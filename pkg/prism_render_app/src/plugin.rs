@@ -18,6 +18,7 @@ use crate::material::{
 };
 use crate::mesh_pipeline::MeshPipelineSpecializer;
 use crate::mesh_pipelines::MeshPipelines;
+use crate::particle::init_particle_gpu_state;
 use crate::pipeline_cache::{
     pso_device_fingerprint, PipelineCachePersistenceConfig, PipelineCachePersistenceError,
     PipelineCachePersistenceStatus,
@@ -320,6 +321,7 @@ where
         render
             .world
             .insert_resource(RenderRuntimeResource::new(runtime));
+        render.world.insert_resource(config);
         render.world.insert_resource(target);
         // Both output paths consume the configuration copied from RenderAppConfig.
         render.world.insert_resource(
@@ -370,6 +372,24 @@ where
         render
             .world
             .insert_resource(crate::ExtractedTransforms::default());
+        render
+            .world
+            .insert_resource(prism_particle_app::ExtractedParticleSnapshot::default());
+        render
+            .world
+            .insert_resource(crate::particle::ExtractedEmberRenderAssets::default());
+        render
+            .world
+            .insert_resource(crate::particle::ExtractedEmberExternalGpuResources::default());
+        render
+            .world
+            .insert_resource(crate::particle::ParticleUploadStatus::default());
+        render
+            .world
+            .insert_resource(crate::particle::EmberPrepareStatus::default());
+        render
+            .world
+            .insert_resource(crate::particle::EmberGpuAssetRegistry::default());
         render.world.insert_resource(device_loss.clone());
 
         // The render schedule, plus the `Last` phase that runs it each frame.
@@ -387,6 +407,12 @@ where
                 .expect("the startup schedule was just inserted")
                 .add_systems(load_persisted_pso_cache::<I>);
         }
+        render
+            .world
+            .resource_mut::<Schedules>()
+            .get_mut(RenderStartup)
+            .expect("the RenderStartup schedule was just inserted")
+            .add_systems(init_particle_gpu_state::<I>);
         {
             let schedule = render
                 .world
@@ -415,6 +441,13 @@ where
                 .add_systems(sync_material_buffers::<I>.in_set(RenderSystems::PrepareResources));
             schedule
                 .add_systems(pump_pipeline_compiles::<I>.in_set(RenderSystems::PrepareResources));
+            schedule.add_systems(
+                crate::particle::prepare_particle_snapshot::<I>
+                    .in_set(RenderSystems::PrepareResources),
+            );
+            schedule.add_systems(
+                crate::particle::prepare_ember_graphs::<I>.in_set(RenderSystems::PrepareResources),
+            );
             schedule.add_systems(fill_queues::<I>.in_set(RenderSystems::Queue));
             schedule.add_systems(execute_frame::<I>.in_set(RenderSystems::Phase));
             schedule.add_systems(clear_queues.in_set(RenderSystems::Cleanup));
@@ -451,6 +484,17 @@ where
             surfaces: vec![crate::lighting::LightingSurfaceInput::default()],
         });
         app.add_extract(RenderApp, extract_render_record);
+        app.add_extract(RenderApp, |main, secondary| {
+            prism_particle_app::extract_particle_snapshot(main, secondary);
+        });
+        app.init_resource::<crate::particle::EmberRenderAssets>();
+        app.init_resource::<crate::particle::EmberCompiledGraphAssets>();
+        app.init_resource::<crate::particle::EmberExternalGpuResources>();
+        app.add_extract(RenderApp, crate::particle::extract_ember_render_assets);
+        app.add_extract(
+            RenderApp,
+            crate::particle::extract_ember_external_gpu_resources,
+        );
         app.add_extract(RenderApp, crate::lighting::extract_lighting_inputs);
         app.init_resource::<crate::PublishedTransforms>();
         app.add_systems(Last, crate::transforms::publish_transforms);
@@ -524,12 +568,58 @@ where
             render.world.insert_resource(specializer);
         }
         if idle && !recovering && !device_lost {
+            if let Some(ember) = render
+                .world
+                .remove_resource::<crate::particle::EmberGpuAssetRegistry>()
+            {
+                let runtime = render.world.resource::<RenderRuntimeResource<I>>();
+                ember.destroy(runtime.runtime().device());
+            }
+            if let Some(particle) = render
+                .world
+                .remove_resource::<crate::particle::ParticleGpuState>()
+            {
+                let runtime = render.world.resource::<RenderRuntimeResource<I>>();
+                particle.destroy(runtime.runtime().device());
+            } else {
+                render
+                    .world
+                    .remove_resource::<crate::particle::ParticleUploadStatus>();
+            }
+            render
+                .world
+                .remove_resource::<crate::particle::EmberPrepareStatus>();
+            render
+                .world
+                .remove_resource::<crate::particle::ExtractedEmberRenderAssets>();
+            render
+                .world
+                .remove_resource::<crate::particle::ExtractedEmberExternalGpuResources>();
             if let (Some(runtime), Some(target)) = (
                 render.world.get_resource::<RenderRuntimeResource<I>>(),
                 render.world.get_resource::<RenderTarget>(),
             ) {
                 target.destroy(runtime.runtime().device());
             }
+        } else {
+            render
+                .world
+                .remove_resource::<crate::particle::EmberGpuAssetRegistry>();
+            render
+                .world
+                .remove_resource::<crate::particle::ParticleGpuState>();
+            render
+                .world
+                .remove_resource::<crate::particle::ParticleUploadStatus>();
+            render
+                .world
+                .remove_resource::<crate::particle::EmberPrepareStatus>();
+            render
+                .world
+                .remove_resource::<crate::particle::ExtractedEmberRenderAssets>();
+            render
+                .world
+                .remove_resource::<crate::particle::ExtractedEmberExternalGpuResources>();
         }
     }
 

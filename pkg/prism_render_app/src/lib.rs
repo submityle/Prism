@@ -159,8 +159,9 @@ pub use mesh_pipelines::{
     ResponseModuleSpec, SpineMeshPipeline,
 };
 pub use particle::{
-    EmberGpuAssetRegistry, EmberGpuAssetRegistryError, EmberGpuPrepareError, EmberPrepareErrorKind,
-    EmberPrepareOutcome, EmberPrepareStatus, EmberRenderAsset, EmberRenderAssets,
+    EmberCompiledGraphAssets, EmberExternalGpuResources, EmberGpuAssetRegistry,
+    EmberGpuAssetRegistryError, EmberGpuPrepareError, EmberPrepareErrorKind, EmberPrepareOutcome,
+    EmberPrepareStatus, EmberRenderAsset, EmberRenderAssets, ExtractedEmberExternalGpuResources,
     ExtractedEmberRenderAssets, ParticleGpuState, ParticleUploadStatus,
 };
 pub use pipeline_cache::{
@@ -256,9 +257,11 @@ pub mod prelude {
         ResponseModuleSpec, SpineMeshPipeline,
     };
     pub use crate::particle::{
-        EmberGpuAssetRegistry, EmberGpuAssetRegistryError, EmberGpuPrepareError,
-        EmberPrepareErrorKind, EmberPrepareOutcome, EmberPrepareStatus, EmberRenderAsset,
-        EmberRenderAssets, ExtractedEmberRenderAssets, ParticleGpuState, ParticleUploadStatus,
+        EmberCompiledGraphAssets, EmberExternalGpuResources, EmberGpuAssetRegistry,
+        EmberGpuAssetRegistryError, EmberGpuPrepareError, EmberPrepareErrorKind,
+        EmberPrepareOutcome, EmberPrepareStatus, EmberRenderAsset, EmberRenderAssets,
+        ExtractedEmberExternalGpuResources, ExtractedEmberRenderAssets, ParticleGpuState,
+        ParticleUploadStatus,
     };
     pub use crate::pipeline_cache::{
         cold_key_from_pipeline_key, hash_vertex_layouts, pso_device_fingerprint,

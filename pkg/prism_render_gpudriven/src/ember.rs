@@ -9,6 +9,7 @@
 //! graph itself.
 
 use alloc::borrow::Cow;
+use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -16,53 +17,367 @@ use alloc::vec::Vec;
 use prism_render_architecture::particle::compiler::{CompiledGraph, PreparedParameterBlock};
 use prism_render_architecture::particle::modules::{ResourceAccess, ResourceDecl, ResourceKind};
 use prism_render_driver as rhi;
-use prism_render_graph::{BufferHandle, PassFlags, RenderGraph, TextureHandle};
+use prism_render_graph::{
+    BufferDesc, BufferHandle, ImportedBuffer, ImportedTexture, PassFlags, RenderGraph, TextureDesc,
+    TextureHandle,
+};
 use rhi::{
     BindGroupDescriptor, BindGroupEntry, BindGroupId, BindGroupLayoutDescriptor,
     BindGroupLayoutEntry, BindGroupLayoutId, BindingResource, BindingType, BufferBindingType,
-    BufferDescriptor, BufferId, BufferUsages, ComputePipelineDescriptor, ComputePipelineId,
-    PipelineLayoutDescriptor, PipelineLayoutId, RenderDevice, RenderQueue, ShaderModuleDescriptor,
-    ShaderModuleId, ShaderSource, ShaderStages, TextureSampleType, TextureViewDimension,
+    BufferDescriptor, BufferId, BufferState, BufferUsages, ComputePipelineDescriptor,
+    ComputePipelineId, PipelineLayoutDescriptor, PipelineLayoutId, RenderDevice, RenderQueue,
+    ShaderModuleDescriptor, ShaderModuleId, ShaderSource, ShaderStages, TextureId,
+    TextureSampleType, TextureState, TextureViewDimension, TextureViewId,
 };
 
-/// A caller-owned resource used to satisfy one compiled non-uniform binding.
+/// A stable compiled binding slot used by caller-owned Ember resources.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct CompiledGraphGpuResourceSlot {
+    /// Compiled bind-group index.
+    pub group: u32,
+    /// Compiled binding index.
+    pub binding: u32,
+}
+
+impl CompiledGraphGpuResourceSlot {
+    /// Creates a stable slot from a compiled group and binding.
+    #[must_use]
+    pub const fn new(group: u32, binding: u32) -> Self {
+        Self { group, binding }
+    }
+}
+
+/// Monotonic revision of one caller-owned Ember resource slot.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct CompiledGraphGpuRevision(u64);
+
+impl CompiledGraphGpuRevision {
+    /// Creates a revision received from an external resource owner.
+    #[must_use]
+    pub const fn from_value(value: u64) -> Self {
+        Self(value)
+    }
+
+    /// Returns the numeric revision used for stale-resource detection.
+    #[must_use]
+    pub const fn value(self) -> u64 {
+        self.0
+    }
+}
+
+/// The concrete resource a caller owns for one compiled Ember slot.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CompiledGraphGpuBinding {
-    /// A whole storage buffer.
-    Buffer {
-        /// Compiled group index.
-        group: u32,
-        /// Compiled binding index.
-        binding: u32,
+pub enum CompiledGraphGpuExternalResource {
+    /// A storage buffer used by a compiled module.
+    StorageBuffer {
         /// Existing caller-owned buffer.
         buffer: BufferId,
         /// Optional byte range exposed to the shader.
         size: Option<u64>,
     },
-    /// An existing sampled texture view.
-    TextureView {
-        /// Compiled group index.
-        group: u32,
-        /// Compiled binding index.
-        binding: u32,
-        /// Existing caller-owned view.
-        view: rhi::TextureViewId,
+    /// A curve lookup buffer used by a compiled module.
+    CurveBuffer {
+        /// Existing caller-owned buffer.
+        buffer: BufferId,
+        /// Optional byte range exposed to the shader.
+        size: Option<u64>,
     },
+    /// An existing caller-owned texture and view.
+    Texture {
+        /// Existing caller-owned texture.
+        texture: TextureId,
+        /// Existing caller-owned sampled view.
+        view: TextureViewId,
+    },
+    /// An existing caller-owned sampled texture view without its texture.
+    TextureView {
+        /// Existing caller-owned view.
+        view: TextureViewId,
+    },
+}
+
+impl CompiledGraphGpuExternalResource {
+    /// Returns the resource category used in diagnostics and validation.
+    #[must_use]
+    pub const fn kind(self) -> CompiledGraphGpuExternalKind {
+        match self {
+            Self::StorageBuffer { .. } => CompiledGraphGpuExternalKind::StorageBuffer,
+            Self::CurveBuffer { .. } => CompiledGraphGpuExternalKind::CurveBuffer,
+            Self::Texture { .. } => CompiledGraphGpuExternalKind::Texture,
+            Self::TextureView { .. } => CompiledGraphGpuExternalKind::TextureView,
+        }
+    }
+}
+
+/// The concrete category of a caller-owned Ember resource.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum CompiledGraphGpuExternalKind {
+    /// A shader storage buffer.
+    StorageBuffer,
+    /// A curve lookup buffer.
+    CurveBuffer,
+    /// A texture together with a sampled view.
+    Texture,
+    /// A sampled view without the underlying texture object.
+    TextureView,
+}
+
+/// A caller-owned resource together with its stable slot and revision.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CompiledGraphGpuBinding {
+    /// Stable compiled group/binding slot.
+    pub slot: CompiledGraphGpuResourceSlot,
+    /// Monotonic resource revision.
+    pub revision: CompiledGraphGpuRevision,
+    /// Caller-owned resource currently published at the slot.
+    pub resource: CompiledGraphGpuExternalResource,
 }
 
 impl CompiledGraphGpuBinding {
     const fn slot(self) -> (u32, u32) {
-        match self {
-            Self::Buffer { group, binding, .. } | Self::TextureView { group, binding, .. } => {
-                (group, binding)
-            }
+        (self.slot.group, self.slot.binding)
+    }
+}
+
+/// A deterministic registry of caller-owned Ember GPU resources.
+#[derive(Clone, Default)]
+pub struct CompiledGraphGpuResourceRegistry {
+    slots: BTreeMap<CompiledGraphGpuResourceSlot, CompiledGraphGpuBinding>,
+    next_revision: u64,
+}
+
+/// A registry mutation can fail only when its revision counter is exhausted.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CompiledGraphGpuRegistryError {
+    /// No further monotonic revision can be minted.
+    RevisionExhausted,
+    /// An exact-revision insertion would replace an existing slot.
+    DuplicateSlot {
+        /// Stable slot already present in the registry.
+        slot: CompiledGraphGpuResourceSlot,
+    },
+}
+
+impl CompiledGraphGpuResourceRegistry {
+    /// Creates an empty caller-owned resource registry.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            slots: BTreeMap::new(),
+            next_revision: 0,
         }
     }
+
+    /// Returns the number of published caller-owned slots.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.slots.len()
+    }
+
+    /// Returns whether no caller-owned slots are published.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.slots.is_empty()
+    }
+
+    /// Looks up the current binding at a stable slot.
+    #[must_use]
+    pub fn get(&self, slot: CompiledGraphGpuResourceSlot) -> Option<&CompiledGraphGpuBinding> {
+        self.slots.get(&slot)
+    }
+
+    /// Returns deterministic slot order for diagnostics and extraction.
+    pub fn iter(&self) -> impl Iterator<Item = &CompiledGraphGpuBinding> {
+        self.slots.values()
+    }
+
+    /// Returns a deterministic owned snapshot without minting revisions.
+    #[must_use]
+    pub fn snapshot(&self) -> Vec<CompiledGraphGpuBinding> {
+        self.slots.values().copied().collect()
+    }
+
+    /// Publishes or replaces a caller-owned resource at `slot`.
+    pub fn set(
+        &mut self,
+        slot: CompiledGraphGpuResourceSlot,
+        resource: CompiledGraphGpuExternalResource,
+    ) -> Result<CompiledGraphGpuRevision, CompiledGraphGpuRegistryError> {
+        let revision = self
+            .next_revision
+            .checked_add(1)
+            .ok_or(CompiledGraphGpuRegistryError::RevisionExhausted)?;
+        self.next_revision = revision;
+        let revision = CompiledGraphGpuRevision::from_value(revision);
+        self.slots.insert(
+            slot,
+            CompiledGraphGpuBinding {
+                slot,
+                revision,
+                resource,
+            },
+        );
+        Ok(revision)
+    }
+
+    /// Inserts an already revisioned binding without minting a new revision.
+    ///
+    /// This is the render-extraction path: the main world may carry a
+    /// published slot/revision pair across the boundary, and the render-side
+    /// registry can reproduce it exactly. The monotonic counter is advanced
+    /// to the maximum imported revision so later [`Self::set`] calls remain
+    /// newer than every imported snapshot.
+    pub fn insert_exact_revision(
+        &mut self,
+        binding: CompiledGraphGpuBinding,
+    ) -> Result<(), CompiledGraphGpuRegistryError> {
+        if self.slots.contains_key(&binding.slot) {
+            return Err(CompiledGraphGpuRegistryError::DuplicateSlot { slot: binding.slot });
+        }
+        self.next_revision = self.next_revision.max(binding.revision.value());
+        self.slots.insert(binding.slot, binding);
+        Ok(())
+    }
+
+    /// Atomically replaces the registry with an existing revisioned snapshot.
+    ///
+    /// The input is validated completely before the live map is replaced, so
+    /// a duplicate slot cannot leave a partially extracted registry. No
+    /// revision is minted; future mutations continue above the greatest
+    /// revision found in either the previous registry or this snapshot.
+    pub fn replace_snapshot(
+        &mut self,
+        snapshot: &[CompiledGraphGpuBinding],
+    ) -> Result<(), CompiledGraphGpuRegistryError> {
+        let mut next = BTreeMap::new();
+        let mut maximum = self.next_revision;
+        for binding in snapshot {
+            if next.insert(binding.slot, *binding).is_some() {
+                return Err(CompiledGraphGpuRegistryError::DuplicateSlot { slot: binding.slot });
+            }
+            maximum = maximum.max(binding.revision.value());
+        }
+        self.slots = next;
+        self.next_revision = maximum;
+        Ok(())
+    }
+
+    /// Publishes a storage buffer and returns its new slot revision.
+    pub fn set_storage_buffer(
+        &mut self,
+        slot: CompiledGraphGpuResourceSlot,
+        buffer: BufferId,
+        size: Option<u64>,
+    ) -> Result<CompiledGraphGpuRevision, CompiledGraphGpuRegistryError> {
+        self.set(
+            slot,
+            CompiledGraphGpuExternalResource::StorageBuffer { buffer, size },
+        )
+    }
+
+    /// Publishes a curve buffer and returns its new slot revision.
+    pub fn set_curve_buffer(
+        &mut self,
+        slot: CompiledGraphGpuResourceSlot,
+        buffer: BufferId,
+        size: Option<u64>,
+    ) -> Result<CompiledGraphGpuRevision, CompiledGraphGpuRegistryError> {
+        self.set(
+            slot,
+            CompiledGraphGpuExternalResource::CurveBuffer { buffer, size },
+        )
+    }
+
+    /// Publishes a texture and sampled view and returns its new slot revision.
+    pub fn set_texture(
+        &mut self,
+        slot: CompiledGraphGpuResourceSlot,
+        texture: TextureId,
+        view: TextureViewId,
+    ) -> Result<CompiledGraphGpuRevision, CompiledGraphGpuRegistryError> {
+        self.set(
+            slot,
+            CompiledGraphGpuExternalResource::Texture { texture, view },
+        )
+    }
+
+    /// Publishes a sampled view and returns its new slot revision.
+    pub fn set_texture_view(
+        &mut self,
+        slot: CompiledGraphGpuResourceSlot,
+        view: TextureViewId,
+    ) -> Result<CompiledGraphGpuRevision, CompiledGraphGpuRegistryError> {
+        self.set(slot, CompiledGraphGpuExternalResource::TextureView { view })
+    }
+
+    /// Removes a caller-owned slot without taking ownership of its resource.
+    pub fn remove(
+        &mut self,
+        slot: CompiledGraphGpuResourceSlot,
+    ) -> Option<CompiledGraphGpuBinding> {
+        self.slots.remove(&slot)
+    }
+}
+
+/// A frame-graph import description for a caller-owned Ember resource.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CompiledGraphGpuGraphImport {
+    /// Import a caller-owned buffer into the frame graph.
+    Buffer {
+        /// Symbolic buffer description used by graph validation.
+        desc: BufferDesc,
+        /// Buffer state on entry to the frame.
+        entry_state: BufferState,
+    },
+    /// Import a caller-owned texture and its default view into the frame graph.
+    Texture {
+        /// Symbolic texture description used by graph validation.
+        desc: TextureDesc,
+        /// Texture state on entry to the frame.
+        entry_state: TextureState,
+        /// Texture state required on frame exit.
+        exit_state: TextureState,
+        /// Number of mip levels tracked by the graph.
+        mip_levels: u32,
+        /// Number of array layers tracked by the graph.
+        array_layers: u32,
+    },
+}
+
+/// A failure while importing a registry slot into a frame graph.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CompiledGraphGpuImportError {
+    /// The requested slot is not currently published.
+    MissingSlot { slot: CompiledGraphGpuResourceSlot },
+    /// A buffer import was requested for a texture binding.
+    ExpectedTexture { slot: CompiledGraphGpuResourceSlot },
+    /// A texture import was requested for a buffer binding.
+    ExpectedBuffer { slot: CompiledGraphGpuResourceSlot },
+    /// A texture view-only slot cannot be imported without its texture object.
+    TextureObjectRequired { slot: CompiledGraphGpuResourceSlot },
+    /// The graph descriptor is smaller than the bound buffer range.
+    BufferSizeTooSmall {
+        slot: CompiledGraphGpuResourceSlot,
+        required: u64,
+        provided: u64,
+    },
+}
+
+/// A result of refreshing caller-owned bind groups from a resource registry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CompiledGraphGpuExternalUpdate {
+    /// The registry revisions and resource ids are unchanged.
+    Unchanged,
+    /// Bind groups were rebuilt for the changed slots.
+    Rebuilt { changed_slots: usize },
 }
 
 /// A failure found while resolving a compiled graph to device resources.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CompiledGraphGpuError {
+    /// The graph supplied to a resident GPU state is not the graph used to
+    /// create that state.
+    GraphMismatch,
     /// Two caller-owned entries claimed one compiled slot.
     DuplicateExternalBinding {
         /// Compiled group index.
@@ -122,6 +437,31 @@ pub enum CompiledGraphGpuError {
         /// Compiled resource name.
         name: String,
     },
+    /// A registry revision is older than the revision already resident in the
+    /// GPU state and cannot safely replace it.
+    StaleExternalRevision {
+        /// Compiled group index.
+        group: u32,
+        /// Compiled binding index.
+        binding: u32,
+        /// Revision currently resident in the GPU state.
+        expected: CompiledGraphGpuRevision,
+        /// Revision supplied by the registry.
+        actual: CompiledGraphGpuRevision,
+    },
+    /// A curve/storage resource category does not match the compiled binding.
+    ExternalResourceKindMismatch {
+        /// Compiled group index.
+        group: u32,
+        /// Compiled binding index.
+        binding: u32,
+        /// Compiled resource name.
+        name: String,
+        /// Resource category required by the compiled graph.
+        expected: ResourceKind,
+        /// Resource category supplied by the caller.
+        actual: CompiledGraphGpuExternalKind,
+    },
 }
 
 /// A failure while updating compiled parameter buffers.
@@ -179,6 +519,8 @@ pub enum CompiledGraphGpuGraphBinding {
         group: u32,
         /// Compiled binding index.
         binding: u32,
+        /// Revision of the caller-owned resource used by this graph handle.
+        revision: CompiledGraphGpuRevision,
         /// Frame-graph buffer handle for the same real buffer bound to Ember.
         handle: BufferHandle,
     },
@@ -188,6 +530,8 @@ pub enum CompiledGraphGpuGraphBinding {
         group: u32,
         /// Compiled binding index.
         binding: u32,
+        /// Revision of the caller-owned resource used by this graph handle.
+        revision: CompiledGraphGpuRevision,
         /// Frame-graph texture handle for the same real view bound to Ember.
         handle: TextureHandle,
     },
@@ -201,11 +545,20 @@ impl CompiledGraphGpuGraphBinding {
             }
         }
     }
+
+    const fn revision(self) -> CompiledGraphGpuRevision {
+        match self {
+            Self::Buffer { revision, .. } | Self::Texture { revision, .. } => revision,
+        }
+    }
 }
 
 /// A failure while declaring a compiled graph in a frame graph.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CompiledGraphGraphError {
+    /// The graph supplied for recording is not the graph used to create the
+    /// resident GPU state.
+    GraphMismatch,
     /// A graph resource was supplied more than once for one binding slot.
     DuplicateBinding { group: u32, binding: u32 },
     /// A compiled non-uniform binding has no graph handle.
@@ -235,6 +588,30 @@ pub enum CompiledGraphGraphError {
     DispatchCountLength { expected: usize, actual: usize },
     /// The state and compiled graph disagree about generated stage pipelines.
     PipelineCountMismatch { expected: usize, actual: usize },
+    /// A frame-graph binding was made from an older or newer external slot
+    /// revision than the bind groups currently use.
+    ExternalRevisionMismatch {
+        /// Compiled group index.
+        group: u32,
+        /// Compiled binding index.
+        binding: u32,
+        /// Revision currently used by the state.
+        expected: CompiledGraphGpuRevision,
+        /// Revision attached to the graph handle.
+        actual: CompiledGraphGpuRevision,
+    },
+    /// A caller-owned texture needs an explicit frame-graph description.
+    ///
+    /// The RHI texture view alone does not carry the symbolic format, extent,
+    /// mip, and state information required by `RenderGraph::import_texture`.
+    /// Callers must use `CompiledGraphGpuState::import_external_to_graph` with
+    /// a concrete `CompiledGraphGpuGraphImport` before recording the graph.
+    ExternalTextureImportRequired {
+        /// Compiled group index.
+        group: u32,
+        /// Compiled binding index.
+        binding: u32,
+    },
 }
 
 /// A failure while updating the compiled graph's persistent attribute pool.
@@ -264,12 +641,14 @@ struct ResolvedEntry {
 
 /// GPU resources and pipelines for one compiled Ember graph.
 pub struct CompiledGraphGpuState {
+    compiled_graph: CompiledGraph,
     shader: ShaderModuleId,
     pipeline_layout: PipelineLayoutId,
     bind_group_layouts: Vec<BindGroupLayoutId>,
     bind_groups: [Vec<BindGroupId>; 2],
     compute_pipelines: Vec<ComputePipelineId>,
     parameter_buffers: Vec<ParameterBuffer>,
+    external_bindings: Vec<CompiledGraphGpuBinding>,
     dispatch_counts: Option<BufferId>,
     dispatch_count_slots: usize,
     attribute_pool: Option<BufferId>,
@@ -282,9 +661,9 @@ impl CompiledGraphGpuState {
         device: &impl RenderDevice,
         queue: &impl RenderQueue,
         graph: &CompiledGraph,
-        external: &[CompiledGraphGpuBinding],
+        registry: &CompiledGraphGpuResourceRegistry,
     ) -> Result<Self, CompiledGraphGpuError> {
-        validate_external_bindings(graph, external)?;
+        let external_bindings = validate_external_registry(graph, registry)?;
         validate_parameter_blocks(graph)?;
 
         let group_count = max_group(graph).map_or(0, |group| group as usize + 1);
@@ -343,7 +722,7 @@ impl CompiledGraphGpuState {
         for group in 0..group_count as u32 {
             let entries = group_entries(
                 graph,
-                external,
+                &external_bindings,
                 &parameter_buffers,
                 dispatch_counts,
                 attribute_pool,
@@ -365,7 +744,7 @@ impl CompiledGraphGpuState {
             for group in 0..group_count as u32 {
                 let entries = group_entries(
                     graph,
-                    external,
+                    &external_bindings,
                     &parameter_buffers,
                     dispatch_counts,
                     attribute_pool,
@@ -410,17 +789,268 @@ impl CompiledGraphGpuState {
         }
 
         Ok(Self {
+            compiled_graph: graph.clone(),
             shader,
             pipeline_layout,
             bind_group_layouts,
             bind_groups,
             compute_pipelines,
             parameter_buffers,
+            external_bindings,
             dispatch_counts,
             dispatch_count_slots,
             attribute_pool,
             attribute_pool_size,
         })
+    }
+
+    /// Returns the caller-owned bindings resident in the current bind groups.
+    #[must_use]
+    pub fn external_bindings(&self) -> &[CompiledGraphGpuBinding] {
+        &self.external_bindings
+    }
+
+    /// Looks up the caller-owned binding resident at one stable slot.
+    #[must_use]
+    pub fn external_binding(
+        &self,
+        slot: CompiledGraphGpuResourceSlot,
+    ) -> Option<CompiledGraphGpuBinding> {
+        self.external_bindings
+            .iter()
+            .find(|binding| binding.slot == slot)
+            .copied()
+    }
+
+    /// Returns the revision and concrete bind-group resource for a slot.
+    ///
+    /// This is the observable binding view used by render code that needs to
+    /// inspect or cache a bind-group entry without taking ownership of the
+    /// caller's buffer, texture, or view.
+    #[must_use]
+    pub fn external_bind_group_resource(
+        &self,
+        slot: CompiledGraphGpuResourceSlot,
+    ) -> Option<(CompiledGraphGpuRevision, BindingResource)> {
+        self.external_binding(slot)
+            .map(|binding| (binding.revision, binding_resource(binding.resource)))
+    }
+
+    /// Produces a graph buffer binding carrying the resident slot revision.
+    ///
+    /// The actual graph resource must already have been imported by the
+    /// caller, because the graph owns its virtual handle.
+    #[must_use]
+    pub fn external_graph_buffer_binding(
+        &self,
+        slot: CompiledGraphGpuResourceSlot,
+        handle: BufferHandle,
+    ) -> Option<CompiledGraphGpuGraphBinding> {
+        let binding = self.external_binding(slot)?;
+        matches!(
+            binding.resource,
+            CompiledGraphGpuExternalResource::StorageBuffer { .. }
+                | CompiledGraphGpuExternalResource::CurveBuffer { .. }
+        )
+        .then_some(CompiledGraphGpuGraphBinding::Buffer {
+            group: slot.group,
+            binding: slot.binding,
+            revision: binding.revision,
+            handle,
+        })
+    }
+
+    /// Produces a graph texture binding carrying the resident slot revision.
+    ///
+    /// This also supports view-only slots whose texture was imported by a
+    /// separate owner that already knows the underlying texture object.
+    #[must_use]
+    pub fn external_graph_texture_binding(
+        &self,
+        slot: CompiledGraphGpuResourceSlot,
+        handle: TextureHandle,
+    ) -> Option<CompiledGraphGpuGraphBinding> {
+        let binding = self.external_binding(slot)?;
+        matches!(
+            binding.resource,
+            CompiledGraphGpuExternalResource::Texture { .. }
+                | CompiledGraphGpuExternalResource::TextureView { .. }
+        )
+        .then_some(CompiledGraphGpuGraphBinding::Texture {
+            group: slot.group,
+            binding: slot.binding,
+            revision: binding.revision,
+            handle,
+        })
+    }
+
+    /// Imports one caller-owned registry slot into the frame graph.
+    pub fn import_external_to_graph(
+        &self,
+        graph: &mut RenderGraph,
+        slot: CompiledGraphGpuResourceSlot,
+        name: impl Into<String>,
+        import: CompiledGraphGpuGraphImport,
+    ) -> Result<CompiledGraphGpuGraphBinding, CompiledGraphGpuImportError> {
+        let binding = self
+            .external_binding(slot)
+            .ok_or(CompiledGraphGpuImportError::MissingSlot { slot })?;
+        match (binding.resource, import) {
+            (
+                CompiledGraphGpuExternalResource::StorageBuffer { buffer, size }
+                | CompiledGraphGpuExternalResource::CurveBuffer { buffer, size },
+                CompiledGraphGpuGraphImport::Buffer { desc, entry_state },
+            ) => {
+                if let Some(required) = size {
+                    if desc.size < required {
+                        return Err(CompiledGraphGpuImportError::BufferSizeTooSmall {
+                            slot,
+                            required,
+                            provided: desc.size,
+                        });
+                    }
+                }
+                let handle = graph.import_buffer(
+                    name,
+                    desc,
+                    ImportedBuffer {
+                        buffer,
+                        entry_state,
+                    },
+                );
+                Ok(CompiledGraphGpuGraphBinding::Buffer {
+                    group: slot.group,
+                    binding: slot.binding,
+                    revision: binding.revision,
+                    handle,
+                })
+            }
+            (
+                CompiledGraphGpuExternalResource::Texture { texture, view },
+                CompiledGraphGpuGraphImport::Texture {
+                    desc,
+                    entry_state,
+                    exit_state,
+                    mip_levels,
+                    array_layers,
+                },
+            ) => {
+                let handle = graph.import_texture(
+                    name,
+                    desc,
+                    ImportedTexture {
+                        texture,
+                        default_view: view,
+                        entry_state,
+                        exit_state,
+                        mip_levels: mip_levels.max(1),
+                        array_layers: array_layers.max(1),
+                    },
+                );
+                Ok(CompiledGraphGpuGraphBinding::Texture {
+                    group: slot.group,
+                    binding: slot.binding,
+                    revision: binding.revision,
+                    handle,
+                })
+            }
+            (
+                CompiledGraphGpuExternalResource::TextureView { .. },
+                CompiledGraphGpuGraphImport::Texture { .. },
+            ) => Err(CompiledGraphGpuImportError::TextureObjectRequired { slot }),
+            (
+                CompiledGraphGpuExternalResource::Texture { .. }
+                | CompiledGraphGpuExternalResource::TextureView { .. },
+                CompiledGraphGpuGraphImport::Buffer { .. },
+            ) => Err(CompiledGraphGpuImportError::ExpectedTexture { slot }),
+            (
+                CompiledGraphGpuExternalResource::StorageBuffer { .. }
+                | CompiledGraphGpuExternalResource::CurveBuffer { .. },
+                CompiledGraphGpuGraphImport::Texture { .. },
+            ) => Err(CompiledGraphGpuImportError::ExpectedBuffer { slot }),
+        }
+    }
+
+    /// Rebuilds caller-facing bind groups after a newer registry publication.
+    ///
+    /// The state never destroys caller-owned resources. Only its bind groups
+    /// are replaced, and a registry revision older than the resident revision
+    /// is rejected before any GPU object is changed.
+    pub fn refresh_external_resources(
+        &mut self,
+        device: &impl RenderDevice,
+        graph: &CompiledGraph,
+        registry: &CompiledGraphGpuResourceRegistry,
+    ) -> Result<CompiledGraphGpuExternalUpdate, CompiledGraphGpuError> {
+        if &self.compiled_graph != graph {
+            return Err(CompiledGraphGpuError::GraphMismatch);
+        }
+        let next_bindings = validate_external_registry(graph, registry)?;
+        for current in &self.external_bindings {
+            let next = next_bindings
+                .iter()
+                .find(|binding| binding.slot == current.slot)
+                .expect("validated external registry contains every resident slot");
+            if next.revision < current.revision {
+                return Err(CompiledGraphGpuError::StaleExternalRevision {
+                    group: current.slot.group,
+                    binding: current.slot.binding,
+                    expected: current.revision,
+                    actual: next.revision,
+                });
+            }
+        }
+        if next_bindings == self.external_bindings {
+            return Ok(CompiledGraphGpuExternalUpdate::Unchanged);
+        }
+
+        let group_count = self.bind_group_layouts.len();
+        let mut replacement = [
+            Vec::with_capacity(group_count),
+            Vec::with_capacity(group_count),
+        ];
+        for frame_index in 0..2u64 {
+            for group in 0..group_count as u32 {
+                let entries = group_entries(
+                    graph,
+                    &next_bindings,
+                    &self.parameter_buffers,
+                    self.dispatch_counts,
+                    self.attribute_pool,
+                    frame_index,
+                    group,
+                )?;
+                let mut bind_entries: Vec<_> = entries
+                    .into_iter()
+                    .map(|entry| BindGroupEntry {
+                        binding: entry.binding,
+                        resource: entry.resource,
+                    })
+                    .collect();
+                bind_entries.sort_by_key(|entry| entry.binding);
+                replacement[frame_index as usize].push(device.create_bind_group(
+                    &BindGroupDescriptor {
+                        label: Some(format!("ember-graph-group-{group}-frame-{frame_index}")),
+                        layout: Some(self.bind_group_layouts[group as usize]),
+                        entries: bind_entries,
+                    },
+                ));
+            }
+        }
+        for bind_groups in &self.bind_groups {
+            for bind_group in bind_groups {
+                device.destroy_bind_group(*bind_group);
+            }
+        }
+        self.bind_groups = replacement;
+        let changed_slots = self
+            .external_bindings
+            .iter()
+            .zip(next_bindings.iter())
+            .filter(|(current, next)| current != next)
+            .count();
+        self.external_bindings = next_bindings;
+        Ok(CompiledGraphGpuExternalUpdate::Rebuilt { changed_slots })
     }
 
     /// Uploads a complete prepared parameter set without rebuilding bind groups.
@@ -600,6 +1230,9 @@ impl CompiledGraphGpuState {
         stage_counts: &[u32],
         frame_index: u64,
     ) -> Result<(), CompiledGraphGraphError> {
+        if &self.compiled_graph != compiled {
+            return Err(CompiledGraphGraphError::GraphMismatch);
+        }
         if self.compute_pipelines.len() != compiled.dispatches.len() {
             return Err(CompiledGraphGraphError::PipelineCountMismatch {
                 expected: compiled.dispatches.len(),
@@ -613,7 +1246,7 @@ impl CompiledGraphGpuState {
             });
         }
 
-        let accesses = graph_accesses(compiled, bindings)?;
+        let accesses = graph_accesses(compiled, bindings, &self.external_bindings)?;
         for (pipeline_index, dispatch) in compiled.dispatches.iter().enumerate() {
             let workgroups = stage_counts
                 .get(dispatch.stage_index)
@@ -715,7 +1348,7 @@ impl CompiledGraphGpuState {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum GraphAccess {
     Uniform(BufferHandle),
     StorageRead(BufferHandle),
@@ -745,6 +1378,7 @@ impl GraphAccess {
 fn graph_accesses(
     compiled: &CompiledGraph,
     bindings: &[CompiledGraphGpuGraphBinding],
+    external: &[CompiledGraphGpuBinding],
 ) -> Result<Vec<GraphAccess>, CompiledGraphGraphError> {
     for (index, entry) in bindings.iter().enumerate() {
         if bindings[..index]
@@ -753,6 +1387,23 @@ fn graph_accesses(
         {
             let (group, binding) = entry.slot();
             return Err(CompiledGraphGraphError::DuplicateBinding { group, binding });
+        }
+    }
+
+    for entry in bindings {
+        if let Some(expected) = external
+            .iter()
+            .find(|binding| binding.slot() == entry.slot())
+        {
+            if expected.revision != entry.revision() {
+                let (group, binding) = entry.slot();
+                return Err(CompiledGraphGraphError::ExternalRevisionMismatch {
+                    group,
+                    binding,
+                    expected: expected.revision,
+                    actual: entry.revision(),
+                });
+            }
         }
     }
 
@@ -882,90 +1533,105 @@ fn max_group(graph: &CompiledGraph) -> Option<u32> {
         .max()
 }
 
-fn validate_external_bindings(
+fn validate_external_registry(
     graph: &CompiledGraph,
-    external: &[CompiledGraphGpuBinding],
-) -> Result<(), CompiledGraphGpuError> {
-    for (index, entry) in external.iter().enumerate() {
-        let slot = entry.slot();
-        if external[..index]
-            .iter()
-            .any(|previous| previous.slot() == slot)
-        {
-            return Err(CompiledGraphGpuError::DuplicateExternalBinding {
-                group: slot.0,
-                binding: slot.1,
-            });
-        }
-        let expected = graph
-            .bindings
-            .iter()
-            .find(|binding| {
-                (binding.group, binding.binding) == slot
-                    && binding.name != "ember_dispatch_counts"
-                    && binding.kind != ResourceKind::Uniform
-            })
-            .map(|binding| (binding.name, binding.kind));
-        let Some((name, kind)) = expected else {
+    registry: &CompiledGraphGpuResourceRegistry,
+) -> Result<Vec<CompiledGraphGpuBinding>, CompiledGraphGpuError> {
+    let requirements: Vec<_> = graph
+        .bindings
+        .iter()
+        .filter(|binding| {
+            binding.name != "ember_dispatch_counts" && binding.kind != ResourceKind::Uniform
+        })
+        .collect();
+
+    for entry in registry.iter() {
+        let Some(requirement) = requirements.iter().find(|requirement| {
+            (requirement.group, requirement.binding) == (entry.slot.group, entry.slot.binding)
+        }) else {
             return Err(CompiledGraphGpuError::UnexpectedExternalBinding {
-                group: slot.0,
-                binding: slot.1,
+                group: entry.slot.group,
+                binding: entry.slot.binding,
             });
         };
-        if kind == ResourceKind::Uniform {
-            return Err(CompiledGraphGpuError::UnexpectedExternalBinding {
-                group: slot.0,
-                binding: slot.1,
-            });
-        }
-        match (kind, entry) {
-            (
-                ResourceKind::Curve | ResourceKind::StorageBuffer,
-                CompiledGraphGpuBinding::Buffer { .. },
-            ) => {}
-            (
-                ResourceKind::Texture2d | ResourceKind::Texture3d,
-                CompiledGraphGpuBinding::TextureView { .. },
-            ) => {}
-            (ResourceKind::Curve | ResourceKind::StorageBuffer, _) => {
-                return Err(CompiledGraphGpuError::ExpectedBuffer {
-                    group: slot.0,
-                    binding: slot.1,
-                    name: String::from(name),
-                });
-            }
-            (ResourceKind::Texture2d | ResourceKind::Texture3d, _) => {
-                return Err(CompiledGraphGpuError::ExpectedTexture {
-                    group: slot.0,
-                    binding: slot.1,
-                    name: String::from(name),
-                });
-            }
-            _ => {
-                return Err(CompiledGraphGpuError::UnsupportedResource {
-                    group: slot.0,
-                    binding: slot.1,
-                    name: String::from(name),
-                });
-            }
-        }
+        validate_external_resource_kind(requirement, entry.resource)?;
     }
-    for (group, binding, name) in graph.bindings.iter().filter_map(|binding| {
-        (binding.kind != ResourceKind::Uniform && binding.name != "ember_dispatch_counts")
-            .then_some((binding.group, binding.binding, binding.name))
-    }) {
-        if !external
-            .iter()
-            .any(|entry| entry.slot() == (group, binding))
-        {
+
+    let mut resolved = Vec::with_capacity(requirements.len());
+    for requirement in requirements {
+        let slot = CompiledGraphGpuResourceSlot::new(requirement.group, requirement.binding);
+        let Some(entry) = registry.get(slot) else {
             return Err(CompiledGraphGpuError::MissingExternalBinding {
-                group,
-                binding,
-                name: String::from(name),
+                group: requirement.group,
+                binding: requirement.binding,
+                name: String::from(requirement.name),
             });
-        }
+        };
+        resolved.push(*entry);
     }
-    Ok(())
+    Ok(resolved)
+}
+
+fn validate_external_resource_kind(
+    requirement: &ResourceDecl,
+    resource: CompiledGraphGpuExternalResource,
+) -> Result<(), CompiledGraphGpuError> {
+    let slot = (requirement.group, requirement.binding);
+    let actual = resource.kind();
+    let valid = match requirement.kind {
+        ResourceKind::StorageBuffer => matches!(
+            resource,
+            CompiledGraphGpuExternalResource::StorageBuffer { .. }
+        ),
+        ResourceKind::Curve => {
+            matches!(
+                resource,
+                CompiledGraphGpuExternalResource::CurveBuffer { .. }
+            )
+        }
+        ResourceKind::Texture2d | ResourceKind::Texture3d => matches!(
+            resource,
+            CompiledGraphGpuExternalResource::Texture { .. }
+                | CompiledGraphGpuExternalResource::TextureView { .. }
+        ),
+        ResourceKind::Uniform => false,
+    };
+    if valid {
+        return Ok(());
+    }
+    if matches!(
+        requirement.kind,
+        ResourceKind::StorageBuffer | ResourceKind::Curve
+    ) && matches!(
+        actual,
+        CompiledGraphGpuExternalKind::Texture | CompiledGraphGpuExternalKind::TextureView
+    ) {
+        return Err(CompiledGraphGpuError::ExpectedBuffer {
+            group: slot.0,
+            binding: slot.1,
+            name: String::from(requirement.name),
+        });
+    }
+    if matches!(
+        requirement.kind,
+        ResourceKind::Texture2d | ResourceKind::Texture3d
+    ) && matches!(
+        actual,
+        CompiledGraphGpuExternalKind::StorageBuffer | CompiledGraphGpuExternalKind::CurveBuffer
+    ) {
+        return Err(CompiledGraphGpuError::ExpectedTexture {
+            group: slot.0,
+            binding: slot.1,
+            name: String::from(requirement.name),
+        });
+    }
+    Err(CompiledGraphGpuError::ExternalResourceKindMismatch {
+        group: slot.0,
+        binding: slot.1,
+        name: String::from(requirement.name),
+        expected: requirement.kind,
+        actual,
+    })
 }
 
 fn validate_parameter_blocks(graph: &CompiledGraph) -> Result<(), CompiledGraphGpuError> {
@@ -1077,9 +1743,13 @@ fn group_entries(
                     .iter()
                     .find(|entry| entry.slot() == (group, binding.binding))
                     .expect("validated storage external binding");
-                let (buffer, size) = match external {
-                    CompiledGraphGpuBinding::Buffer { buffer, size, .. } => (*buffer, *size),
-                    CompiledGraphGpuBinding::TextureView { .. } => {
+                let (buffer, size) = match external.resource {
+                    CompiledGraphGpuExternalResource::StorageBuffer { buffer, size }
+                    | CompiledGraphGpuExternalResource::CurveBuffer { buffer, size } => {
+                        (buffer, size)
+                    }
+                    CompiledGraphGpuExternalResource::Texture { .. }
+                    | CompiledGraphGpuExternalResource::TextureView { .. } => {
                         unreachable!("validated buffer binding")
                     }
                 };
@@ -1098,9 +1768,11 @@ fn group_entries(
                     .iter()
                     .find(|entry| entry.slot() == (group, binding.binding))
                     .expect("validated texture external binding");
-                let view = match external {
-                    CompiledGraphGpuBinding::TextureView { view, .. } => *view,
-                    CompiledGraphGpuBinding::Buffer { .. } => {
+                let view = match external.resource {
+                    CompiledGraphGpuExternalResource::Texture { view, .. }
+                    | CompiledGraphGpuExternalResource::TextureView { view } => view,
+                    CompiledGraphGpuExternalResource::StorageBuffer { .. }
+                    | CompiledGraphGpuExternalResource::CurveBuffer { .. } => {
                         unreachable!("validated texture binding")
                     }
                 };
@@ -1147,6 +1819,23 @@ fn texture_layout_entry(binding: &ResourceDecl) -> BindGroupLayoutEntry {
     }
 }
 
+fn binding_resource(resource: CompiledGraphGpuExternalResource) -> BindingResource {
+    match resource {
+        CompiledGraphGpuExternalResource::StorageBuffer { buffer, size }
+        | CompiledGraphGpuExternalResource::CurveBuffer { buffer, size } => {
+            BindingResource::Buffer {
+                buffer,
+                offset: 0,
+                size,
+            }
+        }
+        CompiledGraphGpuExternalResource::Texture { view, .. }
+        | CompiledGraphGpuExternalResource::TextureView { view } => {
+            BindingResource::TextureView(view)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1161,7 +1850,7 @@ mod tests {
     use prism_render_architecture::particle::IterationDomain;
     use prism_render_driver::Instance;
     use prism_render_driver_null::NullInstance;
-    use prism_render_graph::{BufferDesc, ImportedBuffer};
+    use prism_render_graph::{BufferDesc, ImportedBuffer, TextureDesc};
 
     fn graph_with_one_parameter() -> CompiledGraph {
         CompiledGraph {
@@ -1232,6 +1921,399 @@ mod tests {
         }
     }
 
+    fn graph_with_external_binding(binding: ResourceDecl) -> CompiledGraph {
+        CompiledGraph {
+            source: String::new(),
+            stage_order: Vec::new(),
+            entry_points: Vec::new(),
+            dispatches: Vec::new(),
+            bindings: vec![binding],
+            parameter_blocks: Vec::new(),
+            attribute_layout: AttributeLayoutPlan::build(0, &[]),
+            attribute_bindings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn external_registry_clone_and_snapshot_preserve_revisions() {
+        let storage_slot = CompiledGraphGpuResourceSlot::new(0, 0);
+        let curve_slot = CompiledGraphGpuResourceSlot::new(0, 1);
+        let texture_slot = CompiledGraphGpuResourceSlot::new(0, 2);
+        let view_slot = CompiledGraphGpuResourceSlot::new(0, 3);
+        let mut registry = CompiledGraphGpuResourceRegistry::new();
+        let storage_revision = registry
+            .set_storage_buffer(storage_slot, BufferId::from_parts(1, 1), Some(64))
+            .expect("storage revision");
+        let curve_revision = registry
+            .set_curve_buffer(curve_slot, BufferId::from_parts(2, 1), Some(128))
+            .expect("curve revision");
+        let texture_revision = registry
+            .set_texture(
+                texture_slot,
+                TextureId::from_parts(3, 1),
+                TextureViewId::from_parts(4, 1),
+            )
+            .expect("texture revision");
+        let view_revision = registry
+            .set_texture_view(view_slot, TextureViewId::from_parts(5, 1))
+            .expect("texture view revision");
+
+        assert_eq!(storage_revision.value(), 1);
+        assert_eq!(curve_revision.value(), 2);
+        assert_eq!(texture_revision.value(), 3);
+        assert_eq!(view_revision.value(), 4);
+
+        let snapshot = registry.snapshot();
+        let clone = registry.clone();
+        assert_eq!(clone.snapshot(), snapshot);
+        assert_eq!(clone.get(storage_slot).unwrap().revision, storage_revision);
+        assert_eq!(clone.get(curve_slot).unwrap().revision, curve_revision);
+        assert_eq!(clone.get(texture_slot).unwrap().revision, texture_revision);
+        assert_eq!(clone.get(view_slot).unwrap().revision, view_revision);
+
+        let mut extracted = CompiledGraphGpuResourceRegistry::new();
+        extracted
+            .replace_snapshot(&snapshot)
+            .expect("published snapshot");
+        assert_eq!(extracted.snapshot(), snapshot);
+        let next_revision = extracted
+            .set_texture_view(
+                CompiledGraphGpuResourceSlot::new(1, 0),
+                TextureViewId::from_parts(6, 1),
+            )
+            .expect("revision after snapshot")
+            .value();
+        assert_eq!(next_revision, 5);
+
+        let exact_binding = registry.get(curve_slot).copied().unwrap();
+        let mut exact = CompiledGraphGpuResourceRegistry::new();
+        exact
+            .insert_exact_revision(exact_binding)
+            .expect("exact revision insertion");
+        assert_eq!(
+            exact
+                .set_storage_buffer(
+                    CompiledGraphGpuResourceSlot::new(2, 0),
+                    BufferId::from_parts(7, 1),
+                    None,
+                )
+                .expect("revision after exact insertion")
+                .value(),
+            curve_revision.value() + 1
+        );
+    }
+
+    #[test]
+    fn external_registry_rejects_duplicate_exact_slots_atomically() {
+        let slot = CompiledGraphGpuResourceSlot::new(0, 0);
+        let mut registry = CompiledGraphGpuResourceRegistry::new();
+        registry
+            .set_storage_buffer(slot, BufferId::from_parts(8, 1), None)
+            .expect("initial resource");
+        let binding = registry.get(slot).copied().unwrap();
+
+        assert_eq!(
+            registry.insert_exact_revision(binding),
+            Err(CompiledGraphGpuRegistryError::DuplicateSlot { slot })
+        );
+
+        let before = registry.snapshot();
+        assert_eq!(
+            registry.replace_snapshot(&[binding, binding]),
+            Err(CompiledGraphGpuRegistryError::DuplicateSlot { slot })
+        );
+        assert_eq!(registry.snapshot(), before);
+    }
+
+    #[test]
+    fn external_registry_reports_missing_and_wrong_resource_kinds() {
+        let buffer_graph = graph_with_external_binding(ResourceDecl::buffer("particles", 0, 0));
+        let slot = CompiledGraphGpuResourceSlot::new(0, 0);
+        assert_eq!(
+            validate_external_registry(&buffer_graph, &CompiledGraphGpuResourceRegistry::new()),
+            Err(CompiledGraphGpuError::MissingExternalBinding {
+                group: 0,
+                binding: 0,
+                name: String::from("particles"),
+            })
+        );
+
+        let mut wrong_kind = CompiledGraphGpuResourceRegistry::new();
+        wrong_kind
+            .set_texture_view(slot, TextureViewId::from_parts(9, 1))
+            .expect("texture view revision");
+        assert_eq!(
+            validate_external_registry(&buffer_graph, &wrong_kind),
+            Err(CompiledGraphGpuError::ExpectedBuffer {
+                group: 0,
+                binding: 0,
+                name: String::from("particles"),
+            })
+        );
+
+        let texture_graph = graph_with_external_binding(ResourceDecl::texture2d("field", 1, 2));
+        let texture_slot = CompiledGraphGpuResourceSlot::new(1, 2);
+        let mut wrong_texture_kind = CompiledGraphGpuResourceRegistry::new();
+        wrong_texture_kind
+            .set_storage_buffer(texture_slot, BufferId::from_parts(10, 1), None)
+            .expect("storage revision");
+        assert_eq!(
+            validate_external_registry(&texture_graph, &wrong_texture_kind),
+            Err(CompiledGraphGpuError::ExpectedTexture {
+                group: 1,
+                binding: 2,
+                name: String::from("field"),
+            })
+        );
+    }
+
+    #[test]
+    fn external_state_refreshes_bind_groups_and_rejects_stale_registry() {
+        let instance = NullInstance::new();
+        let adapter = instance
+            .request_adapter(&Default::default())
+            .expect("null adapter");
+        let (device, queue) = instance
+            .create_device(&adapter, &Default::default())
+            .expect("null device");
+        let graph = graph_with_external_binding(ResourceDecl::buffer("particles", 0, 0));
+        let slot = CompiledGraphGpuResourceSlot::new(0, 0);
+        let buffer_one = device.create_buffer(&BufferDescriptor {
+            label: Some(String::from("external-one")),
+            size: 64,
+            usage: BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        let mut registry = CompiledGraphGpuResourceRegistry::new();
+        let first_revision = registry
+            .set_storage_buffer(slot, buffer_one, Some(64))
+            .expect("first external revision");
+        let stale_registry = registry.clone();
+        let mut state = CompiledGraphGpuState::new(&device, &queue, &graph, &registry)
+            .expect("external buffer state");
+
+        let buffer_two = device.create_buffer(&BufferDescriptor {
+            label: Some(String::from("external-two")),
+            size: 64,
+            usage: BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        let second_revision = registry
+            .set_storage_buffer(slot, buffer_two, Some(64))
+            .expect("second external revision");
+        assert!(second_revision.value() > first_revision.value());
+        assert_eq!(
+            state.refresh_external_resources(&device, &graph, &registry),
+            Ok(CompiledGraphGpuExternalUpdate::Rebuilt { changed_slots: 1 })
+        );
+        assert_eq!(
+            state.external_binding(slot).unwrap().revision,
+            second_revision
+        );
+        assert_eq!(
+            state.external_binding(slot).unwrap().resource,
+            CompiledGraphGpuExternalResource::StorageBuffer {
+                buffer: buffer_two,
+                size: Some(64),
+            }
+        );
+        assert_eq!(
+            state.refresh_external_resources(&device, &graph, &stale_registry),
+            Err(CompiledGraphGpuError::StaleExternalRevision {
+                group: 0,
+                binding: 0,
+                expected: second_revision,
+                actual: first_revision,
+            })
+        );
+
+        state.destroy(&device);
+        device.destroy_buffer(buffer_one);
+        device.destroy_buffer(buffer_two);
+        assert_eq!(device.live_resource_count(), 0);
+    }
+
+    #[test]
+    fn external_graph_imports_and_bindings_carry_the_published_revision() {
+        let instance = NullInstance::new();
+        let adapter = instance
+            .request_adapter(&Default::default())
+            .expect("null adapter");
+        let (device, queue) = instance
+            .create_device(&adapter, &Default::default())
+            .expect("null device");
+        let graph = graph_with_external_binding(ResourceDecl::buffer("particles", 0, 0));
+        let slot = CompiledGraphGpuResourceSlot::new(0, 0);
+        let buffer = device.create_buffer(&BufferDescriptor {
+            label: Some(String::from("external-import")),
+            size: 64,
+            usage: BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        let mut registry = CompiledGraphGpuResourceRegistry::new();
+        let revision = registry
+            .set_storage_buffer(slot, buffer, Some(64))
+            .expect("external revision");
+        let state = CompiledGraphGpuState::new(&device, &queue, &graph, &registry)
+            .expect("external buffer state");
+        assert_eq!(
+            state.external_bind_group_resource(slot),
+            Some((
+                revision,
+                BindingResource::Buffer {
+                    buffer,
+                    offset: 0,
+                    size: Some(64),
+                },
+            ))
+        );
+
+        let mut render_graph = RenderGraph::new(rhi::Extent3d::new_2d(1, 1));
+        let binding = state
+            .import_external_to_graph(
+                &mut render_graph,
+                slot,
+                "external-particles",
+                CompiledGraphGpuGraphImport::Buffer {
+                    desc: BufferDesc::new(64, BufferUsages::STORAGE),
+                    entry_state: BufferState::initial(),
+                },
+            )
+            .expect("buffer import");
+        assert_eq!(binding.revision(), revision);
+        let graph_handle = match binding {
+            CompiledGraphGpuGraphBinding::Buffer { handle, .. } => handle,
+            CompiledGraphGpuGraphBinding::Texture { .. } => unreachable!("buffer import"),
+        };
+        assert!(state
+            .external_graph_buffer_binding(slot, graph_handle)
+            .is_some());
+
+        let stale = match binding {
+            CompiledGraphGpuGraphBinding::Buffer {
+                group,
+                binding,
+                handle,
+                ..
+            } => CompiledGraphGpuGraphBinding::Buffer {
+                group,
+                binding,
+                revision: CompiledGraphGpuRevision::from_value(revision.value() - 1),
+                handle,
+            },
+            CompiledGraphGpuGraphBinding::Texture { .. } => unreachable!("buffer import"),
+        };
+        assert_eq!(
+            graph_accesses(&graph, &[stale], state.external_bindings()),
+            Err(CompiledGraphGraphError::ExternalRevisionMismatch {
+                group: 0,
+                binding: 0,
+                expected: revision,
+                actual: CompiledGraphGpuRevision::from_value(revision.value() - 1),
+            })
+        );
+
+        state.destroy(&device);
+        device.destroy_buffer(buffer);
+        assert_eq!(device.live_resource_count(), 0);
+    }
+
+    #[test]
+    fn external_texture_import_supports_texture_and_view_only_slots() {
+        let instance = NullInstance::new();
+        let adapter = instance
+            .request_adapter(&Default::default())
+            .expect("null adapter");
+        let (device, queue) = instance
+            .create_device(&adapter, &Default::default())
+            .expect("null device");
+        let graph = CompiledGraph {
+            source: String::new(),
+            stage_order: Vec::new(),
+            entry_points: Vec::new(),
+            dispatches: Vec::new(),
+            bindings: vec![
+                ResourceDecl::texture2d("field", 0, 0),
+                ResourceDecl::texture2d("view_only", 0, 1),
+            ],
+            parameter_blocks: Vec::new(),
+            attribute_layout: AttributeLayoutPlan::build(0, &[]),
+            attribute_bindings: Vec::new(),
+        };
+        let texture = device.create_texture(&rhi::TextureDescriptor::new_2d(
+            rhi::Extent3d::new_2d(1, 1),
+            rhi::TextureFormat::Rgba8Unorm,
+            rhi::TextureUsages::TEXTURE_BINDING,
+        ));
+        let view = device.create_texture_view(texture, &rhi::TextureViewDescriptor::default());
+        let texture_slot = CompiledGraphGpuResourceSlot::new(0, 0);
+        let view_slot = CompiledGraphGpuResourceSlot::new(0, 1);
+        let mut registry = CompiledGraphGpuResourceRegistry::new();
+        let texture_revision = registry
+            .set_texture(texture_slot, texture, view)
+            .expect("texture revision");
+        let view_revision = registry
+            .set_texture_view(view_slot, view)
+            .expect("view revision");
+        let state = CompiledGraphGpuState::new(&device, &queue, &graph, &registry)
+            .expect("external texture state");
+        let mut render_graph = RenderGraph::new(rhi::Extent3d::new_2d(1, 1));
+        let imported = state
+            .import_external_to_graph(
+                &mut render_graph,
+                texture_slot,
+                "external-field",
+                CompiledGraphGpuGraphImport::Texture {
+                    desc: TextureDesc::color(rhi::TextureFormat::Rgba8Unorm),
+                    entry_state: TextureState::initial(),
+                    exit_state: TextureState::initial(),
+                    mip_levels: 1,
+                    array_layers: 1,
+                },
+            )
+            .expect("texture import");
+        assert_eq!(imported.revision(), texture_revision);
+        let view_handle = render_graph.import_texture(
+            "view-only",
+            TextureDesc::color(rhi::TextureFormat::Rgba8Unorm),
+            ImportedTexture {
+                texture,
+                default_view: view,
+                entry_state: TextureState::initial(),
+                exit_state: TextureState::initial(),
+                mip_levels: 1,
+                array_layers: 1,
+            },
+        );
+        assert!(state
+            .external_graph_texture_binding(view_slot, view_handle)
+            .is_some());
+        assert_eq!(
+            state.import_external_to_graph(
+                &mut render_graph,
+                view_slot,
+                "external-view-only",
+                CompiledGraphGpuGraphImport::Texture {
+                    desc: TextureDesc::color(rhi::TextureFormat::Rgba8Unorm),
+                    entry_state: TextureState::initial(),
+                    exit_state: TextureState::initial(),
+                    mip_levels: 1,
+                    array_layers: 1,
+                },
+            ),
+            Err(CompiledGraphGpuImportError::TextureObjectRequired { slot: view_slot })
+        );
+        assert_eq!(
+            state.external_binding(view_slot).unwrap().revision,
+            view_revision
+        );
+
+        state.destroy(&device);
+        device.destroy_texture_view(view);
+        device.destroy_texture(texture);
+        assert_eq!(device.live_resource_count(), 0);
+    }
+
     #[test]
     fn compiled_graph_state_owns_parameter_buffer_and_bindings() {
         let instance = NullInstance::new();
@@ -1242,8 +2324,13 @@ mod tests {
             .create_device(&adapter, &Default::default())
             .expect("null device");
         let graph = graph_with_one_parameter();
-        let state = CompiledGraphGpuState::new(&device, &queue, &graph, &[])
-            .expect("uniform resources are self-contained");
+        let state = CompiledGraphGpuState::new(
+            &device,
+            &queue,
+            &graph,
+            &CompiledGraphGpuResourceRegistry::new(),
+        )
+        .expect("uniform resources are self-contained");
         assert!(state.bind_group_layout(2).is_some());
         assert!(state.bind_group(2).is_some());
         assert!(state.pipeline_layout().index() != u32::MAX);
@@ -1277,8 +2364,13 @@ mod tests {
             .create_device(&adapter, &Default::default())
             .expect("null device");
         let graph = graph_with_one_parameter();
-        let state = CompiledGraphGpuState::new(&device, &queue, &graph, &[])
-            .expect("uniform resources are self-contained");
+        let state = CompiledGraphGpuState::new(
+            &device,
+            &queue,
+            &graph,
+            &CompiledGraphGpuResourceRegistry::new(),
+        )
+        .expect("uniform resources are self-contained");
         let error = state
             .update_parameters(&queue, &[])
             .expect_err("missing parameter must be observable");
@@ -1335,8 +2427,13 @@ mod tests {
             attribute_layout: AttributeLayoutPlan::build(0, &[]),
             attribute_bindings: Vec::new(),
         };
-        let state = CompiledGraphGpuState::new(&device, &queue, &graph, &[])
-            .expect("dispatch count binding is state-owned");
+        let state = CompiledGraphGpuState::new(
+            &device,
+            &queue,
+            &graph,
+            &CompiledGraphGpuResourceRegistry::new(),
+        )
+        .expect("dispatch count binding is state-owned");
         assert_eq!(state.dispatch_count_slots(), 3);
         state
             .update_dispatch_counts(&queue, &[0, 0, 65])
@@ -1351,7 +2448,7 @@ mod tests {
             BufferDesc::new(12, BufferUsages::STORAGE),
             ImportedBuffer {
                 buffer: dispatch_buffer,
-                entry_state: rhi::BufferState::initial(),
+                entry_state: BufferState::initial(),
             },
         );
         state
@@ -1361,6 +2458,7 @@ mod tests {
                 &[CompiledGraphGpuGraphBinding::Buffer {
                     group: 1,
                     binding: 0,
+                    revision: CompiledGraphGpuRevision::from_value(0),
                     handle: dispatch_handle,
                 }],
                 &[0, 0, 65],
@@ -1401,8 +2499,13 @@ mod tests {
         let graph = graph_with_ping_pong_attribute();
         assert_eq!(graph.attribute_layout.total_bytes, 128);
 
-        let state = CompiledGraphGpuState::new(&device, &queue, &graph, &[])
-            .expect("attribute pool is state-owned");
+        let state = CompiledGraphGpuState::new(
+            &device,
+            &queue,
+            &graph,
+            &CompiledGraphGpuResourceRegistry::new(),
+        )
+        .expect("attribute pool is state-owned");
         let pool = state
             .attribute_pool_buffer()
             .expect("live attributes own a persistent pool");

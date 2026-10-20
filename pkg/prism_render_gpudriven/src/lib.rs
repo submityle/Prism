@@ -81,7 +81,12 @@ pub use camera::{FrameUniform, OrthoCamera};
 pub use cull::{CullOutput, CullParams, CullStage};
 pub use draw::{DrawStage, INDICES_PER_INSTANCE};
 pub use ember::{
-    CompiledGraphGpuBinding, CompiledGraphGpuError, CompiledGraphGpuState, ParameterUploadError,
+    AttributeUploadError, CompiledGraphGpuBinding, CompiledGraphGpuError,
+    CompiledGraphGpuExternalKind, CompiledGraphGpuExternalResource, CompiledGraphGpuGraphBinding,
+    CompiledGraphGpuGraphImport, CompiledGraphGpuImportError, CompiledGraphGpuResourceRegistry,
+    CompiledGraphGpuResourceSlot, CompiledGraphGpuRevision, CompiledGraphGpuState,
+    CompiledGraphGpuExternalUpdate, CompiledGraphGraphError, CompiledGraphGpuRegistryError,
+    ParameterUploadError,
 };
 pub use encoding::IndirectArgs;
 pub use frustum::{aabb_inside, signed_distance, Aabb, Frustum, Plane};
