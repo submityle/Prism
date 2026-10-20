@@ -40,7 +40,7 @@ v12 的不可破坏决策：
 4. Direct、Shadow、GI、Reflection、Environment、Emitter、Material 各自有清晰 owner，不复制第二份真值。
 5. Execute 阶段不能临时换算法、扩大预算、创建作者级灯或静默 fallback。
 6. 所有 miss、unsupported、budget rejection、page miss、history reject 都必须可解释、可回放、可观测。
-7. Bevy 可以在迁移期作为 ECS、资源和 RHI 适配层，但 Bevy Light、Bevy PBR 和 Bevy RenderGraph 不能继续是 Prism 的照明权威。
+7. Bevy 已退出 Prism 的目标运行时架构；迁移期残留只允许作为临时只读适配器，完成 native 替代和验收后必须删除。最终 Prism 产品 crate 不得依赖 `bevy_*`，Bevy Light/PBR/RenderGraph 不是照明权威或最终后端。
 8. “AAA”只表示绑定硬件、内容、分辨率、质量档、帧时间和图像误差的一组可复现证据，不是功能名或性能口号。
 
 ## 1. 产品目标与范围
@@ -747,8 +747,8 @@ CanonicalLightingScene
 6. 完成 EnvironmentScene、MaterialScene 和 `RadianceQuery`；
 7. 完成 GI/reflection fallback 链和 HDR image readback；
 8. 删除旧 extraction、registry、plugin、双写测试和无主 fallback；
-9. 将 `prism_render_scene` 的 Bevy 依赖收敛为明确适配边界；
-10. 默认 profile 不再安装 Bevy Light/PBR authority。
+9. 将 `prism_render_scene` 的所有 Bevy 运行时依赖替换为 Prism 原生 ECS、RHI、frame graph 和 material/scene contracts；
+10. 删除 Bevy Light/PBR/RenderGraph 生产接线，不留默认关闭但仍可启用的旧 renderer。
 
 ## 18. 里程碑和退出门
 
@@ -763,7 +763,7 @@ CanonicalLightingScene
 | M6 GI/Reflection | screen/world/probe/env 与 SSR/world/probe/env coverage | disocclusion、roughness、漏光、历史、重复注能通过 |
 | M7 Product | inspector、profile、Explain、DebugView、capture/replay、导入迁移 | 常见作者问题可定位，目标场景 P50/P95/P99 可复现 |
 | M8 High-end | ReSTIR、HWRT、advanced cache、volume/offline provider | 每个 provider 独立 go/no-go，不以“已接入”退出 |
-| M9 Cleanup | 删除 Bevy authority、旧 registry、双写和 placeholder | 依赖图、默认 profile、contract/image/perf gate 全绿 |
+| M9 Cleanup | 删除全部产品侧 Bevy 依赖、旧 registry、双写和 placeholder | 依赖图无 `bevy_*`、默认 profile、contract/image/perf gate 全绿 |
 
 ## 19. 验收矩阵
 
@@ -818,7 +818,7 @@ CanonicalLightingScene
 - EnvironmentScene、emissive distribution、完整 hit-time `RadianceQuery` 和 world miss fallback 仍需闭环；
 - Rect/Disk/Sphere/Capsule 不能因为 CPU oracle、固定样本或 ABI parity 就宣称生产级阴影、many-light、GI participation 和图像验收完成；
 - VSM 仍需跨帧稳定 slot allocator、完整 dynamic caster epoch producer、全灯型 provider 矩阵和真实 page residency 证据；
-- `prism_render_scene` 仍保留 Bevy ECS、RenderApp/RenderGraph/RenderQueue、Bevy PBR/StandardMaterial 等适配依赖；删除 Bevy Light authority 不等于全仓 Prism runtime 迁移完成；
+- `prism_render_scene` 仍保留 Bevy ECS、RenderApp/RenderGraph/RenderQueue、Bevy PBR/StandardMaterial 等依赖；它们是待移除的迁移残留，不属于最终设计；
 - `prism_render_app` 与 `prism_render_scene` 目前各自维护 canonical light resource；app 的 lighting storage-buffer 输出尚无证据写入其最终 HDR/present 颜色目标；
 - Prism opaque 路径仍与 Bevy PBR plugin/material queue 共存，production composition 必须定义谁拥有 opaque 光照写入，避免重复着色或隐式双 authority；
 - 当前工作树存在大量并行模块修改，未审查的改动不能自动视为已通过本方案验收。
