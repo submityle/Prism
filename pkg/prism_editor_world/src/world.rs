@@ -281,6 +281,7 @@ pub struct EditorWorldData {
     limits: EditorWorldLimits,
     locks: CellLockRegistry,
     payloads: BTreeMap<CellKey, Vec<u8>>,
+    persisted_revisions: BTreeMap<CellKey, u64>,
     ofpa: OfpaCatalog,
     hlod: HlodPlanner,
 }
@@ -296,6 +297,7 @@ impl EditorWorldData {
             limits,
             locks: CellLockRegistry::new(),
             payloads: BTreeMap::new(),
+            persisted_revisions: BTreeMap::new(),
             ofpa: OfpaCatalog::new(limits.max_actors()),
             hlod: HlodPlanner::new(limits.max_hlod_layers(), limits.max_hlod_clusters()),
         })
@@ -498,6 +500,15 @@ impl EditorWorldData {
         token: TransitionToken,
         payload: Vec<u8>,
     ) -> Result<(), EditorWorldDataError> {
+        self.complete_snapshot_load(token, payload, None)
+    }
+
+    fn complete_snapshot_load(
+        &mut self,
+        token: TransitionToken,
+        payload: Vec<u8>,
+        revision: Option<u64>,
+    ) -> Result<(), EditorWorldDataError> {
         if token.kind() != TransitionKind::Load {
             return Err(WorldError::InvalidTransition(token.cell()).into());
         }
@@ -511,6 +522,18 @@ impl EditorWorldData {
             .into());
         }
         self.model.complete_load(token)?;
+        let key = CellKey::new(token.cell());
+        if let Some(revision) = revision {
+            let record = self
+                .model
+                .cells
+                .get_mut(&key)
+                .expect("completed cell exists");
+            record.revision = record.revision.max(revision);
+            self.persisted_revisions.insert(key, revision);
+        } else {
+            self.persisted_revisions.remove(&key);
+        }
         self.payloads.insert(CellKey::new(token.cell()), payload);
         Ok(())
     }
@@ -551,8 +574,12 @@ impl EditorWorldData {
             .payload(cell)
             .ok_or(CellPayloadError::Missing)?
             .to_vec();
+        let mut request = CellSaveRequest::new(cell, record.file().clone(), record.revision());
+        if let Some(revision) = self.persisted_revisions.get(&CellKey::new(cell)) {
+            request = request.with_base_revision(*revision);
+        }
         Ok(PendingCellSave {
-            request: CellSaveRequest::new(cell, record.file().clone(), record.revision()),
+            request,
             payload,
             lock: lock.clone(),
         })
@@ -582,6 +609,7 @@ impl EditorWorldData {
             return Err(EditorWorldDataError::DirtyActors(pending.request.cell()));
         }
         self.model.mark_clean(pending.request.cell())?;
+        self.note_persisted_revision(&pending.request);
         Ok(())
     }
 
@@ -675,11 +703,16 @@ impl EditorWorldData {
         completion: IoCompletion<E>,
     ) -> Result<bool, EditorWorldDataError> {
         match completion {
-            IoCompletion::Loaded { request, bytes, .. } => {
+            IoCompletion::Loaded {
+                request,
+                bytes,
+                revision,
+                ..
+            } => {
                 if self.cell_file(request.cell()) != Some(request.file()) {
                     return Err(EditorWorldDataError::UnexpectedCompletion);
                 }
-                self.complete_load(request.token(), bytes)?;
+                self.complete_snapshot_load(request.token(), bytes, revision)?;
                 Ok(true)
             }
             IoCompletion::Failed {
@@ -712,6 +745,9 @@ impl EditorWorldData {
     ) -> Result<bool, EditorWorldDataError> {
         match completion {
             IoCompletion::Saved { request, .. } if request == pending.request => {
+                // The disk commit happened even if a later edit or expired
+                // lease prevents this completion from clearing dirty state.
+                self.note_persisted_revision(&request);
                 self.commit_save(pending, now)?;
                 Ok(true)
             }
@@ -725,6 +761,13 @@ impl EditorWorldData {
             } if request == pending.request => Ok(false),
             _ => Err(EditorWorldDataError::UnexpectedCompletion),
         }
+    }
+
+    fn note_persisted_revision(&mut self, request: &CellSaveRequest) {
+        self.persisted_revisions
+            .entry(CellKey::new(request.cell()))
+            .and_modify(|revision| *revision = (*revision).max(request.revision()))
+            .or_insert(request.revision());
     }
 
     fn require_editable(&self, cell: CellCoord) -> Result<(), EditorWorldDataError> {

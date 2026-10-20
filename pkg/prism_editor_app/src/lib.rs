@@ -33,7 +33,33 @@ use prism_reflect::{InspectorHints, InspectorKind, InspectorNode};
 use prism_ui::Element;
 
 mod backend;
+mod controller;
+#[cfg(feature = "desktop")]
+mod desktop;
+#[cfg(feature = "desktop")]
+mod desktop_document;
+#[cfg(feature = "desktop")]
+mod desktop_scene;
+mod desktop_ui;
+mod document;
 mod lifecycle;
+
+pub use controller::{ControllerError, ControllerLimits, ControllerOutcome, EditorController};
+#[cfg(feature = "desktop")]
+pub use desktop::{
+    run_desktop, run_desktop_with_document, DesktopConfig, DesktopError, DesktopGpu,
+    DesktopOutcome, DesktopRenderer, DesktopReport, DesktopViewportBounds, DesktopWork,
+};
+#[cfg(feature = "desktop")]
+pub use desktop_document::DesktopDocumentSession;
+#[cfg(feature = "desktop")]
+pub use desktop_scene::{DesktopScene, DesktopSceneObject, DesktopSceneStatus};
+pub use desktop_ui::{DesktopKey, DesktopUiError, EditorDesktopUi};
+pub use document::{
+    DecodedDocument, DocumentCodec, DocumentError, DocumentFileAdapter, DocumentIoEvent,
+    DocumentLimits, DocumentLoadReceipt, DocumentSaveReceipt, DocumentSchemaCatalog,
+    PreparedDocumentLoad,
+};
 
 pub use backend::{
     GpuSurfaceError, GpuSurfaceErrorKind, GpuSurfaceLifecycle, PixelSize, PixelSizeError,

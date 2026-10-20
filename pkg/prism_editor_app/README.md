@@ -2,9 +2,9 @@
 
 `prism_editor_app` assembles the editor data layers into a deterministic
 application harness. Headless mode supports CI, golden snapshots, and
-automation without opening a window or linking game logic. Windowed mode
-requires explicit `WindowBackend` and `GpuSurfaceLifecycle` adapters; this
-crate does not ship an operating-system window or renderer implementation.
+automation without opening a window or linking game logic. With the `desktop`
+feature, the binary also exposes a native winit/wgpu smoke entry point and the
+library exposes the Loom presenter plus the engine-neutral viewport seam.
 
 The harness owns frame advancement, snapshot hashing, and resource lifecycle:
 
@@ -29,9 +29,11 @@ The harness owns frame advancement, snapshot hashing, and resource lifecycle:
   resource and update system. Completion and failure propagate to
   `prism_app::AppExitRequest`.
 
-Loom pixel rendering, device input translation, runtime transport, and
-domain-specific modules remain explicit adapters. Surface lifecycle tests use
-recording backends; they do not claim native window or GPU device validation.
+Document persistence is opt-in through `DesktopDocumentSession` and
+`run_desktop_with_document`; the session preserves dirty/draft state and
+fences stale save/load receipts. Runtime transport and domain-specific modules
+remain explicit adapters. Surface lifecycle tests use recording backends; the
+native smoke entry point is the path for actual OS window/GPU validation.
 
 Verification from the repository root:
 
@@ -39,4 +41,5 @@ Verification from the repository root:
 cargo test -p prism_editor_app --all-targets
 cargo clippy -p prism_editor_app --all-targets --no-deps -- -D warnings
 cargo run -p prism_editor_app -- --frames 4
+cargo run -p prism_editor_app --features desktop -- --desktop --frames 4
 ```

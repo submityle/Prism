@@ -134,7 +134,8 @@ pub struct SceneIdPassEntry {
 ///
 /// Each added or updated entry contains both renderer-owned draw handles and
 /// the exact integer value its fragment shader must write. The adapter owns
-/// pipeline creation, geometry binding, and command encoding.
+/// pipeline creation, geometry binding, and command encoding. The optional
+/// [`crate::SceneIdGeometryRenderer`] is a concrete indexed-geometry adapter.
 pub trait SceneIdPassSink {
     /// Adapter-specific failure produced while recording an addition.
     type Error;
@@ -339,6 +340,17 @@ impl SceneIdPass {
     #[must_use]
     pub const fn generation(&self) -> u64 {
         self.generation
+    }
+
+    /// Advances the scene generation when geometry or transforms change without
+    /// changing draw handles. Existing pick/box results then become stale.
+    /// Does not change tokens or require a draw-list delta.
+    pub fn invalidate_content(&mut self) -> Result<u64, SceneIdPassError> {
+        self.generation = self
+            .generation
+            .checked_add(1)
+            .ok_or(SceneIdPassError::GenerationExhausted)?;
+        Ok(self.generation)
     }
 
     /// Returns the persistent ID encoder for renderer-side ID resolution.

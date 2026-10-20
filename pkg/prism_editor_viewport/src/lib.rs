@@ -1,22 +1,30 @@
 //! Deterministic viewport, picking, and gizmo interaction contracts.
 //!
-//! The crate also includes an executable wgpu ID-buffer backend. It owns only
-//! target/readback resources and leaves object-ID drawing to the renderer.
+//! The crate also includes an executable wgpu ID/depth target and readback
+//! backend, plus an optional indexed-geometry ID renderer.
 
 #![forbid(unsafe_code)]
 
 extern crate alloc;
 
+mod geometry;
+#[cfg(all(test, feature = "gpu-tests"))]
+mod geometry_tests;
 mod gpu_picking;
 mod render_targets;
 mod scene;
 #[cfg(all(test, feature = "gpu-tests"))]
 mod test_support;
 
+pub use geometry::{
+    SceneIdCamera, SceneIdDepth, SceneIdGeometryError, SceneIdGeometryRenderer, SceneIdMatrix,
+    SCENE_ID_IDENTITY_MATRIX,
+};
 pub use gpu_picking::{
-    EncodedPickId, GpuPickingBackend, GpuPickingConfig, GpuPickingError, GpuPickingFrame,
-    InFlightPickReadback, PendingPickReadback, ID_BUFFER_BYTES_PER_TEXEL, ID_BUFFER_FORMAT,
-    READBACK_ROW_ALIGNMENT,
+    EncodedPickId, GpuBoxSelectionError, GpuBoxSelectionLimits, GpuPickingBackend,
+    GpuPickingConfig, GpuPickingError, GpuPickingFrame, InFlightBoxSelectionReadback,
+    InFlightPickReadback, PendingBoxSelectionReadback, PendingPickReadback,
+    ID_BUFFER_BYTES_PER_TEXEL, ID_BUFFER_FORMAT, READBACK_ROW_ALIGNMENT,
 };
 pub use render_targets::{
     RenderTargetError, RenderTargetHandle, RenderTargetRegistry, RenderTargetState,

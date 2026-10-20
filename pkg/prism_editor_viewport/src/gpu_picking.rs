@@ -1,10 +1,11 @@
 //! Executable wgpu ID-buffer picking for an editor viewport.
 //!
-//! The backend owns only the ID target and readback resources. A renderer owns
+//! The backend owns ID/depth targets and readback resources. A renderer owns
 //! the object-ID pipeline and draws into the pass returned by
 //! [`GpuPickingFrame::begin_render_pass`]. This keeps the backend independent
 //! of scene, mesh, material, and camera implementations while still making the
-//! GPU path concrete and testable.
+//! GPU path concrete and testable. [`crate::SceneIdGeometryRenderer`] supplies
+//! an indexed-geometry implementation without a scene-engine dependency.
 
 use core::fmt;
 use std::{mem::size_of, sync::mpsc};
@@ -17,6 +18,12 @@ use wgpu::{
 
 use crate::{
     PickRequest, PickResult, PixelPoint, RenderTargetHandle, RenderTargetState, ViewportId,
+};
+
+mod box_selection;
+pub use box_selection::{
+    GpuBoxSelectionError, GpuBoxSelectionLimits, InFlightBoxSelectionReadback,
+    PendingBoxSelectionReadback,
 };
 
 /// The integer format used by the ID target.
@@ -138,7 +145,7 @@ pub enum GpuPickingError {
         /// Device maximum width or height.
         max_dimension: u32,
     },
-    /// The selected device cannot render to and copy from the integer target.
+    /// The selected device cannot render, copy and sample the integer target.
     UnsupportedTargetUsage,
     /// The entity ID cannot be represented while reserving zero for a miss.
     EntityIdCapacityExceeded,
@@ -219,7 +226,7 @@ impl fmt::Display for GpuPickingError {
                 "GPU picking target {width}x{height} exceeds device dimension {max_dimension}"
             ),
             Self::UnsupportedTargetUsage => {
-                f.write_str("Rgba32Uint does not support render attachment and copy-source usage")
+                f.write_str("Rgba32Uint does not support render attachment, copy-source and texture-binding usage")
             }
             Self::EntityIdCapacityExceeded => {
                 f.write_str("entity ID is reserved by the all-zero miss encoding")
@@ -354,6 +361,7 @@ pub struct GpuPickingBackend {
     queue: Queue,
     target: Texture,
     target_view: TextureView,
+    depth_view: TextureView,
     config: GpuPickingConfig,
     max_dimension: u32,
 }
@@ -380,17 +388,21 @@ impl GpuPickingBackend {
         let allowed = adapter
             .get_texture_format_features(ID_BUFFER_FORMAT)
             .allowed_usages;
-        let required_usage = TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC;
+        let required_usage = TextureUsages::RENDER_ATTACHMENT
+            | TextureUsages::COPY_SRC
+            | TextureUsages::TEXTURE_BINDING;
         if !allowed.contains(required_usage) {
             return Err(GpuPickingError::UnsupportedTargetUsage);
         }
 
         let (target, target_view) = create_target(device, config);
+        let depth_view = create_depth_target(device, config);
         Ok(Self {
             device: device.clone(),
             queue: queue.clone(),
             target,
             target_view,
+            depth_view,
             config,
             max_dimension,
         })
@@ -420,10 +432,20 @@ impl GpuPickingBackend {
         &self.queue
     }
 
-    /// Returns the target's native view for advanced renderer integration.
+    /// Returns the target's native `Rgba32Uint` view. The texture has
+    /// `TEXTURE_BINDING` usage: bind as `TextureSampleType::Uint`, use WGSL
+    /// `texture_2d<u32>`/`textureLoad` without a sampler for GPU-only ID preview.
+    /// Rebuild host bind groups after resize/close/reopen; do not sample this
+    /// view while it is attached to the same render pass.
     #[must_use]
     pub fn target_view(&self) -> &TextureView {
         &self.target_view
+    }
+
+    /// Returns the matching single-sample `Depth32Float` attachment.
+    #[must_use]
+    pub fn depth_view(&self) -> &TextureView {
+        &self.depth_view
     }
 
     /// Recreates the target at a new size. Existing command encoders must be
@@ -431,8 +453,10 @@ impl GpuPickingBackend {
     pub fn resize(&mut self, config: GpuPickingConfig) -> Result<(), GpuPickingError> {
         validate_extent(config, self.max_dimension)?;
         let (target, target_view) = create_target(&self.device, config);
+        let depth_view = create_depth_target(&self.device, config);
         self.target = target;
         self.target_view = target_view;
+        self.depth_view = depth_view;
         self.config = config;
         Ok(())
     }
@@ -467,6 +491,13 @@ impl GpuPickingBackend {
         pending: PendingPickReadback,
     ) -> InFlightPickReadback {
         self.queue.submit([encoder.finish()]);
+        self.start_readback(pending)
+    }
+
+    /// Starts mapping after the host has submitted the encoder containing this
+    /// copy to the shared queue. Allows one host submission to contain multiple
+    /// viewport/box copies and color passes. Never call before submitting.
+    pub fn start_readback(&self, pending: PendingPickReadback) -> InFlightPickReadback {
         let (sender, receiver) = mpsc::sync_channel(1);
         pending
             .buffer
@@ -564,6 +595,12 @@ impl fmt::Debug for GpuPickingFrame<'_> {
 }
 
 impl<'a> GpuPickingFrame<'a> {
+    /// Returns the complete frame allocation/camera correlation record.
+    #[must_use]
+    pub const fn state(&self) -> RenderTargetState {
+        self.state
+    }
+
     /// Returns the frame viewport identity.
     #[must_use]
     pub const fn viewport(&self) -> ViewportId {
@@ -612,6 +649,38 @@ impl<'a> GpuPickingFrame<'a> {
         encoder.begin_render_pass(&RenderPassDescriptor {
             label,
             color_attachments: &color_attachments,
+            ..Default::default()
+        })
+    }
+
+    /// Begins an ID/depth pass, clearing IDs to miss and depth to the selected
+    /// convention's far plane. Geometry uses WebGPU clip depth `[0, 1]`.
+    pub fn begin_geometry_render_pass<'pass>(
+        &'pass self,
+        encoder: &'pass mut CommandEncoder,
+        depth: crate::SceneIdDepth,
+        label: Option<&'pass str>,
+    ) -> RenderPass<'pass> {
+        let color_attachments = [Some(RenderPassColorAttachment {
+            view: &self.backend.target_view,
+            depth_slice: None,
+            resolve_target: None,
+            ops: Operations {
+                load: LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                store: StoreOp::Store,
+            },
+        })];
+        encoder.begin_render_pass(&RenderPassDescriptor {
+            label,
+            color_attachments: &color_attachments,
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &self.backend.depth_view,
+                depth_ops: Some(Operations {
+                    load: LoadOp::Clear(depth.clear_value()),
+                    store: StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
             ..Default::default()
         })
     }
@@ -693,37 +762,58 @@ fn validate_request(
     request: PickRequest,
     config: GpuPickingConfig,
 ) -> Result<(), GpuPickingError> {
-    if request.viewport != state.viewport {
+    validate_correlation(
+        state,
+        scene_generation,
+        request.viewport,
+        request.generation,
+        request.scene_generation,
+        request.target_generation,
+        request.target_handle,
+    )?;
+    validate_pixel(request.pixel, config)
+}
+
+fn validate_correlation(
+    state: RenderTargetState,
+    scene_generation: u64,
+    viewport: ViewportId,
+    generation: u64,
+    requested_scene: u64,
+    target_generation: u64,
+    target_handle: RenderTargetHandle,
+) -> Result<(), GpuPickingError> {
+    if viewport != state.viewport {
         return Err(GpuPickingError::ViewportMismatch {
             expected: state.viewport,
-            actual: request.viewport,
+            actual: viewport,
         });
     }
-    if request.generation != state.viewport_generation {
+    if generation != state.viewport_generation {
         return Err(GpuPickingError::GenerationMismatch {
             expected: state.viewport_generation,
-            actual: request.generation,
+            actual: generation,
         });
     }
-    if request.scene_generation != scene_generation {
+    if requested_scene != scene_generation {
         return Err(GpuPickingError::SceneGenerationMismatch {
             expected: scene_generation,
-            actual: request.scene_generation,
+            actual: requested_scene,
         });
     }
-    if request.target_generation != state.target_generation {
+    if target_generation != state.target_generation {
         return Err(GpuPickingError::TargetGenerationMismatch {
             expected: state.target_generation,
-            actual: request.target_generation,
+            actual: target_generation,
         });
     }
-    if request.target_handle != state.handle {
+    if target_handle != state.handle {
         return Err(GpuPickingError::TargetHandleMismatch {
             expected: state.handle,
-            actual: request.target_handle,
+            actual: target_handle,
         });
     }
-    validate_pixel(request.pixel, config)
+    Ok(())
 }
 
 fn create_target(device: &Device, config: GpuPickingConfig) -> (Texture, TextureView) {
@@ -738,11 +828,32 @@ fn create_target(device: &Device, config: GpuPickingConfig) -> (Texture, Texture
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: ID_BUFFER_FORMAT,
-        usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
+        usage: TextureUsages::RENDER_ATTACHMENT
+            | TextureUsages::COPY_SRC
+            | TextureUsages::TEXTURE_BINDING,
         view_formats: &[],
     });
     let view = target.create_view(&TextureViewDescriptor::default());
     (target, view)
+}
+
+fn create_depth_target(device: &Device, config: GpuPickingConfig) -> TextureView {
+    device
+        .create_texture(&wgpu::TextureDescriptor {
+            label: Some("prism-editor-picking-depth"),
+            size: Extent3d {
+                width: config.width,
+                height: config.height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: TextureFormat::Depth32Float,
+            usage: TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        })
+        .create_view(&TextureViewDescriptor::default())
 }
 
 #[cfg(test)]

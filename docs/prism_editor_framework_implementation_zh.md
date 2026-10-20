@@ -4,9 +4,9 @@
 
 ## 当前结论
 
-可以继续实施，且内核、通用数据层、协议/进程桥、Loom 装配与视口 GPU 基础已落地。当前不是可直接投入生产的完整桌面编辑器；原生窗口、Loom 渲染/输入、真实场景绘制与模型编辑回写仍需组成同一条应用路径。
+可以继续实施，且内核、通用数据层、协议/进程桥、Loom 装配与视口 GPU 基础已落地。当前不是可直接投入生产的完整桌面编辑器；原生窗口、Loom 渲染/输入、真实场景绘制与模型编辑回写仍需组成同一条应用路径。2026-10-20 已开始接入原生文档会话：保存/加载通过事件循环异步轮询，保存确认受模型快照围栏保护，加载成功后原子替换 UI 并失效旧视口拾取；尚未形成完整原生端到端验收证据。
 
-本轮 16 个编辑器包的全 targets、全 features 测试共 **225 项通过**，包含 Apple M2 / Metal 上的两项强制真实 GPU 测试；默认 features 为 223 项。测试数用于标识验证范围，不代表功能完成百分比。
+本轮 16 个编辑器包的全 targets、全 features 普通回归与 `PRISM_REQUIRE_GPU=1` 强制真实 GPU 回归均通过；真实设备为 Apple M2 / Metal，GPU geometry、ID texture、矩形采集、过期结果拒绝和文档重载测试均实际执行。`prism_editor_app` 严格 Clippy(`--no-deps`)也通过，依赖树无 `bevy_*`。这证明当前切片可验证，不等于完整桌面产品或引擎集成已完成。
 
 ## 已实现与交付边界
 
@@ -25,7 +25,7 @@
 | `prism_editor_remote` | 有界 JSON-RPC/二进制 codec、增量副本、PIE、TCP、受控子进程 stdio/TCP 桥及取消/重启/超时 | Prism 引擎专属 adapter 和生产场景运行时接线 | 41 |
 | `prism_editor_collab` | 有界因果副本/LWW/tombstone、Presence/租约软锁、TCP 接纳顺序/广播/重连/历史重放/能力拒绝 | 身份认证/TLS、产品级权限/部署和 UI 到命令栈协同接线 | 20 |
 | `prism_editor_ui` | Loom Element 装配、有界稳定 key、语义目标/事件到选择/展开/字段编辑/命令/Undo/Redo action 的绑定契约 | 真实设备事件、Loom reconciliation/render 和应用命令执行的端到端连接 | 20 |
-| `prism_editor_app` | 有界 headless runner、工作区组合、窗口/surface 生命周期、错误回滚/恢复/退出及 `prism_app` 退出传播 | OS 窗口实现、GPU 呈现实现和完整应用渲染回路 | 16 |
+| `prism_editor_app` | 有界 headless runner、工作区组合、窗口/surface 生命周期、错误回滚/恢复/退出及 `prism_app` 退出传播；原生文档会话接线、Ctrl/Cmd+S 保存、Ctrl/Cmd+O 加载、receipt 围栏和重载 renderer 失效钩子 | 完整原生输入→Loom→真实场景→Inspector→保存重载验收，CLI 原生入口和生产引擎 adapter | 16 |
 | `prism_editor_viewport` | 稳定场景 ID/增量提交、真实整数 ID target/异步读回、多 viewport target 生命周期/过期拒绝、框选/焦点/Gizmo 契约 | 宿主 geometry/depth 绘制、GPU 矩形采集、平台输入、Gizmo 绘制/命中和编辑回写 | 24（默认 22） |
 | `prism_editor_world` | 有界异步 provider 驱动、payload 驻留、分层策略、dirty/租约保护、修订安全保存确认、OFPA/HLOD 计划 | 生产存储 provider/文件格式/崩溃恢复、actor 写盘、HLOD 烘焙/渲染和世界 UI | 24 |
 
@@ -57,6 +57,10 @@
 
 ## 验证记录与复现
 
+### 原生文档会话接线
+
+`DesktopDocumentSession` 持有单文档 `DocumentFileAdapter`、schema allowlist 和 controller limits。`run_desktop_with_document` 将它接入 winit user event/waker：Ctrl/Cmd+S 提交异步保存，Ctrl/Cmd+O 提交加载；保存完成后才调用 `acknowledge_ui`，加载完成后先 `prepare` 再 `install_ui`，成功安装后调用 `DesktopRenderer::document_reloaded`。配置了文档会话时，窗口关闭会在 dirty、活动 draft、pending I/O 或 reconciliation-required 状态下阻止静默退出；未配置文档会话的旧 `run_desktop` API 保持原行为并始终返回 UI/model 所有权。
+
 在仓库根目录为本次验证选择独立 target，避免多个任务共用或清理彼此的构建目录：
 
 ```sh
@@ -68,10 +72,10 @@ cargo clippy -p 'prism_editor_*' --all-targets --all-features --no-deps -- -D wa
 cargo tree -p 'prism_editor_*' --all-features --prefix none --edges normal,build,dev
 ```
 
-- 默认 features：223 项通过；全 features 且强制 GPU：225 项通过，0 失败，0 忽略。
-- GPU 硬件：Apple M2，IntegratedGpu，Metal。两项测试均输出 `EXERCISED`；沙盒内无 adapter 时，`PRISM_REQUIRE_GPU=1` 明确失败，随后沙盒外执行通过。无适配器时的可选跳过不计 GPU 验证。
+- 本轮 `cargo test -p 'prism_editor_*' --all-targets --all-features` 与同命令前置 `PRISM_REQUIRE_GPU=1` 均通过，0 失败；不把无适配器时的可选跳过计入 GPU 证据。
+- GPU 硬件：Apple M2，IntegratedGpu，Metal。强制回归输出真实 adapter 信息及 `EXERCISED`，并覆盖 viewport 与 editor app 的真实 wgpu 路径。
 - 严格 Clippy 范围为编辑器包及其全部 targets/features（`--no-deps`）；不能扩写为全仓库/全部依赖零告警。此前完整依赖 lint 曾遇到 `prism_ecs` 既有告警，未越界修改。
-- 编辑器 Cargo 依赖树的 normal/build/dev 路径未发现 `bevy_*`。该结论基于实际依赖树，而不只搜索源码文字。
+- 编辑器 Cargo 依赖树的 normal/build/dev 路径未发现 `bevy_*`；根 workspace 的 `serde`/`serde_json` 声明也已补齐，保证使用 `workspace = true` 的构建 CLI 清单可解析。该结论基于实际依赖树，而不只搜索源码文字。
 - 本轮代码改动执行包级 fmt/diff 检查；编辑器范围无 `TODO`/`FIXME`/`todo!`/`unimplemented!` 未完成标记。UI 文本输入的 `.placeholder(...)` 是控件属性，不是实现占位。
 
 ## 下一条实施主线与验收

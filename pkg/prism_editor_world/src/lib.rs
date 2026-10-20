@@ -4,8 +4,8 @@
 //! cells, data-layer visibility/editability, edit scopes, stable per-cell
 //! identity, and failure-safe residency transitions. A plan can be adapted to
 //! [`prism_ecs`] / [`prism_scene`] partition contracts, but this crate never
-//! creates entities, defines a file format, or assumes a renderer exists.
-//! Opaque asynchronous storage is supplied through [`CellIoProvider`].
+//! creates entities or assumes a renderer exists. Opaque asynchronous storage
+//! is supplied through [`CellIoProvider`], including [`FileCellIoProvider`].
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -22,18 +22,21 @@ use prism_ecs::partition::{
     data_layer::DataLayerId,
 };
 
+mod filesystem;
 mod hlod;
 mod io;
 mod locks;
 mod ofpa;
 mod world;
 
+pub use filesystem::{FileCellIoError, FileCellIoLimits, FileCellIoProvider};
 pub use hlod::{
     HlodCluster, HlodError, HlodLayer, HlodPlan, HlodPlanOperation, HlodPlanner, HlodView,
 };
 pub use io::{
-    CellIoProvider, CellLoadFuture, CellLoadRequest, CellSaveFuture, CellSaveRequest, IoBudget,
-    IoCompletion, IoFailure, IoOperation, IoRequestId, IoSubmitError, WorldIoDriver,
+    CellIoProvider, CellLoadFuture, CellLoadRequest, CellSaveFuture, CellSaveRequest, CellSnapshot,
+    CellSnapshotFuture, IoBudget, IoCompletion, IoFailure, IoOperation, IoRequestId, IoSubmitError,
+    WorldIoDriver,
 };
 pub use locks::{CellLockError, CellLockRecord, CellLockRegistry, CellLockToken};
 pub use ofpa::{ActorFileIdentity, ActorRecord, OfpaCatalog, OfpaError, OfpaOperation, OfpaPlan};

@@ -19,6 +19,19 @@ use super::{CellCoord, CellFileIdentity, TransitionToken};
 /// A boxed provider future that returns one opaque cell payload.
 pub type CellLoadFuture<E> = Pin<Box<dyn Future<Output = Result<Vec<u8>, E>> + Send + 'static>>;
 
+/// Loaded bytes together with an optional durable authoring revision.
+#[derive(Debug, Eq, PartialEq)]
+pub struct CellSnapshot {
+    /// Opaque application payload, without the provider's envelope.
+    pub bytes: Vec<u8>,
+    /// Durable revision, when the provider persists revisions.
+    pub revision: Option<u64>,
+}
+
+/// A provider future that also restores durable revision metadata.
+pub type CellSnapshotFuture<E> =
+    Pin<Box<dyn Future<Output = Result<CellSnapshot, E>> + Send + 'static>>;
+
 /// A boxed provider future that commits one opaque cell payload.
 pub type CellSaveFuture<E> = Pin<Box<dyn Future<Output = Result<(), E>> + Send + 'static>>;
 
@@ -106,6 +119,7 @@ pub struct CellSaveRequest {
     cell: CellCoord,
     file: CellFileIdentity,
     revision: u64,
+    base_revision: Option<u64>,
 }
 
 impl CellSaveRequest {
@@ -115,6 +129,7 @@ impl CellSaveRequest {
             cell,
             file,
             revision,
+            base_revision: None,
         }
     }
 
@@ -134,6 +149,22 @@ impl CellSaveRequest {
     #[must_use]
     pub const fn revision(&self) -> u64 {
         self.revision
+    }
+
+    /// Requires the existing durable revision to equal `revision` before save.
+    /// The new revision must still be newer (or an identical retry).
+    #[must_use]
+    pub const fn with_base_revision(mut self, revision: u64) -> Self {
+        self.base_revision = Some(revision);
+        self
+    }
+
+    /// Durable base captured by the editor, if known. Without a base, providers
+    /// may still enforce monotonic writes, but cannot detect divergent editors
+    /// whose local counters have advanced by different amounts.
+    #[must_use]
+    pub const fn base_revision(&self) -> Option<u64> {
+        self.base_revision
     }
 }
 
@@ -208,6 +239,8 @@ pub enum IoCompletion<E> {
         request: CellLoadRequest,
         /// Opaque payload bytes.
         bytes: Vec<u8>,
+        /// Durable revision supplied by the provider, if available.
+        revision: Option<u64>,
     },
     /// A save completed successfully.
     Saved {
@@ -264,6 +297,8 @@ impl<E> IoCompletion<E> {
 /// must not publish partial bytes, and may report success only after its atomic
 /// commit is durable according to the provider's persistence policy. The driver
 /// bounds reservations and validates results, not a provider's internal caches.
+/// Cancellation cannot undo a commit that already passed its publication fence;
+/// retain the snapshot for an identical retry/reconciliation in that case.
 pub trait CellIoProvider {
     /// Provider-specific error type.
     type Error: Send + 'static;
@@ -273,6 +308,21 @@ pub trait CellIoProvider {
         &self,
         request: CellLoadRequest,
     ) -> Result<CellLoadFuture<Self::Error>, Self::Error>;
+
+    /// Loads bytes and durable revision metadata. Existing byte-only adapters
+    /// inherit an unversioned implementation; persistent providers override it.
+    fn load_snapshot(
+        &self,
+        request: CellLoadRequest,
+    ) -> Result<CellSnapshotFuture<Self::Error>, Self::Error> {
+        let future = self.load_cell(request)?;
+        Ok(Box::pin(async move {
+            future.await.map(|bytes| CellSnapshot {
+                bytes,
+                revision: None,
+            })
+        }))
+    }
 
     /// Starts a save and takes ownership of the bytes until completion.
     fn save_cell(
@@ -285,7 +335,7 @@ pub trait CellIoProvider {
 enum ActiveOperation<E> {
     Load {
         request: CellLoadRequest,
-        future: CellLoadFuture<E>,
+        future: CellSnapshotFuture<E>,
         reserved_bytes: usize,
     },
     Save {
@@ -375,7 +425,7 @@ impl<P: CellIoProvider> WorldIoDriver<P> {
         self.admit(reserved_bytes)?;
         self.check_cell_idle(request.cell())?;
         let id = self.allocate_id()?;
-        let future = match self.provider.load_cell(request.clone()) {
+        let future = match self.provider.load_snapshot(request.clone()) {
             Ok(future) => future,
             Err(error) => return Err(IoSubmitError::Provider(error)),
         };
@@ -467,17 +517,20 @@ impl<P: CellIoProvider> WorldIoDriver<P> {
                         unreachable!("load poll result matches load operation")
                     };
                     return Poll::Ready(Some(match result {
-                        Ok(bytes) if bytes.len() <= request.max_bytes() => IoCompletion::Loaded {
-                            request_id,
-                            request,
-                            bytes,
-                        },
-                        Ok(bytes) => IoCompletion::Failed {
+                        Ok(snapshot) if snapshot.bytes.len() <= request.max_bytes() => {
+                            IoCompletion::Loaded {
+                                request_id,
+                                request,
+                                bytes: snapshot.bytes,
+                                revision: snapshot.revision,
+                            }
+                        }
+                        Ok(snapshot) => IoCompletion::Failed {
                             request_id,
                             operation: IoOperation::Load(request.clone()),
                             error: IoFailure::PayloadTooLarge {
                                 limit: request.max_bytes(),
-                                actual: bytes.len(),
+                                actual: snapshot.bytes.len(),
                             },
                         },
                         Err(error) => IoCompletion::Failed {
@@ -575,7 +628,7 @@ impl<P: CellIoProvider> WorldIoDriver<P> {
 }
 
 enum PollResult<E> {
-    Load(Poll<Result<Vec<u8>, E>>),
+    Load(Poll<Result<CellSnapshot, E>>),
     Save(Poll<Result<(), E>>),
 }
 
