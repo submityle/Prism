@@ -53,7 +53,9 @@ WGPU_BACKEND=metal PRISM_REQUIRE_GPU=1 cargo test -j 1 -p prism_world_gpu --feat
 
 `ProxyRegistry` 提供固定代理容量、独立 sector 数量预算（含空 sector）、sector 内唯一 ID、代际 handle、交换压紧和 dirty range；`GpuSectorProxies` 持有同一注册表、预留 SoA scratch 和固定 resident GPU 资源，无变化 upload 为 O(1)，改变后的扫描/转置/清标记总计 O(N + K)，逻辑列上传为 48K 字节。未上传编辑和整体替换 registry 均拒绝 render/camera/encode，尾删和全卸载仍同步 count。返回的校验/预算错误不改变注册表；map/Arc 的普通分配 OOM 不属于可恢复错误承诺。
 
-`prism_world_runtime/proxy_host` 在 header 校验后借用项目 decoder、原 `SceneHost` 与同一注册表，先派生 admission 后调用权威 host。load 错误或 unwind 仅补偿新增派生 sector，不能回滚 host 的部分修改；evict 成功后才删代理，失败/unwind 保留。它不另立 scene 真相、不规定 payload 格式、不启用 wgpu。真实 stream demand/coordinator→decoder/host→上传→间接绘制与策略驱逐像素回归已接通；合约、测试方法与性能边界见 `prism_world_sector_proxies_zh.md`。这不是产品 ECS decoder/render graph 的完整接入。
+`prism_world_runtime/proxy_host` 在 header 校验后借用项目 decoder、原 `SceneHost` 与同一注册表，先完成代理校验、容量准入、handle/generation 预计算和 fallible allocation，再调用权威 host；host 成功后才以无可恢复失败的 commit 发布派生 registry 更新。首次 load 与同 sector reload 共用该事务路径，满代理容量时可复用旧 sector 槽位；host 返回错误或 unwind 时旧代理、handle generation、dirty/upload 状态均保持不变。generation 即将进入 `u64::MAX` 的槽位按退休规则排除，不虚报可复用容量。evict 仍在权威 host 成功后才删代理，失败/unwind 保留。它不另立 scene 真相、不规定 payload 格式、不启用 wgpu，也不能回滚权威 host 内部在返回错误或 panic 前自行产生的部分修改。真实 stream demand/coordinator→decoder/host→上传→间接绘制与策略驱逐像素回归已接通；合约、测试方法与性能边界见 `prism_world_sector_proxies_zh.md`。这不是产品 ECS decoder/render graph 的完整接入。
+
+2026-10-20 专项回归：`prism_world_gpu` 默认与 `gpu` feature 库测试均为 123 passed；`prism_world_runtime` 默认库测试为 104 passed，`gpu_proxy` feature 库测试为 124 passed、7 ignored。随后显式执行 `gpu_proxy_cell_host_tests --ignored --nocapture`，7 项在 IntegratedGpu/DiscreteGpu 门禁下全部通过，覆盖真实 GPU 首次加载、同 sector reload、满容量复用、host error/panic 保留旧派生状态、上传与驱逐生命周期。该证据不包含多厂商 GPU、物理显存峰值或产品 scene/ECS decoder/renderer graph。
 
 ### M4：GPU 密度覆盖与距离淡出
 

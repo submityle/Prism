@@ -57,10 +57,12 @@ where
 ///
 /// The adapter owns no scene payload, ECS state, loaded-cell map, or second
 /// residency truth. `GpuSectorProxies` stores only the derived proxy view and
-/// its GPU resources. Loading decodes and admits that view before calling the
-/// authoritative host; a host failure removes only the newly admitted derived
-/// sector. Eviction requires the derived sector to be present, then calls the
-/// authoritative host and removes the derived sector only after success.
+/// its GPU resources. Loading or reloading decodes and fully prepares the
+/// derived registry update before calling the authoritative host, then commits
+/// it without a fallible step only after host success. A host error or panic
+/// therefore leaves the previous derived sector unchanged. Eviction requires
+/// the derived sector to be present, then calls the authoritative host and
+/// removes the derived sector only after success.
 ///
 /// The adapter never submits a command encoder. Call [`Self::stage_upload`]
 /// after one or more cell changes, then [`Self::write_camera`] and
@@ -114,20 +116,16 @@ impl<H: SceneHost, D: CellProxyDecoder> SceneHost for GpuProxyCellHost<'_, H, D>
             .decode(manifest, payload)
             .map_err(GpuProxyCellHostError::Decoder)?;
 
-        let registry = self.gpu.registry_mut();
-        registry
-            .insert_sector(manifest.sector, &proxies)
+        let pending = self
+            .gpu
+            .registry_mut()
+            .prepare_sector_update(manifest.sector, proxies)
             .map_err(GpuProxyCellHostError::Registry)?;
-        let mut pending = PendingGpuSector {
-            registry,
-            sector: manifest.sector,
-            committed: false,
-        };
 
         self.host
             .load_cell(manifest, payload)
             .map_err(GpuProxyCellHostError::Host)?;
-        pending.committed = true;
+        pending.commit();
         Ok(())
     }
 
@@ -141,19 +139,5 @@ impl<H: SceneHost, D: CellProxyDecoder> SceneHost for GpuProxyCellHost<'_, H, D>
         let removed = self.gpu.registry_mut().remove_sector(sector);
         debug_assert!(removed, "sector was checked before authoritative eviction");
         Ok(())
-    }
-}
-
-struct PendingGpuSector<'a> {
-    registry: &'a mut prism_world_gpu::ProxyRegistry,
-    sector: SectorId,
-    committed: bool,
-}
-
-impl Drop for PendingGpuSector<'_> {
-    fn drop(&mut self) {
-        if !self.committed {
-            self.registry.remove_sector(self.sector);
-        }
     }
 }
