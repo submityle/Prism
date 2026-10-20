@@ -15,7 +15,9 @@ use wgpu::{
     TextureFormat, TextureUsages, TextureView, TextureViewDescriptor,
 };
 
-use crate::{PickRequest, PickResult, PixelPoint, ViewportId};
+use crate::{
+    PickRequest, PickResult, PixelPoint, RenderTargetHandle, RenderTargetState, ViewportId,
+};
 
 /// The integer format used by the ID target.
 pub const ID_BUFFER_FORMAT: TextureFormat = TextureFormat::Rgba32Uint;
@@ -29,8 +31,9 @@ pub const READBACK_ROW_ALIGNMENT: u32 = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
 const READBACK_ROW_BYTES: u32 = READBACK_ROW_ALIGNMENT;
 /// A four-channel integer ID written by an object-ID fragment shader.
 ///
-/// Channel zero contains the least-significant 32 bits. All-zero is reserved
-/// for a miss; entity IDs are therefore encoded as `entity + 1`.
+/// All-zero is reserved for a miss. `SceneIdEncoder` uses the low two channels
+/// for its persistent scene-object token; the entity helpers remain available
+/// for adapters that own their own one-to-one entity encoding.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct EncodedPickId([u32; 4]);
 
@@ -79,6 +82,23 @@ impl EncodedPickId {
     #[must_use]
     pub const fn from_channels(channels: [u32; 4]) -> Self {
         Self(channels)
+    }
+
+    pub(crate) fn from_token(token: u64) -> Result<Self, GpuPickingError> {
+        if token == 0 {
+            return Err(GpuPickingError::EntityIdCapacityExceeded);
+        }
+        Ok(Self([token as u32, (token >> 32) as u32, 0, 0]))
+    }
+
+    pub(crate) fn decode_token(self) -> Option<u64> {
+        let channels = self.0;
+        let token = u64::from(channels[0]) | (u64::from(channels[1]) << 32);
+        if token == 0 || channels[2] != 0 || channels[3] != 0 {
+            None
+        } else {
+            Some(token)
+        }
     }
 }
 
@@ -138,12 +158,33 @@ pub enum GpuPickingError {
         /// Viewport carried by the request.
         actual: ViewportId,
     },
-    /// The request was recorded for a different scene generation.
+    /// The request was recorded for a different viewport/camera generation.
     GenerationMismatch {
         /// Generation associated with the frame.
         expected: u64,
         /// Generation carried by the request.
         actual: u64,
+    },
+    /// The request was recorded for different scene content.
+    SceneGenerationMismatch {
+        /// Scene generation associated with the frame.
+        expected: u64,
+        /// Scene generation carried by the request.
+        actual: u64,
+    },
+    /// The request was recorded against a different target allocation.
+    TargetGenerationMismatch {
+        /// Generation associated with the frame.
+        expected: u64,
+        /// Generation carried by the request.
+        actual: u64,
+    },
+    /// The request was recorded against another target allocation.
+    TargetHandleMismatch {
+        /// Handle associated with the frame.
+        expected: RenderTargetHandle,
+        /// Handle carried by the request.
+        actual: RenderTargetHandle,
     },
     /// The device could not complete the blocking poll.
     DevicePollFailed(String),
@@ -202,6 +243,20 @@ impl fmt::Display for GpuPickingError {
                 f,
                 "pick request generation {actual} does not match frame generation {expected}"
             ),
+            Self::TargetGenerationMismatch { expected, actual } => write!(
+                f,
+                "pick request target generation {actual} does not match frame target generation {expected}"
+            ),
+            Self::SceneGenerationMismatch { expected, actual } => write!(
+                f,
+                "pick request scene generation {actual} does not match frame scene generation {expected}"
+            ),
+            Self::TargetHandleMismatch { expected, actual } => write!(
+                f,
+                "pick request target handle {} does not match frame target handle {}",
+                actual.raw(),
+                expected.raw()
+            ),
             Self::DevicePollFailed(error) => write!(f, "GPU picking device poll failed: {error}"),
             Self::ReadbackMapFailed(error) => write!(f, "GPU picking readback map failed: {error}"),
             Self::ReadbackCallbackClosed => f.write_str("GPU picking readback callback closed"),
@@ -229,7 +284,71 @@ impl fmt::Debug for PendingPickReadback {
     }
 }
 
-/// A real wgpu ID-buffer target and its synchronous readback path.
+/// A submitted readback that may be polled without blocking the render loop.
+pub struct InFlightPickReadback {
+    request: PickRequest,
+    device: Device,
+    buffer: Buffer,
+    receiver: mpsc::Receiver<Result<(), wgpu::BufferAsyncError>>,
+    completed: bool,
+}
+
+impl fmt::Debug for InFlightPickReadback {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("InFlightPickReadback")
+            .field("request", &self.request)
+            .field("completed", &self.completed)
+            .finish_non_exhaustive()
+    }
+}
+
+impl InFlightPickReadback {
+    /// Returns immutable correlation metadata, including after a viewport closes.
+    #[must_use]
+    pub const fn request(&self) -> PickRequest {
+        self.request
+    }
+
+    /// Polls without blocking, even after the originating target is closed.
+    /// A result or terminal error is delivered at most once.
+    pub fn poll(&mut self) -> Result<Option<PickResult>, GpuPickingError> {
+        if self.completed {
+            return Ok(None);
+        }
+        if let Err(error) = self.device.poll(PollType::Poll) {
+            self.completed = true;
+            self.buffer.destroy();
+            return Err(GpuPickingError::DevicePollFailed(error.to_string()));
+        }
+        match self.receiver.try_recv() {
+            Ok(Ok(())) => {
+                self.completed = true;
+                read_mapped_result(self).map(Some)
+            }
+            Ok(Err(error)) => {
+                self.completed = true;
+                self.buffer.destroy();
+                Err(GpuPickingError::ReadbackMapFailed(error.to_string()))
+            }
+            Err(mpsc::TryRecvError::Empty) => Ok(None),
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.completed = true;
+                self.buffer.destroy();
+                Err(GpuPickingError::ReadbackCallbackClosed)
+            }
+        }
+    }
+}
+
+impl Drop for InFlightPickReadback {
+    fn drop(&mut self) {
+        // Destroy cancels an outstanding map and also accepts an already-unmapped
+        // buffer. Calling unmap again after successful readback is invalid in wgpu.
+        self.buffer.destroy();
+    }
+}
+
+/// A real wgpu ID-buffer target with asynchronous and explicit blocking readback.
 pub struct GpuPickingBackend {
     device: Device,
     queue: Queue,
@@ -320,11 +439,15 @@ impl GpuPickingBackend {
 
     /// Starts a frame correlation record for one viewport generation.
     #[must_use]
-    pub const fn begin_frame(&self, viewport: ViewportId, generation: u64) -> GpuPickingFrame<'_> {
+    pub(crate) const fn begin_frame(
+        &self,
+        state: RenderTargetState,
+        scene_generation: u64,
+    ) -> GpuPickingFrame<'_> {
         GpuPickingFrame {
             backend: self,
-            viewport,
-            generation,
+            state,
+            scene_generation,
         }
     }
 
@@ -337,6 +460,37 @@ impl GpuPickingBackend {
         })
     }
 
+    /// Submits encoded render/copy commands and starts an asynchronous ID readback.
+    pub fn submit_readback(
+        &self,
+        encoder: CommandEncoder,
+        pending: PendingPickReadback,
+    ) -> InFlightPickReadback {
+        self.queue.submit([encoder.finish()]);
+        let (sender, receiver) = mpsc::sync_channel(1);
+        pending
+            .buffer
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |result| {
+                let _ = sender.send(result);
+            });
+        InFlightPickReadback {
+            request: pending.request,
+            device: self.device.clone(),
+            buffer: pending.buffer,
+            receiver,
+            completed: false,
+        }
+    }
+
+    /// Polls an asynchronous readback without blocking for GPU completion.
+    pub fn poll_readback(
+        &self,
+        pending: &mut InFlightPickReadback,
+    ) -> Result<Option<PickResult>, GpuPickingError> {
+        pending.poll()
+    }
+
     /// Submits the encoded render/copy commands and blocks until one ID texel
     /// is mapped. This is an explicit synchronous policy intended for editor
     /// pointer picks, not a per-frame bulk readback path.
@@ -345,69 +499,65 @@ impl GpuPickingBackend {
         encoder: CommandEncoder,
         pending: PendingPickReadback,
     ) -> Result<PickResult, GpuPickingError> {
-        self.queue.submit([encoder.finish()]);
-        let slice = pending.buffer.slice(..);
-        let (sender, receiver) = mpsc::sync_channel(1);
-        slice.map_async(wgpu::MapMode::Read, move |result| {
-            let _ = sender.send(result);
-        });
+        let mut pending = self.submit_readback(encoder, pending);
         self.device
             .poll(PollType::wait_indefinitely())
             .map_err(|error| GpuPickingError::DevicePollFailed(error.to_string()))?;
-        let map_result = receiver
-            .recv()
-            .map_err(|_| GpuPickingError::ReadbackCallbackClosed)?;
-        map_result.map_err(|error| GpuPickingError::ReadbackMapFailed(error.to_string()))?;
+        self.poll_readback(&mut pending)?
+            .ok_or(GpuPickingError::ReadbackCallbackClosed)
+    }
+}
 
-        let mapped = match slice.get_mapped_range() {
-            Ok(mapped) => mapped,
-            Err(error) => {
-                pending.buffer.unmap();
-                return Err(GpuPickingError::ReadbackMapFailed(error.to_string()));
-            }
-        };
-        if mapped.len() < size_of::<[u32; 4]>() {
-            let actual = mapped.len();
-            drop(mapped);
+fn read_mapped_result(pending: &mut InFlightPickReadback) -> Result<PickResult, GpuPickingError> {
+    let slice = pending.buffer.slice(..);
+    let mapped = match slice.get_mapped_range() {
+        Ok(mapped) => mapped,
+        Err(error) => {
             pending.buffer.unmap();
-            return Err(GpuPickingError::ReadbackBufferTooSmall {
-                actual,
-                required: size_of::<[u32; 4]>(),
-            });
+            return Err(GpuPickingError::ReadbackMapFailed(error.to_string()));
         }
-        let mut channels = [0_u32; 4];
-        for (index, channel) in channels.iter_mut().enumerate() {
-            let offset = index * 4;
-            *channel = u32::from_le_bytes(
-                mapped[offset..offset + 4]
-                    .try_into()
-                    .expect("four-byte channel slice"),
-            );
-        }
+    };
+    if mapped.len() < size_of::<[u32; 4]>() {
+        let actual = mapped.len();
         drop(mapped);
         pending.buffer.unmap();
-
-        Ok(PickResult {
-            id: pending.request.id,
-            viewport: pending.request.viewport,
-            generation: pending.request.generation,
-            entity: EncodedPickId::from_channels(channels).decode_entity(),
-        })
+        return Err(GpuPickingError::ReadbackBufferTooSmall {
+            actual,
+            required: size_of::<[u32; 4]>(),
+        });
     }
+    let mut channels = [0_u32; 4];
+    for (index, channel) in channels.iter_mut().enumerate() {
+        let offset = index * 4;
+        let mut bytes = [0_u8; 4];
+        bytes.copy_from_slice(&mapped[offset..offset + 4]);
+        *channel = u32::from_le_bytes(bytes);
+    }
+    drop(mapped);
+    pending.buffer.unmap();
+    Ok(PickResult {
+        id: pending.request.id,
+        viewport: pending.request.viewport,
+        generation: pending.request.generation,
+        scene_generation: pending.request.scene_generation,
+        target_generation: pending.request.target_generation,
+        target_handle: pending.request.target_handle,
+        encoded: EncodedPickId::from_channels(channels),
+    })
 }
 
 /// A frame-scoped viewport/generation correlation used by the renderer pass.
 pub struct GpuPickingFrame<'a> {
     backend: &'a GpuPickingBackend,
-    viewport: ViewportId,
-    generation: u64,
+    state: RenderTargetState,
+    scene_generation: u64,
 }
 
 impl fmt::Debug for GpuPickingFrame<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("GpuPickingFrame")
-            .field("viewport", &self.viewport)
-            .field("generation", &self.generation)
+            .field("state", &self.state)
+            .field("scene_generation", &self.scene_generation)
             .field("config", &self.backend.config)
             .finish()
     }
@@ -417,13 +567,31 @@ impl<'a> GpuPickingFrame<'a> {
     /// Returns the frame viewport identity.
     #[must_use]
     pub const fn viewport(&self) -> ViewportId {
-        self.viewport
+        self.state.viewport
     }
 
-    /// Returns the frame scene generation.
+    /// Returns the frame viewport/camera generation.
     #[must_use]
     pub const fn generation(&self) -> u64 {
-        self.generation
+        self.state.viewport_generation
+    }
+
+    /// Returns the independent scene-content generation.
+    #[must_use]
+    pub const fn scene_generation(&self) -> u64 {
+        self.scene_generation
+    }
+
+    /// Returns the render-target allocation generation.
+    #[must_use]
+    pub const fn target_generation(&self) -> u64 {
+        self.state.target_generation
+    }
+
+    /// Returns the stable allocation handle for the ID target.
+    #[must_use]
+    pub const fn target_handle(&self) -> RenderTargetHandle {
+        self.state.handle
     }
 
     /// Begins the renderer-owned ID pass, clearing the target to a miss.
@@ -437,7 +605,7 @@ impl<'a> GpuPickingFrame<'a> {
             depth_slice: None,
             resolve_target: None,
             ops: Operations {
-                load: LoadOp::Clear(wgpu::Color::BLACK),
+                load: LoadOp::Clear(wgpu::Color::TRANSPARENT),
                 store: StoreOp::Store,
             },
         })];
@@ -454,7 +622,12 @@ impl<'a> GpuPickingFrame<'a> {
         encoder: &mut CommandEncoder,
         request: PickRequest,
     ) -> Result<PendingPickReadback, GpuPickingError> {
-        validate_request(self.viewport, self.generation, request, self.backend.config)?;
+        validate_request(
+            self.state,
+            self.scene_generation,
+            request,
+            self.backend.config,
+        )?;
 
         let buffer = self.backend.create_readback_buffer();
         encoder.copy_texture_to_buffer(
@@ -515,21 +688,39 @@ fn validate_pixel(pixel: PixelPoint, config: GpuPickingConfig) -> Result<(), Gpu
 }
 
 fn validate_request(
-    viewport: ViewportId,
-    generation: u64,
+    state: RenderTargetState,
+    scene_generation: u64,
     request: PickRequest,
     config: GpuPickingConfig,
 ) -> Result<(), GpuPickingError> {
-    if request.viewport != viewport {
+    if request.viewport != state.viewport {
         return Err(GpuPickingError::ViewportMismatch {
-            expected: viewport,
+            expected: state.viewport,
             actual: request.viewport,
         });
     }
-    if request.generation != generation {
+    if request.generation != state.viewport_generation {
         return Err(GpuPickingError::GenerationMismatch {
-            expected: generation,
+            expected: state.viewport_generation,
             actual: request.generation,
+        });
+    }
+    if request.scene_generation != scene_generation {
+        return Err(GpuPickingError::SceneGenerationMismatch {
+            expected: scene_generation,
+            actual: request.scene_generation,
+        });
+    }
+    if request.target_generation != state.target_generation {
+        return Err(GpuPickingError::TargetGenerationMismatch {
+            expected: state.target_generation,
+            actual: request.target_generation,
+        });
+    }
+    if request.target_handle != state.handle {
+        return Err(GpuPickingError::TargetHandleMismatch {
+            expected: state.handle,
+            actual: request.target_handle,
         });
     }
     validate_pixel(request.pixel, config)
@@ -601,20 +792,25 @@ mod tests {
     }
 
     #[test]
-    fn frame_rejects_wrong_viewport_and_generation_before_gpu_encoding() {
+    fn frame_rejects_wrong_target_identity_before_gpu_encoding() {
+        let state = RenderTargetState {
+            viewport: ViewportId::from_raw(1),
+            handle: RenderTargetHandle::from_raw(1),
+            viewport_generation: 7,
+            target_generation: 3,
+            config: GpuPickingConfig::new(4, 4),
+        };
         let request = PickRequest {
             id: PickRequestId(9),
             viewport: ViewportId::from_raw(2),
             generation: 8,
+            scene_generation: 0,
+            target_generation: 3,
+            target_handle: RenderTargetHandle::from_raw(1),
             pixel: PixelPoint { x: 0, y: 0 },
         };
         assert_eq!(
-            validate_request(
-                ViewportId::from_raw(1),
-                7,
-                request,
-                GpuPickingConfig::new(4, 4)
-            ),
+            validate_request(state, 0, request, GpuPickingConfig::new(4, 4)),
             Err(GpuPickingError::ViewportMismatch {
                 expected: ViewportId::from_raw(1),
                 actual: ViewportId::from_raw(2)
@@ -625,50 +821,100 @@ mod tests {
             ..request
         };
         assert_eq!(
-            validate_request(
-                ViewportId::from_raw(1),
-                7,
-                generation_request,
-                GpuPickingConfig::new(4, 4)
-            ),
+            validate_request(state, 0, generation_request, GpuPickingConfig::new(4, 4)),
             Err(GpuPickingError::GenerationMismatch {
                 expected: 7,
                 actual: 8
+            })
+        );
+        let target_generation_request = PickRequest {
+            target_generation: 4,
+            ..generation_request
+        };
+        assert_eq!(
+            validate_request(
+                RenderTargetState {
+                    viewport_generation: 8,
+                    ..state
+                },
+                0,
+                target_generation_request,
+                GpuPickingConfig::new(4, 4)
+            ),
+            Err(GpuPickingError::TargetGenerationMismatch {
+                expected: 3,
+                actual: 4
+            })
+        );
+        let target_handle_request = PickRequest {
+            target_handle: RenderTargetHandle::from_raw(2),
+            ..generation_request
+        };
+        assert_eq!(
+            validate_request(
+                RenderTargetState {
+                    viewport_generation: 8,
+                    ..state
+                },
+                0,
+                target_handle_request,
+                GpuPickingConfig::new(4, 4)
+            ),
+            Err(GpuPickingError::TargetHandleMismatch {
+                expected: RenderTargetHandle::from_raw(1),
+                actual: RenderTargetHandle::from_raw(2)
             })
         );
     }
 
     #[cfg(feature = "gpu-tests")]
     #[test]
-    fn real_gpu_draw_readback_round_trips_entity_id() {
-        let Some((adapter, device, queue)) = test_device() else {
+    fn real_gpu_draw_readback_round_trips_encoded_id() {
+        let Some((adapter, device, queue)) = crate::test_support::device() else {
             return;
         };
         let backend =
             GpuPickingBackend::new(&device, &adapter, &queue, GpuPickingConfig::new(4, 4))
                 .expect("Rgba32Uint render target");
-        let frame = backend.begin_frame(ViewportId::from_raw(1), 12);
+        let mut viewports = crate::ViewportRegistry::new();
+        let viewport = viewports.open("GPU test").expect("viewport");
+        let mut targets = crate::RenderTargetRegistry::new();
+        let target = targets
+            .open(viewport.id(), viewport.generation(), backend)
+            .expect("open target");
+        let object = crate::SceneObjectId::new(
+            crate::EntityId::from_raw(u128::MAX),
+            crate::MeshId::from_raw(u128::MAX - 1),
+            crate::SubobjectId::from_raw(u64::MAX),
+        );
+        let mut scene = crate::SceneIdPass::new();
+        scene
+            .submit([crate::SceneIdPassItem::new(object, 1, 2, true, 0)])
+            .expect("submit scene");
+        let encoded = scene.draw_entries()[0].encoded_id();
+        let channels = encoded.channels();
+        let shader_source = format!(
+            "
+                @vertex
+                fn vs(@builtin(vertex_index) index: u32) -> @builtin(position) vec4<f32> {{
+                    var positions = array<vec2<f32>, 3>(
+                        vec2<f32>(-1.0, -1.0),
+                        vec2<f32>(3.0, -1.0),
+                        vec2<f32>(-1.0, 3.0),
+                    );
+                    return vec4<f32>(positions[index], 0.0, 1.0);
+                }}
+
+                @fragment
+                fn fs() -> @location(0) vec4<u32> {{
+                    return vec4<u32>({}u, {}u, {}u, {}u);
+                }}
+            ",
+            channels[0], channels[1], channels[2], channels[3],
+        );
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("editor-picking-test-shader"),
-            source: wgpu::ShaderSource::Wgsl(
-                "
-                    @vertex
-                    fn vs(@builtin(vertex_index) index: u32) -> @builtin(position) vec4<f32> {
-                        var positions = array<vec2<f32>, 3>(
-                            vec2<f32>(-1.0, -1.0),
-                            vec2<f32>(3.0, -1.0),
-                            vec2<f32>(-1.0, 3.0),
-                        );
-                        return vec4<f32>(positions[index], 0.0, 1.0);
-                    }
-
-                    @fragment
-                    fn fs() -> @location(0) vec4<u32> {
-                        return vec4<u32>(43u, 0u, 0u, 0u);
-                    }
-                "
-                .into(),
-            ),
+            source: wgpu::ShaderSource::Wgsl(shader_source.into()),
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("editor-picking-test-pipeline"),
@@ -695,50 +941,66 @@ mod tests {
             multiview_mask: None,
             cache: None,
         });
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("editor-picking-test-encoder"),
-        });
-        {
-            let mut pass = frame.begin_render_pass(&mut encoder, Some("editor-picking-test-pass"));
-            pass.set_pipeline(&pipeline);
-            pass.draw(0..3, 0..1);
+        let mut picks = crate::PickCoordinator::new();
+        for (draw, close) in [(false, false), (true, false), (true, true)] {
+            let request = picks
+                .submit(&viewport, target, &scene, PixelPoint { x: 2, y: 2 })
+                .expect("pick request");
+            let mut in_flight = {
+                let render_target = targets.get(viewport.id()).expect("target");
+                let frame = render_target.begin_frame(&scene);
+                let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("editor-picking-test-encoder"),
+                });
+                {
+                    let mut pass =
+                        frame.begin_render_pass(&mut encoder, Some("editor-picking-test-pass"));
+                    if draw {
+                        pass.set_pipeline(&pipeline);
+                        pass.draw(0..3, 0..1);
+                    }
+                }
+                let pending = frame
+                    .encode_readback(&mut encoder, request)
+                    .expect("encode pick readback");
+                render_target.backend().submit_readback(encoder, pending)
+            };
+            assert_eq!(in_flight.request(), request);
+            if close {
+                targets.close(viewport.id()).expect("close before polling");
+            }
+            device
+                .poll(PollType::wait_indefinitely())
+                .expect("wait for async readback");
+            let result = in_flight
+                .poll()
+                .expect("poll result")
+                .expect("completed result");
+            assert_eq!(
+                result.encoded,
+                if draw { encoded } else { EncodedPickId::none() }
+            );
+            assert_eq!(result.viewport, request.viewport);
+            assert_eq!(result.generation, request.generation);
+            assert_eq!(result.scene_generation, request.scene_generation);
+            assert_eq!(result.target_generation, request.target_generation);
+            assert_eq!(result.target_handle, request.target_handle);
+            assert_eq!(scene.resolve(result.encoded), draw.then_some(object));
+            assert_eq!(in_flight.poll().expect("second poll"), None);
+            let expected = if close {
+                crate::PickOutcome::Rejected(crate::PickRejectReason::StaleRenderTarget)
+            } else {
+                crate::PickOutcome::Accepted {
+                    object: draw.then_some(object),
+                }
+            };
+            assert_eq!(
+                picks.resolve(&viewport, targets.state(viewport.id()), &scene, result),
+                expected
+            );
         }
-        let request = PickRequest {
-            id: PickRequestId(1),
-            viewport: ViewportId::from_raw(1),
-            generation: 12,
-            pixel: PixelPoint { x: 2, y: 2 },
-        };
-        let pending = frame
-            .encode_readback(&mut encoder, request)
-            .expect("encode pick readback");
-        let result = backend
-            .submit_and_read_sync(encoder, pending)
-            .expect("read pick result");
-        assert_eq!(result.entity, Some(42));
-        assert_eq!(result.viewport, request.viewport);
-        assert_eq!(result.generation, request.generation);
-    }
-
-    #[cfg(feature = "gpu-tests")]
-    fn test_device() -> Option<(Adapter, Device, Queue)> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::METAL | wgpu::Backends::VULKAN | wgpu::Backends::DX12,
-            flags: wgpu::InstanceFlags::default(),
-            memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
-            display: None,
-            backend_options: wgpu::BackendOptions::default(),
-        });
-        let adapter = futures_lite::future::block_on(
-            instance.request_adapter(&wgpu::RequestAdapterOptions::default()),
-        )
-        .ok()?;
-        let (device, queue) =
-            futures_lite::future::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-                required_limits: adapter.limits(),
-                ..Default::default()
-            }))
-            .ok()?;
-        Some((adapter, device, queue))
+        crate::test_support::diagnostic(format_args!(
+            "EXERCISED viewport GPU draw/miss/readback/close correlation"
+        ));
     }
 }
