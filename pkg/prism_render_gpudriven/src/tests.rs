@@ -19,6 +19,9 @@ use crate::encoding::{instance_storage_bytes, IndirectArgs, AABB_STRIDE};
 use crate::frustum::{Aabb, Frustum};
 use crate::instances::Instance;
 use crate::naive::NaiveStage;
+use crate::particle::{
+    particle_storage_bytes, simulate_cpu, Particle, ParticleParams, ParticleStage, PARTICLE_STRIDE,
+};
 use crate::readback::{count_lit_pixels, pixel_at};
 use crate::reference::{cull_cpu, projected_center_pixel};
 use crate::scene;
@@ -731,4 +734,104 @@ fn gpu_graph_multi_draw_matches_the_single_draw_path() {
         single_pixels, multi_pixels,
         "the graph's multi-draw path must paint the same frame as the single draw"
     );
+}
+
+/// Executes particle update/kill/spawn, GPU active compaction, indirect-args
+/// finalization and rasterization on a physical adapter, then checks the
+/// complete pool against the deterministic CPU reference. Readbacks here are
+/// acceptance instrumentation; `render_graph` itself never reads a count.
+#[test]
+fn gpu_particle_vertical_slice_matches_reference_and_draws_indirectly() {
+    let Some((device, queue)) = device_or_skip() else {
+        assert!(
+            !require_gpu(),
+            "PRISM_REQUIRE_GPU is set but no adapter was found"
+        );
+        return;
+    };
+
+    let initial = [
+        Particle::live([-2.0, 0.0, 0.0], [0.0; 3], 0.1),
+        Particle::dead(),
+        Particle::live([0.0, 0.0, 0.0], [0.0, 1.0, 0.0], 2.0),
+        Particle::dead(),
+    ];
+    let params = ParticleParams {
+        dt: 0.25,
+        spawn_count: 8,
+        spawn_life: 1.0,
+        gravity: [0.0, -2.0, 0.0],
+        spawn_position: [1.5, 0.0, 0.0],
+        spawn_velocity: [2.0, 0.0, 0.0],
+    };
+    let expected = simulate_cpu(&initial, params);
+    let stage = ParticleStage::new(&device, initial.len() as u32, 128);
+    stage.upload(&queue, &initial, params, [-4.0, -4.0], [8.0, 8.0], 0.25);
+    let recorded = stage
+        .render_graph(&device, &queue)
+        .expect("particle render graph compiles and executes");
+    assert!(
+        device.poll_wait(),
+        "particle compute and indirect draw complete"
+    );
+
+    let args = IndirectArgs::from_bytes(&queue.read_buffer(stage.draw_args(), IndirectArgs::BYTES));
+    assert_eq!(args.index_count, 4);
+    assert_eq!(args.instance_count as usize, expected.active_indices.len());
+    assert_eq!(args.first_index, 0);
+    assert_eq!(args.base_vertex, 0);
+    assert_eq!(args.first_instance, 0);
+
+    let gpu_bytes = queue.read_buffer(stage.pool(), initial.len() as u64 * PARTICLE_STRIDE);
+    assert_eq!(
+        gpu_bytes.len(),
+        particle_storage_bytes(&expected.particles).len()
+    );
+    for (slot, (actual, expected)) in gpu_bytes
+        .chunks_exact(PARTICLE_STRIDE as usize)
+        .zip(expected.particles.iter())
+        .enumerate()
+    {
+        let values: Vec<f32> = actual
+            .chunks_exact(4)
+            .map(|word| f32::from_le_bytes(word.try_into().unwrap()))
+            .collect();
+        let wanted = [
+            expected.position[0],
+            expected.position[1],
+            expected.position[2],
+            expected.life,
+            expected.velocity[0],
+            expected.velocity[1],
+            expected.velocity[2],
+            expected.padding,
+        ];
+        for (field, (actual, expected)) in values.iter().zip(wanted).enumerate() {
+            assert!(
+                (actual - expected).abs() <= 1.0e-5,
+                "particle slot {slot}, field {field}: GPU {actual} != CPU {expected}"
+            );
+        }
+    }
+
+    let active_count = u32::from_le_bytes(
+        queue.read_buffer(stage.control(), 4)[..4]
+            .try_into()
+            .expect("the control counter is four bytes"),
+    );
+    let mut active = queue
+        .read_buffer(stage.active_indices(), u64::from(active_count) * 4)
+        .chunks_exact(4)
+        .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
+        .collect::<Vec<_>>();
+    active.sort_unstable();
+    assert_eq!(active, expected.active_indices);
+
+    let pixels = queue.read_texture_rgba8(stage.target(), 128, 128);
+    assert!(
+        pixels.chunks_exact(4).any(|pixel| pixel[2] > 127),
+        "GPU indirect draw paints live particles"
+    );
+    recorded.release(&device);
+    stage.destroy(&device);
 }

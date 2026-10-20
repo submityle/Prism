@@ -15,7 +15,7 @@
 //! 2. **Planning** — [`BackendPlan`] describes *how* the chosen backend schedules
 //!    the work: the `GPU` variant derives a workgroup count and an indirect /
 //!    persistent-thread dispatch strategy; the `CPU` variant derives a
-//!    Structure-of-Arrays (`SoA`) chunk count for a `bevy_tasks`-style parallel
+//!    Structure-of-Arrays (`SoA`) chunk count for a Prism task-executor parallel
 //!    sweep. Both are pure integer derivations with explicit divide-by-zero and
 //!    round-up guards.
 //! 3. **Parity** — [`SemanticParity`] declares the invariants both backends must
@@ -342,7 +342,7 @@ pub struct BackendTuning {
     /// The number of particles one `CPU` chunk (job) processes over the `SoA`
     /// arrays.
     pub cpu_chunk_size: u32,
-    /// Whether the `CPU` path fans chunks out across a `bevy_tasks`-style pool
+    /// Whether the `CPU` path fans chunks out across a Prism task pool
     /// (only meaningful when there is more than one chunk).
     pub cpu_parallel: bool,
 }
@@ -467,7 +467,7 @@ impl GpuDispatchPlan {
 /// How the `CPU` job-graph path chunks an iteration domain (design §24).
 ///
 /// The `SoA` particle arrays are swept in fixed-size chunks so a
-/// `bevy_tasks`-style pool can process disjoint chunks in parallel. The chunk
+/// Prism task pool can process disjoint chunks in parallel. The chunk
 /// count is `ceil(element_count / chunk_size)`, guarded against a zero chunk
 /// size.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]

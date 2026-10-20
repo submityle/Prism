@@ -1,15 +1,15 @@
-# Prism Ember 次世代粒子引擎设计方案
+# Prism Ember 粒子引擎设计与实现状态
 
-> 面向 Prism（Bevy fork）的数据导向、GPU-first、图编译式高性能粒子/特效引擎设计。
+> 面向 Prism 原生 ECS/App/RHI/RenderGraph 的数据导向、GPU-first、图编译式粒子/特效引擎。
 > 借鉴 UE5 Niagara、Unity VFX Graph（HDRP）、Houdini POPs/DOPs、EmberGen、PopcornFX、Frostbite/Destiny GPU 粒子，取长补短。
 > **着色一等公民**：粒子渲染复用共享材质系统的 closure/shading-model，PBR / NPR / 自定义 / 混合四者皆为一等公民，可达顶级次世代 AAA 质量。
-> 本文档为设计规格，尚未进入编码；采用纯经典数值路线，不含任何 AI/ML 内容。
+> 本文档同时保留目标设计并记录代码落地状态。Prism 不依赖 Bevy crates；采用经典数值仿真路线，不含 AI/ML 内容。
 
-- 版本: v0.2（设计阶段，未进入编码；本版重点补齐 PBR/NPR/混合/自定义着色、高级仿真、体积光照、时序集成、性能与效果验收）
+- 版本: v0.3（实现跟踪；设计目标与已验证能力分开记录）
 - 范围: 一步到位（含 Simulation Stages / 网格流体 / 光追碰撞受光 / 四等公民着色）
-- 适用引擎: Prism / Bevy ECS 生态
-- 关键依赖: bevy_ecs（并行 ECS）、bevy_render（wgpu/WESL、render graph、render_phase、pipeline_cache）、bevy_math（glam SIMD）、bevy_tasks（任务系统）、bevy_shader（WESL/naga_oil）、bevy_solari（实时光追，可选）、bevy_light（聚类光照）、bevy_core_pipeline（prepass/OIT/motion vector）、bevy_diagnostic（诊断）
-- 复用的现有设施: render_resource::{storage_buffer, buffer_vec, pipeline_cache, pipeline_specializer}、batching::gpu_preprocessing（indirect）、meshlet（indirect draw 经验）、occlusion_culling（HZB）、gpu_readback（GPU→CPU）、prepass（depth/normal/motion）、共享材质 closure 与 OIT
+- 适用引擎: Prism 自有 ECS/App 与 Prism RHI/RenderGraph；不引入任何 `bevy_*` 依赖
+- 关键依赖边界: `prism_ecs` / `prism_app`、`prism_render_driver`、`prism_render_graph`、Prism 材质/场景/着色 crate；GPU 后端通过 Prism RHI 提供
+- 复用的现有设施: Prism RHI storage buffers、Prism RenderGraph、GPU-driven indirect submission、共享材质 closure/OIT、场景深度与运动矢量资源；具体以仓库现有 Prism crate API 为准
 - 关联文档: `prism_material_pipeline_design_zh.md`（材质与着色一等公民契约）、`prism_aaa_advanced_features_zh.md`（PBR/NPR/混合高级特性分册）、`prism_physics_design_zh.md`（统一 XPBD/VBD 求解原语）
 
 ---
@@ -45,7 +45,7 @@
 28. 伸缩性与平台档案
 29. 确定性与网络
 30. 资产格式与作者工作流
-31. Bevy 集成层：API 与渲染图接线
+31. Prism 集成层：API 与渲染图接线
 32. 性能预算与效果验收
 33. 质量与可信度基础设施
 34. Crate 拆分与落地形态
@@ -102,7 +102,7 @@
 | UE **Lumen / VSM / Nanite / TSR** | 粒子接入 GI / 虚拟阴影 / 时序上采样的共享基底服务 | §17/§20/§21/§22 |
 
 **次世代差异化**（相对 Niagara/VFX Graph 的组合优势）：
-- 用 `bevy_solari` 光追做**粒子碰撞与受光/软阴影**（§22）。
+- 通过 Prism 的光线查询/场景可见性接口实现可选的**粒子碰撞与受光/软阴影**（§22）；粒子系统不绑定特定 GI/RT 实现。
 - 用 `occlusion_culling` HZB 做**粒子遮挡剔除**（§13）。
 - 用 `gpu_readback` 做**GPU→gameplay 事件反馈**（§23）。
 - **粒子着色复用共享材质 closure**，PBR/NPR/自定义/混合四等公民（§16），且天然继承基底高级服务：聚类+RT 光照、虚拟阴影、体积 GI、时序上采样——这是把 VFX 从"贴片时代"抬到"次世代 AAA"的关键。
@@ -115,20 +115,20 @@
 Layer 7  作者层 Authoring   图编辑器 / 模板继承 / 热重载 / 点缓存导入 / 材质预览
 Layer 6  着色层 Shading     ShadingModel（PBR/NPR/自定义/混合）→ 共享材质 closure / OIT
 Layer 5  编译层 Compiler     节点图 → IR → 优化 → WESL codegen + 资源布局
-Layer 4  ECS 集成层          EmberSystem Asset + Instance Component + Plugin
-Layer 3  仿真调度层          extract → prepare → simulate(compute 子图) → queue
+Layer 4  ECS 集成层          EmberSystem Asset + Instance Component + Prism App Plugin
+Layer 3  仿真调度层          Prism ECS extraction → prepare → RenderGraph simulation → queue
 Layer 2  GPU 执行层          缓冲池 / free-list / compute passes / indirect / 排序 / 剔除
 Layer 1  渲染层 Renderers    Sprite / Mesh / Ribbon / Light / Decal / Volume
 ```
 
-拟新增 crate：
+逻辑 crate 拆分目标（实际可按仓库边界合并，不要求逐项创建同名 crate）：
 
 | Crate | 职责 |
 |---|---|
-| `bevy_ember` | 用户 API、Asset、Instance Component、Module/Force/DataInterface/ShadingModel trait、CPU 求解器 |
-| `bevy_ember_compiler` | 图 → IR → WESL codegen、属性活跃性分析、着色特化 key、pipeline specialization key |
-| `bevy_ember_render` | extract/prepare/queue、渲染图节点、GPU 缓冲、WESL kernel、indirect draw、OIT/motion vector 接线 |
-| `bevy_ember_editor`（可选） | 基于 bevy_feathers/bevy_ui 的图编辑器与预览 |
+| `prism_particle` | 用户 API、Asset、Instance Component、Module/Force/DataInterface/ShadingModel、CPU reference |
+| `prism_particle_graph` | 图 → IR → Prism shader codegen、属性活跃性分析、着色特化 key |
+| `prism_particle_render` | Prism ECS extract/prepare/queue、RenderGraph 节点、GPU 缓冲、indirect draw、OIT/motion vector 接线 |
+| `prism_particle_tools`（可选） | 图编辑器与预览 |
 
 **边界声明（避免重复造轮子）**：Ember 只负责"生几何 + 跑仿真 + 提交实例"。**着色走共享材质 closure、透明走共享 OIT、光照/阴影/GI/上采样走共享基底服务**（见 §16 与关联文档）。Ember 不重写 BRDF、不重写 OIT、不重写虚拟阴影，只作为这些服务的消费者与实例提供者。
 
@@ -271,7 +271,7 @@ trait DataInterface {
 ### 8.3 DataInterface / 采样器清单
 - **几何**：Sample Mesh（表面/顶点/三角形重心插值）、Skeletal Mesh（蒙皮位置/速度）、Spline/Curve
 - **场**：Texture2D/3D（vector field / 密度）、SDF/VDB（碰撞与吸附，法线=梯度）、Point Cache（烘焙点云）
-- **场景**：Camera、Depth/Normal（碰撞/软粒子）、Light/Clustered（bevy_light）、Ray-Trace Scene（bevy_solari）、GI Probe / Irradiance（受光，§17）
+- **场景**：Prism Camera、Depth/Normal（碰撞/软粒子）、聚类灯光、光线查询场景、GI Probe / Irradiance（受光，§17）
 - **信号**：Audio 频谱、Curve/Gradient LUT、Global（time/dt/frame/随机流）
 - **交互**：UserParam（Property Binder）、自建 Grid/Neighbor 结构
 
@@ -372,7 +372,7 @@ trait DataInterface {
 | Mesh | 每粒子一网格实例，复用实例化 + gpu_preprocessing | 全 closure（含各向异性/清漆） |
 | Ribbon/Trail | 按 RibbonId 串链，GPU 生成条带几何 | PBR-lit / NPR 速度线 / additive |
 | Beam | 两点/多点链，闪电/激光 | NPR 能量 / additive |
-| Light | 粒子驱动点光/体积光，对接 bevy_light clustered，数量受限 + LOD | — |
+| Light | 粒子驱动点光/体积光，对接 Prism clustered-light 服务，数量受限 + LOD | — |
 | Decal | 落地贴花，接入 deferred/forward decal | PBR / NPR |
 | Volume | 网格流体密度场光线步进（对接 §10 与 §20） | 体积 PBR / 风格化体积 |
 
@@ -412,7 +412,7 @@ enum EmberShadingModel {
 
 面向物理真实的烟、火、火星、碎屑、水花。
 
-- **受光贴片/网格粒子**：Sprite 用 billboard 法线或法线贴图，Mesh 用真实法线；走共享 PBR closure（GGX + 多散近似），接入 bevy_light 聚类光照、阴影贴图/VSM、GI probe/irradiance、Solari RT 受光。
+- **受光贴片/网格粒子**：Sprite 用 billboard 法线或法线贴图，Mesh 用真实法线；走共享 PBR closure（GGX + 多散近似），接入 Prism 聚类光照、阴影贴图/VSM、GI probe/irradiance 与可选 RT 可见性服务。
 - **体积烟雾 PBR**：
   - **单次 + 多次散射**：单散射逐光源采样透过率，多散射用近似（如 blur/ambient 项或 Guerrilla 风格能量补偿），避免烟"发死黑"。
   - **相位函数**：Henyey-Greenstein（各向异性 g），或 double-lobe（前向+后向）表现真实烟的边缘辉光。
@@ -480,10 +480,10 @@ enum EmberShadingModel {
 
 ---
 
-## 22. 光追碰撞与受光（bevy_solari，差异化亮点）
+## 22. 光追碰撞与受光（Prism 光线查询服务）
 
-- **光追碰撞**：per-particle 沿运动方向发短射线查询 `bevy_solari::scene`，命中即碰撞/反弹。比屏幕空间深度碰撞更准（背面/离屏也可）。作为**高质量档**，普通档回退 SDF/depth。
-- **光追受光/阴影**：粒子（尤其烟/体积）向光源采样可见性，得软阴影与 GI bounce 色，接入 bevy_light 聚类光照与 Solari realtime GI。PBR 与 NPR 均可消费（NPR 以风格化映射呈现）。
+- **光追碰撞**：per-particle 沿运动方向发短射线查询 Prism 的场景光线查询接口，命中即碰撞/反弹。作为**可选高质量档**，普通档回退 SDF/depth；不将具体 RT 实现作为粒子 crate 依赖。
+- **光追受光/阴影**：粒子（尤其烟/体积）向光源采样可见性，输出可供共享 Prism 光照/材质系统消费的软阴影与间接光输入。PBR 与 NPR 均可消费（NPR 以风格化映射呈现）。
 - 硬件不支持光追时自动降级；作为可选依赖，不阻塞核心管线。
 
 ---
@@ -498,7 +498,7 @@ enum EmberShadingModel {
 ## 24. CPU / GPU 双模拟
 
 - **GPU 模拟**（默认）：大规模、无需 CPU 交互。
-- **CPU 模拟**（回退/特殊）：小规模、需 gameplay 交互（拾取回调）、或无 compute 平台。用 `bevy_tasks` 并行 + SoA。
+- **CPU 模拟**（回退/特殊）：小规模、需 gameplay 交互（拾取回调）、或无 compute 平台。使用 Prism task 系统并采用 SoA。
 - 编译器对同一图 IR 产出**两套后端**（WESL kernel / Rust SIMD 循环），语义一致由 §29 保证。
 
 ---
@@ -545,32 +545,31 @@ enum EmberShadingModel {
 
 ## 30. 资产格式与作者工作流
 
-- **`.ember`**：图 + 参数 + 渲染器配置 + ShadingModel 设置，`bevy_reflect` 序列化（RON/二进制）。
+- **`.ember`**：图 + 参数 + 渲染器配置 + ShadingModel 设置；当前资产 codec 使用版本化二进制编码，未知字段/版本由校验与迁移链处理。
 - **模板与继承**：System/Emitter 继承模板并局部覆盖（Niagara Parent Emitter），改模板批量生效。
 - **暴露参数**：作者标记可外部驱动参数，运行期由 gameplay/材质/时间线绑定。
 - **点缓存/属性贴图**：从 Houdini/外部烘焙点云或属性纹理驱动初始状态。
 - **材质/着色预览**：编辑器内切 PBR/NPR/混合实时预览，含光照环境切换。
 - **Module 版本与迁移**：Module 带版本号 + 迁移函数，升级不炸旧资产。
 - **热重载**：改图/改着色 → 重编译 kernel → pipeline_cache 换管线，运行时无缝替换。
-- **调试**：单粒子追踪、Stage 逐帧步进、力场/网格/包围盒 gizmo（bevy_gizmos）、每 Stage GPU timestamp（bevy_diagnostic）。
+- **调试**：单粒子追踪、Stage 逐帧步进、力场/网格/包围盒 gizmo、每 Stage GPU timestamp，接入 Prism 诊断与调试服务。
 
 ---
 
-## 31. Bevy 集成层：API 与渲染图接线
+## 31. Prism 集成层：API 与渲染图接线
 
-- **Extract**：`ExtractComponent`/`ExtractResource` 抽取实例 transform、user_params、playback、shading_override 到 render world。
+- **Extract**：通过 Prism ECS 与 RenderApp 边界抽取实例 transform、user_params、playback、shading_override。
 - **Prepare**：分配/复用 GPU 缓冲，写 uniform（dt/time/camera/property binders），备 bind group（复用 combined_bind_group / material_bind_groups 思路）。
 - **Simulate Node**：渲染图新增 `EmberSimulationNode`（ComputePass 序列），置于主 pass 前。
 - **Queue/Phase**：每种渲染器×ShadingModel 生成 phase item，接入 Transparent3d/AlphaMask3d/Opaque3d 与共享 OIT，走 indirect draw；写 motion vector 到 prepass 目标。
-- **Shader**：全 WESL + naga_oil import，复用 globals.wesl / view.wesl / maths.wesl / 共享材质 closure / 光照 / 阴影 include。
-- **PipelineCache**：compute 与 draw 管线走 pipeline_cache + specializer，异步预热避免卡顿。
+- **Shader**：通过 Prism shader/compiler 接口生成并验证 WGSL/WESL，复用 Prism view/math/材质 closure/光照/阴影接口。
+- **Pipeline 缓存**：compute 与 draw 管线走 Prism pipeline cache/specialization 接口，异步预热避免卡顿。
 
 面向用户的最小 API（示意）：
 ```
-app.add_plugins(EmberPlugin::default());
+app.add_plugins(ParticlePlugin::default());
 commands.spawn((
-    EmberSystem(asset_server.load("explosion.ember")),
-    EmberSystemInstance::default(),
+    ParticleSystemInstance::from_asset(asset_server.load("explosion.ember")),
     Transform::from_translation(pos),
 ));
 ```
@@ -579,7 +578,7 @@ commands.spawn((
 
 ## 32. 性能预算与效果验收
 
-> 以下帧时间/显存数字为**设计目标（design target），非实测**（当前沙盒无 GPU）。实测须在目标硬件用 §33 基准闭环校准。
+> 以下帧时间/显存数字为**设计目标（design target），非实测**。实测须在目标硬件用 §33 基准闭环校准。
 
 **帧时间预算（单帧，桌面 Ultra 档，仅供设计对齐）**
 
@@ -616,21 +615,34 @@ commands.spawn((
 ## 34. Crate 拆分与落地形态
 
 ```
-bevy_ember            用户 API / Asset / Component / trait(含 ShadingModel) / CPU 求解器
-bevy_ember_compiler   图 → IR → WESL codegen / 活跃性分析 / 着色特化 key
-bevy_ember_render     extract/prepare/queue / 渲染图节点 / GPU 缓冲 / WESL / indirect / OIT / MV 接线
-bevy_ember_editor     (可选) 图编辑器 / 预览(含着色预览) / 性能 HUD
+prism_particle        用户 API / Asset / Emitter 与 CPU reference runtime
+prism_particle_graph  图 → IR → Prism shader codegen / 活跃性分析 / 着色特化 key
+prism_particle_render Prism RHI/RenderGraph 节点 / GPU 缓冲 / indirect / OIT / MV 接线
+prism_particle_tools  (可选) 图编辑器 / 预览(含着色预览) / 性能 HUD
 ```
-依赖方向：`editor → ember → {compiler, ember_render} → bevy_render/bevy_ecs/bevy_light/bevy_solari/...`。可作为 optional feature 接入 `bevy_internal`。新代码落在 `pkg/` 下对应 crate。
+依赖方向：`tools → particle → {particle_graph, particle_render} → prism_app/prism_ecs/prism_render_*`。运行时不得依赖 Bevy crates；新代码落在 `pkg/` 下对应 Prism crate。
+
+### 31.1 实现状态（2026-10-20）
+
+| 能力 | 代码位置 | 状态与验证边界 |
+|---|---|---|
+| CPU emitter runtime | `pkg/prism_render_architecture/src/particle/runtime.rs` | 已实现固定容量池、rate/burst、确定性采样、积分/力场、寿命回收及溢出计数；CPU 定向测试通过 |
+| `.ember` 二进制资产 | `pkg/prism_render_architecture/src/particle/authoring.rs` | 已实现版本化 little-endian codec、输入校验、迁移模型与 round-trip/损坏输入测试；RON API 已移除 |
+| GPU 仿真与间接绘制切片 | `pkg/prism_render_gpudriven/src/particle.rs` 与 `shaders/particle*.wgsl` | Prism RHI/RenderGraph 上的 pool update、spawn、活跃索引、indirect args 与 quad 绘制；仅代表最小竖切片，不代表全功能 Ember |
+| 合同/算法模块 | `pkg/prism_render_architecture/src/particle/` | 包含池、发射、模拟、事件、排序/剔除、着色/OIT 等 CPU 合同；纯合同或单算法模块不等于 GPU 生产接线 |
+| ECS/App 生命周期与完整渲染集成 | Prism 粒子运行时/渲染 crate | 尚未形成完整端到端接线；需以实际代码和集成验收逐项完成，不能由本设计文档推定已完成 |
+| 图编译、完整渲染器矩阵、高级求解器及场景服务集成 | 对应 compiler/render/solver 模块 | 本轮 GPU 竖切片未覆盖；当前无可声称完成或已测的实现证据 |
+
+验证记录（2026-10-20）：`prism_render_gpudriven` 的粒子单测通过；`gpu_particle_vertical_slice_matches_reference_and_draws_indirectly` 在 Apple M2/Metal 物理 GPU 上通过，验证了 pool 更新、活跃索引、indirect 参数、CPU reference 对比及实际绘制。该结果仅覆盖此竖切片。当前 `cargo test -p prism_render_architecture --lib particle::runtime` 未能编译：共享工作树中的 `prism_physics_core/src/soft/topology.rs` 有三个 `TopologyTearEvent` 初始化缺少字段，故本轮 CPU runtime 与 verification tests 尚未复验；这不是粒子代码的编译诊断。历史 CPU 测试记录不替代本轮验证。结构化帧预算断言只是设计约束，不是 GPU 毫秒测量。
 
 ---
 
-## 35. 路线图
+## 35. 路线图与验收状态
 
-| 阶段 | 内容 | 验收 |
+| 阶段 | 内容 | 验收/状态 |
 |---|---|---|
-| M0 骨架 | crate 布局、Asset/Component、CPU 简单求解器、Sprite Unlit 渲染 | CPU 1 万粒子火花 demo |
-| M1 GPU 核心 | SoA 缓冲池、free-list、spawn/update compute、indirect draw | GPU 100 万粒子无回读 |
+| M0 骨架 | crate 布局、Asset/Component、CPU 简单求解器、Sprite Unlit 渲染 | CPU reference runtime 已有；ECS/App 与完整 sprite demo 未通过验收 |
+| M1 GPU 核心 | SoA 缓冲池、free-list、spawn/update compute、indirect draw | 已有小型 RHI pool/simulate/spawn/indirect draw slice；百万粒子无回读目标未验证 |
 | M2 图编译 | 图→IR→WESL codegen、按需分配、曲线 LUT | 图驱动 update kernel |
 | M3 力/碰撞 | 力场库、curl noise、depth/SDF 碰撞、事件系统 | 烟火/瀑布/碎片 demo |
 | M4 渲染器 | Mesh/Ribbon/Beam/Light、GPU 排序、软粒子、motion vector | 完整特效场景 + TAA 无拖影 |
@@ -639,7 +651,9 @@ bevy_ember_editor     (可选) 图编辑器 / 预览(含着色预览) / 性能 H
 | M7 混合/自定义 | Emitter 级 + 单粒子级混合、Custom WESL closure | 火焰 PBR + 卡通烟同场 demo |
 | M8 体积光照 | 六向 rig、deep shadow、相位函数、体积雾耦合 | 次世代体积烟火 demo |
 | M9 高级求解器 | Simulation Stages、邻域网格、不可压缩流体、涡量、燃烧、XPBD、Data Channels | 体素烟火 + 群体 + 布/绳 demo |
-| M10 次世代 | Solari 光追碰撞/受光、HZB 剔除、GPU→CPU 反馈、平台档案、golden-image + 基准 | 光追特效 + 回归门禁 |
+| M10 次世代 | Prism 光线查询碰撞/受光、HZB 剔除、GPU→CPU 反馈、平台档案、golden-image + 基准 | 光追特效 + 回归门禁 |
+
+除 M0/M1 表中明确列出的窄切片外，后续阶段均为目标设计而非完成声明。所有性能门槛、GPU 质量和视觉目标只有在匹配设备/场景的实测与图像回归通过后才能标记完成。
 
 ---
 
@@ -652,18 +666,18 @@ bevy_ember_editor     (可选) 图编辑器 / 预览(含着色预览) / 性能 H
 - `IntegratorKind`：新增积分器。
 - `SortStrategy` / `CullStrategy`：替换排序/剔除算法。
 - `PlatformProfile` / `QualityLevel`：伸缩档位覆盖（含着色档）。
-- Asset 序列化与迁移钩子（bevy_reflect）。
+- Asset 序列化与迁移钩子（Prism asset schema/codec）。
 
 ---
 
-## 37. 开放问题
+## 37. 已确定的设计决策
 
-1. **首发图模型**：先"线性 Module 堆叠"（易用、快出成果）再演进"任意 DAG"（灵活）——建议堆叠先行，IR 预留 DAG。
-2. **光追依赖**：Solari 碰撞/受光作为可选高质量档（默认关闭）以兼容无光追硬件——建议采纳。
-3. **体素流体范围**：M9 是否包含完整压力投影（不可压缩烟），还是先做无散度近似——建议先近似（Jacobi），后 multigrid 精确。
-4. **CPU 后端优先级**：是否 M0 即交付 CPU 后端，还是仅作回退——建议 M0 交付最小 CPU 后端便于调试与确定性。
-5. **体积着色默认档**：桌面默认六向 rig 还是逐样本光线步进——建议默认六向（性价比），Ultra 档开步进/光追。
-6. **NPR 与共享光照耦合度**：NPR ramp 完全替换光照 vs 在共享光照结果上做风格化映射——建议后者（吃到阴影/GI，呈现风格化），保架构统一。
+1. **首发图模型**：线性 Module 堆叠作为首发作者模型，IR 保留 DAG 表达能力；作者模型与执行 IR 不耦合。
+2. **光追能力**：通过 Prism 光线查询契约作为可选高质量档，默认不要求 RT 硬件或绑定某个 RT/GI crate。
+3. **体素流体范围**：先实现可验证的 Jacobi 压力投影与收敛/稳定性测试，再以 multigrid 作为经基准证明有收益的优化路径。
+4. **CPU 后端**：作为 reference 与无 compute 回退路径；GPU 与 CPU 语义必须有同一套输入/输出 parity tests。
+5. **体积着色默认档**：默认六向 lighting rig；更高档逐样本步进/光追由质量预算按设备能力选择。
+6. **NPR 与共享光照**：消费共享光照输入后做风格化映射，不复制独立光照/阴影栈。
 
 ---
 

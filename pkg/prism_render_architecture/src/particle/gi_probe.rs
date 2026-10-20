@@ -6,7 +6,7 @@
 //! interface: given a world position and a shading normal it returns the
 //! environment irradiance a particle bathes in, mirroring the "Sample
 //! `GI`/Irradiance" node of Unreal `Niagara`, Unity `VFX Graph` probe sampling,
-//! and the `Frostbite`/`bevy_light` probe volumes — at the algorithm level, with
+//! and Prism's probe-volume service — at the algorithm level, with
 //! zero borrowed code and zero external dependencies.
 //!
 //! It is intentionally orthogonal to its sibling modules and never overlaps
@@ -17,7 +17,7 @@
 //!   irradiance value those closures consume. Shading decides response, the
 //!   probe supplies the environment term.
 //! - [`super::raytrace`] resolves *dynamic scene* visibility and single-bounce
-//!   `GI` by casting rays into `bevy_solari`; this module is the *precomputed,
+//!   `GI` through Prism's scene-ray-query provider; this module is the *precomputed,
 //!   cache-friendly* fallback/complement — a baked irradiance field sampled by
 //!   pure arithmetic, never a scene trace.
 //!

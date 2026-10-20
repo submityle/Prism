@@ -6,8 +6,9 @@
 //! fraction of the emitter's own velocity, and draws slots from the owning
 //! [`ParticlePool`]'s free list (design §8.2). Everything here is a pure,
 //! deterministic contract: the same inputs (including the same stream of unit
-//! random samples) always produce the same spawns, so the `CPU` reference and a
-//! future `GPU` spawn kernel agree bit for bit.
+//! random samples) always produce the same spawns. Backend parity is claimed
+//! only for paths with direct cross-backend tests; the current GPU slice accepts
+//! fixed spawn parameters and does not mirror every emitter shape or RNG stream.
 //!
 //! Determinism without transcendental math: the distribution shapes need points
 //! on a disk, in a ball, or on a sphere, which the textbook formulations build

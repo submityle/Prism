@@ -2,9 +2,17 @@
 
 use bevy_app::{App, Plugin};
 use bevy_ecs::schedule::IntoScheduleConfigs;
-use bevy_render::{RenderApp, RenderStartup};
+use bevy_render::{
+    renderer::{RenderGraph, RenderGraphSystems},
+    RenderApp, RenderStartup,
+};
 
-use crate::gpu::context::PrismGpu;
+use crate::gpu::{
+    context::PrismGpu,
+    fabric_history::{
+        mark_scene_fabric_history_submissions, poll_scene_fabric_history, SceneFabricHistory,
+    },
+};
 
 /// Installs the Prism RHI GPU context into Bevy's render sub-application.
 ///
@@ -30,5 +38,17 @@ impl Plugin for PrismGpuPlugin {
         if let Ok(context) = PrismGpu::new() {
             render_app.insert_resource(context);
         }
+        render_app
+            .init_resource::<crate::completion::GpuCompletionTracker>()
+            .init_resource::<SceneFabricHistory>()
+            .add_systems(
+                RenderGraph,
+                (
+                    mark_scene_fabric_history_submissions,
+                    poll_scene_fabric_history,
+                )
+                    .chain()
+                    .in_set(RenderGraphSystems::Finish),
+            );
     }
 }

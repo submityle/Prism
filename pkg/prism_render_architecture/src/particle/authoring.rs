@@ -10,24 +10,23 @@
 //! references, the per-module version + migration chain, and the hot-reload
 //! state machine.
 //!
-//! Nothing here links a real reflection or serialization crate: `bevy_reflect`,
-//! `serde`, and a `RON`/binary writer are all out of scope for this contracts
-//! layer. Instead the format is expressed with contract types, enums, version
-//! numbers, and migration function *signatures*; the stable field order that a
-//! real `RON` or binary codec must honour is documented on
-//! [`EMBER_FIELD_ORDER`] rather than implemented. Runtime binding to
-//! `gameplay`, materials, or the timeline, and the `GPU` kernel recompile the
-//! hot-reload machine drives, live behind these contracts and are documented as
-//! pending the `GPU` backend.
+//! The codec is deliberately dependency-free and lives beside the asset model:
+//! shipped assets use a versioned little-endian binary representation, while
+//! The format has a fixed binary schema and does not depend on an external
+//! serialization library. Runtime binding to `gameplay`, materials, or the
+//! timeline remains outside this asset container.
 
+use alloc::collections::BTreeSet;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::fmt;
 
 use super::EmberShadingModel;
+use super::ShadingBasis;
 
 /// Absolute tolerance for comparing authored `f32` parameters when diffing an
 /// override against its base (design §30). Two scalars closer than this are
-/// treated as "unchanged" so a round-trip through a text codec does not
+/// treated as "unchanged" so a serialization round-trip does not
 /// manufacture spurious overrides.
 pub const PARAM_EPS: f32 = 1e-6;
 
@@ -70,47 +69,27 @@ pub struct ParamHandle(pub u32);
 pub struct EmitterTemplateHandle(pub u32);
 
 /// The on-disk container format an `.ember` asset is serialized to (design §30).
-///
-/// The choice is a codec decision only; the *field order* is fixed for both
-/// formats (see [`EMBER_FIELD_ORDER`]) so a text diff and a binary hash both
-/// stay stable across saves. No real codec (`serde`, a `RON` writer) is linked
-/// at this layer.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum SerializationFormat {
-    /// A human-diffable text form (`RON`), preferred while authoring so version
-    /// control shows meaningful field-level diffs.
-    Ron,
     /// A compact little-endian binary form, preferred for shipped builds where
     /// load time and size matter more than readability.
     Binary,
-}
-
-impl SerializationFormat {
-    /// Returns `true` for the text (`RON`) form and `false` for the binary form.
-    #[must_use]
-    pub fn is_text(self) -> bool {
-        matches!(self, SerializationFormat::Ron)
-    }
 }
 
 /// What an asset is being serialized *for*, used to pick a default
 /// [`SerializationFormat`] (design §30).
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum AssetPurpose {
-    /// Iterating in the editor: prefer a diffable text form.
-    Authoring,
     /// Cooking a shipped build: prefer the compact binary form.
     Shipping,
 }
 
 /// Picks the recommended [`SerializationFormat`] for an [`AssetPurpose`].
 ///
-/// Authoring maps to [`SerializationFormat::Ron`] (diffable), shipping maps to
-/// [`SerializationFormat::Binary`] (compact).
+/// Shipping uses [`SerializationFormat::Binary`] (compact).
 #[must_use]
 pub fn recommended_format(purpose: AssetPurpose) -> SerializationFormat {
     match purpose {
-        AssetPurpose::Authoring => SerializationFormat::Ron,
         AssetPurpose::Shipping => SerializationFormat::Binary,
     }
 }
@@ -118,10 +97,9 @@ pub fn recommended_format(purpose: AssetPurpose) -> SerializationFormat {
 /// The canonical field order every `.ember` codec must emit, in order
 /// (design §30).
 ///
-/// Both the `RON` and binary writers walk fields in exactly this order so a
-/// text diff stays readable and a content hash stays stable regardless of the
-/// in-memory layout. This is the *documented* contract for a future `serde` /
-/// `bevy_reflect` implementation, not a live codec.
+/// The binary writer walks fields in exactly this order and prefixes each field
+/// with a tag. The decoder checks every tag, so reordered fields cannot be
+/// accepted as a different asset.
 pub const EMBER_FIELD_ORDER: [&str; 6] = [
     "format_version",
     "graph",
@@ -130,6 +108,15 @@ pub const EMBER_FIELD_ORDER: [&str; 6] = [
     "shading",
     "format",
 ];
+
+/// Eight-byte signature for the dependency-free binary `.ember` container.
+pub const EMBER_BINARY_MAGIC: [u8; 8] = *b"PREMBER1";
+/// Version of the binary container layout, independent of the asset schema.
+pub const EMBER_BINARY_VERSION: u32 = 1;
+/// Maximum number of exposed parameters accepted by the decoder.
+pub const MAX_EMBER_PARAMS: u32 = 1_000_000;
+/// Maximum UTF-8 byte length accepted for one exposed parameter name.
+pub const MAX_EMBER_PARAM_NAME_BYTES: u32 = 1 << 20;
 
 /// The kind of primitive a renderer configuration draws (design §16).
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -509,7 +496,7 @@ pub struct Migration {
 /// Pure integer data, so this is `Eq`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MigrationError {
-    /// The data is newer than the running code can understand.
+    /// The data version is newer than the running code can understand.
     VersionTooNew {
         /// The version found in the data.
         found: u32,
@@ -590,7 +577,7 @@ impl MigrationChain {
 /// live pipeline through the `pipeline_cache`; this enum tracks that lifecycle.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub enum ReloadState {
-    /// Nothing pending; the live pipeline is current.
+    /// No reload is active; the live pipeline is current.
     #[default]
     Idle,
     /// A kernel recompile is in progress after an edit.
@@ -715,6 +702,681 @@ impl EmberAsset {
     }
 }
 
+/// Errors produced by the `.ember` codec.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EmberCodecError {
+    /// The container does not begin with [`EMBER_BINARY_MAGIC`].
+    InvalidMagic,
+    /// The binary container layout is not supported by this decoder.
+    UnsupportedBinaryVersion(u32),
+    /// A field tag is not the next tag in [`EMBER_FIELD_ORDER`].
+    InvalidFieldOrder { expected: u8, found: u8 },
+    /// The input ended before a complete field was read.
+    Truncated,
+    /// Bytes remained after the final field.
+    TrailingBytes,
+    /// A bounded count exceeded the decoder's allocation limit.
+    CountTooLarge { field: &'static str, value: u32 },
+    /// A bounded byte length exceeded the decoder's allocation limit.
+    LengthTooLarge { field: &'static str, value: u32 },
+    /// An enum discriminant is not part of the wire contract.
+    InvalidEnum { field: &'static str, value: u8 },
+    /// A boolean was not encoded as zero or one.
+    InvalidBoolean { field: &'static str, value: u8 },
+    /// A parameter name was not valid UTF-8.
+    InvalidUtf8,
+    /// A serialized float was NaN or infinite.
+    NonFiniteFloat { field: &'static str },
+    /// A hybrid shading weight was outside its documented interval.
+    InvalidFloatRange { field: &'static str },
+    /// A parameter handle occurred more than once.
+    DuplicateParamHandle(u32),
+    /// A constant parameter value did not match its declared parameter type.
+    ParamValueTypeMismatch { handle: u32 },
+}
+
+impl fmt::Display for EmberCodecError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidMagic => formatter.write_str("invalid ember binary magic"),
+            Self::UnsupportedBinaryVersion(version) => {
+                write!(formatter, "unsupported ember binary version {version}")
+            }
+            Self::InvalidFieldOrder { expected, found } => write!(
+                formatter,
+                "invalid ember field order: expected tag {expected}, found {found}"
+            ),
+            Self::Truncated => formatter.write_str("truncated ember asset"),
+            Self::TrailingBytes => formatter.write_str("trailing bytes after ember asset"),
+            Self::CountTooLarge { field, value } => {
+                write!(formatter, "ember {field} count {value} is too large")
+            }
+            Self::LengthTooLarge { field, value } => {
+                write!(formatter, "ember {field} length {value} is too large")
+            }
+            Self::InvalidEnum { field, value } => {
+                write!(formatter, "invalid ember {field} enum value {value}")
+            }
+            Self::InvalidBoolean { field, value } => {
+                write!(formatter, "invalid ember {field} boolean value {value}")
+            }
+            Self::InvalidUtf8 => formatter.write_str("invalid UTF-8 in ember asset"),
+            Self::NonFiniteFloat { field } => {
+                write!(formatter, "non-finite ember float in {field}")
+            }
+            Self::InvalidFloatRange { field } => {
+                write!(
+                    formatter,
+                    "ember float in {field} is outside its valid range"
+                )
+            }
+            Self::DuplicateParamHandle(handle) => {
+                write!(formatter, "duplicate ember parameter handle {handle}")
+            }
+            Self::ParamValueTypeMismatch { handle } => {
+                write!(formatter, "ember parameter {handle} constant type mismatch")
+            }
+        }
+    }
+}
+
+/// Serializes an asset using the requested on-disk format.
+pub fn serialize_asset(
+    asset: &EmberAsset,
+    format: SerializationFormat,
+) -> Result<Vec<u8>, EmberCodecError> {
+    match format {
+        SerializationFormat::Binary => encode_binary(asset),
+    }
+}
+
+/// Deserializes an asset using the requested on-disk format.
+pub fn deserialize_asset(
+    bytes: &[u8],
+    format: SerializationFormat,
+) -> Result<EmberAsset, EmberCodecError> {
+    match format {
+        SerializationFormat::Binary => decode_binary(bytes),
+    }
+}
+
+/// Encodes an `.ember` asset as the deterministic little-endian binary format.
+pub fn encode_binary(asset: &EmberAsset) -> Result<Vec<u8>, EmberCodecError> {
+    validate_asset(asset)?;
+
+    let mut writer = BinaryWriter::default();
+    writer.bytes(&EMBER_BINARY_MAGIC);
+    writer.u32(EMBER_BINARY_VERSION);
+
+    writer.field(1);
+    writer.u32(asset.format_version);
+
+    writer.field(2);
+    writer.u32(asset.graph.0);
+
+    writer.field(3);
+    writer.count(asset.params.len(), "params")?;
+    for param in &asset.params {
+        writer.u32(param.handle.0);
+        writer.string(&param.name, "parameter name")?;
+        write_param_type(&mut writer, param.ty);
+        write_binding(&mut writer, param.binding)?;
+    }
+
+    writer.field(4);
+    writer.u32(asset.renderer_config.id.0);
+    write_renderer_kind(&mut writer, asset.renderer_config.kind);
+    writer.bool(asset.renderer_config.writes_motion_vectors);
+
+    writer.field(5);
+    write_shading_model(&mut writer, asset.shading.model)?;
+    writer.bool(asset.shading.receive_shadows);
+    writer.bool(asset.shading.cast_shadows);
+
+    writer.field(6);
+    write_serialization_format(&mut writer, asset.format);
+
+    Ok(writer.into_bytes())
+}
+
+/// Decodes and validates a deterministic little-endian binary `.ember` asset.
+pub fn decode_binary(bytes: &[u8]) -> Result<EmberAsset, EmberCodecError> {
+    let mut reader = BinaryReader::new(bytes);
+    if reader.take(EMBER_BINARY_MAGIC.len())? != EMBER_BINARY_MAGIC {
+        return Err(EmberCodecError::InvalidMagic);
+    }
+    let version = reader.u32()?;
+    if version != EMBER_BINARY_VERSION {
+        return Err(EmberCodecError::UnsupportedBinaryVersion(version));
+    }
+
+    reader.field(1)?;
+    let format_version = reader.u32()?;
+
+    reader.field(2)?;
+    let graph = GraphAssetRef(reader.u32()?);
+
+    reader.field(3)?;
+    let param_count = reader.count(MAX_EMBER_PARAMS, "params")?;
+    let mut params = Vec::new();
+    let mut handles = BTreeSet::new();
+    for _ in 0..param_count {
+        let handle = ParamHandle(reader.u32()?);
+        if !handles.insert(handle.0) {
+            return Err(EmberCodecError::DuplicateParamHandle(handle.0));
+        }
+        let name = reader.string(MAX_EMBER_PARAM_NAME_BYTES, "parameter name")?;
+        let ty = read_param_type(&mut reader)?;
+        let binding = read_binding(&mut reader)?;
+        if let BindingSource::Constant(value) = binding {
+            validate_param_value(ty, value, handle.0)?;
+        }
+        params.push(ExposedParam {
+            handle,
+            name,
+            ty,
+            binding,
+        });
+    }
+
+    reader.field(4)?;
+    let renderer_config = RendererConfig {
+        id: RendererConfigId(reader.u32()?),
+        kind: read_renderer_kind(&mut reader)?,
+        writes_motion_vectors: reader.bool("writes_motion_vectors")?,
+    };
+
+    reader.field(5)?;
+    let shading = ShadingSettings {
+        model: read_shading_model(&mut reader)?,
+        receive_shadows: reader.bool("receive_shadows")?,
+        cast_shadows: reader.bool("cast_shadows")?,
+    };
+
+    reader.field(6)?;
+    let format = read_serialization_format(&mut reader)?;
+    let _ = format;
+    let asset = EmberAsset {
+        format_version,
+        graph,
+        params,
+        renderer_config,
+        shading,
+        format,
+    };
+    if !reader.is_empty() {
+        return Err(EmberCodecError::TrailingBytes);
+    }
+    validate_asset(&asset)?;
+    Ok(asset)
+}
+
+fn validate_asset(asset: &EmberAsset) -> Result<(), EmberCodecError> {
+    let mut handles = BTreeSet::new();
+    for param in &asset.params {
+        if !handles.insert(param.handle.0) {
+            return Err(EmberCodecError::DuplicateParamHandle(param.handle.0));
+        }
+        if let BindingSource::Constant(value) = param.binding {
+            validate_param_value(param.ty, value, param.handle.0)?;
+        }
+    }
+    validate_shading_model(asset.shading.model)
+}
+
+fn validate_param_value(
+    ty: ParamType,
+    value: ParamValue,
+    handle: u32,
+) -> Result<(), EmberCodecError> {
+    let matches = match (ty, value) {
+        (ParamType::Scalar, ParamValue::Scalar(value)) => {
+            validate_f32(value, "parameter scalar")?;
+            true
+        }
+        (ParamType::Vec3, ParamValue::Vec3(values)) => {
+            validate_f32s(&values, "parameter vec3")?;
+            true
+        }
+        (ParamType::Color, ParamValue::Color(values)) => {
+            validate_f32s(&values, "parameter color")?;
+            true
+        }
+        (ParamType::Int, ParamValue::Int(_)) | (ParamType::Bool, ParamValue::Bool(_)) => true,
+        _ => false,
+    };
+    if matches {
+        Ok(())
+    } else {
+        Err(EmberCodecError::ParamValueTypeMismatch { handle })
+    }
+}
+
+fn validate_shading_model(model: EmberShadingModel) -> Result<(), EmberCodecError> {
+    if let EmberShadingModel::Hybrid { weight, .. } = model {
+        validate_f32(weight, "hybrid weight")?;
+        if !(0.0..=1.0).contains(&weight) {
+            return Err(EmberCodecError::InvalidFloatRange {
+                field: "hybrid weight",
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_f32(value: f32, field: &'static str) -> Result<(), EmberCodecError> {
+    if value.is_finite() {
+        Ok(())
+    } else {
+        Err(EmberCodecError::NonFiniteFloat { field })
+    }
+}
+
+fn validate_f32s(values: &[f32], field: &'static str) -> Result<(), EmberCodecError> {
+    for value in values {
+        validate_f32(*value, field)?;
+    }
+    Ok(())
+}
+
+fn write_param_type(writer: &mut BinaryWriter, value: ParamType) {
+    writer.u8(match value {
+        ParamType::Scalar => 0,
+        ParamType::Vec3 => 1,
+        ParamType::Color => 2,
+        ParamType::Int => 3,
+        ParamType::Bool => 4,
+    });
+}
+
+fn read_param_type(reader: &mut BinaryReader<'_>) -> Result<ParamType, EmberCodecError> {
+    match reader.u8()? {
+        0 => Ok(ParamType::Scalar),
+        1 => Ok(ParamType::Vec3),
+        2 => Ok(ParamType::Color),
+        3 => Ok(ParamType::Int),
+        4 => Ok(ParamType::Bool),
+        value => Err(EmberCodecError::InvalidEnum {
+            field: "parameter type",
+            value,
+        }),
+    }
+}
+
+fn write_binding(writer: &mut BinaryWriter, binding: BindingSource) -> Result<(), EmberCodecError> {
+    match binding {
+        BindingSource::Constant(value) => {
+            writer.u8(0);
+            write_param_value(writer, value)?;
+        }
+        BindingSource::Gameplay(channel) => {
+            writer.u8(1);
+            writer.u32(channel);
+        }
+        BindingSource::Material(channel) => {
+            writer.u8(2);
+            writer.u32(channel);
+        }
+        BindingSource::Timeline(channel) => {
+            writer.u8(3);
+            writer.u32(channel);
+        }
+        BindingSource::Curve(channel) => {
+            writer.u8(4);
+            writer.u32(channel);
+        }
+    }
+    Ok(())
+}
+
+fn read_binding(reader: &mut BinaryReader<'_>) -> Result<BindingSource, EmberCodecError> {
+    match reader.u8()? {
+        0 => Ok(BindingSource::Constant(read_param_value(reader)?)),
+        1 => Ok(BindingSource::Gameplay(reader.u32()?)),
+        2 => Ok(BindingSource::Material(reader.u32()?)),
+        3 => Ok(BindingSource::Timeline(reader.u32()?)),
+        4 => Ok(BindingSource::Curve(reader.u32()?)),
+        value => Err(EmberCodecError::InvalidEnum {
+            field: "binding source",
+            value,
+        }),
+    }
+}
+
+fn write_param_value(writer: &mut BinaryWriter, value: ParamValue) -> Result<(), EmberCodecError> {
+    match value {
+        ParamValue::Scalar(value) => {
+            writer.u8(0);
+            writer.f32(value, "parameter scalar")?;
+        }
+        ParamValue::Vec3(values) => {
+            writer.u8(1);
+            for value in values {
+                writer.f32(value, "parameter vec3")?;
+            }
+        }
+        ParamValue::Color(values) => {
+            writer.u8(2);
+            for value in values {
+                writer.f32(value, "parameter color")?;
+            }
+        }
+        ParamValue::Int(value) => {
+            writer.u8(3);
+            writer.i32(value);
+        }
+        ParamValue::Bool(value) => {
+            writer.u8(4);
+            writer.bool(value);
+        }
+    }
+    Ok(())
+}
+
+fn read_param_value(reader: &mut BinaryReader<'_>) -> Result<ParamValue, EmberCodecError> {
+    match reader.u8()? {
+        0 => Ok(ParamValue::Scalar(reader.f32("parameter scalar")?)),
+        1 => Ok(ParamValue::Vec3([
+            reader.f32("parameter vec3")?,
+            reader.f32("parameter vec3")?,
+            reader.f32("parameter vec3")?,
+        ])),
+        2 => Ok(ParamValue::Color([
+            reader.f32("parameter color")?,
+            reader.f32("parameter color")?,
+            reader.f32("parameter color")?,
+            reader.f32("parameter color")?,
+        ])),
+        3 => Ok(ParamValue::Int(reader.i32()?)),
+        4 => Ok(ParamValue::Bool(reader.bool("parameter bool")?)),
+        value => Err(EmberCodecError::InvalidEnum {
+            field: "parameter value",
+            value,
+        }),
+    }
+}
+
+fn write_renderer_kind(writer: &mut BinaryWriter, value: RendererKind) {
+    writer.u8(match value {
+        RendererKind::Sprite => 0,
+        RendererKind::Ribbon => 1,
+        RendererKind::Mesh => 2,
+        RendererKind::Light => 3,
+        RendererKind::Decal => 4,
+        RendererKind::Volume => 5,
+    });
+}
+
+fn read_renderer_kind(reader: &mut BinaryReader<'_>) -> Result<RendererKind, EmberCodecError> {
+    match reader.u8()? {
+        0 => Ok(RendererKind::Sprite),
+        1 => Ok(RendererKind::Ribbon),
+        2 => Ok(RendererKind::Mesh),
+        3 => Ok(RendererKind::Light),
+        4 => Ok(RendererKind::Decal),
+        5 => Ok(RendererKind::Volume),
+        value => Err(EmberCodecError::InvalidEnum {
+            field: "renderer kind",
+            value,
+        }),
+    }
+}
+
+fn write_shading_model(
+    writer: &mut BinaryWriter,
+    value: EmberShadingModel,
+) -> Result<(), EmberCodecError> {
+    validate_shading_model(value)?;
+    match value {
+        EmberShadingModel::Unlit => writer.u8(0),
+        EmberShadingModel::Pbr => writer.u8(1),
+        EmberShadingModel::Npr => writer.u8(2),
+        EmberShadingModel::Custom(id) => {
+            writer.u8(3);
+            writer.u32(id);
+        }
+        EmberShadingModel::Hybrid {
+            base,
+            overlay,
+            weight,
+        } => {
+            writer.u8(4);
+            write_shading_basis(writer, base);
+            write_shading_basis(writer, overlay);
+            writer.f32(weight, "hybrid weight")?;
+        }
+    }
+    Ok(())
+}
+
+fn read_shading_model(reader: &mut BinaryReader<'_>) -> Result<EmberShadingModel, EmberCodecError> {
+    let model = match reader.u8()? {
+        0 => EmberShadingModel::Unlit,
+        1 => EmberShadingModel::Pbr,
+        2 => EmberShadingModel::Npr,
+        3 => EmberShadingModel::Custom(reader.u32()?),
+        4 => EmberShadingModel::Hybrid {
+            base: read_shading_basis(reader)?,
+            overlay: read_shading_basis(reader)?,
+            weight: reader.f32("hybrid weight")?,
+        },
+        value => {
+            return Err(EmberCodecError::InvalidEnum {
+                field: "shading model",
+                value,
+            });
+        }
+    };
+    validate_shading_model(model)?;
+    Ok(model)
+}
+
+fn write_shading_basis(writer: &mut BinaryWriter, value: ShadingBasis) {
+    match value {
+        ShadingBasis::Unlit => writer.u8(0),
+        ShadingBasis::Pbr => writer.u8(1),
+        ShadingBasis::Npr => writer.u8(2),
+        ShadingBasis::Custom(id) => {
+            writer.u8(3);
+            writer.u32(id);
+        }
+    }
+}
+
+fn read_shading_basis(reader: &mut BinaryReader<'_>) -> Result<ShadingBasis, EmberCodecError> {
+    match reader.u8()? {
+        0 => Ok(ShadingBasis::Unlit),
+        1 => Ok(ShadingBasis::Pbr),
+        2 => Ok(ShadingBasis::Npr),
+        3 => Ok(ShadingBasis::Custom(reader.u32()?)),
+        value => Err(EmberCodecError::InvalidEnum {
+            field: "shading basis",
+            value,
+        }),
+    }
+}
+
+fn write_serialization_format(writer: &mut BinaryWriter, value: SerializationFormat) {
+    writer.u8(match value {
+        SerializationFormat::Binary => 0,
+    });
+}
+
+fn read_serialization_format(
+    reader: &mut BinaryReader<'_>,
+) -> Result<SerializationFormat, EmberCodecError> {
+    match reader.u8()? {
+        0 => Ok(SerializationFormat::Binary),
+        value => Err(EmberCodecError::InvalidEnum {
+            field: "serialization format",
+            value,
+        }),
+    }
+}
+
+#[derive(Default)]
+struct BinaryWriter {
+    bytes: Vec<u8>,
+}
+
+impl BinaryWriter {
+    fn u8(&mut self, value: u8) {
+        self.bytes.push(value);
+    }
+
+    fn u32(&mut self, value: u32) {
+        self.bytes.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn i32(&mut self, value: i32) {
+        self.bytes.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn f32(&mut self, value: f32, field: &'static str) -> Result<(), EmberCodecError> {
+        validate_f32(value, field)?;
+        self.u32(value.to_bits());
+        Ok(())
+    }
+
+    fn bool(&mut self, value: bool) {
+        self.u8(u8::from(value));
+    }
+
+    fn bytes(&mut self, value: &[u8]) {
+        self.bytes.extend_from_slice(value);
+    }
+
+    fn field(&mut self, tag: u8) {
+        self.u8(tag);
+    }
+
+    fn count(&mut self, value: usize, field: &'static str) -> Result<(), EmberCodecError> {
+        let value = u32::try_from(value).map_err(|_| EmberCodecError::CountTooLarge {
+            field,
+            value: u32::MAX,
+        })?;
+        if value > MAX_EMBER_PARAMS {
+            return Err(EmberCodecError::CountTooLarge { field, value });
+        }
+        self.u32(value);
+        Ok(())
+    }
+
+    fn string(&mut self, value: &str, field: &'static str) -> Result<(), EmberCodecError> {
+        let length = u32::try_from(value.len()).map_err(|_| EmberCodecError::LengthTooLarge {
+            field,
+            value: u32::MAX,
+        })?;
+        if length > MAX_EMBER_PARAM_NAME_BYTES {
+            return Err(EmberCodecError::LengthTooLarge {
+                field,
+                value: length,
+            });
+        }
+        self.u32(length);
+        self.bytes(value.as_bytes());
+        Ok(())
+    }
+
+    fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
+}
+
+struct BinaryReader<'a> {
+    bytes: &'a [u8],
+    cursor: usize,
+}
+
+impl<'a> BinaryReader<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, cursor: 0 }
+    }
+
+    fn take(&mut self, length: usize) -> Result<&'a [u8], EmberCodecError> {
+        let end = self
+            .cursor
+            .checked_add(length)
+            .ok_or(EmberCodecError::Truncated)?;
+        let value = self
+            .bytes
+            .get(self.cursor..end)
+            .ok_or(EmberCodecError::Truncated)?;
+        self.cursor = end;
+        Ok(value)
+    }
+
+    fn u8(&mut self) -> Result<u8, EmberCodecError> {
+        Ok(self.take(1)?[0])
+    }
+
+    fn u32(&mut self) -> Result<u32, EmberCodecError> {
+        Ok(u32::from_le_bytes(
+            self.take(4)?
+                .try_into()
+                .map_err(|_| EmberCodecError::Truncated)?,
+        ))
+    }
+
+    fn i32(&mut self) -> Result<i32, EmberCodecError> {
+        Ok(i32::from_le_bytes(
+            self.take(4)?
+                .try_into()
+                .map_err(|_| EmberCodecError::Truncated)?,
+        ))
+    }
+
+    fn f32(&mut self, field: &'static str) -> Result<f32, EmberCodecError> {
+        let value = f32::from_bits(self.u32()?);
+        validate_f32(value, field)?;
+        Ok(value)
+    }
+
+    fn bool(&mut self, field: &'static str) -> Result<bool, EmberCodecError> {
+        match self.u8()? {
+            0 => Ok(false),
+            1 => Ok(true),
+            value => Err(EmberCodecError::InvalidBoolean { field, value }),
+        }
+    }
+
+    fn string(&mut self, max_length: u32, field: &'static str) -> Result<String, EmberCodecError> {
+        let length = self.u32()?;
+        if length > max_length {
+            return Err(EmberCodecError::LengthTooLarge {
+                field,
+                value: length,
+            });
+        }
+        String::from_utf8(self.take(length as usize)?.to_vec())
+            .map_err(|_| EmberCodecError::InvalidUtf8)
+    }
+
+    fn count(&mut self, max_count: u32, field: &'static str) -> Result<u32, EmberCodecError> {
+        let count = self.u32()?;
+        if count > max_count {
+            return Err(EmberCodecError::CountTooLarge {
+                field,
+                value: count,
+            });
+        }
+        Ok(count)
+    }
+
+    fn field(&mut self, expected: u8) -> Result<(), EmberCodecError> {
+        let found = self.u8()?;
+        if found == expected {
+            Ok(())
+        } else {
+            Err(EmberCodecError::InvalidFieldOrder { expected, found })
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.cursor == self.bytes.len()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -732,15 +1394,9 @@ mod tests {
     #[test]
     fn serialization_format_selection_by_purpose() {
         assert_eq!(
-            recommended_format(AssetPurpose::Authoring),
-            SerializationFormat::Ron
-        );
-        assert_eq!(
             recommended_format(AssetPurpose::Shipping),
             SerializationFormat::Binary
         );
-        assert!(SerializationFormat::Ron.is_text());
-        assert!(!SerializationFormat::Binary.is_text());
     }
 
     #[test]
@@ -748,6 +1404,210 @@ mod tests {
         assert_eq!(EMBER_FIELD_ORDER.len(), 6);
         assert_eq!(EMBER_FIELD_ORDER[0], "format_version");
         assert_eq!(EMBER_FIELD_ORDER[5], "format");
+    }
+
+    fn codec_asset() -> EmberAsset {
+        EmberAsset {
+            format_version: 7,
+            graph: GraphAssetRef(0x1234_5678),
+            params: vec![
+                ExposedParam {
+                    handle: ParamHandle(10),
+                    name: String::from("intensity"),
+                    ty: ParamType::Scalar,
+                    binding: BindingSource::Constant(ParamValue::Scalar(0.75)),
+                },
+                ExposedParam {
+                    handle: ParamHandle(11),
+                    name: String::from("tint/火"),
+                    ty: ParamType::Color,
+                    binding: BindingSource::Material(3),
+                },
+                ExposedParam {
+                    handle: ParamHandle(12),
+                    name: String::from("enabled"),
+                    ty: ParamType::Bool,
+                    binding: BindingSource::Timeline(9),
+                },
+            ],
+            renderer_config: RendererConfig {
+                id: RendererConfigId(4),
+                kind: RendererKind::Ribbon,
+                writes_motion_vectors: true,
+            },
+            shading: ShadingSettings {
+                model: EmberShadingModel::Hybrid {
+                    base: ShadingBasis::Pbr,
+                    overlay: ShadingBasis::Custom(0xAABB_CCDD),
+                    weight: 0.375,
+                },
+                receive_shadows: true,
+                cast_shadows: false,
+            },
+            format: SerializationFormat::Binary,
+        }
+    }
+
+    #[test]
+    fn binary_codec_round_trips_all_asset_fields() {
+        let asset = codec_asset();
+        let encoded = encode_binary(&asset).expect("valid asset encodes");
+        let decoded = decode_binary(&encoded).expect("encoded asset decodes");
+        assert_eq!(decoded, asset);
+        assert_eq!(
+            deserialize_asset(&encoded, SerializationFormat::Binary).unwrap(),
+            asset
+        );
+    }
+
+    #[test]
+    fn binary_codec_has_stable_canonical_bytes() {
+        let asset = codec_asset();
+        let first = encode_binary(&asset).unwrap();
+        let second = encode_binary(&asset).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(&first[..8], &EMBER_BINARY_MAGIC);
+        assert_eq!(&first[8..12], &EMBER_BINARY_VERSION.to_le_bytes());
+        assert_eq!(&first[12..14], &[1, 7]);
+        assert_eq!(&first[17..22], &[2, 0x78, 0x56, 0x34, 0x12]);
+    }
+
+    #[test]
+    fn binary_codec_rejects_wrong_magic_version_field_order_and_trailing_data() {
+        let encoded = encode_binary(&codec_asset()).unwrap();
+        let mut bad_magic = encoded.clone();
+        bad_magic[0] ^= 1;
+        assert_eq!(
+            decode_binary(&bad_magic),
+            Err(EmberCodecError::InvalidMagic)
+        );
+
+        let mut bad_version = encoded.clone();
+        bad_version[8..12].copy_from_slice(&2u32.to_le_bytes());
+        assert_eq!(
+            decode_binary(&bad_version),
+            Err(EmberCodecError::UnsupportedBinaryVersion(2))
+        );
+
+        let mut bad_order = encoded.clone();
+        bad_order[12] = 2;
+        assert_eq!(
+            decode_binary(&bad_order),
+            Err(EmberCodecError::InvalidFieldOrder {
+                expected: 1,
+                found: 2,
+            })
+        );
+
+        let mut trailing = encoded;
+        trailing.push(0);
+        assert_eq!(
+            decode_binary(&trailing),
+            Err(EmberCodecError::TrailingBytes)
+        );
+    }
+
+    #[test]
+    fn binary_codec_rejects_every_truncation() {
+        let encoded = encode_binary(&codec_asset()).unwrap();
+        for end in 0..encoded.len() {
+            assert!(
+                decode_binary(&encoded[..end]).is_err(),
+                "accepted truncated prefix of length {end}"
+            );
+        }
+    }
+
+    #[test]
+    fn binary_codec_rejects_invalid_enum_boolean_and_non_finite_float() {
+        let mut invalid_type = encode_binary(&codec_asset()).unwrap();
+        // Header (12), fields 1+4 and 2+4, param count (field 3+4), then
+        // handle (4) and name length+UTF-8 bytes (4+9).
+        invalid_type[12 + 5 + 5 + 5 + 4 + 4 + 9] = 99;
+        assert!(matches!(
+            decode_binary(&invalid_type),
+            Err(EmberCodecError::InvalidEnum {
+                field: "parameter type",
+                value: 99
+            })
+        ));
+
+        let mut marker = encode_binary(&codec_asset()).unwrap();
+        let bool_index = marker.len() - 3;
+        marker[bool_index] = 2;
+        assert!(matches!(
+            decode_binary(&marker),
+            Err(EmberCodecError::InvalidBoolean { .. })
+        ));
+
+        let mut nan_asset = codec_asset();
+        nan_asset.params[0].binding = BindingSource::Constant(ParamValue::Scalar(f32::NAN));
+        assert_eq!(
+            encode_binary(&nan_asset),
+            Err(EmberCodecError::NonFiniteFloat {
+                field: "parameter scalar"
+            })
+        );
+
+        let mut encoded_nan = encode_binary(&codec_asset()).unwrap();
+        let scalar_value = 12 + 5 + 5 + 5 + 4 + 4 + "intensity".len() + 1 + 1 + 1;
+        encoded_nan[scalar_value..scalar_value + 4]
+            .copy_from_slice(&f32::NAN.to_bits().to_le_bytes());
+        assert_eq!(
+            decode_binary(&encoded_nan),
+            Err(EmberCodecError::NonFiniteFloat {
+                field: "parameter scalar"
+            })
+        );
+    }
+
+    #[test]
+    fn binary_codec_rejects_invalid_utf8_duplicate_handles_and_mismatched_values() {
+        let mut invalid_utf8 = encode_binary(&codec_asset()).unwrap();
+        // First name begins after the fixed header, first three field tags and
+        // values, parameter count, handle, and name-length word.
+        let first_name = 12 + 5 + 5 + 5 + 4 + 4 + 4;
+        invalid_utf8[first_name] = 0xFF;
+        assert_eq!(
+            decode_binary(&invalid_utf8),
+            Err(EmberCodecError::InvalidUtf8)
+        );
+
+        let mut duplicate = codec_asset();
+        duplicate.params[1].handle = duplicate.params[0].handle;
+        assert_eq!(
+            encode_binary(&duplicate),
+            Err(EmberCodecError::DuplicateParamHandle(10))
+        );
+
+        let mut mismatch = codec_asset();
+        mismatch.params[0].ty = ParamType::Vec3;
+        assert_eq!(
+            encode_binary(&mismatch),
+            Err(EmberCodecError::ParamValueTypeMismatch { handle: 10 })
+        );
+    }
+
+    #[test]
+    fn binary_codec_rejects_invalid_hybrid_weight_and_preserves_format_contract() {
+        let mut invalid_weight = codec_asset();
+        invalid_weight.shading.model = EmberShadingModel::Hybrid {
+            base: ShadingBasis::Unlit,
+            overlay: ShadingBasis::Pbr,
+            weight: 1.01,
+        };
+        assert_eq!(
+            encode_binary(&invalid_weight),
+            Err(EmberCodecError::InvalidFloatRange {
+                field: "hybrid weight"
+            })
+        );
+
+        let encoded = serialize_asset(&codec_asset(), SerializationFormat::Binary).unwrap();
+        assert_eq!(
+            deserialize_asset(&encoded, SerializationFormat::Binary).unwrap(),
+            codec_asset()
+        );
     }
 
     #[test]
@@ -884,7 +1744,7 @@ mod tests {
                 receive_shadows: true,
                 cast_shadows: false,
             },
-            format: SerializationFormat::Ron,
+            format: SerializationFormat::Binary,
         };
         assert_eq!(asset.externally_driven_count(), 2);
         assert!(asset.param(ParamHandle(2)).is_some());
@@ -987,13 +1847,13 @@ mod tests {
                 apply: bump_only,
             }],
         };
-        let future = ModuleData {
+        let newer = ModuleData {
             type_id: 42,
             version: 5,
             blob: Vec::new(),
         };
         assert_eq!(
-            chain.migrate(future),
+            chain.migrate(newer),
             Err(MigrationError::VersionTooNew {
                 found: 5,
                 current: 2,

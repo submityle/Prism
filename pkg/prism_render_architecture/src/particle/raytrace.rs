@@ -1,7 +1,7 @@
 //! Ray-traced particle collision and lighting contracts (design §22).
 //!
 //! This is the deterministic `CPU` reference for Ember's optional ray-tracing
-//! integration with `bevy_solari`: per-particle short rays cast along the motion
+//! integration with Prism's scene-ray-query service: per-particle short rays cast along the motion
 //! direction to detect scene collisions (bounce + friction response), a quality
 //! ladder that degrades to an `SDF` or depth-buffer query when ray-tracing
 //! hardware is absent, and a lit-sampling contract that turns a ray-traced
@@ -10,7 +10,7 @@
 //!
 //! Ray tracing is a *differentiating extra*, never a hard dependency: the
 //! collision-method chooser always resolves to a runnable fallback, so the core
-//! pipeline is never blocked when `bevy_solari` is unavailable. Both `PBR` and
+//! pipeline is never blocked when ray-query hardware is unavailable. Both `PBR` and
 //! `NPR` particles consume the ray-traced lighting result (design §16, §22),
 //! routed by [`enables_ray_traced_lighting`]; `Unlit` opts out because it does
 //! not respond to scene light.
@@ -186,7 +186,7 @@ pub fn apply_collision(velocity: Vec3, hit: RayHit, response: CollisionResponse)
 /// How particle-scene collisions are queried (design §22).
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum CollisionMethod {
-    /// Hardware ray tracing through `bevy_solari`: the high-quality path.
+    /// Hardware ray tracing through a Prism scene-query provider: the high-quality path.
     Raytrace,
     /// Signed-distance-field (`SDF`) scene query: a cheaper approximation.
     Sdf,
@@ -196,7 +196,7 @@ pub enum CollisionMethod {
 }
 
 impl CollisionMethod {
-    /// Whether this method needs ray-tracing hardware (`bevy_solari`).
+    /// Whether this method needs hardware ray-tracing support.
     #[must_use]
     pub const fn uses_ray_tracing(self) -> bool {
         matches!(self, CollisionMethod::Raytrace)
@@ -206,7 +206,7 @@ impl CollisionMethod {
 /// Ray-tracing-relevant hardware capabilities of the running platform.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct HardwareCaps {
-    /// Hardware/`API` ray tracing is available (`bevy_solari` usable).
+    /// Hardware/`API` ray tracing is available through a registered provider.
     pub ray_tracing: bool,
     /// A scene `SDF` volume is available for distance queries.
     pub sdf_volume: bool,

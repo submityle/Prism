@@ -20,10 +20,13 @@
 //! Every operation is deterministic and total: an out-of-range slot index is
 //! ignored rather than panicking, and killing an already-dead slot is a no-op,
 //! so the free list can never contain a duplicate (which would hand the same
-//! slot to two spawns). The attribute *buffers* themselves and the GPU
-//! indirect-args writes are pending the GPU backend; this layer only decides
-//! which slots are live and where they compact to.
+//! slot to two spawns). This CPU pool is the authoritative reference for slot
+//! liveness and compaction. The initial Prism RHI GPU slice has its own fixed
+//! particle records and indirect-argument pass; it does not yet use this
+//! allocator's free-list representation, so the two implementations must not
+//! be treated as feature-equivalent.
 
+use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
 /// What a [`ParticlePool`] does when a spawn is requested but every slot is
@@ -73,6 +76,7 @@ pub struct ParticlePool {
     capacity: u32,
     alive: Vec<bool>,
     birth: Vec<u64>,
+    age_order: VecDeque<(u64, u32)>,
     free: Vec<u32>,
     alive_count: u32,
     spawn_count: u32,
@@ -96,6 +100,7 @@ impl ParticlePool {
             capacity,
             alive: alloc::vec![false; cap],
             birth: alloc::vec![0u64; cap],
+            age_order: VecDeque::with_capacity(cap),
             free,
             alive_count: 0,
             spawn_count: 0,
@@ -180,6 +185,7 @@ impl ParticlePool {
         let idx = slot as usize;
         self.alive[idx] = true;
         self.birth[idx] = self.next_seq;
+        self.age_order.push_back((self.next_seq, slot));
         self.next_seq += 1;
         self.alive_count += 1;
         self.spawn_count += 1;
@@ -199,24 +205,36 @@ impl ParticlePool {
         self.alive[idx] = false;
         self.free.push(slot);
         self.alive_count -= 1;
+        if self.age_order.len() > (self.capacity as usize).saturating_mul(2) {
+            self.rebuild_age_order();
+        }
+    }
+
+    /// Rebuilds the birth-order queue after stale killed entries exceed a
+    /// bounded multiple of capacity. This keeps arbitrary kill/spawn workloads
+    /// from growing the queue without bound.
+    fn rebuild_age_order(&mut self) {
+        let mut live: Vec<(u64, u32)> = self
+            .alive
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, &is_alive)| is_alive.then_some((self.birth[slot], slot as u32)))
+            .collect();
+        live.sort_unstable();
+        self.age_order = live.into_iter().collect();
     }
 
     /// The live slot with the smallest birth sequence, ties broken by lowest
-    /// slot index; [`None`] when nothing is live.
-    fn oldest_live_slot(&self) -> Option<u32> {
-        let mut best: Option<(u64, u32)> = None;
-        for (slot, &alive) in self.alive.iter().enumerate() {
-            if !alive {
-                continue;
-            }
-            let seq = self.birth[slot];
-            let slot = slot as u32;
-            match best {
-                Some((best_seq, _)) if best_seq <= seq => {}
-                _ => best = Some((seq, slot)),
+    /// slot index; [`None`] when nothing is live. Stale entries are discarded
+    /// lazily, making the common recycle lookup amortized O(1).
+    fn oldest_live_slot(&mut self) -> Option<u32> {
+        while let Some((birth, slot)) = self.age_order.pop_front() {
+            if self.is_alive(slot) && self.birth[slot as usize] == birth {
+                return Some(slot);
             }
         }
-        best.map(|(_, slot)| slot)
+        self.rebuild_age_order();
+        self.age_order.pop_front().map(|(_, slot)| slot)
     }
 
     /// Fragmentation of the live set in `0..=1`: the fraction of the occupied
@@ -349,6 +367,27 @@ mod tests {
         assert_eq!(reused, a);
         assert!(pool.is_full());
         assert_eq!(pool.alive_count(), 3);
+    }
+
+    #[test]
+    fn recycle_queue_skips_killed_generations_and_preserves_birth_order() {
+        let mut pool = ParticlePool::with_capacity(4);
+        let slots: Vec<u32> = (0..4)
+            .map(|_| pool.spawn(CapacityPolicy::DiscardNewest).unwrap())
+            .collect();
+        pool.kill(slots[0]);
+        pool.kill(slots[1]);
+        let reused_a = pool.spawn(CapacityPolicy::DiscardNewest).unwrap();
+        let reused_b = pool.spawn(CapacityPolicy::DiscardNewest).unwrap();
+        assert_eq!((reused_a, reused_b), (slots[1], slots[0]));
+
+        // The stale queue entries for the original generations of slots 0 and
+        // 1 are ignored; slot 2 is now the oldest live birth.
+        assert_eq!(pool.spawn(CapacityPolicy::RecycleOldest), Some(slots[2]));
+        assert_eq!(pool.alive_count(), 4);
+        assert!(pool.is_alive(slots[0]));
+        assert!(pool.is_alive(slots[1]));
+        assert!(pool.is_alive(slots[3]));
     }
 
     #[test]

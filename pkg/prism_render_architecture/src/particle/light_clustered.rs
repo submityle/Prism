@@ -11,7 +11,7 @@
 //! touches and packs the assignments into a compact `offset + count` index
 //! list. At shade time a particle maps its view-space position to a single
 //! cluster, reads that cluster's short light slice, and accumulates diffuse
-//! response. This mirrors the clustered-forward rig in `bevy_light`, the
+//! response. This mirrors Prism's clustered-forward lighting contract, the
 //! Frostbite / DOOM 2016 clustered-forward renderers, and the light-sampling
 //! blocks of Unity's `VFX Graph` — without reusing any of their code.
 //!
@@ -32,7 +32,7 @@
 //! # Orthogonality to the sibling scene `DataInterface`s
 //!
 //! - `raytrace.rs` is the *ray-traced* scene lighting `DI`: it answers incident
-//!   light and soft-shadow visibility by casting rays against `bevy_solari`
+//!   light and soft-shadow visibility through the Prism scene-ray-query service
 //!   geometry. This module answers the *same shading question* from a rasterizer-
 //!   friendly binned light list; the two are alternative light-sampling sources
 //!   feeding one shading closure, not competitors.

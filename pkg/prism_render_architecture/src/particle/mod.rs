@@ -39,12 +39,12 @@
 //!    `NPR` / custom / hybrid), motion-vector requirements, `OIT` routing, and
 //!    volumetric six-way lighting parameters (design §16-§21); see [`shading`].
 //!
-//! This module owns the shared contract types the sibling modules build on: the
-//! hand-rolled vector math, the stable handles, the shading-model enum, and the
-//! small policy enums (simulation space, integrator, sort strategy, iteration
-//! domain). The `GPU` draw/compute kernels and the `WESL` shader codegen are out
-//! of scope for this `CPU`-verifiable contract layer and are documented as
-//! "pending the GPU backend" where the contract signatures anticipate them.
+//! This crate owns engine-neutral contract types and CPU-verifiable algorithms.
+//! The executable CPU reference runtime lives in [`runtime`], while the initial
+//! Prism RHI compute/indirect-draw slice lives in `prism_render_gpudriven`.
+//! Individual CPU contracts are not evidence that every algorithm is already
+//! lowered to a GPU kernel or wired into the complete Prism render schedule;
+//! see the implementation-status matrix in the particle design document.
 
 pub mod aabb_transform;
 pub mod alpha_erosion;
@@ -240,6 +240,7 @@ pub mod rgbe_encode;
 pub mod ribbon_geometry;
 pub mod ribbon_trail;
 pub mod ritter_bounding_sphere;
+pub mod runtime;
 pub mod sat_collision_2d;
 pub mod scanline_polygon_fill;
 pub mod screen_space_reflection;
@@ -312,6 +313,8 @@ pub mod ycbcr_bt709;
 
 #[cfg(test)]
 mod integration_tests;
+#[cfg(test)]
+mod verification_tests;
 
 /// Squared-length threshold below which a vector is treated as zero, so
 /// normalization and force accumulation never divide by (near) zero and never

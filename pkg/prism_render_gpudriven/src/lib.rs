@@ -69,6 +69,7 @@ pub mod frustum;
 pub mod gpu;
 pub mod instances;
 pub mod naive;
+pub mod particle;
 pub mod quad;
 pub mod readback;
 pub mod reference;
@@ -82,6 +83,11 @@ pub use encoding::IndirectArgs;
 pub use frustum::{aabb_inside, signed_distance, Aabb, Frustum, Plane};
 pub use instances::{id_color, id_color_bytes, instance_storage_bytes, Instance};
 pub use naive::NaiveStage;
+pub use particle::{
+    particle_storage_bytes, simulate_cpu, Particle, ParticleParams, ParticleReferenceResult,
+    ParticleStage, PARTICLE_CONTROL_BYTES, PARTICLE_INDEX_COUNT, PARTICLE_PARAMS_BYTES,
+    PARTICLE_STRIDE,
+};
 pub use quad::{corner_offset, corners, QUAD_HALF_EXTENT, QUAD_VERTICES};
 pub use readback::{count_lit_pixels, pixel_at, ReadBuffer};
 pub use reference::{cull_cpu, projected_center_pixel};
