@@ -18,6 +18,7 @@ use alloc::{
 use core::{fmt, ops::Bound};
 
 pub mod filesystem;
+pub mod git;
 mod source;
 pub mod thumbnail;
 pub mod validation;

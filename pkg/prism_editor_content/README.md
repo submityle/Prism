@@ -64,6 +64,15 @@ VCS adapters can publish status before or after an asset is imported.
 statuses. Invalid or duplicate paths reject the entire snapshot; an identical
 snapshot preserves the generation and cached pages.
 
+The public `git` module reads actual worktree/index status in bounded Unix
+workers, including clean tracked paths, staged/worktree changes, renames,
+untracked/ignored files and merge conflicts. Capture `snapshot_token()` before
+starting a request and apply a complete result with `publish_vcs` after checking
+the host's project/request epoch. Ready results continue to reserve capacity;
+cancellation/deadlines terminate and reap child processes. No Git writes are
+performed. See `docs/prism_editor_content_git_zh.md` for portability and the
+nontransactional boundary between the two Git reads.
+
 ## Source discovery and publication
 
 The public filesystem module enumerates real files and directories into a sorted
