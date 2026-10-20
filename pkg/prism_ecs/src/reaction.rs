@@ -48,7 +48,7 @@
 //! an owning World to cross task lanes.
 
 use alloc::boxed::Box;
-use alloc::collections::VecDeque;
+use alloc::collections::{BTreeSet, VecDeque};
 use alloc::vec::Vec;
 
 /// Opaque, stable handle to a node in a [`ReactionGraph`].
@@ -213,6 +213,10 @@ impl<C> ReactionGraph<C> {
 
     /// Declare that `node` additionally depends on `depends_on` (edge
     /// `depends_on → node`). Idempotent for an edge that already exists.
+    ///
+    /// # Panics
+    /// Panics if either node is unknown or the edge would create a dependency
+    /// cycle. Rejection leaves the graph unchanged.
     #[inline]
     pub fn add_dependency(&mut self, node: NodeId, depends_on: NodeId) {
         self.add_edge(depends_on.0, node.0);
@@ -228,6 +232,10 @@ impl<C> ReactionGraph<C> {
         if self.nodes[node].deps.contains(&dep) {
             return;
         }
+        assert!(
+            !self.edge_would_create_cycle(dep, node),
+            "reaction dependency would create a cycle"
+        );
         self.nodes[node].deps.push(dep);
         self.nodes[dep].dependents.push(node);
         // Adding an edge after a source was dirtied must not lose the new
@@ -235,6 +243,25 @@ impl<C> ReactionGraph<C> {
         if self.nodes[dep].dirty {
             self.mark_dirty(NodeId(node));
         }
+    }
+
+    /// Whether adding `dep → node` would close a path back to `dep`.
+    /// This runs only while constructing the graph, never during a flush. The
+    /// visited set bounds work to the affected reachable subgraph even when
+    /// multiple dependency paths converge.
+    fn edge_would_create_cycle(&self, dep: usize, node: usize) -> bool {
+        let mut stack = alloc::vec![node];
+        let mut visited = BTreeSet::new();
+        while let Some(current) = stack.pop() {
+            if current == dep {
+                return true;
+            }
+            if !visited.insert(current) {
+                continue;
+            }
+            stack.extend(self.nodes[current].dependents.iter().copied());
+        }
+        false
     }
 
     /// Whether `node` is currently scheduled to recompute on the next flush.
@@ -248,8 +275,8 @@ impl<C> ReactionGraph<C> {
     ///
     /// This is the "push": one changed source dirties exactly the sub-graph
     /// that reads from it, and nothing else — the structural root of
-    /// "cost ∝ amount-of-change". The walk is cycle-safe: an already-dirty node
-    /// is never revisited, so dependency cycles terminate.
+    /// "cost ∝ amount-of-change". An already-dirty node is never revisited,
+    /// so converging dependency paths are traversed only once.
     pub fn mark_dirty(&mut self, node: NodeId) {
         let mut stack = Vec::new();
         stack.push(node.0);
@@ -318,8 +345,6 @@ impl<C> ReactionGraph<C> {
     /// of unrelated clean nodes merely because the graph was recently built
     /// or extended. Kahn's queue is seeded in node-index order and dependent
     /// edges retain insertion order, so delivery remains deterministic.
-    /// Cyclic leftovers retain the historical deterministic index-order
-    /// fallback and remain retryable if a callback panics.
     /// The dirty bit is the O(1) membership test: every dirty node is present
     /// exactly once in the pending set until its callback succeeds.
     fn order_pending(&mut self) {
@@ -378,11 +403,10 @@ impl<C> ReactionGraph<C> {
                 }
             }
         }
-        for (position, &node) in affected.iter().enumerate() {
-            if !emitted[position] {
-                ordered.push(node);
-            }
-        }
+        debug_assert!(
+            emitted.iter().all(|was_emitted| *was_emitted),
+            "reaction graph must remain acyclic"
+        );
         // flush_while pops from the end; reverse to execute dependency-first.
         ordered.reverse();
         self.pending = ordered;
@@ -519,22 +543,37 @@ mod tests {
     }
 
     #[test]
-    fn cycle_is_safe_and_each_runs_once() {
-        // n0 → n1 → n2 → n0 (a 3-cycle of derived nodes).
+    fn cycle_edge_is_rejected_without_mutating_the_dag() {
         let mut g = ReactionGraph::<Recorder>::new();
-        let n0 = g.add_derived(&[], |r: &mut Recorder| r.d_count += 1);
-        let n1 = g.add_derived(&[n0], |r: &mut Recorder| r.d_count += 1);
-        let n2 = g.add_derived(&[n1], |r: &mut Recorder| r.d_count += 1);
-        g.add_dependency(n0, n2); // close the cycle
+        let n0 = g.add_derived(&[], |r: &mut Recorder| {
+            r.d_count += 1;
+            r.order.push(0);
+        });
+        let n1 = g.add_derived(&[n0], |r: &mut Recorder| {
+            r.d_count += 1;
+            r.order.push(1);
+        });
+        let n2 = g.add_derived(&[n1], |r: &mut Recorder| {
+            r.d_count += 1;
+            r.order.push(2);
+        });
 
-        g.mark_dirty(n0); // must terminate despite the cycle
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            g.add_dependency(n0, n2); // n2 → n0 would close the cycle
+        }))
+        .is_err());
+        assert!(g.nodes[n0.index()].deps.is_empty());
+        assert_eq!(g.nodes[n1.index()].deps, alloc::vec![n0.index()]);
+        assert_eq!(g.nodes[n2.index()].deps, alloc::vec![n1.index()]);
+
+        g.mark_dirty(n0);
         assert_dirty_pending_invariant(&g);
-        assert!(g.is_dirty(n0) && g.is_dirty(n1) && g.is_dirty(n2));
-
         let mut ctx = Recorder::default();
-        let recomputed = g.flush(&mut ctx); // must terminate
-        assert_eq!(recomputed, 3, "every node in the cycle runs exactly once");
+        let recomputed = g.flush(&mut ctx);
+        assert_eq!(recomputed, 3);
         assert_eq!(ctx.d_count, 3);
+        assert_eq!(ctx.order, alloc::vec![0, 1, 2]);
+        assert_dirty_pending_invariant(&g);
     }
 
     #[test]
