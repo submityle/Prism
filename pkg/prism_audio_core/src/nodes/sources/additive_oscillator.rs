@@ -49,7 +49,7 @@
 //! Resonance Audio, the Web Audio API, or any other audio engine; only the
 //! shared mathematical ideas are used.
 
-use bevy_math::ops;
+use prism_math::ops;
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
 use crate::math::Sample;

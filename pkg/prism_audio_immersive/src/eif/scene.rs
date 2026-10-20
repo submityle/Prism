@@ -231,7 +231,7 @@ impl EifScene {
 
     /// Finds the index of the first walkable region containing `point`.
     #[must_use]
-    pub fn region_at(&self, point: bevy_math::Vec3) -> Option<usize> {
+    pub fn region_at(&self, point: prism_math::Vec3) -> Option<usize> {
         self.walkable.iter().position(|r| r.contains(point))
     }
 
@@ -278,7 +278,7 @@ mod tests {
     use super::*;
     use crate::eif::geometry::AcousticBox;
     use crate::eif::source::EifSourceId;
-    use bevy_math::{ops, Vec3};
+    use prism_math::{ops, Vec3};
 
     const EPS: Sample = 1e-4;
 

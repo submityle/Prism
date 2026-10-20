@@ -87,7 +87,7 @@
 //!
 //! The breath turbulence is a self-contained seeded `xorshift64` stream, so two
 //! [`BrassLipReedNode`]s built with the same sample rate, parameters, and seed
-//! emit bit-identical streams on every platform via [`bevy_math::ops`], and
+//! emit bit-identical streams on every platform via [`prism_math::ops`], and
 //! [`AudioNode::reset`] reseeds the generator, clears the lines, and zeroes the
 //! lip resonator to restart the identical attack.
 //!
@@ -136,7 +136,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use bevy_math::ops;
+use prism_math::ops;
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
 use crate::math::{flush_denormal, Sample};

@@ -78,7 +78,7 @@
 //! The excitation is the deterministic bow motion, not noise, so the node holds
 //! no random state: two [`BowedStringNode`]s built with the same sample rate and
 //! parameters emit bit-identical streams on every platform via
-//! [`bevy_math::ops`], and [`AudioNode::reset`] restarts the identical attack.
+//! [`prism_math::ops`], and [`AudioNode::reset`] restarts the identical attack.
 //!
 //! # Relationship
 //!
@@ -120,7 +120,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use bevy_math::ops;
+use prism_math::ops;
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
 use crate::math::{flush_denormal, Sample};

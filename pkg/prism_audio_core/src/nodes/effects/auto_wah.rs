@@ -55,7 +55,7 @@
 //! [`tremolo`](super::tremolo): where those are LFO-driven, this one is
 //! amplitude-driven.
 
-use bevy_math::ops;
+use prism_math::ops;
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
 use crate::math::{flush_denormal, Sample};

@@ -79,7 +79,7 @@
 //! Unlike the modal physical drums it is a direct two-partial subtractive
 //! voice rather than a bank of excited resonant modes.
 
-use bevy_math::ops;
+use prism_math::ops;
 use core::f32::consts::TAU;
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};

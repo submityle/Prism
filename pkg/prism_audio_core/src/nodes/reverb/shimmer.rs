@@ -438,7 +438,7 @@ impl AudioNode for ShimmerReverb {
 mod tests {
     use super::*;
     use alloc::{vec, vec::Vec};
-    use bevy_math::ops;
+    use prism_math::ops;
     use core::f32::consts::TAU;
 
     const SR: u32 = 48_000;

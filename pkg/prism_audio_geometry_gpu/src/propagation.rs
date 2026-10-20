@@ -195,7 +195,7 @@ mod tests {
     use super::GpuPropagationBackend;
 
     use alloc::vec;
-    use bevy_math::{Quat, Vec3};
+    use prism_math::{Quat, Vec3};
     use prism_audio_geometry::material_map::MaterialTable;
     use prism_audio_geometry::scene::AcousticScene;
     use prism_audio_geometry::{GeometricBackend, GeometricConfig};

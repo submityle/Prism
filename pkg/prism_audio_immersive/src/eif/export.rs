@@ -75,7 +75,7 @@ pub fn export_bed(bed: BedLayout, first_id: u32) -> Vec<EifSource> {
 /// # Examples
 ///
 /// ```
-/// use bevy_math::Vec3;
+/// use prism_math::Vec3;
 /// use prism_audio_immersive::eif::export::export_object_scene;
 /// use prism_audio_object::bed::BedLayout;
 /// use prism_audio_object::object::{AudioObject, ObjectId};
@@ -111,7 +111,7 @@ pub fn export_object_scene(scene: &ObjectScene) -> EifScene {
 mod tests {
     use super::*;
     use crate::eif::source::EifSourceKind;
-    use bevy_math::{ops, Vec3};
+    use prism_math::{ops, Vec3};
     use prism_audio_object::object::ObjectId;
 
     const EPS: Sample = 1e-4;

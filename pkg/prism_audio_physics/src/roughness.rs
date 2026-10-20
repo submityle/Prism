@@ -18,7 +18,7 @@
 //! 47.2-47.3: the [`prism_audio_procedural::contact::ContactPoint`] feeds the
 //! modal table and the roughness feeds the friction template.
 
-use bevy_math::Vec3;
+use prism_math::Vec3;
 
 use prism_audio_core::math::Sample;
 use prism_audio_procedural::contact::ContactPoint;
@@ -41,9 +41,9 @@ pub fn strike_position(
         return ContactPoint::new(0.0);
     }
     let offset = contact_point - body_center;
-    let ax = bevy_math::ops::abs(offset.x);
-    let ay = bevy_math::ops::abs(offset.y);
-    let az = bevy_math::ops::abs(offset.z);
+    let ax = prism_math::ops::abs(offset.x);
+    let ay = prism_math::ops::abs(offset.y);
+    let az = prism_math::ops::abs(offset.z);
     let dominant = ax.max(ay).max(az);
     ContactPoint::new(dominant / body_extent)
 }

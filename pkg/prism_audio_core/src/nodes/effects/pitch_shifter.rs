@@ -46,7 +46,7 @@
 //! [`PitchShifterNode::new`]. [`PitchShifterNode::process`] performs no
 //! allocation, takes no locks, and cannot panic; outputs are denormal-flushed so
 //! a decaying tail cannot stall on subnormals. All transcendental math routes
-//! through [`bevy_math::ops`], so the transform is bit-reproducible across
+//! through [`prism_math::ops`], so the transform is bit-reproducible across
 //! platforms. The pipeline delays the signal by one full frame
 //! ([`PitchShifterNode::latency_frames`]).
 //!
@@ -77,7 +77,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use bevy_math::ops;
+use prism_math::ops;
 use core::f32::consts::{PI, TAU};
 
 use crate::fft::{power_of_two_at_least, Fft};

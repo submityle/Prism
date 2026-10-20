@@ -10,11 +10,9 @@ publish = false
 # Deterministic, cross-platform scalar transcendental functions (sin/cos/exp/
 # log). Using these instead of `f32`'s intrinsics keeps DSP coefficient math
 # bit-reproducible across targets, which the workspace lints enforce.
-bevy_math = { path = "../../crates/bevy_math", default-features = false, features = [
-  "nostd-libm",
-] }
+prism_math = { path = "../prism_math", default-features = false }
 # `f64` rounding for the sample-accurate transport (musical bar boundaries).
-# `bevy_math::ops` only covers `f32`; `libm` gives the `f64` primitives a
+# `prism_math::ops` only covers `f32`; `libm` gives the `f64` primitives a
 # deterministic, no_std-friendly implementation.
 libm = { version = "0.2", default-features = false }
 serde = { version = "1", default-features = false, features = [
@@ -28,7 +26,7 @@ prism_audio_core = { path = ".", features = ["serialize"] }
 default = ["std"]
 # Enables std-backed facilities (heap graph compilation, thread-friendly types).
 # The real-time hot path (`AudioGraph::process`) is allocation-free regardless.
-std = ["bevy_math/std"]
+std = ["prism_math/std"]
 # Enables serde (de)serialization of plain, non-real-time description data.
 serialize = ["dep:serde"]
 

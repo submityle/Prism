@@ -216,7 +216,7 @@ pub fn run(
 mod tests {
     use super::*;
     use alloc::vec::Vec;
-    use bevy_math::ops;
+    use prism_math::ops;
     use core::f32::consts::TAU;
 
     /// Builds a minimal canonical WAV file holding 16-bit stereo `PCM`.

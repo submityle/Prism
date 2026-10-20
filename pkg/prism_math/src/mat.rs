@@ -11,6 +11,7 @@ use core::ops::{Add, Mul, Sub};
 
 /// A 2x2 column-major matrix.
 #[derive(Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
 #[repr(C)]
 pub struct Mat2 {
     /// First column.
@@ -21,6 +22,7 @@ pub struct Mat2 {
 
 /// A 3x3 column-major matrix.
 #[derive(Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
 #[repr(C)]
 pub struct Mat3 {
     /// First column.
@@ -33,6 +35,7 @@ pub struct Mat3 {
 
 /// A 4x4 column-major matrix.
 #[derive(Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
 #[repr(C)]
 pub struct Mat4 {
     /// First column.

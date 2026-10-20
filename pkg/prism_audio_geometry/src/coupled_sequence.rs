@@ -70,7 +70,7 @@
 use alloc::vec::Vec;
 use core::cmp::Ordering;
 
-use bevy_math::Vec3;
+use prism_math::Vec3;
 use prism_audio_core::math::Sample;
 use prism_audio_spatial::doppler::SPEED_OF_SOUND_MPS;
 use prism_audio_spatial::geometry::{Emitter, Listener};
@@ -543,7 +543,7 @@ fn is_duplicate(paths: &[PropagationPath], candidate: &PropagationPath) -> bool 
 mod tests {
     use super::resolve_coupled_sequences;
     use alloc::vec;
-    use bevy_math::{Quat, Vec3};
+    use prism_math::{Quat, Vec3};
     use prism_audio_spatial::doppler::SPEED_OF_SOUND_MPS;
     use prism_audio_spatial::geometry::{Emitter, Listener};
     use prism_audio_spatial::propagation::{AcousticMaterial, PathKind};

@@ -25,7 +25,7 @@
 //! settings producer and checks that its outputs are internally consistent with
 //! the `prism_audio_core` primitives it reuses.
 
-use bevy_math::ops;
+use prism_math::ops;
 
 use prism_audio_core::buffer::{AudioBuffer, ChannelLayout};
 use prism_audio_core::math::Sample;

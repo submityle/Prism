@@ -50,7 +50,7 @@
 //! Dividing the shaped result by `drive` keeps the overall small-signal gain
 //! at unity regardless of how hard the clamp is pushed. The `sinh`, `cosh`,
 //! and `asinh` are expanded from `exp`, `ln`, and `sqrt` (all through
-//! [`bevy_math::ops`]) so the solver is bit-for-bit deterministic.
+//! [`prism_math::ops`]) so the solver is bit-for-bit deterministic.
 //!
 //! **Asymmetry** is produced by biasing the operating point: adding a small
 //! `bias` to the drive before the (perfectly odd) clamp shifts the signal onto
@@ -104,7 +104,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use bevy_math::ops;
+use prism_math::ops;
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
 use crate::math::{db_to_linear, flush_denormal, Sample};
@@ -148,7 +148,7 @@ const DIODE_CA: Sample = 1.0;
 const NEWTON_ITERS: usize = 4;
 
 /// Hyperbolic sine via `exp`, so the solver stays on the deterministic
-/// [`bevy_math::ops`] math path.
+/// [`prism_math::ops`] math path.
 #[inline]
 #[must_use]
 fn sinh_ops(x: Sample) -> Sample {
@@ -157,7 +157,7 @@ fn sinh_ops(x: Sample) -> Sample {
 }
 
 /// Hyperbolic cosine via `exp`, so the solver stays on the deterministic
-/// [`bevy_math::ops`] math path.
+/// [`prism_math::ops`] math path.
 #[inline]
 #[must_use]
 fn cosh_ops(x: Sample) -> Sample {
@@ -166,7 +166,7 @@ fn cosh_ops(x: Sample) -> Sample {
 }
 
 /// Inverse hyperbolic sine via `ln` and `sqrt` for non-negative `x`, so the
-/// seed stays on the deterministic [`bevy_math::ops`] math path.
+/// seed stays on the deterministic [`prism_math::ops`] math path.
 #[inline]
 #[must_use]
 fn asinh_ops(x: Sample) -> Sample {

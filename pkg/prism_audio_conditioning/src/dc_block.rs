@@ -44,7 +44,7 @@
 //! shaping of section 13; here latency and causality do not matter, so the
 //! stronger zero-phase treatment is preferred.
 
-use bevy_math::ops;
+use prism_math::ops;
 
 use alloc::vec::Vec;
 

@@ -9,8 +9,8 @@
 //! exact to compare against.
 //!
 //! Determinism matters here: the twin must track the device within a tight
-//! tolerance, so every square root goes through [`bevy_math::ops::sqrt`] and the
-//! vector algebra uses [`bevy_math::Vec3`], matching the built-in `sqrt`,
+//! tolerance, so every square root goes through [`prism_math::ops::sqrt`] and the
+//! vector algebra uses [`prism_math::Vec3`], matching the built-in `sqrt`,
 //! `dot`, and `cross` the shaders call.
 //!
 //! # Provenance
@@ -26,7 +26,7 @@
 //! `WGSL` entry points to the host for the golden comparison in
 //! [`crate::backend`].
 
-use bevy_math::Vec3;
+use prism_math::Vec3;
 
 use crate::scene_upload::GpuTriangle;
 

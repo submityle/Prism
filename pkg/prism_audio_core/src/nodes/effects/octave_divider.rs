@@ -79,7 +79,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use bevy_math::ops;
+use prism_math::ops;
 
 use crate::buffer::ChannelLayout;
 use crate::graph::{AudioNode, ProcessIo, RenderContext};

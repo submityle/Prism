@@ -18,7 +18,7 @@
 
 use alloc::vec::Vec;
 
-use bevy_math::ops;
+use prism_math::ops;
 
 use prism_audio_core::math::Sample;
 use prism_audio_core::nodes::analysis::spectrum::{SpectrumAnalyzer, Window};
@@ -129,7 +129,7 @@ pub fn analyze(channel: &[Sample], sample_rate: u32, config: &LipsyncConfig) -> 
 mod tests {
     use super::*;
     use alloc::vec::Vec;
-    use bevy_math::ops;
+    use prism_math::ops;
     use core::f32::consts::TAU;
 
     fn tone(amp: Sample, freq: Sample, rate: u32, frames: usize) -> Vec<Sample> {

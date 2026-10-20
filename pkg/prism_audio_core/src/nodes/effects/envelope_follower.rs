@@ -307,7 +307,7 @@ mod tests {
     }
 
     fn ops_sin(x: Sample) -> Sample {
-        bevy_math::ops::sin(x)
+        prism_math::ops::sin(x)
     }
 
     fn run_mono(node: &mut EnvelopeFollowerNode, signal: &[Sample]) -> Vec<Sample> {

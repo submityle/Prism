@@ -34,7 +34,7 @@
 
 use alloc::vec::Vec;
 
-use bevy_math::{ops, Vec3};
+use prism_math::{ops, Vec3};
 use prism_audio_core::math::Sample;
 use prism_audio_spatial::doppler::SPEED_OF_SOUND_MPS;
 
@@ -110,7 +110,7 @@ impl WfsTap {
 /// # Examples
 ///
 /// ```
-/// use bevy_math::Vec3;
+/// use prism_math::Vec3;
 /// use prism_audio_immersive::array::layout::{ArrayLayout, ArraySpeaker};
 /// use prism_audio_immersive::array::wfs::{WfsDriver, WfsSource};
 ///

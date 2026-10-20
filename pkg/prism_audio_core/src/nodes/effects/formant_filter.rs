@@ -425,10 +425,10 @@ mod tests {
         let (mut re, mut im) = (0.0f32, 0.0f32);
         for (k, &s) in signal.iter().enumerate() {
             let ph = w * k as Sample;
-            re += s * bevy_math::ops::cos(ph);
-            im -= s * bevy_math::ops::sin(ph);
+            re += s * prism_math::ops::cos(ph);
+            im -= s * prism_math::ops::sin(ph);
         }
-        bevy_math::ops::sqrt(re * re + im * im) / n as Sample
+        prism_math::ops::sqrt(re * re + im * im) / n as Sample
     }
 
     /// Builds white-ish broadband mono excitation (a deterministic impulse

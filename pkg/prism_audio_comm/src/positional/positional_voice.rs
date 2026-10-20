@@ -17,7 +17,7 @@
 //! is resolved into the listener frame by the inverse rotation. Azimuth is
 //! `atan2(x, -z)` (zero straight ahead, positive toward the right ear) and
 //! elevation is `atan2(y, hypot(x, z))`. Every transcendental routes through
-//! [`bevy_math::ops`], so the parameters are bit-reproducible across targets.
+//! [`prism_math::ops`], so the parameters are bit-reproducible across targets.
 //!
 //! # Provenance
 //! Original work; no Unreal Engine, Unity, Godot, Wwise, FMOD, Steam Audio, or
@@ -28,7 +28,7 @@
 //! renderer (the engine's spatial/HRTF crates) from a decoded remote speaker;
 //! consumed by [`crate::pipeline`] once the downlink has produced playable PCM.
 
-use bevy_math::{ops, Quat, Vec3};
+use prism_math::{ops, Quat, Vec3};
 use prism_audio_core::math::Sample;
 
 /// Distances below this (in metres) are treated as coincident with the
@@ -272,7 +272,7 @@ impl PositionalVoice {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bevy_math::ops;
+    use prism_math::ops;
     use core::f32::consts::{FRAC_PI_2, PI};
 
     fn close(a: Sample, b: Sample, eps: Sample) -> bool {

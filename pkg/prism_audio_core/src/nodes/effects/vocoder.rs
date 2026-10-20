@@ -118,13 +118,13 @@ fn sanitize_range(low_hz: Sample, high_hz: Sample, sample_rate: u32) -> (Sample,
 #[inline]
 fn band_ratio(low: Sample, high: Sample) -> Sample {
     // `low < high` is guaranteed by `sanitize_range`, so the ratio exceeds 1.
-    bevy_math::ops::powf(high / low, 1.0 / (VOCODER_BANDS as Sample - 1.0))
+    prism_math::ops::powf(high / low, 1.0 / (VOCODER_BANDS as Sample - 1.0))
 }
 
 /// Log-spaced band centre frequencies for the sanitised range.
 fn band_centers(low: Sample, high: Sample) -> [Sample; VOCODER_BANDS] {
     let ratio = band_ratio(low, high);
-    core::array::from_fn(|i| low * bevy_math::ops::powf(ratio, i as Sample))
+    core::array::from_fn(|i| low * prism_math::ops::powf(ratio, i as Sample))
 }
 
 /// Constant-`Q` quality factor matching the geometric band spacing.
@@ -132,7 +132,7 @@ fn band_q(low: Sample, high: Sample) -> Sample {
     let ratio = band_ratio(low, high);
     // Geometric band edges give bandwidth `f * (ratio - 1) / sqrt(ratio)`, so
     // `Q = f / bandwidth = sqrt(ratio) / (ratio - 1)`.
-    bevy_math::ops::sqrt(ratio) / (ratio - 1.0)
+    prism_math::ops::sqrt(ratio) / (ratio - 1.0)
 }
 
 /// Builds the `VOCODER_BANDS` band-pass coefficient set for a sanitised range.
@@ -430,10 +430,10 @@ mod tests {
         let (mut re, mut im) = (0.0f32, 0.0f32);
         for (k, &s) in signal.iter().enumerate() {
             let ph = w * k as Sample;
-            re += s * bevy_math::ops::cos(ph);
-            im -= s * bevy_math::ops::sin(ph);
+            re += s * prism_math::ops::cos(ph);
+            im -= s * prism_math::ops::sin(ph);
         }
-        bevy_math::ops::sqrt(re * re + im * im) / n as Sample
+        prism_math::ops::sqrt(re * re + im * im) / n as Sample
     }
 
     /// A deterministic sine of `freq_hz` filling a mono buffer.
@@ -442,7 +442,7 @@ mod tests {
         let w = core::f32::consts::TAU * freq_hz / SR as Sample;
         let ch = buf.channel_mut(0);
         for (k, s) in ch.iter_mut().enumerate() {
-            *s = bevy_math::ops::sin(w * k as Sample);
+            *s = prism_math::ops::sin(w * k as Sample);
         }
         buf
     }

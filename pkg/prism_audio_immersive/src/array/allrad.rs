@@ -31,7 +31,7 @@
 use alloc::vec::Vec;
 use core::f32::consts::PI;
 
-use bevy_math::{ops, Vec3};
+use prism_math::{ops, Vec3};
 use prism_audio_core::math::Sample;
 use prism_audio_object::pan::vbap::vbap_gains;
 use prism_audio_spatial::hoa::{encode_hoa, MAX_HOA_CHANNELS};
@@ -110,7 +110,7 @@ impl VirtualSpeakerGrid {
 /// use prism_audio_object::bed::BedLayout;
 /// use prism_audio_spatial::hoa::{encode_hoa, MAX_HOA_CHANNELS};
 /// use prism_audio_spatial::hoa_decode::DecodeBand;
-/// use bevy_math::Vec3;
+/// use prism_math::Vec3;
 ///
 /// let layout = ArrayLayout::from_bed(BedLayout::Surround7_1_4);
 /// let grid = VirtualSpeakerGrid::fibonacci(100);

@@ -20,7 +20,7 @@
 //! machine. Amplitude is driven through a [`Smoothed`] value so that gain
 //! automation never produces zipper-noise clicks.
 
-use bevy_math::ops;
+use prism_math::ops;
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
 use crate::math::Sample;
@@ -259,7 +259,7 @@ fn band_limited_square(t: Sample, dt: Sample) -> Sample {
 mod tests {
     use super::*;
     use crate::buffer::{AudioBuffer, ChannelLayout};
-    use bevy_math::ops;
+    use prism_math::ops;
 
     /// Builds a render context for the given sample rate and frame count.
     fn ctx(sample_rate: u32, frames: usize) -> RenderContext {

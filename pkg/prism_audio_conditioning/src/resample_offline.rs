@@ -99,7 +99,7 @@ pub fn resample_to(
 mod tests {
     use super::*;
     use alloc::vec;
-    use bevy_math::ops;
+    use prism_math::ops;
     use core::f32::consts::TAU;
     use prism_audio_core::buffer::ChannelLayout;
 

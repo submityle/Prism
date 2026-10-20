@@ -32,7 +32,7 @@
 //! with [`Oversampler::make_state`]. [`Oversampler::process_sample`] and
 //! [`DryDelay::push`] perform no allocation, take no locks, and cannot panic;
 //! the output is denormal-flushed so a decaying tail cannot stall the CPU on
-//! subnormals. All transcendental math routes through [`bevy_math::ops`], so
+//! subnormals. All transcendental math routes through [`prism_math::ops`], so
 //! the designed filter is bit-reproducible across platforms.
 //!
 //! # Provenance
@@ -59,7 +59,7 @@
 
 use alloc::vec::Vec;
 
-use bevy_math::ops;
+use prism_math::ops;
 use core::f32::consts::PI;
 
 use crate::math::{flush_denormal, Sample};

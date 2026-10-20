@@ -307,7 +307,7 @@ mod tests {
     use super::*;
     use crate::buffer::{AudioBuffer, ChannelLayout};
     use alloc::vec::Vec;
-    use bevy_math::ops;
+    use prism_math::ops;
 
     /// Builds a minimal render context for the given block size.
     fn ctx(frames: usize) -> RenderContext {

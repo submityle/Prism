@@ -19,7 +19,7 @@
 pub mod keyframe;
 pub mod stream;
 
-use bevy_math::Vec3;
+use prism_math::Vec3;
 
 use prism_audio_core::math::Sample;
 
@@ -78,7 +78,7 @@ impl ObjectMetadata {
 mod tests {
     use super::*;
     use crate::object::ObjectId;
-    use bevy_math::ops;
+    use prism_math::ops;
 
     const EPS: Sample = 1e-5;
 

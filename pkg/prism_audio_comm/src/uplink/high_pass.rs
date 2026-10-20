@@ -21,7 +21,7 @@
 //! pre-processing). Built on the sample scalar and deterministic math of
 //! `prism_audio_core`; it is the first stage of [`crate::uplink::UplinkChain`].
 
-use bevy_math::ops;
+use prism_math::ops;
 use core::f32::consts::PI;
 use prism_audio_core::math::{flush_denormal, Sample};
 

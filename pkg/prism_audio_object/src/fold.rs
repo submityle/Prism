@@ -17,7 +17,7 @@
 //!
 //! # Determinism
 //!
-//! Angle extraction routes through [`bevy_math::ops`] (`atan2`, `hypot`), so
+//! Angle extraction routes through [`prism_math::ops`] (`atan2`, `hypot`), so
 //! results are bit-reproducible across targets. Degrees are produced by exact
 //! multiplication with `180 / PI`.
 //!
@@ -35,7 +35,7 @@ use alloc::vec::Vec;
 
 use core::f32::consts::PI;
 
-use bevy_math::{ops, Vec3};
+use prism_math::{ops, Vec3};
 
 use prism_audio_core::math::Sample;
 

@@ -38,7 +38,7 @@
 //! allocation, takes no locks, and cannot panic; every output is
 //! denormal-flushed. The two fold shapes are closed-form and bounded, so a
 //! runaway offset or drive cannot produce an unbounded sample. All
-//! transcendental math routes through [`bevy_math::ops`] for bit-reproducible
+//! transcendental math routes through [`prism_math::ops`] for bit-reproducible
 //! output across platforms.
 //!
 //! # Provenance
@@ -65,7 +65,7 @@
 
 use alloc::vec::Vec;
 
-use bevy_math::ops;
+use prism_math::ops;
 use core::f32::consts::FRAC_PI_2;
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};

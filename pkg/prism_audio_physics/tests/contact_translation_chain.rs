@@ -24,7 +24,7 @@
 //! `prism_audio_physics` (and the `Vec3` vector type the API itself exposes in
 //! its signatures); it never touches crate internals.
 
-use bevy_math::Vec3;
+use prism_math::Vec3;
 
 use prism_audio_physics::body::{BodyAudioId, BodyAudioState};
 use prism_audio_physics::config::TranslatorConfig;

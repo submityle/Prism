@@ -30,7 +30,7 @@
 use alloc::vec::Vec;
 use core::f32::consts::PI;
 
-use bevy_math::{ops, Vec3};
+use prism_math::{ops, Vec3};
 use prism_audio_core::math::Sample;
 use prism_audio_spatial::doppler::SPEED_OF_SOUND_MPS;
 
@@ -61,7 +61,7 @@ impl BeamTap {
 /// # Examples
 ///
 /// ```
-/// use bevy_math::Vec3;
+/// use prism_math::Vec3;
 /// use prism_audio_immersive::array::layout::{ArrayLayout, ArraySpeaker};
 /// use prism_audio_immersive::array::beamforming::Beamformer;
 ///

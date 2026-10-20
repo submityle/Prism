@@ -99,7 +99,7 @@ impl CompressorNode {
     pub fn new(sample_rate: u32, channels: usize, params: CompressorParams) -> Self {
         let channels = channels.max(1);
         let lookahead =
-            bevy_math::ops::round(params.lookahead_ms.max(0.0) * (sample_rate as Sample) * 0.001)
+            prism_math::ops::round(params.lookahead_ms.max(0.0) * (sample_rate as Sample) * 0.001)
                 as usize;
         let rings = if lookahead > 0 {
             let mut v = Vec::with_capacity(channels);
@@ -240,7 +240,7 @@ mod tests {
         let mut input = mono(512);
         for (i, s) in input.channel_mut(0).iter_mut().enumerate() {
             // -40 dBFS sine, well below the -18 dB threshold.
-            *s = 0.01 * bevy_math::ops::sin(0.05 * i as Sample);
+            *s = 0.01 * prism_math::ops::sin(0.05 * i as Sample);
         }
         let inputs = [input.clone()];
         let mut outputs = [mono(512)];
@@ -261,7 +261,7 @@ mod tests {
         let mut input = mono(4_800);
         for (i, s) in input.channel_mut(0).iter_mut().enumerate() {
             // 0 dBFS sine, well above the -18 dB threshold.
-            *s = bevy_math::ops::sin(0.05 * i as Sample);
+            *s = prism_math::ops::sin(0.05 * i as Sample);
         }
         let inputs = [input.clone()];
         let mut outputs = [mono(4_800)];
@@ -317,7 +317,7 @@ mod tests {
         let mut node = CompressorNode::new(48_000, 1, params);
         let mut input = mono(128);
         for (i, s) in input.channel_mut(0).iter_mut().enumerate() {
-            *s = bevy_math::ops::sin(0.05 * i as Sample);
+            *s = prism_math::ops::sin(0.05 * i as Sample);
         }
         let inputs = [input.clone()];
         let mut outputs = [mono(128)];

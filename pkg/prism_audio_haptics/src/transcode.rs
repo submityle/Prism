@@ -20,7 +20,7 @@
 //! is re-implemented here. It emits a [`crate::waveform::HapticWaveform`] for a
 //! [`crate::backend::HapticBackend`].
 
-use bevy_math::ops;
+use prism_math::ops;
 use prism_audio_core::buffer::{AudioBuffer, ChannelLayout};
 use prism_audio_core::math::Sample;
 use prism_audio_core::nodes::biquad::{Biquad, BiquadKind};

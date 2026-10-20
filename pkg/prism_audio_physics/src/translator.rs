@@ -31,7 +31,7 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::mem;
 
-use bevy_math::Vec3;
+use prism_math::Vec3;
 
 use prism_audio_procedural::contact::{
     merge_impacts, ContactId, ImpactEvent, SeparationEvent, SustainEvent,

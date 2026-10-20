@@ -6,7 +6,7 @@
 //! [`Smoothed`] value that ramps toward its target over a configurable number
 //! of samples.
 
-use bevy_math::ops;
+use prism_math::ops;
 
 use crate::math::Sample;
 
@@ -143,7 +143,7 @@ impl Smoothed {
 
 #[inline]
 fn exp_neg_inv(tau: f32) -> f32 {
-    // exp(-1/tau) via the deterministic, cross-platform `bevy_math::ops`.
+    // exp(-1/tau) via the deterministic, cross-platform `prism_math::ops`.
     ops::exp(-1.0 / tau)
 }
 

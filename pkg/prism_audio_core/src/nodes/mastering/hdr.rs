@@ -40,7 +40,7 @@
 //! The only state is the scalar envelope and a [`LevelDetector`]; nothing is
 //! allocated after construction. [`HdrNode::process`] performs no allocation,
 //! takes no locks, cannot panic, and sanitises non-finite input to silence. All
-//! transcendental math routes through [`bevy_math::ops`] via the shared
+//! transcendental math routes through [`prism_math::ops`] via the shared
 //! [`math`](crate::math) helpers, so the result is bit-reproducible.
 //!
 //! # Provenance
@@ -328,7 +328,7 @@ impl AudioNode for HdrNode {
 mod tests {
     use super::*;
     use crate::buffer::{AudioBuffer, ChannelLayout};
-    use bevy_math::ops;
+    use prism_math::ops;
 
     const SR: u32 = 48_000;
 

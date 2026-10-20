@@ -37,7 +37,7 @@
 //! [`crate::config::MAX_SUPPORTED_REFLECTION_ORDER`] and a fixed per-query
 //! evaluation budget ([`MAX_IMAGE_SOURCE_EVALUATIONS`]), so the resolved set is
 //! bit-reproducible and the control-rate cost is bounded regardless of mesh
-//! size. Every transcendental routes through [`bevy_math::ops`]; the resolver
+//! size. Every transcendental routes through [`prism_math::ops`]; the resolver
 //! allocates only control-rate scratch and cannot panic.
 //!
 //! # Provenance
@@ -57,8 +57,8 @@
 use alloc::vec::Vec;
 use core::cmp::Ordering;
 
-use bevy_math::ops;
-use bevy_math::Vec3;
+use prism_math::ops;
+use prism_math::Vec3;
 use prism_audio_core::math::Sample;
 use prism_audio_spatial::doppler::SPEED_OF_SOUND_MPS;
 use prism_audio_spatial::geometry::{Emitter, Listener};
@@ -326,7 +326,7 @@ fn is_duplicate(paths: &[PropagationPath], candidate: &PropagationPath) -> bool 
     })
 }
 
-/// Deterministic Euclidean distance (routes through [`bevy_math::ops::sqrt`]).
+/// Deterministic Euclidean distance (routes through [`prism_math::ops::sqrt`]).
 #[inline]
 #[must_use]
 fn distance(a: Vec3, b: Vec3) -> Sample {
@@ -338,7 +338,7 @@ fn distance(a: Vec3, b: Vec3) -> Sample {
 mod tests {
     use super::{point_in_triangle, resolve_higher_order_reflections};
     use alloc::vec;
-    use bevy_math::{Quat, Vec3};
+    use prism_math::{Quat, Vec3};
     use prism_audio_spatial::geometry::{Emitter, Listener};
     use prism_audio_spatial::propagation::{AcousticMaterial, PathKind};
 

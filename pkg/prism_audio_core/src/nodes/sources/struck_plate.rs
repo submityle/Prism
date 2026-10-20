@@ -97,7 +97,7 @@
 //! only the widely documented plate-mode frequencies, resonator, and window
 //! formulas are used.
 
-use bevy_math::ops;
+use prism_math::ops;
 use core::f32::consts::TAU;
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};

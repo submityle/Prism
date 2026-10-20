@@ -75,7 +75,7 @@
 //! quantised or interpolation-order-limited delay line does not dictate the
 //! Doppler and the two can be tuned separately.
 
-use bevy_math::ops;
+use prism_math::ops;
 
 use prism_audio_core::math::Sample;
 use prism_audio_spatial::propagation::{PathKind, PropagationPath};
@@ -368,7 +368,7 @@ impl Default for PerPathDoppler {
 
 /// The one-pole glide coefficient for a step of `dt` seconds with time constant
 /// `tau`. A non-positive `tau` (or an actual update with no elapsed time) snaps
-/// to the target. The exponential routes through [`bevy_math::ops`] so the
+/// to the target. The exponential routes through [`prism_math::ops`] so the
 /// glide is bit-reproducible across targets.
 #[must_use]
 fn one_pole_alpha(dt: Sample, tau: Sample) -> Sample {
@@ -381,7 +381,7 @@ fn one_pole_alpha(dt: Sample, tau: Sample) -> Sample {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bevy_math::Vec3;
+    use prism_math::Vec3;
     use prism_audio_spatial::propagation::MAX_PROPAGATION_PATHS;
 
     /// Builds a path of the given kind at the given delay; the other fields do

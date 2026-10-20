@@ -11,9 +11,7 @@ prism_audio_core = { path = "../prism_audio_core" }
 prism_audio_assets = { path = "../prism_audio_assets" }
 prism_audio_resample = { path = "../prism_audio_resample" }
 prism_audio_hrtf = { path = "../prism_audio_hrtf" }
-bevy_math = { path = "../../crates/bevy_math", default-features = false, features = [
-  "nostd-libm",
-] }
+prism_math = { path = "../prism_math", default-features = false }
 serde = { version = "1", default-features = false, features = [
   "derive",
 ], optional = true }
@@ -28,7 +26,7 @@ std = [
   "prism_audio_assets/std",
   "prism_audio_resample/std",
   "prism_audio_hrtf/std",
-  "bevy_math/std",
+  "prism_math/std",
 ]
 serialize = [
   "dep:serde",
@@ -36,7 +34,7 @@ serialize = [
   "prism_audio_assets/serialize",
   "prism_audio_resample/serialize",
   "prism_audio_hrtf/serialize",
-  "bevy_math/serialize",
+  "prism_math/serialize",
 ]
 
 [lints]

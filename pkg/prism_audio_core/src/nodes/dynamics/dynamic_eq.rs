@@ -397,7 +397,7 @@ impl AudioNode for DynamicEqNode {
 mod tests {
     use super::*;
     use crate::buffer::{AudioBuffer, ChannelLayout};
-    use bevy_math::ops;
+    use prism_math::ops;
 
     const SR: u32 = 48_000;
 

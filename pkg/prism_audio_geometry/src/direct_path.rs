@@ -169,7 +169,7 @@ pub fn transmission_product(
 mod tests {
     use super::{resolve_direct, transmission_product};
     use alloc::vec;
-    use bevy_math::Vec3;
+    use prism_math::Vec3;
     use prism_audio_spatial::geometry::{Emitter, Listener};
     use prism_audio_spatial::material_spectrum::BandedAcousticMaterial;
     use prism_audio_spatial::propagation::{AcousticMaterial, PathKind};
@@ -216,7 +216,7 @@ mod tests {
         let scene = wall(AcousticMaterial::new(6.0206, 0.0));
         let listener = Listener::new(
             Vec3::new(-3.0, 0.0, 0.0),
-            bevy_math::Quat::IDENTITY,
+            prism_math::Quat::IDENTITY,
             Vec3::ZERO,
         );
         let emitter = Emitter::point(Vec3::new(3.0, 0.0, 0.0), Vec3::ZERO);
@@ -233,7 +233,7 @@ mod tests {
         let scene = wall(AcousticMaterial::new(40.0, 0.0));
         let listener = Listener::new(
             Vec3::new(-3.0, 0.0, 0.0),
-            bevy_math::Quat::IDENTITY,
+            prism_math::Quat::IDENTITY,
             Vec3::ZERO,
         );
         let emitter = Emitter::point(Vec3::new(3.0, 0.0, 0.0), Vec3::ZERO);

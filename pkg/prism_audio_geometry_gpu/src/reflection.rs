@@ -29,8 +29,8 @@
 
 use alloc::vec::Vec;
 
-use bevy_math::ops::sqrt;
-use bevy_math::Vec3;
+use prism_math::ops::sqrt;
+use prism_math::Vec3;
 use wgpu::{
     BindGroupDescriptor, BindGroupLayout, BindGroupLayoutDescriptor, BufferBindingType,
     CommandEncoderDescriptor, ComputePassDescriptor, ComputePipeline, ComputePipelineDescriptor,

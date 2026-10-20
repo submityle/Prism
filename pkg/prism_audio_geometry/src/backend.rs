@@ -187,7 +187,7 @@ impl PropagationBackend for GeometricBackend {
 mod tests {
     use super::GeometricBackend;
     use alloc::vec;
-    use bevy_math::{Quat, Vec3};
+    use prism_math::{Quat, Vec3};
     use prism_audio_spatial::geometry::{Emitter, Listener};
     use prism_audio_spatial::propagation::{
         PathKind, PropagationBackend, PropagationPath, MAX_PROPAGATION_PATHS,

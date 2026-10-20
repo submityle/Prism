@@ -22,9 +22,10 @@
 
 use alloc::vec::Vec;
 
-use bevy_math::Vec3;
+use glam::Vec3 as PhysicsVec3;
 use prism_audio_core::math::Sample;
 use prism_audio_spatial::material_spectrum::BandedAcousticMaterial;
+use prism_math::Vec3;
 use prism_physics_geometry::{Ray, TriangleMesh};
 
 use crate::material_map::MaterialTable;
@@ -33,6 +34,16 @@ use crate::material_map::MaterialTable;
 /// through before giving up, bounding the control-rate transmission walk even
 /// for pathological geometry.
 pub const MAX_MARCH_HITS: usize = 64;
+
+#[inline]
+fn to_physics_vec3(value: Vec3) -> PhysicsVec3 {
+    PhysicsVec3::new(value.x, value.y, value.z)
+}
+
+#[inline]
+fn from_physics_vec3(value: PhysicsVec3) -> Vec3 {
+    Vec3::new(value.x, value.y, value.z)
+}
 
 /// Why building an [`AcousticScene`] failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,6 +96,7 @@ impl AcousticScene {
                 }
             }
         }
+        let vertices = vertices.into_iter().map(to_physics_vec3).collect();
         Ok(Self {
             mesh: TriangleMesh::new(vertices, indices),
             materials,
@@ -131,14 +143,16 @@ impl AcousticScene {
     #[inline]
     #[must_use]
     pub fn triangle(&self, index: usize) -> Option<[Vec3; 3]> {
-        self.mesh.triangle(index)
+        self.mesh
+            .triangle(index)
+            .map(|triangle| triangle.map(from_physics_vec3))
     }
 
     /// The outward face unit normal of triangle `index`, or [`None`] if out of
     /// range or degenerate.
     #[must_use]
     pub fn triangle_normal(&self, index: usize) -> Option<Vec3> {
-        let [a, b, c] = self.mesh.triangle(index)?;
+        let [a, b, c] = self.triangle(index)?;
         let n = (b - a).cross(c - a);
         let n = n.normalize_or_zero();
         if n == Vec3::ZERO {
@@ -168,7 +182,11 @@ impl AcousticScene {
         if max_distance <= 0.0 {
             return None;
         }
-        let ray = Ray::with_tmax(origin, direction, max_distance);
+        let ray = Ray::with_tmax(
+            to_physics_vec3(origin),
+            to_physics_vec3(direction),
+            max_distance,
+        );
         let hit = self.mesh.ray_cast(&ray)?;
         if hit.t > max_distance {
             return None;
@@ -176,8 +194,8 @@ impl AcousticScene {
         Some(SceneRayHit {
             triangle: hit.triangle,
             distance: hit.t,
-            point: hit.point,
-            normal: hit.normal,
+            point: from_physics_vec3(hit.point),
+            normal: from_physics_vec3(hit.normal),
             material: self.materials.material(hit.triangle as usize),
         })
     }
@@ -245,9 +263,9 @@ impl AcousticScene {
 mod tests {
     use super::{AcousticScene, SceneBuildError, MAX_MARCH_HITS};
     use alloc::vec;
-    use bevy_math::Vec3;
     use prism_audio_spatial::material_spectrum::BandedAcousticMaterial;
     use prism_audio_spatial::propagation::AcousticMaterial;
+    use prism_math::Vec3;
 
     use crate::material_map::MaterialTable;
 

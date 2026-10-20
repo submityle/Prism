@@ -18,7 +18,7 @@
 //!
 //! # Determinism
 //!
-//! All math routes through [`bevy_math::ops`]; results are bit-reproducible.
+//! All math routes through [`prism_math::ops`]; results are bit-reproducible.
 //!
 //! # Provenance
 //! Original work; no Unreal Engine, Unity, Godot, Wwise, FMOD, Steam Audio,
@@ -34,7 +34,7 @@ pub mod vbap;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
-use bevy_math::{ops, Vec3};
+use prism_math::{ops, Vec3};
 
 use prism_audio_core::math::Sample;
 

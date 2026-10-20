@@ -30,7 +30,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use bevy_math::ops;
+use prism_math::ops;
 
 use prism_audio_core::fft::Fft;
 use prism_audio_core::math::Sample;
@@ -336,7 +336,7 @@ pub fn condition(dataset: &HrtfDataset, config: &HrtfConditionConfig) -> Conditi
 mod tests {
     use super::*;
     use alloc::vec::Vec;
-    use bevy_math::ops;
+    use prism_math::ops;
     use core::f32::consts::TAU;
     use prism_audio_hrtf::dataset::HrtfDataset;
 

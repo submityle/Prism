@@ -26,7 +26,7 @@
 //! [`Fft::new`]. [`Fft::forward`] and [`Fft::inverse`] borrow `&self`, operate
 //! in place on caller-owned scratch slices, perform no allocation, take no
 //! locks, and cannot panic in release builds (the length match is a
-//! `debug_assert`). All transcendental math routes through [`bevy_math::ops`],
+//! `debug_assert`). All transcendental math routes through [`prism_math::ops`],
 //! so the twiddle tables are bit-reproducible across platforms.
 //!
 //! # Provenance
@@ -35,7 +35,7 @@
 //! permutation, and the precomputed twiddle-factor table are textbook
 //! signal-processing constructions described in every digital-signal-processing
 //! reference (for example Oppenheim and Schafer). This module reuses only this
-//! crate's own [`Sample`] scalar and [`bevy_math::ops`]. It is pure classic DSP
+//! crate's own [`Sample`] scalar and [`prism_math::ops`]. It is pure classic DSP
 //! with no AI or ML and contains **no Unreal Engine, Unity, Godot, Wwise, FMOD,
 //! Steam Audio, or Google Resonance Audio source or derived code**; it is
 //! implemented purely from those publicly documented algorithms.
@@ -53,7 +53,7 @@
 
 use alloc::vec::Vec;
 
-use bevy_math::ops;
+use prism_math::ops;
 use core::f32::consts::TAU;
 
 use crate::math::Sample;

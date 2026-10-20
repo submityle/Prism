@@ -457,7 +457,7 @@
 //!
 //! Every generator is real-time safe: `process` performs no allocation, no
 //! locking, and no panics, and reproducible generators are fully deterministic
-//! across platforms via [`bevy_math::ops`].
+//! across platforms via [`prism_math::ops`].
 
 pub mod additive_oscillator;
 pub mod air_jet_flute;

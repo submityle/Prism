@@ -53,7 +53,7 @@
 //!
 //! # Determinism
 //!
-//! The pulse is a closed-form composition of [`bevy_math::ops`] trigonometry and
+//! The pulse is a closed-form composition of [`prism_math::ops`] trigonometry and
 //! the polynomial `PolyBLEP`; there are no iterative solvers and no table
 //! lookups, so a given `(sample_rate, params)` reproduces bit-identical audio on
 //! every platform. Any fundamental above the Nyquist guard is muted.
@@ -95,7 +95,7 @@
 //! Engine, Unity, Godot, Wwise, FMOD, Steam Audio, Google Resonance Audio, Web
 //! Audio, or STK was referenced.
 
-use bevy_math::ops;
+use prism_math::ops;
 use core::f32::consts::PI;
 
 use super::oscillator::poly_blep;

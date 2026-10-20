@@ -60,7 +60,7 @@
 //! The pluck excitation is a white-noise burst drawn from a self-contained
 //! xorshift64 PRNG seeded via `SplitMix64`, so two nodes constructed with the
 //! same `seed` and plucked identically emit bit-identical streams on every
-//! platform via [`bevy_math::ops`]. This matters for reproducible mixes,
+//! platform via [`prism_math::ops`]. This matters for reproducible mixes,
 //! regression tests, and networked lockstep.
 //!
 //! # Relationship
@@ -119,7 +119,7 @@
 
 use alloc::vec::Vec;
 
-use bevy_math::ops;
+use prism_math::ops;
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
 use crate::math::{flush_denormal, Sample};
@@ -159,7 +159,7 @@ pub const MAX_BODY_SIZE: Sample = 2.0;
 pub const OUTPUT_GAIN: Sample = 0.4;
 
 /// Natural logarithm of `1000`, i.e. the `60 dB` amplitude factor `10^3`. Baked
-/// as a constant because [`bevy_math::ops`] exposes `exp` but not `ln`.
+/// as a constant because [`prism_math::ops`] exposes `exp` but not `ln`.
 const LN_1000: Sample = 6.907_755_3;
 
 /// Body-mode centre frequencies in hertz at `body_size == 1`. These are the

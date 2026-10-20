@@ -49,7 +49,7 @@
 //! # Determinism
 //!
 //! Every partial is a plain phase accumulator advanced by closed-form
-//! [`bevy_math::ops`] trigonometry, and `2^x` is evaluated as
+//! [`prism_math::ops`] trigonometry, and `2^x` is evaluated as
 //! `exp(x * ln 2)` from the exact [`core::f32::consts::LN_2`] constant, so a
 //! given `(sample_rate, params)` reproduces bit-identical audio on every
 //! platform. Partials whose instantaneous frequency reaches the Nyquist guard
@@ -86,7 +86,7 @@
 //! Godot, Wwise, FMOD, Steam Audio, Google Resonance Audio, Web Audio, or STK
 //! was referenced.
 
-use bevy_math::ops;
+use prism_math::ops;
 use core::f32::consts::{LN_2, TAU};
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};

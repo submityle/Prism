@@ -25,8 +25,8 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::f32::consts::PI;
 
-use bevy_math::ops;
-use bevy_math::Vec3;
+use prism_math::ops;
+use prism_math::Vec3;
 use prism_audio_core::math::Sample;
 use prism_audio_spatial::doppler::SPEED_OF_SOUND_MPS;
 use prism_audio_spatial::UtdWedge;
@@ -140,7 +140,7 @@ pub(crate) fn least_detour_point(start: Vec3, end: Vec3, listener: Vec3, emitter
     start + (end - start) * t
 }
 
-/// Deterministic Euclidean distance (routes through [`bevy_math::ops::sqrt`]).
+/// Deterministic Euclidean distance (routes through [`prism_math::ops::sqrt`]).
 #[inline]
 #[must_use]
 pub(crate) fn distance(a: Vec3, b: Vec3) -> Sample {
@@ -198,7 +198,7 @@ pub(crate) fn utd_wedge_index(normals: &[Vec3]) -> Sample {
 mod tests {
     use super::{diffracting_edges, least_detour_point, utd_wedge_index};
     use alloc::vec;
-    use bevy_math::Vec3;
+    use prism_math::Vec3;
     use prism_audio_spatial::propagation::AcousticMaterial;
 
     use crate::material_map::MaterialTable;

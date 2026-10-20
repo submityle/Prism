@@ -17,7 +17,7 @@
 //! [`crate::kinematics`] and [`crate::impulse`] to turn physics truth into the
 //! impact/sustain drive assembled by [`crate::translator`].
 
-use bevy_math::Vec3;
+use prism_math::Vec3;
 
 use crate::material::AudioMaterialId;
 

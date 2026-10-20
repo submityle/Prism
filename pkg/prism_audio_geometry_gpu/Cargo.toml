@@ -11,9 +11,7 @@ prism_audio_core = { path = "../prism_audio_core" }
 prism_audio_spatial = { path = "../prism_audio_spatial" }
 prism_audio_geometry = { path = "../prism_audio_geometry" }
 glam = { version = "0.33.2", default-features = false, features = ["std"] }
-bevy_math = { path = "../../crates/bevy_math", default-features = false, features = [
-  "nostd-libm",
-] }
+prism_math = { path = "../prism_math", default-features = false }
 wgpu = { version = "30", default-features = false, features = ["wgsl", "metal"] }
 bytemuck = { version = "1.5", features = ["derive"] }
 futures-lite = "2"

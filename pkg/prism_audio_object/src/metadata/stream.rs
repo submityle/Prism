@@ -28,7 +28,7 @@ use crate::metadata::ObjectMetadata;
 /// # Examples
 ///
 /// ```
-/// use bevy_math::Vec3;
+/// use prism_math::Vec3;
 /// use prism_audio_object::metadata::stream::MetadataStream;
 /// use prism_audio_object::metadata::ObjectMetadata;
 ///
@@ -136,7 +136,7 @@ impl MetadataStream {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bevy_math::{ops, Vec3};
+    use prism_math::{ops, Vec3};
 
     const EPS: Sample = 1e-5;
 

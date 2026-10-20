@@ -13,7 +13,7 @@
 
 use alloc::vec::Vec;
 
-use bevy_math::ops;
+use prism_math::ops;
 use prism_audio_core::math::{linear_to_db, Sample};
 use prism_audio_core::nodes::analysis::spectrum::SpectrumAnalyzer;
 

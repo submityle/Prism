@@ -54,7 +54,7 @@
 //! as silence, mismatched channel counts and zero-length blocks degrade
 //! gracefully. Two instances built with the same [`DitherParams`] produce
 //! bit-identical output, so the stage is golden-testable. All transcendental
-//! math routes through [`bevy_math::ops`].
+//! math routes through [`prism_math::ops`].
 //!
 //! # Provenance
 //!
@@ -85,7 +85,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use bevy_math::ops;
+use prism_math::ops;
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
 use crate::math::{flush_denormal, Sample};

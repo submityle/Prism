@@ -356,7 +356,7 @@ mod tests {
 
     #[inline]
     fn ops_sin(x: Sample) -> Sample {
-        bevy_math::ops::sin(x)
+        prism_math::ops::sin(x)
     }
 
     /// Fills a mono buffer with a steady sine of the given linear amplitude and

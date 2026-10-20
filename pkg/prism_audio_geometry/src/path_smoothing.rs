@@ -55,7 +55,7 @@
 //! wall-clock step. It reuses [`prism_audio_spatial::band_spectrum`] for the
 //! three propagation bands and nothing else.
 
-use bevy_math::{ops, Vec3};
+use prism_math::{ops, Vec3};
 
 use prism_audio_core::math::Sample;
 use prism_audio_spatial::band_spectrum::{BandGains, PROPAGATION_BAND_COUNT};
@@ -451,7 +451,7 @@ fn kind_rank(kind: PathKind) -> u8 {
 /// The one-pole smoothing coefficient for a step of `dt` seconds toward a target
 /// with time constant `tau` seconds: `1 - exp(-dt / tau)`, clamped to `[0, 1]`.
 /// A non-positive `tau` (or a `dt` long enough to converge) yields `1.0`, i.e.
-/// snap to the target. The exponential routes through [`bevy_math::ops`] so the
+/// snap to the target. The exponential routes through [`prism_math::ops`] so the
 /// glide is bit-reproducible across targets.
 #[must_use]
 fn one_pole_alpha(dt: Sample, tau: Sample) -> Sample {
@@ -515,7 +515,7 @@ fn ease_direction(current: Vec3, target: Vec3, alpha: Sample) -> Vec3 {
 }
 
 /// Normalises `v`, returning `None` when it is non-finite or shorter than
-/// [`DIRECTION_EPSILON_SQ`]. The length routes through [`bevy_math::ops`] so the
+/// [`DIRECTION_EPSILON_SQ`]. The length routes through [`prism_math::ops`] so the
 /// result is bit-reproducible across targets.
 fn normalize(v: Vec3) -> Option<Vec3> {
     let len_sq = v.dot(v);

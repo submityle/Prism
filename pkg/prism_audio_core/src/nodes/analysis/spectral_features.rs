@@ -59,7 +59,7 @@
 //! reused thereafter, so the steady-state hot path performs no allocation,
 //! takes no locks, and cannot panic. [`SpectralFeaturesNode`] additionally owns
 //! a [`SpectrumAnalyzer`], whose own buffers are allocated once at
-//! construction. All transcendental math routes through [`bevy_math::ops`], so
+//! construction. All transcendental math routes through [`prism_math::ops`], so
 //! every descriptor is bit-reproducible across platforms. Non-finite or empty
 //! inputs are treated as a silent frame.
 //!
@@ -94,7 +94,7 @@
 
 use alloc::vec::Vec;
 
-use bevy_math::ops;
+use prism_math::ops;
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
 use crate::math::Sample;
@@ -247,7 +247,7 @@ impl SpectralFeatures {
             if power > max_p {
                 max_p = power;
             }
-            // bevy_math::ops operates on f32; accumulate the result in f64.
+            // prism_math::ops operates on f32; accumulate the result in f64.
             sum_ln_p += f64::from(ops::ln((power + POWER_FLOOR) as Sample));
         }
 
@@ -412,13 +412,13 @@ fn sanitise_fraction(fraction: Sample) -> Sample {
     }
 }
 
-/// `sqrt` of a non-negative `f64`, routed through [`bevy_math::ops`] in `f32`.
+/// `sqrt` of a non-negative `f64`, routed through [`prism_math::ops`] in `f32`.
 #[inline]
 fn ops_sqrt(x: f64) -> f64 {
     f64::from(ops::sqrt(x.max(0.0) as Sample))
 }
 
-/// `exp` of an `f64`, routed through [`bevy_math::ops`] in `f32`.
+/// `exp` of an `f64`, routed through [`prism_math::ops`] in `f32`.
 #[inline]
 fn ops_exp(x: f64) -> f64 {
     f64::from(ops::exp(x as Sample))

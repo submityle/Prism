@@ -3,7 +3,7 @@
 //! All functions here are branch-light and safe to call from the real-time
 //! audio thread; none allocate.
 
-use bevy_math::ops;
+use prism_math::ops;
 use core::f32::consts::PI;
 
 /// The audio sample scalar used throughout the engine.
@@ -131,7 +131,7 @@ pub fn lerp(a: Sample, b: Sample, t: Sample) -> Sample {
     a + (b - a) * t.clamp(0.0, 1.0)
 }
 
-/// Computes `10^x` deterministically via [`bevy_math::ops`].
+/// Computes `10^x` deterministically via [`prism_math::ops`].
 #[inline]
 fn exp10(x: Sample) -> Sample {
     ops::exp(x * core::f32::consts::LN_10)

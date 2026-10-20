@@ -47,6 +47,14 @@ pub mod f32 {
         libm::atan2f(y, x)
     }
     #[inline]
+    pub fn atan(x: f32) -> f32 {
+        libm::atanf(x)
+    }
+    #[inline]
+    pub fn hypot(x: f32, y: f32) -> f32 {
+        libm::hypotf(x, y)
+    }
+    #[inline]
     pub fn abs(x: f32) -> f32 {
         libm::fabsf(x)
     }
@@ -69,6 +77,50 @@ pub mod f32 {
     #[inline]
     pub fn powf(x: f32, y: f32) -> f32 {
         libm::powf(x, y)
+    }
+    #[inline]
+    pub fn exp2(x: f32) -> f32 {
+        libm::exp2f(x)
+    }
+    #[inline]
+    pub fn log2(x: f32) -> f32 {
+        libm::log2f(x)
+    }
+    #[inline]
+    pub fn log10(x: f32) -> f32 {
+        libm::log10f(x)
+    }
+    #[inline]
+    pub fn exp_m1(x: f32) -> f32 {
+        libm::expm1f(x)
+    }
+    #[inline]
+    pub fn ln_1p(x: f32) -> f32 {
+        libm::log1pf(x)
+    }
+    #[inline]
+    pub fn sinh(x: f32) -> f32 {
+        libm::sinhf(x)
+    }
+    #[inline]
+    pub fn cosh(x: f32) -> f32 {
+        libm::coshf(x)
+    }
+    #[inline]
+    pub fn tanh(x: f32) -> f32 {
+        libm::tanhf(x)
+    }
+    #[inline]
+    pub fn asinh(x: f32) -> f32 {
+        libm::asinhf(x)
+    }
+    #[inline]
+    pub fn acosh(x: f32) -> f32 {
+        libm::acoshf(x)
+    }
+    #[inline]
+    pub fn atanh(x: f32) -> f32 {
+        libm::atanhf(x)
     }
 
     #[inline]

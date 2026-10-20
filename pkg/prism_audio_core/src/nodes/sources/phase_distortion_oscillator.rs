@@ -75,7 +75,7 @@
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
 use crate::math::Sample;
 use crate::param::{Ramp, Smoothed};
-use bevy_math::ops;
+use prism_math::ops;
 
 const TAU: Sample = core::f32::consts::TAU;
 

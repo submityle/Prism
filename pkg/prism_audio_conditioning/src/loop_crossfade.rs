@@ -41,7 +41,7 @@
 //! sections 10, 20, and 51. Pairs with [`crate::delay_trim`], which rebases
 //! loop points onto the trimmed program before this stage bakes the seam.
 
-use bevy_math::ops;
+use prism_math::ops;
 
 use core::f32::consts::FRAC_PI_2;
 

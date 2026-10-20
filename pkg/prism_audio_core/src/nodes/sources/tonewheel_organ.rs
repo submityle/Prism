@@ -54,7 +54,7 @@
 //! # Determinism
 //!
 //! Every footage is a plain phase accumulator advanced by closed-form
-//! [`bevy_math::ops`] trigonometry, and the tempered ratios use
+//! [`prism_math::ops`] trigonometry, and the tempered ratios use
 //! `exp(x * ln 2)` from the exact [`core::f32::consts::LN_2`] constant, so a
 //! given `(sample_rate, params)` reproduces bit-identical audio on every
 //! platform. Any footage still above the Nyquist guard after foldback is muted.
@@ -93,7 +93,7 @@
 //! Godot, Wwise, FMOD, Steam Audio, Google Resonance Audio, Web Audio, or STK
 //! was referenced.
 
-use bevy_math::ops;
+use prism_math::ops;
 use core::f32::consts::{LN_2, TAU};
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};

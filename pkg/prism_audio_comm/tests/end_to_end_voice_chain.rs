@@ -10,7 +10,7 @@
 //! adaptive [`JitterBuffer`], decoded or filled by the
 //! [`PacketLossConcealer`], and finally handed to the spatial layer as a
 //! [`PositionalVoiceParams`] set computed by [`PositionalVoice`] from real
-//! [`bevy_math::Vec3`] / [`bevy_math::Quat`] listener poses. The deterministic
+//! [`prism_math::Vec3`] / [`prism_math::Quat`] listener poses. The deterministic
 //! [`CommRng`] backs reproducibility checks. Signals are built from direct
 //! current, ramps, triangles, and the crate's own integer noise generator so
 //! no transcendental standard-library floating-point math is required.
@@ -26,10 +26,10 @@
 //! Validates design section 45 (real-time communication: uplink pre-processing,
 //! codec/transport abstractions, jitter buffer, packet-loss concealment, and
 //! positional voice). Depends on the public API of `prism_audio_comm`, the
-//! `Sample` scalar from `prism_audio_core`, and `bevy_math` vector/quaternion
+//! `Sample` scalar from `prism_audio_core`, and `prism_math` vector/quaternion
 //! types.
 
-use bevy_math::{Quat, Vec3};
+use prism_math::{Quat, Vec3};
 use prism_audio_core::math::Sample;
 
 use prism_audio_comm::{

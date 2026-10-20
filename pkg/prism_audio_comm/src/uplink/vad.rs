@@ -18,7 +18,7 @@
 //! Built on the sample scalar and deterministic math of `prism_audio_core`; it
 //! is the final stage of [`crate::uplink::UplinkChain`] and gates the encoder.
 
-use bevy_math::ops;
+use prism_math::ops;
 use prism_audio_core::math::{flush_denormal, Sample};
 
 /// Tuning parameters for [`VoiceActivityDetector`].

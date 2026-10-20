@@ -162,7 +162,7 @@ mod tests {
     use crate::bed::direction_from_angles;
     use crate::clustering::total_energy;
     use crate::object::{AudioObject, ObjectId};
-    use bevy_math::ops;
+    use prism_math::ops;
 
     const EPS: Sample = 1e-3;
 

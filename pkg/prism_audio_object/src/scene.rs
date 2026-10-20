@@ -119,7 +119,7 @@ mod tests {
     use super::*;
     use crate::metadata::ObjectMetadata;
     use crate::object::ObjectId;
-    use bevy_math::{ops, Vec3};
+    use prism_math::{ops, Vec3};
 
     const EPS: Sample = 1e-5;
 

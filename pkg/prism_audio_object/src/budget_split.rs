@@ -107,7 +107,7 @@ fn more_important(a: &AudioObject, b: &AudioObject) -> core::cmp::Ordering {
 /// The result is deterministic for a given input.
 ///
 /// ```
-/// use bevy_math::Vec3;
+/// use prism_math::Vec3;
 /// use prism_audio_object::bed::BedLayout;
 /// use prism_audio_object::budget::ObjectBudget;
 /// use prism_audio_object::budget_split::split_to_budget;
@@ -164,7 +164,7 @@ mod tests {
     use super::*;
     use crate::bed::direction_from_angles;
     use crate::object::ObjectId;
-    use bevy_math::ops;
+    use prism_math::ops;
 
     const EPS: Sample = 1e-4;
 

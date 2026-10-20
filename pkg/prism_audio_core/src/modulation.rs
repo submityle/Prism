@@ -6,7 +6,7 @@
 //! read once per sample and used as a control signal rather than mixed into the
 //! audio itself.
 
-use bevy_math::ops;
+use prism_math::ops;
 use core::f32::consts::TAU;
 
 use crate::math::Sample;

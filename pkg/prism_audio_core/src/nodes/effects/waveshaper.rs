@@ -25,7 +25,7 @@
 //! All filter state (per-channel interpolation/decimation histories and the dry
 //! delay lines) is pre-allocated at construction, so [`WaveshaperNode::process`]
 //! performs no allocation, takes no locks, and cannot panic. All transcendental
-//! math routes through [`bevy_math::ops`] for bit-reproducible output.
+//! math routes through [`prism_math::ops`] for bit-reproducible output.
 //!
 //! # Provenance
 //!
@@ -46,7 +46,7 @@
 
 use alloc::vec::Vec;
 
-use bevy_math::ops;
+use prism_math::ops;
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
 use crate::math::{flush_denormal, Sample};

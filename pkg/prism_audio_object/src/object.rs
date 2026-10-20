@@ -12,7 +12,7 @@
 //!
 //! # Determinism
 //!
-//! Direction/energy helpers route length math through [`bevy_math::ops`] and
+//! Direction/energy helpers route length math through [`prism_math::ops`] and
 //! are bit-reproducible across targets.
 //!
 //! # Provenance
@@ -25,7 +25,7 @@
 //! [`crate::scene`], [`crate::clustering`], [`crate::pan`], and
 //! [`crate::fold`].
 
-use bevy_math::{ops, Vec3};
+use prism_math::{ops, Vec3};
 
 use prism_audio_core::math::Sample;
 

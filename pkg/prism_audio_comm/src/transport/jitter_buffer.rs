@@ -22,7 +22,7 @@
 //! [`crate::pipeline`].
 
 use alloc::collections::BTreeMap;
-use bevy_math::ops;
+use prism_math::ops;
 use prism_audio_core::math::Sample;
 
 use crate::transport::packet::VoicePacket;

@@ -48,7 +48,7 @@
 use alloc::vec::Vec;
 use core::cmp::Ordering;
 
-use bevy_math::Vec3;
+use prism_math::Vec3;
 use prism_audio_geometry::GeometricConfig;
 use prism_audio_spatial::doppler::SPEED_OF_SOUND_MPS;
 use prism_audio_spatial::geometry::{Emitter, Listener};
@@ -345,7 +345,7 @@ fn is_duplicate(existing: &[PropagationPath], candidate: &PropagationPath) -> bo
 mod tests {
     use super::*;
 
-    use bevy_math::{Quat, Vec3};
+    use prism_math::{Quat, Vec3};
     use prism_audio_geometry::direct_path::resolve_direct;
     use prism_audio_geometry::reflection_path::resolve_reflections;
     use prism_audio_geometry::{AcousticScene, GeometricBackend, MaterialTable};

@@ -113,7 +113,7 @@ impl DcBlockerParams {
 fn pole_for(cutoff_hz: Sample, sample_rate: u32) -> Sample {
     let fs = (sample_rate.max(1)) as Sample;
     let fc = cutoff_hz.clamp(MIN_DC_BLOCKER_CUTOFF_HZ, MAX_DC_BLOCKER_CUTOFF_HZ);
-    let r = bevy_math::ops::exp(-core::f32::consts::TAU * fc / fs);
+    let r = prism_math::ops::exp(-core::f32::consts::TAU * fc / fs);
     r.clamp(0.0, MAX_POLE)
 }
 
@@ -263,10 +263,10 @@ mod tests {
         }
     }
 
-    /// `bevy_math::ops::sin` wrapper so tests avoid an otherwise-unused import.
+    /// `prism_math::ops::sin` wrapper so tests avoid an otherwise-unused import.
     #[inline]
     fn ops_sin(x: Sample) -> Sample {
-        bevy_math::ops::sin(x)
+        prism_math::ops::sin(x)
     }
 
     fn sine(freq: Sample, len: usize) -> Vec<Sample> {

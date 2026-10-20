@@ -16,7 +16,7 @@
 //!
 //! # Determinism
 //!
-//! All trigonometry routes through [`bevy_math::ops`] (libm-backed) so the
+//! All trigonometry routes through [`prism_math::ops`] (libm-backed) so the
 //! resolved directions are bit-reproducible across targets.
 //!
 //! # Provenance
@@ -32,7 +32,7 @@
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
-use bevy_math::{ops, Vec3};
+use prism_math::{ops, Vec3};
 use core::f32::consts::PI;
 
 use prism_audio_core::math::Sample;
@@ -104,7 +104,7 @@ const SURROUND_7_1_4: &[SpeakerSpec] = &[
 ];
 
 /// Converts whole-degree azimuth/elevation into a unit listener-local
-/// direction using only [`bevy_math::ops`] trigonometry.
+/// direction using only [`prism_math::ops`] trigonometry.
 #[must_use]
 pub fn direction_from_angles(azimuth_deg: Sample, elevation_deg: Sample) -> Vec3 {
     let az = azimuth_deg * (PI / 180.0);

@@ -41,7 +41,7 @@
 //! as silence so the ring and the transform can never be poisoned by a `NaN`.
 //! Reading the spectrum back ([`SpectrumAnalyzer::magnitudes`]) borrows the
 //! internal buffer and copies nothing. All transcendental math routes through
-//! [`bevy_math::ops`], so the transform is bit-reproducible across platforms.
+//! [`prism_math::ops`], so the transform is bit-reproducible across platforms.
 //!
 //! # Provenance
 //!
@@ -71,7 +71,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use bevy_math::ops;
+use prism_math::ops;
 use core::f32::consts::TAU;
 
 use crate::fft::Fft;

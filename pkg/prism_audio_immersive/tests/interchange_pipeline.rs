@@ -28,7 +28,7 @@
 //! `prism_audio_spatial` (listener geometry). It adds no new engine code; it is
 //! a cross-module acceptance harness over the existing public API.
 
-use bevy_math::{ops, Quat, Vec3};
+use prism_math::{ops, Quat, Vec3};
 
 use prism_audio_immersive::adm::chna::AudioId;
 use prism_audio_immersive::adm::xml::{from_axml_bytes, to_axml_bytes};

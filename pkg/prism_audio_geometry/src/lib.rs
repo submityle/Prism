@@ -99,7 +99,7 @@
 //!
 //! # Determinism
 //!
-//! Every transcendental routes through [`bevy_math::ops`] (libm-backed) exactly
+//! Every transcendental routes through [`prism_math::ops`] (libm-backed) exactly
 //! as the spatial acoustics helpers do, so the resolved delays, gains, and
 //! corners are bit-reproducible across targets and can be golden-compared.
 //! The backend allocates only control-rate scratch (never on the real-time

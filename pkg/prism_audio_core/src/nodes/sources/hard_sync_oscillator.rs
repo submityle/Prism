@@ -397,7 +397,7 @@ mod tests {
             return 0.0;
         }
         let omega = core::f32::consts::TAU * freq / sample_rate as Sample;
-        let coeff = 2.0 * bevy_math::ops::cos(omega);
+        let coeff = 2.0 * prism_math::ops::cos(omega);
         let mut s_prev = 0.0;
         let mut s_prev2 = 0.0;
         for &x in samples {

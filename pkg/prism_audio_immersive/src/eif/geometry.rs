@@ -30,7 +30,7 @@
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
-use bevy_math::Vec3;
+use prism_math::Vec3;
 
 use prism_audio_core::math::Sample;
 
@@ -293,7 +293,7 @@ impl GeometryPrimitive {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bevy_math::ops;
+    use prism_math::ops;
 
     const EPS: Sample = 1e-4;
 

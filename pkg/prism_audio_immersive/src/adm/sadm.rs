@@ -364,7 +364,7 @@ impl<'a> Reader<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bevy_math::ops;
+    use prism_math::ops;
 
     const EPS: Sample = 1e-5;
 

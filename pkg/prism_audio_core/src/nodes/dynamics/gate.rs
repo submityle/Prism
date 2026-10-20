@@ -93,7 +93,7 @@ impl ExpanderGateNode {
     pub fn new(sample_rate: u32, _channels: usize, params: GateParams) -> Self {
         let closed_gain = db_to_linear(-params.range_db.max(0.0));
         let hold_frames =
-            bevy_math::ops::round(params.hold_ms.max(0.0) * (sample_rate as Sample) * 0.001) as u32;
+            prism_math::ops::round(params.hold_ms.max(0.0) * (sample_rate as Sample) * 0.001) as u32;
         Self {
             threshold_db: params.threshold_db,
             ratio: params.ratio.max(1.0),
@@ -195,7 +195,7 @@ mod tests {
         let mut node = ExpanderGateNode::new(48_000, 1, params);
         let mut input = mono(4_800);
         for (i, s) in input.channel_mut(0).iter_mut().enumerate() {
-            *s = 0.8 * bevy_math::ops::sin(0.05 * i as Sample);
+            *s = 0.8 * prism_math::ops::sin(0.05 * i as Sample);
         }
         let inputs = [input.clone()];
         let mut outputs = [mono(4_800)];
@@ -228,7 +228,7 @@ mod tests {
         let mut input = mono(4_800);
         for (i, s) in input.channel_mut(0).iter_mut().enumerate() {
             // -60 dBFS hiss, well below the -45 dB threshold.
-            *s = 0.001 * bevy_math::ops::sin(0.3 * i as Sample);
+            *s = 0.001 * prism_math::ops::sin(0.3 * i as Sample);
         }
         let inputs = [input.clone()];
         let mut outputs = [mono(4_800)];

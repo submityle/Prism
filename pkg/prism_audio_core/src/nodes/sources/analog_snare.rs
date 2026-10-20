@@ -92,7 +92,7 @@
 //! resonant filter and shaped by an envelope, so the whole voice reproduces
 //! bit-for-bit.
 
-use bevy_math::ops;
+use prism_math::ops;
 use core::f32::consts::TAU;
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};

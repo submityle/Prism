@@ -20,7 +20,7 @@
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
-use bevy_math::Vec3;
+use prism_math::Vec3;
 
 use crate::body::BodyAudioId;
 

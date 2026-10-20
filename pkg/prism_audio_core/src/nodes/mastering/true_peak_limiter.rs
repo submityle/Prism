@@ -52,7 +52,7 @@
 //! [`TruePeakLimiter::new`]. [`TruePeakLimiterNode::process`] performs no
 //! allocation, takes no locks, cannot panic, and sanitises non-finite input to
 //! silence so a stray `NaN`/`Inf` cannot poison the state. All transcendental
-//! math routes through [`bevy_math::ops`] via the shared
+//! math routes through [`prism_math::ops`] via the shared
 //! [`math`](crate::math) helpers, so the result is bit-reproducible.
 //!
 //! # Provenance
@@ -240,7 +240,7 @@ impl TruePeakLimiter {
         // Look-ahead length (host frames). At least one frame so the detector
         // always leads the output.
         let lookahead =
-            (bevy_math::ops::round(params.lookahead_ms.max(0.0) * (sr as Sample) * 0.001) as usize)
+            (prism_math::ops::round(params.lookahead_ms.max(0.0) * (sr as Sample) * 0.001) as usize)
                 .max(1);
         // The oversampler's own group delay eats into the usable look-ahead, so
         // the signal is delayed by both to keep the detector ahead of output.
@@ -454,7 +454,7 @@ mod tests {
     use super::*;
     use crate::buffer::{AudioBuffer, ChannelLayout};
     use crate::oversampler::Oversampler;
-    use bevy_math::ops;
+    use prism_math::ops;
     use core::f32::consts::PI;
 
     const SR: u32 = 48_000;

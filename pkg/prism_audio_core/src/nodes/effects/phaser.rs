@@ -210,7 +210,7 @@ impl AudioNode for PhaserNode {
 mod tests {
     use super::*;
     use crate::buffer::{AudioBuffer, ChannelLayout};
-    use bevy_math::ops;
+    use prism_math::ops;
 
     fn ctx(frames: usize) -> RenderContext {
         RenderContext {

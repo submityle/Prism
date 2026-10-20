@@ -10,9 +10,8 @@ publish = false
 prism_audio_core = { path = "../prism_audio_core", default-features = false }
 prism_audio_spatial = { path = "../prism_audio_spatial", default-features = false }
 prism_physics_geometry = { path = "../prism_physics_geometry", default-features = false }
-bevy_math = { path = "../../crates/bevy_math", default-features = false, features = [
-  "nostd-libm",
-] }
+glam = { version = "0.33.2", default-features = false }
+prism_math = { path = "../prism_math", default-features = false }
 serde = { version = "1", default-features = false, features = [
   "derive",
 ], optional = true }
@@ -26,14 +25,14 @@ std = [
   "prism_audio_core/std",
   "prism_audio_spatial/std",
   "prism_physics_geometry/std",
-  "bevy_math/std",
+  "prism_math/std",
 ]
 serialize = [
   "dep:serde",
   "prism_audio_core/serialize",
   "prism_audio_spatial/serialize",
   "prism_physics_geometry/serialize",
-  "bevy_math/serialize",
+  "prism_math/serialize",
 ]
 
 [lints]

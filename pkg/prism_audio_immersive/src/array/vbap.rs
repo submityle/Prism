@@ -21,7 +21,7 @@
 
 use alloc::vec::Vec;
 
-use bevy_math::Vec3;
+use prism_math::Vec3;
 use prism_audio_core::math::Sample;
 use prism_audio_object::pan::vbap::vbap_gains;
 
@@ -37,7 +37,7 @@ use crate::array::layout::ArrayLayout;
 /// # Examples
 ///
 /// ```
-/// use bevy_math::Vec3;
+/// use prism_math::Vec3;
 /// use prism_audio_immersive::array::layout::{ArrayLayout, ArraySpeaker};
 /// use prism_audio_immersive::array::vbap::VbapArrayPanner;
 ///
@@ -105,7 +105,7 @@ impl VbapArrayPanner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bevy_math::ops;
+    use prism_math::ops;
     use prism_audio_object::bed::{direction_from_angles, BedLayout};
 
     use crate::array::layout::ArrayLayout;

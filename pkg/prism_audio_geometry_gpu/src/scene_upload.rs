@@ -95,13 +95,13 @@ impl GpuScene {
         let mut triangles = Vec::with_capacity(count);
         for index in 0..count {
             let [a, b, c] = scene.triangle(index).unwrap_or([
-                bevy_math::Vec3::ZERO,
-                bevy_math::Vec3::ZERO,
-                bevy_math::Vec3::ZERO,
+                prism_math::Vec3::ZERO,
+                prism_math::Vec3::ZERO,
+                prism_math::Vec3::ZERO,
             ]);
             let normal = scene
                 .triangle_normal(index)
-                .unwrap_or(bevy_math::Vec3::ZERO);
+                .unwrap_or(prism_math::Vec3::ZERO);
             let material = scene.material(index);
             let transmission = material.transmission().bands();
             let reflection = material.reflection().bands();

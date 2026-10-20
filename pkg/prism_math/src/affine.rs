@@ -9,6 +9,7 @@ use core::ops::Mul;
 
 /// A 3D affine transform stored as a linear 3x3 matrix and a translation.
 #[derive(Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
 #[repr(C)]
 pub struct Affine3 {
     /// Linear part (rotation * scale * shear).

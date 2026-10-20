@@ -59,7 +59,7 @@
 //! The pluck excitation is a white-noise burst drawn from a self-contained
 //! xorshift64 PRNG seeded via `SplitMix64`, so two nodes constructed with the
 //! same `seed` and plucked identically emit bit-identical streams on every
-//! platform via [`bevy_math::ops`]. This matters for reproducible mixes,
+//! platform via [`prism_math::ops`]. This matters for reproducible mixes,
 //! regression tests, and networked lockstep.
 //!
 //! # Relationship
@@ -101,7 +101,7 @@
 
 use alloc::vec::Vec;
 
-use bevy_math::ops;
+use prism_math::ops;
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
 use crate::math::{flush_denormal, Sample};

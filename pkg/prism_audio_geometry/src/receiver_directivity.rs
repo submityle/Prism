@@ -56,7 +56,7 @@
 //! arrival by how the *source* radiates along its departure, this one by how the
 //! *listener* hears along its arrival; the two compose cleanly when both run.
 
-use bevy_math::{ops, Vec3};
+use prism_math::{ops, Vec3};
 
 use prism_audio_core::math::Sample;
 use prism_audio_spatial::band_spectrum::{
@@ -124,7 +124,7 @@ pub fn weight_path(path: &mut PropagationPath, config: &GeometricConfig) {
 }
 
 /// Cosine of the angle between the receiver's forward axis and `arrival_dir`,
-/// the latter normalised deterministically through [`bevy_math::ops`].
+/// the latter normalised deterministically through [`prism_math::ops`].
 ///
 /// Returns `1.0` (on axis) when `arrival_dir` is too short to have a
 /// well-defined bearing, and clamps the result into `[-1, 1]` for robustness.
@@ -136,7 +136,7 @@ fn arrival_cosine(arrival_dir: Vec3) -> Sample {
 }
 
 /// Normalises `v`, returning `None` when it is non-finite or shorter than
-/// [`COINCIDENT_EPSILON_SQ`]. The length routes through [`bevy_math::ops`] so
+/// [`COINCIDENT_EPSILON_SQ`]. The length routes through [`prism_math::ops`] so
 /// the result is bit-reproducible across targets.
 fn normalize(v: Vec3) -> Option<Vec3> {
     let len_sq = v.dot(v);

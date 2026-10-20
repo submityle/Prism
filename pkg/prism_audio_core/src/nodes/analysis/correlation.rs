@@ -58,7 +58,7 @@
 
 use core::f32::consts::FRAC_1_SQRT_2;
 
-use bevy_math::ops;
+use prism_math::ops;
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
 use crate::math::{flush_denormal, linear_to_db, Sample};

@@ -72,7 +72,7 @@
 //!
 //! The breath turbulence is a self-contained seeded `xorshift64` stream, so two
 //! [`HelmholtzResonatorNode`]s built with the same sample rate, parameters, and
-//! seed emit bit-identical streams on every platform via [`bevy_math::ops`]. A
+//! seed emit bit-identical streams on every platform via [`prism_math::ops`]. A
 //! tiny deterministic initial band-pass displacement guarantees the oscillator
 //! self-starts even with the turbulence disabled, and [`AudioNode::reset`]
 //! restores that displacement, clears the filter, and reseeds the generator to
@@ -116,7 +116,7 @@
 //! Steam Audio, Google Resonance Audio, the Web Audio API, or STK. This is a
 //! pure classical-DSP implementation with no AI or machine-learning component.
 
-use bevy_math::ops;
+use prism_math::ops;
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
 use crate::math::{flush_denormal, Sample};

@@ -17,7 +17,7 @@
 //! re-exported and therefore not constructible from an integration test; the
 //! transcoder output is modelled directly as a `HapticWaveform` so the felt
 //! side of the chain is exercised with realistic dual-band data. Likewise
-//! `SpatialWeighting::weight_direction` needs a `bevy_math` vector that is not
+//! `SpatialWeighting::weight_direction` needs a `prism_math` vector that is not
 //! reachable here, so the scalar `weight_pan`/`weight_azimuth` entry points are
 //! used instead.
 //!
@@ -33,7 +33,7 @@
 //! `waveform`, `transcode`, `spatial`, `backend`, `latency`, and `governor`
 //! modules. It depends only on the `prism_audio_haptics` crate itself (with its
 //! `serialize` dev-dependency feature); it deliberately avoids the
-//! `prism_audio_core` and `bevy_math` types that the audio-input and
+//! `prism_audio_core` and `prism_math` types that the audio-input and
 //! vector-direction entry points require because those crates are not available
 //! to an integration test target.
 

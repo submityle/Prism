@@ -69,7 +69,7 @@
 //! [`Smoothed`] values so automation (including the signature formant glide)
 //! never produces zipper clicks, while the single continuous phase accumulator
 //! makes frequency changes click-free without smoothing. Reproducible across
-//! platforms via [`bevy_math::ops`].
+//! platforms via [`prism_math::ops`].
 //!
 //! # Provenance
 //!
@@ -81,7 +81,7 @@
 //! any other audio engine or toolkit; only the shared mathematical ideas are
 //! used. There is no AI or machine learning of any kind.
 
-use bevy_math::ops;
+use prism_math::ops;
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
 use crate::math::Sample;

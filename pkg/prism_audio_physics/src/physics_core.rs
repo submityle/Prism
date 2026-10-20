@@ -10,8 +10,8 @@
 //! [`crate::body::BodyAudioId`]. It is compiled only under the `physics-core`
 //! feature so the core crate stays free of a hard physics dependency.
 //!
-//! The physics world and `bevy_math` share the same `glam` vector type, so the
-//! witness points are copied component-wise into [`bevy_math::Vec3`] with no
+//! The physics world and `prism_math` share the same `glam` vector type, so the
+//! witness points are copied component-wise into [`prism_math::Vec3`] with no
 //! lossy conversion.
 //!
 //! # Provenance
@@ -23,7 +23,7 @@
 //! [`crate::translator::ContactAudioTranslator`] from the rigid-body truth
 //! exposed by `prism_physics_core`.
 
-use bevy_math::Vec3;
+use prism_math::Vec3;
 
 use prism_physics_core::collide::ContactManifold;
 use prism_physics_core::events::PhysicsEvent;

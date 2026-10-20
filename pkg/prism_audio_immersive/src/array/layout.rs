@@ -25,7 +25,7 @@
 
 use alloc::vec::Vec;
 
-use bevy_math::{ops, Vec3};
+use prism_math::{ops, Vec3};
 use prism_audio_core::math::Sample;
 use prism_audio_object::bed::BedLayout;
 
@@ -217,7 +217,7 @@ impl ArrayLayout {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bevy_math::ops;
+    use prism_math::ops;
 
     const EPS: Sample = 1.0e-4;
 

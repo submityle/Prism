@@ -10,6 +10,7 @@ use core::ops::{Mul, MulAssign, Neg};
 
 /// A quaternion, normally kept unit-length to represent a rotation.
 #[derive(Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
 #[repr(C)]
 pub struct Quat {
     /// Imaginary X.

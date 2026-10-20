@@ -63,7 +63,7 @@
 
 use alloc::vec::Vec;
 
-use bevy_math::ops;
+use prism_math::ops;
 use core::f32::consts::{FRAC_2_PI, FRAC_PI_2, PI};
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};

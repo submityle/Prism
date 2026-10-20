@@ -6,7 +6,7 @@
 //! the *same*, well-tested envelope math, so their sound is consistent and the
 //! per-node code stays focused on routing and mixing.
 
-use bevy_math::ops;
+use prism_math::ops;
 
 use crate::math::{linear_to_db, Sample};
 

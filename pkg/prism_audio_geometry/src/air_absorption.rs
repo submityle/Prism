@@ -149,7 +149,7 @@ pub fn apply_air_absorption(paths: &mut [PropagationPath], config: &GeometricCon
 mod tests {
     use super::{apply_air_absorption, AtmosphericFilter};
     use crate::config::GeometricConfig;
-    use bevy_math::Vec3;
+    use prism_math::Vec3;
     use prism_audio_spatial::air::AtmosphericConditions;
     use prism_audio_spatial::band_spectrum::BandGains;
     use prism_audio_spatial::doppler::SPEED_OF_SOUND_MPS;

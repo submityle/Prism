@@ -33,7 +33,7 @@
 //! Original work; no Unreal Engine, Unity, Godot, Wwise, FMOD, Steam Audio,
 //! Dolby, or Google Resonance Audio source or derived code; no AI/ML.
 
-use bevy_math::{ops, Quat, Vec3};
+use prism_math::{ops, Quat, Vec3};
 use prism_audio_core::buffer::{AudioBuffer, ChannelLayout};
 use prism_audio_core::math::Sample;
 use prism_audio_geometry::direct_path::resolve_direct;

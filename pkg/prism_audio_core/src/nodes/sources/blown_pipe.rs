@@ -80,7 +80,7 @@
 //! Instruments". The `xorshift64` generator seeded via `SplitMix64` is
 //! public-domain (Marsaglia 2003; Vigna). Only these ideas are used.
 
-use bevy_math::ops;
+use prism_math::ops;
 use core::f32::consts::TAU;
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};

@@ -187,7 +187,7 @@ impl AudioNode for MultibandCompressorNode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bevy_math::ops;
+    use prism_math::ops;
 
     const SR: u32 = 48_000;
 

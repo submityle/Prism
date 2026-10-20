@@ -332,7 +332,7 @@ impl VoiceCommPipeline for DefaultVoiceCommPipeline {
 mod tests {
     use super::*;
     use crate::transport::packet::LoopbackTransport;
-    use bevy_math::ops;
+    use prism_math::ops;
     use core::f32::consts::PI;
 
     #[cfg(not(feature = "std"))]

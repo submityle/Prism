@@ -15,7 +15,7 @@ use alloc::vec::Vec;
 
 use crate::buffer::AudioBuffer;
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use bevy_math::ops;
+use prism_math::ops;
 
 use crate::math::{flush_denormal, Sample};
 

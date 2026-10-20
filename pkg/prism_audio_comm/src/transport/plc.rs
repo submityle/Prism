@@ -19,7 +19,7 @@
 //! and [`crate::transport::codec`] decoding; uses [`crate::rng`] for comfort
 //! noise.
 
-use bevy_math::ops;
+use prism_math::ops;
 use prism_audio_core::math::{flush_denormal, Sample};
 
 use crate::rng::CommRng;

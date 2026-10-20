@@ -164,7 +164,7 @@ mod tests {
         let mut node = DuckingNode::new(48_000, DuckingParams::default());
         let mut main = mono(512);
         for (i, s) in main.channel_mut(0).iter_mut().enumerate() {
-            *s = 0.5 * bevy_math::ops::sin(0.05 * i as Sample);
+            *s = 0.5 * prism_math::ops::sin(0.05 * i as Sample);
         }
         let key = mono(512); // silent
         let inputs = [main.clone(), key];
@@ -187,8 +187,8 @@ mod tests {
         let mut main = mono(9_600);
         let mut key = mono(9_600);
         for i in 0..9_600 {
-            main.channel_mut(0)[i] = 0.5 * bevy_math::ops::sin(0.05 * i as Sample);
-            key.channel_mut(0)[i] = 0.9 * bevy_math::ops::sin(0.07 * i as Sample);
+            main.channel_mut(0)[i] = 0.5 * prism_math::ops::sin(0.05 * i as Sample);
+            key.channel_mut(0)[i] = 0.9 * prism_math::ops::sin(0.07 * i as Sample);
         }
         let inputs = [main.clone(), key];
         let mut outputs = [mono(9_600)];
@@ -214,7 +214,7 @@ mod tests {
         let mut node = DuckingNode::new(48_000, DuckingParams::default());
         let mut main = mono(128);
         for (i, s) in main.channel_mut(0).iter_mut().enumerate() {
-            *s = 0.5 * bevy_math::ops::sin(0.05 * i as Sample);
+            *s = 0.5 * prism_math::ops::sin(0.05 * i as Sample);
         }
         let inputs = [main.clone()]; // no key input
         let mut outputs = [mono(128)];

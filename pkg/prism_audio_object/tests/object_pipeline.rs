@@ -27,7 +27,7 @@
 //! contract. Complements the per-module unit tests, which test each stage in
 //! isolation with flat object lists rather than an animated scene end to end.
 
-use bevy_math::Vec3;
+use prism_math::Vec3;
 
 use prism_audio_core::math::Sample;
 

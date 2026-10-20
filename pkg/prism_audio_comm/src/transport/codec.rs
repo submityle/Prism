@@ -129,7 +129,7 @@ impl VoiceCodec for LinearPcmCodec {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bevy_math::ops;
+    use prism_math::ops;
     use core::f32::consts::PI;
 
     #[cfg(not(feature = "std"))]

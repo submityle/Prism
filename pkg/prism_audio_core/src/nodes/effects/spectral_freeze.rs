@@ -51,7 +51,7 @@
 
 use alloc::{vec, vec::Vec};
 
-use bevy_math::ops;
+use prism_math::ops;
 
 use core::f32::consts::{PI, TAU};
 

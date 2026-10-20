@@ -17,7 +17,7 @@
 //! [`crate::impulse`] (closing speed, reduced mass) and the sustain path of
 //! [`crate::translator`] (tangential speed, normal pressure proxy).
 
-use bevy_math::Vec3;
+use prism_math::Vec3;
 
 use crate::body::BodyAudioState;
 use prism_audio_core::math::Sample;
@@ -61,14 +61,14 @@ pub struct VelocitySplit {
 /// Decomposes a relative velocity into signed-normal and tangential parts.
 ///
 /// The `normal` vector is assumed unit length (as emitted by the narrow phase).
-/// The tangential magnitude is computed with [`bevy_math::ops::sqrt`] for
+/// The tangential magnitude is computed with [`prism_math::ops::sqrt`] for
 /// deterministic cross-platform results.
 #[inline]
 #[must_use]
 pub fn decompose(v_rel: Vec3, normal: Vec3) -> VelocitySplit {
     let normal_speed = v_rel.dot(normal);
     let tangential = v_rel - normal * normal_speed;
-    let tangential_speed = bevy_math::ops::sqrt(tangential.dot(tangential));
+    let tangential_speed = prism_math::ops::sqrt(tangential.dot(tangential));
     VelocitySplit {
         normal_speed,
         tangential_speed,

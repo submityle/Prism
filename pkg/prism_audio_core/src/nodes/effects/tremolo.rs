@@ -146,7 +146,7 @@ impl TremoloNode {
 /// Fractional-part helper avoiding an unused top-level `ops` import.
 #[inline]
 fn ops_floor(x: Sample) -> Sample {
-    bevy_math::ops::floor(x)
+    prism_math::ops::floor(x)
 }
 
 impl AudioNode for TremoloNode {

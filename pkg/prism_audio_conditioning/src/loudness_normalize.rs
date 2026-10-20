@@ -36,7 +36,7 @@
 //! [`crate::loudness_offline`] and is applied by [`crate::pipeline`] after the
 //! [`crate::finalize`] stage, before content hashing.
 
-use bevy_math::ops;
+use prism_math::ops;
 use prism_audio_core::math::Sample;
 
 use crate::loudness_offline::LoudnessStats;

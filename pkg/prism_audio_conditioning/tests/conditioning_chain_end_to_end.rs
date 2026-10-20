@@ -25,9 +25,9 @@
 //! its ordinary dependencies that Cargo re-exposes to in-package integration
 //! tests: `prism_audio_core` (`ConditionedPcm`'s `Sample`/`ChannelLayout`),
 //! `prism_audio_assets` (`PcmSampleFormat` for the raw-`PCM` decode leg), and
-//! `bevy_math` (`no_std`-friendly float operations).
+//! `prism_math` (`no_std`-friendly float operations).
 
-use bevy_math::ops;
+use prism_math::ops;
 
 use prism_audio_assets::codec::PcmSampleFormat;
 use prism_audio_core::buffer::ChannelLayout;

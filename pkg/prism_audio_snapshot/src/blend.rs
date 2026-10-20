@@ -4,7 +4,7 @@
 //! [`ParameterKind`] of the value(s) it operates on and performs the blend in
 //! that kind's domain, so callers never have to special-case decibels or
 //! hertz. All deterministic transcendental math routes through
-//! `bevy_math::ops` so results are reproducible across platforms.
+//! `prism_math::ops` so results are reproducible across platforms.
 //!
 //! # Provenance
 //! Original work; no Unreal Engine, Unity, Godot, Wwise, FMOD, Steam Audio,
@@ -15,7 +15,7 @@
 //! [`crate::transition`] (pairwise interpolation) and [`crate::stack`]
 //! (weighted multi-snapshot combination).
 
-use bevy_math::ops;
+use prism_math::ops;
 use prism_audio_core::math::Sample;
 
 use crate::parameter::ParameterKind;

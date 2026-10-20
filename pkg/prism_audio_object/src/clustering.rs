@@ -21,7 +21,7 @@
 //!
 //! # Determinism
 //!
-//! All length/normalisation math routes through [`bevy_math::ops`]; pair
+//! All length/normalisation math routes through [`prism_math::ops`]; pair
 //! selection breaks ties by index, so the reduction is bit-reproducible and
 //! order-stable across targets.
 //!
@@ -37,7 +37,7 @@
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
-use bevy_math::{ops, Vec3};
+use prism_math::{ops, Vec3};
 
 use prism_audio_core::math::Sample;
 

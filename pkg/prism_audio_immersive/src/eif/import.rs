@@ -96,7 +96,7 @@ fn descriptor_for(source: &EifSource) -> SourceDescriptor {
 /// Imports a single source against `listener` at `sample_rate`.
 #[must_use]
 pub fn import_source(source: &EifSource, listener: &Listener, sample_rate: u32) -> ImportedSource {
-    let emitter = Emitter::new(source.position, bevy_math::Vec3::ZERO, source.facing());
+    let emitter = Emitter::new(source.position, prism_math::Vec3::ZERO, source.facing());
     let descriptor = descriptor_for(source);
     let params = resolve(
         listener,
@@ -126,7 +126,7 @@ pub fn import_source(source: &EifSource, listener: &Listener, sample_rate: u32) 
 /// # Examples
 ///
 /// ```
-/// use bevy_math::Vec3;
+/// use prism_math::Vec3;
 /// use prism_audio_immersive::eif::import::import_scene;
 /// use prism_audio_immersive::eif::scene::EifScene;
 /// use prism_audio_immersive::eif::source::{EifSource, EifSourceId};
@@ -164,7 +164,7 @@ mod tests {
     use super::*;
     use crate::eif::geometry::{AcousticBox, GeometryPrimitive, MaterialRef};
     use crate::eif::material::AcousticMaterial;
-    use bevy_math::{ops, Vec3};
+    use prism_math::{ops, Vec3};
 
     const EPS: Sample = 1e-3;
 

@@ -33,7 +33,7 @@
 
 use alloc::vec::Vec;
 
-use bevy_math::Vec3;
+use prism_math::Vec3;
 use prism_audio_core::math::Sample;
 use prism_audio_object::bed::BedLayout;
 
@@ -163,7 +163,7 @@ fn fallback_for(capabilities: ArrayCapabilities) -> RenderDecision {
 /// # Examples
 ///
 /// ```
-/// use bevy_math::Vec3;
+/// use prism_math::Vec3;
 /// use prism_audio_immersive::array::layout::ArrayLayout;
 /// use prism_audio_immersive::array::decode::{ArrayRenderMode, ArrayRenderer, RenderDecision};
 ///
@@ -228,7 +228,7 @@ impl ArrayRenderer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bevy_math::ops;
+    use prism_math::ops;
     use prism_audio_object::bed::direction_from_angles;
 
     use crate::array::layout::{ArrayLayout, ArraySpeaker};

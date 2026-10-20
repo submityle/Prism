@@ -64,7 +64,7 @@
 //! shared mathematical ideas are used. There is no AI or machine learning of
 //! any kind.
 
-use bevy_math::ops;
+use prism_math::ops;
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
 use crate::math::Sample;

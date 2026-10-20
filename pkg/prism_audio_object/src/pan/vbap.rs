@@ -24,7 +24,7 @@
 //!
 //! # Determinism
 //!
-//! Every length/normalisation step routes through [`bevy_math::ops`]; triplet
+//! Every length/normalisation step routes through [`prism_math::ops`]; triplet
 //! selection breaks ties by index. The result is bit-reproducible across
 //! targets.
 //!
@@ -42,7 +42,7 @@
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
-use bevy_math::{ops, Vec3};
+use prism_math::{ops, Vec3};
 
 use prism_audio_core::math::Sample;
 

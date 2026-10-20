@@ -58,7 +58,7 @@
 //! rather than reusing the oversampled [`waveshaper`](super::waveshaper), because
 //! the post high-pass already discards the aliasing-prone low products.
 
-use bevy_math::ops;
+use prism_math::ops;
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
 use crate::math::{flush_denormal, Sample};

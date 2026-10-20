@@ -40,7 +40,7 @@
 //! Consumed by [`crate::eif::geometry`] (per-primitive material reference) and
 //! [`crate::eif::scene`] (the scene material table).
 
-use bevy_math::ops;
+use prism_math::ops;
 
 use prism_audio_core::math::Sample;
 use prism_audio_spatial::material_library::{

@@ -22,7 +22,7 @@
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
-use bevy_math::Vec3;
+use prism_math::Vec3;
 
 use prism_audio_core::math::Sample;
 use prism_audio_procedural::contact::{cluster_to_group, ImpactEvent};

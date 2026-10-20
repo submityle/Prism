@@ -202,7 +202,7 @@ impl UplinkChain {
 mod tests {
     use super::*;
     use crate::rng::CommRng;
-    use bevy_math::ops;
+    use prism_math::ops;
     use core::f32::consts::PI;
 
     #[test]

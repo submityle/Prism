@@ -328,7 +328,7 @@ impl AudioNode for ChaoticOscillatorNode {
 mod tests {
     use super::*;
     use crate::buffer::{AudioBuffer, ChannelLayout};
-    use bevy_math::ops;
+    use prism_math::ops;
     use core::f32::consts::TAU;
 
     const SR: u32 = 48_000;

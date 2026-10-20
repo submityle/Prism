@@ -20,8 +20,8 @@
 //! distance/direction shaping of design section 15. The pan split reuses
 //! `prism_audio_core::math::equal_power_pan` rather than re-deriving a pan law.
 
-use bevy_math::ops;
-use bevy_math::Vec3;
+use prism_math::ops;
+use prism_math::Vec3;
 use prism_audio_core::math::{equal_power_pan, Sample};
 
 /// Left/right actuator intensities produced by the weighting.

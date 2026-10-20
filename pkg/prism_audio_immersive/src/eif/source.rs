@@ -27,7 +27,7 @@
 //! which binds each source to a [`prism_audio_spatial::geometry::Emitter`] and
 //! a [`prism_audio_spatial::spatializer::SourceDescriptor`].
 
-use bevy_math::Vec3;
+use prism_math::Vec3;
 
 use prism_audio_core::math::Sample;
 use prism_audio_spatial::attenuation::Attenuation;
@@ -247,7 +247,7 @@ impl EifSource {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bevy_math::ops;
+    use prism_math::ops;
 
     const EPS: Sample = 1e-5;
 

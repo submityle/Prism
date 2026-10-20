@@ -37,7 +37,7 @@ impl Keyframe {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bevy_math::Vec3;
+    use prism_math::Vec3;
 
     #[test]
     fn stores_time_and_value() {

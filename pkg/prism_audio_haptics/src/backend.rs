@@ -23,7 +23,7 @@
 //! the plugin-delay-compensation contract of design section 29 via
 //! [`crate::latency::LatencyAligner`].
 
-use bevy_math::ops;
+use prism_math::ops;
 use prism_audio_core::math::Sample;
 
 use crate::waveform::HapticWaveform;

@@ -42,7 +42,7 @@
 //! [`Listener`]/[`Emitter`]/[`PropagationPath`] types from
 //! [`prism_audio_spatial`].
 
-use bevy_math::{Quat, Vec3};
+use prism_math::{Quat, Vec3};
 use prism_audio_geometry::{AcousticScene, GeometricBackend, GeometricConfig, MaterialTable};
 use prism_audio_geometry_gpu::{GpuContext, GpuGeometryBackend, GpuScene, ResolvedQuery};
 use prism_audio_spatial::geometry::{Emitter, Listener};

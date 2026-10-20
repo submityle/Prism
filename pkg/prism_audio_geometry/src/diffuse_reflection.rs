@@ -66,7 +66,7 @@
 //! together, specular `(sqrt(1 - s))^2` plus diffuse `(sqrt(s))^2` conserve the
 //! surface's total reflected energy `s + (1 - s) = 1`.
 
-use bevy_math::ops;
+use prism_math::ops;
 use prism_audio_core::math::Sample;
 use prism_audio_spatial::band_spectrum::BandGains;
 use prism_audio_spatial::doppler::SPEED_OF_SOUND_MPS;
@@ -242,7 +242,7 @@ fn scattered_contribution(
 /// The computation runs at control rate, allocates nothing on the heap, never
 /// panics, and is deterministic: surfaces are visited in ascending triangle
 /// index order and all arithmetic flows through
-/// [`bevy_math::ops`](bevy_math::ops) for cross-platform-stable `f32` results.
+/// [`prism_math::ops`](prism_math::ops) for cross-platform-stable `f32` results.
 pub fn resolve_diffuse_reflections(
     scene: &AcousticScene,
     listener: &Listener,
@@ -436,7 +436,7 @@ impl Default for DiffuseEnergyResponse {
 ///
 /// Runs at control rate, allocates nothing on the heap, never panics, and is
 /// deterministic: surfaces are visited in ascending triangle index order and all
-/// arithmetic flows through [`bevy_math::ops`](bevy_math::ops).
+/// arithmetic flows through [`prism_math::ops`](prism_math::ops).
 pub fn resolve_diffuse_energy_response(
     scene: &AcousticScene,
     listener: &Listener,
@@ -508,7 +508,7 @@ pub fn resolve_diffuse_energy_response(
 mod tests {
     use super::*;
     use alloc::vec;
-    use bevy_math::{Quat, Vec3};
+    use prism_math::{Quat, Vec3};
     use prism_audio_spatial::material_spectrum::BandedAcousticMaterial;
 
     use crate::material_map::MaterialTable;

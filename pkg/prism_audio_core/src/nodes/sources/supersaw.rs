@@ -63,7 +63,7 @@
 //! Wwise, FMOD, Steam Audio, Google Resonance Audio, or Web Audio; only the
 //! shared mathematical ideas are referenced.
 
-use bevy_math::ops;
+use prism_math::ops;
 
 use super::oscillator::poly_blep;
 use crate::graph::{AudioNode, ProcessIo, RenderContext};

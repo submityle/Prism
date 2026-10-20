@@ -42,7 +42,7 @@ impl BlockClock {
     /// Maps a sub-step fraction in `[0, 1)` to a sample index in the block.
     ///
     /// The fraction is clamped into `[0, 1)` first (non-finite becomes `0`),
-    /// scaled by `block_frames`, floored with [`bevy_math::ops::floor`], and
+    /// scaled by `block_frames`, floored with [`prism_math::ops::floor`], and
     /// clamped to `block_frames - 1` so the result is always a valid in-block
     /// index. A zero-length block maps everything to `0`.
     #[inline]
@@ -56,7 +56,7 @@ impl BlockClock {
         } else {
             0.0
         };
-        let scaled = bevy_math::ops::floor(frac * self.block_frames as f32);
+        let scaled = prism_math::ops::floor(frac * self.block_frames as f32);
         let last = self.block_frames - 1;
         if scaled >= last as f32 {
             last

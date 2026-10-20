@@ -42,7 +42,7 @@
 //! as silence so the ring and the peak accumulator can never be poisoned by a
 //! `NaN`. Reading the points back ([`Goniometer::points_ordered`]) copies into a
 //! caller-provided slice and allocates nothing. All transcendental math routes
-//! through [`bevy_math::ops`].
+//! through [`prism_math::ops`].
 //!
 //! # Provenance
 //!
@@ -69,7 +69,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use bevy_math::ops;
+use prism_math::ops;
 use core::f32::consts::FRAC_1_SQRT_2;
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};

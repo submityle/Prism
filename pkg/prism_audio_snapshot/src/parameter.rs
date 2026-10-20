@@ -16,10 +16,10 @@
 //! # Relationship
 //! Supplies the identity and domain tags consumed by [`crate::target`],
 //! [`crate::blend`], and [`crate::transition`]. The hertz geometric path and
-//! the decibel arithmetic path reuse `bevy_math::ops` for deterministic
+//! the decibel arithmetic path reuse `prism_math::ops` for deterministic
 //! `ln`/`exp` and reuse the decibel convention of `prism_audio_core::math`.
 
-use bevy_math::ops;
+use prism_math::ops;
 use prism_audio_core::math::Sample;
 
 /// Opaque, stable identifier for one mixer, bus, or effect parameter.

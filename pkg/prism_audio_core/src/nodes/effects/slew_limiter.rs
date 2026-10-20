@@ -340,7 +340,7 @@ mod tests {
 
     #[inline]
     fn ops_sin(x: Sample) -> Sample {
-        bevy_math::ops::sin(x)
+        prism_math::ops::sin(x)
     }
 
     fn sine(freq: Sample, len: usize) -> Vec<Sample> {

@@ -20,7 +20,7 @@
 //! (design section 26) that carries captions; the direction convention matches
 //! the spatial listener frame used elsewhere in the engine.
 
-use bevy_math::{ops, Vec3};
+use prism_math::{ops, Vec3};
 use prism_audio_core::math::Sample;
 
 /// Category of a visual sound cue, used by the UI to pick an icon or color.

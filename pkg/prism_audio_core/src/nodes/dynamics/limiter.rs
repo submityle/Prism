@@ -70,7 +70,7 @@ impl LimiterNode {
     pub fn new(sample_rate: u32, channels: usize, params: LimiterParams) -> Self {
         let channels = channels.max(1);
         let lookahead =
-            bevy_math::ops::round(params.lookahead_ms.max(0.0) * (sample_rate as Sample) * 0.001)
+            prism_math::ops::round(params.lookahead_ms.max(0.0) * (sample_rate as Sample) * 0.001)
                 as usize;
         let rings = if lookahead > 0 {
             let mut v = Vec::with_capacity(channels);
@@ -202,7 +202,7 @@ mod tests {
         let mut input = mono(9_600);
         for (i, s) in input.channel_mut(0).iter_mut().enumerate() {
             // Hot 0 dBFS sine plus a spike.
-            *s = bevy_math::ops::sin(0.05 * i as Sample);
+            *s = prism_math::ops::sin(0.05 * i as Sample);
         }
         input.channel_mut(0)[5_000] = 4.0;
         let inputs = [input];
@@ -219,7 +219,7 @@ mod tests {
         let mut node = LimiterNode::new(48_000, 1, LimiterParams::default());
         let mut input = mono(512);
         for (i, s) in input.channel_mut(0).iter_mut().enumerate() {
-            *s = 0.05 * bevy_math::ops::sin(0.05 * i as Sample);
+            *s = 0.05 * prism_math::ops::sin(0.05 * i as Sample);
         }
         let inputs = [input.clone()];
         let mut outputs = [mono(512)];

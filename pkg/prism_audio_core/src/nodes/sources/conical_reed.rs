@@ -100,7 +100,7 @@
 //! The excitation is the deterministic breath pressure, not noise, so the node
 //! holds no random state: two [`ConicalReedNode`]s built with the same sample
 //! rate and parameters emit bit-identical streams on every platform via
-//! [`bevy_math::ops`], and [`AudioNode::reset`] restarts the identical attack.
+//! [`prism_math::ops`], and [`AudioNode::reset`] restarts the identical attack.
 //!
 //! # Relationship
 //!
@@ -116,7 +116,7 @@
 //! reed) and from the lip-valve brass [`super::brass_lip_reed::BrassLipReedNode`]
 //! (whose tunable mechanical lip resonance, not a fixed bore length, selects the
 //! sounding partial). It reuses only this crate's own [`Sample`] type,
-//! [`bevy_math::ops`], and the shared smoothing primitives.
+//! [`prism_math::ops`], and the shared smoothing primitives.
 //!
 //! # Real-time contract
 //!
@@ -150,7 +150,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use bevy_math::ops;
+use prism_math::ops;
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
 use crate::math::{flush_denormal, Sample};

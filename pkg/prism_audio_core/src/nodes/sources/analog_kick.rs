@@ -74,7 +74,7 @@
 //! downward pitch sweep. Unlike [`noise`](super::noise), it is fully tonal and
 //! deterministic.
 
-use bevy_math::ops;
+use prism_math::ops;
 use core::f32::consts::TAU;
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};

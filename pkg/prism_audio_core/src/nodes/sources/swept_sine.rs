@@ -76,7 +76,7 @@
 //! Engine, Unity, Godot, Wwise, FMOD, Steam Audio, Google Resonance Audio, Web
 //! Audio, or STK was referenced.
 
-use bevy_math::ops;
+use prism_math::ops;
 use core::f32::consts::{PI, TAU};
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};

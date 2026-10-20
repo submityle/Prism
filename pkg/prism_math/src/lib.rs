@@ -38,8 +38,7 @@
 //!   blends), half precision ([`f16`]: IEEE 754 `binary16` `F16` scalar with
 //!   round-to-nearest-even conversions plus `F16Vec2/3/4` storage vectors),
 //!   octahedral normal encoding ([`octahedral`]), structure-of-arrays batches
-//!   ([`soa`]: `SoaVec3`), full swizzle coverage ([`swizzle`]), and the
-//!   `compat-bevy` migration aliases ([`compat_bevy`], feature-gated).
+//!   ([`soa`]: `SoaVec3`), and full swizzle coverage ([`swizzle`]).
 //!
 //! The scalar backend here is the behavioural reference that later SIMD
 //! backends must match within documented tolerances.
@@ -60,6 +59,7 @@ mod f64;
 pub mod fixed;
 mod float;
 mod mat;
+pub mod ops;
 mod quat;
 mod vec;
 
@@ -77,9 +77,6 @@ pub mod soa;
 pub mod spatial;
 pub mod spherical;
 mod swizzle;
-
-#[cfg(feature = "compat-bevy")]
-pub mod compat_bevy;
 
 pub mod batch;
 pub mod color;
@@ -257,8 +254,6 @@ mod m5_tests;
 mod tests;
 #[cfg(test)]
 mod tests_cr_fixes;
-#[cfg(all(test, feature = "compat-bevy"))]
-mod tests_m6_compat;
 #[cfg(test)]
 mod tests_m6_core;
 

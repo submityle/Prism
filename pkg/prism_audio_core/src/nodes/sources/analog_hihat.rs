@@ -93,7 +93,7 @@
 //! It shares the `PolyBLEP` edge-correction primitive with
 //! [`super::oscillator::OscillatorNode`] and [`super::pwm_oscillator`].
 
-use bevy_math::ops;
+use prism_math::ops;
 use core::f32::consts::TAU;
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};

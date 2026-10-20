@@ -14,7 +14,7 @@
 
 use prism_audio_core::math::Sample;
 
-use bevy_math::ops;
+use prism_math::ops;
 
 #[cfg(feature = "serialize")]
 use serde::{Deserialize, Serialize};

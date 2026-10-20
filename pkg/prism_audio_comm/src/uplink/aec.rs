@@ -26,7 +26,7 @@
 //! runs after [`crate::uplink::high_pass`] and before
 //! [`crate::uplink::noise_suppress`] inside [`crate::uplink::UplinkChain`].
 
-use bevy_math::ops;
+use prism_math::ops;
 use prism_audio_core::math::{flush_denormal, Sample};
 
 #[cfg(not(feature = "std"))]

@@ -243,9 +243,9 @@ impl MeterProbe {
 
 /// Deterministic square root over the audio sample type.
 ///
-/// Routed through `bevy_math::ops` so the profiler shares the engine's
+/// Routed through `prism_math::ops` so the profiler shares the engine's
 /// determinism guarantees and stays `no_std`-clean.
 #[inline]
 fn sqrt(value: Sample) -> Sample {
-    bevy_math::ops::sqrt(value)
+    prism_math::ops::sqrt(value)
 }

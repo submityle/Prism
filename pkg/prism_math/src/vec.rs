@@ -57,6 +57,7 @@ fn hypot4(x: f32, y: f32, z: f32, w: f32) -> f32 {
 
 /// A 2-component `f32` vector.
 #[derive(Clone, Copy, PartialEq, Default)]
+#[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
 #[repr(C)]
 pub struct Vec2 {
     /// X component.
@@ -67,6 +68,7 @@ pub struct Vec2 {
 
 /// A 3-component `f32` vector (tightly packed, 12 bytes).
 #[derive(Clone, Copy, PartialEq, Default)]
+#[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
 #[repr(C)]
 pub struct Vec3 {
     /// X component.
@@ -79,6 +81,7 @@ pub struct Vec3 {
 
 /// A 3-component `f32` vector aligned to 16 bytes for SIMD-friendly layout.
 #[derive(Clone, Copy, PartialEq, Default)]
+#[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
 #[repr(C, align(16))]
 pub struct Vec3A {
     /// X component.
@@ -91,6 +94,7 @@ pub struct Vec3A {
 
 /// A 4-component `f32` vector.
 #[derive(Clone, Copy, PartialEq, Default)]
+#[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
 #[repr(C)]
 pub struct Vec4 {
     /// X component.

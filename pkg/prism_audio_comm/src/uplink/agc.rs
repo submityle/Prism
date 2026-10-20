@@ -19,7 +19,7 @@
 //! runs after [`crate::uplink::noise_suppress`] and before
 //! [`crate::uplink::vad`] inside [`crate::uplink::UplinkChain`].
 
-use bevy_math::ops;
+use prism_math::ops;
 use prism_audio_core::math::{flush_denormal, Sample};
 
 /// Tuning parameters for [`AutomaticGainControl`].

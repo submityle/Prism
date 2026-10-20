@@ -17,7 +17,7 @@
 //! # Determinism
 //!
 //! The reused encoder routes all harmonic/length math through
-//! [`bevy_math::ops`]; the gain scaling here is pure multiplication, so results
+//! [`prism_math::ops`]; the gain scaling here is pure multiplication, so results
 //! are bit-reproducible across targets.
 //!
 //! # Provenance
@@ -34,7 +34,7 @@
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
-use bevy_math::Vec3;
+use prism_math::Vec3;
 
 use prism_audio_core::math::Sample;
 use prism_audio_spatial::hoa;
@@ -125,7 +125,7 @@ mod tests {
     use super::*;
     use crate::bed::direction_from_angles;
     use crate::object::ObjectId;
-    use bevy_math::ops;
+    use prism_math::ops;
 
     const EPS: Sample = 1e-4;
 

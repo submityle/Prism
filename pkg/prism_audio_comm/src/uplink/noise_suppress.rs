@@ -19,7 +19,7 @@
 //! it runs after [`crate::uplink::aec`] and before [`crate::uplink::agc`]
 //! inside [`crate::uplink::UplinkChain`].
 
-use bevy_math::ops;
+use prism_math::ops;
 use core::f32::consts::PI;
 use prism_audio_core::fft::Fft;
 use prism_audio_core::math::{flush_denormal, Sample};

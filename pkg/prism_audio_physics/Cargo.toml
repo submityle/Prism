@@ -9,9 +9,7 @@ publish = false
 [dependencies]
 prism_audio_core = { path = "../prism_audio_core" }
 prism_audio_procedural = { path = "../prism_audio_procedural" }
-bevy_math = { path = "../../crates/bevy_math", default-features = false, features = [
-  "nostd-libm",
-] }
+prism_math = { path = "../prism_math", default-features = false }
 prism_physics_core = { path = "../prism_physics_core", optional = true }
 serde = { version = "1", default-features = false, features = [
   "derive",
@@ -25,13 +23,13 @@ default = ["std"]
 std = [
   "prism_audio_core/std",
   "prism_audio_procedural/std",
-  "bevy_math/std",
+  "prism_math/std",
 ]
 serialize = [
   "dep:serde",
   "prism_audio_core/serialize",
   "prism_audio_procedural/serialize",
-  "bevy_math/serialize",
+  "prism_math/serialize",
 ]
 # Concrete adapters that read `prism_physics_core` contact manifolds and
 # physics events. Pulls in the std physics core, so it implies `std`.

@@ -50,7 +50,7 @@
 //! and never duplicates, the geometric spreading, surface/edge colour, and
 //! atmospheric roll-off the other stages compute.
 
-use bevy_math::{ops, Vec3};
+use prism_math::{ops, Vec3};
 
 use prism_audio_core::math::Sample;
 use prism_audio_spatial::band_spectrum::{
@@ -119,7 +119,7 @@ pub fn weight_path(
 }
 
 /// Cosine of the angle between `emitter_forward` and `departure_dir`, both
-/// normalised deterministically through [`bevy_math::ops`].
+/// normalised deterministically through [`prism_math::ops`].
 ///
 /// Returns `1.0` (on axis) when either vector is too short to have a
 /// well-defined direction, and clamps the result into `[-1, 1]` for robustness.
@@ -134,7 +134,7 @@ fn departure_cosine(emitter_forward: Vec3, departure_dir: Vec3) -> Sample {
 }
 
 /// Normalises `v`, returning `None` when it is non-finite or shorter than
-/// [`COINCIDENT_EPSILON_SQ`]. The length routes through [`bevy_math::ops`] so
+/// [`COINCIDENT_EPSILON_SQ`]. The length routes through [`prism_math::ops`] so
 /// the result is bit-reproducible across targets.
 fn normalize(v: Vec3) -> Option<Vec3> {
     let len_sq = v.dot(v);

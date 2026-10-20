@@ -16,7 +16,7 @@
 //! Implements the loudness-analysis leg of design section 51 by reusing the
 //! `prism_audio_core` analysis meter rather than reimplementing `K`-weighting.
 
-use bevy_math::ops;
+use prism_math::ops;
 
 use prism_audio_core::math::Sample;
 use prism_audio_core::nodes::analysis::loudness::LoudnessMeter;
