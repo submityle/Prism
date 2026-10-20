@@ -51,7 +51,9 @@ editor mutation path.
 engine or ECS types. `RuntimeLaunchSpec` describes the executable, arguments,
 environment, working directory, and either a bounded stdio or TCP connection.
 `RuntimeLimits` bounds frame size, socket timing, startup/shutdown deadlines,
-and queued requests. The bridge provides:
+and unfinished requests (queued plus executing). A worker-owned permit releases
+capacity before delivering a completed response; dropping a caller's request
+handle does not make unfinished work disappear from the budget. The bridge provides:
 
 - `start`, `stop`, and `restart` with a monotonic generation and explicit
   `RuntimeState` transitions;

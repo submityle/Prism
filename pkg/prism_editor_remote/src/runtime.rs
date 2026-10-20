@@ -17,7 +17,7 @@ use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -77,7 +77,7 @@ pub struct RuntimeLimits {
     pub startup_timeout: Duration,
     /// Maximum time allowed for process termination after a stop request.
     pub shutdown_timeout: Duration,
-    /// Maximum number of requests queued for the runtime worker.
+    /// Maximum unfinished requests, including the request executing on the worker.
     pub max_pending_requests: usize,
 }
 
@@ -536,6 +536,7 @@ struct RuntimeProcess {
     limits: RuntimeLimits,
     status: RuntimeStatus,
     connection_alive: Arc<AtomicBool>,
+    pending_requests: Arc<AtomicUsize>,
 }
 
 impl RuntimeProcess {
@@ -635,6 +636,7 @@ impl RuntimeProcess {
                 last_error: None,
             },
             connection_alive,
+            pending_requests: Arc::new(AtomicUsize::new(0)),
         })
     }
 
@@ -646,6 +648,8 @@ impl RuntimeProcess {
                 state: status.state,
             });
         }
+        let permit =
+            RequestPermit::acquire(&self.pending_requests, self.limits.max_pending_requests)?;
         let (response_sender, response) = mpsc::channel();
         let control = Arc::new(RequestControl {
             process: Arc::clone(&self.control),
@@ -655,6 +659,7 @@ impl RuntimeProcess {
             message,
             control: Arc::clone(&control),
             response: response_sender,
+            permit,
         };
         match self.sender.try_send(command) {
             Ok(()) => Ok(RuntimeRequest { response, control }),
@@ -787,11 +792,35 @@ impl RequestControl {
     }
 }
 
+struct RequestPermit {
+    pending: Arc<AtomicUsize>,
+}
+
+impl RequestPermit {
+    fn acquire(pending: &Arc<AtomicUsize>, limit: usize) -> Result<Self, RuntimeError> {
+        pending
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                (count < limit).then(|| count + 1)
+            })
+            .map_err(|_| RuntimeError::RequestQueueFull)?;
+        Ok(Self {
+            pending: Arc::clone(pending),
+        })
+    }
+}
+
+impl Drop for RequestPermit {
+    fn drop(&mut self) {
+        self.pending.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 enum WorkerCommand {
     Request {
         message: JsonRpcMessage,
         control: Arc<RequestControl>,
         response: mpsc::Sender<Result<JsonRpcExchange, RuntimeError>>,
+        permit: RequestPermit,
     },
     Shutdown,
 }
@@ -810,6 +839,7 @@ fn worker_loop(
                 message,
                 control,
                 response,
+                permit,
             } => {
                 let result = client.request(message).map_err(RuntimeError::Transport);
                 let result = if let Some(error) = control.error() {
@@ -826,6 +856,9 @@ fn worker_loop(
                     }
                 }
                 let should_stop = result.is_err();
+                // Completion releases capacity before making the result observable.
+                // Dropping a caller's request handle must not release running work.
+                drop(permit);
                 let _ = response.send(result);
                 if should_stop {
                     break;

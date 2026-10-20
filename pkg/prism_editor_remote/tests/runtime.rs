@@ -159,6 +159,44 @@ fn request_queue_is_bounded_before_more_work_is_accepted() {
 }
 
 #[test]
+fn completed_requests_release_capacity_before_delivering_the_response() {
+    let mut request_limits = limits();
+    request_limits.max_pending_requests = 1;
+    let mut bridge = RuntimeBridge::new(
+        LoopbackRuntimeAdapter::default(),
+        spec("serve", RuntimeTransport::Stdio),
+        request_limits,
+    );
+    bridge.start().expect("start");
+    for _ in 0..16 {
+        bridge
+            .request(discovery())
+            .expect("capacity released")
+            .wait()
+            .expect("response");
+    }
+    bridge.stop().expect("stop");
+}
+
+#[test]
+fn dropping_a_request_handle_does_not_release_unfinished_work() {
+    let mut request_limits = limits();
+    request_limits.max_pending_requests = 1;
+    let mut bridge = RuntimeBridge::new(
+        LoopbackRuntimeAdapter::default(),
+        spec("block-after-discover", RuntimeTransport::Stdio),
+        request_limits,
+    );
+    bridge.start().expect("start");
+    drop(bridge.request(discovery()).expect("first request"));
+    assert!(matches!(
+        bridge.request(discovery()),
+        Err(RuntimeError::RequestQueueFull)
+    ));
+    bridge.stop().expect("stop");
+}
+
+#[test]
 fn unexpected_process_exit_exposes_exit_code() {
     let mut bridge = RuntimeBridge::new(
         LoopbackRuntimeAdapter::default(),
