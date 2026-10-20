@@ -25,7 +25,7 @@
 | `prism_editor_remote` | 有界 JSON-RPC/二进制 codec、增量副本、PIE、TCP、受控子进程 stdio/TCP 桥及取消/重启/超时 | Prism 引擎专属 adapter 和生产场景运行时接线 | 41 |
 | `prism_editor_collab` | 有界因果副本/LWW/tombstone、Presence/租约软锁、TCP 接纳顺序/广播/重连/历史重放/能力拒绝 | 身份认证/TLS、产品级权限/部署和 UI 到命令栈协同接线 | 20 |
 | `prism_editor_ui` | Loom Element 装配、有界稳定 key、语义目标/事件到选择/展开/字段编辑/命令/Undo/Redo action 的绑定契约 | 真实设备事件、Loom reconciliation/render 和应用命令执行的端到端连接 | 20 |
-| `prism_editor_app` | 有界 headless runner、工作区组合、窗口/surface 生命周期、错误回滚/恢复/退出及 `prism_app` 退出传播；原生文档会话接线、Ctrl/Cmd+S 保存、Ctrl/Cmd+O 加载、receipt 围栏和重载 renderer 失效钩子 | 完整原生输入→Loom→真实场景→Inspector→保存重载验收，CLI 原生入口和生产引擎 adapter | 16 |
+| `prism_editor_app` | 有界 headless runner、工作区组合、窗口/surface 生命周期、错误回滚/恢复/退出及 `prism_app` 退出传播；原生文档会话接线、Ctrl/Cmd+S 保存、Ctrl/Cmd+O 加载、receipt 围栏、重载 renderer 失效钩子和 native CLI smoke entry | 完整原生输入→Loom→真实场景→Inspector→保存重载验收，以及生产引擎 adapter | 16 |
 | `prism_editor_viewport` | 稳定场景 ID/增量提交、真实整数 ID target/异步读回、多 viewport target 生命周期/过期拒绝、框选/焦点/Gizmo 契约 | 宿主 geometry/depth 绘制、GPU 矩形采集、平台输入、Gizmo 绘制/命中和编辑回写 | 24（默认 22） |
 | `prism_editor_world` | 有界异步 provider 驱动、payload 驻留、分层策略、dirty/租约保护、修订安全保存确认、OFPA/HLOD 计划 | 生产存储 provider/文件格式/崩溃恢复、actor 写盘、HLOD 烘焙/渲染和世界 UI | 24 |
 
@@ -53,7 +53,7 @@
 
 `EditorApplication` 区分 Headless/Windowed。Windowed 必须显式注入 `WindowBackend` 和 `GpuSurfaceLifecycle`，按窗口→GPU→surface 启动并逆序清理；部分失败同样回滚，清理错误不阻止其他资源释放。窗口数量和每帧事件均有限额，多窗口独立挂起，零尺寸暂停、恢复尺寸后继续，关闭不再多提交一帧。
 
-16 项应用测试使用 recording backend，验证顺序、恢复、预算和退出传播，**不证明原生窗口或实际呈现已运行**。`prism_editor_ui` 的 bound builders 可将语义事件解析为 `EditorAction`；当前应用 workspace 仍是视图组合入口，不是完整输入→action→模型变更→Loom 绘制回路。
+16 项应用测试使用 recording backend，验证顺序、恢复、预算和退出传播；另有 native CLI smoke run 在 Apple M2/Metal 上实际提交 1 帧并返回 `error=None`。这仍不等于完整输入→action→模型变更→Loom 绘制→场景编辑闭环。`prism_editor_ui` 的 bound builders 可将语义事件解析为 `EditorAction`。
 
 ## 验证记录与复现
 
