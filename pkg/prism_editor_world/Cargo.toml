@@ -8,6 +8,7 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [dependencies]
+prism_editor_timeline = { path = "../prism_editor_timeline" }
 prism_asset = { path = "../prism_asset", default-features = false }
 prism_ecs = { path = "../prism_ecs", default-features = false, features = ["std", "partition"] }
 prism_scene = { path = "../prism_scene", default-features = false, features = ["std", "partition"] }

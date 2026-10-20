@@ -163,6 +163,13 @@ pub enum TimelineStorageError {
     Codec(TimelineError),
     /// Complete sequence project codec rejected the loaded or submitted bytes.
     SequenceCodec(crate::SequenceDocumentError),
+    /// A contributed document codec rejected the loaded or submitted bytes.
+    DocumentCodec {
+        /// Stable codec domain label.
+        domain: &'static str,
+        /// Concrete validation failure supplied by the codec.
+        message: String,
+    },
     /// An OS operation failed before publication.
     Io {
         /// Fixed operation label.
@@ -190,6 +197,7 @@ impl fmt::Display for TimelineStorageError {
             }
             Self::Codec(error) => write!(f, "timeline file: {error}"),
             Self::SequenceCodec(error) => write!(f, "sequence project file: {error}"),
+            Self::DocumentCodec { domain, message } => write!(f, "{domain} file: {message}"),
             other => write!(f, "timeline storage {other:?}"),
         }
     }

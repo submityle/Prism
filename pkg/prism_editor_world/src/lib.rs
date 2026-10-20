@@ -29,6 +29,7 @@ mod hlod;
 mod io;
 mod locks;
 mod ofpa;
+pub mod project;
 mod world;
 
 pub use filesystem::{

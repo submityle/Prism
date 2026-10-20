@@ -1,6 +1,6 @@
 # Timeline 异步文件存储
 
-实现范围为 `pkg/prism_editor_timeline/src/storage.rs` 及其文件回归测试。存储服务不拥有编辑器，不接入 app，不自动替换当前时间轴，也不自动标记已保存。没有新增依赖或 Bevy 依赖。TimelineDocument codec、根模块公开导出由主线程维护。
+实现范围为 `pkg/prism_editor_timeline/src/storage.rs` 及其文件回归测试。存储服务不拥有编辑器，不自动替换当前时间轴，也不自动标记已保存。没有新增依赖或 Bevy 依赖。2026-10-21 已接入 `prism_editor_timeline` 根模块，使用真实 TimelineDocument codec；app 的文件会话接线另行验收。
 
 ## 宿主 API 与资源归属
 
@@ -11,7 +11,7 @@
 
 宿主保存提交时记录当前 token；收到 receipt 后，只有 token 仍等于当前编辑器 token 才能确认相应快照保存状态。旧保存成功仍更新磁盘修订，但不能把后来编辑标记为已保存。加载结果由宿主按当前项目、服务代次、请求 ID 和未保存编辑策略明确采纳；ID 不能跨不同 service 比较。候选的 ticks_per_second 也由宿主决定如何应用。
 
-完整根模块集成清单（无 Cargo 变更）：
+已集成的完整根模块清单（无 Cargo 变更）：
 
 ```rust
 mod storage;
@@ -53,6 +53,8 @@ sidecar 只协调遵守该协议的写入者。不合作的外部写入仍可能
 
 18 项 storage 测试使用真实临时目录、文件、OS 文件锁和真实 TimelineDocument codec：11 项集成测试覆盖往返、Unicode/cubic/极值 ID、同尺寸同 mtime 冲突、删除修订、并发 worker、请求及字节上限、坏格式/伪造计数、旧快照、独立子进程、原子读观察、符号链接与路径拒绝。7 项内部测试在真实 stage fsync、发布围栏、成功 rename 后设置仅测试构建存在的同步点，验证取消、真实超时、service drop、stage 后冲突、实际 rename 失败及实际父目录同步打开失败。没有生产 mock 文件系统或伪造成功结果。
 
-验证使用独立且无新依赖的 `prism_timeline_storage_checks` harness：直接编译本仓库 storage.rs 与 tests/storage.rs，codec 和编辑器 token 来自实际 prism_editor_timeline 路径依赖；不复制或替代 codec。命令为 `cargo test --offline --manifest-path <owned-harness>/Cargo.toml --lib --test storage --jobs 2`。严格 Clippy 使用相同 manifest、`--lib --test storage --no-deps -- -D warnings`，并复核工作区显式启用的 lint。根模块未挂接时，这些证据不代表 native app 接线已完成。
+最初使用独立且无新依赖的 `prism_timeline_storage_checks` harness：直接编译本仓库 storage.rs 与 tests/storage.rs，codec 和编辑器 token 来自实际 prism_editor_timeline 路径依赖；不复制或替代 codec。严格 Clippy 使用同一 harness。随后主仓库实际根模块集成后的 `cargo test --offline -p prism_editor_timeline -p prism_editor_ui --all-targets`（session 70535）同样通过全部 18 项 storage 回归，时间轴合计 55 项；这不代表 native app 接线已完成。
 
-隔离 target 由本任务单独拥有；验证结束只清理本任务 target，不清理主线程或其他任务缓存。app/native 的项目路径、异步轮询、候选采纳和保存状态提示仍是宿主接线责任。
+2026-10-21 再次直接验证真实 checkout：`cargo test --offline -p prism_editor_timeline -p prism_editor_world --all-targets`（session 17937）exit 0，时间轴 91 项、世界 97 项全部通过，包括通用 document worker、完整 sequence 项目存储及 world membership 的真实文件回归。共享根模块同时公开 sequence 作者/文档/存储 API，world 复用同一个 document worker，并用 `DocumentCodec { domain, message }` 保留实际域错误。随后 session 46011 的 profiler/timeline/world 联合 Clippy（all-targets、all-features、no-deps、`-D warnings`）exit 0；依赖包既有警告不属于此 lint 范围。
+
+隔离 target 由本任务单独拥有；验证结束只清理本任务 target，不清理主线程或其他任务缓存。app 已有 Timeline/Graph/Sequence 项目路径、异步轮询、精确候选和保存回执接线，实际验证见 `prism_editor_native_panels_zh.md`；World membership 原生 UI 集成另行验收。

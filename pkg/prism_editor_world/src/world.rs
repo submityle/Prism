@@ -320,6 +320,11 @@ impl EditorWorldData {
         &self.model
     }
 
+    /// Borrows stable OFPA membership without copying actor payloads.
+    pub fn actor_records(&self) -> impl Iterator<Item = &crate::ActorRecord> {
+        self.ofpa.actors()
+    }
+
     /// Returns configured bounds.
     #[must_use]
     pub const fn limits(&self) -> EditorWorldLimits {

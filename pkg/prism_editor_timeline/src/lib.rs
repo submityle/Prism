@@ -18,11 +18,35 @@ use core::ops::RangeInclusive;
 
 mod editor;
 mod playback;
+mod sequence;
+mod sequence_document;
+mod sequence_storage;
+mod storage;
 mod wire;
 pub use editor::{TimelineEdit, TimelineEditor, TimelineLimits, TimelineSnapshotToken};
 pub use playback::{
     Playback, PlaybackConfig, PlaybackError, PlaybackEvent, PlaybackFrame, PlaybackMode,
     PlaybackRate, PlaybackStatus,
+};
+pub use sequence::{
+    SequenceClip, SequenceClipId, SequenceError, SequenceEvent, SequenceFrame, SequenceId,
+    SequenceInstance, SequenceLimits, SequencePlayer, SequenceProvider, SequenceRange,
+    SequenceRegistry, SequenceSample,
+};
+pub use sequence_document::{
+    SequenceDocumentError, SequenceDocumentLimits, SequenceProjectCommand, SequenceProjectDocument,
+    SequenceProjectEdit, SequenceProjectEditor, SequenceProjectToken,
+};
+pub use sequence_storage::{
+    SequenceProjectCodec, SequenceProjectLoadCandidate, SequenceProjectSaveReceipt,
+    SequenceProjectStorageRequest, SequenceProjectStorageResult, SequenceProjectStorageService,
+};
+pub use storage::{
+    DocumentLoadCandidate, DocumentSaveReceipt, DocumentStorageCodec, DocumentStorageRequest,
+    DocumentStorageResult, DocumentStorageService, TimelineCancelOutcome, TimelineFileRevision,
+    TimelineLoadCandidate, TimelineSaveDurability, TimelineSaveReceipt, TimelineStorageCodec,
+    TimelineStorageError, TimelineStorageLimits, TimelineStorageRequest, TimelineStorageResult,
+    TimelineStorageService, MAX_TIMELINE_STORAGE_BYTES, MAX_TIMELINE_STORAGE_REQUESTS,
 };
 pub use wire::{TimelineCommand, TimelineDocument};
 
@@ -295,7 +319,10 @@ impl Track {
 
     /// Queries only keys in the visible tick range, without scanning earlier keys.
     /// A reversed range is empty.
-    pub fn keys_in(&self, ticks: RangeInclusive<u64>) -> impl Iterator<Item = &Keyframe> {
+    pub fn keys_in(
+        &self,
+        ticks: RangeInclusive<u64>,
+    ) -> impl DoubleEndedIterator<Item = &Keyframe> {
         let (start, end) = ticks.into_inner();
         self.keys
             .range(start..=end.max(start))
