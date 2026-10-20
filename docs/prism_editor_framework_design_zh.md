@@ -375,7 +375,7 @@ pub trait Command: Send {
 | `prism_editor_timeline` | 通用时间线/序列器/关键帧曲线 | ✅ 通用内核已交付 |
 | `prism_editor_domains` | 各域编辑器装配(挂接子系统) | ✅ 装配契约已交付，具体域待接入 |
 | `prism_editor_profiler` | 帧分析器、帧图调试、内存预算、Gameplay Debugger、可视日志 | 🟡 数据层已交付，真实采集待接入 |
-| `prism_editor_content` | 内容浏览器、依赖图、校验、导入导出、cook/构建、版本控制 | 🟡 目录/末项续查分页/有界缓存与诊断/增量依赖/原子 VCS 元数据/任务层已交付，实际管线与 UI 待接 |
+| `prism_editor_content` | 内容浏览器、依赖图、校验、导入导出、cook/构建、版本控制 | 🟡 目录/末项续查分页/有界缓存与诊断/增量依赖/真实异步源扫描/带代际围栏的原子目录发布/原子 VCS 元数据/任务层已交付，实际管线与 UI 待接 |
 | `prism_editor_remote` | BRP 风格 JSON-RPC、PIE、增量同步、安全 | 🟡 协议/TCP/受控进程桥已交付，引擎专属 adapter 待接 |
 | `prism_editor_collab` | 命令广播 / CRDT 协同 / 在场锁(可选) | 🟡 有界副本/TCP 广播/重连/能力拒绝已交付，认证与产品流程待接 |
 | `prism_editor_ui` | Loom Element 装配：Shell、面板、Dock、Viewport host、workspace | 🟡 Element 与语义 action 绑定已交付，设备事件/渲染/模型执行回路待接 |

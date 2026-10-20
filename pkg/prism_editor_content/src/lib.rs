@@ -16,6 +16,9 @@ use alloc::{
 };
 use core::{fmt, ops::Bound};
 
+pub mod filesystem;
+mod source;
+
 /// Stable content identity supplied by an asset system or importer.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Hash)]
 pub struct AssetId(u128);
@@ -250,6 +253,38 @@ impl ContentLimits {
             return Err(ContentError::InvalidLimits);
         }
         Ok(self)
+    }
+}
+
+/// Bounds on one complete asset refresh, applied before building its indexes.
+/// Byte accounting covers UTF-8 path/kind/tag text and 16 bytes per identity or
+/// dependency. It is a logical payload bound, not an allocator heap measurement.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CatalogSnapshotLimits {
+    /// Maximum records in the replacement catalog.
+    pub max_assets: usize,
+    /// Maximum UTF-8 bytes in each asset path.
+    pub max_path_bytes: usize,
+    /// Maximum slash-separated components per path, bounding tree expansion.
+    pub max_path_depth: usize,
+    /// Maximum dependency edges across all records, including missing targets.
+    pub max_dependencies: usize,
+    /// Maximum tags across all records.
+    pub max_tags: usize,
+    /// Maximum logical record payload across the entire replacement.
+    pub max_payload_bytes: usize,
+}
+
+impl Default for CatalogSnapshotLimits {
+    fn default() -> Self {
+        Self {
+            max_assets: 100_000,
+            max_path_bytes: 4096,
+            max_path_depth: 64,
+            max_dependencies: 1_000_000,
+            max_tags: 1_000_000,
+            max_payload_bytes: 64 * 1024 * 1024,
+        }
     }
 }
 
@@ -505,6 +540,15 @@ pub enum ContentError {
     InvalidLimits,
     /// A dependency walk exceeded configured bounds.
     TraversalLimitExceeded,
+    /// A completed refresh was prepared before a newer catalog edit.
+    StaleSnapshot {
+        /// Generation observed when the refresh began.
+        expected: u64,
+        /// Generation of the catalog now.
+        actual: u64,
+    },
+    /// A complete asset refresh exceeded one of its configured bounds.
+    SnapshotLimitExceeded(&'static str),
 }
 
 impl fmt::Display for ContentError {
@@ -530,6 +574,12 @@ impl fmt::Display for ContentError {
             Self::InvalidLimits => formatter.write_str("content limits must all be non-zero"),
             Self::TraversalLimitExceeded => {
                 formatter.write_str("dependency traversal exceeded configured bounds")
+            }
+            Self::StaleSnapshot { expected, actual } => {
+                write!(formatter, "catalog refresh generation {expected} is stale; current generation is {actual}")
+            }
+            Self::SnapshotLimitExceeded(name) => {
+                write!(formatter, "catalog refresh exceeded {name}")
             }
         }
     }
@@ -855,6 +905,136 @@ impl ContentCatalog {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.assets.is_empty()
+    }
+
+    /// Atomically replaces the full asset collection and its derived indexes.
+    /// Stable identities and authored metadata belong to the caller. Missing
+    /// dependencies remain diagnosable; VCS observations remain keyed by path.
+    ///
+    /// Capture `generation()` before starting asynchronous discovery. A stale
+    /// generation rejects the refresh before consuming any records, preventing
+    /// a completed scan from overwriting newer edits. Path swaps and removals
+    /// are checked against the candidate, never against the old collection.
+    /// An identical collection retains generation, cursors, and cached pages.
+    pub fn replace_assets(
+        &mut self,
+        expected_generation: u64,
+        records: impl IntoIterator<Item = AssetRecord>,
+        limits: CatalogSnapshotLimits,
+    ) -> Result<bool, ContentError> {
+        self.replace_asset_results(expected_generation, records.into_iter().map(Ok), limits)
+    }
+
+    fn replace_asset_results(
+        &mut self,
+        expected_generation: u64,
+        records: impl IntoIterator<Item = Result<AssetRecord, ContentError>>,
+        limits: CatalogSnapshotLimits,
+    ) -> Result<bool, ContentError> {
+        if expected_generation != self.generation {
+            return Err(ContentError::StaleSnapshot {
+                expected: expected_generation,
+                actual: self.generation,
+            });
+        }
+        if limits.max_path_bytes == 0 || limits.max_path_depth == 0 {
+            return Err(ContentError::InvalidLimits);
+        }
+        let mut candidate = Self::with_limits(self.limits)?;
+        let mut dependencies = 0usize;
+        let mut tags = 0usize;
+        let mut payload_bytes = 0usize;
+        for record in records {
+            let record = record?;
+            if candidate.len() >= limits.max_assets {
+                return Err(ContentError::SnapshotLimitExceeded("asset count"));
+            }
+            if record.path.len() > limits.max_path_bytes {
+                return Err(ContentError::SnapshotLimitExceeded("path bytes"));
+            }
+            if record.path.split('/').count() > limits.max_path_depth {
+                return Err(ContentError::SnapshotLimitExceeded("path depth"));
+            }
+            let mut account = |amount: usize| {
+                payload_bytes = payload_bytes
+                    .checked_add(amount)
+                    .filter(|total| *total <= limits.max_payload_bytes)
+                    .ok_or(ContentError::SnapshotLimitExceeded("payload bytes"))?;
+                Ok::<(), ContentError>(())
+            };
+            account(16)?;
+            account(record.path.len())?;
+            account(record.kind.as_str().len())?;
+            dependencies = dependencies
+                .checked_add(record.dependencies.len())
+                .filter(|total| *total <= limits.max_dependencies)
+                .ok_or(ContentError::SnapshotLimitExceeded("dependency count"))?;
+            account(
+                record
+                    .dependencies
+                    .len()
+                    .checked_mul(16)
+                    .ok_or(ContentError::SnapshotLimitExceeded("payload bytes"))?,
+            )?;
+            tags = tags
+                .checked_add(record.tags.len())
+                .filter(|total| *total <= limits.max_tags)
+                .ok_or(ContentError::SnapshotLimitExceeded("tag count"))?;
+            for tag in &record.tags {
+                if tag.trim().is_empty() {
+                    return Err(ContentError::EmptyValue("asset tag"));
+                }
+                account(tag.len())?;
+            }
+            let path = canonical_path(record.path.clone())?;
+            if candidate.assets.contains_key(&record.id) {
+                return Err(ContentError::DuplicateAsset(record.id));
+            }
+            candidate.check_path_available(&path, None)?;
+            candidate.paths.insert(path, record.id);
+            candidate.assets.insert(record.id, record);
+        }
+        if self.assets == candidate.assets {
+            return Ok(false);
+        }
+        if self.paths != candidate.paths {
+            let paths = core::mem::take(&mut candidate.paths);
+            for (path, id) in &paths {
+                candidate.add_tree_path(path, *id);
+            }
+            self.paths = paths;
+            self.tree_children = candidate.tree_children;
+            self.folder_counts = candidate.folder_counts;
+        }
+        // Validation is complete. Apply only edge differences, retaining reverse
+        // references to removed targets when their source still references them.
+        let previous = core::mem::replace(&mut self.assets, candidate.assets);
+        for (id, old) in &previous {
+            for dependency in &old.dependencies {
+                if !self
+                    .assets
+                    .get(id)
+                    .is_some_and(|new| new.dependencies.contains(dependency))
+                {
+                    self.remove_reverse_edge(*dependency, *id);
+                }
+            }
+        }
+        for (id, new) in &self.assets {
+            for dependency in &new.dependencies {
+                if !previous
+                    .get(id)
+                    .is_some_and(|old| old.dependencies.contains(dependency))
+                {
+                    self.reverse_dependencies
+                        .entry(*dependency)
+                        .or_default()
+                        .insert(*id);
+                }
+            }
+        }
+        self.changed();
+        Ok(true)
     }
 
     /// Inserts one asset and updates all deterministic indexes.

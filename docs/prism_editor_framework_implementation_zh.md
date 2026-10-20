@@ -20,7 +20,7 @@
 | `prism_editor_graph` | 稳定图身份、类型/基数校验、分组/索引维护、确定性拓扑与评估回调 | 材质/VFX 等具体节点 UI 和编译器适配 | 10 |
 | `prism_editor_timeline` | 整数 tick、稳定轨道/关键帧、插值、维度校验、有序事件与采样 | 序列器 UI 和具体运行时播放适配 | 3 |
 | `prism_editor_profiler` | 有界 frame/span、帧图/关键路径、内存预算告警、可视日志投影 | Tracy/GPU/真实运行时采集和分析界面 | 9 |
-| `prism_editor_content` | 目录/子树索引、按末项续查的分页、过滤、有界缓存与诊断、增量反向依赖、精确路径、原子 VCS 快照、导入导出任务状态 | 文件扫描、缩略图生产、实际 importer/exporter/Cook/VCS provider 和内容 UI | 18（本次目录回归） |
+| `prism_editor_content` | 目录/子树索引、末项续查分页、有界缓存与诊断、增量反向依赖、真实异步文件扫描、带代际围栏的原子源目录发布、原子 VCS 元数据和导入导出任务状态 | 缩略图生产、实际 importer/exporter/Cook/VCS provider 和内容 UI | 50（目录/扫描/发布） |
 | `prism_editor_domains` | 域/能力/贡献/Profile、版本约束、依赖启停、确定性冲突诊断 | 材质/VFX/动画/地形/音频/物理的具体编辑器 | 13 |
 | `prism_editor_remote` | 有界 JSON-RPC/二进制 codec、增量副本、PIE、TCP、受控子进程 stdio/TCP 桥及取消/重启/超时 | Prism 引擎专属 adapter 和生产场景运行时接线 | 41 |
 | `prism_editor_collab` | 有界因果副本/LWW/tombstone、Presence/租约软锁、TCP 接纳顺序/广播/重连/历史重放/能力拒绝 | 身份认证/TLS、产品级权限/部署和 UI 到命令栈协同接线 | 20 |
@@ -55,7 +55,11 @@
 
 依赖闭包与环检测借用邻接集合/迭代器，不在节点数限制生效前复制高扇出依赖列表。深度以根为零统一计数，到达边界叶子或已见回边成功；发现更深的新节点才拒绝，避免完整边界路径误报超限。
 
-2026-10-20 执行 `cargo test --offline -p prism_editor_content --all-targets`，10 项单元测试和 8 项集成测试通过；`cargo clippy --offline -p prism_editor_content --all-targets --all-features --no-deps -- -D warnings` 通过。集成回归包含 257 个分支的过滤分页、变化页大小/缓存命中与淘汰、400 次混合修改的独立反向引用比对、精确路径、原子快照拒绝及依赖深度/节点边界。这里只验证目录数据层，不把任务状态模型计作实际 importer/exporter/Cook 执行。
+`FilesystemDiscovery` 以标准库工作线程读取真实目录和元数据；默认剪枝仓库/构建产物，不跟随符号链接。并发、输出/枚举数量、路径字节、深度、文件大小及协作式超时均有界；只发布完整排序快照，错误/取消不返回半批数据。标准库无法打断阻塞 OS 调用，drop 会 join，不承诺硬实时截止或恶意目录替换隔离，详见 `prism_editor_content_filesystem_zh.md`。
+
+`replace_from_filesystem` 用宿主 manifest/sidecar 解析稳定资产身份，不以路径哈希冒充重命名稳定 ID。扫描开始前捕获 generation，完成时拒绝覆盖更新的编辑；解析失败、非法/重复记录、前缀冲突或预算失败均保持旧目录。`replace_assets` 同样支持其他源适配器的完整候选，接受路径互换/删除，保留缺失依赖诊断和按路径的 VCS 观察。候选记录、路径长度/深度、边/标签数量和逻辑字节分别受限；只在有效变化时推进一次 generation，无变化不重建派生索引，路径不变保留树，反向引用按边差分更新。
+
+2026-10-20 执行 `cargo test --offline -p prism_editor_content --all-targets`：10 项单元、8 项目录回归、28 项真实文件扫描及 4 项原子发布测试。`cargo clippy --offline -p prism_editor_content --all-targets --all-features --no-deps -- -D warnings` 使用同一独立 target 验证。回归覆盖过滤分页/缓存淘汰、400 次混合修改的反向引用比对、所有扫描/发布预算、真实重命名保留宿主身份、代际过期和失败不部分发布。这里只验证源发现/目录数据，不把任务状态模型计作实际 importer/exporter/Cook 执行。
 
 ### 大世界执行数据层
 

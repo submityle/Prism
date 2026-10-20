@@ -1,8 +1,9 @@
 # prism_editor_content
 
 `prism_editor_content` is the deterministic data layer for Prism's content
-browser. It has no renderer, filesystem, OS, or legacy-engine dependency. Adapters
-own I/O and translate their observations into the contracts in this crate.
+browser. Its catalog has no renderer or engine dependency. The filesystem
+adapter uses standard-library workers to discover actual project sources;
+hosts supply stable asset identities and importer-specific metadata.
 
 ## Data model
 
@@ -63,6 +64,34 @@ VCS adapters can publish status before or after an asset is imported.
 statuses. Invalid or duplicate paths reject the entire snapshot; an identical
 snapshot preserves the generation and cached pages.
 
+## Source discovery and publication
+
+The public filesystem module enumerates real files and directories into a sorted
+complete snapshot on a bounded worker. The service limits concurrency, entries,
+path bytes, scanned entries, file sizes and depth; it prunes configurable build
+and repository metadata, skips symlinks, and reports errors without partial
+snapshots. Polling is nonblocking. Cancellation and deadlines are cooperative;
+dropping a request joins its worker and can wait for a blocking OS call. See
+the filesystem design note in docs for platform and confinement boundaries.
+
+Capture the catalog generation before starting a scan, then pass the complete
+snapshot to ContentCatalog::replace_from_filesystem. The host resolves each file
+to an optional AssetRecord using its manifest or sidecars. The record must retain
+the exact discovered path. Stable IDs are not derived from paths; the host can
+preserve identity and authored metadata across renames. A resolver error, invalid
+record, duplicate identity/path, file/folder collision or stale generation leaves
+the current catalog, indexes, cursors and caches intact.
+
+ContentCatalog::replace_assets also accepts complete records from other source
+adapters. CatalogSnapshotLimits bounds records, path bytes/depth, dependencies,
+tags and logical payload bytes while consuming the candidate. Byte accounting
+does not measure allocator or index overhead. Replacement supports path swaps,
+removes omitted assets, retains unresolved dependency references, and preserves
+VCS observations by exact path. An effective refresh changes generation once;
+an identical refresh retains cached pages. Validation requires inspecting the
+complete input, but unchanged snapshots do not rebuild derived indexes, metadata
+edits retain the tree, and reverse references apply only edge differences.
+
 ## Verification
 
 The crate's tests cover deterministic ordering, cursor invalidation, tree
@@ -72,8 +101,11 @@ transitions. Additional regressions cover 257-folder filtered pagination with
 changing page sizes and cache eviction, exact path identity, file/folder prefix
 collisions, atomic VCS publication, bounded diagnostics, and 400 mixed edits
 checked against an independent reverse-reference reconstruction. On 2026-10-20,
-all 18 catalog tests passed; this is data-layer verification, not content UI,
-importer or asset-pipeline acceptance. Run:
+18 original catalog tests, 28 real filesystem tests and 4 source-publication
+tests passed. Publication tests cover path swaps/removals, every snapshot bound,
+bounded iterator consumption, stale refresh refusal, resolver failure and real
+file rename with host-owned stable identity. This does not verify importer,
+thumbnail production or the content UI. Run:
 
 ```text
 cargo fmt --package prism_editor_content
