@@ -512,7 +512,7 @@ fn despawn_releases_shared_reference_and_recycles_slot() {
 #[test]
 fn evicted_shared_archetypes_reclaim_table_component_postings() {
     let mut w = World::new();
-    let live = w.spawn((Position(-1), BatchKey(u32::MAX)));
+    let live = w.spawn((Position(-1), BatchKey(u32::MAX), Layer(7)));
     let live_archetype = archetype_of(&w, live);
     let state = w.query::<(Entity, &Position)>();
     assert_eq!(state.iter(&w).count(), 1);
@@ -523,11 +523,27 @@ fn evicted_shared_archetypes_reclaim_table_component_postings() {
         // One shared value can bind several table-set variants. The active
         // value deliberately shares `Position`, so eviction must remove only
         // the stale archetypes from that posting.
-        let first = w.spawn((Position(value), BatchKey(value as u32)));
-        let second = w.spawn((Position(value), Velocity(value), BatchKey(value as u32)));
+        let first = w.spawn((Position(value), BatchKey(value as u32), Layer(7)));
+        let second = w.spawn((
+            Position(value),
+            Velocity(value),
+            BatchKey(value as u32),
+            Layer(7),
+        ));
         let velocity = cid::<Velocity>(&w);
         let first_archetype = archetype_of(&w, first);
         let second_archetype = archetype_of(&w, second);
+        let batch_key = cid::<BatchKey>(&w);
+        let binding = (batch_key, shared_sid(&w, first, batch_key));
+        let binding_posting = w.archetypes.with_shared_binding(binding.0, binding.1);
+        assert_eq!(binding_posting.len(), 2);
+        assert!(
+            w.archetypes.len() > binding_posting.len(),
+            "candidate posting stays local while stable tombstones accumulate"
+        );
+        assert!(binding_posting.contains(&first_archetype));
+        assert!(binding_posting.contains(&second_archetype));
+        assert!(binding_posting.windows(2).all(|pair| pair[0] < pair[1]));
 
         assert_eq!(
             state.iter(&w).count(),
@@ -542,6 +558,26 @@ fn evicted_shared_archetypes_reclaim_table_component_postings() {
 
         assert!(w.despawn(first));
         assert!(w.despawn(second));
+
+        assert!(
+            w.archetypes
+                .with_shared_binding(binding.0, binding.1)
+                .is_empty(),
+            "eviction must reclaim every table-set variant from the shared-value posting"
+        );
+        let live_binding = shared_sid(&w, live, batch_key);
+        assert_eq!(
+            w.archetypes.with_shared_binding(batch_key, live_binding),
+            &[live_archetype],
+            "evicting a different value must retain the active binding posting"
+        );
+        let layer = cid::<Layer>(&w);
+        let live_layer_binding = shared_sid(&w, live, layer);
+        assert_eq!(
+            w.archetypes.with_shared_binding(layer, live_layer_binding),
+            &[live_archetype],
+            "eviction must also remove tombstones from their other shared-value postings"
+        );
 
         let position_posting = w.archetypes.with_component(position);
         assert!(position_posting.contains(&live_archetype));
