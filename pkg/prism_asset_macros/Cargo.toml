@@ -1,0 +1,31 @@
+[package]
+name = "prism_asset_macros"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+rust-version = "1.96.0"
+publish = false
+description = "Asset and dependency traversal derives for the no_std Prism asset kernel."
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro-crate = "3.5"
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full", "derive"] }
+
+[dev-dependencies]
+prism_asset_runtime = { package = "prism_asset", path = "../prism_asset", default-features = false }
+
+[[test]]
+name = "expansion"
+path = "text/unit/expansion.rs"
+
+[[test]]
+name = "renamed_dependency"
+path = "text/integration/renamed_dependency.rs"
+
+[lints]
+workspace = true

@@ -11,25 +11,194 @@
 //! labeled-path loads that reuse the source assembly; reload candidates also
 //! decode and stage newly introduced ordinary dependencies and sibling labels
 //! before one atomic commit. Range reads and preemptive cancellation are also
-//! outside this slice. Priority orders queued CPU-pool
-//! work where possible; ticket
+//! outside this slice. Live priority cells order queued I/O and CPU work,
+//! including wakeups and dependencies; ticket
 //! cancellation stops that caller from waiting but does not kill shared or
 //! already-running work.
 
 use crate::loader_exec::{AssetLoaders, FullLoadOutput};
 use crate::server::{
     AsyncLoadPreparation, AsyncReloadCandidate, AsyncReloadCandidateAsset, AsyncReloadCommitError,
+    SoftLoadError,
 };
 use crate::source::AssetSources;
-use crate::{AssetPath, AssetServer, AssetTypeId, UntypedHandle};
+use crate::{Asset, AssetPath, AssetServer, AssetTypeId, SoftHandle, UntypedHandle};
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 use core::future::Future;
 use core::pin::Pin;
 use core::task::{Context, Poll, Waker};
-use prism_tasks::{Priority, PriorityGroup, TaskPool};
+use prism_tasks::{Priority, PriorityCell, TaskPool};
 use std::sync::Mutex;
+
+/// Asset-loading urgency, applied to both I/O dispatch and CPU continuations.
+/// Running synchronous reads/decoders are not preempted. Promotion is monotonic.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum LoadPriority {
+    /// Work which may wait for idle time.
+    Background,
+    /// Speculative work for assets which may soon be needed.
+    Prefetch,
+    /// Visible-content streaming, ahead of speculative work.
+    #[default]
+    Streaming,
+    /// Required by the current interactive critical path.
+    Immediate,
+}
+
+impl From<LoadPriority> for Priority {
+    fn from(priority: LoadPriority) -> Self {
+        match priority {
+            LoadPriority::Immediate => Self::Critical,
+            LoadPriority::Streaming => Self::High,
+            LoadPriority::Prefetch => Self::Low,
+            LoadPriority::Background => Self::Background,
+        }
+    }
+}
+
+/// Hard admission limits for one caller-controlled soft-reference batch.
+/// These count roots, not transitive dependencies, decoded memory, or I/O bytes.
+/// Call once per frame/tick with that frame's allowance to implement batching.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SoftLoadBudget {
+    /// Maximum input references, including duplicates.
+    pub max_requests: usize,
+    /// Maximum distinct root paths, including already in-flight roots.
+    pub max_unique_assets: usize,
+}
+
+/// An entire soft-reference batch was rejected before any flight was admitted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SoftBatchError {
+    /// The input exceeds the per-batch reference allowance.
+    RequestBudgetExceeded {
+        /// Number of input references.
+        requested: usize,
+        /// Configured maximum.
+        limit: usize,
+    },
+    /// Distinct resolved roots exceed the per-batch asset allowance.
+    UniqueAssetBudgetExceeded {
+        /// Number of distinct paths.
+        requested: usize,
+        /// Configured maximum.
+        limit: usize,
+    },
+    /// A reference could not be resolved without I/O.
+    InvalidHandle {
+        /// Input index of the first invalid reference.
+        index: usize,
+        /// Exact identity/type/catalog diagnostic.
+        reason: SoftLoadError,
+    },
+    /// Existing shared work has an incompatible or unresolved requested type.
+    ConflictingFlight {
+        /// First input index referring to the conflicting flight.
+        index: usize,
+        /// Resolved root path.
+        path: AssetPath,
+    },
+    /// All new roots cannot fit; duplicates do not consume new slots.
+    AtCapacity {
+        /// New execution slots required by the batch.
+        required: usize,
+        /// Slots available without bypassing dependency/admission waiters.
+        available: usize,
+    },
+}
+
+impl core::fmt::Display for SoftBatchError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::RequestBudgetExceeded { requested, limit } => write!(
+                f,
+                "soft batch request budget exceeded: {requested} > {limit}"
+            ),
+            Self::UniqueAssetBudgetExceeded { requested, limit } => write!(
+                f,
+                "soft batch unique-root budget exceeded: {requested} > {limit}"
+            ),
+            Self::InvalidHandle { index, reason } => {
+                write!(f, "soft batch reference {index}: {reason}")
+            }
+            Self::ConflictingFlight { index, path } => write!(
+                f,
+                "soft batch reference {index} conflicts with in-flight type: {path}"
+            ),
+            Self::AtCapacity {
+                required,
+                available,
+            } => write!(
+                f,
+                "soft batch needs {required} new slots but only {available} are available"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SoftBatchError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::InvalidHandle { reason, .. } => Some(reason),
+            _ => None,
+        }
+    }
+}
+
+/// Weak dependency links avoid retaining completed flights or creating Arc
+/// cycles. Link insertion and promotion may race: inserting first then sampling
+/// the parent's cell ensures either operation observes the other's promotion.
+#[derive(Clone)]
+struct FlightPriority(Arc<PriorityNode>);
+
+struct PriorityNode {
+    cell: Arc<PriorityCell>,
+    dependencies: Mutex<Vec<Weak<PriorityNode>>>,
+}
+
+impl FlightPriority {
+    fn new(priority: Priority) -> Self {
+        Self(Arc::new(PriorityNode {
+            cell: Arc::new(PriorityCell::new(priority)),
+            dependencies: Mutex::new(Vec::new()),
+        }))
+    }
+
+    fn effective_priority(&self) -> Priority {
+        self.0.cell.get()
+    }
+
+    fn priority_cell(&self) -> Arc<PriorityCell> {
+        Arc::clone(&self.0.cell)
+    }
+
+    fn inherit(&self, dependency: &Self) {
+        {
+            let mut dependencies = self.0.dependencies.lock().expect("priority links poisoned");
+            dependencies.retain(|entry| entry.strong_count() != 0);
+            let weak = Arc::downgrade(&dependency.0);
+            if !dependencies.iter().any(|entry| entry.ptr_eq(&weak)) {
+                dependencies.push(weak);
+            }
+        }
+        dependency.boost_to(self.effective_priority());
+    }
+
+    fn boost_to(&self, priority: Priority) {
+        let mut pending = vec![Arc::clone(&self.0)];
+        let mut visited = BTreeSet::new();
+        while let Some(node) = pending.pop() {
+            if !visited.insert(Arc::as_ptr(&node) as usize) {
+                continue;
+            }
+            node.cell.boost_to(priority);
+            let dependencies = node.dependencies.lock().expect("priority links poisoned");
+            pending.extend(dependencies.iter().filter_map(Weak::upgrade));
+        }
+    }
+}
 
 /// The result of a scheduled load.
 pub type ScheduleOutcome = Result<UntypedHandle, LoadFailure>;
@@ -85,7 +254,7 @@ impl std::error::Error for ScheduleError {}
 
 struct Flight {
     notification: Mutex<FlightNotification>,
-    priority: PriorityGroup,
+    priority: FlightPriority,
     requested_type: Option<AssetTypeId>,
 }
 
@@ -167,7 +336,7 @@ struct SchedulerState {
 
 struct AdmissionWaiter {
     token: Arc<()>,
-    priority: Priority,
+    priority: FlightPriority,
     seq: u64,
     waker: Waker,
     granted: bool,
@@ -187,6 +356,7 @@ struct ReloadReadKey {
 
 struct ReloadReadFlight {
     notification: Mutex<ReloadReadNotification>,
+    priority: FlightPriority,
 }
 
 struct ReloadReadNotification {
@@ -355,9 +525,9 @@ impl LoadScheduler {
     pub fn schedule(
         &self,
         path: impl Into<AssetPath>,
-        priority: Priority,
+        priority: impl Into<Priority>,
     ) -> Result<LoadTicket, ScheduleError> {
-        self.schedule_with_ancestors(path.into(), priority, BTreeSet::new())
+        self.schedule_with_ancestors(path.into(), priority.into(), BTreeSet::new())
     }
 
     /// Schedule an asynchronous reload of an already resident asset.
@@ -368,9 +538,104 @@ impl LoadScheduler {
     pub fn schedule_reload(
         &self,
         path: impl Into<AssetPath>,
-        priority: Priority,
+        priority: impl Into<Priority>,
     ) -> Result<LoadTicket, ScheduleError> {
-        self.schedule_reload_with_ancestors(path.into(), priority, BTreeSet::new())
+        self.schedule_reload_with_ancestors(path.into(), priority.into(), BTreeSet::new())
+    }
+
+    /// Atomically admits a typed soft-reference batch, returning one separately
+    /// cancellable ticket per input, in input order. Duplicates share work.
+    ///
+    /// Refusal performs no I/O and admits/promotes no flights. Request and
+    /// distinct-root budgets include duplicates/resident work as documented by
+    /// [`SoftLoadBudget`]; scheduler capacity charges only new distinct flights.
+    /// Dependencies retain the scheduler's separate bounded queue policy.
+    pub fn schedule_soft_batch<A: Asset>(
+        &self,
+        soft: &[SoftHandle<A>],
+        priority: impl Into<Priority>,
+        budget: SoftLoadBudget,
+    ) -> Result<Vec<LoadTicket>, SoftBatchError> {
+        if soft.len() > budget.max_requests {
+            return Err(SoftBatchError::RequestBudgetExceeded {
+                requested: soft.len(),
+                limit: budget.max_requests,
+            });
+        }
+        let paths = self
+            .server
+            .resolve_soft_batch(soft)
+            .map_err(|(index, reason)| SoftBatchError::InvalidHandle { index, reason })?;
+        let unique: BTreeSet<_> = paths.iter().cloned().collect();
+        if unique.len() > budget.max_unique_assets {
+            return Err(SoftBatchError::UniqueAssetBudgetExceeded {
+                requested: unique.len(),
+                limit: budget.max_unique_assets,
+            });
+        }
+        let priority = priority.into();
+        let requested_type = AssetTypeId::of::<A>();
+        let (tickets, starts) = {
+            let mut state = self.state.lock().expect("load scheduler poisoned");
+            for (index, path) in paths.iter().enumerate() {
+                if let Some(existing) = state.in_flight.get(&FlightKey::Load(path.clone()))
+                    && existing.requested_type != Some(requested_type)
+                {
+                    return Err(SoftBatchError::ConflictingFlight {
+                        index,
+                        path: path.clone(),
+                    });
+                }
+            }
+            let required = unique
+                .iter()
+                .filter(|path| {
+                    !state
+                        .in_flight
+                        .contains_key(&FlightKey::Load((*path).clone()))
+                })
+                .count();
+            let available = if state.queued.is_empty() && state.admission_waiters.is_empty() {
+                self.limit.saturating_sub(state.running.len())
+            } else {
+                0
+            };
+            if required > available {
+                return Err(SoftBatchError::AtCapacity {
+                    required,
+                    available,
+                });
+            }
+            let mut starts = Vec::with_capacity(required);
+            // Keep first occurrence order for equal-priority FIFO dispatch.
+            let mut tickets = Vec::with_capacity(paths.len());
+            for path in paths {
+                let key = FlightKey::Load(path);
+                let flight = if let Some(existing) = state.in_flight.get(&key) {
+                    existing.priority.boost_to(priority);
+                    Arc::clone(existing)
+                } else {
+                    let flight = Arc::new(Flight {
+                        notification: Mutex::new(FlightNotification {
+                            result: None,
+                            waiters: Vec::new(),
+                        }),
+                        priority: FlightPriority::new(priority),
+                        requested_type: Some(requested_type),
+                    });
+                    state.in_flight.insert(key.clone(), Arc::clone(&flight));
+                    state.running.insert(key.clone(), Arc::clone(&flight));
+                    starts.push((key, Arc::clone(&flight)));
+                    flight
+                };
+                tickets.push(LoadTicket::new(flight));
+            }
+            (tickets, starts)
+        };
+        for (key, flight) in starts {
+            self.spawn_flight(key, flight, priority, BTreeSet::new(), false);
+        }
+        Ok(tickets)
     }
 
     fn schedule_with_ancestors(
@@ -460,7 +725,7 @@ impl LoadScheduler {
                             result: None,
                             waiters: Vec::new(),
                         }),
-                        priority: self.cpu_pool.priority_group(priority),
+                        priority: FlightPriority::new(priority),
                         requested_type: Some(requested_type),
                     });
                     conflict.complete(Err(LoadFailure::AssemblyFailed(format!(
@@ -492,7 +757,7 @@ impl LoadScheduler {
                         result: None,
                         waiters: Vec::new(),
                     }),
-                    priority: self.cpu_pool.priority_group(priority),
+                    priority: FlightPriority::new(priority),
                     requested_type,
                 });
                 state.in_flight.insert(key.clone(), Arc::clone(&flight));
@@ -554,7 +819,7 @@ impl LoadScheduler {
         let scheduler = self.clone();
         let server = Arc::clone(&self.server);
         let pool = self.cpu_pool.clone();
-        let task = pool.spawn_async(async move {
+        let task = pool.spawn_future_with_priority(flight.priority.priority_cell(), async move {
             let priority = flight.priority.effective_priority().max(priority);
             let path = match &key {
                 FlightKey::Load(path) | FlightKey::Reload { path, .. } => path.clone(),
@@ -570,6 +835,7 @@ impl LoadScheduler {
                         Arc::clone(&server),
                         worker_path.clone(),
                         worker_flight.requested_type,
+                        Arc::clone(&worker_flight),
                     )
                     .await
                 } else {
@@ -637,7 +903,12 @@ impl LoadScheduler {
 
     fn admit_queued_locked(&self, state: &mut SchedulerState) -> Vec<QueuedFlight> {
         let mut admitted = Vec::new();
-        while state.running.len() < self.limit {
+        let reservations = state
+            .admission_waiters
+            .iter()
+            .filter(|waiter| waiter.granted)
+            .count();
+        while state.running.len().saturating_add(reservations) < self.limit {
             if state.queued.is_empty() {
                 break;
             }
@@ -691,12 +962,12 @@ impl LoadScheduler {
         flight: Arc<Flight>,
         priority: Priority,
     ) -> ExecutionSlotFuture {
+        flight.priority.boost_to(priority);
         ExecutionSlotFuture {
             scheduler: self.clone(),
             key,
             flight,
             token: Arc::new(()),
-            priority,
         }
     }
 
@@ -705,6 +976,7 @@ impl LoadScheduler {
         source_revision: u64,
         sources: &AssetSources,
         path: &AssetPath,
+        priority: &FlightPriority,
     ) -> ReloadReadTicket {
         let key = ReloadReadKey {
             source_revision,
@@ -726,11 +998,13 @@ impl LoadScheduler {
                         result: None,
                         waiters: Vec::new(),
                     }),
+                    priority: FlightPriority::new(priority.effective_priority()),
                 });
                 state.reload_reads.insert(key, Arc::clone(&flight));
                 (flight, true)
             }
         };
+        priority.inherit(&flight.priority);
         if start {
             let read_sources = sources.clone();
             let read_path = path.clone();
@@ -746,7 +1020,7 @@ impl LoadScheduler {
                 ReloadReadFlight::wake_all(read_flight.complete(read()));
             } else {
                 self.io_pool
-                    .spawn_async(async move {
+                    .spawn_future_with_priority(flight.priority.priority_cell(), async move {
                         ReloadReadFlight::wake_all(read_flight.complete(read()));
                     })
                     .detach();
@@ -783,7 +1057,8 @@ impl LoadScheduler {
                 .filter(|(_, waiter)| !waiter.granted)
                 .max_by(|(_, left), (_, right)| {
                     left.priority
-                        .cmp(&right.priority)
+                        .effective_priority()
+                        .cmp(&right.priority.effective_priority())
                         .then_with(|| right.seq.cmp(&left.seq))
                 })
                 .map(|(index, _)| index)
@@ -825,20 +1100,27 @@ async fn execute_async_load(
         scheduler.release_execution_slot(&FlightKey::Load(requested_path.clone()), &flight);
         let source_ticket = match scheduler.schedule_with_ancestors(
             source_path.clone(),
-            priority,
+            flight.priority.effective_priority(),
             ancestors.clone(),
         ) {
             Ok(ticket) => ticket,
             Err(error) => return Err(LoadFailure::AssemblyFailed(error.to_string())),
         };
+        flight.priority.inherit(&source_ticket.flight.priority);
         let source_result = source_ticket.await;
         return match source_result {
             Ok(handle) if server.is_loaded(handle.id()) => {
-                server.load_untyped(requested_path.clone()).ok_or_else(|| {
+                let handle = server.load_untyped(requested_path.clone()).ok_or_else(|| {
                     LoadFailure::AssemblyFailed(format!(
                         "labeled asset was not emitted by {source_path}: {requested_path}"
                     ))
-                })
+                })?;
+                if requested_type.is_some_and(|expected| expected != handle.id().type_id()) {
+                    return Err(LoadFailure::AssemblyFailed(format!(
+                        "labeled asset type does not match requested type: {requested_path}"
+                    )));
+                }
+                Ok(handle)
             }
             Ok(_) => Err(LoadFailure::AssemblyFailed(format!(
                 "source asset failed to load: {source_path}"
@@ -871,7 +1153,7 @@ async fn execute_async_load(
         let read_path = plan.path.clone();
         scheduler
             .io_pool
-            .spawn_async(async move {
+            .spawn_future_with_priority(flight.priority.priority_cell(), async move {
                 match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     read_sources.read(&read_path)
                 })) {
@@ -924,7 +1206,7 @@ async fn execute_async_load(
     for dependency in &output.primary.dependencies {
         let ticket = match scheduler.schedule_typed_with_ancestors(
             dependency.path.clone(),
-            priority,
+            flight.priority.effective_priority(),
             dependency.expected_type,
             ancestors.clone(),
         ) {
@@ -935,6 +1217,7 @@ async fn execute_async_load(
                 return Err(LoadFailure::AssemblyFailed(error));
             }
         };
+        flight.priority.inherit(&ticket.flight.priority);
         let dependency_path = dependency.path.clone();
         match ticket.await {
             Ok(handle) if server.is_loaded(handle.id()) => dependencies.push(handle),
@@ -980,7 +1263,7 @@ async fn execute_async_load(
             }
             let ticket = match scheduler.schedule_typed_with_ancestors(
                 dependency.path.clone(),
-                priority,
+                flight.priority.effective_priority(),
                 dependency.expected_type,
                 label_ancestors.clone(),
             ) {
@@ -991,6 +1274,7 @@ async fn execute_async_load(
                     return Err(LoadFailure::AssemblyFailed(error));
                 }
             };
+            flight.priority.inherit(&ticket.flight.priority);
             let dependency_path = dependency.path.clone();
             match ticket.await {
                 Ok(handle) if server.is_loaded(handle.id()) => resolved.push(handle),
@@ -1027,6 +1311,7 @@ async fn execute_async_reload(
     server: Arc<AssetServer>,
     path: AssetPath,
     requested_type: Option<AssetTypeId>,
+    flight: Arc<Flight>,
 ) -> ScheduleOutcome {
     let plan = match server.prepare_async_reload(path.clone(), requested_type) {
         Ok(plan) => plan,
@@ -1040,6 +1325,7 @@ async fn execute_async_reload(
         &plan.loaders,
         &plan.path,
         plan.type_id,
+        &flight.priority,
     )
     .await
     .map_err(LoadFailure::AssemblyFailed)?;
@@ -1098,6 +1384,7 @@ async fn execute_async_reload(
                 &plan.loaders,
                 &source_path,
                 dependency_type,
+                &flight.priority,
             )
             .await
             .map_err(LoadFailure::AssemblyFailed)?;
@@ -1138,9 +1425,10 @@ async fn decode_reload_source(
     loaders: &AssetLoaders,
     path: &AssetPath,
     type_id: AssetTypeId,
+    priority: &FlightPriority,
 ) -> Result<FullLoadOutput, String> {
     let bytes = scheduler
-        .reload_read(source_revision, sources, path)
+        .reload_read(source_revision, sources, path, priority)
         .await?;
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         loaders
@@ -1188,7 +1476,6 @@ struct ExecutionSlotFuture {
     key: FlightKey,
     flight: Arc<Flight>,
     token: Arc<()>,
-    priority: Priority,
 }
 
 impl Future for ExecutionSlotFuture {
@@ -1226,7 +1513,6 @@ impl Future for ExecutionSlotFuture {
             } else {
                 if let Some(index) = own_index {
                     let waiter = &mut state.admission_waiters[index];
-                    waiter.priority = this.priority;
                     if !waiter.waker.will_wake(cx.waker()) {
                         waiter.waker = cx.waker().clone();
                     }
@@ -1235,7 +1521,7 @@ impl Future for ExecutionSlotFuture {
                     state.next_admission_seq = state.next_admission_seq.saturating_add(1);
                     state.admission_waiters.push(AdmissionWaiter {
                         token: Arc::clone(&this.token),
-                        priority: this.priority,
+                        priority: this.flight.priority.clone(),
                         seq,
                         waker: cx.waker().clone(),
                         granted: false,
@@ -1334,6 +1620,33 @@ struct Cancellation {
 }
 
 impl LoadTicket {
+    fn new(flight: Arc<Flight>) -> Self {
+        Self {
+            flight,
+            waiter_token: Arc::new(()),
+            cancellation: Arc::new(Mutex::new(Cancellation {
+                cancelled: false,
+                waker: None,
+            })),
+        }
+    }
+
+    /// Promotes this shared flight, its queued I/O/CPU continuations, and known
+    /// dependencies. Lower priorities never demote work needed by another
+    /// consumer. A cancelled consumer cannot promote shared work.
+    pub fn reprioritize(&self, priority: impl Into<Priority>) {
+        let cancellation = self.cancellation.lock().expect("ticket waker poisoned");
+        if !cancellation.cancelled {
+            self.flight.priority.boost_to(priority.into());
+        }
+    }
+
+    /// Current effective task-pool priority, including inheritance/promotions.
+    #[must_use]
+    pub fn effective_priority(&self) -> Priority {
+        self.flight.priority.effective_priority()
+    }
+
     /// Stop waiting for this request. This is cooperative at the API boundary:
     /// shared work and work already running on the synchronous server continue.
     pub fn cancel(&self) {
@@ -1394,6 +1707,10 @@ impl Cancellation {
         self.waker.take()
     }
 }
+
+#[cfg(test)]
+#[path = "../text/unit/scheduler_priority.rs"]
+mod priority_tests;
 
 #[cfg(test)]
 mod tests {
@@ -2163,7 +2480,7 @@ mod tests {
                 result: None,
                 waiters: Vec::new(),
             }),
-            priority: TaskPool::with_threads(0).priority_group(Priority::Normal),
+            priority: FlightPriority::new(Priority::Normal),
             requested_type: None,
         });
         Flight::wake_all(flight.complete(Err(LoadFailure::NoLoader)));
@@ -2202,13 +2519,13 @@ mod tests {
         )
     }
 
-    fn test_flight(scheduler: &LoadScheduler, priority: Priority) -> Arc<Flight> {
+    fn test_flight(_scheduler: &LoadScheduler, priority: Priority) -> Arc<Flight> {
         Arc::new(Flight {
             notification: Mutex::new(FlightNotification {
                 result: None,
                 waiters: Vec::new(),
             }),
-            priority: scheduler.cpu_pool.priority_group(priority),
+            priority: FlightPriority::new(priority),
             requested_type: None,
         })
     }
@@ -2322,7 +2639,7 @@ mod tests {
                 result: None,
                 waiters: Vec::new(),
             }),
-            priority: TaskPool::with_threads(0).priority_group(Priority::Normal),
+            priority: FlightPriority::new(Priority::Normal),
             requested_type: None,
         });
         let mut ticket = LoadTicket {
@@ -2356,7 +2673,7 @@ mod tests {
                 result: None,
                 waiters: Vec::new(),
             }),
-            priority: TaskPool::with_threads(0).priority_group(Priority::Normal),
+            priority: FlightPriority::new(Priority::Normal),
             requested_type: None,
         });
         let mut ticket = LoadTicket {
@@ -2383,7 +2700,7 @@ mod tests {
                 result: None,
                 waiters: Vec::new(),
             }),
-            priority: TaskPool::with_threads(0).priority_group(Priority::Normal),
+            priority: FlightPriority::new(Priority::Normal),
             requested_type: None,
         });
         let mut ticket = LoadTicket {

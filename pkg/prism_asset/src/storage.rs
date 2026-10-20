@@ -3,9 +3,14 @@
 use crate::asset::Asset;
 use crate::error::AssetErrorId;
 use crate::event::AssetEvent;
+use crate::fallback::{AssetFallbacks, AssetView, FallbackSource};
 use crate::handle::{Handle, HandleInner, ReleaseSignal};
 use crate::id::{AssetId, AssetIndex, UntypedAssetId};
 use crate::load_state::LoadState;
+use crate::retain_cache::{
+    RetainBudget, RetainCache, RetainCollection, RetainError, RetainRemoval, RetainRemovalReason,
+    RetentionPolicy,
+};
 use crate::type_id::AssetTypeId;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
@@ -43,6 +48,8 @@ pub struct Assets<A> {
     /// in flight), forcing the next `collect_releases` to scan even if no new
     /// drops arrived.
     has_pending_grace: bool,
+    fallbacks: AssetFallbacks<A>,
+    retention: RetainCache<A>,
 }
 
 /// One arena slot: a reuse counter plus an optional live entry.
@@ -86,6 +93,8 @@ impl<A: Asset> Assets<A> {
             frame: 0,
             grace_frames: 0,
             has_pending_grace: false,
+            fallbacks: AssetFallbacks::default(),
+            retention: RetainCache::default(),
         }
     }
 
@@ -116,6 +125,145 @@ impl<A: Asset> Assets<A> {
     #[must_use]
     pub fn frame(&self) -> u64 {
         self.frame
+    }
+
+    /// Type-specific placeholder/failure registrations, outside arena generations.
+    #[must_use]
+    pub fn fallbacks(&self) -> &AssetFallbacks<A> {
+        &self.fallbacks
+    }
+
+    /// Configures typed substitutes under their own explicit byte budget.
+    pub fn fallbacks_mut(&mut self) -> &mut AssetFallbacks<A> {
+        &mut self.fallbacks
+    }
+
+    /// Reads a ready value or a typed substitute, preserving the real load state.
+    ///
+    /// Stale/unoccupied ids never return substitutes: fallback presentation must
+    /// not hide a generation mismatch. This does not touch LRU recency or emit
+    /// lifecycle events; `get` and dependency readiness remain unchanged.
+    #[must_use]
+    pub fn get_or_fallback(&self, id: AssetId<A>) -> Option<AssetView<'_, A>> {
+        let state = self.load_state(id);
+        if let Some(value) = self.get(id) {
+            return Some(AssetView {
+                value,
+                load_state: state,
+                source: FallbackSource::Asset,
+            });
+        }
+        self.fallbacks.resolve(state)
+    }
+
+    /// Retention usage, policies and access order; mutation stays arena-checked.
+    #[must_use]
+    pub fn retain_cache(&self) -> &RetainCache<A> {
+        &self.retention
+    }
+
+    /// Atomically changes hard limits, evicting only idle LRU entries as needed.
+    ///
+    /// Pinned, KeepAlive and externally owned reservations cannot be evicted.
+    /// Failure preserves all entries and the previous budget. Returned removals
+    /// release cache references, not externally owned payloads. Run the normal
+    /// reclaim point to destroy abandoned payload slots.
+    pub fn set_retain_budget(
+        &mut self,
+        budget: RetainBudget,
+    ) -> Result<Vec<RetainRemoval>, RetainError> {
+        self.retention.set_budget(budget)
+    }
+
+    /// Pre-charges `bytes` and retains this exact ready handle allocation.
+    ///
+    /// Call before dropping the last external handle. The charge must include
+    /// owned payload allocations. Byte accounting is a declared reservation, not
+    /// automatic heap measurement or a limit on externally owned arena values.
+    /// `fulfill`, `fail` and `get_mut` revoke the reservation before exposing an
+    /// unaccounted replacement/mutation; re-admit it with its new byte charge.
+    /// Admission and policy replacement are atomic on budget rejection.
+    pub fn retain(
+        &mut self,
+        handle: &Handle<A>,
+        bytes: u64,
+        policy: RetentionPolicy,
+    ) -> Result<Vec<RetainRemoval>, RetainError> {
+        if !self.owns_handle(handle) {
+            return Err(RetainError::InvalidHandle);
+        }
+        if policy != RetentionPolicy::Immediate && !self.is_ready(handle.id()) {
+            return Err(RetainError::NotReady);
+        }
+        let removals = self.retention.retain(handle, bytes, policy)?;
+        if let Some(index) = self.resolve(handle.id().index()) {
+            self.slots[index].unused_since = None;
+        }
+        Ok(removals)
+    }
+
+    /// A budget-checked pin; pinned entries never implicitly overcommit limits.
+    pub fn pin(
+        &mut self,
+        handle: &Handle<A>,
+        bytes: u64,
+    ) -> Result<Vec<RetainRemoval>, RetainError> {
+        self.retain(handle, bytes, RetentionPolicy::Pinned)
+    }
+
+    /// Removes this exact allocation's reservation; external handles stay alive.
+    ///
+    /// To unpin into another retention policy atomically, call `retain` instead.
+    pub fn unpin(&mut self, handle: &Handle<A>) -> Result<Option<RetainRemoval>, RetainError> {
+        if !self.owns_handle(handle) {
+            return Err(RetainError::InvalidHandle);
+        }
+        Ok(self
+            .retention
+            .remove(handle.id(), RetainRemovalReason::Explicit))
+    }
+
+    /// Reacquires a retained generation and marks it most recently used.
+    ///
+    /// Never resurrects an expired/retired allocation. A cache-owned handle is
+    /// held before external abandonment, so its original weak handles continue
+    /// to upgrade while the reservation is live.
+    pub fn acquire_retained(&mut self, id: AssetId<A>) -> Option<Handle<A>> {
+        let index = self.resolve(id.index())?;
+        let handle = self.retention.acquire(id)?;
+        self.slots[index].unused_since = None;
+        Some(handle)
+    }
+
+    /// Explicitly updates recency and restarts an idle KeepAlive window.
+    ///
+    /// Immutable `get` deliberately does not mutate recency. This control-plane
+    /// operation requires a live handle from this arena, not an unchecked id.
+    pub fn touch_retained(&mut self, handle: &Handle<A>) -> Result<bool, RetainError> {
+        if !self.owns_handle(handle) {
+            return Err(RetainError::InvalidHandle);
+        }
+        let touched = self.retention.touch(handle.id());
+        if touched && let Some(index) = self.resolve(handle.id().index()) {
+            self.slots[index].unused_since = None;
+        }
+        Ok(touched)
+    }
+
+    /// Checks both generation and allocation identity (ids alone are arena-local).
+    #[must_use]
+    pub fn owns_handle(&self, handle: &Handle<A>) -> bool {
+        let Some(index) = self.resolve(handle.id().index()) else {
+            return false;
+        };
+        self.slots[index]
+            .entry
+            .as_ref()
+            .and_then(|e| e.handle.upgrade())
+            .is_some_and(|arc| {
+                !arc.is_retired_for_collection()
+                    && Handle::<A>::from_arc(arc).handle_id() == handle.handle_id()
+            })
     }
 
     /// Inserts `value`, returning a strong [`Handle`] that keeps it alive and
@@ -176,6 +324,8 @@ impl<A: Asset> Assets<A> {
         let Some(slot_index) = self.resolve(id.index()) else {
             return false;
         };
+        self.retention
+            .remove(id, RetainRemovalReason::PayloadChanged);
         let entry = self.slots[slot_index]
             .entry
             .as_mut()
@@ -199,6 +349,8 @@ impl<A: Asset> Assets<A> {
         let Some(slot_index) = self.resolve(id.index()) else {
             return false;
         };
+        self.retention
+            .remove(id, RetainRemovalReason::PayloadChanged);
         let entry = self.slots[slot_index]
             .entry
             .as_mut()
@@ -233,6 +385,10 @@ impl<A: Asset> Assets<A> {
         if !is_ready {
             return None;
         }
+        // An arbitrary &mut A could grow owned allocations. Revoke the old
+        // reservation rather than silently retaining an undercharged payload.
+        self.retention
+            .remove(id, RetainRemovalReason::PayloadChanged);
         self.events.push(AssetEvent::Modified { id });
         match &mut self.slots[slot_index].entry.as_mut()?.payload {
             Payload::Ready(value) => Some(value),
@@ -326,6 +482,44 @@ impl<A: Asset> Assets<A> {
     /// and the drop-signal fast path, making it the per-frame reclaim entry
     /// point; `remove_unused` remains the eager, grace-ignoring sweep.
     pub fn collect_releases(&mut self) -> usize {
+        self.collect_retained().reclaimed
+    }
+
+    /// Advances retention and normal reclamation together, returning diagnostics.
+    ///
+    /// Use once per reclaim frame **instead of** `collect_releases` when cache
+    /// diagnostics are needed. Existing `collect_releases` also advances policies,
+    /// preserving old callers. KeepAlive age is counted without a wrapping global
+    /// timestamp, so even a u32::MAX window cannot expire prematurely on overflow.
+    /// `Unused` is emitted on first observed cache-only ownership, never faked as
+    /// `Removed`; the normal grace window is measured from that first observation.
+    pub fn collect_retained(&mut self) -> RetainCollection {
+        let frame = self.frame.wrapping_add(1);
+        let slots = &mut self.slots;
+        let events = &mut self.events;
+        let removals = self.retention.advance(&mut |id, idle| {
+            if let Some(slot) = slots.get_mut(id.index().index() as usize)
+                && slot.generation == id.index().generation()
+                && slot.entry.is_some()
+            {
+                if idle {
+                    if slot.unused_since.is_none() {
+                        slot.unused_since = Some(frame);
+                        events.push(AssetEvent::Unused { id });
+                    }
+                } else {
+                    slot.unused_since = None;
+                }
+            }
+        });
+        let reclaimed = self.collect_abandoned();
+        RetainCollection {
+            reclaimed,
+            removals,
+        }
+    }
+
+    fn collect_abandoned(&mut self) -> usize {
         self.frame = self.frame.wrapping_add(1);
         let current = self.release.dropped_count();
         if current == self.seen_dropped && !self.has_pending_grace {
@@ -461,9 +655,14 @@ impl<A: Asset> Assets<A> {
         let slot = self.slots.get_mut(slot_index)?;
         let entry = slot.entry.take()?;
         slot.unused_since = None;
-        slot.generation = slot.generation.wrapping_add(1);
-        self.free
-            .push(u32::try_from(slot_index).expect("slot index fits u32"));
+        let id = AssetId::new(AssetIndex::from_parts(slot_index as u32, slot.generation));
+        // Permanently retire exhausted slots. Wrapping back to generation zero
+        // would let a sufficiently old id alias a new occupant.
+        if let Some(next) = slot.generation.checked_add(1) {
+            slot.generation = next;
+            self.free.push(slot_index as u32);
+        }
+        self.retention.remove(id, RetainRemovalReason::Removed);
         self.len -= 1;
         Some(entry.payload)
     }
@@ -480,3 +679,15 @@ impl<A: Asset> Default for Assets<A> {
 // which is what lets the simulation own assets and a renderer prepare from them.
 #[cfg(feature = "ecs")]
 impl<A: Asset> prism_ecs::resource::Resource for Assets<A> {}
+
+#[cfg(test)]
+#[path = "../text/unit/storage_retention.rs"]
+mod storage_retention_tests;
+
+#[cfg(test)]
+#[path = "../text/unit/fallback.rs"]
+mod fallback_tests;
+
+#[cfg(test)]
+#[path = "../text/unit/retain_cache.rs"]
+mod retain_cache_tests;

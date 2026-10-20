@@ -71,6 +71,69 @@ use alloc::vec::Vec;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Mutex;
 
+/// Identity/catalog refusal returned before a soft-reference load starts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SoftLoadError {
+    /// The reference contains the reserved null GUID.
+    Null,
+    /// The persisted or currently resident type disagrees with the request.
+    TypeMismatch {
+        /// Requested Rust asset type.
+        expected: AssetTypeId,
+        /// Persisted/resident type tag.
+        actual: AssetTypeId,
+    },
+    /// No path has been registered for this persistent identity.
+    UnknownGuid {
+        /// Unresolved identity.
+        guid: StableGuid,
+    },
+    /// No loader can produce the requested primary type (or owning source).
+    NoLoader {
+        /// Unloadable path.
+        path: AssetPath,
+        /// Requested type.
+        type_id: AssetTypeId,
+    },
+    /// Registering this path would replace a different path with the same GUID.
+    CatalogCollision {
+        /// Colliding stable identity.
+        guid: StableGuid,
+        /// Previously registered path.
+        existing: AssetPath,
+        /// New path which was refused.
+        requested: AssetPath,
+    },
+}
+
+impl core::fmt::Display for SoftLoadError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Null => f.write_str("soft handle is null"),
+            Self::TypeMismatch { expected, actual } => write!(
+                f,
+                "soft handle type mismatch: expected {expected:?}, got {actual:?}"
+            ),
+            Self::UnknownGuid { guid } => {
+                write!(f, "soft handle guid is not in the catalog: {guid:?}")
+            }
+            Self::NoLoader { path, type_id } => {
+                write!(f, "no loader for soft asset {path} of type {type_id:?}")
+            }
+            Self::CatalogCollision {
+                guid,
+                existing,
+                requested,
+            } => write!(
+                f,
+                "soft catalog identity collision {guid:?}: {existing} versus {requested}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SoftLoadError {}
+
 /// The runtime asset front door (design §9.2).
 ///
 /// Register loaders and mount byte sources, then call [`AssetServer::load`] to
@@ -191,6 +254,53 @@ struct PromotionRecord {
 }
 
 impl AssetServer {
+    /// Adds a typed soft-reference catalog entry without reading or decoding.
+    ///
+    /// A loader must already be registered. Labels may be registered before
+    /// their source is loaded, but their emitted type is checked at load time.
+    /// Catalog entries follow the server's existing path-reclamation lifecycle;
+    /// this is not a persistent external manifest installation API.
+    pub fn register_soft_path<A: Asset>(
+        &self,
+        path: impl Into<AssetPath>,
+    ) -> Result<SoftHandle<A>, SoftLoadError> {
+        let path = path.into();
+        let mut inner = self.lock();
+        let type_id = AssetTypeId::of::<A>();
+        inner.validate_soft_path(&path, type_id)?;
+        let guid = StableGuid::from_path(&path.to_string());
+        if let Some(existing) = inner.catalog.get(&guid)
+            && existing != &path
+        {
+            return Err(SoftLoadError::CatalogCollision {
+                guid,
+                existing: existing.clone(),
+                requested: path,
+            });
+        }
+        inner.stores.register::<A>();
+        inner.catalog.insert(guid, path);
+        Ok(SoftHandle::new(guid, type_id))
+    }
+
+    /// Resolves and validates a soft reference without allocating a live asset
+    /// or invoking a source reader. Unlike `load_soft`, refusal is a typed error.
+    pub fn resolve_soft<A: Asset>(&self, soft: &SoftHandle<A>) -> Result<AssetPath, SoftLoadError> {
+        self.lock().resolve_soft(soft)
+    }
+
+    pub(crate) fn resolve_soft_batch<A: Asset>(
+        &self,
+        soft: &[SoftHandle<A>],
+    ) -> Result<Vec<AssetPath>, (usize, SoftLoadError)> {
+        // One catalog snapshot, no I/O, and no mutation on a rejected batch.
+        let inner = self.lock();
+        soft.iter()
+            .enumerate()
+            .map(|(index, soft)| inner.resolve_soft(soft).map_err(|error| (index, error)))
+            .collect()
+    }
+
     pub(crate) fn inferred_asset_type(&self, path: &AssetPath) -> Option<AssetTypeId> {
         let inner = self.lock();
         inner
@@ -1115,6 +1225,58 @@ impl Default for AssetServer {
 }
 
 impl AssetServerInner {
+    fn validate_soft_path(
+        &self,
+        path: &AssetPath,
+        expected: AssetTypeId,
+    ) -> Result<(), SoftLoadError> {
+        if let Some(handle) = self.interned.get(path).and_then(UntypedWeakHandle::upgrade) {
+            let actual = handle.id().type_id();
+            if actual != expected {
+                return Err(SoftLoadError::TypeMismatch { expected, actual });
+            }
+            // A resident label does not need a separately registered loader.
+            return Ok(());
+        }
+        let loadable = if path.has_label() {
+            self.loaders
+                .policy()
+                .resolve_untyped(&path.clone().without_label())
+                .is_some()
+        } else {
+            self.loaders
+                .policy()
+                .resolve_for_type(path, expected)
+                .is_some()
+        };
+        if !loadable {
+            return Err(SoftLoadError::NoLoader {
+                path: path.clone(),
+                type_id: expected,
+            });
+        }
+        Ok(())
+    }
+
+    fn resolve_soft<A: Asset>(&self, soft: &SoftHandle<A>) -> Result<AssetPath, SoftLoadError> {
+        if soft.is_null() {
+            return Err(SoftLoadError::Null);
+        }
+        let expected = AssetTypeId::of::<A>();
+        if soft.type_id() != expected {
+            return Err(SoftLoadError::TypeMismatch {
+                expected,
+                actual: soft.type_id(),
+            });
+        }
+        let path = self
+            .catalog
+            .get(&soft.guid())
+            .ok_or(SoftLoadError::UnknownGuid { guid: soft.guid() })?;
+        self.validate_soft_path(path, expected)?;
+        Ok(path.clone())
+    }
+
     /// The core load pipeline. Returns a strong handle to the (reserved and
     /// then fulfilled) asset, or `None` if no type could be resolved for an
     /// untyped load or no arena exists for the resolved type.

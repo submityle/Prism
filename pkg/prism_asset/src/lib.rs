@@ -69,6 +69,8 @@
 #![cfg_attr(docsrs, feature(doc_auto_cfg))]
 
 extern crate alloc;
+// Give derives an absolute path inside this crate and in its doctests, too.
+extern crate self as prism_asset;
 
 mod asset;
 #[cfg(feature = "std")]
@@ -76,6 +78,7 @@ mod cycle_collector;
 mod dependency;
 mod error;
 mod event;
+mod fallback;
 mod guid;
 mod handle;
 mod hash;
@@ -87,6 +90,7 @@ mod loader_exec;
 mod path;
 mod reload;
 mod reload_plan;
+mod retain_cache;
 #[cfg(feature = "std")]
 mod scheduler;
 #[cfg(feature = "std")]
@@ -104,10 +108,13 @@ mod watch;
 #[cfg(test)]
 mod tests;
 
-pub use asset::{direct_dependencies, Asset};
+pub use asset::{
+    direct_asset_dependencies, direct_dependencies, Asset, AssetDependency, VisitAssetDependencies,
+};
 pub use dependency::{DependencyError, DependencyGraph};
 pub use error::{AssetError, AssetErrorId, ErrorRegistry};
 pub use event::AssetEvent;
+pub use fallback::{AssetFallbacks, AssetView, FallbackBudgetError, FallbackKind, FallbackSource};
 pub use guid::{normalize_path, StableGuid};
 pub use handle::{Handle, HandleId, SoftHandle, UntypedHandle, UntypedWeakHandle, WeakHandle};
 pub use id::{AssetId, AssetIndex, UntypedAssetId};
@@ -119,12 +126,20 @@ pub use loader_exec::{
     LoadError, LoadedAsset,
 };
 pub use path::AssetPath;
+pub use prism_asset_macros::{Asset, VisitAssetDependencies};
 pub use reload::{ReloadCommit, ReloadCommitGuard, ReloadEpoch};
 pub use reload_plan::{plan_reload, ReloadPlan, ReloadPlanError};
+pub use retain_cache::{
+    RetainBudget, RetainCache, RetainCollection, RetainError, RetainRemoval, RetainRemovalReason,
+    RetainUsage, RetainedAsset, RetentionPolicy,
+};
 #[cfg(feature = "std")]
-pub use scheduler::{LoadFailure, LoadScheduler, LoadTicket, ScheduleError, ScheduleOutcome};
+pub use scheduler::{
+    LoadFailure, LoadPriority, LoadScheduler, LoadTicket, ScheduleError, ScheduleOutcome,
+    SoftBatchError, SoftLoadBudget,
+};
 #[cfg(feature = "std")]
-pub use server::AssetServer;
+pub use server::{AssetServer, SoftLoadError};
 
 #[cfg(all(feature = "std", feature = "ecs"))]
 impl prism_ecs::resource::Resource for AssetServer {}
@@ -155,12 +170,18 @@ pub mod prelude {
     #[cfg(feature = "std")]
     pub use crate::AssetServer;
     pub use crate::{
-        plan_reload, Asset, AssetError, AssetErrorId, AssetEvent, AssetId, AssetIndex, AssetPath,
-        AssetStores, AssetTypeId, Assets, DependencyGraph, ErrorRegistry, Handle, LoadState,
-        LoaderId, LoaderRegistry, ReloadCommit, ReloadCommitGuard, ReloadEpoch, ReloadPlan,
-        ReloadPlanError, SoftHandle, StableGuid, SuffixConflict, UntypedAssetId, UntypedHandle,
-        UntypedWeakHandle, WeakHandle,
+        direct_asset_dependencies, direct_dependencies, plan_reload, Asset, AssetDependency,
+        AssetError, AssetErrorId, AssetEvent, AssetFallbacks, AssetId, AssetIndex, AssetPath,
+        AssetStores, AssetTypeId, AssetView, Assets, DependencyGraph, ErrorRegistry,
+        FallbackBudgetError, FallbackKind, FallbackSource, Handle, LoadState, LoaderId,
+        LoaderRegistry, ReloadCommit, ReloadCommitGuard, ReloadEpoch, ReloadPlan, ReloadPlanError,
+        RetainBudget, RetainCache, RetainCollection, RetainError, RetainRemoval,
+        RetainRemovalReason, RetainUsage, RetainedAsset, RetentionPolicy, SoftHandle, StableGuid,
+        SuffixConflict, UntypedAssetId, UntypedHandle, UntypedWeakHandle, VisitAssetDependencies,
+        WeakHandle,
     };
+    #[cfg(feature = "std")]
+    pub use crate::{LoadPriority, SoftBatchError, SoftLoadBudget, SoftLoadError};
 }
 
 #[cfg(test)]

@@ -8,6 +8,7 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [dependencies]
+prism_asset_macros = { path = "../prism_asset_macros" }
 prism_ecs = { path = "../prism_ecs", optional = true }
 prism_tasks = { path = "../prism_tasks", optional = true }
 notify-debouncer-full = { version = "0.7.0", default-features = false, optional = true }
@@ -31,3 +32,11 @@ file_watcher = ["std", "dep:notify-debouncer-full"]
 
 [lints]
 workspace = true
+
+[[test]]
+name = "asset_derive"
+path = "text/integration/asset_derive.rs"
+
+[[test]]
+name = "dependency_visitor"
+path = "text/unit/dependency_visitor.rs"

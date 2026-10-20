@@ -36,6 +36,7 @@ members = [
   # Engine-neutral camera math (projection/view/frustum) for the RHI render path.
   "pkg/prism_platform_os",
   "pkg/prism_asset",
+  "pkg/prism_asset_macros",
   "pkg/prism_asset_container",
   "pkg/prism_asset_build_core",
   "pkg/prism_asset_build_cli",

@@ -1,6 +1,6 @@
 //! Reference-counted asset handles.
 
-use crate::asset::Asset;
+use crate::asset::{Asset, AssetDependency, VisitAssetDependencies};
 use crate::guid::StableGuid;
 use crate::id::{AssetId, UntypedAssetId};
 use crate::type_id::AssetTypeId;
@@ -185,6 +185,12 @@ impl<A: ?Sized> Clone for Handle<A> {
     }
 }
 
+impl<A: ?Sized> VisitAssetDependencies for Handle<A> {
+    fn visit_asset_dependencies(&self, visit: &mut dyn FnMut(AssetDependency)) {
+        visit(AssetDependency::Strong(self.untyped_id()));
+    }
+}
+
 impl<A: ?Sized> PartialEq for Handle<A> {
     fn eq(&self, other: &Self) -> bool {
         self.inner.id == other.inner.id
@@ -335,6 +341,12 @@ impl UntypedHandle {
     }
 }
 
+impl VisitAssetDependencies for UntypedHandle {
+    fn visit_asset_dependencies(&self, visit: &mut dyn FnMut(AssetDependency)) {
+        visit(AssetDependency::Strong(self.id()));
+    }
+}
+
 /// A type-erased, non-owning handle that does not keep its asset alive.
 ///
 /// The untyped counterpart to [`WeakHandle`]: it stores a `Weak<HandleInner>`
@@ -465,6 +477,17 @@ impl<A: Asset> SoftHandle<A> {
     #[must_use]
     pub fn from_path(path: &str) -> Self {
         Self::new(StableGuid::from_path(path), AssetTypeId::of::<A>())
+    }
+}
+
+impl<A: ?Sized> VisitAssetDependencies for SoftHandle<A> {
+    fn visit_asset_dependencies(&self, visit: &mut dyn FnMut(AssetDependency)) {
+        if !self.is_null() {
+            visit(AssetDependency::Soft {
+                guid: self.guid(),
+                type_id: self.type_id(),
+            });
+        }
     }
 }
 
