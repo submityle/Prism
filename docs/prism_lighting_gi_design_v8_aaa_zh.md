@@ -912,6 +912,15 @@ v3.1 中的指标保留为候选 benchmark，不再是无条件产品承诺：
 - VSM/page residency、全灯型阴影、生产 ReSTIR DI/GI、完整 SSR/probe 反射和 scene-to-present parity 尚未证明。
 - 尚无匹配硬件/内容/分辨率/质量的完整 P50/P95/P99 与竞品对标报告。
 
+### 22.4 Bevy 废弃审计结论
+
+当前不能把“Bevy 已废弃”作为全仓完成事实：
+
+- `prism_render_app` 与 `prism_render_architecture` 的生产依赖已经不包含 `bevy_light`、`bevy_pbr`、`bevy_render` 或 `bevy_core_pipeline`，原生 LightScene -> GPU upload 链路已独立成立。
+- `prism_render_scene` 仍直接依赖 Bevy RenderApp、`bevy_pbr` mesh/PBR pipeline、`StandardMaterial` adapter、`ExtractSchedule` 和 Bevy RenderGraph；它必须被视为 legacy adapter island，而不是 Prism native renderer。
+- 根 `bevy` 的默认组合仍会安装 `bevy_render::RenderPlugin`、`bevy_light::LightPlugin`、`bevy_core_pipeline::CorePipelinePlugin` 与 `bevy_pbr::PbrPlugin`。
+- 已删除的旧灯光 extraction 文件不应恢复；下一步应先建立 `prism_native_default` 产品组合并将 `prism_render_scene` 从默认组合剥离，再迁移或删除 Bevy PBR render phase。
+
 ## 23. 关键风险与控制措施
 
 | 风险 | 表现 | 控制 |
