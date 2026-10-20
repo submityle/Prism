@@ -583,10 +583,21 @@ impl<R: DesktopRenderer> DesktopHost<R> {
                     native.config.height,
                 )
                 .map_err(|e| DesktopError::Gpu(e.to_string()))?;
+            #[cfg(not(feature = "runtime-preview"))]
             native
                 .images
                 .prepare(
                     self.ui.content_images(),
+                    native.scale,
+                    [native.config.width, native.config.height],
+                )
+                .map_err(|e| DesktopError::Gpu(e.to_string()))?;
+            #[cfg(feature = "runtime-preview")]
+            native
+                .images
+                .prepare_with_preview(
+                    self.ui.content_images(),
+                    self.ui.frame_graph_image(),
                     native.scale,
                     [native.config.width, native.config.height],
                 )

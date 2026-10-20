@@ -14,6 +14,8 @@ pub struct DesktopContentImages {
     renderer: ImageRenderer,
     resident: BTreeMap<ThumbnailKey, (ImageHandle, Arc<Thumbnail>)>,
     uploads: u64,
+    #[cfg(feature = "runtime-preview")]
+    preview: Option<(Arc<prism_editor_ui::FrameGraphPreviewImage>, ImageHandle)>,
 }
 
 impl DesktopContentImages {
@@ -28,6 +30,8 @@ impl DesktopContentImages {
             )?,
             resident: BTreeMap::new(),
             uploads: 0,
+            #[cfg(feature = "runtime-preview")]
+            preview: None,
         })
     }
 
@@ -41,20 +45,96 @@ impl DesktopContentImages {
         scale: f32,
         extent: [u32; 2],
     ) -> Result<(), ImageError> {
-        let result = self.prepare_inner(images, scale, extent);
+        #[cfg(feature = "runtime-preview")]
+        {
+            self.prepare_with_preview(images, None, scale, extent)
+        }
+        #[cfg(not(feature = "runtime-preview"))]
+        {
+            let result = self.prepare_inner(images, scale, extent);
+            if result.is_err() {
+                self.renderer.clear();
+                self.resident.clear();
+            }
+            result
+        }
+    }
+
+    /// Prepare content and the actual active frame-graph image in the same
+    /// bounded compositor. Display image identity controls uploads; geometry
+    /// changes reuse its texture. Hidden images release residency.
+    #[cfg(feature = "runtime-preview")]
+    pub fn prepare_with_preview(
+        &mut self,
+        images: &[DesktopContentImage],
+        preview: Option<&crate::DesktopFrameGraphImage>,
+        scale: f32,
+        extent: [u32; 2],
+    ) -> Result<(), ImageError> {
+        let result = self.prepare_preview_inner(images, preview, scale, extent);
         if result.is_err() {
             self.renderer.clear();
             self.resident.clear();
+            self.preview = None;
         }
         result
     }
 
+    #[cfg(feature = "runtime-preview")]
+    fn prepare_preview_inner(
+        &mut self,
+        images: &[DesktopContentImage],
+        preview: Option<&crate::DesktopFrameGraphImage>,
+        scale: f32,
+        extent: [u32; 2],
+    ) -> Result<(), ImageError> {
+        if preview.is_none()
+            && let Some((_, handle)) = self.preview.take()
+        {
+            self.renderer.remove(&handle)?;
+        }
+        let mut quads = self.prepare_quads(images, scale, extent)?;
+        if let Some(preview) = preview {
+            let previous = self.preview.as_ref().map(|(image, _)| image.clone());
+            let handle = preview
+                .view
+                .sync_image(&mut self.renderer, &mut self.preview)?;
+            if self.preview.as_ref().is_some_and(|(image, _)| {
+                previous.as_ref().is_none_or(|old| !Arc::ptr_eq(old, image))
+            }) {
+                self.uploads = self.uploads.saturating_add(1);
+            }
+            if let Some(handle) = handle {
+                let logical =
+                    |r: prism_ui_layout::Rect| [r.left(), r.top(), r.size.width, r.size.height];
+                quads.push(
+                    preview
+                        .view
+                        .image_quad(handle, logical(preview.rect), logical(preview.clip), scale)
+                        .map_err(|_| ImageError::InvalidGeometry)?,
+                );
+            }
+        }
+        self.renderer.prepare(extent, &quads)
+    }
+
+    #[cfg(not(feature = "runtime-preview"))]
     fn prepare_inner(
         &mut self,
         images: &[DesktopContentImage],
         scale: f32,
         extent: [u32; 2],
     ) -> Result<(), ImageError> {
+        let quads = self.prepare_quads(images, scale, extent)?;
+        self.renderer.prepare(extent, &quads)
+    }
+
+    fn prepare_quads(
+        &mut self,
+        images: &[DesktopContentImage],
+        scale: f32,
+        extent: [u32; 2],
+    ) -> Result<Vec<ImageQuad>, ImageError> {
         if !scale.is_finite() || !(0.125..=16.0).contains(&scale) {
             return Err(ImageError::InvalidGeometry);
         }
@@ -128,7 +208,7 @@ impl DesktopContentImages {
                 opacity: image.opacity,
             });
         }
-        self.renderer.prepare(extent, &quads)
+        Ok(quads)
     }
 
     /// Load-composite into the caller target; no intermediate target or readback.

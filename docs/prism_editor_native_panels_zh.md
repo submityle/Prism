@@ -15,7 +15,7 @@
 | `DesktopProfilerPanel` | `ProfilerController`、非阻塞 provider | 提供实际完成的 CPU/GPU `ProfilerSources` | 发布不可变 store 并路由 frame/span/domain 导航；CPU/GPU 时钟不混用 |
 | `DesktopGraphPanel` | `GraphEditor`、宿主节点模板、视口和预算 | 提供领域无关的端口类型与 payload；显式绑定真实文件 | 实际节点/连线、指针预览、一次逆命令提交与独立存储 |
 | `DesktopPrefabPanel` | `PrefabPanelController`、真实 store 与显式传播目标 | 提供实际资产/实例；确认精确持久化结果 | 路由选择、revert、apply review/confirm、传播与历史；不创建虚假资产 |
-| `DesktopFrameGraphPanel` | `FrameGraphPanelController`、完成的 `Arc<GraphCaptureReport>` provider | 发布真实编译/执行采集；明确 capture 的证据等级 | 真实 pass/resource 导航，生产失败保留旧 publication 并围栏 |
+| `DesktopFrameGraphPanel` | `FrameGraphPanelController`、完成的 `Arc<GraphCaptureReport>` provider；可选 `DesktopRuntimePreviewSource` | 发布真实编译/执行采集；runtime source 必须交给 app 同步提供实际 `RuntimePreviewFrame` | 真实 pass/resource 导航；生产 capture 按 reserve-before-submit、bind、poll/cancel/drain 接入，并将真实 RGBA8 publication 交给共享 `ImageRenderer` |
 | `DesktopSequencePanel` | `SequenceProjectEditor`、显式 `SequencePanelLimits` | 提供真实完整项目、时钟/拓扑预算及独立文件绑定 | 子文档/clip 作者、一次逆命令、嵌套诊断与完整项目异步存储 |
 
 provider 返回 `DesktopPanelUpdate { changed, fenced, wake_at }`。宿主必须用 `fenced` 表达自身未提交元数据、在途发布或尚未解决的 I/O；world 的排队 intent、dirty cell、pending residency 另由 app 直接检查。回调必须非阻塞；延迟工作应提交给宿主服务，并通过单调 `Instant` deadline 或唤醒原生事件循环继续轮询。provider 错误保留 controller/source，显示错误并围栏；宿主解决原因后通过 `retry` 恢复。
@@ -74,7 +74,11 @@ graph 捕获使用真实 `graph:canvas` 的保留矩形及 clip，再由 `BoundG
 
 Sequence 的 `mount_storage(path, DesktopSequenceStorageLimits, observed_revision, timeout)` 复用实际 `SequenceProjectStorageService`。`document` 是完整项目 codec/拓扑/历史预算，`max_requests` 是 worker 准入预算；没有新增共享依赖。Save 编码一次完整项目，包含所有子文档、频率、轨道/事件、clip 拓扑及 ID 高水位。Open 取得隔离候选，复用同一 pending/cancel/durability/revision 围栏；采用同时验证加载开始 token、当前 token、草稿与 controller 错误，再构造独立 editor/controller，成功后一次替换并清空历史及诊断。失败保留现场与候选。`acknowledge_saved` 只认可精确项目 token；改变任一文档频率同样改变 token，旧保存回执不能清除新编辑。
 
-Sequence `Evaluate` 显式运行真实嵌套求值器并显示实际样本/事件诊断，未挂接持续 transport，也不调用 Gameplay 或写入 runtime。没有在途文件请求时不会安排周期唤醒。`DocumentStorage*` 通用类型已从 timeline 根公开。帧图当前接入真实 capture 导航，生产资源缩略预览的 GPU provider/图像桥接另行验收；编译图声明捕获不代表 GPU 已执行。
+Sequence `Evaluate` 显式运行真实嵌套求值器并显示实际样本/事件诊断，未挂接持续 transport，也不调用 Gameplay 或写入 runtime。没有在途文件请求时不会安排周期唤醒。`DocumentStorage*` 通用类型已从 timeline 根公开。帧图生产预览的 capture 不是截图或手工 TexturePreview：宿主通过 `DesktopRuntimePreviewSource` 提供当前真实队列借用的 `RuntimePreviewFrame`，app 在同一调用中依据当前 pass key/resource slot 找到精确 binding，先调用 preview_mut().reserve(...)，再用 reservation 的 binding、mip/layer 与 capture_limits() 调用 RuntimePreviewFrame::submit，最后 bind_submission。提交前失败只 abandon；bind 拒绝则保留原 `RuntimePreviewSubmission` 并继续取消/轮询，直到 staging slots、bytes 和 graph completion 都归零。
+
+poll_native_panels 对隐藏面板也驱动 poll_submission，取消只隔离 publication，不释放 GPU admission；新的报告或选择会取消旧 request 并等待 drain。next_native_panel_wake 使用单调 deadline。成功 publication 的 `FrameGraphPreviewImage` 是 controller 的精确 image Arc；原生 `DesktopContentImages` 通过 viewport 的同一个 `ImageRenderer` 先 upload 后替换旧 handle，通道/曝光/range 生成新 image Arc 会重新上传，单纯 zoom/pan/DPI 几何变化不会上传，image_quad 应用实际 canvas/clip 与 DPI 后再和缩略图一起 Load-composite 到 caller target。resident custom 节点只是有界布局锚点，像素证据必须来自 compositor 的实际 target 读回。
+
+`DesktopRuntimePreviewSource` 是显式 host-owned seam：app 不创建 queue、report、Gameplay 或伪造运行时 frame；source 负责让 `RuntimePreviewFrame<'queue>` 在 callback 中立即提交。source 必须在失败前不提交 frame，并保持 imported resources 的宿主所有权。若 host 需要把 frame 跨 callback 保存，当前 profiler API 不允许将借用 queue 的 frame 存为 'static，应在 host 内同步完成 callback，不能复制 report 来绕过 exact-Arc 校验。
 
 ## 验证状态
 
@@ -92,7 +96,7 @@ collections/Git 并发错误已捕获结构化证据。旧测试二进制中，c
 
 修复后同一原生测试二进制的 collections/Git 七项并行回归连续 100 轮通过（session 45948，exit 0），其中每轮包含实际 Git 进程创建与 100 次集合快照保存，最终回读验证最新快照。该压力回归与真实文件锁失败/恢复测试共同覆盖暂态重试和持续占锁两条路径；有限轮次并不意味着已经证明所有进程创建场景下绝无竞争。
 
-当前新增面板证据是实际 retained 布局/输入路由与 CPU 数据采集，尚无本轮新增的原生面板 GPU 像素或解锁桌面 OS 输入验收结果。此前 native smoke 在锁屏环境只完成 M2/Metal 初始化，0 presented frame、0 native input 后达到时间上限，不能据此宣称原生展示或交互验收完成。
+当前新增面板证据是实际 retained 布局/输入路由与 CPU 数据采集；生产预览接线还通过共享 viewport `ImageRenderer` 完成了真实 M2/Metal runtime framegraph 像素回归。app-owned fixture 使用 host-owned imported `Rgba8Unorm` texture（4×2、2 layers、2 mips），在真实 pass binding 上执行 reserve → `RuntimePreviewFrame::submit` → bind → poll；随后对实际 ImageRenderer target readback 的首像素为 `[0,255,0,255]`，缩放重排未产生第二次 texture upload。第二次 capture 的 submission 经过 cancel 与 GPU drainage 后没有发布半帧；新的 runtime report 选择会清除旧 image，这是 controller 的显式 publication/selection 围栏，不以旧像素冒充新 frame。强制 GPU targeted test 与 app all-targets 均在 Apple M2/Metal 原生 adapter 上通过。此前 native smoke 在锁屏环境只完成 M2/Metal 初始化，0 presented frame、0 native input 后达到时间上限，不能据此宣称原生展示或交互验收完成。
 
 本轮 Graph/Timeline 文件与作者面板接入新增 `desktop_ui::authoring_panel_tests` 九项真实回归：节点移动/最终释放/取消/UndoRedo，中键平移/滚轮缩放/宿主替换取消，宿主类型端口连线单逆事务，真实文件保存/重载/陈旧回执与候选替换围栏，真实外部 revision 冲突和在途取消，频率独立于作者 token 的保存/采用检查，Prefab 实际选择/revert/历史，Prefab review→confirm→Undo/Redo，以及生产 `render_fabric` 编译捕获导航与 provider 失败保留 publication。Prefab Undo 校验实际组合后的基值与子层 pin；Undo 是新发布，不错误要求版本头回到旧字节或旧精确 token。帧图用例是无资源 compute 声明编译捕获，未执行 GPU 工作。
 
@@ -103,6 +107,8 @@ collections/Git 并发错误已捕获结构化证据。旧测试二进制中，c
 - `cargo clippy -p prism_editor_app --no-deps --all-targets --features desktop -- -D warnings`：session 31470 exit 0，日志 `/private/tmp/prism-app-authoring-clippy.log`。依赖仍有其他任务的警告，不宣称全仓零警告。
 
 上述 Graph/Timeline 提交结束时没有自有活动验证进程或待清理自有 target；共享 `/private/tmp/prism-editor-joint-cr1ODK` 保留给主线程，不执行清理。生产帧图 GPU runtime preview 的 provider 与图像桥接仍单独验收。World membership 的完整项目保存/采用需要 UI controller 提供精确围栏的历史/同步/采用入口，现有 provider/intent 接线不等于此能力。
+
+本次 runtime preview 接线的定向真实测试为 `desktop_ui::runtime_preview_tests::native_runtime_capture_drains_and_composites_real_frame_pixels`：Apple M2/Metal、`1 passed`。同一配置的 `cargo test -p prism_editor_app --all-targets --features runtime-preview` 为 88 unit + 2 content-image + 15 controller + 18 document + 4 Gizmo，共 127 项通过；main/examples 无测试也正常结束。之后复用同一 shared target 的 app-only strict Clippy 未到达 app 检查，因共享 target 写入 `serde_core` 临时文件时 `No space left on device` 退出 101；这不是 app lint 诊断，也不宣称本次改动已通过该轮 Clippy。共享 target 仍由主线程管理，不在本任务中清理。
 
 Sequence 本轮新增六项真实 app 回归，定向 session 84029 exit 0，日志 `/private/tmp/prism-app-sequence-check.log`。覆盖实际 retained 节点非零命中矩形、原生 wheel/点击/文本/Enter、草稿应用单逆事务与 Undo/Redo，错误输入经过真实 controller 并保留围栏，陈旧 controller/project bound 拒绝，完整项目真实文件 round trip，异步旧回执/加载后新编辑/草稿拒绝采用，外部文件冲突与取消直到请求终态。真实三层项目 root/child/leaf 频率 2/4/8Hz，显式 elapsed=2 秒得到 leaf tick=16；leaf event=11 映射至 root tick=2，clip 路径为 `[20,30]`。求值前后项目 token 不变，无持续 transport 唤醒。这些是 CPU/文件/保留 UI 路由证据，不是 Sequence runtime 或新增 GPU 渲染验收。
 

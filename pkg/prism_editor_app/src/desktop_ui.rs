@@ -34,7 +34,11 @@ mod git;
 mod panel_pointer;
 mod panel_storage;
 mod panels;
+#[cfg(feature = "runtime-preview")]
+mod runtime_preview;
 mod sequence_panel;
+#[cfg(feature = "runtime-preview")]
+pub use runtime_preview::{DesktopFrameGraphImage, DesktopRuntimePreviewSource};
 mod validation;
 pub use authoring_panels::{DesktopFrameGraphPanel, DesktopGraphPanel, DesktopPrefabPanel};
 use content::NativeContent;
@@ -52,6 +56,8 @@ mod authoring_panel_tests;
 mod content_tests;
 #[cfg(test)]
 mod panel_tests;
+#[cfg(all(test, feature = "runtime-preview"))]
+mod runtime_preview_tests;
 #[cfg(test)]
 mod sequence_panel_tests;
 
@@ -192,6 +198,8 @@ pub struct EditorDesktopUi {
     collections: collections::NativeCollections,
     validation: validation::NativeValidation,
     panels: panels::NativePanels,
+    #[cfg(feature = "runtime-preview")]
+    frame_graph_image: Option<DesktopFrameGraphImage>,
 }
 
 impl EditorDesktopUi {
@@ -218,6 +226,8 @@ impl EditorDesktopUi {
             git: git::NativeGit::default(),
             collections: collections::NativeCollections::default(),
             validation: validation::NativeValidation::default(),
+            #[cfg(feature = "runtime-preview")]
+            frame_graph_image: None,
             panels: panels::NativePanels::default(),
         };
         result.refresh()?;
@@ -434,6 +444,10 @@ impl EditorDesktopUi {
         let mut input_rect = None;
         let mut hits = Vec::new();
         let mut images = Vec::new();
+        #[cfg(feature = "runtime-preview")]
+        {
+            self.frame_graph_image = None;
+        }
         let image_bindings: BTreeMap<_, _> = self
             .content
             .as_ref()
@@ -456,6 +470,21 @@ impl EditorDesktopUi {
                 let clip = scope
                     .and_then(|key| scopes.get(key))
                     .map_or(window, |(_, rect)| *rect);
+                #[cfg(feature = "runtime-preview")]
+                if key == "frame-graph:preview:image"
+                    && let Some(panel) = self.panels.slot().and_then(|slot| {
+                        (slot.host.as_ref() as &dyn std::any::Any)
+                            .downcast_ref::<DesktopFrameGraphPanel>()
+                    })
+                    && let Some(view) = panel.view.as_ref().and_then(|v| v.preview())
+                    && view.image().is_some()
+                {
+                    self.frame_graph_image = Some(DesktopFrameGraphImage {
+                        view: view.clone(),
+                        rect: *rect,
+                        clip,
+                    });
+                }
                 if let Some(image) = image_bindings.get(key.as_str()) {
                     images.push(DesktopContentImage {
                         request: image.request.clone(),

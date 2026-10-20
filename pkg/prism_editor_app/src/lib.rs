@@ -73,6 +73,8 @@ pub use desktop_ui::{
     DesktopSequencePanel, DesktopSequenceStorageLimits, DesktopTimelineFrame, DesktopTimelinePanel,
     DesktopUiError, DesktopWorldPanel, EditorDesktopUi,
 };
+#[cfg(feature = "runtime-preview")]
+pub use desktop_ui::{DesktopFrameGraphImage, DesktopRuntimePreviewSource};
 pub use document::{
     DecodedDocument, DocumentCodec, DocumentError, DocumentFileAdapter, DocumentIoEvent,
     DocumentLimits, DocumentLoadReceipt, DocumentSaveReceipt, DocumentSchemaCatalog,

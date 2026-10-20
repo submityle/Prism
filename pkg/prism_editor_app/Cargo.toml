@@ -35,12 +35,15 @@ futures-lite = { version = "2", optional = true }
 [features]
 default = []
 desktop = ["dep:winit", "dep:wgpu", "dep:futures-lite", "dep:prism_math", "prism_ui_render_backend/gpu"]
+runtime-preview = ["desktop", "prism_editor_ui/frame-graph-preview", "prism_editor_profiler/runtime-preview"]
 
 [dev-dependencies]
 png = "0.18.1"
 prism_editor_profiler = { path = "../prism_editor_profiler", features = ["render-graph"] }
 prism_render_architecture = { path = "../prism_render_architecture" }
 prism_render_graph = { path = "../prism_render_graph" }
+prism_render_driver = { path = "../prism_render_driver" }
+prism_render_driver_wgpu = { path = "../../os-backends/prism_render_driver_wgpu" }
 
 [lints]
 workspace = true

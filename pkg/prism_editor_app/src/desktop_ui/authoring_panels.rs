@@ -175,9 +175,11 @@ pub struct DesktopFrameGraphPanel {
     /// Actual capture navigation and selection controller.
     pub controller: FrameGraphPanelController,
     provider: Box<CaptureProvider>,
-    view: Option<BoundFrameGraphPanel>,
+    pub(super) view: Option<BoundFrameGraphPanel>,
     update: DesktopPanelUpdate,
     failed: bool,
+    #[cfg(feature = "runtime-preview")]
+    pub(super) runtime: runtime_preview::RuntimePreviewHost,
 }
 impl DesktopFrameGraphPanel {
     /// None means no new capture; publish/clear explicitly through the controller.
@@ -199,24 +201,43 @@ impl DesktopFrameGraphPanel {
             view: None,
             update: DesktopPanelUpdate::default(),
             failed: false,
+            #[cfg(feature = "runtime-preview")]
+            runtime: Default::default(),
         }
     }
     /// Resume acquisition after the host resolves the reported producer failure.
     pub fn retry(&mut self) {
         self.failed = false;
+        #[cfg(feature = "runtime-preview")]
+        {
+            self.runtime.error = None;
+        }
+    }
+    /// Refresh the retained binding after a controller or preview stamp changes.
+    /// Runtime publication and cancellation are app-owned state transitions,
+    /// so the next native event must never use an older bound subtree.
+    pub(super) fn refresh_bound_view(&mut self) {
+        self.view = Some(self.controller.build());
     }
 }
 impl DesktopPanel for DesktopFrameGraphPanel {
     fn build(&mut self) -> Result<DesktopPanelView, String> {
         let view = self.controller.build();
-        let result = DesktopPanelView {
+        let mut result = DesktopPanelView {
             element: view.element().clone(),
             bindings: view.bindings().map(|(k, t)| (k.to_owned(), t)).collect(),
         };
+        #[cfg(feature = "runtime-preview")]
+        self.decorate_preview(&view, &mut result);
         self.view = Some(view);
         Ok(result)
     }
     fn event(&mut self, target: &str, event: &UiEvent) -> Result<(), String> {
+        #[cfg(feature = "runtime-preview")]
+        if target.starts_with("frame-graph:preview:") || target.starts_with("frame-graph:runtime:")
+        {
+            return self.runtime_event(target, event);
+        }
         self.controller
             .handle_event(
                 self.view.as_ref().ok_or("Frame graph is not rendered")?,
@@ -224,15 +245,25 @@ impl DesktopPanel for DesktopFrameGraphPanel {
                 event,
             )
             .map(|_| ())
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+        #[cfg(feature = "runtime-preview")]
+        self.cancel_stale_previews()?;
+        self.refresh_bound_view();
+        Ok(())
     }
     fn poll(&mut self, now: Instant) -> Result<bool, String> {
+        #[cfg(feature = "runtime-preview")]
+        let runtime_changed = self.poll_runtime(now)?;
+        #[cfg(not(feature = "runtime-preview"))]
+        let runtime_changed = false;
         if self.failed {
-            return Ok(false);
+            return Ok(runtime_changed);
         }
         let result = (self.provider)(now).and_then(|(report, update)| {
-            let changed = report.is_some() || update.changed;
+            let changed = report.is_some() || update.changed || runtime_changed;
             if let Some(report) = report {
+                #[cfg(feature = "runtime-preview")]
+                self.cancel_runtime_preview()?;
                 self.controller
                     .publish(Some(report))
                     .map_err(|e| e.to_string())?;
@@ -243,9 +274,23 @@ impl DesktopPanel for DesktopFrameGraphPanel {
         if result.is_err() {
             self.failed = true;
         }
+        let result = result.map(|changed| {
+            if changed {
+                self.refresh_bound_view();
+            }
+            changed
+        });
         result
     }
     fn next_wake(&self) -> Option<Instant> {
+        #[cfg(feature = "runtime-preview")]
+        if let Some(wake) = self.runtime.wake {
+            return Some(if self.failed {
+                wake
+            } else {
+                self.update.wake_at.map_or(wake, |p| p.min(wake))
+            });
+        }
         if self.failed {
             None
         } else {
@@ -253,6 +298,10 @@ impl DesktopPanel for DesktopFrameGraphPanel {
         }
     }
     fn fenced(&self) -> bool {
+        #[cfg(feature = "runtime-preview")]
+        if self.runtime.fenced() {
+            return true;
+        }
         self.failed || self.update.fenced
     }
 }
