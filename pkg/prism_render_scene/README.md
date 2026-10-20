@@ -1,5 +1,32 @@
 # Prism Render Scene
 
+This package currently contains two explicit integration boundaries:
+
+* NativeRenderScene is the Prism-native retained-scene core. It has no Bevy API
+  in its implementation and is installed into prism_app with
+  NativeRenderScenePlugin.
+* PrismGpuScenePlugin is the legacy Bevy render-world adapter. It remains a
+  separate migration boundary until its extraction, GPU resource, and render
+  scheduling paths are rewritten against prism_render_app and the Prism RHI.
+
+The native vertical slice is:
+
+    prism_ecs::Entity
+      -> NativeRenderScene entity/SceneHandle mapping
+      -> SceneTransaction / CpuRenderScene
+      -> dirty UploadPlan
+      -> architecture GPU table rows and GpuSceneSnapshot
+
+Native scene handles are generational. Removing an entity retires its slot at
+the caller-provided GPU completion value; reclaim_completed is the only path
+that permits reuse. Transform updates within one frame preserve the first
+pre-frame value as previous_transform.
+
+The package manifest still has direct Bevy dependencies because the legacy
+adapter modules are not yet migrated. The remaining direct dependencies are
+listed in docs/prism_render_scene_native_migration_zh.md; no feature switch or
+comment claims that the whole package is already Bevy-free.
+
 This package integrates the retained Prism GPU Scene with Bevy's render app without modifying Bevy internals. Applications opt in by adding `PrismGpuScenePlugin`.
 
 `PrismGpuSceneOpaquePlugin` is the first real raster consumer. Add it after Bevy PBR and the GPU Scene plugin to render opted-in opaque meshes directly from stable scene index/generation tables. It stays explicit while material parity matures; the base scene plugin never silently replaces Bevy PBR.

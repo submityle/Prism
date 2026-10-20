@@ -18,6 +18,7 @@ mod geometry;
 mod gpu;
 mod lighting;
 mod material;
+mod native_scene;
 mod opaque;
 mod plugin;
 mod raytrace;
@@ -65,6 +66,10 @@ pub use material::{
     MaterialVirtualTextureResourceSizes, PrismMaterialDiagnostics, PrismMaterialPlugin,
     MATERIAL_VIRTUAL_TEXTURE_ENTRY_STRIDE, MATERIAL_VIRTUAL_TEXTURE_ENTRY_WORDS,
     MAX_BINDLESS_TEXTURES,
+};
+pub use native_scene::{
+    NativeRenderScene, NativeRenderScenePlugin, NativeSceneError, NativeSceneInsertBatch,
+    DEFAULT_NATIVE_SCENE_CAPACITY,
 };
 pub use opaque::{
     GpuSceneDebugView, GpuSceneOpaqueEnabled, GpuSceneOpaqueIndirectEnabled,
