@@ -21,7 +21,8 @@
 //! 3. *How is the frame pacing trending?* — the sliding-window statistics in
 //!    [`counters`] fold the most recent [`FrameCounters`] samples into average,
 //!    peak, and `p95` aggregates for `CPU` frame time, `GPU` frame time, and
-//!    `GPU` memory residency, using a sort-based `p95` with no external
+//!    `GPU` memory residency, using in-place nearest-rank percentile selection
+//!    with no external
 //!    dependency and `NaN`-safe `f32` handling.
 //!
 //! The by-name [`registry`] ties the pieces together: features register a
@@ -29,7 +30,7 @@
 //! health through the same validated rules, and the registry aggregates an
 //! overall system health (any `Quarantined` feature degrades the system).
 //!
-//! All arithmetic here is basic (`+ - * /`, `sort`, integer index math, and
+//! All arithmetic here is basic (`+ - * /`, selection, integer index math, and
 //! `clamp`/`abs`-style branches); there are no transcendental functions, so
 //! every result is a deterministic function of the input sequence. The `GPU`
 //! side that would feed real timings and memory figures into [`FrameCounters`]

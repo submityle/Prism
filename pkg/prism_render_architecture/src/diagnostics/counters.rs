@@ -6,11 +6,11 @@
 //! fixed-capacity ring and folds them into average / peak / `p95` aggregates
 //! for `CPU` frame time, `GPU` frame time, and `GPU` memory residency.
 //!
-//! The `p95` is computed by sorting the window (no external dependency) and
-//! taking the nearest-rank sample, so it is exact for the window and fully
-//! deterministic. `f32` inputs are handled `NaN`-safely: non-finite timing
-//! samples are dropped from the timing aggregates rather than poisoning them,
-//! and an all-non-finite (or empty) window yields a zeroed aggregate.
+//! The `p95` is computed with in-place selection (no external dependency),
+//! taking the exact nearest-rank sample without fully sorting the window.
+//! `f32` inputs are handled `NaN`-safely: non-finite timing samples are dropped
+//! from the timing aggregates rather than poisoning them, and an all-non-finite
+//! (or empty) window yields a zeroed aggregate.
 
 use alloc::vec::Vec;
 
@@ -117,15 +117,15 @@ fn aggregate_f32(mut values: Vec<f32>) -> Aggregate {
     }
     let sum: f32 = values.iter().copied().sum();
     let average = sum / n as f32;
-    // `total_cmp` gives a total order without an `unwrap`; values are finite.
-    values.sort_by(f32::total_cmp);
-    let peak = values[n - 1];
-    let p95 = values[p95_index(n)];
+    // `total_cmp` gives a total order; values are finite. Selection avoids
+    // sorting samples that are not needed for the result.
+    let peak = values.iter().copied().max_by(f32::total_cmp).unwrap_or(0.0);
+    let (_, p95, _) = values.select_nth_unstable_by(p95_index(n), f32::total_cmp);
     Aggregate {
         sample_count: n,
         average,
         peak,
-        p95,
+        p95: *p95,
     }
 }
 
@@ -139,14 +139,13 @@ fn aggregate_u64(mut values: Vec<u64>) -> MemoryAggregate {
     // Accumulate in `u128` so a long window of large residencies cannot overflow.
     let sum: u128 = values.iter().map(|&v| v as u128).sum();
     let average = (sum / n as u128) as u64;
-    values.sort_unstable();
-    let peak = values[n - 1];
-    let p95 = values[p95_index(n)];
+    let peak = values.iter().copied().max().unwrap_or(0);
+    let (_, p95, _) = values.select_nth_unstable(p95_index(n));
     MemoryAggregate {
         sample_count: n,
         average,
         peak,
-        p95,
+        p95: *p95,
     }
 }
 
