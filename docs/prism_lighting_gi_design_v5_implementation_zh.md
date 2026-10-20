@@ -42,7 +42,7 @@ Prism 已经存在光照基础，但还缺少一套产品级的统一 light syst
 
 | 资产 | 当前角色 | v5 处理 |
 |---|---|---|
-| `prism_render_scene/src/lighting` | Bevy ECS 光源提取、GPU buffer、cluster 基础 | 改为 `LightScene` adapter 和派生视图 |
+| `prism_render_scene/src/lighting` | 历史 Bevy ECS 光源提取、GPU buffer、cluster 路径 | Bevy 已退出目标架构；不再扩展此入口。能力须迁移到 Prism 自有 scene/RHI/work-graph，完成后删除旧入口及依赖 |
 | `prism_render_app/src/lighting.rs` | 宿主 direct/GI 计划与部分执行路径 | 变为统一 work graph 的编译/执行入口 |
 | `prism_render_architecture/src/lighting` | handle、epoch、journal、trace、预算等契约 | 收敛并升级为稳定 ABI/生命周期契约 |
 | light tree、area light、probe、reference PT | 算法和 oracle | 提取为 provider，不复制光源模型 |
@@ -670,6 +670,7 @@ Render target 必须支持 HDR scene-linear 中间结果；`Rgba8Unorm` 不能�
 | 原生宿主适配 | `prism_render_app::LightingLightScene` → directional/point/spot ABI；对不支持的 class/unit/layer/flags/capacity 明确拒绝 | 转换测试覆盖创建/更新/删除、单位、方向符号和聚光角；仓库测试待跑 |
 | ECS 场景渲染上传 | 现有 Bevy `ExtractedLights` 仍是独立入口；`LightGpuBuffers` 已按 ABI 值比较、合并脏区间并仅写入变化范围，扩容全量重传 | 绑定组按 GPU buffer identity 缓存；真实 device 上传测试待接通 |
 | stable GPU light slots | `IncrementalLightTable<T>` 提供稳定 slot、generation、retirement fence、dirty range/full rebuild policy、upload receipt | 有 10 个单元测试；尚未连接 scene adapter 到真实 buffer/queue lifecycle |
+| 原生 direct-light buffer 增量上传 | `LightingGpuState::prepare` 缓存方向光与点/聚光 ABI 内容；未变化时零次上传，稀疏变化合并成 byte-range 写入，密集变化使用整段写入；资源 bundle replay 后强制全量重传 | 上传规划单测已加入；当前 workspace 物理拓扑编译错误阻止 package 测试运行，真实设备上传量与 GPU 时间未测 |
 | 实际 HDR/present 闭环 | 当前宿主光照仍未证明进入最终 scene-linear HDR texture 并被 present/readback | 未完成；不宣称生产照明闭环 |
 
 截至记录时，`cargo test -p prism_render_scene lighting::buffers::tests --lib` 编译被不相关的既有工作区错误阻断：`pkg/prism_render_scene/src/shading/lobe_budget/gpu.rs` 调用 `uniform_buffer()` 时缺少 `has_dynamic_offset: bool` 参数。该失败不是灯光测试失败，也不证明灯光测试通过。后续应在修复或隔离该阻断后重跑，并继续逐阶段记录 GPU/capture 证据。

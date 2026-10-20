@@ -400,6 +400,7 @@ where
     surface_count: core::sync::atomic::AtomicU32,
     candidate_rays_per_surface: core::sync::atomic::AtomicU32,
     radiance_upload: Mutex<RadianceUploadCache>,
+    light_upload: Mutex<LightUploadCache>,
     marker: core::marker::PhantomData<fn() -> I>,
 }
 
@@ -408,6 +409,13 @@ struct RadianceUploadCache {
     bundle: Option<Arc<LightingGpuBundle>>,
     bvh: Option<Arc<prism_render_architecture::ray_scene::GpuBvhBuffers>>,
     packed: Option<Arc<[[f32; 4]]>>,
+}
+
+#[derive(Default)]
+struct LightUploadCache {
+    bundle: Option<Arc<LightingGpuBundle>>,
+    directionals: Vec<LightingDirectionalInput>,
+    punctuals: Vec<LightingPunctualInput>,
 }
 
 impl<I> LightingGpuState<I>
@@ -426,6 +434,7 @@ where
             surface_count: core::sync::atomic::AtomicU32::new(0),
             candidate_rays_per_surface: core::sync::atomic::AtomicU32::new(0),
             radiance_upload: Mutex::new(RadianceUploadCache::default()),
+            light_upload: Mutex::new(LightUploadCache::default()),
             marker: core::marker::PhantomData,
         })
     }
@@ -571,16 +580,33 @@ where
             })
             .collect::<Vec<_>>();
         queue.write_buffer(bundle.surfaces, 0, cast_slice(&packed_surfaces));
-        queue.write_buffer(
-            bundle.directionals,
-            0,
-            cast_slice(&inputs.directionals[..directional_count]),
-        );
-        queue.write_buffer(
-            bundle.punctuals,
-            0,
-            cast_slice(&inputs.punctuals[..punctual_count]),
-        );
+        {
+            let mut cache = self
+                .light_upload
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let same_bundle = cache
+                .bundle
+                .as_ref()
+                .is_some_and(|cached| Arc::ptr_eq(cached, &bundle));
+            if !same_bundle {
+                cache.directionals.clear();
+                cache.punctuals.clear();
+                cache.bundle = Some(Arc::clone(&bundle));
+            }
+            upload_changed_light_values(
+                queue,
+                bundle.directionals,
+                &mut cache.directionals,
+                &inputs.directionals[..directional_count],
+            );
+            upload_changed_light_values(
+                queue,
+                bundle.punctuals,
+                &mut cache.punctuals,
+                &inputs.punctuals[..punctual_count],
+            );
+        }
         if !packed_candidates.is_empty() {
             queue.write_buffer(bundle.candidates, 0, cast_slice(&packed_candidates));
         }
@@ -653,6 +679,54 @@ where
 
 impl<I> Resource for LightingGpuState<I> where I: prism_render_driver::Instance + 'static {}
 
+fn upload_changed_light_values<T, Q>(
+    queue: &Q,
+    buffer: prism_render_driver::BufferId,
+    cached: &mut Vec<T>,
+    incoming: &[T],
+) where
+    T: Pod + Copy + PartialEq,
+    Q: RenderQueue,
+{
+    let ranges = dirty_light_ranges(cached, incoming);
+    for range in ranges {
+        let byte_offset = (range.start * core::mem::size_of::<T>()) as u64;
+        queue.write_buffer(buffer, byte_offset, cast_slice(&incoming[range.clone()]));
+    }
+    cached.clear();
+    cached.extend_from_slice(incoming);
+}
+
+fn dirty_light_ranges<T: PartialEq>(cached: &[T], incoming: &[T]) -> Vec<std::ops::Range<usize>> {
+    if incoming.is_empty() {
+        return Vec::new();
+    }
+    let mut ranges = Vec::new();
+    let mut start = None;
+    let mut dirty_count = 0_usize;
+    for (index, value) in incoming.iter().enumerate() {
+        let changed = cached.get(index) != Some(value);
+        if changed {
+            dirty_count += 1;
+        }
+        match (start, changed) {
+            (None, true) => start = Some(index),
+            (Some(begin), false) => {
+                ranges.push(begin..index);
+                start = None;
+            }
+            _ => {}
+        }
+    }
+    if let Some(begin) = start {
+        ranges.push(begin..incoming.len());
+    }
+    if ranges.len() >= 64 || dirty_count * 5 >= incoming.len() * 3 {
+        return vec![0..incoming.len()];
+    }
+    ranges
+}
+
 fn storage_layout(binding: u32, min_binding_size: u64, read_only: bool) -> BindGroupLayoutEntry {
     BindGroupLayoutEntry {
         binding,
@@ -663,6 +737,42 @@ fn storage_layout(binding: u32, min_binding_size: u64, read_only: bool) -> BindG
             min_binding_size: Some(min_binding_size),
         },
         count: None,
+    }
+}
+
+#[cfg(test)]
+mod light_upload_tests {
+    use super::{dirty_light_ranges, LightingDirectionalInput};
+
+    #[test]
+    fn unchanged_light_table_produces_no_upload_ranges() {
+        let values = [LightingDirectionalInput::default(); 4];
+        assert!(dirty_light_ranges(&values, &values).is_empty());
+    }
+
+    #[test]
+    fn sparse_light_edits_coalesce_adjacent_ranges_only() {
+        let old = [LightingDirectionalInput::default(); 8];
+        let mut new = old;
+        new[2].visibility = 0.5;
+        new[3].visibility = 0.25;
+        new[7].visibility = 0.75;
+        assert_eq!(dirty_light_ranges(&old, &new), vec![2..4, 7..8]);
+    }
+
+    #[test]
+    fn growth_uploads_only_new_slots_while_dense_changes_use_one_full_range() {
+        let old = [LightingDirectionalInput::default(); 2];
+        let grown = [LightingDirectionalInput::default(); 4];
+        assert_eq!(dirty_light_ranges(&old, &grown), vec![2..4]);
+        let mut dense = [LightingDirectionalInput::default(); 10];
+        for value in &mut dense[..6] {
+            value.visibility = 0.5;
+        }
+        assert_eq!(
+            dirty_light_ranges(&[LightingDirectionalInput::default(); 10], &dense),
+            vec![0..10]
+        );
     }
 }
 
