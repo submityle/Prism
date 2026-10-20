@@ -13,7 +13,7 @@
 //! can be sampled with correct mip selection and anisotropy.
 
 use crate::BarycentricDerivatives;
-use bevy_math::ops;
+use prism_math::ops;
 
 /// An interpolated scalar attribute and its screen-space derivatives.
 #[derive(Clone, Copy, Debug, PartialEq)]
