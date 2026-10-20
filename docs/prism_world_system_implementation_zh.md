@@ -353,3 +353,14 @@ CPU release 基准为确定性平面、16 次预热、每项 128 次测量；下
 - policy core 保持 `no_std + alloc`、`forbid(unsafe_code)`；文件系统和 GPU 能力只在明确 feature/provider 边界出现。
 - 所有日志、排序、PCG、HLOD 和 readback contract 都有稳定顺序或稳定 key。
 - 任何声称 GPU 或性能完成的结论必须同时记录 adapter、pipeline、dispatch/readback、P50/P95/P99、上传字节和显存/资源预算。
+
+## 2026-10-20 当前工作树回归复验
+
+在 HEAD `bcf70c1d` 及当时共享工作树状态下，使用独立临时 Cargo target 离线重跑：
+
+| 命令 | 结果 | 证据边界 |
+|---|---:|---|
+| `cargo test -p prism_world_runtime --lib --offline` | 104 passed | runtime lib 单测；不代表 workspace 全量测试 |
+| `cargo test -p prism_world_gpu --features gpu --lib --offline` | 123 passed | 验证 `gpu` feature 编译与 lib 单测；不代表本次在真实 GPU 上执行 shader |
+
+两条命令均通过；临时 `CARGO_TARGET_DIR` 随后清理，Cargo 报告移除 5,614 个文件、约 1.1 GiB。测试是在含其他并行未提交改动的共享工作树上运行，结论仅适用于当时被编译的工作树内容；本节不声称独立干净 checkout、设备实测或端到端产品链路通过。
