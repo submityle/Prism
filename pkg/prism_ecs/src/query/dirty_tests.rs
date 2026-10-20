@@ -8,12 +8,16 @@
 //! chunk whose rows are all older than `last_run`.
 
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::change::Tick;
-use crate::component::Component;
+use crate::component::{Component, Components};
 use crate::entity::Entity;
+use crate::query::access::Access;
+use crate::query::filter::QueryFilter;
 use crate::query::{Changed, DirtyChunk, Or, With, Without};
 use crate::storage::rows_per_chunk;
+use crate::storage::SparseSets;
 use crate::world::World;
 
 /// A component large enough that only a handful of rows fit per logical chunk,
@@ -42,6 +46,43 @@ impl Component for SparseDirty {
 #[derive(Clone, Copy)]
 struct Tag;
 impl Component for Tag {}
+
+static PANIC_NEXT_CHUNK_FILTER: AtomicBool = AtomicBool::new(false);
+
+struct PanicOnceChunkFilter;
+
+unsafe impl QueryFilter for PanicOnceChunkFilter {
+    type State = ();
+    type Fetch<'w> = ();
+
+    fn init_state(_components: &mut Components) -> Self::State {}
+
+    fn matches(_state: &Self::State, _archetype: &crate::archetype::Archetype) -> bool {
+        true
+    }
+
+    fn update_access(_state: &Self::State, _access: &mut Access) {}
+
+    unsafe fn init_fetch<'w>(
+        _state: &Self::State,
+        _archetype: &'w crate::archetype::Archetype,
+        _sparse_sets: &'w SparseSets,
+        _last_run: Tick,
+        _this_run: Tick,
+    ) -> Self::Fetch<'w> {
+    }
+
+    fn filter_chunk<'w>(_fetch: Self::Fetch<'w>, _chunk: usize) -> bool {
+        if PANIC_NEXT_CHUNK_FILTER.swap(false, Ordering::SeqCst) {
+            panic!("injected one-shot dirty-chunk filter failure");
+        }
+        true
+    }
+
+    unsafe fn filter_fetch<'w>(_fetch: Self::Fetch<'w>, _entity: Entity, _row: usize) -> bool {
+        true
+    }
+}
 
 macro_rules! noise_components {
     ($($name:ident),+ $(,)?) => {
@@ -234,6 +275,36 @@ fn forward_dirty_window_uses_column_journal_without_scanning_all_archetypes() {
     assert_eq!(report.stats.column_candidates, 0);
     assert_eq!(report.stats.matched_archetypes, 1);
     assert_eq!(report.chunks.len(), 1);
+}
+
+#[test]
+fn dirty_journal_cursor_is_acknowledged_only_after_filter_success() {
+    let mut world = World::new();
+    let entity = world.spawn((Big::new(1), SparseDirty(0)));
+    let state = world.query_filtered::<&Big, (With<SparseDirty>, PanicOnceChunkFilter)>();
+
+    let baseline = world.change_tick();
+    assert!(state
+        .dirty_chunks_with_stats(&world, baseline, baseline)
+        .chunks
+        .is_empty());
+
+    advance_frame(&mut world);
+    let last_run = world.last_change_tick();
+    let this_run = world.change_tick();
+    world.get_mut::<Big>(entity).unwrap().tag += 1;
+    world.get_mut::<SparseDirty>(entity).unwrap().0 += 1;
+
+    PANIC_NEXT_CHUNK_FILTER.store(true, Ordering::SeqCst);
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        state.dirty_chunks_with_stats(&world, last_run, this_run)
+    }));
+    assert!(panic.is_err(), "the injected filter panic must be observed");
+
+    let retry = state.dirty_chunks_with_stats(&world, last_run, this_run);
+    assert_eq!(retry.chunks.len(), 1);
+    assert_eq!(retry.stats.journal_events, 1);
+    assert_eq!(retry.stats.sparse_index_events, 1);
 }
 
 #[test]

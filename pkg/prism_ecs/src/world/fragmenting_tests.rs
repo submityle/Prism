@@ -115,14 +115,19 @@ fn shared_value_eviction_releases_fragmenting_relation_identity_without_id_reuse
 
     let evicted_id = archetype(&world, source);
     let relation_id = world.components().id_of::<Link>().unwrap();
+    let batch_id = world.components().id_of::<Batch>().unwrap();
     let before = world.archetypes().get(evicted_id).unwrap();
     assert_eq!(before.relation_pairs(), &[(relation_id, target)]);
+    assert!(before.shared_binding(batch_id).is_some());
+    assert!(before.shared_arc(batch_id).is_some());
     assert!(!before.is_evicted());
 
     assert!(world.despawn(source));
     let tombstone = world.archetypes().get(evicted_id).unwrap();
     assert!(tombstone.is_evicted());
     assert!(tombstone.components().is_empty());
+    assert!(tombstone.shared_binding(batch_id).is_none());
+    assert!(tombstone.shared_arc(batch_id).is_none());
     assert!(tombstone.shared_bindings().is_empty());
     assert!(tombstone.relation_pairs().is_empty());
 

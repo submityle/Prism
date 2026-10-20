@@ -113,6 +113,10 @@ pub struct QueryState<D: QueryData, F: QueryFilter = ()> {
     dirty_tracker: Option<Arc<ChangeTracker>>,
     dirty_sources: Vec<ComponentId>,
     dirty_cursors: SpinLock<Vec<ChangeCursor>>,
+    /// Serialize dirty-window cursor transactions. The scan can invoke a
+    /// user-provided `QueryFilter::filter_chunk`; its cursor updates are only
+    /// published after that scan completes successfully.
+    dirty_pass: SpinLock<()>,
     /// Last explicit dirty-window request. The change index is a forward-only
     /// cursor, so overlapping or rewound requests must use the live fallback.
     dirty_last_window: SpinLock<Option<(Tick, Tick)>>,
@@ -182,6 +186,7 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
             dirty_tracker,
             dirty_sources,
             dirty_cursors,
+            dirty_pass: SpinLock::new(()),
             dirty_last_window: SpinLock::new(None),
             dirty_column_cursor: SpinLock::new(None),
             dirty_activation_tick,
@@ -245,16 +250,29 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
     /// Collect sparse component writes/removals recorded since the caller's
     /// last cursor window. The query owns one cursor per sparse source, so the
     /// tracker can discard history as soon as no observer/query retains it.
+    pub(crate) fn snapshot_dirty_cursors(&self) -> Vec<ChangeCursor> {
+        self.dirty_cursors.lock().clone()
+    }
+
+    pub(crate) fn commit_dirty_cursors(&self, cursors: Vec<ChangeCursor>) {
+        *self.dirty_cursors.lock() = cursors;
+    }
+
+    pub(crate) fn lock_dirty_pass(&self) -> impl Drop + '_ {
+        self.dirty_pass.lock()
+    }
+
     pub(crate) fn collect_sparse_changes(
         &self,
         last_run: Tick,
         this_run: Tick,
+        cursors: &mut [ChangeCursor],
         out: &mut Vec<Entity>,
     ) -> bool {
         let Some(tracker) = &self.dirty_tracker else {
             return false;
         };
-        let mut cursors = self.dirty_cursors.lock();
+        debug_assert_eq!(cursors.len(), self.dirty_sources.len());
         let mut gap = false;
         for (index, &component) in self.dirty_sources.iter().enumerate() {
             let stats = tracker.collect(component, &mut cursors[index], last_run, this_run, out);

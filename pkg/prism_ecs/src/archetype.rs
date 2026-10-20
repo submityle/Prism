@@ -426,6 +426,7 @@ impl Archetype {
     /// Whether entities here have the table/sparse component `id`. Shared
     /// bindings are *not* reported here (they are archetype-level batch keys,
     /// not table columns); query [`Archetype::shared_binding`] for those.
+    /// Permanently evicted tombstones return `false` for every component.
     #[inline]
     pub fn contains(&self, id: ComponentId) -> bool {
         self.components.contains(id)
@@ -434,7 +435,7 @@ impl Archetype {
     /// The interned [`SharedValueId`] bound to shared component `id` in this
     /// archetype, or `None` if this archetype has no binding for `id` (design
     /// §6). This is the precise, per-archetype membership test for a shared
-    /// component.
+    /// component. Permanently evicted tombstones return `None`.
     #[inline]
     pub fn shared_binding(&self, id: ComponentId) -> Option<SharedValueId> {
         self.shared
@@ -447,6 +448,7 @@ impl Archetype {
     /// component `id` in this archetype, or `None` if unbound (design §6). The
     /// value is immutable; downcast via
     /// [`SharedValue::as_any`](crate::storage::SharedValue::as_any) to read it.
+    /// Permanently evicted tombstones return `None`.
     #[inline]
     pub fn shared_arc(&self, id: ComponentId) -> Option<&Arc<dyn SharedValue>> {
         self.shared
@@ -455,8 +457,9 @@ impl Archetype {
             .map(|i| &self.shared[i].2)
     }
 
-    /// All shared-component bindings on this archetype, sorted by
-    /// [`ComponentId`] (design §6).
+    /// All shared-component bindings on this live archetype, sorted by
+    /// [`ComponentId`] (design §6). Permanently evicted tombstones return an
+    /// empty slice.
     #[inline]
     pub fn shared_bindings(&self) -> &[SharedBinding] {
         &self.shared
@@ -471,7 +474,8 @@ impl Archetype {
         &self.pairs
     }
 
-    /// Number of entities in this archetype.
+    /// Number of entities in this archetype. Permanently evicted tombstones
+    /// have length zero.
     #[inline]
     pub fn len(&self) -> usize {
         self.table.len()

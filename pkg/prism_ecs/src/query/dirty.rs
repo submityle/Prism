@@ -325,7 +325,6 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
         let changes = world
             .archetypes()
             .column_changes_since_components(self.dirty_column_cursor(), access_ids);
-        self.set_dirty_column_cursor(changes.cursor);
         report.stats.journal_gap = changes.gap;
         report.stats.journal_records_scanned = changes.records_scanned;
         if changes.gap {
@@ -413,6 +412,11 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
                 report.stats.reported_rows += end - start;
             }
         }
+        // The cursor is only acknowledged after every candidate has been
+        // filtered and the complete report has been built. A custom filter may
+        // panic; in that case the caller can retry this same window without
+        // losing the journal events.
+        self.set_dirty_column_cursor(changes.cursor);
         self.remember_sparse_window(last_run, this_run);
         true
     }
@@ -452,6 +456,7 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
         this_run: Tick,
     ) -> DirtyChunkReport {
         self.validate_world(world);
+        let _dirty_pass = self.lock_dirty_pass();
         let mut report = DirtyChunkReport {
             chunks: Vec::new(),
             stats: DirtyChunkStats::default(),
@@ -489,10 +494,16 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
         // proportional to the sparse set's actual membership rather than to
         // every row in every matched archetype.
         let mut sparse_chunks: BTreeMap<ArchetypeId, Vec<usize>> = BTreeMap::new();
+        let mut sparse_cursors = self.snapshot_dirty_cursors();
         let mut sparse_fallback = self.sparse_fallback_needed(world, last_run, this_run);
         let mut indexed_entities = Vec::new();
         if !sparse_fallback {
-            if self.collect_sparse_changes(last_run, this_run, &mut indexed_entities) {
+            if self.collect_sparse_changes(
+                last_run,
+                this_run,
+                &mut sparse_cursors,
+                &mut indexed_entities,
+            ) {
                 sparse_fallback = true;
                 report.stats.sparse_index_gaps = 1;
                 indexed_entities.clear();
@@ -547,6 +558,8 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
         // matching archetype. This is a conservative superset and preserves
         // correctness without retaining unbounded event history.
         if report.stats.sparse_index_gaps != 0 {
+            let journal_baseline = (this_run == world.change_tick())
+                .then(|| world.archetypes().column_change_cursor());
             let matched = self.matched_archetypes(world);
             report.stats.matched_archetypes = matched.len();
             for &archetype_id in matched.as_ref() {
@@ -567,9 +580,10 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
                     report.stats.reported_rows += chunk.rows;
                 }
             }
-            if this_run == world.change_tick() {
-                self.set_dirty_column_cursor(world.archetypes().column_change_cursor());
+            if let Some(cursor) = journal_baseline {
+                self.set_dirty_column_cursor(cursor);
             }
+            self.commit_dirty_cursors(sparse_cursors);
             self.remember_sparse_window(last_run, this_run);
             return report;
         }
@@ -582,6 +596,7 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
             &sparse_chunks,
             &mut report,
         ) {
+            self.commit_dirty_cursors(sparse_cursors);
             return report;
         }
 
@@ -595,7 +610,6 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
             (this_run == world.change_tick()).then(|| world.archetypes().column_change_cursor());
 
         let matched_archetypes = self.matched_archetypes(world);
-        self.remember_sparse_window(last_run, this_run);
 
         // A conservative tick-index fallback used to walk every matched
         // archetype and probe every query access id for a table column. Build
@@ -721,6 +735,8 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
         if let Some(cursor) = journal_baseline {
             self.set_dirty_column_cursor(cursor);
         }
+        self.commit_dirty_cursors(sparse_cursors);
+        self.remember_sparse_window(last_run, this_run);
         report
     }
 }
