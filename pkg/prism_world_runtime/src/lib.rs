@@ -21,6 +21,11 @@ use prism_world_stream::{
 
 mod routed_io;
 pub use routed_io::RoutedCellIo;
+mod decoded_scene_host;
+pub use decoded_scene_host::{
+    CellDecodeLimits, CellPayloadDecoder, DecodedCell, DecodedCellHost, DecodedSceneHost,
+    DecodedSceneHostError,
+};
 mod cell_world;
 pub use cell_world::{
     CellCommit, ResolvedWorldRef, StableRefDecoder, StableRefSceneHost, StableRefSceneHostError,
@@ -62,6 +67,8 @@ pub use scatter_persist::{
 };
 #[cfg(test)]
 mod async_coordinator_tests;
+#[cfg(test)]
+mod decoded_scene_host_tests;
 #[cfg(test)]
 mod scatter_persist_tests;
 
@@ -267,6 +274,19 @@ pub trait SceneHost {
     /// host owns replacement atomicity and may reject the operation; the
     /// coordinator keeps the previous manifest resident until success.
     fn load_cell(&mut self, manifest: &CellManifest, payload: &[u8]) -> Result<(), Self::Error>;
+
+    /// Classifies a failed load for deterministic trace diagnostics.
+    ///
+    /// Existing hosts default to [`FailureStage::LoadHost`]. Adapters that
+    /// perform decoding or staging may report a more specific stage.
+    fn load_failure_stage(&self, _error: &Self::Error) -> FailureStage {
+        FailureStage::LoadHost
+    }
+
+    /// Formats a stable diagnostic for a rejected load.
+    fn load_failure_message(&self, _error: &Self::Error) -> String {
+        String::from("scene host rejected load")
+    }
 
     /// Removes a cell from the host.
     fn evict_cell(&mut self, sector: SectorId) -> Result<(), Self::Error>;
@@ -788,6 +808,12 @@ pub enum FailureStage {
     ManifestHeader,
     /// The scene host rejected a load.
     LoadHost,
+    /// The application payload decoder rejected a cell.
+    PayloadDecode,
+    /// A cell's decoded footprint exceeded its configured budget.
+    PayloadBudget,
+    /// The typed host rejected preparation before publication.
+    CellPrepare,
     /// The scene host rejected an eviction.
     EvictHost,
 }
@@ -1211,14 +1237,16 @@ impl<I: CellIo> CellFrameCoordinator<I> {
                                 sector: pending.manifest.sector,
                             });
                         }
-                        Err(_) => {
+                        Err(error) => {
+                            let stage = host.load_failure_stage(&error);
+                            let message = host.load_failure_message(&error);
                             self.restore_stream_state(pending.manifest.sector, previous);
                             self.record_failure(
                                 pending.frame,
                                 pending.manifest.sector,
                                 operation,
-                                FailureStage::LoadHost,
-                                "scene host rejected load",
+                                stage,
+                                &message,
                             );
                         }
                     },
