@@ -228,6 +228,8 @@ impl BuildGraph {
         if max_concurrency == 0 {
             return Err(BuildError::InvalidConcurrency);
         }
+        // Reject cycles before running even an otherwise-ready prefix.
+        self.execution_order()?;
         let mut indegree = BTreeMap::new();
         let mut dependents: BTreeMap<JobId, Vec<JobId>> = BTreeMap::new();
         for (&id, job) in &self.jobs {
@@ -260,25 +262,30 @@ impl BuildGraph {
                 wave.iter()
                     .map(|&id| {
                         let job = &self.jobs[&id];
-                        let inputs: Vec<Vec<u8>> = job
+                        // Scoped workers may borrow immutable dependency outputs.
+                        // Copying them per consumer multiplies peak memory for
+                        // large textures/meshes and broad fan-out graphs.
+                        let inputs: Vec<&[u8]> = job
                             .dependencies()
                             .iter()
-                            .map(|dependency| outputs[dependency].clone())
+                            .map(|dependency| outputs[dependency].as_slice())
                             .collect();
                         let processor = job.processor();
-                        scope.spawn(move || {
-                            let input_refs: Vec<&[u8]> = inputs.iter().map(Vec::as_slice).collect();
-                            processor
-                                .process(&input_refs)
-                                .map_err(|source| BuildError::ProcessorFailed { job: id, source })
-                        })
+                        (
+                            id,
+                            scope.spawn(move || {
+                                processor.process(&inputs).map_err(|source| {
+                                    BuildError::ProcessorFailed { job: id, source }
+                                })
+                            }),
+                        )
                     })
                     .collect::<Vec<_>>()
                     .into_iter()
-                    .map(|handle| {
+                    .map(|(id, handle)| {
                         handle.join().unwrap_or_else(|_| {
                             Err(BuildError::ProcessorFailed {
-                                job: JobId(u128::MAX),
+                                job: id,
                                 source: ProcessorError::new("processor thread panicked"),
                             })
                         })

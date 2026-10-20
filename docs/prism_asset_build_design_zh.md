@@ -16,6 +16,14 @@
 
 ## 实施状态（2026-10-20）
 
+2026-10-20 DAG 执行增量：`BuildGraph::execute_parallel_with_limit` 在启动任何
+Processor 前完成整图校验，避免存在环时先执行无关 ready prefix；作用域线程直接
+借用依赖输出，fan-out 消费者不再逐个复制完整输入。线程 panic 保留实际 JobId，
+同 wave 的失败仍按稳定 JobId 选择。`tests/graph_admission.rs` 的四项回归覆盖
+共享输入指针、panic 身份、无效图零执行，以及十万节点深链的非递归规划和后继
+失效传播。`cargo test -j 1 -p prism_asset_build_core --quiet` 共 240 项通过，
+0 失败、0 忽略；十万节点测试是结构正确性证据，不是吞吐、峰值内存或时延达标证据。
+
 2026-10-20 容器读取 SHIPPED 增量：`ContainerReadLimits`/`ContainerReadBudget`
 覆盖声明元数据、条目数、stored/raw 大小、展开比例、累计挂载解码、输出与共享
 活跃字节缓冲门禁；v2 挂载仅保留单个解码 Chunk，压缩 batch 对同一单元去重。
