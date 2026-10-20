@@ -20,7 +20,18 @@
 - 明确约束：身份/存储/依赖/句柄核 `no_std + alloc`；当前 `prism_asset` 实际 feature 仅提供 `std`、`ecs`、`file_watcher`；锁外异步 range executor 属于 `std` 下已实现的窄切片，完整异步 EDL、process/pack 和 GPU streaming 仍属于目标能力分层，不是当前已发布 feature；工作区 `forbid(unsafe_code)`；**不依赖任何 `bevy_*` crate**
 - 烘焙/打包归属： 离线烘焙、缓存键、DDC/CAS、Revision、打包与 Patch 的唯一持有者是 `Prism Asset Build`（`docs/prism_asset_build_design_zh.md` §2.7/§4.6/§10/§14）；本 crate 只提供运行时消费契约（§13）与进程内重烘适配。派生数据分类与登记见 `docs/prism_derived_data_contract_zh.md`
 
-### 实施状态（2026-10-20）
+### 实施状态（2026-10-21）
+
+2026-10-21 运行时值发布：`AssetServer::insert_runtime` 和 `replace_runtime`
+将进程内派生资产放入正常 typed arena，供现有事件快照与 RenderAsset 提取。
+替换保持原 handle/AssetId，只允许同 server 创建的 runtime allocation；
+路径资产、跨 server 等号槽位、类型冲突、缺失强依赖、自引用和依赖环均在
+commit 前拒绝。显式依赖 handle 保留闭包，pending/failed 依赖沿用递归加载态；
+旧值和移除依赖在解锁后释放，正常回收同时清除 runtime provenance。
+`tests/runtime_publication.rs` 的 14 项回归全部通过，覆盖事件/快照、图原子性、
+依赖就绪传播、visitor panic、重入析构和槽位复用。完整默认配置回归共 336 项
+通过（258 单元、77 集成、1 文档），0 失败、0 忽略。该 API 是实际 Bake 消费者
+的发布入口；完整 Bake→Image→渲染采样和编辑器预览仍独立验收。
 
 异步共享 flight 现增加独立的等待图：在 scheduler mutex 下原子执行加边与环检测，
 覆盖祖先链无法发现的独立根请求互等，以及直接 label → source 和 labeled 输出

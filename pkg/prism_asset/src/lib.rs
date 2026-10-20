@@ -139,7 +139,7 @@ pub use scheduler::{
     SoftBatchError, SoftLoadBudget,
 };
 #[cfg(feature = "std")]
-pub use server::{AssetServer, SoftLoadError};
+pub use server::{AssetServer, RuntimePublicationError, SoftLoadError};
 
 #[cfg(all(feature = "std", feature = "ecs"))]
 impl prism_ecs::resource::Resource for AssetServer {}
@@ -167,8 +167,6 @@ pub use watch::{AssetWatchHandle, FileWatcher, WatchStartError};
 
 /// Convenient re-exports for downstream crates.
 pub mod prelude {
-    #[cfg(feature = "std")]
-    pub use crate::AssetServer;
     pub use crate::{
         direct_asset_dependencies, direct_dependencies, plan_reload, Asset, AssetDependency,
         AssetError, AssetErrorId, AssetEvent, AssetFallbacks, AssetId, AssetIndex, AssetPath,
@@ -180,6 +178,8 @@ pub mod prelude {
         SuffixConflict, UntypedAssetId, UntypedHandle, UntypedWeakHandle, VisitAssetDependencies,
         WeakHandle,
     };
+    #[cfg(feature = "std")]
+    pub use crate::{AssetServer, RuntimePublicationError};
     #[cfg(feature = "std")]
     pub use crate::{LoadPriority, SoftBatchError, SoftLoadBudget, SoftLoadError};
 }

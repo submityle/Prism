@@ -50,6 +50,14 @@
 完整 EDL、实际纹理/VT/VG 流送消费者、编辑态资产/重导入、完整 Processor SDK、
 动态文件依赖、通用平台 Cook、远程 CAS/Worker、发行服务和规模性能验收仍未完成。
 
+2026-10-21 运行时发布入口：`prism_asset::AssetServer` 已提供
+`insert_runtime`/`replace_runtime`，保持 typed arena、事件与 RenderAsset
+消费入口一致；同 server ownership、类型、强依赖和 cycle 在发布前校验，
+替换保留原 handle，失败保持旧值/旧图/旧事件。14 项专项回归全部通过；
+`cargo test -j 1 -p prism_asset --quiet` 完整默认配置共 336 项通过
+（258 单元、77 集成、1 文档），0 失败、0 忽略。
+这不是实际 Bake 资产消费者或 GPU 采样已经交付的声明。
+
 2026-10-21 本地回归：`cargo test -j 1 -p prism_asset_build_core --features ecs
 --quiet` 共 299 项通过（162 项单元、137 项集成），0 失败、0 忽略；CLI
 `cargo test -j 1 -p prism_asset_build_cli --quiet` 共 51 项通过，0 失败、0 忽略。

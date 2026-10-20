@@ -134,6 +134,99 @@ impl core::fmt::Display for SoftLoadError {
 
 impl std::error::Error for SoftLoadError {}
 
+/// A runtime publication refused before changing the resident value or graph.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RuntimePublicationError {
+    /// The handle is not a live allocation owned by this server. Slot ids alone
+    /// are insufficient: independent servers and arenas can mint equal ids.
+    ForeignHandle {
+        /// The rejected handle's arena-local id.
+        id: UntypedAssetId,
+    },
+    /// The target belongs to this server, but was not created by
+    /// [`AssetServer::insert_runtime`]. Path-loaded assets cannot be overwritten.
+    NotRuntimeAsset {
+        /// The rejected target.
+        id: UntypedAssetId,
+    },
+    /// The stable type identity is already registered for another Rust type,
+    /// or the target handle was retyped to a different Rust type.
+    TypeMismatch {
+        /// The type identity requested for publication.
+        type_id: AssetTypeId,
+    },
+    /// A strong reference disclosed by the value has no supplied owned handle.
+    MissingDependency {
+        /// The dependency missing from the explicit handle list.
+        id: UntypedAssetId,
+    },
+    /// A runtime value cannot retain its own allocation.
+    SelfDependency {
+        /// The target that would own itself.
+        id: UntypedAssetId,
+    },
+    /// The replacement dependency set would introduce a cycle.
+    DependencyCycle(DependencyError),
+    /// The value's dependency visitor panicked. It runs before locking or
+    /// mutating the server, so the previous publication remains usable.
+    DependencyVisitorPanicked,
+}
+
+impl core::fmt::Display for RuntimePublicationError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::ForeignHandle { id } => {
+                write!(
+                    f,
+                    "runtime publication handle is not owned by this server: {id:?}"
+                )
+            }
+            Self::NotRuntimeAsset { id } => {
+                write!(
+                    f,
+                    "runtime publication cannot replace a path-loaded asset: {id:?}"
+                )
+            }
+            Self::TypeMismatch { type_id } => {
+                write!(
+                    f,
+                    "runtime publication type does not match its arena: {type_id:?}"
+                )
+            }
+            Self::MissingDependency { id } => {
+                write!(
+                    f,
+                    "runtime publication is missing a dependency handle: {id:?}"
+                )
+            }
+            Self::SelfDependency { id } => {
+                write!(f, "runtime publication cannot retain itself: {id:?}")
+            }
+            Self::DependencyCycle(error) => write!(f, "runtime publication {error}"),
+            Self::DependencyVisitorPanicked => {
+                f.write_str("runtime publication dependency visitor panicked")
+            }
+        }
+    }
+}
+
+impl std::error::Error for RuntimePublicationError {}
+
+fn runtime_references<A: Asset>(
+    value: &A,
+) -> Result<BTreeSet<UntypedAssetId>, RuntimePublicationError> {
+    catch_unwind(AssertUnwindSafe(|| {
+        let mut references = BTreeSet::new();
+        value.visit_references(&mut |dependency| {
+            if let Some(id) = dependency.strong_id() {
+                references.insert(id);
+            }
+        });
+        references
+    }))
+    .map_err(|_| RuntimePublicationError::DependencyVisitorPanicked)
+}
+
 /// The runtime asset front door (design §9.2).
 ///
 /// Register loaders and mount byte sources, then call [`AssetServer::load`] to
@@ -212,6 +305,9 @@ struct AssetServerInner {
     /// `asset id -> weak owner handle`, used to distinguish external roots
     /// whose allocation is not currently present in another retained vector.
     owner_weaks: BTreeMap<UntypedAssetId, UntypedWeakHandle>,
+    /// Pathless allocations created by insert_runtime. Weak ownership remains
+    /// in owner_weaks; this provenance set never pins an allocation.
+    runtime_assets: BTreeSet<UntypedAssetId>,
     /// Labels whose lifetime has been promoted from their source revision to
     /// the label itself. This records promotions that happen recursively while
     /// the source is still assembling, before its retained closure is
@@ -926,6 +1022,7 @@ impl AssetServer {
                 catalog: BTreeMap::new(),
                 retained: BTreeMap::new(),
                 owner_weaks: BTreeMap::new(),
+                runtime_assets: BTreeSet::new(),
                 promoted_labels: BTreeMap::new(),
                 promotion_journal: Vec::new(),
                 promotion_depth: 0,
@@ -956,6 +1053,110 @@ impl AssetServer {
         let mut inner = self.lock();
         inner.stores.register::<L::Asset>();
         inner.loaders.register::<L>(loader)
+    }
+
+    /// Publishes an owned runtime value in the same typed arena as loaded
+    /// assets, without creating a path, loader, or persistent catalog entry.
+    /// Returns the sole initial strong handle and emits [`crate::AssetEvent::Added`].
+    ///
+    /// `dependencies` supplies same-server strong handles for every strong
+    /// reference disclosed by [`Asset::visit_references`]. Extra dependencies
+    /// are allowed for values that use an input without embedding its handle.
+    /// Duplicates are retained once. Soft references are neither resolved nor
+    /// retained. Pending and failed dependencies are valid: the new value's own
+    /// state is Loaded, while [`Self::recursive_state`] reflects their states.
+    ///
+    /// Validation runs before inserting any value, graph node, or event. The
+    /// server holds only a weak owner reference; dropping the returned handle
+    /// and its clones allows normal reclamation of the whole dependency closure.
+    pub fn insert_runtime<A: Asset>(
+        &self,
+        value: A,
+        dependencies: impl IntoIterator<Item = UntypedHandle>,
+    ) -> Result<Handle<A>, RuntimePublicationError> {
+        let references = runtime_references(&value)?;
+        let dependencies: Vec<_> = dependencies.into_iter().collect();
+        let mut inner = self.lock();
+        let dependencies = inner.runtime_dependencies(&references, dependencies, None)?;
+        if inner.stores.contains_type_of::<A>() && inner.stores.arena::<A>().is_none() {
+            return Err(RuntimePublicationError::TypeMismatch {
+                type_id: AssetTypeId::of::<A>(),
+            });
+        }
+        let handle = inner.stores.insert(value);
+        let id = handle.id();
+        inner.owner_weaks.insert(id, handle.downgrade());
+        inner.runtime_assets.insert(id);
+        inner.graph.add_asset(id);
+        // A freshly minted node has no incoming edges. Every dependency was
+        // validated as an existing allocation, so none can reach this node.
+        for dependency in &dependencies {
+            inner.graph.add_dependency(id, dependency.id());
+        }
+        let _ = inner.graph.set_self_state(id, LoadState::Loaded);
+        inner.retained.insert(id, dependencies);
+        Ok(handle
+            .typed::<A>()
+            .expect("inserted the requested Rust type"))
+    }
+
+    /// Atomically replaces a runtime value and its complete dependency set.
+    /// The stable asset id and handle allocation are unchanged; success emits
+    /// exactly one [`crate::AssetEvent::Modified`]. The value remains Loaded
+    /// independently of its dependency closure's recursive readiness.
+    ///
+    /// The target must have been created by this server's [`Self::insert_runtime`].
+    /// Foreign allocations, path-loaded targets, omitted strong dependencies,
+    /// self references and dependency cycles are rejected without changing the
+    /// old value, dependency ownership, readiness, or event queue. Dependencies
+    /// have the same semantics as in insert_runtime. Removed dependencies are
+    /// released after commit, and old value destructors run outside the mutex.
+    pub fn replace_runtime<A: Asset>(
+        &self,
+        handle: &Handle<A>,
+        value: A,
+        dependencies: impl IntoIterator<Item = UntypedHandle>,
+    ) -> Result<(), RuntimePublicationError> {
+        let references = runtime_references(&value)?;
+        let dependencies: Vec<_> = dependencies.into_iter().collect();
+        let mut inner = self.lock();
+        let id = handle.untyped_id();
+        inner.validate_owned_handle(&handle.untyped())?;
+        if !inner.runtime_assets.contains(&id) {
+            return Err(RuntimePublicationError::NotRuntimeAsset { id });
+        }
+        if !inner
+            .stores
+            .arena::<A>()
+            .is_some_and(|arena| arena.owns_handle(handle))
+        {
+            return Err(RuntimePublicationError::TypeMismatch {
+                type_id: AssetTypeId::of::<A>(),
+            });
+        }
+        let dependencies = inner.runtime_dependencies(&references, dependencies, Some(id))?;
+        inner
+            .graph
+            .replace_dependencies(id, dependencies.iter().map(UntypedHandle::id))
+            .map_err(RuntimePublicationError::DependencyCycle)?;
+        // Runtime allocations always contain ready values, and only this API
+        // can write them. All fallible checks precede this commit point.
+        let previous_value = core::mem::replace(
+            inner
+                .stores
+                .arena_mut::<A>()
+                .expect("validated runtime arena")
+                .get_mut(handle.id())
+                .expect("owned runtime allocation is ready"),
+            value,
+        );
+        let _ = inner.graph.set_self_state(id, LoadState::Loaded);
+        inner.graph.clear_stale(id);
+        let previous_dependencies = inner.retained.insert(id, dependencies);
+        drop(inner);
+        drop(previous_value);
+        drop(previous_dependencies);
+        Ok(())
     }
 
     /// Mounts a byte [`AssetReader`] under `name` at the given overlay
@@ -1283,6 +1484,49 @@ impl Default for AssetServer {
 }
 
 impl AssetServerInner {
+    fn validate_owned_handle(&self, handle: &UntypedHandle) -> Result<(), RuntimePublicationError> {
+        let owned = self.stores.contains(handle.id())
+            && self
+                .owner_weaks
+                .get(&handle.id())
+                .and_then(UntypedWeakHandle::upgrade)
+                .is_some_and(|owner| owner.handle_id() == handle.handle_id());
+        if owned {
+            Ok(())
+        } else {
+            Err(RuntimePublicationError::ForeignHandle { id: handle.id() })
+        }
+    }
+
+    fn runtime_dependencies(
+        &self,
+        references: &BTreeSet<UntypedAssetId>,
+        dependencies: Vec<UntypedHandle>,
+        owner: Option<UntypedAssetId>,
+    ) -> Result<Vec<UntypedHandle>, RuntimePublicationError> {
+        let mut owned = BTreeMap::new();
+        for dependency in dependencies {
+            // Check every allocation before deduplicating: a foreign handle
+            // can have the same arena-local id as a valid local dependency.
+            self.validate_owned_handle(&dependency)?;
+            if owner == Some(dependency.id()) {
+                return Err(RuntimePublicationError::SelfDependency {
+                    id: dependency.id(),
+                });
+            }
+            owned.entry(dependency.id()).or_insert(dependency);
+        }
+        for &id in references {
+            if owner == Some(id) {
+                return Err(RuntimePublicationError::SelfDependency { id });
+            }
+            if !owned.contains_key(&id) {
+                return Err(RuntimePublicationError::MissingDependency { id });
+            }
+        }
+        Ok(owned.into_values().collect())
+    }
+
     #[expect(
         clippy::result_large_err,
         reason = "structured soft-load diagnostics preserve path and type context"
@@ -1971,6 +2215,7 @@ impl AssetServerInner {
         for id in &dead_owners {
             self.retained.remove(id);
             self.owner_weaks.remove(id);
+            self.runtime_assets.remove(id);
             self.graph.remove_asset(*id);
         }
 
