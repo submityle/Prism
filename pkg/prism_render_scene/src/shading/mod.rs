@@ -71,7 +71,7 @@ pub(crate) use resources::ViewVisibilityBuffer;
 // water surface pass declares a byte-compatible second render target when
 // it writes its own screen-space motion over the pixels it covers (see
 // `water::surface_motion`).
-pub(crate) use resources::MOTION_VECTOR_FORMAT;
+pub(crate) use resources::{MOTION_VECTOR_FORMAT, REACTIVE_MASK_FORMAT};
 // Re-export the per-view reverse-Z Hi-Z "nearest depth" pyramid so the
 // transparent water surface pass can march it directly for screen-space
 // reflections (see `water::surface_ssr`), reusing the opaque prepass output.

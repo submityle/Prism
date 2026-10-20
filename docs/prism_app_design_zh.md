@@ -13,10 +13,10 @@
 
 - 版本: v0.3→v0.4（v0.3 及以前为设计阶段；v0.1→v0.2 新增第 24 章「AAA 高级功能增补」：插件依赖图与分组/系统与模块热重载/子应用流水线深化/运行模式(无头服务器/编辑器内嵌/专用服务器)/优雅生命周期/控制台变量(cvar)与配置级联/崩溃隔离与系统恢复/子状态与状态作用域实体/多窗口多世界；v0.2→v0.3 新增第 25 章「跨 crate 契约对齐」：主循环编排 time 帧节奏/VRR/帧预算/挂起恢复 + 向 tasks 车道喂预算 / 子应用流水线以 ECS 提取为边界·tasks 线程类分离为执行·transform 双缓冲保读一致 / 配置与 cvar 经 reflect 特性校验 / 多世界各持独立 time 时间域；v0.3→v0.4 进入实现，并把 §22/§23 从“全部 PLANNED、无代码”回写为与代码一致：M0–M3 机制、M4 窗口 Runner 与恢复路径、M5 确定性与回滚、第 24 章大部分已落地；网络传输层、生产网络拓扑以及部分原生窗口/GPU 验收仍待闭环，旧 Bevy 桥接层已退役）
 - 适用引擎: Prism（后 Bevy 时代，独立运行时）
-- 状态补记（2026-10-16 复核）: `trace` 阶段火焰图、`hot-reload` 配置热重载、`module-reload` 的受信任 dylib 系统热重载、`PieInstances` 多实例 PIE、`WinitRunner::with_windows` 多窗口、`SubApp` 独立 time 域、平台 suspend / low-memory 回调、`pipelined-tasks` 车道均已有代码路径；设备丢失检测、替换设备、渲染核心资源重建与资源重放也已有实现（`RenderRuntime::recover_if_lost` + `prism_render_app::recovery`）。旧 `prism_bevy` 桥接层已完成退役。当前本机证据显示：App 全特性测试 `477 passed`，headless parity 通过；`--locked` CPU pipeline acceptance 已验证 `output_parity=true`、`frame_sequence=true`，dedicated/task-lane overlap ratio 为 `0.996305` / `0.988263`，对应 frame P50/P95/P99 为 `1008333/1031625/1063375 ns` / `1015042/1364083/1398333 ns`。RenderApp 真实 Metal/wgpu 门禁为 `231 passed, 0 failed, 1 ignored`，WGPU backend 为 `27 + 5`，resident columns 为 `16 passed`，GPU-driven 为 `18 passed`，包括 material buffer device-loss recovery。网络传输层、真实 Winit 窗口/移动设备验收和跨机性能数据仍未闭环；详细命令见 `docs/prism_app_render_acceptance_zh.md`。
+- 状态补记（2026-10-20 复核）: `trace` 阶段火焰图、`module-reload` 的受信任 dylib 系统热重载、`PieInstances` 多实例 PIE、`WinitRunner::with_windows` 多窗口、`SubApp` 独立 time 域、平台 suspend / low-memory 回调、`pipelined-tasks` 车道均已有代码路径；旧应用层配置热重载 bridge 已删除，canonical settings watcher/transaction 接线仍按设置系统里程碑推进；设备丢失检测、替换设备、渲染核心资源重建与资源重放也已有实现（`RenderRuntime::recover_if_lost` + `prism_render_app::recovery`）。旧 `prism_bevy` 桥接层已完成退役。当前本机证据显示：本轮 `prism_app` 定向单测 `248 passed`、alloc-only 集成测试 `6 passed`、默认/全 feature/no-default-features 编译检查通过；跨平台窗口/移动设备验收和跨机性能数据仍未闭环；详细命令见 `docs/prism_app_render_acceptance_zh.md`。
 - 关键依赖: `prism_ecs`（World/Schedule/States）、`prism_tasks`（执行器/流水线）、`prism_time`（时钟/固定步长）、`prism_diagnostic`（可选）、`prism_reflect`（可选，配置/设置反射）
 - 层级定位: ECS 文档 L5「App / Plugin / 固定阶段」；**上层** `prism_loom_runtime_framework`（GameInstance/HUD/路由）跑在本层之上，不要混淆
-- 明确约束: 应用图(App graph/Plugin 注册)核心 `no_std + alloc` 可行；**Runner/主循环/帧节奏需 `std`**；`multi_thread` / `pipelined` / `winit` / `headless` / `determinism` / `reflect` / `trace` / `hot-reload` / `module-reload` 为 feature；**不依赖任何 `bevy_*` crate**
+- 明确约束: 应用图(App graph/Plugin 注册)核心 `no_std + alloc` 可行；**Runner/主循环/帧节奏需 `std`**；`multi_thread` / `pipelined` / `winit` / `determinism` / `reflect` / `trace` / `module-reload` 为 feature；**不依赖任何 `bevy_*` crate**
 
 ---
 
@@ -348,7 +348,7 @@ pkg/prism_app/
     settings.rs            # 分层配置（接 prism_reflect）
     determinism.rs         # 固定序 / 录制重放 / 回滚编排钩子
     diagnostics.rs         # 阶段火焰图 / 帧统计
-    features = ["std","multi_thread","pipelined","pipelined-tasks","winit","determinism","reflect","trace","hot-reload","module-reload"]
+    features = ["std","multi_thread","pipelined","pipelined-tasks","winit","determinism","reflect","trace","module-reload"]
 ```
 
 依赖：`prism_ecs`、`prism_tasks`、`prism_time`，可选 `prism_diagnostic`/`prism_reflect`。`HeadlessRunner` 是无窗口的默认 runner，不需要虚假的 `headless` feature；窗口/输入经插件注入，**不**在 Cargo 层硬依赖具体后端。**不碰任何 `bevy_*`。**
@@ -375,7 +375,7 @@ pkg/prism_app/
 - **M3 子应用 + 流水线**（✅ 机制；🚧 性能验收）：`sub_app` 的 extract 接线与 `pipelined` feature 已落地；渲染车道为**常驻单线程**（首帧惰性创建、逐帧经通道复用同一 worker，不每帧 `spawn`），保证提取语义与串行逐位等价。**`prism_tasks` 车道已接线**（`pipelined-tasks` feature）：可选 `TaskLane` 把每帧渲染作业投到 `prism_tasks` 工作窃取池（`App::enable_pipelined_rendering_with_task_pool`），管线跑在统一作业图上；两条车道共享同一 submit/collect 语义与等价性测试。2026-10-16 当前机器 `--locked` 合成 CPU workload 已形成一轮基线：dedicated/task-lane overlap ratio 为 `0.996959` / `0.994951`，frame P50/P95/P99 为 `622875/642292/658709 ns` / `621291/651000/687083 ns`，并保持 `output_parity=true`、`frame_sequence=true`。benchmark 现在支持显式 `PRISM_PIPELINE_MAX_FRAME_P99_NS` 与 `PRISM_PIPELINE_MIN_OVERLAP_RATIO` 门禁；本机用 `1500000 ns` / `0.90` 运行时 `performance_thresholds_passed=true`。这只闭合“当前机合成负载 + 显式门槛”切片；跨机稳定性能、真实游戏负载、GPU/present latency 和生产阈值仍未验收。
 - **M4 窗口 Runner + 生命周期**（✅ 机制；🚧 集成验收）：`lifecycle`/`exit`/`pacing`、`WinitRunner`、多窗口、带单调时间戳的 `SuspendEvent` 转发、平台 suspend / low-memory 回调和设备丢失通知均已落地。设备替换、渲染核心资源重建、资源重放和恢复期间跳过普通 Render schedule 的路径也已有实现。`prism_render_app::presentation` 已提供 `WindowRenderRequests` / `WindowRenderTargets`，每窗口独立 surface、color/depth target、present 与 pacing target；RenderApp 的 null/headless 与本机 Metal/wgpu 门禁已通过，当前仍待真实 Winit compositor、移动设备、其他后端和长时间运行验收，macOS 原生睡眠/唤醒真机演练未完成。
 - **M5 确定性 + 服务器**（🚧）：`determinism`（种子 RNG / 每帧状态哈希 / 逐固定步输入录放）、`DedicatedServerRunner`、`settings` 分层、基础 transport（memory/threaded/UDP）、有界多 Peer UDP demux、可靠通道、多路复用、回滚窗口协商和显式 PSK/AES-GCM security provider 已落地；UDP multi-peer 还提供了 bounded、经调用方授权后提交的 identity-preserving endpoint rebind（稳定 `UdpPeerId`、两阶段状态机、队列保留、冲突/过期 ticket 边界），但不宣称公网 path validation 或生产连接迁移；**world-snapshot 回滚已落地并接入 `App`/`SubApp`**（`rollback::SnapshotHistory` 复用 `prism_ecs` 的 `WorldSnapshot`/`SnapshotRing`，带上界环形历史、`try_capture` 缺 glue 上报、按帧回滚与逐帧状态哈希；`App`/`SubApp` 暴露 `init_snapshot_history` / `capture_snapshot` / `rollback_to`）；**late-input 回滚+重放环已落地**（`rollback_replay::RollbackReplay`：commit 记录快照+输入、rollback 还原到某帧并给出待重放输入序列、`reconcile` 用修正后的输入重放整段、重提交原地覆盖旧分支）；**对端同步编排已落地**（`peer_sync::reconcile_with_peer`：比对本地/对端逐帧帧哈希定位保留窗口内首个分歧帧、取对端权威输入驱动 `reconcile`，对端输入缺失或帧已淘汰则不动作并如实返回 `Unreconciled`）；**bounded scene/entity 生命周期桥接已落地**（`scene_world::SceneWorldReplication` 通过真实 `SceneSpawn` remap adopt 实体，并在 scene despawn 后幂等清除所有 replication mappings）；**bounded credential rotation 已落地**（`RingPskKeyringProvider` 支持 active/previous key overlap、显式 retire 和容量上限）。**仍待做**：QUIC/WebTransport、NAT/ICE/relay、生产级公网连接迁移/多 peer demux、跨机验收、真实服务器权威 ECS/AOI 接线，以及部署级身份/KMS/信任根和公网安全验收。
-- **M6 迁移/工具**（🚧）：`prelude`（贴近 `bevy_app`）、`diagnostics`（帧统计/启动耗时）、**阶段火焰图**（`trace` feature 的 `PhaseTrace`，逐帧逐阶段事件 + Chrome trace JSON 导出）、**配置热重载**（`hot-reload` feature 的 `ConfigHotReload`：文件哈希监视 + 逐帧经用户层重放）、**系统/模块热重载**（`module-reload` feature：受信任 dylib、稳定 system ID、ABI 校验、状态导出/迁移、帧边界自动轮询）与 **PIE 多实例**（`PieInstances`）均已有实现。旧 `prism_bevy` 桥接层已完成消费者审计并从 workspace 移除；M6 当前剩余的是跨平台/发行构建验证，而不是该桥接层退役。
+- **M6 迁移/工具**（🚧）：`prelude`（贴近 `bevy_app`）、`diagnostics`（帧统计/启动耗时）、**阶段火焰图**（`trace` feature 的 `PhaseTrace`，逐帧逐阶段事件 + Chrome trace JSON 导出）、**系统/模块热重载**（`module-reload` feature：受信任 dylib、稳定 system ID、ABI 校验、状态导出/迁移、帧边界自动轮询）与 **PIE 多实例**（`PieInstances`）均已有实现。旧应用层配置热重载桥接已删除；canonical settings watcher/transaction 接线仍属设置系统后续里程碑。旧 `prism_bevy` 桥接层已完成消费者审计并从 workspace 移除；M6 当前剩余的是跨平台/发行构建验证以及设置事务接线。
 
 **基准即规格**：每里程碑以微基准红绿为完成判据——空帧循环开销、固定步长在 jitter 输入下步数正确、流水线重叠率、无头与窗口行为对拍一致、确定性双跑帧哈希一致。核心价值集中在 **M2（确定性心跳）+ M3（流水线/提取）+ M5（确定性/服务器）**。**采集状态**：`prism_app` 已提供 `benches/frame_loop`（`harness = false`）；`runner_parity` 已有 `frames=128`、`fixed_steps=177`、`final_hash=e679c6d9b125aadd` 的无头/窗口对拍证据；M3 benchmark 已支持显式 P99/重叠率门禁，本机以 `1500000 ns` / `0.90` 运行时 `performance_thresholds_passed=true`。RenderApp 真实 Metal/wgpu 全量门禁为 `231 passed, 0 failed, 1 ignored`，WGPU backend、resident columns 与 GPU-driven 门禁也已在本机 Apple M2/Metal 通过。仍待补的是跨机稳定性能数字、真实游戏负载、GPU/present latency 和真实 Winit/移动设备场景；这些是验收证据缺口，不是相应 API 未实现。
 
@@ -384,7 +384,7 @@ pkg/prism_app/
 ## 23. 诚实边界与风险
 
 - 本文为设计规格。**截至 2026-10-16 代码已进入实现**：M0–M3 机制、M4 窗口 Runner/生命周期/设备恢复路径、M5 确定性+基础网络/回滚+重放+对端同步与第 24 章大部分已落地（见 §22 的状态标注），但**并非全部完成**——生产网络拓扑、真实窗口/移动设备与跨机验收仍缺；旧 `prism_bevy` 桥接层已完成退役。真实 Metal/wgpu GPU recovery 已通过本机全量门禁，剩余是其他平台/后端和更广泛集成证据，不应再把这些验收缺口写成机制“未实现”。
-- **feature 面已与当前 Cargo 契约对齐**：`std`/`multi_thread`（阶段内并行，接 `prism_ecs/multi_thread` 的冲突图执行器）/`pipelined`/`pipelined-tasks`/`determinism`/`winit`/`reflect`/`trace`/`hot-reload`/`module-reload` 均有对应实现；`HeadlessRunner` 是无窗口的默认 runner，因此不另造空的 `headless` feature。
+- **feature 面已与当前 Cargo 契约对齐**：`std`/`multi_thread`（阶段内并行，接 `prism_ecs/multi_thread` 的冲突图执行器）/`pipelined`/`pipelined-tasks`/`determinism`/`winit`/`reflect`/`trace`/`module-reload` 均有对应实现；`HeadlessRunner` 是无窗口的默认 runner，因此不另造空的 `headless` feature。
 - **高风险项**：
   1. **extract 管线 + 流水线并行（M3）**：当前以 `ExtractFn` 作为跨 World 单向接缝，并已有串行/并行等价路径；剩余风险是大负载下的重叠率、尾延迟和跨线程生命周期验收，而不是缺少提取实现。这是 `prism_render_scene` 能否干净脱 Bevy 的决定性接缝。
   2. **固定步长熔断（M2）**：死亡螺旋参数（max_frame_dt/max_substeps）需按内容压测标定，错配会在卡顿时放大为慢放或卡死。
@@ -416,7 +416,7 @@ pkg/prism_app/
 - **资产/配置热重载**:接 `prism_asset` 文件监视,改 shader/材质/配置即时生效。
 - 热重载仅开发档启用;发行档静态链接零成本。
 
-当前实现状态：`module-reload` feature 已提供受信任 cdylib 的 ABI/稳定 system ID 校验、状态导出与 `ReflectStateContract` 迁移、旧 Schedule 绑定保留及 App 帧边界自动轮询；`hot-reload` feature 已提供配置文件哈希监视和 User 层重放，资产侧热重载由 `prism_asset` 的 watch/reload 路径承载。仍需单独验收的是跨平台动态库/资产/配置联调和发行构建门禁；这不是“系统/模块热重载未实现”。
+当前实现状态：`module-reload` feature 已提供受信任 cdylib 的 ABI/稳定 system ID 校验、状态导出与 `ReflectStateContract` 迁移、旧 Schedule 绑定保留及 App 帧边界自动轮询；旧应用层配置热重载已删除，设置文件监视需通过 `prism_settings_io` 的 canonical candidate snapshot/transaction 路径接入。仍需单独验收的是跨平台动态库/资产/配置联调和发行构建门禁；这不是“系统/模块热重载未实现”。
 
 ### 24.3 子应用流水线深化（Sub-App Pipelining）
 
@@ -513,7 +513,7 @@ App 配置分层（§14）与 cvar（§24.6）的读写/校验**委托 `prism_re
 - cvar/配置字段的范围钳制、默认值、改名兼容走 `prism_reflect` 的 `#[reflect(...)]` 元数据（`clamp`/`default`/`rename`）。
 - 命令行/文件/运行时的级联覆盖经 reflect 类型化反序列化，非法输入按安全边界（reflect §24.8）拒绝而非崩溃。
 
-当前实现状态：`reflect_config::cvar_specs_from_metadata` / `App::register_reflected_cvars` 已从 `prism_reflect` 的 `#[reflect(...)]` 字段元数据派生 cvar 规格，覆盖 `default`、`range`/`clamp`、`rename`、分类、只读和跳过规则；命令式 `CvarSpec` 注册仍作为显式路径保留。此前“仅有命令式路径、reflect 属性来源未实现”的描述已过期。
+当前实现状态：旧 `reflect_config` / `CvarSpec` bridge 已删除。设置 schema、默认值、约束和来源元数据由 `prism_settings::SettingDef` / `SettingsRegistry` 持有；`prism_reflect` 到 canonical schema 的派生桥尚未接入，属于设置系统 M1 的未闭合项。
 
 ### 25.4 多世界各持独立 time 时间域
 
@@ -521,4 +521,4 @@ App 多世界（§24.9）与 ECS 多 World（ECS §16）协同时，每个 World
 
 ### 25.5 诚实边界
 
-本章为跨 crate 契约对齐说明，**25.1–25.4 的机制均已有实现路径**：25.1 主循环编排 `prism_time`（`time`/`fixed`/`pacing` 已接线）、25.2 `sub_app` 的 ECS 提取边界与 `pipelined` 执行已落地、25.3 配置的 `prism_reflect` 范围钳制/校验/元数据派生、别名与类型化级联已落地、25.4 `SubApp` 独立时间域已落地。25.3 同时保留显式 `CvarSpec` 注册和 `#[reflect(...)]` 元数据派生两条路径；非法输入按安全边界拒绝而非崩溃。当前缺口是这些契约在真实多窗口/GPU、跨平台和性能负载中的集成验收证据，不是 25.3 的 reflect 属性来源未实现。落地时序：25.1 随 M2 主循环/平台接线；25.2 随 M3 渲染子应用；25.3 随 M1 配置/编辑器；25.4 随多世界接线。App 是地基运行时编排者，更高层游戏流程编排仍归 `prism_loom_runtime_framework`。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码；仅借鉴公开架构形态与经典数值。
+本章为跨 crate 契约对齐说明，**25.1–25.2、25.4 的机制已有实现路径，25.3 正在迁移**：25.1 主循环编排 `prism_time`（`time`/`fixed`/`pacing` 已接线）、25.2 `sub_app` 的 ECS 提取边界与 `pipelined` 执行已落地、25.3 的 canonical `prism_settings` runtime 已接入但 reflect 派生、控制台、事务与持久化尚未完整接线、25.4 `SubApp` 独立时间域已落地。非法输入由 canonical schema/resolver 拒绝而非崩溃。落地时序：25.1 随 M2 主循环/平台接线；25.2 随 M3 渲染子应用；25.3 随设置 M1–M3；25.4 随多世界接线。App 是地基运行时编排者，更高层游戏流程编排仍归 `prism_loom_runtime_framework`。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码；仅借鉴公开架构形态与经典数值。

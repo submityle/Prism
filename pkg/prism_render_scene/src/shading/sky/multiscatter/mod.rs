@@ -10,4 +10,5 @@ pub(crate) use bind_groups::prepare_sky_multiscatter_bind_group;
 pub(crate) use dispatch::sky_multiscatter_lut_pass;
 pub(crate) use pipeline::init_sky_multiscatter_pipeline;
 pub(crate) use resources::init_sky_multiscatter_lut;
+pub(crate) use resources::SkyMultiscatterGeneration;
 pub(crate) use resources::SkyMultiscatterLut;

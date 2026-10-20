@@ -908,6 +908,127 @@ mod conformance {
         sum
     }
 
+    /// Deterministic multiple-importance estimate of the same white-furnace
+    /// integral. Half of the samples follow the GGX NDF and half follow a
+    /// cosine hemisphere. The mixture resolves near-mirror highlights without
+    /// losing the broad multiscatter compensation term.
+    fn furnace_albedo_mis(
+        surface: SurfaceSample,
+        view: [f32; 3],
+        sample_count_per_technique: u32,
+    ) -> [f32; 3] {
+        fn radical_inverse_vdc(bits: u32) -> f32 {
+            let reversed = bits.reverse_bits();
+            (reversed as f64 * (1.0 / 4_294_967_296.0)) as f32
+        }
+
+        fn normalize(v: [f32; 3]) -> [f32; 3] {
+            let length = ops::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+            [v[0] / length, v[1] / length, v[2] / length]
+        }
+
+        fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
+            a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+        }
+
+        fn ggx_half_vector(u1: f32, u2: f32, alpha: f32) -> [f32; 3] {
+            let phi = 2.0 * PI * u1;
+            let alpha_sq = alpha * alpha;
+            let cos_theta = ops::sqrt(
+                ((1.0 - u2) / (1.0 + (alpha_sq - 1.0) * u2)).clamp(0.0, 1.0),
+            );
+            let sin_theta = ops::sqrt((1.0 - cos_theta * cos_theta).max(0.0));
+            [
+                sin_theta * ops::cos(phi),
+                cos_theta,
+                sin_theta * ops::sin(phi),
+            ]
+        }
+
+        fn cosine_direction(u1: f32, u2: f32) -> [f32; 3] {
+            let radius = ops::sqrt(u1);
+            let phi = 2.0 * PI * u2;
+            [
+                radius * ops::cos(phi),
+                ops::sqrt((1.0 - u1).max(0.0)),
+                radius * ops::sin(phi),
+            ]
+        }
+
+        assert!(sample_count_per_technique > 0);
+        let n = [0.0_f32, 1.0, 0.0];
+        let v = normalize(view);
+        let frame = ShadingFrame {
+            normal: n,
+            view: v,
+            tangent: [1.0, 0.0, 0.0],
+            bitangent: [0.0, 0.0, -1.0],
+        };
+        let roughness = surface.perceptual_roughness.clamp(0.045, 1.0);
+        let alpha = roughness * roughness;
+        let mut sum = [0.0_f64; 3];
+
+        for technique in 0..2_u32 {
+            for index in 0..sample_count_per_technique {
+                let u1 = (index as f32 + 0.5) / sample_count_per_technique as f32;
+                let u2 = radical_inverse_vdc(index);
+                let l = if technique == 0 {
+                    let h = ggx_half_vector(u1, u2, alpha);
+                    let v_dot_h = dot(v, h);
+                    if v_dot_h <= 0.0 {
+                        continue;
+                    }
+                    normalize([
+                        2.0 * v_dot_h * h[0] - v[0],
+                        2.0 * v_dot_h * h[1] - v[1],
+                        2.0 * v_dot_h * h[2] - v[2],
+                    ])
+                } else {
+                    cosine_direction(u1, u2)
+                };
+                let n_dot_l = l[1];
+                if n_dot_l <= 0.0 {
+                    continue;
+                }
+                let h = normalize([v[0] + l[0], v[1] + l[1], v[2] + l[2]]);
+                let n_dot_h = h[1].max(0.0);
+                let v_dot_h = dot(v, h).max(1.0e-8);
+                // The PDF must match the exact inverse-CDF sampler above. The
+                // production evaluator deliberately floors its denominator for
+                // finite shader arithmetic; reusing that clamped value here
+                // would no longer integrate to one for a near-mirror lobe.
+                let alpha_sq = alpha * alpha;
+                let denominator = n_dot_h * n_dot_h * (alpha_sq - 1.0) + 1.0;
+                let d = alpha_sq / (PI * denominator * denominator);
+                let ggx_pdf = d * n_dot_h / (4.0 * v_dot_h);
+                let cosine_pdf = n_dot_l / PI;
+                let mixture_pdf = 0.5 * (ggx_pdf + cosine_pdf);
+                if !mixture_pdf.is_finite() || mixture_pdf <= 0.0 {
+                    continue;
+                }
+                let radiance = evaluate_principled_direct(
+                    surface,
+                    frame,
+                    DirectLightSample {
+                        direction: l,
+                        illuminance: [1.0; 3],
+                        visibility: 1.0,
+                    },
+                );
+                for c in 0..3 {
+                    sum[c] += f64::from(radiance[c] / mixture_pdf);
+                }
+            }
+        }
+
+        let denominator = f64::from(2 * sample_count_per_technique);
+        [
+            (sum[0] / denominator) as f32,
+            (sum[1] / denominator) as f32,
+            (sum[2] / denominator) as f32,
+        ]
+    }
+
     /// `OpenPBR` §*Testing*: the specification lists the configurations in which
     /// a **white furnace test** must pass (directional albedo → 1 under a unit
     /// uniform environment). This is the energy-conservation half of the
@@ -963,12 +1084,6 @@ mod conformance {
             specular_weight: 0.0,
             ..Default::default()
         };
-        // The `metal(0.1)` configuration is omitted: a near-mirror GGX lobe is
-        // narrower than any affordable uniform hemisphere grid can resolve (the
-        // probe in `print_furnace_convergence` shows 0.72 at 384² rising to 1.01
-        // at 768²), so measuring it needs importance sampling, not quadrature.
-        // It stays covered by the shader's bounded-invariant test and by
-        // `gi::env_brdf::multiscatter::direct_white_furnace_single_plus_multi_is_one`.
         // With the dielectric interface present the diffuse *coupling* is under
         // test as well, which is the invariant the `1 − F(v·h)` weight used to
         // break at grazing (it measured 1.12).
@@ -1068,6 +1183,21 @@ mod conformance {
                 if err > worst.0 {
                     worst = (err, format!("{name} @ view {view:?}: {albedo:?}"));
                 }
+            }
+        }
+        // The specification's smooth-metal configuration is too narrow for the
+        // uniform grid above. Exercise the production evaluator with a balanced
+        // GGX/cosine MIS estimator so both the sharp single-scatter peak and the
+        // broad multiscatter compensation are measured by the same gate.
+        for view in [[0.0_f32, 1.0, 0.0], [0.6, 0.8, 0.0], [0.95, 0.31, 0.0]] {
+            let albedo = furnace_albedo_mis(metal(0.1), view, 32_768);
+            let mean = (albedo[0] + albedo[1] + albedo[2]) / 3.0;
+            let err = (mean - 1.0).abs();
+            if err > worst.0 {
+                worst = (
+                    err,
+                    format!("metal, smooth (roughness=0.1) @ view {view:?}: {albedo:?}"),
+                );
             }
         }
         // The Subsurface class's own white furnace.

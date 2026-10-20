@@ -140,7 +140,7 @@ pub(crate) fn coat_modulated_darkening(coat_weight: f32, coat_darkening: f32, de
 /// implementation; Prism uses the arithmetic mean of the linear RGB channels,
 /// which is exactly mirrorable in WESL.
 #[inline]
-fn base_normal_albedo(base_color: [f32; 3]) -> f32 {
+pub(crate) fn base_normal_albedo(base_color: [f32; 3]) -> f32 {
     ((base_color[0] + base_color[1] + base_color[2]) / 3.0).clamp(0.0, 1.0)
 }
 

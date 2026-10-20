@@ -11,6 +11,7 @@ publish = false
 prism_ecs = { path = "../prism_ecs", default-features = false }
 prism_time = { path = "../prism_time", default-features = false }
 prism_platform = { path = "../prism_platform", default-features = false }
+prism_settings = { path = "../prism_settings", default-features = false }
 hashbrown = { version = "0.15", default-features = false, features = ["default-hasher", "inline-more"] }
 libm = "0.2"
 libloading = { version = "0.8.9", optional = true }
@@ -76,11 +77,6 @@ reflect = ["std", "dep:prism_reflect"]
 # phase log with a Chrome-trace JSON dump. std-only (wall-clock timing), off by
 # default so an un-observed build pays nothing.
 trace = ["std"]
-
-# Dev-time configuration hot-reload (design §24.2): re-apply a config file
-# through the `User` cascade layer whenever its contents change. std-only (file
-# I/O); off by default so a shipped build pays nothing.
-hot-reload = ["std"]
 
 # Native module reload requires dynamic libraries and host synchronization.
 module-reload = ["std", "dep:libloading", "reflect"]

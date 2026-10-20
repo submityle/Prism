@@ -27,8 +27,7 @@
 //!   "特性探测装配：按 capability 在装配期选择 system 集/子应用拓扑") and the
 //!   [`RunMode`](crate::run_mode::RunMode) default selection can read them.
 //! * [`QualityTier`] is the natural source of the
-//!   [`PlatformTier`](crate::settings::SettingsLayer::PlatformTier) settings
-//!   layer (design §14 "平台档位（quality tier）").
+//!   platform settings source (design §14 "平台档位（quality tier）").
 //!
 //! # Honesty of the display probe
 //!

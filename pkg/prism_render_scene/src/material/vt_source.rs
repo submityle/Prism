@@ -273,6 +273,10 @@ pub struct MaterialVtSourceIdentity {
 }
 
 impl MaterialVtSourceIdentity {
+    pub(crate) const fn new(asset_id: AssetId<Image>, revision: u64) -> Self {
+        Self { asset_id, revision }
+    }
+
     /// The main-world image asset id.
     #[must_use]
     pub const fn asset_id(self) -> AssetId<Image> {
@@ -469,6 +473,50 @@ impl MaterialVtSourceChangeQueue {
 
     pub(crate) fn take(&mut self) -> HashSet<AssetId<Image>> {
         core::mem::take(&mut self.images)
+    }
+}
+
+/// Exact source revisions represented by the completion-published active
+/// material-VT GPU slice.
+///
+/// A CPU snapshot becoming available is not sufficient to advertise VT in a
+/// material row. The producer first uploads a bundle to the inactive slice,
+/// waits for its real queue completion proof, flips that slice active, and
+/// only then replaces this revision set. Material lowering requires an exact
+/// identity match; any source modification therefore forces direct fallback
+/// until the matching publication completes.
+#[derive(Resource, Debug, Default)]
+pub(crate) struct MaterialVtActivePublication {
+    revisions: HashMap<AssetId<Image>, u64>,
+}
+
+impl MaterialVtActivePublication {
+    /// Returns whether the active GPU slice was built from this exact source
+    /// identity.
+    #[must_use]
+    pub(crate) fn contains(&self, identity: MaterialVtSourceIdentity) -> bool {
+        self.revisions.get(&identity.asset_id()).copied() == Some(identity.revision())
+    }
+
+    /// Atomically replaces the source-revision set after the GPU bundle's
+    /// active-slice flip and returns every image whose publication changed.
+    /// Those images must have their referencing material rows republished.
+    pub(crate) fn replace(
+        &mut self,
+        identities: impl IntoIterator<Item = MaterialVtSourceIdentity>,
+    ) -> Vec<AssetId<Image>> {
+        let next: HashMap<_, _> = identities
+            .into_iter()
+            .map(|identity| (identity.asset_id(), identity.revision()))
+            .collect();
+        let mut changed: HashSet<AssetId<Image>> = HashSet::default();
+        for image in self.revisions.keys().chain(next.keys()) {
+            if self.revisions.get(image) != next.get(image) {
+                changed.insert(*image);
+            }
+        }
+        self.revisions = next;
+        changed.into_iter().collect()
     }
 }
 
@@ -1001,6 +1049,35 @@ mod tests {
                 panic!("modified valid source should be available")
             }
         }
+    }
+
+    #[test]
+    fn active_publication_matches_exact_revisions_and_reports_set_changes() {
+        let first_id = image_id(0xF1);
+        let second_id = image_id(0xF2);
+        let mut registry = MaterialVtSourceRegistry::default();
+        let first_v1 = registry.upsert_from_image(first_id, &image_4x4_complete(1), config());
+        let second_v1 = registry.upsert_from_image(second_id, &image_4x4_complete(2), config());
+        let mut publication = MaterialVtActivePublication::default();
+
+        let changed: HashSet<_> = publication
+            .replace([first_v1, second_v1])
+            .into_iter()
+            .collect();
+        assert_eq!(changed, HashSet::from_iter([first_id, second_id]));
+        assert!(publication.contains(first_v1));
+        assert!(publication.contains(second_v1));
+        assert!(publication.replace([first_v1, second_v1]).is_empty());
+
+        let first_v2 = registry.upsert_from_image(first_id, &image_4x4_complete(3), config());
+        assert!(publication.contains(first_v1));
+        assert!(!publication.contains(first_v2));
+
+        let changed: HashSet<_> = publication.replace([first_v2]).into_iter().collect();
+        assert_eq!(changed, HashSet::from_iter([first_id, second_id]));
+        assert!(publication.contains(first_v2));
+        assert!(!publication.contains(first_v1));
+        assert!(!publication.contains(second_v1));
     }
 
     #[test]

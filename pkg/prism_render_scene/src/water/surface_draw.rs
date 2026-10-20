@@ -244,6 +244,43 @@ pub(crate) fn draw_water_surface(
             index_count: draw.grid.index_count(),
         });
     }
+
+    // The opaque resolve does not write a reactive value. Clear the dedicated
+    // mask once per frame before any transparent producer can overwrite its
+    // covered pixels, including the no-water case.
+    {
+        let color = target.get_color_attachment();
+        let motion_attachment = RenderPassColorAttachment {
+            view: visibility.motion_vectors_view(),
+            depth_slice: None,
+            resolve_target: None,
+            ops: Operations {
+                load: LoadOp::Load,
+                store: StoreOp::Store,
+            },
+        };
+        let reactive_attachment = RenderPassColorAttachment {
+            view: visibility.reactive_mask_view(),
+            depth_slice: None,
+            resolve_target: None,
+            ops: Operations {
+                load: LoadOp::Clear(wgpu_types::Color::BLACK),
+                store: StoreOp::Store,
+            },
+        };
+        let _pass = ctx.begin_tracked_render_pass(RenderPassDescriptor {
+            label: Some("prism TAA reactive clear"),
+            color_attachments: &[
+                Some(color),
+                Some(motion_attachment),
+                Some(reactive_attachment),
+            ],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+    }
     if prepared.is_empty() {
         return;
     }
@@ -469,10 +506,23 @@ pub(crate) fn draw_water_surface(
             store: StoreOp::Store,
         },
     };
+    let reactive_attachment = RenderPassColorAttachment {
+        view: visibility.reactive_mask_view(),
+        depth_slice: None,
+        resolve_target: None,
+        ops: Operations {
+            load: LoadOp::Load,
+            store: StoreOp::Store,
+        },
+    };
     {
         let mut pass = ctx.begin_tracked_render_pass(RenderPassDescriptor {
             label: Some("prism water surface"),
-            color_attachments: &[Some(color), Some(motion_attachment)],
+            color_attachments: &[
+                Some(color),
+                Some(motion_attachment),
+                Some(reactive_attachment),
+            ],
             depth_stencil_attachment: Some(depth.get_attachment(StoreOp::Store)),
             timestamp_writes: None,
             occlusion_query_set: None,

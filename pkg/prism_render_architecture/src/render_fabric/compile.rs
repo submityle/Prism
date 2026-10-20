@@ -2,6 +2,7 @@
 //! to `GpuFrameGraphBuilder`, including the producer-first declaration ordering.
 use super::*;
 use crate::frame_graph::*;
+use crate::gpu_scene::SceneHandle;
 use alloc::{
     collections::{BTreeMap, BTreeSet},
     format,
@@ -69,6 +70,12 @@ pub enum FabricCompileError {
     PayloadNotReferenced(ResourceKey),
     PayloadLayoutMismatch(ResourceKey),
     PayloadDomainMismatch(ResourceKey),
+    DuplicatePayloadRole {
+        scene: SceneHandle,
+        domain: RenderDomain,
+        history_key: u32,
+        role: PayloadRole,
+    },
     Graph(CompileError),
 }
 
@@ -544,8 +551,36 @@ impl<'a> ResourceTemplates<'a> {
         for (index, barrier) in compiled.barriers.iter().enumerate() {
             compiled.barriers_by_destination[barrier.destination.0 as usize].push(index);
         }
+        // Index current-frame domain accesses once. Frame items can number in
+        // the millions; rescanning every selected pass per item is unnecessary.
+        let payload_accesses: BTreeSet<_> = compiled
+            .passes
+            .iter()
+            .filter_map(|pass| pass.domain().map(|domain| (pass, domain)))
+            .flat_map(|(pass, domain)| {
+                pass.accesses()
+                    .iter()
+                    .filter(|access| access.frame == frame)
+                    .map(move |access| (access.declaration.key, domain as u32))
+            })
+            .collect();
+        let mut payload_roles = BTreeSet::new();
         for item in items {
-            self.validate_payload(&compiled, item)?;
+            let identity = (
+                item.scene_handle,
+                item.domain as u32,
+                item.history_key,
+                item.payload_role(),
+            );
+            if !payload_roles.insert(identity) {
+                return Err(FabricCompileError::DuplicatePayloadRole {
+                    scene: item.scene_handle,
+                    domain: item.domain,
+                    history_key: item.history_key,
+                    role: item.payload_role(),
+                });
+            }
+            self.validate_payload(&compiled, &payload_accesses, item)?;
         }
         compiled.items.extend_from_slice(items);
         Ok(compiled)
@@ -554,20 +589,13 @@ impl<'a> ResourceTemplates<'a> {
     fn validate_payload(
         &self,
         graph: &CompiledFeatureGraph,
+        accesses: &BTreeSet<(ResourceKey, u32)>,
         item: &FrameRenderItem,
     ) -> Result<(), FabricCompileError> {
         if let DomainPayload::Resource(payload) = item.payload {
             // A current-frame domain payload must actually occur in a pass, not
             // merely be present in the resource declaration table/history map.
-            let id = graph
-                .resource_id(payload.resource, graph.frame)
-                .ok_or(FabricCompileError::PayloadNotReferenced(payload.resource))?;
-            if !graph.passes.iter().any(|pass| {
-                pass.descriptor
-                    .accesses
-                    .iter()
-                    .any(|access| access.resource == id)
-            }) {
+            if graph.resource_id(payload.resource, graph.frame).is_none() {
                 return Err(FabricCompileError::PayloadNotReferenced(payload.resource));
             }
             let template = *self
@@ -586,6 +614,9 @@ impl<'a> ResourceTemplates<'a> {
                 && domain != item.domain
             {
                 return Err(FabricCompileError::PayloadDomainMismatch(payload.resource));
+            }
+            if !accesses.contains(&(payload.resource, item.domain as u32)) {
+                return Err(FabricCompileError::PayloadNotReferenced(payload.resource));
             }
         }
         Ok(())

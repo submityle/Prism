@@ -219,6 +219,37 @@ fn production_principled_brdf_consumes_clearcoat_normal_and_tangent() {
     }
 }
 
+#[test]
+fn production_principled_brdf_consumes_coat_darkening_once_on_the_base() {
+    let brdf = include_str!("../../shaders/brdf.wesl");
+    let principled = brdf
+        .split_once("fn principled_direct_channels_with(")
+        .map(|(_, body)| body)
+        .expect("production principled function must exist");
+    for marker in [
+        "surface.coat_darkening",
+        "brdf_coat_modulated_darkening(",
+        "let coat_base_attenuation = coat_attenuation * coat_darkening;",
+        "base * (coat_base_attenuation * (1.0 - transmission))",
+        "transmission_term = transmission_term * coat_darkening;",
+    ] {
+        assert!(
+            principled.contains(marker),
+            "production principled path does not consume {marker}"
+        );
+    }
+    assert!(
+        !principled.contains("coat_specular * coat_darkening")
+            && !principled.contains("coat_specular * coat_base_attenuation"),
+        "coat darkening must attenuate the base, not the coat reflection"
+    );
+    assert_eq!(
+        principled.matches("brdf_coat_modulated_darkening(").count(),
+        1,
+        "the production path must apply coat darkening at exactly one coupling site"
+    );
+}
+
 /// Registers `lighting.wesl`, `brdf.wesl` and `cloth.wesl` under their canonical
 /// module paths and compiles `cloth.wesl`, forcing the importer to resolve the
 /// `prism_render_scene::shaders::{lighting, brdf}::{...}` imports the cloth lobe

@@ -165,14 +165,13 @@ pub fn load_with_backup(
                 recovered_from_backup: false,
                 primary_error: None,
             }),
-            Err(error) => recover_backup(path, backup, registry, error.to_string()),
+            Err(error) => recover_backup(backup, registry, error.to_string()),
         },
-        Err(error) => recover_backup(path, backup, registry, error.to_string()),
+        Err(error) => recover_backup(backup, registry, error.to_string()),
     }
 }
 
 fn recover_backup(
-    path: &Path,
     backup: Option<impl AsRef<Path>>,
     registry: Option<&SettingsRegistry>,
     primary: String,
@@ -188,10 +187,7 @@ fn recover_backup(
             Ok(document) => Ok(LoadOutcome {
                 document,
                 recovered_from_backup: true,
-                primary_error: Some(format!(
-                    "{}: primary unavailable or invalid",
-                    path.display()
-                )),
+                primary_error: Some(primary),
             }),
             Err(error) => Err(StoreError::Recovery {
                 primary,
@@ -258,6 +254,10 @@ mod tests {
         std::fs::write(&path, "not valid toml = [").unwrap();
         let recovered = load_with_backup(&path, Some(&backup), None).unwrap();
         assert!(recovered.recovered_from_backup);
+        assert!(recovered
+            .primary_error
+            .as_deref()
+            .is_some_and(|error| error.contains("not valid toml")));
         assert_eq!(recovered.document, first);
     }
 

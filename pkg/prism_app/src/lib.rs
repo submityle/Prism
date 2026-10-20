@@ -225,7 +225,6 @@ pub mod budget;
 pub mod capability;
 #[cfg(feature = "std")]
 pub mod crash;
-pub mod cvar;
 #[cfg(feature = "determinism")]
 pub mod determinism;
 #[cfg(feature = "std")]
@@ -236,8 +235,6 @@ pub mod exit;
 pub mod fixed;
 #[cfg(feature = "std")]
 pub mod frame;
-#[cfg(feature = "hot-reload")]
-pub mod hot_reload;
 pub mod lifecycle;
 #[cfg(feature = "module-reload")]
 pub mod module_reload;
@@ -255,15 +252,13 @@ pub mod plugin;
 pub mod plugin_graph;
 pub mod plugin_group;
 pub mod presentation;
-#[cfg(feature = "reflect")]
-pub mod reflect_config;
 pub mod rollback;
 #[cfg(feature = "determinism")]
 pub mod rollback_replay;
 pub mod run_mode;
 pub mod runner;
 pub mod schedule;
-pub mod settings;
+pub mod settings_runtime;
 pub mod state;
 pub mod sub_app;
 pub mod sub_app_label;
@@ -284,11 +279,6 @@ pub use budget::{FrameScheduleBudget, TaskBudgetSnapshot};
 pub use capability::{Capabilities, QualityTier};
 #[cfg(feature = "std")]
 pub use crash::{CrashReport, CrashReporter, CrashSink, CrashSnapshot};
-pub use cvar::{
-    ConsoleOutcome, Cvar, CvarBounds, CvarCategory, CvarChanged, CvarCliApplied, CvarCliRejection,
-    CvarCliReport, CvarError, CvarFlags, CvarListing, CvarRegistry, CvarSetOutcome, CvarSpec,
-    ValidatedWrite,
-};
 #[cfg(feature = "determinism")]
 pub use determinism::{
     DeterministicRng, FrameHash, FrameHashManifest, HashDivergence, InputRecording, RecordedInput,
@@ -324,11 +314,6 @@ pub use platform_tier::PlatformTierProfile;
 pub use plugin::{Plugin, PluginDependency};
 pub use plugin_graph::PluginGraphError;
 pub use plugin_group::{PluginGroup, PluginGroupBuilder};
-#[cfg(feature = "reflect")]
-pub use reflect_config::{
-    clamp_and_validate, cvar_specs_for, cvar_specs_from_metadata, cvar_specs_from_registration,
-    schema_for, ReflectConfigError,
-};
 pub use rollback::SnapshotHistory;
 #[cfg(feature = "determinism")]
 pub use rollback_replay::{EcsRollbackError, EcsRollbackReplay, RollbackReplay};
@@ -342,7 +327,7 @@ pub use schedule::{
     ExitConfirmation, First, Last, PostStartup, PostUpdate, PreStartup, PreUpdate, Shutdown,
     Startup, StateTransition, Update,
 };
-pub use settings::{SettingChange, SettingChanged, SettingValue, Settings, SettingsLayer};
+pub use settings_runtime::SettingsRuntime;
 pub use state::{
     ComputeDepth, ComputedStates, OnTransition, StateScoped, StateTransitionSet, SubStates,
 };
@@ -366,11 +351,6 @@ pub mod prelude {
     pub use crate::capability::{Capabilities, QualityTier};
     #[cfg(feature = "std")]
     pub use crate::crash::{CrashReport, CrashReporter, CrashSink, CrashSnapshot};
-    pub use crate::cvar::{
-        ConsoleOutcome, Cvar, CvarBounds, CvarCategory, CvarChanged, CvarCliApplied,
-        CvarCliRejection, CvarCliReport, CvarError, CvarFlags, CvarListing, CvarRegistry,
-        CvarSetOutcome, CvarSpec, ValidatedWrite,
-    };
     #[cfg(feature = "determinism")]
     pub use crate::determinism::{
         DeterministicRng, FrameHash, FrameHashManifest, HashDivergence, InputRecording,
@@ -385,8 +365,6 @@ pub mod prelude {
         AfterFixedMainLoop, BeforeFixedMainLoop, FixedFirst, FixedLast, FixedPostUpdate,
         FixedPreUpdate, FixedUpdate,
     };
-    #[cfg(feature = "hot-reload")]
-    pub use crate::hot_reload::{ConfigHotReload, ReloadOutcome};
     pub use crate::lifecycle::{
         AppLifecycle, DeviceLost, DeviceRestored, FocusChanged, LowMemory, Resumed,
         SuspendResumeAdapter, SuspendResumeReport, Suspended, WillRenderFirstFrame,
@@ -407,11 +385,6 @@ pub mod prelude {
     pub use crate::plugin::{Plugin, PluginDependency};
     pub use crate::plugin_graph::PluginGraphError;
     pub use crate::plugin_group::{PluginGroup, PluginGroupBuilder};
-    #[cfg(feature = "reflect")]
-    pub use crate::reflect_config::{
-        clamp_and_validate, cvar_specs_for, cvar_specs_from_metadata, cvar_specs_from_registration,
-        schema_for, ReflectConfigError,
-    };
     pub use crate::run_mode::RunMode;
     #[cfg(feature = "std")]
     pub use crate::runner::{DedicatedServerRunner, ServerTickDiagnostics};
@@ -420,9 +393,7 @@ pub mod prelude {
         ExitConfirmation, First, Last, PostStartup, PostUpdate, PreStartup, PreUpdate, Shutdown,
         Startup, StateTransition, Update,
     };
-    pub use crate::settings::{
-        SettingChange, SettingChanged, SettingValue, Settings, SettingsLayer,
-    };
+    pub use crate::settings_runtime::SettingsRuntime;
     pub use crate::state::{
         ComputeDepth, ComputedStates, OnTransition, StateScoped, StateTransitionSet, SubStates,
     };

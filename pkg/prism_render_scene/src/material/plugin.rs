@@ -16,7 +16,8 @@ use super::{
     },
     vt_producer::{prepare_material_virtual_texture, MaterialVtProducer},
     vt_source::{
-        MaterialVtMaterialSourceQueries, MaterialVtSourceChangeQueue, MaterialVtSourceRegistry,
+        MaterialVtActivePublication, MaterialVtMaterialSourceQueries, MaterialVtSourceChangeQueue,
+        MaterialVtSourceRegistry,
     },
 };
 use crate::shading::texel_cache::ShadeDemandRegistry;
@@ -46,6 +47,7 @@ impl Plugin for PrismMaterialPlugin {
             .init_resource::<RenderMaterialRegistry>()
             .init_resource::<MaterialVtSourceRegistry>()
             .init_resource::<MaterialVtSourceChangeQueue>()
+            .init_resource::<MaterialVtActivePublication>()
             .init_resource::<MaterialVtMaterialSourceQueries>()
             .init_resource::<MaterialVtProducer>()
             .init_resource::<MaterialVtDemandRegistry>()

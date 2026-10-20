@@ -2,7 +2,7 @@
 
 use prism_ecs::prelude::{Res, ResMut, SystemParam};
 use prism_ecs::world::World;
-use prism_render_architecture::lighting::contract::JournalSnapshot;
+use prism_render_architecture::lighting::contract::{GiCandidateSource, JournalSnapshot};
 use prism_render_driver::{FrameSync, Instance};
 
 use crate::frame;
@@ -231,9 +231,7 @@ pub(crate) fn execute_frame<I>(
     let trace_device: std::sync::Arc<dyn prism_render_driver::RenderDevice + Send + Sync> =
         runtime.device_handle();
     let trace = trace_gpu.prepare(
-        plan.plan
-            .recipes
-            .contains(&prism_render_architecture::lighting::contract::RecipeId::WorldRestir)
+        (plan.plan.candidate_source == GiCandidateSource::SoftwareBvhGpu)
             .then_some(inputs.trace_scene.as_ref())
             .flatten(),
         &inputs.surfaces,
@@ -245,6 +243,14 @@ pub(crate) fn execute_frame<I>(
             .filter(|pass| pass.run_gi)
             .map(crate::lighting_gpu::LightingGpuPass::gi_candidate_target),
     );
+    if plan.plan.candidate_source == GiCandidateSource::SoftwareBvhGpu
+        && lighting_pass.is_some_and(|pass| pass.run_gi)
+        && trace.is_none()
+    {
+        stats.frames_failed += 1;
+        stats.execution_trace.outcome = FrameExecutionOutcome::Failed;
+        return;
+    }
     let submitted_before = stats.frames_submitted;
     let skipped_before = stats.frames_skipped;
     let failed_before = stats.frames_failed;

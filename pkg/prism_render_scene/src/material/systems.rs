@@ -4,8 +4,8 @@ use super::{
     runtime::{PrismMaterialDiagnostics, RenderMaterialRegistry},
     texture_upload::MaterialTextureArrays,
     vt_source::{
-        MaterialVtMaterialSourceQueries, MaterialVtSourceChangeQueue, MaterialVtSourceError,
-        MaterialVtSourceQuery, MaterialVtSourceRegistry,
+        MaterialVtActivePublication, MaterialVtMaterialSourceQueries, MaterialVtSourceChangeQueue,
+        MaterialVtSourceError, MaterialVtSourceQuery, MaterialVtSourceRegistry,
     },
 };
 use crate::completion::GpuCompletionTracker;
@@ -74,7 +74,7 @@ fn sync_material_vt_source_event(
 ///
 /// This is intentionally a query-only bridge. It does not allocate a bindless
 /// slot, publish a page-table entry, or claim atlas residency; those actions
-/// remain the responsibility of the future material-VT producer.
+/// remain the responsibility of the material-VT producer.
 pub(crate) fn query_standard_material_vt_sources(
     material: &StandardMaterial,
     sources: &MaterialVtSourceRegistry,
@@ -86,6 +86,7 @@ pub(crate) fn extract_standard_materials(
     mut events: Extract<MessageReader<AssetEvent<StandardMaterial>>>,
     materials: Extract<Res<Assets<StandardMaterial>>>,
     sources: Res<MaterialVtSourceRegistry>,
+    active_vt: Res<MaterialVtActivePublication>,
     mut source_queries: ResMut<MaterialVtMaterialSourceQueries>,
     completion: Res<GpuCompletionTracker>,
     mut runtime: ResMut<RenderMaterialRegistry>,
@@ -105,7 +106,7 @@ pub(crate) fn extract_standard_materials(
                     continue;
                 };
                 // Keep source lookup adjacent to material publication. The
-                // query is observational until the real producer consumes the
+                // query is observational until the producer consumes the
                 // immutable snapshot and publishes residency.
                 let exists = runtime.material_handle(id).is_some();
                 let source_query = query_standard_material_vt_sources(material, &sources);
@@ -115,6 +116,7 @@ pub(crate) fn extract_standard_materials(
                         material,
                         completion.next_submission_value(),
                         Some(&sources),
+                        Some(&active_vt),
                     )
                     .is_ok()
                 {
@@ -158,6 +160,7 @@ pub(crate) fn extract_standard_materials(
                     material,
                     completion.next_submission_value(),
                     Some(&sources),
+                    Some(&active_vt),
                 )
                 .is_ok()
             {
@@ -205,7 +208,8 @@ mod tests {
     use bevy_pbr::StandardMaterial;
     use bevy_render::render_resource::{Extent3d, TextureDimension, TextureFormat};
     use prism_render_material::{
-        BuiltinProgram, ProgramRef, ShadingPlan, FALLBACK_MATERIAL_HANDLE,
+        BuiltinProgram, GpuMaterialTexture, ProgramRef, ShadingPlan, FALLBACK_MATERIAL_HANDLE,
+        NO_VIRTUAL_TEXTURE,
     };
 
     use super::*;
@@ -252,6 +256,31 @@ mod tests {
         image.texture_descriptor.mip_level_count = 3;
         image.data = Some(vec![value; (4 * 4 * 4) + (2 * 2 * 4) + 4]);
         image
+    }
+
+    fn publish_texture_row(
+        world: &mut World,
+        material_id: AssetId<StandardMaterial>,
+        sources: &MaterialVtSourceRegistry,
+        active_vt: &MaterialVtActivePublication,
+    ) -> GpuMaterialTexture {
+        world.resource_scope(|world, mut runtime: Mut<RenderMaterialRegistry>| {
+            let materials = world.resource::<Assets<StandardMaterial>>();
+            runtime
+                .publish_asset_with_sources(
+                    material_id,
+                    materials.get(material_id).unwrap(),
+                    prism_render_architecture::gpu_scene::GpuCompletionValue(1),
+                    Some(sources),
+                    Some(active_vt),
+                )
+                .unwrap();
+        });
+        let runtime = world.resource::<RenderMaterialRegistry>();
+        let handle = runtime.material_handle(material_id).unwrap();
+        let record = runtime.registry.get(handle).unwrap();
+        assert_eq!(record.textures.len(), 1);
+        record.textures[0]
     }
 
     #[test]
@@ -326,7 +355,7 @@ mod tests {
     }
 
     #[test]
-    fn material_rows_advertise_vt_only_when_the_default_producer_accepts_the_source() {
+    fn material_rows_require_exact_completion_published_source_revision() {
         let compatible: Handle<Image> = Handle::from(Uuid::from_u128(0xB1));
         let incompatible: Handle<Image> = Handle::from(Uuid::from_u128(0xB2));
         let mut sources = MaterialVtSourceRegistry::default();
@@ -337,6 +366,11 @@ mod tests {
         // row would be stale as soon as this source is refreshed in place.
         sources.upsert_asset_image(compatible.id(), &complete_rgba_image(3));
         sources.upsert_asset_image(incompatible.id(), &complete_image(2));
+        let compatible_identity = match sources.lookup(compatible.id()) {
+            super::super::vt_source::MaterialVtSourceLookup::Available { identity, .. } => identity,
+            other => panic!("expected compatible source, got {other:?}"),
+        };
+        let mut active_vt = MaterialVtActivePublication::default();
 
         let mut world = World::new();
         let mut assets = Assets::<StandardMaterial>::default();
@@ -347,48 +381,41 @@ mod tests {
         let material_id = material.id();
         world.insert_resource(assets);
         world.insert_resource(RenderMaterialRegistry::default());
-        world.resource_scope(|world, mut runtime: Mut<RenderMaterialRegistry>| {
-            let materials = world.resource::<Assets<StandardMaterial>>();
-            runtime
-                .publish_asset_with_sources(
-                    material_id,
-                    materials.get(material_id).unwrap(),
-                    prism_render_architecture::gpu_scene::GpuCompletionValue(1),
-                    Some(&sources),
-                )
-                .unwrap();
-        });
-        let handle = world
-            .resource::<RenderMaterialRegistry>()
-            .material_handle(material_id)
-            .unwrap();
-        let record = world
-            .resource::<RenderMaterialRegistry>()
-            .registry
-            .get(handle)
-            .unwrap();
-        assert_eq!(record.textures.len(), 1);
-        assert_ne!(
-            record.textures[0].virtual_texture_id,
-            prism_render_material::NO_VIRTUAL_TEXTURE
-        );
-        let texture = record.textures[0];
+        let initial = publish_texture_row(&mut world, material_id, &sources, &active_vt);
+        assert_eq!(initial.virtual_texture_id, NO_VIRTUAL_TEXTURE);
+        assert_eq!(initial.virtual_texture_width, 0);
+        assert_eq!(initial.virtual_texture_height, 0);
+        assert_eq!(initial.virtual_texture_page_size, 0);
+
+        active_vt.replace([compatible_identity]);
+        let texture = publish_texture_row(&mut world, material_id, &sources, &active_vt);
+        assert_ne!(texture.virtual_texture_id, NO_VIRTUAL_TEXTURE);
         let runtime = world.resource::<RenderMaterialRegistry>();
         assert_eq!(
             texture.generation,
             runtime.texture_generation_table()[texture.index as usize],
             "VT rows must use the bindless heap generation, not the source revision"
         );
-        let source_revision = match sources.lookup(compatible.id()) {
-            super::super::vt_source::MaterialVtSourceLookup::Available { identity, .. } => {
-                identity.revision()
-            }
-            other => panic!("expected compatible source, got {other:?}"),
-        };
+        let source_revision = compatible_identity.revision();
         assert_ne!(
             texture.generation as u64, source_revision,
             "the regression fixture must distinguish heap generations from source revisions"
         );
+
+        let next_identity = sources.upsert_asset_image(compatible.id(), &complete_rgba_image(4));
+        let transition = publish_texture_row(&mut world, material_id, &sources, &active_vt);
+        assert_eq!(transition.virtual_texture_id, NO_VIRTUAL_TEXTURE);
+        assert_eq!(transition.virtual_texture_width, 0);
+        assert_eq!(transition.virtual_texture_height, 0);
+        assert_eq!(transition.virtual_texture_page_size, 0);
+        assert_eq!(transition.index, texture.index);
+        assert_eq!(transition.generation, texture.generation);
+
+        active_vt.replace([next_identity]);
+        let republished = publish_texture_row(&mut world, material_id, &sources, &active_vt);
+        assert_ne!(republished.virtual_texture_id, NO_VIRTUAL_TEXTURE);
+        assert_eq!(republished.index, texture.index);
+        assert_eq!(republished.generation, texture.generation);
 
         let mut world = World::new();
         let mut assets = Assets::<StandardMaterial>::default();
@@ -399,30 +426,8 @@ mod tests {
         let material_id = material.id();
         world.insert_resource(assets);
         world.insert_resource(RenderMaterialRegistry::default());
-        world.resource_scope(|world, mut runtime: Mut<RenderMaterialRegistry>| {
-            let materials = world.resource::<Assets<StandardMaterial>>();
-            runtime
-                .publish_asset_with_sources(
-                    material_id,
-                    materials.get(material_id).unwrap(),
-                    prism_render_architecture::gpu_scene::GpuCompletionValue(1),
-                    Some(&sources),
-                )
-                .unwrap();
-        });
-        let handle = world
-            .resource::<RenderMaterialRegistry>()
-            .material_handle(material_id)
-            .unwrap();
-        let record = world
-            .resource::<RenderMaterialRegistry>()
-            .registry
-            .get(handle)
-            .unwrap();
-        assert_eq!(
-            record.textures[0].virtual_texture_id,
-            prism_render_material::NO_VIRTUAL_TEXTURE
-        );
+        let incompatible_row = publish_texture_row(&mut world, material_id, &sources, &active_vt);
+        assert_eq!(incompatible_row.virtual_texture_id, NO_VIRTUAL_TEXTURE);
     }
 
     #[test]

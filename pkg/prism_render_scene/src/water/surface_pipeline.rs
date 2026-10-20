@@ -93,7 +93,7 @@ use bevy_shader::Shader;
 use prism_render_architecture::water::gpu::surface_pass::plan_surface_plan;
 use prism_render_architecture::water::{ResponseProgram, WaterShadingPlan};
 
-use super::super::shading::{ViewVisibilityBuffer, MOTION_VECTOR_FORMAT};
+use super::super::shading::{ViewVisibilityBuffer, MOTION_VECTOR_FORMAT, REACTIVE_MASK_FORMAT};
 use crate::lighting::LightBindGroup;
 
 /// The three response programs plus the MaskBlend plan in a stable order; the index into
@@ -333,6 +333,14 @@ impl SpecializedRenderPipeline for WaterSurfacePipelines {
                         format: MOTION_VECTOR_FORMAT,
                         blend: None,
                         write_mask: ColorWrites::RED | ColorWrites::GREEN,
+                    }),
+                    // Third render target: independent TAA reactive coverage.
+                    // Water is the visible foreground layer, so it replaces the
+                    // cleared opaque default for exactly the covered pixels.
+                    Some(ColorTargetState {
+                        format: REACTIVE_MASK_FORMAT,
+                        blend: None,
+                        write_mask: ColorWrites::RED,
                     }),
                 ],
                 ..Default::default()

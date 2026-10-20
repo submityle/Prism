@@ -525,7 +525,7 @@ pkg/
   prism_gameplay_script    # Layer5: 图脚本/WASM（可选 feature）
   prism_gameplay_interaction # Layer4: 交互机制（检测管线 + Interactable 契约，复用 GAS / §29 Smart Object）
   prism_gameplay_feel      # Layer4: 手感机制 + 命中判定基建（hitbox/hurtbox/输入缓冲/i-frame；表现经 Cue/Message 下放）
-  prism_gameplay_settings  # Layer3: 游戏设置框架（建于 prism_app::settings/cvar + prism_reflect + §35 MVVM）
+  prism_gameplay_settings  # Layer3: 游戏设置框架（建于 prism_settings + prism_app::SettingsRuntime + §35 MVVM）
   prism_gameplay           # 门面聚合 + GameplayDefaultPlugins（对标 bevy_internal / UE Gameplay 模块组）
 ```
 - 网络复制/预测由 `prism_network` 承载（不设 `prism_gameplay_net`），玩法只提供 §16 的复制标注与预测/回滚策略接缝。
@@ -1092,7 +1092,7 @@ AAA 的难点不在单系统，而在**整帧协同**。确立清晰的一帧时
 
 ## 51. 游戏设置框架（GameUserSettings 对标）
 
-> **定位**：base 级玩家设置框架，建于 `prism_app::cvar/settings` + `platform_tier`（平台降档）。对标 UE `UGameUserSettings` + Enhanced Input 重绑 + 控制台变量。提供设置的**模型 / 持久化 / 重绑 / 档位 / 实时应用 / UI 绑定**机制；具体选项清单与难度语义由游戏层扩展（属游戏模板层）。
+> **定位**：base 级玩家设置框架，建于 `prism_settings` + `prism_app::SettingsRuntime` + `platform_tier`（平台降档）。对标 UE `UGameUserSettings` + Enhanced Input 重绑 + 控制台变量。提供设置的**模型 / 持久化 / 重绑 / 档位 / 实时应用 / UI 绑定**机制；具体选项清单与难度语义由游戏层扩展（属游戏模板层）。
 
 **分层设置模型（优先级合并）**
 - 默认值 → 平台档（`platform_tier` 自动降档）→ 用户持久化覆盖 → 会话临时覆盖，按优先级合并取值。
@@ -1112,4 +1112,4 @@ AAA 的难点不在单系统，而在**整帧协同**。确立清晰的一帧时
 **UI 绑定**
 - 经 §35 MVVM 双向绑定到设置界面（设置项是双向绑定的典型场景），零手写"每帧刷新 UI"。
 
-> **落地映射**：crate `pkg/prism_gameplay_settings`（建于 `prism_app::settings/cvar` + `prism_reflect` + §35 MVVM）。**边界**：具体选项清单、难度数值、品类专属项属游戏模板层；base 提供模型/持久化/绑定/重绑/档位机制。
+> **落地映射**：crate `pkg/prism_gameplay_settings`（规划中，建于 `prism_settings` + `prism_app::SettingsRuntime` + §35 MVVM）。**边界**：具体选项清单、难度数值、品类专属项属游戏模板层；base 提供模型/持久化/绑定/重绑/档位机制。

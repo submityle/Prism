@@ -1,8 +1,10 @@
 //! Executable Hybrid-water behavior goldens.
 //!
-//! Each golden compares an independent CPU transcription of the
-//! `water_surface_fs_mask_blend` equations with the public `MaskBlend` composition
-//! contract. Source checks pin the WESL consumer and the four raster entries,
+//! CPU equation goldens compare a synthetic composition transcription with
+//! the public `MaskBlend` contract; they are NOT historical image captures.
+//! Separate provenance/link gates pin the exact 8400fe972^ shader graph used
+//! by the independent GPU oracle in `water_hybrid_gpu`.
+//! Source checks pin the WESL consumer and the four raster entries,
 //! while the optional module-validation test classifies adapter/device absence
 //! as an explicit skip unless `PRISM_REQUIRE_GPU=1` turns it into a failure.
 //! Module validation is not output evidence. Actual production raster,
@@ -33,6 +35,9 @@ use wgpu::{
     Backends, Device, DeviceDescriptor, Instance, InstanceDescriptor, Queue,
     ShaderModuleDescriptor, ShaderSource,
 };
+
+#[path = "fixtures/water_legacy_41a31cee/mod.rs"]
+mod legacy;
 
 const RASTER_UUID: u128 = 0x5052_4953_4d5f_5741_5445_525f_4859_4201;
 // The raster pipeline uses groups 0..=6. Keep this gate tied to the actual
@@ -66,6 +71,26 @@ fn raster_cache(
     let brdf = shader_id(RASTER_UUID.wrapping_add(2));
     let water = shader_id(RASTER_UUID.wrapping_add(3));
     let raster = shader_id(RASTER_UUID);
+    for (index, (name, source)) in [
+        ("tangent", include_str!("../src/shaders/tangent.wesl")),
+        (
+            "specular_aa",
+            include_str!("../src/shaders/specular_aa.wesl"),
+        ),
+        ("thin_film", include_str!("../src/shaders/thin_film.wesl")),
+        ("glint", include_str!("../src/shaders/glint.wesl")),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        cache.set_shader(
+            shader_id(RASTER_UUID.wrapping_add(4 + index as u128)),
+            Shader::from_wesl(
+                source,
+                format!("embedded://prism_render_scene/shaders/{name}.wesl"),
+            ),
+        );
+    }
     cache.set_shader(
         lighting,
         Shader::from_wesl(
@@ -206,9 +231,9 @@ fn legacy_mix_scalar(left: f32, right: f32, factor: f32) -> f32 {
     left * (1.0 - factor) + right * factor
 }
 
-/// Independent CPU transcription of the `water_surface_fs_mask_blend`
-/// equations.  It intentionally does not call the new composition helper;
-/// otherwise the gate could pass while both sides shared the same bug.
+/// Synthetic CPU composition equation check, not a historical shading oracle.
+/// It does not call the composition helper, but cannot detect a shared PBR/NPR
+/// shading regression; the frozen-source GPU target supplies that evidence.
 fn legacy_hybrid_reference(input: HybridCompositionInput) -> HybridCompositionOutput {
     let shore = input.weights.shore_signal.clamp(0.0, 1.0);
     let shallow = input.weights.shallow_signal.clamp(0.0, 1.0);
@@ -412,7 +437,7 @@ fn golden_transparency_and_overlay_contract() {
     assert!(source().contains("weights.overlay_opacity"));
     assert!(source().contains("view.viewport.z"));
     assert!(source().contains("output_alpha"));
-    assert!(source().contains("return FragmentOutput(color, motion)"));
+    assert!(source().contains("return FragmentOutput(color, motion,"));
 }
 
 #[test]
@@ -617,6 +642,65 @@ fn hybrid_wesl_compiles_and_preserves_all_four_entries() {
     assert!(wgsl.contains("water_surface_fs_npr"));
     assert!(wgsl.contains("water_surface_fs_custom"));
     assert!(wgsl.contains("water_surface_fs_mask_blend"));
+    assert!(
+        !wgsl.contains("water_surface_fs_hybrid"),
+        "the removed legacy Hybrid entry must not return as a live shader API"
+    );
+}
+
+#[test]
+fn historical_water_fixture_has_pinned_provenance_and_closed_imports() {
+    legacy::verify();
+    assert_eq!(legacy::COMMIT, "41a31ceef24e59ab7f8dda076b2b4c7f5e11f6ec");
+    assert_eq!(legacy::SOURCES.len(), 11);
+    for frozen in legacy::SOURCES {
+        assert_eq!(frozen.blob.len(), 40, "Git blob identity: {}", frozen.name);
+        // These historical modules have no external imports. Catch any later
+        // edit adding a live dependency even before running a GPU gate.
+        for line in frozen
+            .source
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with("import "))
+        {
+            let path = line
+                .strip_prefix("import prism_render_scene::shaders::")
+                .unwrap_or_else(|| panic!("unexpected external historical import: {line}"));
+            let name = path.split("::").next().expect("imported module name");
+            assert!(
+                legacy::SOURCES
+                    .iter()
+                    .any(|s| s.name == format!("{name}.wesl")),
+                "{} imports unfrozen module {name}",
+                frozen.name
+            );
+        }
+    }
+    let raster = legacy::source("water_surface_raster.wesl");
+    assert!(raster.contains("fn water_surface_fs_hybrid("));
+    assert!(!raster.contains("fn water_surface_fs_mask_blend("));
+    assert!(raster.contains(
+        "water_hybrid_weight_contract(in.foam, view.style_params.w, view.style_params.w)"
+    ));
+    assert!(raster.contains("CompositionControl(mask, 1u, left.a, 0u)"));
+    assert!(!legacy::source("brdf.wesl").contains("clearcoat_interface_normal"));
+}
+
+#[test]
+fn historical_water_wesl_graph_links_without_live_shader_dependencies() {
+    let raster = legacy::compile("water_surface_raster.wesl");
+    for entry in [
+        "water_surface_vs",
+        "water_surface_fs_pbr",
+        "water_surface_fs_npr",
+        "water_surface_fs_hybrid",
+    ] {
+        assert!(raster.contains(entry), "historical entry missing: {entry}");
+    }
+    assert!(!raster.contains("water_surface_fs_mask_blend"));
+    let fx = legacy::compile("water_render_fx.wesl");
+    assert!(fx.contains("water_caustics_project"));
+    assert!(fx.contains("water_underwater_volume"));
 }
 
 #[test]

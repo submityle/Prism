@@ -30,6 +30,7 @@
 //   2 = history_sampler (bilinear clamp filtering)
 //   3 = taa_out         (rgba16float storage; the resolved colour the composite reads)
 //   4 = motion_vectors  (rg16float screen-space motion, textureLoad)
+//   5 = reactive_mask   (r8unorm temporal history rejection, textureLoad)
 // with a `TaaParams` immediate block.
 
 struct TaaParams {
@@ -51,6 +52,9 @@ struct TaaParams {
 // history lookup adds it back to reach last frame's UV. Zero on pixels the
 // resolve did not cover.
 @group(0) @binding(4) var motion_vectors: texture_2d<f32>;
+// Independent per-pixel reactive coverage. A value of one drops history
+// completely; zero preserves the configured history blend.
+@group(0) @binding(5) var reactive_mask: texture_2d<f32>;
 
 var<immediate> params: TaaParams;
 
@@ -156,8 +160,10 @@ fn resolve_taa(@builtin(global_invocation_id) gid: vec3<u32>) {
 
             // Luminance (YCoCg `.x`) feedback weighting: down-weight the brighter
             // contributor so a firefly cannot flicker the accumulation.
-            let weight_current = (1.0 - params.history_blend) * tonemap_weight(current_ycocg.x);
-            let weight_history = params.history_blend * tonemap_weight(clipped.x);
+            let reactive = clamp(textureLoad(reactive_mask, coord, 0).x, 0.0, 1.0);
+            let effective_blend = params.history_blend * (1.0 - reactive);
+            let weight_current = (1.0 - effective_blend) * tonemap_weight(current_ycocg.x);
+            let weight_history = effective_blend * tonemap_weight(clipped.x);
             let total = weight_current + weight_history;
             if (total > 0.0) {
                 let blended = (current_ycocg * weight_current + clipped * weight_history) / total;

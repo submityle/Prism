@@ -46,6 +46,20 @@ impl FrameGraphStages {
         trace: Option<TraceGraphRecorder>,
         present_source: prism_render_graph::TextureHandle,
     ) -> Self {
+        if let Some(pass) = lighting {
+            let expects_trace = pass.run_gi && pass.candidate_source
+                == prism_render_architecture::lighting::contract::GiCandidateSource::SoftwareBvhGpu;
+            assert_eq!(
+                trace.is_some(),
+                expects_trace,
+                "host trace must match the compiled candidate source"
+            );
+            assert_eq!(
+                trace.is_some_and(|trace| trace.candidates.is_some()),
+                expects_trace,
+                "the planned GPU trace requires its candidate-build pass"
+            );
+        }
         let scene_passes = 1 + RenderPhase::ORDER
             .into_iter()
             .filter(|phase| !queues.phase(*phase).is_empty())

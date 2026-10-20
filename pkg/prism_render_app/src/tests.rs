@@ -48,8 +48,8 @@ use prism_ecs::schedule::IntoSystemConfigs;
 use prism_render_architecture::abi::GenerationalHandle;
 use prism_render_architecture::gpu_scene::{CpuRenderScene, GeometryHandle, SceneHandle};
 use prism_render_architecture::lighting::contract::{
-    ChangeFields, FrameResourceBudget, LightingPlan, PlanCaps, RecipeId, Rejection, SceneStats,
-    Tier,
+    ChangeFields, FrameResourceBudget, GiCandidateAvailability, GiCandidateRejection,
+    GiCandidateSource, LightingPlan, PlanCaps, RecipeId, Rejection, SceneStats, Tier,
 };
 use prism_render_architecture::lighting::DebugView;
 use prism_render_architecture::shader_package::{
@@ -1967,8 +1967,8 @@ fn render_schedule_runs_each_frame_and_submits_a_frame() {
     );
     assert_eq!(
         stats.passes_declared,
-        FRAMES * 5,
-        "each recorded frame declares three lighting passes, one clear, and one OCIO pass"
+        FRAMES * 4,
+        "without GI candidates each frame declares direct, composite, clear, and OCIO passes"
     );
     assert_eq!(stats.last_viewport, RenderViewport::from_extent(EXTENT));
 
@@ -2046,6 +2046,468 @@ fn lighting_plan_uses_host_caps_scene_stats_and_budget() {
         .iter()
         .any(|rejection| matches!(rejection, Rejection::Unavailable(_))));
     assert!(state.plan.explain().contains("tier=Preview"));
+}
+
+fn lighting_candidate_test_capabilities() -> prism_render_driver::DeviceCapabilities {
+    prism_render_driver::DeviceCapabilities {
+        backend: prism_render_driver::Backend::Noop,
+        features: prism_render_driver::Features::from_bits_truncate(0),
+        limits: prism_render_driver::Limits::baseline(),
+    }
+}
+
+fn lighting_candidate_test_trace_scene(surface_count: usize) -> crate::LightingTraceSceneInput {
+    use prism_render_architecture::ray_scene::{Bvh, GpuBvhBuffers, Triangle};
+
+    let triangle = Triangle::new([-1.0, -1.0, -1.0], [1.0, -1.0, -1.0], [0.0, 1.0, -1.0], 73);
+    crate::LightingTraceSceneInput::new(
+        Arc::new(GpuBvhBuffers::from_bvh(&Bvh::build(&[triangle]))),
+        (0..surface_count).map(|index| index as u64 + 100).collect(),
+        1,
+        0.001,
+        10.0,
+        Arc::from([crate::LightingTriangleRadiance {
+            primitive_id: 73,
+            rgb: [4.0, 2.0, 1.0],
+        }]),
+        1,
+    )
+}
+
+#[test]
+fn lighting_candidate_availability_is_missing_without_a_producer() {
+    let caps = lighting_candidate_test_capabilities();
+    let mut inputs = ExtractedLightingInputs::default();
+    assert_eq!(
+        inputs.candidate_availability(&caps),
+        GiCandidateAvailability::Missing
+    );
+    inputs.surfaces = vec![LightingSurfaceInput::default(); 2];
+    assert_eq!(
+        inputs.candidate_availability(&caps),
+        GiCandidateAvailability::Missing
+    );
+}
+
+#[test]
+fn lighting_candidate_availability_accepts_host_batches_aligned_with_surfaces() {
+    let caps = lighting_candidate_test_capabilities();
+    let mut inputs = ExtractedLightingInputs::default();
+    inputs.surfaces = vec![LightingSurfaceInput::default(); 2];
+    let candidate = LightingGiCandidateInput {
+        target_pdf: 1.0,
+        radiance: [1.0; 3],
+        ..LightingGiCandidateInput::default()
+    };
+    // The empty batch is an explicit, valid zero-proposal surface.
+    inputs.gi_candidates = vec![vec![candidate], Vec::new()];
+    assert_eq!(
+        inputs.candidate_availability(&caps),
+        GiCandidateAvailability::HostProvided
+    );
+    inputs.gi_candidates = vec![Vec::new(); inputs.surfaces.len()];
+    assert_eq!(
+        inputs.candidate_availability(&caps),
+        GiCandidateAvailability::HostProvided
+    );
+}
+
+#[test]
+fn lighting_candidate_availability_rejects_misaligned_or_invalid_host_batches() {
+    let caps = lighting_candidate_test_capabilities();
+    let mut inputs = ExtractedLightingInputs::default();
+    inputs.surfaces = vec![LightingSurfaceInput::default(); 2];
+    inputs.gi_candidates = vec![Vec::new()];
+    assert_eq!(
+        inputs.candidate_availability(&caps),
+        GiCandidateAvailability::Rejected(GiCandidateRejection::InvalidInputs)
+    );
+    inputs.gi_candidates = vec![Vec::new(); inputs.surfaces.len()];
+    inputs.gi_candidates[1].push(LightingGiCandidateInput {
+        source_pdf: f32::NAN,
+        ..LightingGiCandidateInput::default()
+    });
+    assert_eq!(
+        inputs.candidate_availability(&caps),
+        GiCandidateAvailability::Rejected(GiCandidateRejection::InvalidInputs)
+    );
+}
+
+#[test]
+fn lighting_candidate_availability_accepts_software_bvh_without_hardware_ray_tracing() {
+    let mut caps = lighting_candidate_test_capabilities();
+    let mut inputs = ExtractedLightingInputs::default();
+    inputs.surfaces = vec![LightingSurfaceInput::default(); 2];
+    inputs.trace_scene = Some(lighting_candidate_test_trace_scene(inputs.surfaces.len()));
+    // A valid trace request takes precedence over a valid host producer.
+    inputs.gi_candidates = vec![Vec::new(); inputs.surfaces.len()];
+    assert_eq!(
+        inputs.candidate_availability(&caps),
+        GiCandidateAvailability::SoftwareBvhGpu
+    );
+    caps.features |= prism_render_driver::Features::RAY_TRACING;
+    assert_eq!(
+        inputs.candidate_availability(&caps),
+        GiCandidateAvailability::SoftwareBvhGpu
+    );
+    inputs.gi_candidates.clear();
+    assert_eq!(
+        inputs.candidate_availability(&caps),
+        GiCandidateAvailability::SoftwareBvhGpu
+    );
+}
+
+#[test]
+fn lighting_candidate_availability_rejects_invalid_trace_without_host_fallback() {
+    let caps = lighting_candidate_test_capabilities();
+    let mut inputs = ExtractedLightingInputs::default();
+    inputs.surfaces = vec![LightingSurfaceInput::default(); 2];
+    inputs.gi_candidates = vec![Vec::new(); inputs.surfaces.len()];
+    assert_eq!(
+        inputs.candidate_availability(&caps),
+        GiCandidateAvailability::HostProvided
+    );
+
+    let valid = lighting_candidate_test_trace_scene(inputs.surfaces.len());
+    let mut invalid = Vec::new();
+    let mut scene = valid.clone();
+    scene.surface_ids.pop();
+    invalid.push(("surface ID count", scene));
+    let mut scene = valid.clone();
+    scene.surface_ids[1] = scene.surface_ids[0];
+    invalid.push(("duplicate surface ID", scene));
+    let mut scene = valid.clone();
+    scene.rays_per_surface = 0;
+    invalid.push(("zero rays", scene));
+    let mut scene = valid.clone();
+    scene.rays_per_surface = crate::lighting_gpu::GI_CANDIDATES_PER_SURFACE as u32 + 1;
+    invalid.push(("ray capacity", scene));
+    let mut scene = valid.clone();
+    scene.ray_epsilon = f32::NAN;
+    invalid.push(("non-finite ray epsilon", scene));
+    let mut scene = valid.clone();
+    scene.ray_tmax = scene.ray_epsilon;
+    invalid.push(("invalid ray interval", scene));
+    let mut scene = valid.clone();
+    scene.outgoing_radiance = Arc::from([]);
+    invalid.push(("radiance count", scene));
+    let mut scene = valid.clone();
+    scene.outgoing_radiance = Arc::from([crate::LightingTriangleRadiance {
+        primitive_id: 74,
+        rgb: [1.0; 3],
+    }]);
+    invalid.push(("radiance primitive ID", scene));
+    let mut scene = valid;
+    scene.outgoing_radiance = Arc::from([crate::LightingTriangleRadiance {
+        primitive_id: 73,
+        rgb: [f32::NAN, 1.0, 1.0],
+    }]);
+    invalid.push(("non-finite radiance", scene));
+
+    for (case, scene) in invalid {
+        inputs.trace_scene = Some(scene);
+        assert_eq!(
+            inputs.candidate_availability(&caps),
+            GiCandidateAvailability::Rejected(GiCandidateRejection::InvalidInputs),
+            "{case}: a malformed trace request must not fall back to valid host candidates"
+        );
+    }
+}
+
+#[test]
+fn lighting_candidate_availability_checks_device_limits_for_host_and_trace() {
+    let caps = lighting_candidate_test_capabilities();
+    let mut inputs = ExtractedLightingInputs::default();
+    inputs.surfaces = vec![LightingSurfaceInput::default(); 2];
+    inputs.gi_candidates = vec![Vec::new(); inputs.surfaces.len()];
+    let valid_trace = lighting_candidate_test_trace_scene(inputs.surfaces.len());
+
+    let mut cases = Vec::new();
+    let mut limited = caps;
+    limited.limits.max_storage_buffer_binding_size = 0;
+    cases.push((
+        "storage binding",
+        limited,
+        GiCandidateRejection::DeviceLimits,
+    ));
+    let mut limited = caps;
+    limited.limits.max_uniform_buffer_binding_size = 0;
+    cases.push((
+        "uniform binding",
+        limited,
+        GiCandidateRejection::DeviceLimits,
+    ));
+    let mut limited = caps;
+    limited.limits.max_compute_workgroups_per_dimension = 0;
+    cases.push((
+        "dispatch workgroups",
+        limited,
+        GiCandidateRejection::DeviceLimits,
+    ));
+    let mut limited = caps;
+    limited.limits.max_compute_invocations_per_workgroup = 63;
+    cases.push((
+        "workgroup invocations",
+        limited,
+        GiCandidateRejection::TraceBackendUnavailable,
+    ));
+    let mut limited = caps;
+    limited.limits.max_bind_groups = 0;
+    cases.push((
+        "bind groups",
+        limited,
+        GiCandidateRejection::TraceBackendUnavailable,
+    ));
+    let mut limited = caps;
+    limited.limits.max_bindings_per_bind_group = 6;
+    cases.push((
+        "bindings per group",
+        limited,
+        GiCandidateRejection::TraceBackendUnavailable,
+    ));
+
+    for trace_enabled in [false, true] {
+        inputs.trace_scene = trace_enabled.then(|| valid_trace.clone());
+        assert_eq!(
+            inputs.candidate_availability(&caps),
+            if trace_enabled {
+                GiCandidateAvailability::SoftwareBvhGpu
+            } else {
+                GiCandidateAvailability::HostProvided
+            }
+        );
+        for (case, limited, reason) in &cases {
+            assert_eq!(
+                inputs.candidate_availability(limited),
+                GiCandidateAvailability::Rejected(*reason),
+                "{case}, trace_enabled={trace_enabled}"
+            );
+        }
+    }
+}
+
+#[test]
+fn lighting_candidate_availability_checks_trace_workgroups_and_radiance_storage() {
+    let mut caps = lighting_candidate_test_capabilities();
+    let mut inputs = ExtractedLightingInputs::default();
+    inputs.surfaces = vec![LightingSurfaceInput::default(); 2];
+    inputs.gi_candidates = vec![Vec::new(); inputs.surfaces.len()];
+    caps.limits.max_compute_workgroups_per_dimension = 1;
+    assert_eq!(
+        inputs.candidate_availability(&caps),
+        GiCandidateAvailability::HostProvided
+    );
+    let mut trace = lighting_candidate_test_trace_scene(inputs.surfaces.len());
+    trace.rays_per_surface = crate::lighting_gpu::GI_CANDIDATES_PER_SURFACE as u32;
+    inputs.trace_scene = Some(trace);
+    assert_eq!(
+        inputs.candidate_availability(&caps),
+        GiCandidateAvailability::Rejected(GiCandidateRejection::DeviceLimits),
+        "two surfaces fit lighting dispatch but 128 trace rays need two workgroups"
+    );
+
+    caps = lighting_candidate_test_capabilities();
+    caps.limits.max_storage_buffer_binding_size = crate::lighting_gpu::TRACE_RADIANCE_BYTES - 1;
+    inputs.trace_scene = None;
+    assert_eq!(
+        inputs.candidate_availability(&caps),
+        GiCandidateAvailability::HostProvided
+    );
+    inputs.trace_scene = Some(lighting_candidate_test_trace_scene(inputs.surfaces.len()));
+    assert_eq!(
+        inputs.candidate_availability(&caps),
+        GiCandidateAvailability::Rejected(GiCandidateRejection::DeviceLimits),
+        "the trace radiance binding must fit the actual device limit"
+    );
+}
+
+#[test]
+fn lighting_candidate_plugin_source_switches_keep_plan_debug_and_graph_in_the_same_frame() {
+    use crate::lighting_trace_gpu::{LightingTraceState, TracePreparationStatus};
+
+    let mut app = app_on_null_backend(RenderAppConfig::new(EXTENT));
+    app.world_mut()
+        .resource_mut::<LightingSceneInputs>()
+        .gi_candidates = vec![Vec::new()];
+    let mut trace_dispatches = 0;
+
+    for (index, source) in [
+        GiCandidateSource::HostProvided,
+        GiCandidateSource::SoftwareBvhGpu,
+        GiCandidateSource::Disabled,
+        GiCandidateSource::SoftwareBvhGpu,
+        GiCandidateSource::Disabled,
+        GiCandidateSource::HostProvided,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let frame = index as u64 + 1;
+        match index {
+            0 => {}
+            1 | 3 => {
+                app.world_mut()
+                    .insert_resource(lighting_candidate_test_trace_scene(1));
+            }
+            2 => {
+                app.world_mut()
+                    .remove_resource::<crate::LightingTraceSceneInput>();
+                app.world_mut()
+                    .resource_mut::<LightingSceneInputs>()
+                    .gi_candidates
+                    .clear();
+            }
+            4 => {
+                // Reject an explicit invalid trace even though host batches are valid again.
+                app.world_mut()
+                    .resource_mut::<LightingSceneInputs>()
+                    .gi_candidates = vec![Vec::new()];
+                app.world_mut()
+                    .resource_mut::<crate::LightingTraceSceneInput>()
+                    .surface_ids
+                    .clear();
+            }
+            5 => {
+                app.world_mut()
+                    .remove_resource::<crate::LightingTraceSceneInput>();
+            }
+            _ => unreachable!(),
+        }
+        app.world_mut()
+            .resource_mut::<LightingSceneInputs>()
+            .mark_changed(frame, ChangeFields::LIGHTING);
+        app.update();
+
+        let render = app.get_sub_app(RenderApp).expect("render sub-app");
+        let plan = render.world.resource::<LightingPlanState>();
+        let debug = render.world.resource::<LightingDebugViewState>();
+        let extracted = render.world.resource::<ExtractedLightingInputs>();
+        let record = render.world.resource::<RenderRecord>();
+        assert_eq!(record.frame_index, frame);
+        assert_eq!(plan.compiled_frame, frame);
+        assert_eq!(plan.compile_count, frame);
+        assert_eq!(plan.plan.candidate_source, source);
+        let gi_admitted = source != GiCandidateSource::Disabled;
+        assert_eq!(
+            plan.plan.recipes.contains(&RecipeId::WorldRestir),
+            gi_admitted
+        );
+        assert_eq!(plan.journal_snapshot, extracted.journal_snapshot);
+        assert_eq!(debug.compiled_frame, frame);
+        assert_eq!(debug.plan_compile_count, frame);
+        assert_eq!(debug.explain, plan.explain);
+        assert_eq!(
+            debug.rejection_explanations,
+            plan.plan.rejection_explanations()
+        );
+        assert_eq!(
+            debug
+                .selected_recipes
+                .iter()
+                .map(|entry| entry.recipe)
+                .collect::<Vec<_>>(),
+            plan.plan.recipes
+        );
+        if !gi_admitted {
+            let reason = if index == 2 {
+                GiCandidateRejection::MissingInputs
+            } else {
+                GiCandidateRejection::InvalidInputs
+            };
+            assert!(plan.plan.rejected.contains(&Rejection::CandidateSource {
+                recipe: RecipeId::WorldRestir,
+                reason
+            }));
+        }
+
+        let trace_status = render.world.resource::<LightingTraceState>().status();
+        let expected_trace = u32::from(source == GiCandidateSource::SoftwareBvhGpu);
+        if expected_trace == 1 {
+            assert_eq!(
+                trace_status,
+                TracePreparationStatus::Prepared {
+                    rays: 1,
+                    frame_index: frame
+                }
+            );
+        } else {
+            assert_eq!(trace_status, TracePreparationStatus::Disabled);
+        }
+        let stats = render.world.resource::<RenderFrameStats>();
+        assert_eq!(stats.frames_submitted, frame);
+        assert_eq!(stats.frames_failed, 0);
+        assert_eq!(stats.lighting_plan_compiles, frame);
+        assert_eq!(stats.lighting_debug_updates, frame);
+        assert_eq!(stats.execution_trace.frame_index, frame);
+        assert_eq!(
+            stats.execution_trace.journal_snapshot,
+            extracted.journal_snapshot
+        );
+        let stages = stats
+            .execution_trace
+            .graph
+            .expect("submitted host graph publishes stages");
+        stages.assert_contract();
+        assert_eq!(stages.gi_recipes, u32::from(gi_admitted));
+        assert_eq!(stages.trace_dispatches, expected_trace);
+        assert_eq!(stages.candidate_build_dispatches, expected_trace);
+        trace_dispatches += u64::from(expected_trace);
+        assert_eq!(stats.trace_gpu_dispatches_recorded, trace_dispatches);
+    }
+}
+
+#[test]
+fn lighting_candidate_plugin_disables_valid_trace_when_gi_exceeds_budget() {
+    use crate::lighting_trace_gpu::{LightingTraceState, TracePreparationStatus};
+
+    let config = RenderAppConfig::new(EXTENT).with_lighting_budget(FrameResourceBudget {
+        gpu_ms: 1.0,
+        ..RenderAppConfig::DEFAULT.lighting_budget
+    });
+    let mut app = app_on_null_backend(config);
+    app.world_mut()
+        .insert_resource(lighting_candidate_test_trace_scene(1));
+    app.update();
+
+    let render = app.get_sub_app(RenderApp).expect("render sub-app");
+    let inputs = render.world.resource::<ExtractedLightingInputs>();
+    let runtime = render
+        .world
+        .resource::<RenderRuntimeResource<NullInstance>>()
+        .runtime();
+    assert_eq!(
+        inputs.candidate_availability(runtime.device().capabilities()),
+        GiCandidateAvailability::SoftwareBvhGpu
+    );
+    let plan = render.world.resource::<LightingPlanState>();
+    assert_eq!(plan.plan.candidate_source, GiCandidateSource::Disabled);
+    assert!(!plan.plan.recipes.contains(&RecipeId::WorldRestir));
+    assert!(plan
+        .plan
+        .rejected
+        .contains(&Rejection::Budget(RecipeId::WorldRestir)));
+    let debug = render.world.resource::<LightingDebugViewState>();
+    assert_eq!(debug.compiled_frame, plan.compiled_frame);
+    assert_eq!(
+        debug.rejection_explanations,
+        plan.plan.rejection_explanations()
+    );
+    assert_eq!(
+        render.world.resource::<LightingTraceState>().status(),
+        TracePreparationStatus::Disabled
+    );
+    let stats = render.world.resource::<RenderFrameStats>();
+    assert_eq!(stats.frames_submitted, 1);
+    assert_eq!(stats.frames_failed, 0);
+    assert_eq!(stats.trace_gpu_dispatches_recorded, 0);
+    let stages = stats
+        .execution_trace
+        .graph
+        .expect("submitted host graph publishes stages");
+    stages.assert_contract();
+    assert_eq!(stages.trace_dispatches, 0);
+    assert_eq!(stages.candidate_build_dispatches, 0);
+    assert_eq!(stages.gi_recipes, 0);
 }
 
 #[test]
@@ -2528,6 +2990,18 @@ fn wgpu_backend_records_and_clears_a_real_frame() {
     let lighting = render
         .world
         .resource::<LightingGpuState<prism_render_driver_wgpu::WgpuInstance>>();
+    let extracted = render.world.resource::<ExtractedLightingInputs>();
+    assert_eq!(
+        extracted.candidate_availability(runtime.runtime().device().capabilities()),
+        GiCandidateAvailability::HostProvided
+    );
+    let plan = render.world.resource::<LightingPlanState>();
+    assert_eq!(
+        plan.compiled_frame,
+        render.world.resource::<RenderRecord>().frame_index
+    );
+    assert_eq!(plan.plan.candidate_source, GiCandidateSource::HostProvided);
+    assert!(plan.plan.recipes.contains(&RecipeId::WorldRestir));
     let read_output = |buffer| {
         runtime
             .runtime()
@@ -2773,9 +3247,11 @@ fn lighting_plan_records_compute_pipeline_bind_group_and_dispatch() {
             deterministic_npr: false,
         },
         Tier::Balanced,
+        GiCandidateAvailability::HostProvided,
     );
     let mut extracted = ExtractedLightingInputs::default();
     extracted.surfaces = vec![LightingSurfaceInput::default()];
+    extracted.gi_candidates = vec![Vec::new()];
     lighting.prepare(&plan, &extracted, 0, runtime.queue());
 
     let target = RenderTarget::new(runtime.device(), extent);
@@ -2836,6 +3312,7 @@ fn frame_graph_records_optional_trace_between_scene_and_gi() {
     let lighting = LightingGpuState::new(&mut runtime).expect("lighting GPU bundle");
     let plan = LightingPlan {
         tier: Tier::Balanced,
+        candidate_source: GiCandidateSource::SoftwareBvhGpu,
         recipes: vec![RecipeId::WorldRestir],
         partition: Default::default(),
         budget: FrameResourceBudget::default(),
@@ -2891,7 +3368,14 @@ fn frame_graph_records_optional_trace_between_scene_and_gi() {
     let queues = RenderQueues::new();
     let functions = DrawFunctions::new();
 
-    let absent = crate::frame::target_graph(&target, &queues, &functions, lighting.pass(&plan));
+    // The no-trace path must use an admitted host producer; a software-BVH
+    // plan cannot be recorded without its trace/candidate-build passes.
+    let mut host_plan = plan.clone();
+    host_plan.candidate_source = GiCandidateSource::HostProvided;
+    extracted.gi_candidates = vec![Vec::new(); extracted.surfaces.len()];
+    lighting.prepare(&host_plan, &extracted, 0, runtime.queue());
+    let absent =
+        crate::frame::target_graph(&target, &queues, &functions, lighting.pass(&host_plan));
     assert_eq!(
         absent
             .blackboard()
@@ -2900,6 +3384,12 @@ fn frame_graph_records_optional_trace_between_scene_and_gi() {
             .trace_dispatches,
         0
     );
+    absent
+        .blackboard()
+        .get::<crate::frame::FrameGraphStages>()
+        .unwrap()
+        .assert_contract();
+    lighting.prepare(&plan, &extracted, 0, runtime.queue());
 
     let graph = crate::frame::target_graph_with_trace(
         &target,
@@ -2951,7 +3441,7 @@ fn physical_gpu_offscreen_host_graph_traces_builds_gi_and_composites() {
         build_gi_candidates_reference, trace_reference, BorrowedPackedTraceScene, LightingTraceGpu,
         PackedTraceScene, TraceRay,
     };
-    use prism_render_architecture::lighting::contract::{LightingPlan, RecipeId, Tier};
+    use prism_render_architecture::lighting::contract::BudgetCompiler;
     use prism_render_architecture::ray_scene::{Bvh, GpuBvhBuffers, Triangle};
     use prism_render_driver::{BufferDescriptor, BufferUsages, DeviceType};
     use prism_render_driver_wgpu::WgpuInstance;
@@ -3021,16 +3511,22 @@ fn physical_gpu_offscreen_host_graph_traces_builds_gi_and_composites() {
         direction_pdf: 1.0 / core::f32::consts::PI,
         selection_u01: 0.5,
     }];
-    let plan = LightingPlan {
-        tier: Tier::Balanced,
-        recipes: vec![RecipeId::WorldRestir],
-        partition: Default::default(),
-        budget: FrameResourceBudget::default(),
-        rejected: Vec::new(),
-    };
     let mut extracted = ExtractedLightingInputs::default();
     extracted.surfaces = vec![surface];
     extracted.trace_scene = Some(trace_scene);
+    let availability = extracted.candidate_availability(runtime.device().capabilities());
+    assert_eq!(availability, GiCandidateAvailability::SoftwareBvhGpu);
+    let config = RenderAppConfig::new(extent);
+    let plan = BudgetCompiler::compile(
+        extracted.stats,
+        config.lighting_budget,
+        config.lighting_caps,
+        config.lighting_tier,
+        availability,
+    );
+    assert_eq!(plan.candidate_source, GiCandidateSource::SoftwareBvhGpu);
+    assert!(plan.recipes.contains(&RecipeId::WorldRestir));
+    assert!(plan.recipes.contains(&RecipeId::SpecializedDeterministic));
 
     let lighting = LightingGpuState::new(&mut runtime).expect("lighting GPU bundle");
     lighting.prepare(&plan, &extracted, FRAME_INDEX, runtime.queue());
@@ -3072,11 +3568,12 @@ fn physical_gpu_offscreen_host_graph_traces_builds_gi_and_composites() {
     assert_eq!(stages.trace_dispatches, 1);
     assert_eq!(stages.candidate_build_dispatches, 1);
     assert_eq!(stages.gi_recipes, 1);
+    assert_eq!(stages.direct_recipes, 1);
     assert_eq!(stages.composite_passes, 1);
     assert_eq!(
         graph.pass_count(),
-        5,
-        "clear, trace, candidate, GI, composite"
+        6,
+        "clear, trace, candidate, direct, GI, composite"
     );
     let recorded = graph
         .execute(runtime.device(), runtime.queue())
@@ -3195,6 +3692,7 @@ fn lighting_graph_skips_direct_when_only_world_restir_is_admitted() {
     let lighting = LightingGpuState::new(&mut runtime).expect("lighting GPU bundle");
     let plan = LightingPlan {
         tier: Tier::Balanced,
+        candidate_source: GiCandidateSource::HostProvided,
         recipes: vec![RecipeId::WorldRestir],
         partition: Default::default(),
         budget: FrameResourceBudget::default(),
@@ -3202,6 +3700,7 @@ fn lighting_graph_skips_direct_when_only_world_restir_is_admitted() {
     };
     let mut extracted = ExtractedLightingInputs::default();
     extracted.surfaces = vec![LightingSurfaceInput::default()];
+    extracted.gi_candidates = vec![Vec::new()];
     lighting.prepare(&plan, &extracted, 0, runtime.queue());
 
     let target = RenderTarget::new(runtime.device(), extent);
@@ -3241,6 +3740,7 @@ fn lighting_graph_has_no_compute_pass_without_an_admitted_backend() {
     let lighting = LightingGpuState::new(&mut runtime).expect("lighting GPU bundle");
     let plan = LightingPlan {
         tier: Tier::Balanced,
+        candidate_source: GiCandidateSource::Disabled,
         recipes: Vec::new(),
         partition: Default::default(),
         budget: FrameResourceBudget::default(),
@@ -3283,6 +3783,7 @@ fn lighting_empty_surface_batch_clears_outputs_without_dispatching() {
     let lighting = LightingGpuState::new(&mut runtime).expect("lighting GPU bundle");
     let plan = LightingPlan {
         tier: Tier::Balanced,
+        candidate_source: GiCandidateSource::HostProvided,
         recipes: vec![RecipeId::SpecializedDeterministic, RecipeId::WorldRestir],
         partition: Default::default(),
         budget: FrameResourceBudget::default(),

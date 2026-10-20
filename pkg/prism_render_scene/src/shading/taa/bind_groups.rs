@@ -3,7 +3,7 @@
 //! Mirrors [`super::super::ssr::temporal`]'s bind-group preparation: for every
 //! view carrying both a resident [`ViewVisibilityBuffer`] (holding the
 //! composited `scene_color` and the motion-vector G-buffer) and a resolved
-//! [`ViewTaa`] (the ping-pong history slots), it assembles the five-entry
+//! [`ViewTaa`] (the ping-pong history slots), it assembles the six-entry
 //! group-0 bind group in the byte-identical order the resolve pipeline layout
 //! and `taa_resolve.wesl` declare:
 //!
@@ -11,7 +11,8 @@
 //! * binding 1 — the previous-frame history (sampled at the reprojected UV),
 //! * binding 2 — the bilinear clamp history sampler,
 //! * binding 3 — the write-only `rgba16float` resolved output, and
-//! * binding 4 — the resolve's `rg16float` motion-vector G-buffer.
+//! * binding 4 — the resolve's `rg16float` motion-vector G-buffer, and
+//! * binding 5 — the independent `R8Unorm` TAA reactive mask.
 
 use bevy_ecs::prelude::*;
 use bevy_render::{
@@ -51,13 +52,14 @@ pub(crate) fn prepare_taa_bind_groups(
             "prism TAA resolve",
             pipeline.layout(),
             // Order mirrors `taa_resolve.wesl`: scene_color(0), history(1),
-            // sampler(2), taa_out(3), motion(4).
+            // sampler(2), taa_out(3), motion(4), reactive(5).
             &BindGroupEntries::sequential((
                 visibility.scene_color_view(),
                 taa.read_view(),
                 pipeline.sampler(),
                 taa.write_view(),
                 visibility.motion_vectors_view(),
+                visibility.reactive_mask_view(),
             )),
         );
         commands.entity(entity).insert(ViewTaaBindGroup { group });

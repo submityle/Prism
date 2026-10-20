@@ -2,7 +2,10 @@
 //!
 //! These tests draw the production vertex/fragment stages, dispatch the
 //! production render-FX and resident composition/export stages, and map their
-//! actual outputs. No test shader reimplements a water algorithm. The shallow
+//! actual outputs. The eight legacy cases additionally execute a byte-frozen
+//! 8400fe972^ shader graph in an isolated cache, so shared PBR/NPR regressions
+//! cannot supply their own expected pixels. This is a traceable executable
+//! reference, not a previously recorded GPU capture. The shallow
 //! and shore weight tests exercise the current ABI (authored shallow bias and
 //! `normal_foam.w`), not an absent shoreline-distance/depth-texture binding.
 //! Reactive is observable through the production overlay control, not a third
@@ -16,6 +19,9 @@ use bevy_platform::future::block_on;
 use bevy_shader::{Shader, ShaderCache, ShaderCacheError, ShaderCacheSource, ValidateShader};
 use std::sync::OnceLock;
 use wgpu::util::{BufferInitDescriptor, DeviceExt, TextureDataOrder};
+
+#[path = "fixtures/water_legacy_41a31cee/mod.rs"]
+mod legacy;
 
 const EDGE: u32 = 16;
 const PIXELS: usize = (EDGE * EDGE) as usize;
@@ -43,6 +49,13 @@ fn production_wgsl(raster: bool) -> String {
     let mut cache = ShaderCache::new((), keep_wgsl);
     let sources = [
         ("lighting", include_str!("../src/shaders/lighting.wesl")),
+        ("tangent", include_str!("../src/shaders/tangent.wesl")),
+        (
+            "specular_aa",
+            include_str!("../src/shaders/specular_aa.wesl"),
+        ),
+        ("thin_film", include_str!("../src/shaders/thin_film.wesl")),
+        ("glint", include_str!("../src/shaders/glint.wesl")),
         ("brdf", include_str!("../src/shaders/brdf.wesl")),
         ("water", include_str!("../src/shaders/water.wesl")),
         (
@@ -69,7 +82,7 @@ fn production_wgsl(raster: bool) -> String {
         ids.push(id);
     }
     (*cache
-        .get(0, ids[if raster { 3 } else { 4 }], &[])
+        .get(0, ids[if raster { 7 } else { 8 }], &[])
         .expect("unmodified production water WESL must compile"))
     .clone()
 }
@@ -87,6 +100,10 @@ struct Gpu {
     device: wgpu::Device,
     queue: wgpu::Queue,
     layouts: Vec<wgpu::BindGroupLayout>,
+    programs: [Programs; 2],
+}
+
+struct Programs {
     raster: [wgpu::RenderPipeline; 3],
     compose: wgpu::ComputePipeline,
     export: wgpu::ComputePipeline,
@@ -268,87 +285,143 @@ impl Gpu {
             bind_group_layouts: &refs,
             immediate_size: 0,
         });
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("unmodified production water raster"),
-            source: wgpu::ShaderSource::Wgsl(production_wgsl(true).into()),
-        });
-        let raster = [
-            "water_surface_fs_pbr",
-            "water_surface_fs_npr",
-            "water_surface_fs_mask_blend",
-        ]
-        .map(|entry| {
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some(entry),
-                layout: Some(&pipeline_layout),
-                vertex: wgpu::VertexState {
-                    module: &module,
-                    entry_point: Some("water_surface_vs"),
-                    compilation_options: Default::default(),
-                    buffers: &[],
-                },
-                primitive: wgpu::PrimitiveState {
-                    cull_mode: None,
-                    ..Default::default()
-                },
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: wgpu::TextureFormat::Depth32Float,
-                    depth_write_enabled: Some(false),
-                    depth_compare: Some(wgpu::CompareFunction::GreaterEqual),
-                    stencil: Default::default(),
-                    bias: Default::default(),
+        // Distinct modules and pipelines, including FX, composition and HDR:
+        // no part of the frozen oracle resolves to an under-test shader.
+        let programs = [false, true].map(|historical| {
+            let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some(if historical {
+                    legacy::COMMIT
+                } else {
+                    "production water raster"
                 }),
-                multisample: Default::default(),
-                fragment: Some(wgpu::FragmentState {
-                    module: &module,
-                    entry_point: Some(entry),
-                    compilation_options: Default::default(),
-                    targets: &[
-                        Some(wgpu::ColorTargetState {
-                            format: wgpu::TextureFormat::Rgba16Float,
-                            blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
-                            write_mask: wgpu::ColorWrites::ALL,
-                        }),
-                        Some(wgpu::ColorTargetState {
-                            format: wgpu::TextureFormat::Rg16Float,
-                            blend: None,
-                            write_mask: wgpu::ColorWrites::RED | wgpu::ColorWrites::GREEN,
-                        }),
-                    ],
+                source: wgpu::ShaderSource::Wgsl(
+                    if historical {
+                        legacy::compile("water_surface_raster.wesl")
+                    } else {
+                        production_wgsl(true)
+                    }
+                    .into(),
+                ),
+            });
+            let raster = [
+                "water_surface_fs_pbr",
+                "water_surface_fs_npr",
+                if historical {
+                    "water_surface_fs_hybrid"
+                } else {
+                    "water_surface_fs_mask_blend"
+                },
+            ]
+            .map(|entry| {
+                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some(entry),
+                    layout: Some(&pipeline_layout),
+                    vertex: wgpu::VertexState {
+                        module: &module,
+                        entry_point: Some("water_surface_vs"),
+                        compilation_options: Default::default(),
+                        buffers: &[],
+                    },
+                    primitive: wgpu::PrimitiveState {
+                        cull_mode: None,
+                        ..Default::default()
+                    },
+                    depth_stencil: Some(wgpu::DepthStencilState {
+                        format: wgpu::TextureFormat::Depth32Float,
+                        depth_write_enabled: Some(false),
+                        depth_compare: Some(wgpu::CompareFunction::GreaterEqual),
+                        stencil: Default::default(),
+                        bias: Default::default(),
+                    }),
+                    multisample: Default::default(),
+                    fragment: Some(wgpu::FragmentState {
+                        module: &module,
+                        entry_point: Some(entry),
+                        compilation_options: Default::default(),
+                        targets: &[
+                            Some(wgpu::ColorTargetState {
+                                format: wgpu::TextureFormat::Rgba16Float,
+                                blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                                write_mask: wgpu::ColorWrites::ALL,
+                            }),
+                            Some(wgpu::ColorTargetState {
+                                format: wgpu::TextureFormat::Rg16Float,
+                                blend: None,
+                                write_mask: wgpu::ColorWrites::RED | wgpu::ColorWrites::GREEN,
+                            }),
+                            Some(wgpu::ColorTargetState {
+                                format: wgpu::TextureFormat::R8Unorm,
+                                blend: None,
+                                write_mask: wgpu::ColorWrites::RED,
+                            }),
+                        ],
+                    }),
+                    multiview_mask: None,
+                    cache: None,
+                })
+            });
+            let fx = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some(if historical {
+                    "frozen historical water render-FX"
+                } else {
+                    "production water render-FX"
                 }),
-                multiview_mask: None,
-                cache: None,
-            })
+                source: wgpu::ShaderSource::Wgsl(
+                    if historical {
+                        legacy::compile("water_render_fx.wesl")
+                    } else {
+                        production_wgsl(false)
+                    }
+                    .into(),
+                ),
+            });
+            let caustics = compute(&device, &fx, "water_caustics_project");
+            let underwater = compute(&device, &fx, "water_underwater_volume");
+            let composition = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some(if historical {
+                    "frozen historical resident composition"
+                } else {
+                    "production resident composition"
+                }),
+                source: wgpu::ShaderSource::Wgsl(
+                    if historical {
+                        legacy::source("response_composition.wgsl")
+                    } else {
+                        include_str!("../src/shaders/response_composition.wgsl")
+                    }
+                    .into(),
+                ),
+            });
+            let hdr = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some(if historical {
+                    "frozen historical HDR export"
+                } else {
+                    "production HDR export"
+                }),
+                source: wgpu::ShaderSource::Wgsl(
+                    if historical {
+                        legacy::source("response_to_hdr.wgsl")
+                    } else {
+                        include_str!("../src/shaders/response_to_hdr.wgsl")
+                    }
+                    .into(),
+                ),
+            });
+            let compose = compute(&device, &composition, "compose_responses");
+            let export = compute(&device, &hdr, "response_to_hdr");
+            Programs {
+                raster,
+                compose,
+                export,
+                caustics,
+                underwater,
+            }
         });
-        let fx = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("unmodified production water render-FX"),
-            source: wgpu::ShaderSource::Wgsl(production_wgsl(false).into()),
-        });
-        let caustics = compute(&device, &fx, "water_caustics_project");
-        let underwater = compute(&device, &fx, "water_underwater_volume");
-        let composition = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("production resident composition"),
-            source: wgpu::ShaderSource::Wgsl(
-                include_str!("../src/shaders/response_composition.wgsl").into(),
-            ),
-        });
-        let hdr = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("production HDR export"),
-            source: wgpu::ShaderSource::Wgsl(
-                include_str!("../src/shaders/response_to_hdr.wgsl").into(),
-            ),
-        });
-        let compose = compute(&device, &composition, "compose_responses");
-        let export = compute(&device, &hdr, "response_to_hdr");
         Some(Self {
             device,
             queue,
             layouts,
-            raster,
-            compose,
-            export,
-            caustics,
-            underwater,
+            programs,
         })
     }
 }
@@ -593,13 +666,17 @@ impl Output {
         f32::from_bits(self.controls[Self::CENTER][0])
     }
 
-    fn assert_resident_chain(&self, background: [f32; 4]) {
+    fn assert_resident_chain(&self, background: [f32; 4], historical: bool) {
         for i in 0..PIXELS {
             assert_eq!(
                 self.coverage[i], 1,
                 "production fragment coverage pixel {i}"
             );
-            assert_eq!(self.controls[i][1], 31, "all five response channels");
+            assert_eq!(
+                self.controls[i][1],
+                if historical { 1 } else { 31 },
+                "response channel selection"
+            );
             assert_eq!(self.controls[i][3], 0, "shared alpha rule");
             let mask = f32::from_bits(self.controls[i][0]);
             assert!(mask.is_finite() && (0.0..=1.0).contains(&mask));
@@ -644,17 +721,32 @@ impl Output {
 impl Gpu {
     // 0=PBR, 1=NPR, 2=MaskBlend. All have identical geometry/resources.
     fn draw(&self, case: &Case, entry: usize) -> Output {
+        self.draw_program(case, entry, false)
+    }
+
+    // Historical entry 2 is the removed Hybrid, kept ONLY in this test fixture.
+    fn draw_legacy(&self, case: &Case, entry: usize) -> Output {
+        self.draw_program(case, entry, true)
+    }
+
+    fn draw_program(&self, case: &Case, entry: usize, historical: bool) -> Output {
         use wgpu::BindingResource::{Sampler, TextureView};
         use wgpu::TextureUsages as TU;
         let d = &self.device;
         let q = &self.queue;
+        let programs = &self.programs[usize::from(historical)];
         let mut view = Vec::<[f32; 4]>::from(IDENTITY);
         view.extend([
             [0.0, 0.0, case.camera_z, 0.0],
             [0.08, 0.5, 0.2, case.whiten],
             [0.1, 0.3, 0.5, case.alpha],
             [4.0, case.foam_threshold, 0.0, case.shallow],
-            [EDGE as f32, EDGE as f32, case.overlay, 0.0],
+            [
+                EDGE as f32,
+                EDGE as f32,
+                if historical { 0.0 } else { case.overlay },
+                0.0,
+            ],
         ]);
         let view = upload(d, &view, true);
         let base = upload(
@@ -777,7 +869,7 @@ impl Gpu {
         );
         let caustic_group = group(
             d,
-            &self.caustics.get_bind_group_layout(0),
+            &programs.caustics.get_bind_group_layout(0),
             &[
                 photons.as_entire_binding(),
                 caustic_params.as_entire_binding(),
@@ -828,7 +920,7 @@ impl Gpu {
         );
         let underwater_group = group(
             d,
-            &self.underwater.get_bind_group_layout(2),
+            &programs.underwater.get_bind_group_layout(2),
             &[
                 underwater_params.as_entire_binding(),
                 TextureView(&volume_view),
@@ -836,7 +928,7 @@ impl Gpu {
             ],
         );
         let empty_groups: Vec<_> = (0..2)
-            .map(|i| group(d, &self.underwater.get_bind_group_layout(i), &[]))
+            .map(|i| group(d, &programs.underwater.get_bind_group_layout(i), &[]))
             .collect();
         let froxel_params = upload(
             d,
@@ -933,6 +1025,13 @@ impl Gpu {
             TU::RENDER_ATTACHMENT | TU::COPY_SRC,
         );
         let motion_view = motion.create_view(&Default::default());
+        let reactive = texture(
+            d,
+            wgpu::TextureFormat::R8Unorm,
+            1,
+            TU::RENDER_ATTACHMENT | TU::COPY_SRC,
+        );
+        let reactive_view = reactive.create_view(&Default::default());
         let depth = texture(
             d,
             wgpu::TextureFormat::Depth32Float,
@@ -951,7 +1050,7 @@ impl Gpu {
         let visibility_view = visibility.create_view(&Default::default());
         let composition_group = group(
             d,
-            &self.compose.get_bind_group_layout(0),
+            &programs.compose.get_bind_group_layout(0),
             &[
                 left.as_entire_binding(),
                 right.as_entire_binding(),
@@ -961,7 +1060,7 @@ impl Gpu {
         );
         let export_group = group(
             d,
-            &self.export.get_bind_group_layout(0),
+            &programs.export.get_bind_group_layout(0),
             &[
                 left.as_entire_binding(),
                 TextureView(&hdr_view),
@@ -982,13 +1081,13 @@ impl Gpu {
         let mut encoder = d.create_command_encoder(&Default::default());
         {
             let mut pass = encoder.begin_compute_pass(&Default::default());
-            pass.set_pipeline(&self.caustics);
+            pass.set_pipeline(&programs.caustics);
             pass.set_bind_group(0, &caustic_group, &[]);
             pass.dispatch_workgroups(EDGE.div_ceil(8), EDGE.div_ceil(8), 1);
         }
         {
             let mut pass = encoder.begin_compute_pass(&Default::default());
-            pass.set_pipeline(&self.underwater);
+            pass.set_pipeline(&programs.underwater);
             for (i, group) in empty_groups.iter().enumerate() {
                 pass.set_bind_group(i as u32, group, &[]);
             }
@@ -1016,6 +1115,15 @@ impl Gpu {
                         store: wgpu::StoreOp::Store,
                     },
                 }),
+                Some(wgpu::RenderPassColorAttachment {
+                    view: &reactive_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                }),
             ];
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("draw actual production water surface"),
@@ -1030,7 +1138,7 @@ impl Gpu {
                 }),
                 ..Default::default()
             });
-            pass.set_pipeline(&self.raster[entry]);
+            pass.set_pipeline(&programs.raster[entry]);
             for (i, group) in groups.iter().enumerate() {
                 pass.set_bind_group(i as u32, group, &[]);
             }
@@ -1042,13 +1150,13 @@ impl Gpu {
         encoder.copy_buffer_to_buffer(&coverage, 0, &coverage_read, 0, coverage.size());
         {
             let mut pass = encoder.begin_compute_pass(&Default::default());
-            pass.set_pipeline(&self.compose);
+            pass.set_pipeline(&programs.compose);
             pass.set_bind_group(0, &composition_group, &[]);
             pass.dispatch_workgroups((PIXELS as u32).div_ceil(64), 1, 1);
         }
         {
             let mut pass = encoder.begin_compute_pass(&Default::default());
-            pass.set_pipeline(&self.export);
+            pass.set_pipeline(&programs.export);
             pass.set_bind_group(0, &export_group, &[]);
             pass.dispatch_workgroups(EDGE.div_ceil(8), EDGE.div_ceil(8), 1);
         }
@@ -1071,7 +1179,7 @@ impl Gpu {
             caustics: read(d, &caustics_read),
             volume: read(d, &volume_read),
         };
-        output.assert_resident_chain(case.background);
+        output.assert_resident_chain(case.background, historical);
         output
     }
 }
@@ -1116,11 +1224,10 @@ fn different(a: [f32; 4], b: [f32; 4]) {
     );
 }
 
-/// Compare one complete production frame with the legacy two-stage Hybrid
-/// equation.  This is deliberately separate from `assert_region_output`: the
-/// latter proves the current local endpoint relation, while this oracle checks
-/// every response word, control word, motion texel, HDR export texel, and
-/// premultiplied color texel against an independently recomputed frame.
+/// Independent-overlay extension of the old two-stage equation, fed ONLY by
+/// the frozen historical PBR/NPR draws. Unlike a direct historical Hybrid
+/// comparison this permits overlay != shallow; do not call it an old capture.
+/// The direct old-ABI Hybrid comparison lives alongside this check below.
 fn assert_legacy_frame(
     hybrid: &Output,
     pbr: &Output,
@@ -1138,12 +1245,13 @@ fn assert_legacy_frame(
         let mut expected = [0.0_f32; 16];
         let blended_alpha = pbr_arm[15] * (1.0 - region) + npr_arm[15] * region;
         let motion_index = (i / EDGE as usize) * (ROW / 2) as usize + (i % EDGE as usize) * 2;
+        // Keep the expected reactive/overlay independent of the Hybrid output.
         let motion = [
-            half(hybrid.motion[motion_index]),
-            half(hybrid.motion[motion_index + 1]),
+            half(pbr.motion[motion_index]),
+            half(pbr.motion[motion_index + 1]),
         ];
         let reactive = foam
-            .max((motion[0] * motion[0] + motion[1] * motion[1]).sqrt() * 32.0)
+            .max(((motion[0] * motion[0] + motion[1] * motion[1]).sqrt() * 32.0).clamp(0.0, 1.0))
             .max(1.0 - blended_alpha.clamp(0.0, 1.0));
         let overlay = (case.overlay * reactive.max(0.25)).clamp(0.0, 1.0);
         for c in 0..16 {
@@ -1192,12 +1300,152 @@ fn assert_legacy_frame(
     }
 }
 
+fn reference_close(actual: f32, expected: f32, absolute: f32, relative: f32) -> bool {
+    actual.is_finite()
+        && expected.is_finite()
+        && (actual - expected).abs() <= absolute + relative * expected.abs()
+}
+
+fn frozen_value(actual: f32, expected: f32, half_precision: bool, label: &str) {
+    // f32 tolerates small compiler/FMA differences, not a shading change.
+    // Half outputs allow about two ULP at normal values plus a small floor at
+    // zero. Padding bytes are never compared. No frame-averaged error metric
+    // can conceal one corrupt pixel, motion component, or response word.
+    let (absolute, relative) = if half_precision {
+        (2.0e-6, 2.0e-3)
+    } else {
+        (3.0e-5, 3.0e-5)
+    };
+    assert!(
+        reference_close(actual, expected, absolute, relative),
+        "{label}: current={actual}, frozen={expected}, tolerance={absolute}+{relative}*abs(reference), reference={}",
+        legacy::COMMIT,
+    );
+}
+
+/// Compare all active pixels, including pre-composition arms and independent
+/// render-FX readbacks. The one intentional record difference is old channels
+/// 1 -> current 31: this historical producer populated only RGB channel zero.
+fn assert_frozen_output(actual: &Output, reference: &Output, label: &str) {
+    for i in 0..PIXELS {
+        assert_eq!(
+            actual.coverage[i], reference.coverage[i],
+            "{label}: coverage {i}"
+        );
+        assert_eq!(actual.controls[i][1], 31, "{label}: current channels {i}");
+        assert_eq!(
+            reference.controls[i][1], 1,
+            "{label}: historical channels {i}"
+        );
+        assert_eq!(
+            actual.controls[i][3], reference.controls[i][3],
+            "{label}: alpha rule {i}"
+        );
+        for c in [0, 2] {
+            frozen_value(
+                f32::from_bits(actual.controls[i][c]),
+                f32::from_bits(reference.controls[i][c]),
+                false,
+                &format!("{label}: control pixel={i} word={c}"),
+            );
+        }
+        for (name, a, b) in [
+            ("left", &actual.left, &reference.left),
+            ("right", &actual.right, &reference.right),
+            ("composed", &actual.composed, &reference.composed),
+        ] {
+            for c in 0..16 {
+                frozen_value(
+                    a[i][c],
+                    b[i][c],
+                    false,
+                    &format!("{label}: {name} pixel={i} word={c}"),
+                );
+            }
+        }
+        let y = i / EDGE as usize;
+        let x = i % EDGE as usize;
+        for (name, a, b, channels) in [
+            ("color", &actual.color, &reference.color, 4),
+            ("HDR", &actual.hdr, &reference.hdr, 4),
+            ("motion", &actual.motion, &reference.motion, 2),
+        ] {
+            let texel = y * (ROW / 2) as usize + x * channels;
+            for c in 0..channels {
+                frozen_value(
+                    half(a[texel + c]),
+                    half(b[texel + c]),
+                    true,
+                    &format!("{label}: {name} pixel={i} component={c}"),
+                );
+            }
+        }
+        let caustic = y * (ROW / 4) as usize + x;
+        frozen_value(
+            actual.caustics[caustic],
+            reference.caustics[caustic],
+            false,
+            &format!("{label}: caustics pixel={i}"),
+        );
+        for z in 0..VOLUME_DEPTH as usize {
+            let texel = (z * EDGE as usize + y) * (ROW / 2) as usize + x * 4;
+            for c in 0..4 {
+                frozen_value(
+                    half(actual.volume[texel + c]),
+                    half(reference.volume[texel + c]),
+                    true,
+                    &format!("{label}: volume pixel={i} z={z} component={c}"),
+                );
+            }
+        }
+    }
+}
+
 fn run_legacy_frame_case(case: Case, foam: impl Fn(usize) -> f32, shallow: impl Fn(usize) -> f32) {
     let Some(gpu) = gpu() else { return };
-    let pbr = gpu.draw(&case, 0);
-    let npr = gpu.draw(&case, 1);
+    // A live endpoint is NEVER the expected side. Pin both separately even if
+    // a region weight of 0 or 1 would hide one endpoint in the final Hybrid.
+    let pbr = gpu.draw_legacy(&case, 0);
+    let npr = gpu.draw_legacy(&case, 1);
+    assert_frozen_output(&gpu.draw(&case, 0), &pbr, "PBR endpoint");
+    assert_frozen_output(&gpu.draw(&case, 1), &npr, "NPR endpoint");
     let hybrid = gpu.draw(&case, 2);
     assert_legacy_frame(&hybrid, &pbr, &npr, &case, foam, shallow);
+
+    // Old Hybrid aliases its overlay and shallow controls. Do not patch that
+    // shader to accept today's independent overlay or pretend unequal inputs
+    // were historical data. Execute its genuine old contract as a second draw.
+    let old_abi_case = Case {
+        overlay: case.shallow,
+        ..case
+    };
+    let old_hybrid = gpu.draw_legacy(&old_abi_case, 2);
+    let current = gpu.draw(&old_abi_case, 2);
+    assert_frozen_output(&current, &old_hybrid, "direct historical Hybrid");
+}
+
+#[test]
+fn frozen_reference_tolerance_is_finite_and_detects_shared_endpoint_drift() {
+    // Comparator sensitivity, not a claim of an executed GPU mutation test.
+    for reference in [0.0_f32, 0.12, 0.4, 1.0, 4.0] {
+        assert!(reference_close(reference, reference, 3.0e-5, 3.0e-5));
+        assert!(!reference_close(
+            reference + 0.001,
+            reference,
+            3.0e-5,
+            3.0e-5
+        ));
+        assert!(!reference_close(
+            reference + 0.02,
+            reference,
+            2.0e-6,
+            2.0e-3
+        ));
+    }
+    for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+        assert!(!reference_close(bad, bad, 3.0e-5, 3.0e-5));
+        assert!(!reference_close(0.0, bad, 3.0e-5, 3.0e-5));
+    }
 }
 
 #[test]
@@ -1210,6 +1458,27 @@ fn water_legacy_gpu_parity_depth_full_frame() {
         |_| 0.0,
         |_| 0.75,
     );
+    // Also freeze the real depth-dependent volume consumer, not just the
+    // authored shallow scalar. Two eye depths sample the historical compute
+    // volume with a nonuniform surface-light input.
+    for camera_z in [2.0, 6.0] {
+        run_legacy_frame_case(
+            Case {
+                camera_z,
+                volume_enable: true,
+                surface_light: Some(core::array::from_fn(|i| {
+                    if i % EDGE as usize >= EDGE as usize / 2 {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                })),
+                ..Default::default()
+            },
+            |_| 0.0,
+            |_| 0.0,
+        );
+    }
 }
 
 #[test]
@@ -1225,18 +1494,32 @@ fn water_legacy_gpu_parity_shore_full_frame() {
         |_| 0.65,
         |_| 0.0,
     );
+    run_legacy_frame_case(
+        Case {
+            vertex_foam: Some([0.0, 1.0, 0.0]),
+            shallow: 0.2,
+            whiten: 0.0,
+            foam_threshold: 2.0,
+            ..Default::default()
+        },
+        |i| ((i % EDGE as usize) as f32 + 0.5) / (2 * EDGE) as f32,
+        |_| 0.2,
+    );
 }
 
 #[test]
 fn water_legacy_gpu_parity_foam_full_frame() {
-    run_legacy_frame_case(
-        Case {
-            foam: 0.8,
-            ..Default::default()
-        },
-        |_| 0.8,
-        |_| 0.0,
-    );
+    // Straddle the toon threshold and include full foam/alpha saturation.
+    for foam in [0.59, 0.8, 1.0] {
+        run_legacy_frame_case(
+            Case {
+                foam,
+                ..Default::default()
+            },
+            |_| foam,
+            |_| 0.0,
+        );
+    }
 }
 
 #[test]
@@ -1250,34 +1533,57 @@ fn water_legacy_gpu_parity_caustics_full_frame() {
         |_| 0.0,
         |_| 0.0,
     );
+    run_legacy_frame_case(
+        Case {
+            caustic_incident: 0.25,
+            caustic_enable: true,
+            surface_uvs: Some([
+                [0.0, 0.5, 0.0, 0.0],
+                [2.0, 0.5, 0.0, 0.0],
+                [0.0, 0.5, 0.0, 0.0],
+            ]),
+            caustic_offsets: Some(core::array::from_fn(|i| {
+                let x = i % EDGE as usize;
+                [-0.5 * x.min(EDGE as usize - 1 - x) as f32, 0.0]
+            })),
+            ..Default::default()
+        },
+        |_| 0.0,
+        |_| 0.0,
+    );
 }
 
 #[test]
 fn water_legacy_gpu_parity_reflection_full_frame() {
-    run_legacy_frame_case(
-        Case {
-            normal: [0.95, 0.0, 0.3122499],
-            ssr_enable: true,
-            ..Default::default()
-        },
-        |_| 0.0,
-        |_| 0.0,
-    );
+    for (ssr_enable, hzb_depth) in [(true, 0.45), (true, 0.0), (false, 0.45)] {
+        run_legacy_frame_case(
+            Case {
+                normal: [0.95, 0.0, 0.3122499],
+                ssr_enable,
+                hzb_depth,
+                ..Default::default()
+            },
+            |_| 0.0,
+            |_| 0.0,
+        );
+    }
 }
 
 #[test]
 fn water_legacy_gpu_parity_transparency_overlay_full_frame() {
-    run_legacy_frame_case(
-        Case {
-            alpha: 0.65,
-            shallow: 0.2,
-            overlay: 0.7,
-            background: [0.125, 0.25, 0.5, 1.0],
-            ..Default::default()
-        },
-        |_| 0.0,
-        |_| 0.2,
-    );
+    for alpha in [0.65, 1.0] {
+        run_legacy_frame_case(
+            Case {
+                alpha,
+                shallow: 0.2,
+                overlay: 0.7,
+                background: [0.125, 0.25, 0.5, 1.0],
+                ..Default::default()
+            },
+            |_| 0.0,
+            |_| 0.2,
+        );
+    }
 }
 
 #[test]
@@ -1290,21 +1596,52 @@ fn water_legacy_gpu_parity_motion_vector_full_frame() {
         |_| 0.0,
         |_| 0.0,
     );
+    let mut camera = IDENTITY;
+    camera[3][0] = 0.25;
+    let mut behind = IDENTITY;
+    behind[3][3] = -1.0;
+    for previous_clip in [camera, behind] {
+        run_legacy_frame_case(
+            Case {
+                previous_clip,
+                ..Default::default()
+            },
+            |_| 0.0,
+            |_| 0.0,
+        );
+    }
 }
 
 #[test]
 fn water_legacy_gpu_parity_reactive_mask_full_frame() {
-    run_legacy_frame_case(
+    let base = Case {
+        alpha: 1.0,
+        shallow: 0.2,
+        overlay: 1.0,
+        ..Default::default()
+    };
+    // Floor, foam, transparency, and a spatial unsaturated motion field are
+    // independent branches. Motion values here are exactly representable in
+    // FP16, so the endpoint MRT can feed the CPU extension without extra
+    // quantization tolerance; direct old-Hybrid parity uses no CPU equation.
+    for case in [
+        base.clone(),
         Case {
-            alpha: 1.0,
-            shallow: 0.2,
-            overlay: 1.0,
             foam: 0.5,
-            ..Default::default()
+            ..base.clone()
         },
-        |_| 0.5,
-        |_| 0.2,
-    );
+        Case {
+            alpha: 0.4,
+            ..base.clone()
+        },
+        Case {
+            previous_vertex_displacement: Some([[0.0; 4], [-0.125, 0.0, 0.0, 0.0], [0.0; 4]]),
+            ..base
+        },
+    ] {
+        let foam = case.foam;
+        run_legacy_frame_case(case, |_| foam, |_| 0.2);
+    }
 }
 
 #[test]

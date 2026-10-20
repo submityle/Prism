@@ -145,29 +145,29 @@ impl LobeSampleBudget {
                 sss_separable_taps: 5,
                 sss_preintegration_steps: 48,
                 translucency_profile_samples: 16,
-                multiscatter_dir_samples: 8,
-                multiscatter_march_samples: 16,
+                multiscatter_dir_samples: 16,
+                multiscatter_march_samples: 8,
             },
             ShadingQuality::Medium => Self {
                 sss_separable_taps: 9,
                 sss_preintegration_steps: 96,
                 translucency_profile_samples: 32,
-                multiscatter_dir_samples: 16,
-                multiscatter_march_samples: 24,
+                multiscatter_dir_samples: 32,
+                multiscatter_march_samples: 12,
             },
             ShadingQuality::High => Self {
                 sss_separable_taps: 13,
                 sss_preintegration_steps: 160,
                 translucency_profile_samples: 48,
-                multiscatter_dir_samples: 32,
-                multiscatter_march_samples: 32,
+                multiscatter_dir_samples: 64,
+                multiscatter_march_samples: 16,
             },
             ShadingQuality::Ultra => Self {
                 sss_separable_taps: 17,
                 sss_preintegration_steps: 256,
                 translucency_profile_samples: 64,
-                multiscatter_dir_samples: 64,
-                multiscatter_march_samples: 48,
+                multiscatter_dir_samples: 96,
+                multiscatter_march_samples: 32,
             },
         }
     }
@@ -329,6 +329,17 @@ mod tests {
         // out-of-the-box path is numerically unchanged.
         let b = ShadingQuality::High.budget();
         assert_eq!(b.sss_preintegration_steps, 160);
+        assert_eq!(b.multiscatter_dir_samples, 64);
+        assert_eq!(b.multiscatter_march_samples, 16);
+    }
+
+    #[test]
+    fn multiscatter_tiers_preserve_the_historical_work_products() {
+        let products = ShadingQuality::ALL.map(|quality| {
+            let budget = quality.budget();
+            budget.multiscatter_dir_samples * budget.multiscatter_march_samples
+        });
+        assert_eq!(products, [128, 384, 1024, 3072]);
     }
 
     #[test]

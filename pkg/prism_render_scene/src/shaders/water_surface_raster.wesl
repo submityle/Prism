@@ -1025,11 +1025,12 @@ fn water_motion_vector(in: VertexOutput) -> vec2<f32> {
 }
 
 // The water surface's MRT output: the composited transparent colour on
-// `@location(0)` and the screen-space motion vector on `@location(1)` (written
-// over the shared motion G-buffer for exactly the water-covered pixels).
+// `@location(0)`, the screen-space motion vector on `@location(1)`, and an
+// independent normalized TAA reactive mask on `@location(2)`.
 struct FragmentOutput {
     @location(0) color: vec4<f32>,
     @location(1) motion: vec2<f32>,
+    @location(2) reactive: f32,
 }
 
 // Shared geometry stage: displace the base grid vertex by the solved field and
@@ -1692,8 +1693,8 @@ fn water_hybrid_weight_contract(
 }
 
 // Reactive coverage follows the CPU golden: foam, screen motion, and low
-// transparency all increase history rejection. It gates the overlay response
-// rather than adding a third MRT target to the existing two-target pass.
+// transparency all increase history rejection. It also feeds the independent
+// TAA reactive MRT written by the surface fragment.
 fn water_hybrid_reactive_mask(foam: f32, motion: vec2<f32>, transparency: f32) -> f32 {
     let motion_strength = length(motion);
     return max(
@@ -1771,14 +1772,16 @@ fn write_response_planes(
 fn water_surface_fs_pbr(in: VertexOutput) -> FragmentOutput {
     let pbr = shade_pbr_core(in);
     write_response_planes(in, pbr, pbr, 0.0, pbr.a);
-    return FragmentOutput(pbr, water_motion_vector(in));
+    let motion = water_motion_vector(in);
+    return FragmentOutput(pbr, motion, water_hybrid_reactive_mask(in.foam, motion, pbr.a));
 }
 
 @fragment
 fn water_surface_fs_npr(in: VertexOutput) -> FragmentOutput {
     let npr = shade_npr_core(in);
     write_response_planes(in, npr, npr, 0.0, npr.a);
-    return FragmentOutput(npr, water_motion_vector(in));
+    let motion = water_motion_vector(in);
+    return FragmentOutput(npr, motion, water_hybrid_reactive_mask(in.foam, motion, npr.a));
 }
 
 @fragment
@@ -1789,7 +1792,8 @@ fn water_surface_fs_custom(in: VertexOutput) -> FragmentOutput {
     let tint = view.water_color.rgb * view.style_params.z;
     let color = vec4<f32>(pbr.rgb + tint * pbr.a, pbr.a);
     write_response_planes(in, color, color, 0.0, color.a);
-    return FragmentOutput(color, water_motion_vector(in));
+    let motion = water_motion_vector(in);
+    return FragmentOutput(color, motion, water_hybrid_reactive_mask(in.foam, motion, color.a));
 }
 
 @fragment
@@ -1806,5 +1810,5 @@ fn water_surface_fs_mask_blend(in: VertexOutput) -> FragmentOutput {
     // This makes the post-raster HDR export equal to the legacy MRT colour
     // while retaining the typed response producer contract.
     write_response_planes(in, blended, npr, overlay, color.a);
-    return FragmentOutput(color, motion);
+    return FragmentOutput(color, motion, water_hybrid_reactive_mask(in.foam, motion, color.a));
 }

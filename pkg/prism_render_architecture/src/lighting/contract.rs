@@ -641,12 +641,58 @@ pub struct PlanCaps {
     pub deterministic_npr: bool,
 }
 
+/// Candidate producer selected for an admitted WorldRestir recipe.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum GiCandidateSource {
+    #[default]
+    Disabled,
+    HostProvided,
+    SoftwareBvhGpu,
+}
+
+/// Why the current frame cannot provide valid GI candidates.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GiCandidateRejection {
+    MissingInputs,
+    InvalidInputs,
+    TraceBackendUnavailable,
+    DeviceLimits,
+}
+
+impl GiCandidateRejection {
+    #[must_use]
+    pub const fn detail(self) -> &'static str {
+        match self {
+            Self::MissingInputs => "missing_inputs",
+            Self::InvalidInputs => "invalid_inputs",
+            Self::TraceBackendUnavailable => "trace_backend_unavailable",
+            Self::DeviceLimits => "device_limits",
+        }
+    }
+}
+
+/// App-validated candidate availability for the actual device and current frame.
+/// Availability is independent of hardware ray tracing; the planner never
+/// infers a producer from capabilities or falls back to another source.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum GiCandidateAvailability {
+    #[default]
+    Missing,
+    HostProvided,
+    SoftwareBvhGpu,
+    Rejected(GiCandidateRejection),
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Rejection {
     Unsupported(RecipeId),
     Unavailable(RecipeId),
     Budget(RecipeId),
     Determinism(RecipeId),
+    CandidateSource {
+        recipe: RecipeId,
+        reason: GiCandidateRejection,
+    },
     VariantGate {
         recipe: RecipeId,
         selected_variants: u32,
@@ -662,6 +708,7 @@ pub enum RejectionCode {
     Unavailable,
     Budget,
     Determinism,
+    CandidateSource,
     VariantGate,
 }
 
@@ -690,6 +737,12 @@ impl Rejection {
             Self::Unavailable(recipe) => (recipe, RejectionCode::Unavailable, "backend", None),
             Self::Budget(recipe) => (recipe, RejectionCode::Budget, "resource_budget", None),
             Self::Determinism(recipe) => (recipe, RejectionCode::Determinism, "determinism", None),
+            Self::CandidateSource { recipe, reason } => (
+                recipe,
+                RejectionCode::CandidateSource,
+                reason.detail(),
+                None,
+            ),
             Self::VariantGate {
                 recipe,
                 selected_variants,
@@ -740,6 +793,8 @@ impl VariantGate {
 pub struct LightingPlan {
     pub tier: Tier,
     pub recipes: Vec<RecipeId>,
+    /// Disabled whenever WorldRestir is not admitted, regardless of availability.
+    pub candidate_source: GiCandidateSource,
     pub partition: BudgetPartition,
     pub budget: FrameResourceBudget,
     pub rejected: Vec<Rejection>,
@@ -757,8 +812,16 @@ impl BudgetCompiler {
         budget: FrameResourceBudget,
         caps: PlanCaps,
         tier: Tier,
+        availability: GiCandidateAvailability,
     ) -> LightingPlan {
-        Self::compile_with_variant_gate(stats, budget, caps, tier, VariantGate::DEFAULT)
+        Self::compile_with_variant_gate(
+            stats,
+            budget,
+            caps,
+            tier,
+            availability,
+            VariantGate::DEFAULT,
+        )
     }
 
     #[must_use]
@@ -767,6 +830,7 @@ impl BudgetCompiler {
         budget: FrameResourceBudget,
         caps: PlanCaps,
         tier: Tier,
+        availability: GiCandidateAvailability,
         variant_gate: VariantGate,
     ) -> LightingPlan {
         let partition = BudgetPartition {
@@ -776,6 +840,7 @@ impl BudgetCompiler {
             streaming_ms: budget.gpu_ms * 0.12,
         };
         let mut recipes: Vec<RecipeId> = Vec::new();
+        let mut candidate_source = GiCandidateSource::Disabled;
         let mut rejected = Vec::new();
         let mut selected_variants = 0;
         for recipe in RecipeId::ALL {
@@ -805,6 +870,27 @@ impl BudgetCompiler {
                 rejected.push(Rejection::Unavailable(recipe));
                 continue;
             }
+            // Keep capability, determinism and execution-backend policy first.
+            // Candidate validity precedes variant and resource admission.
+            let source = if recipe == RecipeId::WorldRestir {
+                match availability {
+                    GiCandidateAvailability::HostProvided => GiCandidateSource::HostProvided,
+                    GiCandidateAvailability::SoftwareBvhGpu => GiCandidateSource::SoftwareBvhGpu,
+                    GiCandidateAvailability::Missing => {
+                        rejected.push(Rejection::CandidateSource {
+                            recipe,
+                            reason: GiCandidateRejection::MissingInputs,
+                        });
+                        continue;
+                    }
+                    GiCandidateAvailability::Rejected(reason) => {
+                        rejected.push(Rejection::CandidateSource { recipe, reason });
+                        continue;
+                    }
+                }
+            } else {
+                GiCandidateSource::Disabled
+            };
             if !variant_gate.admits(recipe, selected_variants) {
                 rejected.push(Rejection::VariantGate {
                     recipe,
@@ -846,6 +932,9 @@ impl BudgetCompiler {
                 continue;
             }
             recipes.push(recipe);
+            if recipe == RecipeId::WorldRestir {
+                candidate_source = source;
+            }
             selected_variants = selected_variants.saturating_add(recipe.variant_count());
         }
         if recipes.is_empty() {
@@ -854,6 +943,7 @@ impl BudgetCompiler {
         LightingPlan {
             tier,
             recipes,
+            candidate_source,
             partition,
             budget,
             rejected,
@@ -887,13 +977,16 @@ impl LightingPlan {
                 Rejection::Unavailable(recipe) => format_name("unavailable", *recipe),
                 Rejection::Budget(recipe) => format_name("budget", *recipe),
                 Rejection::Determinism(recipe) => format_name("determinism", *recipe),
+                Rejection::CandidateSource { recipe, reason } => {
+                    format!("candidate_source:{}:{}", recipe.name(), reason.detail())
+                }
                 Rejection::VariantGate { recipe, .. } => format_name("variant_gate", *recipe),
             })
             .collect::<Vec<_>>()
             .join(", ");
         format!(
-            "tier={:?}; gpu_ms={:.3}; selected=[{}]; rejected=[{}]",
-            self.tier, self.budget.gpu_ms, selected, rejected
+            "tier={:?}; gpu_ms={:.3}; candidate_source={:?}; selected=[{}]; rejected=[{}]",
+            self.tier, self.budget.gpu_ms, self.candidate_source, selected, rejected
         )
     }
 
@@ -1039,6 +1132,7 @@ mod tests {
                 deterministic_npr: true,
             },
             Tier::Balanced,
+            GiCandidateAvailability::HostProvided,
         );
         assert!(plan.recipes.contains(&RecipeId::SpecializedDeterministic));
         assert!(plan.explain().contains("unsupported:DirectStochasticRT"));
@@ -1064,6 +1158,7 @@ mod tests {
                 deterministic_npr: false,
             },
             Tier::Balanced,
+            GiCandidateAvailability::HostProvided,
         );
         assert_eq!(plan.recipes, vec![RecipeId::SpecializedDeterministic]);
         assert!(plan.rejected.iter().any(|rejection| matches!(
@@ -1090,6 +1185,7 @@ mod tests {
                 deterministic_npr: false,
             },
             Tier::Balanced,
+            GiCandidateAvailability::HostProvided,
         );
         assert!(plan.recipes.contains(&RecipeId::SpecializedDeterministic));
         assert!(plan.recipes.contains(&RecipeId::WorldRestir));
@@ -1111,12 +1207,260 @@ mod tests {
                 deterministic_npr: true,
             },
             Tier::Balanced,
+            GiCandidateAvailability::HostProvided,
         );
         assert!(!plan.recipes.contains(&RecipeId::WorldRestir));
         assert!(plan
             .rejected
             .iter()
             .any(|rejection| matches!(rejection, Rejection::Determinism(RecipeId::WorldRestir))));
+    }
+
+    fn candidate_test_budget() -> FrameResourceBudget {
+        FrameResourceBudget {
+            gpu_ms: 16.666,
+            bandwidth: 512 * 1024 * 1024,
+            resident_bytes: 512 * 1024 * 1024,
+            io_ops: 4096,
+            shading_rate_budget: 1.0,
+        }
+    }
+
+    fn candidate_test_caps(ray_tracing: bool, deterministic_npr: bool) -> PlanCaps {
+        PlanCaps {
+            ray_tracing,
+            virtual_shadow: false,
+            offline: false,
+            deterministic_npr,
+        }
+    }
+
+    #[test]
+    fn candidate_source_matrix_is_independent_of_hardware_ray_tracing() {
+        let cases = [
+            (
+                GiCandidateAvailability::Missing,
+                Err(GiCandidateRejection::MissingInputs),
+            ),
+            (
+                GiCandidateAvailability::HostProvided,
+                Ok(GiCandidateSource::HostProvided),
+            ),
+            (
+                GiCandidateAvailability::SoftwareBvhGpu,
+                Ok(GiCandidateSource::SoftwareBvhGpu),
+            ),
+            (
+                GiCandidateAvailability::Rejected(GiCandidateRejection::MissingInputs),
+                Err(GiCandidateRejection::MissingInputs),
+            ),
+            (
+                GiCandidateAvailability::Rejected(GiCandidateRejection::InvalidInputs),
+                Err(GiCandidateRejection::InvalidInputs),
+            ),
+            (
+                GiCandidateAvailability::Rejected(GiCandidateRejection::TraceBackendUnavailable),
+                Err(GiCandidateRejection::TraceBackendUnavailable),
+            ),
+            (
+                GiCandidateAvailability::Rejected(GiCandidateRejection::DeviceLimits),
+                Err(GiCandidateRejection::DeviceLimits),
+            ),
+        ];
+        for ray_tracing in [false, true] {
+            for tier in [Tier::Preview, Tier::Balanced, Tier::Quality, Tier::Offline] {
+                for (availability, expected) in cases {
+                    let plan = BudgetCompiler::compile(
+                        SceneStats::default(),
+                        candidate_test_budget(),
+                        candidate_test_caps(ray_tracing, false),
+                        tier,
+                        availability,
+                    );
+                    let rejection =
+                        plan.rejected.iter().copied().find(|rejection| {
+                            rejection.explanation().recipe == RecipeId::WorldRestir
+                        });
+                    assert_eq!(
+                        plan.executions().iter().any(|execution| {
+                            execution.recipe == RecipeId::WorldRestir
+                                && execution.domain == RecipeDomain::Indirect
+                        }),
+                        expected.is_ok()
+                    );
+                    assert_eq!(
+                        plan.recipes.contains(&RecipeId::WorldRestir),
+                        expected.is_ok()
+                    );
+                    match expected {
+                        Ok(source) => {
+                            assert_eq!(plan.candidate_source, source);
+                            assert_eq!(rejection, None);
+                            assert!(plan
+                                .explain()
+                                .contains(&format!("candidate_source={source:?}")));
+                        }
+                        Err(reason) => {
+                            assert_eq!(plan.candidate_source, GiCandidateSource::Disabled);
+                            assert_eq!(
+                                rejection,
+                                Some(Rejection::CandidateSource {
+                                    recipe: RecipeId::WorldRestir,
+                                    reason,
+                                })
+                            );
+                            let explanation = rejection.unwrap().explanation();
+                            assert_eq!(explanation.code, RejectionCode::CandidateSource);
+                            assert_eq!(explanation.detail, reason.detail());
+                            assert_eq!(explanation.variant_gate, None);
+                            assert!(plan.explain().contains(&format!(
+                                "candidate_source:WorldRestir:{}",
+                                reason.detail()
+                            )));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn missing_candidates_reject_before_variant_and_budget_admission() {
+        assert_eq!(
+            GiCandidateAvailability::default(),
+            GiCandidateAvailability::Missing
+        );
+        assert_eq!(GiCandidateSource::default(), GiCandidateSource::Disabled);
+        let plan = BudgetCompiler::compile_with_variant_gate(
+            SceneStats::default(),
+            FrameResourceBudget::default(),
+            candidate_test_caps(true, false),
+            Tier::Quality,
+            GiCandidateAvailability::Missing,
+            VariantGate {
+                max_per_recipe: 0,
+                max_total: 0,
+            },
+        );
+        assert_eq!(plan.recipes, vec![RecipeId::SpecializedDeterministic]);
+        assert_eq!(plan.candidate_source, GiCandidateSource::Disabled);
+        assert!(plan.rejected.contains(&Rejection::CandidateSource {
+            recipe: RecipeId::WorldRestir,
+            reason: GiCandidateRejection::MissingInputs,
+        }));
+        assert!(plan.explain().contains("candidate_source=Disabled"));
+    }
+
+    #[test]
+    fn determinism_disables_candidates_and_precedes_candidate_rejection() {
+        for availability in [
+            GiCandidateAvailability::Missing,
+            GiCandidateAvailability::HostProvided,
+            GiCandidateAvailability::SoftwareBvhGpu,
+            GiCandidateAvailability::Rejected(GiCandidateRejection::InvalidInputs),
+        ] {
+            let plan = BudgetCompiler::compile(
+                SceneStats::default(),
+                candidate_test_budget(),
+                candidate_test_caps(true, true),
+                Tier::Balanced,
+                availability,
+            );
+            assert!(!plan.recipes.contains(&RecipeId::WorldRestir));
+            assert_eq!(plan.candidate_source, GiCandidateSource::Disabled);
+            assert_eq!(
+                plan.rejected
+                    .iter()
+                    .copied()
+                    .filter(|rejection| { rejection.explanation().recipe == RecipeId::WorldRestir })
+                    .collect::<Vec<_>>(),
+                vec![Rejection::Determinism(RecipeId::WorldRestir)]
+            );
+        }
+    }
+
+    #[test]
+    fn resource_budgets_disable_both_candidate_sources() {
+        let full = candidate_test_budget();
+        let budgets = [
+            FrameResourceBudget {
+                gpu_ms: 2.0,
+                ..full
+            },
+            FrameResourceBudget {
+                bandwidth: 48 * 1024 * 1024,
+                ..full
+            },
+            FrameResourceBudget {
+                resident_bytes: 64 * 1024 * 1024,
+                ..full
+            },
+            FrameResourceBudget {
+                io_ops: 127,
+                ..full
+            },
+            FrameResourceBudget::default(),
+        ];
+        for availability in [
+            GiCandidateAvailability::HostProvided,
+            GiCandidateAvailability::SoftwareBvhGpu,
+        ] {
+            for budget in budgets {
+                let plan = BudgetCompiler::compile(
+                    SceneStats::default(),
+                    budget,
+                    candidate_test_caps(false, false),
+                    Tier::Balanced,
+                    availability,
+                );
+                assert_eq!(plan.recipes, vec![RecipeId::SpecializedDeterministic]);
+                assert_eq!(plan.candidate_source, GiCandidateSource::Disabled);
+                assert!(plan
+                    .rejected
+                    .contains(&Rejection::Budget(RecipeId::WorldRestir)));
+            }
+        }
+    }
+
+    #[test]
+    fn variant_limits_disable_both_candidate_sources() {
+        for availability in [
+            GiCandidateAvailability::HostProvided,
+            GiCandidateAvailability::SoftwareBvhGpu,
+        ] {
+            for gate in [
+                VariantGate {
+                    max_per_recipe: 1,
+                    max_total: 8,
+                },
+                VariantGate {
+                    max_per_recipe: 4,
+                    max_total: 2,
+                },
+                VariantGate {
+                    max_per_recipe: 0,
+                    max_total: 0,
+                },
+            ] {
+                let plan = BudgetCompiler::compile_with_variant_gate(
+                    SceneStats::default(),
+                    candidate_test_budget(),
+                    candidate_test_caps(false, false),
+                    Tier::Balanced,
+                    availability,
+                    gate,
+                );
+                assert_eq!(plan.recipes, vec![RecipeId::SpecializedDeterministic]);
+                assert_eq!(plan.candidate_source, GiCandidateSource::Disabled);
+                assert!(plan.rejected.iter().any(|rejection| matches!(
+                    rejection,
+                    Rejection::VariantGate {
+                        recipe: RecipeId::WorldRestir,
+                        ..
+                    }
+                )));
+            }
+        }
     }
 
     #[test]
@@ -1137,6 +1481,7 @@ mod tests {
                 deterministic_npr: false,
             },
             Tier::Balanced,
+            GiCandidateAvailability::HostProvided,
             VariantGate {
                 max_per_recipe: 4,
                 max_total: 2,
@@ -1158,6 +1503,7 @@ mod tests {
             })
         );
         assert!(plan.explain().contains("variant_gate:WorldRestir"));
+        assert_eq!(plan.candidate_source, GiCandidateSource::Disabled);
     }
 
     #[test]
@@ -1178,6 +1524,7 @@ mod tests {
                 deterministic_npr: false,
             },
             Tier::Balanced,
+            GiCandidateAvailability::HostProvided,
         );
         let metadata = plan.debug_metadata();
         assert_eq!(metadata.len(), plan.recipes.len());

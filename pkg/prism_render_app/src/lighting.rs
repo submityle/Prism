@@ -4,11 +4,12 @@ use bytemuck::{Pod, Zeroable};
 use prism_ecs::prelude::{Res, ResMut, Resource};
 use prism_ecs::world::World;
 use prism_render_architecture::lighting::contract::{
-    BudgetCompiler, ChangeFields, ChangeJournal, LightingPlan, PlanCaps, RecipeExecution, RecipeId,
-    RejectionExplanation, SceneStats, Tier,
+    BudgetCompiler, ChangeFields, ChangeJournal, GiCandidateAvailability, GiCandidateRejection,
+    LightingPlan, PlanCaps, RecipeExecution, RecipeId, RejectionExplanation, SceneStats, Tier,
 };
 use prism_render_architecture::lighting::{DebugMeta, DebugView};
 use prism_render_architecture::ray_scene::GpuBvhBuffers;
+use prism_render_driver::RenderDevice;
 use std::sync::Arc;
 
 use crate::config::RenderAppConfig;
@@ -325,11 +326,9 @@ impl LightingTraceSceneInput {
     fn build_packed_outgoing_radiance(
         &self,
     ) -> Result<Vec<[f32; 4]>, crate::lighting_trace_gpu::TracePreparationError> {
-        if self.bvh.triangles.len() % prism_render_architecture::ray_scene::TRIANGLE_WORDS != 0 {
-            return Err(crate::lighting_trace_gpu::TracePreparationError::Trace(
-                crate::lighting_trace_gpu::TraceGpuError::MalformedPackedLength,
-            ));
-        }
+        crate::lighting_trace_gpu::BorrowedPackedTraceScene::from(self.bvh.as_ref())
+            .validate()
+            .map_err(crate::lighting_trace_gpu::TracePreparationError::Trace)?;
         let triangles = self.bvh.triangles.chunks_exact(12);
         let triangle_count = self.bvh.triangles.len() / 12;
         if self.outgoing_radiance.len() != triangle_count {
@@ -453,6 +452,132 @@ pub struct ExtractedLightingInputs {
     pub trace_scene: Option<LightingTraceSceneInput>,
 }
 
+impl ExtractedLightingInputs {
+    /// Validates the candidate producer against this frame and the actual
+    /// device. A supplied trace scene is an explicit source request: invalid
+    /// trace data never silently selects the host-candidate route.
+    pub(crate) fn candidate_availability(
+        &self,
+        capabilities: &prism_render_driver::DeviceCapabilities,
+    ) -> GiCandidateAvailability {
+        use crate::lighting_gpu::{
+            GI_CANDIDATES_PER_SURFACE, GI_CANDIDATE_BUFFER_BYTES, LIGHTING_PARAMS_BYTES,
+            LIGHTING_SURFACE_BUFFER_BYTES, MAX_LIGHTING_SURFACES, OUTPUT_BYTES,
+            TRACE_RADIANCE_BYTES,
+        };
+        use GiCandidateAvailability::{HostProvided, Missing, Rejected, SoftwareBvhGpu};
+        use GiCandidateRejection::{DeviceLimits, InvalidInputs, TraceBackendUnavailable};
+
+        if self.surfaces.is_empty() {
+            return Missing;
+        }
+        if self.surfaces.len() > MAX_LIGHTING_SURFACES
+            || self.surfaces.iter().any(|surface| {
+                let normal_len = dot(surface.normal, surface.normal);
+                surface.position.iter().any(|value| !value.is_finite())
+                    || surface.normal.iter().any(|value| !value.is_finite())
+                    || !normal_len.is_finite()
+                    || normal_len <= 1.0e-20
+                    || surface
+                        .albedo
+                        .iter()
+                        .any(|value| !value.is_finite() || *value < 0.0)
+            })
+        {
+            return Rejected(InvalidInputs);
+        }
+        let limits = capabilities.limits;
+        if limits.max_compute_invocations_per_workgroup < 64
+            || limits.max_bind_groups == 0
+            || limits.max_bindings_per_bind_group < 7
+        {
+            return Rejected(TraceBackendUnavailable);
+        }
+        if [
+            GI_CANDIDATE_BUFFER_BYTES,
+            LIGHTING_SURFACE_BUFFER_BYTES,
+            OUTPUT_BYTES,
+        ]
+        .iter()
+        .any(|bytes| *bytes > limits.max_storage_buffer_binding_size)
+            || LIGHTING_PARAMS_BYTES > limits.max_uniform_buffer_binding_size
+            || (self.surfaces.len() as u32).div_ceil(64)
+                > limits.max_compute_workgroups_per_dimension
+        {
+            return Rejected(DeviceLimits);
+        }
+        if let Some(trace) = self.trace_scene.as_ref() {
+            if trace.surface_ids.len() != self.surfaces.len()
+                || trace.rays_per_surface == 0
+                || trace.rays_per_surface as usize > GI_CANDIDATES_PER_SURFACE
+                || !trace.ray_epsilon.is_finite()
+                || trace.ray_epsilon <= 0.0
+                || !trace.ray_tmax.is_finite()
+                || trace.ray_tmax <= trace.ray_epsilon
+                || trace.packed_outgoing_radiance().is_err()
+            {
+                return Rejected(InvalidInputs);
+            }
+            // Bounded stack scratch avoids a per-frame allocation for ID
+            // uniqueness checks; surface validation bounds the copied prefix.
+            let mut ids = [0_u64; MAX_LIGHTING_SURFACES];
+            let ids = &mut ids[..trace.surface_ids.len()];
+            ids.copy_from_slice(&trace.surface_ids);
+            ids.sort_unstable();
+            if ids.windows(2).any(|pair| pair[0] == pair[1]) {
+                return Rejected(InvalidInputs);
+            }
+            let ray_count = self.surfaces.len() as u64 * u64::from(trace.rays_per_surface);
+            let node_bytes = trace.bvh.nodes.len() as u64 * 4;
+            let triangle_bytes = trace.bvh.triangles.len() as u64 * 4;
+            if [
+                node_bytes,
+                triangle_bytes,
+                ray_count * 48,
+                crate::lighting_trace_gpu::HOST_TRACE_OUTPUT_BYTES,
+                TRACE_RADIANCE_BYTES,
+            ]
+            .iter()
+            .any(|bytes| *bytes > limits.max_storage_buffer_binding_size)
+                || ray_count.div_ceil(64) > u64::from(limits.max_compute_workgroups_per_dimension)
+            {
+                return Rejected(DeviceLimits);
+            }
+            return SoftwareBvhGpu;
+        }
+        if self.gi_candidates.is_empty() {
+            return Missing;
+        }
+        if self.gi_candidates.len() != self.surfaces.len()
+            || self.gi_candidates.iter().any(|batch| {
+                batch.len() > GI_CANDIDATES_PER_SURFACE
+                    || batch.iter().any(|candidate| {
+                        candidate
+                            .position
+                            .iter()
+                            .chain(&candidate.normal)
+                            .any(|value| !value.is_finite())
+                            || candidate
+                                .radiance
+                                .iter()
+                                .any(|value| !value.is_finite() || *value < 0.0)
+                            || !candidate.source_pdf.is_finite()
+                            || candidate.source_pdf <= 0.0
+                            || !candidate.target_pdf.is_finite()
+                            || candidate.target_pdf < 0.0
+                            || !candidate.selection_u01.is_finite()
+                            || !(0.0..=1.0).contains(&candidate.selection_u01)
+                            || !candidate.visibility.is_finite()
+                            || !(0.0..=1.0).contains(&candidate.visibility)
+                    })
+            })
+        {
+            return Rejected(InvalidInputs);
+        }
+        HostProvided
+    }
+}
+
 impl Default for LightingPlanState {
     fn default() -> Self {
         Self::from_config(RenderAppConfig::DEFAULT)
@@ -468,6 +593,7 @@ impl LightingPlanState {
             config.lighting_budget,
             config.lighting_caps,
             config.lighting_tier,
+            GiCandidateAvailability::Missing,
         );
         Self {
             executions: plan.executions(),
@@ -505,20 +631,33 @@ pub(crate) fn extract_lighting_inputs(main: &mut World, render: &mut World) {
 }
 
 /// Compiles the single plan once for each extracted frame.
-pub(crate) fn compile_lighting_plan(
+pub(crate) fn compile_lighting_plan<I>(
     record: Res<RenderRecord>,
     inputs: Res<ExtractedLightingInputs>,
+    runtime: Res<crate::RenderRuntimeResource<I>>,
     mut state: ResMut<LightingPlanState>,
     mut stats: ResMut<RenderFrameStats>,
-) {
+) where
+    I: prism_render_driver::Instance + Send + Sync + 'static,
+    I::Adapter: Send + Sync + 'static,
+    I::Device: Send + Sync + 'static,
+    I::Queue: Send + Sync + prism_render_driver::FrameSync + 'static,
+    I::Surface: Send + Sync + 'static,
+{
     if state.compiled_frame == record.frame_index {
         return;
     }
     let previous_epoch = state.journal_snapshot.epoch;
     state.scene_stats = inputs.stats;
     state.journal_snapshot = inputs.journal_snapshot;
-    state.plan =
-        BudgetCompiler::compile(state.scene_stats, state.plan.budget, state.caps, state.tier);
+    let availability = inputs.candidate_availability(runtime.runtime().device().capabilities());
+    state.plan = BudgetCompiler::compile(
+        state.scene_stats,
+        state.plan.budget,
+        state.caps,
+        state.tier,
+        availability,
+    );
     state.executions = state.plan.executions();
     state.explain = state.plan.explain();
     state.compiled_frame = record.frame_index;

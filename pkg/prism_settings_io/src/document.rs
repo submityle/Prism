@@ -76,7 +76,7 @@ impl SettingsDocument {
             if self.unknown.contains_key(key.as_str()) {
                 return Err(CodecError::DuplicateKey(key.as_str().to_owned()));
             }
-            values.insert(key.as_str().to_owned(), encode_value(value));
+            values.insert(key.as_str().to_owned(), encode_value(value, key.as_str())?);
         }
         for (key, value) in &self.unknown {
             if self.candidates.contains_key(&SettingKey::new(key.clone())) {
@@ -241,23 +241,36 @@ impl fmt::Display for CodecError {
 
 impl Error for CodecError {}
 
-fn encode_value(value: &Value) -> toml::Value {
+fn encode_value(value: &Value, key: &str) -> Result<toml::Value, CodecError> {
+    let invalid = |reason: String| CodecError::InvalidValue {
+        key: key.to_owned(),
+        reason,
+    };
     match value {
-        Value::Bool(value) => toml::Value::Boolean(*value),
-        Value::Int(value) => toml::Value::Integer(*value),
-        Value::Float(value) => toml::Value::Float(*value),
-        Value::String(value) => toml::Value::String(value.clone()),
-        Value::Enum(value) => tagged("enum", toml::Value::Integer(i64::from(value.0))),
-        Value::Bytes(value) => tagged("bytes", toml::Value::Integer(value.0 as i64)),
-        Value::Secret(value) => tagged("secret", toml::Value::Integer(value.0 as i64)),
-        Value::Array(values) => toml::Value::Array(values.iter().map(encode_value).collect()),
-        Value::Table(values) => toml::Value::Table(
-            values
-                .iter()
-                .map(|(key, value)| (key.clone(), encode_value(value)))
-                .collect(),
-        ),
-        _ => toml::Value::String(format!("unsupported-value:{value:?}")),
+        Value::Bool(value) => Ok(toml::Value::Boolean(*value)),
+        Value::Int(value) => Ok(toml::Value::Integer(*value)),
+        Value::Float(value) if value.is_finite() => Ok(toml::Value::Float(*value)),
+        Value::Float(_) => Err(invalid("non-finite floats cannot be persisted".to_owned())),
+        Value::String(value) => Ok(toml::Value::String(value.clone())),
+        Value::Enum(value) => Ok(tagged("enum", toml::Value::Integer(i64::from(value.0)))),
+        // TOML integers are signed; decimal strings preserve the full u64 domain.
+        Value::Bytes(value) => Ok(tagged("bytes", toml::Value::String(value.0.to_string()))),
+        Value::Secret(value) => Ok(tagged("secret", toml::Value::String(value.0.to_string()))),
+        Value::Array(values) => values
+            .iter()
+            .enumerate()
+            .map(|(index, value)| encode_value(value, &format!("{key}[{index}]")))
+            .collect::<Result<Vec<_>, _>>()
+            .map(toml::Value::Array),
+        Value::Table(values) => values
+            .iter()
+            .map(|(child_key, value)| {
+                encode_value(value, &format!("{key}.{child_key}"))
+                    .map(|value| (child_key.clone(), value))
+            })
+            .collect::<Result<toml::Table, _>>()
+            .map(toml::Value::Table),
+        _ => Err(invalid("unsupported settings value variant".to_owned())),
     }
 }
 
@@ -313,10 +326,17 @@ fn decode_u32(value: &toml::Value, key: &str) -> Result<u32, String> {
 }
 
 fn decode_u64(value: &toml::Value, key: &str) -> Result<u64, String> {
-    let value = value
-        .as_integer()
-        .ok_or_else(|| format!("tagged integer for `{key}` is not an integer"))?;
-    u64::try_from(value).map_err(|_| format!("tagged integer for `{key}` is outside u64"))
+    match value {
+        toml::Value::String(value) => value
+            .parse()
+            .map_err(|_| format!("tagged decimal reference for `{key}` is not a u64")),
+        toml::Value::Integer(value) => {
+            u64::try_from(*value).map_err(|_| format!("tagged integer for `{key}` is outside u64"))
+        }
+        _ => Err(format!(
+            "tagged reference for `{key}` is not an integer or decimal string"
+        )),
+    }
 }
 
 pub(crate) fn decode_value_for_migration(value: &toml::Value, key: &str) -> Option<Value> {
@@ -365,5 +385,23 @@ mod tests {
             Some(&registry),
         )
         .is_err());
+    }
+
+    #[test]
+    fn byte_and_secret_references_roundtrip_full_u64_range() {
+        let mut document = SettingsDocument::new(1);
+        document.insert(
+            "refs.bytes",
+            Value::Bytes(prism_settings::BytesRef(u64::MAX)),
+        );
+        document.insert(
+            "refs.secret",
+            Value::Secret(prism_settings::SecretRef(u64::MAX)),
+        );
+
+        let encoded = document.encode().unwrap();
+        let decoded = SettingsDocument::decode(&encoded).unwrap();
+        assert_eq!(decoded, document);
+        assert!(encoded.contains("18446744073709551615"));
     }
 }

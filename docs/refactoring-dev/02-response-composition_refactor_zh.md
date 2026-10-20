@@ -175,7 +175,8 @@ water_surface_fs_mask_blend
 - 补强测试 oracle：reactive/overlay 的 motion 输入改为独立 PBR 输出；增加已删除 Hybrid entry 不得回归的编译源码断言。
 - `cargo test -p prism_render_scene --test water_hybrid_golden --test water_hybrid_gpu -- --nocapture`：沙盒外 Apple M2 / Metal，`water_hybrid_golden` **19 passed，0 failed，0 ignored**，`water_hybrid_gpu` **19 passed，0 failed，0 ignored**。GPU 结果包含 10 项当前生产水体输出、8 项 `water_legacy_gpu_parity_*_full_frame` 和 1 项比较器容差测试；未把无适配器 skip 当作通过。
 - 八项 legacy GPU parity 现在确实执行冻结的 `41a31ceef24e59ab7f8dda076b2b4c7f5e11f6ec` shader closure，并分别固定 PBR/NPR endpoint；它证明 16×16 水体 fixture 的完整输出，不证明完整 Scene/Fabric/TAA 帧 parity，也不能追认旧入口删除前护栏曾经运行。
-- 完整 Scene/Fabric/TAA 帧的前后版本 parity、独立 TAA reactive MRT 输出，以及删除旧入口前已运行护栏的历史记录仍缺失。当前 reactive 验证使用独立 endpoint 与 overlay 消费，不能扩大为独立 TAA reactive mask 验收。
+- 独立 TAA reactive MRT 已接入当前生产路径：`ViewVisibilityBuffer` 持有独立 `R8Unorm` mask，水体 fragment 作为第三个 MRT 输出，无水/opaque 帧先清零，TAA resolve 通过 binding 5 读取并削减 history blend；`cargo test -p prism_render_scene --lib shading::taa -- --nocapture`（6/6）与 `shading::resolve::shader_tests`（56/56）已通过。
+- 仍缺完整 Scene/Fabric/TAA 帧的前后版本 parity，以及删除旧入口前已运行护栏的历史记录。当前 TAA 测试证明 ABI、shader 编译与接线，不等于完整场景图像 parity 或跨适配器验收。
 
 ## 9. Git 历史锚点
 

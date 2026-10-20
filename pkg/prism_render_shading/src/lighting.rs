@@ -2,6 +2,10 @@ use core::f32::consts::PI;
 
 use bevy_math::ops;
 
+use crate::clearcoat::{
+    base_normal_albedo, coat_base_roughness_estimate, coat_darkening_delta,
+    coat_internal_reflection_coefficient, coat_modulated_darkening,
+};
 use crate::tangent::orthonormal_basis;
 use crate::vecmath::{add, cross, dot, mix3, mul, mul_scalar, normalize_or, sub};
 use crate::{
@@ -761,6 +765,35 @@ pub fn evaluate_principled_direct_channels_with(
     );
     // `clearcoat == 0` ⇒ `1 − 0 + 0·t = 1`, an exact identity.
     let coat_attenuation = 1.0 + coat * (coat_t_slab - 1.0);
+    // `OpenPBR` coat darkening models the additional base absorption caused by
+    // internal reflection inside the coat. It is a second, independent factor
+    // beside the non-absorbing slab transmission above: apply it once to the
+    // base layer only, never to the coat's own reflection. This deliberately
+    // mirrors the dedicated clearcoat evaluator instead of invoking that whole
+    // evaluator (which would apply the layer coupling twice).
+    let coat_darkening = if coat > 0.0 && surface.coat_darkening > 0.0 {
+        let coat_base_roughness = coat_base_roughness_estimate(
+            surface.perceptual_roughness,
+            surface.specular_weight,
+            surface.specular_ior,
+            metallic,
+        );
+        let coat_internal_reflection = coat_internal_reflection_coefficient(
+            surface.coat_ior.max(MIN_DIELECTRIC_IOR),
+            n_dot_v,
+            coat_base_roughness,
+        );
+        let delta = coat_darkening_delta(
+            base_normal_albedo(surface.base_color),
+            coat_internal_reflection,
+        );
+        coat_modulated_darkening(coat, surface.coat_darkening, delta)
+    } else {
+        // The overwhelmingly common no-coat path and the authored identity do
+        // not pay for the logarithmic hemispherical-Fresnel fit.
+        1.0
+    };
+    let coat_base_attenuation = coat_attenuation * coat_darkening;
 
     // --- `OpenPBR` transmission lobe ---
     // Light refracted through a dielectric slab: the interface Fresnel (driven
@@ -880,11 +913,17 @@ pub fn evaluate_principled_direct_channels_with(
     // `OpenPBR` `transmission_weight` is a **statistical mixture weight** between
     // the reflective base slab and the translucent slab, not an additive lobe:
     // mixing (rather than summing) is what keeps the two slabs inside one energy
-    // budget. `transmission == 0` leaves the base untouched bit-for-bit.
+    // budget. Both alternatives are the substrate below the coat, so coat
+    // darkening must gate both; applying it only to the reflective alternative
+    // would make a fully transmissive base ignore the authored absorption. The
+    // pre-existing non-absorbing coat slab closure remains on the reflective
+    // branch, which keeps `coat_darkening == 0` an exact behavior identity.
+    // `transmission == 0` leaves the historical base path untouched bit-for-bit.
     let direct = add(
-        mul_scalar(base, coat_attenuation * (1.0 - transmission)),
+        mul_scalar(base, coat_base_attenuation * (1.0 - transmission)),
         coat_specular,
     );
+    let transmission_term = mul_scalar(transmission_term, coat_darkening);
     let sheen = surface.sheen.clamp(0.0, 1.0);
     let (direct, transmission_term) = if sheen > 0.0 {
         let roughness = surface.fuzz_roughness.clamp(MIN_ROUGHNESS, 1.0);
@@ -1954,6 +1993,9 @@ mod tests {
         };
         let coated = SurfaceSample {
             clearcoat: 1.0,
+            // This test isolates the non-absorbing slab closure. Coat
+            // darkening intentionally removes energy from the base.
+            coat_darkening: 0.0,
             ..bare
         };
         let zero_a = evaluate_principled_direct(bare, frame(), light());
@@ -2022,6 +2064,161 @@ mod tests {
             coat_only(grazing_frame, grazing_light) > coat_only(frame(), light()),
             "the coat's reflected share must grow with the Fresnel toward grazing"
         );
+    }
+
+    #[test]
+    fn principled_coat_darkening_is_base_only_monotone_and_finite() {
+        let coated = SurfaceSample {
+            base_color: [0.2, 0.5, 0.8],
+            perceptual_roughness: 0.4,
+            clearcoat: 1.0,
+            clearcoat_roughness: 0.2,
+            coat_ior: 1.6,
+            ..Default::default()
+        };
+        let direct = |surface: SurfaceSample| {
+            evaluate_principled_direct_channels(surface, frame(), light()).direct
+        };
+
+        // The two documented identity controls must be exact, not merely close.
+        let no_coat = SurfaceSample {
+            clearcoat: 0.0,
+            coat_darkening: 0.0,
+            ..coated
+        };
+        assert_eq!(
+            direct(no_coat),
+            direct(SurfaceSample {
+                coat_darkening: 1.0,
+                ..no_coat
+            }),
+            "coat_weight == 0 must make coat_darkening inert"
+        );
+        let r_b = coat_base_roughness_estimate(
+            coated.perceptual_roughness,
+            coated.specular_weight,
+            coated.specular_ior,
+            coated.metallic,
+        );
+        let k = coat_internal_reflection_coefficient(coated.coat_ior, 1.0, r_b);
+        let delta = coat_darkening_delta(base_normal_albedo(coated.base_color), k);
+        assert_eq!(coat_modulated_darkening(1.0, 0.0, delta), 1.0);
+
+        let none = direct(SurfaceSample {
+            coat_darkening: 0.0,
+            ..coated
+        });
+        let half = direct(SurfaceSample {
+            coat_darkening: 0.5,
+            ..coated
+        });
+        let full = direct(SurfaceSample {
+            coat_darkening: 1.0,
+            ..coated
+        });
+        assert!(
+            total(none) > total(half) && total(half) > total(full),
+            "coat darkening must monotonically reduce the coated base: none={none:?} half={half:?} full={full:?}"
+        );
+
+        // Removing the base isolates the coat reflection. Darkening must not be
+        // applied to that lobe, which also guards against double attenuation.
+        let coat_only = SurfaceSample {
+            base_weight: 0.0,
+            coat_darkening: 0.0,
+            ..coated
+        };
+        assert_eq!(
+            direct(coat_only),
+            direct(SurfaceSample {
+                coat_darkening: 1.0,
+                ..coat_only
+            }),
+            "coat_darkening must not attenuate the coat reflection"
+        );
+
+        // Transmission is the other branch of the same base/substrate
+        // mixture, so it must receive the coat coupling exactly once too.
+        let transmitted = |coat_darkening| {
+            evaluate_principled_direct_channels(
+                SurfaceSample {
+                    transmission: 1.0,
+                    transmission_color: [0.8, 0.6, 0.4],
+                    thickness: 1.0,
+                    coat_darkening,
+                    ..coated
+                },
+                frame(),
+                light(),
+            )
+            .transmission
+        };
+        let transmitted_none = transmitted(0.0);
+        let transmitted_half = transmitted(0.5);
+        let transmitted_full = transmitted(1.0);
+        assert!(
+            total(transmitted_none) > total(transmitted_half)
+                && total(transmitted_half) > total(transmitted_full),
+            "coat darkening must monotonically reduce the transmitted substrate: none={transmitted_none:?} half={transmitted_half:?} full={transmitted_full:?}"
+        );
+        let zero_darkening = evaluate_principled_direct_channels(
+            SurfaceSample {
+                transmission: 0.75,
+                coat_darkening: 0.0,
+                ..coated
+            },
+            frame(),
+            light(),
+        );
+        assert_eq!(
+            zero_darkening,
+            evaluate_principled_direct_channels(
+                SurfaceSample {
+                    transmission: 0.75,
+                    coat_darkening: -1.0,
+                    ..coated
+                },
+                frame(),
+                light(),
+            ),
+            "coat_darkening == 0 must be an exact identity for every substrate branch"
+        );
+
+        for surface in [
+            SurfaceSample {
+                base_color: [0.0; 3],
+                perceptual_roughness: 0.0,
+                coat_ior: 0.0,
+                coat_darkening: -1.0,
+                ..coated
+            },
+            SurfaceSample {
+                base_color: [1.0; 3],
+                perceptual_roughness: 1.0,
+                coat_ior: 3.0,
+                coat_darkening: 2.0,
+                ..coated
+            },
+            SurfaceSample {
+                transmission: 1.0,
+                transmission_color: [0.0, 0.5, 1.0],
+                thickness: 0.0,
+                coat_ior: 3.0,
+                coat_darkening: 2.0,
+                ..coated
+            },
+        ] {
+            let channels = evaluate_principled_direct_channels(surface, frame(), light());
+            assert!(
+                channels
+                    .radiance
+                    .into_iter()
+                    .chain(channels.direct)
+                    .chain(channels.transmission)
+                    .all(f32::is_finite),
+                "coat/base coupling must remain finite for clamped extremes: {surface:?}"
+            );
+        }
     }
 
     #[test]

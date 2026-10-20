@@ -10,7 +10,9 @@ use prism_render_material::{
 };
 
 use super::texture_heap::{BindlessHeapStats, BindlessTextureHeap};
-use super::vt_source::{MaterialVtSourceLookup, MaterialVtSourceRegistry};
+use super::vt_source::{
+    MaterialVtActivePublication, MaterialVtSourceLookup, MaterialVtSourceRegistry,
+};
 
 #[derive(Resource)]
 pub(crate) struct RenderMaterialRegistry {
@@ -52,7 +54,7 @@ impl RenderMaterialRegistry {
         material: &StandardMaterial,
         completion: prism_render_architecture::gpu_scene::GpuCompletionValue,
     ) -> Result<GenerationalHandle, MaterialRegistryError> {
-        self.publish_asset_with_sources(id, material, completion, None)
+        self.publish_asset_with_sources(id, material, completion, None, None)
     }
 
     pub fn publish_asset_with_sources(
@@ -61,6 +63,7 @@ impl RenderMaterialRegistry {
         material: &StandardMaterial,
         completion: prism_render_architecture::gpu_scene::GpuCompletionValue,
         sources: Option<&MaterialVtSourceRegistry>,
+        active_vt: Option<&MaterialVtActivePublication>,
     ) -> Result<GenerationalHandle, MaterialRegistryError> {
         let (handle, allocated) = match self.assets.get(&id).copied() {
             Some(handle) => (handle, false),
@@ -78,7 +81,7 @@ impl RenderMaterialRegistry {
         // records the image here so we can reconcile references afterwards.
         self.pending_textures.clear();
         let record = {
-            let mut resolver = self.texture_resolver_with_sources(sources);
+            let mut resolver = self.texture_resolver_with_sources(sources, active_vt);
             prism_render_material::import_standard_material(
                 handle,
                 revision,
@@ -137,16 +140,18 @@ impl RenderMaterialRegistry {
         Ok(Some(handle))
     }
     pub fn texture_resolver(&mut self) -> TextureResolver<'_> {
-        self.texture_resolver_with_sources(None)
+        self.texture_resolver_with_sources(None, None)
     }
 
     fn texture_resolver_with_sources<'a>(
         &'a mut self,
         sources: Option<&'a MaterialVtSourceRegistry>,
+        active_vt: Option<&'a MaterialVtActivePublication>,
     ) -> TextureResolver<'a> {
         TextureResolver {
             registry: self,
             sources,
+            active_vt,
         }
     }
 
@@ -203,6 +208,7 @@ impl RenderMaterialRegistry {
 pub(crate) struct TextureResolver<'a> {
     registry: &'a mut RenderMaterialRegistry,
     sources: Option<&'a MaterialVtSourceRegistry>,
+    active_vt: Option<&'a MaterialVtActivePublication>,
 }
 impl StandardMaterialTextureResolver for TextureResolver<'_> {
     fn resolve(&mut self, image: AssetId<Image>, semantic: TextureSemantic) -> GpuMaterialTexture {
@@ -213,7 +219,7 @@ impl StandardMaterialTextureResolver for TextureResolver<'_> {
         // The sampler heap is bound in parallel with the texture heap, so a
         // texture's sampler lives at the same bindless slot as the texture
         // itself. Reserved slots 0/1/2 carry the default filtering sampler.
-        let Some(MaterialVtSourceLookup::Available { snapshot, .. }) = self
+        let Some(MaterialVtSourceLookup::Available { identity, snapshot }) = self
             .sources
             .filter(|sources| sources.eligible_for_default_producer(image))
             .and_then(|sources| match sources.lookup(image) {
@@ -230,6 +236,17 @@ impl StandardMaterialTextureResolver for TextureResolver<'_> {
                 slot.index,
             );
         };
+        if !self
+            .active_vt
+            .is_some_and(|publication| publication.contains(identity))
+        {
+            return GpuMaterialTexture::non_virtual(
+                slot.index,
+                slot.generation,
+                semantic as u32,
+                slot.index,
+            );
+        }
         let descriptor = snapshot.descriptor();
         GpuMaterialTexture::with_virtual_texture(
             slot.index,

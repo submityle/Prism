@@ -350,6 +350,69 @@ fn fresnel_dielectric(cos_i: f32, ior: f32) -> f32 {
     return 0.5 * (r_parl * r_parl + r_perp * r_perp);
 }
 
+// `OpenPBR` coat darkening helpers. These are local twins of the dedicated
+// clearcoat path's `cc_*` functions: `clearcoat.wesl` imports this module, so
+// importing it back here would create a WESL module cycle.
+fn brdf_coat_hemispherical_fresnel_ge1(e: f32) -> f32 {
+    let num = 10893.0 * e - 1438.2;
+    let den = -774.4 * e * e + 10212.0 * e + 1.0;
+    if num <= 0.0 || den <= 0.0 {
+        return 0.0;
+    }
+    return clamp(log(num / den), 0.0, 1.0);
+}
+
+fn brdf_coat_hemispherical_fresnel(eta: f32) -> f32 {
+    let e = max(eta, BRDF_MIN_DIELECTRIC_IOR);
+    if e >= 1.0 {
+        return brdf_coat_hemispherical_fresnel_ge1(e);
+    }
+    let up = brdf_coat_hemispherical_fresnel_ge1(1.0 / e);
+    return clamp(1.0 - e * e * (1.0 - up), 0.0, 1.0);
+}
+
+fn brdf_coat_internal_reflection_rough(eta_c: f32) -> f32 {
+    let e = brdf_coat_hemispherical_fresnel(eta_c);
+    return clamp(1.0 - (1.0 - e) / (eta_c * eta_c), 0.0, 1.0);
+}
+
+fn brdf_coat_base_roughness_estimate(
+    specular_roughness: f32,
+    specular_weight: f32,
+    specular_ior: f32,
+    base_metalness: f32,
+) -> f32 {
+    let r = clamp(specular_roughness, 0.0, 1.0);
+    let ior = clamp(specular_ior, 1.0, 3.0);
+    let t = (1.0 - ior) / (1.0 + ior);
+    let w = clamp(clamp(specular_weight, 0.0, 1.0) * (t * t), 0.0, 1.0);
+    let r_d = 1.0 + (r - 1.0) * w;
+    let m = clamp(base_metalness, 0.0, 1.0);
+    return r_d + (r - r_d) * m;
+}
+
+fn brdf_coat_internal_reflection_coefficient(eta_c: f32, mu_o: f32, r_b: f32) -> f32 {
+    let k_s = fresnel_dielectric(mu_o, eta_c);
+    let k_r = brdf_coat_internal_reflection_rough(eta_c);
+    return clamp(k_s + (k_r - k_s) * clamp(r_b, 0.0, 1.0), 0.0, 1.0);
+}
+
+fn brdf_coat_darkening_delta(base_albedo: f32, k: f32) -> f32 {
+    let eb = clamp(base_albedo, 0.0, 1.0);
+    let kk = clamp(k, 0.0, 1.0);
+    let den = 1.0 - eb * kk;
+    if den <= 1.0e-30 {
+        return 1.0;
+    }
+    return clamp((1.0 - kk) / den, 0.0, 1.0);
+}
+
+fn brdf_coat_modulated_darkening(coat_weight: f32, coat_darkening: f32, delta: f32) -> f32 {
+    let c = clamp(coat_weight, 0.0, 1.0);
+    let d = clamp(coat_darkening, 0.0, 1.0);
+    return 1.0 + (clamp(delta, 0.0, 1.0) - 1.0) * (c * d);
+}
+
 // Beer-Lambert transmittance `color^{thickness}` per channel; mirrors
 // `gi::translucency::transmission::{transmittance_from_color, channel_pow}` with
 // a unit reference thickness.
@@ -1203,6 +1266,38 @@ fn principled_direct_channels_with(
     let coat_specular = coat_single_scatter
         + vec3<f32>(coat * (coat_r_slab - coat_lobe_albedo) * n_dot_l * INV_PI);
     let coat_attenuation = 1.0 + coat * (coat_t_slab - 1.0);
+    // Coat darkening is the additional absorption from internal reflection in
+    // the coat. Apply it once to the base below the coat; the coat reflection
+    // itself remains unchanged, matching the dedicated clearcoat path.
+    var coat_darkening = 1.0;
+    if coat > 0.0 && surface.coat_darkening > 0.0 {
+        let coat_base_roughness = brdf_coat_base_roughness_estimate(
+            surface.perceptual_roughness,
+            surface.specular_weight,
+            surface.specular_ior,
+            metallic,
+        );
+        let coat_internal_reflection = brdf_coat_internal_reflection_coefficient(
+            max(surface.coat_ior, BRDF_MIN_DIELECTRIC_IOR),
+            n_dot_v,
+            coat_base_roughness,
+        );
+        let coat_base_albedo = clamp(
+            (surface.base_color.r + surface.base_color.g + surface.base_color.b) / 3.0,
+            0.0,
+            1.0,
+        );
+        let coat_darkening_delta = brdf_coat_darkening_delta(
+            coat_base_albedo,
+            coat_internal_reflection,
+        );
+        coat_darkening = brdf_coat_modulated_darkening(
+            coat,
+            surface.coat_darkening,
+            coat_darkening_delta,
+        );
+    }
+    let coat_base_attenuation = coat_attenuation * coat_darkening;
 
     // `OpenPBR` transmission lobe: interface Fresnel (driven by
     // `index_of_refraction`) gating entry and exit, Beer-Lambert over
@@ -1284,12 +1379,15 @@ fn principled_direct_channels_with(
 
     // `OpenPBR` `transmission_weight` is a **statistical mixture weight** between
     // the reflective base slab and the translucent slab, not an additive lobe;
-    // mixing keeps both slabs inside one energy budget. `transmission == 0`
-    // leaves the base untouched bit-for-bit.
-    var reflected = base * (coat_attenuation * (1.0 - transmission))
+    // mixing keeps both slabs inside one energy budget. Both alternatives are
+    // the substrate below the coat and therefore receive coat darkening. The
+    // pre-existing non-absorbing coat slab closure remains on the reflective
+    // branch, keeping `coat_darkening == 0` an exact behavior identity.
+    transmission_term = transmission_term * coat_darkening;
+    var reflected = base * (coat_base_attenuation * (1.0 - transmission))
         + coat_specular
         + transmission_term;
-    var direct_term = base * (coat_attenuation * (1.0 - transmission)) + coat_specular;
+    var direct_term = base * (coat_base_attenuation * (1.0 - transmission)) + coat_specular;
     let sheen = clamp(surface.sheen, 0.0, 1.0);
     if sheen > 0.0 {
         let fuzz_roughness = clamp(surface.fuzz_roughness, MIN_ROUGHNESS, 1.0);

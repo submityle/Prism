@@ -8,6 +8,8 @@ publish = false
 
 [dependencies]
 prism_settings = { path = "../prism_settings", default-features = false, features = ["std"] }
+serde_json = "1.0"
+sha2 = "0.10"
 toml = "1.1"
 
 [dev-dependencies]

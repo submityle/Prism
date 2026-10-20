@@ -24,11 +24,11 @@ const MAX_RAY_COUNT: usize = 1_000_000;
 const RAY_WORDS: usize = 12;
 const HIT_WORDS: usize = 8;
 /// Host GI trace work is explicitly bounded to 64 rays for each of 1024
-/// extracted surfaces. The GI candidate builder is a separate future stage.
+/// extracted surfaces; a following GPU pass builds surface-major candidates.
 pub const MAX_HOST_TRACE_RAYS: usize = 65_536;
 /// Bound matching the architecture lighting surface budget and sample policy.
 pub const MAX_HOST_TRACE_RAYS_PER_SURFACE: u32 = 64;
-const HOST_TRACE_OUTPUT_BYTES: u64 = (MAX_HOST_TRACE_RAYS * HIT_WORDS * 4) as u64;
+pub(crate) const HOST_TRACE_OUTPUT_BYTES: u64 = (MAX_HOST_TRACE_RAYS * HIT_WORDS * 4) as u64;
 
 /// Input ray, with a closed lower and upper parameter interval.
 #[derive(Clone, Copy, Debug, PartialEq)]

@@ -21,6 +21,11 @@ use prism_render_architecture::render_fabric::{
 
 use crate::gpu::fabric::SceneFabric;
 
+#[path = "fabric_runtime.rs"]
+mod fabric_runtime;
+
+use self::fabric_runtime::{init_fabric_composition_runtime, observe_fabric_composition_resources};
+
 use super::{
     ao::{
         gtao_compute_pass, gtao_denoise_pass, gtao_prepass_pass, gtao_temporal_pass,
@@ -647,6 +652,10 @@ impl Plugin for PrismShadingPlugin {
                 RenderStartup,
                 init_shading_execution.after(crate::gpu::fabric::init_scene_fabric),
             )
+            .add_systems(
+                RenderStartup,
+                init_fabric_composition_runtime.after(crate::gpu::fabric::init_scene_fabric),
+            )
             .add_systems(RenderStartup, init_response_composition)
             .add_systems(
                 Render,
@@ -656,6 +665,9 @@ impl Plugin for PrismShadingPlugin {
                         .in_set(RenderSystems::PrepareResources),
                     prepare_response_composition_targets
                         .after(prepare_response_composition_resources)
+                        .in_set(RenderSystems::PrepareBindGroups),
+                    observe_fabric_composition_resources
+                        .after(prepare_response_composition_targets)
                         .in_set(RenderSystems::PrepareBindGroups),
                 ),
             )

@@ -132,6 +132,8 @@ impl App {
         app.sub_apps.main.world.insert_resource(capabilities);
         app.sub_apps.main.world.insert_resource(quality_tier);
         app.sub_apps.main.world.insert_resource(run_mode);
+        app.install_detected_settings_runtime()
+            .expect("the built-in platform settings schema must be valid");
         // Parallel phase execution (design §8.2, `multi_thread`): install a
         // private work-stealing pool so each schedule's conflict-free system
         // waves run across worker threads. `set_task_pool` shares one instead.
@@ -644,8 +646,6 @@ impl App {
     /// normal runner. PIE frame sessions call this before advancing time so a
     /// reloaded system/config applies to the frame they step.
     pub(crate) fn run_frame_boundary_hooks(&mut self) {
-        #[cfg(feature = "hot-reload")]
-        self.poll_config_hot_reload();
         #[cfg(feature = "module-reload")]
         crate::module_reload::poll_app_modules(self);
     }
@@ -745,49 +745,6 @@ impl App {
     #[cfg(feature = "multi_thread")]
     pub fn set_task_pool_threads(&mut self, threads: usize) -> &mut Self {
         self.set_task_pool(prism_tasks::TaskPool::with_threads(threads))
-    }
-
-    /// Install a [`ConfigHotReload`](crate::hot_reload::ConfigHotReload) watch
-    /// on `path` (design §24.2). While installed, [`update`](App::update)
-    /// re-reads the file once per frame and re-applies it through the
-    /// [`User`](crate::settings::SettingsLayer::User) cascade layer whenever its
-    /// contents change, so a dev edit takes effect without a restart. Only
-    /// available under the `hot-reload` feature.
-    #[cfg(feature = "hot-reload")]
-    pub fn enable_config_hot_reload(&mut self, path: impl Into<std::path::PathBuf>) -> &mut Self {
-        self.insert_resource(crate::hot_reload::ConfigHotReload::new(path));
-        self
-    }
-
-    /// The installed config hot-reload watch, if any.
-    #[cfg(feature = "hot-reload")]
-    #[must_use]
-    pub fn config_hot_reload(&self) -> Option<&crate::hot_reload::ConfigHotReload> {
-        self.world()
-            .get_resource::<crate::hot_reload::ConfigHotReload>()
-    }
-
-    /// Poll the installed
-    /// [`ConfigHotReload`](crate::hot_reload::ConfigHotReload) (design §24.2).
-    ///
-    /// A no-op returning
-    /// [`Unchanged`](crate::hot_reload::ReloadOutcome::Unchanged) when no watch
-    /// is installed. [`update`](App::update) calls this once per frame; a caller
-    /// driving frames by hand can call it directly. Only available under the
-    /// `hot-reload` feature.
-    #[cfg(feature = "hot-reload")]
-    pub fn poll_config_hot_reload(&mut self) -> crate::hot_reload::ReloadOutcome {
-        // Take the watch out of the world so it can be borrowed `&mut` alongside
-        // the `&mut App` that `load_user_config` needs, then put it back.
-        let Some(mut watch) = self
-            .world_mut()
-            .remove_resource::<crate::hot_reload::ConfigHotReload>()
-        else {
-            return crate::hot_reload::ReloadOutcome::Unchanged;
-        };
-        let outcome = watch.poll(self);
-        self.insert_resource(watch);
-        outcome
     }
 
     /// Finish, clean up, and run startup **iff** every plugin reports

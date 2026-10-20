@@ -16,7 +16,7 @@
 
 - 版本: v1.6（v1.5 明确未发布 API 全量替换；v1.6 落地首个 I/O/迁移垂直切片）
 - 基线: `main@e248f12ec`（写作时）
-- 状态: 实施中；M0 核心已落地并通过当前门禁，M0.5–M5 必须逐阶段完成后才算系统交付；完成度以代码、测试、运行行为与质量门禁共同证明
+- 状态: 实施中；`prism_settings` 核心 crate 与 `prism_app` canonical runtime 接入已实现并通过当前定向测试，但 M0 整体门禁仍未全部通过（M0.5 属性/模型评审、完整性能复测和文档构建仍待完成）；M0.5–M5 必须逐阶段完成后才算系统交付；完成度以代码、测试、运行行为与质量门禁共同证明
 - 适用: 运行时 / 编辑器 / 机器级 / 构建管线
 - 关键依赖: `prism_reflect`（元数据/版本/迁移/校验）、`prism_platform`（目录/文件/监视）、`prism_ui_reactive`、`prism_ui_i18n`、`prism_ui_form`、`prism_app`（应用集成；不承载旧设置 API 兼容层）
 - 明确约束: 核心 `no_std + alloc`；文件 I/O 需 `std`；**不依赖任何 `bevy_*` crate**
@@ -26,7 +26,7 @@
 - 新增 §9.2.6 操作级 journal：`ApplyOp`、每 op 状态/补偿账本/`effect_handle`、恢复决策树与崩溃示例。
 - §9.2.5 applier 契约改为 `apply_op/probe/compensate` 操作级接口。
 - 全量替换未发布的 `prism_app::settings/cvar` API；不提供旧类型别名、行为兼容 facade 或旧文本格式承诺。
-- 当前实现：`pkg/prism_settings` 已提供 no_std + alloc 的 Value/Def/Registry/Resolver/Snapshot/Inspect/Diff 核心；`pkg/prism_settings_io` 已提供版本化 TOML、未知键保留、Rename/Drop/Convert 迁移、原子写、备份轮转和主文件/备份恢复。10k 定义、9 层解析基准在当前参考机 p50 约 4.05 ms、p95 约 4.32 ms、p99 约 4.64 ms。事务 journal、applier、编辑器和 `prism_app` 集成仍按后续里程碑推进，未完成部分不得宣称已交付。
+- 当前实现：`pkg/prism_settings` 已提供 no_std + alloc 的 Value/Def/Registry/Resolver/Snapshot/Inspect/Diff 核心；`pkg/prism_app` 通过 `SettingsRuntime` 持有 registry、分层 source 和已解析 snapshot，`App::new` 安装平台档位 schema/source，崩溃快照读取 canonical snapshot；旧 `settings.rs`、`cvar.rs`、`reflect_config.rs`、`hot_reload.rs` 及其公开入口已移除。`pkg/prism_settings_io` 已提供版本化 TOML、未知键保留、Rename/Drop/Convert 迁移、原子写、备份轮转、主文件/备份恢复，以及带 checksum/fsync/尾部截断修复和 Unknown 在途重建的操作级 journal。事务执行已有原型和单元测试，但尚无完整恢复执行器、阶段持久化协调与预览确认流程，不能视为 §9.2 已交付。M0.5 目前只有 12 键矩阵测试，完整属性测试与模型评审尚未完成；10k 定义、9 层解析基准本轮未重跑。
 - §9.2.3 明确 fsync 边界；§9.2.4 补 `CompensationUnknown`；不变量 19–20、§21 崩溃注入矩阵、§22 M3 验收同步。
 - v1.3 的四点修复保留。
 
@@ -151,10 +151,9 @@
 
 ### 2.3 现有派生层
 
-- `pkg/prism_app/src/reflect_config.rs`（约 1087 行）：从 `prism_reflect` 的 `#[reflect(default/range/clamp/rename/category)]` 字段元数据派生 `CvarSpec`；`register_reflected_cvars` 先克隆 registry 校验整批，再一次性提交。
-- `pkg/prism_app/src/platform_tier.rs`（约 293 行）：五个键 `render.present`、`pacing.frame_limit_fps`、`pipeline.pipelined_rendering`、`loop.power_aware_variable_step`、`lifecycle.suspend_resume`，写入 `PlatformTier` 层。
-- `pkg/prism_app/src/hot_reload.rs`（约 203 行）：`ConfigHotReload` 用内容哈希轮询，变化则走 `load_user_config` 重放。
-- `prism_app` features：`default std`；`multi_thread` / `partition` / `pipelined` / `pipelined-tasks` / `determinism` / `winit` / `reflect` / `trace` / `hot-reload` / `module-reload` / `diagnostic`。
+- `reflect_config.rs` 与 `hot_reload.rs` 的旧应用层桥接已删除；reflect schema bridge、watcher→候选 snapshot→transaction 的 canonical 接线属于后续 M1/M3 工作。
+- `pkg/prism_app/src/platform_tier.rs`：五个键 `render.present`、`pacing.frame_limit_fps`、`pipeline.pipelined_rendering`、`loop.power_aware_variable_step`、`lifecycle.suspend_resume`，写入 canonical `Platform` source。
+- `prism_app` features：`default std`；`multi_thread` / `partition` / `pipelined` / `pipelined-tasks` / `determinism` / `winit` / `reflect` / `trace` / `module-reload` / `diagnostic`。
 
 ### 2.4 可复用底座
 
@@ -185,7 +184,7 @@
 
 ### 2.6 未发布 API 的替换策略
 
-当前 `prism_app::settings` 与 `cvar` 尚未发布，因此直接删除旧公开类型与入口，不维护兼容 facade、旧事件适配器或旧控制台语义。`prism_settings` 成为 schema、解析、写事务与诊断的唯一内核；应用层通过新 plugin/resource/command 接入。所有仓内调用方与测试在同一变更中迁移，禁止仅为让旧测试通过而保留旧 API。
+当前 `prism_app::settings` 与 `cvar` 尚未发布，因此直接删除旧公开类型与入口，不维护兼容 facade、旧事件适配器或旧控制台语义。该删除已完成；`prism_settings` 是 schema、解析、source precedence、snapshot 与诊断的唯一内核，`prism_app::SettingsRuntime` 只负责应用生命周期集成。持久化/控制台/热重载仍须通过 canonical IO/transaction 路径接入。所有仓内调用方与测试在同一变更中迁移，禁止仅为让旧测试通过而保留旧 API。
 
 持久化文件的 schema 迁移与 Rust API 兼容是两件事：已发行文件格式仍按 §11 迁移；旧的内存 API、未发行文本配置格式和旧调用路径不构成兼容承诺。若未来确有外部数据导入需求，只能增加一次性、默认关闭的导入工具，不将其重新变成运行时 API。
 
@@ -2111,6 +2110,6 @@ gameplay → ui → editor → io → core
 
 ## 结语
 
-这套方案的核心不是“再加一个配置表”，而是把设置变成**引擎契约**：一份 schema 管代码/文件/UI/控制台/远程；域与层分离；写入是事务；确认可回滚；迁移有金样；来源可解释；项目配置当敌意输入；工作区状态不混进来。它能在不推翻现有 `prism_app::settings/cvar` 的前提下渐进落地，并同时支撑运行时、编辑器和机器级治理。
+这套方案的核心不是“再加一个配置表”，而是把设置变成**引擎契约**：一份 schema 管代码/文件/UI/控制台/远程；域与层分离；写入是事务；确认可回滚；迁移有金样；来源可解释；项目配置当敌意输入；工作区状态不混进来。它通过 `prism_app::SettingsRuntime` 接入运行时，并继续支撑编辑器和机器级治理的后续实现。
 
 v1.1 进一步把性能、可维护性、可扩展性、易用性变成可度量、可门禁的工程约束——设计不止“能跑”，还要“跑得久、改得动、扩得开、用得顺”。

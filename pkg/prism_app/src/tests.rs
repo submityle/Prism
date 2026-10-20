@@ -3549,268 +3549,6 @@ mod dedicated_server {
     }
 }
 
-// ---- settings
-
-use crate::settings::{SettingChanged, SettingValue, Settings, SettingsLayer};
-
-/// Layer precedence: the highest present layer wins, and `SettingsLayer`'s
-/// derived `Ord` matches the documented ascending-precedence order.
-#[test]
-fn settings_resolve_highest_layer_and_order_is_precedence() {
-    assert!(SettingsLayer::EngineDefault < SettingsLayer::PlatformTier);
-    assert!(SettingsLayer::PlatformTier < SettingsLayer::User);
-    assert!(SettingsLayer::User < SettingsLayer::CommandLine);
-    assert!(SettingsLayer::CommandLine < SettingsLayer::Runtime);
-    assert_eq!(SettingsLayer::ALL.len(), 5);
-    assert_eq!(SettingsLayer::EngineDefault.precedence(), 0);
-    assert_eq!(SettingsLayer::Runtime.precedence(), 4);
-
-    let mut s = Settings::new();
-    s.set(SettingsLayer::EngineDefault, "r.shadows", 1_i64);
-    s.set(SettingsLayer::User, "r.shadows", 2_i64);
-    s.set(SettingsLayer::PlatformTier, "r.shadows", 3_i64);
-
-    // User (rank 2) outranks PlatformTier (rank 1) and EngineDefault (rank 0).
-    assert_eq!(s.get_int("r.shadows"), Some(2));
-    assert_eq!(s.resolved_layer("r.shadows"), Some(SettingsLayer::User));
-    // All three contributions are retained underneath.
-    assert_eq!(s.layers_for("r.shadows").map(|m| m.len()), Some(3));
-}
-
-/// Clearing the top layer transparently falls back to the next layer down;
-/// clearing a shadowed (lower) layer does not change the resolved value.
-#[test]
-fn settings_clear_falls_back_to_lower_layer() {
-    let mut s = Settings::new();
-    s.set(SettingsLayer::EngineDefault, "net.tickrate", 30_i64);
-    s.set(SettingsLayer::Runtime, "net.tickrate", 128_i64);
-    assert_eq!(s.get_int("net.tickrate"), Some(128));
-
-    // Clearing a lower, shadowed layer changes nothing resolved.
-    assert!(s
-        .clear(SettingsLayer::EngineDefault, "net.tickrate")
-        .is_none());
-    assert_eq!(s.get_int("net.tickrate"), Some(128));
-
-    // Re-add the default, then clear the top layer: falls back to the default.
-    s.set(SettingsLayer::EngineDefault, "net.tickrate", 30_i64);
-    let change = s
-        .clear(SettingsLayer::Runtime, "net.tickrate")
-        .expect("clearing the top layer changes the resolved value");
-    assert_eq!(change.previous, Some(SettingValue::Int(128)));
-    assert_eq!(change.current, Some(SettingValue::Int(30)));
-    assert_eq!(s.get_int("net.tickrate"), Some(30));
-
-    // Clearing the last remaining layer makes the key absent entirely.
-    let change = s
-        .clear(SettingsLayer::EngineDefault, "net.tickrate")
-        .expect("clearing the last layer unsets the key");
-    assert_eq!(change.current, None);
-    assert!(!s.contains("net.tickrate"));
-    assert!(s.layers_for("net.tickrate").is_none());
-}
-
-/// `set` only reports a change when the *resolved* value actually moves.
-#[test]
-fn settings_set_reports_resolved_change_only() {
-    let mut s = Settings::new();
-
-    // First write of a key: unset -> value is a change.
-    let change = s
-        .set(SettingsLayer::User, "vol", 50_i64)
-        .expect("first write is a change");
-    assert_eq!(change.key, "vol");
-    assert_eq!(change.previous, None);
-    assert_eq!(change.current, Some(SettingValue::Int(50)));
-
-    // Writing a lower layer while User still overrides it: no resolved change.
-    assert!(s.set(SettingsLayer::EngineDefault, "vol", 10_i64).is_none());
-    // Rewriting the top layer with an equal value: no change.
-    assert!(s.set(SettingsLayer::User, "vol", 50_i64).is_none());
-    // Rewriting the top layer with a different value: a change.
-    assert!(s.set(SettingsLayer::User, "vol", 60_i64).is_some());
-}
-
-/// `SettingValue::parse` infers the most specific type, and the typed accessors
-/// / `From` impls round-trip.
-#[test]
-fn setting_value_parse_infers_type() {
-    assert_eq!(SettingValue::parse("true"), SettingValue::Bool(true));
-    assert_eq!(SettingValue::parse("false"), SettingValue::Bool(false));
-    assert_eq!(SettingValue::parse("42"), SettingValue::Int(42));
-    assert_eq!(SettingValue::parse("-7"), SettingValue::Int(-7));
-    assert_eq!(SettingValue::parse("3.5"), SettingValue::Float(3.5));
-    assert_eq!(
-        SettingValue::parse("hi"),
-        SettingValue::Str("hi".to_owned())
-    );
-    // An empty token is not a bool/int/float, so it stays a string.
-    assert_eq!(SettingValue::parse(""), SettingValue::Str(String::new()));
-
-    assert_eq!(SettingValue::from(true).as_bool(), Some(true));
-    assert_eq!(SettingValue::from(9_i64).as_int(), Some(9));
-    assert_eq!(SettingValue::from(1.25_f64).as_float(), Some(1.25));
-    assert_eq!(SettingValue::from("s").as_str(), Some("s"));
-    assert_eq!(SettingValue::from(String::from("t")).as_str(), Some("t"));
-    // Cross-type accessors return None, not a coercion.
-    assert_eq!(SettingValue::Int(1).as_bool(), None);
-    assert_eq!(SettingValue::Bool(true).as_int(), None);
-}
-
-/// A `Float(NaN)` never equals itself, so re-setting NaN re-signals a change
-/// (documented behavior).
-#[test]
-fn settings_nan_float_resignals_change() {
-    let mut s = Settings::new();
-    assert!(s.set(SettingsLayer::User, "x", f64::NAN).is_some());
-    // Resolved value is NaN; writing NaN again counts as a change.
-    assert!(s.set(SettingsLayer::User, "x", f64::NAN).is_some());
-    // A finite value re-set to the same finite value does not re-signal.
-    s.set(SettingsLayer::User, "y", 1.0_f64);
-    assert!(s.set(SettingsLayer::User, "y", 1.0_f64).is_none());
-}
-
-/// CLI parsing: `--key=value`, `key=value`, and bare `--flag` land in the
-/// CommandLine layer with inferred types.
-#[test]
-fn settings_apply_cli_args_parses_forms() {
-    let mut s = Settings::new();
-    let changes = s.apply_cli_args([
-        "--r.shadows=2",
-        "net.tickrate=128",
-        "--vsync",
-        "--name=prism",
-    ]);
-    assert_eq!(changes.len(), 4);
-    assert_eq!(s.get_int("r.shadows"), Some(2));
-    assert_eq!(
-        s.resolved_layer("r.shadows"),
-        Some(SettingsLayer::CommandLine)
-    );
-    assert_eq!(s.get_int("net.tickrate"), Some(128));
-    assert_eq!(s.get_bool("vsync"), Some(true));
-    assert_eq!(s.get_str("name"), Some("prism"));
-
-    // A bare "--" with no key is ignored rather than inserting an empty key.
-    let none = s.apply_cli_args(["--"]);
-    assert!(none.is_empty());
-    assert!(!s.contains(""));
-}
-
-/// Env folding: only prefixed vars are taken, the prefix is stripped, and
-/// `_`→`.` lowercase mapping matches the cvar namespace. Env + CLI share one
-/// CommandLine layer, so a later env write overrides an earlier CLI write.
-#[test]
-fn settings_apply_env_vars_folds_into_command_line_layer() {
-    let mut s = Settings::new();
-    s.apply_cli_args(["r.shadows=1"]);
-    let changes = s.apply_env_vars(
-        [
-            ("PRISM_R_SHADOWS", "4"),
-            ("PRISM_NET_TICKRATE", "60"),
-            ("PATH", "/usr/bin"), // no prefix -> ignored
-        ],
-        "PRISM_",
-    );
-    // r.shadows changed 1 -> 4; net.tickrate newly set; PATH ignored.
-    assert_eq!(changes.len(), 2);
-    assert_eq!(s.get_int("r.shadows"), Some(4));
-    assert_eq!(
-        s.resolved_layer("r.shadows"),
-        Some(SettingsLayer::CommandLine)
-    );
-    assert_eq!(s.get_int("net.tickrate"), Some(60));
-    assert!(!s.contains("path"));
-}
-
-/// Resolved iteration is deterministic (ascending key order), independent of
-/// insertion order.
-#[test]
-fn settings_iter_is_deterministic() {
-    let mut a = Settings::new();
-    a.set(SettingsLayer::User, "zeta", 1_i64);
-    a.set(SettingsLayer::User, "alpha", 2_i64);
-    a.set(SettingsLayer::User, "mid", 3_i64);
-
-    let mut b = Settings::new();
-    b.set(SettingsLayer::User, "mid", 3_i64);
-    b.set(SettingsLayer::User, "zeta", 1_i64);
-    b.set(SettingsLayer::User, "alpha", 2_i64);
-
-    let keys_a: Vec<&str> = a.iter().map(|(k, _)| k).collect();
-    let keys_b: Vec<&str> = b.iter().map(|(k, _)| k).collect();
-    assert_eq!(keys_a, ["alpha", "mid", "zeta"]);
-    assert_eq!(keys_a, keys_b);
-}
-
-/// `App::insert_setting` auto-initialises the store and broadcasts a
-/// `SettingChanged` event carrying the resolved transition; a shadowed write
-/// broadcasts nothing.
-#[test]
-fn app_insert_setting_broadcasts_resolved_change() {
-    let mut app = App::new();
-
-    // Settings is opt-in: not installed until a settings helper runs.
-    assert!(app.world().get_resource::<Settings>().is_none());
-
-    let seen = Arc::new(Mutex::new(Vec::<(String, Option<i64>, Option<i64>)>::new()));
-    let seen_sys = seen.clone();
-    app.init_settings();
-    app.add_systems(
-        Update,
-        move |mut cursor: Local<EventCursor<SettingChanged>>,
-              events: Res<Events<SettingChanged>>| {
-            for change in cursor.read(&events) {
-                seen_sys.lock().unwrap().push((
-                    change.key.clone(),
-                    change.previous.as_ref().and_then(SettingValue::as_int),
-                    change.current.as_ref().and_then(SettingValue::as_int),
-                ));
-            }
-        },
-    );
-
-    app.insert_setting(SettingsLayer::EngineDefault, "r.shadows", 1_i64);
-    app.insert_setting(SettingsLayer::Runtime, "r.shadows", 3_i64);
-    // Shadowed lower-layer write: no resolved change, no event.
-    app.insert_setting(SettingsLayer::User, "r.shadows", 2_i64);
-
-    assert_eq!(app.setting_int("r.shadows"), Some(3));
-
-    // Two frames of grace to let the reader observe buffered events.
-    app.update();
-    app.update();
-
-    let seen = seen.lock().unwrap();
-    assert_eq!(
-        seen.as_slice(),
-        [
-            ("r.shadows".to_owned(), None, Some(1)),
-            ("r.shadows".to_owned(), Some(1), Some(3)),
-        ]
-    );
-}
-
-/// `App::apply_cli_overrides` initialises the store and the typed getters read
-/// the resolved values back.
-#[test]
-fn app_apply_cli_overrides_and_typed_getters() {
-    let mut app = App::new();
-    app.apply_cli_overrides([
-        "--net.tickrate=128",
-        "--vsync",
-        "--name=prism",
-        "--gain=0.5",
-    ]);
-
-    assert_eq!(app.setting_int("net.tickrate"), Some(128));
-    assert_eq!(app.setting_bool("vsync"), Some(true));
-    assert_eq!(app.setting_str("name"), Some("prism"));
-    assert_eq!(app.setting_float("gain"), Some(0.5));
-    // Unset key resolves to None through the App getter.
-    assert_eq!(app.setting("missing"), None);
-}
-
 // ---- diagnostics (design §16: frame stats / phase timing / startup cost) ----
 //
 // The whole observability module and all five instrumentation hooks live behind
@@ -5766,14 +5504,8 @@ mod capability_tests {
     }
 }
 
-// ---- platform tier -> settings PlatformTier layer (design §3, §14) ---------
-//
-// The `QualityTier` the app derives from its probed `Capabilities` is the
-// natural source of the `PlatformTier` settings layer. These tests pin the
-// per-tier profile to the design §3 server/mobile/desktop table, the
-// serialisation into the dynamically-typed store, the layered `write_into`
-// semantics (a higher layer keeps winning), and the `App` helpers that
-// broadcast one `SettingChanged` per resolved change.
+// ---- platform tier -> canonical settings runtime ---------------------------
+
 mod platform_tier_tests {
     use super::*;
     use crate::capability::{Capabilities, QualityTier};
@@ -5781,200 +5513,138 @@ mod platform_tier_tests {
         self, PlatformTierProfile, KEY_FRAME_LIMIT_FPS, KEY_PIPELINED_RENDERING,
         KEY_POWER_AWARE_VARIABLE_STEP, KEY_RENDER_PRESENT, KEY_SUSPEND_RESUME_LIFECYCLE,
     };
-    use crate::settings::{SettingChanged, Settings, SettingsLayer};
+    use crate::settings_runtime::SettingsRuntime;
+    use prism_settings::{Domain, LayerKind, SettingKey, TrustLevel, Value};
 
-    /// The three tier profiles match the design §3 server/mobile/desktop table
-    /// field-for-field, and the `QualityTier::platform_profile` shortcut agrees
-    /// with `PlatformTierProfile::for_tier`.
+    fn runtime() -> SettingsRuntime {
+        SettingsRuntime::new(
+            PlatformTierProfile::settings_registry().unwrap(),
+            Domain::Runtime,
+        )
+        .unwrap()
+    }
+
+    fn value<'a>(runtime: &'a SettingsRuntime, key: &str) -> &'a Value {
+        let id = runtime.registry().id(&SettingKey::from(key)).unwrap();
+        runtime.snapshot().get(id).unwrap()
+    }
+
     #[test]
-    fn profiles_match_design_table() {
+    fn profiles_and_entries_match_design_table() {
         let server = PlatformTierProfile::for_tier(QualityTier::Server);
-        assert_eq!(
-            server,
-            PlatformTierProfile {
-                presents_display: false,
-                frame_limit_fps: 0,
-                pipelined_rendering: false,
-                power_aware_variable_step: false,
-                suspend_resume_lifecycle: false,
-            }
-        );
+        assert!(!server.presents_display);
+        assert_eq!(server.frame_limit_fps, 0);
+        assert!(!server.pipelined_rendering);
+        assert!(!server.power_aware_variable_step);
+        assert!(!server.suspend_resume_lifecycle);
 
-        let mobile = PlatformTierProfile::for_tier(QualityTier::Mobile);
-        assert_eq!(
-            mobile,
-            PlatformTierProfile {
-                presents_display: true,
-                frame_limit_fps: 60,
-                pipelined_rendering: false,
-                power_aware_variable_step: true,
-                suspend_resume_lifecycle: true,
-            }
-        );
-
-        let desktop = PlatformTierProfile::for_tier(QualityTier::Desktop);
-        assert_eq!(
-            desktop,
-            PlatformTierProfile {
-                presents_display: true,
-                frame_limit_fps: 0,
-                pipelined_rendering: true,
-                power_aware_variable_step: false,
-                suspend_resume_lifecycle: false,
-            }
-        );
-
-        // The shortcut is exactly the free constructor.
-        assert_eq!(QualityTier::Server.platform_profile(), server);
-        assert_eq!(QualityTier::Mobile.platform_profile(), mobile);
-        assert_eq!(QualityTier::Desktop.platform_profile(), desktop);
-    }
-
-    /// `entries` serialises every field under its stable key, in `ALL_KEYS`
-    /// order, with the FPS cap stored as an integer and the rest as booleans.
-    #[test]
-    fn entries_serialise_every_field_under_its_key() {
-        let profile = PlatformTierProfile::for_tier(QualityTier::Mobile);
-        let entries = profile.entries();
-
-        let keys: Vec<&str> = entries.iter().map(|(k, _)| *k).collect();
+        let mobile = QualityTier::Mobile.platform_profile();
+        let entries = mobile.entries();
+        let keys: Vec<&str> = entries.iter().map(|(key, _)| *key).collect();
         assert_eq!(keys, platform_tier::ALL_KEYS);
-
-        // Spot-check each payload against the mobile profile.
-        assert_eq!(entries[0].1.as_bool(), Some(true)); // render.present
-        assert_eq!(entries[1].1.as_int(), Some(60)); // pacing.frame_limit_fps
-        assert_eq!(entries[2].1.as_bool(), Some(false)); // pipeline.pipelined_rendering
-        assert_eq!(entries[3].1.as_bool(), Some(true)); // power-aware step
-        assert_eq!(entries[4].1.as_bool(), Some(true)); // suspend/resume
+        assert_eq!(entries[0].1, Value::Bool(true));
+        assert_eq!(entries[1].1, Value::Int(60));
+        assert_eq!(entries[2].1, Value::Bool(false));
+        assert_eq!(entries[3].1, Value::Bool(true));
+        assert_eq!(entries[4].1, Value::Bool(true));
     }
 
-    /// `write_into` populates the `PlatformTier` layer so every key resolves to
-    /// the profile value, and re-writing the same profile is idempotent.
     #[test]
-    fn write_into_populates_platform_tier_layer_idempotently() {
-        let mut settings = Settings::new();
-        let profile = QualityTier::Desktop.platform_profile();
-
-        let changed = profile.write_into(&mut settings);
-        assert_eq!(changed, platform_tier::ALL_KEYS.len());
-
-        assert_eq!(settings.get_bool(KEY_RENDER_PRESENT), Some(true));
-        assert_eq!(settings.get_int(KEY_FRAME_LIMIT_FPS), Some(0));
-        assert_eq!(settings.get_bool(KEY_PIPELINED_RENDERING), Some(true));
-        assert_eq!(
-            settings.get_bool(KEY_POWER_AWARE_VARIABLE_STEP),
-            Some(false)
-        );
-        assert_eq!(settings.get_bool(KEY_SUSPEND_RESUME_LIFECYCLE), Some(false));
-        assert_eq!(
-            settings.resolved_layer(KEY_RENDER_PRESENT),
-            Some(SettingsLayer::PlatformTier)
-        );
-
-        // Re-applying the identical profile resolves to the same values, so
-        // nothing changed.
-        assert_eq!(profile.write_into(&mut settings), 0);
-    }
-
-    /// A higher-precedence layer keeps winning: the tier populates the
-    /// `PlatformTier` layer underneath an existing user override, which is left
-    /// resolving and reports no change for that key.
-    #[test]
-    fn higher_layer_override_survives_tier_application() {
-        let mut settings = Settings::new();
-        // The user forced presentation off and pinned a 30 FPS cap.
-        settings.set(SettingsLayer::User, KEY_RENDER_PRESENT, false);
-        settings.set(SettingsLayer::User, KEY_FRAME_LIMIT_FPS, 30_i64);
-
-        // Desktop would present and run uncapped, but the user layer wins.
-        let changed = QualityTier::Desktop
+    fn profile_writes_canonical_platform_source() {
+        let mut runtime = runtime();
+        QualityTier::Desktop
             .platform_profile()
-            .write_into(&mut settings);
-        // Three keys resolve to the tier value; the two user-pinned keys do not
-        // change their resolved value.
-        assert_eq!(changed, 3);
-        assert_eq!(settings.get_bool(KEY_RENDER_PRESENT), Some(false));
-        assert_eq!(settings.get_int(KEY_FRAME_LIMIT_FPS), Some(30));
+            .write_into_runtime(&mut runtime)
+            .unwrap();
+
+        assert_eq!(value(&runtime, KEY_RENDER_PRESENT), &Value::Bool(true));
+        assert_eq!(value(&runtime, KEY_FRAME_LIMIT_FPS), &Value::Int(0));
+        assert_eq!(value(&runtime, KEY_PIPELINED_RENDERING), &Value::Bool(true));
         assert_eq!(
-            settings.resolved_layer(KEY_RENDER_PRESENT),
-            Some(SettingsLayer::User)
+            value(&runtime, KEY_POWER_AWARE_VARIABLE_STEP),
+            &Value::Bool(false)
         );
-        // Clearing the user layer transparently falls back to the tier value.
-        settings.clear(SettingsLayer::User, KEY_RENDER_PRESENT);
-        assert_eq!(settings.get_bool(KEY_RENDER_PRESENT), Some(true));
         assert_eq!(
-            settings.resolved_layer(KEY_RENDER_PRESENT),
-            Some(SettingsLayer::PlatformTier)
+            value(&runtime, KEY_SUSPEND_RESUME_LIFECYCLE),
+            &Value::Bool(false)
+        );
+
+        let id = runtime
+            .registry()
+            .id(&SettingKey::from(KEY_RENDER_PRESENT))
+            .unwrap();
+        assert_eq!(
+            runtime.snapshot().source(id).unwrap().layer,
+            LayerKind::Platform
         );
     }
 
-    /// `App::apply_platform_tier` auto-initialises the store and broadcasts one
-    /// `SettingChanged` per key whose resolved value changed.
     #[test]
-    fn app_apply_platform_tier_broadcasts_changes() {
-        let mut app = App::new();
-        assert!(app.world().get_resource::<Settings>().is_none());
+    fn higher_precedence_user_source_survives_platform_application() {
+        let mut runtime = runtime();
+        runtime.set(
+            LayerKind::User,
+            TrustLevel::User,
+            "user-file",
+            KEY_RENDER_PRESENT,
+            Value::Bool(false),
+        );
+        runtime.resolve().unwrap();
+        QualityTier::Desktop
+            .platform_profile()
+            .write_into_runtime(&mut runtime)
+            .unwrap();
 
-        let count = Arc::new(Mutex::new(0usize));
-        let count_sys = count.clone();
-        app.init_settings();
-        app.add_systems(
-            Update,
-            move |mut cursor: Local<EventCursor<SettingChanged>>,
-                  events: Res<Events<SettingChanged>>| {
-                *count_sys.lock().unwrap() += cursor.read(&events).count();
-            },
+        assert_eq!(value(&runtime, KEY_RENDER_PRESENT), &Value::Bool(false));
+        let id = runtime
+            .registry()
+            .id(&SettingKey::from(KEY_RENDER_PRESENT))
+            .unwrap();
+        assert_eq!(
+            runtime.snapshot().source(id).unwrap().layer,
+            LayerKind::User
+        );
+    }
+
+    #[test]
+    fn app_new_installs_and_reapplies_canonical_platform_runtime() {
+        let mut app = App::new();
+        let runtime = app.settings_runtime().unwrap();
+        let id = runtime
+            .registry()
+            .id(&SettingKey::from(KEY_RENDER_PRESENT))
+            .unwrap();
+        assert_eq!(
+            runtime.snapshot().get(id),
+            Some(&Value::Bool(app.quality_tier().presents()))
         );
 
         app.apply_platform_tier(QualityTier::Mobile);
-        // Every mobile key resolves from the tier (empty store underneath).
-        assert_eq!(app.setting_bool(KEY_RENDER_PRESENT), Some(true));
-        assert_eq!(app.setting_int(KEY_FRAME_LIMIT_FPS), Some(60));
-        assert_eq!(app.setting_bool(KEY_SUSPEND_RESUME_LIFECYCLE), Some(true));
-
-        app.update();
-        app.update();
-        assert_eq!(*count.lock().unwrap(), platform_tier::ALL_KEYS.len());
+        let runtime = app.settings_runtime().unwrap();
+        let id = runtime
+            .registry()
+            .id(&SettingKey::from(KEY_FRAME_LIMIT_FPS))
+            .unwrap();
+        assert_eq!(runtime.snapshot().get(id), Some(&Value::Int(60)));
     }
 
-    /// `App::apply_detected_platform_tier` applies the tier the app derived from
-    /// its probed capabilities: the resolved presentation flag agrees with the
-    /// tier's `presents`.
-    #[test]
-    fn app_apply_detected_platform_tier_matches_quality_tier() {
-        let mut app = App::new();
-        let tier = app.quality_tier();
-        app.apply_detected_platform_tier();
-        assert_eq!(app.setting_bool(KEY_RENDER_PRESENT), Some(tier.presents()));
-    }
-
-    /// The std-only `frame_limit` helper turns the FPS cap into a `FrameLimit`:
-    /// the mobile 60 FPS cap paces the loop; the uncapped tiers are `Off`.
     #[cfg(feature = "std")]
     #[test]
     fn frame_limit_reflects_fps_cap() {
         use crate::pacing::FrameLimit;
-
-        let mobile = QualityTier::Mobile.platform_profile().frame_limit();
-        assert_eq!(mobile, FrameLimit::from_fps(60));
-        assert!(mobile.is_limited());
-
+        assert_eq!(
+            QualityTier::Mobile.platform_profile().frame_limit(),
+            FrameLimit::from_fps(60)
+        );
         assert_eq!(
             QualityTier::Desktop.platform_profile().frame_limit(),
             FrameLimit::Off
         );
-        assert_eq!(
-            QualityTier::Server.platform_profile().frame_limit(),
-            FrameLimit::Off
-        );
     }
 
-    /// A headless-shaped capability set derives the server profile: no
-    /// presentation, no pipeline, no mobile lifecycle.
     #[test]
     fn headless_capabilities_yield_server_profile() {
-        let caps = Capabilities::headless();
-        let tier = QualityTier::from_capabilities(&caps);
+        let tier = QualityTier::from_capabilities(&Capabilities::headless());
         let profile = tier.platform_profile();
         assert!(!profile.presents_display);
         assert!(!profile.pipelined_rendering);
@@ -5982,75 +5652,76 @@ mod platform_tier_tests {
     }
 }
 
-// The crash-report module (design §24.7) is `std`-gated, so its tests are too.
-// They exercise the pure, deterministic surface — snapshot capture from live
-// `App` state, `CrashSnapshot`/`CrashReport` rendering, the `report` body that
-// the panic hook runs, and the `publish`/`snapshot` shared slot — plus one
-// guarded end-to-end `install` + `catch_unwind` check. Nothing here depends on
-// `RUST_BACKTRACE`, and only the single `install` test touches the process
-// panic hook (saving and restoring it) so the suite stays deterministic.
+// The crash-report module is std-gated.
 #[cfg(feature = "std")]
 mod crash_tests {
     use super::*;
-
     use std::panic;
     use std::sync::{Arc, Mutex};
 
     use crate::capability::QualityTier;
     use crate::crash::{CrashReport, CrashReporter, CrashSink, CrashSnapshot};
     use crate::run_mode::RunMode;
-    use crate::settings::SettingsLayer;
+    use crate::settings_runtime::SettingsRuntime;
+    use prism_settings::{Domain, LayerKind, RegistryBuilder, SettingDef, TrustLevel, Value};
 
-    /// Serializes the two tests that mutate the process-global panic hook,
-    /// so their save/install/restore windows never overlap under the
-    /// parallel test harness.
     static HOOK_GUARD: Mutex<()> = Mutex::new(());
 
-    /// A `CrashSink` that appends every dump into a shared buffer, so a test can
-    /// assert exactly what the reporter wrote without going through stderr.
     fn capturing_sink() -> (CrashSink, Arc<Mutex<Vec<String>>>) {
         let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let log_for_sink = log.clone();
         let sink: CrashSink = Arc::new(move |dump: &str| {
-            log_for_sink.lock().unwrap().push(dump.to_string());
+            log_for_sink.lock().unwrap().push(dump.to_owned());
         });
         (sink, log)
     }
 
-    /// `capture_crash_snapshot` reads real shell state: the seeded `RunMode`, the
-    /// resolved `QualityTier`, the live main-world entity count, and an empty
-    /// settings list when no store is installed.
-    #[test]
-    fn capture_reads_live_shell_state() {
-        let mut app = App::new();
-        app.set_run_mode(RunMode::DedicatedServer);
-
-        let snapshot = app.capture_crash_snapshot();
-        assert_eq!(snapshot.run_mode, Some(RunMode::DedicatedServer));
-        assert_eq!(snapshot.quality_tier, Some(app.quality_tier()));
-        assert_eq!(snapshot.main_entity_count, 0);
-        assert!(snapshot.settings.is_empty());
+    fn custom_runtime() -> SettingsRuntime {
+        let mut builder = RegistryBuilder::new();
+        for namespace in ["net", "render"] {
+            builder.namespace(namespace, "test").unwrap();
+        }
+        builder.register(SettingDef::new("net.tickrate", "net", Value::Int(60)));
+        builder.register(SettingDef::new("render.shadows", "render", Value::Int(1)));
+        SettingsRuntime::new(builder.finish().unwrap(), Domain::Runtime).unwrap()
     }
 
-    /// Spawning entities and installing settings is reflected in a freshly
-    /// captured snapshot, and the settings are sorted by key.
+    #[test]
+    fn capture_reads_live_shell_state() {
+        let app = App::new();
+        let snapshot = app.capture_crash_snapshot();
+        assert_eq!(snapshot.quality_tier, Some(app.quality_tier()));
+        assert_eq!(snapshot.main_entity_count, 0);
+        assert_eq!(snapshot.settings.len(), 5);
+    }
+
     #[test]
     fn capture_reflects_entities_and_sorted_settings() {
         let mut app = App::new();
-        app.insert_setting(SettingsLayer::User, "r.shadows", 2_i64);
-        app.insert_setting(SettingsLayer::EngineDefault, "net.tickrate", 60_i64);
-        app.world_mut().spawn(());
-        app.world_mut().spawn(());
-        app.world_mut().spawn(());
+        let mut runtime = custom_runtime();
+        runtime.set(
+            LayerKind::User,
+            TrustLevel::User,
+            "user-file",
+            "render.shadows",
+            Value::Int(2),
+        );
+        runtime.resolve().unwrap();
+        app.insert_resource(runtime);
+        for _ in 0..3 {
+            app.world_mut().spawn(());
+        }
 
         let snapshot = app.capture_crash_snapshot();
         assert_eq!(snapshot.main_entity_count, 3);
-        let keys: Vec<&str> = snapshot.settings.iter().map(|(k, _)| k.as_str()).collect();
-        assert_eq!(keys, ["net.tickrate", "r.shadows"]);
+        let keys: Vec<&str> = snapshot
+            .settings
+            .iter()
+            .map(|(key, _)| key.as_str())
+            .collect();
+        assert_eq!(keys, ["net.tickrate", "render.shadows"]);
     }
 
-    /// `CrashSnapshot::render` lays every field out, including the `<unset>` /
-    /// `<none installed>` fallbacks for the empty default snapshot.
     #[test]
     fn snapshot_render_covers_unset_fallbacks() {
         let rendered = CrashSnapshot::default().render();
@@ -6060,8 +5731,6 @@ mod crash_tests {
         assert!(rendered.contains("settings:      <none installed>"));
     }
 
-    /// A populated snapshot renders each setting on its own line and reports the
-    /// key count.
     #[test]
     fn snapshot_render_lists_populated_settings() {
         let snapshot = CrashSnapshot {
@@ -6069,8 +5738,8 @@ mod crash_tests {
             quality_tier: Some(QualityTier::Desktop),
             main_entity_count: 7,
             settings: vec![
-                ("net.tickrate".to_string(), 60_i64.into()),
-                ("r.shadows".to_string(), 2_i64.into()),
+                ("net.tickrate".to_owned(), Value::Int(60)),
+                ("render.shadows".to_owned(), Value::Int(2)),
             ],
         };
         let rendered = snapshot.render();
@@ -6079,17 +5748,14 @@ mod crash_tests {
         assert!(rendered.contains("main entities: 7"));
         assert!(rendered.contains("settings:      2 key(s)"));
         assert!(rendered.contains("  - net.tickrate = Int(60)"));
-        assert!(rendered.contains("  - r.shadows = Int(2)"));
+        assert!(rendered.contains("  - render.shadows = Int(2)"));
     }
 
-    /// `CrashReport::render` frames the dump with headers and prints the panic
-    /// message, location, and the `<unavailable>` backtrace hint when none was
-    /// captured.
     #[test]
     fn report_render_frames_the_dump() {
         let report = CrashReport {
-            message: "it exploded".to_string(),
-            location: Some("src/sim.rs:42:9".to_string()),
+            message: "it exploded".to_owned(),
+            location: Some("src/sim.rs:42:9".to_owned()),
             backtrace: None,
             snapshot: CrashSnapshot::default(),
             recent_logs: Vec::new(),
@@ -6102,14 +5768,12 @@ mod crash_tests {
         assert!(rendered.trim_end().ends_with("=== end crash report ==="));
     }
 
-    /// A present backtrace is embedded under its own header, with a trailing
-    /// newline added when the captured text lacks one.
     #[test]
     fn report_render_embeds_backtrace() {
         let report = CrashReport {
-            message: "boom".to_string(),
+            message: "boom".to_owned(),
             location: None,
-            backtrace: Some("frame#0\nframe#1".to_string()),
+            backtrace: Some("frame#0\nframe#1".to_owned()),
             snapshot: CrashSnapshot::default(),
             recent_logs: Vec::new(),
         };
@@ -6118,13 +5782,10 @@ mod crash_tests {
         assert!(rendered.contains("backtrace:\nframe#0\nframe#1\n"));
     }
 
-    /// `publish` / `snapshot` round-trip the shared slot, and the clone the app
-    /// keeps sees updates published through any other clone.
     #[test]
     fn publish_and_snapshot_share_one_slot() {
         let reporter = CrashReporter::new();
         assert_eq!(reporter.snapshot(), CrashSnapshot::default());
-
         let snapshot = CrashSnapshot {
             run_mode: Some(RunMode::Headless),
             quality_tier: Some(QualityTier::Server),
@@ -6136,8 +5797,6 @@ mod crash_tests {
         assert_eq!(reporter.snapshot(), snapshot);
     }
 
-    /// `report` writes the rendered dump to the sink and returns the identical
-    /// text, embedding the last-published snapshot.
     #[test]
     fn report_writes_to_sink_and_returns_dump() {
         let (sink, log) = capturing_sink();
@@ -6148,9 +5807,7 @@ mod crash_tests {
             main_entity_count: 5,
             settings: Vec::new(),
         });
-
-        let returned = reporter.report("manual boom", Some("here:1:1".to_string()), None);
-
+        let returned = reporter.report("manual boom", Some("here:1:1".to_owned()), None);
         let captured = log.lock().unwrap();
         assert_eq!(captured.len(), 1);
         assert_eq!(captured[0], returned);
@@ -6160,37 +5817,23 @@ mod crash_tests {
         assert!(returned.contains("main entities: 5"));
     }
 
-    /// `install_crash_reporter` stores the reporter as a resource seeded with the
-    /// current snapshot, and `refresh_crash_snapshot` republishes the latest
-    /// state to it. Restores the process panic hook afterward.
     #[test]
     fn install_and_refresh_publish_app_state() {
-        let _guard = HOOK_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = HOOK_GUARD.lock().unwrap_or_else(|error| error.into_inner());
         let previous = panic::take_hook();
-
         let mut app = App::new();
         app.set_run_mode(RunMode::EditorEmbedded);
         let reporter = app.install_crash_reporter();
-
-        // Seeded with the state at install time.
-        let seeded = reporter.snapshot();
-        assert_eq!(seeded.run_mode, Some(RunMode::EditorEmbedded));
-        assert_eq!(seeded.main_entity_count, 0);
-
-        // Mutate the world, then refresh: the stored reporter sees it.
+        assert_eq!(reporter.snapshot().run_mode, Some(RunMode::EditorEmbedded));
         app.world_mut().spawn(());
         app.refresh_crash_snapshot();
         assert_eq!(reporter.snapshot().main_entity_count, 1);
-
         panic::set_hook(previous);
     }
 
-    /// End-to-end: an installed hook turns a real caught panic into a dump on the
-    /// reporter's sink. This is the only test that mutates the global panic hook,
-    /// and it saves and restores the previous hook so the suite stays clean.
     #[test]
     fn installed_hook_reports_a_real_panic() {
-        let _guard = HOOK_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = HOOK_GUARD.lock().unwrap_or_else(|error| error.into_inner());
         let (sink, log) = capturing_sink();
         let reporter = CrashReporter::with_sink(sink);
         reporter.publish(CrashSnapshot {
@@ -6202,2254 +5845,14 @@ mod crash_tests {
 
         let previous = panic::take_hook();
         reporter.install();
-
-        let result = panic::catch_unwind(|| {
-            panic!("sentinel-crash-xyz");
-        });
+        let result = panic::catch_unwind(|| panic!("sentinel-crash-xyz"));
         assert!(result.is_err());
-
         panic::set_hook(previous);
 
         let captured = log.lock().unwrap();
-        assert!(
-            captured
-                .iter()
-                .any(|dump| dump.contains("sentinel-crash-xyz")),
-            "installed hook should have written the panic dump to the sink",
-        );
-    }
-}
-
-// ---- cvar (design §24.6 console variables + §25.3 validation) ----
-//
-// The cvar registry is a declared, validated front door over the existing
-// settings cascade: registering seeds the `EngineDefault` layer, a runtime
-// write lands in `Runtime`, and validation (type coercion, bounds clamping,
-// read-only / cheat gating) rejects illegal input at the boundary rather than
-// panicking. The module is ungated (it mirrors `settings`), so these tests are
-// ungated too.
-mod cvar_tests {
-    use super::*;
-
-    use crate::cvar::{
-        ConsoleOutcome, CvarBounds, CvarCategory, CvarChanged, CvarCliRejection, CvarError,
-        CvarFlags, CvarListing, CvarRegistry, CvarSetOutcome, CvarSpec, ValidatedWrite,
-    };
-
-    /// Registering a cvar seeds its default into the `EngineDefault` settings
-    /// layer, and the typed getters resolve it. A fresh `App` installs nothing.
-    #[test]
-    fn register_seeds_default_into_engine_default_layer() {
-        let mut app = App::new();
-        assert!(app.world().get_resource::<CvarRegistry>().is_none());
-        assert!(app.world().get_resource::<Settings>().is_none());
-
-        app.register_cvar(
-            CvarSpec::new("r.shadows", 2_i64)
-                .category(CvarCategory::Render)
-                .bounds(CvarBounds::Int(0, 4))
-                .description("shadow quality"),
-        )
-        .expect("fresh registration succeeds");
-
-        // The registry now holds the schema and the cascade holds the value.
-        let registry = app.world().resource::<CvarRegistry>();
-        assert!(registry.contains("r.shadows"));
-        assert_eq!(registry.len(), 1);
-        let schema = registry.get("r.shadows").unwrap();
-        assert_eq!(schema.category(), CvarCategory::Render);
-        assert_eq!(schema.kind(), "int");
-        assert_eq!(schema.default_value(), &SettingValue::Int(2));
-
-        assert_eq!(app.cvar_int("r.shadows"), Some(2));
-        assert_eq!(
-            app.world()
-                .resource::<Settings>()
-                .resolved_layer("r.shadows"),
-            Some(SettingsLayer::EngineDefault),
-        );
-    }
-
-    /// A runtime `set_cvar` write lands in the highest-precedence `Runtime`
-    /// layer and wins over the seeded default.
-    #[test]
-    fn set_cvar_runtime_override_wins_cascade() {
-        let mut app = App::new();
-        app.register_cvar(CvarSpec::new("net.tickrate", 30_i64).bounds(CvarBounds::Int(1, 240)))
-            .unwrap();
-        assert_eq!(app.cvar_int("net.tickrate"), Some(30));
-
-        let outcome = app.set_cvar("net.tickrate", 128_i64).unwrap();
-        assert!(outcome.changed);
-        assert!(!outcome.clamped);
-        assert_eq!(outcome.resolved, SettingValue::Int(128));
-        assert_eq!(app.cvar_int("net.tickrate"), Some(128));
-        assert_eq!(
-            app.world()
-                .resource::<Settings>()
-                .resolved_layer("net.tickrate"),
-            Some(SettingsLayer::Runtime),
-        );
-    }
-
-    /// A write past the declared bounds is clamped, and the outcome's `clamped`
-    /// flag reports it (regression guard: the flag must not be hard-wired false).
-    #[test]
-    fn out_of_range_writes_are_clamped_both_ends() {
-        let mut app = App::new();
-        app.register_cvar(CvarSpec::new("r.shadows", 1_i64).bounds(CvarBounds::Int(0, 3)))
-            .unwrap();
-
-        let high = app.set_cvar("r.shadows", 9_i64).unwrap();
-        assert!(high.changed);
-        assert!(high.clamped, "9 clamps down to the max 3");
-        assert_eq!(high.resolved, SettingValue::Int(3));
-        assert_eq!(app.cvar_int("r.shadows"), Some(3));
-
-        let low = app.set_cvar("r.shadows", -5_i64).unwrap();
-        assert!(low.changed);
-        assert!(low.clamped, "-5 clamps up to the min 0");
-        assert_eq!(low.resolved, SettingValue::Int(0));
-
-        // An in-range write is not reported as clamped.
-        let mid = app.set_cvar("r.shadows", 2_i64).unwrap();
-        assert!(mid.changed);
-        assert!(!mid.clamped);
-        assert_eq!(mid.resolved, SettingValue::Int(2));
-    }
-
-    /// An integer written to a float cvar is losslessly coerced to float; the
-    /// coerced value is still clamped into the float bounds.
-    #[test]
-    fn int_is_coerced_to_float_cvar() {
-        let mut app = App::new();
-        app.register_cvar(CvarSpec::new("r.gain", 1.0_f64).bounds(CvarBounds::Float(0.0, 2.0)))
-            .unwrap();
-
-        let ok = app.set_cvar("r.gain", 2_i64).unwrap();
-        assert!(!ok.clamped);
-        assert_eq!(ok.resolved, SettingValue::Float(2.0));
-        assert_eq!(app.cvar_float("r.gain"), Some(2.0));
-
-        let clamped = app.set_cvar("r.gain", 5_i64).unwrap();
-        assert!(clamped.clamped);
-        assert_eq!(clamped.resolved, SettingValue::Float(2.0));
-    }
-
-    /// A value of an incompatible kind (string into an int cvar) is rejected and
-    /// no state changes. Note cvars do not parse strings the way `Settings` does.
-    #[test]
-    fn type_mismatch_is_rejected() {
-        let mut app = App::new();
-        app.register_cvar(CvarSpec::new("r.shadows", 2_i64))
-            .unwrap();
-
-        let err = app.set_cvar("r.shadows", "high").unwrap_err();
-        assert_eq!(
-            err,
-            CvarError::TypeMismatch {
-                name: "r.shadows".to_owned(),
-                expected: "int",
-                found: "string",
-            }
-        );
-        // Rejected write leaves the resolved value untouched.
-        assert_eq!(app.cvar_int("r.shadows"), Some(2));
-    }
-
-    /// A non-finite float is rejected at the boundary before it can poison
-    /// clamping / comparisons.
-    #[test]
-    fn non_finite_float_is_rejected() {
-        let mut app = App::new();
-        app.register_cvar(CvarSpec::new("r.gain", 1.0_f64)).unwrap();
-
-        let err = app.set_cvar("r.gain", f64::NAN).unwrap_err();
-        assert_eq!(
-            err,
-            CvarError::TypeMismatch {
-                name: "r.gain".to_owned(),
-                expected: "finite float",
-                found: "non-finite float",
-            }
-        );
-        assert_eq!(app.cvar_float("r.gain"), Some(1.0));
-
-        assert!(app.set_cvar("r.gain", f64::INFINITY).is_err());
-    }
-
-    /// Writing an unregistered cvar fails with `Unregistered`.
-    #[test]
-    fn writing_unregistered_cvar_fails() {
-        let mut app = App::new();
-        app.init_cvars();
-        let err = app.set_cvar("does.not.exist", 1_i64).unwrap_err();
-        assert_eq!(err, CvarError::Unregistered("does.not.exist".to_owned()));
-    }
-
-    /// A read-only cvar cannot be written at runtime (nor reset).
-    #[test]
-    fn read_only_cvar_cannot_be_written() {
-        let mut app = App::new();
-        app.register_cvar(CvarSpec::new("sys.version", "1.0").flag(CvarFlags::READ_ONLY))
-            .unwrap();
-
-        assert_eq!(
-            app.set_cvar("sys.version", "2.0").unwrap_err(),
-            CvarError::ReadOnly("sys.version".to_owned())
-        );
-        assert_eq!(
-            app.reset_cvar("sys.version").unwrap_err(),
-            CvarError::ReadOnly("sys.version".to_owned())
-        );
-        assert_eq!(app.cvar_str("sys.version"), Some("1.0"));
-    }
-
-    /// A cheat-protected cvar is blocked while cheats are disabled and allowed
-    /// once they are enabled.
-    #[test]
-    fn cheat_protected_cvar_is_gated() {
-        let mut app = App::new();
-        app.register_cvar(CvarSpec::new("g.godmode", false).flag(CvarFlags::CHEAT))
-            .unwrap();
-
-        assert_eq!(
-            app.set_cvar("g.godmode", true).unwrap_err(),
-            CvarError::CheatProtected("g.godmode".to_owned())
-        );
-        assert_eq!(app.cvar_bool("g.godmode"), Some(false));
-
-        app.set_cheats_enabled(true);
-        let ok = app.set_cvar("g.godmode", true).unwrap();
-        assert!(ok.changed);
-        assert_eq!(app.cvar_bool("g.godmode"), Some(true));
-    }
-
-    /// A `NOTIFY` cvar broadcasts a `CvarChanged` event on a resolved change; a
-    /// non-notify cvar changing broadcasts none (the `SettingChanged` still goes
-    /// out, but that is a separate channel).
-    #[test]
-    fn notify_flag_controls_cvar_changed_event() {
-        let mut app = App::new();
-        app.register_cvar(
-            CvarSpec::new("r.vsync", true)
-                .category(CvarCategory::Render)
-                .flag(CvarFlags::NOTIFY),
-        )
-        .unwrap();
-        app.register_cvar(CvarSpec::new("r.quiet", 1_i64)).unwrap();
-
-        let seen = Arc::new(Mutex::new(
-            Vec::<(String, Option<bool>, Option<bool>)>::new(),
-        ));
-        let seen_sys = seen.clone();
-        app.add_systems(
-            Update,
-            move |mut cursor: Local<EventCursor<CvarChanged>>, events: Res<Events<CvarChanged>>| {
-                for ev in cursor.read(&events) {
-                    seen_sys.lock().unwrap().push((
-                        ev.name.clone(),
-                        ev.previous.as_ref().and_then(SettingValue::as_bool),
-                        ev.current.as_bool(),
-                    ));
-                }
-            },
-        );
-
-        app.set_cvar("r.vsync", false).unwrap();
-        app.set_cvar("r.quiet", 7_i64).unwrap();
-        // A no-op write (same resolved value) must not notify.
-        app.set_cvar("r.vsync", false).unwrap();
-
-        app.update();
-        app.update();
-
-        let seen = seen.lock().unwrap();
-        assert_eq!(
-            seen.as_slice(),
-            [("r.vsync".to_owned(), Some(true), Some(false))],
-            "only the NOTIFY cvar's real change fires CvarChanged",
-        );
-    }
-
-    /// `reset_cvar` clears only the `Runtime` override, so the value falls back
-    /// to the next-highest layer still present (here a `User` setting).
-    #[test]
-    fn reset_cvar_falls_back_to_lower_layer() {
-        let mut app = App::new();
-        app.register_cvar(CvarSpec::new("r.shadows", 1_i64).bounds(CvarBounds::Int(0, 4)))
-            .unwrap();
-        // A user-layer preference sits above the engine default.
-        app.set_cvar_at(SettingsLayer::User, "r.shadows", 2_i64)
-            .unwrap();
-        // A runtime console write sits above the user layer.
-        app.set_cvar("r.shadows", 3_i64).unwrap();
-        assert_eq!(app.cvar_int("r.shadows"), Some(3));
-
-        let outcome = app.reset_cvar("r.shadows").unwrap();
-        assert!(outcome.changed);
-        assert!(!outcome.clamped);
-        assert_eq!(outcome.resolved, SettingValue::Int(2));
-        assert_eq!(app.cvar_int("r.shadows"), Some(2));
-        assert_eq!(
-            app.world()
-                .resource::<Settings>()
-                .resolved_layer("r.shadows"),
-            Some(SettingsLayer::User),
-        );
-    }
-
-    /// `iter_category` filters by category and `archived` lists only ARCHIVE
-    /// cvars; both walk ascending-name order deterministically.
-    #[test]
-    fn iter_category_and_archived_are_filtered_and_ordered() {
-        let mut app = App::new();
-        app.register_cvar(CvarSpec::new("r.shadows", 1_i64).category(CvarCategory::Render))
-            .unwrap();
-        app.register_cvar(
-            CvarSpec::new("r.bloom", true)
-                .category(CvarCategory::Render)
-                .flag(CvarFlags::ARCHIVE),
-        )
-        .unwrap();
-        app.register_cvar(CvarSpec::new("net.tickrate", 60_i64).category(CvarCategory::Network))
-            .unwrap();
-
-        let registry = app.world().resource::<CvarRegistry>();
-        let render: Vec<&str> = registry
-            .iter_category(CvarCategory::Render)
-            .map(|(name, _)| name)
-            .collect();
-        assert_eq!(render, ["r.bloom", "r.shadows"]);
-
-        let archived: Vec<&str> = registry.archived().collect();
-        assert_eq!(archived, ["r.bloom"]);
-    }
-
-    /// Registration rejects bounds whose kind disagrees with the default, and
-    /// inverted bounds, both with `InvalidBounds` — and no state is seeded.
-    #[test]
-    fn register_rejects_invalid_bounds() {
-        let mut app = App::new();
-
-        let kind_mismatch = app
-            .register_cvar(CvarSpec::new("r.gain", 1_i64).bounds(CvarBounds::Float(0.0, 1.0)))
-            .unwrap_err();
-        assert_eq!(kind_mismatch, CvarError::InvalidBounds("r.gain".to_owned()));
-
-        let inverted = app
-            .register_cvar(CvarSpec::new("r.shadows", 1_i64).bounds(CvarBounds::Int(4, 0)))
-            .unwrap_err();
-        assert_eq!(inverted, CvarError::InvalidBounds("r.shadows".to_owned()));
-
-        // Nothing was registered or seeded.
-        assert!(!app.world().resource::<CvarRegistry>().contains("r.gain"));
-        assert_eq!(app.cvar_int("r.shadows"), None);
-    }
-
-    /// Registering the same name twice is a `Redeclared` error and leaves the
-    /// first registration intact.
-    #[test]
-    fn register_rejects_redeclaration() {
-        let mut app = App::new();
-        app.register_cvar(CvarSpec::new("r.shadows", 1_i64))
-            .unwrap();
-        let err = app
-            .register_cvar(CvarSpec::new("r.shadows", 9_i64))
-            .unwrap_err();
-        assert_eq!(err, CvarError::Redeclared("r.shadows".to_owned()));
-        // The original default is untouched.
-        assert_eq!(app.cvar_int("r.shadows"), Some(1));
-    }
-
-    /// `CvarRegistry::validate_set` is a pure check returning the coerced,
-    /// clamped value plus whether clamping altered it — no cascade needed.
-    #[test]
-    fn validate_set_is_pure_and_reports_clamping() {
-        let mut registry = CvarRegistry::new();
-        let (name, default) = registry
-            .register(CvarSpec::new("r.shadows", 1_i64).bounds(CvarBounds::Int(0, 3)))
-            .unwrap();
-        assert_eq!(name, "r.shadows");
-        assert_eq!(default, SettingValue::Int(1));
-
-        let in_range = registry
-            .validate_set("r.shadows", SettingValue::Int(2))
-            .unwrap();
-        assert_eq!(
-            in_range,
-            ValidatedWrite {
-                value: SettingValue::Int(2),
-                clamped: false,
-            }
-        );
-
-        let clamped = registry
-            .validate_set("r.shadows", SettingValue::Int(99))
-            .unwrap();
-        assert_eq!(
-            clamped,
-            ValidatedWrite {
-                value: SettingValue::Int(3),
-                clamped: true,
-            }
-        );
-
-        // Cheat gating is observable through the pure path too.
-        registry
-            .register(CvarSpec::new("g.noclip", false).flag(CvarFlags::CHEAT))
-            .unwrap();
-        assert_eq!(
-            registry.validate_set("g.noclip", SettingValue::Bool(true)),
-            Err(CvarError::CheatProtected("g.noclip".to_owned()))
-        );
-        registry.set_cheats_enabled(true);
-        assert!(registry
-            .validate_set("g.noclip", SettingValue::Bool(true))
-            .is_ok());
-    }
-
-    /// A command-line override for a declared cvar is validated and clamped into
-    /// the declared bounds, written to the `CommandLine` layer, and reported as
-    /// an accepted (clamped) cvar — not written raw.
-    #[test]
-    fn cli_overrides_validate_and_clamp_declared_cvar() {
-        let mut app = App::new();
-        app.register_cvar(CvarSpec::new("r.shadows", 2_i64).bounds(CvarBounds::Int(0, 4)))
-            .unwrap();
-
-        // `99` is out of the [0, 4] bounds: it is clamped, not rejected.
-        let report = app.apply_cvar_cli_overrides(["--r.shadows=99"]);
-
-        assert_eq!(report.cvars.len(), 1);
-        assert!(report.settings.is_empty());
-        assert!(!report.has_rejections());
-        let applied = &report.cvars[0];
-        assert_eq!(applied.name, "r.shadows");
-        assert!(applied.outcome.changed);
-        assert!(applied.outcome.clamped);
-        assert_eq!(applied.outcome.resolved, SettingValue::Int(4));
-
-        assert_eq!(app.cvar_int("r.shadows"), Some(4));
-        assert_eq!(
-            app.world()
-                .resource::<Settings>()
-                .resolved_layer("r.shadows"),
-            Some(SettingsLayer::CommandLine),
-        );
-    }
-
-    /// A command-line value of the wrong type for a declared cvar is rejected at
-    /// the boundary (not coerced, not written): the cascade keeps the seeded
-    /// default and the rejection carries the `TypeMismatch` error.
-    #[test]
-    fn cli_overrides_reject_wrong_type_leaving_cascade_untouched() {
-        let mut app = App::new();
-        app.register_cvar(CvarSpec::new("r.shadows", 2_i64).bounds(CvarBounds::Int(0, 4)))
-            .unwrap();
-
-        let report = app.apply_cvar_cli_overrides(["r.shadows=high"]);
-
-        assert!(report.cvars.is_empty());
-        assert_eq!(report.rejected_count(), 1);
-        assert_eq!(report.rejected[0].key, "r.shadows");
-        assert!(matches!(
-            report.rejected[0].error,
-            CvarError::TypeMismatch { .. }
-        ));
-        // Untouched: still the EngineDefault seed.
-        assert_eq!(app.cvar_int("r.shadows"), Some(2));
-        assert_eq!(
-            app.world()
-                .resource::<Settings>()
-                .resolved_layer("r.shadows"),
-            Some(SettingsLayer::EngineDefault),
-        );
-    }
-
-    /// Read-only and cheat-protected cvars refuse command-line writes at the
-    /// boundary; enabling cheats first lets the cheat cvar through.
-    #[test]
-    fn cli_overrides_respect_read_only_and_cheat_flags() {
-        let mut app = App::new();
-        app.register_cvar(CvarSpec::new("sys.build", 7_i64).flag(CvarFlags::READ_ONLY))
-            .unwrap();
-        app.register_cvar(CvarSpec::new("g.noclip", false).flag(CvarFlags::CHEAT))
-            .unwrap();
-
-        let report = app.apply_cvar_cli_overrides(["--sys.build=9", "--g.noclip=true"]);
-        assert!(report.cvars.is_empty());
-        assert_eq!(report.rejected_count(), 2);
-        assert_eq!(
-            report.rejected,
-            vec![
-                CvarCliRejection {
-                    key: "sys.build".to_owned(),
-                    error: CvarError::ReadOnly("sys.build".to_owned()),
-                },
-                CvarCliRejection {
-                    key: "g.noclip".to_owned(),
-                    error: CvarError::CheatProtected("g.noclip".to_owned()),
-                },
-            ],
-        );
-        assert_eq!(app.cvar_int("sys.build"), Some(7));
-        assert_eq!(app.cvar_bool("g.noclip"), Some(false));
-
-        // With cheats enabled, the cheat cvar is accepted; read-only stays refused.
-        app.set_cheats_enabled(true);
-        let report = app.apply_cvar_cli_overrides(["--sys.build=9", "--g.noclip=true"]);
-        assert_eq!(report.rejected_count(), 1);
-        assert_eq!(report.rejected[0].key, "sys.build");
-        assert_eq!(report.cvars.len(), 1);
-        assert_eq!(report.cvars[0].name, "g.noclip");
-        assert_eq!(app.cvar_bool("g.noclip"), Some(true));
-    }
-
-    /// A key that is not a declared cvar is written verbatim into the
-    /// `CommandLine` layer as an ordinary setting (cvars are opt-in), and shows
-    /// up in the report's `settings` bucket.
-    #[test]
-    fn cli_overrides_undeclared_key_written_as_plain_setting() {
-        let mut app = App::new();
-        app.register_cvar(CvarSpec::new("r.shadows", 2_i64).bounds(CvarBounds::Int(0, 4)))
-            .unwrap();
-
-        let report = app.apply_cvar_cli_overrides(["--window.title=Prism", "--r.shadows=1"]);
-
-        assert_eq!(report.settings.len(), 1);
-        assert_eq!(report.settings[0].key, "window.title");
-        assert_eq!(
-            report.settings[0].current,
-            Some(SettingValue::Str("Prism".to_owned()))
-        );
-        assert_eq!(report.cvars.len(), 1);
-        assert_eq!(report.cvars[0].name, "r.shadows");
-        assert_eq!(
-            app.world().resource::<Settings>().get("window.title"),
-            Some(&SettingValue::Str("Prism".to_owned()))
-        );
-        assert_eq!(app.cvar_int("r.shadows"), Some(1));
-    }
-
-    /// A bare `--flag` (no `=`) means `Bool(true)`; applied to a declared bool
-    /// cvar it validates and sets it true.
-    #[test]
-    fn cli_overrides_bare_flag_sets_bool_cvar_true() {
-        let mut app = App::new();
-        app.register_cvar(CvarSpec::new("r.vsync", false)).unwrap();
-
-        let report = app.apply_cvar_cli_overrides(["--r.vsync"]);
-
-        assert_eq!(report.cvars.len(), 1);
-        assert_eq!(report.cvars[0].name, "r.vsync");
-        assert!(report.cvars[0].outcome.changed);
-        assert_eq!(app.cvar_bool("r.vsync"), Some(true));
-    }
-
-    /// Launch flags land in the `CommandLine` layer, which sits *below*
-    /// `Runtime`: a cvar already overridden at runtime resolves unchanged, yet
-    /// the command-line contribution is still recorded (changed = false).
-    #[test]
-    fn cli_overrides_below_runtime_report_unchanged() {
-        let mut app = App::new();
-        app.register_cvar(CvarSpec::new("net.tickrate", 30_i64).bounds(CvarBounds::Int(1, 240)))
-            .unwrap();
-        app.set_cvar("net.tickrate", 128_i64).unwrap();
-        assert_eq!(app.cvar_int("net.tickrate"), Some(128));
-
-        let report = app.apply_cvar_cli_overrides(["--net.tickrate=60"]);
-
-        assert_eq!(report.cvars.len(), 1);
-        assert!(!report.cvars[0].outcome.changed);
-        // Runtime still wins; the CommandLine value sits underneath.
-        assert_eq!(app.cvar_int("net.tickrate"), Some(128));
-        assert_eq!(
-            app.world()
-                .resource::<Settings>()
-                .resolved_layer("net.tickrate"),
-            Some(SettingsLayer::Runtime),
-        );
-    }
-
-    /// Accepting a `NOTIFY` cvar through the command line broadcasts a
-    /// `CvarChanged` event (same path as `set_cvar`).
-    #[test]
-    fn cli_overrides_emit_cvar_changed_for_notify_flag() {
-        let mut app = App::new();
-        app.register_cvar(
-            CvarSpec::new("r.shadows", 2_i64)
-                .category(CvarCategory::Render)
-                .bounds(CvarBounds::Int(0, 4))
-                .flag(CvarFlags::NOTIFY),
-        )
-        .unwrap();
-
-        app.add_systems(
-            Update,
-            |mut cursor: Local<EventCursor<CvarChanged>>, events: Res<Events<CvarChanged>>| {
-                for ev in cursor.read(&events) {
-                    assert_eq!(ev.name, "r.shadows");
-                    assert_eq!(ev.category, CvarCategory::Render);
-                    assert_eq!(ev.current, SettingValue::Int(3));
-                }
-            },
-        );
-
-        let report = app.apply_cvar_cli_overrides(["--r.shadows=3"]);
-        assert!(report.cvars[0].outcome.changed);
-        app.update();
-        app.update();
-    }
-
-    /// Environment-style overrides map `PREFIX_A_B` → `a.b` and run declared
-    /// cvars through the same validation/clamping as the command-line path.
-    #[test]
-    fn env_overrides_map_prefix_and_validate() {
-        let mut app = App::new();
-        app.register_cvar(CvarSpec::new("r.shadows", 2_i64).bounds(CvarBounds::Int(0, 4)))
-            .unwrap();
-
-        let report = app.apply_cvar_env_overrides(
-            [
-                ("PRISM_R_SHADOWS", "99"),
-                ("PRISM_WINDOW_TITLE", "Prism"),
-                ("OTHER_IGNORED", "x"),
-            ],
-            "PRISM_",
-        );
-
-        // r.shadows is a declared cvar: clamped into bounds.
-        assert_eq!(report.cvars.len(), 1);
-        assert_eq!(report.cvars[0].name, "r.shadows");
-        assert!(report.cvars[0].outcome.clamped);
-        assert_eq!(app.cvar_int("r.shadows"), Some(4));
-        // window.title is undeclared: written verbatim.
-        assert_eq!(report.settings.len(), 1);
-        assert_eq!(report.settings[0].key, "window.title");
-        // The non-prefixed var is ignored entirely.
-        assert_eq!(
-            app.world().resource::<Settings>().get("other.ignored"),
-            None
-        );
-    }
-
-    /// An empty / all-no-op override pass produces an empty report.
-    #[test]
-    fn cli_overrides_empty_report_when_nothing_applies() {
-        let mut app = App::new();
-        let report = app.apply_cvar_cli_overrides(["--", "=value", ""]);
-        assert!(report.is_empty());
-    }
-
-    /// A blank line, a whitespace-only line, and a `//` comment are all no-ops.
-    #[test]
-    fn console_blank_and_comment_lines_are_noops() {
-        let mut app = App::new();
-        assert_eq!(app.exec_console(""), ConsoleOutcome::Empty);
-        assert_eq!(app.exec_console("   \t "), ConsoleOutcome::Empty);
-        assert_eq!(app.exec_console("// just a comment"), ConsoleOutcome::Empty);
-        // A no-op line must not even install the cvar machinery.
-        assert!(app.world().get_resource::<CvarRegistry>().is_none());
-    }
-
-    /// A bare registered cvar name queries its current resolved value.
-    #[test]
-    fn console_bare_name_queries_resolved_value() {
-        let mut app = App::new();
-        app.register_cvar(CvarSpec::new("r.shadows", 2_i64).bounds(CvarBounds::Int(0, 4)))
-            .unwrap();
-
-        assert_eq!(
-            app.exec_console("r.shadows"),
-            ConsoleOutcome::Queried {
-                name: "r.shadows".to_owned(),
-                value: SettingValue::Int(2),
-            },
-        );
-
-        // Leading/trailing whitespace around a bare name is still a query.
-        assert_eq!(
-            app.exec_console("  r.shadows  "),
-            ConsoleOutcome::Queried {
-                name: "r.shadows".to_owned(),
-                value: SettingValue::Int(2),
-            },
-        );
-    }
-
-    /// Querying an unregistered name reports `Unknown`, not a resolved value.
-    #[test]
-    fn console_query_unknown_cvar_is_unknown() {
-        let mut app = App::new();
-        assert_eq!(
-            app.exec_console("r.nope"),
-            ConsoleOutcome::Unknown("r.nope".to_owned()),
-        );
-    }
-
-    /// A declared-only front door: an undeclared settings key that happens to
-    /// be set is still `Unknown` from the console, never silently resolved.
-    #[test]
-    fn console_query_ignores_undeclared_settings_key() {
-        let mut app = App::new();
-        // Register an unrelated cvar so the `Settings` cascade exists, then set
-        // an *undeclared* key directly in it.
-        app.register_cvar(CvarSpec::new("r.shadows", 2_i64))
-            .unwrap();
-        app.world_mut().resource_mut::<Settings>().set(
-            SettingsLayer::User,
-            "window.title".to_owned(),
-            SettingValue::Str("Prism".to_owned()),
-        );
-        assert_eq!(
-            app.world().resource::<Settings>().get("window.title"),
-            Some(&SettingValue::Str("Prism".to_owned())),
-        );
-        assert_eq!(
-            app.exec_console("window.title"),
-            ConsoleOutcome::Unknown("window.title".to_owned()),
-        );
-    }
-
-    /// `name value` writes the cvar at the `Runtime` layer and the typed getter
-    /// reflects it (the design's `r.shadows 2` form).
-    #[test]
-    fn console_sets_cvar_at_runtime_layer() {
-        let mut app = App::new();
-        app.register_cvar(CvarSpec::new("r.shadows", 2_i64).bounds(CvarBounds::Int(0, 4)))
-            .unwrap();
-
-        let outcome = app.exec_console("r.shadows 3");
-        match outcome {
-            ConsoleOutcome::Set(set) => {
-                assert!(set.changed);
-                assert!(!set.clamped);
-                assert_eq!(set.resolved, SettingValue::Int(3));
-            }
-            other => panic!("expected Set, got {other:?}"),
-        }
-        assert_eq!(app.cvar_int("r.shadows"), Some(3));
-        assert_eq!(
-            app.world()
-                .resource::<Settings>()
-                .resolved_layer("r.shadows"),
-            Some(SettingsLayer::Runtime),
-        );
-
-        // A subsequent bare-name query now reflects the runtime write.
-        assert_eq!(
-            app.exec_console("r.shadows"),
-            ConsoleOutcome::Queried {
-                name: "r.shadows".to_owned(),
-                value: SettingValue::Int(3),
-            },
-        );
-    }
-
-    /// Out-of-range numeric console input is clamped into bounds, not rejected.
-    #[test]
-    fn console_set_out_of_bounds_is_clamped_not_rejected() {
-        let mut app = App::new();
-        app.register_cvar(CvarSpec::new("r.shadows", 1_i64).bounds(CvarBounds::Int(0, 3)))
-            .unwrap();
-
-        match app.exec_console("r.shadows 99") {
-            ConsoleOutcome::Set(set) => {
-                assert!(set.changed);
-                assert!(set.clamped);
-                assert_eq!(set.resolved, SettingValue::Int(3));
-            }
-            other => panic!("expected clamped Set, got {other:?}"),
-        }
-        assert_eq!(app.cvar_int("r.shadows"), Some(3));
-    }
-
-    /// The whole remainder after the first token is the value, so a multi-word
-    /// console line sets a string containing the interior whitespace.
-    #[test]
-    fn console_multiword_value_is_a_single_string() {
-        let mut app = App::new();
-        app.register_cvar(CvarSpec::new("sv.motd", "welcome"))
-            .unwrap();
-
-        match app.exec_console("sv.motd  hello   brave  world  ") {
-            ConsoleOutcome::Set(set) => {
-                assert_eq!(
-                    set.resolved,
-                    SettingValue::Str("hello   brave  world".to_owned())
-                );
-            }
-            other => panic!("expected Set, got {other:?}"),
-        }
-        assert_eq!(app.cvar_str("sv.motd"), Some("hello   brave  world"));
-    }
-
-    /// Writing an unregistered cvar from the console reports `Unknown` and
-    /// leaves the cascade untouched.
-    #[test]
-    fn console_set_unknown_cvar_is_unknown() {
-        let mut app = App::new();
-        assert_eq!(
-            app.exec_console("does.not.exist 1"),
-            ConsoleOutcome::Unknown("does.not.exist".to_owned()),
-        );
-        assert_eq!(app.cvar("does.not.exist"), None);
-    }
-
-    /// A type-incompatible write is rejected at the boundary with the write's
-    /// `CvarError`, leaving the resolved value unchanged.
-    #[test]
-    fn console_type_mismatch_is_rejected() {
-        let mut app = App::new();
-        app.register_cvar(CvarSpec::new("r.shadows", 2_i64))
-            .unwrap();
-
-        match app.exec_console("r.shadows high") {
-            ConsoleOutcome::Rejected(CvarError::TypeMismatch { name, .. }) => {
-                assert_eq!(name, "r.shadows");
-            }
-            other => panic!("expected Rejected(TypeMismatch), got {other:?}"),
-        }
-        // Rejection left the value untouched.
-        assert_eq!(app.cvar_int("r.shadows"), Some(2));
-    }
-
-    /// A read-only cvar refuses a console write.
-    #[test]
-    fn console_read_only_cvar_is_rejected() {
-        let mut app = App::new();
-        app.register_cvar(CvarSpec::new("sys.version", "1.0").flag(CvarFlags::READ_ONLY))
-            .unwrap();
-
-        assert_eq!(
-            app.exec_console("sys.version 2.0"),
-            ConsoleOutcome::Rejected(CvarError::ReadOnly("sys.version".to_owned())),
-        );
-        assert_eq!(app.cvar_str("sys.version"), Some("1.0"));
-    }
-
-    /// A cheat-protected cvar is refused while cheats are disabled, then
-    /// accepted once cheats are enabled.
-    #[test]
-    fn console_cheat_protected_cvar_is_gated() {
-        let mut app = App::new();
-        app.register_cvar(CvarSpec::new("g.godmode", false).flag(CvarFlags::CHEAT))
-            .unwrap();
-
-        assert_eq!(
-            app.exec_console("g.godmode true"),
-            ConsoleOutcome::Rejected(CvarError::CheatProtected("g.godmode".to_owned())),
-        );
-        assert_eq!(app.cvar_bool("g.godmode"), Some(false));
-
-        app.set_cheats_enabled(true);
-        match app.exec_console("g.godmode true") {
-            ConsoleOutcome::Set(set) => {
-                assert!(set.changed);
-                assert_eq!(set.resolved, SettingValue::Bool(true));
-            }
-            other => panic!("expected Set once cheats are enabled, got {other:?}"),
-        }
-        assert_eq!(app.cvar_bool("g.godmode"), Some(true));
-    }
-
-    /// `write_archive_config` serialises only the ARCHIVE cvars, in ascending
-    /// name order, as `name value` console lines under a `//` header; an
-    /// un-archived cvar is omitted.
-    #[test]
-    fn archive_config_lists_only_archived_cvars_in_ascending_order() {
-        let mut app = App::new();
-        // Registered out of alphabetical order with mixed ARCHIVE flags.
-        app.register_cvar(
-            CvarSpec::new("r.shadows", 2_i64)
-                .bounds(CvarBounds::Int(0, 4))
-                .flag(CvarFlags::ARCHIVE),
-        )
-        .unwrap();
-        app.register_cvar(CvarSpec::new("dbg.fps", false).flag(CvarFlags::ARCHIVE))
-            .unwrap();
-        app.register_cvar(CvarSpec::new("net.rate", 60_i64))
-            .unwrap(); // not archived
-        app.register_cvar(CvarSpec::new("snd.volume", 0.5_f64).flag(CvarFlags::ARCHIVE))
-            .unwrap();
-
-        let config = app.write_archive_config();
-        let lines: Vec<&str> = config.lines().collect();
-        assert!(lines[0].starts_with("//"), "first line is a comment header");
-        assert_eq!(
-            &lines[1..],
-            &["dbg.fps false", "r.shadows 2", "snd.volume 0.5"],
-        );
-        // The un-archived cvar never appears.
-        assert!(!config.contains("net.rate"));
-    }
-
-    /// A `write_archive_config()` -> `exec_console_script()` cycle restores every
-    /// archived value into a fresh App with the same schema, losslessly.
-    #[test]
-    fn archive_config_round_trips_through_exec_console_script() {
-        fn schema(app: &mut App) {
-            app.register_cvar(
-                CvarSpec::new("r.shadows", 2_i64)
-                    .bounds(CvarBounds::Int(0, 4))
-                    .flag(CvarFlags::ARCHIVE),
-            )
-            .unwrap();
-            app.register_cvar(CvarSpec::new("snd.volume", 0.5_f64).flag(CvarFlags::ARCHIVE))
-                .unwrap();
-            app.register_cvar(CvarSpec::new("net.name", "default").flag(CvarFlags::ARCHIVE))
-                .unwrap();
-        }
-
-        let mut source = App::new();
-        schema(&mut source);
-        // Mutate away from the defaults at the runtime layer.
-        source.set_cvar("r.shadows", SettingValue::Int(4)).unwrap();
-        source
-            .set_cvar("snd.volume", SettingValue::Float(0.25))
-            .unwrap();
-        source
-            .set_cvar("net.name", SettingValue::Str("alice".to_owned()))
-            .unwrap();
-        let config = source.write_archive_config();
-
-        let mut restored = App::new();
-        schema(&mut restored);
-        let outcomes = restored.exec_console_script(&config);
-        // Header comment line + three cvar lines (ascending: net.name, r.shadows, snd.volume).
-        assert_eq!(outcomes.len(), 4);
-        assert_eq!(outcomes[0], ConsoleOutcome::Empty); // header comment
-        assert!(matches!(outcomes[1], ConsoleOutcome::Set(_)));
-
-        assert_eq!(restored.cvar_int("r.shadows"), Some(4));
-        assert_eq!(restored.cvar_float("snd.volume"), Some(0.25));
-        assert_eq!(restored.cvar_str("net.name"), Some("alice"));
-    }
-
-    /// Blank lines and `//` comments in a script are no-ops; real lines apply.
-    #[test]
-    fn exec_console_script_skips_blank_and_comment_lines() {
-        let mut app = App::new();
-        app.register_cvar(CvarSpec::new("r.shadows", 2_i64).bounds(CvarBounds::Int(0, 4)))
-            .unwrap();
-
-        let outcomes = app.exec_console_script("// header\n\nr.shadows 3\n   \n// trailing");
-        assert_eq!(outcomes.len(), 5);
-        assert_eq!(outcomes[0], ConsoleOutcome::Empty);
-        assert_eq!(outcomes[1], ConsoleOutcome::Empty);
-        assert!(matches!(outcomes[2], ConsoleOutcome::Set(_)));
-        assert_eq!(outcomes[3], ConsoleOutcome::Empty);
-        assert_eq!(outcomes[4], ConsoleOutcome::Empty);
-        assert_eq!(app.cvar_int("r.shadows"), Some(3));
-    }
-
-    /// A string cvar with interior spaces round-trips without quoting, because
-    /// the console takes the whole trimmed line remainder as the value.
-    #[test]
-    fn archive_config_round_trips_multi_word_string() {
-        fn schema(app: &mut App) {
-            app.register_cvar(CvarSpec::new("player.name", "anon").flag(CvarFlags::ARCHIVE))
-                .unwrap();
-        }
-
-        let mut source = App::new();
-        schema(&mut source);
-        source
-            .set_cvar("player.name", SettingValue::Str("The Brave One".to_owned()))
-            .unwrap();
-        let config = source.write_archive_config();
-        assert!(config.contains("player.name The Brave One"));
-
-        let mut restored = App::new();
-        schema(&mut restored);
-        restored.exec_console_script(&config);
-        assert_eq!(restored.cvar_str("player.name"), Some("The Brave One"));
-    }
-
-    /// A float cvar holding an integral value is written with a trailing `.0`
-    /// and restored as a float, not accidentally coerced through an int token.
-    #[test]
-    fn archive_config_integral_float_round_trips_as_float() {
-        fn schema(app: &mut App) {
-            app.register_cvar(
-                CvarSpec::new("r.gamma", 2.2_f64)
-                    .bounds(CvarBounds::Float(0.0, 4.0))
-                    .flag(CvarFlags::ARCHIVE),
-            )
-            .unwrap();
-        }
-
-        let mut source = App::new();
-        schema(&mut source);
-        source
-            .set_cvar("r.gamma", SettingValue::Float(2.0))
-            .unwrap();
-        let config = source.write_archive_config();
-        assert!(config.contains("r.gamma 2.0"), "got: {config:?}");
-
-        let mut restored = App::new();
-        schema(&mut restored);
-        restored.exec_console_script(&config);
-        assert_eq!(restored.cvar_float("r.gamma"), Some(2.0));
-        assert_eq!(restored.cvar("r.gamma"), Some(&SettingValue::Float(2.0)));
-    }
-
-    /// An unset archived cvar is still written from its declared default, and a
-    /// string value containing a newline is skipped as a documented limitation.
-    #[test]
-    fn archive_config_uses_defaults_and_skips_newline_strings() {
-        let mut app = App::new();
-        app.register_cvar(CvarSpec::new("r.vsync", true).flag(CvarFlags::ARCHIVE))
-            .unwrap();
-        app.register_cvar(CvarSpec::new("sys.motd", "hi").flag(CvarFlags::ARCHIVE))
-            .unwrap();
-        // Give the string cvar a pathological newline-containing value.
-        app.set_cvar("sys.motd", SettingValue::Str("line1\nline2".to_owned()))
-            .unwrap();
-
-        let config = app.write_archive_config();
-        // The unset bool cvar is written from its seeded default.
-        assert!(config.contains("r.vsync true"));
-        // The newline-containing string is skipped entirely.
-        assert!(!config.contains("sys.motd"));
-    }
-
-    /// A fresh App that never registered a cvar yields just the header comment.
-    #[test]
-    fn archive_config_without_registry_is_header_only() {
-        let app = App::new();
-        let config = app.write_archive_config();
-        assert!(config.starts_with("//"));
-        assert_eq!(config.lines().count(), 1);
-    }
-
-    /// `list_cvars` snapshots every registered cvar in ascending-name order,
-    /// resolves each value through the cascade (so a runtime override shows the
-    /// overridden value sourced from `Runtime`), and reports an unset cvar from
-    /// its seeded `EngineDefault` default.
-    #[test]
-    fn list_cvars_snapshots_all_in_order_with_resolved_values() {
-        let mut app = App::new();
-        app.register_cvar(
-            CvarSpec::new("r.shadows", 2_i64)
-                .category(CvarCategory::Render)
-                .bounds(CvarBounds::Int(0, 4))
-                .flag(CvarFlags::ARCHIVE)
-                .description("shadow quality"),
-        )
-        .unwrap();
-        app.register_cvar(
-            CvarSpec::new("net.tickrate", 30_i64)
-                .category(CvarCategory::Network)
-                .bounds(CvarBounds::Int(1, 128)),
-        )
-        .unwrap();
-
-        // Override one cvar at runtime; leave the other at its default.
-        app.set_cvar("r.shadows", 4_i64).unwrap();
-
-        let listings = app.list_cvars();
-        // Ascending by name: `net.tickrate` precedes `r.shadows`.
-        let names: Vec<&str> = listings.iter().map(|l| l.name.as_str()).collect();
-        assert_eq!(names, ["net.tickrate", "r.shadows"]);
-
-        let tickrate = &listings[0];
-        assert_eq!(tickrate.category, CvarCategory::Network);
-        assert_eq!(tickrate.value, SettingValue::Int(30));
-        assert_eq!(tickrate.default, SettingValue::Int(30));
-        assert_eq!(tickrate.bounds, CvarBounds::Int(1, 128));
-        assert_eq!(tickrate.kind, "int");
-        // An unset cvar still resolves from the seeded `EngineDefault` layer.
-        assert_eq!(tickrate.source, Some(SettingsLayer::EngineDefault));
-        assert!(tickrate.flags.is_empty());
-
-        let shadows = &listings[1];
-        assert_eq!(shadows.value, SettingValue::Int(4));
-        assert_eq!(shadows.default, SettingValue::Int(2));
-        // The runtime override is sourced from the `Runtime` layer.
-        assert_eq!(shadows.source, Some(SettingsLayer::Runtime));
-        assert!(shadows.flags.contains(CvarFlags::ARCHIVE));
-        assert_eq!(shadows.description, "shadow quality");
-    }
-
-    /// `list_cvars_in_category` returns only the cvars whose category matches,
-    /// in ascending-name order.
-    #[test]
-    fn list_cvars_in_category_filters_to_one_category() {
-        let mut app = App::new();
-        app.register_cvar(CvarSpec::new("r.shadows", 2_i64).category(CvarCategory::Render))
-            .unwrap();
-        app.register_cvar(CvarSpec::new("r.vsync", true).category(CvarCategory::Render))
-            .unwrap();
-        app.register_cvar(CvarSpec::new("net.tickrate", 30_i64).category(CvarCategory::Network))
-            .unwrap();
-
-        let render: Vec<String> = app
-            .list_cvars_in_category(CvarCategory::Render)
-            .into_iter()
-            .map(|l| l.name)
-            .collect();
-        assert_eq!(render, ["r.shadows", "r.vsync"]);
-
-        let network: Vec<String> = app
-            .list_cvars_in_category(CvarCategory::Network)
-            .into_iter()
-            .map(|l| l.name)
-            .collect();
-        assert_eq!(network, ["net.tickrate"]);
-
-        // A category with no registered cvars yields an empty vector.
-        assert!(app.list_cvars_in_category(CvarCategory::Audio).is_empty());
-    }
-
-    /// `find_cvars` matches a case-insensitive substring against both the name
-    /// and the description, and an empty needle lists everything.
-    #[test]
-    fn find_cvars_matches_name_or_description_case_insensitively() {
-        let mut app = App::new();
-        app.register_cvar(
-            CvarSpec::new("r.shadows", 2_i64)
-                .category(CvarCategory::Render)
-                .description("shadow quality"),
-        )
-        .unwrap();
-        app.register_cvar(
-            CvarSpec::new("r.ao", 1_i64)
-                .category(CvarCategory::Render)
-                .description("ambient occlusion with soft SHADOWing"),
-        )
-        .unwrap();
-        app.register_cvar(CvarSpec::new("net.tickrate", 30_i64).category(CvarCategory::Network))
-            .unwrap();
-
-        // Name substring, case-insensitive.
-        let by_name: Vec<String> = app
-            .find_cvars("SHADOW")
-            .into_iter()
-            .map(|l| l.name)
-            .collect();
-        // `r.ao` matches on its description ("SHADOWing"), `r.shadows` on name.
-        assert_eq!(by_name, ["r.ao", "r.shadows"]);
-
-        // Pure name-prefix match.
-        let net: Vec<String> = app.find_cvars("net.").into_iter().map(|l| l.name).collect();
-        assert_eq!(net, ["net.tickrate"]);
-
-        // An empty needle is an alias for `list_cvars`.
-        assert_eq!(app.find_cvars("").len(), app.list_cvars().len());
-
-        // A needle that matches nothing yields an empty vector.
-        assert!(app.find_cvars("nonexistent").is_empty());
-    }
-
-    /// `summary_line` renders the console shape: `name = value`, a parenthesised
-    /// default only when the value diverges, bracketed flag labels, and the
-    /// description after a dash.
-    #[test]
-    fn summary_line_matches_console_shape() {
-        let mut app = App::new();
-        app.register_cvar(
-            CvarSpec::new("r.shadows", 2_i64)
-                .category(CvarCategory::Render)
-                .bounds(CvarBounds::Int(0, 4))
-                .flag(CvarFlags::ARCHIVE)
-                .description("shadow quality"),
-        )
-        .unwrap();
-        app.set_cvar("r.shadows", 4_i64).unwrap();
-
-        let listing = &app.find_cvars("r.shadows")[0];
-        assert_eq!(
-            listing.summary_line(),
-            "r.shadows = 4 (default 2) [archive] - shadow quality"
-        );
-
-        // A cvar sitting at its default, with no flags and no description,
-        // renders as just `name = value`.
-        let plain = CvarListing {
-            name: "sys.quiet".to_owned(),
-            category: CvarCategory::System,
-            value: SettingValue::Bool(false),
-            default: SettingValue::Bool(false),
-            bounds: CvarBounds::None,
-            flags: CvarFlags::EMPTY,
-            kind: "bool",
-            source: Some(SettingsLayer::EngineDefault),
-            description: String::new(),
-        };
-        assert_eq!(plain.summary_line(), "sys.quiet = false");
-    }
-
-    /// Multiple active flags are rendered as a comma-joined label list in a
-    /// stable, declaration order.
-    #[test]
-    fn summary_line_joins_multiple_flag_labels() {
-        let listing = CvarListing {
-            name: "sv.cheats".to_owned(),
-            category: CvarCategory::Debug,
-            value: SettingValue::Bool(true),
-            default: SettingValue::Bool(false),
-            bounds: CvarBounds::None,
-            flags: CvarFlags::CHEAT | CvarFlags::NOTIFY,
-            kind: "bool",
-            source: Some(SettingsLayer::Runtime),
-            description: "enable cheats".to_owned(),
-        };
-        assert_eq!(
-            listing.summary_line(),
-            "sv.cheats = true (default false) [cheat,notify] - enable cheats"
-        );
-    }
-
-    /// All three console enumeration entry points return an empty vector on a
-    /// fresh `App` that has never registered a cvar (no `CvarRegistry`).
-    #[test]
-    fn list_cvars_without_registry_is_empty() {
-        let app = App::new();
-        assert!(app.world().get_resource::<CvarRegistry>().is_none());
-        assert!(app.list_cvars().is_empty());
-        assert!(app.list_cvars_in_category(CvarCategory::Render).is_empty());
-        assert!(app.find_cvars("r.").is_empty());
-    }
-
-    /// `reset <name>` is a reserved console command that reverts one cvar's
-    /// runtime override, letting it fall back to the seeded default.
-    #[test]
-    fn console_reset_single_reverts_runtime_override() {
-        let mut app = App::new();
-        app.register_cvar(
-            CvarSpec::new("r.shadows", 2_i64)
-                .category(CvarCategory::Render)
-                .bounds(CvarBounds::Int(0, 4)),
-        )
-        .unwrap();
-        app.set_cvar("r.shadows", 4_i64).unwrap();
-        assert_eq!(app.cvar_int("r.shadows"), Some(4));
-
-        let outcome = app.exec_console("reset r.shadows");
-        match outcome {
-            ConsoleOutcome::Reset { name, outcome } => {
-                assert_eq!(name, "r.shadows");
-                assert!(outcome.changed);
-                assert!(!outcome.clamped);
-                assert_eq!(outcome.resolved, SettingValue::Int(2));
-            }
-            other => panic!("expected Reset, got {other:?}"),
-        }
-        // The value has fallen back to the seeded default.
-        assert_eq!(app.cvar_int("r.shadows"), Some(2));
-    }
-
-    /// A bare `reset` reverts every cvar's runtime override and reports the
-    /// changed names in ascending order.
-    #[test]
-    fn console_reset_all_reverts_every_override() {
-        let mut app = App::new();
-        app.register_cvar(CvarSpec::new("r.shadows", 2_i64).category(CvarCategory::Render))
-            .unwrap();
-        app.register_cvar(CvarSpec::new("net.tickrate", 30_i64).category(CvarCategory::Network))
-            .unwrap();
-        app.register_cvar(CvarSpec::new("r.vsync", true).category(CvarCategory::Render))
-            .unwrap();
-        // Override two of the three at runtime; leave `r.vsync` at its default.
-        app.set_cvar("r.shadows", 4_i64).unwrap();
-        app.set_cvar("net.tickrate", 128_i64).unwrap();
-
-        match app.exec_console("reset") {
-            ConsoleOutcome::ResetAll { changed } => {
-                // Only the two overridden cvars changed, ascending by name.
-                assert_eq!(changed, ["net.tickrate", "r.shadows"]);
-            }
-            other => panic!("expected ResetAll, got {other:?}"),
-        }
-        assert_eq!(app.cvar_int("r.shadows"), Some(2));
-        assert_eq!(app.cvar_int("net.tickrate"), Some(30));
-
-        // A second bare `reset` is now a no-op: nothing has an override.
-        match app.exec_console("reset") {
-            ConsoleOutcome::ResetAll { changed } => assert!(changed.is_empty()),
-            other => panic!("expected ResetAll, got {other:?}"),
-        }
-    }
-
-    /// `reset <name>` on an unregistered cvar is reported as `Unknown`, not a
-    /// panic or a silent no-op.
-    #[test]
-    fn console_reset_unknown_cvar_is_unknown() {
-        let mut app = App::new();
-        app.register_cvar(CvarSpec::new("r.shadows", 2_i64).category(CvarCategory::Render))
-            .unwrap();
-        match app.exec_console("reset no.such.cvar") {
-            ConsoleOutcome::Unknown(name) => assert_eq!(name, "no.such.cvar"),
-            other => panic!("expected Unknown, got {other:?}"),
-        }
-    }
-
-    /// `reset <name>` on a read-only cvar is rejected at the boundary.
-    #[test]
-    fn console_reset_readonly_is_rejected() {
-        let mut app = App::new();
-        app.register_cvar(
-            CvarSpec::new("sys.build", "release")
-                .category(CvarCategory::System)
-                .flag(CvarFlags::READ_ONLY),
-        )
-        .unwrap();
-        match app.exec_console("reset sys.build") {
-            ConsoleOutcome::Rejected(CvarError::ReadOnly(name)) => assert_eq!(name, "sys.build"),
-            other => panic!("expected Rejected(ReadOnly), got {other:?}"),
-        }
-    }
-
-    /// The `reset_all_runtime_cvars` API returns only the cvars whose resolved
-    /// value changed, in ascending-name order, and skips read-only cvars.
-    #[test]
-    fn reset_all_runtime_cvars_api_returns_changed_names() {
-        let mut app = App::new();
-        app.register_cvar(CvarSpec::new("r.shadows", 2_i64).category(CvarCategory::Render))
-            .unwrap();
-        app.register_cvar(CvarSpec::new("r.vsync", true).category(CvarCategory::Render))
-            .unwrap();
-        app.register_cvar(
-            CvarSpec::new("sys.build", "release")
-                .category(CvarCategory::System)
-                .flag(CvarFlags::READ_ONLY),
-        )
-        .unwrap();
-        // Only `r.shadows` gets a runtime override.
-        app.set_cvar("r.shadows", 4_i64).unwrap();
-
-        let changed = app.reset_all_runtime_cvars();
-        assert_eq!(changed, ["r.shadows"]);
-        assert_eq!(app.cvar_int("r.shadows"), Some(2));
-        // A fresh App with no registry resets nothing.
-        let mut empty = App::new();
-        assert!(empty.reset_all_runtime_cvars().is_empty());
-    }
-
-    #[test]
-    fn load_user_config_writes_user_layer() {
-        let mut app = App::new();
-        app.register_cvar(
-            CvarSpec::new("r.quality", 1_i64)
-                .category(CvarCategory::Render)
-                .bounds(CvarBounds::Int(0, 3)),
-        )
-        .unwrap();
-
-        let outcomes = app.load_user_config("r.quality 2\n");
-        assert!(matches!(outcomes.as_slice(), [ConsoleOutcome::Set(_)]));
-        assert_eq!(app.cvar_int("r.quality"), Some(2));
-        assert_eq!(
-            app.world()
-                .resource::<Settings>()
-                .resolved_layer("r.quality"),
-            Some(SettingsLayer::User)
-        );
-    }
-
-    #[test]
-    fn load_user_config_sits_below_commandline_and_runtime() {
-        let mut app = App::new();
-        app.register_cvar(
-            CvarSpec::new("r.quality", 1_i64)
-                .category(CvarCategory::Render)
-                .bounds(CvarBounds::Int(0, 3)),
-        )
-        .unwrap();
-        // A launch flag (CommandLine) and a live console tweak (Runtime) both
-        // outrank a persisted user config.
-        app.set_cvar_at(SettingsLayer::CommandLine, "r.quality", 2_i64)
-            .unwrap();
-        app.set_cvar("r.quality", 3_i64).unwrap();
-
-        app.load_user_config("r.quality 0");
-        // The user-config value is recorded but does not win the cascade.
-        assert_eq!(app.cvar_int("r.quality"), Some(3));
-        assert_eq!(
-            app.world()
-                .resource::<Settings>()
-                .resolved_layer("r.quality"),
-            Some(SettingsLayer::Runtime)
-        );
-    }
-
-    #[test]
-    fn load_user_config_reset_runtime_falls_back_to_user_not_default() {
-        let mut app = App::new();
-        app.register_cvar(
-            CvarSpec::new("r.quality", 1_i64)
-                .category(CvarCategory::Render)
-                .bounds(CvarBounds::Int(0, 3)),
-        )
-        .unwrap();
-        app.load_user_config("r.quality 0");
-        app.set_cvar("r.quality", 3_i64).unwrap();
-        assert_eq!(app.cvar_int("r.quality"), Some(3));
-
-        // Clearing the Runtime override reveals the user config, not the
-        // engine default (which would be 1).
-        app.reset_cvar("r.quality").unwrap();
-        assert_eq!(app.cvar_int("r.quality"), Some(0));
-        assert_eq!(
-            app.world()
-                .resource::<Settings>()
-                .resolved_layer("r.quality"),
-            Some(SettingsLayer::User)
-        );
-    }
-
-    #[test]
-    fn load_user_config_ignores_comments_and_blanks() {
-        let mut app = App::new();
-        app.register_cvar(CvarSpec::new("r.vsync", true).category(CvarCategory::Render))
-            .unwrap();
-
-        let outcomes = app.load_user_config("// header\n\nr.vsync false\n");
-        assert_eq!(
-            outcomes,
-            vec![
-                ConsoleOutcome::Empty,
-                ConsoleOutcome::Empty,
-                ConsoleOutcome::Set(CvarSetOutcome {
-                    changed: true,
-                    clamped: false,
-                    resolved: SettingValue::Bool(false),
-                }),
-            ]
-        );
-        assert_eq!(app.cvar_bool("r.vsync"), Some(false));
-    }
-
-    #[test]
-    fn load_user_config_bad_line_does_not_abort_rest() {
-        let mut app = App::new();
-        app.register_cvar(CvarSpec::new("r.vsync", true).category(CvarCategory::Render))
-            .unwrap();
-
-        // An unknown cvar in the middle must not discard the trailing good line.
-        let outcomes = app.load_user_config("r.unknown 1\nr.vsync false\n");
-        assert!(matches!(outcomes[0], ConsoleOutcome::Unknown(_)));
-        assert!(matches!(outcomes[1], ConsoleOutcome::Set(_)));
-        assert_eq!(app.cvar_bool("r.vsync"), Some(false));
-    }
-
-    #[test]
-    fn load_user_config_reset_keyword_is_not_special() {
-        let mut app = App::new();
-        app.register_cvar(CvarSpec::new("r.vsync", true).category(CvarCategory::Render))
-            .unwrap();
-        app.set_cvar("r.vsync", false).unwrap();
-
-        // In a declarative config `reset` is an ordinary (unregistered) name,
-        // not the interactive reset command, so the Runtime override survives.
-        let outcomes = app.load_user_config("reset r.vsync");
-        assert_eq!(outcomes, vec![ConsoleOutcome::Unknown("reset".to_owned())]);
-        assert_eq!(app.cvar_bool("r.vsync"), Some(false));
-    }
-
-    #[test]
-    fn load_user_config_bare_name_is_query() {
-        let mut app = App::new();
-        app.register_cvar(
-            CvarSpec::new("r.quality", 1_i64)
-                .category(CvarCategory::Render)
-                .bounds(CvarBounds::Int(0, 3)),
-        )
-        .unwrap();
-
-        let outcomes = app.load_user_config("r.quality");
-        assert_eq!(
-            outcomes,
-            vec![ConsoleOutcome::Queried {
-                name: "r.quality".to_owned(),
-                value: SettingValue::Int(1),
-            }]
-        );
-        // A query changes nothing: the User layer stays empty.
-        assert_eq!(
-            app.world()
-                .resource::<Settings>()
-                .resolved_layer("r.quality"),
-            Some(SettingsLayer::EngineDefault)
-        );
-    }
-
-    #[test]
-    fn write_user_config_emits_only_user_layer_archived_cvars() {
-        let mut app = App::new();
-        app.register_cvar(
-            CvarSpec::new("r.quality", 1_i64)
-                .category(CvarCategory::Render)
-                .bounds(CvarBounds::Int(0, 3))
-                .flag(CvarFlags::ARCHIVE),
-        )
-        .unwrap();
-        app.register_cvar(
-            CvarSpec::new("r.vsync", true)
-                .category(CvarCategory::Render)
-                .flag(CvarFlags::ARCHIVE),
-        )
-        .unwrap();
-        // An archived cvar whose only override is at Runtime must not persist.
-        app.register_cvar(
-            CvarSpec::new("r.gamma", 1.0_f64)
-                .category(CvarCategory::Render)
-                .flag(CvarFlags::ARCHIVE),
-        )
-        .unwrap();
-        // A non-archived cvar set at User must not persist either.
-        app.register_cvar(CvarSpec::new("sys.debug", false).category(CvarCategory::System))
-            .unwrap();
-
-        app.set_cvar_at(SettingsLayer::User, "r.quality", 3_i64)
-            .unwrap();
-        app.set_cvar_at(SettingsLayer::User, "r.vsync", false)
-            .unwrap();
-        app.set_cvar("r.gamma", 2.0_f64).unwrap(); // Runtime, not User.
-        app.set_cvar_at(SettingsLayer::User, "sys.debug", true)
-            .unwrap(); // not ARCHIVE.
-
-        let config = app.write_user_config();
-        let body: Vec<&str> = config
-            .lines()
-            .filter(|line| !line.starts_with("//"))
-            .collect();
-        // Ascending-name order, only archived + User-layer values.
-        assert_eq!(body, ["r.quality 3", "r.vsync false"]);
-    }
-
-    #[test]
-    fn write_user_config_round_trips_through_load_user_config() {
-        fn registered() -> App {
-            let mut app = App::new();
-            app.register_cvar(
-                CvarSpec::new("r.quality", 1_i64)
-                    .category(CvarCategory::Render)
-                    .bounds(CvarBounds::Int(0, 3))
-                    .flag(CvarFlags::ARCHIVE),
-            )
-            .unwrap();
-            app.register_cvar(
-                CvarSpec::new("r.gamma", 1.0_f64)
-                    .category(CvarCategory::Render)
-                    .flag(CvarFlags::ARCHIVE),
-            )
-            .unwrap();
-            app
-        }
-
-        let mut source = registered();
-        source
-            .set_cvar_at(SettingsLayer::User, "r.quality", 2_i64)
-            .unwrap();
-        source
-            .set_cvar_at(SettingsLayer::User, "r.gamma", 2.5_f64)
-            .unwrap();
-        let config = source.write_user_config();
-
-        let mut loaded = registered();
-        loaded.load_user_config(&config);
-        assert_eq!(loaded.cvar_int("r.quality"), Some(2));
-        assert_eq!(loaded.cvar_float("r.gamma"), Some(2.5));
-        assert_eq!(
-            loaded
-                .world()
-                .resource::<Settings>()
-                .resolved_layer("r.quality"),
-            Some(SettingsLayer::User)
-        );
-        assert_eq!(
-            loaded
-                .world()
-                .resource::<Settings>()
-                .resolved_layer("r.gamma"),
-            Some(SettingsLayer::User)
-        );
-    }
-
-    #[test]
-    fn write_user_config_is_header_only_without_user_values() {
-        let mut app = App::new();
-        app.register_cvar(
-            CvarSpec::new("r.vsync", true)
-                .category(CvarCategory::Render)
-                .flag(CvarFlags::ARCHIVE),
-        )
-        .unwrap();
-        app.set_cvar("r.vsync", false).unwrap(); // Runtime only.
-
-        let config = app.write_user_config();
-        // Only the comment header; nothing persisted.
-        assert!(config.lines().all(|line| line.starts_with("//")));
-        // Reloading a header-only config is a no-op.
-        let outcomes = app.load_user_config(&config);
-        assert!(outcomes.iter().all(|o| *o == ConsoleOutcome::Empty));
-    }
-
-    #[test]
-    fn write_user_config_skips_user_string_with_newline() {
-        let mut app = App::new();
-        app.register_cvar(
-            CvarSpec::new("sys.motd", "hello")
-                .category(CvarCategory::System)
-                .flag(CvarFlags::ARCHIVE),
-        )
-        .unwrap();
-        app.set_cvar_at(SettingsLayer::User, "sys.motd", "line1\nline2")
-            .unwrap();
-
-        let config = app.write_user_config();
-        // The newline-bearing value is skipped rather than corrupting the file.
-        assert!(config.lines().all(|line| line.starts_with("//")));
-    }
-
-    #[test]
-    fn list_modified_cvars_returns_only_diverged_cvars() {
-        let mut app = App::new();
-        app.register_cvar(
-            CvarSpec::new("r.shadows", 2_i64)
-                .category(CvarCategory::Render)
-                .bounds(CvarBounds::Int(0, 4)),
-        )
-        .unwrap();
-        app.register_cvar(CvarSpec::new("r.vsync", true).category(CvarCategory::Render))
-            .unwrap();
-        // Only one cvar is moved off its default.
-        app.set_cvar("r.shadows", 4_i64).unwrap();
-
-        let modified = app.list_modified_cvars();
-        assert_eq!(modified.len(), 1);
-        assert_eq!(modified[0].name, "r.shadows");
-        assert_eq!(modified[0].value, SettingValue::Int(4));
-        assert_eq!(modified[0].default, SettingValue::Int(2));
-    }
-
-    #[test]
-    fn list_modified_cvars_is_empty_when_all_at_default() {
-        let mut app = App::new();
-        app.register_cvar(
-            CvarSpec::new("r.shadows", 2_i64)
-                .category(CvarCategory::Render)
-                .bounds(CvarBounds::Int(0, 4)),
-        )
-        .unwrap();
-        app.register_cvar(CvarSpec::new("net.rate", 60_i64).category(CvarCategory::Network))
-            .unwrap();
-
-        assert!(app.list_modified_cvars().is_empty());
-    }
-
-    #[test]
-    fn list_modified_cvars_is_empty_before_any_registration() {
-        let app = App::new();
-        assert!(app.list_modified_cvars().is_empty());
-    }
-
-    #[test]
-    fn list_modified_cvars_is_ascending_by_name() {
-        let mut app = App::new();
-        app.register_cvar(
-            CvarSpec::new("r.shadows", 2_i64)
-                .category(CvarCategory::Render)
-                .bounds(CvarBounds::Int(0, 4)),
-        )
-        .unwrap();
-        app.register_cvar(
-            CvarSpec::new("net.rate", 60_i64)
-                .category(CvarCategory::Network)
-                .bounds(CvarBounds::Int(1, 240)),
-        )
-        .unwrap();
-        app.register_cvar(
-            CvarSpec::new("snd.volume", 50_i64)
-                .category(CvarCategory::Audio)
-                .bounds(CvarBounds::Int(0, 100)),
-        )
-        .unwrap();
-        app.set_cvar("snd.volume", 80_i64).unwrap();
-        app.set_cvar("net.rate", 128_i64).unwrap();
-        app.set_cvar("r.shadows", 1_i64).unwrap();
-
-        let names: Vec<String> = app
-            .list_modified_cvars()
-            .into_iter()
-            .map(|listing| listing.name)
-            .collect();
-        assert_eq!(names, ["net.rate", "r.shadows", "snd.volume"]);
-    }
-
-    #[test]
-    fn list_modified_cvars_reports_source_layer() {
-        let mut app = App::new();
-        app.register_cvar(CvarSpec::new("sys.lang", "en").category(CvarCategory::System))
-            .unwrap();
-        // Override only on the User layer (no Runtime write).
-        app.set_cvar_at(SettingsLayer::User, "sys.lang", "fr")
-            .unwrap();
-
-        let modified = app.list_modified_cvars();
-        assert_eq!(modified.len(), 1);
-        assert_eq!(modified[0].name, "sys.lang");
-        assert_eq!(modified[0].value, SettingValue::Str("fr".to_owned()));
-        assert_eq!(modified[0].source, Some(SettingsLayer::User));
-    }
-
-    #[test]
-    fn list_modified_cvars_excludes_value_reset_back_to_default() {
-        let mut app = App::new();
-        app.register_cvar(
-            CvarSpec::new("r.shadows", 2_i64)
-                .category(CvarCategory::Render)
-                .bounds(CvarBounds::Int(0, 4)),
-        )
-        .unwrap();
-        app.set_cvar("r.shadows", 4_i64).unwrap();
-        assert_eq!(app.list_modified_cvars().len(), 1);
-
-        // A runtime override back to the default value is no longer "modified".
-        app.set_cvar("r.shadows", 2_i64).unwrap();
-        assert!(app.list_modified_cvars().is_empty());
-    }
-
-    #[test]
-    fn list_modified_cvars_excludes_cvar_after_runtime_reset() {
-        let mut app = App::new();
-        app.register_cvar(
-            CvarSpec::new("r.shadows", 2_i64)
-                .category(CvarCategory::Render)
-                .bounds(CvarBounds::Int(0, 4)),
-        )
-        .unwrap();
-        app.set_cvar("r.shadows", 4_i64).unwrap();
-        assert_eq!(app.list_modified_cvars().len(), 1);
-
-        // Clearing the only override drops it from the diff.
-        app.reset_cvar("r.shadows").unwrap();
-        assert!(app.list_modified_cvars().is_empty());
-    }
-
-    #[test]
-    fn toggle_cvar_flips_a_boolean() {
-        let mut app = App::new();
-        app.register_cvar(CvarSpec::new("r.vsync", true).category(CvarCategory::Render))
-            .unwrap();
-
-        let outcome = app.toggle_cvar("r.vsync", &[]).unwrap();
-        assert!(outcome.changed);
-        assert_eq!(outcome.resolved, SettingValue::Bool(false));
-        assert_eq!(app.cvar_bool("r.vsync"), Some(false));
-
-        // Toggling again flips back.
-        let outcome = app.toggle_cvar("r.vsync", &[]).unwrap();
-        assert_eq!(outcome.resolved, SettingValue::Bool(true));
-        assert_eq!(app.cvar_bool("r.vsync"), Some(true));
-    }
-
-    #[test]
-    fn toggle_cvar_without_values_rejects_non_boolean() {
-        let mut app = App::new();
-        app.register_cvar(
-            CvarSpec::new("r.shadows", 2_i64)
-                .category(CvarCategory::Render)
-                .bounds(CvarBounds::Int(0, 4)),
-        )
-        .unwrap();
-
-        let err = app.toggle_cvar("r.shadows", &[]).unwrap_err();
-        assert_eq!(
-            err,
-            CvarError::TypeMismatch {
-                name: "r.shadows".to_owned(),
-                expected: "bool",
-                found: "int",
-            }
-        );
-        // Nothing was written.
-        assert!(app.list_modified_cvars().is_empty());
-    }
-
-    #[test]
-    fn toggle_cvar_cycles_an_explicit_value_list() {
-        let mut app = App::new();
-        app.register_cvar(
-            CvarSpec::new("r.shadows", 0_i64)
-                .category(CvarCategory::Render)
-                .bounds(CvarBounds::Int(0, 4)),
-        )
-        .unwrap();
-
-        // 0 → 2 → 4 → wrap back to 0.
-        assert_eq!(
-            app.toggle_cvar("r.shadows", &["0", "2", "4"])
-                .unwrap()
-                .resolved,
-            SettingValue::Int(2)
-        );
-        assert_eq!(
-            app.toggle_cvar("r.shadows", &["0", "2", "4"])
-                .unwrap()
-                .resolved,
-            SettingValue::Int(4)
-        );
-        assert_eq!(
-            app.toggle_cvar("r.shadows", &["0", "2", "4"])
-                .unwrap()
-                .resolved,
-            SettingValue::Int(0)
-        );
-    }
-
-    #[test]
-    fn toggle_cvar_lands_on_first_when_current_matches_none() {
-        let mut app = App::new();
-        app.register_cvar(
-            CvarSpec::new("r.shadows", 1_i64)
-                .category(CvarCategory::Render)
-                .bounds(CvarBounds::Int(0, 4)),
-        )
-        .unwrap();
-        // Current value 1 is not in the cycle list, so toggle lands on the first.
-        assert_eq!(
-            app.toggle_cvar("r.shadows", &["0", "2", "4"])
-                .unwrap()
-                .resolved,
-            SettingValue::Int(0)
-        );
-    }
-
-    #[test]
-    fn toggle_cvar_rejects_wrong_typed_candidate_without_writing() {
-        let mut app = App::new();
-        app.register_cvar(
-            CvarSpec::new("r.shadows", 0_i64)
-                .category(CvarCategory::Render)
-                .bounds(CvarBounds::Int(0, 4)),
-        )
-        .unwrap();
-
-        let err = app
-            .toggle_cvar("r.shadows", &["0", "notanint", "4"])
-            .unwrap_err();
-        assert!(matches!(err, CvarError::TypeMismatch { .. }));
-        // The whole command was rejected: still at the default.
-        assert_eq!(app.cvar_int("r.shadows"), Some(0));
-    }
-
-    #[test]
-    fn toggle_cvar_unknown_cvar_errors() {
-        let mut app = App::new();
-        let err = app.toggle_cvar("r.nope", &[]).unwrap_err();
-        assert_eq!(err, CvarError::Unregistered("r.nope".to_owned()));
-    }
-
-    #[test]
-    fn toggle_cvar_cycle_value_is_clamped_into_bounds() {
-        let mut app = App::new();
-        app.register_cvar(
-            CvarSpec::new("r.shadows", 0_i64)
-                .category(CvarCategory::Render)
-                .bounds(CvarBounds::Int(0, 4)),
-        )
-        .unwrap();
-        // The out-of-range candidate 9 clamps to 4, and cycling compares the
-        // clamped form, so a second toggle wraps back to 0.
-        let outcome = app.toggle_cvar("r.shadows", &["9"]).unwrap();
-        assert!(outcome.clamped);
-        assert_eq!(outcome.resolved, SettingValue::Int(4));
-        let outcome = app.toggle_cvar("r.shadows", &["9"]).unwrap();
-        assert_eq!(outcome.resolved, SettingValue::Int(4));
-    }
-
-    #[test]
-    fn console_toggle_flips_boolean() {
-        let mut app = App::new();
-        app.register_cvar(CvarSpec::new("r.vsync", true).category(CvarCategory::Render))
-            .unwrap();
-
-        match app.exec_console("toggle r.vsync") {
-            ConsoleOutcome::Set(outcome) => {
-                assert_eq!(outcome.resolved, SettingValue::Bool(false));
-            }
-            other => panic!("expected Set, got {other:?}"),
-        }
-        assert_eq!(app.cvar_bool("r.vsync"), Some(false));
-    }
-
-    #[test]
-    fn console_toggle_cycles_value_list() {
-        let mut app = App::new();
-        app.register_cvar(
-            CvarSpec::new("r.shadows", 0_i64)
-                .category(CvarCategory::Render)
-                .bounds(CvarBounds::Int(0, 4)),
-        )
-        .unwrap();
-
-        match app.exec_console("toggle r.shadows 0 2 4") {
-            ConsoleOutcome::Set(outcome) => assert_eq!(outcome.resolved, SettingValue::Int(2)),
-            other => panic!("expected Set, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn console_toggle_unknown_cvar_is_unknown() {
-        let mut app = App::new();
-        assert_eq!(
-            app.exec_console("toggle r.nope"),
-            ConsoleOutcome::Unknown("r.nope".to_owned())
-        );
-    }
-
-    #[test]
-    fn console_bare_toggle_is_an_unknown_cvar_query() {
-        let mut app = App::new();
-        // A bare `toggle` has no operand, so it is treated as a query for a cvar
-        // literally named `toggle`, which is not registered.
-        assert_eq!(
-            app.exec_console("toggle"),
-            ConsoleOutcome::Unknown("toggle".to_owned())
-        );
-    }
-
-    #[test]
-    fn console_toggle_is_not_honoured_by_config_loads() {
-        let mut app = App::new();
-        app.register_cvar(CvarSpec::new("r.vsync", true).category(CvarCategory::Render))
-            .unwrap();
-        // In a declarative config, `toggle r.vsync` is an assignment to a cvar
-        // named `toggle`, not the toggle command — so it is Unknown and r.vsync
-        // is untouched.
-        let outcomes = app.load_user_config("toggle r.vsync");
-        assert_eq!(outcomes, vec![ConsoleOutcome::Unknown("toggle".to_owned())]);
-        assert_eq!(app.cvar_bool("r.vsync"), Some(true));
-    }
-
-    #[test]
-    fn increment_cvar_steps_an_int_within_range() {
-        let mut app = App::new();
-        app.register_cvar(
-            CvarSpec::new("r.shadows", 0_i64)
-                .category(CvarCategory::Render)
-                .bounds(CvarBounds::Int(0, 4)),
-        )
-        .unwrap();
-
-        assert_eq!(
-            app.increment_cvar("r.shadows", 0.0, 4.0, 1.0)
-                .unwrap()
-                .resolved,
-            SettingValue::Int(1)
-        );
-        assert_eq!(
-            app.increment_cvar("r.shadows", 0.0, 4.0, 1.0)
-                .unwrap()
-                .resolved,
-            SettingValue::Int(2)
-        );
-        assert_eq!(app.cvar_int("r.shadows"), Some(2));
-    }
-
-    #[test]
-    fn increment_cvar_wraps_past_max_to_min() {
-        let mut app = App::new();
-        app.register_cvar(
-            CvarSpec::new("r.shadows", 0_i64)
-                .category(CvarCategory::Render)
-                .bounds(CvarBounds::Int(0, 4)),
-        )
-        .unwrap();
-        app.set_cvar("r.shadows", SettingValue::Int(4)).unwrap();
-
-        // 4 + 1 = 5 is past max (4), so it wraps to min (0).
-        let outcome = app.increment_cvar("r.shadows", 0.0, 4.0, 1.0).unwrap();
-        assert!(outcome.changed);
-        assert_eq!(outcome.resolved, SettingValue::Int(0));
-    }
-
-    #[test]
-    fn increment_cvar_negative_delta_wraps_below_min_to_max() {
-        let mut app = App::new();
-        app.register_cvar(
-            CvarSpec::new("r.shadows", 0_i64)
-                .category(CvarCategory::Render)
-                .bounds(CvarBounds::Int(0, 4)),
-        )
-        .unwrap();
-
-        // 0 - 1 = -1 is below min (0), so it wraps to max (4).
-        assert_eq!(
-            app.increment_cvar("r.shadows", 0.0, 4.0, -1.0)
-                .unwrap()
-                .resolved,
-            SettingValue::Int(4)
-        );
-    }
-
-    #[test]
-    fn increment_cvar_steps_a_float() {
-        let mut app = App::new();
-        app.register_cvar(
-            CvarSpec::new("r.gamma", 0.0_f64)
-                .category(CvarCategory::Render)
-                .bounds(CvarBounds::Float(0.0, 1.0)),
-        )
-        .unwrap();
-
-        assert_eq!(
-            app.increment_cvar("r.gamma", 0.0, 1.0, 0.5)
-                .unwrap()
-                .resolved,
-            SettingValue::Float(0.5)
-        );
-        assert_eq!(
-            app.increment_cvar("r.gamma", 0.0, 1.0, 0.5)
-                .unwrap()
-                .resolved,
-            SettingValue::Float(1.0)
-        );
-        // 1.0 + 0.5 = 1.5 is past max, so it wraps to min (0.0).
-        assert_eq!(
-            app.increment_cvar("r.gamma", 0.0, 1.0, 0.5)
-                .unwrap()
-                .resolved,
-            SettingValue::Float(0.0)
-        );
-    }
-
-    #[test]
-    fn increment_cvar_result_is_clamped_to_declared_bounds() {
-        let mut app = App::new();
-        app.register_cvar(
-            CvarSpec::new("r.shadows", 0_i64)
-                .category(CvarCategory::Render)
-                .bounds(CvarBounds::Int(0, 2)),
-        )
-        .unwrap();
-
-        // The cycle range (0..=10) is wider than the declared bounds (0..=2):
-        // 0 + 5 = 5 is within the cycle range but clamps to the declared max 2.
-        let outcome = app.increment_cvar("r.shadows", 0.0, 10.0, 5.0).unwrap();
-        assert!(outcome.clamped);
-        assert_eq!(outcome.resolved, SettingValue::Int(2));
-    }
-
-    #[test]
-    fn increment_cvar_rejects_non_numeric() {
-        let mut app = App::new();
-        app.register_cvar(CvarSpec::new("r.vsync", true).category(CvarCategory::Render))
-            .unwrap();
-
-        let err = app.increment_cvar("r.vsync", 0.0, 4.0, 1.0).unwrap_err();
-        assert_eq!(
-            err,
-            CvarError::TypeMismatch {
-                name: "r.vsync".to_owned(),
-                expected: "number",
-                found: "bool",
-            }
-        );
-        assert_eq!(app.cvar_bool("r.vsync"), Some(true));
-    }
-
-    #[test]
-    fn increment_cvar_unknown_cvar_errors() {
-        let mut app = App::new();
-        let err = app.increment_cvar("r.nope", 0.0, 4.0, 1.0).unwrap_err();
-        assert_eq!(err, CvarError::Unregistered("r.nope".to_owned()));
-    }
-
-    #[test]
-    fn console_incrementvar_steps_value() {
-        let mut app = App::new();
-        app.register_cvar(
-            CvarSpec::new("r.shadows", 0_i64)
-                .category(CvarCategory::Render)
-                .bounds(CvarBounds::Int(0, 4)),
-        )
-        .unwrap();
-
-        match app.exec_console("incrementvar r.shadows 0 4 1") {
-            ConsoleOutcome::Set(outcome) => assert_eq!(outcome.resolved, SettingValue::Int(1)),
-            other => panic!("expected Set, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn console_incrementvar_wraps() {
-        let mut app = App::new();
-        app.register_cvar(
-            CvarSpec::new("r.shadows", 0_i64)
-                .category(CvarCategory::Render)
-                .bounds(CvarBounds::Int(0, 4)),
-        )
-        .unwrap();
-        app.set_cvar("r.shadows", SettingValue::Int(4)).unwrap();
-
-        match app.exec_console("incrementvar r.shadows 0 4 1") {
-            ConsoleOutcome::Set(outcome) => assert_eq!(outcome.resolved, SettingValue::Int(0)),
-            other => panic!("expected Set, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn console_incrementvar_unknown_cvar_is_unknown() {
-        let mut app = App::new();
-        assert_eq!(
-            app.exec_console("incrementvar r.nope 0 4 1"),
-            ConsoleOutcome::Unknown("r.nope".to_owned())
-        );
-    }
-
-    #[test]
-    fn console_incrementvar_malformed_falls_through_to_unknown() {
-        let mut app = App::new();
-        app.register_cvar(
-            CvarSpec::new("r.shadows", 0_i64)
-                .category(CvarCategory::Render)
-                .bounds(CvarBounds::Int(0, 4)),
-        )
-        .unwrap();
-
-        // Too few numeric arguments: the whole line is treated as a query for a
-        // cvar literally named `incrementvar`, which is not registered.
-        assert_eq!(
-            app.exec_console("incrementvar r.shadows 0 4"),
-            ConsoleOutcome::Unknown("incrementvar".to_owned())
-        );
-        // A non-numeric argument is likewise not the increment command.
-        assert_eq!(
-            app.exec_console("incrementvar r.shadows 0 4 up"),
-            ConsoleOutcome::Unknown("incrementvar".to_owned())
-        );
-        // A bare `incrementvar` is a query for the unregistered cvar.
-        assert_eq!(
-            app.exec_console("incrementvar"),
-            ConsoleOutcome::Unknown("incrementvar".to_owned())
-        );
-        // The cvar was never touched by any of the malformed lines.
-        assert_eq!(app.cvar_int("r.shadows"), Some(0));
-    }
-
-    #[test]
-    fn console_incrementvar_is_not_honoured_by_config_loads() {
-        let mut app = App::new();
-        app.register_cvar(
-            CvarSpec::new("r.shadows", 0_i64)
-                .category(CvarCategory::Render)
-                .bounds(CvarBounds::Int(0, 4)),
-        )
-        .unwrap();
-        // In a declarative config, `incrementvar …` is an assignment to a cvar
-        // named `incrementvar`, not the increment command — so it is Unknown and
-        // r.shadows is untouched.
-        let outcomes = app.load_user_config("incrementvar r.shadows 0 4 1");
-        assert_eq!(
-            outcomes,
-            vec![ConsoleOutcome::Unknown("incrementvar".to_owned())]
-        );
-        assert_eq!(app.cvar_int("r.shadows"), Some(0));
-    }
-
-    /// A former name declared with `CvarSpec::alias` resolves to the canonical
-    /// cvar on read, and a write through it lands in the canonical cascade key
-    /// (design §25.3 "改名兼容").
-    #[test]
-    fn rename_alias_resolves_reads_and_writes_to_canonical() {
-        let mut app = App::new();
-        app.register_cvar(
-            CvarSpec::new("r.shadows", 1_i64)
-                .bounds(CvarBounds::Int(0, 4))
-                .alias("r.shadow"),
-        )
-        .unwrap();
-
-        let registry = app.world().resource::<CvarRegistry>();
-        assert!(
-            registry.contains("r.shadow"),
-            "an alias counts as registered"
-        );
-        assert_eq!(registry.resolve("r.shadow"), "r.shadows");
-        assert_eq!(registry.resolve("r.shadows"), "r.shadows");
-        assert_eq!(
-            registry.resolve("nope"),
-            "nope",
-            "unknown names pass through"
-        );
-        assert_eq!(registry.len(), 1, "an alias is not a second cvar");
-
-        // A write through the former name lands in the canonical cascade key.
-        let outcome = app.set_cvar("r.shadow", 3_i64).unwrap();
-        assert_eq!(outcome.resolved, SettingValue::Int(3));
-        assert_eq!(app.cvar_int("r.shadows"), Some(3));
-        assert_eq!(
-            app.cvar_int("r.shadow"),
-            Some(3),
-            "reading through the alias sees the write"
-        );
-        let settings = app.world().resource::<Settings>();
-        assert!(settings.get("r.shadow").is_none(), "no alias key is stored");
-        assert_eq!(
-            settings.resolved_layer("r.shadows"),
-            Some(SettingsLayer::Runtime)
-        );
-    }
-
-    /// Aliases are honoured by the `toggle` / `incrementvar` commands too, since
-    /// those route through the canonical cvar.
-    #[test]
-    fn rename_alias_works_for_toggle_and_increment() {
-        let mut app = App::new();
-        app.register_cvar(CvarSpec::new("r.vsync", false).alias("r.vsync_enabled"))
-            .unwrap();
-        app.register_cvar(
-            CvarSpec::new("r.scale", 100_i64)
-                .bounds(CvarBounds::Int(50, 200))
-                .alias("r.res_scale"),
-        )
-        .unwrap();
-
-        app.toggle_cvar("r.vsync_enabled", &[]).unwrap();
-        assert_eq!(app.cvar_bool("r.vsync"), Some(true));
-
-        app.increment_cvar("r.res_scale", 50.0, 200.0, 25.0)
-            .unwrap();
-        assert_eq!(app.cvar_int("r.scale"), Some(125));
-    }
-
-    /// An alias that collides with an existing cvar name, its own name, or
-    /// another alias is rejected at registration, leaving the registry intact.
-    #[test]
-    fn duplicate_aliases_are_rejected() {
-        let mut registry = CvarRegistry::new();
-        registry.register(CvarSpec::new("a", 1_i64)).unwrap();
-
-        // Alias equal to an existing cvar name.
-        assert_eq!(
-            registry.register(CvarSpec::new("b", 2_i64).alias("a")),
-            Err(CvarError::Redeclared("a".to_string()))
-        );
-        // Alias equal to the cvar's own name.
-        assert_eq!(
-            registry.register(CvarSpec::new("c", 3_i64).alias("c")),
-            Err(CvarError::Redeclared("c".to_string()))
-        );
-        // The same alias twice in one spec.
-        assert_eq!(
-            registry.register(CvarSpec::new("d", 4_i64).alias("x").alias("x")),
-            Err(CvarError::Redeclared("x".to_string()))
-        );
-        // A later cvar may not claim a name that is already an alias.
-        registry
-            .register(CvarSpec::new("e", 5_i64).alias("old_e"))
-            .unwrap();
-        assert_eq!(
-            registry.register(CvarSpec::new("old_e", 6_i64)),
-            Err(CvarError::Redeclared("old_e".to_string()))
-        );
-        // Only `a` and `e` registered; every rejected spec left no trace.
-        assert_eq!(registry.len(), 2);
+        assert!(captured
+            .iter()
+            .any(|dump| dump.contains("sentinel-crash-xyz")));
     }
 }
 

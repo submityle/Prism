@@ -2,7 +2,7 @@
 
 use bytemuck::{bytes_of, cast_slice, Pod, Zeroable};
 use prism_ecs::prelude::Resource;
-use prism_render_architecture::lighting::contract::{LightingPlan, RecipeId};
+use prism_render_architecture::lighting::contract::{GiCandidateSource, LightingPlan, RecipeId};
 use prism_render_driver::{
     BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor, BindGroupLayoutEntry,
     BindingResource, BindingType, BufferBindingType, BufferDescriptor, BufferUsages,
@@ -362,6 +362,7 @@ pub(crate) struct LightingGpuPass {
     pub composite_bind_group: prism_render_driver::BindGroupId,
     pub run_direct: bool,
     pub run_gi: bool,
+    pub candidate_source: GiCandidateSource,
     pub candidate_surface_count: u32,
     pub candidate_rays_per_surface: u32,
     pub workgroups: u32,
@@ -441,7 +442,10 @@ where
         let surface_count = inputs.surfaces.len().min(MAX_LIGHTING_SURFACES);
         self.surface_count
             .store(surface_count as u32, core::sync::atomic::Ordering::Release);
-        let trace_radiance_valid = inputs.trace_scene.as_ref().is_some_and(|trace| {
+        let trace_input = (plan.candidate_source == GiCandidateSource::SoftwareBvhGpu)
+            .then_some(inputs.trace_scene.as_ref())
+            .flatten();
+        let trace_radiance_valid = trace_input.is_some_and(|trace| {
             let mut cache = self
                 .radiance_upload
                 .lock()
@@ -475,7 +479,7 @@ where
             true
         });
         let candidate_rays_per_surface = if trace_radiance_valid {
-            inputs.trace_scene.as_ref().map_or(0, |trace| {
+            trace_input.map_or(0, |trace| {
                 trace.rays_per_surface.min(GI_CANDIDATES_PER_SURFACE as u32)
             })
         } else {
@@ -505,9 +509,7 @@ where
                 execution_flags,
                 frame_index as u32,
                 (frame_index >> 32) as u32,
-                inputs
-                    .trace_scene
-                    .as_ref()
+                trace_input
                     .filter(|_| trace_radiance_valid)
                     .map_or(0, |trace| trace.bvh.triangles.len().div_ceil(12) as u32),
             ],
@@ -520,19 +522,19 @@ where
             .enumerate()
             .map(|(surface_index, surface)| {
                 let candidate_start = surface_index * GI_CANDIDATES_PER_SURFACE;
-                if inputs.trace_scene.is_none() {
+                if plan.candidate_source == GiCandidateSource::HostProvided {
                     if let Some(candidates) = inputs.gi_candidates.get(surface_index) {
                         let count = candidates.len().min(GI_CANDIDATES_PER_SURFACE);
                         packed_candidates.extend_from_slice(&candidates[..count]);
                     }
                 }
-                packed_candidates.resize(
-                    candidate_start + GI_CANDIDATES_PER_SURFACE,
-                    LightingGiCandidateInput::default(),
-                );
-                let stable_id = inputs
-                    .trace_scene
-                    .as_ref()
+                if plan.candidate_source == GiCandidateSource::HostProvided {
+                    packed_candidates.resize(
+                        candidate_start + GI_CANDIDATES_PER_SURFACE,
+                        LightingGiCandidateInput::default(),
+                    );
+                }
+                let stable_id = trace_input
                     .and_then(|trace| trace.surface_ids.get(surface_index).copied())
                     .unwrap_or(0);
                 GpuLightingSurface {
@@ -552,15 +554,15 @@ where
                     ],
                     candidate_range: [
                         candidate_start as u32,
-                        if inputs.trace_scene.is_some() {
-                            candidate_rays_per_surface
-                        } else {
-                            inputs
+                        match plan.candidate_source {
+                            GiCandidateSource::SoftwareBvhGpu => candidate_rays_per_surface,
+                            GiCandidateSource::HostProvided => inputs
                                 .gi_candidates
                                 .get(surface_index)
                                 .map_or(0, |candidates| {
                                     candidates.len().min(GI_CANDIDATES_PER_SURFACE) as u32
-                                })
+                                }),
+                            GiCandidateSource::Disabled => 0,
                         },
                         stable_id as u32,
                         (stable_id >> 32) as u32,
@@ -579,7 +581,9 @@ where
             0,
             cast_slice(&inputs.punctuals[..punctual_count]),
         );
-        queue.write_buffer(bundle.candidates, 0, cast_slice(&packed_candidates));
+        if !packed_candidates.is_empty() {
+            queue.write_buffer(bundle.candidates, 0, cast_slice(&packed_candidates));
+        }
         queue.write_buffer(bundle.output, 0, &ZERO_OUTPUT);
         queue.write_buffer(bundle.direct_output, 0, &ZERO_OUTPUT);
         queue.write_buffer(bundle.gi_output, 0, &ZERO_OUTPUT);
@@ -589,7 +593,8 @@ where
     #[must_use]
     pub(crate) fn pass(&self, plan: &LightingPlan) -> Option<LightingGpuPass> {
         let run_direct = plan.recipes.contains(&RecipeId::SpecializedDeterministic);
-        let run_gi = plan.recipes.contains(&RecipeId::WorldRestir);
+        let run_gi = plan.recipes.contains(&RecipeId::WorldRestir)
+            && plan.candidate_source != GiCandidateSource::Disabled;
         if !run_direct && !run_gi {
             return None;
         }
@@ -618,6 +623,7 @@ where
             composite_bind_group: bundle.composite_bind_group,
             run_direct,
             run_gi,
+            candidate_source: plan.candidate_source,
             candidate_surface_count: surface_count as u32,
             candidate_rays_per_surface: self
                 .candidate_rays_per_surface

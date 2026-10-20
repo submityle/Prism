@@ -45,8 +45,9 @@ use prism_ecs::resource::Resource;
 use crate::app::App;
 use crate::capability::QualityTier;
 use crate::run_mode::RunMode;
-use crate::settings::{SettingValue, Settings};
+use crate::settings_runtime::SettingsRuntime;
 use logs::RecentLogs;
+use prism_settings::Value;
 
 pub use prism_ecs::schedule::{
     SystemFailure, SystemFailureStage, SystemFailures, SystemPanicPolicy,
@@ -67,9 +68,8 @@ pub struct CrashSnapshot {
     pub quality_tier: Option<QualityTier>,
     /// The number of live entities in the main world at capture time.
     pub main_entity_count: u32,
-    /// The resolved settings (`key`, value) pairs, sorted by key. Empty when no
-    /// [`Settings`] resource is installed.
-    pub settings: Vec<(String, SettingValue)>,
+    /// The resolved canonical settings (`key`, value) pairs, sorted by key.
+    pub settings: Vec<(String, Value)>,
 }
 
 impl CrashSnapshot {
@@ -342,7 +342,7 @@ impl App {
     /// Capture the current shell state as a [`CrashSnapshot`] (design §24.7).
     ///
     /// Reads the main world's [`RunMode`] and [`QualityTier`], its live entity
-    /// count, and the resolved [`Settings`] (if installed). Pure and cheap; it
+    /// count, and the resolved canonical settings snapshot. Pure and cheap; it
     /// does not install anything.
     #[must_use]
     pub fn capture_crash_snapshot(&self) -> CrashSnapshot {
@@ -351,14 +351,21 @@ impl App {
         let quality_tier = Some(self.quality_tier());
         let main_entity_count = world.entity_count();
         let settings = world
-            .get_resource::<Settings>()
-            .map(|settings| {
-                let mut pairs: Vec<(String, SettingValue)> = settings
+            .get_resource::<SettingsRuntime>()
+            .map(|runtime| {
+                runtime
+                    .registry()
+                    .defs()
                     .iter()
-                    .map(|(key, value)| (key.to_string(), value.clone()))
-                    .collect();
-                pairs.sort_by(|a, b| a.0.cmp(&b.0));
-                pairs
+                    .enumerate()
+                    .filter_map(|(index, definition)| {
+                        runtime
+                            .snapshot()
+                            .get(prism_settings::SettingId(index as u32))
+                            .cloned()
+                            .map(|value| (definition.key.to_string(), value))
+                    })
+                    .collect()
             })
             .unwrap_or_default();
         CrashSnapshot {

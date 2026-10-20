@@ -94,6 +94,7 @@ Transmissive / Transparent / Additive
 - `pkg/prism_render_architecture/src/water/mod.rs` 与 `water/gpu/surface_pass.rs`：水体 `WaterShadingPlan::MaskBlend` 与 `water_surface_fs_mask_blend`。
 - `pkg/prism_render_scene/src/shaders/water_surface_raster.wesl`：四个当前 fragment entry。
 - `pkg/prism_render_architecture/src/ray_scene/footprint.rs`、`pkg/prism_render_scene/src/raytrace/footprint_gpu_tests.rs` 与 `pkg/prism_render_scene/src/shaders/ray_footprint.wesl`：CPU authoritative footprint、WESL 实现和严格 GPU parity gate。
+- `pkg/prism_render_scene/src/shading/resources.rs`、`water/surface_draw.rs`、`shading/taa/bind_groups.rs` 与 `shaders/taa_resolve.wesl`：独立 `R8Unorm` TAA reactive MRT 的资源、清零、第三个水体输出和 resolve 消费。
 
 ### 5.2 已记录的完整验收结果
 
@@ -110,6 +111,8 @@ Transmissive / Transparent / Additive
 | `PRISM_REQUIRE_GPU=1 cargo test -p prism_render_scene --lib ray_footprint_matches_cpu_golden_on_device -- --nocapture --test-threads=1` | 2026-10-16 在 Apple M2 Metal（沙盒外）`1 passed; 0 failed`；GPU footprint 与 CPU golden 一致 |
 
 GPU 证据按运行环境记录：2026-10-16 在 Apple M2 Metal 上，response composition、resident composition、water hybrid、BRDF channels、material classification、material VT 和 ray footprint parity 门禁均有通过记录。它们证明该适配器上的 shader/module、CPU/GPU parity 与链路契约，不外推为所有适配器的性能结论或跨适配器性能结论。
+
+2026-10-20 当前工作树定向验证：TAA ABI/jitter/shader 测试 `6 passed; 0 failed`，resolve shader 测试 `56 passed; 0 failed`；`prism_app` 单元测试 `248 passed; 0 failed`，`alloc_core` `6 passed; 0 failed`；Apple M2 Metal 上 `water_hybrid_gpu` `19 passed; 0 failed`。这些结果证明对应局部契约和当前适配器输出，不等于完整 Scene/Fabric/TAA 帧 parity、Fabric 生产闭环或跨适配器验收。
 
 ## 6. Git 历史锚点
 

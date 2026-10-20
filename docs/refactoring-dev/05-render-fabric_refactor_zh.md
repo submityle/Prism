@@ -1239,7 +1239,7 @@ particle spray ──?──────▶ water foam
 - **原生导入后端回归**：沙盒外 `PRISM_REQUIRE_GPU=1 cargo test -p prism_render_driver_wgpu --lib native_ -- --nocapture`：**4 passed，0 failed，0 ignored，27 filtered out**。覆盖公开导入 API、buffer 与 texture/view 独立 lease／过期 ID／槽位复用，以及 `rgba32uint` 原生格式与整数绑定；该筛选结果不代表整个后端测试集通过。
 - **历史记录**：前版本文记录 2026-10-16 Apple M2 Metal 的 Water Hybrid `17/17`、Resident Composition `3/3`；当前记录仅作为历史证据，不替代本轮结果或完整验收。
 - **2026-10-20 水体复跑**：沙盒外 Apple M2 / Metal 上，`water_hybrid_golden` **19/19**，`water_hybrid_gpu` **19/19**；其中 GPU target 包含 10 项当前生产输出、8 项冻结 legacy full-frame parity 和 1 项比较器测试。冻结 closure 使用 commit `41a31ceef24e59ab7f8dda076b2b4c7f5e11f6ec`，容差为 FP32 `3e-5 + 3e-5*abs(reference)`、FP16 `2e-6 + 2e-3*abs(reference)`。
-- **GPU 口径**：上述结果证明 16×16 水体 fixture 的 production WESL 与冻结旧 shader closure 输出一致；不证明完整 Scene/Fabric/TAA 帧、独立 TAA reactive MRT、所有设备或 Fabric compile/runtime 生产闭环。
+- **GPU 口径**：上述结果证明 16×16 水体 fixture 的 production WESL 与冻结旧 shader closure 输出一致；不证明完整 Scene/Fabric/TAA 帧、所有设备或 Fabric compile/runtime 生产闭环。独立 TAA reactive MRT 的当前接线与 shader/layout 定向测试另有记录，但尚无完整场景 parity 证据。
 - **ABI/cache 复跑**：S5 material target **4/4**，app `pipeline_cache::worker_tests` **25/25**；这关闭了相应 stale package/cache 的当前回归证据，但不关闭 selection 到真实 package/permutation 的生产映射缺口。
 - **已实现子项**：七值 class、旧符号/入口移除、CPU/WESL 公式统一与 overlay 消费已有当前源码证据。这些真实完成项应保留，不回退为未实现；同样不能扩大为 S4b/S5 全部要求完成。
 
@@ -1250,7 +1250,7 @@ particle spray ──?──────▶ water foam
 1. **同一选择的生产调用闭环**：真实 scene 帧使用同一 `SceneFabric` selection，经 `DeviceFabric::compile` → `CompiledFeatureGraph::prepare_runtime`，提供真实资源 imports / pass recorders，再执行既有 RenderGraph；API 定义和测试 fixture 不足以证明该链路。
 2. **全域帧数据与资源生命周期**：各域 `FrameRenderItem` / payload 的真实提取与绑定、版本/barrier 消费，以及 `FrameLag` history 分配、发布和导入；单 command buffer auto-sync 不替代外部 history 或原生多队列 fence 契约。
 3. **G3/G4、全量扇出及 32 门禁**：7 组全域装配范围、NPR 不降级、全部静态 roots 的生产消费者，以及 §12 全部门禁的可追溯运行结果；catalog 覆盖不是高级特性质量/生产验收。
-4. **完整水体行为等价与护栏时序**：冻结旧 shader closure 的八项 GPU 输出已通过，但完整 Scene/Fabric/TAA 帧 parity、独立 TAA reactive MRT 与旧入口删除前护栏的历史运行记录仍缺失。
+4. **完整水体行为等价与护栏时序**：冻结旧 shader closure 的八项 GPU 输出已通过；独立 TAA reactive MRT 已有当前生产接线与 shader/layout 定向测试，但完整 Scene/Fabric/TAA 帧 parity 与旧入口删除前护栏的历史运行记录仍缺失。
 5. **ABI 与管线消费**：S5 ABI bump、package/cache stale rejection 已有当前测试证据；`FeatureVariant` 到真实 shader package / `PermutationSpace` 的同一 selection 生产映射仍未闭合（§4.8）。
 
 **结论**：本文保留已实现子项及所有原始要求、37 条禁止和 32 项门禁。2026-10-20 的 payload/history、S5 ABI/cache 与冻结水体 GPU parity 证据只关闭相应契约缺口，**Render Fabric 生产闭环与完整验收仍未闭合**。此前“仅改本文、不构建、不提交”的说明仅描述当时的文档审计，不适用于当前实施与验证记录。

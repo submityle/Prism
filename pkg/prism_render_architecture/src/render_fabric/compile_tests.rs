@@ -859,6 +859,60 @@ fn payload_is_checked_against_actual_selected_accesses_type_and_layout() {
 }
 
 #[test]
+fn payload_current_access_is_not_shadowed_by_an_earlier_history_access() {
+    let catalog = history_fixture();
+    let b = buffer(B, ResourceLifetime::Persistent);
+    let resources =
+        ResourceTemplates::new(&catalog, &[buffer(A, ResourceLifetime::Transient), b]).unwrap();
+    let compiled = resources
+        .compile(
+            &select(&catalog),
+            10,
+            &[binding(b, 9, 9), binding(b, 10, 10)],
+            &[item(payload(b))],
+            GraphLimits::default(),
+        )
+        .unwrap();
+    assert_eq!(compiled.items(), &[item(payload(b))]);
+}
+
+#[test]
+fn payload_roles_are_unique_per_object_domain_and_history_stream() {
+    let catalog = fixture();
+    let a = buffer(A, ResourceLifetime::Transient);
+    let resources =
+        ResourceTemplates::new(&catalog, &[a, buffer(B, ResourceLifetime::Transient)]).unwrap();
+    let selection = select(&catalog);
+    let mut first = item(payload(a));
+    // History keys are application-defined; zero is not a reserved sentinel.
+    first.history_key = 0;
+    assert_eq!(
+        resources
+            .compile(&selection, 10, &[], &[first, first], GraphLimits::default())
+            .unwrap_err(),
+        FabricCompileError::DuplicatePayloadRole {
+            scene: first.scene_handle,
+            domain: first.domain,
+            history_key: 0,
+            role: first.payload_role(),
+        }
+    );
+    let mut second = first;
+    second.scene_handle.generation += 1;
+    let mut third = first;
+    third.history_key = 1;
+    resources
+        .compile(
+            &selection,
+            10,
+            &[],
+            &[first, second, third],
+            GraphLimits::default(),
+        )
+        .unwrap();
+}
+
+#[test]
 fn execution_uses_bound_passes_and_exact_barriers_and_stops_on_sink_errors() {
     #[derive(Default)]
     struct Sink {

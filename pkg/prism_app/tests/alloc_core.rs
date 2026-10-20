@@ -152,43 +152,41 @@ fn state_computation_substates_and_scoped_cleanup_remain_available() {
 }
 
 #[test]
-fn settings_use_caller_supplied_environment_and_ordered_cascade() {
-    let mut settings = Settings::new();
-    settings.set(SettingsLayer::EngineDefault, "render.quality", 1_i64);
-    settings.apply_env_vars(
-        [("PRISM_RENDER_QUALITY", "2"), ("OTHER", "ignored")],
-        "PRISM_",
-    );
-    assert_eq!(settings.get_int("render.quality"), Some(2));
-    settings.set(SettingsLayer::Runtime, "render.quality", 3_i64);
-    assert_eq!(settings.get_int("render.quality"), Some(3));
-    settings.clear(SettingsLayer::Runtime, "render.quality");
-    assert_eq!(settings.get_int("render.quality"), Some(2));
-    assert!(!settings.contains("other"));
-}
+fn canonical_settings_runtime_resolves_in_alloc_core() {
+    use prism_settings::{
+        Domain, LayerKind, RegistryBuilder, SettingDef, SettingKey, TrustLevel, Value,
+    };
 
-#[test]
-fn alloc_cvar_math_rounds_half_steps_and_archives_float_kinds() {
-    let mut app = App::new();
-    app.register_cvar(CvarSpec::new("step", 0_i64)).unwrap();
-    for (delta, expected) in [(0.5, 1), (-0.5, -1)] {
-        app.set_cvar("step", 0_i64).unwrap();
-        app.increment_cvar("step", -10.0, 10.0, delta).unwrap();
-        assert_eq!(app.cvar_int("step"), Some(expected));
-    }
-    for (name, value) in [("whole", 2.0), ("negative_zero", -0.0), ("fraction", -1.25)] {
-        app.register_cvar(CvarSpec::new(name, value).flag(CvarFlags::ARCHIVE))
-            .unwrap();
-    }
-    let archive = app.write_archive_config();
-    app.set_cvar("whole", 7.25).unwrap();
-    app.exec_console_script(&archive);
-    assert_eq!(app.cvar("whole"), Some(&SettingValue::Float(2.0)));
-    assert_eq!(app.cvar_float("fraction"), Some(-1.25));
-    assert_eq!(
-        app.cvar_float("negative_zero").unwrap().to_bits(),
-        (-0.0_f64).to_bits()
+    let mut builder = RegistryBuilder::new();
+    builder.namespace("render", "test").unwrap();
+    builder.register(SettingDef::new("render.quality", "render", Value::Int(1)));
+    let registry = builder.finish().unwrap();
+    let mut runtime = SettingsRuntime::new(registry, Domain::Runtime).unwrap();
+    let key = SettingKey::from("render.quality");
+    runtime.set(
+        LayerKind::User,
+        TrustLevel::User,
+        "user-file",
+        key.clone(),
+        Value::Int(2),
     );
+    runtime.set(
+        LayerKind::Runtime,
+        TrustLevel::User,
+        "console",
+        key.clone(),
+        Value::Int(3),
+    );
+    runtime.resolve().unwrap();
+    let id = runtime.registry().id(&key).unwrap();
+    assert_eq!(runtime.snapshot().get(id), Some(&Value::Int(3)));
+    assert_eq!(
+        runtime.snapshot().source(id).unwrap().layer,
+        LayerKind::Runtime
+    );
+    assert!(runtime.clear(LayerKind::Runtime, "console", &key));
+    runtime.resolve().unwrap();
+    assert_eq!(runtime.snapshot().get(id), Some(&Value::Int(2)));
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]

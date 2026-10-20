@@ -29,6 +29,10 @@ pub(crate) const SCENE_COLOR_FORMAT: TextureFormat = TextureFormat::Rgba16Float;
 /// delta that is almost always a small fraction of the frame.
 pub(crate) const MOTION_VECTOR_FORMAT: TextureFormat = TextureFormat::Rg16Float;
 
+/// Per-pixel temporal-reactive coverage written by transparent/deforming
+/// producers and consumed by the TAA resolve.
+pub(crate) const REACTIVE_MASK_FORMAT: TextureFormat = TextureFormat::R8Unorm;
+
 /// Owns both table entries for the exact texture consumed by native passes.
 /// No parallel/shadow allocation is made for the RHI graph. Native command
 /// buffers retain their handles after view replacement; table IDs are valid
@@ -64,7 +68,7 @@ impl VisibilityTexture {
     }
 }
 
-/// All nine attachments belong to one SceneRhi table on the host device.
+/// All ten attachments belong to one SceneRhi table on the host device.
 /// Replace the complete owner on resize or bridge replacement; never mix
 /// table-local IDs from different owners, even on the same native device.
 #[derive(Component)]
@@ -86,6 +90,10 @@ pub(crate) struct ViewVisibilityBuffer {
     /// pass writes for every covered pixel; consumed by the SSR temporal
     /// reprojection to follow object + camera motion instead of ghosting.
     motion_vectors: VisibilityTexture,
+    /// Per-pixel temporal-reactive coverage. Opaque shading leaves this at the
+    /// cleared zero value; transparent/deforming producers overwrite covered
+    /// pixels with their history-rejection signal.
+    reactive_mask: VisibilityTexture,
     /// Screen-space GI export: the pre-albedo diffuse *irradiance* the resolve
     /// evaluated per pixel. The SSGI hemisphere gather blends missed rays
     /// toward this so indirect light degrades to the IBL/SH ambient instead of
@@ -168,6 +176,11 @@ impl ViewVisibilityBuffer {
     /// Storage/sampling view of the per-pixel motion-vector G-buffer.
     pub(crate) fn motion_vectors_view(&self) -> &bevy_render::render_resource::TextureView {
         self.motion_vectors.default_view.view()
+    }
+
+    /// Storage/sampling view of the per-pixel TAA reactive mask.
+    pub(crate) fn reactive_mask_view(&self) -> &bevy_render::render_resource::TextureView {
+        self.reactive_mask.default_view.view()
     }
 
     /// Storage/sampling view of the SSGI pre-albedo ambient-irradiance export.
@@ -377,6 +390,11 @@ pub(crate) fn prepare_visibility_buffers(
                 "prism motion vectors",
                 rhi::TextureFormat::Rg16Float,
                 storage | rhi::TextureUsages::RENDER_ATTACHMENT,
+            ),
+            reactive_mask: allocate(
+                "prism TAA reactive mask",
+                rhi::TextureFormat::R8Unorm,
+                rhi::TextureUsages::TEXTURE_BINDING | rhi::TextureUsages::RENDER_ATTACHMENT,
             ),
             ssgi_ambient: allocate(
                 "prism SSGI ambient export",

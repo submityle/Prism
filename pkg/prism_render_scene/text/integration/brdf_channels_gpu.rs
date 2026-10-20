@@ -175,6 +175,55 @@ fn cases() -> Vec<Case> {
             },
         ),
         ("coat", coat),
+        (
+            "coat_darkening_zero",
+            SurfaceSample {
+                coat_darkening: 0.0,
+                ..coat
+            },
+        ),
+        (
+            "coat_darkening_half",
+            SurfaceSample {
+                coat_darkening: 0.5,
+                ..coat
+            },
+        ),
+        (
+            "coat_darkening_full",
+            SurfaceSample {
+                coat_darkening: 1.0,
+                ..coat
+            },
+        ),
+        (
+            "coat_weight_zero_darkening_full",
+            SurfaceSample {
+                clearcoat: 0.0,
+                coat_darkening: 1.0,
+                ..coat
+            },
+        ),
+        (
+            "coat_transmission_darkening_zero",
+            SurfaceSample {
+                transmission: 1.0,
+                transmission_color: [0.5, 0.75, 1.0],
+                thickness: 0.5,
+                coat_darkening: 0.0,
+                ..coat
+            },
+        ),
+        (
+            "coat_transmission_darkening_full",
+            SurfaceSample {
+                transmission: 1.0,
+                transmission_color: [0.5, 0.75, 1.0],
+                thickness: 0.5,
+                coat_darkening: 1.0,
+                ..coat
+            },
+        ),
         ("sheen", fuzz),
         (
             "anisotropy",
@@ -253,7 +302,7 @@ fn cases() -> Vec<Case> {
             }
         }
     }
-    assert_eq!(result.len(), 504);
+    assert_eq!(result.len(), 756);
     assert_ne!(
         result.len() % WORKGROUP,
         0,

@@ -403,7 +403,7 @@ where
             schedule.add_systems(build_view_family.in_set(RenderSystems::CreateViews));
             schedule.add_systems(
                 (
-                    crate::lighting::compile_lighting_plan,
+                    crate::lighting::compile_lighting_plan::<I>,
                     crate::lighting::sync_lighting_debug_view,
                 )
                     .chain()

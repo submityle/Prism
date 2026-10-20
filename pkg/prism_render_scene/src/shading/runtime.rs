@@ -13,6 +13,10 @@ pub struct PrismShadingSettings {
     /// §17.4 (P3-e) quality tier driving the single-lobe sampling budget. `High`
     /// (the default) evaluates every expensive lobe, i.e. the exact path.
     pub shading_quality: prism_render_shading::ShadingQuality,
+    /// Continuous host-side multiplier for the expensive-lobe sample budget.
+    /// It is clamped to `(0, 1]`; lowering it changes sample counts without a
+    /// shader permutation or per-pixel lobe removal.
+    pub lobe_budget_scale: f32,
     /// Frame index fed to the single-lobe sampler's blue-noise sequence; the
     /// caller advances it once per frame so TAA can accumulate the estimator.
     pub frame_index: u32,
@@ -243,11 +247,22 @@ pub struct PrismShadingSettings {
     pub exposure_high_percent: f32,
 }
 
+impl PrismShadingSettings {
+    /// Effective, model-preserving sample budget shared by pass consumers.
+    #[inline]
+    pub fn lobe_sample_budget(&self) -> prism_render_shading::LobeSampleBudget {
+        self.shading_quality
+            .budget()
+            .with_global_scale(self.lobe_budget_scale)
+    }
+}
+
 impl Default for PrismShadingSettings {
     fn default() -> Self {
         Self {
             max_visible_pixels: 3840 * 2160,
             shading_quality: prism_render_shading::ShadingQuality::High,
+            lobe_budget_scale: 1.0,
             frame_index: 0,
             enable_visibility_buffer: false,
             enable_compute_resolve: false,
@@ -513,6 +528,41 @@ mod tests {
             ..Default::default()
         };
         assert!(!diagnostics.compute_resolve_active);
+    }
+
+    #[test]
+    fn default_lobe_budget_preserves_the_sky_multiscatter_baseline() {
+        let budget = PrismShadingSettings::default().lobe_sample_budget();
+        assert_eq!(budget.multiscatter_dir_samples, 64);
+        assert_eq!(budget.multiscatter_march_samples, 16);
+    }
+
+    #[test]
+    fn lobe_budget_scale_is_clamped_without_breaking_model_floors() {
+        let minimum = PrismShadingSettings {
+            lobe_budget_scale: 0.0,
+            ..Default::default()
+        }
+        .lobe_sample_budget();
+        assert_eq!(
+            minimum.multiscatter_dir_samples,
+            prism_render_shading::LobeSampleBudget::MIN_MULTISCATTER_DIR
+        );
+        assert_eq!(
+            minimum.multiscatter_march_samples,
+            prism_render_shading::LobeSampleBudget::MIN_MULTISCATTER_MARCH
+        );
+
+        for scale in [f32::NAN, f32::INFINITY, 2.0] {
+            let settings = PrismShadingSettings {
+                lobe_budget_scale: scale,
+                ..Default::default()
+            };
+            assert_eq!(
+                settings.lobe_sample_budget(),
+                prism_render_shading::ShadingQuality::High.budget()
+            );
+        }
     }
 
     #[test]

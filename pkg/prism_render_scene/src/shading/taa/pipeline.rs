@@ -66,9 +66,10 @@ impl TaaResolvePipeline {
 /// (non-filterable float, `textureLoad`ed as both the anchor and the 3x3
 /// neighbourhood box), the *filterable* history + its filtering sampler
 /// (sampled at the reprojected UV), the write-only `rgba16float` resolved
-/// output, and the non-filterable motion-vector G-buffer the reprojection adds
-/// back to reach last frame's UV.
-fn layout_entries() -> BindGroupLayoutEntries<5> {
+/// output, the non-filterable motion-vector G-buffer the reprojection adds
+/// back to reach last frame's UV, and the non-filterable reactive mask that
+/// cuts history on temporally unstable pixels.
+fn layout_entries() -> BindGroupLayoutEntries<6> {
     BindGroupLayoutEntries::sequential(
         ShaderStages::COMPUTE,
         (
@@ -76,6 +77,7 @@ fn layout_entries() -> BindGroupLayoutEntries<5> {
             texture_2d(TextureSampleType::Float { filterable: true }),
             sampler(SamplerBindingType::Filtering),
             texture_storage_2d(SCENE_COLOR_FORMAT, StorageTextureAccess::WriteOnly),
+            texture_2d(TextureSampleType::Float { filterable: false }),
             texture_2d(TextureSampleType::Float { filterable: false }),
         ),
     )

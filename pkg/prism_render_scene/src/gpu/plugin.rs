@@ -2,7 +2,7 @@
 
 use bevy_app::{App, Plugin};
 use bevy_ecs::schedule::IntoScheduleConfigs;
-use bevy_render::{renderer::RenderGraphSystems, RenderApp, RenderStartup};
+use bevy_render::{RenderApp, RenderStartup};
 
 use crate::gpu::context::PrismGpu;
 
@@ -25,16 +25,7 @@ impl Plugin for PrismGpuPlugin {
         };
         render_app.add_systems(
             RenderStartup,
-            (
-                super::rhi::init_scene_rhi,
-                super::fabric::init_scene_fabric,
-                super::fabric::init_scene_fabric_runtime,
-            )
-                .chain(),
-        );
-        render_app.add_systems(
-            bevy_render::Render,
-            super::fabric::record_scene_fabric.in_set(RenderGraphSystems::Render),
+            (super::rhi::init_scene_rhi, super::fabric::init_scene_fabric).chain(),
         );
         if let Ok(context) = PrismGpu::new() {
             render_app.insert_resource(context);

@@ -35,7 +35,10 @@ use super::{
         MaterialVirtualTextureGpuBundle, MaterialVirtualTextureGpuConfig,
         MaterialVirtualTextureLifecycle, MaterialVirtualTextureStaging,
     },
-    vt_source::MaterialVtSourceRegistry,
+    vt_source::{
+        MaterialVtActivePublication, MaterialVtSourceChangeQueue, MaterialVtSourceIdentity,
+        MaterialVtSourceRegistry,
+    },
 };
 
 /// Maximum number of physical material-VT pages in the default producer.
@@ -67,6 +70,10 @@ pub(crate) struct MaterialVtProducer {
     next_generation: u64,
     lifecycle: MaterialVirtualTextureLifecycle,
     pending: Option<super::virtual_texture::MaterialVirtualTextureSubmission>,
+    /// Exact source revisions represented by the currently in-flight bundle.
+    /// This set becomes visible to material lowering only after completion and
+    /// the active-slice flip succeed.
+    pending_sources: Vec<MaterialVtSourceIdentity>,
     /// A queue write was recorded but assigning its completion token failed.
     /// Keep the lifecycle serial alive and retry instead of dropping the only
     /// handle to an in-flight update.
@@ -84,6 +91,7 @@ impl Default for MaterialVtProducer {
             next_generation: 0,
             lifecycle: MaterialVirtualTextureLifecycle::new(),
             pending: None,
+            pending_sources: Vec::new(),
             unsubmitted_serial: None,
             streamer: VirtualTextureStreamer::new(
                 StreamerConfig::new(u64::from(DEFAULT_MATERIAL_VT_PAGE_CAPACITY) * 70_000)
@@ -106,15 +114,26 @@ pub(crate) fn prepare_material_virtual_texture(
     bundle: Res<MaterialVirtualTextureGpuBundle>,
     queue: Res<RenderQueue>,
     tracker: Res<GpuCompletionTracker>,
+    mut active_publication: ResMut<MaterialVtActivePublication>,
+    mut changed_sources: ResMut<MaterialVtSourceChangeQueue>,
 ) {
     if producer.pending.is_some() {
         let completed = tracker.completed_value();
         let MaterialVtProducer {
-            lifecycle, pending, ..
+            lifecycle,
+            pending,
+            pending_sources,
+            ..
         } = &mut *producer;
-        finish_completed_submission(lifecycle, pending, completed, |slot| {
-            bundle.publish_slot(slot);
-        });
+        finish_completed_publication(
+            lifecycle,
+            pending,
+            pending_sources,
+            completed,
+            &mut active_publication,
+            &mut changed_sources,
+            |slot| bundle.publish_slot(slot),
+        );
     }
 
     if let Some(serial) = producer.unsubmitted_serial {
@@ -187,14 +206,16 @@ pub(crate) fn prepare_material_virtual_texture(
     if demand_changed {
         producer.last_demand_revision = demands.revision();
     }
-    let source_pages = match source_page_map(&entries, bundle.atlas_config()) {
-        Some(source_pages) => source_pages,
-        // If the changed source set is structurally invalid (for example two
-        // sources claim the same page key), publish an empty table rather than
-        // leaving the old publication visible.
-        None if source_changed => BTreeMap::new(),
-        None => return,
-    };
+    let (source_pages, mut published_sources) =
+        match source_page_map(&entries, bundle.atlas_config()) {
+            Some(result) => result,
+            // If the changed source set is structurally invalid (for example two
+            // sources claim the same page key), publish an empty table rather than
+            // leaving the old publication visible.
+            None if source_changed => (BTreeMap::new(), Vec::new()),
+            None => return,
+        };
+    published_sources.retain(|identity| sources.eligible_for_default_producer(identity.asset_id()));
     let (mut records, page_sources, streamer_changed) = if demands.has_feedback() {
         let Some((records, page_sources, frame)) = select_feedback_residency(
             &mut producer.streamer,
@@ -220,7 +241,10 @@ pub(crate) fn prepare_material_virtual_texture(
             Some((records, page_sources)) => (records, page_sources, true),
             // A changed source set must not retain stale pages just because
             // the new deterministic bootstrap set exceeds its capacity.
-            None if source_changed => (Vec::new(), Vec::new(), true),
+            None if source_changed => {
+                published_sources.clear();
+                (Vec::new(), Vec::new(), true)
+            }
             None => return,
         }
     };
@@ -295,6 +319,7 @@ pub(crate) fn prepare_material_virtual_texture(
         let _ = producer.lifecycle.abort(serial);
         return;
     }
+    producer.pending_sources = published_sources;
     producer.fingerprint = fingerprint;
     producer.last_feedback_mode = demands.has_feedback();
     let completion = tracker.next_submission_value();
@@ -365,9 +390,13 @@ fn source_page_map(
         Option<Arc<prism_render_material::MaterialVtSourceSnapshot>>,
     )],
     atlas: super::virtual_texture::MaterialVirtualTextureAtlasConfig,
-) -> Option<BTreeMap<TexturePageKey, Arc<prism_render_material::MaterialVtSourceSnapshot>>> {
+) -> Option<(
+    BTreeMap<TexturePageKey, Arc<prism_render_material::MaterialVtSourceSnapshot>>,
+    Vec<MaterialVtSourceIdentity>,
+)> {
     let mut map = BTreeMap::new();
-    for (_, _, snapshot) in entries {
+    let mut accepted = Vec::new();
+    for (asset_id, revision, snapshot) in entries {
         let Some(source) = snapshot else { continue };
         // Keep every VT producer entry point aligned with the row ABI: the
         // current shader can address only source layer zero.
@@ -382,8 +411,9 @@ fn source_page_map(
                 return None;
             }
         }
+        accepted.push(MaterialVtSourceIdentity::new(*asset_id, *revision));
     }
-    Some(map)
+    Some((map, accepted))
 }
 
 fn build_residency_for_table(
@@ -429,17 +459,40 @@ fn finish_completed_submission(
     lifecycle: &mut MaterialVirtualTextureLifecycle,
     pending: &mut Option<super::virtual_texture::MaterialVirtualTextureSubmission>,
     completed: GpuCompletionValue,
-    publish_slot: impl Fn(u8),
-) -> usize {
+) -> (usize, Option<u8>) {
+    let mut published_slot = None;
     if let Some(submission) = *pending {
         if let Ok(ready) = lifecycle.complete(submission, completed) {
             if lifecycle.publish(ready, submission.completion()).is_ok() {
-                publish_slot(submission.resource_slot());
+                published_slot = Some(submission.resource_slot());
                 *pending = None;
             }
         }
     }
-    lifecycle.reclaim(completed)
+    (lifecycle.reclaim(completed), published_slot)
+}
+
+/// Completes the producer's two-phase publication in strict order: lifecycle
+/// proof, active GPU-slice flip, exact source-revision publication, then row
+/// invalidation. Before completion succeeds this function leaves all source
+/// publication state untouched.
+fn finish_completed_publication(
+    lifecycle: &mut MaterialVirtualTextureLifecycle,
+    pending: &mut Option<super::virtual_texture::MaterialVirtualTextureSubmission>,
+    pending_sources: &mut Vec<MaterialVtSourceIdentity>,
+    completed: GpuCompletionValue,
+    active_publication: &mut MaterialVtActivePublication,
+    changed_sources: &mut MaterialVtSourceChangeQueue,
+    mut publish_slot: impl FnMut(u8),
+) -> usize {
+    let (reclaimed, published_slot) = finish_completed_submission(lifecycle, pending, completed);
+    if let Some(slot) = published_slot {
+        publish_slot(slot);
+        for image in active_publication.replace(core::mem::take(pending_sources)) {
+            changed_sources.record(image);
+        }
+    }
+    reclaimed
 }
 
 fn build_residency(
@@ -500,12 +553,13 @@ fn build_residency(
 mod tests {
     use super::*;
     use bevy_asset::{uuid::Uuid, Handle};
+    use bevy_platform::collections::HashSet;
     use prism_render_architecture::gpu_scene::GpuCompletionValue;
     use prism_render_material::{
         MaterialVtFormat, MaterialVtSourceDescriptor, MaterialVtSourceSnapshot,
     };
 
-    fn source(texture_id: u32, seed: u8) -> Arc<prism_render_material::MaterialVtSourceSnapshot> {
+    fn source(texture_id: u32, seed: u8) -> Arc<MaterialVtSourceSnapshot> {
         let descriptor = MaterialVtSourceDescriptor::new(
             texture_id,
             4,
@@ -553,6 +607,14 @@ mod tests {
         assert_eq!(records[0].slot, 0);
         assert_eq!(records[5].slot, 5);
         assert!(build_residency(&entries, atlas, 5).is_none());
+
+        let (_, accepted) = source_page_map(&entries, atlas).expect("valid source map");
+        let accepted: HashSet<_> = accepted.into_iter().collect();
+        let expected: HashSet<_> = entries
+            .iter()
+            .map(|(asset_id, revision, _)| MaterialVtSourceIdentity::new(*asset_id, *revision))
+            .collect();
+        assert_eq!(accepted, expected);
     }
 
     #[test]
@@ -582,6 +644,10 @@ mod tests {
             .expect("unsupported array source is skipped, not partially published");
         assert!(records.is_empty());
         assert!(pages.is_empty());
+        let (source_pages, accepted) =
+            source_page_map(&entries, atlas).expect("unsupported source set remains valid");
+        assert!(source_pages.is_empty());
+        assert!(accepted.is_empty());
     }
 
     #[test]
@@ -608,6 +674,7 @@ mod tests {
         ];
 
         assert!(build_residency(&entries, atlas, 8).is_none());
+        assert!(source_page_map(&entries, atlas).is_none());
     }
 
     fn page_table_snapshot(generation: u64) -> MaterialVirtualTexturePageTableSnapshot {
@@ -668,30 +735,51 @@ mod tests {
             .mark_submitted(first_serial, GpuCompletionValue(1))
             .expect("submit first update");
         let mut pending = Some(first_submission);
+        let image = Handle::<bevy_image::Image>::from(Uuid::from_u128(0xC1)).id();
+        let first_identity = MaterialVtSourceIdentity::new(image, 1);
+        let second_identity = MaterialVtSourceIdentity::new(image, 2);
+        let mut pending_sources = vec![first_identity];
+        let mut active_publication = MaterialVtActivePublication::default();
+        let mut changed_sources = MaterialVtSourceChangeQueue::default();
+        let mut published_slots = Vec::new();
 
         assert_eq!(
-            finish_completed_submission(
+            finish_completed_publication(
                 &mut lifecycle,
                 &mut pending,
+                &mut pending_sources,
                 GpuCompletionValue(0),
-                |_| {}
+                &mut active_publication,
+                &mut changed_sources,
+                |slot| published_slots.push(slot),
             ),
             0
         );
         assert!(pending.is_some());
         assert!(lifecycle.active().is_none());
+        assert!(!active_publication.contains(first_identity));
+        assert_eq!(pending_sources, [first_identity]);
+        assert!(changed_sources.take().is_empty());
+        assert!(published_slots.is_empty());
 
         assert_eq!(
-            finish_completed_submission(
+            finish_completed_publication(
                 &mut lifecycle,
                 &mut pending,
+                &mut pending_sources,
                 GpuCompletionValue(1),
-                |_| {}
+                &mut active_publication,
+                &mut changed_sources,
+                |slot| published_slots.push(slot),
             ),
             0
         );
         assert!(pending.is_none());
         assert_eq!(lifecycle.active().map(|active| active.serial()), Some(1));
+        assert!(active_publication.contains(first_identity));
+        assert!(pending_sources.is_empty());
+        assert_eq!(changed_sources.take(), HashSet::from_iter([image]));
+        assert_eq!(published_slots, [1]);
 
         let second = page_table_snapshot(2);
         let second_ranges = super::super::virtual_texture::MaterialVirtualTextureUploadRanges {
@@ -707,30 +795,46 @@ mod tests {
             .mark_submitted(second_serial, GpuCompletionValue(2))
             .expect("submit second update");
         pending = Some(second_submission);
+        pending_sources = vec![second_identity];
 
         assert_eq!(
-            finish_completed_submission(
+            finish_completed_publication(
                 &mut lifecycle,
                 &mut pending,
+                &mut pending_sources,
                 GpuCompletionValue(1),
-                |_| {}
+                &mut active_publication,
+                &mut changed_sources,
+                |slot| published_slots.push(slot),
             ),
             0
         );
         assert!(pending.is_some());
         assert_eq!(lifecycle.retired_len(), 0);
+        assert!(active_publication.contains(first_identity));
+        assert!(!active_publication.contains(second_identity));
+        assert!(changed_sources.take().is_empty());
+        assert_eq!(published_slots, [1]);
 
         assert_eq!(
-            finish_completed_submission(
+            finish_completed_publication(
                 &mut lifecycle,
                 &mut pending,
+                &mut pending_sources,
                 GpuCompletionValue(2),
-                |_| {}
+                &mut active_publication,
+                &mut changed_sources,
+                |slot| published_slots.push(slot),
             ),
             1
         );
         assert!(pending.is_none());
         assert_eq!(lifecycle.active().map(|active| active.serial()), Some(2));
         assert_eq!(lifecycle.retired_len(), 0);
+        assert!(active_publication.contains(second_identity));
+        assert!(!active_publication.contains(first_identity));
+        assert!(pending_sources.is_empty());
+        assert_eq!(changed_sources.take(), HashSet::from_iter([image]));
+        assert_eq!(published_slots, [1, 0]);
     }
 }
