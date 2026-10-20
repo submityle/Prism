@@ -351,13 +351,41 @@ pub enum TracePreparationError {
     /// The current frame has no surfaces to trace.
     NoSurfaces,
     /// Stable IDs are not one-to-one with the extracted surfaces.
-    SurfaceIdCountMismatch { surfaces: usize, ids: usize },
+    SurfaceIdCountMismatch {
+        /// Number of extracted surface samples.
+        surfaces: usize,
+        /// Number of provided stable surface IDs.
+        ids: usize,
+    },
     /// Per-surface samples are zero or exceed the bounded frame capacity.
     RayCapacity,
     /// Two surfaces claim the same stable identity.
     DuplicateSurfaceId(u64),
     /// The outgoing-radiance table must have exactly one entry per packed triangle.
-    RadianceCountMismatch { triangles: usize, radiance: usize },
+    RadianceCountMismatch {
+        /// Packed BVH triangle count.
+        triangles: usize,
+        /// Supplied radiance-record count.
+        radiance: usize,
+    },
+    /// Two radiance records claim the same stable primitive ID.
+    DuplicateRadiancePrimitive(u32),
+    /// The packed BVH contains a primitive ID more than once.
+    DuplicatePackedPrimitive(u32),
+    /// The radiance table's primitive IDs do not exactly match the BVH.
+    RadiancePrimitiveSetMismatch {
+        /// Primitive ID from the outgoing-radiance table.
+        radiance_id: u32,
+        /// Primitive ID from the packed BVH at the same sorted position.
+        packed_id: u32,
+    },
+    /// A packed triangle has no matching stable radiance record.
+    MissingRadiancePrimitive {
+        /// Index of the triangle in packed BVH order.
+        packed_index: usize,
+        /// Stable primitive ID stored in that triangle.
+        primitive_id: u32,
+    },
     /// The radiance table exceeds the bounded resident GPU allocation.
     RadianceCapacity,
     /// An outgoing-radiance value is negative or non-finite.
@@ -421,25 +449,12 @@ impl LightingTraceState {
             self.status = TracePreparationStatus::Disabled;
             return None;
         };
-        let triangle_count = input.bvh.triangles.len() / TRIANGLE_WORDS;
-        if input.outgoing_radiance.len() != triangle_count {
-            self.status =
-                TracePreparationStatus::Failed(TracePreparationError::RadianceCountMismatch {
-                    triangles: triangle_count,
-                    radiance: input.outgoing_radiance.len(),
-                });
-            return None;
-        }
         if input.outgoing_radiance.len() > MAX_TRIANGLE_COUNT {
             self.status = TracePreparationStatus::Failed(TracePreparationError::RadianceCapacity);
             return None;
         }
-        if let Some((index, _)) = input.outgoing_radiance.iter().enumerate().find(|(_, rgb)| {
-            rgb.iter()
-                .any(|channel| !channel.is_finite() || *channel < 0.0)
-        }) {
-            self.status =
-                TracePreparationStatus::Failed(TracePreparationError::InvalidRadiance(index));
+        if let Err(error) = input.packed_outgoing_radiance() {
+            self.status = TracePreparationStatus::Failed(error);
             return None;
         }
         if surfaces.is_empty() {
@@ -1894,20 +1909,29 @@ mod tests {
             [0.0, 1.0, -1.0],
             7,
         )]);
-        let input = crate::LightingTraceSceneInput {
-            bvh: Arc::new(GpuBvhBuffers::from_bvh(&bvh)),
-            surface_ids: vec![42],
-            rays_per_surface: 2,
-            ray_epsilon: 0.001,
-            ray_tmax: 10.0,
-            outgoing_radiance: vec![[1.0, 1.0, 1.0]],
-        };
+        let input = crate::LightingTraceSceneInput::new(
+            Arc::new(GpuBvhBuffers::from_bvh(&bvh)),
+            vec![42],
+            2,
+            0.001,
+            10.0,
+            Arc::from([crate::LightingTriangleRadiance {
+                primitive_id: 7,
+                rgb: [1.0, 1.0, 1.0],
+            }]),
+            1,
+        );
         let surfaces = [crate::LightingSurfaceInput::default()];
         let mut state = LightingTraceState::default();
-        let bad_radiance = crate::LightingTraceSceneInput {
-            outgoing_radiance: Vec::new(),
-            ..input.clone()
-        };
+        let bad_radiance = crate::LightingTraceSceneInput::new(
+            Arc::clone(&input.bvh),
+            input.surface_ids.clone(),
+            input.rays_per_surface,
+            input.ray_epsilon,
+            input.ray_tmax,
+            Arc::from([]),
+            input.radiance_revision,
+        );
         assert!(state
             .prepare(
                 Some(&bad_radiance),
@@ -1957,10 +1981,15 @@ mod tests {
             .is_some());
         assert_eq!(state.surface_id_scratch.capacity(), surface_id_capacity);
 
-        let duplicate_ids = crate::LightingTraceSceneInput {
-            surface_ids: vec![42, 42],
-            ..input
-        };
+        let duplicate_ids = crate::LightingTraceSceneInput::new(
+            Arc::clone(&input.bvh),
+            vec![42, 42],
+            input.rays_per_surface,
+            input.ray_epsilon,
+            input.ray_tmax,
+            Arc::clone(&input.outgoing_radiance),
+            input.radiance_revision,
+        );
         let two_surfaces = [
             crate::LightingSurfaceInput::default(),
             crate::LightingSurfaceInput::default(),
@@ -2002,14 +2031,18 @@ mod tests {
                 [0.0, 1.0, z],
                 7,
             )]);
-            crate::LightingTraceSceneInput {
-                bvh: Arc::new(GpuBvhBuffers::from_bvh(&bvh)),
-                surface_ids: vec![42],
-                rays_per_surface: 1,
-                ray_epsilon: 0.001,
-                ray_tmax: 10.0,
-                outgoing_radiance: vec![[1.0, 1.0, 1.0]],
-            }
+            crate::LightingTraceSceneInput::new(
+                Arc::new(GpuBvhBuffers::from_bvh(&bvh)),
+                vec![42],
+                1,
+                0.001,
+                10.0,
+                Arc::from([crate::LightingTriangleRadiance {
+                    primitive_id: 7,
+                    rgb: [1.0, 1.0, 1.0],
+                }]),
+                1,
+            )
         };
         let surface = [crate::LightingSurfaceInput::default()];
         let first_scene = make_scene(-1.0);

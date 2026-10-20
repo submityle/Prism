@@ -131,6 +131,7 @@ pub use label::{Render, RenderApp, RenderStartup};
 pub use lighting::{
     ExtractedLightingInputs, LightingDirectionalInput, LightingGiCandidateInput, LightingPlanState,
     LightingPunctualInput, LightingSceneInputs, LightingSurfaceInput, LightingTraceSceneInput,
+    LightingTriangleRadiance,
 };
 pub use lighting_trace_gpu::{
     LightingTraceState, TracePreparationError, TracePreparationStatus, MAX_HOST_TRACE_RAYS,
@@ -224,7 +225,7 @@ pub mod prelude {
     pub use crate::lighting::{
         ExtractedLightingInputs, LightingDirectionalInput, LightingGiCandidateInput,
         LightingPlanState, LightingPunctualInput, LightingSceneInputs, LightingSurfaceInput,
-        LightingTraceSceneInput,
+        LightingTraceSceneInput, LightingTriangleRadiance,
     };
     pub use crate::material::{
         BindlessSlot, MaterialParameterBuffers, MaterialSyncReport, MaterialUploadStats,

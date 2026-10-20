@@ -2849,16 +2849,18 @@ fn frame_graph_records_optional_trace_between_scene_and_gi() {
     let scene = PackedTraceScene::from(
         &prism_render_architecture::ray_scene::GpuBvhBuffers::from_bvh(&bvh),
     );
-    extracted.trace_scene = Some(LightingTraceSceneInput {
-        bvh: std::sync::Arc::new(
-            prism_render_architecture::ray_scene::GpuBvhBuffers::from_bvh(&bvh),
-        ),
-        surface_ids: vec![1],
-        rays_per_surface: 1,
-        ray_epsilon: 0.001,
-        ray_tmax: 10.0,
-        outgoing_radiance: vec![[1.0, 1.0, 1.0]],
-    });
+    extracted.trace_scene = Some(LightingTraceSceneInput::new(
+        std::sync::Arc::new(prism_render_architecture::ray_scene::GpuBvhBuffers::from_bvh(&bvh)),
+        vec![1],
+        1,
+        0.001,
+        10.0,
+        std::sync::Arc::from([crate::LightingTriangleRadiance {
+            primitive_id: 0,
+            rgb: [1.0, 1.0, 1.0],
+        }]),
+        1,
+    ));
     lighting.prepare(&plan, &extracted, 0, runtime.queue());
     let rays = [TraceRay {
         origin: [0.0, 0.0, 0.0],
@@ -2940,6 +2942,188 @@ fn frame_graph_records_optional_trace_between_scene_and_gi() {
             "prism-lighting-composite",
         ]
     );
+}
+
+#[test]
+fn physical_gpu_offscreen_host_graph_traces_builds_gi_and_composites() {
+    use crate::lighting::{LightingTraceSceneInput, LightingTriangleRadiance};
+    use crate::lighting_trace_gpu::{
+        build_gi_candidates_reference, trace_reference, BorrowedPackedTraceScene, LightingTraceGpu,
+        PackedTraceScene, TraceRay,
+    };
+    use prism_render_architecture::lighting::contract::{LightingPlan, RecipeId, Tier};
+    use prism_render_architecture::ray_scene::{Bvh, GpuBvhBuffers, Triangle};
+    use prism_render_driver::{BufferDescriptor, BufferUsages, DeviceType};
+    use prism_render_driver_wgpu::WgpuInstance;
+
+    const FRAME_INDEX: u64 = 19;
+    const SURFACE_ID: u64 = 0xA11CE;
+    let extent = Extent3d::new_2d(4, 4);
+    let mut runtime = match RenderRuntime::headless(WgpuInstance::new(), extent) {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            assert!(
+                !require_gpu(),
+                "PRISM_REQUIRE_GPU=1 but physical GPU runtime creation failed: {error}"
+            );
+            eprintln!("SKIPPED physical host GI graph: {error}");
+            return;
+        }
+    };
+    if !matches!(
+        runtime.adapter_info().device_type,
+        DeviceType::IntegratedGpu | DeviceType::DiscreteGpu
+    ) {
+        assert!(
+            !require_gpu(),
+            "PRISM_REQUIRE_GPU=1 requires a physical GPU, found {:?} ({})",
+            runtime.adapter_info().device_type,
+            runtime.adapter_info().name
+        );
+        eprintln!(
+            "SKIPPED physical host GI graph: adapter is {:?} ({})",
+            runtime.adapter_info().device_type,
+            runtime.adapter_info().name
+        );
+        return;
+    }
+
+    let triangle = Triangle::new([-1.0, -1.0, -1.0], [1.0, -1.0, -1.0], [0.0, 1.0, -1.0], 73);
+    let bvh = Arc::new(GpuBvhBuffers::from_bvh(&Bvh::build(&[triangle])));
+    let packed_scene = PackedTraceScene::from(&*bvh);
+    let surface = LightingSurfaceInput {
+        position: [0.0, 0.0, 0.0],
+        normal: [0.0, 0.0, -1.0],
+        albedo: [0.8, 0.5, 0.25],
+        ambient: [0.0; 3],
+    };
+    // The primitive id is deliberately explicit: the per-triangle radiance
+    // contract must resolve the packed BVH primitive rather than rely on an
+    // accidental vector-index == primitive-id assumption.
+    let radiance = vec![LightingTriangleRadiance {
+        primitive_id: 73,
+        rgb: [4.0, 2.0, 1.0],
+    }];
+    let trace_scene = LightingTraceSceneInput::new(
+        bvh.clone(),
+        vec![SURFACE_ID],
+        1,
+        0.001,
+        10.0,
+        Arc::from(radiance.clone()),
+        1,
+    );
+    let rays = [TraceRay {
+        origin: surface.position,
+        t_min: trace_scene.ray_epsilon,
+        direction: [0.0, 0.0, -1.0],
+        t_max: trace_scene.ray_tmax,
+        direction_pdf: 1.0 / core::f32::consts::PI,
+        selection_u01: 0.5,
+    }];
+    let plan = LightingPlan {
+        tier: Tier::Balanced,
+        recipes: vec![RecipeId::WorldRestir],
+        partition: Default::default(),
+        budget: FrameResourceBudget::default(),
+        rejected: Vec::new(),
+    };
+    let mut extracted = ExtractedLightingInputs::default();
+    extracted.surfaces = vec![surface];
+    extracted.trace_scene = Some(trace_scene);
+
+    let lighting = LightingGpuState::new(&mut runtime).expect("lighting GPU bundle");
+    lighting.prepare(&plan, &extracted, FRAME_INDEX, runtime.queue());
+    let lighting_pass = lighting.pass(&plan).expect("GI surface admits its recipe");
+    let hit_output = runtime.device().create_buffer(&BufferDescriptor::new(
+        (core::mem::size_of::<u32>() * 8) as u64,
+        BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+    ));
+    let mut trace = LightingTraceGpu::new(runtime.device_handle());
+    let recorder = trace
+        .prepare_graph(
+            runtime.queue(),
+            &BorrowedPackedTraceScene::from(&packed_scene),
+            &rays,
+            hit_output,
+            (core::mem::size_of::<u32>() * 8) as u64,
+            Some(lighting_pass.gi_candidate_target()),
+        )
+        .expect("valid scene, rays, radiance table, and GI targets prepare");
+
+    // This is the same target_graph_with_trace constructor used by the
+    // offscreen/window host composition path, not an independently assembled
+    // trace/candidate/GI graph.
+    let target = RenderTarget::new(runtime.device(), extent);
+    let queues = RenderQueues::new();
+    let functions = DrawFunctions::new();
+    let mut graph = crate::frame::target_graph_with_trace(
+        &target,
+        &queues,
+        &functions,
+        Some(lighting_pass),
+        Some(recorder),
+    );
+    let stages = *graph
+        .blackboard()
+        .get::<crate::frame::FrameGraphStages>()
+        .expect("host frame graph publishes its stage receipt");
+    stages.assert_contract();
+    assert_eq!(stages.trace_dispatches, 1);
+    assert_eq!(stages.candidate_build_dispatches, 1);
+    assert_eq!(stages.gi_recipes, 1);
+    assert_eq!(stages.composite_passes, 1);
+    assert_eq!(
+        graph.pass_count(),
+        5,
+        "clear, trace, candidate, GI, composite"
+    );
+    let recorded = graph
+        .execute(runtime.device(), runtime.queue())
+        .expect("offscreen host graph submits on the physical GPU");
+    assert!(runtime.wait_idle(), "host graph GPU work completes");
+    drop(recorded);
+
+    let cpu_hits = trace_reference(&packed_scene, &rays).expect("valid CPU trace oracle");
+    assert_eq!(cpu_hits.len(), 1);
+    assert!(cpu_hits[0].hit, "fixture ray must hit the packed triangle");
+    let outgoing_rgb = radiance.iter().map(|entry| entry.rgb).collect::<Vec<_>>();
+    let cpu_candidates = build_gi_candidates_reference(
+        &packed_scene,
+        &rays,
+        &cpu_hits,
+        &[surface],
+        &[SURFACE_ID],
+        FRAME_INDEX,
+        &outgoing_rgb,
+    )
+    .expect("CPU candidate oracle accepts the same authored inputs");
+    let expected_gi = evaluate_deterministic_gi(surface, &cpu_candidates[0]);
+
+    let read_rgb = |buffer| {
+        runtime
+            .queue()
+            .read_buffer(buffer, crate::lighting_gpu::OUTPUT_BYTES)
+            .chunks_exact(4)
+            .map(|bytes| f32::from_ne_bytes(bytes.try_into().expect("f32-sized output")))
+            .collect::<Vec<_>>()
+    };
+    let gi = read_rgb(lighting.gi_output_buffer());
+    let composite = read_rgb(lighting.output_buffer());
+    for channel in 0..3 {
+        assert!(
+            (gi[channel] - expected_gi[channel]).abs() <= 2.0e-4,
+            "host graph GI channel {channel}: GPU {} != CPU {}",
+            gi[channel],
+            expected_gi[channel]
+        );
+        assert!(
+            (composite[channel] - expected_gi[channel]).abs() <= 2.0e-4,
+            "host graph composite channel {channel}: GPU {} != CPU {}",
+            composite[channel],
+            expected_gi[channel]
+        );
+    }
 }
 
 #[test]

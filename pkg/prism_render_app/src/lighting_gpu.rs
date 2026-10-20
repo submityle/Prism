@@ -10,6 +10,7 @@ use prism_render_driver::{
     ShaderStages,
 };
 use prism_render_runtime::{RenderRuntime, ReplayHandle};
+use std::sync::{Arc, Mutex};
 
 use crate::lighting::{
     ExtractedLightingInputs, LightingDirectionalInput, LightingGiCandidateInput,
@@ -397,7 +398,15 @@ where
     bundle: ReplayHandle<LightingGpuBundle>,
     surface_count: core::sync::atomic::AtomicU32,
     candidate_rays_per_surface: core::sync::atomic::AtomicU32,
+    radiance_upload: Mutex<RadianceUploadCache>,
     marker: core::marker::PhantomData<fn() -> I>,
+}
+
+#[derive(Default)]
+struct RadianceUploadCache {
+    bundle: Option<Arc<LightingGpuBundle>>,
+    bvh: Option<Arc<prism_render_architecture::ray_scene::GpuBvhBuffers>>,
+    packed: Option<Arc<[[f32; 4]]>>,
 }
 
 impl<I> LightingGpuState<I>
@@ -415,6 +424,7 @@ where
             bundle,
             surface_count: core::sync::atomic::AtomicU32::new(0),
             candidate_rays_per_surface: core::sync::atomic::AtomicU32::new(0),
+            radiance_upload: Mutex::new(RadianceUploadCache::default()),
             marker: core::marker::PhantomData,
         })
     }
@@ -431,9 +441,46 @@ where
         let surface_count = inputs.surfaces.len().min(MAX_LIGHTING_SURFACES);
         self.surface_count
             .store(surface_count as u32, core::sync::atomic::Ordering::Release);
-        let candidate_rays_per_surface = inputs.trace_scene.as_ref().map_or(0, |trace| {
-            trace.rays_per_surface.min(GI_CANDIDATES_PER_SURFACE as u32)
+        let trace_radiance_valid = inputs.trace_scene.as_ref().is_some_and(|trace| {
+            let mut cache = self
+                .radiance_upload
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let packed = match trace.packed_outgoing_radiance() {
+                Ok(packed) => packed,
+                Err(_) => return false,
+            };
+            let unchanged = cache
+                .bundle
+                .as_ref()
+                .is_some_and(|cached| Arc::ptr_eq(cached, &bundle))
+                && cache
+                    .bvh
+                    .as_ref()
+                    .is_some_and(|bvh| Arc::ptr_eq(bvh, &trace.bvh))
+                && cache
+                    .packed
+                    .as_ref()
+                    .is_some_and(|table| Arc::ptr_eq(table, &packed));
+            if unchanged {
+                return true;
+            }
+            if packed.len() > TRACE_RADIANCE_BYTES as usize / 16 {
+                return false;
+            }
+            cache.bvh = Some(Arc::clone(&trace.bvh));
+            cache.bundle = Some(Arc::clone(&bundle));
+            cache.packed = Some(Arc::clone(&packed));
+            queue.write_buffer(bundle.radiance, 0, cast_slice(&packed));
+            true
         });
+        let candidate_rays_per_surface = if trace_radiance_valid {
+            inputs.trace_scene.as_ref().map_or(0, |trace| {
+                trace.rays_per_surface.min(GI_CANDIDATES_PER_SURFACE as u32)
+            })
+        } else {
+            0
+        };
         self.candidate_rays_per_surface.store(
             candidate_rays_per_surface,
             core::sync::atomic::Ordering::Release,
@@ -461,6 +508,7 @@ where
                 inputs
                     .trace_scene
                     .as_ref()
+                    .filter(|_| trace_radiance_valid)
                     .map_or(0, |trace| trace.bvh.triangles.len().div_ceil(12) as u32),
             ],
         };
@@ -532,16 +580,6 @@ where
             cast_slice(&inputs.punctuals[..punctual_count]),
         );
         queue.write_buffer(bundle.candidates, 0, cast_slice(&packed_candidates));
-        if let Some(trace) = inputs.trace_scene.as_ref() {
-            if trace.outgoing_radiance.len() <= TRACE_RADIANCE_BYTES as usize / 16 {
-                let packed_radiance = trace
-                    .outgoing_radiance
-                    .iter()
-                    .map(|rgb| [rgb[0], rgb[1], rgb[2], 0.0])
-                    .collect::<Vec<_>>();
-                queue.write_buffer(bundle.radiance, 0, cast_slice(&packed_radiance));
-            }
-        }
         queue.write_buffer(bundle.output, 0, &ZERO_OUTPUT);
         queue.write_buffer(bundle.direct_output, 0, &ZERO_OUTPUT);
         queue.write_buffer(bundle.gi_output, 0, &ZERO_OUTPUT);

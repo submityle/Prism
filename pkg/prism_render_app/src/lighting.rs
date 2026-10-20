@@ -223,6 +223,19 @@ pub struct LightingSceneInputs {
     pub surfaces: Vec<LightingSurfaceInput>,
 }
 
+/// Immutable outgoing radiance authored for one stable BVH primitive.
+///
+/// `primitive_id` is the stable ID stored in the packed BVH triangle record;
+/// it is deliberately not a packed-array index because BVH construction may
+/// reorder triangles into leaf-contiguous order.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LightingTriangleRadiance {
+    /// Stable primitive ID from the corresponding packed BVH triangle.
+    pub primitive_id: u32,
+    /// Linear, non-negative outgoing RGB radiance.
+    pub rgb: [f32; 3],
+}
+
 /// Optional host-owned packed scene used by the software-BVH GI trace pass.
 /// Surface IDs are stable identities aligned one-to-one with `surfaces` in
 /// [`LightingSceneInputs`]; malformed alignment is rejected by host preparation.
@@ -238,9 +251,156 @@ pub struct LightingTraceSceneInput {
     pub ray_epsilon: f32,
     /// Maximum world-space ray distance.
     pub ray_tmax: f32,
-    /// Per-packed-triangle outgoing radiance for trace-hit GI evaluation.
-    /// Its length must equal the packed triangle count.
-    pub outgoing_radiance: Vec<[f32; 3]>,
+    /// Per-primitive outgoing radiance for trace-hit GI evaluation. Entries
+    /// may arrive in any order, but IDs must exactly cover the packed BVH.
+    /// Sharing this immutable table and advancing its revision only when
+    /// material/texture evaluation changes lets the renderer avoid per-frame
+    /// allocation and upload.
+    pub outgoing_radiance: Arc<[LightingTriangleRadiance]>,
+    /// Monotonic content revision for the outgoing-radiance table.
+    pub radiance_revision: u64,
+    packed_radiance: Arc<std::sync::Mutex<Option<PackedRadianceCache>>>,
+}
+
+#[derive(Debug)]
+struct PackedRadianceCache {
+    // Retain owners, not raw pointer keys: this prevents allocator ABA and
+    // forces Arc::make_mut to copy before changing a cached input snapshot.
+    bvh: Arc<GpuBvhBuffers>,
+    radiance: Arc<[LightingTriangleRadiance]>,
+    revision: u64,
+    result: Result<Arc<[[f32; 4]]>, crate::lighting_trace_gpu::TracePreparationError>,
+}
+
+impl LightingTraceSceneInput {
+    /// Creates an immutable trace snapshot and its revision-scoped upload cache.
+    #[must_use]
+    pub fn new(
+        bvh: Arc<GpuBvhBuffers>,
+        surface_ids: Vec<u64>,
+        rays_per_surface: u32,
+        ray_epsilon: f32,
+        ray_tmax: f32,
+        outgoing_radiance: Arc<[LightingTriangleRadiance]>,
+        radiance_revision: u64,
+    ) -> Self {
+        Self {
+            bvh,
+            surface_ids,
+            rays_per_surface,
+            ray_epsilon,
+            ray_tmax,
+            outgoing_radiance,
+            radiance_revision,
+            packed_radiance: Arc::new(std::sync::Mutex::new(None)),
+        }
+    }
+
+    /// Produces GPU upload order matching packed BVH triangle indices.
+    pub(crate) fn packed_outgoing_radiance(
+        &self,
+    ) -> Result<Arc<[[f32; 4]]>, crate::lighting_trace_gpu::TracePreparationError> {
+        let mut cache = self
+            .packed_radiance
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(cached) = cache.as_ref() {
+            if Arc::ptr_eq(&cached.bvh, &self.bvh)
+                && Arc::ptr_eq(&cached.radiance, &self.outgoing_radiance)
+                && cached.revision == self.radiance_revision
+            {
+                return cached.result.clone();
+            }
+        }
+        let result = self.build_packed_outgoing_radiance().map(Arc::from);
+        *cache = Some(PackedRadianceCache {
+            bvh: Arc::clone(&self.bvh),
+            radiance: Arc::clone(&self.outgoing_radiance),
+            revision: self.radiance_revision,
+            result: result.clone(),
+        });
+        result
+    }
+
+    fn build_packed_outgoing_radiance(
+        &self,
+    ) -> Result<Vec<[f32; 4]>, crate::lighting_trace_gpu::TracePreparationError> {
+        if self.bvh.triangles.len() % prism_render_architecture::ray_scene::TRIANGLE_WORDS != 0 {
+            return Err(crate::lighting_trace_gpu::TracePreparationError::Trace(
+                crate::lighting_trace_gpu::TraceGpuError::MalformedPackedLength,
+            ));
+        }
+        let triangles = self.bvh.triangles.chunks_exact(12);
+        let triangle_count = self.bvh.triangles.len() / 12;
+        if self.outgoing_radiance.len() != triangle_count {
+            return Err(
+                crate::lighting_trace_gpu::TracePreparationError::RadianceCountMismatch {
+                    triangles: triangle_count,
+                    radiance: self.outgoing_radiance.len(),
+                },
+            );
+        }
+        let mut sorted = self.outgoing_radiance.iter().copied().collect::<Vec<_>>();
+        sorted.sort_unstable_by_key(|entry| entry.primitive_id);
+        if let Some(pair) = sorted
+            .windows(2)
+            .find(|pair| pair[0].primitive_id == pair[1].primitive_id)
+        {
+            return Err(
+                crate::lighting_trace_gpu::TracePreparationError::DuplicateRadiancePrimitive(
+                    pair[0].primitive_id,
+                ),
+            );
+        }
+        let mut packed_ids = triangles
+            .clone()
+            .map(|triangle| triangle[9])
+            .collect::<Vec<_>>();
+        packed_ids.sort_unstable();
+        if let Some(pair) = packed_ids.windows(2).find(|pair| pair[0] == pair[1]) {
+            return Err(
+                crate::lighting_trace_gpu::TracePreparationError::DuplicatePackedPrimitive(pair[0]),
+            );
+        }
+        if let Some((radiance_id, packed_id)) = sorted
+            .iter()
+            .map(|entry| entry.primitive_id)
+            .zip(packed_ids.iter().copied())
+            .find(|(radiance_id, packed_id)| radiance_id != packed_id)
+        {
+            return Err(
+                crate::lighting_trace_gpu::TracePreparationError::RadiancePrimitiveSetMismatch {
+                    radiance_id,
+                    packed_id,
+                },
+            );
+        }
+        let mut packed = Vec::with_capacity(triangle_count);
+        for (packed_index, triangle) in triangles.enumerate() {
+            let primitive_id = triangle[9];
+            let entry = sorted
+                .binary_search_by_key(&primitive_id, |entry| entry.primitive_id)
+                .ok()
+                .map(|index| sorted[index])
+                .ok_or(
+                    crate::lighting_trace_gpu::TracePreparationError::MissingRadiancePrimitive {
+                        packed_index,
+                        primitive_id,
+                    },
+                )?;
+            if entry
+                .rgb
+                .iter()
+                .any(|channel| !channel.is_finite() || *channel < 0.0)
+            {
+                return Err(
+                    crate::lighting_trace_gpu::TracePreparationError::InvalidRadiance(packed_index),
+                );
+            }
+            packed.push([entry.rgb[0], entry.rgb[1], entry.rgb[2], 0.0]);
+        }
+        Ok(packed)
+    }
 }
 
 impl LightingSceneInputs {
@@ -533,5 +693,138 @@ fn normalize_or(value: [f32; 3], fallback: [f32; 3]) -> [f32; 3] {
         scale(value, length_squared.sqrt().recip())
     } else {
         fallback
+    }
+}
+
+#[cfg(test)]
+mod radiance_tests {
+    use super::*;
+    use prism_render_architecture::ray_scene::{Bvh, Triangle, TRIANGLE_WORDS};
+
+    #[test]
+    fn radiance_table_is_reordered_by_stable_primitive_id() {
+        let bvh = Bvh::build(&[
+            Triangle::new(
+                [-2.0, -1.0, -1.0],
+                [-1.0, -1.0, -1.0],
+                [-1.5, 1.0, -1.0],
+                73,
+            ),
+            Triangle::new([1.0, -1.0, -1.0], [2.0, -1.0, -1.0], [1.5, 1.0, -1.0], 11),
+        ]);
+        let bvh = Arc::new(GpuBvhBuffers::from_bvh(&bvh));
+        let input = LightingTraceSceneInput::new(
+            Arc::clone(&bvh),
+            vec![1],
+            1,
+            0.001,
+            10.0,
+            Arc::from([
+                LightingTriangleRadiance {
+                    primitive_id: 11,
+                    rgb: [11.0, 1.0, 0.0],
+                },
+                LightingTriangleRadiance {
+                    primitive_id: 73,
+                    rgb: [73.0, 1.0, 0.0],
+                },
+            ]),
+            4,
+        );
+        let packed = input.packed_outgoing_radiance().unwrap();
+        assert!(Arc::ptr_eq(
+            &packed,
+            &input.clone().packed_outgoing_radiance().unwrap()
+        ));
+        let mut changed = input.clone();
+        Arc::make_mut(&mut changed.outgoing_radiance)[0].rgb[0] = 99.0;
+        let changed_packed = changed.packed_outgoing_radiance().unwrap();
+        assert!(!Arc::ptr_eq(&packed, &changed_packed));
+        assert!(changed_packed.iter().any(|rgb| rgb[0] == 99.0));
+        assert_eq!(&*input.packed_outgoing_radiance().unwrap(), &*packed);
+        changed.radiance_revision += 1;
+        assert!(!Arc::ptr_eq(
+            &changed_packed,
+            &changed.packed_outgoing_radiance().unwrap()
+        ));
+        let primitive_ids = bvh
+            .triangles
+            .chunks_exact(TRIANGLE_WORDS)
+            .map(|triangle| triangle[9])
+            .collect::<Vec<_>>();
+        assert_ne!(
+            primitive_ids,
+            [11, 73],
+            "fixture must exercise BVH reordering"
+        );
+        assert_eq!(
+            packed.iter().map(|entry| entry[0]).collect::<Vec<_>>(),
+            primitive_ids
+                .iter()
+                .map(|primitive_id| *primitive_id as f32)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn radiance_table_rejects_duplicate_and_mismatched_primitive_ids() {
+        let bvh = Arc::new(GpuBvhBuffers::from_bvh(&Bvh::build(&[
+            Triangle::new(
+                [-2.0, -1.0, -1.0],
+                [-1.0, -1.0, -1.0],
+                [-1.5, 1.0, -1.0],
+                73,
+            ),
+            Triangle::new([1.0, -1.0, -1.0], [2.0, -1.0, -1.0], [1.5, 1.0, -1.0], 12),
+        ])));
+        let duplicate = LightingTraceSceneInput::new(
+            Arc::clone(&bvh),
+            vec![1],
+            1,
+            0.001,
+            10.0,
+            Arc::from([
+                LightingTriangleRadiance {
+                    primitive_id: 73,
+                    rgb: [1.0; 3],
+                },
+                LightingTriangleRadiance {
+                    primitive_id: 73,
+                    rgb: [2.0; 3],
+                },
+            ]),
+            0,
+        );
+        assert_eq!(
+            duplicate.packed_outgoing_radiance(),
+            Err(crate::lighting_trace_gpu::TracePreparationError::DuplicateRadiancePrimitive(73))
+        );
+        let mismatch = LightingTraceSceneInput::new(
+            bvh,
+            vec![1],
+            1,
+            0.001,
+            10.0,
+            Arc::from([
+                LightingTriangleRadiance {
+                    primitive_id: 11,
+                    rgb: [1.0; 3],
+                },
+                LightingTriangleRadiance {
+                    primitive_id: 73,
+                    rgb: [1.0; 3],
+                },
+            ]),
+            0,
+        );
+        assert_eq!(
+            mismatch.packed_outgoing_radiance(),
+            Err(
+                crate::lighting_trace_gpu::TracePreparationError::RadiancePrimitiveSetMismatch {
+                    radiance_id: 11,
+                    packed_id: 12,
+                }
+            )
+        );
     }
 }

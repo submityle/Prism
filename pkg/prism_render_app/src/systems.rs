@@ -231,7 +231,11 @@ pub(crate) fn execute_frame<I>(
     let trace_device: std::sync::Arc<dyn prism_render_driver::RenderDevice + Send + Sync> =
         runtime.device_handle();
     let trace = trace_gpu.prepare(
-        inputs.trace_scene.as_ref(),
+        plan.plan
+            .recipes
+            .contains(&prism_render_architecture::lighting::contract::RecipeId::WorldRestir)
+            .then_some(inputs.trace_scene.as_ref())
+            .flatten(),
         &inputs.surfaces,
         record.frame_index,
         runtime.device_generation(),
