@@ -56,7 +56,7 @@
 
 1. **性能**：静态 `TypeInfo` 编译期生成（`OnceLock` 缓存，零运行时构造）；反射访问走索引而非字符串查表（路径预编译）；序列化流式零中间分配。
 2. **效果（能力）**：动态结构/枚举、局部 patch、函数反射、稳定类型 ID、schema 版本化迁移，支撑编辑器/脚本/网络/存档兼容等 AAA 刚需。
-3. **易用**：`#[derive(Reflect)]` 一行；序列化无需每类型写 serde；元数据用属性标注；与 `bevy_reflect` 近乎一致。
+3. **易用**：`#[derive(Reflect)]` 生成原生反射实现；序列化无需每类型写 serde；元数据用属性标注。
 4. **可移植 + 档位化**：核心 `no_std + alloc`；序列化/函数反射/文档等按 feature 裁剪，移动端可只带最小反射。
 
 非目标：不做跨语言 IDL；不替代 serde（可互操作）；不保证反射热路径与原生字段访问同速（反射用于工具/边界，非内层循环）。
@@ -272,12 +272,13 @@ let result = registry.call("Transform::looking_at", args)?;   // args: &[Box<dyn
 
 ## 19. 易用性与 Bevy 迁移策略
 
-对外 API 贴近 `bevy_reflect`：`#[derive(Reflect)]`、`Reflect`/`FromReflect`、`TypeRegistry::register`、`reflect_trait`、`DynamicStruct`、路径访问、`apply`。
+原生 API 提供 `#[derive(Reflect)]`、`Reflect`/`FromReflect`、`TypeRegistry::register`、`reflect_trait`、`DynamicStruct`、路径访问和 `apply`。已移除 `compat-bevy` feature、`compat_bevy` 模块及 `AppTypeRegistry`/`PartialReflect` 等别名；同名概念不代表 trait、注册数据或序列化格式兼容。
 
 迁移：
-1. `prism_reflect::prelude` 近同名导出。
-2. 为 `prism_math` 类型实现反射（替代 bevy_reflect 对 glam 的实现）。
-3. ECS 动态组件/快照、场景、编辑器 inspector 底层切到本 crate。
+
+1. 使用 `prism_reflect::prelude` 的原生导出，以 `TypeRegistry` 和 `Reflect` 显式替换旧注册表/trait；重新派生并核对类型元数据。
+2. 通过 `math` feature 启用 `prism_math` 值类型反射。
+3. ECS 动态组件/快照、场景、编辑器 inspector 等消费方按原生契约接线，分别验证 schema、patch 与序列化往返。
 
 ---
 
@@ -325,7 +326,7 @@ pkg/prism_reflect_macros/      # #[derive(Reflect)] + #[reflect_trait] + 属性�
 - **M3 序列化**：反射驱动 Serializer/Deserializer（接二进制 + RON）、StableTypeId。
 - **M4 元数据 + schema**：属性元数据、schema 版本化 + 迁移链、校验。
 - **M5 函数反射 + trait 对象**：函数注册/按名调用、`reflect_trait`、运行时定义类型、diff/merge。
-- **M6 集成**：ECS 动态组件/快照、场景序列化、编辑器 inspector、脚本桥、网络复制接线；bevy_reflect 兼容 prelude。
+- **M6 集成**：ECS 动态组件/快照、场景序列化、编辑器 inspector、脚本桥、网络复制接线契约；旧 Bevy 兼容 prelude 已移除。
 
 **基准即规格**：序列化/反序列化吞吐、路径访问开销、FromReflect 构造成本、迁移正确性（旧版数据读回等价）、确定性双跑类型 ID/字段序一致。核心价值在 **M3（序列化）+ M4（schema 迁移）+ M5（函数反射）**。
 

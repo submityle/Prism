@@ -67,7 +67,7 @@
 //! tier is gated behind the `concurrent` feature so a single-threaded build
 //! pays nothing for it (the conservative default from the design doc §11/§23).
 //!
-//! ## M6 scope (this build): advanced layout + migration
+//! ## M6 scope (this build): advanced layout
 //! - [`HierarchicalBitSet`](hbitset::HierarchicalBitSet): a layered bit set
 //!   with summary levels so "find the next set bit" is close to `O(set bits)`
 //!   even over a very large, sparse index domain (big-world entity/archetype
@@ -85,9 +85,6 @@
 //! - [`BuddyAllocator`](alloc_::BuddyAllocator)/[`TlsfAllocator`](alloc_::TlsfAllocator):
 //!   offset-based region sub-allocators for large-world / `GPU` heap carving
 //!   (buddy coalescing; `O(1)` Two-Level Segregated Fit).
-//! - [`compat_bevy`]: `bevy_utils`-shaped container aliases (the `compat-bevy`
-//!   feature) so porting a Bevy codebase onto Prism is mostly a `use`-path
-//!   change.
 //!
 //! ## M7 scope (this build): hardening + content-addressed dedup
 //! - [`GuardedBuffer`](guard::GuardedBuffer)/[`GuardedPool`](guard::GuardedPool):
@@ -120,8 +117,6 @@ pub mod alloc_;
 pub mod arena;
 pub mod array_vec;
 pub mod bit_set;
-#[cfg(feature = "compat-bevy")]
-pub mod compat_bevy;
 #[cfg(feature = "concurrent")]
 pub mod concurrent;
 pub mod cow;

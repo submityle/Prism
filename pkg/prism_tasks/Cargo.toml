@@ -3,7 +3,7 @@ name = "prism_tasks"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.96.0"
-description = "Prism parallel-runtime kernel: a work-stealing thread pool with per-worker deques, a global injector queue, and atomic Counter fork-join dependencies. Includes structured parallelism, optional stackful fibers, async execution, named lanes, affinity/NUMA placement, deterministic replay, QoS/thread-class routing, cancellation, tracing, and a bevy_tasks-shaped compatibility layer behind feature flags. Contains no Unreal Engine source or derived code and depends on no bevy_* crate."
+description = "Prism parallel-runtime kernel: a work-stealing thread pool with per-worker deques, a global injector queue, and atomic Counter fork-join dependencies. Includes structured parallelism, async execution, named lanes, affinity/NUMA placement, deterministic replay, QoS/thread-class routing, cancellation, and tracing. Stackful fibers, NUMA scheduling, and trace JSON export are optional features. Contains no Unreal Engine source or derived code and depends on no bevy_* crate."
 license = "MIT OR Apache-2.0"
 publish = false
 
@@ -32,11 +32,6 @@ numa = []
 # always available; this feature only compiles the `to_chrome_json` serializer
 # and its JSON-escaping helper, so it adds a meaningful opt-in feature combo.
 trace = []
-# M6: a `bevy_tasks`-compatible prelude (global `ComputeTaskPool` /
-# `AsyncComputeTaskPool` / `IoTaskPool` accessors, a `TaskPoolBuilder`, and a
-# scope/spawn-shaped pool) mapped onto this crate's `TaskPool`. Off by default;
-# adds no scheduling, only re-shapes the existing pool API.
-compat-bevy = []
 
 [[bench]]
 name = "parallel_scaling"

@@ -77,9 +77,6 @@
 //!   tracing with real steal-rate / occupancy counters and a chrome-tracing
 //!   (flamegraph-compatible) JSON export (the `trace` feature gates the
 //!   JSON export only; span recording is always available).
-//! - A `bevy_tasks`-compatible prelude (`ComputeTaskPool` / `TaskPool`-shaped
-//!   aliases plus scope/spawn) behind the off-by-default `compat-bevy`
-//!   feature.
 //!
 //! The crate contains no Unreal Engine source or derived code and depends on
 //! no `bevy_*` crate.
@@ -96,8 +93,6 @@ mod affinity;
 mod arena;
 mod async_exec;
 mod cancel;
-#[cfg(feature = "compat-bevy")]
-mod compat_bevy;
 mod counter;
 mod deterministic_replay;
 #[cfg(feature = "fibers")]
@@ -137,11 +132,6 @@ pub use async_exec::{
     ReadBuf, SyncError, Task,
 };
 pub use cancel::{CancelOutcome, CancelToken, Cancelled};
-#[cfg(feature = "compat-bevy")]
-pub use compat_bevy::{
-    prelude as bevy_prelude, AsyncComputeTaskPool, CompatScope, CompatTaskPool, ComputeTaskPool,
-    IoTaskPool, TaskPoolBuilder,
-};
 pub use counter::Counter;
 pub use deterministic_replay::{
     fold_in_order, ExecutionOrder, ReplayOrderError, ReplayOutcome, SeedStream,
@@ -482,8 +472,6 @@ mod tests;
 mod tests_deterministic_replay;
 #[cfg(test)]
 mod tests_health;
-#[cfg(all(test, feature = "compat-bevy"))]
-mod tests_m6_compat;
 #[cfg(test)]
 mod tests_m6_par_iter;
 #[cfg(test)]

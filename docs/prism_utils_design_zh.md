@@ -54,7 +54,7 @@
 
 1. **性能**：缓存友好布局；SwissTable SIMD 探测；栈上小容量优化省堆分配；池/帧分配器摊薄 malloc；无锁并发容器。
 2. **效果（能力）**：句柄表 / 稀疏集 / 位集 / 驻留 / 分配器 / 并发容器齐全，覆盖 ECS/资产/调度/诊断全需求。
-3. **易用**：API 贴近 Rust std + 常用 crate（`Vec`/`HashMap` 直觉），`prelude` 一把带入；兼容 `bevy_utils` 常用名。
+3. **易用**：API 贴近 Rust std + 常用 crate（`Vec`/`HashMap` 直觉），`prelude` 带入 Prism 原生容器与句柄。
 4. **可移植 + 档位化 + 确定性**：核心 `no_std`；并发/确定性/序列化按 feature；确定性档保证哈希迭代序可复现。
 
 ---
@@ -264,7 +264,7 @@ pub struct TrackingAllocator<A>;              // 包装任意分配器 + 分配�
 ## 19. 易用性与 Bevy 迁移策略
 
 - **API 贴 std**：`push/get/insert/iter` 等与 `Vec`/`HashMap` 同形，学习成本近零。
-- **`bevy_utils` 兼容层**（`compat-bevy`）：`HashMap`/`HashSet`（bevy 的 aHash 别名）、`StableHashMap` 等映射到 Prism 类型，迁移改 `use`。
+- **原生迁移边界**：已移除 `compat-bevy` feature 与 `compat_bevy` 别名模块。调用方显式选择 `prism_utils::hash` 的容器/哈希器或 `determinism` 的有序容器；哈希值与迭代顺序须按所选容器契约核对，不能假定与 Bevy 相同。
 - **prelude**：`use prism_utils::prelude::*;` 带入常用容器 + 句柄类型 + 分配器。
 - **合理默认**：默认哈希器、默认 SmallVec 容量有工程经验默认值，用户不配也能用好。
 - **类型别名**：`EntityMap`/`AssetMap` 等语义别名（在消费 crate 定义），提升可读性。
@@ -294,8 +294,7 @@ pkg/prism_utils/
     cow.rs            # 写时复制容器
     ring_buffer.rs    # 环形缓冲（供 diagnostic）
     prelude.rs
-  features = ["std","concurrent","determinism","serde","bytemuck",
-             "alloc-track","simd-hash","compat-bevy"]
+  features = ["std","concurrent","determinism"] # 当前 manifest；其他档位按实现另行评估
 ```
 
 依赖：**无 Prism 上游**（与 `prism_math` 并列为根）；可选 `hashbrown`。**不碰任何 `bevy_*`。**
@@ -321,7 +320,7 @@ pkg/prism_utils/
 - **M3 驻留 + 稳定哈希**：Interner(FName) + 稳定/内容哈希 → 正确性（跨运行稳定）+ 基准（驻留/比较 O(1)）。
 - **M4 确定性档**：有序哈希 + 确定遍历 + 确定分配 → 跨运行跨平台迭代序位级一致验证。
 - **M5 并发容器**：MPMC/SPSC/并发哈希 + epoch 回收 → 正确性（压力测试/loom）+ 基准（吞吐/扩展）。
-- **M6 高级 + 迁移**：分层位集 + SoA + CoW + buddy/TLSF + `compat-bevy` → 大世界/GPU 子分配验证 + 迁移。
+- **M6 高级布局**：分层位集 + SoA + CoW + buddy/TLSF → 大世界/GPU 子分配契约；迁移使用原生 API，旧 Bevy 别名层已移除。
 
 **基准即规格**：容器增删查吞吐 vs std、SmallVec spill 率、SwissTable 负载因子/探测长度、句柄失效正确性、池/帧分配 vs malloc 加速比、确定性迭代序一致、并发容器扩展比。核心价值在 **M0（全引擎前置）+ M1（ECS 存储底座）+ M4（确定性底座）**。
 

@@ -46,8 +46,7 @@
 //! - **M6 (this crate, done):** engine-agnostic integration wiring — an
 //!   addressable/seekable [`Timeline`] source with a marker [`Sequencer`],
 //!   [`FrameStepper`] frame-step debugging, [`FrameBudget`]/[`FrameStats`]
-//!   frame diagnostics, the [`TimeDriver`] frame-advance pipeline, and (behind
-//!   the `compat-bevy` feature) a `bevy_time`-shaped compatibility prelude (see
+//!   frame diagnostics, and the [`TimeDriver`] frame-advance pipeline (see
 //!   the [`timeline`], [`frame_step`], [`diagnostics`], and [`driver`]
 //!   modules). The crate stays ECS-agnostic: it provides the building blocks,
 //!   not the ECS glue.
@@ -73,8 +72,6 @@ pub(crate) fn scale_duration(d: Duration, factor: f64) -> Duration {
 
 pub mod adaptive_quality;
 mod clock;
-#[cfg(feature = "compat-bevy")]
-pub mod compat_bevy;
 pub mod determinism;
 pub mod diagnostics;
 mod domain;

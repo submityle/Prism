@@ -56,7 +56,7 @@
 
 1. **性能**：时钟推进 O(1) 原子/标量运算；高精度单调时钟缓存频率；无堆分配热路径。
 2. **效果（能力）**：固定步长支撑确定性物理/回滚网络；时间膨胀支撑子弹时间/暂停；插值 alpha 消抖；网络时钟同步抗漂移。
-3. **易用**：`time.delta_secs()` 一把梭；暂停/缩放改一个字段全局生效；与 `bevy_time` 近乎一致。
+3. **易用**：`time.delta_secs()` 读取帧步长；通过虚拟时钟的暂停/缩放控制推进；宿主显式选择和推进时钟。
 4. **可移植 + 档位化**：核心 `no_std`（时钟源注入）；确定性/网络按 feature 裁剪。
 
 非目标：不做日历/时区（那是 gameplay 的事，可另建）；不保证墙钟跨机绝对一致（只在 `determinism` 档保证固定步逻辑一致）。
@@ -257,12 +257,13 @@ Time<Fixed>.overstep_fraction = accumulator / fixed_dt   // = 插值 alpha
 
 ## 19. 易用性与 Bevy 迁移策略
 
-对外 API 贴近 `bevy_time`：`Time`、`Time<Real/Virtual/Fixed>`、`time.delta_secs()`/`elapsed_secs()`、`Timer`/`Stopwatch`、`time.set_relative_speed()`（time_scale）、`Fixed::overstep_fraction()`（alpha）。
+原生 API 提供 `Time<Real/Virtual/Fixed>`、`delta_secs()`/`elapsed_secs()`、`Timer`/`Stopwatch`、`Clocks` 和 `TimeDriver`。已移除 `compat-bevy` feature 与 `compat_bevy` 模块；保留 `prism_time::prelude` 作为原生导出入口。
 
 迁移：
-1. `prism_time::prelude` 近同名导出。
-2. App 主循环改用本 crate 推进三时钟。
-3. 物理/动画/网络按时钟种类取用（多数只换 import）。
+
+1. 从 `prism_time` 或其原生 `prelude` 导入所需时钟和计时器。
+2. 宿主主循环显式驱动 `Clocks`/`TimeDriver`，接入真实时间源或显式 delta。
+3. 物理/动画/网络按时钟种类核对暂停、缩放、固定步长积累与插值语义；ECS 调度接线由宿主承担。
 
 ---
 
@@ -307,7 +308,7 @@ pkg/prism_time/
 - **M3 计时器**：Timer/Stopwatch/冷却/节流 + 平滑 delta。
 - **M4 确定性**：有理/定点步长、整数 tick、重放还原。
 - **M5 网络 + 局部域**：server tick、时钟偏移、插值延迟缓冲、per-world/局部缩放、缓动过渡。
-- **M6 集成/工具**：App/ECS/物理/动画/网络接线、时间轴时间源、帧步进调试、帧预算/统计；bevy_time 兼容 prelude。
+- **M6 集成/工具**：宿主接线所需的 `TimeDriver`、时间轴时间源、帧步进调试、帧预算/统计；旧 Bevy 兼容 prelude 已移除。
 
 **基准即规格**：时钟推进开销、jitter 输入下固定步数正确、alpha 单调性、确定性双跑 tick/elapsed 位等价、网络时钟收敛曲线。核心价值在 **M2（固定步）+ M4（确定性）+ M5（网络）**。
 

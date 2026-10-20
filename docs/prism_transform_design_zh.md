@@ -344,11 +344,11 @@ impl GlobalTransform {
 
 ## 19. 易用性与 Bevy 迁移策略
 
-- **API 近 Bevy**：`Transform`、`GlobalTransform`、`Transform::from_xyz`、`look_at`、`ChildOf` 命名/语义尽量对齐，降低迁移成本。
-- **一行建父子**：`commands.entity(c).insert(ChildOf(p))`（Bevy 用户零学习）。
+- **原生类型**：使用 `Transform`、`GlobalTransform` 与 `prism_math` 数学类型，按原生构造、矩阵和分解 API 迁移。
+- **层级接线**：独立使用 `TransformGraph`；启用 `ecs` 时接入 `prism_ecs` 的 `ChildOf` 与观察器传播路径。宿主须核对重挂父节点、脏标记和传播时序。
 - **全局只读约定**：`GlobalTransform` 无公开可变 setter，防「手改全局被下帧传播覆盖」的经典坑；需要设世界姿态时用 `reparent_keeping_world` 或设根 `Transform`。
 - **prelude**：`use prism_transform::prelude::*;` 带出常用类型 + helper。
-- **迁移垫片**（可选）：提供 `bevy_transform` 兼容别名层，老代码可渐进替换。
+- **兼容层清理**：已移除 `compat-bevy` feature、glam 形状别名与 `BevyGlobalTransformExt`。调用方直接使用原生 `to_matrix`/`affine` 等方法，不承诺 Bevy/glam 类型可直接替换。
 
 ---
 
@@ -396,7 +396,7 @@ pkg/prism_transform/
 - **M3 并行**：经 prism_tasks 分块/分层并行 + 粒度自适应 → 基准（多核线性扩展）。
 - **M4 插值**：固定步 alpha 插值 + 瞬移分流 → 低 tickrate 无抖动视觉验证。
 - **M5 大世界 + 确定性**：f64/cell + 原点重定位；定点传播 → 远距无抖动 + 双跑位等价。
-- **M6 GPU + 工具**：变换列增量上传 + 2D 变体 + 传播统计 + bevy 兼容 prelude。
+- **M6 GPU + 工具**：变换列增量上传 + 2D 变体 + 传播统计；旧 Bevy 兼容 prelude 已移除。
 
 **基准即规格**：静止场景传播成本、脏子树传播吞吐、并行多核扩展比、插值视觉平滑、大世界抖动阈值、确定性双跑位等价、GPU 增量上传字节。核心价值在 **M2（增量）+ M3（并行）+ M5（大世界/确定性）**。
 

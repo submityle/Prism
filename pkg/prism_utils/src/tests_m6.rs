@@ -1,7 +1,6 @@
-//! M6 tests: the advanced-layout + migration tier — a hierarchical bit set,
+//! M6 tests: the advanced-layout tier — a hierarchical bit set,
 //! structure-of-arrays columnar storage, a copy-on-write container, the buddy
-//! and `TLSF` region sub-allocators, and (behind `compat-bevy`) the
-//! `bevy_utils`-shaped container aliases.
+//! and `TLSF` region sub-allocators.
 
 use crate::alloc_::{BuddyAllocator, TlsfAllocator};
 use crate::cow::Cow;
@@ -242,31 +241,4 @@ fn tlsf_rejects_overflowing_request() {
     assert!(t.allocate(usize::MAX).is_none());
     assert!(t.allocate_aligned(usize::MAX - 4, 64).is_none());
     assert!(t.allocate(64).is_some(), "allocator must remain usable");
-}
-
-// --- Bevy migration aliases (feature-gated). --------------------------------
-
-#[cfg(feature = "compat-bevy")]
-#[test]
-fn compat_bevy_aliases_resolve_to_prism_containers() {
-    use crate::compat_bevy::prelude::*;
-
-    let mut map: HashMap<&str, u32> = HashMap::default();
-    map.insert("a", 1);
-    map.insert("b", 2);
-    assert_eq!(map.get("a"), Some(&1));
-
-    let mut set: HashSet<u32> = HashSet::default();
-    assert!(set.insert(7));
-    assert!(!set.insert(7));
-    assert!(set.contains(&7));
-
-    let mut stable: StableHashMap<u32, u32> = StableHashMap::default();
-    stable.insert(1, 10);
-    assert_eq!(stable.get(&1), Some(&10));
-
-    let mut sv: SmallVec<u8, 4> = SmallVec::new();
-    sv.push(1);
-    sv.push(2);
-    assert_eq!(sv.len(), 2);
 }

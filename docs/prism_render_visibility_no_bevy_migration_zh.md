@@ -10,9 +10,9 @@
 
 - `Cargo.toml` 不包含 `bevy`、`bevy_math`、`bevy_camera`、`bevy_transform` 或 `bevy_shape` 依赖。
 - 源码不包含 `bevy_bridge`、`bevy_math` 或 `bevy_*` 引用。
-- 默认 feature、`--no-default-features` 和 `--all-features` 的检查均通过。
-- 单元测试覆盖属性插值、纹理 LOD、可见性裁剪、HZB 历史失效和两阶段解析；真实 GPU 验证由渲染宿主的 GPU acceptance suite 负责。
+- 此前迁移切片实际新跑的是默认 feature 下的 124 项 lib 单元测试，全部通过。本次文档纠正未重跑该测试；没有新增默认/`--no-default-features`/`--all-features` 三档独立检查的证据。
+- lib 单元测试覆盖属性插值、纹理 LOD、可见性裁剪、HZB 历史失效和两阶段解析。真实 GPU acceptance 未在该切片验证，仍须由渲染宿主执行。
 
 ## 性能边界
 
-核心路径保持无分配：视图裁剪、LOD 选择、属性插值和工作项排序只操作定长记录或调用方提供的容器。Bevy 到 Prism 的转换不再隐藏在可选桥接层中，避免在渲染热路径引入跨引擎类型转换和 feature 组合膨胀。
+移除桥接层减少了跨引擎类型转换入口，但不能据此宣称核心路径无分配。工作项集合、排序及 CPU 参考路径是否分配，须逐条核对容器和调用方式，并通过分配计数或性能测量验证；该迁移切片未提供此类测量。

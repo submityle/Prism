@@ -313,12 +313,13 @@ let mesh = tasks::block_on(handle);                // 或在作业图里 wait
 
 ## 19. 易用性与 Bevy 迁移策略
 
-对外 API 覆盖 `bevy_tasks` 常用面：`TaskPool`/`ComputeTaskPool`/`AsyncComputeTaskPool`/`IoTaskPool`、`scope`、`spawn`、`block_on`、`par_iter`（对应 `parallel_for`）。
+调用方使用原生 `TaskPool`、`Scope`、`Task` 和 `ParRange`/`ParSlice`/`ParSliceMut`。已移除 `compat-bevy` feature、`bevy_prelude`、`TaskPoolBuilder` 及 `ComputeTaskPool`/`AsyncComputeTaskPool`/`IoTaskPool` 全局兼容访问器。
 
 迁移路径：
-1. 提供 `prism_tasks::prelude` 与 bevy_tasks 近同名导出。
-2. ECS 的 `par_iter` / system 内并行底层由本调度器承载（替换 bevy_tasks）。
-3. 资产/流送的 `AsyncComputeTaskPool`/`IoTaskPool` 用法原样切换，内部换统一池 + 命名线程。
+
+1. 从 `prism_tasks` 根导入原生类型，以 `TaskPool::new`/`with_threads`/`with_config` 显式创建线程池，由宿主管理生命周期。
+2. 同步作业按 `spawn`/`scope` 的闭包契约接入，future 通过 `spawn_async`/`block_on` 接入；逐处核对等待、借用、返回值和取消语义。
+3. ECS、资产与流送消费方自行选择线程池或 `NamedThreads`/`ThreadClassPool` 路由；接线需由各消费方验证，不承诺只改 import 即可迁移。
 
 ---
 
@@ -366,7 +367,7 @@ pkg/prism_tasks/
 - **M3 异步 + 命名线程**：最小 Future executor + waker + Counter 桥接；Main/Render/IO/AsyncCompute 命名线程。
 - **M4 内存/亲和/NUMA**：每 worker 竞技场、栈池调优、worker 绑核、NUMA 就近 + 跨节点窃取惩罚、大小核。
 - **M5 确定性 + 高级**：确定性树形归约 + 固定分配 + 可回放；优先级继承、取消、节流、panic 传播。
-- **M6 集成/工具**：ECS `par_iter` / system 内并行底层切到本池；App 子应用流水线接线；作业 trace / 窃取率 / 火焰图；bevy_tasks 兼容 prelude。
+- **M6 集成/工具**：ECS `par_iter` / system 内并行与 App 子应用流水线的原生接线契约；作业 trace / 窃取率 / 火焰图；旧 Bevy 兼容 prelude 已移除。
 
 **基准即规格**：每里程碑以微基准红绿为完成判据——fork-join 吞吐、`parallel_for` 随核数加速比、fiber 切换 ns 级开销、窃取率/占用率、确定性双跑结果位等价。核心价值集中在 **M2（fiber）+ M4（内存/NUMA）+ M5（确定性）**。
 

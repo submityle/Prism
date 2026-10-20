@@ -65,8 +65,7 @@
 //!   tree with metadata-driven hints; [`replicated_diff`](integration::replicated_diff)
 //!   for field-level network deltas honouring `replicate`/`no_replicate`
 //!   intent; and [`ScriptBridge`](integration::ScriptBridge) for safe path
-//!   get/set plus call-by-name. The `compat-bevy` feature adds a
-//!   [`bevy_reflect`-compatible prelude](compat_bevy) (no `bevy_*` dependency).
+//!   get/set plus call-by-name.
 //!
 //! This crate contains no Unreal Engine source or derived code and depends on
 //! no `bevy_*` crate.
@@ -82,8 +81,6 @@ extern crate alloc;
 pub mod accessor;
 mod apply;
 mod cache;
-#[cfg(feature = "compat-bevy")]
-pub mod compat_bevy;
 mod diff;
 mod dynamic;
 mod from_reflect;

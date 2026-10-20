@@ -85,11 +85,8 @@
 //!   adds [`stats::PropagationStats`] (nodes visited vs skipped, dirty roots,
 //!   forest depth levels, by-root parallel grain, and a caller-filled timing
 //!   hook) derived from a real pass, wired through
-//!   [`TransformGraph::propagate_incremental_stats`]. Finally the
-//!   `compat-bevy` feature exposes [`compat_bevy`], a glam-shaped prelude of
-//!   aliases/re-exports easing a Bevy-codebase port. The packer, 2D, and
-//!   stats are default (no `GPU` device needed); only the Bevy prelude is
-//!   feature-gated.
+//!   [`TransformGraph::propagate_incremental_stats`]. The packer, 2D, and
+//!   stats are available by default and require no `GPU` device.
 
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
@@ -102,8 +99,6 @@ use prism_math::{Affine3, Mat4, Quat, Vec3};
 
 pub mod bake;
 pub mod change;
-#[cfg(feature = "compat-bevy")]
-pub mod compat_bevy;
 pub mod compute_hierarchy;
 pub mod constraint;
 #[cfg(feature = "determinism")]
@@ -717,9 +712,6 @@ mod tests_m6_2d;
 
 #[cfg(test)]
 mod tests_m6_stats;
-
-#[cfg(all(test, feature = "compat-bevy"))]
-mod tests_m6_compat;
 
 #[cfg(test)]
 mod tests_bake;

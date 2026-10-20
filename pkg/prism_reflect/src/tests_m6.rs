@@ -2,7 +2,7 @@
 //! error paths), the editor inspector model (nested traversal, metadata hints,
 //! hidden-field omission), field-level replication (opt-in/opt-out planning,
 //! minimal delta, apply, and shape guards), the script bridge (path get/set and
-//! call-by-name plus their typed errors), and the `bevy_reflect` compat prelude.
+//! call-by-name plus their typed errors).
 
 use crate::integration::inspector::{inspect, InspectorKind};
 use crate::integration::replication::{
@@ -490,28 +490,4 @@ fn script_bridge_set_rejects_type_mismatch() {
         .set(&mut actor, "transform.x", &7_i32)
         .expect_err("type mismatch");
     assert!(matches!(err, ScriptError::Apply(_)));
-}
-
-// ----------------------------------------------------------------------------
-// bevy_reflect compat prelude
-// ----------------------------------------------------------------------------
-
-#[cfg(feature = "compat-bevy")]
-#[test]
-fn compat_bevy_prelude_aliases_resolve() {
-    use crate::compat_bevy::prelude::*;
-
-    // `AppTypeRegistry` is Prism's `TypeRegistry` under a familiar spelling.
-    let mut registry: AppTypeRegistry = AppTypeRegistry::new();
-    registry.register::<Transform>();
-    assert!(registry.get_with_name(type_name::<Transform>()).is_some());
-
-    // The reflection traits are re-exported, so trait methods are in scope.
-    let t = Transform {
-        x: 1.0,
-        y: 2.0,
-        z: 3.0,
-    };
-    let as_struct: &dyn Struct = &t;
-    assert_eq!(as_struct.field_count(), 3);
 }
