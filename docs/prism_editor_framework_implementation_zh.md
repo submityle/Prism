@@ -66,12 +66,22 @@ CARGO_TARGET_DIR=/private/tmp/prism-editor-core-target cargo test -p prism_edito
 - 层级分组、连线删除、节点删除和索引一致性维护。
 - 稳定拓扑排序、显式 cycle 错误和回调式确定性评估。
 
+### E5 运行时同步协议基础
+
+`pkg/prism_editor_remote` 已完成并通过 10 个测试：
+
+- 传输无关的 endpoint capability、request/response correlation 和明确错误模型。
+- Snapshot、incremental changes、revision conflict 和 history retention。
+- 有界确定性二进制 codec，拒绝 trailing bytes 并在分配前执行解码限额。
+- 客户端副本从 snapshot 到增量 commit 的收敛流程。
+- 该 crate 不实现 BRP，不依赖 `bevy_*`；BRP adapter 仍需在上层实现。
+
 ## 当前未交付
 
 以下项目仍以代码和测试为准，不能仅因设计文档存在就视为完成：
 
 - 反射 Inspector 到 Loom 控件的最终渲染适配。
-- 外壳、停靠、核心面板、运行时桥和 PIE。
+- 外壳、停靠、Loom 核心面板、BRP adapter 和 PIE。
 - GPU 视口、拾取、Gizmo、内容管线、大世界编辑器 UI。
 - 域编辑器、分析器、协同和无头编辑器应用。
 
