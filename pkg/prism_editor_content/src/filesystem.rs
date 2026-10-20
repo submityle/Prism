@@ -7,17 +7,18 @@
 //! Symlinks are never intentionally followed. Path-based standard-library I/O
 //! cannot provide confinement against concurrent hostile symlink replacement.
 
-use std::{
-    collections::BTreeSet,
-    fmt, fs, io,
-    path::{Component, Path, PathBuf},
-    sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
-        Arc,
-    },
+use alloc::{collections::BTreeSet, sync::Arc};
+use core::{
+    fmt,
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     task::Poll,
+    time::Duration,
+};
+use std::{
+    fs, io,
+    path::{Component, Path, PathBuf},
     thread::{self, JoinHandle},
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 /// Resource limits shared by all requests started through one discovery service.
@@ -231,8 +232,8 @@ impl fmt::Display for FilesystemError {
     }
 }
 
-impl std::error::Error for FilesystemError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+impl core::error::Error for FilesystemError {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match &self.kind {
             FilesystemErrorKind::Io { source, .. } => Some(source),
             _ => None,
@@ -330,7 +331,7 @@ pub struct FilesystemDiscovery {
 
 impl FilesystemDiscovery {
     /// Creates a service with immutable limits and exclusion policy.
-    /// Only max_in_flight must be positive; zero scan budgets are valid.
+    /// Only `max_in_flight` must be positive; zero scan budgets are valid.
     pub fn new(
         limits: FilesystemLimits,
         excludes: FilesystemExcludes,

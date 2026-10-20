@@ -1,13 +1,16 @@
 //! Real-directory coverage of the public filesystem discovery API.
 
+use core::{
+    sync::atomic::{AtomicU64, Ordering},
+    task::Poll,
+    time::Duration,
+};
 use prism_editor_content::filesystem::*;
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
-    task::Poll,
     thread,
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
@@ -556,7 +559,7 @@ fn missing_or_file_root_reports_native_path_and_operation() {
     let e = wait(&mut service.start(&missing).unwrap()).unwrap_err();
     assert_eq!(e.path, missing);
     assert!(e.to_string().contains("missing\\n资源"));
-    assert!(std::error::Error::source(&e).is_some());
+    assert!(core::error::Error::source(&e).is_some());
     assert!(matches!(
         e.kind,
         FilesystemErrorKind::Io {

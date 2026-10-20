@@ -86,7 +86,7 @@ debug = 0
 incremental = false
 ```
 
-实际验证命令（临时目录仅属于本任务，收尾删除；复验应新建独有目录）：
+首次实现的验证命令（临时目录仅属于本任务，收尾删除；复验应新建独有目录）：
 
 ```sh
 cargo test --offline --manifest-path /private/tmp/prism-editor-filesystem-PaGAJa/Cargo.toml --target-dir /private/tmp/prism-editor-filesystem-PaGAJa/target --test filesystem
@@ -97,3 +97,17 @@ git diff --check -- pkg/prism_editor_content/src/filesystem.rs pkg/prism_editor_
 ```
 
 Clippy 使用独立 harness 默认 lint 集合并将 warning 视为错误，不等同于执行工作区全部 lint。独立 rustc 检查另外覆盖本模块公开文档、unsafe 禁止和未使用限定名。文件 watcher、内容读取、导入器、资产身份分配及增量内容/重命名识别不在本切片范围。
+
+### 严格 lint 补验（2026-10-20）
+
+根据 main 的集成检查反馈，将 BTreeSet/Arc 改从 alloc 引入，fmt、原子类型、Poll、Duration 和 Error trait 使用 core；文档中的 `max_in_flight` 使用代码格式。测试继续通过公开的 `prism_editor_content::filesystem` 导入，不直接包含源文件，测试内的等价 core 类型也同步调整。行为和 OS 调用边界不变：阻塞系统调用不能被强行中断，取消/超时只在调用边界检查，drop 的 join 可能等待该调用返回。
+
+本次独立 harness 仍指向实际 crate 库和真实集成测试，并将当前根 manifest 的 `[workspace.lints.clippy]`、`[workspace.lints.rust]` 完整镜像为 harness 的 `[lints.clippy]`、`[lints.rust]`。因此以下 Clippy 补验应用工作区相同 lint 集合，并通过 `-D warnings` 将 warning 升为错误；不再仅检查上面的默认 lint 集合。
+
+```sh
+cargo clippy --offline --manifest-path /private/tmp/prism-editor-filesystem-lints-Sbol9j/Cargo.toml --target-dir /private/tmp/prism-editor-filesystem-lints-Sbol9j/target --lib --test filesystem -- -D warnings
+cargo test --offline --manifest-path /private/tmp/prism-editor-filesystem-lints-Sbol9j/Cargo.toml --target-dir /private/tmp/prism-editor-filesystem-lints-Sbol9j/target --test filesystem
+rustc --extern alloc --edition 2024 --crate-type lib --crate-name prism_filesystem_validation -F unsafe_code -D warnings -W missing_docs -W unused_qualifications pkg/prism_editor_content/src/filesystem.rs -o /private/tmp/prism-editor-filesystem-lints-Sbol9j/libprism_filesystem_validation.rlib
+```
+
+结果：严格 Clippy、28/28 文件系统集成测试、独立 rustc 及指定文件的格式/空白检查均通过。未重新运行 main 的其他测试，main 报告的 49 项总数不是本次独立复验范围。补验目录和 target 仅属于本任务，完成后删除；没有执行全仓构建。
