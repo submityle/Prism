@@ -11,6 +11,9 @@ mod geometry;
 #[cfg(all(test, feature = "gpu-tests"))]
 mod geometry_tests;
 mod gpu_picking;
+pub mod image;
+#[cfg(all(test, feature = "gpu-tests"))]
+mod image_tests;
 mod render_targets;
 mod scene;
 #[cfg(all(test, feature = "gpu-tests"))]

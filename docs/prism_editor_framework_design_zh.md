@@ -410,6 +410,7 @@ pub trait Command: Send {
 - **E5 运行时桥 + PIE**:`prism_editor_remote`——协议、增量同步、PIE、TCP 和受控子进程管理已落地；引擎专属 adapter 与真实场景 runtime 是后续接入，不将 loopback fixture 计作引擎实现。
 - **E6 GPU 视口 + Gizmo**:`prism_editor_viewport`——增量场景 ID 提交、indexed geometry/depth ID pass、多 viewport target、单点异步读回、GPU 矩形去重归约及过期拒绝已落地；`prism_editor_app` 已提供文档到场景的引擎中立候选/提交边界和 native 点选/拖拽框选接线。归约保留完整四通道 ID，无跨线程发布自旋等待；读回量按 ID 容量而非矩形像素数计。2026-10-20 视口全 features 测试 37 项通过，包含 8 项 Apple M2/Metal 真实 GPU 测试；框选 overlay、焦点和原生 Gizmo 绘制/编辑回写继续接入。
 - **E7 内容与管线**:`prism_editor_content`——内容浏览器 + 依赖图 + 校验 + 导入导出 + 版本控制贡献点。
+  2026-10-20 已验证真实 PNG worker、只读 Git worker 及 `prism_editor_viewport::image` GPU 图像合成；后者与宿主共享 device/queue，保持线性光预乘滤波和有界保留资源，相同几何零再次上传。主包 12 项真实 Git 回归及视口 42 项全 features 回归通过（含新增 5 项 Apple M2/Metal 图像硬件测试）；原生缩略图网格与实际构建流程仍按应用路径验收，见实现状态及专用文档。
 - **E8 大世界编辑**:`prism_editor_world`——World Partition 流送 + 数据层 + OFPA + 层级实例 + HLOD 预览。
 - **E9 分析诊断**:`prism_editor_profiler`——帧分析器 + 帧图调试 + 内存预算 + Gameplay Debugger + 可视日志。
 - **E10 通用图 + 时间线**:`prism_editor_graph` + `prism_editor_timeline`——材质图 + 序列器先行。

@@ -34,6 +34,12 @@ adapter:
   and forward/reverse depth-tested ID drawing on the host's shared wgpu device.
   The ID texture can be colorized entirely on GPU for object-ID debug preview;
   this is not an engine material/color renderer.
+- `image::ImageRenderer` uploads bounded sRGB RGBA8 images and overlays visible
+  physical-pixel quads on the host's existing texture. Linear-light premultiplied
+  bilinear filtering avoids transparent color fringes; identical preparation
+  reuses retained geometry without queue uploads. It performs no submission,
+  readback, or full-resolution intermediate allocation. See
+  `docs/prism_editor_image_compositor_zh.md` for host ordering and resource bounds.
 - `ViewportInputFocus`, `ScreenGizmoLayout`, `GizmoInteraction`, `GizmoSession`,
   `GizmoDrawCommand`, and `PixelRect` are engine-neutral interaction contracts.
   Screen gizmo hit testing is deterministic and renderer-independent; platform

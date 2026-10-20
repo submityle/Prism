@@ -20,13 +20,13 @@
 | `prism_editor_graph` | 稳定图身份、类型/基数校验、分组/索引维护、确定性拓扑与评估回调 | 材质/VFX 等具体节点 UI 和编译器适配 | 10 |
 | `prism_editor_timeline` | 整数 tick、稳定轨道/关键帧、插值、维度校验、有序事件与采样 | 序列器 UI 和具体运行时播放适配 | 3 |
 | `prism_editor_profiler` | 有界 frame/span、帧图/关键路径、内存预算告警、可视日志投影 | Tracy/GPU/真实运行时采集和分析界面 | 9 |
-| `prism_editor_content` | 目录/子树索引、末项续查分页、有界缓存与诊断、增量反向依赖、真实异步文件扫描、精确快照围栏的源/VCS 原子发布、可贡献校验规则与精确快照门禁、真实 PNG 缩略图解码/缩放/缓存、导入导出任务状态 | 缩略图网格/GPU 显示、实际 importer/exporter/Cook/VCS provider 和原生内容流程 | 59（目录/扫描/发布/校验）+14（缩略图） |
+| `prism_editor_content` | 目录/子树索引、末项续查分页、有界缓存与诊断、增量反向依赖、真实异步文件扫描、精确快照围栏的源/VCS 原子发布、可贡献校验规则与精确快照门禁、真实 PNG 缩略图解码/缩放/缓存、真实只读 Git worker、导入导出任务状态 | 缩略图网格/原生图像接线、实际 importer/exporter/Cook 和完整原生内容流程 | 59（目录/扫描/发布/校验）+14（缩略图）+12（Git） |
 | `prism_editor_domains` | 域/能力/贡献/Profile、版本约束、依赖启停、确定性冲突诊断 | 材质/VFX/动画/地形/音频/物理的具体编辑器 | 13 |
 | `prism_editor_remote` | 有界 JSON-RPC/二进制 codec、增量副本、PIE、TCP、受控子进程 stdio/TCP 桥及取消/重启/超时 | Prism 引擎专属 adapter 和生产场景运行时接线 | 41 |
 | `prism_editor_collab` | 有界因果副本/LWW/tombstone、Presence/租约软锁、TCP 接纳顺序/广播/重连/历史重放/能力拒绝 | 身份认证/TLS、产品级权限/部署和 UI 到命令栈协同接线 | 20 |
 | `prism_editor_ui` | Loom Element 装配、有界稳定 key、语义目标/事件到选择/展开/字段编辑/命令/Undo/Redo action 的绑定契约 | 真实设备事件、Loom reconciliation/render 和应用命令执行的端到端连接 | 20 |
 | `prism_editor_app` | 有界 headless runner、工作区组合、窗口/surface 生命周期、错误回滚/恢复/退出及 `prism_app` 退出传播；原生文档会话接线、Ctrl/Cmd+S 保存、Ctrl/Cmd+O 加载、receipt 围栏、引擎中立 `SceneDocumentAdapter` 候选/提交边界、点选/拖拽框选、重载 renderer 失效钩子、单对象 transform 增量更新和 native CLI smoke entry | 完整原生输入→Loom→真实场景→Inspector→保存重载验收，以及具体引擎/项目场景 adapter | 见验证命令 |
-| `prism_editor_viewport` | 稳定场景 ID/增量提交、indexed geometry/depth ID pass、真实整数 ID target/异步读回、GPU 矩形去重归约、多 viewport target 生命周期/过期拒绝、Gizmo 屏幕命中与会话 | 引擎材质/场景提取、平台输入、Gizmo 绘制与宿主变换命令绑定 | 37（本次全 features） |
+| `prism_editor_viewport` | 稳定场景 ID/增量提交、indexed geometry/depth ID pass、真实整数 ID target/异步读回、GPU 矩形去重归约、多 viewport target 生命周期/过期拒绝、Gizmo 屏幕命中与会话、有界 sRGB 图像 GPU 合成 | 引擎材质/场景提取、完整原生产品接线 | 42（本次全 features） |
 | `prism_editor_world` | 有界异步 provider、版本化 cell 文件持久化、校验/并发锁/修订冲突/阶段文件恢复、payload 驻留、分层策略、dirty/租约保护、OFPA/HLOD 计划 | actor codec/写盘执行、跨 cell/OFPA 事务、HLOD 烘焙/渲染和世界 UI | 41（本次全 targets） |
 
 ### 运行时进程桥
@@ -74,6 +74,12 @@
 ### 实际缩略图生产
 
 `thumbnail::ThumbnailService` 已读取真实 PNG 并在有界 worker 上解码与面积缩放，输出不可变 sRGB RGBA8；线性光和预乘透明度滤波、比例缩小不放大、源修订/路径/输出尺寸缓存身份、LRU、取消与项目 epoch 围栏均有实际文件测试。运行及已完成未消费请求一起计入并发；drop 不阻塞调用者，worker 保留额度至清理结束。编码/源像素/PNG 内部/输出/缓存分别有预算，协作截止时间不能中断单次阻塞 OS 或解码调用。14 项 PNG 回归与定向严格 Clippy 通过，色彩与文件系统边界见 `prism_editor_content_thumbnail_zh.md`；尚不以此声称图片已接入原生网格/GPU。
+
+`prism_editor_viewport::image::ImageRenderer` 已补上真实像素上传与目标纹理叠加：线性光预乘双线性滤波、物理像素裁剪/opacity/绘制顺序、有界保留纹理及顶点缓冲、handle 代际失效和相同几何零再次上传。与宿主共享 device/queue，生产路径无 submit/readback/全尺寸中间 attachment；宿主负责按实际布局和 DPI 传入可见图像并安排 paint order。2026-10-20 视口全 features 42 项测试通过，包含新增 5 项 Apple M2/Metal 图像像素/资源硬件测试。strict Clippy 及 normal/build/dev 依赖树检查通过，无 Bevy；见 `prism_editor_image_compositor_zh.md`。原生内容网格到 compositor 的应用接线仍须单独验收。
+
+### 实际 Git 读取
+
+`git::GitProvider` 已通过主包公开模块接线，读取真实索引和工作区的 Clean、staged/worktree 变化、rename 双路径、untracked/ignored 及冲突，使用精确目录 token 原子发布。worker 限制合计输出字节/路径/请求数/截止时间；完成未消费结果仍占槽，取消/超时负责终止并回收 Git，错误不发布半批。仅 Unix 实现；两条 Git 命令之间没有对外部编辑的事务隔离，不提供 LFS 锁。2026-10-20 主包 12 项真实仓库测试沙盒外全部通过，strict Clippy 通过；原生刷新/项目 epoch/错误界面接线仍由 app 负责。沙盒内特殊路径和 ps 权限失败未计入成功覆盖，详见 `prism_editor_content_git_zh.md`。
 
 ### 大世界执行数据层
 
