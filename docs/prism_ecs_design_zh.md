@@ -484,10 +484,10 @@ prefab 作为实体模板；实例通过 `IsA` 关系继承其组件并可逐字
 
 对外 API 刻意贴近 `bevy_ecs`：`#[derive(Component/Bundle/Resource/Event)]`、`Query<...>`、`Res/ResMut`、`Commands`、`App::add_systems`、`States`、`run_if`、`observe`。
 
-迁移路径：
-1. 提供 `prism_ecs::prelude` 与 bevy_ecs 近同名导出。
-2. 把 `prism_ui_ecs`（当前依赖 `bevy_ecs`）切到 `prism_ecs`，用其现有测试对拍验证。
-3. 渲染/音频对接层（`prism_render_scene/material/visibility` 等）逐个核对，保留公共 API，内部换内核；其中 `prism_audio_ecs` 已使用原生 `prism_ecs`，`prism_audio_bevy` 仅保留为兼容 facade，不再维护第二套 Bevy 音频实现。音频 native ECS/facade 已完成局部验证：30 个 unit tests、22 个 integration tests、4 个 facade integration tests；完整应用工作流仍待联合验收。
+迁移状态与剩余路径：
+1. `prism_ecs::prelude` 与 Bevy ECS 常用 API 的近同名导出已实现；这提供常见调用形态，不承诺与 `bevy_ecs` 的完整 API/语义二进制兼容。
+2. `prism_ui_ecs` 已直接依赖 `prism_ecs`，不再是待迁移项；`prism_scene` 与 `prism_render_app` 也已接入原生内核。仍须在真实应用中完成旧工程/场景资产加载、编辑、保存、运行时更新与回写的端到端对拍，不能由 crate 依赖或单测代替。
+3. 音频已拆分为原生 `prism_audio_ecs` 与仅作兼容重导出的 `prism_audio_bevy` facade，不维护第二套 Bevy 音频实现；局部验证已有 30 个 unit tests、22 个 integration tests、4 个 facade integration tests 的历史记录。真实设备回调、音频资产导入/解码、播放头绑定、场景生命周期与完整应用工作流仍需联合验收。其他渲染/音频对接必须继续按公共 API、生命周期、调度和失败恢复逐项核验。
 
 ---
 
