@@ -702,6 +702,11 @@ pub struct ProfileProjection {
 }
 
 impl ProfileProjection {
+    /// Schema namespace and version used by this projection.
+    pub fn schema_identity(&self) -> &ProfileSchemaIdentity {
+        &self.data.identity
+    }
+
     /// Selected fields in canonical order, including declared absent fields.
     pub fn fields(&self) -> impl Iterator<Item = &str> {
         self.data.fields.keys().map(String::as_str)

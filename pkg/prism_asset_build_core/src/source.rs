@@ -13,6 +13,15 @@ pub struct SourceSnapshot {
     content_hash: ContentHash,
 }
 
+/// The persisted semantic identity of a source snapshot.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceIdentity {
+    /// Canonical relative logical path.
+    pub logical_path: String,
+    /// Digest of the exact captured source bytes.
+    pub content_hash: ContentHash,
+}
+
 /// Processor identity for source-root jobs in the deterministic build graph.
 pub const SOURCE_PROCESSOR_ID: u128 = 0x5052_4953_4d5f_534f_5552_4345_0001;
 /// Schema version for source-root outputs.
@@ -72,6 +81,15 @@ impl SourceSnapshot {
         self.content_hash
     }
 
+    /// Returns the compact semantic identity used by invalidation reports.
+    #[must_use]
+    pub fn identity(&self) -> SourceIdentity {
+        SourceIdentity {
+            logical_path: self.logical_path.clone(),
+            content_hash: self.content_hash,
+        }
+    }
+
     /// Stable semantic key for this source snapshot.
     #[must_use]
     pub fn artifact_key(&self) -> ArtifactKey {
@@ -119,6 +137,10 @@ impl SourceSnapshot {
             Ok(bytes.clone())
         })
     }
+}
+
+pub(crate) fn is_canonical_path(path: &str) -> bool {
+    canonicalize_path(path).is_ok_and(|canonical| canonical == path)
 }
 
 fn canonicalize_path(path: &str) -> Result<String, SourceError> {

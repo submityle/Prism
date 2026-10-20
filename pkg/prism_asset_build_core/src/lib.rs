@@ -76,9 +76,13 @@ pub use bake::{
 };
 pub use cas::{CasError, CasSweepReport, ContentAddressedStore};
 pub use ddc::{Ddc, DdcCapacity, DdcError, DdcEviction, DerivedDataCache, LocalDdc};
-pub use dirty::{DirtySet, DirtySetError};
+pub use dirty::{
+    BuildInputSnapshot, DirtySet, DirtySetError, InvalidationPlan, InvalidationReason,
+    ProfileFieldChange, RebuildExplanationError,
+};
 pub use executor::{
-    ArtifactSpec, BuildExecution, BuildExecutionError, BuildExecutor, DeterminismDifference,
+    ArtifactSpec, BuildExecution, BuildExecutionError, BuildExecutor, CommittedBuildInputs,
+    DeterminismDifference,
 };
 pub use graph::{BuildError, BuildGraph, BuildOutputs};
 pub use hash::{derive_artifact_key, ArtifactKeyInputs, HashError};
@@ -110,7 +114,7 @@ pub use runtime_patch::{
     RuntimePatchPackage, RuntimePatchRequest,
 };
 pub use shader_package::{ShaderPackageAsset, ShaderPackageAssetError};
-pub use source::{SourceError, SourceSnapshot};
+pub use source::{SourceError, SourceIdentity, SourceSnapshot};
 pub use transaction::{
     PublishError, PublishTransaction, PublishedManifest, RevisionStore, TransactionState,
 };

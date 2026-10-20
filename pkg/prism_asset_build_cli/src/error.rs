@@ -14,6 +14,27 @@ pub enum CommandError {
     Quality(prism_asset_build_core::ValidationError),
     Package(prism_asset_build_core::PackageError),
     Publication(&'static str),
+    RebuildExplanation(prism_asset_build_core::RebuildExplanationError),
+}
+
+impl CommandError {
+    /// Stable protocol codes; display strings remain diagnostic, not machine keys.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::InvalidInput(_) => "invalid_input",
+            Self::Io(_) => "io_error",
+            Self::Source(_) => "source_error",
+            Self::Build(_) => "build_error",
+            Self::Store(_) => "store_error",
+            Self::Cas(_) => "cas_error",
+            Self::Ddc(_) => "ddc_error",
+            Self::Artifact(_) => "artifact_error",
+            Self::Quality(_) => "quality_error",
+            Self::Package(_) => "package_error",
+            Self::Publication(_) => "publication_error",
+            Self::RebuildExplanation(_) => "rebuild_explanation_error",
+        }
+    }
 }
 
 impl fmt::Display for CommandError {
@@ -30,6 +51,7 @@ impl fmt::Display for CommandError {
             Self::Quality(error) => write!(f, "quality gate failed: {error}"),
             Self::Package(error) => write!(f, "runtime packaging failed: {error}"),
             Self::Publication(error) => write!(f, "publication descriptor failed: {error}"),
+            Self::RebuildExplanation(error) => write!(f, "{error}"),
         }
     }
 }

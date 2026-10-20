@@ -7,6 +7,7 @@
 use crate::args::Patch;
 use crate::error::CommandError;
 use crate::mapping;
+use crate::output::{container_results, FileResult, PatchResult};
 use crate::pipeline::package_mappings;
 use prism_asset_build_core::{
     package_runtime_patch, AssetPackageMapping, BuildRevision, ContentHash, ReleaseProvenance,
@@ -19,7 +20,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// Builds and writes one deterministic runtime patch.
-pub fn run(command: Patch) -> Result<(), CommandError> {
+pub fn run(command: Patch) -> Result<PatchResult, CommandError> {
     let store = RevisionStore::open(&command.store)?;
     let base_revision = BuildRevision(command.base_revision);
     let target_revision = store.current_revision()?.ok_or_else(|| {
@@ -81,19 +82,31 @@ pub fn run(command: Patch) -> Result<(), CommandError> {
         write_immutable(containers.join(name), bytes)?;
     }
 
-    println!("base_revision={}", patch.descriptor.base_revision);
-    println!("target_revision={}", patch.descriptor.target_revision);
-    println!("removed_routes={}", patch.descriptor.removed_guids.len());
-    println!("patch_container_count={}", patch.payload.containers.len());
-    println!(
-        "patch_manifest_hash={}",
-        ContentHash::digest(&patch.payload.runtime_manifest_bytes).to_hex()
+    let mut files = vec![
+        FileResult::new("descriptor.bin", &patch.descriptor_bytes),
+        FileResult::new("patch_manifest.bin", &patch.payload.runtime_manifest_bytes),
+        FileResult::new("target_manifest.bin", &patch.target_runtime_manifest_bytes),
+        FileResult::new("provenance.bin", &patch.target_provenance_bytes),
+    ];
+    files.extend(
+        patch
+            .payload
+            .containers
+            .iter()
+            .map(|(name, bytes)| FileResult::new(format!("containers/{name}"), bytes)),
     );
-    println!(
-        "target_manifest_hash={}",
-        ContentHash::digest(&patch.target_runtime_manifest_bytes).to_hex()
-    );
-    Ok(())
+    files.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(PatchResult {
+        base_revision: patch.descriptor.base_revision,
+        target_revision: patch.descriptor.target_revision,
+        output_directory: command.output.display().to_string(),
+        removed_routes: patch.descriptor.removed_guids.len(),
+        patch_container_count: patch.payload.containers.len(),
+        patch_manifest_hash: ContentHash::digest(&patch.payload.runtime_manifest_bytes).to_hex(),
+        target_manifest_hash: ContentHash::digest(&patch.target_runtime_manifest_bytes).to_hex(),
+        containers: container_results(&patch.payload.containers, &patch.payload.runtime_manifest),
+        files,
+    })
 }
 
 fn validate_output_shape<'a>(

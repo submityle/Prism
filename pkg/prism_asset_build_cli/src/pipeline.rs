@@ -1,13 +1,17 @@
-use crate::args::{Package, Plan, Validate};
+use crate::args::{Package, Plan, Validate, Why};
 use crate::error::CommandError;
 use crate::mapping;
+use crate::output::{
+    container_results, ArtifactResult, FileResult, InspectResult, PackageResult, PlanResult,
+    PublishResult, QualityResult, RebuildChangeResult, RebuildExplanationResult, SignatureStatus,
+};
 use prism_asset::StableGuid;
 use prism_asset_build_core::import::{
     CanonicalPngProcessor, ImageMipArtifact, IMAGE_ARTIFACT_KIND, IMAGE_MIP_ARTIFACT_SCHEMA,
 };
 use prism_asset_build_core::{
-    ArtifactQualityGate, AssetId, BuildExecutor, BuildGraph, BuildRevision, ContentHash,
-    DerivedDataCache, ImportRecipe, JobId, PackageRequest, PublicationDescriptor,
+    ArtifactQualityGate, AssetId, BuildExecutor, BuildGraph, BuildInputSnapshot, BuildRevision,
+    ContentHash, DerivedDataCache, ImportRecipe, JobId, PackageRequest, PublicationDescriptor,
     ReleaseDescriptor, ReleaseProvenance, ReleaseSignatureError, ReleaseSigner, ReleaseTrustStore,
     ReleaseVerifier, RevisionStore, RuntimePackage, SignedReleaseDescriptor, SourceSnapshot,
 };
@@ -16,14 +20,42 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-pub fn plan(command: Plan) -> Result<(), CommandError> {
+pub fn plan(command: Plan) -> Result<PlanResult, CommandError> {
     let source = snapshot(&command.source, &command.logical_path)?;
     let (source_key, image_key) = artifact_keys(&source, command.asset_id)?;
-    println!("source_path={}", source.logical_path());
-    println!("source_artifact_key={}", source_key.to_hex());
-    println!("image_artifact_key={}", image_key.to_hex());
-    println!("image_asset_id={}", command.asset_id);
-    Ok(())
+    Ok(PlanResult {
+        source_path: source.logical_path().to_owned(),
+        source_artifact_key: source_key.to_hex(),
+        image_artifact_key: image_key.to_hex(),
+        image_asset_id: command.asset_id.to_string(),
+    })
+}
+
+pub fn why(command: Why) -> Result<RebuildExplanationResult, CommandError> {
+    let revision = BuildRevision(command.revision);
+    let inputs = BuildExecutor::default()
+        .load_committed_build_inputs(&command.store, revision)
+        .map_err(CommandError::RebuildExplanation)?;
+    let plan = inputs.plan;
+    let changes = plan
+        .changes()
+        .iter()
+        .map(RebuildChangeResult::from)
+        .collect();
+    Ok(RebuildExplanationResult {
+        revision: revision.0,
+        direct_jobs: plan
+            .dirty_set()
+            .direct_jobs()
+            .map(|job| job.0.to_string())
+            .collect(),
+        affected_jobs: plan
+            .dirty_set()
+            .jobs()
+            .map(|job| job.0.to_string())
+            .collect(),
+        changes,
+    })
 }
 
 pub fn publish(
@@ -32,7 +64,7 @@ pub fn publish(
     asset_id: u128,
     store_root: PathBuf,
     verify_determinism: bool,
-) -> Result<(), CommandError> {
+) -> Result<PublishResult, CommandError> {
     let source = snapshot(&source_path, &logical_path)?;
     let (source_key, image_key) = artifact_keys(&source, asset_id)?;
     let source_job = JobId(1);
@@ -65,6 +97,30 @@ pub fn publish(
     })?;
     specs.insert(source_job, source.artifact_spec(AssetId(source_asset)));
     specs.insert(image_job, plan.spec);
+    let mut inputs = BuildInputSnapshot::new().with_source(source_job, &source);
+    for (&job, spec) in &specs {
+        // Fingerprint routing and processor/output contracts independently
+        // from source identity and profile evidence. A source edit must not
+        // manufacture a processor-settings or profile change.
+        let mut contract = spec.clone();
+        if job == source_job {
+            // The source processor's settings encode exactly the path/hash
+            // already recorded by with_source above.
+            contract.canonical_settings.clear();
+        }
+        contract.profile_hash = [0; 32];
+        let mut settings = spec.asset.0.to_le_bytes().to_vec();
+        settings.extend_from_slice(
+            &contract
+                .artifact_key(1, &[])
+                .map_err(|error| {
+                    CommandError::InvalidInput(format!("input contract rejected: {error}"))
+                })?
+                .0,
+        );
+        inputs.set_settings(job, settings);
+        inputs.set_profile_hash(job, spec.profile_hash);
+    }
 
     let store = RevisionStore::open(&store_root)?;
     let mut ddc = DerivedDataCache::open(store_root.join("ddc"))?;
@@ -78,21 +134,19 @@ pub fn publish(
     let executor = BuildExecutor {
         protocol_version: 1,
     };
-    let execution = if verify_determinism {
-        let limit = std::thread::available_parallelism()
-            .map(|count| count.get())
-            .unwrap_or(1);
-        executor.execute_verified_with_limit(
-            &graph,
-            &specs,
-            &store,
-            &mut ddc,
-            BuildRevision(revision),
-            limit,
-        )?
-    } else {
-        executor.execute_parallel(&graph, &specs, &store, &mut ddc, BuildRevision(revision))?
-    };
+    let limit = std::thread::available_parallelism()
+        .map(|count| count.get())
+        .unwrap_or(1);
+    let execution = executor.execute_explained_with_limit(
+        &graph,
+        &specs,
+        &inputs,
+        &store,
+        &mut ddc,
+        BuildRevision(revision),
+        limit,
+        verify_determinism,
+    )?;
     let image_descriptor = execution
         .published
         .manifest
@@ -100,50 +154,53 @@ pub fn publish(
         .get(&AssetId(asset_id))
         .ok_or_else(|| CommandError::InvalidInput("published image artifact is missing".into()))?;
     let image = ImageMipArtifact::decode(&store.cas().read(image_descriptor.content_hash)?)?;
-    println!("revision={}", execution.published.manifest.revision.0);
-    println!("source_artifact_key={}", source_key.to_hex());
-    println!("image_artifact_key={}", image_key.to_hex());
-    println!(
-        "image_content_hash={}",
-        image_descriptor.content_hash.to_hex()
-    );
-    println!("image_dimensions={}x{}", image.width, image.height);
-    println!("image_mip_levels={}", image.levels.len());
-    println!("cache_hits={}", execution.cache_hits.len());
-    if verify_determinism {
-        println!(
-            "determinism_verified_jobs={}",
-            execution.artifact_keys.len()
-        );
-    }
-    Ok(())
+    Ok(PublishResult {
+        revision: execution.published.manifest.revision.0,
+        build_manifest_hash: ContentHash::digest(&execution.published.manifest.canonical_bytes())
+            .to_hex(),
+        source_artifact_key: source_key.to_hex(),
+        image_artifact_key: image_key.to_hex(),
+        image_asset_id: asset_id.to_string(),
+        image_content_hash: image_descriptor.content_hash.to_hex(),
+        image_width: image.width,
+        image_height: image.height,
+        image_mip_levels: image.levels.len(),
+        cache_hits: execution.cache_hits.len(),
+        determinism_verified_jobs: verify_determinism.then_some(execution.artifact_keys.len()),
+        artifacts: execution
+            .published
+            .manifest
+            .entries
+            .iter()
+            .map(|(asset, descriptor)| ArtifactResult::new(*asset, descriptor))
+            .collect(),
+    })
 }
 
-pub fn inspect(store_root: PathBuf) -> Result<(), CommandError> {
+pub fn inspect(store_root: PathBuf) -> Result<InspectResult, CommandError> {
     let store = RevisionStore::open(&store_root)?;
     let Some(revision) = store.current_revision()? else {
-        println!("current_revision=none");
-        return Ok(());
+        return Ok(InspectResult {
+            current_revision: None,
+            build_manifest_hash: None,
+            asset_count: 0,
+            artifacts: Vec::new(),
+        });
     };
     let manifest = store.manifest(revision)?;
-    println!("current_revision={}", revision.0);
-    println!("asset_count={}", manifest.entries.len());
-    for (asset, descriptor) in manifest.entries {
-        println!(
-            "asset={} key={} kind={} schema={} bytes={} hash={} dependencies={}",
-            asset.0,
-            descriptor.key.to_hex(),
-            descriptor.kind,
-            descriptor.schema,
-            descriptor.byte_len,
-            descriptor.content_hash.to_hex(),
-            descriptor.dependencies.len()
-        );
-    }
-    Ok(())
+    Ok(InspectResult {
+        current_revision: Some(revision.0),
+        build_manifest_hash: Some(ContentHash::digest(&manifest.canonical_bytes()).to_hex()),
+        asset_count: manifest.entries.len(),
+        artifacts: manifest
+            .entries
+            .iter()
+            .map(|(asset, descriptor)| ArtifactResult::new(*asset, descriptor))
+            .collect(),
+    })
 }
 
-pub fn package(command: Package) -> Result<(), CommandError> {
+pub fn package(command: Package) -> Result<PackageResult, CommandError> {
     let prepared = prepare_package(
         &command.store,
         command.mapping.as_deref(),
@@ -154,11 +211,21 @@ pub fn package(command: Package) -> Result<(), CommandError> {
     if let Some(path) = command.signing_key_file.as_deref() {
         write_release_signature(&command.output, &prepared, path)?;
     }
-    print_package_summary(&prepared);
-    Ok(())
+    let signature = if command.signing_key_file.is_some() {
+        SignatureStatus::Signed
+    } else {
+        // An idempotent package invocation may encounter a previously signed
+        // publication. Report the actual output, not just the current flags.
+        match fs::metadata(command.output.join("release.sig")) {
+            Ok(_) => SignatureStatus::PresentUnverified,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => SignatureStatus::Unsigned,
+            Err(error) => return Err(CommandError::Io(error)),
+        }
+    };
+    package_result(prepared, &command.output, signature)
 }
 
-pub fn validate(command: Validate) -> Result<(), CommandError> {
+pub fn validate(command: Validate) -> Result<PackageResult, CommandError> {
     let prepared = prepare_package(
         &command.store,
         command.mapping.as_deref(),
@@ -166,23 +233,13 @@ pub fn validate(command: Validate) -> Result<(), CommandError> {
         command.logical_path.as_deref(),
     )?;
     validate_package_output(&command.package, &prepared)?;
-    validate_release_signature(
+    let signature = validate_release_signature(
         &command.package,
         &prepared,
         command.verification_key_file.as_deref(),
         command.trust_policy_file.as_deref(),
     )?;
-    println!("validated_revision={}", prepared.revision.0);
-    println!(
-        "build_manifest_hash={}",
-        prepared.build_manifest_hash.to_hex()
-    );
-    println!(
-        "runtime_manifest_hash={}",
-        ContentHash::digest(&prepared.package.runtime_manifest_bytes).to_hex()
-    );
-    println!("container_count={}", prepared.package.containers.len());
-    Ok(())
+    package_result(prepared, &command.package, signature)
 }
 
 struct PreparedPackage {
@@ -191,6 +248,7 @@ struct PreparedPackage {
     package: RuntimePackage,
     publication: PublicationDescriptor,
     provenance: ReleaseProvenance,
+    quality: QualityResult,
 }
 
 fn prepare_package(
@@ -232,7 +290,6 @@ fn prepare_package(
     let manifest = store.manifest(revision)?;
     let gate = ArtifactQualityGate::default();
     let report = gate.validate_manifest(&manifest, store.cas())?;
-    print_quality_report(&report);
 
     let build_manifest_hash = ContentHash::digest(&manifest.canonical_bytes());
     let package = prism_asset_build_core::package_runtime(PackageRequest {
@@ -260,6 +317,7 @@ fn prepare_package(
         package,
         publication,
         provenance,
+        quality: report.into(),
     })
 }
 
@@ -401,7 +459,7 @@ fn validate_release_signature(
     prepared: &PreparedPackage,
     verification_key_file: Option<&Path>,
     trust_policy_file: Option<&Path>,
-) -> Result<(), CommandError> {
+) -> Result<SignatureStatus, CommandError> {
     if verification_key_file.is_some() && trust_policy_file.is_some() {
         return Err(CommandError::InvalidInput(
             "--verification-key-file cannot be combined with --trust-policy-file".into(),
@@ -416,7 +474,7 @@ fn validate_release_signature(
                     "release verification options require package release.sig".into(),
                 ));
             }
-            return Ok(());
+            return Ok(SignatureStatus::Unsigned);
         }
         Err(error) => return Err(CommandError::Io(error)),
     };
@@ -434,6 +492,7 @@ fn validate_release_signature(
             let public_key = read_exact_key::<32>(key_path, "Ed25519 verification key")?;
             ReleaseVerifier::from_public_key(public_key)
                 .verify(&signed)
+                .map(|()| SignatureStatus::VerifiedPublicKey)
                 .map_err(signature_error)
         }
         (None, Some(policy_path)) => {
@@ -443,7 +502,7 @@ fn validate_release_signature(
                     policy_path.display()
                 ))
             })?;
-            trust.verify(&signed).map_err(|error| {
+            trust.verify(&signed).map(|_| SignatureStatus::VerifiedTrustPolicy).map_err(|error| {
                 CommandError::InvalidInput(format!(
                     "release trust policy verification failed: {error}"
                 ))
@@ -538,44 +597,48 @@ fn write_immutable(path: PathBuf, bytes: &[u8]) -> Result<(), CommandError> {
     }
 }
 
-fn print_quality_report(report: &prism_asset_build_core::ValidationReport) {
-    println!("quality_checked_assets={}", report.checked_assets);
-    println!("quality_checked_artifacts={}", report.checked_artifacts);
-    println!("quality_checked_blobs={}", report.checked_blobs);
-    println!("quality_checked_bytes={}", report.checked_bytes);
-    println!(
-        "quality_checked_dependency_edges={}",
-        report.checked_dependency_edges
+fn package_result(
+    prepared: PreparedPackage,
+    output: &Path,
+    signature: SignatureStatus,
+) -> Result<PackageResult, CommandError> {
+    let publication_bytes = prepared
+        .publication
+        .encode()
+        .map_err(CommandError::Publication)?;
+    let provenance_bytes = prepared
+        .provenance
+        .encode()
+        .map_err(|error| CommandError::InvalidInput(error.to_owned()))?;
+    let mut files = vec![
+        FileResult::new("manifest.bin", &prepared.package.runtime_manifest_bytes),
+        FileResult::new("publication.bin", &publication_bytes),
+        FileResult::new("provenance.bin", &provenance_bytes),
+    ];
+    files.extend(
+        prepared
+            .package
+            .containers
+            .iter()
+            .map(|(name, bytes)| FileResult::new(format!("containers/{name}"), bytes)),
     );
-}
-
-fn print_package_summary(prepared: &PreparedPackage) {
-    println!("packaged_revision={}", prepared.revision.0);
-    println!(
-        "build_manifest_hash={}",
-        prepared.build_manifest_hash.to_hex()
-    );
-    println!(
-        "runtime_manifest_hash={}",
-        ContentHash::digest(&prepared.package.runtime_manifest_bytes).to_hex()
-    );
-    println!(
-        "runtime_manifest_bytes={}",
-        prepared.package.runtime_manifest_bytes.len()
-    );
-    println!("container_count={}", prepared.package.containers.len());
-    for (name, bytes) in &prepared.package.containers {
-        let info = ContainerReader::new(bytes.clone())
-            .expect("package output was just encoded")
-            .info();
-        println!(
-            "container={} bytes={} hash={} entries={}",
-            name,
-            bytes.len(),
-            ContentHash::digest(bytes).to_hex(),
-            info.entry_count
-        );
-    }
+    files.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(PackageResult {
+        revision: prepared.revision.0,
+        output_directory: output.display().to_string(),
+        build_manifest_hash: prepared.build_manifest_hash.to_hex(),
+        runtime_manifest_hash: ContentHash::digest(&prepared.package.runtime_manifest_bytes)
+            .to_hex(),
+        runtime_manifest_bytes: prepared.package.runtime_manifest_bytes.len(),
+        container_count: prepared.package.containers.len(),
+        containers: container_results(
+            &prepared.package.containers,
+            &prepared.package.runtime_manifest,
+        ),
+        files,
+        quality: prepared.quality,
+        signature,
+    })
 }
 
 fn snapshot(path: &Path, logical_path: &str) -> Result<SourceSnapshot, CommandError> {

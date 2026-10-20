@@ -2,15 +2,24 @@
 
 use crate::cas::CasError;
 use crate::ddc::{DdcError, DerivedDataCache};
-use crate::dirty::DirtySet;
+use crate::dirty::{
+    read_bounded, sync_directory, BuildInputSnapshot, Cursor, DirtySet, InvalidationPlan,
+    RebuildExplanationError,
+};
 use crate::graph::{BuildError, BuildGraph};
 use crate::hash::{derive_artifact_key, ArtifactKeyInputs, HashError};
 use crate::job::JobId;
 use crate::resources::{BuildResources, ResourceError};
 use crate::transaction::{PublishError, PublishedManifest, RevisionStore};
-use crate::types::{ArtifactDescriptor, ArtifactKey, AssetId, BuildRevision, ContentHash};
+use crate::types::{
+    ArtifactDescriptor, ArtifactKey, AssetId, BuildRevision, ContentHash, Manifest, ManifestEntry,
+    TransactionId,
+};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::fs;
+use std::io::{self, Read, Write};
+use std::path::{Path, PathBuf};
 use std::thread;
 
 mod determinism;
@@ -103,6 +112,8 @@ pub enum BuildExecutionError {
     InvalidOutput(JobId, &'static str),
     /// Two fresh executions of the same job produced different bytes.
     NonDeterministic(DeterminismDifference),
+    /// Semantic input/explanation persistence or validation failed.
+    Explanation(RebuildExplanationError),
 }
 
 impl fmt::Display for BuildExecutionError {
@@ -127,6 +138,7 @@ impl fmt::Display for BuildExecutionError {
                 write!(f, "job {} has invalid output: {reason}", id.0)
             }
             Self::NonDeterministic(difference) => difference.fmt(f),
+            Self::Explanation(error) => error.fmt(f),
         }
     }
 }
@@ -159,6 +171,12 @@ impl From<PublishError> for BuildExecutionError {
     }
 }
 
+impl From<RebuildExplanationError> for BuildExecutionError {
+    fn from(value: RebuildExplanationError) -> Self {
+        Self::Explanation(value)
+    }
+}
+
 /// Executes a validated graph using verified DDC hits and publishes all
 /// selected outputs as one new manifest revision.
 #[derive(Clone, Copy, Debug, Default)]
@@ -168,6 +186,89 @@ pub struct BuildExecutor {
 }
 
 impl BuildExecutor {
+    /// Builds against a captured committed baseline and persists semantic inputs
+    /// and their actual invalidation plan before publication. The transaction
+    /// journal binds the metadata digest and manifest together. Dirty jobs bypass
+    /// DDC; unchanged jobs retain the usual verified cache reuse.
+    pub fn execute_explained_with_limit(
+        &self,
+        graph: &BuildGraph,
+        specs: &BTreeMap<JobId, ArtifactSpec>,
+        inputs: &BuildInputSnapshot,
+        store: &RevisionStore,
+        ddc: &mut DerivedDataCache,
+        revision: BuildRevision,
+        max_concurrency: usize,
+        verify_determinism: bool,
+    ) -> Result<BuildExecution, BuildExecutionError> {
+        self.execute_with_limit(
+            graph,
+            specs,
+            store,
+            ddc,
+            revision,
+            max_concurrency,
+            verify_determinism,
+            BuildResources::UNLIMITED,
+            None,
+            Some(inputs),
+        )
+    }
+
+    /// Reads only existing files. A sidecar alone, Prepare, CURRENT without a
+    /// Commit, missing metadata, or a digest/manifest mismatch is never accepted.
+    /// No store initialization, recovery, journal truncation or DDC open occurs.
+    pub fn load_committed_build_inputs(
+        &self,
+        root: impl AsRef<Path>,
+        revision: BuildRevision,
+    ) -> Result<CommittedBuildInputs, RebuildExplanationError> {
+        let root = root.as_ref();
+        let binding = input_binding(root, revision)?.ok_or(RebuildExplanationError::Invalid(
+            "revision has no durable committed input binding",
+        ))?;
+        if binding.publication_hash.is_some() {
+            return Err(RebuildExplanationError::Invalid(
+                "input record does not bind a runtime publication",
+            ));
+        }
+        let bytes = read_bounded(
+            &input_record_path(root, revision, binding.id),
+            MAX_INPUT_RECORD_BYTES,
+        )?;
+        if input_transaction_id(&bytes) != binding.id {
+            return Err(RebuildExplanationError::Invalid(
+                "input metadata digest differs from committed transaction",
+            ));
+        }
+        let record = CommittedBuildInputs::decode(&bytes)?;
+        if record.revision != revision
+            || record.manifest_hash != binding.manifest_hash
+            || record.previous_revision != binding.previous_revision
+        {
+            return Err(RebuildExplanationError::Invalid(
+                "input metadata does not bind committed revision/manifest",
+            ));
+        }
+        let manifest = read_bounded(
+            &root
+                .join("revisions")
+                .join(format!("{}.manifest", revision.0)),
+            MAX_INPUT_RECORD_BYTES,
+        )?;
+        let header = b"PRISM-MANIFEST\0\x02";
+        if ContentHash::digest(&manifest) != binding.manifest_hash
+            || !manifest.starts_with(header)
+            || manifest.get(header.len()..header.len() + 8)
+                != Some(revision.0.to_le_bytes().as_slice())
+        {
+            return Err(RebuildExplanationError::Invalid(
+                "committed manifest differs from input metadata/journal",
+            ));
+        }
+        Ok(record)
+    }
+
     /// Execute and publish the graph. DDC entries may be populated before a
     /// later node fails, but `CURRENT` is changed only after every job succeeds.
     pub fn execute(
@@ -187,6 +288,7 @@ impl BuildExecutor {
             1,
             false,
             BuildResources::UNLIMITED,
+            None,
             None,
         )
     }
@@ -258,6 +360,7 @@ impl BuildExecutor {
             false,
             BuildResources::UNLIMITED,
             None,
+            None,
         )
     }
 
@@ -316,6 +419,7 @@ impl BuildExecutor {
             true,
             BuildResources::UNLIMITED,
             None,
+            None,
         )
     }
 
@@ -373,6 +477,7 @@ impl BuildExecutor {
             verify_determinism,
             budget,
             None,
+            None,
         )
     }
 
@@ -401,6 +506,7 @@ impl BuildExecutor {
             verify_determinism,
             budget,
             Some(dirty),
+            None,
         )
     }
 
@@ -415,12 +521,65 @@ impl BuildExecutor {
         verify_determinism: bool,
         budget: BuildResources,
         dirty: Option<&DirtySet>,
+        inputs: Option<&BuildInputSnapshot>,
     ) -> Result<BuildExecution, BuildExecutionError> {
         if max_concurrency == 0 {
             return Err(BuildExecutionError::Graph(BuildError::InvalidConcurrency));
         }
         let order = graph.execution_order()?;
         validate_specs(&order, specs)?;
+        if let Some(dirty) = dirty {
+            validate_dirty(&order, dirty)?;
+        }
+        // Freeze the optimistic baseline before executing processors, never
+        // recapture CURRENT after work has raced with another publisher.
+        let expected_current = store.build_baseline()?;
+        let next = match expected_current {
+            None => Some(0),
+            Some(current) => current.0.checked_add(1),
+        };
+        if next != Some(revision.0) {
+            return Err(
+                PublishError::Invalid("revision must be the next monotonic revision").into(),
+            );
+        }
+        let root = store
+            .cas()
+            .root()
+            .parent()
+            .ok_or(PublishError::Invalid("CAS has no store root"))?;
+        let explanation = if let Some(inputs) = inputs {
+            // Reject oversized or malformed evidence before processors or cache
+            // writes. A successful build must have a decodable durable record.
+            BuildInputSnapshot::from_canonical_bytes(&inputs.canonical_bytes())?;
+            let previous = match expected_current {
+                Some(revision) => self.load_committed_build_inputs(root, revision)?.snapshot,
+                None => {
+                    // Even an empty store can retain aborted journal history.
+                    // Reject history the read-only query cannot decode before
+                    // publishing a revision that why could never retrieve.
+                    if input_binding(root, revision)?.is_some() {
+                        return Err(RebuildExplanationError::Invalid(
+                            "journal already commits the requested cold revision",
+                        )
+                        .into());
+                    }
+                    BuildInputSnapshot::new()
+                }
+            };
+            let plan = previous.invalidation_plan(inputs, graph).map_err(|_| {
+                RebuildExplanationError::Invalid(
+                    "semantic inputs do not match validated build graph",
+                )
+            })?;
+            Some(plan)
+        } else {
+            None
+        };
+        let dirty = explanation
+            .as_ref()
+            .map(InvalidationPlan::dirty_set)
+            .or(dirty);
         if let Some(dirty) = dirty {
             validate_dirty(&order, dirty)?;
         }
@@ -608,8 +767,39 @@ impl BuildExecutor {
             }
         }
 
-        let expected_current = store.current_revision()?;
-        let mut transaction = store.begin(revision, expected_current);
+        let mut transaction = if let (Some(snapshot), Some(plan)) = (inputs, explanation) {
+            let manifest = Manifest::new(
+                revision,
+                order.iter().map(|id| ManifestEntry {
+                    asset: specs[id].asset,
+                    descriptor: descriptors[id].clone(),
+                }),
+            )
+            .map_err(PublishError::Invalid)?;
+            let manifest_bytes = manifest.canonical_bytes();
+            if manifest_bytes.len() > MAX_INPUT_RECORD_BYTES {
+                return Err(RebuildExplanationError::Invalid(
+                    "explained manifest exceeds maximum encoded size",
+                )
+                .into());
+            }
+            let record = CommittedBuildInputs {
+                revision,
+                previous_revision: expected_current,
+                manifest_hash: ContentHash::digest(&manifest_bytes),
+                snapshot: snapshot.clone(),
+                plan,
+            };
+            let bytes = record.encode();
+            // Validate our own bounded representation before any commit can
+            // make it visible. Publication never depends on a post-commit write.
+            CommittedBuildInputs::decode(&bytes)?;
+            let id = input_transaction_id(&bytes);
+            persist_input_record(&input_record_path(root, revision, id), &bytes)?;
+            store.begin_with_id(revision, expected_current, id)
+        } else {
+            store.begin(revision, expected_current)
+        };
         for id in order {
             transaction.stage(
                 specs[&id].asset,
@@ -624,6 +814,259 @@ impl BuildExecutor {
             cache_hits,
         })
     }
+}
+
+/// Semantic evidence bound by the committed transaction and exact manifest.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CommittedBuildInputs {
+    /// Committed revision.
+    pub revision: BuildRevision,
+    /// Baseline captured before any processors executed.
+    pub previous_revision: Option<BuildRevision>,
+    /// Digest of the exact canonical committed manifest.
+    pub manifest_hash: ContentHash,
+    /// Semantic inputs actually compared by this execution.
+    pub snapshot: BuildInputSnapshot,
+    /// Computed direct changes and successor closure.
+    pub plan: InvalidationPlan,
+}
+
+const INPUT_RECORD_HEADER: &[u8] = b"PRISM-COMMITTED-BUILD-INPUTS\0\x01";
+const MAX_INPUT_RECORD_BYTES: usize = 16 * 1024 * 1024;
+
+impl CommittedBuildInputs {
+    fn encode(&self) -> Vec<u8> {
+        let mut bytes = INPUT_RECORD_HEADER.to_vec();
+        bytes.extend_from_slice(&self.revision.0.to_le_bytes());
+        bytes.push(u8::from(self.previous_revision.is_some()));
+        bytes.extend_from_slice(
+            &self
+                .previous_revision
+                .map_or(0, |revision| revision.0)
+                .to_le_bytes(),
+        );
+        bytes.extend_from_slice(&self.manifest_hash.0);
+        for value in [self.snapshot.canonical_bytes(), self.plan.canonical_bytes()] {
+            bytes.extend_from_slice(&(value.len() as u64).to_le_bytes());
+            bytes.extend_from_slice(&value);
+        }
+        bytes
+    }
+
+    fn decode(bytes: &[u8]) -> Result<Self, RebuildExplanationError> {
+        let mut cursor = Cursor::bounded(bytes)?;
+        if cursor.take(INPUT_RECORD_HEADER.len())? != INPUT_RECORD_HEADER {
+            return Err(RebuildExplanationError::Invalid(
+                "unknown committed input header",
+            ));
+        }
+        let revision = BuildRevision(cursor.u64()?);
+        let marker = cursor.u8()?;
+        let previous = cursor.u64()?;
+        let previous_revision = match (marker, previous) {
+            (0, 0) if revision.0 == 0 => None,
+            (1, previous) if previous.checked_add(1) == Some(revision.0) => {
+                Some(BuildRevision(previous))
+            }
+            _ => {
+                return Err(RebuildExplanationError::Invalid(
+                    "invalid input baseline revision",
+                ))
+            }
+        };
+        let manifest_hash = ContentHash(cursor.array32()?);
+        let snapshot = BuildInputSnapshot::from_canonical_bytes(cursor.blob()?)?;
+        let plan = InvalidationPlan::from_canonical_bytes(cursor.blob()?)?;
+        let record = Self {
+            revision,
+            previous_revision,
+            manifest_hash,
+            snapshot,
+            plan,
+        };
+        if !cursor.is_empty() || record.encode() != bytes {
+            return Err(RebuildExplanationError::Invalid(
+                "noncanonical committed inputs",
+            ));
+        }
+        Ok(record)
+    }
+}
+
+fn input_transaction_id(bytes: &[u8]) -> TransactionId {
+    // The existing durable journal stores 128-bit transaction identities.
+    // Domain separation is provided by the versioned input record header.
+    TransactionId(ContentHash::digest(bytes).0[..16].try_into().unwrap())
+}
+
+fn input_record_path(root: &Path, revision: BuildRevision, id: TransactionId) -> PathBuf {
+    root.join("revisions")
+        .join(format!("{}.inputs-{}.bin", revision.0, id.to_hex()))
+}
+
+fn persist_input_record(path: &Path, bytes: &[u8]) -> Result<(), RebuildExplanationError> {
+    let parent = path
+        .parent()
+        .ok_or(RebuildExplanationError::Invalid("input path has no parent"))?;
+    // RevisionStore::open already durably created this directory. Immutable
+    // publication prevents a losing process from replacing the winner's data.
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    temporary.write_all(bytes)?;
+    temporary.as_file().sync_all()?;
+    if let Err(error) = temporary.persist_noclobber(path) {
+        if error.error.kind() != io::ErrorKind::AlreadyExists {
+            return Err(error.error.into());
+        }
+        if read_bounded(path, MAX_INPUT_RECORD_BYTES)? != bytes {
+            return Err(RebuildExplanationError::Invalid(
+                "immutable input metadata conflict",
+            ));
+        }
+        fs::File::open(path)?.sync_all()?;
+    }
+    sync_directory(parent)?;
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct InputBinding {
+    id: TransactionId,
+    manifest_hash: ContentHash,
+    previous_revision: Option<BuildRevision>,
+    publication_hash: Option<ContentHash>,
+}
+
+fn input_binding(
+    root: &Path,
+    target: BuildRevision,
+) -> Result<Option<InputBinding>, RebuildExplanationError> {
+    // Read the existing journal v2 framing without TransactionJournal::open or
+    // scan: those APIs initialize/recover/truncate and are unsuitable for why.
+    // Fixed frames keep memory bounded independently of journal history length.
+    let file = fs::File::open(root.join("transactions/journal.bin"))?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(RebuildExplanationError::Invalid(
+            "journal is not a regular file",
+        ));
+    }
+    // Freeze the readable prefix so a busy publisher cannot extend this scan
+    // indefinitely. A partial final frame never proves commitment.
+    let mut reader = io::BufReader::new(file.take(metadata.len()));
+    let magic = b"PRISM-TXN-JNL\0\x02";
+    let mut header = vec![0; magic.len()];
+    reader.read_exact(&mut header)?;
+    if header != magic {
+        return Err(RebuildExplanationError::Invalid(
+            "invalid transaction journal header",
+        ));
+    }
+    let mut prepared = None;
+    let mut committed = None;
+    loop {
+        let mut frame_header = [0; 8];
+        match reader.read_exact(&mut frame_header) {
+            Ok(()) => {}
+            // A concurrently appended or interrupted tail never establishes
+            // commitment. Earlier complete Commit frames remain queryable.
+            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => break,
+            Err(error) => return Err(error.into()),
+        }
+        if &frame_header[..4] != b"TXN1" {
+            return Err(RebuildExplanationError::Invalid(
+                "invalid transaction journal frame",
+            ));
+        }
+        let length = u32::from_le_bytes(frame_header[4..].try_into().unwrap());
+        if length != 99 {
+            return Err(RebuildExplanationError::Invalid(
+                "journal record has no supported transaction binding",
+            ));
+        }
+        let mut frame = [0; 99 + 32];
+        match reader.read_exact(&mut frame) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => break,
+            Err(error) => return Err(error.into()),
+        }
+        let payload = &frame[..99];
+        if ContentHash::digest(payload).0 != frame[99..] {
+            return Err(RebuildExplanationError::Invalid(
+                "transaction journal checksum mismatch",
+            ));
+        }
+        let mut cursor = Cursor::bounded(payload)?;
+        let kind = cursor.u8()?;
+        let id = TransactionId(cursor.take(16)?.try_into().unwrap());
+        let revision = BuildRevision(cursor.u64()?);
+        let marker = cursor.u8()?;
+        let previous = cursor.u64()?;
+        let previous_revision = match (marker, previous) {
+            (0, 0) => None,
+            (1, previous) if kind == 1 => Some(BuildRevision(previous)),
+            _ => {
+                return Err(RebuildExplanationError::Invalid(
+                    "invalid journal baseline marker",
+                ))
+            }
+        };
+        let manifest_hash = ContentHash(cursor.array32()?);
+        let publication_marker = cursor.u8()?;
+        let publication = cursor.array32()?;
+        let publication_hash = match (publication_marker, publication) {
+            (0, hash) if hash == [0; 32] => None,
+            (1, hash) => Some(ContentHash(hash)),
+            _ => {
+                return Err(RebuildExplanationError::Invalid(
+                    "invalid journal publication marker",
+                ))
+            }
+        };
+        if !(1..=3).contains(&kind) {
+            return Err(RebuildExplanationError::Invalid(
+                "invalid transaction journal kind",
+            ));
+        }
+        if revision != target {
+            continue;
+        }
+        let binding = InputBinding {
+            id,
+            manifest_hash,
+            previous_revision,
+            publication_hash,
+        };
+        if committed.is_some() {
+            return Err(RebuildExplanationError::Invalid(
+                "journal changes an already committed revision",
+            ));
+        }
+        match kind {
+            1 if prepared.is_none() => prepared = Some(binding),
+            2 | 3 => {
+                let baseline = prepared.take().ok_or(RebuildExplanationError::Invalid(
+                    "journal terminal record has no prepare",
+                ))?;
+                if baseline.id != id
+                    || baseline.manifest_hash != manifest_hash
+                    || baseline.publication_hash != publication_hash
+                {
+                    return Err(RebuildExplanationError::Invalid(
+                        "journal terminal record differs from prepare",
+                    ));
+                }
+                if kind == 2 {
+                    committed = Some(baseline);
+                }
+            }
+            _ => {
+                return Err(RebuildExplanationError::Invalid(
+                    "duplicate journal prepare",
+                ))
+            }
+        }
+    }
+    Ok(committed)
 }
 
 struct PreparedJob {
@@ -1077,6 +1520,39 @@ mod tests {
         .unwrap();
         assert!(rebuilt.cache_hits.is_empty());
         assert_eq!(count.load(Ordering::Relaxed), before + 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unrepaired_baseline_corruption_still_blocks_publication() {
+        let root = temp_dir("unrepaired-baseline");
+        let count = Arc::new(AtomicUsize::new(0));
+        let graph = one_job(Arc::clone(&count), b"original");
+        let mut specs = BTreeMap::new();
+        specs.insert(JobId(1), spec(42, b"settings"));
+        let original = run(&graph, &specs, &root, 0);
+        let store = RevisionStore::open(&root).unwrap();
+        let mut ddc = DerivedDataCache::open(root.join("ddc")).unwrap();
+        let old_hash = original.published.manifest.entries[&AssetId(42)].content_hash;
+        fs::write(store.cas().blob_path(old_hash), b"tampered").unwrap();
+        let pointer = fs::read(root.join("CURRENT")).unwrap();
+        // A changed recipe builds different bytes; it cannot silently abandon
+        // an already-published corrupt blob and call the baseline valid.
+        let changed = one_job(Arc::clone(&count), b"replacement");
+        specs.get_mut(&JobId(1)).unwrap().canonical_settings = b"changed".to_vec();
+        let result = BuildExecutor {
+            protocol_version: 1,
+        }
+        .execute(&changed, &specs, &store, &mut ddc, BuildRevision(1));
+        assert!(matches!(
+            result,
+            Err(BuildExecutionError::Publish(PublishError::Cas(
+                CasError::Corrupt { .. }
+            )))
+        ));
+        assert_eq!(fs::read(root.join("CURRENT")).unwrap(), pointer);
+        assert!(!root.join("revisions/1.manifest").exists());
+        assert_eq!(count.load(Ordering::Relaxed), 2);
         fs::remove_dir_all(root).unwrap();
     }
 

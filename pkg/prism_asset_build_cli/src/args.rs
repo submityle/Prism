@@ -4,6 +4,9 @@ use std::path::PathBuf;
 /// Top-level Prism asset build command.
 #[derive(FromArgs)]
 pub struct PrismAssetBuild {
+    /// emit versioned JSONL events instead of text (place before the command)
+    #[argh(switch)]
+    pub json: bool,
     /// operation to perform
     #[argh(subcommand)]
     pub command: Command,
@@ -20,6 +23,22 @@ pub enum Command {
     Patch(Patch),
     Validate(Validate),
     Inspect(Inspect),
+    Why(Why),
+}
+
+impl Command {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Plan(_) => "plan",
+            Self::Import(_) => "import",
+            Self::Build(_) => "build",
+            Self::Package(_) => "package",
+            Self::Patch(_) => "patch",
+            Self::Validate(_) => "validate",
+            Self::Inspect(_) => "inspect",
+            Self::Why(_) => "why",
+        }
+    }
 }
 
 /// Derive and print deterministic artifact keys without publishing.
@@ -162,4 +181,16 @@ pub struct Inspect {
     /// local revision store directory
     #[argh(option)]
     pub store: PathBuf,
+}
+
+/// Explain the persisted invalidation plan for a published revision.
+#[derive(FromArgs)]
+#[argh(subcommand, name = "why")]
+pub struct Why {
+    /// local revision store directory
+    #[argh(option)]
+    pub store: PathBuf,
+    /// committed build revision whose rebuild explanation should be read
+    #[argh(option)]
+    pub revision: u64,
 }

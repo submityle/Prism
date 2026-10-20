@@ -250,6 +250,18 @@ impl RevisionStore {
         Ok(current)
     }
 
+    /// Captures the optimistic build baseline without rejecting CAS contents
+    /// that the executor can reconstruct. Manifest and runtime-publication
+    /// metadata remain validated here; commit revalidates every baseline blob
+    /// under the publication lock after candidate outputs have repaired CAS.
+    pub(crate) fn build_baseline(&self) -> Result<Option<BuildRevision>, PublishError> {
+        let current = self.read_current_pointer()?;
+        if let Some(revision) = current {
+            self.validate_current_manifest_with_payloads(revision, false)?;
+        }
+        Ok(current)
+    }
+
     /// Returns the last durable journal state for `revision`.
     pub fn transaction_state(
         &self,
@@ -618,6 +630,14 @@ impl RevisionStore {
     }
 
     fn validate_current_manifest(&self, revision: BuildRevision) -> Result<(), PublishError> {
+        self.validate_current_manifest_with_payloads(revision, true)
+    }
+
+    fn validate_current_manifest_with_payloads(
+        &self,
+        revision: BuildRevision,
+        validate_payloads: bool,
+    ) -> Result<(), PublishError> {
         let path = self
             .root
             .join("revisions")
@@ -636,17 +656,16 @@ impl RevisionStore {
         // immutable payload it names has disappeared or no longer matches its
         // declared length.  Verify the closure at the publication boundary so
         // a later build never treats a dangling CURRENT as a usable base.
-        for descriptor in manifest.entries.values() {
-            let payload = self
-                .cas
-                .read(descriptor.content_hash)
-                .map_err(|error| PublishError::Cas(error))?;
-            let actual_len = u64::try_from(payload.len())
-                .map_err(|_| PublishError::Invalid("CAS payload length overflows"))?;
-            if actual_len != descriptor.byte_len {
-                return Err(PublishError::Invalid(
-                    "CURRENT manifest payload length does not match CAS",
-                ));
+        if validate_payloads {
+            for descriptor in manifest.entries.values() {
+                let payload = self.cas.read(descriptor.content_hash)?;
+                let actual_len = u64::try_from(payload.len())
+                    .map_err(|_| PublishError::Invalid("CAS payload length overflows"))?;
+                if actual_len != descriptor.byte_len {
+                    return Err(PublishError::Invalid(
+                        "CURRENT manifest payload length does not match CAS",
+                    ));
+                }
             }
         }
         self.validate_publication_if_present(revision, &bytes)?;
