@@ -82,6 +82,9 @@ pub struct DirtyChunkStats {
     pub sparse_chunk_candidates: usize,
     /// Number of sparse writes/removals delivered from the exact change index.
     pub sparse_index_events: usize,
+    /// Number of source logs that reported lost retained history and forced a
+    /// conservative all-matched-chunk fallback.
+    pub sparse_index_gaps: usize,
     /// Number of matching table journal events consumed by the strict
     /// incremental path.
     pub journal_events: usize,
@@ -486,10 +489,14 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
         // proportional to the sparse set's actual membership rather than to
         // every row in every matched archetype.
         let mut sparse_chunks: BTreeMap<ArchetypeId, Vec<usize>> = BTreeMap::new();
-        let sparse_fallback = self.sparse_fallback_needed(world, last_run, this_run);
+        let mut sparse_fallback = self.sparse_fallback_needed(world, last_run, this_run);
         let mut indexed_entities = Vec::new();
         if !sparse_fallback {
-            self.collect_sparse_changes(last_run, this_run, &mut indexed_entities);
+            if self.collect_sparse_changes(last_run, this_run, &mut indexed_entities) {
+                sparse_fallback = true;
+                report.stats.sparse_index_gaps = 1;
+                indexed_entities.clear();
+            }
         }
         report.stats.sparse_index_events = indexed_entities.len();
         for entity in indexed_entities {
@@ -532,6 +539,39 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
         for rows in sparse_chunks.values_mut() {
             rows.sort_unstable();
             rows.dedup();
+        }
+
+        // A bounded sparse log can lose an entity removal, which cannot be
+        // reconstructed by scanning only the current sparse-set members. In
+        // that rare case, return every row window in every structurally
+        // matching archetype. This is a conservative superset and preserves
+        // correctness without retaining unbounded event history.
+        if report.stats.sparse_index_gaps != 0 {
+            let matched = self.matched_archetypes(world);
+            report.stats.matched_archetypes = matched.len();
+            for &archetype_id in matched.as_ref() {
+                let Some(archetype) = world.archetypes().get(archetype_id) else {
+                    continue;
+                };
+                for chunk in archetype.table().iter_chunks() {
+                    if chunk.rows == 0 {
+                        continue;
+                    }
+                    let end = chunk.first_row + chunk.rows;
+                    report.chunks.push(DirtyChunk {
+                        archetype: archetype_id,
+                        start: chunk.first_row,
+                        end,
+                    });
+                    report.stats.reported_chunks += 1;
+                    report.stats.reported_rows += chunk.rows;
+                }
+            }
+            if this_run == world.change_tick() {
+                self.set_dirty_column_cursor(world.archetypes().column_change_cursor());
+            }
+            self.remember_sparse_window(last_run, this_run);
+            return report;
         }
 
         if self.dirty_chunks_from_journal(

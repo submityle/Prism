@@ -112,6 +112,25 @@ fn repeated_observer_churn_reuses_slots_instead_of_growing_registry() {
     assert_eq!(world.change_observers.free_indices.len(), 1);
 }
 
+#[test]
+fn observer_rebuilds_candidates_after_a_log_gap() {
+    let mut world = World::new();
+    let entity = world.spawn(Value(0));
+    let calls = Arc::new(AtomicUsize::new(0));
+    world.observe_changed::<Value, _>(count(&calls));
+    assert_eq!(world.flush_changed_observers(), 0);
+
+    world.get_mut::<Value>(entity).unwrap().0 += 1;
+    let component = world.components().id_of::<Value>().unwrap();
+    let tick = world.change_tick();
+    for _ in 0..=crate::change_index::MAX_RETAINED_EVENTS {
+        world.change_tracker.record(component, entity, tick);
+    }
+
+    assert_eq!(world.flush_changed_observers(), 1);
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+}
+
 #[cfg(feature = "std")]
 #[test]
 fn sparse_registry_compaction_preserves_order_and_pending_delivery() {

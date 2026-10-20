@@ -5,6 +5,7 @@
 //! borrows and structural writes append the owning entity to the component's
 //! tick batch, so observers consume only batches created since their cursor.
 
+use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use core::cell::UnsafeCell;
 use core::hint::spin_loop;
@@ -79,8 +80,19 @@ struct ChangeBatch {
 
 struct ComponentLog {
     active: usize,
-    batches: Vec<ChangeBatch>,
+    batches: VecDeque<ChangeBatch>,
+    base_batch: usize,
+    event_count: usize,
+    loss_revision: u64,
+    discarding_tick: Option<Tick>,
 }
+
+// Change records are an acceleration index, not the authoritative component
+// state. If a consumer falls behind, it can rebuild its candidate set from
+// current component ticks. Keep the acceleration structure bounded and make
+// that loss explicit to every cursor.
+pub(crate) const MAX_RETAINED_BATCHES: usize = 4096;
+pub(crate) const MAX_RETAINED_EVENTS: usize = 65_536;
 
 struct TrackerState {
     epoch: u64,
@@ -98,6 +110,7 @@ struct TrackerState {
 pub(crate) struct ChangeCursor {
     pub(crate) epoch: u64,
     pub(crate) next_batch: usize,
+    loss_revision: u64,
 }
 
 /// Collection diagnostics kept deliberately small so tests and future tracing
@@ -106,6 +119,7 @@ pub(crate) struct ChangeCursor {
 pub(crate) struct ChangeIndexStats {
     pub(crate) batches: usize,
     pub(crate) events: usize,
+    pub(crate) gap: bool,
 }
 
 /// Per-world exact change index.
@@ -208,7 +222,11 @@ impl ChangeTracker {
         }
         state.logs[index].get_or_insert_with(|| ComponentLog {
             active: 0,
-            batches: Vec::new(),
+            batches: VecDeque::new(),
+            base_batch: 0,
+            event_count: 0,
+            loss_revision: 0,
+            discarding_tick: None,
         })
     }
 
@@ -219,7 +237,8 @@ impl ChangeTracker {
         log.active += 1;
         ChangeCursor {
             epoch,
-            next_batch: log.batches.len(),
+            next_batch: log.base_batch + log.batches.len(),
+            loss_revision: log.loss_revision,
         }
     }
 
@@ -231,7 +250,10 @@ impl ChangeTracker {
         };
         log.active = log.active.saturating_sub(1);
         if log.active == 0 {
+            log.base_batch = log.base_batch.saturating_add(log.batches.len());
             log.batches.clear();
+            log.event_count = 0;
+            log.discarding_tick = None;
         }
     }
 
@@ -254,16 +276,42 @@ impl ChangeTracker {
         let log = state.logs[component_index]
             .as_mut()
             .expect("ensured component log");
-        if let Some(batch) = log.batches.last_mut()
-            && batch.tick == tick
-        {
-            batch.entities.push(entity);
+        if log.discarding_tick == Some(tick) {
+            // A cursor may have activated after the batch first overflowed.
+            // Publish every later dropped write so that such a cursor still
+            // receives a gap and can rebuild from authoritative state.
+            log.loss_revision = log.loss_revision.saturating_add(1);
             return;
         }
-        log.batches.push(ChangeBatch {
+        if log.discarding_tick.is_some() {
+            log.discarding_tick = None;
+        }
+        if let Some(batch) = log.batches.back_mut()
+            && batch.tick == tick
+        {
+            if log.event_count == MAX_RETAINED_EVENTS {
+                log.base_batch = log.base_batch.saturating_add(log.batches.len());
+                log.batches.clear();
+                log.event_count = 0;
+                log.loss_revision = log.loss_revision.saturating_add(1);
+                log.discarding_tick = Some(tick);
+                return;
+            }
+            batch.entities.push(entity);
+            log.event_count += 1;
+            return;
+        }
+        log.batches.push_back(ChangeBatch {
             tick,
             entities: alloc::vec![entity],
         });
+        log.event_count += 1;
+        while log.batches.len() > MAX_RETAINED_BATCHES || log.event_count > MAX_RETAINED_EVENTS {
+            let expired = log.batches.pop_front().expect("over-limit log is nonempty");
+            log.event_count -= expired.entities.len();
+            log.base_batch = log.base_batch.saturating_add(1);
+            log.loss_revision = log.loss_revision.saturating_add(1);
+        }
     }
 
     pub(crate) fn collect(
@@ -278,13 +326,29 @@ impl ChangeTracker {
         let Some(Some(log)) = state.logs.get(component.index() as usize) else {
             return ChangeIndexStats::default();
         };
+        let mut gap = false;
         if cursor.epoch != state.epoch {
             cursor.epoch = state.epoch;
             cursor.next_batch = 0;
+            cursor.loss_revision = log.loss_revision;
+            gap = true;
         }
-        let start = cursor.next_batch.min(log.batches.len());
-        let mut stats = ChangeIndexStats::default();
-        for batch in &log.batches[start..] {
+        if cursor.loss_revision != log.loss_revision {
+            gap = true;
+        }
+        if cursor.next_batch < log.base_batch {
+            gap = true;
+            cursor.next_batch = log.base_batch;
+        }
+        let start = cursor
+            .next_batch
+            .saturating_sub(log.base_batch)
+            .min(log.batches.len());
+        let mut stats = ChangeIndexStats {
+            gap,
+            ..ChangeIndexStats::default()
+        };
+        for batch in log.batches.iter().skip(start) {
             cursor.next_batch += 1;
             if batch.tick.is_newer_than(last_run, this_run) {
                 stats.batches += 1;
@@ -292,6 +356,7 @@ impl ChangeTracker {
                 out.extend_from_slice(&batch.entities);
             }
         }
+        cursor.loss_revision = log.loss_revision;
         stats
     }
 
@@ -302,13 +367,24 @@ impl ChangeTracker {
         state.epoch = state.epoch.wrapping_add(1);
         state.revision = state.revision.saturating_add(1);
         for log in state.logs.iter_mut().flatten() {
+            log.base_batch = log.base_batch.saturating_add(log.batches.len());
             log.batches.clear();
+            log.event_count = 0;
+            log.discarding_tick = None;
+            log.loss_revision = log.loss_revision.saturating_add(1);
         }
         state.dirty_components.clear();
         state.dirty_flags.fill(false);
         ChangeCursor {
             epoch: state.epoch,
             next_batch: 0,
+            loss_revision: state
+                .logs
+                .iter()
+                .flatten()
+                .map(|log| log.loss_revision)
+                .max()
+                .unwrap_or_default(),
         }
     }
 }
@@ -358,5 +434,90 @@ mod revision_tests {
             assert_eq!(stats.events, expected.len());
             last_run = tick;
         }
+    }
+
+    #[test]
+    fn lagging_cursor_reports_gap_and_retained_history_is_bounded() {
+        let tracker = ChangeTracker::new();
+        let component = ComponentId::new(0);
+        let mut cursor = tracker.activate(component);
+        for tick in 1..=(MAX_RETAINED_BATCHES as u32 + 32) {
+            tracker.record(component, entity(tick), Tick::new(tick));
+        }
+
+        let log = tracker.state.lock();
+        let component_log = log.logs[component.index() as usize]
+            .as_ref()
+            .expect("active log exists");
+        assert_eq!(component_log.batches.len(), MAX_RETAINED_BATCHES);
+        assert!(component_log.event_count <= MAX_RETAINED_EVENTS);
+        drop(log);
+
+        let mut out = Vec::new();
+        let stats = tracker.collect(
+            component,
+            &mut cursor,
+            Tick::ZERO,
+            Tick::new(MAX_RETAINED_BATCHES as u32 + 32),
+            &mut out,
+        );
+        assert!(
+            stats.gap,
+            "evicted records must be visible to lagging consumers"
+        );
+        assert_eq!(out.len(), MAX_RETAINED_BATCHES);
+    }
+
+    #[test]
+    fn oversized_single_tick_batch_is_capped_until_next_tick() {
+        let tracker = ChangeTracker::new();
+        let component = ComponentId::new(0);
+        let mut cursor = tracker.activate(component);
+        let oversized_tick = Tick::new(1);
+        for index in 0..=(MAX_RETAINED_EVENTS as u32) {
+            tracker.record(component, entity(index), oversized_tick);
+        }
+
+        let mut out = Vec::new();
+        let stats = tracker.collect(component, &mut cursor, Tick::ZERO, oversized_tick, &mut out);
+        assert!(stats.gap);
+        assert!(out.is_empty());
+        {
+            let state = tracker.state.lock();
+            let log = state.logs[component.index() as usize].as_ref().unwrap();
+            assert!(log.batches.is_empty());
+            assert_eq!(log.event_count, 0);
+        }
+
+        tracker.record(component, entity(1), Tick::new(2));
+        let stats = tracker.collect(
+            component,
+            &mut cursor,
+            oversized_tick,
+            Tick::new(2),
+            &mut out,
+        );
+        assert!(!stats.gap);
+        assert_eq!(out, [entity(1)]);
+    }
+
+    #[test]
+    fn new_cursor_is_not_blind_to_dropped_writes_in_overflow_tick() {
+        let tracker = ChangeTracker::new();
+        let component = ComponentId::new(0);
+        let mut old_cursor = tracker.activate(component);
+        let tick = Tick::new(1);
+        for index in 0..=MAX_RETAINED_EVENTS as u32 {
+            tracker.record(component, entity(index), tick);
+        }
+        let mut new_cursor = tracker.activate(component);
+        tracker.record(component, entity(90_000), tick);
+
+        let mut out = Vec::new();
+        let stats = tracker.collect(component, &mut new_cursor, Tick::ZERO, tick, &mut out);
+        assert!(stats.gap);
+        assert!(out.is_empty());
+        let stats = tracker.collect(component, &mut old_cursor, Tick::ZERO, tick, &mut out);
+        assert!(stats.gap);
     }
 }

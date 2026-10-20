@@ -250,14 +250,17 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
         last_run: Tick,
         this_run: Tick,
         out: &mut Vec<Entity>,
-    ) {
+    ) -> bool {
         let Some(tracker) = &self.dirty_tracker else {
-            return;
+            return false;
         };
         let mut cursors = self.dirty_cursors.lock();
+        let mut gap = false;
         for (index, &component) in self.dirty_sources.iter().enumerate() {
-            tracker.collect(component, &mut cursors[index], last_run, this_run, out);
+            let stats = tracker.collect(component, &mut cursors[index], last_run, this_run, out);
+            gap |= stats.gap;
         }
+        gap
     }
 
     /// Whether the exact sparse change index may be missing writes because the

@@ -110,11 +110,29 @@ where
         let stats = world
             .change_tracker
             .collect(self.component, cursor, last_run, this_run, out);
-        out.retain(|&entity| {
-            world
-                .get_ticks::<T>(entity)
-                .is_some_and(|ticks| ticks.is_changed(last_run, this_run))
-        });
+        if stats.gap {
+            // The event index is deliberately bounded. Rebuild the exact
+            // current-state candidate set from authoritative component ticks;
+            // removed/despawned entities are not delivered by this observer
+            // contract because they have no readable current component.
+            out.clear();
+            for archetype in world.archetypes().iter() {
+                for &entity in archetype.table().entities() {
+                    if world
+                        .get_ticks::<T>(entity)
+                        .is_some_and(|ticks| ticks.is_changed(last_run, this_run))
+                    {
+                        out.push(entity);
+                    }
+                }
+            }
+        } else {
+            out.retain(|&entity| {
+                world
+                    .get_ticks::<T>(entity)
+                    .is_some_and(|ticks| ticks.is_changed(last_run, this_run))
+            });
+        }
         stats
     }
 

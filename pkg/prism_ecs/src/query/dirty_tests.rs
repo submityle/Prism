@@ -796,6 +796,35 @@ fn sparse_dirty_fallback_is_empty_for_a_clean_window() {
 }
 
 #[test]
+fn sparse_log_gap_falls_back_to_all_matching_table_chunks() {
+    let mut w = World::new();
+    let entities: Vec<_> = (0..4)
+        .map(|i| w.spawn((Big::new(i), SparseDirty(i as u32))))
+        .collect();
+    advance_frame(&mut w);
+    let state = w.query_filtered::<&Big, With<SparseDirty>>();
+    let baseline = w.change_tick();
+    let _ = state.dirty_chunks(&w, baseline, baseline);
+    advance_frame(&mut w);
+    let last_run = w.last_change_tick();
+    let this_run = w.change_tick();
+
+    // Force the bounded source log to lose this tick's sparse records, then
+    // remove the last current member. The fallback must still conservatively
+    // include the table rows because current SparseSet membership cannot
+    // reconstruct a lost removal event.
+    for _ in 0..=crate::change_index::MAX_RETAINED_EVENTS {
+        w.get_mut::<SparseDirty>(entities[0]).unwrap().0 += 1;
+    }
+    assert!(w.remove::<SparseDirty>(entities[3]));
+
+    let report = state.dirty_chunks_with_stats(&w, last_run, this_run);
+    assert_eq!(report.stats.sparse_index_gaps, 1);
+    assert_eq!(report.stats.reported_rows, 4);
+    assert_eq!(report.chunks.len(), 1);
+}
+
+#[test]
 fn sparse_dirty_fallback_matches_tick_oracle_across_wrap() {
     let mut w = World::new();
     let entities: Vec<Entity> = (0..8).map(|i| w.spawn(SparseDirty(i))).collect();
