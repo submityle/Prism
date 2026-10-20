@@ -24,6 +24,8 @@
 #![forbid(unsafe_code)]
 
 mod codec;
+#[cfg(feature = "ecs")]
+pub mod ecs;
 mod endpoint;
 mod jsonrpc;
 mod model;
@@ -35,7 +37,9 @@ mod transport;
 pub use codec::{
     decode_request, decode_response, encode_request, encode_response, CodecError, CodecLimits,
 };
-pub use endpoint::{Endpoint, InMemoryEndpoint, InMemoryStore, SyncEndpoint, SyncStore};
+pub use endpoint::{
+    CommitResult, Endpoint, InMemoryEndpoint, InMemoryStore, SyncEndpoint, SyncStore,
+};
 pub use jsonrpc::{
     decode_json_rpc, decode_json_rpc_with_limits, encode_json_rpc, request, JsonNumber,
     JsonRpcCodecError, JsonRpcDispatchError, JsonRpcErrorObject, JsonRpcId, JsonRpcLimits,

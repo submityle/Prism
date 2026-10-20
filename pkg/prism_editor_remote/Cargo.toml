@@ -8,6 +8,12 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [dependencies]
+prism_ecs = { path = "../prism_ecs", features = ["reflect"], optional = true }
+prism_reflect = { path = "../prism_reflect", default-features = false, features = ["std"], optional = true }
+
+[features]
+default = []
+ecs = ["dep:prism_ecs", "dep:prism_reflect"]
 
 [lints]
 [lints.rust]
