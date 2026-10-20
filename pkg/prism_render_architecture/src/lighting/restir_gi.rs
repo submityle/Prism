@@ -88,7 +88,7 @@ pub struct GiSample {
 }
 
 impl GiSample {
-    /// A zeroed sample (used as the placeholder in an empty reservoir).
+    /// A zeroed sample used as the neutral value for an empty reservoir.
     #[must_use]
     pub const fn zero() -> Self {
         Self {

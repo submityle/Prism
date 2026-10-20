@@ -1596,9 +1596,6 @@ impl LightScene {
                 current_generation: slot.generation,
             });
         }
-        if slot.identity != handle.identity {
-            return Err(SceneError::InvalidHandle(handle));
-        }
         if slot.retired {
             return Err(SceneError::GenerationExhausted(handle));
         }
@@ -1607,6 +1604,17 @@ impl LightScene {
         }
         if !self.free_slots.contains(&handle.slot) {
             return Err(SceneError::InvalidCheckpoint);
+        }
+        // A reclaimed slot keeps its generation but receives a fresh light
+        // identity. The previous identity must never be resurrected, while a
+        // newly allocated identity is intentionally different from the slot's
+        // retired occupant.
+        if self
+            .slots
+            .iter()
+            .any(|candidate| candidate.identity == handle.identity)
+        {
+            return Err(SceneError::InvalidHandle(handle));
         }
         Ok(())
     }
