@@ -218,6 +218,9 @@ members = [
   "pkg/prism_ui_render_backend",
   "pkg/prism_ui_component_kit",
   "pkg/prism_editor_core",
+  "pkg/prism_editor_reflect",
+  "pkg/prism_editor_world",
+  "pkg/prism_editor_graph",
   # Several crates with macros have "compile fail" tests nested inside them, also known as UI
   # tests, that verify diagnostic output does not accidentally change.
   # TODO: Use a glob pattern once they are fixed in `dependabot-core`
