@@ -338,6 +338,57 @@ pub struct StreamPlan {
     pub trace: VmTrace,
 }
 
+/// Invalid manifest input rejected before scheduler state changes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ManifestValidationError {
+    /// Two entries claimed the same sector identity.
+    DuplicateSector {
+        /// The duplicated sector.
+        sector: SectorId,
+        /// Index of the first entry in the caller's slice.
+        first_index: usize,
+        /// Index of the duplicate entry in the caller's slice.
+        duplicate_index: usize,
+    },
+}
+
+impl core::fmt::Display for ManifestValidationError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::DuplicateSector {
+                sector,
+                first_index,
+                duplicate_index,
+            } => write!(
+                formatter,
+                "duplicate manifest sector {sector:?} at indices {first_index} and {duplicate_index}"
+            ),
+        }
+    }
+}
+
+impl core::error::Error for ManifestValidationError {}
+
+/// Validates that each sector has exactly one manifest entry.
+pub fn validate_manifests(manifests: &[CellManifest]) -> Result<(), ManifestValidationError> {
+    let mut indexed: Vec<_> = manifests
+        .iter()
+        .enumerate()
+        .map(|(index, manifest)| (manifest.sector, index))
+        .collect();
+    indexed.sort_unstable_by_key(|(sector, index)| (*sector, *index));
+    for pair in indexed.windows(2) {
+        if pair[0].0 == pair[1].0 {
+            return Err(ManifestValidationError::DuplicateSector {
+                sector: pair[0].0,
+                first_index: pair[0].1,
+                duplicate_index: pair[1].1,
+            });
+        }
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ResidentState {
     Loading,
@@ -394,13 +445,14 @@ impl StreamScheduler {
         self.resident.contains_key(&sector)
     }
 
-    /// Produces a deterministic plan from demand sources and manifests.
-    pub fn plan(
+    /// Produces a deterministic plan from unique manifests.
+    pub fn try_plan(
         &mut self,
         demands: &[DemandSource],
         manifests: &[CellManifest],
         budget: StreamBudget,
-    ) -> StreamPlan {
+    ) -> Result<StreamPlan, ManifestValidationError> {
+        validate_manifests(manifests)?;
         self.frame = self.frame.saturating_add(1);
         let mut trace = VmTrace::new();
         trace.push(VmInstruction::BeginFrame(self.frame));
@@ -510,11 +562,25 @@ impl StreamScheduler {
             frame: self.frame,
             admitted_bytes,
         });
-        StreamPlan {
+        Ok(StreamPlan {
             actions,
             admitted_bytes,
             trace,
-        }
+        })
+    }
+
+    /// Produces a deterministic plan, panicking on invalid duplicate input.
+    ///
+    /// New callers that receive external or dynamically assembled manifests
+    /// should use [`Self::try_plan`] so the validation error can be propagated.
+    pub fn plan(
+        &mut self,
+        demands: &[DemandSource],
+        manifests: &[CellManifest],
+        budget: StreamBudget,
+    ) -> StreamPlan {
+        self.try_plan(demands, manifests, budget)
+            .expect("stream manifests must contain unique sectors")
     }
 
     /// Returns the frame counter used in VM traces.
@@ -721,6 +787,54 @@ mod tests {
             .actions
             .iter()
             .all(|a| !matches!(a, StreamAction::Unload(_))));
+    }
+
+    #[test]
+    fn duplicate_manifests_fail_before_frame_state_changes() {
+        let sector = SectorId::new(0, 3, 0, 0);
+        let bounds = AabbI64::new(GlobalPos::new(0, 0, 0), GlobalPos::new(1, 1, 1)).unwrap();
+        let first = CellManifest {
+            sector,
+            bounds,
+            scene_key: 1,
+            content_version: 1,
+            derived_hash: 2,
+            io_bytes: 1,
+        };
+        let duplicate = CellManifest {
+            scene_key: 9,
+            io_bytes: 99,
+            ..first
+        };
+        let demand = DemandSource::new(sector, 0, 1, 10).unwrap();
+        let mut scheduler = StreamScheduler::new();
+        assert_eq!(
+            scheduler.try_plan(
+                &[demand],
+                &[first, duplicate],
+                StreamBudget {
+                    io_bytes: 100,
+                    max_actions: 2,
+                },
+            ),
+            Err(ManifestValidationError::DuplicateSector {
+                sector,
+                first_index: 0,
+                duplicate_index: 1,
+            })
+        );
+        assert_eq!(scheduler.frame(), 0);
+        let valid = scheduler
+            .try_plan(
+                &[demand],
+                &[first],
+                StreamBudget {
+                    io_bytes: 100,
+                    max_actions: 2,
+                },
+            )
+            .unwrap();
+        assert_eq!(valid.trace.as_slice()[0], VmInstruction::BeginFrame(1));
     }
 
     #[test]

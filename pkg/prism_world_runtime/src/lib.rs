@@ -14,7 +14,10 @@ use core::num::NonZeroU64;
 use core::task::{Context, Poll};
 
 use prism_world_io::ReadRequest;
-use prism_world_stream::{CellManifest, DemandSource, SectorId, StreamAction, StreamBudget};
+use prism_world_stream::{
+    validate_manifests, CellManifest, DemandSource, ManifestValidationError, SectorId,
+    StreamAction, StreamBudget,
+};
 
 mod routed_io;
 pub use routed_io::RoutedCellIo;
@@ -898,6 +901,46 @@ pub struct FrameReport {
     pub failed: usize,
 }
 
+/// Invalid frame input rejected before coordinator state or host state changes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FramePlanError {
+    /// The manifest slice contains duplicate sector identities.
+    DuplicateManifest(ManifestValidationError),
+    /// The loaded snapshot contains duplicate sector identities.
+    DuplicateLoadedCell {
+        /// The duplicated sector.
+        sector: SectorId,
+        /// Index of the first loaded entry.
+        first_index: usize,
+        /// Index of the duplicate loaded entry.
+        duplicate_index: usize,
+    },
+}
+
+impl fmt::Display for FramePlanError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DuplicateManifest(error) => write!(formatter, "{error}"),
+            Self::DuplicateLoadedCell {
+                sector,
+                first_index,
+                duplicate_index,
+            } => write!(
+                formatter,
+                "duplicate loaded cell sector {sector:?} at indices {first_index} and {duplicate_index}"
+            ),
+        }
+    }
+}
+
+impl core::error::Error for FramePlanError {}
+
+impl From<ManifestValidationError> for FramePlanError {
+    fn from(error: ManifestValidationError) -> Self {
+        Self::DuplicateManifest(error)
+    }
+}
+
 struct PendingLoad {
     frame: u64,
     manifest: CellManifest,
@@ -951,19 +994,24 @@ impl<I: CellIo> CellFrameCoordinator<I> {
     }
 
     /// Plans a frame, submits load actions, and applies evictions to `host`.
-    pub fn plan_frame<H: SceneHost>(
+    pub fn try_plan_frame<H: SceneHost>(
         &mut self,
         demands: &[DemandSource],
         manifests: &[CellManifest],
         loaded: &[LoadedCell],
         budget: StreamBudget,
         host: &mut H,
-    ) -> FrameReport {
+    ) -> Result<FrameReport, FramePlanError> {
+        validate_manifests(manifests)?;
+        validate_loaded_cells(loaded)?;
         self.frame = self.frame.wrapping_add(1);
         let frame = self.frame;
         self.trace.push(TraceEvent::FrameStarted { frame });
         self.sync_loaded(loaded);
-        let plan = self.stream.plan(demands, manifests, budget);
+        let plan = self
+            .stream
+            .try_plan(demands, manifests, budget)
+            .expect("manifest validation completed before stream planning");
         let mut report = FrameReport {
             frame,
             actions: plan.actions.len(),
@@ -973,19 +1021,10 @@ impl<I: CellIo> CellFrameCoordinator<I> {
         for action in plan.actions {
             match action {
                 StreamAction::Load(request) | StreamAction::Prefetch(request) => {
-                    let Some(manifest) = manifests.iter().find(|m| m.sector == request.sector)
-                    else {
-                        self.record_failure(
-                            frame,
-                            request.sector,
-                            TraceOp::Load,
-                            FailureStage::Provider,
-                            "stream action has no manifest",
-                        );
-                        self.restore_stream_state(request.sector, None);
-                        report.failed += 1;
-                        continue;
-                    };
+                    let manifest = manifests
+                        .iter()
+                        .find(|manifest| manifest.sector == request.sector)
+                        .expect("stream request must refer to a validated manifest");
                     let previous = self.known_loaded.get(&request.sector).copied();
                     let operation = if previous.is_some_and(|old| {
                         old.scene_key != manifest.scene_key
@@ -1057,7 +1096,23 @@ impl<I: CellIo> CellFrameCoordinator<I> {
             frame,
             actions: report.actions,
         });
-        report
+        Ok(report)
+    }
+
+    /// Plans a frame and panics on duplicate manifest or loaded-cell input.
+    ///
+    /// New callers that receive external or dynamically assembled snapshots
+    /// should use [`Self::try_plan_frame`] to propagate validation errors.
+    pub fn plan_frame<H: SceneHost>(
+        &mut self,
+        demands: &[DemandSource],
+        manifests: &[CellManifest],
+        loaded: &[LoadedCell],
+        budget: StreamBudget,
+        host: &mut H,
+    ) -> FrameReport {
+        self.try_plan_frame(demands, manifests, loaded, budget, host)
+            .expect("world frame inputs must contain unique sectors")
     }
 
     /// Polls the backend once and commits one validated terminal result to `host`.
@@ -1242,6 +1297,25 @@ impl<I: CellIo> CellFrameCoordinator<I> {
     }
 }
 
+fn validate_loaded_cells(loaded: &[LoadedCell]) -> Result<(), FramePlanError> {
+    let mut indexed: Vec<_> = loaded
+        .iter()
+        .enumerate()
+        .map(|(index, cell)| (cell.manifest.sector, index))
+        .collect();
+    indexed.sort_unstable_by_key(|(sector, index)| (*sector, *index));
+    for pair in indexed.windows(2) {
+        if pair[0].0 == pair[1].0 {
+            return Err(FramePlanError::DuplicateLoadedCell {
+                sector: pair[0].0,
+                first_index: pair[0].1,
+                duplicate_index: pair[1].1,
+            });
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1328,6 +1402,63 @@ mod tests {
             capacity,
         )
         .expect("runtime config")
+    }
+
+    #[test]
+    fn duplicate_manifest_and_loaded_inputs_fail_before_runtime_mutation() {
+        let first = manifest(0, 7, 1, 9);
+        let duplicate = CellManifest {
+            scene_key: 8,
+            io_bytes: 64,
+            ..first
+        };
+        let demand = DemandSource::new(first.sector, 0, 1, 10).expect("demand");
+        let mut coordinator = coordinator(first, 1);
+        let mut host = Host::default();
+
+        assert_eq!(
+            coordinator.try_plan_frame(
+                &[demand],
+                &[first, duplicate],
+                &[],
+                StreamBudget {
+                    io_bytes: 64,
+                    max_actions: 2,
+                },
+                &mut host,
+            ),
+            Err(FramePlanError::DuplicateManifest(
+                ManifestValidationError::DuplicateSector {
+                    sector: first.sector,
+                    first_index: 0,
+                    duplicate_index: 1,
+                }
+            ))
+        );
+        assert!(coordinator.trace().as_slice().is_empty());
+        assert_eq!(coordinator.in_flight(), 0);
+        assert!(host.loaded.is_empty());
+
+        assert_eq!(
+            coordinator.try_plan_frame(
+                &[demand],
+                &[first],
+                &[LoadedCell::new(first), LoadedCell::new(duplicate)],
+                StreamBudget {
+                    io_bytes: 64,
+                    max_actions: 2,
+                },
+                &mut host,
+            ),
+            Err(FramePlanError::DuplicateLoadedCell {
+                sector: first.sector,
+                first_index: 0,
+                duplicate_index: 1,
+            })
+        );
+        assert!(coordinator.trace().as_slice().is_empty());
+        assert_eq!(coordinator.in_flight(), 0);
+        assert!(host.loaded.is_empty());
     }
 
     #[test]

@@ -18,7 +18,8 @@ use prism_world_residency::{
     MaterializationBudget, ResidencyPlan, ResidencyRecord, ResidencyScheduler,
 };
 use prism_world_stream::{
-    CellManifest, DemandSource, SectorId, StreamAction, StreamBudget, StreamPlan, StreamScheduler,
+    validate_manifests, CellManifest, DemandSource, ManifestValidationError, SectorId,
+    StreamAction, StreamBudget, StreamPlan, StreamScheduler,
 };
 
 #[cfg(feature = "simulation")]
@@ -47,6 +48,29 @@ pub struct WorldFramePlan {
     pub stream: StreamPlan,
     /// Tier promotion/demotion/keep operations.
     pub residency: ResidencyPlan,
+}
+
+/// Invalid frame input rejected before either policy scheduler advances.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorldTickError {
+    /// The manifest slice contains duplicate sector identities.
+    DuplicateManifest(ManifestValidationError),
+}
+
+impl core::fmt::Display for WorldTickError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::DuplicateManifest(error) => write!(formatter, "{error}"),
+        }
+    }
+}
+
+impl core::error::Error for WorldTickError {}
+
+impl From<ManifestValidationError> for WorldTickError {
+    fn from(error: ManifestValidationError) -> Self {
+        Self::DuplicateManifest(error)
+    }
 }
 
 /// Host boundary used to apply a policy plan to the authoritative scene.
@@ -102,6 +126,28 @@ impl WorldRuntime {
     }
 
     /// Plans streaming and residency independently but atomically as one frame.
+    pub fn try_tick(
+        &mut self,
+        demands: &[DemandSource],
+        manifests: &[CellManifest],
+        records: &[ResidencyRecord],
+        frame: u64,
+        budget: WorldBudget,
+    ) -> Result<WorldFramePlan, WorldTickError> {
+        validate_manifests(manifests)?;
+        Ok(WorldFramePlan {
+            stream: self
+                .stream
+                .try_plan(demands, manifests, budget.stream)
+                .expect("manifest validation completed before stream planning"),
+            residency: self.residency.plan(frame, records, budget.materialization),
+        })
+    }
+
+    /// Plans a frame and panics on duplicate manifest input.
+    ///
+    /// New callers that receive external or dynamically assembled manifests
+    /// should use [`Self::try_tick`] to propagate validation errors.
     pub fn tick(
         &mut self,
         demands: &[DemandSource],
@@ -110,10 +156,8 @@ impl WorldRuntime {
         frame: u64,
         budget: WorldBudget,
     ) -> WorldFramePlan {
-        WorldFramePlan {
-            stream: self.stream.plan(demands, manifests, budget.stream),
-            residency: self.residency.plan(frame, records, budget.materialization),
-        }
+        self.try_tick(demands, manifests, records, frame, budget)
+            .expect("world manifests must contain unique sectors")
     }
 
     /// Applies a plan in deterministic stream-then-tier order.
@@ -234,6 +278,52 @@ mod tests {
         assert_eq!(plan.stream.admitted_bytes, 4);
         assert_eq!(plan.residency.actions.len(), 1);
         assert_eq!(world.stream_frame(), 1);
+    }
+
+    #[test]
+    fn duplicate_manifests_fail_before_stream_or_residency_advances() {
+        let policy = ResidencyPolicy::new(1, 2, 3, 4, 0).unwrap();
+        let mut world = WorldRuntime::new(ResidencyScheduler::new(policy));
+        let sector = SectorId::new(0, 0, 0, 0);
+        let bounds = AabbI64::new(GlobalPos::new(0, 0, 0), GlobalPos::new(1, 1, 1)).unwrap();
+        let first = CellManifest {
+            sector,
+            bounds,
+            scene_key: 1,
+            content_version: 1,
+            derived_hash: 2,
+            io_bytes: 4,
+        };
+        let duplicate = CellManifest {
+            scene_key: 2,
+            io_bytes: 64,
+            ..first
+        };
+        let demand = DemandSource::new(sector, 0, 1, 10).unwrap();
+        let error = world
+            .try_tick(
+                &[demand],
+                &[first, duplicate],
+                &[],
+                1,
+                WorldBudget {
+                    stream: StreamBudget {
+                        io_bytes: 64,
+                        max_actions: 2,
+                    },
+                    materialization: MaterializationBudget::new(2, 2),
+                },
+            )
+            .unwrap_err();
+        assert_eq!(
+            error,
+            WorldTickError::DuplicateManifest(ManifestValidationError::DuplicateSector {
+                sector,
+                first_index: 0,
+                duplicate_index: 1,
+            })
+        );
+        assert_eq!(world.stream_frame(), 0);
     }
 
     #[test]
