@@ -43,7 +43,10 @@ mod tile;
 mod volume_bake;
 mod voxel;
 
-pub use bake::{BakeError, BakeLimits, GridChange, HeightfieldMesh, HeightfieldTile, SampleBounds};
+pub use bake::{
+    BakeError, BakeLimits, GridChange, HeightfieldImportError, HeightfieldMesh, HeightfieldTile,
+    SampleBounds,
+};
 pub use coordinates::{
     CoordinateError, FixedPoint3, I64Point, VerifiedLocalPoint, FIXED_FRAC_BITS, FIXED_SCALE,
 };

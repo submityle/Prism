@@ -10,9 +10,17 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
-use std::collections::BTreeMap;
-use std::fmt;
-use std::vec::Vec;
+extern crate alloc;
+
+mod codec;
+
+pub use codec::{
+    TerrainCellCodec, TerrainCellCodecError, TerrainCellCodecLimits, TERRAIN_CELL_CODEC_VERSION,
+};
+
+use alloc::collections::BTreeMap;
+use alloc::vec::Vec;
+use core::fmt;
 
 use prism_world_physics_bridge::{
     HeightfieldBridgeBudget, HeightfieldBridgeError, HeightfieldResidencyBudget,
@@ -291,6 +299,17 @@ impl<'a, H: SceneHost, D: TerrainCellDecoder> PhysicsCellHost<'a, H, D> {
                         tile: input.tile(),
                     });
                 }
+                if let Some(current) = self.residency.snapshot(input.tile()) {
+                    let incoming = input.heightfield().revision();
+                    if incoming <= current.revision() {
+                        return Err(PhysicsCellHostError::Physics(
+                            HeightfieldBridgeError::StaleRevision {
+                                current: current.revision(),
+                                incoming,
+                            },
+                        ));
+                    }
+                }
             }
             residency
                 .publish(input.heightfield(), input.embedding())
@@ -479,6 +498,27 @@ mod tests {
         )
     }
 
+    fn terrain_revision(tile: TileKey, revision: u64) -> DecodedTerrainHeightfield {
+        let field = HeightfieldTile::from_encoded_samples(
+            tile,
+            HeightfieldSpec::new(3, 10).expect("valid heightfield spec"),
+            revision,
+            [0_i16; 9].into_iter(),
+            BakeLimits {
+                max_samples: 9,
+                max_bytes: 18,
+            },
+        )
+        .expect("valid encoded heightfield");
+        DecodedTerrainHeightfield::new(
+            field,
+            PlanarHeightfieldEmbedding {
+                sample_origin_mm: [0, 0, 0],
+                sample_spacing_mm: 500,
+            },
+        )
+    }
+
     fn adapter(host: &mut Host, decoder: Decoder) -> PhysicsCellHost<'_, Host, Decoder> {
         PhysicsCellHost::new(
             host,
@@ -519,6 +559,34 @@ mod tests {
             .residency()
             .snapshot(TileKey::root(CubeFace::NegativeY))
             .is_none());
+    }
+
+    #[test]
+    fn same_tile_reload_rejects_equal_or_older_revision_before_host_call() {
+        let sector = SectorId::new(0, 0, 0, 0);
+        let tile = TileKey::root(CubeFace::PositiveY);
+        let decoder = Decoder {
+            snapshot: TerrainCellSnapshot::new(sector, vec![terrain_revision(tile, 10)]).unwrap(),
+            reject: false,
+        };
+        let mut host = Host::default();
+        let mut adapter = adapter(&mut host, decoder);
+        adapter.load_cell(&manifest(0), b"revision-10").unwrap();
+        assert_eq!(adapter.residency().snapshot(tile).unwrap().revision(), 10);
+
+        adapter.decoder_mut().snapshot =
+            TerrainCellSnapshot::new(sector, vec![terrain_revision(tile, 9)]).unwrap();
+        assert!(matches!(
+            adapter.load_cell(&manifest(0), b"revision-9"),
+            Err(PhysicsCellHostError::Physics(
+                HeightfieldBridgeError::StaleRevision {
+                    current: 10,
+                    incoming: 9,
+                }
+            ))
+        ));
+        assert_eq!(adapter.host.loads, 1);
+        assert_eq!(adapter.residency().snapshot(tile).unwrap().revision(), 10);
     }
 
     #[test]

@@ -46,6 +46,29 @@ pub enum BakeError<E> {
     InvalidGeometry,
 }
 
+/// Failure while restoring an immutable heightfield from validated encoded samples.
+///
+/// Import allocates a fresh exact logical payload instead of retaining caller-owned
+/// spare capacity. This keeps the retained sample storage subject to [`BakeLimits`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HeightfieldImportError {
+    /// The square sample count or byte count cannot be represented by `usize`.
+    SizeOverflow,
+    /// The supplied sample count does not match `samples_per_edge squared`.
+    SampleCountMismatch {
+        /// Required number of samples.
+        expected: usize,
+        /// Supplied number of samples.
+        actual: usize,
+    },
+    /// The sample count or retained logical payload exceeds the configured limits.
+    BudgetExceeded,
+    /// The allocator refused the bounded sample allocation.
+    AllocationFailed,
+    /// The process-wide disposable cache identity space is exhausted.
+    CacheIdExhausted,
+}
+
 /// Inclusive grid coordinates touched by a bake, with X as the fast axis.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SampleBounds {
@@ -164,6 +187,70 @@ impl HeightfieldTile {
             spec,
             revision: 0,
             samples,
+        })
+    }
+
+    /// Restores a complete tile from already encoded signed samples.
+    ///
+    /// The iterator must contain exactly `samples_per_edge squared` values. Count
+    /// and byte budgets are checked before allocation, allocation is fallible, and
+    /// a fresh process-local cache identity is published only after the complete
+    /// sample payload has been staged. The persisted revision is retained so a
+    /// reloaded tile can participate in monotonic downstream publication.
+    pub fn from_encoded_samples<I>(
+        tile: TileKey,
+        spec: HeightfieldSpec,
+        revision: u64,
+        samples: I,
+        limits: BakeLimits,
+    ) -> Result<Self, HeightfieldImportError>
+    where
+        I: IntoIterator<Item = i16>,
+        I::IntoIter: ExactSizeIterator,
+    {
+        let side = usize::try_from(spec.samples_per_edge())
+            .map_err(|_| HeightfieldImportError::SizeOverflow)?;
+        let expected = side
+            .checked_mul(side)
+            .ok_or(HeightfieldImportError::SizeOverflow)?;
+        let bytes = expected
+            .checked_mul(core::mem::size_of::<i16>())
+            .ok_or(HeightfieldImportError::SizeOverflow)?;
+        let samples = samples.into_iter();
+        let actual = samples.len();
+        if actual != expected {
+            return Err(HeightfieldImportError::SampleCountMismatch { expected, actual });
+        }
+        if expected > limits.max_samples || bytes > limits.max_bytes {
+            return Err(HeightfieldImportError::BudgetExceeded);
+        }
+        let mut restored = Vec::new();
+        restored
+            .try_reserve_exact(expected)
+            .map_err(|_| HeightfieldImportError::AllocationFailed)?;
+        let mut samples = samples;
+        for _ in 0..expected {
+            let Some(sample) = samples.next() else {
+                return Err(HeightfieldImportError::SampleCountMismatch {
+                    expected,
+                    actual: restored.len(),
+                });
+            };
+            restored.push(sample);
+        }
+        if samples.next().is_some() {
+            return Err(HeightfieldImportError::SampleCountMismatch {
+                expected,
+                actual: expected.saturating_add(1),
+            });
+        }
+        let cache_id = next_cache_id().ok_or(HeightfieldImportError::CacheIdExhausted)?;
+        Ok(Self {
+            cache_id,
+            tile,
+            spec,
+            revision,
+            samples: restored,
         })
     }
 
@@ -531,6 +618,30 @@ fn normal(field: &HeightfieldTile, size: [f32; 2], x: u32, z: u32) -> [f32; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
+
+    struct MisreportedSamples {
+        samples: alloc::vec::IntoIter<i16>,
+        reported_len: usize,
+    }
+
+    impl Iterator for MisreportedSamples {
+        type Item = i16;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            self.samples.next()
+        }
+
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            (self.reported_len, Some(self.reported_len))
+        }
+    }
+
+    impl ExactSizeIterator for MisreportedSamples {
+        fn len(&self) -> usize {
+            self.reported_len
+        }
+    }
     use crate::{CubeFace, HeightSampleValue};
     use core::cell::Cell;
 
@@ -727,5 +838,99 @@ mod tests {
         assert_eq!(next_cache_id_candidate(u64::MAX - 1), Some(u64::MAX - 1));
         assert_eq!(next_cache_id_candidate(u64::MAX), None);
         assert_eq!(next_cache_id_candidate(0), None);
+    }
+
+    #[test]
+    fn encoded_sample_import_is_exact_bounded_and_cache_local() {
+        let tile = TileKey::root(CubeFace::PositiveZ);
+        let spec = HeightfieldSpec::new(3, 25).unwrap();
+        let samples = [-4, -3, -2, -1, 0, 1, 2, 3, 4];
+        let limits = BakeLimits {
+            max_samples: samples.len(),
+            max_bytes: samples.len() * core::mem::size_of::<i16>(),
+        };
+        let first =
+            HeightfieldTile::from_encoded_samples(tile, spec, 17, samples.into_iter(), limits)
+                .unwrap();
+        let second =
+            HeightfieldTile::from_encoded_samples(tile, spec, 17, samples.into_iter(), limits)
+                .unwrap();
+        assert_eq!(first, second);
+        assert_ne!(first.cache_id(), second.cache_id());
+        assert_eq!(first.revision(), 17);
+        assert_eq!(first.samples(), &samples);
+
+        assert_eq!(
+            HeightfieldTile::from_encoded_samples(
+                tile,
+                spec,
+                17,
+                samples[..8].iter().copied(),
+                limits,
+            ),
+            Err(HeightfieldImportError::SampleCountMismatch {
+                expected: 9,
+                actual: 8,
+            })
+        );
+        assert_eq!(
+            HeightfieldTile::from_encoded_samples(
+                tile,
+                spec,
+                17,
+                samples.into_iter(),
+                BakeLimits {
+                    max_samples: 8,
+                    max_bytes: limits.max_bytes,
+                },
+            ),
+            Err(HeightfieldImportError::BudgetExceeded)
+        );
+        assert_eq!(
+            HeightfieldTile::from_encoded_samples(
+                tile,
+                spec,
+                17,
+                samples.into_iter(),
+                BakeLimits {
+                    max_samples: limits.max_samples,
+                    max_bytes: limits.max_bytes - 1,
+                },
+            ),
+            Err(HeightfieldImportError::BudgetExceeded)
+        );
+    }
+
+    #[test]
+    fn encoded_sample_import_does_not_trust_misreported_exact_length() {
+        let tile = TileKey::root(CubeFace::PositiveZ);
+        let spec = HeightfieldSpec::new(2, 25).unwrap();
+        let limits = BakeLimits {
+            max_samples: 4,
+            max_bytes: 8,
+        };
+        let short = MisreportedSamples {
+            samples: vec![1, 2, 3].into_iter(),
+            reported_len: 4,
+        };
+        assert_eq!(
+            HeightfieldTile::from_encoded_samples(tile, spec, 3, short, limits),
+            Err(HeightfieldImportError::SampleCountMismatch {
+                expected: 4,
+                actual: 3,
+            })
+        );
+
+        let long = MisreportedSamples {
+            samples: vec![1, 2, 3, 4, 5].into_iter(),
+            reported_len: 4,
+        };
+        assert_eq!(
+            HeightfieldTile::from_encoded_samples(tile, spec, 3, long, limits),
+            Err(HeightfieldImportError::SampleCountMismatch {
+                expected: 4,
+                actual: 5,
+            })
+        );
     }
 }
