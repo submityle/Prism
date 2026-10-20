@@ -4,9 +4,9 @@
 
 ## API 与根接线
 
-world 根声明 `pub mod project;` 即可使用模块内全部公开类型：`WorldProject`、`ProjectLayer`、`ProjectLimits`、`ProjectError`、`ProjectEdit`、`ProjectChange`、`ProjectHistory`、`WorldProjectToken`、`WorldProjectCodec`、`WorldProjectStorageService`、`WorldProjectStorageRequest`、`WorldProjectStorageResult`、`WorldProjectLoadCandidate`、`WorldProjectSaveReceipt`、`WorldProjectStorageError`。world Cargo 依赖 `prism_editor_timeline = { path = "../prism_editor_timeline" }`，复用其通用 document worker。
+world 根已声明 `pub mod project;`，可使用模块内全部公开类型：`WorldProject`、`ProjectLayer`、`ProjectLimits`、`ProjectError`、`ProjectEdit`、`ProjectChange`、`ProjectHistory`、`WorldProjectToken`、`WorldProjectCodec`、`WorldProjectStorageService`、`WorldProjectStorageRequest`、`WorldProjectStorageResult`、`WorldProjectLoadCandidate`、`WorldProjectSaveReceipt`、`WorldProjectStorageError`。world Cargo 已依赖 `prism_editor_timeline = { path = "../prism_editor_timeline" }`，复用其通用 document worker，无新增根导出或依赖要求。
 
-`EditorWorldData::actor_records()` 需要转发已有的 `self.ofpa.actors()`，提供所有注册 actor 的确定性只读迭代。通用存储错误需要 `TimelineStorageError::DocumentCodec { domain: &'static str, message: String }`，world 使用 domain `world-project`，不伪装成 timeline/sequence 错误。根与既有模块由主线程接线。
+`EditorWorldData::actor_records()` 已转发已有的 `self.ofpa.actors()`，提供所有注册 actor 的确定性只读迭代。通用存储错误已有 `TimelineStorageError::DocumentCodec { domain: &'static str, message: String }`，world 使用 domain `world-project`，不伪装成 timeline/sequence 错误。以上四项根与既有模块接线由主线程负责，本切片不提交这些共享文件。
 
 典型流程：
 
@@ -44,10 +44,35 @@ layer 按 u32 ID 严格升序：ID、u32 UTF-8 名称长度及名称、parent ta
 
 membership 项目文件出版与独立 OFPA payload 事务不是同一个跨文件原子事务。宿主必须为自己的保存策略排序、处理缺失 payload 和故障后恢复，不可将本模块宣称为跨目录/payload 的原子保存、原生应用挂载或 runtime 流式安装已完成。
 
+## 原生 world 面板接线审计
+
+真实调用链为 `pkg/prism_editor_app/src/desktop_ui/panels.rs` 的 `DesktopWorldPanel`，持有 `pkg/prism_editor_ui/src/world.rs` 的 `WorldPanelController`，再由 `world_view.rs` 生成带精确 stamp 围栏的 `BoundWorldPanel`。`DesktopWorldPanel::poll` 调用宿主 provider；provider 可通过 `DesktopPanelUpdate::fenced` 和 `wake_at` 报告未保存目录、在途出版及下次轮询。现有 `fenced()` 同时检查 pending cell intents、cell dirty/residency，但不会自动发现 project membership dirty。
+
+当前控制器只有 `world()` 只读访问和消耗自身的 `into_world()`；现有 intent 只含 cell load/unload/save 和 cross-cell 事务。`LayerVisible/LayerEditable` 直接修改真实 world，没有走 `ProjectHistory`。UI/app 尚无 `WorldProject` 使用点。因此本轮完成的是下面的接入审计与交接，不能称为 membership 原生面板已经挂载。app 文件归 Erdos，UI 文件需经主线程协调所有权后修改。
+
+宿主需要保留同一个 `WorldProject`、有界 `ProjectHistory`、last-clean token、精确文件 revision、唯一在途 request 与独立 loaded candidate，复用当前 document worker。`WorldProjectStorageService::save(&project, expected_file_revision, timeout)` 和 `load(timeout)` 已可调用，request 支持 `poll()`/`cancel()`。加载后调用 `candidate.document.materialize(EditorWorldLimits, ProjectLimits)`，失败时保留旧模型和 candidate，成功构建也不等于宿主已经采用。
+
+接线必须满足：
+
+1. 作者入口有界地接收 `ProjectEdit`，以项目 revision admission，通过 `ProjectHistory::execute/undo/redo` 验证完整关系。UI 所有者还需提供与真实 world 同步提交、成功后失效旧 bound view/intent 的接口；现有 project 历史只修改目录，不会更新 resident world。不得先改一侧、再以可能失败的另一侧更新宣称原子成功。尤其 actor owner 变化须复用既有 world transaction/租约守卫，不能绕过 OFPA 直接搬目录。
+2. 捕获用于显式建立目录或受控对账。每次 `capture()` 都创建 revision=0 的独立目录与新 token，不能每次 `poll()` 重建来代替持续作者历史。已有层策略按钮和 cross-cell transaction 成功后须同步目录，再允许保存或 clean 认定；只检查一个未同步的缓存 project token，不能证明当前真实 world 已保存。
+3. 保存先保留 request 和本次 token。实际 receipt 总要更新所观察到的文件 revision；仅当当前目录匹配 `receipt.snapshot_token`、目录与真实 world 已同步时才更新 last-clean。过期 receipt 不清理更新后的编辑，`PublicationUncertain` 要求重新读取并对账；取消后仍轮询终态。membership dirty、候选待采用和不确定出版均进入宿主 `fenced`。
+4. candidate 采用前，宿主显式处理旧 world 的 dirty payload、在途 IO/事务、保留租约和运行时消费者；不能从 cell dirty=false 推断目录 clean。完整替换路径可在这些条件满足后，以 materialize 的全 unloaded 新 world 构造新 `WorldPanelController`，同时替换其 bound view、清空旧历史、拒绝旧 controller tickets/回执，并重新启动真实 payload 加载。未完成这些条件时保留 candidate，不自动覆盖。
+
+`desktop_ui/panel_storage.rs` 已有 app 侧通用 `StorageBackend`/`PanelFile` 生命周期，但现有宏的保存签名是 bytes+token，且要求 token `PartialEq`。world 薄适配接收 `&WorldProject`，`WorldProjectToken` 则通过 `matches_token()` 检查精确 Arc 身份；不可不加适配直接套用该宏，或把 GUID/revision 相等当作精确 token 相等。可由 Erdos 适配该生命周期或直接保留已有 request，均不需要新增 worker。后续验收还需原生真实保存/重启重载、目录编辑 undo/redo、旧 view/回执/候选拒绝和 payload 保护的集成测试；本轮 codec/后端测试不替代这些 UI 验收。
+
 ## 验证范围
 
 `tests/project.rs` 覆盖真实 world 干净 actor 捕获、完整 canonical roundtrip、真实身份物化、每个截断前缀与逐字节损坏、非法 wire/预算、批量最终引用关系、失败原子性、稀疏逆冲突及非关联编辑保留、历史 byte/entry 预算、深层层级与修订耗尽。
 
 `tests/project_storage.rs` 使用真实临时目录：共享 worker 保存/重启重载、实际文件字节与 CAS 冲突、codec domain/错误身份/损坏/文件预算、槽位与取消出版围栏、旧 receipt 拒绝，以及经重载目录解析并读取既有真实 OFPA actor 文件。测试不会以假 payload 或假 IO 代替后端。具体执行结果以本切片提交报告为准。
 
-本切片实现时，共享根接线尚未合入，因此使用临时源码副本补入上文的最小根接线，复用 `/private/tmp/prism-editor-joint-cr1ODK`，jobs=2、debug=0、incremental=0。`cargo test -p prism_editor_world --offline` 完整副本回归 97 项测试及 1 项 doctest 通过，其中新增项目/存储测试 19 项；`cargo clippy -p prism_editor_world --all-targets --no-deps --offline -- -D warnings` 通过。副本验证不是主仓库已接线的证据；主线程接线后仍需在真实 crate 联合验证。共享 target 保留。
+初次实现提交 `63113dd24` 时根接线尚未合入，曾使用临时源码副本验证；以下是真实 checkout 在四项根接线到位后的复核结果，取代此前仅副本验证的状态：
+
+| 真实 checkout 命令 | session | 结果 |
+| --- | --- | --- |
+| `cargo test -p prism_editor_world --all-targets --offline` | `3877` | exit 0；39 unit + 7 executable_data_layer + 12 filesystem + 12 ofpa_filesystem + 13 project + 6 project_storage + 8 recovery，共 97 项通过 |
+| `cargo clippy -p prism_editor_world --all-targets --no-deps --offline -- -D warnings` | `71814` | exit 0，无 warning |
+| `cargo test -p prism_editor_world --doc --offline` | `96226` | exit 0，1 项 doctest 通过 |
+
+三条命令均使用 `CARGO_TARGET_DIR=/private/tmp/prism-editor-joint-cr1ODK`、`CARGO_BUILD_JOBS=2`、`CARGO_PROFILE_DEV_DEBUG=0`、`CARGO_PROFILE_TEST_DEBUG=0`、`CARGO_INCREMENTAL=0`。测试没有失败或忽略项，所有上述 session 已结束；没有创建新的 build target，也不清理共享 target。根接线的独立提交仍由主线程负责。
