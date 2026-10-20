@@ -760,3 +760,14 @@ prism_particle_tools  (可选) 图编辑器 / 预览(含着色预览) / 性能 H
 | HZB | 层级 Z 缓冲，用于遮挡剔除 |
 | Property Binder | CPU→GPU 参数绑定 |
 | Point Cache | 外部烘焙点云/属性贴图 |
+
+## 39. 验收基础设施记录（2026-10-21）
+
+新增 `pkg/prism_render_architecture/tests/particle_validation.rs`，仅调用现有粒子合同 API：
+
+- 默认集成测试已覆盖 CPU runtime 重放确定性、`integrate` 对半隐式 Euler 闭式结果的数值比较、`ParticlePool` 容量/双释放竞态/compaction、`EventRouter` 背压、`FragmentList` OIT 溢出，以及 `validation` 结构化报告；这不冒充 CPU/GPU parity。
+- `benchmark_100k_particles` 与 `benchmark_1m_particles` 是可执行的 `#[ignore]` 入口，实际构造粒子池并运行 `CompactConfig` 压缩；命令：`cargo test -p prism_render_architecture --release --test particle_validation -- --ignored --nocapture`。
+- `gpu_readback_parity_gate` 是可执行的真实产物门禁，读取 `PRISM_PARTICLE_GPU_READBACK` 指定的 15 列 CSV（初始位置/速度、加速度、GPU 最终位置/速度），并用相同初值、加速度和 `PRISM_PARTICLE_GPU_DT` 经 CPU `integrate` 计算参考值，再比较位置与速度；没有真实 GPU readback 时保持 ignored，不把 CPU 复算冒充 GPU 证据。
+- `golden_image_gate` 是最小真实 P3/P6 PPM 图像门禁，读取 `PRISM_PARTICLE_IMAGE` 与 `PRISM_PARTICLE_GOLDEN`，逐像素计算 RGB 误差并调用 `evaluate_golden`；没有实际渲染输出和 golden 文件时保持 ignored。
+
+已执行定向格式检查与 `cargo test -p prism_render_architecture --test particle_validation --no-fail-fast`，默认测试通过。当前记录不声称物理 GPU parity、实际图像回归或性能数字已通过：这些仍需要粒子 GPU 渲染路径输出真实 readback/图像，并在目标设备上执行对应 ignored 门禁。
