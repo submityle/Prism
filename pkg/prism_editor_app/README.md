@@ -288,6 +288,8 @@ revision, use monotonic wakeups without sleeping on the UI thread, and require
 explicit retry after exhaustion. Other failures remain visible and fenced.
 The default all-targets suite passed 100 tests (69 unit, 15 controller, 16 document).
 These results do not establish Sequence runtime execution or native OS input
-acceptance. Desktop strict Clippy and the planned repeated concurrency run were
-not rerun for this change after the disk emergency; the shared test binary was
-no longer present, and no replacement build was started.
+acceptance. After disk recovery the desktop strict Clippy attempt (session 96266)
+was blocked before checking app by in-progress UI World compilation errors:
+a const wrapper calling non-const transaction request and unmatched new project
+actions. The planned repeated concurrency run did not execute because the shared
+test binary was no longer present; no replacement test build was started.
