@@ -27,6 +27,14 @@ pub enum FabricCompileError {
     ForeignSelection(FeatureId),
     MultipleWriters(ResourceKey),
     MissingSelectedPass(PassKey),
+    DuplicateActivePass(PassKey),
+    ForeignActivePass(PassKey),
+    DuplicateFulfilledDependency(PassKey),
+    ForeignFulfilledDependency(PassKey),
+    MissingActiveDependency {
+        pass: PassKey,
+        dependency: PassKey,
+    },
     InvalidProducer {
         pass: PassKey,
         resource: ResourceKey,
@@ -159,6 +167,79 @@ impl<'a> ResourceTemplates<'a> {
         items: &[FrameRenderItem],
         limits: GraphLimits,
     ) -> Result<CompiledFeatureGraph, FabricCompileError> {
+        self.compile_selected(
+            selection,
+            frame,
+            external,
+            items,
+            None,
+            &BTreeSet::new(),
+            limits,
+        )
+    }
+
+    /// Compiles only the named passes from the immutable device selection.
+    ///
+    /// This is the execution-stage boundary used by frame/view recorders. An
+    /// active pass cannot introduce a feature or variant outside `selection`,
+    /// and every dependency omitted from this stage must be named explicitly
+    /// in `fulfilled_dependencies`. Resource lowering is limited to accesses of
+    /// the active passes, so a recorder supplies only its real imports rather
+    /// than fabricating bindings for unrelated selected features.
+    pub fn compile_active(
+        &self,
+        selection: &FeatureSelection,
+        frame: u64,
+        external: &[FrameResourceBinding],
+        items: &[FrameRenderItem],
+        active_passes: &[PassKey],
+        fulfilled_dependencies: &[PassKey],
+        limits: GraphLimits,
+    ) -> Result<CompiledFeatureGraph, FabricCompileError> {
+        let mut active = BTreeSet::new();
+        for &pass in active_passes {
+            if !active.insert(pass) {
+                return Err(FabricCompileError::DuplicateActivePass(pass));
+            }
+        }
+        let selected_passes: BTreeSet<_> = selection
+            .selected()
+            .iter()
+            .flat_map(|feature| feature.passes().iter().map(|pass| pass.id))
+            .collect();
+        if let Some(&pass) = active.iter().find(|pass| !selected_passes.contains(pass)) {
+            return Err(FabricCompileError::ForeignActivePass(pass));
+        }
+        let mut fulfilled = BTreeSet::new();
+        for &dependency in fulfilled_dependencies {
+            if !fulfilled.insert(dependency) {
+                return Err(FabricCompileError::DuplicateFulfilledDependency(dependency));
+            }
+            if !selected_passes.contains(&dependency) || active.contains(&dependency) {
+                return Err(FabricCompileError::ForeignFulfilledDependency(dependency));
+            }
+        }
+        self.compile_selected(
+            selection,
+            frame,
+            external,
+            items,
+            Some(&active),
+            &fulfilled,
+            limits,
+        )
+    }
+
+    fn compile_selected(
+        &self,
+        selection: &FeatureSelection,
+        frame: u64,
+        external: &[FrameResourceBinding],
+        items: &[FrameRenderItem],
+        active_passes: Option<&BTreeSet<PassKey>>,
+        fulfilled_dependencies: &BTreeSet<PassKey>,
+        limits: GraphLimits,
+    ) -> Result<CompiledFeatureGraph, FabricCompileError> {
         for selected in selection.selected() {
             let valid = self
                 .catalog
@@ -171,6 +252,9 @@ impl<'a> ResourceTemplates<'a> {
         let mut declarations = Vec::new();
         for feature in selection.selected() {
             for pass in feature.passes() {
+                if active_passes.is_some_and(|active| !active.contains(&pass.id)) {
+                    continue;
+                }
                 GraphLimits::check_count("passes", declarations.len() + 1, limits.passes)?;
                 declarations.push((feature.feature_id(), feature.variant_id(), pass));
             }
@@ -207,11 +291,18 @@ impl<'a> ResourceTemplates<'a> {
         for (index, &(_, _, pass)) in declarations.iter().enumerate() {
             let mut dependencies = BTreeSet::new();
             for &dependency in pass.depends_on {
-                dependencies.insert(
-                    *pass_indices
-                        .get(&dependency)
-                        .ok_or(FabricCompileError::MissingSelectedPass(dependency))?,
-                );
+                if let Some(&dependency) = pass_indices.get(&dependency) {
+                    dependencies.insert(dependency);
+                } else if !fulfilled_dependencies.contains(&dependency) {
+                    return Err(if active_passes.is_some() {
+                        FabricCompileError::MissingActiveDependency {
+                            pass: pass.id,
+                            dependency,
+                        }
+                    } else {
+                        FabricCompileError::MissingSelectedPass(dependency)
+                    });
+                }
             }
             let mut pass_sources = Vec::with_capacity(pass.accesses.len());
             for usage in pass.accesses {

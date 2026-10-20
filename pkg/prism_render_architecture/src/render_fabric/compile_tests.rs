@@ -131,6 +131,135 @@ fn compile_fixture(limits: GraphLimits) -> Result<CompiledFeatureGraph, FabricCo
 }
 
 #[test]
+fn active_compile_uses_frozen_selection_and_explicit_completed_dependencies() {
+    let producer = pass(
+        1,
+        QueueClass::Compute,
+        vec![usage(B, AccessKind::StorageWrite)],
+    );
+    let mut consumer = pass(
+        2,
+        QueueClass::Graphics,
+        vec![usage(A, AccessKind::StorageRead)],
+    );
+    consumer.depends_on = table(vec![PassKey(1)]);
+    let catalog = catalog(vec![variant(700, 0, vec![producer, consumer])], vec![A, B]);
+    let selection = select(&catalog);
+    let template = buffer(A, ResourceLifetime::Persistent);
+    let imported = binding(template, 10, 55);
+    let resources = ResourceTemplates::new(
+        &catalog,
+        &[template, buffer(B, ResourceLifetime::Transient)],
+    )
+    .unwrap();
+
+    assert_eq!(
+        resources
+            .compile_active(
+                &selection,
+                10,
+                &[imported],
+                &[],
+                &[PassKey(2)],
+                &[],
+                GraphLimits::default(),
+            )
+            .unwrap_err(),
+        FabricCompileError::MissingActiveDependency {
+            pass: PassKey(2),
+            dependency: PassKey(1),
+        }
+    );
+
+    let compiled = resources
+        .compile_active(
+            &selection,
+            10,
+            &[imported],
+            &[],
+            &[PassKey(2)],
+            &[PassKey(1)],
+            GraphLimits::default(),
+        )
+        .unwrap();
+    assert_eq!(compiled.passes().len(), 1);
+    assert_eq!(compiled.passes()[0].key(), PassKey(2));
+    assert_eq!(compiled.resources().len(), 1);
+    assert_eq!(compiled.resources()[0].external, Some(imported));
+
+    assert_eq!(
+        resources
+            .compile_active(
+                &selection,
+                10,
+                &[imported],
+                &[],
+                &[PassKey(3)],
+                &[],
+                GraphLimits::default(),
+            )
+            .unwrap_err(),
+        FabricCompileError::ForeignActivePass(PassKey(3))
+    );
+    assert_eq!(
+        resources
+            .compile_active(
+                &selection,
+                10,
+                &[imported],
+                &[],
+                &[PassKey(2), PassKey(2)],
+                &[PassKey(1)],
+                GraphLimits::default(),
+            )
+            .unwrap_err(),
+        FabricCompileError::DuplicateActivePass(PassKey(2))
+    );
+    assert_eq!(
+        resources
+            .compile_active(
+                &selection,
+                10,
+                &[imported],
+                &[],
+                &[PassKey(2)],
+                &[PassKey(1), PassKey(1)],
+                GraphLimits::default(),
+            )
+            .unwrap_err(),
+        FabricCompileError::DuplicateFulfilledDependency(PassKey(1))
+    );
+    assert_eq!(
+        resources
+            .compile_active(
+                &selection,
+                10,
+                &[imported],
+                &[],
+                &[PassKey(2)],
+                &[PassKey(3)],
+                GraphLimits::default(),
+            )
+            .unwrap_err(),
+        FabricCompileError::ForeignFulfilledDependency(PassKey(3))
+    );
+    assert_eq!(
+        resources
+            .compile_active(
+                &selection,
+                10,
+                &[imported],
+                &[],
+                &[PassKey(2)],
+                &[PassKey(2)],
+                GraphLimits::default(),
+            )
+            .unwrap_err(),
+        FabricCompileError::ForeignFulfilledDependency(PassKey(2))
+    );
+}
+
+#[test]
 fn derived_order_and_every_barrier_match_authoritative_resource_graph() {
     let compiled = compile_fixture(GraphLimits::default()).unwrap();
     let mut baseline = GpuFrameGraphBuilder::default();

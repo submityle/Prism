@@ -48,6 +48,29 @@ impl DeviceFabric {
             limits,
         )
     }
+
+    /// Compiles one recorder-owned active-pass slice without changing the
+    /// device-lifetime feature selection.
+    pub fn compile_active(
+        &self,
+        templates: &[ResourceTemplate],
+        frame: u64,
+        bindings: &[FrameResourceBinding],
+        items: &[FrameRenderItem],
+        active_passes: &[PassKey],
+        fulfilled_dependencies: &[PassKey],
+        limits: GraphLimits,
+    ) -> Result<CompiledFeatureGraph, FabricCompileError> {
+        ResourceTemplates::new(&self.catalog, templates)?.compile_active(
+            &self.selection,
+            frame,
+            bindings,
+            items,
+            active_passes,
+            fulfilled_dependencies,
+            limits,
+        )
+    }
 }
 
 #[cfg(test)]
