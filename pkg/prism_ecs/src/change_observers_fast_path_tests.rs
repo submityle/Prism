@@ -97,6 +97,51 @@ fn nonempty_flush_visits_only_active_candidates_after_heavy_churn() {
 }
 
 #[test]
+fn repeated_observer_churn_reuses_slots_instead_of_growing_registry() {
+    let mut world = World::new();
+    let calls = Arc::new(AtomicUsize::new(0));
+    world.observe_changed::<Value, _>(count(&calls));
+
+    for _ in 0..10_000 {
+        let id = world.observe_changed::<Value, _>(count(&calls));
+        assert!(world.remove_change_observer(id));
+    }
+
+    assert_eq!(world.change_observers.active, 1);
+    assert_eq!(world.change_observers.slots.len(), 2);
+    assert_eq!(world.change_observers.free_indices.len(), 1);
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn sparse_registry_compaction_preserves_order_and_pending_delivery() {
+    use std::sync::Mutex;
+
+    let mut world = World::new();
+    let entity = world.spawn(Value(0));
+    let order = Arc::new(Mutex::new(Vec::new()));
+    let ids: Vec<_> = (0..256)
+        .map(|label| {
+            let order = order.clone();
+            world.observe_changed::<Value, _>(move |_| order.lock().unwrap().push(label))
+        })
+        .collect();
+    assert_eq!(world.flush_changed_observers(), 0);
+
+    for id in ids.iter().take(240) {
+        assert!(world.remove_change_observer(*id));
+    }
+    assert_eq!(world.change_observers.active, 16);
+    assert!(
+        world.change_observers.slots.len() <= world.change_observers.active.saturating_mul(2) + 64
+    );
+
+    world.get_mut::<Value>(entity).unwrap().0 += 1;
+    assert_eq!(world.flush_changed_observers(), 16);
+    assert_eq!(*order.lock().unwrap(), (240..256).collect::<Vec<_>>());
+}
+
+#[test]
 fn nonempty_flush_visits_only_observers_for_dirty_components() {
     let mut world = World::new();
     let entity = world.spawn((Value(0), Sparse(0)));
@@ -491,11 +536,69 @@ fn active_index_preserves_order_across_remove_and_readd() {
     world.observe_changed::<Value, _>(observe(3, &order));
     assert_eq!(world.flush_changed_observers(), 0);
     assert!(world.remove_change_observer(removed));
-    world.observe_changed::<Value, _>(observe(4, &order));
+    let readded = world.observe_changed::<Value, _>(observe(4, &order));
 
     world.get_mut::<Value>(entity).unwrap().0 += 1;
     assert_eq!(world.flush_changed_observers(), 3);
     assert_eq!(*order.lock().unwrap(), [1, 3, 4]);
+    assert!(world.remove_change_observer(readded));
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn callback_churn_then_panic_keeps_candidates_and_deferred_slots_valid() {
+    use std::sync::{Mutex, OnceLock};
+
+    let mut world = World::new();
+    let entity = world.spawn(Value(0));
+    for _ in 0..4 {
+        let id = world.observe_changed::<Value, _>(|_| {});
+        assert!(world.remove_change_observer(id));
+    }
+
+    let order = Arc::new(Mutex::new(Vec::new()));
+    let future_id = Arc::new(OnceLock::<ObserverId>::new());
+    let panic_once = Arc::new(core::sync::atomic::AtomicBool::new(true));
+    let first_order = order.clone();
+    let future_id_in_first = future_id.clone();
+    let panic_once_in_first = panic_once.clone();
+    world.observe_changed::<Value, _>(move |ctx| {
+        first_order.lock().unwrap().push(1);
+        if panic_once_in_first.swap(false, Ordering::Relaxed) {
+            assert!(ctx
+                .world
+                .remove_change_observer(*future_id_in_first.get().unwrap()));
+            let replacement_order = first_order.clone();
+            ctx.world.observe_changed::<Value, _>(move |_| {
+                replacement_order.lock().unwrap().push(4);
+            });
+            panic!("exercise deferred slot reuse during unwind");
+        }
+    });
+    let removed = world.observe_changed::<Value, _>({
+        let order = order.clone();
+        move |_| order.lock().unwrap().push(2)
+    });
+    assert!(future_id.set(removed).is_ok());
+    world.observe_changed::<Value, _>({
+        let order = order.clone();
+        move |_| order.lock().unwrap().push(3)
+    });
+    assert_eq!(world.flush_changed_observers(), 0);
+
+    world.get_mut::<Value>(entity).unwrap().0 += 1;
+    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        world.flush_changed_observers();
+    }))
+    .is_err());
+    assert_eq!(*order.lock().unwrap(), [1]);
+
+    assert_eq!(world.flush_changed_observers(), 2);
+    assert_eq!(*order.lock().unwrap(), [1, 1, 3]);
+
+    world.get_mut::<Value>(entity).unwrap().0 += 1;
+    assert_eq!(world.flush_changed_observers(), 3);
+    assert_eq!(*order.lock().unwrap(), [1, 1, 3, 1, 3, 4]);
 }
 
 #[cfg(feature = "std")]

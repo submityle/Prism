@@ -136,6 +136,7 @@ struct ChangeSlot {
 
 struct ChangeEntry {
     id: ObserverId,
+    registration_order: u64,
     component: ComponentId,
     active: bool,
     slot: Option<ChangeSlot>,
@@ -159,12 +160,15 @@ struct FlushStats {
 
 /// The ordered change-observer registry (design §24.2).
 ///
-/// Slots are never compacted: removal clears a slot in place so the *registration
-/// order* — and therefore deterministic firing order — is preserved across
-/// remove/re-add churn, and so an index captured while a callback runs stays
-/// valid even if that callback registers or removes observers.
+/// Empty slots are reused outside an in-progress flush. Slots removed by a
+/// callback are deferred until the flush guard drops, so candidate indices
+/// remain stable for the entire delivery. Registration order is stored
+/// separately from the slot index and remains deterministic across reuse.
 pub(crate) struct ChangeObservers {
     slots: Vec<ChangeEntry>,
+    free_indices: Vec<usize>,
+    deferred_free_indices: Vec<usize>,
+    next_registration_order: u64,
     /// Active slots in registration order. Unlike `slots`, this never contains
     /// removed historical entries and is the source for a flush's candidate
     /// snapshot.
@@ -190,7 +194,7 @@ pub(crate) struct ChangeObservers {
     clean_revision: Option<u64>,
     /// Last skipped collection window and the old slots it applies to. New
     /// registrations retain their own (later) baseline instead of inheriting it.
-    idle_baseline: Option<(Tick, usize)>,
+    idle_baseline: Option<(Tick, u64)>,
     #[cfg(test)]
     stats: FlushStats,
 }
@@ -199,6 +203,9 @@ impl Default for ChangeObservers {
     fn default() -> Self {
         Self {
             slots: Vec::new(),
+            free_indices: Vec::new(),
+            deferred_free_indices: Vec::new(),
+            next_registration_order: 0,
             active_indices: Vec::new(),
             active_by_component: Vec::new(),
             pending_indices: Vec::new(),
@@ -226,21 +233,37 @@ impl ChangeObservers {
         self.flushing
     }
 
-    /// Number of slots ever occupied (including cleared ones).
-    fn slot_count(&self) -> usize {
-        self.slots.len()
-    }
-
     fn push(&mut self, slot: ChangeSlot) {
-        let index = self.slots.len();
+        if !self.flushing {
+            self.compact_if_sparse();
+        }
+        let registration_order = self.next_registration_order;
+        self.next_registration_order = self
+            .next_registration_order
+            .checked_add(1)
+            .expect("change observer registration order exhausted");
         let id = slot.id;
         let component = slot.observer.component_id();
-        self.slots.push(ChangeEntry {
+        let entry = ChangeEntry {
             id,
+            registration_order,
             component,
             active: true,
             slot: Some(slot),
+        };
+        let reusable = self.free_indices.pop().or_else(|| {
+            (!self.flushing)
+                .then(|| self.deferred_free_indices.pop())
+                .flatten()
         });
+        let index = if let Some(index) = reusable {
+            self.slots[index] = entry;
+            index
+        } else {
+            let index = self.slots.len();
+            self.slots.push(entry);
+            index
+        };
         self.active_indices.push(index);
         let component_index = component.index() as usize;
         if self.active_by_component.len() <= component_index {
@@ -266,21 +289,77 @@ impl ChangeObservers {
                 candidates.extend_from_slice(indices);
             }
         }
-        candidates.sort_unstable();
+        candidates.sort_unstable_by_key(|&index| self.slots[index].registration_order);
         candidates.dedup();
         candidates
     }
 
     fn mark_pending(&mut self, index: usize) {
-        match self.pending_indices.binary_search(&index) {
+        let order = self.slots[index].registration_order;
+        match self
+            .pending_indices
+            .binary_search_by_key(&order, |&pending| self.slots[pending].registration_order)
+        {
             Ok(_) => {}
             Err(position) => self.pending_indices.insert(position, index),
         }
     }
 
     fn clear_pending(&mut self, index: usize) {
-        if let Ok(position) = self.pending_indices.binary_search(&index) {
+        let order = self.slots[index].registration_order;
+        if let Ok(position) = self
+            .pending_indices
+            .binary_search_by_key(&order, |&pending| self.slots[pending].registration_order)
+        {
             self.pending_indices.remove(position);
+        }
+    }
+
+    fn compact_if_sparse(&mut self) {
+        debug_assert!(!self.flushing);
+        let retain_limit = self.active.saturating_mul(2).saturating_add(64);
+        if self.slots.len() <= retain_limit {
+            return;
+        }
+
+        let old_slots = core::mem::take(&mut self.slots);
+        let mut old_slots: Vec<_> = old_slots.into_iter().map(Some).collect();
+        let mut remap = alloc::vec![usize::MAX; old_slots.len()];
+        let mut compacted = Vec::with_capacity(self.active);
+        for old_index in self.active_indices.iter().copied() {
+            let entry = old_slots[old_index]
+                .take()
+                .expect("active observer slot must be unique");
+            debug_assert!(entry.active);
+            remap[old_index] = compacted.len();
+            compacted.push(entry);
+        }
+
+        self.active_indices.clear();
+        self.active_indices.extend(0..compacted.len());
+        for indices in &mut self.active_by_component {
+            indices.clear();
+        }
+        for (index, entry) in compacted.iter().enumerate() {
+            self.active_by_component[entry.component.index() as usize].push(index);
+        }
+        for index in self.slot_by_id.values_mut() {
+            *index = remap[*index];
+        }
+        for index in &mut self.pending_indices {
+            *index = remap[*index];
+        }
+
+        self.slots = compacted;
+        self.free_indices.clear();
+        self.deferred_free_indices.clear();
+        self.slots.shrink_to_fit();
+        self.free_indices.shrink_to_fit();
+        self.deferred_free_indices.shrink_to_fit();
+        self.active_indices.shrink_to_fit();
+        self.pending_indices.shrink_to_fit();
+        for indices in &mut self.active_by_component {
+            indices.shrink_to_fit();
         }
     }
 
@@ -306,29 +385,46 @@ impl ChangeObservers {
         let Some(index) = self.slot_by_id.remove(&id) else {
             return false;
         };
-        let entry = self
-            .slots
-            .get_mut(index)
-            .expect("active observer index must name a slot");
-        debug_assert!(entry.active && entry.id == id);
-        let component = entry.component;
-        entry.active = false;
-        entry.slot = None;
+        let (component, registration_order) = {
+            let entry = self
+                .slots
+                .get_mut(index)
+                .expect("active observer index must name a slot");
+            debug_assert!(entry.active && entry.id == id);
+            let component = entry.component;
+            let registration_order = entry.registration_order;
+            entry.active = false;
+            entry.slot = None;
+            (component, registration_order)
+        };
 
         let active_position = self
             .active_indices
-            .binary_search(&index)
+            .binary_search_by_key(&registration_order, |&active_index| {
+                self.slots[active_index].registration_order
+            })
             .expect("active observer missing from registration-order index");
         self.active_indices.remove(active_position);
-        let component_indices = &mut self.active_by_component[component.index() as usize];
-        let component_position = component_indices
-            .binary_search(&index)
+        let component_index = component.index() as usize;
+        let component_position = self.active_by_component[component_index]
+            .binary_search_by_key(&registration_order, |&component_index| {
+                self.slots[component_index].registration_order
+            })
             .expect("active observer missing from component index");
-        component_indices.remove(component_position);
+        self.active_by_component[component_index].remove(component_position);
+        debug_assert_eq!(registration_order, self.slots[index].registration_order);
         self.clear_pending(index);
+        if self.flushing {
+            self.deferred_free_indices.push(index);
+        } else {
+            self.free_indices.push(index);
+        }
 
         self.active -= 1;
         self.clean_revision = None;
+        if !self.flushing {
+            self.compact_if_sparse();
+        }
         true
     }
 
@@ -363,6 +459,14 @@ impl ChangeObservers {
                 slot.last_run = baseline;
                 slot.cursor = cursor;
             }
+        }
+    }
+
+    fn finish_flush(&mut self, compact: bool) {
+        debug_assert!(self.flushing);
+        self.flushing = false;
+        if compact {
+            self.compact_if_sparse();
         }
     }
 }
@@ -437,8 +541,9 @@ impl World {
     /// Replacing the World inside a callback ends this delivery; the replacement
     /// retains its own observers and is not automatically flushed by this call.
     /// After a successful delivery, an unchanged exact write-index revision
-    /// skips both slot passes in O(1), including removed historical slots. This
-    /// still advances the delivery tick and settles pending reaction effects.
+    /// skips both slot passes in O(1). Removed slots are reused or compacted
+    /// without changing registration order. This still advances the delivery
+    /// tick and settles pending reaction effects.
     pub fn flush_changed_observers(&mut self) -> usize {
         // Effects may explicitly request a flush. Their writes belong to the
         // next delivery window and must not recursively re-enter this bus.
@@ -449,18 +554,19 @@ impl World {
         {
             self.change_observers.stats = FlushStats::default();
         }
+        self.change_observers.compact_if_sparse();
         if self.change_observers.is_empty() {
             self.flush_reactions();
             return 0;
         }
-        let slot_count = self.change_observers.slot_count();
+        let registration_cutoff = self.change_observers.next_registration_order;
         let revision = self.change_tracker.revision();
         #[cfg(test)]
         {
             self.change_observers.stats.revision_checks += 1;
         }
         if revision.is_some() && revision == self.change_observers.clean_revision {
-            self.change_observers.idle_baseline = Some((self.change_tick(), slot_count));
+            self.change_observers.idle_baseline = Some((self.change_tick(), registration_cutoff));
             #[cfg(test)]
             {
                 self.change_observers.stats.idle_fast_path = true;
@@ -505,8 +611,8 @@ impl World {
                 restore_generation,
             };
             let slot = guard.slot.as_mut().expect("owned change observer");
-            if let Some((tick, old_count)) = idle_baseline
-                && index < old_count
+            if let Some((tick, old_cutoff)) = idle_baseline
+                && guard.world.change_observers.slots[index].registration_order < old_cutoff
             {
                 slot.last_run = tick;
             }
@@ -645,7 +751,7 @@ impl Drop for ChangeFlush<'_> {
             if !self.completed {
                 self.world.change_observers.clean_revision = None;
             }
-            self.world.change_observers.flushing = false;
+            self.world.change_observers.finish_flush(self.completed);
         }
     }
 }
