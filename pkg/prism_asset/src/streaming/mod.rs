@@ -21,7 +21,9 @@ mod demand;
 mod io;
 mod page_residency;
 mod range_assembly;
-pub(crate) use range_assembly::{assemble_ranges_resolved, collect_range_parts};
+pub(crate) use range_assembly::{
+    assemble_ranges_resolved, assemble_ranges_resolved_async, collect_range_parts,
+};
 
 pub use async_io::{AsyncStreamIoExecutor, AsyncStreamTask};
 pub use demand::{

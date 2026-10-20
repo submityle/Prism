@@ -31,11 +31,12 @@
 #![cfg(feature = "std")]
 
 use crate::path::AssetPath;
-use crate::source::{AssetMeta, AssetSources};
+use crate::source::{AssetMeta, AssetSources, ResolvedAssetRead};
 use crate::stores::ErasedAssetStore;
 use crate::streaming::{
-    assemble_ranges_resolved, collect_range_parts, RangeAssemblyError, RangeAssemblyLimits,
-    RangeAssemblyPlan, RangeAssemblyPlanError, RangePart,
+    assemble_ranges_resolved, assemble_ranges_resolved_async, collect_range_parts,
+    RangeAssemblyCancellation, RangeAssemblyError, RangeAssemblyLimits, RangeAssemblyPlan,
+    RangeAssemblyPlanError, RangePart,
 };
 use crate::type_id::AssetTypeId;
 use crate::{Asset, Assets, LoaderId, LoaderRegistry, SuffixConflict};
@@ -498,6 +499,39 @@ impl AssetLoaders {
         path: &AssetPath,
         requested: AssetTypeId,
     ) -> Result<Vec<u8>, String> {
+        let (source, plan, whole) = self.prepare_read(sources, path, requested)?;
+        let assembled = assemble_ranges_resolved(&source, &plan);
+        Self::finish_read(sources, path, whole, assembled)
+    }
+
+    /// Called on the scheduler's I/O pool. Preparation and legacy whole-read
+    /// fallback remain on I/O workers; only range joins yield asynchronously.
+    pub(crate) async fn read_for_type_async(
+        &self,
+        sources: &AssetSources,
+        path: &AssetPath,
+        requested: AssetTypeId,
+        pool: &prism_tasks::TaskPool,
+        priority: Arc<prism_tasks::PriorityCell>,
+    ) -> Result<Vec<u8>, String> {
+        let (source, plan, whole) = self.prepare_read(sources, path, requested)?;
+        let assembled = assemble_ranges_resolved_async(
+            &source,
+            &plan,
+            pool,
+            priority,
+            &RangeAssemblyCancellation::new(),
+        )
+        .await;
+        Self::finish_read(sources, path, whole, assembled)
+    }
+
+    fn prepare_read(
+        &self,
+        sources: &AssetSources,
+        path: &AssetPath,
+        requested: AssetTypeId,
+    ) -> Result<(ResolvedAssetRead, RangeAssemblyPlan, bool), String> {
         let source = sources
             .resolve_read(path)
             .map_err(|error| error.to_string())?;
@@ -520,7 +554,15 @@ impl AssetLoaders {
         let plan = declared_plan
             .validate(path, metadata.size)
             .map_err(|error| error.to_string())?;
-        let assembled = assemble_ranges_resolved(&source, &plan);
+        Ok((source, plan, whole))
+    }
+
+    fn finish_read(
+        sources: &AssetSources,
+        path: &AssetPath,
+        whole: bool,
+        assembled: Result<Vec<u8>, RangeAssemblyError>,
+    ) -> Result<Vec<u8>, String> {
         // A source is allowed to report metadata optimistically and later say
         // the path is absent (for example an overlay index that has gone
         // stale). Preserve the VFS's established NotFound-only fallback rule

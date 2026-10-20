@@ -16,7 +16,7 @@ use core::future::Future;
 use core::pin::Pin;
 use core::sync::atomic::{AtomicBool, Ordering};
 use core::task::{Context, Poll};
-use prism_tasks::{Task, TaskPool};
+use prism_tasks::{PriorityCell, Task, TaskPool};
 
 /// One physical range contributing bytes to an assembled payload.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -381,21 +381,95 @@ pub(crate) fn assemble_ranges_resolved(
 ) -> Result<Vec<u8>, RangeAssemblyError> {
     let mut output = reserve_output(plan.total_bytes)?;
     for (index, part) in plan.parts.iter().copied().enumerate() {
-        let bytes = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            source
-                .reader
-                .read_range(&source.path, part.offset, part.len)
-        }))
-        .map_err(|_| RangeAssemblyError::SourcePanicked { part: index })?
-        .map_err(|error| RangeAssemblyError::Read { part: index, error })?;
-        if bytes.len() as u64 != part.len {
-            return Err(RangeAssemblyError::ShortRead {
-                part: index,
-                expected: part.len,
-                actual: bytes.len() as u64,
-            });
-        }
+        let bytes = read_part(source.reader.as_ref(), &source.path, index, part)?;
         output.extend_from_slice(&bytes);
+    }
+    Ok(output)
+}
+
+fn read_part(
+    reader: &dyn crate::AssetReader,
+    path: &str,
+    index: usize,
+    part: RangePart,
+) -> Result<Vec<u8>, RangeAssemblyError> {
+    let bytes = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        reader.read_range(path, part.offset, part.len)
+    }))
+    .map_err(|_| RangeAssemblyError::SourcePanicked { part: index })?
+    .map_err(|error| RangeAssemblyError::Read { part: index, error })?;
+    if bytes.len() as u64 != part.len {
+        return Err(RangeAssemblyError::ShortRead {
+            part: index,
+            expected: part.len,
+            actual: bytes.len() as u64,
+        });
+    }
+    Ok(bytes)
+}
+
+/// Executes an already validated plan against one operation-pinned reader.
+/// Only one bounded batch is admitted at a time. Awaiting children yields the
+/// coordinator's worker; it never blocks an I/O worker waiting for that pool.
+/// Drain admitted reads even on failure/cancellation, so the caller's execution
+/// slot is not released while detached reads still consume its I/O budget.
+pub(crate) async fn assemble_ranges_resolved_async(
+    source: &crate::source::ResolvedAssetRead,
+    plan: &RangeAssemblyPlan,
+    pool: &TaskPool,
+    priority: Arc<PriorityCell>,
+    cancellation: &RangeAssemblyCancellation,
+) -> Result<Vec<u8>, RangeAssemblyError> {
+    if cancellation.is_cancelled() {
+        return Err(RangeAssemblyError::Cancelled);
+    }
+    let mut output = reserve_output(plan.total_bytes)?;
+    let parallel = plan.limits.max_parallel.min(pool.worker_count().max(1));
+    for (chunk_index, chunk) in plan.parts.chunks(parallel).enumerate() {
+        if cancellation.is_cancelled() {
+            return Err(RangeAssemblyError::Cancelled);
+        }
+        // A zero-worker pool cannot execute children unless explicitly driven.
+        // Also avoid an extra dispatch for plans that request serial reads.
+        if parallel == 1 {
+            let bytes = read_part(source.reader.as_ref(), &source.path, chunk_index, chunk[0])?;
+            output.extend_from_slice(&bytes);
+            continue;
+        }
+        let mut reads = Vec::with_capacity(chunk.len());
+        for (relative, part) in chunk.iter().copied().enumerate() {
+            let reader = Arc::clone(&source.reader);
+            let path = source.path.clone();
+            let cancellation = cancellation.clone();
+            let index = chunk_index * parallel + relative;
+            reads.push(
+                pool.spawn_future_with_priority(Arc::clone(&priority), async move {
+                    if cancellation.is_cancelled() {
+                        return Err(RangeAssemblyError::Cancelled);
+                    }
+                    read_part(reader.as_ref(), &path, index, part)
+                }),
+            );
+        }
+        let mut failure = None;
+        for read in reads {
+            match read.await {
+                Ok(bytes) if failure.is_none() && !cancellation.is_cancelled() => {
+                    output.extend_from_slice(&bytes);
+                }
+                Err(error) if failure.is_none() => failure = Some(error),
+                _ => {}
+            }
+        }
+        if cancellation.is_cancelled() {
+            return Err(RangeAssemblyError::Cancelled);
+        }
+        if let Some(error) = failure {
+            return Err(error);
+        }
+    }
+    if cancellation.is_cancelled() {
+        return Err(RangeAssemblyError::Cancelled);
     }
     Ok(output)
 }
@@ -455,58 +529,14 @@ pub fn assemble_ranges_async(
             return Err(RangeAssemblyError::Cancelled);
         }
         let source = resolve_source(&sources, &plan)?;
-        let mut output = reserve_output(plan.total_bytes)?;
-        let parallel = plan.limits.max_parallel;
-        for (chunk_index, chunk) in plan.parts.chunks(parallel).enumerate() {
-            if task_cancellation.is_cancelled() {
-                return Err(RangeAssemblyError::Cancelled);
-            }
-            let mut reads = Vec::with_capacity(chunk.len());
-            for (relative, part) in chunk.iter().copied().enumerate() {
-                let reader = Arc::clone(&source.reader);
-                let path = source.path.clone();
-                let cancellation = task_cancellation.clone();
-                let index = chunk_index * parallel;
-                reads.push(child_pool.spawn_async(async move {
-                    if cancellation.is_cancelled() {
-                        return Err(RangeAssemblyError::Cancelled);
-                    }
-                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        reader.read_range(&path, part.offset, part.len)
-                    }));
-                    let bytes = match result {
-                        Ok(Ok(bytes)) => bytes,
-                        Ok(Err(error)) => {
-                            return Err(RangeAssemblyError::Read {
-                                part: index + relative,
-                                error,
-                            })
-                        }
-                        Err(_) => {
-                            return Err(RangeAssemblyError::SourcePanicked {
-                                part: index + relative,
-                            })
-                        }
-                    };
-                    if bytes.len() as u64 != part.len {
-                        return Err(RangeAssemblyError::ShortRead {
-                            part: index + relative,
-                            expected: part.len,
-                            actual: bytes.len() as u64,
-                        });
-                    }
-                    Ok(bytes)
-                }));
-            }
-            for read in reads {
-                let bytes = read.await?;
-                if task_cancellation.is_cancelled() {
-                    return Err(RangeAssemblyError::Cancelled);
-                }
-                output.extend_from_slice(&bytes);
-            }
-        }
-        Ok(output)
+        assemble_ranges_resolved_async(
+            &source,
+            &plan,
+            &child_pool,
+            Arc::new(PriorityCell::new(prism_tasks::Priority::Normal)),
+            &task_cancellation,
+        )
+        .await
     });
     RangeAssemblyTicket { task, cancellation }
 }

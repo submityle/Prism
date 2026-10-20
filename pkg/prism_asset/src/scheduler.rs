@@ -10,8 +10,8 @@
 //! resident-root revision replacement with per-path epoch supersede and direct
 //! labeled-path loads that reuse the source assembly; reload candidates also
 //! decode and stage newly introduced ordinary dependencies and sibling labels
-//! before one atomic commit. Parts within one normal loader input are read
-//! sequentially; preemptive cancellation is outside this slice. Live priority cells order queued I/O and CPU work,
+//! before one atomic commit. Loader ranges use bounded batches on the existing
+//! I/O pool, concatenated in declaration order; preemptive cancellation is outside this slice. Live priority cells order queued I/O and CPU work,
 //! including wakeups and dependencies; ticket
 //! cancellation stops that caller from waiting but does not kill shared or
 //! already-running work.
@@ -1026,19 +1026,31 @@ impl LoadScheduler {
             let read_loaders = loaders.clone();
             let read_path = path.clone();
             let read_flight = Arc::clone(&flight);
-            let read = move || match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                read_loaders.read_for_type(&read_sources, &read_path, type_id)
-            })) {
-                Ok(Ok(bytes)) => Ok(Arc::<[u8]>::from(bytes)),
-                Ok(Err(error)) => Err(error.to_string()),
-                Err(_) => Err("asset source or loader panicked".to_string()),
-            };
             if self.io_pool.is_single_threaded() {
-                ReloadReadFlight::wake_all(read_flight.complete(read()));
+                let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    read_loaders.read_for_type(&read_sources, &read_path, type_id)
+                })) {
+                    Ok(Ok(bytes)) => Ok(Arc::<[u8]>::from(bytes)),
+                    Ok(Err(error)) => Err(error),
+                    Err(_) => Err("asset source or loader panicked".to_string()),
+                };
+                ReloadReadFlight::wake_all(read_flight.complete(result));
             } else {
+                let pool = self.io_pool.clone();
+                let priority = flight.priority.priority_cell();
                 self.io_pool
                     .spawn_future_with_priority(flight.priority.priority_cell(), async move {
-                        ReloadReadFlight::wake_all(read_flight.complete(read()));
+                        let result = read_loader_bytes_async(
+                            &read_loaders,
+                            &read_sources,
+                            &read_path,
+                            type_id,
+                            &pool,
+                            priority,
+                        )
+                        .await
+                        .map(Arc::<[u8]>::from);
+                        ReloadReadFlight::wake_all(read_flight.complete(result));
                     })
                     .detach();
             }
@@ -1170,16 +1182,20 @@ async fn execute_async_load(
         let read_loaders = plan.loaders.clone();
         let read_path = plan.path.clone();
         let read_type_id = plan.type_id;
+        let pool = scheduler.io_pool.clone();
+        let priority = flight.priority.priority_cell();
         scheduler
             .io_pool
             .spawn_future_with_priority(flight.priority.priority_cell(), async move {
-                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    read_loaders.read_for_type(&read_sources, &read_path, read_type_id)
-                })) {
-                    Ok(Ok(bytes)) => Ok(bytes),
-                    Ok(Err(error)) => Err(error.to_string()),
-                    Err(_) => Err("asset source or loader panicked".to_string()),
-                }
+                read_loader_bytes_async(
+                    &read_loaders,
+                    &read_sources,
+                    &read_path,
+                    read_type_id,
+                    &pool,
+                    priority,
+                )
+                .await
             })
             .await
     };
@@ -1625,6 +1641,19 @@ fn read_bytes_inline(plan: &crate::server::AsyncLoadPlan) -> Result<Vec<u8>, Str
     }
 }
 
+async fn read_loader_bytes_async(
+    loaders: &AssetLoaders,
+    sources: &AssetSources,
+    path: &AssetPath,
+    requested: AssetTypeId,
+    pool: &TaskPool,
+    priority: Arc<PriorityCell>,
+) -> Result<Vec<u8>, String> {
+    PanicBoundary::new(loaders.read_for_type_async(sources, path, requested, pool, priority))
+        .await
+        .unwrap_or_else(|()| Err("asset source or loader panicked".to_string()))
+}
+
 fn read_bytes_for_plan(
     sources: &AssetSources,
     plan: &crate::server::AsyncLoadPlan,
@@ -1738,6 +1767,10 @@ impl Cancellation {
 #[cfg(test)]
 #[path = "../text/unit/scheduler_priority.rs"]
 mod priority_tests;
+
+#[cfg(test)]
+#[path = "scheduler_range_tests.rs"]
+mod range_tests;
 
 #[cfg(test)]
 mod tests {
