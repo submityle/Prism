@@ -434,6 +434,15 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
             return report;
         }
 
+        // A conservative scan covers the requested ticks but does not consume
+        // journal revisions. If this was a current-tick request, remember a
+        // revision boundary before scanning so those already-covered writes
+        // cannot be replayed as changes in the next forward window. Capturing
+        // before the scan keeps concurrent later writes available to the next
+        // journal pass; such writes may conservatively overlap this scan.
+        let journal_baseline =
+            (this_run == world.change_tick()).then(|| world.archetypes().column_change_cursor());
+
         let archetypes = self.matched_archetypes(world);
         report.stats.matched_archetypes = archetypes.len();
         self.remember_sparse_window(last_run, this_run);
@@ -515,6 +524,9 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
                 report.stats.reported_chunks += 1;
                 report.stats.reported_rows += end - start;
             });
+        }
+        if let Some(cursor) = journal_baseline {
+            self.set_dirty_column_cursor(cursor);
         }
         report
     }

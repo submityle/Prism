@@ -158,6 +158,15 @@ impl ColumnJournal {
             }),
         }
     }
+
+    fn cursor(&self) -> ColumnChangeCursor {
+        let state = self.lock();
+        self.active.store(true, Ordering::Release);
+        ColumnChangeCursor {
+            log: self.id,
+            revision: state.revision,
+        }
+    }
 }
 
 /// A stable, dense identifier for an [`Archetype`] within a world.
@@ -418,6 +427,13 @@ impl Archetypes {
     /// Payload access still requires the usual ECS read/write scheduling barrier.
     pub fn column_changes_since(&self, cursor: Option<ColumnChangeCursor>) -> ColumnChanges {
         self.column_journal.since(cursor)
+    }
+
+    /// Establish an incremental baseline without materializing retained events.
+    /// Used after a conservative fallback has covered the current tick window.
+    #[inline]
+    pub(crate) fn column_change_cursor(&self) -> ColumnChangeCursor {
+        self.column_journal.cursor()
     }
 
     /// All archetypes mutably, in id order.
