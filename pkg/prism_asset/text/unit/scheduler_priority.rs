@@ -735,6 +735,7 @@ fn reload_read_dedup_and_io_promotion_share_the_same_live_cell() {
         &path,
         AssetTypeId::of::<Value>(),
         &low,
+        false,
     );
     let unrelated = scheduler.reload_read(
         7,
@@ -743,6 +744,7 @@ fn reload_read_dedup_and_io_promotion_share_the_same_live_cell() {
         &AssetPath::from("b.value"),
         AssetTypeId::of::<Value>(),
         &high,
+        false,
     );
     let joining = FlightPriority::new(Priority::Background);
     let duplicate = scheduler.reload_read(
@@ -752,6 +754,7 @@ fn reload_read_dedup_and_io_promotion_share_the_same_live_cell() {
         &path,
         AssetTypeId::of::<Value>(),
         &joining,
+        false,
     );
     joining.boost_to(Priority::Critical);
     assert!(Arc::ptr_eq(&first.flight, &duplicate.flight));

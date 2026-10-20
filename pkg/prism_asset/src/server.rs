@@ -150,6 +150,8 @@ pub(crate) enum AsyncLoadPreparation {
 }
 
 pub(crate) struct AsyncReloadPlan {
+    pub(crate) requested_path: AssetPath,
+    pub(crate) requested_handle: UntypedHandle,
     pub(crate) path: AssetPath,
     pub(crate) id: UntypedAssetId,
     pub(crate) type_id: AssetTypeId,
@@ -381,33 +383,47 @@ impl AssetServer {
         requested: Option<AssetTypeId>,
     ) -> Result<AsyncReloadPlan, String> {
         let mut inner = self.lock();
-        if path.has_label() {
-            return Err("async reload does not yet support labeled assets".into());
+        let requested_path = path;
+        let requested_handle = inner
+            .interned
+            .get(&requested_path)
+            .and_then(UntypedWeakHandle::upgrade)
+            .ok_or_else(|| format!("asset is not resident for async reload: {requested_path}"))?;
+        if requested.is_some_and(|type_id| requested_handle.id().type_id() != type_id) {
+            return Err(format!(
+                "asset path is already interned with another type: {requested_path}"
+            ));
         }
-        let type_id = match requested {
-            Some(ty) => ty,
-            None => inner
-                .loaders
-                .policy()
-                .resolve_untyped(&path)
-                .and_then(|id| inner.loaders.policy().produced_type(id))
-                .ok_or_else(|| format!("no loader for {path}"))?,
-        };
+        if !matches!(
+            inner.stores.load_state(requested_handle.id()),
+            LoadState::Loaded
+        ) {
+            return Err(format!(
+                "asset is not ready for async reload: {requested_path}"
+            ));
+        }
+        // A label's type selects its output, never the loader for the source's
+        // primary value. The resident source also remains authoritative when
+        // it was originally loaded using a non-default typed loader.
+        let path = requested_path.clone().without_label();
         let handle = inner
             .interned
             .get(&path)
             .and_then(UntypedWeakHandle::upgrade)
             .ok_or_else(|| format!("asset is not resident for async reload: {path}"))?;
-        if handle.id().type_id() != type_id {
-            return Err(format!(
-                "asset path is already interned with another type: {path}"
-            ));
-        }
+        let type_id = handle.id().type_id();
         if !matches!(inner.stores.load_state(handle.id()), LoadState::Loaded) {
             return Err(format!("asset is not ready for async reload: {path}"));
         }
-        let epoch = inner.reload_epochs.entry(path.clone()).or_default().begin();
+        let epoch = inner
+            .reload_epochs
+            .entry(path.clone())
+            .or_default()
+            .try_begin()
+            .ok_or_else(|| "async reload epoch space exhausted".to_string())?;
         Ok(AsyncReloadPlan {
+            requested_path,
+            requested_handle,
             path,
             id: handle.id(),
             type_id,
@@ -553,6 +569,8 @@ impl AssetServer {
         candidate: AsyncReloadCandidate,
     ) -> Result<UntypedHandle, AsyncReloadCommitError> {
         let AsyncReloadPlan {
+            requested_path,
+            requested_handle,
             path,
             id,
             type_id,
@@ -585,6 +603,25 @@ impl AssetServer {
                 return Err(AsyncReloadCommitError::Rejected(
                     "loader produced an unexpected asset type".into(),
                 ));
+            }
+            // Reject before publishing if the exact requested output no longer
+            // exists. A source reload can still explicitly retire that label.
+            if let Some(label) = requested_path.label() {
+                let sub = root_asset
+                    .output
+                    .labeled
+                    .iter()
+                    .find(|sub| sub.label == label)
+                    .ok_or_else(|| {
+                        AsyncReloadCommitError::Rejected(format!(
+                            "labeled asset was not emitted by {path}: {requested_path}"
+                        ))
+                    })?;
+                if sub.type_id != requested_handle.id().type_id() {
+                    return Err(AsyncReloadCommitError::Rejected(format!(
+                        "async reload labeled asset type changed at {requested_path}"
+                    )));
+                }
             }
 
             // Every primary in the candidate is reassembled from the same
@@ -717,6 +754,12 @@ impl AssetServer {
                     .or_else(|| handles.get(&dependency_path))
                     .cloned()
                     .or_else(|| {
+                        // This candidate owns the complete label set of each
+                        // source it stages; old removed labels cannot satisfy
+                        // dependencies of its replacement revision.
+                        if source_assets.contains_key(&dependency_path.clone().without_label()) {
+                            return None;
+                        }
                         inner
                             .interned
                             .get(&dependency_path)
@@ -836,7 +879,10 @@ impl AssetServer {
                     .unwrap_or_default();
                 inner.retire_removed_labels(&source_path, &previous_labels, &current_labels);
             }
-            Ok(handle.clone())
+            if requested_path.has_label() {
+                inner.promote_label_ownership(&requested_handle, &handle);
+            }
+            Ok(requested_handle.clone())
         });
         match committed {
             ReloadCommit::Committed(Ok(handle)) => Ok(handle),

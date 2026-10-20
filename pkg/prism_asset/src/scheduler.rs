@@ -7,19 +7,19 @@
 //! committing one dependency-aware revision. Awaiting a dependency yields the
 //! CPU worker, so a fixed worker count cannot deadlock solely because parent
 //! assemblies are waiting for child flights. Reload flights support a narrow
-//! resident-root revision replacement with per-path epoch supersede and direct
+//! resident-root revision replacement with per-source epoch supersede and direct
 //! labeled-path loads that reuse the source assembly; reload candidates also
 //! decode and stage newly introduced ordinary dependencies and sibling labels
 //! before one atomic commit. Loader ranges use bounded batches on the existing
 //! I/O pool, concatenated in declaration order; preemptive cancellation is outside this slice. Live priority cells order queued I/O and CPU work,
 //! including wakeups and dependencies; ticket
-//! cancellation stops that caller from waiting but does not kill shared or
-//! already-running work.
+//! cancellation stops that caller from waiting. Ordinary shared loads continue;
+//! reload cancellation also prevents publication of its staged revision.
 
 use crate::loader_exec::{AssetLoaders, FullLoadOutput};
 use crate::server::{
     AsyncLoadPreparation, AsyncReloadCandidate, AsyncReloadCandidateAsset, AsyncReloadCommitError,
-    SoftLoadError,
+    AsyncReloadPlan, SoftLoadError,
 };
 use crate::source::AssetSources;
 use crate::{Asset, AssetPath, AssetServer, AssetTypeId, SoftHandle, UntypedHandle};
@@ -31,6 +31,8 @@ use core::pin::Pin;
 use core::task::{Context, Poll, Waker};
 use prism_tasks::{Priority, PriorityCell, TaskPool};
 use std::sync::Mutex;
+
+const MAX_REVISION_CLOSURE: usize = 4096;
 
 /// Asset-loading urgency, applied to both I/O dispatch and CPU continuations.
 /// Running synchronous reads/decoders are not preempted. Promotion is monotonic.
@@ -328,10 +330,16 @@ struct SchedulerState {
     in_flight: BTreeMap<FlightKey, Arc<Flight>>,
     running: BTreeMap<FlightKey, Arc<Flight>>,
     reload_reads: BTreeMap<ReloadReadKey, Arc<ReloadReadFlight>>,
+    reload_requests: BTreeMap<FlightKey, ReloadRequest>,
     queued: VecDeque<QueuedFlight>,
     admission_waiters: Vec<AdmissionWaiter>,
     next_admission_seq: u64,
     next_reload_serial: u64,
+}
+
+struct ReloadRequest {
+    plan: Result<AsyncReloadPlan, LoadFailure>,
+    cancellation: Arc<Mutex<Cancellation>>,
 }
 
 struct AdmissionWaiter {
@@ -513,6 +521,7 @@ impl LoadScheduler {
                 in_flight: BTreeMap::new(),
                 running: BTreeMap::new(),
                 reload_reads: BTreeMap::new(),
+                reload_requests: BTreeMap::new(),
                 queued: VecDeque::new(),
                 admission_waiters: Vec::new(),
                 next_admission_seq: 0,
@@ -536,12 +545,29 @@ impl LoadScheduler {
     /// Reload flights are independent from ordinary load flights for the same
     /// path. Decoding and dependency resolution happen against staging state;
     /// only the latest reload epoch may replace the resident revision.
+    /// A labeled request reloads its entire source and returns that exact
+    /// resident label. If the candidate removes it, the revision is rejected.
     pub fn schedule_reload(
         &self,
         path: impl Into<AssetPath>,
         priority: impl Into<Priority>,
     ) -> Result<LoadTicket, ScheduleError> {
         self.schedule_reload_with_ancestors(path.into(), priority.into(), BTreeSet::new())
+    }
+
+    /// Reload a resident path with an explicit expected output type. For a
+    /// labeled path this checks the label, independently of the source type.
+    pub fn schedule_reload_typed<A: Asset>(
+        &self,
+        path: impl Into<AssetPath>,
+        priority: impl Into<Priority>,
+    ) -> Result<LoadTicket, ScheduleError> {
+        self.schedule_reload_typed_with_ancestors(
+            path.into(),
+            priority.into(),
+            Some(AssetTypeId::of::<A>()),
+            BTreeSet::new(),
+        )
     }
 
     /// Atomically admits a typed soft-reference batch, returning one separately
@@ -722,10 +748,14 @@ impl LoadScheduler {
             FlightKey::Load(path) | FlightKey::Reload { path, .. } => path.clone(),
         };
         let requested_type = requested_type.or_else(|| {
-            (!path.has_label())
+            (!reload && !path.has_label())
                 .then(|| self.server.inferred_asset_type(&path))
                 .flatten()
         });
+        let cancellation = Arc::new(Mutex::new(Cancellation {
+            cancelled: false,
+            waker: None,
+        }));
         let (flight, start_now) = {
             let mut state = self.state.lock().expect("load scheduler poisoned");
             if let Some(existing) = state.in_flight.get(&key) {
@@ -773,6 +803,22 @@ impl LoadScheduler {
                     priority: FlightPriority::new(priority),
                     requested_type,
                 });
+                if reload {
+                    // Admission order, not worker priority or polling order,
+                    // determines which source revision may publish. Capacity
+                    // refusals must not supersede already admitted work.
+                    let plan = self
+                        .server
+                        .prepare_async_reload(path.clone(), requested_type)
+                        .map_err(LoadFailure::AssemblyFailed);
+                    state.reload_requests.insert(
+                        key.clone(),
+                        ReloadRequest {
+                            plan,
+                            cancellation: Arc::clone(&cancellation),
+                        },
+                    );
+                }
                 state.in_flight.insert(key.clone(), Arc::clone(&flight));
                 if can_start {
                     state.running.insert(key.clone(), Arc::clone(&flight));
@@ -797,10 +843,7 @@ impl LoadScheduler {
         Ok(LoadTicket {
             flight,
             waiter_token: Arc::new(()),
-            cancellation: Arc::new(Mutex::new(Cancellation {
-                cancelled: false,
-                waker: None,
-            })),
+            cancellation,
         })
     }
 
@@ -829,6 +872,18 @@ impl LoadScheduler {
         ancestors: BTreeSet<AssetPath>,
         reload: bool,
     ) {
+        let reload_request = if reload {
+            Some(
+                self.state
+                    .lock()
+                    .expect("load scheduler poisoned")
+                    .reload_requests
+                    .remove(&key)
+                    .expect("admitted reload has a request"),
+            )
+        } else {
+            None
+        };
         let scheduler = self.clone();
         let server = Arc::clone(&self.server);
         let pool = self.cpu_pool.clone();
@@ -842,12 +897,11 @@ impl LoadScheduler {
             let worker_path = path.clone();
             let worker_flight = Arc::clone(&flight);
             let outcome = match PanicBoundary::new(async move {
-                if reload {
+                if let Some(request) = reload_request {
                     execute_async_reload(
                         worker_scheduler.clone(),
                         Arc::clone(&server),
-                        worker_path.clone(),
-                        worker_flight.requested_type,
+                        request,
                         Arc::clone(&worker_flight),
                     )
                     .await
@@ -896,6 +950,16 @@ impl LoadScheduler {
                 .is_some_and(|current| Arc::ptr_eq(current, &flight))
             {
                 state.in_flight.remove(&key);
+            }
+            if !state
+                .in_flight
+                .keys()
+                .any(|key| matches!(key, FlightKey::Reload { .. }))
+            {
+                // Completed reads are shared only by overlapping revisions.
+                // Keeping them indefinitely would reuse stale file contents
+                // on the next reload without a mount/unmount in between.
+                state.reload_reads.clear();
             }
             let queued = self.admit_queued_locked(&mut state);
             let admission_wakers = self.grant_admission_locked(&mut state);
@@ -992,6 +1056,7 @@ impl LoadScheduler {
         path: &AssetPath,
         type_id: AssetTypeId,
         priority: &FlightPriority,
+        fresh: bool,
     ) -> ReloadReadTicket {
         let key = ReloadReadKey {
             source_revision,
@@ -1000,13 +1065,13 @@ impl LoadScheduler {
         };
         let (flight, start) = {
             let mut state = self.state.lock().expect("load scheduler poisoned");
-            // Source revisions are immutable snapshots for a reload. Drop
-            // flights from older snapshots so a later mount can never reuse
-            // old bytes and the cache remains bounded by one revision.
+            // Share dependency reads only within an overlapping source
+            // snapshot. A root always reads again: mounted readers may change
+            // their file contents without changing the overlay revision.
             state
                 .reload_reads
                 .retain(|candidate, _| candidate.source_revision == source_revision);
-            if let Some(flight) = state.reload_reads.get(&key) {
+            if let Some(flight) = state.reload_reads.get(&key).filter(|_| !fresh) {
                 (Arc::clone(flight), false)
             } else {
                 let flight = Arc::new(ReloadReadFlight {
@@ -1016,7 +1081,26 @@ impl LoadScheduler {
                     }),
                     priority: FlightPriority::new(priority.effective_priority()),
                 });
-                state.reload_reads.insert(key, Arc::clone(&flight));
+                // One slow reload must not pin an unbounded history of reads
+                // from arbitrarily many later, completed reloads.
+                let cache_limit = self.limit.saturating_mul(MAX_REVISION_CLOSURE);
+                if state.reload_reads.len() >= cache_limit {
+                    let completed = state.reload_reads.iter().find_map(|(key, flight)| {
+                        flight
+                            .notification
+                            .lock()
+                            .expect("reload read flight poisoned")
+                            .result
+                            .is_some()
+                            .then(|| key.clone())
+                    });
+                    if let Some(completed) = completed {
+                        state.reload_reads.remove(&completed);
+                    }
+                }
+                if state.reload_reads.len() < cache_limit || state.reload_reads.contains_key(&key) {
+                    state.reload_reads.insert(key, Arc::clone(&flight));
+                }
                 (flight, true)
             }
         };
@@ -1344,15 +1428,18 @@ async fn execute_async_load(
 async fn execute_async_reload(
     scheduler: LoadScheduler,
     server: Arc<AssetServer>,
-    path: AssetPath,
-    requested_type: Option<AssetTypeId>,
+    request: ReloadRequest,
     flight: Arc<Flight>,
 ) -> ScheduleOutcome {
-    let plan = match server.prepare_async_reload(path.clone(), requested_type) {
-        Ok(plan) => plan,
-        Err(error) if error.starts_with("no loader for ") => return Err(LoadFailure::NoLoader),
-        Err(error) => return Err(LoadFailure::AssemblyFailed(error)),
-    };
+    let plan = request.plan?;
+    if request
+        .cancellation
+        .lock()
+        .expect("ticket waker poisoned")
+        .cancelled
+    {
+        return Err(LoadFailure::Cancelled);
+    }
     let output = decode_reload_source(
         &scheduler,
         plan.source_revision,
@@ -1361,6 +1448,7 @@ async fn execute_async_reload(
         &plan.path,
         plan.type_id,
         &flight.priority,
+        true,
     )
     .await
     .map_err(LoadFailure::AssemblyFailed)?;
@@ -1368,13 +1456,7 @@ async fn execute_async_reload(
     let mut pending = VecDeque::new();
     decoded.insert(plan.path.clone(), (plan.type_id, output));
     pending.push_back(plan.path.clone());
-    const MAX_REVISION_CLOSURE: usize = 4096;
     while let Some(current_path) = pending.pop_front() {
-        if decoded.len() > MAX_REVISION_CLOSURE {
-            return Err(LoadFailure::AssemblyFailed(
-                "async reload dependency closure exceeds the bounded candidate limit".into(),
-            ));
-        }
         let requests = {
             let (_, output) = decoded
                 .get(&current_path)
@@ -1390,6 +1472,19 @@ async fn execute_async_reload(
             let source_path = dependency.path.clone().without_label();
             if decoded.contains_key(&source_path) {
                 continue;
+            }
+            if decoded.len() >= MAX_REVISION_CLOSURE {
+                return Err(LoadFailure::AssemblyFailed(
+                    "async reload dependency closure exceeds the bounded candidate limit".into(),
+                ));
+            }
+            if request
+                .cancellation
+                .lock()
+                .expect("ticket waker poisoned")
+                .cancelled
+            {
+                return Err(LoadFailure::Cancelled);
             }
             let dependency_type = if dependency.path.has_label() {
                 plan.loaders
@@ -1420,6 +1515,7 @@ async fn execute_async_reload(
                 &source_path,
                 dependency_type,
                 &flight.priority,
+                false,
             )
             .await
             .map_err(LoadFailure::AssemblyFailed)?;
@@ -1442,6 +1538,12 @@ async fn execute_async_reload(
             })
             .collect(),
     };
+    // Serialize cancellation with publication: a cancel that wins this lock
+    // leaves the complete resident revision untouched, even after blocking I/O.
+    let cancellation = request.cancellation.lock().expect("ticket waker poisoned");
+    if cancellation.cancelled {
+        return Err(LoadFailure::Cancelled);
+    }
     match server.commit_async_reload(plan, candidate) {
         Ok(handle) => Ok(handle),
         Err(AsyncReloadCommitError::Superseded) => Err(LoadFailure::Superseded),
@@ -1461,9 +1563,18 @@ async fn decode_reload_source(
     path: &AssetPath,
     type_id: AssetTypeId,
     priority: &FlightPriority,
+    fresh: bool,
 ) -> Result<FullLoadOutput, String> {
     let bytes = scheduler
-        .reload_read(source_revision, sources, loaders, path, type_id, priority)
+        .reload_read(
+            source_revision,
+            sources,
+            loaders,
+            path,
+            type_id,
+            priority,
+            fresh,
+        )
         .await?;
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         loaders
@@ -1662,8 +1773,8 @@ fn read_bytes_for_plan(
         .read_for_type(sources, &plan.path, plan.type_id)
 }
 
-/// A future for one consumer of a scheduled load. Cancelling a ticket only
-/// cancels that consumer's wait; shared server work is allowed to finish.
+/// A future for one consumer of a scheduled load. Ordinary shared loads may
+/// finish after cancellation; a reload cannot publish after cancellation wins.
 pub struct LoadTicket {
     flight: Arc<Flight>,
     waiter_token: Arc<()>,
@@ -1703,8 +1814,9 @@ impl LoadTicket {
         self.flight.priority.effective_priority()
     }
 
-    /// Stop waiting for this request. This is cooperative at the API boundary:
-    /// shared work and work already running on the synchronous server continue.
+    /// Stop waiting for this request. Shared ordinary loads continue. For a
+    /// reload, cancellation before commit also discards the staged revision;
+    /// synchronous reads/decoders already running are not interrupted.
     pub fn cancel(&self) {
         let waker = self
             .cancellation
@@ -2478,6 +2590,124 @@ mod tests {
     }
 
     #[test]
+    fn queued_label_reload_is_bounded_and_refused_requests_do_not_advance_its_epoch() {
+        let server = Arc::new(AssetServer::new());
+        server.register_loader(LabeledLoader);
+        let mut source = MemSource::new();
+        source.insert("scene.scene", []);
+        server.mount("mem", Arc::new(source), 0);
+        let root = server.load::<TestAsset>("scene.scene");
+        let label = server.load::<OtherAsset>("scene.scene#mesh");
+        let scheduler = LoadScheduler::new(Arc::clone(&server), TaskPool::with_threads(0), 1);
+        let blocker_key = FlightKey::Load(AssetPath::parse("blocked.sched"));
+        let blocker = Arc::new(Flight {
+            notification: Mutex::new(FlightNotification {
+                result: None,
+                waiters: Vec::new(),
+            }),
+            priority: FlightPriority::new(Priority::Normal),
+            requested_type: None,
+        });
+        {
+            let mut state = scheduler.state.lock().unwrap();
+            state
+                .in_flight
+                .insert(blocker_key.clone(), Arc::clone(&blocker));
+            state
+                .running
+                .insert(blocker_key.clone(), Arc::clone(&blocker));
+        }
+        let ancestors = BTreeSet::from([AssetPath::parse("blocked.sched")]);
+        let queued = scheduler
+            .schedule_reload_typed_with_ancestors(
+                AssetPath::parse("scene.scene#mesh"),
+                Priority::Normal,
+                Some(AssetTypeId::of::<OtherAsset>()),
+                ancestors.clone(),
+            )
+            .unwrap();
+        for _ in 0..32 {
+            assert!(matches!(
+                scheduler.schedule_reload_typed_with_ancestors(
+                    AssetPath::parse("scene.scene"),
+                    Priority::Critical,
+                    Some(AssetTypeId::of::<TestAsset>()),
+                    ancestors.clone(),
+                ),
+                Err(ScheduleError::DependencyQueueFull { limit: 1 })
+            ));
+            let state = scheduler.state.lock().unwrap();
+            assert_eq!(state.queued.len(), 1);
+            assert_eq!(state.reload_requests.len(), 1);
+            assert_eq!(state.in_flight.len(), 2);
+        }
+        scheduler.finish_flight(blocker_key, blocker, Err(LoadFailure::Cancelled));
+        assert_eq!(
+            scheduler.cpu_pool.block_on(queued).unwrap().id(),
+            label.untyped_id()
+        );
+        assert!(server.is_loaded(root.untyped_id()));
+        assert!(server.is_loaded(label.untyped_id()));
+        let state = scheduler.state.lock().unwrap();
+        assert!(state.in_flight.is_empty());
+        assert!(state.queued.is_empty());
+        assert!(state.reload_requests.is_empty());
+        assert!(state.reload_reads.is_empty());
+    }
+
+    #[test]
+    fn reload_read_cache_stays_bounded_while_a_revision_is_still_active() {
+        let server = Arc::new(AssetServer::new());
+        server.register_loader(ReloadLoader);
+        let mut source = MemSource::new();
+        source.insert("hero.reload", [1]);
+        server.mount("mem", Arc::new(source), 0);
+        let root = server.load::<ReloadAsset>("hero.reload");
+        let plan = server
+            .prepare_async_reload(AssetPath::parse("hero.reload"), None)
+            .unwrap();
+        let scheduler = LoadScheduler::new(Arc::clone(&server), TaskPool::with_threads(0), 1);
+        let priority = FlightPriority::new(Priority::Normal);
+        {
+            let mut state = scheduler.state.lock().unwrap();
+            for index in 0..MAX_REVISION_CLOSURE {
+                state.reload_reads.insert(
+                    ReloadReadKey {
+                        source_revision: plan.source_revision,
+                        path: AssetPath::new(format!("completed-{index}.reload")),
+                        type_id: plan.type_id,
+                    },
+                    Arc::new(ReloadReadFlight {
+                        notification: Mutex::new(ReloadReadNotification {
+                            result: Some(Ok(Arc::from([1_u8]))),
+                            waiters: Vec::new(),
+                        }),
+                        priority: FlightPriority::new(Priority::Normal),
+                    }),
+                );
+            }
+        }
+        let bytes = scheduler
+            .cpu_pool
+            .block_on(scheduler.reload_read(
+                plan.source_revision,
+                &plan.sources,
+                &plan.loaders,
+                &plan.path,
+                plan.type_id,
+                &priority,
+                true,
+            ))
+            .unwrap();
+        assert_eq!(&*bytes, &[1]);
+        assert_eq!(
+            scheduler.state.lock().unwrap().reload_reads.len(),
+            MAX_REVISION_CLOSURE
+        );
+        assert!(server.is_loaded(root.untyped_id()));
+    }
+
+    #[test]
     fn source_panics_fail_ticket_and_release_capacity() {
         let server = Arc::new(AssetServer::new());
         server.register_loader(TestLoader);
@@ -2975,6 +3205,75 @@ mod tests {
         release.store(true, Ordering::Release);
         assert!(scheduler.cpu_pool.block_on(duplicate).is_ok());
         assert_eq!(flight.waiter_count(), 0);
+    }
+
+    struct WideReloadLoader;
+
+    impl AssetLoader for WideReloadLoader {
+        type Asset = TestAsset;
+
+        fn extensions(&self) -> &'static [&'static str] {
+            &["wide-reload"]
+        }
+
+        fn load(&self, bytes: &[u8], ctx: &mut LoadContext<'_>) -> Result<TestAsset, LoadError> {
+            if bytes == [1] {
+                for index in 0..MAX_REVISION_CLOSURE {
+                    ctx.add_typed_dependency(
+                        AssetPath::new(format!("leaf-{index}.rdep")),
+                        AssetTypeId::of::<OtherAsset>(),
+                    );
+                }
+            }
+            ctx.add_labeled_asset("mesh", OtherAsset);
+            Ok(TestAsset)
+        }
+    }
+
+    struct WideReloadSource(Arc<AtomicUsize>);
+
+    impl AssetReader for WideReloadSource {
+        fn read(&self, _: &str) -> Result<Vec<u8>, ReadError> {
+            self.0.fetch_add(1, Ordering::AcqRel);
+            Ok(vec![1])
+        }
+
+        fn metadata(&self, _: &str) -> Result<AssetMeta, ReadError> {
+            Ok(AssetMeta {
+                size: 1,
+                modified_ms: None,
+                is_dir: false,
+            })
+        }
+    }
+
+    #[test]
+    fn label_reload_closure_limit_is_enforced_before_reading_an_extra_source() {
+        let server = Arc::new(AssetServer::new());
+        server.register_loader(WideReloadLoader);
+        server.register_loader(ReloadDependencyLoader);
+        let mut source = MemSource::new();
+        source.insert("root.wide-reload", [0]);
+        server.mount("mem", Arc::new(source), 0);
+        let root = server.load::<TestAsset>("root.wide-reload");
+        let label = server.load::<OtherAsset>("root.wide-reload#mesh");
+        let reads = Arc::new(AtomicUsize::new(0));
+        server.mount("wide", Arc::new(WideReloadSource(Arc::clone(&reads))), 10);
+        let scheduler = LoadScheduler::new(Arc::clone(&server), TaskPool::with_threads(0), 1);
+        let result = scheduler.cpu_pool.block_on(
+            scheduler
+                .schedule_reload_typed::<OtherAsset>("root.wide-reload#mesh", Priority::Normal)
+                .unwrap(),
+        );
+        assert!(
+            matches!(result, Err(LoadFailure::AssemblyFailed(error)) if error.contains("bounded candidate limit"))
+        );
+        assert_eq!(reads.load(Ordering::Acquire), MAX_REVISION_CLOSURE);
+        assert_eq!(server.total_assets(), 2);
+        assert!(server.recursive_state(root.untyped_id()).is_loaded());
+        assert!(server.recursive_state(label.untyped_id()).is_loaded());
+        assert_eq!(scheduler.in_flight(), 0);
+        assert!(scheduler.state.lock().unwrap().reload_reads.is_empty());
     }
 
     struct CountWake(Arc<AtomicUsize>);
