@@ -1,40 +1,37 @@
 //! Optional `wgpu` compute backend for Prism's `GDeflate` asset-streaming
 //! decompressor.
 //!
-//! `DirectStorage`-class streaming ships assets `GDeflate`-compressed: the
-//! payload is split into fixed-size tiles, each tile is `DEFLATE`-compressed,
-//! and the resulting bitstream is laid out so a 32-lane `GPU` warp can decode
-//! it with coalesced access — logical 32-bit word `r * 32 + lane` is stored at
-//! lane-major position `lane * rounds + r`. The complete, device-free codec
+//! Prism splits payloads into fixed-size raw-DEFLATE tiles and transposes
+//! their words into a 32-lane layout: logical 32-bit word `r * 32 + lane` is
+//! stored at lane-major position `lane * rounds + r`. This layout does not
+//! make Huffman or LZ77 decoding warp-parallel. The complete, device-free codec
 //! (container framing, the `RFC 1951` inflate core, and the reversible word
 //! transpose) lives in
 //! [`prism_render_architecture::compression`].
 //!
-//! This crate is the real-device half of the *embarrassingly-parallel* stage of
-//! that pipeline: a compute kernel that reverses the warp-interleave transpose.
-//! The Huffman inflate is inherently serial and variable-length, so it is
-//! deliberately **not** moved to the `GPU`; instead the kernel performs the
-//! per-output-word de-interleave gather (one invocation writes one linear word
-//! by reading its lane-major source word) and the host runs the ordinary
-//! `inflate` core on the recovered stream. This mirrors how the sparse
-//! virtual-texture twin splits its parallel map onto the device and keeps the
-//! serial dedup on the host.
+//! The unified decoder uses a complete GPU raw-DEFLATE kernel: direct
+//! lane-major word gather, stored/fixed/dynamic blocks, device-built canonical
+//! Huffman trees, and LZ77 references across block boundaries. Host code parses
+//! Prism's GDF1 framing and verifies tile checksums; no CPU inflate is used on
+//! the successful GPU path. GPU rejection retries the CPU golden codec with
+//! explicit fallback telemetry. Legacy de-interleave, stored-plan, and strict
+//! fixed-only APIs remain available separately.
+//!
+//! Tiles are bounded to 64 KiB and decoded serially by one invocation each.
+//! This synchronous implementation reads each tile back before submitting
+//! the next; batched dispatch and GPU-resident consumers are not provided.
+//! The lane-major GDF1 layout is Prism's format contract, not a claim of binary
+//! interoperability with external DirectStorage/GDeflate implementations.
 //!
 //! # Exact parity
 //!
-//! The de-interleave is a pure word permutation — every invocation computes
-//! integer indices (`lane = logical % 32`, `r = logical / 32`,
-//! `stored = lane * rounds + r`) and moves a whole 32-bit word, so no bit is
-//! ever reinterpreted. There is no floating point anywhere, so the device
-//! output equals the golden de-interleave bit-for-bit and the parity tests
-//! assert exact equality rather than a tolerance. An end-to-end test feeds a
-//! real [`gdeflate_compress`](prism_render_architecture::compression::gdeflate_compress)
-//! tile payload through the device de-interleave and then the golden
-//! [`inflate`](prism_render_architecture::compression::inflate), proving the
-//! device stage composes with the real golden decode path.
+//! Real-device tests compare GPU output directly against independently built
+//! bytes and exercise dynamic trees, mixed blocks, malformed streams, and
+//! the shared compressor. Successful unified decode must report full GPU
+//! execution with no fallback; CPU correctness is not used as GPU evidence.
 //!
 //! Provenance: the public `GDeflate`/`DirectStorage` format description only.
-//! Classical, data-oblivious integer word permutation; no neural, learned, or
+//! Classical integer permutation and canonical Huffman/LZ77; no neural, learned, or
 //! data-driven components. No Unreal Engine or NVIDIA `GDeflate` source or
 //! derived code.
 
@@ -43,14 +40,18 @@ extern crate alloc;
 pub mod buffer;
 pub mod context;
 pub mod decoder;
+pub mod deflate;
 pub mod deinterleave;
+pub mod fixed;
 pub mod stored;
 
 pub use context::{GpuContext, GpuProbeError};
 pub use decoder::{
     DecodePath, DecodeReport, DecodedGDeflate, DecoderError, GDeflateDecoder, GpuFallbackReason,
 };
+pub use deflate::{DeflateDecodeError, GpuDeflate};
 pub use deinterleave::{
     reference_deinterleave, DeinterleaveError, GpuDeinterleave, GROUP, LANES, WORD,
 };
+pub use fixed::{FixedDecodeError, GpuFixedGDeflate};
 pub use stored::{plan_stored_deflate, GpuStoredGDeflate, StoredBlockPlan, StoredPlanError};

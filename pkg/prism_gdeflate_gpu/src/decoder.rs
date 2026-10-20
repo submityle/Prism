@@ -1,19 +1,18 @@
-//! Unified GDeflate decode policy with an honest GPU/CPU execution report.
+//! Unified `GDeflate` decode policy with an honest GPU/CPU execution report.
 //!
-//! The current GPU backend owns the fixed-cost word de-interleave stage. The
-//! variable-length RFC 1951 Huffman stage remains the shared CPU golden
-//! implementation. This module makes that boundary explicit at the call site:
-//! callers get one decoder, deterministic integrity checks, and a report that
-//! says whether the GPU was used or why the CPU fallback was selected.
+//! Every block type is decoded completely on the GPU, including dynamic tree
+//! construction. Framing and checksums remain host-side. GPU rejection or an
+//! integrity failure retries the complete stream through the CPU golden path
+//! and is reported as a fallback, never as successful GPU decode.
 
 use alloc::vec::Vec;
 use core::fmt;
 
 use prism_render_architecture::compression::{
-    deflate::inflate, gdeflate_decompress, GDeflateError, GDeflateTileDescriptor, InflateError,
+    gdeflate_decompress, GDeflateError, GDeflateTileDescriptor, InflateError,
 };
 
-use crate::{DeinterleaveError, GpuContext, GpuDeinterleave};
+use crate::{DeflateDecodeError, DeinterleaveError, GpuContext, GpuDeflate};
 
 const HEADER_LEN: usize = 20;
 const DESCRIPTOR_LEN: usize = 12;
@@ -27,7 +26,16 @@ const MAX_TILES: usize = 1_000_000;
 pub enum DecodePath {
     /// The complete stream was decoded by the CPU golden implementation.
     Cpu,
+    /// All tile blocks, dynamic trees, and LZ77 history were decoded on GPU.
+    /// Container parsing and checksum verification are still CPU-side.
+    GpuDeflate,
+    /// A fixed-Huffman tile stream was decoded entirely by the GPU, including
+    /// lane-major word gather, Huffman symbols, and LZ77 back-references.
+    /// Retained for report compatibility; the unified decoder now uses
+    /// [`Self::GpuDeflate`] for every supported block type.
+    GpuFixedHuffman,
     /// GPU de-interleave was used and CPU Huffman inflate completed the tiles.
+    /// Legacy report value; no longer emitted by the unified decoder.
     GpuDeinterleaveCpuHuffman,
     /// GPU was attempted but the request fell back to the CPU golden path.
     CpuFallback,
@@ -39,7 +47,12 @@ pub enum GpuFallbackReason {
     /// The caller did not provide a real device.
     NoDevice,
     /// The adapter rejected the request shape or resource size.
+    /// Legacy de-interleave reason; new full-decode errors are reported via
+    /// [`Self::DecodeRejected`].
     DeviceLimit(DeinterleaveError),
+    /// The complete GPU decoder rejected a tile. Any returned bytes came
+    /// from a successful, independently validated CPU golden retry.
+    DecodeRejected(DeflateDecodeError),
     /// The GPU result failed the same CPU-side integrity checks as the golden
     /// decoder, so the safe CPU path was used.
     Integrity,
@@ -76,6 +89,7 @@ pub enum DecoderError {
     /// The stream framing or tile integrity is invalid.
     Format(GDeflateError),
     /// The shared CPU inflate core rejected a tile.
+    /// Legacy hybrid-path error; CPU golden retries now return [`Self::Format`].
     Inflate(InflateError),
 }
 
@@ -92,15 +106,15 @@ impl std::error::Error for DecoderError {}
 
 /// Reusable decoder policy. The pipeline is compiled once per GPU context.
 pub struct GDeflateDecoder {
-    deinterleave: GpuDeinterleave,
+    deflate: GpuDeflate,
 }
 
 impl GDeflateDecoder {
-    /// Compiles the GPU de-interleave pipeline for `ctx`.
+    /// Compiles the complete GPU DEFLATE pipeline for `ctx`.
     #[must_use]
     pub fn new(ctx: &GpuContext) -> Self {
         Self {
-            deinterleave: GpuDeinterleave::new(ctx),
+            deflate: GpuDeflate::new(ctx),
         }
     }
 
@@ -134,79 +148,55 @@ impl GDeflateDecoder {
         Self::new(ctx).decode(ctx, input)
     }
 
-    /// Attempts GPU de-interleave plus CPU Huffman inflate, falling back to
-    /// the CPU golden decoder on shape/limit/device-side failures.
+    /// Prefers complete GPU decode for every tile. A GPU error or checksum
+    /// failure retries the entire stream on CPU and reports the exact reason.
     pub fn decode(&self, ctx: &GpuContext, input: &[u8]) -> Result<DecodedGDeflate, DecoderError> {
         let parsed = parse_stream(input).map_err(DecoderError::Format)?;
-        match self.decode_gpu(ctx, &parsed) {
-            Ok(bytes) => Ok(DecodedGDeflate {
-                report: DecodeReport {
-                    path: DecodePath::GpuDeinterleaveCpuHuffman,
-                    gpu_attempted: true,
-                    compressed_bytes: input.len(),
-                    uncompressed_bytes: bytes.len(),
-                    fallback: None,
-                },
-                bytes,
-            }),
-            Err(GpuAttemptError::Limit(reason)) => {
-                let mut decoded = Self::decode_cpu(input)?;
-                decoded.report.path = DecodePath::CpuFallback;
-                decoded.report.gpu_attempted = true;
-                decoded.report.fallback = Some(GpuFallbackReason::DeviceLimit(reason));
-                Ok(decoded)
+        let (bytes, path, fallback) = match self.decode_gpu(ctx, &parsed) {
+            Ok(bytes) => (bytes, DecodePath::GpuDeflate, None),
+            Err(reason) => {
+                let decoded = Self::decode_cpu(input)?;
+                (decoded.bytes, DecodePath::CpuFallback, Some(reason))
             }
-            Err(GpuAttemptError::Integrity) => {
-                let mut decoded = Self::decode_cpu(input)?;
-                decoded.report.path = DecodePath::CpuFallback;
-                decoded.report.gpu_attempted = true;
-                decoded.report.fallback = Some(GpuFallbackReason::Integrity);
-                Ok(decoded)
-            }
-            Err(GpuAttemptError::Inflate(_error)) => {
-                let mut decoded = Self::decode_cpu(input)?;
-                decoded.report.path = DecodePath::CpuFallback;
-                decoded.report.gpu_attempted = true;
-                decoded.report.fallback = Some(GpuFallbackReason::Integrity);
-                Ok(decoded)
-            }
-        }
+        };
+        Ok(DecodedGDeflate {
+            report: DecodeReport {
+                path,
+                gpu_attempted: true,
+                compressed_bytes: input.len(),
+                uncompressed_bytes: bytes.len(),
+                fallback,
+            },
+            bytes,
+        })
     }
 
     fn decode_gpu(
         &self,
         ctx: &GpuContext,
         parsed: &ParsedStream,
-    ) -> Result<Vec<u8>, GpuAttemptError> {
+    ) -> Result<Vec<u8>, GpuFallbackReason> {
         let mut output = Vec::with_capacity(parsed.uncompressed_size as usize);
-        for (descriptor, payload) in parsed.tiles.iter() {
-            let linear = self
-                .deinterleave
-                .deinterleave(ctx, payload)
-                .map_err(GpuAttemptError::Limit)?;
-            let compressed_size = descriptor.compressed_size as usize;
-            let deflated = linear
-                .get(..compressed_size)
-                .ok_or(GpuAttemptError::Integrity)?;
-            let tile = inflate(deflated).map_err(GpuAttemptError::Inflate)?;
-            if tile.len() != descriptor.uncompressed_size as usize
-                || checksum(&tile) != descriptor.checksum
-            {
-                return Err(GpuAttemptError::Integrity);
+        for (descriptor, payload) in &parsed.tiles {
+            let tile = self
+                .deflate
+                .decompress(
+                    ctx,
+                    payload,
+                    descriptor.compressed_size as usize,
+                    descriptor.uncompressed_size as usize,
+                )
+                .map_err(GpuFallbackReason::DecodeRejected)?;
+            if checksum(&tile) != descriptor.checksum {
+                return Err(GpuFallbackReason::Integrity);
             }
             output.extend_from_slice(&tile);
         }
         if output.len() != parsed.uncompressed_size as usize {
-            return Err(GpuAttemptError::Integrity);
+            return Err(GpuFallbackReason::Integrity);
         }
         Ok(output)
     }
-}
-
-enum GpuAttemptError {
-    Limit(DeinterleaveError),
-    Integrity,
-    Inflate(InflateError),
 }
 
 struct ParsedStream<'a> {
