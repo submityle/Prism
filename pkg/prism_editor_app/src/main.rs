@@ -53,7 +53,9 @@ fn run_native(args: &[String], frames: u64) {
         u32::try_from(width).expect("--width must fit u32"),
         u32::try_from(height).expect("--height must fit u32"),
     ];
-    let ui = EditorDesktopUi::new(EditorController::new()).expect("valid empty editor UI");
+    let mut ui = EditorDesktopUi::new(EditorController::new()).expect("valid empty editor UI");
+    ui.mount_content_browser(prism_editor_content::ContentCatalog::new())
+        .expect("valid empty content catalog");
     let scene = DesktopScene::new(Vec::new()).expect("valid empty desktop scene");
     let outcome = run_desktop(
         DesktopConfig {

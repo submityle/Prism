@@ -13,13 +13,16 @@ fn main() {
         .find(|a| a[0] == "--frames")
         .and_then(|a| a[1].parse().ok());
     let (controller, scene) = support::scene().expect("example host bindings");
+    let mut ui = EditorDesktopUi::new(controller).expect("example UI");
+    ui.mount_content_browser(prism_editor_content::ContentCatalog::new())
+        .expect("content dock");
     let outcome = run_desktop(
         DesktopConfig {
             frame_limit: frames,
             time_limit: frames.map(|_| std::time::Duration::from_secs(15)),
             ..Default::default()
         },
-        EditorDesktopUi::new(controller).expect("example UI"),
+        ui,
         scene,
     );
     println!(

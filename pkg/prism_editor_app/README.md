@@ -115,6 +115,29 @@ failure rollback and codec reload; the transform persistence test in
 fail if hardware is unavailable. The native smoke proves window presentation,
 not automated OS mouse/key delivery.
 
+The native content dock mounts the real bound Loom browser through
+`EditorDesktopUi::mount_content_browser(ContentCatalog)`. Both the CLI desktop
+entry point and the Gizmo example mount an initially empty catalog. Hosts publish
+real source/Git results through `content_catalog_mut()` on the UI thread, then wake
+the native loop. Its refresh checks catalog generation independently of document
+revision; unchanged frames keep the retained draw list and GPU uploads. Browser
+queries and asset selection are available through `content_browser()` and remain
+independent of document object selection, dirty state and Undo/Redo history.
+
+The dock uses actual layout rectangles for row/button hits and four text inputs,
+including IME composition, Enter/Tab commits and Escape cancellation. Nested
+favorite/pin controls update the real catalog. A catalog publication invalidates
+old browser clicks and text drafts; an Inspector draft survives that publication.
+While browser text owns focus, Undo/Redo does not alter document history. All text
+focus conservatively fences close/reload and Gizmo capture until committed or
+cancelled. Resize adjusts the bounded page size; navigation buttons reach rows
+outside the current page. Input and drawing share the dock clip bounds.
+
+Mounting supplies no source scan, Git worker, thumbnail or pipeline by itself;
+those services publish into the application-owned catalog. No sample assets are
+inserted into the native catalog. The offscreen browser integration exercises
+real GPU text changes after publication and verifies idle frames add no uploads.
+
 Verification from the repository root:
 
 ```text
@@ -127,10 +150,12 @@ cargo run -p prism_editor_app --features desktop --example native_gizmo -- --fra
 ```
 
 2026-10-20 verification: required-GPU `--all-features --all-targets` passed
-80 tests on Apple M2/Metal, including three Gizmo offscreen integration tests;
-default-feature `--all-targets` passed 58 tests. Scoped all-feature/all-target
+85 tests on Apple M2/Metal, including three Gizmo offscreen integration tests and
+one native content dock GPU integration test; default-feature `--all-targets`
+passed 62 tests. Scoped all-feature/all-target
 Clippy with `--no-deps -- -D warnings` passed. Native smoke initialized an
 Apple M2/Metal device but presented zero frames and reached its 15-second bound.
 The desktop automation service confirmed the Mac was locked and could not
-unlock it. Native presentation and OS input validation therefore remain
+unlock it; this was confirmed again after the content dock integration. Native
+presentation and OS input validation therefore remain
 unverified; unlock the desktop before repeating the bounded smoke command.

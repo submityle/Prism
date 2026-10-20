@@ -5,11 +5,12 @@
 use alloc::collections::BTreeMap;
 use core::fmt;
 
+use prism_editor_content::ContentCatalog;
 use prism_editor_core::SelectionItem;
 use prism_editor_ui::{
     inspector_view_bound, outliner_panel_bound, ActionBindings, ActionError, ActionValue,
-    EditorAction, InspectorViewProps, OutlinerViewProps, SelectionMode, UiBuildError, UiEvent,
-    UiTrigger, MAX_ACTION_TEXT_BYTES, MAX_VISIBLE_ROWS,
+    ContentBrowserError, EditorAction, InspectorViewProps, OutlinerViewProps, SelectionMode,
+    UiBuildError, UiEvent, UiTrigger, MAX_ACTION_TEXT_BYTES, MAX_VISIBLE_ROWS,
 };
 use prism_reflect::{reflect_path, ParsedPath};
 use prism_ui::style::{Class, Color, Keyword, StyleProp, StyleSheet, StyleValue};
@@ -25,6 +26,11 @@ const TOOLBAR_HEIGHT: f32 = 38.0;
 const STATUS_HEIGHT: f32 = 28.0;
 const PANEL_HEADER: f32 = 30.0;
 const MAX_DIMENSION: f32 = 32_768.0;
+
+mod content;
+use content::NativeContent;
+#[cfg(test)]
+mod content_tests;
 
 /// Logical keys, independent of `winit` or any native keyboard API.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -52,6 +58,8 @@ pub enum DesktopUiError {
     Action(ActionError),
     /// A generic bound panel exceeded its supported limits.
     Build(UiBuildError),
+    /// The independent content browser rejected its event or catalog.
+    Content(ContentBrowserError),
     /// Dimensions must be finite and in 0..=32768 logical pixels.
     InvalidSize,
     /// Pointer coordinates must be finite.
@@ -70,6 +78,7 @@ impl fmt::Display for DesktopUiError {
             Self::Controller(e) => e.fmt(f),
             Self::Action(e) => e.fmt(f),
             Self::Build(e) => e.fmt(f),
+            Self::Content(e) => e.fmt(f),
             Self::InvalidSize => f.write_str("UI dimensions must be finite and within 0..=32768"),
             Self::InvalidPointer => f.write_str("pointer coordinates must be finite"),
             Self::TextLimit => f.write_str("field text/composition exceeds the 4096-byte budget"),
@@ -100,6 +109,11 @@ impl From<UiBuildError> for DesktopUiError {
         Self::Build(e)
     }
 }
+impl From<ContentBrowserError> for DesktopUiError {
+    fn from(e: ContentBrowserError) -> Self {
+        Self::Content(e)
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 struct Focus {
@@ -114,6 +128,7 @@ struct Hit {
     target: String,
     trigger: UiTrigger,
     rect: Rect,
+    content: bool,
 }
 
 /// Owns the editable model, retained UI, text focus and last rendered draw list.
@@ -135,6 +150,7 @@ pub struct EditorDesktopUi {
     focus: Option<Focus>,
     error: Option<String>,
     outliner_start: usize,
+    content: Option<NativeContent>,
 }
 
 impl EditorDesktopUi {
@@ -157,6 +173,7 @@ impl EditorDesktopUi {
             focus: None,
             error: None,
             outliner_start: 0,
+            content: None,
         };
         result.refresh()?;
         Ok(result)
@@ -276,22 +293,39 @@ impl EditorDesktopUi {
         self.error.as_deref()
     }
 
-    /// Reconciles only after controller revision or local input state changes.
+    /// Reconciles after controller revision, catalog generation or local input changes.
     /// Returns false on an idle frame without rebuilding the retained tree.
     pub fn refresh(&mut self) -> Result<bool, DesktopUiError> {
         let revision = self.controller.revision();
-        if !self.invalidated && self.rendered_revision == Some(revision) {
+        let content_changed = self.content.as_ref().is_some_and(NativeContent::changed);
+        if !self.invalidated && !content_changed && self.rendered_revision == Some(revision) {
             return Ok(false);
         }
         // Save acknowledgement only changes the UI revision, not the model
         // or field target. Keep drafts/composition alive across that refresh.
-        if self
+        if (self
             .rendered_model_revision
             .is_some_and(|old| old != self.controller.model_revision())
             || (self.rendered_revision.is_some()
-                && self.rendered_primary.as_ref() != self.controller.selection().primary())
+                && self.rendered_primary.as_ref() != self.controller.selection().primary()))
+            && !self
+                .focus
+                .as_ref()
+                .is_some_and(|f| content::is_target(&f.target))
         {
             self.focus = None;
+        }
+        if content_changed
+            && self
+                .focus
+                .as_ref()
+                .is_some_and(|f| content::is_target(&f.target))
+        {
+            self.focus = None;
+        }
+        let content_height = self.content_height();
+        if let Some(content) = &mut self.content {
+            content.rebuild(content_height)?;
         }
         let total = self.visible_outliner_count();
         let count = self.visible_rows();
@@ -326,6 +360,12 @@ impl EditorDesktopUi {
         let mut viewport = Rect::new(Point::ZERO, Size::ZERO);
         let mut input_rect = None;
         let mut hits = Vec::new();
+        let content_bindings: BTreeMap<_, _> = self
+            .content
+            .as_ref()
+            .into_iter()
+            .flat_map(|content| content.view.bindings())
+            .collect();
         for ((element, scope), (_, rect)) in semantics.iter().zip(&geometry) {
             if let Some(Key::Str(key)) = element.explicit_key() {
                 if key == "editor.viewport" {
@@ -338,12 +378,10 @@ impl EditorDesktopUi {
                     .focus
                     .as_ref()
                     .is_some_and(|focus| focus.target == *key)
-                    && let Some(value) = element.child_elements().iter().find(|child| {
-                        child
-                            .class_names()
-                            .iter()
-                            .any(|c| c == "prism-editor-inspector__value")
-                    })
+                    && let Some(value) = element
+                        .child_elements()
+                        .iter()
+                        .find(|child| child.class_names().iter().any(|c| is_input_value(c)))
                     && let Some(index) = semantics
                         .iter()
                         .position(|(el, _)| std::ptr::eq(*el, value))
@@ -358,6 +396,15 @@ impl EditorDesktopUi {
                         target: key.clone(),
                         trigger: binding.trigger(),
                         rect: intersection(clip, *rect),
+                        content: false,
+                    });
+                }
+                if let Some(&trigger) = content_bindings.get(key.as_str()) {
+                    hits.push(Hit {
+                        target: key.clone(),
+                        trigger,
+                        rect: intersection(clip, *rect),
+                        content: true,
                     });
                 }
             }
@@ -384,7 +431,17 @@ impl EditorDesktopUi {
         if !x.is_finite() || !y.is_finite() {
             return self.reject(DesktopUiError::InvalidPointer);
         }
+        let stale_content = self.content.as_ref().is_some_and(NativeContent::changed)
+            && self
+                .hits
+                .iter()
+                .rev()
+                .find(|hit| contains(hit.rect, x, y))
+                .is_some_and(|hit| hit.content);
         let refreshed = self.refresh()?;
+        if stale_content {
+            return Ok(refreshed);
+        }
         let hit = self
             .hits
             .iter()
@@ -406,6 +463,9 @@ impl EditorDesktopUi {
                 } else {
                     UiEvent::Activate
                 };
+                if hit.content {
+                    return self.content_event(&hit.target, &event);
+                }
                 let action = self.bindings.dispatch(&hit.target, &event)?;
                 let cancelled = self.focus.take().is_some();
                 self.invalidated |= cancelled;
@@ -532,6 +592,14 @@ impl EditorDesktopUi {
                 Ok(true)
             }
             DesktopKey::Undo | DesktopKey::Redo => {
+                // Content text input belongs to the browser, not document history.
+                if self
+                    .focus
+                    .as_ref()
+                    .is_some_and(|f| content::is_target(&f.target))
+                {
+                    return Ok(false);
+                }
                 let cancelled = self.focus.take().is_some();
                 self.invalidated |= cancelled;
                 let outcome = self.execute(if key == DesktopKey::Undo {
@@ -588,8 +656,13 @@ impl EditorDesktopUi {
     }
 
     fn visible_rows(&self) -> usize {
-        (((self.size.height - TOOLBAR_HEIGHT - STATUS_HEIGHT - PANEL_HEADER).max(0.0) / ROW_HEIGHT)
-            as usize)
+        (((self.size.height
+            - self.content_height()
+            - TOOLBAR_HEIGHT
+            - STATUS_HEIGHT
+            - PANEL_HEADER)
+            .max(0.0)
+            / ROW_HEIGHT) as usize)
             .min(MAX_VISIBLE_ROWS)
     }
 
@@ -614,6 +687,9 @@ impl EditorDesktopUi {
     }
 
     fn focus_field(&mut self, target: &str) -> Result<(), DesktopUiError> {
+        if content::is_target(target) {
+            return self.focus_content(target);
+        }
         let binding = self
             .bindings
             .iter()
@@ -667,6 +743,10 @@ impl EditorDesktopUi {
         let event = UiEvent::Commit {
             value: ActionValue::text(focus.buffer.clone())?,
         };
+        if content::is_target(&focus.target) {
+            let target = focus.target.clone();
+            return self.content_event(&target, &event);
+        }
         let action = self.bindings.dispatch(&focus.target, &event)?;
         // On error retain the exact draft for correction and display the cause.
         self.execute(action)?;
@@ -722,7 +802,8 @@ impl EditorDesktopUi {
             .child(Element::text(dirty).class("desktop-dirty"));
         let left = (self.size.width * 0.23).min(280.0);
         let right = (self.size.width * 0.30).min(380.0);
-        let height = (self.size.height - TOOLBAR_HEIGHT - STATUS_HEIGHT).max(0.0);
+        let height =
+            (self.size.height - self.content_height() - TOOLBAR_HEIGHT - STATUS_HEIGHT).max(0.0);
         let content = Element::box_()
             .key_str("editor.content")
             .class("desktop-content")
@@ -768,14 +849,23 @@ impl EditorDesktopUi {
                 } else {
                     "desktop-status"
                 });
-        let element = Element::box_()
+        let mut element = Element::box_()
             .key_str("editor.desktop")
             .class("desktop-root")
             .style(StyleProp::Width, StyleValue::px(self.size.width))
             .style(StyleProp::Height, StyleValue::px(self.size.height))
             .child(toolbar)
-            .child(content)
-            .child(status);
+            .child(content);
+        if let Some(browser) = &self.content {
+            element = element.child(
+                Element::box_()
+                    .key_str("editor.browser")
+                    .class("desktop-browser")
+                    .style(StyleProp::Height, StyleValue::px(self.content_height()))
+                    .child(browser.view.element().clone()),
+            );
+        }
+        let element = element.child(status);
         Ok((decorate(&element, self.focus.as_ref(), false), bindings))
     }
 }
@@ -792,6 +882,7 @@ fn collect_elements<'a>(
             "editor.toolbar" => Some("editor.toolbar"),
             "editor.outliner" => Some("editor.outliner"),
             "editor.inspector" => Some("editor.inspector"),
+            "editor.browser" => Some("editor.browser"),
             "editor.status" => Some("editor.status"),
             _ => inherited,
         },
@@ -834,8 +925,12 @@ fn clipped_draw_list(
         "editor.outliner",
         "editor.viewport",
         "editor.inspector",
+        "editor.browser",
         "editor.status",
     ] {
+        if key == "editor.browser" && !scopes.contains_key(key) {
+            continue;
+        }
         let (id, bounds) = lookup(key)?;
         let pane = matches!(
             key,
@@ -877,11 +972,7 @@ fn append_clipped(list: &mut DrawList, source: &DrawList, bounds: Rect) {
 fn decorate(element: &Element, focus: Option<&Focus>, in_focus: bool) -> Element {
     let in_focus = in_focus
         || matches!(element.explicit_key(), Some(Key::Str(key)) if focus.is_some_and(|f| f.target == *key));
-    let value = in_focus
-        && element
-            .class_names()
-            .iter()
-            .any(|c| c == "prism-editor-inspector__value");
+    let value = in_focus && element.class_names().iter().any(|c| is_input_value(c));
     let mut result = match element.kind() {
         ElementKind::Text => Element::text(if value {
             let f = focus.expect("focused value");
@@ -923,6 +1014,13 @@ fn decorate(element: &Element, focus: Option<&Focus>, in_focus: bool) -> Element
         result = result.child(decorate(child, focus, in_focus));
     }
     result
+}
+
+fn is_input_value(class: &str) -> bool {
+    matches!(
+        class,
+        "prism-editor-inspector__value" | "pk-search-field__value" | "pk-search-field__placeholder"
+    )
 }
 
 fn truncate_bytes(text: &str, limit: usize) -> &str {
@@ -1035,6 +1133,18 @@ fn stylesheet() -> StyleSheet {
     sheet.insert(Class::new("is-child").with(P::PaddingLeft, V::px(12.0)));
     sheet.insert(Class::new("is-selected").with(P::BackgroundColor, bg(52, 78, 116)));
     sheet.insert(Class::new("desktop-focused").with(P::BackgroundColor, bg(46, 65, 92)));
+    sheet.insert(
+        column("desktop-browser")
+            .with(P::Width, V::percent(100.0))
+            .with(P::BackgroundColor, bg(33, 36, 44)),
+    );
+    sheet.insert(
+        row("pk-search-field")
+            .with(P::Height, V::px(28.0))
+            .with(P::MinWidth, V::px(180.0))
+            .with(P::BackgroundColor, bg(24, 26, 31)),
+    );
+    sheet.insert(Class::new("prism-editor-content__asset").with(P::Height, V::px(28.0)));
     sheet.insert(column("prism-editor-inspector__heading").with(P::MinHeight, V::px(22.0)));
     sheet.insert(
         Class::new("prism-editor-inspector__type").with(P::Display, V::Keyword(Keyword::None)),

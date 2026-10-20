@@ -339,6 +339,59 @@ fn gpu_axes_multiselect_real_command_undo_redo_picking_and_codec_reload() {
 }
 
 #[test]
+fn gpu_native_content_dock_catalog_publish_repaints_without_model_or_idle_uploads() {
+    use prism_editor_content::{AssetId, AssetKind, AssetRecord, ContentCatalog};
+    use prism_ui_render_backend::GpuPresenter;
+
+    let Some(gpu) = gpu() else { return };
+    let (controller, _) = support::scene().unwrap();
+    let mut ui = EditorDesktopUi::new(controller).unwrap();
+    ui.resize(512.0, 512.0).unwrap();
+    let mut catalog = ContentCatalog::new();
+    let id = AssetId::from_raw(1);
+    catalog
+        .insert(AssetRecord::new(id, "before.mesh", AssetKind::new("mesh").unwrap()).unwrap())
+        .unwrap();
+    ui.mount_content_browser(catalog).unwrap();
+    let revision = ui.controller().model_revision();
+    let texture = output(&gpu);
+    let mut presenter = GpuPresenter::new(&gpu.device, &gpu.queue, gpu.format, 16_384).unwrap();
+    let draw = |presenter: &mut GpuPresenter, ui: &EditorDesktopUi| {
+        presenter
+            .prepare(&gpu.device, &gpu.queue, ui.draw_list(), 512, 512)
+            .unwrap();
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        presenter
+            .encode(
+                &mut encoder,
+                &texture.create_view(&Default::default()),
+                Some(wgpu::Color::BLACK),
+            )
+            .unwrap();
+        gpu.queue.submit([encoder.finish()]);
+        pixels(&gpu, &texture)
+    };
+    let before = draw(&mut presenter, &ui);
+    let uploads = presenter.primitive_uploads();
+    assert!(!ui.refresh().unwrap());
+    assert_eq!(before, draw(&mut presenter, &ui));
+    assert_eq!(presenter.primitive_uploads(), uploads);
+    let mut renamed = ui.content_catalog().unwrap().get(id).unwrap().clone();
+    renamed.path = "after.mesh".into();
+    ui.content_catalog_mut().unwrap().update(renamed).unwrap();
+    assert!(ui.refresh().unwrap());
+    let after = draw(&mut presenter, &ui);
+    let dock_y = ui.viewport_rect().bottom() as usize;
+    assert_ne!(
+        &before[dock_y * 512 * 4..],
+        &after[dock_y * 512 * 4..],
+        "real dock pixels must reflect the catalog publication"
+    );
+    assert_eq!(ui.controller().model_revision(), revision);
+    assert_eq!(ui.controller().document_history_lengths(), (0, 0));
+}
+
+#[test]
 fn gpu_rotation_scale_snap_zero_drag_and_renderer_cancellation_hooks() {
     let Some(gpu) = gpu() else { return };
     let (controller, mut scene) = support::scene().unwrap();
