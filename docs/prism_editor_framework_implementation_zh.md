@@ -6,7 +6,7 @@
 
 可以继续实施，且内核、通用数据层、协议/进程桥、Loom 装配与视口 GPU 基础已落地。当前不是可直接投入生产的完整桌面编辑器；原生窗口、Loom 渲染/输入、真实场景绘制与模型编辑回写仍需组成同一条应用路径。2026-10-20 已接入原生文档会话：保存/加载通过事件循环异步轮询，保存确认受模型快照围栏保护，加载成功后原子替换 UI，并通过 `SceneDocumentAdapter` 候选/提交边界为宿主提供文档到场景的引擎中立绑定；尚未形成完整原生端到端验收证据。
 
-编辑器包的全 targets、全 features 普通回归与强制真实 GPU 回归以独立 target 执行；历史强制 GPU 证据使用 Apple M2 / Metal，当前增量新增了原生拖拽到矩形 GPU copy/readback 与一次性多选提交路径。测试总数随切片增量变化，以下以命令输出和本次提交状态为准，不把固定总数当作产品完成度证据。`prism_editor_app` 严格 Clippy(`--no-deps`)也通过，依赖树无 `bevy_*`。这证明当前切片可验证，不等于完整桌面产品或引擎集成已完成。
+编辑器包此前的全 targets、全 features 普通回归与强制真实 GPU 回归以独立 target 执行；历史强制 GPU 证据使用 Apple M2 / Metal。当前视口增量已将矩形逐像素读回改为 GPU 去重归约，2026-10-20 重新执行的视口全 features 测试为 37 项通过，包含 8 项真实 GPU 测试。测试总数随切片增量变化，以下以命令输出和对应提交状态为准，不把固定总数当作产品完成度证据。此前 `prism_editor_app` 严格 Clippy(`--no-deps`)也通过，依赖树无 `bevy_*`。这证明当前切片可验证，不等于完整桌面产品或引擎集成已完成。
 
 ## 已实现与交付边界
 
@@ -26,7 +26,7 @@
 | `prism_editor_collab` | 有界因果副本/LWW/tombstone、Presence/租约软锁、TCP 接纳顺序/广播/重连/历史重放/能力拒绝 | 身份认证/TLS、产品级权限/部署和 UI 到命令栈协同接线 | 20 |
 | `prism_editor_ui` | Loom Element 装配、有界稳定 key、语义目标/事件到选择/展开/字段编辑/命令/Undo/Redo action 的绑定契约 | 真实设备事件、Loom reconciliation/render 和应用命令执行的端到端连接 | 20 |
 | `prism_editor_app` | 有界 headless runner、工作区组合、窗口/surface 生命周期、错误回滚/恢复/退出及 `prism_app` 退出传播；原生文档会话接线、Ctrl/Cmd+S 保存、Ctrl/Cmd+O 加载、receipt 围栏、引擎中立 `SceneDocumentAdapter` 候选/提交边界、点选/拖拽框选、重载 renderer 失效钩子、单对象 transform 增量更新和 native CLI smoke entry | 完整原生输入→Loom→真实场景→Inspector→保存重载验收，以及具体引擎/项目场景 adapter | 见验证命令 |
-| `prism_editor_viewport` | 稳定场景 ID/增量提交、真实整数 ID target/异步读回、多 viewport target 生命周期/过期拒绝、框选/焦点/Gizmo 契约 | 宿主 geometry/depth 绘制、GPU 矩形采集、平台输入、Gizmo 绘制/命中和编辑回写 | 24（默认 22） |
+| `prism_editor_viewport` | 稳定场景 ID/增量提交、indexed geometry/depth ID pass、真实整数 ID target/异步读回、GPU 矩形去重归约、多 viewport target 生命周期/过期拒绝、Gizmo 屏幕命中与会话 | 引擎材质/场景提取、平台输入、Gizmo 绘制与宿主变换命令绑定 | 37（本次全 features） |
 | `prism_editor_world` | 有界异步 provider 驱动、payload 驻留、分层策略、dirty/租约保护、修订安全保存确认、OFPA/HLOD 计划 | 生产存储 provider/文件格式/崩溃恢复、actor 写盘、HLOD 烘焙/渲染和世界 UI | 24 |
 
 ### 运行时进程桥
@@ -41,7 +41,11 @@
 
 `RenderTargetRegistry` 管理每视口的真实 `Rgba32Uint` target。resize 保留 handle、推进 target generation；close/reopen 更换 handle。异步单像素读回按 viewport、相机/视口代际、场景代际、target 代际和 handle 关联，旧结果不能更新选择。
 
-真实 GPU 测试覆盖整数绘制/清屏 miss/读回/关闭后关联，以及多 target resize/close/reopen。`DesktopScene` 现在把拖拽框选编码为有界矩形 `copy_texture_to_buffer`，异步 map 后按完整 token 去重，再通过一次 `select_items` 原子提交；这是真实 GPU copy/readback，不宣称已有 GPU reduction。焦点、框选可视化 overlay 和 Gizmo 绘制/命中/变换回写仍需宿主适配。
+真实 GPU 测试覆盖 indexed geometry、前向/反向深度遮挡、相机/模型/网格变化、清屏 miss、GPU debug-color 预览及多 target resize/close/reopen。`DesktopScene` 的拖拽框选调用 `encode_box_readback`：compute 在实际 `Rgba32Uint` target 的请求矩形内读取像素，用有界哈希表在 GPU 去重，异步读回唯一 ID 表与计数，再通过一次 `select_items` 原子提交。原子槽保存源像素索引，竞争线程直接比较只读源纹理，不等待别的线程发布多字 ID；完整四通道身份不被截断。读回结果排序，消除 GPU 插入调度对公开结果顺序的影响。
+
+框选限制扫描像素数、唯一 ID 数、读回字节数和并发请求。二维 dispatch 支持超出单维 workgroup 上限的矩形，并检查填充 lane 的 32 位索引溢出；4096 ID 容量对应 131,080 字节读回，与框选面积无关。新 GPU buffer 的零初始化避免 CPU 另建、映射和复制整张表。超出容量时整个请求报错，不截断选区。2026-10-20 的真实 GPU 回归包含 16 个刻意同桶的四字 ID、跨工作组重复像素、重复运行顺序一致及容量 16/15/0 的成功/拒绝。焦点、框选可视化 overlay 和原生 Gizmo 绘制/变换回写仍需宿主适配。
+
+本次增量验证命令为 `PRISM_REQUIRE_GPU=1 cargo test --offline -p prism_editor_viewport --all-features -- --nocapture`（37 项通过、无跳过，Apple M2/Metal），以及 `cargo clippy --offline -p prism_editor_viewport --all-targets --all-features --no-deps -- -D warnings`、包级 fmt 与定向 diff 检查。沙盒内无法枚举 Metal adapter 的失败未计入 GPU 覆盖；上述成功测试在授权的沙盒外执行。
 
 ### 大世界执行数据层
 

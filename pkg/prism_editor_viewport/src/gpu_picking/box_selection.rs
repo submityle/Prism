@@ -61,7 +61,7 @@ pub enum GpuBoxSelectionError {
         /// Configured maximum.
         limit: usize,
     },
-    /// The compute dispatch would exceed the device's workgroup dimension.
+    /// The compute dispatch would exceed the device's two-dimensional workgroup grid.
     DispatchLimitExceeded {
         /// Required workgroups.
         groups: u64,
@@ -95,7 +95,7 @@ impl From<GpuPickingError> for GpuBoxSelectionError {
 struct ReductionLayout {
     width: u32,
     height: u32,
-    pixel_count: u32,
+    dispatch: [u32; 2],
     table_capacity: u32,
     values_bytes: u64,
     readback_bytes: u64,
@@ -296,9 +296,9 @@ impl GpuPickingFrame<'_> {
                 .max_compute_workgroups_per_dimension,
         )?;
         let params = create_params_buffer(&self.backend.device, request.rectangle, &layout, limits);
-        let locks = create_zeroed_buffer(
+        let representatives = create_zeroed_buffer(
             &self.backend.device,
-            "prism-editor-box-selection-locks",
+            "prism-editor-box-selection-representatives",
             u64::from(layout.table_capacity) * 4,
             wgpu::BufferUsages::STORAGE,
         );
@@ -337,7 +337,7 @@ impl GpuPickingFrame<'_> {
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
-                        resource: locks.as_entire_binding(),
+                        resource: representatives.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 3,
@@ -356,7 +356,7 @@ impl GpuPickingFrame<'_> {
             });
             pass.set_pipeline(&self.backend.box_selection_pipeline.pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
-            pass.dispatch_workgroups(layout.pixel_count.div_ceil(64), 1, 1);
+            pass.dispatch_workgroups(layout.dispatch[0], layout.dispatch[1], 1);
         }
         encoder.copy_buffer_to_buffer(&values, 0, &buffer, 0, layout.values_bytes);
         encoder.copy_buffer_to_buffer(&stats, 0, &buffer, layout.values_bytes, 8);
@@ -423,20 +423,14 @@ fn create_zeroed_buffer(
     size: u64,
     usage: wgpu::BufferUsages,
 ) -> wgpu::Buffer {
-    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+    // Fresh WebGPU buffers are zero-initialized. Avoid a second host-side
+    // allocation and mapping/copying a table whose only writer is the GPU.
+    device.create_buffer(&wgpu::BufferDescriptor {
         label: Some(label),
         size,
         usage,
-        mapped_at_creation: true,
-    });
-    let mut mapped = buffer
-        .slice(..)
-        .get_mapped_range_mut()
-        .expect("newly mapped buffer");
-    mapped.copy_from_slice(&vec![0; usize::try_from(size).expect("mapped buffer size")]);
-    drop(mapped);
-    buffer.unmap();
-    buffer
+        mapped_at_creation: false,
+    })
 }
 
 fn create_params_buffer(
@@ -501,13 +495,23 @@ fn reduction_layout(
             limit: limits.max_pixels,
         });
     }
-    let pixel_count = u32::try_from(pixels).map_err(|_| GpuBoxSelectionError::LayoutOverflow)?;
     let groups = pixels.div_ceil(64);
-    if groups > u64::from(max_compute_workgroups_per_dimension) {
+    let dispatch_x = groups.min(u64::from(max_compute_workgroups_per_dimension));
+    let dispatch_y = if dispatch_x == 0 {
+        0
+    } else {
+        groups.div_ceil(dispatch_x)
+    };
+    if dispatch_x == 0 || dispatch_y > u64::from(max_compute_workgroups_per_dimension) {
         return Err(GpuBoxSelectionError::DispatchLimitExceeded {
             groups,
             limit: max_compute_workgroups_per_dimension,
         });
+    }
+    // The shader uses a u32 flattened pixel index and reserves zero in the
+    // representative table. Include padded dispatch lanes in this check.
+    if dispatch_x * dispatch_y * 64 > u64::from(u32::MAX) {
+        return Err(GpuBoxSelectionError::LayoutOverflow);
     }
     let max_ids =
         u64::try_from(limits.max_ids).map_err(|_| GpuBoxSelectionError::LayoutOverflow)?;
@@ -523,7 +527,7 @@ fn reduction_layout(
     let values_bytes = u64::from(table_capacity)
         .checked_mul(16)
         .ok_or(GpuBoxSelectionError::LayoutOverflow)?;
-    let locks_bytes = u64::from(table_capacity)
+    let representatives_bytes = u64::from(table_capacity)
         .checked_mul(4)
         .ok_or(GpuBoxSelectionError::LayoutOverflow)?;
     let readback_bytes = values_bytes
@@ -537,16 +541,16 @@ fn reduction_layout(
         });
     }
     let storage_limit = max_storage_buffer_binding_size;
-    if values_bytes > storage_limit || locks_bytes > storage_limit {
+    if values_bytes > storage_limit || representatives_bytes > storage_limit {
         return Err(GpuBoxSelectionError::ByteLimitExceeded {
-            bytes: values_bytes.max(locks_bytes),
+            bytes: values_bytes.max(representatives_bytes),
             limit: storage_limit,
         });
     }
     Ok(ReductionLayout {
         width,
         height,
-        pixel_count,
+        dispatch: [dispatch_x as u32, dispatch_y as u32],
         table_capacity,
         values_bytes,
         readback_bytes,
@@ -590,6 +594,9 @@ fn parse_reduction(
             observed: ids.len(),
         });
     }
+    // Hash insertion order depends on GPU scheduling. Keep the public result
+    // deterministic without scanning or copying the source pixels on the CPU.
+    ids.sort_unstable_by_key(|id| id.channels());
     Ok(ids)
 }
 
@@ -644,12 +651,12 @@ mod tests {
             (
                 layout.width,
                 layout.height,
-                layout.pixel_count,
+                layout.dispatch,
                 layout.table_capacity,
                 layout.values_bytes,
                 layout.readback_bytes
             ),
-            (3, 2, 6, 2, 32, 40)
+            (3, 2, [1, 1], 2, 32, 40)
         );
         assert_eq!(
             reduction_layout(
@@ -705,7 +712,7 @@ mod tests {
         let layout = ReductionLayout {
             width: 2,
             height: 2,
-            pixel_count: 4,
+            dispatch: [1, 1],
             table_capacity: 4,
             values_bytes: 64,
             readback_bytes: 72,
@@ -736,5 +743,162 @@ mod tests {
             Err(GpuBoxSelectionError::IdLimitExceeded { limit: 2 })
         );
         assert!(parse_reduction(&bytes[..71], layout, 2).is_err());
+    }
+
+    #[test]
+    fn large_rectangles_use_two_dispatch_dimensions_with_checked_padding() {
+        let config = GpuPickingConfig::new(4096, 4096);
+        let rectangle = PixelRect::new(0, 0, 4096, 4096).expect("4K rectangle");
+        let limits = GpuBoxSelectionLimits {
+            max_pixels: 4096 * 4096,
+            ..Default::default()
+        };
+        let layout = reduction_layout(config, rectangle, limits, 1 << 30, 1 << 27, 65535)
+            .expect("multi-row dispatch");
+        assert_eq!(layout.dispatch, [65535, 5]);
+        assert_eq!(layout.readback_bytes, 8192 * 16 + 8);
+        // The staging size depends on the ID budget rather than the pixel area.
+        let small = reduction_layout(
+            config,
+            PixelRect::new(0, 0, 8, 8).unwrap(),
+            limits,
+            1 << 30,
+            1 << 27,
+            65535,
+        )
+        .unwrap();
+        assert_eq!(small.readback_bytes, layout.readback_bytes);
+        assert!(matches!(
+            reduction_layout(config, rectangle, limits, 1 << 30, 1 << 27, 8),
+            Err(GpuBoxSelectionError::DispatchLimitExceeded { .. })
+        ));
+    }
+
+    #[cfg(feature = "gpu-tests")]
+    #[test]
+    fn gpu_hash_collisions_and_duplicate_pixels_preserve_all_four_words() {
+        let Some((adapter, device, queue)) = crate::test_support::device() else {
+            return;
+        };
+        // Every distinct ID collides in the same initial slot of a 32-slot
+        // table. Each appears in 1024 fragments, spanning many workgroups.
+        fn hash(id: [u32; 4]) -> u32 {
+            let mut h = id[0].wrapping_mul(0x9E3779B1).wrapping_add(id[1]);
+            h = (h ^ (h >> 16)).wrapping_mul(0x85EBCA6B);
+            h = (h ^ id[2]).wrapping_mul(0xC2B2AE35);
+            h = (h ^ id[3]).wrapping_mul(0x27D4EB2F);
+            h ^ (h >> 15)
+        }
+        let mut expected = Vec::new();
+        for n in 1..100_000u32 {
+            let id = [n, n.wrapping_mul(37), !n, n.rotate_left(13)];
+            if hash(id) & 31 == 0 {
+                expected.push(id);
+            }
+            if expected.len() == 16 {
+                break;
+            }
+        }
+        assert_eq!(expected.len(), 16);
+        let entries = expected
+            .iter()
+            .map(|v| format!("vec4<u32>({}u,{}u,{}u,{}u)", v[0], v[1], v[2], v[3]))
+            .collect::<Vec<_>>()
+            .join(",");
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("colliding box IDs"),
+            source: wgpu::ShaderSource::Wgsl(format!(r"
+                const IDS: array<vec4<u32>, 16> = array<vec4<u32>, 16>({entries});
+                @vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {{
+                    let p = array<vec2<f32>, 3>(vec2<f32>(-1.,-1.), vec2<f32>(3.,-1.), vec2<f32>(-1.,3.));
+                    return vec4<f32>(p[i], 0., 1.);
+                }}
+                @fragment fn fs(@builtin(position) p: vec4<f32>) -> @location(0) vec4<u32> {{
+                    return IDS[u32(p.x) % 16u];
+                }}
+            ").into()),
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("colliding box IDs"),
+            layout: None,
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            primitive: Default::default(),
+            depth_stencil: None,
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: super::super::ID_BUFFER_FORMAT,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        let backend =
+            GpuPickingBackend::new(&device, &adapter, &queue, GpuPickingConfig::new(128, 128))
+                .unwrap();
+        let mut viewports = crate::ViewportRegistry::new();
+        let viewport = viewports.open("collisions").unwrap();
+        let mut targets = crate::RenderTargetRegistry::new();
+        let state = targets
+            .open(viewport.id(), viewport.generation(), backend)
+            .unwrap();
+        let scene = crate::SceneIdPass::new();
+        let mut boxes = crate::BoxSelectionCoordinator::new(16);
+        expected.sort_unstable();
+        for max_ids in [16, 16, 16, 15, 0] {
+            let request = boxes
+                .submit(
+                    &viewport,
+                    state,
+                    &scene,
+                    PixelRect::new(0, 0, 128, 128).unwrap(),
+                )
+                .unwrap();
+            let target = targets.get(viewport.id()).unwrap();
+            let frame = target.begin_frame(&scene);
+            let mut encoder = device.create_command_encoder(&Default::default());
+            {
+                let mut pass = frame.begin_render_pass(&mut encoder, None);
+                pass.set_pipeline(&pipeline);
+                pass.draw(0..3, 0..1);
+            }
+            let pending = frame
+                .encode_box_readback(
+                    &mut encoder,
+                    request,
+                    GpuBoxSelectionLimits {
+                        max_ids,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            let result = target.backend().submit_box_and_read_sync(encoder, pending);
+            if max_ids == 16 {
+                let actual = result
+                    .unwrap()
+                    .ids
+                    .into_iter()
+                    .map(EncodedPickId::channels)
+                    .collect::<Vec<_>>();
+                assert_eq!(actual, expected);
+            } else {
+                assert_eq!(
+                    result,
+                    Err(GpuBoxSelectionError::IdLimitExceeded { limit: max_ids })
+                );
+            }
+            boxes.cancel_viewport(viewport.id());
+        }
+        crate::test_support::diagnostic(format_args!("EXERCISED GPU box hash collisions/full four-word IDs/duplicate workgroups/deterministic ordering/overflow"));
     }
 }

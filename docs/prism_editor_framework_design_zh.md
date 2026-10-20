@@ -217,7 +217,7 @@ pub trait Command: Send {
 ---
 
 ## 7. GPU 驱动视口(D5/D8)
-> crate: `prism_editor_viewport`；稳定 ID/增量场景提交、多 viewport target 与异步单像素读回已交付；宿主 geometry/depth、GPU 矩形采集、设备输入/Gizmo 绘制待接，按需挂接 `prism_virtual_geometry_gpu`。
+> crate: `prism_editor_viewport`；稳定 ID/增量场景提交、indexed geometry/depth ID pass、多 viewport target、异步单像素读回及 GPU 矩形去重归约已交付。`prism_editor_app` 已接入原生点选/拖拽框选；引擎场景提取、材质/GI/虚拟几何预览和原生 Gizmo 绘制/变换命令继续接入。
 
 - **多视口**:透视 + 正交(顶/前/侧)+ 可同步相机 + 独立显示模式(线框/光照/光照复杂度/overdraw/LOD 着色)。
 - **GPU 拾取(D8)**:十万实体下走 GPU id-buffer 拾取而非 CPU 射线逐个测,拾取能力由 `prism_ui_input` 提供(**前置待建**)为基线,
@@ -369,7 +369,7 @@ pub trait Command: Send {
 | `prism_editor_dock` | 嵌套 split/tab/浮动停靠 + 持久化 + 工作区 | ✅ 数据层已交付 |
 | `prism_editor_shell` | 外壳装配:活动栏/侧栏/命令面板/菜单/工具栏/状态栏/键位/主题 | ✅ 数据层已交付 |
 | `prism_editor_panels` | Inspector / Outliner / Content / Console 等通用面板 | ✅ 数据层已交付 |
-| `prism_editor_viewport` | 多视口、GPU 拾取、虚拟几何/GI 预览、高级 Gizmo、瓦片重绘 | 🟡 增量 ID 提交/真实 target/异步读回已交付，geometry/depth/矩形采集/输入/Gizmo 待接 |
+| `prism_editor_viewport` | 多视口、GPU 拾取、虚拟几何/GI 预览、高级 Gizmo、瓦片重绘 | 🟡 增量 ID 提交/geometry/depth/真实 target/单点读回/GPU 框选归约/屏幕轴命中已交付，引擎预览和原生 Gizmo 回写待接 |
 | `prism_editor_world` | World Partition 流送、数据层、HLOD、OFPA、层级实例 | 🟡 异步 provider 执行/dirty/租约/计划已交付，生产持久化/烘焙/UI 待接 |
 | `prism_editor_graph` | 通用节点图内核(材质/VFX/动画/行为树/几何节点) | ✅ 通用内核已交付 |
 | `prism_editor_timeline` | 通用时间线/序列器/关键帧曲线 | ✅ 通用内核已交付 |
@@ -407,7 +407,7 @@ pub trait Command: Send {
 - **E3 外壳 + 停靠**:`prism_editor_dock` + `prism_editor_shell`——停靠/命令面板/菜单键位/主题/工作区持久化。
 - **E4 核心面板**:`prism_editor_panels`——Inspector + Outliner(虚拟化)+ Console。`InspectorSession` 已打通选择→字段命令→Undo/Redo→快照回写，`prism_editor_ui` 已提供有界语义 action 绑定；原生设备事件到应用模型执行/绘制仍需接线。
 - **E5 运行时桥 + PIE**:`prism_editor_remote`——协议、增量同步、PIE、TCP 和受控子进程管理已落地；引擎专属 adapter 与真实场景 runtime 是后续接入，不将 loopback fixture 计作引擎实现。
-- **E6 GPU 视口 + Gizmo**:`prism_editor_viewport`——增量场景 ID 提交、多 viewport target、单点/矩形异步读回与过期拒绝已落地；`prism_editor_app` 已提供文档到场景的引擎中立候选/提交边界和 native 点选/拖拽框选接线；GPU reduction、框选 overlay、焦点和 Gizmo 绘制/编辑回写仍需接入。
+- **E6 GPU 视口 + Gizmo**:`prism_editor_viewport`——增量场景 ID 提交、indexed geometry/depth ID pass、多 viewport target、单点异步读回、GPU 矩形去重归约及过期拒绝已落地；`prism_editor_app` 已提供文档到场景的引擎中立候选/提交边界和 native 点选/拖拽框选接线。归约保留完整四通道 ID，无跨线程发布自旋等待；读回量按 ID 容量而非矩形像素数计。2026-10-20 视口全 features 测试 37 项通过，包含 8 项 Apple M2/Metal 真实 GPU 测试；框选 overlay、焦点和原生 Gizmo 绘制/编辑回写继续接入。
 - **E7 内容与管线**:`prism_editor_content`——内容浏览器 + 依赖图 + 校验 + 导入导出 + 版本控制贡献点。
 - **E8 大世界编辑**:`prism_editor_world`——World Partition 流送 + 数据层 + OFPA + 层级实例 + HLOD 预览。
 - **E9 分析诊断**:`prism_editor_profiler`——帧分析器 + 帧图调试 + 内存预算 + Gameplay Debugger + 可视日志。

@@ -252,10 +252,14 @@ if let Some(result) = flight.poll()? {
 before GPU allocation when it is outside the current target. The rectangle path
 is a real GPU reduction: one compute invocation reads one pixel from the actual
 `Rgba32Uint` target, ignores the all-zero miss, and inserts the four-channel ID
-into a bounded linear-probing hash table guarded by GPU atomics. The GPU also
+into a bounded linear-probing hash table. Each atomic slot holds a source pixel
+index plus one. Contending invocations compare the immutable source texture
+directly, with no publication lock or waiting for another invocation to run.
+Only the successful claimant writes that slot's four-word output. The GPU also
 publishes the unique-ID count and an overflow flag. The mapped staging buffer
 contains only the compact hash table and those two counters; the host extracts
-non-empty slots but does not scan rectangle pixels or perform ID deduplication.
+non-empty slots and sorts the IDs deterministically, but does not scan rectangle
+pixels or perform ID deduplication.
 This selects visible fragments, not objects hidden behind other geometry; it is
 not a through-selection algorithm.
 
@@ -263,6 +267,11 @@ not a through-selection algorithm.
 and unique IDs. Defaults are 1,048,576 pixels, 32 MiB, and 4096 unique IDs. The
 GPU table is sized to at least twice `max_ids` and rounded to a power of two;
 the resulting storage and dispatch sizes are checked against device limits.
+Dispatch uses two dimensions when one dimension cannot cover the rectangle;
+checked padded invocation counts protect the shader's 32-bit pixel index. At
+4096 IDs, the mapped table and counters occupy 131,080 bytes, independent of
+rectangle area. Fresh GPU buffers provide zero initialization without allocating
+or copying a second hash table on the host.
 Set `max_ids` no higher than `BoxSelectionCoordinator::new(max_hits)`'s bound.
 Exceeding a limit or GPU table capacity returns an error, never a silently
 truncated selection. The host must also bound the number of in-flight staging
@@ -293,7 +302,9 @@ are wired or that a complete editor is implemented.
 Default tests cover identity stability, deterministic deltas, patch conflicts,
 selection bounds, stale-result rejection, snapping, and request correlation.
 The required GPU tests cover indexed geometry, nonzero-origin rectangles, misses,
-GPU deduplication, overflow rejection, shared point/box submission, and all
+GPU deduplication, deliberate hash collisions, repeated IDs across workgroups,
+all four identity words, deterministic results, overflow rejection, shared
+point/box submission, and all
 viewport/scene/target generation invalidation paths. Run the real adapter tests
 on a machine with a supported GPU backend. Allocate
 an isolated target and clean only that exact directory when finished:
@@ -314,7 +325,7 @@ cargo clean --target-dir "$viewport_target"
 GPU tests print adapter name/type/backend followed by `EXERCISED` markers after
 real indexed overlapping geometry/forward+reverse depth/camera/model/mesh
 mutation/miss/readback, multi-viewport resize/close/reopen, bounded rectangular
-copies, and unsigned ID texture sampling into a GPU debug-color pass. That last
+reductions, and unsigned ID texture sampling into a GPU debug-color pass. That last
 test uses a color readback only to assert output, not as a presentation path.
 `PRISM_REQUIRE_GPU=1` fails explicitly if adapter or device creation fails. When
 unset, unavailable hardware prints `SKIP` with the capability error; such a run
