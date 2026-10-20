@@ -17,6 +17,7 @@ pub mod assets;
 pub mod budget;
 pub mod client_resource;
 pub mod commands;
+pub mod device;
 pub mod emitter;
 pub mod listener;
 pub mod master_gain;
@@ -35,7 +36,13 @@ pub use assets::{
     AudioAssetLoadError, AudioAssetStore, AudioSourceRouteError, ResidentAudioSource,
 };
 pub use budget::PhysicalVoiceBudget;
-pub use client_resource::{AudioClient, AudioRuntimeHost};
+pub use client_resource::{AudioClient, AudioRuntimeHost, AudioRuntimeMetadata};
+#[cfg(feature = "cpal-backend")]
+pub use device::CpalAudioDevicePlugin;
+pub use device::{
+    drive_audio_device, install_device, start_audio_device, stop_audio_device, AudioDeviceConfig,
+    AudioDevicePlugin, AudioDeviceRuntimeHost, AudioDeviceStatus,
+};
 pub use emitter::AudioEmitter;
 pub use listener::AudioListener;
 pub use master_gain::MasterGain;
@@ -58,7 +65,13 @@ pub mod prelude {
         AudioAssetLoadError, AudioAssetStore, AudioSourceRouteError, ResidentAudioSource,
     };
     pub use crate::budget::PhysicalVoiceBudget;
-    pub use crate::client_resource::{AudioClient, AudioRuntimeHost};
+    pub use crate::client_resource::{AudioClient, AudioRuntimeHost, AudioRuntimeMetadata};
+    #[cfg(feature = "cpal-backend")]
+    pub use crate::device::CpalAudioDevicePlugin;
+    pub use crate::device::{
+        drive_audio_device, install_device, start_audio_device, stop_audio_device,
+        AudioDeviceConfig, AudioDevicePlugin, AudioDeviceRuntimeHost, AudioDeviceStatus,
+    };
     pub use crate::emitter::AudioEmitter;
     pub use crate::listener::AudioListener;
     pub use crate::master_gain::MasterGain;

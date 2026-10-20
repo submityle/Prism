@@ -50,7 +50,10 @@ pub mod render;
 #[cfg(feature = "cpal-backend")]
 pub mod cpal_backend;
 
-pub use backend::{AudioDeviceBackend, DeviceEvent, DeviceRecovery, DeviceState, FakeAudioBackend};
+pub use backend::{
+    AudioDeviceBackend, AudioDeviceFactory, DeviceEvent, DeviceFormat, DeviceRecovery,
+    DeviceSampleFormat, DeviceState, FakeAudioBackend, FakeAudioControl,
+};
 pub use capture::{capture_ring, CaptureConsumer, CaptureSink};
 pub use error::DeviceError;
 pub use file_sink::render_to_wav;
@@ -58,4 +61,7 @@ pub use interleave::{interleaved_to_planar, planar_to_interleaved};
 pub use render::BlockRenderer;
 
 #[cfg(feature = "cpal-backend")]
-pub use cpal_backend::{layout_for_channels, open_default_output, CpalOutput, OutputStreamInfo};
+pub use cpal_backend::{
+    layout_for_channels, open_default_output, open_default_output_paused, CpalOutput,
+    CpalOutputFactory, OutputStreamInfo,
+};

@@ -13,6 +13,7 @@
 //! every platform, [`CpalOutput`] is intended to live on the thread that opened
 //! it.
 
+use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 use alloc::vec;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -26,13 +27,16 @@ use prism_audio_core::buffer::ChannelLayout;
 use prism_audio_core::math::Sample;
 use prism_audio_rt::AudioRuntime;
 
-use crate::backend::DeviceEvent;
+use crate::backend::{
+    AudioDeviceBackend, AudioDeviceFactory, DeviceEvent, DeviceFormat, DeviceSampleFormat,
+    DeviceState,
+};
 use crate::error::DeviceError;
 use crate::render::BlockRenderer;
 
 const EVENT_UNDERRUN: u64 = 1;
 const EVENT_DISCONNECTED: u64 = 2;
-const EVENT_RECOVERY_FAILED: u64 = 4;
+const EVENT_STREAM_ERROR: u64 = 4;
 
 /// Maps a device channel count onto the engine [`ChannelLayout`] with the same
 /// number of channels.
@@ -86,6 +90,7 @@ pub struct CpalOutput {
     /// Coalesced callback events. The control thread drains this bitset with
     /// [`CpalOutput::poll_event`]; the callback never allocates or locks.
     events: Arc<AtomicU64>,
+    state: DeviceState,
 }
 
 impl CpalOutput {
@@ -110,14 +115,19 @@ impl CpalOutput {
     /// the callback and must create a new [`CpalOutput`] after observing a
     /// disconnect or invalidated stream.
     #[must_use]
-    pub fn poll_event(&self) -> Option<DeviceEvent> {
+    pub fn poll_event(&mut self) -> Option<DeviceEvent> {
         for (mask, event) in [
             (EVENT_DISCONNECTED, DeviceEvent::Disconnected),
             (EVENT_UNDERRUN, DeviceEvent::Underrun { frames: 0 }),
-            (EVENT_RECOVERY_FAILED, DeviceEvent::RecoveryFailed),
+            (EVENT_STREAM_ERROR, DeviceEvent::StreamError),
         ] {
             let previous = self.events.fetch_and(!mask, Ordering::AcqRel);
             if previous & mask != 0 {
+                self.state = match event {
+                    DeviceEvent::Underrun { .. } => DeviceState::Degraded,
+                    DeviceEvent::Disconnected | DeviceEvent::StreamError => DeviceState::Recovering,
+                    _ => self.state,
+                };
                 return Some(event);
             }
         }
@@ -129,10 +139,8 @@ impl CpalOutput {
     /// # Errors
     ///
     /// Returns [`DeviceError::PlayStream`] if the platform refuses to start.
-    pub fn play(&self) -> Result<(), DeviceError> {
-        self.stream
-            .play()
-            .map_err(|e| DeviceError::PlayStream(e.to_string()))
+    pub fn play(&mut self) -> Result<(), DeviceError> {
+        self.start()
     }
 
     /// Pauses playback without closing the stream, where the platform supports
@@ -141,10 +149,65 @@ impl CpalOutput {
     /// # Errors
     ///
     /// Returns [`DeviceError::PlayStream`] if the platform refuses to pause.
-    pub fn pause(&self) -> Result<(), DeviceError> {
+    pub fn pause(&mut self) -> Result<(), DeviceError> {
+        self.stop()
+    }
+}
+
+impl AudioDeviceBackend for CpalOutput {
+    fn state(&self) -> DeviceState {
+        self.state
+    }
+
+    fn format(&self) -> DeviceFormat {
+        self.info.format()
+    }
+
+    fn start(&mut self) -> Result<(), DeviceError> {
+        if !matches!(self.state, DeviceState::Stopped) {
+            return Err(DeviceError::InvalidState {
+                operation: "start",
+                state: self.state,
+            });
+        }
+        self.stream
+            .play()
+            .map_err(|e| DeviceError::PlayStream(e.to_string()))?;
+        self.state = DeviceState::Running;
+        Ok(())
+    }
+
+    fn stop(&mut self) -> Result<(), DeviceError> {
+        if !matches!(self.state, DeviceState::Running | DeviceState::Degraded) {
+            return Err(DeviceError::InvalidState {
+                operation: "stop",
+                state: self.state,
+            });
+        }
         self.stream
             .pause()
-            .map_err(|e| DeviceError::PlayStream(e.to_string()))
+            .map_err(|e| DeviceError::StopStream(e.to_string()))?;
+        self.state = DeviceState::Stopped;
+        Ok(())
+    }
+
+    fn poll_event(&mut self) -> Option<DeviceEvent> {
+        CpalOutput::poll_event(self)
+    }
+}
+
+/// Factory for the platform default CPAL output endpoint.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CpalOutputFactory;
+
+impl AudioDeviceFactory for CpalOutputFactory {
+    fn open(
+        &mut self,
+        runtime: AudioRuntime,
+        block_frames: usize,
+    ) -> Result<Box<dyn AudioDeviceBackend>, DeviceError> {
+        open_default_output_paused(runtime, block_frames)
+            .map(|backend| Box::new(backend) as Box<dyn AudioDeviceBackend>)
     }
 }
 
@@ -175,6 +238,19 @@ pub fn open_default_output(
     runtime: AudioRuntime,
     block_frames: usize,
 ) -> Result<CpalOutput, DeviceError> {
+    let mut output = open_default_output_paused(runtime, block_frames)?;
+    output.start()?;
+    Ok(output)
+}
+
+/// Opens the platform default output device without starting callback delivery.
+///
+/// This is the construction half used by lifecycle hosts: state is
+/// [`DeviceState::Stopped`] until [`AudioDeviceBackend::start`] succeeds.
+pub fn open_default_output_paused(
+    runtime: AudioRuntime,
+    block_frames: usize,
+) -> Result<CpalOutput, DeviceError> {
     if block_frames == 0 {
         return Err(DeviceError::InvalidBlockFrames);
     }
@@ -192,6 +268,7 @@ pub fn open_default_output(
         .default_output_config()
         .map_err(|e| DeviceError::ConfigQuery(e.to_string()))?;
     let sample_format = default_config.sample_format();
+    device_sample_format(sample_format)?;
     let channels = default_config.channels();
     let layout = layout_for_channels(channels)?;
 
@@ -222,15 +299,42 @@ pub fn open_default_output(
         Arc::clone(&errors),
         Arc::clone(&events),
     )?;
-    stream
-        .play()
-        .map_err(|e| DeviceError::PlayStream(e.to_string()))?;
-
     Ok(CpalOutput {
         stream,
         info,
         errors,
         events,
+        state: DeviceState::Stopped,
+    })
+}
+
+impl OutputStreamInfo {
+    /// Backend-neutral negotiated stream format.
+    #[must_use]
+    pub fn format(&self) -> DeviceFormat {
+        DeviceFormat {
+            sample_rate: self.sample_rate,
+            layout: self.layout,
+            sample_format: device_sample_format(self.sample_format)
+                .expect("unsupported formats are rejected while opening"),
+        }
+    }
+}
+
+fn device_sample_format(format: SampleFormat) -> Result<DeviceSampleFormat, DeviceError> {
+    Ok(match format {
+        SampleFormat::F32 => DeviceSampleFormat::F32,
+        SampleFormat::F64 => DeviceSampleFormat::F64,
+        SampleFormat::I8 => DeviceSampleFormat::I8,
+        SampleFormat::I16 => DeviceSampleFormat::I16,
+        SampleFormat::I32 => DeviceSampleFormat::I32,
+        SampleFormat::U8 => DeviceSampleFormat::U8,
+        SampleFormat::U16 => DeviceSampleFormat::U16,
+        other => {
+            return Err(DeviceError::UnsupportedSampleFormat(alloc::format!(
+                "{other:?}"
+            )))
+        }
     })
 }
 
@@ -304,7 +408,7 @@ where
                     cpal::StreamError::BufferUnderrun => EVENT_UNDERRUN,
                     cpal::StreamError::DeviceNotAvailable
                     | cpal::StreamError::StreamInvalidated => EVENT_DISCONNECTED,
-                    cpal::StreamError::BackendSpecific { .. } => EVENT_RECOVERY_FAILED,
+                    cpal::StreamError::BackendSpecific { .. } => EVENT_STREAM_ERROR,
                 };
                 event_flags.fetch_or(flag, Ordering::Release);
             },
@@ -346,7 +450,8 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{fill_output, layout_for_channels, open_default_output};
+    use super::{device_sample_format, fill_output, layout_for_channels, open_default_output};
+    use crate::backend::DeviceSampleFormat;
     use crate::render::BlockRenderer;
     use crate::DeviceError;
     use cpal::Sample;
@@ -369,6 +474,22 @@ mod tests {
         assert_eq!(f32::from_sample(0.5f32), 0.5f32);
         // Full-scale positive maps to i16::MAX.
         assert_eq!(i16::from_sample(1.0f32), i16::MAX);
+    }
+
+    #[test]
+    fn cpal_formats_map_to_backend_neutral_formats() {
+        assert_eq!(
+            device_sample_format(cpal::SampleFormat::F32).unwrap(),
+            DeviceSampleFormat::F32
+        );
+        assert_eq!(
+            device_sample_format(cpal::SampleFormat::I16).unwrap(),
+            DeviceSampleFormat::I16
+        );
+        assert_eq!(
+            device_sample_format(cpal::SampleFormat::U16).unwrap(),
+            DeviceSampleFormat::U16
+        );
     }
 
     #[test]

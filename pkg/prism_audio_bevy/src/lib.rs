@@ -14,6 +14,6 @@ pub use prism_audio_ecs::*;
 // behind the native ECS crate. This is a path-level compatibility bridge, not
 // a second owner of any audio state or systems.
 pub use prism_audio_ecs::{
-    budget, client_resource, commands, emitter, listener, master_gain, playback, player,
+    budget, client_resource, commands, device, emitter, listener, master_gain, playback, player,
     player_systems, plugin, systems, telemetry, voice_registry, volume,
 };

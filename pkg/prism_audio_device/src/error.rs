@@ -3,6 +3,8 @@
 use alloc::string::String;
 use core::fmt;
 
+use crate::backend::DeviceState;
+
 /// Errors produced while enumerating devices, building streams, or writing
 /// offline renders.
 ///
@@ -21,6 +23,17 @@ pub enum DeviceError {
     BuildStream(String),
     /// Starting (playing) the platform audio stream failed.
     PlayStream(String),
+    /// Pausing/stopping the platform audio stream failed.
+    StopStream(String),
+    /// A lifecycle operation was requested from an illegal state.
+    InvalidState {
+        /// Requested lifecycle operation.
+        operation: &'static str,
+        /// State in which the operation was rejected.
+        state: DeviceState,
+    },
+    /// A backend factory failed before a more specific platform error existed.
+    Backend(String),
     /// The renderer's channel count does not match the device stream.
     ChannelCountMismatch {
         /// Channel count the renderer produces.
@@ -47,6 +60,11 @@ impl fmt::Display for DeviceError {
             DeviceError::ConfigQuery(msg) => write!(f, "device configuration query failed: {msg}"),
             DeviceError::BuildStream(msg) => write!(f, "failed to build audio stream: {msg}"),
             DeviceError::PlayStream(msg) => write!(f, "failed to start audio stream: {msg}"),
+            DeviceError::StopStream(msg) => write!(f, "failed to stop audio stream: {msg}"),
+            DeviceError::InvalidState { operation, state } => {
+                write!(f, "cannot {operation} audio device while it is {state:?}")
+            }
+            DeviceError::Backend(msg) => write!(f, "audio backend failed: {msg}"),
             DeviceError::ChannelCountMismatch { renderer, device } => write!(
                 f,
                 "renderer produces {renderer} channels but the device stream expects {device}"

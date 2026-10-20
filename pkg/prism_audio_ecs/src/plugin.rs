@@ -11,7 +11,7 @@ use prism_transform::GlobalTransform;
 
 use crate::assets::AudioAssetStore;
 use crate::budget::PhysicalVoiceBudget;
-use crate::client_resource::{AudioClient, AudioRuntimeHost};
+use crate::client_resource::{AudioClient, AudioRuntimeHost, AudioRuntimeMetadata};
 use crate::emitter::AudioEmitter;
 use crate::listener::AudioListener;
 use crate::master_gain::MasterGain;
@@ -78,8 +78,27 @@ pub fn install(world: &mut World, config: AudioRuntimeConfig) {
     let (runtime, client, collector) = prism_audio_rt::runtime(config);
     let open = Arc::new(AtomicBool::new(true));
     let client = AudioClient::new(client, open);
-    world.insert_resource(client.clone());
+    initialize_control_plane(
+        world,
+        config,
+        client.clone(),
+        AudioRuntimeMetadata {
+            sample_rate: runtime.sample_rate(),
+            max_block: runtime.max_block(),
+        },
+    );
     world.insert_non_send(AudioRuntimeHost::new(runtime, collector, client));
+}
+
+pub(crate) fn initialize_control_plane(
+    world: &mut World,
+    config: AudioRuntimeConfig,
+    client: AudioClient,
+    metadata: AudioRuntimeMetadata,
+) {
+    world.remove_resource::<AudioStopped>();
+    world.insert_resource(client);
+    world.insert_resource(metadata);
     world.insert_resource(VoiceMirror::new(
         config.voice_capacity,
         config.max_physical_voices,
@@ -129,10 +148,12 @@ pub fn install(world: &mut World, config: AudioRuntimeConfig) {
 /// Idempotent. Pending commands are discarded by runtime destruction rather
 /// than depending on a possibly full command ring to deliver shutdown stops.
 pub fn shutdown(world: &mut World) {
+    world.remove_non_send::<crate::device::AudioDeviceRuntimeHost>();
     if let Some(client) = world.remove_resource::<AudioClient>() {
         client.close();
     }
     world.remove_non_send::<AudioRuntimeHost>();
+    world.remove_resource::<AudioRuntimeMetadata>();
     if let Some(state) = world.remove_resource::<BridgeState>() {
         for observer in state.observers {
             world.remove_observer(observer);

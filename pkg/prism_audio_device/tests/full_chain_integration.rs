@@ -37,9 +37,11 @@ use prism_audio_core::graph::{AudioGraph, PortRef};
 use prism_audio_core::math::Sample;
 use prism_audio_core::nodes::sources::{OscillatorNode, Waveform};
 use prism_audio_core::voice::{VoiceGroup, VoiceRequest};
+#[cfg(feature = "cpal-backend")]
+use prism_audio_device::layout_for_channels;
 use prism_audio_device::{
-    capture_ring, interleaved_to_planar, layout_for_channels, planar_to_interleaved, render_to_wav,
-    BlockRenderer, DeviceError,
+    capture_ring, interleaved_to_planar, planar_to_interleaved, render_to_wav, BlockRenderer,
+    DeviceError,
 };
 use prism_audio_rt::{runtime, AudioCommand, AudioRuntimeClient, AudioRuntimeConfig};
 
@@ -439,6 +441,7 @@ fn capture_overflow_drops_whole_frames_and_counts_them() {
 }
 
 #[test]
+#[cfg(feature = "cpal-backend")]
 fn layout_negotiation_maps_supported_channel_counts_and_rejects_others() {
     // The device backend negotiates format by mapping a reported device channel
     // count onto an engine ChannelLayout. Supported endpoints map cleanly.

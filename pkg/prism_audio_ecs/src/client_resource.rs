@@ -32,6 +32,16 @@ use prism_audio_core::graph::AudioGraph;
 use prism_audio_rt::{AudioCommand, AudioRuntime, AudioRuntimeClient, Collector, TelemetryFrame};
 use prism_ecs::prelude::Resource;
 
+/// Runtime invariants needed by ECS graph compilation independently of where
+/// the real-time half is parked (headless host or physical device callback).
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AudioRuntimeMetadata {
+    /// Runtime graph sample rate in frames per second.
+    pub sample_rate: u32,
+    /// Largest block accepted by the runtime graph.
+    pub max_block: usize,
+}
+
 /// ECS resource wrapping the clonable [`AudioRuntimeClient`].
 ///
 /// Systems read this resource to enqueue commands and drain telemetry. The
@@ -90,11 +100,25 @@ impl AudioClient {
     }
 
     pub(crate) fn close(&self) {
+        self.suspend();
+    }
+
+    /// Temporarily detaches the current runtime generation while preserving
+    /// the facade identity held by ECS resources and retained clones.
+    pub(crate) fn suspend(&self) {
         let client = self.raw().take();
         self.open.store(false, Ordering::Release);
         // Destruct the producer outside the control-side guard. Its graph
         // handoff is no longer retained by any facade clone after this point.
         drop(client);
+    }
+
+    /// Atomically points every retained facade clone at a new runtime
+    /// generation. The audio callback never touches this control-side mutex.
+    pub(crate) fn replace(&self, replacement: AudioRuntimeClient) {
+        let previous = self.raw().replace(replacement);
+        self.open.store(true, Ordering::Release);
+        drop(previous);
     }
 
     fn raw(&self) -> MutexGuard<'_, Option<AudioRuntimeClient>> {

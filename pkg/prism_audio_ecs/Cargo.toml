@@ -14,8 +14,13 @@ prism_transform = { path = "../prism_transform", features = ["ecs"] }
 prism_audio_core = { path = "../prism_audio_core" }
 prism_audio_rt = { path = "../prism_audio_rt" }
 prism_audio_assets = { path = "../prism_audio_assets" }
+prism_audio_device = { path = "../prism_audio_device", default-features = false }
 prism_scene = { path = "../prism_scene", default-features = false }
 libm = "0.2"
+
+[features]
+default = ["cpal-backend"]
+cpal-backend = ["prism_audio_device/cpal-backend"]
 
 [dev-dependencies]
 prism_asset = { path = "../prism_asset" }

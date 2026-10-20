@@ -24,7 +24,7 @@ use prism_ecs::prelude::{Entity, Resource, World};
 use prism_transform::GlobalTransform;
 
 use crate::assets::{AudioAssetStore, AudioSourceRouteError, ResidentAudioSource};
-use crate::client_resource::{AudioClient, AudioRuntimeHost};
+use crate::client_resource::{AudioClient, AudioRuntimeMetadata};
 use crate::commands::effective_importance;
 use crate::listener::AudioListener;
 use crate::playback::{PlaybackMode, PlaybackSettings};
@@ -491,8 +491,8 @@ pub fn sync_audio_source_routes(world: &mut World) {
     }
 
     let Some((sample_rate, max_block)) = world
-        .get_non_send::<AudioRuntimeHost>()
-        .map(|host| (host.runtime().sample_rate(), host.runtime().max_block()))
+        .get_resource::<AudioRuntimeMetadata>()
+        .map(|metadata| (metadata.sample_rate, metadata.max_block))
     else {
         world.resource_mut::<AudioGraphRouteState>().last_error =
             Some(AudioGraphRouteError::MissingRuntime);
