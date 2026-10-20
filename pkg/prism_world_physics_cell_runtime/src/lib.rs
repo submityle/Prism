@@ -158,6 +158,8 @@ pub enum PhysicsCellHostError<D, H> {
     },
     /// The physics bridge rejected the staged snapshot.
     Physics(HeightfieldBridgeError),
+    /// The adapter could not reserve the bounded cell tile index.
+    AllocationFailed,
     /// The downstream scene host rejected the transition.
     Host(H),
 }
@@ -182,6 +184,7 @@ impl<D: fmt::Display, H: fmt::Display> fmt::Display for PhysicsCellHostError<D, 
                 )
             }
             Self::Physics(error) => write!(f, "physics heightfield staging failed: {error}"),
+            Self::AllocationFailed => f.write_str("physics cell staging allocation failed"),
             Self::Host(error) => write!(f, "scene host transition failed: {error}"),
         }
     }
@@ -198,6 +201,7 @@ pub struct PhysicsCellHost<'a, H: SceneHost, D: TerrainCellDecoder> {
     decoder: D,
     residency: WorldHeightfieldPhysicsResidency,
     cell_tiles: BTreeMap<SectorId, Vec<TileKey>>,
+    tile_owners: BTreeMap<TileKey, SectorId>,
 }
 
 impl<'a, H: SceneHost, D: TerrainCellDecoder> PhysicsCellHost<'a, H, D> {
@@ -214,6 +218,7 @@ impl<'a, H: SceneHost, D: TerrainCellDecoder> PhysicsCellHost<'a, H, D> {
             decoder,
             residency: WorldHeightfieldPhysicsResidency::new(per_tile_budget, residency_budget),
             cell_tiles: BTreeMap::new(),
+            tile_owners: BTreeMap::new(),
         }
     }
 
@@ -242,6 +247,7 @@ impl<'a, H: SceneHost, D: TerrainCellDecoder> PhysicsCellHost<'a, H, D> {
         (
             WorldHeightfieldPhysicsResidency,
             BTreeMap<SectorId, Vec<TileKey>>,
+            BTreeMap<TileKey, SectorId>,
         ),
         PhysicsCellHostError<D::Error, H::Error>,
     > {
@@ -253,6 +259,7 @@ impl<'a, H: SceneHost, D: TerrainCellDecoder> PhysicsCellHost<'a, H, D> {
         }
         let mut residency = self.residency.clone();
         let mut cell_tiles = self.cell_tiles.clone();
+        let mut tile_owners = self.tile_owners.clone();
         if let Some(old_tiles) = cell_tiles.remove(&manifest.sector) {
             for tile in old_tiles {
                 if residency.evict(tile).is_none() {
@@ -261,25 +268,33 @@ impl<'a, H: SceneHost, D: TerrainCellDecoder> PhysicsCellHost<'a, H, D> {
                         tile,
                     });
                 }
-            }
-        }
-        let mut next_tiles = Vec::with_capacity(decoded.heightfields().len());
-        for input in decoded.heightfields() {
-            for (&owner, tiles) in &cell_tiles {
-                if tiles.contains(&input.tile()) {
-                    return Err(PhysicsCellHostError::TileOwnedByOtherCell {
-                        tile: input.tile(),
-                        owner,
+                if tile_owners.remove(&tile) != Some(manifest.sector) {
+                    return Err(PhysicsCellHostError::ResidencyInvariant {
+                        sector: manifest.sector,
+                        tile,
                     });
                 }
+            }
+        }
+        let mut next_tiles = Vec::new();
+        next_tiles
+            .try_reserve(decoded.heightfields().len())
+            .map_err(|_| PhysicsCellHostError::AllocationFailed)?;
+        for input in decoded.heightfields() {
+            if let Some(&owner) = tile_owners.get(&input.tile()) {
+                return Err(PhysicsCellHostError::TileOwnedByOtherCell {
+                    tile: input.tile(),
+                    owner,
+                });
             }
             residency
                 .publish(input.heightfield(), input.embedding())
                 .map_err(PhysicsCellHostError::Physics)?;
             next_tiles.push(input.tile());
+            tile_owners.insert(input.tile(), manifest.sector);
         }
         cell_tiles.insert(manifest.sector, next_tiles);
-        Ok((residency, cell_tiles))
+        Ok((residency, cell_tiles, tile_owners))
     }
 }
 
@@ -291,21 +306,26 @@ impl<H: SceneHost, D: TerrainCellDecoder> SceneHost for PhysicsCellHost<'_, H, D
             .decoder
             .decode(manifest, payload)
             .map_err(PhysicsCellHostError::Decoder)?;
-        let (residency, cell_tiles) = self.stage_cell(manifest, &decoded)?;
+        let (residency, cell_tiles, tile_owners) = self.stage_cell(manifest, &decoded)?;
         self.host
             .load_cell(manifest, payload)
             .map_err(PhysicsCellHostError::Host)?;
         self.residency = residency;
         self.cell_tiles = cell_tiles;
+        self.tile_owners = tile_owners;
         Ok(())
     }
 
     fn evict_cell(&mut self, sector: SectorId) -> Result<(), Self::Error> {
         let mut residency = self.residency.clone();
         let mut cell_tiles = self.cell_tiles.clone();
+        let mut tile_owners = self.tile_owners.clone();
         if let Some(tiles) = cell_tiles.remove(&sector) {
             for tile in tiles {
                 if residency.evict(tile).is_none() {
+                    return Err(PhysicsCellHostError::ResidencyInvariant { sector, tile });
+                }
+                if tile_owners.remove(&tile) != Some(sector) {
                     return Err(PhysicsCellHostError::ResidencyInvariant { sector, tile });
                 }
             }
@@ -315,6 +335,7 @@ impl<H: SceneHost, D: TerrainCellDecoder> SceneHost for PhysicsCellHost<'_, H, D
             .map_err(PhysicsCellHostError::Host)?;
         self.residency = residency;
         self.cell_tiles = cell_tiles;
+        self.tile_owners = tile_owners;
         Ok(())
     }
 }
