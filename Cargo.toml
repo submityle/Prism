@@ -269,6 +269,10 @@ exclude = [
   "tools/ecs-perf",
 ]
 
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1.0.140"
+
 [workspace.lints.clippy]
 doc_markdown = "warn"
 manual_let_else = "warn"
