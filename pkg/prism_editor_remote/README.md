@@ -15,9 +15,23 @@ bounded parsing, capability negotiation, request correlation, and contiguous
 incremental notifications. `publish_changes` accepts a target explicitly
 because `ChangeSet` remains reusable across transport-neutral stores.
 
-The crate does not depend on a particular socket, HTTP stack, renderer, ECS,
-or engine. Transport code only needs to decode a frame, call
-`JsonRpcServer::handle_bytes`, and write the returned frames.
+The crate includes a synchronous standard-library TCP transport. Each payload
+is prefixed by a four-byte big-endian length and is rejected before allocation
+when it exceeds `TransportLimits::max_frame_bytes`. `TcpJsonRpcListener` and
+`connect_tcp` attach `JsonRpcServer` and `JsonRpcClient` to that framing layer;
+read/write/connect timeouts are configurable, clean EOF is distinct from a
+truncated frame, and `JsonRpcServerSession::publish_changes` writes subscribed
+notifications immediately. `LengthPrefixedStream` also works with any
+`Read`/`Write` pair, which keeps framing tests deterministic and transport
+independent.
+
+The crate does not depend on a renderer, ECS, engine, or third-party socket
+runtime. The wire path is:
+
+```text
+TCP stream -> length prefix -> JSON-RPC payload -> JsonRpcServer -> Endpoint
+TCP stream <- length prefix <- JSON-RPC response/notification
+```
 
 The binary codec is deliberately JSON-free. It uses little-endian integers,
 length-prefixed strings/byte arrays, sorted map keys, and explicit enum tags.

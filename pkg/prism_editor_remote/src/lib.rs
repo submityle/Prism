@@ -29,6 +29,7 @@ mod jsonrpc;
 mod model;
 mod pie;
 mod replica;
+mod transport;
 
 pub use codec::{
     decode_request, decode_response, encode_request, encode_response, CodecError, CodecLimits,
@@ -48,3 +49,7 @@ pub use model::{
 };
 pub use pie::{PieRuntimeRecord, PieSession, PieSessionId, PieState, PieStopPolicy, PieStopResult};
 pub use replica::{PendingRequest, Replica, SyncClient};
+pub use transport::{
+    connect_tcp, FrameStage, JsonRpcClient, JsonRpcExchange, JsonRpcServerSession,
+    LengthPrefixedStream, TcpJsonRpcListener, TransportError, TransportLimits,
+};
