@@ -823,11 +823,13 @@ CanonicalLightingScene
 - Prism opaque 路径仍与 Bevy PBR plugin/material queue 共存，production composition 必须定义谁拥有 opaque 光照写入，避免重复着色或隐式双 authority；
 - 当前工作树存在大量并行模块修改，未审查的改动不能自动视为已通过本方案验收。
 
-### 20.3 当前构建阻塞
+### 20.3 当前构建与验证状态（2026-10-20）
 
-截至本文本次更新，`cargo check -p prism_render_scene --lib` 首轮发现的 CommandBuffer re-export、water history 可见性、HashSet 推断和 SceneFabricHistory 参数等错误均已修复；随后发现并修复 composition error enum 的 `missing_docs` 硬错误。第二轮复核目前等待共享 Cargo build lock，尚未返回最终状态，因此本 crate 的最终 `cargo check` 仍记为 `BLOCKED/UNVERIFIED`，不能记为 PASS。最近一次完整诊断阶段还报告 87 条 warning；它们横跨多个当前修改模块，需在 build 复核后分类清理，不应与硬错误混为一谈。
+- `cargo check -p prism_render_app --lib --message-format short`：**PASS**。该构建覆盖 `prism_render_architecture`、`prism_render_shading`、`prism_render_visibility` 和 `prism_render_app`；首次检查因 Bevy→`prism_math` 迁移缺少 `IVec3/UVec3::as_vec3` 失败，后续 API 已补齐并通过。本次检查仍报告大量跨 crate warning，warning 不等价于功能验收。
+- `cargo test -p prism_render_app --lib lighting_ -- --nocapture`：**未验证**。首轮测试目标首次编译期间遇到磁盘空间耗尽，未得到测试结果；之后 `target` 被清理。重试目前在等待共享 Cargo build lock，测试尚未启动完成。
+- 真实物理 GPU、HDR 像素路径、present parity 和性能数据：**未由本轮验证**。App lighting composite 仍将表面样本写入 storage buffer；尚无证据表明其写入 scene HDR 颜色纹理并被 display transform/present 消费。
 
-这些阻塞属于当前工作树的实现状态，不改变本文的目标架构；但在构建恢复前，所有真实 GPU、HDR 和性能结论都必须保持 `BLOCKED` 或 `PARTIAL`。
+上述构建结果只证明当前 Rust library 类型检查通过，不改变目标架构，也不能覆盖真实 GPU/HDR/性能退出门。所有未获得相应证据的项目继续标记为 `BLOCKED`、`PARTIAL` 或 `UNVERIFIED`。
 
 ## 21. 最终决策清单
 
