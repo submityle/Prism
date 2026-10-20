@@ -39,6 +39,11 @@ impl WorldReactions {
     pub(crate) fn is_flushing(&self) -> bool {
         self.flushing
     }
+
+    #[cfg(test)]
+    pub(crate) fn reaction_stats(&self) -> crate::reaction::ReactionStats {
+        self.graph.stats()
+    }
 }
 
 impl World {

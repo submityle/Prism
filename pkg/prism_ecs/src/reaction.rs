@@ -40,9 +40,12 @@
 //! The graph never inspects `C`; it only guarantees *when* and *how often* each
 //! callback runs.
 //!
-//! After a topology rebuild, a flush sorts and visits only dirty nodes:
-//! `O(d log d)` work for `d` affected nodes, and `O(1)` on a clean frame.
-//! Callbacks are `Send + Sync`, allowing an owning World to cross task lanes.
+//! A non-empty flush sorts only the `d` dirty node indices, then runs Kahn's
+//! ordering over their incident dependency edges. Its structural work is
+//! `O(d log d + e_d)`, where `e_d` counts adjacency entries inspected for dirty
+//! nodes; membership checks use the dirty bit plus a per-flush position, so
+//! they are O(1). A clean frame is O(1). Callbacks are `Send + Sync`, allowing
+//! an owning World to cross task lanes.
 
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
@@ -79,6 +82,9 @@ struct Node<C> {
     dependents: Vec<usize>,
     /// Whether this node must be recomputed on the next [`ReactionGraph::flush`].
     dirty: bool,
+    /// Position in the current flush's sorted dirty-node array. Meaningful
+    /// only while `dirty` is true; the dirty bit is the membership marker.
+    order_position: usize,
     /// Recompute callback, or `None` for a pure source signal (sources carry a
     /// dirty bit but have nothing to recompute).
     recompute: Option<Recompute<C>>,
@@ -98,14 +104,20 @@ struct Node<C> {
 pub struct ReactionGraph<C> {
     /// Dense node storage; indices are [`NodeId`]s.
     nodes: Vec<Node<C>>,
-    /// Cached topological order of *all* node indices (dependencies first).
-    topo: Vec<usize>,
-    /// Whether [`topo`](Self::topo) is up to date with the current edge set.
-    topo_valid: bool,
-    /// Cached node-to-topological-position mapping.
-    rank: Vec<usize>,
     /// Only dirty nodes; clean frames never scan the node array.
     pending: Vec<usize>,
+    /// Deterministic work counters for sparse-flush complexity regressions.
+    #[cfg(test)]
+    stats: ReactionStats,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ReactionStats {
+    pub(crate) ordering_nodes: usize,
+    /// Dependency/dependent adjacency entries inspected during sparse ordering.
+    pub(crate) ordering_edges: usize,
+    pub(crate) executed_nodes: usize,
 }
 
 impl<C> Default for ReactionGraph<C> {
@@ -113,15 +125,19 @@ impl<C> Default for ReactionGraph<C> {
     fn default() -> Self {
         Self {
             nodes: Vec::new(),
-            topo: Vec::new(),
-            topo_valid: true,
-            rank: Vec::new(),
             pending: Vec::new(),
+            #[cfg(test)]
+            stats: ReactionStats::default(),
         }
     }
 }
 
 impl<C> ReactionGraph<C> {
+    #[cfg(test)]
+    pub(crate) fn stats(&self) -> ReactionStats {
+        self.stats
+    }
+
     /// Create an empty reaction graph.
     #[inline]
     #[must_use]
@@ -161,10 +177,9 @@ impl<C> ReactionGraph<C> {
             deps: Vec::new(),
             dependents: Vec::new(),
             dirty: false,
+            order_position: usize::MAX,
             recompute: None,
         });
-        // A fresh isolated node must still appear in the flush order.
-        self.topo_valid = false;
         NodeId(id)
     }
 
@@ -187,12 +202,12 @@ impl<C> ReactionGraph<C> {
             deps: Vec::new(),
             dependents: Vec::new(),
             dirty: false,
+            order_position: usize::MAX,
             recompute: Some(Box::new(recompute)),
         });
         for &dep in deps {
             self.add_edge(dep.0, id);
         }
-        self.topo_valid = false;
         NodeId(id)
     }
 
@@ -215,7 +230,6 @@ impl<C> ReactionGraph<C> {
         }
         self.nodes[node].deps.push(dep);
         self.nodes[dep].dependents.push(node);
-        self.topo_valid = false;
         // Adding an edge after a source was dirtied must not lose the new
         // dependent merely because the source is already in the pending set.
         if self.nodes[dep].dirty {
@@ -277,11 +291,7 @@ impl<C> ReactionGraph<C> {
         if self.pending.is_empty() {
             return 0;
         }
-        self.ensure_topo();
-        // Reverse rank so the next dependency is at the end. This sorts only
-        // the affected subgraph, rather than scanning every clean node.
-        self.pending
-            .sort_unstable_by_key(|&i| core::cmp::Reverse(self.rank[i]));
+        self.order_pending();
         let mut recomputed = 0;
         while let Some(&i) = self.pending.last() {
             if !keep_running(ctx) {
@@ -293,6 +303,10 @@ impl<C> ReactionGraph<C> {
             if let Some(cb) = self.nodes[i].recompute.as_mut() {
                 cb(ctx);
                 recomputed += 1;
+                #[cfg(test)]
+                {
+                    self.stats.executed_nodes += 1;
+                }
             }
             self.nodes[i].dirty = false;
             self.pending.pop();
@@ -300,58 +314,78 @@ impl<C> ReactionGraph<C> {
         recomputed
     }
 
-    /// Rebuild [`topo`](Self::topo) via Kahn's algorithm if the edge set
-    /// changed since the last build.
-    ///
-    /// Nodes are emitted in dependency order (every dependency precedes its
-    /// dependents). Any nodes left inside a dependency cycle (never reaching
-    /// in-degree zero) are appended afterwards in index order, so a flush over
-    /// a cyclic graph still terminates and still visits each node at most once.
-    fn ensure_topo(&mut self) {
-        if self.topo_valid {
-            return;
+    /// Order only the dirty subgraph. A sparse change must not trigger a scan
+    /// of unrelated clean nodes merely because the graph was recently built
+    /// or extended. Kahn's queue is seeded in node-index order and dependent
+    /// edges retain insertion order, so delivery remains deterministic.
+    /// Cyclic leftovers retain the historical deterministic index-order
+    /// fallback and remain retryable if a callback panics.
+    /// The dirty bit is the O(1) membership test: every dirty node is present
+    /// exactly once in the pending set until its callback succeeds.
+    fn order_pending(&mut self) {
+        let mut affected = core::mem::take(&mut self.pending);
+        affected.sort_unstable();
+        let count = affected.len();
+        let mut indegree = alloc::vec![0usize; count];
+        for (position, &node) in affected.iter().enumerate() {
+            self.nodes[node].order_position = position;
         }
-        let n = self.nodes.len();
-        let mut indegree = Vec::with_capacity(n);
-        for node in &self.nodes {
-            indegree.push(node.deps.len());
-        }
-        let mut queue: VecDeque<usize> = VecDeque::new();
-        for (i, &deg) in indegree.iter().enumerate() {
-            if deg == 0 {
-                queue.push_back(i);
-            }
-        }
-        let mut topo = Vec::with_capacity(n);
-        while let Some(u) = queue.pop_front() {
-            topo.push(u);
-            for k in 0..self.nodes[u].dependents.len() {
-                let v = self.nodes[u].dependents[k];
-                indegree[v] -= 1;
-                if indegree[v] == 0 {
-                    queue.push_back(v);
+        for (position, &node) in affected.iter().enumerate() {
+            for &dependency in &self.nodes[node].deps {
+                #[cfg(test)]
+                {
+                    self.stats.ordering_edges += 1;
+                }
+                if self.nodes[dependency].dirty {
+                    // A dirty dependency is in `affected`; positions were
+                    // published before this edge pass.
+                    indegree[position] += 1;
                 }
             }
         }
-        if topo.len() < n {
-            // Cycle fallback: append the remaining (cyclic) nodes deterministically.
-            let mut seen = Vec::with_capacity(n);
-            seen.resize(n, false);
-            for &u in &topo {
-                seen[u] = true;
+        #[cfg(test)]
+        {
+            self.stats.ordering_nodes += count;
+        }
+        let mut queue = VecDeque::new();
+        for (position, &degree) in indegree.iter().enumerate() {
+            if degree == 0 {
+                queue.push_back(position);
             }
-            for (i, &was_seen) in seen.iter().enumerate() {
-                if !was_seen {
-                    topo.push(i);
+        }
+        let mut ordered = Vec::with_capacity(count);
+        let mut emitted = alloc::vec![false; count];
+        while let Some(position) = queue.pop_front() {
+            let node = affected[position];
+            emitted[position] = true;
+            ordered.push(node);
+            for &dependent in &self.nodes[node].dependents {
+                #[cfg(test)]
+                {
+                    self.stats.ordering_edges += 1;
+                }
+                if self.nodes[dependent].dirty {
+                    // The dirty/pending invariant also holds while pending is
+                    // temporarily owned by this ordering pass.
+                    let dependent_position = self.nodes[dependent].order_position;
+                    debug_assert!(dependent_position < count);
+                    if indegree[dependent_position] > 0 {
+                        indegree[dependent_position] -= 1;
+                        if indegree[dependent_position] == 0 {
+                            queue.push_back(dependent_position);
+                        }
+                    }
                 }
             }
         }
-        self.topo = topo;
-        self.rank.resize(n, 0);
-        for (rank, &node) in self.topo.iter().enumerate() {
-            self.rank[node] = rank;
+        for (position, &node) in affected.iter().enumerate() {
+            if !emitted[position] {
+                ordered.push(node);
+            }
         }
-        self.topo_valid = true;
+        // flush_while pops from the end; reverse to execute dependency-first.
+        ordered.reverse();
+        self.pending = ordered;
     }
 }
 
@@ -359,6 +393,18 @@ impl<C> ReactionGraph<C> {
 mod tests {
     use super::*;
     use alloc::vec::Vec;
+
+    fn assert_dirty_pending_invariant<C>(graph: &ReactionGraph<C>) {
+        let mut pending = alloc::vec![false; graph.nodes.len()];
+        for &node in &graph.pending {
+            assert!(graph.nodes[node].dirty, "pending node must be dirty");
+            assert!(!pending[node], "pending nodes must be unique");
+            pending[node] = true;
+        }
+        for (index, node) in graph.nodes.iter().enumerate() {
+            assert_eq!(node.dirty, pending[index], "node {index}");
+        }
+    }
 
     /// Scratch recompute context recording per-node values and the order /
     /// count of recomputes, so tests can assert glitch-freedom and dedup.
@@ -482,6 +528,7 @@ mod tests {
         g.add_dependency(n0, n2); // close the cycle
 
         g.mark_dirty(n0); // must terminate despite the cycle
+        assert_dirty_pending_invariant(&g);
         assert!(g.is_dirty(n0) && g.is_dirty(n1) && g.is_dirty(n2));
 
         let mut ctx = Recorder::default();
@@ -507,16 +554,20 @@ mod tests {
         let first = graph.add_derived(&[source], |ctx| ctx.order.push(1));
         let second = graph.add_derived(&[first], |ctx| ctx.order.push(2));
         graph.mark_dirty(source);
+        assert_dirty_pending_invariant(&graph);
         let mut ctx = Recorder::default();
         assert_eq!(graph.flush_while(&mut ctx, |_| false), 0);
+        assert_dirty_pending_invariant(&graph);
         assert_eq!(graph.dirty_count(), 3);
         assert_eq!(graph.flush_while(&mut ctx, |ctx| ctx.order.is_empty()), 1);
+        assert_dirty_pending_invariant(&graph);
         assert_eq!(ctx.order, alloc::vec![1]);
         assert!(!graph.is_dirty(source));
         assert!(!graph.is_dirty(first));
         assert!(graph.is_dirty(second));
         assert_eq!(graph.dirty_count(), 1);
         assert_eq!(graph.flush(&mut ctx), 1);
+        assert_dirty_pending_invariant(&graph);
         assert_eq!(ctx.order, alloc::vec![1, 2]);
         assert_eq!(graph.flush(&mut ctx), 0);
     }
@@ -541,6 +592,7 @@ mod tests {
         let derived = graph.add_derived(&[], |ctx| ctx.order.push(1));
         graph.mark_dirty(source);
         graph.add_dependency(derived, source);
+        assert_dirty_pending_invariant(&graph);
         assert_eq!(graph.dirty_count(), 2);
         let mut ctx = Recorder::default();
         assert_eq!(graph.flush(&mut ctx), 1);
@@ -586,9 +638,11 @@ mod tests {
             graph.flush(&mut ctx);
         }))
         .is_err());
+        assert_dirty_pending_invariant(&graph);
         assert_eq!(ctx.order, alloc::vec![1]);
         assert_eq!(graph.dirty_count(), 2);
         assert_eq!(graph.flush(&mut ctx), 2);
+        assert_dirty_pending_invariant(&graph);
         assert_eq!(ctx.order, alloc::vec![1, 2, 3]);
         assert_eq!(graph.flush(&mut ctx), 0);
     }

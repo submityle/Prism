@@ -13,6 +13,14 @@ impl Component for Sparse {
     const STORAGE: crate::component::StorageType = crate::component::StorageType::SparseSet;
 }
 
+#[derive(Clone)]
+struct Unobserved(u32);
+impl Component for Unobserved {}
+
+#[derive(Clone)]
+struct Noise;
+impl Component for Noise {}
+
 fn count(counter: &Arc<AtomicUsize>) -> impl FnMut(&mut ChangeContext<'_>) + Send + Sync + 'static {
     let counter = counter.clone();
     move |ctx| {
@@ -98,6 +106,83 @@ fn nonempty_flush_visits_only_observers_for_dirty_components() {
     assert_eq!(world.change_observers.stats.collections, 1);
     assert_eq!(value_calls.load(Ordering::Relaxed), 0);
     assert_eq!(sparse_calls.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn observer_to_reaction_sparse_flush_ignores_unaffected_registry_entries() {
+    const ENTITIES: usize = 4_096;
+    const QUERY_REGISTRATIONS: usize = 64;
+    const NOISE_OBSERVERS: usize = 512;
+    const CLEAN_REACTIONS: usize = 2_048;
+
+    let mut world = World::new();
+    let entities: Vec<_> = (0..ENTITIES)
+        .map(|index| world.spawn((Value(index as u32), Unobserved(index as u32), Noise)))
+        .collect();
+
+    // Populate many reusable query states and verify their initial full-set
+    // view. The measured Observer -> Reaction push path below does not execute
+    // these queries, so this is not evidence for the full Query -> Observer
+    // chain's asymptotic cost.
+    let queries: Vec<_> = (0..QUERY_REGISTRATIONS)
+        .map(|_| world.query::<&Value>())
+        .collect();
+    for query in &queries {
+        assert_eq!(query.iter(&world).count(), ENTITIES);
+    }
+
+    let noise_calls = Arc::new(AtomicUsize::new(0));
+    for _ in 0..NOISE_OBSERVERS {
+        world.observe_changed::<Noise, _>(count(&noise_calls));
+    }
+
+    let source = world.reaction_source::<Value>();
+    let effect_calls = Arc::new(AtomicUsize::new(0));
+    world.add_reaction(&[source], {
+        let effect_calls = effect_calls.clone();
+        move |_| {
+            effect_calls.fetch_add(1, Ordering::Relaxed);
+        }
+    });
+    for _ in 0..CLEAN_REACTIONS {
+        world.add_reaction(&[], |_| {});
+    }
+
+    // Establish a clean revision after registration. Neither entity count nor
+    // clean registry cardinality should enter the subsequent sparse flush.
+    assert_eq!(world.flush_changed_observers(), 0);
+    assert_idle(&mut world);
+
+    // A component with no active change subscription does not dirty the
+    // tracker, so the large observer registry still takes the O(1) idle path.
+    world
+        .get_mut::<Unobserved>(entities[ENTITIES / 2])
+        .unwrap()
+        .0 += 1;
+    assert_eq!(world.flush_changed_observers(), 0);
+    assert!(world.change_observers.stats.idle_fast_path);
+    assert_eq!(world.change_observers.stats.slot_visits, 0);
+    assert_eq!(world.change_observers.stats.candidate_slots, 0);
+
+    // One row change flows through one source observer and one affected
+    // reaction, despite thousands of rows, observers, and clean reactions.
+    world.get_mut::<Value>(entities[ENTITIES - 1]).unwrap().0 += 1;
+    assert_eq!(world.flush_changed_observers(), 1);
+    assert_eq!(effect_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(noise_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(world.change_observers.stats.candidate_slots, 1);
+    assert_eq!(world.change_observers.stats.slot_visits, 2);
+    assert_eq!(world.change_observers.stats.collections, 1);
+    assert_eq!(world.change_observers.stats.log_batches, 1);
+    assert_eq!(world.change_observers.stats.log_events, 1);
+    assert_eq!(
+        world.change_observers.stats.retain_tick_lookup_upper_bound,
+        1
+    );
+    let reaction_stats = world.reactions.reaction_stats();
+    assert_eq!(reaction_stats.ordering_nodes, 2);
+    assert_eq!(reaction_stats.ordering_edges, 2);
+    assert_eq!(reaction_stats.executed_nodes, 1);
 }
 
 #[test]

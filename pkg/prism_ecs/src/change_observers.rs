@@ -78,7 +78,7 @@ trait ChangeObserver: Send + Sync {
         last_run: Tick,
         this_run: Tick,
         out: &mut Vec<Entity>,
-    );
+    ) -> crate::change_index::ChangeIndexStats;
     /// Invoke the user callback.
     fn fire(&mut self, ctx: &mut ChangeContext<'_>);
 }
@@ -106,8 +106,8 @@ where
         last_run: Tick,
         this_run: Tick,
         out: &mut Vec<Entity>,
-    ) {
-        world
+    ) -> crate::change_index::ChangeIndexStats {
+        let stats = world
             .change_tracker
             .collect(self.component, cursor, last_run, this_run, out);
         out.retain(|&entity| {
@@ -115,6 +115,7 @@ where
                 .get_ticks::<T>(entity)
                 .is_some_and(|ticks| ticks.is_changed(last_run, this_run))
         });
+        stats
     }
 
     fn fire(&mut self, ctx: &mut ChangeContext<'_>) {
@@ -148,6 +149,11 @@ struct FlushStats {
     slot_visits: usize,
     collections: usize,
     candidate_slots: usize,
+    log_batches: usize,
+    log_events: usize,
+    /// Auditable upper bound: current collection calls `get_ticks` once per
+    /// event passed through the retain filter; derived from indexed events.
+    retain_tick_lookup_upper_bound: usize,
     idle_fast_path: bool,
 }
 
@@ -513,13 +519,23 @@ impl World {
             // buffer so retry state is never re-filtered against a later
             // `last_run` and accidentally discarded.
             let mut fresh = Vec::new();
-            slot.observer.collect(
+            let _collect_stats = slot.observer.collect(
                 guard.world,
                 &mut slot.cursor,
                 slot.last_run,
                 this_run,
                 &mut fresh,
             );
+            #[cfg(test)]
+            {
+                guard.world.change_observers.stats.log_batches += _collect_stats.batches;
+                guard.world.change_observers.stats.log_events += _collect_stats.events;
+                guard
+                    .world
+                    .change_observers
+                    .stats
+                    .retain_tick_lookup_upper_bound += _collect_stats.events;
+            }
             fresh.sort_unstable_by_key(|entity| (entity.index(), entity.generation()));
             fresh.dedup();
             slot.pending.extend(fresh);
