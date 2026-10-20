@@ -45,6 +45,11 @@ impl Component for DirtyCell {}
 struct Vel(f32, f32, f32);
 impl Component for Vel {}
 
+/// Shared key used to measure archetype creation and final-reference eviction.
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[component(storage = "shared")]
+struct ChurnKey(u32);
+
 /// Spawn `ENTITIES` `(Pos, Vel)` entities into a fresh world.
 fn spawn_world() -> (World, Entity) {
     let mut world = World::new();
@@ -362,6 +367,45 @@ fn scale_spawn_batch_vs_individual_1m() {
         ns_per_entity(batched),
         individual.as_secs_f64() / batched.as_secs_f64(),
     );
+}
+
+/// Measure shared-value archetype eviction while unrelated archetypes sharing
+/// the same table columns remain live. This exercises the `by_shared_binding`
+/// candidate posting and affected-posting cleanup cost.
+///
+/// The output is diagnostic, not a timing gate: run on an otherwise idle host
+/// before comparing sizes.
+#[test]
+#[ignore = "creates up to 4097 archetypes; run explicitly with --release --ignored"]
+fn scale_shared_binding_eviction_churn() {
+    const EVICTIONS_PER_SAMPLE: usize = 1_024;
+    const SAMPLES: usize = 7;
+    for live_values in [64usize, 256, 1_024, 4_096] {
+        let mut world = World::new();
+        world.spawn((Pos(-1.0, 0.0, 0.0), ChurnKey(u32::MAX)));
+        for value in 0..live_values {
+            world.spawn((Pos(value as f32, 0.0, 0.0), ChurnKey(value as u32)));
+        }
+
+        let mut samples = Vec::with_capacity(SAMPLES);
+        for sample in 0..SAMPLES {
+            let start = Instant::now();
+            for offset in 0..EVICTIONS_PER_SAMPLE {
+                let value = (live_values + sample * EVICTIONS_PER_SAMPLE + offset) as u32;
+                let entity = world.spawn((Pos(value as f32, 1.0, 0.0), ChurnKey(value)));
+                assert!(world.despawn(entity));
+            }
+            samples.push(start.elapsed());
+            assert_eq!(world.entity_count() as usize, live_values + 1);
+        }
+        samples.sort_unstable();
+        let median = samples[SAMPLES / 2];
+        println!(
+            "shared_binding_eviction_churn live_values={live_values} samples={SAMPLES} evictions/sample={EVICTIONS_PER_SAMPLE} median={median:?} median_ns/eviction={:.0}",
+            median.as_nanos() as f64 / EVICTIONS_PER_SAMPLE as f64
+        );
+        black_box(&world);
+    }
 }
 
 /// The design's headline claim is that the incremental path costs in proportion
