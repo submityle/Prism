@@ -121,6 +121,23 @@ where
                 world.insert_resource(MeshPipelineSpecializer::with_worker(
                     runtime.device_handle(),
                 ));
+                // Particle GPU buffers belong to the lost device. Drop the
+                // resource without destroying through that device; the
+                // invalidated startup schedule recreates it on the replacement.
+                world.remove_resource::<crate::particle::EmberGpuAssetRegistry>();
+                world.insert_resource(crate::particle::EmberGpuAssetRegistry::default());
+                world.remove_resource::<crate::particle::ParticleGpuState>();
+                let particle_status = world.resource_mut::<crate::particle::ParticleUploadStatus>();
+                particle_status.error = None;
+                particle_status.disabled_reason = None;
+                let ember_status = world.resource_mut::<crate::particle::EmberPrepareStatus>();
+                ember_status.error = None;
+                ember_status.fatal = false;
+                ember_status.error_kind = None;
+                ember_status.updated_graphs = 0;
+                ember_status.preserved_graphs = 0;
+                ember_status.initial_failures = 0;
+                ember_status.outcome = crate::particle::EmberPrepareOutcome::Idle;
                 world
                     .resource_mut::<MaterialParameterBuffers>()
                     .recover(runtime.device(), runtime.queue());

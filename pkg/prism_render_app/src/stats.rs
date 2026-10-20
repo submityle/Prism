@@ -49,8 +49,22 @@ pub struct RenderFrameStats {
     /// Canonical light-scene conversion failure for the latest attempted frame.
     /// A present value means that frame was rejected before GPU recording.
     pub lighting_input_error: Option<crate::lighting_scene::LightingSceneExtractError>,
+    /// Stable-slot table preparation failure for the latest attempted frame.
+    pub lighting_upload_error: Option<crate::lighting_gpu::LightingGpuPrepareError>,
     /// Trace compute dispatches recorded into host frame graphs.
     pub trace_gpu_dispatches_recorded: u64,
+    /// Ember graph inputs successfully uploaded during preparation.
+    pub ember_graphs_updated: u64,
+    /// Ember updates that kept an older valid graph resident.
+    pub ember_graphs_preserved: u64,
+    /// Ember graph inputs that failed before any valid graph existed.
+    pub ember_initial_failures: u64,
+    /// Ember preparation error category from the latest attempted frame.
+    pub ember_prepare_error: Option<crate::particle::EmberPrepareErrorKind>,
+    /// Ember preparation outcome from the latest attempted frame.
+    pub ember_prepare_outcome: crate::particle::EmberPrepareOutcome,
+    /// Compute passes recorded for Ember graphs.
+    pub ember_compute_passes_recorded: u64,
     /// The viewport of the most recently recorded frame, empty or not.
     pub last_viewport: RenderViewport,
     /// The receipt for the most recently attempted frame graph execution.

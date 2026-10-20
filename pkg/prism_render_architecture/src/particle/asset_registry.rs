@@ -8,15 +8,26 @@
 use alloc::collections::BTreeMap;
 
 use super::authoring::{
-    decode_binary, EmberAsset, EmberAssetHandle, EmberCodecError, HotReload, ReloadEvent,
-    ReloadState,
+    decode_binary, EmberAsset, EmberAssetHandle, EmberCodecError, GraphAssetRef, HotReload,
+    ReloadEvent, ReloadState,
 };
+use super::compiler::CompiledGraph;
 
 /// Monotonic revision of one registered asset.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct EmberAssetRevision(u64);
 
 impl EmberAssetRevision {
+    /// Creates a revision received from an external asset database or an
+    /// extracted render record.
+    ///
+    /// Revision values are opaque to the registry, but render-world bridges
+    /// must be able to carry the value across the main/render world boundary.
+    #[must_use]
+    pub const fn from_value(value: u64) -> Self {
+        Self(value)
+    }
+
     /// Returns the numeric revision used by render caches and diagnostics.
     #[must_use]
     pub const fn value(self) -> u64 {
@@ -101,6 +112,169 @@ pub enum EmberAssetRegistryError {
     },
     /// The incoming asset bytes are not a valid `.ember` binary.
     Decode(EmberCodecError),
+}
+
+/// An immutable compiled graph together with its published revision.
+pub struct EmberCompiledGraphEntry {
+    graph: CompiledGraph,
+    revision: EmberAssetRevision,
+}
+
+impl EmberCompiledGraphEntry {
+    /// Returns the validated compiled graph.
+    #[must_use]
+    pub const fn graph(&self) -> &CompiledGraph {
+        &self.graph
+    }
+
+    /// Returns the graph publication revision.
+    #[must_use]
+    pub const fn revision(&self) -> EmberAssetRevision {
+        self.revision
+    }
+}
+
+/// Errors returned by [`EmberCompiledGraphRegistry`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EmberCompiledGraphRegistryError {
+    /// A graph handle is already present and an explicit duplicate insert was
+    /// attempted.
+    DuplicateGraph(GraphAssetRef),
+    /// A publication result belongs to an older or equal graph revision.
+    StaleGraph {
+        /// Graph whose publication was rejected.
+        graph: GraphAssetRef,
+        /// Revision currently published.
+        expected: EmberAssetRevision,
+        /// Revision supplied by the caller.
+        actual: EmberAssetRevision,
+    },
+    /// The requested graph handle is not present.
+    UnknownGraph(GraphAssetRef),
+    /// The registry revision counter wrapped around.
+    RevisionExhausted,
+}
+
+/// Formal `GraphAssetRef → CompiledGraph` registry.
+///
+/// Compilation publishes an already validated [`CompiledGraph`] atomically.
+/// The registry never exposes a partially built graph, and an older async
+/// result cannot replace a newer publication. GPU resource realization remains
+/// the responsibility of the render layer.
+#[derive(Default)]
+pub struct EmberCompiledGraphRegistry {
+    graphs: BTreeMap<GraphAssetRef, EmberCompiledGraphEntry>,
+    next_revision: u64,
+}
+
+impl EmberCompiledGraphRegistry {
+    /// Creates an empty compiled-graph registry.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            graphs: BTreeMap::new(),
+            next_revision: 0,
+        }
+    }
+
+    /// Number of published compiled graphs.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.graphs.len()
+    }
+
+    /// Returns the graph entry for a stable graph reference.
+    #[must_use]
+    pub fn get(&self, graph: GraphAssetRef) -> Option<&EmberCompiledGraphEntry> {
+        self.graphs.get(&graph)
+    }
+
+    /// Returns deterministic graph/revision pairs.
+    pub fn iter(&self) -> impl Iterator<Item = (GraphAssetRef, &EmberCompiledGraphEntry)> {
+        self.graphs.iter().map(|(graph, entry)| (*graph, entry))
+    }
+
+    /// Publishes a new compiled graph with a registry-owned revision.
+    pub fn publish(
+        &mut self,
+        graph: GraphAssetRef,
+        compiled: CompiledGraph,
+    ) -> Result<EmberAssetRevision, EmberCompiledGraphRegistryError> {
+        let revision = self
+            .next_revision
+            .checked_add(1)
+            .ok_or(EmberCompiledGraphRegistryError::RevisionExhausted)?;
+        self.next_revision = revision;
+        let revision = EmberAssetRevision::from_value(revision);
+        self.graphs.insert(
+            graph,
+            EmberCompiledGraphEntry {
+                graph: compiled,
+                revision,
+            },
+        );
+        Ok(revision)
+    }
+
+    /// Inserts a graph under an explicit revision without replacing a live
+    /// graph.
+    pub fn insert(
+        &mut self,
+        graph: GraphAssetRef,
+        revision: EmberAssetRevision,
+        compiled: CompiledGraph,
+    ) -> Result<(), EmberCompiledGraphRegistryError> {
+        if self.graphs.contains_key(&graph) {
+            return Err(EmberCompiledGraphRegistryError::DuplicateGraph(graph));
+        }
+        self.next_revision = self.next_revision.max(revision.value());
+        self.graphs.insert(
+            graph,
+            EmberCompiledGraphEntry {
+                graph: compiled,
+                revision,
+            },
+        );
+        Ok(())
+    }
+
+    /// Atomically replaces a graph if the incoming revision is newer.
+    pub fn replace_if_newer(
+        &mut self,
+        graph: GraphAssetRef,
+        revision: EmberAssetRevision,
+        compiled: CompiledGraph,
+    ) -> Result<(), EmberCompiledGraphRegistryError> {
+        if let Some(current) = self.graphs.get(&graph) {
+            if revision <= current.revision {
+                return Err(EmberCompiledGraphRegistryError::StaleGraph {
+                    graph,
+                    expected: current.revision,
+                    actual: revision,
+                });
+            }
+        }
+        self.next_revision = self.next_revision.max(revision.value());
+        self.graphs.insert(
+            graph,
+            EmberCompiledGraphEntry {
+                graph: compiled,
+                revision,
+            },
+        );
+        Ok(())
+    }
+
+    /// Removes and returns a published compiled graph.
+    pub fn remove(
+        &mut self,
+        graph: GraphAssetRef,
+    ) -> Result<CompiledGraph, EmberCompiledGraphRegistryError> {
+        self.graphs
+            .remove(&graph)
+            .map(|entry| entry.graph)
+            .ok_or(EmberCompiledGraphRegistryError::UnknownGraph(graph))
+    }
 }
 
 /// CPU-side registry for live `.ember` assets.
@@ -329,10 +503,12 @@ impl EmberAssetRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::particle::attributes::AttributeLayoutPlan;
     use crate::particle::authoring::{
         EmberAsset, GraphAssetRef, RendererConfig, RendererConfigId, RendererKind,
         SerializationFormat, ShadingSettings,
     };
+    use crate::particle::compiler::CompiledGraph;
     use crate::particle::EmberShadingModel;
     use alloc::vec::Vec;
 
@@ -352,6 +528,19 @@ mod tests {
                 cast_shadows: false,
             },
             format: SerializationFormat::Binary,
+        }
+    }
+
+    fn compiled_graph() -> CompiledGraph {
+        CompiledGraph {
+            source: String::new(),
+            stage_order: Vec::new(),
+            entry_points: Vec::new(),
+            dispatches: Vec::new(),
+            bindings: Vec::new(),
+            parameter_blocks: Vec::new(),
+            attribute_layout: AttributeLayoutPlan::build(0, &[]),
+            attribute_bindings: Vec::new(),
         }
     }
 
@@ -434,5 +623,61 @@ mod tests {
             registry.get(handle).unwrap().reload_state(),
             ReloadState::Idle
         );
+    }
+
+    #[test]
+    fn compiled_graph_registry_publishes_and_replaces_atomically() {
+        let mut registry = EmberCompiledGraphRegistry::new();
+        let graph = GraphAssetRef(9);
+        let first = registry.publish(graph, compiled_graph()).unwrap();
+        assert_eq!(first.value(), 1);
+        assert_eq!(registry.get(graph).unwrap().revision(), first);
+
+        let second = EmberAssetRevision::from_value(4);
+        registry
+            .replace_if_newer(graph, second, compiled_graph())
+            .unwrap();
+        assert_eq!(registry.get(graph).unwrap().revision(), second);
+        assert_eq!(registry.len(), 1);
+    }
+
+    #[test]
+    fn compiled_graph_registry_rejects_stale_results_and_keeps_previous_graph() {
+        let mut registry = EmberCompiledGraphRegistry::new();
+        let graph = GraphAssetRef(10);
+        let current = EmberAssetRevision::from_value(8);
+        registry.insert(graph, current, compiled_graph()).unwrap();
+        let error = registry
+            .replace_if_newer(graph, EmberAssetRevision::from_value(7), compiled_graph())
+            .expect_err("older asynchronous compile must be rejected");
+        assert_eq!(
+            error,
+            EmberCompiledGraphRegistryError::StaleGraph {
+                graph,
+                expected: current,
+                actual: EmberAssetRevision::from_value(7),
+            }
+        );
+        assert_eq!(registry.get(graph).unwrap().revision(), current);
+    }
+
+    #[test]
+    fn compiled_graph_registry_remove_reports_unknown_graph() {
+        let mut registry = EmberCompiledGraphRegistry::new();
+        assert_eq!(
+            registry.remove(GraphAssetRef(404)),
+            Err(EmberCompiledGraphRegistryError::UnknownGraph(
+                GraphAssetRef(404)
+            ))
+        );
+        registry
+            .insert(
+                GraphAssetRef(1),
+                EmberAssetRevision::from_value(1),
+                compiled_graph(),
+            )
+            .unwrap();
+        assert!(registry.remove(GraphAssetRef(1)).is_ok());
+        assert!(registry.get(GraphAssetRef(1)).is_none());
     }
 }

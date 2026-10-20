@@ -611,10 +611,20 @@ const R_POINT_ATTRACTOR: &[ResourceDecl] = &[ResourceDecl::uniform("point_attrac
 const R_LINE_ATTRACTOR: &[ResourceDecl] = &[ResourceDecl::uniform("line_attractor", 2, 0)];
 const R_CURL_NOISE: &[ResourceDecl] = &[ResourceDecl::uniform("curl_noise", 2, 0)];
 const R_WIND: &[ResourceDecl] = &[ResourceDecl::uniform("wind", 2, 0)];
-const R_VECTOR_FIELD: &[ResourceDecl] = &[ResourceDecl::texture3d("vector_field", 2, 0)];
+const R_VECTOR_FIELD: &[ResourceDecl] = &[
+    ResourceDecl::texture3d("vector_field", 2, 0),
+    ResourceDecl::uniform("vector_field_params", 2, 1),
+];
 const R_COLLISION_PLANE: &[ResourceDecl] = &[ResourceDecl::uniform("collision_plane", 2, 0)];
-const R_DEPTH: &[ResourceDecl] = &[ResourceDecl::texture2d("depth_buffer", 2, 0)];
-const R_COLLISION_SDF: &[ResourceDecl] = &[ResourceDecl::texture3d("collision_sdf", 2, 0)];
+const R_DEPTH: &[ResourceDecl] = &[
+    ResourceDecl::texture2d("depth_buffer", 2, 0),
+    ResourceDecl::uniform("depth_params", 2, 1),
+];
+const R_COLLISION_SDF: &[ResourceDecl] = &[
+    ResourceDecl::texture3d("collision_sdf", 2, 0),
+    ResourceDecl::uniform("collision_sdf_origin", 2, 1),
+    ResourceDecl::uniform("collision_sdf_extent", 2, 2),
+];
 const R_RAYTRACE: &[ResourceDecl] = &[ResourceDecl::buffer("raytrace_scene", 2, 0)];
 const R_BOUNCE: &[ResourceDecl] = &[ResourceDecl::uniform("bounce_params", 2, 0)];
 const R_COLOR_CURVE: &[ResourceDecl] = &[ResourceDecl::curve("color_over_life", 2, 0)];
@@ -624,6 +634,40 @@ const R_RANDOM_RANGE: &[ResourceDecl] = &[ResourceDecl::uniform("random_range", 
 const R_SPAWN_RATE: &[ResourceDecl] = &[ResourceDecl::uniform("spawn_rate", 2, 0)];
 const R_SPAWN_BURST: &[ResourceDecl] = &[ResourceDecl::uniform("spawn_burst", 2, 0)];
 const R_SPAWN_SHAPE: &[ResourceDecl] = &[ResourceDecl::uniform("spawn_shape", 2, 0)];
+const R_SPAWN_MESH: &[ResourceDecl] = &[
+    ResourceDecl::new(
+        "spawn_mesh_vertices",
+        ResourceKind::StorageBuffer,
+        ResourceAccess::ReadOnly,
+        AttributeFormat::Vec4,
+        2,
+        0,
+    ),
+    ResourceDecl::buffer("spawn_mesh_indices", 2, 1),
+    ResourceDecl::uniform("spawn_mesh_params", 2, 2),
+];
+const R_SPAWN_SKELETON: &[ResourceDecl] = &[
+    ResourceDecl::new(
+        "spawn_skeleton_vertices",
+        ResourceKind::StorageBuffer,
+        ResourceAccess::ReadOnly,
+        AttributeFormat::Vec4,
+        2,
+        0,
+    ),
+    ResourceDecl::buffer("spawn_skeleton_indices", 2, 1),
+    ResourceDecl::uniform("spawn_skeleton_params", 2, 2),
+];
+const R_SPAWN_SDF: &[ResourceDecl] = &[
+    ResourceDecl::texture3d("spawn_sdf", 2, 0),
+    ResourceDecl::uniform("spawn_sdf_origin", 2, 1),
+    ResourceDecl::uniform("spawn_sdf_extent", 2, 2),
+];
+const R_SET_POSITION: &[ResourceDecl] = &[ResourceDecl::uniform("set_position", 2, 0)];
+const R_SET_VELOCITY: &[ResourceDecl] = &[ResourceDecl::uniform("set_velocity", 2, 0)];
+const R_SET_COLOR: &[ResourceDecl] = &[ResourceDecl::uniform("set_color", 2, 0)];
+const R_SET_SIZE: &[ResourceDecl] = &[ResourceDecl::uniform("set_size", 2, 0)];
+const R_SET_ROTATION: &[ResourceDecl] = &[ResourceDecl::uniform("set_rotation", 2, 0)];
 const R_EMITTER_VELOCITY: &[ResourceDecl] = &[ResourceDecl::uniform("emitter_velocity", 2, 0)];
 const R_LIFETIME_PARAMS: &[ResourceDecl] = &[ResourceDecl::uniform("lifetime_params", 2, 0)];
 const R_CONSTRAINT_PARAMS: &[ResourceDecl] = &[ResourceDecl::uniform("constraint_params", 2, 0)];
@@ -652,6 +696,37 @@ parameter_schema!(P_RANDOM_RANGE, "random_range");
 parameter_schema!(P_SPAWN_RATE, "spawn_rate");
 parameter_schema!(P_SPAWN_BURST, "spawn_burst");
 parameter_schema!(P_SPAWN_SHAPE, "spawn_shape");
+parameter_schema!(P_SPAWN_MESH, "spawn_mesh_params");
+parameter_schema!(P_SPAWN_SKELETON, "spawn_skeleton_params");
+parameter_schema!(P_SPAWN_SDF_ORIGIN, "spawn_sdf_origin");
+parameter_schema!(P_SPAWN_SDF_EXTENT, "spawn_sdf_extent");
+const P_SPAWN_SDF: &[ParameterBlockDecl] = &[P_SPAWN_SDF_ORIGIN[0], P_SPAWN_SDF_EXTENT[0]];
+parameter_schema!(P_SET_POSITION, "set_position");
+parameter_schema!(P_SET_VELOCITY, "set_velocity");
+parameter_schema!(P_SET_COLOR, "set_color");
+parameter_schema!(P_SET_SIZE, "set_size");
+parameter_schema!(P_SET_ROTATION, "set_rotation");
+const P_VECTOR_FIELD_FIELDS: &[ParameterField] = &[
+    ParameterField::new(
+        "origin",
+        ParameterType::Vec4,
+        ParameterValue::Vec4([0.0; 4]),
+    ),
+    ParameterField::new(
+        "extent",
+        ParameterType::Vec4,
+        ParameterValue::Vec4([1.0; 4]),
+    ),
+];
+const P_VECTOR_FIELD: &[ParameterBlockDecl] = &[ParameterBlockDecl::new(
+    "vector_field_params",
+    P_VECTOR_FIELD_FIELDS,
+)];
+parameter_schema!(P_DEPTH, "depth_params");
+parameter_schema!(P_COLLISION_SDF_ORIGIN, "collision_sdf_origin");
+parameter_schema!(P_COLLISION_SDF_EXTENT, "collision_sdf_extent");
+const P_COLLISION_SDF: &[ParameterBlockDecl] =
+    &[P_COLLISION_SDF_ORIGIN[0], P_COLLISION_SDF_EXTENT[0]];
 parameter_schema!(P_EMITTER_VELOCITY, "emitter_velocity");
 parameter_schema!(P_LIFETIME, "lifetime_params");
 parameter_schema!(P_CONSTRAINT, "constraint_params");
@@ -837,43 +912,43 @@ impl BuiltinModule {
             BuiltinModule::SpawnMeshSurface => ModuleMeta {
                 stage: StageKind::Emit,
                 attributes: A_SPAWN_SHAPED,
-                resources: R_SPAWN_SHAPE,
+                resources: R_SPAWN_MESH,
                 kernel: "spawn_mesh_surface",
             },
             BuiltinModule::SpawnSkeleton => ModuleMeta {
                 stage: StageKind::Emit,
                 attributes: A_SPAWN_SHAPED,
-                resources: R_SPAWN_SHAPE,
+                resources: R_SPAWN_SKELETON,
                 kernel: "spawn_skeleton",
             },
             BuiltinModule::SpawnSdfSurface => ModuleMeta {
                 stage: StageKind::Emit,
                 attributes: A_SPAWN_SHAPED,
-                resources: R_SPAWN_SHAPE,
+                resources: R_SPAWN_SDF,
                 kernel: "spawn_sdf_surface",
             },
             BuiltinModule::SetPosition => ModuleMeta {
                 stage: StageKind::Init,
                 attributes: A_POSITION,
-                resources: R_EMPTY,
+                resources: R_SET_POSITION,
                 kernel: "set_position",
             },
             BuiltinModule::SetVelocity => ModuleMeta {
                 stage: StageKind::Init,
                 attributes: A_VELOCITY,
-                resources: R_EMPTY,
+                resources: R_SET_VELOCITY,
                 kernel: "set_velocity",
             },
             BuiltinModule::SetColor => ModuleMeta {
                 stage: StageKind::Init,
                 attributes: A_COLOR,
-                resources: R_EMPTY,
+                resources: R_SET_COLOR,
                 kernel: "set_color",
             },
             BuiltinModule::SetSize => ModuleMeta {
                 stage: StageKind::Init,
                 attributes: A_SIZE,
-                resources: R_EMPTY,
+                resources: R_SET_SIZE,
                 kernel: "set_size",
             },
             BuiltinModule::SetLifetime => ModuleMeta {
@@ -885,7 +960,7 @@ impl BuiltinModule {
             BuiltinModule::SetRotation => ModuleMeta {
                 stage: StageKind::Init,
                 attributes: A_ROTATION,
-                resources: R_EMPTY,
+                resources: R_SET_ROTATION,
                 kernel: "set_rotation",
             },
             BuiltinModule::RandomRange => ModuleMeta {
@@ -1230,13 +1305,17 @@ impl EmberModule for BuiltinModule {
         match self {
             Self::SpawnRate => P_SPAWN_RATE,
             Self::SpawnBurst => P_SPAWN_BURST,
-            Self::SpawnPoint
-            | Self::SpawnSphere
-            | Self::SpawnBox
-            | Self::SpawnCone
-            | Self::SpawnMeshSurface
-            | Self::SpawnSkeleton
-            | Self::SpawnSdfSurface => P_SPAWN_SHAPE,
+            Self::SpawnPoint | Self::SpawnSphere | Self::SpawnBox | Self::SpawnCone => {
+                P_SPAWN_SHAPE
+            }
+            Self::SpawnMeshSurface => P_SPAWN_MESH,
+            Self::SpawnSkeleton => P_SPAWN_SKELETON,
+            Self::SpawnSdfSurface => P_SPAWN_SDF,
+            Self::SetPosition => P_SET_POSITION,
+            Self::SetVelocity => P_SET_VELOCITY,
+            Self::SetColor => P_SET_COLOR,
+            Self::SetSize => P_SET_SIZE,
+            Self::SetRotation => P_SET_ROTATION,
             Self::SetLifetime => P_LIFETIME,
             Self::RandomRange => P_RANDOM_RANGE,
             Self::InheritVelocity => P_EMITTER_VELOCITY,
@@ -1247,7 +1326,10 @@ impl EmberModule for BuiltinModule {
             Self::LineAttractor => P_LINE_ATTRACTOR,
             Self::CurlNoise => P_CURL_NOISE,
             Self::Wind => P_WIND,
+            Self::VectorField => P_VECTOR_FIELD,
             Self::CollisionPlane => P_COLLISION_PLANE,
+            Self::CollisionDepth => P_DEPTH,
+            Self::CollisionSdf => P_COLLISION_SDF,
             Self::CollisionBounce => P_BOUNCE,
             Self::DistanceConstraint | Self::BendConstraint | Self::VolumeConstraint => {
                 P_CONSTRAINT
@@ -1284,6 +1366,9 @@ impl EmberModule for BuiltinModule {
                 | BuiltinModule::SpawnSphere
                 | BuiltinModule::SpawnBox
                 | BuiltinModule::SpawnCone
+                | BuiltinModule::SpawnMeshSurface
+                | BuiltinModule::SpawnSkeleton
+                | BuiltinModule::SpawnSdfSurface
                 | BuiltinModule::CurlNoise
         ) {
             ctx.push_function(
@@ -1316,19 +1401,23 @@ fn builtin_kernel_source(module: BuiltinModule) -> String {
         BuiltinModule::SpawnCone => {
             "    let u = ember_rand01(index * 747796405u);\n    let v = ember_rand01(index * 2891336453u);\n    let radius = spawn_shape.w * sqrt(u);\n    let phi = 6.28318530718 * v;\n    ember_attr_position[index] = spawn_shape.xyz + vec3<f32>(radius * cos(phi), radius * sin(phi), spawn_shape.w * u);\n    ember_attr_alive[index] = 1u;\n    ember_attr_particle_id[index] = index;\n    ember_attr_age[index] = 0.0;\n    ember_attr_lifetime[index] = max(spawn_shape.w, 0.001);"
         }
-        BuiltinModule::SpawnMeshSurface
-        | BuiltinModule::SpawnSkeleton
-        | BuiltinModule::SpawnSdfSurface => {
-            "    ember_attr_alive[index] = 1u;\n    ember_attr_particle_id[index] = index;\n    ember_attr_age[index] = 0.0;\n    ember_attr_lifetime[index] = max(spawn_shape.w, 0.001);"
+        BuiltinModule::SpawnMeshSurface => {
+            "    let vertex_count = arrayLength(&spawn_mesh_vertices);\n    let index_count = arrayLength(&spawn_mesh_indices);\n    var position = vec3<f32>(0.0);\n    if (vertex_count > 0u && index_count >= 3u) {\n        let triangle_count = index_count / 3u;\n        let triangle = index % triangle_count;\n        let base = triangle * 3u;\n        let ia = min(spawn_mesh_indices[base], vertex_count - 1u);\n        let ib = min(spawn_mesh_indices[base + 1u], vertex_count - 1u);\n        let ic = min(spawn_mesh_indices[base + 2u], vertex_count - 1u);\n        let a = spawn_mesh_vertices[ia].xyz;\n        let b = spawn_mesh_vertices[ib].xyz;\n        let c = spawn_mesh_vertices[ic].xyz;\n        let u = sqrt(ember_rand01(index * 747796405u));\n        let v = ember_rand01(index * 2891336453u);\n        position = (a * (1.0 - u) + b * (u * (1.0 - v)) + c * (u * v)) * spawn_mesh_params.value.y;\n    }\n    ember_attr_position[index] = position;\n    ember_attr_alive[index] = 1u;\n    ember_attr_particle_id[index] = index;\n    ember_attr_age[index] = 0.0;\n    ember_attr_lifetime[index] = max(spawn_mesh_params.value.x, 0.001);"
         }
-        BuiltinModule::SetPosition => "    ember_attr_position[index] = vec3<f32>(0.0);",
-        BuiltinModule::SetVelocity => "    ember_attr_velocity[index] = vec3<f32>(0.0);",
-        BuiltinModule::SetColor => "    ember_attr_color[index] = vec4<f32>(1.0);",
-        BuiltinModule::SetSize => "    ember_attr_size[index] = 1.0;",
+        BuiltinModule::SpawnSkeleton => {
+            "    let vertex_count = arrayLength(&spawn_skeleton_vertices);\n    let index_count = arrayLength(&spawn_skeleton_indices);\n    var position = vec3<f32>(0.0);\n    if (vertex_count > 0u) {\n        var source = index % vertex_count;\n        if (index_count > 0u) {\n            source = min(spawn_skeleton_indices[index % index_count], vertex_count - 1u);\n        }\n        position = spawn_skeleton_vertices[source].xyz * spawn_skeleton_params.value.y;\n    }\n    ember_attr_position[index] = position;\n    ember_attr_alive[index] = 1u;\n    ember_attr_particle_id[index] = index;\n    ember_attr_age[index] = 0.0;\n    ember_attr_lifetime[index] = max(spawn_skeleton_params.value.x, 0.001);"
+        }
+        BuiltinModule::SpawnSdfSurface => {
+            "    let dims = textureDimensions(spawn_sdf, 0u);\n    var position = spawn_sdf_origin.value.xyz;\n    if (dims.x > 0u && dims.y > 0u && dims.z > 0u) {\n        let u = ember_rand01(index * 747796405u);\n        let v = ember_rand01(index * 2891336453u);\n        let x = min(u32(u * f32(dims.x)), dims.x - 1u);\n        let y = min(u32(v * f32(dims.y)), dims.y - 1u);\n        var previous = textureLoad(spawn_sdf, vec3<i32>(i32(x), i32(y), 0), 0).x;\n        var surface_z = 0u;\n        let steps = min(dims.z, 64u);\n        for (var step = 1u; step < steps; step++) {\n            let value = textureLoad(spawn_sdf, vec3<i32>(i32(x), i32(y), i32(step)), 0).x;\n            if ((previous <= 0.0 && value >= 0.0) || (previous >= 0.0 && value <= 0.0)) {\n                surface_z = step;\n                break;\n            }\n            previous = value;\n        }\n        let denom = max(f32(dims.z - 1u), 1.0);\n        position = spawn_sdf_origin.value.xyz + spawn_sdf_extent.value.xyz * vec3<f32>(f32(x) / max(f32(dims.x - 1u), 1.0), f32(y) / max(f32(dims.y - 1u), 1.0), f32(surface_z) / denom);\n    }\n    ember_attr_position[index] = position;\n    ember_attr_alive[index] = 1u;\n    ember_attr_particle_id[index] = index;\n    ember_attr_age[index] = 0.0;\n    ember_attr_lifetime[index] = max(spawn_sdf_extent.value.w, 0.001);"
+        }
+        BuiltinModule::SetPosition => "    ember_attr_position[index] = set_position.value.xyz;",
+        BuiltinModule::SetVelocity => "    ember_attr_velocity[index] = set_velocity.value.xyz;",
+        BuiltinModule::SetColor => "    ember_attr_color[index] = set_color.value;",
+        BuiltinModule::SetSize => "    ember_attr_size[index] = max(set_size.value.x, 0.0);",
         BuiltinModule::SetLifetime => {
             "    ember_attr_lifetime[index] = max(lifetime_params.x, 0.001);\n    ember_attr_age[index] = 0.0;"
         }
-        BuiltinModule::SetRotation => "    ember_attr_rotation[index] = 0.0;",
+        BuiltinModule::SetRotation => "    ember_attr_rotation[index] = set_rotation.value.x;",
         BuiltinModule::RandomRange => {
             "    let sampled = mix(random_range.x, random_range.y, ember_rand01(index));\n    ember_attr_size[index] = max(sampled, 0.0);"
         }
@@ -1351,16 +1440,16 @@ fn builtin_kernel_source(module: BuiltinModule) -> String {
         }
         BuiltinModule::Wind => "    ember_attr_velocity[index] += wind.xyz;",
         BuiltinModule::VectorField => {
-            "    let sample = textureLoad(vector_field, vec3<i32>(0, 0, 0), 0);\n    ember_attr_velocity[index] += sample.xyz;"
+            "    let dims = textureDimensions(vector_field, 0u);\n    if (dims.x > 0u && dims.y > 0u && dims.z > 0u) {\n        let extent = max(vector_field_params.extent.xyz, vec3<f32>(0.00001));\n        let uvw = clamp((ember_attr_position[index] - vector_field_params.origin.xyz) / extent, vec3<f32>(0.0), vec3<f32>(1.0));\n        let coord = vec3<i32>(i32(uvw.x * f32(dims.x - 1u)), i32(uvw.y * f32(dims.y - 1u)), i32(uvw.z * f32(dims.z - 1u)));\n        ember_attr_velocity[index] += textureLoad(vector_field, coord, 0).xyz;\n    }"
         }
         BuiltinModule::CollisionPlane => {
             "    let normal = normalize(collision_plane.xyz);\n    let distance = dot(ember_attr_position[index], normal) - collision_plane.w;\n    if (distance < 0.0) {\n        ember_attr_position[index] -= normal * distance;\n        ember_attr_velocity[index] = reflect(ember_attr_velocity[index], normal);\n    }"
         }
         BuiltinModule::CollisionDepth => {
-            "    let scene = textureLoad(depth_buffer, vec2<i32>(0, 0), 0).x;\n    if (ember_attr_position[index].z > scene) { ember_attr_position[index].z = scene; }"
+            "    let dims = textureDimensions(depth_buffer, 0u);\n    if (dims.x > 0u && dims.y > 0u) {\n        let uv = clamp(ember_attr_position[index].xy * depth_params.value.zw + depth_params.value.xy, vec2<f32>(0.0), vec2<f32>(1.0));\n        let coord = vec2<i32>(i32(uv.x * f32(dims.x - 1u)), i32(uv.y * f32(dims.y - 1u)));\n        let scene = textureLoad(depth_buffer, coord, 0).x;\n        if (ember_attr_position[index].z > scene) { ember_attr_position[index].z = scene; }\n    }"
         }
         BuiltinModule::CollisionSdf => {
-            "    let distance = textureLoad(collision_sdf, vec3<i32>(0, 0, 0), 0).x;\n    if (distance < 0.0) { ember_attr_position[index] -= vec3<f32>(0.0, 0.0, distance); }"
+            "    let dims = textureDimensions(collision_sdf, 0u);\n    if (dims.x > 0u && dims.y > 0u && dims.z > 0u) {\n        let extent = max(collision_sdf_extent.value.xyz, vec3<f32>(0.00001));\n        let uvw = clamp((ember_attr_position[index] - collision_sdf_origin.value.xyz) / extent, vec3<f32>(0.0), vec3<f32>(1.0));\n        let coord = vec3<i32>(i32(uvw.x * f32(dims.x - 1u)), i32(uvw.y * f32(dims.y - 1u)), i32(uvw.z * f32(dims.z - 1u)));\n        let distance = textureLoad(collision_sdf, coord, 0).x;\n        if (distance < 0.0) {\n            let px = min(coord.x + 1, i32(dims.x - 1u));\n            let py = min(coord.y + 1, i32(dims.y - 1u));\n            let pz = min(coord.z + 1, i32(dims.z - 1u));\n            let gradient = vec3<f32>(textureLoad(collision_sdf, vec3<i32>(px, coord.y, coord.z), 0).x - distance, textureLoad(collision_sdf, vec3<i32>(coord.x, py, coord.z), 0).x - distance, textureLoad(collision_sdf, vec3<i32>(coord.x, coord.y, pz), 0).x - distance);\n            let normal = normalize(gradient + vec3<f32>(0.00001));\n            ember_attr_position[index] -= normal * distance;\n            ember_attr_velocity[index] = reflect(ember_attr_velocity[index], normal);\n        }\n    }"
         }
         BuiltinModule::CollisionRaytrace => {
             "    let scene_word = raytrace_scene[index];\n    if (scene_word != 0u) { ember_attr_velocity[index] = -ember_attr_velocity[index]; }"
@@ -2077,15 +2166,132 @@ mod tests {
     }
 
     #[test]
-    fn resource_free_module_declares_no_bindings() {
+    fn setter_module_declares_and_uses_parameter_uniform() {
         let mut ctx = CodegenCtx::new();
         BuiltinModule::SetPosition.emit_wesl(&mut ctx);
         assert_eq!(ctx.fragment_count(), 1);
-        assert_eq!(ctx.binding_count(), 0);
+        assert_eq!(ctx.binding_count(), 1);
+        assert_eq!(ctx.bindings()[0].name, "set_position");
+        assert_eq!(
+            BuiltinModule::SetPosition.parameter_blocks()[0].resource,
+            "set_position"
+        );
         assert_eq!(
             ctx.fragments()[0],
             "ember_kernel_set_position(particle_index);"
         );
+
+        let mut functions = CodegenCtx::new();
+        BuiltinModule::SetPosition.emit_wesl_functions(&mut functions);
+        assert!(functions
+            .functions()
+            .any(|source| source.contains("set_position.value.xyz")));
+    }
+
+    #[test]
+    fn setter_kernels_are_parameter_driven() {
+        let cases = [
+            (BuiltinModule::SetPosition, "set_position.value.xyz"),
+            (BuiltinModule::SetVelocity, "set_velocity.value.xyz"),
+            (BuiltinModule::SetColor, "set_color.value"),
+            (BuiltinModule::SetSize, "set_size.value.x"),
+            (BuiltinModule::SetRotation, "set_rotation.value.x"),
+        ];
+
+        for (module, expected) in cases {
+            assert_eq!(module.resources().len(), 1);
+            assert_eq!(module.parameter_blocks().len(), 1);
+            assert_eq!(
+                module.parameter_blocks()[0].resource,
+                module.resources()[0].name
+            );
+
+            let mut ctx = CodegenCtx::new();
+            module.emit_wesl_functions(&mut ctx);
+            let source = ctx
+                .functions()
+                .find(|source| source.contains(&format!("fn {}", module.kernel_function_name())))
+                .expect("module kernel function should be emitted");
+            assert!(source.contains(expected), "{source}");
+        }
+    }
+
+    #[test]
+    fn non_constant_spawn_and_field_kernels_use_declared_inputs() {
+        let cases = [
+            (
+                BuiltinModule::SpawnMeshSurface,
+                &[
+                    "spawn_mesh_vertices",
+                    "spawn_mesh_indices",
+                    "spawn_mesh_params.value",
+                ] as &[&str],
+            ),
+            (
+                BuiltinModule::SpawnSkeleton,
+                &[
+                    "spawn_skeleton_vertices",
+                    "spawn_skeleton_indices",
+                    "spawn_skeleton_params.value",
+                ],
+            ),
+            (
+                BuiltinModule::SpawnSdfSurface,
+                &[
+                    "textureDimensions(spawn_sdf",
+                    "textureLoad(spawn_sdf",
+                    "spawn_sdf_origin.value",
+                ],
+            ),
+            (
+                BuiltinModule::VectorField,
+                &[
+                    "ember_attr_position[index]",
+                    "vector_field_params.extent",
+                    "textureLoad(vector_field",
+                ],
+            ),
+            (
+                BuiltinModule::CollisionDepth,
+                &[
+                    "depth_params.value",
+                    "textureDimensions(depth_buffer",
+                    "textureLoad(depth_buffer",
+                ],
+            ),
+            (
+                BuiltinModule::CollisionSdf,
+                &[
+                    "collision_sdf_origin.value",
+                    "collision_sdf_extent.value",
+                    "gradient",
+                ],
+            ),
+        ];
+
+        for (module, expected_fragments) in cases {
+            for resource in module.resources() {
+                assert!(
+                    module
+                        .parameter_blocks()
+                        .iter()
+                        .any(|block| block.resource == resource.name)
+                        || !matches!(resource.kind, ResourceKind::Uniform),
+                    "resource {} lacks a matching parameter schema",
+                    resource.name
+                );
+            }
+
+            let mut ctx = CodegenCtx::new();
+            module.emit_wesl_functions(&mut ctx);
+            let source = ctx
+                .functions()
+                .find(|source| source.contains(&format!("fn {}", module.kernel_function_name())))
+                .expect("module kernel function should be emitted");
+            for expected in expected_fragments {
+                assert!(source.contains(expected), "missing {expected} in {source}");
+            }
+        }
     }
 
     #[test]

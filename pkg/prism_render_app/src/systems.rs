@@ -9,7 +9,7 @@ use crate::frame;
 use crate::intent::RenderIntent;
 use crate::label::Render;
 use crate::lighting::LightingPlanState;
-use crate::lighting_gpu::LightingGpuState;
+use crate::lighting_gpu::{lighting_submission_domain, LightingGpuState};
 use crate::record::RenderRecord;
 use crate::runtime_resource::RenderRuntimeResource;
 use crate::startup::ensure_render_startup;
@@ -66,6 +66,10 @@ pub(crate) struct OffscreenFrameTargets<'w> {
 pub(crate) struct FrameExecutionResources<'w> {
     trace_gpu: ResMut<'w, crate::lighting_trace_gpu::LightingTraceState>,
     stats: ResMut<'w, RenderFrameStats>,
+    particle: Option<Res<'w, crate::particle::ParticleGpuState>>,
+    particle_status: Res<'w, crate::particle::ParticleUploadStatus>,
+    ember: Res<'w, crate::particle::EmberGpuAssetRegistry>,
+    ember_status: Res<'w, crate::particle::EmberPrepareStatus>,
 }
 
 impl FrameExecutionTrace {
@@ -221,10 +225,38 @@ pub(crate) fn execute_frame<I>(
 {
     let mut trace_gpu = execution.trace_gpu;
     let mut stats = execution.stats;
+    let particle = execution.particle;
+    let particle_status = execution.particle_status;
+    let ember = execution.ember;
+    let ember_status = execution.ember_status;
     stats
         .execution_trace
         .begin(&record, queues.len() as u64, &inputs);
     stats.execution_trace.assert_input_parity(&record, &inputs);
+    stats.lighting_upload_error = None;
+    stats.ember_graphs_updated = stats
+        .ember_graphs_updated
+        .saturating_add(u64::from(ember_status.updated_graphs));
+    stats.ember_graphs_preserved = stats
+        .ember_graphs_preserved
+        .saturating_add(u64::from(ember_status.preserved_graphs));
+    stats.ember_initial_failures = stats
+        .ember_initial_failures
+        .saturating_add(u64::from(ember_status.initial_failures));
+    stats.ember_prepare_error = ember_status.error_kind;
+    stats.ember_prepare_outcome = ember_status.outcome;
+    if particle_status.error.is_some() {
+        stats.frames_failed = stats.frames_failed.saturating_add(1);
+        stats.execution_trace.outcome = FrameExecutionOutcome::Failed;
+        return;
+    }
+    if ember_status.fatal {
+        stats.frames_failed = stats.frames_failed.saturating_add(1);
+        stats.execution_trace.outcome = FrameExecutionOutcome::Failed;
+        return;
+    }
+    // Emitter-local adaptation rejections remain observable on `inputs` but
+    // do not abort the frame; only a snapshot-wide extraction error is fatal.
     stats.lighting_input_error = inputs.light_scene_error;
     if inputs.light_scene_error.is_some() {
         stats.frames_failed = stats.frames_failed.saturating_add(1);
@@ -232,7 +264,13 @@ pub(crate) fn execute_frame<I>(
         return;
     }
     let runtime = runtime.runtime();
-    lighting_gpu.prepare(&plan.plan, &inputs, record.frame_index, runtime.queue());
+    if let Err(error) = lighting_gpu.prepare(&plan.plan, &inputs, record.frame_index, runtime) {
+        stats.lighting_upload_error = Some(error);
+        stats.frames_failed = stats.frames_failed.saturating_add(1);
+        stats.execution_trace.outcome = FrameExecutionOutcome::Failed;
+        return;
+    }
+    stats.lighting_upload_error = None;
     let lighting_pass = lighting_gpu.pass(&plan.plan);
     let trace_device: std::sync::Arc<dyn prism_render_driver::RenderDevice + Send + Sync> =
         runtime.device_handle();
@@ -260,7 +298,7 @@ pub(crate) fn execute_frame<I>(
     let submitted_before = stats.frames_submitted;
     let skipped_before = stats.frames_skipped;
     let failed_before = stats.frames_failed;
-    if windows.drive(
+    let window_receipt = windows.drive_with_particles(
         runtime,
         &requests,
         &overrides,
@@ -268,8 +306,15 @@ pub(crate) fn execute_frame<I>(
         &functions,
         lighting_pass,
         trace,
+        particle.as_ref().map(|particle| particle.stage()),
         &mut stats,
-    ) {
+    );
+    if window_receipt.handled {
+        if let Some(submission) = window_receipt.first_submission.and_then(|submission| {
+            lighting_submission_domain(runtime.device_generation()).submission(submission)
+        }) {
+            lighting_gpu.acknowledge_light_upload(submission);
+        }
         stats.execution_trace.outcome = classify_window_outcome(
             stats.frames_submitted.saturating_sub(submitted_before),
             stats.frames_skipped.saturating_sub(skipped_before),
@@ -322,12 +367,15 @@ pub(crate) fn execute_frame<I>(
         stats.execution_trace.outcome = FrameExecutionOutcome::Failed;
         return;
     }
-    let graph = match frame::target_graph_with_display_transform_and_trace(
+    let graph = match frame::target_graph_with_display_transform_and_trace_particles_and_ember(
         &offscreen.target,
         &queues,
         &functions,
         lighting_pass,
         trace,
+        particle.as_ref().map(|particle| particle.stage()),
+        Some(&ember),
+        record.frame_index,
         &offscreen.display,
         runtime.queue(),
     ) {
@@ -353,6 +401,11 @@ pub(crate) fn execute_frame<I>(
     let draws = queues.len() as u64;
     match runtime.execute_tracked(graph) {
         Ok(submission) => {
+            if let Some(submission) =
+                lighting_submission_domain(runtime.device_generation()).submission(submission)
+            {
+                lighting_gpu.acknowledge_light_upload(submission);
+            }
             offscreen
                 .output
                 .publish(crate::display_transform_gpu::OffscreenOutputFrame::new(
@@ -371,6 +424,7 @@ pub(crate) fn execute_frame<I>(
             stats.draws_recorded += draws;
             stats.lighting_gpu_passes_recorded += lighting_pass.map_or(0, |pass| pass.pass_count());
             stats.trace_gpu_dispatches_recorded += u64::from(trace.is_some());
+            stats.ember_compute_passes_recorded += u64::from(stages.ember_compute_passes);
         }
         Err(_) => {
             // A compile failure is the only error `execute` can return; the

@@ -16,6 +16,7 @@ use alloc::vec::Vec;
 use prism_render_architecture::particle::compiler::{CompiledGraph, PreparedParameterBlock};
 use prism_render_architecture::particle::modules::{ResourceAccess, ResourceDecl, ResourceKind};
 use prism_render_driver as rhi;
+use prism_render_graph::{BufferHandle, PassFlags, RenderGraph, TextureHandle};
 use rhi::{
     BindGroupDescriptor, BindGroupEntry, BindGroupId, BindGroupLayoutDescriptor,
     BindGroupLayoutEntry, BindGroupLayoutId, BindingResource, BindingType, BufferBindingType,
@@ -165,6 +166,88 @@ pub enum ParameterUploadError {
     },
 }
 
+/// A graph-owned handle corresponding to one compiled Ember binding.
+///
+/// The real GPU object is still owned by the caller or by
+/// [`CompiledGraphGpuState`]. The handle only lets the frame graph declare the
+/// same resource access that the compiled bind group will use at execution.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CompiledGraphGpuGraphBinding {
+    /// A buffer imported or created in the caller's frame graph.
+    Buffer {
+        /// Compiled group index.
+        group: u32,
+        /// Compiled binding index.
+        binding: u32,
+        /// Frame-graph buffer handle for the same real buffer bound to Ember.
+        handle: BufferHandle,
+    },
+    /// A texture imported or created in the caller's frame graph.
+    Texture {
+        /// Compiled group index.
+        group: u32,
+        /// Compiled binding index.
+        binding: u32,
+        /// Frame-graph texture handle for the same real view bound to Ember.
+        handle: TextureHandle,
+    },
+}
+
+impl CompiledGraphGpuGraphBinding {
+    const fn slot(self) -> (u32, u32) {
+        match self {
+            Self::Buffer { group, binding, .. } | Self::Texture { group, binding, .. } => {
+                (group, binding)
+            }
+        }
+    }
+}
+
+/// A failure while declaring a compiled graph in a frame graph.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CompiledGraphGraphError {
+    /// A graph resource was supplied more than once for one binding slot.
+    DuplicateBinding { group: u32, binding: u32 },
+    /// A compiled non-uniform binding has no graph handle.
+    MissingBinding {
+        /// Compiled group index.
+        group: u32,
+        /// Compiled binding index.
+        binding: u32,
+        /// Compiled resource name.
+        name: String,
+    },
+    /// A graph resource does not correspond to a compiled binding.
+    UnexpectedBinding { group: u32, binding: u32 },
+    /// The caller supplied a texture handle where a buffer was required.
+    ExpectedBuffer {
+        group: u32,
+        binding: u32,
+        name: String,
+    },
+    /// The caller supplied a buffer handle where a texture was required.
+    ExpectedTexture {
+        group: u32,
+        binding: u32,
+        name: String,
+    },
+    /// The runtime count array does not address every compiled stage index.
+    DispatchCountLength { expected: usize, actual: usize },
+    /// The state and compiled graph disagree about generated stage pipelines.
+    PipelineCountMismatch { expected: usize, actual: usize },
+}
+
+/// A failure while updating the compiled graph's persistent attribute pool.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AttributeUploadError {
+    /// The write range exceeds the compiled SoA pool.
+    OutOfBounds {
+        offset: u64,
+        size: usize,
+        capacity: u64,
+    },
+}
+
 struct ParameterBuffer {
     resource: String,
     group: u32,
@@ -184,10 +267,13 @@ pub struct CompiledGraphGpuState {
     shader: ShaderModuleId,
     pipeline_layout: PipelineLayoutId,
     bind_group_layouts: Vec<BindGroupLayoutId>,
-    bind_groups: Vec<BindGroupId>,
+    bind_groups: [Vec<BindGroupId>; 2],
     compute_pipelines: Vec<ComputePipelineId>,
     parameter_buffers: Vec<ParameterBuffer>,
     dispatch_counts: Option<BufferId>,
+    dispatch_count_slots: usize,
+    attribute_pool: Option<BufferId>,
+    attribute_pool_size: u64,
 }
 
 impl CompiledGraphGpuState {
@@ -202,6 +288,15 @@ impl CompiledGraphGpuState {
         validate_parameter_blocks(graph)?;
 
         let group_count = max_group(graph).map_or(0, |group| group as usize + 1);
+        let attribute_pool_size = graph.attribute_layout.total_bytes;
+        let attribute_pool = (attribute_pool_size != 0).then(|| {
+            device.create_buffer(&BufferDescriptor {
+                label: Some(String::from("ember-attribute-pool")),
+                size: attribute_pool_size,
+                usage: BufferUsages::STORAGE.union(BufferUsages::COPY_DST),
+                mapped_at_creation: false,
+            })
+        });
         let mut parameter_buffers = Vec::with_capacity(graph.parameter_blocks.len());
         for block in &graph.parameter_blocks {
             let buffer = device.create_buffer(&BufferDescriptor {
@@ -220,49 +315,79 @@ impl CompiledGraphGpuState {
             });
         }
 
-        let dispatch_counts = if graph.dispatches.is_empty() {
+        let dispatch_count_slots = graph
+            .dispatches
+            .iter()
+            .map(|dispatch| dispatch.stage_index + 1)
+            .max()
+            .unwrap_or(0);
+        let dispatch_counts = if dispatch_count_slots == 0 {
             None
         } else {
             let buffer = device.create_buffer(&BufferDescriptor {
                 label: Some(String::from("ember-dispatch-counts")),
-                size: graph.dispatches.len().max(1) as u64 * 4,
+                size: dispatch_count_slots as u64 * 4,
                 usage: BufferUsages::STORAGE.union(BufferUsages::COPY_DST),
                 mapped_at_creation: false,
             });
-            let mut bytes = Vec::with_capacity(graph.dispatches.len() * 4);
+            let mut bytes = vec![0; dispatch_count_slots * 4];
             for dispatch in &graph.dispatches {
-                bytes.extend_from_slice(&dispatch.default_count.to_le_bytes());
+                let offset = dispatch.stage_index * 4;
+                bytes[offset..offset + 4].copy_from_slice(&dispatch.default_count.to_le_bytes());
             }
             queue.write_buffer(buffer, 0, &bytes);
             Some(buffer)
         };
 
         let mut bind_group_layouts = Vec::with_capacity(group_count);
-        let mut bind_groups = Vec::with_capacity(group_count);
         for group in 0..group_count as u32 {
-            let entries =
-                group_entries(graph, external, &parameter_buffers, dispatch_counts, group)?;
+            let entries = group_entries(
+                graph,
+                external,
+                &parameter_buffers,
+                dispatch_counts,
+                attribute_pool,
+                0,
+                group,
+            )?;
             let mut layout_entries: Vec<_> = entries.iter().map(|entry| entry.layout).collect();
             layout_entries.sort_by_key(|entry| entry.binding);
-            let layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            bind_group_layouts.push(device.create_bind_group_layout(&BindGroupLayoutDescriptor {
                 label: Some(format!("ember-graph-group-{group}")),
                 entries: layout_entries,
-            });
-            let mut bind_entries: Vec<_> = entries
-                .into_iter()
-                .map(|entry| BindGroupEntry {
-                    binding: entry.binding,
-                    resource: entry.resource,
-                })
-                .collect();
-            bind_entries.sort_by_key(|entry| entry.binding);
-            let bind_group = device.create_bind_group(&BindGroupDescriptor {
-                label: Some(format!("ember-graph-group-{group}-bindings")),
-                layout: Some(layout),
-                entries: bind_entries,
-            });
-            bind_group_layouts.push(layout);
-            bind_groups.push(bind_group);
+            }));
+        }
+        let mut bind_groups = [
+            Vec::with_capacity(group_count),
+            Vec::with_capacity(group_count),
+        ];
+        for frame_index in 0..2u64 {
+            for group in 0..group_count as u32 {
+                let entries = group_entries(
+                    graph,
+                    external,
+                    &parameter_buffers,
+                    dispatch_counts,
+                    attribute_pool,
+                    frame_index,
+                    group,
+                )?;
+                let mut bind_entries: Vec<_> = entries
+                    .into_iter()
+                    .map(|entry| BindGroupEntry {
+                        binding: entry.binding,
+                        resource: entry.resource,
+                    })
+                    .collect();
+                bind_entries.sort_by_key(|entry| entry.binding);
+                bind_groups[frame_index as usize].push(device.create_bind_group(
+                    &BindGroupDescriptor {
+                        label: Some(format!("ember-graph-group-{group}-frame-{frame_index}")),
+                        layout: Some(bind_group_layouts[group as usize]),
+                        entries: bind_entries,
+                    },
+                ));
+            }
         }
 
         let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
@@ -292,6 +417,9 @@ impl CompiledGraphGpuState {
             compute_pipelines,
             parameter_buffers,
             dispatch_counts,
+            dispatch_count_slots,
+            attribute_pool,
+            attribute_pool_size,
         })
     }
 
@@ -363,7 +491,7 @@ impl CompiledGraphGpuState {
                 Err("compiled graph has no dispatch-count buffer")
             };
         };
-        if counts.len() != self.compute_pipelines.len() {
+        if counts.len() != self.dispatch_count_slots {
             return Err("dispatch-count length does not match compiled stages");
         }
         let mut bytes = Vec::with_capacity(counts.len() * 4);
@@ -371,6 +499,154 @@ impl CompiledGraphGpuState {
             bytes.extend_from_slice(&count.to_le_bytes());
         }
         queue.write_buffer(buffer, 0, &bytes);
+        Ok(())
+    }
+
+    /// Returns a state-owned parameter buffer and its compiled binding slot.
+    ///
+    /// Callers use this to import the buffer into the frame graph before
+    /// [`Self::append_to_graph`] declares the uniform read.
+    #[must_use]
+    pub fn parameter_buffer(&self, resource: &str) -> Option<(u32, u32, BufferId, u64)> {
+        self.parameter_buffers
+            .iter()
+            .find(|parameter| parameter.resource == resource)
+            .map(|parameter| {
+                (
+                    parameter.group,
+                    parameter.binding,
+                    parameter.buffer,
+                    parameter.size,
+                )
+            })
+    }
+
+    /// Returns the state-owned dispatch-count storage buffer.
+    #[must_use]
+    pub const fn dispatch_counts_buffer(&self) -> Option<BufferId> {
+        self.dispatch_counts
+    }
+
+    /// Returns the number of stage-index slots in the dispatch-count ABI.
+    #[must_use]
+    pub const fn dispatch_count_slots(&self) -> usize {
+        self.dispatch_count_slots
+    }
+
+    /// Returns the persistent SoA attribute pool, when the graph has live
+    /// attributes.
+    #[must_use]
+    pub const fn attribute_pool_buffer(&self) -> Option<BufferId> {
+        self.attribute_pool
+    }
+
+    /// Returns the total byte size of the persistent SoA attribute pool.
+    #[must_use]
+    pub const fn attribute_pool_size(&self) -> u64 {
+        self.attribute_pool_size
+    }
+
+    /// Uploads a byte range into the persistent SoA attribute pool.
+    pub fn upload_attribute_bytes(
+        &self,
+        queue: &impl RenderQueue,
+        offset: u64,
+        bytes: &[u8],
+    ) -> Result<(), AttributeUploadError> {
+        let end = offset.saturating_add(bytes.len() as u64);
+        if end > self.attribute_pool_size {
+            return Err(AttributeUploadError::OutOfBounds {
+                offset,
+                size: bytes.len(),
+                capacity: self.attribute_pool_size,
+            });
+        }
+        if let Some(buffer) = self.attribute_pool {
+            queue.write_buffer(buffer, offset, bytes);
+        } else if !bytes.is_empty() {
+            return Err(AttributeUploadError::OutOfBounds {
+                offset,
+                size: bytes.len(),
+                capacity: 0,
+            });
+        }
+        Ok(())
+    }
+
+    /// Declares and records all compiled stage dispatches in a frame graph.
+    ///
+    /// `bindings` must contain one graph handle for every compiled resource
+    /// binding, including the state-owned parameter and dispatch-count buffers.
+    /// The handles must refer to the same real resources used when this state
+    /// was created. This method records commands only; callers still upload
+    /// parameters/counts and execute the returned graph through the runtime.
+    pub fn append_to_graph(
+        &self,
+        compiled: &CompiledGraph,
+        graph: &mut RenderGraph,
+        bindings: &[CompiledGraphGpuGraphBinding],
+        stage_counts: &[u32],
+    ) -> Result<(), CompiledGraphGraphError> {
+        self.append_to_graph_for_frame(compiled, graph, bindings, stage_counts, 0)
+    }
+
+    /// Variant of [`Self::append_to_graph`] selecting the ping-pong side for a
+    /// specific frame parity.
+    pub fn append_to_graph_for_frame(
+        &self,
+        compiled: &CompiledGraph,
+        graph: &mut RenderGraph,
+        bindings: &[CompiledGraphGpuGraphBinding],
+        stage_counts: &[u32],
+        frame_index: u64,
+    ) -> Result<(), CompiledGraphGraphError> {
+        if self.compute_pipelines.len() != compiled.dispatches.len() {
+            return Err(CompiledGraphGraphError::PipelineCountMismatch {
+                expected: compiled.dispatches.len(),
+                actual: self.compute_pipelines.len(),
+            });
+        }
+        if stage_counts.len() != self.dispatch_count_slots {
+            return Err(CompiledGraphGraphError::DispatchCountLength {
+                expected: self.dispatch_count_slots,
+                actual: stage_counts.len(),
+            });
+        }
+
+        let accesses = graph_accesses(compiled, bindings)?;
+        for (pipeline_index, dispatch) in compiled.dispatches.iter().enumerate() {
+            let workgroups = stage_counts
+                .get(dispatch.stage_index)
+                .copied()
+                .unwrap_or(0)
+                .saturating_add(63)
+                / 64;
+            let pipeline = self.compute_pipelines[pipeline_index];
+            let bind_groups = self.bind_groups[(frame_index & 1) as usize].clone();
+            let entry_name = dispatch.entry_point.clone();
+            let iterations = dispatch.iterations;
+            let accesses_for_setup = accesses.clone();
+            graph.add_compute_pass(
+                format!("ember-{entry_name}"),
+                PassFlags::SIDE_EFFECT,
+                move |builder| {
+                    for access in &accesses_for_setup {
+                        access.declare(builder);
+                    }
+                    move |context| {
+                        context.set_compute_pipeline(pipeline);
+                        for (group, bind_group) in bind_groups.iter().copied().enumerate() {
+                            context.set_compute_bind_group(group as u32, bind_group, Vec::new());
+                        }
+                        for _ in 0..iterations {
+                            if workgroups != 0 {
+                                context.dispatch(workgroups, 1, 1);
+                            }
+                        }
+                    }
+                },
+            );
+        }
         Ok(())
     }
 
@@ -395,7 +671,15 @@ impl CompiledGraphGpuState {
     /// Returns a bind group by compiled group index.
     #[must_use]
     pub fn bind_group(&self, group: u32) -> Option<BindGroupId> {
-        self.bind_groups.get(group as usize).copied()
+        self.bind_groups[0].get(group as usize).copied()
+    }
+
+    /// Returns a bind group for the selected ping-pong frame parity.
+    #[must_use]
+    pub fn bind_group_for_frame(&self, group: u32, frame_index: u64) -> Option<BindGroupId> {
+        self.bind_groups[(frame_index & 1) as usize]
+            .get(group as usize)
+            .copied()
     }
 
     /// Returns a generated compute pipeline by entry-point order.
@@ -411,8 +695,10 @@ impl CompiledGraphGpuState {
         }
         device.destroy_shader_module(self.shader);
         device.destroy_pipeline_layout(self.pipeline_layout);
-        for bind_group in self.bind_groups {
-            device.destroy_bind_group(bind_group);
+        for bind_groups in self.bind_groups {
+            for bind_group in bind_groups {
+                device.destroy_bind_group(bind_group);
+            }
         }
         for layout in self.bind_group_layouts {
             device.destroy_bind_group_layout(layout);
@@ -423,7 +709,168 @@ impl CompiledGraphGpuState {
         if let Some(dispatch_counts) = self.dispatch_counts {
             device.destroy_buffer(dispatch_counts);
         }
+        if let Some(attribute_pool) = self.attribute_pool {
+            device.destroy_buffer(attribute_pool);
+        }
     }
+}
+
+#[derive(Clone, Copy)]
+enum GraphAccess {
+    Uniform(BufferHandle),
+    StorageRead(BufferHandle),
+    StorageWrite(BufferHandle),
+    Sample(TextureHandle),
+}
+
+impl GraphAccess {
+    fn declare(self, builder: &mut prism_render_graph::PassBuilder<'_>) {
+        match self {
+            Self::Uniform(handle) => {
+                let _ = builder.read_uniform(handle);
+            }
+            Self::StorageRead(handle) => {
+                let _ = builder.read_storage_buffer(handle);
+            }
+            Self::StorageWrite(handle) => {
+                let _ = builder.write_storage_buffer(handle);
+            }
+            Self::Sample(handle) => {
+                let _ = builder.sample(handle);
+            }
+        }
+    }
+}
+
+fn graph_accesses(
+    compiled: &CompiledGraph,
+    bindings: &[CompiledGraphGpuGraphBinding],
+) -> Result<Vec<GraphAccess>, CompiledGraphGraphError> {
+    for (index, entry) in bindings.iter().enumerate() {
+        if bindings[..index]
+            .iter()
+            .any(|previous| previous.slot() == entry.slot())
+        {
+            let (group, binding) = entry.slot();
+            return Err(CompiledGraphGraphError::DuplicateBinding { group, binding });
+        }
+    }
+
+    let mut accesses = Vec::new();
+    let mut expected = Vec::new();
+    for attribute in &compiled.attribute_bindings {
+        expected.push((
+            attribute.group,
+            attribute.binding,
+            attribute.name.as_str(),
+            ResourceKind::StorageBuffer,
+            attribute.access,
+        ));
+        let entry = bindings
+            .iter()
+            .find(|entry| entry.slot() == (attribute.group, attribute.binding))
+            .ok_or_else(|| CompiledGraphGraphError::MissingBinding {
+                group: attribute.group,
+                binding: attribute.binding,
+                name: attribute.name.clone(),
+            })?;
+        let CompiledGraphGpuGraphBinding::Buffer { handle, .. } = entry else {
+            return Err(CompiledGraphGraphError::ExpectedBuffer {
+                group: attribute.group,
+                binding: attribute.binding,
+                name: attribute.name.clone(),
+            });
+        };
+        accesses.push(match attribute.access {
+            ResourceAccess::ReadOnly => GraphAccess::StorageRead(*handle),
+            ResourceAccess::ReadWrite => GraphAccess::StorageWrite(*handle),
+        });
+    }
+    for binding in &compiled.bindings {
+        if binding.name == "ember_dispatch_counts" {
+            expected.push((
+                binding.group,
+                binding.binding,
+                binding.name,
+                binding.kind,
+                binding.access,
+            ));
+            let entry = bindings
+                .iter()
+                .find(|entry| entry.slot() == (binding.group, binding.binding))
+                .ok_or_else(|| CompiledGraphGraphError::MissingBinding {
+                    group: binding.group,
+                    binding: binding.binding,
+                    name: String::from(binding.name),
+                })?;
+            let CompiledGraphGpuGraphBinding::Buffer { handle, .. } = entry else {
+                return Err(CompiledGraphGraphError::ExpectedBuffer {
+                    group: binding.group,
+                    binding: binding.binding,
+                    name: String::from(binding.name),
+                });
+            };
+            accesses.push(GraphAccess::StorageRead(*handle));
+            continue;
+        }
+        expected.push((
+            binding.group,
+            binding.binding,
+            binding.name,
+            binding.kind,
+            binding.access,
+        ));
+        let entry = bindings
+            .iter()
+            .find(|entry| entry.slot() == (binding.group, binding.binding))
+            .ok_or_else(|| CompiledGraphGraphError::MissingBinding {
+                group: binding.group,
+                binding: binding.binding,
+                name: String::from(binding.name),
+            })?;
+        match (binding.kind, entry) {
+            (ResourceKind::Uniform, CompiledGraphGpuGraphBinding::Buffer { handle, .. }) => {
+                accesses.push(GraphAccess::Uniform(*handle));
+            }
+            (
+                ResourceKind::Curve | ResourceKind::StorageBuffer,
+                CompiledGraphGpuGraphBinding::Buffer { handle, .. },
+            ) => {
+                accesses.push(match binding.access {
+                    ResourceAccess::ReadOnly => GraphAccess::StorageRead(*handle),
+                    ResourceAccess::ReadWrite => GraphAccess::StorageWrite(*handle),
+                });
+            }
+            (
+                ResourceKind::Texture2d | ResourceKind::Texture3d,
+                CompiledGraphGpuGraphBinding::Texture { handle, .. },
+            ) => accesses.push(GraphAccess::Sample(*handle)),
+            (ResourceKind::Uniform, _) => {
+                return Err(CompiledGraphGraphError::ExpectedBuffer {
+                    group: binding.group,
+                    binding: binding.binding,
+                    name: String::from(binding.name),
+                });
+            }
+            (_, _) => {
+                return Err(CompiledGraphGraphError::ExpectedTexture {
+                    group: binding.group,
+                    binding: binding.binding,
+                    name: String::from(binding.name),
+                });
+            }
+        }
+    }
+    for entry in bindings {
+        if !expected
+            .iter()
+            .any(|(group, binding, _, _, _)| (*group, *binding) == entry.slot())
+        {
+            let (group, binding) = entry.slot();
+            return Err(CompiledGraphGraphError::UnexpectedBinding { group, binding });
+        }
+    }
+    Ok(accesses)
 }
 
 fn max_group(graph: &CompiledGraph) -> Option<u32> {
@@ -451,17 +898,14 @@ fn validate_external_bindings(
             });
         }
         let expected = graph
-            .attribute_bindings
+            .bindings
             .iter()
-            .find(|binding| (binding.group, binding.binding) == slot)
-            .map(|binding| (binding.name.as_str(), ResourceKind::StorageBuffer))
-            .or_else(|| {
-                graph
-                    .bindings
-                    .iter()
-                    .find(|binding| (binding.group, binding.binding) == slot)
-                    .map(|binding| (binding.name, binding.kind))
-            });
+            .find(|binding| {
+                (binding.group, binding.binding) == slot
+                    && binding.name != "ember_dispatch_counts"
+                    && binding.kind != ResourceKind::Uniform
+            })
+            .map(|binding| (binding.name, binding.kind));
         let Some((name, kind)) = expected else {
             return Err(CompiledGraphGpuError::UnexpectedExternalBinding {
                 group: slot.0,
@@ -506,15 +950,10 @@ fn validate_external_bindings(
             }
         }
     }
-    for (group, binding, name) in graph
-        .attribute_bindings
-        .iter()
-        .map(|binding| (binding.group, binding.binding, binding.name.as_str()))
-        .chain(graph.bindings.iter().filter_map(|binding| {
-            (binding.kind != ResourceKind::Uniform && binding.name != "ember_dispatch_counts")
-                .then_some((binding.group, binding.binding, binding.name))
-        }))
-    {
+    for (group, binding, name) in graph.bindings.iter().filter_map(|binding| {
+        (binding.kind != ResourceKind::Uniform && binding.name != "ember_dispatch_counts")
+            .then_some((binding.group, binding.binding, binding.name))
+    }) {
         if !external
             .iter()
             .any(|entry| entry.slot() == (group, binding))
@@ -562,6 +1001,8 @@ fn group_entries(
     external: &[CompiledGraphGpuBinding],
     parameter_buffers: &[ParameterBuffer],
     dispatch_counts: Option<BufferId>,
+    attribute_pool: Option<BufferId>,
+    frame_index: u64,
     group: u32,
 ) -> Result<Vec<ResolvedEntry>, CompiledGraphGpuError> {
     let mut entries = Vec::new();
@@ -570,21 +1011,21 @@ fn group_entries(
         .iter()
         .filter(|binding| binding.group == group)
     {
-        let external = external
-            .iter()
-            .find(|entry| entry.slot() == (group, attribute.binding))
-            .expect("validated attribute external binding");
-        let (buffer, size) = match external {
-            CompiledGraphGpuBinding::Buffer { buffer, size, .. } => (*buffer, *size),
-            CompiledGraphGpuBinding::TextureView { .. } => unreachable!("validated buffer binding"),
-        };
+        let pool = attribute_pool.expect("compiled attribute layout owns the SoA pool");
+        let planned = graph
+            .attribute_layout
+            .get(attribute.semantic)
+            .expect("compiled attribute binding has a planned layout");
+        let per_copy = u64::from(planned.stride) * u64::from(graph.attribute_layout.capacity);
+        let physical_copy = attribute.physical_copy(frame_index) as u64;
+        let offset = planned.byte_offset + physical_copy * per_copy;
         entries.push(ResolvedEntry {
             binding: attribute.binding,
             layout: storage_layout_entry(attribute.binding, attribute.access),
             resource: BindingResource::Buffer {
-                buffer,
-                offset: 0,
-                size,
+                buffer: pool,
+                offset,
+                size: Some(per_copy),
             },
         });
     }
@@ -709,13 +1150,18 @@ fn texture_layout_entry(binding: &ResourceDecl) -> BindGroupLayoutEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use prism_render_architecture::particle::attributes::AttributeLayoutPlan;
+    use prism_render_architecture::particle::attributes::{
+        AttributeAccess, AttributeFormat, AttributeLayoutPlan, AttributeSemantic, AttributeUsage,
+    };
     use prism_render_architecture::particle::compiler::{
-        CompiledParameterBlock, CompiledParameterField,
+        AttributeBufferRole, CompiledAttributeBinding, CompiledDispatch, CompiledParameterBlock,
+        CompiledParameterField,
     };
     use prism_render_architecture::particle::modules::{ParameterType, ResourceDecl};
+    use prism_render_architecture::particle::IterationDomain;
     use prism_render_driver::Instance;
     use prism_render_driver_null::NullInstance;
+    use prism_render_graph::{BufferDesc, ImportedBuffer};
 
     fn graph_with_one_parameter() -> CompiledGraph {
         CompiledGraph {
@@ -743,6 +1189,46 @@ mod tests {
             }],
             attribute_layout: AttributeLayoutPlan::build(0, &[]),
             attribute_bindings: Vec::new(),
+        }
+    }
+
+    fn graph_with_ping_pong_attribute() -> CompiledGraph {
+        let layout = AttributeLayoutPlan::build(
+            4,
+            &[AttributeUsage::new(
+                AttributeSemantic::Position,
+                AttributeFormat::Vec3,
+                AttributeAccess::READ_PREV.union(AttributeAccess::WRITE),
+            )],
+        );
+        CompiledGraph {
+            source: String::new(),
+            stage_order: Vec::new(),
+            entry_points: Vec::new(),
+            dispatches: Vec::new(),
+            bindings: Vec::new(),
+            parameter_blocks: Vec::new(),
+            attribute_layout: layout,
+            attribute_bindings: vec![
+                CompiledAttributeBinding {
+                    semantic: AttributeSemantic::Position,
+                    format: AttributeFormat::Vec3,
+                    role: AttributeBufferRole::Previous,
+                    name: String::from("position_previous"),
+                    group: 0,
+                    binding: 0,
+                    access: ResourceAccess::ReadOnly,
+                },
+                CompiledAttributeBinding {
+                    semantic: AttributeSemantic::Position,
+                    format: AttributeFormat::Vec3,
+                    role: AttributeBufferRole::Current,
+                    name: String::from("position_current"),
+                    group: 0,
+                    binding: 1,
+                    access: ResourceAccess::ReadWrite,
+                },
+            ],
         }
     }
 
@@ -822,5 +1308,161 @@ mod tests {
             }
         );
         state.destroy(&device);
+    }
+
+    #[test]
+    fn compiled_graph_records_stage_dispatches_into_render_graph() {
+        let instance = NullInstance::new();
+        let adapter = instance
+            .request_adapter(&Default::default())
+            .expect("null adapter");
+        let (device, queue) = instance
+            .create_device(&adapter, &Default::default())
+            .expect("null device");
+        let graph = CompiledGraph {
+            source: String::new(),
+            stage_order: vec![2],
+            entry_points: vec![String::from("ember_stage_2")],
+            dispatches: vec![CompiledDispatch {
+                stage_index: 2,
+                domain: IterationDomain::PerParticle,
+                default_count: 1,
+                iterations: 2,
+                entry_point: String::from("ember_stage_2"),
+            }],
+            bindings: vec![ResourceDecl::buffer("ember_dispatch_counts", 1, 0)],
+            parameter_blocks: Vec::new(),
+            attribute_layout: AttributeLayoutPlan::build(0, &[]),
+            attribute_bindings: Vec::new(),
+        };
+        let state = CompiledGraphGpuState::new(&device, &queue, &graph, &[])
+            .expect("dispatch count binding is state-owned");
+        assert_eq!(state.dispatch_count_slots(), 3);
+        state
+            .update_dispatch_counts(&queue, &[0, 0, 65])
+            .expect("counts are indexed by compiled stage index");
+
+        let dispatch_buffer = state
+            .dispatch_counts_buffer()
+            .expect("compiled stage owns dispatch counts");
+        let mut render_graph = RenderGraph::new(rhi::Extent3d::new_2d(1, 1));
+        let dispatch_handle = render_graph.import_buffer(
+            "ember-dispatch-counts",
+            BufferDesc::new(12, BufferUsages::STORAGE),
+            ImportedBuffer {
+                buffer: dispatch_buffer,
+                entry_state: rhi::BufferState::initial(),
+            },
+        );
+        state
+            .append_to_graph(
+                &graph,
+                &mut render_graph,
+                &[CompiledGraphGpuGraphBinding::Buffer {
+                    group: 1,
+                    binding: 0,
+                    handle: dispatch_handle,
+                }],
+                &[0, 0, 65],
+            )
+            .expect("compiled stages are declared in the frame graph");
+        let recorded = render_graph
+            .execute(&device, &queue)
+            .expect("null RHI records the compute frame");
+        assert_eq!(recorded.commands().passes.len(), 1);
+        let prism_render_driver::Pass::Compute { commands, .. } = &recorded.commands().passes[0]
+        else {
+            panic!("compiled Ember stage must record a compute pass");
+        };
+        assert_eq!(
+            commands
+                .iter()
+                .filter(|command| matches!(
+                    command,
+                    prism_render_driver::ComputeCommand::Dispatch { x: 2, y: 1, z: 1 }
+                ))
+                .count(),
+            2
+        );
+        recorded.release(&device);
+        state.destroy(&device);
+        assert_eq!(device.live_resource_count(), 0);
+    }
+
+    #[test]
+    fn attribute_pool_uses_layout_ranges_and_ping_pong_bindings() {
+        let instance = NullInstance::new();
+        let adapter = instance
+            .request_adapter(&Default::default())
+            .expect("null adapter");
+        let (device, queue) = instance
+            .create_device(&adapter, &Default::default())
+            .expect("null device");
+        let graph = graph_with_ping_pong_attribute();
+        assert_eq!(graph.attribute_layout.total_bytes, 128);
+
+        let state = CompiledGraphGpuState::new(&device, &queue, &graph, &[])
+            .expect("attribute pool is state-owned");
+        let pool = state
+            .attribute_pool_buffer()
+            .expect("live attributes own a persistent pool");
+        assert_eq!(state.attribute_pool_size(), 128);
+        state
+            .upload_attribute_bytes(&queue, 64, &[7; 64])
+            .expect("an in-range copy upload succeeds");
+        assert_eq!(
+            state
+                .upload_attribute_bytes(&queue, 120, &[7; 9])
+                .expect_err("an upload past the pool must be rejected"),
+            AttributeUploadError::OutOfBounds {
+                offset: 120,
+                size: 9,
+                capacity: 128,
+            }
+        );
+
+        let frame_zero = group_entries(&graph, &[], &[], None, Some(pool), 0, 0)
+            .expect("frame-zero attribute bindings");
+        let frame_one = group_entries(&graph, &[], &[], None, Some(pool), 1, 0)
+            .expect("frame-one attribute bindings");
+        assert_eq!(
+            frame_zero[0].resource,
+            BindingResource::Buffer {
+                buffer: pool,
+                offset: 64,
+                size: Some(64),
+            }
+        );
+        assert_eq!(
+            frame_zero[1].resource,
+            BindingResource::Buffer {
+                buffer: pool,
+                offset: 0,
+                size: Some(64),
+            }
+        );
+        assert_eq!(
+            frame_one[0].resource,
+            BindingResource::Buffer {
+                buffer: pool,
+                offset: 0,
+                size: Some(64),
+            }
+        );
+        assert_eq!(
+            frame_one[1].resource,
+            BindingResource::Buffer {
+                buffer: pool,
+                offset: 64,
+                size: Some(64),
+            }
+        );
+        assert_ne!(
+            state.bind_group_for_frame(0, 0),
+            state.bind_group_for_frame(0, 1)
+        );
+
+        state.destroy(&device);
+        assert_eq!(device.live_resource_count(), 0);
     }
 }

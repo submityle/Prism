@@ -81,6 +81,7 @@ mod mesh_draw;
 mod mesh_pipeline;
 mod mesh_pipelines;
 mod mesh_source;
+mod particle;
 mod pipeline_cache;
 mod pipeline_pass;
 mod plugin;
@@ -135,6 +136,7 @@ pub use lighting::{
     LightingSceneInputs, LightingSurfaceInput, LightingTraceSceneInput, LightingTriangleMaterial,
     LightingTriangleRadiance,
 };
+pub use lighting_gpu::LightingGpuPrepareError;
 pub use lighting_scene::{LightingLightScene, LightingSceneExtractError, NativeLights};
 pub use lighting_trace_gpu::{
     LightingTraceState, TracePreparationError, TracePreparationStatus, MAX_HOST_TRACE_RAYS,
@@ -155,6 +157,11 @@ pub use mesh_pipeline::{
 pub use mesh_pipelines::{
     MeshPipelines, ResidentResponseModule, ResponseModuleCache, ResponseModuleCacheError,
     ResponseModuleSpec, SpineMeshPipeline,
+};
+pub use particle::{
+    EmberGpuAssetRegistry, EmberGpuAssetRegistryError, EmberGpuPrepareError, EmberPrepareErrorKind,
+    EmberPrepareOutcome, EmberPrepareStatus, EmberRenderAsset, EmberRenderAssets,
+    ExtractedEmberRenderAssets, ParticleGpuState, ParticleUploadStatus,
 };
 pub use pipeline_cache::{
     cold_key_from_pipeline_key, hash_vertex_layouts, pso_device_fingerprint,
@@ -187,6 +194,11 @@ pub use render_asset::{
     PageAllocation, PagePoolError, PageReleaseTransaction, PageReplaceTransaction,
     PageResidencyBridgeError, PageUploadTransaction, PrepareAssetError, PrepareCancellation,
     PrepareContext, PrepareContextError, RenderAsset, RenderAssets,
+};
+#[cfg(feature = "fixed-page-feedback")]
+pub use render_asset::{
+    register_fixed_page_feedback, FixedPageFeedback, FixedPageFeedbackConfig,
+    FixedPageFeedbackError, FixedPageFeedbackGpu, FixedPageFeedbackSample, FixedPageQuery,
 };
 pub use runtime_resource::RenderRuntimeResource;
 pub use scene::{MeshClass, SceneRegistry, VisibilityWorkList};
@@ -243,6 +255,11 @@ pub mod prelude {
         MeshPipelines, ResidentResponseModule, ResponseModuleCache, ResponseModuleCacheError,
         ResponseModuleSpec, SpineMeshPipeline,
     };
+    pub use crate::particle::{
+        EmberGpuAssetRegistry, EmberGpuAssetRegistryError, EmberGpuPrepareError,
+        EmberPrepareErrorKind, EmberPrepareOutcome, EmberPrepareStatus, EmberRenderAsset,
+        EmberRenderAssets, ExtractedEmberRenderAssets, ParticleGpuState, ParticleUploadStatus,
+    };
     pub use crate::pipeline_cache::{
         cold_key_from_pipeline_key, hash_vertex_layouts, pso_device_fingerprint,
         PipelineBinaryCacheError, PipelineCache, PipelineCacheDiagnostics,
@@ -277,6 +294,11 @@ pub mod prelude {
         PageReleaseTransaction, PageReplaceTransaction, PageResidencyBridgeError,
         PageUploadTransaction, PrepareAssetError, PrepareCancellation, PrepareContext,
         PrepareContextError, RenderAsset, RenderAssets,
+    };
+    #[cfg(feature = "fixed-page-feedback")]
+    pub use crate::render_asset::{
+        register_fixed_page_feedback, FixedPageFeedback, FixedPageFeedbackConfig,
+        FixedPageFeedbackError, FixedPageFeedbackGpu, FixedPageFeedbackSample, FixedPageQuery,
     };
     pub use crate::scene::{MeshClass, SceneRegistry, VisibilityWorkList};
     pub use crate::sets::{
