@@ -1,7 +1,9 @@
 //! Real Loom content rows and semantic event recipes.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
+use prism_editor_content::thumbnail::{Thumbnail, ThumbnailKey};
 use prism_editor_content::{AssetId, AssetKind, ContentCatalog, TreeEntryKind, TreePage, VcsState};
 use prism_ui::{
     style::{Keyword, StyleProp, StyleValue},
@@ -12,7 +14,8 @@ use prism_ui_component_kit::inputs::{SearchField, SearchFieldProps};
 
 use crate::content::check_text;
 use crate::{
-    ContentBrowserAction, ContentBrowserController, ContentBrowserError, UiEvent, UiTrigger,
+    ContentBrowserAction, ContentBrowserController, ContentBrowserError, ContentLayout,
+    ContentThumbnailState, ContentThumbnails, UiEvent, UiTrigger,
 };
 
 #[derive(Clone, Debug)]
@@ -23,6 +26,21 @@ enum Recipe {
     Kind,
     Tag,
     Vcs,
+    CreateCollection,
+    RenameCollection(u64),
+}
+
+/// Real pixels paired with an actual keyed Loom layout anchor. This is not an
+/// image draw command: the native host must upload and encode through its image
+/// renderer using the anchor's reconciled geometry, effective clip and opacity.
+#[derive(Clone, Debug)]
+pub struct ContentImageVisual {
+    /// Exact key of a custom image-layout Element in this bound tree.
+    pub visual_key: String,
+    /// Authoritative asset/revision/source/size cache identity.
+    pub request: ThumbnailKey,
+    /// Actual decoded sRGB RGBA8 data, shared with the thumbnail service.
+    pub image: Arc<Thumbnail>,
 }
 
 /// An owned Element tree paired with the exact interactive keys it contains.
@@ -30,6 +48,7 @@ enum Recipe {
 /// then rebuild after every accepted action or catalog refresh.
 #[derive(Clone, Debug)]
 pub struct BoundContentBrowser {
+    images: Vec<ContentImageVisual>,
     element: Element,
     bindings: BTreeMap<(String, UiTrigger), Recipe>,
     generation: u64,
@@ -37,6 +56,12 @@ pub struct BoundContentBrowser {
 }
 
 impl BoundContentBrowser {
+    /// Upload/layout targets for successfully decoded visible assets only.
+    /// An empty custom node by itself is never evidence of image rendering.
+    #[must_use]
+    pub fn images(&self) -> &[ContentImageVisual] {
+        &self.images
+    }
     /// Borrows the real panel tree to mount or reconcile in Loom.
     #[must_use]
     pub fn element(&self) -> &Element {
@@ -95,6 +120,13 @@ impl BoundContentBrowser {
                     )),
                     Recipe::Tag => Ok(ContentBrowserAction::Tag(optional)),
                     Recipe::Vcs => Ok(ContentBrowserAction::Vcs(parse_vcs(text)?)),
+                    Recipe::CreateCollection => {
+                        Ok(ContentBrowserAction::CreateCollection(text.to_owned()))
+                    }
+                    Recipe::RenameCollection(id) => Ok(ContentBrowserAction::RenameCollection {
+                        id: *id,
+                        name: text.to_owned(),
+                    }),
                     _ => Err(ContentBrowserError::UnboundEvent),
                 }
             }
@@ -107,8 +139,10 @@ pub(crate) fn build(
     controller: &ContentBrowserController,
     catalog: &ContentCatalog,
     page: &TreePage,
+    thumbnails: Option<&ContentThumbnails>,
 ) -> BoundContentBrowser {
     let mut bound = BoundContentBrowser {
+        images: Vec::new(),
         element: Element::box_(),
         bindings: BTreeMap::new(),
         generation: catalog.generation(),
@@ -195,7 +229,24 @@ pub(crate) fn build(
             .class("prism-editor-content__path"),
         );
 
+    let collections = collection_controls(&mut bound, controller);
+    let display = row("prism-editor-content__display")
+        .child(button(
+            &mut bound,
+            "content:layout:list",
+            "List",
+            Some(ContentBrowserAction::Layout(ContentLayout::List)),
+        ))
+        .child(button(
+            &mut bound,
+            "content:layout:grid",
+            "Grid",
+            Some(ContentBrowserAction::Layout(ContentLayout::Grid {
+                columns: 4,
+            })),
+        ));
     let mut list = column("prism-editor-content__list").key_str("content:list");
+    let mut items = Vec::new();
     for entry in &page.items {
         let item = match entry.kind {
             TreeEntryKind::Folder => button(
@@ -219,64 +270,130 @@ pub(crate) fn build(
                     .insert((key.clone(), UiTrigger::Select), Recipe::Select(id));
                 let selected = controller.selection().contains(&id);
                 let vcs = catalog.vcs_status(id).unwrap_or_default();
-                row("prism-editor-content__asset")
-                    .key_str(key)
-                    .class(if selected {
-                        "is-selected"
+                let mut card = match controller.layout() {
+                    ContentLayout::List => row("prism-editor-content__asset"),
+                    ContentLayout::Grid { .. } => column("prism-editor-content__asset")
+                        .style(StyleProp::Width, StyleValue::px(160.0))
+                        .style(StyleProp::FlexShrink, StyleValue::number(0.0)),
+                }
+                .key_str(key)
+                .class(if selected {
+                    "is-selected"
+                } else {
+                    "is-unselected"
+                })
+                .style(
+                    StyleProp::BackgroundColor,
+                    StyleValue::token(if selected {
+                        "color.fill.secondary"
                     } else {
-                        "is-unselected"
-                    })
-                    .style(
-                        StyleProp::BackgroundColor,
-                        StyleValue::token(if selected {
-                            "color.fill.secondary"
-                        } else {
-                            "color.bg"
-                        }),
-                    )
-                    .child(
-                        Element::text(if selected { "[x]" } else { "[ ]" })
-                            .class("prism-editor-content__selection"),
-                    )
-                    .child(Element::text(&entry.name).class("prism-editor-content__name"))
-                    .child(Element::text(record.kind.as_str()).class("prism-editor-content__kind"))
-                    .child(
-                        Element::text(format!(
-                            "VCS: {}{}",
-                            vcs_name(vcs.state),
-                            if vcs.staged { " (staged)" } else { "" }
-                        ))
-                        .class("prism-editor-content__vcs"),
-                    )
-                    .child(button(
-                        &mut bound,
-                        &format!("content:favorite:{}", id.raw()),
-                        if record.favorite {
-                            "Favorite: on"
-                        } else {
-                            "Favorite: off"
-                        },
-                        Some(ContentBrowserAction::SetFavorite {
-                            asset: id,
-                            value: !record.favorite,
-                        }),
+                        "color.bg"
+                    }),
+                )
+                .child(
+                    Element::text(if selected { "[x]" } else { "[ ]" })
+                        .class("prism-editor-content__selection"),
+                )
+                .child(Element::text(&entry.name).class("prism-editor-content__name"))
+                .child(Element::text(record.kind.as_str()).class("prism-editor-content__kind"))
+                .child(
+                    Element::text(format!(
+                        "VCS: {}{}",
+                        vcs_name(vcs.state),
+                        if vcs.staged { " (staged)" } else { "" }
                     ))
-                    .child(button(
-                        &mut bound,
-                        &format!("content:pin:{}", id.raw()),
-                        if record.pinned {
-                            "Pinned: on"
-                        } else {
-                            "Pinned: off"
-                        },
-                        Some(ContentBrowserAction::SetPinned {
-                            asset: id,
-                            value: !record.pinned,
-                        }),
-                    ))
+                    .class("prism-editor-content__vcs"),
+                )
+                .child(button(
+                    &mut bound,
+                    &format!("content:favorite:{}", id.raw()),
+                    if record.favorite {
+                        "Favorite: on"
+                    } else {
+                        "Favorite: off"
+                    },
+                    Some(ContentBrowserAction::SetFavorite {
+                        asset: id,
+                        value: !record.favorite,
+                    }),
+                ))
+                .child(button(
+                    &mut bound,
+                    &format!("content:pin:{}", id.raw()),
+                    if record.pinned {
+                        "Pinned: on"
+                    } else {
+                        "Pinned: off"
+                    },
+                    Some(ContentBrowserAction::SetPinned {
+                        asset: id,
+                        value: !record.pinned,
+                    }),
+                ));
+                if let Some(thumbnails) =
+                    thumbnails.filter(|data| data.current_for(catalog.generation()))
+                    && let Some(state) = thumbnails.state(id)
+                {
+                    card = match state {
+                        ContentThumbnailState::Ready(image) => {
+                            let (request, _) =
+                                thumbnails.ready(id).expect("ready state owns its key");
+                            let visual_key = format!("content:image:{}", id.raw());
+                            bound.images.push(ContentImageVisual {
+                                visual_key: visual_key.clone(),
+                                request: request.clone(),
+                                image: image.clone(),
+                            });
+                            let scale = 128.0 / image.width().max(image.height()) as f32;
+                            card.child(
+                                Element::custom("prism-editor-content-image")
+                                    .key_str(visual_key)
+                                    .style(
+                                        StyleProp::Width,
+                                        StyleValue::px(image.width() as f32 * scale),
+                                    )
+                                    .style(
+                                        StyleProp::Height,
+                                        StyleValue::px(image.height() as f32 * scale),
+                                    )
+                                    .style(StyleProp::FlexShrink, StyleValue::number(0.0)),
+                            )
+                        }
+                        ContentThumbnailState::Queued => {
+                            card.child(Element::text("Thumbnail queued"))
+                        }
+                        ContentThumbnailState::Loading => {
+                            card.child(Element::text("Thumbnail loading"))
+                        }
+                        ContentThumbnailState::Failed(error) => {
+                            card.child(Element::text(format!("Thumbnail unavailable: {error}")))
+                        }
+                    };
+                }
+                card
             }
         };
-        list = list.child(item);
+        items.push(item);
+    }
+    match controller.layout() {
+        ContentLayout::List => {
+            for item in items {
+                list = list.child(item);
+            }
+        }
+        ContentLayout::Grid { columns } => {
+            let mut remaining = items.into_iter().peekable();
+            let mut index = 0;
+            while remaining.peek().is_some() {
+                let mut grid_row = row("prism-editor-content__grid-row")
+                    .key_str(format!("content:grid-row:{index}"));
+                for item in remaining.by_ref().take(columns) {
+                    grid_row = grid_row.child(item.style(StyleProp::Width, StyleValue::px(160.0)));
+                }
+                list = list.child(grid_row);
+                index += 1;
+            }
+        }
     }
     if page.items.is_empty() {
         list = list.child(crate::support::empty_state(
@@ -311,8 +428,8 @@ pub(crate) fn build(
             &mut bound,
             "content:next",
             "Next",
-            page.next
-                .is_some()
+            controller
+                .has_next(page)
                 .then_some(ContentBrowserAction::NextPage),
         ))
         .child(Element::text(format!(
@@ -328,10 +445,87 @@ pub(crate) fn build(
     bound.element = column("prism-editor-content")
         .key_str("content:browser")
         .child(header)
+        .child(collections)
+        .child(display)
         .child(navigation)
         .child(list)
         .child(footer);
     bound
+}
+
+fn collection_controls(
+    bound: &mut BoundContentBrowser,
+    controller: &ContentBrowserController,
+) -> Element {
+    let mut controls = column("prism-editor-content__collections")
+        .key_str("content:collections")
+        .child(field(
+            bound,
+            "content:collection:create",
+            "New collection (commit name)",
+            "",
+            Recipe::CreateCollection,
+        ))
+        .child(button(
+            bound,
+            "content:collection:folders",
+            "Browse folders",
+            Some(ContentBrowserAction::OpenCollection(None)),
+        ));
+    for collection in controller.collections() {
+        let id = collection.id();
+        let has_selection = !controller.selection().is_empty();
+        controls = controls.child(
+            column("prism-editor-content__collection")
+                .key_str(format!("content:collection:{id}"))
+                .child(button(
+                    bound,
+                    &format!("content:collection:open:{id}"),
+                    &format!(
+                        "{}{} ({} members)",
+                        if controller.active_collection() == Some(id) {
+                            "[Open] "
+                        } else {
+                            ""
+                        },
+                        collection.name(),
+                        collection.members().len()
+                    ),
+                    Some(ContentBrowserAction::OpenCollection(Some(id))),
+                ))
+                .child(field(
+                    bound,
+                    &format!("content:collection:rename:{id}"),
+                    "Collection name",
+                    collection.name(),
+                    Recipe::RenameCollection(id),
+                ))
+                .child(
+                    row("prism-editor-content__collection-actions")
+                        .child(button(
+                            bound,
+                            &format!("content:collection:add:{id}"),
+                            "Add selection",
+                            has_selection
+                                .then_some(ContentBrowserAction::AddSelectionToCollection(id)),
+                        ))
+                        .child(button(
+                            bound,
+                            &format!("content:collection:remove:{id}"),
+                            "Remove selection",
+                            has_selection
+                                .then_some(ContentBrowserAction::RemoveSelectionFromCollection(id)),
+                        ))
+                        .child(button(
+                            bound,
+                            &format!("content:collection:delete:{id}"),
+                            "Delete collection",
+                            Some(ContentBrowserAction::DeleteCollection(id)),
+                        )),
+                ),
+        );
+    }
+    controls
 }
 
 fn field(

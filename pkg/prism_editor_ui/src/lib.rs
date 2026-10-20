@@ -12,8 +12,10 @@ mod chrome;
 mod command;
 mod console;
 mod content;
+mod content_collection;
 mod content_diagnostics;
 mod content_diagnostics_view;
+mod content_thumbnails;
 mod content_view;
 mod dock;
 mod inspector;
@@ -35,7 +37,8 @@ pub use command::{
 };
 pub use console::{console_panel, ConsolePanelProps};
 pub use content::{
-    ContentBrowserAction, ContentBrowserController, ContentBrowserError, MAX_CONTENT_PAGE_HISTORY,
+    ContentBrowserAction, ContentBrowserController, ContentBrowserError, ContentCollection,
+    ContentLayout, MAX_COLLECTION_MEMBERS, MAX_CONTENT_COLLECTIONS, MAX_CONTENT_PAGE_HISTORY,
     MAX_CONTENT_SELECTION,
 };
 pub use content_diagnostics::{
@@ -43,7 +46,10 @@ pub use content_diagnostics::{
     DependencyDirection, MAX_DEPENDENCY_NAVIGATION_HISTORY,
 };
 pub use content_diagnostics_view::BoundContentDiagnostics;
-pub use content_view::BoundContentBrowser;
+pub use content_thumbnails::{
+    ContentThumbnailState, ContentThumbnails, MAX_CONTENT_THUMBNAIL_BYTES,
+};
+pub use content_view::{BoundContentBrowser, ContentImageVisual};
 pub use dock::{dock_workspace, DockWorkspaceProps};
 pub use inspector::{inspector_view, inspector_view_bound, InspectorViewProps};
 pub use outliner::{outliner_panel, outliner_panel_bound, OutlinerViewProps};

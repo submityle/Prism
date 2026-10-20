@@ -11,8 +11,8 @@ The crate provides builders for:
 - shell chrome with menu, toolbar, and status contributions;
 - a scored command palette backed by `prism_editor_shell::CommandIndex`;
 - bounded, keyed Outliner and Console panel trees;
-- a paged content folder/list panel with search, kind/tag/VCS filters,
-  favorites, pins, and bounded multiselection;
+- a paged content folder/list or thumbnail grid with search, kind/tag/VCS
+  filters, favorites, pins, bounded multiselection and named collections;
 - bounded dependency/dependent navigation and paged validation receipts with
   explicit run and locate actions;
 - reflection projection rows with field paths and editability hints;
@@ -65,7 +65,7 @@ controls have no binding. `dispatch` returns an owned action without writing;
 `apply` supports explicit host commands. `handle_event` additionally rejects
 views from an earlier controller revision or catalog generation.
 
-The controller owns query, bounded cursor history and selection only. It
+The controller owns query, bounded cursor history, selection and collections. It
 borrows the host's catalog for `tree_page` queries and favorite/pinned updates,
 preserving all other record fields. Each page contains at most
 `min(page_size, MAX_VISIBLE_ROWS, catalog.limits().max_page_size)` rows; the
@@ -78,13 +78,32 @@ back to root. Home also restarts the current folder traversal at root while
 retaining filters. Search normalization and filtering are the catalog's own
 semantics (ASCII case folding); kinds match exactly.
 
-The UI renders a real list without thumbnail signals. It owns no filesystem
-or Git worker, texture cache, GPU resource, persistence service or native
-window. The native app still needs to mount this panel, keep its controller
-and displayed bindings, route clicks/modifiers and committed text, and request
-redraw after actions or catalog publications. A host stylesheet may refine
-the supplied inline layout. See `docs/prism_editor_content_ui_zh.md` for the
-integration boundary and verified behavior.
+`ContentLayout::Grid { columns }` uses real fixed-width card/row layout with
+1..=8 columns. Collection creation, rename, deletion, membership changes and
+navigation use explicit `ContentBrowserAction` values and real keyed controls.
+At most 64 collections with 4096 stable asset IDs each are retained. Collection
+queries span folders, apply the same filters, sort by path then ID, and page
+deterministically. Deleted IDs remain members but have no visible row. Collection
+persistence/restoration is outside this controller's current API.
+
+`ContentThumbnails` shares the host's `ThumbnailService`. After building a page,
+supply authoritative visible `ThumbnailKey` values through `sync_visible`, tick
+`poll` while `needs_poll`, then use `build_with_thumbnails`. No caller file I/O
+occurs. Ready results alone produce `prism-editor-content-image` custom layout
+nodes and `BoundContentBrowser::images()` entries pairing exact `visual_key`,
+request identity and `Arc<Thumbnail>` RGBA8 pixels. Project each key's actual
+Loom layout to physical rect/clip/opacity and upload/prepare/encode using the
+host's image renderer. Custom nodes alone do not draw images. Missing, queued
+and failed requests never create fake images. Page-owned decoded pixels are
+capped at 32 MiB; off-page requests/results are dropped at synchronization.
+
+The native app owns input routing, revision/source resolution, redraw scheduling,
+layout projection and GPU handles. Rebuild and resynchronize keys after catalog
+publication; generation mismatch hides old visuals. Project close must clear
+page data, shared service and host textures; service clear alone cannot revoke
+already cloned Arcs. This UI owns no filesystem/Git scanner, GPU resource,
+persistence service or window. See `docs/prism_editor_content_grid_ui_zh.md` for
+the additive API, resource ownership and actual PNG/Loom/GPU pixel regression.
 
 `ContentDiagnosticsController` provides a separate E7 panel without extending
 `EditorAction`. Call `apply(&catalog, &registry, ContentDiagnosticsAction::Focus(

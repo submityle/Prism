@@ -20,6 +20,15 @@ prism_editor_dock = { path = "../prism_editor_dock" }
 prism_editor_viewport = { path = "../prism_editor_viewport" }
 prism_reflect = { path = "../prism_reflect" }
 
+[dev-dependencies]
+png = "0.18.1"
+futures-lite = "2"
+wgpu = { version = "30", default-features = false, features = ["wgsl", "metal"] }
+
+[features]
+default = []
+gpu-tests = []
+
 [lints.rust]
 missing_docs = "deny"
 unsafe_code = "deny"

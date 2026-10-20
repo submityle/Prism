@@ -10,6 +10,47 @@ use prism_editor_content::{
 
 use crate::{BoundContentBrowser, SelectionMode, UiEvent, MAX_ACTION_TEXT_BYTES, MAX_VISIBLE_ROWS};
 
+/// Maximum named collections retained by one browser.
+pub const MAX_CONTENT_COLLECTIONS: usize = 64;
+/// Maximum stable asset identities in one collection.
+pub const MAX_COLLECTION_MEMBERS: usize = 4096;
+
+/// Bounded presentation of the current content page.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ContentLayout {
+    /// One asset per row.
+    #[default]
+    List,
+    /// Fixed-width cards arranged in one to eight columns.
+    Grid {
+        /// Number of columns, provided by the host layout policy.
+        columns: usize,
+    },
+}
+
+/// A named set of stable asset identities; persistence belongs to the host.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContentCollection {
+    id: u64,
+    name: String,
+    members: BTreeSet<AssetId>,
+}
+
+impl ContentCollection {
+    /// Browser-local identity; not reused after deletion.
+    pub const fn id(&self) -> u64 {
+        self.id
+    }
+    /// Display name, independent of asset paths.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    /// Members, including deleted catalog IDs until explicitly removed.
+    pub fn members(&self) -> &BTreeSet<AssetId> {
+        &self.members
+    }
+}
+
 /// Maximum retained selection, including assets on other pages or in other folders.
 pub const MAX_CONTENT_SELECTION: usize = 4096;
 /// Maximum previous-page cursors retained; older pages remain reachable from Home.
@@ -18,6 +59,25 @@ pub const MAX_CONTENT_PAGE_HISTORY: usize = 64;
 /// Explicit commands accepted by the content controller; independent of `EditorAction`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ContentBrowserAction {
+    /// Change presentation without changing the query or selection.
+    Layout(ContentLayout),
+    /// Create and open an empty collection with a bounded nonempty name.
+    CreateCollection(String),
+    /// Rename a collection without changing its identity or members.
+    RenameCollection {
+        /// Collection identity.
+        id: u64,
+        /// New display name.
+        name: String,
+    },
+    /// Delete a collection, preserving catalog assets.
+    DeleteCollection(u64),
+    /// Open a collection, or return to folder browsing.
+    OpenCollection(Option<u64>),
+    /// Add the current selection atomically to one collection.
+    AddSelectionToCollection(u64),
+    /// Remove the current selection from one collection.
+    RemoveSelectionFromCollection(u64),
     /// Search paths, kinds and tags using catalog search semantics.
     Search(String),
     /// Filter by exact kind; `None` clears the filter.
@@ -66,6 +126,12 @@ pub enum ContentBrowserAction {
 /// Failures leave the requested mutation unapplied.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ContentBrowserError {
+    /// Collection does not exist, or its name is empty.
+    InvalidCollection,
+    /// Collection count, member count or identity space exhausted.
+    CollectionLimit,
+    /// Grid columns must be in the inclusive range 1..=8.
+    InvalidGridColumns,
     /// Catalog validation or paging failed.
     Catalog(ContentError),
     /// The event did not match an interactive key and trigger.
@@ -87,6 +153,9 @@ pub enum ContentBrowserError {
 impl fmt::Display for ContentBrowserError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InvalidCollection => f.write_str("unknown collection or empty collection name"),
+            Self::CollectionLimit => f.write_str("content collection limit exceeded"),
+            Self::InvalidGridColumns => f.write_str("content grid needs one to eight columns"),
             Self::Catalog(error) => error.fmt(f),
             Self::UnboundEvent => f.write_str("unbound content browser event"),
             Self::InvalidValue => f.write_str("invalid content browser input"),
@@ -111,6 +180,12 @@ impl From<ContentError> for ContentBrowserError {
 /// source workers, persistence, Loom runtime and native input adapter.
 #[derive(Clone, Debug)]
 pub struct ContentBrowserController {
+    layout: ContentLayout,
+    collections: Vec<ContentCollection>,
+    next_collection: u64,
+    collection: Option<u64>,
+    collection_offset: usize,
+    collection_has_next: bool,
     query: TreeQuery,
     selected: BTreeSet<AssetId>,
     anchor: Option<AssetId>,
@@ -126,6 +201,12 @@ pub struct ContentBrowserController {
 impl Default for ContentBrowserController {
     fn default() -> Self {
         Self {
+            layout: ContentLayout::List,
+            collections: Vec::new(),
+            next_collection: 1,
+            collection: None,
+            collection_offset: 0,
+            collection_has_next: false,
             query: TreeQuery::default(),
             selected: BTreeSet::new(),
             anchor: None,
@@ -141,6 +222,26 @@ impl Default for ContentBrowserController {
 }
 
 impl ContentBrowserController {
+    /// Current list/grid presentation.
+    pub const fn layout(&self) -> ContentLayout {
+        self.layout
+    }
+    /// Named sets owned by this controller; host persists their snapshots.
+    pub fn collections(&self) -> &[ContentCollection] {
+        &self.collections
+    }
+    /// Open collection, or None for folders.
+    pub const fn active_collection(&self) -> Option<u64> {
+        self.collection
+    }
+    /// Stable identities on the most recently refreshed page.
+    pub fn visible_assets(&self) -> &[AssetId] {
+        &self.visible
+    }
+    /// Catalog generation used to build the current page, if any.
+    pub const fn generation(&self) -> Option<u64> {
+        self.generation
+    }
     /// Returns the current query without permitting direct mutation.
     #[must_use]
     pub fn query(&self) -> &TreeQuery {
@@ -156,7 +257,11 @@ impl ContentBrowserController {
     /// Returns the current matching-row offset (folders count as rows).
     #[must_use]
     pub fn page_offset(&self) -> usize {
-        self.cursor.as_ref().map_or(0, TreeCursor::offset)
+        if self.collection.is_some() {
+            self.collection_offset
+        } else {
+            self.cursor.as_ref().map_or(0, TreeCursor::offset)
+        }
     }
 
     /// Builds a real keyed Loom panel and its content-specific event bindings.
@@ -167,7 +272,24 @@ impl ContentBrowserController {
         catalog: &mut ContentCatalog,
     ) -> Result<BoundContentBrowser, ContentBrowserError> {
         let page = self.refresh(catalog)?;
-        Ok(crate::content_view::build(self, catalog, &page))
+        Ok(crate::content_view::build(self, catalog, &page, None))
+    }
+
+    /// Builds image-layout nodes and exposes real ready pixels through
+    /// `BoundContentBrowser::images`. Host projects the Loom layout and submits
+    /// images to its compositor; queued/failed requests expose status only.
+    pub fn build_with_thumbnails(
+        &mut self,
+        catalog: &mut ContentCatalog,
+        thumbnails: &crate::ContentThumbnails,
+    ) -> Result<BoundContentBrowser, ContentBrowserError> {
+        let page = self.refresh(catalog)?;
+        Ok(crate::content_view::build(
+            self,
+            catalog,
+            &page,
+            Some(thumbnails),
+        ))
     }
 
     /// Routes an event from the currently displayed bound tree and applies its
@@ -196,6 +318,65 @@ impl ContentBrowserController {
     ) -> Result<(), ContentBrowserError> {
         self.refresh(catalog)?;
         match action {
+            ContentBrowserAction::Layout(layout) => {
+                if matches!(layout, ContentLayout::Grid { columns } if !(1..=8).contains(&columns))
+                {
+                    return Err(ContentBrowserError::InvalidGridColumns);
+                }
+                self.layout = layout;
+            }
+            ContentBrowserAction::CreateCollection(name) => {
+                let name = collection_name(name)?;
+                if self.collections.len() == MAX_CONTENT_COLLECTIONS
+                    || self.next_collection == u64::MAX
+                {
+                    return Err(ContentBrowserError::CollectionLimit);
+                }
+                let id = self.next_collection;
+                self.next_collection += 1;
+                self.collections.push(ContentCollection {
+                    id,
+                    name,
+                    members: BTreeSet::new(),
+                });
+                self.collection = Some(id);
+                self.reset_page();
+            }
+            ContentBrowserAction::RenameCollection { id, name } => {
+                let name = collection_name(name)?;
+                self.collection_mut(id)?.name = name;
+            }
+            ContentBrowserAction::DeleteCollection(id) => {
+                self.collection_mut(id)?;
+                self.collections.retain(|collection| collection.id != id);
+                if self.collection == Some(id) {
+                    self.collection = None;
+                }
+                self.reset_page();
+            }
+            ContentBrowserAction::OpenCollection(id) => {
+                if let Some(id) = id {
+                    self.collection_mut(id)?;
+                }
+                self.collection = id;
+                self.reset_page();
+            }
+            ContentBrowserAction::AddSelectionToCollection(id) => {
+                let selection = self.selected.clone();
+                let collection = self.collection_mut(id)?;
+                if collection.members.union(&selection).count() > MAX_COLLECTION_MEMBERS {
+                    return Err(ContentBrowserError::CollectionLimit);
+                }
+                collection.members.extend(selection);
+                self.reset_page();
+            }
+            ContentBrowserAction::RemoveSelectionFromCollection(id) => {
+                let selection = self.selected.clone();
+                self.collection_mut(id)?
+                    .members
+                    .retain(|asset| !selection.contains(asset));
+                self.reset_page();
+            }
             ContentBrowserAction::Search(value) => {
                 check_text(&value)?;
                 self.query.text = nonempty(value);
@@ -234,11 +415,16 @@ impl ContentBrowserController {
                     ..self.query.clone()
                 };
                 catalog.tree_page(&query, self.request(catalog), None)?;
+                self.collection = None;
                 self.query = query;
                 self.reset_page();
             }
             ContentBrowserAction::NextPage => {
-                if let Some(next) = self.next.take() {
+                if self.collection.is_some() {
+                    if self.collection_has_next {
+                        self.collection_offset += self.request(catalog).limit;
+                    }
+                } else if let Some(next) = self.next.take() {
                     if self.history.len() == MAX_CONTENT_PAGE_HISTORY {
                         self.history.pop_front();
                     }
@@ -247,7 +433,11 @@ impl ContentBrowserController {
                 }
             }
             ContentBrowserAction::PreviousPage => {
-                if let Some(previous) = self.history.pop_back() {
+                if self.collection.is_some() {
+                    self.collection_offset = self
+                        .collection_offset
+                        .saturating_sub(self.request(catalog).limit);
+                } else if let Some(previous) = self.history.pop_back() {
                     self.cursor = previous;
                     self.next = None;
                 }
@@ -289,7 +479,26 @@ impl ContentBrowserController {
         self.revision
     }
     pub(crate) fn has_previous(&self) -> bool {
-        !self.history.is_empty()
+        if self.collection.is_some() {
+            self.collection_offset > 0
+        } else {
+            !self.history.is_empty()
+        }
+    }
+
+    pub(crate) fn has_next(&self, page: &TreePage) -> bool {
+        if self.collection.is_some() {
+            self.collection_has_next
+        } else {
+            page.next.is_some()
+        }
+    }
+
+    fn collection_mut(&mut self, id: u64) -> Result<&mut ContentCollection, ContentBrowserError> {
+        self.collections
+            .iter_mut()
+            .find(|collection| collection.id == id)
+            .ok_or(ContentBrowserError::InvalidCollection)
     }
 
     fn request(&self, catalog: &ContentCatalog) -> PageRequest {
@@ -297,6 +506,8 @@ impl ContentBrowserController {
     }
 
     fn reset_page(&mut self) {
+        self.collection_offset = 0;
+        self.collection_has_next = false;
         self.cursor = None;
         self.next = None;
         self.history.clear();
@@ -312,6 +523,42 @@ impl ContentBrowserController {
             }
             self.generation = Some(catalog.generation());
             self.revision = self.revision.wrapping_add(1);
+        }
+        if let Some(id) = self.collection {
+            let members = &self
+                .collections
+                .iter()
+                .find(|collection| collection.id == id)
+                .ok_or(ContentBrowserError::InvalidCollection)?
+                .members;
+            let mut records: Vec<_> = members
+                .iter()
+                .filter_map(|id| catalog.get(*id))
+                .filter(|record| crate::content_collection::matches(catalog, &self.query, record))
+                .collect();
+            records.sort_by(|a, b| a.path.cmp(&b.path).then(a.id.cmp(&b.id)));
+            let end = self
+                .collection_offset
+                .saturating_add(self.request(catalog).limit);
+            self.collection_has_next = end < records.len();
+            let items: Vec<_> = records
+                .into_iter()
+                .skip(self.collection_offset)
+                .take(self.request(catalog).limit)
+                .map(|record| prism_editor_content::TreeEntry {
+                    path: record.path.clone(),
+                    name: record.path.clone(),
+                    kind: prism_editor_content::TreeEntryKind::Asset,
+                    asset: Some(record.id),
+                    descendant_assets: 0,
+                })
+                .collect();
+            self.visible = items.iter().filter_map(|entry| entry.asset).collect();
+            return Ok(TreePage {
+                items,
+                next: None,
+                cache: prism_editor_content::CacheStatus::Miss,
+            });
         }
         let page = match catalog.tree_page(&self.query, self.request(catalog), self.cursor.clone())
         {
@@ -374,6 +621,14 @@ pub(crate) fn check_text(value: &str) -> Result<(), ContentBrowserError> {
     } else {
         Ok(())
     }
+}
+
+fn collection_name(name: String) -> Result<String, ContentBrowserError> {
+    check_text(&name)?;
+    if name.trim().is_empty() {
+        return Err(ContentBrowserError::InvalidCollection);
+    }
+    Ok(name.trim().to_owned())
 }
 
 fn nonempty(value: String) -> Option<String> {

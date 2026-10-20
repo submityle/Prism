@@ -116,7 +116,7 @@ fn loom_events_mutate_catalog_and_reconcile_existing_nodes() {
     for (key, _) in &bindings {
         assert!(find(view.element(), key).is_some(), "phantom binding {key}");
     }
-    assert_eq!(bindings.len(), 10);
+    assert_eq!(bindings.len(), 14);
     ui.backend_mut().clear();
     let unchanged = controller.build(&mut catalog).unwrap();
     ui.update(unchanged.element());
