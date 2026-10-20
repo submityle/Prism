@@ -5,6 +5,7 @@
 //! implementation or format-specific cache logic.
 
 mod args;
+mod cache;
 mod commands;
 mod error;
 mod mapping;
@@ -106,6 +107,7 @@ fn command_hint(arguments: &[OsString]) -> Option<&'static str> {
         "why" => Some("why"),
         "graph" => Some("graph"),
         "diff" => Some("diff"),
+        "cache" => Some("cache"),
         _ => None,
     }
 }

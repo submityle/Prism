@@ -9,7 +9,7 @@ use fs4::fs_std::FileExt;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
@@ -38,6 +38,11 @@ pub enum DdcError {
     CapacityInsufficient {
         max_encoded_bytes: usize,
         minimum_encoded_bytes: usize,
+    },
+    /// The complete index cannot be admitted by a read-only snapshot.
+    SnapshotTooLarge {
+        max_encoded_bytes: u64,
+        observed_bytes: u64,
     },
     KeyConflict {
         key: ArtifactKey,
@@ -70,6 +75,10 @@ impl fmt::Display for DdcError {
             } => write!(
                 f,
                 "DDC encoded-byte capacity {max_encoded_bytes} is below the empty index minimum {minimum_encoded_bytes}"
+            ),
+            Self::SnapshotTooLarge { max_encoded_bytes, observed_bytes } => write!(
+                f,
+                "DDC index exceeds snapshot byte budget {max_encoded_bytes}: observed {observed_bytes} bytes"
             ),
             Self::KeyConflict { key, reason } => {
                 write!(f, "DDC key {} conflicts: {reason}", key.to_hex())
@@ -111,6 +120,16 @@ impl From<io::Error> for DdcError {
 pub struct DerivedDataCache {
     root: PathBuf,
     entries: BTreeMap<ArtifactKey, ArtifactDescriptor>,
+}
+
+/// A fully decoded, checksum-verified index read without initialization,
+/// recovery, locking, or writes. Atomic DDC replacement leaves this snapshot
+/// consistent; a missing index is represented explicitly as absent.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DdcSnapshot {
+    pub index_present: bool,
+    pub encoded_bytes: u64,
+    pub entries: BTreeMap<ArtifactKey, ArtifactDescriptor>,
 }
 
 /// Short name for [`DerivedDataCache`].
@@ -182,6 +201,78 @@ pub struct DdcEviction {
 }
 
 impl DerivedDataCache {
+    /// Reads the complete existing index under an explicit encoded-byte budget.
+    /// Oversized input is rejected, never truncated into a partial snapshot.
+    /// A missing root/index stays missing; no lock or temporary file is created.
+    pub fn read_snapshot(
+        root: impl AsRef<Path>,
+        max_encoded_bytes: u64,
+    ) -> Result<DdcSnapshot, DdcError> {
+        let root = root.as_ref();
+        match fs::symlink_metadata(root) {
+            Ok(metadata) if metadata.is_dir() => {}
+            Ok(_) => {
+                return Err(DdcError::InvalidFormat(
+                    "DDC root is not a regular directory",
+                ))
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(DdcSnapshot {
+                    index_present: false,
+                    encoded_bytes: 0,
+                    entries: BTreeMap::new(),
+                });
+            }
+            Err(error) => return Err(error.into()),
+        }
+        let path = root.join("index.ddc");
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(DdcSnapshot {
+                    index_present: false,
+                    encoded_bytes: 0,
+                    entries: BTreeMap::new(),
+                });
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if !metadata.is_file() {
+            return Err(DdcError::InvalidFormat("index is not a regular file"));
+        }
+        let file = File::open(path)?;
+        let metadata = file.metadata()?;
+        if !metadata.is_file() {
+            return Err(DdcError::InvalidFormat("index is not a regular file"));
+        }
+        if metadata.len() > max_encoded_bytes {
+            return Err(DdcError::SnapshotTooLarge {
+                max_encoded_bytes,
+                observed_bytes: metadata.len(),
+            });
+        }
+        let mut bytes = Vec::new();
+        file.take(max_encoded_bytes.saturating_add(1))
+            .read_to_end(&mut bytes)?;
+        let encoded_bytes = bytes.len() as u64;
+        if encoded_bytes > max_encoded_bytes {
+            return Err(DdcError::SnapshotTooLarge {
+                max_encoded_bytes,
+                observed_bytes: encoded_bytes,
+            });
+        }
+        if encoded_bytes != metadata.len() {
+            return Err(DdcError::InvalidFormat(
+                "index changed during snapshot read",
+            ));
+        }
+        Ok(DdcSnapshot {
+            index_present: true,
+            encoded_bytes,
+            entries: decode_index(&bytes)?,
+        })
+    }
+
     /// Opens (or creates) the DDC directory and restores its index.
     pub fn open(root: impl Into<PathBuf>) -> Result<Self, DdcError> {
         let root = root.into();

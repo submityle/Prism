@@ -26,6 +26,7 @@ pub enum Command {
     Why(Why),
     Graph(Graph),
     Diff(Diff),
+    Cache(Cache),
 }
 
 impl Command {
@@ -41,6 +42,7 @@ impl Command {
             Self::Why(_) => "why",
             Self::Graph(_) => "graph",
             Self::Diff(_) => "diff",
+            Self::Cache(_) => "cache",
         }
     }
 }
@@ -230,4 +232,65 @@ pub struct Diff {
     /// target committed revision; equal and older revisions are supported
     #[argh(option)]
     pub target_revision: u64,
+}
+
+/// Inspect, verify, or explicitly prune an existing local cache.
+#[derive(FromArgs)]
+#[argh(subcommand, name = "cache")]
+pub struct Cache {
+    #[argh(subcommand)]
+    pub command: CacheCommand,
+}
+
+#[derive(FromArgs)]
+#[argh(subcommand)]
+pub enum CacheCommand {
+    Status(CacheStatus),
+    Verify(CacheVerify),
+    Prune(CachePrune),
+}
+
+/// Report cache metadata without initialization or recovery.
+#[derive(FromArgs)]
+#[argh(subcommand, name = "status")]
+pub struct CacheStatus {
+    /// existing local revision store directory
+    #[argh(option)]
+    pub store: PathBuf,
+    /// maximum admitted complete DDC index bytes (default 64 MiB)
+    #[argh(option, default = "crate::cache::DEFAULT_MAX_INDEX_BYTES")]
+    pub max_index_bytes: u64,
+}
+
+/// Verify DDC, all CAS blobs and current committed payloads without repair.
+#[derive(FromArgs)]
+#[argh(subcommand, name = "verify")]
+pub struct CacheVerify {
+    /// existing local revision store directory
+    #[argh(option)]
+    pub store: PathBuf,
+    /// maximum admitted complete DDC index bytes (default 64 MiB)
+    #[argh(option, default = "crate::cache::DEFAULT_MAX_INDEX_BYTES")]
+    pub max_index_bytes: u64,
+}
+
+/// Evict DDC metadata to explicit bounds, then sweep unreachable CAS blobs.
+#[derive(FromArgs)]
+#[argh(subcommand, name = "prune")]
+pub struct CachePrune {
+    /// existing local revision store directory
+    #[argh(option)]
+    pub store: PathBuf,
+    /// DDC entry capacity; at least one capacity bound is required
+    #[argh(option)]
+    pub max_entries: Option<usize>,
+    /// complete encoded DDC index capacity, not CAS payload bytes
+    #[argh(option)]
+    pub max_encoded_bytes: Option<usize>,
+    /// explicit minimum age in seconds for unreachable CAS blobs (zero allowed)
+    #[argh(option)]
+    pub grace_seconds: u64,
+    /// maximum admitted complete DDC index bytes (default 64 MiB)
+    #[argh(option, default = "crate::cache::DEFAULT_MAX_INDEX_BYTES")]
+    pub max_index_bytes: u64,
 }

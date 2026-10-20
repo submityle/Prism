@@ -46,6 +46,16 @@
   为 256 MiB；损坏、非 canonical、孤立或错配记录拒绝读取。graph 保留有序
   dependency slot，diff 复用核心 Patch 规划并保留原 revision 身份。它们不是
   通用 Cook、图形化 Build Monitor 或逐节点事件流。
+- **本地缓存巡检与显式回收**：CLI 新增 `cache status`、`cache verify` 和
+  `cache prune`。前两者只读取现有 store，不初始化、恢复、加锁或写入；它们
+  受完整 DDC index 字节上限约束，并拒绝符号链接和非普通 DDC/CAS 路径。
+  `verify` 逐一复核可发现 CAS blob、DDC descriptor 和当前 Revision descriptor。
+  `prune` 必须显式给出 DDC 容量，先确定性驱逐 DDC metadata，再按已提交
+  Revision roots 和宽限期 sweep CAS；DDC 不作为 CAS GC root，完成 sweep 后
+  仅移除已缺失 blob 的可重建 descriptor。活跃 build lease 或 pending transaction
+  会使 CAS sweep 延期。它不是 L0-L3 DDC、磁盘配额管理、远程缓存或抗恶意
+  路径替换的文件描述符级实现。回归入口为
+  `prism_asset_build_cli/tests/cache_commands.rs`。
 
 完整 EDL、实际纹理/VT/VG 流送消费者、编辑态资产/重导入、完整 Processor SDK、
 动态文件依赖、通用平台 Cook、远程 CAS/Worker、发行服务和规模性能验收仍未完成。
@@ -143,7 +153,7 @@ CAS 基线元数据在执行前校验，候选可修复损坏 blob，提交时�
 未修复的损坏不能发布。显式 dirty job 在读取基线前校验。设置目前按完整规范化字节
 跟踪；Profile 读取记录与字段投影已由上述 `plan_with_profile` 接入 Recipe 规划、
 缓存键和已提交重建解释，任意执行期环境/文件读取的自动依赖发现仍未交付。
-`prism_asset_build_cli` 的 JSONL protocol v1 已实现八个命令（含 `why`）的稳定启动/终态
+`prism_asset_build_cli` 的 JSONL protocol v1 已实现顶层构建、查询、发行和缓存命令的稳定启动/终态
 事件、结构化成功结果/错误、确定性退出码和 stdout/stderr 分离。
 本轮 `cargo test -j 1 -p prism_asset_build_core -p prism_asset_build_cli --quiet`：
 核心 236 项（含 14 项 `invalidation_plan`）、CLI 41 项（含 15 项 JSONL 集成测试）全部
@@ -198,7 +208,7 @@ GPU 常驻范围输出和批量 dispatch，feedback/page-table 闭环仍未完�
 | RuntimeDerived 进程内 BakeService | 已实现（本地调度与 ECS 结果消费切片） | `src/bake.rs`、可选 `ecs` 的 `src/bake_ecs.rs`；`tests/bake.rs`、`dirty_bake.rs`、`bake_subscriptions.rs`、`bake_ecs.rs` 覆盖 admission、确定性 key、共享执行、订阅容量、取消、失败、缓存、每帧消费配额、独立请求实例、替换/移除/despawn 和 last-good 保留 | 实际 Image/材质/场景消费者、渲染采样和编辑器预览仍待验收；RuntimeDerived 不进入离线 CAS/DDC/Manifest |
 | DirtySet 增量 BuildExecutor | 已实现（本地增量执行切片） | `pkg/prism_asset_build_core/src/executor.rs`；`tests/incremental_executor.rs` 的 8 项测试覆盖串行/并行/资源预算/双跑入口、直接变更的后继闭包、未受影响 DDC/CAS 复用、未知 job 拒绝、空 dirty set、失败不发布和串并行等价；`BakeService::submit_dirty` 另有 `tests/dirty_bake.rs` 的 3 项测试覆盖稳定选择、重复请求合并、缓存、失败与取消；commit `19f3980c7` | 仍未接入 ECS/渲染/编辑器消费、远程调度或大规模性能基准 |
 | 双跑确定性发布门禁 | 已实现（本机同进程切片） | `executor/determinism.rs`、`BuildExecutor::execute_verified_with_limit`；`tests/determinism_gate.rs` 的 7 项测试证明冷/持久 warm DDC 均逐节点执行两次、不记 cache hit、相同有序依赖、串并行等价、差异位置/长度/hash 诊断、第二次错误/panic 拒绝且不发布、失败候选不提前落 CAS/DDC；`prism_asset_build_cli/tests/determinism.rs` 对 `build/import --verify-determinism` 各有冷/普通 warm/强制 warm 完整命令回归 | 不隔离处理器外部状态；不证明跨进程/跨机器/跨工具链可复现，也不把历史 DDC 内容当作本次对照。成功节点可留下有效缓存，不承诺全图缓存回滚 |
-| 本地 CAS、DDC 与 BuildExecutor 缓存校验 | 部分实现 | `cas.rs`、`ddc.rs`、`executor.rs`；`detects_corruption_on_read`、`persists_and_restores_across_multiple_opens`、`ddc_hit_skips_processor_and_publishes_next_revision`、`corrupt_cas_blob_is_rebuilt_instead_of_returned_as_a_hit`、`concurrent_threads_merge_distinct_writes_without_lost_updates`、`readers_only_observe_complete_published_indexes` 和 DDC 容量驱逐回归测试；DDC 稳定锁文件通过 `fs4` 在 Unix/Windows 提供排他 read-modify-write 窗口 | 分层 DDC/L0–L3、隐式 recency policy、远端 CAS、跨机器协调、网络文件系统一致性和大规模性能证据未完成 |
+| 本地 CAS、DDC 与 BuildExecutor 缓存校验 | 部分实现 | `cas.rs`、`ddc.rs`、`executor.rs`；`detects_corruption_on_read`、`persists_and_restores_across_multiple_opens`、`ddc_hit_skips_processor_and_publishes_next_revision`、`corrupt_cas_blob_is_rebuilt_instead_of_returned_as_a_hit`、`concurrent_threads_merge_distinct_writes_without_lost_updates`、`readers_only_observe_complete_published_indexes` 和 DDC 容量驱逐回归测试；CLI `cache status`/`verify` 在不初始化 store 的前提下枚举并复核 CAS、DDC 与 current Revision，`cache prune` 显式驱逐 DDC metadata 并按 Revision root sweep CAS，`tests/cache_commands.rs` 覆盖只读、损坏、lease/pending transaction 延期、容量与非普通路径拒绝；DDC 稳定锁文件通过 `fs4` 在 Unix/Windows 提供排他 read-modify-write 窗口 | 分层 DDC/L0–L3、隐式 recency policy、磁盘配额管理、远端 CAS、跨机器协调、网络文件系统一致性和大规模性能证据未完成；普通 path API 对恶意并发路径替换仍有 TOCTOU 边界 |
 | Artifact 与 Manifest 字节预算 | 已实现（质量门切片） | `validation.rs`；`max_artifact_bytes`、`max_total_manifest_bytes`、唯一 `ContentHash` 确定性计数、CAS 实际字节复核；默认策略保持兼容，单 artifact/总预算在预读阶段拒绝 | 尚未覆盖压缩后/平台 Cook 后预算、跨包聚合预算和远程发布服务 |
 | SourceSnapshot / Recipe / PNG 导入垂直链 | 部分实现 | `source.rs`、`recipe.rs`、`import/image.rs`、`executor.rs`、`prism_image::artifact`；除 v1 兼容外，PNG importer 现在发布 schema v2 完整语义 RGBA8 mip 链，覆盖 odd-size ceil-halving、metadata round-trip、确定性编码及严格异常拒绝 | 仍不代表通用 importer、BCn/ASTC/ETC2 压缩、平台 Cook、VT/page artifact 或完整远程 runtime texture delivery 已完成 |
 | ImporterPlugin / ImporterRegistry | 已实现（进程内注册选择切片） | `prism_asset_build_core/src/import/mod.rs`、`import/image.rs`；`tests/import_registry.rs` 的 `built_in_registry_normalizes_and_selects_by_extension_or_mime`、`selection_has_explicit_missing_and_no_match_errors`、`registration_and_selection_are_deterministic_and_ambiguity_is_explicit`；覆盖扩展名/MIME 归一化、内置 PNG 注册、稳定身份排序、重复身份/歧义拒绝和 profile 字段元数据 | 动态插件加载、隔离 worker、更多格式、插件准入/签名和完整 Source/IR/Recipe 生态未完成 |

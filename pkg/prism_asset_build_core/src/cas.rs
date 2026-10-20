@@ -329,7 +329,46 @@ impl ContentAddressedStore {
     /// Verifies a complete blob with a fixed 64 KiB buffer, returning its exact
     /// length. Publication and insertion collisions need no owned payload.
     pub fn verify(&self, hash: ContentHash) -> Result<u64, CasError> {
-        let mut file = File::open(self.blob_path(hash))?;
+        Self::verify_at(&self.root, hash)
+    }
+
+    /// Verifies an existing blob without opening or initializing a store.
+    /// Missing paths and non-regular blobs are errors; no repair is attempted.
+    /// Uses the same fixed-buffer verifier as insertion and publication.
+    pub fn verify_at(root: impl AsRef<Path>, hash: ContentHash) -> Result<u64, CasError> {
+        let root = root.as_ref();
+        if !fs::symlink_metadata(root)?.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "CAS root is not a regular directory",
+            )
+            .into());
+        }
+        let hex = hash.to_hex();
+        let shard = root.join(&hex[..2]);
+        if !fs::symlink_metadata(&shard)?.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "CAS shard is not a regular directory",
+            )
+            .into());
+        }
+        let path = shard.join(&hex[2..]);
+        if !fs::symlink_metadata(&path)?.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "CAS blob is not a regular file",
+            )
+            .into());
+        }
+        let mut file = File::open(path)?;
+        if !file.metadata()?.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "CAS blob is not a regular file",
+            )
+            .into());
+        }
         let mut hasher = blake3::Hasher::new();
         let mut buffer = [0u8; 64 * 1024];
         let mut length = 0u64;

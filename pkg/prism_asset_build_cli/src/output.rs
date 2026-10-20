@@ -31,6 +31,9 @@ pub enum CommandResult {
     Why(RebuildExplanationResult),
     Graph(crate::query::GraphResult),
     Diff(crate::query::DiffResult),
+    CacheStatus(crate::cache::CacheStatus),
+    CacheVerify(crate::cache::CacheVerification),
+    CachePrune(crate::cache::CachePrune),
     Help { help: String },
 }
 
@@ -538,6 +541,9 @@ impl CommandResult {
             Self::Help { help } => writeln!(out, "{help}")?,
             Self::Graph(result) => result.write_human(out)?,
             Self::Diff(result) => result.write_human(out)?,
+            Self::CacheStatus(result) => result.write_human(out)?,
+            Self::CacheVerify(result) => result.write_human(out)?,
+            Self::CachePrune(result) => result.write_human(out)?,
         }
         Ok(())
     }
