@@ -21,6 +21,9 @@ use alloc::vec::Vec;
 
 use super::{IterationDomain, Vec3};
 
+const MAX_BUCKET_TABLE_SIZE: u32 = 1 << 20;
+const MAX_PRESSURE_ITERATIONS: u32 = 4096;
+
 /// Live element counts an emitter exposes for domain-sized dispatch.
 ///
 /// A stage's dispatch size is read from the field matching its
@@ -126,14 +129,19 @@ impl NeighborGrid {
     /// every point to the origin cell (a total fallback, not a panic).
     #[must_use]
     pub fn cell_of(p: Vec3, cell_size: f32) -> CellCoord {
-        if cell_size <= 0.0 {
+        if !cell_size.is_finite()
+            || cell_size <= 0.0
+            || !p.x.is_finite()
+            || !p.y.is_finite()
+            || !p.z.is_finite()
+        {
             return CellCoord::new(0, 0, 0);
         }
         let inv = 1.0 / cell_size;
         CellCoord::new(
-            (p.x * inv).floor() as i32,
-            (p.y * inv).floor() as i32,
-            (p.z * inv).floor() as i32,
+            cell_index(p.x * inv),
+            cell_index(p.y * inv),
+            cell_index(p.z * inv),
         )
     }
 
@@ -155,7 +163,7 @@ impl NeighborGrid {
     /// well-formed. Cost is `O(n + table_size)`.
     #[must_use]
     pub fn build(positions: &[Vec3], cell_size: f32, table_size: u32) -> Self {
-        let table_size = table_size.max(1);
+        let table_size = table_size.clamp(1, MAX_BUCKET_TABLE_SIZE);
         let n = positions.len();
         let mut bucket_start = vec![0u32; table_size as usize + 1];
         let mut buckets = Vec::with_capacity(n);
@@ -235,10 +243,13 @@ impl NeighborGrid {
         for dz in -1..=1 {
             for dy in -1..=1 {
                 for dx in -1..=1 {
-                    self.collect_cell(
-                        CellCoord::new(cell.x + dx, cell.y + dy, cell.z + dz),
-                        &mut out,
-                    );
+                    if let (Some(x), Some(y), Some(z)) = (
+                        cell.x.checked_add(dx),
+                        cell.y.checked_add(dy),
+                        cell.z.checked_add(dz),
+                    ) {
+                        self.collect_cell(CellCoord::new(x, y, z), &mut out);
+                    }
                 }
             }
         }
@@ -247,14 +258,43 @@ impl NeighborGrid {
 
     /// Returns the particles within `radius` of `center`.
     ///
-    /// Scans the 27-cell block around `center` and keeps candidates inside the
-    /// radius. When `cell_size >= radius` the block is a superset of the true
-    /// neighborhood, so the result is exact; the query point itself is included
-    /// only if a particle sits on it. `positions` must be the slice the grid was
+    /// Scans every cell that can intersect the radius and keeps candidates
+    /// inside the radius. The result is exact for any positive radius, not only
+    /// when `cell_size >= radius`. `positions` must be the slice the grid was
     /// built from.
     #[must_use]
     pub fn query_ball(&self, positions: &[Vec3], center: Vec3, radius: f32) -> Vec<u32> {
-        let candidates = self.query_cell_block(Self::cell_of(center, self.cell_size));
+        if !center.x.is_finite()
+            || !center.y.is_finite()
+            || !center.z.is_finite()
+            || !radius.is_finite()
+            || radius < 0.0
+        {
+            return Vec::new();
+        }
+        if !self.cell_size.is_finite() || self.cell_size <= 0.0 {
+            return self.all_candidates_within(positions, center, radius);
+        }
+        let span = (radius / self.cell_size).ceil();
+        if !span.is_finite() || span > 64.0 {
+            return self.all_candidates_within(positions, center, radius);
+        }
+        let span = span as i32;
+        let cell = Self::cell_of(center, self.cell_size);
+        let mut candidates = Vec::new();
+        for dz in -span..=span {
+            for dy in -span..=span {
+                for dx in -span..=span {
+                    if let (Some(x), Some(y), Some(z)) = (
+                        cell.x.checked_add(dx),
+                        cell.y.checked_add(dy),
+                        cell.z.checked_add(dz),
+                    ) {
+                        self.collect_cell(CellCoord::new(x, y, z), &mut candidates);
+                    }
+                }
+            }
+        }
         let r2 = radius * radius;
         let mut out = Vec::new();
         for index in candidates {
@@ -265,6 +305,41 @@ impl NeighborGrid {
             }
         }
         out
+    }
+
+    fn all_candidates_within(&self, positions: &[Vec3], center: Vec3, radius: f32) -> Vec<u32> {
+        let r2 = radius * radius;
+        let mut out = Vec::new();
+        for index in 0..self.entries.len() {
+            let particle = self.entries[index] as usize;
+            if let Some(&position) = positions.get(particle)
+                && position.x.is_finite()
+                && position.y.is_finite()
+                && position.z.is_finite()
+                && center.distance_squared(position) <= r2
+            {
+                out.push(self.entries[index]);
+            }
+        }
+        out.sort_unstable();
+        out
+    }
+}
+
+#[inline]
+fn cell_index(value: f32) -> i32 {
+    if !value.is_finite() {
+        return 0;
+    }
+    value.floor().clamp(i32::MIN as f32, i32::MAX as f32) as i32
+}
+
+#[inline]
+fn sanitize_nonnegative(value: f32) -> f32 {
+    if value.is_finite() {
+        value.max(0.0)
+    } else {
+        0.0
     }
 }
 
@@ -292,8 +367,8 @@ impl ParticleConstraint {
         Self {
             a,
             b,
-            rest_length,
-            compliance,
+            rest_length: sanitize_nonnegative(rest_length),
+            compliance: sanitize_nonnegative(compliance),
         }
     }
 }
@@ -347,11 +422,10 @@ impl ConstraintColoring {
 /// particle degree.
 #[must_use]
 pub fn color_particle_constraints(constraints: &[ParticleConstraint]) -> ConstraintColoring {
-    let count = constraints.len();
-    let mut color_of = vec![0usize; count];
     let mut used_particles: Vec<BTreeSet<u32>> = Vec::new();
+    let mut color_constraints: Vec<Vec<ParticleConstraint>> = Vec::new();
 
-    for (i, constraint) in constraints.iter().enumerate() {
+    for constraint in constraints {
         let a = constraint.a;
         let b = constraint.b;
         let mut chosen: Option<usize> = None;
@@ -365,22 +439,19 @@ pub fn color_particle_constraints(constraints: &[ParticleConstraint]) -> Constra
             Some(color) => color,
             None => {
                 used_particles.push(BTreeSet::new());
+                color_constraints.push(Vec::new());
                 used_particles.len() - 1
             }
         };
         used_particles[color].insert(a);
         used_particles[color].insert(b);
-        color_of[i] = color;
+        color_constraints[color].push(*constraint);
     }
 
     let mut coloring = ConstraintColoring::default();
-    for color in 0..used_particles.len() {
+    for constraints in color_constraints {
         let start = coloring.constraints.len() as u32;
-        for (i, constraint) in constraints.iter().enumerate() {
-            if color_of[i] == color {
-                coloring.constraints.push(*constraint);
-            }
-        }
+        coloring.constraints.extend(constraints);
         let len = coloring.constraints.len() as u32 - start;
         coloring.batches.push(ColorBatch { start, len });
     }
@@ -413,7 +484,8 @@ pub enum FluidStage {
 /// solve; the returned order is fixed and deterministic.
 #[must_use]
 pub fn grid_fluid_schedule(pressure_iterations: u32) -> Vec<FluidStage> {
-    let mut stages = Vec::with_capacity(4 + pressure_iterations as usize + 1);
+    let pressure_iterations = pressure_iterations.min(MAX_PRESSURE_ITERATIONS);
+    let mut stages = Vec::with_capacity(5 + pressure_iterations as usize);
     stages.push(FluidStage::AddForces);
     stages.push(FluidStage::Advect);
     stages.push(FluidStage::Diffuse);

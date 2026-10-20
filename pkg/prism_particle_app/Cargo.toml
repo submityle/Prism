@@ -1,0 +1,13 @@
+[package]
+name = "prism_particle_app"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96.0"
+description = "Bevy-free Prism App/ECS bridge for the Ember particle CPU runtime"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+prism_app = { path = "../prism_app" }
+prism_ecs = { path = "../prism_ecs" }
+prism_render_architecture = { path = "../prism_render_architecture" }

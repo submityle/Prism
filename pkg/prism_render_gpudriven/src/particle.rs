@@ -9,10 +9,13 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use prism_render_architecture::particle::indirect_draw::RendererGeometry;
+use prism_render_architecture::particle::renderers::RendererKind;
+use prism_render_architecture::particle::SortStrategy;
 use prism_render_driver as rhi;
 use prism_render_graph::{
     BufferDesc, BufferHandle, CompileError, ImportedBuffer, ImportedTexture, PassFlags,
-    RecordedGraph, RenderGraph, SizeClass, TextureDesc,
+    RecordedGraph, RenderGraph, SizeClass, TextureDesc, TextureHandle,
 };
 use rhi::{
     BindGroupDescriptor, BindGroupId, BindGroupLayoutDescriptor, BindGroupLayoutId,
@@ -26,6 +29,11 @@ use rhi::{
 
 use crate::encoding::IndirectArgs;
 use crate::gpu::{bind_buffer, buffer_entry};
+use renderer_matrix::{
+    ParticleRenderInput, ParticleRendererGpu, ParticleRendererGpuError, ParticleRendererRoute,
+};
+
+pub mod renderer_matrix;
 
 /// Number of bytes in one GPU particle record.
 pub const PARTICLE_STRIDE: u64 = 32;
@@ -376,6 +384,8 @@ pub enum ParticleStageError {
         /// Index of the malformed record in the upload slice.
         index: usize,
     },
+    /// The renderer-matrix GPU stage could not be created.
+    RendererMatrix(ParticleRendererGpuError),
 }
 
 /// Checks a particle stage's fixed resource footprint against device limits.
@@ -647,8 +657,8 @@ pub fn particle_storage_bytes(particles: &[Particle]) -> Vec<u8> {
 mod tests {
     use super::{
         particle_storage_bytes, simulate_cpu, validate_particle_stage_config, Particle,
-        ParticleComputePipelineKind, ParticleParams, ParticlePipelineCache, ParticleStageError,
-        PARTICLE_STRIDE,
+        ParticleComputePipelineKind, ParticleParams, ParticlePipelineCache, ParticleStage,
+        ParticleStageError, PARTICLE_STRIDE,
     };
     use prism_render_driver::{
         Features, Instance, Limits, PipelineLayoutDescriptor, RenderDevice, ShaderModuleDescriptor,
@@ -815,6 +825,22 @@ mod tests {
     }
 
     #[test]
+    fn null_rhi_rejects_particle_stage_without_indirect_draw() {
+        let instance = NullInstance::new();
+        let adapter = instance
+            .request_adapter(&Default::default())
+            .expect("null adapter");
+        let (device, _queue) = instance
+            .create_device(&adapter, &Default::default())
+            .expect("null device");
+        match ParticleStage::new(&device, 8, 32) {
+            Err(ParticleStageError::MissingIndirectDraw) => {}
+            Err(error) => panic!("unexpected null-RHI particle error: {error:?}"),
+            Ok(_) => panic!("null RHI unexpectedly enabled indirect draw"),
+        }
+    }
+
+    #[test]
     fn cpu_reference_updates_kills_and_spawns_into_lowest_free_slots() {
         let pool = [
             Particle::live([1.0, 0.0, 0.0], [0.0; 3], 0.1),
@@ -876,6 +902,8 @@ pub struct ParticleStage {
     render_shader: ShaderModuleId,
     compute_bind_group: BindGroupId,
     render_bind_group: BindGroupId,
+    renderer_render_bind_group: BindGroupId,
+    renderer_matrix: ParticleRendererGpu,
 }
 
 impl ParticleStage {
@@ -888,6 +916,98 @@ impl ParticleStage {
     ) -> Result<Self, ParticleStageError> {
         let mut pipeline_cache = ParticlePipelineCache::new();
         Self::new_with_pipeline_cache(device, capacity, resolution, &mut pipeline_cache)
+    }
+
+    fn validate_pool_and_view(
+        &self,
+        pool: &[Particle],
+        world_min: [f32; 2],
+        world_size: [f32; 2],
+        size: f32,
+    ) -> Result<(), ParticleStageError> {
+        if pool.len() > self.capacity as usize {
+            return Err(ParticleStageError::PoolExceedsCapacity {
+                requested: pool.len(),
+                capacity: self.capacity,
+            });
+        }
+        if !world_min.into_iter().all(f32::is_finite) {
+            return Err(ParticleStageError::InvalidViewParameter("world_min"));
+        }
+        if !world_size.into_iter().all(|v| v.is_finite() && v > 0.0) {
+            return Err(ParticleStageError::InvalidViewParameter("world_size"));
+        }
+        if !size.is_finite() || size < 0.0 {
+            return Err(ParticleStageError::InvalidViewParameter("size"));
+        }
+        for (index, particle) in pool.iter().enumerate() {
+            if !particle.position.into_iter().all(f32::is_finite)
+                || !particle.velocity.into_iter().all(f32::is_finite)
+                || !particle.life.is_finite()
+                || particle.life < 0.0
+                || !particle.padding.is_finite()
+            {
+                return Err(ParticleStageError::InvalidParticleRecord { index });
+            }
+        }
+        Ok(())
+    }
+
+    fn write_frame(
+        &self,
+        queue: &impl RenderQueue,
+        world_min: [f32; 2],
+        world_size: [f32; 2],
+        size: f32,
+    ) {
+        let mut frame_bytes = [0_u8; 48];
+        for (index, value) in [
+            self.resolution as f32,
+            self.resolution as f32,
+            world_min[0],
+            world_min[1],
+            world_size[0],
+            world_size[1],
+            size,
+            0.0,
+            0.15,
+            0.55,
+            1.0,
+            1.0,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            frame_bytes[index * 4..index * 4 + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        queue.write_buffer(self.frame, 0, &frame_bytes);
+    }
+
+    fn write_renderer_inputs(
+        &self,
+        queue: &impl RenderQueue,
+        pool: &[Particle],
+    ) -> Result<(), ParticleStageError> {
+        let inputs: Vec<_> = pool
+            .iter()
+            .enumerate()
+            .map(|(index, particle)| {
+                ParticleRenderInput::new(
+                    particle.position,
+                    particle.padding.max(0.0),
+                    particle.position[2],
+                    index as u32,
+                )
+            })
+            .collect();
+        self.renderer_matrix
+            .set_inputs(
+                queue,
+                &inputs,
+                renderer_matrix::ParticleCullView::unrestricted(),
+            )
+            .map_err(ParticleStageError::RendererMatrix)?;
+        Ok(())
     }
 
     /// Creates a particle stage using a caller-owned reusable pipeline cache.
@@ -914,7 +1034,7 @@ impl ParticleStage {
         let active_indices = device.create_buffer(&BufferDescriptor {
             label: Some(String::from("particle-active-indices")),
             size: u64::from(capacity) * 4,
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
         let control = device.create_buffer(&BufferDescriptor {
@@ -946,6 +1066,18 @@ impl ParticleStage {
             usage: BufferUsages::INDEX | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let renderer_route = ParticleRendererRoute::new(
+            RendererKind::Sprite,
+            SortStrategy::ViewDepthBitonic,
+            RendererGeometry::Sprite {
+                alive_count: capacity,
+                first_instance: 0,
+            },
+        )
+        .map_err(ParticleRendererGpuError::from)
+        .map_err(ParticleStageError::RendererMatrix)?;
+        let renderer_matrix = ParticleRendererGpu::new(device, capacity, renderer_route)
+            .map_err(ParticleStageError::RendererMatrix)?;
         let target = device.create_texture(&rhi::TextureDescriptor::new_2d(
             rhi::Extent3d::new_2d(resolution, resolution),
             TextureFormat::Rgba8Unorm,
@@ -1034,6 +1166,15 @@ impl ParticleStage {
                 bind_buffer(2, active_indices),
             ],
         });
+        let renderer_render_bind_group = device.create_bind_group(&BindGroupDescriptor {
+            label: Some(String::from("particle-renderer-render-bg")),
+            layout: Some(render_bind_group_layout),
+            entries: vec![
+                bind_buffer(0, frame),
+                bind_buffer(1, pool),
+                bind_buffer(2, renderer_matrix.visible_indices()),
+            ],
+        });
 
         Ok(Self {
             capacity,
@@ -1060,6 +1201,8 @@ impl ParticleStage {
             render_shader,
             compute_bind_group,
             render_bind_group,
+            renderer_render_bind_group,
+            renderer_matrix,
         })
     }
 
@@ -1074,56 +1217,317 @@ impl ParticleStage {
         world_size: [f32; 2],
         size: f32,
     ) -> Result<(), ParticleStageError> {
-        if pool.len() > self.capacity as usize {
-            return Err(ParticleStageError::PoolExceedsCapacity {
-                requested: pool.len(),
-                capacity: self.capacity,
-            });
-        }
+        self.validate_pool_and_view(pool, world_min, world_size, size)?;
         params.validate()?;
-        if !world_min.into_iter().all(f32::is_finite) {
-            return Err(ParticleStageError::InvalidViewParameter("world_min"));
-        }
-        if !world_size.into_iter().all(|v| v.is_finite() && v > 0.0) {
-            return Err(ParticleStageError::InvalidViewParameter("world_size"));
-        }
-        if !size.is_finite() || size < 0.0 {
-            return Err(ParticleStageError::InvalidViewParameter("size"));
-        }
-        for (index, particle) in pool.iter().enumerate() {
-            if !particle.position.into_iter().all(f32::is_finite)
-                || !particle.velocity.into_iter().all(f32::is_finite)
-                || !particle.life.is_finite()
-                || particle.life < 0.0
-                || !particle.padding.is_finite()
-            {
-                return Err(ParticleStageError::InvalidParticleRecord { index });
-            }
-        }
-        let mut frame_bytes = Vec::with_capacity(48);
-        for value in [
-            self.resolution as f32,
-            self.resolution as f32,
-            world_min[0],
-            world_min[1],
-            world_size[0],
-            world_size[1],
-            size,
-            0.0,
-            0.15,
-            0.55,
-            1.0,
-            1.0,
-        ] {
-            frame_bytes.extend_from_slice(&value.to_le_bytes());
-        }
         let mut full_pool = vec![Particle::dead(); self.capacity as usize];
         full_pool[..pool.len()].copy_from_slice(pool);
         queue.write_buffer(self.pool, 0, &particle_storage_bytes(&full_pool));
         queue.write_buffer(self.params, 0, &params.to_bytes(self.capacity));
-        queue.write_buffer(self.frame, 0, &frame_bytes);
+        self.write_frame(queue, world_min, world_size, size);
         queue.write_buffer(self.index_buffer, 0, &[0, 0, 1, 0, 2, 0, 3, 0]);
+        self.write_renderer_inputs(queue, pool)?;
         Ok(())
+    }
+
+    /// Uploads a CPU-authoritative live pool for the render-only path.
+    ///
+    /// This method writes the active-index list, active count and indirect
+    /// arguments as well as the pool itself. It is intentionally separate from
+    /// [`Self::upload`]: the latter prepares the GPU simulation inputs, while
+    /// this path must not run a second simulation step over an already
+    /// simulated CPU snapshot.
+    pub fn upload_render_pool(
+        &self,
+        queue: &impl RenderQueue,
+        pool: &[Particle],
+        world_min: [f32; 2],
+        world_size: [f32; 2],
+        size: f32,
+    ) -> Result<(), ParticleStageError> {
+        self.validate_pool_and_view(pool, world_min, world_size, size)?;
+        self.write_frame(queue, world_min, world_size, size);
+        queue.write_buffer(self.pool, 0, &particle_storage_bytes(pool));
+        queue.write_buffer(self.index_buffer, 0, &[0, 0, 1, 0, 2, 0, 3, 0]);
+
+        let mut active_indices = Vec::with_capacity(pool.len() * 4);
+        let mut active_count = 0_u32;
+        for (index, particle) in pool.iter().enumerate() {
+            if particle.life > 0.0 {
+                active_indices.extend_from_slice(&(index as u32).to_le_bytes());
+                active_count = active_count.saturating_add(1);
+            }
+        }
+        let mut control = [0_u8; PARTICLE_CONTROL_BYTES as usize];
+        control[..4].copy_from_slice(&active_count.to_le_bytes());
+        let mut draw_args = [0_u8; IndirectArgs::BYTES as usize];
+        draw_args[..4].copy_from_slice(&PARTICLE_INDEX_COUNT.to_le_bytes());
+        draw_args[4..8].copy_from_slice(&active_count.to_le_bytes());
+        queue.write_buffer(self.active_indices, 0, &active_indices);
+        queue.write_buffer(self.control, 0, &control);
+        queue.write_buffer(self.draw_args, 0, &draw_args);
+        self.write_renderer_inputs(queue, pool)?;
+        Ok(())
+    }
+
+    /// Render-only upload using caller-owned active-index scratch storage.
+    ///
+    /// This is the per-frame path used by the RenderApp bridge; retaining the
+    /// byte vector avoids a heap allocation when the live count is stable.
+    pub fn upload_render_pool_with_scratch(
+        &self,
+        queue: &impl RenderQueue,
+        pool: &[Particle],
+        active_indices: &mut Vec<u8>,
+        world_min: [f32; 2],
+        world_size: [f32; 2],
+        size: f32,
+    ) -> Result<(), ParticleStageError> {
+        self.validate_pool_and_view(pool, world_min, world_size, size)?;
+        self.write_frame(queue, world_min, world_size, size);
+        queue.write_buffer(self.pool, 0, &particle_storage_bytes(pool));
+        queue.write_buffer(self.index_buffer, 0, &[0, 0, 1, 0, 2, 0, 3, 0]);
+        active_indices.clear();
+        let mut active_count = 0_u32;
+        for (index, particle) in pool.iter().enumerate() {
+            if particle.life > 0.0 {
+                active_indices.extend_from_slice(&(index as u32).to_le_bytes());
+                active_count = active_count.saturating_add(1);
+            }
+        }
+        let mut control = [0_u8; PARTICLE_CONTROL_BYTES as usize];
+        control[..4].copy_from_slice(&active_count.to_le_bytes());
+        let mut draw_args = [0_u8; IndirectArgs::BYTES as usize];
+        draw_args[..4].copy_from_slice(&PARTICLE_INDEX_COUNT.to_le_bytes());
+        draw_args[4..8].copy_from_slice(&active_count.to_le_bytes());
+        queue.write_buffer(self.active_indices, 0, active_indices);
+        queue.write_buffer(self.control, 0, &control);
+        queue.write_buffer(self.draw_args, 0, &draw_args);
+        self.write_renderer_inputs(queue, pool)?;
+        Ok(())
+    }
+
+    /// Appends only the raster part of the stage to an existing frame graph.
+    ///
+    /// Use this with [`Self::upload_render_pool`] when the CPU runtime is the
+    /// authoritative simulator. The method does not dispatch reset, simulate,
+    /// spawn or finalize, so a snapshot is rendered exactly once per frame.
+    pub fn append_render_to_graph(
+        &self,
+        graph: &mut RenderGraph,
+        target: TextureHandle,
+    ) -> TextureHandle {
+        let pool = import_buffer(
+            graph,
+            "particle-render-pool",
+            self.pool,
+            u64::from(self.capacity) * PARTICLE_STRIDE,
+            BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+            BufferState::storage_read(PipelineStages::VERTEX_SHADER),
+        );
+        let frame = import_buffer(
+            graph,
+            "particle-render-frame",
+            self.frame,
+            48,
+            BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+            BufferState::copy_dst(),
+        );
+        let renderer_outputs = self
+            .renderer_matrix
+            .append_to_graph(graph)
+            .expect("particle renderer matrix graph admission");
+
+        let render_pipeline = self.render_pipeline;
+        let render_bind_group = self.renderer_render_bind_group;
+        let visible_indices = renderer_outputs.visible_indices;
+        let sprite_args = renderer_outputs.sprite_args;
+        let mut output = target;
+        graph.add_raster_pass("particle-render", PassFlags::SIDE_EFFECT, |builder| {
+            builder.read_uniform(frame);
+            builder.read_storage_buffer(pool);
+            builder.read_storage_buffer(visible_indices);
+            builder.read_indirect(sprite_args);
+            output = builder.color_attachment(output);
+            move |ctx| {
+                ctx.set_render_pipeline(render_pipeline)
+                    .set_render_bind_group(0, render_bind_group, Vec::new())
+                    .draw_indirect(sprite_args, 0);
+            }
+        });
+        output
+    }
+
+    /// Appends this stage to an existing frame graph and rasterizes into the
+    /// supplied color version.
+    ///
+    /// The returned handle is the new SSA version of `target`; callers must
+    /// pass it to the next pass that consumes the frame color. The stage uses
+    /// only imported persistent buffers, so appending it does not allocate a
+    /// second particle pool or an offscreen target. The render pipeline is the
+    /// portable `Rgba8Unorm` vertical-slice pipeline created by this stage.
+    ///
+    /// Resource versions are carried explicitly instead of through the graph
+    /// blackboard. That makes multiple stages composable: one emitter cannot
+    /// overwrite another emitter's blackboard receipt.
+    pub fn append_to_graph(&self, graph: &mut RenderGraph, target: TextureHandle) -> TextureHandle {
+        let pool = import_buffer(
+            graph,
+            "particle-pool",
+            self.pool,
+            u64::from(self.capacity) * PARTICLE_STRIDE,
+            BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+            BufferState::storage_write(PipelineStages::COMPUTE_SHADER),
+        );
+        let active_indices = import_buffer(
+            graph,
+            "particle-active-indices",
+            self.active_indices,
+            u64::from(self.capacity) * 4,
+            BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+            BufferState::storage_write(PipelineStages::COMPUTE_SHADER),
+        );
+        let control = import_buffer(
+            graph,
+            "particle-control",
+            self.control,
+            PARTICLE_CONTROL_BYTES,
+            BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+            BufferState::storage_write(PipelineStages::COMPUTE_SHADER),
+        );
+        let params = import_buffer(
+            graph,
+            "particle-params",
+            self.params,
+            PARTICLE_PARAMS_BYTES,
+            BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+            BufferState::copy_dst(),
+        );
+        let args = import_buffer(
+            graph,
+            "particle-draw-args",
+            self.draw_args,
+            IndirectArgs::BYTES,
+            BufferUsages::STORAGE
+                | BufferUsages::INDIRECT
+                | BufferUsages::COPY_DST
+                | BufferUsages::COPY_SRC,
+            BufferState::storage_write(PipelineStages::COMPUTE_SHADER),
+        );
+        let frame = import_buffer(
+            graph,
+            "particle-frame",
+            self.frame,
+            48,
+            BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+            BufferState::copy_dst(),
+        );
+        let index_buffer = import_buffer(
+            graph,
+            "particle-index",
+            self.index_buffer,
+            8,
+            BufferUsages::INDEX | BufferUsages::COPY_DST,
+            BufferState::copy_dst(),
+        );
+
+        let reset_pipeline = self.reset_pipeline;
+        let reset_bind_group = self.compute_bind_group;
+        let (control_after_reset, args_after_reset) = {
+            let mut control_after_reset = control;
+            let mut args_after_reset = args;
+            graph.add_compute_pass("particle-reset", PassFlags::SIDE_EFFECT, |builder| {
+                control_after_reset = builder.write_storage_buffer(control);
+                args_after_reset = builder.write_storage_buffer(args);
+                move |ctx| {
+                    ctx.set_compute_pipeline(reset_pipeline)
+                        .set_compute_bind_group(0, reset_bind_group, Vec::new())
+                        .dispatch(1, 1, 1);
+                }
+            });
+            (control_after_reset, args_after_reset)
+        };
+
+        let groups = self.capacity.div_ceil(WORKGROUP_SIZE);
+        let compute_pipeline = self.compute_pipeline;
+        let compute_bind_group = self.compute_bind_group;
+        let (pool_after_simulate, active_after_simulate, control_after_simulate) = {
+            let mut pool_after_simulate = pool;
+            let mut active_after_simulate = active_indices;
+            let mut control_after_simulate = control_after_reset;
+            graph.add_compute_pass("particle-simulate", PassFlags::SIDE_EFFECT, |builder| {
+                builder.read_uniform(params);
+                pool_after_simulate = builder.write_storage_buffer(pool);
+                active_after_simulate = builder.write_storage_buffer(active_indices);
+                control_after_simulate = builder.write_storage_buffer(control_after_reset);
+                move |ctx| {
+                    ctx.set_compute_pipeline(compute_pipeline)
+                        .set_compute_bind_group(0, compute_bind_group, Vec::new())
+                        .dispatch(groups, 1, 1);
+                }
+            });
+            (
+                pool_after_simulate,
+                active_after_simulate,
+                control_after_simulate,
+            )
+        };
+
+        let spawn_pipeline = self.spawn_pipeline;
+        let spawn_bind_group = self.compute_bind_group;
+        let (pool_after_spawn, active_after_spawn, control_after_spawn) = {
+            let mut pool_after_spawn = pool_after_simulate;
+            let mut active_after_spawn = active_after_simulate;
+            let mut control_after_spawn = control_after_simulate;
+            graph.add_compute_pass("particle-spawn", PassFlags::SIDE_EFFECT, |builder| {
+                builder.read_uniform(params);
+                pool_after_spawn = builder.write_storage_buffer(pool_after_simulate);
+                active_after_spawn = builder.write_storage_buffer(active_after_simulate);
+                control_after_spawn = builder.write_storage_buffer(control_after_simulate);
+                move |ctx| {
+                    ctx.set_compute_pipeline(spawn_pipeline)
+                        .set_compute_bind_group(0, spawn_bind_group, Vec::new())
+                        .dispatch(groups, 1, 1);
+                }
+            });
+            (pool_after_spawn, active_after_spawn, control_after_spawn)
+        };
+
+        let finalize_pipeline = self.finalize_pipeline;
+        let finalize_bind_group = self.compute_bind_group;
+        let args_after_finalize = {
+            let mut args_after_finalize = args_after_reset;
+            graph.add_compute_pass("particle-finalize", PassFlags::SIDE_EFFECT, |builder| {
+                builder.read_uniform(params);
+                builder.read_storage_buffer(control_after_spawn);
+                args_after_finalize = builder.write_storage_buffer(args_after_reset);
+                move |ctx| {
+                    ctx.set_compute_pipeline(finalize_pipeline)
+                        .set_compute_bind_group(0, finalize_bind_group, Vec::new())
+                        .dispatch(1, 1, 1);
+                }
+            });
+            args_after_finalize
+        };
+
+        let render_pipeline = self.render_pipeline;
+        let render_bind_group = self.render_bind_group;
+        let index_buffer_id = self.index_buffer;
+        let mut output = target;
+        graph.add_raster_pass("particle-draw", PassFlags::SIDE_EFFECT, |builder| {
+            builder.read_uniform(frame);
+            builder.read_storage_buffer(pool_after_spawn);
+            builder.read_storage_buffer(active_after_spawn);
+            builder.read_index(index_buffer);
+            builder.read_indirect(args_after_finalize);
+            output = builder.color_attachment(output);
+            move |ctx| {
+                ctx.set_render_pipeline(render_pipeline)
+                    .set_render_bind_group(0, render_bind_group, Vec::new())
+                    .set_index_buffer(index_buffer_id, IndexFormat::Uint16, 0)
+                    .draw_indexed_indirect(args_after_finalize, 0);
+            }
+        });
+        output
     }
 
     /// Builds the reset, simulation, deterministic spawn, finalize and
@@ -1400,6 +1804,7 @@ impl ParticleStage {
     }
 
     fn destroy_stage_resources(&self, device: &impl RenderDevice) {
+        self.renderer_matrix.destroy(device);
         device.destroy_bind_group(self.compute_bind_group);
         device.destroy_bind_group(self.render_bind_group);
         device.destroy_buffer(self.pool);

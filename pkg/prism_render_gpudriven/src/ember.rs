@@ -14,7 +14,12 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use prism_render_architecture::particle::compiler::{CompiledGraph, PreparedParameterBlock};
+use prism_render_architecture::particle::attributes::{
+    AttributeLayoutPlan, AttributeSemantic, PlannedAttribute,
+};
+use prism_render_architecture::particle::compiler::{
+    AttributeBufferRole, CompiledGraph, PreparedParameterBlock,
+};
 use prism_render_architecture::particle::modules::{ResourceAccess, ResourceDecl, ResourceKind};
 use prism_render_driver as rhi;
 use prism_render_graph::{
@@ -377,7 +382,17 @@ pub enum CompiledGraphGpuExternalUpdate {
 pub enum CompiledGraphGpuError {
     /// The graph supplied to a resident GPU state is not the graph used to
     /// create that state.
-    GraphMismatch,
+    /// The graph passed by a caller is not the graph used to create this
+    /// resident state. Both values are included so stale render extraction is
+    /// diagnosable without relying on object identity.
+    GraphAbiMismatch {
+        /// ABI fingerprint captured when the state was created.
+        expected: CompiledGraphGpuAbiFingerprint,
+        /// ABI fingerprint supplied by the caller.
+        actual: CompiledGraphGpuAbiFingerprint,
+    },
+    /// The caller supplied a malformed compiled graph.
+    InvalidGraphAbi(CompiledGraphGpuAbiError),
     /// Two caller-owned entries claimed one compiled slot.
     DuplicateExternalBinding {
         /// Compiled group index.
@@ -462,6 +477,158 @@ pub enum CompiledGraphGpuError {
         /// Resource category supplied by the caller.
         actual: CompiledGraphGpuExternalKind,
     },
+    /// The device cannot represent the persistent Ember attribute pool.
+    AttributeBufferLimit {
+        /// Attribute semantic whose per-copy binding is too large.
+        semantic: AttributeSemantic,
+        /// Required binding size in bytes.
+        required: u64,
+        /// Device binding-size limit in bytes.
+        limit: u64,
+    },
+    /// The device cannot represent the complete persistent Ember pool.
+    AttributePoolLimit {
+        /// Required allocation size in bytes.
+        required: u64,
+        /// Device allocation-size limit in bytes.
+        limit: u64,
+    },
+    /// The graph uses more bind groups than the device supports.
+    BindGroupLimit {
+        /// Number of bind groups required by the graph.
+        required: u64,
+        /// Device limit.
+        limit: u32,
+    },
+    /// One bind group contains more entries than the device supports.
+    BindingCountLimit {
+        /// Bind-group index.
+        group: u32,
+        /// Number of entries required by the graph.
+        required: u64,
+        /// Device limit.
+        limit: u32,
+    },
+    /// A uniform parameter block exceeds the device binding-size limit.
+    UniformBufferLimit {
+        /// Parameter resource name.
+        resource: String,
+        /// Required binding size.
+        required: u64,
+        /// Device binding-size limit.
+        limit: u64,
+    },
+}
+
+/// A stable fingerprint of every field that participates in the compiled
+/// Ember graph ABI and generated executable.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct CompiledGraphGpuAbiFingerprint(u64);
+
+impl CompiledGraphGpuAbiFingerprint {
+    /// Returns the numeric ABI fingerprint.
+    #[must_use]
+    pub const fn value(self) -> u64 {
+        self.0
+    }
+}
+
+/// A malformed compiled graph rejected before any device or frame-graph work.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CompiledGraphGpuAbiError {
+    /// The generated entry-point, stage-order, and dispatch arrays disagree.
+    EntryPointCountMismatch {
+        /// Number of generated entry points.
+        entry_points: usize,
+        /// Number of stage-order entries.
+        stage_order: usize,
+        /// Number of dispatch records.
+        dispatches: usize,
+    },
+    /// A generated entry point name is empty.
+    EmptyEntryPoint { index: usize },
+    /// Two generated stages use the same entry-point name.
+    DuplicateEntryPoint { index: usize, name: String },
+    /// A dispatch record does not correspond to its scheduled stage.
+    DispatchStageMismatch {
+        /// Dispatch array index.
+        dispatch: usize,
+        /// Stage index expected from the schedule.
+        expected: usize,
+        /// Stage index supplied by the dispatch record.
+        actual: usize,
+    },
+    /// A dispatch record names a different generated entry point.
+    DispatchEntryPointMismatch {
+        /// Dispatch array index.
+        dispatch: usize,
+        /// Generated entry-point name expected at that position.
+        expected: String,
+        /// Name supplied by the dispatch record.
+        actual: String,
+    },
+    /// A stage index cannot be represented by the dispatch-count ABI.
+    DispatchStageIndexOverflow { dispatch: usize },
+    /// Two graph resources claim one group/binding slot.
+    DuplicateBinding { group: u32, binding: u32 },
+    /// A graph resource name is declared at more than one slot.
+    DuplicateResourceName { name: String },
+    /// The reserved dispatch-count binding has the wrong ABI declaration.
+    InvalidDispatchBinding {
+        /// Supplied group index.
+        group: u32,
+        /// Supplied binding index.
+        binding: u32,
+    },
+    /// Dispatch records require the reserved dispatch-count binding.
+    MissingDispatchBinding,
+    /// A planned attribute semantic appears more than once.
+    DuplicateAttributeSemantic { semantic: AttributeSemantic },
+    /// A planned attribute has an invalid number of physical copies.
+    InvalidAttributeCopies {
+        /// Attribute semantic.
+        semantic: AttributeSemantic,
+        /// Supplied copy count.
+        copies: u32,
+    },
+    /// A planned attribute's size/offset metadata disagrees with its format.
+    AttributeLayoutMismatch { semantic: AttributeSemantic },
+    /// The sum of planned ranges does not equal the declared pool size.
+    AttributePoolSizeMismatch { expected: u64, actual: u64 },
+    /// A generated attribute binding has no matching planned allocation.
+    MissingAttributeLayout { semantic: AttributeSemantic },
+    /// A generated attribute binding is not in group zero.
+    AttributeBindingGroup {
+        semantic: AttributeSemantic,
+        group: u32,
+    },
+    /// A generated attribute binding has an incompatible role or multiplicity.
+    AttributeBindingRoleMismatch { semantic: AttributeSemantic },
+    /// A uniform resource has no corresponding parameter block.
+    MissingParameterBlock { resource: String },
+    /// A parameter block has no corresponding uniform resource.
+    UnexpectedParameterBlock { resource: String },
+    /// A parameter resource has more than one parameter block.
+    DuplicateParameterBlock { resource: String },
+    /// A parameter block has an invalid declared payload size.
+    ParameterBlockSizeMismatch {
+        /// Parameter resource name.
+        resource: String,
+        /// Declared block size.
+        expected: usize,
+        /// Default payload size.
+        actual: usize,
+    },
+    /// A parameter field's default payload does not match its type.
+    ParameterFieldSizeMismatch { resource: String, field: String },
+    /// A parameter field lies outside its containing block.
+    ParameterFieldOutOfBounds { resource: String, field: String },
+    /// A parameter field name appears more than once in one block.
+    DuplicateParameterField { resource: String, field: String },
+    /// Checked layout arithmetic overflowed before a GPU allocation.
+    LayoutArithmeticOverflow,
+    /// A runtime attribute binding requests a texture layout for another kind.
+    InvalidTextureBindingKind { group: u32, binding: u32 },
 }
 
 /// A failure while updating compiled parameter buffers.
@@ -558,7 +725,16 @@ impl CompiledGraphGpuGraphBinding {
 pub enum CompiledGraphGraphError {
     /// The graph supplied for recording is not the graph used to create the
     /// resident GPU state.
-    GraphMismatch,
+    /// The graph passed by a caller is not the graph used to create this
+    /// resident state.
+    GraphAbiMismatch {
+        /// ABI fingerprint captured when the state was created.
+        expected: CompiledGraphGpuAbiFingerprint,
+        /// ABI fingerprint supplied by the caller.
+        actual: CompiledGraphGpuAbiFingerprint,
+    },
+    /// The caller supplied a malformed compiled graph.
+    InvalidGraphAbi(CompiledGraphGpuAbiError),
     /// A graph resource was supplied more than once for one binding slot.
     DuplicateBinding { group: u32, binding: u32 },
     /// A compiled non-uniform binding has no graph handle.
@@ -612,6 +788,8 @@ pub enum CompiledGraphGraphError {
         /// Compiled binding index.
         binding: u32,
     },
+    /// A caller-provided external-resource import descriptor was rejected.
+    ExternalImport(CompiledGraphGpuImportError),
 }
 
 /// A failure while updating the compiled graph's persistent attribute pool.
@@ -623,6 +801,9 @@ pub enum AttributeUploadError {
         size: usize,
         capacity: u64,
     },
+    /// The resident state no longer contains the layout needed to translate
+    /// a logical upload into its aligned physical pool range.
+    InvalidLayout { semantic: AttributeSemantic },
 }
 
 struct ParameterBuffer {
@@ -642,6 +823,8 @@ struct ResolvedEntry {
 /// GPU resources and pipelines for one compiled Ember graph.
 pub struct CompiledGraphGpuState {
     compiled_graph: CompiledGraph,
+    graph_abi_fingerprint: CompiledGraphGpuAbiFingerprint,
+    attribute_layout: AttributeLayoutPlan,
     shader: ShaderModuleId,
     pipeline_layout: PipelineLayoutId,
     bind_group_layouts: Vec<BindGroupLayoutId>,
@@ -663,16 +846,76 @@ impl CompiledGraphGpuState {
         graph: &CompiledGraph,
         registry: &CompiledGraphGpuResourceRegistry,
     ) -> Result<Self, CompiledGraphGpuError> {
+        validate_compiled_graph_abi(graph).map_err(CompiledGraphGpuError::InvalidGraphAbi)?;
         let external_bindings = validate_external_registry(graph, registry)?;
-        validate_parameter_blocks(graph)?;
 
-        let group_count = max_group(graph).map_or(0, |group| group as usize + 1);
-        let attribute_pool_size = graph.attribute_layout.total_bytes;
+        let limits = device.capabilities().limits;
+        let attribute_layout = aligned_attribute_layout(
+            &graph.attribute_layout,
+            u64::from(limits.min_storage_buffer_offset_alignment),
+        )
+        .map_err(CompiledGraphGpuError::InvalidGraphAbi)?;
+        let group_count = max_group(graph).map_or(0, |group| group as u64 + 1);
+        if group_count > u64::from(limits.max_bind_groups) {
+            return Err(CompiledGraphGpuError::BindGroupLimit {
+                required: group_count,
+                limit: limits.max_bind_groups,
+            });
+        }
+        for group in 0..group_count as u32 {
+            let required = graph
+                .attribute_bindings
+                .iter()
+                .filter(|binding| binding.group == group)
+                .count()
+                + graph
+                    .bindings
+                    .iter()
+                    .filter(|binding| binding.group == group)
+                    .count();
+            if required as u64 > u64::from(limits.max_bindings_per_bind_group) {
+                return Err(CompiledGraphGpuError::BindingCountLimit {
+                    group,
+                    required: required as u64,
+                    limit: limits.max_bindings_per_bind_group,
+                });
+            }
+        }
+        for attribute in &attribute_layout.attributes {
+            let per_copy = attribute.byte_size / u64::from(attribute.copies);
+            if per_copy > limits.max_storage_buffer_binding_size {
+                return Err(CompiledGraphGpuError::AttributeBufferLimit {
+                    semantic: attribute.semantic,
+                    required: per_copy,
+                    limit: limits.max_storage_buffer_binding_size,
+                });
+            }
+        }
+        if attribute_layout.total_bytes > limits.max_buffer_size {
+            return Err(CompiledGraphGpuError::AttributePoolLimit {
+                required: attribute_layout.total_bytes,
+                limit: limits.max_buffer_size,
+            });
+        }
+        for block in &graph.parameter_blocks {
+            if u64::from(block.size) > limits.max_uniform_buffer_binding_size {
+                return Err(CompiledGraphGpuError::UniformBufferLimit {
+                    resource: block.resource.clone(),
+                    required: u64::from(block.size),
+                    limit: limits.max_uniform_buffer_binding_size,
+                });
+            }
+        }
+
+        let group_count = group_count as usize;
+        let attribute_pool_size = attribute_layout.total_bytes;
         let attribute_pool = (attribute_pool_size != 0).then(|| {
             device.create_buffer(&BufferDescriptor {
                 label: Some(String::from("ember-attribute-pool")),
                 size: attribute_pool_size,
-                usage: BufferUsages::STORAGE.union(BufferUsages::COPY_DST),
+                usage: BufferUsages::STORAGE
+                    .union(BufferUsages::COPY_DST)
+                    .union(BufferUsages::COPY_SRC),
                 mapped_at_creation: false,
             })
         });
@@ -726,6 +969,7 @@ impl CompiledGraphGpuState {
                 &parameter_buffers,
                 dispatch_counts,
                 attribute_pool,
+                &attribute_layout,
                 0,
                 group,
             )?;
@@ -748,6 +992,7 @@ impl CompiledGraphGpuState {
                     &parameter_buffers,
                     dispatch_counts,
                     attribute_pool,
+                    &attribute_layout,
                     frame_index,
                     group,
                 )?;
@@ -790,6 +1035,8 @@ impl CompiledGraphGpuState {
 
         Ok(Self {
             compiled_graph: graph.clone(),
+            graph_abi_fingerprint: compiled_graph_abi_fingerprint(graph),
+            attribute_layout,
             shader,
             pipeline_layout,
             bind_group_layouts,
@@ -982,15 +1229,26 @@ impl CompiledGraphGpuState {
         graph: &CompiledGraph,
         registry: &CompiledGraphGpuResourceRegistry,
     ) -> Result<CompiledGraphGpuExternalUpdate, CompiledGraphGpuError> {
-        if &self.compiled_graph != graph {
-            return Err(CompiledGraphGpuError::GraphMismatch);
+        validate_compiled_graph_abi(graph).map_err(CompiledGraphGpuError::InvalidGraphAbi)?;
+        let actual_fingerprint = compiled_graph_abi_fingerprint(graph);
+        if actual_fingerprint != self.graph_abi_fingerprint || &self.compiled_graph != graph {
+            return Err(CompiledGraphGpuError::GraphAbiMismatch {
+                expected: self.graph_abi_fingerprint,
+                actual: actual_fingerprint,
+            });
         }
         let next_bindings = validate_external_registry(graph, registry)?;
         for current in &self.external_bindings {
-            let next = next_bindings
+            let Some(next) = next_bindings
                 .iter()
                 .find(|binding| binding.slot == current.slot)
-                .expect("validated external registry contains every resident slot");
+            else {
+                return Err(CompiledGraphGpuError::MissingExternalBinding {
+                    group: current.slot.group,
+                    binding: current.slot.binding,
+                    name: String::from("resident external binding"),
+                });
+            };
             if next.revision < current.revision {
                 return Err(CompiledGraphGpuError::StaleExternalRevision {
                     group: current.slot.group,
@@ -1017,6 +1275,7 @@ impl CompiledGraphGpuState {
                     &self.parameter_buffers,
                     self.dispatch_counts,
                     self.attribute_pool,
+                    &self.attribute_layout,
                     frame_index,
                     group,
                 )?;
@@ -1183,21 +1442,47 @@ impl CompiledGraphGpuState {
         offset: u64,
         bytes: &[u8],
     ) -> Result<(), AttributeUploadError> {
+        let logical_capacity = self.compiled_graph.attribute_layout.total_bytes;
         let end = offset.saturating_add(bytes.len() as u64);
-        if end > self.attribute_pool_size {
+        if end > logical_capacity {
             return Err(AttributeUploadError::OutOfBounds {
                 offset,
                 size: bytes.len(),
-                capacity: self.attribute_pool_size,
+                capacity: logical_capacity,
             });
         }
         if let Some(buffer) = self.attribute_pool {
-            queue.write_buffer(buffer, offset, bytes);
+            let end = offset + bytes.len() as u64;
+            let logical = &self.compiled_graph.attribute_layout;
+            for planned in &logical.attributes {
+                let logical_per_copy = u64::from(planned.stride) * u64::from(logical.capacity);
+                let Some(aligned) = self.attribute_layout.get(planned.semantic) else {
+                    return Err(AttributeUploadError::InvalidLayout {
+                        semantic: planned.semantic,
+                    });
+                };
+                let physical_per_copy = aligned.byte_size / u64::from(aligned.copies);
+                for copy in 0..planned.copies {
+                    let logical_start = planned.byte_offset + u64::from(copy) * logical_per_copy;
+                    let logical_end = logical_start + logical_per_copy;
+                    let overlap_start = offset.max(logical_start);
+                    let overlap_end = end.min(logical_end);
+                    if overlap_start >= overlap_end {
+                        continue;
+                    }
+                    let source_start = (overlap_start - offset) as usize;
+                    let source_end = (overlap_end - offset) as usize;
+                    let destination = aligned.byte_offset
+                        + u64::from(copy) * physical_per_copy
+                        + (overlap_start - logical_start);
+                    queue.write_buffer(buffer, destination, &bytes[source_start..source_end]);
+                }
+            }
         } else if !bytes.is_empty() {
             return Err(AttributeUploadError::OutOfBounds {
                 offset,
                 size: bytes.len(),
-                capacity: 0,
+                capacity: logical_capacity,
             });
         }
         Ok(())
@@ -1230,8 +1515,15 @@ impl CompiledGraphGpuState {
         stage_counts: &[u32],
         frame_index: u64,
     ) -> Result<(), CompiledGraphGraphError> {
-        if &self.compiled_graph != compiled {
-            return Err(CompiledGraphGraphError::GraphMismatch);
+        if let Err(error) = validate_compiled_graph_abi(compiled) {
+            return Err(CompiledGraphGraphError::InvalidGraphAbi(error));
+        }
+        let actual_fingerprint = compiled_graph_abi_fingerprint(compiled);
+        if actual_fingerprint != self.graph_abi_fingerprint || &self.compiled_graph != compiled {
+            return Err(CompiledGraphGraphError::GraphAbiMismatch {
+                expected: self.graph_abi_fingerprint,
+                actual: actual_fingerprint,
+            });
         }
         if self.compute_pipelines.len() != compiled.dispatches.len() {
             return Err(CompiledGraphGraphError::PipelineCountMismatch {
@@ -1634,32 +1926,572 @@ fn validate_external_resource_kind(
     })
 }
 
-fn validate_parameter_blocks(graph: &CompiledGraph) -> Result<(), CompiledGraphGpuError> {
+fn aligned_attribute_layout(
+    layout: &AttributeLayoutPlan,
+    alignment: u64,
+) -> Result<AttributeLayoutPlan, CompiledGraphGpuAbiError> {
+    let alignment = alignment.max(1);
+    let mut attributes = Vec::with_capacity(layout.attributes.len());
+    let mut offset = 0u64;
+    for attribute in &layout.attributes {
+        let logical_per_copy = u64::from(attribute.stride) * u64::from(layout.capacity);
+        let physical_per_copy = align_up(logical_per_copy, alignment)
+            .ok_or(CompiledGraphGpuAbiError::LayoutArithmeticOverflow)?;
+        offset = align_up(offset, alignment)
+            .ok_or(CompiledGraphGpuAbiError::LayoutArithmeticOverflow)?;
+        let byte_size = physical_per_copy
+            .checked_mul(u64::from(attribute.copies))
+            .ok_or(CompiledGraphGpuAbiError::LayoutArithmeticOverflow)?;
+        attributes.push(PlannedAttribute {
+            semantic: attribute.semantic,
+            format: attribute.format,
+            stride: attribute.stride,
+            copies: attribute.copies,
+            byte_offset: offset,
+            byte_size,
+        });
+        offset = offset
+            .checked_add(byte_size)
+            .ok_or(CompiledGraphGpuAbiError::LayoutArithmeticOverflow)?;
+    }
+    Ok(AttributeLayoutPlan {
+        capacity: layout.capacity,
+        attributes,
+        total_bytes: offset,
+    })
+}
+
+const fn align_up(value: u64, alignment: u64) -> Option<u64> {
+    let remainder = value % alignment;
+    if remainder == 0 {
+        Some(value)
+    } else {
+        value.checked_add(alignment - remainder)
+    }
+}
+
+fn validate_compiled_graph_abi(graph: &CompiledGraph) -> Result<(), CompiledGraphGpuAbiError> {
+    if graph.entry_points.len() != graph.stage_order.len()
+        || graph.entry_points.len() != graph.dispatches.len()
+    {
+        return Err(CompiledGraphGpuAbiError::EntryPointCountMismatch {
+            entry_points: graph.entry_points.len(),
+            stage_order: graph.stage_order.len(),
+            dispatches: graph.dispatches.len(),
+        });
+    }
+
+    for (index, entry_point) in graph.entry_points.iter().enumerate() {
+        if entry_point.is_empty() {
+            return Err(CompiledGraphGpuAbiError::EmptyEntryPoint { index });
+        }
+        if graph.entry_points[..index]
+            .iter()
+            .any(|previous| previous == entry_point)
+        {
+            return Err(CompiledGraphGpuAbiError::DuplicateEntryPoint {
+                index,
+                name: entry_point.clone(),
+            });
+        }
+        let dispatch = &graph.dispatches[index];
+        if dispatch.stage_index != graph.stage_order[index] {
+            return Err(CompiledGraphGpuAbiError::DispatchStageMismatch {
+                dispatch: index,
+                expected: graph.stage_order[index],
+                actual: dispatch.stage_index,
+            });
+        }
+        if dispatch.entry_point != *entry_point {
+            return Err(CompiledGraphGpuAbiError::DispatchEntryPointMismatch {
+                dispatch: index,
+                expected: entry_point.clone(),
+                actual: dispatch.entry_point.clone(),
+            });
+        }
+        if dispatch.stage_index == usize::MAX {
+            return Err(CompiledGraphGpuAbiError::DispatchStageIndexOverflow { dispatch: index });
+        }
+    }
+    for (index, stage_index) in graph.stage_order.iter().copied().enumerate() {
+        if graph.stage_order[..index]
+            .iter()
+            .any(|previous| *previous == stage_index)
+        {
+            return Err(CompiledGraphGpuAbiError::DispatchStageMismatch {
+                dispatch: index,
+                expected: stage_index,
+                actual: stage_index,
+            });
+        }
+    }
+
+    let mut slots = Vec::with_capacity(
+        graph
+            .bindings
+            .len()
+            .saturating_add(graph.attribute_bindings.len()),
+    );
+    let mut resource_names: Vec<&str> = Vec::with_capacity(graph.bindings.len());
+    let mut dispatch_binding = None;
+    for binding in &graph.bindings {
+        if slots.contains(&(binding.group, binding.binding)) {
+            return Err(CompiledGraphGpuAbiError::DuplicateBinding {
+                group: binding.group,
+                binding: binding.binding,
+            });
+        }
+        slots.push((binding.group, binding.binding));
+        if resource_names.contains(&binding.name) {
+            return Err(CompiledGraphGpuAbiError::DuplicateResourceName {
+                name: String::from(binding.name),
+            });
+        }
+        resource_names.push(binding.name);
+        if binding.name == "ember_dispatch_counts" {
+            if dispatch_binding.is_some()
+                || binding.group != 1
+                || binding.binding != 0
+                || binding.kind != ResourceKind::StorageBuffer
+                || binding.access != ResourceAccess::ReadOnly
+            {
+                return Err(CompiledGraphGpuAbiError::InvalidDispatchBinding {
+                    group: binding.group,
+                    binding: binding.binding,
+                });
+            }
+            dispatch_binding = Some(binding);
+        }
+    }
+    if !graph.dispatches.is_empty() && dispatch_binding.is_none() {
+        return Err(CompiledGraphGpuAbiError::MissingDispatchBinding);
+    }
+    if graph.dispatches.is_empty() && dispatch_binding.is_some() {
+        return Err(CompiledGraphGpuAbiError::InvalidDispatchBinding {
+            group: 1,
+            binding: 0,
+        });
+    }
+
+    validate_attribute_layout(&graph.attribute_layout)?;
+    for attribute in &graph.attribute_bindings {
+        if attribute.group != 0 {
+            return Err(CompiledGraphGpuAbiError::AttributeBindingGroup {
+                semantic: attribute.semantic,
+                group: attribute.group,
+            });
+        }
+        if slots.contains(&(attribute.group, attribute.binding)) {
+            return Err(CompiledGraphGpuAbiError::DuplicateBinding {
+                group: attribute.group,
+                binding: attribute.binding,
+            });
+        }
+        slots.push((attribute.group, attribute.binding));
+        let Some(planned) = graph.attribute_layout.get(attribute.semantic) else {
+            return Err(CompiledGraphGpuAbiError::MissingAttributeLayout {
+                semantic: attribute.semantic,
+            });
+        };
+        if planned.format != attribute.format {
+            return Err(CompiledGraphGpuAbiError::AttributeLayoutMismatch {
+                semantic: attribute.semantic,
+            });
+        }
+        let role_is_valid = match (planned.copies, attribute.role) {
+            (1, AttributeBufferRole::Single) => true,
+            (2, AttributeBufferRole::Previous | AttributeBufferRole::Current) => true,
+            _ => false,
+        };
+        if !role_is_valid {
+            return Err(CompiledGraphGpuAbiError::AttributeBindingRoleMismatch {
+                semantic: attribute.semantic,
+            });
+        }
+        let same_semantic = graph
+            .attribute_bindings
+            .iter()
+            .filter(|other| other.semantic == attribute.semantic);
+        let role_count = same_semantic
+            .clone()
+            .filter(|other| other.role == attribute.role)
+            .count();
+        if role_count > 1 {
+            return Err(CompiledGraphGpuAbiError::AttributeBindingRoleMismatch {
+                semantic: attribute.semantic,
+            });
+        }
+    }
+    for planned in &graph.attribute_layout.attributes {
+        let bindings: Vec<_> = graph
+            .attribute_bindings
+            .iter()
+            .filter(|binding| binding.semantic == planned.semantic)
+            .collect();
+        let valid = match planned.copies {
+            1 => bindings.len() == 1 && bindings[0].role == AttributeBufferRole::Single,
+            2 => {
+                bindings.len() == 2
+                    && bindings
+                        .iter()
+                        .filter(|binding| binding.role == AttributeBufferRole::Previous)
+                        .count()
+                        == 1
+                    && bindings
+                        .iter()
+                        .filter(|binding| binding.role == AttributeBufferRole::Current)
+                        .count()
+                        == 1
+            }
+            _ => false,
+        };
+        if !valid {
+            return Err(CompiledGraphGpuAbiError::AttributeBindingRoleMismatch {
+                semantic: planned.semantic,
+            });
+        }
+    }
+
+    validate_parameter_blocks(graph)
+}
+
+fn validate_attribute_layout(layout: &AttributeLayoutPlan) -> Result<(), CompiledGraphGpuAbiError> {
+    let mut expected_offset = 0u64;
+    for (index, attribute) in layout.attributes.iter().enumerate() {
+        if layout.attributes[..index]
+            .iter()
+            .any(|previous| previous.semantic == attribute.semantic)
+        {
+            return Err(CompiledGraphGpuAbiError::DuplicateAttributeSemantic {
+                semantic: attribute.semantic,
+            });
+        }
+        if attribute.copies != 1 && attribute.copies != 2 {
+            return Err(CompiledGraphGpuAbiError::InvalidAttributeCopies {
+                semantic: attribute.semantic,
+                copies: attribute.copies,
+            });
+        }
+        let expected_stride = attribute.format.std430_stride();
+        let expected_per_copy = u64::from(expected_stride)
+            .checked_mul(u64::from(layout.capacity))
+            .ok_or(CompiledGraphGpuAbiError::LayoutArithmeticOverflow)?;
+        let expected_size = expected_per_copy
+            .checked_mul(u64::from(attribute.copies))
+            .ok_or(CompiledGraphGpuAbiError::LayoutArithmeticOverflow)?;
+        let expected_end = attribute
+            .byte_offset
+            .checked_add(expected_size)
+            .ok_or(CompiledGraphGpuAbiError::LayoutArithmeticOverflow)?;
+        if attribute.stride != expected_stride
+            || attribute.byte_size != expected_size
+            || attribute.byte_offset != expected_offset
+        {
+            return Err(CompiledGraphGpuAbiError::AttributeLayoutMismatch {
+                semantic: attribute.semantic,
+            });
+        }
+        expected_offset = expected_end;
+    }
+    if layout.total_bytes != expected_offset {
+        return Err(CompiledGraphGpuAbiError::AttributePoolSizeMismatch {
+            expected: expected_offset,
+            actual: layout.total_bytes,
+        });
+    }
+    Ok(())
+}
+
+fn validate_parameter_blocks(graph: &CompiledGraph) -> Result<(), CompiledGraphGpuAbiError> {
+    for (index, block) in graph.parameter_blocks.iter().enumerate() {
+        if graph.parameter_blocks[..index]
+            .iter()
+            .any(|previous| previous.resource == block.resource)
+        {
+            return Err(CompiledGraphGpuAbiError::DuplicateParameterBlock {
+                resource: block.resource.clone(),
+            });
+        }
+        if block.size == 0 || block.default_bytes.len() != block.size as usize {
+            return Err(CompiledGraphGpuAbiError::ParameterBlockSizeMismatch {
+                resource: block.resource.clone(),
+                expected: block.size as usize,
+                actual: block.default_bytes.len(),
+            });
+        }
+        for (field_index, field) in block.fields.iter().enumerate() {
+            if block.fields[..field_index]
+                .iter()
+                .any(|previous| previous.name == field.name)
+            {
+                return Err(CompiledGraphGpuAbiError::DuplicateParameterField {
+                    resource: block.resource.clone(),
+                    field: field.name.clone(),
+                });
+            }
+            if field.default_bytes.len() != field.ty.size() as usize {
+                return Err(CompiledGraphGpuAbiError::ParameterFieldSizeMismatch {
+                    resource: block.resource.clone(),
+                    field: field.name.clone(),
+                });
+            }
+            let Some(end) = field.offset.checked_add(field.ty.size()) else {
+                return Err(CompiledGraphGpuAbiError::ParameterFieldOutOfBounds {
+                    resource: block.resource.clone(),
+                    field: field.name.clone(),
+                });
+            };
+            if end > block.size {
+                return Err(CompiledGraphGpuAbiError::ParameterFieldOutOfBounds {
+                    resource: block.resource.clone(),
+                    field: field.name.clone(),
+                });
+            }
+        }
+        let Some(binding) = graph.bindings.iter().find(|binding| {
+            binding.kind == ResourceKind::Uniform
+                && binding.name == block.resource
+                && binding.group == block.group
+                && binding.binding == block.binding
+        }) else {
+            return Err(CompiledGraphGpuAbiError::UnexpectedParameterBlock {
+                resource: block.resource.clone(),
+            });
+        };
+        let _ = binding;
+    }
     for binding in graph
         .bindings
         .iter()
         .filter(|binding| binding.kind == ResourceKind::Uniform)
     {
-        let Some(block) = graph.parameter_blocks.iter().find(|block| {
-            block.resource == binding.name
-                && block.group == binding.group
-                && block.binding == binding.binding
-        }) else {
-            return Err(CompiledGraphGpuError::MissingParameterBlock {
-                group: binding.group,
-                binding: binding.binding,
-                name: String::from(binding.name),
+        let matches = graph
+            .parameter_blocks
+            .iter()
+            .filter(|block| {
+                block.resource == binding.name
+                    && block.group == binding.group
+                    && block.binding == binding.binding
+            })
+            .count();
+        if matches == 0 {
+            return Err(CompiledGraphGpuAbiError::MissingParameterBlock {
+                resource: String::from(binding.name),
             });
-        };
-        if block.size == 0 {
-            return Err(CompiledGraphGpuError::MissingParameterBlock {
-                group: binding.group,
-                binding: binding.binding,
-                name: String::from(binding.name),
+        }
+        if matches > 1 {
+            return Err(CompiledGraphGpuAbiError::DuplicateParameterBlock {
+                resource: String::from(binding.name),
+            });
+        }
+    }
+    for block in &graph.parameter_blocks {
+        if !graph.bindings.iter().any(|binding| {
+            binding.kind == ResourceKind::Uniform
+                && binding.name == block.resource
+                && binding.group == block.group
+                && binding.binding == block.binding
+        }) {
+            return Err(CompiledGraphGpuAbiError::UnexpectedParameterBlock {
+                resource: block.resource.clone(),
             });
         }
     }
     Ok(())
+}
+
+fn compiled_graph_abi_fingerprint(graph: &CompiledGraph) -> CompiledGraphGpuAbiFingerprint {
+    let mut hasher = FingerprintHasher::new();
+    hasher.str_value(&graph.source);
+    hasher.usize(graph.stage_order.len());
+    for value in &graph.stage_order {
+        hasher.usize(*value);
+    }
+    hasher.usize(graph.entry_points.len());
+    for value in &graph.entry_points {
+        hasher.str_value(value);
+    }
+    hasher.usize(graph.dispatches.len());
+    for dispatch in &graph.dispatches {
+        hasher.usize(dispatch.stage_index);
+        hasher.iteration_domain(dispatch.domain);
+        hasher.u32(dispatch.default_count);
+        hasher.u32(dispatch.iterations);
+        hasher.str_value(&dispatch.entry_point);
+    }
+    hasher.usize(graph.bindings.len());
+    for binding in &graph.bindings {
+        hasher.str_value(binding.name);
+        hasher.resource_kind(binding.kind);
+        hasher.resource_access(binding.access);
+        hasher.attribute_format(binding.format);
+        hasher.u32(binding.group);
+        hasher.u32(binding.binding);
+    }
+    hasher.usize(graph.parameter_blocks.len());
+    for block in &graph.parameter_blocks {
+        hasher.str_value(&block.resource);
+        hasher.u32(block.group);
+        hasher.u32(block.binding);
+        hasher.u32(block.size);
+        hasher.bytes(&block.default_bytes);
+        hasher.usize(block.fields.len());
+        for field in &block.fields {
+            hasher.str_value(&field.name);
+            hasher.parameter_type(field.ty);
+            hasher.u32(field.offset);
+            hasher.bytes(&field.default_bytes);
+        }
+    }
+    hasher.u32(graph.attribute_layout.capacity);
+    hasher.usize(graph.attribute_layout.attributes.len());
+    for attribute in &graph.attribute_layout.attributes {
+        hasher.attribute_semantic(attribute.semantic);
+        hasher.attribute_format(attribute.format);
+        hasher.u32(attribute.stride);
+        hasher.u32(attribute.copies);
+        hasher.u64(attribute.byte_offset);
+        hasher.u64(attribute.byte_size);
+    }
+    hasher.u64(graph.attribute_layout.total_bytes);
+    hasher.usize(graph.attribute_bindings.len());
+    for binding in &graph.attribute_bindings {
+        hasher.attribute_semantic(binding.semantic);
+        hasher.attribute_format(binding.format);
+        hasher.attribute_buffer_role(binding.role);
+        hasher.str_value(&binding.name);
+        hasher.u32(binding.group);
+        hasher.u32(binding.binding);
+        hasher.resource_access(binding.access);
+    }
+    CompiledGraphGpuAbiFingerprint(hasher.finish())
+}
+
+struct FingerprintHasher {
+    state: u64,
+}
+
+impl FingerprintHasher {
+    const OFFSET: u64 = 14_695_981_039_346_656_037;
+    const PRIME: u64 = 1_099_511_628_211;
+
+    const fn new() -> Self {
+        Self {
+            state: Self::OFFSET,
+        }
+    }
+
+    fn byte(&mut self, value: u8) {
+        self.state ^= u64::from(value);
+        self.state = self.state.wrapping_mul(Self::PRIME);
+    }
+
+    fn raw_bytes(&mut self, values: &[u8]) {
+        for value in values {
+            self.byte(*value);
+        }
+    }
+
+    fn bytes(&mut self, values: &[u8]) {
+        self.raw_bytes(&(values.len() as u64).to_le_bytes());
+        self.raw_bytes(values);
+    }
+
+    fn u32(&mut self, value: u32) {
+        self.raw_bytes(&value.to_le_bytes());
+    }
+
+    fn u64(&mut self, value: u64) {
+        self.raw_bytes(&value.to_le_bytes());
+    }
+
+    fn usize(&mut self, value: usize) {
+        self.u64(value as u64);
+    }
+
+    fn str_value(&mut self, value: &str) {
+        self.bytes(value.as_bytes());
+    }
+
+    fn attribute_semantic(&mut self, value: AttributeSemantic) {
+        match value {
+            AttributeSemantic::Custom(id) => {
+                self.byte(19);
+                self.u32(id);
+            }
+            other => self.byte(other.ordinal() as u8),
+        }
+    }
+
+    fn attribute_format(
+        &mut self,
+        value: prism_render_architecture::particle::attributes::AttributeFormat,
+    ) {
+        self.byte(match value {
+            prism_render_architecture::particle::attributes::AttributeFormat::F32 => 0,
+            prism_render_architecture::particle::attributes::AttributeFormat::U32 => 1,
+            prism_render_architecture::particle::attributes::AttributeFormat::Vec2 => 2,
+            prism_render_architecture::particle::attributes::AttributeFormat::Vec3 => 3,
+            prism_render_architecture::particle::attributes::AttributeFormat::Vec4 => 4,
+        });
+    }
+
+    fn resource_kind(&mut self, value: ResourceKind) {
+        self.byte(match value {
+            ResourceKind::Uniform => 0,
+            ResourceKind::Curve => 1,
+            ResourceKind::Texture2d => 2,
+            ResourceKind::Texture3d => 3,
+            ResourceKind::StorageBuffer => 4,
+        });
+    }
+
+    fn resource_access(&mut self, value: ResourceAccess) {
+        self.byte(match value {
+            ResourceAccess::ReadOnly => 0,
+            ResourceAccess::ReadWrite => 1,
+        });
+    }
+
+    fn parameter_type(
+        &mut self,
+        value: prism_render_architecture::particle::modules::ParameterType,
+    ) {
+        self.byte(match value {
+            prism_render_architecture::particle::modules::ParameterType::F32 => 0,
+            prism_render_architecture::particle::modules::ParameterType::U32 => 1,
+            prism_render_architecture::particle::modules::ParameterType::I32 => 2,
+            prism_render_architecture::particle::modules::ParameterType::Vec2 => 3,
+            prism_render_architecture::particle::modules::ParameterType::Vec3 => 4,
+            prism_render_architecture::particle::modules::ParameterType::Vec4 => 5,
+        });
+    }
+
+    fn attribute_buffer_role(&mut self, value: AttributeBufferRole) {
+        self.byte(match value {
+            AttributeBufferRole::Single => 0,
+            AttributeBufferRole::Previous => 1,
+            AttributeBufferRole::Current => 2,
+        });
+    }
+
+    fn iteration_domain(&mut self, value: prism_render_architecture::particle::IterationDomain) {
+        match value {
+            prism_render_architecture::particle::IterationDomain::PerParticle => self.byte(0),
+            prism_render_architecture::particle::IterationDomain::PerNeighborCell => self.byte(1),
+            prism_render_architecture::particle::IterationDomain::PerGridVoxel => self.byte(2),
+            prism_render_architecture::particle::IterationDomain::PerConstraint => self.byte(3),
+            prism_render_architecture::particle::IterationDomain::PerEvent => self.byte(4),
+            prism_render_architecture::particle::IterationDomain::Custom(value) => {
+                self.byte(5);
+                self.u32(value);
+            }
+        }
+    }
+
+    const fn finish(self) -> u64 {
+        self.state
+    }
 }
 
 fn group_entries(
@@ -1668,6 +2500,7 @@ fn group_entries(
     parameter_buffers: &[ParameterBuffer],
     dispatch_counts: Option<BufferId>,
     attribute_pool: Option<BufferId>,
+    attribute_layout: &AttributeLayoutPlan,
     frame_index: u64,
     group: u32,
 ) -> Result<Vec<ResolvedEntry>, CompiledGraphGpuError> {
@@ -1677,14 +2510,24 @@ fn group_entries(
         .iter()
         .filter(|binding| binding.group == group)
     {
-        let pool = attribute_pool.expect("compiled attribute layout owns the SoA pool");
-        let planned = graph
-            .attribute_layout
-            .get(attribute.semantic)
-            .expect("compiled attribute binding has a planned layout");
-        let per_copy = u64::from(planned.stride) * u64::from(graph.attribute_layout.capacity);
+        let Some(pool) = attribute_pool else {
+            return Err(CompiledGraphGpuError::InvalidGraphAbi(
+                CompiledGraphGpuAbiError::MissingAttributeLayout {
+                    semantic: attribute.semantic,
+                },
+            ));
+        };
+        let Some(planned) = attribute_layout.get(attribute.semantic) else {
+            return Err(CompiledGraphGpuError::InvalidGraphAbi(
+                CompiledGraphGpuAbiError::MissingAttributeLayout {
+                    semantic: attribute.semantic,
+                },
+            ));
+        };
+        let per_copy = u64::from(planned.stride) * u64::from(attribute_layout.capacity);
+        let physical_copy_span = planned.byte_size / u64::from(planned.copies);
         let physical_copy = attribute.physical_copy(frame_index) as u64;
-        let offset = planned.byte_offset + physical_copy * per_copy;
+        let offset = planned.byte_offset + physical_copy * physical_copy_span;
         entries.push(ResolvedEntry {
             binding: attribute.binding,
             layout: storage_layout_entry(attribute.binding, attribute.access),
@@ -1739,10 +2582,16 @@ fn group_entries(
                 });
             }
             ResourceKind::Curve | ResourceKind::StorageBuffer => {
-                let external = external
+                let Some(external) = external
                     .iter()
                     .find(|entry| entry.slot() == (group, binding.binding))
-                    .expect("validated storage external binding");
+                else {
+                    return Err(CompiledGraphGpuError::MissingExternalBinding {
+                        group,
+                        binding: binding.binding,
+                        name: String::from(binding.name),
+                    });
+                };
                 let (buffer, size) = match external.resource {
                     CompiledGraphGpuExternalResource::StorageBuffer { buffer, size }
                     | CompiledGraphGpuExternalResource::CurveBuffer { buffer, size } => {
@@ -1750,7 +2599,11 @@ fn group_entries(
                     }
                     CompiledGraphGpuExternalResource::Texture { .. }
                     | CompiledGraphGpuExternalResource::TextureView { .. } => {
-                        unreachable!("validated buffer binding")
+                        return Err(CompiledGraphGpuError::ExpectedBuffer {
+                            group,
+                            binding: binding.binding,
+                            name: String::from(binding.name),
+                        });
                     }
                 };
                 entries.push(ResolvedEntry {
@@ -1764,21 +2617,32 @@ fn group_entries(
                 });
             }
             ResourceKind::Texture2d | ResourceKind::Texture3d => {
-                let external = external
+                let Some(external) = external
                     .iter()
                     .find(|entry| entry.slot() == (group, binding.binding))
-                    .expect("validated texture external binding");
+                else {
+                    return Err(CompiledGraphGpuError::MissingExternalBinding {
+                        group,
+                        binding: binding.binding,
+                        name: String::from(binding.name),
+                    });
+                };
                 let view = match external.resource {
                     CompiledGraphGpuExternalResource::Texture { view, .. }
                     | CompiledGraphGpuExternalResource::TextureView { view } => view,
                     CompiledGraphGpuExternalResource::StorageBuffer { .. }
                     | CompiledGraphGpuExternalResource::CurveBuffer { .. } => {
-                        unreachable!("validated texture binding")
+                        return Err(CompiledGraphGpuError::ExpectedTexture {
+                            group,
+                            binding: binding.binding,
+                            name: String::from(binding.name),
+                        });
                     }
                 };
                 entries.push(ResolvedEntry {
                     binding: binding.binding,
-                    layout: texture_layout_entry(binding),
+                    layout: texture_layout_entry(binding)
+                        .map_err(CompiledGraphGpuError::InvalidGraphAbi)?,
                     resource: BindingResource::TextureView(view),
                 });
             }
@@ -1802,21 +2666,29 @@ fn storage_layout_entry(binding: u32, access: ResourceAccess) -> BindGroupLayout
     }
 }
 
-fn texture_layout_entry(binding: &ResourceDecl) -> BindGroupLayoutEntry {
-    BindGroupLayoutEntry {
+fn texture_layout_entry(
+    binding: &ResourceDecl,
+) -> Result<BindGroupLayoutEntry, CompiledGraphGpuAbiError> {
+    let view_dimension = match binding.kind {
+        ResourceKind::Texture2d => TextureViewDimension::D2,
+        ResourceKind::Texture3d => TextureViewDimension::D3,
+        _ => {
+            return Err(CompiledGraphGpuAbiError::InvalidTextureBindingKind {
+                group: binding.group,
+                binding: binding.binding,
+            });
+        }
+    };
+    Ok(BindGroupLayoutEntry {
         binding: binding.binding,
         visibility: ShaderStages::COMPUTE,
         ty: BindingType::Texture {
             sample_type: TextureSampleType::Float,
-            view_dimension: match binding.kind {
-                ResourceKind::Texture2d => TextureViewDimension::D2,
-                ResourceKind::Texture3d => TextureViewDimension::D3,
-                _ => unreachable!("texture layout requested for non-texture"),
-            },
+            view_dimension,
             multisampled: false,
         },
         count: None,
-    }
+    })
 }
 
 fn binding_resource(resource: CompiledGraphGpuExternalResource) -> BindingResource {
@@ -1850,6 +2722,7 @@ mod tests {
     use prism_render_architecture::particle::IterationDomain;
     use prism_render_driver::Instance;
     use prism_render_driver_null::NullInstance;
+    use prism_render_driver_wgpu::{require_hardware_gpu, HardwareDeviceError, WgpuInstance};
     use prism_render_graph::{BufferDesc, ImportedBuffer, TextureDesc};
 
     fn graph_with_one_parameter() -> CompiledGraph {
@@ -2091,6 +2964,16 @@ mod tests {
         let stale_registry = registry.clone();
         let mut state = CompiledGraphGpuState::new(&device, &queue, &graph, &registry)
             .expect("external buffer state");
+
+        let mut changed_graph = graph.clone();
+        changed_graph.source.push_str("changed");
+        assert_eq!(
+            state.refresh_external_resources(&device, &changed_graph, &registry),
+            Err(CompiledGraphGpuError::GraphAbiMismatch {
+                expected: state.graph_abi_fingerprint,
+                actual: compiled_graph_abi_fingerprint(&changed_graph),
+            })
+        );
 
         let buffer_two = device.create_buffer(&BufferDescriptor {
             label: Some(String::from("external-two")),
@@ -2434,6 +3317,22 @@ mod tests {
             &CompiledGraphGpuResourceRegistry::new(),
         )
         .expect("dispatch count binding is state-owned");
+        let mut changed_graph = graph.clone();
+        changed_graph.source.push_str("changed");
+        let mut mismatched_render_graph = RenderGraph::new(rhi::Extent3d::new_2d(1, 1));
+        assert_eq!(
+            state.append_to_graph_for_frame(
+                &changed_graph,
+                &mut mismatched_render_graph,
+                &[],
+                &[0, 0, 0],
+                0,
+            ),
+            Err(CompiledGraphGraphError::GraphAbiMismatch {
+                expected: state.graph_abi_fingerprint,
+                actual: compiled_graph_abi_fingerprint(&changed_graph),
+            })
+        );
         assert_eq!(state.dispatch_count_slots(), 3);
         state
             .update_dispatch_counts(&queue, &[0, 0, 65])
@@ -2488,6 +3387,35 @@ mod tests {
     }
 
     #[test]
+    fn malformed_compiled_graph_is_rejected_before_resource_resolution() {
+        let instance = NullInstance::new();
+        let adapter = instance
+            .request_adapter(&Default::default())
+            .expect("null adapter");
+        let (device, queue) = instance
+            .create_device(&adapter, &Default::default())
+            .expect("null device");
+        let mut graph = graph_with_ping_pong_attribute();
+        graph.attribute_layout.attributes[0].copies = 0;
+        let result = CompiledGraphGpuState::new(
+            &device,
+            &queue,
+            &graph,
+            &CompiledGraphGpuResourceRegistry::new(),
+        );
+        assert!(matches!(
+            result,
+            Err(CompiledGraphGpuError::InvalidGraphAbi(
+                CompiledGraphGpuAbiError::InvalidAttributeCopies {
+                    semantic: AttributeSemantic::Position,
+                    copies: 0,
+                }
+            ))
+        ));
+        assert_eq!(device.live_resource_count(), 0);
+    }
+
+    #[test]
     fn attribute_pool_uses_layout_ranges_and_ping_pong_bindings() {
         let instance = NullInstance::new();
         let adapter = instance
@@ -2509,7 +3437,7 @@ mod tests {
         let pool = state
             .attribute_pool_buffer()
             .expect("live attributes own a persistent pool");
-        assert_eq!(state.attribute_pool_size(), 128);
+        assert_eq!(state.attribute_pool_size(), 512);
         state
             .upload_attribute_bytes(&queue, 64, &[7; 64])
             .expect("an in-range copy upload succeeds");
@@ -2524,15 +3452,33 @@ mod tests {
             }
         );
 
-        let frame_zero = group_entries(&graph, &[], &[], None, Some(pool), 0, 0)
-            .expect("frame-zero attribute bindings");
-        let frame_one = group_entries(&graph, &[], &[], None, Some(pool), 1, 0)
-            .expect("frame-one attribute bindings");
+        let frame_zero = group_entries(
+            &graph,
+            &[],
+            &[],
+            None,
+            Some(pool),
+            &state.attribute_layout,
+            0,
+            0,
+        )
+        .expect("frame-zero attribute bindings");
+        let frame_one = group_entries(
+            &graph,
+            &[],
+            &[],
+            None,
+            Some(pool),
+            &state.attribute_layout,
+            1,
+            0,
+        )
+        .expect("frame-one attribute bindings");
         assert_eq!(
             frame_zero[0].resource,
             BindingResource::Buffer {
                 buffer: pool,
-                offset: 64,
+                offset: 256,
                 size: Some(64),
             }
         );
@@ -2556,7 +3502,7 @@ mod tests {
             frame_one[1].resource,
             BindingResource::Buffer {
                 buffer: pool,
-                offset: 64,
+                offset: 256,
                 size: Some(64),
             }
         );
@@ -2567,5 +3513,146 @@ mod tests {
 
         state.destroy(&device);
         assert_eq!(device.live_resource_count(), 0);
+    }
+
+    #[test]
+    fn physical_gpu_ember_compute_modifies_attribute_pool() {
+        let (device, queue) = match WgpuInstance::new().request_default_hardware_device() {
+            Ok(pair) => pair,
+            Err(HardwareDeviceError::NoAdapter) => {
+                assert!(
+                    !require_hardware_gpu(),
+                    "PRISM_REQUIRE_GPU=1 but no wgpu adapter was found"
+                );
+                eprintln!("SKIPPED Ember physical GPU test: no adapter");
+                return;
+            }
+            Err(HardwareDeviceError::NonHardware(evidence)) => {
+                assert!(
+                    !require_hardware_gpu(),
+                    "PRISM_REQUIRE_GPU=1 requires a physical GPU; observed {evidence}"
+                );
+                eprintln!("SKIPPED Ember physical GPU test: software/virtual adapter");
+                return;
+            }
+            Err(HardwareDeviceError::Device(error)) => {
+                panic!("physical GPU adapter was found but device creation failed: {error}");
+            }
+        };
+
+        let graph = CompiledGraph {
+            source: String::from(
+                "@group(0) @binding(0) var<storage, read_write> ember_attr_age: array<f32>;\n\
+                 @group(1) @binding(0) var<storage, read> ember_dispatch_counts: array<u32>;\n\
+                 @compute @workgroup_size(64)\n\
+                 fn main(@builtin(global_invocation_id) id: vec3<u32>) {\n\
+                     if (id.x >= ember_dispatch_counts[0u]) { return; }\n\
+                     ember_attr_age[id.x] = ember_attr_age[id.x] + 1.0;\n\
+                 }",
+            ),
+            stage_order: vec![0],
+            entry_points: vec![String::from("main")],
+            dispatches: vec![CompiledDispatch {
+                stage_index: 0,
+                domain: IterationDomain::PerParticle,
+                default_count: 1,
+                iterations: 1,
+                entry_point: String::from("main"),
+            }],
+            bindings: vec![ResourceDecl::buffer("ember_dispatch_counts", 1, 0)],
+            parameter_blocks: Vec::new(),
+            attribute_layout: AttributeLayoutPlan::build(
+                1,
+                &[AttributeUsage::new(
+                    AttributeSemantic::Age,
+                    AttributeFormat::F32,
+                    AttributeAccess::READ.union(AttributeAccess::WRITE),
+                )],
+            ),
+            attribute_bindings: vec![CompiledAttributeBinding {
+                semantic: AttributeSemantic::Age,
+                format: AttributeFormat::F32,
+                role: AttributeBufferRole::Single,
+                name: String::from("ember_attr_age"),
+                group: 0,
+                binding: 0,
+                access: ResourceAccess::ReadWrite,
+            }],
+        };
+        let state = CompiledGraphGpuState::new(
+            &device,
+            &queue,
+            &graph,
+            &CompiledGraphGpuResourceRegistry::new(),
+        )
+        .expect("physical device accepts the one-particle Ember graph");
+        let attribute_pool = state
+            .attribute_pool_buffer()
+            .expect("the graph owns an attribute pool");
+        state
+            .upload_attribute_bytes(&queue, 0, &1.5f32.to_le_bytes())
+            .expect("attribute upload fits the logical layout");
+        state
+            .update_dispatch_counts(&queue, &[1])
+            .expect("one dispatch count is accepted");
+
+        let mut render_graph = RenderGraph::new(rhi::Extent3d::new_2d(1, 1));
+        let attribute_handle = render_graph.import_buffer(
+            "ember-attributes",
+            BufferDesc::new(
+                state.attribute_pool_size(),
+                BufferUsages::STORAGE.union(BufferUsages::COPY_DST),
+            ),
+            ImportedBuffer {
+                buffer: attribute_pool,
+                entry_state: BufferState::initial(),
+            },
+        );
+        let dispatch_buffer = state
+            .dispatch_counts_buffer()
+            .expect("the graph owns dispatch counts");
+        let dispatch_handle = render_graph.import_buffer(
+            "ember-dispatch-counts",
+            BufferDesc::new(4, BufferUsages::STORAGE.union(BufferUsages::COPY_DST)),
+            ImportedBuffer {
+                buffer: dispatch_buffer,
+                entry_state: BufferState::initial(),
+            },
+        );
+        state
+            .append_to_graph(
+                &graph,
+                &mut render_graph,
+                &[
+                    CompiledGraphGpuGraphBinding::Buffer {
+                        group: 0,
+                        binding: 0,
+                        revision: CompiledGraphGpuRevision::from_value(0),
+                        handle: attribute_handle,
+                    },
+                    CompiledGraphGpuGraphBinding::Buffer {
+                        group: 1,
+                        binding: 0,
+                        revision: CompiledGraphGpuRevision::from_value(0),
+                        handle: dispatch_handle,
+                    },
+                ],
+                &[1],
+            )
+            .expect("Ember compute is declared in the frame graph");
+        let recorded = render_graph
+            .execute(&device, &queue)
+            .expect("Ember frame graph executes on the physical GPU");
+        assert!(device.poll_wait(), "the physical GPU remains healthy");
+
+        let bytes = queue.read_buffer(attribute_pool, state.attribute_pool_size());
+        let value = f32::from_le_bytes(bytes[..4].try_into().expect("four-byte attribute"));
+        assert!(
+            (value - 2.5).abs() <= 1.0e-6,
+            "GPU Ember output was {value}"
+        );
+
+        recorded.release(&device);
+        state.destroy(&device);
     }
 }

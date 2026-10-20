@@ -62,7 +62,11 @@ impl Falloff {
     /// `distance / radius`. Returns `1.0` at the center for every variant.
     #[must_use]
     pub fn shape(self, ratio: f32) -> f32 {
-        let t = ratio.clamp(0.0, 1.0);
+        let t = if ratio.is_finite() {
+            ratio.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
         match self {
             Falloff::Constant => 1.0,
             Falloff::Linear => 1.0 - t,
@@ -83,9 +87,16 @@ impl Falloff {
 /// on it has no singularity (design §8.2 softening `r^2 + eps^2`). A negative
 /// or zero `softening` still gets an `EPS`-scale floor so the divisor is finite.
 fn softened_direction(origin: Vec3, target: Vec3, softening: f32) -> (Vec3, f32) {
+    if !finite_vec3(origin) || !finite_vec3(target) {
+        return (Vec3::ZERO, f32::NAN);
+    }
     let to = target.sub(origin);
     let dist_sq = to.length_squared();
-    let soft = softening.max(0.0);
+    let soft = if softening.is_finite() {
+        softening.max(0.0)
+    } else {
+        0.0
+    };
     let denom = dist_sq + soft * soft + EPS * EPS;
     let inv = 1.0 / denom.sqrt();
     (to.scale(inv), dist_sq.sqrt())
@@ -96,7 +107,7 @@ fn softened_direction(origin: Vec3, target: Vec3, softening: f32) -> (Vec3, f32)
 /// A non-positive `radius` (`<= EPS`) means "unbounded", so the gate never
 /// rejects; otherwise points strictly beyond `radius` are cut off.
 fn outside_radius(distance: f32, radius: f32) -> bool {
-    radius > EPS && distance > radius
+    !distance.is_finite() || (!radius.is_finite()) || (radius > EPS && distance > radius)
 }
 
 /// Acceleration pulling a particle toward (or pushing it from) a single point.
@@ -116,6 +127,9 @@ pub fn point_attractor(
     softening: f32,
     falloff: Falloff,
 ) -> Vec3 {
+    if !strength.is_finite() || !radius.is_finite() {
+        return Vec3::ZERO;
+    }
     let (dir, dist) = softened_direction(position, point, softening);
     if outside_radius(dist, radius) {
         return Vec3::ZERO;
@@ -141,6 +155,9 @@ pub fn line_attractor(
     softening: f32,
     falloff: Falloff,
 ) -> Vec3 {
+    if !finite_vec3(position) || !finite_vec3(line_point) || !finite_vec3(line_direction) {
+        return Vec3::ZERO;
+    }
     let axis = line_direction.normalize_or_zero();
     if axis.length_squared() <= EPS * EPS {
         return point_attractor(position, line_point, strength, radius, softening, falloff);
@@ -230,6 +247,15 @@ pub fn orbital_force(
     tangential_strength: f32,
     radial_stiffness: f32,
 ) -> Vec3 {
+    if !finite_vec3(position)
+        || !finite_vec3(center)
+        || !finite_vec3(axis)
+        || !target_radius.is_finite()
+        || !tangential_strength.is_finite()
+        || !radial_stiffness.is_finite()
+    {
+        return Vec3::ZERO;
+    }
     let unit_axis = axis.normalize_or_zero();
     if unit_axis.length_squared() <= EPS * EPS {
         return Vec3::ZERO;
@@ -247,8 +273,8 @@ pub fn orbital_force(
     let tangent = unit_axis.cross(perp_unit).normalize_or_zero();
     let tangential = tangent.scale(tangential_strength);
     // Radial spring pulling the orbit back to `target_radius`.
-    let radial_error = dist - target_radius;
-    let correction = perp_unit.scale(-radial_stiffness * radial_error);
+    let radial_error = dist - target_radius.max(0.0);
+    let correction = perp_unit.scale(-radial_stiffness.max(0.0) * radial_error);
     tangential.add(correction)
 }
 
@@ -261,9 +287,16 @@ pub fn orbital_force(
 /// radius-limited pull is wanted instead.
 #[must_use]
 pub fn gravity_well(position: Vec3, center: Vec3, strength: f32, softening: f32) -> Vec3 {
+    if !finite_vec3(position) || !finite_vec3(center) || !strength.is_finite() {
+        return Vec3::ZERO;
+    }
     let to = center.sub(position);
     let dist_sq = to.length_squared();
-    let soft = softening.max(0.0);
+    let soft = if softening.is_finite() {
+        softening.max(0.0)
+    } else {
+        0.0
+    };
     let denom = dist_sq + soft * soft + EPS * EPS;
     let dir = to.normalize_or_zero();
     dir.scale(strength / denom)
@@ -277,7 +310,7 @@ pub fn gravity_well(position: Vec3, center: Vec3, strength: f32, softening: f32)
 /// no drag; a particle at rest feels nothing.
 #[must_use]
 pub fn quadratic_drag(velocity: Vec3, coefficient: f32) -> Vec3 {
-    if coefficient <= 0.0 {
+    if !finite_vec3(velocity) || !coefficient.is_finite() || coefficient <= 0.0 {
         return Vec3::ZERO;
     }
     let speed = velocity.length();
@@ -307,6 +340,14 @@ pub fn turbulence(
     amplitude_multiplier: f32,
     epsilon: f32,
 ) -> Vec3 {
+    if !finite_vec3(position)
+        || !frequency.is_finite()
+        || !amplitude.is_finite()
+        || !frequency_multiplier.is_finite()
+        || !amplitude_multiplier.is_finite()
+    {
+        return Vec3::ZERO;
+    }
     let mut total = Vec3::ZERO;
     let mut freq = frequency;
     let mut amp = amplitude;
@@ -335,9 +376,22 @@ pub fn spring_damper(
     stiffness: f32,
     damping: f32,
 ) -> Vec3 {
-    let restoring = anchor.sub(position).scale(stiffness);
-    let resistance = velocity.scale(-damping);
+    if !finite_vec3(position)
+        || !finite_vec3(velocity)
+        || !finite_vec3(anchor)
+        || !stiffness.is_finite()
+        || !damping.is_finite()
+    {
+        return Vec3::ZERO;
+    }
+    let restoring = anchor.sub(position).scale(stiffness.max(0.0));
+    let resistance = velocity.scale(-damping.max(0.0));
     restoring.add(resistance)
+}
+
+#[inline]
+fn finite_vec3(v: Vec3) -> bool {
+    v.x.is_finite() && v.y.is_finite() && v.z.is_finite()
 }
 
 /// A single force term for the [`ForceField`] accumulator.
@@ -627,16 +681,27 @@ impl ForceEntry {
     /// the gate sphere.
     #[must_use]
     pub fn contribution(self, position: Vec3, velocity: Vec3) -> Vec3 {
-        if !self.enabled {
+        if !self.enabled || !finite_vec3(position) || !finite_vec3(velocity) {
+            return Vec3::ZERO;
+        }
+        if !self.weight.is_finite() || self.weight <= 0.0 {
             return Vec3::ZERO;
         }
         if self.gate_radius > EPS {
+            if !self.gate_radius.is_finite() || !finite_vec3(self.gate_center) {
+                return Vec3::ZERO;
+            }
             let gate_sq = self.gate_radius * self.gate_radius;
             if position.distance_squared(self.gate_center) > gate_sq {
                 return Vec3::ZERO;
             }
         }
-        self.force.evaluate(position, velocity).scale(self.weight)
+        let contribution = self.force.evaluate(position, velocity).scale(self.weight);
+        if finite_vec3(contribution) {
+            contribution
+        } else {
+            Vec3::ZERO
+        }
     }
 }
 

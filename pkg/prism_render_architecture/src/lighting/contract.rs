@@ -10,6 +10,7 @@ use alloc::vec::Vec;
 use core::fmt;
 
 use super::debug::DebugMeta;
+use super::recipe_backend;
 
 /// Monotonic epochs for fields that independently invalidate lighting work.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -223,12 +224,499 @@ pub struct TraceQuery {
     pub t_max: f32,
 }
 
-/// A trace result carrying systematic and statistical error separately.
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// Reserved index used by every table-backed hit identity.
+pub const INVALID_HIT_INDEX: u32 = u32::MAX;
+
+/// Number of canonical 32-bit words in [`RayHitIdentity`].
+pub const RAY_HIT_IDENTITY_WORDS: usize = 20;
+
+/// A generation-safe identity for one stable row in a renderer-owned table.
+///
+/// This contract is intentionally local to the architecture crate. It does
+/// not depend on the material runtime, and its two-word representation can be
+/// copied directly into CPU, storage-buffer, or path-tracing records.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct HitTableIdentity {
+    pub index: u32,
+    pub generation: u32,
+}
+
+impl HitTableIdentity {
+    pub const INVALID: Self = Self {
+        index: INVALID_HIT_INDEX,
+        generation: 0,
+    };
+
+    #[must_use]
+    pub const fn new(index: u32, generation: u32) -> Self {
+        Self { index, generation }
+    }
+
+    #[must_use]
+    pub const fn is_valid(self) -> bool {
+        self.index != INVALID_HIT_INDEX
+    }
+
+    /// Returns whether both identities name the same live allocation, not
+    /// merely the same recyclable table slot.
+    #[must_use]
+    pub const fn is_same_allocation(self, other: Self) -> bool {
+        self.is_valid()
+            && other.is_valid()
+            && self.index == other.index
+            && self.generation == other.generation
+    }
+}
+
+impl Default for HitTableIdentity {
+    fn default() -> Self {
+        Self::INVALID
+    }
+}
+
+/// Stable primitive key independent of packed BVH or geometry-row order.
+///
+/// The key is encoded as low/high words because native shader `u64` support is
+/// not a requirement of this architecture contract. `u64::MAX` is reserved as
+/// the invalid sentinel; key zero remains a valid producer-assigned identity.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct StablePrimitiveIdentity {
+    pub low: u32,
+    pub high: u32,
+}
+
+impl StablePrimitiveIdentity {
+    pub const INVALID: Self = Self {
+        low: u32::MAX,
+        high: u32::MAX,
+    };
+
+    #[must_use]
+    pub const fn new(value: u64) -> Self {
+        Self {
+            low: value as u32,
+            high: (value >> 32) as u32,
+        }
+    }
+
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        (self.low as u64) | ((self.high as u64) << 32)
+    }
+
+    #[must_use]
+    pub const fn is_valid(self) -> bool {
+        self.low != u32::MAX || self.high != u32::MAX
+    }
+}
+
+impl Default for StablePrimitiveIdentity {
+    fn default() -> Self {
+        Self::INVALID
+    }
+}
+
+/// Scene publication epoch captured by a hit.
+///
+/// Epoch zero is reserved for unpublished data. The split representation is
+/// lossless and keeps the ABI usable on shader targets without integer `u64`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct HitSceneEpoch {
+    pub low: u32,
+    pub high: u32,
+}
+
+impl HitSceneEpoch {
+    pub const INVALID: Self = Self { low: 0, high: 0 };
+
+    #[must_use]
+    pub const fn new(value: u64) -> Self {
+        Self {
+            low: value as u32,
+            high: (value >> 32) as u32,
+        }
+    }
+
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        (self.low as u64) | ((self.high as u64) << 32)
+    }
+
+    #[must_use]
+    pub const fn is_valid(self) -> bool {
+        self.low != 0 || self.high != 0
+    }
+}
+
+impl Default for HitSceneEpoch {
+    fn default() -> Self {
+        Self::INVALID
+    }
+}
+
+/// Encoding used by the coordinates stored in a hit identity.
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct HitCoordinateEncoding(u32);
+
+impl HitCoordinateEncoding {
+    /// `(u, v)` are the weights of vertices 1 and 2 in the geometry-local
+    /// triangle; vertex 0 has weight `1 - u - v`. World position remains
+    /// exactly `query.origin + hit.depth * query.direction`.
+    pub const TRIANGLE_BARYCENTRIC_UV: Self = Self(1);
+
+    /// `(u, v)` are primitive-local coordinates for a non-triangle analytic
+    /// primitive.  The exact parameterization is owned by the primitive
+    /// implementation and is not interpreted as triangle barycentrics.
+    pub const PRIMITIVE_LOCAL_UV: Self = Self(2);
+
+    #[must_use]
+    pub const fn from_raw(raw: u32) -> Self {
+        Self(raw)
+    }
+
+    #[must_use]
+    pub const fn raw(self) -> u32 {
+        self.0
+    }
+
+    #[must_use]
+    pub const fn is_known(self) -> bool {
+        self.0 == Self::TRIANGLE_BARYCENTRIC_UV.0 || self.0 == Self::PRIMITIVE_LOCAL_UV.0
+    }
+}
+
+/// Moller-Trumbore triangle coordinates.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct TriangleBarycentrics {
+    /// Weight of vertex 1.
+    pub u: f32,
+    /// Weight of vertex 2.
+    pub v: f32,
+}
+
+impl TriangleBarycentrics {
+    #[must_use]
+    pub const fn new(u: f32, v: f32) -> Self {
+        Self { u, v }
+    }
+
+    #[must_use]
+    pub fn is_valid(self) -> bool {
+        self.u.is_finite()
+            && self.v.is_finite()
+            && self.u >= 0.0
+            && self.v >= 0.0
+            && self.u + self.v <= 1.0
+    }
+
+    /// Returns weights in vertex order `(v0, v1, v2)`.
+    #[must_use]
+    pub fn weights(self) -> Option<[f32; 3]> {
+        self.is_valid()
+            .then_some([1.0 - self.u - self.v, self.u, self.v])
+    }
+}
+
+/// Generation-safe instance identity and the transform revision used to
+/// interpret its geometry-local attributes.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct HitInstanceIdentity {
+    pub handle: HitTableIdentity,
+    pub transform_revision: u32,
+}
+
+impl HitInstanceIdentity {
+    pub const INVALID: Self = Self {
+        handle: HitTableIdentity::INVALID,
+        transform_revision: 0,
+    };
+
+    #[must_use]
+    pub const fn is_valid(self) -> bool {
+        self.handle.is_valid() && self.transform_revision != 0
+    }
+}
+
+impl Default for HitInstanceIdentity {
+    fn default() -> Self {
+        Self::INVALID
+    }
+}
+
+/// Geometry allocation, source revisions, and packed rows used by a hit.
+///
+/// `primitive_row` resolves topology/indices. `attribute_row` resolves the
+/// first row of the attribute set consumed with the hit barycentrics. Both are
+/// stable only for the captured handle generation and revisions.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct HitGeometryIdentity {
+    pub handle: HitTableIdentity,
+    pub geometry_revision: u32,
+    pub attribute_revision: u32,
+    pub primitive_row: u32,
+    pub attribute_row: u32,
+}
+
+impl HitGeometryIdentity {
+    pub const INVALID: Self = Self {
+        handle: HitTableIdentity::INVALID,
+        geometry_revision: 0,
+        attribute_revision: 0,
+        primitive_row: INVALID_HIT_INDEX,
+        attribute_row: INVALID_HIT_INDEX,
+    };
+
+    #[must_use]
+    pub const fn is_valid(self) -> bool {
+        self.handle.is_valid()
+            && self.geometry_revision != 0
+            && self.attribute_revision != 0
+            && self.primitive_row != INVALID_HIT_INDEX
+            && self.attribute_row != INVALID_HIT_INDEX
+    }
+}
+
+impl Default for HitGeometryIdentity {
+    fn default() -> Self {
+        Self::INVALID
+    }
+}
+
+/// Generation-safe material allocation and the exact published record
+/// revision that must be evaluated at the hit.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct HitMaterialIdentity {
+    pub handle: HitTableIdentity,
+    pub revision: u32,
+}
+
+impl HitMaterialIdentity {
+    pub const INVALID: Self = Self {
+        handle: HitTableIdentity::INVALID,
+        revision: 0,
+    };
+
+    #[must_use]
+    pub const fn is_valid(self) -> bool {
+        self.handle.is_valid() && self.revision != 0
+    }
+}
+
+impl Default for HitMaterialIdentity {
+    fn default() -> Self {
+        Self::INVALID
+    }
+}
+
+/// Exact generations and revisions against which a retained hit is current.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HitIdentityRevisions {
+    pub scene_epoch: HitSceneEpoch,
+    pub instance: HitTableIdentity,
+    pub transform_revision: u32,
+    pub geometry: HitTableIdentity,
+    pub geometry_revision: u32,
+    pub attribute_revision: u32,
+    pub material: HitTableIdentity,
+    pub material_revision: u32,
+}
+
+/// Validation failure for an identity published as a surface hit.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RayHitIdentityError {
+    InvalidPrimitive,
+    InvalidInstance,
+    InvalidGeometry,
+    InvalidMaterial,
+    InvalidTriangle,
+    InvalidSceneEpoch,
+    UnknownCoordinateEncoding(u32),
+    InvalidBarycentrics,
+}
+
+/// Complete identity needed to reconstruct and evaluate a ray hit without
+/// relying on packed-array order or a bare material index.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct RayHitIdentity {
+    pub primitive: StablePrimitiveIdentity,
+    pub instance: HitInstanceIdentity,
+    pub geometry: HitGeometryIdentity,
+    pub material: HitMaterialIdentity,
+    /// Geometry-local topology index for the captured geometry revision.
+    pub triangle_index: u32,
+    pub coordinate_encoding: HitCoordinateEncoding,
+    pub barycentrics: TriangleBarycentrics,
+    pub scene_epoch: HitSceneEpoch,
+}
+
+impl RayHitIdentity {
+    pub const INVALID: Self = Self {
+        primitive: StablePrimitiveIdentity::INVALID,
+        instance: HitInstanceIdentity::INVALID,
+        geometry: HitGeometryIdentity::INVALID,
+        material: HitMaterialIdentity::INVALID,
+        triangle_index: INVALID_HIT_INDEX,
+        coordinate_encoding: HitCoordinateEncoding::from_raw(0),
+        barycentrics: TriangleBarycentrics::new(0.0, 0.0),
+        scene_epoch: HitSceneEpoch::INVALID,
+    };
+
+    pub fn validate(self) -> Result<(), RayHitIdentityError> {
+        if !self.primitive.is_valid() {
+            return Err(RayHitIdentityError::InvalidPrimitive);
+        }
+        if !self.instance.is_valid() {
+            return Err(RayHitIdentityError::InvalidInstance);
+        }
+        if !self.geometry.is_valid() {
+            return Err(RayHitIdentityError::InvalidGeometry);
+        }
+        if !self.material.is_valid() {
+            return Err(RayHitIdentityError::InvalidMaterial);
+        }
+        if !self.scene_epoch.is_valid() {
+            return Err(RayHitIdentityError::InvalidSceneEpoch);
+        }
+        if !self.coordinate_encoding.is_known() {
+            return Err(RayHitIdentityError::UnknownCoordinateEncoding(
+                self.coordinate_encoding.raw(),
+            ));
+        }
+        if self.coordinate_encoding == HitCoordinateEncoding::TRIANGLE_BARYCENTRIC_UV
+            && self.triangle_index == INVALID_HIT_INDEX
+        {
+            return Err(RayHitIdentityError::InvalidTriangle);
+        }
+        if self.coordinate_encoding == HitCoordinateEncoding::PRIMITIVE_LOCAL_UV
+            && self.triangle_index != INVALID_HIT_INDEX
+        {
+            return Err(RayHitIdentityError::InvalidTriangle);
+        }
+        let coordinates_are_valid =
+            if self.coordinate_encoding == HitCoordinateEncoding::TRIANGLE_BARYCENTRIC_UV {
+                self.barycentrics.is_valid()
+            } else {
+                self.barycentrics.u.is_finite() && self.barycentrics.v.is_finite()
+            };
+        if !coordinates_are_valid {
+            return Err(RayHitIdentityError::InvalidBarycentrics);
+        }
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn is_current_for(self, current: HitIdentityRevisions) -> bool {
+        self.validate().is_ok()
+            && self.scene_epoch == current.scene_epoch
+            && self.instance.handle.is_same_allocation(current.instance)
+            && self.instance.transform_revision == current.transform_revision
+            && self.geometry.handle.is_same_allocation(current.geometry)
+            && self.geometry.geometry_revision == current.geometry_revision
+            && self.geometry.attribute_revision == current.attribute_revision
+            && self.material.handle.is_same_allocation(current.material)
+            && self.material.revision == current.material_revision
+    }
+
+    #[must_use]
+    pub const fn revisions(self) -> HitIdentityRevisions {
+        HitIdentityRevisions {
+            scene_epoch: self.scene_epoch,
+            instance: self.instance.handle,
+            transform_revision: self.instance.transform_revision,
+            geometry: self.geometry.handle,
+            geometry_revision: self.geometry.geometry_revision,
+            attribute_revision: self.geometry.attribute_revision,
+            material: self.material.handle,
+            material_revision: self.material.revision,
+        }
+    }
+
+    /// Canonical CPU/GPU word encoding. Float coordinates use IEEE-754 bits.
+    #[must_use]
+    pub fn to_words(self) -> [u32; RAY_HIT_IDENTITY_WORDS] {
+        [
+            self.primitive.low,
+            self.primitive.high,
+            self.instance.handle.index,
+            self.instance.handle.generation,
+            self.instance.transform_revision,
+            self.geometry.handle.index,
+            self.geometry.handle.generation,
+            self.geometry.geometry_revision,
+            self.geometry.attribute_revision,
+            self.geometry.primitive_row,
+            self.geometry.attribute_row,
+            self.material.handle.index,
+            self.material.handle.generation,
+            self.material.revision,
+            self.triangle_index,
+            self.coordinate_encoding.raw(),
+            self.barycentrics.u.to_bits(),
+            self.barycentrics.v.to_bits(),
+            self.scene_epoch.low,
+            self.scene_epoch.high,
+        ]
+    }
+
+    #[must_use]
+    pub fn from_words(words: [u32; RAY_HIT_IDENTITY_WORDS]) -> Self {
+        Self {
+            primitive: StablePrimitiveIdentity {
+                low: words[0],
+                high: words[1],
+            },
+            instance: HitInstanceIdentity {
+                handle: HitTableIdentity::new(words[2], words[3]),
+                transform_revision: words[4],
+            },
+            geometry: HitGeometryIdentity {
+                handle: HitTableIdentity::new(words[5], words[6]),
+                geometry_revision: words[7],
+                attribute_revision: words[8],
+                primitive_row: words[9],
+                attribute_row: words[10],
+            },
+            material: HitMaterialIdentity {
+                handle: HitTableIdentity::new(words[11], words[12]),
+                revision: words[13],
+            },
+            triangle_index: words[14],
+            coordinate_encoding: HitCoordinateEncoding::from_raw(words[15]),
+            barycentrics: TriangleBarycentrics::new(
+                f32::from_bits(words[16]),
+                f32::from_bits(words[17]),
+            ),
+            scene_epoch: HitSceneEpoch {
+                low: words[18],
+                high: words[19],
+            },
+        }
+    }
+}
+
+impl Default for RayHitIdentity {
+    fn default() -> Self {
+        Self::INVALID
+    }
+}
+
+/// A trace result carrying reconstructable surface identity plus systematic
+/// and statistical error separately. Misses use [`RayHitIdentity::INVALID`].
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct RayHit {
     pub radiance: [f32; 3],
     pub depth: f32,
-    pub material: u32,
+    pub identity: RayHitIdentity,
     pub bias_bound: f32,
     pub variance: f32,
 }
@@ -486,12 +974,16 @@ impl RecipeId {
         }
     }
 
-    /// Whether the current render host has a real execution path for this
-    /// recipe. A recipe stays in the architectural whitelist while admission
-    /// remains closed until its GPU/CPU twin and graph pass are registered.
+    /// Whether the architecture has a registered executable backend for this
+    /// recipe.
+    ///
+    /// `recipe_backend` is the single source of truth. Keeping this query
+    /// here is convenient for callers, but it must not grow an independent
+    /// recipe list: a recipe is executable only when its provider/backend
+    /// registration exposes a real execution path and its deterministic twin.
     #[must_use]
     pub const fn has_execution_backend(self) -> bool {
-        matches!(self, Self::SpecializedDeterministic | Self::WorldRestir)
+        super::recipe_backend::is_registered(self)
     }
 
     #[must_use]
@@ -854,6 +1346,13 @@ impl BudgetCompiler {
                 rejected.push(Rejection::Unsupported(recipe));
                 continue;
             }
+            // Backend registration is a hard execution boundary. Do this
+            // before policy, candidate, variant, or budget admission so a
+            // planned recipe can never be mistaken for an executable one.
+            let Some(backend) = recipe_backend::registration(recipe) else {
+                rejected.push(Rejection::Unavailable(recipe));
+                continue;
+            };
             if caps.deterministic_npr
                 && matches!(
                     recipe,
@@ -864,10 +1363,6 @@ impl BudgetCompiler {
                 )
             {
                 rejected.push(Rejection::Determinism(recipe));
-                continue;
-            }
-            if !recipe.has_execution_backend() {
-                rejected.push(Rejection::Unavailable(recipe));
                 continue;
             }
             // Keep capability, determinism and execution-backend policy first.
@@ -908,21 +1403,41 @@ impl BudgetCompiler {
             }
             let used_gpu_ms = recipes
                 .iter()
-                .map(|selected| selected.cost().gpu_ms)
+                .map(|selected| {
+                    recipe_backend::registration(*selected)
+                        .expect("selected recipe must have a registered backend")
+                        .cost
+                        .gpu_ms
+                })
                 .sum::<f32>();
             let used_resident_bytes = recipes
                 .iter()
-                .map(|selected| selected.cost().resident_bytes)
+                .map(|selected| {
+                    recipe_backend::registration(*selected)
+                        .expect("selected recipe must have a registered backend")
+                        .cost
+                        .resident_bytes
+                })
                 .sum::<u64>();
             let used_bandwidth = recipes
                 .iter()
-                .map(|selected| selected.cost().bandwidth)
+                .map(|selected| {
+                    recipe_backend::registration(*selected)
+                        .expect("selected recipe must have a registered backend")
+                        .cost
+                        .bandwidth
+                })
                 .sum::<u64>();
             let used_io_ops = recipes
                 .iter()
-                .map(|selected| selected.cost().io_ops)
+                .map(|selected| {
+                    recipe_backend::registration(*selected)
+                        .expect("selected recipe must have a registered backend")
+                        .cost
+                        .io_ops
+                })
                 .sum::<u32>();
-            let cost = recipe.cost();
+            let cost = backend.cost;
             if used_gpu_ms + cost.gpu_ms > budget.gpu_ms.max(0.1)
                 || used_resident_bytes.saturating_add(cost.resident_bytes) > budget.resident_bytes
                 || used_bandwidth.saturating_add(cost.bandwidth) > budget.bandwidth
@@ -937,9 +1452,6 @@ impl BudgetCompiler {
             }
             selected_variants = selected_variants.saturating_add(recipe.variant_count());
         }
-        if recipes.is_empty() {
-            recipes.push(RecipeId::SpecializedDeterministic);
-        }
         LightingPlan {
             tier,
             recipes,
@@ -952,8 +1464,22 @@ impl BudgetCompiler {
 }
 
 impl LightingPlan {
+    /// Verifies that every selected recipe has a real registered execution
+    /// backend. This is intentionally separate from [`Self::executions`] so a
+    /// caller holding a manually assembled plan can obtain a structured
+    /// rejection instead of silently manufacturing an execution declaration.
+    #[must_use]
+    pub fn validate_execution_contract(&self) -> Result<(), Rejection> {
+        self.recipes
+            .iter()
+            .copied()
+            .find(|recipe| !recipe.has_execution_backend())
+            .map_or(Ok(()), |recipe| Err(Rejection::Unavailable(recipe)))
+    }
+
     #[must_use]
     pub fn executions(&self) -> Vec<RecipeExecution> {
+        debug_assert!(self.validate_execution_contract().is_ok());
         self.recipes
             .iter()
             .enumerate()
@@ -1050,6 +1576,290 @@ impl fmt::Display for RecipeId {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::mem::{align_of, offset_of, size_of};
+
+    fn valid_hit_identity(seed: u32) -> RayHitIdentity {
+        RayHitIdentity {
+            primitive: StablePrimitiveIdentity::new(0x1020_3040_5060_7000 + u64::from(seed)),
+            instance: HitInstanceIdentity {
+                handle: HitTableIdentity::new(10 + seed, 20 + seed),
+                transform_revision: 30 + seed,
+            },
+            geometry: HitGeometryIdentity {
+                handle: HitTableIdentity::new(40 + seed, 50 + seed),
+                geometry_revision: 60 + seed,
+                attribute_revision: 70 + seed,
+                primitive_row: 80 + seed,
+                attribute_row: 90 + seed,
+            },
+            material: HitMaterialIdentity {
+                handle: HitTableIdentity::new(100 + seed, 110 + seed),
+                revision: 120 + seed,
+            },
+            triangle_index: 130 + seed,
+            coordinate_encoding: HitCoordinateEncoding::TRIANGLE_BARYCENTRIC_UV,
+            barycentrics: TriangleBarycentrics::new(0.25, 0.5),
+            scene_epoch: HitSceneEpoch::new(0x2030_4050_6070_8000 + u64::from(seed)),
+        }
+    }
+
+    #[test]
+    fn hit_identity_rejects_each_invalid_sentinel_and_unpublished_revision() {
+        let identity = valid_hit_identity(0);
+        assert_eq!(identity.validate(), Ok(()));
+        assert_eq!(
+            RayHitIdentity::INVALID.validate(),
+            Err(RayHitIdentityError::InvalidPrimitive)
+        );
+
+        let mut invalid = identity;
+        invalid.primitive = StablePrimitiveIdentity::INVALID;
+        assert_eq!(
+            invalid.validate(),
+            Err(RayHitIdentityError::InvalidPrimitive)
+        );
+
+        invalid = identity;
+        invalid.instance.handle = HitTableIdentity::INVALID;
+        assert_eq!(
+            invalid.validate(),
+            Err(RayHitIdentityError::InvalidInstance)
+        );
+        invalid = identity;
+        invalid.instance.transform_revision = 0;
+        assert_eq!(
+            invalid.validate(),
+            Err(RayHitIdentityError::InvalidInstance)
+        );
+
+        invalid = identity;
+        invalid.geometry.handle = HitTableIdentity::INVALID;
+        assert_eq!(
+            invalid.validate(),
+            Err(RayHitIdentityError::InvalidGeometry)
+        );
+        invalid = identity;
+        invalid.geometry.geometry_revision = 0;
+        assert_eq!(
+            invalid.validate(),
+            Err(RayHitIdentityError::InvalidGeometry)
+        );
+        invalid = identity;
+        invalid.geometry.attribute_revision = 0;
+        assert_eq!(
+            invalid.validate(),
+            Err(RayHitIdentityError::InvalidGeometry)
+        );
+        invalid = identity;
+        invalid.geometry.primitive_row = INVALID_HIT_INDEX;
+        assert_eq!(
+            invalid.validate(),
+            Err(RayHitIdentityError::InvalidGeometry)
+        );
+        invalid = identity;
+        invalid.geometry.attribute_row = INVALID_HIT_INDEX;
+        assert_eq!(
+            invalid.validate(),
+            Err(RayHitIdentityError::InvalidGeometry)
+        );
+
+        invalid = identity;
+        invalid.material.handle = HitTableIdentity::INVALID;
+        assert_eq!(
+            invalid.validate(),
+            Err(RayHitIdentityError::InvalidMaterial)
+        );
+        invalid = identity;
+        invalid.material.revision = 0;
+        assert_eq!(
+            invalid.validate(),
+            Err(RayHitIdentityError::InvalidMaterial)
+        );
+
+        invalid = identity;
+        invalid.triangle_index = INVALID_HIT_INDEX;
+        assert_eq!(
+            invalid.validate(),
+            Err(RayHitIdentityError::InvalidTriangle)
+        );
+
+        let mut analytic = identity;
+        analytic.coordinate_encoding = HitCoordinateEncoding::PRIMITIVE_LOCAL_UV;
+        analytic.triangle_index = INVALID_HIT_INDEX;
+        analytic.barycentrics = TriangleBarycentrics::new(2.0, -3.0);
+        assert_eq!(analytic.validate(), Ok(()));
+        analytic.triangle_index = 0;
+        assert_eq!(
+            analytic.validate(),
+            Err(RayHitIdentityError::InvalidTriangle)
+        );
+
+        invalid = identity;
+        invalid.scene_epoch = HitSceneEpoch::INVALID;
+        assert_eq!(
+            invalid.validate(),
+            Err(RayHitIdentityError::InvalidSceneEpoch)
+        );
+        invalid = identity;
+        invalid.coordinate_encoding = HitCoordinateEncoding::from_raw(17);
+        assert_eq!(
+            invalid.validate(),
+            Err(RayHitIdentityError::UnknownCoordinateEncoding(17))
+        );
+
+        assert!(HitTableIdentity::new(0, 0).is_valid());
+        assert!(StablePrimitiveIdentity::new(0).is_valid());
+    }
+
+    #[test]
+    fn hit_identity_detects_recycled_generations_and_stale_revisions() {
+        let identity = valid_hit_identity(1);
+        let current = identity.revisions();
+        assert!(identity.is_current_for(current));
+        assert!(!RayHitIdentity::INVALID.is_current_for(current));
+
+        let mut stale = current;
+        stale.instance.generation += 1;
+        assert!(!identity.is_current_for(stale));
+        stale = current;
+        stale.geometry.generation += 1;
+        assert!(!identity.is_current_for(stale));
+        stale = current;
+        stale.material.generation += 1;
+        assert!(!identity.is_current_for(stale));
+
+        stale = current;
+        stale.transform_revision += 1;
+        assert!(!identity.is_current_for(stale));
+        stale = current;
+        stale.geometry_revision += 1;
+        assert!(!identity.is_current_for(stale));
+        stale = current;
+        stale.attribute_revision += 1;
+        assert!(!identity.is_current_for(stale));
+        stale = current;
+        stale.material_revision += 1;
+        assert!(!identity.is_current_for(stale));
+        stale = current;
+        stale.scene_epoch = HitSceneEpoch::new(stale.scene_epoch.get() + 1);
+        assert!(!identity.is_current_for(stale));
+
+        let allocation = HitTableIdentity::new(7, 11);
+        assert!(allocation.is_same_allocation(allocation));
+        assert!(!allocation.is_same_allocation(HitTableIdentity::new(7, 12)));
+        assert!(!allocation.is_same_allocation(HitTableIdentity::INVALID));
+    }
+
+    #[test]
+    fn triangle_barycentrics_accept_only_closed_triangle_coordinates() {
+        for coordinates in [
+            TriangleBarycentrics::new(0.0, 0.0),
+            TriangleBarycentrics::new(1.0, 0.0),
+            TriangleBarycentrics::new(0.0, 1.0),
+            TriangleBarycentrics::new(0.25, 0.75),
+            TriangleBarycentrics::new(0.2, 0.3),
+        ] {
+            assert!(coordinates.is_valid());
+            let weights = coordinates.weights().unwrap();
+            assert!((weights.iter().sum::<f32>() - 1.0).abs() <= f32::EPSILON);
+            assert_eq!(weights[1], coordinates.u);
+            assert_eq!(weights[2], coordinates.v);
+        }
+
+        for coordinates in [
+            TriangleBarycentrics::new(-f32::EPSILON, 0.0),
+            TriangleBarycentrics::new(0.0, -f32::EPSILON),
+            TriangleBarycentrics::new(0.75, 0.5),
+            TriangleBarycentrics::new(f32::NAN, 0.0),
+            TriangleBarycentrics::new(0.0, f32::NAN),
+            TriangleBarycentrics::new(f32::INFINITY, 0.0),
+            TriangleBarycentrics::new(0.0, f32::NEG_INFINITY),
+        ] {
+            assert!(!coordinates.is_valid());
+            assert_eq!(coordinates.weights(), None);
+        }
+
+        let mut identity = valid_hit_identity(0);
+        identity.barycentrics = TriangleBarycentrics::new(0.75, 0.5);
+        assert_eq!(
+            identity.validate(),
+            Err(RayHitIdentityError::InvalidBarycentrics)
+        );
+    }
+
+    #[test]
+    fn hit_identity_layout_and_word_encoding_are_stable() {
+        assert_eq!(size_of::<HitTableIdentity>(), 8);
+        assert_eq!(size_of::<RayHitIdentity>(), 80);
+        assert_eq!(align_of::<RayHitIdentity>(), 4);
+        assert_eq!(offset_of!(RayHitIdentity, primitive), 0);
+        assert_eq!(offset_of!(RayHitIdentity, instance), 8);
+        assert_eq!(offset_of!(RayHitIdentity, geometry), 20);
+        assert_eq!(offset_of!(RayHitIdentity, material), 44);
+        assert_eq!(offset_of!(RayHitIdentity, triangle_index), 56);
+        assert_eq!(offset_of!(RayHitIdentity, coordinate_encoding), 60);
+        assert_eq!(offset_of!(RayHitIdentity, barycentrics), 64);
+        assert_eq!(offset_of!(RayHitIdentity, scene_epoch), 72);
+        assert_eq!(size_of::<RayHit>(), 104);
+        assert_eq!(align_of::<RayHit>(), 4);
+        assert_eq!(offset_of!(RayHit, identity), 16);
+        assert_eq!(offset_of!(RayHit, bias_bound), 96);
+        assert_eq!(offset_of!(RayHit, variance), 100);
+
+        let identity = RayHitIdentity {
+            primitive: StablePrimitiveIdentity {
+                low: 0x00,
+                high: 0x01,
+            },
+            instance: HitInstanceIdentity {
+                handle: HitTableIdentity::new(0x02, 0x03),
+                transform_revision: 0x04,
+            },
+            geometry: HitGeometryIdentity {
+                handle: HitTableIdentity::new(0x05, 0x06),
+                geometry_revision: 0x07,
+                attribute_revision: 0x08,
+                primitive_row: 0x09,
+                attribute_row: 0x0a,
+            },
+            material: HitMaterialIdentity {
+                handle: HitTableIdentity::new(0x0b, 0x0c),
+                revision: 0x0d,
+            },
+            triangle_index: 0x0e,
+            coordinate_encoding: HitCoordinateEncoding::TRIANGLE_BARYCENTRIC_UV,
+            barycentrics: TriangleBarycentrics::new(0.25, 0.5),
+            scene_epoch: HitSceneEpoch {
+                low: 0x12,
+                high: 0x13,
+            },
+        };
+        let expected = [
+            0x00,
+            0x01,
+            0x02,
+            0x03,
+            0x04,
+            0x05,
+            0x06,
+            0x07,
+            0x08,
+            0x09,
+            0x0a,
+            0x0b,
+            0x0c,
+            0x0d,
+            0x0e,
+            HitCoordinateEncoding::TRIANGLE_BARYCENTRIC_UV.raw(),
+            0.25_f32.to_bits(),
+            0.5_f32.to_bits(),
+            0x12,
+            0x13,
+        ];
+        assert_eq!(identity.to_words(), expected);
+        assert_eq!(RayHitIdentity::from_words(expected), identity);
+        assert_eq!(bytemuck::bytes_of(&identity).len(), 80);
+    }
 
     #[test]
     fn journal_is_wal_ordered_and_checkpointable() {
@@ -1122,7 +1932,7 @@ mod tests {
                 ..SceneStats::default()
             },
             FrameResourceBudget {
-                gpu_ms: 16.6,
+                gpu_ms: 0.1,
                 ..FrameResourceBudget::default()
             },
             PlanCaps {
@@ -1134,10 +1944,13 @@ mod tests {
             Tier::Balanced,
             GiCandidateAvailability::HostProvided,
         );
-        assert!(plan.recipes.contains(&RecipeId::SpecializedDeterministic));
+        assert!(plan.recipes.is_empty());
         assert!(plan.explain().contains("unsupported:DirectStochasticRT"));
         assert!(plan.explain().contains("unavailable:DdgiProbes"));
-        assert!(plan.explain().contains("determinism:WorldRestir"));
+        assert!(plan
+            .rejected
+            .contains(&Rejection::Budget(RecipeId::SpecializedDeterministic)));
+        assert!(plan.explain().contains("unavailable:WorldRestir"));
     }
 
     #[test]
@@ -1160,7 +1973,7 @@ mod tests {
             Tier::Balanced,
             GiCandidateAvailability::HostProvided,
         );
-        assert_eq!(plan.recipes, vec![RecipeId::SpecializedDeterministic]);
+        assert!(plan.recipes.is_empty());
         assert!(plan.rejected.iter().any(|rejection| matches!(
             rejection,
             Rejection::Unavailable(RecipeId::SsgiScreenSpace)
@@ -1168,7 +1981,7 @@ mod tests {
     }
 
     #[test]
-    fn planner_admits_world_restir_when_backend_and_budget_are_available() {
+    fn planner_rejects_world_restir_without_a_registered_backend() {
         let plan = BudgetCompiler::compile(
             SceneStats::default(),
             FrameResourceBudget {
@@ -1187,9 +2000,8 @@ mod tests {
             Tier::Balanced,
             GiCandidateAvailability::HostProvided,
         );
-        assert!(plan.recipes.contains(&RecipeId::SpecializedDeterministic));
-        assert!(plan.recipes.contains(&RecipeId::WorldRestir));
-        assert!(!plan
+        assert!(!plan.recipes.contains(&RecipeId::WorldRestir));
+        assert!(plan
             .rejected
             .iter()
             .any(|rejection| matches!(rejection, Rejection::Unavailable(RecipeId::WorldRestir))));
@@ -1213,7 +2025,127 @@ mod tests {
         assert!(plan
             .rejected
             .iter()
-            .any(|rejection| matches!(rejection, Rejection::Determinism(RecipeId::WorldRestir))));
+            .any(|rejection| matches!(rejection, Rejection::Unavailable(RecipeId::WorldRestir))));
+    }
+
+    #[test]
+    fn every_recipe_has_one_consistent_backend_registration_answer() {
+        for recipe in RecipeId::ALL {
+            assert_eq!(
+                recipe.has_execution_backend(),
+                recipe_backend::registration(recipe).is_some()
+            );
+            if let Some(registration) = recipe_backend::registration(recipe) {
+                assert_eq!(registration.recipe, recipe);
+                assert_eq!(registration.cost, recipe.cost());
+                assert!(registration.deterministic_twin);
+            }
+        }
+
+        assert_eq!(
+            recipe_backend::registrations()
+                .iter()
+                .map(|registration| registration.recipe)
+                .collect::<Vec<_>>(),
+            vec![
+                RecipeId::DirectStochasticRt,
+                RecipeId::DirectStochasticVsm,
+                RecipeId::SpecializedDeterministic,
+            ]
+        );
+    }
+
+    #[test]
+    fn unregistered_shadow_reflection_and_gi_recipes_are_structured_unavailable() {
+        let plan = BudgetCompiler::compile(
+            SceneStats::default(),
+            FrameResourceBudget {
+                gpu_ms: 1_000.0,
+                bandwidth: u64::MAX,
+                resident_bytes: u64::MAX,
+                io_ops: u32::MAX,
+                shading_rate_budget: 1.0,
+            },
+            PlanCaps {
+                ray_tracing: true,
+                virtual_shadow: true,
+                offline: true,
+                deterministic_npr: false,
+            },
+            Tier::Offline,
+            GiCandidateAvailability::HostProvided,
+        );
+
+        for recipe in [
+            RecipeId::DirectDeterministicCsm,
+            RecipeId::DdgiProbes,
+            RecipeId::ScreenProbeGi,
+            RecipeId::SurfaceCacheSurfel,
+            RecipeId::WorldRestir,
+            RecipeId::SsgiScreenSpace,
+            RecipeId::SpecularRestir,
+            RecipeId::SparseSdfGi,
+            RecipeId::RadianceCascades,
+            RecipeId::PathTracedOffline,
+        ] {
+            assert!(!plan.recipes.contains(&recipe));
+            assert!(plan
+                .rejected
+                .contains(&Rejection::Unavailable(recipe)), "{recipe:?}");
+        }
+    }
+
+    #[test]
+    fn selected_plan_executions_are_all_registered_and_costed_by_the_backend() {
+        let plan = BudgetCompiler::compile(
+            SceneStats::default(),
+            FrameResourceBudget {
+                gpu_ms: 1_000.0,
+                bandwidth: u64::MAX,
+                resident_bytes: u64::MAX,
+                io_ops: u32::MAX,
+                shading_rate_budget: 1.0,
+            },
+            PlanCaps {
+                ray_tracing: true,
+                virtual_shadow: true,
+                offline: false,
+                deterministic_npr: false,
+            },
+            Tier::Quality,
+            GiCandidateAvailability::Missing,
+        );
+
+        assert_eq!(plan.validate_execution_contract(), Ok(()));
+        let executions = plan.executions();
+        assert_eq!(executions.len(), plan.recipes.len());
+        for execution in executions {
+            let registration = recipe_backend::registration(execution.recipe)
+                .expect("every plan execution must have a registered backend");
+            assert_eq!(execution.recipe.cost(), registration.cost);
+            assert_eq!(execution.domain, execution.recipe.domain());
+        }
+    }
+
+    #[test]
+    fn manually_assembled_plan_reports_unavailable_instead_of_fabricating_execution() {
+        let plan = LightingPlan {
+            tier: Tier::Balanced,
+            recipes: vec![RecipeId::WorldRestir],
+            candidate_source: GiCandidateSource::Disabled,
+            partition: BudgetPartition::default(),
+            budget: FrameResourceBudget::default(),
+            rejected: Vec::new(),
+        };
+
+        assert_eq!(
+            plan.validate_execution_contract(),
+            Err(Rejection::Unavailable(RecipeId::WorldRestir))
+        );
+        assert_eq!(
+            plan.rejection_explanations(),
+            Vec::<RejectionExplanation>::new()
+        );
     }
 
     fn candidate_test_budget() -> FrameResourceBudget {
@@ -1281,44 +2213,18 @@ mod tests {
                         plan.rejected.iter().copied().find(|rejection| {
                             rejection.explanation().recipe == RecipeId::WorldRestir
                         });
+                    assert!(!plan.recipes.contains(&RecipeId::WorldRestir));
+                    assert_eq!(plan.candidate_source, GiCandidateSource::Disabled);
                     assert_eq!(
-                        plan.executions().iter().any(|execution| {
-                            execution.recipe == RecipeId::WorldRestir
-                                && execution.domain == RecipeDomain::Indirect
-                        }),
-                        expected.is_ok()
+                        rejection,
+                        Some(Rejection::Unavailable(RecipeId::WorldRestir))
                     );
-                    assert_eq!(
-                        plan.recipes.contains(&RecipeId::WorldRestir),
-                        expected.is_ok()
-                    );
-                    match expected {
-                        Ok(source) => {
-                            assert_eq!(plan.candidate_source, source);
-                            assert_eq!(rejection, None);
-                            assert!(plan
-                                .explain()
-                                .contains(&format!("candidate_source={source:?}")));
-                        }
-                        Err(reason) => {
-                            assert_eq!(plan.candidate_source, GiCandidateSource::Disabled);
-                            assert_eq!(
-                                rejection,
-                                Some(Rejection::CandidateSource {
-                                    recipe: RecipeId::WorldRestir,
-                                    reason,
-                                })
-                            );
-                            let explanation = rejection.unwrap().explanation();
-                            assert_eq!(explanation.code, RejectionCode::CandidateSource);
-                            assert_eq!(explanation.detail, reason.detail());
-                            assert_eq!(explanation.variant_gate, None);
-                            assert!(plan.explain().contains(&format!(
-                                "candidate_source:WorldRestir:{}",
-                                reason.detail()
-                            )));
-                        }
-                    }
+                    let explanation = rejection.unwrap().explanation();
+                    assert_eq!(explanation.code, RejectionCode::Unavailable);
+                    assert_eq!(explanation.detail, "backend");
+                    assert_eq!(explanation.variant_gate, None);
+                    assert!(!plan.explain().contains("candidate_source:WorldRestir"));
+                    let _ = expected;
                 }
             }
         }
@@ -1342,12 +2248,11 @@ mod tests {
                 max_total: 0,
             },
         );
-        assert_eq!(plan.recipes, vec![RecipeId::SpecializedDeterministic]);
+        assert!(plan.recipes.is_empty());
         assert_eq!(plan.candidate_source, GiCandidateSource::Disabled);
-        assert!(plan.rejected.contains(&Rejection::CandidateSource {
-            recipe: RecipeId::WorldRestir,
-            reason: GiCandidateRejection::MissingInputs,
-        }));
+        assert!(plan
+            .rejected
+            .contains(&Rejection::Unavailable(RecipeId::WorldRestir)));
         assert!(plan.explain().contains("candidate_source=Disabled"));
     }
 
@@ -1374,7 +2279,7 @@ mod tests {
                     .copied()
                     .filter(|rejection| { rejection.explanation().recipe == RecipeId::WorldRestir })
                     .collect::<Vec<_>>(),
-                vec![Rejection::Determinism(RecipeId::WorldRestir)]
+                vec![Rejection::Unavailable(RecipeId::WorldRestir)]
             );
         }
     }
@@ -1413,11 +2318,11 @@ mod tests {
                     Tier::Balanced,
                     availability,
                 );
-                assert_eq!(plan.recipes, vec![RecipeId::SpecializedDeterministic]);
+                assert!(!plan.recipes.contains(&RecipeId::WorldRestir));
                 assert_eq!(plan.candidate_source, GiCandidateSource::Disabled);
                 assert!(plan
                     .rejected
-                    .contains(&Rejection::Budget(RecipeId::WorldRestir)));
+                    .contains(&Rejection::Unavailable(RecipeId::WorldRestir)));
             }
         }
     }
@@ -1450,15 +2355,11 @@ mod tests {
                     availability,
                     gate,
                 );
-                assert_eq!(plan.recipes, vec![RecipeId::SpecializedDeterministic]);
+                assert!(!plan.recipes.contains(&RecipeId::WorldRestir));
                 assert_eq!(plan.candidate_source, GiCandidateSource::Disabled);
-                assert!(plan.rejected.iter().any(|rejection| matches!(
-                    rejection,
-                    Rejection::VariantGate {
-                        recipe: RecipeId::WorldRestir,
-                        ..
-                    }
-                )));
+                assert!(plan
+                    .rejected
+                    .contains(&Rejection::Unavailable(RecipeId::WorldRestir)));
             }
         }
     }
@@ -1475,7 +2376,7 @@ mod tests {
                 shading_rate_budget: 1.0,
             },
             PlanCaps {
-                ray_tracing: false,
+                ray_tracing: true,
                 virtual_shadow: false,
                 offline: false,
                 deterministic_npr: false,
@@ -1490,19 +2391,20 @@ mod tests {
         let explanation = plan
             .rejection_explanations()
             .into_iter()
-            .find(|item| item.code == RejectionCode::VariantGate)
-            .expect("the second admitted recipe must hit the total variant gate");
-        assert_eq!(explanation.recipe, RecipeId::WorldRestir);
-        assert_eq!(explanation.requested_variants, 2);
+            .find(|item| item.recipe == RecipeId::DirectStochasticRt)
+            .expect("the registered direct recipe must produce a rejection");
+        assert_eq!(explanation.recipe, RecipeId::DirectStochasticRt);
+        assert_eq!(explanation.code, RejectionCode::VariantGate);
+        assert_eq!(explanation.requested_variants, 4);
         assert_eq!(
             explanation.variant_gate,
             Some(VariantGateEvidence {
-                selected_variants: 1,
+                selected_variants: 0,
                 max_per_recipe: 4,
                 max_total: 2,
             })
         );
-        assert!(plan.explain().contains("variant_gate:WorldRestir"));
+        assert!(plan.explain().contains("variant_gate:DirectStochasticRT"));
         assert_eq!(plan.candidate_source, GiCandidateSource::Disabled);
     }
 
@@ -1518,7 +2420,7 @@ mod tests {
                 shading_rate_budget: 1.0,
             },
             PlanCaps {
-                ray_tracing: false,
+                ray_tracing: true,
                 virtual_shadow: false,
                 offline: false,
                 deterministic_npr: false,
@@ -1529,7 +2431,7 @@ mod tests {
         let metadata = plan.debug_metadata();
         assert_eq!(metadata.len(), plan.recipes.len());
         assert!(metadata.iter().any(|(recipe, meta)| {
-            *recipe == RecipeId::SpecializedDeterministic
+            *recipe == RecipeId::DirectStochasticRt
                 && meta.channel == super::super::debug::ChannelSemantics::Radiance
         }));
     }
@@ -1618,7 +2520,7 @@ mod tests {
                 *slot = Some(RayHit {
                     radiance: [index as f32, 0.0, 0.0],
                     depth: 1.0,
-                    material: index as u32,
+                    identity: valid_hit_identity(index as u32),
                     bias_bound: 0.0,
                     variance: 0.0,
                 });
@@ -1658,8 +2560,8 @@ mod tests {
             backend.poll(submission.token, 12, 0, &mut out),
             PollState::Ready
         );
-        assert_eq!(out[0].unwrap().material, 0);
-        assert_eq!(out[1].unwrap().material, 1);
+        assert_eq!(out[0].unwrap().identity, valid_hit_identity(0));
+        assert_eq!(out[1].unwrap().identity, valid_hit_identity(1));
         assert!(
             out[2].is_none(),
             "the caller's slot range is never compacted"

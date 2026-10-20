@@ -75,7 +75,7 @@ pub struct RecipeBackendRegistration {
     pub deterministic_twin: bool,
 }
 
-const REGISTRATIONS: [RecipeBackendRegistration; 2] = [
+const REGISTRATIONS: [RecipeBackendRegistration; 3] = [
     RecipeBackendRegistration {
         recipe: RecipeId::DirectStochasticRt,
         cost: RecipeId::DirectStochasticRt.cost(),
@@ -86,7 +86,23 @@ const REGISTRATIONS: [RecipeBackendRegistration; 2] = [
         cost: RecipeId::DirectStochasticVsm.cost(),
         deterministic_twin: true,
     },
+    RecipeBackendRegistration {
+        recipe: RecipeId::SpecializedDeterministic,
+        cost: RecipeId::SpecializedDeterministic.cost(),
+        deterministic_twin: true,
+    },
 ];
+
+/// Returns every registered recipe/provider pair.
+///
+/// The planner and diagnostics must consume this table instead of keeping a
+/// second list of executable recipes. A registration is only executable when
+/// it also advertises the deterministic twin required by the architecture
+/// contract.
+#[must_use]
+pub const fn registrations() -> &'static [RecipeBackendRegistration] {
+    &REGISTRATIONS
+}
 
 /// Returns the concrete backend registration for a recipe, if one exists.
 #[must_use]
@@ -94,6 +110,7 @@ pub const fn registration(recipe: RecipeId) -> Option<RecipeBackendRegistration>
     match recipe {
         RecipeId::DirectStochasticRt => Some(REGISTRATIONS[0]),
         RecipeId::DirectStochasticVsm => Some(REGISTRATIONS[1]),
+        RecipeId::SpecializedDeterministic => Some(REGISTRATIONS[2]),
         _ => None,
     }
 }
@@ -101,10 +118,10 @@ pub const fn registration(recipe: RecipeId) -> Option<RecipeBackendRegistration>
 /// Whether a recipe has a registered executable backend and deterministic twin.
 #[must_use]
 pub const fn is_registered(recipe: RecipeId) -> bool {
-    matches!(
-        recipe,
-        RecipeId::DirectStochasticRt | RecipeId::DirectStochasticVsm
-    )
+    match registration(recipe) {
+        Some(registration) => registration.deterministic_twin,
+        None => false,
+    }
 }
 
 /// Executes the registered direct RIS backend.
@@ -119,6 +136,13 @@ pub fn execute(
                 return Err(RecipeBackendError::ShadowSlotsRequired);
             };
             execute_ris(work, Some(slots))
+        }
+        RecipeId::SpecializedDeterministic => {
+            let exact_work = DirectRisWork {
+                sample_budget: u32::MAX,
+                ..work
+            };
+            execute_ris(exact_work, work.shadow_slots)
         }
         _ => Err(RecipeBackendError::UnsupportedRecipe),
     }
@@ -219,15 +243,44 @@ mod tests {
     }
 
     #[test]
-    fn registrations_cover_the_first_direct_ris_pair() {
+    fn registrations_cover_executable_direct_recipe_backends() {
+        assert_eq!(registrations().len(), 3);
         assert!(is_registered(RecipeId::DirectStochasticRt));
         assert!(is_registered(RecipeId::DirectStochasticVsm));
         assert!(!is_registered(RecipeId::DirectDeterministicCsm));
+        assert!(is_registered(RecipeId::SpecializedDeterministic));
         assert!(
             registration(RecipeId::DirectStochasticRt)
                 .expect("registered RT recipe")
                 .deterministic_twin
         );
+        for registration in registrations() {
+            assert_eq!(registration.cost, registration.recipe.cost());
+            assert!(registration.deterministic_twin);
+            assert!(RecipeId::ALL.contains(&registration.recipe));
+        }
+    }
+
+    #[test]
+    fn registration_table_is_the_single_recipe_execution_whitelist() {
+        let mut registered_from_all = Vec::new();
+        for recipe in RecipeId::ALL {
+            let registration = registration(recipe);
+            assert_eq!(recipe.has_execution_backend(), registration.is_some());
+            if let Some(registration) = registration {
+                assert_eq!(registration.recipe, recipe);
+                assert_eq!(registration.cost, recipe.cost());
+                assert!(registration.deterministic_twin);
+                registered_from_all.push(recipe);
+            }
+        }
+
+        assert_eq!(registered_from_all, vec![
+            RecipeId::DirectStochasticRt,
+            RecipeId::DirectStochasticVsm,
+            RecipeId::SpecializedDeterministic,
+        ]);
+        assert_eq!(registrations().iter().map(|entry| entry.recipe).collect::<Vec<_>>(), registered_from_all);
     }
 
     #[test]
@@ -241,6 +294,19 @@ mod tests {
         .expect("RIS execution");
         assert_eq!(output.value, [5.0, 7.0, 9.0]);
         assert!(output.selected.exact);
+    }
+
+    #[test]
+    fn specialized_deterministic_backend_always_evaluates_every_overlapping_light() {
+        let lights = lights();
+        let contributions = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]];
+        let mut work = work(&lights, &contributions, None, 0);
+        work.cluster_id = 99;
+        let output = execute(RecipeId::SpecializedDeterministic, work)
+            .expect("the exact direct backend is executable");
+        assert_eq!(output.value, [5.0, 7.0, 9.0]);
+        assert!(output.selected.exact);
+        assert_eq!(output.selected.overlap_count, 2);
     }
 
     #[test]
@@ -302,5 +368,17 @@ mod tests {
         )
         .expect_err("short shadow table must fail");
         assert_eq!(error, RecipeBackendError::ShadowSlotCountMismatch);
+    }
+
+    #[test]
+    fn unregistered_recipe_cannot_enter_the_execution_function() {
+        let lights = lights();
+        let contributions = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]];
+        let error = execute(
+            RecipeId::WorldRestir,
+            work(&lights, &contributions, None, 1),
+        )
+        .expect_err("an unregistered recipe must not have a pseudo execution path");
+        assert_eq!(error, RecipeBackendError::UnsupportedRecipe);
     }
 }

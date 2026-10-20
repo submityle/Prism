@@ -83,8 +83,8 @@ impl ResponseParams {
     #[must_use]
     pub fn new(restitution: f32, friction: f32) -> Self {
         Self {
-            restitution: restitution.clamp(0.0, 1.0),
-            friction: friction.clamp(0.0, 1.0),
+            restitution: clamp01(restitution),
+            friction: clamp01(friction),
         }
     }
 }
@@ -123,9 +123,13 @@ impl Contact {
     pub fn hit(normal: Vec3, penetration: f32, point: Vec3) -> Self {
         Self {
             hit: true,
-            normal,
-            penetration,
-            point,
+            normal: safe_normal(normal, Vec3::new(0.0, 1.0, 0.0)),
+            penetration: if penetration.is_finite() {
+                penetration.max(0.0)
+            } else {
+                0.0
+            },
+            point: finite_vec3(point),
         }
     }
 }
@@ -237,16 +241,103 @@ pub enum Collider {
 /// (numerically) zero so a degenerate contact still has a defined direction.
 #[must_use]
 fn safe_normal(v: Vec3, fallback: Vec3) -> Vec3 {
-    if v.length_squared() > EPS_LEN_SQ {
+    if is_finite_vec3(v) && v.length_squared() > EPS_LEN_SQ {
         v.normalize_or_zero()
     } else {
         fallback
     }
 }
 
+#[inline]
+fn finite_vec3(v: Vec3) -> Vec3 {
+    Vec3::new(
+        if v.x.is_finite() { v.x } else { 0.0 },
+        if v.y.is_finite() { v.y } else { 0.0 },
+        if v.z.is_finite() { v.z } else { 0.0 },
+    )
+}
+
+#[inline]
+fn is_finite_vec3(v: Vec3) -> bool {
+    v.x.is_finite() && v.y.is_finite() && v.z.is_finite()
+}
+
+#[inline]
+fn clamp01(value: f32) -> f32 {
+    if value.is_finite() {
+        value.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+#[inline]
+fn particle_radius(radius: f32) -> f32 {
+    if radius.is_finite() {
+        radius.max(0.0)
+    } else {
+        0.0
+    }
+}
+
+#[inline]
+fn normalized_plane(plane: Plane) -> Option<Plane> {
+    if !is_finite_vec3(plane.normal) || !plane.d.is_finite() {
+        return None;
+    }
+    let length = plane.normal.length();
+    if !length.is_finite() || length <= EPS {
+        return None;
+    }
+    Some(Plane::new(
+        plane.normal.scale(1.0 / length),
+        plane.d / length,
+    ))
+}
+
+#[inline]
+fn valid_aabb(box_: Aabb) -> bool {
+    is_finite_vec3(box_.min)
+        && is_finite_vec3(box_.max)
+        && box_.min.x <= box_.max.x
+        && box_.min.y <= box_.max.y
+        && box_.min.z <= box_.max.z
+}
+
+#[inline]
+fn contact_precedes(candidate: Contact, current: Contact) -> bool {
+    let candidate_values = [
+        candidate.normal.x,
+        candidate.normal.y,
+        candidate.normal.z,
+        candidate.point.x,
+        candidate.point.y,
+        candidate.point.z,
+    ];
+    let current_values = [
+        current.normal.x,
+        current.normal.y,
+        current.normal.z,
+        current.point.x,
+        current.point.y,
+        current.point.z,
+    ];
+    for (candidate, current) in candidate_values.into_iter().zip(current_values) {
+        match candidate.total_cmp(&current) {
+            core::cmp::Ordering::Less => return true,
+            core::cmp::Ordering::Greater => return false,
+            core::cmp::Ordering::Equal => {}
+        }
+    }
+    false
+}
+
 /// The closest point to `p` on the segment `a..b`.
 #[must_use]
 pub fn closest_point_on_segment(a: Vec3, b: Vec3, p: Vec3) -> Vec3 {
+    if !is_finite_vec3(a) || !is_finite_vec3(b) || !is_finite_vec3(p) {
+        return finite_vec3(a);
+    }
     let ab = b.sub(a);
     let denom = ab.length_squared();
     if denom <= EPS_LEN_SQ {
@@ -259,27 +350,38 @@ pub fn closest_point_on_segment(a: Vec3, b: Vec3, p: Vec3) -> Vec3 {
 /// Signed distance from `p` to a solid sphere surface (positive outside).
 #[must_use]
 pub fn sd_sphere(sphere: Sphere, p: Vec3) -> f32 {
-    p.distance(sphere.center) - sphere.radius
+    if !is_finite_vec3(p) || !is_finite_vec3(sphere.center) || !sphere.radius.is_finite() {
+        return f32::INFINITY;
+    }
+    p.distance(sphere.center) - particle_radius(sphere.radius)
 }
 
 /// The closest point on a sphere's surface to `p` (the sphere center when `p`
 /// coincides with the center).
 #[must_use]
 pub fn closest_point_sphere(sphere: Sphere, p: Vec3) -> Vec3 {
-    let dir = p.sub(sphere.center);
+    let center = finite_vec3(sphere.center);
+    let radius = particle_radius(sphere.radius);
+    let p = finite_vec3(p);
+    let dir = p.sub(center);
     if dir.length_squared() <= EPS_LEN_SQ {
-        return sphere.center;
+        return center;
     }
-    sphere
-        .center
-        .add(dir.normalize_or_zero().scale(sphere.radius))
+    center.add(dir.normalize_or_zero().scale(radius))
 }
 
 /// Signed distance from `p` to a solid capsule surface (positive outside).
 #[must_use]
 pub fn sd_capsule(capsule: Capsule, p: Vec3) -> f32 {
+    if !is_finite_vec3(capsule.a)
+        || !is_finite_vec3(capsule.b)
+        || !is_finite_vec3(p)
+        || !capsule.radius.is_finite()
+    {
+        return f32::INFINITY;
+    }
     let closest = closest_point_on_segment(capsule.a, capsule.b, p);
-    p.distance(closest) - capsule.radius
+    p.distance(closest) - particle_radius(capsule.radius)
 }
 
 /// The closest point on a capsule's surface to `p`.
@@ -290,12 +392,18 @@ pub fn closest_point_capsule(capsule: Capsule, p: Vec3) -> Vec3 {
     if dir.length_squared() <= EPS_LEN_SQ {
         return axis;
     }
-    axis.add(dir.normalize_or_zero().scale(capsule.radius))
+    axis.add(
+        dir.normalize_or_zero()
+            .scale(particle_radius(capsule.radius)),
+    )
 }
 
 /// The closest point to `p` inside or on a solid box (a component-wise clamp).
 #[must_use]
 pub fn closest_point_aabb(box_: Aabb, p: Vec3) -> Vec3 {
+    if !valid_aabb(box_) || !is_finite_vec3(p) {
+        return finite_vec3(p);
+    }
     Vec3::new(
         p.x.clamp(box_.min.x, box_.max.x),
         p.y.clamp(box_.min.y, box_.max.y),
@@ -307,6 +415,9 @@ pub fn closest_point_aabb(box_: Aabb, p: Vec3) -> Vec3 {
 /// negative inside).
 #[must_use]
 pub fn sd_aabb(box_: Aabb, p: Vec3) -> f32 {
+    if !valid_aabb(box_) || !is_finite_vec3(p) {
+        return f32::INFINITY;
+    }
     let c = box_.center();
     let e = box_.half_extents();
     let q = Vec3::new(
@@ -345,8 +456,14 @@ fn aabb_interior_normal(box_: Aabb, p: Vec3) -> Vec3 {
 /// signed distance drops below its radius.
 #[must_use]
 pub fn collide_half_space(plane: Plane, state: ParticleState) -> Contact {
+    let Some(plane) = normalized_plane(plane) else {
+        return Contact::miss();
+    };
+    if !is_finite_vec3(state.pos) {
+        return Contact::miss();
+    }
     let sd = plane.signed_distance(state.pos);
-    let penetration = state.radius - sd;
+    let penetration = particle_radius(state.radius) - sd;
     if penetration <= 0.0 {
         return Contact::miss();
     }
@@ -358,39 +475,54 @@ pub fn collide_half_space(plane: Plane, state: ParticleState) -> Contact {
 /// Detects the contact between a particle sphere and a solid sphere.
 #[must_use]
 pub fn collide_sphere(sphere: Sphere, state: ParticleState) -> Contact {
+    if !is_finite_vec3(sphere.center) || !sphere.radius.is_finite() || !is_finite_vec3(state.pos) {
+        return Contact::miss();
+    }
     let sd = sd_sphere(sphere, state.pos);
     let penetration = state.radius - sd;
     if penetration <= 0.0 {
         return Contact::miss();
     }
     let normal = safe_normal(state.pos.sub(sphere.center), Vec3::new(0.0, 1.0, 0.0));
-    let surface = sphere.center.add(normal.scale(sphere.radius));
+    let surface = sphere
+        .center
+        .add(normal.scale(particle_radius(sphere.radius)));
     Contact::hit(normal, penetration, surface)
 }
 
 /// Detects the contact between a particle sphere and a solid capsule.
 #[must_use]
 pub fn collide_capsule(capsule: Capsule, state: ParticleState) -> Contact {
+    if !is_finite_vec3(capsule.a)
+        || !is_finite_vec3(capsule.b)
+        || !capsule.radius.is_finite()
+        || !is_finite_vec3(state.pos)
+    {
+        return Contact::miss();
+    }
     let axis = closest_point_on_segment(capsule.a, capsule.b, state.pos);
-    let sd = state.pos.distance(axis) - capsule.radius;
-    let penetration = state.radius - sd;
+    let sd = state.pos.distance(axis) - particle_radius(capsule.radius);
+    let penetration = particle_radius(state.radius) - sd;
     if penetration <= 0.0 {
         return Contact::miss();
     }
     let normal = safe_normal(state.pos.sub(axis), Vec3::new(0.0, 1.0, 0.0));
-    let surface = axis.add(normal.scale(capsule.radius));
+    let surface = axis.add(normal.scale(particle_radius(capsule.radius)));
     Contact::hit(normal, penetration, surface)
 }
 
 /// Detects the contact between a particle sphere and a solid axis-aligned box.
 #[must_use]
 pub fn collide_aabb(box_: Aabb, state: ParticleState) -> Contact {
+    if !valid_aabb(box_) || !is_finite_vec3(state.pos) {
+        return Contact::miss();
+    }
     let closest = closest_point_aabb(box_, state.pos);
     let outward = state.pos.sub(closest);
     if outward.length_squared() > EPS_LEN_SQ {
         // Particle center is outside the box.
         let dist = outward.length();
-        let penetration = state.radius - dist;
+        let penetration = particle_radius(state.radius) - dist;
         if penetration <= 0.0 {
             return Contact::miss();
         }
@@ -400,7 +532,7 @@ pub fn collide_aabb(box_: Aabb, state: ParticleState) -> Contact {
     // Particle center is inside the box: always a contact, pushed out the
     // nearest face.
     let sd = sd_aabb(box_, state.pos);
-    let penetration = state.radius - sd;
+    let penetration = particle_radius(state.radius) - sd;
     let normal = safe_normal(
         aabb_interior_normal(box_, state.pos),
         Vec3::new(0.0, 1.0, 0.0),
@@ -416,7 +548,13 @@ pub fn collide_aabb(box_: Aabb, state: ParticleState) -> Contact {
 /// drops below its radius (design §10).
 #[must_use]
 pub fn collide_sdf(sample: SdfSample, state: ParticleState) -> Contact {
-    let penetration = state.radius - sample.distance;
+    if !sample.distance.is_finite()
+        || !is_finite_vec3(sample.gradient)
+        || !is_finite_vec3(state.pos)
+    {
+        return Contact::miss();
+    }
+    let penetration = particle_radius(state.radius) - sample.distance;
     if penetration <= 0.0 {
         return Contact::miss();
     }
@@ -457,10 +595,16 @@ pub fn resolve_contact(
     contact: Contact,
     params: ResponseParams,
 ) -> CollisionResponse {
-    if !contact.hit {
+    let state = ParticleState::new(
+        finite_vec3(state.pos),
+        finite_vec3(state.vel),
+        particle_radius(state.radius),
+    );
+    let params = ResponseParams::new(params.restitution, params.friction);
+    if !contact.hit || !contact.penetration.is_finite() {
         return CollisionResponse::unchanged(state);
     }
-    let normal = contact.normal;
+    let normal = safe_normal(contact.normal, Vec3::new(0.0, 1.0, 0.0));
     let new_pos = state.pos.add(normal.scale(contact.penetration.max(0.0)));
 
     let vn = state.vel.dot(normal);
@@ -505,7 +649,11 @@ pub fn resolve_particle_collision(
     let mut deepest = Contact::miss();
     for collider in colliders {
         let contact = collide(*collider, state);
-        if contact.hit && contact.penetration > deepest.penetration {
+        if contact.hit
+            && (contact.penetration > deepest.penetration + EPS
+                || ((contact.penetration - deepest.penetration).abs() <= EPS
+                    && contact_precedes(contact, deepest)))
+        {
             deepest = contact;
         }
     }
@@ -522,6 +670,11 @@ pub fn resolve_particle_collision(
 /// that is already penetrating or moving away returns `None`.
 #[must_use]
 pub fn swept_sphere_vs_plane(plane: Plane, p0: Vec3, p1: Vec3, radius: f32) -> Option<f32> {
+    let plane = normalized_plane(plane)?;
+    if !is_finite_vec3(p0) || !is_finite_vec3(p1) || !radius.is_finite() {
+        return None;
+    }
+    let radius = particle_radius(radius);
     let d0 = plane.signed_distance(p0);
     let d1 = plane.signed_distance(p1);
     let denom = d1 - d0;
@@ -550,7 +703,15 @@ pub fn swept_sphere_vs_plane(plane: Plane, p0: Vec3, p1: Vec3, radius: f32) -> O
 /// overlap at the start. This catches tunneling between two small fast bodies.
 #[must_use]
 pub fn swept_sphere_vs_sphere(p0: Vec3, p1: Vec3, radius: f32, sphere: Sphere) -> Option<f32> {
-    let combined = radius + sphere.radius;
+    if !is_finite_vec3(p0)
+        || !is_finite_vec3(p1)
+        || !is_finite_vec3(sphere.center)
+        || !radius.is_finite()
+        || !sphere.radius.is_finite()
+    {
+        return None;
+    }
+    let combined = particle_radius(radius) + particle_radius(sphere.radius);
     let rel = p0.sub(sphere.center);
     let disp = p1.sub(p0);
 
@@ -560,13 +721,13 @@ pub fn swept_sphere_vs_sphere(p0: Vec3, p1: Vec3, radius: f32, sphere: Sphere) -
         return Some(0.0);
     }
     let a = disp.length_squared();
-    if a < EPS {
+    if !a.is_finite() || a <= EPS_LEN_SQ {
         // Not moving and not already overlapping.
         return None;
     }
     let b = 2.0 * rel.dot(disp);
     let disc = b * b - 4.0 * a * c;
-    if disc < 0.0 {
+    if !disc.is_finite() || disc < 0.0 {
         return None;
     }
     let t = (-b - disc.sqrt()) / (2.0 * a);
@@ -609,7 +770,12 @@ pub fn depth_buffer_hit(
     scene_depth: f32,
     params: DepthCollisionParams,
 ) -> bool {
-    particle_depth > scene_depth && particle_depth < scene_depth + params.thickness
+    particle_depth.is_finite()
+        && scene_depth.is_finite()
+        && params.thickness.is_finite()
+        && params.thickness > 0.0
+        && particle_depth > scene_depth
+        && particle_depth < scene_depth + params.thickness
 }
 
 /// Resolves a particle against the scene depth buffer (design §13).

@@ -28,7 +28,229 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use super::attributes::{AttributeAccess, AttributeFormat, AttributeSemantic, AttributeUsage};
-use super::IterationDomain;
+use super::events::{EventKind, EventPayload};
+use super::raytrace::{RayCollisionQuery, RayHit};
+use super::{IterationDomain, Vec3, EPS_LEN_SQ};
+
+/// Structured validation failure for the event and ray-trace module inputs.
+///
+/// The module registry is intentionally independent from a particular GPU
+/// backend, so malformed scene results and event records are rejected at the
+/// contract boundary instead of being turned into a guessed zero or a fake
+/// collision.  The WGSL ABI below carries the same fields in structure-of-
+/// arrays form for coalesced particle access.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ModuleContractError {
+    /// The selected module does not consume an event input record.
+    NotAnEventModule,
+    /// The event payload kind does not match the selected event module.
+    EventKindMismatch {
+        expected: EventKind,
+        actual: EventKind,
+    },
+    /// A required collision result was not supplied.
+    MissingCollisionHit,
+    /// A collision result was supplied to an event that cannot consume it.
+    UnexpectedCollisionHit,
+    /// The collision distance is not finite or is negative.
+    InvalidCollisionDistance,
+    /// The collision normal is non-finite or degenerate.
+    InvalidCollisionNormal,
+    /// A required condition record was not supplied.
+    MissingConditionInput,
+    /// A condition record was supplied to an event that cannot consume it.
+    UnexpectedConditionInput,
+    /// A condition scalar is non-finite.
+    InvalidConditionScalar,
+    /// An event position or velocity contains a non-finite component.
+    InvalidEventVector,
+    /// An event age is non-finite or negative.
+    InvalidEventAge,
+    /// A hit was returned for a query that cannot run.
+    HitForInactiveRayQuery,
+    /// A hit lies outside the ray query's declared range.
+    HitOutsideRayQueryRange,
+    /// A ray query contains a non-finite scalar or vector.
+    InvalidRayQuery,
+}
+
+/// The explicit collision result consumed by event modules.
+///
+/// `Miss` is a first-class result.  A hit always carries its distance and
+/// geometric normal; there is no implicit zero-distance or zero-normal
+/// fallback.  The layout used by generated WGSL is exposed by the
+/// `event_input_collision_*` resources below.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ParticleCollisionInput {
+    /// The query completed without a surface hit.
+    Miss,
+    /// The query hit a surface and returned its complete collision payload.
+    Hit {
+        /// Distance along the normalized query ray.
+        distance: f32,
+        /// Geometric surface normal at the hit point.
+        normal: Vec3,
+        /// Material slot selected by the scene query.
+        material_slot: u32,
+        /// Whether the query exited geometry through a back face.
+        back_face: bool,
+    },
+}
+
+impl ParticleCollisionInput {
+    /// Converts the shared ray-trace hit type into the module input contract.
+    #[must_use]
+    pub const fn from_ray_hit(hit: RayHit) -> Self {
+        Self::Hit {
+            distance: hit.distance,
+            normal: hit.normal,
+            material_slot: hit.material_slot,
+            back_face: hit.back_face,
+        }
+    }
+
+    /// Whether this record represents a surface hit.
+    #[must_use]
+    pub const fn is_hit(self) -> bool {
+        matches!(self, Self::Hit { .. })
+    }
+
+    /// Validates all fields that are meaningful for the selected result.
+    pub fn validate(self) -> Result<(), ModuleContractError> {
+        let Self::Hit {
+            distance, normal, ..
+        } = self
+        else {
+            return Ok(());
+        };
+        if !distance.is_finite() || distance < 0.0 {
+            return Err(ModuleContractError::InvalidCollisionDistance);
+        }
+        if !vec3_is_finite(normal) || normal.length_squared() <= EPS_LEN_SQ {
+            return Err(ModuleContractError::InvalidCollisionNormal);
+        }
+        Ok(())
+    }
+
+    /// Returns the shared hit value when this record is a hit.
+    #[must_use]
+    pub const fn as_ray_hit(self) -> Option<RayHit> {
+        match self {
+            Self::Miss => None,
+            Self::Hit {
+                distance,
+                normal,
+                material_slot,
+                back_face,
+            } => Some(RayHit {
+                distance,
+                normal,
+                material_slot,
+                back_face,
+            }),
+        }
+    }
+}
+
+/// A condition sample supplied to [`BuiltinModule::EmitOnCondition`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ParticleConditionInput {
+    /// Result of the authored predicate after its data-interface evaluation.
+    pub passed: bool,
+    /// The scalar value used by the predicate.
+    pub value: f32,
+    /// The authored comparison threshold.
+    pub threshold: f32,
+}
+
+impl ParticleConditionInput {
+    /// Validates the scalar portion of the condition contract.
+    pub fn validate(self) -> Result<(), ModuleContractError> {
+        if self.value.is_finite() && self.threshold.is_finite() {
+            Ok(())
+        } else {
+            Err(ModuleContractError::InvalidConditionScalar)
+        }
+    }
+}
+
+/// Complete input record for one event module invocation.
+///
+/// The event payload is kept separate from collision and condition inputs so a
+/// consumer can select only the data it needs while retaining an explicit
+/// presence/absence state.  `payload.kind` is the authoritative event kind;
+/// the selected built-in module validates that kind before code generation or
+/// CPU reference evaluation consumes the record.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ParticleEventInput {
+    /// Originator attributes inherited by the spawned child.
+    pub payload: EventPayload,
+    /// Collision result associated with this event, or [`Miss`](ParticleCollisionInput::Miss).
+    pub collision: ParticleCollisionInput,
+    /// Condition data for a condition event, or `None` for other event kinds.
+    pub condition: Option<ParticleConditionInput>,
+}
+
+impl ParticleEventInput {
+    /// Validates the common payload fields without selecting a module.
+    pub fn validate(&self) -> Result<(), ModuleContractError> {
+        if !vec3_is_finite(self.payload.position) || !vec3_is_finite(self.payload.velocity) {
+            return Err(ModuleContractError::InvalidEventVector);
+        }
+        if !self.payload.age.is_finite() || self.payload.age < 0.0 {
+            return Err(ModuleContractError::InvalidEventAge);
+        }
+        self.collision.validate()?;
+        if let Some(condition) = self.condition {
+            condition.validate()?;
+        }
+        Ok(())
+    }
+}
+
+/// The ray query and its resolved result as handed to `CollisionRaytrace`.
+///
+/// The query is retained alongside the result so a CPU reference or a scene
+/// provider can prove that a hit belongs to the requested motion segment.  A
+/// backend must not manufacture a hit for an inactive query or report a hit
+/// beyond `max_distance`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ParticleRaytraceInput {
+    /// Motion ray submitted to the scene query service.
+    pub query: RayCollisionQuery,
+    /// Explicit hit/miss result returned by that service.
+    pub result: ParticleCollisionInput,
+}
+
+impl ParticleRaytraceInput {
+    /// Validates query and result consistency.
+    pub fn validate(&self) -> Result<(), ModuleContractError> {
+        if !vec3_is_finite(self.query.origin)
+            || !vec3_is_finite(self.query.direction)
+            || !self.query.max_distance.is_finite()
+            || !self.query.radius.is_finite()
+            || self.query.max_distance < 0.0
+            || self.query.radius < 0.0
+        {
+            return Err(ModuleContractError::InvalidRayQuery);
+        }
+        self.result.validate()?;
+        if let ParticleCollisionInput::Hit { distance, .. } = self.result {
+            if !self.query.is_active() {
+                return Err(ModuleContractError::HitForInactiveRayQuery);
+            }
+            if distance > self.query.max_distance {
+                return Err(ModuleContractError::HitOutsideRayQueryRange);
+            }
+        }
+        Ok(())
+    }
+}
+
+#[inline]
+fn vec3_is_finite(value: Vec3) -> bool {
+    value.x.is_finite() && value.y.is_finite() && value.z.is_finite()
+}
 
 /// The plugin-level simulation stage a [`EmberModule`] contributes to
 /// (design §8.1).
@@ -579,7 +801,6 @@ const A_COLOR: &[AttributeSemantic] = &[AttributeSemantic::Color];
 const A_SIZE: &[AttributeSemantic] = &[AttributeSemantic::Size];
 const A_ROTATION: &[AttributeSemantic] = &[AttributeSemantic::Rotation];
 const A_LIFETIME_AGE: &[AttributeSemantic] = &[AttributeSemantic::Lifetime, AttributeSemantic::Age];
-const A_AGE: &[AttributeSemantic] = &[AttributeSemantic::Age];
 const A_AGEKILL: &[AttributeSemantic] = &[
     AttributeSemantic::Age,
     AttributeSemantic::Lifetime,
@@ -600,8 +821,7 @@ const A_VEL_LIFE: &[AttributeSemantic] = &[
     AttributeSemantic::Lifetime,
     AttributeSemantic::Velocity,
 ];
-const A_DEATH: &[AttributeSemantic] = &[AttributeSemantic::Alive, AttributeSemantic::Position];
-const A_PARTICLE_ID: &[AttributeSemantic] = &[AttributeSemantic::ParticleId];
+const A_EVENT_INPUT: &[AttributeSemantic] = &[];
 
 const R_EMPTY: &[ResourceDecl] = &[];
 const R_GRAVITY: &[ResourceDecl] = &[ResourceDecl::uniform("gravity", 2, 0)];
@@ -625,7 +845,27 @@ const R_COLLISION_SDF: &[ResourceDecl] = &[
     ResourceDecl::uniform("collision_sdf_origin", 2, 1),
     ResourceDecl::uniform("collision_sdf_extent", 2, 2),
 ];
-const R_RAYTRACE: &[ResourceDecl] = &[ResourceDecl::buffer("raytrace_scene", 2, 0)];
+const R_RAYTRACE: &[ResourceDecl] = &[
+    ResourceDecl::buffer("collision_raytrace_hit", 2, 0),
+    ResourceDecl::new(
+        "collision_raytrace_distance",
+        ResourceKind::StorageBuffer,
+        ResourceAccess::ReadOnly,
+        AttributeFormat::F32,
+        2,
+        1,
+    ),
+    ResourceDecl::new(
+        "collision_raytrace_normal",
+        ResourceKind::StorageBuffer,
+        ResourceAccess::ReadOnly,
+        AttributeFormat::Vec4,
+        2,
+        2,
+    ),
+    ResourceDecl::buffer("collision_raytrace_material", 2, 3),
+    ResourceDecl::buffer("collision_raytrace_back_face", 2, 4),
+];
 const R_BOUNCE: &[ResourceDecl] = &[ResourceDecl::uniform("bounce_params", 2, 0)];
 const R_COLOR_CURVE: &[ResourceDecl] = &[ResourceDecl::curve("color_over_life", 2, 0)];
 const R_SIZE_CURVE: &[ResourceDecl] = &[ResourceDecl::curve("size_over_life", 2, 0)];
@@ -671,7 +911,132 @@ const R_SET_ROTATION: &[ResourceDecl] = &[ResourceDecl::uniform("set_rotation", 
 const R_EMITTER_VELOCITY: &[ResourceDecl] = &[ResourceDecl::uniform("emitter_velocity", 2, 0)];
 const R_LIFETIME_PARAMS: &[ResourceDecl] = &[ResourceDecl::uniform("lifetime_params", 2, 0)];
 const R_CONSTRAINT_PARAMS: &[ResourceDecl] = &[ResourceDecl::uniform("constraint_params", 2, 0)];
-const R_EVENT_OUTPUT: &[ResourceDecl] = &[ResourceDecl::storage_rw("event_output", 2, 0)];
+const R_EVENT_OUTPUT: &[ResourceDecl] = &[
+    ResourceDecl::buffer("event_input_kind", 2, 0),
+    ResourceDecl::buffer("event_input_origin", 2, 1),
+    ResourceDecl::new(
+        "event_input_position",
+        ResourceKind::StorageBuffer,
+        ResourceAccess::ReadOnly,
+        AttributeFormat::Vec4,
+        2,
+        2,
+    ),
+    ResourceDecl::new(
+        "event_input_velocity",
+        ResourceKind::StorageBuffer,
+        ResourceAccess::ReadOnly,
+        AttributeFormat::Vec4,
+        2,
+        3,
+    ),
+    ResourceDecl::new(
+        "event_input_age",
+        ResourceKind::StorageBuffer,
+        ResourceAccess::ReadOnly,
+        AttributeFormat::F32,
+        2,
+        4,
+    ),
+    ResourceDecl::buffer("event_input_collision_hit", 2, 5),
+    ResourceDecl::new(
+        "event_input_collision_distance",
+        ResourceKind::StorageBuffer,
+        ResourceAccess::ReadOnly,
+        AttributeFormat::F32,
+        2,
+        6,
+    ),
+    ResourceDecl::new(
+        "event_input_collision_normal",
+        ResourceKind::StorageBuffer,
+        ResourceAccess::ReadOnly,
+        AttributeFormat::Vec4,
+        2,
+        7,
+    ),
+    ResourceDecl::buffer("event_input_collision_material", 2, 8),
+    ResourceDecl::buffer("event_input_collision_back_face", 2, 9),
+    ResourceDecl::buffer("event_input_condition_passed", 2, 10),
+    ResourceDecl::new(
+        "event_input_condition_value",
+        ResourceKind::StorageBuffer,
+        ResourceAccess::ReadOnly,
+        AttributeFormat::F32,
+        2,
+        11,
+    ),
+    ResourceDecl::new(
+        "event_input_condition_threshold",
+        ResourceKind::StorageBuffer,
+        ResourceAccess::ReadOnly,
+        AttributeFormat::F32,
+        2,
+        12,
+    ),
+    ResourceDecl::storage_rw("event_output", 2, 13),
+    ResourceDecl::storage_rw("event_output_kind", 2, 14),
+    ResourceDecl::storage_rw("event_output_origin", 2, 15),
+    ResourceDecl::new(
+        "event_output_position",
+        ResourceKind::StorageBuffer,
+        ResourceAccess::ReadWrite,
+        AttributeFormat::Vec4,
+        2,
+        16,
+    ),
+    ResourceDecl::new(
+        "event_output_velocity",
+        ResourceKind::StorageBuffer,
+        ResourceAccess::ReadWrite,
+        AttributeFormat::Vec4,
+        2,
+        17,
+    ),
+    ResourceDecl::new(
+        "event_output_age",
+        ResourceKind::StorageBuffer,
+        ResourceAccess::ReadWrite,
+        AttributeFormat::F32,
+        2,
+        18,
+    ),
+    ResourceDecl::storage_rw("event_output_collision_hit", 2, 19),
+    ResourceDecl::new(
+        "event_output_collision_distance",
+        ResourceKind::StorageBuffer,
+        ResourceAccess::ReadWrite,
+        AttributeFormat::F32,
+        2,
+        20,
+    ),
+    ResourceDecl::new(
+        "event_output_collision_normal",
+        ResourceKind::StorageBuffer,
+        ResourceAccess::ReadWrite,
+        AttributeFormat::Vec4,
+        2,
+        21,
+    ),
+    ResourceDecl::storage_rw("event_output_collision_material", 2, 22),
+    ResourceDecl::storage_rw("event_output_collision_back_face", 2, 23),
+    ResourceDecl::new(
+        "event_output_condition_value",
+        ResourceKind::StorageBuffer,
+        ResourceAccess::ReadWrite,
+        AttributeFormat::F32,
+        2,
+        24,
+    ),
+    ResourceDecl::new(
+        "event_output_condition_threshold",
+        ResourceKind::StorageBuffer,
+        ResourceAccess::ReadWrite,
+        AttributeFormat::F32,
+        2,
+        25,
+    ),
+];
 
 const PARAM_VEC4: &[ParameterField] = &[ParameterField::new(
     "value",
@@ -1097,25 +1462,25 @@ impl BuiltinModule {
             },
             BuiltinModule::EmitOnDeath => ModuleMeta {
                 stage: StageKind::Event,
-                attributes: A_DEATH,
+                attributes: A_EVENT_INPUT,
                 resources: R_EVENT_OUTPUT,
                 kernel: "emit_on_death",
             },
             BuiltinModule::EmitOnCollision => ModuleMeta {
                 stage: StageKind::Event,
-                attributes: A_POS_VEL,
+                attributes: A_EVENT_INPUT,
                 resources: R_EVENT_OUTPUT,
                 kernel: "emit_on_collision",
             },
             BuiltinModule::EmitOnSpawn => ModuleMeta {
                 stage: StageKind::Event,
-                attributes: A_PARTICLE_ID,
+                attributes: A_EVENT_INPUT,
                 resources: R_EVENT_OUTPUT,
                 kernel: "emit_on_spawn",
             },
             BuiltinModule::EmitOnCondition => ModuleMeta {
                 stage: StageKind::Event,
-                attributes: A_AGE,
+                attributes: A_EVENT_INPUT,
                 resources: R_EVENT_OUTPUT,
                 kernel: "emit_on_condition",
             },
@@ -1230,16 +1595,10 @@ impl BuiltinModule {
                 usage(AttributeSemantic::Lifetime, read),
                 usage(AttributeSemantic::Velocity, read_write),
             ],
-            Self::EmitOnDeath => alloc::vec![
-                usage(AttributeSemantic::Alive, read),
-                usage(AttributeSemantic::Position, read),
-            ],
-            Self::EmitOnCollision => alloc::vec![
-                usage(AttributeSemantic::Position, read),
-                usage(AttributeSemantic::Velocity, read),
-            ],
-            Self::EmitOnSpawn => alloc::vec![usage(AttributeSemantic::ParticleId, read)],
-            Self::EmitOnCondition => alloc::vec![usage(AttributeSemantic::Age, read)],
+            Self::EmitOnDeath
+            | Self::EmitOnCollision
+            | Self::EmitOnSpawn
+            | Self::EmitOnCondition => alloc::vec![],
         }
     }
 
@@ -1281,6 +1640,54 @@ impl BuiltinModule {
         } else {
             None
         }
+    }
+
+    /// Validates the explicit event inputs consumed by an event module.
+    ///
+    /// Event modules do not infer their trigger from particle attributes.  The
+    /// event kind, origin payload, collision result, and condition sample must
+    /// arrive through [`ParticleEventInput`] and must agree with the selected
+    /// module.  This is the CPU-side mirror of the generated `event_input_*`
+    /// storage-buffer contract.
+    pub fn validate_event_input(
+        self,
+        input: &ParticleEventInput,
+    ) -> Result<(), ModuleContractError> {
+        if !matches!(
+            self,
+            Self::EmitOnDeath | Self::EmitOnCollision | Self::EmitOnSpawn | Self::EmitOnCondition
+        ) {
+            return Err(ModuleContractError::NotAnEventModule);
+        }
+        input.validate()?;
+        let (expected, needs_collision, needs_condition) = match self {
+            Self::EmitOnDeath => (EventKind::OnDeath, false, false),
+            Self::EmitOnCollision => (EventKind::OnCollision, true, false),
+            Self::EmitOnSpawn => (EventKind::OnSpawn, false, false),
+            Self::EmitOnCondition => (EventKind::OnCondition, false, true),
+            _ => return Err(ModuleContractError::NotAnEventModule),
+        };
+        if input.payload.kind != expected {
+            return Err(ModuleContractError::EventKindMismatch {
+                expected,
+                actual: input.payload.kind,
+            });
+        }
+        if needs_collision != input.collision.is_hit() {
+            return Err(if needs_collision {
+                ModuleContractError::MissingCollisionHit
+            } else {
+                ModuleContractError::UnexpectedCollisionHit
+            });
+        }
+        if needs_condition != input.condition.is_some() {
+            return Err(if needs_condition {
+                ModuleContractError::MissingConditionInput
+            } else {
+                ModuleContractError::UnexpectedConditionInput
+            });
+        }
+        Ok(())
     }
 }
 
@@ -1376,6 +1783,18 @@ impl EmberModule for BuiltinModule {
                 "fn ember_rand01(value: u32) -> f32 {\n    var x = value;\n    x = x ^ (x >> 16u);\n    x = x * 747796405u + 2891336453u;\n    x = ((x >> ((x >> 28u) + 4u)) ^ x) * 277803737u;\n    x = (x >> 22u) ^ x;\n    return f32(x) / 4294967295.0;\n}" ,
             );
         }
+        if matches!(
+            self,
+            BuiltinModule::EmitOnDeath
+                | BuiltinModule::EmitOnCollision
+                | BuiltinModule::EmitOnSpawn
+                | BuiltinModule::EmitOnCondition
+        ) {
+            let _ = ctx.push_function(
+                "ember_copy_event_payload",
+                "fn ember_copy_event_payload(index: u32) {\n    event_output_kind[index] = event_input_kind[index];\n    event_output_origin[index] = event_input_origin[index];\n    event_output_position[index] = event_input_position[index];\n    event_output_velocity[index] = event_input_velocity[index];\n    event_output_age[index] = event_input_age[index];\n    event_output_collision_hit[index] = event_input_collision_hit[index];\n    event_output_collision_distance[index] = event_input_collision_distance[index];\n    event_output_collision_normal[index] = event_input_collision_normal[index];\n    event_output_collision_material[index] = event_input_collision_material[index];\n    event_output_collision_back_face[index] = event_input_collision_back_face[index];\n    event_output_condition_value[index] = event_input_condition_value[index];\n    event_output_condition_threshold[index] = event_input_condition_threshold[index];\n}",
+            );
+        }
         ctx.push_function(self.kernel_function_name(), builtin_kernel_source(*self));
     }
 }
@@ -1452,7 +1871,7 @@ fn builtin_kernel_source(module: BuiltinModule) -> String {
             "    let dims = textureDimensions(collision_sdf, 0u);\n    if (dims.x > 0u && dims.y > 0u && dims.z > 0u) {\n        let extent = max(collision_sdf_extent.value.xyz, vec3<f32>(0.00001));\n        let uvw = clamp((ember_attr_position[index] - collision_sdf_origin.value.xyz) / extent, vec3<f32>(0.0), vec3<f32>(1.0));\n        let coord = vec3<i32>(i32(uvw.x * f32(dims.x - 1u)), i32(uvw.y * f32(dims.y - 1u)), i32(uvw.z * f32(dims.z - 1u)));\n        let distance = textureLoad(collision_sdf, coord, 0).x;\n        if (distance < 0.0) {\n            let px = min(coord.x + 1, i32(dims.x - 1u));\n            let py = min(coord.y + 1, i32(dims.y - 1u));\n            let pz = min(coord.z + 1, i32(dims.z - 1u));\n            let gradient = vec3<f32>(textureLoad(collision_sdf, vec3<i32>(px, coord.y, coord.z), 0).x - distance, textureLoad(collision_sdf, vec3<i32>(coord.x, py, coord.z), 0).x - distance, textureLoad(collision_sdf, vec3<i32>(coord.x, coord.y, pz), 0).x - distance);\n            let normal = normalize(gradient + vec3<f32>(0.00001));\n            ember_attr_position[index] -= normal * distance;\n            ember_attr_velocity[index] = reflect(ember_attr_velocity[index], normal);\n        }\n    }"
         }
         BuiltinModule::CollisionRaytrace => {
-            "    let scene_word = raytrace_scene[index];\n    if (scene_word != 0u) { ember_attr_velocity[index] = -ember_attr_velocity[index]; }"
+            "    let hit = collision_raytrace_hit[index] != 0u;\n    let distance = collision_raytrace_distance[index];\n    let raw_normal = collision_raytrace_normal[index].xyz;\n    let normal = select(raw_normal, -raw_normal, collision_raytrace_back_face[index] != 0u);\n    let normal_sq = dot(normal, normal);\n    let velocity = ember_attr_velocity[index];\n    let velocity_sq = dot(velocity, velocity);\n    if (hit && distance >= 0.0 && normal_sq > 0.000000000001 && velocity_sq > 0.000000000001) {\n        let travel = velocity / sqrt(velocity_sq);\n        let unit_normal = normal / sqrt(normal_sq);\n        ember_attr_position[index] += travel * distance + unit_normal * 0.0001;\n        ember_attr_velocity[index] = reflect(velocity, unit_normal);\n    }"
         }
         BuiltinModule::CollisionBounce => {
             "    ember_attr_velocity[index] *= max(0.0, bounce_params.x);\n    ember_attr_velocity[index] = vec3<f32>(ember_attr_velocity[index].xy, -ember_attr_velocity[index].z);"
@@ -1478,25 +1897,17 @@ fn builtin_kernel_source(module: BuiltinModule) -> String {
         BuiltinModule::VelocityOverLife => {
             "    let t = clamp(ember_attr_age[index] / max(ember_attr_lifetime[index], 0.001), 0.0, 1.0);\n    ember_attr_velocity[index] *= ember_sample_velocity_over_life(t).xyz;"
         }
-        BuiltinModule::EmitOnDeath
-        | BuiltinModule::EmitOnCollision
-        | BuiltinModule::EmitOnSpawn
-        | BuiltinModule::EmitOnCondition => {
-            match module {
-                BuiltinModule::EmitOnDeath => {
-                    "    event_output[index] = select(0u, 1u, ember_attr_alive[index] == 0u);"
-                }
-                BuiltinModule::EmitOnCollision => {
-                    "    event_output[index] = select(0u, 1u, dot(ember_attr_velocity[index], ember_attr_velocity[index]) > 0.0);"
-                }
-                BuiltinModule::EmitOnSpawn => {
-                    "    event_output[index] = ember_attr_particle_id[index];"
-                }
-                BuiltinModule::EmitOnCondition => {
-                    "    event_output[index] = select(0u, 1u, ember_attr_age[index] > 0.0);"
-                }
-                _ => unreachable!(),
-            }
+        BuiltinModule::EmitOnDeath => {
+            "    ember_copy_event_payload(index);\n    event_output[index] = select(0u, 1u, event_input_kind[index] == 1u);"
+        }
+        BuiltinModule::EmitOnCollision => {
+            "    ember_copy_event_payload(index);\n    let normal = event_input_collision_normal[index].xyz;\n    let normal_sq = dot(normal, normal);\n    let valid_hit = event_input_collision_hit[index] != 0u && event_input_collision_distance[index] >= 0.0 && normal_sq > 0.000000000001;\n    event_output[index] = select(0u, 1u, event_input_kind[index] == 2u && valid_hit);"
+        }
+        BuiltinModule::EmitOnSpawn => {
+            "    ember_copy_event_payload(index);\n    event_output[index] = select(0u, 1u, event_input_kind[index] == 0u);"
+        }
+        BuiltinModule::EmitOnCondition => {
+            "    ember_copy_event_payload(index);\n    event_output[index] = select(0u, 1u, event_input_kind[index] == 3u && event_input_condition_passed[index] != 0u);"
         }
     };
     format!("fn {name}(index: u32) {{\n{body}\n}}")
@@ -1617,7 +2028,27 @@ const B_CAMERA: &[ResourceDecl] = &[ResourceDecl::uniform("camera", 3, 0)];
 const B_DEPTH: &[ResourceDecl] = &[ResourceDecl::texture2d("scene_depth", 3, 0)];
 const B_NORMAL: &[ResourceDecl] = &[ResourceDecl::texture2d("scene_normal", 3, 0)];
 const B_LIGHT: &[ResourceDecl] = &[ResourceDecl::buffer("clustered_lights", 3, 0)];
-const B_RAYTRACE: &[ResourceDecl] = &[ResourceDecl::buffer("raytrace_tlas", 3, 0)];
+const B_RAYTRACE: &[ResourceDecl] = &[
+    ResourceDecl::buffer("scene_raytrace_hit", 3, 0),
+    ResourceDecl::new(
+        "scene_raytrace_distance",
+        ResourceKind::StorageBuffer,
+        ResourceAccess::ReadOnly,
+        AttributeFormat::F32,
+        3,
+        1,
+    ),
+    ResourceDecl::new(
+        "scene_raytrace_normal",
+        ResourceKind::StorageBuffer,
+        ResourceAccess::ReadOnly,
+        AttributeFormat::Vec4,
+        3,
+        2,
+    ),
+    ResourceDecl::buffer("scene_raytrace_material", 3, 3),
+    ResourceDecl::buffer("scene_raytrace_back_face", 3, 4),
+];
 const B_GI: &[ResourceDecl] = &[ResourceDecl::texture3d("gi_irradiance", 3, 0)];
 const B_AUDIO: &[ResourceDecl] = &[ResourceDecl::buffer("audio_spectrum", 3, 0)];
 const B_CURVE: &[ResourceDecl] = &[ResourceDecl::curve("signal_curve", 3, 0)];
@@ -1645,7 +2076,14 @@ const F_CAMERA: &[&str] = &["sample_camera_position", "sample_camera_view_projec
 const F_DEPTH: &[&str] = &["sample_scene_depth"];
 const F_NORMAL: &[&str] = &["sample_scene_normal"];
 const F_LIGHT: &[&str] = &["sample_clustered_light"];
-const F_RAYTRACE: &[&str] = &["trace_ray_closest", "trace_ray_any"];
+const F_RAYTRACE: &[&str] = &[
+    "trace_ray_closest_hit",
+    "trace_ray_closest_distance",
+    "trace_ray_closest_normal",
+    "trace_ray_closest_material",
+    "trace_ray_closest_back_face",
+    "trace_ray_any",
+];
 const F_GI: &[&str] = &["sample_gi_irradiance"];
 const F_AUDIO: &[&str] = &["sample_audio_band"];
 const F_CURVE: &[&str] = &["sample_curve"];
@@ -1903,6 +2341,29 @@ impl DataInterface for BuiltinDataInterface {
 }
 
 fn data_interface_function_source(interface: BuiltinDataInterface, name: &str) -> String {
+    if interface == BuiltinDataInterface::SampleRayTraceScene {
+        return match name {
+            "trace_ray_closest_hit" => String::from(
+                "fn trace_ray_closest_hit(id: u32) -> bool {\n    return scene_raytrace_hit[id] != 0u;\n}",
+            ),
+            "trace_ray_closest_distance" => String::from(
+                "fn trace_ray_closest_distance(id: u32) -> f32 {\n    return scene_raytrace_distance[id];\n}",
+            ),
+            "trace_ray_closest_normal" => String::from(
+                "fn trace_ray_closest_normal(id: u32) -> vec3<f32> {\n    return scene_raytrace_normal[id].xyz;\n}",
+            ),
+            "trace_ray_closest_material" => String::from(
+                "fn trace_ray_closest_material(id: u32) -> u32 {\n    return scene_raytrace_material[id];\n}",
+            ),
+            "trace_ray_closest_back_face" => String::from(
+                "fn trace_ray_closest_back_face(id: u32) -> bool {\n    return scene_raytrace_back_face[id] != 0u;\n}",
+            ),
+            "trace_ray_any" => String::from(
+                "fn trace_ray_any(id: u32) -> bool {\n    return scene_raytrace_hit[id] != 0u;\n}",
+            ),
+            _ => unreachable!("ray-trace function is missing from its metadata"),
+        };
+    }
     let body = match (interface, name) {
         (BuiltinDataInterface::SampleMesh, "sample_mesh_position") => {
             "    return mesh_vertices[id];"
@@ -1952,9 +2413,6 @@ fn data_interface_function_source(interface: BuiltinDataInterface, name: &str) -
         }
         (BuiltinDataInterface::SampleLight, _) => {
             "    return vec4<f32>(f32(clustered_lights[id]), 0.0, 0.0, 1.0);"
-        }
-        (BuiltinDataInterface::SampleRayTraceScene, _) => {
-            "    return vec4<f32>(f32(raytrace_tlas[id]), 0.0, 0.0, 1.0);"
         }
         (BuiltinDataInterface::SampleGiProbe, _) => {
             "    return textureLoad(gi_irradiance, vec3<i32>(i32(id), 0, 0), 0);"
@@ -2354,5 +2812,337 @@ mod tests {
         assert_eq!(ctx.fragment_count(), 0);
         assert_eq!(ctx.binding_count(), 0);
         assert_eq!(ctx.assembled_source(), "");
+    }
+
+    #[test]
+    fn raytrace_contract_accepts_complete_hit_and_preserves_payload() {
+        let hit = ParticleCollisionInput::Hit {
+            distance: 2.5,
+            normal: Vec3::new(0.0, 1.0, 0.0),
+            material_slot: 7,
+            back_face: true,
+        };
+        let input = ParticleRaytraceInput {
+            query: RayCollisionQuery {
+                origin: Vec3::ZERO,
+                direction: Vec3::new(0.0, -1.0, 0.0),
+                max_distance: 3.0,
+                radius: 0.25,
+            },
+            result: hit,
+        };
+
+        assert_eq!(input.validate(), Ok(()));
+        assert_eq!(
+            hit.as_ray_hit(),
+            Some(RayHit {
+                distance: 2.5,
+                normal: Vec3::new(0.0, 1.0, 0.0),
+                material_slot: 7,
+                back_face: true,
+            })
+        );
+    }
+
+    #[test]
+    fn raytrace_contract_rejects_invalid_hit_fields() {
+        let query = RayCollisionQuery {
+            origin: Vec3::ZERO,
+            direction: Vec3::new(1.0, 0.0, 0.0),
+            max_distance: 1.0,
+            radius: 0.0,
+        };
+
+        assert_eq!(
+            ParticleRaytraceInput {
+                query,
+                result: ParticleCollisionInput::Hit {
+                    distance: -0.1,
+                    normal: Vec3::new(0.0, 1.0, 0.0),
+                    material_slot: 0,
+                    back_face: false,
+                },
+            }
+            .validate(),
+            Err(ModuleContractError::InvalidCollisionDistance)
+        );
+        assert_eq!(
+            ParticleRaytraceInput {
+                query,
+                result: ParticleCollisionInput::Hit {
+                    distance: 0.1,
+                    normal: Vec3::ZERO,
+                    material_slot: 0,
+                    back_face: false,
+                },
+            }
+            .validate(),
+            Err(ModuleContractError::InvalidCollisionNormal)
+        );
+        assert_eq!(
+            ParticleRaytraceInput {
+                query,
+                result: ParticleCollisionInput::Hit {
+                    distance: 1.1,
+                    normal: Vec3::new(0.0, 1.0, 0.0),
+                    material_slot: 0,
+                    back_face: false,
+                },
+            }
+            .validate(),
+            Err(ModuleContractError::HitOutsideRayQueryRange)
+        );
+    }
+
+    #[test]
+    fn raytrace_contract_rejects_hit_for_inactive_query() {
+        let input = ParticleRaytraceInput {
+            query: RayCollisionQuery {
+                origin: Vec3::ZERO,
+                direction: Vec3::ZERO,
+                max_distance: 1.0,
+                radius: 0.0,
+            },
+            result: ParticleCollisionInput::Hit {
+                distance: 0.0,
+                normal: Vec3::new(0.0, 1.0, 0.0),
+                material_slot: 0,
+                back_face: false,
+            },
+        };
+
+        assert_eq!(
+            input.validate(),
+            Err(ModuleContractError::HitForInactiveRayQuery)
+        );
+        assert_eq!(
+            (ParticleRaytraceInput {
+                result: ParticleCollisionInput::Miss,
+                ..input
+            })
+            .validate(),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn event_contract_requires_matching_kind_and_inputs() {
+        let payload = |kind| EventPayload::new(kind, 12, Vec3::ZERO, Vec3::new(1.0, 2.0, 3.0), 0.5);
+        let collision = ParticleCollisionInput::Hit {
+            distance: 0.25,
+            normal: Vec3::new(0.0, 1.0, 0.0),
+            material_slot: 4,
+            back_face: false,
+        };
+        let condition = ParticleConditionInput {
+            passed: true,
+            value: 2.0,
+            threshold: 1.0,
+        };
+
+        assert_eq!(
+            BuiltinModule::EmitOnDeath.validate_event_input(&ParticleEventInput {
+                payload: payload(EventKind::OnDeath),
+                collision: ParticleCollisionInput::Miss,
+                condition: None,
+            }),
+            Ok(())
+        );
+        assert_eq!(
+            BuiltinModule::EmitOnCollision.validate_event_input(&ParticleEventInput {
+                payload: payload(EventKind::OnCollision),
+                collision,
+                condition: None,
+            }),
+            Ok(())
+        );
+        assert_eq!(
+            BuiltinModule::EmitOnSpawn.validate_event_input(&ParticleEventInput {
+                payload: payload(EventKind::OnSpawn),
+                collision: ParticleCollisionInput::Miss,
+                condition: None,
+            }),
+            Ok(())
+        );
+        assert_eq!(
+            BuiltinModule::EmitOnCondition.validate_event_input(&ParticleEventInput {
+                payload: payload(EventKind::OnCondition),
+                collision: ParticleCollisionInput::Miss,
+                condition: Some(condition),
+            }),
+            Ok(())
+        );
+
+        let spawn_input = ParticleEventInput {
+            payload: payload(EventKind::OnSpawn),
+            collision: ParticleCollisionInput::Miss,
+            condition: None,
+        };
+        assert_eq!(
+            BuiltinModule::EmitOnDeath.validate_event_input(&spawn_input),
+            Err(ModuleContractError::EventKindMismatch {
+                expected: EventKind::OnDeath,
+                actual: EventKind::OnSpawn,
+            })
+        );
+        assert_eq!(
+            BuiltinModule::EmitOnCollision.validate_event_input(&ParticleEventInput {
+                payload: payload(EventKind::OnCollision),
+                collision: ParticleCollisionInput::Miss,
+                condition: None,
+            }),
+            Err(ModuleContractError::MissingCollisionHit)
+        );
+        assert_eq!(
+            BuiltinModule::EmitOnSpawn.validate_event_input(&ParticleEventInput {
+                payload: payload(EventKind::OnSpawn),
+                collision,
+                condition: None,
+            }),
+            Err(ModuleContractError::UnexpectedCollisionHit)
+        );
+        assert_eq!(
+            BuiltinModule::EmitOnCondition.validate_event_input(&ParticleEventInput {
+                payload: payload(EventKind::OnCondition),
+                collision: ParticleCollisionInput::Miss,
+                condition: None,
+            }),
+            Err(ModuleContractError::MissingConditionInput)
+        );
+        assert_eq!(
+            BuiltinModule::EmitOnDeath.validate_event_input(&ParticleEventInput {
+                payload: payload(EventKind::OnDeath),
+                collision: ParticleCollisionInput::Miss,
+                condition: Some(condition),
+            }),
+            Err(ModuleContractError::UnexpectedConditionInput)
+        );
+        assert_eq!(
+            BuiltinModule::Gravity.validate_event_input(&spawn_input),
+            Err(ModuleContractError::NotAnEventModule)
+        );
+    }
+
+    #[test]
+    fn event_contract_rejects_invalid_payload_and_condition_scalars() {
+        let invalid_payload = ParticleEventInput {
+            payload: EventPayload::new(
+                EventKind::OnSpawn,
+                0,
+                Vec3::new(f32::NAN, 0.0, 0.0),
+                Vec3::ZERO,
+                0.0,
+            ),
+            collision: ParticleCollisionInput::Miss,
+            condition: None,
+        };
+        assert_eq!(
+            BuiltinModule::EmitOnSpawn.validate_event_input(&invalid_payload),
+            Err(ModuleContractError::InvalidEventVector)
+        );
+
+        let invalid_condition = ParticleEventInput {
+            payload: EventPayload::new(EventKind::OnCondition, 0, Vec3::ZERO, Vec3::ZERO, 0.0),
+            collision: ParticleCollisionInput::Miss,
+            condition: Some(ParticleConditionInput {
+                passed: false,
+                value: f32::INFINITY,
+                threshold: 0.0,
+            }),
+        };
+        assert_eq!(
+            BuiltinModule::EmitOnCondition.validate_event_input(&invalid_condition),
+            Err(ModuleContractError::InvalidConditionScalar)
+        );
+    }
+
+    #[test]
+    fn raytrace_and_event_codegen_expose_explicit_contract_fields() {
+        let mut collision_ctx = CodegenCtx::new();
+        BuiltinModule::CollisionRaytrace.emit_wesl(&mut collision_ctx);
+        BuiltinModule::CollisionRaytrace.emit_wesl_functions(&mut collision_ctx);
+        let collision_source = collision_ctx.assembled_source();
+        for field in [
+            "collision_raytrace_hit",
+            "collision_raytrace_distance",
+            "collision_raytrace_normal",
+            "collision_raytrace_material",
+            "collision_raytrace_back_face",
+        ] {
+            assert!(
+                collision_ctx
+                    .bindings()
+                    .iter()
+                    .any(|binding| binding.name == field),
+                "missing binding {field}"
+            );
+        }
+        for field in [
+            "collision_raytrace_hit",
+            "collision_raytrace_distance",
+            "collision_raytrace_normal",
+            "collision_raytrace_back_face",
+        ] {
+            assert!(
+                collision_source.contains(field),
+                "missing kernel field {field}"
+            );
+        }
+        assert!(!collision_source.contains("raytrace_tlas"));
+        assert!(!collision_source.contains("scene_word"));
+
+        let mut event_ctx = CodegenCtx::new();
+        BuiltinModule::EmitOnCondition.emit_wesl(&mut event_ctx);
+        BuiltinModule::EmitOnCondition.emit_wesl_functions(&mut event_ctx);
+        let event_source = event_ctx.assembled_source();
+        for field in [
+            "event_input_kind",
+            "event_input_origin",
+            "event_input_position",
+            "event_input_velocity",
+            "event_input_age",
+            "event_input_collision_hit",
+            "event_input_collision_distance",
+            "event_input_collision_normal",
+            "event_input_condition_passed",
+            "event_output_position",
+            "event_output_collision_normal",
+        ] {
+            assert!(event_source.contains(field), "missing {field}");
+        }
+        assert!(!event_source.contains("ember_attr_particle_id[index]"));
+        assert!(!event_source.contains("ember_attr_age[index] > 0.0"));
+        assert!(!event_source.contains("dot(ember_attr_velocity[index]"));
+    }
+
+    #[test]
+    fn raytrace_scene_interface_returns_structured_results() {
+        let mut ctx = CodegenCtx::new();
+        BuiltinDataInterface::SampleRayTraceScene.emit_wesl_functions(&mut ctx);
+        let source = ctx.assembled_source();
+
+        for function in [
+            "trace_ray_closest_hit",
+            "trace_ray_closest_distance",
+            "trace_ray_closest_normal",
+            "trace_ray_closest_material",
+            "trace_ray_closest_back_face",
+            "trace_ray_any",
+        ] {
+            assert!(
+                source.contains(&format!("fn {function}")),
+                "missing {function}"
+            );
+        }
+        for field in [
+            "scene_raytrace_hit",
+            "scene_raytrace_distance",
+            "scene_raytrace_normal",
+            "scene_raytrace_material",
+            "scene_raytrace_back_face",
+        ] {
+            assert!(source.contains(field), "missing {field}");
+        }
+        assert!(!source.contains("raytrace_tlas"));
     }
 }

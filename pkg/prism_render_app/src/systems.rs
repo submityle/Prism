@@ -1,5 +1,7 @@
 //! The systems that bridge the main world and the render sub-app.
 
+use std::time::Instant;
+
 use prism_ecs::prelude::{Res, ResMut, SystemParam};
 use prism_ecs::world::World;
 use prism_render_architecture::lighting::contract::{GiCandidateSource, JournalSnapshot};
@@ -69,6 +71,7 @@ pub(crate) struct FrameExecutionResources<'w> {
     particle: Option<Res<'w, crate::particle::ParticleGpuState>>,
     particle_status: Res<'w, crate::particle::ParticleUploadStatus>,
     ember: Res<'w, crate::particle::EmberGpuAssetRegistry>,
+    ember_external: Res<'w, crate::particle::ExtractedEmberExternalGpuResources>,
     ember_status: Res<'w, crate::particle::EmberPrepareStatus>,
 }
 
@@ -161,7 +164,14 @@ where
         return;
     }
     ensure_render_startup(world);
+    let frame_start = Instant::now();
     world.run_schedule(Render);
+    let frame_index = world
+        .get_resource::<RenderRecord>()
+        .map_or(0, |record| record.frame_index);
+    if let Some(stats) = world.get_resource_mut::<RenderFrameStats>() {
+        stats.record_cpu_frame(frame_index, frame_start.elapsed());
+    }
 }
 
 /// Drops the frame's queued draws once they have been recorded.
@@ -228,6 +238,7 @@ pub(crate) fn execute_frame<I>(
     let particle = execution.particle;
     let particle_status = execution.particle_status;
     let ember = execution.ember;
+    let ember_external = execution.ember_external;
     let ember_status = execution.ember_status;
     stats
         .execution_trace
@@ -271,7 +282,7 @@ pub(crate) fn execute_frame<I>(
         return;
     }
     stats.lighting_upload_error = None;
-    let lighting_pass = lighting_gpu.pass(&plan.plan);
+    let lighting_plan_pass = lighting_gpu.pass(&plan.plan);
     let trace_device: std::sync::Arc<dyn prism_render_driver::RenderDevice + Send + Sync> =
         runtime.device_handle();
     let trace = trace_gpu.prepare(
@@ -283,12 +294,12 @@ pub(crate) fn execute_frame<I>(
         runtime.device_generation(),
         trace_device,
         runtime.queue(),
-        lighting_pass
+        lighting_plan_pass
             .filter(|pass| pass.run_gi)
             .map(crate::lighting_gpu::LightingGpuPass::gi_candidate_target),
     );
     if plan.plan.candidate_source == GiCandidateSource::SoftwareBvhGpu
-        && lighting_pass.is_some_and(|pass| pass.run_gi)
+        && lighting_plan_pass.is_some_and(|pass| pass.run_gi)
         && trace.is_none()
     {
         stats.frames_failed += 1;
@@ -304,7 +315,7 @@ pub(crate) fn execute_frame<I>(
         &overrides,
         &queues,
         &functions,
-        lighting_pass,
+        Some((&*lighting_gpu, &plan.plan)),
         trace,
         particle.as_ref().map(|particle| particle.stage()),
         &mut stats,
@@ -367,6 +378,7 @@ pub(crate) fn execute_frame<I>(
         stats.execution_trace.outcome = FrameExecutionOutcome::Failed;
         return;
     }
+    let lighting_pass = lighting_gpu.pass_for_target(&plan.plan, &offscreen.target, runtime);
     let graph = match frame::target_graph_with_display_transform_and_trace_particles_and_ember(
         &offscreen.target,
         &queues,
@@ -375,6 +387,8 @@ pub(crate) fn execute_frame<I>(
         trace,
         particle.as_ref().map(|particle| particle.stage()),
         Some(&ember),
+        ember_external.graph_imports(),
+        &Default::default(),
         record.frame_index,
         &offscreen.display,
         runtime.queue(),

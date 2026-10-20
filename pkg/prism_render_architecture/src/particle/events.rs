@@ -158,13 +158,26 @@ impl EventPayload {
     /// the `CPU` reference stays bit-reproducible against a future `GPU` kernel.
     #[must_use]
     pub fn spawn_seed(&self, velocity_inheritance: f32) -> SpawnSeed {
-        let factor = velocity_inheritance.clamp(0.0, 1.0);
+        let factor = if velocity_inheritance.is_finite() {
+            velocity_inheritance.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
         SpawnSeed {
             origin_particle: self.origin_particle,
-            position: self.position,
-            velocity: self.velocity.scale(factor),
+            position: finite_vec3(self.position),
+            velocity: finite_vec3(self.velocity).scale(factor),
         }
     }
+}
+
+#[inline]
+fn finite_vec3(v: Vec3) -> Vec3 {
+    Vec3::new(
+        if v.x.is_finite() { v.x } else { 0.0 },
+        if v.y.is_finite() { v.y } else { 0.0 },
+        if v.z.is_finite() { v.z } else { 0.0 },
+    )
 }
 
 /// The inherited initial state handed to a particle spawned from an event.
@@ -382,7 +395,9 @@ impl EventRouter {
 
     /// The index of the channel registered under `id`, if any.
     fn index_of(&self, id: u32) -> Option<usize> {
-        self.channels.iter().position(|routed| routed.id == id)
+        self.channels
+            .binary_search_by_key(&id, |routed| routed.id)
+            .ok()
     }
 
     /// Registers a new channel under `id` with the given capacity, returning
@@ -391,10 +406,17 @@ impl EventRouter {
         if self.index_of(id).is_some() {
             return false;
         }
-        self.channels.push(RoutedChannel {
-            id,
-            channel: DataChannel::new(capacity),
-        });
+        let index = self
+            .channels
+            .binary_search_by_key(&id, |routed| routed.id)
+            .unwrap_or_else(|index| index);
+        self.channels.insert(
+            index,
+            RoutedChannel {
+                id,
+                channel: DataChannel::new(capacity),
+            },
+        );
         true
     }
 

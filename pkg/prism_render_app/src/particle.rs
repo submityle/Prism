@@ -19,15 +19,15 @@ use prism_render_architecture::particle::compiler::{
 };
 use prism_render_driver::{
     BufferId, BufferState, BufferUsages, FrameSync, Instance, PipelineStages, RenderDevice,
-    RenderQueue,
+    RenderQueue, TextureViewId,
 };
 use prism_render_gpudriven::{
     CompiledGraphGpuError, CompiledGraphGpuExternalResource, CompiledGraphGpuGraphBinding,
-    CompiledGraphGpuResourceRegistry, CompiledGraphGpuRevision, CompiledGraphGpuState,
-    CompiledGraphGraphError, ParameterUploadError, Particle, ParticlePipelineCache, ParticleStage,
-    ParticleStageError,
+    CompiledGraphGpuGraphImport, CompiledGraphGpuResourceRegistry, CompiledGraphGpuResourceSlot,
+    CompiledGraphGpuRevision, CompiledGraphGpuState, CompiledGraphGraphError, ParameterUploadError,
+    Particle, ParticlePipelineCache, ParticleStage, ParticleStageError,
 };
-use prism_render_graph::{BufferDesc, BufferHandle, ImportedBuffer, RenderGraph};
+use prism_render_graph::{BufferDesc, BufferHandle, ImportedBuffer, RenderGraph, TextureHandle};
 
 use crate::config::RenderAppConfig;
 use crate::runtime_resource::RenderRuntimeResource;
@@ -79,6 +79,10 @@ pub struct EmberCompiledGraphAssets {
 #[derive(Clone, Default)]
 pub struct EmberExternalGpuResources {
     registry: CompiledGraphGpuResourceRegistry,
+    graph_imports: BTreeMap<
+        CompiledGraphGpuResourceSlot,
+        (CompiledGraphGpuRevision, CompiledGraphGpuGraphImport),
+    >,
 }
 
 impl Resource for EmberExternalGpuResources {}
@@ -89,6 +93,7 @@ impl EmberExternalGpuResources {
     pub const fn new() -> Self {
         Self {
             registry: CompiledGraphGpuResourceRegistry::new(),
+            graph_imports: BTreeMap::new(),
         }
     }
 
@@ -102,6 +107,39 @@ impl EmberExternalGpuResources {
     #[must_use]
     pub const fn registry_mut(&mut self) -> &mut CompiledGraphGpuResourceRegistry {
         &mut self.registry
+    }
+
+    /// Publishes the symbolic frame-graph import contract for one external
+    /// resource slot and exact resource revision. A later resource revision
+    /// invalidates this descriptor until its owner publishes replacement
+    /// metadata. The concrete GPU resource remains owned by the registry; this
+    /// descriptor supplies metadata a frame graph cannot infer from a raw RHI
+    /// handle (format, extent, mip/layer counts and synchronization states).
+    pub fn set_graph_import(
+        &mut self,
+        slot: CompiledGraphGpuResourceSlot,
+        revision: CompiledGraphGpuRevision,
+        import: CompiledGraphGpuGraphImport,
+    ) {
+        self.graph_imports.insert(slot, (revision, import));
+    }
+
+    /// Removes the symbolic frame-graph import contract for one slot.
+    pub fn remove_graph_import(
+        &mut self,
+        slot: CompiledGraphGpuResourceSlot,
+    ) -> Option<CompiledGraphGpuGraphImport> {
+        self.graph_imports.remove(&slot).map(|(_, import)| import)
+    }
+
+    /// Returns the published frame-graph import contract for one slot.
+    #[must_use]
+    pub fn graph_import(
+        &self,
+        slot: CompiledGraphGpuResourceSlot,
+    ) -> Option<&CompiledGraphGpuGraphImport> {
+        let (revision, import) = self.graph_imports.get(&slot)?;
+        (self.registry.get(slot)?.revision == *revision).then_some(import)
     }
 }
 
@@ -220,6 +258,7 @@ impl Resource for ExtractedEmberRenderAssets {}
 #[derive(Clone, Default)]
 pub struct ExtractedEmberExternalGpuResources {
     registry: CompiledGraphGpuResourceRegistry,
+    graph_imports: BTreeMap<CompiledGraphGpuResourceSlot, CompiledGraphGpuGraphImport>,
 }
 
 impl Resource for ExtractedEmberExternalGpuResources {}
@@ -229,6 +268,23 @@ impl ExtractedEmberExternalGpuResources {
     #[must_use]
     pub const fn registry(&self) -> &CompiledGraphGpuResourceRegistry {
         &self.registry
+    }
+
+    /// Returns the exact extracted frame-graph import metadata.
+    #[must_use]
+    pub fn graph_import(
+        &self,
+        slot: CompiledGraphGpuResourceSlot,
+    ) -> Option<&CompiledGraphGpuGraphImport> {
+        self.graph_imports.get(&slot)
+    }
+
+    /// Returns all extracted frame-graph import metadata in stable slot order.
+    #[must_use]
+    pub const fn graph_imports(
+        &self,
+    ) -> &BTreeMap<CompiledGraphGpuResourceSlot, CompiledGraphGpuGraphImport> {
+        &self.graph_imports
     }
 }
 
@@ -280,13 +336,23 @@ pub fn extract_ember_render_assets(main: &mut World, render: &mut World) {
 /// Extracts caller-owned Ember GPU resources without minting new revisions.
 pub fn extract_ember_external_gpu_resources(main: &mut World, render: &mut World) {
     render.init_resource::<ExtractedEmberExternalGpuResources>();
-    let snapshot = main
+    let (snapshot, graph_imports) = main
         .get_resource::<EmberExternalGpuResources>()
-        .map(|resources| resources.registry.clone())
+        .map(|resources| {
+            let graph_imports = resources
+                .graph_imports
+                .iter()
+                .filter_map(|(slot, (revision, import))| {
+                    (resources.registry.get(*slot)?.revision == *revision)
+                        .then_some((*slot, import.clone()))
+                })
+                .collect();
+            (resources.registry.clone(), graph_imports)
+        })
         .unwrap_or_default();
-    render
-        .resource_mut::<ExtractedEmberExternalGpuResources>()
-        .registry = snapshot;
+    let extracted = render.resource_mut::<ExtractedEmberExternalGpuResources>();
+    extracted.registry = snapshot;
+    extracted.graph_imports = graph_imports;
 }
 
 /// A compiled Ember graph and its device-owned resources in the render world.
@@ -311,6 +377,29 @@ pub struct EmberGpuAssetRegistry {
 }
 
 impl Resource for EmberGpuAssetRegistry {}
+
+fn import_graph_buffer(
+    graph: &mut RenderGraph,
+    imported: &mut BTreeMap<BufferId, BufferHandle>,
+    id: BufferId,
+    size: u64,
+    usage: BufferUsages,
+    state: BufferState,
+) -> BufferHandle {
+    if let Some(handle) = imported.get(&id) {
+        return *handle;
+    }
+    let handle = graph.import_buffer(
+        "ember-graph-buffer",
+        BufferDesc::new(size, usage),
+        ImportedBuffer {
+            buffer: id,
+            entry_state: state,
+        },
+    );
+    imported.insert(id, handle);
+    handle
+}
 
 /// Failure while publishing a compiled graph into the render-world registry.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -596,28 +685,17 @@ impl EmberGpuAssetRegistry {
         &self,
         graph: &mut RenderGraph,
         frame_index: u64,
+        external_imports: &BTreeMap<CompiledGraphGpuResourceSlot, CompiledGraphGpuGraphImport>,
+        external_texture_handles: &BTreeMap<TextureViewId, TextureHandle>,
     ) -> Result<(), CompiledGraphGraphError> {
         for entry in self.entries.values() {
             let mut imported = BTreeMap::<BufferId, BufferHandle>::new();
             let mut bindings = Vec::new();
-            let mut import = |id: BufferId, size: u64, usage: BufferUsages, state: BufferState| {
-                if let Some(handle) = imported.get(&id) {
-                    return *handle;
-                }
-                let handle = graph.import_buffer(
-                    "ember-graph-buffer",
-                    BufferDesc::new(size, usage),
-                    ImportedBuffer {
-                        buffer: id,
-                        entry_state: state,
-                    },
-                );
-                imported.insert(id, handle);
-                handle
-            };
 
             let attribute_handle = entry.state.attribute_pool_buffer().map(|buffer| {
-                import(
+                import_graph_buffer(
+                    graph,
+                    &mut imported,
                     buffer,
                     entry.state.attribute_pool_size(),
                     BufferUsages::STORAGE | BufferUsages::COPY_DST,
@@ -670,13 +748,22 @@ impl EmberGpuAssetRegistry {
                         BufferUsages::UNIFORM | BufferUsages::COPY_DST,
                         BufferState::uniform(PipelineStages::COMPUTE_SHADER),
                     )
+                } else if entry
+                    .state
+                    .external_binding(CompiledGraphGpuResourceSlot::new(
+                        binding.group,
+                        binding.binding,
+                    ))
+                    .is_some()
+                {
+                    continue;
                 } else {
                     return Err(CompiledGraphGraphError::UnexpectedBinding {
                         group: binding.group,
                         binding: binding.binding,
                     });
                 };
-                let handle = import(buffer, size, usage, state);
+                let handle = import_graph_buffer(graph, &mut imported, buffer, size, usage, state);
                 bindings.push(CompiledGraphGpuGraphBinding::Buffer {
                     group: binding.group,
                     binding: binding.binding,
@@ -686,14 +773,48 @@ impl EmberGpuAssetRegistry {
             }
             for external in entry.state.external_bindings() {
                 let (group, binding) = (external.slot.group, external.slot.binding);
+                if let CompiledGraphGpuExternalResource::Texture { view, .. }
+                | CompiledGraphGpuExternalResource::TextureView { view } = external.resource
+                    && let Some(handle) = external_texture_handles.get(&view)
+                {
+                    let Some(graph_binding) = entry
+                        .state
+                        .external_graph_texture_binding(external.slot, *handle)
+                    else {
+                        return Err(CompiledGraphGraphError::ExpectedTexture {
+                            group,
+                            binding,
+                            name: String::from("external Ember resource"),
+                        });
+                    };
+                    bindings.push(graph_binding);
+                    continue;
+                }
+                if let Some(import) = external_imports.get(&external.slot) {
+                    let graph_binding = entry
+                        .state
+                        .import_external_to_graph(
+                            graph,
+                            external.slot,
+                            format!("ember-external-{}-{}", group, binding),
+                            import.clone(),
+                        )
+                        .map_err(CompiledGraphGraphError::ExternalImport)?;
+                    bindings.push(graph_binding);
+                    continue;
+                }
                 let handle = match external.resource {
                     CompiledGraphGpuExternalResource::StorageBuffer { buffer, size }
-                    | CompiledGraphGpuExternalResource::CurveBuffer { buffer, size } => import(
-                        buffer,
-                        size.unwrap_or(1).max(1),
-                        BufferUsages::STORAGE,
-                        BufferState::initial(),
-                    ),
+                    | CompiledGraphGpuExternalResource::CurveBuffer { buffer, size } => {
+                        import_graph_buffer(
+                            graph,
+                            &mut imported,
+                            buffer,
+                            size.unwrap_or(1).max(1),
+                            BufferUsages::STORAGE,
+                            BufferState::initial(),
+                        )
+                    }
                     CompiledGraphGpuExternalResource::Texture { .. }
                     | CompiledGraphGpuExternalResource::TextureView { .. } => {
                         return Err(CompiledGraphGraphError::ExternalTextureImportRequired {
@@ -1002,8 +1123,10 @@ pub fn prepare_ember_graphs<I>(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::{
-        extract_ember_external_gpu_resources, extract_ember_render_assets,
+        extract_ember_external_gpu_resources, extract_ember_render_assets, EmberAssetHandle,
         EmberCompiledGraphAssets, EmberExternalGpuResources, EmberGpuAssetRegistry,
         EmberRenderAssets, ExtractedEmberExternalGpuResources, ExtractedEmberRenderAssets,
         ParticleGpuState, ParticleStageError, ParticleUploadStatus,
@@ -1011,18 +1134,21 @@ mod tests {
     use crate::{PrismRenderPlugin, RenderApp, RenderAppConfig};
     use prism_app::App;
     use prism_ecs::world::World;
+    use prism_render_architecture::particle::asset_registry::EmberAssetRevision;
     use prism_render_architecture::particle::attributes::AttributeLayoutPlan;
     use prism_render_architecture::particle::authoring::{
         EmberAsset, GraphAssetRef, RendererConfig, RendererConfigId, RendererKind,
         SerializationFormat, ShadingSettings,
     };
     use prism_render_architecture::particle::compiler::CompiledGraph;
+    use prism_render_architecture::particle::modules::ResourceDecl;
     use prism_render_architecture::particle::EmberShadingModel;
     use prism_render_driver_null::NullInstance;
     use prism_render_gpudriven::{
-        CompiledGraphGpuExternalKind, CompiledGraphGpuExternalResource,
-        CompiledGraphGpuResourceSlot,
+        CompiledGraphGpuExternalKind, CompiledGraphGpuGraphImport,
+        CompiledGraphGpuResourceRegistry, CompiledGraphGpuResourceSlot, CompiledGraphGraphError,
     };
+    use prism_render_graph::RenderGraph;
 
     fn empty_asset() -> EmberAsset {
         EmberAsset {
@@ -1053,6 +1179,24 @@ mod tests {
             parameter_blocks: Vec::new(),
             attribute_layout: AttributeLayoutPlan::build(0, &[]),
             attribute_bindings: Vec::new(),
+        }
+    }
+
+    fn compiled_graph_with_texture() -> CompiledGraph {
+        CompiledGraph {
+            source: String::from("@compute @workgroup_size(64) fn main() {}"),
+            entry_points: vec![String::from("main")],
+            dispatches: vec![
+                prism_render_architecture::particle::compiler::CompiledDispatch {
+                    stage_index: 0,
+                    domain: prism_render_architecture::particle::IterationDomain::PerParticle,
+                    default_count: 1,
+                    iterations: 1,
+                    entry_point: String::from("main"),
+                },
+            ],
+            bindings: vec![ResourceDecl::texture2d("field", 0, 0)],
+            ..empty_compiled_graph()
         }
     }
 
@@ -1190,14 +1334,23 @@ mod tests {
         let revision = main
             .resource_mut::<EmberExternalGpuResources>()
             .registry_mut()
-            .set(
+            .set_texture(
                 slot,
-                CompiledGraphGpuExternalResource::StorageBuffer {
-                    buffer: prism_render_driver::BufferId::from_parts(4, 9),
-                    size: Some(256),
-                },
+                prism_render_driver::TextureId::from_parts(4, 9),
+                prism_render_driver::TextureViewId::from_parts(5, 9),
             )
             .expect("external slot publication succeeds");
+        let import = CompiledGraphGpuGraphImport::Texture {
+            desc: prism_render_graph::TextureDesc::color(
+                prism_render_driver::TextureFormat::Rgba8Unorm,
+            ),
+            entry_state: prism_render_driver::TextureState::initial(),
+            exit_state: prism_render_driver::TextureState::initial(),
+            mip_levels: 1,
+            array_layers: 1,
+        };
+        main.resource_mut::<EmberExternalGpuResources>()
+            .set_graph_import(slot, revision, import.clone());
 
         let mut render = World::new();
         render.insert_resource(ExtractedEmberExternalGpuResources::default());
@@ -1212,7 +1365,177 @@ mod tests {
         assert_eq!(extracted.slot, slot);
         assert_eq!(
             extracted.resource.kind(),
-            CompiledGraphGpuExternalKind::StorageBuffer
+            CompiledGraphGpuExternalKind::Texture
         );
+        assert_eq!(
+            render
+                .resource::<ExtractedEmberExternalGpuResources>()
+                .graph_import(slot),
+            Some(&import)
+        );
+
+        main.resource_mut::<EmberExternalGpuResources>()
+            .registry_mut()
+            .set_texture(
+                slot,
+                prism_render_driver::TextureId::from_parts(6, 9),
+                prism_render_driver::TextureViewId::from_parts(7, 9),
+            )
+            .expect("replacement texture publication succeeds");
+        extract_ember_external_gpu_resources(&mut main, &mut render);
+        assert_eq!(
+            render
+                .resource::<ExtractedEmberExternalGpuResources>()
+                .graph_import(slot),
+            None,
+            "metadata from an earlier resource revision must not be reused"
+        );
+    }
+
+    #[test]
+    fn ember_render_app_imports_external_texture_with_exact_frame_graph_description() {
+        use prism_render_driver::{Instance as _, RenderDevice as _};
+
+        let instance = NullInstance::new();
+        let adapter = instance
+            .request_adapter(&Default::default())
+            .expect("null adapter");
+        let (device, queue) = instance
+            .create_device(&adapter, &Default::default())
+            .expect("null device");
+        let texture = device.create_texture(&prism_render_driver::TextureDescriptor::new_2d(
+            prism_render_driver::Extent3d::new_2d(1, 1),
+            prism_render_driver::TextureFormat::Rgba8Unorm,
+            prism_render_driver::TextureUsages::TEXTURE_BINDING,
+        ));
+        let view = device.create_texture_view(
+            texture,
+            &prism_render_driver::TextureViewDescriptor::default(),
+        );
+        let slot = CompiledGraphGpuResourceSlot::new(0, 0);
+        let mut external = CompiledGraphGpuResourceRegistry::new();
+        external
+            .set_texture(slot, texture, view)
+            .expect("texture publication succeeds");
+        let mut registry = EmberGpuAssetRegistry::default();
+        let handle = EmberAssetHandle(9);
+        registry
+            .upsert(
+                &device,
+                &queue,
+                handle,
+                GraphAssetRef(1),
+                EmberAssetRevision::from_value(1),
+                compiled_graph_with_texture(),
+                &external,
+            )
+            .expect("compiled graph is materialized");
+        registry
+            .prepare(&queue, handle, &empty_asset(), &[], &[1], &[])
+            .expect("compiled graph inputs are prepared");
+        let import = CompiledGraphGpuGraphImport::Texture {
+            desc: prism_render_graph::TextureDesc::color(
+                prism_render_driver::TextureFormat::Rgba8Unorm,
+            )
+            .with_size(prism_render_graph::SizeClass::absolute_2d(1, 1))
+            .with_usage(prism_render_driver::TextureUsages::TEXTURE_BINDING),
+            entry_state: prism_render_driver::TextureState::initial(),
+            exit_state: prism_render_driver::TextureState::initial(),
+            mip_levels: 1,
+            array_layers: 1,
+        };
+        let mut graph = RenderGraph::new(prism_render_driver::Extent3d::new_2d(1, 1));
+        assert_eq!(
+            registry.append_to_graph(
+                &mut graph,
+                0,
+                &BTreeMap::from([(slot, import)]),
+                &BTreeMap::new()
+            ),
+            Ok(())
+        );
+        assert!(graph.compile().is_ok());
+
+        registry.destroy(&device);
+        device.destroy_texture_view(view);
+        device.destroy_texture(texture);
+    }
+
+    #[test]
+    fn ember_render_app_requires_metadata_or_a_matching_existing_texture_view() {
+        use prism_render_driver::{Instance as _, RenderDevice as _};
+
+        let instance = NullInstance::new();
+        let adapter = instance
+            .request_adapter(&Default::default())
+            .expect("null adapter");
+        let (device, queue) = instance
+            .create_device(&adapter, &Default::default())
+            .expect("null device");
+        let texture = device.create_texture(&prism_render_driver::TextureDescriptor::new_2d(
+            prism_render_driver::Extent3d::new_2d(1, 1),
+            prism_render_driver::TextureFormat::Rgba8Unorm,
+            prism_render_driver::TextureUsages::TEXTURE_BINDING,
+        ));
+        let view = device.create_texture_view(
+            texture,
+            &prism_render_driver::TextureViewDescriptor::default(),
+        );
+        let slot = CompiledGraphGpuResourceSlot::new(0, 0);
+        let mut external = CompiledGraphGpuResourceRegistry::new();
+        external
+            .set_texture_view(slot, view)
+            .expect("view publication succeeds");
+        let mut registry = EmberGpuAssetRegistry::default();
+        let handle = EmberAssetHandle(10);
+        registry
+            .upsert(
+                &device,
+                &queue,
+                handle,
+                GraphAssetRef(1),
+                EmberAssetRevision::from_value(1),
+                compiled_graph_with_texture(),
+                &external,
+            )
+            .expect("compiled graph is materialized");
+        registry
+            .prepare(&queue, handle, &empty_asset(), &[], &[1], &[])
+            .expect("compiled graph inputs are prepared");
+
+        let mut missing_graph = RenderGraph::new(prism_render_driver::Extent3d::new_2d(1, 1));
+        assert_eq!(
+            registry.append_to_graph(&mut missing_graph, 0, &BTreeMap::new(), &BTreeMap::new()),
+            Err(CompiledGraphGraphError::ExternalTextureImportRequired {
+                group: slot.group,
+                binding: slot.binding,
+            })
+        );
+
+        let mut graph = RenderGraph::new(prism_render_driver::Extent3d::new_2d(1, 1));
+        let imported = graph.import_texture(
+            "caller-imported-view",
+            prism_render_graph::TextureDesc::color(prism_render_driver::TextureFormat::Rgba8Unorm)
+                .with_size(prism_render_graph::SizeClass::absolute_2d(1, 1))
+                .with_usage(prism_render_driver::TextureUsages::TEXTURE_BINDING),
+            prism_render_graph::ImportedTexture {
+                texture,
+                default_view: view,
+                entry_state: prism_render_driver::TextureState::initial(),
+                exit_state: prism_render_driver::TextureState::initial(),
+                mip_levels: 1,
+                array_layers: 1,
+            },
+        );
+        let texture_handles = BTreeMap::from([(view, imported)]);
+        assert_eq!(
+            registry.append_to_graph(&mut graph, 0, &BTreeMap::new(), &texture_handles),
+            Ok(())
+        );
+        assert!(graph.compile().is_ok());
+
+        registry.destroy(&device);
+        device.destroy_texture_view(view);
+        device.destroy_texture(texture);
     }
 }

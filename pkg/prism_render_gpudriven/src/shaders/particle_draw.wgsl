@@ -38,8 +38,9 @@ fn vs(
 ) -> VertexOutput {
     let particle = particles[active_indices[instance_index]];
     let corner = vec2<f32>(f32(vertex_index & 1u), f32(vertex_index >> 1u));
+    let particle_size = select(frame.size, particle.velocity_pad.w, particle.velocity_pad.w > 0.0);
     let world = particle.position_life.xy
-        + (corner - vec2<f32>(0.5, 0.5)) * frame.size * 2.0;
+        + (corner - vec2<f32>(0.5, 0.5)) * particle_size * 2.0;
     var output: VertexOutput;
     output.clip_position = project(world);
     output.color = frame.color;

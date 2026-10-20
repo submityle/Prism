@@ -42,39 +42,65 @@ pub fn integrate<F>(kind: IntegratorKind, state: Kinematics, dt: f32, accel_at: 
 where
     F: Fn(Vec3, Vec3) -> Vec3,
 {
-    let Kinematics { position, velocity } = state;
-    match kind {
+    if !dt.is_finite() || dt <= 0.0 {
+        return sanitize_kinematics(state);
+    }
+    let position = finite_vec3(state.position);
+    let velocity = finite_vec3(state.velocity);
+    let result = match kind {
         IntegratorKind::SemiImplicitEuler => {
-            let a = accel_at(position, velocity);
-            let new_v = velocity.add(a.scale(dt));
+            let a = finite_vec3(accel_at(position, velocity));
+            let new_v = finite_vec3(velocity).add(a.scale(dt));
             let new_p = position.add(new_v.scale(dt));
             Kinematics::new(new_p, new_v)
         }
         IntegratorKind::Verlet => {
             // Velocity Verlet with the step's acceleration: position advances
             // with a half-step acceleration term, velocity with the full step.
-            let a = accel_at(position, velocity);
+            let a = finite_vec3(accel_at(position, velocity));
+            let velocity = finite_vec3(velocity);
             let new_p = position.add(velocity.scale(dt)).add(a.scale(0.5 * dt * dt));
             let new_v = velocity.add(a.scale(dt));
             Kinematics::new(new_p, new_v)
         }
         IntegratorKind::Rk2 => {
             let half = 0.5 * dt;
-            let a1 = accel_at(position, velocity);
+            let velocity = finite_vec3(velocity);
+            let a1 = finite_vec3(accel_at(position, velocity));
             let mid_v = velocity.add(a1.scale(half));
             let mid_p = position.add(velocity.scale(half));
-            let a2 = accel_at(mid_p, mid_v);
+            let a2 = finite_vec3(accel_at(mid_p, mid_v));
             let new_v = velocity.add(a2.scale(dt));
             let new_p = position.add(mid_v.scale(dt));
             Kinematics::new(new_p, new_v)
         }
-    }
+    };
+    sanitize_kinematics(result)
+}
+
+#[inline]
+fn is_finite_vec3(v: Vec3) -> bool {
+    v.x.is_finite() && v.y.is_finite() && v.z.is_finite()
+}
+
+#[inline]
+fn finite_vec3(v: Vec3) -> Vec3 {
+    Vec3::new(
+        if v.x.is_finite() { v.x } else { 0.0 },
+        if v.y.is_finite() { v.y } else { 0.0 },
+        if v.z.is_finite() { v.z } else { 0.0 },
+    )
+}
+
+#[inline]
+fn sanitize_kinematics(state: Kinematics) -> Kinematics {
+    Kinematics::new(finite_vec3(state.position), finite_vec3(state.velocity))
 }
 
 /// Constant gravitational acceleration.
 #[must_use]
 pub fn gravity(g: Vec3) -> Vec3 {
-    g
+    finite_vec3(g)
 }
 
 /// Linear (Stokes) drag acceleration opposing velocity.
@@ -84,10 +110,10 @@ pub fn gravity(g: Vec3) -> Vec3 {
 /// rest (which would inject energy), keeping the integrator stable.
 #[must_use]
 pub fn linear_drag(velocity: Vec3, coefficient: f32, dt: f32) -> Vec3 {
-    if coefficient > 0.0 && dt > 0.0 {
+    if coefficient.is_finite() && coefficient > 0.0 && dt.is_finite() && dt > 0.0 {
         // Clamp the effective rate so `coefficient * dt <= 1`.
         let rate = (coefficient).min(1.0 / dt);
-        velocity.scale(-rate)
+        finite_vec3(velocity).scale(-rate)
     } else {
         Vec3::ZERO
     }
@@ -100,8 +126,10 @@ pub fn linear_drag(velocity: Vec3, coefficient: f32, dt: f32) -> Vec3 {
 /// with the wind feels nothing (design §8 force library).
 #[must_use]
 pub fn wind(wind_velocity: Vec3, velocity: Vec3, coefficient: f32) -> Vec3 {
-    if coefficient > 0.0 {
-        wind_velocity.sub(velocity).scale(coefficient)
+    if coefficient.is_finite() && coefficient > 0.0 {
+        finite_vec3(wind_velocity)
+            .sub(finite_vec3(velocity))
+            .scale(coefficient)
     } else {
         Vec3::ZERO
     }
@@ -114,13 +142,21 @@ pub fn wind(wind_velocity: Vec3, velocity: Vec3, coefficient: f32) -> Vec3 {
 /// axis rather than being flung out. A particle on the axis feels nothing.
 #[must_use]
 pub fn vortex(position: Vec3, center: Vec3, axis: Vec3, strength: f32) -> Vec3 {
+    if !is_finite_vec3(position)
+        || !is_finite_vec3(center)
+        || !is_finite_vec3(axis)
+        || !strength.is_finite()
+    {
+        return Vec3::ZERO;
+    }
     let radial = position.sub(center);
     let unit_axis = axis.normalize_or_zero();
-    let tangent = unit_axis.cross(radial);
-    let dist_sq = radial.length_squared();
+    let perpendicular = radial.sub(unit_axis.scale(radial.dot(unit_axis)));
+    let tangent = unit_axis.cross(perpendicular);
+    let dist_sq = perpendicular.length_squared();
     if dist_sq > EPS_LEN_SQ {
         // Tangential direction scaled by strength / distance for orbital decay.
-        tangent.scale(strength / dist_sq.sqrt())
+        tangent.scale(strength / dist_sq)
     } else {
         Vec3::ZERO
     }
@@ -151,11 +187,24 @@ impl VectorField<'_> {
         if nx == 0 || ny == 0 || nz == 0 {
             return Vec3::ZERO;
         }
-        let cx = x.clamp(0, nx as i32 - 1) as u32;
-        let cy = y.clamp(0, ny as i32 - 1) as u32;
-        let cz = z.clamp(0, nz as i32 - 1) as u32;
-        let idx = (cx + cy * nx + cz * nx * ny) as usize;
-        self.values.get(idx).copied().unwrap_or(Vec3::ZERO)
+        let cx = x.max(0) as u32;
+        let cy = y.max(0) as u32;
+        let cz = z.max(0) as u32;
+        let cx = cx.min(nx - 1);
+        let cy = cy.min(ny - 1);
+        let cz = cz.min(nz - 1);
+        let idx = (cy as usize)
+            .checked_mul(nx as usize)
+            .and_then(|row| (cx as usize).checked_add(row))
+            .and_then(|idx| {
+                (cz as usize)
+                    .checked_mul(nx as usize)
+                    .and_then(|slice| slice.checked_mul(ny as usize))
+                    .and_then(|slice| idx.checked_add(slice))
+            });
+        idx.and_then(|idx| self.values.get(idx).copied())
+            .map(finite_vec3)
+            .unwrap_or(Vec3::ZERO)
     }
 
     /// Trilinearly samples the field at a world position.
@@ -164,16 +213,30 @@ impl VectorField<'_> {
     /// outside the grid clamp to the border voxel.
     #[must_use]
     pub fn sample(&self, world: Vec3) -> Vec3 {
-        if self.cell_size <= 0.0 {
+        let (nx, ny, nz) = self.dims;
+        if nx == 0
+            || ny == 0
+            || nz == 0
+            || !self.cell_size.is_finite()
+            || self.cell_size <= 0.0
+            || !is_finite_vec3(world)
+            || !is_finite_vec3(self.origin)
+        {
             return Vec3::ZERO;
         }
         let local = world.sub(self.origin).scale(1.0 / self.cell_size);
-        let x0 = local.x.floor();
-        let y0 = local.y.floor();
-        let z0 = local.z.floor();
-        let fx = local.x - x0;
-        let fy = local.y - y0;
-        let fz = local.z - z0;
+        if !is_finite_vec3(local) {
+            return Vec3::ZERO;
+        }
+        let x = local.x.clamp(0.0, (nx - 1) as f32);
+        let y = local.y.clamp(0.0, (ny - 1) as f32);
+        let z = local.z.clamp(0.0, (nz - 1) as f32);
+        let x0 = x.floor();
+        let y0 = y.floor();
+        let z0 = z.floor();
+        let fy = y - y0;
+        let fz = z - z0;
+        let fx = x - x0;
         let (ix, iy, iz) = (x0 as i32, y0 as i32, z0 as i32);
         let c000 = self.voxel(ix, iy, iz);
         let c100 = self.voxel(ix + 1, iy, iz);
@@ -196,6 +259,13 @@ impl VectorField<'_> {
 /// Scalar linear interpolation.
 #[must_use]
 pub fn lerp(a: f32, b: f32, t: f32) -> f32 {
+    let a = if a.is_finite() { a } else { 0.0 };
+    let b = if b.is_finite() { b } else { 0.0 };
+    let t = if t.is_finite() {
+        t.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
     a + (b - a) * t
 }
 
@@ -263,6 +333,9 @@ fn lattice_value(ix: i32, iy: i32, iz: i32, seed: u32) -> f32 {
 /// which is what [`curl_noise`] differentiates.
 #[must_use]
 pub fn value_noise(p: Vec3, seed: u32) -> f32 {
+    if !is_finite_vec3(p) {
+        return 0.0;
+    }
     let x0 = p.x.floor();
     let y0 = p.y.floor();
     let z0 = p.z.floor();
@@ -295,7 +368,14 @@ pub fn value_noise(p: Vec3, seed: u32) -> f32 {
 /// leaving voids. Derivatives use central differences with step `epsilon`.
 #[must_use]
 pub fn curl_noise(position: Vec3, seed: u32, epsilon: f32) -> Vec3 {
-    let eps = if epsilon > 0.0 { epsilon } else { 1.0e-3 };
+    if !is_finite_vec3(position) {
+        return Vec3::ZERO;
+    }
+    let eps = if epsilon.is_finite() && epsilon > 0.0 {
+        epsilon
+    } else {
+        1.0e-3
+    };
     let inv = 1.0 / (2.0 * eps);
     // Three decorrelated potential channels via distinct seed offsets.
     let s1 = seed;
@@ -333,9 +413,18 @@ impl Lifetime {
     /// Advances the age by `dt`.
     #[must_use]
     pub fn advance(self, dt: f32) -> Self {
+        let age = if self.age.is_finite() && self.age >= 0.0 {
+            self.age
+        } else {
+            0.0
+        };
         Self {
-            age: self.age + dt.max(0.0),
-            max_age: self.max_age,
+            age: age + if dt.is_finite() { dt.max(0.0) } else { 0.0 },
+            max_age: if self.max_age.is_finite() {
+                self.max_age
+            } else {
+                0.0
+            },
         }
     }
 
@@ -344,14 +433,17 @@ impl Lifetime {
     /// A non-positive `max_age` marks an immortal particle that never expires.
     #[must_use]
     pub fn is_expired(self) -> bool {
-        self.max_age > 0.0 && self.age >= self.max_age
+        self.max_age.is_finite()
+            && self.age.is_finite()
+            && self.max_age > 0.0
+            && self.age >= self.max_age
     }
 
     /// Normalized age in `[0, 1]`, the input to over-life curves. Immortal
     /// particles report `0`.
     #[must_use]
     pub fn normalized(self) -> f32 {
-        if self.max_age > 0.0 {
+        if self.max_age.is_finite() && self.age.is_finite() && self.max_age > 0.0 {
             (self.age / self.max_age).clamp(0.0, 1.0)
         } else {
             0.0
@@ -368,9 +460,13 @@ impl Lifetime {
 pub fn sample_over_life(lut: &[f32], t: f32) -> f32 {
     match lut.len() {
         0 => 0.0,
-        1 => lut[0],
+        1 => finite_f32(lut[0]),
         n => {
-            let clamped = t.clamp(0.0, 1.0);
+            let clamped = if t.is_finite() {
+                t.clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
             let scaled = clamped * (n - 1) as f32;
             let lower = scaled.floor();
             let i = (lower as usize).min(n - 2);
@@ -387,13 +483,22 @@ pub fn sample_over_life(lut: &[f32], t: f32) -> f32 {
 /// clamped to `1..=max_substeps`. Degenerate inputs fall back to a single step.
 #[must_use]
 pub fn cfl_substeps(max_speed: f32, dt: f32, cell_size: f32, cfl: f32, max_substeps: u32) -> u32 {
-    if max_speed <= 0.0 || dt <= 0.0 || cell_size <= 0.0 || cfl <= 0.0 {
+    if max_substeps == 0
+        || !max_speed.is_finite()
+        || !dt.is_finite()
+        || !cell_size.is_finite()
+        || !cfl.is_finite()
+        || max_speed <= 0.0
+        || dt <= 0.0
+        || cell_size <= 0.0
+        || cfl <= 0.0
+    {
         return 1;
     }
     let travel = max_speed * dt;
     let budget = cfl * cell_size;
     let needed = (travel / budget).ceil();
-    let n = if needed >= max_substeps as f32 {
+    let n = if !needed.is_finite() || needed >= max_substeps as f32 {
         max_substeps
     } else {
         needed as u32
@@ -404,7 +509,9 @@ pub fn cfl_substeps(max_speed: f32, dt: f32, cell_size: f32, cfl: f32, max_subst
 /// The per-substep timestep once a frame is split into `substeps`.
 #[must_use]
 pub fn substep_dt(dt: f32, substeps: u32) -> f32 {
-    if substeps == 0 {
+    if !dt.is_finite() || dt < 0.0 {
+        0.0
+    } else if substeps == 0 {
         dt
     } else {
         dt / substeps as f32
@@ -414,14 +521,24 @@ pub fn substep_dt(dt: f32, substeps: u32) -> f32 {
 /// Clamps a velocity to a maximum speed, preserving direction.
 #[must_use]
 pub fn clamp_speed(velocity: Vec3, max_speed: f32) -> Vec3 {
-    if max_speed <= 0.0 {
+    let velocity = finite_vec3(velocity);
+    if !max_speed.is_finite() || max_speed <= 0.0 {
         return velocity;
     }
     let speed_sq = velocity.length_squared();
-    if speed_sq > max_speed * max_speed {
+    if speed_sq.is_finite() && speed_sq > max_speed * max_speed {
         velocity.scale(max_speed / speed_sq.sqrt())
     } else {
         velocity
+    }
+}
+
+#[inline]
+fn finite_f32(value: f32) -> f32 {
+    if value.is_finite() {
+        value
+    } else {
+        0.0
     }
 }
 

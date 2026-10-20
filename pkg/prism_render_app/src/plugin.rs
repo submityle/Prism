@@ -679,7 +679,19 @@ mod tests {
                 .as_ref()
                 .expect("forward-lit fragment")
                 .targets,
-            vec![Some(ColorTargetState::opaque(TextureFormat::Rgba16Float))]
+            vec![
+                Some(ColorTargetState::opaque(
+                    crate::target::POSITION_GBUFFER_FORMAT
+                )),
+                Some(ColorTargetState::opaque(crate::target::GBUFFER_FORMAT)),
+                Some(ColorTargetState::opaque(crate::target::GBUFFER_FORMAT)),
+                Some(ColorTargetState::opaque(
+                    crate::target::SURFACE_ID_GBUFFER_FORMAT
+                )),
+                Some(ColorTargetState::opaque(
+                    crate::target::COVERAGE_GBUFFER_FORMAT
+                )),
+            ]
         );
     }
 }
