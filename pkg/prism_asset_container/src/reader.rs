@@ -24,6 +24,35 @@ enum Backing {
     Range(Arc<dyn crate::RangeSource>),
 }
 
+/// Normalizes a source's per-call cap once, before parsing or retaining it.
+/// This also covers block-index/decoder reads that bypass `read_from_source`.
+#[derive(Debug)]
+struct BoundedSource {
+    source: Arc<dyn crate::RangeSource>,
+    maximum_read_bytes: usize,
+}
+
+impl crate::RangeSource for BoundedSource {
+    fn len(&self) -> u64 {
+        self.source.len()
+    }
+
+    fn read_range(&self, mut offset: u64, out: &mut [u8]) -> Result<(), crate::RangeSourceError> {
+        let len = u64::try_from(out.len()).map_err(|_| crate::RangeSourceError::OutOfBounds)?;
+        let end = offset
+            .checked_add(len)
+            .ok_or(crate::RangeSourceError::OutOfBounds)?;
+        if end > self.source.len() {
+            return Err(crate::RangeSourceError::OutOfBounds);
+        }
+        for chunk in out.chunks_mut(self.maximum_read_bytes) {
+            self.source.read_range(offset, chunk)?;
+            offset += chunk.len() as u64;
+        }
+        Ok(())
+    }
+}
+
 /// Strict container reader. Mount validates the complete directory and every
 /// payload digest before the container can be mounted. A range-backed reader
 /// retains only the source and validated metadata; it never caches the whole
@@ -75,6 +104,10 @@ impl ContainerReader {
     /// caller must ensure source contents remain immutable for this reader's
     /// lifetime; range reads cannot re-verify a whole-payload digest without
     /// reading the entire payload.
+    /// Reads larger than `RangeSource::maximum_read_bytes` are split into
+    /// consecutive calls, including metadata, hashes and compressed blocks.
+    /// Mount still verifies the entire container; a fetch cap does not make
+    /// mounting lazy or authenticate an isolated runtime subrange.
     pub fn from_range_source<S>(source: Arc<S>) -> Result<Self, ContainerError>
     where
         S: crate::RangeSource + 'static,
@@ -95,6 +128,15 @@ impl ContainerReader {
         source: Arc<dyn crate::RangeSource>,
         budget: ContainerReadBudget,
     ) -> Result<Self, ContainerError> {
+        let maximum_read_bytes = source.maximum_read_bytes().get();
+        let source: Arc<dyn crate::RangeSource> = if maximum_read_bytes < usize::MAX {
+            Arc::new(BoundedSource {
+                source,
+                maximum_read_bytes,
+            })
+        } else {
+            source
+        };
         let parsed = parse_source(source.as_ref(), &budget)?;
         Ok(Self {
             backing: Backing::Range(source),
@@ -148,6 +190,7 @@ impl ContainerReader {
 
     /// Reads a byte range from a decoded payload. Raw payloads use direct
     /// physical range I/O; Deflate payloads are decoded and then sliced.
+    /// On error, `out` may have been partially written and must be discarded.
     pub fn read_range(
         &self,
         guid: StableGuid,
@@ -1244,7 +1287,9 @@ fn validate_deflate(
         let before_in = decompressor.total_in();
         let before_out = decompressor.total_out();
         let status = decompressor
-            .decompress(input, &mut output, FlushDecompress::Finish)
+            // Finish requires enough output space for the entire remainder.
+            // This validator deliberately reuses a bounded streaming buffer.
+            .decompress(input, &mut output, FlushDecompress::None)
             .map_err(|_| ContainerError::CompressionFailed)?;
         let produced = decompressor
             .total_out()
@@ -1274,4 +1319,101 @@ fn validate_deflate(
         return Err(ContainerError::HashMismatch);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod deflate_validation_tests {
+    use std::io::Write;
+
+    use flate2::{write::DeflateEncoder, Compression};
+
+    use super::{validate_deflate, ContainerError, ContainerReadBudget, VALIDATION_CHUNK_SIZE};
+    use crate::ContainerReadLimits;
+
+    fn fixture(len: usize) -> (Vec<u8>, Vec<u8>, [u8; 32]) {
+        let raw: Vec<_> = (0..len)
+            .map(|index| ((index.wrapping_mul(31) ^ (index >> 7)) & 255) as u8)
+            .collect();
+        let hash = *blake3::hash(&raw).as_bytes();
+        let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&raw).unwrap();
+        (raw, encoder.finish().unwrap(), hash)
+    }
+
+    fn budget() -> ContainerReadBudget {
+        ContainerReadBudget::new(ContainerReadLimits {
+            max_in_flight_bytes: VALIDATION_CHUNK_SIZE as u64,
+            ..ContainerReadLimits::default()
+        })
+    }
+
+    #[test]
+    fn deflate_validation_streams_across_output_buffer_boundaries() {
+        for len in [
+            0,
+            1,
+            VALIDATION_CHUNK_SIZE - 1,
+            VALIDATION_CHUNK_SIZE,
+            VALIDATION_CHUNK_SIZE + 1,
+            2 * VALIDATION_CHUNK_SIZE,
+            3 * VALIDATION_CHUNK_SIZE + 17,
+        ] {
+            let (_, stored, hash) = fixture(len);
+            let budget = budget();
+            assert_eq!(validate_deflate(&stored, len as u64, hash, &budget), Ok(()));
+            assert_eq!(budget.in_flight_bytes(), 0);
+            assert_eq!(
+                budget.peak_in_flight_bytes(),
+                (len + 1).min(VALIDATION_CHUNK_SIZE) as u64
+            );
+        }
+    }
+
+    #[test]
+    fn deflate_validation_rejects_corruption_and_releases_bounded_buffer() {
+        for len in [0, 1, VALIDATION_CHUNK_SIZE, 3 * VALIDATION_CHUNK_SIZE + 17] {
+            let (_, stored, hash) = fixture(len);
+            let budget = budget();
+            for cut in [0, 1, stored.len() / 2, stored.len() - 1] {
+                // A severely truncated input can hit the expansion gate before
+                // entering the codec. Preserve that earlier safety rejection.
+                let expected = budget
+                    .limits()
+                    .unit(cut as u64, len as u64)
+                    .err()
+                    .unwrap_or(ContainerError::CompressionFailed);
+                assert_eq!(
+                    validate_deflate(&stored[..cut], len as u64, hash, &budget),
+                    Err(expected),
+                    "incorrect truncation rejection: raw={len}, stored={cut}"
+                );
+                assert_eq!(budget.in_flight_bytes(), 0);
+            }
+            let mut trailing = stored.clone();
+            trailing.push(0);
+            assert_eq!(
+                validate_deflate(&trailing, len as u64, hash, &budget),
+                Err(ContainerError::CompressionFailed)
+            );
+            assert_eq!(budget.in_flight_bytes(), 0);
+            for declared in [len.saturating_sub(1), len + 1] {
+                if declared == len {
+                    continue;
+                }
+                assert_eq!(
+                    validate_deflate(&stored, declared as u64, hash, &budget),
+                    Err(ContainerError::CompressionFailed)
+                );
+                assert_eq!(budget.in_flight_bytes(), 0);
+            }
+            let mut wrong_hash = hash;
+            wrong_hash[0] ^= 1;
+            assert_eq!(
+                validate_deflate(&stored, len as u64, wrong_hash, &budget),
+                Err(ContainerError::HashMismatch)
+            );
+            assert_eq!(budget.in_flight_bytes(), 0);
+            assert!(budget.peak_in_flight_bytes() <= VALIDATION_CHUNK_SIZE as u64);
+        }
+    }
 }

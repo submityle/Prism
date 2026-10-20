@@ -175,6 +175,7 @@ fn remote_range_source_binds_requests_to_identity_and_exact_bytes() {
 
     assert_eq!(source.identity(), expected_identity);
     assert_eq!(source.maximum_request_bytes(), 16);
+    assert_eq!(source.maximum_read_bytes().get(), 16);
     assert_eq!(source.len(), expected_identity.byte_len);
 
     let mut output = [0_u8; 6];
@@ -394,6 +395,281 @@ impl RangeSource for TrackingRangeSource {
         out.copy_from_slice(bytes);
         Ok(())
     }
+}
+
+#[derive(Debug)]
+struct CappedRangeSource {
+    bytes: Arc<[u8]>,
+    maximum_read: usize,
+    requests: Arc<Mutex<Vec<(u64, usize)>>>,
+    fail_after: Mutex<Option<usize>>,
+}
+
+impl RangeSource for CappedRangeSource {
+    fn len(&self) -> u64 {
+        self.bytes.len() as u64
+    }
+
+    fn maximum_read_bytes(&self) -> std::num::NonZeroUsize {
+        std::num::NonZeroUsize::new(self.maximum_read).unwrap()
+    }
+
+    fn read_range(&self, offset: u64, out: &mut [u8]) -> Result<(), RangeSourceError> {
+        let mut requests = self.requests.lock().unwrap();
+        let request_index = requests.len();
+        requests.push((offset, out.len()));
+        if self
+            .fail_after
+            .lock()
+            .unwrap()
+            .is_some_and(|limit| request_index >= limit)
+        {
+            return Err(RangeSourceError::Io("injected capped failure".into()));
+        }
+        assert!(out.len() <= self.maximum_read);
+        let start = usize::try_from(offset).map_err(|_| RangeSourceError::OutOfBounds)?;
+        let end = start
+            .checked_add(out.len())
+            .ok_or(RangeSourceError::OutOfBounds)?;
+        out.copy_from_slice(
+            self.bytes
+                .get(start..end)
+                .ok_or(RangeSourceError::OutOfBounds)?,
+        );
+        Ok(())
+    }
+}
+
+fn capped_source(
+    bytes: Vec<u8>,
+    maximum_read: usize,
+    fail_after: Option<usize>,
+) -> (Arc<CappedRangeSource>, Arc<Mutex<Vec<(u64, usize)>>>) {
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let source = Arc::new(CappedRangeSource {
+        bytes: Arc::from(bytes),
+        maximum_read,
+        requests: Arc::clone(&requests),
+        fail_after: Mutex::new(fail_after),
+    });
+    (source, requests)
+}
+
+#[test]
+fn remote_range_large_container_mount_and_runtime_reads_respect_fetch_cap() {
+    let id = guid("remote-large.asset");
+    let payload: Vec<u8> = (0..2 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+    let bytes = build(&[("remote-large.asset", &payload)]);
+    let expected_identity = identity(&bytes);
+    let (fetcher, requests) = ControlledRemoteFetcher::new(bytes, RemoteFetchOutcome::Exact);
+    let cap = 4093;
+    let source = Arc::new(RemoteRangeSource::new(fetcher, expected_identity, cap).unwrap());
+    let budget = crate::ContainerReadBudget::new(crate::ContainerReadLimits {
+        max_in_flight_bytes: 128 * 1024,
+        ..crate::ContainerReadLimits::default()
+    });
+    let reader = ContainerReader::from_range_source_with_budget(source, budget.clone()).unwrap();
+    assert_eq!(reader.info().content_hash, expected_identity.content_hash);
+    assert_eq!(reader.info().generation, expected_identity.generation);
+    assert_eq!(budget.in_flight_bytes(), 0);
+    assert!(budget.peak_in_flight_bytes() <= 64 * 1024 + 80);
+
+    // The digest pass covers every byte, sequentially, without an object-sized
+    // request or allocation. The two preceding requests are prefix and header.
+    let mount_requests = requests.lock().unwrap().clone();
+    let mut end = 0;
+    for request in &mount_requests[2..] {
+        assert_eq!(request.offset, end);
+        end += request.len as u64;
+        if end == expected_identity.byte_len {
+            break;
+        }
+    }
+    assert_eq!(end, expected_identity.byte_len);
+
+    requests.lock().unwrap().clear();
+    let mut output = vec![0; 96 * 1024 + 11];
+    reader.read_range(id, 13, &mut output).unwrap();
+    assert_eq!(output, payload[13..13 + output.len()]);
+    let physical_start = reader.entry(id).unwrap().offset + 13;
+    let reads = requests.lock().unwrap().clone();
+    let mut end = physical_start;
+    for request in &reads {
+        assert_eq!(request.offset, end);
+        end += request.len as u64;
+    }
+    assert_eq!(end, physical_start + output.len() as u64);
+    assert_eq!(reads.len(), output.len().div_ceil(cap));
+    assert_eq!(
+        reader.read_range_owned(id, 77, 8001).unwrap(),
+        payload[77..8078]
+    );
+    assert_eq!(
+        reader
+            .read_ranges(
+                &[
+                    RangeRequest::new(id, 7000, 5000),
+                    RangeRequest::new(id, 0, 8000)
+                ],
+                RangeBatchPolicy {
+                    max_gap_bytes: 0,
+                    max_batch_bytes: 16 * 1024,
+                },
+            )
+            .unwrap(),
+        vec![payload[7000..12000].to_vec(), payload[..8000].to_vec()]
+    );
+    let runtime_requests = requests.lock().unwrap().clone();
+    assert!(mount_requests
+        .iter()
+        .chain(runtime_requests.iter())
+        .all(|request| {
+            request.len > 0
+                && request.len <= cap
+                && request.identity == expected_identity
+                && request.offset + request.len as u64 <= expected_identity.byte_len
+        }));
+    assert_eq!(budget.in_flight_bytes(), 0);
+}
+
+#[test]
+fn remote_range_caps_smaller_than_headers_and_directories_mount_and_read_all() {
+    let payload = vec![42; 513];
+    let bytes = build(&[("remote-tiny-cap.asset", &payload)]);
+    let expected_identity = identity(&bytes);
+    for cap in [1, 7, 79, 96, 64 * 1024] {
+        let (fetcher, requests) =
+            ControlledRemoteFetcher::new(bytes.clone(), RemoteFetchOutcome::Exact);
+        let reader = ContainerReader::from_range_source(Arc::new(
+            RemoteRangeSource::new(fetcher, expected_identity, cap).unwrap(),
+        ))
+        .unwrap();
+        assert_eq!(reader.info().content_hash, expected_identity.content_hash);
+        assert_eq!(
+            reader.read_all(guid("remote-tiny-cap.asset")).unwrap(),
+            payload
+        );
+        assert!(requests
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|request| request.len <= cap));
+    }
+}
+
+#[test]
+fn capped_range_sources_cover_v1_deflate_and_all_v2_codecs() {
+    // Spans multiple validation buffers and independently read blocks.
+    let payload = b"remote codec payload ".repeat(8_000);
+    let id = guid("remote-codecs.asset");
+    let policy = ChunkPolicy {
+        max_chunk_size: 256 * 1024,
+        chunk_alignment: 4096,
+        max_chunks: 1,
+    };
+    let plan = ChunkPlanner::new(policy)
+        .plan([ChunkInput {
+            guid: id,
+            size: payload.len() as u64,
+            alignment: 1,
+            dependencies: vec![],
+            priority: 0,
+        }])
+        .unwrap();
+    for (version, codec) in [
+        (FORMAT_VERSION, Codec::Deflate),
+        (CHUNK_FORMAT_VERSION, Codec::Raw),
+        (CHUNK_FORMAT_VERSION, Codec::Deflate),
+        (CHUNK_FORMAT_VERSION, Codec::BlockDeflate),
+    ] {
+        let mut writer = ContainerWriter::new();
+        let bytes = if version == FORMAT_VERSION {
+            writer.add_deflate(id, payload.clone()).unwrap();
+            writer.finish().unwrap()
+        } else {
+            writer.add_aligned(id, payload.clone(), 1).unwrap();
+            writer
+                .finish_with_chunk_compression(&plan, policy.chunk_alignment, codec)
+                .unwrap()
+        };
+        let expected_identity = ContainerReader::new(bytes.clone())
+            .unwrap_or_else(|error| panic!("invalid {version:?}/{codec:?} fixture: {error:?}"))
+            .info();
+        let expected_identity = ContainerIdentity {
+            byte_len: expected_identity.total_len,
+            content_hash: expected_identity.content_hash,
+            generation: expected_identity.generation,
+        };
+        let (fetcher, requests) = ControlledRemoteFetcher::new(bytes, RemoteFetchOutcome::Exact);
+        // Smaller than both outer and block headers, directory and chunk records.
+        let cap = 61;
+        let reader = ContainerReader::from_range_source(Arc::new(
+            RemoteRangeSource::new(fetcher, expected_identity, cap).unwrap(),
+        ))
+        .unwrap();
+        assert_eq!(reader.info().version, version);
+        assert_eq!(reader.info().content_hash, expected_identity.content_hash);
+        requests.lock().unwrap().clear();
+        let mut output = vec![0; 5003];
+        reader.read_range(id, 65_001, &mut output).unwrap();
+        assert_eq!(output, payload[65_001..70_004]);
+        assert_eq!(reader.read_all(id).unwrap(), payload);
+        assert_eq!(
+            reader
+                .read_ranges(
+                    &[
+                        RangeRequest::new(id, 11, 2000),
+                        RangeRequest::new(id, 70_000, 3000)
+                    ],
+                    RangeBatchPolicy::default(),
+                )
+                .unwrap(),
+            vec![payload[11..2011].to_vec(), payload[70_000..73_000].to_vec()]
+        );
+        assert!(requests
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|request| request.len <= cap));
+        assert_eq!(reader.budget().in_flight_bytes(), 0);
+    }
+}
+
+#[test]
+fn capped_range_reads_fail_fast_and_release_budget_without_retrying_short_reads() {
+    let bytes = build(&[("capped-failure.asset", &vec![23; 128 * 1024])]);
+    let budget = crate::ContainerReadBudget::default();
+    // Prefix + header + two successful digest fragments, then fail mid-hash.
+    let (source, requests) = capped_source(bytes.clone(), 1024, Some(4));
+    let error = ContainerReader::from_range_source_with_budget(source, budget.clone()).unwrap_err();
+    assert_eq!(
+        error,
+        ContainerError::Source("range source I/O failed: injected capped failure".into())
+    );
+    assert_eq!(requests.lock().unwrap().len(), 5);
+    assert_eq!(budget.in_flight_bytes(), 0);
+
+    let (source, requests) = capped_source(bytes, 1024, None);
+    let reader =
+        ContainerReader::from_range_source_with_budget(source.clone(), budget.clone()).unwrap();
+    requests.lock().unwrap().clear();
+    *source.fail_after.lock().unwrap() = Some(2);
+    let mut out = vec![0xCC; 4000];
+    assert_eq!(
+        reader.read_range(guid("capped-failure.asset"), 0, &mut out),
+        Err(error.clone())
+    );
+    assert_eq!(requests.lock().unwrap().len(), 3);
+    assert_eq!(&out[..2048], &[23; 2048]);
+    assert!(out[2048..].iter().all(|byte| *byte == 0xCC));
+    assert_eq!(budget.in_flight_bytes(), 0);
+    requests.lock().unwrap().clear();
+    assert_eq!(
+        reader.read_range_owned(guid("capped-failure.asset"), 0, 4000),
+        Err(error)
+    );
+    assert_eq!(requests.lock().unwrap().len(), 3);
+    assert_eq!(budget.in_flight_bytes(), 0);
 }
 
 #[derive(Debug)]

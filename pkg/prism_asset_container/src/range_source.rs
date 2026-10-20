@@ -1,5 +1,6 @@
 use alloc::sync::Arc;
 use core::fmt;
+use core::num::NonZeroUsize;
 use std::fs::File;
 use std::path::Path;
 
@@ -110,7 +111,17 @@ pub trait RangeSource: Send + Sync + fmt::Debug {
         self.len() == 0
     }
 
+    /// Largest supported non-empty read, stable for this source's lifetime.
+    /// Container readers split larger logical reads into consecutive requests.
+    /// The default imposes no additional per-call limit.
+    fn maximum_read_bytes(&self) -> NonZeroUsize {
+        NonZeroUsize::MAX
+    }
+
     /// Reads one source range into `out`.
+    ///
+    /// On error, `out` may contain a successfully read prefix or other partial
+    /// writes. Callers must not consume any bytes unless the operation succeeds.
     fn read_range(&self, offset: u64, out: &mut [u8]) -> Result<(), RangeSourceError>;
 }
 
@@ -258,6 +269,11 @@ impl RemoteRangeSource {
 impl RangeSource for RemoteRangeSource {
     fn len(&self) -> u64 {
         self.identity.byte_len
+    }
+
+    fn maximum_read_bytes(&self) -> NonZeroUsize {
+        // Construction rejects a zero request limit.
+        NonZeroUsize::new(self.maximum_request_bytes).unwrap()
     }
 
     fn read_range(&self, offset: u64, out: &mut [u8]) -> Result<(), RangeSourceError> {
