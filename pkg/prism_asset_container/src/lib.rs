@@ -1,11 +1,14 @@
 //! Versioned, deterministic runtime asset containers and priority overlays.
 //!
 //! This crate owns runtime consumption only. It does not cook assets,
-//! authenticate publishers, or submit data to a GPU. The writer and reader
-//! support deterministic raw and raw-DEFLATE payloads in both the legacy
-//! per-payload [`FORMAT_VERSION`] layout and the independently compressed
-//! [`CHUNK_FORMAT_VERSION`] chunk-table layout. Encryption, signatures, and
-//! GPU decompression remain outside this crate. Remote range
+//! authenticate publishers, or own platform I/O queues. The writer and reader
+//! support deterministic raw and raw-DEFLATE payloads in both the per-payload
+//! [`FORMAT_VERSION`] layout and the independently compressed
+//! [`CHUNK_FORMAT_VERSION`] chunk-table layout, including independently
+//! addressable BlockDeflate streams. The optional `gpu` feature adapts
+//! `prism_gdeflate_gpu` to the injected block backend; the container validates
+//! the decoded hashes and execution reports. Encryption and publisher
+//! authentication remain outside this crate. Remote range
 //! delivery is exposed as a transport-neutral [`RemoteRangeSource`] contract:
 //! applications provide an immutable-version-aware HTTP/object-store adapter,
 //! while this crate enforces exact identity, offset, length, and request-bound
@@ -20,6 +23,8 @@ pub mod block;
 mod budget;
 mod chunk;
 mod format;
+#[cfg(feature = "gpu")]
+mod gpu;
 mod install;
 mod manifest;
 mod manifest_reader;
@@ -30,6 +35,10 @@ mod range_source;
 mod reader;
 mod writer;
 
+pub use block::{
+    BlockCodec, BlockDecodeBackend, BlockDecodePath, BlockDecodeReport, BlockDecodeRequest,
+    BlockDecodeSummary, CpuBlockDecodeBackend,
+};
 pub use budget::{ContainerReadBudget, ContainerReadLimits};
 pub use chunk::{
     ChunkInput, ChunkPlacement, ChunkPlan, ChunkPlanError, ChunkPlanner, ChunkPolicy, PlannedChunk,
@@ -38,6 +47,8 @@ pub use format::{
     ChunkInfo, Codec, ContainerError, ContainerInfo, EntryInfo, CHUNK_FORMAT_VERSION,
     FORMAT_VERSION, MAGIC, SUPPORTED_FORMAT_VERSIONS,
 };
+#[cfg(feature = "gpu")]
+pub use gpu::GpuBlockDecodeBackend;
 pub use install::{
     install_runtime_package, install_runtime_package_transaction,
     install_runtime_package_transaction_with_policy, install_runtime_package_with_policy,

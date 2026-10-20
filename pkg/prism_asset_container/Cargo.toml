@@ -12,10 +12,13 @@ blake3 = "1.8"
 flate2 = { version = "1.0", default-features = false, features = ["rust_backend"] }
 memmap2 = { version = "0.9", optional = true }
 prism_asset = { path = "../prism_asset" }
+prism_gdeflate_gpu = { path = "../prism_gdeflate_gpu", optional = true }
+prism_render_architecture = { path = "../prism_render_architecture", optional = true }
 
 [features]
 default = []
 mmap = ["dep:memmap2"]
+gpu = ["dep:prism_gdeflate_gpu", "dep:prism_render_architecture"]
 
 [lints]
 workspace = true
@@ -27,3 +30,8 @@ path = "text/integration/read_budget.rs"
 [[test]]
 name = "block_format"
 path = "text/integration/block_format.rs"
+
+[[test]]
+name = "resident_blocks"
+path = "text/integration/resident_blocks.rs"
+required-features = ["gpu"]

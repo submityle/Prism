@@ -129,6 +129,12 @@ pub enum ContainerError {
     HashMismatch,
     /// A payload codec failed while encoding or decoding.
     CompressionFailed,
+    /// A block backend returned metadata inconsistent with the decode request.
+    InvalidDecodeReport,
+    /// A block backend failed and supplied a diagnostic.
+    BlockDecodeFailed(String),
+    /// A block backend could not allocate its internal working memory.
+    BackendAllocationFailed,
     /// No mounted container contains the requested asset.
     MissingAsset(prism_asset::StableGuid),
     /// The requested payload range exceeds the raw payload length.
@@ -177,6 +183,11 @@ impl fmt::Display for ContainerError {
             }
             Self::HashMismatch => f.write_str("container or payload hash mismatch"),
             Self::CompressionFailed => f.write_str("container payload compression failed"),
+            Self::InvalidDecodeReport => f.write_str("inconsistent block decode report"),
+            Self::BlockDecodeFailed(error) => write!(f, "block decode backend failed: {error}"),
+            Self::BackendAllocationFailed => {
+                f.write_str("block decode backend working-memory allocation failed")
+            }
             Self::MissingAsset(g) => write!(f, "asset {g:?} is not mounted"),
             Self::InvalidRange => f.write_str("requested asset range is invalid"),
             Self::InvalidAlignment => f.write_str("payload alignment is invalid"),

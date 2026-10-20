@@ -58,13 +58,26 @@ impl crate::RangeSource for BoundedSource {
 /// retains only the source and validated metadata; it never caches the whole
 /// file. Range sources must keep their byte contents immutable for the reader's
 /// lifetime; `read_all` additionally verifies the bytes it returns.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ContainerReader {
     backing: Backing,
     info: ContainerInfo,
     entries: BTreeMap<StableGuid, EntryInfo>,
     chunks: BTreeMap<u32, ChunkInfo>,
     budget: ContainerReadBudget,
+    block_decode_backend: Arc<dyn crate::block::BlockDecodeBackend>,
+}
+
+impl core::fmt::Debug for ContainerReader {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ContainerReader")
+            .field("backing", &self.backing)
+            .field("info", &self.info)
+            .field("entries", &self.entries)
+            .field("chunks", &self.chunks)
+            .field("budget", &self.budget)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug)]
@@ -85,16 +98,44 @@ impl ContainerReader {
         bytes: impl Into<Arc<[u8]>>,
         budget: ContainerReadBudget,
     ) -> Result<Self, ContainerError> {
+        Self::with_budget_and_block_decode_backend(
+            bytes,
+            budget,
+            Arc::new(crate::block::CpuBlockDecodeBackend),
+        )
+    }
+
+    /// Validates memory-backed bytes with a caller-provided BlockDeflate
+    /// backend and shared budget.
+    pub fn with_budget_and_block_decode_backend(
+        bytes: impl Into<Arc<[u8]>>,
+        budget: ContainerReadBudget,
+        block_decode_backend: Arc<dyn crate::block::BlockDecodeBackend>,
+    ) -> Result<Self, ContainerError> {
         let bytes = bytes.into();
         let source = crate::MemoryRangeSource::new(bytes.clone());
-        let parsed = parse_source(&source, &budget)?;
+        let parsed = parse_source(&source, &budget, block_decode_backend.as_ref())?;
         Ok(Self {
             backing: Backing::Memory(bytes),
             info: parsed.info,
             entries: parsed.entries,
             chunks: parsed.chunks,
             budget,
+            block_decode_backend,
         })
+    }
+
+    /// Validates memory-backed bytes with a caller-provided BlockDeflate
+    /// backend and the default budget.
+    pub fn new_with_block_decode_backend(
+        bytes: impl Into<Arc<[u8]>>,
+        block_decode_backend: Arc<dyn crate::block::BlockDecodeBackend>,
+    ) -> Result<Self, ContainerError> {
+        Self::with_budget_and_block_decode_backend(
+            bytes,
+            ContainerReadBudget::default(),
+            block_decode_backend,
+        )
     }
 
     /// Mounts and strictly validates a container through a seekable/range
@@ -120,13 +161,31 @@ impl ContainerReader {
     pub fn from_shared_range_source(
         source: Arc<dyn crate::RangeSource>,
     ) -> Result<Self, ContainerError> {
-        Self::from_range_source_with_budget(source, ContainerReadBudget::default())
+        Self::from_range_source_with_budget_and_block_decode_backend(
+            source,
+            ContainerReadBudget::default(),
+            Arc::new(crate::block::CpuBlockDecodeBackend),
+        )
     }
 
     /// Mounts a range source under a budget that may also govern other mounts.
     pub fn from_range_source_with_budget(
         source: Arc<dyn crate::RangeSource>,
         budget: ContainerReadBudget,
+    ) -> Result<Self, ContainerError> {
+        Self::from_range_source_with_budget_and_block_decode_backend(
+            source,
+            budget,
+            Arc::new(crate::block::CpuBlockDecodeBackend),
+        )
+    }
+
+    /// Mounts a range source under a budget with a caller-provided BlockDeflate
+    /// backend. The backend is used during mount validation and later reads.
+    pub fn from_range_source_with_budget_and_block_decode_backend(
+        source: Arc<dyn crate::RangeSource>,
+        budget: ContainerReadBudget,
+        block_decode_backend: Arc<dyn crate::block::BlockDecodeBackend>,
     ) -> Result<Self, ContainerError> {
         let maximum_read_bytes = source.maximum_read_bytes().get();
         let source: Arc<dyn crate::RangeSource> = if maximum_read_bytes < usize::MAX {
@@ -137,14 +196,28 @@ impl ContainerReader {
         } else {
             source
         };
-        let parsed = parse_source(source.as_ref(), &budget)?;
+        let parsed = parse_source(source.as_ref(), &budget, block_decode_backend.as_ref())?;
         Ok(Self {
             backing: Backing::Range(source),
             info: parsed.info,
             entries: parsed.entries,
             chunks: parsed.chunks,
             budget,
+            block_decode_backend,
         })
+    }
+
+    /// Mounts a range source with a caller-provided BlockDeflate backend and
+    /// the default budget.
+    pub fn from_shared_range_source_with_block_decode_backend(
+        source: Arc<dyn crate::RangeSource>,
+        block_decode_backend: Arc<dyn crate::block::BlockDecodeBackend>,
+    ) -> Result<Self, ContainerError> {
+        Self::from_range_source_with_budget_and_block_decode_backend(
+            source,
+            ContainerReadBudget::default(),
+            block_decode_backend,
+        )
     }
 
     /// Returns the shared in-flight budget used by this reader and its clones.
@@ -498,7 +571,13 @@ impl ContainerReader {
                     return Err(ContainerError::InvalidDirectory);
                 }
                 let mut decoded = self.budget.buffer(chunk.raw_len)?;
-                index.decode_range(source, 0, &mut decoded, &self.budget)?;
+                index.decode_range_with_backend(
+                    source,
+                    0,
+                    &mut decoded,
+                    &self.budget,
+                    self.block_decode_backend.as_ref(),
+                )?;
                 Ok(decoded)
             });
         }
@@ -523,7 +602,13 @@ impl ContainerReader {
             if index.raw_len() != chunk.raw_len {
                 return Err(ContainerError::InvalidDirectory);
             }
-            index.decode_range(source, raw_offset, out, &self.budget)
+            index.decode_range_with_backend(
+                source,
+                raw_offset,
+                out,
+                &self.budget,
+                self.block_decode_backend.as_ref(),
+            )
         })
     }
 
@@ -621,6 +706,7 @@ fn read_from_source(
 fn parse_source(
     source: &dyn crate::RangeSource,
     budget: &ContainerReadBudget,
+    block_decode_backend: &dyn crate::block::BlockDecodeBackend,
 ) -> Result<ParsedContainer, ContainerError> {
     let limits = budget.limits();
     limits.check("container bytes", source.len(), limits.max_container_bytes)?;
@@ -631,7 +717,7 @@ fn parse_source(
     }
     match read_u16(&prefix, 8)? {
         FORMAT_VERSION => parse_v1(source, budget),
-        CHUNK_FORMAT_VERSION => parse_v2(source, budget),
+        CHUNK_FORMAT_VERSION => parse_v2(source, budget, block_decode_backend),
         version => Err(ContainerError::UnsupportedVersion(version)),
     }
 }
@@ -803,6 +889,7 @@ fn parse_v1(
 fn parse_v2(
     source: &dyn crate::RangeSource,
     budget: &ContainerReadBudget,
+    block_decode_backend: &dyn crate::block::BlockDecodeBackend,
 ) -> Result<ParsedContainer, ContainerError> {
     let mut header = [0_u8; CHUNK_HEADER_SIZE];
     read_from_source(source, 0, &mut header)?;
@@ -1025,7 +1112,8 @@ fn parse_v2(
             let metadata_bytes = dir_len
                 .checked_add(table_len)
                 .ok_or(ContainerError::IntegerOverflow)?;
-            let decoded = decode_chunk_source(source, chunk, metadata_bytes, budget)?;
+            let decoded =
+                decode_chunk_source(source, chunk, metadata_bytes, budget, block_decode_backend)?;
             if blake3::hash(&decoded).as_bytes() != &chunk.hash {
                 return Err(ContainerError::HashMismatch);
             }
@@ -1106,6 +1194,7 @@ fn decode_chunk_source(
     chunk: ChunkInfo,
     existing_metadata_bytes: u64,
     budget: &ContainerReadBudget,
+    block_decode_backend: &dyn crate::block::BlockDecodeBackend,
 ) -> Result<ReadBuffer, ContainerError> {
     budget.limits().unit(chunk.stored_len, chunk.raw_len)?;
     if chunk.codec == Codec::BlockDeflate {
@@ -1120,7 +1209,7 @@ fn decode_chunk_source(
             return Err(ContainerError::InvalidDirectory);
         }
         let mut decoded = budget.buffer(chunk.raw_len)?;
-        index.decode_range(source, 0, &mut decoded, budget)?;
+        index.decode_range_with_backend(source, 0, &mut decoded, budget, block_decode_backend)?;
         return Ok(decoded);
     }
     let mut stored = budget.buffer(chunk.stored_len)?;

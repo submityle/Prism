@@ -15,6 +15,256 @@ use crate::budget::{ContainerReadBudget, ReadBuffer};
 use crate::format::ContainerError;
 use crate::range_source::RangeSource;
 
+/// The independently encoded representation of one BlockDeflate block.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlockCodec {
+    /// The block is stored without compression.
+    Raw,
+    /// The block is stored as a raw-DEFLATE stream.
+    Deflate,
+}
+
+/// Validated input supplied to a [`BlockDecodeBackend`].
+#[derive(Clone, Copy, Debug)]
+pub struct BlockDecodeRequest<'a> {
+    /// Zero-based block ordinal within the BlockDeflate payload.
+    pub block_index: u32,
+    /// Decoded byte offset of this block within the payload.
+    pub raw_offset: u64,
+    /// Exact decoded length required in `output`.
+    pub raw_len: u64,
+    /// The independently stored block bytes.
+    pub stored: &'a [u8],
+    /// The representation used by `stored`.
+    pub codec: BlockCodec,
+}
+
+/// Successful execution path for one independently decoded block.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlockDecodePath {
+    /// The block was stored without compression and copied as-is.
+    Raw,
+    /// The raw-DEFLATE stream was decoded by the CPU implementation.
+    CpuDeflate,
+    /// The raw-DEFLATE stream was decoded by the GPU implementation.
+    GpuDeflate,
+    /// A GPU attempt failed and the block was decoded by the CPU fallback.
+    CpuFallback,
+}
+
+/// Per-block execution evidence returned by a decode backend.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BlockDecodeReport {
+    /// Successful execution path.
+    pub path: BlockDecodePath,
+    /// Whether a GPU attempt was made.
+    pub gpu_attempted: bool,
+    /// Number of bytes in the independently stored stream.
+    pub compressed_bytes: u64,
+    /// Number of decoded bytes written to the output.
+    pub uncompressed_bytes: u64,
+}
+
+impl BlockDecodeReport {
+    fn for_path(path: BlockDecodePath, compressed_bytes: usize, uncompressed_bytes: usize) -> Self {
+        Self {
+            path,
+            gpu_attempted: matches!(
+                path,
+                BlockDecodePath::GpuDeflate | BlockDecodePath::CpuFallback
+            ),
+            compressed_bytes: u64::try_from(compressed_bytes).unwrap_or(u64::MAX),
+            uncompressed_bytes: u64::try_from(uncompressed_bytes).unwrap_or(u64::MAX),
+        }
+    }
+
+    fn validate(self, request: BlockDecodeRequest<'_>) -> Result<(), ContainerError> {
+        let stored_len =
+            u64::try_from(request.stored.len()).map_err(|_| ContainerError::IntegerOverflow)?;
+        let valid_path = match (request.codec, self.path) {
+            (BlockCodec::Raw, BlockDecodePath::Raw)
+            | (BlockCodec::Deflate, BlockDecodePath::CpuDeflate) => !self.gpu_attempted,
+            (BlockCodec::Deflate, BlockDecodePath::GpuDeflate | BlockDecodePath::CpuFallback) => {
+                self.gpu_attempted
+            }
+            _ => false,
+        };
+        if !valid_path
+            || self.compressed_bytes != stored_len
+            || self.uncompressed_bytes != request.raw_len
+        {
+            return Err(ContainerError::InvalidDecodeReport);
+        }
+        Ok(())
+    }
+}
+
+/// Aggregated block execution evidence for one validation or range operation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BlockDecodeSummary {
+    /// Number of blocks decoded.
+    pub blocks: u64,
+    /// Number of blocks decoded with the GPU kernel.
+    pub gpu_blocks: u64,
+    /// Number of blocks decoded with the CPU implementation.
+    pub cpu_blocks: u64,
+    /// Number of uncompressed blocks copied without a codec invocation.
+    pub raw_blocks: u64,
+    /// Number of blocks that fell back to CPU after a GPU attempt.
+    pub fallback_blocks: u64,
+    /// Total stored bytes consumed by block decoders.
+    pub compressed_bytes: u64,
+    /// Total decoded bytes produced before range slicing.
+    pub uncompressed_bytes: u64,
+}
+
+impl BlockDecodeSummary {
+    fn record(&mut self, report: BlockDecodeReport) -> Result<(), ContainerError> {
+        self.blocks = self
+            .blocks
+            .checked_add(1)
+            .ok_or(ContainerError::IntegerOverflow)?;
+        match report.path {
+            BlockDecodePath::GpuDeflate => {
+                self.gpu_blocks = self
+                    .gpu_blocks
+                    .checked_add(1)
+                    .ok_or(ContainerError::IntegerOverflow)?;
+            }
+            BlockDecodePath::CpuFallback => {
+                self.fallback_blocks = self
+                    .fallback_blocks
+                    .checked_add(1)
+                    .ok_or(ContainerError::IntegerOverflow)?;
+            }
+            BlockDecodePath::Raw => {
+                self.raw_blocks = self
+                    .raw_blocks
+                    .checked_add(1)
+                    .ok_or(ContainerError::IntegerOverflow)?;
+            }
+            BlockDecodePath::CpuDeflate => {
+                self.cpu_blocks = self
+                    .cpu_blocks
+                    .checked_add(1)
+                    .ok_or(ContainerError::IntegerOverflow)?;
+            }
+        }
+        self.compressed_bytes = self
+            .compressed_bytes
+            .checked_add(report.compressed_bytes)
+            .ok_or(ContainerError::IntegerOverflow)?;
+        self.uncompressed_bytes = self
+            .uncompressed_bytes
+            .checked_add(report.uncompressed_bytes)
+            .ok_or(ContainerError::IntegerOverflow)?;
+        Ok(())
+    }
+}
+
+/// Backend used to decode one independently stored BlockDeflate block.
+///
+/// The container owns the input range and output buffer. Implementations must
+/// write exactly `request.raw_len` bytes to `output` and return an error when
+/// the encoded block cannot be decoded. The container verifies the output
+/// hash and the report's codec, byte counts, and attempt flag after this method
+/// returns. Reports describe backend execution; they are not device attestation.
+pub trait BlockDecodeBackend: Send + Sync {
+    /// Decodes one validated block into the caller-provided output buffer.
+    fn decode_block(
+        &self,
+        request: BlockDecodeRequest<'_>,
+        output: &mut [u8],
+    ) -> Result<BlockDecodeReport, ContainerError>;
+}
+
+/// The deterministic CPU BlockDeflate decoder used by default.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CpuBlockDecodeBackend;
+
+impl BlockDecodeBackend for CpuBlockDecodeBackend {
+    fn decode_block(
+        &self,
+        request: BlockDecodeRequest<'_>,
+        output: &mut [u8],
+    ) -> Result<BlockDecodeReport, ContainerError> {
+        if request.raw_len
+            != u64::try_from(output.len()).map_err(|_| ContainerError::IntegerOverflow)?
+        {
+            return Err(ContainerError::LengthMismatch);
+        }
+        match request.codec {
+            BlockCodec::Raw => {
+                if request.stored.len() != output.len() {
+                    return Err(ContainerError::InvalidDirectory);
+                }
+                output.copy_from_slice(request.stored);
+                Ok(BlockDecodeReport::for_path(
+                    BlockDecodePath::Raw,
+                    request.stored.len(),
+                    output.len(),
+                ))
+            }
+            BlockCodec::Deflate => {
+                let mut decompressor = Decompress::new(false);
+                loop {
+                    let written = usize::try_from(decompressor.total_out())
+                        .map_err(|_| ContainerError::CompressionFailed)?;
+                    let consumed = usize::try_from(decompressor.total_in())
+                        .map_err(|_| ContainerError::CompressionFailed)?;
+                    let input = request
+                        .stored
+                        .get(consumed..)
+                        .ok_or(ContainerError::CompressionFailed)?;
+                    let before_in = decompressor.total_in();
+                    let before_out = decompressor.total_out();
+                    let output_tail = output
+                        .get_mut(written..)
+                        .ok_or(ContainerError::CompressionFailed)?;
+                    let status = decompressor
+                        .decompress(input, output_tail, FlushDecompress::Finish)
+                        .map_err(|_| ContainerError::CompressionFailed)?;
+                    if status == Status::StreamEnd {
+                        if decompressor.total_in()
+                            != u64::try_from(request.stored.len())
+                                .map_err(|_| ContainerError::IntegerOverflow)?
+                            || decompressor.total_out()
+                                != u64::try_from(output.len())
+                                    .map_err(|_| ContainerError::IntegerOverflow)?
+                        {
+                            return Err(ContainerError::CompressionFailed);
+                        }
+                        return Ok(BlockDecodeReport::for_path(
+                            BlockDecodePath::CpuDeflate,
+                            request.stored.len(),
+                            output.len(),
+                        ));
+                    }
+                    if status == Status::BufError
+                        || (decompressor.total_in() == before_in
+                            && decompressor.total_out() == before_out)
+                    {
+                        return Err(ContainerError::CompressionFailed);
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl<T> BlockDecodeBackend for alloc::sync::Arc<T>
+where
+    T: BlockDecodeBackend + ?Sized,
+{
+    fn decode_block(
+        &self,
+        request: BlockDecodeRequest<'_>,
+        output: &mut [u8],
+    ) -> Result<BlockDecodeReport, ContainerError> {
+        (**self).decode_block(request, output)
+    }
+}
+
 /// The outer-container codec value reserved for this wire format.
 pub const BLOCK_DEFLATE_CODEC: u8 = 2;
 /// The block wire-format version.  It is deliberately independent of the
@@ -187,6 +437,48 @@ impl core::fmt::Debug for BlockIndex {
 }
 
 impl BlockIndex {
+    #[cfg(feature = "gpu")]
+    pub(crate) fn raw_hash(&self) -> [u8; 32] {
+        self.raw_hash
+    }
+
+    /// Borrows encoded bytes using this index's already validated layout.
+    #[cfg(feature = "gpu")]
+    pub(crate) fn encoded_block<'a>(
+        &self,
+        bytes: &'a [u8],
+        number: u32,
+    ) -> Result<BlockDecodeRequest<'a>, ContainerError> {
+        let record = self.record(number)?;
+        let start = self
+            .source_offset
+            .checked_add(self.data_offset)
+            .and_then(|offset| offset.checked_add(record.stored_offset))
+            .ok_or(ContainerError::IntegerOverflow)?;
+        let end = start
+            .checked_add(record.stored_len)
+            .ok_or(ContainerError::IntegerOverflow)?;
+        let stored = bytes
+            .get(
+                usize::try_from(start).map_err(|_| ContainerError::IntegerOverflow)?
+                    ..usize::try_from(end).map_err(|_| ContainerError::IntegerOverflow)?,
+            )
+            .ok_or(ContainerError::OutOfBounds)?;
+        let codec = match record.codec {
+            0 if record.stored_len == record.raw_len => BlockCodec::Raw,
+            0 => return Err(ContainerError::LengthMismatch),
+            1 => BlockCodec::Deflate,
+            value => return Err(ContainerError::UnsupportedCodec(value)),
+        };
+        Ok(BlockDecodeRequest {
+            block_index: number,
+            raw_offset: record.raw_offset,
+            raw_len: record.raw_len,
+            stored,
+            codec,
+        })
+    }
+
     /// Returns the canonical raw block size declared by the payload.
     #[must_use]
     pub fn block_size(&self) -> u32 {
@@ -223,6 +515,36 @@ impl BlockIndex {
         out: &mut [u8],
         budget: &ContainerReadBudget,
     ) -> Result<(), ContainerError> {
+        self.decode_range_with_backend(source, raw_offset, out, budget, &CpuBlockDecodeBackend)
+    }
+
+    /// Decodes `out.len()` bytes using a caller-provided block backend.
+    ///
+    /// The container still validates the requested raw range, admits stored
+    /// and decoded buffers through `budget`, and verifies every decoded block
+    /// hash before copying bytes into `out`.
+    pub fn decode_range_with_backend(
+        &self,
+        source: &dyn RangeSource,
+        raw_offset: u64,
+        out: &mut [u8],
+        budget: &ContainerReadBudget,
+        backend: &dyn BlockDecodeBackend,
+    ) -> Result<(), ContainerError> {
+        self.decode_range_with_backend_report(source, raw_offset, out, budget, backend)
+            .map(|_| ())
+    }
+
+    /// Like [`Self::decode_range_with_backend`], but returns aggregated
+    /// per-block execution evidence for the blocks touched by the request.
+    pub fn decode_range_with_backend_report(
+        &self,
+        source: &dyn RangeSource,
+        raw_offset: u64,
+        out: &mut [u8],
+        budget: &ContainerReadBudget,
+        backend: &dyn BlockDecodeBackend,
+    ) -> Result<BlockDecodeSummary, ContainerError> {
         let output_len = u64::try_from(out.len()).map_err(|_| ContainerError::IntegerOverflow)?;
         let end = raw_offset
             .checked_add(output_len)
@@ -231,7 +553,7 @@ impl BlockIndex {
             return Err(ContainerError::InvalidRange);
         }
         if out.is_empty() {
-            return Ok(());
+            return Ok(BlockDecodeSummary::default());
         }
 
         let first = raw_offset / u64::from(self.block_size);
@@ -239,6 +561,7 @@ impl BlockIndex {
         let first = u32::try_from(first).map_err(|_| ContainerError::IntegerOverflow)?;
         let last = u32::try_from(last).map_err(|_| ContainerError::IntegerOverflow)?;
         let mut copied = 0usize;
+        let mut summary = BlockDecodeSummary::default();
 
         for block_number in first..=last {
             let record = self.record(block_number)?;
@@ -251,7 +574,9 @@ impl BlockIndex {
             if copy_start >= copy_end {
                 continue;
             }
-            let decoded = self.decode_block(source, &record, budget)?;
+            let (decoded, report) =
+                self.decode_block(source, block_number, &record, budget, backend)?;
+            summary.record(report)?;
             let source_start = usize::try_from(copy_start - record.raw_offset)
                 .map_err(|_| ContainerError::IntegerOverflow)?;
             let amount = usize::try_from(copy_end - copy_start)
@@ -278,7 +603,7 @@ impl BlockIndex {
         if copied != out.len() {
             return Err(ContainerError::InvalidDirectory);
         }
-        Ok(())
+        Ok(summary)
     }
 
     /// Validates every stored block and the complete decoded-payload hash.
@@ -291,16 +616,42 @@ impl BlockIndex {
         source: &dyn RangeSource,
         budget: &ContainerReadBudget,
     ) -> Result<(), ContainerError> {
+        self.validate_all_with_backend(source, budget, &CpuBlockDecodeBackend)
+    }
+
+    /// Validates every stored block and the complete decoded-payload hash with
+    /// a caller-provided backend.
+    pub fn validate_all_with_backend(
+        &self,
+        source: &dyn RangeSource,
+        budget: &ContainerReadBudget,
+        backend: &dyn BlockDecodeBackend,
+    ) -> Result<(), ContainerError> {
+        self.validate_all_with_backend_report(source, budget, backend)
+            .map(|_| ())
+    }
+
+    /// Like [`Self::validate_all_with_backend`], but returns aggregate
+    /// execution evidence for every block validated.
+    pub fn validate_all_with_backend_report(
+        &self,
+        source: &dyn RangeSource,
+        budget: &ContainerReadBudget,
+        backend: &dyn BlockDecodeBackend,
+    ) -> Result<BlockDecodeSummary, ContainerError> {
         let mut hasher = blake3::Hasher::new();
+        let mut summary = BlockDecodeSummary::default();
         for block_number in 0..self.block_count {
             let record = self.record(block_number)?;
-            let decoded = self.decode_block(source, &record, budget)?;
+            let (decoded, report) =
+                self.decode_block(source, block_number, &record, budget, backend)?;
+            summary.record(report)?;
             hasher.update(&decoded);
         }
         if *hasher.finalize().as_bytes() != self.raw_hash {
             return Err(ContainerError::HashMismatch);
         }
-        Ok(())
+        Ok(summary)
     }
 
     fn record(&self, block_number: u32) -> Result<BlockRecord, ContainerError> {
@@ -337,10 +688,15 @@ impl BlockIndex {
     fn decode_block(
         &self,
         source: &dyn RangeSource,
+        block_number: u32,
         record: &BlockRecord,
         budget: &ContainerReadBudget,
-    ) -> Result<ReadBuffer, ContainerError> {
+        backend: &dyn BlockDecodeBackend,
+    ) -> Result<(ReadBuffer, BlockDecodeReport), ContainerError> {
         budget.limits().unit(record.stored_len, record.raw_len)?;
+        if record.codec == 0 && record.stored_len != record.raw_len {
+            return Err(ContainerError::InvalidDirectory);
+        }
         let absolute = self
             .source_offset
             .checked_add(self.data_offset)
@@ -350,63 +706,25 @@ impl BlockIndex {
         source
             .read_range(absolute, &mut stored[..])
             .map_err(|error| ContainerError::Source(error.to_string()))?;
-
-        let decoded = if record.codec == 0 {
-            if record.stored_len != record.raw_len {
-                return Err(ContainerError::InvalidDirectory);
-            }
-            stored
-        } else {
-            let raw_len =
-                usize::try_from(record.raw_len).map_err(|_| ContainerError::IntegerOverflow)?;
-            let capacity = raw_len
-                .checked_add(1)
-                .ok_or(ContainerError::IntegerOverflow)?;
-            let mut output = budget
-                .buffer(u64::try_from(capacity).map_err(|_| ContainerError::IntegerOverflow)?)?;
-            let mut decompressor = Decompress::new(false);
-            loop {
-                let written = usize::try_from(decompressor.total_out())
-                    .map_err(|_| ContainerError::CompressionFailed)?;
-                if written >= capacity {
-                    return Err(ContainerError::CompressionFailed);
-                }
-                let consumed = usize::try_from(decompressor.total_in())
-                    .map_err(|_| ContainerError::CompressionFailed)?;
-                let input = stored
-                    .get(consumed..)
-                    .ok_or(ContainerError::CompressionFailed)?;
-                let before_in = decompressor.total_in();
-                let before_out = decompressor.total_out();
-                let status = decompressor
-                    .decompress(input, &mut output[written..], FlushDecompress::Finish)
-                    .map_err(|_| ContainerError::CompressionFailed)?;
-                if status == Status::StreamEnd {
-                    if decompressor.total_in() != record.stored_len
-                        || decompressor.total_out() != record.raw_len
-                    {
-                        return Err(ContainerError::CompressionFailed);
-                    }
-                    break;
-                }
-                if status == Status::BufError
-                    || (decompressor.total_in() == before_in
-                        && decompressor.total_out() == before_out)
-                {
-                    return Err(ContainerError::CompressionFailed);
-                }
-            }
-            output.truncate(raw_len);
-            output
+        let codec = match record.codec {
+            0 => BlockCodec::Raw,
+            1 => BlockCodec::Deflate,
+            other => return Err(ContainerError::UnsupportedCodec(other)),
         };
-
-        if decoded.len()
-            != usize::try_from(record.raw_len).map_err(|_| ContainerError::IntegerOverflow)?
-            || *blake3::hash(&decoded).as_bytes() != record.raw_hash
-        {
+        let mut decoded = budget.buffer(record.raw_len)?;
+        let request = BlockDecodeRequest {
+            block_index: block_number,
+            raw_offset: record.raw_offset,
+            raw_len: record.raw_len,
+            stored: &stored,
+            codec,
+        };
+        let report = backend.decode_block(request, &mut decoded)?;
+        report.validate(request)?;
+        if *blake3::hash(&decoded).as_bytes() != record.raw_hash {
             return Err(ContainerError::HashMismatch);
         }
-        Ok(decoded)
+        Ok((decoded, report))
     }
 }
 
