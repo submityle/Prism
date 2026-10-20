@@ -1,0 +1,40 @@
+# Prism 编辑器框架实现状态
+
+本文是 `prism_editor_framework_design_zh.md` 的代码状态补充，只记录当前 checkout 中已经存在并通过验证的实现，不把设计规格或代理分支内容计入完成度。
+
+## 当前已交付
+
+### E1 编辑器内核
+
+`pkg/prism_editor_core` 已加入 workspace，并完成以下无 `bevy_*` 依赖的基础能力：
+
+- `DocumentState`、有序 Layer、Base/Override/Runtime 层类型和脏状态/修订号。
+- 类型无关的 `Command`、事务、失败回滚、Undo/Redo、影响域集合和命令合并接口。
+- 有序去重的 Entity/Asset/SubObject 选择集及主选择。
+- 类型键控的服务注册表，以及可注销的命令/面板贡献注册表。
+- 单元测试覆盖层约束、事务往返、选择集去重、服务生命周期和贡献注销。
+
+验证命令：
+
+```text
+CARGO_TARGET_DIR=/private/tmp/prism-editor-core-target cargo check -p prism_editor_core
+CARGO_TARGET_DIR=/private/tmp/prism-editor-core-target cargo test -p prism_editor_core
+```
+
+验证结果：5 个单元测试通过，文档测试 0 个；该实现已提交为 `4e6d3a724`。
+
+## 当前未交付
+
+以下项目仍以代码和测试为准，不能仅因设计文档存在就视为完成：
+
+- 反射 Inspector 到编辑器控件的适配和字段命令。
+- 外壳、停靠、核心面板、运行时桥和 PIE。
+- GPU 视口、拾取、Gizmo、内容管线、大世界编辑器 UI。
+- 通用节点图、时间线、域编辑器、分析器、协同和无头编辑器应用。
+
+## 不变约束
+
+- 编辑器专有 crate 不得依赖 `bevy_*`；Bevy 机制只在尚未迁移的引擎边界中保留。
+- 通用内核不写死项目 gameplay 类型、固定输入通道、网络 authority、AI 或物理策略。
+- 每个新增 crate 必须同时具备实现、测试和文档；不以 TODO、`todo!`、`unimplemented!` 或空壳接口宣称完成。
+- 设计规格中的 SHIPPED/PLANNED 标记必须以当前源码、Cargo 依赖和测试证据复核。
