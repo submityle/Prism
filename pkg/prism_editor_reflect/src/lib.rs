@@ -10,9 +10,11 @@
 mod edit;
 mod inspector;
 mod path;
+mod session;
 mod validation;
 
 pub use edit::{EditorError, FieldEditCommand, ReflectEditor, ReflectEditorContext};
 pub use inspector::{project_inspector, InspectorProjection, InspectorProjectionNode};
 pub use path::{FieldPath, FieldPathError};
+pub use session::{InspectorSession, InspectorSessionError};
 pub use validation::{validate, ValidationIssue, ValidationIssueKind, ValidationReport};

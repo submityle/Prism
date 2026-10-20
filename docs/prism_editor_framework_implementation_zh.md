@@ -48,6 +48,7 @@ CARGO_TARGET_DIR=/private/tmp/prism-editor-core-target cargo test -p prism_edito
 - 基于 `prism_reflect` Inspector 的路径化树投影，保留字段元数据。
 - 元数据范围/必填/只读校验，以及字段编辑命令的 apply/undo/redo。
 - 只依赖 `prism_reflect` 与 `prism_editor_core`，不依赖 `bevy_*`。
+- `InspectorSession` 将稳定选择集、主选 Inspector 投影、字段命令、Undo/Redo 和动态反射快照串成可测试闭环；快照可通过 `Reflect::apply` 回写具体模型。
 
 ### E8 大世界编辑模型
 
@@ -76,16 +77,18 @@ CARGO_TARGET_DIR=/private/tmp/prism-editor-core-target cargo test -p prism_edito
 - 客户端副本从 snapshot 到增量 commit 的收敛流程。
 - `jsonrpc` 模块提供有界 JSON-RPC 2.0 请求/响应/通知/批量解析、能力协商、BRP 风格 snapshot/change/apply/subscribe 方法和断档重同步通知；27 个测试通过。
 - `pie` 模块隔离编辑快照与运行快照，保留有序运行日志，并以显式 Rollback/Commit 返回结果；提交需再次经过编辑版本检查。
-- 该 crate 不依赖 `bevy_*`，也不假装提供 socket/进程管理或真实 `bevy_remote` transport；当前交付的是可接入实际 transport 的协议和隔离内核。
+- `transport` 模块提供有界四字节长度前缀流、TCP listener/client、超时/EOF/响应关联和主动订阅通知；31 个 transport/协议测试通过。
+- 该 crate 不依赖 `bevy_*`，也不假装提供运行时进程管理或引擎专属 BRP adapter；当前 TCP transport 可直接承载协议，进程桥仍是上层职责。
 
 ### E6 视口交互契约基础
 
-`pkg/prism_editor_viewport` 已完成并通过 3 个测试：
+`pkg/prism_editor_viewport` 已完成交互契约和第一条真实 GPU picking backend，并通过 6 个默认测试及 1 个真实 wgpu readback 测试：
 
 - 多视口稳定 ID、相机/显示设置和代际号，关闭后不复用身份。
 - 异步拾取请求的 request correlation、视口校验和过期代际拒绝。
 - Translate/Rotate/Scale Gizmo 会话、整数吸附、取消和一次性累计变换结果。
-- 该 crate 不执行 GPU 拾取、射线检测或 Gizmo 绘制；这些仍由 `prism_ui_input`/渲染适配层提供。
+- `gpu_picking` 创建 `Rgba32Uint` ID target，执行 256-byte 行对齐的单像素 GPU readback，并校验 viewport/generation/像素边界；真实测试绘制并读回实体 ID `42`。
+- 当前仍不包含完整场景/mesh ID pass、射线检测、输入焦点和 Gizmo/debug drawing；这些由上层 renderer/input 适配继续接入。
 
 ### E7 内容管线基础
 
@@ -126,7 +129,8 @@ CARGO_TARGET_DIR=/private/tmp/prism-editor-core-target cargo test -p prism_edito
 
 `pkg/prism_editor_collab` 与 `pkg/prism_editor_app` 已完成第一批可验证能力：
 
-- 协同层提供 HLC/Lamport 时钟、命令 envelope、因果排序、去重、有限历史、字段级 LWW/tombstone、Presence 和 soft-lock；13 个测试通过。
+- 协同层提供 HLC/Lamport 时钟、命令 envelope、因果排序、去重、有限历史、字段级 LWW/tombstone、Presence 和 soft-lock；15 个测试通过。
+- 协同接收会重新校验命令限制，Replica 的 known/pending/applied 元数据和 remote client pending 请求均有界；达到上限时显式拒绝，不静默丢弃因果信息。
 - 应用层提供有界 headless runner、确定性 snapshot/checksum、`prism_app` Update system 集成和 workspace 组合；4 个应用测试通过。
 - 当前没有宣称网络服务器、真实多人 transport、操作系统窗口或 GPU 视口已交付。
 
@@ -134,14 +138,14 @@ CARGO_TARGET_DIR=/private/tmp/prism-editor-core-target cargo test -p prism_edito
 
 以下项目仍以代码和测试为准，不能仅因设计文档存在就视为完成：
 
-- 真实 BRP/bevy_remote transport、跨进程连接和运行时进程管理。
-- GPU 视口后端、ID-buffer picking、实际 Gizmo/debug drawing、相机/网格 render target 和多 viewport GPU 提交。
+- 运行时进程管理、引擎专属 BRP adapter、完整场景/mesh ID pass 和多 viewport GPU 提交。
+- 输入焦点、射线/框选、实际 Gizmo/debug drawing，以及相机/网格和完整 render target 生命周期。
 - 内容浏览器 UI、大世界编辑器 UI，以及各具体域编辑器的业务贡献。
 - 真实多人网络 transport、权限/服务器仲裁和操作系统窗口生命周期。
 
 ## 不变约束
 
-- 编辑器专有 crate 不得依赖 `bevy_*`；Bevy 机制只在尚未迁移的引擎边界中保留。
+- 编辑器专有 crate 不得依赖 `bevy_*`；Bevy 只可作为历史迁移对照，不能出现在实现依赖或运行时路径中。
 - 通用内核不写死项目 gameplay 类型、固定输入通道、网络 authority、AI 或物理策略。
 - 每个新增 crate 必须同时具备实现、测试和文档；不以 TODO、`todo!`、`unimplemented!` 或空壳接口宣称完成。
 - 设计规格中的 SHIPPED/PLANNED 标记必须以当前源码、Cargo 依赖和测试证据复核。
