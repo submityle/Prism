@@ -15,6 +15,8 @@ pub mod frame;
 pub mod frame_graph;
 #[cfg(feature = "gpu")]
 pub mod gpu;
+#[cfg(feature = "gpu")]
+pub mod gpu_preview;
 pub mod graph_capture;
 pub mod memory;
 pub mod visual_log;

@@ -25,6 +25,10 @@ prism_render_driver = { path = "../prism_render_driver" }
 name = "gpu_capture"
 required-features = ["gpu-tests"]
 
+[[test]]
+name = "gpu_texture_preview"
+required-features = ["gpu-tests", "render-graph"]
+
 [lints]
 [lints.rust]
 unsafe_code = "forbid"
