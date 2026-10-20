@@ -23,16 +23,30 @@ use prism_render_architecture::particle::SortStrategy;
 use prism_render_driver as rhi;
 use prism_render_driver::{BufferState, PipelineStages};
 use prism_render_graph::{
-    BufferDesc, BufferHandle, CompileError, ImportedBuffer, PassFlags, RecordedGraph, RenderGraph,
+    BufferDesc, BufferHandle, CompileError, ImportedBuffer, ImportedTexture, PassFlags,
+    RecordedGraph, RenderGraph, SizeClass, TextureDesc,
 };
 use rhi::{
     BindGroupDescriptor, BindGroupId, BindGroupLayoutDescriptor, BindGroupLayoutId,
-    BufferBindingType, BufferDescriptor, BufferId, BufferUsages, ComputePipelineDescriptor,
-    ComputePipelineId, PipelineLayoutDescriptor, PipelineLayoutId, RenderDevice, RenderQueue,
-    ShaderModuleDescriptor, ShaderModuleId, ShaderStages,
+    BufferBindingType, BufferDescriptor, BufferId, BufferUsages, ColorTargetState,
+    ComputePipelineDescriptor, ComputePipelineId, FragmentState, IndexFormat, MultisampleState,
+    PipelineLayoutDescriptor, PipelineLayoutId, PrimitiveState, PrimitiveTopology, RenderDevice,
+    RenderPipelineDescriptor, RenderPipelineId, RenderQueue, ShaderModuleDescriptor,
+    ShaderModuleId, ShaderStages, TextureFormat, TextureState, TextureUsages,
+    TextureViewDescriptor, VertexState,
 };
 
 use crate::gpu::{bind_buffer, buffer_entry};
+
+/// The fixed offscreen target used by the standalone renderer-matrix raster
+/// consumer. Callers embedding the stage in a larger frame graph can use the
+/// same pipeline/bindings with their own color target.
+pub const RENDERER_MATRIX_TARGET_SIZE: u32 = 128;
+
+const SURFACE_MATERIAL_BYTES: u64 = 64;
+const SURFACE_MESH_VERTEX_STRIDE: u64 = 16;
+const AUX_RECORD_BYTES: u64 = 32;
+const AUX_PARAMS_BYTES: u64 = 16;
 
 /// One source particle record consumed by the GPU cull pass.
 ///
@@ -52,6 +66,35 @@ pub struct ParticleRenderInput {
     pub flags: u32,
     /// Reserved ABI word; must be zero in host uploads.
     pub reserved: u32,
+}
+
+/// One mesh vertex consumed by the particle Mesh renderer.
+///
+/// The renderer-matrix surface ABI currently carries local position and UV;
+/// normals and material attributes remain owned by the shared particle
+/// material path.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ParticleMeshVertex {
+    /// Local mesh position in the renderer's two-dimensional surface space.
+    pub position: [f32; 2],
+    /// Mesh UV passed through to the surface fragment stage.
+    pub uv: [f32; 2],
+}
+
+impl ParticleMeshVertex {
+    /// Creates a finite mesh vertex.
+    #[must_use]
+    pub const fn new(position: [f32; 2], uv: [f32; 2]) -> Self {
+        Self { position, uv }
+    }
+
+    fn validate(self) -> bool {
+        self.position
+            .iter()
+            .chain(self.uv.iter())
+            .all(|value| value.is_finite())
+    }
 }
 
 impl ParticleRenderInput {
@@ -257,7 +300,7 @@ impl ParticleRendererRoute {
         }
     }
 
-    fn params_bytes(self) -> [u8; 32] {
+    fn params_bytes(self) -> [u8; 48] {
         let words = [
             self.kind_code(),
             self.geometry_count(),
@@ -268,7 +311,7 @@ impl ParticleRendererRoute {
             0,
             0,
         ];
-        let mut bytes = [0; 32];
+        let mut bytes = [0; 48];
         for (index, word) in words.into_iter().enumerate() {
             bytes[index * 4..index * 4 + 4].copy_from_slice(&word.to_le_bytes());
         }
@@ -322,6 +365,12 @@ pub enum ParticleRendererGpuError {
     InvalidInput,
     /// Host view parameters did not satisfy the finite ABI invariants.
     InvalidView,
+    /// A custom surface mesh was supplied to a non-Mesh route.
+    MeshGeometryUnsupported,
+    /// A custom surface mesh did not fit the route-owned buffers.
+    MeshGeometryTooLarge,
+    /// A custom surface mesh contained an invalid index or non-finite vertex.
+    InvalidMeshGeometry,
 }
 
 impl From<SortCullLayoutError> for ParticleRendererGpuError {
@@ -333,6 +382,248 @@ impl From<SortCullLayoutError> for ParticleRendererGpuError {
 impl From<ParticleRendererRouteError> for ParticleRendererGpuError {
     fn from(value: ParticleRendererRouteError) -> Self {
         Self::Route(value)
+    }
+}
+
+impl ParticleAuxiliaryGpu {
+    /// Creates a renderer-specific Light, Decal, or Volume dispatch stage.
+    pub fn new<D: RenderDevice + ?Sized>(
+        device: &D,
+        kind: RendererKind,
+        capacity: u32,
+    ) -> Result<Self, ParticleRendererGpuError> {
+        if capacity == 0 {
+            return Err(ParticleRendererGpuError::ZeroCapacity);
+        }
+        if !matches!(
+            kind,
+            RendererKind::Light | RendererKind::Decal | RendererKind::Volume
+        ) {
+            return Err(ParticleRendererGpuError::Route(
+                ParticleRendererRouteError::UnsupportedRenderer(kind),
+            ));
+        }
+        let limits = device.capabilities().limits;
+        let max_storage = limits
+            .max_storage_buffer_binding_size
+            .min(limits.max_buffer_size);
+        for (resource, size) in [
+            ("particle auxiliary input", u64::from(capacity) * 32),
+            (
+                "particle auxiliary output",
+                u64::from(capacity) * AUX_RECORD_BYTES,
+            ),
+        ] {
+            if size > max_storage {
+                return Err(ParticleRendererGpuError::BufferTooLarge {
+                    resource,
+                    requested: size,
+                    limit: max_storage,
+                });
+            }
+        }
+        let workgroups = capacity.div_ceil(64);
+        if workgroups > limits.max_compute_workgroups_per_dimension {
+            return Err(ParticleRendererGpuError::DispatchTooLarge {
+                workgroups,
+                limit: limits.max_compute_workgroups_per_dimension,
+            });
+        }
+        let input = device.create_buffer(&BufferDescriptor::new(
+            u64::from(capacity) * 32,
+            BufferUsages::STORAGE | BufferUsages::COPY_DST,
+        ));
+        let output = device.create_buffer(&BufferDescriptor::new(
+            u64::from(capacity) * AUX_RECORD_BYTES,
+            BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+        ));
+        let params = device.create_buffer(&BufferDescriptor::new(
+            AUX_PARAMS_BYTES,
+            BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+        ));
+        let shader = device.create_shader_module(&ShaderModuleDescriptor::wgsl(include_str!(
+            "../shaders/particle_renderer_auxiliary.wgsl"
+        )));
+        let layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some(String::from("particle-renderer-auxiliary-bgl")),
+            entries: vec![
+                buffer_entry(
+                    0,
+                    BufferBindingType::Storage { read_only: true },
+                    ShaderStages::COMPUTE,
+                ),
+                buffer_entry(
+                    1,
+                    BufferBindingType::Storage { read_only: false },
+                    ShaderStages::COMPUTE,
+                ),
+                buffer_entry(2, BufferBindingType::Uniform, ShaderStages::COMPUTE),
+            ],
+        });
+        let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+            label: Some(String::from("particle-renderer-auxiliary-pl")),
+            bind_group_layouts: vec![layout],
+            push_constant_ranges: Vec::new(),
+        });
+        let entry_point = match kind {
+            RendererKind::Light => "emit_lights",
+            RendererKind::Decal => "project_decals",
+            RendererKind::Volume => "accumulate_volumes",
+            _ => unreachable!(),
+        };
+        let pipeline = make_compute(device, pipeline_layout, shader, entry_point);
+        let bind_group = device.create_bind_group(&BindGroupDescriptor {
+            label: Some(String::from("particle-renderer-auxiliary-bg")),
+            layout: Some(layout),
+            entries: vec![
+                bind_buffer(0, input),
+                bind_buffer(1, output),
+                bind_buffer(2, params),
+            ],
+        });
+        Ok(Self {
+            kind,
+            capacity,
+            input,
+            output,
+            params,
+            shader,
+            layout,
+            pipeline_layout,
+            pipeline,
+            bind_group,
+        })
+    }
+
+    /// Uploads particle records and renderer-specific effect parameters.
+    pub fn set_inputs(
+        &self,
+        queue: &impl RenderQueue,
+        inputs: &[ParticleRenderInput],
+        intensity_or_density: f32,
+    ) -> Result<(), ParticleRendererGpuError> {
+        if inputs.len() > self.capacity as usize || !intensity_or_density.is_finite() {
+            return Err(ParticleRendererGpuError::InvalidInput);
+        }
+        let mut bytes = Vec::with_capacity(inputs.len() * 32);
+        for input in inputs {
+            if !input.validate() {
+                return Err(ParticleRendererGpuError::InvalidInput);
+            }
+            for value in input.center_radius {
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+            bytes.extend_from_slice(&input.depth.to_le_bytes());
+            bytes.extend_from_slice(&input.particle_index.to_le_bytes());
+            bytes.extend_from_slice(&input.flags.to_le_bytes());
+            bytes.extend_from_slice(&input.reserved.to_le_bytes());
+        }
+        queue.write_buffer(self.input, 0, &bytes);
+        let mode = match self.kind {
+            RendererKind::Light => 0.0_f32,
+            RendererKind::Decal => 1.0,
+            RendererKind::Volume => 2.0,
+            _ => unreachable!(),
+        };
+        let params = [
+            inputs.len() as u32,
+            mode.to_bits(),
+            intensity_or_density.to_bits(),
+            0_u32,
+        ];
+        let mut packed = [0_u8; AUX_PARAMS_BYTES as usize];
+        for (i, word) in params.into_iter().enumerate() {
+            packed[i * 4..i * 4 + 4].copy_from_slice(&word.to_le_bytes());
+        }
+        queue.write_buffer(self.params, 0, &packed);
+        Ok(())
+    }
+
+    /// Adds the selected renderer's concrete compute phase to a graph.
+    pub fn append_to_graph(
+        &self,
+        graph: &mut RenderGraph,
+    ) -> Result<ParticleAuxiliaryGraphOutputs, CompileError> {
+        let input = import_buffer(
+            graph,
+            "particle-aux-input",
+            self.input,
+            u64::from(self.capacity) * 32,
+            BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            BufferState::storage_read(PipelineStages::COMPUTE_SHADER),
+        );
+        let output = import_buffer(
+            graph,
+            "particle-aux-output",
+            self.output,
+            u64::from(self.capacity) * AUX_RECORD_BYTES,
+            BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+            BufferState::storage_write(PipelineStages::COMPUTE_SHADER),
+        );
+        let params = import_buffer(
+            graph,
+            "particle-aux-params",
+            self.params,
+            AUX_PARAMS_BYTES,
+            BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+            BufferState::copy_dst(),
+        );
+        let groups = self.capacity.div_ceil(64);
+        let pipeline = self.pipeline;
+        let bind_group = self.bind_group;
+        let mut records = output;
+        graph.add_compute_pass(
+            format!("particle-renderer-{:?}-phase", self.kind),
+            PassFlags::SIDE_EFFECT,
+            |builder| {
+                builder.read_storage_buffer(input);
+                builder.read_uniform(params);
+                records = builder.write_storage_buffer(output);
+                move |context| {
+                    context
+                        .set_compute_pipeline(pipeline)
+                        .set_compute_bind_group(0, bind_group, Vec::new())
+                        .dispatch(groups, 1, 1);
+                }
+            },
+        );
+        Ok(ParticleAuxiliaryGraphOutputs { records })
+    }
+
+    /// Builds a graph containing this renderer's concrete compute phase.
+    #[must_use]
+    pub fn graph_frame(&self) -> RenderGraph {
+        let mut graph = RenderGraph::new(rhi::Extent3d::new_2d(1, 1));
+        self.append_to_graph(&mut graph)
+            .expect("particle auxiliary graph admission");
+        graph
+    }
+
+    /// Executes this phase and submits its compute dispatch.
+    pub fn execute<D: RenderDevice, Q: RenderQueue>(
+        &self,
+        device: &D,
+        queue: &Q,
+    ) -> Result<RecordedGraph, CompileError> {
+        self.graph_frame().execute(device, queue)
+    }
+
+    /// GPU output records written by the selected renderer phase.
+    #[must_use]
+    pub const fn output(&self) -> BufferId {
+        self.output
+    }
+
+    /// Releases all GPU resources owned by this auxiliary phase.
+    pub fn destroy<D: RenderDevice + ?Sized>(&self, device: &D) {
+        device.destroy_bind_group(self.bind_group);
+        device.destroy_compute_pipeline(self.pipeline);
+        device.destroy_pipeline_layout(self.pipeline_layout);
+        device.destroy_bind_group_layout(self.layout);
+        device.destroy_shader_module(self.shader);
+        for buffer in [self.input, self.output, self.params] {
+            device.destroy_buffer(buffer);
+        }
     }
 }
 
@@ -376,11 +667,49 @@ pub struct ParticleRendererGpu {
     args_pipeline: ComputePipelineId,
     args_bind_group: BindGroupId,
     sorted_output: BufferId,
+    surface_target: rhi::TextureId,
+    surface_target_view: rhi::TextureViewId,
+    surface_mesh_vertices: BufferId,
+    surface_index_buffer: BufferId,
+    surface_material: BufferId,
+    surface_mesh_bytes: Vec<u8>,
+    surface_index_bytes: Vec<u8>,
+    surface_shader: ShaderModuleId,
+    surface_bind_group_layout: BindGroupLayoutId,
+    surface_pipeline_layout: PipelineLayoutId,
+    surface_pipeline: RenderPipelineId,
+    surface_bind_group: BindGroupId,
+}
+
+/// Executable non-surface particle phase for Light, Decal, or Volume.
+///
+/// The stage owns its input/output records and dispatches a renderer-specific
+/// WGSL entry point; it is deliberately separate from indexed surface draws.
+pub struct ParticleAuxiliaryGpu {
+    kind: RendererKind,
+    capacity: u32,
+    input: BufferId,
+    output: BufferId,
+    params: BufferId,
+    shader: ShaderModuleId,
+    layout: BindGroupLayoutId,
+    pipeline_layout: PipelineLayoutId,
+    pipeline: ComputePipelineId,
+    bind_group: BindGroupId,
+}
+
+/// Graph outputs from a real renderer-specific auxiliary dispatch.
+#[derive(Clone, Copy, Debug)]
+pub struct ParticleAuxiliaryGraphOutputs {
+    /// The transformed per-particle light/decal/volume records.
+    pub records: BufferHandle,
 }
 
 /// SSA versions produced by the renderer-matrix compute passes.
 #[derive(Clone, Copy, Debug)]
 pub struct ParticleRendererGraphOutputs {
+    /// Source particle records consumed by the raster and auxiliary paths.
+    pub input: BufferHandle,
     /// Compact visible particle indices consumed by the vertex shader.
     pub visible_indices: BufferHandle,
     /// Sprite non-indexed indirect arguments.
@@ -393,8 +722,8 @@ pub struct ParticleRendererGraphOutputs {
 
 impl ParticleRendererGpu {
     /// Creates all persistent buffers, pipelines and bind groups for one route.
-    pub fn new(
-        device: &impl RenderDevice,
+    pub fn new<D: RenderDevice + ?Sized>(
+        device: &D,
         capacity: u32,
         route: ParticleRendererRoute,
     ) -> Result<Self, ParticleRendererGpuError> {
@@ -476,7 +805,7 @@ impl ParticleRendererGpu {
             BufferUsages::STORAGE | BufferUsages::INDIRECT | BufferUsages::COPY_SRC,
         ));
         let route_params = device.create_buffer(&BufferDescriptor::new(
-            32,
+            48,
             BufferUsages::UNIFORM | BufferUsages::COPY_DST,
         ));
         let cull_shader = device.create_shader_module(&ShaderModuleDescriptor::wgsl(include_str!(
@@ -680,6 +1009,76 @@ impl ParticleRendererGpu {
             ],
         });
 
+        let surface_target = device.create_texture(&rhi::TextureDescriptor::new_2d(
+            rhi::Extent3d::new_2d(RENDERER_MATRIX_TARGET_SIZE, RENDERER_MATRIX_TARGET_SIZE),
+            TextureFormat::Rgba8Unorm,
+            TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
+        ));
+        let surface_target_view =
+            device.create_texture_view(surface_target, &TextureViewDescriptor::default());
+        let surface_mesh_vertices = device.create_buffer(&BufferDescriptor::new(
+            u64::from(self_index_capacity(route).max(3)) * SURFACE_MESH_VERTEX_STRIDE,
+            BufferUsages::STORAGE | BufferUsages::COPY_DST,
+        ));
+        let surface_index_buffer = device.create_buffer(&BufferDescriptor::new(
+            u64::from(surface_index_count(route).max(1)) * 4,
+            BufferUsages::INDEX | BufferUsages::COPY_DST,
+        ));
+        let surface_material = device.create_buffer(&BufferDescriptor::new(
+            SURFACE_MATERIAL_BYTES,
+            BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+        ));
+        let surface_shader = device.create_shader_module(&ShaderModuleDescriptor::wgsl(
+            include_str!("../shaders/particle_renderer_surface.wgsl"),
+        ));
+        let surface_bind_group_layout =
+            device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+                label: Some(String::from("particle-renderer-surface-bgl")),
+                entries: vec![
+                    buffer_entry(
+                        0,
+                        BufferBindingType::Storage { read_only: true },
+                        ShaderStages::VERTEX,
+                    ),
+                    buffer_entry(
+                        1,
+                        BufferBindingType::Storage { read_only: true },
+                        ShaderStages::VERTEX,
+                    ),
+                    buffer_entry(
+                        2,
+                        BufferBindingType::Storage { read_only: true },
+                        ShaderStages::VERTEX,
+                    ),
+                    buffer_entry(
+                        3,
+                        BufferBindingType::Uniform,
+                        ShaderStages::VERTEX | ShaderStages::FRAGMENT,
+                    ),
+                ],
+            });
+        let surface_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+            label: Some(String::from("particle-renderer-surface-pl")),
+            bind_group_layouts: vec![surface_bind_group_layout],
+            push_constant_ranges: Vec::new(),
+        });
+        let surface_pipeline = make_surface_pipeline(
+            device,
+            surface_pipeline_layout,
+            surface_shader,
+            route.kind(),
+        );
+        let surface_bind_group = device.create_bind_group(&BindGroupDescriptor {
+            label: Some(String::from("particle-renderer-surface-bg")),
+            layout: Some(surface_bind_group_layout),
+            entries: vec![
+                bind_buffer(0, input),
+                bind_buffer(1, visible_indices),
+                bind_buffer(2, surface_mesh_vertices),
+                bind_buffer(3, surface_material),
+            ],
+        });
+
         Ok(Self {
             capacity,
             padded_capacity,
@@ -719,6 +1118,18 @@ impl ParticleRendererGpu {
             args_pipeline,
             args_bind_group,
             sorted_output,
+            surface_target,
+            surface_target_view,
+            surface_mesh_vertices,
+            surface_index_buffer,
+            surface_material,
+            surface_mesh_bytes: surface_mesh_vertex_bytes(route),
+            surface_index_bytes: surface_index_bytes(route),
+            surface_shader,
+            surface_bind_group_layout,
+            surface_pipeline_layout,
+            surface_pipeline,
+            surface_bind_group,
         })
     }
 
@@ -753,11 +1164,67 @@ impl ParticleRendererGpu {
             &view.params_bytes(self.capacity, inputs.len() as u32),
         );
         queue.write_buffer(self.route_params, 0, &self.route.params_bytes());
+        queue.write_buffer(self.surface_mesh_vertices, 0, &self.surface_mesh_bytes);
+        queue.write_buffer(self.surface_index_buffer, 0, &self.surface_index_bytes);
+        queue.write_buffer(
+            self.surface_material,
+            0,
+            &surface_material_bytes(self.route),
+        );
         for (index, step) in self.sort_steps.iter().copied().enumerate() {
             let (k, j) = sort_step_at(self.padded_capacity, index);
             let bytes = [k.to_le_bytes(), j.to_le_bytes(), [0; 4], [0; 4]].concat();
             queue.write_buffer(step, 0, &bytes);
         }
+        Ok(())
+    }
+
+    /// Replaces the source geometry consumed by the Mesh surface route.
+    ///
+    /// The route's index count is fixed when the stage is created. Geometry
+    /// replacement therefore updates existing buffers and does not rebuild
+    /// the renderer graph resources.
+    pub fn set_mesh_geometry(
+        &mut self,
+        queue: &impl RenderQueue,
+        vertices: &[ParticleMeshVertex],
+        indices: &[u32],
+    ) -> Result<(), ParticleRendererGpuError> {
+        if self.route.kind() != RendererKind::Mesh {
+            return Err(ParticleRendererGpuError::MeshGeometryUnsupported);
+        }
+        let expected_indices = surface_index_count(self.route) as usize;
+        let vertex_capacity = self_index_capacity(self.route) as usize;
+        if indices.len() != expected_indices || vertices.len() > vertex_capacity {
+            return Err(ParticleRendererGpuError::MeshGeometryTooLarge);
+        }
+        if vertices.is_empty()
+            || vertices.iter().copied().any(|vertex| !vertex.validate())
+            || indices
+                .iter()
+                .any(|index| *index as usize >= vertices.len())
+        {
+            return Err(ParticleRendererGpuError::InvalidMeshGeometry);
+        }
+
+        let mut vertex_bytes =
+            Vec::with_capacity(vertex_capacity * SURFACE_MESH_VERTEX_STRIDE as usize);
+        for vertex in vertices {
+            vertex_bytes.extend_from_slice(&vertex.position[0].to_le_bytes());
+            vertex_bytes.extend_from_slice(&vertex.position[1].to_le_bytes());
+            vertex_bytes.extend_from_slice(&vertex.uv[0].to_le_bytes());
+            vertex_bytes.extend_from_slice(&vertex.uv[1].to_le_bytes());
+        }
+        vertex_bytes.resize(vertex_capacity * SURFACE_MESH_VERTEX_STRIDE as usize, 0);
+
+        let mut index_bytes = Vec::with_capacity(indices.len() * 4);
+        for index in indices {
+            index_bytes.extend_from_slice(&index.to_le_bytes());
+        }
+        queue.write_buffer(self.surface_mesh_vertices, 0, &vertex_bytes);
+        queue.write_buffer(self.surface_index_buffer, 0, &index_bytes);
+        self.surface_mesh_bytes = vertex_bytes;
+        self.surface_index_bytes = index_bytes;
         Ok(())
     }
 
@@ -772,7 +1239,7 @@ impl ParticleRendererGpu {
             "particle-render-input",
             self.input,
             u64::from(self.capacity) * 32,
-            BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+            BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
             BufferState::storage_read(PipelineStages::COMPUTE_SHADER),
         );
         let frustum = import_buffer(
@@ -838,6 +1305,45 @@ impl ParticleRendererGpu {
             20,
             BufferUsages::STORAGE | BufferUsages::INDIRECT | BufferUsages::COPY_SRC,
             BufferState::storage_write(PipelineStages::COMPUTE_SHADER),
+        );
+        let mesh_vertices = import_buffer(
+            graph,
+            "particle-render-mesh-vertices",
+            self.surface_mesh_vertices,
+            u64::from(self_index_capacity(self.route).max(3)) * SURFACE_MESH_VERTEX_STRIDE,
+            BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            BufferState::storage_read(PipelineStages::VERTEX_SHADER),
+        );
+        let index_buffer = import_buffer(
+            graph,
+            "particle-render-index-buffer",
+            self.surface_index_buffer,
+            u64::from(surface_index_count(self.route).max(1)) * 4,
+            BufferUsages::INDEX | BufferUsages::COPY_DST,
+            BufferState::index(),
+        );
+        let material = import_buffer(
+            graph,
+            "particle-render-material",
+            self.surface_material,
+            SURFACE_MATERIAL_BYTES,
+            BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+            BufferState::copy_dst(),
+        );
+        let target = graph.import_texture(
+            "particle-renderer-surface-target",
+            TextureDesc::color(TextureFormat::Rgba8Unorm).with_size(SizeClass::absolute_2d(
+                RENDERER_MATRIX_TARGET_SIZE,
+                RENDERER_MATRIX_TARGET_SIZE,
+            )),
+            ImportedTexture {
+                texture: self.surface_target,
+                default_view: self.surface_target_view,
+                entry_state: TextureState::initial(),
+                exit_state: TextureState::color_target(),
+                mip_levels: 1,
+                array_layers: 1,
+            },
         );
 
         let reset_pipeline = self.reset_pipeline;
@@ -994,7 +1500,53 @@ impl ParticleRendererGpu {
                 }
             },
         );
+        let surface_pipeline = self.surface_pipeline;
+        let surface_bind_group = self.surface_bind_group;
+        let surface_index_buffer = self.surface_index_buffer;
+        let renderer_route = self.route;
+        let visible_for_raster = visible_output;
+        let indexed_for_raster = indexed_output;
+        let input_for_raster = input;
+        graph.add_raster_pass(
+            format!("particle-renderer-raster-{:?}", renderer_route.kind()),
+            PassFlags::SIDE_EFFECT,
+            |builder| {
+                builder.read_storage_buffer(input_for_raster);
+                builder.read_storage_buffer(visible_for_raster);
+                builder.read_storage_buffer(mesh_vertices);
+                builder.read_uniform(material);
+                builder.read_index(index_buffer);
+                match renderer_route.kind() {
+                    RendererKind::Sprite => builder.read_indirect(sprite_output),
+                    RendererKind::Mesh | RendererKind::Ribbon | RendererKind::Beam => {
+                        builder.read_indirect(indexed_for_raster)
+                    }
+                    RendererKind::Light | RendererKind::Decal | RendererKind::Volume => {
+                        unreachable!()
+                    }
+                };
+                builder.color_attachment(target);
+                move |context| {
+                    context
+                        .set_render_pipeline(surface_pipeline)
+                        .set_render_bind_group(0, surface_bind_group, Vec::new())
+                        .set_index_buffer(surface_index_buffer, IndexFormat::Uint32, 0);
+                    match renderer_route.kind() {
+                        RendererKind::Sprite => {
+                            context.draw_indirect(sprite_output, 0);
+                        }
+                        RendererKind::Mesh | RendererKind::Ribbon | RendererKind::Beam => {
+                            context.draw_indexed_indirect(indexed_for_raster, 0);
+                        }
+                        RendererKind::Light | RendererKind::Decal | RendererKind::Volume => {
+                            unreachable!()
+                        }
+                    }
+                }
+            },
+        );
         Ok(ParticleRendererGraphOutputs {
+            input,
             visible_indices: visible_output,
             sprite_args: sprite_output,
             indexed_args: indexed_output,
@@ -1032,6 +1584,12 @@ impl ParticleRendererGpu {
         self.route
     }
 
+    /// Capacity of the persistent source/visibility buffers.
+    #[must_use]
+    pub const fn capacity(&self) -> u32 {
+        self.capacity
+    }
+
     /// The GPU-authored compact visible-index buffer.
     #[must_use]
     pub const fn visible_indices(&self) -> BufferId {
@@ -1056,6 +1614,12 @@ impl ParticleRendererGpu {
         self.control
     }
 
+    /// The offscreen target written by the renderer-specific raster pass.
+    #[must_use]
+    pub const fn raster_target(&self) -> rhi::TextureId {
+        self.surface_target
+    }
+
     /// The final sorted item buffer, or the cull output when sorting is disabled.
     #[must_use]
     pub const fn sorted_output(&self) -> BufferId {
@@ -1063,7 +1627,7 @@ impl ParticleRendererGpu {
     }
 
     /// Destroys every persistent resource owned by the stage.
-    pub fn destroy(&self, device: &impl RenderDevice) {
+    pub fn destroy<D: RenderDevice + ?Sized>(&self, device: &D) {
         device.destroy_bind_group(self.args_bind_group);
         device.destroy_compute_pipeline(self.args_pipeline);
         device.destroy_pipeline_layout(self.args_pipeline_layout);
@@ -1102,14 +1666,24 @@ impl ParticleRendererGpu {
             self.sprite_args,
             self.indexed_args,
             self.route_params,
+            self.surface_mesh_vertices,
+            self.surface_index_buffer,
+            self.surface_material,
         ] {
             device.destroy_buffer(buffer);
         }
+        device.destroy_render_pipeline(self.surface_pipeline);
+        device.destroy_pipeline_layout(self.surface_pipeline_layout);
+        device.destroy_bind_group_layout(self.surface_bind_group_layout);
+        device.destroy_bind_group(self.surface_bind_group);
+        device.destroy_shader_module(self.surface_shader);
+        device.destroy_texture_view(self.surface_target_view);
+        device.destroy_texture(self.surface_target);
     }
 }
 
-fn make_compute(
-    device: &impl RenderDevice,
+fn make_compute<D: RenderDevice + ?Sized>(
+    device: &D,
     layout: PipelineLayoutId,
     shader: ShaderModuleId,
     entry_point: &'static str,
@@ -1119,6 +1693,127 @@ fn make_compute(
         layout: Some(layout),
         module: shader,
         entry_point: entry_point.into(),
+    })
+}
+
+fn self_index_capacity(route: ParticleRendererRoute) -> u32 {
+    match route.geometry {
+        RendererGeometry::Sprite { .. } => SPRITE_QUAD_VERTEX_COUNT,
+        RendererGeometry::Mesh { index_count, .. } => index_count.max(3),
+        RendererGeometry::Ribbon {
+            segments_per_chain, ..
+        }
+        | RendererGeometry::Beam {
+            segments_per_chain, ..
+        } => segments_per_chain.saturating_mul(4).max(4),
+    }
+}
+
+fn surface_index_count(route: ParticleRendererRoute) -> u32 {
+    match route.geometry {
+        RendererGeometry::Sprite { .. } => 6,
+        _ => route.index_count(),
+    }
+}
+
+fn surface_mesh_vertex_bytes(route: ParticleRendererRoute) -> Vec<u8> {
+    let count = self_index_capacity(route).max(3);
+    let triangle = [[-0.48_f32, -0.40_f32], [0.48, -0.40], [0.0, 0.52]];
+    let mut bytes = Vec::with_capacity(count as usize * SURFACE_MESH_VERTEX_STRIDE as usize);
+    for index in 0..count {
+        let point = triangle[(index % 3) as usize];
+        bytes.extend_from_slice(&point[0].to_le_bytes());
+        bytes.extend_from_slice(&point[1].to_le_bytes());
+        bytes.extend_from_slice(&0.0_f32.to_le_bytes());
+        bytes.extend_from_slice(&1.0_f32.to_le_bytes());
+    }
+    bytes
+}
+
+fn surface_index_bytes(route: ParticleRendererRoute) -> Vec<u8> {
+    let count = surface_index_count(route);
+    let mut bytes = Vec::with_capacity(count as usize * 4);
+    for index in 0..count {
+        let vertex = match route.geometry {
+            RendererGeometry::Sprite { .. } => [0_u32, 1, 2, 0, 2, 3][(index % 6) as usize],
+            RendererGeometry::Mesh { .. } => index,
+            RendererGeometry::Ribbon { .. } | RendererGeometry::Beam { .. } => {
+                let local = index % 6;
+                let segment = index / 6;
+                segment * 4 + [0_u32, 1, 2, 0, 2, 3][local as usize]
+            }
+        };
+        bytes.extend_from_slice(&vertex.to_le_bytes());
+    }
+    bytes
+}
+
+fn surface_material_bytes(route: ParticleRendererRoute) -> [u8; SURFACE_MATERIAL_BYTES as usize] {
+    let kind_tint: [f32; 4] = match route.kind() {
+        RendererKind::Sprite => [1.0, 0.72, 0.20, 1.0],
+        RendererKind::Mesh => [0.20, 0.82, 0.38, 1.0],
+        RendererKind::Ribbon => [0.20, 0.58, 1.0, 1.0],
+        RendererKind::Beam => [1.0, 0.24, 0.12, 1.0],
+        RendererKind::Light | RendererKind::Decal | RendererKind::Volume => [1.0; 4],
+    };
+    let words = [
+        1.0_f32.to_bits(),
+        1.0_f32.to_bits(),
+        1.0_f32.to_bits(),
+        1.0_f32.to_bits(),
+        kind_tint[0].to_bits(),
+        kind_tint[1].to_bits(),
+        kind_tint[2].to_bits(),
+        kind_tint[3].to_bits(),
+        0.08_f32.to_bits(),
+        0.025_f32.to_bits(),
+        0.0_f32.to_bits(),
+        0.0_f32.to_bits(),
+        route.first_instance(),
+        0.0_f32.to_bits(),
+        0.0_f32.to_bits(),
+        0.0_f32.to_bits(),
+    ];
+    let mut bytes = [0; SURFACE_MATERIAL_BYTES as usize];
+    for (index, word) in words.into_iter().enumerate() {
+        bytes[index * 4..index * 4 + 4].copy_from_slice(&word.to_le_bytes());
+    }
+    bytes
+}
+
+fn make_surface_pipeline<D: RenderDevice + ?Sized>(
+    device: &D,
+    layout: PipelineLayoutId,
+    shader: ShaderModuleId,
+    kind: RendererKind,
+) -> RenderPipelineId {
+    let entry = match kind {
+        RendererKind::Sprite => "vs_sprite",
+        RendererKind::Mesh => "vs_mesh",
+        RendererKind::Ribbon => "vs_ribbon",
+        RendererKind::Beam => "vs_beam",
+        RendererKind::Light | RendererKind::Decal | RendererKind::Volume => unreachable!(),
+    };
+    device.create_render_pipeline(&RenderPipelineDescriptor {
+        label: Some(format!("particle-renderer-{kind:?}")),
+        layout: Some(layout),
+        vertex: VertexState {
+            module: shader,
+            entry_point: entry.into(),
+            buffers: Vec::new(),
+        },
+        primitive: PrimitiveState {
+            topology: PrimitiveTopology::TriangleList,
+            cull_mode: None,
+            ..PrimitiveState::default()
+        },
+        depth_stencil: None,
+        multisample: MultisampleState::default(),
+        fragment: Some(FragmentState {
+            module: shader,
+            entry_point: "fs".into(),
+            targets: vec![Some(ColorTargetState::opaque(TextureFormat::Rgba8Unorm))],
+        }),
     })
 }
 
@@ -1239,6 +1934,51 @@ mod tests {
             .passes
             .iter()
             .any(|pass| matches!(pass, prism_render_driver::Pass::Compute { .. })));
+        stage.destroy(&device);
+    }
+
+    #[test]
+    fn mesh_route_accepts_custom_geometry_and_rejects_invalid_geometry() {
+        let instance = NullInstance::new();
+        let adapter = instance
+            .request_adapter(&Default::default())
+            .expect("null adapter");
+        let (device, queue) = instance
+            .create_device(&adapter, &Default::default())
+            .expect("null device");
+        let mut stage = ParticleRendererGpu::new(
+            &device,
+            4,
+            ParticleRendererRoute::new(
+                RendererKind::Mesh,
+                SortStrategy::ViewDepthBitonic,
+                RendererGeometry::Mesh {
+                    alive_count: 1,
+                    index_count: 6,
+                    first_instance: 0,
+                },
+            )
+            .expect("mesh route"),
+        )
+        .expect("mesh stage");
+
+        let vertices = [
+            ParticleMeshVertex::new([-0.5, -0.5], [0.0, 0.0]),
+            ParticleMeshVertex::new([0.5, -0.5], [1.0, 0.0]),
+            ParticleMeshVertex::new([0.5, 0.5], [1.0, 1.0]),
+            ParticleMeshVertex::new([-0.5, 0.5], [0.0, 1.0]),
+        ];
+        stage
+            .set_mesh_geometry(&queue, &vertices, &[0, 1, 2, 0, 2, 3])
+            .expect("quad geometry is accepted");
+        assert_eq!(
+            stage.set_mesh_geometry(&queue, &vertices, &[0, 1, 2]),
+            Err(ParticleRendererGpuError::MeshGeometryTooLarge)
+        );
+        assert_eq!(
+            stage.set_mesh_geometry(&queue, &vertices, &[0, 1, 9, 0, 2, 3]),
+            Err(ParticleRendererGpuError::InvalidMeshGeometry)
+        );
         stage.destroy(&device);
     }
 }

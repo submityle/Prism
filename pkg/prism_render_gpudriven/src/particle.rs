@@ -29,8 +29,10 @@ use rhi::{
 
 use crate::encoding::IndirectArgs;
 use crate::gpu::{bind_buffer, buffer_entry};
-use renderer_matrix::{
-    ParticleRenderInput, ParticleRendererGpu, ParticleRendererGpuError, ParticleRendererRoute,
+pub use renderer_matrix::{
+    ParticleAuxiliaryGpu, ParticleAuxiliaryGraphOutputs, ParticleCullView, ParticleMeshVertex,
+    ParticleRenderInput, ParticleRendererGpu, ParticleRendererGpuError,
+    ParticleRendererGraphOutputs, ParticleRendererRoute, ParticleRendererRouteError,
 };
 
 pub mod renderer_matrix;
@@ -259,9 +261,9 @@ impl ParticlePipelineCache {
     }
 
     /// Releases one reference to a cached compute pipeline.
-    pub fn release_compute(
+    pub fn release_compute<D: RenderDevice + ?Sized>(
         &mut self,
-        device: &impl RenderDevice,
+        device: &D,
         module: ShaderModuleId,
         layout: PipelineLayoutId,
         kind: ParticleComputePipelineKind,
@@ -277,9 +279,9 @@ impl ParticlePipelineCache {
     }
 
     /// Releases one reference to a cached render pipeline.
-    pub fn release_render(
+    pub fn release_render<D: RenderDevice + ?Sized>(
         &mut self,
-        device: &impl RenderDevice,
+        device: &D,
         module: ShaderModuleId,
         layout: PipelineLayoutId,
     ) {
@@ -290,7 +292,7 @@ impl ParticlePipelineCache {
     }
 
     /// Releases one stage's reference to the fixed shader and layout resources.
-    fn release_resources(&mut self, device: &impl RenderDevice) {
+    fn release_resources<D: RenderDevice + ?Sized>(&mut self, device: &D) {
         if let Some(id) = self.render_pipeline_layout.release(&()) {
             device.destroy_pipeline_layout(id);
         }
@@ -384,6 +386,8 @@ pub enum ParticleStageError {
         /// Index of the malformed record in the upload slice.
         index: usize,
     },
+    /// The extracted emitter ranges are not a contiguous, valid partition of the snapshot pool.
+    InvalidSnapshotRange,
     /// The renderer-matrix GPU stage could not be created.
     RendererMatrix(ParticleRendererGpuError),
 }
@@ -1776,9 +1780,9 @@ impl ParticleStage {
     /// Pipeline references are returned to `pipeline_cache`; shared native
     /// pipelines are destroyed only when their final stage releases them.
     /// Non-pipeline resources are always owned uniquely by the stage.
-    pub fn destroy_with_pipeline_cache(
+    pub fn destroy_with_pipeline_cache<D: RenderDevice + ?Sized>(
         &self,
-        device: &impl RenderDevice,
+        device: &D,
         pipeline_cache: &mut ParticlePipelineCache,
     ) {
         pipeline_cache.release_render(device, self.render_shader, self.render_pipeline_layout);
@@ -1803,7 +1807,7 @@ impl ParticleStage {
         device.destroy_shader_module(self.render_shader);
     }
 
-    fn destroy_stage_resources(&self, device: &impl RenderDevice) {
+    fn destroy_stage_resources<D: RenderDevice + ?Sized>(&self, device: &D) {
         self.renderer_matrix.destroy(device);
         device.destroy_bind_group(self.compute_bind_group);
         device.destroy_bind_group(self.render_bind_group);

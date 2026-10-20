@@ -22,6 +22,7 @@ prism_render_driver_wgpu = { path = "../../os-backends/prism_render_driver_wgpu"
 # The headless RHI backend, so the declared frame graph can be compiled and
 # checked on any host without a GPU (the GPU tests skip in the base sandbox).
 prism_render_driver_null = { path = "../../os-backends/prism_render_driver_null" }
+naga = { version = "30.0.1", features = ["wgsl-in"] }
 
 [lints]
 workspace = true

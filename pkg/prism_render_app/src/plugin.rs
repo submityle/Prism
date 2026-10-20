@@ -360,6 +360,12 @@ where
         render.world.insert_resource(mesh_pipelines);
         render.world.insert_resource(SceneRegistry::new());
         render.world.insert_resource(VisibilityWorkList::new());
+        render
+            .world
+            .insert_resource(crate::NativeSceneGpuState::new());
+        render
+            .world
+            .insert_resource(crate::ExtractedNativeScene::default());
         // The material ABI: the render world's registry plus the header/parameter
         // buffers built from it (sized for the scene's material budget).
         render
@@ -440,6 +446,9 @@ where
             // Materials register/retire → the ABI buffers, before anything binds them.
             schedule
                 .add_systems(sync_material_buffers::<I>.in_set(RenderSystems::PrepareResources));
+            schedule.add_systems(
+                crate::prepare_native_scene_gpu::<I>.in_set(RenderSystems::PrepareResources),
+            );
             schedule
                 .add_systems(pump_pipeline_compiles::<I>.in_set(RenderSystems::PrepareResources));
             schedule.add_systems(
@@ -497,6 +506,7 @@ where
             crate::particle::extract_ember_external_gpu_resources,
         );
         app.add_extract(RenderApp, crate::lighting::extract_lighting_inputs);
+        app.add_extract(RenderApp, crate::extract_native_scene::<I>);
         app.init_resource::<crate::PublishedTransforms>();
         app.add_systems(Last, crate::transforms::publish_transforms);
         app.add_extract(RenderApp, crate::transforms::extract_transforms);
@@ -568,6 +578,12 @@ where
             render.world.insert_resource(specializer);
         }
         if idle && !recovering && !device_lost {
+            if let Some(mut native_scene) =
+                render.world.remove_resource::<crate::NativeSceneGpuState>()
+            {
+                let runtime = render.world.resource::<RenderRuntimeResource<I>>();
+                native_scene.destroy(runtime.runtime().device());
+            }
             if let Some(ember) = render
                 .world
                 .remove_resource::<crate::particle::EmberGpuAssetRegistry>()
@@ -579,8 +595,7 @@ where
                 .world
                 .remove_resource::<crate::particle::ParticleGpuState>()
             {
-                let runtime = render.world.resource::<RenderRuntimeResource<I>>();
-                particle.destroy(runtime.runtime().device());
+                particle.destroy();
             } else {
                 render
                     .world
@@ -602,6 +617,7 @@ where
                 target.destroy(runtime.runtime().device());
             }
         } else {
+            render.world.remove_resource::<crate::NativeSceneGpuState>();
             render
                 .world
                 .remove_resource::<crate::particle::EmberGpuAssetRegistry>();

@@ -30,7 +30,12 @@ fn sort_step(@builtin(global_invocation_id) gid: vec3<u32>) {
     let left = sort_source[index];
     let right = sort_source[partner];
     let ascending = (index & step.k) == 0u;
+    let is_lower = (index & step.j) == 0u;
     let left_before_right = item_less_or_equal(left, right);
-    let choose_left = select(!left_before_right, left_before_right, ascending);
-    sort_destination[index] = select(right, left, choose_left);
+    let choose_left = (ascending == is_lower) == left_before_right;
+    if choose_left {
+        sort_destination[index] = left;
+    } else {
+        sort_destination[index] = right;
+    }
 }

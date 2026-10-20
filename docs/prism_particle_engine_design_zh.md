@@ -673,7 +673,11 @@ prism_particle_tools  (可选) 图编辑器 / 预览(含着色预览) / 性能 H
 
 验证更新（2026-10-21）：重跑 `CARGO_TARGET_DIR=/private/tmp/prism-ember-renderapp-target cargo test -p prism_render_app --lib particle::tests:: --no-fail-fast` 时，构建在 `prism_render_shading` 阶段因 `/private/tmp` 磁盘空间不足失败，未进入粒子测试执行；因此本次不产生 RenderApp 通过/失败结论。此前记录的 lighting `compile_error!` 仍是共享工作树中的独立历史阻断，均不得归因于粒子改动。
 
+验证更新（2026-10-21）：在共享工作树存在并行构建变更的情况下，使用已有临时 target 执行 `CARGO_TARGET_DIR=/private/tmp/prism-particle-current-target cargo test -p prism_render_gpudriven --tests --no-fail-fast`，46 项库测试和 3 项 `particle_renderer_matrix` 外部测试全部通过；真实 GPU 项覆盖 Ember compute、GPU simulation force/lifetime/collision/spawn/event compaction、Mesh/Ribbon/Beam raster 以及 Light/Decal/Volume compute。新增 Mesh 自定义几何上传与非法索引/索引数量拒绝回归。该证据仍不覆盖 RenderApp 专项测试、设备恢复、共享材质/OIT、图像 golden 或性能基准。
+
 实现更新（2026-10-21）：`prism_particle_app` 的 CPU 快照新增稳定的 emitter range 元数据（`emitter_entity`、packed `first_particle`、`particle_count`），并在主世界到 secondary/render world 的提取过程中复用其容量；新增双 emitter 回归测试验证每个 emitter 的连续范围和跨 emitter 的 packed 索引。该改动只完成元数据闭环，不等同于 GPU renderer matrix、按 emitter 的独立材质/排序或正式 Sprite demo 已完成。
+
+实现与验证更新（2026-10-21）：renderer matrix 的 Mesh surface 不再只能依赖内部固定三角形。新增 `ParticleMeshVertex` 与 `set_mesh_geometry`，支持在固定容量的 GPU 顶点/索引缓冲内上传有限、经过索引范围校验的 Mesh 几何，并把 UV 传入 surface shader；新增 Null RHI 非法几何拒绝测试和物理 GPU 自定义四边形 raster 验收。该改动完成的是 renderer-matrix 几何输入合同，不等同于资产系统 Mesh handle、共享 PBR/NPR closure、深度/OIT/motion-vector 或完整材质消费链。
 
 ---
 
@@ -684,9 +688,9 @@ prism_particle_tools  (可选) 图编辑器 / 预览(含着色预览) / 性能 H
 以下内容仍是明确的未完成项；设计章节中的目标、CPU 合同或 Null RHI 测试不能替代端到端验收：
 
 - **M0/M2 端到端生命周期**：完整 Ember pipeline 的异步编译/特化、完整 ECS/App → RenderApp → RenderGraph 帧生命周期、GPU 侧 emitter range 消费、正式 Sprite demo，以及通用 owner-to-frame-graph view handle 发布。
-- **M1/M2 GPU 完整性**：更广泛的 shader/dispatch 组合、设备恢复后的完整重建矩阵、Sprite 以外的完整 renderer matrix raster 接线；当前真实 GPU 证据仅覆盖单属性 Ember compute 子用例，Sprite sort/cull/compact/indirect 仍是窄切片。
+- **M1/M2 GPU 完整性**：更广泛的 shader/dispatch 组合、设备恢复后的完整重建矩阵、完整 RenderApp 生命周期和 GPU simulation 正式接入；当前真实 GPU 证据覆盖单属性 Ember compute 与 renderer matrix 的 Mesh/Ribbon/Beam raster、Light/Decal/Volume compute 子闭环，但不代表完整系统生命周期或生产压力目标已完成。
 - **M3 力与碰撞**：生产级力场、curl noise、depth/SDF/光追碰撞、事件与数据通道的 GPU 接线，以及烟火/瀑布/碎片验收场景。
-- **M4 渲染器**：Mesh、Ribbon、Beam、Light、Decal、Volume 的生产 GPU renderer；除 Sprite 窄切片外的 GPU sort/cull/compact/indirect 消费、软粒子、真实 OIT、depth/SDF/RT prepass 和 motion-vector pass。
+- **M4 渲染器**：Mesh、Ribbon、Beam、Light、Decal、Volume 的生产 GPU renderer；当前已有独立 renderer-matrix compute/raster 子闭环和 Mesh 几何上传合同，但资产 Mesh 消费、真实材质/OIT、软粒子、depth/SDF/RT prepass 与 motion-vector pass 仍未完成。
 - **M5–M8 着色与体积**：共享 PBR closure、聚类受光、GI/阴影、NPR ramp/描边/速度线、混合/自定义 closure、六向光照、deep shadow、phase function 与体积雾耦合。
 - **M9 高级求解器**：Simulation Stages、邻域网格、不可压缩流体、涡量/燃烧、XPBD/VBD 粒子约束与 Data Channels 的完整 GPU 实现。
 - **M10 次世代服务**：Prism 光线查询碰撞/受光、HZB 剔除、GPU→CPU gameplay 反馈、平台档案和完整设备兼容矩阵。
@@ -769,5 +773,6 @@ prism_particle_tools  (可选) 图编辑器 / 预览(含着色预览) / 性能 H
 - `benchmark_100k_particles` 与 `benchmark_1m_particles` 是可执行的 `#[ignore]` 入口，实际构造粒子池并运行 `CompactConfig` 压缩；命令：`cargo test -p prism_render_architecture --release --test particle_validation -- --ignored --nocapture`。
 - `gpu_readback_parity_gate` 是可执行的真实产物门禁，读取 `PRISM_PARTICLE_GPU_READBACK` 指定的 15 列 CSV（初始位置/速度、加速度、GPU 最终位置/速度），并用相同初值、加速度和 `PRISM_PARTICLE_GPU_DT` 经 CPU `integrate` 计算参考值，再比较位置与速度；没有真实 GPU readback 时保持 ignored，不把 CPU 复算冒充 GPU 证据。
 - `golden_image_gate` 是最小真实 P3/P6 PPM 图像门禁，读取 `PRISM_PARTICLE_IMAGE` 与 `PRISM_PARTICLE_GOLDEN`，逐像素计算 RGB 误差并调用 `evaluate_golden`；没有实际渲染输出和 golden 文件时保持 ignored。
+- renderer-matrix 验收已补充到 `pkg/prism_render_gpudriven/tests/particle_renderer_matrix.rs`：Null RHI 检查四种 surface raster 与三种 auxiliary dispatch 的图记录，物理 GPU 检查 Mesh/Ribbon/Beam raster 和 Light/Decal/Volume compute；Mesh 额外覆盖自定义顶点/索引上传及非法几何拒绝。该测试集证明的是 GPU 子闭环，不是完整 Ember/RenderApp 生命周期。
 
 已执行定向格式检查与 `cargo test -p prism_render_architecture --test particle_validation --no-fail-fast`，默认测试通过。当前记录不声称物理 GPU parity、实际图像回归或性能数字已通过：这些仍需要粒子 GPU 渲染路径输出真实 readback/图像，并在目标设备上执行对应 ignored 门禁。

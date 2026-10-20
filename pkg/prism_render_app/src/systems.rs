@@ -379,7 +379,7 @@ pub(crate) fn execute_frame<I>(
         return;
     }
     let lighting_pass = lighting_gpu.pass_for_target(&plan.plan, &offscreen.target, runtime);
-    let graph = match frame::target_graph_with_display_transform_and_trace_particles_and_ember(
+    let mut graph = match frame::target_graph_with_display_transform_and_trace_particles_and_ember(
         &offscreen.target,
         &queues,
         &functions,
@@ -400,6 +400,14 @@ pub(crate) fn execute_frame<I>(
             return;
         }
     };
+    if particle
+        .as_ref()
+        .is_some_and(|particle| particle.append_emitter_renderers(&mut graph).is_err())
+    {
+        stats.frames_failed += 1;
+        stats.execution_trace.outcome = FrameExecutionOutcome::Failed;
+        return;
+    }
     let stages = *graph
         .blackboard()
         .get::<frame::FrameGraphStages>()

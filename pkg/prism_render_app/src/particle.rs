@@ -3,11 +3,11 @@
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::String;
 use alloc::vec::Vec;
-use std::sync::Arc;
+use std::sync::{mpsc, Arc, Mutex};
 
 use prism_ecs::prelude::{Res, ResMut, Resource};
 use prism_ecs::world::World;
-use prism_particle_app::ExtractedParticleSnapshot;
+use prism_particle_app::{ExtractedParticleSnapshot, ParticleEmitterSnapshot};
 use prism_render_architecture::particle::asset_registry::{
     EmberAssetRevision, EmberCompiledGraphRegistry,
 };
@@ -17,6 +17,8 @@ use prism_render_architecture::particle::authoring::{
 use prism_render_architecture::particle::compiler::{
     AssetParameterError, CompiledGraph, PreparedParameterBlock,
 };
+use prism_render_architecture::particle::renderers::RendererKind;
+use prism_render_architecture::particle::{indirect_draw::RendererGeometry, SortStrategy};
 use prism_render_driver::{
     BufferId, BufferState, BufferUsages, FrameSync, Instance, PipelineStages, RenderDevice,
     RenderQueue, TextureViewId,
@@ -25,7 +27,8 @@ use prism_render_gpudriven::{
     CompiledGraphGpuError, CompiledGraphGpuExternalResource, CompiledGraphGpuGraphBinding,
     CompiledGraphGpuGraphImport, CompiledGraphGpuResourceRegistry, CompiledGraphGpuResourceSlot,
     CompiledGraphGpuRevision, CompiledGraphGpuState, CompiledGraphGraphError, ParameterUploadError,
-    Particle, ParticlePipelineCache, ParticleStage, ParticleStageError,
+    Particle, ParticleCullView, ParticlePipelineCache, ParticleRenderInput, ParticleRendererGpu,
+    ParticleRendererRoute, ParticleStage, ParticleStageError,
 };
 use prism_render_graph::{BufferDesc, BufferHandle, ImportedBuffer, RenderGraph, TextureHandle};
 
@@ -40,9 +43,33 @@ use crate::runtime_resource::RenderRuntimeResource;
 pub struct ParticleGpuState {
     stage: ParticleStage,
     pipeline_cache: ParticlePipelineCache,
+    device: Arc<dyn RenderDevice + Send + Sync>,
+    device_generation: u64,
     scratch: Vec<Particle>,
     active_indices_scratch: Vec<u8>,
+    emitter_renderers: Vec<ParticleEmitterRenderer>,
 }
+
+struct ParticleEmitterRenderer {
+    entity: prism_ecs::prelude::Entity,
+    stage: ParticleRendererGpu,
+    inputs: Vec<ParticleRenderInput>,
+}
+
+/// Completion channel for particle pipeline/resource specialization.
+/// The worker captures the device generation so late results from a lost
+/// device can be explicitly destroyed instead of published into a new frame.
+#[derive(Default)]
+pub struct ParticleGpuBuildQueue {
+    pending: Option<PendingParticleGpuBuild>,
+}
+
+struct PendingParticleGpuBuild {
+    generation: u64,
+    receiver: Mutex<mpsc::Receiver<Result<ParticleGpuState, ParticleStageError>>>,
+}
+
+impl Resource for ParticleGpuBuildQueue {}
 
 /// Result of the prepare upload, kept in the render world so the frame system
 /// can turn malformed snapshots into an observable failed frame.
@@ -852,6 +879,8 @@ impl ParticleGpuState {
     /// Creates the GPU stage for the current render device.
     pub fn new(
         device: &impl RenderDevice,
+        device_handle: Arc<dyn RenderDevice + Send + Sync>,
+        device_generation: u64,
         capacity: u32,
         resolution: u32,
     ) -> Result<Self, ParticleStageError> {
@@ -865,8 +894,11 @@ impl ParticleGpuState {
         Ok(Self {
             stage,
             pipeline_cache,
+            device: device_handle,
+            device_generation,
             scratch: Vec::with_capacity(capacity as usize),
             active_indices_scratch: Vec::with_capacity(capacity as usize * 4),
+            emitter_renderers: Vec::new(),
         })
     }
 
@@ -888,21 +920,63 @@ impl ParticleGpuState {
         I::Queue: RenderQueue,
     {
         self.scratch.clear();
-        self.scratch
-            .extend(snapshot.particles().iter().map(|entry| {
-                let record = entry.particle;
-                let remaining_life = (record.lifetime - record.age).max(0.0);
-                Particle {
-                    position: [record.position.x, record.position.y, record.position.z],
-                    velocity: [record.velocity.x, record.velocity.y, record.velocity.z],
-                    life: remaining_life,
-                    padding: if record.size > 0.0 {
-                        record.size
-                    } else {
-                        config.particle_size
-                    },
-                }
-            }));
+        let particles = snapshot.particles();
+        let mut next = 0usize;
+        for emitter in snapshot.emitters() {
+            let first = emitter.first_particle as usize;
+            let end = first
+                .checked_add(emitter.particle_count as usize)
+                .filter(|end| *end <= particles.len())
+                .ok_or(ParticleStageError::InvalidSnapshotRange)?;
+            if first != next {
+                return Err(ParticleStageError::InvalidSnapshotRange);
+            }
+            self.scratch.extend(
+                particles[first..end]
+                    .iter()
+                    .map(|entry| {
+                        if entry.emitter_entity != emitter.emitter_entity {
+                            return Err(ParticleStageError::InvalidSnapshotRange);
+                        }
+                        let record = entry.particle;
+                        let remaining_life = (record.lifetime - record.age).max(0.0);
+                        Ok(Particle {
+                            position: [record.position.x, record.position.y, record.position.z],
+                            velocity: [record.velocity.x, record.velocity.y, record.velocity.z],
+                            life: remaining_life,
+                            padding: if record.size > 0.0 {
+                                record.size
+                            } else {
+                                config.particle_size
+                            },
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            );
+            self.prepare_emitter_renderer::<I>(
+                queue,
+                emitter,
+                &particles[first..end],
+                config.particle_size,
+            )?;
+            next = end;
+        }
+        if next != particles.len() {
+            return Err(ParticleStageError::InvalidSnapshotRange);
+        }
+        let live_emitters: BTreeSet<_> = snapshot
+            .emitters()
+            .iter()
+            .map(|emitter| emitter.emitter_entity)
+            .collect();
+        self.emitter_renderers.retain(|renderer| {
+            if live_emitters.contains(&renderer.entity) {
+                true
+            } else {
+                renderer.stage.destroy(self.device.as_ref());
+                false
+            }
+        });
         self.stage.upload_render_pool_with_scratch(
             queue,
             &self.scratch,
@@ -913,10 +987,104 @@ impl ParticleGpuState {
         )
     }
 
+    fn prepare_emitter_renderer<I>(
+        &mut self,
+        queue: &I::Queue,
+        emitter: &ParticleEmitterSnapshot,
+        particles: &[prism_particle_app::ParticleSnapshotEntry],
+        fallback_size: f32,
+    ) -> Result<(), ParticleStageError>
+    where
+        I: Instance,
+        I::Queue: RenderQueue,
+    {
+        let renderer_index = self
+            .emitter_renderers
+            .iter()
+            .position(|renderer| renderer.entity == emitter.emitter_entity);
+        let required = emitter.particle_count.max(1);
+        let replace = renderer_index
+            .is_some_and(|index| self.emitter_renderers[index].stage.capacity() < required);
+        if replace {
+            let index = renderer_index.expect("renderer index checked");
+            self.emitter_renderers
+                .remove(index)
+                .stage
+                .destroy(self.device.as_ref());
+        }
+        let renderer_index = self
+            .emitter_renderers
+            .iter()
+            .position(|renderer| renderer.entity == emitter.emitter_entity);
+        if renderer_index.is_none() && !particles.is_empty() {
+            let route = ParticleRendererRoute::new(
+                RendererKind::Sprite,
+                SortStrategy::ViewDepthBitonic,
+                RendererGeometry::Sprite {
+                    alive_count: required,
+                    first_instance: 0,
+                },
+            )
+            .map_err(|_| ParticleStageError::MissingIndirectDraw)?;
+            let stage = ParticleRendererGpu::new(self.device.as_ref(), required, route)
+                .map_err(|_| ParticleStageError::MissingIndirectDraw)?;
+            self.emitter_renderers.push(ParticleEmitterRenderer {
+                entity: emitter.emitter_entity,
+                stage,
+                inputs: Vec::with_capacity(required as usize),
+            });
+        }
+        let Some(renderer) = self
+            .emitter_renderers
+            .iter_mut()
+            .find(|renderer| renderer.entity == emitter.emitter_entity)
+        else {
+            return Ok(());
+        };
+        renderer.inputs.clear();
+        renderer
+            .inputs
+            .extend(particles.iter().enumerate().map(|(index, entry)| {
+                let particle = entry.particle;
+                ParticleRenderInput::new(
+                    [
+                        particle.position.x,
+                        particle.position.y,
+                        particle.position.z,
+                    ],
+                    if particle.size > 0.0 {
+                        particle.size
+                    } else {
+                        fallback_size
+                    },
+                    particle.position.z,
+                    index as u32,
+                )
+            }));
+        renderer
+            .stage
+            .set_inputs(queue, &renderer.inputs, ParticleCullView::unrestricted())
+            .map_err(|_| ParticleStageError::InvalidSnapshotRange)
+    }
+
+    /// Appends each emitter's renderer-matrix graph to the host frame graph.
+    pub fn append_emitter_renderers(
+        &self,
+        graph: &mut RenderGraph,
+    ) -> Result<(), prism_render_graph::CompileError> {
+        for renderer in &self.emitter_renderers {
+            renderer.stage.append_to_graph(graph)?;
+        }
+        Ok(())
+    }
+
     /// Releases all resources while the owning device is still usable.
-    pub fn destroy(mut self, device: &impl RenderDevice) {
+    pub fn destroy(mut self) {
+        for renderer in self.emitter_renderers.drain(..) {
+            renderer.stage.destroy(self.device.as_ref());
+        }
         self.stage
-            .destroy_with_pipeline_cache(device, &mut self.pipeline_cache);
+            .destroy_with_pipeline_cache(self.device.as_ref(), &mut self.pipeline_cache);
     }
 }
 
@@ -932,49 +1100,104 @@ where
     if world.get_resource::<ParticleGpuState>().is_some() {
         return;
     }
+    let generation = world
+        .resource::<RenderRuntimeResource<I>>()
+        .runtime()
+        .device_generation();
+    let build_queue = world.resource_mut::<ParticleGpuBuildQueue>();
+    if build_queue
+        .pending
+        .as_ref()
+        .is_some_and(|pending| pending.generation == generation)
+    {
+        return;
+    }
     let config = *world.resource::<RenderAppConfig>();
     let runtime = world.resource::<RenderRuntimeResource<I>>();
     let resolution = config.extent.width.max(config.extent.height).max(1);
-    match ParticleGpuState::new(
-        runtime.runtime().device(),
-        config.particle_capacity,
-        resolution,
-    ) {
-        Ok(state) => {
-            let status = world.resource_mut::<ParticleUploadStatus>();
-            status.error = None;
-            status.disabled_reason = None;
-            world.insert_resource(state);
-        }
-        Err(error) => {
-            let status = world.resource_mut::<ParticleUploadStatus>();
-            status.error = None;
-            status.disabled_reason = Some(error);
-        }
-    }
+    let device = runtime.runtime().device_handle();
+    let erased_device: Arc<dyn RenderDevice + Send + Sync> = device.clone();
+    let (sender, receiver) = mpsc::channel();
+    let capacity = config.particle_capacity;
+    std::thread::Builder::new()
+        .name(String::from("prism-particle-pipeline"))
+        .spawn(move || {
+            let result = ParticleGpuState::new(
+                device.as_ref(),
+                erased_device,
+                generation,
+                capacity,
+                resolution,
+            );
+            let _ = sender.send(result);
+        })
+        .expect("spawn particle pipeline specialization worker");
+    world.resource_mut::<ParticleGpuBuildQueue>().pending = Some(PendingParticleGpuBuild {
+        generation,
+        receiver: Mutex::new(receiver),
+    });
 }
 
 /// Uploads the extracted snapshot during the render prepare phase.
-pub fn prepare_particle_snapshot<I>(
-    state: Option<ResMut<ParticleGpuState>>,
-    mut status: ResMut<ParticleUploadStatus>,
-    snapshot: Res<ExtractedParticleSnapshot>,
-    config: Res<RenderAppConfig>,
-    runtime: Res<RenderRuntimeResource<I>>,
-) where
+pub fn prepare_particle_snapshot<I>(world: &mut World)
+where
     I: Instance + Send + Sync + 'static,
     I::Adapter: Send + Sync + 'static,
     I::Device: Send + Sync + 'static,
     I::Queue: Send + Sync + FrameSync + 'static,
     I::Surface: Send + Sync + 'static,
 {
-    let Some(mut state) = state else {
-        status.error = None;
+    let generation = world
+        .resource::<RenderRuntimeResource<I>>()
+        .runtime()
+        .device_generation();
+    let mut build_queue = world
+        .remove_resource::<ParticleGpuBuildQueue>()
+        .unwrap_or_default();
+    if let Some(pending) = build_queue.pending.as_ref() {
+        let completed = pending
+            .receiver
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .try_recv();
+        match completed {
+            Ok(Ok(state)) => {
+                build_queue.pending = None;
+                if state.device_generation == generation {
+                    world.insert_resource(state);
+                    let status = world.resource_mut::<ParticleUploadStatus>();
+                    status.disabled_reason = None;
+                } else {
+                    state.destroy();
+                }
+            }
+            Ok(Err(error)) => {
+                build_queue.pending = None;
+                world.resource_mut::<ParticleUploadStatus>().disabled_reason = Some(error);
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                build_queue.pending = None;
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+        }
+    }
+    world.insert_resource(build_queue);
+    let Some(mut state) = world.remove_resource::<ParticleGpuState>() else {
+        world.resource_mut::<ParticleUploadStatus>().error = None;
         return;
     };
-    status.error = state
-        .upload_snapshot::<I>(runtime.runtime().queue(), &snapshot, &config)
-        .err();
+    let result = {
+        let runtime = world.resource::<RenderRuntimeResource<I>>();
+        let snapshot = world.resource::<ExtractedParticleSnapshot>();
+        let config = world.resource::<RenderAppConfig>();
+        if state.device_generation == runtime.runtime().device_generation() {
+            state.upload_snapshot::<I>(runtime.runtime().queue(), snapshot, config)
+        } else {
+            Err(ParticleStageError::InvalidSnapshotRange)
+        }
+    };
+    world.resource_mut::<ParticleUploadStatus>().error = result.err();
+    world.insert_resource(state);
 }
 
 /// Prepares every changed Ember graph and uploads its current runtime inputs.

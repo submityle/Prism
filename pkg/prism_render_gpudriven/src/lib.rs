@@ -68,6 +68,7 @@ pub mod ember;
 pub mod encoding;
 pub mod frustum;
 pub mod gpu;
+pub mod gpu_simulation;
 pub mod instances;
 pub mod naive;
 pub mod particle;
@@ -82,11 +83,10 @@ pub use cull::{CullOutput, CullParams, CullStage};
 pub use draw::{DrawStage, INDICES_PER_INSTANCE};
 pub use ember::{
     AttributeUploadError, CompiledGraphGpuBinding, CompiledGraphGpuError,
-    CompiledGraphGpuExternalKind, CompiledGraphGpuExternalResource, CompiledGraphGpuGraphBinding,
-    CompiledGraphGpuGraphImport, CompiledGraphGpuImportError, CompiledGraphGpuResourceRegistry,
-    CompiledGraphGpuResourceSlot, CompiledGraphGpuRevision, CompiledGraphGpuState,
-    CompiledGraphGpuExternalUpdate, CompiledGraphGraphError, CompiledGraphGpuRegistryError,
-    ParameterUploadError,
+    CompiledGraphGpuExternalKind, CompiledGraphGpuExternalResource, CompiledGraphGpuExternalUpdate,
+    CompiledGraphGpuGraphBinding, CompiledGraphGpuGraphImport, CompiledGraphGpuImportError,
+    CompiledGraphGpuRegistryError, CompiledGraphGpuResourceRegistry, CompiledGraphGpuResourceSlot,
+    CompiledGraphGpuRevision, CompiledGraphGpuState, CompiledGraphGraphError, ParameterUploadError,
 };
 pub use encoding::IndirectArgs;
 pub use frustum::{aabb_inside, signed_distance, Aabb, Frustum, Plane};
@@ -94,9 +94,12 @@ pub use instances::{id_color, id_color_bytes, instance_storage_bytes, Instance};
 pub use naive::NaiveStage;
 pub use particle::{
     particle_storage_bytes, simulate_cpu, validate_particle_stage_config, Particle,
-    ParticleComputePipelineKind, ParticleParams, ParticlePipelineCache, ParticleReferenceResult,
-    ParticleStage, ParticleStageError, PARTICLE_CONTROL_BYTES, PARTICLE_INDEX_COUNT,
-    PARTICLE_PARAMS_BYTES, PARTICLE_STRIDE,
+    ParticleAuxiliaryGpu, ParticleAuxiliaryGraphOutputs, ParticleComputePipelineKind,
+    ParticleCullView, ParticleParams, ParticlePipelineCache, ParticleReferenceResult,
+    ParticleRenderInput, ParticleRendererGpu, ParticleRendererGpuError,
+    ParticleRendererGraphOutputs, ParticleRendererRoute, ParticleRendererRouteError, ParticleStage,
+    ParticleStageError, PARTICLE_CONTROL_BYTES, PARTICLE_INDEX_COUNT, PARTICLE_PARAMS_BYTES,
+    PARTICLE_STRIDE,
 };
 pub use quad::{corner_offset, corners, QUAD_HALF_EXTENT, QUAD_VERTICES};
 pub use readback::{count_lit_pixels, pixel_at, ReadBuffer};
