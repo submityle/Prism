@@ -107,7 +107,10 @@ impl AssetLoader for RuntimeImageLoader {
     type Asset = Image;
 
     fn extensions(&self) -> &'static [&'static str] {
-        &["prismimg"]
+        // Packaged assets retain their authored logical paths: a PNG route
+        // resolves to canonical PRIMG bytes, not the original PNG stream.
+        // Both extensions deliberately use the same strict artifact decoder.
+        &["prismimg", "png"]
     }
 
     fn load(&self, bytes: &[u8], _ctx: &mut LoadContext) -> Result<Self::Asset, LoadError> {

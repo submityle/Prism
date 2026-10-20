@@ -18,5 +18,17 @@ prism_render_driver = { path = "../prism_render_driver" }
 # this crate intentionally does not depend on Asset Build or its CAS.
 prism_asset_container = { path = "../prism_asset_container" }
 
+[dev-dependencies]
+# Exercise the existing producer and renderer from the image consumption seam;
+# neither dependency belongs in the runtime image library.
+png = "0.18.1"
+tempfile = "3.27"
+prism_asset_build_core = { path = "../prism_asset_build_core" }
+prism_ecs = { path = "../prism_ecs" }
+prism_render_app = { path = "../prism_render_app" }
+prism_render_driver_null = { path = "../../os-backends/prism_render_driver_null" }
+prism_render_driver_wgpu = { path = "../../os-backends/prism_render_driver_wgpu" }
+prism_tasks = { path = "../prism_tasks" }
+
 [lints]
 workspace = true
