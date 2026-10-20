@@ -27,7 +27,7 @@
 | `prism_editor_ui` | Loom Element 装配、有界稳定 key、语义目标/事件到选择/展开/字段编辑/命令/Undo/Redo action 的绑定契约 | 真实设备事件、Loom reconciliation/render 和应用命令执行的端到端连接 | 20 |
 | `prism_editor_app` | 有界 headless runner、工作区组合、窗口/surface 生命周期、错误回滚/恢复/退出及 `prism_app` 退出传播；原生文档会话接线、Ctrl/Cmd+S 保存、Ctrl/Cmd+O 加载、receipt 围栏、引擎中立 `SceneDocumentAdapter` 候选/提交边界、点选/拖拽框选、重载 renderer 失效钩子、单对象 transform 增量更新和 native CLI smoke entry | 完整原生输入→Loom→真实场景→Inspector→保存重载验收，以及具体引擎/项目场景 adapter | 见验证命令 |
 | `prism_editor_viewport` | 稳定场景 ID/增量提交、indexed geometry/depth ID pass、真实整数 ID target/异步读回、GPU 矩形去重归约、多 viewport target 生命周期/过期拒绝、Gizmo 屏幕命中与会话 | 引擎材质/场景提取、平台输入、Gizmo 绘制与宿主变换命令绑定 | 37（本次全 features） |
-| `prism_editor_world` | 有界异步 provider 驱动、payload 驻留、分层策略、dirty/租约保护、修订安全保存确认、OFPA/HLOD 计划 | 生产存储 provider/文件格式/崩溃恢复、actor 写盘、HLOD 烘焙/渲染和世界 UI | 24 |
+| `prism_editor_world` | 有界异步 provider、版本化 cell 文件持久化、校验/并发锁/修订冲突/阶段文件恢复、payload 驻留、分层策略、dirty/租约保护、OFPA/HLOD 计划 | actor codec/写盘执行、跨 cell/OFPA 事务、HLOD 烘焙/渲染和世界 UI | 41（本次全 targets） |
 
 ### 运行时进程桥
 
@@ -59,7 +59,11 @@
 
 `CellIoProvider` 返回拥有所有权的异步 Future，`WorldIoDriver` 限制请求数和预留字节数，提供取消/完成事件。`EditorWorldData` 管理 payload 驻留、失败恢复、编辑作用域、分层可见性/可编辑性、租约 token 与 dirty 保护。
 
-保存确认检查请求快照、当前修订、字节、有效锁和 actor dirty 状态，旧完成事件不能清掉新编辑。测试包含异步 Pending/wake/load/save/evict/reload 往返，但使用内存 provider；不把它视为生产文件持久化。OFPA 是稳定 actor 文件计划，HLOD 是 show/hide 代理计划，均不冒充实际序列化或烘焙。
+保存确认检查请求快照、当前修订、字节、有效锁和 actor dirty 状态，旧完成事件不能清掉新编辑。`FileCellIoProvider` 已在提交 `d70e41247` 落地真实文件持久化：64 字节版本化 envelope、坐标/GUID/长度/校验和验证、有界异步 worker、每 cell OS advisory lock、同目录 stage→fsync→rename→目录 fsync。加载恢复 durable revision，保存按已观察的 base revision 拒绝冲突；取消围栏阻止后续发布，rename 后目录同步失败显式返回 `CommitUncertain`，不能据此清除 dirty。临时目录测试包含实际文件往返、错误 envelope、符号链接拒绝、并发 provider 和子进程锁/进程退出恢复；故障注入不等于物理断电验证。
+
+文件持久化按 cell 原子提交，尚不提供跨 cell/OFPA 事务、备份修复或恶意目录替换隔离；具体格式与恢复步骤见 `pkg/prism_editor_world/README.md`。OFPA 目前仍是稳定 actor 文件计划，HLOD 是 show/hide 代理计划，不能计作 actor codec/写盘执行或实际烘焙。
+
+2026-10-20 在当前 checkout 执行 `cargo test --offline -p prism_editor_world --all-targets`，14 项单元、7 项执行层、12 项真实文件系统、8 项恢复测试全部通过。另重新执行编辑器全 features 的 normal/build/dev Cargo 依赖树检查，未发现 `bevy_*`。
 
 ### 应用生命周期与 UI
 

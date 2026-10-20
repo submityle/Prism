@@ -201,7 +201,7 @@ pub trait Command: Send {
 ---
 
 ## 6. 大世界编辑:World Partition / 数据层 / HLOD / OFPA(D8)
-> crate: `prism_editor_world`；元数据/异步 provider 执行、payload/dirty/租约保护及 OFPA/HLOD 计划已交付；生产存储、烘焙和 UI 仍待接入。
+> crate: `prism_editor_world`；元数据/异步 provider 执行、版本化 cell 文件持久化及恢复、payload/dirty/租约保护和 OFPA/HLOD 计划已交付；actor 写盘执行、跨 cell/OFPA 事务、烘焙和 UI 仍待接入。
 
 借鉴 Unreal World Partition / Frostbite 大世界:
 
@@ -370,12 +370,12 @@ pub trait Command: Send {
 | `prism_editor_shell` | 外壳装配:活动栏/侧栏/命令面板/菜单/工具栏/状态栏/键位/主题 | ✅ 数据层已交付 |
 | `prism_editor_panels` | Inspector / Outliner / Content / Console 等通用面板 | ✅ 数据层已交付 |
 | `prism_editor_viewport` | 多视口、GPU 拾取、虚拟几何/GI 预览、高级 Gizmo、瓦片重绘 | 🟡 增量 ID 提交/geometry/depth/真实 target/单点读回/GPU 框选归约/屏幕轴命中已交付，引擎预览和原生 Gizmo 回写待接 |
-| `prism_editor_world` | World Partition 流送、数据层、HLOD、OFPA、层级实例 | 🟡 异步 provider 执行/dirty/租约/计划已交付，生产持久化/烘焙/UI 待接 |
+| `prism_editor_world` | World Partition 流送、数据层、HLOD、OFPA、层级实例 | 🟡 异步 provider/版本化 cell 文件存储及恢复/dirty/租约/计划已交付，actor 写盘/跨 cell 事务/烘焙/UI 待接 |
 | `prism_editor_graph` | 通用节点图内核(材质/VFX/动画/行为树/几何节点) | ✅ 通用内核已交付 |
 | `prism_editor_timeline` | 通用时间线/序列器/关键帧曲线 | ✅ 通用内核已交付 |
 | `prism_editor_domains` | 各域编辑器装配(挂接子系统) | ✅ 装配契约已交付，具体域待接入 |
 | `prism_editor_profiler` | 帧分析器、帧图调试、内存预算、Gameplay Debugger、可视日志 | 🟡 数据层已交付，真实采集待接入 |
-| `prism_editor_content` | 内容浏览器、依赖图、校验、导入导出、cook/构建、版本控制 | 🟡 目录/分页/缓存/依赖/VCS 元数据/任务层已交付，实际管线与 UI 待接 |
+| `prism_editor_content` | 内容浏览器、依赖图、校验、导入导出、cook/构建、版本控制 | 🟡 目录/末项续查分页/有界缓存与诊断/增量依赖/原子 VCS 元数据/任务层已交付，实际管线与 UI 待接 |
 | `prism_editor_remote` | BRP 风格 JSON-RPC、PIE、增量同步、安全 | 🟡 协议/TCP/受控进程桥已交付，引擎专属 adapter 待接 |
 | `prism_editor_collab` | 命令广播 / CRDT 协同 / 在场锁(可选) | 🟡 有界副本/TCP 广播/重连/能力拒绝已交付，认证与产品流程待接 |
 | `prism_editor_ui` | Loom Element 装配：Shell、面板、Dock、Viewport host、workspace | 🟡 Element 与语义 action 绑定已交付，设备事件/渲染/模型执行回路待接 |
