@@ -376,6 +376,35 @@ impl GpuPlanetPlacement {
         encoder.copy_buffer_to_buffer(&self.indirect, 0, destination, 8, 16);
         Ok(())
     }
+
+    /// Copies the candidate-aligned records to a caller-owned readback buffer.
+    ///
+    /// The required size is 80 * candidate_count() bytes. This is a
+    /// diagnostic/parity path; production consumers should use the storage
+    /// buffer directly and compact/indirect output without readback.
+    pub fn encode_records_readback(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        destination: &wgpu::Buffer,
+    ) -> Result<(), GpuPlanetPlacementError> {
+        let bytes = u64::from(self.candidate_count())
+            .checked_mul(RECORD_BYTES)
+            .ok_or(GpuPlanetPlacementError::Gpu(
+                GpuScatterError::ArithmeticOverflow,
+            ))?;
+        if destination.size() < bytes {
+            return Err(GpuPlanetPlacementError::Gpu(
+                GpuScatterError::BufferBudgetExceeded {
+                    required: bytes,
+                    limit: destination.size(),
+                },
+            ));
+        }
+        if bytes != 0 {
+            encoder.copy_buffer_to_buffer(&self.records, 0, destination, 0, bytes);
+        }
+        Ok(())
+    }
     /// Active primary-slot prefix, independent of GPU acceptance.
     pub fn candidate_count(&self) -> u32 {
         self.request.as_ref().map_or(0, |r| r.candidate_count)

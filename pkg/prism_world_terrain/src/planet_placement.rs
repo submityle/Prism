@@ -286,7 +286,7 @@ pub fn place_on_planet_heightfield(
                 tile: region.tile,
                 cell: [u, v],
             };
-            if rank(key) > config.acceptance_threshold {
+            if planet_placement_rank(key) > config.acceptance_threshold {
                 continue;
             }
             let point = project(config, key, tile)?;
@@ -397,7 +397,11 @@ fn round_i64(value: f64) -> Result<i64, PlanetPlacementError> {
     Ok(rounded as i64)
 }
 
-fn rank(key: PlanetPlacementKey) -> u16 {
+/// Returns the stable 16-bit acceptance rank for a placement key.
+///
+/// The value is part of the CPU/GPU placement contract: lower values are
+/// accepted first, and the GPU producer must use the same full key fields.
+pub fn planet_placement_rank(key: PlanetPlacementKey) -> u16 {
     let mut value = key.seed ^ key.salt;
     value ^= u64::from(key.placement_version) << 32 | u64::from(key.version);
     value = mix(value ^ u64::from(key.tile.face().index()));

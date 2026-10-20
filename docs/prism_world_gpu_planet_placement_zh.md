@@ -17,7 +17,12 @@ pass，不提交、不等待、不读回，必须由调用者在提交 encoder �
 高度、半径和 origin 先以 signed-i128 limbs 上传，再在 shader 中转换为 `f32`。完整的 i64
 CPU 配置、tile、region 和样本仍保存在 `GpuPlanetPlacementCacheKey` 中。该切片
 提供 GPU placement 资源和 indirect 输出，不宣称与 CPU `place_on_planet_heightfield` 的
-i64 毫米坐标逐位相等，也不包含 scene/ECS、renderer graph 或跨 LOD seam。`planet_placement_deletion` 已在 Apple M2 / Metal / IntegratedGpu 上对包含该 placement producer 的真实 compute pipeline 完成 1 项 dispatch/readback 回归；这不是 placement 与 CPU i64 几何的逐位 parity 证明。
+i64 毫米坐标逐位相等，也不包含 scene/ECS、renderer graph 或跨 LOD seam。GPU 候选记录现在
+提供独立的 diagnostic readback；真实设备回归逐候选核对 tile/cell identity、CPU 导出的稳定
+rank、四角高度 numerator、threshold accepted 和 invalid 标志。这是候选语义 parity，不是
+`f32` 几何位置的 i64 毫米逐位 parity。`planet_placement_deletion` 已在 Apple M2 / Metal /
+IntegratedGpu 上对包含该 placement producer 的真实 compute pipeline 完成 dispatch/readback
+回归。
 
 离线无设备验证：
 
@@ -35,7 +40,8 @@ cargo test --offline -p prism_world_gpu --features terrain_scatter \
   --test planet_placement_gpu -- --nocapture --test-threads=1
 ```
 
-2026-10-20 已在 Apple M2 / Metal / IntegratedGpu 上通过 1 项：真实创建 placement
-pipeline、dispatch 4 个 flat-tile candidates、readback status/indirect，并确认 4 个
-候选全部被接受且无投影失败。测试明确拒绝无硬件 adapter，不把 CPU/noop/virtual adapter
-算作通过。该证据证明 producer 的设备执行和输出计数，不证明与 CPU i64 几何逐位相等。
+2026-10-20 本次隔离运行已完成 placement GPU 测试编译；严格 Metal 命令实际因运行环境未
+返回可用 adapter 而未执行 shader，输出为 `metal found no adapters`，因此不能记为真实设备
+通过。测试仍明确拒绝无硬件 adapter，不把 CPU/noop/virtual adapter 算作通过。离线 WGSL/CPU
+验证已通过，真实 Apple M2 / Metal / IntegratedGpu 的该 placement producer dispatch/readback
+与候选语义 parity 仍待在有 adapter 的环境重跑；它也不证明与 CPU i64 几何逐位相等。

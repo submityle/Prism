@@ -73,9 +73,9 @@ pub use planet_mesh::{
     PlanetHeightfieldNormalNeighborhood, PlanetMeshConfig,
 };
 pub use planet_placement::{
-    estimate_planet_placement_work, place_on_planet_heightfield, PlanetPlacementBudget,
-    PlanetPlacementConfig, PlanetPlacementError, PlanetPlacementKey, PlanetPlacementOutput,
-    PlanetPlacementPoint, PlanetPlacementRegion, PLANET_PLACEMENT_VERSION,
+    estimate_planet_placement_work, place_on_planet_heightfield, planet_placement_rank,
+    PlanetPlacementBudget, PlanetPlacementConfig, PlanetPlacementError, PlanetPlacementKey,
+    PlanetPlacementOutput, PlanetPlacementPoint, PlanetPlacementRegion, PLANET_PLACEMENT_VERSION,
 };
 pub use planet_placement_deletion::{
     filter_planet_placement, DeletionFilteredPlanetPlacement, PlanetPlacementDeletionBudget,
