@@ -14,3 +14,12 @@ glam = { version = "0.33.2", default-features = false, features = ["std"] }
 
 [lints]
 workspace = true
+
+[[test]]
+name = "sdf_sampling"
+path = "text/unit/sdf_sampling.rs"
+
+[[bench]]
+name = "sdf_sampling"
+path = "text/integration/sdf_sampling_bench.rs"
+harness = false

@@ -9,6 +9,9 @@
 pub use prism_world_residency::{SdfBounds, SdfQueryResult};
 use prism_world_residency::{SdfQueryConsumer, SparseSdfBrickGrid, SparseSdfQuery};
 
+mod sampling;
+pub use sampling::SdfDistanceGradient;
+
 /// Logical bytes represented by the fixed SDF snapshot header.
 pub const WORLD_SDF_HEADER_BYTES: usize = 48;
 /// Logical bytes represented by one packed sparse-brick metadata record.
@@ -72,15 +75,7 @@ impl WorldSdfTransform {
         world_position_mm: [i64; 3],
         mip: u8,
     ) -> Result<[i32; 3], SdfBridgeError> {
-        if mip >= 127 {
-            return Err(SdfBridgeError::MipScaleOverflow);
-        }
-        let mip_scale = 1_i128
-            .checked_shl(u32::from(mip))
-            .ok_or(SdfBridgeError::MipScaleOverflow)?;
-        let voxel_size = i128::from(self.voxel_size_mm)
-            .checked_mul(mip_scale)
-            .ok_or(SdfBridgeError::MipScaleOverflow)?;
+        let voxel_size = self.mip_voxel_size_mm(mip)?;
         let mut voxel = [0_i32; 3];
         for axis in 0..3 {
             let delta = i128::from(world_position_mm[axis]) - i128::from(self.origin_mm[axis]);
@@ -89,6 +84,18 @@ impl WorldSdfTransform {
                 i32::try_from(coordinate).map_err(|_| SdfBridgeError::VoxelCoordinateOutOfRange)?;
         }
         Ok(voxel)
+    }
+
+    fn mip_voxel_size_mm(self, mip: u8) -> Result<i128, SdfBridgeError> {
+        if mip >= 127 {
+            return Err(SdfBridgeError::MipScaleOverflow);
+        }
+        let mip_scale = 1_i128
+            .checked_shl(u32::from(mip))
+            .ok_or(SdfBridgeError::MipScaleOverflow)?;
+        i128::from(self.voxel_size_mm)
+            .checked_mul(mip_scale)
+            .ok_or(SdfBridgeError::MipScaleOverflow)
     }
 }
 

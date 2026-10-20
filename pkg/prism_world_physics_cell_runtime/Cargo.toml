@@ -15,3 +15,7 @@ prism_world_terrain = { path = "../prism_world_terrain" }
 
 [lints]
 workspace = true
+
+[[test]]
+name = "sdf_sampling_lifecycle"
+path = "text/integration/sdf_sampling_lifecycle.rs"

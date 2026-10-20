@@ -3,8 +3,8 @@
 use core::fmt;
 
 use prism_world_physics_bridge::{
-    SdfBounds, SdfBridgeError, SdfPhysicsBridgeBudget, SdfPhysicsSnapshot, SdfQueryResult,
-    WorldSdfPhysicsBridge, WorldSdfSnapshot,
+    SdfBounds, SdfBridgeError, SdfDistanceGradient, SdfPhysicsBridgeBudget, SdfPhysicsSnapshot,
+    SdfQueryResult, WorldSdfPhysicsBridge, WorldSdfSnapshot,
 };
 use prism_world_residency::{SdfError, SdfQueryConsumer};
 use prism_world_runtime::SceneHost;
@@ -277,6 +277,21 @@ impl<'a, H: SceneHost, D: SdfCellDecoder> SdfPhysicsCellHost<'a, H, D> {
         self.resident(sector)
             .map_or(Ok(SdfQueryResult::Unknown), |snapshot| {
                 snapshot.query_world_distance_mm(world_position_mm, mip)
+            })
+    }
+
+    /// Queries trilinear distance and its world-space derivative from one
+    /// committed snapshot. A missing cell or interpolation corner is `Unknown`.
+    /// Failed loads, reloads and evictions retain the previous query result.
+    pub fn query_world_distance_gradient_mm(
+        &self,
+        sector: SectorId,
+        world_position_mm: [i64; 3],
+        mip: u8,
+    ) -> Result<SdfQueryResult<SdfDistanceGradient>, SdfBridgeError> {
+        self.resident(sector)
+            .map_or(Ok(SdfQueryResult::Unknown), |snapshot| {
+                snapshot.query_world_distance_gradient_mm(world_position_mm, mip)
             })
     }
 

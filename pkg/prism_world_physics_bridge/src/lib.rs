@@ -13,9 +13,9 @@
 mod sdf;
 
 pub use sdf::{
-    SdfBounds, SdfBridgeError, SdfPhysicsBridgeBudget, SdfPhysicsSnapshot, SdfQueryResult,
-    WorldSdfPhysicsBridge, WorldSdfSnapshot, WorldSdfTransform, WORLD_SDF_BRICK_METADATA_BYTES,
-    WORLD_SDF_HEADER_BYTES, WORLD_SDF_SAMPLE_BYTES,
+    SdfBounds, SdfBridgeError, SdfDistanceGradient, SdfPhysicsBridgeBudget, SdfPhysicsSnapshot,
+    SdfQueryResult, WorldSdfPhysicsBridge, WorldSdfSnapshot, WorldSdfTransform,
+    WORLD_SDF_BRICK_METADATA_BYTES, WORLD_SDF_HEADER_BYTES, WORLD_SDF_SAMPLE_BYTES,
 };
 
 use std::{fmt, vec::Vec};
