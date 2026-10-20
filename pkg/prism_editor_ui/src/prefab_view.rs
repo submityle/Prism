@@ -53,6 +53,9 @@ pub struct BoundPrefabPanel {
     element: Element,
     bindings: BTreeMap<(String, UiTrigger), A>,
     rows: Vec<PrefabOverrideVisual>,
+    review: Option<Vec<PrefabOverrideVisual>>,
+    proposals: Option<Vec<PrefabOverrideVisual>>,
+    review_blocked: bool,
     stats: PrefabPanelViewStats,
     snapshot: PrefabPanelSnapshot,
     pub(crate) view: Arc<()>,
@@ -65,6 +68,20 @@ impl BoundPrefabPanel {
     /// Exact visible authored overrides in semantic key order.
     pub fn rows(&self) -> &[PrefabOverrideVisual] {
         &self.rows
+    }
+    /// Reviewed ancestor/target pins, bounded by the selection limit.
+    /// Some(empty) is a valid review with no overlapping authored pins.
+    pub fn apply_review(&self) -> Option<&[PrefabOverrideVisual]> {
+        self.review.as_deref()
+    }
+    /// All selected source values in the review, including off-page selection.
+    /// Values are shared; source addresses are bounded by the selection limit.
+    pub fn apply_proposals(&self) -> Option<&[PrefabOverrideVisual]> {
+        self.proposals.as_deref()
+    }
+    /// Broader/narrower reviewed pins require separate authoring decisions.
+    pub const fn apply_review_blocked(&self) -> bool {
+        self.review_blocked
     }
     /// Bounded page traversal evidence and navigation availability.
     pub const fn stats(&self) -> PrefabPanelViewStats {
@@ -187,6 +204,9 @@ pub(crate) fn build(c: &PrefabPanelController) -> Result<BoundPrefabPanel, Prefa
         element: Element::box_(),
         bindings: BTreeMap::new(),
         rows: Vec::new(),
+        review: None,
+        proposals: None,
+        review_blocked: false,
         stats: Default::default(),
         snapshot: c.snapshot(),
         view: c.view.clone(),
@@ -249,6 +269,11 @@ pub(crate) fn build(c: &PrefabPanelController) -> Result<BoundPrefabPanel, Prefa
             "prefab:apply-base",
             "Apply to base",
             (has_selection && c.base.is_some()).then_some(A::ApplyBase),
+        ),
+        (
+            "prefab:review-apply",
+            "Review apply / conflicts",
+            (has_selection && c.base.is_some()).then_some(A::ReviewApplyBase),
         ),
         (
             "prefab:propagate",
@@ -332,6 +357,77 @@ pub(crate) fn build(c: &PrefabPanelController) -> Result<BoundPrefabPanel, Prefa
     }
     if v.rows.is_empty() {
         rows = rows.child(Element::text("No explicit field overrides on this page"));
+    }
+    if let Some(review) = &c.review {
+        v.review_blocked = review.blocked;
+        let mut pins = Vec::with_capacity(review.pins.len());
+        rows = rows.child(Element::text(format!(
+            "Apply review: {:?} -> {:?}; {} selected; {} pins",
+            review.source,
+            review.target,
+            review.properties.len(),
+            review.pins.len()
+        )));
+        rows = rows.child(Element::text(if review.blocked {
+            "Blocked: broader/narrower pins require separate field decisions; nothing will be discarded"
+        } else {
+            "Confirm reverts exact intervening pins and replaces exact target pins; inheriting descendants are affected"
+        }));
+        rows = rows.child(Element::text("Selected source overrides to apply"));
+        let source = &c.store().layer(review.source)?.overrides;
+        let mut proposals = Vec::with_capacity(review.properties.len());
+        for p in &review.properties {
+            let value = source.get(p).ok_or(PrefabPanelError::Target)?;
+            let row = PrefabOverrideVisual {
+                key: format!("prefab:proposal:{}", key(p)),
+                owner: review.source,
+                property: p.clone(),
+                value: value.clone(),
+                label: address_label(p),
+                preview: preview(value),
+                selected: true,
+            };
+            rows = rows.child(
+                column(780.)
+                    .key_str(&row.key)
+                    .child(Element::text(&row.label))
+                    .child(Element::text(&row.preview)),
+            );
+            proposals.push(row);
+        }
+        v.proposals = Some(proposals);
+        rows = rows.child(Element::text("Ancestor / target pins affected by apply"));
+        for ((owner, p), value) in &review.pins {
+            let row = PrefabOverrideVisual {
+                key: format!("prefab:review:{owner:?}:{}", key(p)),
+                owner: *owner,
+                property: p.clone(),
+                value: value.clone(),
+                label: address_label(p),
+                preview: preview(value),
+                selected: false,
+            };
+            rows = rows.child(
+                column(780.)
+                    .key_str(&row.key)
+                    .child(Element::text(format!("{:?}: {}", owner, row.label)))
+                    .child(Element::text(&row.preview)),
+            );
+            pins.push(row);
+        }
+        rows = rows.child(control(
+            &mut v,
+            "prefab:confirm-apply",
+            "Confirm exact-pin resolution and apply",
+            (!review.blocked).then_some(A::ConfirmApplyReview),
+        ));
+        rows = rows.child(control(
+            &mut v,
+            "prefab:cancel-apply",
+            "Cancel review",
+            Some(A::CancelApplyReview),
+        ));
+        v.review = Some(pins);
     }
     rows = rows.child(Element::text(format!(
         "{} rows; previous={} next={}",

@@ -31,6 +31,8 @@ Set 的值只克隆 Arc 引用。Null 与 Remove 不同，浮点显示精确位�
 
 Revert 为所有选定覆盖生成一批 Revert；ApplyBase 为所有选定覆盖生成一批 ApplyToBase；Propagate 对选定资产覆盖生成一批 Propagate，接收者为显式勾选集。每次按钮只创建一个 PrefabCommand，而非循环提交多个命令。任一字段、后代、祖先或内核预算拒绝时，整批不发布、不增历史、不清选择、旧 view 仍有效。传播还预先检查 fields × (recipients + 1) 的内核 edit 展开预算。内核会保护中间变体覆盖和较宽属性覆盖，不强行覆盖兄弟字段。未选实例的显式 pin 和未触及记录的 Arc 身份保持原样。
 
+Review apply 提供真正的冲突审查：显示全部选中源覆盖（包括其他页），以及应用路径上中间层和目标的相关覆盖。确认会在同一真实命令内还原精确中间 pin 后应用基底；取消只改变视图。宽/窄重叠时确认禁用并明确拒绝，不删除未选兄弟字段。审查按祖先前缀与有序 range 查找，pin 数和源值数各受 selection 上限、地址预算及 8192 lookup/range 步数约束，事务展开受 max_edits 约束。模型、配置或选择/分页变化使旧确认失效；真实提交失败保留模型、历史和审查。设计要求覆盖、真实回滚示例、原生 app 交接及未交付边界见 `prism_editor_prefab_authoring_zh.md`。
+
 Undo/Redo 直接调用 CommandStack 和 PrefabCommand 逆历史，不保存每次全 Store 克隆。历史条目总量以 undo+redo 受限，正常新分支会丢弃 redo 后再占用一项；undo 深度已经到上限时明确拒绝新命令，不自动丢弃旧历史。内核接受的 no-op 命令也占一个历史项。每项保留被修改记录的前后 Arc，记录大小仍受 PrefabLimits 约束，并不宣称单项历史是常数字节。
 
 snapshot() 返回带私有 Arc 身份和诊断 revision 的 PrefabPanelSnapshot。execute(expected, edits)、configure_targets 和 replace_store 必须匹配精确模型 capability。控制器独占 Store 且无可写逃逸，任何成功作者命令、undo、redo、替换 Store 都更新模型身份。即便 undo 恢复相同值、从相同编码载入、独立 Store revision 恰好一致，也拒绝旧 capability。读取 encode/compose 不改变身份。replace_store 在验证新 owner 后才交换所有权并清空历史、选择和配置。
@@ -47,8 +49,10 @@ snapshot() 返回带私有 Arc 身份和诊断 revision 的 PrefabPanelSnapshot�
 
 retained 测试真实 mount/update Element，以 RetainedScene 计算 layout、生成 draw list、CPU rasterize 检查选择/未选行像素；再从绘制控件执行真实 Revert 并验证组合值与 retained 更新。相同状态重建检查 RecordingBackend 零差异。
 
-2026-10-21 公共 API 回归：`cargo test -p prism_editor_ui --test prefab_panel`，11 passed、0 failed、0 ignored。覆盖真实内核事务、组合结果、逆历史、精确 fence、有界分页和 retained layout/raster。
+2026-10-21 公共 API 回归：`cargo test -p prism_editor_ui --test prefab_panel`，17 passed、0 failed、0 ignored。覆盖真实内核事务、组合结果、逆历史、精确 fence、有界分页和 retained layout/raster；新增审查取消、精确 pin 单事务解决/Undo/Redo、无关 pin 保留、宽/窄冲突禁用、pin 和展开 edit 预算、提交失败整体回滚及跨页真实共享值/确认控件 raster。
 
 完整严格检查命令：`cargo clippy -p prism_editor_ui --all-targets --all-features --no-deps -- -D warnings`。当前未通过：共享 checkout 中其他任务拥有的 `src/graph_gesture.rs:301/304` 触发 `semicolon_if_nothing_returned`；该次检查没有报告 Prefab 模块错误。不能将此结果视为全包 strict Clippy 已通过，修复共享文件后须由联合验证重新执行。
 
-验证统一设置 `CARGO_TARGET_DIR=/private/tmp/prism-prefab-panel.ym06D6 CARGO_BUILD_JOBS=1 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0`。该独立 target 只属于本任务，验证结束后用 `cargo clean --target-dir /private/tmp/prism-prefab-panel.ym06D6` 清理；不清理主线程或其他任务 target。
+额外诊断命令 `cargo clippy -p prism_editor_ui --test prefab_panel --all-features --no-deps -- -D warnings -A clippy::semicolon_if_nothing_returned` 已通过，检查到公共 Prefab 测试目标且无其他 lint 错误。这次仅为越过共享图手势的已知 lint；由于显式允许了该 lint，不能替代上面的 strict 结果。
+
+本次审查验证设置 `CARGO_TARGET_DIR=/private/tmp/prism-prefab-authoring.znQfw6 CARGO_BUILD_JOBS=1 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0`。所有验证进程退出后已执行 `cargo clean --target-dir /private/tmp/prism-prefab-authoring.znQfw6`，回收 725.0MiB；未清理主线程或其他任务 target。此前面板 target `/private/tmp/prism-prefab-panel.ym06D6` 已清理，回收 838.4MiB。

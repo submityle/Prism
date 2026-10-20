@@ -1,7 +1,22 @@
 //! Bounded authored-override controller over the real Prefab command kernel.
 use crate::{prefab_view::BoundPrefabPanel, SelectionMode, UiEvent};
 use prism_editor_core::{prefab::*, CommandError, CommandStack};
-use std::{collections::BTreeSet, fmt, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+    sync::Arc,
+};
+
+// Explicit review work bound, independent of the library's total owner count.
+const REVIEW_STEPS: usize = 8192;
+
+pub(crate) struct ApplyReview {
+    pub(crate) source: PrefabOwner,
+    pub(crate) target: PrefabId,
+    pub(crate) properties: Vec<PrefabProperty>,
+    pub(crate) pins: BTreeMap<(PrefabOwner, PrefabProperty), PrefabOverride>,
+    pub(crate) blocked: bool,
+}
 
 /// Limits on UI materialization, selection, propagation and retained history.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -101,6 +116,13 @@ pub enum PrefabPanelAction {
     Revert,
     /// Move selected explicit overrides to the configured ancestor atomically.
     ApplyBase,
+    /// Review bounded overlapping pins along the configured apply ancestry.
+    ReviewApplyBase,
+    /// Cancel the current review, without touching authoring or history.
+    CancelApplyReview,
+    /// Revert reviewed exact intervening pins and apply in one real command.
+    /// Broader/narrower pins must be resolved separately and cannot be discarded.
+    ConfirmApplyReview,
     /// Pin selected asset values into selected proper descendants atomically.
     Propagate,
     /// Real command history undo.
@@ -157,6 +179,7 @@ pub struct PrefabPanelController {
     pub(crate) base: Option<PrefabId>,
     pub(crate) candidates: Vec<PrefabOwner>,
     pub(crate) recipients: BTreeSet<PrefabOwner>,
+    pub(crate) review: Option<ApplyReview>,
     model: Arc<()>,
     pub(crate) view: Arc<()>,
 }
@@ -179,6 +202,7 @@ impl PrefabPanelController {
             base: None,
             candidates: Vec::new(),
             recipients: BTreeSet::new(),
+            review: None,
             model: Arc::new(()),
             view: Arc::new(()),
         })
@@ -247,6 +271,7 @@ impl PrefabPanelController {
         self.base = base;
         self.candidates = recipients;
         self.recipients = seen;
+        self.review = None;
         self.view = Arc::new(());
         Ok(())
     }
@@ -298,6 +323,7 @@ impl PrefabPanelController {
         Ok(())
     }
     fn published_model(&mut self) {
+        self.review = None;
         self.selected.retain(|p| {
             self.store
                 .layer(self.owner)
@@ -333,6 +359,38 @@ impl PrefabPanelController {
     pub fn apply(&mut self, action: PrefabPanelAction) -> Result<(), PrefabPanelError> {
         use PrefabPanelAction as A;
         match action {
+            A::ReviewApplyBase => {
+                let review = self.review_apply()?;
+                self.review = Some(review);
+                self.view = Arc::new(());
+                return Ok(());
+            }
+            A::CancelApplyReview => {
+                self.review = None;
+            }
+            A::ConfirmApplyReview => {
+                let review = self.review.as_ref().ok_or(PrefabPanelError::Target)?;
+                if review.blocked {
+                    return Err(PrefabPanelError::Target);
+                }
+                let mut edits = Vec::new();
+                for (owner, property) in review.pins.keys() {
+                    if *owner != PrefabOwner::Asset(review.target) {
+                        edits.push(PrefabEdit::Revert {
+                            owner: *owner,
+                            property: property.clone(),
+                        });
+                    }
+                }
+                for property in &review.properties {
+                    edits.push(PrefabEdit::ApplyToBase {
+                        source: review.source,
+                        target: review.target,
+                        property: property.clone(),
+                    });
+                }
+                return self.execute(&self.snapshot(), edits);
+            }
             A::Owner(owner) => {
                 self.store.layer(owner)?;
                 self.owner = owner;
@@ -431,7 +489,101 @@ impl PrefabPanelController {
                 return self.execute(&self.snapshot(), edits);
             }
         }
+        self.review = None;
         self.view = Arc::new(());
+        Ok(())
+    }
+    fn review_apply(&self) -> Result<ApplyReview, PrefabPanelError> {
+        let target = self.base.ok_or(PrefabPanelError::Target)?;
+        if self.selected.is_empty() || self.owner == PrefabOwner::Asset(target) {
+            return Err(PrefabPanelError::Target);
+        }
+        let mut cursor = match self.owner {
+            PrefabOwner::Asset(id) => self.store.asset(id).ok_or(PrefabPanelError::Target)?.base,
+            PrefabOwner::Instance(id) => Some(
+                self.store
+                    .instance(id)
+                    .ok_or(PrefabPanelError::Target)?
+                    .prefab,
+            ),
+        };
+        let mut review = ApplyReview {
+            source: self.owner,
+            target,
+            properties: self.selected.iter().cloned().collect(),
+            pins: BTreeMap::new(),
+            blocked: false,
+        };
+        let mut steps = 0;
+        let mut depth = 0;
+        while let Some(id) = cursor {
+            depth += 1;
+            if depth > self.store.limits().max_depth {
+                return Err(PrefabPanelError::Capacity);
+            }
+            let owner = PrefabOwner::Asset(id);
+            let asset = self.store.asset(id).ok_or(PrefabPanelError::Target)?;
+            let overrides = &asset.layer.overrides;
+            for p in &self.selected {
+                let mut ancestor = p.clone();
+                // Exact/descendant keys form a contiguous range. Prefix keys
+                // preceding it require at most the bounded semantic depth lookups.
+                while !ancestor.fields.is_empty() {
+                    ancestor.fields.pop();
+                    Self::review_step(&mut steps)?;
+                    if let Some(value) = overrides.get(&ancestor) {
+                        self.review_pin(&mut review, owner, &ancestor, value, true)?;
+                    }
+                }
+                for (key, value) in overrides.range(p.clone()..) {
+                    Self::review_step(&mut steps)?;
+                    if key.entity != p.entity
+                        || key.component != p.component
+                        || !key.fields.starts_with(&p.fields)
+                    {
+                        break;
+                    }
+                    self.review_pin(&mut review, owner, key, value, key != p)?;
+                }
+            }
+            if id == target {
+                let reverts = review
+                    .pins
+                    .keys()
+                    .filter(|(owner, _)| *owner != PrefabOwner::Asset(target))
+                    .count();
+                if reverts + review.properties.len() > self.store.limits().max_edits {
+                    return Err(PrefabPanelError::Capacity);
+                }
+                return Ok(review);
+            }
+            cursor = asset.base;
+        }
+        Err(PrefabPanelError::Target)
+    }
+    fn review_step(steps: &mut usize) -> Result<(), PrefabPanelError> {
+        *steps += 1;
+        if *steps > REVIEW_STEPS {
+            return Err(PrefabPanelError::Capacity);
+        }
+        Ok(())
+    }
+    fn review_pin(
+        &self,
+        review: &mut ApplyReview,
+        owner: PrefabOwner,
+        property: &PrefabProperty,
+        value: &PrefabOverride,
+        blocked: bool,
+    ) -> Result<(), PrefabPanelError> {
+        self.limits.address(property)?;
+        if !review.pins.contains_key(&(owner, property.clone()))
+            && review.pins.len() >= self.limits.selection
+        {
+            return Err(PrefabPanelError::Capacity);
+        }
+        review.blocked |= blocked;
+        review.pins.insert((owner, property.clone()), value.clone());
         Ok(())
     }
     fn page(&mut self, p: PrefabProperty, before: bool) -> Result<(), PrefabPanelError> {

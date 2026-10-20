@@ -106,6 +106,15 @@ fn all_bindings_painted(v: &BoundPrefabPanel) {
         assert!(find(v.element(), key).is_some(), "{key}");
     }
 }
+fn element_keys(e: &Element, out: &mut Vec<Option<String>>) {
+    out.push(match e.explicit_key() {
+        Some(Key::Str(k)) => Some(k.to_string()),
+        _ => None,
+    });
+    for child in e.child_elements() {
+        element_keys(child, out);
+    }
+}
 
 #[test]
 fn painted_revert_apply_base_and_history_write_real_model_atomically() {
@@ -274,6 +283,335 @@ fn model_snapshot_and_controller_view_fences_reject_aba_and_foreign_views() {
     assert_eq!(
         c.handle_event(&view, "prefab:undo", &UiEvent::Activate),
         Err(Error::StaleView)
+    );
+}
+
+#[test]
+fn reviewed_exact_conflicts_cancel_and_resolve_with_one_real_inverse_history() {
+    let mut c = controller(instance(1));
+    c.execute(
+        &c.snapshot(),
+        vec![
+            pin(asset(1), property("field0000"), 400),
+            pin(asset(2), property("field0001"), 500),
+            pin(asset(2), property("field0002"), 600),
+            pin(instance(3), property("field0000"), 700),
+        ],
+    )
+    .unwrap();
+    c.configure_targets(&c.snapshot(), Some(PrefabId::from_raw(1)), vec![])
+        .unwrap();
+    select(&mut c, 0, SelectionMode::Replace);
+    select(&mut c, 1, SelectionMode::Add);
+    let bytes = c.store().encode().unwrap();
+    let history = c.history_depths();
+    let token = c.snapshot();
+    let untouched = c
+        .store()
+        .instance(PrefabInstanceId::from_raw(3))
+        .unwrap()
+        .clone();
+    send(&mut c, "prefab:review-apply").unwrap();
+    let review = c.build().unwrap();
+    all_bindings_painted(&review);
+    let pins = review.apply_review().unwrap();
+    assert_eq!(pins.len(), 2);
+    assert_eq!(pins[0].owner, asset(1));
+    assert_eq!(pins[1].owner, asset(2));
+    assert!(!review.apply_review_blocked());
+    assert!(find(review.element(), "prefab:confirm-apply").is_some());
+    send(&mut c, "prefab:cancel-apply").unwrap();
+    assert!(c.build().unwrap().apply_review().is_none());
+    assert_eq!(c.store().encode().unwrap(), bytes);
+    assert_eq!(c.history_depths(), history);
+    assert!(c.matches_snapshot(&token));
+    assert_eq!(
+        c.handle_event(&review, "prefab:confirm-apply", &UiEvent::Activate),
+        Err(Error::StaleView)
+    );
+    send(&mut c, "prefab:review-apply").unwrap();
+    send(&mut c, "prefab:confirm-apply").unwrap();
+    assert_eq!(c.history_depths().0, history.0 + 1);
+    assert!(c.build().unwrap().apply_review().is_none());
+    assert_eq!(c.store().layer(asset(2)).unwrap().overrides.len(), 1);
+    assert_eq!(
+        read(&c, asset(2), &property("field0002")),
+        Some(PrefabValue::Signed(600))
+    );
+    assert_eq!(
+        read(&c, instance(3), &property("field0000")),
+        Some(PrefabValue::Signed(700))
+    );
+    assert!(Arc::ptr_eq(
+        &untouched,
+        c.store().instance(PrefabInstanceId::from_raw(3)).unwrap()
+    ));
+    assert!(c.store().layer(instance(1)).unwrap().overrides.is_empty());
+    for owner in [asset(1), asset(2), instance(1), instance(2)] {
+        assert_eq!(
+            read(&c, owner, &property("field0000")),
+            Some(PrefabValue::Signed(80))
+        );
+        assert_eq!(
+            read(&c, owner, &property("field0001")),
+            Some(PrefabValue::Signed(90))
+        );
+    }
+    send(&mut c, "prefab:undo").unwrap();
+    assert_eq!(
+        read(&c, asset(1), &property("field0000")),
+        Some(PrefabValue::Signed(400))
+    );
+    assert_eq!(
+        read(&c, asset(2), &property("field0001")),
+        Some(PrefabValue::Signed(500))
+    );
+    assert_eq!(c.store().layer(instance(1)).unwrap().overrides.len(), 2);
+    send(&mut c, "prefab:redo").unwrap();
+    assert_eq!(
+        read(&c, instance(2), &property("field0001")),
+        Some(PrefabValue::Signed(90))
+    );
+}
+
+#[test]
+fn review_preserves_broader_and_narrower_pins_and_enforces_materialization_budget() {
+    for broad_ancestor in [true, false] {
+        let mut s = store(2);
+        let mut root = property("field0000");
+        root.fields.clear();
+        let whole = PrefabOverride::Set(Arc::new(PrefabValue::Object(BTreeMap::from([
+            ("field0000".into(), PrefabValue::Signed(700)),
+            ("field0001".into(), PrefabValue::Signed(800)),
+        ]))));
+        let edits = if broad_ancestor {
+            vec![
+                PrefabEdit::Override {
+                    owner: asset(2),
+                    property: root,
+                    value: whole,
+                },
+                pin(instance(1), property("field0000"), 99),
+            ]
+        } else {
+            vec![
+                pin(asset(1), property("field0000"), 44),
+                PrefabEdit::Override {
+                    owner: instance(1),
+                    property: root,
+                    value: whole,
+                },
+            ]
+        };
+        s.transact(s.revision(), &edits).unwrap();
+        let mut c = Controller::new(s, instance(1), PrefabPanelLimits::default()).unwrap();
+        c.configure_targets(&c.snapshot(), Some(PrefabId::from_raw(1)), vec![])
+            .unwrap();
+        select(&mut c, 0, SelectionMode::Replace);
+        let bytes = c.store().encode().unwrap();
+        send(&mut c, "prefab:review-apply").unwrap();
+        let review = c.build().unwrap();
+        assert_eq!(review.apply_review().unwrap().len(), 1);
+        assert!(review.apply_review_blocked());
+        assert_eq!(
+            c.handle_event(&review, "prefab:confirm-apply", &UiEvent::Activate),
+            Err(Error::UnboundEvent)
+        );
+        assert_eq!(c.apply(A::ConfirmApplyReview), Err(Error::Target));
+        assert_eq!(c.store().encode().unwrap(), bytes);
+        assert_eq!(c.history_depths(), (0, 0));
+    }
+    let mut s = store(1);
+    s.transact(
+        s.revision(),
+        &[
+            pin(asset(1), property("field0000"), 20),
+            pin(asset(2), property("field0000"), 30),
+            pin(instance(1), property("field0000"), 40),
+        ],
+    )
+    .unwrap();
+    let mut c = Controller::new(
+        s,
+        instance(1),
+        PrefabPanelLimits {
+            selection: 1,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    c.configure_targets(&c.snapshot(), Some(PrefabId::from_raw(1)), vec![])
+        .unwrap();
+    select(&mut c, 0, SelectionMode::Replace);
+    let view = c.build().unwrap();
+    assert_eq!(
+        c.handle_event(&view, "prefab:review-apply", &UiEvent::Activate),
+        Err(Error::Capacity)
+    );
+    assert!(c.build().unwrap().apply_review().is_none());
+    assert_eq!(c.history_depths(), (0, 0));
+    c.handle_event(&view, "prefab:revert", &UiEvent::Activate)
+        .unwrap();
+}
+
+#[test]
+fn review_expanded_edit_budget_rejects_without_model_history_or_view_publication() {
+    let mut s = controller(instance(1)).into_store();
+    s.transact(s.revision(), &[pin(asset(2), property("field0000"), 55)])
+        .unwrap();
+    let mut limits = s.limits();
+    limits.max_edits = 2;
+    let s = PrefabStore::decode(&s.encode().unwrap(), limits).unwrap();
+    let mut c = Controller::new(s, instance(1), Default::default()).unwrap();
+    c.configure_targets(&c.snapshot(), Some(PrefabId::from_raw(1)), vec![])
+        .unwrap();
+    select(&mut c, 0, SelectionMode::Replace);
+    select(&mut c, 1, SelectionMode::Add);
+    let token = c.snapshot();
+    let bytes = c.store().encode().unwrap();
+    let view = c.build().unwrap();
+    // Two source applies plus one intermediate revert exceeds the real budget.
+    assert_eq!(
+        c.handle_event(&view, "prefab:review-apply", &UiEvent::Activate),
+        Err(Error::Capacity)
+    );
+    assert_eq!(c.store().encode().unwrap(), bytes);
+    assert_eq!(c.history_depths(), (0, 0));
+    assert!(c.matches_snapshot(&token));
+    assert!(c.build().unwrap().apply_review().is_none());
+    c.handle_event(&view, "prefab:revert", &UiEvent::Activate)
+        .unwrap();
+}
+
+#[test]
+fn failed_review_commit_restores_intervening_pin_and_keeps_review_current() {
+    let mut s = store(1);
+    let p = property("introduced");
+    s.transact(
+        s.revision(),
+        &[
+            pin(asset(2), p.clone(), 500),
+            PrefabEdit::Override {
+                owner: instance(1),
+                property: p.clone(),
+                value: PrefabOverride::Remove,
+            },
+        ],
+    )
+    .unwrap();
+    let mut c = Controller::new(s, instance(1), PrefabPanelLimits::default()).unwrap();
+    c.configure_targets(&c.snapshot(), Some(PrefabId::from_raw(1)), vec![])
+        .unwrap();
+    select(&mut c, 0, SelectionMode::Replace);
+    send(&mut c, "prefab:review-apply").unwrap();
+    let view = c.build().unwrap();
+    let bytes = c.store().encode().unwrap();
+    let token = c.snapshot();
+    assert!(matches!(
+        c.handle_event(&view, "prefab:confirm-apply", &UiEvent::Activate),
+        Err(Error::Command(_))
+    ));
+    // Revert of the intervening Set was staged before the invalid base Remove;
+    // the actual kernel transaction must restore all authored records.
+    assert_eq!(c.store().encode().unwrap(), bytes);
+    assert_eq!(c.history_depths(), (0, 0));
+    assert!(c.matches_snapshot(&token));
+    assert_eq!(read(&c, asset(2), &p), Some(PrefabValue::Signed(500)));
+    assert!(c.build().unwrap().apply_review().is_some());
+    c.handle_event(&view, "prefab:cancel-apply", &UiEvent::Activate)
+        .unwrap();
+}
+
+#[test]
+fn review_does_not_survive_selection_configuration_or_model_changes() {
+    let mut c = controller(instance(1));
+    c.configure_targets(&c.snapshot(), Some(PrefabId::from_raw(1)), vec![])
+        .unwrap();
+    select(&mut c, 0, SelectionMode::Replace);
+    send(&mut c, "prefab:review-apply").unwrap();
+    assert!(c.build().unwrap().apply_review().unwrap().is_empty());
+    let view = c.build().unwrap();
+    select(&mut c, 1, SelectionMode::Replace);
+    assert!(c.build().unwrap().apply_review().is_none());
+    assert_eq!(
+        c.handle_event(&view, "prefab:confirm-apply", &UiEvent::Activate),
+        Err(Error::StaleView)
+    );
+    send(&mut c, "prefab:review-apply").unwrap();
+    c.configure_targets(&c.snapshot(), Some(PrefabId::from_raw(2)), vec![])
+        .unwrap();
+    assert!(c.build().unwrap().apply_review().is_none());
+    send(&mut c, "prefab:review-apply").unwrap();
+    c.execute(
+        &c.snapshot(),
+        vec![pin(instance(2), property("field0001"), 700)],
+    )
+    .unwrap();
+    assert!(c.build().unwrap().apply_review().is_none());
+    assert_eq!(c.apply(A::ConfirmApplyReview), Err(Error::Target));
+}
+
+#[test]
+fn off_page_review_proposals_are_shared_painted_and_confirmed_via_retained_controls() {
+    let mut c = Controller::new(
+        controller(instance(1)).into_store(),
+        instance(1),
+        PrefabPanelLimits {
+            rows: 1,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    c.configure_targets(&c.snapshot(), Some(PrefabId::from_raw(1)), vec![])
+        .unwrap();
+    select(&mut c, 0, SelectionMode::Replace);
+    send(&mut c, "prefab:next").unwrap();
+    select(&mut c, 0, SelectionMode::Add);
+    send(&mut c, "prefab:review-apply").unwrap();
+    let view = c.build().unwrap();
+    assert_eq!(view.rows().len(), 1);
+    let proposed = view.apply_proposals().unwrap();
+    assert_eq!(proposed.len(), 2);
+    for row in proposed {
+        assert_eq!(row.owner, instance(1));
+        assert!(find(view.element(), &row.key).is_some());
+        let PrefabOverride::Set(value) = &row.value else {
+            panic!("actual shared source Set");
+        };
+        let PrefabOverride::Set(stored) =
+            &c.store().layer(instance(1)).unwrap().overrides[&row.property]
+        else {
+            panic!("stored source Set");
+        };
+        assert!(Arc::ptr_eq(value, stored));
+    }
+    let mut ui = Ui::new(RetainedScene::new());
+    ui.mount(view.element());
+    ui.compute_layout(Size::new(
+        AvailableSpace::Definite(1100.),
+        AvailableSpace::MaxContent,
+    ));
+    let mut rects = Vec::new();
+    ui.backend().visit_layout(|_, rect| rects.push(rect));
+    let mut names = Vec::new();
+    element_keys(view.element(), &mut names);
+    assert_eq!(names.len(), rects.len());
+    let confirm = names
+        .iter()
+        .position(|key| key.as_deref() == Some("prefab:confirm-apply"))
+        .unwrap();
+    let rect = rects[confirm];
+    assert!(rect.size.width > 0. && rect.size.height >= 28.);
+    let image = rasterize(&ui.backend().to_draw_list(), 1100, 1600);
+    let pixel = image.pixel((rect.left() + 770.) as u32, (rect.top() + 20.) as u32);
+    assert!((pixel[2] - 0.22).abs() < 0.01, "enabled confirm {pixel:?}");
+    c.handle_event(&view, "prefab:confirm-apply", &UiEvent::Activate)
+        .unwrap();
+    assert_eq!(c.history_depths(), (1, 0));
+    assert!(c.store().layer(instance(1)).unwrap().overrides.is_empty());
+    assert_eq!(
+        read(&c, asset(1), &property("field0000")),
+        Some(PrefabValue::Signed(80))
     );
 }
 
@@ -585,17 +923,8 @@ fn actual_retained_layout_raster_and_reconciliation_follow_real_selection() {
     ));
     let mut rects = Vec::new();
     ui.backend().visit_layout(|_, rect| rects.push(rect));
-    fn keys(e: &Element, out: &mut Vec<Option<String>>) {
-        out.push(match e.explicit_key() {
-            Some(Key::Str(k)) => Some(k.to_string()),
-            _ => None,
-        });
-        for child in e.child_elements() {
-            keys(child, out);
-        }
-    }
     let mut names = Vec::new();
-    keys(view.element(), &mut names);
+    element_keys(view.element(), &mut names);
     assert_eq!(names.len(), rects.len());
     let rects: BTreeMap<_, _> = names
         .into_iter()
