@@ -177,7 +177,7 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
             access,
             matched: SpinLock::new(MatchedArchetypes::new(
                 world.archetype_generation(),
-                world.archetypes().eviction_generation(),
+                world.archetypes().evicted_ids().len(),
             )),
             dirty_tracker,
             dirty_sources,
@@ -364,7 +364,7 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
         // across them risks a re-entrant deadlock, and a panic mid-scan would
         // otherwise leave a half-updated cache that duplicates ids on retry.
         let generation = world.archetype_generation();
-        let eviction_generation = world.archetypes().eviction_generation();
+        let evicted_ids = world.archetypes().evicted_ids();
         let checked = {
             let mut cache = self.matched.lock();
             // A wholesale archetype-registry replacement (snapshot restore)
@@ -374,19 +374,23 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
                 cache.ids = Arc::new(Vec::new());
                 cache.checked = 0;
                 cache.generation = generation;
-                cache.eviction_generation = eviction_generation;
-            } else if cache.eviction_generation != eviction_generation {
-                // Shared-value eviction leaves stable registry tombstones, but
-                // they no longer need to occupy every warmed query's match
-                // snapshot. Compact once per eviction revision. `Arc::make_mut`
-                // preserves snapshots already held by an active iterator.
-                Arc::make_mut(&mut cache.ids).retain(|id| {
-                    world
-                        .archetypes()
-                        .get(*id)
-                        .is_some_and(|archetype| !archetype.is_evicted())
-                });
-                cache.eviction_generation = eviction_generation;
+                cache.eviction_checked = evicted_ids.len();
+            } else if cache.eviction_checked < evicted_ids.len() {
+                // Unrelated shared-value churn should not scan/copy this query's
+                // whole matched-id snapshot. Probe only newly evicted IDs first;
+                // compact iff one actually belongs to the cached match set.
+                let affected = evicted_ids[cache.eviction_checked..]
+                    .iter()
+                    .any(|id| cache.ids.binary_search(id).is_ok());
+                if affected {
+                    Arc::make_mut(&mut cache.ids).retain(|id| {
+                        world
+                            .archetypes()
+                            .get(*id)
+                            .is_some_and(|archetype| !archetype.is_evicted())
+                    });
+                }
+                cache.eviction_checked = evicted_ids.len();
             }
             cache.checked
         };
@@ -413,7 +417,7 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
         // its (identical, deterministic) result and drop ours.
         let mut cache = self.matched.lock();
         if cache.generation == generation
-            && cache.eviction_generation == eviction_generation
+            && cache.eviction_checked == evicted_ids.len()
             && cache.checked == checked
         {
             if !appended.is_empty() {

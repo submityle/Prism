@@ -23,10 +23,10 @@ use crate::archetype::ArchetypeId;
 /// Archetype component sets are immutable and archetype ids remain stable
 /// (except by a wholesale registry replacement on restore), so a match decision
 /// for a live [`ArchetypeId`] is permanent within a structural generation.
-/// Permanently evicted shared-value tombstones are compacted from `ids` when
-/// the eviction revision changes. The cache records how many archetypes have
-/// been examined (`checked`), the ids that matched (`ids`), and the structural
-/// and eviction generations they were computed against.
+/// Permanently evicted shared-value tombstones are compacted from `ids` only
+/// when an eviction event intersects the cached matches. The cache records how
+/// many archetypes have been examined (`checked`), the ids that matched
+/// (`ids`), and its structural generation and eviction-log cursor.
 pub(crate) struct MatchedArchetypes {
     /// Immutable, shareable ids of every non-evicted archetype matched so far,
     /// in ascending id order. Query iterators retain this snapshot without
@@ -40,20 +40,20 @@ pub(crate) struct MatchedArchetypes {
     /// The `World::archetype_generation` these `ids`/`checked` were computed
     /// against; a mismatch clears the cache and re-scans from scratch.
     pub(crate) generation: u64,
-    /// `Archetypes::eviction_generation` the cache has compacted against.
-    /// Unlike a structural-generation reset, an eviction only removes stable
-    /// ids from this snapshot; the scan cursor remains valid.
-    pub(crate) eviction_generation: u64,
+    /// Number of `Archetypes::evicted_ids` events already checked. Unlike a
+    /// structural-generation reset, an eviction only removes stable ids from
+    /// this snapshot; the archetype scan cursor remains valid.
+    pub(crate) eviction_checked: usize,
 }
 
 impl MatchedArchetypes {
     /// An empty cache stamped with the world's structural `generation`.
-    pub(crate) fn new(generation: u64, eviction_generation: u64) -> Self {
+    pub(crate) fn new(generation: u64, eviction_checked: usize) -> Self {
         Self {
             ids: Arc::new(Vec::new()),
             checked: 0,
             generation,
-            eviction_generation,
+            eviction_checked,
         }
     }
 }

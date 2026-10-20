@@ -20,6 +20,7 @@
 //! shared values (including a shared-only entity), and the construction-time
 //! rejection of mutable / change-detecting access.
 
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use crate::archetype::ArchetypeId;
@@ -566,6 +567,31 @@ fn evicted_shared_archetypes_reclaim_table_component_postings() {
         assert!(!compacted.contains(&first_archetype));
         assert!(!compacted.contains(&second_archetype));
         assert_eq!(state.iter(&w).count(), 1, "cached tombstones yield no rows");
+    }
+}
+
+#[test]
+fn unrelated_shared_evictions_preserve_warmed_query_snapshot() {
+    let mut w = World::new();
+    w.spawn((Velocity(-1),));
+    let state = w.query::<&Velocity>();
+    let initial = state.matched_archetypes(&w);
+    assert_eq!(initial.len(), 1);
+
+    for value in 0..64_i32 {
+        let transient = w.spawn((Position(value), BatchKey(value as u32)));
+        // Settle the newly-created archetype before its shared value is evicted,
+        // so the next refresh measures only eviction-cache handling.
+        let before_eviction = state.matched_archetypes(&w);
+        assert!(Arc::ptr_eq(&initial, &before_eviction));
+
+        assert!(w.despawn(transient));
+        let after_eviction = state.matched_archetypes(&w);
+        assert!(
+            Arc::ptr_eq(&initial, &after_eviction),
+            "evictions outside this query's match set must not scan/copy its cached IDs"
+        );
+        assert_eq!(state.iter(&w).count(), 1);
     }
 }
 
