@@ -379,10 +379,10 @@ fn painted_save_intent_round_trips_real_file_and_stale_completion_preserves_dirt
     read.apply(A::Load).unwrap();
     let ticket = read.take_intent().unwrap();
     let token = read.begin_residency(&ticket).unwrap();
-    let request = read.world().load_request(token).unwrap();
+    let request = read.world().load_request(token.token()).unwrap();
     driver.submit_load(request).unwrap();
     let done = block_on(poll_fn(|cx| driver.poll(cx))).unwrap();
-    assert!(read.apply_load_completion(done).unwrap());
+    assert!(read.apply_load_completion(&token, done).unwrap());
     assert_eq!(read.world().payload(cell(0, 0)), Some(&b"snapshot A"[..]));
     wait_idle(|| provider.outstanding_operations());
 }
@@ -451,6 +451,13 @@ fn actor_move_expired_receipt_retains_dirty_until_explicit_leased_snapshot_resto
     .unwrap();
     c.commit_transaction(&pending, &receipt).unwrap();
     assert_eq!(c.world().actor_payload(actor), Some(&b"actor original"[..]));
+    assert_eq!(c.project().actor_cell(actor), Some(cell(0, 0)));
+    // Sparse policy history must survive unrelated real OFPA owner changes.
+    c.apply(A::LayerVisible {
+        id: DataLayerId::new(701),
+        visible: false,
+    })
+    .unwrap();
 
     let snapshot = block_on(provider.load_snapshot(Duration::from_secs(5)).unwrap()).unwrap();
     c.apply(A::CrossCell).unwrap();
@@ -472,6 +479,7 @@ fn actor_move_expired_receipt_retains_dirty_until_explicit_leased_snapshot_resto
     .unwrap();
     c.set_time(60).unwrap();
     assert!(c.commit_transaction(&pending, &receipt).is_err());
+    assert_eq!(c.project().actor_cell(actor), Some(cell(0, 0)));
     assert!(c.world().model().cell(cell(0, 0)).unwrap().is_dirty());
     assert!(c.world().model().cell(cell(1, 0)).unwrap().is_dirty());
     assert_eq!(
@@ -496,6 +504,11 @@ fn actor_move_expired_receipt_retains_dirty_until_explicit_leased_snapshot_resto
         c.world().actor_record(actor).unwrap().identity().cell(),
         cell(1, 0)
     );
+    assert_eq!(c.world().actor_payload(actor), Some(&b"actor moved"[..]));
+    assert_eq!(c.project().actor_cell(actor), Some(cell(1, 0)));
+    c.apply(A::ProjectUndo).unwrap();
+    assert!(c.world().model().is_cell_visible(cell(0, 0)));
+    assert_eq!(c.project().actor_cell(actor), Some(cell(1, 0)));
     assert_eq!(c.world().actor_payload(actor), Some(&b"actor moved"[..]));
     assert!(!c.world().model().cell(cell(0, 0)).unwrap().is_dirty());
     assert!(!c.world().model().cell(cell(1, 0)).unwrap().is_dirty());
