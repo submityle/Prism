@@ -225,6 +225,34 @@ fn forward_dirty_window_uses_column_journal_without_scanning_all_archetypes() {
 }
 
 #[test]
+fn repeated_writes_deduplicate_dirty_chunk_candidates_before_sorting() {
+    let mut w = World::new();
+    let entity = w.spawn(Big::new(10));
+    advance_frame(&mut w);
+
+    let state = w.query::<&Big>();
+    let last_run = w.change_tick();
+    let this_run = w.change_tick();
+    let baseline = state.dirty_chunks_with_stats(&w, last_run, this_run);
+    assert!(baseline.stats.journal_gap);
+
+    let last_run = w.change_tick();
+    w.increment_change_tick();
+    let this_run = w.change_tick();
+    const WRITES: usize = 4096;
+    for _ in 0..WRITES {
+        w.get_mut::<Big>(entity).unwrap().tag += 1;
+    }
+
+    let report = state.dirty_chunks_with_stats(&w, last_run, this_run);
+    assert!(!report.stats.journal_gap);
+    assert_eq!(report.stats.journal_events, WRITES);
+    assert_eq!(report.stats.candidate_chunk_marks, WRITES);
+    assert_eq!(report.stats.merged_candidates, 1);
+    assert_eq!(report.chunks.len(), 1);
+}
+
+#[test]
 fn dirty_chunks_follow_an_archetype_migration() {
     #[derive(Clone, Copy)]
     struct Tag;

@@ -12,10 +12,11 @@
 //! (design §5.3, §9).
 
 use alloc::boxed::Box;
-use alloc::collections::VecDeque;
+use alloc::collections::{BinaryHeap, VecDeque};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::cell::UnsafeCell;
+use core::cmp::Reverse;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::collections::HashMap;
@@ -273,34 +274,49 @@ impl ColumnJournal {
         }
 
         let first_retained = state.revision - state.events.len() as u64;
-        let mut revisions = Vec::new();
         let mut records_scanned = 0;
+        let mut sources = Vec::with_capacity(component_ids.len() + 1);
         for component in component_ids {
             if let Some(index) = state.component_events.get(component) {
                 let start = lower_bound_revision(index, cursor.revision);
                 records_scanned += index.len() - start;
-                for position in start..index.len() {
-                    revisions.push(index[position]);
-                }
+                sources.push((index, start));
             }
         }
         let structural_start = lower_bound_revision(&state.structural_events, cursor.revision);
         records_scanned += state.structural_events.len() - structural_start;
-        for position in structural_start..state.structural_events.len() {
-            revisions.push(state.structural_events[position]);
+        if structural_start < state.structural_events.len() {
+            sources.push((&state.structural_events, structural_start));
         }
-        revisions.sort_unstable();
-        revisions.dedup();
-        let events = revisions
-            .into_iter()
-            .map(|revision| {
-                // `first_retained` is the revision immediately before the
-                // first retained event; convert event revision to zero-based
-                // VecDeque position.
-                let offset = (revision - first_retained - 1) as usize;
-                state.events[offset]
-            })
-            .collect();
+
+        // Every source is already strictly ordered by revision, and sources
+        // are disjoint (one event has either one component or is structural).
+        // Merge the selected streams directly instead of materializing all
+        // revisions and sorting them. This keeps the filtered read at
+        // O(k log m), where k is the selected event count and m is the number
+        // of selected sources, rather than O(k log k). The output is copied
+        // while the journal lock is held so eviction cannot invalidate an
+        // event's offset before it is materialized.
+        let mut heap = BinaryHeap::with_capacity(sources.len());
+        for (source, (revisions, position)) in sources.iter().enumerate() {
+            if let Some(&revision) = revisions.get(*position) {
+                heap.push(Reverse((revision, source)));
+            }
+        }
+        let mut events = Vec::with_capacity(records_scanned);
+        while let Some(Reverse((revision, source))) = heap.pop() {
+            // `first_retained` is the revision immediately before the first
+            // retained event; convert event revision to zero-based deque
+            // position.
+            let offset = (revision - first_retained - 1) as usize;
+            events.push(state.events[offset]);
+
+            let (revisions, position) = &mut sources[source];
+            *position += 1;
+            if let Some(&next) = revisions.get(*position) {
+                heap.push(Reverse((next, source)));
+            }
+        }
         FilteredColumnChanges {
             cursor: current,
             gap: false,
@@ -807,6 +823,37 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![Some(0), Some(2), Some(0), Some(3)]
         );
+    }
+
+    #[test]
+    fn filtered_column_journal_k_way_merge_preserves_high_source_order() {
+        let journal = ColumnJournal::new();
+        let selected: Vec<_> = (0..32).map(|id| ComponentId::new(id + 1)).collect();
+        let unrelated = ComponentId::new(10_000);
+        let baseline = journal.since(None).cursor;
+
+        for round in 0..4 {
+            for (source, &component) in selected.iter().enumerate() {
+                journal.record(component_event(component, round * 32 + source));
+            }
+            journal.record(component_event(unrelated, round));
+            if round % 2 == 0 {
+                journal.record(column_event());
+            }
+        }
+
+        let full = journal.since(Some(baseline));
+        let filtered = journal.since_components(Some(baseline), &selected);
+        let expected: Vec<_> = full
+            .events
+            .iter()
+            .copied()
+            .filter(|event| event.component.is_none_or(|id| selected.contains(&id)))
+            .collect();
+
+        assert!(!full.gap && !filtered.gap);
+        assert_eq!(filtered.events, expected);
+        assert_eq!(filtered.records_scanned, selected.len() * 4 + 2);
     }
 
     #[test]

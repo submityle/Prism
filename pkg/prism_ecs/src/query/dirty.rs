@@ -25,6 +25,7 @@ use alloc::collections::{BTreeMap, BinaryHeap};
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cmp::Reverse;
+use hashbrown::HashSet;
 
 use crate::archetype::ArchetypeId;
 use crate::change::Tick;
@@ -88,6 +89,8 @@ pub struct DirtyChunkStats {
     /// Number of distinct candidate archetypes checked against query data and
     /// filters after journal and sparse-index candidates are grouped.
     pub candidate_archetype_checks: usize,
+    /// Number of chunk candidates offered before per-archetype deduplication.
+    pub candidate_chunk_marks: usize,
     /// Whether this request had to use the conservative path because the
     /// retained table journal could not establish a complete baseline.
     pub journal_gap: bool,
@@ -104,7 +107,7 @@ pub struct DirtyChunkReport {
 
 #[derive(Default)]
 struct DirtyChunkCandidates {
-    chunks: Vec<usize>,
+    chunks: HashSet<usize>,
     journal_events: usize,
 }
 
@@ -228,16 +231,15 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
 
         let mut candidates: BTreeMap<ArchetypeId, DirtyChunkCandidates> = BTreeMap::new();
         for (archetype, rows) in sparse_chunks {
-            candidates
-                .entry(*archetype)
-                .or_default()
-                .chunks
-                .extend(rows.iter().map(|row| {
-                    row / world
-                        .archetypes()
-                        .get(*archetype)
-                        .map_or(1, |a| a.table().rows_per_chunk())
-                }));
+            let rows_per_chunk = world
+                .archetypes()
+                .get(*archetype)
+                .map_or(1, |a| a.table().rows_per_chunk());
+            let candidate = candidates.entry(*archetype).or_default();
+            for &row in rows {
+                report.stats.candidate_chunk_marks += 1;
+                candidate.chunks.insert(row / rows_per_chunk);
+            }
         }
         for change in changes.events {
             if let Some(component) = change.component
@@ -255,13 +257,9 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
                 continue;
             }
             let candidate = candidates.entry(change.archetype).or_default();
-            candidate.chunks.push(chunk);
+            report.stats.candidate_chunk_marks += 1;
+            candidate.chunks.insert(chunk);
             candidate.journal_events += 1;
-        }
-
-        for candidate in candidates.values_mut() {
-            candidate.chunks.sort_unstable();
-            candidate.chunks.dedup();
         }
 
         for (archetype_id, candidate) in candidates {
@@ -288,7 +286,12 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
             };
             let rpc = table.rows_per_chunk();
             let len = table.len();
-            for chunk in candidate.chunks {
+            // Hash iteration is normalized before publishing results, keeping
+            // output deterministic while deduplicating repeated writes in
+            // expected O(1) per event instead of sorting every duplicate.
+            let mut chunks: Vec<_> = candidate.chunks.into_iter().collect();
+            chunks.sort_unstable();
+            for chunk in chunks {
                 report.stats.merged_candidates += 1;
                 if !F::filter_chunk(filter_fetch, chunk) {
                     report.stats.filter_rejected += 1;
