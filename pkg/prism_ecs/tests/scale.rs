@@ -874,6 +874,7 @@ mod perf_gate {
         {
             const WORLD_CHUNKS: usize = 4096;
             const CHANGED_CHUNKS: usize = 1024;
+            const WRITES_PER_CHUNK: usize = 4;
             const ROW_BYTES: usize = 512;
             const ROWS_PER_CHUNK: usize = 32;
             let mut world = World::new();
@@ -908,39 +909,42 @@ mod perf_gate {
             world.increment_change_tick();
             let this_run = world.change_tick();
             for chunk in 0..CHANGED_CHUNKS {
-                world
-                    .get_mut::<DirtyCell>(entities[chunk * rows_per_chunk])
-                    .unwrap()
-                    .value += 1;
+                for _ in 0..WRITES_PER_CHUNK {
+                    world
+                        .get_mut::<DirtyCell>(entities[chunk * rows_per_chunk])
+                        .unwrap()
+                        .value += 1;
+                }
             }
             let report = query.dirty_chunks_with_stats(&world, last_run, this_run);
-            assert_eq!(report.stats.journal_records_scanned, CHANGED_CHUNKS);
-            assert_eq!(report.stats.candidate_chunk_marks, CHANGED_CHUNKS);
+            let writes = CHANGED_CHUNKS * WRITES_PER_CHUNK;
+            assert_eq!(report.stats.journal_records_scanned, writes);
+            assert_eq!(report.stats.candidate_chunk_marks, writes);
             assert_eq!(report.stats.reported_chunks, CHANGED_CHUNKS);
             assert_eq!(report.stats.matched_archetypes, 1);
             assert_eq!(report.stats.summaries_tested, 0);
             emit_complexity(
                 "dirty_journal_records_scanned",
                 WORLD_CHUNKS * ROWS_PER_CHUNK,
-                CHANGED_CHUNKS,
+                writes,
                 report.stats.journal_records_scanned,
             );
             emit_complexity(
                 "dirty_candidate_chunk_marks",
                 WORLD_CHUNKS * ROWS_PER_CHUNK,
-                CHANGED_CHUNKS,
+                writes,
                 report.stats.candidate_chunk_marks,
             );
             emit_complexity(
                 "dirty_index_summaries_tested",
                 WORLD_CHUNKS * ROWS_PER_CHUNK,
-                CHANGED_CHUNKS,
+                writes,
                 report.stats.summaries_tested,
             );
             emit_complexity(
                 "dirty_reported_chunks",
                 WORLD_CHUNKS * ROWS_PER_CHUNK,
-                CHANGED_CHUNKS,
+                writes,
                 report.stats.reported_chunks,
             );
         }

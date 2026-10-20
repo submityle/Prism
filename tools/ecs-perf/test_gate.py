@@ -63,10 +63,10 @@ def portable_fixture(kind="portable-measurement"):
         {"metric": "dirty_chunks_output", "world_units": 16384, "changed_units": 3, "value": 3},
         {"metric": "changed_scan_rows", "world_units": 256, "changed_units": 3, "value": 3},
         {"metric": "changed_scan_rows", "world_units": 16384, "changed_units": 3, "value": 3},
-        {"metric": "dirty_journal_records_scanned", "world_units": 131072, "changed_units": 1024, "value": 1024},
-        {"metric": "dirty_candidate_chunk_marks", "world_units": 131072, "changed_units": 1024, "value": 1024},
-        {"metric": "dirty_index_summaries_tested", "world_units": 131072, "changed_units": 1024, "value": 0},
-        {"metric": "dirty_reported_chunks", "world_units": 131072, "changed_units": 1024, "value": 1024},
+        {"metric": "dirty_journal_records_scanned", "world_units": 131072, "changed_units": 4096, "value": 4096},
+        {"metric": "dirty_candidate_chunk_marks", "world_units": 131072, "changed_units": 4096, "value": 4096},
+        {"metric": "dirty_index_summaries_tested", "world_units": 131072, "changed_units": 4096, "value": 0},
+        {"metric": "dirty_reported_chunks", "world_units": 131072, "changed_units": 4096, "value": 1024},
     ]
     timing = {
         metric: [100 + index for index in range(gate.PORTABLE_SAMPLES)]

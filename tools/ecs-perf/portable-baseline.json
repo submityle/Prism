@@ -15,10 +15,10 @@
       "world_units": 16384
     },
     {
-      "changed_units": 1024,
+      "changed_units": 4096,
       "metric": "dirty_candidate_chunk_marks",
       "tolerance_abs": 0,
-      "value": 1024,
+      "value": 4096,
       "world_units": 131072
     },
     {
@@ -36,21 +36,21 @@
       "world_units": 16384
     },
     {
-      "changed_units": 1024,
+      "changed_units": 4096,
       "metric": "dirty_index_summaries_tested",
       "tolerance_abs": 0,
       "value": 0,
       "world_units": 131072
     },
     {
-      "changed_units": 1024,
+      "changed_units": 4096,
       "metric": "dirty_journal_records_scanned",
       "tolerance_abs": 0,
-      "value": 1024,
+      "value": 4096,
       "world_units": 131072
     },
     {
-      "changed_units": 1024,
+      "changed_units": 4096,
       "metric": "dirty_reported_chunks",
       "tolerance_abs": 0,
       "value": 1024,
@@ -79,7 +79,7 @@
     }
   ],
   "contract": {
-    "benchmark_sha256": "14c2ffad6878f3113daa0dc48eeb6ccf547660c062f906e9fea5382810d3ce8a",
+    "benchmark_sha256": "8ee747924fe87d2294cf21b6fc102788c6d0c7fd0d99b6a65ff1e350c3e26f23",
     "complexity_metrics": {
       "changed_scan_rows": 2,
       "dirty_candidate_chunk_marks": 1,
@@ -102,53 +102,53 @@
     },
     "timing_protocol": "PRISM_ECS_TIMING_V1"
   },
-  "contract_sha256": "d86bdd6d2c92f0cabe43e552ffd4bd27dcc55ec37cafd0da9598887fa01c468e",
+  "contract_sha256": "2336f65a1d5aba91b13ea6d2317e27a2a86adb10b3cb751e9c72e2e4f217ed7a",
   "kind": "portable-baseline",
   "schema": 1,
   "timing": {
     "changed_scan_16384": [
-      1708,
-      1667,
-      1667,
-      1667,
-      1667,
-      1667,
-      1667,
-      1625,
-      1666
+      2084,
+      2084,
+      2083,
+      2041,
+      2083,
+      2083,
+      2084,
+      2083,
+      2041
     ],
     "changed_scan_256": [
+      333,
       250,
-      208,
-      208,
-      209,
-      208,
       292,
-      209,
-      208,
-      208
+      250,
+      250,
+      292,
+      292,
+      291,
+      292
     ],
     "dirty_chunks_16384": [
+      1958,
+      1792,
+      1708,
       1625,
-      1584,
-      1416,
-      1416,
-      2916,
-      2500,
-      1500,
-      1375,
-      1333
+      1625,
+      1667,
+      1667,
+      1625,
+      1584
     ],
     "dirty_chunks_256": [
       417,
-      333,
-      333,
-      292,
-      292,
-      292,
-      292,
-      334,
-      292
+      458,
+      417,
+      416,
+      416,
+      375,
+      375,
+      2125,
+      584
     ]
   }
 }
