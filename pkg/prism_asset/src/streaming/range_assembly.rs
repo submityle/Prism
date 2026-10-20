@@ -96,13 +96,7 @@ impl RangeAssemblyPlan {
         if limits.max_parallel == 0 {
             return Err(RangeAssemblyPlanError::ZeroParallelLimit);
         }
-        let parts: Vec<_> = parts.into_iter().collect();
-        if parts.len() > limits.max_parts {
-            return Err(RangeAssemblyPlanError::TooManyParts {
-                actual: parts.len(),
-                limit: limits.max_parts,
-            });
-        }
+        let parts = collect_range_parts(parts, limits.max_parts)?;
         let mut total_bytes = 0u64;
         for part in &parts {
             let end =
@@ -127,6 +121,9 @@ impl RangeAssemblyPlan {
                     requested: total_bytes,
                     limit: limits.max_bytes,
                 });
+            }
+            if total_bytes > isize::MAX as u64 {
+                return Err(RangeAssemblyPlanError::HostAllocationOverflow { bytes: total_bytes });
             }
         }
         Ok(Self {
@@ -178,6 +175,25 @@ impl RangeAssemblyPlan {
     }
 }
 
+/// Stops after the first excess item, including for infinite iterators. Never
+/// trusts the iterator's size hint as an allocation request.
+pub(crate) fn collect_range_parts(
+    parts: impl IntoIterator<Item = RangePart>,
+    limit: usize,
+) -> Result<Vec<RangePart>, RangeAssemblyPlanError> {
+    let mut result = Vec::new();
+    for part in parts {
+        if result.len() == limit {
+            return Err(RangeAssemblyPlanError::TooManyParts {
+                actual: limit.saturating_add(1),
+                limit,
+            });
+        }
+        result.push(part);
+    }
+    Ok(result)
+}
+
 /// Why a range assembly plan was rejected before I/O.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RangeAssemblyPlanError {
@@ -187,7 +203,7 @@ pub enum RangeAssemblyPlanError {
     ZeroParallelLimit,
     /// The number of physical ranges exceeded the configured limit.
     TooManyParts {
-        /// Number of supplied ranges.
+        /// Number observed before rejecting; iteration stops at the first excess item.
         actual: usize,
         /// Maximum allowed ranges.
         limit: usize,
@@ -216,6 +232,11 @@ pub enum RangeAssemblyPlanError {
         requested: u64,
         /// Maximum allowed bytes.
         limit: u64,
+    },
+    /// The assembled result cannot be represented by the host allocation API.
+    HostAllocationOverflow {
+        /// Requested output size.
+        bytes: u64,
     },
 }
 
@@ -246,6 +267,9 @@ impl fmt::Display for RangeAssemblyPlanError {
                     "range assembly requests {requested} bytes, limit is {limit}"
                 )
             }
+            Self::HostAllocationOverflow { bytes } => {
+                write!(f, "range assembly output size {bytes} is not representable")
+            }
         }
     }
 }
@@ -255,6 +279,11 @@ impl std::error::Error for RangeAssemblyPlanError {}
 /// Why an otherwise valid range assembly failed during I/O.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RangeAssemblyError {
+    /// The output buffer could not be reserved before starting source I/O.
+    AllocationFailed {
+        /// Requested output size.
+        bytes: u64,
+    },
     /// A source read failed.
     Read {
         /// Zero-based range index in the plan.
@@ -283,6 +312,7 @@ pub enum RangeAssemblyError {
 impl fmt::Display for RangeAssemblyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::AllocationFailed { bytes } => write!(f, "cannot reserve {bytes} assembly bytes"),
             Self::Read { part, error } => write!(f, "range part {part} failed: {error}"),
             Self::ShortRead {
                 part,
@@ -330,10 +360,31 @@ pub fn assemble_ranges(
     sources: &AssetSources,
     plan: &RangeAssemblyPlan,
 ) -> Result<Vec<u8>, RangeAssemblyError> {
-    let mut output = Vec::with_capacity(plan.total_bytes as usize);
+    let resolved = resolve_source(sources, plan)?;
+    assemble_ranges_resolved(&resolved, plan)
+}
+
+fn resolve_source(
+    sources: &AssetSources,
+    plan: &RangeAssemblyPlan,
+) -> Result<crate::source::ResolvedAssetRead, RangeAssemblyError> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        sources.resolve_read(plan.path())
+    }))
+    .map_err(|_| RangeAssemblyError::SourcePanicked { part: 0 })?
+    .map_err(|error| RangeAssemblyError::Read { part: 0, error })
+}
+
+pub(crate) fn assemble_ranges_resolved(
+    source: &crate::source::ResolvedAssetRead,
+    plan: &RangeAssemblyPlan,
+) -> Result<Vec<u8>, RangeAssemblyError> {
+    let mut output = reserve_output(plan.total_bytes)?;
     for (index, part) in plan.parts.iter().copied().enumerate() {
         let bytes = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            sources.read_range(plan.path(), part.offset, part.len)
+            source
+                .reader
+                .read_range(&source.path, part.offset, part.len)
         }))
         .map_err(|_| RangeAssemblyError::SourcePanicked { part: index })?
         .map_err(|error| RangeAssemblyError::Read { part: index, error })?;
@@ -346,6 +397,16 @@ pub fn assemble_ranges(
         }
         output.extend_from_slice(&bytes);
     }
+    Ok(output)
+}
+
+fn reserve_output(bytes: u64) -> Result<Vec<u8>, RangeAssemblyError> {
+    let capacity =
+        usize::try_from(bytes).map_err(|_| RangeAssemblyError::AllocationFailed { bytes })?;
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(capacity)
+        .map_err(|_| RangeAssemblyError::AllocationFailed { bytes })?;
     Ok(output)
 }
 
@@ -390,7 +451,11 @@ pub fn assemble_ranges_async(
     let task_cancellation = cancellation.clone();
     let child_pool = pool.clone();
     let task = pool.spawn_async(async move {
-        let mut output = Vec::with_capacity(plan.total_bytes as usize);
+        if task_cancellation.is_cancelled() {
+            return Err(RangeAssemblyError::Cancelled);
+        }
+        let source = resolve_source(&sources, &plan)?;
+        let mut output = reserve_output(plan.total_bytes)?;
         let parallel = plan.limits.max_parallel;
         for (chunk_index, chunk) in plan.parts.chunks(parallel).enumerate() {
             if task_cancellation.is_cancelled() {
@@ -398,8 +463,8 @@ pub fn assemble_ranges_async(
             }
             let mut reads = Vec::with_capacity(chunk.len());
             for (relative, part) in chunk.iter().copied().enumerate() {
-                let sources = sources.clone();
-                let path = plan.path.clone();
+                let reader = Arc::clone(&source.reader);
+                let path = source.path.clone();
                 let cancellation = task_cancellation.clone();
                 let index = chunk_index * parallel;
                 reads.push(child_pool.spawn_async(async move {
@@ -407,7 +472,7 @@ pub fn assemble_ranges_async(
                         return Err(RangeAssemblyError::Cancelled);
                     }
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        sources.read_range(&path, part.offset, part.len)
+                        reader.read_range(&path, part.offset, part.len)
                     }));
                     let bytes = match result {
                         Ok(Ok(bytes)) => bytes,
@@ -505,6 +570,121 @@ mod tests {
             ),
             Err(RangeAssemblyPlanError::ByteBudgetExceeded { .. })
         ));
+    }
+
+    #[test]
+    fn rejects_host_allocation_overflow_before_io() {
+        let bytes = isize::MAX as u64 + 1;
+        assert_eq!(
+            RangeAssemblyPlan::whole(
+                "huge.bin",
+                bytes,
+                RangeAssemblyLimits {
+                    max_bytes: u64::MAX,
+                    ..limits()
+                }
+            ),
+            Err(RangeAssemblyPlanError::HostAllocationOverflow { bytes })
+        );
+    }
+
+    #[test]
+    fn finite_part_budget_stops_an_infinite_iterator() {
+        let mut observed = 0;
+        let parts = core::iter::repeat_with(|| {
+            observed += 1;
+            RangePart::new(0, 0)
+        });
+        assert_eq!(
+            RangeAssemblyPlan::new("payload.bin", 10, parts, limits()),
+            Err(RangeAssemblyPlanError::TooManyParts {
+                actual: 9,
+                limit: 8
+            })
+        );
+        assert_eq!(observed, 9);
+        assert!(matches!(
+            crate::AssetReadPlan::ranges(core::iter::repeat(RangePart::new(0, 0))),
+            Err(RangeAssemblyPlanError::TooManyParts {
+                actual: 257,
+                limit: 256
+            })
+        ));
+    }
+
+    struct PartialOverlay {
+        short_read: bool,
+    }
+
+    impl crate::AssetReader for PartialOverlay {
+        fn read(&self, _: &str) -> Result<Vec<u8>, ReadError> {
+            Err(ReadError::Unsupported)
+        }
+
+        fn metadata(&self, _: &str) -> Result<crate::AssetMeta, ReadError> {
+            Ok(crate::AssetMeta {
+                size: 10,
+                modified_ms: None,
+                is_dir: false,
+            })
+        }
+
+        fn read_range(&self, _: &str, offset: u64, len: u64) -> Result<Vec<u8>, ReadError> {
+            if offset == 0 {
+                Ok(alloc::vec![b'X'; len as usize])
+            } else if self.short_read {
+                Ok(Vec::new())
+            } else {
+                Err(ReadError::NotFound)
+            }
+        }
+    }
+
+    #[test]
+    fn sequential_and_parallel_parts_never_mix_overlay_sources() {
+        let mut sources = source();
+        sources.mount("patch", Arc::new(PartialOverlay { short_read: false }), 10);
+        let plan = RangeAssemblyPlan::new(
+            "payload.bin",
+            10,
+            [RangePart::new(0, 2), RangePart::new(4, 2)],
+            limits(),
+        )
+        .unwrap();
+        let expected = Err(RangeAssemblyError::Read {
+            part: 1,
+            error: ReadError::NotFound,
+        });
+        assert_eq!(assemble_ranges(&sources, &plan), expected);
+        let pool = TaskPool::with_threads(2);
+        assert_eq!(
+            pool.block_on(assemble_ranges_async(sources, plan, pool.clone())),
+            expected
+        );
+    }
+
+    #[test]
+    fn sequential_and_parallel_assembly_discard_partial_short_reads() {
+        let mut sources = source();
+        sources.mount("patch", Arc::new(PartialOverlay { short_read: true }), 10);
+        let plan = RangeAssemblyPlan::new(
+            "payload.bin",
+            10,
+            [RangePart::new(0, 2), RangePart::new(4, 2)],
+            limits(),
+        )
+        .unwrap();
+        let expected = Err(RangeAssemblyError::ShortRead {
+            part: 1,
+            expected: 2,
+            actual: 0,
+        });
+        assert_eq!(assemble_ranges(&sources, &plan), expected);
+        let pool = TaskPool::with_threads(2);
+        assert_eq!(
+            pool.block_on(assemble_ranges_async(sources, plan, pool.clone())),
+            expected
+        );
     }
 
     #[test]

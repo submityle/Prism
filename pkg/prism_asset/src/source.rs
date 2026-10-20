@@ -721,6 +721,14 @@ struct Mount {
     seq: u64,
 }
 
+/// Metadata and reader selected in one overlay lookup. Subsequent parts must
+/// use this reader rather than independently falling through the mount table.
+pub(crate) struct ResolvedAssetRead {
+    pub(crate) reader: Arc<dyn AssetReader>,
+    pub(crate) path: String,
+    pub(crate) metadata: AssetMeta,
+}
+
 /// An ordered table of named [`AssetSource`]s resolving an
 /// [`AssetPath`](crate::AssetPath) to concrete bytes.
 ///
@@ -816,7 +824,7 @@ impl AssetSources {
     /// does not exist), propagating a hard [`ReadError::Io`]/[`ReadError::InvalidPath`]
     /// from the resolving mount.
     pub fn read(&self, path: &AssetPath) -> Result<Vec<u8>, ReadError> {
-        self.dispatch(path, |reader, rel| reader.read(rel))
+        self.dispatch(path, |mount, rel| mount.reader.read(rel))
     }
 
     /// Reads a byte range of the asset named by `path` (streaming).
@@ -829,7 +837,7 @@ impl AssetSources {
         offset: u64,
         len: u64,
     ) -> Result<Vec<u8>, ReadError> {
-        self.dispatch(path, |reader, rel| reader.read_range(rel, offset, len))
+        self.dispatch(path, |mount, rel| mount.reader.read_range(rel, offset, len))
     }
 
     /// Returns metadata for the asset named by `path`.
@@ -837,7 +845,18 @@ impl AssetSources {
     /// # Errors
     /// As [`AssetSources::read`].
     pub fn metadata(&self, path: &AssetPath) -> Result<AssetMeta, ReadError> {
-        self.dispatch(path, |reader, rel| reader.metadata(rel))
+        self.dispatch(path, |mount, rel| mount.reader.metadata(rel))
+    }
+
+    pub(crate) fn resolve_read(&self, path: &AssetPath) -> Result<ResolvedAssetRead, ReadError> {
+        self.dispatch(path, |mount, rel| {
+            let metadata = mount.reader.metadata(rel)?;
+            Ok(ResolvedAssetRead {
+                reader: Arc::clone(&mount.reader),
+                path: rel.to_string(),
+                metadata,
+            })
+        })
     }
 
     /// Whether some mount can resolve `path`.
@@ -853,7 +872,7 @@ impl AssetSources {
     fn dispatch<T>(
         &self,
         path: &AssetPath,
-        op: impl Fn(&dyn AssetReader, &str) -> Result<T, ReadError>,
+        op: impl Fn(&Mount, &str) -> Result<T, ReadError>,
     ) -> Result<T, ReadError> {
         let rel = path.path();
         match path.scheme() {
@@ -863,12 +882,12 @@ impl AssetSources {
                     .iter()
                     .find(|m| m.name == name)
                     .ok_or(ReadError::NotFound)?;
-                op(mount.reader.as_ref(), rel)
+                op(mount, rel)
             }
             None => {
                 let mut last = ReadError::NotFound;
                 for mount in self.mounts_in_overlay_order() {
-                    match op(mount.reader.as_ref(), rel) {
+                    match op(mount, rel) {
                         Ok(v) => return Ok(v),
                         Err(ReadError::NotFound) => last = ReadError::NotFound,
                         Err(other) => return Err(other),

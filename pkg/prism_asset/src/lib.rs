@@ -122,8 +122,8 @@ pub use load_state::{LoadState, RecursiveDependencyLoadState};
 pub use loader::{LoaderId, LoaderRegistry, SuffixConflict};
 #[cfg(feature = "std")]
 pub use loader_exec::{
-    AssetLoader, AssetLoaders, DepRequest, ErasedLoadedAsset, FullLoadOutput, LoadContext,
-    LoadError, LoadedAsset,
+    AssetLoader, AssetLoaders, AssetReadPlan, DepRequest, ErasedLoadedAsset, FullLoadOutput,
+    LoadContext, LoadError, LoadedAsset,
 };
 pub use path::AssetPath;
 pub use prism_asset_macros::{Asset, VisitAssetDependencies};

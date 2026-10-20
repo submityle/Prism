@@ -14,8 +14,9 @@ use crate::{
     FileRangeSource, InstallMount, InstallTombstones, ManifestAssetReader, ManifestError,
     ManifestMetadata, ManifestRangeRequest, ManifestReadError, ManifestRoute, MemoryRangeSource,
     OverlaySet, RangeBatchPolicy, RangeRequest, RangeSource, RangeSourceError,
-    RuntimeInstallPolicy, RuntimeManifest, CHUNK_FORMAT_VERSION, FORMAT_VERSION, MAGIC,
-    SUPPORTED_FORMAT_VERSIONS,
+    RemoteRangeFetchError, RemoteRangeFetcher, RemoteRangeRequest, RemoteRangeResponse,
+    RemoteRangeSource, RuntimeInstallPolicy, RuntimeManifest, CHUNK_FORMAT_VERSION, FORMAT_VERSION,
+    MAGIC, SUPPORTED_FORMAT_VERSIONS,
 };
 
 fn guid(name: &str) -> StableGuid {
@@ -103,6 +104,229 @@ fn identity(bytes: &[u8]) -> ContainerIdentity {
         content_hash: info.content_hash,
         generation: info.generation,
     }
+}
+
+#[derive(Clone, Debug)]
+enum RemoteFetchOutcome {
+    Exact,
+    Response(RemoteRangeResponse),
+    Error(RemoteRangeFetchError),
+}
+
+#[derive(Debug)]
+struct ControlledRemoteFetcher {
+    bytes: Arc<[u8]>,
+    outcome: RemoteFetchOutcome,
+    requests: Arc<Mutex<Vec<RemoteRangeRequest>>>,
+}
+
+impl ControlledRemoteFetcher {
+    fn new(
+        bytes: impl Into<Arc<[u8]>>,
+        outcome: RemoteFetchOutcome,
+    ) -> (Arc<Self>, Arc<Mutex<Vec<RemoteRangeRequest>>>) {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        (
+            Arc::new(Self {
+                bytes: bytes.into(),
+                outcome,
+                requests: Arc::clone(&requests),
+            }),
+            requests,
+        )
+    }
+}
+
+impl RemoteRangeFetcher for ControlledRemoteFetcher {
+    fn fetch_range(
+        &self,
+        request: RemoteRangeRequest,
+    ) -> Result<RemoteRangeResponse, RemoteRangeFetchError> {
+        self.requests.lock().unwrap().push(request);
+        match &self.outcome {
+            RemoteFetchOutcome::Exact => {
+                let start = usize::try_from(request.offset)
+                    .map_err(|_| RemoteRangeFetchError::Transport("test offset overflow".into()))?;
+                let end = start.checked_add(request.len).ok_or_else(|| {
+                    RemoteRangeFetchError::Transport("test range overflow".into())
+                })?;
+                let bytes = self.bytes.get(start..end).ok_or_else(|| {
+                    RemoteRangeFetchError::Transport("test range out of bounds".into())
+                })?;
+                Ok(RemoteRangeResponse::new(
+                    request.offset,
+                    request.identity,
+                    bytes,
+                ))
+            }
+            RemoteFetchOutcome::Response(response) => Ok(response.clone()),
+            RemoteFetchOutcome::Error(error) => Err(error.clone()),
+        }
+    }
+}
+
+#[test]
+fn remote_range_source_binds_requests_to_identity_and_exact_bytes() {
+    let bytes = b"immutable remote source".to_vec();
+    let expected_identity = identity(&build(&[("remote-identity.asset", &bytes)]));
+    let (fetcher, requests) =
+        ControlledRemoteFetcher::new(bytes.clone(), RemoteFetchOutcome::Exact);
+    let source = RemoteRangeSource::new(fetcher.clone(), expected_identity, 16).unwrap();
+
+    assert_eq!(source.identity(), expected_identity);
+    assert_eq!(source.maximum_request_bytes(), 16);
+    assert_eq!(source.len(), expected_identity.byte_len);
+
+    let mut output = [0_u8; 6];
+    source.read_range(4, &mut output).unwrap();
+    assert_eq!(output, bytes[4..10]);
+    assert_eq!(
+        requests.lock().unwrap().as_slice(),
+        &[RemoteRangeRequest::new(4, 6, expected_identity)]
+    );
+}
+
+#[test]
+fn remote_range_source_rejects_invalid_responses_and_transport_failures() {
+    let object = build(&[("remote-errors.asset", b"payload")]);
+    let expected_identity = identity(&object);
+    let another_identity = identity(&build(&[("different.asset", b"payload")]));
+    let requested_bytes = object[3..7].to_vec();
+
+    let cases = [
+        (
+            RemoteFetchOutcome::Response(RemoteRangeResponse::new(
+                3,
+                another_identity,
+                requested_bytes.clone(),
+            )),
+            RangeSourceError::RemoteIdentityMismatch,
+        ),
+        (
+            RemoteFetchOutcome::Response(RemoteRangeResponse::new(
+                2,
+                expected_identity,
+                requested_bytes.clone(),
+            )),
+            RangeSourceError::RemoteOffsetMismatch {
+                expected: 3,
+                actual: 2,
+            },
+        ),
+        (
+            RemoteFetchOutcome::Response(RemoteRangeResponse::new(
+                3,
+                expected_identity,
+                requested_bytes[..3].to_vec(),
+            )),
+            RangeSourceError::RemoteLengthMismatch {
+                expected: 4,
+                actual: 3,
+            },
+        ),
+        (
+            RemoteFetchOutcome::Response(RemoteRangeResponse::new(
+                3,
+                expected_identity,
+                [requested_bytes.clone(), vec![0]].concat(),
+            )),
+            RangeSourceError::RemoteLengthMismatch {
+                expected: 4,
+                actual: 5,
+            },
+        ),
+    ];
+
+    for (outcome, expected_error) in cases {
+        let (fetcher, requests) = ControlledRemoteFetcher::new(object.clone(), outcome);
+        let source = RemoteRangeSource::new(fetcher, expected_identity, 16).unwrap();
+        let mut output = [0_u8; 4];
+        assert_eq!(source.read_range(3, &mut output), Err(expected_error));
+        assert_eq!(requests.lock().unwrap().len(), 1);
+    }
+
+    for error in [
+        RemoteRangeFetchError::Rejected("stale generation".into()),
+        RemoteRangeFetchError::Transport("connection reset".into()),
+    ] {
+        let (fetcher, requests) =
+            ControlledRemoteFetcher::new(object.clone(), RemoteFetchOutcome::Error(error.clone()));
+        let source = RemoteRangeSource::new(fetcher, expected_identity, 16).unwrap();
+        let mut output = [0_u8; 4];
+        assert_eq!(
+            source.read_range(3, &mut output),
+            Err(RangeSourceError::RemoteFetch(error))
+        );
+        assert_eq!(requests.lock().unwrap().len(), 1);
+    }
+}
+
+#[test]
+fn remote_range_source_rejects_invalid_requests_before_fetching() {
+    let object = build(&[("remote-bounds.asset", b"payload")]);
+    let expected_identity = identity(&object);
+    let (fetcher, requests) = ControlledRemoteFetcher::new(object, RemoteFetchOutcome::Exact);
+    let source = RemoteRangeSource::new(fetcher, expected_identity, 3).unwrap();
+
+    assert!(matches!(
+        RemoteRangeSource::new(
+            ControlledRemoteFetcher::new(Vec::<u8>::new(), RemoteFetchOutcome::Exact).0,
+            expected_identity,
+            0,
+        ),
+        Err(RangeSourceError::InvalidRequestLimit { maximum: 0 })
+    ));
+
+    let mut too_large = [0_u8; 4];
+    assert_eq!(
+        source.read_range(0, &mut too_large),
+        Err(RangeSourceError::RequestTooLarge {
+            requested: 4,
+            maximum: 3,
+        })
+    );
+    let mut out_of_bounds = [0_u8; 1];
+    assert_eq!(
+        source.read_range(expected_identity.byte_len, &mut out_of_bounds),
+        Err(RangeSourceError::OutOfBounds)
+    );
+    assert_eq!(
+        source.read_range(u64::MAX, &mut out_of_bounds),
+        Err(RangeSourceError::OutOfBounds)
+    );
+    let mut empty = [];
+    source
+        .read_range(expected_identity.byte_len, &mut empty)
+        .unwrap();
+    assert!(requests.lock().unwrap().is_empty());
+}
+
+#[test]
+fn remote_range_source_mount_keeps_container_integrity_validation() {
+    let payload = b"remote container payload".repeat(256);
+    let bytes = build(&[("remote-mount.asset", &payload)]);
+    let expected_identity = identity(&bytes);
+    let (fetcher, _) = ControlledRemoteFetcher::new(bytes.clone(), RemoteFetchOutcome::Exact);
+    let reader = ContainerReader::from_range_source(Arc::new(
+        RemoteRangeSource::new(fetcher, expected_identity, 64 * 1024).unwrap(),
+    ))
+    .unwrap();
+    assert_eq!(
+        reader.read_all(guid("remote-mount.asset")).unwrap(),
+        payload
+    );
+
+    let mut tampered = bytes;
+    let payload_offset = u64::from_le_bytes(tampered[36..44].try_into().unwrap()) as usize;
+    tampered[payload_offset] ^= 0x80;
+    let (fetcher, _) = ControlledRemoteFetcher::new(tampered, RemoteFetchOutcome::Exact);
+    assert_eq!(
+        ContainerReader::from_range_source(Arc::new(
+            RemoteRangeSource::new(fetcher, expected_identity, 64 * 1024).unwrap(),
+        ))
+        .unwrap_err(),
+        ContainerError::HashMismatch
+    );
 }
 
 #[derive(Debug)]

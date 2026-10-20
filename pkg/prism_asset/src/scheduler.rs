@@ -2,16 +2,16 @@
 //! the synchronous [`AssetServer`](crate::AssetServer).
 //!
 //! This API coalesces concurrent requests for the same path, bounds admission,
-//! snapshots source/loader state under the server mutex, and performs full
-//! reads on an I/O pool plus synchronous CPU decoding on a CPU pool before
+//! snapshots source/loader state under the server mutex, and performs validated
+//! loader-declared range reads on an I/O pool plus synchronous CPU decoding on a CPU pool before
 //! committing one dependency-aware revision. Awaiting a dependency yields the
 //! CPU worker, so a fixed worker count cannot deadlock solely because parent
 //! assemblies are waiting for child flights. Reload flights support a narrow
 //! resident-root revision replacement with per-path epoch supersede and direct
 //! labeled-path loads that reuse the source assembly; reload candidates also
 //! decode and stage newly introduced ordinary dependencies and sibling labels
-//! before one atomic commit. Range reads and preemptive cancellation are also
-//! outside this slice. Live priority cells order queued I/O and CPU work,
+//! before one atomic commit. Parts within one normal loader input are read
+//! sequentially; preemptive cancellation is outside this slice. Live priority cells order queued I/O and CPU work,
 //! including wakeups and dependencies; ticket
 //! cancellation stops that caller from waiting but does not kill shared or
 //! already-running work.
@@ -352,6 +352,7 @@ enum FlightKey {
 struct ReloadReadKey {
     source_revision: u64,
     path: AssetPath,
+    type_id: AssetTypeId,
 }
 
 struct ReloadReadFlight {
@@ -670,7 +671,11 @@ impl LoadScheduler {
         // Normalize untyped requests before admission so a typed dependency and
         // an untyped root request for the same path can share a flight only
         // when loader selection resolves them to the same produced type.
-        let requested_type = requested_type.or_else(|| self.server.inferred_asset_type(&path));
+        let requested_type = requested_type.or_else(|| {
+            (!path.has_label())
+                .then(|| self.server.inferred_asset_type(&path))
+                .flatten()
+        });
         self.schedule_keyed(
             FlightKey::Load(path),
             priority,
@@ -716,7 +721,11 @@ impl LoadScheduler {
         let path = match &key {
             FlightKey::Load(path) | FlightKey::Reload { path, .. } => path.clone(),
         };
-        let requested_type = requested_type.or_else(|| self.server.inferred_asset_type(&path));
+        let requested_type = requested_type.or_else(|| {
+            (!path.has_label())
+                .then(|| self.server.inferred_asset_type(&path))
+                .flatten()
+        });
         let (flight, start_now) = {
             let mut state = self.state.lock().expect("load scheduler poisoned");
             if let Some(existing) = state.in_flight.get(&key) {
@@ -979,12 +988,15 @@ impl LoadScheduler {
         &self,
         source_revision: u64,
         sources: &AssetSources,
+        loaders: &AssetLoaders,
         path: &AssetPath,
+        type_id: AssetTypeId,
         priority: &FlightPriority,
     ) -> ReloadReadTicket {
         let key = ReloadReadKey {
             source_revision,
             path: path.clone(),
+            type_id,
         };
         let (flight, start) = {
             let mut state = self.state.lock().expect("load scheduler poisoned");
@@ -1011,10 +1023,11 @@ impl LoadScheduler {
         priority.inherit(&flight.priority);
         if start {
             let read_sources = sources.clone();
+            let read_loaders = loaders.clone();
             let read_path = path.clone();
             let read_flight = Arc::clone(&flight);
             let read = move || match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                read_sources.read(&read_path)
+                read_loaders.read_for_type(&read_sources, &read_path, type_id)
             })) {
                 Ok(Ok(bytes)) => Ok(Arc::<[u8]>::from(bytes)),
                 Ok(Err(error)) => Err(error.to_string()),
@@ -1154,12 +1167,14 @@ async fn execute_async_load(
         read_bytes_inline(&plan)
     } else {
         let read_sources = plan.sources.clone();
+        let read_loaders = plan.loaders.clone();
         let read_path = plan.path.clone();
+        let read_type_id = plan.type_id;
         scheduler
             .io_pool
             .spawn_future_with_priority(flight.priority.priority_cell(), async move {
                 match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    read_sources.read(&read_path)
+                    read_loaders.read_for_type(&read_sources, &read_path, read_type_id)
                 })) {
                     Ok(Ok(bytes)) => Ok(bytes),
                     Ok(Err(error)) => Err(error.to_string()),
@@ -1432,7 +1447,7 @@ async fn decode_reload_source(
     priority: &FlightPriority,
 ) -> Result<FullLoadOutput, String> {
     let bytes = scheduler
-        .reload_read(source_revision, sources, path, priority)
+        .reload_read(source_revision, sources, loaders, path, type_id, priority)
         .await?;
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         loaders
@@ -1602,12 +1617,20 @@ impl Drop for ExecutionSlotFuture {
 
 fn read_bytes_inline(plan: &crate::server::AsyncLoadPlan) -> Result<Vec<u8>, String> {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        plan.sources.read(&plan.path)
+        read_bytes_for_plan(&plan.sources, plan)
     })) {
         Ok(Ok(bytes)) => Ok(bytes),
         Ok(Err(error)) => Err(error.to_string()),
         Err(_) => Err("asset source or loader panicked".to_string()),
     }
+}
+
+fn read_bytes_for_plan(
+    sources: &AssetSources,
+    plan: &crate::server::AsyncLoadPlan,
+) -> Result<Vec<u8>, String> {
+    plan.loaders
+        .read_for_type(sources, &plan.path, plan.type_id)
 }
 
 /// A future for one consumer of a scheduled load. Cancelling a ticket only
@@ -1720,8 +1743,8 @@ mod priority_tests;
 mod tests {
     use super::*;
     use crate::{
-        Asset, AssetLoader, AssetMeta, AssetPath, AssetReader, LoadContext, LoadError, MemSource,
-        ReadError, RecursiveDependencyLoadState,
+        Asset, AssetLoader, AssetMeta, AssetPath, AssetReadPlan, AssetReader, LoadContext,
+        LoadError, MemSource, RangePart, ReadError, RecursiveDependencyLoadState,
     };
     use alloc::sync::Arc;
     use alloc::vec::Vec;
@@ -1912,6 +1935,77 @@ mod tests {
         }
     }
 
+    struct RangeOnlySource {
+        bytes: Arc<[u8]>,
+        reads: Arc<AtomicUsize>,
+        ranges: Arc<AtomicUsize>,
+    }
+
+    impl AssetReader for RangeOnlySource {
+        fn read(&self, _path: &str) -> Result<Vec<u8>, ReadError> {
+            self.reads.fetch_add(1, Ordering::AcqRel);
+            Err(ReadError::Unsupported)
+        }
+
+        fn read_range(&self, _path: &str, offset: u64, len: u64) -> Result<Vec<u8>, ReadError> {
+            self.ranges.fetch_add(1, Ordering::AcqRel);
+            let end = offset.checked_add(len).ok_or(ReadError::OutOfRange {
+                offset,
+                len,
+                size: self.bytes.len() as u64,
+            })?;
+            if end > self.bytes.len() as u64 {
+                return Err(ReadError::OutOfRange {
+                    offset,
+                    len,
+                    size: self.bytes.len() as u64,
+                });
+            }
+            Ok(self.bytes[offset as usize..end as usize].to_vec())
+        }
+
+        fn metadata(&self, _path: &str) -> Result<AssetMeta, ReadError> {
+            Ok(AssetMeta {
+                size: self.bytes.len() as u64,
+                modified_ms: None,
+                is_dir: false,
+            })
+        }
+    }
+
+    struct RangeAwareReloadLoader;
+
+    impl AssetLoader for RangeAwareReloadLoader {
+        type Asset = ReloadAsset;
+
+        fn extensions(&self) -> &'static [&'static str] {
+            &["ranged"]
+        }
+
+        fn read_plan(
+            &self,
+            _path: &AssetPath,
+            _metadata: AssetMeta,
+        ) -> Result<AssetReadPlan, LoadError> {
+            AssetReadPlan::ranges([RangePart::new(2, 1), RangePart::new(0, 2)])
+                .map_err(|error| LoadError::LimitExceeded(error.to_string()))
+        }
+
+        fn load(&self, bytes: &[u8], _ctx: &mut LoadContext) -> Result<ReloadAsset, LoadError> {
+            if bytes.len() != 3 || bytes[0] != bytes[2] + bytes[1] {
+                return Err(LoadError::Malformed(
+                    "range declaration order was not preserved".into(),
+                ));
+            }
+            bytes
+                .first()
+                .copied()
+                .filter(|value| *value > 0)
+                .map(ReloadAsset)
+                .ok_or_else(|| LoadError::Malformed("ranged payload is invalid".into()))
+        }
+    }
+
     struct ParallelSource {
         active: Arc<AtomicUsize>,
         peak: Arc<AtomicUsize>,
@@ -2018,6 +2112,98 @@ mod tests {
         assert_eq!(server.with_asset(id, |asset| asset.0), Some(2));
         assert!(server.is_loaded(id.untyped()));
         assert_eq!(scheduler.in_flight(), 0);
+    }
+
+    #[test]
+    fn async_initial_load_and_reload_use_declared_range_reads() {
+        let reads = Arc::new(AtomicUsize::new(0));
+        let ranges = Arc::new(AtomicUsize::new(0));
+        let server = Arc::new(AssetServer::new());
+        server.register_loader(RangeAwareReloadLoader);
+        server.mount(
+            "base",
+            Arc::new(RangeOnlySource {
+                bytes: Arc::<[u8]>::from([1_u8, 2, 3]),
+                reads: Arc::clone(&reads),
+                ranges: Arc::clone(&ranges),
+            }),
+            0,
+        );
+        let scheduler = LoadScheduler::new(Arc::clone(&server), TaskPool::with_threads(1), 1);
+        let resident = scheduler
+            .cpu_pool
+            .block_on(scheduler.schedule("hero.ranged", Priority::Normal).unwrap())
+            .expect("initial range load should commit");
+        let asset_id = resident
+            .id()
+            .typed::<ReloadAsset>()
+            .expect("declared loader type should match the resident asset");
+        assert_eq!(server.with_asset(asset_id, |asset| asset.0), Some(3));
+
+        server.mount(
+            "patch",
+            Arc::new(RangeOnlySource {
+                bytes: Arc::<[u8]>::from([2_u8, 4, 6]),
+                reads: Arc::clone(&reads),
+                ranges: Arc::clone(&ranges),
+            }),
+            10,
+        );
+        scheduler
+            .cpu_pool
+            .block_on(
+                scheduler
+                    .schedule_reload("hero.ranged", Priority::Normal)
+                    .unwrap(),
+            )
+            .expect("range reload should commit");
+        assert_eq!(server.with_asset(asset_id, |asset| asset.0), Some(6));
+        assert_eq!(reads.load(Ordering::Acquire), 0);
+        assert_eq!(ranges.load(Ordering::Acquire), 4);
+    }
+
+    #[test]
+    fn synchronous_load_uses_reordered_declared_ranges() {
+        let reads = Arc::new(AtomicUsize::new(0));
+        let ranges = Arc::new(AtomicUsize::new(0));
+        let server = AssetServer::new();
+        server.register_loader(RangeAwareReloadLoader);
+        server.mount(
+            "mem",
+            Arc::new(RangeOnlySource {
+                bytes: Arc::<[u8]>::from([1_u8, 2, 3]),
+                reads: Arc::clone(&reads),
+                ranges: Arc::clone(&ranges),
+            }),
+            0,
+        );
+        let asset = server.load::<ReloadAsset>("hero.ranged");
+        assert_eq!(server.with_asset(asset.id(), |value| value.0), Some(3));
+        assert_eq!(reads.load(Ordering::Acquire), 0);
+        assert_eq!(ranges.load(Ordering::Acquire), 2);
+    }
+
+    #[test]
+    fn truncated_range_reload_retains_the_resident_revision() {
+        let server = Arc::new(AssetServer::new());
+        server.register_loader(RangeAwareReloadLoader);
+        let mut initial = MemSource::new();
+        initial.insert("hero.ranged", [1_u8, 2, 3]);
+        server.mount("mem", Arc::new(initial), 0);
+        let asset = server.load::<ReloadAsset>("hero.ranged");
+        let mut truncated = MemSource::new();
+        truncated.insert("hero.ranged", [1_u8]);
+        server.mount("mem", Arc::new(truncated), 0);
+        let scheduler = LoadScheduler::new(Arc::clone(&server), TaskPool::with_threads(1), 1);
+        assert!(scheduler
+            .cpu_pool
+            .block_on(
+                scheduler
+                    .schedule_reload("hero.ranged", Priority::Normal)
+                    .unwrap()
+            )
+            .is_err());
+        assert_eq!(server.with_asset(asset.id(), |value| value.0), Some(3));
     }
 
     #[test]

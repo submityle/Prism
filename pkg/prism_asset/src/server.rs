@@ -1492,10 +1492,10 @@ impl AssetServerInner {
     fn finalize(&mut self, path: AssetPath, id: UntypedAssetId, type_id: AssetTypeId) -> bool {
         let had_ready_value = matches!(self.stores.load_state(id), LoadState::Loaded);
         let previous_labels = self.labels_for_source(&path);
-        let bytes = match self.sources.read(&path) {
+        let bytes = match self.loaders.read_for_type(&self.sources, &path, type_id) {
             Ok(bytes) => bytes,
-            Err(err) => {
-                self.fail(id, &path, err.to_string());
+            Err(error) => {
+                self.fail(id, &path, error);
                 return false;
             }
         };

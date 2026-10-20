@@ -31,7 +31,12 @@
 #![cfg(feature = "std")]
 
 use crate::path::AssetPath;
+use crate::source::{AssetMeta, AssetSources};
 use crate::stores::ErasedAssetStore;
+use crate::streaming::{
+    assemble_ranges_resolved, collect_range_parts, RangeAssemblyError, RangeAssemblyLimits,
+    RangeAssemblyPlan, RangeAssemblyPlanError, RangePart,
+};
 use crate::type_id::AssetTypeId;
 use crate::{Asset, Assets, LoaderId, LoaderRegistry, SuffixConflict};
 use alloc::boxed::Box;
@@ -60,6 +65,70 @@ pub enum LoadError {
     LimitExceeded(String),
     /// A catch-all for loader-internal errors that do not fit the above.
     Other(String),
+}
+
+/// The physical bytes a loader needs before it can decode an asset.
+///
+/// A loader still receives one contiguous byte slice. `Ranges` therefore
+/// concatenates the declared physical ranges in declaration order before
+/// calling [`AssetLoader::load`]. This is useful for formats whose manifest or
+/// route already identifies independent sections; it is not a claim that an
+/// arbitrary format can decode an incomplete file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AssetReadPlan {
+    /// Read the complete source through the range API.
+    Whole,
+    /// Read and concatenate explicitly declared physical ranges.
+    Ranges {
+        /// Physical ranges, in the order exposed to the decoder.
+        parts: Vec<RangePart>,
+        /// Limits applied before I/O starts.
+        limits: RangeAssemblyLimits,
+    },
+}
+
+impl AssetReadPlan {
+    /// Creates a bounded explicit range plan using the standard limits.
+    pub fn ranges(
+        parts: impl IntoIterator<Item = RangePart>,
+    ) -> Result<Self, RangeAssemblyPlanError> {
+        Self::ranges_with_limits(parts, RangeAssemblyLimits::default())
+    }
+
+    /// Creates an explicit range plan with caller-selected limits.
+    pub fn ranges_with_limits(
+        parts: impl IntoIterator<Item = RangePart>,
+        limits: RangeAssemblyLimits,
+    ) -> Result<Self, RangeAssemblyPlanError> {
+        if limits.max_parts == 0 {
+            return Err(RangeAssemblyPlanError::ZeroPartLimit);
+        }
+        if limits.max_parallel == 0 {
+            return Err(RangeAssemblyPlanError::ZeroParallelLimit);
+        }
+        Ok(Self::Ranges {
+            parts: collect_range_parts(parts, limits.max_parts)?,
+            limits,
+        })
+    }
+
+    fn validate(self, path: &AssetPath, source_len: u64) -> Result<RangeAssemblyPlan, LoadError> {
+        match self {
+            Self::Whole => RangeAssemblyPlan::whole(
+                path.clone(),
+                source_len,
+                RangeAssemblyLimits {
+                    max_parts: 1,
+                    max_bytes: source_len,
+                    max_parallel: 1,
+                },
+            ),
+            Self::Ranges { parts, limits } => {
+                RangeAssemblyPlan::new(path.clone(), source_len, parts, limits)
+            }
+        }
+        .map_err(|error| LoadError::LimitExceeded(error.to_string()))
+    }
 }
 
 impl fmt::Display for LoadError {
@@ -267,6 +336,23 @@ pub trait AssetLoader: Send + Sync + 'static {
         0
     }
 
+    /// Declares the source bytes that must be assembled before [`Self::load`]
+    /// runs. The default is a single full-source range, so every normal load
+    /// uses the same bounded range-backed I/O path as streaming rather than a
+    /// separate whole-file read path.
+    ///
+    /// Implementations may return [`AssetReadPlan::Ranges`] only when their
+    /// decoder accepts the concatenation of those ranges in exactly the
+    /// declared order. The runtime validates metadata bounds, part and byte
+    /// limits, and every returned range length before publishing a revision.
+    fn read_plan(
+        &self,
+        _path: &AssetPath,
+        _metadata: AssetMeta,
+    ) -> Result<AssetReadPlan, LoadError> {
+        Ok(AssetReadPlan::Whole)
+    }
+
     /// Decodes `bytes` into a value, declaring dependencies/sub-assets on `ctx`.
     ///
     /// # Errors
@@ -279,6 +365,9 @@ pub trait ErasedAssetLoader: Send + Sync {
     /// The produced asset type.
     fn produced_type(&self) -> AssetTypeId;
 
+    /// Declares the physical input required by this loader.
+    fn read_plan(&self, path: &AssetPath, metadata: AssetMeta) -> Result<AssetReadPlan, LoadError>;
+
     /// Decodes `bytes` for `path`, returning the primary asset together with
     /// every labeled sub-asset the loader emitted on its [`LoadContext`].
     ///
@@ -290,6 +379,10 @@ pub trait ErasedAssetLoader: Send + Sync {
 impl<L: AssetLoader> ErasedAssetLoader for L {
     fn produced_type(&self) -> AssetTypeId {
         AssetTypeId::of::<L::Asset>()
+    }
+
+    fn read_plan(&self, path: &AssetPath, metadata: AssetMeta) -> Result<AssetReadPlan, LoadError> {
+        <L as AssetLoader>::read_plan(self, path, metadata)
     }
 
     fn load_erased(&self, path: &AssetPath, bytes: &[u8]) -> Result<FullLoadOutput, LoadError> {
@@ -394,6 +487,76 @@ impl AssetLoaders {
                 ))
             })?;
         self.run(id, path, bytes)
+    }
+
+    /// Reads the validated loader input for a typed request through
+    /// [`AssetSources::read_range`]. Metadata is obtained first, so a malformed
+    /// range declaration is rejected before any payload I/O begins.
+    pub(crate) fn read_for_type(
+        &self,
+        sources: &AssetSources,
+        path: &AssetPath,
+        requested: AssetTypeId,
+    ) -> Result<Vec<u8>, String> {
+        let source = sources
+            .resolve_read(path)
+            .map_err(|error| error.to_string())?;
+        let metadata = source.metadata;
+        if metadata.is_dir {
+            return Err(alloc::format!("asset path is a directory: {path}"));
+        }
+        let id = self
+            .policy
+            .resolve_for_type(path, requested)
+            .ok_or_else(|| alloc::format!("no loader for {path} producing {requested:?}"))?;
+        let loader = self
+            .loaders
+            .get(id.index() as usize)
+            .ok_or_else(|| "loader id out of range".to_string())?;
+        let declared_plan = loader
+            .read_plan(path, metadata)
+            .map_err(|error| error.to_string())?;
+        let whole = matches!(declared_plan, AssetReadPlan::Whole);
+        let plan = declared_plan
+            .validate(path, metadata.size)
+            .map_err(|error| error.to_string())?;
+        let assembled = assemble_ranges_resolved(&source, &plan);
+        // A source is allowed to report metadata optimistically and later say
+        // the path is absent (for example an overlay index that has gone
+        // stale). Preserve the VFS's established NotFound-only fallback rule
+        // for the default whole-file plan. Explicit range plans intentionally
+        // stay pinned to their declared physical layout and never reinterpret
+        // a missing part as another source's payload.
+        if matches!(
+            (whole, &assembled),
+            (
+                true,
+                Err(RangeAssemblyError::Read {
+                    error: crate::ReadError::NotFound,
+                    ..
+                })
+            )
+        ) {
+            return sources.read(path).map_err(|error| error.to_string());
+        }
+        // A zero-byte range cannot distinguish a genuine empty source from an
+        // optimistic overlay whose metadata says zero but whose actual read is
+        // absent. Confirm that ambiguous case with the legacy full-read
+        // dispatch so a stale overlay cannot turn a lower-priority asset into
+        // an empty loader input. Non-empty whole reads, and all explicit range
+        // plans, remain range-backed.
+        if matches!(
+            (whole, &assembled),
+            (true, Ok(bytes)) if bytes.is_empty()
+        ) {
+            return sources.read(path).map_err(|error| error.to_string());
+        }
+        assembled.map_err(|error| match error {
+            RangeAssemblyError::SourcePanicked { .. } => {
+                "asset source or loader panicked".to_string()
+            }
+            error => error.to_string(),
+        })
     }
 
     fn run(

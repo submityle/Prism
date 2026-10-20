@@ -725,11 +725,34 @@ fn reload_read_dedup_and_io_promotion_share_the_same_live_cell() {
     sources.mount("mem", Arc::new(RecordingSource(Arc::clone(&reads))), 0);
     let low = FlightPriority::new(Priority::Background);
     let high = FlightPriority::new(Priority::High);
+    let mut loaders = AssetLoaders::new();
+    loaders.register(RecordingLoader(Arc::new(Mutex::new(Vec::new()))));
     let path = AssetPath::from("a.value");
-    let first = scheduler.reload_read(7, &sources, &path, &low);
-    let unrelated = scheduler.reload_read(7, &sources, &AssetPath::from("b.value"), &high);
+    let first = scheduler.reload_read(
+        7,
+        &sources,
+        &loaders,
+        &path,
+        AssetTypeId::of::<Value>(),
+        &low,
+    );
+    let unrelated = scheduler.reload_read(
+        7,
+        &sources,
+        &loaders,
+        &AssetPath::from("b.value"),
+        AssetTypeId::of::<Value>(),
+        &high,
+    );
     let joining = FlightPriority::new(Priority::Background);
-    let duplicate = scheduler.reload_read(7, &sources, &path, &joining);
+    let duplicate = scheduler.reload_read(
+        7,
+        &sources,
+        &loaders,
+        &path,
+        AssetTypeId::of::<Value>(),
+        &joining,
+    );
     joining.boost_to(Priority::Critical);
     assert!(Arc::ptr_eq(&first.flight, &duplicate.flight));
     assert_eq!(

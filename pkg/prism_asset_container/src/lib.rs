@@ -4,8 +4,12 @@
 //! authenticate publishers, or submit data to a GPU. The writer and reader
 //! support deterministic raw and raw-DEFLATE payloads in both the legacy
 //! per-payload [`FORMAT_VERSION`] layout and the independently compressed
-//! [`CHUNK_FORMAT_VERSION`] chunk-table layout. Encryption, signatures,
-//! remote delivery, and GPU decompression remain outside this crate. The
+//! [`CHUNK_FORMAT_VERSION`] chunk-table layout. Encryption, signatures, and
+//! GPU decompression remain outside this crate. Remote range
+//! delivery is exposed as a transport-neutral [`RemoteRangeSource`] contract:
+//! applications provide an immutable-version-aware HTTP/object-store adapter,
+//! while this crate enforces exact identity, offset, length, and request-bound
+//! checks before bytes reach the validated reader. The
 //! optional `mmap` feature adds a read-only local-file [`MmapRangeSource`]
 //! without changing the validated container ABI or the default positional-I/O
 //! path.
@@ -51,7 +55,10 @@ pub use patch::{PatchDescriptorError, RuntimePatchDescriptor, PATCH_MAGIC, PATCH
 pub use range_batch::{RangeBatchPolicy, RangeRequest};
 #[cfg(feature = "mmap")]
 pub use range_source::MmapRangeSource;
-pub use range_source::{FileRangeSource, MemoryRangeSource, RangeSource, RangeSourceError};
+pub use range_source::{
+    FileRangeSource, MemoryRangeSource, RangeSource, RangeSourceError, RemoteRangeFetchError,
+    RemoteRangeFetcher, RemoteRangeRequest, RemoteRangeResponse, RemoteRangeSource,
+};
 pub use reader::ContainerReader;
 pub use writer::{ContainerWriter, WriteEntry};
 
