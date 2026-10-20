@@ -20,6 +20,11 @@ rendering, ECS, UI, networking, and engine-specific crates.
 - History is bounded. Once entries are dropped, incremental replay before the
   retention floor returns an explicit error; a snapshot plus retained entries
   remains the recovery path.
+- Command metadata is bounded independently by `ReplicaLimits`: `known`,
+  `pending`, and `applied` entries are rejected at their configured limits
+  rather than silently evicted, because eviction would weaken causal ordering
+  and duplicate detection. A caller can compact by bootstrapping a fresh
+  replica from a snapshot.
 
 ## Presence and soft locks
 

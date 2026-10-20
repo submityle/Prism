@@ -4,6 +4,8 @@ use crate::model::{
 };
 use std::collections::BTreeMap;
 
+const DEFAULT_MAX_PENDING_REQUESTS: usize = 1_024;
+
 /// A request retained until its response is accepted.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PendingRequest {
@@ -20,6 +22,7 @@ pub struct SyncClient {
     pending: BTreeMap<RequestId, Request>,
     descriptor: Option<EndpointDescriptor>,
     revision: Revision,
+    max_pending_requests: usize,
 }
 
 impl SyncClient {
@@ -32,7 +35,21 @@ impl SyncClient {
             pending: BTreeMap::new(),
             descriptor: None,
             revision: Revision::ZERO,
+            max_pending_requests: DEFAULT_MAX_PENDING_REQUESTS,
         }
+    }
+
+    /// Sets the maximum number of requests retained for response correlation.
+    #[must_use]
+    pub fn with_max_pending_requests(mut self, limit: usize) -> Self {
+        self.max_pending_requests = limit;
+        self
+    }
+
+    /// Returns the request-retention bound.
+    #[must_use]
+    pub const fn max_pending_requests(&self) -> usize {
+        self.max_pending_requests
     }
 
     /// Returns the target this client addresses.
@@ -54,30 +71,45 @@ impl SyncClient {
     }
 
     /// Issues a request and records it for response correlation.
-    pub fn issue(&mut self, request: Request) -> PendingRequest {
+    pub fn issue(&mut self, request: Request) -> Result<PendingRequest, SyncError> {
+        if self.pending.len() >= self.max_pending_requests {
+            return Err(SyncError::InvalidRequest {
+                code: crate::ErrorCode::InvalidRequest,
+                detail: format!(
+                    "pending request limit {} exceeded",
+                    self.max_pending_requests
+                ),
+            });
+        }
+        if self.next_request_id == u64::MAX {
+            return Err(SyncError::InvalidRequest {
+                code: crate::ErrorCode::InvalidRequest,
+                detail: String::from("request ID space is exhausted"),
+            });
+        }
         let request_id = RequestId::from_raw(self.next_request_id);
-        self.next_request_id = self.next_request_id.saturating_add(1).max(1);
+        self.next_request_id += 1;
         self.pending.insert(request_id, request.clone());
-        PendingRequest {
+        Ok(PendingRequest {
             request_id,
             request,
-        }
+        })
     }
 
     /// Issues a metadata request.
-    pub fn describe(&mut self) -> PendingRequest {
+    pub fn describe(&mut self) -> Result<PendingRequest, SyncError> {
         self.issue(Request::Describe)
     }
 
     /// Issues a snapshot request for the configured target.
-    pub fn read_snapshot(&mut self) -> PendingRequest {
+    pub fn read_snapshot(&mut self) -> Result<PendingRequest, SyncError> {
         self.issue(Request::ReadSnapshot {
             target: self.target,
         })
     }
 
     /// Issues an incremental read from the client's current revision.
-    pub fn read_changes(&mut self) -> PendingRequest {
+    pub fn read_changes(&mut self) -> Result<PendingRequest, SyncError> {
         self.issue(Request::ReadChanges {
             target: self.target,
             from_revision: self.revision,
@@ -85,7 +117,7 @@ impl SyncClient {
     }
 
     /// Issues an optimistic write against the client's current revision.
-    pub fn apply_changes(&mut self, changes: Vec<Change>) -> PendingRequest {
+    pub fn apply_changes(&mut self, changes: Vec<Change>) -> Result<PendingRequest, SyncError> {
         self.issue(Request::ApplyChanges {
             target: self.target,
             base_revision: self.revision,
@@ -291,7 +323,7 @@ mod tests {
         let mut client = SyncClient::new(TargetId::from_raw(1));
         let mut replica = Replica::new(TargetId::from_raw(1));
 
-        let snapshot_request = client.read_snapshot();
+        let snapshot_request = client.read_snapshot().expect("snapshot request");
         let snapshot_response = endpoint.handle(RequestEnvelope {
             request_id: snapshot_request.request_id,
             request: snapshot_request.request,
@@ -299,11 +331,13 @@ mod tests {
         let snapshot_payload = client.accept(snapshot_response).expect("snapshot");
         replica.apply_payload(snapshot_payload).expect("install");
 
-        let write = client.apply_changes(vec![Change::SetComponent {
-            entity: EntityId::from_raw(1),
-            component: ComponentId::from_static("Value"),
-            value: Value::Unsigned(9),
-        }]);
+        let write = client
+            .apply_changes(vec![Change::SetComponent {
+                entity: EntityId::from_raw(1),
+                component: ComponentId::from_static("Value"),
+                value: Value::Unsigned(9),
+            }])
+            .expect("write request");
         let response = endpoint.handle(RequestEnvelope {
             request_id: write.request_id,
             request: write.request,
@@ -326,6 +360,14 @@ mod tests {
                 response: Response::Success(ResponsePayload::Pong),
             })
             .expect_err("unknown response");
+        assert_eq!(error.code(), crate::ErrorCode::InvalidRequest);
+    }
+
+    #[test]
+    fn client_rejects_unbounded_pending_requests() {
+        let mut client = SyncClient::new(TargetId::from_raw(1)).with_max_pending_requests(1);
+        client.issue(Request::Ping).expect("first request");
+        let error = client.issue(Request::Ping).expect_err("pending limit");
         assert_eq!(error.code(), crate::ErrorCode::InvalidRequest);
     }
 }

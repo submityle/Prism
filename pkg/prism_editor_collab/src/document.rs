@@ -127,6 +127,8 @@ pub struct HistoryInfo {
 /// Reasons an incoming command cannot be applied.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ApplyError {
+    /// The incoming command failed the replica's current command limits.
+    InvalidCommand(crate::command::CommandError),
     /// The same command ID was received with different bytes/metadata.
     ConflictingDuplicate(CommandId),
     /// The public envelope fields disagree about the command actor.
@@ -135,6 +137,13 @@ pub enum ApplyError {
     CausalCycle(CommandId),
     /// The replica clock could not advance.
     Clock(ClockError),
+    /// A bounded replica store cannot retain another command in this class.
+    LimitExceeded {
+        /// The bounded store that reached its configured limit.
+        kind: &'static str,
+        /// Maximum number of entries allowed in that store.
+        limit: usize,
+    },
 }
 
 impl fmt::Display for ApplyError {
@@ -148,6 +157,39 @@ impl std::error::Error for ApplyError {}
 impl From<ClockError> for ApplyError {
     fn from(error: ClockError) -> Self {
         Self::Clock(error)
+    }
+}
+
+impl From<crate::command::CommandError> for ApplyError {
+    fn from(error: crate::command::CommandError) -> Self {
+        Self::InvalidCommand(error)
+    }
+}
+
+/// Memory bounds for one collaboration replica.
+///
+/// The replica rejects new commands when any bound is reached. It does not
+/// silently evict command IDs because doing so would break causal ordering or
+/// duplicate detection; callers can install a snapshot into a fresh replica
+/// when they want to compact the command metadata.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReplicaLimits {
+    /// Maximum number of received command envelopes retained for deduplication
+    /// and replay.
+    pub max_known_commands: usize,
+    /// Maximum number of commands waiting for causal predecessors.
+    pub max_pending_commands: usize,
+    /// Maximum number of applied command IDs retained for causal checks.
+    pub max_applied_commands: usize,
+}
+
+impl Default for ReplicaLimits {
+    fn default() -> Self {
+        Self {
+            max_known_commands: 65_536,
+            max_pending_commands: 4_096,
+            max_applied_commands: 65_536,
+        }
     }
 }
 
@@ -212,6 +254,7 @@ pub struct Replica {
     actor: ActorId,
     clock: HlcClock,
     command_limits: CommandLimits,
+    limits: ReplicaLimits,
     history_limit: usize,
     state: DocumentState,
     known: BTreeMap<CommandId, CommandEnvelope>,
@@ -230,6 +273,7 @@ impl Replica {
             actor,
             clock,
             command_limits: CommandLimits::default(),
+            limits: ReplicaLimits::default(),
             history_limit,
             state: DocumentState::new(),
             known: BTreeMap::new(),
@@ -245,6 +289,19 @@ impl Replica {
     pub fn with_command_limits(mut self, limits: CommandLimits) -> Self {
         self.command_limits = limits;
         self
+    }
+
+    /// Sets explicit in-memory command bounds before receiving commands.
+    #[must_use]
+    pub fn with_replica_limits(mut self, limits: ReplicaLimits) -> Self {
+        self.limits = limits;
+        self
+    }
+
+    /// Returns the configured in-memory command bounds.
+    #[must_use]
+    pub const fn replica_limits(&self) -> ReplicaLimits {
+        self.limits
     }
 
     /// Returns the local actor identity.
@@ -287,32 +344,78 @@ impl Replica {
 
     /// Receives one command, deduplicates it, and drains causal-ready work.
     pub fn receive(&mut self, command: CommandEnvelope) -> Result<ReceiveOutcome, ApplyError> {
+        let command = self.validate_command(command)?;
         if let Some(existing) = self.known.get(&command.id) {
             if existing == &command {
                 return Ok(ReceiveOutcome::Duplicate(command.id));
             }
             return Err(ApplyError::ConflictingDuplicate(command.id));
         }
+        let mut candidate = self.clone();
+        let outcome = candidate.receive_new(command)?;
+        *self = candidate;
+        Ok(outcome)
+    }
+
+    fn receive_new(&mut self, command: CommandEnvelope) -> Result<ReceiveOutcome, ApplyError> {
         if command.id.actor != command.actor {
             return Err(ApplyError::ActorMismatch(command.id));
         }
-        let previous_clock = self.clock.clone();
+        if self.known.len() >= self.limits.max_known_commands {
+            return Err(ApplyError::LimitExceeded {
+                kind: "known commands",
+                limit: self.limits.max_known_commands,
+            });
+        }
+        let ready = command
+            .causal
+            .iter()
+            .all(|dependency| self.applied.contains(dependency));
+        if self.pending.len() >= self.limits.max_pending_commands && !ready {
+            return Err(ApplyError::LimitExceeded {
+                kind: "pending commands",
+                limit: self.limits.max_pending_commands,
+            });
+        }
         self.clock
             .observe(command.timestamp, command.timestamp.physical)?;
         let command_id = command.id.clone();
         self.known.insert(command_id.clone(), command.clone());
-        self.pending.insert(command_id.clone(), command);
-        let applied = self.drain_ready()?;
+        let applied = if ready && self.pending.len() >= self.limits.max_pending_commands {
+            self.apply_one(command)?;
+            let mut applied = vec![command_id.clone()];
+            applied.extend(self.drain_ready()?);
+            applied
+        } else {
+            self.pending.insert(command_id.clone(), command);
+            self.drain_ready()?
+        };
         if !applied.is_empty() {
             Ok(ReceiveOutcome::Applied(applied))
         } else if let Some(cycle) = self.pending_cycle() {
             self.known.remove(&command_id);
             self.pending.remove(&command_id);
-            self.clock = previous_clock;
             Err(ApplyError::CausalCycle(cycle))
         } else {
             Ok(ReceiveOutcome::Buffered(self.missing_for(&command_id)))
         }
+    }
+
+    fn validate_command(&self, command: CommandEnvelope) -> Result<CommandEnvelope, ApplyError> {
+        let command_id = command.id.clone();
+        if command_id.actor != command.actor {
+            return Err(ApplyError::ActorMismatch(command_id));
+        }
+        CommandEnvelope::new(
+            command.actor,
+            command_id.sequence,
+            command.timestamp,
+            command.causal,
+            command.affected_domains,
+            command.payload,
+            self.command_limits,
+        )
+        .map_err(ApplyError::InvalidCommand)
     }
 
     /// Returns retained commands after a local revision cursor.
@@ -412,21 +515,33 @@ impl Replica {
                 .pending
                 .remove(&id)
                 .expect("ready command must remain in pending");
-            self.state.apply(&command);
-            self.applied.insert(id.clone());
-            self.revision = self.revision.saturating_add(1);
-            self.history.push(HistoryEntry {
-                revision: self.revision,
-                command,
-            });
-            if self.history.len() > self.history_limit {
-                let overflow = self.history.len() - self.history_limit;
-                self.history.drain(..overflow);
-                self.dropped = self.dropped.saturating_add(overflow as u64);
-            }
+            self.apply_one(command)?;
             applied_now.push(id);
         }
         Ok(applied_now)
+    }
+
+    fn apply_one(&mut self, command: CommandEnvelope) -> Result<(), ApplyError> {
+        if self.applied.len() >= self.limits.max_applied_commands {
+            return Err(ApplyError::LimitExceeded {
+                kind: "applied commands",
+                limit: self.limits.max_applied_commands,
+            });
+        }
+        let id = command.id.clone();
+        self.state.apply(&command);
+        self.applied.insert(id);
+        self.revision = self.revision.saturating_add(1);
+        self.history.push(HistoryEntry {
+            revision: self.revision,
+            command,
+        });
+        if self.history.len() > self.history_limit {
+            let overflow = self.history.len() - self.history_limit;
+            self.history.drain(..overflow);
+            self.dropped = self.dropped.saturating_add(overflow as u64);
+        }
+        Ok(())
     }
 }
 

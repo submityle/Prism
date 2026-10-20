@@ -2,9 +2,9 @@
 //! bounded history, presence leases, and soft locks.
 
 use prism_editor_collab::{
-    ActorId, CommandEnvelope, CommandId, CommandLimits, CommandPayload, DomainId, FieldPath,
-    HlcClock, HlcTimestamp, LockError, PresenceError, PresenceRegistry, PresenceStatus, Replica,
-    ResourceId, SoftLockRegistry, Value,
+    ActorId, CommandEnvelope, CommandError, CommandId, CommandLimits, CommandPayload, DomainId,
+    FieldPath, HlcClock, HlcTimestamp, LockError, PresenceError, PresenceRegistry, PresenceStatus,
+    Replica, ReplicaLimits, ResourceId, SoftLockRegistry, Value,
 };
 use std::collections::BTreeMap;
 
@@ -88,10 +88,7 @@ fn command_normalizes_causal_order_and_rejects_self_dependency() {
         CommandLimits::default(),
     )
     .expect_err("self dependency must fail");
-    assert!(matches!(
-        error,
-        prism_editor_collab::CommandError::SelfDependency
-    ));
+    assert!(matches!(error, CommandError::SelfDependency));
 }
 
 #[test]
@@ -140,6 +137,119 @@ fn exact_duplicates_are_ignored_and_conflicting_duplicates_fail() {
         error,
         prism_editor_collab::ApplyError::ConflictingDuplicate(_)
     ));
+}
+
+#[test]
+fn receive_revalidates_command_limits_before_retaining_a_command() {
+    let command = CommandEnvelope {
+        id: CommandId {
+            actor: actor("a"),
+            sequence: 1,
+        },
+        actor: actor("a"),
+        timestamp: HlcTimestamp::new(1, 0),
+        causal: Vec::new(),
+        affected_domains: [domain()].into_iter().collect(),
+        payload: CommandPayload::Opaque(vec![1, 2]),
+    };
+    let limits = CommandLimits {
+        max_payload_bytes: 1,
+        ..CommandLimits::default()
+    };
+    let mut replica = Replica::new(actor("local"), 8)
+        .expect("replica")
+        .with_command_limits(limits);
+    let error = replica
+        .receive(command)
+        .expect_err("over-sized command must be rejected");
+    assert!(matches!(
+        error,
+        prism_editor_collab::ApplyError::InvalidCommand(CommandError::LimitExceeded("payload"))
+    ));
+    assert_eq!(replica.revision(), 0);
+    assert!(replica.pending_ids().is_empty());
+}
+
+#[test]
+fn replica_memory_limits_reject_growth_without_partial_state() {
+    let limits = ReplicaLimits {
+        max_known_commands: 8,
+        max_pending_commands: 1,
+        max_applied_commands: 1,
+    };
+    let first = set("a", 1, 1, Vec::new(), "one", Value::Int(1));
+    let second = set("a", 2, 2, Vec::new(), "two", Value::Int(2));
+    let mut replica = Replica::new(actor("local"), 8)
+        .expect("replica")
+        .with_replica_limits(limits);
+    replica.receive(first).expect("first command");
+    let error = replica
+        .receive(second)
+        .expect_err("applied command bound must reject growth");
+    assert_eq!(
+        error,
+        prism_editor_collab::ApplyError::LimitExceeded {
+            kind: "applied commands",
+            limit: 1,
+        }
+    );
+    assert_eq!(replica.revision(), 1);
+
+    let missing = CommandId {
+        actor: actor("missing"),
+        sequence: 1,
+    };
+    let buffered = set("b", 1, 3, vec![missing.clone()], "buffered", Value::Int(3));
+    let extra = set("c", 1, 4, vec![missing], "extra", Value::Int(4));
+    let mut pending_replica = Replica::new(actor("local"), 8)
+        .expect("replica")
+        .with_replica_limits(ReplicaLimits {
+            max_known_commands: 8,
+            max_pending_commands: 1,
+            max_applied_commands: 8,
+        });
+    assert!(matches!(
+        pending_replica.receive(buffered),
+        Ok(prism_editor_collab::ReceiveOutcome::Buffered(_))
+    ));
+    assert_eq!(
+        pending_replica.receive(extra),
+        Err(prism_editor_collab::ApplyError::LimitExceeded {
+            kind: "pending commands",
+            limit: 1,
+        })
+    );
+    assert_eq!(pending_replica.pending_ids().len(), 1);
+}
+
+#[test]
+fn pending_capacity_allows_dependency_and_applied_capacity_is_transactional() {
+    let missing = CommandId {
+        actor: actor("a"),
+        sequence: 1,
+    };
+    let buffered = set("b", 1, 1, vec![missing.clone()], "buffered", Value::Int(1));
+    let dependency = set("a", 1, 2, Vec::new(), "dependency", Value::Int(2));
+    let mut replica = Replica::new(actor("local"), 8)
+        .expect("replica")
+        .with_replica_limits(ReplicaLimits {
+            max_known_commands: 8,
+            max_pending_commands: 1,
+            max_applied_commands: 1,
+        });
+    assert!(matches!(
+        replica.receive(buffered),
+        Ok(prism_editor_collab::ReceiveOutcome::Buffered(_))
+    ));
+    assert_eq!(
+        replica.receive(dependency),
+        Err(prism_editor_collab::ApplyError::LimitExceeded {
+            kind: "applied commands",
+            limit: 1,
+        })
+    );
+    assert_eq!(replica.revision(), 0);
+    assert_eq!(replica.pending_ids().len(), 1);
 }
 
 #[test]

@@ -31,7 +31,7 @@ pub use command::{
 };
 pub use document::{
     ApplyError, ApplyOutcome, DocumentState, HistoryEntry, HistoryError, HistoryInfo,
-    ReceiveOutcome, ReplayError, Replica, Snapshot,
+    ReceiveOutcome, ReplayError, Replica, ReplicaLimits, Snapshot,
 };
 pub use lock::{LockError, LockLease, LockRecord, ResourceId, SoftLockRegistry};
 pub use presence::{
