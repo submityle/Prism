@@ -7,17 +7,25 @@
 //!
 //! * `pkg/prism_render_scene/src/shaders/material_unpack.wesl` — the GPU decoder.
 //! * `pkg/prism_render_material/src/surface_layout.rs` — the CPU layout facts.
+//! * `pkg/prism_material_schema/src/generated_contract.rs` — S3/S4
+//!   specialization packing and CPU sample/golden field metadata.
+//! * `pkg/prism_render_scene/src/shaders/material_classification.wesl` — the
+//!   schema-owned classification metadata block.
 //!
 //! Usage:
 //!
 //! ```text
 //! cargo run -p prism_material_schema --bin prism-material-codegen -- write
+//! cargo run -p prism_material_schema --bin prism-material-codegen -- write-rust
 //! cargo run -p prism_material_schema --bin prism-material-codegen -- check
 //! ```
 //!
 //! `write` rewrites both files from the schema. `check` regenerates in memory
 //! and exits non-zero (listing the stale files) if either committed file drifts
 //! from the schema — the hook a CI job and the `codegen_freshness` tests use.
+//! `write-rust` rewrites only the Rust product, which is useful when the
+//! material schema changes are intentionally scoped away from the render-scene
+//! shader tree.
 
 #![expect(
     clippy::print_stdout,
@@ -28,7 +36,9 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use prism_material_schema::codegen::{emit_rust_layout, emit_wesl_unpack};
+use prism_material_schema::codegen::{
+    emit_material_classification, emit_rust_layout, emit_schema_contract, emit_wesl_unpack,
+};
 use prism_material_schema::surface_schema;
 
 /// A generated product: its workspace-relative path and freshly emitted text.
@@ -50,6 +60,8 @@ fn workspace_root() -> PathBuf {
 /// Emit every product from the current committed schema.
 fn products() -> Vec<Product> {
     let schema = surface_schema();
+    let classification_template =
+        include_str!("../../../prism_render_scene/src/shaders/material_classification.wesl");
     vec![
         Product {
             relative_path: "pkg/prism_render_scene/src/shaders/material_unpack.wesl",
@@ -59,7 +71,22 @@ fn products() -> Vec<Product> {
             relative_path: "pkg/prism_render_material/src/surface_layout.rs",
             contents: emit_rust_layout(&schema),
         },
+        Product {
+            relative_path: "pkg/prism_material_schema/src/generated_contract.rs",
+            contents: emit_schema_contract(&schema),
+        },
+        Product {
+            relative_path: "pkg/prism_render_scene/src/shaders/material_classification.wesl",
+            contents: emit_material_classification(&schema, classification_template),
+        },
     ]
+}
+
+fn rust_product() -> Product {
+    products()
+        .into_iter()
+        .find(|product| product.relative_path == "pkg/prism_render_material/src/surface_layout.rs")
+        .expect("Rust layout product must exist")
 }
 
 fn main() -> ExitCode {
@@ -68,8 +95,13 @@ fn main() -> ExitCode {
     let products = products();
 
     match mode.as_str() {
-        "write" => {
-            for p in &products {
+        "write" | "write-rust" => {
+            let selected = if mode == "write-rust" {
+                vec![rust_product()]
+            } else {
+                products
+            };
+            for p in &selected {
                 let path = root.join(p.relative_path);
                 if let Err(e) = std::fs::write(&path, &p.contents) {
                     eprintln!("error: failed to write {}: {e}", path.display());
@@ -104,7 +136,7 @@ fn main() -> ExitCode {
             }
         }
         other => {
-            eprintln!("usage: prism-material-codegen <write|check>");
+            eprintln!("usage: prism-material-codegen <write|write-rust|check>");
             if !other.is_empty() {
                 eprintln!("unknown mode: {other}");
             }

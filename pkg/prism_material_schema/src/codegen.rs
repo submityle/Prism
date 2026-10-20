@@ -85,6 +85,251 @@ fn all_lobe_bits(schema: &SurfaceSchema) -> u32 {
         .fold(0u32, |acc, l| acc | (1u32 << l.registry_slot))
 }
 
+fn bit_mask(bits: u8) -> u64 {
+    if bits == 64 {
+        u64::MAX
+    } else {
+        (1u64 << bits) - 1
+    }
+}
+
+fn specialization_mask(range: crate::BitRange) -> u64 {
+    bit_mask(range.bits) << range.shift
+}
+
+fn emit_f32_slice(output: &mut String, values: &[f32]) {
+    let values = values
+        .iter()
+        .map(|value| float_literal(*value))
+        .collect::<Vec<_>>();
+    let _ = writeln!(output, "&[{}],", values.join(", "));
+}
+
+/// Emit the schema-derived CPU sample/golden field directory.
+///
+/// This product intentionally describes only facts that the surface schema
+/// owns: identity, projected member, storage footprint, neutral default and
+/// declared consumer steps. It does not invent CPU response mathematics,
+/// sampling directions, texture semantics or a `SurfaceSample` projection for
+/// fields whose runtime behavior is shade-time derived.
+#[must_use]
+pub fn emit_cpu_surface_contract(schema: &SurfaceSchema) -> String {
+    let fields = schema.response_fields();
+    let sample_count = fields
+        .iter()
+        .filter(|(_, field)| field.consumed_by.contains(&crate::ConsumedStep::Sample))
+        .count();
+    let golden_count = fields
+        .iter()
+        .filter(|(_, field)| field.consumed_by.contains(&crate::ConsumedStep::Golden))
+        .count();
+    let mut o = String::with_capacity(fields.len() * 260 + 1400);
+    let _ = writeln!(o, "// {GENERATED_BANNER_LINE}");
+    let _ = writeln!(o, "// Regenerate: {REGEN_COMMAND}");
+    o.push_str("// Schema-derived CPU sample/golden surface contract.\n");
+    o.push_str("// Only declarative surface facts are generated here; response math remains typed code.\n\n");
+    o.push_str("#[derive(Clone, Copy, Debug, PartialEq)]\n");
+    o.push_str("pub struct CpuSurfaceField {\n");
+    o.push_str("    pub lobe: Option<&'static str>,\n    pub name: &'static str,\n    pub surface_field: &'static str,\n    pub storage_type: &'static str,\n    pub words: u32,\n    pub default: &'static [f32],\n    pub consumed_by: &'static [&'static str],\n}\n\n");
+    let _ = writeln!(
+        o,
+        "pub const CPU_SURFACE_FIELDS: [CpuSurfaceField; {}] = [",
+        fields.len()
+    );
+    for (lobe, field) in fields {
+        let consumers = field
+            .consumed_by
+            .iter()
+            .map(|step| format!("{:?}", step.as_str()))
+            .collect::<Vec<_>>();
+        let _ = writeln!(o, "    CpuSurfaceField {{");
+        let _ = writeln!(
+            o,
+            "        lobe: {},",
+            lobe.map(|value| format!("Some({value:?})"))
+                .unwrap_or_else(|| "None".to_string())
+        );
+        let _ = writeln!(o, "        name: {:?},", field.name);
+        let _ = writeln!(o, "        surface_field: {:?},", field.surface_field());
+        let _ = writeln!(o, "        storage_type: {:?},", field.ty.as_str());
+        let _ = writeln!(o, "        words: {},", field.ty.words());
+        o.push_str("        default: ");
+        emit_f32_slice(&mut o, &field.default.components());
+        let _ = writeln!(o, "        consumed_by: &[{}],", consumers.join(", "));
+        o.push_str("    },\n");
+    }
+    o.push_str("];\n\n");
+    let _ = writeln!(
+        o,
+        "pub const CPU_SAMPLE_FIELD_COUNT: usize = {sample_count};"
+    );
+    let _ = writeln!(
+        o,
+        "pub const CPU_GOLDEN_FIELD_COUNT: usize = {golden_count};"
+    );
+    o
+}
+
+/// Replace the schema-owned metadata block in the shipping classification
+/// shader while preserving the hand-written execution-table algorithm around
+/// it. The replacement is exact and deterministic; missing or duplicated
+/// markers are rejected by the codegen caller.
+#[must_use]
+pub fn emit_material_classification(schema: &SurfaceSchema, template: &str) -> String {
+    const BEGIN: &str = "// BEGIN SCHEMA-GENERATED MATERIAL METADATA";
+    const END: &str = "// END SCHEMA-GENERATED MATERIAL METADATA";
+    let Some(begin) = template.find(BEGIN) else {
+        return template.to_string();
+    };
+    let Some(end_rel) = template[begin..].find(END) else {
+        return template.to_string();
+    };
+    let end = begin + end_rel + END.len();
+    let block_storage = emit_material_classification_schema_block(schema);
+    let block = block_storage.trim_end();
+    let mut output = String::with_capacity(template.len() + block.len());
+    output.push_str(&template[..begin]);
+    output.push_str(block);
+    output.push_str(&template[end..]);
+    output
+}
+
+/// Emit the complete schema contract source product used by S3/S4 tests and
+/// tooling. It deliberately contains no runtime dependency on removed APIs.
+#[must_use]
+pub fn emit_schema_contract(schema: &SurfaceSchema) -> String {
+    let mut output = emit_specialization_layout(schema);
+    output.push('\n');
+    output.push_str(&emit_cpu_surface_contract(schema));
+    output
+}
+
+/// Emit the schema-derived specialization packing product.
+///
+/// This is deliberately a value-level helper rather than a runtime
+/// `SpecializationId` type. The old runtime API was removed with the ABI
+/// refactor; the schema still owns the stable bake-time bit contract.
+#[must_use]
+pub fn emit_specialization_layout(schema: &SurfaceSchema) -> String {
+    let layout = &schema.specialization;
+    let mut o = String::with_capacity(2200);
+    let _ = writeln!(o, "// {GENERATED_BANNER_LINE}");
+    let _ = writeln!(o, "// Regenerate: {REGEN_COMMAND}");
+    o.push_str("#![allow(missing_docs)]\n\n");
+    o.push_str("// Schema-derived bake-time material specialization packing.\n");
+    o.push_str("// This is metadata and pure packing logic; it does not restore the removed runtime API.\n\n");
+    o.push_str("#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]\n");
+    o.push_str("pub struct SpecializationParts {\n");
+    o.push_str(
+        "    pub illumination: u32,\n    pub lobe_mask: u32,\n    pub render_class: u32,\n}\n\n",
+    );
+    o.push_str("#[derive(Clone, Copy, Debug, Eq, PartialEq)]\n");
+    o.push_str("pub struct SpecializationLayout {\n");
+    o.push_str("    pub storage_bits: u8,\n    pub illumination_shift: u8,\n    pub illumination_bits: u8,\n    pub lobe_mask_shift: u8,\n    pub lobe_mask_bits: u8,\n    pub render_class_shift: u8,\n    pub render_class_bits: u8,\n    pub reserved_shift: u8,\n    pub reserved_bits: u8,\n}\n\n");
+    o.push_str("pub const SPECIALIZATION_LAYOUT: SpecializationLayout = SpecializationLayout {\n");
+    let _ = writeln!(o, "    storage_bits: {},", layout.storage_bits);
+    let _ = writeln!(o, "    illumination_shift: {},", layout.illumination.shift);
+    let _ = writeln!(o, "    illumination_bits: {},", layout.illumination.bits);
+    let _ = writeln!(o, "    lobe_mask_shift: {},", layout.lobe_mask.shift);
+    let _ = writeln!(o, "    lobe_mask_bits: {},", layout.lobe_mask.bits);
+    let _ = writeln!(o, "    render_class_shift: {},", layout.render_class.shift);
+    let _ = writeln!(o, "    render_class_bits: {},", layout.render_class.bits);
+    let _ = writeln!(o, "    reserved_shift: {},", layout.reserved.shift);
+    let _ = writeln!(o, "    reserved_bits: {},\n}};", layout.reserved.bits);
+    let _ = writeln!(
+        o,
+        "pub const SPECIALIZATION_ILLUMINATION_MASK: u64 = 0x{:016X};",
+        specialization_mask(layout.illumination)
+    );
+    let _ = writeln!(
+        o,
+        "pub const SPECIALIZATION_LOBE_MASK_MASK: u64 = 0x{:016X};",
+        specialization_mask(layout.lobe_mask)
+    );
+    let _ = writeln!(
+        o,
+        "pub const SPECIALIZATION_RENDER_CLASS_MASK: u64 = 0x{:016X};",
+        specialization_mask(layout.render_class)
+    );
+    let _ = writeln!(
+        o,
+        "pub const SPECIALIZATION_RESERVED_MASK: u64 = 0x{:016X};\n",
+        specialization_mask(layout.reserved)
+    );
+    let _ = writeln!(
+        o,
+        "pub const fn pack_specialization_id(illumination: u32, lobe_mask: u32, render_class: u32) -> u64 {{\n    ((illumination as u64 & 0x{:X}) << {}) | ((lobe_mask as u64 & 0x{:X}) << {}) | ((render_class as u64 & 0x{:X}) << {})\n}}\n",
+        bit_mask(layout.illumination.bits),
+        layout.illumination.shift,
+        bit_mask(layout.lobe_mask.bits),
+        layout.lobe_mask.shift,
+        bit_mask(layout.render_class.bits),
+        layout.render_class.shift
+    );
+    o.push_str("#[must_use]\n");
+    o.push_str("pub const fn unpack_specialization_id(value: u64) -> SpecializationParts {\n");
+    let _ = writeln!(
+        o,
+        "    SpecializationParts {{ illumination: ((value >> {}) & 0x{:X}) as u32, lobe_mask: ((value >> {}) & 0x{:X}) as u32, render_class: ((value >> {}) & 0x{:X}) as u32 }}\n}}\n",
+        layout.illumination.shift,
+        bit_mask(layout.illumination.bits),
+        layout.lobe_mask.shift,
+        bit_mask(layout.lobe_mask.bits),
+        layout.render_class.shift,
+        bit_mask(layout.render_class.bits)
+    );
+    o
+}
+
+/// Emit the schema-owned metadata block embedded in the shipping
+/// `material_classification.wesl` consumer.
+#[must_use]
+pub fn emit_material_classification_schema_block(schema: &SurfaceSchema) -> String {
+    let layout = &schema.specialization;
+    let mut o = String::new();
+    o.push_str("// BEGIN SCHEMA-GENERATED MATERIAL METADATA\n");
+    o.push_str("// This block is generated from schema/surface.toml.\n");
+    let _ = writeln!(
+        o,
+        "const PRISM_SCHEMA_LOBE_MASK_ALL: u32 = {}u;",
+        all_lobe_bits(schema)
+    );
+    let _ = writeln!(
+        o,
+        "const PRISM_SCHEMA_SPECIALIZATION_ILLUMINATION_SHIFT: u32 = {}u;",
+        layout.illumination.shift
+    );
+    let _ = writeln!(
+        o,
+        "const PRISM_SCHEMA_SPECIALIZATION_ILLUMINATION_BITS: u32 = {}u;",
+        layout.illumination.bits
+    );
+    let _ = writeln!(
+        o,
+        "const PRISM_SCHEMA_SPECIALIZATION_LOBE_MASK_SHIFT: u32 = {}u;",
+        layout.lobe_mask.shift
+    );
+    let _ = writeln!(
+        o,
+        "const PRISM_SCHEMA_SPECIALIZATION_LOBE_MASK_BITS: u32 = {}u;",
+        layout.lobe_mask.bits
+    );
+    let _ = writeln!(
+        o,
+        "const PRISM_SCHEMA_SPECIALIZATION_RENDER_CLASS_SHIFT: u32 = {}u;",
+        layout.render_class.shift
+    );
+    let _ = writeln!(
+        o,
+        "const PRISM_SCHEMA_SPECIALIZATION_RENDER_CLASS_BITS: u32 = {}u;",
+        layout.render_class.bits
+    );
+    o.push_str("\nfn prism_schema_lobe_mask_is_valid(mask: u32) -> bool {\n");
+    o.push_str("    return (mask & ~PRISM_SCHEMA_LOBE_MASK_ALL) == 0u;\n}\n");
+    o.push_str("// END SCHEMA-GENERATED MATERIAL METADATA\n");
+    o
+}
+
 // ---------------------------------------------------------------------------
 // WESL emitter
 // ---------------------------------------------------------------------------
@@ -1190,12 +1435,18 @@ pub fn emit_rust_layout(schema: &SurfaceSchema) -> String {
     o.push_str("    pub lobe: Option<&'static str>,\n");
     o.push_str("    /// Field name within the owning record.\n");
     o.push_str("    pub name: &'static str,\n");
+    o.push_str("    /// Target member in the decoded CPU/GPU fat surface.\n");
+    o.push_str("    pub surface_field: &'static str,\n");
+    o.push_str("    /// Exact schema storage type (`f32`, `vec4f`, or `f16`).\n");
+    o.push_str("    pub storage_type: &'static str,\n");
     o.push_str("    /// First `u32` word within the owning record.\n");
     o.push_str("    pub pack_slot: u32,\n");
     o.push_str("    /// Word footprint of the field's storage type.\n");
     o.push_str("    pub words: u32,\n");
     o.push_str("    /// Schema bit-region spelling (`KHR`, `PRISM`, ...).\n");
     o.push_str("    pub bit_region: &'static str,\n");
+    o.push_str("    /// Declared pipeline consumers, in schema order.\n");
+    o.push_str("    pub consumed_by: &'static [&'static str],\n");
     o.push_str("}\n\n");
     let _ = writeln!(o, "/// Every non-padding field, in core-then-registry-slot order.\npub const SURFACE_FIELDS: [SurfaceFieldLayout; {field_count}] = [");
     for field in schema
@@ -1206,11 +1457,18 @@ pub fn emit_rust_layout(schema: &SurfaceSchema) -> String {
     {
         let _ = writeln!(
             o,
-            "    SurfaceFieldLayout {{\n        lobe: None,\n        name: {:?},\n        pack_slot: {},\n        words: {},\n        bit_region: {:?},\n    }},",
+            "    SurfaceFieldLayout {{\n        lobe: None,\n        name: {:?},\n        surface_field: {:?},\n        storage_type: {:?},\n        pack_slot: {},\n        words: {},\n        bit_region: {:?},\n        consumed_by: &{:?},\n    }},",
             field.name,
+            field.surface_field(),
+            field.ty.as_str(),
             field.pack_slot,
             field.ty.words(),
-            field.bit_region.as_str()
+            field.bit_region.as_str(),
+            field
+                .consumed_by
+                .iter()
+                .map(|step| step.as_str())
+                .collect::<Vec<_>>()
         );
     }
     for lobe in lobes {
@@ -1221,12 +1479,19 @@ pub fn emit_rust_layout(schema: &SurfaceSchema) -> String {
         {
             let _ = writeln!(
                 o,
-                "    SurfaceFieldLayout {{\n        lobe: Some({:?}),\n        name: {:?},\n        pack_slot: {},\n        words: {},\n        bit_region: {:?},\n    }},",
+                "    SurfaceFieldLayout {{\n        lobe: Some({:?}),\n        name: {:?},\n        surface_field: {:?},\n        storage_type: {:?},\n        pack_slot: {},\n        words: {},\n        bit_region: {:?},\n        consumed_by: &{:?},\n    }},",
                 lobe.id,
                 field.name,
+                field.surface_field(),
+                field.ty.as_str(),
                 field.pack_slot,
                 field.ty.words(),
-                field.bit_region.as_str()
+                field.bit_region.as_str(),
+                field
+                    .consumed_by
+                    .iter()
+                    .map(|step| step.as_str())
+                    .collect::<Vec<_>>()
             );
         }
     }

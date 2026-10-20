@@ -15,7 +15,9 @@
 //! proves the hand-written `surface.rs` image equals the schema for all 2^N
 //! masks), the schema -> Rust layout -> WESL chain stays transitively exact.
 
-use prism_material_schema::codegen::{emit_rust_layout, emit_wesl_unpack};
+use prism_material_schema::codegen::{
+    emit_material_classification, emit_rust_layout, emit_schema_contract, emit_wesl_unpack,
+};
 use prism_material_schema::surface_schema;
 use prism_render_material::{ClosureKind, SURFACE_LOBE_CLOSURES};
 
@@ -26,6 +28,10 @@ const COMMITTED_WESL: &str =
 
 /// Committed CPU layout module (lives next to the typed structs it guards).
 const COMMITTED_RUST_LAYOUT: &str = include_str!("../src/surface_layout.rs");
+const COMMITTED_SCHEMA_CONTRACT: &str =
+    include_str!("../../prism_material_schema/src/generated_contract.rs");
+const COMMITTED_CLASSIFICATION: &str =
+    include_str!("../../prism_render_scene/src/shaders/material_classification.wesl");
 const HAND_WRITTEN_SURFACE: &str = include_str!("../src/surface.rs");
 
 #[test]
@@ -45,6 +51,25 @@ fn committed_rust_layout_matches_generator() {
         COMMITTED_RUST_LAYOUT, fresh,
         "surface_layout.rs is stale; regenerate with \
          `cargo run -p prism_material_schema --bin prism-material-codegen -- write`"
+    );
+}
+
+#[test]
+fn committed_schema_contract_matches_generator() {
+    let fresh = emit_schema_contract(&surface_schema());
+    assert_eq!(
+        COMMITTED_SCHEMA_CONTRACT, fresh,
+        "generated_contract.rs is stale; regenerate with `cargo run -p prism_material_schema --bin prism-material-codegen -- write`"
+    );
+}
+
+#[test]
+fn committed_classification_metadata_matches_generator() {
+    let schema = surface_schema();
+    let fresh = emit_material_classification(&schema, COMMITTED_CLASSIFICATION);
+    assert_eq!(
+        COMMITTED_CLASSIFICATION, fresh,
+        "material_classification.wesl is stale; regenerate with `cargo run -p prism_material_schema --bin prism-material-codegen -- write`"
     );
 }
 

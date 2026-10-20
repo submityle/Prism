@@ -3,12 +3,11 @@
 //!
 //! # Why
 //!
-//! The lobe field layout, bit masks, specialization keys, defaults and valid
-//! ranges are currently hand-written in six places: Rust (`surface.rs` /
-//! `record.rs`), the WESL twins (`material_unpack` / `material_classification`
-//! / `material_sample`), the CPU golden in `prism_render_shading`, the doc
-//! field tables (§4.4), and the compliance enum (§4.5). Adding one lobe means
-//! editing all six, and any drift is a silent CPU/GPU parity or compliance bug.
+//! The lobe field layout, bit masks, defaults and valid ranges are consumed by
+//! Rust (`surface.rs` / `record.rs`), the WESL unpack/sample path, the CPU
+//! golden in `prism_render_shading`, the doc field tables (§4.4), and the
+//! compliance enum (§4.5). Adding one lobe must not let those consumers drift
+//! into different CPU/GPU ABI or compliance contracts.
 //!
 //! This crate holds the declarative schema and the deterministic, pure layout
 //! derivation consumed by the S2 codegen. The generator emits the committed
@@ -20,8 +19,8 @@
 //! # Design boundary (§17.5.5)
 //!
 //! The schema owns *layout and contract* (field name/type/bit-region/pack
-//! offset/specialization subfield/consumed-by step/default/valid predicate/
-//! energy policy/view dependence). It deliberately does **not** express
+//! offset/consumed-by step/default/valid predicate/energy policy/view
+//! dependence). It deliberately does **not** express
 //! behavioural math; that stays in typed hooks. The schema is not Turing
 //! complete by design.
 
@@ -35,6 +34,13 @@ use core::fmt;
 use serde::Deserialize;
 
 pub mod codegen;
+/// Schema-derived bake-time specialization and CPU sample/golden metadata.
+///
+/// This module is generated from `schema/surface.toml`; keeping it compiled
+/// here makes S3/S4 products part of the crate contract instead of an
+/// uncompiled file that can silently drift.
+#[allow(missing_docs)]
+pub mod generated_contract;
 mod response;
 pub use response::*;
 
@@ -68,6 +74,10 @@ pub struct SurfaceSchema {
     pub schema_version: u32,
     /// The runtime `MATERIAL_ABI_VERSION` this layout targets.
     pub abi_version: u32,
+    /// Bit-level specialization identity layout used by bake-time products.
+    /// This is metadata for code generation, not a runtime header field.
+    #[serde(default)]
+    pub specialization: SpecializationSchema,
     /// The always-present über-BSDF core record.
     pub core: Record,
     /// Optional lobes, declared in any order (`registry_slot` fixes identity
@@ -88,6 +98,75 @@ pub struct SurfaceSchema {
     /// hold no header-digest slot (§5.2).
     #[serde(default, rename = "identity_extension")]
     pub identity_extensions: Vec<IdentityExtension>,
+}
+
+/// Declarative bit layout for the material specialization identity.
+///
+/// The current runtime uses execution-table bindings rather than carrying this
+/// identity in `GpuMaterialHeader`. The layout remains schema-owned because
+/// bake-time permutation keys, bin keys, and diagnostics still need one stable
+/// packing contract. Codegen emits a pure value type without reviving the
+/// removed runtime API.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SpecializationSchema {
+    /// Width of the serialized identity.
+    #[serde(default = "default_specialization_storage_bits")]
+    pub storage_bits: u8,
+    /// Illumination axis bit range.
+    #[serde(default = "default_illumination_bits")]
+    pub illumination: BitRange,
+    /// Live surface-lobe mask bit range.
+    #[serde(default = "default_lobe_mask_bits")]
+    pub lobe_mask: BitRange,
+    /// Raster/blend class bit range.
+    #[serde(default = "default_render_class_bits")]
+    pub render_class: BitRange,
+    /// Reserved high bits.
+    #[serde(default = "default_reserved_bits")]
+    pub reserved: BitRange,
+}
+
+impl Default for SpecializationSchema {
+    fn default() -> Self {
+        Self {
+            storage_bits: default_specialization_storage_bits(),
+            illumination: default_illumination_bits(),
+            lobe_mask: default_lobe_mask_bits(),
+            render_class: default_render_class_bits(),
+            reserved: default_reserved_bits(),
+        }
+    }
+}
+
+/// A half-open bit range `[shift, shift + bits)`.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BitRange {
+    /// First bit occupied by this range.
+    pub shift: u8,
+    /// Number of bits occupied by this range.
+    pub bits: u8,
+}
+
+const fn default_specialization_storage_bits() -> u8 {
+    64
+}
+
+const fn default_illumination_bits() -> BitRange {
+    BitRange { shift: 0, bits: 8 }
+}
+
+const fn default_lobe_mask_bits() -> BitRange {
+    BitRange { shift: 8, bits: 32 }
+}
+
+const fn default_render_class_bits() -> BitRange {
+    BitRange { shift: 40, bits: 8 }
+}
+
+const fn default_reserved_bits() -> BitRange {
+    BitRange { shift: 48, bits: 16 }
 }
 
 /// A runtime dynamic parameter channel (§17.1).
@@ -331,9 +410,6 @@ pub struct Field {
     pub bit_region: Namespace,
     /// First `u32` word of this field within its record.
     pub pack_slot: u32,
-    /// Which structural layout input this contributes to; never a packed ID.
-    #[serde(default)]
-    pub spec_subfield: SpecSubfield,
     /// Which pipeline steps consume this field (§8.5).
     #[serde(default)]
     pub consumed_by: Vec<ConsumedStep>,
@@ -387,6 +463,17 @@ pub enum FieldType {
 }
 
 impl FieldType {
+    /// Canonical schema spelling used by generated field metadata.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::F32 => "f32",
+            Self::Vec4f => "vec4f",
+            Self::F16 => "f16",
+            Self::Pad => "pad",
+        }
+    }
+
     /// Number of `u32` words this type occupies in a packed record.
     #[must_use]
     pub const fn words(self) -> u32 {
@@ -515,27 +602,12 @@ impl IdentityKind {
     }
 }
 
-/// Structural metadata; surface values never become permutation identities.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SpecSubfield {
-    /// Contributes to no specialization subfield.
-    #[default]
-    None,
-    /// Contributes to the open lobe closure mask.
-    ClosureMask,
-    /// Contributes to the render-class axis.
-    RenderClass,
-}
-
 /// A pipeline step that consumes a field (§8.5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConsumedStep {
     /// Word-heap unpack (`material_unpack`).
     Unpack,
-    /// Work classification (`material_classification`).
-    Classify,
     /// BSDF sampling / evaluation (`material_sample`).
     Sample,
     /// CPU golden mirror (`prism_render_shading`).
@@ -552,6 +624,24 @@ pub enum ConsumedStep {
     Npr,
     /// Unlit response semantics.
     Unlit,
+}
+
+impl ConsumedStep {
+    /// Canonical schema spelling used by generated field metadata.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unpack => "unpack",
+            Self::Sample => "sample",
+            Self::Golden => "golden",
+            Self::Debug => "debug",
+            Self::Doc => "doc",
+            Self::Compliance => "compliance",
+            Self::Lit => "lit",
+            Self::Npr => "npr",
+            Self::Unlit => "unlit",
+        }
+    }
 }
 
 /// How a field participates in the layered energy budget (§17.2).
@@ -728,6 +818,7 @@ impl SurfaceSchema {
 
     /// Validate structural invariants that any valid schema must satisfy.
     pub fn validate(&self) -> Result<(), SchemaError> {
+        validate_specialization(&self.specialization)?;
         validate_record("core", &self.core)?;
 
         // The decoded fat surface is the CPU/GPU mirror target. Its field
@@ -906,6 +997,42 @@ impl SurfaceSchema {
 /// without ever colliding.
 pub const EXTENSION_SLOT_BASE: u32 = 16;
 
+fn validate_specialization(layout: &SpecializationSchema) -> Result<(), SchemaError> {
+    if layout.storage_bits == 0 || layout.storage_bits > 64 {
+        return Err(SchemaError::InvalidSpecializationLayout(format!(
+            "storage_bits must be in 1..=64, got {}",
+            layout.storage_bits
+        )));
+    }
+    let ranges = [
+        ("illumination", layout.illumination),
+        ("lobe_mask", layout.lobe_mask),
+        ("render_class", layout.render_class),
+        ("reserved", layout.reserved),
+    ];
+    for (name, range) in ranges {
+        let end = u16::from(range.shift) + u16::from(range.bits);
+        if range.bits == 0 || end > u16::from(layout.storage_bits) {
+            return Err(SchemaError::InvalidSpecializationLayout(format!(
+                "{name} range [{}..{}) is outside {} bits",
+                range.shift, end, layout.storage_bits
+            )));
+        }
+    }
+    for (index, (left_name, left)) in ranges.iter().enumerate() {
+        for (right_name, right) in ranges.iter().skip(index + 1) {
+            let left_end = u16::from(left.shift) + u16::from(left.bits);
+            let right_end = u16::from(right.shift) + u16::from(right.bits);
+            if u16::from(left.shift) < right_end && u16::from(right.shift) < left_end {
+                return Err(SchemaError::InvalidSpecializationLayout(format!(
+                    "{left_name} overlaps {right_name}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// A borrowed record view so core and lobe records share one validator.
 fn record_view(lobe: &Lobe) -> Record {
     Record {
@@ -995,6 +1122,8 @@ fn validate_record(name: &str, record: &Record) -> Result<(), SchemaError> {
 pub enum SchemaError {
     /// The TOML failed to deserialize into the schema model.
     Parse(String),
+    /// The specialization ranges do not form a valid, non-overlapping layout.
+    InvalidSpecializationLayout(String),
     /// Two lobes declared the same `registry_slot`.
     DuplicateRegistrySlot(u32),
     /// Two lobes declared the same `uid`.
@@ -1090,6 +1219,9 @@ impl fmt::Display for SchemaError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Parse(e) => write!(f, "schema parse error: {e}"),
+            Self::InvalidSpecializationLayout(message) => {
+                write!(f, "invalid specialization layout: {message}")
+            }
             Self::EmptyClosureName(id) => {
                 write!(f, "lobe {id:?} declares an empty closure name")
             }
@@ -1171,7 +1303,7 @@ mod tests {
     #[test]
     fn embedded_schema_parses_and_validates() {
         let schema = surface_schema();
-        assert_eq!(schema.schema_version, 2);
+        assert_eq!(schema.schema_version, 3);
         assert_eq!(schema.core.words, 20);
         assert_eq!(schema.lobe_count(), 10);
         // The open-vocabulary glint lobe (§17.6) is a first-class member of the

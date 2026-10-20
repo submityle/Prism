@@ -104,6 +104,21 @@ const FEATURE_ILLUMINATION_BLEND: u32 = 1u << 9u;
 const FEATURE_REGION_ILLUMINATION: u32 = 1u << 7u;
 const INVALID: u32 = 0xffffffffu;
 
+// BEGIN SCHEMA-GENERATED MATERIAL METADATA
+// This block is generated from schema/surface.toml.
+const PRISM_SCHEMA_LOBE_MASK_ALL: u32 = 458879u;
+const PRISM_SCHEMA_SPECIALIZATION_ILLUMINATION_SHIFT: u32 = 0u;
+const PRISM_SCHEMA_SPECIALIZATION_ILLUMINATION_BITS: u32 = 8u;
+const PRISM_SCHEMA_SPECIALIZATION_LOBE_MASK_SHIFT: u32 = 8u;
+const PRISM_SCHEMA_SPECIALIZATION_LOBE_MASK_BITS: u32 = 32u;
+const PRISM_SCHEMA_SPECIALIZATION_RENDER_CLASS_SHIFT: u32 = 40u;
+const PRISM_SCHEMA_SPECIALIZATION_RENDER_CLASS_BITS: u32 = 8u;
+
+fn prism_schema_lobe_mask_is_valid(mask: u32) -> bool {
+    return (mask & ~PRISM_SCHEMA_LOBE_MASK_ALL) == 0u;
+}
+// END SCHEMA-GENERATED MATERIAL METADATA
+
 // Program kinds are the generated execution-table ABI, not lobe buckets.
 struct ExecutionIdentity {
     family: u32,
@@ -302,6 +317,11 @@ fn classify_count(@builtin(global_invocation_id) id: vec3<u32>) {
     if header.is_active == 0u || header.generation != metadata.y {
         pixels[pixel] = PixelClass(0xffffffffu, 0xffffffffu, material_index, 0xffffffffu, 4u);
         atomicAdd(&diagnostics[1], 1u);
+        return;
+    }
+    if !prism_schema_lobe_mask_is_valid(header.lobe_mask) {
+        pixels[pixel] = PixelClass(INVALID, INVALID, material_index, INVALID, 8u);
+        atomicAdd(&diagnostics[2], 1u);
         return;
     }
     // `metadata.z` is the visibility raster's Lit/Stylized selector
