@@ -8,6 +8,14 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [dependencies]
+wgpu = { version = "30", default-features = false, features = ["wgsl", "metal"] }
+
+[dev-dependencies]
+futures-lite = "2"
+
+[features]
+default = []
+gpu-tests = []
 
 [lints]
 workspace = true

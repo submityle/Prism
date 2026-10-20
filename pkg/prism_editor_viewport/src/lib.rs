@@ -1,13 +1,18 @@
 //! Deterministic viewport, picking, and gizmo interaction contracts.
 //!
-//! This crate deliberately stops at the editor boundary. A renderer adapter
-//! may turn [`PickRequest`] into a GPU ID-buffer pass, while an input adapter
-//! may feed pointer movement into [`GizmoSession`]. Neither adapter is needed
-//! to test ordering, stale-result rejection, or drag coalescing.
+//! The crate also includes an executable wgpu ID-buffer backend. It owns only
+//! target/readback resources and leaves object-ID drawing to the renderer.
 
 #![forbid(unsafe_code)]
 
 extern crate alloc;
+
+mod gpu_picking;
+
+pub use gpu_picking::{
+    EncodedPickId, GpuPickingBackend, GpuPickingConfig, GpuPickingError, GpuPickingFrame,
+    PendingPickReadback, ID_BUFFER_BYTES_PER_TEXEL, ID_BUFFER_FORMAT, READBACK_ROW_ALIGNMENT,
+};
 
 use alloc::{collections::BTreeMap, string::String};
 use core::fmt;
