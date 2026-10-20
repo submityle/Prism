@@ -1,6 +1,6 @@
 # Prism World 系统实现记录
 
-日期：2026-10-16
+日期：2026-10-20
 
 本文只把已经存在源码、测试和提交记录的部分标为已交付；设计文档中的路线图、指标和效果目标仍然不能替代实现证据。
 
@@ -24,6 +24,7 @@
 - canonical Data Layer admission 已进入 `prism_world_stream`：`DataLayerMask` 使用固定 64-bit ABI，拒绝重复及超范围 layer id；`CellManifest::data_layers` 与 `DemandSource::data_layers` 在同一 scheduler 中完成无逐帧 layer-list 分配的子集准入，layer mask 变化会触发 stale reload，空间仍满足但 layer 不可用的 resident 会被确定性驱逐。runtime 的 `LayeredCellManifest`、`RuntimeDataLayers` 和 `LayeredCellFrameCoordinator` 现在复用该 mask，并将可用层集合传给普通 stream coordinator；cell header 扩展为 52 字节并校验 layer mask，避免 manifest 与 payload header 的层集合分裂。该切片仍不解析 layer payload，也不等价于 ECS、terrain、GPU 或 renderer 的产品层接线。
 - `prism_world_residency`：A/B/C 三档状态、物化预算、确定性 promotion/demotion、HLOD 连续 alpha/dither、QoS governor、稀疏 SDF brick 和 PCG 图求值/脏传播/cache key。
 - `prism_world_runtime` 的 cell reload 缺口已补齐：`CellFrameCoordinator` 用 manifest revision 识别 replacement，仍复用既有 `SceneHost::load_cell` 边界，成功后提交新 manifest；header、provider、取消、背压或 host 失败时恢复旧 manifest 的 resident 状态。该片只覆盖 cell payload replacement，不冒充 `prism_scene::SceneReloadPlan` 的模板级增量 ECS 传播，也不提供 host 内部原子回滚。
+- 数据层切换期间的 in-flight 请求现在有明确的 stale-completion fence：层变为不可用时只标记并取消对应 sector，底层 IO 必须消费终结事件后才释放身份/配额；迟到成功或失败不会跨过 `SceneHost` 边界，也不会污染旧 resident 状态。data-layer mask 变化仍参与 manifest replacement identity。`prism_world_stream` 9 项与 `prism_world_runtime` 104 项定向回归通过（2026-10-20，独立 `/private/tmp/prism-target`）；这证明的是 CPU lifecycle contract，不是异步 OS 读抢占、GPU 或 renderer 接线。
 - `prism_world_runtime` 新增 engine-neutral `RuntimeDataLayers` 与 `LayeredCellFrameCoordinator`：在既有 `CellFrameCoordinator`/`SceneHost` 之上显式区分 unloaded、loaded、activated，按稳定 `DataLayerId` 排序并取 cell 声明层与 runtime-enabled 层的确定性交集；layer-set host 调用成功后才提交本地状态，失败保留旧状态，可在驻留 eviction 后重新加载并重新激活。该 slice 不解析 layer payload，不修改 terrain、GPU、ECS partition 或 render。
 - `prism_world_runtime` 新增 engine-neutral `HlodRuntime`：接入已验证的 `HlodCluster` 声明，按稳定 cluster id 排序请求，执行请求数/输出字节/目录容量预检，提供跨帧 hysteresis 与确定性 transition record，并在整批校验、计算和输出分配成功后一次性提交 active level；重复 cluster、重复请求、未知 cluster、声明错误和预算错误均 fail-closed，失败不污染旧状态。该 slice 只负责 runtime selection plan，不生成 HLOD 资产、不解析 proxy、不接 Scene/ECS 或 renderer graph。
 - `prism_world`：组合 policy core 的 `WorldRuntime`，并提供 feature-gated `SceneEcsHost`；cell 加载通过真实 `prism_scene::spawn_typed_plan`/`SceneSpawn::attach_instance`，卸载通过 `prism_scene::despawn_instance`，驻留升降级通过 typed provider 回调，不直接写第二份 scene 真相。
