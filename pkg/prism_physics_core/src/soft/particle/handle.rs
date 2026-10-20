@@ -29,10 +29,11 @@ impl ParticleHandle {
 
     /// Creates a handle from a raw slot index.
     ///
-    /// This is `pub(crate)` because only the storage should mint handles that
-    /// are guaranteed to refer to a live slot.
+    /// The caller is responsible for ensuring that the slot belongs to the
+    /// particle storage being accessed and is currently live. Constructing a
+    /// handle does not validate either condition.
     #[must_use]
-    pub(crate) const fn from_index(index: u32) -> ParticleHandle {
+    pub const fn from_index(index: u32) -> ParticleHandle {
         ParticleHandle(index)
     }
 

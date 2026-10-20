@@ -642,6 +642,8 @@ prism_particle_tools  (可选) 图编辑器 / 预览(含着色预览) / 性能 H
 
 验证更新（2026-10-20）：共享 checkout 后续恢复了 `pkg/prism_editor_content/src/lib.rs`，定向测试进入依赖编译，但被并行改动中的 `pkg/prism_physics_core/src/world.rs:1036` 阻断（`expected f32, found Vec3`）。同一时段 `target` 再次被并发清理，导致 Naga 无法创建临时目录。故 `particle::compiler` 回归测试仍未运行；错误来自 workspace 依赖/共享构建目录，不是粒子编译器诊断。源码 `rustfmt` 与 `git diff --check` 通过。
 
+验证更新（2026-10-20）：在保留当前共享工作树物理改动的前提下，使用独立的 `CARGO_TARGET_DIR=/private/tmp/prism-ember-target` 重跑 `cargo test -p prism_render_architecture --lib particle::compiler --no-fail-fast`，14 项测试全部通过。覆盖 GraphIr 校验、模块资源契约、资源 binding 冲突重分配、运行时 dispatch ABI、活跃属性与 ping-pong storage binding、曲线采样、Naga WGSL 验证和拓扑顺序；这仍不覆盖内置 kernel 语义 lowering、完整 DataInterface、pipeline-cache/RenderGraph 接线或端到端 Ember 生命周期。
+
 ---
 
 ## 35. 路线图与验收状态
