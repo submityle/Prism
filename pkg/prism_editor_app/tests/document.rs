@@ -4,6 +4,10 @@
 
 extern crate alloc;
 
+#[cfg(feature = "desktop")]
+#[path = "../examples/native_gizmo/support.rs"]
+mod gizmo_support;
+
 use alloc::{sync::Arc, task::Wake};
 use std::{
     fs, io,
@@ -666,6 +670,77 @@ fn real_file_save_reopen_load_prepare_and_atomic_controller_publication() {
     let receipt = saved(&mut reader);
     assert_eq!(receipt.durable_revision, 1);
     receipt.acknowledge(&mut current, &catalog()).unwrap();
+}
+
+#[cfg(feature = "desktop")]
+#[test]
+fn host_transform_batch_undo_redo_real_file_save_and_reload() {
+    use prism_editor_app::SceneTransformAdapter;
+    use prism_editor_viewport::TransformDelta;
+
+    let temp = Temp::new();
+    let (mut controller, _scene) = gizmo_support::scene().unwrap();
+    let mut catalog = DocumentSchemaCatalog::new();
+    catalog
+        .register(
+            std::any::type_name::<gizmo_support::ExampleTransform>(),
+            1,
+            gizmo_support::registry,
+        )
+        .unwrap();
+    let matrix = |controller: &EditorController, n| {
+        gizmo_support::read(controller.object_root(&SelectionItem::entity(n)).unwrap())
+            .unwrap()
+            .matrix
+    };
+    let original = [matrix(&controller, 1), matrix(&controller, 2)];
+    let mut edits = Vec::new();
+    for n in 1..=2 {
+        let item = SelectionItem::entity(n);
+        edits.extend(
+            gizmo_support::ExampleBinding
+                .edits(
+                    &item,
+                    controller.object_root(&item).unwrap(),
+                    TransformDelta {
+                        translation_milliunits: [200, -100, 0],
+                        scale_milliunits: [1000; 3],
+                        ..Default::default()
+                    },
+                )
+                .unwrap(),
+        );
+    }
+    let prepared = controller.prepare_edits(edits).unwrap();
+    controller.commit_edits(prepared).unwrap();
+    assert_eq!(controller.document_history_lengths(), (1, 0));
+    let transformed = [matrix(&controller, 1), matrix(&controller, 2)];
+    assert_ne!(transformed, original);
+    controller.clear_selection().unwrap();
+    controller.execute(EditorAction::Undo).unwrap();
+    assert_eq!([matrix(&controller, 1), matrix(&controller, 2)], original);
+    controller.execute(EditorAction::Redo).unwrap();
+    assert_eq!(
+        [matrix(&controller, 1), matrix(&controller, 2)],
+        transformed
+    );
+    let mut writer = temp.adapter();
+    writer.submit_save(&controller, &catalog).unwrap();
+    saved(&mut writer)
+        .acknowledge(&mut controller, &catalog)
+        .unwrap();
+    assert!(!controller.is_dirty());
+    let mut restored = EditorController::new();
+    let mut reader = temp.adapter();
+    reader.submit_load(&restored, &catalog).unwrap();
+    loaded(&mut reader)
+        .prepare(&catalog, ControllerLimits::default())
+        .unwrap()
+        .install(&mut reader, &mut restored, &catalog)
+        .unwrap();
+    assert_eq!([matrix(&restored, 1), matrix(&restored, 2)], transformed);
+    assert_eq!(restored.document_history_lengths(), (0, 0));
+    assert!(!restored.is_dirty());
 }
 
 #[test]

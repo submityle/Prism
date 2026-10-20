@@ -44,7 +44,10 @@ mod desktop_ui;
 mod document;
 mod lifecycle;
 
-pub use controller::{ControllerError, ControllerLimits, ControllerOutcome, EditorController};
+pub use controller::{
+    ControllerError, ControllerFieldEdit, ControllerLimits, ControllerOutcome, EditorController,
+    PreparedControllerEdit,
+};
 #[cfg(feature = "desktop")]
 pub use desktop::{
     run_desktop, run_desktop_with_document, DesktopConfig, DesktopError, DesktopGpu,
@@ -57,6 +60,8 @@ pub use desktop_scene::{
     DesktopScene, DesktopSceneDocument, DesktopSceneObject, DesktopSceneStatus,
     SceneDocumentAdapter,
 };
+#[cfg(feature = "desktop")]
+pub use desktop_scene::{GizmoFrame, SceneTransformAdapter};
 pub use desktop_ui::{DesktopKey, DesktopUiError, EditorDesktopUi};
 pub use document::{
     DecodedDocument, DocumentCodec, DocumentError, DocumentFileAdapter, DocumentIoEvent,

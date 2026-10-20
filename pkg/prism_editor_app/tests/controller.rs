@@ -1,6 +1,6 @@
 //! Real model, bound UI events, reversible commands, and writeback acceptance.
 
-use prism_editor_app::{ControllerError, ControllerLimits, EditorController};
+use prism_editor_app::{ControllerError, ControllerFieldEdit, ControllerLimits, EditorController};
 use prism_editor_core::SelectionItem;
 use prism_editor_panels::{OutlinerId, OutlinerNode};
 use prism_editor_reflect::{EditorError, FieldPath};
@@ -85,6 +85,111 @@ fn edit(path: &str, value: ActionValue) -> EditorAction {
         path: FieldPath::parse(path).expect("path"),
         value,
     }
+}
+
+fn field(id: u128, path: &str, value: ActionValue) -> ControllerFieldEdit {
+    ControllerFieldEdit {
+        item: SelectionItem::entity(id),
+        path: FieldPath::parse(path).unwrap(),
+        value,
+    }
+}
+
+#[test]
+fn atomic_batches_validate_every_object_and_share_one_history_entry() {
+    let mut c = loaded(ControllerLimits::default());
+    let before = document_models(&c);
+    let revision = c.model_revision();
+    let prepared = c
+        .prepare_edits(vec![
+            field(1, "speed", ActionValue::integer(12)),
+            field(2, "gain", ActionValue::float(0.75)),
+        ])
+        .unwrap();
+    assert_eq!(document_models(&c), before);
+    assert_eq!(c.model_revision(), revision);
+    c.commit_edits(prepared).unwrap();
+    assert_eq!(c.document_history_lengths(), (1, 0));
+    assert_eq!(
+        c.changed_objects_since(revision).unwrap(),
+        vec![SelectionItem::entity(1), SelectionItem::entity(2)]
+    );
+    let after = document_models(&c);
+    c.clear_selection().unwrap();
+    c.execute(EditorAction::Undo).unwrap();
+    assert_eq!(document_models(&c), before);
+    let state = (c.revision(), c.model_revision(), c.is_dirty());
+    for edits in [
+        vec![
+            field(1, "speed", ActionValue::integer(13)),
+            field(2, "gain", ActionValue::float(2.0)),
+        ],
+        vec![
+            field(1, "speed", ActionValue::integer(13)),
+            field(2, "locked", ActionValue::unsigned(8)),
+        ],
+        vec![
+            field(1, "speed", ActionValue::integer(13)),
+            field(1, "speed", ActionValue::integer(10)),
+        ],
+    ] {
+        assert!(c.prepare_edits(edits).is_err());
+        assert_eq!(document_models(&c), before);
+        assert_eq!(c.document_history_lengths(), (0, 1));
+        assert_eq!((c.revision(), c.model_revision(), c.is_dirty()), state);
+    }
+    c.execute(EditorAction::Redo).unwrap();
+    assert_eq!(document_models(&c), after);
+}
+
+#[test]
+fn prepared_batches_reject_foreign_stale_and_over_budget_candidates() {
+    let mut c = loaded(ControllerLimits {
+        max_batch_fields: 2,
+        ..ControllerLimits::default()
+    });
+    let prepared = c
+        .prepare_edits(vec![field(1, "speed", ActionValue::integer(12))])
+        .unwrap();
+    let mut foreign = loaded(ControllerLimits::default());
+    assert!(matches!(
+        foreign.commit_edits(prepared),
+        Err(ControllerError::EditConflict)
+    ));
+    let prepared = c
+        .prepare_edits(vec![field(1, "speed", ActionValue::integer(12))])
+        .unwrap();
+    c.execute(edit("speed", ActionValue::integer(11))).unwrap();
+    assert!(matches!(
+        c.commit_edits(prepared),
+        Err(ControllerError::EditConflict)
+    ));
+    assert_eq!(snapshot(&c).speed, 11);
+    assert!(matches!(
+        c.prepare_edits(vec![
+            field(1, "speed", ActionValue::integer(12)),
+            field(2, "speed", ActionValue::integer(12)),
+            field(3, "speed", ActionValue::integer(12))
+        ]),
+        Err(ControllerError::BudgetExceeded {
+            resource: "batch fields",
+            ..
+        })
+    ));
+    assert_eq!(c.document_history_lengths(), (1, 0));
+    let mut full = loaded(ControllerLimits {
+        max_history_per_object: 1,
+        ..ControllerLimits::default()
+    });
+    full.execute(edit("speed", ActionValue::integer(11)))
+        .unwrap();
+    assert!(full
+        .prepare_edits(vec![
+            field(2, "speed", ActionValue::integer(12)),
+            field(1, "speed", ActionValue::integer(12))
+        ])
+        .is_err());
+    assert_eq!(snapshot_of(&full, &SelectionItem::entity(2)).speed, 10);
 }
 
 fn select(id: u128, mode: SelectionMode) -> EditorAction {
@@ -707,6 +812,25 @@ fn document_borrows_actual_models_registries_and_all_outliner_rows() {
     assert!(objects.next().is_none());
     drop(objects);
 
+    c.execute(EditorAction::Undo).unwrap();
+    assert_eq!(
+        c.object_root(&SelectionItem::entity(1))
+            .unwrap()
+            .downcast_ref::<Model>()
+            .unwrap()
+            .count,
+        1
+    );
+    c.execute(EditorAction::Redo).unwrap();
+    assert_eq!(
+        c.object_root(&SelectionItem::entity(1))
+            .unwrap()
+            .downcast_ref::<Model>()
+            .unwrap()
+            .count,
+        23
+    );
+
     let rows = c.document_outliner_nodes();
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].id(), parent);
@@ -716,7 +840,10 @@ fn document_borrows_actual_models_registries_and_all_outliner_rows() {
     assert!(!rows[1].is_visible());
     assert_eq!(rows[1].selection(), Some(&SelectionItem::entity(1)));
     assert!(!c.outliner().visible_window(0, usize::MAX).contains(&child));
-    assert_eq!((c.revision(), c.model_revision(), c.is_dirty()), before);
+    assert_eq!(
+        (c.revision(), c.model_revision(), c.is_dirty()),
+        (before.0 + 2, before.1 + 2, before.2)
+    );
     c.execute(EditorAction::ToggleOutlinerExpansion { node: parent })
         .unwrap();
     assert!(c.document_outliner_nodes()[0].is_expanded());

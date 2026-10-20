@@ -311,6 +311,9 @@ impl DocumentCodec {
         catalog: &DocumentSchemaCatalog,
         limits: DocumentLimits,
     ) -> Result<Vec<u8>, DocumentError> {
+        if controller.has_active_edit() {
+            return Err(DocumentError::Busy);
+        }
         limits.validate()?;
         let objects = controller.document_objects();
         bound(objects.len(), limits.max_objects, "objects")?;

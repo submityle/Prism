@@ -12,7 +12,15 @@
 //! local logical pixels. The newest click supersedes older clicks; camera,
 //! geometry, bounds, target and controller-revision changes reject late work.
 
-use alloc::{collections::BTreeSet, string::String, vec::Vec};
+use alloc::{
+    collections::{BTreeMap, BTreeSet},
+    string::String,
+    vec::Vec,
+};
+
+#[path = "desktop_gizmo.rs"]
+mod gizmo;
+pub use gizmo::{GizmoFrame, SceneTransformAdapter};
 
 use prism_editor_core::SelectionItem;
 use prism_editor_panels::OutlinerId;
@@ -187,6 +195,7 @@ impl ReadyBoxSelection {
 }
 
 struct GpuScene {
+    gizmo: gizmo::GizmoPainter,
     renderer: SceneIdGeometryRenderer,
     pipeline: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
@@ -202,6 +211,7 @@ struct GpuScene {
 /// No full material rendering or automatic model-to-mesh extraction is claimed.
 pub struct DesktopScene {
     objects: Vec<DesktopSceneObject>,
+    object_indices: BTreeMap<SceneObjectId, usize>,
     scene: SceneIdPass,
     viewports: ViewportRegistry,
     viewport: Viewport,
@@ -218,6 +228,10 @@ pub struct DesktopScene {
     counters: DesktopSceneStatus,
     document_adapter: Option<Box<dyn SceneDocumentAdapter>>,
     pending_document: Option<DesktopSceneDocument>,
+    transform_adapter: Option<Box<dyn SceneTransformAdapter>>,
+    transform_revision: Option<u64>,
+    transform_indices: BTreeMap<SelectionItem, Vec<usize>>,
+    gizmo: gizmo::GizmoState,
 }
 
 impl DesktopScene {
@@ -230,6 +244,7 @@ impl DesktopScene {
             .open("Object-ID debug preview")
             .map_err(renderer_error)?;
         Ok(Self {
+            object_indices: objects.iter().enumerate().map(|(i, o)| (o.id, i)).collect(),
             objects,
             scene: SceneIdPass::new(),
             viewports,
@@ -247,6 +262,10 @@ impl DesktopScene {
             counters: DesktopSceneStatus::default(),
             document_adapter: None,
             pending_document: None,
+            transform_adapter: None,
+            transform_revision: None,
+            transform_indices: BTreeMap::new(),
+            gizmo: gizmo::GizmoState::default(),
         })
     }
 
@@ -275,10 +294,15 @@ impl DesktopScene {
         &mut self,
         objects: Vec<DesktopSceneObject>,
     ) -> Result<(), DesktopError> {
+        if self.gizmo.drag_active() {
+            return Err(message("cancel active gizmo before replacing scene"));
+        }
         validate_objects(&objects)?;
         self.scene.invalidate_content().map_err(renderer_error)?;
         self.cancel_pending();
+        self.object_indices = objects.iter().enumerate().map(|(i, o)| (o.id, i)).collect();
         self.objects = objects;
+        self.transform_revision = None;
         self.needs_upload = true;
         Ok(())
     }
@@ -293,21 +317,25 @@ impl DesktopScene {
         id: SceneObjectId,
         model: SceneIdMatrix,
     ) -> Result<bool, DesktopError> {
+        if self.gizmo.drag_active() {
+            return Err(message(
+                "cancel active gizmo before external transform updates",
+            ));
+        }
         validate_matrix(&model)?;
         let index = self
-            .objects
-            .iter()
-            .position(|object| object.id == id)
+            .object_indices
+            .get(&id)
+            .copied()
             .ok_or_else(|| message("unknown desktop scene object"))?;
         if self.objects[index].model == model {
             return Ok(false);
         }
 
-        if let Some(gpu) = self.gpu.as_mut() {
+        if let Some(gpu) = self.gpu.as_mut().filter(|_| !self.needs_upload) {
             gpu.renderer
                 .set_transform(&mut self.scene, index as u64, model)
                 .map_err(renderer_error)?;
-            self.needs_upload = false;
         } else {
             self.needs_upload = true;
         }
@@ -319,10 +347,7 @@ impl DesktopScene {
     /// Returns the current model transform for an exact scene identity.
     #[must_use]
     pub fn object_model(&self, id: SceneObjectId) -> Option<SceneIdMatrix> {
-        self.objects
-            .iter()
-            .find(|object| object.id == id)
-            .map(|object| object.model)
+        self.object_indices.get(&id).map(|i| self.objects[*i].model)
     }
 
     /// Sets a column-major world-to-clip matrix and matching `[0,1]` depth
@@ -333,6 +358,9 @@ impl DesktopScene {
         view_projection: SceneIdMatrix,
         depth: SceneIdDepth,
     ) -> Result<(), DesktopError> {
+        if self.gizmo.drag_active() {
+            return Err(message("cancel active gizmo before changing camera"));
+        }
         validate_matrix(&view_projection)?;
         if self.matrix != view_projection || self.depth != depth {
             self.advance_camera()?;
@@ -364,6 +392,7 @@ impl DesktopScene {
     /// current transforms again and publishes a fresh target/frame generation.
     pub fn document_reloaded(&mut self) {
         self.cancel_pending();
+        self.transform_revision = None;
 
         // These counters are monotonic fences. Exhaustion is unreachable for a
         // live adapter; retain the last valid state if an artificial boundary
@@ -384,6 +413,9 @@ impl DesktopScene {
         &mut self,
         controller: &EditorController,
     ) -> Result<(), DesktopError> {
+        if self.gizmo.drag_active() || controller.has_active_edit() {
+            return Err(message("cancel active gizmo before loading document"));
+        }
         self.pending_document = None;
         let Some(adapter) = self.document_adapter.as_mut() else {
             return Ok(());
@@ -408,7 +440,14 @@ impl DesktopScene {
             self.document_reloaded();
             return;
         };
+        self.object_indices = candidate
+            .objects
+            .iter()
+            .enumerate()
+            .map(|(i, o)| (o.id, i))
+            .collect();
         self.objects = candidate.objects;
+        self.transform_revision = None;
         self.matrix = candidate.camera;
         self.depth = candidate.depth;
         self.document_reloaded();
@@ -427,6 +466,7 @@ impl DesktopScene {
         target: &TextureView,
         bounds: DesktopViewportBounds,
     ) -> Result<(), DesktopError> {
+        self.sync_transforms(controller)?;
         let Some(region) = preview_region(&bounds)? else {
             self.cancel_pending();
             self.bounds = None;
@@ -559,6 +599,7 @@ impl DesktopScene {
             pass.draw(0..3, 0..1);
         }
         self.bounds = Some(bounds);
+        self.paint_gizmo(gpu, controller, encoder, target, bounds)?;
         Ok(())
     }
 
@@ -1016,6 +1057,54 @@ impl DesktopScene {
 }
 
 impl DesktopRenderer for DesktopScene {
+    fn gesture_active(&self) -> bool {
+        self.gizmo.drag_active()
+    }
+
+    fn gesture_press(
+        &mut self,
+        ui: &mut EditorDesktopUi,
+        position: [f32; 2],
+    ) -> Result<bool, DesktopError> {
+        if ui.has_uncommitted_edit() {
+            return Err(message("finish the active edit before capturing a gizmo"));
+        }
+        self.gizmo_press(ui.controller_mut(), position)
+    }
+
+    fn gesture_move(
+        &mut self,
+        ui: &mut EditorDesktopUi,
+        position: [f32; 2],
+    ) -> Result<bool, DesktopError> {
+        if !self.gizmo.drag_active() {
+            return Ok(false);
+        }
+        self.gizmo_move(ui.controller_mut(), position)
+    }
+
+    fn gesture_release(&mut self, ui: &mut EditorDesktopUi) -> Result<bool, DesktopError> {
+        if !self.gizmo.drag_active() {
+            return Ok(false);
+        }
+        self.gizmo_release(ui.controller_mut())
+    }
+
+    fn gesture_cancel(&mut self, ui: &mut EditorDesktopUi) -> Result<bool, DesktopError> {
+        if !self.gizmo.drag_active() {
+            return Ok(false);
+        }
+        self.gizmo_cancel(ui.controller_mut())
+    }
+
+    fn transform_tool(
+        &mut self,
+        mode: prism_editor_viewport::GizmoMode,
+    ) -> Result<bool, DesktopError> {
+        self.set_gizmo_tool(mode, self.gizmo.snap)?;
+        Ok(self.transform_adapter.is_some())
+    }
+
     fn initialize(&mut self, gpu: &DesktopGpu) -> Result<(), DesktopError> {
         self.suspend();
         self.scene.invalidate_content().map_err(renderer_error)?;
@@ -1169,6 +1258,7 @@ impl GpuScene {
         });
         Self {
             renderer: SceneIdGeometryRenderer::new(&gpu.device),
+            gizmo: gizmo::GizmoPainter::new(gpu),
             pipeline,
             layout,
             uniform,
@@ -1279,14 +1369,16 @@ fn local_rectangle(
     if width <= 0.0 || height <= 0.0 || config.width == 0 || config.height == 0 {
         return None;
     }
-    let clamp = |[x, y]: [f32; 2]| {
-        [
-            x.clamp(0.0, (width - f32::EPSILON).max(0.0)),
-            y.clamp(0.0, (height - f32::EPSILON).max(0.0)),
-        ]
+    // Rectangle endpoints may reach or cross the viewport edge. Clamp in
+    // integer target space: width - EPSILON can round back to width in f32.
+    let clamp = |[x, y]: [f32; 2]| PixelPoint {
+        x: (((x / width).clamp(0.0, 1.0) * config.width as f32).floor() as u32)
+            .min(config.width - 1),
+        y: (((y / height).clamp(0.0, 1.0) * config.height as f32).floor() as u32)
+            .min(config.height - 1),
     };
-    let start = local_pixel(clamp(start), bounds, config)?;
-    let end = local_pixel(clamp(end), bounds, config)?;
+    let start = clamp(start);
+    let end = clamp(end);
     let min_x = start.x.min(end.x);
     let min_y = start.y.min(end.y);
     let max_x = start.x.max(end.x).checked_add(1)?;
@@ -1377,6 +1469,25 @@ mod tests {
             physical: Rect::new(Point::new(8.0, 8.0), Size::new(64.0, 64.0)),
             surface_extent: [80, 80],
         }
+    }
+
+    #[test]
+    fn box_rectangle_includes_edges_and_clamps_captured_pointer_outside() {
+        let bounds = bounds();
+        let config = GpuPickingConfig::new(64, 64);
+        let full = PixelRect::new(0, 0, 64, 64).unwrap();
+        assert_eq!(
+            local_rectangle([0.0, 0.0], [32.0, 32.0], &bounds, config),
+            Some(full)
+        );
+        assert_eq!(
+            local_rectangle([40.0, 40.0], [-8.0, -8.0], &bounds, config),
+            Some(full)
+        );
+        assert_eq!(
+            local_rectangle([16.0, 16.0], [16.0, 16.0], &bounds, config),
+            PixelRect::new(32, 32, 33, 33).ok()
+        );
     }
 
     fn objects() -> Vec<DesktopSceneObject> {
@@ -1729,7 +1840,10 @@ mod tests {
         let mut model = descriptors[0].model;
         model[3][0] = 0.25;
 
-        assert_eq!(scene.update_object_model(id, descriptors[0].model), Ok(false));
+        assert_eq!(
+            scene.update_object_model(id, descriptors[0].model),
+            Ok(false)
+        );
         assert_eq!(scene.update_object_model(id, model), Ok(true));
         assert_eq!(scene.object_model(id), Some(model));
         assert_eq!(scene.objects()[1].model, descriptors[1].model);

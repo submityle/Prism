@@ -2,28 +2,28 @@
 //!
 //! Field commands share one document timeline, independent of selection.
 //! `Undo`/`Redo` target the object captured when the command was committed. New
-//! successful edits discard the whole redo branch. `FieldEditCommand` does not
-//! merge, so every effective field submission is a separate history entry.
+//! successful edits discard the whole redo branch. Each field submission or
+//! explicitly prepared multi-object batch occupies one atomic history entry.
 //! Registration loads clean model data; selection/expansion only change the `UI`
 //! revision. Model edits, including `Undo`/`Redo`, advance a separate monotonic
 //! revision. Dirty is conservative until that exact model revision is saved.
 
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, VecDeque};
+use alloc::sync::Arc;
 use core::fmt;
 
 use prism_editor_core::{Command, Selection, SelectionItem};
 use prism_editor_panels::{Outliner, OutlinerError, OutlinerId, OutlinerNode};
 use prism_editor_reflect::{
-    project_inspector, validate, EditorError, FieldEditCommand, FieldPath, InspectorProjection,
-    ReflectEditorContext,
+    project_inspector, validate, EditorError, FieldPath, InspectorProjection, ReflectEditorContext,
 };
 use prism_editor_ui::{
     ActionBindings, ActionError, ActionTemplate, ActionValue, EditorAction, SelectionMode, UiEvent,
     MAX_ACTION_PATH_BYTES, MAX_ACTION_TEXT_BYTES,
 };
 use prism_reflect::{
-    reflect_path, Access, ParsedPath, Reflect, ReflectRef, TypeMetadata, TypeRegistration,
-    TypeRegistry,
+    reflect_path, reflect_path_mut, Access, ParsedPath, Reflect, ReflectRef, TypeMetadata,
+    TypeRegistration, TypeRegistry,
 };
 
 /// Resource bounds checked before committing controller state.
@@ -37,6 +37,8 @@ pub struct ControllerLimits {
     pub max_outliner_depth: usize,
     /// Maximum number of selected objects.
     pub max_selection: usize,
+    /// Maximum scalar field replacements in one atomic command.
+    pub max_batch_fields: usize,
     /// Maximum number of registered command factories.
     pub max_commands: usize,
     /// Maximum command-factory indirections during one execution.
@@ -61,6 +63,7 @@ impl Default for ControllerLimits {
             max_outliner_nodes: 4_096,
             max_outliner_depth: 64,
             max_selection: 1_024,
+            max_batch_fields: 16_384,
             max_commands: 256,
             max_command_depth: 16,
             max_history: 256,
@@ -134,6 +137,8 @@ pub enum ControllerError {
     },
     /// A revision counter cannot advance without wrapping.
     RevisionExhausted,
+    /// A transform gesture owns the document, or a prepared edit became stale.
+    EditConflict,
 }
 
 impl fmt::Display for ControllerError {
@@ -169,6 +174,7 @@ impl fmt::Display for ControllerError {
                 )
             }
             Self::RevisionExhausted => f.write_str("controller revision counter exhausted"),
+            Self::EditConflict => f.write_str("active or stale document edit"),
         }
     }
 }
@@ -197,10 +203,41 @@ type CommandFactory =
     dyn Fn(&EditorController) -> Result<EditorAction, ControllerError> + Send + Sync;
 
 // Capture the target at execution, never resolve it from current selection.
-// Payloads are the existing validated, reversible reflection field command.
+// Only scalar leaves are exchanged, preserving the concrete host roots.
 struct DocumentEdit {
+    fields: Vec<StoredField>,
+}
+
+struct StoredField {
     item: SelectionItem,
-    command: FieldEditCommand,
+    path: FieldPath,
+    parsed: ParsedPath,
+    value: Box<dyn Reflect>,
+}
+
+/// One explicit host-authored field replacement in an atomic document command.
+pub struct ControllerFieldEdit {
+    /// Exact controller identity, independent of primary selection.
+    pub item: SelectionItem,
+    /// Explicit reflected field binding.
+    pub path: FieldPath,
+    /// Semantic value checked by normal conversion and metadata rules.
+    pub value: ActionValue,
+}
+
+/// Fully validated candidate. Preparing never mutates models or history.
+pub struct PreparedControllerEdit {
+    objects: BTreeMap<SelectionItem, ReflectEditorContext>,
+    fields: Vec<StoredField>,
+    model_revision: u64,
+    owner: Arc<()>,
+}
+
+impl PreparedControllerEdit {
+    /// Candidate root for renderer validation before publication.
+    pub fn root(&self, item: &SelectionItem) -> Option<&dyn Reflect> {
+        self.objects.get(item).map(ReflectEditorContext::root)
+    }
 }
 
 /// Owns editor models, selection, projections, and bounded action execution.
@@ -223,6 +260,9 @@ pub struct EditorController {
     revision: u64,
     model_revision: u64,
     saved_model_revision: u64,
+    edit_active: bool,
+    changes: VecDeque<(u64, Vec<SelectionItem>)>,
+    identity: Arc<()>,
 }
 
 impl Default for EditorController {
@@ -254,6 +294,9 @@ impl EditorController {
             revision: 0,
             model_revision: 0,
             saved_model_revision: 0,
+            edit_active: false,
+            changes: VecDeque::new(),
+            identity: Arc::new(()),
         }
     }
 
@@ -267,6 +310,7 @@ impl EditorController {
         root: Box<dyn Reflect>,
         registry: TypeRegistry,
     ) -> Result<(), ControllerError> {
+        self.ensure_idle()?;
         if self.objects.contains_key(&item) {
             return Err(ControllerError::DuplicateObject(item));
         }
@@ -286,6 +330,7 @@ impl EditorController {
     /// Registers a root/group/object row. Its parent must already be registered.
     /// Incoming child lists are rebuilt from parent identities, never trusted.
     pub fn register_outliner_node(&mut self, node: OutlinerNode) -> Result<(), ControllerError> {
+        self.ensure_idle()?;
         if self.outliner.node(node.id()).is_some() {
             return Err(OutlinerError::DuplicateNode(node.id()).into());
         }
@@ -365,6 +410,7 @@ impl EditorController {
         &mut self,
         mut action: EditorAction,
     ) -> Result<ControllerOutcome, ControllerError> {
+        self.ensure_idle()?;
         let mut depth = 0;
         while let EditorAction::ExecuteCommand { command_id } = action {
             ActionTemplate::execute_command(command_id.clone())?;
@@ -391,6 +437,7 @@ impl EditorController {
 
     /// Selects a loaded object directly, independent of Outliner presentation.
     pub fn select(&mut self, item: SelectionItem) -> Result<ControllerOutcome, ControllerError> {
+        self.ensure_idle()?;
         self.editor(&item)?;
         let mut selection = Selection::default();
         selection.replace(item.clone());
@@ -412,6 +459,7 @@ impl EditorController {
         items: &[SelectionItem],
         mode: SelectionMode,
     ) -> Result<ControllerOutcome, ControllerError> {
+        self.ensure_idle()?;
         for item in items {
             self.editor(item)?;
         }
@@ -443,6 +491,7 @@ impl EditorController {
 
     /// Clears the selection and its range anchor.
     pub fn clear_selection(&mut self) -> Result<ControllerOutcome, ControllerError> {
+        self.ensure_idle()?;
         self.commit_selection(Selection::default(), None)
     }
 
@@ -514,8 +563,14 @@ impl EditorController {
     pub fn history_lengths(&self, item: &SelectionItem) -> Result<(usize, usize), ControllerError> {
         self.editor(item)?;
         Ok((
-            self.undo.iter().filter(|entry| &entry.item == item).count(),
-            self.redo.iter().filter(|entry| &entry.item == item).count(),
+            self.undo
+                .iter()
+                .filter(|entry| entry.fields.iter().any(|field| &field.item == item))
+                .count(),
+            self.redo
+                .iter()
+                .filter(|entry| entry.fields.iter().any(|field| &field.item == item))
+                .count(),
         ))
     }
 
@@ -682,87 +737,216 @@ impl EditorController {
         path: FieldPath,
         value: ActionValue,
     ) -> Result<ControllerOutcome, ControllerError> {
-        ensure_bound(
-            path.as_str().len(),
-            MAX_ACTION_PATH_BYTES,
-            "action path bytes",
-        )?;
-        ensure_bound(
-            path.segments().len(),
-            self.limits.max_inspector_depth,
-            "action path depth",
-        )?;
         let item = self
             .selection
             .primary()
             .ok_or(ControllerError::NoPrimary)?
             .clone();
-        let editor = self.editor(&item)?;
-        // FieldPath's ParsedPath is crate-private; reparse its bounded canonical text.
-        let parsed = ParsedPath::parse(path.as_str())
-            .map_err(|_| ControllerError::PathNotFound(path.clone()))?;
-        let target = reflect_path(editor.root(), &parsed)
-            .ok_or_else(|| ControllerError::PathNotFound(path.clone()))?;
-        ensure_editable_ancestors(editor, parsed, &path)?;
-        let converted = convert_value(target, &value, &path)?;
-        if same_leaf(target, &*converted) {
-            // Read-only and validation errors remain errors for identical values.
-            editor.prepare_edit(path, converted)?;
+        let prepared = self.prepare_edits(vec![ControllerFieldEdit { item, path, value }])?;
+        self.commit_edits(prepared)
+    }
+
+    /// Borrows a root without cloning the entire document.
+    pub fn object_root(&self, item: &SelectionItem) -> Result<&dyn Reflect, ControllerError> {
+        Ok(self.editor(item)?.root())
+    }
+
+    /// Whether an unfinished transform owns the document. Persistence must fence it.
+    #[must_use]
+    pub const fn has_active_edit(&self) -> bool {
+        self.edit_active
+    }
+
+    #[cfg(feature = "desktop")]
+    pub(crate) fn begin_edit(&mut self) -> Result<(), ControllerError> {
+        self.ensure_idle()?;
+        self.edit_active = true;
+        Ok(())
+    }
+
+    #[cfg(feature = "desktop")]
+    pub(crate) fn end_edit(&mut self) {
+        self.edit_active = false;
+    }
+
+    fn ensure_idle(&self) -> Result<(), ControllerError> {
+        if self.edit_active {
+            Err(ControllerError::EditConflict)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Changed identities since a renderer revision. None requests a full resync
+    /// when the bounded journal no longer covers the requested revision.
+    pub fn changed_objects_since(&self, revision: u64) -> Option<Vec<SelectionItem>> {
+        if revision == self.model_revision {
+            return Some(Vec::new());
+        }
+        if revision > self.model_revision
+            || self
+                .changes
+                .front()
+                .is_none_or(|(r, _)| revision.saturating_add(1) < *r)
+        {
+            return None;
+        }
+        let mut items = alloc::collections::BTreeSet::new();
+        for (_, changed) in self.changes.iter().filter(|(r, _)| *r > revision) {
+            items.extend(changed.iter().cloned());
+        }
+        Some(items.into_iter().collect())
+    }
+
+    /// Validates a bounded batch against isolated contexts. All replacements
+    /// use the existing reflection commands, including readonly ancestors.
+    /// May run during a gesture; only commit publishes the candidate.
+    pub fn prepare_edits(
+        &self,
+        edits: Vec<ControllerFieldEdit>,
+    ) -> Result<PreparedControllerEdit, ControllerError> {
+        ensure_bound(edits.len(), self.limits.max_batch_fields, "batch fields")?;
+        let mut objects = BTreeMap::new();
+        let mut fields = Vec::new();
+        let mut changed = alloc::collections::BTreeSet::new();
+        let mut targets = alloc::collections::BTreeSet::new();
+        for ControllerFieldEdit { item, path, value } in edits {
+            // Ambiguous repeated writes are rejected before publication.
+            if !targets.insert((item.clone(), path.as_str().to_owned())) {
+                return Err(ControllerError::EditConflict);
+            }
+            ensure_bound(
+                path.as_str().len(),
+                MAX_ACTION_PATH_BYTES,
+                "action path bytes",
+            )?;
+            ensure_bound(
+                path.segments().len(),
+                self.limits.max_inspector_depth,
+                "action path depth",
+            )?;
+            if !objects.contains_key(&item) {
+                let editor = self.editor(&item)?;
+                let mut registry = TypeRegistry::new();
+                for registration in editor.registry().iter() {
+                    if editor
+                        .registry()
+                        .get(registration.type_id())
+                        .is_some_and(|r| r.type_name() == registration.type_name())
+                    {
+                        registry.add_registration(registration.clone());
+                    } else {
+                        registry.register_runtime(registration.clone());
+                    }
+                }
+                objects.insert(
+                    item.clone(),
+                    ReflectEditorContext::new(editor.root().reflect_clone(), registry),
+                );
+            }
+            let editor = objects
+                .get_mut(&item)
+                .ok_or_else(|| ControllerError::MissingObject(item.clone()))?;
+            let parsed = ParsedPath::parse(path.as_str())
+                .map_err(|_| ControllerError::PathNotFound(path.clone()))?;
+            let target = reflect_path(editor.root(), &parsed)
+                .ok_or_else(|| ControllerError::PathNotFound(path.clone()))?;
+            ensure_editable_ancestors(editor, parsed.clone(), &path)?;
+            let converted = convert_value(target, &value, &path)?;
+            let same = same_leaf(target, &*converted);
+            let stored = (!same).then(|| StoredField {
+                item: item.clone(),
+                path: path.clone(),
+                parsed,
+                value: converted.reflect_clone(),
+            });
+            let mut command = editor.prepare_edit(path, converted)?;
+            if !same {
+                command.apply(editor).map_err(EditorError::Command)?;
+                fields.push(stored.expect("changed scalar captured above"));
+                changed.insert(item);
+            }
+        }
+        objects.retain(|item, _| changed.contains(item));
+        if !objects.is_empty() {
+            ensure_capacity(self.undo.len(), self.limits.max_history, "document history")?;
+            for item in objects.keys() {
+                ensure_capacity(
+                    self.undo
+                        .iter()
+                        .filter(|e| e.fields.iter().any(|field| &field.item == item))
+                        .count(),
+                    self.limits.max_history_per_object,
+                    "object commands in document history",
+                )?;
+            }
+            self.ensure_revision(true)?;
+        }
+        Ok(PreparedControllerEdit {
+            objects,
+            fields,
+            model_revision: self.model_revision,
+            owner: self.identity.clone(),
+        })
+    }
+
+    /// Publishes a prepared batch as one undoable command, or rejects it without
+    /// changing models, either history branch, dirty state, or revisions.
+    pub fn commit_edits(
+        &mut self,
+        mut prepared: PreparedControllerEdit,
+    ) -> Result<ControllerOutcome, ControllerError> {
+        self.ensure_idle()?;
+        if !Arc::ptr_eq(&prepared.owner, &self.identity)
+            || prepared.model_revision != self.model_revision
+        {
+            return Err(ControllerError::EditConflict);
+        }
+        if prepared.objects.is_empty() {
             return Ok(self.outcome(false, false));
         }
-        // FieldEditCommand explicitly does not merge. Only the applied prefix
-        // survives if this commit creates a new document branch.
-        ensure_capacity(self.undo.len(), self.limits.max_history, "document history")?;
-        ensure_capacity(
-            self.undo.iter().filter(|entry| entry.item == item).count(),
-            self.limits.max_history_per_object,
-            "object commands in document history",
-        )?;
-        let mut command = editor.prepare_edit(path, converted)?;
         self.ensure_revision(true)?;
-        let context = self
-            .objects
-            .get_mut(&item)
-            .ok_or_else(|| ControllerError::MissingObject(item.clone()))?;
-        command.apply(context).map_err(EditorError::Command)?;
-        // Rejected commands retain both branches. Commit history/revisions only
-        // after the existing command has applied and validated atomically.
+        let items = prepared.objects.keys().cloned().collect();
+        exchange_fields(&mut self.objects, &mut prepared.fields)?;
         self.redo.clear();
-        self.undo.push(DocumentEdit { item, command });
+        self.undo.push(DocumentEdit {
+            fields: prepared.fields,
+        });
         self.advance(true);
+        self.record_changes(items);
         Ok(self.outcome(true, true))
+    }
+
+    fn record_changes(&mut self, items: Vec<SelectionItem>) {
+        self.changes.push_back((self.model_revision, items));
+        while self.changes.len() > self.limits.max_history.max(1) {
+            self.changes.pop_front();
+        }
     }
 
     fn navigate_history(&mut self, redo: bool) -> Result<ControllerOutcome, ControllerError> {
         let source = if redo { &self.redo } else { &self.undo };
-        let Some(entry) = source.last() else {
+        let Some(_) = source.last() else {
             return Ok(self.outcome(false, false));
         };
-        self.editor(&entry.item)?;
         self.ensure_revision(true)?;
         let (source, destination) = if redo {
             (&mut self.redo, &mut self.undo)
         } else {
             (&mut self.undo, &mut self.redo)
         };
-        // Keep the entry in place until command success. Failed apply/undo
-        // retains its exact position and neither revision counter advances.
+        let mut items = Vec::new();
         if let Some(entry) = source.last_mut() {
-            let context = self
-                .objects
-                .get_mut(&entry.item)
-                .ok_or_else(|| ControllerError::MissingObject(entry.item.clone()))?;
-            if redo {
-                entry.command.apply(context)
-            } else {
-                entry.command.undo(context)
-            }
-            .map_err(EditorError::Command)?;
+            exchange_fields(&mut self.objects, &mut entry.fields)?;
+            items.extend(entry.fields.iter().map(|field| field.item.clone()));
+            items.sort();
+            items.dedup();
         }
         if let Some(entry) = source.pop() {
             destination.push(entry);
         }
         self.advance(true);
+        self.record_changes(items);
         Ok(self.outcome(true, true))
     }
 
@@ -1005,6 +1189,55 @@ fn convert_value(
             .ok_or_else(|| invalid("expected exactly one Unicode scalar"));
     }
     Err(invalid("UI values cannot replace this reflected type"))
+}
+
+// Preflight the whole batch before exchanging infallible primitive values.
+// Dynamic candidate roots must never replace the concrete host-owned models.
+fn exchange_fields(
+    objects: &mut BTreeMap<SelectionItem, ReflectEditorContext>,
+    fields: &mut [StoredField],
+) -> Result<(), ControllerError> {
+    for field in fields.iter() {
+        let root = objects
+            .get(&field.item)
+            .ok_or_else(|| ControllerError::MissingObject(field.item.clone()))?
+            .root();
+        let target = reflect_path(root, &field.parsed)
+            .ok_or_else(|| ControllerError::PathNotFound(field.path.clone()))?;
+        if target.as_any().type_id() != field.value.as_any().type_id() {
+            return Err(ControllerError::EditConflict);
+        }
+    }
+    for field in fields {
+        let target = reflect_path_mut(
+            objects
+                .get_mut(&field.item)
+                .expect("preflighted identity")
+                .root_mut(),
+            &field.parsed,
+        )
+        .expect("preflighted scalar path");
+        exchange_scalar(target, &mut *field.value);
+    }
+    Ok(())
+}
+
+fn exchange_scalar(target: &mut dyn Reflect, stored: &mut dyn Reflect) {
+    macro_rules! exchange {
+        ($($ty:ty),* $(,)?) => { $(
+            if let (Some(target), Some(stored)) =
+                (target.downcast_mut::<$ty>(), stored.downcast_mut::<$ty>())
+            {
+                core::mem::swap(target, stored);
+                return;
+            }
+        )* };
+    }
+    exchange!(
+        bool, char, String, i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u128, usize, f32,
+        f64
+    );
+    unreachable!("prepared edits only contain supported scalar values");
 }
 
 fn same_leaf(left: &dyn Reflect, right: &dyn Reflect) -> bool {

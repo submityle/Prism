@@ -257,7 +257,7 @@ impl EditorDesktopUi {
     /// make the draft safe to discard.
     #[must_use]
     pub fn has_uncommitted_edit(&self) -> bool {
-        self.focus.is_some()
+        self.focus.is_some() || self.controller.has_active_edit()
     }
 
     /// Stores a bounded, visible error. Call `refresh` before presenting it.

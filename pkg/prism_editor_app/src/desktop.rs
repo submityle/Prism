@@ -87,6 +87,41 @@ pub struct DesktopWork {
 /// Implementations retain scene resources, reject stale picks, and update the
 /// controller through commands rather than keeping a second authority.
 pub trait DesktopRenderer {
+    /// Whether the renderer owns an unfinished transform gesture.
+    fn gesture_active(&self) -> bool {
+        false
+    }
+    /// Hit-test transform handles before starting selection.
+    fn gesture_press(
+        &mut self,
+        _ui: &mut EditorDesktopUi,
+        _position: [f32; 2],
+    ) -> Result<bool, DesktopError> {
+        Ok(false)
+    }
+    /// Update captured input, including coordinates outside the viewport.
+    fn gesture_move(
+        &mut self,
+        _ui: &mut EditorDesktopUi,
+        _position: [f32; 2],
+    ) -> Result<bool, DesktopError> {
+        Ok(false)
+    }
+    /// Commit one document command on release.
+    fn gesture_release(&mut self, _ui: &mut EditorDesktopUi) -> Result<bool, DesktopError> {
+        Ok(false)
+    }
+    /// Restore the drag-start state on Escape, focus loss or suspension.
+    fn gesture_cancel(&mut self, _ui: &mut EditorDesktopUi) -> Result<bool, DesktopError> {
+        Ok(false)
+    }
+    /// Select the translation, rotation or scale tool.
+    fn transform_tool(
+        &mut self,
+        _mode: prism_editor_viewport::GizmoMode,
+    ) -> Result<bool, DesktopError> {
+        Ok(false)
+    }
     /// Create device-local resources after initial launch or native resume.
     fn initialize(&mut self, gpu: &DesktopGpu) -> Result<(), DesktopError>;
     /// Draw only inside the retained viewport after Loom paints the surface.
@@ -294,6 +329,9 @@ pub fn run_desktop_with_document<R: DesktopRenderer>(
     if let Err(error) = event_loop.run_app(&mut host) {
         host.error
             .get_or_insert_with(|| DesktopError::Window(error.to_string()));
+    }
+    if let Err(error) = host.renderer.gesture_cancel(&mut host.ui) {
+        host.error = Some(error);
     }
     host.renderer.suspend();
     host.native = None;
@@ -711,6 +749,8 @@ impl<R: DesktopRenderer> ApplicationHandler<DesktopWake> for DesktopHost<R> {
     }
 
     fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
+        let result = self.renderer.gesture_cancel(&mut self.ui);
+        self.input_result(result);
         self.renderer.suspend();
         self.native = None;
         self.cursor = None;
@@ -755,6 +795,8 @@ impl<R: DesktopRenderer> ApplicationHandler<DesktopWake> for DesktopHost<R> {
                     self.fail(event_loop, DesktopError::Gpu(message));
                     return;
                 }
+                let result = self.renderer.gesture_cancel(&mut self.ui);
+                self.input_result(result);
                 self.renderer.suspend();
                 self.native = None;
                 self.pending = false;
@@ -776,12 +818,13 @@ impl<R: DesktopRenderer> ApplicationHandler<DesktopWake> for DesktopHost<R> {
         }
         match event {
             WindowEvent::CloseRequested => {
-                let blocked = self.document.as_ref().is_some_and(|document| {
-                    self.ui.controller().is_dirty()
-                        || self.ui.has_uncommitted_edit()
-                        || document.is_busy()
-                        || document.reconciliation_required()
-                });
+                let blocked = self.renderer.gesture_active()
+                    || self.document.as_ref().is_some_and(|document| {
+                        self.ui.controller().is_dirty()
+                            || self.ui.has_uncommitted_edit()
+                            || document.is_busy()
+                            || document.reconciliation_required()
+                    });
                 if blocked {
                     self.ui.show_error(DesktopError::UnsavedChanges.to_string());
                     self.redraw = true;
@@ -790,6 +833,9 @@ impl<R: DesktopRenderer> ApplicationHandler<DesktopWake> for DesktopHost<R> {
                 }
             }
             WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
+                let result = self.renderer.gesture_cancel(&mut self.ui);
+                self.input_result(result);
+                self.drag_start = None;
                 if let Err(error) = self.resize() {
                     self.fail(event_loop, error);
                 }
@@ -812,6 +858,15 @@ impl<R: DesktopRenderer> ApplicationHandler<DesktopWake> for DesktopHost<R> {
                         position.y as f32 / native.scale,
                     ]);
                 }
+                if self.renderer.gesture_active()
+                    && let Some([x, y]) = self.cursor
+                {
+                    let rect = self.ui.viewport_rect();
+                    let result = self
+                        .renderer
+                        .gesture_move(&mut self.ui, [x - rect.left(), y - rect.top()]);
+                    self.input_result(result);
+                }
             }
             WindowEvent::CursorLeft { .. } => self.cursor = None,
             WindowEvent::Focused(false) => {
@@ -819,6 +874,8 @@ impl<R: DesktopRenderer> ApplicationHandler<DesktopWake> for DesktopHost<R> {
                 self.cursor = None;
                 self.drag_start = None;
                 self.composing = false;
+                let result = self.renderer.gesture_cancel(&mut self.ui);
+                self.input_result(result);
                 let result = self.ui.key(DesktopKey::Escape);
                 self.input_result(result);
             }
@@ -828,6 +885,14 @@ impl<R: DesktopRenderer> ApplicationHandler<DesktopWake> for DesktopHost<R> {
                 ..
             } => {
                 self.report.native_input_events += 1;
+                if state == ElementState::Released && self.renderer.gesture_active() {
+                    // Use the last known pointer even after CursorLeft; focus loss
+                    // has a separate cancellation path.
+                    let result = self.renderer.gesture_release(&mut self.ui);
+                    self.drag_start = None;
+                    self.input_result(result);
+                    return;
+                }
                 if let Some([x, y]) = self.cursor {
                     let mode = if self.modifiers.control_key() || self.modifiers.super_key() {
                         SelectionMode::Toggle
@@ -839,6 +904,32 @@ impl<R: DesktopRenderer> ApplicationHandler<DesktopWake> for DesktopHost<R> {
                     let rect = self.ui.viewport_rect();
                     match state {
                         ElementState::Pressed if contains(rect, x, y) => {
+                            if self
+                                .document
+                                .as_ref()
+                                .is_some_and(DesktopDocumentSession::is_busy)
+                            {
+                                self.ui.show_error(
+                                    "document I/O must finish before starting a gesture",
+                                );
+                                self.redraw = true;
+                                return;
+                            }
+                            if self.ui.has_uncommitted_edit() {
+                                self.ui
+                                    .show_error("commit or cancel the Inspector draft first");
+                                self.redraw = true;
+                                return;
+                            }
+                            let result = self
+                                .renderer
+                                .gesture_press(&mut self.ui, [x - rect.left(), y - rect.top()]);
+                            let captured = matches!(result, Ok(true));
+                            let rejected = result.is_err();
+                            self.input_result(result);
+                            if captured || rejected {
+                                return;
+                            }
                             self.drag_start = Some(([x, y], mode));
                         }
                         ElementState::Pressed => {
@@ -901,6 +992,14 @@ impl<R: DesktopRenderer> ApplicationHandler<DesktopWake> for DesktopHost<R> {
                 if self.composing {
                     return;
                 }
+                if self.renderer.gesture_active()
+                    && event.logical_key == Key::Named(NamedKey::Escape)
+                {
+                    let result = self.renderer.gesture_cancel(&mut self.ui);
+                    self.drag_start = None;
+                    self.input_result(result);
+                    return;
+                }
                 let primary = if cfg!(target_os = "macos") {
                     self.modifiers.super_key()
                 } else {
@@ -919,6 +1018,22 @@ impl<R: DesktopRenderer> ApplicationHandler<DesktopWake> for DesktopHost<R> {
                 {
                     self.document_command(false);
                     return;
+                }
+                if !primary
+                    && !self.ui.has_uncommitted_edit()
+                    && let Key::Character(character) = &event.logical_key
+                {
+                    let mode = match character.to_ascii_lowercase().as_str() {
+                        "w" => Some(prism_editor_viewport::GizmoMode::Translate),
+                        "e" => Some(prism_editor_viewport::GizmoMode::Rotate),
+                        "r" => Some(prism_editor_viewport::GizmoMode::Scale),
+                        _ => None,
+                    };
+                    if let Some(mode) = mode {
+                        let result = self.renderer.transform_tool(mode);
+                        self.input_result(result);
+                        return;
+                    }
                 }
                 let key = match &event.logical_key {
                     Key::Named(NamedKey::Enter) => Some(DesktopKey::Enter),
