@@ -1,0 +1,13 @@
+[package]
+name = "prism_editor_graph"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96.0"
+description = "Generic deterministic node graph kernel for the Prism editor."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+
+[lints]
+workspace = true

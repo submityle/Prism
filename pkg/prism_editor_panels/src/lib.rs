@@ -107,9 +107,13 @@ pub enum OutlinerError {
 impl std::fmt::Display for OutlinerError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::DuplicateNode(id) => write!(formatter, "outliner node {} already exists", id.raw()),
+            Self::DuplicateNode(id) => {
+                write!(formatter, "outliner node {} already exists", id.raw())
+            }
             Self::MissingNode(id) => write!(formatter, "outliner node {} does not exist", id.raw()),
-            Self::ParentCycle(id) => write!(formatter, "outliner parent cycle at node {}", id.raw()),
+            Self::ParentCycle(id) => {
+                write!(formatter, "outliner parent cycle at node {}", id.raw())
+            }
         }
     }
 }
@@ -139,7 +143,11 @@ impl Outliner {
         let parent = node.parent;
         self.nodes.insert(id, node);
         if let Some(parent) = parent {
-            self.nodes.get_mut(&parent).expect("validated parent").children.push(id);
+            self.nodes
+                .get_mut(&parent)
+                .expect("validated parent")
+                .children
+                .push(id);
         } else {
             self.roots.push(id);
         }
@@ -147,7 +155,10 @@ impl Outliner {
     }
 
     pub fn remove(&mut self, id: OutlinerId) -> Result<OutlinerNode, OutlinerError> {
-        let node = self.nodes.remove(&id).ok_or(OutlinerError::MissingNode(id))?;
+        let node = self
+            .nodes
+            .remove(&id)
+            .ok_or(OutlinerError::MissingNode(id))?;
         if let Some(parent) = node.parent {
             if let Some(parent_node) = self.nodes.get_mut(&parent) {
                 parent_node.children.retain(|child| *child != id);
@@ -179,17 +190,29 @@ impl Outliner {
     }
 
     fn flatten_visible(&self, id: OutlinerId, output: &mut Vec<OutlinerId>) {
-        let Some(node) = self.nodes.get(&id) else { return };
-        if !node.visible { return; }
+        let Some(node) = self.nodes.get(&id) else {
+            return;
+        };
+        if !node.visible {
+            return;
+        }
         output.push(id);
         if node.expanded {
-            for child in &node.children { self.flatten_visible(*child, output); }
+            for child in &node.children {
+                self.flatten_visible(*child, output);
+            }
         }
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub enum LogLevel { Trace, Debug, Info, Warn, Error }
+pub enum LogLevel {
+    Trace,
+    Debug,
+    Info,
+    Warn,
+    Error,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConsoleEntry {
@@ -208,31 +231,60 @@ pub struct Console {
 
 impl Console {
     pub fn new(capacity: usize) -> Result<Self, ConsoleError> {
-        if capacity == 0 { return Err(ConsoleError::ZeroCapacity); }
-        Ok(Self { capacity, next_sequence: 0, entries: Vec::with_capacity(capacity) })
+        if capacity == 0 {
+            return Err(ConsoleError::ZeroCapacity);
+        }
+        Ok(Self {
+            capacity,
+            next_sequence: 0,
+            entries: Vec::with_capacity(capacity),
+        })
     }
 
-    pub fn push(&mut self, level: LogLevel, channel: impl Into<String>, message: impl Into<String>) {
-        let entry = ConsoleEntry { sequence: self.next_sequence, level, channel: channel.into(), message: message.into() };
+    pub fn push(
+        &mut self,
+        level: LogLevel,
+        channel: impl Into<String>,
+        message: impl Into<String>,
+    ) {
+        let entry = ConsoleEntry {
+            sequence: self.next_sequence,
+            level,
+            channel: channel.into(),
+            message: message.into(),
+        };
         self.next_sequence = self.next_sequence.saturating_add(1);
-        if self.entries.len() == self.capacity { self.entries.remove(0); }
+        if self.entries.len() == self.capacity {
+            self.entries.remove(0);
+        }
         self.entries.push(entry);
     }
 
     #[must_use]
-    pub fn entries(&self) -> &[ConsoleEntry] { &self.entries }
+    pub fn entries(&self) -> &[ConsoleEntry] {
+        &self.entries
+    }
 
     #[must_use]
     pub fn filtered(&self, minimum: LogLevel, channel: Option<&str>) -> Vec<&ConsoleEntry> {
-        self.entries.iter().filter(|entry| entry.level >= minimum && channel.is_none_or(|value| value == entry.channel)).collect()
+        self.entries
+            .iter()
+            .filter(|entry| {
+                entry.level >= minimum && channel.is_none_or(|value| value == entry.channel)
+            })
+            .collect()
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ConsoleError { ZeroCapacity }
+pub enum ConsoleError {
+    ZeroCapacity,
+}
 
 impl std::fmt::Display for ConsoleError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { formatter.write_str("console capacity must be greater than zero") }
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("console capacity must be greater than zero")
+    }
 }
 
 impl std::error::Error for ConsoleError {}
@@ -244,12 +296,30 @@ mod tests {
     #[test]
     fn outliner_window_respects_expansion() {
         let mut outliner = Outliner::default();
-        outliner.insert(OutlinerNode::new(OutlinerId::from_raw(1), None, "root")).expect("root");
-        outliner.insert(OutlinerNode::new(OutlinerId::from_raw(2), Some(OutlinerId::from_raw(1)), "child")).expect("child");
-        assert_eq!(outliner.visible_window(0, 10), vec![OutlinerId::from_raw(1), OutlinerId::from_raw(2)]);
+        outliner
+            .insert(OutlinerNode::new(OutlinerId::from_raw(1), None, "root"))
+            .expect("root");
+        outliner
+            .insert(OutlinerNode::new(
+                OutlinerId::from_raw(2),
+                Some(OutlinerId::from_raw(1)),
+                "child",
+            ))
+            .expect("child");
+        assert_eq!(
+            outliner.visible_window(0, 10),
+            vec![OutlinerId::from_raw(1), OutlinerId::from_raw(2)]
+        );
         outliner.node(OutlinerId::from_raw(1)).expect("root");
-        outliner.nodes.get_mut(&OutlinerId::from_raw(1)).expect("root").set_expanded(false);
-        assert_eq!(outliner.visible_window(0, 10), vec![OutlinerId::from_raw(1)]);
+        outliner
+            .nodes
+            .get_mut(&OutlinerId::from_raw(1))
+            .expect("root")
+            .set_expanded(false);
+        assert_eq!(
+            outliner.visible_window(0, 10),
+            vec![OutlinerId::from_raw(1)]
+        );
     }
 
     #[test]

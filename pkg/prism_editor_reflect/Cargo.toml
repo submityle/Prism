@@ -1,0 +1,12 @@
+[package]
+name = "prism_editor_reflect"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96.0"
+description = "Reflection-driven editor model with stable field paths, inspector projection, validation, and reversible field commands."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+prism_reflect = { path = "../prism_reflect" }
+prism_editor_core = { path = "../prism_editor_core" }

@@ -40,14 +40,40 @@ CARGO_TARGET_DIR=/private/tmp/prism-editor-core-target cargo test -p prism_edito
 - 轨道采样返回按 `TrackId` 排序的结果，便于帧缓存和可重复测试。
 - 通过 `rustc` 独立测试验证 2 个测试用例；未依赖 `bevy_*`。
 
+### E2 反射编辑模型
+
+`pkg/prism_editor_reflect` 已完成并通过 6 个测试：
+
+- 语义字段路径规范化，支持结构体、tuple、列表、数组、map 和 set 的可寻址投影。
+- 基于 `prism_reflect` Inspector 的路径化树投影，保留字段元数据。
+- 元数据范围/必填/只读校验，以及字段编辑命令的 apply/undo/redo。
+- 只依赖 `prism_reflect` 与 `prism_editor_core`，不依赖 `bevy_*`。
+
+### E8 大世界编辑模型
+
+`pkg/prism_editor_world` 已完成并通过 7 个测试：
+
+- 确定性的 Cell 身份、文件路径、数据层可见性/可编辑性和编辑作用域。
+- Residency demand 到 load/unload 计划的确定性编排。
+- dirty cell 阻止卸载、过期计划拒绝部分执行、失败转换恢复安全状态。
+- 可适配 `prism_ecs`/`prism_scene` 分区契约，但不直接执行运行时或文件 I/O。
+
+### E10 通用节点图基础
+
+`pkg/prism_editor_graph` 已完成并通过 7 个测试：
+
+- 稳定 Node/Port/Edge/Group ID、端口类型和连接基数校验。
+- 层级分组、连线删除、节点删除和索引一致性维护。
+- 稳定拓扑排序、显式 cycle 错误和回调式确定性评估。
+
 ## 当前未交付
 
 以下项目仍以代码和测试为准，不能仅因设计文档存在就视为完成：
 
-- 反射 Inspector 到编辑器控件的适配和字段命令。
+- 反射 Inspector 到 Loom 控件的最终渲染适配。
 - 外壳、停靠、核心面板、运行时桥和 PIE。
 - GPU 视口、拾取、Gizmo、内容管线、大世界编辑器 UI。
-- 通用节点图、时间线、域编辑器、分析器、协同和无头编辑器应用。
+- 域编辑器、分析器、协同和无头编辑器应用。
 
 ## 不变约束
 
