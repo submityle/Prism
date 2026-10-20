@@ -148,6 +148,19 @@ The dock retains real Loom layout, semantic bindings and independent scroll
 positions. Hidden playback continues from monotonic time without rebuilding the
 browser, while paused transport permits native idle sleep.
 
+`DesktopGraphPanel`, `DesktopPrefabPanel` and `DesktopFrameGraphPanel` mount
+the host's actual graph, Prefab store and immutable capture reports. Graph
+pointer input shares retained canvas geometry with painting and commits one
+inverse command at release; Prefab review/confirm uses its actual controller
+and fences unresolved proposals. Active authoring Undo/Redo stays in its panel.
+Graph and timeline can bind an explicit absolute file/revision with
+`mount_storage`: asynchronous Save/Open retains real requests, durable receipts
+and isolated load candidates. Adoption needs exact load-start/current model
+evidence; native adoption is disabled while dirty. Timeline save baselines
+include frequency: external persistence acknowledges with
+`acknowledge_saved(&token, ticks_per_second)`. Capture declaration navigation
+does not by itself prove GPU execution or preview image presentation.
+
 Timeline key/tangent pointer input uses actual retained lane/curve origins,
 pauses playback and paints bounded previews. Release validates its final position
 before publishing one undoable transaction. Escape, focus loss, resize, suspend

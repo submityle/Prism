@@ -19,6 +19,7 @@ prism_editor_reflect = { path = "../prism_editor_reflect" }
 prism_editor_shell = { path = "../prism_editor_shell" }
 prism_editor_world = { path = "../prism_editor_world" }
 prism_editor_timeline = { path = "../prism_editor_timeline" }
+prism_editor_graph = { path = "../prism_editor_graph" }
 prism_asset = { path = "../prism_asset" }
 prism_app = { path = "../prism_app", default-features = false, features = ["std"] }
 prism_ecs = { path = "../prism_ecs", default-features = false, features = ["std"] }
@@ -37,6 +38,9 @@ desktop = ["dep:winit", "dep:wgpu", "dep:futures-lite", "dep:prism_math", "prism
 
 [dev-dependencies]
 png = "0.18.1"
+prism_editor_profiler = { path = "../prism_editor_profiler", features = ["render-graph"] }
+prism_render_architecture = { path = "../prism_render_architecture" }
+prism_render_graph = { path = "../prism_render_graph" }
 
 [lints]
 workspace = true

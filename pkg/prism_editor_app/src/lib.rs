@@ -67,9 +67,10 @@ pub use desktop_scene::{
 #[cfg(feature = "desktop")]
 pub use desktop_scene::{GizmoFrame, SceneTransformAdapter};
 pub use desktop_ui::{
-    ContentGitPhase, ContentGitStatus, ContentThumbnailSource, DesktopContentImage, DesktopKey,
-    DesktopPanel, DesktopPanelUpdate, DesktopPanelView, DesktopProfilerPanel, DesktopTimelineFrame,
-    DesktopTimelinePanel, DesktopUiError, DesktopWorldPanel, EditorDesktopUi,
+    ContentGitPhase, ContentGitStatus, ContentThumbnailSource, DesktopContentImage,
+    DesktopFrameGraphPanel, DesktopGraphPanel, DesktopKey, DesktopPanel, DesktopPanelCancelOutcome,
+    DesktopPanelUpdate, DesktopPanelView, DesktopPrefabPanel, DesktopProfilerPanel,
+    DesktopTimelineFrame, DesktopTimelinePanel, DesktopUiError, DesktopWorldPanel, EditorDesktopUi,
 };
 pub use document::{
     DecodedDocument, DocumentCodec, DocumentError, DocumentFileAdapter, DocumentIoEvent,

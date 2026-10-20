@@ -16,7 +16,9 @@ use winit::{
     window::{Window, WindowId},
 };
 
-use crate::{DesktopDocumentSession, DesktopKey, EditorController, EditorDesktopUi};
+use crate::{
+    DesktopDocumentSession, DesktopKey, DesktopUiError, EditorController, EditorDesktopUi,
+};
 
 /// Native window and bounded validation-run configuration.
 #[derive(Clone, Debug)]
@@ -709,6 +711,27 @@ impl<R: DesktopRenderer> DesktopHost<R> {
     }
 
     fn document_command(&mut self, save: bool) {
+        if self
+            .document
+            .as_ref()
+            .is_some_and(|d| d.is_busy() || d.reconciliation_required())
+        {
+            self.input_result(Err(DesktopUiError::Panel(
+                "Resolve scene I/O before panel file commands".into(),
+            )));
+            return;
+        }
+        match self.ui.panel_document_command(save) {
+            Ok(true) => {
+                self.pending = true;
+                return;
+            }
+            Err(error) => {
+                self.input_result(Err(error));
+                return;
+            }
+            Ok(false) => {}
+        }
         let Some(document) = self.document.as_mut() else {
             return;
         };
@@ -915,11 +938,43 @@ impl<R: DesktopRenderer> ApplicationHandler<DesktopWake> for DesktopHost<R> {
             }
             WindowEvent::MouseInput {
                 state,
+                button: MouseButton::Middle,
+                ..
+            } => {
+                self.report.native_input_events += 1;
+                if state == ElementState::Released && self.ui.panel_pan_active() {
+                    let result = self.ui.panel_pointer_release(self.cursor);
+                    self.input_result(result);
+                } else if state == ElementState::Pressed
+                    && !self.ui.panel_pointer_active()
+                    && !self.renderer.gesture_active()
+                    && self.drag_start.is_none()
+                    && let Some([x, y]) = self.cursor
+                {
+                    if self
+                        .document
+                        .as_ref()
+                        .is_some_and(DesktopDocumentSession::is_busy)
+                    {
+                        self.ui
+                            .show_error("Document I/O must finish before panel input");
+                        self.redraw = true;
+                        return;
+                    }
+                    let result = self.ui.panel_pan_press(x, y);
+                    self.input_result(result);
+                }
+            }
+            WindowEvent::MouseInput {
+                state,
                 button: MouseButton::Left,
                 ..
             } => {
                 self.report.native_input_events += 1;
-                if state == ElementState::Released && self.ui.panel_pointer_active() {
+                if state == ElementState::Released
+                    && self.ui.panel_pointer_active()
+                    && !self.ui.panel_pan_active()
+                {
                     let result = self.ui.panel_pointer_release(self.cursor);
                     self.input_result(result);
                     return;

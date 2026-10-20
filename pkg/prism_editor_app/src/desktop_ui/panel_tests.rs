@@ -152,9 +152,9 @@ fn actual_timeline_transport_fields_layout_and_authoring_undo_fences() {
     let p = ui
         .native_panel_mut::<DesktopTimelinePanel>("timeline")
         .unwrap();
-    assert!(!p.acknowledge_saved(&stale));
+    assert!(!p.acknowledge_saved(&stale, 120));
     let token = p.editor.snapshot_token();
-    assert!(p.acknowledge_saved(&token));
+    assert!(p.acknowledge_saved(&token, 120));
     ui.refresh().unwrap();
     assert!(!ui.has_uncommitted_edit());
     assert_eq!(ui.controller().model_revision(), doc_revision);

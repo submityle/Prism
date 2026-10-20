@@ -134,7 +134,10 @@ pub struct DesktopTimelinePanel {
     pub controller: TimelinePanelController,
     consumer: Box<TimelineConsumer>,
     pub(super) view: Option<BoundTimelinePanel>,
-    saved: TimelineSnapshotToken,
+    pub(super) saved: TimelineSnapshotToken,
+    pub(super) saved_rate: u64,
+    pub(super) file:
+        Option<panel_storage::PanelFile<prism_editor_timeline::TimelineStorageService>>,
     pub(super) anchor: Option<Instant>,
     pub(super) wake: Option<Instant>,
     pending: Option<DesktopTimelineFrame>,
@@ -149,11 +152,14 @@ impl DesktopTimelinePanel {
         consumer: impl FnMut(&DesktopTimelineFrame) -> Result<(), String> + 'static,
     ) -> Self {
         let saved = editor.snapshot_token();
+        let saved_rate = controller.playback().config().ticks_per_second;
         Self {
             editor,
             controller,
             consumer: Box::new(consumer),
             saved,
+            saved_rate,
+            file: None,
             view: None,
             anchor: None,
             wake: None,
@@ -162,13 +168,24 @@ impl DesktopTimelinePanel {
             deliver: true,
         }
     }
-    /// Call only after persisting this exact authoring snapshot successfully.
-    pub fn acknowledge_saved(&mut self, token: &TimelineSnapshotToken) -> bool {
-        if *token != self.editor.snapshot_token() {
+    /// Call only after persisting this exact authoring snapshot and tick rate.
+    pub fn acknowledge_saved(
+        &mut self,
+        token: &TimelineSnapshotToken,
+        ticks_per_second: u64,
+    ) -> bool {
+        if *token != self.editor.snapshot_token()
+            || ticks_per_second != self.controller.playback().config().ticks_per_second
+        {
             return false;
         }
         self.saved = token.clone();
+        self.saved_rate = ticks_per_second;
         true
+    }
+    pub(super) fn dirty(&self) -> bool {
+        self.saved != self.editor.snapshot_token()
+            || self.saved_rate != self.controller.playback().config().ticks_per_second
     }
     /// Explicitly retry a rejected delivery or failed advance. No elapsed time
     /// is silently discarded; advance errors retain the old clock anchor.
@@ -187,14 +204,25 @@ impl DesktopPanel for DesktopTimelinePanel {
             .controller
             .build(&self.editor)
             .map_err(|e| e.to_string())?;
-        let result = DesktopPanelView {
+        let mut result = DesktopPanelView {
             element: view.element().clone(),
             bindings: view.bindings().map(|(k, t)| (k.to_owned(), t)).collect(),
         };
+        if let Some(file) = &self.file {
+            file.decorate(
+                "timeline",
+                &mut result,
+                self.file_ready().is_ok(),
+                !self.dirty(),
+            );
+        }
         self.view = Some(view);
         Ok(result)
     }
     fn event(&mut self, target: &str, event: &UiEvent) -> Result<(), String> {
+        if target.starts_with("timeline:file:") {
+            return self.file_event(target, event);
+        }
         if self.failed || self.pending.is_some() {
             return Err("Timeline delivery failed; retry the retained frame before editing".into());
         }
@@ -217,8 +245,9 @@ impl DesktopPanel for DesktopTimelinePanel {
         Ok(())
     }
     fn poll(&mut self, now: Instant) -> Result<bool, String> {
+        let file_changed = self.poll_file()?;
         if self.failed || self.controller.drag_preview().is_some() {
-            return Ok(false);
+            return Ok(file_changed);
         }
         if self.anchor.is_some_and(|anchor| now < anchor) {
             self.failed = true;
@@ -228,7 +257,7 @@ impl DesktopPanel for DesktopTimelinePanel {
         if self.pending.is_none() {
             let playing = self.controller.playback().status() == PlaybackStatus::Playing;
             if !self.deliver && (!playing || self.wake.is_some_and(|w| now < w)) {
-                return Ok(false);
+                return Ok(file_changed);
             }
             let elapsed = if playing {
                 match self.anchor {
@@ -279,12 +308,23 @@ impl DesktopPanel for DesktopTimelinePanel {
     }
     fn next_wake(&self) -> Option<Instant> {
         self.wake
+            .into_iter()
+            .chain(
+                self.file
+                    .as_ref()
+                    .and_then(panel_storage::PanelFile::next_wake),
+            )
+            .min()
     }
     fn fenced(&self) -> bool {
         self.failed
             || self.pending.is_some()
             || self.controller.drag_preview().is_some()
-            || self.saved != self.editor.snapshot_token()
+            || self.dirty()
+            || self
+                .file
+                .as_ref()
+                .is_some_and(panel_storage::PanelFile::fenced)
     }
     fn draft_revision(&self) -> u64 {
         self.editor.revision()

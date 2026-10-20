@@ -1,15 +1,17 @@
 //! Capture uses the same retained logical rectangles as painting and clipping.
 use super::*;
-use prism_editor_ui::{TimelinePanelAction, TimelineTangentSide};
+use prism_editor_ui::{GraphPointerButton, TimelinePanelAction, TimelineTangentSide};
 use std::{any::Any, time::Instant};
 
 pub(super) struct PanelCapture {
     id: String,
     origin: [f32; 2],
+    pan: bool,
 }
 
 fn is_drag_target(key: &str) -> bool {
-    key.starts_with("timeline:key:")
+    key == "graph:canvas"
+        || key.starts_with("timeline:key:")
         || matches!(
             key,
             "timeline:tangent:incoming" | "timeline:tangent:outgoing"
@@ -17,7 +19,7 @@ fn is_drag_target(key: &str) -> bool {
 }
 
 impl EditorDesktopUi {
-    /// Whether a timeline key/tangent owns the native pointer until release/cancel.
+    /// Whether an authoring controller owns the native pointer until release/cancel.
     pub fn panel_pointer_active(&self) -> bool {
         self.panels.capture.is_some()
     }
@@ -29,6 +31,23 @@ impl EditorDesktopUi {
         x: f32,
         y: f32,
         mode: SelectionMode,
+    ) -> Result<bool, DesktopUiError> {
+        self.panel_press(x, y, mode, false)
+    }
+    /// Map a native middle-button press to real graph canvas panning.
+    pub fn panel_pan_press(&mut self, x: f32, y: f32) -> Result<bool, DesktopUiError> {
+        self.panel_press(x, y, SelectionMode::Replace, true)
+    }
+    /// The native release must match the button that acquired capture.
+    pub fn panel_pan_active(&self) -> bool {
+        self.panels.capture.as_ref().is_some_and(|c| c.pan)
+    }
+    fn panel_press(
+        &mut self,
+        x: f32,
+        y: f32,
+        mode: SelectionMode,
+        pan: bool,
     ) -> Result<bool, DesktopUiError> {
         if !x.is_finite() || !y.is_finite() {
             return self.reject(DesktopUiError::InvalidPointer);
@@ -48,7 +67,8 @@ impl EditorDesktopUi {
             return self.reject(DesktopUiError::Panel("Pointer is already captured".into()));
         }
         let target = self.panels.geometry.iter().find_map(|(key, (_, clip))| {
-            (is_drag_target(key) && contains(*clip, x, y)).then(|| key.clone())
+            (is_drag_target(key) && (!pan || key == "graph:canvas") && contains(*clip, x, y))
+                .then(|| key.clone())
         });
         let Some(target) = target else {
             return Ok(false);
@@ -57,6 +77,50 @@ impl EditorDesktopUi {
             return self.reject(DesktopUiError::Panel(
                 "Resolve the draft before dragging".into(),
             ));
+        }
+        if target == "graph:canvas" {
+            let (rect, _) = self
+                .panels
+                .geometry
+                .get(&target)
+                .ok_or(DesktopUiError::InvalidProjection)?;
+            let origin = [rect.left(), rect.top()];
+            let slot = self
+                .panels
+                .slot_mut()
+                .ok_or(DesktopUiError::InvalidProjection)?;
+            let Some(panel) =
+                (slot.host.as_mut() as &mut dyn Any).downcast_mut::<DesktopGraphPanel>()
+            else {
+                return Ok(false);
+            };
+            let view = panel
+                .view
+                .as_ref()
+                .ok_or(DesktopUiError::InvalidProjection)?;
+            let button = if pan {
+                GraphPointerButton::Pan
+            } else {
+                GraphPointerButton::Primary
+            };
+            if let Err(e) = panel.controller.pointer_press(
+                view,
+                [f64::from(x - origin[0]), f64::from(y - origin[1])],
+                button,
+                mode,
+            ) {
+                return self.reject(DesktopUiError::Panel(e.to_string()));
+            }
+            if panel.controller.pointer_active() {
+                self.panels.capture = Some(PanelCapture {
+                    id: slot.id.clone(),
+                    origin,
+                    pan,
+                });
+            }
+            self.invalidated = true;
+            self.refresh()?;
+            return Ok(true);
         }
         let (origin_key, side) = match target.as_str() {
             "timeline:tangent:incoming" => (
@@ -126,6 +190,7 @@ impl EditorDesktopUi {
         self.panels.capture = Some(PanelCapture {
             id: slot.id.clone(),
             origin,
+            pan: false,
         });
         self.invalidated = true;
         self.refresh()?;
@@ -145,6 +210,19 @@ impl EditorDesktopUi {
             .iter_mut()
             .find(|s| s.id == capture.id)
             .ok_or(DesktopUiError::InvalidProjection)?;
+        if let Some(panel) =
+            (slot.host.as_mut() as &mut dyn Any).downcast_mut::<DesktopGraphPanel>()
+        {
+            if let Err(e) = panel
+                .controller
+                .pointer_move([f64::from(x - origin[0]), f64::from(y - origin[1])])
+            {
+                return self.reject(DesktopUiError::Panel(e.to_string()));
+            }
+            self.invalidated = true;
+            self.refresh()?;
+            return Ok(true);
+        }
         let panel = (slot.host.as_mut() as &mut dyn Any)
             .downcast_mut::<DesktopTimelinePanel>()
             .ok_or(DesktopUiError::InvalidProjection)?;
@@ -171,6 +249,40 @@ impl EditorDesktopUi {
         let Some([x, y]) = position else {
             return self.cancel_panel_pointer();
         };
+        let capture = self.panels.capture.as_ref().expect("active pointer");
+        let slot = self
+            .panels
+            .slots
+            .iter_mut()
+            .find(|s| s.id == capture.id)
+            .ok_or(DesktopUiError::InvalidProjection)?;
+        if let Some(panel) =
+            (slot.host.as_mut() as &mut dyn Any).downcast_mut::<DesktopGraphPanel>()
+        {
+            // Release validates the latest painted view before its own final move.
+            let result = if let Some(view) = &panel.view {
+                panel
+                    .controller
+                    .pointer_release(
+                        view,
+                        [
+                            f64::from(x - capture.origin[0]),
+                            f64::from(y - capture.origin[1]),
+                        ],
+                    )
+                    .map_err(|e| DesktopUiError::Panel(e.to_string()))
+            } else {
+                panel.controller.cancel_pointer();
+                Err(DesktopUiError::InvalidProjection)
+            };
+            self.panels.capture = None;
+            self.invalidated = true;
+            if let Err(e) = result {
+                return self.reject(e);
+            }
+            self.refresh()?;
+            return Ok(true);
+        }
         if let Err(error) = self.panel_pointer_move(x, y) {
             self.cancel_panel_pointer()?;
             return self.reject(error);
@@ -205,12 +317,56 @@ impl EditorDesktopUi {
         };
         if let Some(slot) = self.panels.slots.iter_mut().find(|s| s.id == capture.id)
             && let Some(panel) =
+                (slot.host.as_mut() as &mut dyn Any).downcast_mut::<DesktopGraphPanel>()
+        {
+            panel.controller.cancel_pointer();
+        }
+        if let Some(slot) = self.panels.slots.iter_mut().find(|s| s.id == capture.id)
+            && let Some(panel) =
                 (slot.host.as_mut() as &mut dyn Any).downcast_mut::<DesktopTimelinePanel>()
         {
             panel.controller.cancel_drag();
             panel.anchor = None;
             panel.deliver = true;
             panel.wake = Some(Instant::now());
+        }
+        self.invalidated = true;
+        self.refresh()?;
+        Ok(true)
+    }
+
+    pub(super) fn graph_zoom_at(
+        &mut self,
+        x: f32,
+        y: f32,
+        rows: i32,
+    ) -> Result<bool, DesktopUiError> {
+        let Some((rect, clip)) = self.panels.geometry.get("graph:canvas") else {
+            return Ok(false);
+        };
+        if !contains(*clip, x, y) {
+            return Ok(false);
+        }
+        let local = [f64::from(x - rect.left()), f64::from(y - rect.top())];
+        let Some(slot) = self.panels.slot_mut() else {
+            return Ok(false);
+        };
+        let Some(panel) = (slot.host.as_mut() as &mut dyn Any).downcast_mut::<DesktopGraphPanel>()
+        else {
+            return Ok(false);
+        };
+        if rows == 0 {
+            return Ok(true);
+        }
+        let view = panel
+            .view
+            .as_ref()
+            .ok_or(DesktopUiError::InvalidProjection)?;
+        if let Err(e) = panel
+            .controller
+            .zoom_at(view, local, 1.1_f64.powi(-rows.clamp(-16, 16)))
+        {
+            return self.reject(DesktopUiError::Panel(e.to_string()));
         }
         self.invalidated = true;
         self.refresh()?;

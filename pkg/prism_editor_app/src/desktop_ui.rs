@@ -27,19 +27,25 @@ const STATUS_HEIGHT: f32 = 28.0;
 const PANEL_HEADER: f32 = 30.0;
 const MAX_DIMENSION: f32 = 32_768.0;
 
+mod authoring_panels;
 mod collections;
 mod content;
 mod git;
 mod panel_pointer;
+mod panel_storage;
 mod panels;
 mod validation;
+pub use authoring_panels::{DesktopFrameGraphPanel, DesktopGraphPanel, DesktopPrefabPanel};
 use content::NativeContent;
 pub use content::{ContentThumbnailSource, DesktopContentImage};
 pub use git::{ContentGitPhase, ContentGitStatus};
+pub use panel_storage::DesktopPanelCancelOutcome;
 pub use panels::{
     DesktopPanel, DesktopPanelUpdate, DesktopPanelView, DesktopProfilerPanel, DesktopTimelineFrame,
     DesktopTimelinePanel, DesktopWorldPanel,
 };
+#[cfg(test)]
+mod authoring_panel_tests;
 #[cfg(test)]
 mod content_tests;
 #[cfg(test)]
@@ -546,7 +552,7 @@ impl EditorDesktopUi {
                 let Some(Key::Str(key)) = el.explicit_key() else {
                     return None;
                 };
-                if !key.starts_with("timeline:") {
+                if !key.starts_with("timeline:") && key != "graph:canvas" {
                     return None;
                 }
                 let clip = scope
@@ -804,13 +810,17 @@ impl EditorDesktopUi {
                     return Ok(false);
                 }
                 if self.panels.active() {
-                    let target = if key == DesktopKey::Undo {
-                        "timeline:undo"
+                    let operation = if key == DesktopKey::Undo {
+                        "undo"
                     } else {
-                        "timeline:redo"
+                        "redo"
                     };
-                    return if self.panels.is_target(target) {
-                        self.panel_event(target, &UiEvent::Activate)
+                    let target = ["timeline", "graph", "prefab"]
+                        .into_iter()
+                        .map(|prefix| format!("{prefix}:{operation}"))
+                        .find(|target| self.panels.is_target(target));
+                    return if let Some(target) = target {
+                        self.panel_event(&target, &UiEvent::Activate)
                     } else {
                         Ok(false)
                     };
@@ -860,6 +870,9 @@ impl EditorDesktopUi {
             return self.reject(DesktopUiError::InvalidPointer);
         }
         let refreshed = self.refresh()?;
+        if self.graph_zoom_at(x, y, delta_rows)? {
+            return Ok(true);
+        }
         let browser_height = self.content_height();
         let browser_top = self.size.height - STATUS_HEIGHT - browser_height;
         if self.panels.active()
