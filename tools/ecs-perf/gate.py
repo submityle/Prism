@@ -62,6 +62,10 @@ PORTABLE_COMPLEXITY_METRICS = {
     "query_match_new_archetype_calls": 1,
     "dirty_chunks_output": 2,
     "changed_scan_rows": 2,
+    "dirty_journal_records_scanned": 1,
+    "dirty_candidate_chunk_marks": 1,
+    "dirty_index_summaries_tested": 1,
+    "dirty_reported_chunks": 1,
 }
 PORTABLE_COMPLEXITY_POINTS = {
     ("query_match_cold_calls", 3),
@@ -71,6 +75,10 @@ PORTABLE_COMPLEXITY_POINTS = {
     ("dirty_chunks_output", 16384),
     ("changed_scan_rows", 256),
     ("changed_scan_rows", 16384),
+    ("dirty_journal_records_scanned", 131072),
+    ("dirty_candidate_chunk_marks", 131072),
+    ("dirty_index_summaries_tested", 131072),
+    ("dirty_reported_chunks", 131072),
 }
 PORTABLE_TIMING_METRICS = {
     "dirty_chunks_256": 256,

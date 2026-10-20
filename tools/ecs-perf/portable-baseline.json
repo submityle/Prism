@@ -15,6 +15,13 @@
       "world_units": 16384
     },
     {
+      "changed_units": 1024,
+      "metric": "dirty_candidate_chunk_marks",
+      "tolerance_abs": 0,
+      "value": 1024,
+      "world_units": 131072
+    },
+    {
       "changed_units": 3,
       "metric": "dirty_chunks_output",
       "tolerance_abs": 0,
@@ -27,6 +34,27 @@
       "tolerance_abs": 0,
       "value": 3,
       "world_units": 16384
+    },
+    {
+      "changed_units": 1024,
+      "metric": "dirty_index_summaries_tested",
+      "tolerance_abs": 0,
+      "value": 0,
+      "world_units": 131072
+    },
+    {
+      "changed_units": 1024,
+      "metric": "dirty_journal_records_scanned",
+      "tolerance_abs": 0,
+      "value": 1024,
+      "world_units": 131072
+    },
+    {
+      "changed_units": 1024,
+      "metric": "dirty_reported_chunks",
+      "tolerance_abs": 0,
+      "value": 1024,
+      "world_units": 131072
     },
     {
       "changed_units": 0,
@@ -51,10 +79,14 @@
     }
   ],
   "contract": {
-    "benchmark_sha256": "cbc2ba0a18a250568e85bf40d8451125ddfd030475e2bcdda915b386743e315c",
+    "benchmark_sha256": "14c2ffad6878f3113daa0dc48eeb6ccf547660c062f906e9fea5382810d3ce8a",
     "complexity_metrics": {
       "changed_scan_rows": 2,
+      "dirty_candidate_chunk_marks": 1,
       "dirty_chunks_output": 2,
+      "dirty_index_summaries_tested": 1,
+      "dirty_journal_records_scanned": 1,
+      "dirty_reported_chunks": 1,
       "query_match_cold_calls": 1,
       "query_match_new_archetype_calls": 1,
       "query_match_warm_calls": 1
@@ -70,53 +102,53 @@
     },
     "timing_protocol": "PRISM_ECS_TIMING_V1"
   },
-  "contract_sha256": "86529e6eaf46c2cb5eb1977208f579d9bf55dcaf683f41d799a6afadeed1b1af",
+  "contract_sha256": "d86bdd6d2c92f0cabe43e552ffd4bd27dcc55ec37cafd0da9598887fa01c468e",
   "kind": "portable-baseline",
   "schema": 1,
   "timing": {
     "changed_scan_16384": [
-      3041,
-      3041,
-      3000,
-      3041,
-      2958,
-      2917,
-      3042,
-      2959,
-      2917
+      1708,
+      1667,
+      1667,
+      1667,
+      1667,
+      1667,
+      1667,
+      1625,
+      1666
     ],
     "changed_scan_256": [
       250,
       208,
-      209,
       208,
       209,
       208,
+      292,
       209,
-      250,
+      208,
       208
     ],
     "dirty_chunks_16384": [
-      583,
-      500,
-      500,
-      458,
-      708,
-      459,
-      417,
-      4417,
-      667
+      1625,
+      1584,
+      1416,
+      1416,
+      2916,
+      2500,
+      1500,
+      1375,
+      1333
     ],
     "dirty_chunks_256": [
-      208,
-      166,
-      167,
-      166,
-      125,
-      166,
-      166,
-      166,
-      166
+      417,
+      333,
+      333,
+      292,
+      292,
+      292,
+      292,
+      334,
+      292
     ]
   }
 }

@@ -32,6 +32,14 @@ const REPEATS: usize = 3;
 struct Pos(f32, f32, f32);
 impl Component for Pos {}
 
+/// 512-byte table row used to exercise the high-cardinality chunk-index path.
+#[derive(Debug, Clone, Copy)]
+struct DirtyCell {
+    value: u64,
+    _padding: [u8; 504],
+}
+impl Component for DirtyCell {}
+
 /// Table-backed velocity.
 #[derive(Debug, Clone, Copy)]
 struct Vel(f32, f32, f32);
@@ -858,6 +866,83 @@ mod perf_gate {
             emit_timing(&format!("changed_scan_{count}"), count, || {
                 black_box(changed.iter(&world).count())
             });
+        }
+
+        // Exercise indexed dirty discovery at enough distinct chunks to bypass
+        // the small-candidate inline path. The counters make internal work
+        // observable; output cardinality alone cannot detect a full chunk scan.
+        {
+            const WORLD_CHUNKS: usize = 4096;
+            const CHANGED_CHUNKS: usize = 1024;
+            const ROW_BYTES: usize = 512;
+            const ROWS_PER_CHUNK: usize = 32;
+            let mut world = World::new();
+            let archetype_id = world.prewarm::<DirtyCell>(WORLD_CHUNKS * ROWS_PER_CHUNK);
+            let rows_per_chunk = world
+                .archetypes()
+                .get(archetype_id)
+                .unwrap()
+                .table()
+                .rows_per_chunk();
+            assert_eq!(rows_per_chunk, ROWS_PER_CHUNK);
+            let entities =
+                world.spawn_batch((0..WORLD_CHUNKS * rows_per_chunk).map(|index| DirtyCell {
+                    value: index as u64,
+                    _padding: [0; ROW_BYTES - size_of::<u64>()],
+                }));
+            let chunk_count = WORLD_CHUNKS;
+            assert_eq!(
+                world
+                    .archetypes()
+                    .get(archetype_id)
+                    .unwrap()
+                    .table()
+                    .chunk_count(),
+                chunk_count,
+            );
+            let query = world.query::<&DirtyCell>();
+            let last_run = world.change_tick();
+            let baseline = query.dirty_chunks_with_stats(&world, last_run, last_run);
+            assert!(baseline.chunks.is_empty());
+
+            world.increment_change_tick();
+            let this_run = world.change_tick();
+            for chunk in 0..CHANGED_CHUNKS {
+                world
+                    .get_mut::<DirtyCell>(entities[chunk * rows_per_chunk])
+                    .unwrap()
+                    .value += 1;
+            }
+            let report = query.dirty_chunks_with_stats(&world, last_run, this_run);
+            assert_eq!(report.stats.journal_records_scanned, CHANGED_CHUNKS);
+            assert_eq!(report.stats.candidate_chunk_marks, CHANGED_CHUNKS);
+            assert_eq!(report.stats.reported_chunks, CHANGED_CHUNKS);
+            assert_eq!(report.stats.matched_archetypes, 1);
+            assert_eq!(report.stats.summaries_tested, 0);
+            emit_complexity(
+                "dirty_journal_records_scanned",
+                WORLD_CHUNKS * ROWS_PER_CHUNK,
+                CHANGED_CHUNKS,
+                report.stats.journal_records_scanned,
+            );
+            emit_complexity(
+                "dirty_candidate_chunk_marks",
+                WORLD_CHUNKS * ROWS_PER_CHUNK,
+                CHANGED_CHUNKS,
+                report.stats.candidate_chunk_marks,
+            );
+            emit_complexity(
+                "dirty_index_summaries_tested",
+                WORLD_CHUNKS * ROWS_PER_CHUNK,
+                CHANGED_CHUNKS,
+                report.stats.summaries_tested,
+            );
+            emit_complexity(
+                "dirty_reported_chunks",
+                WORLD_CHUNKS * ROWS_PER_CHUNK,
+                CHANGED_CHUNKS,
+                report.stats.reported_chunks,
+            );
         }
     }
 }
