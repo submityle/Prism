@@ -20,7 +20,7 @@
 | `prism_editor_graph` | 稳定图身份、类型/基数校验、分组/索引维护、确定性拓扑与评估回调 | 材质/VFX 等具体节点 UI 和编译器适配 | 10 |
 | `prism_editor_timeline` | 整数 tick、稳定轨道/关键帧、插值、维度校验、有序事件与采样 | 序列器 UI 和具体运行时播放适配 | 3 |
 | `prism_editor_profiler` | 有界 frame/span、帧图/关键路径、内存预算告警、可视日志投影 | Tracy/GPU/真实运行时采集和分析界面 | 9 |
-| `prism_editor_content` | 目录/子树索引、末项续查分页、有界缓存与诊断、增量反向依赖、真实异步文件扫描、原子源目录发布、可贡献校验规则与精确快照门禁、原子 VCS 元数据和导入导出任务状态 | 缩略图生产、实际 importer/exporter/Cook/VCS provider 和原生内容流程 | 56（目录/扫描/发布/校验） |
+| `prism_editor_content` | 目录/子树索引、末项续查分页、有界缓存与诊断、增量反向依赖、真实异步文件扫描、精确快照围栏的源/VCS 原子发布、可贡献校验规则与精确快照门禁、导入导出任务状态 | 缩略图生产、实际 importer/exporter/Cook/VCS provider 和原生内容流程 | 59（目录/扫描/发布/校验） |
 | `prism_editor_domains` | 域/能力/贡献/Profile、版本约束、依赖启停、确定性冲突诊断 | 材质/VFX/动画/地形/音频/物理的具体编辑器 | 13 |
 | `prism_editor_remote` | 有界 JSON-RPC/二进制 codec、增量副本、PIE、TCP、受控子进程 stdio/TCP 桥及取消/重启/超时 | Prism 引擎专属 adapter 和生产场景运行时接线 | 41 |
 | `prism_editor_collab` | 有界因果副本/LWW/tombstone、Presence/租约软锁、TCP 接纳顺序/广播/重连/历史重放/能力拒绝 | 身份认证/TLS、产品级权限/部署和 UI 到命令栈协同接线 | 20 |
@@ -62,6 +62,8 @@
 2026-10-20 执行 `cargo test --offline -p prism_editor_content --all-targets`：10 项单元、8 项目录回归、28 项真实文件扫描及 4 项原子发布测试。`cargo clippy --offline -p prism_editor_content --all-targets --all-features --no-deps -- -D warnings` 使用同一独立 target 验证。回归覆盖过滤分页/缓存淘汰、400 次混合修改的反向引用比对、所有扫描/发布预算、真实重命名保留宿主身份、代际过期和失败不部分发布。这里只验证源发现/目录数据，不把任务状态模型计作实际 importer/exporter/Cook 执行。
 
 ### 内容校验与操作授权
+
+异步适配器捕获 `snapshot_token()` 后调用 `publish_assets`、`publish_filesystem` 或 `publish_vcs`，在消费任何输入/调用解析器前核对精确快照；相同数值 generation 的独立目录或分叉 clone 同样拒绝。VCS 发布另有路径数、单路径字节和路径/修订/锁拥有者总逻辑字节预算，失败保留全部旧元数据；相同观察保留 token。token 保护目录编辑，不能代替宿主的请求 epoch 排序或外部文件修订。新增 3 项围栏回归，当前目录相关测试合计 59 项通过。
 
 `validation::ValidationRegistry` 按稳定规则 ID 执行宿主贡献，检查前先限制资产、依赖边及规则调用数；诊断输出分别限制发射次数（含重复）、保留行数、消息和标识字节。回调只能为当前资产输出诊断；忽略 sink 错误也不能获得通过结果。宿主回调是可信代码，回调内部耗时和分配不属于这套预算的隔离保证。
 

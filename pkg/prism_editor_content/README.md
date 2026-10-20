@@ -92,6 +92,15 @@ an identical refresh retains cached pages. Validation requires inspecting the
 complete input, but unchanged snapshots do not rebuild derived indexes, metadata
 edits retain the tree, and reverse references apply only edge differences.
 
+For asynchronous adapters, capture `snapshot_token()` and use `publish_assets`,
+`publish_filesystem` or `publish_vcs`. These production publication entries
+check exact snapshot identity before consuming inputs or calling the resolver,
+including unrelated or divergent catalogs whose numeric generations coincide.
+`publish_vcs` additionally bounds path count, per-path bytes and total logical
+path/revision/lock-owner bytes. Errors leave live metadata unchanged; unchanged
+observations retain the token. A token fences catalog edits, not source changes
+or concurrent request ordering: hosts must also discard superseded scan epochs.
+
 ## Validation gates
 
 `validation::ValidationRegistry` combines built-in missing-reference, cycle and
@@ -124,7 +133,7 @@ changing page sizes and cache eviction, exact path identity, file/folder prefix
 collisions, atomic VCS publication, bounded diagnostics, and 400 mixed edits
 checked against an independent reverse-reference reconstruction. On 2026-10-20,
 18 original catalog tests, 28 real filesystem tests, 4 source-publication and
-6 validation tests passed. Publication tests cover path swaps/removals, every snapshot bound,
+6 validation and 3 exact-publication-fence tests passed. Publication tests cover path swaps/removals, every snapshot bound,
 bounded iterator consumption, stale refresh refusal, resolver failure and real
 file rename with host-owned stable identity. Validation tests cover hidden errors,
 incomplete checks, operation policy, zero display capacity, stale snapshot/rule

@@ -20,6 +20,12 @@ use core::{fmt, ops::Bound};
 pub mod filesystem;
 mod source;
 pub mod validation;
+pub use source::VcsSnapshotLimits;
+
+/// Exact catalog identity captured before asynchronous source or VCS work.
+/// Private identity prevents construction from an unrelated numeric generation.
+#[derive(Clone, Debug)]
+pub struct ContentSnapshotToken(Arc<()>);
 
 /// Stable content identity supplied by an asset system or importer.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Hash)]
@@ -568,6 +574,8 @@ pub enum ContentError {
         /// Generation of the catalog now.
         actual: u64,
     },
+    /// An asynchronous result belongs to another exact catalog snapshot.
+    StaleCatalogSnapshot,
     /// A complete asset refresh exceeded one of its configured bounds.
     SnapshotLimitExceeded(&'static str),
 }
@@ -599,6 +607,7 @@ impl fmt::Display for ContentError {
             Self::StaleSnapshot { expected, actual } => {
                 write!(formatter, "catalog refresh generation {expected} is stale; current generation is {actual}")
             }
+            Self::StaleCatalogSnapshot => formatter.write_str("content catalog snapshot changed"),
             Self::SnapshotLimitExceeded(name) => {
                 write!(formatter, "catalog refresh exceeded {name}")
             }
@@ -916,6 +925,20 @@ impl ContentCatalog {
     #[must_use]
     pub const fn generation(&self) -> u64 {
         self.generation
+    }
+
+    /// Capture an exact immutable identity before starting asynchronous work.
+    /// Clones share this identity only until an effective mutation occurs.
+    #[must_use]
+    pub fn snapshot_token(&self) -> ContentSnapshotToken {
+        ContentSnapshotToken(self.snapshot_identity.clone())
+    }
+
+    /// Whether this catalog is still the exact captured snapshot. Unlike the
+    /// cursor generation, this also rejects unrelated catalogs and wraparound.
+    #[must_use]
+    pub fn matches_snapshot(&self, token: &ContentSnapshotToken) -> bool {
+        Arc::ptr_eq(&self.snapshot_identity, &token.0)
     }
 
     /// Returns the number of registered assets.
