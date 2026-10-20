@@ -18,8 +18,9 @@
 //! strict fixed-only algorithms are also available for direct composition.
 //!
 //! Tiles are bounded to 64 KiB and decoded serially by one invocation each.
-//! This synchronous implementation reads each tile back before submitting
-//! the next; batched dispatch and GPU-resident consumers are not provided.
+//! Direct batch APIs submit independent tiles in one compute pass and one
+//! submission, read back only status records, and publish owned GPU outputs
+//! after all tiles validate. Synchronous byte-returning APIs also remain.
 //! The lane-major GDF1 layout is Prism's format contract, not a claim of binary
 //! interoperability with external DirectStorage/GDeflate implementations.
 //!
@@ -53,5 +54,8 @@ pub use deflate::{DeflateDecodeError, GpuDeflate};
 pub use deinterleave::{
     reference_deinterleave, DeinterleaveError, GpuDeinterleave, GROUP, LANES, WORD,
 };
-pub use fixed::{FixedDecodeError, GpuFixedGDeflate};
+pub use fixed::{
+    DeflateBatchError, DeflateBatchLimits, DeflateTile, FixedDecodeError, GpuFixedGDeflate,
+    ResidentDeflateTile,
+};
 pub use stored::{plan_stored_deflate, GpuStoredGDeflate, StoredBlockPlan, StoredPlanError};

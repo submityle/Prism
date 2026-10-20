@@ -20,7 +20,10 @@ mod deflate_encode;
 mod deflate_huffman;
 pub mod gdeflate;
 
-pub use deflate::{inflate, InflateError};
+pub use deflate::{
+    inflate, inflate_bounded, inflate_bounded_with_consumed, validate_deflate_bounded, InflateError,
+};
 pub use gdeflate::{
-    gdeflate_compress, gdeflate_decompress, GDeflateError, GDeflateHeader, GDeflateTileDescriptor,
+    gdeflate_compress, gdeflate_decompress, gdeflate_decompress_bounded, GDeflateError,
+    GDeflateHeader, GDeflateTileDescriptor,
 };

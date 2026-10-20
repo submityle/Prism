@@ -7,7 +7,7 @@
 //!
 //! The implementation follows `RFC 1951` directly and holds no device or OS
 //! handle, so it works identically as a `CPU` fallback and as the golden
-//! reference a future `GPU` decoder is validated against. It supports all three
+//! reference the `GPU` decoder is validated against. It supports all three
 //! block types — stored, fixed-Huffman, and dynamic-Huffman — including
 //! back-references that span block boundaries.
 //!
@@ -17,7 +17,6 @@
 //! raw throughput for a tiny, obviously-correct table, which is the right
 //! trade-off for a reference core.
 
-use alloc::vec;
 use alloc::vec::Vec;
 
 /// Largest Huffman code length `DEFLATE` permits.
@@ -70,6 +69,12 @@ pub enum InflateError {
     DistanceTooFar,
     /// A decoded code-length table was malformed (over- or under-subscribed).
     InvalidCodeLengths,
+    /// A decoded write would exceed the caller's output byte limit.
+    OutputLimitExceeded,
+    /// The allocator rejected an output buffer growth request.
+    AllocationFailed,
+    /// Whole bytes remained after the final block (not terminal padding bits).
+    TrailingData,
 }
 
 /// Decompresses a raw `DEFLATE` stream (no `zlib`/`gzip` wrapper) into bytes.
@@ -78,21 +83,91 @@ pub enum InflateError {
 /// Returns an [`InflateError`] when the stream is truncated or violates
 /// `RFC 1951`.
 pub fn inflate(input: &[u8]) -> Result<Vec<u8>, InflateError> {
+    inflate_bounded(input, usize::MAX)
+}
+
+/// Decompresses a raw `DEFLATE` stream with a hard decoded byte limit.
+///
+/// Every stored block, literal, and LZ77 copy is checked before reserving or
+/// writing its output. The limit is not preallocated: capacity grows
+/// geometrically, never requesting more than `max_output_bytes`, and allocation
+/// failure is returned rather than panicking. Huffman tables use fixed-size
+/// stack storage independent of input and output lengths. A zero limit accepts
+/// valid empty streams but rejects the first decoded byte.
+/// This decodes one stream prefix, as [`inflate`] does. Framed callers should
+/// use [`inflate_bounded_with_consumed`] to reject whole trailing bytes.
+///
+/// # Errors
+/// Returns [`InflateError::OutputLimitExceeded`] before any write that would
+/// exceed the limit, [`InflateError::AllocationFailed`] on allocation failure,
+/// or another [`InflateError`] for truncated or malformed streams.
+pub fn inflate_bounded(input: &[u8], max_output_bytes: usize) -> Result<Vec<u8>, InflateError> {
+    inflate_bounded_with_consumed(input, max_output_bytes).map(|(output, _)| output)
+}
+
+/// Inflates one raw stream prefix and returns `(output, consumed_bytes)`.
+///
+/// `consumed_bytes` includes the last partially used byte, but no following
+/// whole byte. Unused bits in that last byte are legal padding, regardless of
+/// their value. Like [`inflate_bounded`], this accepts a stream prefix; framed
+/// callers must compare `consumed_bytes` to their declared compressed length.
+///
+/// # Errors
+/// Returns the same bounded-write, allocation, and format errors as
+/// [`inflate_bounded`].
+pub fn inflate_bounded_with_consumed(
+    input: &[u8],
+    max_output_bytes: usize,
+) -> Result<(Vec<u8>, usize), InflateError> {
     let mut reader = BitReader::new(input);
     let mut out = Vec::new();
+    inflate_into(&mut reader, &mut out, max_output_bytes)?;
+    Ok((out, reader.consumed_bytes()))
+}
+
+/// Validates exactly one bounded raw stream without allocating decoded bytes.
+///
+/// Returns the decoded byte count. This shares the inflate parser, checks LZ77
+/// distances and all output growth, but counts references instead of expanding
+/// them. It is suitable for validating GPU input, not for producing CPU output
+/// or validating a decoded checksum. Whole trailing bytes are rejected; unused
+/// bits in the final byte are accepted.
+///
+/// # Errors
+/// Returns [`InflateError::TrailingData`] if any whole byte follows BFINAL, or
+/// the same format and output-limit errors as [`inflate_bounded`].
+pub fn validate_deflate_bounded(
+    input: &[u8],
+    max_output_bytes: usize,
+) -> Result<usize, InflateError> {
+    let mut reader = BitReader::new(input);
+    let mut count = OutputCount(0);
+    inflate_into(&mut reader, &mut count, max_output_bytes)?;
+    if reader.consumed_bytes() != input.len() {
+        return Err(InflateError::TrailingData);
+    }
+    Ok(count.len())
+}
+
+fn inflate_into(
+    reader: &mut BitReader<'_>,
+    out: &mut impl InflateOutput,
+    max_output_bytes: usize,
+) -> Result<(), InflateError> {
     loop {
         let final_block = reader.bit()? == 1;
         match reader.bits(2)? {
-            0 => inflate_stored(&mut reader, &mut out)?,
+            0 => inflate_stored(reader, out, max_output_bytes)?,
             1 => inflate_block(
-                &mut reader,
-                &mut out,
+                reader,
+                out,
                 &Huffman::fixed_litlen(),
                 &Huffman::fixed_dist(),
+                max_output_bytes,
             )?,
             2 => {
-                let (litlen, dist) = read_dynamic_tables(&mut reader)?;
-                inflate_block(&mut reader, &mut out, &litlen, &dist)?;
+                let (litlen, dist) = read_dynamic_tables(reader)?;
+                inflate_block(reader, out, &litlen, &dist, max_output_bytes)?;
             }
             _ => return Err(InflateError::ReservedBlockType),
         }
@@ -100,7 +175,81 @@ pub fn inflate(input: &[u8]) -> Result<Vec<u8>, InflateError> {
             break;
         }
     }
-    Ok(out)
+    Ok(())
+}
+
+// Both materializing and count-only decode use exactly the same block parser.
+// Every push/copy is preceded by reserve_bounded for the entire write.
+trait InflateOutput {
+    fn len(&self) -> usize;
+    fn reserve_bounded(&mut self, additional: usize, limit: usize) -> Result<(), InflateError>;
+    fn push(&mut self, byte: u8);
+    fn copy_match(&mut self, length: usize, distance: usize);
+}
+
+impl InflateOutput for Vec<u8> {
+    fn len(&self) -> usize {
+        self.len()
+    }
+
+    fn reserve_bounded(&mut self, additional: usize, limit: usize) -> Result<(), InflateError> {
+        reserve_output(self, additional, limit)
+    }
+
+    fn push(&mut self, byte: u8) {
+        self.push(byte);
+    }
+
+    fn copy_match(&mut self, length: usize, distance: usize) {
+        let start = self.len() - distance;
+        for offset in 0..length {
+            self.push(self[start + offset]);
+        }
+    }
+}
+
+struct OutputCount(usize);
+
+impl InflateOutput for OutputCount {
+    fn len(&self) -> usize {
+        self.0
+    }
+
+    fn reserve_bounded(&mut self, additional: usize, limit: usize) -> Result<(), InflateError> {
+        self.0
+            .checked_add(additional)
+            .filter(|&length| length <= limit)
+            .ok_or(InflateError::OutputLimitExceeded)?;
+        Ok(())
+    }
+
+    fn push(&mut self, _byte: u8) {
+        self.0 += 1;
+    }
+
+    fn copy_match(&mut self, length: usize, _distance: usize) {
+        self.0 += length;
+    }
+}
+
+/// Checks a complete write before reserving, including overlapping LZ77 copies.
+fn reserve_output(out: &mut Vec<u8>, additional: usize, limit: usize) -> Result<(), InflateError> {
+    let required = out
+        .len()
+        .checked_add(additional)
+        .filter(|&length| length <= limit)
+        .ok_or(InflateError::OutputLimitExceeded)?;
+    if required > out.capacity() {
+        let capacity = out
+            .capacity()
+            .saturating_mul(2)
+            .max(256)
+            .min(limit)
+            .max(required);
+        out.try_reserve_exact(capacity - out.len())
+            .map_err(|_| InflateError::AllocationFailed)?;
+    }
+    Ok(())
 }
 
 /// `LSB`-first bit reader over a byte slice, matching `DEFLATE` bit packing.
@@ -122,6 +271,11 @@ impl<'a> BitReader<'a> {
             bit_buf: 0,
             bit_count: 0,
         }
+    }
+
+    /// Excludes any full bytes buffered ahead of the actual end of the stream.
+    fn consumed_bytes(&self) -> usize {
+        self.byte_pos - self.bit_count as usize / 8
     }
 
     /// Reads a single bit (`LSB`-first within each byte).
@@ -177,15 +331,21 @@ struct Huffman {
     /// `counts[len]` is the number of codes of bit length `len` (`counts[0]==0`).
     counts: [u16; MAX_BITS + 1],
     /// Symbols ordered by increasing code length, then increasing symbol value.
-    symbols: Vec<u16>,
+    symbols: [u16; MAX_LITLEN_SYMBOLS],
 }
 
 impl Huffman {
     /// Builds a decoder from one code length per symbol (0 = symbol absent).
     fn from_lengths(lengths: &[u16]) -> Result<Self, InflateError> {
+        if lengths.len() > MAX_LITLEN_SYMBOLS {
+            return Err(InflateError::InvalidCodeLengths);
+        }
         let mut counts = [0u16; MAX_BITS + 1];
         for &len in lengths {
-            counts[len as usize] += 1;
+            let count = counts
+                .get_mut(len as usize)
+                .ok_or(InflateError::InvalidCodeLengths)?;
+            *count += 1;
         }
         counts[0] = 0;
 
@@ -203,8 +363,7 @@ impl Huffman {
         for len in 1..=MAX_BITS {
             offsets[len + 1] = offsets[len] + counts[len];
         }
-        let total = offsets[MAX_BITS + 1] as usize;
-        let mut symbols = vec![0u16; total];
+        let mut symbols = [0u16; MAX_LITLEN_SYMBOLS];
         for (symbol, &len) in lengths.iter().enumerate() {
             if len != 0 {
                 symbols[offsets[len as usize] as usize] = symbol as u16;
@@ -252,7 +411,11 @@ impl Huffman {
 }
 
 /// Copies a stored (uncompressed) block verbatim (`RFC 1951` §3.2.4).
-fn inflate_stored(reader: &mut BitReader<'_>, out: &mut Vec<u8>) -> Result<(), InflateError> {
+fn inflate_stored(
+    reader: &mut BitReader<'_>,
+    out: &mut impl InflateOutput,
+    max_output_bytes: usize,
+) -> Result<(), InflateError> {
     reader.align_to_byte();
     let len =
         u16::from(reader.read_aligned_byte()?) | (u16::from(reader.read_aligned_byte()?) << 8);
@@ -261,7 +424,7 @@ fn inflate_stored(reader: &mut BitReader<'_>, out: &mut Vec<u8>) -> Result<(), I
     if len != !nlen {
         return Err(InflateError::StoredLengthMismatch);
     }
-    out.reserve(len as usize);
+    out.reserve_bounded(len as usize, max_output_bytes)?;
     for _ in 0..len {
         out.push(reader.read_aligned_byte()?);
     }
@@ -282,7 +445,8 @@ fn read_dynamic_tables(reader: &mut BitReader<'_>) -> Result<(Huffman, Huffman),
     let code_length_table = Huffman::from_lengths(&code_length_lengths)?;
 
     let total = hlit + hdist;
-    let mut lengths = vec![0u16; total];
+    let mut storage = [0u16; MAX_LITLEN_SYMBOLS + MAX_DIST_SYMBOLS];
+    let lengths = &mut storage[..total];
     let mut i = 0;
     while i < total {
         let symbol = code_length_table.decode(reader)?;
@@ -307,11 +471,11 @@ fn read_dynamic_tables(reader: &mut BitReader<'_>) -> Result<(Huffman, Huffman),
             }
             17 => {
                 let repeat = reader.bits(3)? as usize + 3;
-                i = fill_zeros(&mut lengths, i, repeat, total)?;
+                i = fill_zeros(lengths, i, repeat, total)?;
             }
             18 => {
                 let repeat = reader.bits(7)? as usize + 11;
-                i = fill_zeros(&mut lengths, i, repeat, total)?;
+                i = fill_zeros(lengths, i, repeat, total)?;
             }
             _ => return Err(InflateError::InvalidSymbol),
         }
@@ -342,14 +506,18 @@ fn fill_zeros(
 /// Decodes one compressed block body with the supplied Huffman tables.
 fn inflate_block(
     reader: &mut BitReader<'_>,
-    out: &mut Vec<u8>,
+    out: &mut impl InflateOutput,
     litlen: &Huffman,
     dist: &Huffman,
+    max_output_bytes: usize,
 ) -> Result<(), InflateError> {
     loop {
         let symbol = litlen.decode(reader)?;
         match symbol {
-            0..=255 => out.push(symbol as u8),
+            0..=255 => {
+                out.reserve_bounded(1, max_output_bytes)?;
+                out.push(symbol as u8);
+            }
             256 => return Ok(()),
             257..=285 => {
                 let index = (symbol - 257) as usize;
@@ -364,11 +532,8 @@ fn inflate_block(
                 if distance == 0 || distance > out.len() {
                     return Err(InflateError::DistanceTooFar);
                 }
-                let start = out.len() - distance;
-                for offset in 0..length {
-                    let byte = out[start + offset];
-                    out.push(byte);
-                }
+                out.reserve_bounded(length, max_output_bytes)?;
+                out.copy_match(length, distance);
             }
             _ => return Err(InflateError::InvalidSymbol),
         }
@@ -378,6 +543,7 @@ fn inflate_block(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
     use flate2::write::DeflateEncoder;
     use flate2::Compression;
     use std::io::Write;
@@ -471,5 +637,350 @@ mod tests {
         // BFINAL=1, BTYPE=00, then LEN=1 with a wrong NLEN check word.
         let stream = [0x01, 0x01, 0x00, 0x00, 0x00, 0x42];
         assert_eq!(inflate(&stream), Err(InflateError::StoredLengthMismatch));
+    }
+
+    #[test]
+    fn bounded_decode_accepts_exact_and_generous_limits_for_all_encoder_levels() {
+        for data in [
+            Vec::new(),
+            b"literal bytes".to_vec(),
+            vec![0xAB; 100_000],
+            (0..70_001u32)
+                .map(|value| value.wrapping_mul(37) as u8)
+                .collect(),
+        ] {
+            for level in [0, 1, 6, 9] {
+                let encoded = deflate(&data, level);
+                assert_eq!(inflate_bounded(&encoded, data.len()).unwrap(), data);
+                assert_eq!(inflate_bounded(&encoded, usize::MAX).unwrap(), data);
+                if !data.is_empty() {
+                    assert_eq!(
+                        inflate_bounded(&encoded, data.len() - 1),
+                        Err(InflateError::OutputLimitExceeded),
+                        "level={level}, length={}",
+                        data.len(),
+                    );
+                    assert_eq!(
+                        inflate_bounded(&encoded, 0),
+                        Err(InflateError::OutputLimitExceeded),
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn stored_block_is_rejected_before_reserving_or_reading_payload() {
+        // A complete header advertising three bytes, without any payload.
+        let encoded = [0x01, 0x03, 0x00, 0xFC, 0xFF];
+        let mut reader = BitReader::new(&encoded);
+        assert_eq!(reader.bits(3).unwrap(), 1);
+        let mut out = Vec::new();
+        assert_eq!(
+            inflate_stored(&mut reader, &mut out, 2),
+            Err(InflateError::OutputLimitExceeded),
+        );
+        assert_eq!(out.capacity(), 0);
+        assert!(out.is_empty());
+    }
+
+    /// Independent fixed block: literal 'A', length 258 / distance 1, EOB.
+    fn overlapping_copy_stream() -> Vec<u8> {
+        let mut bits = vec![true, true, false]; // BFINAL=1, BTYPE=01.
+        for (code, count) in [(0x71u16, 8), (0xC5, 8), (0, 5), (0, 7)] {
+            for shift in (0..count).rev() {
+                bits.push((code >> shift) & 1 != 0);
+            }
+        }
+        let mut bytes = vec![0u8; bits.len().div_ceil(8)];
+        for (offset, bit) in bits.into_iter().enumerate() {
+            bytes[offset / 8] |= u8::from(bit) << (offset % 8);
+        }
+        bytes
+    }
+
+    #[test]
+    fn fixed_literal_limit_is_checked_before_the_first_write() {
+        let encoded = overlapping_copy_stream();
+        let mut reader = BitReader::new(&encoded);
+        assert_eq!(reader.bits(3).unwrap(), 3);
+        let mut out = Vec::new();
+        assert_eq!(
+            inflate_block(
+                &mut reader,
+                &mut out,
+                &Huffman::fixed_litlen(),
+                &Huffman::fixed_dist(),
+                0
+            ),
+            Err(InflateError::OutputLimitExceeded),
+        );
+        assert!(out.is_empty());
+        assert_eq!(out.capacity(), 0);
+    }
+
+    #[test]
+    fn overlapping_lz77_copy_is_rejected_as_a_whole_before_writing() {
+        let encoded = overlapping_copy_stream();
+        assert_eq!(inflate_bounded(&encoded, 259).unwrap(), vec![b'A'; 259]);
+        let mut reader = BitReader::new(&encoded);
+        reader.bits(3).unwrap();
+        let mut out = Vec::new();
+        assert_eq!(
+            inflate_block(
+                &mut reader,
+                &mut out,
+                &Huffman::fixed_litlen(),
+                &Huffman::fixed_dist(),
+                258
+            ),
+            Err(InflateError::OutputLimitExceeded),
+        );
+        assert_eq!(out, b"A");
+        assert!(out.capacity() <= 258);
+    }
+
+    #[test]
+    fn output_limit_is_shared_across_stored_and_huffman_blocks() {
+        let mut encoded = vec![0x00, 0x01, 0x00, 0xFE, 0xFF, b'X'];
+        encoded.extend_from_slice(&overlapping_copy_stream());
+        let mut expected = vec![b'X'];
+        expected.extend_from_slice(&vec![b'A'; 259]);
+        assert_eq!(inflate_bounded(&encoded, 260).unwrap(), expected);
+        assert_eq!(
+            inflate_bounded(&encoded, 259),
+            Err(InflateError::OutputLimitExceeded)
+        );
+    }
+
+    #[test]
+    fn dynamic_huffman_output_limit_applies_before_full_decode() {
+        let data = vec![0xAB; 100_000];
+        let encoded = deflate(&data, 9);
+        assert_eq!((encoded[0] >> 1) & 3, 2, "fixture must use dynamic Huffman");
+        assert_eq!(inflate_bounded(&encoded, data.len()).unwrap(), data);
+        assert_eq!(
+            inflate_bounded(&encoded, 1024),
+            Err(InflateError::OutputLimitExceeded)
+        );
+    }
+
+    #[test]
+    fn checked_reservation_rejects_overflow_and_allocation_failure_without_growth() {
+        let mut out = vec![1];
+        let capacity = out.capacity();
+        assert_eq!(
+            reserve_output(&mut out, usize::MAX, usize::MAX),
+            Err(InflateError::OutputLimitExceeded)
+        );
+        assert_eq!(out, [1]);
+        assert_eq!(out.capacity(), capacity);
+        let mut out = Vec::new();
+        assert_eq!(
+            reserve_output(&mut out, usize::MAX, usize::MAX),
+            Err(InflateError::AllocationFailed)
+        );
+        assert_eq!(out.capacity(), 0);
+    }
+
+    #[test]
+    fn geometric_growth_never_requests_more_than_the_output_limit() {
+        let mut out = Vec::new();
+        let mut growths = 0;
+        for _ in 0..65_537 {
+            let previous = out.capacity();
+            reserve_output(&mut out, 1, 65_537).unwrap();
+            growths += usize::from(out.capacity() != previous);
+            assert!(out.capacity() <= 65_537);
+            out.push(7);
+        }
+        assert!(growths <= 10, "literal streams must not allocate per byte");
+    }
+
+    #[test]
+    fn huffman_table_storage_rejects_out_of_range_lengths_without_panicking() {
+        assert!(matches!(
+            Huffman::from_lengths(&[16]),
+            Err(InflateError::InvalidCodeLengths)
+        ));
+        assert!(matches!(
+            Huffman::from_lengths(&[0; MAX_LITLEN_SYMBOLS + 1]),
+            Err(InflateError::InvalidCodeLengths)
+        ));
+    }
+
+    fn consumed_fixtures() -> Vec<(Vec<u8>, Vec<u8>)> {
+        let dynamic_data = vec![0xAB; 70_000];
+        let dynamic = deflate(&dynamic_data, 9);
+        assert_eq!((dynamic[0] >> 1) & 3, 2);
+        let fixed = overlapping_copy_stream();
+        // Fixed block ends at bit 31; a non-final stored header straddles that
+        // byte boundary, followed by a byte-aligned final dynamic block.
+        let mut mixed = fixed.clone();
+        mixed[0] &= !1;
+        mixed.push(0);
+        mixed.extend_from_slice(&[1, 0, 0xFE, 0xFF, b'X']);
+        mixed.extend_from_slice(&dynamic);
+        let mut mixed_data = vec![b'A'; 259];
+        mixed_data.push(b'X');
+        mixed_data.extend_from_slice(&dynamic_data);
+        vec![
+            (vec![1, 0, 0, 0xFF, 0xFF], Vec::new()),
+            (vec![3, 0], Vec::new()),
+            (vec![1, 3, 0, 0xFC, 0xFF, b'a', b'b', b'c'], b"abc".to_vec()),
+            (fixed, vec![b'A'; 259]),
+            (dynamic, dynamic_data),
+            (mixed, mixed_data),
+        ]
+    }
+
+    #[test]
+    fn exact_consumed_excludes_trailing_bytes_for_empty_stored_fixed_dynamic_and_mixed() {
+        for (raw, data) in consumed_fixtures() {
+            let (decoded, consumed) = inflate_bounded_with_consumed(&raw, data.len()).unwrap();
+            assert_eq!(decoded, data);
+            assert_eq!(consumed, raw.len());
+            assert_eq!(validate_deflate_bounded(&raw, data.len()), Ok(data.len()));
+            for tail in [&[0][..], &[0xFF], &[3, 0], raw.as_slice()] {
+                let mut extended = raw.clone();
+                extended.extend_from_slice(tail);
+                let (decoded, consumed) =
+                    inflate_bounded_with_consumed(&extended, data.len()).unwrap();
+                assert_eq!(decoded, data);
+                assert_eq!(consumed, raw.len());
+                assert_eq!(inflate_bounded(&extended, data.len()).unwrap(), data);
+                assert_eq!(inflate(&extended).unwrap(), data);
+                assert_eq!(
+                    validate_deflate_bounded(&extended, data.len()),
+                    Err(InflateError::TrailingData)
+                );
+            }
+            if !data.is_empty() {
+                assert_eq!(
+                    validate_deflate_bounded(&raw, data.len() - 1),
+                    Err(InflateError::OutputLimitExceeded)
+                );
+            }
+            for length in 0..raw.len() {
+                assert!(inflate_bounded_with_consumed(&raw[..length], data.len()).is_err());
+                assert!(validate_deflate_bounded(&raw[..length], data.len()).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn consumed_accepts_nonzero_terminal_padding_but_not_an_extra_whole_byte() {
+        for raw in [&[3, 0xFC][..], &[0xF9, 0, 0, 0xFF, 0xFF]] {
+            assert_eq!(
+                inflate_bounded_with_consumed(raw, 0),
+                Ok((Vec::new(), raw.len()))
+            );
+            assert_eq!(validate_deflate_bounded(raw, 0), Ok(0));
+            let mut extended = raw.to_vec();
+            extended.push(0);
+            assert_eq!(
+                validate_deflate_bounded(&extended, 0),
+                Err(InflateError::TrailingData)
+            );
+        }
+        // Simulate lookahead: whole buffered bytes must not count as consumed.
+        let mut reader = BitReader::new(&[0; 4]);
+        reader.bits(24).unwrap();
+        reader.bit_buf = 0;
+        reader.bit_count = 17;
+        assert_eq!(reader.consumed_bytes(), 1);
+    }
+
+    #[test]
+    fn exact_consumed_handles_every_final_bit_alignment() {
+        // Each fixed literal 144 occupies nine bits, so these cover all eight
+        // final-bit offsets, including a byte-aligned EOB with no padding.
+        for literals in 0..8 {
+            let mut bits = vec![true, true, false];
+            for _ in 0..literals {
+                bits.extend((0..9).rev().map(|shift| 0x190u16 & (1 << shift) != 0));
+            }
+            bits.extend([false; 7]); // Fixed EOB.
+            let mut raw = vec![0u8; bits.len().div_ceil(8)];
+            for (offset, &bit) in bits.iter().enumerate() {
+                raw[offset / 8] |= u8::from(bit) << (offset % 8);
+            }
+            if !bits.len().is_multiple_of(8) {
+                *raw.last_mut().unwrap() |= 0xFFu8 << (bits.len() % 8);
+            }
+            let data = vec![144; literals];
+            let consumed = raw.len();
+            assert_eq!(
+                inflate_bounded_with_consumed(&raw, literals),
+                Ok((data.clone(), consumed))
+            );
+            assert_eq!(validate_deflate_bounded(&raw, literals), Ok(literals));
+            raw.extend_from_slice(&[0, 0xFF, 3, 0]);
+            assert_eq!(
+                inflate_bounded_with_consumed(&raw, literals),
+                Ok((data, consumed))
+            );
+            assert_eq!(
+                validate_deflate_bounded(&raw, literals),
+                Err(InflateError::TrailingData)
+            );
+        }
+    }
+
+    #[test]
+    fn count_only_validation_preserves_cross_block_history_and_invalid_distance_errors() {
+        // Non-final stored 'X', then fixed length 258/distance 1 with no literal.
+        let mut bits = vec![true, true, false];
+        for (code, width) in [(0xC5u16, 8), (0, 5), (0, 7)] {
+            bits.extend((0..width).rev().map(|shift| code & (1 << shift) != 0));
+        }
+        let mut fixed = vec![0u8; bits.len().div_ceil(8)];
+        for (offset, bit) in bits.into_iter().enumerate() {
+            fixed[offset / 8] |= u8::from(bit) << (offset % 8);
+        }
+        assert_eq!(
+            validate_deflate_bounded(&fixed, 259),
+            Err(InflateError::DistanceTooFar)
+        );
+        let mut mixed = vec![0, 1, 0, 0xFE, 0xFF, b'X'];
+        mixed.extend_from_slice(&fixed);
+        assert_eq!(validate_deflate_bounded(&mixed, 259), Ok(259));
+        assert_eq!(
+            inflate_bounded_with_consumed(&mixed, 259),
+            Ok((vec![b'X'; 259], mixed.len()))
+        );
+        assert_eq!(
+            validate_deflate_bounded(&mixed, 258),
+            Err(InflateError::OutputLimitExceeded)
+        );
+        let mut count = OutputCount(usize::MAX);
+        assert_eq!(
+            count.reserve_bounded(1, usize::MAX),
+            Err(InflateError::OutputLimitExceeded)
+        );
+        assert_eq!(count.len(), usize::MAX);
+    }
+
+    #[test]
+    fn count_only_and_materialized_decode_agree_on_malformed_streams() {
+        let mut state = 0x1234_5678u32;
+        for length in 0..48 {
+            for _ in 0..64 {
+                let raw: Vec<u8> = (0..length)
+                    .map(|_| {
+                        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                        (state >> 24) as u8
+                    })
+                    .collect();
+                let expected = inflate_bounded_with_consumed(&raw, 32).and_then(|(bytes, used)| {
+                    if used == raw.len() {
+                        Ok(bytes.len())
+                    } else {
+                        Err(InflateError::TrailingData)
+                    }
+                });
+                assert_eq!(validate_deflate_bounded(&raw, 32), expected, "{raw:?}");
+            }
+        }
     }
 }

@@ -52,12 +52,16 @@ impl fmt::Display for GpuProbeError {
 impl core::error::Error for GpuProbeError {}
 
 /// The long-lived `wgpu` handles shared by every compute kernel in this crate.
+/// Cloning retains the same instance, logical device, and submission queue.
+#[derive(Clone)]
 pub struct GpuContext {
     /// The `wgpu` instance the adapter was requested from.
-    #[expect(dead_code, reason = "kept alive so the adapter and device stay valid")]
     instance: Instance,
     /// The physical adapter backing [`GpuContext::device`].
-    #[expect(dead_code, reason = "kept alive so the device stays valid")]
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "kept alive so the device stays valid")
+    )]
     adapter: Adapter,
     /// Snapshot of the physical adapter identity used for diagnostics.
     adapter_info: wgpu::AdapterInfo,
@@ -120,6 +124,12 @@ impl GpuContext {
         &self.device
     }
 
+    // Native wgpu device IDs are unique only within their owning instance.
+    // Compare this handle alongside Device when validating resource ownership.
+    pub(crate) fn instance(&self) -> &Instance {
+        &self.instance
+    }
+
     /// Returns the submission queue.
     #[must_use]
     pub fn queue(&self) -> &Queue {
@@ -142,5 +152,76 @@ impl GpuContext {
         self.device
             .poll(PollType::wait_indefinitely())
             .expect("device poll should complete the submitted work");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        DeflateBatchError, DeflateBatchLimits, DeflateDecodeError, DeflateTile, GpuDeflate,
+        GpuFixedGDeflate, GROUP,
+    };
+
+    #[test]
+    fn decode_device_guard_rejects_another_device_in_the_same_instance() {
+        let Some(ctx) = GpuContext::try_headless() else {
+            return;
+        };
+        // A separate request on the same adapter is a different logical device.
+        let (device, queue) = block_on(ctx.adapter.request_device(&DeviceDescriptor {
+            required_limits: ctx.adapter.limits(),
+            ..Default::default()
+        }))
+        .expect("second logical device on the test adapter");
+        let other = GpuContext {
+            instance: ctx.instance.clone(),
+            adapter: ctx.adapter.clone(),
+            adapter_info: ctx.adapter_info.clone(),
+            device,
+            queue,
+        };
+        assert_eq!(ctx.instance(), other.instance());
+        assert_ne!(ctx.device(), other.device());
+        let mut source = [0u8; GROUP];
+        source[0] = 3; // final fixed block, EOB only: raw bytes [3, 0]
+        let requests = [DeflateTile {
+            interleaved: &source,
+            compressed_size: 2,
+            expected_output_size: 0,
+        }];
+        let limits = DeflateBatchLimits {
+            max_tiles: 1,
+            max_device_bytes: 1024,
+        };
+        let fixed = GpuFixedGDeflate::new(&ctx);
+        let full = GpuDeflate::new(&ctx);
+        let scope = other
+            .device()
+            .push_error_scope(wgpu::ErrorFilter::Validation);
+        assert_eq!(
+            fixed
+                .decompress_batch_resident(&other, &requests, limits)
+                .unwrap_err(),
+            DeflateBatchError::Device(DeflateDecodeError::DeviceMismatch),
+        );
+        assert_eq!(
+            full.decompress_batch_resident(&other, &requests, limits)
+                .unwrap_err(),
+            DeflateBatchError::Device(DeflateDecodeError::DeviceMismatch),
+        );
+        assert_eq!(
+            fixed.decompress(&other, &source, 2, 0),
+            Err(DeflateDecodeError::DeviceMismatch)
+        );
+        assert_eq!(
+            full.decompress(&other, &source, 2, 0),
+            Err(DeflateDecodeError::DeviceMismatch)
+        );
+        assert!(block_on(scope.pop()).is_none());
+        // The same handles cloned into another wrapper retain valid ownership.
+        let cloned = ctx.clone();
+        assert!(fixed.decompress(&cloned, &source, 2, 0).unwrap().is_empty());
+        assert!(full.decompress(&cloned, &source, 2, 0).unwrap().is_empty());
     }
 }

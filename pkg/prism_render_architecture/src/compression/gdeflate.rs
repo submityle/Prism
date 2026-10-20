@@ -18,7 +18,7 @@
 //!   header and per-tile descriptors.
 //! * [`gdeflate_decompress`] parses the headers, reverses the transpose to
 //!   recover each tile's linear `DEFLATE` bitstream, and inflates it with the
-//!   existing [`super::deflate::inflate`] core.
+//!   bounded [`super::deflate::inflate_bounded`] core.
 //!
 //! The interleave is a reversible word-level transpose of a single standard
 //! `DEFLATE` bitstream: logical word `r * 32 + lane` is stored at lane-major
@@ -73,19 +73,28 @@ pub enum GDeflateError {
     UnsupportedLaneCount(u8),
     /// The stream ended before a header, descriptor, or tile payload finished.
     TruncatedStream,
-    /// A tile's interleaved payload was not a whole number of lane groups.
+    /// The tile layout, reserved header byte, or a tile's sizes are invalid.
     CorruptTile,
+    /// Bytes remained after the last declared tile payload.
+    TrailingData,
     /// A decoded tile's length did not match its descriptor.
     TileSizeMismatch,
     /// A decoded tile's checksum did not match its descriptor.
     TileChecksumMismatch,
     /// The inner `DEFLATE` stream of a tile failed to inflate.
     Inflate(InflateError),
+    /// The allocator rejected a decode buffer growth request.
+    AllocationFailed,
+    /// The declared stream output exceeds the caller's aggregate byte budget.
+    OutputLimitExceeded,
 }
 
 impl From<InflateError> for GDeflateError {
     fn from(error: InflateError) -> Self {
-        Self::Inflate(error)
+        match error {
+            InflateError::AllocationFailed => Self::AllocationFailed,
+            error => Self::Inflate(error),
+        }
     }
 }
 
@@ -249,49 +258,123 @@ pub fn gdeflate_compress(input: &[u8]) -> Vec<u8> {
 ///
 /// # Errors
 /// Returns a [`GDeflateError`] when the stream is truncated, carries bad magic,
-/// fails a tile integrity check, or contains an invalid inner `DEFLATE` stream.
+/// has an invalid layout or trailing container bytes, fails tile integrity,
+/// exceeds a tile's declared output limit, or cannot allocate decode storage.
+/// The entire framing is checked before allocating decode buffers. Each tile
+/// is limited to 64 KiB and its declared size is enforced before decoded writes.
+/// Use [`gdeflate_decompress_bounded`] to also cap the aggregate stream output.
 pub fn gdeflate_decompress(input: &[u8]) -> Result<Vec<u8>, GDeflateError> {
+    gdeflate_decompress_bounded(input, usize::MAX)
+}
+
+/// Decompresses a container with a caller-specified aggregate output budget.
+///
+/// All descriptors, ranges, and their sum must agree with the header, and that
+/// sum must fit `max_output_bytes`, before any decode allocation or inflation.
+/// A budget is not an allocation hint. Per-tile bounds still apply, including
+/// to empty and noncanonical short tiles. Each raw stream must consume exactly
+/// its declared compressed bytes; lane padding and final-byte unused bits are
+/// not part of that check.
+///
+/// # Errors
+/// Returns [`GDeflateError::OutputLimitExceeded`] for an over-budget stream,
+/// [`GDeflateError::Inflate`] containing [`InflateError::TrailingData`] for
+/// trailing raw bytes inside a tile, or the errors of [`gdeflate_decompress`].
+pub fn gdeflate_decompress_bounded(
+    input: &[u8],
+    max_output_bytes: usize,
+) -> Result<Vec<u8>, GDeflateError> {
     let header = GDeflateHeader::read(input)?;
     if usize::from(header.lane_count) != LANES {
         return Err(GDeflateError::UnsupportedLaneCount(header.lane_count));
     }
+    if header.tile_shift != TILE_SHIFT || input[7] != 0 {
+        return Err(GDeflateError::CorruptTile);
+    }
+    let tile_count =
+        usize::try_from(header.tile_count).map_err(|_| GDeflateError::TruncatedStream)?;
+    let descriptor_end = tile_count
+        .checked_mul(DESCRIPTOR_LEN)
+        .and_then(|length| HEADER_LEN.checked_add(length))
+        .ok_or(GDeflateError::TruncatedStream)?;
+    let descriptors = input
+        .get(HEADER_LEN..descriptor_end)
+        .ok_or(GDeflateError::TruncatedStream)?;
+    let uncompressed_size =
+        usize::try_from(header.uncompressed_size).map_err(|_| GDeflateError::TileSizeMismatch)?;
 
-    let tile_count = header.tile_count as usize;
-    let mut offset = HEADER_LEN;
-
-    let mut descriptors = Vec::with_capacity(tile_count);
-    for _ in 0..tile_count {
-        let slice = input
-            .get(offset..offset + DESCRIPTOR_LEN)
-            .ok_or(GDeflateError::TruncatedStream)?;
-        descriptors.push(GDeflateTileDescriptor::read(slice)?);
-        offset += DESCRIPTOR_LEN;
+    // Validate the entire framing without allocating or inflating anything.
+    // In particular, neither header count nor total size is an allocation hint.
+    let mut offset = descriptor_end;
+    let mut total = 0usize;
+    for bytes in descriptors.chunks_exact(DESCRIPTOR_LEN) {
+        let descriptor = GDeflateTileDescriptor::read(bytes)?;
+        if descriptor.uncompressed_size as usize > TILE_SIZE || descriptor.compressed_size == 0 {
+            return Err(GDeflateError::CorruptTile);
+        }
+        total = total
+            .checked_add(descriptor.uncompressed_size as usize)
+            .ok_or(GDeflateError::TileSizeMismatch)?;
+        tile_payload(input, &mut offset, descriptor.compressed_size as usize)?;
+    }
+    if total != uncompressed_size {
+        return Err(GDeflateError::TileSizeMismatch);
+    }
+    if offset != input.len() {
+        return Err(GDeflateError::TrailingData);
+    }
+    if uncompressed_size > max_output_bytes {
+        return Err(GDeflateError::OutputLimitExceeded);
     }
 
-    let mut out = Vec::with_capacity(header.uncompressed_size as usize);
-    for descriptor in &descriptors {
+    let mut out = Vec::new();
+    offset = descriptor_end;
+    for bytes in descriptors.chunks_exact(DESCRIPTOR_LEN) {
+        let descriptor = GDeflateTileDescriptor::read(bytes)?;
         let compressed_size = descriptor.compressed_size as usize;
-        let padded = round_up(compressed_size, GROUP);
-        let chunk = input
-            .get(offset..offset + padded)
-            .ok_or(GDeflateError::TruncatedStream)?;
-        offset += padded;
-
+        let chunk = tile_payload(input, &mut offset, compressed_size)?;
         let deflated = deinterleave(chunk, compressed_size)?;
-        let tile = deflate::inflate(&deflated)?;
+        let (tile, consumed) = deflate::inflate_bounded_with_consumed(
+            &deflated,
+            descriptor.uncompressed_size as usize,
+        )?;
+        if consumed != compressed_size {
+            return Err(InflateError::TrailingData.into());
+        }
         if tile.len() != descriptor.uncompressed_size as usize {
             return Err(GDeflateError::TileSizeMismatch);
         }
         if checksum(&tile) != descriptor.checksum {
             return Err(GDeflateError::TileChecksumMismatch);
         }
+        out.try_reserve(tile.len())
+            .map_err(|_| GDeflateError::AllocationFailed)?;
         out.extend_from_slice(&tile);
     }
-
-    if out.len() != header.uncompressed_size as usize {
+    if out.len() != uncompressed_size {
         return Err(GDeflateError::TileSizeMismatch);
     }
     Ok(out)
+}
+
+/// Borrows one padded payload, checking rounding and cursor arithmetic.
+fn tile_payload<'a>(
+    input: &'a [u8],
+    offset: &mut usize,
+    compressed_size: usize,
+) -> Result<&'a [u8], GDeflateError> {
+    let padded = compressed_size
+        .div_ceil(GROUP)
+        .checked_mul(GROUP)
+        .ok_or(GDeflateError::TruncatedStream)?;
+    let end = offset
+        .checked_add(padded)
+        .ok_or(GDeflateError::TruncatedStream)?;
+    let payload = input
+        .get(*offset..end)
+        .ok_or(GDeflateError::TruncatedStream)?;
+    *offset = end;
+    Ok(payload)
 }
 
 /// Transposes a linear `DEFLATE` byte stream into lane-major (warp-interleaved)
@@ -328,20 +411,17 @@ fn deinterleave(interleaved: &[u8], compressed_size: usize) -> Result<Vec<u8>, G
     if !interleaved.len().is_multiple_of(GROUP) || compressed_size > interleaved.len() {
         return Err(GDeflateError::CorruptTile);
     }
-    let padded_len = interleaved.len();
-    let words = padded_len / WORD;
-    let rounds = words / LANES;
-    let mut padded = vec![0u8; padded_len];
-    for lane in 0..LANES {
-        for r in 0..rounds {
-            let logical = r * LANES + lane;
-            let stored = lane * rounds + r;
-            let src = &interleaved[stored * WORD..stored * WORD + WORD];
-            padded[logical * WORD..logical * WORD + WORD].copy_from_slice(src);
-        }
+    let rounds = interleaved.len() / GROUP;
+    let mut linear = Vec::new();
+    linear
+        .try_reserve_exact(compressed_size)
+        .map_err(|_| GDeflateError::AllocationFailed)?;
+    for offset in 0..compressed_size {
+        let word = offset / WORD;
+        let stored_word = (word % LANES) * rounds + word / LANES;
+        linear.push(interleaved[stored_word * WORD + offset % WORD]);
     }
-    padded.truncate(compressed_size);
-    Ok(padded)
+    Ok(linear)
 }
 
 /// Rounds `value` up to the next multiple of `multiple`.
@@ -376,6 +456,80 @@ fn read_u64_le(bytes: &[u8]) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn frame_raw_tiles(tiles: &[(&[u8], &[u8])]) -> Vec<u8> {
+        let mut out = Vec::new();
+        GDeflateHeader {
+            magic: MAGIC,
+            version: VERSION,
+            lane_count: LANES as u8,
+            tile_shift: TILE_SHIFT,
+            tile_count: tiles.len() as u32,
+            uncompressed_size: tiles.iter().map(|(_, data)| data.len() as u64).sum(),
+        }
+        .write(&mut out);
+        for &(raw, data) in tiles {
+            GDeflateTileDescriptor {
+                uncompressed_size: data.len() as u32,
+                compressed_size: raw.len() as u32,
+                checksum: checksum(data),
+            }
+            .write(&mut out);
+        }
+        for &(raw, _) in tiles {
+            out.extend_from_slice(&interleave(raw));
+        }
+        out
+    }
+
+    fn set_single_tile_size(input: &mut [u8], size: u32) {
+        input[12..20].copy_from_slice(&u64::from(size).to_le_bytes());
+        input[HEADER_LEN..HEADER_LEN + 4].copy_from_slice(&size.to_le_bytes());
+    }
+
+    fn raw_block_fixtures() -> Vec<(Vec<u8>, Vec<u8>)> {
+        // Independent fixed tree: literal A, length 258/distance 1, EOB.
+        let mut bits = vec![true, true, false];
+        for (code, width) in [(0x71u16, 8), (0xC5, 8), (0, 5), (0, 7)] {
+            bits.extend((0..width).rev().map(|shift| code & (1 << shift) != 0));
+        }
+        let pack = |bits: &[bool]| {
+            let mut bytes = vec![0; bits.len().div_ceil(8)];
+            for (i, &bit) in bits.iter().enumerate() {
+                bytes[i / 8] |= u8::from(bit) << (i % 8);
+            }
+            bytes
+        };
+        let fixed = pack(&bits);
+        // Produced by an independent zlib compressor, not Prism's encoder.
+        let hex = "edcab10d83301000c0559e0932062d4d0608f0912c2516022301d3932dd25c73d5f5c333e6b3bebe658ab6666ef18852e75cf2476d717dca18ef72b47dcd2e7adbb66ddbb66ddbb66ddbb66ddbb66ddbb66ddbb66ddbb66ddbb6ffb86f";
+        let dynamic: Vec<u8> = (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+            .collect();
+        let dynamic_data = b"GPU dynamic trees / independent zlib fixture! ".repeat(200);
+        assert_eq!((dynamic[0] >> 1) & 3, 2);
+
+        // Non-final fixed, non-final stored X, then a final dynamic block.
+        // The stored header starts at bit 31, testing cross-byte alignment.
+        bits[0] = false;
+        bits.extend_from_slice(&[false, false, false]);
+        while !bits.len().is_multiple_of(8) {
+            bits.push(false);
+        }
+        let mut mixed = pack(&bits);
+        mixed.extend_from_slice(&[1, 0, 0xFE, 0xFF, b'X']);
+        mixed.extend_from_slice(&dynamic);
+        let mut mixed_data = vec![b'A'; 259];
+        mixed_data.push(b'X');
+        mixed_data.extend_from_slice(&dynamic_data);
+        vec![
+            (vec![1, 3, 0, 0xFC, 0xFF, b'a', b'b', b'c'], b"abc".to_vec()),
+            (fixed, vec![b'A'; 259]),
+            (dynamic, dynamic_data),
+            (mixed, mixed_data),
+        ]
+    }
 
     fn lcg_bytes(len: usize, seed: u32) -> Vec<u8> {
         let mut state = seed;
@@ -489,6 +643,368 @@ mod tests {
         assert_eq!(
             gdeflate_decompress(truncated),
             Err(GDeflateError::TruncatedStream)
+        );
+    }
+
+    #[test]
+    fn header_contract_rejects_unknown_layouts() {
+        for (offset, value, expected) in [
+            (4, 2, GDeflateError::UnsupportedVersion(2)),
+            (5, 0, GDeflateError::UnsupportedLaneCount(0)),
+            (6, 15, GDeflateError::CorruptTile),
+            (6, 17, GDeflateError::CorruptTile),
+            (7, 1, GDeflateError::CorruptTile),
+        ] {
+            let mut input = gdeflate_compress(&[]);
+            input[offset] = value;
+            assert_eq!(gdeflate_decompress(&input), Err(expected));
+        }
+    }
+
+    #[test]
+    fn forged_counts_totals_and_sizes_are_rejected_during_preflight() {
+        let encoded = gdeflate_compress(b"bounded framing");
+        for count in [0u32, u32::MAX] {
+            let mut input = encoded.clone();
+            input[8..12].copy_from_slice(&count.to_le_bytes());
+            assert_eq!(
+                gdeflate_decompress(&input),
+                Err(if count == 0 {
+                    GDeflateError::TileSizeMismatch
+                } else {
+                    GDeflateError::TruncatedStream
+                })
+            );
+        }
+        for total in [0, 1, 1u64 << 40, u64::MAX] {
+            let mut input = encoded.clone();
+            input[12..20].copy_from_slice(&total.to_le_bytes());
+            assert_eq!(
+                gdeflate_decompress(&input),
+                Err(GDeflateError::TileSizeMismatch)
+            );
+        }
+        for (size, expected) in [
+            (0, GDeflateError::CorruptTile),
+            (u32::MAX, GDeflateError::TruncatedStream),
+        ] {
+            let mut input = encoded.clone();
+            input[HEADER_LEN + 4..HEADER_LEN + 8].copy_from_slice(&size.to_le_bytes());
+            assert_eq!(gdeflate_decompress(&input), Err(expected));
+        }
+        let mut input = encoded;
+        set_single_tile_size(&mut input, TILE_SIZE as u32 + 1);
+        assert_eq!(gdeflate_decompress(&input), Err(GDeflateError::CorruptTile));
+    }
+
+    #[test]
+    fn every_truncated_prefix_and_outer_trailing_byte_is_rejected() {
+        let input = frame_raw_tiles(&[(&[1, 3, 0, 0xFC, 0xFF, b'a', b'b', b'c'], b"abc")]);
+        for length in 0..input.len() {
+            assert_eq!(
+                gdeflate_decompress(&input[..length]),
+                Err(GDeflateError::TruncatedStream),
+                "prefix {length}"
+            );
+        }
+        for encoded in [gdeflate_compress(&[]), input] {
+            for extra in [1, GROUP] {
+                let mut input = encoded.clone();
+                input.resize(input.len() + extra, 0);
+                assert_eq!(
+                    gdeflate_decompress(&input),
+                    Err(GDeflateError::TrailingData)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn preflight_finishes_before_decoding_a_corrupt_first_tile() {
+        let mut input = frame_raw_tiles(&[(&[7], b""), (&[3, 0], b"")]);
+        input.pop();
+        assert_eq!(
+            gdeflate_decompress(&input),
+            Err(GDeflateError::TruncatedStream)
+        );
+        let mut input = frame_raw_tiles(&[(&[7], b"")]);
+        input.push(0);
+        assert_eq!(
+            gdeflate_decompress(&input),
+            Err(GDeflateError::TrailingData)
+        );
+    }
+
+    #[test]
+    fn all_block_types_enforce_exact_zero_and_undersized_tile_budgets() {
+        for (raw, data) in raw_block_fixtures() {
+            let encoded = frame_raw_tiles(&[(&raw, &data)]);
+            assert_eq!(gdeflate_decompress(&encoded).unwrap(), data);
+            for limit in [0, data.len() - 1] {
+                let mut input = encoded.clone();
+                set_single_tile_size(&mut input, limit as u32);
+                assert_eq!(
+                    gdeflate_decompress(&input),
+                    Err(GDeflateError::Inflate(InflateError::OutputLimitExceeded))
+                );
+            }
+            let mut input = encoded.clone();
+            set_single_tile_size(&mut input, data.len() as u32 + 1);
+            assert_eq!(
+                gdeflate_decompress(&input),
+                Err(GDeflateError::TileSizeMismatch)
+            );
+            let mut input = encoded;
+            input[HEADER_LEN + 8] ^= 1;
+            assert_eq!(
+                gdeflate_decompress(&input),
+                Err(GDeflateError::TileChecksumMismatch)
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_empty_and_noncanonical_small_tiles_remain_valid() {
+        let empty_stored = [1, 0, 0, 0xFF, 0xFF];
+        let empty_fixed = [3, 0];
+        let stored = [1, 3, 0, 0xFC, 0xFF, b'a', b'b', b'c'];
+        for raw in [&empty_stored[..], &empty_fixed[..]] {
+            let input = frame_raw_tiles(&[(raw, b"")]);
+            assert_eq!(gdeflate_decompress(&input).unwrap(), b"");
+        }
+        let input = frame_raw_tiles(&[
+            (&empty_stored, b""),
+            (&stored, b"abc"),
+            (&empty_fixed, b""),
+            (&stored, b"abc"),
+        ]);
+        assert_eq!(gdeflate_decompress(&input).unwrap(), b"abcabc");
+    }
+
+    #[test]
+    fn tiles_cannot_borrow_another_tiles_output_budget() {
+        let raw = [1, 3, 0, 0xFC, 0xFF, b'a', b'b', b'c'];
+        let encoded = frame_raw_tiles(&[(&raw, b"abc"), (&raw, b"abc")]);
+        for (first, second) in [(2u32, 4u32), (3, 2)] {
+            let mut input = encoded.clone();
+            input[12..20].copy_from_slice(&u64::from(first + second).to_le_bytes());
+            input[HEADER_LEN..HEADER_LEN + 4].copy_from_slice(&first.to_le_bytes());
+            input[HEADER_LEN + DESCRIPTOR_LEN..HEADER_LEN + DESCRIPTOR_LEN + 4]
+                .copy_from_slice(&second.to_le_bytes());
+            assert_eq!(
+                gdeflate_decompress(&input),
+                Err(GDeflateError::Inflate(InflateError::OutputLimitExceeded))
+            );
+        }
+    }
+
+    #[test]
+    fn full_tile_stored_blocks_allow_compressed_bytes_above_tile_size() {
+        let data = vec![b'Z'; TILE_SIZE];
+        // A stored block has a 16-bit length, so use two blocks for 64 KiB.
+        let mut raw = vec![0, 0xFF, 0xFF, 0, 0];
+        raw.extend_from_slice(&data[..TILE_SIZE - 1]);
+        raw.extend_from_slice(&[1, 1, 0, 0xFE, 0xFF, b'Z']);
+        assert!(raw.len() > TILE_SIZE);
+        let input = frame_raw_tiles(&[(&raw, &data)]);
+        assert_eq!(gdeflate_decompress(&input).unwrap(), data);
+        let mut input = input;
+        set_single_tile_size(&mut input, TILE_SIZE as u32 - 1);
+        assert_eq!(
+            gdeflate_decompress(&input),
+            Err(GDeflateError::Inflate(InflateError::OutputLimitExceeded))
+        );
+    }
+
+    #[test]
+    fn checked_payload_offsets_fail_without_advancing_the_cursor() {
+        for (start, size) in [(usize::MAX - 63, 1), (0, usize::MAX), (1, GROUP)] {
+            let mut cursor = start;
+            assert_eq!(
+                tile_payload(&[0; GROUP], &mut cursor, size),
+                Err(GDeflateError::TruncatedStream)
+            );
+            assert_eq!(cursor, start);
+        }
+        assert_eq!(
+            deinterleave(&[0; GROUP - 1], 1),
+            Err(GDeflateError::CorruptTile)
+        );
+        assert_eq!(
+            deinterleave(&[0; GROUP], GROUP + 1),
+            Err(GDeflateError::CorruptTile)
+        );
+    }
+
+    #[test]
+    fn allocation_errors_keep_their_structured_category() {
+        assert_eq!(
+            GDeflateError::from(InflateError::AllocationFailed),
+            GDeflateError::AllocationFailed
+        );
+        assert_eq!(
+            GDeflateError::from(InflateError::OutputLimitExceeded),
+            GDeflateError::Inflate(InflateError::OutputLimitExceeded)
+        );
+    }
+
+    #[test]
+    fn inner_raw_trailing_bytes_are_rejected_in_every_block_kind_and_tile_position() {
+        let mut fixtures = raw_block_fixtures();
+        fixtures.extend([
+            (vec![3, 0], Vec::new()),
+            (vec![1, 0, 0, 0xFF, 0xFF], Vec::new()),
+        ]);
+        for (raw, data) in fixtures {
+            for suffix in [vec![0], vec![0xFF], vec![3, 0], vec![0; GROUP], raw.clone()] {
+                let mut extended = raw.clone();
+                extended.extend_from_slice(&suffix);
+                for tiles in [
+                    vec![(extended.as_slice(), data.as_slice()), (&[3, 0], &b""[..])],
+                    vec![(&[3, 0], &b""[..]), (extended.as_slice(), data.as_slice())],
+                ] {
+                    let input = frame_raw_tiles(&tiles);
+                    assert_eq!(
+                        gdeflate_decompress(&input),
+                        Err(GDeflateError::Inflate(InflateError::TrailingData))
+                    );
+                    assert_eq!(
+                        gdeflate_decompress_bounded(&input, data.len()),
+                        Err(GDeflateError::Inflate(InflateError::TrailingData))
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn terminal_bits_and_lane_padding_are_not_mistaken_for_raw_trailing_bytes() {
+        for raw in [&[3, 0xFC][..], &[0xF9, 0, 0, 0xFF, 0xFF]] {
+            let mut input = frame_raw_tiles(&[(raw, b"")]);
+            // For one round, stored and logical word positions coincide.
+            input[HEADER_LEN + DESCRIPTOR_LEN + raw.len()..].fill(0xA5);
+            assert_eq!(gdeflate_decompress_bounded(&input, 0).unwrap(), b"");
+        }
+        // Also distinguish raw bytes from transpose padding across many rounds.
+        let data = lcg_bytes(2_003, 0xCAFEBABE);
+        let raw = deflate_encode::deflate(&data);
+        let mut input = frame_raw_tiles(&[(&raw, &data)]);
+        let payload = &mut input[HEADER_LEN + DESCRIPTOR_LEN..];
+        let rounds = payload.len() / GROUP;
+        assert!(rounds > 1);
+        for offset in raw.len()..payload.len() {
+            let word = offset / WORD;
+            let stored_word = (word % LANES) * rounds + word / LANES;
+            payload[stored_word * WORD + offset % WORD] = 0xA5;
+        }
+        assert_eq!(
+            gdeflate_decompress_bounded(&input, data.len()).unwrap(),
+            data
+        );
+    }
+
+    #[test]
+    fn aggregate_budget_accepts_exact_empty_multitile_and_full_tile_boundaries() {
+        let fixtures = raw_block_fixtures();
+        let mut tiles = vec![(&[3, 0][..], &b""[..])];
+        tiles.extend(
+            fixtures
+                .iter()
+                .map(|(raw, data)| (raw.as_slice(), data.as_slice())),
+        );
+        tiles.push((&[1, 0, 0, 0xFF, 0xFF], b""));
+        let expected: Vec<u8> = fixtures
+            .iter()
+            .flat_map(|(_, data)| data.iter().copied())
+            .collect();
+        let encoded = frame_raw_tiles(&tiles);
+        assert_eq!(
+            gdeflate_decompress_bounded(&encoded, expected.len()).unwrap(),
+            expected
+        );
+        assert_eq!(
+            gdeflate_decompress_bounded(&encoded, usize::MAX).unwrap(),
+            expected
+        );
+        for limit in [0, expected.len() - 1] {
+            assert_eq!(
+                gdeflate_decompress_bounded(&encoded, limit),
+                Err(GDeflateError::OutputLimitExceeded)
+            );
+        }
+        for empty in [
+            gdeflate_compress(&[]),
+            frame_raw_tiles(&[(&[3, 0], b""), (&[3, 0], b"")]),
+        ] {
+            assert_eq!(gdeflate_decompress_bounded(&empty, 0).unwrap(), b"");
+        }
+        let data = vec![b'A'; 2 * TILE_SIZE + 1];
+        let encoded = gdeflate_compress(&data);
+        assert_eq!(
+            gdeflate_decompress_bounded(&encoded, data.len()).unwrap(),
+            data
+        );
+        assert_eq!(
+            gdeflate_decompress_bounded(&encoded, data.len() - 1),
+            Err(GDeflateError::OutputLimitExceeded)
+        );
+    }
+
+    #[test]
+    fn aggregate_budget_and_complete_framing_are_checked_before_any_inflate() {
+        // Sum is 6, but the first raw stream is reserved and cannot inflate.
+        let valid = [1, 3, 0, 0xFC, 0xFF, b'a', b'b', b'c'];
+        let input = frame_raw_tiles(&[(&[7], b"abc"), (&valid, b"abc")]);
+        assert_eq!(
+            gdeflate_decompress_bounded(&input, 5),
+            Err(GDeflateError::OutputLimitExceeded)
+        );
+        assert_eq!(
+            gdeflate_decompress_bounded(&input, 6),
+            Err(GDeflateError::Inflate(InflateError::ReservedBlockType))
+        );
+        let mut truncated = input.clone();
+        truncated.pop();
+        assert_eq!(
+            gdeflate_decompress_bounded(&truncated, 5),
+            Err(GDeflateError::TruncatedStream)
+        );
+        let mut forged = input.clone();
+        forged[12..20].copy_from_slice(&3u64.to_le_bytes());
+        assert_eq!(
+            gdeflate_decompress_bounded(&forged, 3),
+            Err(GDeflateError::TileSizeMismatch)
+        );
+        let mut oversized = input;
+        oversized[HEADER_LEN + DESCRIPTOR_LEN..HEADER_LEN + DESCRIPTOR_LEN + 4]
+            .copy_from_slice(&(TILE_SIZE as u32 + 1).to_le_bytes());
+        assert_eq!(
+            gdeflate_decompress_bounded(&oversized, usize::MAX),
+            Err(GDeflateError::CorruptTile)
+        );
+    }
+
+    #[test]
+    fn aggregate_budget_never_replaces_independent_tile_budgets() {
+        let raw = [1, 3, 0, 0xFC, 0xFF, b'a', b'b', b'c'];
+        let mut input = frame_raw_tiles(&[(&raw, b"abc"), (&raw, b"abc")]);
+        input[HEADER_LEN..HEADER_LEN + 4].copy_from_slice(&2u32.to_le_bytes());
+        input[HEADER_LEN + DESCRIPTOR_LEN..HEADER_LEN + DESCRIPTOR_LEN + 4]
+            .copy_from_slice(&4u32.to_le_bytes());
+        assert_eq!(
+            gdeflate_decompress_bounded(&input, 6),
+            Err(GDeflateError::Inflate(InflateError::OutputLimitExceeded))
+        );
+        assert_eq!(
+            gdeflate_decompress_bounded(&input, 5),
+            Err(GDeflateError::OutputLimitExceeded)
+        );
+        // History is local to a tile: the second fixed stream starts with a
+        // match (length 3/distance 1), despite the first tile providing 'A'.
+        let input = frame_raw_tiles(&[(&[1, 1, 0, 0xFE, 0xFF, b'A'], b"A"), (&[3, 2, 0], b"AAA")]);
+        assert_eq!(
+            gdeflate_decompress_bounded(&input, 4),
+            Err(GDeflateError::Inflate(InflateError::DistanceTooFar))
         );
     }
 }

@@ -3,17 +3,18 @@
 //! The kernel reads lane-major `GDeflate` words directly, decodes every fixed
 //! block in one tile, and writes the tile bytes into a GPU buffer.  A tile is
 //! intentionally decoded by one invocation because literal/LZ77 state is
-//! serial. The current host API dispatches one tile at a time; a future batch
-//! scheduler can submit independent tiles concurrently. This module never
-//! accepts a partial result: shader
-//! status and exact advertised output length are checked before bytes are
-//! returned. The unified decoder additionally verifies each tile checksum;
+//! serial. Independent tiles share one compute pass and one submission. Only
+//! status records are read back by the resident batch API. This module never
+//! accepts a partial result: every status and exact advertised output length
+//! is checked before owned output buffers are returned. The unified decoder
+//! additionally verifies each tile checksum;
 //! this low-level API intentionally does not receive container metadata.
 //! The same bounded kernel and host transport are shared with the complete
 //! [`crate::GpuDeflate`] API; the uniform mode keeps this API strictly fixed-only.
 
 use alloc::vec::Vec;
 use core::fmt;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use bytemuck::{Pod, Zeroable};
 use wgpu::{
@@ -100,8 +101,128 @@ impl fmt::Display for FixedDecodeError {
 
 impl std::error::Error for FixedDecodeError {}
 
+/// One independent raw-DEFLATE stream in Prism's lane-major tile format.
+#[derive(Clone, Copy, Debug)]
+pub struct DeflateTile<'a> {
+    /// Source bytes including complete lane-group padding.
+    pub interleaved: &'a [u8],
+    /// Logical compressed byte count, excluding lane-group padding.
+    pub compressed_size: usize,
+    /// Exact logical output byte count, at most 64 KiB (including zero).
+    pub expected_output_size: usize,
+}
+
+/// Explicit admission bounds for one resident batch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DeflateBatchLimits {
+    /// Maximum number of independent tiles admitted in one call.
+    pub max_tiles: usize,
+    /// Maximum sum of buffer descriptor sizes allocated by this call.
+    ///
+    /// Includes padded sources and outputs, uniforms, per-tile status storage,
+    /// and the packed status readback buffer. Driver bookkeeping and retained
+    /// buffers from previous calls are outside this per-call budget.
+    pub max_device_bytes: u64,
+}
+
+/// A batch failure never exposes any of that batch's output buffers.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DeflateBatchError {
+    /// A tile failed shape, device-size, or shader-status validation.
+    Tile {
+        /// Index in the submitted request slice.
+        index: usize,
+        /// Concrete rejection reason.
+        error: DeflateDecodeError,
+    },
+    /// The requested tile count exceeds admission.
+    TooManyTiles {
+        /// Number of requested tiles.
+        requested: usize,
+        /// Configured maximum.
+        limit: usize,
+    },
+    /// All buffer allocations together exceed admission.
+    AllocationBudgetExceeded {
+        /// Required buffer bytes, including padding and status readback.
+        required: u64,
+        /// Configured maximum.
+        limit: u64,
+    },
+    /// A batch-wide device, host-allocation, or readback failure.
+    Device(DeflateDecodeError),
+}
+
+impl fmt::Display for DeflateBatchError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Tile { index, error } => write!(formatter, "DEFLATE tile {index}: {error}"),
+            Self::TooManyTiles { requested, limit } => {
+                write!(
+                    formatter,
+                    "DEFLATE batch has {requested} tiles; limit is {limit}"
+                )
+            }
+            Self::AllocationBudgetExceeded { required, limit } => {
+                write!(
+                    formatter,
+                    "DEFLATE batch needs {required} device bytes; limit is {limit}"
+                )
+            }
+            Self::Device(error) => write!(formatter, "{error}"),
+        }
+    }
+}
+
+impl std::error::Error for DeflateBatchError {}
+
+/// Owned, validated GPU output; no payload bytes were read back by the batch.
+///
+/// The buffer supports STORAGE, COPY_SRC, and COPY_DST. Its allocation is
+/// rounded up to a nonzero word; only `byte_len()` bytes are logical output.
+/// Buffers remain usable after the decoder, request slices, and sibling
+/// results are dropped. Container checksums remain the caller's responsibility.
+#[derive(Debug)]
+pub struct ResidentDeflateTile {
+    buffer: wgpu::Buffer,
+    byte_len: u64,
+}
+
+impl ResidentDeflateTile {
+    /// Buffer for downstream GPU binding or copying on the same device.
+    #[must_use]
+    pub fn buffer(&self) -> &wgpu::Buffer {
+        &self.buffer
+    }
+
+    /// Exact decoded byte length, excluding word padding.
+    #[must_use]
+    pub fn byte_len(&self) -> u64 {
+        self.byte_len
+    }
+
+    /// Transfers the buffer and its exact logical byte length to the consumer.
+    #[must_use]
+    pub fn into_buffer(self) -> (wgpu::Buffer, u64) {
+        (self.buffer, self.byte_len)
+    }
+}
+
+struct PreparedTile {
+    params: Params,
+    words: Vec<u32>,
+    output_bytes: u64,
+}
+
+struct DispatchTile {
+    bind: wgpu::BindGroup,
+    status: wgpu::Buffer,
+    output: wgpu::Buffer,
+}
+
 /// Compiled fixed-Huffman `GDeflate` tile decoder.
 pub struct GpuFixedGDeflate {
+    instance: wgpu::Instance,
     device: wgpu::Device,
     pipeline: ComputePipeline,
     layout: wgpu::BindGroupLayout,
@@ -144,6 +265,7 @@ impl GpuFixedGDeflate {
             cache: None,
         });
         Self {
+            instance: ctx.instance().clone(),
             device: device.clone(),
             pipeline,
             layout,
@@ -164,132 +286,39 @@ impl GpuFixedGDeflate {
         compressed_size: usize,
         expected_output_size: usize,
     ) -> Result<Vec<u8>, FixedDecodeError> {
-        if ctx.device() != &self.device {
-            return Err(FixedDecodeError::DeviceMismatch);
-        }
-        if expected_output_size > 1 << 16 {
-            return Err(FixedDecodeError::InvalidInput);
-        }
-        let (source_words, rounds) = validate_input(interleaved, compressed_size)?;
-        let output_words = expected_output_size.div_ceil(WORD).max(1);
-        let output_bytes = output_words
-            .checked_mul(WORD)
-            .ok_or(FixedDecodeError::InvalidInput)?;
-        let source_bytes = interleaved.len();
-        let limits = ctx.device().limits();
-        if source_bytes as u64 > limits.max_buffer_size
-            || source_bytes as u64 > limits.max_storage_buffer_binding_size
-            || output_bytes as u64 > limits.max_buffer_size
-            || output_bytes as u64 > limits.max_storage_buffer_binding_size
-            || STATUS_BYTES > limits.max_buffer_size
-            || STATUS_BYTES > limits.max_storage_buffer_binding_size
-        {
-            return Err(FixedDecodeError::DeviceLimitExceeded);
-        }
-        let source_words =
-            u32::try_from(source_words).map_err(|_| FixedDecodeError::InvalidInput)?;
-        let rounds = u32::try_from(rounds).map_err(|_| FixedDecodeError::InvalidInput)?;
-        let compressed_bytes =
-            u32::try_from(compressed_size).map_err(|_| FixedDecodeError::InvalidInput)?;
-        let output_bytes_u32 =
-            u32::try_from(expected_output_size).map_err(|_| FixedDecodeError::InvalidInput)?;
-
-        let device = ctx.device();
-        // Capture failures rather than allowing wgpu's uncaptured-error handler
-        // to panic. Scopes are thread-local in this native, std-enabled backend.
-        let allocation_scope = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
-        let internal_scope = device.push_error_scope(wgpu::ErrorFilter::Internal);
-        let validation_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
-        let result = (|| {
-        let params = buffer::uniform(
-            device,
-            "prism_gdeflate_deflate_params",
-            &Params {
-                source_words,
-                rounds,
-                compressed_bytes,
-                output_bytes: output_bytes_u32,
-                fixed_only: u32::from(self.fixed_only),
-                padding: [0; 3],
-            },
-        );
-        let source = buffer::storage_read(
-            device,
-            "prism_gdeflate_deflate_source",
-            &to_words_le(interleaved)?,
-        );
-        let output =
-            buffer::storage_rw_zeroed(device, "prism_gdeflate_deflate_output", output_bytes as u64);
-        // Fail closed even if the kernel never executes (notably empty output
-        // after device loss); zero initialization would look like STATUS_OK.
-        let status = buffer::storage_rw_init(
-            device,
-            "prism_gdeflate_deflate_status",
-            &[STATUS_PARAMETERS, 0u32],
-        );
-        let bind = device.create_bind_group(&BindGroupDescriptor {
-            label: Some("prism_gdeflate_deflate_decode_bind"),
-            layout: &self.layout,
-            entries: &[
-                BindGroupEntry {
-                    binding: 0,
-                    resource: params.as_entire_binding(),
+        let mut tiles = self
+            .decompress_batch_resident(
+                ctx,
+                &[DeflateTile {
+                    interleaved,
+                    compressed_size,
+                    expected_output_size,
+                }],
+                DeflateBatchLimits {
+                    max_tiles: 1,
+                    max_device_bytes: u64::MAX,
                 },
-                BindGroupEntry {
-                    binding: 1,
-                    resource: source.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: 2,
-                    resource: output.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: 3,
-                    resource: status.as_entire_binding(),
-                },
-            ],
-        });
-        let output_stage = buffer::staging(
-            device,
-            "prism_gdeflate_deflate_output_stage",
-            output_bytes as u64,
-        );
-        let status_stage =
-            buffer::staging(device, "prism_gdeflate_deflate_status_stage", STATUS_BYTES);
-        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
-            label: Some("prism_gdeflate_deflate_decode_encoder"),
-        });
-        {
-            let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                label: Some("prism_gdeflate_deflate_decode_pass"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &bind, &[]);
-            pass.dispatch_workgroups(1, 1, 1);
-        }
-        buffer::copy(&mut encoder, &output, &output_stage, output_bytes as u64);
-        buffer::copy(&mut encoder, &status, &status_stage, STATUS_BYTES);
-        let submission = ctx.queue().submit([encoder.finish()]);
-
-        let status_values = buffer::read_back::<u32>(ctx, &status_stage, submission.clone())
-            .map_err(FixedDecodeError::Readback)?;
-        let code = *status_values
-            .first()
-            .ok_or(FixedDecodeError::MalformedStream)?;
-        let written = *status_values
-            .get(1)
-            .ok_or(FixedDecodeError::MalformedStream)?;
-        if code != STATUS_OK {
-            return Err(status_error(code));
-        }
-        if written != output_bytes_u32 {
-            return Err(FixedDecodeError::OutputSizeMismatch);
-        }
-        let output_words = buffer::read_back::<u32>(ctx, &output_stage, submission)
-            .map_err(FixedDecodeError::Readback)?;
+            )
+            .map_err(|error| match error {
+                DeflateBatchError::Tile { error, .. } | DeflateBatchError::Device(error) => error,
+                _ => FixedDecodeError::DeviceLimitExceeded,
+            })?;
+        let tile = tiles.pop().ok_or(FixedDecodeError::MalformedStream)?;
+        // Only the compatibility API requests a payload staging allocation.
+        let output_words = with_device_errors(ctx.device(), || {
+            let stage = buffer::staging(
+                ctx.device(),
+                "prism_gdeflate_deflate_output_stage",
+                tile.buffer.size(),
+            );
+            let mut encoder = ctx.device().create_command_encoder(&Default::default());
+            buffer::copy(&mut encoder, &tile.buffer, &stage, tile.buffer.size());
+            let submission = ctx.queue().submit([encoder.finish()]);
+            buffer::read_back::<u32>(ctx, &stage, submission).map_err(FixedDecodeError::Readback)
+        })?;
         let mut output = Vec::new();
-        output.try_reserve_exact(expected_output_size)
+        output
+            .try_reserve_exact(expected_output_size)
             .map_err(|_| FixedDecodeError::Readback(buffer::ReadbackError::Allocation))?;
         for word in output_words {
             let bytes = word.to_le_bytes();
@@ -297,15 +326,275 @@ impl GpuFixedGDeflate {
             output.extend_from_slice(&bytes[..count]);
         }
         Ok(output)
-        })();
-        let validation_error = crate::context::block_on(validation_scope.pop());
-        let internal_error = crate::context::block_on(internal_scope.pop());
-        let allocation_error = crate::context::block_on(allocation_scope.pop());
-        if validation_error.is_some() || internal_error.is_some() || allocation_error.is_some() {
-            return Err(FixedDecodeError::DeviceResource);
-        }
-        result
     }
+
+    /// Decodes independent tiles in one compute pass and one submission.
+    ///
+    /// All shape, admission, and device-limit checks and host input reserves
+    /// complete before GPU resource creation. The only readback is one packed
+    /// array of eight-byte status records. Outputs are published together, in
+    /// request order, after every status and exact byte count is valid. An
+    /// empty request returns an empty vector without GPU work.
+    pub fn decompress_batch_resident(
+        &self,
+        ctx: &GpuContext,
+        requests: &[DeflateTile<'_>],
+        admission: DeflateBatchLimits,
+    ) -> Result<Vec<ResidentDeflateTile>, DeflateBatchError> {
+        // Device IDs may alias across independently created wgpu instances.
+        // The retained instance also prevents address reuse while we exist.
+        if ctx.instance() != &self.instance || ctx.device() != &self.device {
+            return Err(DeflateBatchError::Device(FixedDecodeError::DeviceMismatch));
+        }
+        let status_bytes = admit_batch(requests, admission, &ctx.device().limits())?;
+        if requests.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Reserve input, dispatch, and result storage before GPU allocation.
+        // The readback helper also reserves its status result fallibly.
+        let mut prepared = Vec::new();
+        let mut dispatches = Vec::new();
+        let mut outputs = Vec::new();
+        for result in [
+            prepared.try_reserve_exact(requests.len()),
+            dispatches.try_reserve_exact(requests.len()),
+            outputs.try_reserve_exact(requests.len()),
+        ] {
+            result.map_err(|_| DeflateBatchError::Device(host_allocation_error()))?;
+        }
+        for (index, request) in requests.iter().enumerate() {
+            let (params, output_bytes) = tile_params(request, self.fixed_only)
+                .map_err(|error| DeflateBatchError::Tile { index, error })?;
+            let words = to_words_le(request.interleaved)
+                .map_err(|error| DeflateBatchError::Tile { index, error })?;
+            prepared.push(PreparedTile {
+                params,
+                words,
+                output_bytes,
+            });
+        }
+
+        let device = ctx.device();
+        let statuses = with_device_errors(device, || {
+            for tile in &prepared {
+                let params = buffer::uniform(device, "prism_gdeflate_deflate_params", &tile.params);
+                let source =
+                    buffer::storage_read(device, "prism_gdeflate_deflate_source", &tile.words);
+                let output = buffer::storage_rw_zeroed(
+                    device,
+                    "prism_gdeflate_deflate_output",
+                    tile.output_bytes,
+                );
+                // A missing dispatch must fail even for zero-length output.
+                let status = buffer::storage_rw_init(
+                    device,
+                    "prism_gdeflate_deflate_status",
+                    &[STATUS_PARAMETERS, 0u32],
+                );
+                let bind = device.create_bind_group(&BindGroupDescriptor {
+                    label: Some("prism_gdeflate_deflate_decode_bind"),
+                    layout: &self.layout,
+                    entries: &[
+                        BindGroupEntry {
+                            binding: 0,
+                            resource: params.as_entire_binding(),
+                        },
+                        BindGroupEntry {
+                            binding: 1,
+                            resource: source.as_entire_binding(),
+                        },
+                        BindGroupEntry {
+                            binding: 2,
+                            resource: output.as_entire_binding(),
+                        },
+                        BindGroupEntry {
+                            binding: 3,
+                            resource: status.as_entire_binding(),
+                        },
+                    ],
+                });
+                dispatches.push(DispatchTile {
+                    bind,
+                    status,
+                    output,
+                });
+            }
+            let stage =
+                buffer::staging(device, "prism_gdeflate_deflate_batch_status", status_bytes);
+            let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+                label: Some("prism_gdeflate_deflate_batch_encoder"),
+            });
+            {
+                let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                    label: Some("prism_gdeflate_deflate_batch_pass"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(&self.pipeline);
+                for tile in &dispatches {
+                    pass.set_bind_group(0, &tile.bind, &[]);
+                    pass.dispatch_workgroups(1, 1, 1);
+                }
+            }
+            for (index, tile) in dispatches.iter().enumerate() {
+                encoder.copy_buffer_to_buffer(
+                    &tile.status,
+                    0,
+                    &stage,
+                    index as u64 * STATUS_BYTES,
+                    STATUS_BYTES,
+                );
+            }
+            let submission = ctx.queue().submit([encoder.finish()]);
+            buffer::read_back::<u32>(ctx, &stage, submission).map_err(FixedDecodeError::Readback)
+        })
+        .map_err(DeflateBatchError::Device)?;
+        validate_statuses(&statuses, requests)?;
+        for (tile, request) in dispatches.into_iter().zip(requests) {
+            outputs.push(ResidentDeflateTile {
+                buffer: tile.output,
+                byte_len: request.expected_output_size as u64,
+            });
+        }
+        Ok(outputs)
+    }
+}
+
+fn host_allocation_error() -> FixedDecodeError {
+    FixedDecodeError::Readback(buffer::ReadbackError::Allocation)
+}
+
+fn with_device_errors<T>(
+    device: &wgpu::Device,
+    operation: impl FnOnce() -> Result<T, FixedDecodeError>,
+) -> Result<T, FixedDecodeError> {
+    let allocation_scope = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+    let internal_scope = device.push_error_scope(wgpu::ErrorFilter::Internal);
+    let validation_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let result =
+        catch_unwind(AssertUnwindSafe(operation)).unwrap_or(Err(FixedDecodeError::DeviceResource));
+    // Always consume the actual wgpu 30 scope handles, including on unwind.
+    let validation_error = crate::context::block_on(validation_scope.pop());
+    let internal_error = crate::context::block_on(internal_scope.pop());
+    let allocation_error = crate::context::block_on(allocation_scope.pop());
+    if validation_error.is_some() || internal_error.is_some() || allocation_error.is_some() {
+        return Err(FixedDecodeError::DeviceResource);
+    }
+    result
+}
+
+fn tile_params(
+    request: &DeflateTile<'_>,
+    fixed_only: bool,
+) -> Result<(Params, u64), FixedDecodeError> {
+    if request.expected_output_size > 1 << 16 {
+        return Err(FixedDecodeError::InvalidInput);
+    }
+    let (source_words, rounds) = validate_input(request.interleaved, request.compressed_size)?;
+    let params = Params {
+        source_words: u32::try_from(source_words).map_err(|_| FixedDecodeError::InvalidInput)?,
+        rounds: u32::try_from(rounds).map_err(|_| FixedDecodeError::InvalidInput)?,
+        compressed_bytes: u32::try_from(request.compressed_size)
+            .map_err(|_| FixedDecodeError::InvalidInput)?,
+        output_bytes: u32::try_from(request.expected_output_size)
+            .map_err(|_| FixedDecodeError::InvalidInput)?,
+        fixed_only: u32::from(fixed_only),
+        padding: [0; 3],
+    };
+    Ok((
+        params,
+        request.expected_output_size.div_ceil(WORD).max(1) as u64 * WORD as u64,
+    ))
+}
+
+fn admit_batch(
+    requests: &[DeflateTile<'_>],
+    admission: DeflateBatchLimits,
+    limits: &wgpu::Limits,
+) -> Result<u64, DeflateBatchError> {
+    if requests.len() > admission.max_tiles {
+        return Err(DeflateBatchError::TooManyTiles {
+            requested: requests.len(),
+            limit: admission.max_tiles,
+        });
+    }
+    if requests.is_empty() {
+        return Ok(0);
+    }
+    let device_limit = || DeflateBatchError::Device(FixedDecodeError::DeviceLimitExceeded);
+    let count = u64::try_from(requests.len()).map_err(|_| device_limit())?;
+    let status_bytes = count.checked_mul(STATUS_BYTES).ok_or_else(device_limit)?;
+    let uniform_bytes = size_of::<Params>() as u64;
+    if status_bytes > limits.max_buffer_size
+        || uniform_bytes > limits.max_buffer_size
+        || uniform_bytes > limits.max_uniform_buffer_binding_size
+        || STATUS_BYTES > limits.max_buffer_size
+        || STATUS_BYTES > limits.max_storage_buffer_binding_size
+        || limits.max_bind_groups < 1
+        || limits.max_bindings_per_bind_group < 4
+        || limits.max_storage_buffers_per_shader_stage < 3
+        || limits.max_uniform_buffers_per_shader_stage < 1
+        || limits.max_compute_workgroups_per_dimension < 1
+        || limits.max_compute_invocations_per_workgroup < 1
+        || limits.max_compute_workgroup_size_x < 1
+        || limits.max_compute_workgroup_size_y < 1
+        || limits.max_compute_workgroup_size_z < 1
+        || count.checked_mul(4).ok_or_else(device_limit)?
+            > u64::from(limits.max_non_sampler_bindings)
+    {
+        return Err(device_limit());
+    }
+    let mut required = status_bytes;
+    for (index, request) in requests.iter().enumerate() {
+        let (_, output_bytes) = tile_params(request, false)
+            .map_err(|error| DeflateBatchError::Tile { index, error })?;
+        let source_bytes = u64::try_from(request.interleaved.len()).map_err(|_| device_limit())?;
+        if [source_bytes, output_bytes].iter().any(|&size| {
+            size > limits.max_buffer_size || size > limits.max_storage_buffer_binding_size
+        }) {
+            return Err(DeflateBatchError::Tile {
+                index,
+                error: FixedDecodeError::DeviceLimitExceeded,
+            });
+        }
+        for size in [source_bytes, output_bytes, uniform_bytes, STATUS_BYTES] {
+            required = required.checked_add(size).ok_or_else(device_limit)?;
+        }
+    }
+    if required > admission.max_device_bytes {
+        return Err(DeflateBatchError::AllocationBudgetExceeded {
+            required,
+            limit: admission.max_device_bytes,
+        });
+    }
+    Ok(status_bytes)
+}
+
+fn validate_statuses(
+    statuses: &[u32],
+    requests: &[DeflateTile<'_>],
+) -> Result<(), DeflateBatchError> {
+    if statuses.len()
+        != requests
+            .len()
+            .checked_mul(2)
+            .ok_or(DeflateBatchError::Device(FixedDecodeError::MalformedStream))?
+    {
+        return Err(DeflateBatchError::Device(FixedDecodeError::MalformedStream));
+    }
+    for (index, (status, request)) in statuses.chunks_exact(2).zip(requests).enumerate() {
+        let error = if status[0] != STATUS_OK {
+            Some(status_error(status[0]))
+        } else if u64::from(status[1]) != request.expected_output_size as u64 {
+            Some(FixedDecodeError::OutputSizeMismatch)
+        } else {
+            None
+        };
+        if let Some(error) = error {
+            return Err(DeflateBatchError::Tile { index, error });
+        }
+    }
+    Ok(())
 }
 
 fn validate_input(
@@ -330,10 +619,14 @@ fn validate_input(
 
 fn to_words_le(bytes: &[u8]) -> Result<Vec<u32>, FixedDecodeError> {
     let mut words = Vec::new();
-    words.try_reserve_exact(bytes.len() / WORD)
+    words
+        .try_reserve_exact(bytes.len() / WORD)
         .map_err(|_| FixedDecodeError::Readback(buffer::ReadbackError::Allocation))?;
-    words.extend(bytes.chunks_exact(WORD)
-        .map(|chunk| u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])));
+    words.extend(
+        bytes
+            .chunks_exact(WORD)
+            .map(|chunk| u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])),
+    );
     Ok(words)
 }
 
@@ -363,6 +656,206 @@ fn buffer_layout(binding: u32, ty: BufferBindingType) -> BindGroupLayoutEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn batch_admission_checks_uniform_storage_readback_and_dispatch_limits() {
+        let source = [0; GROUP];
+        let tile = DeflateTile {
+            interleaved: &source,
+            compressed_size: 2,
+            expected_output_size: 0,
+        };
+        let admission = DeflateBatchLimits {
+            max_tiles: 32,
+            max_device_bytes: u64::MAX,
+        };
+        let limits = wgpu::Limits::default();
+        assert_eq!(admit_batch(&[tile; 2], admission, &limits), Ok(16));
+        for restricted in [
+            wgpu::Limits {
+                max_uniform_buffer_binding_size: 31,
+                ..limits.clone()
+            },
+            wgpu::Limits {
+                max_storage_buffer_binding_size: 7,
+                ..limits.clone()
+            },
+            wgpu::Limits {
+                max_buffer_size: 31,
+                ..limits.clone()
+            },
+            wgpu::Limits {
+                max_bind_groups: 0,
+                ..limits.clone()
+            },
+            wgpu::Limits {
+                max_bindings_per_bind_group: 3,
+                ..limits.clone()
+            },
+            wgpu::Limits {
+                max_storage_buffers_per_shader_stage: 2,
+                ..limits.clone()
+            },
+            wgpu::Limits {
+                max_uniform_buffers_per_shader_stage: 0,
+                ..limits.clone()
+            },
+            wgpu::Limits {
+                max_compute_workgroups_per_dimension: 0,
+                ..limits.clone()
+            },
+            wgpu::Limits {
+                max_compute_invocations_per_workgroup: 0,
+                ..limits.clone()
+            },
+            wgpu::Limits {
+                max_compute_workgroup_size_x: 0,
+                ..limits.clone()
+            },
+            wgpu::Limits {
+                max_compute_workgroup_size_y: 0,
+                ..limits.clone()
+            },
+            wgpu::Limits {
+                max_compute_workgroup_size_z: 0,
+                ..limits.clone()
+            },
+            wgpu::Limits {
+                max_non_sampler_bindings: 7,
+                ..limits.clone()
+            },
+        ] {
+            assert_eq!(
+                admit_batch(&[tile; 2], admission, &restricted),
+                Err(DeflateBatchError::Device(
+                    FixedDecodeError::DeviceLimitExceeded
+                )),
+            );
+        }
+        for restricted in [
+            wgpu::Limits {
+                max_buffer_size: GROUP as u64 - 1,
+                ..limits.clone()
+            },
+            wgpu::Limits {
+                max_storage_buffer_binding_size: GROUP as u64 - 1,
+                ..limits.clone()
+            },
+        ] {
+            assert_eq!(
+                admit_batch(&[tile], admission, &restricted),
+                Err(DeflateBatchError::Tile {
+                    index: 0,
+                    error: FixedDecodeError::DeviceLimitExceeded
+                }),
+            );
+        }
+        assert_eq!(
+            admit_batch(
+                &[DeflateTile {
+                    expected_output_size: GROUP + 1,
+                    ..tile
+                }],
+                admission,
+                &wgpu::Limits {
+                    max_storage_buffer_binding_size: GROUP as u64 + 3,
+                    ..limits.clone()
+                },
+            ),
+            Err(DeflateBatchError::Tile {
+                index: 0,
+                error: FixedDecodeError::DeviceLimitExceeded
+            }),
+        );
+        // Readback is one aggregate allocation, even though each status is 8B.
+        assert_eq!(
+            admit_batch(
+                &[tile; 17],
+                admission,
+                &wgpu::Limits {
+                    max_buffer_size: GROUP as u64,
+                    ..limits
+                }
+            ),
+            Err(DeflateBatchError::Device(
+                FixedDecodeError::DeviceLimitExceeded
+            )),
+        );
+    }
+
+    #[test]
+    fn batch_admission_includes_padding_and_checks_late_tiles_before_budget() {
+        let source = [0; GROUP];
+        let tile = DeflateTile {
+            interleaved: &source,
+            compressed_size: 2,
+            expected_output_size: 5,
+        };
+        let limits = wgpu::Limits::default();
+        let required = 2 * (GROUP as u64 + 8 + 32 + 8 + 8);
+        let mut admission = DeflateBatchLimits {
+            max_tiles: 2,
+            max_device_bytes: required - 1,
+        };
+        assert_eq!(
+            admit_batch(&[tile; 2], admission, &limits),
+            Err(DeflateBatchError::AllocationBudgetExceeded {
+                required,
+                limit: required - 1
+            }),
+        );
+        admission.max_device_bytes = required;
+        assert_eq!(admit_batch(&[tile; 2], admission, &limits), Ok(16));
+        admission.max_device_bytes = 0;
+        assert_eq!(
+            admit_batch(
+                &[
+                    tile,
+                    DeflateTile {
+                        compressed_size: 0,
+                        ..tile
+                    }
+                ],
+                admission,
+                &limits
+            ),
+            Err(DeflateBatchError::Tile {
+                index: 1,
+                error: FixedDecodeError::InvalidInput
+            }),
+        );
+    }
+
+    #[test]
+    fn batch_status_validation_fails_closed_for_missing_or_late_records() {
+        let requests = [DeflateTile {
+            interleaved: &[],
+            compressed_size: 0,
+            expected_output_size: 0,
+        }; 2];
+        assert_eq!(
+            validate_statuses(&[STATUS_OK, 0, STATUS_OK, 0], &requests),
+            Ok(())
+        );
+        assert_eq!(
+            validate_statuses(&[STATUS_OK, 0], &requests),
+            Err(DeflateBatchError::Device(FixedDecodeError::MalformedStream)),
+        );
+        assert_eq!(
+            validate_statuses(&[STATUS_OK, 0, STATUS_PARAMETERS, 0], &requests),
+            Err(DeflateBatchError::Tile {
+                index: 1,
+                error: FixedDecodeError::MalformedStream
+            }),
+        );
+        assert_eq!(
+            validate_statuses(&[STATUS_OK, 0, STATUS_OK, 1], &requests),
+            Err(DeflateBatchError::Tile {
+                index: 1,
+                error: FixedDecodeError::OutputSizeMismatch
+            }),
+        );
+    }
 
     #[test]
     fn input_validation_requires_exact_lane_padding_and_nonempty_stream() {

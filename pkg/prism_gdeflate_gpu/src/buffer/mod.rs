@@ -15,10 +15,14 @@
 
 use bytemuck::Pod;
 use core::fmt;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 use wgpu::util::{BufferInitDescriptor, DeviceExt};
-use wgpu::{Buffer, BufferDescriptor, BufferUsages, CommandEncoder, Device, MapMode, PollType, SubmissionIndex};
+use wgpu::{
+    Buffer, BufferDescriptor, BufferUsages, CommandEncoder, Device, MapMode, PollType,
+    SubmissionIndex,
+};
 
 use crate::context::GpuContext;
 
@@ -107,16 +111,6 @@ impl fmt::Display for ReadbackError {
 
 impl std::error::Error for ReadbackError {}
 
-// Unmap on every exit, including cancellation of a pending map after timeout.
-// The callback owns only its channel sender, never a borrowed staging buffer.
-struct Unmap<'a>(&'a Buffer);
-
-impl Drop for Unmap<'_> {
-    fn drop(&mut self) {
-        self.0.unmap();
-    }
-}
-
 /// Maps `staging` after this call's submission, not unrelated queue work.
 ///
 /// Polling and callback receipt share a 30-second deadline. On every exit the
@@ -136,37 +130,92 @@ fn read_back_with_timeout<T: Pod>(
     submission: SubmissionIndex,
     timeout: Duration,
 ) -> Result<Vec<T>, ReadbackError> {
+    read_back_with_poll(ctx, staging, submission, timeout, |poll_type| {
+        ctx.device().poll(poll_type)
+    })
+}
+
+fn read_back_with_poll<T: Pod>(
+    ctx: &GpuContext,
+    staging: &Buffer,
+    submission: SubmissionIndex,
+    timeout: Duration,
+    poll: impl FnOnce(PollType) -> Result<wgpu::PollStatus, wgpu::PollError>,
+) -> Result<Vec<T>, ReadbackError> {
     let started = Instant::now();
-    let (sender, receiver) = mpsc::sync_channel(1);
-    staging.slice(..).map_async(MapMode::Read, move |result| {
-        // A timeout may already have dropped the receiver.
-        let _ = sender.send(result);
-    });
-    let _unmap = Unmap(staging);
-    ctx.device()
-        .poll(PollType::Wait {
-            submission_index: Some(submission),
-            timeout: Some(timeout),
-        })
+    let device = ctx.device();
+    // map_async reports validation failures both through its callback and the
+    // device error sink. unmap can also fail after destruction or device loss.
+    // Keep all three scopes active until mapping, polling, host copy, and
+    // cancellation have finished; native scopes belong to this thread.
+    let allocation_scope = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+    let internal_scope = device.push_error_scope(wgpu::ErrorFilter::Internal);
+    let validation_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        staging.slice(..).map_async(MapMode::Read, move |result| {
+            // Never block a poll/unmap callback, including after cancellation.
+            // This closure owns no buffer, scope, or borrowed request state.
+            let _ = sender.try_send(result);
+        });
+        let mapped_immediately = match receiver.try_recv() {
+            Ok(Ok(())) => true,
+            Ok(Err(_)) => return Err(ReadbackError::Mapping),
+            Err(mpsc::TryRecvError::Empty) => false,
+            Err(mpsc::TryRecvError::Disconnected) => return Err(ReadbackError::Callback),
+        };
+        // Native wgpu turns fatal poll errors (including device errors) into
+        // panics instead of PollError. Contain that boundary as well.
+        catch_unwind(AssertUnwindSafe(|| {
+            poll(PollType::Wait {
+                submission_index: Some(submission),
+                timeout: Some(timeout.saturating_sub(started.elapsed())),
+            })
+        }))
+        .map_err(|_| ReadbackError::Poll)?
         .map_err(|error| match error {
             wgpu::PollError::Timeout => ReadbackError::Timeout,
             _ => ReadbackError::Poll,
         })?;
-    receiver
-        .recv_timeout(timeout.saturating_sub(started.elapsed()))
-        .map_err(|error| match error {
-            mpsc::RecvTimeoutError::Timeout => ReadbackError::Timeout,
-            mpsc::RecvTimeoutError::Disconnected => ReadbackError::Callback,
-        })?
-        .map_err(|_| ReadbackError::Mapping)?;
-    let view = staging
-        .slice(..)
-        .get_mapped_range()
-        .map_err(|_| ReadbackError::Mapping)?;
-    let mapped = bytemuck::try_cast_slice::<u8, T>(&view).map_err(|_| ReadbackError::Layout)?;
-    let mut values = Vec::new();
-    values.try_reserve_exact(mapped.len()).map_err(|_| ReadbackError::Allocation)?;
-    values.extend_from_slice(mapped);
+        if !mapped_immediately {
+            receiver
+                .recv_timeout(timeout.saturating_sub(started.elapsed()))
+                .map_err(|error| match error {
+                    mpsc::RecvTimeoutError::Timeout => ReadbackError::Timeout,
+                    mpsc::RecvTimeoutError::Disconnected => ReadbackError::Callback,
+                })?
+                .map_err(|_| ReadbackError::Mapping)?;
+        }
+        let view = staging
+            .slice(..)
+            .get_mapped_range()
+            .map_err(|_| ReadbackError::Mapping)?;
+        let mapped = bytemuck::try_cast_slice::<u8, T>(&view).map_err(|_| ReadbackError::Layout)?;
+        let mut values = Vec::new();
+        values
+            .try_reserve_exact(mapped.len())
+            .map_err(|_| ReadbackError::Allocation)?;
+        values.extend_from_slice(mapped);
+        Ok(values)
+    }))
+    .unwrap_or(Err(ReadbackError::Mapping));
+
+    // The view and receiver are gone before cancellation, even on an unwind.
+    // A destroyed buffer may reject unmap too, so cleanup stays inside the
+    // scopes and cannot panic from a Drop implementation while unwinding.
+    let unmap_result =
+        catch_unwind(AssertUnwindSafe(|| staging.unmap())).map_err(|_| ReadbackError::Mapping);
+    // Pop every scope in reverse order, without early returns. Native wgpu
+    // resolves these futures immediately; no additional device poll is needed.
+    let validation_error = crate::context::block_on(validation_scope.pop());
+    let internal_error = crate::context::block_on(internal_scope.pop());
+    let allocation_error = crate::context::block_on(allocation_scope.pop());
+    // Preserve the first operational failure, especially Timeout versus Poll.
+    let values = result?;
+    unmap_result?;
+    if validation_error.is_some() || internal_error.is_some() || allocation_error.is_some() {
+        return Err(ReadbackError::Mapping);
+    }
     Ok(values)
 }
 
@@ -185,9 +234,14 @@ mod tests {
 
     #[test]
     fn readback_unmaps_after_success_and_host_layout_failure() {
-        let Some(ctx) = GpuContext::try_headless() else { return; };
+        let Some(ctx) = GpuContext::try_headless() else {
+            return;
+        };
         let (stage, submission) = copied_staging(&ctx);
-        assert_eq!(read_back::<u32>(&ctx, &stage, submission.clone()), Ok(vec![7, 11]));
+        assert_eq!(
+            read_back::<u32>(&ctx, &stage, submission.clone()),
+            Ok(vec![7, 11])
+        );
         assert_eq!(
             read_back::<[u8; 3]>(&ctx, &stage, submission.clone()),
             Err(ReadbackError::Layout)
@@ -197,10 +251,131 @@ mod tests {
 
     #[test]
     fn readback_reports_destroyed_buffer_and_does_not_poison_next_request() {
-        let Some(ctx) = GpuContext::try_headless() else { return; };
+        let Some(ctx) = GpuContext::try_headless() else {
+            return;
+        };
         let (stage, submission) = copied_staging(&ctx);
         stage.destroy();
-        assert_eq!(read_back::<u32>(&ctx, &stage, submission), Err(ReadbackError::Mapping));
+        // Our readback scopes must consume both map and cleanup errors, and
+        // leave the caller's scopes intact and empty. Repeat to check reset.
+        let allocation_scope = ctx
+            .device()
+            .push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+        let internal_scope = ctx.device().push_error_scope(wgpu::ErrorFilter::Internal);
+        let validation_scope = ctx.device().push_error_scope(wgpu::ErrorFilter::Validation);
+        assert_eq!(
+            read_back::<u32>(&ctx, &stage, submission.clone()),
+            Err(ReadbackError::Mapping)
+        );
+        assert_eq!(
+            read_back::<u32>(&ctx, &stage, submission),
+            Err(ReadbackError::Mapping)
+        );
+        let validation_error = crate::context::block_on(validation_scope.pop());
+        let internal_error = crate::context::block_on(internal_scope.pop());
+        let allocation_error = crate::context::block_on(allocation_scope.pop());
+        assert!(validation_error.is_none(), "{validation_error:?}");
+        assert!(internal_error.is_none(), "{internal_error:?}");
+        assert!(allocation_error.is_none(), "{allocation_error:?}");
+        let (stage, submission) = copied_staging(&ctx);
+        assert_eq!(read_back::<u32>(&ctx, &stage, submission), Ok(vec![7, 11]));
+    }
+
+    #[test]
+    fn readback_reports_invalid_map_usage_and_range_without_leaking_errors() {
+        let Some(ctx) = GpuContext::try_headless() else {
+            return;
+        };
+        let invalid_usage = storage_rw_zeroed(ctx.device(), "readback_invalid_usage", 8);
+        let invalid_range = staging(ctx.device(), "readback_invalid_range", 6);
+        let (stage, submission) = copied_staging(&ctx);
+        let scope = ctx.device().push_error_scope(wgpu::ErrorFilter::Validation);
+        for invalid in [&invalid_usage, &invalid_range] {
+            assert_eq!(
+                read_back::<u32>(&ctx, invalid, submission.clone()),
+                Err(ReadbackError::Mapping)
+            );
+        }
+        let error = crate::context::block_on(scope.pop());
+        assert!(error.is_none(), "{error:?}");
+        assert_eq!(read_back::<u32>(&ctx, &stage, submission), Ok(vec![7, 11]));
+    }
+
+    #[test]
+    fn readback_cancels_pending_mapping_after_poll_failure() {
+        let Some(ctx) = GpuContext::try_headless() else {
+            return;
+        };
+        // Inject poll failures so cancellation is exercised independently of
+        // GPU speed, without losing the real device needed for the retry.
+        for (poll_error, expected) in [
+            (wgpu::PollError::Timeout, ReadbackError::Timeout),
+            (
+                wgpu::PollError::WrongSubmissionIndex(2, 1),
+                ReadbackError::Poll,
+            ),
+        ] {
+            let (stage, submission) = copied_staging(&ctx);
+            assert_eq!(
+                read_back_with_poll::<u32>(
+                    &ctx,
+                    &stage,
+                    submission.clone(),
+                    Duration::from_secs(30),
+                    |_| Err(poll_error)
+                ),
+                Err(expected)
+            );
+            assert_eq!(read_back::<u32>(&ctx, &stage, submission), Ok(vec![7, 11]));
+        }
+        let (stage, submission) = copied_staging(&ctx);
+        assert_eq!(read_back::<u32>(&ctx, &stage, submission), Ok(vec![7, 11]));
+    }
+
+    #[test]
+    fn readback_cancels_pending_mapping_after_native_poll_unwind() {
+        let Some(ctx) = GpuContext::try_headless() else {
+            return;
+        };
+        let (stage, submission) = copied_staging(&ctx);
+        assert_eq!(
+            read_back_with_poll::<u32>(
+                &ctx,
+                &stage,
+                submission.clone(),
+                Duration::from_secs(30),
+                |_| {
+                    // Model wgpu's fatal-poll unwind without invoking the
+                    // process panic hook for this deliberately injected fault.
+                    std::panic::resume_unwind(Box::new("simulated native poll failure"))
+                }
+            ),
+            Err(ReadbackError::Poll)
+        );
+        assert_eq!(read_back::<u32>(&ctx, &stage, submission), Ok(vec![7, 11]));
+        let (stage, submission) = copied_staging(&ctx);
+        assert_eq!(read_back::<u32>(&ctx, &stage, submission), Ok(vec![7, 11]));
+    }
+
+    #[test]
+    fn readback_reports_destruction_while_mapping_and_allows_next_request() {
+        let Some(ctx) = GpuContext::try_headless() else {
+            return;
+        };
+        let (stage, submission) = copied_staging(&ctx);
+        assert_eq!(
+            read_back_with_poll::<u32>(
+                &ctx,
+                &stage,
+                submission,
+                Duration::from_secs(30),
+                |poll_type| {
+                    stage.destroy();
+                    ctx.device().poll(poll_type)
+                }
+            ),
+            Err(ReadbackError::Mapping)
+        );
         let (stage, submission) = copied_staging(&ctx);
         assert_eq!(read_back::<u32>(&ctx, &stage, submission), Ok(vec![7, 11]));
     }

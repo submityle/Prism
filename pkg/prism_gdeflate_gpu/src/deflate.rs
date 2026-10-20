@@ -3,7 +3,10 @@
 
 use alloc::vec::Vec;
 
-use crate::{GpuContext, GpuFixedGDeflate};
+use crate::{
+    DeflateBatchError, DeflateBatchLimits, DeflateTile, GpuContext, GpuFixedGDeflate,
+    ResidentDeflateTile,
+};
 
 pub use crate::fixed::DeflateDecodeError;
 
@@ -12,8 +15,8 @@ pub use crate::fixed::DeflateDecodeError;
 /// The host validates only tile shape and resource limits. The kernel parses
 /// block headers, constructs dynamic canonical trees, expands LZ77 references,
 /// and validates the exact output size. It uses no CPU inflate or block plan.
-/// One invocation decodes a tile, and this synchronous API submits one tile at
-/// a time; it does not yet provide batched or GPU-resident output consumption.
+/// One invocation decodes a tile. Independent tiles can share one compute pass
+/// and submission while their validated outputs remain resident on the GPU.
 pub struct GpuDeflate {
     kernel: GpuFixedGDeflate,
 }
@@ -40,5 +43,21 @@ impl GpuDeflate {
     ) -> Result<Vec<u8>, DeflateDecodeError> {
         self.kernel
             .decompress(ctx, interleaved, compressed_size, expected_output_size)
+    }
+
+    /// Decodes a bounded batch, returning owned GPU output buffers together
+    /// only after all tile statuses and exact output lengths are valid.
+    ///
+    /// Delegates to the same batch transport and kernel as the fixed-only API,
+    /// with stored, fixed, and dynamic blocks enabled. Only packed status
+    /// records are read back; no payload staging buffer is allocated.
+    pub fn decompress_batch_resident(
+        &self,
+        ctx: &GpuContext,
+        requests: &[DeflateTile<'_>],
+        admission: DeflateBatchLimits,
+    ) -> Result<Vec<ResidentDeflateTile>, DeflateBatchError> {
+        self.kernel
+            .decompress_batch_resident(ctx, requests, admission)
     }
 }
