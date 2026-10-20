@@ -230,6 +230,27 @@ impl ContentBrowserController {
     pub fn collections(&self) -> &[ContentCollection] {
         &self.collections
     }
+    /// Persistent high-water mark, including identities deleted before saving.
+    pub(crate) const fn next_collection_id(&self) -> u64 {
+        self.next_collection
+    }
+
+    /// Installs a fully validated project snapshot from collection storage.
+    pub(crate) fn restore_collections(
+        &mut self,
+        entries: Vec<(u64, String, BTreeSet<AssetId>)>,
+        next_id: u64,
+    ) {
+        self.collections = entries
+            .into_iter()
+            .map(|(id, name, members)| ContentCollection { id, name, members })
+            .collect();
+        self.next_collection = next_id;
+        self.collection = None;
+        self.reset_page();
+        self.revision = self.revision.wrapping_add(1);
+    }
+
     /// Open collection, or None for folders.
     pub const fn active_collection(&self) -> Option<u64> {
         self.collection
