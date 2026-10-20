@@ -32,6 +32,103 @@ pub struct GpuHeightfieldPlacementWorkBudget {
     pub max_field_work: u64,
 }
 
+/// One immutable native buffer handle plus its exact logical byte size.
+///
+/// Cloning the snapshot clones the native handle; it does not allocate or copy
+/// GPU memory. A renderer may register the handle in its same-device RHI table
+/// and must retain that registration through every lookup that uses its ID.
+#[derive(Clone)]
+pub struct GpuHeightfieldPlacementBufferSnapshot {
+    buffer: wgpu::Buffer,
+    bytes: u64,
+}
+
+impl GpuHeightfieldPlacementBufferSnapshot {
+    /// Exact native allocation owned by the placement object.
+    #[must_use]
+    pub fn buffer(&self) -> &wgpu::Buffer {
+        &self.buffer
+    }
+
+    /// Logical size imported into the render graph.
+    #[must_use]
+    pub fn bytes(&self) -> u64 {
+        self.bytes
+    }
+}
+
+/// One native compute stage ready for persistent same-device registration.
+#[derive(Clone)]
+pub struct GpuHeightfieldPlacementStageSnapshot {
+    pipeline: wgpu::ComputePipeline,
+    bind_group: wgpu::BindGroup,
+    dispatch: [u32; 3],
+}
+
+impl GpuHeightfieldPlacementStageSnapshot {
+    /// Native compute pipeline created from the placement ABI.
+    #[must_use]
+    pub fn pipeline(&self) -> &wgpu::ComputePipeline {
+        &self.pipeline
+    }
+
+    /// Native bind group compatible with [`Self::pipeline`].
+    #[must_use]
+    pub fn bind_group(&self) -> &wgpu::BindGroup {
+        &self.bind_group
+    }
+
+    /// Direct workgroup dimensions; every component is nonzero.
+    #[must_use]
+    pub fn dispatch(&self) -> [u32; 3] {
+        self.dispatch
+    }
+}
+
+/// Candidate-dependent stages. `None` means an uploaded empty request: the
+/// reset stage must still execute, while source/project/field/finalize and draw
+/// must be omitted rather than represented by a fabricated dispatch.
+#[derive(Clone)]
+pub struct GpuHeightfieldPlacementActiveStagesSnapshot {
+    /// Canonical XZ source generation.
+    pub source: GpuHeightfieldPlacementStageSnapshot,
+    /// Exact heightfield projection.
+    pub project: GpuHeightfieldPlacementStageSnapshot,
+    /// Author field evaluation and compaction.
+    pub field: GpuHeightfieldPlacementStageSnapshot,
+    /// Fail-closed projection overflow finalization.
+    pub finalize: GpuHeightfieldPlacementStageSnapshot,
+}
+
+/// Complete native resource snapshot for one uploaded placement request.
+///
+/// The eleven buffers and reset stage are always present. Candidate-dependent
+/// stages are present only when `candidate_count != 0`. Handles remain stable
+/// for the lifetime of the placement object; request generation changes after
+/// every successful upload, including structurally identical uploads.
+#[derive(Clone)]
+pub struct GpuHeightfieldPlacementRegistrationSnapshot {
+    /// Monotonic successful request upload generation.
+    pub request_generation: u64,
+    /// Primary candidate count represented by this request.
+    pub candidate_count: u32,
+    pub source_params: GpuHeightfieldPlacementBufferSnapshot,
+    pub project_params: GpuHeightfieldPlacementBufferSnapshot,
+    pub field_params: GpuHeightfieldPlacementBufferSnapshot,
+    pub records: GpuHeightfieldPlacementBufferSnapshot,
+    pub samples: GpuHeightfieldPlacementBufferSnapshot,
+    pub attributes: GpuHeightfieldPlacementBufferSnapshot,
+    pub compact: GpuHeightfieldPlacementBufferSnapshot,
+    pub indirect: GpuHeightfieldPlacementBufferSnapshot,
+    pub status: GpuHeightfieldPlacementBufferSnapshot,
+    pub heights: GpuHeightfieldPlacementBufferSnapshot,
+    pub brushes: GpuHeightfieldPlacementBufferSnapshot,
+    /// Always-dispatched transient state reset.
+    pub reset: GpuHeightfieldPlacementStageSnapshot,
+    /// Nonempty candidate work; absent for a reset-only request.
+    pub active: Option<GpuHeightfieldPlacementActiveStagesSnapshot>,
+}
+
 /// Recoverable host preflight failures enqueue no writes and retain the prior
 /// request. Device/OOM errors follow wgpu; projection overflow is GPU status.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -150,10 +247,12 @@ pub struct GpuHeightfieldPlacement {
     status: wgpu::Buffer,
     heights: wgpu::Buffer,
     brushes: wgpu::Buffer,
+    reset_pipeline: wgpu::ComputePipeline,
     source_pipeline: wgpu::ComputePipeline,
     project_pipeline: wgpu::ComputePipeline,
     field_pipeline: wgpu::ComputePipeline,
     finalize_pipeline: wgpu::ComputePipeline,
+    reset_bind: wgpu::BindGroup,
     source_bind: wgpu::BindGroup,
     project_bind: wgpu::BindGroup,
     field_bind: wgpu::BindGroup,
@@ -235,6 +334,11 @@ impl GpuHeightfieldPlacement {
             contents: bytemuck::cast_slice(&[vertex_count, 0, 0, 0]),
             usage: storage | upload | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::INDIRECT,
         });
+        let reset_layout = layout(
+            device,
+            "placement reset layout",
+            &[storage_entry(0, false), storage_entry(1, false)],
+        );
         let source_layout = layout(
             device,
             "placement source layout",
@@ -271,6 +375,12 @@ impl GpuHeightfieldPlacement {
                 include_str!("shaders/heightfield_placement_source.wgsl").into(),
             ),
         });
+        let reset_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("placement reset kernel"),
+            source: wgpu::ShaderSource::Wgsl(
+                include_str!("shaders/heightfield_placement_reset.wgsl").into(),
+            ),
+        });
         let project_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("placement exact projection kernel"),
             source: wgpu::ShaderSource::Wgsl(
@@ -281,6 +391,7 @@ impl GpuHeightfieldPlacement {
             label: Some("placement author kernel"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/scatter_field.wgsl").into()),
         });
+        let reset_pipeline = pipeline(device, &reset_layout, &reset_shader, "reset_main");
         let source_pipeline = pipeline(device, &source_layout, &source_shader, "placement_main");
         let project_pipeline = pipeline(device, &project_layout, &project_shader, "project_main");
         let finalize_pipeline = pipeline(device, &project_layout, &project_shader, "finalize_main");
@@ -292,6 +403,11 @@ impl GpuHeightfieldPlacement {
                 entries,
             })
         };
+        let reset_bind = bind(
+            "placement reset bindings",
+            &reset_layout,
+            &[buffer_binding(0, &indirect), buffer_binding(1, &status)],
+        );
         let source_bind = bind(
             "placement source bindings",
             &source_layout,
@@ -346,10 +462,12 @@ impl GpuHeightfieldPlacement {
             status,
             heights,
             brushes,
+            reset_pipeline,
             source_pipeline,
             project_pipeline,
             field_pipeline,
             finalize_pipeline,
+            reset_bind,
             source_bind,
             project_bind,
             field_bind,
@@ -430,7 +548,8 @@ impl GpuHeightfieldPlacement {
         Ok(())
     }
 
-    /// Records four ordered compute passes and clears transient GPU state.
+    /// Records a reset compute pass and, for nonempty requests, four ordered
+    /// candidate compute passes. Reset preserves immutable draw words 0/2/3.
     /// No owned allocation, queue upload, submit, wait, map or readback.
     pub fn encode(
         &self,
@@ -440,8 +559,15 @@ impl GpuHeightfieldPlacement {
             .request
             .as_ref()
             .ok_or(GpuScatterError::RequestNotUploaded)?;
-        encoder.clear_buffer(&self.indirect, 4, Some(4));
-        encoder.clear_buffer(&self.status, 0, None);
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("placement transient reset"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.reset_pipeline);
+            pass.set_bind_group(0, &self.reset_bind, &[]);
+            pass.dispatch_workgroups(1, 1, 1);
+        }
         if r.source[11] != 0 {
             for (pipeline, bind, label) in [
                 (&self.source_pipeline, &self.source_bind, "placement XZ"),
@@ -520,6 +646,56 @@ impl GpuHeightfieldPlacement {
     /// Fixed primary-slot capacity; never an accepted-point truncation limit.
     pub fn capacity(&self) -> usize {
         self.capacity
+    }
+
+    /// Clones the complete native registration surface for the current request.
+    ///
+    /// This does not allocate GPU memory or register table IDs. The target RHI
+    /// must belong to the same native device; wgpu cannot authenticate that
+    /// provenance. Empty requests expose reset-only work through `active=None`.
+    pub fn registration_snapshot(
+        &self,
+    ) -> Result<GpuHeightfieldPlacementRegistrationSnapshot, GpuHeightfieldPlacementError> {
+        let request = self
+            .request
+            .as_ref()
+            .ok_or(GpuScatterError::RequestNotUploaded)?;
+        let slots = self.capacity.max(1) as u64;
+        let buffer = |value: &wgpu::Buffer, bytes| GpuHeightfieldPlacementBufferSnapshot {
+            buffer: value.clone(),
+            bytes,
+        };
+        let stage = |pipeline: &wgpu::ComputePipeline, bind_group: &wgpu::BindGroup, dispatch| {
+            GpuHeightfieldPlacementStageSnapshot {
+                pipeline: pipeline.clone(),
+                bind_group: bind_group.clone(),
+                dispatch,
+            }
+        };
+        let dispatch = [request.groups[0], request.groups[1], 1];
+        let candidate_count = request.source[11];
+        Ok(GpuHeightfieldPlacementRegistrationSnapshot {
+            request_generation: self.request_generation,
+            candidate_count,
+            source_params: buffer(&self.source_params, 192),
+            project_params: buffer(&self.project_params, 128),
+            field_params: buffer(&self.field_params, 128),
+            records: buffer(&self.records, 64 * slots),
+            samples: buffer(&self.samples, 64 * slots),
+            attributes: buffer(&self.attributes, 16 * slots),
+            compact: buffer(&self.compact, 4 * slots),
+            indirect: buffer(&self.indirect, 16),
+            status: buffer(&self.status, 4),
+            heights: buffer(&self.heights, 4 * self.max_surface_samples.max(1) as u64),
+            brushes: buffer(&self.brushes, 64 * self.max_brushes.max(1) as u64),
+            reset: stage(&self.reset_pipeline, &self.reset_bind, [1, 1, 1]),
+            active: (candidate_count != 0).then(|| GpuHeightfieldPlacementActiveStagesSnapshot {
+                source: stage(&self.source_pipeline, &self.source_bind, dispatch),
+                project: stage(&self.project_pipeline, &self.project_bind, dispatch),
+                field: stage(&self.field_pipeline, &self.field_bind, dispatch),
+                finalize: stage(&self.finalize_pipeline, &self.project_bind, dispatch),
+            }),
+        })
     }
 
     pub(super) fn device_identity(&self) -> &std::sync::Arc<()> {

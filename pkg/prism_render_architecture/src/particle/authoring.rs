@@ -112,11 +112,13 @@ pub const EMBER_FIELD_ORDER: [&str; 6] = [
 /// Eight-byte signature for the dependency-free binary `.ember` container.
 pub const EMBER_BINARY_MAGIC: [u8; 8] = *b"PREMBER1";
 /// Version of the binary container layout, independent of the asset schema.
-pub const EMBER_BINARY_VERSION: u32 = 1;
+pub const EMBER_BINARY_VERSION: u32 = 2;
 /// Maximum number of exposed parameters accepted by the decoder.
 pub const MAX_EMBER_PARAMS: u32 = 1_000_000;
 /// Maximum UTF-8 byte length accepted for one exposed parameter name.
 pub const MAX_EMBER_PARAM_NAME_BYTES: u32 = 1 << 20;
+/// Maximum UTF-8 byte length accepted for either part of a compiled parameter target.
+pub const MAX_EMBER_PARAM_TARGET_BYTES: u32 = 1 << 20;
 
 /// The kind of primitive a renderer configuration draws (design §16).
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -244,10 +246,22 @@ pub struct ExposedParam {
     pub handle: ParamHandle,
     /// The author-facing display name.
     pub name: String,
+    /// The exact compiled uniform resource and member this parameter updates.
+    pub target: ParameterTarget,
     /// The declared value type.
     pub ty: ParamType,
     /// Where the runtime value comes from.
     pub binding: BindingSource,
+}
+
+/// Stable reference from an author-facing parameter to a compiled uniform
+/// field. It is deliberately separate from the localized/display name.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct ParameterTarget {
+    /// Uniform resource name declared by the compiled module.
+    pub resource: String,
+    /// Member name in that resource's compiled parameter schema.
+    pub field: String,
 }
 
 impl ExposedParam {
@@ -733,6 +747,8 @@ pub enum EmberCodecError {
     DuplicateParamHandle(u32),
     /// A constant parameter value did not match its declared parameter type.
     ParamValueTypeMismatch { handle: u32 },
+    /// A compiled parameter target has an empty resource or field name.
+    InvalidParamTarget { handle: u32 },
 }
 
 impl fmt::Display for EmberCodecError {
@@ -775,6 +791,12 @@ impl fmt::Display for EmberCodecError {
             }
             Self::ParamValueTypeMismatch { handle } => {
                 write!(formatter, "ember parameter {handle} constant type mismatch")
+            }
+            Self::InvalidParamTarget { handle } => {
+                write!(
+                    formatter,
+                    "ember parameter {handle} has an empty compiled target"
+                )
             }
         }
     }
@@ -819,6 +841,8 @@ pub fn encode_binary(asset: &EmberAsset) -> Result<Vec<u8>, EmberCodecError> {
     for param in &asset.params {
         writer.u32(param.handle.0);
         writer.string(&param.name, "parameter name")?;
+        writer.string(&param.target.resource, "parameter target resource")?;
+        writer.string(&param.target.field, "parameter target field")?;
         write_param_type(&mut writer, param.ty);
         write_binding(&mut writer, param.binding)?;
     }
@@ -866,6 +890,10 @@ pub fn decode_binary(bytes: &[u8]) -> Result<EmberAsset, EmberCodecError> {
             return Err(EmberCodecError::DuplicateParamHandle(handle.0));
         }
         let name = reader.string(MAX_EMBER_PARAM_NAME_BYTES, "parameter name")?;
+        let target = ParameterTarget {
+            resource: reader.string(MAX_EMBER_PARAM_TARGET_BYTES, "parameter target resource")?,
+            field: reader.string(MAX_EMBER_PARAM_TARGET_BYTES, "parameter target field")?,
+        };
         let ty = read_param_type(&mut reader)?;
         let binding = read_binding(&mut reader)?;
         if let BindingSource::Constant(value) = binding {
@@ -874,6 +902,7 @@ pub fn decode_binary(bytes: &[u8]) -> Result<EmberAsset, EmberCodecError> {
         params.push(ExposedParam {
             handle,
             name,
+            target,
             ty,
             binding,
         });
@@ -916,6 +945,11 @@ fn validate_asset(asset: &EmberAsset) -> Result<(), EmberCodecError> {
     for param in &asset.params {
         if !handles.insert(param.handle.0) {
             return Err(EmberCodecError::DuplicateParamHandle(param.handle.0));
+        }
+        if param.target.resource.is_empty() || param.target.field.is_empty() {
+            return Err(EmberCodecError::InvalidParamTarget {
+                handle: param.handle.0,
+            });
         }
         if let BindingSource::Constant(value) = param.binding {
             validate_param_value(param.ty, value, param.handle.0)?;
@@ -1414,18 +1448,30 @@ mod tests {
                 ExposedParam {
                     handle: ParamHandle(10),
                     name: String::from("intensity"),
+                    target: ParameterTarget {
+                        resource: String::from("params"),
+                        field: String::from("weight"),
+                    },
                     ty: ParamType::Scalar,
                     binding: BindingSource::Constant(ParamValue::Scalar(0.75)),
                 },
                 ExposedParam {
                     handle: ParamHandle(11),
                     name: String::from("tint/火"),
+                    target: ParameterTarget {
+                        resource: String::from("params"),
+                        field: String::from("tint"),
+                    },
                     ty: ParamType::Color,
                     binding: BindingSource::Material(3),
                 },
                 ExposedParam {
                     handle: ParamHandle(12),
                     name: String::from("enabled"),
+                    target: ParameterTarget {
+                        resource: String::from("params"),
+                        field: String::from("enabled"),
+                    },
                     ty: ParamType::Bool,
                     binding: BindingSource::Timeline(9),
                 },
@@ -1461,6 +1507,16 @@ mod tests {
     }
 
     #[test]
+    fn binary_codec_rejects_empty_compiled_parameter_targets() {
+        let mut asset = codec_asset();
+        asset.params[0].target.field.clear();
+        assert_eq!(
+            encode_binary(&asset),
+            Err(EmberCodecError::InvalidParamTarget { handle: 10 })
+        );
+    }
+
+    #[test]
     fn binary_codec_has_stable_canonical_bytes() {
         let asset = codec_asset();
         let first = encode_binary(&asset).unwrap();
@@ -1483,10 +1539,10 @@ mod tests {
         );
 
         let mut bad_version = encoded.clone();
-        bad_version[8..12].copy_from_slice(&2u32.to_le_bytes());
+        bad_version[8..12].copy_from_slice(&1u32.to_le_bytes());
         assert_eq!(
             decode_binary(&bad_version),
-            Err(EmberCodecError::UnsupportedBinaryVersion(2))
+            Err(EmberCodecError::UnsupportedBinaryVersion(1))
         );
 
         let mut bad_order = encoded.clone();
@@ -1521,9 +1577,11 @@ mod tests {
     #[test]
     fn binary_codec_rejects_invalid_enum_boolean_and_non_finite_float() {
         let mut invalid_type = encode_binary(&codec_asset()).unwrap();
-        // Header (12), fields 1+4 and 2+4, param count (field 3+4), then
-        // handle (4) and name length+UTF-8 bytes (4+9).
-        invalid_type[12 + 5 + 5 + 5 + 4 + 4 + 9] = 99;
+        // Header (12), fields 1+4 and 2+4, param count (field 3+4), handle
+        // (4), display name (4+9), target resource (4+6), and target field
+        // (4+6) precede the parameter type byte.
+        let type_index = 12 + 5 + 5 + 5 + 4 + 4 + 9 + 4 + 6 + 4 + 6;
+        invalid_type[type_index] = 99;
         assert!(matches!(
             decode_binary(&invalid_type),
             Err(EmberCodecError::InvalidEnum {
@@ -1550,7 +1608,20 @@ mod tests {
         );
 
         let mut encoded_nan = encode_binary(&codec_asset()).unwrap();
-        let scalar_value = 12 + 5 + 5 + 5 + 4 + 4 + "intensity".len() + 1 + 1 + 1;
+        let scalar_value = 12
+            + 5
+            + 5
+            + 5
+            + 4
+            + 4
+            + "intensity".len()
+            + 4
+            + "params".len()
+            + 4
+            + "weight".len()
+            + 1
+            + 1
+            + 1;
         encoded_nan[scalar_value..scalar_value + 4]
             .copy_from_slice(&f32::NAN.to_bits().to_le_bytes());
         assert_eq!(
@@ -1694,12 +1765,20 @@ mod tests {
         let constant = ExposedParam {
             handle: ParamHandle(1),
             name: String::from("intensity"),
+            target: ParameterTarget {
+                resource: String::from("params"),
+                field: String::from("weight"),
+            },
             ty: ParamType::Scalar,
             binding: BindingSource::Constant(ParamValue::Scalar(1.0)),
         };
         let driven = ExposedParam {
             handle: ParamHandle(2),
             name: String::from("tint"),
+            target: ParameterTarget {
+                resource: String::from("params"),
+                field: String::from("tint"),
+            },
             ty: ParamType::Color,
             binding: BindingSource::Material(7),
         };
@@ -1718,18 +1797,30 @@ mod tests {
                 ExposedParam {
                     handle: ParamHandle(1),
                     name: String::from("a"),
+                    target: ParameterTarget {
+                        resource: String::from("params"),
+                        field: String::from("weight"),
+                    },
                     ty: ParamType::Scalar,
                     binding: BindingSource::Constant(ParamValue::Scalar(0.0)),
                 },
                 ExposedParam {
                     handle: ParamHandle(2),
                     name: String::from("b"),
+                    target: ParameterTarget {
+                        resource: String::from("params"),
+                        field: String::from("direction"),
+                    },
                     ty: ParamType::Vec3,
                     binding: BindingSource::Gameplay(4),
                 },
                 ExposedParam {
                     handle: ParamHandle(3),
                     name: String::from("c"),
+                    target: ParameterTarget {
+                        resource: String::from("params"),
+                        field: String::from("enabled"),
+                    },
                     ty: ParamType::Bool,
                     binding: BindingSource::Timeline(9),
                 },

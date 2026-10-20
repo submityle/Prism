@@ -134,6 +134,8 @@ pub struct EmitterRuntime {
     config: EmitterRuntimeConfig,
     pool: ParticlePool,
     particles: Vec<ParticleRecord>,
+    live_slots: Vec<u32>,
+    live_slot_indices: Vec<u32>,
     origin: Vec3,
     emitter_velocity: Vec3,
     time: f32,
@@ -156,6 +158,8 @@ impl EmitterRuntime {
             emitter,
             pool: ParticlePool::with_capacity(config.capacity),
             particles: alloc::vec![ParticleRecord::default(); capacity],
+            live_slots: Vec::with_capacity(capacity),
+            live_slot_indices: alloc::vec![u32::MAX; capacity],
             config,
             origin,
             emitter_velocity,
@@ -194,6 +198,18 @@ impl EmitterRuntime {
         }
     }
 
+    /// Iterates live records in deterministic runtime order without scanning
+    /// the emitter's full capacity. Expiration removes in O(1) by moving the
+    /// final live slot into the vacated position; recycled slots keep their
+    /// current position and new slots append.
+    #[must_use]
+    pub fn live_particles(&self) -> impl Iterator<Item = (u32, ParticleRecord)> + '_ {
+        self.live_slots
+            .iter()
+            .copied()
+            .map(|slot| (slot, self.particles[slot as usize]))
+    }
+
     /// Returns the last frame's counters.
     #[must_use]
     pub const fn last_stats(&self) -> EmitterStepStats {
@@ -219,10 +235,9 @@ impl EmitterRuntime {
         self.pool.begin_frame();
         self.time += dt;
         let mut expired = 0;
-        for slot in 0..self.config.capacity {
-            if !self.pool.is_alive(slot) {
-                continue;
-            }
+        let mut live_index = 0;
+        while live_index < self.live_slots.len() {
+            let slot = self.live_slots[live_index];
             let record = &mut self.particles[slot as usize];
             let old = *record;
             let next = integrate(
@@ -237,7 +252,10 @@ impl EmitterRuntime {
             if record.age >= record.lifetime {
                 self.pool.kill(slot);
                 self.particles[slot as usize] = ParticleRecord::default();
+                self.remove_live_slot(live_index);
                 expired += 1;
+            } else {
+                live_index += 1;
             }
         }
 
@@ -254,6 +272,10 @@ impl EmitterRuntime {
             .emitter
             .allocate(&mut self.pool, requested, self.config.capacity_policy);
         for &slot in &slots {
+            if self.live_slot_indices[slot as usize] == u32::MAX {
+                self.live_slot_indices[slot as usize] = self.live_slots.len() as u32;
+                self.live_slots.push(slot);
+            }
             let particle_id = self.next_particle_id;
             self.next_particle_id = self.next_particle_id.wrapping_add(1);
             let mut samples = [0.0; 8];
@@ -293,6 +315,14 @@ impl EmitterRuntime {
             alive: self.pool.alive_count(),
         };
         self.last_stats
+    }
+
+    fn remove_live_slot(&mut self, live_index: usize) {
+        let removed = self.live_slots.swap_remove(live_index);
+        self.live_slot_indices[removed as usize] = u32::MAX;
+        if let Some(&moved) = self.live_slots.get(live_index) {
+            self.live_slot_indices[moved as usize] = live_index as u32;
+        }
     }
 }
 
@@ -444,5 +474,54 @@ mod tests {
         assert_eq!(stats.requested_spawns, 10);
         assert_eq!(stats.spawned, 2);
         assert_eq!(stats.discarded, 8);
+    }
+
+    #[test]
+    fn live_particle_iteration_tracks_expiration_and_slot_reuse() {
+        let mut runtime = emitter(20.0, 0.1, 64);
+        runtime.step(0.1);
+        assert_eq!(runtime.live_particles().count(), 2);
+
+        let stats = runtime.step(0.1);
+        assert_eq!(stats.expired, 2);
+        assert_eq!(stats.alive, 2);
+        let live: Vec<_> = runtime.live_particles().collect();
+        assert_eq!(live.len(), 2);
+        assert!(live.iter().all(|(slot, _)| runtime.pool().is_alive(*slot)));
+        let mut slots: Vec<_> = live.iter().map(|(slot, _)| *slot).collect();
+        slots.sort_unstable();
+        assert_eq!(slots, [0, 1]);
+    }
+
+    #[test]
+    fn recycling_does_not_duplicate_or_drop_live_slot_tracking() {
+        let mut config = EmitterRuntimeConfig {
+            capacity: 2,
+            rate_per_second: 30.0,
+            lifetime: 10.0,
+            capacity_policy: CapacityPolicy::RecycleOldest,
+            ..EmitterRuntimeConfig::default()
+        };
+        config.spawn.speed = 1.0;
+        let mut runtime = EmitterRuntime::new(
+            Emitter::new(EmitterHandle(9), EmitterShape::Point, config.spawn),
+            config,
+            Vec3::ZERO,
+            Vec3::ZERO,
+        )
+        .expect("valid emitter");
+
+        let stats = runtime.step(0.1);
+        let live: Vec<_> = runtime.live_particles().collect();
+        assert_eq!(stats.requested_spawns, 3);
+        assert_eq!(stats.spawned, 3);
+        assert_eq!(stats.alive, 2);
+        assert_eq!(
+            live.iter().map(|(slot, _)| *slot).collect::<Vec<_>>(),
+            [0, 1]
+        );
+        assert!(live.iter().all(|(slot, record)| {
+            runtime.pool().is_alive(*slot) && runtime.particle(*slot) == Some(*record)
+        }));
     }
 }

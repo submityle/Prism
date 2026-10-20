@@ -1009,6 +1009,72 @@ impl Allocations {
 }
 
 #[test]
+fn registration_snapshot_has_exact_native_abi_and_reset_only_empty_work() {
+    let ctx = context();
+    let mut gpu = new_gpu(&ctx, 65, 2, 9);
+    assert!(gpu.registration_snapshot().is_err());
+
+    let c = config(1, 0);
+    let active_region = region([0; 2], [65, 1]);
+    let author = painted();
+    let terrain = surface(3, 65, [0; 3], 1, &[0; 9]);
+    upload(&mut gpu, c, active_region, &author, &terrain, filters());
+
+    let first_generation;
+    {
+        let snapshot = gpu.registration_snapshot().unwrap();
+        first_generation = snapshot.request_generation;
+        assert_eq!(snapshot.candidate_count, 65);
+        assert_eq!(snapshot.reset.dispatch(), [1, 1, 1]);
+        let active = snapshot.active.as_ref().expect("nonempty request work");
+        for stage in [
+            &active.source,
+            &active.project,
+            &active.field,
+            &active.finalize,
+        ] {
+            assert_eq!(stage.dispatch(), [2, 1, 1]);
+        }
+        assert_eq!(
+            [
+                snapshot.source_params.bytes(),
+                snapshot.project_params.bytes(),
+                snapshot.field_params.bytes(),
+                snapshot.records.bytes(),
+                snapshot.samples.bytes(),
+                snapshot.attributes.bytes(),
+                snapshot.compact.bytes(),
+                snapshot.indirect.bytes(),
+                snapshot.status.bytes(),
+                snapshot.heights.bytes(),
+                snapshot.brushes.bytes(),
+            ],
+            [192, 128, 128, 4_160, 4_160, 1_040, 260, 16, 4, 36, 128]
+        );
+        assert_eq!(snapshot.records.buffer(), gpu.records());
+        assert_eq!(snapshot.samples.buffer(), gpu.surface_samples());
+        assert_eq!(snapshot.attributes.buffer(), gpu.attributes());
+        assert_eq!(snapshot.compact.buffer(), gpu.compact_indices());
+        assert_eq!(snapshot.indirect.buffer(), gpu.indirect_args());
+        assert_eq!(snapshot.status.buffer(), gpu.status());
+    }
+
+    upload(&mut gpu, c, active_region, &author, &terrain, filters());
+    let repeated_generation = gpu.registration_snapshot().unwrap().request_generation;
+    assert_eq!(repeated_generation, first_generation + 1);
+
+    let empty_region = region([0; 2], [0, 1]);
+    upload(&mut gpu, c, empty_region, &author, &terrain, filters());
+    let empty = gpu.registration_snapshot().unwrap();
+    assert_eq!(empty.request_generation, repeated_generation + 1);
+    assert_eq!(empty.candidate_count, 0);
+    assert_eq!(empty.reset.dispatch(), [1, 1, 1]);
+    assert!(empty.active.is_none());
+    assert_eq!(empty.indirect.buffer(), gpu.indirect_args());
+    assert_eq!(empty.status.buffer(), gpu.status());
+}
+
+#[test]
 fn fixed_allocations_tails_repeated_encodes_empty_axes_and_rebaked_identity() {
     let ctx = context();
     let mut gpu = new_gpu(&ctx, 129, 2, 9);

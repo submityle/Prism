@@ -3,7 +3,7 @@
 > 面向 Prism 原生 ECS/App/RHI/RenderGraph 的数据导向、GPU-first、图编译式粒子/特效引擎。
 > 借鉴 UE5 Niagara、Unity VFX Graph（HDRP）、Houdini POPs/DOPs、EmberGen、PopcornFX、Frostbite/Destiny GPU 粒子，取长补短。
 > **着色一等公民**：粒子渲染复用共享材质系统的 closure/shading-model，PBR / NPR / 自定义 / 混合四者皆为一等公民，可达顶级次世代 AAA 质量。
-> 本文档同时保留目标设计并记录代码落地状态。Prism 不依赖 Bevy crates；采用经典数值仿真路线，不含 AI/ML 内容。
+> 本文档同时保留目标设计并记录代码落地状态。Ember 新增运行时必须依赖 Prism 自有 ECS/App/RHI，禁止依赖任何 `bevy_*` crate；仓库遗留 Bevy 场景包不得进入 Ember 依赖闭包。采用经典数值仿真路线，不含 AI/ML 内容。
 
 - 版本: v0.3（实现跟踪；设计目标与已验证能力分开记录）
 - 范围: 一步到位（含 Simulation Stages / 网格流体 / 光追碰撞受光 / 四等公民着色）
@@ -626,11 +626,11 @@ prism_particle_tools  (可选) 图编辑器 / 预览(含着色预览) / 性能 H
 
 | 能力 | 代码位置 | 状态与验证边界 |
 |---|---|---|
-| CPU emitter runtime | `pkg/prism_render_architecture/src/particle/runtime.rs` | 已实现固定容量池、rate/burst、确定性采样、积分/力场、寿命回收及溢出计数；本轮无法完成 crate 测试编译，不能据此确认当前测试状态 |
-| `.ember` 二进制资产 | `pkg/prism_render_architecture/src/particle/authoring.rs` | 已实现版本化 little-endian codec、输入校验、迁移模型与 round-trip/损坏输入测试；RON API 已移除 |
+| CPU emitter runtime | `pkg/prism_render_architecture/src/particle/runtime.rs` | 已实现固定容量池、rate/burst、确定性采样、积分/力场、寿命回收及溢出计数；仿真与活粒子枚举现按活跃槽位迭代，不再按容量全扫描。本轮完整 particle 单元测试 6473 项通过；App 固定步调度和 Render Extract 集成仍未完成 |
+| `.ember` 二进制资产 | `pkg/prism_render_architecture/src/particle/authoring.rs` | 已实现版本化 little-endian codec v2、显式 `ParameterTarget { resource, field }`、输入校验、迁移模型与 round-trip/损坏输入测试；RON API 已移除 |
 | GPU 仿真与间接绘制切片 | `pkg/prism_render_gpudriven/src/particle.rs` 与 `shaders/particle*.wgsl` | Prism RHI/RenderGraph 上的 pool update、spawn、活跃索引、indirect args 与 quad 绘制；构造前校验设备缓冲/纹理/dispatch 限制，上传校验数值与记录；仅代表最小竖切片，不代表全功能 Ember |
 | 粒子竖切片管线缓存 | `pkg/prism_render_gpudriven/src/particle.rs` | 新增 per-device caller-owned `ParticlePipelineCache`，对固定 shader/layout、compute entry points 和 quad render pipeline 做内容缓存与引用计数释放；`ParticleStage::new_with_pipeline_cache` / `destroy_with_pipeline_cache` 已接线。缓存目前只覆盖竖切片，尚未接入 `prism_render_app::PipelineCache` 的异步编译、持久化 PSO 或完整 Ember pipeline specialization |
-| Graph → WGSL 编译器与 typed uniform ABI 基础 | `pkg/prism_render_architecture/src/particle/compiler.rs`、`modules.rs` | 校验 GraphIr、稳定拓扑序、模块属性需求与资源 ABI，生成活跃 SoA 布局和 WGSL storage bindings（含 previous/current ping-pong ABI）、运行时计数缓冲控制的 stage dispatch 与迭代计划、曲线 LUT 采样函数、DataInterface 函数合并、模块读/写/读旧帧契约、逻辑属性名到物理绑定名的 lowering，以及按帧奇偶选择 ping-pong 物理副本；模块资源按 group 稳定分配空闲 binding。现已实现 typed uniform schema、确定性 WGSL/host 偏移布局、默认字节和命名运行时值编码，并拒绝缺失/多余/错类型字段。内置 uniform 目前仍以单个 `vec4` 字段作为基础 schema，尚未与 `.ember` 暴露参数资产建立语义字段/实例值映射，compiled bytes 也未接入设备 buffer 上传。pipeline-cache/RenderGraph 生产接线、真实设备资源绑定和端到端 Ember 生命周期仍未完成，因此不能标记 M2 完成 |
+| Graph → WGSL 编译器与 typed uniform ABI 基础 | `pkg/prism_render_architecture/src/particle/compiler.rs`、`modules.rs` | 校验 GraphIr、稳定拓扑序、模块属性需求与资源 ABI，生成活跃 SoA 布局和 WGSL storage bindings（含 previous/current ping-pong ABI）、运行时计数缓冲控制的 stage dispatch 与迭代计划、曲线 LUT 采样函数、DataInterface 函数合并、模块读/写/读旧帧契约、逻辑属性名到物理绑定名的 lowering，以及按帧奇偶选择 ping-pong 物理副本；模块资源按 group 稳定分配空闲 binding。typed uniform schema 支持确定性 WGSL/host 布局、默认字节和参数值编码；`.ember` 参数按显式资源/字段目标映射，支持 scalar/vec3/color/i32 与用 u32 0/1 编码的 bool，并拒绝缺失/多余/错类型字段。当前仍未把编译字节创建/上传为 GPU uniform buffer，未绑定到生成图 pipeline，也未接通完整参数资源生命周期、pipeline specialization、ECS/App 生命周期与端到端 Ember 路径，不能标记 M2 完成 |
 | 完整 renderer matrix 的 CPU 合同与 GPU-facing ABI | `pkg/prism_render_architecture/src/particle/renderers.rs`、`shading.rs`、`sort_cull.rs`、`motion_vectors.rs` | 新增统一 renderer plan（Sprite/Mesh/Ribbon/Beam/Light/Decal/Volume 路由及资源需求）、OIT fragment 节点布局、sort/cull 缓冲容量计划和 motion-vector 编码/目标行布局合同；当前仅为 CPU 侧计划与布局合同，未接入对应 GPU buffers、真实 OIT target/resolve、renderer pipelines、depth/SDF/RT prepass 或 motion-vector pass，不代表 M4/M5 的生产渲染器完成 |
 | 合同/算法模块 | `pkg/prism_render_architecture/src/particle/` | 包含池、发射、模拟、事件、排序/剔除、着色/OIT 等 CPU 合同；纯合同或单算法模块不等于 GPU 生产接线 |
 | ECS/App 生命周期与完整渲染集成 | Prism 粒子运行时/渲染 crate | 尚未形成完整端到端接线；需以实际代码和集成验收逐项完成，不能由本设计文档推定已完成 |
@@ -650,7 +650,7 @@ prism_particle_tools  (可选) 图编辑器 / 预览(含着色预览) / 性能 H
 
 实现更新（2026-10-20）：GPU 粒子竖切片新增 `ParticlePipelineCache`，并在 `ParticleStage::new_with_pipeline_cache` 与 `destroy_with_pipeline_cache` 中接入 compute/render pipeline 的复用和引用计数释放；RenderGraph 的 reset → simulate → spawn → finalize → indirect draw 路径保持不变。新增 Null RHI 下的缓存命中与两次释放测试源码，但本轮由于共享构建目录被并行 Cargo 清理、随后隔离 target 又因磁盘空间不足，未取得该测试的编译/执行验收；不得将此静态实现记录解释为 pipeline-cache 生产验收。
 
-验证更新（2026-10-20）：当前源码快照下，`cargo test -p prism_render_architecture --lib particle::compiler --no-fail-fast` 通过 21 项测试，覆盖 WGSL/Naga 内置 kernel、DataInterface、typed uniform 对齐/默认字节/运行时编码、字段错误拒绝、schema 共享、属性 ping-pong 和 dispatch 计划。随后 `cargo test -p prism_render_architecture --lib particle:: --no-fail-fast` 通过全部 6467 项粒子单元测试。第一次全量运行曾发现 `SampleMesh` 绑定数断言过期（实际为 mesh vertices/normals/indices 三个资源），修正断言后本次重编重跑全绿。该结果不证明 `.ember` 参数资产到 GPU buffer 的运行时接线、物理 GPU 路径或完整 crate 全量通过；本次没有物理 GPU 或视觉回归结果。
+验证更新（2026-10-20）：此前源码快照记录 `particle::compiler` 通过 21 项测试、`particle::` 通过 6467 项粒子单元测试。本轮在包含 `.ember` 参数显式目标/codec v2、i32/bool ABI 和活跃槽位迭代的当前快照下，`cargo test -p prism_render_architecture --lib particle:: --no-fail-fast` 通过 6473 项（0 failed）；其中 runtime 定向子集 5 项通过，包含活跃槽位过期与回收。该结果不证明参数资产到 GPU buffer 的运行时接线、物理 GPU 路径或完整 crate 全量通过；本轮没有物理 GPU 或视觉回归结果。
 
 ---
 
@@ -660,7 +660,7 @@ prism_particle_tools  (可选) 图编辑器 / 预览(含着色预览) / 性能 H
 |---|---|---|
 | M0 骨架 | crate 布局、Asset/Component、CPU 简单求解器、Sprite Unlit 渲染 | CPU reference runtime 已有；ECS/App 与完整 sprite demo 未通过验收 |
 | M1 GPU 核心 | SoA 缓冲池、free-list、spawn/update compute、indirect draw | 已有小型 RHI pool/simulate/spawn/indirect draw slice；百万粒子无回读目标未验证 |
-| M2 图编译 | 图→IR→WESL codegen、按需分配、曲线 LUT | 已有 GraphIr→WGSL 编译器基础、活跃 SoA 布局和 storage-binding ABI、模块属性访问/语义 lowering、DataInterface 函数合并、运行时 dispatch-count ABI/host 计划、曲线 LUT WGSL 采样 helper 和 ping-pong 运行时绑定选择；GPU 竖切片已有 RenderGraph 接线与局部 caller-owned pipeline cache，但仍未接入完整 Ember pipeline specialization、真实图编译产物到设备资源绑定、完整模块参数资产 ABI、ECS/App 生命周期及当前共享 checkout 的完整回归验收，不能标记 M2 完成 |
+| M2 图编译 | 图→IR→WESL codegen、按需分配、曲线 LUT | 已有 GraphIr→WGSL 编译器基础、活跃 SoA 布局和 storage-binding ABI、模块属性访问/语义 lowering、DataInterface 函数合并、运行时 dispatch-count ABI/host 计划、曲线 LUT WGSL 采样 helper 和 ping-pong 运行时绑定选择；`.ember` 参数已有按显式资源/字段目标编码到 uniform ABI 字节的 host 接口，支持 scalar/vec3/color/i32/u32-backed bool。GPU buffer 创建/上传/绑定尚未接线。GPU 竖切片已有 RenderGraph 接线与局部 caller-owned pipeline cache，但仍未接入完整 Ember pipeline specialization、真实图编译产物到设备资源绑定、完整参数 GPU 资源生命周期、ECS/App 生命周期及完整回归验收，不能标记 M2 完成 |
 | M3 力/碰撞 | 力场库、curl noise、depth/SDF 碰撞、事件系统 | 烟火/瀑布/碎片 demo |
 | M4 渲染器 | Mesh/Ribbon/Beam/Light、GPU 排序、软粒子、motion vector | 完整特效场景 + TAA 无拖影 |
 | M5 PBR 着色 | 共享 PBR closure 接入、聚类受光、软粒子折射、共享 OIT | 物理受光火星/水花 demo |

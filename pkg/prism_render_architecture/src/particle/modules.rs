@@ -265,6 +265,8 @@ pub enum ParameterType {
     F32,
     /// Unsigned 32-bit integer scalar.
     U32,
+    /// Signed 32-bit integer scalar.
+    I32,
     /// Two-lane floating-point vector.
     Vec2,
     /// Three-lane floating-point vector (16-byte uniform alignment).
@@ -280,6 +282,7 @@ impl ParameterType {
         match self {
             Self::F32 => "f32",
             Self::U32 => "u32",
+            Self::I32 => "i32",
             Self::Vec2 => "vec2<f32>",
             Self::Vec3 => "vec3<f32>",
             Self::Vec4 => "vec4<f32>",
@@ -290,7 +293,7 @@ impl ParameterType {
     #[must_use]
     pub const fn alignment(self) -> u32 {
         match self {
-            Self::F32 | Self::U32 => 4,
+            Self::F32 | Self::U32 | Self::I32 => 4,
             Self::Vec2 => 8,
             Self::Vec3 | Self::Vec4 => 16,
         }
@@ -300,7 +303,7 @@ impl ParameterType {
     #[must_use]
     pub const fn size(self) -> u32 {
         match self {
-            Self::F32 | Self::U32 => 4,
+            Self::F32 | Self::U32 | Self::I32 => 4,
             Self::Vec2 => 8,
             Self::Vec3 => 12,
             Self::Vec4 => 16,
@@ -316,6 +319,8 @@ pub enum ParameterValue {
     F32(f32),
     /// One unsigned integer value.
     U32(u32),
+    /// One signed integer value.
+    I32(i32),
     /// Two floating-point values.
     Vec2([f32; 2]),
     /// Three floating-point values.
@@ -331,6 +336,7 @@ impl ParameterValue {
         match self {
             Self::F32(_) => ParameterType::F32,
             Self::U32(_) => ParameterType::U32,
+            Self::I32(_) => ParameterType::I32,
             Self::Vec2(_) => ParameterType::Vec2,
             Self::Vec3(_) => ParameterType::Vec3,
             Self::Vec4(_) => ParameterType::Vec4,
