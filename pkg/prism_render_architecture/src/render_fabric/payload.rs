@@ -1,5 +1,65 @@
 use super::*;
-use crate::{frame_graph::ResourceLifetime, gpu_scene::SceneHandle, motion::MotionSource};
+use crate::{
+    abi::GenerationalHandle, frame_graph::ResourceLifetime, gpu_scene::SceneHandle,
+    motion::MotionSource,
+};
+
+/// Generational identity for an object owned by a non-surface render domain.
+/// This is deliberately distinct from `SceneHandle`: domain objects are not
+/// inserted into the GPU Scene merely to acquire a Fabric identity.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct DomainObjectHandle(GenerationalHandle);
+
+impl DomainObjectHandle {
+    #[must_use]
+    pub const fn new(index: u32, generation: u32) -> Self {
+        Self(GenerationalHandle::new(index, generation))
+    }
+
+    #[must_use]
+    pub const fn index(self) -> u32 {
+        self.0.index
+    }
+
+    #[must_use]
+    pub const fn generation(self) -> u32 {
+        self.0.generation
+    }
+}
+
+/// Stable identity of one frame-rendered object. Surface objects retain their
+/// actual GPU Scene handle; every other domain carries its own generational
+/// handle and is never represented by a fabricated `SceneHandle`.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum RenderObjectId {
+    Surface(SceneHandle),
+    Particle(DomainObjectHandle),
+    Volume(DomainObjectHandle),
+    Hair(DomainObjectHandle),
+    Decal(DomainObjectHandle),
+}
+
+impl RenderObjectId {
+    #[must_use]
+    pub const fn domain(self) -> RenderDomain {
+        match self {
+            Self::Surface(_) => RenderDomain::Surface,
+            Self::Particle(_) => RenderDomain::Particle,
+            Self::Volume(_) => RenderDomain::Volume,
+            Self::Hair(_) => RenderDomain::Hair,
+            Self::Decal(_) => RenderDomain::Decal,
+        }
+    }
+
+    /// Returns the retained scene identity only for real Surface objects.
+    #[must_use]
+    pub const fn scene_handle(self) -> Option<SceneHandle> {
+        match self {
+            Self::Surface(handle) => Some(handle),
+            Self::Particle(_) | Self::Volume(_) | Self::Hair(_) | Self::Decal(_) => None,
+        }
+    }
+}
 
 /// Domain-local authored role, not another central resource enum.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -47,7 +107,7 @@ impl DomainPayload {
 /// Per-frame record only; the retained `InstanceRecord` and scene identity do not change.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FrameRenderItem {
-    pub scene_handle: SceneHandle,
+    pub object_id: RenderObjectId,
     pub domain: RenderDomain,
     pub history_key: u32,
     pub motion_source: MotionSource,

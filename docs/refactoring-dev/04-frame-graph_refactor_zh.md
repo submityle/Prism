@@ -122,9 +122,12 @@ response planes + coverage ──▶ response_composition ──▶ HDR
 | compatibility frame_graph 导出与底层契约 | `pkg/prism_render_architecture/src/frame_graph/mod.rs`、`pkg/prism_render_architecture/src/frame_graph/tests.rs` |
 | shading graph 单一 pass-count source、主链顺序、资源 barrier | `pkg/prism_render_scene/src/shading/graph.rs` 中 `declared_pass_count_matches_runtime_assertion` |
 | composition 固定位置、imported planes、HDR barrier | `pkg/prism_render_scene/text/unit/shading/composition_graph.rs` 中 `composition_is_resident_and_follows_water_response_producer` |
+| composition production recorder 与 GPU 回归 | `shading/composition.rs::response_composition_pass` / `record_composition_fabric_commands`；`text/integration/resident_composition_gpu.rs` 现与生产入口共用 recorder，覆盖真实 imports、Fabric compile/prepare/record、producer → composition → readback 顺序；修订后的 harness 尚待本轮运行。即使局部 GPU 回归通过，也不证明共享 Scene/Fabric/TAA 全帧闭环 |
 | pass skeleton codegen 的确定性、依赖校验、资源复用和 cycle diagnostics | `pkg/prism_render_graph/src/frame_graph/codegen.rs` 及其单元测试 |
 | 23 项 post inventory、声明/binding/executor 对齐和插件 registration | `pkg/prism_render_scene/src/shading/post_graph.rs`、`pkg/prism_render_scene/src/shading/plugin.rs` |
-| shading crate 当前测试 | `cargo test -p prism_render_scene --lib shading`：844 passed，0 failed |
+| shading crate 历史运行记录 | `cargo test -p prism_render_scene --lib shading`：844 passed，0 failed；不是本轮复跑结果 |
+
+跨适配器行为单独由 `pkg/prism_render_scene/tests/cross_adapter_acceptance.rs` 验收：它枚举 distinct physical adapters，并在每个 adapter 上执行 storage compute、submit、copy-to-staging 和 map/readback。默认 profile 在少于两个 adapter 时输出 `SKIP_UNVERIFIED`；`PRISM_REQUIRE_GPU=1` 将同一条件提升为失败。2026-10-20 沙盒外只发现 `Apple M2 / Metal / IntegratedGpu` 一个 adapter，故严格门禁失败。该测试证明 adapter-local submission/readback，不证明 31-pass frame graph、Scene imports、TAA history 或 water full-frame parity 已跨 adapter 通过。
 
 ## 7. 历史依据
 

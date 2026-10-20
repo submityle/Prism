@@ -3,6 +3,32 @@ use std::collections::BTreeSet;
 
 use crate::{AuthoringError, Connection, DiagnosticCode, Document, Node, NodeGraph, TypedValue};
 
+pub(crate) struct EvaluationIndex<'a> {
+    graphs: std::collections::BTreeMap<&'a str, &'a NodeGraph>,
+    nodes: std::collections::BTreeMap<(&'a str, &'a str), &'a Node>,
+    implementations: std::collections::BTreeMap<&'a str, &'a NodeGraph>,
+}
+
+impl<'a> EvaluationIndex<'a> {
+    pub(crate) fn new(document: &'a Document) -> Self {
+        let mut index = Self {
+            graphs: std::collections::BTreeMap::new(),
+            nodes: std::collections::BTreeMap::new(),
+            implementations: std::collections::BTreeMap::new(),
+        };
+        for graph in &document.nodegraphs {
+            index.graphs.insert(&graph.name, graph);
+            for node in &graph.nodes {
+                index.nodes.insert((&graph.name, &node.name), node);
+            }
+            if let Some(nodedef) = graph.nodedef.as_deref() {
+                index.implementations.insert(nodedef, graph);
+            }
+        }
+        index
+    }
+}
+
 /// Evaluate a node connection using only pure numeric graph operators.
 ///
 /// This is intentionally a bounded authoring evaluator, not a general MaterialX
@@ -13,34 +39,34 @@ pub fn evaluate_connection(
     graph: &NodeGraph,
     connection: &Connection,
 ) -> Result<TypedValue, AuthoringError> {
+    let index = EvaluationIndex::new(document);
     let target_graph = connection.nodegraph.as_deref().map_or(Ok(graph), |name| {
-        document
-            .nodegraphs
-            .iter()
-            .find(|g| g.name == name)
-            .ok_or_else(|| {
-                error(
-                    DiagnosticCode::InvalidReference,
-                    format!("nodegraph '{name}' does not exist"),
-                )
-            })
+        index.graphs.get(name).copied().ok_or_else(|| {
+            error(
+                DiagnosticCode::InvalidReference,
+                format!("nodegraph '{name}' does not exist"),
+            )
+        })
     })?;
     let mut stack = BTreeSet::new();
-    evaluate_connection_inner(document, target_graph, connection, &mut stack)
+    evaluate_connection_inner(&index, document, target_graph, connection, &mut stack)
 }
 
-/// Resolves one node input, including a literal, connection, or graph
-/// interface reference. `None` means that the input is omitted.
-pub(crate) fn evaluate_input(
+/// Resolves one node input using the caller's per-document index. `None` means
+/// that the input is omitted. Batch adapters build the index once and reuse it
+/// across all inputs/nodes in the evaluation.
+pub(crate) fn evaluate_input_indexed(
+    index: &EvaluationIndex<'_>,
     document: &Document,
     graph: &NodeGraph,
     input: &crate::Input,
 ) -> Result<Option<TypedValue>, AuthoringError> {
     let mut stack = BTreeSet::new();
-    evaluate_input_inner(document, graph, input, &mut stack)
+    evaluate_input_inner(index, document, graph, input, &mut stack)
 }
 
 fn eval_node(
+    index: &EvaluationIndex<'_>,
     document: &Document,
     graph: &NodeGraph,
     name: &str,
@@ -54,26 +80,37 @@ fn eval_node(
             format!("cyclic graph expression at node '{name}'"),
         ));
     }
-    let node = graph.nodes.iter().find(|n| n.name == name).ok_or_else(|| {
-        error(
-            DiagnosticCode::InvalidReference,
-            format!("connected node '{name}' does not exist"),
-        )
-    })?;
-    let result = eval_node_inner(document, graph, node, output, stack);
+    let node = index
+        .nodes
+        .get(&(graph.name.as_str(), name))
+        .copied()
+        .or_else(|| graph.nodes.iter().find(|n| n.name == name))
+        .ok_or_else(|| {
+            error(
+                DiagnosticCode::InvalidReference,
+                format!("connected node '{name}' does not exist"),
+            )
+        })?;
+    let result = eval_node_inner(index, document, graph, node, output, stack);
     stack.remove(&key);
     result
 }
 
 fn eval_node_inner(
+    index: &EvaluationIndex<'_>,
     document: &Document,
     graph: &NodeGraph,
     node: &Node,
     output: Option<&str>,
     stack: &mut BTreeSet<String>,
 ) -> Result<TypedValue, AuthoringError> {
+    if let Some(definition_name) = node.attributes.get("nodedef")
+        && let Some(implementation) = index.implementations.get(definition_name.as_str()).copied()
+    {
+        return eval_graph_instance(index, document, graph, node, implementation, output, stack);
+    }
     if let Some((definition, _)) = crate::author_node::resolve(document, node)? {
-        return eval_author_node(document, graph, node, definition, output, stack);
+        return eval_author_node(index, document, graph, node, definition, output, stack);
     }
     if let Some(value) = &node.value {
         if output.is_some_and(|name| name != "out") {
@@ -113,7 +150,7 @@ fn eval_node_inner(
     }
     let mut values = Vec::with_capacity(node.inputs.len());
     for input in &node.inputs {
-        let Some(value) = evaluate_input_inner(document, graph, input, stack)? else {
+        let Some(value) = evaluate_input_inner(index, document, graph, input, stack)? else {
             return Err(error(
                 DiagnosticCode::UnsafeConnection,
                 format!("node '{}' input '{}' is unconnected", node.name, input.name),
@@ -124,7 +161,141 @@ fn eval_node_inner(
     evaluate_operator(&node.category, &values)
 }
 
+fn eval_graph_instance(
+    index: &EvaluationIndex<'_>,
+    document: &Document,
+    caller: &NodeGraph,
+    instance: &Node,
+    implementation: &NodeGraph,
+    selected_output: Option<&str>,
+    stack: &mut BTreeSet<String>,
+) -> Result<TypedValue, AuthoringError> {
+    let definition_name = implementation
+        .nodedef
+        .as_deref()
+        .expect("matched graph nodedef");
+    let definition = document
+        .nodedefs
+        .binary_search_by(|definition| definition.name.as_str().cmp(definition_name))
+        .ok()
+        .map(|pos| &document.nodedefs[pos])
+        .ok_or_else(|| {
+            error(
+                DiagnosticCode::InvalidReference,
+                format!(
+                    "nodegraph '{}' references unknown nodedef '{definition_name}'",
+                    implementation.name
+                ),
+            )
+        })?;
+
+    let mut effective = implementation.clone();
+    for interface in &mut effective.inputs {
+        if interface.value.is_none()
+            && interface.connection.is_none()
+            && !interface.attributes.contains_key("interfacename")
+        {
+            interface.value = definition
+                .inputs
+                .iter()
+                .find(|declared| declared.name == interface.name)
+                .and_then(|declared| declared.value.clone());
+        }
+        if let Some(override_input) = instance
+            .inputs
+            .iter()
+            .find(|input| input.name == interface.name)
+        {
+            let mut value = evaluate_input_inner(index, document, caller, override_input, stack)?
+                .ok_or_else(|| {
+                error(
+                    DiagnosticCode::InvalidStructure,
+                    format!(
+                        "node '{}' override '{}' has no value",
+                        instance.name, interface.name
+                    ),
+                )
+            })?;
+            if let Some(expected) = interface.type_name.as_deref() {
+                value = coerce_value(
+                    value,
+                    expected,
+                    &format!("node '{}' input '{}'", instance.name, interface.name),
+                    override_input.type_name.is_none()
+                        && override_input
+                            .value
+                            .as_ref()
+                            .is_some_and(|value| value.type_name == "string"),
+                )?;
+            }
+            interface.type_name = interface
+                .type_name
+                .clone()
+                .or_else(|| override_input.type_name.clone());
+            interface.value = Some(value);
+            interface.connection = None;
+        }
+    }
+    for input in &instance.inputs {
+        if !effective
+            .inputs
+            .iter()
+            .any(|interface| interface.name == input.name)
+        {
+            return Err(error(
+                DiagnosticCode::InvalidStructure,
+                format!(
+                    "node '{}' input '{}' is not declared by nodegraph '{}'",
+                    instance.name, input.name, implementation.name
+                ),
+            ));
+        }
+    }
+
+    let output_name = match selected_output {
+        Some(name) => name,
+        None if effective.outputs.len() == 1 => effective.outputs[0].name.as_str(),
+        None => {
+            return Err(error(
+                DiagnosticCode::InvalidReference,
+                format!(
+                    "node '{}' references nodegraph '{}' without selecting one of its {} outputs",
+                    instance.name,
+                    implementation.name,
+                    effective.outputs.len()
+                ),
+            ))
+        }
+    };
+    let declared_output = definition
+        .outputs
+        .iter()
+        .find(|output| output.name == output_name)
+        .ok_or_else(|| {
+            error(
+                DiagnosticCode::InvalidReference,
+                format!(
+                    "output '{output_name}' is not declared by nodedef '{}'",
+                    definition.name
+                ),
+            )
+        })?;
+    let value = eval_graph_output(index, document, &effective, output_name, stack)?;
+    declared_output
+        .type_name
+        .as_deref()
+        .map_or(Ok(value.clone()), |expected| {
+            coerce_value(
+                value,
+                expected,
+                &format!("node '{}' output '{}'", instance.name, output_name),
+                false,
+            )
+        })
+}
+
 fn eval_author_node(
+    index: &EvaluationIndex<'_>,
     document: &Document,
     graph: &NodeGraph,
     node: &Node,
@@ -156,12 +327,19 @@ fn eval_author_node(
 
     let mut values = Vec::with_capacity(definition.inputs.len());
     for declared in &definition.inputs {
-        let mut value = if let Some(instance) = node
+        let instance = node
             .inputs
             .iter()
-            .find(|candidate| candidate.name == declared.name)
-        {
-            evaluate_input_inner(document, graph, instance, stack)?.ok_or_else(|| {
+            .find(|candidate| candidate.name == declared.name);
+        let allow_untyped = instance.is_some_and(|input| {
+            input.type_name.is_none()
+                && input
+                    .value
+                    .as_ref()
+                    .is_some_and(|value| value.type_name == "string")
+        });
+        let mut value = if let Some(instance) = instance {
+            evaluate_input_inner(index, document, graph, instance, stack)?.ok_or_else(|| {
                 error(
                     DiagnosticCode::InvalidStructure,
                     format!(
@@ -185,17 +363,12 @@ fn eval_author_node(
             .type_name
             .as_deref()
             .expect("parsed nodedef inputs always carry a type");
-        if value.type_name == "string" {
-            value.type_name = declared_type.to_owned();
-        } else if value.type_name != declared_type {
-            return Err(error(
-                DiagnosticCode::InvalidValue,
-                format!(
-                    "node '{}' input '{}' evaluated to type '{}', expected '{}'",
-                    node.name, declared.name, value.type_name, declared_type
-                ),
-            ));
-        }
+        value = coerce_value(
+            value,
+            declared_type,
+            &format!("node '{}' input '{}'", node.name, declared.name),
+            allow_untyped,
+        )?;
         values.push(value);
     }
 
@@ -303,25 +476,22 @@ fn evaluate_operator(category: &str, values: &[TypedValue]) -> Result<TypedValue
 }
 
 fn evaluate_connection_inner(
+    index: &EvaluationIndex<'_>,
     document: &Document,
     graph: &NodeGraph,
     c: &Connection,
     stack: &mut BTreeSet<String>,
 ) -> Result<TypedValue, AuthoringError> {
     let target = c.nodegraph.as_deref().map_or(Ok(graph), |n| {
-        document
-            .nodegraphs
-            .iter()
-            .find(|g| g.name == n)
-            .ok_or_else(|| {
-                error(
-                    DiagnosticCode::InvalidReference,
-                    format!("nodegraph '{n}' does not exist"),
-                )
-            })
+        index.graphs.get(n).copied().ok_or_else(|| {
+            error(
+                DiagnosticCode::InvalidReference,
+                format!("nodegraph '{n}' does not exist"),
+            )
+        })
     })?;
     if let Some(name) = c.node.as_deref() {
-        return eval_node(document, target, name, c.output.as_deref(), stack);
+        return eval_node(index, document, target, name, c.output.as_deref(), stack);
     }
     let output = c
         .output
@@ -336,10 +506,11 @@ fn evaluate_connection_inner(
             ),
         )
     })?;
-    eval_graph_output(document, target, output, stack)
+    eval_graph_output(index, document, target, output, stack)
 }
 
 fn evaluate_input_inner(
+    index: &EvaluationIndex<'_>,
     document: &Document,
     graph: &NodeGraph,
     input: &crate::Input,
@@ -349,15 +520,16 @@ fn evaluate_input_inner(
         return Ok(Some(value.clone()));
     }
     if let Some(connection) = &input.connection {
-        return evaluate_connection_inner(document, graph, connection, stack).map(Some);
+        return evaluate_connection_inner(index, document, graph, connection, stack).map(Some);
     }
     if let Some(interface) = input.attributes.get("interfacename") {
-        return evaluate_interface(document, graph, interface, stack).map(Some);
+        return evaluate_interface(index, document, graph, interface, stack).map(Some);
     }
     Ok(None)
 }
 
 fn evaluate_interface(
+    index: &EvaluationIndex<'_>,
     document: &Document,
     graph: &NodeGraph,
     name: &str,
@@ -386,20 +558,29 @@ fn evaluate_interface(
     let result = if let Some(value) = &input.value {
         Ok(value.clone())
     } else if let Some(connection) = &input.connection {
-        evaluate_connection_inner(document, graph, connection, stack)
+        evaluate_connection_inner(index, document, graph, connection, stack)
     } else if let Some(alias) = input.attributes.get("interfacename") {
-        evaluate_interface(document, graph, alias, stack)
+        evaluate_interface(index, document, graph, alias, stack)
     } else {
         Err(error(
             DiagnosticCode::UnsafeConnection,
             format!("graph interface input '{name}' has no value or connection"),
         ))
     };
+    let result = result.and_then(|value| {
+        input
+            .type_name
+            .as_deref()
+            .map_or(Ok(value.clone()), |expected| {
+                coerce_value(value, expected, &format!("interface input '{name}'"), false)
+            })
+    });
     stack.remove(&key);
     result
 }
 
 fn eval_graph_output(
+    index: &EvaluationIndex<'_>,
     document: &Document,
     graph: &NodeGraph,
     name: &str,
@@ -428,7 +609,7 @@ fn eval_graph_output(
     let result = if let Some(value) = &output.value {
         Ok(value.clone())
     } else if let Some(connection) = &output.connection {
-        evaluate_connection_inner(document, graph, connection, stack)
+        evaluate_connection_inner(index, document, graph, connection, stack)
     } else {
         Err(error(
             DiagnosticCode::UnsafeConnection,
@@ -438,6 +619,14 @@ fn eval_graph_output(
             ),
         ))
     };
+    let result = result.and_then(|value| {
+        output
+            .type_name
+            .as_deref()
+            .map_or(Ok(value.clone()), |expected| {
+                coerce_value(value, expected, &format!("graph output '{name}'"), false)
+            })
+    });
     stack.remove(&key);
     result
 }
@@ -454,6 +643,67 @@ fn numbers(v: &TypedValue) -> Result<Vec<f32>, AuthoringError> {
         })
         .collect()
 }
+
+fn coerce_value(
+    value: TypedValue,
+    expected: &str,
+    context: &str,
+    allow_untyped: bool,
+) -> Result<TypedValue, AuthoringError> {
+    if value.type_name == expected && expected == "string" {
+        return Ok(value);
+    }
+    let untyped = value.type_name == "string";
+    if untyped && !allow_untyped {
+        return Err(error(
+            DiagnosticCode::InvalidValue,
+            format!("{context} has an untyped string value; expected '{expected}'"),
+        ));
+    }
+    if !untyped && value.type_name != expected {
+        return Err(error(
+            DiagnosticCode::InvalidValue,
+            format!(
+                "{context} evaluated to type '{}', expected '{expected}'",
+                value.type_name
+            ),
+        ));
+    }
+
+    if let Some(width) = crate::author_node::numeric_width(expected) {
+        let components = numbers(&value)?;
+        if components.len() != width {
+            return Err(error(
+                DiagnosticCode::InvalidValue,
+                format!(
+                    "{context} has {} numeric components, expected {width} for '{expected}'",
+                    components.len()
+                ),
+            ));
+        }
+        return typed(expected, components);
+    }
+    if expected == "boolean" {
+        if matches!(value.value.as_str(), "true" | "false") {
+            return Ok(TypedValue {
+                type_name: expected.to_owned(),
+                value: value.value,
+            });
+        }
+        return Err(error(
+            DiagnosticCode::InvalidValue,
+            format!("{context} has invalid boolean literal '{}'", value.value),
+        ));
+    }
+    if !untyped {
+        return Ok(value);
+    }
+    Err(error(
+        DiagnosticCode::InvalidValue,
+        format!("{context} is an untyped string and cannot be safely coerced to '{expected}'"),
+    ))
+}
+
 fn typed(name: &str, values: Vec<f32>) -> Result<TypedValue, AuthoringError> {
     if values.iter().any(|v| !v.is_finite()) {
         return Err(error(

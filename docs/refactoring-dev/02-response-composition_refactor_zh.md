@@ -145,9 +145,9 @@ water_surface_fs_mask_blend
 | `split_outputs_must_borrow_identical_lighting_context_not_equal_copies` | split 两臂共享同一 lighting context |
 | `pair_reads_one_visibility_sample_and_shared_terms_with_two_response_calls` | 共享项只采样一次 |
 | `mask_blend_materials_are_excluded_from_conservation_suites_and_counted` | 混合材质机械排除并计数 |
-| `production_composition_gpu_matches_cpu_all_domains_alpha_and_auxiliary` | GPU composition 与 CPU 在通道、alpha、auxiliary 上一致 |
+| `production_composition_gpu_matches_cpu_all_domains_alpha_and_auxiliary` | GPU composition 与 CPU 在通道、alpha、auxiliary 上一致；当前 harness 经真实 `CompositionFabric` recorder 编译、准备并录制 command buffer，不再走独立 test-only composition encoder |
 | `hybrid_composition_golden_grid_matches_legacy_reference` | 水体组合网格与历史 reference 一致 |
-| `hybrid_runtime_is_wired_through_resident_composition_and_hdr_export` | 水体生产组合链路完整 |
+| `hybrid_runtime_is_wired_through_resident_composition_and_hdr_export` | 验证 resident composition 与 HDR export 的源码接线形态；不证明完整 Scene/Fabric/TAA 闭环 |
 | `water_legacy_gpu_parity_*_full_frame`（8 项） | 强制 GPU 时，逐像素验证 16×16 水体 fixture 与 legacy 组合公式一致，不代表完整应用帧 parity |
 | `water_gpu_*`（10 项） | 强制 GPU 时，验证当前 ABI 的定向生产水体输出 |
 | `hybrid_wesl_compiles_and_preserves_all_four_entries` | 四个现行入口可编译，已删除的 `water_surface_fs_hybrid` 不会回归 |
@@ -175,8 +175,12 @@ water_surface_fs_mask_blend
 - 补强测试 oracle：reactive/overlay 的 motion 输入改为独立 PBR 输出；增加已删除 Hybrid entry 不得回归的编译源码断言。
 - `cargo test -p prism_render_scene --test water_hybrid_golden --test water_hybrid_gpu -- --nocapture`：沙盒外 Apple M2 / Metal，`water_hybrid_golden` **19 passed，0 failed，0 ignored**，`water_hybrid_gpu` **19 passed，0 failed，0 ignored**。GPU 结果包含 10 项当前生产水体输出、8 项 `water_legacy_gpu_parity_*_full_frame` 和 1 项比较器容差测试；未把无适配器 skip 当作通过。
 - 八项 legacy GPU parity 现在确实执行冻结的 `41a31ceef24e59ab7f8dda076b2b4c7f5e11f6ec` shader closure，并分别固定 PBR/NPR endpoint；它证明 16×16 水体 fixture 的完整输出，不证明完整 Scene/Fabric/TAA 帧 parity，也不能追认旧入口删除前护栏曾经运行。
-- 独立 TAA reactive MRT 已接入当前生产路径：`ViewVisibilityBuffer` 持有独立 `R8Unorm` mask，水体 fragment 作为第三个 MRT 输出，无水/opaque 帧先清零，TAA resolve 通过 binding 5 读取并削减 history blend；`cargo test -p prism_render_scene --lib shading::taa -- --nocapture`（6/6）与 `shading::resolve::shader_tests`（56/56）已通过。
+- 独立 TAA reactive MRT 已接入当前生产路径：`ViewVisibilityBuffer` 持有独立 `R8Unorm` mask，水体 fragment 作为第三个 MRT 输出，无水/opaque 帧先清零，TAA resolve 通过 binding 5 读取并削减 history blend；本轮 `cargo test -p prism_render_scene --lib shading::taa -- --nocapture` 为 `6/6`，`shading::resolve::shader_tests` 当前复跑为 `56/56`。这些测试证明 ABI、shader 编译与接线，不等于完整场景图像 parity 或跨适配器验收。
+- resident composition 的生产入口现为 `response_composition_pass`：它通过 `CompositionFabric` 的 `DeviceFabric::compile` → `prepare_runtime`，导入真实 response buffers、HDR/visibility textures、pipeline 和 bind group，经 `SceneRhi` 编码后交给 `RenderContext::add_command_buffer`。`resident_composition_gpu` 现调用与生产入口共用的 `record_composition_fabric_commands`，执行真实 Fabric compile/prepare/record 与 GPU readback；修订后的 harness 尚待本轮运行确认。该局部回归仍不等于共享 `SceneFabric` 的全场景 recorder、history/TAA 或完整帧 parity。
+- 当前仍未闭合：`SceneFabricHistory` 的 completion-gated lifecycle 已有真实 host-queue hook 和定向单元测试。water compute adapter 只导入真实本帧 surface/foam；另一个 per-instance spray feedback adapter 已接入精确 `WATER_SPRAY_RESOURCE @ frame-1` publication/import、completion 校验、显式清零 fallback，以及 resize/removal 后保留 RHI lease 的安全 retirement。新增接线尚无 Cargo 编译/测试证据。composition graph 的八个 accesses 均为当帧资源（`frame_lag=None`），没有应当发布的 temporal output，因此不把“composition 未消费 history”列为缺陷；真正待闭合的是 TAA/history、完整 Scene payload、全域 Fabric imports 与共享 production recorder 的整帧链路。
 - 仍缺完整 Scene/Fabric/TAA 帧的前后版本 parity，以及删除旧入口前已运行护栏的历史记录。当前 TAA 测试证明 ABI、shader 编译与接线，不等于完整场景图像 parity 或跨适配器验收。
+
+本轮复跑口径：`water_hybrid_golden` 为 `19/19`，沙盒外 `PRISM_REQUIRE_GPU=1 cargo test -p prism_render_scene --test water_hybrid_gpu -- --nocapture` 为 `19/19`，adapter 为 Apple M2 / Metal。跨适配器门禁单独位于 `tests/cross_adapter_acceptance.rs`；本机只有一个 physical adapter，默认输出 `SKIP_UNVERIFIED`，严格模式失败。故水体 `19/19` 只能证明 16×16 fixture 在一个适配器上的局部 output/parity，不扩张为完整 Scene/TAA 图像 parity、第二适配器通过或 Render Fabric 生产闭环。
 
 ## 9. Git 历史锚点
 

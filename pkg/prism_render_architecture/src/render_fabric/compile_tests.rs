@@ -898,12 +898,18 @@ fn texture_mips_dimension_formats_and_access_usage_have_real_layout_checks() {
 }
 
 fn item(payload: DomainPayload) -> FrameRenderItem {
-    FrameRenderItem {
-        scene_handle: SceneHandle {
+    item_with_object(
+        RenderObjectId::Surface(SceneHandle {
             index: 1,
             generation: 1,
-        },
-        domain: RenderDomain::Surface,
+        }),
+        payload,
+    )
+}
+fn item_with_object(object_id: RenderObjectId, payload: DomainPayload) -> FrameRenderItem {
+    FrameRenderItem {
+        domain: object_id.domain(),
+        object_id,
         history_key: 19,
         motion_source: MotionSource::Rigid,
         payload,
@@ -936,6 +942,24 @@ fn payload_is_checked_against_actual_selected_accesses_type_and_layout() {
     assert_eq!(
         resources
             .compile(&selection, 10, &[], &[bad_domain], GraphLimits::default())
+            .unwrap_err(),
+        FabricCompileError::DomainIdentityMismatch {
+            object: good.object_id,
+            declared: RenderDomain::Volume,
+        }
+    );
+    let mut bad_payload_domain = good;
+    bad_payload_domain.object_id = RenderObjectId::Volume(DomainObjectHandle::new(1, 1));
+    bad_payload_domain.domain = RenderDomain::Volume;
+    assert_eq!(
+        resources
+            .compile(
+                &selection,
+                10,
+                &[],
+                &[bad_payload_domain],
+                GraphLimits::default()
+            )
             .unwrap_err(),
         FabricCompileError::PayloadDomainMismatch(A)
     );
@@ -1020,14 +1044,17 @@ fn payload_roles_are_unique_per_object_domain_and_history_stream() {
             .compile(&selection, 10, &[], &[first, first], GraphLimits::default())
             .unwrap_err(),
         FabricCompileError::DuplicatePayloadRole {
-            scene: first.scene_handle,
+            object: first.object_id,
             domain: first.domain,
             history_key: 0,
             role: first.payload_role(),
         }
     );
     let mut second = first;
-    second.scene_handle.generation += 1;
+    second.object_id = RenderObjectId::Surface(SceneHandle {
+        generation: 2,
+        ..SceneHandle::new(1, 1)
+    });
     let mut third = first;
     third.history_key = 1;
     resources
@@ -1036,6 +1063,42 @@ fn payload_roles_are_unique_per_object_domain_and_history_stream() {
             10,
             &[],
             &[first, second, third],
+            GraphLimits::default(),
+        )
+        .unwrap();
+}
+
+#[test]
+fn non_surface_generational_identity_distinguishes_reused_slots() {
+    let catalog = fixture();
+    let resources = ResourceTemplates::new(
+        &catalog,
+        &[
+            buffer(A, ResourceLifetime::Transient),
+            buffer(B, ResourceLifetime::Transient),
+        ],
+    )
+    .unwrap();
+    let first = item_with_object(
+        RenderObjectId::Particle(DomainObjectHandle::new(7, 1)),
+        DomainPayload::Value(ValuePayload {
+            value: PayloadValue::Scalar(1.0),
+            role: PayloadRole(8),
+        }),
+    );
+    let second = item_with_object(
+        RenderObjectId::Particle(DomainObjectHandle::new(7, 2)),
+        DomainPayload::Value(ValuePayload {
+            value: PayloadValue::Scalar(2.0),
+            role: PayloadRole(8),
+        }),
+    );
+    resources
+        .compile(
+            &select(&catalog),
+            10,
+            &[],
+            &[first, second],
             GraphLimits::default(),
         )
         .unwrap();

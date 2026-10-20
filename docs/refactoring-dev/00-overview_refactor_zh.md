@@ -98,7 +98,7 @@ Transmissive / Transparent / Additive
 
 ### 5.2 已记录的完整验收结果
 
-下表对应 2026-10-16 已保存的完整命令输出；后续未修改相关契约的条目继续作为当前证据。
+下表对应 2026-10-16 已保存的历史完整命令输出；仅对自该次运行后未变化的契约保留回归参考价值，不视为当前工作树整体通过。
 
 | 目标 | 结果 |
 |---|---|
@@ -112,7 +112,15 @@ Transmissive / Transparent / Additive
 
 GPU 证据按运行环境记录：2026-10-16 在 Apple M2 Metal 上，response composition、resident composition、water hybrid、BRDF channels、material classification、material VT 和 ray footprint parity 门禁均有通过记录。它们证明该适配器上的 shader/module、CPU/GPU parity 与链路契约，不外推为所有适配器的性能结论或跨适配器性能结论。
 
-2026-10-20 当前工作树定向验证：TAA ABI/jitter/shader 测试 `6 passed; 0 failed`，resolve shader 测试 `56 passed; 0 failed`；`prism_app` 单元测试 `248 passed; 0 failed`，`alloc_core` `6 passed; 0 failed`；Apple M2 Metal 上 `water_hybrid_gpu` `19 passed; 0 failed`。这些结果证明对应局部契约和当前适配器输出，不等于完整 Scene/Fabric/TAA 帧 parity、Fabric 生产闭环或跨适配器验收。
+2026-10-20 当前工作树定向验证：TAA ABI/jitter/shader 测试 `6 passed; 0 failed`；resolve shader 测试当前复跑 `56 passed; 0 failed`；`prism_app` 单元测试 `248 passed; 0 failed`，`alloc_core` `6 passed; 0 failed`；Apple M2 Metal 上 `water_hybrid_gpu` `19 passed; 0 failed`。较早的 `cargo check -p prism_render_scene --lib` 和 Render Fabric 定向复跑被当时并发 `prism_physics_core` 修改阻断（缺失 `topology_bridge` 等模块/类型）；这些历史失败不能替代当前状态的复验。target 曾因磁盘空间耗尽被清理，本轮后续的 MaterialX 测试重新编译了相关 workspace 依赖。上述结果证明对应局部契约和当前适配器输出，不等于完整 Scene/Fabric/TAA 帧 parity、Fabric 生产闭环或跨适配器验收。
+
+本轮测试侧验收（2026-10-20）进一步固定了范围：`render_fabric_acceptance` 为 `3 passed; 0 failed`，其中 fixture 严格列出 32 个唯一 Render Fabric gate，并验证五个 subsystem domain、三个 response root、provider/resource fanout 和 builtin shader package identity；gate 23 明确保持 `partial`。Render Fabric 单元测试上一次完整运行报告 `134 passed; 0 failed`。这些是 contract、CPU compiler/runtime fixture 和选择扇出的证据，不是 scene 生产 `compile → prepare_runtime → execute` 闭环。
+
+Material authoring 另有一项已实现并通过定向测试的有限切片：`prism_render_material_authoring` 支持受限的 MaterialX author nodes（`add/subtract/multiply/divide/mix/clamp/convert`）、nodedef defaults、instance overrides，以及 nodegraph implementation 的输入/输出签名、多输出选择、嵌套和循环/类型错误诊断；解析索引在一次批量适配中复用。2026-10-20 `cargo test -p prism_render_material_authoring --test materialx -- --nocapture` **27 passed; 0 failed**，覆盖上述 nodegraph-instance 语义与既有 MaterialX adapter。此前 `cargo test -p prism_render_material_authoring --test evaluator` 记录为 `8 passed; 0 failed`，particle compiler 修复后的定向测试为 `21 passed; 0 failed`。此项是 bake/offline authoring 路径，不是完整 MaterialX 一致性、编辑器集成、任意图求值、完整 nodedef 继承，也不是 Render Fabric 通用图求值器。
+
+局部 production 接线现包括 water compute、spray feedback、resident composition 与首个 Surface 帧项。water solver adapter 导入本帧真实 surface/foam；spray feedback 另有 per-instance adapter，基于稳定 owner 和真实双缓冲 RHI lease 形成精确 `WATER_SPRAY_RESOURCE + FrameLag(1)` binding，录制前 enqueue publication/import，history 未完成时走显式清零，并在 resize/removal 后经 RenderQueue completion retirement 再回收旧 buffer/lease。water dispatch 与 spray adapter 仍是窄切片，不是共享全场景 recorder。`RenderFabricFrame` 从 committed Surface instances 提取帧项、排序并拒绝重复句柄；帧项向量复用容量，visibility 消费同一 handle 列表。以上新增 history/frame 接线尚无当前工作树 Cargo 编译/运行证据；全域 payload、TAA/history 与其他域的统一生产装配仍未闭合。
+
+跨适配器门禁为 `pkg/prism_render_scene/tests/cross_adapter_acceptance.rs`：默认模式发现少于两个 distinct physical adapter 时必须输出 `SKIP_UNVERIFIED`，该状态不计入验收；`PRISM_REQUIRE_GPU=1` 必须失败。当前沙盒 inventory 为 0 个 physical adapter；沙盒外真实 inventory 为 1 个 `Apple M2 / Metal / IntegratedGpu`，因此严格模式按预期失败。该 probe 只验证每个 adapter 的 storage-compute submit/readback，不冒充水体、Scene 或 TAA full-frame parity；第二个 physical adapter 仍是未验证阻塞。
 
 ## 6. Git 历史锚点
 
@@ -122,7 +130,7 @@ GPU 证据按运行环境记录：2026-10-16 在 Apple M2 Metal 上，response c
 - `3d066db25 feat(render): harden render fabric contracts`：加入 pipeline mapping、Render Fabric contract 和 selection 检查。
 - `8400fe972 feat: complete runtime and render refactoring implementation`：汇总 runtime/render 重构实现。
 
-这些历史提交用于确认结论的演进边界；当前文档中的完成状态以当前源码和本轮测试结果为准。
+这些历史提交用于确认结论的演进边界；当前完成状态按每条明确标注的源码事实、历史运行记录和本轮结果分别判断。
 
 ## 7. 交叉引用
 

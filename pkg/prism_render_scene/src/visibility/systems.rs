@@ -13,6 +13,7 @@ use prism_render_visibility::{
 };
 
 use crate::{
+    fabric_frame::RenderFabricFrame,
     material::runtime::RenderMaterialRegistry,
     scene::RenderGpuScene,
     visibility::{
@@ -35,9 +36,11 @@ pub(crate) fn build_unified_visibility(
     enabled: Res<UnifiedVisibilityEnabled>,
     settings: Res<UnifiedVisibilitySettings>,
     scene: Res<RenderGpuScene>,
+    fabric_frame: Res<RenderFabricFrame>,
     materials: Res<RenderMaterialRegistry>,
     geometries: Res<crate::RenderGeometryRegistry>,
     mut state: ResMut<UnifiedVisibilityState>,
+    mut fabric_handles: Local<Vec<prism_render_architecture::gpu_scene::SceneHandle>>,
     mut buffers: ResMut<UnifiedVisibilityBuffers>,
     mut diagnostics: ResMut<PrismVisibilityDiagnostics>,
     views: Query<(&ExtractedView, Option<&Frustum>, Option<&RenderLayers>)>,
@@ -60,9 +63,16 @@ pub(crate) fn build_unified_visibility(
         return;
     }
 
-    let handles = scene.mirror().live_handles();
-    let geometry = geometry_lods(scene.mirror(), &handles, &geometries);
-    let material_records = material_records(&materials, scene.mirror(), &handles);
+    fabric_handles.clear();
+    fabric_handles.extend(
+        fabric_frame
+            .items()
+            .iter()
+            .filter_map(|item| item.object_id.scene_handle()),
+    );
+    let handles = fabric_handles.as_slice();
+    let geometry = geometry_lods(scene.mirror(), handles, &geometries);
+    let material_records = material_records(&materials, scene.mirror(), handles);
     let gpu_slots_per_view = (handles.len() as u32).min(settings.gpu_parity_max_items_per_view);
     let previous_lods = state.previous_lods().clone();
     let occluded = state.occluded().clone();
@@ -109,7 +119,7 @@ pub(crate) fn build_unified_visibility(
             &record,
             VisibilityInput {
                 scene: scene.mirror(),
-                handles: &handles,
+                handles,
                 geometry: &geometry,
                 materials: &material_records,
                 previous_lods: &previous_lods,

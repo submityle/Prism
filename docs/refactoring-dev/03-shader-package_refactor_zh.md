@@ -50,6 +50,28 @@ PipelineKey = {
 
 质量档不能通过运行时换 PSO 实现；如果只是改变采样预算或参数，应沿用同一置换。`LightingContract` 描述模块编译能力，逐帧灯光裁剪、阴影页就绪和样本值属于数据。
 
+### 2.2 FeatureSelection 到 PSO identity 的冻结映射闭环
+
+这一条链现在已经由冻结选择驱动，而不是在 PSO 请求处重新选择：
+
+```text
+FeatureSelection
+  -> FrozenShaderSelection
+  -> SelectedFeatureShaderBinding
+  -> checked PermutationIndex
+  -> FeaturePipelineIdentity
+  -> PipelineKey + PsoCacheKey
+  -> PipelineCache / WarmRuntime / WarmSetPlanner
+```
+
+- `FeatureSelection::bind_shader_packages` 要求 package map 与已选 `VariantId` 精确相等；缺少绑定、额外绑定、package/module 不一致、PermutationSpace/key 不一致或 pass descriptor 不一致都会拒绝。
+- `PermutationSelector::finish_in(&PermutationSpace)` 与 `ShaderPermutationBinding::checked_index()` 共用现有 `PermutationSpace`，dense index 不能由调用方另行填写或伪造；空 permutation space 只代表唯一的 canonical empty permutation。
+- `FrozenShaderSelection` 保存选择结果、完整 package/module/permutation/pass binding 和稳定 digest。`PipelineCache::register_frozen_selection`、`require_frozen_selection_warm`、`resolve_frozen_selection_or_request` 只能从这个冻结对象派生真实 package/permutation/PSO identity，不会重新调用 feature resolver，也不会枚举整个 permutation space。
+- app 侧以 `(feature, variant, driver module)` 记录 binding fingerprint；同一 slot 的 package digest、permutation/pass declaration 或 selection generation 变化会返回 `FeatureBindingChanged`，不会静默复用 stale cache。
+- warm set 只加入冻结选择对应的 exact `PsoCacheKey`，最终排序仍由 `WarmSetPlanner` 按 priority 和 key 确定性完成；catalog/package/registration order 不改变同一冻结选择的 identity。
+
+这完成的是 `FeatureSelection -> shader package/permutation -> PSO identity/cache/warm set` 的冻结映射与生产调用 seam。完整 Scene/Fabric 的每帧生产接线、跨适配器 GPU parity 和真实 driver binary 覆盖仍属于后续验收，不在本闭环的完成声明内。
+
 ## 3. 缓存、持久化与线程边界
 
 ### 3.1 热端
@@ -104,13 +126,15 @@ bin 路径位于 `pkg/prism_render_app/src/bin_queue.rs`：
 |---|---|
 | typed state 覆盖 descriptor 固定功能字段、hash/canonical bytes 稳定 | `pkg/prism_render_app/src/pipeline_state_tests.rs` |
 | typed key ↔ cold key、package/module 冲突、warm runtime 生命周期、LRU 与 driver binary seam | `pkg/prism_render_app/src/pipeline_worker_tests.rs` |
+| FeatureSelection 精确绑定 package、PermutationSpace/selector、pass descriptor，冻结 digest 不受注册顺序影响 | `pkg/prism_render_architecture/src/render_fabric/tests.rs`、`pkg/prism_render_architecture/src/shader_package/permutation.rs` |
+| 冻结选择生成真实 `PipelineKey`/`PsoCacheKey`，warm set 只消费 selected permutation，并拒绝同 slot stale binding | `pkg/prism_render_app/src/pipeline_worker_tests.rs`、`pkg/prism_render_app/src/pipeline_cache.rs` |
 | direct/bin specialization、full-lobe fallback、prewarm、split bin 三 work item | `pkg/prism_render_app/src/tests.rs` |
 | shader package interning、manifest/variant、PSO cache wire model | `pkg/prism_render_architecture/src/shader_package/` 及其单元测试 |
 | asset refs 与 DriverLocal 隔离、variant manifest 完整性 | `pkg/prism_asset_build_core/src/shader_package.rs` |
 | app 侧 ABI 指纹与持久化缓存失效 | `pipeline_cache.rs` 将生成 Surface layout、material record/class 与 response ABI 纳入 `DeviceFingerprint`；`pipeline_worker_tests.rs` 的 schema/layout/class/response/legacy fingerprint 回归 |
 | 当前 shading crate 测试 | `cargo test -p prism_render_scene --lib shading`：844 passed，0 failed（历史记录） |
 
-2026-10-20 当前复跑：`cargo test -p prism_render_material --test s5_abi_cache_invalidation -- --nocapture` 为 **4 passed，0 failed**；`cargo test -p prism_render_app --lib pipeline_cache::worker_tests -- --nocapture` 为 **25 passed，0 failed**。这两组结果证明 ABI 变更会拒绝 stale response/package/PSO cache，并且 app 侧版本号、生成布局、render class、response ABI 与旧 version-only fingerprint 都进入缓存失效路径；不等于 FeatureSelection 到真实 shader package/permutation 的生产映射已经闭合。
+2026-10-20 先前完整运行记录：`cargo test -p prism_render_architecture --lib render_fabric -- --nocapture` 为 **134 passed，0 failed**；`cargo test -p prism_render_app --lib pipeline_cache::worker_tests -- --nocapture` 为 **27 passed，0 failed**。本次收口再次运行 architecture target 时未到达测试执行阶段，被并发 `prism_physics_core` 工作树编译错误阻断（缺失 `index` 模块、跨 crate 私有模块访问及 tearing API 不匹配），因此没有新的通过记录。已有验收覆盖 selector/space 到 checked dense index、精确 package map、registration-order 稳定性、冻结选择到真实 pipeline/cold key/warm set 映射，以及同一 feature/variant/module slot 的 stale binding 拒绝。app 侧 ABI 变更拒绝测试仍保留；映射 API 与生产调用 seam 已接入，并有先前完整运行记录，本次收口未重新获得 architecture target 的通过结果。这不等于完整 Scene/Fabric 每帧接线、跨适配器 GPU parity 或真实 driver binary 覆盖已经完成。
 
 ## 7. 历史依据
 
@@ -118,4 +142,4 @@ bin 路径位于 `pkg/prism_render_app/src/bin_queue.rs`：
 - `8400fe972 feat: complete runtime and render refactoring implementation`：将渲染运行时、shader package、pass set 和测试证据合入统一实现。
 - `5ad60f878 test(render): name refactor acceptance gates`：将关键重构验收固定为命名测试。
 
-本篇结论：当前 shader package 的身份、typed render state、interned package handle、有界编译队列、冷热缓存映射、DriverLocal 边界和 direct/bin/split pass set 已由源码和测试形成闭环；后续变更必须保持上述语义分层。
+本篇结论：当前 shader package 的身份、typed render state、interned package handle、冻结 FeatureSelection 到 package/permutation/PSO identity 的映射闭环、有界编译队列、冷热缓存映射、DriverLocal 边界和 direct/bin/split pass set 已由源码与已标注的运行记录形成对应证据；后续变更必须保持上述语义分层，并继续把完整 Scene/Fabric 接线与跨适配器证据作为独立验收项。

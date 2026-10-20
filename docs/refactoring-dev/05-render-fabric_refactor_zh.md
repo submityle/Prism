@@ -62,7 +62,7 @@
 | CPU/GPU Hybrid 公式 | CPU 与 WESL 都是 clamp 两个归一化区域信号、取 `max` 得 NPR、取补数得 PBR、再 clamp overlay；源码契约测试见 `water_hybrid_golden.rs:469-519` | 公式已统一 |
 | 水体入口 | `surface_pass.rs:167-177` 的 `MaskBlend` 选择 `water_surface_fs_mask_blend`；WESL 实现在 `water_surface_raster.wesl:1795-1809` | 已替代旧 `water_surface_fs_hybrid` 入口 |
 | `MaterialRenderClass` | `record.rs:41-50` 仅保留七个 blend/raster 值；域状态由 `render_state.rs:95-157` 映射 | 四个旧值已移除，管线状态映射已存在 |
-| S4b/S5 子项 | `water_hybrid_golden.rs:276-466` 的八项 CPU 行为 golden 与网格；`render_fabric_legacy_gate.rs:11-19,54-91` 的旧符号静态门禁；`surface_pass.rs:297-301` 的入口门禁 | 可核实公式、入口与枚举收口及测试定义；不能合并为 S4b 全部行为验收、S5 独立 ABI 批次已完成 |
+| S4b/S5 子项 | `water_hybrid_golden.rs:276-466` 的八项 CPU 行为 golden 与网格；`water_hybrid_gpu.rs` 的冻结 legacy GPU closure parity；`render_fabric_legacy_gate.rs:11-19,54-91` 的旧符号静态门禁；S5 ABI/cache 定向回归见 §15.2 | 当前公式、入口、枚举、冻结 GPU 输出与 ABI/cache 回归已有证据；仍不能追证“先护栏后删除”的历史时序，也不等于完整 Scene/Fabric/TAA、跨适配器或真实 driver binary 验收完成 |
 
 本篇把“测试定义/静态门禁存在”和“本轮实际执行结果”分开表述：已有运行记录只作为历史证据，当前轮次新执行的命令只按其真实输出记账，不把未成功执行的命令写成通过结果。
 
@@ -70,9 +70,23 @@
 
 **v10（2026-10-20，scene 接线审计与边界收口）**：`pkg/prism_render_scene/src/gpu/fabric.rs` 曾经分配独立 buffer、绑定通用 compute shader，再由 `RenderGraphSystems::Render` 单独提交；它是 adapter probe，不消费真实 `FrameRenderItem`、scene-owned imports 或 shading/water recorder，不能作为 Fabric 生产执行证据。本轮已移除该 probe 的初始化、record 与提交；`SceneFabric` 仍只负责从实际 Bevy `RenderDevice` 冻结 capability/feature selection，供既有 shading/water 准入消费。
 
-生产 lowering 仍缺四个同一真实帧的输入/责任方：（1）由 scene frame builder 持有的 `FrameRenderItem`；（2）精确的 scene-owned `FrameResourceBinding` / `RuntimeImport`；（3）委派给实际 shading/water recorder 的 `RuntimePassBinding`；（4）Bevy 所有的 allocation、history publication、submission 与 completion 生命周期。未以固定 blocker 资源、恒零计数或空 recorder 替代这些实现。故当前结论仍是：现有 shading/water scene graph 可以继续执行，但 `DeviceFabric::compile → CompiledFeatureGraph::prepare_runtime → 既有 scene submitter` 尚未闭合；移除 probe 不构成生产闭环完成。
+生产 lowering 对全场景仍缺四个同一真实帧的输入/责任方：（1）已有 scene frame builder 在 render-world production prepare 中生成真实 `FrameRenderItem`，但目前限于 `Surface/Bounds`，仍缺所有 scene 域 payload 且未被共享全场景 recorder 消费；（2）覆盖全部 scene 域的精确 `FrameResourceBinding` / `RuntimeImport`；（3）覆盖全部实际 shading/scene pass 的 `RuntimePassBinding`；（4）Bevy 所有的 allocation、history publication、submission 与 completion 生命周期。五个 response plane 已在局部 resident composition recorder 中以 canonical `ResourceKey`、动态模板和真实 Bevy buffer 进入 production `RuntimeImport`；但该 recorder 使用独立 `CompositionFabric` catalog/selection，不是共享 `SceneFabric` 的全场景 lowering。未以固定 blocker 资源、恒零计数或空 recorder 替代缺失域。v10 审计时移除的 probe 不构成生产闭环；水体 compute 与 composition 两个窄 adapter 也不能替代全场景 lowering。
 
-**v11（2026-10-20，payload/history 契约补强）**：payload 以对象 generation、domain、history stream 与 role 联合判重；当前帧/domain 的访问一次建立索引，避免逐 item 重扫全部 pass，并修正先读历史版本、后写当前版本时的误拒绝。`ResourceHistory` 记录外部已确认完成的精确 persistent binding，核对 physical storage、版本与布局，拒绝缺失、重复及倒序 publication；按单资源前缀显式退休，并保留 publication 水位，禁止退休后重放旧帧。130 项 Fabric 单元测试通过，范围和命令见 §15.2；这些契约测试不是 scene 生产生命周期接线证据。
+**v11（2026-10-20，payload/history 契约补强）**：payload 以对象 generation、domain、history stream 与 role 联合判重；当前帧/domain 的访问一次建立索引，避免逐 item 重扫全部 pass，并修正先读历史版本、后写当前版本时的误拒绝。`ResourceHistory` 记录外部已确认完成的精确 persistent binding，核对 physical storage、版本与布局，拒绝缺失、重复及倒序 publication；按单资源前缀显式退休，并保留 publication 水位，禁止退休后重放旧帧。Fabric 单元测试的先前完整运行记录为 134 项通过，范围和命令见 §15.2；本次收口复跑未完成，因此这些契约测试既不是本轮新结果，也不是 scene 生产生命周期接线证据。
+
+**v12（2026-10-20，局部生产切片接线）**：`water/dispatch.rs` 的唯一 water recorder 在 `SceneFabric + SceneRhi` 可用时消费 resident `WaterGpuBody` 的真实 buffers、pipelines、bind-groups 和 dispatch schedule；`shading/fabric_executor.rs` 为其创建真实 `FrameResourceBinding` / `RuntimeImport`、调用 `DeviceFabric::compile` 与 `prepare_runtime`，经 RHI queue encode 后加入宿主 `RenderContext`。resident Composition 也通过独立 `CompositionFabric` 导入五个 canonical response plane 与 HDR/visibility 资源并提交真实 command buffer。两条链只关闭各自的局部生产切片；TAA history publication、全域 `FrameRenderItem`/payload、共享 `SceneFabric` selection 和其他域仍未进入同一 recorder，因此全场景验收仍未完成。
+
+**v13（2026-10-20，water history 证据校正）**：water compute adapter 现只声明并导入本帧真实可证明的 `WATER_SURFACE_RESOURCE` 与 `WATER_FOAM_RESOURCE`。此前把本帧稍后由 `SprayEmit` 写入的单缓冲 `spray_spawn` 标成 `WATER_SPRAY_RESOURCE @ frame-1`，会把未完成发布的当前帧资源冒充上一帧 history；该伪绑定已撤掉。canonical built-in 中 spray→water 的 `FrameLag(1)` 仍保留为设计与 CPU 编译契约，不代表 production 已闭合：现有 `SprayHistory` 双缓冲保存的是 particle/foam feedback，与 `spray_spawn` 语义不同，不能直接互换。要让 adapter 消费 canonical spray history，仍需统一的 persistent ownership、GPU completion 后 publication、exact import validation、resize/version 迁移与 retirement。
+
+**v14（2026-10-20，active-pass compile 切片）**：`ResourceTemplates::compile_active` 与 `DeviceFabric::compile_active` 支持 recorder 按 frozen `FeatureSelection` 编译指定 pass slice，仅 lowering 活跃 pass 实际访问的资源；拒绝重复/未选中 pass，并要求被省略的依赖由调用方显式列为已完成依赖。`active_compile_uses_frozen_selection_and_explicit_completed_dependencies` 此前定向运行记录为 `1 passed; 0 failed`。本轮复跑未到达测试执行阶段，被并发 `prism_physics_core` 编译错误阻断。该能力关闭的是 active-slice compiler 缺口，不会自动建立共享的全场景 `SceneFabric` selection、完整域 imports/history 或唯一生产 recorder。
+
+**v15（2026-10-20，Surface 帧项生产提取接线）**：`PrismGpuScenePlugin` 在 render-world `PrepareResources` 中、GPU Scene transaction 与 geometry registry 同步后调用 `build_render_fabric_frame_system`，把真实 committed scene instances 降为 `RenderFabricFrame` resource。当前只产生 `Surface/Bounds` payload；该 resource 尚未被共享全场景 recorder 消费，粒子/体积/毛发/贴花等域 payload 仍未实现。本轮 `prism_render_scene` 定向测试先因磁盘空间耗尽未进入源码编译；清理 target 后，authoring 定向测试又被 `prism_render_architecture::particle::compiler` 的当前编译错误阻断，故此接线尚无编译或运行通过证据。
+
+**v16（2026-10-20，Surface 帧项进入可见性输入）**：`visibility::build_unified_visibility` 不再独立从 `RenderGpuScene::mirror().live_handles()` 枚举对象，改为使用 `RenderFabricFrame.items()` 中已校验并排序的 `scene_handle`；`PrismVisibilityPlugin` 显式声明该系统排在 `build_render_fabric_frame_system` 之后。handle scratch 改为 system-local `Vec` 并跨帧复用已增长容量，避免每帧重新分配同尺寸的临时 vector。这样 Surface 帧项成为当前可见性消费端的真实输入，收敛了“帧提取已生产但无人读取”的一个 seam。builder 先按 handle 排序，再用相邻比较以 O(n) 时间、O(1) 额外空间拒绝重复项，避免排序后再建一棵重复的 `BTreeSet`。此接线尚未通过当前工作树编译/运行验证；visibility 仍自行读取 GPU Scene/material/geometry 生成旧的可见性 work item，并未因此成为共享 `SceneFabric` lowering/recorder，也不覆盖其他域 payload 或 history 生命周期。
+
+**v17（2026-10-20，spray feedback owner/access seam）**：`SprayHistory::feedback_access` 现能为每个实体返回生命周期内不复用的 `FabricHistoryOwner`、本帧 producer feedback buffer、lag-one buffer 候选、网格尺寸和 allocation version；resize 会重置本地 dispatch marker 并递增 allocation version。该 API 尚未接入 `SceneFabricHistory` 的 `enqueue → host submission → completion poll → validate_import`，也未把持久 RHI lease、`WATER_SPRAY_RESOURCE @ frame-1` 的 `RuntimeImport`、versioned retirement 接入 recorder。候选 buffer 的存在或本地 `LagOneHistory` dispatch marker 都不是 GPU completion/publication 证明；此前 `previous_frame_published` 命名已移除以免混淆。此切片当前只有 rustfmt/差异空白检查，没有 Cargo 编译或测试通过证据。
+
+**v18（2026-10-20，spray history completion 接线与性能收敛）**：后续实现已超出 v17 的 access seam：spray adapter 现在把精确的上一帧 binding 通过 `SceneFabricHistory` 入队，并仅在 `validate_import` 认可已完成 publication 时使用；否则清零 lag-one 输入。per-instance owner 单调且不复用，feedback allocation 持有 RHI lease；resize/removal 将旧 buffers/leases 留存到 RenderQueue completion 驱动的 retirement 水位越过对应前缀。`RenderFabricFrame` 每帧重建复用 item-vector 容量；spray removal scan 复用 scratch vectors，并用排序后的实体 key 做 `O((live + resident) log live)` 查询，避免每个驻留对象重复扫描全部实体。新增代码仅有 rustfmt 与 diff whitespace 检查，Cargo 编译/测试仍待锁释放后确认；这些仍是 water/spray 局部接线，不代表 TAA history 或全场景 recorder 闭环。Composition 当前声明的 accesses 均为当帧资源，无 `FrameLag`，因此不要求伪造 composition history publication。
 
 **v6 针对第四轮三条发现的修订**：
 
@@ -163,19 +177,20 @@ pkg/prism_render_scene/src/water/{surface_node,surface_pipeline,surface_shading}
 
 这是迁移前快照。当前水体选择由 `WaterShadingPlan` 表达：三个 `Single` 程序仍分别进入 `water_surface_fs_pbr` / `_npr` / `_custom`，而组合计划进入 `water_surface_fs_mask_blend`（`pkg/prism_render_architecture/src/water/gpu/surface_pass.rs:167-177`）。当前 WESL 只有 `water_surface_fs_pbr`、`_npr`、`_custom`、`_mask_blend` 四个入口（`pkg/prism_render_scene/src/shaders/water_surface_raster.wesl:1770-1809`），旧 `_hybrid` 不再存在。
 
-### 1.3 当前状态：声明与部分水体消费已存在，通用生产装配尚未证实
+### 1.3 当前状态：声明与部分水体消费已存在，窄切片已接入，全场景装配尚未闭合
 
 | 载体 | 位置 | 当前下游 |
 |---|---|---|
 | 水体服务闭包 | `water/fabric.rs:246-334` | `WaterFabricPlan` 使用 catalog-derived `required_services` 与四个 resident pass |
 | MaskBlend 声明与链接检查 | `water/fabric.rs:289-332` | `is_link_complete` 校验 resident pass 与资源声明；本身不建立 driver import/export，也不执行 Fabric runtime |
 | 实际水体响应 producer | `prism_render_scene/src/shading/graph.rs:196-222` | 声明 water 写入 `response_left/right/controls/water_coverage`，常驻 Composition 随后消费；属于现有 scene shading 链路 |
+| 水体计算的窄 Fabric adapter | `water/dispatch.rs:record_water_fabric_commands`、`shading/fabric_executor.rs:prepare_water_runtime` | 在 `SceneFabric + SceneRhi` 可用时，把 resident water body 的真实 surface/foam buffer、pipeline、bind-group 和 dispatch schedule 经过 `compile → prepare_runtime → queue.encode → RenderContext`；该 adapter 自身只覆盖水体计算，不声明未完成发布的 spray history；response composition 由独立局部 adapter 覆盖，二者仍未统一覆盖 TAA/history 与全域 fanout |
 | 水体入口 | `water/gpu/surface_pass.rs:167-177` | `WaterShadingPlan::MaskBlend` → `water_surface_fs_mask_blend` |
 | 旧权威符号 | `tests/render_fabric_legacy_gate.rs:11-19,54-91` | 静态扫描禁止 `SharedBaseServices`、`ShadingFrontend`、`bound_base` 等回归 |
 
 **当前结论**：旧服务类型与入口的收口已有源码证据；catalog / selection 已统一服务声明，但**不能写成已替代所有生产装配路径**。`pkg/prism_render_scene/src/gpu/fabric.rs:13-51` 从实际拥有 scene buffers 的 Bevy `RenderDevice` 读取能力，创建 `DeviceFabric` 并冻结选择；`water/spray_history.rs:156-167,234-250` 消费选择并进行 particle root admission。`shading/plugin.rs:463-515,629-633` 已将同一 `SceneFabric` 的冻结选择接入 shading executor 初始化与准入，但 `build_shading_execution` 仍调用现有 `shading_frame_graph().compile()`；`shading/execution.rs:97-160` 的选择校验不等于通用 Fabric 编译。另一方面，`water/prepare.rs:39-94` 虽把 `SceneFabric` 传给 spray history，仍直接 prepare 水体、创建 GPU buffers 与绑定，未证明由通用 Fabric 编译驱动。
 
-`render_fabric/device.rs:33-48` 已定义 `DeviceFabric::compile`，`render_fabric/runtime.rs:195-200` 已定义 `CompiledFeatureGraph::prepare_runtime`；本轮检索 `pkg/prism_render*` 未发现前者进入 scene 生产构帧，后者的调用仅见 `render_fabric/runtime_tests.rs`。因此 selection 初始化及局部生产准入、声明链接测试、水体现有渲染链路与 **Fabric compile → prepare_runtime → execute 的生产闭环**必须分开记账；其他代理正在实施的接线不能提前写成完成。
+`render_fabric/device.rs:33-48` 已定义 `DeviceFabric::compile`，`render_fabric/runtime.rs:195-200` 已定义 `CompiledFeatureGraph::prepare_runtime`。当前水体计算 adapter 已在 `water/dispatch.rs` 的真实 recorder 中调用 `prepare_water_runtime`，由 `shading/fabric_executor.rs` 绑定 resident surface/foam 资源、创建 runtime recorder，并把 RHI command buffer 加入宿主 `RenderContext`；resident Composition 另有一条局部 recorder 导入 canonical response/HDR/visibility 资源并提交真实 command buffer。这关闭的是两个真实但彼此独立的局部生产切片。water adapter 有意不把当前帧 `spray_spawn` 冒充 `frame-1` 的 `WATER_SPRAY_RESOURCE`；canonical `FrameLag(1)` 只有在统一 history publication/import lifecycle 闭合后才能进入该 production recorder。两条局部切片仍不等于 TAA history / 全域 payload / 其他域的统一 `SceneFabric` 装配，也不等于所有域都取消 host fallback。因此 selection 初始化、局部生产接线、声明链接测试、水体现有响应链路与 **全场景 Fabric compile → prepare_runtime → execute 闭环**必须分开记账。
 
 ### 1.4 它的意图是对的，只是载体错了
 
@@ -782,7 +797,7 @@ pub struct ServiceOutput {
 
 `shader_package::permutation`（`PermutationSpace::new(axis_option_counts)` / `index_of` / `key_from_index` / `PermutationSelector::select().finish()`）是**编译期**的混合基数 shader 置换索引；`FeatureVariant` 是**运行时**的实现选择。两者不是一回事，但必然相连。
 
-**设计契约**：`FeatureVariant` 对应的 shader 绑定必须**引用**既有 `PermutationSpace`（或绑定 selector），**不得自己再枚举 shader 变体**。这样“某 variant 需要哪些置换坐标”只由 03 §2 的置换空间回答，保留原始“变体数 = 注册模块数”的单一事实源约束；不把旧等式误标为当前 03 §3.1 的热端内容。§4 的类型示意未给出 selector 字段，现有声明与确定性选择测试也不等于该生产绑定已实现；仍需由真实管线消费者证明同一选择到 package/permutation 的映射。
+**设计契约**：`FeatureVariant` 对应的 shader 绑定必须**引用**既有 `PermutationSpace`（或绑定 selector），**不得自己再枚举 shader 变体**。这样“某 variant 需要哪些置换坐标”只由 03 §2 的置换空间回答，保留原始“变体数 = 注册模块数”的单一事实源约束；不把旧等式误标为当前 03 §3.1 的热端内容。当前 `FeatureSelection → FrozenShaderSelection → checked PermutationIndex → PipelineKey / PsoCacheKey / warm set` 的生产消费 seam 已闭合，并拒绝 package map、variant、space/key、pass descriptor 与 stale binding 不一致；见 03 §2.2、§6。仍未完成的是这套冻结映射在统一全场景 `SceneFabric` 每帧装配、真实 driver binary 和跨适配器范围内的端到端覆盖。
 
 ---
 
@@ -960,7 +975,7 @@ pub struct ValuePayload {
 
 **明确不删**：`prism_material_pcm::ExtensionRegistry` 及其全部 API —— 它是材质扩展的权威，本篇只阻止它扩张（§0.2 / §5.2）。
 
-**原始验收顺序与当前证据**见 §9；S4b 的公式/CPU 子项、S5 的删除子项已有源码证据，但完整行为等价与独立 ABI 批次不能据此宣称完成，门禁 23 原始要求保留。
+**原始验收顺序与当前证据**见 §9；S4b 已有公式、CPU golden 与冻结 legacy GPU 输出证据，S5 已有删除、冻结 selection mapping、ABI/cache 定向回归，但完整 Scene/Fabric/TAA、跨适配器、真实 driver binary 与“先护栏后删除”的历史时序不能据此宣称完成，门禁 23 原始要求保留。
 
 ### 7.1 水体 Hybrid 的当前实现：`MaskBlend` + `water_surface_fs_mask_blend`
 
@@ -981,10 +996,10 @@ pub struct ValuePayload {
 2. **门禁 23 已有 CPU 测试定义**：`water_hybrid_golden.rs:276-466` 覆盖深度、岸边、泡沫、焦散、反射、透明/overlay、motion vector、reactive mask，并以独立 legacy reference 对比 `compose_mask_blend`；`:447-466` 还覆盖组合网格。它们不是 GPU 像素输出测试，也不证明旧入口删除前护栏已实际运行。
 3. **旧入口已收口**：当前水体 `MaskBlend` 直接选择 `water_surface_fs_mask_blend`（`surface_pass.rs:167-177`），旧 `water_surface_fs_hybrid` 不在当前 WESL 入口集合中；`water_hybrid_golden.rs:607-613` 固定检查当前四入口名称。
 4. **`overlay_opacity` 已接入 WESL**：`water_surface_raster.wesl:1800-1808` 从 `view.viewport.z` 读取并写入组合控制；CPU/WESL 的权重与 overlay 源码契约已统一。这是参数消费与公式实现证据，不是 GPU 输出等价运行结果。
-5. **GPU 证据边界**：`water_hybrid_golden.rs:688-706` 仅创建 raster、composition、HDR shader modules，不绘制、不读回八项行为；`:616-633` 是源码接线检查。`PRISM_REQUIRE_GPU` 在 `:635-685` 禁止严格模式静默 skip，但变量存在本身不是本轮实际执行记录。Apple M2 Metal 的既有通过数字只按历史记录保留于 §15.2，本轮未复跑、未独立核验原始日志。
-6. **最新局部输出证据**：`pkg/prism_render_scene/tests/water_hybrid_gpu.rs` 有 10/10 项真实输出测试，使用生产 WESL、真实 render/composition/export stages 和 output readback，覆盖该 integration target 定义的局部水体 output contract。它不能替代八项 legacy golden 的删除前护栏时序、整帧 reference parity、所有设备覆盖、Fabric compile/runtime 生产闭环或全部门禁验收。
+5. **GPU 证据边界**：`water_hybrid_golden.rs:688-706` 自身只创建 raster、composition、HDR shader modules；真正的输出 readback 与冻结旧 shader closure 对比在 `water_hybrid_gpu.rs`。2026-10-20 Apple M2 / Metal 定向复跑结果见 §15.2；它是当前真实运行记录，但仍不能追证旧入口删除前护栏已经运行。
+6. **最新局部输出证据**：`pkg/prism_render_scene/tests/water_hybrid_gpu.rs` 为 **19/19**：10 项当前 production output、8 项冻结 legacy full-frame parity、1 项比较器测试，使用生产 WESL、真实 render/composition/export stages 和 output readback。它证明该 16×16 fixture 的冻结输出等价，但不能扩大为完整 Scene/Fabric/TAA 帧 parity、所有设备覆盖、删除前护栏历史时序或全部门禁验收。
 
-**结论**：当前 scene 水体 surface → resident Composition / HDR 链路已有 `MaskBlend` 语义的生产源码接线，水体用 `WaterShadingPlan` adapter，当前入口为 `water_surface_fs_mask_blend`，旧 `_hybrid` 已删除。该具体链路不能证明通用 `DeviceFabric::compile / prepare_runtime` 已接生产，也不能把 S4b 与完整门禁 23 判为全部验收通过。
+**结论**：当前 scene 水体 surface → resident Composition / HDR 链路已有 `MaskBlend` 语义的生产源码接线，水体用 `WaterShadingPlan` adapter，当前入口为 `water_surface_fs_mask_blend`，旧 `_hybrid` 已删除；水体 compute 与 resident composition 也各有局部 Fabric production slice。两条切片仍不能证明统一全场景 `DeviceFabric::compile / prepare_runtime` 闭环，也不能把 S4b 与完整门禁 23 判为全部验收通过。
 
 ### 7.2 `MaterialRenderClass` 四值迁移：已实现子项与持续契约
 
@@ -993,7 +1008,7 @@ pub struct ValuePayload {
 1. **域与 class 在 `PipelineBinClass` 中仍可逆恢复**（`render_fabric/pipeline.rs:203-250`），而不是依赖旧 `queue.rs` 的位字段解码。
 2. **域的编码走稳定稠密索引**，不得新开手写位窗口或按注册顺序重新编号（`pipeline.rs:209-215`；回归见 `pipeline_tests.rs:102-116`）。
 3. **水体相位与目标已统一**：`Surface + WATER` 固定为 `Transparent + HdrTransparent + PremultipliedAlpha + depth_write=false`（`render_state.rs:101-118`；`surface_pass.rs:202-215`），历史相位矛盾已经消除。
-4. **ABI 影响必须独立记账**：`render_class` 位于 `GpuMaterialHeader`（`record.rs:150-167`）并参与管线/执行身份；七值顺序或域/特性映射变化属 ABI 级变更。字段与身份定义不能证明本次已执行独立 ABI bump / 缓存失效验收，见 §9 S5 / §15.3。
+4. **ABI 影响必须独立记账**：`render_class` 位于 `GpuMaterialHeader`（`record.rs:150-167`）并参与管线/执行身份；七值顺序或域/特性映射变化属 ABI 级变更。当前 ABI/package/cache stale rejection 已有 §15.2 的定向回归证据；但历史变更是否严格作为独立批次、是否先于删除完成，仍不能由当前测试倒推。
 
 **当前证据**：`pipeline_state_for_material`（`render_state.rs:95-157`）与 `render_fabric/pipeline_tests.rs` 提供全域、七个 class、water feature 和非法域组合的实现及测试定义；门禁 `domain_plus_render_class_plus_features_maps_to_pipeline_state`（§12 门禁 24）持续有效，不据此声称运行验收已通过。
 
@@ -1026,17 +1041,17 @@ particle spray ──?──────▶ water foam
 
 | # | 切片 | 原始要求（持续有效） | 当前证据状态 |
 |---|---|---|---|
-| **S1** | **求解契约**（纯新增，**不碰 PCM**） | 在 `prism_render_architecture` 定义 `ResourceOwner` / `ResourceKey` / `ResourceScope` / `ResourceUse` / `ServiceSet` / `ServiceOutput` / `RenderQualityTier`，与 `FeatureDefinition`（`kind` + `Option<domain>`）/ `FeatureKind`（`Service { provides }`）/ `FeatureVariant`（含 `requires_services_extra`）/ `PassTemplate` / `FeatureCatalog` 骨架，并**同时实现求解契约本身**：① 编译期静态校验（唯一 provider 索引 `providers[s]`、槽位与 ID 唯一性、**边种类矩阵**）；② **硬需求闭包**计算（只沿 `FeatureDefinition.requires_services`）；③ `FeatureVariant` 选择器与 `FeatureSelection::resolve`（拓扑序 + `FeatureId` 破平局 + `rank` / `RenderQualityTier` 判定，单遍无回溯，结果整体冻结）；④ 对应静态测试——`active_roots` 闭包隔离、声明顺序打乱后逐项相等、软需求不扩张闭包、重复 provider 报错。门禁 **27 / 29 / 30 / 31 / 32** 在 S1 内即须为绿。**`ExtensionManifest` 一个字段都不加**（§5.2） | 类型、求解实现与对应单元测试已存在并包含在 2026-10-20 的 130 项通过记录中；不能追证这些门禁在后续迁移前已全部通过 |
+| **S1** | **求解契约**（纯新增，**不碰 PCM**） | 在 `prism_render_architecture` 定义 `ResourceOwner` / `ResourceKey` / `ResourceScope` / `ResourceUse` / `ServiceSet` / `ServiceOutput` / `RenderQualityTier`，与 `FeatureDefinition`（`kind` + `Option<domain>`）/ `FeatureKind`（`Service { provides }`）/ `FeatureVariant`（含 `requires_services_extra`）/ `PassTemplate` / `FeatureCatalog` 骨架，并**同时实现求解契约本身**：① 编译期静态校验（唯一 provider 索引 `providers[s]`、槽位与 ID 唯一性、**边种类矩阵**）；② **硬需求闭包**计算（只沿 `FeatureDefinition.requires_services`）；③ `FeatureVariant` 选择器与 `FeatureSelection::resolve`（拓扑序 + `FeatureId` 破平局 + `rank` / `RenderQualityTier` 判定，单遍无回溯，结果整体冻结）；④ 对应静态测试——`active_roots` 闭包隔离、声明顺序打乱后逐项相等、软需求不扩张闭包、重复 provider 报错。门禁 **27 / 29 / 30 / 31 / 32** 在 S1 内即须为绿。**`ExtensionManifest` 一个字段都不加**（§5.2） | 类型、求解实现与对应单元测试已存在，并包含在 2026-10-20 的先前 134 项完整运行记录中；本次收口没有新的通过记录，也不能追证这些门禁在后续迁移前已全部通过 |
 | **S2** | **建护栏** | 三份服务集分别与 `ServiceSet` 声明做“旧位掩码/布尔结构 ⇔ 新声明一致”断言；§3.1.1 的相位映射表必须有断言（旧 `prism_render_app/src/tests.rs:849-852` 是迁移前定位，非当前行号） | 当前服务闭包与 pipeline 映射有实现及测试定义；旧新等价护栏的历史运行及先后记录未在本轮核验 |
 | **S3** | 顺序推导 | `frame_graph` 由 `accesses` 派生依赖与 `Barrier`；断言派生结果 == 迁移前手写结果；消除固定 pass 数矛盾（旧 5 vs 6 是历史问题，不是当前计数） | 编译 fixture 有顺序/barrier 对比；当前 shading 声明为 **8 + 23 = 31**，数量断言读取编译图。现有显式语义 `depends_on` 不得替代资源 hazard，生产自动推导与历史等价仍需各自证明 |
-| **S4** | 一条垂直切片 | 水体声明 `requires_services` / `accesses`，由统一编译器自动排序并完成生产端到端消费；消除 `WaterPrepare.shared_base` / `bound_base`；常驻 `CompositionPass` 承载 `MaskBlend` | 旧字段/入口收口及现有水体 → Composition / HDR 链路已证；通用 Fabric compile → prepare_runtime → 真实 recorder / execute 的生产闭环尚无证据（§1.3） |
-| **S4b** | 水体的行为等价 | **旧入口删除前须有八项 golden 等价护栏**：深度、岸边、泡沫、焦散、反射、透明/overlay、motion vector、reactive mask；保留连续混合、统一 CPU/WESL 公式并消费 `overlay_opacity`，完整门禁 23 持续有效 | 公式、参数接线、八项 CPU golden 与组合网格的实现/测试定义已证；另有 `water_hybrid_gpu.rs` 的 10/10 项真实输出测试，限于该 integration target 的局部 production water output contract；GPU 八项 legacy 等价、整帧等价与删除前运行时序未核实，**完整验收未闭合** |
-| **S5** | 删除 + ABI bump | 删除三份服务集、两份 `ShadingFrontend`、`bound_base` / `shared_base`、`MaterialRenderClass` 四值及旧 `_hybrid` 入口；保留七值 class、域/特性到 `PipelineState` 的映射；以**独立 ABI 变更批次**记录入口/class 变化并验证缓存失效 | 删除与映射子项已有源码证据；不能据此宣称独立 ABI bump、批次记录和缓存失效运行验收完成 |
+| **S4** | 一条垂直切片 | 水体声明 `requires_services` / `accesses`，由统一编译器自动排序并完成生产端到端消费；消除 `WaterPrepare.shared_base` / `bound_base`；常驻 `CompositionPass` 承载 `MaskBlend` | 旧字段/入口收口及现有水体 → Composition / HDR 链路已证；water compute 与 resident composition 已各自通过 Fabric compile/prepare/record/submit 接入局部生产切片。两条独立 recorder 尚未统一为覆盖 TAA/history、全域 payload 与其他域的 `SceneFabric` 全场景闭环（§1.3） |
+| **S4b** | 水体的行为等价 | **旧入口删除前须有八项 golden 等价护栏**：深度、岸边、泡沫、焦散、反射、透明/overlay、motion vector、reactive mask；保留连续混合、统一 CPU/WESL 公式并消费 `overlay_opacity`，完整门禁 23 持续有效 | 公式、参数接线、八项 CPU golden 与组合网格已证；`water_hybrid_gpu.rs` 的 **19/19** 包含 10 项当前输出、8 项冻结 legacy GPU parity 与 1 项比较器。仍缺删除前护栏运行时序、完整 Scene/Fabric/TAA 帧与跨适配器证据，**完整验收未闭合** |
+| **S5** | 删除 + ABI bump | 删除三份服务集、两份 `ShadingFrontend`、`bound_base` / `shared_base`、`MaterialRenderClass` 四值及旧 `_hybrid` 入口；保留七值 class、域/特性到 `PipelineState` 的映射；以**独立 ABI 变更批次**记录入口/class 变化并验证缓存失效 | 删除、映射、冻结 `FeatureSelection → package/permutation → PSO/cache/warm set` seam 及 ABI/cache stale rejection 已有源码与定向运行证据；仍不能追证历史批次顺序，且完整 Scene/Fabric、真实 driver binary 与跨适配器覆盖未完成 |
 | **S6** | 扇出 | 端到端切片成立后，将粒子 / 体积 / 毛发 / 贴花全部接入同一声明、选择与生产执行链路；补齐 `render_layers` delta | built-in roots 与 selection、`render_layers` 接线已存在；各域 `FrameRenderItem` / payload / 真实 GPU recorder 的全量生产扇出尚未验收 |
 
 **验收顺序契约**：先建立可断言的护栏（S2），再执行受护栏保护的迁移（S5）；先证明一条生产端到端切片（S4），再验收扇出（S6）。这保留原始顺序要求，但不声称本轮掌握历史已按此执行的证据。S4b/S5 的已实现子项不能抵销未闭合的验收项。
 
-**S5 的独立 ABI 要求不变**：入口名属于 shader package 编译身份，`MaterialRenderClass` 改值属 ABI 级变更（`GpuMaterialHeader.render_class`，`record.rs:150-167`）。必须独立记录 ABI bump / package 与缓存失效，不能与其它迁移混成无法归因的批次；四分量管线身份与冷热缓存边界参见当前 03 §2 / §3.2 / §5，而非旧 §4 的 DDC 节号。本轮只核实定义，不把独立批次与运行验收写成已完成。
+**S5 的独立 ABI 要求不变**：入口名属于 shader package 编译身份，`MaterialRenderClass` 改值属 ABI 级变更（`GpuMaterialHeader.render_class`，`record.rs:150-167`）。ABI/package/cache stale rejection 与冻结 selection mapping 的当前回归已有证据；四分量管线身份与冷热缓存边界参见当前 03 §2 / §3.2 / §5，而非旧 §4 的 DDC 节号。当前结果不能反向证明历史上已将 ABI bump 作为独立、可归因且先于删除的批次执行。
 
 ---
 
@@ -1044,9 +1059,9 @@ particle spray ──?──────▶ water foam
 
 | 风险 | 处置 |
 |---|---|
-| **入口重命名 / `render_class` 改值 → PSO 缓存静默复用旧管线** | typed pipeline identity、ABI 版本/哈希提供身份机制；本次独立 ABI 批次与缓存失效仍须可追溯，不能仅由类型定义判为已验收（§7.2 / §9 S5） |
+| **入口重命名 / `render_class` 改值 → PSO 缓存静默复用旧管线** | typed pipeline identity、ABI 版本/哈希及 stale rejection 已有定向回归；历史独立 ABI 批次与先后顺序仍须可追溯，不能由当前测试反推（§7.2 / §9 S5） |
 | 删除与建立之间的**零护栏窗口** | 保留“先护栏、后删除”要求；当前 legacy static gate、pipeline/水体 golden 定义可防回归，但不能追证删除前已运行、没有历史空窗 |
-| **误删水体 Hybrid**（本版新增） | 公式/overlay、CPU 八项 golden、组合网格与 resident Composition 接线已有证据；GPU 八项行为及整帧等价未证，禁止用 `REGION_ILLUMINATION` 替代连续混合（§7.1 / 门禁 23） |
+| **误删水体 Hybrid**（本版新增） | 公式/overlay、CPU 八项 golden、组合网格、resident Composition 接线及 8 项冻结 legacy GPU parity 已有证据；删除前护栏时序、完整 Scene/Fabric/TAA 帧和跨适配器等价仍未证，禁止用 `REGION_ILLUMINATION` 替代连续混合（§7.1 / 门禁 23） |
 | **四值迁移把"对象域"与"管线状态域"一起删掉**（本版新增） | 已由 `RenderDomain`、稠密可逆 `PipelineBinClass` 与 `PipelineState` 映射保留；§12 门禁 24 作为持续回归契约 |
 | **变体选择引入每帧输入 → 帧图拓扑随场景变化**（本版新增） | §4.1 约束 1：选择输入只有 `device_caps` + 静态 `RenderQualityTier`；§12 门禁 22 |
 | **`ResourceKey` 退化成中心大枚举**（本版新增） | §4.5.1 命名空间键；新增子系统不得改中央枚举；§12 门禁 20 |
@@ -1145,7 +1160,7 @@ particle spray ──?──────▶ water foam
 | 20 | `resource_keys_are_namespaced_and_unique` | 每个 `ResourceKey` 有已声明的 `ResourceOwner`，`(owner, slot)` 唯一，且**未修改任何中央枚举**（§4.5.1） |
 | 21 | `every_required_service_has_a_selected_provider` | 特性级 `requires_services` 与变体级 `requires_services_extra` 的每个成员，都由**唯一**提供者特性 `providers[s]`（已选）的 `ServiceOutput` 提供；无例外分支、无 `engine_services` 旁路（§4.1 相 A 第 5 条、§4.6.1） |
 | 22 | `variant_selection_is_deterministic_and_registration_order_independent` | 校验**整个 `FeatureSelection`**（不只是单次 `select`）：对同一 `active_roots` 与**打乱声明顺序**的同一 catalog，`resolve(active_roots, device_caps, quality)` 逐项相等；闭包内每个 `requires_services` 都被满足；求解顺序只由「依赖图拓扑序（分层 + `Service` 子图序）+ `FeatureId` 破平局」决定，**不读注册顺序**；**闭包只由特性级硬需求决定**（同一 catalog 下改变变体的 `requires_services_extra` 不得改变闭包成员集合）；输入不含每帧测量值（§4.1） |
-| 23 | `water_hybrid_golden_matches_before_entry_removal`（文档门禁） | **原要求不变**：旧入口删除前具备深度、岸边、泡沫、焦散、反射、透明/overlay、motion vector、reactive mask 八项等价护栏，当前组合链路持续保留该语义。`water_hybrid_golden.rs:276-466` 是八项 CPU golden / 独立 reference 网格，`:469-519` 是权重源码契约，`:607-613` 编译四入口，`:616-633` 检查 Composition/HDR 源码，`:688-706` 的 GPU gate **只创建 shader modules**。另有 `water_hybrid_gpu.rs` 的 10/10 项真实输出测试，但其范围是该 integration target 的局部 production water output contract，不能替代八项 legacy GPU 等价、整帧等价或删除前护栏运行时序；历史 17/17 也不可替代这些证据，**完整验收未闭合**（§7.1 / §15.2） |
+| 23 | `water_hybrid_golden_matches_before_entry_removal`（文档门禁） | **原要求不变**：旧入口删除前具备深度、岸边、泡沫、焦散、反射、透明/overlay、motion vector、reactive mask 八项等价护栏，当前组合链路持续保留该语义。`water_hybrid_golden.rs:276-466` 是八项 CPU golden / 独立 reference 网格，`:469-519` 是权重源码契约，`:607-613` 编译四入口，`:616-633` 检查 Composition/HDR 源码。`water_hybrid_gpu.rs` 的 **19/19** 包含 10 项当前 production output、8 项冻结 legacy full-frame parity 与 1 项比较器，已关闭冻结 GPU 输出等价缺口；但不能追证删除前护栏运行时序，也不替代完整 Scene/Fabric/TAA 帧、所有设备或跨适配器验收，因此 gate 仍为 **partial**（§7.1 / §15.2） |
 | 24 | `domain_plus_render_class_plus_features_maps_to_pipeline_state` | §3.1.1 的映射表对四个旧值成立，且域仍可从 `bin_class` 恢复（§3.1.1 / §7.2） |
 | 25 | `every_service_output_resource_is_written_by_every_provider_variant` | 对每个已选 `FeatureKind::Service` 特性 f：`f.kind.provides` 的每个资源都落在**f 的每一个变体**某条 `PassTemplate` 的写入项（`AccessKind::writes()`）中，且写者可归一到唯一 `ResourceVersion`；只覆盖当前选中变体不算通过（§4.6.1、§12 门禁 32）。否则 `ServiceOutput` 只是声明性标签 |
 | 26 | `resource_keys_and_feature_ids_are_explicitly_declared` | `FeatureId` / `VariantId` / `(owner, slot)` 全部显式声明；插入或删除任一声明**不改变**已有 ID 与 slot；`FeatureCatalog` 只校验唯一性、**不按声明顺序发号**（§4.5.1） |
@@ -1208,7 +1223,7 @@ particle spray ──?──────▶ water foam
 - **旧权威回归门禁**：`pkg/prism_render_architecture/tests/render_fabric_legacy_gate.rs:11-19,54-91` 扫描旧服务集、旧 frontend、`bound_base` / `shared_base` 等符号；当前水体旧入口收口由 `surface_pass.rs:167-177` 与 `water_hybrid_golden.rs:607-633` 共同证明
 - shader：`pkg/prism_render_scene/src/shaders/{shading_resolve,visibility_raster,water_surface_raster}.wesl`、`pkg/prism_render_scene/src/shading/{graph,runtime,raster}.rs`
 - 回边：`pkg/prism_render_architecture/src/water/{coupling,spray_bridge}.rs`
-- 设备选择与 runtime 边界：`pkg/prism_render_scene/src/gpu/fabric.rs:13-51` 实际设备初始化 `SceneFabric`；`pkg/prism_render_architecture/src/render_fabric/device.rs:33-48` 定义 `compile`，`runtime.rs:180-200` 定义 runtime 执行与 prepare seam；测试调用不能当作生产闭环。
+- 设备选择与 runtime 边界：`pkg/prism_render_scene/src/gpu/fabric.rs:13-51` 实际设备初始化 `SceneFabric`；`pkg/prism_render_architecture/src/render_fabric/device.rs:33-48` 定义 `compile`，`runtime.rs:180-200` 定义 runtime 执行与 prepare seam；水体窄 adapter 的生产调用见 `pkg/prism_render_scene/src/shading/fabric_executor.rs` 与 `water/dispatch.rs`，但测试调用和窄切片都不能当作全场景生产闭环。
 
 ## 15. 当前实现证据审计（2026-10-20 更新）
 
@@ -1221,36 +1236,44 @@ particle spray ──?──────▶ water foam
 | `FeatureKind`/domain 类型边界、显式 ID 与 namespaced `ResourceKey` | `render_fabric/tests.rs`：`feature_kind_matches_domain_presence`、`constructors_and_explicit_keys_are_const`、duplicate ID/rank、`resource_keys_are_namespaced_and_unique`；`pipeline_tests.rs` 覆盖五个 domain 与七个 render class | 类型/校验实现及测试定义存在；不声称本轮测试通过 |
 | 唯一 provider、hard closure、soft requirements、依赖分层 | `render_fabric/tests.rs`：`every_service_id_has_exactly_one_provider_feature`、`missing_hard_and_soft_providers_are_static_errors`、`feature_dependency_kinds_are_stratified`、hard cycle、`hard_transitive_closure_and_selected_providers`、`variant_extra_requirements_do_not_grow_the_closure` | 静态 catalog 与选择契约有实现和断言，不替代生产资源消费 |
 | active roots 冻结与闭包隔离 | `selection.rs:40-89` 的 `FrozenRoots::from_build_profile` / `require_root`；`tests.rs` 的 `active_roots_are_static_and_frozen`、来源/unknown、empty profile 与 unused declaration 测试 | roots 冻结与闭包隔离模型；不代表所有域已提交 GPU 工作 |
-| 设备能力/画质驱动的确定性选择与注册顺序无关 | `selection.rs:185-267`；`tests.rs` 的 capability/quality matrix、no candidate、registration order 与 explicit identity 测试 | 选择器及测试定义；同一 selection 到 shader package/permutation 的全生产映射不由此证明 |
+| 设备能力/画质驱动的确定性选择与注册顺序无关 | `selection.rs:185-267`；`tests.rs` 的 capability/quality matrix、no candidate、registration order 与 explicit identity 测试；03 §2.2 的冻结 shader binding seam | 选择器与 `FeatureSelection → package/permutation → PipelineKey/PsoCacheKey/warm set` 的生产消费 seam 已闭合；完整 Scene/Fabric 每帧接线、driver binary 与跨适配器覆盖另计 |
 | 服务输出、每个 provider variant 写入资源、payload 资源/值校验 | `tests.rs` 的 `every_service_output_resource_is_written_by_every_provider_variant`、`service_variants_publish_the_same_resource_interface`；`compile_tests.rs:648,790,857` 的 layout、payload、sink/barrier 测试 | 声明和 CPU 编译校验；不等于真实全域 payload 已从 scene 提取并绑定 |
-| 统一编译器接线与一帧延迟 | `device.rs:33-48`；`compile_tests.rs:132,326` 的 authoritative graph 顺序/barrier 比较、history frame binding 测试 | compile seam 与 fixture 的真实版本/历史映射；不证明 scene 已调用 compile 或完成 history 发布/导入 |
-| 既有 RenderGraph 的 runtime lowering | `runtime.rs:180-200` 的 `execute` / `prepare_runtime`；`runtime_tests.rs` 的 recorder/import coverage、plan/hazard projection 测试 | runtime API 与测试调用存在；本轮源码检索未见 scene 的 `prepare_runtime` 生产调用，不能标为生产完成 |
+| compiler 的 active-pass slice | `compile.rs::ResourceTemplates::compile_active`、`device.rs::DeviceFabric::compile_active`；`compile_tests.rs::active_compile_uses_frozen_selection_and_explicit_completed_dependencies` | API 只编译 frozen selection 中明确指定的 pass 并限制资源 lowering 到这些 pass 的访问；省略依赖必须显式声明已完成。此前定向测试 `1/1`；当前复跑被并发 `prism_physics_core` 编译错误阻断。不是共享全场景 selection、全域 production imports 或 history 生命周期闭环 |
+| 编译计划、帧图版本与一帧延迟 | `device.rs:33-48`；`compile_tests.rs:132,326` 的 authoritative graph 顺序/barrier 比较、history frame binding 测试 | fixture 证明版本/历史映射；water/composition 有局部 production compile 调用，active-pass compiler 也已提供 recorder-owned slice；这些都不证明统一全场景 compile 或 history 发布/导入完成 |
+| 既有 RenderGraph 的 runtime lowering | `runtime.rs:180-200` 的 `execute` / `prepare_runtime`；`runtime_tests.rs` 的 recorder/import coverage、plan/hazard projection 测试 | runtime API 与测试调用存在；水体 compute 窄 adapter 已有生产调用，但不能标为全场景生产完成 |
+| 水体 compute 与 spray feedback 窄生产接线 | `water/dispatch.rs::record_water_fabric_commands`、`shading/fabric_executor.rs::prepare_water_runtime*` / `prepare_spray_feedback_runtime`、`water/spray_history.rs::SprayHistory::prepare` | water solver 的本帧 surface/foam 与 spray 的 per-instance lag-1 feedback 均以真实 resident resources compile/prepare/import/encode 并进入宿主 command buffer；spray publication/import 由 host-queue completion 验证，resize/removal 的 buffer 与 RHI lease 经 completion retirement 后回收。新增接线尚未 Cargo 验证；这仍是独立窄 adapter，不覆盖 response composition/TAA、其他域或全场景唯一 recorder |
 | PCM 权威边界与 sidecar bridge | `pcm_tests.rs:132,172,246,481` 的 capability conversion、authored variants、inactive variant enforcement 与 manifest→catalog→selection→CPU sink 测试 | bridge 模型与 fixture；one-chain CPU sink 不是生产 GPU recorder 或整帧闭环 |
 | built-in catalog、roots 与实际设备 selection 初始化及局部准入 | `builtins.rs:527-552` 的 roots/catalog；`prism_render_scene/src/gpu/fabric.rs:13-51` 从 Bevy `RenderDevice` 建立 `SceneFabric`；`water/spray_history.rs:156-167,234-250` 读取选择并 admit particle root；`shading/plugin.rs:463-515,629-633` 将同一选择接入 executor 初始化 | selection 初始化与局部准入已有生产调用；shading 仍编译既有图，不等于 Fabric compile/runtime 闭环，五个 subsystem 和三个 response root 的声明不等于所有高级服务已生产实现 |
-| pipeline mapping 与 `render_layers` | `pipeline.rs:203-250`、`pipeline_tests.rs:102-116,238-257`；`gpu_scene` transaction/mirror 的 `RenderLayers` 接线与测试（§6.4） | 域/class 可逆编码、显式状态映射及 delta 接线已存在；独立 ABI bump / 缓存失效运行记录另计 |
+| pipeline mapping、ABI/cache 与 `render_layers` | `pipeline.rs:203-250`、`pipeline_tests.rs:102-116,238-257`；03 §2.2/§6 的冻结 selection mapping；`gpu_scene` transaction/mirror 的 `RenderLayers` 接线与测试（§6.4） | 域/class 可逆编码、显式状态映射、delta、ABI/cache stale rejection 与冻结 mapping seam 已有源码及定向运行记录；历史独立批次顺序、真实 driver binary 和跨适配器范围另计 |
 | 旧服务集、旧 frontend 与旧水体入口收口 | `render_fabric_legacy_gate.rs:11-19,54-91`；`surface_pass.rs:167-177`；`record.rs:41-69` | 旧符号删除和当前替代物已有源码证据；legacy gate 有明确扫描范围，不声称全仓字符串零命中 |
-| 水体连续 Hybrid、overlay 与 resident Composition | CPU `hybrid.rs:109-204`；WESL `water_surface_raster.wesl:1666-1719,1795-1809`；`shading/graph.rs:196-222`；`water_hybrid_golden.rs:276-519,607-706`；`water_hybrid_gpu.rs` | 公式/参数消费、具体 scene 链路与冻结历史 shader closure 已证；当前已有 10 项局部真实输出与 8 项冻结 legacy full-frame parity；仍不构成完整 Scene/Fabric/TAA 帧 parity、删除前护栏历史时序或 Fabric 生产闭环 |
+| 水体连续 Hybrid、overlay 与 resident Composition | CPU `hybrid.rs:109-204`；WESL `water_surface_raster.wesl:1666-1719,1795-1809`；`shading/graph.rs:196-222`；`water_hybrid_golden.rs:276-519,607-706`；`water_hybrid_gpu.rs` | 公式/参数消费、具体 scene 链路与冻结历史 shader closure 已证；当前 **19/19** 含 10 项当前输出、8 项冻结 legacy full-frame parity、1 项比较器；仍不构成完整 Scene/Fabric/TAA 帧 parity、删除前护栏历史时序或全场景 Fabric 闭环 |
+| 五个 response plane 的身份与真实 buffer binding | `water/fabric.rs` 的 `ResponseCompositionPlane`；`shading/composition.rs` 的 `COMPOSITION_ACCESSES`、`resource_bindings` / `resource_templates` / `record_composition_fabric`；built-in catalog 的 response templates | `ResourceKey`、动态 template、真实 Bevy `BufferId`、zero-job auxiliary allocation、生产 `FrameResourceBinding` 与 `RuntimeImport` 已统一；`response_composition_pass` 已经把真实 Fabric command buffer 交给宿主。其 accesses 是当帧资源、`frame_lag=None`，不需要 history publication；`resident_composition_gpu` 已改为调用与生产入口共用的 recorder，覆盖本地 compile/prepare/record/readback，修订后的测试仍待当前运行确认；这仍不等于接入共享全场景 selection/recorder |
 | shading graph 的数量单源 | `shading/graph.rs:79-225,285-289`、`post_graph.rs:938,1200`、`shading/runtime.rs:393-401,464-469` | 当前 **8 主链 + 23 后处理 = 31**，Composition 已在主链内；生产断言读取编译图，不保留旧 6 pass 假设 |
+| 测试侧 32-gate ledger 与全域 fanout | `pkg/prism_render_architecture/tests/fixtures/render_fabric_gate_matrix.tsv`、`tests/render_fabric_acceptance.rs` | 32 个唯一 gate 均有可读源码锚点；五个 subsystem domain、三个 response root、provider/resource fanout 和 builtin shader package identity 均被验收测试覆盖；gate 23 保持 `partial`，不等于完整生产帧验收 |
+| 跨适配器门禁 | `pkg/prism_render_scene/tests/cross_adapter_acceptance.rs`、`tests/fixtures/cross_adapter_acceptance.txt` | 每个 distinct physical adapter 都必须通过 storage-compute submit/readback；少于两个时默认 `SKIP_UNVERIFIED`、严格 `PRISM_REQUIRE_GPU=1` 失败；skip 不计入通过 |
 
 ### 15.2 本轮检查与历史运行记录的边界
 
-- **2026-10-20 实际运行**：`cargo test -p prism_render_architecture --lib render_fabric`：**130 passed，0 failed，0 ignored，11346 filtered out**。包含 payload 当前帧/domain 访问、role 判重，以及 completed-history 精确导入、publication 顺序和退休水位的回归测试；不是全仓、真实 GPU 或完整 32 门禁通过记录。
+- **2026-10-20 先前完整运行记录**：`cargo test -p prism_render_architecture --lib render_fabric`：**134 passed，0 failed，0 ignored，11347 filtered out**。包含 payload 当前帧/domain 访问、role 判重、response plane 声明，以及 completed-history 精确导入、publication 顺序和退休水位的回归测试；不是全仓、真实 GPU 或完整 32 门禁通过记录。本轮复跑未到达测试执行阶段：共享依赖编译被并发 `prism_physics_core` 工作树错误阻断（包括缺失 `index` 模块、跨 crate 私有模块访问及 tearing API 不匹配），因此没有新的通过记录。当前工作树对 `prism_render_scene` 的完整编译同样受 physics 修改阻断，不能把本轮源码改动写成已编译通过。
 - **同设备资源桥的实际 GPU 运行**：`PRISM_REQUIRE_GPU=1 cargo test -p prism_render_scene --lib gpu::rhi::tests -- --nocapture`：沙盒内因无 adapter 失败；随后沙盒外 Apple M2 / Metal **13 passed，0 failed，0 ignored，1834 filtered out**，无 GPU skip。验证 exact host handles、buffer/texture/view 的非 owning table lease、table-local ID/slot reuse、worker/drop、真实 host submission/completion；1 项为 Send/Sync 静态断言，其余使用硬件。资源桥具备导入能力不等于 Fabric 已使用真实场景 imports/recorders。
 - **原生导入后端回归**：沙盒外 `PRISM_REQUIRE_GPU=1 cargo test -p prism_render_driver_wgpu --lib native_ -- --nocapture`：**4 passed，0 failed，0 ignored，27 filtered out**。覆盖公开导入 API、buffer 与 texture/view 独立 lease／过期 ID／槽位复用，以及 `rgba32uint` 原生格式与整数绑定；该筛选结果不代表整个后端测试集通过。
 - **历史记录**：前版本文记录 2026-10-16 Apple M2 Metal 的 Water Hybrid `17/17`、Resident Composition `3/3`；当前记录仅作为历史证据，不替代本轮结果或完整验收。
 - **2026-10-20 水体复跑**：沙盒外 Apple M2 / Metal 上，`water_hybrid_golden` **19/19**，`water_hybrid_gpu` **19/19**；其中 GPU target 包含 10 项当前生产输出、8 项冻结 legacy full-frame parity 和 1 项比较器测试。冻结 closure 使用 commit `41a31ceef24e59ab7f8dda076b2b4c7f5e11f6ec`，容差为 FP32 `3e-5 + 3e-5*abs(reference)`、FP16 `2e-6 + 2e-3*abs(reference)`。
-- **GPU 口径**：上述结果证明 16×16 水体 fixture 的 production WESL 与冻结旧 shader closure 输出一致；不证明完整 Scene/Fabric/TAA 帧、所有设备或 Fabric compile/runtime 生产闭环。独立 TAA reactive MRT 的当前接线与 shader/layout 定向测试另有记录，但尚无完整场景 parity 证据。
-- **ABI/cache 复跑**：S5 material target **4/4**，app `pipeline_cache::worker_tests` **25/25**；这关闭了相应 stale package/cache 的当前回归证据，但不关闭 selection 到真实 package/permutation 的生产映射缺口。
+- **GPU 口径**：上述结果证明 16×16 水体 fixture 的 production WESL 与冻结旧 shader closure 输出一致；不证明完整 Scene/Fabric/TAA 帧、所有设备或全场景 Fabric compile/runtime 生产闭环。独立 TAA reactive MRT 的当前接线与 shader/layout 定向测试另有记录，但尚无完整场景 parity 证据。
+- **ABI/cache 与 selection mapping 复跑**：S5 material target **4/4**，app `pipeline_cache::worker_tests` **27/27**；结合 architecture target 的先前完整记录，已覆盖冻结 selection 到真实 package/permutation/PSO identity/cache/warm set 的生产消费 seam 与 stale binding 拒绝。未关闭的是完整 Scene/Fabric 每帧装配、真实 driver binary 和跨适配器覆盖。
+- **本轮 Render Fabric 测试侧验收**：`cargo test -p prism_render_architecture --test render_fabric_acceptance -- --nocapture` 为 **3 passed，0 failed**；`cargo test -p prism_render_architecture --lib render_fabric -- --nocapture --test-threads=1` 的上一次完整运行报告 **134 passed，0 failed**。前者验证 32-gate ledger、完整 built-in fanout 和 gate 23 的 `partial` 标记；后者覆盖 contract/compiler/runtime fixture。水体 compute 与 resident composition 另有真实局部 `DeviceFabric::compile → prepare_runtime → record/submit` 调用，但这些测试与局部切片都不等于全场景生产闭环。
+- **跨适配器验收**：默认 `cargo test -p prism_render_scene --test cross_adapter_acceptance -- --nocapture` 在沙盒外发现 1 个 physical adapter（`Apple M2 / Metal / IntegratedGpu`）并输出 `SKIP_UNVERIFIED` 后结束；`PRISM_REQUIRE_GPU=1` 同命令以“需要至少两个 distinct physical adapters”失败。该失败是严格门禁的预期结果，不是通过，也不把单 adapter probe 写成跨 adapter parity。
 - **已实现子项**：七值 class、旧符号/入口移除、CPU/WESL 公式统一与 overlay 消费已有当前源码证据。这些真实完成项应保留，不回退为未实现；同样不能扩大为 S4b/S5 全部要求完成。
 
 ### 15.3 完整验收仍需的证据
 
 以下是原始目标的证据缺口，不是取消或缩减目标；生产接线仍在实施，其他代理的进行中变更不提前记为完成：
 
-1. **同一选择的生产调用闭环**：真实 scene 帧使用同一 `SceneFabric` selection，经 `DeviceFabric::compile` → `CompiledFeatureGraph::prepare_runtime`，提供真实资源 imports / pass recorders，再执行既有 RenderGraph；API 定义和测试 fixture 不足以证明该链路。
-2. **全域帧数据与资源生命周期**：各域 `FrameRenderItem` / payload 的真实提取与绑定、版本/barrier 消费，以及 `FrameLag` history 分配、发布和导入；单 command buffer auto-sync 不替代外部 history 或原生多队列 fence 契约。
-3. **G3/G4、全量扇出及 32 门禁**：7 组全域装配范围、NPR 不降级、全部静态 roots 的生产消费者，以及 §12 全部门禁的可追溯运行结果；catalog 覆盖不是高级特性质量/生产验收。
+1. **全场景同一选择的生产调用闭环**：水体 compute 与 resident response composition 已各自有窄切片使用 `SceneFabric`/`CompositionFabric` 的 `DeviceFabric::compile` → `CompiledFeatureGraph::prepare_runtime`，并把真实 command buffer 交给宿主；仍需把 TAA/history、全域 payload 与其他域接入同一选择、真实 imports / pass recorders 和既有 RenderGraph。两个局部 recorder 不能证明全场景链路。
+2. **全域帧数据与资源生命周期**：各域 `FrameRenderItem` / payload 的真实提取与绑定、版本/barrier 消费，以及有 temporal 语义资源的 `FrameLag` history 分配、发布和导入。Surface `RenderFabricFrame` 已从 committed scene 提取并由 visibility 消费；当前仅覆盖 Surface bounds payload，且新增接线尚未 Cargo 验证。water solver 仍导入本帧 surface/foam；spray feedback 已另行接入 per-instance exact lag-1 bindings、completion-validated import/publication enqueue、缺失历史显式清零，以及 resize/removal 后的 completion-gated retirement，并持有旧 buffer/RHI lease 至安全回收。该 water/spray 接线是局部 adapter，不是统一全域 recorder；TAA/history 与其他 temporal domain 尚未消费统一的全场景 history lifecycle。Composition 当前无 `FrameLag` accesses，不要求引入无消费者的 temporal publication。单 command buffer auto-sync 不替代这些责任或原生多队列 fence 契约。
+3. **G3/G4、全量扇出及 32 门禁**：测试侧 ledger 和 built-in fanout 本轮有 `3/3` acceptance 记录；Render Fabric contract/runtime 只有先前 `134/134` 完整记录，本次复跑被并发 `prism_physics_core` 编译错误阻断。仍缺 7 组全域装配范围、NPR 不降级、全部静态 roots 的真实生产消费者及完整 32 门禁的端到端运行结果。catalog/fixture 覆盖不是高级特性质量或生产帧验收。
 4. **完整水体行为等价与护栏时序**：冻结旧 shader closure 的八项 GPU 输出已通过；独立 TAA reactive MRT 已有当前生产接线与 shader/layout 定向测试，但完整 Scene/Fabric/TAA 帧 parity 与旧入口删除前护栏的历史运行记录仍缺失。
-5. **ABI 与管线消费**：S5 ABI bump、package/cache stale rejection 已有当前测试证据；`FeatureVariant` 到真实 shader package / `PermutationSpace` 的同一 selection 生产映射仍未闭合（§4.8）。
+5. **ABI 与管线消费**：S5 ABI bump、package/cache stale rejection，以及冻结 `FeatureSelection → shader package / PermutationSpace → PipelineKey / PsoCacheKey / warm set` 的生产消费 seam 已有当前源码与先前完整运行记录（见 03）；仍缺的是该 mapping 在完整 Scene/Fabric 每帧装配、真实 driver binary 与跨适配器范围内的端到端覆盖，而不是重新选择或另建第二套 identity。
+6. **跨适配器 GPU 证据**：本机只有一个 Apple M2/Metal physical adapter；`SKIP_UNVERIFIED` 与严格失败语义已固定，但第二个 physical adapter 上的 probe、water/Scene/TAA full-frame replay 和跨 adapter parity 仍未验证。
 
-**结论**：本文保留已实现子项及所有原始要求、37 条禁止和 32 项门禁。2026-10-20 的 payload/history、S5 ABI/cache 与冻结水体 GPU parity 证据只关闭相应契约缺口，**Render Fabric 生产闭环与完整验收仍未闭合**。此前“仅改本文、不构建、不提交”的说明仅描述当时的文档审计，不适用于当前实施与验证记录。
+**结论**：本文保留已实现子项及所有原始要求、37 条禁止和 32 项门禁。2026-10-20 的 payload/history contract、S5 ABI/cache、冻结水体 GPU parity、水体 compute 窄 Fabric adapter，以及 resident composition 的局部 Fabric recorder 只关闭相应契约/局部生产缺口；统一 history publication、全域 fanout、全域编译接线、跨适配器和**完整 Render Fabric 生产闭环仍未闭合**。此前“仅改本文、不构建、不提交”的说明仅描述当时的文档审计，不适用于当前实施与验证记录。

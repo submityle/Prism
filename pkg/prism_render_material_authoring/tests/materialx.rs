@@ -1,7 +1,7 @@
 #![allow(missing_docs, reason = "integration tests are self-describing")]
 
 use prism_render_material_authoring::{
-    adapt_openpbr_surface, export_materialx, import_openpbr_surface, parse_materialx,
+    adapt_openpbr_surface, export_materialx, import_openpbr_surface, parse_materialx, Connection,
     DiagnosticCode, Severity,
 };
 
@@ -621,4 +621,184 @@ fn standard_surface_aliases_map_to_runtime_fields_without_claiming_color_opacity
     assert_eq!(adapted.parameters.emission_color, [0.9, 0.8, 0.7, 1.0]);
     assert_eq!(adapted.parameters.emission_luminance, 0.0);
     assert_eq!(adapted.report.unsupported_fields, ["emission", "opacity"]);
+}
+
+#[test]
+fn reusable_nodegraph_instances_resolve_defaults_overrides_and_selected_outputs() {
+    let document = parse_materialx(r#"<materialx>
+      <nodedef name="ND_scale" node="multiply"><input name="factor" type="float" value="2"/><input name="value" type="float" value="0.25"/><output name="out" type="float"/><output name="twice" type="float"/></nodedef>
+      <nodegraph name="NG_scale" nodedef="ND_scale">
+        <input name="factor" type="float" value="3"/><input name="value" type="float" value="0.2"/>
+        <multiply name="product"><input name="in1" interfacename="factor"/><input name="in2" interfacename="value"/></multiply>
+        <constant name="alternate" type="float" value="0.9"/>
+        <output name="out" type="float" nodename="product"/><output name="twice" type="float" nodename="alternate"/>
+      </nodegraph>
+      <nodegraph name="surface">
+        <constant name="override" type="float" value="0.4"/>
+        <multiply name="instance" nodedef="ND_scale"><input name="factor" nodename="override"/></multiply>
+        <open_pbr_surface name="s"><input name="specular_roughness" type="float" nodename="instance" output="out"/></open_pbr_surface>
+      </nodegraph>
+    </materialx>"#).expect("reusable graph definition and instance parse");
+    let adapted =
+        adapt_openpbr_surface(&document, "surface", "s").expect("graph instance evaluates");
+    assert!((adapted.parameters.specular_roughness - 0.08).abs() < 1.0e-6);
+    let surface_graph = document
+        .nodegraphs
+        .iter()
+        .find(|graph| graph.name == "surface")
+        .unwrap();
+    let selected = prism_render_material_authoring::evaluate_connection(
+        &document,
+        surface_graph,
+        &Connection {
+            node: Some("instance".into()),
+            output: Some("twice".into()),
+            nodegraph: None,
+        },
+    )
+    .expect("selected alternate graph output evaluates");
+    assert_eq!(selected.value, "0.9");
+
+    let round_trip =
+        parse_materialx(&export_materialx(&document)).expect("graph binding round trips");
+    assert_eq!(round_trip, document);
+}
+
+#[test]
+fn reusable_nodegraph_instance_falls_back_to_nodedef_interface_defaults() {
+    let document = parse_materialx(r#"<materialx>
+      <nodedef name="ND_value" node="convert">
+        <input name="in" type="float" value="0.375"/>
+        <output name="out" type="float"/>
+      </nodedef>
+      <nodegraph name="NG_value" nodedef="ND_value">
+        <input name="in" type="float"/>
+        <output name="out" type="float" nodename="source"/>
+        <convert name="source"><input name="in" interfacename="in"/></convert>
+      </nodegraph>
+      <nodegraph name="surface">
+        <convert name="instance" nodedef="ND_value"/>
+        <open_pbr_surface name="s"><input name="specular_roughness" type="float" nodename="instance"/></open_pbr_surface>
+      </nodegraph>
+    </materialx>"#).expect("nodedef and implementation interfaces agree");
+
+    let adapted = adapt_openpbr_surface(&document, "surface", "s")
+        .expect("omitted instance input resolves through nodedef default");
+    assert_eq!(adapted.parameters.specular_roughness, 0.375);
+}
+
+#[test]
+fn reusable_nodegraph_instance_does_not_mask_implementation_interface_connections() {
+    let document = parse_materialx(r#"<materialx>
+      <nodedef name="ND_value" node="convert">
+        <input name="in" type="float" value="0.375"/>
+        <output name="out" type="float"/>
+      </nodedef>
+      <nodegraph name="NG_value" nodedef="ND_value">
+        <input name="in" type="float" nodename="implementation_default"/>
+        <constant name="implementation_default" type="float" value="0.625"/>
+        <output name="out" type="float" nodename="source"/>
+        <convert name="source"><input name="in" interfacename="in"/></convert>
+      </nodegraph>
+      <nodegraph name="surface">
+        <convert name="instance" nodedef="ND_value"/>
+        <open_pbr_surface name="s"><input name="specular_roughness" type="float" nodename="instance"/></open_pbr_surface>
+      </nodegraph>
+    </materialx>"#).expect("connected implementation interface is valid");
+
+    let adapted = adapt_openpbr_surface(&document, "surface", "s")
+        .expect("implementation connection takes precedence over nodedef fallback");
+    assert_eq!(adapted.parameters.specular_roughness, 0.625);
+}
+
+#[test]
+fn reusable_nodegraph_instances_nest_and_detect_cycles() {
+    let nested = parse_materialx(r#"<materialx>
+      <nodedef name="ND_inner" node="add"><input name="x" type="float" value="0.1"/><output name="out" type="float"/></nodedef>
+      <nodegraph name="NG_inner" nodedef="ND_inner"><input name="x" type="float" value="0.2"/><add name="sum"><input name="in1" interfacename="x"/><input name="in2" type="float" value="0.1"/></add><output name="out" type="float" nodename="sum"/></nodegraph>
+      <nodedef name="ND_outer" node="add"><input name="x" type="float" value="0"/><output name="out" type="float"/></nodedef>
+      <nodegraph name="NG_outer" nodedef="ND_outer"><input name="x" type="float" value="0"/><add name="inner_instance" nodedef="ND_inner"><input name="x" interfacename="x"/></add><output name="out" type="float" nodename="inner_instance"/></nodegraph>
+      <nodegraph name="surface"><add name="outer" nodedef="ND_outer"/><open_pbr_surface name="s"><input name="specular_roughness" type="float" nodename="outer"/></open_pbr_surface></nodegraph>
+    </materialx>"#).expect("nested graphs parse");
+    let value = prism_render_material_authoring::evaluate_connection(
+        &nested,
+        &nested.nodegraphs[2],
+        &Connection {
+            node: Some("outer".into()),
+            output: None,
+            nodegraph: None,
+        },
+    )
+    .expect("nested graph evaluates");
+    assert_eq!(value.value, "0.1");
+
+    let cyclic = parse_materialx(r#"<materialx>
+      <nodedef name="ND_loop" node="add"><input name="x" type="float" value="1"/><output name="out" type="float"/></nodedef>
+      <nodegraph name="NG_loop" nodedef="ND_loop"><input name="x" type="float" value="1"/><add name="again" nodedef="ND_loop"><input name="x" interfacename="x"/></add><output name="out" type="float" nodename="again"/></nodegraph>
+      <nodegraph name="surface"><add name="loop" nodedef="ND_loop"/><open_pbr_surface name="s"><input name="specular_roughness" type="float" nodename="loop"/></open_pbr_surface></nodegraph>
+    </materialx>"#).expect("cycle is a runtime graph property");
+    let error =
+        adapt_openpbr_surface(&cyclic, "surface", "s").expect_err("recursive graph rejected");
+    assert_eq!(error.0.code, DiagnosticCode::UnsafeConnection);
+    assert!(error.to_string().contains("cyclic"));
+}
+
+#[test]
+fn reusable_nodegraph_instances_report_input_and_output_type_mismatches() {
+    let wrong_input = parse_materialx(r#"<materialx><nodedef name="ND_value" node="constant"><input name="value" type="float" value="0"/><output name="out" type="float"/></nodedef><nodegraph name="NG_value" nodedef="ND_value"><input name="value" type="float" value="0.2"/><convert name="source"><input name="in" interfacename="value"/></convert><output name="out" type="float" nodename="source"/></nodegraph><nodegraph name="surface"><constant name="color" type="color3" value="0.1, 0.2, 0.3"/><constant name="instance" nodedef="ND_value"><input name="value" nodename="color"/></constant><open_pbr_surface name="s"><input name="specular_roughness" type="float" nodename="instance"/></open_pbr_surface></nodegraph></materialx>"#).expect("instance connection is structurally valid");
+    let error = adapt_openpbr_surface(&wrong_input, "surface", "s")
+        .expect_err("input type mismatch rejected");
+    assert_eq!(error.0.code, DiagnosticCode::InvalidValue);
+
+    let malformed_untyped_override = parse_materialx(r#"<materialx>
+      <nodedef name="ND_value" node="convert"><input name="in" type="float" value="0"/><output name="out" type="float"/></nodedef>
+      <nodegraph name="NG_value" nodedef="ND_value"><input name="in" type="float"/><convert name="source"><input name="in" interfacename="in"/></convert><output name="out" type="float" nodename="source"/></nodegraph>
+      <nodegraph name="surface"><convert name="instance" nodedef="ND_value"><input name="in" value="not-a-number"/></convert><open_pbr_surface name="s"><input name="specular_roughness" type="float" nodename="instance"/></open_pbr_surface></nodegraph>
+    </materialx>"#).expect("untyped override is structurally valid");
+    let error = adapt_openpbr_surface(&malformed_untyped_override, "surface", "s")
+        .expect_err("untyped numeric override must be parsed before type coercion");
+    assert_eq!(error.0.code, DiagnosticCode::InvalidValue);
+    assert!(error.to_string().contains("invalid numeric literal"));
+
+    let missing_output = parse_materialx(r#"<materialx><nodedef name="ND_multi" node="add"><input name="x" type="float" value="0"/><output name="a" type="float"/><output name="b" type="float"/></nodedef><nodegraph name="NG_multi" nodedef="ND_multi"><input name="x" type="float" value="0"/><add name="source"><input name="in1" interfacename="x"/><input name="in2" interfacename="x"/></add><output name="a" type="float" nodename="source"/><output name="b" type="float" nodename="source"/></nodegraph><nodegraph name="surface"><add name="instance" nodedef="ND_multi"/><open_pbr_surface name="s"><input name="specular_roughness" type="float" nodename="instance"/></open_pbr_surface></nodegraph></materialx>"#).expect("ambiguous graph output is structurally valid");
+    let error = adapt_openpbr_surface(&missing_output, "surface", "s")
+        .expect_err("ambiguous output rejected");
+    assert_eq!(error.0.code, DiagnosticCode::InvalidReference);
+
+    let wrong_output = parse_materialx(r#"<materialx><nodedef name="ND_wrong_output" node="constant"><input name="x" type="float" value="0"/><output name="out" type="float"/></nodedef><nodegraph name="NG_wrong_output" nodedef="ND_wrong_output"><input name="x" type="float" value="0"/><constant name="color" type="color3" value="0.1, 0.2, 0.3"/><output name="out" type="float" nodename="color"/></nodegraph><nodegraph name="surface"><constant name="instance" nodedef="ND_wrong_output"/><open_pbr_surface name="s"><input name="specular_roughness" type="float" nodename="instance"/></open_pbr_surface></nodegraph></materialx>"#).expect("output type is checked during evaluation");
+    let error = adapt_openpbr_surface(&wrong_output, "surface", "s")
+        .expect_err("implementation output type mismatch rejected");
+    assert_eq!(error.0.code, DiagnosticCode::InvalidValue);
+}
+
+#[test]
+fn reusable_nodegraph_instances_reject_invalid_instance_contracts_at_parse_time() {
+    let cases = [
+        (
+            r#"<materialx><nodedef name="ND_value" node="constant"><input name="value" type="float" value="0"/><output name="out" type="float"/></nodedef><nodegraph name="NG_value" nodedef="ND_value"><input name="value" type="float"/><constant name="source" type="float" value="0"/><output name="other" type="float" nodename="source"/></nodegraph><nodegraph name="surface"><add name="instance" nodedef="ND_value"/></nodegraph></materialx>"#,
+            DiagnosticCode::InvalidStructure,
+            "does not match nodedef",
+        ),
+        (
+            r#"<materialx><nodedef name="ND_value" node="constant"><input name="value" type="float" value="0"/><output name="out" type="float"/></nodedef><nodegraph name="NG_value" nodedef="ND_value"><input name="value" type="float"/><constant name="source" type="float" value="0"/><output name="out" type="float" nodename="source"/></nodegraph><nodegraph name="surface"><constant name="instance" type="float" value="1" nodedef="ND_value"/></nodegraph></materialx>"#,
+            DiagnosticCode::InvalidStructure,
+            "cannot carry a node-level value",
+        ),
+        (
+            r#"<materialx><nodedef name="ND_value" node="constant"><input name="value" type="float" value="0"/><output name="out" type="float"/></nodedef><nodegraph name="NG_value" nodedef="ND_value"><input name="value" type="float"/><constant name="source" type="float" value="0"/><output name="out" type="float" nodename="source"/></nodegraph><nodegraph name="surface"><constant name="instance" nodedef="ND_value"><input name="unknown" type="float" value="1"/></constant></nodegraph></materialx>"#,
+            DiagnosticCode::InvalidStructure,
+            "is not declared by nodegraph",
+        ),
+        (
+            r#"<materialx><nodedef name="ND_value" node="constant"><input name="value" type="float" value="0"/><output name="out" type="float"/></nodedef><nodegraph name="NG_value" nodedef="ND_value"><input name="value" type="float"/><constant name="source" type="float" value="0"/><output name="out" type="float" nodename="source"/></nodegraph><nodegraph name="surface"><constant name="instance" nodedef="ND_value"><output name="other" type="float"/></constant></nodegraph></materialx>"#,
+            DiagnosticCode::InvalidReference,
+            "is not declared by nodedef",
+        ),
+    ];
+
+    for (source, code, message) in cases {
+        let error = parse_materialx(source).expect_err(message);
+        assert_eq!(error.0.code, code, "{source}");
+        assert!(error.to_string().contains(message), "{error}");
+    }
 }

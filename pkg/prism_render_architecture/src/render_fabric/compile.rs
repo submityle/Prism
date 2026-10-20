@@ -2,7 +2,6 @@
 //! to `GpuFrameGraphBuilder`, including the producer-first declaration ordering.
 use super::*;
 use crate::frame_graph::*;
-use crate::gpu_scene::SceneHandle;
 use alloc::{
     collections::{BTreeMap, BTreeSet},
     format,
@@ -79,10 +78,14 @@ pub enum FabricCompileError {
     PayloadLayoutMismatch(ResourceKey),
     PayloadDomainMismatch(ResourceKey),
     DuplicatePayloadRole {
-        scene: SceneHandle,
+        object: RenderObjectId,
         domain: RenderDomain,
         history_key: u32,
         role: PayloadRole,
+    },
+    DomainIdentityMismatch {
+        object: RenderObjectId,
+        declared: RenderDomain,
     },
     Graph(CompileError),
 }
@@ -657,15 +660,21 @@ impl<'a> ResourceTemplates<'a> {
             .collect();
         let mut payload_roles = BTreeSet::new();
         for item in items {
+            if item.object_id.domain() != item.domain {
+                return Err(FabricCompileError::DomainIdentityMismatch {
+                    object: item.object_id,
+                    declared: item.domain,
+                });
+            }
             let identity = (
-                item.scene_handle,
+                item.object_id,
                 item.domain as u32,
                 item.history_key,
                 item.payload_role(),
             );
             if !payload_roles.insert(identity) {
                 return Err(FabricCompileError::DuplicatePayloadRole {
-                    scene: item.scene_handle,
+                    object: item.object_id,
                     domain: item.domain,
                     history_key: item.history_key,
                     role: item.payload_role(),
