@@ -19,6 +19,7 @@ use core::{fmt, ops::Bound};
 
 pub mod filesystem;
 pub mod git;
+pub mod pipeline;
 mod source;
 pub mod thumbnail;
 pub mod validation;
