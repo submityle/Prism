@@ -17,7 +17,7 @@ use alloc::vec::Vec;
 
 use super::attributes::{AttributeAccess, AttributeFormat, AttributeLayoutPlan, AttributeSemantic};
 use super::graph::{self, CompileError as GraphError, GraphIr};
-use super::modules::{EmberModule, ResourceAccess, ResourceDecl, ResourceKind};
+use super::modules::{DataInterface, EmberModule, ResourceAccess, ResourceDecl, ResourceKind};
 use super::IterationDomain;
 
 /// The fixed workgroup width in the generated compute-entry ABI.
@@ -88,6 +88,55 @@ pub struct CompiledAttributeBinding {
     pub access: ResourceAccess,
 }
 
+impl CompiledAttributeBinding {
+    /// Returns the physical copy index to bind for one frame.
+    ///
+    /// A ping-ponged attribute uses copy `frame % 2` as the current destination
+    /// and the other copy as the previous-frame source. Single-copy attributes
+    /// always return zero. The result is an index into the attribute's planned
+    /// region, not a bind-group slot.
+    #[must_use]
+    pub const fn physical_copy(self, frame_index: u64) -> u32 {
+        match self.role {
+            AttributeBufferRole::Single => 0,
+            AttributeBufferRole::Previous => 1 - (frame_index as u32 & 1),
+            AttributeBufferRole::Current => frame_index as u32 & 1,
+        }
+    }
+}
+
+/// The runtime-selected physical copy for one generated attribute binding.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RuntimeAttributeBinding {
+    /// Attribute semantic represented by the binding.
+    pub semantic: AttributeSemantic,
+    /// Logical role used by the generated shader.
+    pub role: AttributeBufferRole,
+    /// Group-zero binding slot in the generated shader.
+    pub binding: u32,
+    /// Physical copy within the planned attribute region.
+    pub physical_copy: u32,
+}
+
+impl CompiledGraph {
+    /// Resolves all graph-attribute bindings for a frame parity.
+    ///
+    /// The returned order is the same as `attribute_bindings`, making it safe
+    /// for a backend to use as a deterministic bind-group update list.
+    #[must_use]
+    pub fn attribute_bindings_for_frame(&self, frame_index: u64) -> Vec<RuntimeAttributeBinding> {
+        self.attribute_bindings
+            .iter()
+            .map(|binding| RuntimeAttributeBinding {
+                semantic: binding.semantic,
+                role: binding.role,
+                binding: binding.binding,
+                physical_copy: binding.physical_copy(frame_index),
+            })
+            .collect()
+    }
+}
+
 /// One concrete compute dispatch emitted from a graph stage iteration.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CompiledDispatch {
@@ -134,12 +183,25 @@ pub enum CompileError {
         stage: usize,
         semantic: AttributeSemantic,
     },
+    /// A module's generated kernel needs an access mode that the graph stage
+    /// did not declare (for example `READ_PREV | WRITE` for a ping-pong read).
+    ModuleAttributeAccessUndeclared {
+        module: usize,
+        stage: usize,
+        semantic: AttributeSemantic,
+        required: AttributeAccess,
+        declared: AttributeAccess,
+    },
     /// A module's `resources()` and `CodegenCtx` binding declarations disagree.
     ModuleBindingMismatch { module: usize, name: String },
+    /// A data interface's `bindings()` and `CodegenCtx` declarations disagree.
+    DataInterfaceBindingMismatch { interface: usize, name: String },
     /// Different declarations use one binding name.
     BindingNameConflict { name: String },
     /// Different declarations occupy one `(group, binding)` slot.
     BindingSlotConflict { group: u32, binding: u32 },
+    /// Two modules emitted different definitions for one helper or kernel name.
+    FunctionNameConflict { name: String },
     /// The compiler cannot allocate another module resource in this bind group.
     BindingIndexLimitExceeded { group: u32 },
     /// The resource declaration cannot be represented by the supported WGSL
@@ -180,6 +242,20 @@ pub fn compile(
     graph_ir: &GraphIr,
     modules: &[StageModule<'_>],
 ) -> Result<CompiledGraph, CompileError> {
+    compile_with_data_interfaces(graph_ir, modules, &[])
+}
+
+/// Compiles a graph with explicitly selected data interfaces.
+///
+/// Data interfaces contribute only global resource declarations and reusable
+/// sampling functions; modules still own the stage fragments that call them.
+/// Keeping the interface list explicit makes asset compilation deterministic
+/// and prevents unused scene bindings from entering a pipeline layout.
+pub fn compile_with_data_interfaces(
+    graph_ir: &GraphIr,
+    modules: &[StageModule<'_>],
+    data_interfaces: &[&dyn DataInterface],
+) -> Result<CompiledGraph, CompileError> {
     graph_ir.validate().map_err(CompileError::InvalidGraph)?;
     let stage_order = graph::schedule_order(graph_ir).map_err(CompileError::InvalidGraph)?;
     let entry_names = entry_point_names(graph_ir)?;
@@ -187,6 +263,36 @@ pub fn compile(
     let mut stage_fragments: Vec<Vec<String>> = Vec::new();
     stage_fragments.resize_with(graph_ir.stages.len(), Vec::new);
     let mut bindings = Vec::new();
+    let mut functions = Vec::new();
+    let attribute_layout = graph::plan_layout(graph_ir);
+    let attribute_bindings =
+        build_attribute_bindings(&attribute_layout, &graph::live_usages(graph_ir))?;
+
+    for (interface_index, interface) in data_interfaces.iter().enumerate() {
+        let mut context = super::modules::CodegenCtx::new();
+        interface.emit_wesl_functions(&mut context);
+
+        for emitted in context.bindings() {
+            if !interface.bindings().iter().any(|decl| decl == emitted) {
+                return Err(CompileError::DataInterfaceBindingMismatch {
+                    interface: interface_index,
+                    name: String::from(emitted.name),
+                });
+            }
+        }
+        for declared in interface.bindings() {
+            if !context.bindings().iter().any(|emitted| emitted == declared) {
+                return Err(CompileError::DataInterfaceBindingMismatch {
+                    interface: interface_index,
+                    name: String::from(declared.name),
+                });
+            }
+            merge_module_binding(&mut bindings, *declared)?;
+        }
+        for function in context.functions() {
+            merge_function(&mut functions, function)?;
+        }
+    }
 
     for (module_index, assignment) in modules.iter().enumerate() {
         let Some(stage) = graph_ir.stages.get(assignment.stage_index) else {
@@ -214,11 +320,28 @@ pub fn compile(
                 });
             }
         }
+        for required in assignment.module.attribute_accesses() {
+            let declared = stage_demand
+                .usages()
+                .iter()
+                .find(|usage| usage.semantic == required.semantic)
+                .map_or(AttributeAccess::empty(), |usage| usage.access);
+            if !declared.contains(required.access) {
+                return Err(CompileError::ModuleAttributeAccessUndeclared {
+                    module: module_index,
+                    stage: assignment.stage_index,
+                    semantic: required.semantic,
+                    required: required.access,
+                    declared,
+                });
+            }
+        }
 
         let declared = assignment.module.resources();
         validate_module_bindings(declared)?;
         let mut context = super::modules::CodegenCtx::new();
         assignment.module.emit_wesl(&mut context);
+        assignment.module.emit_wesl_functions(&mut context);
 
         for emitted in context.bindings() {
             if !declared.iter().any(|decl| decl == emitted) {
@@ -242,16 +365,23 @@ pub fn compile(
             merge_module_binding(&mut bindings, *declared_binding)?;
         }
 
-        stage_fragments[assignment.stage_index].extend(context.fragments().iter().cloned());
+        for function in context.functions() {
+            let resolved = resolve_attribute_identifiers(function, &attribute_layout);
+            merge_function(&mut functions, &resolved)?;
+        }
+
+        stage_fragments[assignment.stage_index].extend(
+            context
+                .fragments()
+                .iter()
+                .map(|fragment| resolve_attribute_identifiers(fragment, &attribute_layout)),
+        );
     }
 
     if !graph_ir.stages.is_empty() {
         merge_binding(&mut bindings, DISPATCH_COUNT_BINDING)?;
     }
 
-    let attribute_layout = graph::plan_layout(graph_ir);
-    let attribute_bindings =
-        build_attribute_bindings(&attribute_layout, &graph::live_usages(graph_ir))?;
     validate_attribute_bindings(&bindings, &attribute_bindings)?;
 
     let mut source = String::from("// Generated by Prism Ember graph compiler.\n");
@@ -265,6 +395,11 @@ pub fn compile(
         if binding.kind == ResourceKind::Curve {
             emit_curve_sampler(&mut source, *binding);
         }
+    }
+    for function in &functions {
+        source.push('\n');
+        source.push_str(function);
+        source.push('\n');
     }
 
     let mut entry_points = Vec::with_capacity(stage_order.len());
@@ -405,6 +540,56 @@ fn attribute_identifier(semantic: AttributeSemantic) -> String {
         AttributeSemantic::Custom(id) => format!("custom_{id}"),
     };
     name
+}
+
+/// Resolves the logical attribute identifiers emitted by modules to the
+/// physical storage names in this graph's ABI.
+///
+/// Built-in kernels use `ember_attr_<semantic>` for current-frame accesses and
+/// may use explicit `_previous`/`_current` suffixes when a module needs both
+/// sides. A non-ping-ponged channel has one physical binding, so both explicit
+/// sides collapse to that binding. Identifier-token replacement keeps names
+/// such as `velocity_current` from being rewritten as a substring of another
+/// identifier and also makes custom snippets deterministic.
+fn resolve_attribute_identifiers(source: &str, layout: &AttributeLayoutPlan) -> String {
+    let mut replacements = Vec::new();
+    for planned in &layout.attributes {
+        let base = format!("ember_attr_{}", attribute_identifier(planned.semantic));
+        let previous = format!("{base}_previous");
+        let current = format!("{base}_current");
+        let (resolved_previous, resolved_current, resolved_base) = if planned.copies == 2 {
+            (previous.clone(), current.clone(), current)
+        } else {
+            (base.clone(), base.clone(), base)
+        };
+        replacements.push((previous, resolved_previous));
+        replacements.push((current, resolved_current));
+        replacements.push((base, resolved_base));
+    }
+
+    let mut output = String::with_capacity(source.len());
+    let mut token = String::new();
+    let flush = |output: &mut String, token: &mut String| {
+        if token.is_empty() {
+            return;
+        }
+        if let Some((_, replacement)) = replacements.iter().find(|(name, _)| name == token) {
+            output.push_str(replacement);
+        } else {
+            output.push_str(token);
+        }
+        token.clear();
+    };
+    for ch in source.chars() {
+        if ch == '_' || ch.is_ascii_alphanumeric() {
+            token.push(ch);
+        } else {
+            flush(&mut output, &mut token);
+            output.push(ch);
+        }
+    }
+    flush(&mut output, &mut token);
+    output
 }
 
 fn validate_attribute_bindings(
@@ -583,6 +768,32 @@ fn merge_module_binding(
     Ok(())
 }
 
+fn merge_function(functions: &mut Vec<String>, function: &str) -> Result<(), CompileError> {
+    let name = function
+        .strip_prefix("fn ")
+        .and_then(|rest| rest.split_once('(').map(|(name, _)| name.trim()))
+        .filter(|name| is_wgsl_identifier(name))
+        .ok_or_else(|| CompileError::InvalidGeneratedWgsl {
+            phase: ShaderValidationPhase::Parse,
+            diagnostic: String::from("generated function is missing a valid WGSL name"),
+        })?;
+    if let Some(existing) = functions.iter().find(|existing| {
+        existing
+            .strip_prefix("fn ")
+            .and_then(|rest| rest.split_once('(').map(|(name, _)| name.trim()))
+            == Some(name)
+    }) {
+        if existing == function {
+            return Ok(());
+        }
+        return Err(CompileError::FunctionNameConflict {
+            name: String::from(name),
+        });
+    }
+    functions.push(String::from(function));
+    Ok(())
+}
+
 fn emit_binding(source: &mut String, binding: ResourceDecl) -> Result<(), CompileError> {
     if !is_wgsl_identifier(binding.name) {
         return Err(CompileError::InvalidBindingIdentifier {
@@ -697,7 +908,9 @@ mod tests {
     use super::*;
     use crate::particle::attributes::AttributeSemantic;
     use crate::particle::graph::{read, read_prev, write, PlatformProfile, StageIr};
-    use crate::particle::modules::{BuiltinModule, CodegenCtx, StageKind};
+    use crate::particle::modules::{
+        BuiltinDataInterface, BuiltinModule, CodegenCtx, DataInterface, StageKind,
+    };
     use crate::particle::EmberShadingModel;
 
     struct SnippetModule {
@@ -970,7 +1183,142 @@ mod tests {
             compiled.attribute_bindings[1].access,
             ResourceAccess::ReadWrite
         );
+        assert_eq!(
+            compiled.attribute_bindings_for_frame(0),
+            vec![
+                RuntimeAttributeBinding {
+                    semantic: AttributeSemantic::Velocity,
+                    role: AttributeBufferRole::Previous,
+                    binding: 0,
+                    physical_copy: 1,
+                },
+                RuntimeAttributeBinding {
+                    semantic: AttributeSemantic::Velocity,
+                    role: AttributeBufferRole::Current,
+                    binding: 1,
+                    physical_copy: 0,
+                },
+            ]
+        );
+        assert_eq!(compiled.attribute_bindings_for_frame(1)[0].physical_copy, 0);
+        assert_eq!(compiled.attribute_bindings_for_frame(1)[1].physical_copy, 1);
         validate_wgsl(&compiled.source).unwrap();
+    }
+
+    #[test]
+    fn module_access_contract_selects_previous_and_current_ping_pong_sides() {
+        let module = BuiltinModule::InheritVelocity;
+        let graph = GraphIr::new(32, EmberShadingModel::Unlit, PlatformProfile::Desktop)
+            .with_stage(
+                StageIr::new("inherit", IterationDomain::PerParticle, 1)
+                    .reading(read_prev(AttributeSemantic::Velocity))
+                    .writing(write(AttributeSemantic::Velocity)),
+            )
+            .with_output(AttributeSemantic::Velocity);
+        let compiled = compile(
+            &graph,
+            &[StageModule {
+                stage_index: 0,
+                module: &module,
+            }],
+        )
+        .unwrap();
+        assert!(compiled
+            .source
+            .contains("ember_attr_velocity_current[index] = emitter_velocity.xyz + ember_attr_velocity_previous[index]"));
+        assert!(compiled
+            .source
+            .contains("var<storage, read> ember_attr_velocity_previous"));
+        assert!(compiled
+            .source
+            .contains("var<storage, read_write> ember_attr_velocity_current"));
+        validate_wgsl(&compiled.source).unwrap();
+
+        let bad_graph = GraphIr::new(32, EmberShadingModel::Unlit, PlatformProfile::Desktop)
+            .with_stage(
+                StageIr::new("inherit", IterationDomain::PerParticle, 1)
+                    .writing(write(AttributeSemantic::Velocity)),
+            )
+            .with_output(AttributeSemantic::Velocity);
+        assert!(matches!(
+            compile(
+                &bad_graph,
+                &[StageModule {
+                    stage_index: 0,
+                    module: &module,
+                }]
+            ),
+            Err(CompileError::ModuleAttributeAccessUndeclared {
+                semantic: AttributeSemantic::Velocity,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn every_builtin_module_emits_a_naga_validated_kernel() {
+        for module in BuiltinModule::ALL {
+            let mut stage = StageIr::new(module.kernel_name(), module.stage().default_domain(), 1);
+            for usage in module.attribute_accesses() {
+                if usage.access.contains(AttributeAccess::READ)
+                    || usage.access.contains(AttributeAccess::READ_PREV)
+                {
+                    stage = stage.reading(usage);
+                }
+                if usage.access.contains(AttributeAccess::WRITE) {
+                    stage = stage.writing(usage);
+                }
+            }
+            let mut graph = GraphIr::new(64, EmberShadingModel::Unlit, PlatformProfile::Desktop)
+                .with_stage(stage);
+            for &semantic in module.required_attributes() {
+                graph = graph.with_output(semantic);
+            }
+            let compiled = compile(
+                &graph,
+                &[StageModule {
+                    stage_index: 0,
+                    module: &module,
+                }],
+            )
+            .unwrap_or_else(|error| {
+                panic!(
+                    "builtin {} failed to compile: {error:?}",
+                    module.kernel_name()
+                )
+            });
+            assert!(
+                compiled
+                    .source
+                    .contains(&format!("fn {}(index: u32)", module.kernel_function_name())),
+                "missing kernel definition for {}",
+                module.kernel_name()
+            );
+        }
+    }
+
+    #[test]
+    fn every_builtin_data_interface_emits_naga_validated_functions() {
+        for interface in BuiltinDataInterface::ALL {
+            let graph =
+                GraphIr::new(64, EmberShadingModel::Unlit, PlatformProfile::Desktop).with_stage(
+                    StageIr::new("data_interface_validation", IterationDomain::PerParticle, 1),
+                );
+            let interfaces: [&dyn DataInterface; 1] = [&interface];
+            let compiled =
+                compile_with_data_interfaces(&graph, &[], &interfaces).unwrap_or_else(|error| {
+                    panic!(
+                        "data interface {:?} failed to compile: {error:?}",
+                        interface
+                    )
+                });
+            for &function in interface.sample_functions() {
+                assert!(
+                    compiled.source.contains(&format!("fn {function}(")),
+                    "missing data-interface function {function} for {interface:?}"
+                );
+            }
+        }
     }
 
     #[test]

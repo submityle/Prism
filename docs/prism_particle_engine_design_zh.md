@@ -629,7 +629,7 @@ prism_particle_tools  (可选) 图编辑器 / 预览(含着色预览) / 性能 H
 | CPU emitter runtime | `pkg/prism_render_architecture/src/particle/runtime.rs` | 已实现固定容量池、rate/burst、确定性采样、积分/力场、寿命回收及溢出计数；本轮无法完成 crate 测试编译，不能据此确认当前测试状态 |
 | `.ember` 二进制资产 | `pkg/prism_render_architecture/src/particle/authoring.rs` | 已实现版本化 little-endian codec、输入校验、迁移模型与 round-trip/损坏输入测试；RON API 已移除 |
 | GPU 仿真与间接绘制切片 | `pkg/prism_render_gpudriven/src/particle.rs` 与 `shaders/particle*.wgsl` | Prism RHI/RenderGraph 上的 pool update、spawn、活跃索引、indirect args 与 quad 绘制；构造前校验设备缓冲/纹理/dispatch 限制，上传校验数值与记录；仅代表最小竖切片，不代表全功能 Ember |
-| Graph → WGSL 编译器基础 | `pkg/prism_render_architecture/src/particle/compiler.rs` | 校验 GraphIr、稳定拓扑序、模块属性需求与资源 ABI，生成活跃 SoA 布局和 WGSL storage bindings（含 previous/current ping-pong ABI）、运行时计数缓冲控制的 stage dispatch 与迭代计划及曲线 LUT 采样函数；模块资源按 group 稳定分配空闲 binding，避免多个模块默认声明 `(2, 0)` 时无法组合。内置 kernel 函数体、模块到属性变量的语义 lowering、DataInterface 可执行代码生成、ping-pong 运行时绑定选择与 pipeline-cache/RenderGraph 生产接线尚未完成，因此不能标记 M2 完成 |
+| Graph → WGSL 编译器基础 | `pkg/prism_render_architecture/src/particle/compiler.rs` | 校验 GraphIr、稳定拓扑序、模块属性需求与资源 ABI，生成活跃 SoA 布局和 WGSL storage bindings（含 previous/current ping-pong ABI）、运行时计数缓冲控制的 stage dispatch 与迭代计划、曲线 LUT 采样函数、DataInterface 函数合并、模块读/写/读旧帧契约、逻辑属性名到物理绑定名的 lowering，以及按帧奇偶选择 ping-pong 物理副本；模块资源按 group 稳定分配空闲 binding，避免多个模块默认声明 `(2, 0)` 时无法组合。pipeline-cache/RenderGraph 生产接线、真实设备资源绑定、完整模块参数资产 ABI 和端到端 Ember 生命周期仍未完成，因此不能标记 M2 完成 |
 | 合同/算法模块 | `pkg/prism_render_architecture/src/particle/` | 包含池、发射、模拟、事件、排序/剔除、着色/OIT 等 CPU 合同；纯合同或单算法模块不等于 GPU 生产接线 |
 | ECS/App 生命周期与完整渲染集成 | Prism 粒子运行时/渲染 crate | 尚未形成完整端到端接线；需以实际代码和集成验收逐项完成，不能由本设计文档推定已完成 |
 | 图编译、完整渲染器矩阵、高级求解器及场景服务集成 | 对应 compiler/render/solver 模块 | 本轮 GPU 竖切片未覆盖；当前无可声称完成或已测的实现证据 |
@@ -643,6 +643,8 @@ prism_particle_tools  (可选) 图编辑器 / 预览(含着色预览) / 性能 H
 验证更新（2026-10-20）：共享 checkout 后续恢复了 `pkg/prism_editor_content/src/lib.rs`，定向测试进入依赖编译，但被并行改动中的 `pkg/prism_physics_core/src/world.rs:1036` 阻断（`expected f32, found Vec3`）。同一时段 `target` 再次被并发清理，导致 Naga 无法创建临时目录。故 `particle::compiler` 回归测试仍未运行；错误来自 workspace 依赖/共享构建目录，不是粒子编译器诊断。源码 `rustfmt` 与 `git diff --check` 通过。
 
 验证更新（2026-10-20）：在保留当前共享工作树物理改动的前提下，使用独立的 `CARGO_TARGET_DIR=/private/tmp/prism-ember-target` 重跑 `cargo test -p prism_render_architecture --lib particle::compiler --no-fail-fast`，14 项测试全部通过。覆盖 GraphIr 校验、模块资源契约、资源 binding 冲突重分配、运行时 dispatch ABI、活跃属性与 ping-pong storage binding、曲线采样、Naga WGSL 验证和拓扑顺序；这仍不覆盖内置 kernel 语义 lowering、完整 DataInterface、pipeline-cache/RenderGraph 接线或端到端 Ember 生命周期。
+
+实现更新（2026-10-20）：编译器已加入模块级属性访问契约（current read / previous read / write）、生成源码的逻辑属性名解析，以及 `CompiledGraph::attribute_bindings_for_frame` 的 ping-pong 物理副本选择。`InheritVelocity`、`SetLifetime` 和三个标量约束 kernel 不再依赖 self-assignment；DataInterface 元数据不匹配会报错，未知接口函数名不再静默生成零值。由于共享工作树中的 `prism_physics_core/src/soft/topology.rs`、`ccd/leaf_sweep.rs` 等并行改动当前阻断 workspace 编译，本更新尚未取得新的 crate 测试验收；不能把源码格式检查当作编译通过。
 
 ---
 

@@ -12,13 +12,10 @@
 //!   `SDF`/`VDB` volume, the depth buffer, an audio spectrum, ...) as a set of
 //!   `sample_*` functions the modules can call from generated shader code.
 //!
-//! This module owns the *`CPU`-verifiable* half of that contract: the plugin
-//! traits, the built-in plugin registries with their stage/attribute/resource
-//! metadata, and a small [`CodegenCtx`] that accumulates inline `WESL`
-//! fragments and de-duplicates binding declarations. Actually running the
-//! generated `WESL`/`WGSL` on a `GPU` is out of scope for this layer, so the
-//! codegen hooks only assemble deterministic source fragments that tests can
-//! assert on.
+//! This module owns the plugin contracts, built-in registries, and the
+//! deterministic source assembly context used by the graph compiler. Generated
+//! function bodies are kept separate from entry-point fragments so helpers and
+//! kernels can be emitted once even when a module is reused by several stages.
 //!
 //! The [`StageKind`] defined here is the *plugin-level* categorisation from
 //! design §8; it is a coarser, authoring-facing grouping than the compiled
@@ -26,10 +23,11 @@
 //! [`super::graph`], and [`StageKind::default_domain`] maps each plugin stage to
 //! the [`IterationDomain`] its kernels dispatch under.
 
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use super::attributes::{AttributeFormat, AttributeSemantic};
+use super::attributes::{AttributeAccess, AttributeFormat, AttributeSemantic, AttributeUsage};
 use super::IterationDomain;
 
 /// The plugin-level simulation stage a [`EmberModule`] contributes to
@@ -270,6 +268,7 @@ impl ResourceDecl {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CodegenCtx {
     fragments: Vec<String>,
+    functions: Vec<(String, String)>,
     bindings: Vec<ResourceDecl>,
 }
 
@@ -283,12 +282,30 @@ impl CodegenCtx {
     /// Whether nothing has been emitted yet.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.fragments.is_empty() && self.bindings.is_empty()
+        self.fragments.is_empty() && self.functions.is_empty() && self.bindings.is_empty()
     }
 
     /// Appends an inline source fragment in emission order.
     pub fn push_fragment(&mut self, code: impl Into<String>) {
         self.fragments.push(code.into());
+    }
+
+    /// Adds one named function definition, de-duplicating repeated emissions.
+    ///
+    /// A repeated name with different source is rejected by returning `false`;
+    /// callers must not silently assemble two incompatible definitions.
+    pub fn push_function(&mut self, name: impl Into<String>, code: impl Into<String>) -> bool {
+        let name = name.into();
+        let code = code.into();
+        if let Some((_, existing)) = self
+            .functions
+            .iter()
+            .find(|(existing_name, _)| existing_name == &name)
+        {
+            return existing == &code;
+        }
+        self.functions.push((name, code));
+        true
     }
 
     /// Records a resource binding, de-duplicating by [`ResourceDecl::name`].
@@ -320,6 +337,12 @@ impl CodegenCtx {
         &self.bindings
     }
 
+    /// The named function definitions in emission order.
+    #[must_use]
+    pub fn functions(&self) -> impl Iterator<Item = &str> {
+        self.functions.iter().map(|(_, source)| source.as_str())
+    }
+
     /// The number of accumulated fragments.
     #[must_use]
     pub fn fragment_count(&self) -> usize {
@@ -336,8 +359,12 @@ impl CodegenCtx {
     #[must_use]
     pub fn assembled_source(&self) -> String {
         let mut out = String::new();
+        for source in self.functions() {
+            out.push_str(source);
+            out.push('\n');
+        }
         for (index, fragment) in self.fragments.iter().enumerate() {
-            if index > 0 {
+            if index > 0 || !out.is_empty() {
                 out.push('\n');
             }
             out.push_str(fragment);
@@ -357,10 +384,29 @@ pub trait EmberModule {
     fn stage(&self) -> StageKind;
     /// The attribute channels this module reads or writes (allocated on demand).
     fn required_attributes(&self) -> &[AttributeSemantic];
+    /// Returns the exact read/previous-read/write contract for this module.
+    /// Custom modules may override this when their generated source uses a
+    /// channel in a more specific way than the legacy required-attribute list.
+    fn attribute_accesses(&self) -> Vec<AttributeUsage> {
+        self.required_attributes()
+            .iter()
+            .copied()
+            .map(|semantic| {
+                AttributeUsage::new(
+                    semantic,
+                    semantic.default_format().unwrap_or(AttributeFormat::F32),
+                    AttributeAccess::WRITE,
+                )
+            })
+            .collect()
+    }
     /// The `GPU` resources this module binds.
     fn resources(&self) -> &[ResourceDecl];
     /// Emits this module's inline `WESL` fragment and binding declarations.
     fn emit_wesl(&self, ctx: &mut CodegenCtx);
+
+    /// Emits reusable helper and kernel function definitions.
+    fn emit_wesl_functions(&self, _ctx: &mut CodegenCtx) {}
 }
 
 /// A data source exposed to modules as callable `sample_*` functions
@@ -383,7 +429,6 @@ struct ModuleMeta {
     kernel: &'static str,
 }
 
-const A_EMPTY: &[AttributeSemantic] = &[];
 const A_SPAWN_BASE: &[AttributeSemantic] = &[
     AttributeSemantic::Alive,
     AttributeSemantic::ParticleId,
@@ -449,6 +494,10 @@ const R_RANDOM_RANGE: &[ResourceDecl] = &[ResourceDecl::uniform("random_range", 
 const R_SPAWN_RATE: &[ResourceDecl] = &[ResourceDecl::uniform("spawn_rate", 2, 0)];
 const R_SPAWN_BURST: &[ResourceDecl] = &[ResourceDecl::uniform("spawn_burst", 2, 0)];
 const R_SPAWN_SHAPE: &[ResourceDecl] = &[ResourceDecl::uniform("spawn_shape", 2, 0)];
+const R_EMITTER_VELOCITY: &[ResourceDecl] = &[ResourceDecl::uniform("emitter_velocity", 2, 0)];
+const R_LIFETIME_PARAMS: &[ResourceDecl] = &[ResourceDecl::uniform("lifetime_params", 2, 0)];
+const R_CONSTRAINT_PARAMS: &[ResourceDecl] = &[ResourceDecl::uniform("constraint_params", 2, 0)];
+const R_EVENT_OUTPUT: &[ResourceDecl] = &[ResourceDecl::storage_rw("event_output", 2, 0)];
 
 /// The first-ship built-in module library (design §8.2).
 ///
@@ -489,7 +538,7 @@ pub enum BuiltinModule {
     SetLifetime,
     /// Initialise rotation.
     SetRotation,
-    /// Assign a uniformly random value inside an authored range.
+    /// Assign a uniformly random size inside an authored range.
     RandomRange,
     /// Inherit the emitter's velocity at spawn.
     InheritVelocity,
@@ -673,7 +722,7 @@ impl BuiltinModule {
             BuiltinModule::SetLifetime => ModuleMeta {
                 stage: StageKind::Init,
                 attributes: A_LIFETIME_AGE,
-                resources: R_EMPTY,
+                resources: R_LIFETIME_PARAMS,
                 kernel: "set_lifetime",
             },
             BuiltinModule::SetRotation => ModuleMeta {
@@ -684,14 +733,14 @@ impl BuiltinModule {
             },
             BuiltinModule::RandomRange => ModuleMeta {
                 stage: StageKind::Init,
-                attributes: A_EMPTY,
+                attributes: A_SIZE,
                 resources: R_RANDOM_RANGE,
                 kernel: "random_range",
             },
             BuiltinModule::InheritVelocity => ModuleMeta {
                 stage: StageKind::Init,
                 attributes: A_VELOCITY,
-                resources: R_EMPTY,
+                resources: R_EMITTER_VELOCITY,
                 kernel: "inherit_velocity",
             },
             BuiltinModule::Gravity => ModuleMeta {
@@ -775,19 +824,19 @@ impl BuiltinModule {
             BuiltinModule::DistanceConstraint => ModuleMeta {
                 stage: StageKind::Constraint,
                 attributes: A_POSITION,
-                resources: R_EMPTY,
+                resources: R_CONSTRAINT_PARAMS,
                 kernel: "distance_constraint",
             },
             BuiltinModule::BendConstraint => ModuleMeta {
                 stage: StageKind::Constraint,
                 attributes: A_POSITION,
-                resources: R_EMPTY,
+                resources: R_CONSTRAINT_PARAMS,
                 kernel: "bend_constraint",
             },
             BuiltinModule::VolumeConstraint => ModuleMeta {
                 stage: StageKind::Constraint,
                 attributes: A_POSITION,
-                resources: R_EMPTY,
+                resources: R_CONSTRAINT_PARAMS,
                 kernel: "volume_constraint",
             },
             BuiltinModule::AgeKill => ModuleMeta {
@@ -817,25 +866,25 @@ impl BuiltinModule {
             BuiltinModule::EmitOnDeath => ModuleMeta {
                 stage: StageKind::Event,
                 attributes: A_DEATH,
-                resources: R_EMPTY,
+                resources: R_EVENT_OUTPUT,
                 kernel: "emit_on_death",
             },
             BuiltinModule::EmitOnCollision => ModuleMeta {
                 stage: StageKind::Event,
                 attributes: A_POS_VEL,
-                resources: R_EMPTY,
+                resources: R_EVENT_OUTPUT,
                 kernel: "emit_on_collision",
             },
             BuiltinModule::EmitOnSpawn => ModuleMeta {
                 stage: StageKind::Event,
                 attributes: A_PARTICLE_ID,
-                resources: R_EMPTY,
+                resources: R_EVENT_OUTPUT,
                 kernel: "emit_on_spawn",
             },
             BuiltinModule::EmitOnCondition => ModuleMeta {
                 stage: StageKind::Event,
                 attributes: A_AGE,
-                resources: R_EMPTY,
+                resources: R_EVENT_OUTPUT,
                 kernel: "emit_on_condition",
             },
         }
@@ -853,16 +902,135 @@ impl BuiltinModule {
         self.meta().attributes
     }
 
+    /// Returns the exact attribute access contract implemented by the kernel.
+    ///
+    /// The compact `required_attributes()` list is useful for registry and
+    /// authoring queries. Compilation additionally needs to know whether a
+    /// channel is read from the current frame, read from the previous frame,
+    /// or written, otherwise a graph can select the wrong side of a ping-pong
+    /// allocation.
+    #[must_use]
+    pub fn attribute_accesses(self) -> Vec<AttributeUsage> {
+        let read = AttributeAccess::READ;
+        let read_prev = AttributeAccess::READ_PREV;
+        let write = AttributeAccess::WRITE;
+        let read_write = read.union(write);
+        let usage = |semantic, access| {
+            AttributeUsage::new(
+                semantic,
+                semantic.default_format().unwrap_or(AttributeFormat::F32),
+                access,
+            )
+        };
+        match self {
+            Self::SpawnRate | Self::SpawnBurst => alloc::vec![
+                usage(AttributeSemantic::Alive, write),
+                usage(AttributeSemantic::ParticleId, write),
+                usage(AttributeSemantic::Age, write),
+                usage(AttributeSemantic::Lifetime, write),
+            ],
+            Self::SpawnPoint
+            | Self::SpawnSphere
+            | Self::SpawnBox
+            | Self::SpawnCone
+            | Self::SpawnMeshSurface
+            | Self::SpawnSkeleton
+            | Self::SpawnSdfSurface => alloc::vec![
+                usage(AttributeSemantic::Position, write),
+                usage(AttributeSemantic::Alive, write),
+                usage(AttributeSemantic::ParticleId, write),
+                usage(AttributeSemantic::Age, write),
+                usage(AttributeSemantic::Lifetime, write),
+            ],
+            Self::SetPosition => alloc::vec![usage(AttributeSemantic::Position, write)],
+            Self::SetVelocity => alloc::vec![usage(AttributeSemantic::Velocity, write)],
+            Self::SetColor => alloc::vec![usage(AttributeSemantic::Color, write)],
+            Self::SetSize | Self::RandomRange => alloc::vec![usage(AttributeSemantic::Size, write)],
+            Self::SetLifetime => alloc::vec![
+                usage(AttributeSemantic::Lifetime, write),
+                usage(AttributeSemantic::Age, write),
+            ],
+            Self::SetRotation => alloc::vec![usage(AttributeSemantic::Rotation, write)],
+            Self::InheritVelocity => {
+                alloc::vec![usage(AttributeSemantic::Velocity, read_prev.union(write))]
+            }
+            Self::Gravity | Self::Drag | Self::Wind => {
+                alloc::vec![usage(AttributeSemantic::Velocity, read_write)]
+            }
+            Self::Vortex | Self::PointAttractor | Self::LineAttractor | Self::CurlNoise => {
+                alloc::vec![
+                    usage(AttributeSemantic::Position, read),
+                    usage(AttributeSemantic::Velocity, read_write),
+                ]
+            }
+            Self::VectorField => alloc::vec![
+                usage(AttributeSemantic::Position, read),
+                usage(AttributeSemantic::Velocity, read_write),
+            ],
+            Self::CollisionPlane
+            | Self::CollisionDepth
+            | Self::CollisionSdf
+            | Self::CollisionRaytrace
+            | Self::CollisionBounce => alloc::vec![
+                usage(AttributeSemantic::Position, read_write),
+                usage(AttributeSemantic::Velocity, read_write),
+            ],
+            Self::DistanceConstraint | Self::BendConstraint | Self::VolumeConstraint => {
+                alloc::vec![usage(AttributeSemantic::Position, read_write)]
+            }
+            Self::AgeKill => alloc::vec![
+                usage(AttributeSemantic::Age, read),
+                usage(AttributeSemantic::Lifetime, read),
+                usage(AttributeSemantic::Alive, write),
+            ],
+            Self::ColorOverLife => alloc::vec![
+                usage(AttributeSemantic::Age, read),
+                usage(AttributeSemantic::Lifetime, read),
+                usage(AttributeSemantic::Color, write),
+            ],
+            Self::SizeOverLife => alloc::vec![
+                usage(AttributeSemantic::Age, read),
+                usage(AttributeSemantic::Lifetime, read),
+                usage(AttributeSemantic::Size, write),
+            ],
+            Self::VelocityOverLife => alloc::vec![
+                usage(AttributeSemantic::Age, read),
+                usage(AttributeSemantic::Lifetime, read),
+                usage(AttributeSemantic::Velocity, read_write),
+            ],
+            Self::EmitOnDeath => alloc::vec![
+                usage(AttributeSemantic::Alive, read),
+                usage(AttributeSemantic::Position, read),
+            ],
+            Self::EmitOnCollision => alloc::vec![
+                usage(AttributeSemantic::Position, read),
+                usage(AttributeSemantic::Velocity, read),
+            ],
+            Self::EmitOnSpawn => alloc::vec![usage(AttributeSemantic::ParticleId, read)],
+            Self::EmitOnCondition => alloc::vec![usage(AttributeSemantic::Age, read)],
+        }
+    }
+
     /// The `GPU` resources this module binds.
     #[must_use]
     pub const fn resources(self) -> &'static [ResourceDecl] {
         self.meta().resources
     }
 
-    /// The stable `WESL` kernel identifier generated code calls for this module.
+    /// The stable logical kernel identifier used by graph metadata and diagnostics.
     #[must_use]
     pub const fn kernel_name(self) -> &'static str {
         self.meta().kernel
+    }
+
+    /// The WGSL function identifier emitted for this module's executable kernel.
+    ///
+    /// Resource bindings intentionally use their authored names (for example
+    /// `spawn_rate`), so executable functions live in a separate namespace to
+    /// avoid WGSL global-identifier collisions.
+    #[must_use]
+    pub fn kernel_function_name(self) -> String {
+        format!("ember_kernel_{}", self.kernel_name())
     }
 
     /// The stable ordinal used for serialisation and registry indexing.
@@ -893,6 +1061,10 @@ impl EmberModule for BuiltinModule {
         self.meta().attributes
     }
 
+    fn attribute_accesses(&self) -> Vec<AttributeUsage> {
+        BuiltinModule::attribute_accesses(*self)
+    }
+
     fn resources(&self) -> &[ResourceDecl] {
         self.meta().resources
     }
@@ -902,7 +1074,7 @@ impl EmberModule for BuiltinModule {
         for &decl in meta.resources {
             let _ = ctx.declare_binding(decl);
         }
-        let mut call = String::from(meta.kernel);
+        let mut call = self.kernel_function_name();
         let index = match meta.stage.default_domain() {
             IterationDomain::PerParticle => "particle_index",
             IterationDomain::PerNeighborCell
@@ -916,6 +1088,142 @@ impl EmberModule for BuiltinModule {
         call.push_str(");");
         ctx.push_fragment(call);
     }
+
+    fn emit_wesl_functions(&self, ctx: &mut CodegenCtx) {
+        if matches!(
+            self,
+            BuiltinModule::RandomRange
+                | BuiltinModule::SpawnPoint
+                | BuiltinModule::SpawnSphere
+                | BuiltinModule::SpawnBox
+                | BuiltinModule::SpawnCone
+                | BuiltinModule::CurlNoise
+        ) {
+            ctx.push_function(
+                "ember_rand01",
+                "fn ember_rand01(value: u32) -> f32 {\n    var x = value;\n    x = x ^ (x >> 16u);\n    x = x * 747796405u + 2891336453u;\n    x = ((x >> ((x >> 28u) + 4u)) ^ x) * 277803737u;\n    x = (x >> 22u) ^ x;\n    return f32(x) / 4294967295.0;\n}" ,
+            );
+        }
+        ctx.push_function(self.kernel_function_name(), builtin_kernel_source(*self));
+    }
+}
+
+fn builtin_kernel_source(module: BuiltinModule) -> String {
+    let name = module.kernel_function_name();
+    let body = match module {
+        BuiltinModule::SpawnRate => {
+            "    ember_attr_alive[index] = 1u;\n    ember_attr_particle_id[index] = index;\n    ember_attr_age[index] = 0.0;\n    ember_attr_lifetime[index] = max(spawn_rate.y, 0.001);"
+        }
+        BuiltinModule::SpawnBurst => {
+            "    ember_attr_alive[index] = 1u;\n    ember_attr_particle_id[index] = index;\n    ember_attr_age[index] = 0.0;\n    ember_attr_lifetime[index] = max(spawn_burst.y, 0.001);"
+        }
+        BuiltinModule::SpawnPoint => {
+            "    ember_attr_position[index] = spawn_shape.xyz;\n    ember_attr_alive[index] = 1u;\n    ember_attr_particle_id[index] = index;\n    ember_attr_age[index] = 0.0;\n    ember_attr_lifetime[index] = max(spawn_shape.w, 0.001);"
+        }
+        BuiltinModule::SpawnSphere => {
+            "    let u = ember_rand01(index * 747796405u);\n    let v = ember_rand01(index * 2891336453u);\n    let z = 1.0 - 2.0 * u;\n    let r = sqrt(max(0.0, 1.0 - z * z));\n    let phi = 6.28318530718 * v;\n    ember_attr_position[index] = spawn_shape.xyz + spawn_shape.w * vec3<f32>(r * cos(phi), r * sin(phi), z);\n    ember_attr_alive[index] = 1u;\n    ember_attr_particle_id[index] = index;\n    ember_attr_age[index] = 0.0;\n    ember_attr_lifetime[index] = max(spawn_shape.w, 0.001);"
+        }
+        BuiltinModule::SpawnBox => {
+            "    let x = ember_rand01(index * 747796405u) * 2.0 - 1.0;\n    let y = ember_rand01(index * 2891336453u) * 2.0 - 1.0;\n    let z = ember_rand01(index * 277803737u) * 2.0 - 1.0;\n    ember_attr_position[index] = spawn_shape.xyz + vec3<f32>(x, y, z) * spawn_shape.w;\n    ember_attr_alive[index] = 1u;\n    ember_attr_particle_id[index] = index;\n    ember_attr_age[index] = 0.0;\n    ember_attr_lifetime[index] = max(spawn_shape.w, 0.001);"
+        }
+        BuiltinModule::SpawnCone => {
+            "    let u = ember_rand01(index * 747796405u);\n    let v = ember_rand01(index * 2891336453u);\n    let radius = spawn_shape.w * sqrt(u);\n    let phi = 6.28318530718 * v;\n    ember_attr_position[index] = spawn_shape.xyz + vec3<f32>(radius * cos(phi), radius * sin(phi), spawn_shape.w * u);\n    ember_attr_alive[index] = 1u;\n    ember_attr_particle_id[index] = index;\n    ember_attr_age[index] = 0.0;\n    ember_attr_lifetime[index] = max(spawn_shape.w, 0.001);"
+        }
+        BuiltinModule::SpawnMeshSurface
+        | BuiltinModule::SpawnSkeleton
+        | BuiltinModule::SpawnSdfSurface => {
+            "    ember_attr_alive[index] = 1u;\n    ember_attr_particle_id[index] = index;\n    ember_attr_age[index] = 0.0;\n    ember_attr_lifetime[index] = max(spawn_shape.w, 0.001);"
+        }
+        BuiltinModule::SetPosition => "    ember_attr_position[index] = vec3<f32>(0.0);",
+        BuiltinModule::SetVelocity => "    ember_attr_velocity[index] = vec3<f32>(0.0);",
+        BuiltinModule::SetColor => "    ember_attr_color[index] = vec4<f32>(1.0);",
+        BuiltinModule::SetSize => "    ember_attr_size[index] = 1.0;",
+        BuiltinModule::SetLifetime => {
+            "    ember_attr_lifetime[index] = max(lifetime_params.x, 0.001);\n    ember_attr_age[index] = 0.0;"
+        }
+        BuiltinModule::SetRotation => "    ember_attr_rotation[index] = 0.0;",
+        BuiltinModule::RandomRange => {
+            "    let sampled = mix(random_range.x, random_range.y, ember_rand01(index));\n    ember_attr_size[index] = max(sampled, 0.0);"
+        }
+        BuiltinModule::InheritVelocity => {
+            "    ember_attr_velocity_current[index] = emitter_velocity.xyz + ember_attr_velocity_previous[index];"
+        }
+        BuiltinModule::Gravity => "    ember_attr_velocity[index] += gravity.xyz;",
+        BuiltinModule::Drag => "    ember_attr_velocity[index] *= max(0.0, 1.0 - drag.x);",
+        BuiltinModule::Vortex => {
+            "    let offset = ember_attr_position[index] - vortex.xyz;\n    ember_attr_velocity[index] += cross(vortex.xyz, offset) * vortex.w;"
+        }
+        BuiltinModule::PointAttractor => {
+            "    let delta = point_attractor.xyz - ember_attr_position[index];\n    let distance_sq = max(dot(delta, delta), 0.0001);\n    ember_attr_velocity[index] += delta * (point_attractor.w / distance_sq);"
+        }
+        BuiltinModule::LineAttractor => {
+            "    let delta = line_attractor.xyz - ember_attr_position[index];\n    ember_attr_velocity[index] += normalize(delta + vec3<f32>(0.00001)) * line_attractor.w;"
+        }
+        BuiltinModule::CurlNoise => {
+            "    let phase = ember_rand01(index * 1664525u) * 6.28318530718;\n    ember_attr_velocity[index] += curl_noise.xyz * vec3<f32>(sin(phase), cos(phase), sin(phase * 0.5));"
+        }
+        BuiltinModule::Wind => "    ember_attr_velocity[index] += wind.xyz;",
+        BuiltinModule::VectorField => {
+            "    let sample = textureLoad(vector_field, vec3<i32>(0, 0, 0), 0);\n    ember_attr_velocity[index] += sample.xyz;"
+        }
+        BuiltinModule::CollisionPlane => {
+            "    let normal = normalize(collision_plane.xyz);\n    let distance = dot(ember_attr_position[index], normal) - collision_plane.w;\n    if (distance < 0.0) {\n        ember_attr_position[index] -= normal * distance;\n        ember_attr_velocity[index] = reflect(ember_attr_velocity[index], normal);\n    }"
+        }
+        BuiltinModule::CollisionDepth => {
+            "    let scene = textureLoad(depth_buffer, vec2<i32>(0, 0), 0).x;\n    if (ember_attr_position[index].z > scene) { ember_attr_position[index].z = scene; }"
+        }
+        BuiltinModule::CollisionSdf => {
+            "    let distance = textureLoad(collision_sdf, vec3<i32>(0, 0, 0), 0).x;\n    if (distance < 0.0) { ember_attr_position[index] -= vec3<f32>(0.0, 0.0, distance); }"
+        }
+        BuiltinModule::CollisionRaytrace => {
+            "    let scene_word = raytrace_scene[index];\n    if (scene_word != 0u) { ember_attr_velocity[index] = -ember_attr_velocity[index]; }"
+        }
+        BuiltinModule::CollisionBounce => {
+            "    ember_attr_velocity[index] *= max(0.0, bounce_params.x);\n    ember_attr_velocity[index] = vec3<f32>(ember_attr_velocity[index].xy, -ember_attr_velocity[index].z);"
+        }
+        BuiltinModule::DistanceConstraint => {
+            "    let radius = length(ember_attr_position[index]);\n    let target = max(constraint_params.x, 0.0);\n    let correction = (radius - target) * clamp(constraint_params.y, 0.0, 1.0);\n    if (radius > 0.00001) { ember_attr_position[index] -= normalize(ember_attr_position[index]) * correction; }"
+        }
+        BuiltinModule::BendConstraint => {
+            "    let target = normalize(constraint_params.xyz + vec3<f32>(0.00001));\n    let length_before = length(ember_attr_position[index]);\n    let blend = clamp(constraint_params.w, 0.0, 1.0);\n    ember_attr_position[index] = mix(ember_attr_position[index], target * length_before, blend);"
+        }
+        BuiltinModule::VolumeConstraint => {
+            "    let radius = max(length(ember_attr_position[index]), 0.00001);\n    let target_radius = max(constraint_params.x, 0.00001);\n    let scale = mix(1.0, target_radius / radius, clamp(constraint_params.y, 0.0, 1.0));\n    ember_attr_position[index] *= scale;"
+        }
+        BuiltinModule::AgeKill => {
+            "    if (ember_attr_age[index] >= ember_attr_lifetime[index]) { ember_attr_alive[index] = 0u; }"
+        }
+        BuiltinModule::ColorOverLife => {
+            "    let t = clamp(ember_attr_age[index] / max(ember_attr_lifetime[index], 0.001), 0.0, 1.0);\n    ember_attr_color[index] = ember_sample_color_over_life(t);"
+        }
+        BuiltinModule::SizeOverLife => {
+            "    let t = clamp(ember_attr_age[index] / max(ember_attr_lifetime[index], 0.001), 0.0, 1.0);\n    ember_attr_size[index] = ember_sample_size_over_life(t).x;"
+        }
+        BuiltinModule::VelocityOverLife => {
+            "    let t = clamp(ember_attr_age[index] / max(ember_attr_lifetime[index], 0.001), 0.0, 1.0);\n    ember_attr_velocity[index] *= ember_sample_velocity_over_life(t).xyz;"
+        }
+        BuiltinModule::EmitOnDeath
+        | BuiltinModule::EmitOnCollision
+        | BuiltinModule::EmitOnSpawn
+        | BuiltinModule::EmitOnCondition => {
+            match module {
+                BuiltinModule::EmitOnDeath => {
+                    "    event_output[index] = select(0u, 1u, ember_attr_alive[index] == 0u);"
+                }
+                BuiltinModule::EmitOnCollision => {
+                    "    event_output[index] = select(0u, 1u, dot(ember_attr_velocity[index], ember_attr_velocity[index]) > 0.0);"
+                }
+                BuiltinModule::EmitOnSpawn => {
+                    "    event_output[index] = ember_attr_particle_id[index];"
+                }
+                BuiltinModule::EmitOnCondition => {
+                    "    event_output[index] = select(0u, 1u, ember_attr_age[index] > 0.0);"
+                }
+                _ => unreachable!(),
+            }
+        }
+    };
+    format!("fn {name}(index: u32) {{\n{body}\n}}")
 }
 
 // --- Built-in data-interface catalog (design §8.3) -------------------------
@@ -972,19 +1280,63 @@ struct DataInterfaceMeta {
 }
 
 const B_MESH: &[ResourceDecl] = &[
-    ResourceDecl::buffer("mesh_vertices", 3, 0),
-    ResourceDecl::buffer("mesh_indices", 3, 1),
+    ResourceDecl::new(
+        "mesh_vertices",
+        ResourceKind::StorageBuffer,
+        ResourceAccess::ReadOnly,
+        AttributeFormat::Vec4,
+        3,
+        0,
+    ),
+    ResourceDecl::new(
+        "mesh_normals",
+        ResourceKind::StorageBuffer,
+        ResourceAccess::ReadOnly,
+        AttributeFormat::Vec4,
+        3,
+        1,
+    ),
+    ResourceDecl::buffer("mesh_indices", 3, 2),
 ];
 const B_SKELETAL: &[ResourceDecl] = &[
-    ResourceDecl::buffer("skeletal_vertices", 3, 0),
-    ResourceDecl::buffer("skeletal_bones", 3, 1),
+    ResourceDecl::new(
+        "skeletal_vertices",
+        ResourceKind::StorageBuffer,
+        ResourceAccess::ReadOnly,
+        AttributeFormat::Vec4,
+        3,
+        0,
+    ),
+    ResourceDecl::new(
+        "skeletal_velocities",
+        ResourceKind::StorageBuffer,
+        ResourceAccess::ReadOnly,
+        AttributeFormat::Vec4,
+        3,
+        1,
+    ),
+    ResourceDecl::buffer("skeletal_bones", 3, 2),
 ];
-const B_SPLINE: &[ResourceDecl] = &[ResourceDecl::buffer("spline_control_points", 3, 0)];
+const B_SPLINE: &[ResourceDecl] = &[ResourceDecl::new(
+    "spline_control_points",
+    ResourceKind::StorageBuffer,
+    ResourceAccess::ReadOnly,
+    AttributeFormat::Vec4,
+    3,
+    0,
+)];
 const B_TEX2D: &[ResourceDecl] = &[ResourceDecl::texture2d("field_texture_2d", 3, 0)];
 const B_TEX3D: &[ResourceDecl] = &[ResourceDecl::texture3d("field_texture_3d", 3, 0)];
 const B_SDF: &[ResourceDecl] = &[ResourceDecl::texture3d("sdf_volume", 3, 0)];
 const B_VDB: &[ResourceDecl] = &[ResourceDecl::buffer("vdb_tree", 3, 0)];
-const B_POINT_CACHE: &[ResourceDecl] = &[ResourceDecl::buffer("point_cache", 3, 0)];
+const B_POINT_CACHE: &[ResourceDecl] = &[ResourceDecl::new(
+    "point_cache",
+    ResourceKind::StorageBuffer,
+    ResourceAccess::ReadOnly,
+    AttributeFormat::Vec4,
+    3,
+    0,
+)];
 const B_CAMERA: &[ResourceDecl] = &[ResourceDecl::uniform("camera", 3, 0)];
 const B_DEPTH: &[ResourceDecl] = &[ResourceDecl::texture2d("scene_depth", 3, 0)];
 const B_NORMAL: &[ResourceDecl] = &[ResourceDecl::texture2d("scene_normal", 3, 0)];
@@ -1257,12 +1609,85 @@ impl DataInterface for BuiltinDataInterface {
             let _ = ctx.declare_binding(decl);
         }
         for &name in meta.functions {
-            let mut decl = String::from("fn ");
-            decl.push_str(name);
-            decl.push_str("(id: u32) -> vec4<f32>;");
-            ctx.push_fragment(decl);
+            ctx.push_function(name, data_interface_function_source(*self, name));
         }
     }
+}
+
+fn data_interface_function_source(interface: BuiltinDataInterface, name: &str) -> String {
+    let body = match (interface, name) {
+        (BuiltinDataInterface::SampleMesh, "sample_mesh_position") => {
+            "    return mesh_vertices[id];"
+        }
+        (BuiltinDataInterface::SampleMesh, "sample_mesh_normal") => {
+            "    return mesh_normals[id];"
+        }
+        (BuiltinDataInterface::SampleMesh, "sample_mesh_barycentric") => {
+            "    let u = fract(f32(mesh_indices[id]) * 0.7548776);\n    let v = fract(f32(mesh_indices[id]) * 0.5698403) * (1.0 - u);\n    return vec4<f32>(u, v, 1.0 - u - v, 1.0);"
+        }
+        (BuiltinDataInterface::SampleSkeletalMesh, "sample_skeletal_position") => {
+            "    return skeletal_vertices[id];"
+        }
+        (BuiltinDataInterface::SampleSkeletalMesh, "sample_skeletal_velocity") => {
+            "    return skeletal_velocities[id];"
+        }
+        (BuiltinDataInterface::SampleSpline, "sample_spline_point") => {
+            "    return spline_control_points[id];"
+        }
+        (BuiltinDataInterface::SampleSpline, "sample_spline_tangent") => {
+            "    return normalize(spline_control_points[id]);"
+        }
+        (BuiltinDataInterface::SampleTexture2d, _) => {
+            "    return textureLoad(field_texture_2d, vec2<i32>(i32(id), 0), 0);"
+        }
+        (BuiltinDataInterface::SampleTexture3d, _) => {
+            "    return textureLoad(field_texture_3d, vec3<i32>(i32(id), 0, 0), 0);"
+        }
+        (BuiltinDataInterface::SampleSdf, "sample_sdf_distance") => {
+            "    return textureLoad(sdf_volume, vec3<i32>(i32(id), 0, 0), 0);"
+        }
+        (BuiltinDataInterface::SampleSdf, "sample_sdf_gradient") => {
+            "    let center = textureLoad(sdf_volume, vec3<i32>(i32(id), 0, 0), 0).x;\n    let right = textureLoad(sdf_volume, vec3<i32>(i32(id) + 1, 0, 0), 0).x;\n    return vec4<f32>(right - center, 0.0, 0.0, 0.0);"
+        }
+        (BuiltinDataInterface::SampleVdb, _) => {
+            "    return vec4<f32>(f32(vdb_tree[id]), 0.0, 0.0, 1.0);"
+        }
+        (BuiltinDataInterface::SamplePointCache, _) => {
+            "    return point_cache[id];"
+        }
+        (BuiltinDataInterface::SampleCamera, _) => "    return camera;",
+        (BuiltinDataInterface::SampleDepth, _) => {
+            "    return textureLoad(scene_depth, vec2<i32>(i32(id), 0), 0);"
+        }
+        (BuiltinDataInterface::SampleNormal, _) => {
+            "    return textureLoad(scene_normal, vec2<i32>(i32(id), 0), 0);"
+        }
+        (BuiltinDataInterface::SampleLight, _) => {
+            "    return vec4<f32>(f32(clustered_lights[id]), 0.0, 0.0, 1.0);"
+        }
+        (BuiltinDataInterface::SampleRayTraceScene, _) => {
+            "    return vec4<f32>(f32(raytrace_tlas[id]), 0.0, 0.0, 1.0);"
+        }
+        (BuiltinDataInterface::SampleGiProbe, _) => {
+            "    return textureLoad(gi_irradiance, vec3<i32>(i32(id), 0, 0), 0);"
+        }
+        (BuiltinDataInterface::SampleAudioSpectrum, _) => {
+            "    return vec4<f32>(f32(audio_spectrum[id]), 0.0, 0.0, 1.0);"
+        }
+        (BuiltinDataInterface::SampleCurve, _) => {
+            "    let count = arrayLength(&signal_curve);\n    if (count == 0u) { return vec4<f32>(0.0); }\n    return signal_curve[min(id, count - 1u)];"
+        }
+        (BuiltinDataInterface::SampleGlobal, _) => "    return globals;",
+        (BuiltinDataInterface::SampleUserParam, _) => "    return user_params;",
+        (BuiltinDataInterface::SampleGrid, _) => {
+            "    return vec4<f32>(f32(interaction_grid[id]), 0.0, 0.0, 1.0);"
+        }
+        (BuiltinDataInterface::SampleNeighbor, _) => {
+            "    return vec4<f32>(f32(neighbor_list[id]), 0.0, 0.0, 1.0);"
+        }
+        _ => unreachable!("builtin data-interface function is missing from its metadata"),
+    };
+    format!("fn {name}(id: u32) -> vec4<f32> {{\n{body}\n}}")
 }
 
 #[cfg(test)]
@@ -1326,8 +1751,11 @@ mod tests {
     }
 
     #[test]
-    fn random_range_is_an_attribute_free_boundary() {
-        assert!(BuiltinModule::RandomRange.required_attributes().is_empty());
+    fn random_range_writes_size_and_binds_range_uniform() {
+        assert_eq!(
+            BuiltinModule::RandomRange.required_attributes(),
+            &[AttributeSemantic::Size]
+        );
         // It still binds its range uniform, so it is not resource-free.
         assert_eq!(BuiltinModule::RandomRange.resources().len(), 1);
     }
@@ -1420,10 +1848,13 @@ mod tests {
         BuiltinModule::Drag.emit_wesl(&mut ctx);
         assert_eq!(ctx.fragment_count(), 2);
         assert_eq!(ctx.binding_count(), 2);
-        assert_eq!(ctx.fragments()[0], "gravity(particle_index);");
+        assert_eq!(ctx.fragments()[0], "ember_kernel_gravity(particle_index);");
         assert_eq!(ctx.bindings()[0].name, "gravity");
         let source = ctx.assembled_source();
-        assert_eq!(source, "gravity(particle_index);\ndrag(particle_index);");
+        assert_eq!(
+            source,
+            "ember_kernel_gravity(particle_index);\nember_kernel_drag(particle_index);"
+        );
     }
 
     #[test]
@@ -1452,7 +1883,10 @@ mod tests {
         BuiltinModule::SetPosition.emit_wesl(&mut ctx);
         assert_eq!(ctx.fragment_count(), 1);
         assert_eq!(ctx.binding_count(), 0);
-        assert_eq!(ctx.fragments()[0], "set_position(particle_index);");
+        assert_eq!(
+            ctx.fragments()[0],
+            "ember_kernel_set_position(particle_index);"
+        );
     }
 
     #[test]
@@ -1470,7 +1904,7 @@ mod tests {
             module.emit_wesl(&mut context);
             assert_eq!(
                 context.fragments()[0],
-                alloc::format!("{}(invocation_index);", module.kernel_name())
+                alloc::format!("{}(invocation_index);", module.kernel_function_name())
             );
         }
     }
@@ -1481,11 +1915,13 @@ mod tests {
         BuiltinDataInterface::SampleGlobal.emit_wesl_functions(&mut ctx);
         assert_eq!(ctx.binding_count(), 1);
         assert_eq!(ctx.bindings()[0].name, "globals");
-        assert_eq!(ctx.fragment_count(), 4);
-        assert_eq!(ctx.fragments()[0], "fn global_time(id: u32) -> vec4<f32>;");
+        assert_eq!(ctx.functions().count(), 4);
+        assert!(ctx
+            .functions()
+            .any(|source| source.contains("fn global_time(id: u32) -> vec4<f32>")));
         assert!(ctx
             .assembled_source()
-            .contains("fn random_stream(id: u32) -> vec4<f32>;"));
+            .contains("fn random_stream(id: u32) -> vec4<f32> {"));
     }
 
     #[test]
