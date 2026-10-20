@@ -480,6 +480,67 @@ fn dirty_fallback_uses_table_component_index_for_optional_queries() {
 }
 
 #[test]
+fn dirty_fallback_merges_overlapping_component_postings_once() {
+    use crate::archetype::COLUMN_CHANGE_LOG_CAPACITY;
+
+    let mut w = World::new();
+    let mut target = None;
+    for mask in 0_u8..(1 << 6) {
+        let entity = w.spawn(());
+        if mask & (1 << 0) != 0 {
+            w.insert(entity, Noise0);
+        }
+        if mask & (1 << 1) != 0 {
+            w.insert(entity, Noise1);
+        }
+        if mask & (1 << 2) != 0 {
+            w.insert(entity, Noise2);
+        }
+        if mask & (1 << 3) != 0 {
+            w.insert(entity, Noise3);
+        }
+        if mask & (1 << 4) != 0 {
+            w.insert(entity, Noise4);
+        }
+        if mask & (1 << 5) != 0 {
+            w.insert(entity, Noise5);
+        }
+        if mask == (1 << 6) - 1 {
+            target = Some(entity);
+        }
+    }
+    let target = target.expect("the full component-set archetype was spawned");
+
+    let state = w.query::<(
+        Option<&Noise0>,
+        Option<&Noise1>,
+        Option<&Noise2>,
+        Option<&Noise3>,
+        Option<&Noise4>,
+        Option<&Noise5>,
+    )>();
+    let baseline = state.dirty_chunks_with_stats(&w, w.change_tick(), w.change_tick());
+    assert!(baseline.stats.journal_gap);
+
+    let last_run = w.change_tick();
+    w.increment_change_tick();
+    let this_run = w.change_tick();
+    for _ in 0..(COLUMN_CHANGE_LOG_CAPACITY + 1) {
+        *w.get_mut::<Noise0>(target).unwrap() = Noise0;
+    }
+
+    let report = state.dirty_chunks_with_stats(&w, last_run, this_run);
+    assert!(report.stats.journal_gap);
+    // Each of six columns is present in 32 component-set archetypes; their
+    // union is the 63 non-empty combinations, with overlaps removed once.
+    assert_eq!(report.stats.archetype_index_entries_scanned, 6 * 32);
+    assert_eq!(report.stats.candidate_archetype_checks, 63);
+    assert_eq!(report.stats.matched_archetypes, 63);
+    assert_eq!(report.stats.reported_chunks, 1);
+    assert_eq!(report.chunks.len(), 1);
+}
+
+#[test]
 fn dirty_chunks_follow_an_archetype_migration() {
     #[derive(Clone, Copy)]
     struct Tag;
