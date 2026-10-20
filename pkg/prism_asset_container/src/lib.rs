@@ -5,7 +5,7 @@
 //! support deterministic raw and raw-DEFLATE payloads in both the per-payload
 //! [`FORMAT_VERSION`] layout and the independently compressed
 //! [`CHUNK_FORMAT_VERSION`] chunk-table layout, including independently
-//! addressable BlockDeflate streams. The optional `gpu` feature adapts
+//! addressable `BlockDeflate` streams. The optional `gpu` feature adapts
 //! `prism_gdeflate_gpu` to the injected block backend; the container validates
 //! the decoded hashes and execution reports. Encryption and publisher
 //! authentication remain outside this crate. Remote range
@@ -71,6 +71,8 @@ pub use range_source::{
     RemoteRangeFetcher, RemoteRangeRequest, RemoteRangeResponse, RemoteRangeSource,
 };
 pub use reader::ContainerReader;
+#[cfg(feature = "mmap")]
+pub use reader::MmapV2DirectoryView;
 pub use writer::{ContainerWriter, WriteEntry};
 
 /// A strict [`prism_asset::AssetReader`] backed by an owned runtime manifest

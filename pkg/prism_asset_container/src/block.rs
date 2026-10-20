@@ -15,7 +15,7 @@ use crate::budget::{ContainerReadBudget, ReadBuffer};
 use crate::format::ContainerError;
 use crate::range_source::RangeSource;
 
-/// The independently encoded representation of one BlockDeflate block.
+/// The independently encoded representation of one `BlockDeflate` block.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BlockCodec {
     /// The block is stored without compression.
@@ -27,7 +27,7 @@ pub enum BlockCodec {
 /// Validated input supplied to a [`BlockDecodeBackend`].
 #[derive(Clone, Copy, Debug)]
 pub struct BlockDecodeRequest<'a> {
-    /// Zero-based block ordinal within the BlockDeflate payload.
+    /// Zero-based block ordinal within the `BlockDeflate` payload.
     pub block_index: u32,
     /// Decoded byte offset of this block within the payload.
     pub raw_offset: u64,
@@ -162,7 +162,7 @@ impl BlockDecodeSummary {
     }
 }
 
-/// Backend used to decode one independently stored BlockDeflate block.
+/// Backend used to decode one independently stored `BlockDeflate` block.
 ///
 /// The container owns the input range and output buffer. Implementations must
 /// write exactly `request.raw_len` bytes to `output` and return an error when
@@ -178,7 +178,7 @@ pub trait BlockDecodeBackend: Send + Sync {
     ) -> Result<BlockDecodeReport, ContainerError>;
 }
 
-/// The deterministic CPU BlockDeflate decoder used by default.
+/// The deterministic CPU `BlockDeflate` decoder used by default.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CpuBlockDecodeBackend;
 

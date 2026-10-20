@@ -6,8 +6,6 @@ use std::sync::Mutex;
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-#[cfg(feature = "mmap")]
-use crate::MmapRangeSource;
 use crate::{
     install_runtime_package, install_runtime_package_transaction, ChunkInput, ChunkPlanner,
     ChunkPolicy, Codec, ContainerError, ContainerIdentity, ContainerReader, ContainerWriter,
@@ -18,6 +16,8 @@ use crate::{
     RemoteRangeSource, RuntimeInstallPolicy, RuntimeManifest, CHUNK_FORMAT_VERSION, FORMAT_VERSION,
     MAGIC, SUPPORTED_FORMAT_VERSIONS,
 };
+#[cfg(feature = "mmap")]
+use crate::{MmapRangeSource, MmapV2DirectoryView};
 
 fn guid(name: &str) -> StableGuid {
     StableGuid::from_path(name)
@@ -771,6 +771,159 @@ fn mmap_range_source_rejects_empty_files_before_mapping() {
         MmapRangeSource::open(&path),
         Err(RangeSourceError::Io(message)) if message.contains("empty file")
     ));
+    fs::remove_file(path).unwrap();
+}
+
+#[cfg(feature = "mmap")]
+#[test]
+fn mmap_v2_directory_view_matches_reader_for_all_chunk_codecs_without_tree_materialization() {
+    let entries = [
+        (guid("mapped/a.asset"), b"A".repeat(4096), 0),
+        (guid("mapped/b.asset"), b"B".repeat(4096), 1),
+    ];
+    let policy = ChunkPolicy {
+        max_chunk_size: 4096,
+        chunk_alignment: 64,
+        max_chunks: 2,
+    };
+    let plan = ChunkPlanner::new(policy)
+        .plan(entries.iter().map(|(id, bytes, priority)| ChunkInput {
+            guid: *id,
+            size: bytes.len() as u64,
+            alignment: 1,
+            dependencies: vec![],
+            priority: *priority,
+        }))
+        .unwrap();
+
+    for codec in [Codec::Raw, Codec::Deflate, Codec::BlockDeflate] {
+        let mut writer = ContainerWriter::new();
+        for (id, bytes, _) in &entries {
+            writer.add_aligned(*id, bytes.clone(), 1).unwrap();
+        }
+        let bytes = writer
+            .finish_with_chunk_compression(&plan, policy.chunk_alignment, codec)
+            .unwrap();
+        let expected = ContainerReader::new(bytes.clone()).unwrap();
+        let path = temporary_container_path("mmap-v2-view");
+        fs::write(&path, &bytes).unwrap();
+        let view = MmapV2DirectoryView::open(&path).unwrap();
+
+        assert_eq!(view.info(), expected.info());
+        assert_eq!(
+            view.guids().collect::<Vec<_>>(),
+            expected.guids().collect::<Vec<_>>()
+        );
+        for (id, _, _) in &entries {
+            assert_eq!(view.entry(*id), expected.entry(*id));
+        }
+        for chunk_id in 0..expected.info().chunk_count {
+            assert_eq!(view.chunk(chunk_id), expected.chunk(chunk_id));
+        }
+        assert!(!view.contains(guid("mapped/missing.asset")));
+        assert_eq!(view.chunk(expected.info().chunk_count), None);
+        fs::remove_file(path).unwrap();
+    }
+}
+
+#[cfg(feature = "mmap")]
+#[test]
+fn mmap_v2_directory_view_rejects_payload_tampering_and_non_v2_layouts() {
+    let id = guid("mapped/tamper.asset");
+    let payload = b"mmap validation is strict".repeat(128);
+    let policy = ChunkPolicy {
+        max_chunk_size: payload.len() as u64,
+        chunk_alignment: 64,
+        max_chunks: 1,
+    };
+    let plan = ChunkPlanner::new(policy)
+        .plan([ChunkInput {
+            guid: id,
+            size: payload.len() as u64,
+            alignment: 1,
+            dependencies: vec![],
+            priority: 0,
+        }])
+        .unwrap();
+    let mut writer = ContainerWriter::new();
+    writer.add(id, payload).unwrap();
+    let mut bytes = writer
+        .finish_with_chunk_compression(&plan, 64, Codec::Raw)
+        .unwrap();
+    let reader = ContainerReader::new(bytes.clone()).unwrap();
+    let chunk = reader.chunk(0).unwrap();
+    bytes[chunk.offset as usize] ^= 0x80;
+    let path = temporary_container_path("mmap-v2-tampered");
+    fs::write(&path, bytes).unwrap();
+    assert!(matches!(
+        MmapV2DirectoryView::open(&path),
+        Err(ContainerError::HashMismatch)
+    ));
+    fs::remove_file(path).unwrap();
+
+    let path = temporary_container_path("mmap-v1-view");
+    fs::write(&path, build(&[("mapped/v1.asset", b"legacy")])).unwrap();
+    assert!(matches!(
+        MmapV2DirectoryView::open(&path),
+        Err(ContainerError::UnsupportedVersion(FORMAT_VERSION))
+    ));
+    fs::remove_file(path).unwrap();
+}
+
+#[cfg(feature = "mmap")]
+#[test]
+fn mmap_v2_directory_view_charges_validation_scratch_and_releases_it_on_failure() {
+    let id = guid("mapped/budget.asset");
+    let payload = b"bounded mmap directory".repeat(64);
+    let policy = ChunkPolicy {
+        max_chunk_size: payload.len() as u64,
+        chunk_alignment: 64,
+        max_chunks: 1,
+    };
+    let plan = ChunkPlanner::new(policy)
+        .plan([ChunkInput {
+            guid: id,
+            size: payload.len() as u64,
+            alignment: 1,
+            dependencies: vec![],
+            priority: 0,
+        }])
+        .unwrap();
+    let mut writer = ContainerWriter::new();
+    writer.add(id, payload).unwrap();
+    let bytes = writer
+        .finish_with_chunk_compression(&plan, 64, Codec::Raw)
+        .unwrap();
+    let path = temporary_container_path("mmap-v2-budget");
+    fs::write(&path, bytes).unwrap();
+
+    let limits = crate::ContainerReadLimits {
+        max_in_flight_bytes: 0,
+        ..crate::ContainerReadLimits::default()
+    };
+    let budget = crate::ContainerReadBudget::new(limits);
+    assert!(matches!(
+        MmapV2DirectoryView::open_with_budget(&path, budget.clone()),
+        Err(ContainerError::ResourceLimit {
+            resource: "in-flight bytes",
+            ..
+        })
+    ));
+    assert_eq!(budget.in_flight_bytes(), 0);
+
+    let limits = crate::ContainerReadLimits {
+        max_metadata_bytes: 0,
+        ..crate::ContainerReadLimits::default()
+    };
+    let budget = crate::ContainerReadBudget::new(limits);
+    assert!(matches!(
+        MmapV2DirectoryView::open_with_budget(&path, budget.clone()),
+        Err(ContainerError::ResourceLimit {
+            resource: "metadata bytes",
+            ..
+        })
+    ));
+    assert_eq!(budget.in_flight_bytes(), 0);
     fs::remove_file(path).unwrap();
 }
 

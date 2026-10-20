@@ -18,6 +18,13 @@ use crate::{ContainerReadBudget, RangeBatchPolicy, RangeRequest};
 
 const VALIDATION_CHUNK_SIZE: usize = 64 * 1024;
 
+#[cfg(feature = "mmap")]
+#[path = "mmap_view.rs"]
+mod mmap_view;
+
+#[cfg(feature = "mmap")]
+pub use mmap_view::MmapV2DirectoryView;
+
 #[derive(Clone, Debug)]
 enum Backing {
     Memory(Arc<[u8]>),
@@ -105,7 +112,7 @@ impl ContainerReader {
         )
     }
 
-    /// Validates memory-backed bytes with a caller-provided BlockDeflate
+    /// Validates memory-backed bytes with a caller-provided `BlockDeflate`
     /// backend and shared budget.
     pub fn with_budget_and_block_decode_backend(
         bytes: impl Into<Arc<[u8]>>,
@@ -125,7 +132,7 @@ impl ContainerReader {
         })
     }
 
-    /// Validates memory-backed bytes with a caller-provided BlockDeflate
+    /// Validates memory-backed bytes with a caller-provided `BlockDeflate`
     /// backend and the default budget.
     pub fn new_with_block_decode_backend(
         bytes: impl Into<Arc<[u8]>>,
@@ -180,7 +187,7 @@ impl ContainerReader {
         )
     }
 
-    /// Mounts a range source under a budget with a caller-provided BlockDeflate
+    /// Mounts a range source under a budget with a caller-provided `BlockDeflate`
     /// backend. The backend is used during mount validation and later reads.
     pub fn from_range_source_with_budget_and_block_decode_backend(
         source: Arc<dyn crate::RangeSource>,
@@ -207,7 +214,7 @@ impl ContainerReader {
         })
     }
 
-    /// Mounts a range source with a caller-provided BlockDeflate backend and
+    /// Mounts a range source with a caller-provided `BlockDeflate` backend and
     /// the default budget.
     pub fn from_shared_range_source_with_block_decode_backend(
         source: Arc<dyn crate::RangeSource>,

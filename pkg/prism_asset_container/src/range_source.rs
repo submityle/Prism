@@ -489,6 +489,11 @@ impl MmapRangeSource {
             len,
         })
     }
+
+    /// Borrows the complete immutable mapping without copying it.
+    pub(crate) fn mapped_bytes(&self) -> &[u8] {
+        &self.map
+    }
 }
 
 #[cfg(feature = "mmap")]
