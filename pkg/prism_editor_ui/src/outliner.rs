@@ -5,6 +5,7 @@ use prism_ui::Element;
 use prism_ui_component::Component;
 use prism_ui_component_kit::inputs::{SearchField, SearchFieldProps};
 
+use crate::action::{ActionBinding, ActionBindings, ActionTemplate, BoundElement, UiBuildError};
 use crate::support::{bounded_count, empty_state, label, normalized_filter};
 
 /// Inputs for the Outliner Element tree.
@@ -25,6 +26,21 @@ pub struct OutlinerViewProps<'a> {
 /// Builds a bounded Outliner panel with keyed rows.
 #[must_use]
 pub fn outliner_panel(props: &OutlinerViewProps<'_>) -> Element {
+    build_outliner(props, None)
+        .expect("outliner without action bindings cannot fail")
+        .into_element()
+}
+
+/// Builds an Outliner panel and binds row selection and disclosure actions.
+pub fn outliner_panel_bound(props: &OutlinerViewProps<'_>) -> Result<BoundElement, UiBuildError> {
+    build_outliner(props, Some(ActionBindings::new()))
+}
+
+fn build_outliner(
+    props: &OutlinerViewProps<'_>,
+    bindings: Option<ActionBindings>,
+) -> Result<BoundElement, UiBuildError> {
+    let mut bindings = bindings;
     let search = SearchField.render(
         &SearchFieldProps::new()
             .value(props.filter)
@@ -75,6 +91,18 @@ pub fn outliner_panel(props: &OutlinerViewProps<'_>) -> Element {
         if props.selected == Some(id) {
             row = row.class("is-selected");
         }
+        if let Some(action_bindings) = bindings.as_mut() {
+            action_bindings.bind(ActionBinding::select(
+                format!("outliner:{}", id.raw()),
+                ActionTemplate::select_outliner(id),
+            )?)?;
+            if !node.children().is_empty() {
+                action_bindings.bind(ActionBinding::activate(
+                    format!("outliner-disclosure:{}", id.raw()),
+                    ActionTemplate::toggle_outliner_expansion(id),
+                )?)?;
+            }
+        }
         list = list.child(row);
     }
     if emitted == 0 {
@@ -88,8 +116,9 @@ pub fn outliner_panel(props: &OutlinerViewProps<'_>) -> Element {
         ));
     }
 
-    Element::custom("prism.editor.outliner")
+    let element = Element::custom("prism.editor.outliner")
         .class("prism-editor-outliner")
         .child(header)
-        .child(list)
+        .child(list);
+    Ok(BoundElement::new(element, bindings.unwrap_or_default()))
 }

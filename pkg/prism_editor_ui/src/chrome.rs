@@ -6,6 +6,7 @@ use prism_ui_component::Component;
 use prism_ui_component_kit::basics::{Button, ButtonProps};
 use prism_ui_component_kit::kit::{ButtonVariant, ControlSize};
 
+use crate::action::{ActionBinding, ActionBindings, ActionTemplate, BoundElement, UiBuildError};
 use crate::support::label;
 
 /// Resolved contribution slices used to build the shell chrome.
@@ -26,6 +27,30 @@ pub struct ShellChromeProps<'a> {
 /// Builds the stable shell chrome tree.
 #[must_use]
 pub fn shell_chrome(props: &ShellChromeProps<'_>) -> Element {
+    build_shell_chrome(props)
+}
+
+/// Builds shell chrome and binds command-bearing menu and toolbar items.
+pub fn shell_chrome_bound(props: &ShellChromeProps<'_>) -> Result<BoundElement, UiBuildError> {
+    let mut bindings = ActionBindings::new();
+    for item in props.menus {
+        if let Some(command_id) = &item.command_id {
+            bindings.bind(ActionBinding::activate(
+                format!("menu:{}", item.id),
+                ActionTemplate::execute_command(command_id.clone())?,
+            )?)?;
+        }
+    }
+    for item in props.toolbar {
+        bindings.bind(ActionBinding::activate(
+            format!("toolbar:{}", item.id),
+            ActionTemplate::execute_command(item.command_id.clone())?,
+        )?)?;
+    }
+    Ok(BoundElement::new(build_shell_chrome(props), bindings))
+}
+
+fn build_shell_chrome(props: &ShellChromeProps<'_>) -> Element {
     let title_bar = Element::box_()
         .class("prism-editor-shell__title-bar")
         .child(label("prism-editor-shell__title", props.title))

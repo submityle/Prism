@@ -3,7 +3,8 @@
 use prism_editor_reflect::{InspectorProjection, InspectorProjectionNode};
 use prism_ui::Element;
 
-use crate::support::{empty_state, label};
+use crate::action::{ActionBinding, ActionBindings, ActionTemplate, BoundElement, UiBuildError};
+use crate::support::{empty_state, label, MAX_INSPECTOR_DEPTH, MAX_INSPECTOR_NODES};
 
 /// Options controlling inspector projection presentation.
 #[derive(Clone, Copy, Debug)]
@@ -17,6 +18,22 @@ pub struct InspectorViewProps<'a> {
 /// Builds an inspector Element tree from a reflection projection.
 #[must_use]
 pub fn inspector_view(props: &InspectorViewProps<'_>) -> Element {
+    match build_inspector(props, None) {
+        Ok(bound) => bound.into_element(),
+        Err(error) => inspector_limit_state(error),
+    }
+}
+
+/// Builds an Inspector tree and binds editable leaves to field-edit actions.
+pub fn inspector_view_bound(props: &InspectorViewProps<'_>) -> Result<BoundElement, UiBuildError> {
+    build_inspector(props, Some(ActionBindings::new()))
+}
+
+fn build_inspector(
+    props: &InspectorViewProps<'_>,
+    bindings: Option<ActionBindings>,
+) -> Result<BoundElement, UiBuildError> {
+    let mut bindings = bindings;
     let root = &props.projection.root;
     let mut body = Element::box_().class("prism-editor-inspector__body");
     if root.children.is_empty() && root.node.value.is_none() {
@@ -25,33 +42,82 @@ pub fn inspector_view(props: &InspectorViewProps<'_>) -> Element {
             "No inspectable fields",
         ));
     } else if props.show_root {
-        body = body.child(render_node(root, true, 0));
+        body = body.child(render_node_with_actions(
+            root,
+            true,
+            0,
+            0,
+            &mut bindings,
+            &mut InspectorBudget::default(),
+        )?);
     } else {
+        let mut budget = InspectorBudget::default();
         for (index, child) in root.children.iter().enumerate() {
-            body = body.child(render_node_with_index(child, false, 0, index));
+            body = body.child(render_node_with_actions(
+                child,
+                false,
+                0,
+                index,
+                &mut bindings,
+                &mut budget,
+            )?);
         }
     }
 
-    Element::custom("prism.editor.inspector")
+    let element = Element::custom("prism.editor.inspector")
         .class("prism-editor-inspector")
         .child(
             Element::box_()
                 .class("prism-editor-inspector__header")
                 .child(label("prism-editor-inspector__title", "Inspector")),
         )
-        .child(body)
+        .child(body);
+    Ok(BoundElement::new(element, bindings.unwrap_or_default()))
 }
 
-fn render_node(node: &InspectorProjectionNode, root: bool, sibling_index: usize) -> Element {
-    render_node_with_index(node, root, 0, sibling_index)
+fn inspector_limit_state(error: UiBuildError) -> Element {
+    let message = match error {
+        UiBuildError::InspectorDepthLimit { limit } => {
+            format!("Inspector depth limit reached ({limit})")
+        }
+        UiBuildError::InspectorNodeLimit { limit } => {
+            format!("Inspector node limit reached ({limit})")
+        }
+        UiBuildError::Action(error) => format!("Inspector action binding failed: {error}"),
+    };
+    Element::custom("prism.editor.inspector")
+        .class("prism-editor-inspector")
+        .child(
+            Element::box_()
+                .class("prism-editor-inspector__body")
+                .child(empty_state("prism-editor-inspector__limit", message)),
+        )
 }
 
-fn render_node_with_index(
+#[derive(Default)]
+struct InspectorBudget {
+    nodes: usize,
+}
+
+fn render_node_with_actions_inner(
     node: &InspectorProjectionNode,
     root: bool,
     depth: usize,
     sibling_index: usize,
-) -> Element {
+    bindings: &mut Option<ActionBindings>,
+    budget: &mut InspectorBudget,
+) -> Result<Element, UiBuildError> {
+    if depth > MAX_INSPECTOR_DEPTH {
+        return Err(UiBuildError::InspectorDepthLimit {
+            limit: MAX_INSPECTOR_DEPTH,
+        });
+    }
+    budget.nodes = budget.nodes.saturating_add(1);
+    if budget.nodes > MAX_INSPECTOR_NODES {
+        return Err(UiBuildError::InspectorNodeLimit {
+            limit: MAX_INSPECTOR_NODES,
+        });
+    }
     let key = node
         .path
         .as_ref()
@@ -103,12 +169,41 @@ fn render_node_with_index(
         row = row.child(label("prism-editor-inspector__docs", docs.clone()));
     }
 
+    if let Some(path) = node.path.as_ref()
+        && node.node.value.is_some()
+        && !node.node.hints.readonly
+        && let Some(action_bindings) = bindings.as_mut()
+    {
+        action_bindings.bind(ActionBinding::commit(
+            format!("field:{}", path.as_str()),
+            ActionTemplate::edit_inspector_field(path.clone())?,
+        )?)?;
+    }
+
     if !node.children.is_empty() {
         let mut children = Element::box_().class("prism-editor-inspector__children");
         for (index, child) in node.children.iter().enumerate() {
-            children = children.child(render_node_with_index(child, false, depth + 1, index));
+            children = children.child(render_node_with_actions_inner(
+                child,
+                false,
+                depth + 1,
+                index,
+                bindings,
+                budget,
+            )?);
         }
         row = row.child(children);
     }
-    row
+    Ok(row)
+}
+
+fn render_node_with_actions(
+    node: &InspectorProjectionNode,
+    root: bool,
+    depth: usize,
+    sibling_index: usize,
+    bindings: &mut Option<ActionBindings>,
+    budget: &mut InspectorBudget,
+) -> Result<Element, UiBuildError> {
+    render_node_with_actions_inner(node, root, depth, sibling_index, bindings, budget)
 }

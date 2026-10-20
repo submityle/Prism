@@ -4,6 +4,12 @@ use prism_ui::Element;
 
 /// Maximum number of dynamic rows materialized by one panel render.
 pub const MAX_VISIBLE_ROWS: usize = 512;
+/// Maximum number of action bindings materialized by one bound view.
+pub const MAX_ACTION_BINDINGS: usize = 8192;
+/// Maximum nesting depth rendered by the Inspector.
+pub const MAX_INSPECTOR_DEPTH: usize = 64;
+/// Maximum number of Inspector nodes rendered by one view.
+pub const MAX_INSPECTOR_NODES: usize = 4096;
 
 /// Builds a semantic text node with a stable class.
 pub(crate) fn label(class: &str, text: impl Into<String>) -> Element {

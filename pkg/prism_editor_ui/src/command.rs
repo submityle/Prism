@@ -5,7 +5,8 @@ use prism_ui::Element;
 use prism_ui_component::Component;
 use prism_ui_component_kit::inputs::{SearchField, SearchFieldProps};
 
-use crate::support::{empty_state, label};
+use crate::action::{ActionBinding, ActionBindings, ActionTemplate, BoundElement, UiBuildError};
+use crate::support::{bounded_count, empty_state, label};
 
 /// Inputs for the command palette.
 #[derive(Clone, Copy)]
@@ -23,8 +24,16 @@ pub struct CommandPaletteProps<'a> {
 /// Builds a command palette by querying the existing deterministic index.
 #[must_use]
 pub fn command_palette(props: &CommandPaletteProps<'_>) -> Element {
-    let results = props.index.search(props.query, props.limit);
+    let results = props.index.search(props.query, bounded_count(props.limit));
     command_palette_results(props.query, &results, props.selected_id)
+}
+
+/// Builds a command palette and binds enabled rows to command actions.
+pub fn command_palette_bound(
+    props: &CommandPaletteProps<'_>,
+) -> Result<BoundElement, UiBuildError> {
+    let results = props.index.search(props.query, bounded_count(props.limit));
+    command_palette_results_bound(props.query, &results, props.selected_id)
 }
 
 /// Builds a command palette from already resolved search results.
@@ -34,6 +43,27 @@ pub fn command_palette_results(
     results: &[CommandSearchResult],
     selected_id: Option<&str>,
 ) -> Element {
+    build_command_palette(query, results, selected_id, None)
+        .expect("command palette without action bindings cannot fail")
+        .into_element()
+}
+
+/// Builds a command palette from resolved results and binds enabled rows.
+pub fn command_palette_results_bound(
+    query: &str,
+    results: &[CommandSearchResult],
+    selected_id: Option<&str>,
+) -> Result<BoundElement, UiBuildError> {
+    build_command_palette(query, results, selected_id, Some(ActionBindings::new()))
+}
+
+fn build_command_palette(
+    query: &str,
+    results: &[CommandSearchResult],
+    selected_id: Option<&str>,
+    bindings: Option<ActionBindings>,
+) -> Result<BoundElement, UiBuildError> {
+    let mut bindings = bindings;
     let search = SearchField.render(
         &SearchFieldProps::new()
             .value(query)
@@ -55,7 +85,7 @@ pub fn command_palette_results(
             },
         ));
     } else {
-        for result in results {
+        for result in results.iter().take(bounded_count(results.len())) {
             let mut row = Element::box_()
                 .key_str(format!("command:{}", result.id))
                 .class("prism-editor-command-palette__row")
@@ -75,12 +105,21 @@ pub fn command_palette_results(
             if selected_id == Some(result.id.as_str()) {
                 row = row.class("is-selected");
             }
+            if result.enabled
+                && let Some(action_bindings) = bindings.as_mut()
+            {
+                action_bindings.bind(ActionBinding::activate(
+                    format!("command:{}", result.id),
+                    ActionTemplate::execute_command(result.id.clone())?,
+                )?)?;
+            }
             list = list.child(row);
         }
     }
 
-    Element::custom("prism.editor.command-palette")
+    let element = Element::custom("prism.editor.command-palette")
         .class("prism-editor-command-palette")
         .child(header)
-        .child(list)
+        .child(list);
+    Ok(BoundElement::new(element, bindings.unwrap_or_default()))
 }

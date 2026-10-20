@@ -365,3 +365,183 @@ fn shell_contribution_registry_resolves_before_element_assembly() {
     });
     assert_eq!(tree.child_elements()[1].child_elements().len(), 1);
 }
+
+#[test]
+fn bound_outliner_emits_selection_and_disclosure_actions() -> Result<(), UiBuildError> {
+    let mut model = Outliner::default();
+    let root = OutlinerId::from_raw(1);
+    model
+        .insert(OutlinerNode::new(root, None, "Root"))
+        .expect("root");
+    model
+        .insert(OutlinerNode::new(
+            OutlinerId::from_raw(2),
+            Some(root),
+            "Child",
+        ))
+        .expect("child");
+
+    let bound = outliner_panel_bound(&OutlinerViewProps {
+        outliner: &model,
+        filter: "",
+        start: 0,
+        count: 16,
+        selected: None,
+    })?;
+    assert_eq!(bound.bindings().len(), 3);
+    assert_eq!(
+        bound.dispatch(
+            "outliner:2",
+            &UiEvent::Select {
+                mode: SelectionMode::Replace,
+            },
+        )?,
+        EditorAction::SelectOutliner {
+            node: OutlinerId::from_raw(2),
+            mode: SelectionMode::Replace,
+        }
+    );
+    assert_eq!(
+        bound.dispatch("outliner-disclosure:1", &UiEvent::Activate)?,
+        EditorAction::ToggleOutlinerExpansion { node: root }
+    );
+    Ok(())
+}
+
+#[test]
+fn bound_inspector_emits_only_editable_field_actions() -> Result<(), UiBuildError> {
+    let editable = InspectorNode {
+        label: "speed".into(),
+        type_name: "i32".into(),
+        kind: InspectorKind::Value,
+        variant: None,
+        value: Some("1".into()),
+        hints: InspectorHints::default(),
+        children: Vec::new(),
+    };
+    let readonly = InspectorNode {
+        label: "id".into(),
+        type_name: "u32".into(),
+        kind: InspectorKind::Value,
+        variant: None,
+        value: Some("7".into()),
+        hints: InspectorHints {
+            readonly: true,
+            ..InspectorHints::default()
+        },
+        children: Vec::new(),
+    };
+    let projection = InspectorProjection {
+        root: InspectorProjectionNode {
+            path: Some(prism_editor_reflect::FieldPath::root()),
+            node: InspectorNode {
+                label: "root".into(),
+                type_name: "Config".into(),
+                kind: InspectorKind::Struct,
+                variant: None,
+                value: None,
+                hints: InspectorHints::default(),
+                children: vec![editable.clone(), readonly.clone()],
+            },
+            children: vec![
+                InspectorProjectionNode {
+                    path: Some(prism_editor_reflect::FieldPath::parse("speed").expect("path")),
+                    node: editable,
+                    children: Vec::new(),
+                },
+                InspectorProjectionNode {
+                    path: Some(prism_editor_reflect::FieldPath::parse("id").expect("path")),
+                    node: readonly,
+                    children: Vec::new(),
+                },
+            ],
+        },
+    };
+    let bound = inspector_view_bound(&InspectorViewProps {
+        projection: &projection,
+        show_root: false,
+    })?;
+    assert_eq!(bound.bindings().len(), 1);
+    assert_eq!(
+        bound.dispatch(
+            "field:.speed",
+            &UiEvent::Commit {
+                value: ActionValue::integer(42),
+            },
+        )?,
+        EditorAction::EditInspectorField {
+            path: prism_editor_reflect::FieldPath::parse("speed").expect("path"),
+            value: ActionValue::integer(42),
+        }
+    );
+    assert!(matches!(
+        bound.dispatch(
+            "field:.id",
+            &UiEvent::Commit {
+                value: ActionValue::unsigned(8),
+            },
+        ),
+        Err(ActionError::Unbound { .. })
+    ));
+    Ok(())
+}
+
+#[test]
+fn bound_command_palette_and_shell_emit_command_actions() -> Result<(), UiBuildError> {
+    let mut index = CommandIndex::default();
+    index
+        .register(CommandEntry::new("scene.save", "Save"))
+        .expect("command");
+    let palette = command_palette_bound(&CommandPaletteProps {
+        index: &index,
+        query: "",
+        limit: 8,
+        selected_id: Some("scene.save"),
+    })?;
+    assert_eq!(
+        palette.dispatch("command:scene.save", &UiEvent::Activate)?,
+        EditorAction::ExecuteCommand {
+            command_id: "scene.save".into(),
+        }
+    );
+
+    let toolbar = [ToolbarContribution {
+        id: "save".into(),
+        toolbar_id: "main".into(),
+        label: "Save".into(),
+        command_id: "scene.save".into(),
+        group: "file".into(),
+        order: 0,
+        when: ContextExpr::Any,
+    }];
+    let shell = shell_chrome_bound(&ShellChromeProps {
+        title: "Prism",
+        workspace: "Main",
+        menus: &[],
+        toolbar: &toolbar,
+        status: &[],
+    })?;
+    assert_eq!(
+        shell.dispatch("toolbar:save", &UiEvent::Activate)?,
+        EditorAction::ExecuteCommand {
+            command_id: "scene.save".into(),
+        }
+    );
+    Ok(())
+}
+
+#[test]
+fn upper_layer_can_inject_undo_and_redo_bindings() -> Result<(), ActionError> {
+    let mut bindings = ActionBindings::new();
+    bindings.bind_undo("edit.undo")?;
+    bindings.bind_redo("edit.redo")?;
+    assert_eq!(
+        bindings.dispatch("edit.undo", &UiEvent::Activate)?,
+        EditorAction::Undo
+    );
+    assert_eq!(
+        bindings.dispatch("edit.redo", &UiEvent::Activate)?,
+        EditorAction::Redo
+    );
+    Ok(())
+}
