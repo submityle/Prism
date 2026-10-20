@@ -31,6 +31,15 @@ CARGO_TARGET_DIR=/private/tmp/prism-editor-core-target cargo test -p prism_edito
 - 有界 Console 日志、单调序列号、级别/频道过滤和超容量淘汰。
 - 通过 `rustc` 独立测试验证 2 个测试用例；workspace 级 Cargo 验证待其他并行 crate 回传后执行。
 
+### 通用时间线基础
+
+`pkg/prism_editor_timeline` 已完成与具体域无关的确定性时间线模型：
+
+- 整数 tick、稳定轨道/关键帧 ID、Step/Linear 插值和维度校验。
+- 按稳定 ID 排序的事件轨道，避免同 tick 事件顺序随插入路径变化。
+- 轨道采样返回按 `TrackId` 排序的结果，便于帧缓存和可重复测试。
+- 通过 `rustc` 独立测试验证 2 个测试用例；未依赖 `bevy_*`。
+
 ## 当前未交付
 
 以下项目仍以代码和测试为准，不能仅因设计文档存在就视为完成：
