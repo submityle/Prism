@@ -59,6 +59,23 @@ struct Sources {
     device: WgpuDevice,
     buffers: [BufferId; 2],
 }
+#[derive(Clone, Copy)]
+struct CopyImage {
+    extent: [u32; 3],
+    mip_levels: u32,
+    mip: u32,
+    layer: u32,
+}
+impl Default for CopyImage {
+    fn default() -> Self {
+        Self {
+            extent: [3, 2, 1],
+            mip_levels: 1,
+            mip: 0,
+            layer: 0,
+        }
+    }
+}
 impl Sources {
     fn new(device: &WgpuDevice, queue: &WgpuQueue) -> Self {
         let buffers = [[255, 0, 0, 255], [0, 255, 0, 255]].map(|color| {
@@ -101,6 +118,18 @@ impl Sources {
         RuntimeFeatureGraph,
         Option<(TextureId, prism_render_driver::TextureViewId)>,
     ) {
+        self.graph_with_subresource(imported, callbacks, lifetime, CopyImage::default())
+    }
+    fn graph_with_subresource(
+        &self,
+        imported: Option<&wgpu::Texture>,
+        callbacks: Arc<AtomicUsize>,
+        lifetime: ResourceLifetime,
+        image: CopyImage,
+    ) -> (
+        RuntimeFeatureGraph,
+        Option<(TextureId, prism_render_driver::TextureViewId)>,
+    ) {
         let resources = [
             ResourceTemplate {
                 key: RED,
@@ -133,10 +162,10 @@ impl Sources {
                 },
                 alignment: 256,
                 layout: ResourceLayout::Texture {
-                    extent: [3, 2, 1],
+                    extent: image.extent,
                     dimension: TextureDimension::D2,
                     format: TextureFormat::Rgba8Unorm,
-                    mip_levels: 1,
+                    mip_levels: image.mip_levels,
                     samples: 1,
                     usage: TextureUsages::COPY_SRC
                         | TextureUsages::COPY_DST
@@ -234,8 +263,8 @@ impl Sources {
                     default_view: view,
                     entry_state: TextureState::undefined(),
                     exit_state: TextureState::undefined(),
-                    mip_levels: 1,
-                    array_layers: 1,
+                    mip_levels: image.mip_levels,
+                    array_layers: image.extent[2],
                 },
             });
             (id, view)
@@ -266,8 +295,8 @@ impl Sources {
                     Some(256),
                     Some(2),
                     target,
-                    0,
-                    [0; 3],
+                    image.mip,
+                    [0, 0, image.layer],
                     Extent3d::new_2d(3, 2),
                 );
             }));
@@ -277,7 +306,11 @@ impl Sources {
         }));
         (
             graph
-                .prepare_runtime(Extent3d::new_2d(3, 2), &imports, recorders)
+                .prepare_runtime(
+                    Extent3d::new_2d(image.extent[0], image.extent[1]),
+                    &imports,
+                    recorders,
+                )
                 .unwrap(),
             registered,
         )
@@ -502,4 +535,82 @@ fn prepared_runtime_preview_copies_exact_pass_and_retires_after_full_submission(
     let (import, view) = registered.unwrap();
     device.release_texture_view(view);
     device.release_texture(import);
+}
+
+#[test]
+fn runtime_preview_copies_selected_mip_and_array_layer_with_exact_accounting() {
+    let instance = WgpuInstance::new();
+    let (device, queue) = instance
+        .request_default_hardware_device()
+        .expect("requires a physical GPU, never skips or accepts CPU rendering");
+    let sources = Sources::new(&device, &queue);
+    // The selected 3x2 image lives at mip 1, layer 1 of a 6x4x2 texture.
+    // Other subresources remain zero, so copying either default would fail.
+    let image = CopyImage {
+        extent: [6, 4, 2],
+        mip_levels: 2,
+        mip: 1,
+        layer: 1,
+    };
+    let native = device
+        .wgpu_device()
+        .create_texture(&wgpu::TextureDescriptor {
+            label: Some("runtime mip and array layer acceptance"),
+            size: wgpu::Extent3d {
+                width: image.extent[0],
+                height: image.extent[1],
+                depth_or_array_layers: image.extent[2],
+            },
+            mip_level_count: image.mip_levels,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+    for imported in [false, true] {
+        for (key, expected) in [(10, [255, 0, 0, 255]), (20, [0, 255, 0, 255])] {
+            let callbacks = Arc::new(AtomicUsize::new(0));
+            let (graph, registered) = sources.graph_with_subresource(
+                imported.then_some(&native),
+                callbacks.clone(),
+                ResourceLifetime::Transient,
+                image,
+            );
+            let mut frame = record(graph, &device, &queue);
+            let binding = selected(&frame, key);
+            for (mip, layer) in [(2, 1), (1, 2)] {
+                let failure = frame
+                    .submit(binding.clone(), mip, layer, TexturePreviewLimits::default())
+                    .err()
+                    .expect("out-of-range subresource must return the unsubmitted graph");
+                assert!(matches!(failure.error, RuntimePreviewError::Texture(_)));
+                frame = failure.frame;
+            }
+            let mut pending = frame
+                .submit(
+                    binding,
+                    image.mip,
+                    image.layer,
+                    TexturePreviewLimits::default(),
+                )
+                .unwrap();
+            assert_eq!((pending.mip(), pending.layer()), (1, 1));
+            assert_eq!(pending.occupied_slots(), 1);
+            assert_eq!(pending.allocated_bytes(), 512);
+            let preview = finish(&device, &mut pending);
+            assert_color(&preview, expected);
+            assert_eq!((preview.mip(), preview.layer()), (1, 1));
+            assert_eq!(pending.occupied_slots(), 0);
+            assert_eq!(pending.allocated_bytes(), 0);
+            assert_eq!(callbacks.load(Ordering::Relaxed), 3);
+            if let Some((texture, view)) = registered {
+                assert_eq!(device.wgpu_texture(texture).mip_level_count(), 2);
+                device.release_texture_view(view);
+                device.release_texture(texture);
+            }
+        }
+    }
 }

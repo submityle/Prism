@@ -20,6 +20,8 @@
 
 每个 frame 拥有独立生产器；宿主还须限制跨帧保留的 frame/submission 数量及 staging 总量，不能通过反复创建 frame 绕过应用总预算。这是可选的诊断录制入口；引擎需在其实际提交入口使用它，原生窗口的所有生产 pass 尚未自动改道到此 API。
 
+`RuntimePreviewSubmission` 公开实际复制的 `mip()`/`layer()` 与仍占用的 `occupied_slots()`/`allocated_bytes()`；`TexturePreviewProducer::limits()` 返回真实 admission 配置。跨帧 admission 可以据此核对实际 subresource 与 padded staging 数量，取消后的额度仍须等待读回排空后回收。
+
 ## 像素与显示
 
 支持单采样 D2 及数组层的 RGBA8/BGRA8 unorm/sRGB、RGBA16Float、RGBA32Float、R32Float、R32Uint、Depth32Float；要求真实 `COPY_SRC`。压缩格式、多采样和其它格式显式报错。按所选 mip/layer 复制，去除 256 字节 staging 行填充后发布原始字节。
@@ -38,4 +40,6 @@
 
 同日执行 `cargo test --offline -p prism_editor_profiler --features runtime-preview,gpu-tests --all-targets -- --nocapture`，26 项通过、零失败/零跳过，包括真实 timestamp、纹理和 Fabric 录制硬件测试。新增硬件验收通过真实两次 buffer→texture transfer 验证红色/绿色两个 pass 时点、buffer/texture 原始顺序、transient/imported/persistent import、每 recorder 恰执行一次、独立报告拒绝、预算拒绝后同帧重试、取消、丢弃 pending 和丢弃未提交录制。原生窗口显示及引擎全量入口仍须分别验收。
 
-同日 `cargo clippy --offline -p prism_editor_profiler --all-targets --all-features --no-deps -- -D warnings` 通过。该范围不包含依赖包的 lint；依赖仍有既有告警。
+同日 session 79648 在沙盒外以相同命令重跑，新增 subresource 验收后共 27 项通过、零失败/零忽略。真实 Fabric 分配和 imported 纹理均为 6×4×2、2 mips；两个 transfer pass 仅写 mip 1/layer 1，分别捕获 3×2 红色/绿色真实像素。mip 2 或 layer 2 的拒绝返回原始未提交帧，随后同帧重试成功，recorder 总计仍只调用三次。submission 与结果均保留 mip/layer=1；512 字节 padded staging 和一个槽位在完成消费后归零。日志为 `/private/tmp/prism-editor-runtime-subresources-gpu.log`。
+
+同日 `cargo clippy --offline -p prism_editor_profiler --all-targets --all-features --no-deps -- -D warnings` 通过。新增 getter/subresource 回归后，session 46011 再次以 profiler/timeline/world 联合命令和相同 targets/features/strict 参数通过。该范围不包含依赖包的 lint；依赖仍有既有告警。

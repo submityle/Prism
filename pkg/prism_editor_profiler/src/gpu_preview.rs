@@ -344,6 +344,10 @@ pub struct TexturePreviewProducer {
     slots: Vec<Slot>,
 }
 impl TexturePreviewProducer {
+    /// Configured admission bounds, including the total staging byte ceiling.
+    pub const fn limits(&self) -> TexturePreviewLimits {
+        self.limits
+    }
     /// `queue` must belong to `device`. Limit validation allocates no GPU buffers.
     pub fn new(
         device: &wgpu::Device,

@@ -246,6 +246,8 @@ impl<'queue> RuntimePreviewFrame<'queue> {
             producer,
             handle,
             binding,
+            mip,
+            layer,
             submission,
             complete,
         })
@@ -267,10 +269,28 @@ pub struct RuntimePreviewSubmission {
     producer: TexturePreviewProducer,
     handle: CaptureHandle,
     binding: TexturePreviewBinding,
+    mip: u32,
+    layer: u32,
     submission: wgpu::SubmissionIndex,
     complete: Arc<AtomicBool>,
 }
 impl RuntimePreviewSubmission {
+    /// Exact mip copied from the physical graph texture.
+    pub const fn mip(&self) -> u32 {
+        self.mip
+    }
+    /// Exact array layer copied from the physical graph texture.
+    pub const fn layer(&self) -> u32 {
+        self.layer
+    }
+    /// Slots still recording, mapping, or awaiting cancellation drainage.
+    pub fn occupied_slots(&self) -> usize {
+        self.producer.occupied_slots()
+    }
+    /// Actual retained staging bytes, including cancelled in-flight readbacks.
+    pub fn allocated_bytes(&self) -> u64 {
+        self.producer.allocated_bytes()
+    }
     /// Exact request identity for the native readback result.
     pub const fn handle(&self) -> CaptureHandle {
         self.handle
