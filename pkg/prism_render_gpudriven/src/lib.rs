@@ -64,6 +64,7 @@ extern crate alloc;
 pub mod camera;
 pub mod cull;
 pub mod draw;
+pub mod ember;
 pub mod encoding;
 pub mod frustum;
 pub mod gpu;
@@ -79,6 +80,9 @@ pub mod scene_draw;
 pub use camera::{FrameUniform, OrthoCamera};
 pub use cull::{CullOutput, CullParams, CullStage};
 pub use draw::{DrawStage, INDICES_PER_INSTANCE};
+pub use ember::{
+    CompiledGraphGpuBinding, CompiledGraphGpuError, CompiledGraphGpuState, ParameterUploadError,
+};
 pub use encoding::IndirectArgs;
 pub use frustum::{aabb_inside, signed_distance, Aabb, Frustum, Plane};
 pub use instances::{id_color, id_color_bytes, instance_storage_bytes, Instance};
