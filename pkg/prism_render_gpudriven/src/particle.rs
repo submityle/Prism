@@ -17,11 +17,11 @@ use prism_render_graph::{
 use rhi::{
     BindGroupDescriptor, BindGroupId, BindGroupLayoutDescriptor, BindGroupLayoutId,
     BufferBindingType, BufferDescriptor, BufferId, BufferState, BufferUsages, ColorTargetState,
-    ComputePipelineDescriptor, ComputePipelineId, Features, FragmentState, IndexFormat, Limits,
-    MultisampleState, PipelineLayoutDescriptor, PipelineLayoutId, PipelineStages, PrimitiveState,
-    PrimitiveTopology, RenderDevice, RenderPipelineDescriptor, RenderPipelineId, RenderQueue,
-    ShaderModuleDescriptor, ShaderModuleId, ShaderStages, TextureFormat, TextureId, TextureState,
-    TextureUsages, TextureViewId, VertexState,
+    ComputePipelineDescriptor, ComputePipelineId, ContentCache, Features, FragmentState,
+    IndexFormat, Limits, MultisampleState, PipelineLayoutDescriptor, PipelineLayoutId,
+    PipelineStages, PrimitiveState, PrimitiveTopology, RenderDevice, RenderPipelineDescriptor,
+    RenderPipelineId, RenderQueue, ShaderModuleDescriptor, ShaderModuleId, ShaderStages,
+    TextureFormat, TextureId, TextureState, TextureUsages, TextureViewId, VertexState,
 };
 
 use crate::encoding::IndirectArgs;
@@ -36,6 +36,273 @@ pub const PARTICLE_CONTROL_BYTES: u64 = 16;
 /// One indexed quad uses four indices.
 pub const PARTICLE_INDEX_COUNT: u32 = 4;
 const WORKGROUP_SIZE: u32 = 64;
+
+/// The fixed compute entry points used by the particle vertical slice.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum ParticleComputePipelineKind {
+    /// Clears the atomic counters and indirect draw arguments.
+    Reset,
+    /// Updates existing particles and appends the surviving indices.
+    Simulate,
+    /// Claims dead slots and initializes spawned particles.
+    Spawn,
+    /// Copies the active count into the indexed-indirect draw arguments.
+    Finalize,
+}
+
+impl ParticleComputePipelineKind {
+    const fn entry_point(self) -> &'static str {
+        match self {
+            Self::Reset => "reset",
+            Self::Simulate => "simulate",
+            Self::Spawn => "spawn",
+            Self::Finalize => "finalize",
+        }
+    }
+}
+
+/// Content identity for one particle compute pipeline.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct ParticleComputePipelineKey {
+    module: ShaderModuleId,
+    layout: PipelineLayoutId,
+    kind: ParticleComputePipelineKind,
+}
+
+/// Content identity for the fixed particle quad draw pipeline.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct ParticleRenderPipelineKey {
+    module: ShaderModuleId,
+    layout: PipelineLayoutId,
+}
+
+/// Reusable pipeline cache for the particle vertical slice.
+///
+/// The cache owns references to the fixed shader modules, bind-group layouts,
+/// pipeline layouts, and native pipeline ids through the RHI's
+/// content-addressed cache. This makes separate stages use compatible shared
+/// layouts instead of merely reusing a pipeline id with unrelated resources.
+/// Call [`Self::release_compute`], [`Self::release_render`], and
+/// [`Self::release_resources`] when a cached stage is destroyed.
+#[derive(Default)]
+pub struct ParticlePipelineCache {
+    compute_shader: ContentCache<(), ShaderModuleId>,
+    render_shader: ContentCache<(), ShaderModuleId>,
+    compute_bind_group_layout: ContentCache<(), BindGroupLayoutId>,
+    compute_pipeline_layout: ContentCache<(), PipelineLayoutId>,
+    render_bind_group_layout: ContentCache<(), BindGroupLayoutId>,
+    render_pipeline_layout: ContentCache<(), PipelineLayoutId>,
+    compute: ContentCache<ParticleComputePipelineKey, ComputePipelineId>,
+    render: ContentCache<ParticleRenderPipelineKey, RenderPipelineId>,
+}
+
+#[derive(Clone, Copy)]
+struct ParticlePipelineResources {
+    shader: ShaderModuleId,
+    render_shader: ShaderModuleId,
+    compute_bind_group_layout: BindGroupLayoutId,
+    compute_pipeline_layout: PipelineLayoutId,
+    render_bind_group_layout: BindGroupLayoutId,
+    render_pipeline_layout: PipelineLayoutId,
+}
+
+impl ParticlePipelineCache {
+    /// Creates an empty particle pipeline cache.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            compute_shader: ContentCache::new(),
+            render_shader: ContentCache::new(),
+            compute_bind_group_layout: ContentCache::new(),
+            compute_pipeline_layout: ContentCache::new(),
+            render_bind_group_layout: ContentCache::new(),
+            render_pipeline_layout: ContentCache::new(),
+            compute: ContentCache::new(),
+            render: ContentCache::new(),
+        }
+    }
+
+    fn acquire_resources(&mut self, device: &impl RenderDevice) -> ParticlePipelineResources {
+        let shader = self.compute_shader.get_or_create((), || {
+            device.create_shader_module(&ShaderModuleDescriptor::wgsl(include_str!(
+                "shaders/particle.wgsl"
+            )))
+        });
+        let render_shader = self.render_shader.get_or_create((), || {
+            device.create_shader_module(&ShaderModuleDescriptor::wgsl(include_str!(
+                "shaders/particle_draw.wgsl"
+            )))
+        });
+        let compute_bind_group_layout = self.compute_bind_group_layout.get_or_create((), || {
+            device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+                label: Some(String::from("particle-bgl")),
+                entries: vec![
+                    buffer_entry(0, BufferBindingType::Uniform, ShaderStages::COMPUTE),
+                    buffer_entry(
+                        1,
+                        BufferBindingType::Storage { read_only: false },
+                        ShaderStages::COMPUTE,
+                    ),
+                    buffer_entry(
+                        2,
+                        BufferBindingType::Storage { read_only: false },
+                        ShaderStages::COMPUTE,
+                    ),
+                    buffer_entry(
+                        3,
+                        BufferBindingType::Storage { read_only: false },
+                        ShaderStages::COMPUTE,
+                    ),
+                    buffer_entry(
+                        4,
+                        BufferBindingType::Storage { read_only: false },
+                        ShaderStages::COMPUTE,
+                    ),
+                ],
+            })
+        });
+        let compute_pipeline_layout = self.compute_pipeline_layout.get_or_create((), || {
+            device.create_pipeline_layout(&PipelineLayoutDescriptor {
+                label: Some(String::from("particle-pl")),
+                bind_group_layouts: vec![compute_bind_group_layout],
+                push_constant_ranges: Vec::new(),
+            })
+        });
+        let render_bind_group_layout = self.render_bind_group_layout.get_or_create((), || {
+            device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+                label: Some(String::from("particle-render-bgl")),
+                entries: vec![
+                    buffer_entry(0, BufferBindingType::Uniform, ShaderStages::VERTEX),
+                    buffer_entry(
+                        1,
+                        BufferBindingType::Storage { read_only: true },
+                        ShaderStages::VERTEX,
+                    ),
+                    buffer_entry(
+                        2,
+                        BufferBindingType::Storage { read_only: true },
+                        ShaderStages::VERTEX,
+                    ),
+                ],
+            })
+        });
+        let render_pipeline_layout = self.render_pipeline_layout.get_or_create((), || {
+            device.create_pipeline_layout(&PipelineLayoutDescriptor {
+                label: Some(String::from("particle-render-pl")),
+                bind_group_layouts: vec![render_bind_group_layout],
+                push_constant_ranges: Vec::new(),
+            })
+        });
+
+        ParticlePipelineResources {
+            shader,
+            render_shader,
+            compute_bind_group_layout,
+            compute_pipeline_layout,
+            render_bind_group_layout,
+            render_pipeline_layout,
+        }
+    }
+
+    fn get_or_create_compute(
+        &mut self,
+        device: &impl RenderDevice,
+        module: ShaderModuleId,
+        layout: PipelineLayoutId,
+        kind: ParticleComputePipelineKind,
+    ) -> ComputePipelineId {
+        let key = ParticleComputePipelineKey {
+            module,
+            layout,
+            kind,
+        };
+        self.compute.get_or_create(key, || {
+            device.create_compute_pipeline(&ComputePipelineDescriptor {
+                label: Some(String::from("particle-compute")),
+                layout: Some(layout),
+                module,
+                entry_point: kind.entry_point().into(),
+            })
+        })
+    }
+
+    fn get_or_create_render(
+        &mut self,
+        device: &impl RenderDevice,
+        module: ShaderModuleId,
+        layout: PipelineLayoutId,
+        descriptor: &RenderPipelineDescriptor,
+    ) -> RenderPipelineId {
+        let key = ParticleRenderPipelineKey { module, layout };
+        self.render
+            .get_or_create(key, || device.create_render_pipeline(descriptor))
+    }
+
+    /// Returns cache statistics for compute pipelines.
+    #[must_use]
+    pub fn compute_stats(&self) -> rhi::CacheStats {
+        self.compute.stats()
+    }
+
+    /// Returns cache statistics for render pipelines.
+    #[must_use]
+    pub fn render_stats(&self) -> rhi::CacheStats {
+        self.render.stats()
+    }
+
+    /// Releases one reference to a cached compute pipeline.
+    pub fn release_compute(
+        &mut self,
+        device: &impl RenderDevice,
+        module: ShaderModuleId,
+        layout: PipelineLayoutId,
+        kind: ParticleComputePipelineKind,
+    ) {
+        let key = ParticleComputePipelineKey {
+            module,
+            layout,
+            kind,
+        };
+        if let Some(id) = self.compute.release(&key) {
+            device.destroy_compute_pipeline(id);
+        }
+    }
+
+    /// Releases one reference to a cached render pipeline.
+    pub fn release_render(
+        &mut self,
+        device: &impl RenderDevice,
+        module: ShaderModuleId,
+        layout: PipelineLayoutId,
+    ) {
+        let key = ParticleRenderPipelineKey { module, layout };
+        if let Some(id) = self.render.release(&key) {
+            device.destroy_render_pipeline(id);
+        }
+    }
+
+    /// Releases one stage's reference to the fixed shader and layout resources.
+    fn release_resources(&mut self, device: &impl RenderDevice) {
+        if let Some(id) = self.render_pipeline_layout.release(&()) {
+            device.destroy_pipeline_layout(id);
+        }
+        if let Some(id) = self.render_bind_group_layout.release(&()) {
+            device.destroy_bind_group_layout(id);
+        }
+        if let Some(id) = self.compute_pipeline_layout.release(&()) {
+            device.destroy_pipeline_layout(id);
+        }
+        if let Some(id) = self.compute_bind_group_layout.release(&()) {
+            device.destroy_bind_group_layout(id);
+        }
+        if let Some(id) = self.render_shader.release(&()) {
+            device.destroy_shader_module(id);
+        }
+        if let Some(id) = self.compute_shader.release(&()) {
+            device.destroy_shader_module(id);
+        }
+    }
+}
 
 /// Configuration or input error detected before particle GPU resources are
 /// created or bytes are uploaded.
@@ -380,9 +647,72 @@ pub fn particle_storage_bytes(particles: &[Particle]) -> Vec<u8> {
 mod tests {
     use super::{
         particle_storage_bytes, simulate_cpu, validate_particle_stage_config, Particle,
-        ParticleParams, ParticleStageError, PARTICLE_STRIDE,
+        ParticleComputePipelineKind, ParticleParams, ParticlePipelineCache, ParticleStageError,
+        PARTICLE_STRIDE,
     };
-    use prism_render_driver::{Features, Limits};
+    use prism_render_driver::{
+        Features, Instance, Limits, PipelineLayoutDescriptor, RenderDevice, ShaderModuleDescriptor,
+    };
+    use prism_render_driver_null::NullInstance;
+
+    #[test]
+    fn particle_pipeline_cache_reuses_and_releases_compute_pipelines() {
+        let instance = NullInstance::new();
+        let adapter = instance
+            .request_adapter(&Default::default())
+            .expect("null adapter");
+        let (device, _queue) = instance
+            .create_device(&adapter, &Default::default())
+            .expect("null device");
+        let module = device.create_shader_module(&ShaderModuleDescriptor::wgsl(""));
+        let bind_group_layout =
+            device.create_bind_group_layout(&prism_render_driver::BindGroupLayoutDescriptor {
+                label: None,
+                entries: Vec::new(),
+            });
+        let layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+            label: None,
+            bind_group_layouts: vec![bind_group_layout],
+            push_constant_ranges: Vec::new(),
+        });
+
+        let mut cache = ParticlePipelineCache::new();
+        let first = cache.get_or_create_compute(
+            &device,
+            module,
+            layout,
+            ParticleComputePipelineKind::Simulate,
+        );
+        let second = cache.get_or_create_compute(
+            &device,
+            module,
+            layout,
+            ParticleComputePipelineKind::Simulate,
+        );
+        assert_eq!(first, second);
+        assert_eq!(cache.compute_stats().hits, 1);
+        assert_eq!(cache.compute_stats().misses, 1);
+        assert_eq!(device.live_resource_count(), 4);
+
+        cache.release_compute(
+            &device,
+            module,
+            layout,
+            ParticleComputePipelineKind::Simulate,
+        );
+        assert_eq!(device.live_resource_count(), 4);
+        cache.release_compute(
+            &device,
+            module,
+            layout,
+            ParticleComputePipelineKind::Simulate,
+        );
+        assert_eq!(device.live_resource_count(), 3);
+
+        device.destroy_pipeline_layout(layout);
+        device.destroy_bind_group_layout(bind_group_layout);
+        device.destroy_shader_module(module);
+    }
 
     #[test]
     fn stage_config_validation_rejects_device_limit_violations_before_allocation() {
@@ -556,6 +886,23 @@ impl ParticleStage {
         capacity: u32,
         resolution: u32,
     ) -> Result<Self, ParticleStageError> {
+        let mut pipeline_cache = ParticlePipelineCache::new();
+        Self::new_with_pipeline_cache(device, capacity, resolution, &mut pipeline_cache)
+    }
+
+    /// Creates a particle stage using a caller-owned reusable pipeline cache.
+    ///
+    /// The cache is useful when several stages share the same shader module and
+    /// pipeline layout. Call [`Self::destroy_with_pipeline_cache`] for the
+    /// matching teardown path; [`Self::destroy`] remains the teardown API for
+    /// stages created by [`Self::new`].
+    #[must_use]
+    pub fn new_with_pipeline_cache(
+        device: &impl RenderDevice,
+        capacity: u32,
+        resolution: u32,
+        pipeline_cache: &mut ParticlePipelineCache,
+    ) -> Result<Self, ParticleStageError> {
         let caps = device.capabilities();
         validate_particle_stage_config(capacity, resolution, caps.features, &caps.limits)?;
         let pool = device.create_buffer(&BufferDescriptor {
@@ -607,91 +954,38 @@ impl ParticleStage {
         let target_view =
             device.create_texture_view(target, &rhi::TextureViewDescriptor::default());
 
-        let shader = device.create_shader_module(&ShaderModuleDescriptor::wgsl(include_str!(
-            "shaders/particle.wgsl"
-        )));
-        let render_shader = device.create_shader_module(&ShaderModuleDescriptor::wgsl(
-            include_str!("shaders/particle_draw.wgsl"),
-        ));
-        let compute_bind_group_layout =
-            device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-                label: Some(String::from("particle-bgl")),
-                entries: vec![
-                    buffer_entry(0, BufferBindingType::Uniform, ShaderStages::COMPUTE),
-                    buffer_entry(
-                        1,
-                        BufferBindingType::Storage { read_only: false },
-                        ShaderStages::COMPUTE,
-                    ),
-                    buffer_entry(
-                        2,
-                        BufferBindingType::Storage { read_only: false },
-                        ShaderStages::COMPUTE,
-                    ),
-                    buffer_entry(
-                        3,
-                        BufferBindingType::Storage { read_only: false },
-                        ShaderStages::COMPUTE,
-                    ),
-                    buffer_entry(
-                        4,
-                        BufferBindingType::Storage { read_only: false },
-                        ShaderStages::COMPUTE,
-                    ),
-                ],
-            });
-        let compute_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
-            label: Some(String::from("particle-pl")),
-            bind_group_layouts: vec![compute_bind_group_layout],
-            push_constant_ranges: Vec::new(),
-        });
-        let compute_pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
-            label: Some(String::from("particle-simulate")),
-            layout: Some(compute_pipeline_layout),
-            module: shader,
-            entry_point: "simulate".into(),
-        });
-        let spawn_pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
-            label: Some(String::from("particle-spawn")),
-            layout: Some(compute_pipeline_layout),
-            module: shader,
-            entry_point: "spawn".into(),
-        });
-        let reset_pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
-            label: Some(String::from("particle-reset")),
-            layout: Some(compute_pipeline_layout),
-            module: shader,
-            entry_point: "reset".into(),
-        });
-        let finalize_pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
-            label: Some(String::from("particle-finalize")),
-            layout: Some(compute_pipeline_layout),
-            module: shader,
-            entry_point: "finalize".into(),
-        });
-        let render_bind_group_layout =
-            device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-                label: Some(String::from("particle-render-bgl")),
-                entries: vec![
-                    buffer_entry(0, BufferBindingType::Uniform, ShaderStages::VERTEX),
-                    buffer_entry(
-                        1,
-                        BufferBindingType::Storage { read_only: true },
-                        ShaderStages::VERTEX,
-                    ),
-                    buffer_entry(
-                        2,
-                        BufferBindingType::Storage { read_only: true },
-                        ShaderStages::VERTEX,
-                    ),
-                ],
-            });
-        let render_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
-            label: Some(String::from("particle-render-pl")),
-            bind_group_layouts: vec![render_bind_group_layout],
-            push_constant_ranges: Vec::new(),
-        });
-        let render_pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
+        let resources = pipeline_cache.acquire_resources(device);
+        let shader = resources.shader;
+        let render_shader = resources.render_shader;
+        let compute_bind_group_layout = resources.compute_bind_group_layout;
+        let compute_pipeline_layout = resources.compute_pipeline_layout;
+        let compute_pipeline = pipeline_cache.get_or_create_compute(
+            device,
+            shader,
+            compute_pipeline_layout,
+            ParticleComputePipelineKind::Simulate,
+        );
+        let spawn_pipeline = pipeline_cache.get_or_create_compute(
+            device,
+            shader,
+            compute_pipeline_layout,
+            ParticleComputePipelineKind::Spawn,
+        );
+        let reset_pipeline = pipeline_cache.get_or_create_compute(
+            device,
+            shader,
+            compute_pipeline_layout,
+            ParticleComputePipelineKind::Reset,
+        );
+        let finalize_pipeline = pipeline_cache.get_or_create_compute(
+            device,
+            shader,
+            compute_pipeline_layout,
+            ParticleComputePipelineKind::Finalize,
+        );
+        let render_bind_group_layout = resources.render_bind_group_layout;
+        let render_pipeline_layout = resources.render_pipeline_layout;
+        let render_descriptor = RenderPipelineDescriptor {
             label: Some(String::from("particle-draw")),
             layout: Some(render_pipeline_layout),
             vertex: VertexState {
@@ -712,7 +1006,13 @@ impl ParticleStage {
                 entry_point: "fs".into(),
                 targets: vec![Some(ColorTargetState::opaque(TextureFormat::Rgba8Unorm))],
             }),
-        });
+        };
+        let render_pipeline = pipeline_cache.get_or_create_render(
+            device,
+            render_shader,
+            render_pipeline_layout,
+            &render_descriptor,
+        );
         let compute_bind_group = device.create_bind_group(&BindGroupDescriptor {
             label: Some(String::from("particle-bg")),
             layout: Some(compute_bind_group_layout),
@@ -1063,12 +1363,43 @@ impl ParticleStage {
         device.destroy_compute_pipeline(self.spawn_pipeline);
         device.destroy_compute_pipeline(self.reset_pipeline);
         device.destroy_compute_pipeline(self.finalize_pipeline);
+        self.destroy_owned_pipeline_resources(device);
+        self.destroy_stage_resources(device);
+    }
+
+    /// Releases a stage created with [`Self::new_with_pipeline_cache`].
+    ///
+    /// Pipeline references are returned to `pipeline_cache`; shared native
+    /// pipelines are destroyed only when their final stage releases them.
+    /// Non-pipeline resources are always owned uniquely by the stage.
+    pub fn destroy_with_pipeline_cache(
+        &self,
+        device: &impl RenderDevice,
+        pipeline_cache: &mut ParticlePipelineCache,
+    ) {
+        pipeline_cache.release_render(device, self.render_shader, self.render_pipeline_layout);
+        for kind in [
+            ParticleComputePipelineKind::Simulate,
+            ParticleComputePipelineKind::Spawn,
+            ParticleComputePipelineKind::Reset,
+            ParticleComputePipelineKind::Finalize,
+        ] {
+            pipeline_cache.release_compute(device, self.shader, self.compute_pipeline_layout, kind);
+        }
+        pipeline_cache.release_resources(device);
+        self.destroy_stage_resources(device);
+    }
+
+    fn destroy_owned_pipeline_resources(&self, device: &impl RenderDevice) {
         device.destroy_pipeline_layout(self.compute_pipeline_layout);
         device.destroy_bind_group_layout(self.compute_bind_group_layout);
         device.destroy_pipeline_layout(self.render_pipeline_layout);
         device.destroy_bind_group_layout(self.render_bind_group_layout);
         device.destroy_shader_module(self.shader);
         device.destroy_shader_module(self.render_shader);
+    }
+
+    fn destroy_stage_resources(&self, device: &impl RenderDevice) {
         device.destroy_bind_group(self.compute_bind_group);
         device.destroy_bind_group(self.render_bind_group);
         device.destroy_buffer(self.pool);

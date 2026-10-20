@@ -84,9 +84,10 @@ pub use frustum::{aabb_inside, signed_distance, Aabb, Frustum, Plane};
 pub use instances::{id_color, id_color_bytes, instance_storage_bytes, Instance};
 pub use naive::NaiveStage;
 pub use particle::{
-    particle_storage_bytes, simulate_cpu, validate_particle_stage_config, Particle, ParticleParams,
-    ParticleReferenceResult, ParticleStage, ParticleStageError, PARTICLE_CONTROL_BYTES,
-    PARTICLE_INDEX_COUNT, PARTICLE_PARAMS_BYTES, PARTICLE_STRIDE,
+    particle_storage_bytes, simulate_cpu, validate_particle_stage_config, Particle,
+    ParticleComputePipelineKind, ParticleParams, ParticlePipelineCache, ParticleReferenceResult,
+    ParticleStage, ParticleStageError, PARTICLE_CONTROL_BYTES, PARTICLE_INDEX_COUNT,
+    PARTICLE_PARAMS_BYTES, PARTICLE_STRIDE,
 };
 pub use quad::{corner_offset, corners, QUAD_HALF_EXTENT, QUAD_VERTICES};
 pub use readback::{count_lit_pixels, pixel_at, ReadBuffer};

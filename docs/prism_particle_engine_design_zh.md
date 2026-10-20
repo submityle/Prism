@@ -629,6 +629,7 @@ prism_particle_tools  (可选) 图编辑器 / 预览(含着色预览) / 性能 H
 | CPU emitter runtime | `pkg/prism_render_architecture/src/particle/runtime.rs` | 已实现固定容量池、rate/burst、确定性采样、积分/力场、寿命回收及溢出计数；本轮无法完成 crate 测试编译，不能据此确认当前测试状态 |
 | `.ember` 二进制资产 | `pkg/prism_render_architecture/src/particle/authoring.rs` | 已实现版本化 little-endian codec、输入校验、迁移模型与 round-trip/损坏输入测试；RON API 已移除 |
 | GPU 仿真与间接绘制切片 | `pkg/prism_render_gpudriven/src/particle.rs` 与 `shaders/particle*.wgsl` | Prism RHI/RenderGraph 上的 pool update、spawn、活跃索引、indirect args 与 quad 绘制；构造前校验设备缓冲/纹理/dispatch 限制，上传校验数值与记录；仅代表最小竖切片，不代表全功能 Ember |
+| 粒子竖切片管线缓存 | `pkg/prism_render_gpudriven/src/particle.rs` | 新增 per-device caller-owned `ParticlePipelineCache`，对固定 shader/layout、compute entry points 和 quad render pipeline 做内容缓存与引用计数释放；`ParticleStage::new_with_pipeline_cache` / `destroy_with_pipeline_cache` 已接线。缓存目前只覆盖竖切片，尚未接入 `prism_render_app::PipelineCache` 的异步编译、持久化 PSO 或完整 Ember pipeline specialization |
 | Graph → WGSL 编译器基础 | `pkg/prism_render_architecture/src/particle/compiler.rs` | 校验 GraphIr、稳定拓扑序、模块属性需求与资源 ABI，生成活跃 SoA 布局和 WGSL storage bindings（含 previous/current ping-pong ABI）、运行时计数缓冲控制的 stage dispatch 与迭代计划、曲线 LUT 采样函数、DataInterface 函数合并、模块读/写/读旧帧契约、逻辑属性名到物理绑定名的 lowering，以及按帧奇偶选择 ping-pong 物理副本；模块资源按 group 稳定分配空闲 binding，避免多个模块默认声明 `(2, 0)` 时无法组合。pipeline-cache/RenderGraph 生产接线、真实设备资源绑定、完整模块参数资产 ABI 和端到端 Ember 生命周期仍未完成，因此不能标记 M2 完成 |
 | 合同/算法模块 | `pkg/prism_render_architecture/src/particle/` | 包含池、发射、模拟、事件、排序/剔除、着色/OIT 等 CPU 合同；纯合同或单算法模块不等于 GPU 生产接线 |
 | ECS/App 生命周期与完整渲染集成 | Prism 粒子运行时/渲染 crate | 尚未形成完整端到端接线；需以实际代码和集成验收逐项完成，不能由本设计文档推定已完成 |
@@ -646,6 +647,8 @@ prism_particle_tools  (可选) 图编辑器 / 预览(含着色预览) / 性能 H
 
 实现更新（2026-10-20）：编译器已加入模块级属性访问契约（current read / previous read / write）、生成源码的逻辑属性名解析，以及 `CompiledGraph::attribute_bindings_for_frame` 的 ping-pong 物理副本选择。`InheritVelocity`、`SetLifetime` 和三个标量约束 kernel 不再依赖 self-assignment；DataInterface 元数据不匹配会报错，未知接口函数名不再静默生成零值。由于共享工作树中的 `prism_physics_core/src/soft/topology.rs`、`ccd/leaf_sweep.rs` 等并行改动当前阻断 workspace 编译，本更新尚未取得新的 crate 测试验收；不能把源码格式检查当作编译通过。
 
+实现更新（2026-10-20）：GPU 粒子竖切片新增 `ParticlePipelineCache`，并在 `ParticleStage::new_with_pipeline_cache` 与 `destroy_with_pipeline_cache` 中接入 compute/render pipeline 的复用和引用计数释放；RenderGraph 的 reset → simulate → spawn → finalize → indirect draw 路径保持不变。新增 Null RHI 下的缓存命中与两次释放测试源码，但本轮由于共享构建目录被并行 Cargo 清理、随后隔离 target 又因磁盘空间不足，未取得该测试的编译/执行验收；不得将此静态实现记录解释为 pipeline-cache 生产验收。
+
 ---
 
 ## 35. 路线图与验收状态
@@ -654,7 +657,7 @@ prism_particle_tools  (可选) 图编辑器 / 预览(含着色预览) / 性能 H
 |---|---|---|
 | M0 骨架 | crate 布局、Asset/Component、CPU 简单求解器、Sprite Unlit 渲染 | CPU reference runtime 已有；ECS/App 与完整 sprite demo 未通过验收 |
 | M1 GPU 核心 | SoA 缓冲池、free-list、spawn/update compute、indirect draw | 已有小型 RHI pool/simulate/spawn/indirect draw slice；百万粒子无回读目标未验证 |
-| M2 图编译 | 图→IR→WESL codegen、按需分配、曲线 LUT | 已有 GraphIr→WGSL 编译器基础、活跃 SoA 布局和 storage-binding ABI、模块属性需求校验、运行时 dispatch-count ABI/host 计划及曲线 LUT WGSL 采样 helper；内置 kernel 函数体、模块操作到属性变量的语义 lowering、DataInterface 可执行代码生成、ping-pong 运行时绑定选择、pipeline-cache/RenderGraph 接线及当前 checkout 测试验收未完成 |
+| M2 图编译 | 图→IR→WESL codegen、按需分配、曲线 LUT | 已有 GraphIr→WGSL 编译器基础、活跃 SoA 布局和 storage-binding ABI、模块属性访问/语义 lowering、DataInterface 函数合并、运行时 dispatch-count ABI/host 计划、曲线 LUT WGSL 采样 helper 和 ping-pong 运行时绑定选择；GPU 竖切片已有 RenderGraph 接线与局部 caller-owned pipeline cache，但仍未接入完整 Ember pipeline specialization、真实图编译产物到设备资源绑定、完整模块参数资产 ABI、ECS/App 生命周期及当前共享 checkout 的完整回归验收，不能标记 M2 完成 |
 | M3 力/碰撞 | 力场库、curl noise、depth/SDF 碰撞、事件系统 | 烟火/瀑布/碎片 demo |
 | M4 渲染器 | Mesh/Ribbon/Beam/Light、GPU 排序、软粒子、motion vector | 完整特效场景 + TAA 无拖影 |
 | M5 PBR 着色 | 共享 PBR closure 接入、聚类受光、软粒子折射、共享 OIT | 物理受光火星/水花 demo |
