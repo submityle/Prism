@@ -161,6 +161,8 @@ pub enum GraphPanelError {
     UnboundEvent,
     /// Atomic authoring command rejected by the kernel.
     Authoring(GraphAuthoringError),
+    /// A pointer is already captured or there is no active capture.
+    GestureState,
 }
 impl fmt::Display for GraphPanelError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -185,6 +187,7 @@ pub struct GraphPanelController {
     pub(crate) pending: Option<PortId>,
     pub(crate) index: SpatialIndex,
     pub(crate) stamp: Arc<()>,
+    pub(crate) gesture: Option<crate::graph_gesture::GraphGesture>,
 }
 impl GraphPanelController {
     /// Accept a real authoring model and a bounded host contribution set.
@@ -239,6 +242,7 @@ impl GraphPanelController {
             pending: None,
             index,
             stamp: Arc::new(()),
+            gesture: None,
         })
     }
     /// Read-only real model; all mutation passes through atomic commands.
@@ -382,7 +386,7 @@ impl GraphPanelController {
                 }
             }
             GraphPanelAction::Disconnect(e) => {
-                self.command(&GraphCommand::Edit(vec![GraphEdit::Disconnect(e)]))?
+                self.command(&GraphCommand::Edit(vec![GraphEdit::Disconnect(e)]))?;
             }
             GraphPanelAction::Pan(delta) => {
                 let mut v = self.viewport;
@@ -407,6 +411,7 @@ impl GraphPanelController {
             }
         }
         self.stamp = Arc::new(());
+        self.gesture = None;
         Ok(())
     }
     fn command(&mut self, c: &GraphCommand) -> Result<(), GraphPanelError> {

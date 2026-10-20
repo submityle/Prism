@@ -1,6 +1,7 @@
 //! Real retained Loom node/port/wire controls with bounded spatial queries.
 use crate::{
     graph::{self, GraphPanelAction as A, GraphPanelController, GraphPanelError, Item},
+    graph_gesture::{GraphGesturePreview, GraphPointerHit},
     SelectionMode, UiEvent, UiTrigger,
 };
 use prism_editor_graph::{EdgeId, GraphCommand, GraphPoint, NodeId, PortDirection, PortId};
@@ -25,6 +26,8 @@ pub struct GraphNodeVisual {
 /// A real typed port and its clipped connection control.
 #[derive(Clone, Debug)]
 pub struct GraphPortVisual {
+    /// Owning node; preserves the interleaved node/port painter order for hits.
+    pub node: NodeId,
     /// Stable kernel identity.
     pub port: PortId,
     /// Painted activation key.
@@ -70,10 +73,45 @@ pub struct BoundGraphPanel {
     nodes: Vec<GraphNodeVisual>,
     ports: Vec<GraphPortVisual>,
     wires: Vec<GraphWireVisual>,
+    preview_rects: Vec<[f32; 4]>,
+    viewport: graph::GraphPanelViewport,
     stats: GraphPanelViewStats,
     pub(crate) stamp: Arc<()>,
 }
 impl BoundGraphPanel {
+    /// Effective viewport of this publication, including an uncommitted pan.
+    pub const fn viewport(&self) -> graph::GraphPanelViewport {
+        self.viewport
+    }
+    /// At most four clipped overlay rectangles painted above nodes and ports.
+    pub fn preview_rects(&self) -> &[[f32; 4]] {
+        &self.preview_rects
+    }
+    /// Hit exact painted controls in reverse painter order. Coordinates are
+    /// canvas-local logical pixels; canvas and control bounds are half-open.
+    /// Non-finite or outside positions have no target.
+    pub fn hit_test(&self, position: [f64; 2]) -> Option<GraphPointerHit> {
+        self.viewport.document_point(position)?;
+        let inside = |r: [f32; 4]| {
+            position[0] >= f64::from(r[0])
+                && position[1] >= f64::from(r[1])
+                && position[0] < f64::from(r[0] + r[2])
+                && position[1] < f64::from(r[1] + r[3])
+        };
+        let mut ports = self.ports.iter().rev().peekable();
+        for node in self.nodes.iter().rev() {
+            while ports.peek().is_some_and(|p| p.node == node.node) {
+                let port = ports.next().expect("painted owner");
+                if inside(port.rect) {
+                    return Some(GraphPointerHit::Port(port.port));
+                }
+            }
+            if inside(node.rect) {
+                return Some(GraphPointerHit::Node(node.node));
+            }
+        }
+        Some(GraphPointerHit::Canvas)
+    }
     /// Mount or reconcile in a real Loom Ui.
     pub fn element(&self) -> &Element {
         &self.element
@@ -160,18 +198,22 @@ fn clipped(rect: [f64; 4], size: [f64; 2]) -> Option<[f32; 4]> {
     Some([x0 as f32, y0 as f32, (x1 - x0) as f32, (y1 - y0) as f32])
 }
 fn screen(c: &GraphPanelController, p: [f64; 2]) -> [f64; 2] {
+    let viewport = c.display_viewport();
     [
-        (p[0] - c.viewport.origin[0]) * c.viewport.zoom,
-        (p[1] - c.viewport.origin[1]) * c.viewport.zoom,
+        (p[0] - viewport.origin[0]) * viewport.zoom,
+        (p[1] - viewport.origin[1]) * viewport.zoom,
     ]
 }
 pub(crate) fn build(c: &GraphPanelController) -> BoundGraphPanel {
+    let viewport = c.display_viewport();
     let mut view = BoundGraphPanel {
         element: Element::box_(),
         bindings: BTreeMap::new(),
         nodes: Vec::new(),
         ports: Vec::new(),
         wires: Vec::new(),
+        preview_rects: Vec::new(),
+        viewport,
         stats: Default::default(),
         stamp: c.stamp.clone(),
     };
@@ -247,15 +289,15 @@ pub(crate) fn build(c: &GraphPanelController) -> BoundGraphPanel {
     let mut canvas = Element::box_()
         .key_str("graph:canvas")
         .style(StyleProp::Position, StyleValue::keyword(Keyword::Relative))
-        .style(StyleProp::Width, StyleValue::px(c.viewport.size[0] as f32))
-        .style(StyleProp::Height, StyleValue::px(c.viewport.size[1] as f32))
+        .style(StyleProp::Width, StyleValue::px(viewport.size[0] as f32))
+        .style(StyleProp::Height, StyleValue::px(viewport.size[1] as f32))
         .style(StyleProp::FlexShrink, StyleValue::number(0.))
         .style(
             StyleProp::BackgroundColor,
             StyleValue::rgba(0.04, 0.05, 0.07, 1.),
         );
     let query = c.index.query(
-        c.viewport.bounds(),
+        c.preview_query(),
         c.limits.query_visits,
         c.limits.visible_nodes + c.limits.visible_edges,
     );
@@ -270,7 +312,18 @@ pub(crate) fn build(c: &GraphPanelController) -> BoundGraphPanel {
             view.stats.truncated = true;
             continue;
         }
-        let points = graph::wire_points(&c.editor, edge);
+        let mut points = graph::wire_points(&c.editor, edge);
+        let e = c.editor.graph().edge(edge).expect("indexed edge");
+        for (index, port) in [(0, e.output()), (3, e.input())] {
+            let owner = c.editor.graph().port(port).expect("indexed port").node();
+            let offset = c.preview_offset(owner);
+            for (axis, d) in offset.into_iter().enumerate() {
+                points[index][axis] += d;
+            }
+        }
+        let middle = (points[0][0] + points[3][0]) / 2.;
+        points[1] = [middle, points[0][1]];
+        points[2] = [middle, points[3][1]];
         let mut segments = Vec::new();
         for ends in points.windows(2) {
             let a = screen(c, ends[0]);
@@ -280,7 +333,7 @@ pub(crate) fn build(c: &GraphPanelController) -> BoundGraphPanel {
             } else {
                 [a[0] - 2., a[1].min(b[1]), a[0] + 2., a[1].max(b[1])]
             };
-            if let Some(rect) = clipped(rect, c.viewport.size) {
+            if let Some(rect) = clipped(rect, viewport.size) {
                 segments.push(rect);
             }
         }
@@ -317,10 +370,14 @@ pub(crate) fn build(c: &GraphPanelController) -> BoundGraphPanel {
             view.stats.truncated = true;
             continue;
         }
-        let r = graph::node_rect(&c.editor, n).0;
+        let mut r = graph::node_rect(&c.editor, n).0;
+        let offset = c.preview_offset(n);
+        for i in 0..4 {
+            r[i] += offset[i % 2];
+        }
         let a = screen(c, [r[0], r[1]]);
         let b = screen(c, [r[2], r[3]]);
-        let Some(rect) = clipped([a[0], a[1], b[0], b[1]], c.viewport.size) else {
+        let Some(rect) = clipped([a[0], a[1], b[0], b[1]], viewport.size) else {
             continue;
         };
         let node = c.editor.graph().node(n).expect("indexed node");
@@ -337,8 +394,8 @@ pub(crate) fn build(c: &GraphPanelController) -> BoundGraphPanel {
         // Text is emitted only when its entire title row fits the clipped box.
         if a[0] >= 0.
             && a[1] >= 0.
-            && b[0] <= c.viewport.size[0]
-            && c.viewport.zoom >= 0.75
+            && b[0] <= viewport.size[0]
+            && viewport.zoom >= 0.75
             && rect[3] >= 24.
         {
             element = element.child(Element::text(short(node.name(), 20)));
@@ -360,7 +417,10 @@ pub(crate) fn build(c: &GraphPanelController) -> BoundGraphPanel {
         });
         for id in node.ports() {
             let p = c.editor.graph().port(*id).expect("real port");
-            let at = graph::port_point(&c.editor, *id);
+            let mut at = graph::port_point(&c.editor, *id);
+            for i in 0..2 {
+                at[i] += offset[i];
+            }
             let (x0, x1) = if p.direction() == PortDirection::Input {
                 (at[0], at[0] + 90.)
             } else {
@@ -368,7 +428,7 @@ pub(crate) fn build(c: &GraphPanelController) -> BoundGraphPanel {
             };
             let a = screen(c, [x0, at[1] - 8.]);
             let b = screen(c, [x1, at[1] + 8.]);
-            let Some(rect) = clipped([a[0], a[1], b[0], b[1]], c.viewport.size) else {
+            let Some(rect) = clipped([a[0], a[1], b[0], b[1]], viewport.size) else {
                 continue;
             };
             if view.ports.len() == c.limits.visible_ports {
@@ -396,6 +456,7 @@ pub(crate) fn build(c: &GraphPanelController) -> BoundGraphPanel {
             view.bindings
                 .insert((key.clone(), UiTrigger::Activate), A::PickPort(*id));
             view.ports.push(GraphPortVisual {
+                node: n,
                 port: *id,
                 key,
                 rect,
@@ -403,6 +464,41 @@ pub(crate) fn build(c: &GraphPanelController) -> BoundGraphPanel {
                 type_key: p.port_type().key().into(),
                 pending,
             });
+        }
+    }
+    let mut overlay = Vec::with_capacity(4);
+    match c.gesture_preview() {
+        Some(GraphGesturePreview::Connection { from, to, .. }) => {
+            let mid = (from[0] + to[0]) / 2.;
+            for ends in [from, [mid, from[1]], [mid, to[1]], to].windows(2) {
+                let (a, b) = (ends[0], ends[1]);
+                overlay.push(if a[1] == b[1] {
+                    [a[0].min(b[0]), a[1] - 1., a[0].max(b[0]), a[1] + 1.]
+                } else {
+                    [a[0] - 1., a[1].min(b[1]), a[0] + 1., a[1].max(b[1])]
+                });
+            }
+        }
+        Some(GraphGesturePreview::Marquee { rect }) => {
+            let a = screen(c, [rect[0], rect[1]]);
+            let b = screen(c, [rect[2], rect[3]]);
+            overlay.extend([
+                [a[0], a[1], b[0], a[1] + 1.],
+                [a[0], b[1] - 1., b[0], b[1]],
+                [a[0], a[1], a[0] + 1., b[1]],
+                [b[0] - 1., a[1], b[0], b[1]],
+            ]);
+        }
+        _ => {}
+    }
+    for rect in overlay {
+        if let Some(rect) = clipped(rect, viewport.size) {
+            let i = view.preview_rects.len();
+            canvas = canvas.child(box_at(rect).key_str(format!("graph:gesture:{i}")).style(
+                StyleProp::BackgroundColor,
+                StyleValue::rgba(0.95, 0.70, 0.15, 1.),
+            ));
+            view.preview_rects.push(rect);
         }
     }
     view.stats.nodes = view.nodes.len();
@@ -427,7 +523,7 @@ pub(crate) fn build(c: &GraphPanelController) -> BoundGraphPanel {
         .key_str("graph:panel")
         .style(
             StyleProp::Width,
-            StyleValue::px(c.viewport.size[0] as f32 + 160.),
+            StyleValue::px(viewport.size[0] as f32 + 160.),
         )
         .child(body)
         .child(Element::text(status));
