@@ -7,6 +7,9 @@
 //! lifetime of the graph.
 
 #![forbid(unsafe_code)]
+#![deny(missing_docs)]
+
+extern crate alloc;
 
 mod graph;
 

@@ -1,6 +1,8 @@
-use std::any::type_name;
-use std::collections::{BTreeMap, BTreeSet};
-use std::fmt;
+use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::string::String;
+use alloc::vec::Vec;
+use core::any::type_name;
+use core::fmt;
 
 /// Monotonic identity for a graph node.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Hash)]
@@ -430,13 +432,13 @@ impl Group {
     }
 
     /// Returns directly assigned nodes in stable ID order.
-    #[must_use]
+    #[must_use = "iterate over the group's direct nodes"]
     pub fn nodes(&self) -> impl Iterator<Item = NodeId> + '_ {
         self.nodes.iter().copied()
     }
 
     /// Returns direct child groups in stable ID order.
-    #[must_use]
+    #[must_use = "iterate over the group's direct child groups"]
     pub fn children(&self) -> impl Iterator<Item = GroupId> + '_ {
         self.children.iter().copied()
     }
@@ -514,11 +516,24 @@ impl std::error::Error for CycleError {}
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum GraphError {
     /// A required graph name was empty.
-    InvalidName { kind: NameKind, name: String },
+    InvalidName {
+        /// The kind of item whose name is invalid.
+        kind: NameKind,
+        /// The invalid name.
+        name: String,
+    },
     /// A port type key was empty.
-    InvalidPortType { port: String },
+    InvalidPortType {
+        /// The local port name with the invalid type key.
+        port: String,
+    },
     /// A node declared two ports with the same local name.
-    DuplicatePortName { node: NodeId, name: String },
+    DuplicatePortName {
+        /// The node ID, or zero while validating an uncommitted node spec.
+        node: NodeId,
+        /// The duplicated local port name.
+        name: String,
+    },
     /// A node ID was not found.
     MissingNode(NodeId),
     /// A port ID was not found.
@@ -529,21 +544,33 @@ pub enum GraphError {
     MissingGroup(GroupId),
     /// A connection used the wrong endpoint direction.
     WrongDirection {
+        /// The endpoint whose direction was invalid.
         port: PortId,
+        /// The direction required by the operation.
         expected: PortDirection,
+        /// The direction found on the endpoint.
         actual: PortDirection,
     },
     /// The output and input port type keys differ.
     TypeMismatch {
+        /// The output endpoint.
         output: PortId,
+        /// The input endpoint.
         input: PortId,
+        /// The output type key.
         output_type: PortType,
+        /// The input type key.
         input_type: PortType,
     },
     /// A single-connection input already has an edge.
     InputAlreadyConnected(PortId),
     /// A proposed group parent would create a group cycle.
-    GroupCycle { group: GroupId, parent: GroupId },
+    GroupCycle {
+        /// The group being reparented.
+        group: GroupId,
+        /// The proposed parent.
+        parent: GroupId,
+    },
     /// A group cannot be removed while it owns nodes or child groups.
     GroupNotEmpty(GroupId),
     /// The graph's node dependency edges contain a cycle.
@@ -621,7 +648,7 @@ impl fmt::Display for GraphError {
     }
 }
 
-impl std::error::Error for GraphError {}
+impl core::error::Error for GraphError {}
 
 /// Failure while invoking a node evaluator.
 #[derive(Debug)]
@@ -629,7 +656,12 @@ pub enum EvaluationError<E> {
     /// The graph could not produce a valid deterministic order.
     Graph(GraphError),
     /// The callback rejected one node.
-    Node { node: NodeId, error: E },
+    Node {
+        /// The node whose callback failed.
+        node: NodeId,
+        /// The callback error.
+        error: E,
+    },
 }
 
 impl<E: fmt::Display> fmt::Display for EvaluationError<E> {
@@ -641,7 +673,7 @@ impl<E: fmt::Display> fmt::Display for EvaluationError<E> {
     }
 }
 
-impl<E: fmt::Debug + fmt::Display> std::error::Error for EvaluationError<E> {}
+impl<E: fmt::Debug + fmt::Display> core::error::Error for EvaluationError<E> {}
 
 /// A deterministic node graph with typed ports, hierarchical groups, and
 /// callback-driven topological evaluation.
@@ -749,7 +781,7 @@ impl<N> Graph<N> {
     }
 
     /// Returns edges in ascending stable-ID order.
-    #[must_use]
+    #[must_use = "iterate over the graph edges"]
     pub fn edges(&self) -> impl Iterator<Item = &Edge> {
         self.edges.values()
     }
@@ -846,10 +878,10 @@ impl<N> Graph<N> {
                 name: spec.name,
             });
         }
-        if let Some(parent) = spec.parent {
-            if !self.groups.contains_key(&parent) {
-                return Err(GraphError::MissingGroup(parent));
-            }
+        if let Some(parent) = spec.parent
+            && !self.groups.contains_key(&parent)
+        {
+            return Err(GraphError::MissingGroup(parent));
         }
         self.ensure_capacity(self.next_group, 1)?;
         let id = GroupId(Self::allocate(&mut self.next_group)?);
@@ -945,10 +977,10 @@ impl<N> Graph<N> {
         if !self.nodes.contains_key(&node) {
             return Err(GraphError::MissingNode(node));
         }
-        if let Some(group_id) = group {
-            if !self.groups.contains_key(&group_id) {
-                return Err(GraphError::MissingGroup(group_id));
-            }
+        if let Some(group_id) = group
+            && !self.groups.contains_key(&group_id)
+        {
+            return Err(GraphError::MissingGroup(group_id));
         }
         let old_group = self.nodes.get(&node).and_then(|entry| entry.group);
         if old_group == group {
@@ -1112,12 +1144,8 @@ impl<N> Graph<N> {
     pub fn topological_order(&self) -> Result<Vec<NodeId>, GraphError> {
         let mut indegree: BTreeMap<NodeId, usize> =
             self.nodes.keys().copied().map(|id| (id, 0)).collect();
-        for ((source, target), count) in &self.node_pair_counts {
-            if source != target {
-                *indegree.get_mut(target).expect("edge target is live") += count;
-            } else {
-                *indegree.get_mut(target).expect("edge target is live") += count;
-            }
+        for ((_, target), count) in &self.node_pair_counts {
+            *indegree.get_mut(target).expect("edge target is live") += count;
         }
         let mut ready: BTreeSet<NodeId> = indegree
             .iter()
@@ -1219,14 +1247,13 @@ impl<N> Graph<N> {
                     return Err(GraphError::MissingPort(*port_id));
                 }
             }
-            if let Some(group) = node.group {
-                if !self
+            if let Some(group) = node.group
+                && !self
                     .groups
                     .get(&group)
                     .is_some_and(|entry| entry.nodes.contains(id))
-                {
-                    return Err(GraphError::MissingGroup(group));
-                }
+            {
+                return Err(GraphError::MissingGroup(group));
             }
         }
         for edge in self.edges.values() {
@@ -1545,5 +1572,108 @@ mod tests {
             )
             .expect_err("type mismatch");
         assert!(matches!(error, GraphError::TypeMismatch { .. }));
+    }
+
+    #[test]
+    fn removing_a_node_clears_all_incident_indexes() {
+        let mut graph = Graph::new();
+        let source = graph.add_node(node("source", false, true)).expect("node");
+        let middle = graph.add_node(node("middle", true, true)).expect("node");
+        let sink = graph.add_node(node("sink", true, false)).expect("node");
+        let first = graph
+            .connect(
+                graph.port_named(source, "out").expect("source output"),
+                graph.port_named(middle, "in").expect("middle input"),
+            )
+            .expect("first edge");
+        let second = graph
+            .connect(
+                graph.port_named(middle, "out").expect("middle output"),
+                graph.port_named(sink, "in").expect("sink input"),
+            )
+            .expect("second edge");
+
+        let removed = graph.remove_node(middle).expect("remove");
+        assert_eq!(removed.id(), middle);
+        assert_eq!(graph.edge_count(), 0);
+        assert!(graph.edge(first).is_none());
+        assert!(graph.edge(second).is_none());
+        assert!(graph.incoming_edges(source).is_empty());
+        assert!(graph.outgoing_edges(source).is_empty());
+        assert!(graph.incoming_edges(sink).is_empty());
+        assert!(graph.validate().is_ok());
+        assert_eq!(
+            graph.topological_order().expect("acyclic"),
+            vec![source, sink]
+        );
+    }
+
+    #[test]
+    fn multiple_input_connections_keep_topological_order_stable() {
+        let mut graph = Graph::new();
+        let left = graph.add_node(node("left", false, true)).expect("node");
+        let right = graph.add_node(node("right", false, true)).expect("node");
+        let sink = graph
+            .add_node(
+                NodeSpec::new("sink", "payload")
+                    .with_port(PortSpec::input("first", number_type()))
+                    .with_port(
+                        PortSpec::input("many", number_type())
+                            .with_connection_policy(ConnectionPolicy::Multiple),
+                    ),
+            )
+            .expect("node");
+        let sink_first = graph.port_named(sink, "first").expect("first input");
+        let sink_many = graph.port_named(sink, "many").expect("many input");
+        graph
+            .connect(
+                graph.port_named(left, "out").expect("left output"),
+                sink_first,
+            )
+            .expect("first edge");
+        graph
+            .connect(
+                graph.port_named(left, "out").expect("left output"),
+                sink_many,
+            )
+            .expect("second edge");
+        graph
+            .connect(
+                graph.port_named(right, "out").expect("right output"),
+                sink_many,
+            )
+            .expect("third edge");
+        assert_eq!(
+            graph.topological_order().expect("acyclic"),
+            vec![left, right, sink]
+        );
+        assert_eq!(graph.incoming_edges(sink).len(), 3);
+    }
+
+    #[test]
+    fn invalid_group_and_port_specs_are_rejected_without_mutation() {
+        let mut graph = Graph::new();
+        assert_eq!(
+            graph.add_group(GroupSpec::new("child").with_parent(GroupId::from_raw(9))),
+            Err(GraphError::MissingGroup(GroupId::from_raw(9)))
+        );
+        assert_eq!(graph.group_count(), 0);
+        assert!(matches!(
+            graph.add_node(
+                NodeSpec::new("invalid", ()).with_port(PortSpec::input("", number_type()))
+            ),
+            Err(GraphError::InvalidName {
+                kind: NameKind::Port,
+                ..
+            })
+        ));
+        assert!(matches!(
+            graph.add_node(
+                NodeSpec::new("invalid", ()).with_port(PortSpec::input("in", PortType::named("")))
+            ),
+            Err(GraphError::InvalidPortType { .. })
+        ));
+        assert_eq!(graph.node_count(), 0);
+        assert_eq!(graph.port_count(), 0);
     }
 }

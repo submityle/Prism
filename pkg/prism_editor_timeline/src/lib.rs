@@ -1,49 +1,66 @@
 //! Deterministic timeline primitives shared by animation, sequencing, and VFX.
 //!
 //! Time is represented as integer ticks. Values are fixed-width numeric vectors
-//! so sampling is allocation-free and domain adapters decide how to interpret
-//! the sampled channels.
+//! so domain adapters can decide how to interpret the sampled channels. Sampling
+//! returns owned values, which keeps the timeline independent from temporary
+//! storage owned by a caller.
 
 #![forbid(unsafe_code)]
+#![deny(missing_docs)]
 
-use std::collections::{BTreeMap, BTreeSet};
+extern crate alloc;
 
+use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::string::String;
+use alloc::vec::Vec;
+use core::fmt;
+
+/// Stable identity for a timeline track.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Hash)]
 pub struct TrackId(u128);
 
 impl TrackId {
+    /// Constructs a track ID from its serialized representation.
     #[must_use]
     pub const fn from_raw(raw: u128) -> Self {
         Self(raw)
     }
 
+    /// Returns the serialized representation of this track ID.
     #[must_use]
     pub const fn raw(self) -> u128 {
         self.0
     }
 }
 
+/// Stable identity for a keyframe within a timeline.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Hash)]
 pub struct KeyId(u128);
 
 impl KeyId {
+    /// Constructs a keyframe ID from its serialized representation.
     #[must_use]
     pub const fn from_raw(raw: u128) -> Self {
         Self(raw)
     }
 
+    /// Returns the serialized representation of this keyframe ID.
     #[must_use]
     pub const fn raw(self) -> u128 {
         self.0
     }
 }
 
+/// Interpolation applied from one keyframe to the next.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Interpolation {
+    /// Holds the preceding keyframe value until the next keyframe.
     Step,
+    /// Linearly interpolates each component between adjacent keyframes.
     Linear,
 }
 
+/// A keyframe containing a fixed-dimensional numeric value.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Keyframe {
     id: KeyId,
@@ -53,6 +70,7 @@ pub struct Keyframe {
 }
 
 impl Keyframe {
+    /// Creates a keyframe. Track insertion validates the value dimension.
     #[must_use]
     pub fn new(id: KeyId, tick: u64, values: Vec<f64>, interpolation: Interpolation) -> Self {
         Self {
@@ -63,46 +81,66 @@ impl Keyframe {
         }
     }
 
+    /// Returns the stable keyframe ID.
     #[must_use]
     pub const fn id(&self) -> KeyId {
         self.id
     }
 
+    /// Returns the integer tick at which this keyframe occurs.
     #[must_use]
     pub const fn tick(&self) -> u64 {
         self.tick
     }
 
+    /// Returns the keyframe components in declaration order.
     #[must_use]
     pub fn values(&self) -> &[f64] {
         &self.values
     }
 
+    /// Returns the interpolation used after this keyframe.
     #[must_use]
     pub const fn interpolation(&self) -> Interpolation {
         self.interpolation
     }
 }
 
+/// Errors returned by timeline and track mutations.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TimelineError {
+    /// The track ID is already present in the timeline.
     DuplicateTrack(TrackId),
+    /// The requested track ID is not present in the timeline.
     MissingTrack(TrackId),
+    /// The keyframe ID is already present in the track.
     DuplicateKey(KeyId),
+    /// The requested keyframe ID is not present in the track.
     MissingKey(KeyId),
+    /// A track or keyframe was given an empty value vector.
     EmptyValue,
-    DimensionMismatch { expected: usize, actual: usize },
+    /// A keyframe tick is already occupied by another keyframe.
+    DuplicateTick(u64),
+    /// A keyframe vector has a different dimension from its track.
+    DimensionMismatch {
+        /// The dimension required by the track.
+        expected: usize,
+        /// The dimension supplied by the keyframe.
+        actual: usize,
+    },
+    /// An event ID is already present in the timeline.
     DuplicateEvent(u128),
 }
 
-impl std::fmt::Display for TimelineError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for TimelineError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::DuplicateTrack(id) => write!(formatter, "track {} already exists", id.raw()),
             Self::MissingTrack(id) => write!(formatter, "track {} does not exist", id.raw()),
             Self::DuplicateKey(id) => write!(formatter, "key {} already exists", id.raw()),
             Self::MissingKey(id) => write!(formatter, "key {} does not exist", id.raw()),
             Self::EmptyValue => formatter.write_str("keyframe values cannot be empty"),
+            Self::DuplicateTick(tick) => write!(formatter, "tick {tick} already has a keyframe"),
             Self::DimensionMismatch { expected, actual } => {
                 write!(
                     formatter,
@@ -114,8 +152,9 @@ impl std::fmt::Display for TimelineError {
     }
 }
 
-impl std::error::Error for TimelineError {}
+impl core::error::Error for TimelineError {}
 
+/// A deterministic track of keyframes with one fixed value dimension.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Track {
     id: TrackId,
@@ -126,6 +165,10 @@ pub struct Track {
 }
 
 impl Track {
+    /// Creates an empty track with the requested value dimension.
+    ///
+    /// A zero-dimensional track is rejected because it cannot produce a useful
+    /// sample.
     pub fn new(
         id: TrackId,
         name: impl Into<String>,
@@ -143,26 +186,31 @@ impl Track {
         })
     }
 
+    /// Returns the stable track ID.
     #[must_use]
     pub const fn id(&self) -> TrackId {
         self.id
     }
 
+    /// Returns the display name of the track.
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
     }
 
+    /// Returns the number of components in every keyframe value.
     #[must_use]
     pub const fn dimension(&self) -> usize {
         self.dimension
     }
 
-    #[must_use]
+    /// Returns keyframes in ascending tick order.
+    #[must_use = "iterate over the track keyframes"]
     pub fn keyframes(&self) -> impl Iterator<Item = &Keyframe> {
         self.keys.values()
     }
 
+    /// Inserts a keyframe while preserving unique IDs and unique ticks.
     pub fn insert(&mut self, key: Keyframe) -> Result<(), TimelineError> {
         if key.values.is_empty() {
             return Err(TimelineError::EmptyValue);
@@ -177,13 +225,14 @@ impl Track {
             return Err(TimelineError::DuplicateKey(key.id));
         }
         if self.keys.contains_key(&key.tick) {
-            return Err(TimelineError::DuplicateKey(key.id));
+            return Err(TimelineError::DuplicateTick(key.tick));
         }
         self.keys_by_id.insert(key.id, key.tick);
         self.keys.insert(key.tick, key);
         Ok(())
     }
 
+    /// Removes and returns a keyframe by stable ID.
     pub fn remove(&mut self, id: KeyId) -> Result<Keyframe, TimelineError> {
         let tick = self
             .keys_by_id
@@ -192,6 +241,7 @@ impl Track {
         self.keys.remove(&tick).ok_or(TimelineError::MissingKey(id))
     }
 
+    /// Samples the track at a tick, or returns `None` before its first keyframe.
     #[must_use]
     pub fn sample(&self, tick: u64) -> Option<Vec<f64>> {
         let (_, left) = self.keys.range(..=tick).next_back()?;
@@ -213,13 +263,18 @@ impl Track {
     }
 }
 
+/// An event emitted at a specific timeline tick.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TimelineEvent {
+    /// Stable event identity, unique within a timeline.
     pub id: u128,
+    /// Integer tick at which the event occurs.
     pub tick: u64,
+    /// Caller-defined event name.
     pub name: String,
 }
 
+/// A deterministic collection of tracks and point events.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Timeline {
     tracks: BTreeMap<TrackId, Track>,
@@ -228,6 +283,7 @@ pub struct Timeline {
 }
 
 impl Timeline {
+    /// Adds a track, rejecting a duplicate track ID.
     pub fn add_track(&mut self, track: Track) -> Result<(), TimelineError> {
         if self.tracks.contains_key(&track.id) {
             return Err(TimelineError::DuplicateTrack(track.id));
@@ -236,27 +292,32 @@ impl Timeline {
         Ok(())
     }
 
+    /// Removes and returns a track by stable ID.
     pub fn remove_track(&mut self, id: TrackId) -> Result<Track, TimelineError> {
         self.tracks
             .remove(&id)
             .ok_or(TimelineError::MissingTrack(id))
     }
 
+    /// Returns a track by stable ID.
     #[must_use]
     pub fn track(&self, id: TrackId) -> Option<&Track> {
         self.tracks.get(&id)
     }
 
+    /// Returns a mutable track by stable ID.
     #[must_use]
     pub fn track_mut(&mut self, id: TrackId) -> Option<&mut Track> {
         self.tracks.get_mut(&id)
     }
 
-    #[must_use]
+    /// Returns tracks in ascending stable-ID order.
+    #[must_use = "iterate over the timeline tracks"]
     pub fn tracks(&self) -> impl Iterator<Item = &Track> {
         self.tracks.values()
     }
 
+    /// Adds an event and orders same-tick events by stable event ID.
     pub fn add_event(&mut self, event: TimelineEvent) -> Result<(), TimelineError> {
         if !self.event_ids.insert(event.id) {
             return Err(TimelineError::DuplicateEvent(event.id));
@@ -270,11 +331,13 @@ impl Timeline {
         Ok(())
     }
 
+    /// Returns events at a tick in deterministic stable-ID order.
     #[must_use]
     pub fn events_at(&self, tick: u64) -> &[TimelineEvent] {
         self.events.get(&tick).map_or(&[], Vec::as_slice)
     }
 
+    /// Samples every track and returns results keyed by ascending track ID.
     #[must_use]
     pub fn sample(&self, tick: u64) -> BTreeMap<TrackId, Vec<f64>> {
         self.tracks
@@ -341,5 +404,80 @@ mod tests {
             .expect("event");
         assert_eq!(timeline.events_at(3)[0].id, 1);
         assert_eq!(timeline.events_at(3)[1].id, 2);
+    }
+
+    #[test]
+    fn mutation_boundaries_preserve_indexes_and_sampling_edges() {
+        assert_eq!(
+            Track::new(TrackId::from_raw(1), "invalid", 0),
+            Err(TimelineError::EmptyValue)
+        );
+
+        let mut track = Track::new(TrackId::from_raw(1), "value", 1).expect("track");
+        let first = Keyframe::new(KeyId::from_raw(1), 10, vec![2.0], Interpolation::Step);
+        track.insert(first.clone()).expect("first key");
+        assert_eq!(track.sample(9), None);
+        assert_eq!(track.sample(10), Some(vec![2.0]));
+
+        assert_eq!(
+            track.insert(Keyframe::new(
+                KeyId::from_raw(2),
+                10,
+                vec![3.0],
+                Interpolation::Linear,
+            )),
+            Err(TimelineError::DuplicateTick(10))
+        );
+        assert_eq!(
+            track.insert(Keyframe::new(
+                KeyId::from_raw(1),
+                11,
+                vec![3.0],
+                Interpolation::Linear,
+            )),
+            Err(TimelineError::DuplicateKey(KeyId::from_raw(1)))
+        );
+        assert_eq!(
+            track.insert(Keyframe::new(
+                KeyId::from_raw(3),
+                11,
+                Vec::new(),
+                Interpolation::Linear,
+            )),
+            Err(TimelineError::EmptyValue)
+        );
+        assert_eq!(track.remove(KeyId::from_raw(1)), Ok(first));
+        assert_eq!(
+            track.remove(KeyId::from_raw(1)),
+            Err(TimelineError::MissingKey(KeyId::from_raw(1)))
+        );
+        assert_eq!(track.sample(10), None);
+
+        let mut timeline = Timeline::default();
+        let track = Track::new(TrackId::from_raw(4), "track", 1).expect("track");
+        timeline.add_track(track.clone()).expect("track");
+        assert_eq!(
+            timeline.add_track(track),
+            Err(TimelineError::DuplicateTrack(TrackId::from_raw(4)))
+        );
+        assert_eq!(
+            timeline.remove_track(TrackId::from_raw(9)),
+            Err(TimelineError::MissingTrack(TrackId::from_raw(9)))
+        );
+        timeline
+            .add_event(TimelineEvent {
+                id: 7,
+                tick: 2,
+                name: "event".into(),
+            })
+            .expect("event");
+        assert_eq!(
+            timeline.add_event(TimelineEvent {
+                id: 7,
+                tick: 3,
+                name: "duplicate".into(),
+            }),
+            Err(TimelineError::DuplicateEvent(7))
+        );
     }
 }

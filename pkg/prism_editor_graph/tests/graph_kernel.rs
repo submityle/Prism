@@ -1,3 +1,5 @@
+//! Integration coverage for the public graph kernel API.
+
 use prism_editor_graph::{Graph, NodeSpec, PortSpec, PortType};
 
 #[test]
