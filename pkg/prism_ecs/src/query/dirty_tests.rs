@@ -8,7 +8,7 @@
 //! chunk whose rows are all older than `last_run`.
 
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::cell::Cell;
 
 use crate::change::Tick;
 use crate::component::{Component, Components};
@@ -47,7 +47,9 @@ impl Component for SparseDirty {
 struct Tag;
 impl Component for Tag {}
 
-static PANIC_NEXT_CHUNK_FILTER: AtomicBool = AtomicBool::new(false);
+std::thread_local! {
+    static PANIC_NEXT_CHUNK_FILTER: Cell<bool> = const { Cell::new(false) };
+}
 
 struct PanicOnceChunkFilter;
 
@@ -73,7 +75,7 @@ unsafe impl QueryFilter for PanicOnceChunkFilter {
     }
 
     fn filter_chunk<'w>(_fetch: Self::Fetch<'w>, _chunk: usize) -> bool {
-        if PANIC_NEXT_CHUNK_FILTER.swap(false, Ordering::SeqCst) {
+        if PANIC_NEXT_CHUNK_FILTER.with(|panic_next| panic_next.replace(false)) {
             panic!("injected one-shot dirty-chunk filter failure");
         }
         true
@@ -295,7 +297,7 @@ fn dirty_journal_cursor_is_acknowledged_only_after_filter_success() {
     world.get_mut::<Big>(entity).unwrap().tag += 1;
     world.get_mut::<SparseDirty>(entity).unwrap().0 += 1;
 
-    PANIC_NEXT_CHUNK_FILTER.store(true, Ordering::SeqCst);
+    PANIC_NEXT_CHUNK_FILTER.with(|panic_next| panic_next.set(true));
     let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         state.dirty_chunks_with_stats(&world, last_run, this_run)
     }));
@@ -305,6 +307,50 @@ fn dirty_journal_cursor_is_acknowledged_only_after_filter_success() {
     assert_eq!(retry.chunks.len(), 1);
     assert_eq!(retry.stats.journal_events, 1);
     assert_eq!(retry.stats.sparse_index_events, 1);
+}
+
+#[test]
+fn dirty_fallback_window_is_retryable_after_filter_panic() {
+    let mut world = World::new();
+    let entity = world.spawn((Big::new(1), SparseDirty(0)));
+    let state = world.query_filtered::<&Big, (With<SparseDirty>, PanicOnceChunkFilter)>();
+
+    let initial_tick = world.change_tick();
+    assert!(state
+        .dirty_chunks_with_stats(&world, initial_tick, initial_tick)
+        .chunks
+        .is_empty());
+
+    advance_frame(&mut world);
+    let first_last_run = world.last_change_tick();
+    let first_this_run = world.change_tick();
+    world.get_mut::<Big>(entity).unwrap().tag += 1;
+    world.get_mut::<SparseDirty>(entity).unwrap().0 += 1;
+    assert_eq!(
+        state
+            .dirty_chunks_with_stats(&world, first_last_run, first_this_run)
+            .chunks
+            .len(),
+        1
+    );
+
+    advance_frame(&mut world);
+    world.get_mut::<Big>(entity).unwrap().tag += 1;
+    world.get_mut::<SparseDirty>(entity).unwrap().0 += 1;
+    let fallback_this_run = world.change_tick();
+
+    // Rewind the lower bound across the previous request. Dirty queries must
+    // use the conservative tick-index fallback rather than consume a forward
+    // journal window.
+    PANIC_NEXT_CHUNK_FILTER.with(|panic_next| panic_next.set(true));
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        state.dirty_chunks_with_stats(&world, initial_tick, fallback_this_run)
+    }));
+    assert!(panic.is_err(), "the injected filter panic must be observed");
+
+    let retry = state.dirty_chunks_with_stats(&world, initial_tick, fallback_this_run);
+    assert_eq!(retry.chunks.len(), 1);
+    assert!(retry.stats.sparse_fallback_scans > 0);
 }
 
 #[test]
