@@ -27,6 +27,7 @@ futures-lite = "2"
 prism_world_terrain = { path = "../prism_world_terrain", features = ["mesh"] }
 prism_world_runtime = { path = "../prism_world_runtime", features = ["gpu_proxy"] }
 prism_world_io = { path = "../prism_world_io", default-features = false }
+prism_render_driver_null = { path = "../../os-backends/prism_render_driver_null" }
 wgpu = { version = "30", default-features = false, features = ["wgsl", "metal", "vulkan", "dx12"] }
 
 [[bench]]

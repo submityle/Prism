@@ -154,7 +154,16 @@ surface、设备 binding、work budget 与固定 capacity，逻辑 buffer 为
 真实 indirect draw 像素；无设备 Naga 闸门 6/6 通过。release 8 warmup+64 samples 的
 10k/100k×0/150mm 结果、完整资源和复现命令见 `prism_world_gpu_heightfield_placement_zh.md`。
 这只完成二维平面 GPU kernel，不代表 GPU placement deletion、行星/曲率/数据层、风/交互、
-产品 scene/ECS decoder/renderer graph 或多厂商性能已完成。
+产品 scene/ECS decoder、生产 renderer 注册/提交或多厂商性能已完成。
+
+本轮另交付 backend-neutral renderer bridge：`build_placement_render_graph` 接收 renderer 已注册的
+RHI buffer/scene texture 与 pipeline/bind-group identity，按稳定 cell 顺序为每个 placement stream
+记录 `reset → source → project → field/compact → finalize` 五个 compute pass 和一个 indirect
+raster pass。全部 bind-group 可见资源进入 RenderGraph hazard/SSA 声明；同 cell 重复、零 buffer、
+零 dispatch 和未对齐 indirect offset 在 graph 发布前拒绝。Null RHI 回归验证真实命令记录及跨
+cell 顺序。该 bridge 不分配或注册生产 RHI 资源，也不 submit/wait/retire；raw
+`GpuHeightfieldPlacement` 到 renderer resource registry、`prism_render_scene` 的
+mesh/material/unified visibility 消费以及产品 scene/ECS decoder 仍是明确未交付边界。
 
 ### M4：真实 heightfield 的 GPU 精确地表过滤
 
@@ -314,7 +323,7 @@ CPU release 基准为确定性平面、16 次预热、每项 128 次测量；下
 
 以下项目仍需要独立硬件或端到端证据，不能用 policy primitive 冒充完成：
 
-- M4 散布：行星/曲率/数据层/跨散布层规则、风与交互、逐键并发删除协议、索引增量编辑、蓝噪声目标、产品 proxy renderer 接线及大规模产品散布性能验收；`GpuPlanetPlacement` 已交付固定容量的 source/projection/finalize kernel、signed-i128 上传 ABI、compact/indirect 输出、Naga/device-free 回归，并新增逐候选 identity/rank/height numerator/accepted/invalid 语义 parity 回归；本轮严格 Metal 运行因无可用 adapter 未执行 shader，真实设备 parity 仍待重跑。这仍不是 CPU i64 几何坐标逐位 parity，也没有 scene/ECS decoder、renderer graph 或完整行星产品链路。已有内容中立有界 CPU/GPU 源散布、CPU/GPU 作者密度/种类场及各自可选刷子空间/有序索引、真实heightfield的CPU/GPU高度/离地带/坡度精确稳定过滤、独立身份的CPU二维精确贴地放置及其PPLD完整键持久删除、CPU/GPU二维贴地放置 kernel、CPU源/作者场/地形及GPU完整键删除与CPU持久文件恢复、独立 resident 密度 coverage/dither 与真实消费测试，不等于完整产品散布链路。
+- M4 散布：行星/曲率/数据层/跨散布层规则、风与交互、逐键并发删除协议、索引增量编辑、蓝噪声目标、产品 proxy renderer 接线及大规模产品散布性能验收；`GpuPlanetPlacement` 已交付固定容量的 source/projection/finalize kernel、signed-i128 上传 ABI、compact/indirect 输出、Naga/device-free 回归，并新增逐候选 identity/rank/height numerator/accepted/invalid 语义 parity 回归；本轮严格 Metal 运行因无可用 adapter 未执行 shader，真实设备 parity 仍待重跑。这仍不是 CPU i64 几何坐标逐位 parity，也没有 scene/ECS decoder 或完整行星产品链路。二维贴地 placement 已有 backend-neutral RenderGraph lowering 和 Null RHI 命令记录，但 raw GPU placement 到生产 RHI resource registry、pipeline/bind-group registration、submission/completion retirement，以及 `prism_render_scene` mesh/material/unified visibility 接线仍未完成。已有内容中立有界 CPU/GPU 源散布、CPU/GPU 作者密度/种类场及各自可选刷子空间/有序索引、真实heightfield的CPU/GPU高度/离地带/坡度精确稳定过滤、独立身份的CPU二维精确贴地放置及其PPLD完整键持久删除、CPU/GPU二维贴地放置 kernel、CPU源/作者场/地形及GPU完整键删除与CPU持久文件恢复、独立 resident 密度 coverage/dither 与真实消费测试，不等于完整产品散布链路。
 - M3：资产包解压、真正零解析的 mmap schema 视图、GPU 直传和产品级吞吐仍需实现或独立运行时验证；本批仅新增可选 mmap-backed container range source，保留受验证索引解析。共享动态优先级已接入但不提供抢占或跨队列无饥饿保证。任务池 Future/共享取消、固定 worker 及宿主原生 reactor → pollable coordinator → manifest/payload → `SceneHost` 已有真实文件端到端证据，同步兼容路径仍独立保留。离线缓存文件基准记录于 `prism_world_async_runtime_zh.md` 与 `prism_world_native_io_zh.md`，不能代替冷盘、资产包或产品负载验收。
 - M6：多表示产品接线、Dual Contouring/Transvoxel 与混合 LOD 接缝、实际 renderer graph 接入；本批等分辨率 marching-tetrahedra 已通过 no-default 103 项和 `mesh` feature 106 项 CPU 回归，行星跨 tile 法线、高度局部增量投影和 `PlanetMeshPublication` 的跨 tile 原子 CPU 发布也已补齐，但其性能、混合 LOD 接缝和产品接线仍未验收。既有 heightfield 原子局部重烘、cube-sphere 增量投影、Q16.16 SDF 数据烘焙、native Mesh、离屏真实 GPU 绘制和 terrain-to-world-stream manifest 接缝不构成这些剩余缺口的完成证据。
 - M7：SDF 与渲染/物理/GI 的多消费者真实运行时接入，以及大规模实时调度；CPU sparse grid、clipmap layout 与 GPU brick lookup contract 已交付，产品多消费者接线仍独立验收；simulation-to-world persistence 接缝已完成。

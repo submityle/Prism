@@ -14,6 +14,7 @@
 mod contract;
 mod density;
 mod packing;
+mod placement_render_bridge;
 mod registry;
 mod world_placement_graph;
 
@@ -23,6 +24,11 @@ pub use contract::{
 };
 pub use density::{density_dither_visible, DensityPolicy, DensityPolicyError};
 pub use packing::{ClusterSoa, ProxySoa, SoaBufferPack};
+pub use placement_render_bridge::{
+    build_placement_render_graph, PlacementComputeStage, PlacementDrawStage,
+    PlacementImportedBuffer, PlacementRenderBridgeError, PlacementRenderStream,
+    PlacementSceneTarget,
+};
 pub use registry::{ProxyHandle, ProxyRegistry, ProxyRegistryError};
 pub use world_placement_graph::{
     PlacementCellManifest, PlacementGraphLayout, PlacementGraphPass, PlacementGraphResource,
