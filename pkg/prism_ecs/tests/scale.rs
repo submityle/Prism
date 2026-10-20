@@ -920,6 +920,8 @@ mod perf_gate {
             let writes = CHANGED_CHUNKS * WRITES_PER_CHUNK;
             assert_eq!(report.stats.journal_records_scanned, writes);
             assert_eq!(report.stats.candidate_chunk_marks, writes);
+            assert_eq!(report.stats.candidate_archetype_checks, 1);
+            assert_eq!(report.stats.merged_candidates, CHANGED_CHUNKS);
             assert_eq!(report.stats.reported_chunks, CHANGED_CHUNKS);
             assert_eq!(report.stats.matched_archetypes, 1);
             assert_eq!(report.stats.summaries_tested, 0);
@@ -936,10 +938,22 @@ mod perf_gate {
                 report.stats.candidate_chunk_marks,
             );
             emit_complexity(
+                "dirty_candidate_archetype_checks",
+                WORLD_CHUNKS * ROWS_PER_CHUNK,
+                writes,
+                report.stats.candidate_archetype_checks,
+            );
+            emit_complexity(
                 "dirty_index_summaries_tested",
                 WORLD_CHUNKS * ROWS_PER_CHUNK,
                 writes,
                 report.stats.summaries_tested,
+            );
+            emit_complexity(
+                "dirty_merged_candidates",
+                WORLD_CHUNKS * ROWS_PER_CHUNK,
+                writes,
+                report.stats.merged_candidates,
             );
             emit_complexity(
                 "dirty_reported_chunks",

@@ -65,7 +65,9 @@ def portable_fixture(kind="portable-measurement"):
         {"metric": "changed_scan_rows", "world_units": 16384, "changed_units": 3, "value": 3},
         {"metric": "dirty_journal_records_scanned", "world_units": 131072, "changed_units": 4096, "value": 4096},
         {"metric": "dirty_candidate_chunk_marks", "world_units": 131072, "changed_units": 4096, "value": 4096},
+        {"metric": "dirty_candidate_archetype_checks", "world_units": 131072, "changed_units": 4096, "value": 1},
         {"metric": "dirty_index_summaries_tested", "world_units": 131072, "changed_units": 4096, "value": 0},
+        {"metric": "dirty_merged_candidates", "world_units": 131072, "changed_units": 4096, "value": 1024},
         {"metric": "dirty_reported_chunks", "world_units": 131072, "changed_units": 4096, "value": 1024},
     ]
     timing = {
@@ -200,7 +202,7 @@ class ProtocolTests(unittest.TestCase):
                     "units": gate.PORTABLE_TIMING_METRICS[metric],
                 })
         parsed = gate.parse_portable_samples(output)
-        self.assertEqual(len(parsed["complexity"]), 11)
+        self.assertEqual(len(parsed["complexity"]), 13)
         self.assertEqual(parsed["timing"]["changed_scan_16384"], list(range(100, 109)))
 
     def test_portable_parser_rejects_missing_complexity_point(self):
@@ -305,7 +307,10 @@ class PersistenceAndCliTests(unittest.TestCase):
         self.assertEqual(report["timing"]["changed_scan_16384"]["p99_ns"], 108)
 
         candidate = portable_fixture()
-        candidate["complexity"][-2]["value"] = 131072
+        next(
+            record for record in candidate["complexity"]
+            if record["metric"] == "dirty_index_summaries_tested"
+        )["value"] = 131072
         report = gate.compare_portable(base, candidate)
         self.assertFalse(report["passed"])
         summary_work = next(

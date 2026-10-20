@@ -64,7 +64,9 @@ PORTABLE_COMPLEXITY_METRICS = {
     "changed_scan_rows": 2,
     "dirty_journal_records_scanned": 1,
     "dirty_candidate_chunk_marks": 1,
+    "dirty_candidate_archetype_checks": 1,
     "dirty_index_summaries_tested": 1,
+    "dirty_merged_candidates": 1,
     "dirty_reported_chunks": 1,
 }
 PORTABLE_COMPLEXITY_POINTS = {
@@ -77,7 +79,9 @@ PORTABLE_COMPLEXITY_POINTS = {
     ("changed_scan_rows", 16384),
     ("dirty_journal_records_scanned", 131072),
     ("dirty_candidate_chunk_marks", 131072),
+    ("dirty_candidate_archetype_checks", 131072),
     ("dirty_index_summaries_tested", 131072),
+    ("dirty_merged_candidates", 131072),
     ("dirty_reported_chunks", 131072),
 }
 PORTABLE_TIMING_METRICS = {
