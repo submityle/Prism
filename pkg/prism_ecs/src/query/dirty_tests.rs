@@ -324,6 +324,48 @@ fn high_cardinality_dirty_query_work_tracks_distinct_journal_candidates() {
 }
 
 #[test]
+fn journal_overflow_falls_back_without_missing_chunks_or_replaying_them() {
+    use crate::archetype::COLUMN_CHANGE_LOG_CAPACITY;
+
+    const CHUNKS: usize = 1024;
+    let mut w = World::new();
+    let entities: Vec<_> = (0..CHUNKS * 4)
+        .map(|i| w.spawn(Big::new(i as u64)))
+        .collect();
+    advance_frame(&mut w);
+
+    let state = w.query::<&Big>();
+    let baseline = state.dirty_chunks_with_stats(&w, w.last_change_tick(), w.change_tick());
+    assert!(baseline.stats.journal_gap);
+
+    let last_run = w.change_tick();
+    w.increment_change_tick();
+    let this_run = w.change_tick();
+    // Overflow the retained event window while touching every chunk. The
+    // journal must request a conservative indexed rebuild rather than lose
+    // early events that have been evicted.
+    for _round in 0..(COLUMN_CHANGE_LOG_CAPACITY / CHUNKS + 1) {
+        for chunk in 0..CHUNKS {
+            w.get_mut::<Big>(entities[chunk * 4]).unwrap().tag += 1;
+        }
+    }
+
+    let report = state.dirty_chunks_with_stats(&w, last_run, this_run);
+    assert!(report.stats.journal_gap);
+    assert_eq!(report.stats.journal_records_scanned, 0);
+    assert_eq!(report.stats.column_candidates, CHUNKS);
+    assert_eq!(report.chunks.len(), CHUNKS);
+    assert_eq!(report.stats.reported_rows, CHUNKS * 4);
+
+    // The fallback covered this current tick window and advanced the journal
+    // cursor. A later clean forward window must not replay those same writes.
+    advance_frame(&mut w);
+    let next = state.dirty_chunks_with_stats(&w, this_run, w.change_tick());
+    assert!(!next.stats.journal_gap);
+    assert!(next.chunks.is_empty());
+}
+
+#[test]
 fn dirty_chunks_follow_an_archetype_migration() {
     #[derive(Clone, Copy)]
     struct Tag;
