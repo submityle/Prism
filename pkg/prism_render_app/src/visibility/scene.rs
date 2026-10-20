@@ -37,6 +37,7 @@ pub struct PrismRenderScene {
     pub(super) next_index: u32,
     pub(super) next_view: u32,
     pub(super) frame: u64,
+    geometry_epoch: u64,
     pub(super) capacity: u32,
     pub(super) transaction: SceneTransaction,
     pub(super) report: SceneApplyReport,
@@ -57,6 +58,7 @@ impl Default for PrismRenderScene {
             next_index: 1,
             next_view: 0,
             frame: 0,
+            geometry_epoch: 0,
             capacity: 1 << 20,
             transaction: SceneTransaction::default(),
             report: SceneApplyReport::default(),
@@ -67,13 +69,25 @@ impl Default for PrismRenderScene {
 impl PrismRenderScene {
     /// Register or replace a LOD chain. Replacements invalidate its LOD history.
     pub fn insert_geometry(&mut self, chain: GeometryLodChain) {
-        self.invalidate_geometry(chain.geometry);
-        self.geometry.insert(chain.geometry, chain);
+        let geometry = chain.geometry;
+        let changed = self
+            .geometry
+            .get(&geometry)
+            .is_none_or(|current| current != &chain);
+        self.invalidate_geometry(geometry);
+        if changed {
+            self.geometry.insert(geometry, chain);
+            self.bump_geometry_epoch();
+        }
     }
     /// Unregister geometry; subsequent culls report missing geometry.
     pub fn remove_geometry(&mut self, handle: GeometryHandle) -> Option<GeometryLodChain> {
         self.invalidate_geometry(handle);
-        self.geometry.remove(&handle)
+        let removed = self.geometry.remove(&handle);
+        if removed.is_some() {
+            self.bump_geometry_epoch();
+        }
+        removed
     }
     /// Register or replace a material, consumed afresh by every cull.
     pub fn insert_material(&mut self, record: MaterialRecord) {
@@ -90,6 +104,14 @@ impl PrismRenderScene {
     /// Read-only CPU scene for upload, capture or inspection.
     pub fn scene(&self) -> &CpuRenderScene {
         &self.scene
+    }
+    /// Monotonically changing geometry-table epoch; zero is reserved for the initial state.
+    pub fn geometry_epoch(&self) -> u64 {
+        self.geometry_epoch
+    }
+    /// Iterate the currently registered geometry records without exposing mutation.
+    pub fn geometry_records(&self) -> impl Iterator<Item = &GeometryLodChain> {
+        self.geometry.values()
     }
     /// Number of complete renderable entities mirrored this frame.
     pub fn instance_count(&self) -> usize {
@@ -143,6 +165,12 @@ impl PrismRenderScene {
                 .get(handle)
                 .is_some_and(|record| record.geometry != geometry)
         });
+    }
+    fn bump_geometry_epoch(&mut self) {
+        self.geometry_epoch = self.geometry_epoch.wrapping_add(1);
+        if self.geometry_epoch == 0 {
+            self.geometry_epoch = 1;
+        }
     }
     pub(super) fn forget_instance(&mut self, handle: SceneHandle) {
         self.previous_lods

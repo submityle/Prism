@@ -289,6 +289,34 @@ fn native_camera_history_resets_on_epoch_and_geometry_replacement() {
     scene_check_geometry_invalidation(&mut app, camera, entity, view, instance);
 }
 
+#[test]
+fn native_geometry_epoch_tracks_replacement_and_removal() {
+    let mut scene = PrismRenderScene::default();
+    assert_eq!(scene.geometry_epoch(), 0);
+    assert_eq!(scene.geometry_records().count(), 0);
+
+    scene.insert_geometry(geometry(7));
+    assert_eq!(scene.geometry_epoch(), 1);
+    assert_eq!(scene.geometry_records().count(), 1);
+
+    scene.insert_geometry(geometry(7));
+    assert_eq!(scene.geometry_epoch(), 1);
+    assert_eq!(scene.geometry_records().count(), 1);
+
+    let mut replacement = geometry(7);
+    replacement.lods[0].screen_error = 0.5;
+    scene.insert_geometry(replacement.clone());
+    assert_eq!(scene.geometry_epoch(), 2);
+    assert_eq!(scene.geometry_records().next(), Some(&replacement));
+
+    assert_eq!(scene.remove_geometry(handle(7)), Some(replacement));
+    assert_eq!(scene.geometry_epoch(), 3);
+    assert_eq!(scene.geometry_records().count(), 0);
+
+    assert_eq!(scene.remove_geometry(handle(7)), None);
+    assert_eq!(scene.geometry_epoch(), 3);
+}
+
 fn scene_check_geometry_invalidation(
     app: &mut App,
     camera: Entity,
