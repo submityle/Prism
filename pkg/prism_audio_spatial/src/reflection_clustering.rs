@@ -43,7 +43,7 @@
 //! Clustering operates on stack scalars and fixed-size arrays; there is no heap
 //! allocation, no locking, and no panicking. Taps with a non-finite or
 //! zero-length direction, a non-finite gain, or zero energy are skipped. All
-//! transcendental and length math routes through [`bevy_math::ops`].
+//! transcendental and length math routes through [`prism_math::ops`].
 //!
 //! # Relationship
 //!
@@ -63,8 +63,8 @@
 //! Steam Audio, or Google Resonance Audio source or derived code**; it is a
 //! plain energy-preserving bucketing of this crate's own reflection taps.
 
-use bevy_math::ops;
-use bevy_math::Vec3;
+use prism_math::ops;
+use prism_math::Vec3;
 
 use prism_audio_core::math::Sample;
 
@@ -207,7 +207,7 @@ fn nearest_cluster(dir: Vec3) -> usize {
 /// # Examples
 ///
 /// ```
-/// use bevy_math::Vec3;
+/// use prism_math::Vec3;
 /// use prism_audio_spatial::early_reflections::ReflectionTap;
 /// use prism_audio_spatial::reflection_clustering::{cluster_taps, CLUSTER_COUNT};
 ///

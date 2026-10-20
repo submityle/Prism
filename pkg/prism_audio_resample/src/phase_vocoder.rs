@@ -26,7 +26,7 @@
 //! reconstruction are textbook (for example Dolson's "The Phase Vocoder: A
 //! Tutorial" and Zoelzer's DAFX). Principal-argument phase wrapping is computed
 //! as `atan2(sin(d), cos(d))` and every transcendental routes through
-//! [`bevy_math::ops`], so the output is bit-reproducible across platforms.
+//! [`prism_math::ops`], so the output is bit-reproducible across platforms.
 //!
 //! # Relationship
 //!
@@ -40,7 +40,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use bevy_math::ops;
+use prism_math::ops;
 use core::f32::consts::TAU;
 
 use prism_audio_core::fft::Fft;

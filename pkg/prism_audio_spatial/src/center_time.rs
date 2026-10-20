@@ -262,7 +262,7 @@ mod tests {
     }
 
     fn decay(n: usize, tau: Sample) -> Sample {
-        bevy_math::ops::exp(-(n as Sample) / tau)
+        prism_math::ops::exp(-(n as Sample) / tau)
     }
 
     fn ops_exp_decay(n: usize) -> Sample {

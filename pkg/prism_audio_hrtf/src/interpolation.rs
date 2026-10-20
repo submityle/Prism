@@ -31,7 +31,7 @@
 //!
 //! # Determinism
 //!
-//! All angle math routes through [`bevy_math::ops`] (libm-backed) and onset
+//! All angle math routes through [`prism_math::ops`] (libm-backed) and onset
 //! detection is a deterministic threshold scan, so interpolation is
 //! bit-reproducible and golden-comparable across targets.
 //!
@@ -43,7 +43,7 @@
 //! spherical direction geometry are implemented from standard, publicly
 //! documented DSP and scattered-data-interpolation knowledge.
 
-use bevy_math::{ops, Vec3};
+use prism_math::{ops, Vec3};
 use prism_audio_core::math::{Sample, MIN_AUDIBLE_GAIN};
 
 use crate::dataset::HrtfDataset;

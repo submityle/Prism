@@ -18,9 +18,9 @@
 //! # Relationship
 //! Validates section 33 (masking-aware virtualization + source clustering) of
 //! the Prism audio engine design, over `prism_audio_governor::{masking,
-//! clustering}`. Depends only on the crate's public API plus `bevy_math::Vec3`.
+//! clustering}`. Depends only on the crate's public API plus `prism_math::Vec3`.
 
-use bevy_math::Vec3;
+use prism_math::Vec3;
 use prism_audio_core::math::Sample;
 use prism_audio_governor::clustering::assignment::{assign, merge_to_capacity, ClusterConfig};
 use prism_audio_governor::clustering::cluster::{Cluster, ClusterMember};

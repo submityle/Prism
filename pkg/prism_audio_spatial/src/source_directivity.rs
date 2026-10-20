@@ -40,7 +40,7 @@
 //! is no heap allocation, no locking, and no panicking. Out-of-range band
 //! indices and frequencies clamp to the end bands, and non-finite inputs return
 //! safe finite values. All transcendental math routes through
-//! [`bevy_math::ops`], never through `f32` intrinsics.
+//! [`prism_math::ops`], never through `f32` intrinsics.
 //!
 //! # Provenance
 //!
@@ -52,7 +52,7 @@
 //! Steam Audio, or Google Resonance Audio source or derived code**; it is
 //! implemented purely from that publicly documented acoustics knowledge.
 
-use bevy_math::ops;
+use prism_math::ops;
 
 use prism_audio_core::math::Sample;
 

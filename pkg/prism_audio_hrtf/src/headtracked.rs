@@ -42,7 +42,7 @@
 //!
 //! # Determinism
 //!
-//! All transcendental math routes through [`bevy_math::ops`] (libm-backed):
+//! All transcendental math routes through [`prism_math::ops`] (libm-backed):
 //! the prediction delta quaternion is built from [`ops::sin_cos`] and the
 //! smoothing coefficient from [`ops::exp`], so head steering is
 //! bit-reproducible across targets and golden-comparable.
@@ -56,7 +56,7 @@
 //! azimuth/elevation geometry are implemented from standard, publicly
 //! documented rotation and signal-processing knowledge.
 
-use bevy_math::{ops, Quat, Vec3};
+use prism_math::{ops, Quat, Vec3};
 use prism_audio_core::math::Sample;
 
 /// Upper bound on the look-ahead used for pose prediction, in seconds.
@@ -327,7 +327,7 @@ pub fn world_to_local_direction(orientation: Quat, world_direction: Vec3) -> Vec
 /// source on the right ear:
 ///
 /// ```
-/// use bevy_math::{Quat, Vec3};
+/// use prism_math::{Quat, Vec3};
 /// use core::f32::consts::FRAC_PI_2;
 /// use prism_audio_hrtf::headtracked::{HeadPose, predicted_local_angles};
 ///

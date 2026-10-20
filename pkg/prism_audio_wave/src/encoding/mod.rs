@@ -22,7 +22,7 @@ pub mod wet_dry;
 
 pub use direction::DirectionalProbe;
 
-use bevy_math::ops;
+use prism_math::ops;
 use prism_audio_spatial::{SpatialParams, SpreadParams};
 
 use crate::solver::ImpulseResponse;

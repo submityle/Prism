@@ -44,7 +44,7 @@
 //! # Determinism and real-time safety
 //!
 //! Every routine operates on stack scalars, allocates nothing, never locks and
-//! never panics. All transcendental math routes through [`bevy_math::ops`]
+//! never panics. All transcendental math routes through [`prism_math::ops`]
 //! (libm-backed) rather than `f32` intrinsics, so results are bit-reproducible
 //! across targets and can be golden-compared.
 //!
@@ -55,7 +55,7 @@
 //! derived code**. The Fresnel approximations are the published Abramowitz and
 //! Stegun formulas and the transition function is the textbook UTD definition.
 
-use bevy_math::ops;
+use prism_math::ops;
 
 use core::f32::consts::{FRAC_PI_2, PI};
 

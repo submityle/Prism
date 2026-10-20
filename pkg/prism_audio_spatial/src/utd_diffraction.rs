@@ -58,7 +58,7 @@
 //!
 //! Every query runs on stack scalars and fixed-size arrays with no allocation,
 //! no locking and no panicking, and all transcendental math routes through
-//! [`bevy_math::ops`]. Degenerate geometry (grazing incidence, coincident
+//! [`prism_math::ops`]. Degenerate geometry (grazing incidence, coincident
 //! points, non-finite inputs) is clamped to safe finite values.
 //!
 //! # Provenance
@@ -69,8 +69,8 @@
 //! formulation (Kouyoumjian and Pathak 1974; the textbook presentation in
 //! `McNamara`, Pistorius and Malherbe 1990 and Balanis).
 
-use bevy_math::ops;
-use bevy_math::Vec3;
+use prism_math::ops;
+use prism_math::Vec3;
 
 use core::f32::consts::{FRAC_1_SQRT_2, PI};
 

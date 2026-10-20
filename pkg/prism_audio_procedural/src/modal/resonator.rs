@@ -24,7 +24,7 @@
 //! [`crate::modal::bank::ModalBank`]. Uses the half-life-to-radius helper from
 //! [`crate::dsp`] rather than restating it.
 
-use bevy_math::ops;
+use prism_math::ops;
 
 use crate::dsp::{clamp_frequency, half_life_to_radius, TWO_PI};
 use prism_audio_core::math::{flush_denormal, Sample};

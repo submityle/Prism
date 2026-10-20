@@ -54,7 +54,7 @@
 //! # Determinism
 //!
 //! The layout directions, decode gains, and HRIR interpolation all route their
-//! transcendental and length math through [`bevy_math::ops`] (via
+//! transcendental and length math through [`prism_math::ops`] (via
 //! [`prism_audio_spatial`] and [`crate::interpolation`]); the convolution and
 //! accumulation are pure multiply-add. Output is therefore bit-reproducible
 //! across targets and can be golden-compared sample-for-sample.
@@ -83,7 +83,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use bevy_math::Vec3;
+use prism_math::Vec3;
 
 use prism_audio_core::math::Sample;
 use prism_audio_spatial::{encode_hoa, hoa_channel_count, MAX_HOA_CHANNELS, MAX_HOA_ORDER};
@@ -243,7 +243,7 @@ impl VirtualSpeakerLayout {
 /// [module documentation](self).
 ///
 /// ```
-/// use bevy_math::Vec3;
+/// use prism_math::Vec3;
 /// use prism_audio_hrtf::hoa_binaural::{HoaBinauralDecoder, VirtualSpeakerLayout};
 /// use prism_audio_hrtf::dataset::{HrtfDataset, Measurement};
 ///

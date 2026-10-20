@@ -7,10 +7,10 @@
 //! # Relationship
 //! The filter primitive of the design section 11 node library. It is a standard
 //! first-order low-pass whose coefficient is derived from an exposed
-//! `cutoff_hz` parameter using `bevy_math::ops`, keeping the response
+//! `cutoff_hz` parameter using `prism_math::ops`, keeping the response
 //! deterministic across platforms.
 
-use bevy_math::ops;
+use prism_math::ops;
 use core::f32::consts::TAU;
 
 use prism_audio_core::graph::{AudioNode, ProcessIo, RenderContext};

@@ -32,7 +32,7 @@
 
 use alloc::vec::Vec;
 
-use bevy_math::ops;
+use prism_math::ops;
 
 use prism_audio_core::math::Sample;
 
@@ -73,7 +73,7 @@ pub fn clamp_pitch(ratio: Sample) -> Sample {
 }
 
 /// Converts a pitch interval in semitones to a frequency ratio
-/// (`2^(semitones / 12)`), computed with [`bevy_math::ops`].
+/// (`2^(semitones / 12)`), computed with [`prism_math::ops`].
 #[inline]
 #[must_use]
 pub fn semitones_to_ratio(semitones: Sample) -> Sample {

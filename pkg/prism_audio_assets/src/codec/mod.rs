@@ -151,7 +151,7 @@ mod tests {
         let mut pcm: Vec<i16> = Vec::with_capacity(samples_per_block);
         for n in 0..samples_per_block {
             let phase = n as f32 * 0.05;
-            pcm.push((bevy_math::ops::sin(phase) * 8000.0) as i16);
+            pcm.push((prism_math::ops::sin(phase) * 8000.0) as i16);
         }
         let block = encoder.encode_block(&pcm);
         assert_eq!(block.len(), encoder.block_align());
@@ -181,7 +181,7 @@ mod tests {
         let mut pcm: Vec<i16> = Vec::with_capacity(samples_per_block);
         for n in 0..samples_per_block {
             let phase = n as f32 * 0.03;
-            pcm.push((bevy_math::ops::sin(phase) * 9000.0) as i16);
+            pcm.push((prism_math::ops::sin(phase) * 9000.0) as i16);
         }
         let block = encoder.encode_block(&pcm);
         assert_eq!(block.len(), encoder.block_align());

@@ -8,7 +8,7 @@
 //! a depth, an offset, and a response [`Curve`]. A mapping is pure data: its
 //! [`TargetMapping::apply`] turns a dimension value into a modulation amount
 //! with deterministic integer-to-float normalisation and
-//! [`bevy_math::ops`]-based curve math, performing no DSP of its own.
+//! [`prism_math::ops`]-based curve math, performing no DSP of its own.
 //!
 //! # Provenance
 //! Original work; no Unreal Engine, Unity, Godot, Wwise, FMOD, Steam Audio, or
@@ -20,7 +20,7 @@
 //! engine's section 12 modulation routing understands; [`crate::mapping::router`]
 //! uses these mappings to emit modulation writes.
 
-use bevy_math::ops;
+use prism_math::ops;
 use prism_audio_core::math::Sample;
 
 /// A modulation destination inside the engine.

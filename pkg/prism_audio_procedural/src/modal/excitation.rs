@@ -91,7 +91,7 @@ fn exp_decay_to(target: Sample, n: Sample) -> Sample {
         return 0.0;
     }
     // target = m^n  =>  m = target^(1/n).
-    bevy_math::ops::powf(target.clamp(1e-6, 0.5), 1.0 / n)
+    prism_math::ops::powf(target.clamp(1e-6, 0.5), 1.0 / n)
 }
 
 /// A one-pole spectral tilt stage crossfading dark (low-pass) and bright

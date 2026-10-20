@@ -51,7 +51,7 @@
 //! not per-sample callbacks and must not run on an audio thread. They never
 //! panic: empty, all-zero, non-finite, or non-positive-sample-rate inputs
 //! return safe defaults (`0`). All transcendental and length math routes
-//! through [`bevy_math::ops`].
+//! through [`prism_math::ops`].
 //!
 //! # Provenance
 //!
@@ -62,7 +62,7 @@
 //! Steam Audio, or Google Resonance Audio source or derived code**; it is
 //! implemented purely from that publicly documented standard.
 
-use bevy_math::ops;
+use prism_math::ops;
 
 use prism_audio_core::math::Sample;
 

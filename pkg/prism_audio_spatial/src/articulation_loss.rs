@@ -40,7 +40,7 @@
 //! directivity factor, a negative distance, or any non-finite input returns the
 //! safe sentinel [`MAX_ALCONS`] (worst-case intelligibility). Intermediate
 //! products are accumulated in `f64` and read back as [`Sample`]. All square
-//! root and logarithm math routes through [`bevy_math::ops`].
+//! root and logarithm math routes through [`prism_math::ops`].
 //!
 //! # Relationship
 //!
@@ -66,7 +66,7 @@
 //! Google Resonance Audio source or derived code**; it is implemented purely
 //! from that publicly documented acoustics literature.
 
-use bevy_math::ops;
+use prism_math::ops;
 
 use prism_audio_core::math::Sample;
 

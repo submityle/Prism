@@ -50,7 +50,7 @@
 //! heap allocation, no locking, and no panicking. Non-finite and degenerate
 //! inputs fall back to safe finite values, and the divergence term is capped at
 //! a finite ceiling so a fully attenuated distance model never produces an
-//! infinite total. All transcendental math routes through [`bevy_math::ops`].
+//! infinite total. All transcendental math routes through [`prism_math::ops`].
 //!
 //! # Provenance
 //!
@@ -61,7 +61,7 @@
 //! Resonance Audio source or derived code**; it merely composes terms defined
 //! by that publicly documented acoustics standard.
 
-use bevy_math::ops;
+use prism_math::ops;
 
 use prism_audio_core::math::{db_to_linear, linear_to_db, Sample};
 

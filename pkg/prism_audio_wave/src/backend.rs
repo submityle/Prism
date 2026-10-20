@@ -15,7 +15,7 @@
 //! [`ParameterLookup`]. Querying it is allocation free, lock free, and panic
 //! free, matching the geometric backend's real-time behaviour.
 
-use bevy_math::Vec3;
+use prism_math::Vec3;
 use prism_audio_spatial::SpatialParams;
 
 use crate::encoding::PerceptualParams;

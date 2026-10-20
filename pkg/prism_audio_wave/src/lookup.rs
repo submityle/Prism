@@ -14,7 +14,7 @@
 //! it meets the real-time contract; scalar fields blend linearly and the two
 //! angles blend on the unit circle.
 
-use bevy_math::{ops, Vec3};
+use prism_math::{ops, Vec3};
 
 use crate::encoding::PerceptualParams;
 use crate::field::ParameterField;
@@ -54,7 +54,7 @@ impl<'a> ParameterLookup<'a> {
     /// # Examples
     ///
     /// ```
-    /// # use bevy_math::Vec3;
+    /// # use prism_math::Vec3;
     /// # use prism_audio_wave::field::{BitDepth, ParameterFieldBuilder};
     /// # use prism_audio_wave::grid::{Aabb, ProbeGrid};
     /// # use prism_audio_wave::lookup::ParameterLookup;

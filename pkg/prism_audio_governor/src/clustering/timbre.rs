@@ -33,7 +33,7 @@
 //! Supports the source-clustering half of design section 33. Consumes the
 //! critical-band spectra of [`crate::masking`].
 
-use bevy_math::ops;
+use prism_math::ops;
 use prism_audio_core::math::Sample;
 
 use crate::masking::critical_bands::CriticalBands;

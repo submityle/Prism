@@ -52,10 +52,10 @@
 //! # Determinism
 //!
 //! Every transcendental (`sqrt`, `exp`, `ln`) routes through
-//! [`bevy_math::ops`] (libm-backed) rather than an `f32` intrinsic, so the
+//! [`prism_math::ops`] (libm-backed) rather than an `f32` intrinsic, so the
 //! attenuation and the derived corner are bit-reproducible across targets and
 //! can be golden-compared. `tanh` is built from `exp` and `log10` from `ln`
-//! (neither is exposed by `bevy_math::ops`), keeping the whole path libm-backed.
+//! (neither is exposed by `prism_math::ops`), keeping the whole path libm-backed.
 //!
 //! # Provenance
 //!
@@ -67,7 +67,7 @@
 //! Unreal Engine, Unity, Godot, Wwise, or FMOD source or derived code**; it is
 //! implemented purely from that publicly documented acoustics knowledge.
 
-use bevy_math::{ops, Vec3};
+use prism_math::{ops, Vec3};
 use prism_audio_core::math::{db_to_linear, Sample};
 
 use crate::band_spectrum::BandGains;
@@ -370,8 +370,8 @@ pub fn fresnel_number(path_difference_m: Sample, freq_hz: Sample) -> Sample {
     2.0 * path_difference_m * freq_hz / SPEED_OF_SOUND_MPS
 }
 
-/// Hyperbolic tangent built from [`bevy_math::ops::exp`], since
-/// `bevy_math::ops` exposes no `tanh`. `tanh(x) = (e^{2x} - 1) / (e^{2x} + 1)`.
+/// Hyperbolic tangent built from [`prism_math::ops::exp`], since
+/// `prism_math::ops` exposes no `tanh`. `tanh(x) = (e^{2x} - 1) / (e^{2x} + 1)`.
 #[inline]
 #[must_use]
 fn tanh(x: Sample) -> Sample {
@@ -379,7 +379,7 @@ fn tanh(x: Sample) -> Sample {
     (e2x - 1.0) / (e2x + 1.0)
 }
 
-/// Base-10 logarithm built from [`bevy_math::ops::ln`], since `bevy_math::ops`
+/// Base-10 logarithm built from [`prism_math::ops::ln`], since `prism_math::ops`
 /// exposes no `log10`.
 #[inline]
 #[must_use]
@@ -517,7 +517,7 @@ pub fn transmission_gain(loss_db: Sample) -> Sample {
 /// # Examples
 ///
 /// ```
-/// use bevy_math::Vec3;
+/// use prism_math::Vec3;
 /// use prism_audio_spatial::propagation::edge_path_difference;
 /// // An edge directly on the line of sight adds no detour.
 /// let d = edge_path_difference(
@@ -536,7 +536,7 @@ pub fn edge_path_difference(listener: Vec3, edge: Vec3, source: Vec3) -> Sample 
 }
 
 /// Deterministic Euclidean distance between two points (routes the length
-/// through [`bevy_math::ops::sqrt`] rather than an `f32` intrinsic).
+/// through [`prism_math::ops::sqrt`] rather than an `f32` intrinsic).
 #[inline]
 #[must_use]
 fn distance(a: Vec3, b: Vec3) -> Sample {

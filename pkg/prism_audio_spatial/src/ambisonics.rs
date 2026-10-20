@@ -60,11 +60,11 @@
 //!
 //! # Determinism
 //!
-//! All length/normalisation math flows through [`bevy_math`] (libm-backed via
-//! the crate's `nostd-libm` feature) rather than `f32` intrinsics, so encoding,
+//! All length/normalisation math flows through [`prism_math`]'s libm-backed
+//! reference implementation rather than `f32` intrinsics, so encoding,
 //! rotation, and decoding are bit-reproducible across targets.
 
-use bevy_math::{Quat, Vec3};
+use prism_math::{Quat, Vec3};
 
 use prism_audio_core::graph::{AudioNode, ProcessIo, RenderContext};
 use prism_audio_core::math::Sample;

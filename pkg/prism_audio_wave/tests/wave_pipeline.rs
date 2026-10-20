@@ -35,7 +35,7 @@
 //! `router`/`hybrid`), together with the shared `prism_audio_spatial` bus and
 //! the `prism_audio_governor` propagation tier.
 
-use bevy_math::{ops, Vec3};
+use prism_math::{ops, Vec3};
 
 use prism_audio_governor::governor::lod::PropagationTier;
 use prism_audio_spatial::{SpatialParams, SpreadParams};

@@ -30,7 +30,7 @@
 //!
 //! # Determinism
 //!
-//! All transcendental and length math routes through [`bevy_math::ops`]
+//! All transcendental and length math routes through [`prism_math::ops`]
 //! (libm-backed) rather than `f32` intrinsics, so spatialisation is
 //! bit-reproducible across targets and can be golden-compared sample-for-
 //! sample. This is enforced by the workspace lints.

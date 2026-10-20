@@ -12,12 +12,9 @@ prism_audio_core = { path = "../prism_audio_core" }
 # HRTF selection agrees bit-for-bit with the rest of the spatial pipeline.
 prism_audio_spatial = { path = "../prism_audio_spatial" }
 # Deterministic, cross-platform scalar transcendental functions (sin/cos/atan2/
-# sqrt/acos/...) plus the glam `Vec3` prelude used for direction geometry.
-# `nostd-libm` keeps the math bit-reproducible across targets under `no_std`,
-# which the workspace lints enforce.
-bevy_math = { path = "../../crates/bevy_math", default-features = false, features = [
-  "nostd-libm",
-] }
+# sqrt/acos/...) plus the `prism_math` `Vec3` types used for direction geometry.
+# `prism_math` routes these operations through libm in both `std` and `no_std`.
+prism_math = { path = "../prism_math", default-features = false }
 serde = { version = "1", default-features = false, features = [
   "derive",
 ], optional = true }
@@ -29,14 +26,14 @@ prism_audio_hrtf = { path = ".", features = ["serialize"] }
 default = ["std"]
 # Enables std-backed facilities, including on-disk SOFA/AES69 dataset loading.
 # The real-time hot path (block convolution) stays allocation-free regardless.
-std = ["prism_audio_core/std", "prism_audio_spatial/std", "bevy_math/std"]
+std = ["prism_audio_core/std", "prism_audio_spatial/std", "prism_math/std"]
 # Enables serde (de)serialization of plain, non-real-time description data
 # (dataset metadata, measurement grid descriptors).
 serialize = [
   "dep:serde",
   "prism_audio_core/serialize",
   "prism_audio_spatial/serialize",
-  "bevy_math/serialize",
+  "prism_math/serialize",
 ]
 
 [lints]

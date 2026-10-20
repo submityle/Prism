@@ -53,7 +53,7 @@
 //! Godot, Wwise, FMOD, or Steam Audio source or derived code**. The AES69
 //! spherical-to-local angle conversion and dataset assembly are implemented
 //! from the publicly documented SOFA/AES69 specification using only standard
-//! collections and [`bevy_math::ops`].
+//! collections and [`prism_math::ops`].
 //!
 //! # Relationship
 //!
@@ -69,7 +69,7 @@ pub mod decode;
 pub mod hdf5;
 
 use alloc::vec::Vec;
-use bevy_math::ops;
+use prism_math::ops;
 use core::f32::consts::{FRAC_PI_2, PI};
 use prism_audio_core::math::Sample;
 

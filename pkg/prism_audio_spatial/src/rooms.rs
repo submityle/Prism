@@ -57,7 +57,7 @@
 //! rate. Its pure geometry helpers ([`room_of`], [`Room::contains`],
 //! [`Portal::closest_point`], [`portal_coupling_gain`], [`obliquity_factor`])
 //! allocate nothing, lock nothing, and cannot panic; every square root and
-//! division routes through [`bevy_math::ops`] so the result is deterministic
+//! division routes through [`prism_math::ops`] so the result is deterministic
 //! and golden-comparable.
 //!
 //! # Provenance
@@ -70,7 +70,7 @@
 //! implemented purely from that publicly documented acoustics and geometry
 //! knowledge.
 
-use bevy_math::{ops, Vec3};
+use prism_math::{ops, Vec3};
 use prism_audio_core::math::{Sample, MIN_AUDIBLE_GAIN};
 
 use crate::band_spectrum::BandGains;
@@ -370,7 +370,7 @@ pub fn portal_coupling_gain(listener_pos: Vec3, emitter_pos: Vec3, portal: &Port
 /// # Examples
 ///
 /// ```
-/// use bevy_math::Vec3;
+/// use prism_math::Vec3;
 /// use prism_audio_spatial::propagation::AcousticMaterial;
 /// use prism_audio_spatial::rooms::{Room, RoomId, room_of};
 ///
@@ -412,7 +412,7 @@ pub fn room_of(point: Vec3, rooms: &[Room]) -> Option<RoomId> {
 /// # Examples
 ///
 /// ```
-/// use bevy_math::Vec3;
+/// use prism_math::Vec3;
 /// use prism_audio_spatial::geometry::{Emitter, Listener};
 /// use prism_audio_spatial::propagation::{
 ///     AcousticMaterial, PropagationBackend, PropagationPath,
@@ -568,7 +568,7 @@ impl PropagationBackend for RoomNetwork<'_> {
     }
 }
 
-/// Euclidean distance between two points, via [`bevy_math::ops`].
+/// Euclidean distance between two points, via [`prism_math::ops`].
 #[inline]
 #[must_use]
 fn distance(a: Vec3, b: Vec3) -> Sample {
@@ -606,7 +606,7 @@ fn any_perpendicular(n: Vec3) -> Vec3 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bevy_math::Quat;
+    use prism_math::Quat;
 
     const EPS: Sample = 1.0e-5;
 

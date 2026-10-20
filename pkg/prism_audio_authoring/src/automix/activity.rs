@@ -100,7 +100,7 @@ fn block_coefficient(tau_seconds: Sample, frames: u32, sample_rate: u32) -> Samp
     }
     let frames = frames as Sample;
     let fs = sample_rate as Sample;
-    bevy_math::ops::exp(-frames / (tau_seconds * fs))
+    prism_math::ops::exp(-frames / (tau_seconds * fs))
 }
 
 #[cfg(test)]

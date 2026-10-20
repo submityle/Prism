@@ -5,7 +5,7 @@
 //! filter used for spectral tilt and friction colouring, and the standard
 //! helpers that convert a decay half-life into a per-sample pole radius for the
 //! modal resonators. All transcendental math is routed through
-//! [`bevy_math::ops`] so results are deterministic across platforms.
+//! [`prism_math::ops`] so results are deterministic across platforms.
 //!
 //! # Provenance
 //! Original work; no Unreal Engine, Unity, Godot, Wwise, FMOD, Steam Audio, or
@@ -19,7 +19,7 @@
 //! [`prism_audio_core::param::Smoothed`] with a direct one-pole colour filter
 //! rather than a parameter ramp.
 
-use bevy_math::ops;
+use prism_math::ops;
 
 use prism_audio_core::math::{flush_denormal, Sample};
 

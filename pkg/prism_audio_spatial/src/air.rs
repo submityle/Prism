@@ -29,7 +29,7 @@
 //! # Determinism
 //!
 //! Every transcendental (`exp`, `powf`, `sqrt`) routes through
-//! [`bevy_math::ops`] (libm-backed) rather than an `f32` intrinsic, so the
+//! [`prism_math::ops`] (libm-backed) rather than an `f32` intrinsic, so the
 //! absorption coefficient and the derived cut-off are bit-reproducible across
 //! targets. The coefficient is evaluated in `f32`: the crate stays `no_std`
 //! compatible and has no `f64`/libm dependency available, and the `f32` result
@@ -48,7 +48,7 @@
 //! derived code**; it is implemented purely from that publicly documented
 //! acoustics and signal-processing knowledge.
 
-use bevy_math::ops;
+use prism_math::ops;
 
 use prism_audio_core::graph::{AudioNode, ProcessIo, RenderContext};
 use prism_audio_core::math::Sample;

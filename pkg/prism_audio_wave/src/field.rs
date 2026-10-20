@@ -387,8 +387,8 @@ impl ParameterField {
         let nx = read_u32(&mut cur);
         let ny = read_u32(&mut cur);
         let nz = read_u32(&mut cur);
-        let min = bevy_math::Vec3::new(read_f32(&mut cur), read_f32(&mut cur), read_f32(&mut cur));
-        let max = bevy_math::Vec3::new(read_f32(&mut cur), read_f32(&mut cur), read_f32(&mut cur));
+        let min = prism_math::Vec3::new(read_f32(&mut cur), read_f32(&mut cur), read_f32(&mut cur));
+        let max = prism_math::Vec3::new(read_f32(&mut cur), read_f32(&mut cur), read_f32(&mut cur));
         let mut slots = [(0.0_f32, 0.0_f32); FIELDS_PER_PROBE];
         for slot in &mut slots {
             let lo = read_f32(&mut cur);
@@ -553,7 +553,7 @@ impl ParameterFieldBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bevy_math::Vec3;
+    use prism_math::Vec3;
 
     fn approx(a: f32, b: f32, eps: f32) -> bool {
         (a - b).abs() <= eps

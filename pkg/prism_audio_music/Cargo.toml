@@ -8,9 +8,7 @@ publish = false
 
 [dependencies]
 prism_audio_core = { path = "../prism_audio_core" }
-bevy_math = { path = "../../crates/bevy_math", default-features = false, features = [
-  "nostd-libm",
-] }
+prism_math = { path = "../prism_math", default-features = false }
 serde = { version = "1", default-features = false, features = [
   "derive",
 ], optional = true }
@@ -20,8 +18,8 @@ prism_audio_music = { path = ".", features = ["serialize"] }
 
 [features]
 default = ["std"]
-std = ["prism_audio_core/std", "bevy_math/std"]
-serialize = ["dep:serde", "prism_audio_core/serialize", "bevy_math/serialize"]
+std = ["prism_audio_core/std", "prism_math/std"]
+serialize = ["dep:serde", "prism_audio_core/serialize", "prism_math/serialize"]
 
 [lints]
 workspace = true

@@ -98,7 +98,7 @@ impl Partition {
 /// # Examples
 ///
 /// ```
-/// # use bevy_math::Vec3;
+/// # use prism_math::Vec3;
 /// # use prism_audio_wave::solver::{partition_scene, VoxelScene};
 /// let scene = VoxelScene::new(Vec3::ZERO, 1.0, 4, 4, 1);
 /// let parts = partition_scene(&scene);
@@ -176,7 +176,7 @@ pub fn partition_scene(scene: &VoxelScene) -> Vec<Partition> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bevy_math::Vec3;
+    use prism_math::Vec3;
 
     fn total_air(scene: &VoxelScene) -> usize {
         let [nx, ny, nz] = scene.dims();

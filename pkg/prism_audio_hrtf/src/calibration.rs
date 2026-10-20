@@ -36,7 +36,7 @@
 //! # Determinism
 //!
 //! Only clamping and a square root (for the convergence norm) are used, routed
-//! through [`bevy_math::ops`], so calibration is bit-reproducible.
+//! through [`prism_math::ops`], so calibration is bit-reproducible.
 //!
 //! # Provenance
 //!
@@ -50,7 +50,7 @@
 //! [`crate::dataset`]. Pairs with [`crate::personalization`]: pick the nearest
 //! dataset first, then calibrate the residual elevation bias.
 
-use bevy_math::ops;
+use prism_math::ops;
 use core::f32::consts::FRAC_PI_2;
 use prism_audio_core::math::Sample;
 

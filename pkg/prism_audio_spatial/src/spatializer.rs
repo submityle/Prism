@@ -50,7 +50,7 @@
 //! # Determinism
 //!
 //! Every angle, gain, and corner routes through the leaf models, which in turn
-//! use [`bevy_math::ops`] rather than `f32` intrinsics, so a given world
+//! use [`prism_math::ops`] rather than `f32` intrinsics, so a given world
 //! configuration resolves to bit-identical parameters across targets and can be
 //! golden-compared.
 //!
@@ -161,7 +161,7 @@ pub struct SpatialParams {
 /// # Examples
 ///
 /// ```
-/// # use bevy_math::Vec3;
+/// # use prism_math::Vec3;
 /// # use prism_audio_spatial::geometry::{Emitter, Listener};
 /// # use prism_audio_spatial::occlusion::OcclusionFactors;
 /// # use prism_audio_spatial::spatializer::{resolve, SourceDescriptor};
@@ -224,7 +224,7 @@ pub fn resolve(
 mod tests {
     use super::*;
     use crate::attenuation::DistanceModel;
-    use bevy_math::Vec3;
+    use prism_math::Vec3;
     use core::f32::consts::FRAC_PI_2;
 
     const SR: u32 = 48_000;

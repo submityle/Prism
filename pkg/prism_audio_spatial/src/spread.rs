@@ -35,7 +35,7 @@
 //! # Determinism
 //!
 //! The focus window and tap offsets route their transcendental math through
-//! [`bevy_math::ops`] (libm) rather than `f32` intrinsics, so spreading is
+//! [`prism_math::ops`] (libm) rather than `f32` intrinsics, so spreading is
 //! bit-reproducible across targets.
 //!
 //! # Provenance
@@ -47,7 +47,7 @@
 
 use core::f32::consts::{FRAC_PI_2, PI};
 
-use bevy_math::ops;
+use prism_math::ops;
 use prism_audio_core::math::Sample;
 
 use crate::panner::Panner;

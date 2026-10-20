@@ -55,7 +55,7 @@
 //! # Determinism
 //!
 //! The geometry helper routes its transcendental math through
-//! [`bevy_math::ops`] (libm-backed) rather than `f32` intrinsics, so derived
+//! [`prism_math::ops`] (libm-backed) rather than `f32` intrinsics, so derived
 //! coefficients are bit-reproducible across targets. The runtime recursion is
 //! plain multiply/add and is golden-comparable sample-for-sample.
 //!
@@ -75,7 +75,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use bevy_math::ops;
+use prism_math::ops;
 
 use prism_audio_core::math::Sample;
 

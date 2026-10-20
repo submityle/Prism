@@ -56,7 +56,7 @@
 //! implemented purely from that publicly documented acoustics literature.
 
 use alloc::{vec, vec::Vec};
-use bevy_math::ops;
+use prism_math::ops;
 use prism_audio_core::math::Sample;
 
 /// Speech sliding-window width `delta_tau_E` in milliseconds.

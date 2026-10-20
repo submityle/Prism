@@ -37,7 +37,7 @@
 //!
 //! # Determinism
 //!
-//! All transcendental math routes through [`bevy_math::ops`] rather than `f32`
+//! All transcendental math routes through [`prism_math::ops`] rather than `f32`
 //! intrinsics, so bakes and lookups are bit-reproducible across targets.
 #![forbid(unsafe_code)]
 #![cfg_attr(not(feature = "std"), no_std)]

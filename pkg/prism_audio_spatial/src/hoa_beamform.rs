@@ -67,11 +67,11 @@
 //! # Determinism
 //!
 //! All direction encoding routes through [`crate::hoa::encode_hoa`], whose math
-//! flows through [`bevy_math::ops`] (libm-backed) rather than `f32` intrinsics,
+//! flows through [`prism_math::ops`] (libm-backed) rather than `f32` intrinsics,
 //! so beamforming is bit-reproducible across targets and can be golden-compared
 //! sample-for-sample. This is enforced by the workspace lints.
 
-use bevy_math::Vec3;
+use prism_math::Vec3;
 
 use prism_audio_core::math::Sample;
 
@@ -261,7 +261,7 @@ mod tests {
     use super::*;
     use crate::hoa::decode_hoa;
     use crate::hoa_decode::max_re_radius;
-    use bevy_math::ops;
+    use prism_math::ops;
 
     const EPS: Sample = 1.0e-4;
 

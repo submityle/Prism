@@ -53,7 +53,7 @@
 //! [`MaterialAbsorption`]: crate::material_library::MaterialAbsorption
 //! [`Material`]: crate::material_library::Material
 
-use bevy_math::ops;
+use prism_math::ops;
 use prism_audio_core::math::{db_to_linear, linear_to_db, Sample, MIN_AUDIBLE_GAIN};
 
 use crate::band_spectrum::{BandGains, PROPAGATION_BAND_COUNT};

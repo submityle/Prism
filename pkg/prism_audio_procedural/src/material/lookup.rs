@@ -25,7 +25,7 @@
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
-use bevy_math::ops;
+use prism_math::ops;
 
 use crate::material::pair::{MaterialCategory, MaterialId, MaterialPairId};
 use crate::modal::bank::{Mode, MAX_MODES};

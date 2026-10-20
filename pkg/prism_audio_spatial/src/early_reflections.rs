@@ -65,7 +65,7 @@
 //!
 //! # Determinism
 //!
-//! All length and transcendental math routes through [`bevy_math::ops`], and
+//! All length and transcendental math routes through [`prism_math::ops`], and
 //! sample-accurate delays are accumulated with integer stepping (never a
 //! floating-point-to-integer cast), so the tap list is bit-reproducible and can
 //! be golden-compared sample-for-sample.
@@ -82,7 +82,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use bevy_math::{ops, Vec3};
+use prism_math::{ops, Vec3};
 use prism_audio_core::math::{equal_power_pan, Sample};
 
 use crate::geometry::Listener;
@@ -290,7 +290,7 @@ fn wall_counts(n: i32) -> (u32, u32) {
 /// # Examples
 ///
 /// ```
-/// use bevy_math::Vec3;
+/// use prism_math::Vec3;
 /// use prism_audio_spatial::early_reflections::{
 ///     compute_early_reflections, ReflectionTap, ShoeboxRoom, DEFAULT_SOUND_SPEED,
 /// };
@@ -530,7 +530,7 @@ impl EarlyReflectionRenderer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bevy_math::Quat;
+    use prism_math::Quat;
     use core::f32::consts::FRAC_PI_2;
 
     fn approx(a: Sample, b: Sample, eps: Sample) -> bool {

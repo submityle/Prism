@@ -24,7 +24,7 @@
 //! [`crate::dsp::OnePole`], and summed into the modal bank by
 //! [`crate::continuous::ContactVoice`].
 
-use bevy_math::ops;
+use prism_math::ops;
 
 use crate::dsp::OnePole;
 use crate::material::FrictionTemplate;

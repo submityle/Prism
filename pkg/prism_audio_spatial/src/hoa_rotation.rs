@@ -59,12 +59,12 @@
 //!
 //! # Determinism
 //!
-//! All transcendental / length math routes through [`bevy_math::ops`]
+//! All transcendental / length math routes through [`prism_math::ops`]
 //! (libm-backed) rather than `f32` intrinsics, so rotation is bit-reproducible
 //! across targets and can be golden-compared sample-for-sample. This is
 //! enforced by the workspace lints.
 
-use bevy_math::{ops, Mat3, Quat, Vec3};
+use prism_math::{ops, Mat3, Quat, Vec3};
 
 use prism_audio_core::math::Sample;
 
@@ -232,7 +232,7 @@ fn first_order_block(q: Mat3) -> [[Sample; 3]; 3] {
 /// [`HoaRotationMatrix::apply`] (real-time, allocation/lock/panic free).
 ///
 /// ```
-/// use bevy_math::{Quat, Vec3};
+/// use prism_math::{Quat, Vec3};
 /// use core::f32::consts::FRAC_PI_2;
 /// use prism_audio_spatial::hoa::{encode_hoa, MAX_HOA_CHANNELS};
 /// use prism_audio_spatial::hoa_rotation::HoaRotationMatrix;
@@ -409,7 +409,7 @@ pub fn rotate_hoa(coeffs: &mut [Sample], order: usize, rotation: Quat) {
 mod tests {
     use super::*;
     use crate::hoa::encode_hoa;
-    use bevy_math::Quat;
+    use prism_math::Quat;
     use core::f32::consts::{FRAC_PI_2, PI};
 
     const EPS: Sample = 1.0e-4;

@@ -25,10 +25,10 @@
 //!
 //! Integration test for `prism_audio_spatial` (design doc chapters on
 //! spatialisation and Ambisonics). Depends on `prism_audio_spatial` and
-//! `bevy_math` as ordinary dev-visible dependencies and treats them as black
+//! `prism_math` as ordinary dev-visible dependencies and treats them as black
 //! boxes through their public interfaces.
 
-use bevy_math::{Quat, Vec3};
+use prism_math::{Quat, Vec3};
 use core::f32::consts::FRAC_PI_2;
 use prism_audio_spatial::ambisonics::{
     decode_foa, encode_foa_gains, encode_foa_sample, rotate_foa, FOA_CHANNELS, IDX_W, IDX_X, IDX_Y,

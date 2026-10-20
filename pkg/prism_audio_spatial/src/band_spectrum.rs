@@ -45,7 +45,7 @@
 //! [`MaterialAbsorption::at`]: crate::material_library::MaterialAbsorption::at
 //! [`PropagationPath::cutoff_hz`]: crate::propagation::PropagationPath
 
-use bevy_math::ops;
+use prism_math::ops;
 use prism_audio_core::math::Sample;
 
 use crate::material_library::{MaterialAbsorption, OCTAVE_BAND_CENTERS, OCTAVE_BAND_COUNT};

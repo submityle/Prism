@@ -10,7 +10,7 @@
 //! is latched and held until the next edge. Paired with a random source in
 //! `super::random` it becomes the classic stepped-random modulator.
 
-use bevy_math::ops;
+use prism_math::ops;
 use prism_audio_core::Sample;
 
 /// A rate-clocked latch that samples its input on each clock edge and holds the

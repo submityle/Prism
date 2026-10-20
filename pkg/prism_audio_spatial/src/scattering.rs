@@ -33,7 +33,7 @@
 //!
 //! Everything here is a small scalar computation over eight bands or a single
 //! direction: no allocation, no locking, no panics, and no `f32` intrinsics
-//! (all logarithms and roots route through [`bevy_math::ops`]). Degenerate
+//! (all logarithms and roots route through [`prism_math::ops`]). Degenerate
 //! inputs (out-of-range coefficients, back-facing or zero-length directions)
 //! clamp to safe finite values, never a `NaN` or an infinity.
 //!
@@ -47,8 +47,8 @@
 //! Steam Audio, or Google Resonance Audio source or derived code**; it is
 //! implemented purely from that publicly documented acoustics knowledge.
 
-use bevy_math::ops;
-use bevy_math::Vec3;
+use prism_math::ops;
+use prism_math::Vec3;
 use core::f32::consts::PI;
 
 use prism_audio_core::math::Sample;

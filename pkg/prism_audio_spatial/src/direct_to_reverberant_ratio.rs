@@ -47,7 +47,7 @@
 //! and must not run on an audio thread. It never panics: empty, all-zero,
 //! non-finite, or non-positive sample-rate inputs return the safe sentinel
 //! [`NO_DRR_DB`]. All logarithmic and length math routes through
-//! [`bevy_math::ops`].
+//! [`prism_math::ops`].
 //!
 //! # Provenance
 //!
@@ -60,7 +60,7 @@
 
 use core::f32::consts::LN_10;
 
-use bevy_math::ops;
+use prism_math::ops;
 
 use prism_audio_core::math::Sample;
 

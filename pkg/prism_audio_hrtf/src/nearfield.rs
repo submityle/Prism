@@ -34,7 +34,7 @@
 //!
 //! # Determinism
 //!
-//! All transcendental/length math routes through [`bevy_math::ops`]
+//! All transcendental/length math routes through [`prism_math::ops`]
 //! (libm-backed) and the decibel conversions come from [`prism_audio_core`],
 //! so results are bit-reproducible across targets.
 //!
@@ -46,7 +46,7 @@
 //! implemented from standard, publicly documented acoustics knowledge
 //! (spherical-head near-field model).
 
-use bevy_math::{ops, Vec3};
+use prism_math::{ops, Vec3};
 use prism_audio_core::math::{db_to_linear, linear_to_db, Sample};
 
 /// Default head radius in metres (average adult, the value used by most

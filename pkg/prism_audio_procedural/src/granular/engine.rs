@@ -19,7 +19,7 @@
 //! [`crate::granular::grain::Grain`]s into a
 //! [`crate::granular::pool::GrainPool`] using [`crate::rng`].
 
-use bevy_math::ops;
+use prism_math::ops;
 
 use crate::granular::pool::GrainPool;
 use crate::rng::ProceduralRng;

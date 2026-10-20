@@ -10,7 +10,7 @@
 //! dialog bus level) so other parameters can duck or pump in response. Feeds
 //! control buses in `super::control_bus`.
 
-use bevy_math::ops;
+use prism_math::ops;
 use prism_audio_core::Sample;
 
 /// A rectifying one-pole envelope follower with independent attack and release

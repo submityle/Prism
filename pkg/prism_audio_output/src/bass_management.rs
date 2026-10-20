@@ -237,7 +237,7 @@ impl BassManager {
 mod tests {
     use super::*;
     use alloc::vec::Vec;
-    use bevy_math::ops;
+    use prism_math::ops;
 
     const SR: u32 = 48_000;
 

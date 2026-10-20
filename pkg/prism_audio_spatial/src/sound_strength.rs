@@ -39,7 +39,7 @@
 //! and must not run on an audio thread. They never panic: empty, all-zero,
 //! non-finite, non-positive reference energy, or non-positive sample-rate
 //! inputs return safe defaults ([`MIN_STRENGTH_DB`] or `0`). All logarithmic and
-//! length math routes through [`bevy_math::ops`].
+//! length math routes through [`prism_math::ops`].
 //!
 //! # Provenance
 //!
@@ -51,7 +51,7 @@
 
 use core::f32::consts::LN_10;
 
-use bevy_math::ops;
+use prism_math::ops;
 
 use prism_audio_core::math::Sample;
 

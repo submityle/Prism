@@ -21,7 +21,7 @@
 //! [`crate::granular::pool::GrainPool`] and scheduled by
 //! [`crate::granular::engine::GranularEngine`].
 
-use bevy_math::ops;
+use prism_math::ops;
 
 use crate::dsp::TWO_PI;
 use prism_audio_core::math::{equal_power_pan, Sample};

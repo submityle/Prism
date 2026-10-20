@@ -12,7 +12,7 @@
 //! with the reverberant tail; the wet send gain is a bounded, monotonically
 //! decreasing function of that ratio.
 
-use bevy_math::ops;
+use prism_math::ops;
 
 /// Decibel value returned when the reverberant tail is empty (a perfectly dry
 /// path).

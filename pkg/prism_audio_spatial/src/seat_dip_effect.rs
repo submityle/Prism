@@ -58,7 +58,7 @@
 //! heap allocation, no locking, and no panicking. Degenerate geometry (a zero
 //! or negative seat height, a zero row spacing, a zero distance) and
 //! non-finite inputs return a safe, all-zero spectrum. All transcendental math
-//! routes through [`bevy_math::ops`], never through `f32` intrinsics.
+//! routes through [`prism_math::ops`], never through `f32` intrinsics.
 //!
 //! # Provenance
 //!
@@ -71,7 +71,7 @@
 //! Audio source or derived code**; it is implemented purely from that publicly
 //! documented concert-hall acoustics literature.
 
-use bevy_math::ops;
+use prism_math::ops;
 
 use prism_audio_core::math::{db_to_linear, Sample};
 

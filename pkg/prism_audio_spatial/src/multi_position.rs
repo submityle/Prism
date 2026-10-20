@@ -46,7 +46,7 @@
 //!
 //! # Determinism
 //!
-//! Every angle and length routes through [`bevy_math::ops`] rather than `f32`
+//! Every angle and length routes through [`prism_math::ops`] rather than `f32`
 //! intrinsics, so a given configuration reduces to bit-identical parameters
 //! across targets and can be golden-compared.
 //!
@@ -57,7 +57,7 @@
 //! source by several positions and combining them by nearest/weighted/all is a
 //! standard, publicly documented spatial-audio technique.
 
-use bevy_math::{ops, Vec3};
+use prism_math::{ops, Vec3};
 use prism_audio_core::math::{Sample, MIN_AUDIBLE_GAIN};
 
 use crate::geometry::{Emitter, Listener, LocalSource};
@@ -144,7 +144,7 @@ pub enum MultiPositionMode {
 /// # Examples
 ///
 /// ```
-/// # use bevy_math::Vec3;
+/// # use prism_math::Vec3;
 /// # use prism_audio_spatial::geometry::{Emitter, Listener};
 /// # use prism_audio_spatial::multi_position::{
 /// #     resolve_multi, MultiPositionMode, PositionInput,

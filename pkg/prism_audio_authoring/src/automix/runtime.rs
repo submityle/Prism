@@ -166,7 +166,7 @@ impl CompiledAutoMix {
         }
         /// `20 / ln(10)`, converting a natural-log amplitude ratio to decibels.
         const DB_PER_LN: Sample = 8.685_889;
-        DB_PER_LN * bevy_math::ops::ln(gain)
+        DB_PER_LN * prism_math::ops::ln(gain)
     }
 
     /// Resets every envelope, activity reading, and bus to its initial state.

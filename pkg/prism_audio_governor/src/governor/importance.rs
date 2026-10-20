@@ -21,7 +21,7 @@
 //!
 //! # Determinism
 //!
-//! Distance attenuation uses [`bevy_math::ops`] for its one transcendental
+//! Distance attenuation uses [`prism_math::ops`] for its one transcendental
 //! (a power), so the result is bit-reproducible. Everything else is
 //! multiplication and clamping.
 //!
@@ -37,7 +37,7 @@
 //! `prism_audio_core` ranks. The `masked` input is supplied by
 //! [`crate::masking`].
 
-use bevy_math::ops;
+use prism_math::ops;
 use prism_audio_core::math::Sample;
 use prism_audio_core::voice::Importance;
 

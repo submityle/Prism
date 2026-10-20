@@ -13,7 +13,7 @@
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
-use bevy_math::ops;
+use prism_math::ops;
 use prism_audio_core::Sample;
 
 /// A monotone-friendly response curve mapping an input in `[0, 1]` to an output
@@ -21,7 +21,7 @@ use prism_audio_core::Sample;
 ///
 /// Inputs are clamped into `[0, 1]` before evaluation so callers never produce
 /// out-of-range control values. Determinism is guaranteed by routing every
-/// transcendental through [`bevy_math::ops`].
+/// transcendental through [`prism_math::ops`].
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
 pub enum Curve {

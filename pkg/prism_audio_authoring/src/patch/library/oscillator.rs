@@ -8,11 +8,11 @@
 //! The oscillator primitive of the design section 11 node library. It realizes
 //! the "deterministic synthesis" requirement: the phase accumulator advances by
 //! a fixed per-block increment and all trigonometry routes through
-//! `bevy_math::ops`, so a given parameter stream is reproducible sample for
+//! `prism_math::ops`, so a given parameter stream is reproducible sample for
 //! sample. Frequency and amplitude are exposed parameters read from
 //! [`ParamCell`]s.
 
-use bevy_math::ops;
+use prism_math::ops;
 use core::f32::consts::TAU;
 
 use prism_audio_core::graph::{AudioNode, ProcessIo, RenderContext};

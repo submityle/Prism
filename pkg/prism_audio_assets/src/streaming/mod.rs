@@ -131,7 +131,7 @@ mod tests {
         let encoder = ImaAdpcmEncoder::new(samples_per_block);
         let mut pcm = Vec::new();
         for n in 0..samples_per_block {
-            pcm.push((bevy_math::ops::sin(n as f32 * 0.02) * 6000.0) as i16);
+            pcm.push((prism_math::ops::sin(n as f32 * 0.02) * 6000.0) as i16);
         }
         let block = encoder.encode_block(&pcm);
         let decoder = crate::codec::ima_adpcm::ImaAdpcmDecoder::new(
@@ -176,7 +176,7 @@ mod tests {
         let encoder = ms_adpcm::MsAdpcmEncoder::new(samples_per_block);
         let mut pcm = Vec::new();
         for n in 0..samples_per_block {
-            pcm.push((bevy_math::ops::sin(n as f32 * 0.04) * 7000.0) as i16);
+            pcm.push((prism_math::ops::sin(n as f32 * 0.04) * 7000.0) as i16);
         }
         let block = encoder.encode_block(&pcm);
         let decoder = MsAdpcmDecoder::new(

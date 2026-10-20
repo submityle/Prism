@@ -33,7 +33,7 @@
 //! ([`MAX_ROOM_MODES`]); there is no heap allocation, no locking, and no
 //! panicking. Degenerate geometry (a non-positive dimension), a non-finite
 //! ceiling, or an empty mode set all return safe finite values. All roots go
-//! through [`bevy_math::ops`], never through `f32` intrinsics.
+//! through [`prism_math::ops`], never through `f32` intrinsics.
 //!
 //! # Provenance
 //!
@@ -46,7 +46,7 @@
 //! Resonance Audio source or derived code**; it is implemented purely from that
 //! publicly documented acoustics knowledge.
 
-use bevy_math::ops;
+use prism_math::ops;
 use core::f32::consts::{PI, SQRT_2};
 
 use prism_audio_core::math::Sample;
@@ -143,7 +143,7 @@ impl RoomModes {
     /// # Examples
     ///
     /// ```
-    /// use bevy_math::Vec3;
+    /// use prism_math::Vec3;
     /// use prism_audio_spatial::early_reflections::ShoeboxRoom;
     /// use prism_audio_spatial::room_modes::RoomModes;
     ///
@@ -362,7 +362,7 @@ fn octave_band_index(freq_hz: Sample) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bevy_math::Vec3;
+    use prism_math::Vec3;
 
     fn cube(side: Sample) -> ShoeboxRoom {
         ShoeboxRoom::new(Vec3::ZERO, Vec3::splat(side), [0.0; 6])

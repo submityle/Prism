@@ -47,7 +47,7 @@
 //! is no heap allocation, no locking, and no panicking. Degenerate and
 //! non-finite inputs fall back to safe finite values (a zero forward axis
 //! defaults to `-Z`, a non-finite tap direction is treated as on-axis).
-//! All transcendental math routes through [`bevy_math::ops`].
+//! All transcendental math routes through [`prism_math::ops`].
 //!
 //! # Relationship
 //!
@@ -72,8 +72,8 @@
 //! Google Resonance Audio source or derived code**; it is implemented purely by
 //! composing this crate's own directivity and image-source modules.
 
-use bevy_math::ops;
-use bevy_math::Vec3;
+use prism_math::ops;
+use prism_math::Vec3;
 
 use prism_audio_core::math::Sample;
 
@@ -110,7 +110,7 @@ impl DirectionalEarlyReflections {
     /// # Examples
     ///
     /// ```
-    /// use bevy_math::Vec3;
+    /// use prism_math::Vec3;
     /// use prism_audio_spatial::early_reflections::ReflectionTap;
     /// use prism_audio_spatial::reflection_directivity::DirectionalEarlyReflections;
     /// use prism_audio_spatial::source_directivity::{DirectivityPreset, SourceDirectivity};

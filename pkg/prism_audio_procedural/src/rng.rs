@@ -21,7 +21,7 @@
 //! (procedural soundscape scattering); mirrors the integer-only RNG style used
 //! by `prism_physics_core::fracture::rng` without sharing code.
 
-use bevy_math::ops;
+use prism_math::ops;
 
 use crate::dsp::TWO_PI;
 use prism_audio_core::math::Sample;

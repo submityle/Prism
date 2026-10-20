@@ -60,7 +60,7 @@
 //! per-sample callbacks and must not run on an audio thread. They never panic:
 //! empty, all-zero, or non-finite inputs return safe defaults (`0`, an empty
 //! curve, or a clamped sentinel). All transcendental math routes through
-//! [`bevy_math::ops`].
+//! [`prism_math::ops`].
 //!
 //! # Provenance
 //!
@@ -75,7 +75,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use bevy_math::ops;
+use prism_math::ops;
 use core::f32::consts::LN_10;
 
 use prism_audio_core::math::Sample;

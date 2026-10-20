@@ -56,7 +56,7 @@
 
 use crate::material_library::{OCTAVE_BAND_CENTERS, OCTAVE_BAND_COUNT};
 use alloc::{vec, vec::Vec};
-use bevy_math::ops;
+use prism_math::ops;
 use core::f32::consts::{LN_10, LN_2, PI};
 use prism_audio_core::math::Sample;
 

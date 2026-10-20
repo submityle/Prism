@@ -36,7 +36,7 @@
 //! # Determinism
 //!
 //! The cut-off is interpolated in the log-frequency domain through
-//! [`bevy_math::ops`] (libm-backed `ln`/`exp`) rather than `f32` intrinsics, so
+//! [`prism_math::ops`] (libm-backed `ln`/`exp`) rather than `f32` intrinsics, so
 //! results are bit-reproducible across targets.
 //!
 //! # Provenance
@@ -47,7 +47,7 @@
 //! source or derived code**; only publicly documented acoustics knowledge is
 //! used.
 
-use bevy_math::ops;
+use prism_math::ops;
 use prism_audio_core::graph::{AudioNode, ProcessIo, RenderContext};
 use prism_audio_core::math::{db_to_linear, Sample};
 use prism_audio_core::nodes::biquad::{Biquad, BiquadCoeffs, BiquadKind};
@@ -470,7 +470,7 @@ mod tests {
     fn null_query_is_always_open() {
         let q = NullOcclusionQuery;
         let listener = Listener::default();
-        let emitter = Emitter::point(bevy_math::Vec3::new(1.0, 0.0, 0.0), bevy_math::Vec3::ZERO);
+        let emitter = Emitter::point(prism_math::Vec3::new(1.0, 0.0, 0.0), prism_math::Vec3::ZERO);
         assert_eq!(q.query(&listener, &emitter), OcclusionFactors::OPEN);
     }
 

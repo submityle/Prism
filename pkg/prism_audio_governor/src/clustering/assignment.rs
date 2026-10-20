@@ -35,7 +35,7 @@
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
-use bevy_math::Vec3;
+use prism_math::Vec3;
 use prism_audio_core::math::Sample;
 
 use crate::clustering::cluster::{Cluster, ClusterAccumulator, ClusterMember};
@@ -272,7 +272,7 @@ fn alloc_filled(len: usize, value: usize) -> Vec<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bevy_math::Vec3;
+    use prism_math::Vec3;
 
     const EPS: Sample = 1.0e-4;
 

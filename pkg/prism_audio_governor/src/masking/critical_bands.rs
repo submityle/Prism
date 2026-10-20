@@ -18,7 +18,7 @@
 //!
 //! # Determinism
 //!
-//! Every transcendental routes through [`bevy_math::ops`], so band edges and
+//! Every transcendental routes through [`prism_math::ops`], so band edges and
 //! lookups are bit-reproducible across targets.
 //!
 //! # Provenance
@@ -36,7 +36,7 @@
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
-use bevy_math::ops;
+use prism_math::ops;
 use prism_audio_core::math::Sample;
 
 /// Converts a frequency in hertz to the Bark scale (Zwicker 1961

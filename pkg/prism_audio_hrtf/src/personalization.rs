@@ -36,7 +36,7 @@
 //! # Determinism
 //!
 //! The only transcendental used is a square root, routed through
-//! [`bevy_math::ops`], so rankings are bit-reproducible across targets.
+//! [`prism_math::ops`], so rankings are bit-reproducible across targets.
 //!
 //! # Provenance
 //!
@@ -50,7 +50,7 @@
 //! Independent of [`crate::sofa`] loading: a candidate may originate from any
 //! [`crate::sofa::HrirSource`].
 
-use bevy_math::ops;
+use prism_math::ops;
 use prism_audio_core::math::Sample;
 
 use crate::dataset::HrtfDataset;

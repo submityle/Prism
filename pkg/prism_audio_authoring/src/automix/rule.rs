@@ -111,14 +111,14 @@ impl DuckingRule {
 
 /// Converts a decibel value to a linear amplitude ratio.
 ///
-/// Uses `10^(db/20) = exp(db * ln(10) / 20)` via [`bevy_math::ops::exp`] so the
+/// Uses `10^(db/20) = exp(db * ln(10) / 20)` via [`prism_math::ops::exp`] so the
 /// result is bit-identical across platforms, matching the crate's determinism
 /// contract (design section 24).
 #[must_use]
 pub fn decibels_to_linear(db: Sample) -> Sample {
     /// `ln(10) / 20`, the exponent scale from decibels to a natural-log power.
     const LN10_OVER_20: Sample = 0.115_129_255;
-    bevy_math::ops::exp(db * LN10_OVER_20)
+    prism_math::ops::exp(db * LN10_OVER_20)
 }
 
 #[cfg(test)]

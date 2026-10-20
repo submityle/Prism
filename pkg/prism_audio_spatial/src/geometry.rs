@@ -13,12 +13,12 @@
 //!
 //! # Determinism
 //!
-//! Every length/normalisation routes through [`bevy_math::ops`] (libm-backed)
+//! Every length/normalisation routes through [`prism_math::ops`] (libm-backed)
 //! rather than `f32` intrinsics, and quaternion/vector combinations are pure
 //! multiply-adds, so localisation is bit-reproducible across targets and can be
 //! golden-compared sample-for-sample.
 
-use bevy_math::{ops, Quat, Vec3};
+use prism_math::{ops, Quat, Vec3};
 use prism_audio_core::math::Sample;
 
 /// Distances below this (in metres) are treated as "at the listener": the
@@ -198,7 +198,7 @@ impl LocalSource {
 
 /// Normalises `v`, falling back to `fallback` when `v` is too short to have a
 /// well-defined direction. Deterministic (routes the length through
-/// [`bevy_math::ops`]).
+/// [`prism_math::ops`]).
 #[must_use]
 #[inline]
 fn normalize_or(v: Vec3, fallback: Vec3) -> Vec3 {

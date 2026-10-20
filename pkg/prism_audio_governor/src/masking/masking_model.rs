@@ -21,7 +21,7 @@
 //!
 //! # Determinism
 //!
-//! Only energy additions, multiplications, and [`bevy_math::ops`] powers are
+//! Only energy additions, multiplications, and [`prism_math::ops`] powers are
 //! used, so the masking verdicts are reproducible and golden-testable.
 //!
 //! # Provenance
@@ -40,7 +40,7 @@
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 
-use bevy_math::ops;
+use prism_math::ops;
 use prism_audio_core::math::Sample;
 
 use crate::masking::critical_bands::CriticalBands;

@@ -88,7 +88,7 @@
 //! derived code**; it is implemented purely from those publicly documented
 //! acoustic models.
 
-use bevy_math::ops;
+use prism_math::ops;
 use core::f32::consts::{FRAC_PI_2, PI, TAU};
 
 use prism_audio_core::math::Sample;

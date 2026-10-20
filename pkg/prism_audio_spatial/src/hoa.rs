@@ -53,7 +53,7 @@
 //!
 //! # Determinism
 //!
-//! All length/normalisation math flows through [`bevy_math::ops`] (libm-backed)
+//! All length/normalisation math flows through [`prism_math::ops`] (libm-backed)
 //! rather than `f32` intrinsics; the harmonics themselves are evaluated with
 //! polynomial (Chebyshev / associated-Legendre) recurrences using only
 //! multiplies and adds, so encoding and decoding are bit-reproducible across
@@ -68,7 +68,7 @@
 //! (exactly what [`HoaEncoderNode::set_direction`] does); first-order fields
 //! can still be rotated directly with [`crate::ambisonics::rotate_foa`].
 
-use bevy_math::{ops, Vec3};
+use prism_math::{ops, Vec3};
 
 use prism_audio_core::graph::{AudioNode, ProcessIo, RenderContext};
 use prism_audio_core::math::Sample;

@@ -16,7 +16,7 @@
 //! Angles use the same listener-local convention as
 //! [`prism_audio_spatial::SpatialParams`].
 
-use bevy_math::{ops, Vec3};
+use prism_math::{ops, Vec3};
 
 use crate::solver::ImpulseResponse;
 

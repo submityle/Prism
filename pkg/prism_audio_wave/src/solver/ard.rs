@@ -19,13 +19,13 @@
 //! # Determinism and real-time
 //!
 //! The solve is deterministic (all transcendental math routes through
-//! [`bevy_math::ops`]) and runs offline only: it allocates mode buffers and is
+//! [`prism_math::ops`]) and runs offline only: it allocates mode buffers and is
 //! not intended for the audio callback thread. The runtime side of the crate
 //! ([`crate::lookup`]) never touches this solver.
 
 use alloc::vec;
 use alloc::vec::Vec;
-use bevy_math::ops;
+use prism_math::ops;
 use core::f32::consts::PI;
 
 use super::impulse::ImpulseResponse;
@@ -532,7 +532,7 @@ fn inverse_dct(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bevy_math::Vec3;
+    use prism_math::Vec3;
 
     fn approx(a: f32, b: f32, eps: f32) -> bool {
         (a - b).abs() <= eps

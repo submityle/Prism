@@ -47,7 +47,7 @@
 //!
 //! # Determinism
 //!
-//! All distance and blend math routes through [`bevy_math::ops`] (libm-backed)
+//! All distance and blend math routes through [`prism_math::ops`] (libm-backed)
 //! rather than `f32` intrinsics, and the smoothstep blend uses only
 //! polynomial arithmetic, so a given world configuration resolves to
 //! bit-identical sends across targets and can be golden-compared.
@@ -63,7 +63,7 @@
 
 use prism_audio_core::math::{Sample, MIN_AUDIBLE_GAIN};
 
-use bevy_math::{ops, Vec3};
+use prism_math::{ops, Vec3};
 
 /// Identifier of an auxiliary return bus (a reverb or effect return in the
 /// mixer graph). Opaque; the mixer owns the mapping to an actual bus.
@@ -267,7 +267,7 @@ impl<'a> ReverbZoneField<'a> {
     /// # Examples
     ///
     /// ```
-    /// # use bevy_math::Vec3;
+    /// # use prism_math::Vec3;
     /// # use prism_audio_spatial::reverb_zones::{
     /// #     AuxBusId, AuxSend, ReverbZone, ReverbZoneField,
     /// # };

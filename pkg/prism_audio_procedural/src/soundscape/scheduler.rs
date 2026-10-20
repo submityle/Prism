@@ -30,7 +30,7 @@
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
-use bevy_math::ops;
+use prism_math::ops;
 
 use crate::rng::ProceduralRng;
 use crate::soundscape::element::SoundscapeElement;

@@ -23,7 +23,7 @@
 //! no audio state and performs no DSP; it is a pure function sampler.
 
 use alloc::vec::Vec;
-use bevy_math::ops;
+use prism_math::ops;
 use prism_audio_core::math::{lerp, Sample};
 
 /// The interpolation shape applied across a single curve segment.

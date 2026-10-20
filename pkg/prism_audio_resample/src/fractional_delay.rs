@@ -21,7 +21,7 @@
 //! Classic DSP only. The windowed-sinc fractional-delay filter and the Blackman
 //! window are standard, publicly documented signal-processing constructions
 //! (for example Oppenheim and Schafer, and the Smith "Digital Audio Resampling"
-//! notes). All transcendental math routes through [`bevy_math::ops`] so the
+//! notes). All transcendental math routes through [`prism_math::ops`] so the
 //! tables are bit-reproducible across platforms.
 //!
 //! # Relationship
@@ -35,7 +35,7 @@
 
 use alloc::vec::Vec;
 
-use bevy_math::ops;
+use prism_math::ops;
 use core::f32::consts::PI;
 
 use prism_audio_core::math::Sample;

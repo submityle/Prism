@@ -20,7 +20,7 @@
 //! the room ownership of the reverb-zone layer so outdoor elements are muted
 //! indoors.
 
-use bevy_math::ops;
+use prism_math::ops;
 
 use crate::dsp::TWO_PI;
 use prism_audio_core::math::Sample;

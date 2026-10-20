@@ -50,7 +50,7 @@
 //! Every query operates on stack scalars; there is no heap allocation, no
 //! locking, and no panicking. Degenerate geometry (a non-positive area, a mean
 //! absorption at `0` or `1`) and non-finite inputs return safe finite values.
-//! All transcendental math routes through [`bevy_math::ops`], never through
+//! All transcendental math routes through [`prism_math::ops`], never through
 //! `f32` intrinsics.
 //!
 //! # Provenance
@@ -63,7 +63,7 @@
 //! Steam Audio, or Google Resonance Audio source or derived code**; it is
 //! implemented purely from that publicly documented acoustics knowledge.
 
-use bevy_math::ops;
+use prism_math::ops;
 
 use core::f32::consts::{LN_10, PI};
 

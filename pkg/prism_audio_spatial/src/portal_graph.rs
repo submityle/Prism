@@ -53,7 +53,7 @@
 //! free**: the search state (visited-room path, portal-index stack) lives in
 //! fixed-size stack arrays bounded by [`MAX_PORTAL_HOPS`], room and portal
 //! counts are safely truncated to [`MAX_ROOMS`] / [`MAX_PORTALS`], and every
-//! square root and division routes through [`bevy_math::ops`] for deterministic,
+//! square root and division routes through [`prism_math::ops`] for deterministic,
 //! golden-comparable output. Delays are accumulated by integer stepping rather
 //! than a float-to-int cast.
 //!
@@ -66,7 +66,7 @@
 //! from [`crate::rooms`]) and elementary bounded graph search (acyclic
 //! depth-first enumeration of shortest paths), with no proprietary algorithm.
 
-use bevy_math::{ops, Vec3};
+use prism_math::{ops, Vec3};
 use prism_audio_core::math::Sample;
 
 use crate::acoustic_format::AcousticFormat;
@@ -157,7 +157,7 @@ impl Default for RoutedPath {
     }
 }
 
-/// The Euclidean distance between two points, routed through [`bevy_math::ops`]
+/// The Euclidean distance between two points, routed through [`prism_math::ops`]
 /// for determinism.
 #[inline]
 #[must_use]
@@ -313,7 +313,7 @@ impl Search<'_> {
 /// # Examples
 ///
 /// ```
-/// use bevy_math::Vec3;
+/// use prism_math::Vec3;
 /// use prism_audio_spatial::geometry::{Emitter, Listener};
 /// use prism_audio_spatial::propagation::AcousticMaterial;
 /// use prism_audio_spatial::rooms::{Portal, PortalFrame, Room, RoomId};

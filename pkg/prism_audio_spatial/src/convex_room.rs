@@ -67,7 +67,7 @@
 //!
 //! # Determinism
 //!
-//! All length math routes through [`bevy_math::ops`] and delays are accumulated
+//! All length math routes through [`prism_math::ops`] and delays are accumulated
 //! by integer stepping, so the tap list is bit-reproducible.
 //!
 //! # Relationship
@@ -91,7 +91,7 @@
 //! Resonance Audio source or derived code**; it is implemented from the public
 //! mathematical description.
 
-use bevy_math::{ops, Vec3};
+use prism_math::{ops, Vec3};
 
 use prism_audio_core::math::Sample;
 
@@ -378,7 +378,7 @@ fn push_tap(
 /// # Examples
 ///
 /// ```
-/// use bevy_math::Vec3;
+/// use prism_math::Vec3;
 /// use prism_audio_spatial::convex_room::{compute_convex_reflections, ConvexRoom};
 /// use prism_audio_spatial::geometry::Listener;
 ///
@@ -498,7 +498,7 @@ pub fn compute_convex_reflections(
 mod tests {
     use super::*;
     use crate::reflection_clustering::cluster_taps;
-    use bevy_math::Quat;
+    use prism_math::Quat;
 
     fn approx(a: Sample, b: Sample, eps: Sample) -> bool {
         (a - b).abs() <= eps

@@ -42,7 +42,7 @@
 //! and must not run on an audio thread. They never panic: empty, all-zero,
 //! non-finite, zero sample-rate, out-of-range windows, or a non-positive
 //! direct-window energy all return the safe sentinel `0`. All logarithmic and
-//! length math routes through [`bevy_math::ops`].
+//! length math routes through [`prism_math::ops`].
 //!
 //! # Provenance
 //!
@@ -55,7 +55,7 @@
 
 use core::f32::consts::LN_10;
 
-use bevy_math::ops;
+use prism_math::ops;
 
 use prism_audio_core::math::Sample;
 

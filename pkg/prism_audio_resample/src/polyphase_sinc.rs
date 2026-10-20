@@ -24,7 +24,7 @@
 //! Classic DSP only. The polyphase windowed-sinc resampler is a standard,
 //! publicly documented construction (Smith, "Digital Audio Resampling";
 //! Crochiere and Rabiner, multirate signal processing). All math routes through
-//! [`bevy_math::ops`] for bit-reproducibility.
+//! [`prism_math::ops`] for bit-reproducibility.
 //!
 //! # Relationship
 //!
@@ -37,14 +37,14 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use bevy_math::ops;
+use prism_math::ops;
 
 use prism_audio_core::math::Sample;
 
 use crate::fractional_delay::{sanitize, windowed_sinc, EPS};
 use crate::resampler::{clamp_ratio, ResampleProgress, ResampleQuality, Resampler};
 
-/// Returns the ceiling of `x` using only [`bevy_math::ops`] (`ceil(x) ==
+/// Returns the ceiling of `x` using only [`prism_math::ops`] (`ceil(x) ==
 /// -floor(-x)`), so no `f32` intrinsic method is used.
 #[inline]
 #[must_use]

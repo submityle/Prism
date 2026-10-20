@@ -20,7 +20,7 @@
 //! Implements the energy-mapping curves of design section 47.1 and feeds the
 //! excitation shaping of section 47.2 ([`crate::modal::excitation`]).
 
-use bevy_math::ops;
+use prism_math::ops;
 
 use crate::contact::event::ContactPoint;
 use crate::dsp::TWO_PI;

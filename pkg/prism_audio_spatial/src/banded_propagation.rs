@@ -247,7 +247,7 @@ impl AudioNode for BandedPropagationShaper {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bevy_math::ops;
+    use prism_math::ops;
 
     const SR: u32 = 48_000;
     const FRAMES: usize = 4096;

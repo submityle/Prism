@@ -16,7 +16,7 @@
 //! step: it allocates and must not run on the audio thread.
 
 use alloc::vec::Vec;
-use bevy_math::Vec3;
+use prism_math::Vec3;
 
 use crate::encoding::{
     encode_perceptual, energy, DirectionalProbe, EncodeConfig, PerceptualParams,

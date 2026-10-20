@@ -15,7 +15,7 @@
 //! Original work; contains no Unreal Engine, Unity, Godot, Wwise, FMOD, Steam
 //! Audio, or Google Resonance Audio source or derived code, and no AI/ML.
 //! Classic DSP only. The long windowed-sinc kernel is a standard multirate
-//! construction; all math routes through [`bevy_math::ops`].
+//! construction; all math routes through [`prism_math::ops`].
 //!
 //! # Relationship
 //!
@@ -99,7 +99,7 @@ mod tests {
     use crate::fractional_delay::close;
     use alloc::vec;
     use alloc::vec::Vec;
-    use bevy_math::ops;
+    use prism_math::ops;
     use core::f32::consts::TAU;
 
     fn run(res: &mut HighOrderSincResampler, input: &[Sample]) -> Vec<Sample> {

@@ -15,7 +15,7 @@
 //! ([`crate::lookup`]). Coordinates use the Bevy right-handed convention
 //! shared with [`prism_audio_spatial`].
 
-use bevy_math::{ops, Vec3};
+use prism_math::{ops, Vec3};
 
 /// An axis-aligned bounding box in world space.
 ///
@@ -37,7 +37,7 @@ impl Aabb {
     /// # Examples
     ///
     /// ```
-    /// # use bevy_math::Vec3;
+    /// # use prism_math::Vec3;
     /// # use prism_audio_wave::grid::Aabb;
     /// let b = Aabb::new(Vec3::new(1.0, 2.0, 3.0), Vec3::ZERO);
     /// assert_eq!(b.min, Vec3::ZERO);
@@ -97,7 +97,7 @@ impl ProbeGrid {
     /// # Examples
     ///
     /// ```
-    /// # use bevy_math::Vec3;
+    /// # use prism_math::Vec3;
     /// # use prism_audio_wave::grid::{Aabb, ProbeGrid};
     /// let grid = ProbeGrid::new(Aabb::new(Vec3::ZERO, Vec3::splat(4.0)), 3, 3, 3);
     /// assert_eq!(grid.probe_count(), 27);
@@ -184,7 +184,7 @@ impl ProbeGrid {
     /// # Examples
     ///
     /// ```
-    /// # use bevy_math::Vec3;
+    /// # use prism_math::Vec3;
     /// # use prism_audio_wave::grid::{Aabb, ProbeGrid};
     /// let grid = ProbeGrid::new(Aabb::new(Vec3::ZERO, Vec3::splat(2.0)), 3, 3, 3);
     /// let s = grid.trilinear(Vec3::splat(1.0));

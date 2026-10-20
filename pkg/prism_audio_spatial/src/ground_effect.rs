@@ -72,7 +72,7 @@
 //! heap allocation, no locking, and no panicking. Degenerate geometry (a
 //! non-positive distance, a negative height) and non-finite inputs return safe
 //! finite values, and the ground factors are clamped to `[0, 1]`. All
-//! transcendental math routes through [`bevy_math::ops`], never through `f32`
+//! transcendental math routes through [`prism_math::ops`], never through `f32`
 //! intrinsics.
 //!
 //! # Provenance
@@ -85,7 +85,7 @@
 //! Resonance Audio source or derived code**; it is implemented purely from that
 //! publicly documented acoustics standard.
 
-use bevy_math::ops;
+use prism_math::ops;
 
 use prism_audio_core::math::{db_to_linear, Sample};
 

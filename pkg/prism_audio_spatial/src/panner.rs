@@ -39,7 +39,7 @@
 //!
 //! # Determinism
 //!
-//! All trigonometry routes through [`bevy_math::ops`] (libm-backed) rather than
+//! All trigonometry routes through [`prism_math::ops`] (libm-backed) rather than
 //! `f32` intrinsics, keeping the result bit-reproducible across targets.
 //!
 //! # Provenance
@@ -50,7 +50,7 @@
 //! with the classic constant-power (sine/cosine) pan law. This file contains
 //! **no Unreal Engine, Unity, Godot, Wwise, or FMOD source or derived code**.
 
-use bevy_math::ops;
+use prism_math::ops;
 use core::f32::consts::{FRAC_PI_2, PI, TAU};
 
 use prism_audio_core::buffer::ChannelLayout;

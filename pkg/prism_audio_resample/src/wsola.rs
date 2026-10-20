@@ -21,7 +21,7 @@
 //! Audio, or Google Resonance Audio source or derived code, and no AI/ML.
 //! Classic DSP only. WSOLA is the publicly documented Verhelst-Roelands
 //! overlap-add time-scale algorithm; the Hann window and normalized
-//! cross-correlation are textbook. All math routes through [`bevy_math::ops`].
+//! cross-correlation are textbook. All math routes through [`prism_math::ops`].
 //!
 //! # Relationship
 //!
@@ -33,7 +33,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use bevy_math::ops;
+use prism_math::ops;
 use core::f32::consts::TAU;
 
 use prism_audio_core::math::Sample;

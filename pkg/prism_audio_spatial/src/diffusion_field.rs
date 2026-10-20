@@ -38,7 +38,7 @@
 //!
 //! Everything here is a small scalar computation: no allocation, no locking, no
 //! panics, and no `f32` intrinsics (all roots route through
-//! [`bevy_math::ops`]). Degenerate inputs (zero volume, empty surface set,
+//! [`prism_math::ops`]). Degenerate inputs (zero volume, empty surface set,
 //! non-finite time) return safe finite values, never a `NaN` or an infinity.
 //!
 //! # Provenance
@@ -51,7 +51,7 @@
 //! Steam Audio, or Google Resonance Audio source or derived code**; it is
 //! implemented purely from that publicly documented acoustics knowledge.
 
-use bevy_math::ops;
+use prism_math::ops;
 use core::f32::consts::PI;
 
 use prism_audio_core::math::Sample;
@@ -145,7 +145,7 @@ impl DiffusionField {
     /// # Examples
     ///
     /// ```
-    /// use bevy_math::Vec3;
+    /// use prism_math::Vec3;
     /// use prism_audio_spatial::diffusion_field::DiffusionField;
     /// use prism_audio_spatial::early_reflections::ShoeboxRoom;
     /// use prism_audio_spatial::material_library::Material;
@@ -308,7 +308,7 @@ mod tests {
     use super::*;
     use crate::material_library::Material;
     use crate::scattering::SurfaceScatter;
-    use bevy_math::Vec3;
+    use prism_math::Vec3;
 
     fn approx(a: Sample, b: Sample, eps: Sample) -> bool {
         (a - b).abs() <= eps

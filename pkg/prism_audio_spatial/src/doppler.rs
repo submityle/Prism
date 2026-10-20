@@ -22,7 +22,7 @@
 //!
 //! This module performs only comparisons, additions, multiplications, and a
 //! single division on [`Sample`] values; it invokes no transcendental
-//! functions and therefore needs nothing from [`bevy_math::ops`]. The math is
+//! functions and therefore needs nothing from [`prism_math::ops`]. The math is
 //! bit-reproducible across targets.
 //!
 //! # Provenance

@@ -35,7 +35,7 @@
 //!
 //! Everything here is a small scalar computation over eight bands: no
 //! allocation, no locking, no panics, and no `f32` intrinsics (all logarithms
-//! and exponentials route through [`bevy_math::ops`]). Degenerate geometry
+//! and exponentials route through [`prism_math::ops`]). Degenerate geometry
 //! (zero volume, full absorption, non-positive RT60 or delay) returns safe
 //! finite values, never a `NaN` or an infinity.
 //!
@@ -50,7 +50,7 @@
 //! Google Resonance Audio source or derived code**; it is implemented purely
 //! from that publicly documented acoustics knowledge.
 
-use bevy_math::ops;
+use prism_math::ops;
 use prism_audio_core::math::Sample;
 
 use crate::early_reflections::ShoeboxRoom;
@@ -128,7 +128,7 @@ impl OctaveReverb {
     /// # Examples
     ///
     /// ```
-    /// use bevy_math::Vec3;
+    /// use prism_math::Vec3;
     /// use prism_audio_spatial::early_reflections::ShoeboxRoom;
     /// use prism_audio_spatial::material_library::Material;
     /// use prism_audio_spatial::octave_reverb::OctaveReverb;
@@ -244,7 +244,7 @@ impl OctaveReverb {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bevy_math::Vec3;
+    use prism_math::Vec3;
 
     fn test_room() -> ShoeboxRoom {
         ShoeboxRoom::new(Vec3::ZERO, Vec3::new(10.0, 4.0, 8.0), [0.0; 6])

@@ -466,7 +466,7 @@ impl NfcFilter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bevy_math::ops;
+    use prism_math::ops;
 
     const FS: Sample = 48_000.0;
     const C: Sample = 343.0;

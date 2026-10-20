@@ -48,7 +48,7 @@
 //! heap allocation, no locking, and no panicking. Degenerate geometry (a
 //! non-positive detour, a non-positive speed of sound) and non-finite inputs
 //! return safe finite values. All transcendental math routes through
-//! [`bevy_math::ops`], never through `f32` intrinsics.
+//! [`prism_math::ops`], never through `f32` intrinsics.
 //!
 //! # Provenance
 //!
@@ -60,8 +60,8 @@
 //! Audio source or derived code**; it is implemented purely from that publicly
 //! documented acoustics knowledge.
 
-use bevy_math::ops;
-use bevy_math::Vec3;
+use prism_math::ops;
+use prism_math::Vec3;
 
 use prism_audio_core::math::{db_to_linear, Sample};
 
@@ -254,7 +254,7 @@ impl Diffraction {
     }
 }
 
-/// Euclidean length of a vector using [`bevy_math::ops::sqrt`] on the dot
+/// Euclidean length of a vector using [`prism_math::ops::sqrt`] on the dot
 /// product, avoiding `Vec3::length` (which would route through an `f32`
 /// intrinsic).
 #[inline]

@@ -11,7 +11,7 @@
 //! # Determinism
 //!
 //! The angle between the emitter axis and the emitter-to-listener direction is
-//! recovered with [`bevy_math::ops::acos`] (libm-backed) rather than an `f32`
+//! recovered with [`prism_math::ops::acos`] (libm-backed) rather than an `f32`
 //! intrinsic, and vectors are normalised through [`Vec3::normalize_or_zero`],
 //! so cone gains are bit-reproducible across targets.
 //!
@@ -22,7 +22,7 @@
 //! **no Unreal Engine, Unity, Godot, Wwise, or FMOD source or derived code**;
 //! only publicly documented acoustics knowledge is used.
 
-use bevy_math::{ops, Vec3};
+use prism_math::{ops, Vec3};
 use prism_audio_core::math::Sample;
 
 use core::f32::consts::TAU;

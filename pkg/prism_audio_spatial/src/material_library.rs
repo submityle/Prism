@@ -31,7 +31,7 @@
 //!
 //! Everything is a small, `const`-fed scalar computation: no allocation, no
 //! locking, no panics, no `f32` intrinsics (all logarithms route through
-//! [`bevy_math::ops`]). The absorption tables are compile-time constants, so a
+//! [`prism_math::ops`]). The absorption tables are compile-time constants, so a
 //! [`Material`] lookup is a branch and a copy.
 //!
 //! # Provenance
@@ -46,7 +46,7 @@
 //! code**; it is implemented purely from that publicly documented acoustics
 //! knowledge.
 
-use bevy_math::ops;
+use prism_math::ops;
 use prism_audio_core::math::Sample;
 
 /// Number of octave bands in every material spectrum.
@@ -410,7 +410,7 @@ mod tests {
     fn hard_room_reverberates_longer_than_soft_room() {
         use crate::early_reflections::ShoeboxRoom;
         use crate::room_acoustics::RoomAcoustics;
-        use bevy_math::Vec3;
+        use prism_math::Vec3;
 
         let corner = Vec3::new(10.0, 4.0, 8.0);
         let hard = ShoeboxRoom::new(Vec3::ZERO, corner, Material::Concrete.uniform_walls());

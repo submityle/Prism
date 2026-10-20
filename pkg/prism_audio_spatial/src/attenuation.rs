@@ -21,11 +21,11 @@
 //! # Determinism
 //!
 //! The only transcendental used here (the exponential model's power) routes
-//! through [`bevy_math::ops::powf`] rather than an `f32` intrinsic, so results
+//! through [`prism_math::ops::powf`] rather than an `f32` intrinsic, so results
 //! are bit-reproducible across targets, as the workspace lints enforce. The
 //! remaining arithmetic is plain multiply/add/divide plus range clamping.
 
-use bevy_math::ops;
+use prism_math::ops;
 use prism_audio_core::math::Sample;
 
 /// Smallest positive reference distance (in metres) permitted by

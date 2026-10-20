@@ -47,7 +47,7 @@
 //! an audio thread. It never panics: empty, all-zero, non-finite, or
 //! non-positive sample-rate inputs yield the safe sentinel
 //! [`NO_MIXING_TIME_MS`] and an all-zero profile. All deviation and length math
-//! routes through [`bevy_math::ops`].
+//! routes through [`prism_math::ops`].
 //!
 //! # Provenance
 //!
@@ -57,7 +57,7 @@
 //! FMOD, Steam Audio, or Google Resonance Audio source or derived code**; it is
 //! implemented purely from that publicly documented acoustics literature.
 
-use bevy_math::ops;
+use prism_math::ops;
 
 use prism_audio_core::math::Sample;
 

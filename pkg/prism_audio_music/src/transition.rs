@@ -19,7 +19,7 @@
 //! transition / crossfade / bridge model is reconstructed from first
 //! principles over plain data and classic equal-power gain math
 //! (`cos`/`sin` of a quarter turn) evaluated through
-//! [`bevy_math::ops`] for cross-platform determinism. No AI/ML.
+//! [`prism_math::ops`] for cross-platform determinism. No AI/ML.
 //!
 //! # Relationship
 //!
@@ -31,7 +31,7 @@
 
 use core::f32::consts::FRAC_PI_2;
 
-use bevy_math::ops;
+use prism_math::ops;
 use prism_audio_core::math::Sample;
 
 use crate::id::{MarkerId, SegmentId};

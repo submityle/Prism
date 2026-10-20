@@ -46,7 +46,7 @@
 //! returns a safe finite value rather than a `NaN` or an infinity: divisors are
 //! floored and the mean absorption is clamped just below unity so the logarithm
 //! stays finite. All square roots, logarithms, and exponentials route through
-//! [`bevy_math::ops`] for deterministic, golden-comparable results.
+//! [`prism_math::ops`] for deterministic, golden-comparable results.
 //!
 //! # Provenance
 //!
@@ -60,7 +60,7 @@
 //! Resonance Audio source or derived code**; it is implemented purely from that
 //! publicly documented acoustics knowledge.
 
-use bevy_math::ops;
+use prism_math::ops;
 use prism_audio_core::math::Sample;
 
 use crate::early_reflections::ShoeboxRoom;
@@ -353,7 +353,7 @@ fn wall_absorption(material: &AcousticMaterial) -> Sample {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bevy_math::Vec3;
+    use prism_math::Vec3;
 
     fn approx(a: Sample, b: Sample, tol: Sample) -> bool {
         (a - b).abs() <= tol

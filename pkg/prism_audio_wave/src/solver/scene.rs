@@ -15,7 +15,7 @@
 
 use alloc::vec;
 use alloc::vec::Vec;
-use bevy_math::{ops, Vec3};
+use prism_math::{ops, Vec3};
 
 /// A regular voxel grid flagging each cell as air or rigid.
 ///
