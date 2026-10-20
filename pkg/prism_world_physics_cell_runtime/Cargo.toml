@@ -1,0 +1,16 @@
+[package]
+name = "prism_world_physics_cell_runtime"
+version = "0.1.0"
+edition = "2024"
+description = "Atomic world-cell terrain decoding and physics heightfield residency adapter."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+prism_world_physics_bridge = { path = "../prism_world_physics_bridge" }
+prism_world_runtime = { path = "../prism_world_runtime" }
+prism_world_stream = { path = "../prism_world_stream" }
+prism_world_terrain = { path = "../prism_world_terrain" }
+
+[lints]
+workspace = true
