@@ -1,6 +1,6 @@
 # E7 Git 状态 provider
 
-实现位于 `pkg/prism_editor_content/src/git.rs`，仅依赖 Rust 标准库与包内 VCS 合同，不依赖 Bevy 或异步 runtime。主模块需要导出 `pub mod git;`；集成测试直接导入公开模块。此适配器只读取仓库，生产代码不执行 add、commit、checkout、lock 或 LFS 写动作。
+实现位于 `pkg/prism_editor_content/src/git.rs`，通过主包的 `pub mod git;` 导出，仅依赖 Rust 标准库与包内 VCS 合同，不依赖 Bevy 或异步 runtime。集成测试直接导入公开模块。此适配器只读取仓库，生产代码不执行 add、commit、checkout、lock 或 LFS 写动作。
 
 ## 调用与原子应用
 
@@ -17,6 +17,18 @@ catalog.publish_vcs(&expected, snapshot.into_vcs_statuses(), VcsSnapshotLimits::
 token 过期、发布预算或批量路径错误全部原子拒绝，保留旧状态。旧接口 `replace_vcs_statuses` 也可应用快照，但调用者需在同次独占 catalog 访问中先自行验证 token；新增异步入口应优先使用 `publish_vcs`。Git 模块自身不增加发布方法。
 
 所有读取、退出、预算、解析和路径校验完成前，不交付快照，也不接触 catalog。任何 Err 都应显示给用户并保留原 catalog。诊断保留原始 stderr bytes；成功时也通过 diagnostics 显式返回，不静默丢弃警告；消费 `into_vcs_statuses` 前应取出需要展示的 diagnostics。revision 和 lock_owner 均为 None，本次读取不采集提交 ID 或锁所有者。
+
+## Native host 刷新合同
+
+本包提供采集与 catalog 发布合同；原生事件循环、刷新动作和诊断控件由 app 持有。上述 provider 回归不代表原生 UI 接入已经完成。host 每次挂载或切换项目建立新的 session；每次请求刷新立即更换 refresh epoch，即使 catalog 没有变化也必须撤销旧请求的发布资格。exact token 仅校验 catalog 快照身份，不能代替请求 epoch：新结果发布为 `Ok(false)` 时 token 不变，旧请求仍必须被拒绝。
+
+每个 host session 保留一个在途句柄和一个最新刷新意图。刷新到来时取消旧句柄、覆盖待启动意图，并在事件循环中继续非阻塞 poll 旧句柄直至终态；连续点击刷新不能积攒请求列表。消费旧终态后再尝试启动最新意图，并在实际启动时捕获 catalog token。共享 provider 仍可能被其他使用者占满；Busy 应成为可见的等待状态，保留一个最新意图并由后续 wake 重试，不能在 UI 线程自旋或另建 provider 绕过容量。
+
+结果只能在同次 UI 线程访问中，先检查 session、root 绑定、refresh epoch，再调用 `publish_vcs` 检查捕获的 exact token。重新挂载 catalog、换 root、显式取消或更新的刷新请求均撤销旧结果资格。GitSnapshot.root 是 worker 规范化后的绝对路径；host 应绑定请求提交时的 root 身份，不能把成功结果的 root 反过来作为当前项目身份，也不能在 UI 线程为比较路径执行同步 canonicalize。若 host 需要与项目根作规范路径相等校验，应由已有项目来源或后台任务提供该身份。
+
+发布成功但未变化仍应结束当前请求，并展示本次诊断；发布失败应保留整个旧 catalog。当前请求的启动、Git 退出、预算、超时、清理与发布错误均需要进入可见诊断。成功 stderr 必须在消费 snapshot 前取出；非 UTF-8 诊断可转义展示并保留原 bytes，不能静默丢失。旧 session/epoch 的结果不能覆盖新会话的状态或诊断；显式用户取消可以展示已取消，内部替换产生的取消属于已撤销请求。诊断应替换当前有界状态，显示文本另设长度预算，不能无限追加历史或直接将最大输出量全部加入布局。
+
+原生验收应使用实际 Git 仓库经过刷新动作、事件循环 poll 和 `publish_vcs`，验证 Clean/Modified 可见变化、ready 未消费时刷新、在途刷新与旧 epoch、同内容 `Ok(false)`、换项目或 catalog 后拒绝旧结果，以及失败后旧状态保留和可见诊断。阻塞/取消测试可沿用真实 Git 的 FIFO index，不需要假进程或伪造 snapshot。仅调用 content 层 exact-token 回归不能替代这些 app 行为验证。
 
 ## 真实数据与路径语义
 
@@ -49,7 +61,7 @@ porcelain 按 NUL 分隔，不按行或空白分割；保留空格、tab、换�
 
 ## 验证
 
-2026-10-20：12 项真实 Git 仓库回归、公开模块的 `--all-targets` strict Clippy 与独占 Rust 文件 rustfmt 检查通过。当时共享 lib 尚未导出 git，因此验证在自有 target 内的临时包执行：复制当时 content 源码，仅给副本补 `pub mod git;`，测试通过公开 crate API 导入。共享包导出后仍需运行下面的主包命令；临时包结果不代表主线程后续改动已验证。
+2026-10-20：主线程已在实际主包验证 `tests/git` 的 12 项真实 Git 仓库回归，并通过 `--all-targets --all-features --no-deps` strict Clippy。主模块已公开导出 git，测试直接导入主包公共 API。Git 测试在沙盒外完整通过；沙盒内特殊文件路径创建与 ps 可能被系统拒绝，不能将该拒绝当成 provider 行为失败或跳过后宣称完整通过。独占 Rust 文件 rustfmt 检查也已通过。
 
 真实临时仓库回归覆盖 Clean、索引+工作区双变化、重命名来源/目标及来源重建、空白/换行/Unicode、未跟踪、逐文件忽略、真实 merge 冲突、非 UTF-8/反斜杠拒绝、合并预算失败保留 catalog、dirty 回到 Clean、原子批量路径拒绝、精确 token 过期拒绝及遗漏路径 Unknown、真实 Git 非零退出、取消/超时/drop 回收与共享容量。生命周期测试让真实 Git 打开 FIFO index 阻塞，再验证终止后 ps 中无存活或 zombie PID；不使用假 Git 或状态 fixture。APFS 拒绝创建非 UTF-8 文件名时，通过真实 `git update-index --cacheinfo` 建立该索引路径；允许该文件名的平台额外覆盖未跟踪路径。
 
@@ -57,7 +69,7 @@ porcelain 按 NUL 分隔，不按行或空白分割；保留空格、tab、换�
 
 ```sh
 CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --offline -p prism_editor_content --test git --target-dir <owned-target>
-CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo clippy --offline -p prism_editor_content --all-targets --target-dir <owned-target> -- -D warnings
+CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo clippy --offline -p prism_editor_content --all-targets --all-features --no-deps --target-dir <owned-target> -- -D warnings
 rustfmt --edition 2024 --check pkg/prism_editor_content/src/git.rs pkg/prism_editor_content/tests/git.rs
 cargo clean --target-dir <owned-target>
 ```

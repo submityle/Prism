@@ -1,7 +1,7 @@
 //! Bounded, read-only Git status acquisition without a runtime dependency.
 //!
-//! Export with `pub mod git;`. A request never accesses a catalog: only a complete
-//! successful snapshot can be converted for `ContentCatalog::replace_vcs_statuses`.
+//! A request never accesses a catalog: only a complete successful snapshot can be
+//! converted for token-checked `ContentCatalog::publish_vcs` publication.
 
 use crate::VcsRecord;
 #[cfg(unix)]
