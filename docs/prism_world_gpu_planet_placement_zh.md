@@ -26,5 +26,16 @@ cargo test --offline -p prism_world_gpu --features terrain_scatter --test planet
 cargo test --offline -p prism_world_gpu --features terrain_scatter --lib
 ```
 
-已验证的本地隔离命令使用 `CARGO_TARGET_DIR=/private/tmp/prism-planet-gpu-*`；真实设备
-readback 未在本轮声称通过，是否具备物理 adapter 必须以运行时 evidence 为准。
+严格真实设备回归：
+
+```bash
+CARGO_TARGET_DIR=/private/tmp/prism-world-planet-placement-gpu-20261020 \
+WGPU_BACKEND=metal PRISM_REQUIRE_GPU=1 \
+cargo test --offline -p prism_world_gpu --features terrain_scatter \
+  --test planet_placement_gpu -- --nocapture --test-threads=1
+```
+
+2026-10-20 已在 Apple M2 / Metal / IntegratedGpu 上通过 1 项：真实创建 placement
+pipeline、dispatch 4 个 flat-tile candidates、readback status/indirect，并确认 4 个
+候选全部被接受且无投影失败。测试明确拒绝无硬件 adapter，不把 CPU/noop/virtual adapter
+算作通过。该证据证明 producer 的设备执行和输出计数，不证明与 CPU i64 几何逐位相等。
