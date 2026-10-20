@@ -12,6 +12,7 @@
 
 extern crate alloc;
 
+mod budget;
 mod chunk;
 mod format;
 mod install;
@@ -24,6 +25,7 @@ mod range_source;
 mod reader;
 mod writer;
 
+pub use budget::{ContainerReadBudget, ContainerReadLimits};
 pub use chunk::{
     ChunkInput, ChunkPlacement, ChunkPlan, ChunkPlanError, ChunkPlanner, ChunkPolicy, PlannedChunk,
 };
@@ -120,37 +122,23 @@ impl prism_asset::AssetReader for ManifestAssetReader {
         len: u64,
     ) -> Result<Vec<u8>, prism_asset::ReadError> {
         let guid = Self::logical_guid(path)?;
-        let len_usize = usize::try_from(len).map_err(|_| prism_asset::ReadError::OutOfRange {
-            offset,
-            len,
-            size: 0,
-        })?;
-        // Validate the caller's range against the manifest entry before
-        // allocating.  A remote or malformed caller must not be able to turn
-        // an invalid u64 request into an unbounded Vec allocation.
-        let entry = self
-            .bound()?
+        let bound = self.bound()?;
+        let entry = bound
             .entry_info(guid)
             .map_err(|error| prism_asset::ReadError::Io(error.to_string()))?;
-        let end = offset
+        if offset
             .checked_add(len)
-            .ok_or(prism_asset::ReadError::OutOfRange {
-                offset,
-                len,
-                size: entry.raw_len,
-            })?;
-        if end > entry.raw_len {
+            .is_none_or(|end| end > entry.raw_len)
+        {
             return Err(prism_asset::ReadError::OutOfRange {
                 offset,
                 len,
                 size: entry.raw_len,
             });
         }
-        let mut out = vec![0; len_usize];
-        self.bound()?
-            .read_range(guid, offset, &mut out)
-            .map_err(|error| prism_asset::ReadError::Io(error.to_string()))?;
-        Ok(out)
+        bound
+            .read_range_owned(guid, offset, len)
+            .map_err(|error| prism_asset::ReadError::Io(error.to_string()))
     }
 
     fn metadata(&self, path: &str) -> Result<prism_asset::AssetMeta, prism_asset::ReadError> {

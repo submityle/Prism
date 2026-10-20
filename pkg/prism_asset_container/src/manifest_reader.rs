@@ -225,6 +225,27 @@ impl<'manifest, 'overlay> ManifestReader<'manifest, 'overlay> {
             .map_err(|error| self.map_read_error(logical_guid, offset, out.len(), error))
     }
 
+    /// Reads an owned range under the selected container's output/I/O budget.
+    pub fn read_range_owned(
+        &self,
+        logical_guid: StableGuid,
+        offset: u64,
+        len: u64,
+    ) -> Result<Vec<u8>, ManifestReadError> {
+        let route = self.route(logical_guid)?;
+        let reader = self.resolve(route)?;
+        reader
+            .read_range_owned(route.container_guid, offset, len)
+            .map_err(|error| {
+                self.map_read_error(
+                    logical_guid,
+                    offset,
+                    usize::try_from(len).unwrap_or(usize::MAX),
+                    error,
+                )
+            })
+    }
+
     /// Reads logical ranges with deterministic per-container coalescing.
     ///
     /// Every route is resolved before any payload read. Requests targeting the

@@ -42,7 +42,12 @@ pub struct RuntimePatchDescriptor {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PatchDescriptorError {
     /// The target revision must be newer than the base revision.
-    TargetNotNewer { base: u64, target: u64 },
+    TargetNotNewer {
+        /// Currently installed revision.
+        base: u64,
+        /// Requested target revision, which must exceed `base`.
+        target: u64,
+    },
     /// A nil GUID cannot be a tombstone identity.
     NilGuid,
     /// Tombstone identities must be strictly ascending and unique.

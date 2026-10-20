@@ -20,7 +20,16 @@
 - 明确约束：身份/存储/依赖/句柄核 `no_std + alloc`；当前 `prism_asset` 实际 feature 仅提供 `std`、`ecs`、`file_watcher`；锁外异步 range executor 属于 `std` 下已实现的窄切片，完整异步 EDL、process/pack、GPU streaming 和 retain-cache 等仍属于目标能力分层，不是当前已发布 feature；工作区 `forbid(unsafe_code)`；**不依赖任何 `bevy_*` crate**
 - 烘焙/打包归属： 离线烘焙、缓存键、DDC/CAS、Revision、打包与 Patch 的唯一持有者是 `Prism Asset Build`（`docs/prism_asset_build_design_zh.md` §2.7/§4.6/§10/§14）；本 crate 只提供运行时消费契约（§13）与进程内重烘适配。派生数据分类与登记见 `docs/prism_derived_data_contract_zh.md`
 
-### 实施状态（2026-10-16）
+### 实施状态（2026-10-20）
+
+2026-10-20 新增 SHIPPED 切片：容器提供显式 `ContainerReadLimits` 与可跨 mount/clone
+共享的 `ContainerReadBudget`，在分配或解码前检查文件/元数据/记录数、stored/raw
+单元大小、展开比例、输出、累计挂载校验工作量和活跃字节缓冲。批次在首次 I/O
+前完整验证，重复输出分别计费，同一压缩 payload/Chunk 只读解一次；v2 挂载最多
+保留一个解码 Chunk。Manifest/VFS owned-range 也在输出分配前门禁。
+`cargo test -p prism_asset_container --all-features` 通过 75+10 项测试。该预算不是
+整个进程的精确 heap 限额；返回值驻留、元数据树节点与 codec 内部状态不计入
+活跃字节缓冲。block-level 随机压缩索引和远程/GPU 交付仍未完成。
 
 本地发布包现额外生成 `provenance.bin`：它以 canonical bytes 绑定当前 Build Manifest、每个 Artifact、Runtime Publication 与每个 Container 的 revision/hash/长度/依赖事实，并由 CLI `package` 写入、`validate` 严格解码和逐字节复核。该 descriptor 不声称包含远程 Worker、源码提交、密钥托管或跨机器信任根证明。
 
@@ -1005,7 +1014,7 @@ pkg/prism_vfs/                   # pak/容器打包工具 + 远程/CDN 源（可
 超大纹理/网格以 page/cluster 为流送粒度（对接 `prism_virtual_texture_gpu` / `prism_virtual_geometry_gpu`），`read_range` 按 page 拉取，GPU 直通解压直灌页缓存——`prism_asset` 提供「按区段异步取 + 解压」，页表/反馈归渲染侧。
 
 ### 23.7 不可信容器/网络字节的安全边界
-容器 ToC、远程字节来自不可信源：读取前校验 chunk 长度/偏移在界内、声明长度与实际一致、内容哈希校验（防篡改/损坏）；解压前校验解压后尺寸上限（防「解压炸弹」）。失败走 `AssetErrorId` 返回，不 panic、不 OOM（复用 `prism_reflect` §24.8 不可信反序列化边界的同款防御）。
+容器 ToC、远程字节来自不可信源：读取前校验 chunk 长度/偏移在界内、声明长度与实际一致，并检查内容完整性；BLAKE3 不是发布者认证。容器层现以 `ContainerReadLimits` 在分配/解码前检查声明尺寸、展开比例、记录数、累计校验工作量和输出，并以共享 `ContainerReadBudget` 约束活跃字节缓冲；超限或字节分配失败返回 `ContainerError`，VFS 接线映射成读取错误。返回 `Vec` 的后续驻留须由运行时另行计费；树节点与 codec 内部内存不作精确 heap 统计，因此不声称任意输入下整个进程绝不会 OOM。range source 必须保持不可变；局部 range 不提供密码学子范围认证。
 
 ### 23.8 加载预算与首帧墙优化
 区分 `Immediate`（首帧可玩必需）与 `Streaming/Prefetch`（可后补），首帧只等 `Immediate` 闭包就绪即进入可玩，其余后台渐进流入——AAA「秒进游戏」的关键。配合 §23.2 分批与 §11 预取，隐藏加载长尾。

@@ -19,3 +19,7 @@ mmap = ["dep:memmap2"]
 
 [lints]
 workspace = true
+
+[[test]]
+name = "read_budget"
+path = "text/integration/read_budget.rs"

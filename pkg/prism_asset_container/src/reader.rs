@@ -1,3 +1,5 @@
+//! Validated mounting and bounded raw/compressed payload reads.
+
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec;
@@ -6,12 +8,13 @@ use flate2::{Decompress, FlushDecompress, Status};
 
 use prism_asset::StableGuid;
 
+use crate::budget::{zeroed, ReadBuffer};
 use crate::format::{
     read_u16, read_u32, read_u64, ChunkInfo, Codec, ContainerError, ContainerInfo, EntryInfo,
     CHUNK_FORMAT_VERSION, CHUNK_HEADER_SIZE, CHUNK_RECORD_SIZE, CHUNK_TABLE_RECORD_SIZE,
     FORMAT_VERSION, HEADER_SIZE, MAGIC, RECORD_SIZE,
 };
-use crate::{RangeBatchPolicy, RangeRequest};
+use crate::{ContainerReadBudget, RangeBatchPolicy, RangeRequest};
 
 const VALIDATION_CHUNK_SIZE: usize = 64 * 1024;
 
@@ -32,6 +35,7 @@ pub struct ContainerReader {
     info: ContainerInfo,
     entries: BTreeMap<StableGuid, EntryInfo>,
     chunks: BTreeMap<u32, ChunkInfo>,
+    budget: ContainerReadBudget,
 }
 
 #[derive(Debug)]
@@ -44,14 +48,23 @@ struct ParsedContainer {
 impl ContainerReader {
     /// Validates a complete container and retains its bytes immutably.
     pub fn new(bytes: impl Into<Arc<[u8]>>) -> Result<Self, ContainerError> {
+        Self::with_budget(bytes, ContainerReadBudget::default())
+    }
+
+    /// Validates memory-backed bytes using a caller-owned shared budget.
+    pub fn with_budget(
+        bytes: impl Into<Arc<[u8]>>,
+        budget: ContainerReadBudget,
+    ) -> Result<Self, ContainerError> {
         let bytes = bytes.into();
         let source = crate::MemoryRangeSource::new(bytes.clone());
-        let parsed = parse_source(&source)?;
+        let parsed = parse_source(&source, &budget)?;
         Ok(Self {
             backing: Backing::Memory(bytes),
             info: parsed.info,
             entries: parsed.entries,
             chunks: parsed.chunks,
+            budget,
         })
     }
 
@@ -74,13 +87,28 @@ impl ContainerReader {
     pub fn from_shared_range_source(
         source: Arc<dyn crate::RangeSource>,
     ) -> Result<Self, ContainerError> {
-        let parsed = parse_source(source.as_ref())?;
+        Self::from_range_source_with_budget(source, ContainerReadBudget::default())
+    }
+
+    /// Mounts a range source under a budget that may also govern other mounts.
+    pub fn from_range_source_with_budget(
+        source: Arc<dyn crate::RangeSource>,
+        budget: ContainerReadBudget,
+    ) -> Result<Self, ContainerError> {
+        let parsed = parse_source(source.as_ref(), &budget)?;
         Ok(Self {
             backing: Backing::Range(source),
             info: parsed.info,
             entries: parsed.entries,
             chunks: parsed.chunks,
+            budget,
         })
+    }
+
+    /// Returns the shared in-flight budget used by this reader and its clones.
+    #[must_use]
+    pub fn budget(&self) -> &ContainerReadBudget {
+        &self.budget
     }
 
     /// Mounts a read-only memory-mapped local container file.
@@ -136,6 +164,11 @@ impl ContainerReader {
             .ok_or(ContainerError::IntegerOverflow)?;
         if end > entry.raw_len {
             return Err(ContainerError::InvalidRange);
+        }
+        let limits = self.budget.limits();
+        limits.check("output bytes", len, limits.max_output_bytes)?;
+        if out.is_empty() {
+            return Ok(());
         }
         if self.info.version == CHUNK_FORMAT_VERSION {
             let chunk = self
@@ -204,10 +237,11 @@ impl ContainerReader {
 
     /// Reads multiple payload ranges using bounded physical range coalescing.
     ///
-    /// All requests are validated before the first source read. The source is
-    /// read in deterministic physical order, while the returned vectors retain
-    /// the caller's request order. Overlapping requests share one physical read;
-    /// nearby requests may include a bounded gap to reduce I/O operations.
+    /// All requests are validated before the first source read, and the
+    /// returned vectors retain the caller's request order. Raw-only batches
+    /// coalesce overlapping/nearby ranges in physical order. Batches containing
+    /// compressed entries decode each requested unit once; raw entries in a
+    /// mixed batch are read separately, without coalescing.
     pub fn read_ranges(
         &self,
         requests: &[RangeRequest],
@@ -216,6 +250,25 @@ impl ContainerReader {
         if policy.max_batch_bytes == 0 {
             return Err(ContainerError::InvalidBatchPolicy);
         }
+        let limits = self.budget.limits();
+        limits.check(
+            "batch requests",
+            requests.len() as u64,
+            u64::from(limits.max_records),
+        )?;
+
+        // Validate the complete batch before reading, including the compressed
+        // path. Output allocations remain reserved until every read finishes.
+        let mut total = 0_u64;
+        for request in requests.iter().copied() {
+            self.validate_range_request(request)?;
+            policy.validate_request_len(request.len)?;
+            total = total
+                .checked_add(request.len)
+                .ok_or(ContainerError::IntegerOverflow)?;
+        }
+        limits.check("output bytes", total, limits.max_output_bytes)?;
+        let _outputs_reservation = self.budget.reserve(total)?;
 
         if requests.iter().any(|request| {
             self.entries
@@ -223,12 +276,52 @@ impl ContainerReader {
                 .is_some_and(|entry| entry.codec == Codec::Deflate)
         }) {
             let mut outputs = Vec::with_capacity(requests.len());
-            for request in requests.iter().copied() {
-                let len = self.validate_range_request(request)?;
-                policy.validate_request_len(request.len)?;
-                let mut output = vec![0; len];
-                self.read_range(request.guid, request.offset, &mut output)?;
-                outputs.push(output);
+            let mut compressed = Vec::new();
+            for (index, request) in requests.iter().copied().enumerate() {
+                outputs.push(zeroed(request.len)?);
+                if request.len == 0 {
+                    continue;
+                }
+                let entry = self.entries[&request.guid];
+                if entry.codec == Codec::Deflate {
+                    let key = if self.info.version == CHUNK_FORMAT_VERSION {
+                        (entry.chunk_id, None)
+                    } else {
+                        (0, Some(entry.guid))
+                    };
+                    compressed.push((key, index));
+                } else {
+                    self.read_range(request.guid, request.offset, &mut outputs[index])?;
+                }
+            }
+            compressed.sort_unstable();
+            let mut position = 0;
+            while let Some(&(key, first)) = compressed.get(position) {
+                let entry = self.entries[&requests[first].guid];
+                let decoded = if self.info.version == CHUNK_FORMAT_VERSION {
+                    self.decode_chunk(self.chunks[&entry.chunk_id])?
+                } else {
+                    self.decode_entry(entry)?
+                };
+                while position < compressed.len() && compressed[position].0 == key {
+                    let index = compressed[position].1;
+                    let request = requests[index];
+                    let entry = self.entries[&request.guid];
+                    let start = usize::try_from(
+                        entry
+                            .raw_offset
+                            .checked_add(request.offset)
+                            .ok_or(ContainerError::IntegerOverflow)?,
+                    )
+                    .map_err(|_| ContainerError::IntegerOverflow)?;
+                    let end = start
+                        .checked_add(outputs[index].len())
+                        .ok_or(ContainerError::IntegerOverflow)?;
+                    outputs[index].copy_from_slice(
+                        decoded.get(start..end).ok_or(ContainerError::OutOfBounds)?,
+                    );
+                    position += 1;
+                }
             }
             return Ok(outputs);
         }
@@ -238,7 +331,7 @@ impl ContainerReader {
         for (index, request) in requests.iter().copied().enumerate() {
             policy.validate_request_len(request.len)?;
             let len = self.validate_range_request(request)?;
-            outputs.push(vec![0; len]);
+            outputs.push(zeroed(len as u64)?);
             if len != 0 {
                 let entry = self.entries[&request.guid];
                 let base = entry
@@ -277,7 +370,7 @@ impl ContainerReader {
         for batch in batches {
             let batch_len = usize::try_from(batch.end - batch.start)
                 .map_err(|_| ContainerError::IntegerOverflow)?;
-            let mut bytes = vec![0; batch_len];
+            let mut bytes = self.budget.buffer(batch_len as u64)?;
             self.read_physical_range(batch.start, &mut bytes)?;
             for range in batch.ranges {
                 let start = usize::try_from(range.start - batch.start)
@@ -327,23 +420,39 @@ impl ContainerReader {
         }
     }
 
-    fn decode_chunk(&self, chunk: ChunkInfo) -> Result<Vec<u8>, ContainerError> {
-        let stored_len =
-            usize::try_from(chunk.stored_len).map_err(|_| ContainerError::IntegerOverflow)?;
-        let mut stored = vec![0; stored_len];
+    fn decode_chunk(&self, chunk: ChunkInfo) -> Result<ReadBuffer, ContainerError> {
+        self.budget.limits().unit(chunk.stored_len, chunk.raw_len)?;
+        let mut stored = self.budget.buffer(chunk.stored_len)?;
         self.read_physical_range(chunk.offset, &mut stored)?;
         match chunk.codec {
             Codec::Raw => Ok(stored),
-            Codec::Deflate => decode_deflate(&stored, chunk.raw_len),
+            Codec::Deflate => decode_deflate(&stored, chunk.raw_len, &self.budget),
         }
     }
 
-    fn decode_entry(&self, entry: EntryInfo) -> Result<Vec<u8>, ContainerError> {
-        let stored_len =
-            usize::try_from(entry.stored_len).map_err(|_| ContainerError::IntegerOverflow)?;
-        let mut stored = vec![0; stored_len];
+    fn decode_entry(&self, entry: EntryInfo) -> Result<ReadBuffer, ContainerError> {
+        self.budget.limits().unit(entry.stored_len, entry.raw_len)?;
+        let mut stored = self.budget.buffer(entry.stored_len)?;
         self.read_physical_range(entry.offset, &mut stored)?;
-        decode_deflate(&stored, entry.raw_len)
+        decode_deflate(&stored, entry.raw_len, &self.budget)
+    }
+
+    /// Reads an owned payload range after validating and reserving its output.
+    ///
+    /// Bridges returning a `Vec` should use this entry point instead of
+    /// allocating an unchecked output before calling [`Self::read_range`].
+    pub fn read_range_owned(
+        &self,
+        guid: StableGuid,
+        offset: u64,
+        len: u64,
+    ) -> Result<Vec<u8>, ContainerError> {
+        self.validate_range_request(RangeRequest::new(guid, offset, len))?;
+        let limits = self.budget.limits();
+        limits.check("output bytes", len, limits.max_output_bytes)?;
+        let mut out = self.budget.buffer(len)?;
+        self.read_range(guid, offset, &mut out)?;
+        Ok(out.into_vec())
     }
 
     /// Reads and verifies the complete raw payload.
@@ -352,13 +461,14 @@ impl ContainerReader {
             .entries
             .get(&guid)
             .ok_or(ContainerError::MissingAsset(guid))?;
-        let len = usize::try_from(entry.raw_len).map_err(|_| ContainerError::IntegerOverflow)?;
-        let mut out = vec![0; len];
+        let limits = self.budget.limits();
+        limits.check("output bytes", entry.raw_len, limits.max_output_bytes)?;
+        let mut out = self.budget.buffer(entry.raw_len)?;
         self.read_range(guid, 0, &mut out)?;
         if blake3::hash(&out).as_bytes() != &entry.hash {
             return Err(ContainerError::HashMismatch);
         }
-        Ok(out)
+        Ok(out.into_vec())
     }
 }
 
@@ -411,20 +521,28 @@ fn read_from_source(
         .map_err(|error| ContainerError::Source(error.to_string()))
 }
 
-fn parse_source(source: &dyn crate::RangeSource) -> Result<ParsedContainer, ContainerError> {
+fn parse_source(
+    source: &dyn crate::RangeSource,
+    budget: &ContainerReadBudget,
+) -> Result<ParsedContainer, ContainerError> {
+    let limits = budget.limits();
+    limits.check("container bytes", source.len(), limits.max_container_bytes)?;
     let mut prefix = [0_u8; 12];
     read_from_source(source, 0, &mut prefix)?;
     if prefix[0..8] != MAGIC {
         return Err(ContainerError::BadMagic);
     }
     return match read_u16(&prefix, 8)? {
-        FORMAT_VERSION => parse_v1(source),
-        CHUNK_FORMAT_VERSION => parse_v2(source),
+        FORMAT_VERSION => parse_v1(source, budget),
+        CHUNK_FORMAT_VERSION => parse_v2(source, budget),
         version => Err(ContainerError::UnsupportedVersion(version)),
     };
 }
 
-fn parse_v1(source: &dyn crate::RangeSource) -> Result<ParsedContainer, ContainerError> {
+fn parse_v1(
+    source: &dyn crate::RangeSource,
+    budget: &ContainerReadBudget,
+) -> Result<ParsedContainer, ContainerError> {
     let mut header = [0_u8; HEADER_SIZE];
     read_from_source(source, 0, &mut header)?;
     if header[0..8] != MAGIC {
@@ -464,19 +582,27 @@ fn parse_v1(source: &dyn crate::RangeSource) -> Result<ParsedContainer, Containe
         return Err(ContainerError::InvalidHeader);
     }
 
-    let content_hash = digest_range(source, 0, total_len)?;
+    let limits = budget.limits();
+    limits.metadata(dir_len, 0, count, 0)?;
+    let content_hash = digest_range(source, 0, total_len, budget)?;
     let generation = u64::from_le_bytes(content_hash[..8].try_into().unwrap());
 
-    let directory_len = usize::try_from(dir_len).map_err(|_| ContainerError::IntegerOverflow)?;
-    let mut directory = vec![0_u8; directory_len];
+    let mut directory = budget.buffer(dir_len)?;
     read_from_source(source, dir_off, &mut directory)?;
     if blake3::hash(&directory).as_bytes() != &header[52..84] {
         return Err(ContainerError::HashMismatch);
     }
-    validate_zero_range_as(source, dir_end, payload_off, ContainerError::InvalidHeader)?;
+    validate_zero_range_as(
+        source,
+        dir_end,
+        payload_off,
+        ContainerError::InvalidHeader,
+        budget,
+    )?;
 
     let mut entries = BTreeMap::new();
     let mut previous_guid = None;
+    let mut validation_bytes = 0_u64;
     for record in directory.chunks_exact(RECORD_SIZE) {
         let guid = StableGuid::from_u128(u128::from_le_bytes(record[0..16].try_into().unwrap()));
         if entries.contains_key(&guid) {
@@ -496,6 +622,15 @@ fn parse_v1(source: &dyn crate::RangeSource) -> Result<ParsedContainer, Containe
         if codec == Codec::Raw && stored_len != raw_len {
             return Err(ContainerError::InvalidDirectory);
         }
+        limits.unit(stored_len, raw_len)?;
+        validation_bytes = validation_bytes
+            .checked_add(raw_len)
+            .ok_or(ContainerError::IntegerOverflow)?;
+        limits.check(
+            "validation decoded bytes",
+            validation_bytes,
+            limits.max_validation_decoded_bytes,
+        )?;
         let end = offset
             .checked_add(stored_len)
             .ok_or(ContainerError::IntegerOverflow)?;
@@ -511,13 +646,11 @@ fn parse_v1(source: &dyn crate::RangeSource) -> Result<ParsedContainer, Containe
             return Err(ContainerError::InvalidDirectory);
         }
         if codec == Codec::Raw {
-            validate_hash_range(source, offset, end, hash)?;
+            validate_hash_range(source, offset, end, hash, budget)?;
         } else {
-            let stored_len =
-                usize::try_from(stored_len).map_err(|_| ContainerError::IntegerOverflow)?;
-            let mut stored = vec![0; stored_len];
+            let mut stored = budget.buffer(stored_len)?;
             read_from_source(source, offset, &mut stored)?;
-            validate_deflate(&stored, raw_len, hash)?;
+            validate_deflate(&stored, raw_len, hash, budget)?;
         }
         entries.insert(
             guid,
@@ -544,7 +677,7 @@ fn parse_v1(source: &dyn crate::RangeSource) -> Result<ParsedContainer, Containe
         if entry.offset < cursor {
             return Err(ContainerError::OutOfBounds);
         }
-        validate_zero_range(source, cursor, entry.offset)?;
+        validate_zero_range(source, cursor, entry.offset, budget)?;
         cursor = entry
             .offset
             .checked_add(entry.stored_len)
@@ -567,7 +700,10 @@ fn parse_v1(source: &dyn crate::RangeSource) -> Result<ParsedContainer, Containe
     })
 }
 
-fn parse_v2(source: &dyn crate::RangeSource) -> Result<ParsedContainer, ContainerError> {
+fn parse_v2(
+    source: &dyn crate::RangeSource,
+    budget: &ContainerReadBudget,
+) -> Result<ParsedContainer, ContainerError> {
     let mut header = [0_u8; CHUNK_HEADER_SIZE];
     read_from_source(source, 0, &mut header)?;
     if header[0..8] != MAGIC
@@ -612,29 +748,37 @@ fn parse_v2(source: &dyn crate::RangeSource) -> Result<ParsedContainer, Containe
     {
         return Err(ContainerError::InvalidHeader);
     }
-    let content_hash = digest_range(source, 0, total_len)?;
+    let limits = budget.limits();
+    limits.metadata(dir_len, table_len, count, chunk_count)?;
+    let content_hash = digest_range(source, 0, total_len, budget)?;
     let generation = u64::from_le_bytes(content_hash[..8].try_into().unwrap());
-    let mut directory =
-        vec![0; usize::try_from(dir_len).map_err(|_| ContainerError::IntegerOverflow)?];
+    let mut directory = budget.buffer(dir_len)?;
     read_from_source(source, dir_off, &mut directory)?;
     if blake3::hash(&directory).as_bytes() != &header[72..104] {
         return Err(ContainerError::HashMismatch);
     }
-    let mut table =
-        vec![0; usize::try_from(table_len).map_err(|_| ContainerError::IntegerOverflow)?];
+    let mut table = budget.buffer(table_len)?;
     read_from_source(source, table_off, &mut table)?;
     if blake3::hash(&table).as_bytes() != &header[104..136] {
         return Err(ContainerError::HashMismatch);
     }
-    validate_zero_range_as(source, dir_end, table_off, ContainerError::InvalidHeader)?;
+    validate_zero_range_as(
+        source,
+        dir_end,
+        table_off,
+        ContainerError::InvalidHeader,
+        budget,
+    )?;
     validate_zero_range_as(
         source,
         table_end,
         payload_off,
         ContainerError::InvalidHeader,
+        budget,
     )?;
 
     let mut chunks = BTreeMap::new();
+    let mut validation_bytes = 0_u64;
     for (index, record) in table.chunks_exact(CHUNK_TABLE_RECORD_SIZE).enumerate() {
         let id = u32::try_from(index).map_err(|_| ContainerError::IntegerOverflow)?;
         let offset = read_u64(record, 0)?;
@@ -649,6 +793,15 @@ fn parse_v2(source: &dyn crate::RangeSource) -> Result<ParsedContainer, Containe
         if codec == Codec::Raw && stored_len != raw_len {
             return Err(ContainerError::InvalidDirectory);
         }
+        limits.unit(stored_len, raw_len)?;
+        validation_bytes = validation_bytes
+            .checked_add(raw_len)
+            .ok_or(ContainerError::IntegerOverflow)?;
+        limits.check(
+            "validation decoded bytes",
+            validation_bytes,
+            limits.max_validation_decoded_bytes,
+        )?;
         let end = offset
             .checked_add(stored_len)
             .ok_or(ContainerError::IntegerOverflow)?;
@@ -656,14 +809,6 @@ fn parse_v2(source: &dyn crate::RangeSource) -> Result<ParsedContainer, Containe
             return Err(ContainerError::OutOfBounds);
         }
         let hash = record[28..60].try_into().unwrap();
-        if codec == Codec::Raw {
-            validate_hash_range(source, offset, end, hash)?;
-        } else {
-            let mut stored =
-                vec![0; usize::try_from(stored_len).map_err(|_| ContainerError::IntegerOverflow)?];
-            read_from_source(source, offset, &mut stored)?;
-            validate_deflate(&stored, raw_len, hash)?;
-        }
         if chunks
             .insert(
                 id,
@@ -693,7 +838,7 @@ fn parse_v2(source: &dyn crate::RangeSource) -> Result<ParsedContainer, Containe
             .offset
             .checked_add(chunk.raw_len)
             .ok_or(ContainerError::IntegerOverflow)?;
-        validate_zero_range(source, cursor, chunk.offset)?;
+        validate_zero_range(source, cursor, chunk.offset, budget)?;
         cursor = chunk
             .offset
             .checked_add(chunk.stored_len)
@@ -711,11 +856,10 @@ fn parse_v2(source: &dyn crate::RangeSource) -> Result<ParsedContainer, Containe
     } else if payload_off != total_len {
         return Err(ContainerError::InvalidDirectory);
     }
-    validate_zero_range(source, cursor, total_len)?;
+    validate_zero_range(source, cursor, total_len, budget)?;
 
     let mut entries = BTreeMap::new();
     let mut previous_guid = None;
-    let mut decoded_chunks = BTreeMap::<u32, Vec<u8>>::new();
     for record in directory.chunks_exact(CHUNK_RECORD_SIZE) {
         let guid = StableGuid::from_u128(u128::from_le_bytes(record[0..16].try_into().unwrap()));
         if entries.contains_key(&guid) || previous_guid.is_some_and(|previous| previous >= guid) {
@@ -747,30 +891,6 @@ fn parse_v2(source: &dyn crate::RangeSource) -> Result<ParsedContainer, Containe
         if alignment == 0 || !alignment.is_power_of_two() || absolute % u64::from(alignment) != 0 {
             return Err(ContainerError::InvalidDirectory);
         }
-        if chunk.codec == Codec::Raw {
-            validate_hash_range(
-                source,
-                absolute,
-                absolute
-                    .checked_add(raw_len)
-                    .ok_or(ContainerError::IntegerOverflow)?,
-                hash,
-            )?;
-        } else {
-            let decoded = decoded_chunks.entry(chunk_id).or_default();
-            if decoded.is_empty() {
-                *decoded = decode_chunk_source(source, chunk)?;
-            }
-            let start = usize::try_from(raw_offset).map_err(|_| ContainerError::IntegerOverflow)?;
-            let end = start
-                .checked_add(usize::try_from(raw_len).map_err(|_| ContainerError::IntegerOverflow)?)
-                .ok_or(ContainerError::IntegerOverflow)?;
-            if blake3::hash(decoded.get(start..end).ok_or(ContainerError::OutOfBounds)?).as_bytes()
-                != &hash
-            {
-                return Err(ContainerError::HashMismatch);
-            }
-        }
         entries.insert(
             guid,
             EntryInfo {
@@ -785,6 +905,84 @@ fn parse_v2(source: &dyn crate::RangeSource) -> Result<ParsedContainer, Containe
                 alignment,
             },
         );
+    }
+
+    // Validate in chunk order rather than GUID order: one decode per chunk,
+    // one bounded live scratch buffer, no repeated decode for interleaved GUIDs.
+    let mut grouped: Vec<_> = entries.values().collect();
+    grouped.sort_by_key(|entry| (entry.chunk_id, entry.raw_offset, entry.raw_len, entry.guid));
+    let mut position = 0;
+    for chunk in chunks.values().copied() {
+        let begin = position;
+        while position < grouped.len() && grouped[position].chunk_id == chunk.id {
+            position += 1;
+        }
+        if position == begin {
+            return Err(ContainerError::InvalidDirectory);
+        }
+        let members = &grouped[begin..position];
+        let decoded = if chunk.codec == Codec::Deflate {
+            let decoded = decode_chunk_source(source, chunk, budget)?;
+            if blake3::hash(&decoded).as_bytes() != &chunk.hash {
+                return Err(ContainerError::HashMismatch);
+            }
+            Some(decoded)
+        } else {
+            validate_hash_range(
+                source,
+                chunk.offset,
+                chunk
+                    .offset
+                    .checked_add(chunk.raw_len)
+                    .ok_or(ContainerError::IntegerOverflow)?,
+                chunk.hash,
+                budget,
+            )?;
+            None
+        };
+        let mut cursor = 0_u64;
+        for entry in members {
+            if entry.raw_offset < cursor {
+                return Err(ContainerError::InvalidDirectory);
+            }
+            let end = entry
+                .raw_offset
+                .checked_add(entry.raw_len)
+                .ok_or(ContainerError::IntegerOverflow)?;
+            if let Some(decoded) = &decoded {
+                let start = usize::try_from(entry.raw_offset)
+                    .map_err(|_| ContainerError::IntegerOverflow)?;
+                let end_usize =
+                    usize::try_from(end).map_err(|_| ContainerError::IntegerOverflow)?;
+                if decoded[cursor as usize..start]
+                    .iter()
+                    .any(|byte| *byte != 0)
+                {
+                    return Err(ContainerError::InvalidDirectory);
+                }
+                if blake3::hash(&decoded[start..end_usize]).as_bytes() != &entry.hash {
+                    return Err(ContainerError::HashMismatch);
+                }
+            } else {
+                validate_zero_range(
+                    source,
+                    chunk.offset + cursor,
+                    chunk.offset + entry.raw_offset,
+                    budget,
+                )?;
+                validate_hash_range(
+                    source,
+                    chunk.offset + entry.raw_offset,
+                    chunk.offset + end,
+                    entry.hash,
+                    budget,
+                )?;
+            }
+            cursor = end;
+        }
+        if cursor != chunk.raw_len {
+            return Err(ContainerError::InvalidDirectory);
+        }
     }
     Ok(ParsedContainer {
         info: ContainerInfo {
@@ -803,13 +1001,14 @@ fn parse_v2(source: &dyn crate::RangeSource) -> Result<ParsedContainer, Containe
 fn decode_chunk_source(
     source: &dyn crate::RangeSource,
     chunk: ChunkInfo,
-) -> Result<Vec<u8>, ContainerError> {
-    let mut stored =
-        vec![0; usize::try_from(chunk.stored_len).map_err(|_| ContainerError::IntegerOverflow)?];
+    budget: &ContainerReadBudget,
+) -> Result<ReadBuffer, ContainerError> {
+    budget.limits().unit(chunk.stored_len, chunk.raw_len)?;
+    let mut stored = budget.buffer(chunk.stored_len)?;
     read_from_source(source, chunk.offset, &mut stored)?;
     match chunk.codec {
         Codec::Raw => Ok(stored),
-        Codec::Deflate => decode_deflate(&stored, chunk.raw_len),
+        Codec::Deflate => decode_deflate(&stored, chunk.raw_len, budget),
     }
 }
 
@@ -817,8 +1016,9 @@ fn validate_zero_range(
     source: &dyn crate::RangeSource,
     start: u64,
     end: u64,
+    budget: &ContainerReadBudget,
 ) -> Result<(), ContainerError> {
-    validate_zero_range_as(source, start, end, ContainerError::InvalidDirectory)
+    validate_zero_range_as(source, start, end, ContainerError::InvalidDirectory, budget)
 }
 
 fn validate_zero_range_as(
@@ -826,8 +1026,9 @@ fn validate_zero_range_as(
     start: u64,
     end: u64,
     error: ContainerError,
+    budget: &ContainerReadBudget,
 ) -> Result<(), ContainerError> {
-    validate_range(source, start, end, |chunk| {
+    validate_range(source, start, end, budget, |chunk| {
         if chunk.iter().any(|byte| *byte != 0) {
             Err(error.clone())
         } else {
@@ -841,9 +1042,10 @@ fn validate_hash_range(
     start: u64,
     end: u64,
     expected: [u8; 32],
+    budget: &ContainerReadBudget,
 ) -> Result<(), ContainerError> {
     let mut hasher = blake3::Hasher::new();
-    validate_range(source, start, end, |chunk| {
+    validate_range(source, start, end, budget, |chunk| {
         hasher.update(chunk);
         Ok(())
     })?;
@@ -857,9 +1059,10 @@ fn digest_range(
     source: &dyn crate::RangeSource,
     start: u64,
     end: u64,
+    budget: &ContainerReadBudget,
 ) -> Result<[u8; 32], ContainerError> {
     let mut hasher = blake3::Hasher::new();
-    validate_range(source, start, end, |chunk| {
+    validate_range(source, start, end, budget, |chunk| {
         hasher.update(chunk);
         Ok(())
     })?;
@@ -870,6 +1073,7 @@ fn validate_range<F>(
     source: &dyn crate::RangeSource,
     start: u64,
     end: u64,
+    budget: &ContainerReadBudget,
     mut validate: F,
 ) -> Result<(), ContainerError>
 where
@@ -882,7 +1086,7 @@ where
         return Ok(());
     }
     let mut offset = start;
-    let mut buffer = vec![0_u8; VALIDATION_CHUNK_SIZE];
+    let mut buffer = budget.buffer((end - start).min(VALIDATION_CHUNK_SIZE as u64))?;
     while offset < end {
         let remaining = end - offset;
         let amount = usize::try_from(remaining)
@@ -897,12 +1101,17 @@ where
     Ok(())
 }
 
-fn decode_deflate(stored: &[u8], raw_len: u64) -> Result<Vec<u8>, ContainerError> {
+fn decode_deflate(
+    stored: &[u8],
+    raw_len: u64,
+    budget: &ContainerReadBudget,
+) -> Result<ReadBuffer, ContainerError> {
+    budget.limits().unit(stored.len() as u64, raw_len)?;
     let raw_len = usize::try_from(raw_len).map_err(|_| ContainerError::IntegerOverflow)?;
     let capacity = raw_len
         .checked_add(1)
         .ok_or(ContainerError::IntegerOverflow)?;
-    let mut output = vec![0_u8; capacity];
+    let mut output = budget.buffer(capacity as u64)?;
     let mut decompressor = Decompress::new(false);
     let status = loop {
         let written = usize::try_from(decompressor.total_out())
@@ -943,9 +1152,11 @@ fn validate_deflate(
     stored: &[u8],
     raw_len: u64,
     expected_hash: [u8; 32],
+    budget: &ContainerReadBudget,
 ) -> Result<(), ContainerError> {
+    budget.limits().unit(stored.len() as u64, raw_len)?;
     let mut decompressor = Decompress::new(false);
-    let mut output = vec![0_u8; VALIDATION_CHUNK_SIZE];
+    let mut output = budget.buffer(raw_len.saturating_add(1).min(VALIDATION_CHUNK_SIZE as u64))?;
     let mut hasher = blake3::Hasher::new();
     let status = loop {
         let consumed = usize::try_from(decompressor.total_in())

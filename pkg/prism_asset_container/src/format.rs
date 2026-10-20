@@ -134,6 +134,20 @@ pub enum ContainerError {
     Source(String),
     /// The batch range policy cannot produce a bounded physical read.
     InvalidBatchPolicy,
+    /// An explicit resource policy rejected work before allocation or decode.
+    ResourceLimit {
+        /// Name of the limited resource.
+        resource: &'static str,
+        /// Requested or declared amount.
+        requested: u64,
+        /// Configured maximum.
+        limit: u64,
+    },
+    /// A fallible byte-buffer allocation was refused by the allocator.
+    AllocationFailed {
+        /// Requested allocation size.
+        bytes: u64,
+    },
 }
 
 impl fmt::Display for ContainerError {
@@ -162,6 +176,17 @@ impl fmt::Display for ContainerError {
             Self::LengthMismatch => f.write_str("output buffer length does not match range"),
             Self::Source(error) => write!(f, "container range source failed: {error}"),
             Self::InvalidBatchPolicy => f.write_str("invalid range batch policy"),
+            Self::ResourceLimit {
+                resource,
+                requested,
+                limit,
+            } => write!(
+                f,
+                "container {resource} limit exceeded: {requested} > {limit}"
+            ),
+            Self::AllocationFailed { bytes } => {
+                write!(f, "container allocation of {bytes} bytes failed")
+            }
         }
     }
 }

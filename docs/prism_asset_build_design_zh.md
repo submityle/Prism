@@ -14,7 +14,14 @@
 - 参考形态：Unreal Asset Registry / Cook / DDC / IoStore、Unity Importer / Addressables、Bazel/Nix 内容寻址、DirectStorage/GDeflate、现代虚拟纹理与虚拟几何流水线
 - 关联文档：`docs/prism_asset_design_zh.md`、`docs/prism_material_pipeline_design_zh.md`、`docs/prism_rendering_architecture_zh.md`、`docs/prism_platform_design_zh.md`、`docs/prism_derived_data_contract_zh.md`（派生数据契约登记表）
 
-## 实施状态（2026-10-16）
+## 实施状态（2026-10-20）
+
+2026-10-20 容器读取 SHIPPED 增量：`ContainerReadLimits`/`ContainerReadBudget`
+覆盖声明元数据、条目数、stored/raw 大小、展开比例、累计挂载解码、输出与共享
+活跃字节缓冲门禁；v2 挂载仅保留单个解码 Chunk，压缩 batch 对同一单元去重。
+Manifest/VFS owned-range 在分配前复用同一预算。含 mmap 的容器测试通过
+75 项既有回归和 10 项新增预算/并发/批次回归。这不是跨包驻留总预算、完整进程
+heap 计量、block-level 压缩索引或远程/GPU 交付完成声明。
 
 当前仓库已交付一个可验证的 M0 垂直切片，但距离本文定义的 AAA 构建系统仍有明确缺口：
 
