@@ -74,6 +74,115 @@ fn committed_classification_metadata_matches_generator() {
 }
 
 #[test]
+fn generated_specialization_id_round_trips_schema_axes() {
+    use prism_material_schema::generated_contract::{
+        pack_specialization_id, SpecializationId, SPECIALIZATION_LAYOUT,
+        SPECIALIZATION_RESERVED_MASK,
+    };
+
+    let schema = surface_schema();
+    assert_eq!(
+        SPECIALIZATION_LAYOUT.storage_bits,
+        schema.specialization.storage_bits
+    );
+    assert_eq!(
+        SPECIALIZATION_LAYOUT.illumination_shift,
+        schema.specialization.illumination.shift
+    );
+    assert_eq!(
+        SPECIALIZATION_LAYOUT.lobe_mask_shift,
+        schema.specialization.lobe_mask.shift
+    );
+    assert_eq!(
+        SPECIALIZATION_LAYOUT.render_class_shift,
+        schema.specialization.render_class.shift
+    );
+
+    let illumination = 0xA5;
+    let lobe_mask = prism_render_material::LobeMask::all().bits();
+    let render_class = 0x5A;
+    let id = SpecializationId::new(illumination, lobe_mask, render_class);
+    assert_eq!(
+        id.raw(),
+        pack_specialization_id(illumination, lobe_mask, render_class)
+    );
+    assert_eq!(
+        id.parts(),
+        prism_material_schema::generated_contract::SpecializationParts {
+            illumination,
+            lobe_mask,
+            render_class,
+        }
+    );
+    assert_eq!(SpecializationId::from_raw(id.raw()), Some(id));
+    assert_eq!(
+        SpecializationId::from_raw(id.raw() | SPECIALIZATION_RESERVED_MASK),
+        None
+    );
+    assert!(!id.has_reserved_bits());
+}
+
+#[test]
+fn generated_cpu_sample_and_golden_indices_are_schema_exact() {
+    use prism_material_schema::generated_contract::{
+        CPU_GOLDEN_FIELD_COUNT, CPU_GOLDEN_FIELD_INDICES, CPU_GOLDEN_WORD_COUNT,
+        CPU_SAMPLE_FIELD_COUNT, CPU_SAMPLE_FIELD_INDICES, CPU_SAMPLE_WORD_COUNT,
+        CPU_SURFACE_FIELDS,
+    };
+    use prism_material_schema::{ConsumedStep, FieldType};
+
+    let schema = surface_schema();
+    let fields = schema.response_fields();
+    let expected_sample = fields
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, field))| field.consumed_by.contains(&ConsumedStep::Sample))
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let expected_golden = fields
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, field))| field.consumed_by.contains(&ConsumedStep::Golden))
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        CPU_SAMPLE_FIELD_INDICES.as_slice(),
+        expected_sample.as_slice()
+    );
+    assert_eq!(
+        CPU_GOLDEN_FIELD_INDICES.as_slice(),
+        expected_golden.as_slice()
+    );
+    assert_eq!(CPU_SAMPLE_FIELD_COUNT, expected_sample.len());
+    assert_eq!(CPU_GOLDEN_FIELD_COUNT, expected_golden.len());
+
+    let words = |indices: &[usize]| {
+        indices
+            .iter()
+            .map(|index| {
+                let field = &CPU_SURFACE_FIELDS[*index];
+                assert_ne!(field.storage_type, FieldType::Pad.as_str());
+                field.words
+            })
+            .sum::<u32>()
+    };
+    assert_eq!(CPU_SAMPLE_WORD_COUNT, words(&CPU_SAMPLE_FIELD_INDICES));
+    assert_eq!(CPU_GOLDEN_WORD_COUNT, words(&CPU_GOLDEN_FIELD_INDICES));
+}
+
+#[test]
+#[should_panic(expected = "exactly one schema metadata begin marker")]
+fn classification_codegen_rejects_a_missing_schema_marker() {
+    let _ = emit_material_classification(&surface_schema(), "// no generated block");
+}
+
+#[test]
+fn classification_shader_contains_the_generated_schema_contract() {
+    assert!(!COMMITTED_CLASSIFICATION.contains("header.lobe_mask"));
+    assert!(COMMITTED_CLASSIFICATION.contains("PRISM_SCHEMA_SPECIALIZATION_RESERVED_BITS"));
+}
+
+#[test]
 fn generated_field_directory_covers_exactly_non_padding_schema_fields() {
     use prism_material_schema::FieldType;
     use prism_render_material::SURFACE_FIELDS;

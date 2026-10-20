@@ -166,7 +166,10 @@ const fn default_render_class_bits() -> BitRange {
 }
 
 const fn default_reserved_bits() -> BitRange {
-    BitRange { shift: 48, bits: 16 }
+    BitRange {
+        shift: 48,
+        bits: 16,
+    }
 }
 
 /// A runtime dynamic parameter channel (§17.1).
@@ -840,6 +843,12 @@ impl SurfaceSchema {
             if !slots.insert(lobe.registry_slot) {
                 return Err(SchemaError::DuplicateRegistrySlot(lobe.registry_slot));
             }
+            if lobe.registry_slot >= self.specialization.lobe_mask.bits as u32 {
+                return Err(SchemaError::InvalidSpecializationLayout(format!(
+                    "lobe `{}` registry_slot {} does not fit the specialization lobe_mask width {}",
+                    lobe.id, lobe.registry_slot, self.specialization.lobe_mask.bits
+                )));
+            }
             if !uids.insert(lobe.uid.clone()) {
                 return Err(SchemaError::DuplicateUid(lobe.uid.clone()));
             }
@@ -1016,6 +1025,18 @@ fn validate_specialization(layout: &SpecializationSchema) -> Result<(), SchemaEr
             return Err(SchemaError::InvalidSpecializationLayout(format!(
                 "{name} range [{}..{}) is outside {} bits",
                 range.shift, end, layout.storage_bits
+            )));
+        }
+    }
+    for (name, range) in [
+        ("illumination", layout.illumination),
+        ("lobe_mask", layout.lobe_mask),
+        ("render_class", layout.render_class),
+    ] {
+        if range.bits > 32 {
+            return Err(SchemaError::InvalidSpecializationLayout(format!(
+                "{name} range is projected into a u32 component but declares {} bits",
+                range.bits
             )));
         }
     }
@@ -1361,6 +1382,28 @@ mod tests {
         assert_eq!(measured.uid, "org.prism.provider.measured_brdf");
         assert_eq!(measured.requires_caps, ["heavy_sampling"]);
         assert!(measured.view_dependent);
+    }
+
+    #[test]
+    fn specialization_components_are_bounded_by_generated_u32_parts() {
+        let mut schema = surface_schema();
+        schema.specialization.illumination.bits = 33;
+        assert!(matches!(
+            schema.validate(),
+            Err(SchemaError::InvalidSpecializationLayout(message))
+                if message.contains("illumination") && message.contains("u32")
+        ));
+    }
+
+    #[test]
+    fn lobe_registry_slots_must_fit_the_specialization_lobe_axis() {
+        let mut schema = surface_schema();
+        schema.specialization.lobe_mask.bits = 1;
+        assert!(matches!(
+            schema.validate(),
+            Err(SchemaError::InvalidSpecializationLayout(message))
+                if message.contains("registry_slot") && message.contains("lobe_mask")
+        ));
     }
 
     #[test]

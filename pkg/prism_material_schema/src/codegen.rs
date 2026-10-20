@@ -105,6 +105,38 @@ fn emit_f32_slice(output: &mut String, values: &[f32]) {
     let _ = writeln!(output, "&[{}],", values.join(", "));
 }
 
+fn emit_usize_array(output: &mut String, declaration: &str, values: &[usize]) {
+    let values = values.iter().map(usize::to_string).collect::<Vec<_>>();
+    let one_line = format!("{declaration} = [{}];", values.join(", "));
+    if one_line.chars().count() <= RUSTFMT_MAX_WIDTH {
+        let _ = writeln!(output, "{one_line}");
+        return;
+    }
+
+    let _ = writeln!(output, "{declaration} = [");
+    let mut line = String::from("    ");
+    for value in values {
+        let additional_width = if line.len() == 4 {
+            value.len()
+        } else {
+            value.len() + 2
+        };
+        if line.len() > 4 && line.len() + additional_width + 1 > RUSTFMT_MAX_WIDTH {
+            let _ = writeln!(output, "{line},");
+            line.clear();
+            line.push_str("    ");
+        }
+        if line.len() > 4 {
+            line.push_str(", ");
+        }
+        line.push_str(&value);
+    }
+    if line.len() > 4 {
+        let _ = writeln!(output, "{line},");
+    }
+    output.push_str("];\n");
+}
+
 /// Emit the schema-derived CPU sample/golden field directory.
 ///
 /// This product intentionally describes only facts that the surface schema
@@ -115,14 +147,26 @@ fn emit_f32_slice(output: &mut String, values: &[f32]) {
 #[must_use]
 pub fn emit_cpu_surface_contract(schema: &SurfaceSchema) -> String {
     let fields = schema.response_fields();
-    let sample_count = fields
+    let sample_indices = fields
         .iter()
-        .filter(|(_, field)| field.consumed_by.contains(&crate::ConsumedStep::Sample))
-        .count();
-    let golden_count = fields
+        .enumerate()
+        .filter(|(_, (_, field))| field.consumed_by.contains(&crate::ConsumedStep::Sample))
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let golden_indices = fields
         .iter()
-        .filter(|(_, field)| field.consumed_by.contains(&crate::ConsumedStep::Golden))
-        .count();
+        .enumerate()
+        .filter(|(_, (_, field))| field.consumed_by.contains(&crate::ConsumedStep::Golden))
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let sample_word_count = sample_indices
+        .iter()
+        .map(|index| fields[*index].1.ty.words())
+        .sum::<u32>();
+    let golden_word_count = golden_indices
+        .iter()
+        .map(|index| fields[*index].1.ty.words())
+        .sum::<u32>();
     let mut o = String::with_capacity(fields.len() * 260 + 1400);
     let _ = writeln!(o, "// {GENERATED_BANNER_LINE}");
     let _ = writeln!(o, "// Regenerate: {REGEN_COMMAND}");
@@ -159,13 +203,37 @@ pub fn emit_cpu_surface_contract(schema: &SurfaceSchema) -> String {
         o.push_str("    },\n");
     }
     o.push_str("];\n\n");
-    let _ = writeln!(
-        o,
-        "pub const CPU_SAMPLE_FIELD_COUNT: usize = {sample_count};"
+    emit_usize_array(
+        &mut o,
+        &format!(
+            "pub const CPU_SAMPLE_FIELD_INDICES: [usize; {}]",
+            sample_indices.len()
+        ),
+        &sample_indices,
+    );
+    emit_usize_array(
+        &mut o,
+        &format!(
+            "pub const CPU_GOLDEN_FIELD_INDICES: [usize; {}]",
+            golden_indices.len()
+        ),
+        &golden_indices,
     );
     let _ = writeln!(
         o,
-        "pub const CPU_GOLDEN_FIELD_COUNT: usize = {golden_count};"
+        "pub const CPU_SAMPLE_FIELD_COUNT: usize = CPU_SAMPLE_FIELD_INDICES.len();"
+    );
+    let _ = writeln!(
+        o,
+        "pub const CPU_GOLDEN_FIELD_COUNT: usize = CPU_GOLDEN_FIELD_INDICES.len();"
+    );
+    let _ = writeln!(
+        o,
+        "pub const CPU_SAMPLE_WORD_COUNT: u32 = {sample_word_count};"
+    );
+    let _ = writeln!(
+        o,
+        "pub const CPU_GOLDEN_WORD_COUNT: u32 = {golden_word_count};"
     );
     o
 }
@@ -178,12 +246,22 @@ pub fn emit_cpu_surface_contract(schema: &SurfaceSchema) -> String {
 pub fn emit_material_classification(schema: &SurfaceSchema, template: &str) -> String {
     const BEGIN: &str = "// BEGIN SCHEMA-GENERATED MATERIAL METADATA";
     const END: &str = "// END SCHEMA-GENERATED MATERIAL METADATA";
-    let Some(begin) = template.find(BEGIN) else {
-        return template.to_string();
-    };
-    let Some(end_rel) = template[begin..].find(END) else {
-        return template.to_string();
-    };
+    assert_eq!(
+        template.matches(BEGIN).count(),
+        1,
+        "material_classification.wesl must contain exactly one schema metadata begin marker"
+    );
+    assert_eq!(
+        template.matches(END).count(),
+        1,
+        "material_classification.wesl must contain exactly one schema metadata end marker"
+    );
+    let begin = template
+        .find(BEGIN)
+        .expect("validated schema metadata begin marker");
+    let end_rel = template[begin..]
+        .find(END)
+        .expect("validated schema metadata end marker");
     let end = begin + end_rel + END.len();
     let block_storage = emit_material_classification_schema_block(schema);
     let block = block_storage.trim_end();
@@ -199,16 +277,16 @@ pub fn emit_material_classification(schema: &SurfaceSchema, template: &str) -> S
 #[must_use]
 pub fn emit_schema_contract(schema: &SurfaceSchema) -> String {
     let mut output = emit_specialization_layout(schema);
-    output.push('\n');
     output.push_str(&emit_cpu_surface_contract(schema));
     output
 }
 
 /// Emit the schema-derived specialization packing product.
 ///
-/// This is deliberately a value-level helper rather than a runtime
-/// `SpecializationId` type. The old runtime API was removed with the ABI
-/// refactor; the schema still owns the stable bake-time bit contract.
+/// This is a generated value-level `SpecializationId` contract. It is kept in
+/// the schema product rather than the runtime material header: ABI8 carries
+/// execution-table bindings, while bake-time keys still need one stable,
+/// schema-owned bit packing.
 #[must_use]
 pub fn emit_specialization_layout(schema: &SurfaceSchema) -> String {
     let layout = &schema.specialization;
@@ -256,9 +334,25 @@ pub fn emit_specialization_layout(schema: &SurfaceSchema) -> String {
         "pub const SPECIALIZATION_RESERVED_MASK: u64 = 0x{:016X};\n",
         specialization_mask(layout.reserved)
     );
+    o.push_str("#[derive(Clone, Copy, Debug, Eq, PartialEq)]\n");
+    o.push_str("pub struct SpecializationId(u64);\n\n");
+    o.push_str("impl SpecializationId {\n");
+    o.push_str("    #[must_use]\n");
+    o.push_str(
+        "    pub const fn new(illumination: u32, lobe_mask: u32, render_class: u32) -> Self {\n",
+    );
+    o.push_str("        Self(pack_specialization_id(\n");
+    o.push_str("            illumination,\n            lobe_mask,\n            render_class,\n        ))\n    }\n\n");
+    o.push_str("    #[must_use]\n    pub const fn raw(self) -> u64 {\n        self.0\n    }\n\n");
+    o.push_str("    #[must_use]\n    pub const fn parts(self) -> SpecializationParts {\n        unpack_specialization_id(self.0)\n    }\n\n");
+    o.push_str("    #[must_use]\n    pub const fn from_raw(value: u64) -> Option<Self> {\n");
+    o.push_str("        if value & SPECIALIZATION_RESERVED_MASK == 0 {\n            Some(Self(value))\n        } else {\n            None\n        }\n    }\n\n");
+    o.push_str("    #[must_use]\n    pub const fn has_reserved_bits(self) -> bool {\n");
+    o.push_str("        self.0 & SPECIALIZATION_RESERVED_MASK != 0\n    }\n");
+    o.push_str("}\n\n");
     let _ = writeln!(
         o,
-        "pub const fn pack_specialization_id(illumination: u32, lobe_mask: u32, render_class: u32) -> u64 {{\n    ((illumination as u64 & 0x{:X}) << {}) | ((lobe_mask as u64 & 0x{:X}) << {}) | ((render_class as u64 & 0x{:X}) << {})\n}}\n",
+        "pub const fn pack_specialization_id(illumination: u32, lobe_mask: u32, render_class: u32) -> u64 {{\n    ((illumination as u64 & 0x{:X}) << {})\n        | ((lobe_mask as u64 & 0x{:X}) << {})\n        | ((render_class as u64 & 0x{:X}) << {})\n}}\n",
         bit_mask(layout.illumination.bits),
         layout.illumination.shift,
         bit_mask(layout.lobe_mask.bits),
@@ -270,7 +364,7 @@ pub fn emit_specialization_layout(schema: &SurfaceSchema) -> String {
     o.push_str("pub const fn unpack_specialization_id(value: u64) -> SpecializationParts {\n");
     let _ = writeln!(
         o,
-        "    SpecializationParts {{ illumination: ((value >> {}) & 0x{:X}) as u32, lobe_mask: ((value >> {}) & 0x{:X}) as u32, render_class: ((value >> {}) & 0x{:X}) as u32 }}\n}}\n",
+        "    SpecializationParts {{\n        illumination: ((value >> {}) & 0x{:X}) as u32,\n        lobe_mask: ((value >> {}) & 0x{:X}) as u32,\n        render_class: ((value >> {}) & 0x{:X}) as u32,\n    }}\n}}\n",
         layout.illumination.shift,
         bit_mask(layout.illumination.bits),
         layout.lobe_mask.shift,
@@ -289,11 +383,6 @@ pub fn emit_material_classification_schema_block(schema: &SurfaceSchema) -> Stri
     let mut o = String::new();
     o.push_str("// BEGIN SCHEMA-GENERATED MATERIAL METADATA\n");
     o.push_str("// This block is generated from schema/surface.toml.\n");
-    let _ = writeln!(
-        o,
-        "const PRISM_SCHEMA_LOBE_MASK_ALL: u32 = {}u;",
-        all_lobe_bits(schema)
-    );
     let _ = writeln!(
         o,
         "const PRISM_SCHEMA_SPECIALIZATION_ILLUMINATION_SHIFT: u32 = {}u;",
@@ -324,8 +413,16 @@ pub fn emit_material_classification_schema_block(schema: &SurfaceSchema) -> Stri
         "const PRISM_SCHEMA_SPECIALIZATION_RENDER_CLASS_BITS: u32 = {}u;",
         layout.render_class.bits
     );
-    o.push_str("\nfn prism_schema_lobe_mask_is_valid(mask: u32) -> bool {\n");
-    o.push_str("    return (mask & ~PRISM_SCHEMA_LOBE_MASK_ALL) == 0u;\n}\n");
+    let _ = writeln!(
+        o,
+        "const PRISM_SCHEMA_SPECIALIZATION_RESERVED_SHIFT: u32 = {}u;",
+        layout.reserved.shift
+    );
+    let _ = writeln!(
+        o,
+        "const PRISM_SCHEMA_SPECIALIZATION_RESERVED_BITS: u32 = {}u;",
+        layout.reserved.bits
+    );
     o.push_str("// END SCHEMA-GENERATED MATERIAL METADATA\n");
     o
 }

@@ -22,6 +22,11 @@ use std::path::Path;
 /// Extract `(name, type)` pairs from a `struct <name> { … }` body in WESL.
 fn wesl_fields(source: &str, struct_name: &str) -> Vec<(String, String)> {
     let marker = format!("struct {struct_name} {{");
+    assert_eq!(
+        source.matches(marker.as_str()).count(),
+        1,
+        "{struct_name} must have exactly one declaration in the WESL source"
+    );
     let start = source
         .find(&marker)
         .unwrap_or_else(|| panic!("{struct_name} not found in source"))
