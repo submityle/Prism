@@ -16,6 +16,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use super::attributes::{AttributeAccess, AttributeFormat, AttributeLayoutPlan, AttributeSemantic};
+use super::authoring::{BindingSource, EmberAsset, ParamHandle, ParamType, ParamValue};
 use super::graph::{self, CompileError as GraphError, GraphIr};
 use super::modules::{
     DataInterface, EmberModule, ParameterBlockDecl, ParameterType, ParameterValue, ResourceAccess,
@@ -136,6 +137,178 @@ impl CompiledParameterBlock {
     }
 }
 
+/// A fully encoded uniform payload ready for the render layer to upload and
+/// bind at the compiled group/binding pair.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PreparedParameterBlock {
+    /// Uniform resource name from the compiled graph.
+    pub resource: String,
+    /// Compiled bind-group index.
+    pub group: u32,
+    /// Compiled binding index.
+    pub binding: u32,
+    /// Host bytes matching the compiled WGSL uniform layout.
+    pub bytes: Vec<u8>,
+}
+
+impl CompiledGraph {
+    /// Resolves `.ember` exposed parameters into the compiled uniform blocks.
+    ///
+    /// Asset parameter targets must identify exactly one compiled uniform
+    /// resource/member. Constant bindings provide their authored defaults;
+    /// externally bound values must be supplied by stable [`ParamHandle`].
+    /// Runtime values for constants are rejected. Unexposed fields retain
+    /// their compiled module defaults. This prepares bytes only; GPU resource
+    /// creation, upload, and bind-group lifetime belong to the render layer.
+    pub fn prepare_asset_parameters(
+        &self,
+        asset: &EmberAsset,
+        runtime_values: &[(ParamHandle, ParamValue)],
+    ) -> Result<Vec<PreparedParameterBlock>, AssetParameterError> {
+        for (index, (handle, _)) in runtime_values.iter().enumerate() {
+            if runtime_values[..index]
+                .iter()
+                .any(|(previous, _)| previous == handle)
+            {
+                return Err(AssetParameterError::DuplicateRuntimeValue(*handle));
+            }
+            let Some(param) = asset.param(*handle) else {
+                return Err(AssetParameterError::UnknownRuntimeHandle(*handle));
+            };
+            if !param.is_externally_driven() {
+                return Err(AssetParameterError::UnexpectedRuntimeValue(*handle));
+            }
+        }
+
+        let mut prepared: Vec<PreparedParameterBlock> = self
+            .parameter_blocks
+            .iter()
+            .map(|block| PreparedParameterBlock {
+                resource: block.resource.clone(),
+                group: block.group,
+                binding: block.binding,
+                bytes: block.default_bytes.clone(),
+            })
+            .collect();
+
+        for param in &asset.params {
+            let matches: Vec<(usize, usize)> = self
+                .parameter_blocks
+                .iter()
+                .enumerate()
+                .flat_map(|(block_index, block)| {
+                    block
+                        .fields
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, field)| {
+                            block.resource == param.target.resource
+                                && field.name == param.target.field
+                        })
+                        .map(move |(field_index, _)| (block_index, field_index))
+                })
+                .collect();
+            let [(block_index, field_index)] = matches.as_slice() else {
+                return Err(if matches.is_empty() {
+                    AssetParameterError::UnmappedParameter {
+                        handle: param.handle,
+                        name: param.name.clone(),
+                    }
+                } else {
+                    AssetParameterError::AmbiguousParameter {
+                        handle: param.handle,
+                        name: param.name.clone(),
+                    }
+                });
+            };
+            let field = &self.parameter_blocks[*block_index].fields[*field_index];
+            let value = match runtime_values
+                .iter()
+                .find(|(handle, _)| *handle == param.handle)
+            {
+                Some((_, value)) => *value,
+                None => match param.binding {
+                    BindingSource::Constant(value) => value,
+                    _ => return Err(AssetParameterError::MissingRuntimeValue(param.handle)),
+                },
+            };
+            let value = authored_parameter_value(param.handle, param.ty, value)?;
+            if value.parameter_type() != field.ty {
+                return Err(AssetParameterError::CompiledTypeMismatch {
+                    handle: param.handle,
+                    expected: field.ty,
+                    actual: value.parameter_type(),
+                });
+            }
+            let start = field.offset as usize;
+            encode_parameter_value(
+                value,
+                &mut prepared[*block_index].bytes[start..start + field.ty.size() as usize],
+            );
+        }
+        Ok(prepared)
+    }
+}
+
+/// Failure to resolve an authored `.ember` parameter into the compiled ABI.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AssetParameterError {
+    /// A runtime value repeated a stable handle.
+    DuplicateRuntimeValue(ParamHandle),
+    /// A runtime value does not identify a parameter in the asset.
+    UnknownRuntimeHandle(ParamHandle),
+    /// An externally driven parameter has no value for this frame.
+    MissingRuntimeValue(ParamHandle),
+    /// A constant parameter was given a runtime override.
+    UnexpectedRuntimeValue(ParamHandle),
+    /// An authored parameter name is absent from all compiled blocks.
+    UnmappedParameter { handle: ParamHandle, name: String },
+    /// An authored parameter name occurs in multiple compiled blocks.
+    AmbiguousParameter { handle: ParamHandle, name: String },
+    /// The authored value does not match its declared `.ember` type.
+    AuthoredTypeMismatch { handle: ParamHandle, ty: ParamType },
+    /// The matched compiled field has a different ABI type.
+    CompiledTypeMismatch {
+        handle: ParamHandle,
+        expected: ParameterType,
+        actual: ParameterType,
+    },
+    /// A floating-point parameter contains NaN or infinity.
+    NonFiniteValue(ParamHandle),
+}
+
+fn authored_parameter_value(
+    handle: ParamHandle,
+    param_type: ParamType,
+    value: ParamValue,
+) -> Result<ParameterValue, AssetParameterError> {
+    match (param_type, value) {
+        (ParamType::Scalar, ParamValue::Scalar(value)) if value.is_finite() => {
+            Ok(ParameterValue::F32(value))
+        }
+        (ParamType::Vec3, ParamValue::Vec3(value)) if value.into_iter().all(f32::is_finite) => {
+            Ok(ParameterValue::Vec3(value))
+        }
+        (ParamType::Color, ParamValue::Color(value)) if value.into_iter().all(f32::is_finite) => {
+            Ok(ParameterValue::Vec4(value))
+        }
+        (ParamType::Int, ParamValue::Int(value)) => Ok(ParameterValue::I32(value)),
+        // WGSL `bool` is not host-shareable in a uniform block. The asset ABI
+        // therefore stores booleans as canonical 0/1 `u32` lanes; shader code
+        // tests the field against `0u`.
+        (ParamType::Bool, ParamValue::Bool(value)) => Ok(ParameterValue::U32(u32::from(value))),
+        (ParamType::Scalar, ParamValue::Scalar(_))
+        | (ParamType::Vec3, ParamValue::Vec3(_))
+        | (ParamType::Color, ParamValue::Color(_)) => {
+            Err(AssetParameterError::NonFiniteValue(handle))
+        }
+        _ => Err(AssetParameterError::AuthoredTypeMismatch {
+            handle,
+            ty: param_type,
+        }),
+    }
+}
+
 /// A host parameter payload did not match its compiled schema.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ParameterEncodeError {
@@ -160,6 +333,7 @@ fn encode_parameter_value(value: ParameterValue, output: &mut [u8]) {
     match value {
         ParameterValue::F32(value) => write_f32(output, 0, value),
         ParameterValue::U32(value) => output[..4].copy_from_slice(&value.to_le_bytes()),
+        ParameterValue::I32(value) => output[..4].copy_from_slice(&value.to_le_bytes()),
         ParameterValue::Vec2(values) => values
             .iter()
             .enumerate()
@@ -1284,6 +1458,22 @@ mod tests {
         ],
     )];
 
+    const TEST_CONTROL_PARAMS: &[ParameterBlockDecl] = &[ParameterBlockDecl::new(
+        "controls",
+        &[
+            super::super::modules::ParameterField::new(
+                "steps",
+                ParameterType::I32,
+                ParameterValue::I32(0),
+            ),
+            super::super::modules::ParameterField::new(
+                "enabled_bits",
+                ParameterType::U32,
+                ParameterValue::U32(0),
+            ),
+        ],
+    )];
+
     impl EmberModule for SnippetModule {
         fn stage(&self) -> StageKind {
             self.stage
@@ -1304,6 +1494,12 @@ mod tests {
                 .any(|resource| resource.name == "params")
             {
                 TEST_PARAMS
+            } else if self
+                .resources
+                .iter()
+                .any(|resource| resource.name == "controls")
+            {
+                TEST_CONTROL_PARAMS
             } else {
                 &[]
             }
@@ -1926,6 +2122,179 @@ mod tests {
         assert_eq!(encoded[20..24], 5.0f32.to_bits().to_le_bytes());
         assert_eq!(encoded[24..28], 6.0f32.to_bits().to_le_bytes());
         assert!(encoded[28..32].iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn authored_asset_parameters_resolve_to_compiled_uniform_bytes() {
+        let module = SnippetModule {
+            stage: StageKind::Update,
+            resources: alloc::vec![ResourceDecl::uniform("params", 2, 0)],
+            fragments: Vec::new(),
+        };
+        let compiled = compile(
+            &graph(),
+            &[StageModule {
+                stage_index: 0,
+                module: &module,
+            }],
+        )
+        .unwrap();
+        let asset = EmberAsset {
+            format_version: 1,
+            graph: super::super::authoring::GraphAssetRef(7),
+            params: alloc::vec![
+                super::super::authoring::ExposedParam {
+                    handle: ParamHandle(1),
+                    name: String::from("Authored intensity"),
+                    target: super::super::authoring::ParameterTarget {
+                        resource: String::from("params"),
+                        field: String::from("weight"),
+                    },
+                    ty: ParamType::Scalar,
+                    binding: BindingSource::Constant(ParamValue::Scalar(0.75)),
+                },
+                super::super::authoring::ExposedParam {
+                    handle: ParamHandle(2),
+                    name: String::from("wind / direction"),
+                    target: super::super::authoring::ParameterTarget {
+                        resource: String::from("params"),
+                        field: String::from("direction"),
+                    },
+                    ty: ParamType::Vec3,
+                    binding: BindingSource::Gameplay(3),
+                },
+            ],
+            renderer_config: super::super::authoring::RendererConfig {
+                id: super::super::authoring::RendererConfigId(0),
+                kind: super::super::authoring::RendererKind::Sprite,
+                writes_motion_vectors: false,
+            },
+            shading: super::super::authoring::ShadingSettings {
+                model: EmberShadingModel::Unlit,
+                receive_shadows: false,
+                cast_shadows: false,
+            },
+            format: super::super::authoring::SerializationFormat::Binary,
+        };
+
+        let missing = compiled.prepare_asset_parameters(&asset, &[]);
+        assert_eq!(
+            missing,
+            Err(AssetParameterError::MissingRuntimeValue(ParamHandle(2)))
+        );
+        let constant_override =
+            compiled.prepare_asset_parameters(&asset, &[(ParamHandle(1), ParamValue::Scalar(0.5))]);
+        assert_eq!(
+            constant_override,
+            Err(AssetParameterError::UnexpectedRuntimeValue(ParamHandle(1)))
+        );
+
+        let prepared = compiled
+            .prepare_asset_parameters(
+                &asset,
+                &[(ParamHandle(2), ParamValue::Vec3([4.0, 5.0, 6.0]))],
+            )
+            .unwrap();
+        assert_eq!(prepared.len(), 1);
+        assert_eq!(prepared[0].resource, "params");
+        assert_eq!((prepared[0].group, prepared[0].binding), (2, 0));
+        assert_eq!(prepared[0].bytes[0..4], 0.75f32.to_bits().to_le_bytes());
+        assert!(prepared[0].bytes[4..16].iter().all(|byte| *byte == 0));
+        assert_eq!(prepared[0].bytes[16..20], 4.0f32.to_bits().to_le_bytes());
+        assert_eq!(prepared[0].bytes[20..24], 5.0f32.to_bits().to_le_bytes());
+        assert_eq!(prepared[0].bytes[24..28], 6.0f32.to_bits().to_le_bytes());
+        assert!(prepared[0].bytes[28..32].iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn authored_parameter_validation_distinguishes_mismatch_unsupported_and_non_finite() {
+        assert_eq!(
+            authored_parameter_value(ParamHandle(4), ParamType::Bool, ParamValue::Scalar(1.0)),
+            Err(AssetParameterError::AuthoredTypeMismatch {
+                handle: ParamHandle(4),
+                ty: ParamType::Bool,
+            })
+        );
+        assert_eq!(
+            authored_parameter_value(ParamHandle(5), ParamType::Bool, ParamValue::Bool(true)),
+            Ok(ParameterValue::U32(1))
+        );
+        assert_eq!(
+            authored_parameter_value(ParamHandle(7), ParamType::Int, ParamValue::Int(-17)),
+            Ok(ParameterValue::I32(-17))
+        );
+        assert_eq!(
+            authored_parameter_value(
+                ParamHandle(6),
+                ParamType::Scalar,
+                ParamValue::Scalar(f32::INFINITY),
+            ),
+            Err(AssetParameterError::NonFiniteValue(ParamHandle(6)))
+        );
+    }
+
+    #[test]
+    fn authored_integer_and_boolean_values_encode_to_host_shareable_wgsl_lanes() {
+        let module = SnippetModule {
+            stage: StageKind::Update,
+            resources: alloc::vec![ResourceDecl::uniform("controls", 2, 0)],
+            fragments: Vec::new(),
+        };
+        let compiled = compile(
+            &graph(),
+            &[StageModule {
+                stage_index: 0,
+                module: &module,
+            }],
+        )
+        .unwrap();
+        assert!(compiled.source.contains("steps: i32"));
+        assert!(compiled.source.contains("enabled_bits: u32"));
+        let asset = EmberAsset {
+            format_version: 1,
+            graph: super::super::authoring::GraphAssetRef(8),
+            params: alloc::vec![
+                super::super::authoring::ExposedParam {
+                    handle: ParamHandle(3),
+                    name: String::from("Iteration count"),
+                    target: super::super::authoring::ParameterTarget {
+                        resource: String::from("controls"),
+                        field: String::from("steps"),
+                    },
+                    ty: ParamType::Int,
+                    binding: BindingSource::Constant(ParamValue::Int(-17)),
+                },
+                super::super::authoring::ExposedParam {
+                    handle: ParamHandle(4),
+                    name: String::from("Use turbulence"),
+                    target: super::super::authoring::ParameterTarget {
+                        resource: String::from("controls"),
+                        field: String::from("enabled_bits"),
+                    },
+                    ty: ParamType::Bool,
+                    binding: BindingSource::Constant(ParamValue::Bool(true)),
+                },
+            ],
+            renderer_config: super::super::authoring::RendererConfig {
+                id: super::super::authoring::RendererConfigId(0),
+                kind: super::super::authoring::RendererKind::Sprite,
+                writes_motion_vectors: false,
+            },
+            shading: super::super::authoring::ShadingSettings {
+                model: EmberShadingModel::Unlit,
+                receive_shadows: false,
+                cast_shadows: false,
+            },
+            format: super::super::authoring::SerializationFormat::Binary,
+        };
+        let payload = compiled
+            .prepare_asset_parameters(&asset, &[])
+            .unwrap()
+            .remove(0)
+            .bytes;
+        assert_eq!(payload[0..4], (-17i32).to_le_bytes());
+        assert_eq!(payload[4..8], 1u32.to_le_bytes());
+        assert!(payload[8..].iter().all(|byte| *byte == 0));
     }
 
     #[test]

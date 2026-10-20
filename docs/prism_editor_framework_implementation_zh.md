@@ -25,7 +25,7 @@
 | `prism_editor_remote` | 有界 JSON-RPC/二进制 codec、增量副本、PIE、TCP、受控子进程 stdio/TCP 桥及取消/重启/超时 | Prism 引擎专属 adapter 和生产场景运行时接线 | 41 |
 | `prism_editor_collab` | 有界因果副本/LWW/tombstone、Presence/租约软锁、TCP 接纳顺序/广播/重连/历史重放/能力拒绝 | 身份认证/TLS、产品级权限/部署和 UI 到命令栈协同接线 | 20 |
 | `prism_editor_ui` | Loom Element 装配、有界稳定 key、语义目标/事件到选择/展开/字段编辑/命令/Undo/Redo action 的绑定契约 | 真实设备事件、Loom reconciliation/render 和应用命令执行的端到端连接 | 20 |
-| `prism_editor_app` | 有界 headless runner、工作区组合、窗口/surface 生命周期、错误回滚/恢复/退出及 `prism_app` 退出传播；原生文档会话接线、Ctrl/Cmd+S 保存、Ctrl/Cmd+O 加载、receipt 围栏、引擎中立 `SceneDocumentAdapter` 候选/提交边界、点选/拖拽框选、重载 renderer 失效钩子和 native CLI smoke entry | 完整原生输入→Loom→真实场景→Inspector→保存重载验收，以及具体引擎/项目场景 adapter | 见验证命令 |
+| `prism_editor_app` | 有界 headless runner、工作区组合、窗口/surface 生命周期、错误回滚/恢复/退出及 `prism_app` 退出传播；原生文档会话接线、Ctrl/Cmd+S 保存、Ctrl/Cmd+O 加载、receipt 围栏、引擎中立 `SceneDocumentAdapter` 候选/提交边界、点选/拖拽框选、重载 renderer 失效钩子、单对象 transform 增量更新和 native CLI smoke entry | 完整原生输入→Loom→真实场景→Inspector→保存重载验收，以及具体引擎/项目场景 adapter | 见验证命令 |
 | `prism_editor_viewport` | 稳定场景 ID/增量提交、真实整数 ID target/异步读回、多 viewport target 生命周期/过期拒绝、框选/焦点/Gizmo 契约 | 宿主 geometry/depth 绘制、GPU 矩形采集、平台输入、Gizmo 绘制/命中和编辑回写 | 24（默认 22） |
 | `prism_editor_world` | 有界异步 provider 驱动、payload 驻留、分层策略、dirty/租约保护、修订安全保存确认、OFPA/HLOD 计划 | 生产存储 provider/文件格式/崩溃恢复、actor 写盘、HLOD 烘焙/渲染和世界 UI | 24 |
 
@@ -37,7 +37,7 @@
 
 ### GPU 视口
 
-`SceneIdPass` 将完整 entity/mesh/subobject 身份映射到不复用的 token；快照和 patch 生成稳定增量，拒绝输入不部分修改状态。`SceneIdPassSink` 是 renderer 的 draw-list 边界，不是现成的场景 geometry renderer。`DesktopScene` 现在提供 `SceneDocumentAdapter`，由宿主把反射文档映射为完整 indexed geometry/selection identity 候选，并在 UI 安装成功后原子提交；它不推断项目业务类型。
+`SceneIdPass` 将完整 entity/mesh/subobject 身份映射到不复用的 token；快照和 patch 生成稳定增量，拒绝输入不部分修改状态。`SceneIdPassSink` 是 renderer 的 draw-list 边界，不是现成的场景 geometry renderer。`DesktopScene` 现在提供 `SceneDocumentAdapter`，由宿主把反射文档映射为完整 indexed geometry/selection identity 候选，并在 UI 安装成功后原子提交；它不推断项目业务类型。宿主对已发布对象的变换可调用 `update_object_model`，在线设备路径只重建对应实例 bind group，暂停/未初始化路径延迟到下次上传，并取消旧拾取读回。
 
 `RenderTargetRegistry` 管理每视口的真实 `Rgba32Uint` target。resize 保留 handle、推进 target generation；close/reopen 更换 handle。异步单像素读回按 viewport、相机/视口代际、场景代际、target 代际和 handle 关联，旧结果不能更新选择。
 
