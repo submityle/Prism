@@ -45,8 +45,12 @@ retained and reported by `validate`, while reverse references remain queryable.
 The report deterministically covers missing dependencies, one discovered cycle,
 depth-limit warnings, and VCS conflicts. Validation retains only the configured
 number of diagnostics while collecting them, preserving the sorted prefix and
-reporting truncation. `dependency_closure` and
-`dependent_closure` enforce both node and depth bounds.
+reporting truncation. `dependency_closure` and `dependent_closure` enforce both
+node and depth bounds while borrowing adjacency sets, so an oversized fan-out
+is not copied before the node limit can reject it. Cycle validation keeps
+borrowed edge iterators per DFS frame instead of copying each node's outgoing
+edges. Roots have depth zero; complete leaves and back-edges at the configured
+boundary succeed, while unseen deeper dependencies report the depth limit.
 
 ## Import/export and version control
 
@@ -68,7 +72,7 @@ transitions. Additional regressions cover 257-folder filtered pagination with
 changing page sizes and cache eviction, exact path identity, file/folder prefix
 collisions, atomic VCS publication, bounded diagnostics, and 400 mixed edits
 checked against an independent reverse-reference reconstruction. On 2026-10-20,
-all 17 catalog tests passed; this is data-layer verification, not content UI,
+all 18 catalog tests passed; this is data-layer verification, not content UI,
 importer or asset-pipeline acceptance. Run:
 
 ```text

@@ -217,7 +217,7 @@ pub struct ContentLimits {
     pub max_diagnostics: usize,
     /// Maximum assets returned by a dependency walk.
     pub max_dependency_nodes: usize,
-    /// Maximum dependency depth inspected by validation and walks.
+    /// Maximum dependency depth inspected by validation and walks; roots have depth zero.
     pub max_dependency_depth: usize,
 }
 
@@ -1501,22 +1501,22 @@ impl ContentCatalog {
         let mut result = Vec::new();
         let mut seen = BTreeSet::from([root]);
         let mut frontier = vec![root];
-        for _ in 0..self.limits.max_dependency_depth {
+        for depth in 0..=self.limits.max_dependency_depth {
             let mut next = Vec::new();
             for id in frontier {
                 let neighbors = if reverse {
-                    self.reverse_dependencies(id)
+                    self.reverse_dependencies.get(&id)
                 } else {
-                    self.assets
-                        .get(&id)
-                        .map(|asset| asset.dependencies.iter().copied().collect())
-                        .unwrap_or_default()
+                    self.assets.get(&id).map(|asset| &asset.dependencies)
                 };
-                for neighbor in neighbors {
-                    if seen.insert(neighbor) {
-                        if result.len() >= self.limits.max_dependency_nodes {
+                for &neighbor in neighbors.into_iter().flatten() {
+                    if !seen.contains(&neighbor) {
+                        if depth == self.limits.max_dependency_depth
+                            || result.len() >= self.limits.max_dependency_nodes
+                        {
                             return Err(ContentError::TraversalLimitExceeded);
                         }
+                        seen.insert(neighbor);
                         result.push(neighbor);
                         if self.assets.contains_key(&neighbor) {
                             next.push(neighbor);
@@ -1544,27 +1544,28 @@ impl ContentCatalog {
             colors.insert(start, 1);
             positions.insert(start, path.len());
             path.push(start);
-            let mut frames = vec![(start, 0usize, self.known_dependencies(start))];
-            while let Some((id, index, dependencies)) = frames.last_mut() {
-                if *index >= dependencies.len() {
+            let mut frames = vec![(start, self.assets[&start].dependencies.iter())];
+            while let Some((id, dependencies)) = frames.last_mut() {
+                let Some(&dependency) = dependencies.next() else {
                     colors.insert(*id, 2);
                     positions.remove(id);
                     path.pop();
                     frames.pop();
                     continue;
-                }
-                let dependency = dependencies[*index];
-                *index += 1;
+                };
+                let Some(record) = self.assets.get(&dependency) else {
+                    continue;
+                };
                 match colors.get(&dependency).copied().unwrap_or(0) {
                     0 => {
-                        if path.len() >= self.limits.max_dependency_depth {
+                        if path.len() > self.limits.max_dependency_depth {
                             depth_exceeded = true;
                             continue;
                         }
                         colors.insert(dependency, 1);
                         positions.insert(dependency, path.len());
                         path.push(dependency);
-                        frames.push((dependency, 0, self.known_dependencies(dependency)));
+                        frames.push((dependency, record.dependencies.iter()));
                     }
                     1 => {
                         let start_index = positions[&dependency];
@@ -1577,20 +1578,6 @@ impl ContentCatalog {
             }
         }
         (None, depth_exceeded)
-    }
-
-    fn known_dependencies(&self, id: AssetId) -> Vec<AssetId> {
-        self.assets
-            .get(&id)
-            .map(|asset| {
-                asset
-                    .dependencies
-                    .iter()
-                    .filter(|dependency| self.assets.contains_key(dependency))
-                    .copied()
-                    .collect()
-            })
-            .unwrap_or_default()
     }
 
     fn changed(&mut self) {

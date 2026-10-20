@@ -6,7 +6,7 @@ use alloc::collections::{BTreeMap, BTreeSet};
 
 use prism_editor_content::{
     AssetId, AssetKind, AssetQuery, AssetRecord, CacheStatus, ContentCatalog, ContentError,
-    ContentLimits, PageRequest, TreeQuery, VcsRecord, VcsState,
+    ContentLimits, DiagnosticCode, PageRequest, TreeQuery, VcsRecord, VcsState,
 };
 
 fn record(id: u128, path: &str) -> AssetRecord {
@@ -325,4 +325,54 @@ fn bounded_diagnostics_keep_the_same_deterministic_prefix_as_full_validation() {
     assert!(report.truncated);
     assert_eq!(report.diagnostics(), &full_report.diagnostics()[..7]);
     assert!(report.has_errors());
+}
+
+#[test]
+fn dependency_depth_accepts_complete_boundary_leaves_and_rejects_unseen_descendants() {
+    let mut catalog = ContentCatalog::with_limits(ContentLimits {
+        max_dependency_depth: 1,
+        max_dependency_nodes: 2,
+        ..ContentLimits::default()
+    })
+    .unwrap();
+    let a = AssetId::from_raw(1);
+    let b = AssetId::from_raw(2);
+    let c = AssetId::from_raw(3);
+    for (id, path) in [(1, "a"), (2, "b"), (3, "c")] {
+        catalog.insert(record(id, path)).unwrap();
+    }
+    catalog.add_dependency(a, b).unwrap();
+    assert_eq!(catalog.dependency_closure(a).unwrap(), [b]);
+    assert_eq!(catalog.dependent_closure(b).unwrap(), [a]);
+    assert!(catalog.validate().diagnostics().is_empty());
+    catalog.add_dependency(b, a).unwrap();
+    assert_eq!(catalog.dependency_closure(a).unwrap(), [b]);
+    assert!(catalog
+        .validate()
+        .diagnostics()
+        .iter()
+        .any(|diagnostic| diagnostic.code == DiagnosticCode::DependencyCycle));
+    catalog.remove_dependency(b, a).unwrap();
+    catalog.add_dependency(b, c).unwrap();
+    assert_eq!(
+        catalog.dependency_closure(a),
+        Err(ContentError::TraversalLimitExceeded)
+    );
+    assert_eq!(
+        catalog.dependent_closure(c),
+        Err(ContentError::TraversalLimitExceeded)
+    );
+    assert!(catalog
+        .validate()
+        .diagnostics()
+        .iter()
+        .any(|diagnostic| diagnostic.code == DiagnosticCode::DependencyDepthExceeded));
+    catalog.remove_dependency(b, c).unwrap();
+    catalog.add_dependency(a, c).unwrap();
+    assert_eq!(catalog.dependency_closure(a).unwrap(), [b, c]);
+    catalog.add_dependency(a, AssetId::from_raw(4)).unwrap();
+    assert_eq!(
+        catalog.dependency_closure(a),
+        Err(ContentError::TraversalLimitExceeded)
+    );
 }
