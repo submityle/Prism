@@ -101,10 +101,12 @@ impl DesktopDocumentSession {
                 let prepared = receipt
                     .prepare(&self.catalog, self.controller_limits)
                     .map_err(document_error)?;
-                prepared
-                    .install_ui(&mut self.adapter, ui, &self.catalog)
-                    .map_err(document_error)?;
-                renderer.document_reloaded();
+                renderer.prepare_document(prepared.controller())?;
+                if let Err(error) = prepared.install_ui(&mut self.adapter, ui, &self.catalog) {
+                    renderer.discard_document();
+                    return Err(document_error(error));
+                }
+                renderer.commit_document();
                 Ok(Poll::Ready(crate::desktop::DesktopWork {
                     redraw: true,
                     pending: false,

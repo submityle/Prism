@@ -35,6 +35,13 @@ fences stale save/load receipts. Runtime transport and domain-specific modules
 remain explicit adapters. Surface lifecycle tests use recording backends; the
 native smoke entry point is the path for actual OS window/GPU validation.
 
+For document-driven native scenes, `DesktopScene::new_with_document_adapter`
+accepts a host-owned `SceneDocumentAdapter`. The adapter converts the validated
+`EditorController` candidate into indexed geometry, full selection identities,
+and a camera without embedding project gameplay types. Scene candidates are
+staged before UI publication and committed only after the document install
+succeeds; an install failure discards the candidate and keeps the active scene.
+
 Verification from the repository root:
 
 ```text

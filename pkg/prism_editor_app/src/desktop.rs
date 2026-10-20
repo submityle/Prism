@@ -16,7 +16,7 @@ use winit::{
     window::{Window, WindowId},
 };
 
-use crate::{DesktopDocumentSession, DesktopKey, EditorDesktopUi};
+use crate::{DesktopDocumentSession, DesktopKey, EditorController, EditorDesktopUi};
 
 /// Native window and bounded validation-run configuration.
 #[derive(Clone, Debug)]
@@ -112,6 +112,19 @@ pub trait DesktopRenderer {
         gpu: &DesktopGpu,
         ui: &mut EditorDesktopUi,
     ) -> Result<DesktopWork, DesktopError>;
+    /// Builds a document-dependent renderer candidate without publishing it.
+    /// The host owns the mapping from reflected document data to render
+    /// descriptors; the application layer does not assume gameplay types.
+    fn prepare_document(&mut self, _controller: &EditorController) -> Result<(), DesktopError> {
+        Ok(())
+    }
+    /// Drops a document candidate after UI publication failed.
+    fn discard_document(&mut self) {}
+    /// Publishes the candidate prepared by `prepare_document`. Implementations
+    /// must make this operation infallible after their preparation checks.
+    fn commit_document(&mut self) {
+        self.document_reloaded();
+    }
     /// Invalidates renderer-side scene and picking state after a document load.
     /// UI-only renderers may keep the default no-op implementation.
     fn document_reloaded(&mut self) {}

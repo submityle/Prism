@@ -57,6 +57,30 @@ pub struct DesktopSceneObject {
     pub sort_key: u64,
 }
 
+/// The engine-neutral scene payload produced for one validated document.
+/// Geometry and identity remain explicit so the editor never guesses project
+/// gameplay types from reflection metadata.
+#[derive(Clone, Debug)]
+pub struct DesktopSceneDocument {
+    /// Complete indexed geometry and controller mappings for this document.
+    pub objects: Vec<DesktopSceneObject>,
+    /// World-to-clip matrix for the document's initial viewport camera.
+    pub camera: SceneIdMatrix,
+    /// Depth convention matching `camera`.
+    pub depth: SceneIdDepth,
+}
+
+/// Host-owned mapping from a validated editor document to render descriptors.
+/// Implementations may inspect reflected roots, asset handles, or an external
+/// runtime snapshot, but the editor application supplies no business schema.
+pub trait SceneDocumentAdapter {
+    /// Builds a complete candidate without mutating the active scene.
+    fn build(
+        &mut self,
+        controller: &EditorController,
+    ) -> Result<DesktopSceneDocument, DesktopError>;
+}
+
 impl DesktopSceneObject {
     /// Describes an identity-mapped indexed mesh with identity transform.
     #[must_use]
@@ -159,6 +183,8 @@ pub struct DesktopScene {
     depth: SceneIdDepth,
     bounds: Option<DesktopViewportBounds>,
     counters: DesktopSceneStatus,
+    document_adapter: Option<Box<dyn SceneDocumentAdapter>>,
+    pending_document: Option<DesktopSceneDocument>,
 }
 
 impl DesktopScene {
@@ -184,7 +210,20 @@ impl DesktopScene {
             depth: SceneIdDepth::Forward,
             bounds: None,
             counters: DesktopSceneStatus::default(),
+            document_adapter: None,
+            pending_document: None,
         })
+    }
+
+    /// Creates an empty scene whose contents are supplied by a host-owned
+    /// document adapter before each successful document publication.
+    pub fn new_with_document_adapter<A>(adapter: A) -> Result<Self, DesktopError>
+    where
+        A: SceneDocumentAdapter + 'static,
+    {
+        let mut scene = Self::new(Vec::new())?;
+        scene.document_adapter = Some(Box::new(adapter));
+        Ok(scene)
     }
 
     /// Returns the descriptors currently owned by this adapter.
@@ -261,6 +300,40 @@ impl DesktopScene {
             gpu.binding = None;
         }
         self.needs_upload = true;
+    }
+
+    fn prepare_document_candidate(
+        &mut self,
+        controller: &EditorController,
+    ) -> Result<(), DesktopError> {
+        self.pending_document = None;
+        let Some(adapter) = self.document_adapter.as_mut() else {
+            return Ok(());
+        };
+        let candidate = adapter.build(controller)?;
+        validate_matrix(&candidate.camera)?;
+        validate_objects(&candidate.objects)?;
+        self.scene
+            .generation()
+            .checked_add(1)
+            .ok_or_else(|| message("scene generation exhausted"))?;
+        self.pending_document = Some(candidate);
+        Ok(())
+    }
+
+    fn discard_document_candidate(&mut self) {
+        self.pending_document = None;
+    }
+
+    fn commit_document_candidate(&mut self) {
+        let Some(candidate) = self.pending_document.take() else {
+            self.document_reloaded();
+            return;
+        };
+        self.objects = candidate.objects;
+        self.matrix = candidate.camera;
+        self.depth = candidate.depth;
+        self.document_reloaded();
     }
 
     /// Encodes real ID geometry followed by GPU debug-color composition into
@@ -731,6 +804,18 @@ impl DesktopRenderer for DesktopScene {
         self.poll_ui(ui, InFlightPickReadback::poll)
     }
 
+    fn prepare_document(&mut self, controller: &EditorController) -> Result<(), DesktopError> {
+        self.prepare_document_candidate(controller)
+    }
+
+    fn discard_document(&mut self) {
+        self.discard_document_candidate();
+    }
+
+    fn commit_document(&mut self) {
+        self.commit_document_candidate();
+    }
+
     fn document_reloaded(&mut self) {
         DesktopScene::document_reloaded(self);
     }
@@ -1095,6 +1180,65 @@ mod tests {
             .apply(&*ui.controller().primary_snapshot().expect("snapshot"))
             .expect("apply snapshot");
         model.label
+    }
+
+    struct StaticSceneAdapter {
+        document: Option<DesktopSceneDocument>,
+    }
+
+    impl SceneDocumentAdapter for StaticSceneAdapter {
+        fn build(
+            &mut self,
+            _controller: &EditorController,
+        ) -> Result<DesktopSceneDocument, DesktopError> {
+            self.document
+                .take()
+                .ok_or_else(|| message("test scene candidate already consumed"))
+        }
+    }
+
+    #[test]
+    fn document_adapter_stages_scene_before_commit() {
+        let object = objects().pop().expect("test object");
+        let mut scene = DesktopScene::new_with_document_adapter(StaticSceneAdapter {
+            document: Some(DesktopSceneDocument {
+                objects: vec![object.clone()],
+                camera: SCENE_ID_IDENTITY_MATRIX,
+                depth: SceneIdDepth::Forward,
+            }),
+        })
+        .expect("adapter scene");
+        let controller = EditorController::new();
+
+        DesktopRenderer::prepare_document(&mut scene, &controller).expect("stage candidate");
+        assert!(
+            scene.objects().is_empty(),
+            "candidate must not publish early"
+        );
+        DesktopRenderer::commit_document(&mut scene);
+        assert_eq!(scene.objects().len(), 1);
+        assert_eq!(scene.objects()[0].id, object.id);
+        assert!(scene.status().scene_generation > 0);
+    }
+
+    #[test]
+    fn invalid_document_scene_candidate_is_rejected_without_publication() {
+        let mut invalid = objects().pop().expect("test object");
+        invalid.indices[0] = 99;
+        let mut scene = DesktopScene::new_with_document_adapter(StaticSceneAdapter {
+            document: Some(DesktopSceneDocument {
+                objects: vec![invalid],
+                camera: SCENE_ID_IDENTITY_MATRIX,
+                depth: SceneIdDepth::Forward,
+            }),
+        })
+        .expect("adapter scene");
+        let controller = EditorController::new();
+
+        assert!(DesktopRenderer::prepare_document(&mut scene, &controller).is_err());
+        assert!(scene.objects().is_empty());
+        DesktopRenderer::discard_document(&mut scene);
+        assert!(scene.objects().is_empty());
     }
 
     fn begin_draft(ui: &mut EditorDesktopUi, text: &str) {

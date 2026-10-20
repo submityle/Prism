@@ -53,7 +53,10 @@ pub use desktop::{
 #[cfg(feature = "desktop")]
 pub use desktop_document::DesktopDocumentSession;
 #[cfg(feature = "desktop")]
-pub use desktop_scene::{DesktopScene, DesktopSceneObject, DesktopSceneStatus};
+pub use desktop_scene::{
+    DesktopScene, DesktopSceneDocument, DesktopSceneObject, DesktopSceneStatus,
+    SceneDocumentAdapter,
+};
 pub use desktop_ui::{DesktopKey, DesktopUiError, EditorDesktopUi};
 pub use document::{
     DecodedDocument, DocumentCodec, DocumentError, DocumentFileAdapter, DocumentIoEvent,
