@@ -5,6 +5,7 @@
 //! module never creates, reads, or deletes a CAS blob.
 
 use crate::types::{ArtifactDescriptor, ArtifactKey, ArtifactStorageClass, ContentHash};
+use fs4::fs_std::FileExt;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
@@ -27,9 +28,6 @@ pub enum DdcError {
     Io(io::Error),
     InvalidFormat(&'static str),
     InvalidDescriptor(&'static str),
-    /// The platform has no backend that can provide the cross-process
-    /// exclusion required by the shared on-disk index protocol.
-    CoordinationUnavailable(&'static str),
     Truncated,
     UnknownVersion(u32),
     HashMismatch {
@@ -57,9 +55,6 @@ impl fmt::Display for DdcError {
             Self::Io(error) => write!(f, "DDC I/O error: {error}"),
             Self::InvalidFormat(reason) => write!(f, "invalid DDC format: {reason}"),
             Self::InvalidDescriptor(reason) => write!(f, "invalid artifact descriptor: {reason}"),
-            Self::CoordinationUnavailable(reason) => {
-                write!(f, "DDC cross-process coordination unavailable: {reason}")
-            }
             Self::Truncated => f.write_str("DDC index is truncated"),
             Self::UnknownVersion(version) => write!(f, "unknown DDC index version: {version}"),
             Self::HashMismatch { expected, actual } => write!(
@@ -101,11 +96,9 @@ impl From<io::Error> for DdcError {
 /// Reads are snapshots refreshed at `open`; each mutation serializes with other
 /// handles in this process, reloads the latest index, then publishes a synced
 /// temporary file through [`tempfile::NamedTempFile::persist`]. On POSIX, the
-/// containing directory is synced after replacement. The index is deliberately
-/// uses a stable advisory file lock to coordinate read-modify-write updates
-/// across Unix processes. Other platforms fail closed with
-/// [`DdcError::CoordinationUnavailable`] unless a platform-equivalent backend
-/// is added; they never silently retain a single-owner-process contract.
+/// containing directory is synced after replacement. The index uses a stable
+/// advisory file lock to coordinate read-modify-write updates across Unix and
+/// Windows processes.
 /// `get`, `len`, and
 /// `is_empty` report this handle's last snapshot
 /// until it mutates or is reopened. The cache is independent from the CAS.
@@ -341,11 +334,9 @@ fn process_lock() -> &'static Mutex<()> {
 
 /// Cross-process lease for DDC index mutations. Each process opens the same
 /// stable lock file, while the process-local mutex above also orders handles
-/// in this process (flock semantics are tied to open file descriptions).
-#[cfg(unix)]
+/// in this process (platform lock semantics are tied to open file handles).
 struct DdcFileLock(File);
 
-#[cfg(unix)]
 impl DdcFileLock {
     fn acquire(root: &Path) -> Result<Self, DdcError> {
         let file = OpenOptions::new()
@@ -353,28 +344,14 @@ impl DdcFileLock {
             .read(true)
             .write(true)
             .open(root.join(".index.ddc.lock"))?;
-        rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive)
-            .map_err(|error| DdcError::Io(io::Error::from(error)))?;
+        FileExt::lock_exclusive(&file)?;
         Ok(Self(file))
     }
 }
 
-#[cfg(unix)]
 impl Drop for DdcFileLock {
     fn drop(&mut self) {
-        let _ = rustix::fs::flock(&self.0, rustix::fs::FlockOperation::Unlock);
-    }
-}
-
-#[cfg(not(unix))]
-struct DdcFileLock;
-
-#[cfg(not(unix))]
-impl DdcFileLock {
-    fn acquire(_root: &Path) -> Result<Self, DdcError> {
-        Err(DdcError::CoordinationUnavailable(
-            "cross-process DDC index locking has no supported platform backend",
-        ))
+        let _ = FileExt::unlock(&self.0);
     }
 }
 
@@ -944,17 +921,6 @@ mod tests {
             orphan.exists(),
             "active/unknown writer files are not reaped"
         );
-        cleanup(&dir);
-    }
-
-    #[cfg(not(unix))]
-    #[test]
-    fn non_unix_ddc_coordination_fails_closed() {
-        let dir = temp_dir();
-        assert!(matches!(
-            DerivedDataCache::open(&dir),
-            Err(DdcError::CoordinationUnavailable(_))
-        ));
         cleanup(&dir);
     }
 }

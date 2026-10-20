@@ -10,6 +10,7 @@ use crate::publication::PublicationDescriptor;
 use crate::transaction::{PublishError, PublishedManifest, RevisionStore};
 use crate::types::{BuildRevision, ContentHash};
 use crate::validation::{ArtifactQualityGate, ValidationError, ValidationReport};
+use fs4::fs_std::FileExt;
 use ring::signature::{self, KeyPair};
 use std::collections::BTreeMap;
 use std::fs;
@@ -792,10 +793,8 @@ impl ReleaseTrustStore {
     }
 }
 
-#[cfg(unix)]
 struct TrustStoreFileLock(fs::File);
 
-#[cfg(unix)]
 impl TrustStoreFileLock {
     fn acquire(policy_path: &Path) -> Result<Self, ReleaseTrustError> {
         let parent = policy_parent(policy_path);
@@ -805,26 +804,14 @@ impl TrustStoreFileLock {
             .read(true)
             .write(true)
             .open(trust_lock_path(policy_path))?;
-        rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive)
-            .map_err(std::io::Error::from)?;
+        FileExt::lock_exclusive(&file)?;
         Ok(Self(file))
     }
 }
 
-#[cfg(unix)]
 impl Drop for TrustStoreFileLock {
     fn drop(&mut self) {
-        let _ = rustix::fs::flock(&self.0, rustix::fs::FlockOperation::Unlock);
-    }
-}
-
-#[cfg(not(unix))]
-struct TrustStoreFileLock;
-
-#[cfg(not(unix))]
-impl TrustStoreFileLock {
-    fn acquire(_policy_path: &Path) -> Result<Self, ReleaseTrustError> {
-        Ok(Self)
+        let _ = FileExt::unlock(&self.0);
     }
 }
 
@@ -1305,7 +1292,7 @@ mod tests {
     use crate::types::{ArtifactDescriptor, AssetId, Manifest, ManifestEntry};
     use std::fs;
     use std::path::PathBuf;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     fn temp_dir(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
@@ -1582,6 +1569,29 @@ mod tests {
             ReleaseTrustStore::open(&path).unwrap().policy(),
             newer.policy()
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn trust_store_file_lock_blocks_until_guard_is_released() {
+        let root = temp_dir("trust-lock-contention");
+        let path = root.join("release.trust");
+        let guard = TrustStoreFileLock::acquire(&path).unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let worker_path = path.clone();
+        let worker = std::thread::spawn(move || {
+            sender
+                .send(TrustStoreFileLock::acquire(&worker_path).is_ok())
+                .unwrap();
+        });
+
+        assert!(matches!(
+            receiver.recv_timeout(Duration::from_millis(100)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
+        drop(guard);
+        assert!(receiver.recv_timeout(Duration::from_secs(5)).unwrap());
+        worker.join().unwrap();
         fs::remove_dir_all(root).unwrap();
     }
 

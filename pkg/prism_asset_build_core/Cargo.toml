@@ -9,6 +9,7 @@ publish = false
 
 [dependencies]
 blake3 = "1.8"
+fs4 = "0.13.1"
 ring = "0.17.14"
 png = "0.18.1"
 prism_asset = { path = "../prism_asset" }
@@ -18,7 +19,6 @@ prism_mesh = { path = "../prism_mesh" }
 prism_render_architecture = { path = "../prism_render_architecture" }
 prism_render_driver = { path = "../prism_render_driver" }
 prism_tasks = { path = "../prism_tasks" }
-rustix = { version = "1.1.5", features = ["fs"] }
 tempfile = "3.27"
 
 [[bench]]

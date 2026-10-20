@@ -6,6 +6,7 @@ use crate::types::{
     ArtifactDescriptor, ArtifactKey, ArtifactStorageClass, AssetId, BuildRevision, Manifest,
     ManifestEntry, TransactionId,
 };
+use fs4::fs_std::FileExt;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
@@ -42,9 +43,6 @@ pub enum PublishError {
     Io(io::Error),
     Cas(CasError),
     Invalid(&'static str),
-    /// The platform has no backend that can provide the cross-process
-    /// exclusion required by this local publication protocol.
-    CoordinationUnavailable(&'static str),
     /// `CURRENT` was replaced, but the durable commit marker could not be
     /// written. The revision may already be visible; callers must reconcile
     /// it instead of retrying the same revision as a fresh transaction.
@@ -124,13 +122,11 @@ pub struct RevisionStore {
     publish_lock: Arc<Mutex<()>>,
 }
 
-/// Cross-process publication lease. On Unix this is an advisory `flock` held
-/// on a stable file, so separate `RevisionStore` instances and worker
-/// processes sharing one root serialize the compare-and-publish window.
-#[cfg(unix)]
+/// Cross-process publication lease held on a stable file. `fs4` maps this to
+/// `flock` on Unix and `LockFileEx` on Windows, so separate `RevisionStore`
+/// instances and worker processes serialize the compare-and-publish window.
 struct FilePublishLock(File);
 
-#[cfg(unix)]
 impl FilePublishLock {
     fn acquire(root: &Path) -> Result<Self, PublishError> {
         let file = OpenOptions::new()
@@ -138,31 +134,16 @@ impl FilePublishLock {
             .read(true)
             .write(true)
             .open(root.join(".publish.lock"))?;
-        rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive)
-            .map_err(|error| PublishError::Io(io::Error::from(error)))?;
+        FileExt::lock_exclusive(&file)?;
         Ok(Self(file))
     }
 }
 
-#[cfg(unix)]
 impl Drop for FilePublishLock {
     fn drop(&mut self) {
         // The descriptor is closed immediately afterwards; an unlock failure
         // cannot make the already-completed publication observable as failed.
-        let _ = rustix::fs::flock(&self.0, rustix::fs::FlockOperation::Unlock);
-    }
-}
-
-#[cfg(not(unix))]
-struct FilePublishLock;
-
-#[cfg(not(unix))]
-impl FilePublishLock {
-    fn acquire(root: &Path) -> Result<Self, PublishError> {
-        let _ = root;
-        Err(PublishError::CoordinationUnavailable(
-            "cross-process publication locking has no supported platform backend",
-        ))
+        let _ = FileExt::unlock(&self.0);
     }
 }
 
@@ -179,9 +160,7 @@ impl RevisionStore {
         create_dir_all_durable(&transactions_root)?;
         // Serialize journal initialization and recovery with publishers in
         // other processes. The root exists by this point, so the lock itself
-        // is also a durable store entry. Platforms without an equivalent
-        // cross-process lock fail closed instead of silently weakening the
-        // publication protocol.
+        // is also a durable store entry.
         let _recovery_guard = FilePublishLock::acquire(&root)?;
         let cas = ContentAddressedStore::open(cas_root)?;
         let journal = TransactionJournal::open(transactions_root.join("journal.bin"))?;
@@ -1416,19 +1395,13 @@ fn write_immutable(path: &Path, bytes: &[u8]) -> Result<(), PublishError> {
 }
 
 fn atomic_replace(root: &Path, name: &str, bytes: &[u8]) -> Result<(), PublishError> {
-    let tmp = temp_path(root);
-    let result = (|| -> Result<(), PublishError> {
-        let mut f = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
-        f.write_all(bytes)?;
-        f.sync_all()?;
-        fs::rename(&tmp, root.join(name))?;
-        sync_directory(root)?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(tmp);
-    }
-    result
+    let mut temporary = tempfile::NamedTempFile::new_in(root)?;
+    temporary.write_all(bytes)?;
+    temporary.as_file().sync_all()?;
+    temporary
+        .persist(root.join(name))
+        .map_err(|error| PublishError::Io(error.error))?;
+    sync_directory(root)
 }
 
 fn sync_directory(path: &Path) -> Result<(), PublishError> {
@@ -2201,7 +2174,6 @@ mod tests {
         fs::remove_dir_all(dir).unwrap();
     }
 
-    #[cfg(unix)]
     #[test]
     fn separate_store_handles_serialize_concurrent_revision_publication() {
         let dir = temp_dir();
@@ -2258,14 +2230,36 @@ mod tests {
         fs::remove_dir_all(dir).unwrap();
     }
 
-    #[cfg(not(unix))]
     #[test]
-    fn non_unix_publication_coordination_fails_closed() {
+    fn publication_file_lock_blocks_until_guard_is_released() {
         let dir = temp_dir();
+        fs::create_dir_all(&dir).unwrap();
+        let guard = FilePublishLock::acquire(&dir).unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let worker_dir = dir.clone();
+        let worker = std::thread::spawn(move || {
+            sender
+                .send(FilePublishLock::acquire(&worker_dir).is_ok())
+                .unwrap();
+        });
+
         assert!(matches!(
-            RevisionStore::open(&dir),
-            Err(PublishError::CoordinationUnavailable(_))
+            receiver.recv_timeout(Duration::from_millis(100)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
         ));
+        drop(guard);
+        assert!(receiver.recv_timeout(Duration::from_secs(5)).unwrap());
+        worker.join().unwrap();
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn atomic_replace_overwrites_existing_pointer() {
+        let dir = temp_dir();
+        fs::create_dir_all(&dir).unwrap();
+        atomic_replace(&dir, "CURRENT", &1u64.to_le_bytes()).unwrap();
+        atomic_replace(&dir, "CURRENT", &2u64.to_le_bytes()).unwrap();
+        assert_eq!(fs::read(dir.join("CURRENT")).unwrap(), 2u64.to_le_bytes());
         fs::remove_dir_all(dir).unwrap();
     }
 }
