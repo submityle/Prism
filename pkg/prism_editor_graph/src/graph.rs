@@ -4,6 +4,8 @@ use alloc::vec::Vec;
 use core::any::type_name;
 use core::fmt;
 
+pub(crate) mod authoring;
+
 /// Monotonic identity for a graph node.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Hash)]
 pub struct NodeId(u64);
@@ -1072,9 +1074,16 @@ impl<N> Graph<N> {
         }
         self.ensure_capacity(self.next_edge, 1)?;
         let id = EdgeId(Self::allocate(&mut self.next_edge)?);
-        let source = output_port.node;
-        let target = input_port.node;
-        self.edges.insert(id, Edge { id, output, input });
+        self.insert_edge(Edge { id, output, input });
+        Ok(id)
+    }
+
+    // Used by validated connection creation and private inverse restoration.
+    fn insert_edge(&mut self, edge: Edge) {
+        let Edge { id, output, input } = edge;
+        let source = self.ports[&output].node;
+        let target = self.ports[&input].node;
+        self.edges.insert(id, edge);
         self.outgoing_by_port.entry(output).or_default().insert(id);
         self.incoming_by_port.entry(input).or_default().insert(id);
         self.outgoing_nodes
@@ -1082,7 +1091,6 @@ impl<N> Graph<N> {
             .or_default()
             .insert(target);
         *self.node_pair_counts.entry((source, target)).or_default() += 1;
-        Ok(id)
     }
 
     /// Disconnects an edge and returns its stable edge record.

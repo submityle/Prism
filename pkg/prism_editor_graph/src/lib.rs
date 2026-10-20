@@ -1,8 +1,9 @@
 //! Deterministic, type-aware node graph kernel for editor and authoring tools.
 //!
 //! The kernel owns graph structure and execution order only. Values, widgets,
-//! serialization formats, and project-specific node semantics remain outside
-//! this crate. Nodes, ports, edges, and groups use monotonic opaque IDs: an ID
+//! and project-specific node semantics remain outside this crate. The optional
+//! authoring layer adds bounded reversible edits and a versioned command codec.
+//! Nodes, ports, edges, and groups use monotonic opaque IDs: an ID
 //! is never reused after removal, so references remain unambiguous for the
 //! lifetime of the graph.
 
@@ -13,8 +14,12 @@ extern crate alloc;
 
 mod graph;
 
+pub use graph::authoring::{
+    GraphAuthoringError, GraphAuthoringLimits, GraphCommand, GraphEdit, GraphEditor,
+    GraphNodeDraft, GraphPoint, GraphPortDraft,
+};
 pub use graph::{
-    ConnectionPolicy, CycleError, Edge, EvaluationError, EvaluationNode, Graph, GraphError, Group,
-    GroupId, GroupSpec, NameKind, Node, NodeId, NodeSpec, Port, PortDirection, PortId, PortSpec,
-    PortType,
+    ConnectionPolicy, CycleError, Edge, EdgeId, EvaluationError, EvaluationNode, Graph, GraphError,
+    Group, GroupId, GroupSpec, NameKind, Node, NodeId, NodeSpec, Port, PortDirection, PortId,
+    PortSpec, PortType,
 };
