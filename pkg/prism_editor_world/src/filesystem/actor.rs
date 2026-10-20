@@ -162,7 +162,7 @@ struct Admission {
     bytes: AtomicUsize,
     limit: usize,
 }
-struct Reservation {
+pub(super) struct Reservation {
     admission: Arc<Admission>,
     bytes: usize,
 }
@@ -177,7 +177,7 @@ impl Drop for Reservation {
 /// No executor, entity schema or renderer is assumed.
 #[derive(Clone)]
 pub struct FileActorIoProvider {
-    cell: FileCellIoProvider,
+    pub(super) cell: FileCellIoProvider,
     admission: Arc<Admission>,
 }
 impl FileActorIoProvider {
@@ -203,7 +203,7 @@ impl FileActorIoProvider {
     pub fn reserved_bytes(&self) -> usize {
         self.admission.bytes.load(Ordering::Acquire)
     }
-    fn reserve(&self, bytes: usize) -> Result<Arc<Reservation>, FileCellIoError> {
+    pub(super) fn reserve(&self, bytes: usize) -> Result<Arc<Reservation>, FileCellIoError> {
         self.admission
             .bytes
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
@@ -217,7 +217,7 @@ impl FileActorIoProvider {
             bytes,
         }))
     }
-    fn deadline(timeout: Duration) -> Result<Instant, FileCellIoError> {
+    pub(super) fn deadline(timeout: Duration) -> Result<Instant, FileCellIoError> {
         if timeout.is_zero() {
             return Err(FileCellIoError::InvalidRequest);
         }
@@ -247,6 +247,7 @@ impl FileActorIoProvider {
             Some(deadline),
             Some(reservation.clone()),
             move |cancel| {
+                let _isolation = shared.legacy_guard()?;
                 cancel.check()?;
                 let directory = actor_directory(&shared, &identity, false)?;
                 let path = directory.path.join(identity.actor().to_u128().to_string());
@@ -294,6 +295,7 @@ impl FileActorIoProvider {
             Some(deadline),
             Some(reservation.clone()),
             move |cancel| {
+                let _isolation = shared.legacy_guard()?;
                 cancel.check()?;
                 let directory = actor_directory(&shared, &request.identity, true)?;
                 let path = directory

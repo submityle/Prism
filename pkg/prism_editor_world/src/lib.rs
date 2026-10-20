@@ -6,7 +6,8 @@
 //! [`prism_ecs`] / [`prism_scene`] partition contracts, but this crate never
 //! creates entities or assumes a renderer exists. Opaque asynchronous storage
 //! is supplied through [`CellIoProvider`], including [`FileCellIoProvider`],
-//! and bounded OFPA actor storage through [`FileActorIoProvider`].
+//! bounded OFPA actor storage through [`FileActorIoProvider`], and isolated
+//! multi-file publication/recovery through [`FileWorldTransactionProvider`].
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -33,6 +34,9 @@ mod world;
 pub use filesystem::{
     ActorIoFuture, ActorIoLimits, ActorRevisionBase, ActorSaveReceipt, ActorSaveRequest,
     ActorSnapshot, FileActorIoProvider, FileCellIoError, FileCellIoLimits, FileCellIoProvider,
+    FileWorldTransactionProvider, WorldFileChange, WorldFileSnapshot, WorldFileTarget,
+    WorldTransactionLimits, WorldTransactionReceipt, WorldTransactionRequest,
+    WorldTransactionSnapshot,
 };
 pub use hlod::{
     HlodCluster, HlodError, HlodLayer, HlodPlan, HlodPlanOperation, HlodPlanner, HlodView,
@@ -46,7 +50,8 @@ pub use locks::{CellLockError, CellLockRecord, CellLockRegistry, CellLockToken};
 pub use ofpa::{ActorFileIdentity, ActorRecord, OfpaCatalog, OfpaError, OfpaOperation, OfpaPlan};
 pub use world::{
     CellPayloadError, EditorWorldData, EditorWorldDataError, EditorWorldLimits, LoadSubmitError,
-    PendingActorLoad, PendingActorSave, PendingCellSave, VisibilityPlan,
+    PendingActorLoad, PendingActorSave, PendingCellSave, PendingWorldTransaction, VisibilityPlan,
+    WorldTransactionEdit,
 };
 
 /// A total-order wrapper around the ECS cell coordinate.

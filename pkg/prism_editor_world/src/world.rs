@@ -14,6 +14,8 @@ use super::{CellIoProvider, CellSaveRequest, HlodPlanner};
 
 mod actors;
 pub use actors::{PendingActorLoad, PendingActorSave};
+mod transaction;
+pub use transaction::{PendingWorldTransaction, WorldTransactionEdit};
 
 /// Bounds applied to editor-world metadata and resident payloads.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -287,6 +289,7 @@ pub struct EditorWorldData {
     resident_tokens: BTreeMap<CellKey, TransitionToken>,
     actor_payloads: BTreeMap<StableGuid, std::sync::Arc<[u8]>>,
     persisted_revisions: BTreeMap<CellKey, u64>,
+    transaction_root: Option<(std::path::PathBuf, u64)>,
     ofpa: OfpaCatalog,
     hlod: HlodPlanner,
 }
@@ -305,6 +308,7 @@ impl EditorWorldData {
             resident_tokens: BTreeMap::new(),
             actor_payloads: BTreeMap::new(),
             persisted_revisions: BTreeMap::new(),
+            transaction_root: None,
             ofpa: OfpaCatalog::new(limits.max_actors()),
             hlod: HlodPlanner::new(limits.max_hlod_layers(), limits.max_hlod_clusters()),
         })
@@ -670,6 +674,11 @@ impl EditorWorldData {
     #[must_use]
     pub fn plan_ofpa(&self) -> OfpaPlan {
         self.ofpa.plan()
+    }
+
+    /// Current actor ownership, revision and dirty state after reconciliation.
+    pub fn actor_record(&self, actor: StableGuid) -> Option<&super::ActorRecord> {
+        self.ofpa.actor(actor)
     }
 
     /// Returns a mutable HLOD declaration/planner boundary.

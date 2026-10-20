@@ -19,7 +19,13 @@ use crate::{
 };
 
 mod codec;
+mod transaction;
 mod worker;
+pub use transaction::{
+    FileWorldTransactionProvider, WorldFileChange, WorldFileSnapshot, WorldFileTarget,
+    WorldTransactionLimits, WorldTransactionReceipt, WorldTransactionRequest,
+    WorldTransactionSnapshot,
+};
 
 use codec::{read_cell, read_envelope, write_envelope, EnvelopeIdentity, HEADER_BYTES};
 use worker::{start, Cancellation};
@@ -66,7 +72,7 @@ impl FileCellIoLimits {
     }
 }
 
-/// Failures preserve the old complete cell unless explicitly marked uncertain.
+/// Failures preserve the previous published data unless marked uncertain.
 #[derive(Debug)]
 pub enum FileCellIoError {
     /// Zero capacities or an envelope exceeding the scene storage bound.
@@ -84,9 +90,9 @@ pub enum FileCellIoError {
     },
     /// Invalid envelope, identity, checksum, or exact file length.
     Corrupt(&'static str),
-    /// Another process/provider holds this cell's advisory lock; retry later.
+    /// Another process/provider holds a required advisory lock; retry later.
     Busy,
-    /// The provider's outstanding-operation capacity is full.
+    /// A request, byte, or stored-snapshot capacity would be exceeded.
     Capacity,
     /// A save would overwrite a newer or divergent durable snapshot.
     RevisionConflict {
@@ -100,7 +106,9 @@ pub enum FileCellIoError {
     /// The cooperative deadline expired before publication. Kernel I/O cannot
     /// be interrupted; a commit already inside the fence completes normally.
     TimedOut,
-    /// I/O failed before rename; the previous cell remains authoritative.
+    /// This root is isolated for manifest-based transactions; use its provider.
+    TransactionalRoot,
+    /// I/O failed before publication/decision; previous data remains authoritative.
     Io {
         /// Operation that failed.
         operation: &'static str,
@@ -128,9 +136,13 @@ impl fmt::Display for FileCellIoError {
             ),
             Self::Cancelled => f.write_str("cell I/O cancelled"),
             Self::TimedOut => f.write_str("storage operation deadline expired"),
+            Self::TransactionalRoot => f.write_str("transactional world requires manifest reader"),
             Self::Io { operation, source } => write!(f, "{operation}: {source}"),
             Self::CommitUncertain(source) => {
-                write!(f, "cell replaced but directory sync failed: {source}")
+                write!(
+                    f,
+                    "storage commit needs recovery or durability confirmation: {source}"
+                )
             }
         }
     }
@@ -275,6 +287,7 @@ impl CellIoProvider for FileCellIoProvider {
         }
         let shared = self.shared.clone();
         start(shared.clone(), move |cancel| {
+            let _isolation = shared.legacy_guard()?;
             let directory = shared.directory(false)?;
             let _guard = directory.acquire(request.file(), false)?;
             let path = directory.cell_path(request.file());
@@ -335,6 +348,7 @@ impl Shared {
         payload: &[u8],
         cancel: &Cancellation,
     ) -> Result<(), FileCellIoError> {
+        let _isolation = self.legacy_guard()?;
         cancel.check()?;
         let directory = self.directory(true)?;
         let _guard = directory.acquire(request.file(), true)?;
@@ -581,6 +595,9 @@ impl Drop for Temporary {
 enum TestPhase {
     Staged,
     Renamed,
+    TransactionPrepared,
+    TransactionDecided,
+    TransactionPublished,
 }
 
 #[cfg(test)]

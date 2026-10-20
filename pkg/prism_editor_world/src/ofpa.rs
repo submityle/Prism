@@ -350,6 +350,24 @@ impl OfpaCatalog {
         Ok(())
     }
 
+    pub(crate) fn install_transaction_actor(&mut self, identity: ActorFileIdentity, revision: u64) {
+        self.actors.insert(
+            identity.actor(),
+            ActorRecord {
+                identity,
+                revision,
+                dirty: false,
+                persisted: Some(revision),
+            },
+        );
+        self.bump_epoch();
+    }
+
+    pub(crate) fn remove_transaction_actor(&mut self, actor: StableGuid) {
+        self.actors.remove(&actor);
+        self.bump_epoch();
+    }
+
     pub(crate) fn operation(&self, actor: StableGuid) -> Result<OfpaOperation, OfpaError> {
         let record = self
             .actors
