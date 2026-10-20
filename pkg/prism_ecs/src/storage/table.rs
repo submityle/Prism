@@ -818,7 +818,9 @@ impl Table {
     /// when it is stale** — its cached `bounds_epoch` no longer matches the
     /// chunk's structural epoch (a row moved in/out), the source column differs,
     /// or the column's independent write revision differs (including writes in
-    /// the same tick). An untouched frame costs one staleness test per chunk.
+    /// the same tick). Saturated `u64::MAX` epochs/revisions are always stale,
+    /// avoiding cache aliasing after counter exhaustion. An untouched frame
+    /// costs one staleness test per chunk unless a counter has saturated.
     /// Pass `force` when the projection changes, including captured parameters;
     /// a closure's semantics cannot be inferred from its type or address.
     /// Returns the number of windows recomputed.
@@ -854,8 +856,12 @@ impl Table {
             let revision = column.chunk_revision(chunk);
             let stale = force
                 || meta.bounds_source() != Some(id)
-                || meta.bounds_epoch() != meta.structural_epoch()
-                || revision != meta.bounds_revision();
+                || bounds_metadata_requires_refresh(
+                    meta.structural_epoch(),
+                    meta.bounds_epoch(),
+                    revision,
+                    meta.bounds_revision(),
+                );
             if !stale {
                 continue;
             }
@@ -1134,6 +1140,19 @@ impl Table {
     }
 }
 
+#[inline]
+fn bounds_metadata_requires_refresh(
+    structural_epoch: u64,
+    bounds_epoch: u64,
+    revision: u64,
+    bounds_revision: u64,
+) -> bool {
+    structural_epoch == u64::MAX
+        || structural_epoch != bounds_epoch
+        || revision == u64::MAX
+        || revision != bounds_revision
+}
+
 impl crate::world::World {
     /// Borrow exactly one physical table-column slice. The component id is
     /// derived from THIS world's registry, not supplied by a caller; equal ids
@@ -1215,6 +1234,13 @@ impl Column {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saturated_bounds_epochs_and_revisions_never_reuse_a_cache() {
+        assert!(!bounds_metadata_requires_refresh(7, 7, 9, 9));
+        assert!(bounds_metadata_requires_refresh(u64::MAX, u64::MAX, 9, 9));
+        assert!(bounds_metadata_requires_refresh(7, 7, u64::MAX, u64::MAX));
+    }
     use crate::component::Component;
     use crate::storage::ChunkBounds;
     use crate::world::World;

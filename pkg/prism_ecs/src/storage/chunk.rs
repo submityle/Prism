@@ -273,10 +273,16 @@ impl ChunkChange {
     /// Include a changed tick. Safe for concurrent writers of distinct rows in
     /// one chunk. Relaxed atomics suffice: ECS access barriers synchronize the
     /// values themselves; these atomics only merge metadata without lost writes.
+    /// The independent write revision saturates rather than wrapping; consumers
+    /// must treat `u64::MAX` as permanently dirty.
     #[inline]
     pub fn record(&self, tick: Tick) {
         self.include(Self::pack(tick.get(), 0));
-        self.revision.fetch_add(1, Ordering::Relaxed);
+        let _ = self
+            .revision
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |revision| {
+                revision.checked_add(1)
+            });
         let log = self.event_log.load(Ordering::Acquire);
         if !log.is_null() {
             // SAFETY: the owning ChunkVersions keeps the log alive while the
@@ -981,7 +987,7 @@ impl ChunkVersions {
         };
         // Clamped added ticks can change even if changed ticks do not. Snapshot
         // keys must invalidate for either metadata change, not just endpoint edits.
-        *cell.revision.get_mut() = cell.revision.get_mut().wrapping_add(1);
+        *cell.revision.get_mut() = cell.revision.get_mut().saturating_add(1);
         self.refresh_ancestors(self.leaf_capacity + chunk);
     }
 }
@@ -1154,7 +1160,8 @@ impl Default for ChunkMeta {
 }
 
 impl ChunkMeta {
-    /// The monotonic structural epoch — see the type-level contract.
+    /// The monotonic structural epoch — see the type-level contract. `u64::MAX`
+    /// is a saturated sentinel and requires consumers to invalidate every pass.
     #[inline]
     pub fn structural_epoch(&self) -> u64 {
         self.structural_epoch
@@ -1166,7 +1173,7 @@ impl ChunkMeta {
     /// [`Table`]: crate::storage::Table
     #[inline]
     pub(crate) fn bump_structural(&mut self) {
-        self.structural_epoch = self.structural_epoch.wrapping_add(1);
+        self.structural_epoch = self.structural_epoch.saturating_add(1);
     }
 
     /// The `structural_epoch` at which [`bounds`](Self::bounds) was computed.
@@ -1713,6 +1720,38 @@ mod tests {
         m.lod = 3;
         m.batch_key = 42;
         assert_eq!(m.structural_epoch(), 5);
+    }
+
+    #[test]
+    fn chunk_meta_structural_epoch_saturates_instead_of_aliasing() {
+        let mut m = ChunkMeta::default();
+        m.structural_epoch = u64::MAX - 1;
+        m.bump_structural();
+        assert_eq!(m.structural_epoch(), u64::MAX);
+        m.bump_structural();
+        assert_eq!(m.structural_epoch(), u64::MAX);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn chunk_write_revision_saturates_and_ticks_keep_advancing() {
+        let cell = ChunkChange::new();
+        cell.revision.store(u64::MAX - 31, Ordering::Relaxed);
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                let cell = &cell;
+                scope.spawn(move || {
+                    for _ in 0..16 {
+                        cell.record(Tick::new(20));
+                    }
+                });
+            }
+        });
+
+        // Concurrent increments saturate without wrapping, while the tick
+        // summary still records the writes after the cache counter is full.
+        assert_eq!(cell.revision(), u64::MAX);
+        assert!(cell.may_have_changed(Tick::new(19), Tick::new(20)));
     }
 
     #[test]
