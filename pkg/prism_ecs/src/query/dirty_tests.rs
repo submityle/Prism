@@ -43,6 +43,18 @@ impl Component for SparseDirty {
 struct Tag;
 impl Component for Tag {}
 
+macro_rules! noise_components {
+    ($($name:ident),+ $(,)?) => {
+        $(
+            #[derive(Clone, Copy)]
+            struct $name;
+            impl Component for $name {}
+        )+
+    };
+}
+
+noise_components!(Noise0, Noise1, Noise2, Noise3, Noise4, Noise5);
+
 /// Advance the world as if a system had just finished a run: the next window
 /// starts where this one ended, and the frame tick advances by one.
 fn advance_frame(w: &mut World) {
@@ -221,6 +233,56 @@ fn forward_dirty_window_uses_column_journal_without_scanning_all_archetypes() {
     assert_eq!(report.stats.summaries_tested, 0);
     assert_eq!(report.stats.column_candidates, 0);
     assert_eq!(report.stats.matched_archetypes, 1);
+    assert_eq!(report.chunks.len(), 1);
+}
+
+#[test]
+fn forward_dirty_query_checks_only_changed_archetypes_in_large_world() {
+    let mut w = World::new();
+    for mask in 0_u8..(1 << 6) {
+        let entity = w.spawn(());
+        if mask & (1 << 0) != 0 {
+            w.insert(entity, Noise0);
+        }
+        if mask & (1 << 1) != 0 {
+            w.insert(entity, Noise1);
+        }
+        if mask & (1 << 2) != 0 {
+            w.insert(entity, Noise2);
+        }
+        if mask & (1 << 3) != 0 {
+            w.insert(entity, Noise3);
+        }
+        if mask & (1 << 4) != 0 {
+            w.insert(entity, Noise4);
+        }
+        if mask & (1 << 5) != 0 {
+            w.insert(entity, Noise5);
+        }
+    }
+    let target = w.spawn(Big::new(0));
+    assert_eq!(w.archetypes().len(), 65, "64 noise archetypes + target");
+
+    let state = w.query::<&Big>();
+    let baseline_tick = w.change_tick();
+    let baseline = state.dirty_chunks_with_stats(&w, baseline_tick, baseline_tick);
+    assert!(baseline.chunks.is_empty());
+    assert!(
+        baseline.stats.journal_gap,
+        "first call establishes baseline"
+    );
+
+    advance_frame(&mut w);
+    let last_run = w.last_change_tick();
+    let this_run = w.change_tick();
+    w.get_mut::<Big>(target).unwrap().tag += 1;
+
+    let report = state.dirty_chunks_with_stats(&w, last_run, this_run);
+    assert!(!report.stats.journal_gap);
+    assert_eq!(report.stats.journal_records_scanned, 1);
+    assert_eq!(report.stats.candidate_archetype_checks, 1);
+    assert_eq!(report.stats.matched_archetypes, 1);
+    assert_eq!(report.stats.summaries_tested, 0);
     assert_eq!(report.chunks.len(), 1);
 }
 
