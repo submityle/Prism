@@ -329,12 +329,48 @@ impl Flight {
 struct SchedulerState {
     in_flight: BTreeMap<FlightKey, Arc<Flight>>,
     running: BTreeMap<FlightKey, Arc<Flight>>,
+    // Actual waits between shared flights, distinct from one root's ancestry.
+    // Both edge insertion and cycle detection use the scheduler mutex.
+    dependency_waits: BTreeMap<FlightKey, BTreeSet<FlightKey>>,
+    dependency_parents: BTreeMap<FlightKey, BTreeSet<FlightKey>>,
     reload_reads: BTreeMap<ReloadReadKey, Arc<ReloadReadFlight>>,
     reload_requests: BTreeMap<FlightKey, ReloadRequest>,
     queued: VecDeque<QueuedFlight>,
     admission_waiters: Vec<AdmissionWaiter>,
     next_admission_seq: u64,
     next_reload_serial: u64,
+}
+
+impl SchedulerState {
+    fn remove_wait(&mut self, parent: &FlightKey, dependency: &FlightKey) {
+        if let Some(dependencies) = self.dependency_waits.get_mut(parent) {
+            dependencies.remove(dependency);
+            if dependencies.is_empty() {
+                self.dependency_waits.remove(parent);
+            }
+        }
+        if let Some(parents) = self.dependency_parents.get_mut(dependency) {
+            parents.remove(parent);
+            if parents.is_empty() {
+                self.dependency_parents.remove(dependency);
+            }
+        }
+    }
+
+    fn clear_waits(&mut self, key: &FlightKey) {
+        // Index both directions so completing a flight only visits its own
+        // edges, rather than scanning every waiting parent on every completion.
+        if let Some(dependencies) = self.dependency_waits.remove(key) {
+            for dependency in dependencies {
+                self.remove_wait(key, &dependency);
+            }
+        }
+        if let Some(parents) = self.dependency_parents.remove(key) {
+            for parent in parents {
+                self.remove_wait(&parent, key);
+            }
+        }
+    }
 }
 
 struct ReloadRequest {
@@ -354,6 +390,29 @@ struct AdmissionWaiter {
 enum FlightKey {
     Load(AssetPath),
     Reload { path: AssetPath, serial: u64 },
+}
+
+/// A wait edge exists only while its caller is suspended on that dependency.
+/// Keeping the parent identity also prevents cleanup from touching a newer
+/// flight admitted for the same path after a failed or completed attempt.
+struct DependencyWait {
+    state: Arc<Mutex<SchedulerState>>,
+    parent: FlightKey,
+    parent_flight: Arc<Flight>,
+    dependency: FlightKey,
+}
+
+impl Drop for DependencyWait {
+    fn drop(&mut self) {
+        let mut state = self.state.lock().expect("load scheduler poisoned");
+        if state
+            .in_flight
+            .get(&self.parent)
+            .is_some_and(|flight| Arc::ptr_eq(flight, &self.parent_flight))
+        {
+            state.remove_wait(&self.parent, &self.dependency);
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -520,6 +579,8 @@ impl LoadScheduler {
             state: Arc::new(Mutex::new(SchedulerState {
                 in_flight: BTreeMap::new(),
                 running: BTreeMap::new(),
+                dependency_waits: BTreeMap::new(),
+                dependency_parents: BTreeMap::new(),
                 reload_reads: BTreeMap::new(),
                 reload_requests: BTreeMap::new(),
                 queued: VecDeque::new(),
@@ -950,6 +1011,7 @@ impl LoadScheduler {
                 .is_some_and(|current| Arc::ptr_eq(current, &flight))
             {
                 state.in_flight.remove(&key);
+                state.clear_waits(&key);
             }
             if !state
                 .in_flight
@@ -976,6 +1038,68 @@ impl LoadScheduler {
             );
         }
         Flight::wake_all(admission_wakers);
+    }
+
+    async fn wait_for_dependency(
+        &self,
+        parent_path: &AssetPath,
+        parent_flight: &Arc<Flight>,
+        dependency_path: &AssetPath,
+        ticket: LoadTicket,
+    ) -> ScheduleOutcome {
+        let parent = FlightKey::Load(parent_path.clone());
+        let dependency = FlightKey::Load(dependency_path.clone());
+        let _wait = {
+            let mut state = self.state.lock().expect("load scheduler poisoned");
+            let parent_live = state
+                .in_flight
+                .get(&parent)
+                .is_some_and(|flight| Arc::ptr_eq(flight, parent_flight));
+            let dependency_live = state
+                .in_flight
+                .get(&dependency)
+                .is_some_and(|flight| Arc::ptr_eq(flight, &ticket.flight));
+            if parent_live && dependency_live {
+                // Two separately admitted roots can join each other's flights
+                // without sharing an ancestry set. Reject the final edge of
+                // that cycle before suspending either CPU worker indefinitely.
+                let mut pending = vec![dependency.clone()];
+                let mut visited = BTreeSet::new();
+                while let Some(key) = pending.pop() {
+                    if key == parent {
+                        return Err(LoadFailure::AssemblyFailed(format!(
+                            "dependency cycle at {dependency_path}"
+                        )));
+                    }
+                    if visited.insert(key.clone()) {
+                        if let Some(dependencies) = state.dependency_waits.get(&key) {
+                            pending.extend(dependencies.iter().cloned());
+                        }
+                    }
+                }
+                state
+                    .dependency_waits
+                    .entry(parent.clone())
+                    .or_default()
+                    .insert(dependency.clone());
+                state
+                    .dependency_parents
+                    .entry(dependency.clone())
+                    .or_default()
+                    .insert(parent.clone());
+                Some(DependencyWait {
+                    state: Arc::clone(&self.state),
+                    parent,
+                    parent_flight: Arc::clone(parent_flight),
+                    dependency,
+                })
+            } else {
+                // Completion and map removal are atomic with respect to the
+                // graph. A finished ticket requires no live wait edge.
+                None
+            }
+        };
+        ticket.await
     }
 
     fn admit_queued_locked(&self, state: &mut SchedulerState) -> Vec<QueuedFlight> {
@@ -1220,7 +1344,9 @@ async fn execute_async_load(
             Err(error) => return Err(LoadFailure::AssemblyFailed(error.to_string())),
         };
         flight.priority.inherit(&source_ticket.flight.priority);
-        let source_result = source_ticket.await;
+        let source_result = scheduler
+            .wait_for_dependency(&requested_path, &flight, &source_path, source_ticket)
+            .await;
         return match source_result {
             Ok(handle) if server.is_loaded(handle.id()) => {
                 let handle = server.load_untyped(requested_path.clone()).ok_or_else(|| {
@@ -1338,7 +1464,10 @@ async fn execute_async_load(
         };
         flight.priority.inherit(&ticket.flight.priority);
         let dependency_path = dependency.path.clone();
-        match ticket.await {
+        match scheduler
+            .wait_for_dependency(&requested_path, &flight, &dependency_path, ticket)
+            .await
+        {
             Ok(handle) if server.is_loaded(handle.id()) => dependencies.push(handle),
             Ok(_) => {
                 let error = format!("dependency {} failed to load", dependency_path);
@@ -1395,7 +1524,10 @@ async fn execute_async_load(
             };
             flight.priority.inherit(&ticket.flight.priority);
             let dependency_path = dependency.path.clone();
-            match ticket.await {
+            match scheduler
+                .wait_for_dependency(&requested_path, &flight, &dependency_path, ticket)
+                .await
+            {
                 Ok(handle) if server.is_loaded(handle.id()) => resolved.push(handle),
                 Ok(_) => {
                     let error = format!("dependency {} failed to load", dependency_path);

@@ -16,6 +16,12 @@
 
 ## 实施状态（2026-10-20）
 
+运行时共享加载的等待图已补齐独立根请求间的 cycle gate，覆盖普通依赖、直接
+label → source 和 labeled 输出依赖；flight 结束按双向索引清理边。五项有界、
+无 sleep 的受控并发回归通过，完整 `prism_asset` 默认配置共 322 项测试通过
+（258 单元、63 集成、1 文档），0 失败、0 忽略。这是运行时死锁正确性修复，
+不代表增量解码、完整 EDL、Build Cook 或规模性能验收完成。
+
 2026-10-20 Profile 规划增量：`ImportRecipe::plan_with_profile` 在 DDC 查询前通过
 `ProfileReader` 配置 owned processor，自动把实际读取字段的同一投影写入 ArtifactKey
 和 `BuildInputSnapshot`；条件分支选择字段、缺失的可选字段同样计入依赖，未读取字段

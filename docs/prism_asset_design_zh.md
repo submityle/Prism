@@ -22,6 +22,15 @@
 
 ### 实施状态（2026-10-20）
 
+异步共享 flight 现增加独立的等待图：在 scheduler mutex 下原子执行加边与环检测，
+覆盖祖先链无法发现的独立根请求互等，以及直接 label → source 和 labeled 输出
+依赖形成的交叉等待。flight 完成按双向索引清理关联边，等待结束的 RAII 清理校验
+父 flight 身份，避免路径复用时删除新任务状态。`tests/scheduler_wait_cycles.rs`
+的五项受控并发回归覆盖两节点/三节点环、无环共享 diamond、两类 label 交叉环和
+失败后恢复；不以 sleep 证明并发。2026-10-20 完整 `prism_asset` 默认配置回归
+通过 258 项单元、63 项集成和 1 项文档测试，共 322 项，0 失败、0 忽略。
+这项修复不改变下述同步解码 ABI 或完整 EDL 的未完成边界。
+
 容器现提供独立的 GPU 常驻范围输出：`GpuBlockDecodeBackend::bind_validated_chunk`
 以完整 stored-container hash 将已完成普通挂载校验的 reader 绑定到不可变
 `Arc<[u8]>`，复用 BlockIndex 验证记录并核对内外层 payload hash。
