@@ -17,7 +17,7 @@ pass，不提交、不等待、不读回，必须由调用者在提交 encoder �
 高度、半径和 origin 先以 signed-i128 limbs 上传，再在 shader 中转换为 `f32`。完整的 i64
 CPU 配置、tile、region 和样本仍保存在 `GpuPlanetPlacementCacheKey` 中。该切片
 提供 GPU placement 资源和 indirect 输出，不宣称与 CPU `place_on_planet_heightfield` 的
-i64 毫米坐标逐位相等，也不包含 scene/ECS、renderer graph、跨 LOD seam 或真实设备回归。
+i64 毫米坐标逐位相等，也不包含 scene/ECS、renderer graph 或跨 LOD seam。`planet_placement_deletion` 已在 Apple M2 / Metal / IntegratedGpu 上对包含该 placement producer 的真实 compute pipeline 完成 1 项 dispatch/readback 回归；这不是 placement 与 CPU i64 几何的逐位 parity 证明。
 
 离线无设备验证：
 

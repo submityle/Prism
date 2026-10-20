@@ -28,7 +28,7 @@ cargo test --offline -p prism_world_gpu --features terrain_scatter \
   --test planet_placement_deletion -- --nocapture --test-threads=1
 ```
 
-该测试在没有可用硬件 adapter 时明确失败而不是静默跳过。本机当前曾报告 Metal 没有可用 adapter，因此真实 GPU parity 尚未形成通过证据；这不影响 Naga 和 host preflight 测试的通过结论。
+该测试在没有可用硬件 adapter 时明确失败而不是静默跳过。2026-10-20 已在 Apple M2 / Metal / IntegratedGpu 上通过 1 项：真实创建 placement 与 deletion compute pipeline，提交 dispatch，读回 indirect/compact/records，并确认删除一个完整键后仍保留其余三个 cell。受限沙盒内的同一命令因无 Metal adapter 失败，不计作通过；本条证据来自宿主机跨沙盒运行。
 
 ## 边界
 

@@ -225,12 +225,12 @@ impl GpuPlanetPlacementDeletions {
             label: Some("planet placement deletion layout"),
             entries: &[
                 uniform_entry(0),
-                storage_entry(1, false),
-                storage_entry(2, false),
-                storage_entry(3, false),
-                storage_entry(4, false),
-                storage_entry(5, true),
-                storage_entry(6, true),
+                storage_entry(1, true),
+                storage_entry(2, true),
+                storage_entry(3, true),
+                storage_entry(4, true),
+                storage_entry(5, false),
+                storage_entry(6, false),
             ],
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
