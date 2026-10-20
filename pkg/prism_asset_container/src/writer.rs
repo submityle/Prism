@@ -381,7 +381,8 @@ impl ContainerWriter {
 
     /// Emits the v2 chunk-table layout. Each planned chunk is encoded
     /// independently, preserving raw offsets inside the chunk so a request
-    /// touches only its owning chunk.
+    /// touches only its owning chunk. Physical starts are computed after
+    /// encoding: incompressible data and block indexes may exceed raw sizes.
     pub fn finish_with_chunk_compression(
         self,
         plan: &ChunkPlan,
@@ -480,7 +481,14 @@ impl ContainerWriter {
         let payload_alignment = plan
             .chunks
             .iter()
-            .fold(chunk_alignment, |a, c| a.max(c.start_alignment));
+            .fold(chunk_alignment, |a, c| a.max(c.start_alignment))
+            .max(
+                self.entries
+                    .values()
+                    .map(|entry| u64::from(entry.alignment))
+                    .max()
+                    .unwrap_or(1),
+            );
         let payload_start = align_up(table_end, payload_alignment)?;
 
         let mut raw_chunks = Vec::with_capacity(plan.chunks.len());
@@ -509,21 +517,24 @@ impl ContainerWriter {
             raw_chunks.push((raw, stored));
         }
 
-        for ((chunk, (_, stored)), next_chunk) in plan
-            .chunks
-            .iter()
-            .zip(raw_chunks.iter())
-            .zip(plan.chunks.iter().skip(1))
-        {
-            let stored_end = chunk
-                .offset
-                .checked_add(
-                    u64::try_from(stored.len()).map_err(|_| ContainerError::IntegerOverflow)?,
-                )
+        // The planner describes raw membership and offsets, not encoded
+        // extents. Reserve both extents to satisfy v2's non-overlap contract.
+        let mut physical_offsets = Vec::with_capacity(plan.chunks.len());
+        let mut physical_end = 0_u64;
+        for (chunk, (_, stored)) in plan.chunks.iter().zip(raw_chunks.iter()) {
+            let alignment = chunk.placements.iter().fold(
+                chunk_alignment.max(chunk.start_alignment),
+                |alignment, placement| {
+                    alignment.max(u64::from(self.entries[&placement.guid].alignment))
+                },
+            );
+            let offset = align_up(physical_end, alignment)?;
+            let stored_len =
+                u64::try_from(stored.len()).map_err(|_| ContainerError::IntegerOverflow)?;
+            physical_end = offset
+                .checked_add(chunk.raw_size.max(stored_len))
                 .ok_or(ContainerError::IntegerOverflow)?;
-            if stored_end > next_chunk.offset {
-                return Err(ContainerError::InvalidDirectory);
-            }
+            physical_offsets.push(offset);
         }
 
         let mut directory = Vec::with_capacity(directory_len);
@@ -532,12 +543,11 @@ impl ContainerWriter {
                 .get(guid)
                 .copied()
                 .ok_or(ContainerError::InvalidDirectory)?;
-            let chunk = plan
-                .chunks
+            let physical_offset = physical_offsets
                 .get(chunk_id)
                 .ok_or(ContainerError::InvalidDirectory)?;
             let absolute = payload_start
-                .checked_add(chunk.offset)
+                .checked_add(*physical_offset)
                 .and_then(|v| v.checked_add(placement.offset))
                 .ok_or(ContainerError::IntegerOverflow)?;
             if absolute % u64::from(entry.alignment) != 0 {
@@ -557,10 +567,10 @@ impl ContainerWriter {
             directory.extend_from_slice(&0_u32.to_le_bytes());
         }
         let mut table = Vec::with_capacity(table_len);
-        for (chunk, (raw, stored)) in plan.chunks.iter().zip(raw_chunks.iter()) {
+        for (offset, (raw, stored)) in physical_offsets.iter().zip(raw_chunks.iter()) {
             table.extend_from_slice(
                 &payload_start
-                    .checked_add(chunk.offset)
+                    .checked_add(*offset)
                     .ok_or(ContainerError::IntegerOverflow)?
                     .to_le_bytes(),
             );
@@ -580,19 +590,6 @@ impl ContainerWriter {
             table.extend_from_slice(&0_u32.to_le_bytes());
         }
 
-        let stored_end = plan.chunks.iter().zip(raw_chunks.iter()).try_fold(
-            0_u64,
-            |end, (chunk, (_, stored))| {
-                chunk
-                    .offset
-                    .checked_add(
-                        u64::try_from(stored.len()).map_err(|_| ContainerError::IntegerOverflow)?,
-                    )
-                    .map(|chunk_end| end.max(chunk_end))
-                    .ok_or(ContainerError::IntegerOverflow)
-            },
-        )?;
-        let physical_end = previous_end.max(stored_end);
         let total_len_u64 = payload_start
             .checked_add(physical_end)
             .ok_or(ContainerError::IntegerOverflow)?;
@@ -615,10 +612,10 @@ impl ContainerWriter {
         let table_start =
             usize::try_from(table_offset).map_err(|_| ContainerError::IntegerOverflow)?;
         out[table_start..table_start + table_len].copy_from_slice(&table);
-        for (chunk, (_, stored)) in plan.chunks.iter().zip(raw_chunks.iter()) {
+        for (offset, (_, stored)) in physical_offsets.iter().zip(raw_chunks.iter()) {
             let start = usize::try_from(
                 payload_start
-                    .checked_add(chunk.offset)
+                    .checked_add(*offset)
                     .ok_or(ContainerError::IntegerOverflow)?,
             )
             .map_err(|_| ContainerError::IntegerOverflow)?;

@@ -1,8 +1,7 @@
 //! Integration coverage for the standalone block-addressed codec.
 //!
-//! The main crate should register this file as a `[[test]]` target after
-//! exposing `prism_asset_container::block`.  The tests deliberately exercise
-//! the public source/range contract rather than private implementation state.
+//! The tests exercise the public source/range contract, including physical
+//! relocation of expanded chunks and rejection of malformed wire layouts.
 
 use alloc::sync::Arc;
 use std::sync::Mutex;
@@ -193,7 +192,7 @@ fn container_chunk_codec_round_trips_and_serves_ranges() {
 }
 
 #[test]
-fn container_writer_rejects_block_payload_overlap_with_next_chunk() {
+fn container_writer_relocates_expanded_blocks_and_reader_rejects_physical_overlap() {
     let first = StableGuid::from_path("block-overlap-first.asset");
     let second = StableGuid::from_path("block-overlap-second.asset");
     let mut writer = ContainerWriter::new();
@@ -226,10 +225,35 @@ fn container_writer_rejects_block_payload_overlap_with_next_chunk() {
     ])
     .expect("two one-byte chunks are planned");
 
-    assert_eq!(
-        writer.finish_with_chunk_compression(&plan, 1, Codec::BlockDeflate),
-        Err(ContainerError::InvalidDirectory)
-    );
+    let mut bytes = writer
+        .finish_with_chunk_compression(&plan, 1, Codec::BlockDeflate)
+        .expect("encoded chunk starts account for block-index overhead");
+    let reader = ContainerReader::new(bytes.clone()).expect("expanded layout is valid");
+    let first_chunk = reader.chunk(0).unwrap();
+    let second_chunk = reader.chunk(1).unwrap();
+    assert!(first_chunk.stored_len > first_chunk.raw_len);
+    assert!(second_chunk.offset >= first_chunk.offset + first_chunk.stored_len);
+    assert_eq!(reader.read_all(first).unwrap(), [1]);
+    assert_eq!(reader.read_all(second).unwrap(), [2]);
+    assert_eq!(reader.entry(first).unwrap().raw_offset, 0);
+    assert_eq!(reader.entry(second).unwrap().raw_offset, 0);
+
+    let table_offset = usize::try_from(u64::from_le_bytes(bytes[40..48].try_into().unwrap()))
+        .expect("table offset fits");
+    let table_len = usize::try_from(u64::from_le_bytes(bytes[48..56].try_into().unwrap()))
+        .expect("table length fits");
+    assert_eq!(table_len, 128);
+    bytes[table_offset + 64..table_offset + 72].copy_from_slice(&first_chunk.offset.to_le_bytes());
+    let table_hash = *blake3::hash(&bytes[table_offset..table_offset + table_len]).as_bytes();
+    bytes[104..136].copy_from_slice(&table_hash);
+    assert!(matches!(
+        ContainerReader::new(bytes.clone()),
+        Err(ContainerError::OutOfBounds)
+    ));
+    assert!(matches!(
+        ContainerReader::from_range_source(Arc::new(MemoryRangeSource::new(bytes))),
+        Err(ContainerError::OutOfBounds)
+    ));
 }
 
 #[test]

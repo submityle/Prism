@@ -1737,6 +1737,97 @@ fn version_two_chunk_table_round_trips_and_is_a_closed_set() {
 }
 
 #[test]
+fn version_two_relocates_expanded_chunks_without_changing_raw_placements() {
+    for codec in [Codec::Raw, Codec::Deflate, Codec::BlockDeflate] {
+        for alignments in [[64, 64, 64], [64, 256, 128]] {
+            let ids = [guid("expanded-a"), guid("expanded-b"), guid("expanded-c")];
+            let payload_len = *alignments.iter().max().unwrap();
+            let payloads: Vec<Vec<u8>> = (0..3)
+                .map(|index| {
+                    let mut state = 0x9e37_79b9_u32.wrapping_add(index);
+                    (0..payload_len)
+                        .map(|_| {
+                            state ^= state << 13;
+                            state ^= state >> 17;
+                            state ^= state << 5;
+                            state as u8
+                        })
+                        .collect()
+                })
+                .collect();
+            let policy = ChunkPolicy {
+                max_chunk_size: payload_len,
+                chunk_alignment: 64,
+                max_chunks: 3,
+            };
+            let plan = ChunkPlanner::new(policy)
+                .plan((0..3).map(|index| ChunkInput {
+                    guid: ids[index],
+                    size: payloads[index].len() as u64,
+                    alignment: alignments[index],
+                    dependencies: vec![],
+                    priority: (3 - index) as u32,
+                }))
+                .unwrap();
+            assert_eq!(plan.chunks.len(), 3);
+            let encode = |plan: &crate::ChunkPlan| {
+                let mut writer = ContainerWriter::new();
+                for index in 0..3 {
+                    writer
+                        .add_aligned(
+                            ids[index],
+                            payloads[index].clone(),
+                            alignments[index] as u32,
+                        )
+                        .unwrap();
+                }
+                writer.finish_with_chunk_compression(plan, policy.chunk_alignment, codec)
+            };
+            let bytes = encode(&plan).unwrap();
+            assert_eq!(bytes, encode(&plan).unwrap());
+            let total_len = bytes.len() as u64;
+            let source = CappedRangeSource {
+                bytes: Arc::from(bytes.clone()),
+                maximum_read: 17,
+                requests: Arc::new(Mutex::new(Vec::new())),
+                fail_after: Mutex::new(None),
+            };
+            let requests = Arc::clone(&source.requests);
+            let reader = ContainerReader::from_range_source(Arc::new(source)).unwrap();
+            let memory_reader = ContainerReader::new(bytes).unwrap();
+            let mut end = 0;
+            for index in 0..3 {
+                let chunk = reader.chunk(index as u32).unwrap();
+                assert!(chunk.offset >= end);
+                assert_eq!(chunk.offset % alignments[index], 0);
+                if codec != Codec::Raw {
+                    assert!(chunk.stored_len > chunk.raw_len);
+                }
+                end = chunk.offset + chunk.stored_len.max(chunk.raw_len);
+                let entry = reader.entry(ids[index]).unwrap();
+                assert_eq!(entry.chunk_id, plan.assignments[&ids[index]] as u32);
+                assert_eq!(entry.raw_offset, plan.chunks[index].placements[0].offset);
+                assert_eq!(reader.read_all(ids[index]).unwrap(), payloads[index]);
+                assert_eq!(memory_reader.read_all(ids[index]).unwrap(), payloads[index]);
+                requests.lock().unwrap().clear();
+                let mut range = [0; 19];
+                reader.read_range(ids[index], 7, &mut range).unwrap();
+                assert_eq!(range.as_slice(), &payloads[index][7..26]);
+                for &(offset, len) in requests.lock().unwrap().iter() {
+                    assert!(len <= 17);
+                    assert!(offset >= chunk.offset);
+                    assert!(offset + len as u64 <= chunk.offset + chunk.stored_len);
+                }
+            }
+            assert_eq!(end, total_len);
+            let mut invalid_plan = plan.clone();
+            invalid_plan.chunks[1].offset += 64;
+            assert_eq!(encode(&invalid_plan), Err(ContainerError::InvalidDirectory));
+        }
+    }
+}
+
+#[test]
 fn version_two_raw_range_batching_uses_chunk_local_offsets() {
     let first = guid("chunk-range-first");
     let second = guid("chunk-range-second");

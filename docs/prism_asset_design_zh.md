@@ -27,7 +27,9 @@
 单元大小、展开比例、输出、累计挂载校验工作量和活跃字节缓冲。批次在首次 I/O
 前完整验证，重复输出分别计费，同一压缩 payload/Chunk 只读解一次；v2 挂载最多
 保留一个解码 Chunk。Manifest/VFS owned-range 也在输出分配前门禁。
-`cargo test -p prism_asset_container --all-targets --all-features` 本轮通过 86+8+10 项测试。该预算不是
+`cargo test -j 1 -p prism_asset_container --all-targets --all-features --quiet` 于 2026-10-20
+通过 87 项单元测试、8 项 `block_format` 集成测试和 10 项 `read_budget` 集成测试，
+共 105 项，0 失败、0 跳过。该预算不是
 整个进程的精确 heap 限额；返回值驻留、元数据树节点与 codec 内部状态不计入
 活跃字节缓冲。新增的 `BlockDeflate` 已提供 v2 Chunk 内独立 block 表、逐 block
 Raw/raw-DEFLATE、block hash、完整 payload hash、按逻辑范围只读取命中 block，以及
@@ -42,15 +44,17 @@ range-backed reader 的严格 budget/布局校验；GPU 解压、远程/GPU 交�
 
 本地发布包现额外生成 `provenance.bin`：它以 canonical bytes 绑定当前 Build Manifest、每个 Artifact、Runtime Publication 与每个 Container 的 revision/hash/长度/依赖事实，并由 CLI `package` 写入、`validate` 严格解码和逐字节复核。该 descriptor 不声称包含远程 Worker、源码提交、密钥托管或跨机器信任根证明。
 
-本轮新增的 `FeedbackDemandQueue` 已完成代码和回归测试：它按 source revision 隔离反馈，执行去重合并、确定性排序、过期淘汰、top-K 容量限制，并可批量生成 `PageResidency` 请求；`prism_render_app` 现把外部已解码 feedback 以每帧 admission 上限接入 CPU fixed-page residency，并有 Null backend 与可用真实 adapter 时的上传/读回测试。反馈解码、GPU feedback buffer/page-table 生成与读回仍不在此切片内，因此这不代表完整纹理驻留闭环已经完成。
+本轮新增的 `FeedbackDemandQueue` 已完成代码和回归测试：它按 source revision 隔离反馈，执行去重合并、确定性排序、过期淘汰、top-K 容量限制，并可批量生成 `PageResidency` 请求；`prism_render_app` 现把外部已解码 feedback 以每帧 admission 上限接入 CPU fixed-page residency，并有 Null backend 与可用真实 adapter 时的上传/读回测试。仓库的渲染侧 `feedback.rs` 已有真实 feedback texture copy/readback，但资产系统尚未把该结果统一接入解码、page-table 生成和 residency 淘汰；`prism_asset` 仍只消费已解码 `FeedbackDemand`，因此这不代表完整纹理驻留闭环已经完成。
 
 以下状态只记录仓库中已存在、可运行并有测试覆盖的能力，不把设计文字当作实现。容器安全边界同时以实现的读路径为准：挂载时校验的是当时读取到的完整字节；range source 在 reader 生命周期内必须保持不可变；整 payload `read_all` 再校验 entry digest，局部 `read_range` 不提供密码学子范围认证（详见 §10.5）。
+
+2026-10-20 的容器回归另证明：v2 writer 会在每个 chunk 编码完成后重新计算物理位置，压缩膨胀不会破坏 RAW 计划的逻辑放置和对齐；编码后的 raw/stored 物理范围均不重叠，伪造 Chunk Table 物理重叠会被 memory reader 与 range reader 以 `OutOfBounds` 拒绝。RAW、Deflate、BlockDeflate 和混合对齐组合均覆盖，恶意 RAW plan 仍会被 writer 拒绝。
 
 本轮异步调度切片补充了直接 `path#label` 请求，以及 reload 候选对新普通依赖和 sibling 新 label 的递归读取/解码/原子提交：调度器复用源资产的锁外读取、解码、依赖等待和原子 labeled 提交，成功返回精确子资产句柄；源资产已驻留时走同一解析路径，未知 label 终态失败但不污染已成功的源 revision。`AssetLoader::read_plan` 现可声明 `Whole` 或受限的物理 range 列表；同步 `AssetServer`、初次异步加载和异步 reload 都会先校验 metadata/范围/预算/短读，再按声明顺序拼接为一个连续输入交给既有 `load(&[u8], ...)`。这不是通用部分格式解码或完整 EDL；GPU 上传仍按下文状态单独验收。
 
 本轮还把已验证的运行时消费边界向下游接通：`prism_asset_container` 提供可选 `mmap` feature 下的只读 `MmapRangeSource`，仍沿用 immutable-file 前提和既有容器校验；`prism_world_runtime` 的 opt-in `asset_container` feature 提供 `AssetContainerCellProvider`，将 `CellReadRequest::manifest().scene_key` 映射为 `StableGuid`，在分配前校验 route 长度，在读前/读后检查取消，并校验零物理偏移、完整 payload 长度、可选 checksum 与既有 cell header。该 provider 是同步兼容 I/O：已开始的阻塞容器读不可被中断，不解析场景、不上传 GPU、也不提供 GPU-direct I/O。
 
-本轮还落地了运行时 API 收口：`#[derive(Asset)]` 与 `#[derive(VisitAssetDependencies)]` 支持嵌套字段/集合遍历并拒绝无法推导的泛型；`LoadPriority` 已作用于排队的 I/O/CPU 工作，SoftHandle 批次在 admission 前执行请求数、唯一根资产数、类型和容量检查；`AssetFallbacks` 保持真实加载状态不变，`RetainCache` 对驻留值执行显式字节/条目预扣、KeepAlive/LRU/Pinned 策略和确定性淘汰。AssetServer 的同帧 fixpoint 回收不会重复推进 KeepAlive 计龄。上述代码已提交，但完整 Cargo 验证仍需在磁盘空间恢复后补跑；这些能力也不改变完整 EDL、GPU 解码或远程交付尚未完成的边界。
+本轮还落地了运行时 API 收口：`#[derive(Asset)]` 与 `#[derive(VisitAssetDependencies)]` 支持嵌套字段/集合遍历并拒绝无法推导的泛型；`LoadPriority` 已作用于排队的 I/O/CPU 工作，SoftHandle 批次在 admission 前执行请求数、唯一根资产数、类型和容量检查；`AssetFallbacks` 保持真实加载状态不变，`RetainCache` 对驻留值执行显式字节/条目预扣、KeepAlive/LRU/Pinned 策略和确定性淘汰。AssetServer 的同帧 fixpoint 回收不会重复推进 KeepAlive 计龄。相关能力已提交；当前完整 workspace Cargo 验证仍受并发物理模块的编译错误阻断，不能把该阻断误写成资产模块已全绿。这些能力也不改变完整 EDL、GPU 解码或远程交付尚未完成的边界。
 
 - **已完成**：`prism_asset` M0/M1 核（稳定身份、句柄、代际存储、依赖图、加载状态、错误注册、loader 选择与同步 `AssetServer`/VFS）；`prism_asset_container` 的 v1 原始 payload 容器与 v2 独立 Chunk Table 容器读写、严格目录/Chunk Table/哈希/对齐/填充校验、Raw 与确定性 raw-DEFLATE、按 payload 范围读取与优先级 overlay；ChunkPlanner/Writer 的起始对齐约束、Runtime Manifest 的 manifest/chunk priority 传递、同名容器 remount 替换旧 mount，以及基于 `RangeSource` 的文件按范围读取（含 positional I/O、并发读取、短读/截断/篡改门禁）均已有测试覆盖。
 - **部分完成**：M2 已有同步装配之上的 bounded scheduler facade，以及 `AsyncStreamIoExecutor`；后者使用现有 `prism_tasks::TaskPool`，在 controller 锁外真实调用 `AssetSources::read_range`，覆盖提交、预算拒绝、失败释放、读前取消和读中协作取消。当前还交付了有限的 M2.1 锁外完整读/解码/依赖等待/提交切片：不同路径可并行进入 source read，I/O 与 CPU 使用独立池，父资产只在依赖成功后发布，失败和环会终态失败；`max_in_flight` 现在限制并发 assembly 执行槽位，父资产等待依赖时释放槽位，依赖按逐项推进进入有界优先级队列后再恢复父装配，根请求仍在容量满时快速失败，队列溢出会显式终态失败而不是无界累积。初次异步 load 现在会为主资产的 labeled 输出建立稳定身份、校验类型、解析其声明的普通依赖，并把主资产、label graph 和 retained closure 一次性提交；重复标签、类型不一致、依赖失败和环不会发布部分 revision。异步 reload 目前可递归读取并暂存新普通依赖、label 对应源和 sibling 新 label 的依赖，所有候选在一次 revision-local commit 中发布；重复 label、类型变化、依赖失败、cycle、source overlay 变化、旧 epoch supersede 和超出候选上限都会保留旧值、旧图和旧 retained closure。`RangeAssemblyPlan`/`assemble_ranges`/`assemble_ranges_async` 已补齐显式 range 的 bounded 并行读取、严格短读与预算门禁、按声明顺序拼接及协作取消；其 loader-declared read plan 已接入同步加载、初次异步加载和异步 reload，解码 ABI 仍接收连续字节，因此完整 EDL 的增量依赖就绪、真正可抢占 worker 和 GPU 上传闭环仍未完成。直接请求 `path#label` 已复用源资产的异步装配并返回精确 labeled handle，未知 label 会终态失败且不污染已成功的源 revision。
