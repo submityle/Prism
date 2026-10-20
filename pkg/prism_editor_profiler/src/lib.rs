@@ -15,11 +15,21 @@ pub mod frame;
 pub mod frame_graph;
 #[cfg(feature = "gpu")]
 pub mod gpu;
+pub mod graph_capture;
 pub mod memory;
 pub mod visual_log;
 
 pub use frame::{Frame, FrameId, FrameStore, Span, SpanId, SpanNode, SpanTree};
 pub use frame_graph::{CriticalPath, FrameGraph, GraphNode, GraphNodeId};
+#[cfg(feature = "render-graph")]
+pub use graph_capture::architecture::{
+    capture_feature_graph, capture_runtime_graph, GraphCaptureInputs,
+};
+pub use graph_capture::{
+    CapturedDependencyKind, CapturedGraphAccess, CapturedGraphBudget, CapturedGraphDependency,
+    CapturedGraphPass, CapturedGraphResource, CapturedResourceLayout, GraphCaptureLimits,
+    GraphCaptureReport, GraphCaptureSource, GraphPassTiming, GraphTimingSource,
+};
 pub use memory::{MemoryAlert, MemoryBudget, MemoryProfile, MemorySample, MemorySeverity};
 pub use visual_log::{
     TrackProjection, VisualEvent, VisualEventId, VisualLog, VisualPrimitive, VisualTrack,

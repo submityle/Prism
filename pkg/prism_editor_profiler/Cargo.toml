@@ -11,9 +11,15 @@ publish = false
 default = []
 gpu = ["dep:wgpu"]
 gpu-tests = ["gpu", "wgpu/wgsl"]
+render-graph = ["dep:prism_render_architecture", "dep:prism_render_graph"]
 
 [dependencies]
+prism_render_architecture = { path = "../prism_render_architecture", optional = true }
+prism_render_graph = { path = "../prism_render_graph", optional = true }
 wgpu = { version = "30", default-features = false, features = ["std", "metal", "vulkan", "dx12"], optional = true }
+
+[dev-dependencies]
+prism_render_driver = { path = "../prism_render_driver" }
 
 [[test]]
 name = "gpu_capture"

@@ -19,6 +19,10 @@ matches.
   stores a bounded ordered frame timeline.
 - `frame_graph` validates pass/node dependencies and computes a deterministic
   topological order and weighted critical path.
+- `graph_capture` provides bounded deterministic diagnostic serialization/replay.
+  Optional `render-graph` captures real render-architecture compiled/prepared
+  graphs, preserving SSA, explicit/hazard edges, resource descriptors and budgets.
+  Integration contract: `docs/prism_editor_frame_graph_capture_zh.md`.
 - `memory` records category samples and turns warning/over-budget thresholds
   into deterministic alerts.
 - `visual_log` stores structured primitives and projects intersecting events
