@@ -449,7 +449,7 @@ app.add_plugins(
 1. **协议与 reflect 耦合深**:schema 漂移是主要复杂度来源;靠版本化迁移链 + 握手指纹兜底,但跨版本协同需严格 CI 覆盖。
 2. **零拷贝 vs 安全**:同进程零拷贝绕过序列化,也绕过部分不可信边界——仅在**同信任域**(编辑器内嵌运行时)启用,跨进程一律走安全编解码。
 3. **命令权威历史的存储成本**:长编辑会话历史增长;需配额 + 快照压缩(复用 `prism_ecs` 的 `SnapshotDelta` 思路)。
-4. **BRP 桥接过渡期双实现**:`bevy_remote` 与 `prism_editor_remote` 并存期需明确哪条通路权威,避免双写;以 refactor plan 的 pkg 优先定调逐步内化。
+4. **协议边界迁移**:历史 BRP 形态只能作为语义参照；当前 `prism_editor_remote` 的协议、codec、TCP/stdio bridge 和 PIE 由 Prism 自己拥有，运行时不得再引入 `bevy_remote` 或其他 Bevy 依赖，避免双写与双重权威。
 5. **远程暴露的安全责任**:默认回环 + 显式告警,但用户配置对外监听仍可能误配;文档与运行时告警双重提示。
 6. **采样/背压的可感知性**:降采样可能让编辑器显示滞后;需在 UI 明示「遥测降级中」,不伪装实时。
 
@@ -458,9 +458,9 @@ app.add_plugins(
 ## 19. 诚实边界(SHIPPED vs PLANNED)
 
 - ✅ **已存在底座(非本 crate)**:`bevy_remote` 的 BRP(JSON-RPC 2.0 / `world.*` + `+watch` / `observe` / HTTP:15702 / strict 语义 / `error_codes`)、`prism_reflect`(TypeRegistry / StableTypeId / ReflectSerialize / 反射驱动序列化 / schema 版本化迁移 / `net_delta` DirtyMask 字段增量 / 不可信反序列化安全边界:分配上限夹到剩余字节、不 panic、未注册类型拒绝 / property_bridge)、`prism_tasks`(work-stealing + FrameArenas + join)、`prism_ui_store` / `prism_ui_async`。
-- ⬜ **全部 PLANNED(本 crate 尚未创建)**:`prism_editor_remote` 的 protocol / transport(除概念外无实现)/ session / codec 绑定 / delta 采集 / methods / command 通路 / security 拦截器 / server 插件 / client SDK。本文档所有 `rust` 代码块与方法表均为**设计意图**,不代表已实现。
-- ⬜ **依赖未落地项**:`command.*` 需编辑器命令内核;`pick.*`/`gizmo.*` 需 S13 拾取迁移 + Gizmo pkg;`asset.*` 的流/热重载需 `prism_asset` 后续里程碑。
-- 诚实约束:协议本体为自研;过渡期在服务端**复用**开源 `bevy_remote` 的方法实现并逐步内化,不抄任何 Unreal/Unity/Omniverse 源码,仅借公开架构形态。
+- ✅ **当前已实现**:`prism_editor_remote` 的 protocol / transport / session / binary codec / JSON-RPC methods / PIE / TCP / 受控 stdio/TCP 进程桥和有界取消/重启/超时清理均已存在于 `pkg/prism_editor_remote`，并有单元与子进程集成测试；实现不依赖 Bevy、ECS 或渲染器。
+- ⬜ **仍需产品化**:真实 Prism runtime adapter、生产身份认证/TLS/权限与部署策略，以及 `asset.*` 流/热重载和 `pick.*`/`gizmo.*` 的宿主适配仍需分别接入；loopback adapter 与子进程 fixture 不冒充生产运行时。
+- 诚实约束:协议本体为自研；BRP/`bevy_remote` 只保留为历史公开形态参照，不复用其代码或运行时依赖，不抄任何 Unreal/Unity/Omniverse 源码，仅借公开架构形态。
 
 ---
 
@@ -476,4 +476,4 @@ app.add_plugins(
 
 ---
 
-> 本文为 `prism_editor_remote` 的 v1 设计规格。实现须遵循仓库 `prism_bevy_refactor_plan_zh.md` 的「pkg 优先、`prism_*` 为唯一真相源」方向,与 `prism_editor_framework_design_zh.md`(§4/§13 BRP 前置待建)、`prism_reflect_design_zh.md`(序列化/安全/net_delta)、`prism_tasks_design_zh.md`(异步/背压)、`prism_asset_design_zh.md`(资产通路)协同演进。所有 Prism crate 不含任何 Unreal Engine / Unity / Omniverse 源码或衍生代码;仅借鉴公开架构形态与经典协议数值。
+> 本文为 `prism_editor_remote` 的 v1 设计规格。实现须遵循仓库 `prism_bevy_refactor_plan_zh.md` 的「pkg 优先、`prism_*` 为唯一真相源」方向；当前协议底座已落地，后续以 `prism_editor_framework_design_zh.md` 的真实 runtime adapter、生产安全和宿主适配门禁为准，并与 `prism_reflect_design_zh.md`(序列化/安全/net_delta)、`prism_tasks_design_zh.md`(异步/背压)、`prism_asset_design_zh.md`(资产通路)协同演进。所有 Prism crate 不含任何 Unreal Engine / Unity / Omniverse 源码或衍生代码；BRP/Bevy 仅作公开形态参照。
