@@ -106,6 +106,7 @@ members = [
   "pkg/prism_ui_dock",
   # Prism experimental next-generation physics engine.
   "pkg/prism_physics_core",
+  "pkg/prism_particle_app",
   "pkg/prism_physics_geometry",
   "pkg/prism_physics_gpu",
   # Prism SER ray-coherence GPU radix twin (device sort validated vs CPU golden).
