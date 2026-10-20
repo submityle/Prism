@@ -244,11 +244,7 @@ impl<'a, H: SceneHost, D: TerrainCellDecoder> PhysicsCellHost<'a, H, D> {
         manifest: &CellManifest,
         decoded: &TerrainCellSnapshot,
     ) -> Result<
-        (
-            WorldHeightfieldPhysicsResidency,
-            BTreeMap<SectorId, Vec<TileKey>>,
-            BTreeMap<TileKey, SectorId>,
-        ),
+        (WorldHeightfieldPhysicsResidency, Vec<TileKey>),
         PhysicsCellHostError<D::Error, H::Error>,
     > {
         if decoded.sector() != manifest.sector {
@@ -257,23 +253,24 @@ impl<'a, H: SceneHost, D: TerrainCellDecoder> PhysicsCellHost<'a, H, D> {
                 decoded: decoded.sector(),
             });
         }
+        // The height samples are the only deep clone. Its cost is capped by the
+        // explicit aggregate residency budget; the two global ownership indexes
+        // are validated in place and committed as a per-cell delta after the
+        // downstream host succeeds.
         let mut residency = self.residency.clone();
-        let mut cell_tiles = self.cell_tiles.clone();
-        let mut tile_owners = self.tile_owners.clone();
-        if let Some(old_tiles) = cell_tiles.remove(&manifest.sector) {
-            for tile in old_tiles {
-                if residency.evict(tile).is_none() {
-                    return Err(PhysicsCellHostError::ResidencyInvariant {
-                        sector: manifest.sector,
-                        tile,
-                    });
-                }
-                if tile_owners.remove(&tile) != Some(manifest.sector) {
-                    return Err(PhysicsCellHostError::ResidencyInvariant {
-                        sector: manifest.sector,
-                        tile,
-                    });
-                }
+        let old_tiles = self
+            .cell_tiles
+            .get(&manifest.sector)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        for &tile in old_tiles {
+            if residency.evict(tile).is_none()
+                || self.tile_owners.get(&tile).copied() != Some(manifest.sector)
+            {
+                return Err(PhysicsCellHostError::ResidencyInvariant {
+                    sector: manifest.sector,
+                    tile,
+                });
             }
         }
         let mut next_tiles = Vec::new();
@@ -281,20 +278,46 @@ impl<'a, H: SceneHost, D: TerrainCellDecoder> PhysicsCellHost<'a, H, D> {
             .try_reserve(decoded.heightfields().len())
             .map_err(|_| PhysicsCellHostError::AllocationFailed)?;
         for input in decoded.heightfields() {
-            if let Some(&owner) = tile_owners.get(&input.tile()) {
-                return Err(PhysicsCellHostError::TileOwnedByOtherCell {
-                    tile: input.tile(),
-                    owner,
-                });
+            if let Some(&owner) = self.tile_owners.get(&input.tile()) {
+                if owner != manifest.sector {
+                    return Err(PhysicsCellHostError::TileOwnedByOtherCell {
+                        tile: input.tile(),
+                        owner,
+                    });
+                }
+                if old_tiles.binary_search(&input.tile()).is_err() {
+                    return Err(PhysicsCellHostError::ResidencyInvariant {
+                        sector: manifest.sector,
+                        tile: input.tile(),
+                    });
+                }
             }
             residency
                 .publish(input.heightfield(), input.embedding())
                 .map_err(PhysicsCellHostError::Physics)?;
             next_tiles.push(input.tile());
-            tile_owners.insert(input.tile(), manifest.sector);
         }
-        cell_tiles.insert(manifest.sector, next_tiles);
-        Ok((residency, cell_tiles, tile_owners))
+        Ok((residency, next_tiles))
+    }
+
+    fn commit_cell(
+        &mut self,
+        sector: SectorId,
+        residency: WorldHeightfieldPhysicsResidency,
+        next_tiles: Vec<TileKey>,
+    ) {
+        if let Some(old_tiles) = self.cell_tiles.remove(&sector) {
+            for tile in old_tiles {
+                let previous_owner = self.tile_owners.remove(&tile);
+                debug_assert_eq!(previous_owner, Some(sector));
+            }
+        }
+        for &tile in &next_tiles {
+            let previous_owner = self.tile_owners.insert(tile, sector);
+            debug_assert!(previous_owner.is_none());
+        }
+        self.cell_tiles.insert(sector, next_tiles);
+        self.residency = residency;
     }
 }
 
@@ -306,26 +329,21 @@ impl<H: SceneHost, D: TerrainCellDecoder> SceneHost for PhysicsCellHost<'_, H, D
             .decoder
             .decode(manifest, payload)
             .map_err(PhysicsCellHostError::Decoder)?;
-        let (residency, cell_tiles, tile_owners) = self.stage_cell(manifest, &decoded)?;
+        let (residency, next_tiles) = self.stage_cell(manifest, &decoded)?;
         self.host
             .load_cell(manifest, payload)
             .map_err(PhysicsCellHostError::Host)?;
-        self.residency = residency;
-        self.cell_tiles = cell_tiles;
-        self.tile_owners = tile_owners;
+        self.commit_cell(manifest.sector, residency, next_tiles);
         Ok(())
     }
 
     fn evict_cell(&mut self, sector: SectorId) -> Result<(), Self::Error> {
         let mut residency = self.residency.clone();
-        let mut cell_tiles = self.cell_tiles.clone();
-        let mut tile_owners = self.tile_owners.clone();
-        if let Some(tiles) = cell_tiles.remove(&sector) {
-            for tile in tiles {
-                if residency.evict(tile).is_none() {
-                    return Err(PhysicsCellHostError::ResidencyInvariant { sector, tile });
-                }
-                if tile_owners.remove(&tile) != Some(sector) {
+        if let Some(tiles) = self.cell_tiles.get(&sector) {
+            for &tile in tiles {
+                if residency.evict(tile).is_none()
+                    || self.tile_owners.get(&tile).copied() != Some(sector)
+                {
                     return Err(PhysicsCellHostError::ResidencyInvariant { sector, tile });
                 }
             }
@@ -333,9 +351,13 @@ impl<H: SceneHost, D: TerrainCellDecoder> SceneHost for PhysicsCellHost<'_, H, D
         self.host
             .evict_cell(sector)
             .map_err(PhysicsCellHostError::Host)?;
+        if let Some(tiles) = self.cell_tiles.remove(&sector) {
+            for tile in tiles {
+                let previous_owner = self.tile_owners.remove(&tile);
+                debug_assert_eq!(previous_owner, Some(sector));
+            }
+        }
         self.residency = residency;
-        self.cell_tiles = cell_tiles;
-        self.tile_owners = tile_owners;
         Ok(())
     }
 }
@@ -366,9 +388,12 @@ mod tests {
 
     impl std::error::Error for TestError {}
 
+    #[derive(Default)]
     struct Host {
         reject_load: bool,
         reject_evict: bool,
+        panic_load: bool,
+        panic_evict: bool,
         loads: usize,
         evictions: usize,
     }
@@ -381,6 +406,7 @@ mod tests {
             _manifest: &CellManifest,
             _payload: &[u8],
         ) -> Result<(), Self::Error> {
+            assert!(!self.panic_load, "load panicked");
             if self.reject_load {
                 return Err(TestError("load rejected"));
             }
@@ -389,6 +415,7 @@ mod tests {
         }
 
         fn evict_cell(&mut self, _sector: SectorId) -> Result<(), Self::Error> {
+            assert!(!self.panic_evict, "eviction panicked");
             if self.reject_evict {
                 return Err(TestError("eviction rejected"));
             }
@@ -470,12 +497,7 @@ mod tests {
             snapshot: TerrainCellSnapshot::new(sector, vec![first]).unwrap(),
             reject: false,
         };
-        let mut host = Host {
-            reject_load: false,
-            reject_evict: false,
-            loads: 0,
-            evictions: 0,
-        };
+        let mut host = Host::default();
         let mut adapter = adapter(&mut host, decoder);
         adapter.load_cell(&manifest(0), b"first").unwrap();
         assert!(adapter
@@ -502,28 +524,36 @@ mod tests {
     #[test]
     fn decoder_and_manifest_failures_do_not_call_host_or_mutate_residency() {
         let sector = SectorId::new(0, 0, 0, 0);
+        let tile = TileKey::root(CubeFace::PositiveY);
         let decoder = Decoder {
-            snapshot: TerrainCellSnapshot::new(
-                SectorId::new(0, 9, 0, 0),
-                vec![terrain(TileKey::root(CubeFace::PositiveY))],
-            )
-            .unwrap(),
+            snapshot: TerrainCellSnapshot::new(sector, vec![terrain(tile)]).unwrap(),
             reject: false,
         };
-        let mut host = Host {
-            reject_load: false,
-            reject_evict: false,
-            loads: 0,
-            evictions: 0,
-        };
+        let mut host = Host::default();
         let mut adapter = adapter(&mut host, decoder);
+        adapter.load_cell(&manifest(0), b"good").unwrap();
+        adapter.decoder_mut().reject = true;
+        assert!(matches!(
+            adapter.load_cell(&manifest(0), b"decode-error"),
+            Err(PhysicsCellHostError::Decoder(TestError("decode rejected")))
+        ));
+        assert_eq!(adapter.host.loads, 1);
+        assert!(adapter.residency().snapshot(tile).is_some());
+
+        adapter.decoder_mut().reject = false;
+        adapter.decoder_mut().snapshot = TerrainCellSnapshot::new(
+            SectorId::new(0, 9, 0, 0),
+            vec![terrain(TileKey::root(CubeFace::NegativeY))],
+        )
+        .unwrap();
         assert!(matches!(
             adapter.load_cell(&manifest(0), b"bad-sector"),
             Err(PhysicsCellHostError::ManifestSectorMismatch { manifest: actual, decoded })
                 if actual == sector && decoded == SectorId::new(0, 9, 0, 0)
         ));
-        assert_eq!(adapter.host.loads, 0);
-        assert!(adapter.residency().snapshots().is_empty());
+        assert_eq!(adapter.host.loads, 1);
+        assert_eq!(adapter.residency().snapshots().len(), 1);
+        assert!(adapter.residency().snapshot(tile).is_some());
     }
 
     #[test]
@@ -534,12 +564,7 @@ mod tests {
             snapshot: TerrainCellSnapshot::new(sector, vec![terrain(tile)]).unwrap(),
             reject: false,
         };
-        let mut host = Host {
-            reject_load: false,
-            reject_evict: false,
-            loads: 0,
-            evictions: 0,
-        };
+        let mut host = Host::default();
         let mut adapter = adapter(&mut host, decoder);
         adapter.load_cell(&manifest(0), b"payload").unwrap();
         adapter.host.reject_evict = true;
@@ -552,5 +577,195 @@ mod tests {
         adapter.evict_cell(sector).unwrap();
         assert!(adapter.residency().snapshot(tile).is_none());
         assert_eq!(host.evictions, 1);
+    }
+
+    #[test]
+    fn snapshot_rejects_duplicate_tiles_and_orders_distinct_tiles() {
+        let sector = SectorId::new(0, 0, 0, 0);
+        let positive = TileKey::root(CubeFace::PositiveY);
+        let negative = TileKey::root(CubeFace::NegativeY);
+        assert!(matches!(
+            TerrainCellSnapshot::new(sector, vec![terrain(positive), terrain(positive)]),
+            Err(TerrainCellSnapshotError::DuplicateTile { tile }) if tile == positive
+        ));
+
+        let snapshot =
+            TerrainCellSnapshot::new(sector, vec![terrain(positive), terrain(negative)]).unwrap();
+        let tiles = snapshot
+            .heightfields()
+            .iter()
+            .map(DecodedTerrainHeightfield::tile)
+            .collect::<Vec<_>>();
+        let mut expected = vec![positive, negative];
+        expected.sort_unstable();
+        assert_eq!(tiles, expected);
+    }
+
+    #[test]
+    fn successful_reload_replaces_only_the_cells_previous_tiles() {
+        let sector = SectorId::new(0, 0, 0, 0);
+        let first = TileKey::root(CubeFace::PositiveY);
+        let second = TileKey::root(CubeFace::NegativeY);
+        let decoder = Decoder {
+            snapshot: TerrainCellSnapshot::new(sector, vec![terrain(first)]).unwrap(),
+            reject: false,
+        };
+        let mut host = Host::default();
+        let mut adapter = adapter(&mut host, decoder);
+        adapter.load_cell(&manifest(0), b"first").unwrap();
+        adapter.decoder_mut().snapshot =
+            TerrainCellSnapshot::new(sector, vec![terrain(second)]).unwrap();
+        adapter.load_cell(&manifest(0), b"second").unwrap();
+
+        assert!(adapter.residency().snapshot(first).is_none());
+        assert!(adapter.residency().snapshot(second).is_some());
+        assert_eq!(adapter.host.loads, 2);
+        assert_eq!(adapter.cell_tiles.get(&sector), Some(&vec![second]));
+        assert_eq!(adapter.tile_owners.get(&second), Some(&sector));
+    }
+
+    #[test]
+    fn cross_cell_ownership_conflict_preserves_residency_and_host_state() {
+        let first_sector = SectorId::new(0, 0, 0, 0);
+        let second_sector = SectorId::new(0, 1, 0, 0);
+        let tile = TileKey::root(CubeFace::PositiveY);
+        let decoder = Decoder {
+            snapshot: TerrainCellSnapshot::new(first_sector, vec![terrain(tile)]).unwrap(),
+            reject: false,
+        };
+        let mut host = Host::default();
+        let mut adapter = adapter(&mut host, decoder);
+        adapter.load_cell(&manifest(0), b"first").unwrap();
+        adapter.decoder_mut().snapshot =
+            TerrainCellSnapshot::new(second_sector, vec![terrain(tile)]).unwrap();
+
+        assert!(matches!(
+            adapter.load_cell(&manifest(1), b"conflict"),
+            Err(PhysicsCellHostError::TileOwnedByOtherCell { tile: actual, owner })
+                if actual == tile && owner == first_sector
+        ));
+        assert_eq!(adapter.host.loads, 1);
+        assert!(adapter.residency().snapshot(tile).is_some());
+        assert_eq!(adapter.tile_owners.get(&tile), Some(&first_sector));
+        assert!(!adapter.cell_tiles.contains_key(&second_sector));
+    }
+
+    #[test]
+    fn aggregate_budget_failure_preserves_previous_cell_snapshot() {
+        let sector = SectorId::new(0, 0, 0, 0);
+        let old = TileKey::root(CubeFace::PositiveY);
+        let decoder = Decoder {
+            snapshot: TerrainCellSnapshot::new(sector, vec![terrain(old)]).unwrap(),
+            reject: false,
+        };
+        let mut host = Host::default();
+        let mut adapter = adapter(&mut host, decoder);
+        adapter.load_cell(&manifest(0), b"old").unwrap();
+        adapter.decoder_mut().snapshot = TerrainCellSnapshot::new(
+            sector,
+            vec![
+                terrain(TileKey::root(CubeFace::NegativeY)),
+                terrain(TileKey::root(CubeFace::PositiveX)),
+                terrain(TileKey::root(CubeFace::NegativeX)),
+            ],
+        )
+        .unwrap();
+
+        assert!(matches!(
+            adapter.load_cell(&manifest(0), b"too-large"),
+            Err(PhysicsCellHostError::Physics(
+                HeightfieldBridgeError::ResidentTileCapacityExceeded {
+                    required: 3,
+                    capacity: 2
+                }
+            ))
+        ));
+        assert_eq!(adapter.host.loads, 1);
+        assert_eq!(adapter.residency().snapshots().len(), 1);
+        assert!(adapter.residency().snapshot(old).is_some());
+    }
+
+    #[test]
+    fn multiple_cells_keep_stable_order_and_exact_aggregate_accounting() {
+        let first_sector = SectorId::new(0, 0, 0, 0);
+        let second_sector = SectorId::new(0, 1, 0, 0);
+        let first = TileKey::root(CubeFace::PositiveY);
+        let second = TileKey::root(CubeFace::NegativeY);
+        let decoder = Decoder {
+            snapshot: TerrainCellSnapshot::new(first_sector, vec![terrain(first)]).unwrap(),
+            reject: false,
+        };
+        let mut host = Host::default();
+        let mut adapter = adapter(&mut host, decoder);
+        adapter.load_cell(&manifest(0), b"first").unwrap();
+        adapter.decoder_mut().snapshot =
+            TerrainCellSnapshot::new(second_sector, vec![terrain(second)]).unwrap();
+        adapter.load_cell(&manifest(1), b"second").unwrap();
+
+        let tiles = adapter
+            .residency()
+            .snapshots()
+            .iter()
+            .map(PhysicsHeightfieldSnapshot::tile)
+            .collect::<Vec<_>>();
+        let mut expected = vec![first, second];
+        expected.sort_unstable();
+        assert_eq!(tiles, expected);
+        assert_eq!(adapter.residency().resident_samples(), 18);
+        assert_eq!(adapter.residency().resident_upload_bytes(), 136);
+    }
+
+    #[test]
+    fn empty_cell_and_unknown_eviction_have_explicit_host_semantics() {
+        let sector = SectorId::new(0, 0, 0, 0);
+        let unknown = SectorId::new(0, 9, 0, 0);
+        let decoder = Decoder {
+            snapshot: TerrainCellSnapshot::new(sector, Vec::new()).unwrap(),
+            reject: false,
+        };
+        let mut host = Host::default();
+        let mut adapter = adapter(&mut host, decoder);
+        adapter.load_cell(&manifest(0), b"empty").unwrap();
+        assert!(adapter.residency().snapshots().is_empty());
+        assert_eq!(adapter.cell_tiles.get(&sector), Some(&Vec::new()));
+
+        adapter.evict_cell(unknown).unwrap();
+        assert_eq!(adapter.host.evictions, 1);
+        assert!(adapter.cell_tiles.contains_key(&sector));
+        adapter.evict_cell(sector).unwrap();
+        assert_eq!(adapter.host.evictions, 2);
+        assert!(!adapter.cell_tiles.contains_key(&sector));
+    }
+
+    #[test]
+    fn downstream_panics_leave_committed_physics_state_unchanged() {
+        let sector = SectorId::new(0, 0, 0, 0);
+        let first = TileKey::root(CubeFace::PositiveY);
+        let second = TileKey::root(CubeFace::NegativeY);
+        let decoder = Decoder {
+            snapshot: TerrainCellSnapshot::new(sector, vec![terrain(first)]).unwrap(),
+            reject: false,
+        };
+        let mut host = Host::default();
+        let mut adapter = adapter(&mut host, decoder);
+        adapter.load_cell(&manifest(0), b"first").unwrap();
+        adapter.decoder_mut().snapshot =
+            TerrainCellSnapshot::new(sector, vec![terrain(second)]).unwrap();
+        adapter.host.panic_load = true;
+        let load_panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = adapter.load_cell(&manifest(0), b"panic");
+        }));
+        assert!(load_panic.is_err());
+        assert!(adapter.residency().snapshot(first).is_some());
+        assert!(adapter.residency().snapshot(second).is_none());
+
+        adapter.host.panic_load = false;
+        adapter.host.panic_evict = true;
+        let evict_panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = adapter.evict_cell(sector);
+        }));
+        assert!(evict_panic.is_err());
+        assert!(adapter.residency().snapshot(first).is_some());
+        assert_eq!(adapter.tile_owners.get(&first), Some(&sector));
     }
 }
