@@ -21,6 +21,7 @@ use crate::{
 };
 
 mod box_selection;
+use box_selection::BoxSelectionPipeline;
 pub use box_selection::{
     GpuBoxSelectionError, GpuBoxSelectionLimits, InFlightBoxSelectionReadback,
     PendingBoxSelectionReadback,
@@ -362,6 +363,7 @@ pub struct GpuPickingBackend {
     target: Texture,
     target_view: TextureView,
     depth_view: TextureView,
+    box_selection_pipeline: BoxSelectionPipeline,
     config: GpuPickingConfig,
     max_dimension: u32,
 }
@@ -397,12 +399,14 @@ impl GpuPickingBackend {
 
         let (target, target_view) = create_target(device, config);
         let depth_view = create_depth_target(device, config);
+        let box_selection_pipeline = BoxSelectionPipeline::new(device);
         Ok(Self {
             device: device.clone(),
             queue: queue.clone(),
             target,
             target_view,
             depth_view,
+            box_selection_pipeline,
             config,
             max_dimension,
         })

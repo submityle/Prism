@@ -187,7 +187,7 @@ impl Harness {
             .expect("render");
         let pending = frame
             .encode_box_readback(&mut encoder, request, limits)
-            .expect("rectangle copy");
+            .expect("rectangle reduction");
         target.backend().submit_box_readback(encoder, pending)
     }
 }
@@ -388,7 +388,7 @@ fn indexed_gpu_camera_resize_resources_sink_and_stale_readbacks() {
 }
 
 #[test]
-fn indexed_gpu_bounded_rectangle_copy_and_shared_submission() {
+fn indexed_gpu_bounded_rectangle_gpu_reduction_and_shared_submission() {
     let Some(mut h) = Harness::new() else { return };
     let limits = GpuBoxSelectionLimits {
         max_pixels: 512,
@@ -415,7 +415,8 @@ fn indexed_gpu_bounded_rectangle_copy_and_shared_submission() {
         .record_commit(&commit, &mut h.renderer)
         .expect("sink add");
 
-    // Exact nonzero origin and non-aligned row width, not a full-target readback.
+    // Exact nonzero origin and a rectangle smaller than the target; the result
+    // comes from the GPU hash reduction, not a full-target readback.
     for (rectangle, expected) in [
         (
             PixelRect::new(18, 12, 27, 20).expect("both"),
@@ -533,7 +534,7 @@ fn indexed_gpu_bounded_rectangle_copy_and_shared_submission() {
         ));
         let box_pending = frame
             .encode_box_readback(&mut encoder, request, limits)
-            .expect("box copy");
+            .expect("box reduction");
         let point_pending = frame
             .encode_readback(&mut encoder, point_request)
             .expect("point copy");
@@ -555,7 +556,7 @@ fn indexed_gpu_bounded_rectangle_copy_and_shared_submission() {
         boxes.resolve(&h.viewport, Some(h.state()), &h.scene, result),
         SelectionOutcome::Accepted(vec![object(u64::MAX - 1), object(u64::MAX)])
     );
-    test_support::diagnostic(format_args!("EXERCISED indexed GPU bounded rectangle copy/nonzero origin/padded rows/occluded dedup/miss/capacity failure/shared point+box submission"));
+    test_support::diagnostic(format_args!("EXERCISED indexed GPU box reduction/nonzero origin/occluded dedup/miss/capacity failure/shared point+box submission"));
 }
 
 #[test]

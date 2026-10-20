@@ -1,22 +1,22 @@
-//! Bounded rectangular GPU copy and padded-row ID parsing.
+//! Bounded rectangular GPU scan and compact ID readback.
 
-use alloc::{collections::BTreeSet, vec::Vec};
+use alloc::vec::Vec;
 use core::fmt;
 use std::sync::mpsc;
 
 use super::{
     validate_correlation, EncodedPickId, GpuPickingBackend, GpuPickingConfig, GpuPickingError,
-    GpuPickingFrame, ID_BUFFER_BYTES_PER_TEXEL, READBACK_ROW_ALIGNMENT,
+    GpuPickingFrame,
 };
 use crate::{BoxSelectionRequest, BoxSelectionResult, PixelRect};
 
-/// Explicit per-copy limits. The caller also bounds concurrent in-flight GPU
+/// Explicit per-scan limits. The caller also bounds concurrent in-flight GPU
 /// buffers; the coordinator's pending bound alone does not own these buffers.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GpuBoxSelectionLimits {
-    /// Maximum number of actual pixels copied (not row padding).
+    /// Maximum number of rectangle pixels scanned by the compute pass.
     pub max_pixels: u64,
-    /// Maximum padded staging-buffer bytes, also capped by device limits.
+    /// Maximum compact reduction staging-buffer bytes, also capped by device limits.
     pub max_bytes: u64,
     /// Maximum unique nonzero IDs returned. Exceeding it fails, never truncates.
     /// Set no higher than the associated coordinator's `max_hits`.
@@ -33,14 +33,14 @@ impl Default for GpuBoxSelectionLimits {
     }
 }
 
-/// Rectangular copy/map/parse failure. No partial selection is returned.
+/// Rectangular scan/map/parse failure. No partial selection is returned.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum GpuBoxSelectionError {
     /// Frame identity or GPU readback failure.
     Picking(GpuPickingError),
     /// The requested inclusive-exclusive rectangle exceeds the target.
     RectangleOutOfBounds,
-    /// Row alignment, buffer sizing, or native address space overflowed.
+    /// Buffer sizing, dispatch sizing, or native address space overflowed.
     LayoutOverflow,
     /// Pixel count exceeds the configured bound.
     PixelLimitExceeded {
@@ -49,7 +49,7 @@ pub enum GpuBoxSelectionError {
         /// Configured maximum.
         limit: u64,
     },
-    /// Padded byte count exceeds the configured or native device bound.
+    /// Reduction or staging byte count exceeds the configured or native device bound.
     ByteLimitExceeded {
         /// Required bytes.
         bytes: u64,
@@ -60,6 +60,20 @@ pub enum GpuBoxSelectionError {
     IdLimitExceeded {
         /// Configured maximum.
         limit: usize,
+    },
+    /// The compute dispatch would exceed the device's workgroup dimension.
+    DispatchLimitExceeded {
+        /// Required workgroups.
+        groups: u64,
+        /// Device workgroup limit.
+        limit: u32,
+    },
+    /// GPU reduction output did not match its reported insertion count.
+    ReductionInvariantViolation {
+        /// Count reported by the GPU.
+        reported: u32,
+        /// Non-empty slots observed in the mapped reduction table.
+        observed: usize,
     },
 }
 
@@ -78,23 +92,117 @@ impl From<GpuPickingError> for GpuBoxSelectionError {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct CopyLayout {
+struct ReductionLayout {
     width: u32,
     height: u32,
-    row_bytes: u32,
-    buffer_bytes: u64,
+    pixel_count: u32,
+    table_capacity: u32,
+    values_bytes: u64,
+    readback_bytes: u64,
 }
 
-/// Encoded rectangle copy, waiting for a shared-queue submission.
+/// The cached GPU compute pipeline used for all box selections on one backend.
+pub(crate) struct BoxSelectionPipeline {
+    pipeline: wgpu::ComputePipeline,
+    layout: wgpu::BindGroupLayout,
+}
+
+impl fmt::Debug for BoxSelectionPipeline {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BoxSelectionPipeline")
+            .finish_non_exhaustive()
+    }
+}
+
+impl BoxSelectionPipeline {
+    pub(crate) fn new(device: &wgpu::Device) -> Self {
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("prism-editor-box-selection-shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../box_selection.wgsl").into()),
+        });
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("prism-editor-box-selection-bind-group-layout"),
+            entries: &[
+                buffer_layout(
+                    0,
+                    wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Uint,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                buffer_layout(
+                    2,
+                    wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+                buffer_layout(
+                    3,
+                    wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+                buffer_layout(
+                    4,
+                    wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+            ],
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("prism-editor-box-selection-pipeline-layout"),
+            bind_group_layouts: &[Some(&layout)],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("prism-editor-box-selection-pipeline"),
+            layout: Some(&pipeline_layout),
+            module: &module,
+            entry_point: Some("main"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            cache: None,
+        });
+        Self { pipeline, layout }
+    }
+}
+
+fn buffer_layout(binding: u32, ty: wgpu::BindingType) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        ty,
+        count: None,
+    }
+}
+
+/// Encoded rectangle reduction, waiting for a shared-queue submission.
 #[derive(Debug)]
 pub struct PendingBoxSelectionReadback {
     request: BoxSelectionRequest,
     buffer: wgpu::Buffer,
-    layout: CopyLayout,
+    layout: ReductionLayout,
     max_ids: usize,
 }
 
-/// Submitted rectangle copy, polled without blocking. Owns its device/buffer
+/// Submitted rectangle reduction, polled without blocking. Owns its device/buffer
 /// and can complete after resize or closure; current-state resolution is still
 /// mandatory. Drop cancels mapping and releases the staging allocation.
 pub struct InFlightBoxSelectionReadback {
@@ -121,8 +229,8 @@ impl InFlightBoxSelectionReadback {
     }
 
     /// Polls device progress and delivers a result or error at most once.
-    /// IDs are deduplicated on CPU from only the requested rectangle, ignoring
-    /// zero/miss and row padding. This is not a GPU reduction algorithm.
+    /// The mapped buffer contains the GPU's unique-ID hash table; the host only
+    /// extracts its non-empty slots and never scans the source rectangle.
     pub fn poll(&mut self) -> Result<Option<BoxSelectionResult>, GpuBoxSelectionError> {
         if self.completed {
             return Ok(None);
@@ -158,9 +266,9 @@ impl Drop for InFlightBoxSelectionReadback {
 }
 
 impl GpuPickingFrame<'_> {
-    /// Copies the requested rectangle into a bounded, 256-byte-row-aligned
-    /// staging buffer. Rejects stale identity, out-of-bounds region and resource
-    /// limits before allocating or recording commands. No full-target fallback.
+    /// Scans the requested rectangle on the GPU and records a bounded compact
+    /// reduction readback. Rejects stale identity, empty/out-of-bounds regions,
+    /// and resource limits before allocating or recording commands.
     pub fn encode_box_readback(
         &self,
         encoder: &mut wgpu::CommandEncoder,
@@ -176,44 +284,82 @@ impl GpuPickingFrame<'_> {
             request.target_generation,
             request.target_handle,
         )?;
-        let layout = copy_layout(
+        let layout = reduction_layout(
             self.backend.config,
             request.rectangle,
             limits,
             self.backend.device.limits().max_buffer_size,
+            self.backend.device.limits().max_storage_buffer_binding_size,
+            self.backend
+                .device
+                .limits()
+                .max_compute_workgroups_per_dimension,
         )?;
+        let params = create_params_buffer(&self.backend.device, request.rectangle, &layout, limits);
+        let locks = create_zeroed_buffer(
+            &self.backend.device,
+            "prism-editor-box-selection-locks",
+            u64::from(layout.table_capacity) * 4,
+            wgpu::BufferUsages::STORAGE,
+        );
+        let values = create_zeroed_buffer(
+            &self.backend.device,
+            "prism-editor-box-selection-values",
+            layout.values_bytes,
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        );
+        let stats = create_zeroed_buffer(
+            &self.backend.device,
+            "prism-editor-box-selection-stats",
+            8,
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        );
         let buffer = self.backend.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("prism-editor-box-readback"),
-            size: layout.buffer_bytes,
+            label: Some("prism-editor-box-selection-readback"),
+            size: layout.readback_bytes,
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let min = request.rectangle.min();
-        encoder.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo {
-                texture: &self.backend.target,
-                mip_level: 0,
-                origin: wgpu::Origin3d {
-                    x: min.x,
-                    y: min.y,
-                    z: 0,
-                },
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyBufferInfo {
-                buffer: &buffer,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(layout.row_bytes),
-                    rows_per_image: Some(layout.height),
-                },
-            },
-            wgpu::Extent3d {
-                width: layout.width,
-                height: layout.height,
-                depth_or_array_layers: 1,
-            },
-        );
+        let bind_group = self
+            .backend
+            .device
+            .create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("prism-editor-box-selection-bind-group"),
+                layout: &self.backend.box_selection_pipeline.layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: params.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&self.backend.target_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: locks.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: values.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: stats.as_entire_binding(),
+                    },
+                ],
+            });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("prism-editor-box-selection-pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.backend.box_selection_pipeline.pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.dispatch_workgroups(layout.pixel_count.div_ceil(64), 1, 1);
+        }
+        encoder.copy_buffer_to_buffer(&values, 0, &buffer, 0, layout.values_bytes);
+        encoder.copy_buffer_to_buffer(&stats, 0, &buffer, layout.values_bytes, 8);
         Ok(PendingBoxSelectionReadback {
             request,
             buffer,
@@ -224,7 +370,7 @@ impl GpuPickingFrame<'_> {
 }
 
 impl GpuPickingBackend {
-    /// Submits an encoder containing the rectangle copy and starts mapping.
+    /// Submits an encoder containing the rectangle reduction and starts mapping.
     pub fn submit_box_readback(
         &self,
         encoder: wgpu::CommandEncoder,
@@ -234,7 +380,7 @@ impl GpuPickingBackend {
         self.start_box_readback(pending)
     }
 
-    /// Starts mapping after the host has submitted the rectangle copy to the
+    /// Starts mapping after the host has submitted the rectangle reduction to the
     /// shared queue. Supports batching several copies with surface/color work.
     pub fn start_box_readback(
         &self,
@@ -271,13 +417,78 @@ impl GpuPickingBackend {
     }
 }
 
-fn copy_layout(
+fn create_zeroed_buffer(
+    device: &wgpu::Device,
+    label: &str,
+    size: u64,
+    usage: wgpu::BufferUsages,
+) -> wgpu::Buffer {
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some(label),
+        size,
+        usage,
+        mapped_at_creation: true,
+    });
+    let mut mapped = buffer
+        .slice(..)
+        .get_mapped_range_mut()
+        .expect("newly mapped buffer");
+    mapped.copy_from_slice(&vec![0; usize::try_from(size).expect("mapped buffer size")]);
+    drop(mapped);
+    buffer.unmap();
+    buffer
+}
+
+fn create_params_buffer(
+    device: &wgpu::Device,
+    rectangle: PixelRect,
+    layout: &ReductionLayout,
+    limits: GpuBoxSelectionLimits,
+) -> wgpu::Buffer {
+    let min = rectangle.min();
+    let words = [
+        min.x,
+        min.y,
+        layout.width,
+        layout.height,
+        layout.table_capacity - 1,
+        u32::try_from(limits.max_ids).expect("reduction layout validates max_ids"),
+        0,
+        0,
+    ];
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("prism-editor-box-selection-params"),
+        size: 32,
+        usage: wgpu::BufferUsages::UNIFORM,
+        mapped_at_creation: true,
+    });
+    {
+        let mut mapped = buffer
+            .slice(..)
+            .get_mapped_range_mut()
+            .expect("newly mapped uniform buffer");
+        for (index, word) in words.into_iter().enumerate() {
+            mapped
+                .slice(index * 4..index * 4 + 4)
+                .copy_from_slice(&word.to_le_bytes());
+        }
+    }
+    buffer.unmap();
+    buffer
+}
+
+fn reduction_layout(
     config: GpuPickingConfig,
     rectangle: PixelRect,
     limits: GpuBoxSelectionLimits,
     max_buffer_size: u64,
-) -> Result<CopyLayout, GpuBoxSelectionError> {
+    max_storage_buffer_binding_size: u64,
+    max_compute_workgroups_per_dimension: u32,
+) -> Result<ReductionLayout, GpuBoxSelectionError> {
     let max = rectangle.max();
+    if rectangle.width() == 0 || rectangle.height() == 0 {
+        return Err(GpuBoxSelectionError::RectangleOutOfBounds);
+    }
     if max.x > config.width || max.y > config.height {
         return Err(GpuBoxSelectionError::RectangleOutOfBounds);
     }
@@ -290,59 +501,102 @@ fn copy_layout(
             limit: limits.max_pixels,
         });
     }
-    let alignment = u64::from(READBACK_ROW_ALIGNMENT);
-    let row_bytes =
-        (u64::from(width) * u64::from(ID_BUFFER_BYTES_PER_TEXEL)).div_ceil(alignment) * alignment;
-    let row_bytes = u32::try_from(row_bytes).map_err(|_| GpuBoxSelectionError::LayoutOverflow)?;
-    let buffer_bytes = u64::from(row_bytes) * u64::from(height);
-    let limit = limits.max_bytes.min(max_buffer_size).min(usize::MAX as u64);
-    if buffer_bytes > limit {
-        return Err(GpuBoxSelectionError::ByteLimitExceeded {
-            bytes: buffer_bytes,
-            limit,
+    let pixel_count = u32::try_from(pixels).map_err(|_| GpuBoxSelectionError::LayoutOverflow)?;
+    let groups = pixels.div_ceil(64);
+    if groups > u64::from(max_compute_workgroups_per_dimension) {
+        return Err(GpuBoxSelectionError::DispatchLimitExceeded {
+            groups,
+            limit: max_compute_workgroups_per_dimension,
         });
     }
-    Ok(CopyLayout {
+    let max_ids =
+        u64::try_from(limits.max_ids).map_err(|_| GpuBoxSelectionError::LayoutOverflow)?;
+    let requested_capacity = max_ids
+        .max(1)
+        .checked_mul(2)
+        .ok_or(GpuBoxSelectionError::LayoutOverflow)?;
+    let table_capacity = requested_capacity
+        .checked_next_power_of_two()
+        .ok_or(GpuBoxSelectionError::LayoutOverflow)?;
+    let table_capacity =
+        u32::try_from(table_capacity).map_err(|_| GpuBoxSelectionError::LayoutOverflow)?;
+    let values_bytes = u64::from(table_capacity)
+        .checked_mul(16)
+        .ok_or(GpuBoxSelectionError::LayoutOverflow)?;
+    let locks_bytes = u64::from(table_capacity)
+        .checked_mul(4)
+        .ok_or(GpuBoxSelectionError::LayoutOverflow)?;
+    let readback_bytes = values_bytes
+        .checked_add(8)
+        .ok_or(GpuBoxSelectionError::LayoutOverflow)?;
+    let staging_limit = limits.max_bytes.min(max_buffer_size).min(usize::MAX as u64);
+    if readback_bytes > staging_limit {
+        return Err(GpuBoxSelectionError::ByteLimitExceeded {
+            bytes: readback_bytes,
+            limit: staging_limit,
+        });
+    }
+    let storage_limit = max_storage_buffer_binding_size;
+    if values_bytes > storage_limit || locks_bytes > storage_limit {
+        return Err(GpuBoxSelectionError::ByteLimitExceeded {
+            bytes: values_bytes.max(locks_bytes),
+            limit: storage_limit,
+        });
+    }
+    Ok(ReductionLayout {
         width,
         height,
-        row_bytes,
-        buffer_bytes,
+        pixel_count,
+        table_capacity,
+        values_bytes,
+        readback_bytes,
     })
 }
 
-fn parse_ids(
+fn parse_reduction(
     bytes: &[u8],
-    layout: CopyLayout,
+    layout: ReductionLayout,
     max_ids: usize,
 ) -> Result<Vec<EncodedPickId>, GpuBoxSelectionError> {
-    if (bytes.len() as u64) < layout.buffer_bytes {
+    if (bytes.len() as u64) < layout.readback_bytes {
         return Err(GpuPickingError::ReadbackBufferTooSmall {
             actual: bytes.len(),
-            required: layout.buffer_bytes as usize,
+            required: layout.readback_bytes as usize,
         }
         .into());
     }
-    let mut ids = BTreeSet::new();
-    for row in bytes
-        .chunks_exact(layout.row_bytes as usize)
-        .take(layout.height as usize)
-    {
-        for texel in
-            row[..layout.width as usize * ID_BUFFER_BYTES_PER_TEXEL as usize].chunks_exact(16)
-        {
-            let mut channels = [0; 4];
-            for (word, channel) in texel.chunks_exact(4).zip(&mut channels) {
-                *channel = u32::from_le_bytes([word[0], word[1], word[2], word[3]]);
-            }
-            if channels != [0; 4] && !ids.contains(&channels) {
-                if ids.len() >= max_ids {
-                    return Err(GpuBoxSelectionError::IdLimitExceeded { limit: max_ids });
-                }
-                ids.insert(channels);
-            }
+    let stats_offset = layout.values_bytes as usize;
+    let reported = read_u32(bytes, stats_offset);
+    let overflow = read_u32(bytes, stats_offset + 4);
+    if overflow != 0 || usize::try_from(reported).unwrap_or(usize::MAX) > max_ids {
+        return Err(GpuBoxSelectionError::IdLimitExceeded { limit: max_ids });
+    }
+    let mut ids = Vec::with_capacity(reported as usize);
+    for slot in 0..layout.table_capacity as usize {
+        let offset = slot * 16;
+        let channels = [
+            read_u32(bytes, offset),
+            read_u32(bytes, offset + 4),
+            read_u32(bytes, offset + 8),
+            read_u32(bytes, offset + 12),
+        ];
+        if channels != [0; 4] {
+            ids.push(EncodedPickId::from_channels(channels));
         }
     }
-    Ok(ids.into_iter().map(EncodedPickId::from_channels).collect())
+    if ids.len() != reported as usize {
+        return Err(GpuBoxSelectionError::ReductionInvariantViolation {
+            reported,
+            observed: ids.len(),
+        });
+    }
+    Ok(ids)
+}
+
+fn read_u32(bytes: &[u8], offset: usize) -> u32 {
+    let mut word = [0_u8; 4];
+    word.copy_from_slice(&bytes[offset..offset + 4]);
+    u32::from_le_bytes(word)
 }
 
 fn read_mapped(
@@ -356,7 +610,7 @@ fn read_mapped(
             return Err(GpuPickingError::ReadbackMapFailed(error.to_string()).into());
         }
     };
-    let ids = parse_ids(&mapped, pending.layout, pending.max_ids);
+    let ids = parse_reduction(&mapped, pending.layout, pending.max_ids);
     drop(mapped);
     pending.buffer.unmap();
     let request = pending.request;
@@ -376,7 +630,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rectangle_layout_honors_pixel_padded_byte_and_native_limits() {
+    fn reduction_layout_honors_pixel_table_byte_and_dispatch_limits() {
         let rectangle = PixelRect::new(1, 2, 4, 4).expect("rectangle");
         let config = GpuPickingConfig::new(8, 8);
         let limits = GpuBoxSelectionLimits {
@@ -384,25 +638,30 @@ mod tests {
             max_bytes: 512,
             max_ids: 1,
         };
-        let layout = copy_layout(config, rectangle, limits, 512).expect("padded rows");
+        let layout = reduction_layout(config, rectangle, limits, 512, 1024, 65535)
+            .expect("reduction layout");
         assert_eq!(
             (
                 layout.width,
                 layout.height,
-                layout.row_bytes,
-                layout.buffer_bytes
+                layout.pixel_count,
+                layout.table_capacity,
+                layout.values_bytes,
+                layout.readback_bytes
             ),
-            (3, 2, 256, 512)
+            (3, 2, 6, 2, 32, 40)
         );
         assert_eq!(
-            copy_layout(
+            reduction_layout(
                 config,
                 rectangle,
                 GpuBoxSelectionLimits {
                     max_pixels: 5,
                     ..limits
                 },
-                512
+                512,
+                1024,
+                65535
             )
             .unwrap_err(),
             GpuBoxSelectionError::PixelLimitExceeded {
@@ -411,50 +670,71 @@ mod tests {
             }
         );
         assert_eq!(
-            copy_layout(config, rectangle, limits, 511).unwrap_err(),
+            reduction_layout(config, rectangle, limits, 39, 1024, 65535).unwrap_err(),
             GpuBoxSelectionError::ByteLimitExceeded {
-                bytes: 512,
-                limit: 511
+                bytes: 40,
+                limit: 39
             }
         );
         assert_eq!(
-            copy_layout(GpuPickingConfig::new(3, 8), rectangle, limits, 512).unwrap_err(),
+            reduction_layout(
+                GpuPickingConfig::new(3, 8),
+                rectangle,
+                limits,
+                512,
+                1024,
+                65535
+            )
+            .unwrap_err(),
+            GpuBoxSelectionError::RectangleOutOfBounds
+        );
+        let empty = PixelRect {
+            min_x: 1,
+            min_y: 1,
+            max_x: 1,
+            max_y: 2,
+        };
+        assert_eq!(
+            reduction_layout(config, empty, limits, 512, 1024, 65535).unwrap_err(),
             GpuBoxSelectionError::RectangleOutOfBounds
         );
     }
 
     #[test]
-    fn parser_ignores_padding_and_miss_deduplicates_and_never_truncates() {
-        let layout = CopyLayout {
+    fn parser_reads_gpu_unique_slots_and_never_truncates() {
+        let layout = ReductionLayout {
             width: 2,
             height: 2,
-            row_bytes: 256,
-            buffer_bytes: 512,
+            pixel_count: 4,
+            table_capacity: 4,
+            values_bytes: 64,
+            readback_bytes: 72,
         };
-        let mut bytes = vec![255; 512]; // Padding would produce a bogus identity.
-        for (offset, id) in [
-            (0, [5, 1, 0, 0]),
-            (16, [5, 1, 0, 0]),
-            (256, [0; 4]),
-            (272, [9, 2, 0, 0]),
-        ] {
+        let mut bytes = vec![0; 72];
+        for (offset, id) in [(0, [5, 1, 0, 0]), (16, [9, 2, 0, 0])] {
             for (word, channel) in id.into_iter().enumerate() {
                 bytes[offset + word * 4..offset + word * 4 + 4]
                     .copy_from_slice(&u32::to_le_bytes(channel));
             }
         }
-        let ids = parse_ids(&bytes, layout, 2).expect("unique IDs");
+        bytes[64..68].copy_from_slice(&2_u32.to_le_bytes());
+        let ids = parse_reduction(&bytes, layout, 2).expect("unique IDs");
         assert_eq!(
             ids,
             vec![
                 EncodedPickId::from_channels([5, 1, 0, 0]),
-                EncodedPickId::from_channels([9, 2, 0, 0])
+                EncodedPickId::from_channels([9, 2, 0, 0]),
             ]
         );
         assert_eq!(
-            parse_ids(&bytes, layout, 1),
+            parse_reduction(&bytes, layout, 1),
             Err(GpuBoxSelectionError::IdLimitExceeded { limit: 1 })
         );
-        assert!(parse_ids(&bytes[..511], layout, 2).is_err());
+        bytes[68..72].copy_from_slice(&1_u32.to_le_bytes());
+        assert_eq!(
+            parse_reduction(&bytes, layout, 2),
+            Err(GpuBoxSelectionError::IdLimitExceeded { limit: 2 })
+        );
+        assert!(parse_reduction(&bytes[..71], layout, 2).is_err());
     }
 }

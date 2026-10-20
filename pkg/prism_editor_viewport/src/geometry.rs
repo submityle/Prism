@@ -319,11 +319,11 @@ impl SceneIdGeometryRenderer {
     }
 
     fn retain(&mut self, entry: SceneIdPassEntry) {
-        if let Some(draw) = self.draws.get_mut(&entry.item().id) {
-            if draw.entry.encoded_id() == entry.encoded_id() {
-                draw.entry = entry;
-                return;
-            }
+        if let Some(draw) = self.draws.get_mut(&entry.item().id)
+            && draw.entry.encoded_id() == entry.encoded_id()
+        {
+            draw.entry = entry;
+            return;
         }
         let bytes: Vec<_> = entry
             .encoded_id()

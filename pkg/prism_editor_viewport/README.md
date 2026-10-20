@@ -9,7 +9,8 @@ adapter:
   deterministic added/updated/removed deltas; tokens are never reused during
   the encoder lifetime.
 - `GpuPickingBackend` owns a sampleable `Rgba32Uint` ID target, matching
-  `Depth32Float` attachment, and 256-byte-row-aligned readback buffers.
+  `Depth32Float` attachment, and cached compute/readback resources for bounded
+  rectangle selection.
   `submit_readback` plus `poll_readback` provides
   non-blocking correlation. An `InFlightPickReadback` owns its device/buffer and
   can be polled independently after its target closes; completion is delivered
@@ -228,10 +229,11 @@ pass. Rebuild the host bind group whenever `(handle, target_generation)` changes
 sampleable depth texture. There is no basic entity color/MRT/material pass in
 this renderer; the supported presentation is explicitly object-ID debug color.
 
-## Point and bounded rectangle readback
+## Point readback and GPU rectangle reduction
 
-Point readback uses `frame.encode_readback`. Rectangle readback is an actual
-requested-region GPU copy, followed by bounded CPU parsing of the mapped rows:
+Point readback uses `frame.encode_readback`. Rectangle selection is an actual
+requested-region GPU compute scan and compact reduction, followed by bounded
+CPU extraction of the mapped result table:
 
 ```rust
 let request = boxes.submit(&viewport, target.state(), &scene, rectangle)?;
@@ -246,32 +248,39 @@ if let Some(result) = flight.poll()? {
 }
 ```
 
-`PixelRect` is inclusive-exclusive. Copies use the rectangle's actual nonzero
-origin and dimensions with 256-byte padded rows; there is no full-target
-fallback. Parsing ignores padding and zero/miss, deduplicates encoded IDs, then
-the existing coordinator resolves complete identities in stable order. This
-selects visible fragments, not objects hidden behind other geometry; it is not
-a GPU reduction or through-selection algorithm.
+`PixelRect` is inclusive-exclusive and must be non-empty. The request is rejected
+before GPU allocation when it is outside the current target. The rectangle path
+is a real GPU reduction: one compute invocation reads one pixel from the actual
+`Rgba32Uint` target, ignores the all-zero miss, and inserts the four-channel ID
+into a bounded linear-probing hash table guarded by GPU atomics. The GPU also
+publishes the unique-ID count and an overflow flag. The mapped staging buffer
+contains only the compact hash table and those two counters; the host extracts
+non-empty slots but does not scan rectangle pixels or perform ID deduplication.
+This selects visible fragments, not objects hidden behind other geometry; it is
+not a through-selection algorithm.
 
-`GpuBoxSelectionLimits` bounds pixels, padded staging bytes, and unique IDs.
-Defaults are 1,048,576 pixels, 32 MiB, and 4096 unique IDs. Set `max_ids` no higher
-than `BoxSelectionCoordinator::new(max_hits)`'s bound. Exceeding a limit returns
-an error, never a silently truncated selection. The host must also bound the
-number of in-flight staging buffers and cancel coordinator requests on encoding
-or mapping errors; the coordinator's pending bound does not own those buffers.
+`GpuBoxSelectionLimits` bounds scanned pixels, compact reduction staging bytes,
+and unique IDs. Defaults are 1,048,576 pixels, 32 MiB, and 4096 unique IDs. The
+GPU table is sized to at least twice `max_ids` and rounded to a power of two;
+the resulting storage and dispatch sizes are checked against device limits.
+Set `max_ids` no higher than `BoxSelectionCoordinator::new(max_hits)`'s bound.
+Exceeding a limit or GPU table capacity returns an error, never a silently
+truncated selection. The host must also bound the number of in-flight staging
+buffers and cancel coordinator requests on encoding or mapping errors; the
+coordinator's pending bound does not own those buffers.
 Dropping a flight cancels mapping/releases its buffer, but does not cancel the
 coordinator request. Both point and box `poll()` deliver completion/error at
 most once and can finish after their original target closes; always resolve
 against current viewport, target and scene state.
 
 For shared-queue batching, encode ID geometry, presentation, and any point/box
-copies into the host encoder; call `queue.submit([encoder.finish()])`, then
+readback operations into the host encoder; call `queue.submit([encoder.finish()])`, then
 `target.backend().start_readback(pending_pick)` and/or
 `target.backend().start_box_readback(pending_box)`. These methods only start
-mapping: they must be called after submitting the matching copies. The
-`submit_*` convenience methods instead submit the encoder themselves; do not
-double-submit. Blocking `submit_and_read_sync` / `submit_box_and_read_sync`
-are explicit tool/test policies, not a per-frame presentation path.
+mapping: they must be called after submitting the matching operations. The
+  `submit_*` convenience methods instead submit the encoder themselves; do not
+  double-submit. Blocking `submit_and_read_sync` / `submit_box_and_read_sync`
+  are explicit tool/test policies, not a per-frame presentation path.
 
 Actual scene traversal/extraction, camera math, surface creation/compositing,
 platform events/focus, gizmo rendering, pixel-to-transform mapping, edits/undo,
@@ -283,7 +292,10 @@ are wired or that a complete editor is implemented.
 
 Default tests cover identity stability, deterministic deltas, patch conflicts,
 selection bounds, stale-result rejection, snapping, and request correlation.
-Run the real adapter tests on a machine with a supported GPU backend. Allocate
+The required GPU tests cover indexed geometry, nonzero-origin rectangles, misses,
+GPU deduplication, overflow rejection, shared point/box submission, and all
+viewport/scene/target generation invalidation paths. Run the real adapter tests
+on a machine with a supported GPU backend. Allocate
 an isolated target and clean only that exact directory when finished:
 
 ```text
