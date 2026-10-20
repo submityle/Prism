@@ -107,7 +107,10 @@ bin 路径位于 `pkg/prism_render_app/src/bin_queue.rs`：
 | direct/bin specialization、full-lobe fallback、prewarm、split bin 三 work item | `pkg/prism_render_app/src/tests.rs` |
 | shader package interning、manifest/variant、PSO cache wire model | `pkg/prism_render_architecture/src/shader_package/` 及其单元测试 |
 | asset refs 与 DriverLocal 隔离、variant manifest 完整性 | `pkg/prism_asset_build_core/src/shader_package.rs` |
-| 当前 shading crate 测试 | `cargo test -p prism_render_scene --lib shading`：844 passed，0 failed |
+| app 侧 ABI 指纹与持久化缓存失效 | `pipeline_cache.rs` 将生成 Surface layout、material record/class 与 response ABI 纳入 `DeviceFingerprint`；`pipeline_worker_tests.rs` 的 schema/layout/class/response/legacy fingerprint 回归 |
+| 当前 shading crate 测试 | `cargo test -p prism_render_scene --lib shading`：844 passed，0 failed（历史记录） |
+
+2026-10-20 当前复跑：`cargo test -p prism_render_material --test s5_abi_cache_invalidation -- --nocapture` 为 **4 passed，0 failed**；`cargo test -p prism_render_app --lib pipeline_cache::worker_tests -- --nocapture` 为 **25 passed，0 failed**。这两组结果证明 ABI 变更会拒绝 stale response/package/PSO cache，并且 app 侧版本号、生成布局、render class、response ABI 与旧 version-only fingerprint 都进入缓存失效路径；不等于 FeatureSelection 到真实 shader package/permutation 的生产映射已经闭合。
 
 ## 7. 历史依据
 

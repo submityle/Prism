@@ -50,6 +50,26 @@ pub const MAX_PERSISTED_PSO_CACHE_BYTES: u64 = 64 * 1024 * 1024;
 /// changing the architecture or material ABI versions.
 pub const PSO_CACHE_ABI_VERSION: u32 = 1;
 
+// Fingerprint the ABI inputs compiled into this build, not just the version
+// labels. In particular, schema_version is independent of MATERIAL_ABI_VERSION.
+// Consume the generated layout (not the authoring schema/parser) just as the
+// material runtime does. include_str! also makes these files build dependencies.
+// These are conservative source fingerprints: even a comment/format-only edit
+// can cause a safe cold-cache miss. They do not replace the explicit version
+// for app-owned pipeline contracts outside these material ABI inputs.
+#[derive(Clone, Copy)]
+struct MaterialAbiSources<'a> {
+    surface_layout: &'a str,
+    material_record: &'a str,
+    response_abi: &'a str,
+}
+
+const MATERIAL_ABI_SOURCES: MaterialAbiSources<'static> = MaterialAbiSources {
+    surface_layout: include_str!("../../prism_render_material/src/surface_layout.rs"),
+    material_record: include_str!("../../prism_render_material/src/record.rs"),
+    response_abi: prism_render_material::response_source::RESPONSE_FUNCTION_ABI,
+};
+
 /// Configuration for the optional application-owned PSO cache file.
 #[derive(Clone, Debug, Eq, PartialEq, Resource)]
 pub struct PipelineCachePersistenceConfig {
@@ -124,9 +144,19 @@ pub enum PipelineCachePersistenceError {
 /// The RHI exposes a textual driver token, so it is deterministically reduced
 /// to the numeric field required by the architecture contract. Unknown driver
 /// strings remain distinct from a known string, and backend/vendor/device are
-/// retained as first-class fields.
+/// retained as first-class fields. The ABI identity includes the compiled
+/// generated Surface layout, GPU material record/class definitions, and shared
+/// response ABI, so their changes invalidate persisted binaries even when the
+/// numeric architecture/material/app ABI versions have not changed.
 #[must_use]
 pub fn pso_device_fingerprint(info: &AdapterInfo) -> DeviceFingerprint {
+    pso_device_fingerprint_for_abi_sources(info, MATERIAL_ABI_SOURCES)
+}
+
+fn pso_device_fingerprint_for_abi_sources(
+    info: &AdapterInfo,
+    sources: MaterialAbiSources<'_>,
+) -> DeviceFingerprint {
     let backend = match info.backend {
         Backend::Vulkan => GraphicsBackend::Vulkan,
         Backend::Metal => GraphicsBackend::Metal,
@@ -150,6 +180,9 @@ pub fn pso_device_fingerprint(info: &AdapterInfo) -> DeviceFingerprint {
         &architecture_version,
         &material_abi_version,
         &pso_abi_version,
+        sources.surface_layout.as_bytes(),
+        sources.material_record.as_bytes(),
+        sources.response_abi.as_bytes(),
     ]);
     DeviceFingerprint::new(
         backend,

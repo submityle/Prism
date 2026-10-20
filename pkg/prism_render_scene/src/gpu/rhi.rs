@@ -5,9 +5,10 @@
 //! request a device, replace host callbacks, or submit commands. The host owns
 //! submission, completion, device-loss handling, and recovery.
 //!
-//! Allocate here and clone the exported Bevy handles for native consumers;
-//! arbitrary native resource import is deliberately absent. Keep leases alive
-//! while recording/encoding their table-local IDs. Keep graph allocations until
+//! Allocate here and clone the exported Bevy handles for native consumers, or
+//! import live Bevy handles from this bridge's exact host device. Import is a
+//! caller-certified same-device operation, not an ownership check. Keep leases
+//! alive while recording/encoding their table-local IDs. Keep graph allocations until
 //! the host confirms completion of the submission containing their commands;
 //! encoding, callback registration, and callback disposal are not completion.
 //!
@@ -23,7 +24,7 @@ use std::sync::Arc;
 
 use bevy_ecs::{resource::Resource, world::World};
 use bevy_render::{
-    render_resource::{Buffer, Texture, TextureView},
+    render_resource::{BindGroup, Buffer, ComputePipeline, Texture, TextureView},
     renderer::{RenderAdapter, RenderDevice, RenderQueue},
 };
 use prism_render_driver::{self as rhi, RenderDevice as _};
@@ -96,6 +97,15 @@ impl SceneRhi {
     /// Registers a Bevy-owned buffer without taking ownership of its native
     /// allocation. The returned lease owns only the table entry; dropping it
     /// removes the RHI ID and never destroys the Bevy buffer.
+    ///
+    /// The buffer must be live and belong to this bridge's original host
+    /// device. Import cannot authenticate that provenance or explicit native
+    /// destruction. Each import gets its own entry; cloning the Bevy handle
+    /// does not retain that entry. Keep the lease through every ID lookup and
+    /// retain reusable frame storage until actual host-confirmed completion.
+    /// IDs must never cross bridges, even on the same device: they can collide
+    /// with unrelated entries rather than being rejected. Share the lease with
+    /// `Arc` for multiple ID users; do not manually release/destroy its ID.
     #[must_use]
     pub fn import_buffer(&self, buffer: &Buffer) -> SceneRhiImportedBuffer {
         let id = self.device.register_buffer(buffer.deref());
@@ -103,6 +113,72 @@ impl SceneRhi {
             device: Arc::clone(&self.device),
             id,
             buffer: buffer.clone(),
+        }
+    }
+
+    /// Registers a live Bevy texture on this bridge's exact host device.
+    ///
+    /// The same provenance, table-local ID and lease obligations as
+    /// [`Self::import_buffer`] apply. No allocation/copy occurs; the existing
+    /// texture lease removes only the table entry on drop. Surface acquisition,
+    /// presentation and frame validity remain the host's responsibility.
+    #[must_use]
+    pub fn import_texture(&self, texture: &Texture) -> SceneRhiTexture {
+        let id = self.device.register_texture(texture.deref());
+        SceneRhiTexture {
+            device: Arc::clone(&self.device),
+            id,
+            texture: texture.clone(),
+        }
+    }
+
+    /// Registers a live Bevy view on this bridge's exact host device.
+    ///
+    /// The obligations of [`Self::import_buffer`] apply. The view keeps a native
+    /// reference to its texture; no texture table entry is required or created.
+    /// Drop removes only this view's entry, not the texture or any other entry.
+    #[must_use]
+    pub fn import_texture_view(&self, view: &TextureView) -> SceneRhiTextureView {
+        let id = self.device.register_texture_view(view.deref());
+        SceneRhiTextureView {
+            device: Arc::clone(&self.device),
+            id,
+            view: view.clone(),
+        }
+    }
+
+    /// Registers an existing Bevy compute pipeline without recompiling it or
+    /// creating a layout/pipeline. The provenance and lifetime obligations of
+    /// [`Self::import_buffer`] apply: this must be the exact host device, and
+    /// the returned lease/ID must only be used with its original table.
+    /// Native layout compatibility remains the caller's responsibility.
+    #[must_use]
+    pub fn import_compute_pipeline(
+        &self,
+        pipeline: &ComputePipeline,
+    ) -> SceneRhiImportedComputePipeline {
+        let id = self.device.register_compute_pipeline(pipeline.deref());
+        SceneRhiImportedComputePipeline {
+            device: Arc::clone(&self.device),
+            id,
+            pipeline: pipeline.clone(),
+        }
+    }
+
+    /// Registers an existing Bevy bind group without rebuilding its bindings.
+    /// The same-device and table-local obligations of [`Self::import_buffer`]
+    /// apply to the group and its resources. No layout/resource table entries
+    /// are created, and existing resource leases must be retained independently
+    /// wherever their IDs are used. Graph access declarations, resource
+    /// freshness and actual host-completion retirement are not inferred from
+    /// the group; native layout/dynamic-offset validation is unchanged.
+    #[must_use]
+    pub fn import_bind_group(&self, bind_group: &BindGroup) -> SceneRhiImportedBindGroup {
+        let id = self.device.register_bind_group(bind_group.deref());
+        SceneRhiImportedBindGroup {
+            device: Arc::clone(&self.device),
+            id,
+            bind_group: bind_group.clone(),
         }
     }
 
@@ -157,6 +233,10 @@ pub struct SceneRhiBuffer {
 /// Non-owning RHI table lease for a buffer owned by Bevy's render resource
 /// system. The native handle is cloned only to keep the host allocation alive;
 /// the lease Drop path releases the table registration, not the native buffer.
+/// Retains its original table even after SceneRhi replacement. Share with `Arc`
+/// through all ID lookups; a cloned Bevy buffer or device does not retain the
+/// entry. Neither this lease nor a cloned handle prevents explicit native
+/// destruction; the host owns that discipline and actual GPU retirement.
 #[must_use = "retain the lease while its RHI ID is needed"]
 pub struct SceneRhiImportedBuffer {
     device: Arc<WgpuDevice>,
@@ -165,16 +245,19 @@ pub struct SceneRhiImportedBuffer {
 }
 
 impl SceneRhiImportedBuffer {
+    /// ID in this lease's original table, never transferable to another bridge.
     #[must_use]
     pub fn id(&self) -> rhi::BufferId {
         self.id
     }
 
+    /// The original device/table retained by this lease.
     #[must_use]
     pub fn device(&self) -> &Arc<WgpuDevice> {
         &self.device
     }
 
+    /// Exact Bevy handle; cloning it does not extend the table entry's lifetime.
     #[must_use]
     pub fn buffer(&self) -> &Buffer {
         &self.buffer
@@ -184,6 +267,87 @@ impl SceneRhiImportedBuffer {
 impl Drop for SceneRhiImportedBuffer {
     fn drop(&mut self) {
         self.device.release_buffer(self.id);
+    }
+}
+
+/// Move-only, non-owning table lease for the exact Bevy compute pipeline.
+/// Retains the original table even after bridge replacement. Share with `Arc`
+/// through every ID lookup/encoding; cloning the Bevy handle alone does not
+/// retain the entry. Drop releases only this registration, not host ownership,
+/// and neither submits nor waits nor signals completion. Never manually release
+/// its ID. Pipeline-cache replacement requires importing the new native object;
+/// an old lease continues to refer to the old pipeline, not the replacement.
+#[must_use = "retain the lease while its RHI pipeline ID is needed"]
+pub struct SceneRhiImportedComputePipeline {
+    device: Arc<WgpuDevice>,
+    id: rhi::ComputePipelineId,
+    pipeline: ComputePipeline,
+}
+
+impl SceneRhiImportedComputePipeline {
+    /// ID in this lease's original table, not Bevy's ComputePipelineId.
+    #[must_use]
+    pub fn id(&self) -> rhi::ComputePipelineId {
+        self.id
+    }
+
+    /// The original device/table retained by this lease.
+    #[must_use]
+    pub fn device(&self) -> &Arc<WgpuDevice> {
+        &self.device
+    }
+
+    /// Exact Bevy handle; cloning it does not retain this table registration.
+    #[must_use]
+    pub fn pipeline(&self) -> &ComputePipeline {
+        &self.pipeline
+    }
+}
+
+impl Drop for SceneRhiImportedComputePipeline {
+    fn drop(&mut self) {
+        self.device.release_compute_pipeline(self.id);
+    }
+}
+
+/// Move-only, non-owning table lease for the exact Bevy bind group.
+/// Retains its original table; share with `Arc` through every ID lookup/encode.
+/// Native references to bound resources do not retain their RHI entries or
+/// prevent explicit native destruction. Drop only releases this registration;
+/// it does not destroy buffers/textures, submit, wait or prove GPU completion.
+/// The host must retain reusable storage until actual completion and no future
+/// readers. Never manually release this ID. Rebinding/resizing requires a new
+/// import of the replacement group; existing leases keep the original group.
+#[must_use = "retain the lease while its RHI bind-group ID is needed"]
+pub struct SceneRhiImportedBindGroup {
+    device: Arc<WgpuDevice>,
+    id: rhi::BindGroupId,
+    bind_group: BindGroup,
+}
+
+impl SceneRhiImportedBindGroup {
+    /// ID in this lease's original table, not Bevy's BindGroupId.
+    #[must_use]
+    pub fn id(&self) -> rhi::BindGroupId {
+        self.id
+    }
+
+    /// The original device/table retained by this lease.
+    #[must_use]
+    pub fn device(&self) -> &Arc<WgpuDevice> {
+        &self.device
+    }
+
+    /// Exact Bevy handle; cloning it does not retain this table registration.
+    #[must_use]
+    pub fn bind_group(&self) -> &BindGroup {
+        &self.bind_group
+    }
+}
+
+impl Drop for SceneRhiImportedBindGroup {
+    fn drop(&mut self) {
+        self.device.release_bind_group(self.id);
     }
 }
 
@@ -213,11 +377,12 @@ impl Drop for SceneRhiBuffer {
     }
 }
 
-/// Move-only table entry plus a Bevy handle to its exact native texture.
+/// Move-only table entry for an allocated or imported exact native texture.
 ///
 /// Native clones/views can outlive this lease. Its ID cannot: keep this owner
 /// through all recording/encoding that resolves the texture in the RHI table.
 /// Do not manually destroy this ID or explicitly destroy the native texture.
+/// Drop releases the table entry only, without native destruction or waiting.
 #[must_use = "retain the lease while its RHI ID is needed"]
 pub struct SceneRhiTexture {
     device: Arc<WgpuDevice>,
@@ -232,7 +397,7 @@ impl SceneRhiTexture {
         self.id
     }
 
-    /// The creating device/table.
+    /// The allocating/importing device/table.
     #[must_use]
     pub fn device(&self) -> &Arc<WgpuDevice> {
         &self.device
@@ -263,11 +428,12 @@ impl SceneRhiTexture {
 
 impl Drop for SceneRhiTexture {
     fn drop(&mut self) {
-        self.device.destroy_texture(self.id);
+        self.device.release_texture(self.id);
     }
 }
 
-/// Move-only RHI view entry; its native Bevy clone retains the underlying texture.
+/// Move-only allocated/imported view entry; its Bevy clone retains the texture.
+/// Drop releases only this entry; retain the lease through every ID lookup.
 #[must_use = "retain the lease while its RHI view ID is needed"]
 pub struct SceneRhiTextureView {
     device: Arc<WgpuDevice>,
@@ -282,7 +448,7 @@ impl SceneRhiTextureView {
         self.id
     }
 
-    /// The creating device/table.
+    /// The allocating/importing device/table.
     #[must_use]
     pub fn device(&self) -> &Arc<WgpuDevice> {
         &self.device
@@ -297,7 +463,7 @@ impl SceneRhiTextureView {
 
 impl Drop for SceneRhiTextureView {
     fn drop(&mut self) {
-        self.device.destroy_texture_view(self.id);
+        self.device.release_texture_view(self.id);
     }
 }
 
@@ -408,6 +574,99 @@ mod tests {
         send_sync::<SceneRhiImportedBuffer>();
         send_sync::<SceneRhiTexture>();
         send_sync::<SceneRhiTextureView>();
+        send_sync::<SceneRhiImportedComputePipeline>();
+        send_sync::<SceneRhiImportedBindGroup>();
+    }
+
+    #[test]
+    fn imported_compute_pipeline_and_bind_group_keep_exact_native_handles() {
+        let Some(host) = host_or_skip() else { return };
+        let bridge = host.bridge();
+        let output = host.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("scene-rhi-imported-compute-output"),
+            size: 4,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let shader = host
+            .device
+            .wgpu_device()
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("scene-rhi-imported-compute-shader"),
+                source: wgpu::ShaderSource::Wgsl(
+                    "@group(0) @binding(0) var<storage, read_write> output: u32;
+                     @compute @workgroup_size(1) fn main() { output = 271828u; }"
+                        .into(),
+                ),
+            });
+        let native_pipeline =
+            host.device
+                .wgpu_device()
+                .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some("scene-rhi-imported-compute-pipeline"),
+                    layout: None,
+                    module: &shader,
+                    entry_point: Some("main"),
+                    compilation_options: Default::default(),
+                    cache: None,
+                });
+        let native_group =
+            host.device
+                .wgpu_device()
+                .create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("scene-rhi-imported-compute-group"),
+                    layout: &native_pipeline.get_bind_group_layout(0),
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: output.as_entire_binding(),
+                    }],
+                });
+        let pipeline = ComputePipeline::from(native_pipeline.clone());
+        let bind_group = BindGroup::from(native_group.clone());
+        let imported_pipeline = bridge.import_compute_pipeline(&pipeline);
+        let imported_group = bridge.import_bind_group(&bind_group);
+        assert_eq!(imported_pipeline.pipeline().id(), pipeline.id());
+        assert_eq!(imported_group.bind_group().id(), bind_group.id());
+        assert_eq!(
+            imported_pipeline
+                .device()
+                .wgpu_compute_pipeline(imported_pipeline.id()),
+            native_pipeline
+        );
+        assert_eq!(
+            imported_group.device().wgpu_bind_group(imported_group.id()),
+            native_group
+        );
+
+        let pipeline_id = imported_pipeline.id();
+        let group_id = imported_group.id();
+        let device = Arc::clone(imported_pipeline.device());
+        drop((imported_pipeline, imported_group));
+        assert!(catch_unwind(AssertUnwindSafe(
+            || device.wgpu_compute_pipeline(pipeline_id)
+        ))
+        .is_err());
+        assert!(catch_unwind(AssertUnwindSafe(|| device.wgpu_bind_group(group_id))).is_err());
+
+        // The original Bevy/native objects remain usable after lease release;
+        // lease Drop is table retirement only and never GPU completion.
+        let mut encoder = host
+            .device
+            .wgpu_device()
+            .create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&native_pipeline);
+            pass.set_bind_group(0, Some(&native_group), &[]);
+            pass.dispatch_workgroups(1, 1, 1);
+        }
+        host.queue.submit([encoder.finish()]);
+        let output_id = device.register_buffer(&output);
+        assert_eq!(
+            bridge.queue().read_buffer(output_id, 4),
+            271828_u32.to_le_bytes()
+        );
+        device.release_buffer(output_id);
     }
 
     #[test]
@@ -417,21 +676,25 @@ mod tests {
         let native = host.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("scene-rhi-imported-buffer"),
             size: 16,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
-        let imported = bridge.import_buffer(&Buffer::from(native.clone()));
+        let imported = bridge.import_buffer(&native);
         let id = imported.id();
         assert_eq!(imported.buffer().size(), 16);
-        assert_eq!(imported.device().wgpu_buffer(id), native);
+        assert_eq!(
+            imported.buffer().id(),
+            native.id(),
+            "preserve Bevy identity"
+        );
+        assert_eq!(imported.device().wgpu_buffer(id), *native.deref());
         let device = Arc::clone(imported.device());
         drop(imported);
         assert!(catch_unwind(AssertUnwindSafe(|| device.wgpu_buffer(id))).is_err());
         host.queue.write_buffer(&native, 0, &[9, 8, 7, 6]);
-        assert_eq!(
-            &read_buffer(&host, &Buffer::from(native))[..4],
-            &[9, 8, 7, 6]
-        );
+        assert_eq!(&read_buffer(&host, &native)[..4], &[9, 8, 7, 6]);
     }
 
     #[test]
@@ -439,25 +702,170 @@ mod tests {
         let Some(host) = host_or_skip() else { return };
         let first = host.bridge();
         let second = host.bridge();
-        let native = Buffer::from(host.device.create_buffer(&wgpu::BufferDescriptor {
+        let native = host.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("scene-rhi-import-table-local"),
             size: 16,
             usage: wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
-        }));
+        });
+        let other_native = host.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("scene-rhi-other-table-buffer"),
+            size: 16,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
         let old = first.import_buffer(&native);
         let old_id = old.id();
-        let other = second.import_buffer(&native);
+        let other = second.import_buffer(&other_native);
         let other_id = other.id();
         assert_eq!(first.device().wgpu_buffer(old_id), *native);
-        assert_eq!(second.device().wgpu_buffer(other_id), *native);
-        assert!(catch_unwind(AssertUnwindSafe(|| first.device().wgpu_buffer(other_id))).is_err());
+        assert_eq!(second.device().wgpu_buffer(other_id), *other_native);
+        assert_eq!(
+            old_id, other_id,
+            "independent tables can mint identical IDs"
+        );
+        // A foreign ID is NOT guaranteed to be rejected. This is precisely why
+        // the API requires every user to retain and use the original lease/table.
+        assert_eq!(first.device().wgpu_buffer(other_id), *native);
+        assert_ne!(first.device().wgpu_buffer(other_id), *other_native);
         drop(old);
         assert!(catch_unwind(AssertUnwindSafe(|| first.device().wgpu_buffer(old_id))).is_err());
-        assert_eq!(second.device().wgpu_buffer(other_id), *native);
+        assert_eq!(second.device().wgpu_buffer(other_id), *other_native);
         let replacement = first.import_buffer(&native);
         assert_ne!(replacement.id(), old_id);
+        first.device().release_buffer(old_id);
         assert_eq!(first.device().wgpu_buffer(replacement.id()), *native);
+    }
+
+    #[test]
+    fn shared_imported_buffer_lease_keeps_original_table_until_last_owner_drops() {
+        let Some(host) = host_or_skip() else { return };
+        let bridge = host.bridge();
+        let native = host.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("scene-rhi-shared-native-buffer"),
+            size: 4,
+            usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let imported = Arc::new(bridge.import_buffer(&native));
+        let id = imported.id();
+        let duplicate = bridge.import_buffer(&native);
+        assert_ne!(id, duplicate.id(), "each import owns an independent entry");
+        drop(duplicate);
+        let weak = Arc::downgrade(imported.device());
+        let worker = Arc::clone(&imported);
+        drop(bridge);
+        assert_eq!(weak.strong_count(), 1, "the lease alone retains its table");
+        std::thread::spawn(move || {
+            assert_eq!(
+                worker.device().wgpu_buffer(worker.id()),
+                *worker.buffer().deref()
+            );
+        })
+        .join()
+        .expect("worker import lookup");
+        assert_eq!(imported.device().wgpu_buffer(id), *native.deref());
+        let device = Arc::clone(imported.device());
+        drop(imported);
+        assert!(catch_unwind(AssertUnwindSafe(|| device.wgpu_buffer(id))).is_err());
+        drop(device);
+        assert!(weak.upgrade().is_none());
+        host.queue.write_buffer(&native, 0, &[8, 6, 7, 5]);
+        assert_eq!(read_buffer(&host, &native), [8, 6, 7, 5]);
+    }
+
+    #[test]
+    fn imported_texture_and_view_leases_preserve_native_rendering_after_release() {
+        let Some(host) = host_or_skip() else { return };
+        let bridge = host.bridge();
+        let native = host.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("scene-rhi-imported-texture"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let native_view = native.create_view(&Default::default());
+        // A Bevy-only view can be imported without registering its texture.
+        let imported_view = bridge.import_texture_view(&native_view);
+        let imported = bridge.import_texture(&native);
+        let duplicate = bridge.import_texture(&native);
+        assert_ne!(imported.id(), duplicate.id());
+        assert_eq!(imported.texture().id(), native.id());
+        assert_eq!(imported_view.view().id(), native_view.id());
+        let created_view = imported
+            .create_view(&rhi::TextureViewDescriptor::default())
+            .expect("view created from an imported texture ID");
+        let device = Arc::clone(imported.device());
+        let id = imported.id();
+        let view_id = imported_view.id();
+        assert_eq!(device.wgpu_texture(id), *native.deref());
+        assert_eq!(device.wgpu_texture_view(view_id), *native_view.deref());
+        drop(imported);
+        assert!(catch_unwind(AssertUnwindSafe(|| device.wgpu_texture(id))).is_err());
+        assert_eq!(device.wgpu_texture(duplicate.id()), *native.deref());
+        let replacement = bridge.import_texture(&native);
+        assert_ne!(replacement.id(), id);
+        device.release_texture(id);
+        assert_eq!(device.wgpu_texture(replacement.id()), *native.deref());
+        drop((duplicate, replacement, bridge));
+        assert_eq!(device.wgpu_texture_view(view_id), *native_view.deref());
+        assert_eq!(
+            device.wgpu_texture_view(created_view.id()),
+            *created_view.view().deref()
+        );
+        drop((created_view, imported_view));
+        assert!(catch_unwind(AssertUnwindSafe(|| device.wgpu_texture_view(view_id))).is_err());
+        drop(device);
+
+        // Exercise the surviving native view, texture and GPU allocation after
+        // every RHI registration/table owner has gone away.
+        let staging = host.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("scene-rhi-imported-texture-readback"),
+            size: 256,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = host.device.create_command_encoder(&Default::default());
+        {
+            let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &native_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::RED),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                ..Default::default()
+            });
+        }
+        encoder.copy_texture_to_buffer(
+            native.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &staging,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(256),
+                    rows_per_image: Some(1),
+                },
+            },
+            wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+        );
+        host.queue.submit([encoder.finish()]);
+        assert_eq!(&mapped_bytes(&host, &staging)[..4], &[255, 0, 0, 255]);
     }
 
     #[test]

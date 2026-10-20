@@ -5,7 +5,7 @@ use prism_render_architecture::shader_package::{
     PipelineStateHash, PsoCacheKey, ShaderPackageId,
 };
 use prism_render_driver::{
-    DeviceDescriptor, Instance, MultisampleState, PrimitiveState, RequestAdapterOptions,
+    Adapter, DeviceDescriptor, Instance, MultisampleState, PrimitiveState, RequestAdapterOptions,
     ShaderModuleId, VertexState,
 };
 use prism_render_driver_null::{NullDevice, NullInstance};
@@ -24,6 +24,196 @@ fn persistence_path(label: &str) -> std::path::PathBuf {
 
 fn persistence_fingerprint(driver: u64) -> DeviceFingerprint {
     DeviceFingerprint::new(GraphicsBackend::Other(7), 1, 2, driver, AbiHash([3; 32]))
+}
+
+fn adapter_info() -> AdapterInfo {
+    NullInstance::new()
+        .request_adapter(&RequestAdapterOptions::default())
+        .unwrap()
+        .info()
+        .clone()
+}
+
+// Keep the real adapter, package, permutation, pipeline descriptor and opaque
+// binary unchanged. Only one compiled material ABI input varies, through the
+// same producer used by startup/shutdown (never an injected final AbiHash).
+fn assert_abi_source_change_rejects_persisted_cache(
+    label: &str,
+    revised_sources: MaterialAbiSources<'_>,
+) {
+    let info = adapter_info();
+    let original = pso_device_fingerprint(&info);
+    let revised = pso_device_fingerprint_for_abi_sources(&info, revised_sources);
+    assert_ne!(original.abi_hash, revised.abi_hash);
+    assert_eq!(original.backend, revised.backend);
+    assert_eq!(original.vendor_id, revised.vendor_id);
+    assert_eq!(original.device_id, revised.device_id);
+    assert_eq!(original.driver_version, revised.driver_version);
+
+    let path = persistence_path(label);
+    let typed = key(1);
+    let cold = cold_key_from_pipeline_key(&typed, ShaderPackageId::new("s5.same-program"));
+    // This is a wire/import-boundary fixture, not a driver-produced binary.
+    let blob = vec![0x53, 0x35, 0x50, 0x53, 0x4f];
+    let mut old_image = PersistedPsoCache::new(original.clone());
+    old_image.insert(cold.clone(), blob.clone());
+    std::fs::write(&path, old_image.encode()).unwrap();
+
+    let device = device();
+    let mut cache = PipelineCache::new();
+    // Positive control: the public production fingerprint admits its own file.
+    assert_eq!(
+        cache.load_persisted_cache_from_path(&path, &original, 1024),
+        Ok(1)
+    );
+    cache.shutdown(&*device);
+    let mut cache = PipelineCache::new();
+    assert_eq!(
+        cache.load_persisted_cache_from_path(&path, &revised, 1024),
+        Err(PipelineCachePersistenceError::Decode(
+            PersistLoadError::Fingerprint(
+                prism_render_architecture::shader_package::FingerprintMismatch::Abi,
+            ),
+        ))
+    );
+    assert_eq!(cache.pending_persisted_len(), 0);
+    assert_eq!(cache.last_binary_error(), None, "reject before lazy import");
+
+    let mut rebuilt = PersistedPsoCache::new(revised.clone());
+    rebuilt.insert(cold.clone(), blob.clone());
+    std::fs::write(&path, rebuilt.encode()).unwrap();
+    assert_eq!(
+        cache.load_persisted_cache_from_path(&path, &revised, 1024),
+        Ok(1)
+    );
+    assert_eq!(cache.persisted.get(&cold), Some(&blob));
+    // Rejecting a stale ABI expectation must not clear an admitted image.
+    assert_eq!(
+        cache.load_persisted_cache_from_path(&path, &original, 1024),
+        Err(PipelineCachePersistenceError::Decode(
+            PersistLoadError::Fingerprint(
+                prism_render_architecture::shader_package::FingerprintMismatch::Abi,
+            ),
+        ))
+    );
+    assert_eq!(cache.persisted.get(&cold), Some(&blob));
+    cache.shutdown(&*device);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn schema_revision_only_change_rejects_app_persisted_cache() {
+    let version = prism_render_material::SURFACE_SCHEMA_VERSION;
+    let before = format!("pub const SURFACE_SCHEMA_VERSION: u32 = {version};");
+    let after = format!(
+        "pub const SURFACE_SCHEMA_VERSION: u32 = {};",
+        version.checked_add(1).unwrap()
+    );
+    assert_eq!(
+        MATERIAL_ABI_SOURCES.surface_layout.matches(&before).count(),
+        1
+    );
+    let revised = MATERIAL_ABI_SOURCES
+        .surface_layout
+        .replacen(&before, &after, 1);
+    assert_abi_source_change_rejects_persisted_cache(
+        "schema-revision",
+        MaterialAbiSources {
+            surface_layout: &revised,
+            ..MATERIAL_ABI_SOURCES
+        },
+    );
+}
+
+#[test]
+fn generated_layout_only_change_rejects_app_persisted_cache() {
+    let words = prism_render_material::SURFACE_CORE_WORDS;
+    let before = format!("pub const SURFACE_CORE_WORDS: usize = {words};");
+    let after = format!("pub const SURFACE_CORE_WORDS: usize = {};", words + 4);
+    assert_eq!(
+        MATERIAL_ABI_SOURCES.surface_layout.matches(&before).count(),
+        1
+    );
+    let revised = MATERIAL_ABI_SOURCES
+        .surface_layout
+        .replacen(&before, &after, 1);
+    assert_abi_source_change_rejects_persisted_cache(
+        "surface-layout",
+        MaterialAbiSources {
+            surface_layout: &revised,
+            ..MATERIAL_ABI_SOURCES
+        },
+    );
+}
+
+#[test]
+fn render_class_encoding_only_change_rejects_app_persisted_cache() {
+    let before = "    Opaque,\n    OpaqueTwoSided,";
+    let after = "    OpaqueTwoSided,\n    Opaque,";
+    assert_eq!(
+        MATERIAL_ABI_SOURCES.material_record.matches(before).count(),
+        1
+    );
+    let revised = MATERIAL_ABI_SOURCES
+        .material_record
+        .replacen(before, after, 1);
+    assert_abi_source_change_rejects_persisted_cache(
+        "render-class-encoding",
+        MaterialAbiSources {
+            material_record: &revised,
+            ..MATERIAL_ABI_SOURCES
+        },
+    );
+}
+
+#[test]
+fn response_abi_only_change_rejects_app_persisted_cache() {
+    let before = "    base_weight: f32,";
+    let after = "    base_weight: vec2<f32>,";
+    assert_eq!(MATERIAL_ABI_SOURCES.response_abi.matches(before).count(), 2);
+    let revised = MATERIAL_ABI_SOURCES.response_abi.replacen(before, after, 1);
+    assert_abi_source_change_rejects_persisted_cache(
+        "response-abi",
+        MaterialAbiSources {
+            response_abi: &revised,
+            ..MATERIAL_ABI_SOURCES
+        },
+    );
+}
+
+#[test]
+fn persisted_cache_rejects_legacy_version_only_app_fingerprint() {
+    let current = pso_device_fingerprint(&adapter_info());
+    // Reproduce the exact old producer, with the SAME three numeric versions.
+    let legacy = DeviceFingerprint {
+        abi_hash: AbiHash::combine(&[
+            b"prism-render-app-pso-cache",
+            &ARCHITECTURE_VERSION.to_le_bytes(),
+            &prism_render_material::MATERIAL_ABI_VERSION.to_le_bytes(),
+            &PSO_CACHE_ABI_VERSION.to_le_bytes(),
+        ]),
+        ..current.clone()
+    };
+    let mut persisted = PersistedPsoCache::new(legacy);
+    persisted.insert(
+        cold_key_from_pipeline_key(&key(1), ShaderPackageId::new("s5.same-program")),
+        vec![1, 2, 3],
+    );
+    let path = persistence_path("legacy-version-only");
+    std::fs::write(&path, persisted.encode()).unwrap();
+    let device = device();
+    let mut cache = PipelineCache::new();
+    assert_eq!(
+        cache.load_persisted_cache_from_path(&path, &current, 1024),
+        Err(PipelineCachePersistenceError::Decode(
+            PersistLoadError::Fingerprint(
+                prism_render_architecture::shader_package::FingerprintMismatch::Abi,
+            ),
+        ))
+    );
+    assert_eq!(cache.pending_persisted_len(), 0);
+    cache.shutdown(&*device);
+    std::fs::remove_file(path).unwrap();
 }
 
 fn device() -> Arc<NullDevice> {

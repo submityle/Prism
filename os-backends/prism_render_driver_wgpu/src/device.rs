@@ -302,29 +302,6 @@ impl DeviceInner {
             .clone()
     }
 
-    /// Registers an externally-created buffer (for example a host renderer's
-    /// persistent scene buffer) into the slot map and returns its RHI id.
-    ///
-    /// The RHI table stores only a clone of the native handle. The caller keeps
-    /// ownership of the underlying wgpu buffer and must release the returned
-    /// table entry with [`release_buffer`](Self::release_buffer) when the ID is
-    /// no longer used. This is deliberately separate from `create_buffer`:
-    /// releasing the registration never destroys the host-owned native buffer.
-    pub fn register_buffer(&self, buffer: &wgpu::Buffer) -> rhi::BufferId {
-        let id = lock(&self.buffers).insert(StoredBuffer {
-            buffer: buffer.clone(),
-        });
-        convert::convert_id(id)
-    }
-
-    /// Releases a buffer registered with [`register_buffer`](Self::register_buffer).
-    ///
-    /// The ID is table-local and becomes stale immediately. The native buffer
-    /// remains alive through the host's handle and any command-buffer refs.
-    pub fn release_buffer(&self, id: rhi::BufferId) {
-        lock(&self.buffers).remove(convert::convert_id(id));
-    }
-
     /// Registers an externally-created texture (e.g. a swapchain image) into the
     /// slot map and returns its RHI id.
     ///
@@ -406,7 +383,9 @@ impl DeviceInner {
 /// which lets the device and its [`crate::queue::WgpuQueue`] co-own the state.
 ///
 /// The native resource getters clone the exact handles stored in these tables;
-/// they do not create/import resources, change callbacks, or submit work. Pass
+/// they do not create/import resources, change callbacks, or submit work. Native
+/// `register_*` methods only retain handles supplied by the host; see
+/// [`Self::register_buffer`] for the import contract. Pass
 /// IDs minted by this device (or a clone sharing its tables). IDs are table-local:
 /// an ID from another adoption can alias a live slot and is not an ownership
 /// certificate. Removed/stale IDs panic instead of resolving a recycled slot.
@@ -438,8 +417,9 @@ impl WgpuDevice {
     /// adapter/queue pairing and does not import any native resources. In
     /// particular, native `Device` equality alone is not a cross-instance
     /// proof: the native backend compares IDs local to its wgpu Global.
-    /// Callers must supply the original host tuple; arbitrary native resource
-    /// registration is deliberately not exposed through this API.
+    /// Callers must supply the original host tuple. Native registration is a
+    /// separate, caller-certified same-device operation, not authentication of
+    /// arbitrary resources; see [`Self::register_buffer`].
     ///
     /// Each adoption creates a fresh RHI resource table. IDs cannot cross
     /// adoptions, including two adoptions of the same native device. Dropping
@@ -488,6 +468,129 @@ impl WgpuDevice {
     #[must_use]
     pub fn wgpu_device(&self) -> &wgpu::Device {
         &self.inner.device
+    }
+
+    /// Registers an exact native buffer clone without owning its allocation.
+    /// No GPU allocation, copy, submission, callback change, or device request
+    /// occurs. Each call creates an independent table entry, even for the same
+    /// buffer; release each entry with [`Self::release_buffer`].
+    ///
+    /// # Device identity and lifetime
+    ///
+    /// The caller must supply a live buffer created on this exact logical
+    /// device, from the original host tuple. There is no safe native owner query
+    /// here: importing does not validate device identity, usage, mapping state,
+    /// or explicit destruction. A foreign resource may fail later wgpu
+    /// validation; import success is not proof that it belongs to this device.
+    ///
+    /// IDs belong only to this table (or a `WgpuDevice` clone sharing it).
+    /// Separate adoptions, even of the same device, may mint identical IDs.
+    /// Never resolve/release an ID through another table: a colliding foreign
+    /// ID can resolve or remove an unrelated live entry and cannot be detected.
+    ///
+    /// Keep a device/table owner and the registration alive through every ID
+    /// lookup, including deferred command encoding. A device clone retains the
+    /// table, not an entry removed by another caller. A registered handle keeps
+    /// a native reference but cannot prevent the host calling `Buffer::destroy`;
+    /// the host must not explicitly destroy it while work still uses it, and
+    /// must retain reusable graph allocations until actual GPU completion.
+    #[must_use = "release the registration when its table-local ID is no longer used"]
+    pub fn register_buffer(&self, buffer: &wgpu::Buffer) -> rhi::BufferId {
+        let id = lock(&self.inner.buffers).insert(StoredBuffer {
+            buffer: buffer.clone(),
+        });
+        convert::convert_id(id)
+    }
+
+    /// Removes only the table entry, never calls native `Buffer::destroy`.
+    ///
+    /// All ID lookups must have finished. The ID becomes stale immediately;
+    /// stale/repeated release on this same table is a no-op, including after
+    /// slot reuse. Native clones and already-encoded commands retain their own
+    /// references. Releasing the last native reference may naturally free the
+    /// allocation; this is not a GPU-completion or storage-retirement signal.
+    /// The table-local restriction in [`Self::register_buffer`] also applies
+    /// here: IDs do not authenticate the table they came from.
+    pub fn release_buffer(&self, id: rhi::BufferId) {
+        lock(&self.inner.buffers).remove(convert::convert_id(id));
+    }
+
+    /// Registers an exact native texture clone, without owning its allocation.
+    /// The same-device, table-local ID and lifetime obligations of
+    /// [`Self::register_buffer`] apply. This does not acquire/present a surface
+    /// image or extend a surface frame's validity. Release the independent
+    /// entry with [`Self::release_texture`].
+    #[must_use = "release the registration when its table-local ID is no longer used"]
+    pub fn register_texture(&self, texture: &wgpu::Texture) -> rhi::TextureId {
+        self.inner.register_texture(texture.clone())
+    }
+
+    /// Removes only a texture table entry, never calls native `Texture::destroy`.
+    /// The release/identity/completion contract of [`Self::release_buffer`]
+    /// applies. Independently registered views remain live in their own slots.
+    pub fn release_texture(&self, id: rhi::TextureId) {
+        self.inner.release_texture(id);
+    }
+
+    /// Registers an exact native view clone, retaining its native texture
+    /// reference without allocating a texture or view. No texture table entry
+    /// is required or created. The same-device, table-local ID and lifetime
+    /// obligations of [`Self::register_buffer`] apply. Release with
+    /// [`Self::release_texture_view`]; the host owns surface-frame validity.
+    #[must_use = "release the registration when its table-local ID is no longer used"]
+    pub fn register_texture_view(&self, view: &wgpu::TextureView) -> rhi::TextureViewId {
+        self.inner.register_texture_view(view.clone())
+    }
+
+    /// Removes only a view table entry; no native texture is destroyed and no
+    /// texture table entry is removed. The stale-ID, same-table and completion
+    /// contract of [`Self::release_buffer`] applies.
+    pub fn release_texture_view(&self, id: rhi::TextureViewId) {
+        self.inner.release_texture_view(id);
+    }
+
+    /// Registers the exact host compute pipeline, without creating a shader,
+    /// pipeline layout or replacement pipeline. The same-device, table-local
+    /// ID and lifetime obligations of [`Self::register_buffer`] apply. Pipeline
+    /// and layout compatibility remain subject to native validation at use.
+    /// Each import has its own entry; release with [`Self::release_compute_pipeline`].
+    #[must_use = "release the registration when its table-local ID is no longer used"]
+    pub fn register_compute_pipeline(
+        &self,
+        pipeline: &wgpu::ComputePipeline,
+    ) -> rhi::ComputePipelineId {
+        convert::convert_id(lock(&self.inner.compute_pipelines).insert(pipeline.clone()))
+    }
+
+    /// Removes only this pipeline table entry, dropping its native reference.
+    /// Does not invalidate host clones or encoded commands, submit or wait.
+    /// The stale-ID, same-table and completion contract of
+    /// [`Self::release_buffer`] applies; this is not a retirement signal.
+    pub fn release_compute_pipeline(&self, id: rhi::ComputePipelineId) {
+        lock(&self.inner.compute_pipelines).remove(convert::convert_id(id));
+    }
+
+    /// Registers the exact host bind group without rebuilding its bindings or
+    /// allocating resources. The same-device, table-local ID and lifetime
+    /// obligations of [`Self::register_buffer`] apply to the group and all its
+    /// bound resources. Native layout/dynamic-offset validation still applies.
+    ///
+    /// No RHI entries are created for the group's layout or bound resources;
+    /// its native references do not keep their separate RHI entries alive.
+    /// Import does not infer graph accesses or prove resource freshness or
+    /// completion. Each import has its own entry; release with [`Self::release_bind_group`].
+    #[must_use = "release the registration when its table-local ID is no longer used"]
+    pub fn register_bind_group(&self, bind_group: &wgpu::BindGroup) -> rhi::BindGroupId {
+        convert::convert_id(lock(&self.inner.bind_groups).insert(bind_group.clone()))
+    }
+
+    /// Removes only this bind-group entry, not any bound resource's entry.
+    /// Drops a native reference without explicitly destroying allocations,
+    /// submitting or waiting. The stale-ID, same-table and completion contract
+    /// of [`Self::release_buffer`] applies; reusable bound storage still needs
+    /// actual host-confirmed completion and no future readers before reuse.
+    pub fn release_bind_group(&self, id: rhi::BindGroupId) {
+        lock(&self.inner.bind_groups).remove(convert::convert_id(id));
     }
 
     /// Clones the native buffer stored for a live, table-local RHI id.
@@ -1235,6 +1338,232 @@ impl OwnedBinding {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    fn import_device_or_skip() -> Option<(WgpuDevice, crate::WgpuQueue)> {
+        match crate::WgpuInstance::new().request_default_hardware_device() {
+            Ok(pair) => Some(pair),
+            Err(crate::HardwareDeviceError::Device(error)) => {
+                panic!("native import test device creation failed: {error}")
+            }
+            Err(error) => {
+                assert!(
+                    !crate::require_hardware_gpu(),
+                    "PRISM_REQUIRE_GPU=1: {error}"
+                );
+                eprintln!("SKIPPED native import GPU test: {error}");
+                None
+            }
+        }
+    }
+
+    #[test]
+    fn native_import_api_is_available_on_public_device() {
+        // Compile-time regression for methods accidentally placed only on
+        // DeviceInner: downstream callers only have this public device type.
+        let _: fn(&WgpuDevice, &wgpu::Buffer) -> rhi::BufferId = WgpuDevice::register_buffer;
+        let _: fn(&WgpuDevice, rhi::BufferId) = WgpuDevice::release_buffer;
+        let _: fn(&WgpuDevice, &wgpu::Texture) -> rhi::TextureId = WgpuDevice::register_texture;
+        let _: fn(&WgpuDevice, rhi::TextureId) = WgpuDevice::release_texture;
+        let _: fn(&WgpuDevice, &wgpu::TextureView) -> rhi::TextureViewId =
+            WgpuDevice::register_texture_view;
+        let _: fn(&WgpuDevice, rhi::TextureViewId) = WgpuDevice::release_texture_view;
+        let _: fn(&WgpuDevice, &wgpu::ComputePipeline) -> rhi::ComputePipelineId =
+            WgpuDevice::register_compute_pipeline;
+        let _: fn(&WgpuDevice, rhi::ComputePipelineId) = WgpuDevice::release_compute_pipeline;
+        let _: fn(&WgpuDevice, &wgpu::BindGroup) -> rhi::BindGroupId =
+            WgpuDevice::register_bind_group;
+        let _: fn(&WgpuDevice, rhi::BindGroupId) = WgpuDevice::release_bind_group;
+    }
+
+    #[test]
+    fn native_compute_imports_release_only_independent_generation_checked_entries() {
+        let Some((device, queue)) = import_device_or_skip() else {
+            return;
+        };
+        let native = device.wgpu_device();
+        let output = native.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("native-compute-import-output"),
+            size: 4,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let shader = native.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("native-compute-import-shader"),
+            source: wgpu::ShaderSource::Wgsl(
+                "@group(0) @binding(0) var<storage, read_write> output: u32;
+                 @compute @workgroup_size(1) fn main() { output = 314159u; }"
+                    .into(),
+            ),
+        });
+        let pipeline = native.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("native-compute-import-pipeline"),
+            layout: None,
+            module: &shader,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let group = native.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("native-compute-import-group"),
+            layout: &pipeline.get_bind_group_layout(0),
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: output.as_entire_binding(),
+            }],
+        });
+        let pipeline_id = device.register_compute_pipeline(&pipeline);
+        let pipeline_duplicate = device.register_compute_pipeline(&pipeline);
+        let group_id = device.register_bind_group(&group);
+        let group_duplicate = device.register_bind_group(&group);
+        assert_ne!(pipeline_id, pipeline_duplicate);
+        assert_ne!(group_id, group_duplicate);
+        assert_eq!(device.wgpu_compute_pipeline(pipeline_id), pipeline);
+        assert_eq!(device.wgpu_bind_group(group_id), group);
+        // Imports do not synthesize any dependencies in other resource tables.
+        assert!(lock(&device.inner.shaders).is_empty());
+        assert!(lock(&device.inner.pipeline_layouts).is_empty());
+        assert!(lock(&device.inner.bind_group_layouts).is_empty());
+        assert!(lock(&device.inner.buffers).is_empty());
+        device.release_compute_pipeline(pipeline_id);
+        device.release_bind_group(group_id);
+        assert!(catch_unwind(AssertUnwindSafe(
+            || device.wgpu_compute_pipeline(pipeline_id)
+        ))
+        .is_err());
+        assert!(catch_unwind(AssertUnwindSafe(|| device.wgpu_bind_group(group_id))).is_err());
+        assert_eq!(device.wgpu_compute_pipeline(pipeline_duplicate), pipeline);
+        assert_eq!(device.wgpu_bind_group(group_duplicate), group);
+        let pipeline_replacement = device.register_compute_pipeline(&pipeline);
+        let group_replacement = device.register_bind_group(&group);
+        assert_eq!(pipeline_replacement.index(), pipeline_id.index());
+        assert_eq!(group_replacement.index(), group_id.index());
+        assert_ne!(pipeline_replacement, pipeline_id);
+        assert_ne!(group_replacement, group_id);
+        device.clone().release_compute_pipeline(pipeline_id);
+        device.clone().release_bind_group(group_id);
+        assert_eq!(device.wgpu_compute_pipeline(pipeline_replacement), pipeline);
+        assert_eq!(device.wgpu_bind_group(group_replacement), group);
+        device.release_compute_pipeline(pipeline_duplicate);
+        device.release_bind_group(group_duplicate);
+        device.release_compute_pipeline(pipeline_replacement);
+        device.release_bind_group(group_replacement);
+        device.release_compute_pipeline(pipeline_replacement);
+        device.release_bind_group(group_replacement);
+        assert!(lock(&device.inner.compute_pipelines).is_empty());
+        assert!(lock(&device.inner.bind_groups).is_empty());
+
+        // The original native objects remain usable after every registration
+        // is removed, including the group's otherwise unregistered allocation.
+        let mut encoder = native.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, Some(&group), &[]);
+            pass.dispatch_workgroups(1, 1, 1);
+        }
+        queue.wgpu_queue().submit([encoder.finish()]);
+        let output_id = device.register_buffer(&output);
+        assert_eq!(queue.read_buffer(output_id, 4), 314159_u32.to_le_bytes());
+        device.release_buffer(output_id);
+    }
+
+    #[test]
+    fn native_buffer_imports_are_independent_and_stale_release_preserves_reuse() {
+        let Some((device, queue)) = import_device_or_skip() else {
+            return;
+        };
+        let native = device.wgpu_device().create_buffer(&wgpu::BufferDescriptor {
+            label: Some("native-import-buffer"),
+            size: 4,
+            usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let first = device.register_buffer(&native);
+        let second = device.register_buffer(&native);
+        assert_ne!(first, second);
+        assert_eq!(device.wgpu_buffer(first), native);
+        assert_eq!(device.wgpu_buffer(second), native);
+        device.release_buffer(first);
+        assert!(catch_unwind(AssertUnwindSafe(|| device.wgpu_buffer(first))).is_err());
+        assert_eq!(device.wgpu_buffer(second), native);
+        let replacement = device.register_buffer(&native);
+        assert_eq!(
+            replacement.index(),
+            first.index(),
+            "exercise actual slot reuse"
+        );
+        assert_ne!(replacement, first);
+        device.clone().release_buffer(first);
+        assert_eq!(device.wgpu_buffer(replacement), native);
+        device.release_buffer(second);
+        device.release_buffer(replacement);
+        device.release_buffer(replacement);
+        assert!(lock(&device.inner.buffers).is_empty());
+
+        // Native use after all registrations were released catches accidental
+        // Buffer::destroy, not merely retention of the public handle's metadata.
+        queue.wgpu_queue().write_buffer(&native, 0, &[3, 1, 4, 1]);
+        let again = device.register_buffer(&native);
+        assert_eq!(queue.read_buffer(again, 4), [3, 1, 4, 1]);
+        device.release_buffer(again);
+    }
+
+    #[test]
+    fn native_texture_and_view_imports_have_independent_table_lifetimes() {
+        let Some((device, _queue)) = import_device_or_skip() else {
+            return;
+        };
+        let native = device
+            .wgpu_device()
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("native-import-texture"),
+                size: wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+        let view = native.create_view(&Default::default());
+        let view_id = device.register_texture_view(&view);
+        assert!(
+            lock(&device.inner.textures).is_empty(),
+            "view import needs no texture ID"
+        );
+        let first = device.register_texture(&native);
+        let second = device.register_texture(&native);
+        assert_ne!(first, second);
+        assert_eq!(device.wgpu_texture(first), native);
+        device.release_texture(first);
+        let replacement = device.register_texture(&native);
+        assert_eq!(replacement.index(), first.index());
+        assert_ne!(replacement, first);
+        device.release_texture(first);
+        assert_eq!(device.wgpu_texture(replacement), native);
+        assert_eq!(device.wgpu_texture(second), native);
+        device.release_texture(second);
+        device.release_texture(replacement);
+        assert!(catch_unwind(AssertUnwindSafe(|| device.wgpu_texture(first))).is_err());
+        assert_eq!(device.wgpu_texture_view(view_id), view);
+
+        device.release_texture_view(view_id);
+        assert!(catch_unwind(AssertUnwindSafe(|| device.wgpu_texture_view(view_id))).is_err());
+        let new_view_id = device.register_texture_view(&view);
+        assert_eq!(new_view_id.index(), view_id.index());
+        assert_ne!(new_view_id, view_id);
+        device.release_texture_view(view_id);
+        assert_eq!(device.wgpu_texture_view(new_view_id), view);
+        device.release_texture_view(new_view_id);
+        device.release_texture_view(new_view_id);
+        assert!(lock(&device.inner.textures).is_empty());
+        assert!(lock(&device.inner.texture_views).is_empty());
+    }
 
     #[test]
     fn bindless_layout_capability_mismatch_is_structured() {

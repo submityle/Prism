@@ -123,9 +123,11 @@ water_surface_fs_custom
 water_surface_fs_mask_blend
 ```
 
-`water_surface_fs_hybrid` 不在当前入口集合中。当前水体测试直接检查四入口编译、两臂响应写入、coverage、resident composition 的通道合并和 HDR alpha 写回；这说明当前源码没有保留旧入口，但不等于“删除旧入口前的 golden/护栏顺序”已经被证明或可以取消。该历史验收要求仍未闭合，必须与当前入口集合分开记账。
+`water_surface_fs_hybrid` 不在当前入口集合中；`hybrid_wesl_compiles_and_preserves_all_four_entries` 同时检查四个现行入口可编译，且已删除的名称不会重新成为 live shader API。当前入口防回归已经有测试，但它不能倒推为“删除旧入口前已运行护栏”。该历史验收必须单独记账。
 
-`water_hybrid_golden.rs` 的组合公式覆盖深度、岸边、泡沫、焦散、反射、透明/overlay、motion vector、reactive mask、组合网格、权重边界和 WESL 参考公式；该测试集合不能扩大解释为八项 GPU 输出等价、整帧 parity，或已完成旧入口删除前的运行时护栏时序。另有 `water_hybrid_gpu.rs` 的 10 项真实输出测试，证据范围限于该 integration target 覆盖的局部 production water path/output contract，不替代上述历史护栏要求。
+`water_hybrid_gpu.rs` 另有八个 `water_legacy_gpu_parity_*_full_frame` 用例，分别覆盖深度、岸边、泡沫、焦散、反射、透明/overlay、motion vector 和 reactive mask。每例编译未修改的生产 WESL，绘制 PBR、NPR、MaskBlend 三个生产 fragment entry，并运行生产 caustics、underwater、resident composition 与 HDR export；读回后逐像素比较 16 个 response words、control、coverage、motion MRT、HDR 与 premultiplied color。其 oracle 以独立 PBR/NPR 输出和测试 case 重算 legacy 两臂组合，而不是把 MaskBlend 自身的 motion 作为 reactive/overlay 输入。这里的 full frame 仅指 16×16 离屏水体 fixture 的全部像素：没有运行删除前旧 shader，也不是完整 Scene/Fabric/TAA 帧的前后版本图像对比；当前两端点共同的着色回归仍可能被此公式 oracle 掩盖。
+
+另有十个 `water_gpu_*` 定向真实 GPU 输出用例，用于定位当前 ABI 的各个可观察结果。这里的 shore 是 solver foam lane，shallow 是 authored scalar；它们不等同于旧 ABI 的独立 shoreline/bathymetry 绑定。八项全帧 parity 与十项定向输出都需要以 `PRISM_REQUIRE_GPU=1` 实跑通过才可作为真实 GPU 证据；无适配器时的 skip 不构成验收。
 
 ## 7. 当前门禁
 
@@ -146,6 +148,9 @@ water_surface_fs_mask_blend
 | `production_composition_gpu_matches_cpu_all_domains_alpha_and_auxiliary` | GPU composition 与 CPU 在通道、alpha、auxiliary 上一致 |
 | `hybrid_composition_golden_grid_matches_legacy_reference` | 水体组合网格与历史 reference 一致 |
 | `hybrid_runtime_is_wired_through_resident_composition_and_hdr_export` | 水体生产组合链路完整 |
+| `water_legacy_gpu_parity_*_full_frame`（8 项） | 强制 GPU 时，逐像素验证 16×16 水体 fixture 与 legacy 组合公式一致，不代表完整应用帧 parity |
+| `water_gpu_*`（10 项） | 强制 GPU 时，验证当前 ABI 的定向生产水体输出 |
+| `hybrid_wesl_compiles_and_preserves_all_four_entries` | 四个现行入口可编译，已删除的 `water_surface_fs_hybrid` 不会回归 |
 
 ## 8. 当前源码与测试证据
 
@@ -157,14 +162,20 @@ water_surface_fs_mask_blend
 - response output / conservation：`pkg/prism_render_shading/src/response_output.rs` 与 `tests/response_output.rs`；
 - 水体计划与 fragment entry：`pkg/prism_render_architecture/src/water/mod.rs`、`water/gpu/surface_pass.rs`、`pkg/prism_render_scene/src/shaders/water_surface_raster.wesl`；
 - 水体 golden：`pkg/prism_render_scene/tests/water_hybrid_golden.rs`。
+- 水体真实 GPU 输出与整帧 parity：`pkg/prism_render_scene/tests/water_hybrid_gpu.rs`。
 
-本轮运行结果：
+历史文档记录（以下三条不是 2026-10-20 本轮复跑结果）：
 
 - `cargo test -p prism_render_material --tests`：相关 shading plan integration 33 项通过，stale id、registered source、两臂执行和连续 mask 测试均通过；
 - `cargo test -p prism_render_shading --tests`：`3387 passed; 0 failed; 6 ignored`，response composition workload 1 项通过，response output 27 项通过；
 - `cargo test -p prism_render_scene --tests`：`1771 passed; 0 failed`，response composition GPU 2 项、water hybrid golden 17 项及 resident composition 3 项通过；
-- `water_hybrid_gpu.rs` 已有 10/10 项真实输出测试证据；该数字只表示该 integration target 的十项水体 GPU 输出覆盖，不表示八项 legacy golden、整帧 parity、所有设备或 Fabric 生产闭环已完成；
-- 当前宿主 Apple M2 Metal 的 GPU 结果按适配器记录，不扩展为所有设备的性能结论。
+
+2026-10-20 当前工作树审计与复跑：
+
+- 补强测试 oracle：reactive/overlay 的 motion 输入改为独立 PBR 输出；增加已删除 Hybrid entry 不得回归的编译源码断言。
+- `cargo test -p prism_render_scene --test water_hybrid_golden --test water_hybrid_gpu -- --nocapture`：沙盒外 Apple M2 / Metal，`water_hybrid_golden` **19 passed，0 failed，0 ignored**，`water_hybrid_gpu` **19 passed，0 failed，0 ignored**。GPU 结果包含 10 项当前生产水体输出、8 项 `water_legacy_gpu_parity_*_full_frame` 和 1 项比较器容差测试；未把无适配器 skip 当作通过。
+- 八项 legacy GPU parity 现在确实执行冻结的 `41a31ceef24e59ab7f8dda076b2b4c7f5e11f6ec` shader closure，并分别固定 PBR/NPR endpoint；它证明 16×16 水体 fixture 的完整输出，不证明完整 Scene/Fabric/TAA 帧 parity，也不能追认旧入口删除前护栏曾经运行。
+- 完整 Scene/Fabric/TAA 帧的前后版本 parity、独立 TAA reactive MRT 输出，以及删除旧入口前已运行护栏的历史记录仍缺失。当前 reactive 验证使用独立 endpoint 与 overlay 消费，不能扩大为独立 TAA reactive mask 验收。
 
 ## 9. Git 历史锚点
 
@@ -173,5 +184,6 @@ water_surface_fs_mask_blend
 - `ce6af1163 feat(material): add custom response production registration`：加入注册程序的生产路径。
 - `bdca810a9 feat(render): complete scene execution and water GPU path`：接通 response execution、水体 shader 和 GPU 测试。
 - `8400fe972 feat: complete runtime and render refactoring implementation`：汇总 runtime/render 执行路径。
+- `8400fe972`（2026-10-16 01:31:43 +08:00）：以 `water_surface_fs_mask_blend` 替换 `water_surface_fs_hybrid`；`a1e33a798`（2026-10-16 18:30:52 +08:00）才加入八项 `water_legacy_gpu_parity_*_full_frame`。故没有可追溯证据证明“删除前护栏已运行”；当前仅能以入口不存在断言防止旧 API 回归，历史时序护栏仍未完成。
 
 当前结论以现有源码、门禁和测试为准；历史设计中的固定 9 类表、未来切片顺序和水体入口保留条件不属于当前契约。
