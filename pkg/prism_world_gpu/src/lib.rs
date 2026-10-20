@@ -25,8 +25,8 @@ pub use density::{density_dither_visible, DensityPolicy, DensityPolicyError};
 pub use packing::{ClusterSoa, ProxySoa, SoaBufferPack};
 pub use registry::{ProxyHandle, ProxyRegistry, ProxyRegistryError};
 pub use world_placement_graph::{
-    PlacementGraphError, PlacementGraphPass, PlacementGraphResource, PlacementGraphStage,
-    PlacementRenderGraph, PlacementStream,
+    PlacementGraphEncodeError, PlacementGraphEncoder, PlacementGraphError, PlacementGraphPass,
+    PlacementGraphResource, PlacementGraphStage, PlacementRenderGraph, PlacementStream,
 };
 
 /// Renderer-side ordered coverage test. Concatenate this WGSL with a draw

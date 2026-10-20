@@ -106,6 +106,55 @@ pub struct PlacementRenderGraph {
     passes: Vec<PlacementGraphPass>,
 }
 
+/// Consumer invoked for each graph stage in deterministic submission order.
+///
+/// A renderer implements this small adapter at its graph boundary. The world
+/// contract owns ordering and validation; the consumer owns device resources,
+/// barriers, and the actual render/compute API. Each method is called exactly
+/// once for every matching pass, including empty streams, so a consumer cannot
+/// silently skip a cell while still reporting a successful execution.
+pub trait PlacementGraphEncoder {
+    /// Consumer-specific failure type.
+    type Error;
+
+    /// Registers or uploads the source stream for one cell.
+    fn upload(&mut self, stream: PlacementStream) -> Result<(), Self::Error>;
+
+    /// Encodes the terrain projection/placement producer for one cell.
+    fn project(&mut self, stream: PlacementStream) -> Result<(), Self::Error>;
+
+    /// Encodes compaction and indirect-argument production for one cell.
+    fn compact(&mut self, stream: PlacementStream) -> Result<(), Self::Error>;
+
+    /// Registers the indirect draw consumer for one cell.
+    fn draw_indirect(&mut self, stream: PlacementStream) -> Result<(), Self::Error>;
+}
+
+/// Failure returned when a graph consumer rejects one pass.
+#[derive(Debug, Eq, PartialEq)]
+pub struct PlacementGraphEncodeError<E> {
+    /// Zero-based pass index in [`PlacementRenderGraph::passes`].
+    pub pass_index: usize,
+    /// Cell/revision associated with the rejected pass.
+    pub stream: PlacementStream,
+    /// Stage that was rejected.
+    pub stage: PlacementGraphStage,
+    /// Consumer-specific error.
+    pub error: E,
+}
+
+impl<E: fmt::Display> fmt::Display for PlacementGraphEncodeError<E> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "placement graph pass {} ({:?}, {:?}) failed: {}",
+            self.pass_index, self.stream, self.stage, self.error
+        )
+    }
+}
+
+impl<E: fmt::Debug + fmt::Display> core::error::Error for PlacementGraphEncodeError<E> {}
+
 /// Errors from graph construction.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PlacementGraphError {
@@ -191,6 +240,39 @@ impl PlacementRenderGraph {
         &self.passes
     }
 
+    /// Executes every pass through a renderer-owned consumer.
+    ///
+    /// The graph is already validated and sorted by [`Self::build`]. This
+    /// method performs no allocation and never reorders or coalesces passes;
+    /// therefore a renderer can map each callback to one native graph node or
+    /// command section while retaining the same deterministic cell ordering.
+    /// If a consumer fails, the exact pass and stream are returned. Earlier
+    /// callbacks may already have been applied; callers that need rollback must
+    /// provide it in their consumer or discard the partially recorded command
+    /// encoder.
+    pub fn encode<E: PlacementGraphEncoder>(
+        &self,
+        encoder: &mut E,
+    ) -> Result<(), PlacementGraphEncodeError<E::Error>> {
+        for (pass_index, pass) in self.passes.iter().copied().enumerate() {
+            let result = match pass.stage {
+                PlacementGraphStage::Upload => encoder.upload(pass.stream),
+                PlacementGraphStage::Project => encoder.project(pass.stream),
+                PlacementGraphStage::Compact => encoder.compact(pass.stream),
+                PlacementGraphStage::DrawIndirect => encoder.draw_indirect(pass.stream),
+            };
+            if let Err(error) = result {
+                return Err(PlacementGraphEncodeError {
+                    pass_index,
+                    stream: pass.stream,
+                    stage: pass.stage,
+                    error,
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// Returns whether the plan contains all producer-to-consumer barriers.
     #[must_use]
     pub fn has_complete_hazards(&self) -> bool {
@@ -217,6 +299,48 @@ impl PlacementRenderGraph {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Default)]
+    struct RecordingEncoder {
+        calls: Vec<(PlacementGraphStage, PlacementStream)>,
+        fail_at: Option<usize>,
+    }
+
+    impl PlacementGraphEncoder for RecordingEncoder {
+        type Error = &'static str;
+
+        fn upload(&mut self, stream: PlacementStream) -> Result<(), Self::Error> {
+            self.record(PlacementGraphStage::Upload, stream)
+        }
+
+        fn project(&mut self, stream: PlacementStream) -> Result<(), Self::Error> {
+            self.record(PlacementGraphStage::Project, stream)
+        }
+
+        fn compact(&mut self, stream: PlacementStream) -> Result<(), Self::Error> {
+            self.record(PlacementGraphStage::Compact, stream)
+        }
+
+        fn draw_indirect(&mut self, stream: PlacementStream) -> Result<(), Self::Error> {
+            self.record(PlacementGraphStage::DrawIndirect, stream)
+        }
+    }
+
+    impl RecordingEncoder {
+        fn record(
+            &mut self,
+            stage: PlacementGraphStage,
+            stream: PlacementStream,
+        ) -> Result<(), &'static str> {
+            let index = self.calls.len();
+            self.calls.push((stage, stream));
+            if self.fail_at == Some(index) {
+                Err("consumer rejected pass")
+            } else {
+                Ok(())
+            }
+        }
+    }
 
     fn stream(x: i64, revision: u64) -> PlacementStream {
         PlacementStream {
@@ -256,5 +380,40 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn encode_delivers_every_stage_in_graph_order_without_reordering() {
+        let streams = [stream(3, 1), stream(-1, 2)];
+        let graph = PlacementRenderGraph::build(&streams).unwrap();
+        let mut encoder = RecordingEncoder::default();
+
+        graph.encode(&mut encoder).unwrap();
+
+        assert_eq!(
+            encoder.calls,
+            graph
+                .passes()
+                .iter()
+                .map(|pass| (pass.stage, pass.stream))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn encode_reports_the_exact_rejected_pass_and_stops() {
+        let graph = PlacementRenderGraph::build(&[stream(1, 7)]).unwrap();
+        let mut encoder = RecordingEncoder {
+            fail_at: Some(2),
+            ..Default::default()
+        };
+
+        let error = graph.encode(&mut encoder).unwrap_err();
+
+        assert_eq!(error.pass_index, 2);
+        assert_eq!(error.stage, PlacementGraphStage::Compact);
+        assert_eq!(error.stream, stream(1, 7));
+        assert_eq!(error.error, "consumer rejected pass");
+        assert_eq!(encoder.calls.len(), 3);
     }
 }

@@ -76,9 +76,12 @@ submit, wait or read back. See `docs/prism_world_gpu_scatter_field_zh.md` for th
 exact ABI, budgets, queue lifecycle and physical-device evidence. The
 world-facing `PlacementRenderGraph` contract now describes deterministic
 multi-cell `Upload → Project → Compact → DrawIndirect` ordering and explicit
-source/placement/compact/indirect/scene hazards. It is backend-neutral: the
-real renderer/device pass registration and product scene decoder remain
-separate work and are not claimed by the CPU graph-plan tests.
+source/placement/compact/indirect/scene hazards. `PlacementGraphEncoder` gives a
+renderer a no-allocation execution entry that receives every pass in that exact
+order and reports the rejected pass precisely; it owns device barriers and
+native resource registration. The raw world crate remains engine-neutral: a
+renderer bridge must still implement that consumer and bind the returned
+indirect resources to its own scene/material path.
 
 The optional `terrain_scatter` feature adds `GpuScatterHeightfield`: source
 generation, author field and exact triangle-height/vertical-clearance/slope
