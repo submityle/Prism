@@ -402,6 +402,45 @@ impl EditorController {
         self.commit_selection(selection, anchor)
     }
 
+    /// Applies one bounded multi-selection operation after validating every
+    /// identity. The candidate is committed once, so a GPU box result cannot
+    /// expose a partially applied selection or advance the UI revision per hit.
+    /// `Extend` uses the supplied ordered items as the replacement range because
+    /// a GPU rectangle has no Outliner range endpoints of its own.
+    pub fn select_items(
+        &mut self,
+        items: &[SelectionItem],
+        mode: SelectionMode,
+    ) -> Result<ControllerOutcome, ControllerError> {
+        for item in items {
+            self.editor(item)?;
+        }
+        let mut candidate = self.selection.clone();
+        let replace = matches!(mode, SelectionMode::Replace | SelectionMode::Extend);
+        if replace {
+            candidate.clear();
+        }
+        for item in items {
+            match mode {
+                SelectionMode::Replace | SelectionMode::Add | SelectionMode::Extend => {
+                    candidate.add(item.clone());
+                }
+                SelectionMode::Toggle => {
+                    if !candidate.remove(item) {
+                        candidate.add(item.clone());
+                    }
+                }
+            }
+        }
+        let anchor = candidate.primary().and_then(|item| {
+            self.rows
+                .iter()
+                .find(|row| row.selection() == Some(item))
+                .map(OutlinerNode::id)
+        });
+        self.commit_selection(candidate, anchor)
+    }
+
     /// Clears the selection and its range anchor.
     pub fn clear_selection(&mut self) -> Result<ControllerOutcome, ControllerError> {
         self.commit_selection(Selection::default(), None)

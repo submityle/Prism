@@ -407,7 +407,7 @@ pub trait Command: Send {
 - **E3 外壳 + 停靠**:`prism_editor_dock` + `prism_editor_shell`——停靠/命令面板/菜单键位/主题/工作区持久化。
 - **E4 核心面板**:`prism_editor_panels`——Inspector + Outliner(虚拟化)+ Console。`InspectorSession` 已打通选择→字段命令→Undo/Redo→快照回写，`prism_editor_ui` 已提供有界语义 action 绑定；原生设备事件到应用模型执行/绘制仍需接线。
 - **E5 运行时桥 + PIE**:`prism_editor_remote`——协议、增量同步、PIE、TCP 和受控子进程管理已落地；引擎专属 adapter 与真实场景 runtime 是后续接入，不将 loopback fixture 计作引擎实现。
-- **E6 GPU 视口 + Gizmo**:`prism_editor_viewport`——增量场景 ID 提交、多 viewport target、异步读回/过期拒绝已落地；`prism_editor_app` 已提供文档到场景的引擎中立候选/提交边界；宿主 geometry/depth、GPU 矩形采集、平台输入和 Gizmo 绘制/编辑回写仍需接入。
+- **E6 GPU 视口 + Gizmo**:`prism_editor_viewport`——增量场景 ID 提交、多 viewport target、单点/矩形异步读回与过期拒绝已落地；`prism_editor_app` 已提供文档到场景的引擎中立候选/提交边界和 native 点选/拖拽框选接线；GPU reduction、框选 overlay、焦点和 Gizmo 绘制/编辑回写仍需接入。
 - **E7 内容与管线**:`prism_editor_content`——内容浏览器 + 依赖图 + 校验 + 导入导出 + 版本控制贡献点。
 - **E8 大世界编辑**:`prism_editor_world`——World Partition 流送 + 数据层 + OFPA + 层级实例 + HLOD 预览。
 - **E9 分析诊断**:`prism_editor_profiler`——帧分析器 + 帧图调试 + 内存预算 + Gameplay Debugger + 可视日志。

@@ -42,6 +42,11 @@ and a camera without embedding project gameplay types. Scene candidates are
 staged before UI publication and committed only after the document install
 succeeds; an install failure discards the candidate and keeps the active scene.
 
+Viewport clicks use asynchronous integer-ID readback. A native drag inside the
+viewport becomes a bounded rectangle copy and resolves all visible identities
+through one controller selection commit; stale target, scene, or controller
+revisions are rejected without mutating selection.
+
 Verification from the repository root:
 
 ```text

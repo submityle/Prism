@@ -18,10 +18,12 @@ use prism_editor_core::SelectionItem;
 use prism_editor_panels::OutlinerId;
 use prism_editor_ui::{EditorAction, SelectionMode};
 use prism_editor_viewport::{
-    EncodedPickId, GpuPickingBackend, GpuPickingConfig, InFlightPickReadback, PickCoordinator,
-    PickOutcome, PickResult, PixelPoint, RenderTargetRegistry, RenderTargetState, SceneIdCamera,
-    SceneIdDepth, SceneIdGeometryRenderer, SceneIdMatrix, SceneIdPass, SceneIdPassItem,
-    SceneObjectId, Viewport, ViewportRegistry, SCENE_ID_IDENTITY_MATRIX,
+    BoxSelectionCoordinator, EncodedPickId, GpuBoxSelectionLimits, GpuPickingBackend,
+    GpuPickingConfig, InFlightBoxSelectionReadback, InFlightPickReadback, PickCoordinator,
+    PickOutcome, PickResult, PixelPoint, PixelRect, RenderTargetRegistry, RenderTargetState,
+    SceneIdCamera, SceneIdDepth, SceneIdGeometryRenderer, SceneIdMatrix, SceneIdPass,
+    SceneIdPassItem, SceneObjectId, SelectionOutcome, Viewport, ViewportRegistry,
+    SCENE_ID_IDENTITY_MATRIX,
 };
 use wgpu::{CommandEncoder, TextureView};
 
@@ -112,6 +114,8 @@ pub struct DesktopSceneStatus {
     pub scene_generation: u64,
     /// At most one GPU readback is retained (newest click wins).
     pub pending: bool,
+    /// At most one GPU rectangle readback is retained.
+    pub pending_box: bool,
     /// Number of submitted pick copies.
     pub submitted_picks: u64,
     /// Number of current hit/miss results accepted by the adapter.
@@ -124,6 +128,12 @@ pub struct DesktopSceneStatus {
 
 struct PendingClick {
     readback: InFlightPickReadback,
+    controller_revision: u64,
+    mode: SelectionMode,
+}
+
+struct PendingBox {
+    readback: InFlightBoxSelectionReadback,
     controller_revision: u64,
     mode: SelectionMode,
 }
@@ -155,6 +165,27 @@ impl ReadySelection {
     }
 }
 
+enum ReadyBoxSelection {
+    Items(Vec<SelectionItem>),
+    Clear,
+    Unchanged,
+}
+
+impl ReadyBoxSelection {
+    fn apply(
+        self,
+        controller: &mut EditorController,
+        mode: SelectionMode,
+    ) -> Result<bool, DesktopError> {
+        let outcome = match self {
+            Self::Items(items) => controller.select_items(&items, mode),
+            Self::Clear => controller.clear_selection(),
+            Self::Unchanged => return Ok(false),
+        };
+        Ok(outcome.map_err(renderer_error)?.changed)
+    }
+}
+
 struct GpuScene {
     renderer: SceneIdGeometryRenderer,
     pipeline: wgpu::RenderPipeline,
@@ -177,6 +208,8 @@ pub struct DesktopScene {
     targets: RenderTargetRegistry,
     picks: PickCoordinator,
     pending: Option<PendingClick>,
+    boxes: BoxSelectionCoordinator,
+    pending_box: Option<PendingBox>,
     gpu: Option<GpuScene>,
     needs_upload: bool,
     matrix: SceneIdMatrix,
@@ -204,6 +237,8 @@ impl DesktopScene {
             targets: RenderTargetRegistry::new(),
             picks: PickCoordinator::new(),
             pending: None,
+            boxes: BoxSelectionCoordinator::new(MAX_OBJECTS),
+            pending_box: None,
             gpu: None,
             needs_upload: true,
             matrix: SCENE_ID_IDENTITY_MATRIX,
@@ -273,6 +308,7 @@ impl DesktopScene {
             target: self.targets.state(self.viewport.id()),
             scene_generation: self.scene.generation(),
             pending: self.pending.is_some(),
+            pending_box: self.pending_box.is_some(),
             ..self.counters
         }
     }
@@ -565,6 +601,100 @@ impl DesktopScene {
         Ok(true)
     }
 
+    /// Queues one bounded asynchronous rectangular selection. The rectangle
+    /// is copied from the real integer ID target; identity resolution and the
+    /// controller commit happen only after correlation checks pass.
+    pub fn request_box_pick(
+        &mut self,
+        gpu: &DesktopGpu,
+        controller: &EditorController,
+        start: [f32; 2],
+        end: [f32; 2],
+        mode: SelectionMode,
+    ) -> Result<bool, DesktopError> {
+        if start
+            .iter()
+            .chain(end.iter())
+            .any(|value| !value.is_finite())
+        {
+            return Err(message("box-pick coordinates must be finite"));
+        }
+        if self.needs_upload {
+            return Ok(false);
+        }
+        let Some(bounds) = &self.bounds else {
+            return Ok(false);
+        };
+        let Some(viewport_target) = self.targets.get(self.viewport.id()) else {
+            return Ok(false);
+        };
+        let config = viewport_target.state().config;
+        let rectangle = local_rectangle(start, end, bounds, config)
+            .ok_or_else(|| message("box-pick must cover a non-empty viewport rectangle"))?;
+        self.cancel_pending();
+        let viewport_target = self
+            .targets
+            .get(self.viewport.id())
+            .ok_or_else(|| message("missing target"))?;
+        let state = viewport_target.state();
+        let request = self
+            .boxes
+            .submit(&self.viewport, state, &self.scene, rectangle)
+            .map_err(renderer_error)?;
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("desktop asynchronous geometry box selection"),
+            });
+        let encoded = (|| {
+            let native = self
+                .gpu
+                .as_ref()
+                .ok_or_else(|| message("missing GPU scene"))?;
+            let frame = viewport_target.begin_frame(&self.scene);
+            native
+                .renderer
+                .render(
+                    &mut encoder,
+                    &frame,
+                    &self.scene,
+                    &SceneIdCamera {
+                        target: state,
+                        view_projection: self.matrix,
+                        depth: self.depth,
+                    },
+                )
+                .map_err(renderer_error)?;
+            frame
+                .encode_box_readback(
+                    &mut encoder,
+                    request,
+                    GpuBoxSelectionLimits {
+                        max_ids: MAX_OBJECTS,
+                        ..GpuBoxSelectionLimits::default()
+                    },
+                )
+                .map_err(renderer_error)
+        })();
+        let pending = match encoded {
+            Ok(pending) => pending,
+            Err(error) => {
+                self.boxes.cancel_viewport(self.viewport.id());
+                return Err(error);
+            }
+        };
+        let readback = viewport_target
+            .backend()
+            .submit_box_readback(encoder, pending);
+        self.pending_box = Some(PendingBox {
+            readback,
+            controller_revision: controller.revision(),
+            mode,
+        });
+        self.counters.submitted_picks = self.counters.submitted_picks.saturating_add(1);
+        Ok(true)
+    }
+
     /// Nonblocking headless/controller integration point. Rejects results when
     /// controller revision changed since the click, in addition to viewport,
     /// scene, target allocation and target-generation checks. Miss clears only
@@ -575,16 +705,20 @@ impl DesktopScene {
         controller: &mut EditorController,
     ) -> Result<DesktopWork, DesktopError> {
         let selection = self.poll_selection(controller, InFlightPickReadback::poll)?;
-        let changed = if let Some(selection) = selection {
+        let mut changed = if let Some(selection) = selection {
             let changed = selection.apply(controller)?;
             self.counters.accepted_picks = self.counters.accepted_picks.saturating_add(1);
             changed
         } else {
             false
         };
+        if let Some((selection, mode)) = self.poll_box_selection(controller)? {
+            changed |= selection.apply(controller, mode)?;
+            self.counters.accepted_picks = self.counters.accepted_picks.saturating_add(1);
+        }
         Ok(DesktopWork {
             redraw: changed,
-            pending: self.pending.is_some(),
+            pending: self.pending.is_some() || self.pending_box.is_some(),
         })
     }
 
@@ -678,6 +812,68 @@ impl DesktopScene {
         Ok(Some(selection))
     }
 
+    fn poll_box_selection(
+        &mut self,
+        controller: &EditorController,
+    ) -> Result<Option<(ReadyBoxSelection, SelectionMode)>, DesktopError> {
+        let Some(pending) = self.pending_box.as_mut() else {
+            return Ok(None);
+        };
+        let result = match pending.readback.poll() {
+            Ok(Some(result)) => result,
+            Ok(None) => return Ok(None),
+            Err(error) => {
+                self.cancel_pending();
+                return Err(renderer_error(error));
+            }
+        };
+        let pending = self
+            .pending_box
+            .take()
+            .ok_or_else(|| message("missing pending box selection"))?;
+        let mode = pending.mode;
+        let outcome = self.boxes.resolve(
+            &self.viewport,
+            self.targets.state(self.viewport.id()),
+            &self.scene,
+            result,
+        );
+        if pending.controller_revision != controller.revision()
+            || matches!(outcome, SelectionOutcome::Rejected(_))
+        {
+            self.counters.rejected_picks = self.counters.rejected_picks.saturating_add(1);
+            return Ok(None);
+        }
+        let SelectionOutcome::Accepted(ids) = outcome else {
+            return Ok(None);
+        };
+        let mut items = Vec::with_capacity(ids.len());
+        for id in ids {
+            let Some(object) = self
+                .objects
+                .iter()
+                .find(|object| object.id == id && object.visible)
+            else {
+                self.counters.rejected_picks = self.counters.rejected_picks.saturating_add(1);
+                return Ok(None);
+            };
+            controller
+                .history_lengths(&object.selection)
+                .map_err(renderer_error)?;
+            if !items.contains(&object.selection) {
+                items.push(object.selection.clone());
+            }
+        }
+        let selection = if items.is_empty() && mode == SelectionMode::Replace {
+            ReadyBoxSelection::Clear
+        } else if items.is_empty() {
+            ReadyBoxSelection::Unchanged
+        } else {
+            ReadyBoxSelection::Items(items)
+        };
+        Ok(Some((selection, mode)))
+    }
+
     fn poll_ui(
         &mut self,
         ui: &mut EditorDesktopUi,
@@ -706,9 +902,16 @@ impl DesktopScene {
                 changed
             }
         };
+        let mut changed = changed;
+        if let Some((selection, mode)) = self.poll_box_selection(ui.controller())? {
+            let box_changed = selection.apply(ui.controller_mut(), mode)?;
+            let refreshed = ui.refresh().map_err(renderer_error)?;
+            changed |= box_changed || refreshed;
+            self.counters.accepted_picks = self.counters.accepted_picks.saturating_add(1);
+        }
         Ok(DesktopWork {
             redraw: changed,
-            pending: self.pending.is_some(),
+            pending: self.pending.is_some() || self.pending_box.is_some(),
         })
     }
 
@@ -716,7 +919,11 @@ impl DesktopScene {
         if self.pending.take().is_some() {
             self.counters.rejected_picks = self.counters.rejected_picks.saturating_add(1);
         }
+        if self.pending_box.take().is_some() {
+            self.counters.rejected_picks = self.counters.rejected_picks.saturating_add(1);
+        }
         self.picks.cancel_viewport(self.viewport.id());
+        self.boxes.cancel_viewport(self.viewport.id());
     }
 
     fn advance_camera(&mut self) -> Result<(), DesktopError> {
@@ -794,6 +1001,17 @@ impl DesktopRenderer for DesktopScene {
         mode: SelectionMode,
     ) -> Result<bool, DesktopError> {
         self.request_pick(gpu, ui.controller(), position, mode)
+    }
+
+    fn box_select(
+        &mut self,
+        gpu: &DesktopGpu,
+        ui: &mut EditorDesktopUi,
+        start: [f32; 2],
+        end: [f32; 2],
+        mode: SelectionMode,
+    ) -> Result<bool, DesktopError> {
+        self.request_box_pick(gpu, ui.controller(), start, end, mode)
     }
 
     fn poll(
@@ -1006,6 +1224,38 @@ fn local_pixel(
         x: ((x / width * config.width as f32).floor() as u32).min(config.width - 1),
         y: ((y / height * config.height as f32).floor() as u32).min(config.height - 1),
     })
+}
+
+fn local_rectangle(
+    start: [f32; 2],
+    end: [f32; 2],
+    bounds: &DesktopViewportBounds,
+    config: GpuPickingConfig,
+) -> Option<PixelRect> {
+    let width = bounds.logical.size.width;
+    let height = bounds.logical.size.height;
+    if width <= 0.0 || height <= 0.0 || config.width == 0 || config.height == 0 {
+        return None;
+    }
+    let clamp = |[x, y]: [f32; 2]| {
+        [
+            x.clamp(0.0, (width - f32::EPSILON).max(0.0)),
+            y.clamp(0.0, (height - f32::EPSILON).max(0.0)),
+        ]
+    };
+    let start = local_pixel(clamp(start), bounds, config)?;
+    let end = local_pixel(clamp(end), bounds, config)?;
+    let min_x = start.x.min(end.x);
+    let min_y = start.y.min(end.y);
+    let max_x = start.x.max(end.x).checked_add(1)?;
+    let max_y = start.y.max(end.y).checked_add(1)?;
+    PixelRect::new(
+        min_x,
+        min_y,
+        max_x.min(config.width),
+        max_y.min(config.height),
+    )
+    .ok()
 }
 
 fn validate_objects(objects: &[DesktopSceneObject]) -> Result<(), DesktopError> {
@@ -1592,6 +1842,48 @@ mod tests {
             .encode_preview(gpu, controller, &mut encoder, &view, bounds)
             .expect("encode indexed geometry and GPU preview");
         gpu.queue.submit([encoder.finish()]);
+    }
+
+    #[test]
+    fn desktop_scene_gpu_box_selection_resolves_all_visible_ids_atomically() {
+        let Some(gpu) = gpu() else { return };
+        let objects = objects();
+        let mut controller = controller(&objects);
+        let mut scene = DesktopScene::new(objects.clone()).expect("scene");
+        scene.initialize(&gpu).expect("initialize");
+        let output = output(&gpu);
+        encode(&mut scene, &gpu, &controller, &output, bounds());
+        assert!(scene
+            .request_box_pick(
+                &gpu,
+                &controller,
+                [0.0, 0.0],
+                [32.0, 32.0],
+                SelectionMode::Replace,
+            )
+            .expect("submit GPU box selection"));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let work = scene
+                .poll_controller(&mut controller)
+                .expect("poll GPU box selection");
+            if !work.pending {
+                assert!(work.redraw);
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "box selection completion deadline"
+            );
+            std::thread::yield_now();
+        }
+        assert_eq!(controller.selection().items().len(), 2);
+        assert_eq!(
+            controller.selection().primary(),
+            Some(&objects[1].selection)
+        );
+        assert!(!scene.status().pending_box);
+        assert_eq!(scene.status().accepted_picks, 1);
     }
 
     fn pixels(gpu: &DesktopGpu, texture: &wgpu::Texture) -> Vec<u8> {

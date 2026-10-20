@@ -721,3 +721,32 @@ fn document_borrows_actual_models_registries_and_all_outliner_rows() {
         .unwrap();
     assert!(c.document_outliner_nodes()[0].is_expanded());
 }
+
+#[test]
+fn multi_selection_commits_once_and_validates_all_items_before_mutation() {
+    let first = SelectionItem::entity(1);
+    let second = SelectionItem::entity(2);
+    let missing = SelectionItem::entity(99);
+    let mut c = EditorController::new();
+    for (raw, item) in [(1, &first), (2, &second)] {
+        c.register_object(item.clone(), Box::new(model()), registry())
+            .unwrap();
+        let mut row = OutlinerNode::new(OutlinerId::from_raw(raw), None, "object");
+        row.set_selection(item.clone());
+        c.register_outliner_node(row).unwrap();
+    }
+    let before = c.revision();
+    assert!(
+        c.select_items(&[first.clone(), second.clone()], SelectionMode::Replace)
+            .expect("multi-select")
+            .changed
+    );
+    assert_eq!(c.selection().items(), &[first.clone(), second.clone()]);
+    assert_eq!(c.revision(), before + 1);
+    let snapshot = c.selection().clone();
+    assert!(matches!(
+        c.select_items(&[first, missing], SelectionMode::Toggle),
+        Err(ControllerError::MissingObject(_))
+    ));
+    assert_eq!(c.selection(), &snapshot);
+}

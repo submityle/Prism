@@ -6,7 +6,7 @@
 
 可以继续实施，且内核、通用数据层、协议/进程桥、Loom 装配与视口 GPU 基础已落地。当前不是可直接投入生产的完整桌面编辑器；原生窗口、Loom 渲染/输入、真实场景绘制与模型编辑回写仍需组成同一条应用路径。2026-10-20 已接入原生文档会话：保存/加载通过事件循环异步轮询，保存确认受模型快照围栏保护，加载成功后原子替换 UI，并通过 `SceneDocumentAdapter` 候选/提交边界为宿主提供文档到场景的引擎中立绑定；尚未形成完整原生端到端验收证据。
 
-本轮 16 个编辑器包的全 targets、全 features 普通回归与 `PRISM_REQUIRE_GPU=1` 强制真实 GPU 回归均通过；真实设备为 Apple M2 / Metal，GPU geometry、ID texture、矩形采集、过期结果拒绝和文档重载测试均实际执行。`prism_editor_app` 严格 Clippy(`--no-deps`)也通过，依赖树无 `bevy_*`。这证明当前切片可验证，不等于完整桌面产品或引擎集成已完成。
+编辑器包的全 targets、全 features 普通回归与强制真实 GPU 回归以独立 target 执行；历史强制 GPU 证据使用 Apple M2 / Metal，当前增量新增了原生拖拽到矩形 GPU copy/readback 与一次性多选提交路径。测试总数随切片增量变化，以下以命令输出和本次提交状态为准，不把固定总数当作产品完成度证据。`prism_editor_app` 严格 Clippy(`--no-deps`)也通过，依赖树无 `bevy_*`。这证明当前切片可验证，不等于完整桌面产品或引擎集成已完成。
 
 ## 已实现与交付边界
 
@@ -25,7 +25,7 @@
 | `prism_editor_remote` | 有界 JSON-RPC/二进制 codec、增量副本、PIE、TCP、受控子进程 stdio/TCP 桥及取消/重启/超时 | Prism 引擎专属 adapter 和生产场景运行时接线 | 41 |
 | `prism_editor_collab` | 有界因果副本/LWW/tombstone、Presence/租约软锁、TCP 接纳顺序/广播/重连/历史重放/能力拒绝 | 身份认证/TLS、产品级权限/部署和 UI 到命令栈协同接线 | 20 |
 | `prism_editor_ui` | Loom Element 装配、有界稳定 key、语义目标/事件到选择/展开/字段编辑/命令/Undo/Redo action 的绑定契约 | 真实设备事件、Loom reconciliation/render 和应用命令执行的端到端连接 | 20 |
-| `prism_editor_app` | 有界 headless runner、工作区组合、窗口/surface 生命周期、错误回滚/恢复/退出及 `prism_app` 退出传播；原生文档会话接线、Ctrl/Cmd+S 保存、Ctrl/Cmd+O 加载、receipt 围栏、引擎中立 `SceneDocumentAdapter` 候选/提交边界、重载 renderer 失效钩子和 native CLI smoke entry | 完整原生输入→Loom→真实场景→Inspector→保存重载验收，以及具体引擎/项目场景 adapter | 18 |
+| `prism_editor_app` | 有界 headless runner、工作区组合、窗口/surface 生命周期、错误回滚/恢复/退出及 `prism_app` 退出传播；原生文档会话接线、Ctrl/Cmd+S 保存、Ctrl/Cmd+O 加载、receipt 围栏、引擎中立 `SceneDocumentAdapter` 候选/提交边界、点选/拖拽框选、重载 renderer 失效钩子和 native CLI smoke entry | 完整原生输入→Loom→真实场景→Inspector→保存重载验收，以及具体引擎/项目场景 adapter | 见验证命令 |
 | `prism_editor_viewport` | 稳定场景 ID/增量提交、真实整数 ID target/异步读回、多 viewport target 生命周期/过期拒绝、框选/焦点/Gizmo 契约 | 宿主 geometry/depth 绘制、GPU 矩形采集、平台输入、Gizmo 绘制/命中和编辑回写 | 24（默认 22） |
 | `prism_editor_world` | 有界异步 provider 驱动、payload 驻留、分层策略、dirty/租约保护、修订安全保存确认、OFPA/HLOD 计划 | 生产存储 provider/文件格式/崩溃恢复、actor 写盘、HLOD 烘焙/渲染和世界 UI | 24 |
 
@@ -41,7 +41,7 @@
 
 `RenderTargetRegistry` 管理每视口的真实 `Rgba32Uint` target。resize 保留 handle、推进 target generation；close/reopen 更换 handle。异步单像素读回按 viewport、相机/视口代际、场景代际、target 代际和 handle 关联，旧结果不能更新选择。
 
-真实 GPU 测试覆盖整数绘制/清屏 miss/读回/关闭后关联，以及多 target resize/close/reopen。框选目前是有界 request/result 与 ID 解析契约，**未实现 GPU 矩形 copy/reduction**；焦点与 Gizmo 也仍需宿主事件和渲染适配。
+真实 GPU 测试覆盖整数绘制/清屏 miss/读回/关闭后关联，以及多 target resize/close/reopen。`DesktopScene` 现在把拖拽框选编码为有界矩形 `copy_texture_to_buffer`，异步 map 后按完整 token 去重，再通过一次 `select_items` 原子提交；这是真实 GPU copy/readback，不宣称已有 GPU reduction。焦点、框选可视化 overlay 和 Gizmo 绘制/命中/变换回写仍需宿主适配。
 
 ### 大世界执行数据层
 
@@ -59,7 +59,7 @@
 
 ### 原生文档会话接线
 
-`DesktopDocumentSession` 持有单文档 `DocumentFileAdapter`、schema allowlist 和 controller limits。`run_desktop_with_document` 将它接入 winit user event/waker：Ctrl/Cmd+S 提交异步保存，Ctrl/Cmd+O 提交加载；保存完成后才调用 `acknowledge_ui`，加载完成后先 `prepare`，再调用 renderer 的 `prepare_document` 构造候选场景，候选 UI 安装失败时丢弃候选，成功安装后提交 renderer 候选。配置了文档会话时，窗口关闭会在 dirty、活动 draft、pending I/O 或 reconciliation-required 状态下阻止静默退出；未配置文档会话的旧 `run_desktop` API 保持原行为并始终返回 UI/model 所有权。
+`DesktopDocumentSession` 持有单文档 `DocumentFileAdapter`、schema allowlist 和 controller limits。`run_desktop_with_document` 将它接入 winit user event/waker：Ctrl/Cmd+S 提交异步保存，Ctrl/Cmd+O 提交加载；保存完成后才调用 `acknowledge_ui`，加载完成后先 `prepare`，再调用 renderer 的 `prepare_document` 构造候选场景，候选 UI 安装失败时丢弃候选，成功安装后提交 renderer 候选。native 鼠标在 viewport 内按下/释放时区分点选和拖拽框选，框选结果走 GPU readback 后一次性提交多选。配置了文档会话时，窗口关闭会在 dirty、活动 draft、pending I/O 或 reconciliation-required 状态下阻止静默退出；未配置文档会话的旧 `run_desktop` API 保持原行为并始终返回 UI/model 所有权。
 
 在仓库根目录为本次验证选择独立 target，避免多个任务共用或清理彼此的构建目录：
 

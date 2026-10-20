@@ -106,6 +106,18 @@ pub trait DesktopRenderer {
         position: [f32; 2],
         mode: SelectionMode,
     ) -> Result<bool, DesktopError>;
+    /// Enqueue a rectangular viewport selection without blocking the event
+    /// loop. Renderers that do not support it leave the gesture unhandled.
+    fn box_select(
+        &mut self,
+        _gpu: &DesktopGpu,
+        _ui: &mut EditorDesktopUi,
+        _start: [f32; 2],
+        _end: [f32; 2],
+        _mode: SelectionMode,
+    ) -> Result<bool, DesktopError> {
+        Ok(false)
+    }
     /// Poll device-local work without blocking the native event loop.
     fn poll(
         &mut self,
@@ -265,6 +277,7 @@ pub fn run_desktop_with_document<R: DesktopRenderer>(
         report: DesktopReport::default(),
         error: None,
         cursor: None,
+        drag_start: None,
         modifiers: ModifiersState::empty(),
         ime_enabled: false,
         ime_allowed: false,
@@ -324,6 +337,7 @@ struct DesktopHost<R> {
     report: DesktopReport,
     error: Option<DesktopError>,
     cursor: Option<[f32; 2]>,
+    drag_start: Option<([f32; 2], SelectionMode)>,
     modifiers: ModifiersState,
     ime_enabled: bool,
     ime_allowed: bool,
@@ -700,6 +714,7 @@ impl<R: DesktopRenderer> ApplicationHandler<DesktopWake> for DesktopHost<R> {
         self.renderer.suspend();
         self.native = None;
         self.cursor = None;
+        self.drag_start = None;
         self.pending = false;
         self.sync_text_input();
     }
@@ -802,12 +817,13 @@ impl<R: DesktopRenderer> ApplicationHandler<DesktopWake> for DesktopHost<R> {
             WindowEvent::Focused(false) => {
                 self.modifiers = ModifiersState::empty();
                 self.cursor = None;
+                self.drag_start = None;
                 self.composing = false;
                 let result = self.ui.key(DesktopKey::Escape);
                 self.input_result(result);
             }
             WindowEvent::MouseInput {
-                state: ElementState::Pressed,
+                state,
                 button: MouseButton::Left,
                 ..
             } => {
@@ -821,22 +837,42 @@ impl<R: DesktopRenderer> ApplicationHandler<DesktopWake> for DesktopHost<R> {
                         SelectionMode::Replace
                     };
                     let rect = self.ui.viewport_rect();
-                    if contains(rect, x, y) {
-                        let result = if let Some(native) = &self.native {
-                            self.renderer.pointer(
-                                &native.gpu,
-                                &mut self.ui,
-                                [x - rect.location.x, y - rect.location.y],
-                                mode,
-                            )
-                        } else {
-                            Ok(false)
-                        };
-                        self.pending = true;
-                        self.input_result(result);
-                    } else {
-                        let result = self.ui.click(x, y, mode);
-                        self.input_result(result);
+                    match state {
+                        ElementState::Pressed if contains(rect, x, y) => {
+                            self.drag_start = Some(([x, y], mode));
+                        }
+                        ElementState::Pressed => {
+                            let result = self.ui.click(x, y, mode);
+                            self.input_result(result);
+                        }
+                        ElementState::Released => {
+                            let Some(([start_x, start_y], drag_mode)) = self.drag_start.take()
+                            else {
+                                return;
+                            };
+                            let start = [start_x - rect.location.x, start_y - rect.location.y];
+                            let end = [x - rect.location.x, y - rect.location.y];
+                            let moved =
+                                (end[0] - start[0]).abs() > 2.0 || (end[1] - start[1]).abs() > 2.0;
+                            let result = if let Some(native) = &self.native {
+                                if moved {
+                                    self.renderer.box_select(
+                                        &native.gpu,
+                                        &mut self.ui,
+                                        start,
+                                        end,
+                                        drag_mode,
+                                    )
+                                } else {
+                                    self.renderer
+                                        .pointer(&native.gpu, &mut self.ui, end, drag_mode)
+                                }
+                            } else {
+                                Ok(false)
+                            };
+                            self.pending = true;
+                            self.input_result(result);
+                        }
                     }
                 }
             }
