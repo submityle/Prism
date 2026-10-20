@@ -934,9 +934,7 @@ mod conformance {
         fn ggx_half_vector(u1: f32, u2: f32, alpha: f32) -> [f32; 3] {
             let phi = 2.0 * PI * u1;
             let alpha_sq = alpha * alpha;
-            let cos_theta = ops::sqrt(
-                ((1.0 - u2) / (1.0 + (alpha_sq - 1.0) * u2)).clamp(0.0, 1.0),
-            );
+            let cos_theta = ops::sqrt(((1.0 - u2) / (1.0 + (alpha_sq - 1.0) * u2)).clamp(0.0, 1.0));
             let sin_theta = ops::sqrt((1.0 - cos_theta * cos_theta).max(0.0));
             [
                 sin_theta * ops::cos(phi),
