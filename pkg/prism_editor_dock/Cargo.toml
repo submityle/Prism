@@ -1,0 +1,21 @@
+[package]
+name = "prism_editor_dock"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96.0"
+description = "Pure-data editor-layer adapter between Prism editor contributions and the dock model."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+prism_editor_core = { path = "../prism_editor_core" }
+prism_ui_dock = { path = "../prism_ui_dock", default-features = false }
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+unused_qualifications = "warn"
+
+[lints.clippy]
+semicolon_if_nothing_returned = "warn"
+type_complexity = "allow"

@@ -1,0 +1,13 @@
+[package]
+name = "prism_editor_content"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96.0"
+description = "Deterministic content browser, dependency validation, and import job models for the Prism editor."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+
+[lints]
+workspace = true

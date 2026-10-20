@@ -76,14 +76,48 @@ CARGO_TARGET_DIR=/private/tmp/prism-editor-core-target cargo test -p prism_edito
 - 客户端副本从 snapshot 到增量 commit 的收敛流程。
 - 该 crate 不实现 BRP，不依赖 `bevy_*`；BRP adapter 仍需在上层实现。
 
+### E6 视口交互契约基础
+
+`pkg/prism_editor_viewport` 已完成并通过 3 个测试：
+
+- 多视口稳定 ID、相机/显示设置和代际号，关闭后不复用身份。
+- 异步拾取请求的 request correlation、视口校验和过期代际拒绝。
+- Translate/Rotate/Scale Gizmo 会话、整数吸附、取消和一次性累计变换结果。
+- 该 crate 不执行 GPU 拾取、射线检测或 Gizmo 绘制；这些仍由 `prism_ui_input`/渲染适配层提供。
+
+### E7 内容管线基础
+
+`pkg/prism_editor_content` 已完成并通过 3 个测试：
+
+- 规范化资产路径、确定性内容浏览器查询、标签/类型/收藏/固定过滤和结果上限。
+- 正向依赖、反向引用、删除影响查询、缺失引用和循环校验。
+- 有界、可取消、确定性导入作业状态机。
+- 该 crate 不执行文件 I/O、缩略图、真实 importer/exporter 或 Cook；这些仍由 `prism_asset` 适配层接入。
+
+### E3 外壳与停靠基础
+
+以下两个 renderer-independent 数据层已完成并通过验证：
+
+- `pkg/prism_editor_dock`：面板贡献映射、实例生命周期、工作区布局校验、Primary → LastGood → Default 恢复和有界双流持久化，9 个测试通过。
+- `pkg/prism_editor_shell`：命令面板索引/搜索、上下文键位与冲突检测、菜单/工具栏/状态栏贡献聚合，7 个测试通过。
+- 两者都不实现 Loom 控件渲染；最终 UI 装配仍待 `prism_ui`/Loom 应用层接入。
+
+### E9 分析器数据层
+
+`pkg/prism_editor_profiler` 已完成并通过 9 个测试：
+
+- 有界 frame/span 树、稳定帧图拓扑与关键路径。
+- 内存预算样本/告警及结构化可视日志轨道投影。
+- 不连接 Tracy、GPU 或真实运行时采集；这些仍由诊断适配层提供。
+
 ## 当前未交付
 
 以下项目仍以代码和测试为准，不能仅因设计文档存在就视为完成：
 
 - 反射 Inspector 到 Loom 控件的最终渲染适配。
-- 外壳、停靠、Loom 核心面板、BRP adapter 和 PIE。
-- GPU 视口、拾取、Gizmo、内容管线、大世界编辑器 UI。
-- 域编辑器、分析器、协同和无头编辑器应用。
+- Loom 核心面板、BRP adapter 和 PIE。
+- GPU 视口渲染、实际拾取/Gizmo 绘制、内容浏览器 UI、大世界编辑器 UI。
+- 域编辑器、协同和无头编辑器应用。
 
 ## 不变约束
 

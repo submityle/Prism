@@ -1,0 +1,17 @@
+[package]
+name = "prism_editor_shell"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96.0"
+description = "Renderer-independent Loom Studio shell data models for commands, keymaps, and contributions."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lints.rust]
+missing_docs = "warn"
+unsafe_code = "deny"
+unused_qualifications = "warn"
+
+[lints.clippy]
+semicolon_if_nothing_returned = "warn"
+type_complexity = "allow"
