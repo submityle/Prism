@@ -1,10 +1,11 @@
 //! Deterministic editor-side world partition state.
 //!
-//! This crate owns authoring policy, not runtime world mutation. It models
+//! This crate owns authoring policy, not runtime world mutation. It executes
 //! cells, data-layer visibility/editability, edit scopes, stable per-cell
 //! identity, and failure-safe residency transitions. A plan can be adapted to
 //! [`prism_ecs`] / [`prism_scene`] partition contracts, but this crate never
-//! creates entities, performs file I/O, or assumes a renderer exists.
+//! creates entities, defines a file format, or assumes a renderer exists.
+//! Opaque asynchronous storage is supplied through [`CellIoProvider`].
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -19,6 +20,26 @@ use prism_asset::StableGuid;
 use prism_ecs::partition::{
     cell::{CellCoord, StreamingDelta},
     data_layer::DataLayerId,
+};
+
+mod hlod;
+mod io;
+mod locks;
+mod ofpa;
+mod world;
+
+pub use hlod::{
+    HlodCluster, HlodError, HlodLayer, HlodPlan, HlodPlanOperation, HlodPlanner, HlodView,
+};
+pub use io::{
+    CellIoProvider, CellLoadFuture, CellLoadRequest, CellSaveFuture, CellSaveRequest, IoBudget,
+    IoCompletion, IoFailure, IoOperation, IoRequestId, IoSubmitError, WorldIoDriver,
+};
+pub use locks::{CellLockError, CellLockRecord, CellLockRegistry, CellLockToken};
+pub use ofpa::{ActorFileIdentity, ActorRecord, OfpaCatalog, OfpaError, OfpaOperation, OfpaPlan};
+pub use world::{
+    CellPayloadError, EditorWorldData, EditorWorldDataError, EditorWorldLimits, LoadSubmitError,
+    PendingCellSave, VisibilityPlan,
 };
 
 /// A total-order wrapper around the ECS cell coordinate.
@@ -136,6 +157,7 @@ pub struct CellRecord {
     layers: BTreeSet<DataLayerId>,
     residency: CellResidency,
     dirty: bool,
+    revision: u64,
 }
 
 impl CellRecord {
@@ -158,7 +180,6 @@ impl CellRecord {
     }
 
     /// Data layers assigned to this cell in deterministic order.
-    #[must_use]
     pub fn layers(&self) -> impl Iterator<Item = DataLayerId> + '_ {
         self.layers.iter().copied()
     }
@@ -174,6 +195,12 @@ impl CellRecord {
     pub const fn is_dirty(&self) -> bool {
         self.dirty
     }
+
+    /// Monotonic authoring revision, advanced even for byte-identical edits.
+    #[must_use]
+    pub const fn revision(&self) -> u64 {
+        self.revision
+    }
 }
 
 /// Authoring visibility/editability policy for one data layer.
@@ -181,6 +208,7 @@ impl CellRecord {
 pub struct DataLayer {
     id: DataLayerId,
     name: String,
+    parent: Option<DataLayerId>,
     visible: bool,
     editable: bool,
 }
@@ -193,9 +221,24 @@ impl DataLayer {
         Ok(Self {
             id,
             name,
+            parent: None,
             visible: true,
             editable: true,
         })
+    }
+
+    /// Creates a visible and editable child data layer.
+    ///
+    /// Parent existence and cycle safety are validated when the layer is
+    /// registered in an [`EditorWorld`].
+    pub fn with_parent(
+        id: DataLayerId,
+        name: impl Into<String>,
+        parent: DataLayerId,
+    ) -> Result<Self, ValidationError> {
+        let mut layer = Self::new(id, name)?;
+        layer.parent = Some(parent);
+        Ok(layer)
     }
 
     /// Layer identity.
@@ -208,6 +251,12 @@ impl DataLayer {
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Optional parent layer whose policy also applies to this layer.
+    #[must_use]
+    pub const fn parent(&self) -> Option<DataLayerId> {
+        self.parent
     }
 
     /// Whether the layer contributes visible content in the editor.
@@ -346,6 +395,8 @@ impl PlanOperation {
 pub enum PlanBlock {
     /// A cell cannot be unloaded until its changes are committed.
     DirtyCell(CellCoord),
+    /// A live edit lease protects this cell from eviction.
+    LockedCell(CellCoord),
 }
 
 /// Deterministic result of reconciling current residency with a demand.
@@ -441,6 +492,15 @@ pub enum ValidationError {
     DuplicateLayer(DataLayerId),
     /// A cell assignment references an unknown data layer.
     UnknownLayer(DataLayerId),
+    /// A layer's parent does not exist in this world.
+    UnknownLayerParent(DataLayerId),
+    /// A parent assignment would introduce a data-layer cycle.
+    LayerParentCycle {
+        /// Child layer that would become part of the cycle.
+        child: DataLayerId,
+        /// Parent layer requested for the child.
+        parent: DataLayerId,
+    },
 }
 
 impl fmt::Display for ValidationError {
@@ -450,6 +510,15 @@ impl fmt::Display for ValidationError {
             Self::InvalidLayerName => formatter.write_str("data-layer name is invalid"),
             Self::DuplicateLayer(id) => write!(formatter, "data layer {} already exists", id.get()),
             Self::UnknownLayer(id) => write!(formatter, "data layer {} does not exist", id.get()),
+            Self::UnknownLayerParent(id) => {
+                write!(formatter, "data-layer parent {} does not exist", id.get())
+            }
+            Self::LayerParentCycle { child, parent } => write!(
+                formatter,
+                "data-layer parent {} would create a cycle for layer {}",
+                parent.get(),
+                child.get()
+            ),
         }
     }
 }
@@ -476,6 +545,10 @@ pub enum WorldError {
     StaleToken(TransitionId),
     /// The model exhausted its transition ID space.
     TransitionIdExhausted,
+    /// A cell exhausted its authoring revision counter.
+    RevisionExhausted(CellCoord),
+    /// Authoring policy or edit scope currently prohibits the edit.
+    CellNotEditable(CellCoord),
     /// Validation failed before a mutation could be committed.
     Validation(ValidationError),
     /// The requested cell set contains an unregistered cell.
@@ -506,6 +579,16 @@ impl fmt::Display for WorldError {
             ),
             Self::StaleToken(id) => write!(formatter, "stale transition token {id}"),
             Self::TransitionIdExhausted => formatter.write_str("transition ID space exhausted"),
+            Self::RevisionExhausted(cell) => write!(
+                formatter,
+                "cell ({},{},{}) exhausted its authoring revision",
+                cell.x, cell.y, cell.z
+            ),
+            Self::CellNotEditable(cell) => write!(
+                formatter,
+                "cell ({},{},{}) is not editable",
+                cell.x, cell.y, cell.z
+            ),
             Self::Validation(error) => error.fmt(formatter),
             Self::DemandContainsUnknownCell(cell) => write!(
                 formatter,
@@ -572,6 +655,7 @@ impl EditorWorld {
         if self.layers.values().any(|other| other.name == layer.name) {
             return Err(ValidationError::InvalidLayerName);
         }
+        self.validate_layer_parent(layer.id, layer.parent)?;
         self.layers.insert(layer.id, layer);
         self.bump_epoch();
         Ok(())
@@ -581,6 +665,27 @@ impl EditorWorld {
     #[must_use]
     pub fn layer(&self, id: DataLayerId) -> Option<&DataLayer> {
         self.layers.get(&id)
+    }
+
+    /// Reparents a layer after validating the complete ancestor chain.
+    ///
+    /// The model is unchanged when the requested parent is unknown or would
+    /// introduce a cycle.
+    pub fn set_layer_parent(
+        &mut self,
+        id: DataLayerId,
+        parent: Option<DataLayerId>,
+    ) -> Result<(), ValidationError> {
+        if !self.layers.contains_key(&id) {
+            return Err(ValidationError::UnknownLayer(id));
+        }
+        self.validate_layer_parent(id, parent)?;
+        self.layers
+            .get_mut(&id)
+            .expect("validated data layer must exist")
+            .parent = parent;
+        self.bump_epoch();
+        Ok(())
     }
 
     /// Sets layer visibility without changing editability or residency.
@@ -629,6 +734,7 @@ impl EditorWorld {
             layers: memberships,
             residency: CellResidency::Unloaded,
             dirty: false,
+            revision: 0,
         };
         self.cells.insert(key, record);
         self.bump_epoch();
@@ -646,17 +752,24 @@ impl EditorWorld {
         self.cells.values()
     }
 
+    /// Number of registered cells without traversing the catalog.
+    #[must_use]
+    pub fn cell_count(&self) -> usize {
+        self.cells.len()
+    }
+
     /// Validates the complete model without changing it.
     pub fn validate(&self) -> Result<(), ValidationError> {
         if self.identity.is_nil() {
             return Err(ValidationError::NilWorldIdentity);
         }
         let mut names = BTreeSet::new();
-        for layer in self.layers.values() {
+        for (&id, layer) in &self.layers {
             validate_layer_name(&layer.name)?;
             if !names.insert(&layer.name) {
                 return Err(ValidationError::InvalidLayerName);
             }
+            self.validate_layer_parent(id, layer.parent)?;
         }
         for cell in self.cells.values() {
             if let Some(layer) = cell.layers.iter().find(|id| !self.layers.contains_key(id)) {
@@ -705,7 +818,7 @@ impl EditorWorld {
         };
         cell.layers
             .iter()
-            .all(|id| self.layers.get(id).is_some_and(DataLayer::is_visible))
+            .all(|id| self.layer_ancestors_allow(*id, DataLayer::is_visible))
     }
 
     /// Computes editability from residency, scope, and every assigned layer.
@@ -719,7 +832,7 @@ impl EditorWorld {
             && cell
                 .layers
                 .iter()
-                .all(|id| self.layers.get(id).is_some_and(DataLayer::is_editable))
+                .all(|id| self.layer_ancestors_allow(*id, DataLayer::is_editable))
     }
 
     /// Marks a loaded cell dirty, preventing unsafe unload planning.
@@ -731,6 +844,10 @@ impl EditorWorld {
         if cell.residency != CellResidency::Loaded {
             return Err(WorldError::InvalidTransition(coord));
         }
+        cell.revision = cell
+            .revision
+            .checked_add(1)
+            .ok_or(WorldError::RevisionExhausted(coord))?;
         cell.dirty = true;
         self.bump_epoch();
         Ok(())
@@ -865,6 +982,42 @@ impl EditorWorld {
         Ok(())
     }
 
+    fn validate_layer_parent(
+        &self,
+        child: DataLayerId,
+        parent: Option<DataLayerId>,
+    ) -> Result<(), ValidationError> {
+        let mut current = parent;
+        while let Some(id) = current {
+            if id == child {
+                return Err(ValidationError::LayerParentCycle {
+                    child,
+                    parent: parent.expect("ancestor traversal requires a parent"),
+                });
+            }
+            let layer = self
+                .layers
+                .get(&id)
+                .ok_or(ValidationError::UnknownLayerParent(id))?;
+            current = layer.parent;
+        }
+        Ok(())
+    }
+
+    fn layer_ancestors_allow(&self, id: DataLayerId, policy: fn(&DataLayer) -> bool) -> bool {
+        let mut current = Some(id);
+        while let Some(layer_id) = current {
+            let Some(layer) = self.layers.get(&layer_id) else {
+                return false;
+            };
+            if !policy(layer) {
+                return false;
+            }
+            current = layer.parent;
+        }
+        true
+    }
+
     fn finish_transition(
         &mut self,
         token: TransitionToken,
@@ -961,6 +1114,68 @@ mod tests {
             .set_layer_visible(DataLayerId::new(1), true)
             .expect("show");
         assert!(!model.is_cell_editable(cell(2, 0, -1)));
+    }
+
+    #[test]
+    fn ancestor_layer_policy_controls_child_assigned_cells() {
+        let mut model = world();
+        let parent = DataLayerId::new(1);
+        let child = DataLayerId::new(2);
+        model.add_layer(layer(1, "parent")).expect("parent");
+        model
+            .add_layer(DataLayer::with_parent(child, "child", parent).expect("child"))
+            .expect("add child");
+        let coord = cell(4, 0, 0);
+        model.add_cell(coord, [child]).expect("add cell");
+        let mut demand = ResidencyDemand::new();
+        demand.require(coord);
+        let plan = model.plan(&demand).expect("plan");
+        let tokens = model.begin_plan(&plan).expect("begin");
+        model.complete_load(tokens[0]).expect("load");
+
+        model.set_layer_visible(parent, false).expect("hide parent");
+        assert!(!model.is_cell_visible(coord));
+        assert!(model.is_cell_editable(coord));
+
+        model.set_layer_visible(parent, true).expect("show parent");
+        model
+            .set_layer_editable(parent, false)
+            .expect("lock parent");
+        assert!(model.is_cell_visible(coord));
+        assert!(!model.is_cell_editable(coord));
+    }
+
+    #[test]
+    fn invalid_layer_parent_changes_are_rejected_atomically() {
+        let mut model = world();
+        let parent = DataLayerId::new(1);
+        let child = DataLayerId::new(2);
+        model.add_layer(layer(1, "parent")).expect("parent");
+        model
+            .add_layer(DataLayer::with_parent(child, "child", parent).expect("child"))
+            .expect("add child");
+        let epoch = model.epoch();
+
+        assert_eq!(
+            model.add_layer(
+                DataLayer::with_parent(DataLayerId::new(3), "orphan", DataLayerId::new(99))
+                    .expect("orphan")
+            ),
+            Err(ValidationError::UnknownLayerParent(DataLayerId::new(99)))
+        );
+        assert!(model.layer(DataLayerId::new(3)).is_none());
+        assert_eq!(model.epoch(), epoch);
+
+        assert_eq!(
+            model.set_layer_parent(parent, Some(child)),
+            Err(ValidationError::LayerParentCycle {
+                child: parent,
+                parent: child
+            })
+        );
+        assert_eq!(model.layer(parent).expect("parent").parent(), None);
+        assert_eq!(model.layer(child).expect("child").parent(), Some(parent));
+        assert_eq!(model.epoch(), epoch);
     }
 
     #[test]
