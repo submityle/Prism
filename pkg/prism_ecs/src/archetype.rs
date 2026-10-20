@@ -36,7 +36,7 @@ pub struct ColumnChangeCursor {
 
 /// A physical column write or row-membership change. `component == None`
 /// affects every column; `chunk == None` announces a newly created archetype.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ColumnChange {
     /// Stable archetype address within this registry.
     pub archetype: ArchetypeId,
@@ -58,9 +58,25 @@ pub struct ColumnChanges {
     pub events: Vec<ColumnChange>,
 }
 
+/// Result and deterministic work count for the query-only filtered journal read.
+pub(crate) struct FilteredColumnChanges {
+    pub cursor: ColumnChangeCursor,
+    pub gap: bool,
+    pub events: Vec<ColumnChange>,
+    /// Relevant event records selected/materialized for merge, including
+    /// structural records. Binary-search probes over revision metadata and
+    /// unrelated writes are not counted.
+    pub records_scanned: usize,
+}
+
 struct ColumnJournalState {
     revision: u64,
     events: VecDeque<ColumnChange>,
+    component_events: HashMap<ComponentId, VecDeque<u64>>,
+    structural_events: VecDeque<u64>,
+    evicted_component_revision: HashMap<ComponentId, u64>,
+    evicted_structural_revision: u64,
+    precision_floor: u64,
 }
 
 /// Shared by the registry, tables and stable boxed column write journals.
@@ -106,6 +122,11 @@ impl ColumnJournal {
             state: UnsafeCell::new(ColumnJournalState {
                 revision: 0,
                 events: VecDeque::new(),
+                component_events: HashMap::new(),
+                structural_events: VecDeque::new(),
+                evicted_component_revision: HashMap::new(),
+                evicted_structural_revision: 0,
+                precision_floor: 0,
             }),
         }
     }
@@ -132,9 +153,51 @@ impl ColumnJournal {
             .checked_add(1)
             .expect("column revision exhausted");
         if state.events.len() == COLUMN_CHANGE_LOG_CAPACITY {
-            state.events.pop_front();
+            let evicted_revision = state.revision - COLUMN_CHANGE_LOG_CAPACITY as u64;
+            let evicted = state.events.pop_front().expect("full journal has front");
+            match evicted.component {
+                Some(component) => {
+                    let index = state
+                        .component_events
+                        .get_mut(&component)
+                        .expect("retained component event has an index");
+                    let removed_revision = index.pop_front();
+                    debug_assert_eq!(removed_revision, Some(evicted_revision));
+                    if index.is_empty() {
+                        state.component_events.remove(&component);
+                    }
+                    state
+                        .evicted_component_revision
+                        .insert(component, evicted_revision);
+                    if state.evicted_component_revision.len() > COLUMN_CHANGE_LOG_CAPACITY
+                        && let Some((&old_component, &oldest_evicted)) =
+                            state.evicted_component_revision.iter().next()
+                    {
+                        state.evicted_component_revision.remove(&old_component);
+                        // Dropping any component watermark is safe if every
+                        // cursor before its last evicted revision falls back.
+                        // This keeps steady-state eviction O(1), without a
+                        // sorted metadata index on the write hot path.
+                        state.precision_floor = state.precision_floor.max(oldest_evicted);
+                    }
+                }
+                None => {
+                    let removed_revision = state.structural_events.pop_front();
+                    debug_assert_eq!(removed_revision, Some(evicted_revision));
+                    state.evicted_structural_revision = evicted_revision;
+                }
+            }
         }
+        let revision = state.revision;
         state.events.push_back(event);
+        match event.component {
+            Some(component) => state
+                .component_events
+                .entry(component)
+                .or_default()
+                .push_back(revision),
+            None => state.structural_events.push_back(revision),
+        }
     }
 
     fn since(&self, cursor: Option<ColumnChangeCursor>) -> ColumnChanges {
@@ -150,12 +213,99 @@ impl ColumnJournal {
                 .contains(&c.revision)
                 .then(|| (c.revision - first) as usize)
         });
+        let events = offset.map_or_else(Vec::new, |start| {
+            state.events.range(start..).copied().collect()
+        });
         ColumnChanges {
             cursor: current,
             gap: offset.is_none(),
-            events: offset.map_or_else(Vec::new, |start| {
-                state.events.range(start..).copied().collect()
-            }),
+            events,
+        }
+    }
+
+    fn since_components(
+        &self,
+        cursor: Option<ColumnChangeCursor>,
+        components: &[ComponentId],
+    ) -> FilteredColumnChanges {
+        let state = self.lock();
+        self.active.store(true, Ordering::Release);
+        let current = ColumnChangeCursor {
+            log: self.id,
+            revision: state.revision,
+        };
+        let Some(cursor) = cursor.filter(|cursor| {
+            cursor.log == self.id
+                && cursor.revision <= state.revision
+                && cursor.revision >= state.precision_floor
+        }) else {
+            return FilteredColumnChanges {
+                cursor: current,
+                gap: true,
+                events: Vec::new(),
+                records_scanned: 0,
+            };
+        };
+
+        let sorted_components = if components.windows(2).all(|pair| pair[0] < pair[1]) {
+            None
+        } else {
+            let mut sorted = components.to_vec();
+            sorted.sort_unstable();
+            sorted.dedup();
+            Some(sorted)
+        };
+        let component_ids = sorted_components.as_deref().unwrap_or(components);
+        if state.evicted_structural_revision > cursor.revision
+            || component_ids.iter().any(|component| {
+                state
+                    .evicted_component_revision
+                    .get(component)
+                    .is_some_and(|revision| *revision > cursor.revision)
+            })
+        {
+            return FilteredColumnChanges {
+                cursor: current,
+                gap: true,
+                events: Vec::new(),
+                records_scanned: 0,
+            };
+        }
+
+        let first_retained = state.revision - state.events.len() as u64;
+        let mut revisions = Vec::new();
+        let mut records_scanned = 0;
+        for component in component_ids {
+            if let Some(index) = state.component_events.get(component) {
+                let start = lower_bound_revision(index, cursor.revision);
+                records_scanned += index.len() - start;
+                for position in start..index.len() {
+                    revisions.push(index[position]);
+                }
+            }
+        }
+        let structural_start = lower_bound_revision(&state.structural_events, cursor.revision);
+        records_scanned += state.structural_events.len() - structural_start;
+        for position in structural_start..state.structural_events.len() {
+            revisions.push(state.structural_events[position]);
+        }
+        revisions.sort_unstable();
+        revisions.dedup();
+        let events = revisions
+            .into_iter()
+            .map(|revision| {
+                // `first_retained` is the revision immediately before the
+                // first retained event; convert event revision to zero-based
+                // VecDeque position.
+                let offset = (revision - first_retained - 1) as usize;
+                state.events[offset]
+            })
+            .collect();
+        FilteredColumnChanges {
+            cursor: current,
+            gap: false,
+            events,
+            records_scanned,
         }
     }
 
@@ -167,6 +317,20 @@ impl ColumnJournal {
             revision: state.revision,
         }
     }
+}
+
+/// First position whose revision is strictly greater than `cursor_revision`.
+fn lower_bound_revision(revisions: &VecDeque<u64>, cursor_revision: u64) -> usize {
+    let (mut low, mut high) = (0, revisions.len());
+    while low < high {
+        let mid = low + (high - low) / 2;
+        if revisions[mid] <= cursor_revision {
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+    low
 }
 
 /// A stable, dense identifier for an [`Archetype`] within a world.
@@ -423,10 +587,30 @@ impl Archetypes {
     }
 
     /// Discover writes/structural edits in O(retained events since cursor), not
-    /// O(archetypes/chunks). Repeated same-tick writes advance this cursor too.
-    /// Payload access still requires the usual ECS read/write scheduling barrier.
+    /// O(archetypes/chunks). A successful call materializes every retained event
+    /// after the cursor, so its deterministic record-scan count is `events.len()`;
+    /// a gap materializes/scans zero delta records. Repeated same-tick writes
+    /// advance this cursor too. Payload access still requires the usual ECS
+    /// read/write scheduling barrier.
     pub fn column_changes_since(&self, cursor: Option<ColumnChangeCursor>) -> ColumnChanges {
         self.column_journal.since(cursor)
+    }
+
+    /// Discover structural changes and writes to selected components without
+    /// scanning unrelated retained journal records. `component_ids` may be in
+    /// any order and may contain duplicates. Structural records (`component ==
+    /// None`) are always included. The journal remains globally capped at
+    /// [`COLUMN_CHANGE_LOG_CAPACITY`]; if a selected record may have been
+    /// evicted, this returns a gap and no events so callers can rebuild a
+    /// conservative baseline. Evictions known to affect only unrelated
+    /// components do not force a gap unless bounded eviction metadata itself
+    /// overflowed, in which case older cursors conservatively gap.
+    pub(crate) fn column_changes_since_components(
+        &self,
+        cursor: Option<ColumnChangeCursor>,
+        component_ids: &[ComponentId],
+    ) -> FilteredColumnChanges {
+        self.column_journal.since_components(cursor, component_ids)
     }
 
     /// Establish an incremental baseline without materializing retained events.
@@ -564,6 +748,7 @@ impl Default for Archetypes {
 mod tests {
     use super::*;
     use crate::component::{Component, Components};
+    use alloc::vec;
 
     struct A(#[allow(dead_code)] u32);
     impl Component for A {}
@@ -576,6 +761,132 @@ mod tests {
             component: None,
             chunk: Some(0),
         }
+    }
+
+    fn component_event(component: ComponentId, chunk: usize) -> ColumnChange {
+        ColumnChange {
+            archetype: ArchetypeId::EMPTY,
+            component: Some(component),
+            chunk: Some(chunk),
+        }
+    }
+
+    #[test]
+    fn filtered_column_journal_merges_selected_components_and_structural_events_in_order() {
+        let journal = ColumnJournal::new();
+        let a = ComponentId::new(1);
+        let b = ComponentId::new(2);
+        let unrelated = ComponentId::new(3);
+        let baseline = journal.since(None).cursor;
+        journal.record(component_event(b, 0));
+        journal.record(component_event(unrelated, 1));
+        journal.record(component_event(a, 2));
+        journal.record(column_event());
+        journal.record(component_event(a, 3));
+
+        let full = journal.since(Some(baseline));
+        let filtered = journal.since_components(Some(baseline), &[b, a, b]);
+        let expected: Vec<_> = full
+            .events
+            .iter()
+            .copied()
+            .filter(|event| event.component.map_or(true, |id| id == a || id == b))
+            .collect();
+        assert!(!full.gap && !filtered.gap);
+        assert_eq!(filtered.events, expected);
+        assert_eq!(filtered.events.len(), 4);
+        assert_eq!(filtered.records_scanned, 4);
+        // The legacy full API's scan count is defined as the full returned
+        // delta length; it deliberately has no added public stats field.
+        assert_eq!(full.events.len(), 5);
+        assert_eq!(
+            filtered
+                .events
+                .iter()
+                .map(|event| event.chunk)
+                .collect::<Vec<_>>(),
+            vec![Some(0), Some(2), Some(0), Some(3)]
+        );
+    }
+
+    #[test]
+    fn filtered_column_journal_allows_unrelated_evictions_within_precision_window() {
+        let journal = ColumnJournal::new();
+        let selected = ComponentId::new(1);
+        let unrelated = ComponentId::new(2);
+        let baseline = journal.since(None).cursor;
+        for _ in 0..COLUMN_CHANGE_LOG_CAPACITY {
+            journal.record(component_event(unrelated, 9));
+        }
+        journal.record(component_event(selected, 7));
+
+        // The selected record itself is still retained; the first unrelated
+        // record was evicted. Filtered reads can prove that no selected record
+        // was lost and need not rebuild.
+        let filtered = journal.since_components(Some(baseline), &[selected]);
+        assert!(!filtered.gap);
+        assert_eq!(filtered.events, vec![component_event(selected, 7)]);
+        assert_eq!(filtered.records_scanned, 1);
+
+        // The compatibility API remains a global snapshot and therefore gaps
+        // after any retained record has been evicted.
+        let full = journal.since(Some(baseline));
+        assert!(full.gap);
+        assert!(full.events.is_empty());
+    }
+
+    #[test]
+    fn filtered_column_journal_gaps_when_selected_or_structural_record_is_evicted() {
+        let selected_journal = ColumnJournal::new();
+        let selected = ComponentId::new(1);
+        let unrelated = ComponentId::new(2);
+        let selected_baseline = selected_journal.since(None).cursor;
+        selected_journal.record(component_event(selected, 0));
+        for _ in 0..COLUMN_CHANGE_LOG_CAPACITY {
+            selected_journal.record(component_event(unrelated, 1));
+        }
+        let selected_gap = selected_journal.since_components(Some(selected_baseline), &[selected]);
+        assert!(selected_gap.gap);
+        assert!(selected_gap.events.is_empty());
+        assert_eq!(selected_gap.records_scanned, 0);
+
+        let structural_journal = ColumnJournal::new();
+        let structural_baseline = structural_journal.since(None).cursor;
+        structural_journal.record(column_event());
+        for _ in 0..COLUMN_CHANGE_LOG_CAPACITY {
+            structural_journal.record(component_event(unrelated, 2));
+        }
+        let structural_gap =
+            structural_journal.since_components(Some(structural_baseline), &[selected]);
+        assert!(structural_gap.gap);
+        assert!(structural_gap.events.is_empty());
+        assert_eq!(structural_gap.records_scanned, 0);
+    }
+
+    #[test]
+    fn filtered_column_journal_bounds_eviction_metadata_and_gaps_old_cursors() {
+        let journal = ColumnJournal::new();
+        let baseline = journal.since(None).cursor;
+        for index in 0..(COLUMN_CHANGE_LOG_CAPACITY * 2 + 1) {
+            journal.record(component_event(ComponentId::new(index as u32), 0));
+        }
+
+        let state = journal.lock();
+        assert_eq!(state.events.len(), COLUMN_CHANGE_LOG_CAPACITY);
+        assert!(state.evicted_component_revision.len() <= COLUMN_CHANGE_LOG_CAPACITY);
+        let precision_cursor = ColumnChangeCursor {
+            log: journal.id,
+            revision: state.precision_floor,
+        };
+        drop(state);
+
+        let old = journal.since_components(Some(baseline), &[]);
+        assert!(old.gap);
+        assert!(old.events.is_empty());
+        let at_precision_floor = journal.since_components(Some(precision_cursor), &[]);
+        assert!(!at_precision_floor.gap);
+        assert!(at_precision_floor.events.is_empty());
+        assert_eq!(at_precision_floor.records_scanned, 0);
     }
 
     #[test]

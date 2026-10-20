@@ -266,17 +266,29 @@ mod tests {
         let mut schedule = budgeted_schedule(&mut world);
         let pool = prism_tasks::TaskPool::with_threads(2);
 
+        let tick_before = world.change_tick().get();
         let deferred =
             schedule.run_parallel_budgeted(&pool, &mut world, core::time::Duration::ZERO);
         assert_eq!(deferred, 1);
+        assert_eq!(
+            world.change_tick().get(),
+            tick_before.wrapping_add(2),
+            "gated systems must not receive synthetic tick windows"
+        );
         {
             let c = world.resource::<Lanes>();
             assert_eq!((c.critical, c.normal, c.background), (1, 1, 0));
         }
 
+        let tick_before = world.change_tick().get();
         let deferred =
             schedule.run_parallel_budgeted(&pool, &mut world, core::time::Duration::from_secs(60));
         assert_eq!(deferred, 0);
+        assert_eq!(
+            world.change_tick().get(),
+            tick_before.wrapping_add(3),
+            "each executed system receives exactly one change-detection tick"
+        );
         let c = world.resource::<Lanes>();
         assert_eq!((c.critical, c.normal, c.background), (2, 2, 1));
     }

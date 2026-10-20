@@ -1,6 +1,7 @@
 //! Correctness and operation-count regressions for unchanged flushes.
 
 use super::*;
+use crate::query::DirtyChunk;
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
@@ -20,6 +21,14 @@ impl Component for Unobserved {}
 #[derive(Clone)]
 struct Noise;
 impl Component for Noise {}
+
+#[derive(Clone)]
+struct ExtraA;
+impl Component for ExtraA {}
+
+#[derive(Clone)]
+struct ExtraB;
+impl Component for ExtraB {}
 
 fn count(counter: &Arc<AtomicUsize>) -> impl FnMut(&mut ChangeContext<'_>) + Send + Sync + 'static {
     let counter = counter.clone();
@@ -153,8 +162,9 @@ fn observer_to_reaction_sparse_flush_ignores_unaffected_registry_entries() {
     assert_eq!(world.flush_changed_observers(), 0);
     assert_idle(&mut world);
 
-    // A component with no active change subscription does not dirty the
-    // tracker, so the large observer registry still takes the O(1) idle path.
+    // A write to a component with no active subscription must retain the
+    // observer tracker's idle fast path, independently of the dirty-query
+    // coverage below.
     world
         .get_mut::<Unobserved>(entities[ENTITIES / 2])
         .unwrap()
@@ -164,9 +174,51 @@ fn observer_to_reaction_sparse_flush_ignores_unaffected_registry_entries() {
     assert_eq!(world.change_observers.stats.slot_visits, 0);
     assert_eq!(world.change_observers.stats.candidate_slots, 0);
 
-    // One row change flows through one source observer and one affected
-    // reaction, despite thousands of rows, observers, and clean reactions.
-    world.get_mut::<Value>(entities[ENTITIES - 1]).unwrap().0 += 1;
+    // The first query pass establishes its journal cursor after setup. Its
+    // conservative fallback must see a clean same-tick window.
+    let value_query = world.query::<&Value>();
+    let baseline_tick = world.change_tick();
+    let baseline = value_query.dirty_chunks_with_stats(&world, baseline_tick, baseline_tick);
+    assert!(baseline.chunks.is_empty());
+    assert!(baseline.stats.journal_gap);
+
+    // In one forward tick, mutate one unobserved row and one Value row. The
+    // dirty-query journal path must discard the unrelated component event and
+    // report only Value's touched table chunk before observers are flushed.
+    let last_run = world.change_tick();
+    world.increment_change_tick();
+    let this_run = world.change_tick();
+    world
+        .get_mut::<Unobserved>(entities[ENTITIES / 2])
+        .unwrap()
+        .0 += 1;
+    let value_entity = entities[ENTITIES - 1];
+    let value_location = world.entities().location(value_entity).unwrap();
+    world.get_mut::<Value>(value_entity).unwrap().0 += 1;
+
+    let value_archetype = world.archetypes().get(value_location.archetype_id).unwrap();
+    let rows_per_chunk = value_archetype.table().rows_per_chunk();
+    let chunk_start = value_location.row as usize / rows_per_chunk * rows_per_chunk;
+    let chunk_end = (chunk_start + rows_per_chunk).min(value_archetype.table().len());
+    let dirty = value_query.dirty_chunks_with_stats(&world, last_run, this_run);
+    assert_eq!(
+        dirty.chunks,
+        [DirtyChunk {
+            archetype: value_location.archetype_id,
+            start: chunk_start,
+            end: chunk_end,
+        }]
+    );
+    assert!(!dirty.stats.journal_gap);
+    assert_eq!(dirty.stats.journal_events, 1);
+    assert_eq!(dirty.stats.journal_records_scanned, 1);
+    assert_eq!(dirty.stats.candidate_archetype_checks, 1);
+    assert_eq!(dirty.stats.merged_candidates, 1);
+    assert_eq!(dirty.stats.summaries_tested, 0);
+    assert_eq!(dirty.stats.column_candidates, 0);
+
+    // The same sparse pair of writes then flows through only the Value source
+    // observer and its affected reaction, despite the large clean registries.
     assert_eq!(world.flush_changed_observers(), 1);
     assert_eq!(effect_calls.load(Ordering::Relaxed), 1);
     assert_eq!(noise_calls.load(Ordering::Relaxed), 0);
@@ -183,6 +235,113 @@ fn observer_to_reaction_sparse_flush_ignores_unaffected_registry_entries() {
     assert_eq!(reaction_stats.ordering_nodes, 2);
     assert_eq!(reaction_stats.ordering_edges, 2);
     assert_eq!(reaction_stats.executed_nodes, 1);
+}
+
+fn sparse_pipeline_work_counts(
+    entity_count: usize,
+    noise_observers: usize,
+    clean_reactions: usize,
+    unrelated_writes: usize,
+    grow_archetypes: bool,
+) -> [usize; 14] {
+    let mut world = World::new();
+    let mut entities = Vec::with_capacity(entity_count);
+    for index in 0..entity_count {
+        let value = Value(index as u32);
+        let unobserved = Unobserved(index as u32);
+        let entity = if grow_archetypes {
+            match index % 4 {
+                0 => world.spawn((value, unobserved, Noise)),
+                1 => world.spawn((value, unobserved, Noise, ExtraA)),
+                2 => world.spawn((value, unobserved, Noise, ExtraB)),
+                _ => world.spawn((value, unobserved, Noise, ExtraA, ExtraB)),
+            }
+        } else {
+            world.spawn((value, unobserved, Noise))
+        };
+        entities.push(entity);
+    }
+
+    let noise_calls = Arc::new(AtomicUsize::new(0));
+    for _ in 0..noise_observers {
+        world.observe_changed::<Noise, _>(count(&noise_calls));
+    }
+    let source = world.reaction_source::<Value>();
+    let effect_calls = Arc::new(AtomicUsize::new(0));
+    world.add_reaction(&[source], {
+        let effect_calls = effect_calls.clone();
+        move |_| {
+            effect_calls.fetch_add(1, Ordering::Relaxed);
+        }
+    });
+    for _ in 0..clean_reactions {
+        world.add_reaction(&[], |_| {});
+    }
+    assert_eq!(world.flush_changed_observers(), 0);
+
+    let query = world.query::<&Value>();
+    let baseline_tick = world.change_tick();
+    assert!(query
+        .dirty_chunks_with_stats(&world, baseline_tick, baseline_tick)
+        .chunks
+        .is_empty());
+
+    let last_run = world.change_tick();
+    world.increment_change_tick();
+    let this_run = world.change_tick();
+    assert!(unrelated_writes < entity_count);
+    for &entity in entities.iter().take(unrelated_writes) {
+        world.get_mut::<Unobserved>(entity).unwrap().0 += 1;
+    }
+    world.get_mut::<Value>(*entities.last().unwrap()).unwrap().0 += 1;
+
+    let dirty = query.dirty_chunks_with_stats(&world, last_run, this_run);
+    assert!(!dirty.stats.journal_gap);
+    assert_eq!(dirty.chunks.len(), 1);
+    assert_eq!(dirty.stats.candidate_archetype_checks, 1);
+    assert_eq!(dirty.stats.merged_candidates, 1);
+    assert_eq!(world.flush_changed_observers(), 1);
+    assert_eq!(effect_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(noise_calls.load(Ordering::Relaxed), 0);
+
+    let observer = world.change_observers.stats;
+    let reaction = world.reactions.reaction_stats();
+    [
+        dirty.chunks.len(),
+        dirty.stats.journal_events,
+        dirty.stats.journal_records_scanned,
+        dirty.stats.candidate_archetype_checks,
+        dirty.stats.merged_candidates,
+        dirty.stats.summaries_tested,
+        dirty.stats.column_candidates,
+        observer.candidate_slots,
+        observer.slot_visits,
+        observer.collections,
+        reaction.ordering_nodes,
+        reaction.ordering_edges,
+        reaction.executed_nodes,
+        world.archetypes().len(),
+    ]
+}
+
+#[test]
+fn sparse_pipeline_work_counts_ignore_clean_registry_and_entity_growth() {
+    // Increase entities, matching archetypes, unrelated observer slots,
+    // clean reaction nodes, and unrelated journal writes while keeping the
+    // relevant write fixed at one.
+    let small = sparse_pipeline_work_counts(256, 16, 64, 1, false);
+    let large = sparse_pipeline_work_counts(8_192, 512, 2_048, 4_096, true);
+    assert_eq!(
+        &large[..13],
+        &small[..13],
+        "clean scale must not add sparse-path work"
+    );
+    assert!(large[13] > small[13], "the large case adds archetypes");
+    assert_eq!(large[0], 1, "one touched table chunk is reported");
+    assert_eq!(large[1], 1, "one relevant journal event is consumed");
+    assert_eq!(large[2], 1, "only the relevant journal record is scanned");
+    assert_eq!(&large[7..10], &[1, 2, 1]);
+    assert_eq!(&large[10..13], &[2, 2, 1]);
 }
 
 #[test]

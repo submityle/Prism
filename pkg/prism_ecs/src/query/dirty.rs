@@ -79,6 +79,12 @@ pub struct DirtyChunkStats {
     /// Number of matching table journal events consumed by the strict
     /// incremental path.
     pub journal_events: usize,
+    /// Number of component-indexed journal event records selected/materialized
+    /// for merge by the filtered read, including structural records and before
+    /// archetype or chunk validation. Binary-search probes and unrelated writes
+    /// are excluded. A conservative gap reports zero because no delta records
+    /// are consumed.
+    pub journal_records_scanned: usize,
     /// Number of distinct candidate archetypes checked against query data and
     /// filters after journal and sparse-index candidates are grouped.
     pub candidate_archetype_checks: usize,
@@ -212,9 +218,10 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
 
         let changes = world
             .archetypes()
-            .column_changes_since(self.dirty_column_cursor());
+            .column_changes_since_components(self.dirty_column_cursor(), access_ids);
         self.set_dirty_column_cursor(changes.cursor);
         report.stats.journal_gap = changes.gap;
+        report.stats.journal_records_scanned = changes.records_scanned;
         if changes.gap {
             return false;
         }

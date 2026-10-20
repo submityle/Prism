@@ -163,9 +163,9 @@ impl MultiThreadedExecutor {
             // as the single-threaded executor's `System::run` does. This keeps
             // the per-system `(last_run, this_run)` values identical across both
             // executors for an ambiguity-free schedule, so change detection is
-            // single-threaded-equivalent. Gated-off systems get an unused
-            // placeholder window and never increment the tick.
-            let mut windows: Vec<(Tick, Tick)> = Vec::with_capacity(wave.len());
+            // single-threaded-equivalent. Gated-off systems have no window and
+            // never increment the tick.
+            let mut windows: Vec<Option<(Tick, Tick)>> = Vec::with_capacity(wave.len());
             for (slot, &idx) in wave.iter().enumerate() {
                 if should_run[slot] {
                     // Reject a cross-world system before the tick is advanced so
@@ -173,31 +173,30 @@ impl MultiThreadedExecutor {
                     schedule.nodes[idx].system.validate_world(world);
                     let last_run = schedule.nodes[idx].system.get_last_run();
                     let this_run = world.increment_change_tick();
-                    windows.push((last_run, this_run));
+                    windows.push(Some((last_run, this_run)));
                 } else {
-                    windows.push((Tick::ZERO, Tick::ZERO));
+                    windows.push(None);
                 }
             }
 
             // Collect a raw pointer to each wave member's system. Distinct
             // indices make the pointers non-aliasing; we only ever hold the raw
             // pointers (not references) across the dispatch.
-            let mut tasks: Vec<(SendSystem, bool, Tick, Tick, SystemLane)> =
+            let mut tasks: Vec<Option<(SendSystem, Tick, Tick, SystemLane)>> =
                 Vec::with_capacity(wave.len());
             for (slot, &idx) in wave.iter().enumerate() {
+                if !should_run[slot] {
+                    tasks.push(None);
+                    continue;
+                }
                 let system: *mut (dyn System<Out = ()> + 'static) = {
                     let boxed: &mut BoxedSystem = &mut schedule.nodes[idx].system;
                     &mut **boxed
                 };
-                let (last_run, this_run) = windows[slot];
+                let (last_run, this_run) =
+                    windows[slot].expect("a scheduled system must have a change-detection window");
                 let lane = schedule.nodes[idx].lane;
-                tasks.push((
-                    SendSystem(system),
-                    should_run[slot],
-                    last_run,
-                    this_run,
-                    lane,
-                ));
+                tasks.push(Some((SendSystem(system), last_run, this_run, lane)));
             }
 
             // --- Dispatch the passing bodies in parallel. The `&mut World`
@@ -227,10 +226,10 @@ impl MultiThreadedExecutor {
                     Mutex::new((0..wave.len()).map(|_| None).collect());
                 let mut groups: [Option<PriorityGroup>; 3] = [None, None, None];
 
-                for (slot, (system, run, last_run, this_run, lane)) in tasks.iter().enumerate() {
-                    if !*run {
+                for (slot, task) in tasks.iter().enumerate() {
+                    let Some((system, last_run, this_run, lane)) = task else {
                         continue;
-                    }
+                    };
                     let rank = lane_rank(*lane);
                     let group =
                         groups[rank].get_or_insert_with(|| pool.priority_group(lane.to_priority()));
@@ -304,7 +303,9 @@ impl MultiThreadedExecutor {
             // its deferred commands, in topological order within the wave.
             for (slot, &idx) in wave.iter().enumerate() {
                 if should_run[slot] {
-                    schedule.nodes[idx].system.set_last_run(windows[slot].1);
+                    let (_, this_run) = windows[slot]
+                        .expect("a scheduled system must have a change-detection window");
+                    schedule.nodes[idx].system.set_last_run(this_run);
                     if let Err(payload) =
                         policy.invoke(|| schedule.nodes[idx].system.apply_deferred(world))
                     {
