@@ -964,6 +964,60 @@ fn material_vt_production_layout_contract_is_linked_into_resolve() {
         resolve.contains("sample_texture_slot(record, geometry.uv, lod)"),
         "shading resolve must call the production material consumer",
     );
+    assert!(
+        resolve.contains("surface.normal_variance = 0.0;")
+            && resolve.contains("geometry.uv + uv_gradients[0]")
+            && resolve.contains("geometry.uv + uv_gradients[1]")
+            && resolve.contains("decode_tangent_normal")
+            && resolve.contains("spec_aa_screen_space_variance")
+            && resolve.contains("SPEC_AA_SIGMA2"),
+        "production resolve must derive normal variance from same-record forward samples",
+    );
+}
+
+#[test]
+fn production_resolve_derives_specular_aa_before_response_evaluation() {
+    let resolve = include_str!("../../shaders/shading_resolve.wesl");
+    let reset = resolve
+        .find("surface.normal_variance = 0.0;")
+        .expect("production resolve must initialise shade-time normal variance");
+    let normal_record = resolve
+        .find("if record.semantic == SEMANTIC_NORMAL")
+        .expect("production resolve must identify the authored normal record");
+    let center_sample = resolve
+        .find("let texel = sample_texture_slot(record, geometry.uv, lod);")
+        .expect("normal footprint must reuse the current record's centre sample");
+    let forward_x = resolve
+        .find("sample_texture_slot(record, geometry.uv + uv_gradients[0], lod)")
+        .expect("normal footprint must use the current record and its selected mip");
+    let forward_y = resolve
+        .find("sample_texture_slot(record, geometry.uv + uv_gradients[1], lod)")
+        .expect("normal footprint must use both UV footprint directions");
+    let center_decode = resolve
+        .find("normal_center_tangent = decode_tangent_normal(")
+        .expect("normal footprint must decode the centre sample");
+    let variance = resolve
+        .find("surface.normal_variance = spec_aa_screen_space_variance(")
+        .expect("production resolve must publish geometric specular-AA variance");
+    let response = resolve
+        .find("let left_arm = evaluate_response_arm(")
+        .expect("production resolve must evaluate a response arm");
+
+    assert!(reset < center_sample && center_sample < normal_record);
+    assert!(normal_record < forward_x && forward_x < forward_y);
+    assert!(forward_y < center_decode && center_decode < variance);
+    assert!(variance < response);
+
+    let shading_slice = &resolve[reset..response];
+    assert!(
+        shading_slice.contains("decode_tangent_normal(\n                    forward_x_texel.xyz")
+    );
+    assert!(
+        shading_slice.contains("decode_tangent_normal(\n                    forward_y_texel.xyz")
+    );
+    assert!(shading_slice.contains("apply_tangent_space_normal("));
+    let post_variance = &resolve[variance..response];
+    assert!(!post_variance.contains("surface.normal_variance = 0.0;"));
 }
 
 /// Compiles the material VT resolver through the production WESL frontend.

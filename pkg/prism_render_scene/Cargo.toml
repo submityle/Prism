@@ -68,3 +68,7 @@ path = "text/integration/material_classification_gpu.rs"
 [[test]]
 name = "brdf_channels_gpu"
 path = "text/integration/brdf_channels_gpu.rs"
+
+[[test]]
+name = "specular_aa_image_gpu"
+path = "text/integration/specular_aa_image_gpu.rs"
