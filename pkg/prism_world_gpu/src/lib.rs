@@ -27,7 +27,7 @@ pub use packing::{ClusterSoa, ProxySoa, SoaBufferPack};
 pub use placement_render_bridge::{
     build_placement_render_graph, PlacementComputeStage, PlacementDrawStage,
     PlacementImportedBuffer, PlacementRenderBridgeError, PlacementRenderStream,
-    PlacementSceneTarget,
+    PlacementRenderWork, PlacementSceneTarget,
 };
 pub use registry::{ProxyHandle, ProxyRegistry, ProxyRegistryError};
 pub use world_placement_graph::{
@@ -110,7 +110,10 @@ mod heightfield_placement;
 
 #[cfg(feature = "terrain_scatter")]
 pub use heightfield_placement::{
-    GpuHeightfieldPlacement, GpuHeightfieldPlacementError, GpuHeightfieldPlacementWorkBudget,
+    GpuHeightfieldPlacement, GpuHeightfieldPlacementActiveStagesSnapshot,
+    GpuHeightfieldPlacementBufferSnapshot, GpuHeightfieldPlacementError,
+    GpuHeightfieldPlacementRegistrationSnapshot, GpuHeightfieldPlacementStageSnapshot,
+    GpuHeightfieldPlacementWorkBudget,
 };
 
 #[cfg(feature = "terrain_scatter")]

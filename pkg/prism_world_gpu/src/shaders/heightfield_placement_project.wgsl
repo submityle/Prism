@@ -9,10 +9,11 @@
 // surface. Source records belong to that request, have canonical grid Y = 0,
 // and flag 12 identifies original XZ ownership/minimum-distance survivors.
 // Buffers cover count slots (heights cover side*side); dispatch Z = 1 and
-// groups_x matches dispatch X. Host clears status and indirect[1] initially.
-// Submit project_main, then existing field_main at the projected positions,
-// then finalize_main in ordered dispatches. No inter-workgroup barriers or
-// optional GPU features are needed. Finalize may be skipped when count = 0.
+// groups_x matches dispatch X. The ordered reset_main compute pass clears
+// status and indirect[1] before this shader. Submit project_main, then existing
+// field_main at the projected positions, then finalize_main in ordered
+// dispatches. No inter-workgroup barriers or optional GPU features are needed.
+// All four candidate passes are skipped when count = 0; reset still executes.
 // After failure only flags/indirect count are invalidated: compact tails and
 // projected positions/samples must not be interpreted as a successful result.
 struct Params {

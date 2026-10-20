@@ -50,6 +50,25 @@ pub struct PlacementDrawStage {
     pub indirect_offset: u64,
 }
 
+/// Candidate-dependent placement work.
+///
+/// Empty placement requests intentionally omit this value. They still execute
+/// the reset stage so stale indirect/status state cannot escape into a later
+/// frame, but they do not fabricate a nonzero dispatch or an empty draw.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PlacementRenderWork {
+    /// Canonical XZ source generation kernel.
+    pub source: PlacementComputeStage,
+    /// Exact heightfield projection kernel.
+    pub project: PlacementComputeStage,
+    /// Author field/compact kernel.
+    pub field: PlacementComputeStage,
+    /// Fail-closed finalization kernel.
+    pub finalize: PlacementComputeStage,
+    /// Production raster consumer.
+    pub draw: PlacementDrawStage,
+}
+
 /// Complete physical resource/pipeline binding for one placement stream.
 ///
 /// The fields intentionally include every buffer visible to the compute and
@@ -83,16 +102,9 @@ pub struct PlacementRenderStream {
     pub brushes: PlacementImportedBuffer,
     /// Reset kernel clearing transient output state.
     pub reset: PlacementComputeStage,
-    /// Canonical XZ source generation kernel.
-    pub source: PlacementComputeStage,
-    /// Exact heightfield projection kernel.
-    pub project: PlacementComputeStage,
-    /// Author field/compact kernel.
-    pub field: PlacementComputeStage,
-    /// Fail-closed finalization kernel.
-    pub finalize: PlacementComputeStage,
-    /// Production raster consumer.
-    pub draw: PlacementDrawStage,
+    /// Candidate-dependent compute and draw work. This must be absent exactly
+    /// when `stream.candidate_count == 0`.
+    pub work: Option<PlacementRenderWork>,
 }
 
 /// Imported scene color target consumed by the placement raster passes.
@@ -132,6 +144,13 @@ pub enum PlacementRenderBridgeError {
         /// Invalid byte offset.
         offset: u64,
     },
+    /// Candidate count and candidate-dependent work disagree.
+    CandidateWorkMismatch {
+        /// Stream owning the inconsistent binding.
+        stream: PlacementStream,
+        /// Whether candidate-dependent work was supplied.
+        work_present: bool,
+    },
     /// The underlying executable graph rejected a checked operation.
     Graph(CompileError),
 }
@@ -156,6 +175,14 @@ impl fmt::Display for PlacementRenderBridgeError {
             Self::MisalignedIndirectOffset { stream, offset } => write!(
                 f,
                 "placement indirect offset {offset} is not four-byte aligned for {stream:?}"
+            ),
+            Self::CandidateWorkMismatch {
+                stream,
+                work_present,
+            } => write!(
+                f,
+                "placement candidate count {} disagrees with work_present={work_present} for {stream:?}",
+                stream.candidate_count
             ),
             Self::Graph(error) => write!(f, "placement render graph lowering failed: {error}"),
         }
@@ -205,26 +232,30 @@ pub fn build_placement_render_graph(
         validate_stream(&item)?;
         let handles = import_stream(&mut graph, &item)?;
 
-        let (compact, indirect, status, attributes) = add_reset_pass(
+        let (indirect, status) = add_reset_pass(
             &mut graph,
-            handles.compact,
             handles.indirect,
             handles.status,
-            handles.attributes,
             item.reset,
             item.stream,
         )?;
 
+        let Some(work) = item.work else {
+            continue;
+        };
+
+        let attributes = handles.attributes;
+        let compact = handles.compact;
         let source_params = handles.source_params;
         let source_records = handles.records;
-        let source_stage = item.source;
+        let source_stage = work.source;
         let source_records =
             graph_handle_write(&mut graph, source_params, source_records, source_stage)?;
 
         let project_params = handles.project_params;
         let heights = handles.heights;
         let samples = handles.samples;
-        let project_stage = item.project;
+        let project_stage = work.project;
         let (records, samples, status, indirect, attributes) = add_project_pass(
             &mut graph,
             project_params,
@@ -240,7 +271,7 @@ pub fn build_placement_render_graph(
 
         let field_params = handles.field_params;
         let brushes = handles.brushes;
-        let field_stage = item.field;
+        let field_stage = work.field;
         let (attributes, compact, indirect) = add_field_pass(
             &mut graph,
             field_params,
@@ -261,7 +292,7 @@ pub fn build_placement_render_graph(
             status,
             attributes,
             indirect,
-            item.finalize,
+            work.finalize,
             item.stream,
         )?;
 
@@ -269,7 +300,7 @@ pub fn build_placement_render_graph(
         let draw_samples = samples;
         let draw_attributes = attributes;
         let draw_compact = compact;
-        let draw_stage = item.draw;
+        let draw_stage = work.draw;
         let previous_scene = scene_handle;
         let mut next_scene = previous_scene;
         graph.try_add_raster_pass(
@@ -339,22 +370,18 @@ fn import_stream(
 
 fn add_reset_pass(
     graph: &mut RenderGraph,
-    compact: BufferHandle,
     indirect: BufferHandle,
     status: BufferHandle,
-    attributes: BufferHandle,
     stage: PlacementComputeStage,
     stream: PlacementStream,
-) -> Result<(BufferHandle, BufferHandle, BufferHandle, BufferHandle), CompileError> {
-    let mut out = (compact, indirect, status, attributes);
+) -> Result<(BufferHandle, BufferHandle), CompileError> {
+    let mut out = (indirect, status);
     graph.try_add_compute_pass(
         format!("world placement reset {:?}", stream),
         PassFlags::NEVER_CULL,
         |builder| {
-            out.0 = builder.write_storage_buffer(compact);
-            out.1 = builder.write_storage_buffer(indirect);
-            out.2 = builder.write_storage_buffer(status);
-            out.3 = builder.write_storage_buffer(attributes);
+            out.0 = builder.write_storage_buffer(indirect);
+            out.1 = builder.write_storage_buffer(status);
             move |commands: &mut ExecuteContext<'_>| record_compute(commands, stage)
         },
     )?;
@@ -509,12 +536,27 @@ fn validate_stream(item: &PlacementRenderStream) -> Result<(), PlacementRenderBr
             });
         }
     }
+    if (item.stream.candidate_count == 0) != item.work.is_none() {
+        return Err(PlacementRenderBridgeError::CandidateWorkMismatch {
+            stream: item.stream,
+            work_present: item.work.is_some(),
+        });
+    }
+    if item.reset.dispatch.contains(&0) {
+        return Err(PlacementRenderBridgeError::ZeroDispatch {
+            stream: item.stream,
+            stage: "reset",
+            dispatch: item.reset.dispatch,
+        });
+    }
+    let Some(work) = item.work else {
+        return Ok(());
+    };
     for (stage, label) in [
-        (item.reset, "reset"),
-        (item.source, "source"),
-        (item.project, "project"),
-        (item.field, "field"),
-        (item.finalize, "finalize"),
+        (work.source, "source"),
+        (work.project, "project"),
+        (work.field, "field"),
+        (work.finalize, "finalize"),
     ] {
         if stage.dispatch.contains(&0) {
             return Err(PlacementRenderBridgeError::ZeroDispatch {
@@ -524,10 +566,10 @@ fn validate_stream(item: &PlacementRenderStream) -> Result<(), PlacementRenderBr
             });
         }
     }
-    if item.draw.indirect_offset % 4 != 0 {
+    if work.draw.indirect_offset % 4 != 0 {
         return Err(PlacementRenderBridgeError::MisalignedIndirectOffset {
             stream: item.stream,
-            offset: item.draw.indirect_offset,
+            offset: work.draw.indirect_offset,
         });
     }
     Ok(())
@@ -568,10 +610,10 @@ mod tests {
     }
 
     fn item(device: &impl RenderDevice) -> PlacementRenderStream {
-        let stage = |id| PlacementComputeStage {
+        let stage = |id, dispatch| PlacementComputeStage {
             pipeline: ComputePipelineId::from_parts(id, 0),
             bind_group: BindGroupId::from_parts(id, 0),
-            dispatch: [1, 1, 1],
+            dispatch,
         };
         PlacementRenderStream {
             stream: stream(),
@@ -586,17 +628,26 @@ mod tests {
             status: imported_buffer(device, 4),
             heights: imported_buffer(device, 16),
             brushes: imported_buffer(device, 64),
-            reset: stage(1),
-            source: stage(2),
-            project: stage(3),
-            field: stage(4),
-            finalize: stage(5),
-            draw: PlacementDrawStage {
-                pipeline: RenderPipelineId::from_parts(6, 0),
-                bind_group: BindGroupId::from_parts(6, 0),
-                indirect_offset: 0,
-            },
+            reset: stage(1, [1, 1, 1]),
+            work: Some(PlacementRenderWork {
+                source: stage(2, [2, 1, 1]),
+                project: stage(3, [3, 1, 1]),
+                field: stage(4, [4, 1, 1]),
+                finalize: stage(5, [5, 1, 1]),
+                draw: PlacementDrawStage {
+                    pipeline: RenderPipelineId::from_parts(6, 0),
+                    bind_group: BindGroupId::from_parts(6, 0),
+                    indirect_offset: 4,
+                },
+            }),
         }
+    }
+
+    fn reset_only_item(device: &impl RenderDevice) -> PlacementRenderStream {
+        let mut item = item(device);
+        item.stream.candidate_count = 0;
+        item.work = None;
+        item
     }
 
     fn device() -> impl RenderDevice {
@@ -643,18 +694,20 @@ mod tests {
         let recorded = graph.record(&device).expect("recording");
         assert_eq!(recorded.plan().pass_count(), 6);
         assert_eq!(recorded.commands().passes.len(), 6);
-        for (index, pass) in recorded.commands().passes[..5].iter().enumerate() {
+        for (index, (pass, expected_x)) in recorded.commands().passes[..5]
+            .iter()
+            .zip(1..=5)
+            .enumerate()
+        {
             let Pass::Compute { commands, .. } = pass else {
                 panic!("pass {index} must be compute");
             };
-            assert!(matches!(
-                commands.as_slice(),
-                [
-                    ComputeCommand::SetPipeline(_),
-                    ComputeCommand::SetBindGroup { index: 0, .. },
-                    ComputeCommand::Dispatch { x: 1, y: 1, z: 1 },
-                ]
-            ));
+            let [ComputeCommand::SetPipeline(_), ComputeCommand::SetBindGroup { index: 0, .. }, ComputeCommand::Dispatch { x, y: 1, z: 1 }] =
+                commands.as_slice()
+            else {
+                panic!("pass {index} has unexpected compute commands: {commands:?}");
+            };
+            assert_eq!(*x, expected_x);
         }
         let Pass::Render { commands, .. } = &recorded.commands().passes[5] else {
             panic!("last pass must be render");
@@ -664,7 +717,37 @@ mod tests {
             [
                 RenderCommand::SetPipeline(_),
                 RenderCommand::SetBindGroup { index: 0, .. },
-                RenderCommand::DrawIndirect { offset: 0, .. },
+                RenderCommand::DrawIndirect { offset: 4, .. },
+            ]
+        ));
+    }
+
+    #[test]
+    fn empty_stream_records_only_the_mandatory_reset_pass() {
+        let device = device();
+        let graph = build_placement_render_graph(
+            Extent3d::new_2d(4, 4),
+            scene(&device),
+            &[reset_only_item(&device)],
+        )
+        .expect("reset-only graph lowering");
+        let recorded = graph.record(&device).expect("reset-only recording");
+        assert_eq!(recorded.plan().pass_count(), 1);
+        let [Pass::Compute {
+            label, commands, ..
+        }] = recorded.commands().passes.as_slice()
+        else {
+            panic!("empty stream must record exactly one compute pass");
+        };
+        assert!(label
+            .as_deref()
+            .is_some_and(|label| label.contains("reset")));
+        assert!(matches!(
+            commands.as_slice(),
+            [
+                ComputeCommand::SetPipeline(_),
+                ComputeCommand::SetBindGroup { index: 0, .. },
+                ComputeCommand::Dispatch { x: 1, y: 1, z: 1 },
             ]
         ));
     }
@@ -696,7 +779,7 @@ mod tests {
         ));
 
         let mut zero_dispatch = item(&device);
-        zero_dispatch.project.dispatch = [1, 0, 1];
+        zero_dispatch.work.as_mut().unwrap().project.dispatch = [1, 0, 1];
         assert!(matches!(
             build_placement_render_graph(Extent3d::new_2d(4, 4), scene(&device), &[zero_dispatch],),
             Err(PlacementRenderBridgeError::ZeroDispatch {
@@ -707,10 +790,34 @@ mod tests {
         ));
 
         let mut misaligned = item(&device);
-        misaligned.draw.indirect_offset = 2;
+        misaligned.work.as_mut().unwrap().draw.indirect_offset = 2;
         assert!(matches!(
             build_placement_render_graph(Extent3d::new_2d(4, 4), scene(&device), &[misaligned],),
             Err(PlacementRenderBridgeError::MisalignedIndirectOffset { offset: 2, .. })
+        ));
+
+        let mut missing_work = item(&device);
+        missing_work.work = None;
+        assert!(matches!(
+            build_placement_render_graph(Extent3d::new_2d(4, 4), scene(&device), &[missing_work],),
+            Err(PlacementRenderBridgeError::CandidateWorkMismatch {
+                work_present: false,
+                ..
+            })
+        ));
+
+        let mut unexpected_work = item(&device);
+        unexpected_work.stream.candidate_count = 0;
+        assert!(matches!(
+            build_placement_render_graph(
+                Extent3d::new_2d(4, 4),
+                scene(&device),
+                &[unexpected_work],
+            ),
+            Err(PlacementRenderBridgeError::CandidateWorkMismatch {
+                work_present: true,
+                ..
+            })
         ));
     }
 

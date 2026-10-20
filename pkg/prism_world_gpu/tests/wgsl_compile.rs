@@ -2,6 +2,57 @@
 
 #[cfg(feature = "terrain_scatter")]
 #[test]
+fn placement_reset_uses_two_read_write_storage_bindings_and_core_u32_atomics() {
+    use wgpu::naga::{AddressSpace, ScalarKind, StorageAccess, TypeInner};
+
+    let source = include_str!("../src/shaders/heightfield_placement_reset.wgsl");
+    let module = wgpu::naga::front::wgsl::parse_str(source)
+        .unwrap_or_else(|error| panic!("placement reset: {}", error.emit_to_string(source)));
+    wgpu::naga::valid::Validator::new(
+        wgpu::naga::valid::ValidationFlags::all(),
+        wgpu::naga::valid::Capabilities::empty(),
+    )
+    .validate(&module)
+    .unwrap_or_else(|error| panic!("placement reset: {error}"));
+
+    let [entry] = module.entry_points.as_slice() else {
+        panic!("placement reset must expose exactly one entry point");
+    };
+    assert_eq!(entry.name, "reset_main");
+    assert_eq!(entry.workgroup_size, [1, 1, 1]);
+
+    let mut bindings = std::collections::BTreeMap::new();
+    for (_, variable) in module.global_variables.iter() {
+        if let Some(binding) = variable.binding {
+            assert_eq!(binding.group, 0);
+            assert!(bindings.insert(binding.binding, variable).is_none());
+        }
+        assert_ne!(variable.space, AddressSpace::Uniform);
+    }
+    assert_eq!(bindings.len(), 2);
+    for binding in 0..=1 {
+        assert_eq!(
+            bindings[&binding].space,
+            AddressSpace::Storage {
+                access: StorageAccess::LOAD | StorageAccess::STORE,
+            }
+        );
+    }
+    for (_, ty) in module.types.iter() {
+        match ty.inner {
+            TypeInner::Scalar(scalar)
+            | TypeInner::Atomic(scalar)
+            | TypeInner::Vector { scalar, .. } => {
+                assert_ne!(scalar.kind, ScalarKind::Float);
+                assert!(scalar.width <= 4);
+            }
+            _ => {}
+        }
+    }
+}
+
+#[cfg(feature = "terrain_scatter")]
+#[test]
 fn placement_shaders_match_core_integer_binding_and_record_abi() {
     use wgpu::naga::{AddressSpace, ScalarKind, StorageAccess, TypeInner};
     let load = StorageAccess::LOAD;
