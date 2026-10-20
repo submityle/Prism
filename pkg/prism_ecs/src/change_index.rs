@@ -86,6 +86,11 @@ struct TrackerState {
     epoch: u64,
     revision: u64,
     logs: Vec<Option<ComponentLog>>,
+    /// Components with at least one indexed write since the last observer
+    /// candidate snapshot. The parallel `dirty_flags` table makes repeated
+    /// writes O(1) without growing this list.
+    dirty_components: Vec<ComponentId>,
+    dirty_flags: Vec<bool>,
 }
 
 /// Cursor into one component's exact change log.
@@ -164,6 +169,8 @@ impl ChangeTracker {
                 epoch: 0,
                 revision: 0,
                 logs: Vec::new(),
+                dirty_components: Vec::new(),
+                dirty_flags: Vec::new(),
             }),
         }
     }
@@ -179,6 +186,19 @@ impl ChangeTracker {
     pub(crate) fn revision(&self) -> Option<u64> {
         let revision = self.state.lock().revision;
         (revision != u64::MAX).then_some(revision)
+    }
+
+    /// Atomically take the component-level write summary used to select
+    /// change-observer candidates. Writes made after this call (notably from
+    /// callbacks) start the next summary and therefore remain visible to the
+    /// next flush.
+    pub(crate) fn take_dirty_components(&self) -> Vec<ComponentId> {
+        let mut state = self.state.lock();
+        let dirty = core::mem::take(&mut state.dirty_components);
+        for component in &dirty {
+            state.dirty_flags[component.index() as usize] = false;
+        }
+        dirty
     }
 
     fn ensure_log(state: &mut TrackerState, component: ComponentId) -> &mut ComponentLog {
@@ -223,7 +243,15 @@ impl ChangeTracker {
         }
         // Count every append, including another write in the same tick batch.
         state.revision = state.revision.saturating_add(1);
-        let log = state.logs[component.index() as usize]
+        let component_index = component.index() as usize;
+        if state.dirty_flags.len() <= component_index {
+            state.dirty_flags.resize(component_index + 1, false);
+        }
+        if !state.dirty_flags[component_index] {
+            state.dirty_flags[component_index] = true;
+            state.dirty_components.push(component);
+        }
+        let log = state.logs[component_index]
             .as_mut()
             .expect("ensured component log");
         if let Some(batch) = log.batches.last_mut()
@@ -276,6 +304,8 @@ impl ChangeTracker {
         for log in state.logs.iter_mut().flatten() {
             log.batches.clear();
         }
+        state.dirty_components.clear();
+        state.dirty_flags.fill(false);
         ChangeCursor {
             epoch: state.epoch,
             next_batch: 0,

@@ -24,6 +24,7 @@
 //! [`World::flush_changed_observers`] directly to control the cadence yourself.
 
 use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
 
@@ -139,13 +140,14 @@ struct ChangeEntry {
     slot: Option<ChangeSlot>,
 }
 
-/// Test-only operation counts: include vacant historical slots in both passes.
+/// Test-only operation counts for candidate selection and delivery.
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct FlushStats {
     revision_checks: usize,
     slot_visits: usize,
     collections: usize,
+    candidate_slots: usize,
     idle_fast_path: bool,
 }
 
@@ -157,6 +159,20 @@ struct FlushStats {
 /// valid even if that callback registers or removes observers.
 pub(crate) struct ChangeObservers {
     slots: Vec<ChangeEntry>,
+    /// Active slots in registration order. Unlike `slots`, this never contains
+    /// removed historical entries and is the source for a flush's candidate
+    /// snapshot.
+    active_indices: Vec<usize>,
+    /// Active slots grouped by the component they observe. Component ids are
+    /// dense within a World, so a vector avoids map lookup in the common path.
+    active_by_component: Vec<Vec<usize>>,
+    /// Active slots with an already-collected batch that still needs delivery
+    /// after a callback panic. Kept sorted by registration slot so retry order
+    /// remains deterministic without scanning every active observer.
+    pending_indices: Vec<usize>,
+    /// Observer ids share one namespace with lifecycle observers and are not a
+    /// dense change-observer index.
+    slot_by_id: BTreeMap<ObserverId, usize>,
     active: usize,
     pub(crate) flushing: bool,
     restore_generation: u64,
@@ -177,6 +193,10 @@ impl Default for ChangeObservers {
     fn default() -> Self {
         Self {
             slots: Vec::new(),
+            active_indices: Vec::new(),
+            active_by_component: Vec::new(),
+            pending_indices: Vec::new(),
+            slot_by_id: BTreeMap::new(),
             active: 0,
             flushing: false,
             restore_generation: 0,
@@ -206,14 +226,56 @@ impl ChangeObservers {
     }
 
     fn push(&mut self, slot: ChangeSlot) {
+        let index = self.slots.len();
+        let id = slot.id;
+        let component = slot.observer.component_id();
         self.slots.push(ChangeEntry {
-            id: slot.id,
-            component: slot.observer.component_id(),
+            id,
+            component,
             active: true,
             slot: Some(slot),
         });
+        self.active_indices.push(index);
+        let component_index = component.index() as usize;
+        if self.active_by_component.len() <= component_index {
+            self.active_by_component
+                .resize_with(component_index + 1, Vec::new);
+        }
+        self.active_by_component[component_index].push(index);
+        let previous = self.slot_by_id.insert(id, index);
+        debug_assert!(previous.is_none(), "observer id registered twice");
         self.active += 1;
         self.clean_revision = None;
+    }
+
+    fn active_candidates(&self, dirty_components: &[ComponentId]) -> Vec<usize> {
+        debug_assert_eq!(self.active_indices.len(), self.active);
+        debug_assert_eq!(
+            self.active_by_component.iter().map(Vec::len).sum::<usize>(),
+            self.active
+        );
+        let mut candidates = self.pending_indices.clone();
+        for component in dirty_components {
+            if let Some(indices) = self.active_by_component.get(component.index() as usize) {
+                candidates.extend_from_slice(indices);
+            }
+        }
+        candidates.sort_unstable();
+        candidates.dedup();
+        candidates
+    }
+
+    fn mark_pending(&mut self, index: usize) {
+        match self.pending_indices.binary_search(&index) {
+            Ok(_) => {}
+            Err(position) => self.pending_indices.insert(position, index),
+        }
+    }
+
+    fn clear_pending(&mut self, index: usize) {
+        if let Ok(position) = self.pending_indices.binary_search(&index) {
+            self.pending_indices.remove(position);
+        }
     }
 
     fn take(&mut self, index: usize) -> Option<ChangeSlot> {
@@ -235,23 +297,39 @@ impl ChangeObservers {
     }
 
     pub(crate) fn remove(&mut self, id: ObserverId) -> bool {
-        for entry in &mut self.slots {
-            if entry.active && entry.id == id {
-                entry.active = false;
-                entry.slot = None;
-                self.active -= 1;
-                self.clean_revision = None;
-                return true;
-            }
-        }
-        false
+        let Some(index) = self.slot_by_id.remove(&id) else {
+            return false;
+        };
+        let entry = self
+            .slots
+            .get_mut(index)
+            .expect("active observer index must name a slot");
+        debug_assert!(entry.active && entry.id == id);
+        let component = entry.component;
+        entry.active = false;
+        entry.slot = None;
+
+        let active_position = self
+            .active_indices
+            .binary_search(&index)
+            .expect("active observer missing from registration-order index");
+        self.active_indices.remove(active_position);
+        let component_indices = &mut self.active_by_component[component.index() as usize];
+        let component_position = component_indices
+            .binary_search(&index)
+            .expect("active observer missing from component index");
+        component_indices.remove(component_position);
+        self.clear_pending(index);
+
+        self.active -= 1;
+        self.clean_revision = None;
+        true
     }
 
     pub(crate) fn component_for(&self, id: ObserverId) -> Option<ComponentId> {
-        self.slots
-            .iter()
-            .find(|entry| entry.active && entry.id == id)
-            .map(|entry| entry.component)
+        let index = *self.slot_by_id.get(&id)?;
+        let entry = self.slots.get(index)?;
+        (entry.active && entry.id == id).then_some(entry.component)
     }
 
     /// Invalidate delivery state after an authoritative storage restore.
@@ -267,13 +345,14 @@ impl ChangeObservers {
         self.restore_cursor = cursor;
         self.clean_revision = None;
         self.idle_baseline = None;
+        self.pending_indices.clear();
         // Restore keeps the snapshot's exact change tick. A write made
         // immediately afterwards is stamped with that same tick, so the
         // delivery window starts one logical tick earlier. The tracker was
         // reset above, so this cannot replay restored values.
         let baseline = Tick::new(tick.get().wrapping_sub(1));
-        for entry in &mut self.slots {
-            if let Some(slot) = entry.slot.as_mut() {
+        for &index in &self.active_indices {
+            if let Some(slot) = self.slots[index].slot.as_mut() {
                 slot.pending.clear();
                 slot.last_run = baseline;
                 slot.cursor = cursor;
@@ -368,14 +447,14 @@ impl World {
             self.flush_reactions();
             return 0;
         }
-        let count = self.change_observers.slot_count();
+        let slot_count = self.change_observers.slot_count();
         let revision = self.change_tracker.revision();
         #[cfg(test)]
         {
             self.change_observers.stats.revision_checks += 1;
         }
         if revision.is_some() && revision == self.change_observers.clean_revision {
-            self.change_observers.idle_baseline = Some((self.change_tick(), count));
+            self.change_observers.idle_baseline = Some((self.change_tick(), slot_count));
             #[cfg(test)]
             {
                 self.change_observers.stats.idle_fast_path = true;
@@ -387,6 +466,12 @@ impl World {
             return 0;
         }
         self.change_observers.clean_revision = None;
+        let dirty_components = self.change_tracker.take_dirty_components();
+        let candidates = self.change_observers.active_candidates(&dirty_components);
+        #[cfg(test)]
+        {
+            self.change_observers.stats.candidate_slots = candidates.len();
+        }
         let idle_baseline = self.change_observers.idle_baseline;
         let world_id = self.id();
         let restore_generation = self.change_observers.restore_generation;
@@ -398,7 +483,7 @@ impl World {
         };
         let this_run = flush.world.change_tick();
         let mut fired = 0;
-        for index in 0..count {
+        for &index in &candidates {
             #[cfg(test)]
             {
                 flush.world.change_observers.stats.slot_visits += 1;
@@ -441,6 +526,9 @@ impl World {
             slot.pending
                 .sort_unstable_by_key(|entity| (entity.index(), entity.generation()));
             slot.pending.dedup();
+            if !slot.pending.is_empty() {
+                guard.world.change_observers.mark_pending(index);
+            }
             slot.last_run = this_run;
         }
         flush.world.change_observers.idle_baseline = None;
@@ -452,7 +540,7 @@ impl World {
         // callback may remove components or write values, but cannot change the
         // already-collected delivery of a later observer in this flush.
         flush.world.increment_change_tick();
-        for index in 0..count {
+        for &index in &candidates {
             #[cfg(test)]
             {
                 flush.world.change_observers.stats.slot_visits += 1;
@@ -476,13 +564,18 @@ impl World {
                 slot.observer.fire(&mut ctx);
                 // Preserve this batch if the callback unwinds, for an explicit
                 // retry. Successful callbacks are never replayed on retry.
-                slot.pending.clear();
+                // A callback may replace or restore the World. In that case
+                // the world no longer refers to the timeline from which this
+                // slot was collected; never clear a pending index in the
+                // replacement registry using the old slot index.
                 fired += 1;
                 if guard.world.id() != world_id
                     || guard.world.change_observers.restore_generation != restore_generation
                 {
                     return fired;
                 }
+                slot.pending.clear();
+                guard.world.change_observers.clear_pending(index);
             }
         }
         // Release the delivery barrier only after every source callback has
