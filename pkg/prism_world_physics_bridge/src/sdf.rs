@@ -6,6 +6,9 @@
 //! source revision. The bridge only publishes fully budgeted snapshots and
 //! keeps the previous snapshot when a candidate is rejected.
 
+extern crate alloc;
+use alloc::sync::Arc;
+
 pub use prism_world_residency::{SdfBounds, SdfQueryResult};
 use prism_world_residency::{SdfQueryConsumer, SparseSdfBrickGrid, SparseSdfQuery};
 
@@ -14,8 +17,10 @@ pub use sampling::SdfDistanceGradient;
 mod rebake;
 pub use rebake::{
     SdfRebakeError, SdfRebakeLimits, SdfRebakePoint, SdfRebakeRegion, SdfRebakeReport,
-    SdfRebakeResource,
+    SdfRebakeResource, SdfRebakeUpdate, SdfRebakeWork,
 };
+#[cfg(feature = "tasks")]
+pub use rebake::{SdfRebakeTask, SdfRebakeTaskError};
 
 /// Logical bytes represented by the fixed SDF snapshot header.
 pub const WORLD_SDF_HEADER_BYTES: usize = 48;
@@ -264,6 +269,7 @@ impl std::error::Error for SdfBridgeError {}
 pub struct SdfPhysicsSnapshot {
     source: WorldSdfSnapshot,
     logical_bytes: usize,
+    publication: Arc<()>,
 }
 
 impl SdfPhysicsSnapshot {
@@ -337,10 +343,25 @@ impl SdfPhysicsSnapshot {
 }
 
 /// Single-snapshot physics bridge with atomic replacement semantics.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct WorldSdfPhysicsBridge {
     budget: SdfPhysicsBridgeBudget,
     current: Option<SdfPhysicsSnapshot>,
+}
+
+impl Clone for WorldSdfPhysicsBridge {
+    fn clone(&self) -> Self {
+        let mut current = self.current.clone();
+        if let Some(snapshot) = &mut current {
+            // A cloned bridge is independently writable. Outstanding work from
+            // its source must never be admitted by this separate publication.
+            snapshot.publication = Arc::new(());
+        }
+        Self {
+            budget: self.budget,
+            current,
+        }
+    }
 }
 
 impl WorldSdfPhysicsBridge {
@@ -405,6 +426,7 @@ impl WorldSdfPhysicsBridge {
         Ok(SdfPhysicsSnapshot {
             source,
             logical_bytes: bytes,
+            publication: Arc::new(()),
         })
     }
 

@@ -48,6 +48,165 @@ fn quantized(point: SdfRebakePoint) -> Result<i16, Infallible> {
     Ok(i16::try_from((x + 2 * y - 3 * z) * (1_i64 << point.brick.mip)).expect("bounded field"))
 }
 
+/// Detached evaluation preserves traversal, costs, and output of the synchronous API.
+#[test]
+fn detached_work_matches_sync_without_holding_the_resident_borrow() {
+    let mut direct = empty(3, 3);
+    let mut detached = direct.clone();
+    let before = detached.current().expect("current").clone();
+    let edit = region([-4, -1, 2], [0, 2, 3], 0);
+    let mut direct_points = Vec::new();
+    let report = direct
+        .rebake_region(edit, 8, LIMITS, |point| {
+            direct_points.push(point);
+            quantized(point)
+        })
+        .expect("sync");
+    let work = detached.prepare_rebake(edit, 8, LIMITS).expect("prepare");
+    assert_eq!(work.report(), report);
+    assert_eq!(detached.current(), Some(&before));
+    let mut detached_points = Vec::new();
+    let update = work
+        .evaluate(|point| {
+            // This immutable borrow could not compile if work retained &mut bridge.
+            assert_eq!(detached.current(), Some(&before));
+            detached_points.push(point);
+            quantized(point)
+        })
+        .expect("evaluate");
+    assert_eq!(detached_points, direct_points);
+    assert_eq!(detached.current(), Some(&before));
+    assert_eq!(detached.commit_rebake(update).expect("commit"), report);
+    assert_eq!(detached.current(), direct.current());
+}
+
+/// Same content/revision does not confer publication identity, including clones.
+#[test]
+fn foreign_and_cloned_bridges_reject_work_without_resident_changes() {
+    let original = empty(2, 2);
+    for mut other in [empty(2, 2), original.clone()] {
+        let before = other.current().expect("current").clone();
+        let update = original
+            .prepare_rebake(region([0; 3], [0; 3], 0), 8, LIMITS)
+            .expect("prepare")
+            .evaluate(quantized)
+            .expect("evaluate");
+        assert_eq!(
+            other.commit_rebake(update),
+            Err(SdfRebakeError::StalePublication)
+        );
+        assert_eq!(other.current(), Some(&before));
+    }
+}
+
+/// Retained identity tokens prevent eviction/reload ABA even at identical revision.
+#[test]
+fn eviction_reload_and_newer_publication_invalidate_old_work() {
+    for reload in [false, true] {
+        let mut bridge = empty(2, 2);
+        let update = bridge
+            .prepare_rebake(region([0; 3], [0; 3], 0), 8, LIMITS)
+            .expect("prepare")
+            .evaluate(quantized)
+            .expect("evaluate");
+        let source = bridge.evict().expect("resident").into_source();
+        if reload {
+            bridge.publish(source).expect("same revision reload");
+        }
+        let before = bridge.current().cloned();
+        let expected = if reload {
+            SdfRebakeError::StalePublication
+        } else {
+            SdfRebakeError::NoSnapshot
+        };
+        assert_eq!(bridge.commit_rebake(update), Err(expected));
+        assert_eq!(bridge.current(), before.as_ref());
+    }
+    let mut bridge = empty(2, 2);
+    let work = bridge
+        .prepare_rebake(region([0; 3], [0; 3], 0), 100, LIMITS)
+        .expect("prepare");
+    bridge
+        .publish(WorldSdfSnapshot::new(
+            WorldSdfTransform::new([7; 3], 2, 3).expect("transform"),
+            8,
+            SparseSdfBrickGrid::new(3, 1).expect("grid"),
+        ))
+        .expect("new shape publication");
+    let before = bridge.current().expect("current").clone();
+    assert_eq!(
+        bridge.commit_rebake(work.evaluate(quantized).expect("evaluate")),
+        Err(SdfRebakeError::StalePublication)
+    );
+    assert_eq!(bridge.current(), Some(&before));
+}
+
+/// Concurrent edits, including disjoint regions, must reprepare after first commit.
+#[test]
+fn first_commit_invalidates_all_other_works_at_that_base() {
+    let mut bridge = empty(2, 2);
+    let early = bridge
+        .prepare_rebake(region([0; 3], [0; 3], 0), 8, LIMITS)
+        .expect("early");
+    let late = bridge
+        .prepare_rebake(region([8; 3], [8; 3], 0), 9, LIMITS)
+        .expect("late");
+    bridge
+        .commit_rebake(early.evaluate(quantized).expect("evaluate"))
+        .expect("first commit");
+    let before = bridge.current().expect("current").clone();
+    assert_eq!(
+        bridge.commit_rebake(late.evaluate(quantized).expect("evaluate")),
+        Err(SdfRebakeError::StalePublication)
+    );
+    assert_eq!(bridge.current(), Some(&before));
+}
+
+/// Failed publication and abandoned/failed evaluation do not revoke valid work.
+#[test]
+fn failed_and_abandoned_work_leave_prepared_publication_valid() {
+    let mut bridge = empty(2, 2);
+    let edit = region([0; 3], [0; 3], 0);
+    let work = bridge.prepare_rebake(edit, 8, LIMITS).expect("work");
+    let before = bridge.current().expect("current").clone();
+    assert!(bridge.publish(before.source().clone()).is_err());
+    drop(
+        bridge
+            .prepare_rebake(edit, 9, LIMITS)
+            .expect("abandoned work"),
+    );
+    drop(
+        bridge
+            .prepare_rebake(edit, 9, LIMITS)
+            .expect("work")
+            .evaluate(quantized)
+            .expect("abandoned update"),
+    );
+    let failed = bridge
+        .prepare_rebake(edit, 9, LIMITS)
+        .expect("work")
+        .evaluate(|_| Err::<i16, _>("source"));
+    assert!(matches!(
+        failed,
+        Err(SdfRebakeError::Source {
+            error: "source",
+            ..
+        })
+    ));
+    let panicked = bridge.prepare_rebake(edit, 9, LIMITS).expect("work");
+    assert!(catch_unwind(AssertUnwindSafe(|| panicked.evaluate(
+        |_| -> Result<i16, Infallible> {
+            panic!("detached source unwind");
+        }
+    )))
+    .is_err());
+    assert_eq!(bridge.current(), Some(&before));
+    bridge
+        .commit_rebake(work.evaluate(quantized).expect("evaluate"))
+        .expect("still valid");
+    assert_eq!(bridge.current().expect("current").revision(), 8);
+}
+
 // Enumerate edited voxels individually, then derive ancestors independently
 // from voxel scale. This intentionally does not use brick rectangle propagation.
 fn expected_keys(edit: SdfRebakeRegion, edge: i64, mips: u8) -> BTreeSet<BrickCoord> {

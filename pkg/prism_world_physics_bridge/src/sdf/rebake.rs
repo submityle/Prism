@@ -1,4 +1,4 @@
-//! Bounded local rebaking into an exclusively borrowed published SDF snapshot.
+//! Bounded local rebaking with detached evaluation and checked publication.
 //!
 //! A voxel edit invalidates its intersecting bricks and their coarser parents.
 //! Staging owns only those replacement samples; the resident map is never
@@ -6,14 +6,19 @@
 
 extern crate alloc;
 
-use alloc::vec::Vec;
-use core::{fmt, mem::size_of};
+use alloc::{sync::Arc, vec::Vec};
+use core::{convert::Infallible, fmt, mem::size_of};
 use prism_world_residency::{BrickCoord, SdfError, SparseSdfBrickGrid};
 
 use super::{
     SdfBridgeError, WorldSdfPhysicsBridge, WorldSdfTransform, WORLD_SDF_BRICK_METADATA_BYTES,
     WORLD_SDF_HEADER_BYTES, WORLD_SDF_SAMPLE_BYTES,
 };
+
+#[cfg(feature = "tasks")]
+mod task;
+#[cfg(feature = "tasks")]
+pub use task::{SdfRebakeTask, SdfRebakeTaskError};
 
 /// Inclusive edited voxel coverage at one mip, with all coarser parents implied.
 ///
@@ -96,6 +101,10 @@ pub struct SdfRebakeReport {
 pub enum SdfRebakeError<E> {
     /// No snapshot has been published.
     NoSnapshot,
+    /// The base publication was replaced, evicted, or belongs to another bridge.
+    StalePublication,
+    /// Cooperative cancellation was observed before publication.
+    Cancelled,
     /// Existing grid invalidations must be resolved by its owner first.
     DirtySnapshot,
     /// An edited minimum exceeds its maximum.
@@ -128,6 +137,8 @@ impl<E: fmt::Display> fmt::Display for SdfRebakeError<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NoSnapshot => f.write_str("world SDF rebake has no published snapshot"),
+            Self::StalePublication => f.write_str("world SDF rebake base publication changed"),
+            Self::Cancelled => f.write_str("world SDF rebake was cancelled"),
             Self::DirtySnapshot => f.write_str("world SDF rebake requires a clean source grid"),
             Self::InvalidRegion => f.write_str("world SDF rebake region is inverted"),
             Self::Bridge(error) => error.fmt(f),
@@ -169,9 +180,131 @@ impl<E> From<SdfBridgeError> for SdfRebakeError<E> {
     }
 }
 
+impl<E> SdfRebakeError<E> {
+    /// Transforms only the evaluator error while preserving admission diagnostics.
+    pub fn map_source<F>(self, map: impl FnOnce(E) -> F) -> SdfRebakeError<F> {
+        match self {
+            Self::NoSnapshot => SdfRebakeError::NoSnapshot,
+            Self::StalePublication => SdfRebakeError::StalePublication,
+            Self::Cancelled => SdfRebakeError::Cancelled,
+            Self::DirtySnapshot => SdfRebakeError::DirtySnapshot,
+            Self::InvalidRegion => SdfRebakeError::InvalidRegion,
+            Self::Bridge(error) => SdfRebakeError::Bridge(error),
+            Self::BudgetExceeded {
+                resource,
+                required,
+                limit,
+            } => SdfRebakeError::BudgetExceeded {
+                resource,
+                required,
+                limit,
+            },
+            Self::AllocationFailed => SdfRebakeError::AllocationFailed,
+            Self::Source {
+                brick,
+                voxel,
+                error,
+            } => SdfRebakeError::Source {
+                brick,
+                voxel,
+                error: map(error),
+            },
+        }
+    }
+}
+
+fn widen<E>(error: SdfRebakeError<Infallible>) -> SdfRebakeError<E> {
+    error.map_source(|never| match never {})
+}
+
+#[derive(Debug)]
 struct Replacement {
     coord: BrickCoord,
     samples: Vec<i16>,
+}
+
+/// Owned, bounded sampling work detached from the resident snapshot.
+///
+/// Created by [`WorldSdfPhysicsBridge::prepare_rebake`]. It holds only affected
+/// replacement buffers and a base identity, and can move to any worker without
+/// borrowing or cloning the resident grid. Each work has its own scratch limit;
+/// callers must bound the number and total bytes of simultaneous works.
+#[derive(Debug)]
+#[must_use]
+pub struct SdfRebakeWork {
+    publication: Arc<()>,
+    transform: WorldSdfTransform,
+    edge: u8,
+    replacements: Vec<Replacement>,
+    report: SdfRebakeReport,
+}
+
+/// Fully evaluated replacements awaiting admission against their exact base.
+///
+/// Dropping an update discards its replacements. Only explicit
+/// [`WorldSdfPhysicsBridge::commit_rebake`] changes the resident snapshot.
+#[derive(Debug)]
+#[must_use]
+pub struct SdfRebakeUpdate {
+    work: SdfRebakeWork,
+}
+
+impl SdfRebakeWork {
+    /// Returns the preflight cost and proposed revision transition.
+    #[must_use]
+    pub const fn report(&self) -> SdfRebakeReport {
+        self.report
+    }
+
+    /// Evaluates the complete affected bricks without touching resident data.
+    ///
+    /// The evaluator must read one coherent composed source revision. All sample
+    /// buffers were allocated by preparation. Errors and unwinding discard work
+    /// without changing the bridge; source side effects are not rolled back.
+    pub fn evaluate<E>(
+        self,
+        sample: impl FnMut(SdfRebakePoint) -> Result<i16, E>,
+    ) -> Result<SdfRebakeUpdate, SdfRebakeError<E>> {
+        self.evaluate_checked(sample, || false)
+    }
+
+    fn evaluate_checked<E>(
+        mut self,
+        mut sample: impl FnMut(SdfRebakePoint) -> Result<i16, E>,
+        cancelled: impl Fn() -> bool,
+    ) -> Result<SdfRebakeUpdate, SdfRebakeError<E>> {
+        let edge = i64::from(self.edge);
+        for replacement in &mut self.replacements {
+            let coord = replacement.coord;
+            let base = [coord.x, coord.y, coord.z].map(|v| i64::from(v) * edge);
+            for z in 0..edge {
+                for y in 0..edge {
+                    for x in 0..edge {
+                        if cancelled() {
+                            return Err(SdfRebakeError::Cancelled);
+                        }
+                        let point = point_at(
+                            self.transform,
+                            coord,
+                            [base[0] + x, base[1] + y, base[2] + z],
+                        )?;
+                        replacement.samples.push(sample(point).map_err(|error| {
+                            SdfRebakeError::Source {
+                                brick: coord,
+                                voxel: point.voxel,
+                                error,
+                            }
+                        })?);
+                    }
+                }
+            }
+        }
+        // Cancellation in the last callback must also suppress a ready update.
+        if cancelled() {
+            return Err(SdfRebakeError::Cancelled);
+        }
+        Ok(SdfRebakeUpdate { work: self })
+    }
 }
 
 impl WorldSdfPhysicsBridge {
@@ -212,9 +345,29 @@ impl WorldSdfPhysicsBridge {
         region: SdfRebakeRegion,
         revision: u64,
         limits: SdfRebakeLimits,
-        mut sample: impl FnMut(SdfRebakePoint) -> Result<i16, E>,
+        sample: impl FnMut(SdfRebakePoint) -> Result<i16, E>,
     ) -> Result<SdfRebakeReport, SdfRebakeError<E>> {
-        let current = self.current.as_mut().ok_or(SdfRebakeError::NoSnapshot)?;
+        let work = self
+            .prepare_rebake(region, revision, limits)
+            .map_err(widen)?;
+        let update = work.evaluate(sample)?;
+        self.commit_rebake(update).map_err(widen)
+    }
+
+    /// Preflights and allocates only the edited bricks while queries stay usable.
+    ///
+    /// No source evaluator runs here. Preparation performs bounded allocation
+    /// and tree lookups on the caller; this is not a zero-allocation frame API.
+    /// The detached work does not reserve the publication: the first successful
+    /// replacement invalidates every other work prepared against the old base.
+    /// A rejected publish leaves outstanding work valid. See [`SdfRebakeWork`].
+    pub fn prepare_rebake(
+        &self,
+        region: SdfRebakeRegion,
+        revision: u64,
+        limits: SdfRebakeLimits,
+    ) -> Result<SdfRebakeWork, SdfRebakeError<Infallible>> {
+        let current = self.current.as_ref().ok_or(SdfRebakeError::NoSnapshot)?;
         if revision <= current.revision() {
             return Err(SdfBridgeError::StaleRevision {
                 current: current.revision(),
@@ -338,50 +491,55 @@ impl WorldSdfPhysicsBridge {
                 .try_reserve_exact(grid.sample_count())
                 .map_err(|_| SdfRebakeError::AllocationFailed)?;
             replacements.push(Replacement { coord, samples });
-            Ok::<_, SdfRebakeError<E>>(())
+            Ok::<_, SdfRebakeError<Infallible>>(())
         })?;
-        let edge = i64::from(grid.brick_size());
-        for replacement in &mut replacements {
-            let coord = replacement.coord;
-            let base = [coord.x, coord.y, coord.z].map(|v| i64::from(v) * edge);
-            for z in 0..edge {
-                for y in 0..edge {
-                    for x in 0..edge {
-                        let point =
-                            point_at(transform, coord, [base[0] + x, base[1] + y, base[2] + z])?;
-                        replacement.samples.push(sample(point).map_err(|error| {
-                            SdfRebakeError::Source {
-                                brick: coord,
-                                voxel: point.voxel,
-                                error,
-                            }
-                        })?);
-                    }
-                }
-            }
-        }
+        Ok(SdfRebakeWork {
+            publication: Arc::clone(&current.publication),
+            transform,
+            edge: grid.brick_size(),
+            replacements,
+            report: SdfRebakeReport {
+                previous_revision: current.revision(),
+                revision,
+                rebaked_bricks: bricks,
+                sampled_voxels: samples,
+                inserted_bricks,
+                scratch_bytes,
+                logical_bytes,
+            },
+        })
+    }
 
-        let previous_revision = current.revision();
-        // All keys and exact volumes were constructed against this exclusively
-        // borrowed grid. insert_brick's validation cannot reject any staged item.
-        for replacement in replacements {
+    /// Publishes evaluated work only if its exact base publication is current.
+    ///
+    /// All identity and revision checks precede resident writes. Eviction and
+    /// reload at the same revision, another bridge (including a clone), and
+    /// intervening successful edits all reject this update without any writes.
+    /// The first commit wins; disjoint updates are not automatically merged.
+    /// Map insertion can still abort on allocator OOM, as with synchronous rebake.
+    pub fn commit_rebake(
+        &mut self,
+        update: SdfRebakeUpdate,
+    ) -> Result<SdfRebakeReport, SdfRebakeError<Infallible>> {
+        let current = self.current.as_mut().ok_or(SdfRebakeError::NoSnapshot)?;
+        let work = update.work;
+        if !Arc::ptr_eq(&current.publication, &work.publication)
+            || current.revision() != work.report.previous_revision
+        {
+            return Err(SdfRebakeError::StalePublication);
+        }
+        // Matching publication+revision implies the same immutable shape, keys
+        // and budgets used for preflight. No staged insertion can fail validation.
+        for replacement in work.replacements {
             current
                 .source
                 .grid
                 .insert_brick(replacement.coord, replacement.samples)
                 .map_err(SdfBridgeError::GridQuery)?;
         }
-        current.source.revision = revision;
-        current.logical_bytes = logical_bytes;
-        Ok(SdfRebakeReport {
-            previous_revision,
-            revision,
-            rebaked_bricks: bricks,
-            sampled_voxels: samples,
-            inserted_bricks,
-            scratch_bytes,
-            logical_bytes,
-        })
+        current.source.revision = work.report.revision;
+        current.logical_bytes = work.report.logical_bytes;
+        Ok(work.report)
     }
 }
 

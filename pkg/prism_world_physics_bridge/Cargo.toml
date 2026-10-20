@@ -6,7 +6,12 @@ description = "Validated world-terrain snapshot adapter for Prism physics height
 license = "MIT OR Apache-2.0"
 publish = false
 
+[features]
+default = []
+tasks = ["dep:prism_tasks"]
+
 [dependencies]
+prism_tasks = { path = "../prism_tasks", optional = true }
 prism_physics_gpu = { path = "../prism_physics_gpu" }
 prism_world_residency = { path = "../prism_world_residency" }
 prism_world_terrain = { path = "../prism_world_terrain" }
@@ -28,7 +33,18 @@ harness = false
 name = "sdf_rebake"
 path = "text/unit/sdf_rebake.rs"
 
+[[test]]
+name = "sdf_rebake_task"
+path = "text/integration/sdf_rebake_task.rs"
+required-features = ["tasks"]
+
 [[bench]]
 name = "sdf_rebake"
 path = "text/integration/sdf_rebake_bench.rs"
 harness = false
+
+[[bench]]
+name = "sdf_rebake_task"
+path = "text/integration/sdf_rebake_task_bench.rs"
+harness = false
+required-features = ["tasks"]

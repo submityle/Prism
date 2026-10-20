@@ -79,13 +79,13 @@ Record 的 0/4/8 偏移分别为 i32 X/Y/Z，12 为 u8 mip，13–15 必须为�
 
 设受影响总 brick 数为 K、总样本数为 S、驻留 brick 数为 B、mip 数为 M：预检为 `O(M + K log B)`，重烘/提交为 `O(S + K log(B + K))`；scratch 为 `K × size_of::<Replacement>() + 2S` 逻辑字节，尺寸随目标 ABI 而定。它不包含驻留数据、树节点、allocator 元数据或 source 自有内存；不是 RSS/VRAM 上限。每个受影响 brick 都完整重新求值，尚未做 brick 内稀疏样本编辑或已知空场压缩。
 
-重烘成功后可从 `evict()` 的 `Some` 结果取得 snapshot，再调用 `into_source()` 转移所有权至 `SdfCellSnapshot`，无需复制样本，再交给 PSDC codec 和既有 cell host 的聚合预算/宿主提交。真实文件集成测试覆盖本地求值失败后重试、编码、archive offset/分块读取、下游拒绝后旧查询与 usage 保留，以及成功重载后的新梯度/距离。该同步 worker API 本身不调度任务、不更新 cell host 内部聚合统计，也不执行 GPU 上传；相机 clipmap 滚动、对象自动脏传播和多消费者作业调度仍需独立运行时接线。
+重烘成功后可从 `evict()` 的 `Some` 结果取得 snapshot，再调用 `into_source()` 转移所有权至 `SdfCellSnapshot`，无需复制样本，再交给 PSDC codec 和既有 cell host 的聚合预算/宿主提交。真实文件集成测试覆盖本地求值失败后重试、编码、archive offset/分块读取、下游拒绝后旧查询与 usage 保留，以及成功重载后的新梯度/距离。同步 `rebake_region` 不调度任务；下节可选 `tasks` adapter 提供 worker 求值与显式 owner 提交，两者均不更新 cell host 内部聚合统计或执行 GPU 上传。相机 clipmap 滚动、对象自动脏传播和多消费者作业调度仍需独立运行时接线。
 
 ### 局部重烘多维质量评估
 
 | 维度 | 当前实现与取舍 |
 |---|---|
-| 性能 | 成本随受影响 brick/sample 增长，无全 grid clone/扫描；worker 阶段有受预算限制的分配，查询仍保持零分配 |
+| 性能 | 成本随受影响 brick/sample 增长，无全 grid clone/扫描；prepare 阶段有受预算限制的分配，查询仍保持零分配 |
 | 效果 | 父 mip 重新采样完整场，精确整数位置与固定物理单位；不推断未提供的几何影响范围或滤波策略 |
 | 易用性 | 单个闭包与报告，错误保留失败 brick/voxel 和 source error；rustdoc 示例可执行 |
 | 易维护性 | 独立 rebake 模块，复用原稀疏 grid 和 physics 快照，不修改 residency/terrain/solver |
@@ -93,6 +93,33 @@ Record 的 0/4/8 偏移分别为 i32 X/Y/Z，12 为 u8 mip，13–15 必须为�
 | 易迭代性 | 增量公开 API，原 publish/query/codec 格式保持兼容，源快照可零样本复制转移 |
 | 健壮性 | 独立 voxel/parent oracle、每个采样序号失败注入、panic、精确预算与溢出检查；未做 allocator OOM 注入 |
 | 安全 | 无 unsafe，独占借用保证提交期间无并发读写，失败不破坏已发布数据；外部求值副作用由调用者负责 |
+
+## 分离式重烘与共享任务池（设计 §17.3，SHIPPED）
+
+同步入口现复用三个阶段：`prepare_rebake(&self, ...)` 完成全部预检和目标样本缓冲分配，返回拥有数据的 `SdfRebakeWork`；`work.evaluate(...)` 在不借用 resident grid 的情况下求值，返回 `SdfRebakeUpdate`；`commit_rebake(&mut self, update)` 检查原发布身份和精确 base revision，成功后才写入。准备和求值期间旧快照可继续查询，不复制或扫描整张 grid。未提交的 work/update 直接丢弃即可；求值错误、unwind 和被拒绝的发布不使其他已准备工作失效。
+
+每次完整加载/重载分配私有 `Arc<()>` 发布身份；work 保留强引用，防止驱逐后同 revision 重载的 ABA。独立 bridge（包括 clone）不能接收源 bridge 的 update。成功局部重烘通过严格递增 revision 使该 base 上所有其他 update 过期，即使编辑区不相交也采用首个提交成功、其余拒绝的语义，不自动合并。身份和 revision 检查均在首个 resident 写入之前；失效返回 `StalePublication`，当前没有快照时返回 `NoSnapshot`。
+
+可选 `tasks` feature 增加 `work.spawn(&TaskPool, &CancelToken, source)`：复用现有 `prism_tasks::TaskPool::spawn_catch`，不另建线程池。闭包须拥有同版本合成场且满足 `Send + 'static`。`SdfRebakeTask<'pool, E>` 实际借用 pool，编译器禁止 pool owner 先于句柄销毁，避免句柄析构触发最后一个 pool 引用的 shutdown/join。worker 数为零或启用 `prism_tasks/single` 时，求值在 spawn 返回前同步完成；该模式不能声称后台执行。
+
+`try_commit` 对尚未完成的任务立即返回 `Ok(None)`，不 help-run 队列。完成后仅收集一次结果并在 owner 独占 bridge 时提交；重复收集返回 `AlreadyCollected`。完成结果使用既有 result-slot mutex，提交还有树查找、替换/节点分配及旧样本释放，不承诺无锁或零分配。求值错误保留完整 brick/voxel/source error；unwind 被捕获为原 panic payload，pool 可继续使用。
+
+每个 task 使用 scope 的独立 child token，单独取消不影响 sibling；父 scope 取消会传播。取消在每次 source 回调之前、最终回调之后及 owner 提交之前检查，因此计算已完成但尚未提交的结果仍可取消。正在执行的回调不能被抢占；最后提交检查之后的并发取消不撤销已开始的提交。丢弃未收集句柄只请求取消、不等待、不发布；pool 的最终 shutdown 由其 owner 管理。
+
+工作 scratch 限额仍为单个 work 的 descriptor 加样本缓冲，不限制同时准备/排队的任务总数或总字节；token/header、allocator/树节点、source 自有数据和 pool 队列均不在该逻辑预算内。调用者必须额外限制 in-flight 总量，并在 frame 热路径之外安排 prepare/spawn。该基础接口没有实现相机/对象调度器、cell host 的异步状态机、跨消费者预算或 GPU 上传。
+
+### 分离式重烘多维质量评估
+
+| 维度 | 当前实现与取舍 |
+|---|---|
+| 性能 | 样本求值可在共享 worker 执行，pending poll 不执行作业；准备分配和 owner 提交仍有有界但非零成本 |
+| 效果 | 同步/分离/任务路径逐样本一致；后台结果仅在正确发布和 base revision 上可见 |
+| 易用性 | 显式 prepare/evaluate/commit 与可选 spawn/try_commit，旧查询持续可用；无 worker 时行为明确 |
+| 易维护性 | 独立 task adapter，无额外线程池、不改 cell/solver/renderer，测试隔离在 text |
+| 易拓展性 | source 与外部 pool/cancel scope 注入；总任务预算、重试与合并由未来运行时 owner 统一管理 |
+| 易迭代性 | 原同步 API 与 codec 不变，默认构建不引入 tasks，新增接口可独立采用 |
+| 健壮性 | ABA/foreign/clone/intervening edit 拒绝，取消边界、panic、单次收集及 pool 生命周期有回归 |
+| 安全 | 无 unsafe；类型限制 pool 生命周期，私有 update 防伪造，提交独占；OOM 与回调副作用边界保持明确 |
 
 ## 验证边界
 
@@ -103,11 +130,15 @@ cargo test -p prism_world_physics_bridge --lib --offline
 cargo test -p prism_world_physics_cell_runtime --lib --offline
 cargo test -p prism_world_physics_bridge --test sdf_sampling --offline
 cargo test -p prism_world_physics_bridge --test sdf_rebake --offline
+cargo test -p prism_world_physics_bridge --features tasks --test sdf_rebake_task --offline
+cargo test -p prism_world_physics_bridge --features tasks,prism_tasks/single --lib --test sdf_rebake --test sdf_sampling --test sdf_rebake_task --offline
 cargo test -p prism_world_physics_bridge --doc --offline
+cargo test -p prism_world_physics_bridge --features tasks --doc --offline
 cargo test -p prism_world_physics_cell_runtime --test sdf_sampling_lifecycle --offline
 cargo test -p prism_world_physics_cell_runtime --test sdf_cell_codec --test sdf_cell_file_runtime --offline
 cargo bench -p prism_world_physics_bridge --bench sdf_sampling --offline
 cargo bench -p prism_world_physics_bridge --bench sdf_rebake --offline
+cargo bench -p prism_world_physics_bridge --features tasks --bench sdf_rebake_task --offline
 cargo bench -p prism_world_physics_cell_runtime --bench sdf_cell_codec --offline
 ```
 
@@ -160,3 +191,21 @@ Apple M2、`aarch64-apple-darwin`、rustc 1.96.1、默认优化 bench profile、
 | 4096 | 完整 X 行及父级 | 7168 / 3670016 | 7626752 / 7454768 | 75524291 / 79003667 / 80703875 |
 
 本负载下固定局部编辑的 P50 均约 31.2 µs；大范围重烘随求值数量增长，最大案例约 75.5 ms，不能放入实时帧热路径。结果包含刻意便宜的量化场回调，不代表真实几何求值、job 调度、GPU、RSS/VRAM、多硬件或产品帧时。实现依赖树查找仍有对数驻留规模项，不能从这三个测量点声称严格 O(1)。
+
+### 2026-10-21 分离式重烘验证与任务基准
+
+独立 target `/private/tmp/prism-world-sdf-task-20261021.h5UGnl`，offline、单编译任务、dev/test debug=0、incremental=0：`cargo test -j1 -p prism_world_physics_bridge -p prism_world_physics_cell_runtime --features prism_world_physics_bridge/tasks --lib --tests --offline` 共 85 项通过（bridge lib 11、重烘 18、task 9、连续采样 10、cell lib 22、codec 11、文件集成 3、生命周期 1），0 失败、0 忽略。真实 worker 测试核对 thread identity 和 worker index，并以 channel gate 阻塞 source，同时验证旧查询、pending poll、drop 不等待；另以无关作业占住同池唯一 worker，验证已完成结果可独立收集。过期结果、取消边界、panic 后 pool 复用均有回归。
+
+默认关闭 tasks 的 `--no-default-features --lib --tests` 共 39 项通过。`--features tasks,prism_tasks/single --lib --test sdf_rebake --test sdf_sampling --test sdf_rebake_task` 共 48 项通过；其中 3 个仅适用于真实 worker 的 channel gate 测试在断言 inline 模式后直接返回，不能把这一配置作为后台执行证据。`--features tasks` doctest 共 3 项通过，含 2 项可执行示例和 1 项禁止 pool 提前销毁的 compile-fail 示例；同 feature 的 `cargo rustdoc --lib -- -D warnings` 通过。生产 adapter 只复用调用者的 pool，测试提供可控的本地 pool；本片未修改 cell、solver 或其他并行模块。
+
+最终严格 `cargo clippy -j1 -p prism_world_physics_bridge --all-targets --features tasks --no-deps --offline -- -D warnings` 仍在库阶段被上述 4 处既有告警阻断。包含最终第 9 项任务测试的定向诊断命令 `cargo clippy -j1 -p prism_world_physics_bridge --lib --test sdf_rebake --test sdf_rebake_task --bench sdf_rebake --bench sdf_rebake_task --features tasks --no-deps --offline -- -D warnings -A clippy::collapsible_if -A clippy::std_instead_of_alloc` 通过；这是命令行排除既有 lint 类后的诊断，不是严格门禁通过，源码没有增加 allow，也未修改其他 agent 的文件。
+
+Apple M2、`aarch64-apple-darwin`、rustc 1.96.1、默认优化 bench profile、bench debug=0、incremental=0；共享 pool 配置 1 个真实 worker。每例 8 次预热、128 次测量，每次停止计时后逐值比较完整 grid 与同步路径 oracle，并检查工作量和 inserted=0；nearest-rank 分位数。初始 grid、pool 与 oracle 构造、结果校验及最终快照销毁均不计时。prepare 包括全部预检/目标缓冲分配；spawn_to_finished 包括 spawn 分配、排队、取消检查、完整求值以及 owner yield-poll 的观测成本；commit 包括结果收集、身份检查、写入和旧样本释放。任务句柄自身的最终销毁在 commit 计时外。
+
+| 起始 mip0 驻留 brick / 编辑 | 重烘 brick / 样本 / scratch 字节 | Prepare P50 / P95 / P99（ns） | Spawn-to-finished P50 / P95 / P99（ns） | Commit P50 / P95 / P99（ns） |
+|---|---|---|---|---|
+| 64 / 单格及父级 | 3 / 1536 / 3192 | 250 / 1000 / 2000 | 45959 / 93875 / 113792 | 1375 / 8834 / 9292 |
+| 32768 / 单格及父级 | 3 / 1536 / 3192 | 1708 / 3875 / 5500 | 102167 / 175292 / 184792 | 1833 / 22584 / 24292 |
+| 4096 / 完整 X 行及父级 | 7168 / 3670016 / 7626752 | 558750 / 1348000 / 2123958 | 99136458 / 164211583 / 201487750 | 581834 / 1027083 / 1470500 |
+
+完整行案例 worker 观测 P50 约 99.1 ms、P99 约 201.5 ms，而 owner prepare/commit 各自 P99 仍约 2.124/1.471 ms，说明求值离开 owner 不等于已满足产品帧预算。调度与取消检查有额外开销；此前同步基准和本轮负载均受并行任务影响，不能据此推导加速比或驻留规模无关性。本基准是 CPU 主机阶段墙钟，使用刻意便宜的量化 source，不含真实几何、文件 IO、GPU、RSS/VRAM 或产品多消费者总预算。
