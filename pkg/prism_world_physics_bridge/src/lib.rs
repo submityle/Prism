@@ -10,7 +10,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
-use std::fmt;
+use std::{fmt, vec::Vec};
 
 use prism_physics_gpu::Heightfield;
 use prism_world_terrain::{HeightfieldTile, PlanarHeightfieldEmbedding, TileKey};
@@ -51,6 +51,36 @@ impl HeightfieldBridgeBudget {
             });
         }
         Ok(Self {
+            max_samples,
+            max_upload_bytes,
+        })
+    }
+}
+
+/// Aggregate limits for a resident collection of derived heightfields.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HeightfieldResidencyBudget {
+    /// Maximum number of simultaneously resident tiles.
+    pub max_tiles: usize,
+    /// Maximum sum of samples across resident tiles.
+    pub max_samples: usize,
+    /// Maximum sum of logical upload bytes across resident tiles.
+    pub max_upload_bytes: usize,
+}
+
+impl HeightfieldResidencyBudget {
+    /// Creates aggregate limits with checked, nonzero capacities.
+    pub const fn new(
+        max_tiles: usize,
+        max_samples: usize,
+        max_upload_bytes: usize,
+    ) -> Result<Self, HeightfieldBridgeError> {
+        if max_tiles == 0 || max_samples == 0 || max_upload_bytes < PHYSICS_HEIGHTFIELD_HEADER_BYTES
+        {
+            return Err(HeightfieldBridgeError::InvalidBudget);
+        }
+        Ok(Self {
+            max_tiles,
             max_samples,
             max_upload_bytes,
         })
@@ -147,6 +177,27 @@ pub enum HeightfieldBridgeError {
     },
     /// The host allocation for the derived sample vector failed.
     AllocationFailed,
+    /// The resident tile count would exceed the aggregate limit.
+    ResidentTileCapacityExceeded {
+        /// Number of resident tiles after the attempted publish.
+        required: usize,
+        /// Configured resident tile capacity.
+        capacity: usize,
+    },
+    /// The resident sample sum would exceed the aggregate limit.
+    ResidentSampleBudgetExceeded {
+        /// Sample sum after the attempted publish.
+        required: usize,
+        /// Configured resident sample limit.
+        limit: usize,
+    },
+    /// The resident upload-byte sum would exceed the aggregate limit.
+    ResidentUploadBudgetExceeded {
+        /// Upload-byte sum after the attempted publish.
+        required: usize,
+        /// Configured resident upload-byte limit.
+        limit: usize,
+    },
 }
 
 impl fmt::Display for HeightfieldBridgeError {
@@ -186,6 +237,24 @@ impl fmt::Display for HeightfieldBridgeError {
                 )
             }
             Self::AllocationFailed => f.write_str("heightfield bridge allocation failed"),
+            Self::ResidentTileCapacityExceeded { required, capacity } => {
+                write!(
+                    f,
+                    "resident heightfield tiles need {required}, capacity {capacity}"
+                )
+            }
+            Self::ResidentSampleBudgetExceeded { required, limit } => {
+                write!(
+                    f,
+                    "resident heightfield samples need {required}, limit {limit}"
+                )
+            }
+            Self::ResidentUploadBudgetExceeded { required, limit } => {
+                write!(
+                    f,
+                    "resident heightfield upload needs {required} bytes, limit {limit}"
+                )
+            }
         }
     }
 }
@@ -250,11 +319,204 @@ impl WorldHeightfieldPhysicsBridge {
     }
 }
 
+/// Owns a deterministically ordered, bounded set of derived heightfields.
+///
+/// The vector is kept sorted by [`TileKey`] so physics consumers can derive
+/// stable heightfield indices without a hash-map iteration order. Replacing a
+/// tile never changes the number of resident entries; publishing a new tile
+/// checks all aggregate budgets before mutating the set.
+#[derive(Clone, Debug)]
+pub struct WorldHeightfieldPhysicsResidency {
+    per_tile_budget: HeightfieldBridgeBudget,
+    budget: HeightfieldResidencyBudget,
+    snapshots: Vec<PhysicsHeightfieldSnapshot>,
+    resident_samples: usize,
+    resident_upload_bytes: usize,
+}
+
+impl WorldHeightfieldPhysicsResidency {
+    /// Creates an empty residency set with per-tile and aggregate limits.
+    #[must_use]
+    pub const fn new(
+        per_tile_budget: HeightfieldBridgeBudget,
+        budget: HeightfieldResidencyBudget,
+    ) -> Self {
+        Self {
+            per_tile_budget,
+            budget,
+            snapshots: Vec::new(),
+            resident_samples: 0,
+            resident_upload_bytes: 0,
+        }
+    }
+
+    /// Returns the per-tile conversion budget.
+    #[must_use]
+    pub fn per_tile_budget(&self) -> HeightfieldBridgeBudget {
+        self.per_tile_budget
+    }
+
+    /// Returns the aggregate residency budget.
+    #[must_use]
+    pub fn budget(&self) -> HeightfieldResidencyBudget {
+        self.budget
+    }
+
+    /// Returns resident snapshots in stable [`TileKey`] order.
+    #[must_use]
+    pub fn snapshots(&self) -> &[PhysicsHeightfieldSnapshot] {
+        &self.snapshots
+    }
+
+    /// Returns the derived snapshot for one tile, if resident.
+    #[must_use]
+    pub fn snapshot(&self, tile: TileKey) -> Option<&PhysicsHeightfieldSnapshot> {
+        self.snapshots
+            .binary_search_by_key(&tile, PhysicsHeightfieldSnapshot::tile)
+            .ok()
+            .map(|index| &self.snapshots[index])
+    }
+
+    /// Returns the aggregate sample count currently resident.
+    #[must_use]
+    pub const fn resident_samples(&self) -> usize {
+        self.resident_samples
+    }
+
+    /// Returns the aggregate logical upload bytes currently resident.
+    #[must_use]
+    pub const fn resident_upload_bytes(&self) -> usize {
+        self.resident_upload_bytes
+    }
+
+    /// Publishes or replaces one tile after complete preflight.
+    pub fn publish(
+        &mut self,
+        tile: &HeightfieldTile,
+        embedding: PlanarHeightfieldEmbedding,
+    ) -> Result<&PhysicsHeightfieldSnapshot, HeightfieldBridgeError> {
+        let plan = conversion_plan(tile, embedding, self.per_tile_budget())?;
+        let tile_key = tile.tile();
+        let position = self
+            .snapshots
+            .binary_search_by_key(&tile_key, PhysicsHeightfieldSnapshot::tile);
+        let (insert_index, old_revision, old_samples, old_upload_bytes) = match position {
+            Ok(index) => {
+                let current = &self.snapshots[index];
+                (
+                    index,
+                    Some(current.revision()),
+                    Some(
+                        current.heightfield().rows() as usize
+                            * current.heightfield().cols() as usize,
+                    ),
+                    Some(current.upload_bytes()),
+                )
+            }
+            Err(index) => (index, None, None, None),
+        };
+        if let Some(current_revision) = old_revision {
+            if tile.revision() <= current_revision {
+                return Err(HeightfieldBridgeError::StaleRevision {
+                    current: current_revision,
+                    incoming: tile.revision(),
+                });
+            }
+        }
+
+        let old_samples = old_samples.unwrap_or(0);
+        let old_upload_bytes = old_upload_bytes.unwrap_or(0);
+        let resident_samples = self
+            .resident_samples
+            .checked_sub(old_samples)
+            .and_then(|value| value.checked_add(plan.sample_count))
+            .ok_or(HeightfieldBridgeError::ArithmeticOverflow)?;
+        let resident_upload_bytes = self
+            .resident_upload_bytes
+            .checked_sub(old_upload_bytes)
+            .and_then(|value| value.checked_add(plan.upload_bytes))
+            .ok_or(HeightfieldBridgeError::ArithmeticOverflow)?;
+        let budget = self.budget();
+        if old_revision.is_none() {
+            let required = self
+                .snapshots
+                .len()
+                .checked_add(1)
+                .ok_or(HeightfieldBridgeError::ArithmeticOverflow)?;
+            if required > budget.max_tiles {
+                return Err(HeightfieldBridgeError::ResidentTileCapacityExceeded {
+                    required,
+                    capacity: budget.max_tiles,
+                });
+            }
+        }
+        if resident_samples > budget.max_samples {
+            return Err(HeightfieldBridgeError::ResidentSampleBudgetExceeded {
+                required: resident_samples,
+                limit: budget.max_samples,
+            });
+        }
+        if resident_upload_bytes > budget.max_upload_bytes {
+            return Err(HeightfieldBridgeError::ResidentUploadBudgetExceeded {
+                required: resident_upload_bytes,
+                limit: budget.max_upload_bytes,
+            });
+        }
+        let next = convert_planned(tile, embedding, plan)?;
+        if old_revision.is_none() {
+            self.snapshots
+                .try_reserve(1)
+                .map_err(|_| HeightfieldBridgeError::AllocationFailed)?;
+        }
+
+        if old_revision.is_some() {
+            self.snapshots[insert_index] = next;
+            self.resident_samples = resident_samples;
+            self.resident_upload_bytes = resident_upload_bytes;
+            Ok(&self.snapshots[insert_index])
+        } else {
+            self.snapshots.insert(insert_index, next);
+            self.resident_samples = resident_samples;
+            self.resident_upload_bytes = resident_upload_bytes;
+            Ok(&self.snapshots[insert_index])
+        }
+    }
+
+    /// Evicts one tile and releases only its derived physics state.
+    pub fn evict(&mut self, tile: TileKey) -> Option<PhysicsHeightfieldSnapshot> {
+        let index = self
+            .snapshots
+            .binary_search_by_key(&tile, PhysicsHeightfieldSnapshot::tile)
+            .ok()?;
+        let snapshot = self.snapshots.remove(index);
+        self.resident_samples -=
+            snapshot.heightfield().rows() as usize * snapshot.heightfield().cols() as usize;
+        self.resident_upload_bytes -= snapshot.upload_bytes();
+        Some(snapshot)
+    }
+}
+
 fn convert(
     tile: &HeightfieldTile,
     embedding: PlanarHeightfieldEmbedding,
     budget: HeightfieldBridgeBudget,
 ) -> Result<PhysicsHeightfieldSnapshot, HeightfieldBridgeError> {
+    let plan = conversion_plan(tile, embedding, budget)?;
+    convert_planned(tile, embedding, plan)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ConversionPlan {
+    side: usize,
+    sample_count: usize,
+    upload_bytes: usize,
+}
+
+fn conversion_plan(
+    tile: &HeightfieldTile,
+    embedding: PlanarHeightfieldEmbedding,
+    budget: HeightfieldBridgeBudget,
+) -> Result<ConversionPlan, HeightfieldBridgeError> {
     if embedding.sample_spacing_mm == 0 {
         return Err(HeightfieldBridgeError::InvalidSpacing);
     }
@@ -288,6 +550,18 @@ fn convert(
         });
     }
 
+    Ok(ConversionPlan {
+        side,
+        sample_count: expected,
+        upload_bytes,
+    })
+}
+
+fn convert_planned(
+    tile: &HeightfieldTile,
+    embedding: PlanarHeightfieldEmbedding,
+    plan: ConversionPlan,
+) -> Result<PhysicsHeightfieldSnapshot, HeightfieldBridgeError> {
     let metres = |millimetres: i128| {
         let value = millimetres as f64 * 0.001;
         let value = value as f32;
@@ -305,7 +579,7 @@ fn convert(
     let scale = i128::from(tile.spec().height_scale_mm());
     let mut heights = Vec::new();
     heights
-        .try_reserve_exact(expected)
+        .try_reserve_exact(plan.sample_count)
         .map_err(|_| HeightfieldBridgeError::AllocationFailed)?;
     for &sample in tile.samples() {
         heights.push(metres(i128::from(sample) * scale)?);
@@ -315,13 +589,13 @@ fn convert(
         revision: tile.revision(),
         embedding,
         heightfield: Heightfield::new(
-            u32::try_from(side).map_err(|_| HeightfieldBridgeError::ArithmeticOverflow)?,
-            u32::try_from(side).map_err(|_| HeightfieldBridgeError::ArithmeticOverflow)?,
+            u32::try_from(plan.side).map_err(|_| HeightfieldBridgeError::ArithmeticOverflow)?,
+            u32::try_from(plan.side).map_err(|_| HeightfieldBridgeError::ArithmeticOverflow)?,
             cell_size,
             glam::Vec3::from_array(origin),
             heights,
         ),
-        upload_bytes,
+        upload_bytes: plan.upload_bytes,
     })
 }
 
@@ -350,9 +624,9 @@ mod tests {
         }
     }
 
-    fn tile(revision: u64) -> HeightfieldTile {
+    fn tile_at(tile_key: TileKey, revision: u64) -> HeightfieldTile {
         let mut tile = HeightfieldTile::bake(
-            TileKey::root(CubeFace::PositiveY),
+            tile_key,
             HeightfieldSpec::new(3, 1).unwrap(),
             &RampSampler,
             BakeLimits {
@@ -374,6 +648,10 @@ mod tests {
             .unwrap();
         }
         tile
+    }
+
+    fn tile(revision: u64) -> HeightfieldTile {
+        tile_at(TileKey::root(CubeFace::PositiveY), revision)
     }
 
     fn embedding() -> PlanarHeightfieldEmbedding {
@@ -448,5 +726,103 @@ mod tests {
         bridge.publish(&tile(0), embedding()).unwrap();
         assert!(bridge.evict().is_some());
         assert!(bridge.current().is_none());
+    }
+
+    #[test]
+    fn residency_is_sorted_bounded_and_revision_aware() {
+        let per_tile = HeightfieldBridgeBudget::new(9, 68).unwrap();
+        let residency_budget = HeightfieldResidencyBudget::new(2, 18, 136).unwrap();
+        let mut residency = WorldHeightfieldPhysicsResidency::new(per_tile, residency_budget);
+        let positive_y = TileKey::root(CubeFace::PositiveY);
+        let negative_y = TileKey::root(CubeFace::NegativeY);
+
+        residency
+            .publish(&tile_at(positive_y, 0), embedding())
+            .unwrap();
+        residency
+            .publish(&tile_at(negative_y, 0), embedding())
+            .unwrap();
+
+        assert_eq!(residency.snapshots().len(), 2);
+        assert!(residency.snapshots()[0].tile() < residency.snapshots()[1].tile());
+        assert_eq!(residency.resident_samples(), 18);
+        assert_eq!(residency.resident_upload_bytes(), 136);
+        assert!(matches!(
+            residency.publish(&tile_at(positive_y, 0), embedding()),
+            Err(HeightfieldBridgeError::StaleRevision { .. })
+        ));
+
+        let evicted = residency.evict(negative_y).unwrap();
+        assert_eq!(evicted.tile(), negative_y);
+        assert_eq!(residency.snapshots().len(), 1);
+        assert_eq!(residency.resident_samples(), 9);
+        assert_eq!(residency.resident_upload_bytes(), 68);
+    }
+
+    #[test]
+    fn residency_rejects_aggregate_capacity_without_mutation() {
+        let per_tile = HeightfieldBridgeBudget::new(9, 68).unwrap();
+        let residency_budget = HeightfieldResidencyBudget::new(1, 9, 68).unwrap();
+        let mut residency = WorldHeightfieldPhysicsResidency::new(per_tile, residency_budget);
+        let first = TileKey::root(CubeFace::PositiveY);
+        let second = TileKey::root(CubeFace::NegativeY);
+        residency.publish(&tile_at(first, 0), embedding()).unwrap();
+
+        let error = residency
+            .publish(&tile_at(second, 0), embedding())
+            .unwrap_err();
+        assert_eq!(
+            error,
+            HeightfieldBridgeError::ResidentTileCapacityExceeded {
+                required: 2,
+                capacity: 1,
+            }
+        );
+        assert_eq!(residency.snapshots().len(), 1);
+        assert!(residency.snapshot(first).is_some());
+        assert!(residency.snapshot(second).is_none());
+    }
+
+    #[test]
+    fn residency_rejects_sample_and_upload_aggregate_limits_before_publish() {
+        let per_tile = HeightfieldBridgeBudget::new(9, 68).unwrap();
+        let first = TileKey::root(CubeFace::PositiveY);
+        let second = TileKey::root(CubeFace::NegativeY);
+
+        let mut sample_limited = WorldHeightfieldPhysicsResidency::new(
+            per_tile,
+            HeightfieldResidencyBudget::new(2, 9, 136).unwrap(),
+        );
+        sample_limited
+            .publish(&tile_at(first, 0), embedding())
+            .unwrap();
+        assert_eq!(
+            sample_limited
+                .publish(&tile_at(second, 0), embedding())
+                .unwrap_err(),
+            HeightfieldBridgeError::ResidentSampleBudgetExceeded {
+                required: 18,
+                limit: 9,
+            }
+        );
+        assert_eq!(sample_limited.snapshots().len(), 1);
+
+        let mut upload_limited = WorldHeightfieldPhysicsResidency::new(
+            per_tile,
+            HeightfieldResidencyBudget::new(2, 18, 68).unwrap(),
+        );
+        upload_limited
+            .publish(&tile_at(first, 0), embedding())
+            .unwrap();
+        assert_eq!(
+            upload_limited
+                .publish(&tile_at(second, 0), embedding())
+                .unwrap_err(),
+            HeightfieldBridgeError::ResidentUploadBudgetExceeded {
+                required: 136,
+                limit: 68,
+            }
+        );
+        assert_eq!(upload_limited.snapshots().len(), 1);
     }
 }
