@@ -54,6 +54,7 @@ pub mod anisotropic_clearcoat;
 pub mod anisotropic_footprint;
 pub mod ao_sample;
 pub mod aperture_blade;
+pub mod asset_registry;
 pub mod atlas_mip_padding;
 pub mod atlas_packing;
 pub mod attributes;
