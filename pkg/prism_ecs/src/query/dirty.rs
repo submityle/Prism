@@ -21,9 +21,10 @@
 //! recently-changed row has since been swap-removed. The design explicitly
 //! accepts this over-approximation for the coarse layer.
 
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BinaryHeap};
 use alloc::vec;
 use alloc::vec::Vec;
+use core::cmp::Reverse;
 
 use crate::archetype::ArchetypeId;
 use crate::change::Tick;
@@ -99,6 +100,61 @@ pub struct DirtyChunkReport {
 struct DirtyChunkCandidates {
     chunks: Vec<usize>,
     journal_events: usize,
+}
+
+/// Visit the sorted unique union of sorted chunk sources using a min-heap.
+/// A small-source linear path avoids heap allocation for common low-arity
+/// queries. Returns heap pushes plus pops (zero for the linear path).
+pub(super) fn merge_sorted_chunks(sources: &[Vec<usize>], mut visit: impl FnMut(usize)) -> usize {
+    if sources.len() <= 4 {
+        let mut cursors = [0usize; 4];
+        loop {
+            let next = sources
+                .iter()
+                .enumerate()
+                .filter_map(|(index, chunks)| chunks.get(cursors[index]).copied())
+                .min();
+            let Some(chunk) = next else {
+                return 0;
+            };
+            for (index, chunks) in sources.iter().enumerate() {
+                let cursor = &mut cursors[index];
+                while chunks.get(*cursor).copied() == Some(chunk) {
+                    *cursor += 1;
+                }
+            }
+            visit(chunk);
+        }
+    }
+
+    let mut cursors = vec![0usize; sources.len()];
+    let mut heap = BinaryHeap::new();
+    let mut heap_operations = 0;
+    for (source, chunks) in sources.iter().enumerate() {
+        if let Some(&chunk) = chunks.first() {
+            heap.push(Reverse((chunk, source)));
+            heap_operations += 1;
+        }
+    }
+
+    while let Some(Reverse((chunk, _))) = heap.peek().copied() {
+        while heap.peek().is_some_and(|Reverse((next, _))| *next == chunk) {
+            let Reverse((_, source)) = heap.pop().expect("peeked heap item");
+            heap_operations += 1;
+            let chunks = &sources[source];
+            let cursor = &mut cursors[source];
+            *cursor += 1;
+            while chunks.get(*cursor).is_some_and(|&next| next == chunk) {
+                *cursor += 1;
+            }
+            if let Some(&next) = chunks.get(*cursor) {
+                heap.push(Reverse((next, source)));
+                heap_operations += 1;
+            }
+        }
+        visit(chunk);
+    }
+    heap_operations
 }
 
 /// A contiguous window of rows in one archetype whose chunk-version indicates a
@@ -390,10 +446,10 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
             let rpc = table.rows_per_chunk();
             let len = table.len();
 
-            // Each source is already sorted by the hierarchical visitor. Keep
-            // one cursor per source and merge their heads below. This is
-            // O(sum(source candidates) + distinct candidates * column count),
-            // rather than O(total candidates * log(total candidates)).
+            // Each source is sorted by its index visitor. Merge the source
+            // heads with a min-heap, so fallback work is
+            // O((source entries + sources) * log(sources)), not a scan of all
+            // columns for every distinct candidate chunk.
             let mut candidates = Vec::new();
             if let Some(rows) = sparse_chunks.get(&archetype_id)
                 && !rows.is_empty()
@@ -441,31 +497,12 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
                 )
             };
 
-            let mut cursors = vec![0usize; candidates.len()];
             let chunk_count = len.div_ceil(rpc);
-            loop {
-                let next = candidates
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(index, chunks)| chunks.get(cursors[index]).copied())
-                    .min();
-                let Some(chunk) = next else {
-                    break;
-                };
-
-                // Advance every source currently pointing at the merged
-                // chunk. Since each source is sorted, this also deduplicates
-                // repeated access to the same column or chunk.
-                for (index, chunks) in candidates.iter().enumerate() {
-                    if chunks.get(cursors[index]).copied() == Some(chunk) {
-                        cursors[index] += 1;
-                    }
-                }
-
+            merge_sorted_chunks(&candidates, |chunk| {
                 report.stats.merged_candidates += 1;
                 if chunk >= chunk_count || !F::filter_chunk(filter_fetch, chunk) {
                     report.stats.filter_rejected += 1;
-                    continue;
+                    return;
                 }
 
                 let start = chunk * rpc;
@@ -477,7 +514,7 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
                 });
                 report.stats.reported_chunks += 1;
                 report.stats.reported_rows += end - start;
-            }
+            });
         }
         report
     }

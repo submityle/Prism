@@ -313,6 +313,28 @@ fn multiple_access_columns_merge_the_same_chunk_once() {
 }
 
 #[test]
+fn sorted_chunk_merge_scales_with_entries_not_sources_per_output() {
+    use super::dirty::merge_sorted_chunks;
+
+    const SOURCES: usize = 48;
+    const CHUNKS: usize = 512;
+
+    let overlapping: Vec<Vec<usize>> = (0..SOURCES).map(|_| (0..CHUNKS).collect()).collect();
+    let mut merged = Vec::new();
+    let operations = merge_sorted_chunks(&overlapping, |chunk| merged.push(chunk));
+    assert_eq!(merged, (0..CHUNKS).collect::<Vec<_>>());
+    assert_eq!(operations, 2 * SOURCES * CHUNKS);
+
+    let disjoint: Vec<Vec<usize>> = (0..SOURCES)
+        .map(|source| (source * CHUNKS..(source + 1) * CHUNKS).collect())
+        .collect();
+    merged.clear();
+    let operations = merge_sorted_chunks(&disjoint, |chunk| merged.push(chunk));
+    assert_eq!(merged, (0..SOURCES * CHUNKS).collect::<Vec<_>>());
+    assert_eq!(operations, 2 * SOURCES * CHUNKS);
+}
+
+#[test]
 fn filter_chunk_rejects_a_changed_column_that_is_not_in_the_filter_window() {
     #[derive(Clone, Copy)]
     struct NeverChanged;
