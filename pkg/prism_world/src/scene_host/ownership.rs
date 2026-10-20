@@ -1,7 +1,9 @@
 //! World-persistent scene ownership and explicit lifecycle operations.
 
 use alloc::collections::BTreeMap;
+use alloc::vec::Vec;
 use prism_ecs::resource::Resource;
+use prism_world_persist::PersistentId;
 
 use super::{
     despawn_instance, ResidencyBinding, SceneEcsHost, SceneEcsProvider, SceneSpawn, SectorId,
@@ -12,6 +14,7 @@ use super::{
 pub(super) struct SceneOwnership {
     pub(super) cells: BTreeMap<SectorId, SceneSpawn>,
     pub(super) bindings: BTreeMap<u64, ResidencyBinding>,
+    pub(super) persistence_objects: BTreeMap<SectorId, Vec<PersistentId>>,
 }
 
 impl Resource for SceneOwnership {}
@@ -31,6 +34,7 @@ impl<P: SceneEcsProvider> SceneEcsHost<'_, P> {
         despawn_instance(self.world, spawn);
         let ownership = self.ownership_mut();
         ownership.cells.remove(&sector);
+        // Preserve the persistent object list after eviction for later reload.
         ownership
             .bindings
             .retain(|_, binding| binding.sector != sector);

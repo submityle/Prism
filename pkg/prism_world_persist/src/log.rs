@@ -92,6 +92,52 @@ impl AppendOnlyLog {
         Ok(())
     }
 
+    /// Appends a batch after validating all entries against the prospective
+    /// log. Validation failures leave the log unchanged.
+    pub fn append_batch(&mut self, transactions: &[Transaction]) -> Result<(), LogError> {
+        let mut next_sequence = self.next_sequence;
+        let mut last_clock = self.last_clock;
+        for (index, transaction) in transactions.iter().enumerate() {
+            if self.transaction_ids.contains(&transaction.id())
+                || transactions[..index]
+                    .iter()
+                    .any(|previous| previous.id() == transaction.id())
+            {
+                return Err(LogError::DuplicateTransaction(transaction.id()));
+            }
+            if transaction.sequence() != next_sequence {
+                return Err(LogError::OutOfOrder {
+                    expected: next_sequence,
+                    actual: transaction.sequence(),
+                });
+            }
+            if let Some(previous) = last_clock
+                && transaction.clock() < previous
+            {
+                return Err(LogError::ClockRegression {
+                    previous,
+                    actual: transaction.clock(),
+                });
+            }
+            if next_sequence == u64::MAX {
+                return Err(LogError::SequenceExhausted);
+            }
+            transaction
+                .validate()
+                .map_err(LogError::InvalidTransaction)?;
+            next_sequence += 1;
+            last_clock = Some(transaction.clock());
+        }
+
+        // Validation is complete. Use the normal append path so all indexes
+        // and cursors stay identical to individual appends.
+        for transaction in transactions {
+            self.append(transaction.clone())
+                .expect("prevalidated append batch remains valid");
+        }
+        Ok(())
+    }
+
     pub(crate) fn validate_append(&self, transaction: &Transaction) -> Result<(), LogError> {
         if self.transaction_ids.contains(&transaction.id()) {
             return Err(LogError::DuplicateTransaction(transaction.id()));

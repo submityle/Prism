@@ -4,7 +4,7 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 use super::{ResidencyBinding, SceneEcsHost, SceneEcsHostError, SceneEcsProvider, SectorId};
-use crate::{ApplyError, SceneHost, WorldFramePlan, WorldRuntime};
+use crate::{apply_plan_to, ApplyError, SceneHost, WorldFramePlan, WorldRuntime};
 
 impl WorldRuntime {
     /// Applies a frame plan through the scene/ECS ownership boundary.
@@ -23,10 +23,12 @@ impl WorldRuntime {
         plan: &WorldFramePlan,
         host: &mut SceneEcsHost<'_, P>,
     ) -> Result<(), ApplyError<SceneEcsHostError<P::Error>>> {
-        self.apply_plan(
+        let Self { persist, .. } = self;
+        apply_plan_to(
             plan,
             &mut PlanApplication {
                 host,
+                log: persist,
                 evicted: BTreeMap::new(),
             },
         )
@@ -35,6 +37,7 @@ impl WorldRuntime {
 
 struct PlanApplication<'host, 'world, P> {
     host: &'host mut SceneEcsHost<'world, P>,
+    log: &'host mut prism_world_persist::AppendOnlyLog,
     evicted: BTreeMap<u64, ResidencyBinding>,
 }
 
@@ -48,7 +51,7 @@ impl<P: SceneEcsProvider> SceneHost for PlanApplication<'_, '_, P> {
     type Error = SceneEcsHostError<P::Error>;
 
     fn load_cell(&mut self, sector: SectorId) -> Result<(), Self::Error> {
-        SceneHost::load_cell(self.host, sector)?;
+        self.host.load_cell_with_persistence(sector, self.log)?;
         self.evicted.retain(|_, binding| binding.sector != sector);
         Ok(())
     }
@@ -62,7 +65,7 @@ impl<P: SceneEcsProvider> SceneHost for PlanApplication<'_, '_, P> {
             .filter(|(_, binding)| binding.sector == sector)
             .map(|(&id, &binding)| (id, binding))
             .collect();
-        SceneHost::unload_cell(self.host, sector)?;
+        self.host.unload_cell_with_persistence(sector, self.log)?;
         self.evicted.extend(removed);
         Ok(())
     }

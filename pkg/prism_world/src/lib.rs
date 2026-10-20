@@ -29,7 +29,8 @@ use prism_world_sim::{simulation_delta_to_transaction, SimulationDelta, Simulati
 
 #[cfg(feature = "scene_host")]
 pub use scene_host::{
-    ResidencyBinding, SceneEcsHost, SceneEcsHostConfigError, SceneEcsHostError, SceneEcsProvider,
+    CellPersistenceState, ResidencyBinding, SceneEcsHost, SceneEcsHostConfigError,
+    SceneEcsHostError, SceneEcsProvider,
 };
 
 /// Per-frame budgets for the two hot policy paths.
@@ -166,28 +167,7 @@ impl WorldRuntime {
         plan: &WorldFramePlan,
         host: &mut H,
     ) -> Result<(), ApplyError<H::Error>> {
-        for action in &plan.stream.actions {
-            match action {
-                StreamAction::Load(request) | StreamAction::Prefetch(request) => {
-                    host.load_cell(request.sector).map_err(ApplyError::Host)?;
-                }
-                StreamAction::Unload(sector) => {
-                    host.unload_cell(*sector).map_err(ApplyError::Host)?;
-                }
-            }
-        }
-        for action in &plan.residency.actions {
-            match action {
-                prism_world_residency::ResidencyAction::Promote { id, .. } => {
-                    host.promote(*id).map_err(ApplyError::Host)?;
-                }
-                prism_world_residency::ResidencyAction::Demote { id, .. } => {
-                    host.demote(*id).map_err(ApplyError::Host)?;
-                }
-                prism_world_residency::ResidencyAction::Keep { .. } => {}
-            }
-        }
-        Ok(())
+        apply_plan_to(plan, host)
     }
 
     /// Commits an IO completion without mutating scene truth.
@@ -239,6 +219,34 @@ impl WorldRuntime {
     pub const fn stream_frame(&self) -> u64 {
         self.stream.frame()
     }
+}
+
+pub(crate) fn apply_plan_to<H: SceneHost>(
+    plan: &WorldFramePlan,
+    host: &mut H,
+) -> Result<(), ApplyError<H::Error>> {
+    for action in &plan.stream.actions {
+        match action {
+            StreamAction::Load(request) | StreamAction::Prefetch(request) => {
+                host.load_cell(request.sector).map_err(ApplyError::Host)?;
+            }
+            StreamAction::Unload(sector) => {
+                host.unload_cell(*sector).map_err(ApplyError::Host)?;
+            }
+        }
+    }
+    for action in &plan.residency.actions {
+        match action {
+            prism_world_residency::ResidencyAction::Promote { id, .. } => {
+                host.promote(*id).map_err(ApplyError::Host)?;
+            }
+            prism_world_residency::ResidencyAction::Demote { id, .. } => {
+                host.demote(*id).map_err(ApplyError::Host)?;
+            }
+            prism_world_residency::ResidencyAction::Keep { .. } => {}
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -5,6 +5,10 @@ use super::tests::{Marker, Provider};
 use super::*;
 use crate::{ApplyError, SceneHost, WorldBudget, WorldRuntime};
 use prism_ecs::component_hooks::{ComponentHooks, HookContext};
+use prism_world_persist::{
+    ActorId, FieldId, LogicalClock, OverrideDelta, OverrideValue,
+    PersistentId as WorldPersistentId, Transaction, TransactionId,
+};
 use prism_world_residency::{
     MaterializationBudget, ResidencyAction, ResidencyPolicy, ResidencyRecord, ResidencyScheduler,
     ResidencyState,
@@ -58,7 +62,7 @@ fn load_bound_cell(
         plan.stream.actions.as_slice(),
         [StreamAction::Load(_)]
     ));
-    runtime.apply_plan(&plan, host).unwrap();
+    runtime.apply_scene_plan(&plan, host).unwrap();
     runtime.mark_resident(sector);
     host.bind_residency(
         id,
@@ -69,6 +73,117 @@ fn load_bound_cell(
     )
     .unwrap();
     host.loaded_cell(sector).unwrap().root.unwrap()
+}
+
+#[test]
+fn world_persistence_delta_survives_scene_eviction_and_reload() {
+    let mut world = World::new();
+    let sector = SectorId::new(0, 0, 0, 0);
+    let object = WorldPersistentId(0xfeed);
+    let mut runtime = runtime();
+    let mut host = SceneEcsHost::new(
+        &mut world,
+        Provider {
+            persistent_object: Some(object),
+            ..Provider::default()
+        },
+    );
+    let first_root = load_bound_cell(&mut runtime, &mut host, sector, 41);
+    host.world_mut().get_mut::<Marker>(first_root).unwrap().0 = 42;
+
+    let eviction = runtime.tick(&[], &[manifest(sector)], &[], 2, budget());
+    runtime.apply_scene_plan(&eviction, &mut host).unwrap();
+    runtime.mark_unloaded(sector);
+    assert!(!host.world().contains(first_root));
+    assert_eq!(runtime.persistence().len(), 1);
+    assert_eq!(runtime.persistence().get(0).unwrap().object(), object);
+
+    let reload = runtime.tick(
+        &[DemandSource::new(sector, 0, 1, 10).unwrap()],
+        &[manifest(sector)],
+        &[],
+        3,
+        budget(),
+    );
+    runtime.apply_scene_plan(&reload, &mut host).unwrap();
+    let reloaded_root = host.loaded_cell(sector).unwrap().root.unwrap();
+    assert_ne!(reloaded_root, first_root);
+    assert_eq!(host.world().get::<Marker>(reloaded_root), Some(&Marker(42)));
+    assert_eq!(host.loaded_cell_count(), 1);
+}
+
+#[test]
+fn rejected_persistence_batch_keeps_cell_and_log_unchanged() {
+    let mut world = World::new();
+    let sector = SectorId::new(0, 0, 0, 0);
+    let object = WorldPersistentId(0xbeef);
+    let mut runtime = runtime();
+    let mut host = SceneEcsHost::new(
+        &mut world,
+        Provider {
+            persistent_object: Some(object),
+            ..Provider::default()
+        },
+    );
+    let root = load_bound_cell(&mut runtime, &mut host, sector, 41);
+    let existing = Transaction::new(
+        TransactionId(1000),
+        ActorId(1),
+        LogicalClock(0),
+        0,
+        object,
+        OverrideDelta::single(FieldId(1), OverrideValue::Integer(8)).unwrap(),
+        OverrideDelta::single(FieldId(1), OverrideValue::Integer(7)).unwrap(),
+    )
+    .unwrap();
+    runtime.append(existing).unwrap();
+
+    let eviction = runtime.tick(&[], &[manifest(sector)], &[], 2, budget());
+    assert!(matches!(
+        runtime.apply_scene_plan(&eviction, &mut host),
+        Err(ApplyError::Host(SceneEcsHostError::PersistenceAppend(_)))
+    ));
+    assert!(host.world().contains(root));
+    assert_eq!(host.loaded_cell_count(), 1);
+    assert_eq!(host.residency_binding(41).unwrap().sector, sector);
+    assert_eq!(runtime.persistence().len(), 1);
+}
+
+#[test]
+fn failed_world_state_replay_despawns_unpublished_scene() {
+    let mut world = World::new();
+    let sector = SectorId::new(0, 0, 0, 0);
+    let object = WorldPersistentId(0xcafe);
+    let mut runtime = runtime();
+    let mut host = SceneEcsHost::new(
+        &mut world,
+        Provider {
+            persistent_object: Some(object),
+            ..Provider::default()
+        },
+    );
+    let root = load_bound_cell(&mut runtime, &mut host, sector, 41);
+    host.world_mut().get_mut::<Marker>(root).unwrap().0 = 13;
+    let eviction = runtime.tick(&[], &[manifest(sector)], &[], 2, budget());
+    runtime.apply_scene_plan(&eviction, &mut host).unwrap();
+    runtime.mark_unloaded(sector);
+    host.provider_mut().fail_replay = true;
+
+    let reload = runtime.tick(
+        &[DemandSource::new(sector, 0, 1, 10).unwrap()],
+        &[manifest(sector)],
+        &[],
+        3,
+        budget(),
+    );
+    assert_eq!(
+        runtime.apply_scene_plan(&reload, &mut host),
+        Err(ApplyError::Host(SceneEcsHostError::Provider(())))
+    );
+    assert_eq!(host.loaded_cell_count(), 0);
+    assert_eq!(host.residency_binding(41), None);
+    assert_eq!(host.world().entity_count(), 0);
+    assert_eq!(runtime.persistence().len(), 1);
 }
 
 #[test]
