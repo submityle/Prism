@@ -193,6 +193,17 @@ pub enum CommandPayload {
     Opaque(Vec<u8>),
 }
 
+/// Operation class used by capability policies.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CommandKind {
+    /// Field register write.
+    SetField,
+    /// Field register tombstone.
+    DeleteField,
+    /// Adapter-defined operation.
+    Opaque,
+}
+
 /// Limits checked at the command boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CommandLimits {
@@ -316,6 +327,26 @@ impl CommandEnvelope {
     #[must_use]
     pub fn order_key(&self) -> (&HlcTimestamp, &ActorId, u64) {
         (&self.timestamp, &self.actor, self.id.sequence)
+    }
+
+    /// Returns the operation class of this command.
+    #[must_use]
+    pub const fn kind(&self) -> CommandKind {
+        match self.payload {
+            CommandPayload::SetField { .. } => CommandKind::SetField,
+            CommandPayload::DeleteField { .. } => CommandKind::DeleteField,
+            CommandPayload::Opaque(_) => CommandKind::Opaque,
+        }
+    }
+
+    /// Returns the bounded payload size used by command validation.
+    #[must_use]
+    pub fn payload_size(&self) -> usize {
+        match &self.payload {
+            CommandPayload::Opaque(bytes) => bytes.len(),
+            CommandPayload::SetField { path, value } => path.as_string().len() + value_size(value),
+            CommandPayload::DeleteField { path } => path.as_string().len(),
+        }
     }
 }
 

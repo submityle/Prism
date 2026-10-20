@@ -26,8 +26,8 @@ mod presence;
 
 pub use clock::{ClockError, HlcClock, HlcTimestamp};
 pub use command::{
-    ActorId, CommandEnvelope, CommandError, CommandId, CommandLimits, CommandPayload, DomainId,
-    FieldPath, PathSegment, Value,
+    ActorId, CommandEnvelope, CommandError, CommandId, CommandKind, CommandLimits, CommandPayload,
+    DomainId, FieldPath, PathSegment, Value,
 };
 pub use document::{
     ApplyError, ApplyOutcome, DocumentState, HistoryEntry, HistoryError, HistoryInfo,
@@ -37,3 +37,10 @@ pub use lock::{LockError, LockLease, LockRecord, ResourceId, SoftLockRegistry};
 pub use presence::{
     PresenceError, PresenceLease, PresenceRecord, PresenceRegistry, PresenceStatus,
 };
+pub use transport::{
+    CapabilityError, ClientError, ClientEvent, CommandCapabilities, RejectionReason, ServerConfig,
+    ServerError, TcpCollaborationClient, TcpCollaborationServer, TcpServerHandle,
+    TransportConfigError, TransportLimits,
+};
+
+mod transport;
