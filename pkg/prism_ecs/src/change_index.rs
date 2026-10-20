@@ -84,6 +84,7 @@ struct ComponentLog {
     base_batch: usize,
     event_count: usize,
     loss_revision: u64,
+    loss_saturated: bool,
     discarding_tick: Option<Tick>,
 }
 
@@ -226,8 +227,20 @@ impl ChangeTracker {
             base_batch: 0,
             event_count: 0,
             loss_revision: 0,
+            loss_saturated: false,
             discarding_tick: None,
         })
+    }
+
+    #[inline]
+    fn note_loss(log: &mut ComponentLog) {
+        if log.loss_revision >= u64::MAX - 1 {
+            // Once the counter cannot distinguish future losses, permanently
+            // report gaps until reset/deactivation establishes a new baseline.
+            // This trades incremental performance for correctness at exhaustion.
+            log.loss_saturated = true;
+        }
+        log.loss_revision = log.loss_revision.saturating_add(1);
     }
 
     pub(crate) fn activate(&self, component: ComponentId) -> ChangeCursor {
@@ -253,6 +266,8 @@ impl ChangeTracker {
             log.base_batch = log.base_batch.saturating_add(log.batches.len());
             log.batches.clear();
             log.event_count = 0;
+            log.loss_revision = 0;
+            log.loss_saturated = false;
             log.discarding_tick = None;
         }
     }
@@ -280,7 +295,7 @@ impl ChangeTracker {
             // A cursor may have activated after the batch first overflowed.
             // Publish every later dropped write so that such a cursor still
             // receives a gap and can rebuild from authoritative state.
-            log.loss_revision = log.loss_revision.saturating_add(1);
+            Self::note_loss(log);
             return;
         }
         if log.discarding_tick.is_some() {
@@ -293,7 +308,7 @@ impl ChangeTracker {
                 log.base_batch = log.base_batch.saturating_add(log.batches.len());
                 log.batches.clear();
                 log.event_count = 0;
-                log.loss_revision = log.loss_revision.saturating_add(1);
+                Self::note_loss(log);
                 log.discarding_tick = Some(tick);
                 return;
             }
@@ -310,7 +325,7 @@ impl ChangeTracker {
             let expired = log.batches.pop_front().expect("over-limit log is nonempty");
             log.event_count -= expired.entities.len();
             log.base_batch = log.base_batch.saturating_add(1);
-            log.loss_revision = log.loss_revision.saturating_add(1);
+            Self::note_loss(log);
         }
     }
 
@@ -333,7 +348,7 @@ impl ChangeTracker {
             cursor.loss_revision = log.loss_revision;
             gap = true;
         }
-        if cursor.loss_revision != log.loss_revision {
+        if log.loss_saturated || cursor.loss_revision != log.loss_revision {
             gap = true;
         }
         if cursor.next_batch < log.base_batch {
@@ -371,7 +386,8 @@ impl ChangeTracker {
             log.batches.clear();
             log.event_count = 0;
             log.discarding_tick = None;
-            log.loss_revision = log.loss_revision.saturating_add(1);
+            log.loss_revision = 0;
+            log.loss_saturated = false;
         }
         state.dirty_components.clear();
         state.dirty_flags.fill(false);
@@ -519,5 +535,33 @@ mod revision_tests {
         assert!(out.is_empty());
         let stats = tracker.collect(component, &mut old_cursor, Tick::ZERO, tick, &mut out);
         assert!(stats.gap);
+    }
+
+    #[test]
+    fn saturated_loss_revision_stays_conservatively_gapped() {
+        let tracker = ChangeTracker::new();
+        let component = ComponentId::new(0);
+        let mut cursor = tracker.activate(component);
+        {
+            let mut state = tracker.state.lock();
+            let log = state.logs[component.index() as usize]
+                .as_mut()
+                .expect("active log exists");
+            log.loss_revision = u64::MAX - 1;
+            ChangeTracker::note_loss(log);
+            cursor.loss_revision = u64::MAX;
+        }
+
+        let stats = tracker.collect(
+            component,
+            &mut cursor,
+            Tick::ZERO,
+            Tick::ZERO,
+            &mut Vec::new(),
+        );
+        assert!(
+            stats.gap,
+            "saturation must not make a lost history look complete"
+        );
     }
 }
