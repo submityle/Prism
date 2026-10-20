@@ -68,7 +68,8 @@ pub use desktop_scene::{
 pub use desktop_scene::{GizmoFrame, SceneTransformAdapter};
 pub use desktop_ui::{
     ContentGitPhase, ContentGitStatus, ContentThumbnailSource, DesktopContentImage, DesktopKey,
-    DesktopUiError, EditorDesktopUi,
+    DesktopPanel, DesktopPanelUpdate, DesktopPanelView, DesktopProfilerPanel, DesktopTimelineFrame,
+    DesktopTimelinePanel, DesktopUiError, DesktopWorldPanel, EditorDesktopUi,
 };
 pub use document::{
     DecodedDocument, DocumentCodec, DocumentError, DocumentFileAdapter, DocumentIoEvent,

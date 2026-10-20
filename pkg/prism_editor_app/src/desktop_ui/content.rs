@@ -272,7 +272,7 @@ impl EditorDesktopUi {
     }
 
     pub(super) fn content_height(&self) -> f32 {
-        if self.content.is_some() {
+        if self.content.is_some() || self.panels.mounted() {
             (self.size.height * 0.48).min(400.0)
         } else {
             0.0

@@ -18,6 +18,7 @@ prism_editor_dock = { path = "../prism_editor_dock" }
 prism_editor_reflect = { path = "../prism_editor_reflect" }
 prism_editor_shell = { path = "../prism_editor_shell" }
 prism_editor_world = { path = "../prism_editor_world" }
+prism_editor_timeline = { path = "../prism_editor_timeline" }
 prism_asset = { path = "../prism_asset" }
 prism_app = { path = "../prism_app", default-features = false, features = ["std"] }
 prism_ecs = { path = "../prism_ecs", default-features = false, features = ["std"] }

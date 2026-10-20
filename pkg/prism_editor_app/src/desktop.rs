@@ -771,6 +771,8 @@ impl<R: DesktopRenderer> ApplicationHandler<DesktopWake> for DesktopHost<R> {
     }
 
     fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
+        let result = self.ui.cancel_panel_pointer();
+        self.input_result(result);
         let result = self.renderer.gesture_cancel(&mut self.ui);
         self.input_result(result);
         self.renderer.suspend();
@@ -856,6 +858,8 @@ impl<R: DesktopRenderer> ApplicationHandler<DesktopWake> for DesktopHost<R> {
                 }
             }
             WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
+                let result = self.ui.cancel_panel_pointer();
+                self.input_result(result);
                 let result = self.renderer.gesture_cancel(&mut self.ui);
                 self.input_result(result);
                 self.drag_start = None;
@@ -880,6 +884,13 @@ impl<R: DesktopRenderer> ApplicationHandler<DesktopWake> for DesktopHost<R> {
                         position.x as f32 / native.scale,
                         position.y as f32 / native.scale,
                     ]);
+                }
+                if self.ui.panel_pointer_active()
+                    && let Some([x, y]) = self.cursor
+                {
+                    let result = self.ui.panel_pointer_move(x, y);
+                    self.input_result(result);
+                    return;
                 }
                 if self.renderer.gesture_active()
                     && let Some([x, y]) = self.cursor
@@ -908,6 +919,11 @@ impl<R: DesktopRenderer> ApplicationHandler<DesktopWake> for DesktopHost<R> {
                 ..
             } => {
                 self.report.native_input_events += 1;
+                if state == ElementState::Released && self.ui.panel_pointer_active() {
+                    let result = self.ui.panel_pointer_release(self.cursor);
+                    self.input_result(result);
+                    return;
+                }
                 if state == ElementState::Released && self.renderer.gesture_active() {
                     // Use the last known pointer even after CursorLeft; focus loss
                     // has a separate cancellation path.
@@ -956,6 +972,23 @@ impl<R: DesktopRenderer> ApplicationHandler<DesktopWake> for DesktopHost<R> {
                             self.drag_start = Some(([x, y], mode));
                         }
                         ElementState::Pressed => {
+                            if self
+                                .document
+                                .as_ref()
+                                .is_some_and(DesktopDocumentSession::is_busy)
+                            {
+                                self.ui
+                                    .show_error("Document I/O must finish before panel input");
+                                self.redraw = true;
+                                return;
+                            }
+                            let result = self.ui.panel_pointer_press(x, y, mode);
+                            let captured = matches!(result, Ok(true));
+                            let rejected = result.is_err();
+                            self.input_result(result);
+                            if captured || rejected {
+                                return;
+                            }
                             let result = self.ui.click(x, y, mode);
                             self.input_result(result);
                         }
@@ -1149,6 +1182,10 @@ impl<R: DesktopRenderer> ApplicationHandler<DesktopWake> for DesktopHost<R> {
                 self.redraw = true;
             }
         }
+        if let Err(error) = self.ui.poll_native_panels(Instant::now()) {
+            self.ui.show_error(error.to_string());
+            self.redraw = true;
+        }
         match self.ui.refresh() {
             Ok(changed) => {
                 self.redraw |= changed;
@@ -1182,11 +1219,18 @@ impl<R: DesktopRenderer> ApplicationHandler<DesktopWake> for DesktopHost<R> {
             .config
             .time_limit
             .and_then(|duration| self.started.checked_add(duration));
-        let wake = [poll_at, self.retry_at, deadline]
-            .into_iter()
-            .flatten()
-            .filter(|time| *time > now)
-            .min();
+        let wake = [
+            poll_at,
+            self.retry_at,
+            deadline,
+            self.ui
+                .next_native_panel_wake()
+                .map(|wake| wake.max(now + Duration::from_millis(1))),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|time| *time > now)
+        .min();
         event_loop.set_control_flow(wake.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }
 }

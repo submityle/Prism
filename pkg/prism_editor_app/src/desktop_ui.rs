@@ -30,12 +30,20 @@ const MAX_DIMENSION: f32 = 32_768.0;
 mod collections;
 mod content;
 mod git;
+mod panel_pointer;
+mod panels;
 mod validation;
 use content::NativeContent;
 pub use content::{ContentThumbnailSource, DesktopContentImage};
 pub use git::{ContentGitPhase, ContentGitStatus};
+pub use panels::{
+    DesktopPanel, DesktopPanelUpdate, DesktopPanelView, DesktopProfilerPanel, DesktopTimelineFrame,
+    DesktopTimelinePanel, DesktopWorldPanel,
+};
 #[cfg(test)]
 mod content_tests;
+#[cfg(test)]
+mod panel_tests;
 
 /// Logical keys, independent of `winit` or any native keyboard API.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -69,6 +77,8 @@ pub enum DesktopUiError {
     Thumbnail(prism_editor_content::thumbnail::ThumbnailError),
     /// Content rules or preparation gate rejected the requested operation.
     Validation(String),
+    /// A native contribution, source or delivery rejected an operation.
+    Panel(String),
     /// Dimensions must be finite and in 0..=32768 logical pixels.
     InvalidSize,
     /// Pointer coordinates must be finite.
@@ -89,7 +99,7 @@ impl fmt::Display for DesktopUiError {
             Self::Build(e) => e.fmt(f),
             Self::Content(e) => e.fmt(f),
             Self::Thumbnail(e) => e.fmt(f),
-            Self::Validation(e) => f.write_str(e),
+            Self::Validation(e) | Self::Panel(e) => f.write_str(e),
             Self::InvalidSize => f.write_str("UI dimensions must be finite and within 0..=32768"),
             Self::InvalidPointer => f.write_str("pointer coordinates must be finite"),
             Self::TextLimit => f.write_str("field text/composition exceeds the 4096-byte budget"),
@@ -145,6 +155,7 @@ struct Hit {
     trigger: UiTrigger,
     rect: Rect,
     content: bool,
+    panel: bool,
 }
 
 /// Owns the editable model, retained UI, text focus and last rendered draw list.
@@ -170,6 +181,7 @@ pub struct EditorDesktopUi {
     git: git::NativeGit,
     collections: collections::NativeCollections,
     validation: validation::NativeValidation,
+    panels: panels::NativePanels,
 }
 
 impl EditorDesktopUi {
@@ -196,6 +208,7 @@ impl EditorDesktopUi {
             git: git::NativeGit::default(),
             collections: collections::NativeCollections::default(),
             validation: validation::NativeValidation::default(),
+            panels: panels::NativePanels::default(),
         };
         result.refresh()?;
         Ok(result)
@@ -213,6 +226,7 @@ impl EditorDesktopUi {
         }
         let size = Size::new(width, height);
         if self.size != size {
+            self.cancel_panel_pointer()?;
             self.size = size;
             self.invalidated = true;
         }
@@ -297,7 +311,10 @@ impl EditorDesktopUi {
     /// also retain this fence until their exact snapshot is published.
     #[must_use]
     pub fn has_uncommitted_edit(&self) -> bool {
-        self.focus.is_some() || self.controller.has_active_edit() || self.collections.fenced()
+        self.focus.is_some()
+            || self.controller.has_active_edit()
+            || self.collections.fenced()
+            || self.panels.fenced()
     }
 
     /// Stores a bounded, visible error. Call `refresh` before presenting it.
@@ -332,7 +349,8 @@ impl EditorDesktopUi {
             self.invalidated = true;
         }
         let revision = self.controller.revision();
-        let content_changed = self.content.as_ref().is_some_and(NativeContent::changed);
+        let content_changed =
+            !self.panels.active() && self.content.as_ref().is_some_and(NativeContent::changed);
         if self
             .content
             .as_ref()
@@ -353,7 +371,7 @@ impl EditorDesktopUi {
             && !self
                 .focus
                 .as_ref()
-                .is_some_and(|f| content::is_target(&f.target))
+                .is_some_and(|f| content::is_target(&f.target) || self.panels.is_target(&f.target))
         {
             self.focus = None;
         }
@@ -365,10 +383,13 @@ impl EditorDesktopUi {
         {
             self.focus = None;
         }
-        let content_height = self.content_height();
-        if let Some(content) = &mut self.content {
+        let content_height = self.panel_body_height();
+        if !self.panels.active()
+            && let Some(content) = &mut self.content
+        {
             content.rebuild(content_height, self.size.width)?;
         }
+        self.panels.rebuild()?;
         let total = self.visible_outliner_count();
         let count = self.visible_rows();
         self.outliner_start = self.outliner_start.min(total.saturating_sub(count.max(1)));
@@ -416,6 +437,7 @@ impl EditorDesktopUi {
             .into_iter()
             .flat_map(|content| content.view.bindings())
             .collect();
+        let panel_bindings: Vec<_> = self.panels.bindings().collect();
         for ((element, scope), (_, rect)) in semantics.iter().zip(&geometry) {
             if let Some(Key::Str(key)) = element.explicit_key() {
                 if key == "editor.viewport" {
@@ -456,14 +478,18 @@ impl EditorDesktopUi {
                         trigger: binding.trigger(),
                         rect: intersection(clip, *rect),
                         content: false,
+                        panel: false,
                     });
                 }
-                if let Some(&trigger) = content_bindings.get(key.as_str()) {
+                if !self.panels.active()
+                    && let Some(&trigger) = content_bindings.get(key.as_str())
+                {
                     hits.push(Hit {
                         target: key.clone(),
                         trigger,
                         rect: intersection(clip, *rect),
                         content: true,
+                        panel: false,
                     });
                 }
                 if matches!(
@@ -475,13 +501,66 @@ impl EditorDesktopUi {
                         trigger: UiTrigger::Activate,
                         rect: intersection(clip, *rect),
                         content: true,
+                        panel: false,
+                    });
+                }
+                if let Some((_, trigger)) = panel_bindings
+                    .iter()
+                    .find(|(target, _)| *target == key.as_str())
+                {
+                    hits.push(Hit {
+                        target: key.clone(),
+                        trigger: *trigger,
+                        rect: intersection(clip, *rect),
+                        content: false,
+                        panel: true,
+                    });
+                } else if key.starts_with("native:tab:") {
+                    hits.push(Hit {
+                        target: key.clone(),
+                        trigger: UiTrigger::Activate,
+                        rect: intersection(clip, *rect),
+                        content: false,
+                        panel: true,
                     });
                 }
             }
         }
         let list = clipped_draw_list(self.ui.backend(), &scopes, window)?;
+        let body = semantics
+            .iter()
+            .zip(&geometry)
+            .find_map(|((el, _), (_, rect))| {
+                matches!(el.explicit_key(),Some(Key::Str(k)) if k=="native:body")
+                    .then_some(rect.size.height)
+            })
+            .unwrap_or(0.0);
+        if self.panels.layout(content_height, body) {
+            self.invalidated = true;
+            return self.refresh();
+        }
+        self.panels.geometry = semantics
+            .iter()
+            .zip(&geometry)
+            .filter_map(|((el, scope), (_, rect))| {
+                let Some(Key::Str(key)) = el.explicit_key() else {
+                    return None;
+                };
+                if !key.starts_with("timeline:") {
+                    return None;
+                }
+                let clip = scope
+                    .and_then(|k| scopes.get(k))
+                    .map_or(window, |(_, r)| *r);
+                Some((key.clone(), (*rect, intersection(clip, *rect))))
+            })
+            .collect();
         if let Some(content) = &mut self.content {
             content.images = images;
+        }
+        if !self.panels.active()
+            && let Some(content) = &mut self.content
+        {
             let dock = scopes
                 .get("editor.browser")
                 .map_or(0.0, |(_, r)| r.size.height);
@@ -511,12 +590,18 @@ impl EditorDesktopUi {
         self.rendered_model_revision = Some(self.controller.model_revision());
         self.rendered_primary = self.controller.selection().primary().cloned();
         self.invalidated = false;
+        self.panels.stale = false;
         Ok(true)
     }
 
     /// Routes to the deepest bound Element under the actual drawn location.
     /// Field clicks focus a draft; they do not mutate model data.
     pub fn click(&mut self, x: f32, y: f32, mode: SelectionMode) -> Result<bool, DesktopUiError> {
+        if self.panel_pointer_active() {
+            return self.reject(DesktopUiError::Panel(
+                "Release or cancel the pointer before another action".into(),
+            ));
+        }
         if !x.is_finite() || !y.is_finite() {
             return self.reject(DesktopUiError::InvalidPointer);
         }
@@ -527,8 +612,18 @@ impl EditorDesktopUi {
                 .rev()
                 .find(|hit| contains(hit.rect, x, y))
                 .is_some_and(|hit| hit.content);
+        let stale_panel = self.panels.stale
+            && self
+                .hits
+                .iter()
+                .rev()
+                .find(|hit| contains(hit.rect, x, y))
+                .is_some_and(|hit| hit.panel);
         let refreshed = self.refresh()?;
         if stale_content {
+            return Ok(refreshed);
+        }
+        if stale_panel {
             return Ok(refreshed);
         }
         let hit = self
@@ -554,6 +649,18 @@ impl EditorDesktopUi {
                 };
                 if hit.content {
                     return self.content_event(&hit.target, &event);
+                }
+                if hit.panel {
+                    return self.panel_event(&hit.target, &event);
+                }
+                if self.panels.active()
+                    && matches!(hit.target.as_str(), "editor.undo" | "editor.redo")
+                {
+                    return self.key(if hit.target == "editor.undo" {
+                        DesktopKey::Undo
+                    } else {
+                        DesktopKey::Redo
+                    });
                 }
                 let action = self.bindings.dispatch(&hit.target, &event)?;
                 let cancelled = self.focus.take().is_some();
@@ -622,9 +729,15 @@ impl EditorDesktopUi {
 
     /// Handles editing/navigation and `Undo`/`Redo`, never native keycodes.
     pub fn key(&mut self, key: DesktopKey) -> Result<bool, DesktopUiError> {
+        if self.panel_pointer_active() && key != DesktopKey::Escape {
+            return Ok(false);
+        }
         self.refresh()?;
         match key {
             DesktopKey::Escape => {
+                if self.cancel_panel_pointer()? {
+                    return Ok(true);
+                }
                 if self.focus.take().is_none() {
                     return Ok(false);
                 }
@@ -681,13 +794,26 @@ impl EditorDesktopUi {
                 Ok(true)
             }
             DesktopKey::Undo | DesktopKey::Redo => {
-                // Content text input belongs to the browser, not document history.
-                if self
-                    .focus
-                    .as_ref()
-                    .is_some_and(|f| content::is_target(&f.target))
-                {
+                if self.panel_pointer_active() {
                     return Ok(false);
+                }
+                // Content text input belongs to the browser, not document history.
+                if self.focus.as_ref().is_some_and(|f| {
+                    content::is_target(&f.target) || self.panels.is_target(&f.target)
+                }) {
+                    return Ok(false);
+                }
+                if self.panels.active() {
+                    let target = if key == DesktopKey::Undo {
+                        "timeline:undo"
+                    } else {
+                        "timeline:redo"
+                    };
+                    return if self.panels.is_target(target) {
+                        self.panel_event(target, &UiEvent::Activate)
+                    } else {
+                        Ok(false)
+                    };
                 }
                 let cancelled = self.focus.take().is_some();
                 self.invalidated |= cancelled;
@@ -727,13 +853,32 @@ impl EditorDesktopUi {
     /// Routes native wheel input only inside the actual visible `Outliner` pane.
     /// `Inspector`, viewport, toolbar and status input never scroll the `Outliner`.
     pub fn scroll_at(&mut self, x: f32, y: f32, delta_rows: i32) -> Result<bool, DesktopUiError> {
+        if self.panel_pointer_active() {
+            return Ok(false);
+        }
         if !x.is_finite() || !y.is_finite() {
             return self.reject(DesktopUiError::InvalidPointer);
         }
         let refreshed = self.refresh()?;
         let browser_height = self.content_height();
         let browser_top = self.size.height - STATUS_HEIGHT - browser_height;
+        if self.panels.active()
+            && contains(
+                Rect::new(
+                    Point::new(0.0, browser_top + self.panel_tabs_height()),
+                    Size::new(self.size.width, self.panel_body_height()),
+                ),
+                x,
+                y,
+            )
+        {
+            let changed = self.panels.scroll(delta_rows);
+            self.invalidated |= changed;
+            self.refresh()?;
+            return Ok(refreshed || changed);
+        }
         if let Some(content) = &mut self.content
+            && !self.panels.active()
             && contains(
                 Rect::new(
                     Point::new(0.0, browser_top),
@@ -797,6 +942,9 @@ impl EditorDesktopUi {
     }
 
     fn focus_field(&mut self, target: &str) -> Result<(), DesktopUiError> {
+        if self.panels.is_target(target) {
+            return self.focus_panel(target);
+        }
         if content::is_target(target) {
             return self.focus_content(target);
         }
@@ -857,6 +1005,10 @@ impl EditorDesktopUi {
             let target = focus.target.clone();
             return self.content_event(&target, &event);
         }
+        if self.panels.is_target(&focus.target) {
+            let target = focus.target.clone();
+            return self.panel_event(&target, &event);
+        }
         let action = self.bindings.dispatch(&focus.target, &event)?;
         // On error retain the exact draft for correction and display the cause.
         self.execute(action)?;
@@ -910,6 +1062,9 @@ impl EditorDesktopUi {
                     .child(Element::text("Redo")),
             )
             .child(Element::text(dirty).class("desktop-dirty"));
+        if self.panels.fenced() {
+            toolbar = toolbar.child(Element::text("Panel data pending *"));
+        }
         if self.git.mounted() {
             toolbar = toolbar
                 .child(
@@ -1001,12 +1156,17 @@ impl EditorDesktopUi {
             .style(StyleProp::Height, StyleValue::px(self.size.height))
             .child(toolbar)
             .child(content);
-        if let Some(browser) = &self.content {
+        if self.panels.mounted() {
+            element = element.child(self.panels.tabs(self.content.is_some()));
+        }
+        if let Some(panel) = self.panels.body(self.panel_body_height()) {
+            element = element.child(panel);
+        } else if let Some(browser) = &self.content {
             element = element.child(
                 Element::box_()
                     .key_str("editor.browser")
                     .class("desktop-browser")
-                    .style(StyleProp::Height, StyleValue::px(self.content_height()))
+                    .style(StyleProp::Height, StyleValue::px(self.panel_body_height()))
                     .child(
                         browser
                             .view
@@ -1035,6 +1195,8 @@ fn collect_elements<'a>(
             "editor.outliner" => Some("editor.outliner"),
             "editor.inspector" => Some("editor.inspector"),
             "editor.browser" => Some("editor.browser"),
+            "editor.paneltabs" => Some("editor.paneltabs"),
+            "editor.nativepanel" => Some("editor.nativepanel"),
             "editor.status" => Some("editor.status"),
             _ => inherited,
         },
@@ -1078,9 +1240,15 @@ fn clipped_draw_list(
         "editor.viewport",
         "editor.inspector",
         "editor.browser",
+        "editor.paneltabs",
+        "editor.nativepanel",
         "editor.status",
     ] {
-        if key == "editor.browser" && !scopes.contains_key(key) {
+        if matches!(
+            key,
+            "editor.browser" | "editor.paneltabs" | "editor.nativepanel"
+        ) && !scopes.contains_key(key)
+        {
             continue;
         }
         let (id, bounds) = lookup(key)?;

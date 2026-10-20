@@ -1,7 +1,28 @@
 //! Startup loading and one serialized metadata writer, outside Loom builds.
 use super::*;
-use prism_editor_ui::{CollectionLoadReport, CollectionStore, ContentBrowserController};
+use prism_editor_ui::{
+    CollectionLoadReport, CollectionSaveReport, CollectionStorageError, CollectionStore,
+    ContentBrowserController,
+};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
+
+// Lock contention is transient and may outlive a completed writer when another
+// process is being created. Retry only Busy, on the worker, for at most 126 ms
+// of backoff. Persistent contention remains a visible, explicitly retried error.
+fn save_with_contention_backoff(
+    store: &CollectionStore,
+    controller: &ContentBrowserController,
+) -> Result<CollectionSaveReport, CollectionStorageError> {
+    for delay in [2, 4, 8, 16, 32, 32, 32] {
+        match store.save(controller) {
+            Err(CollectionStorageError::Busy) => {
+                std::thread::sleep(std::time::Duration::from_millis(delay));
+            }
+            result => return result,
+        }
+    }
+    store.save(controller)
+}
 
 #[derive(Default)]
 pub(super) struct NativeCollections {
@@ -60,8 +81,7 @@ impl NativeCollections {
             match std::thread::Builder::new()
                 .name("prism-collections".into())
                 .spawn(move || {
-                    let result = store
-                        .save(&controller)
+                    let result = save_with_contention_backoff(&store, &controller)
                         .map(|report| {
                             report.durability_warning.map_or_else(
                                 || "Collections saved".into(),
@@ -70,7 +90,12 @@ impl NativeCollections {
                                 },
                             )
                         })
-                        .map_err(|error| error.to_string());
+                        .map_err(|error| {
+                            format!(
+                                "Collection writer {}: {error:?}: {error}",
+                                store.path().display()
+                            )
+                        });
                     let _ = send.send(result);
                 }) {
                 Ok(_) => self.active = Some(receive),
@@ -223,7 +248,14 @@ mod tests {
         settle(&mut ui);
         assert!(
             !ui.has_uncommitted_edit(),
-            "successful metadata writes clear only their fence"
+            "successful metadata writes clear only their fence: status={:?}, active={}, queued={}, failed={}, focus={}, controller_edit={}, panels={}",
+            ui.content_collection_status(),
+            ui.collections.active.is_some(),
+            ui.collections.queued.is_some(),
+            ui.collections.failed,
+            ui.focus.is_some(),
+            ui.controller.has_active_edit(),
+            ui.panels.fenced(),
         );
         assert_eq!(ui.content_collection_status(), "Collections saved");
         let mut restored = ContentBrowserController::default();
@@ -237,6 +269,114 @@ mod tests {
         assert!(!ui.refresh().unwrap());
         ui.mount_content_collections(other.store()).unwrap();
         assert!(ui.content_browser().unwrap().collections().is_empty());
+    }
+    #[test]
+    fn real_collection_lock_contention_is_bounded_and_preserves_latest_for_retry() {
+        let project = Project::new();
+        let mut ui = ui();
+        ui.mount_content_collections(project.store()).unwrap();
+        ui.content_action(ContentBrowserAction::CreateCollection("published".into()))
+            .unwrap();
+        settle(&mut ui);
+        let store = project.store();
+        let previous = std::fs::read(store.path()).unwrap();
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(store.path().with_file_name("content-collections.lock"))
+            .unwrap();
+        lock.lock().unwrap();
+        assert_eq!(
+            store.save(ui.content_browser().unwrap()),
+            Err(CollectionStorageError::Busy),
+        );
+        ui.content_action(ContentBrowserAction::RenameCollection {
+            id: 1,
+            name: "contended".into(),
+        })
+        .unwrap();
+        ui.content_action(ContentBrowserAction::RenameCollection {
+            id: 1,
+            name: "latest after contention".into(),
+        })
+        .unwrap();
+        settle(&mut ui);
+        assert!(ui.collections.failed());
+        assert!(ui.has_uncommitted_edit());
+        assert!(ui.content_collection_status().contains("Busy"));
+        assert_eq!(std::fs::read(store.path()).unwrap(), previous);
+        assert!(!ui.refresh().unwrap(), "no unbounded per-frame retry");
+        drop(lock);
+        ui.retry_content_collection_save();
+        settle(&mut ui);
+        assert!(!ui.has_uncommitted_edit());
+        let mut restored = ContentBrowserController::default();
+        store
+            .load_into(&mut restored, ui.content_catalog().unwrap())
+            .unwrap();
+        assert_eq!(restored.collections()[0].name(), "latest after contention");
+
+        // A real external lock released during backoff must allow this exact
+        // snapshot to publish without turning contention into a terminal fence.
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(store.path().with_file_name("content-collections.lock"))
+            .unwrap();
+        lock.lock().unwrap();
+        let controller = restored.clone();
+        let worker_store = store.clone();
+        let worker =
+            std::thread::spawn(move || save_with_contention_backoff(&worker_store, &controller));
+        std::thread::sleep(Duration::from_millis(20));
+        drop(lock);
+        worker.join().unwrap().unwrap();
+    }
+    #[test]
+    fn collection_writes_overlap_real_git_processes_without_losing_latest_snapshot() {
+        let project = Project::new();
+        let mut ui = ui();
+        ui.mount_content_collections(project.store()).unwrap();
+        ui.content_action(ContentBrowserAction::CreateCollection("initial".into()))
+            .unwrap();
+        let running = alloc::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let worker_running = running.clone();
+        let worker = std::thread::spawn(move || {
+            let mut spawned = 0;
+            while worker_running.load(Ordering::Acquire) {
+                let result = std::process::Command::new("git")
+                    .arg("--version")
+                    .output()
+                    .unwrap();
+                assert!(result.status.success(), "{result:?}");
+                spawned += 1;
+            }
+            spawned
+        });
+        let mut failure = None;
+        for serial in 0..100 {
+            ui.content_action(ContentBrowserAction::RenameCollection {
+                id: 1,
+                name: format!("publication-{serial}"),
+            })
+            .unwrap();
+            settle(&mut ui);
+            if ui.collections.failed() {
+                failure = Some(ui.content_collection_status().to_owned());
+                break;
+            }
+        }
+        running.store(false, Ordering::Release);
+        let spawned = worker.join().unwrap();
+        assert!(spawned > 0, "must exercise actual Git process creation");
+        assert_eq!(failure, None, "concurrent publication failed");
+        assert!(!ui.has_uncommitted_edit());
+        let mut restored = ContentBrowserController::default();
+        project
+            .store()
+            .load_into(&mut restored, ui.content_catalog().unwrap())
+            .unwrap();
+        assert_eq!(restored.collections()[0].name(), "publication-99");
     }
     #[test]
     fn failed_collection_load_and_save_preserve_bytes_and_require_explicit_retry() {

@@ -112,8 +112,9 @@ matrix to 16 explicit scalar paths. `tests/gizmo.rs` exercises real offscreen
 axis pixels, geometry, picking, multiselect commands, Undo/Redo, cancellation,
 failure rollback and codec reload; the transform persistence test in
 `tests/document.rs` uses the production filesystem provider. Required-GPU runs
-fail if hardware is unavailable. The native smoke proves window presentation,
-not automated OS mouse/key delivery.
+fail if hardware is unavailable. The latest native smoke reached Metal
+initialization on a locked desktop but presented zero frames and received zero
+native input events; window presentation and OS input acceptance remain unverified.
 
 The native content dock mounts the real bound Loom browser through
 `EditorDesktopUi::mount_content_browser(ContentCatalog)`. Both the CLI desktop
@@ -137,6 +138,22 @@ Mounting the dock supplies an application-owned catalog. Source producers remain
 explicit host bindings; the app does not infer project files or revisions.
 The offscreen browser integration exercises real GPU text changes after
 publication and verifies idle frames add no uploads.
+
+Native timeline/world/profiler panels are explicit host contributions through
+`mount_native_panel`. `DesktopTimelinePanel` retains the real authoring editor
+and transport controller and delivers actual samples/events to an atomic host
+consumer. World and profiler providers poll real I/O/capture results without
+blocking; pending work, unsaved data and failures fence document operations.
+The dock retains real Loom layout, semantic bindings and independent scroll
+positions. Hidden playback continues from monotonic time without rebuilding the
+browser, while paused transport permits native idle sleep.
+
+Timeline key/tangent pointer input uses actual retained lane/curve origins,
+pauses playback and paints bounded previews. Release validates its final position
+before publishing one undoable transaction. Escape, focus loss, resize, suspend
+and host document replacement cancel; invalid release cannot commit an earlier
+valid preview. See `docs/prism_editor_native_panels_zh.md` for provider ownership,
+save acknowledgement, contribution limits and acceptance evidence.
 
 Thumbnail hosts install a shared bounded decoder and a pure
 `ContentThumbnailSource` through `mount_content_thumbnails`. A source key contains
