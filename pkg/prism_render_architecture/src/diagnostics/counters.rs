@@ -19,6 +19,8 @@ use super::FrameCounters;
 /// Average / peak / `p95` aggregate of an `f32` quantity over the window.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Aggregate {
+    /// Number of finite measurements included in this aggregate.
+    pub sample_count: usize,
     /// Arithmetic mean of the finite samples.
     pub average: f32,
     /// Largest finite sample.
@@ -30,6 +32,7 @@ pub struct Aggregate {
 impl Aggregate {
     /// The zeroed aggregate returned for an empty / all-non-finite input.
     pub const ZERO: Self = Self {
+        sample_count: 0,
         average: 0.0,
         peak: 0.0,
         p95: 0.0,
@@ -45,6 +48,8 @@ impl Default for Aggregate {
 /// Average / peak / `p95` aggregate of a `u64` quantity over the window.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct MemoryAggregate {
+    /// Number of measurements included in this aggregate.
+    pub sample_count: usize,
     /// Arithmetic mean (integer, truncated toward zero).
     pub average: u64,
     /// Largest sample.
@@ -56,6 +61,7 @@ pub struct MemoryAggregate {
 impl MemoryAggregate {
     /// The zeroed aggregate returned for an empty window.
     pub const ZERO: Self = Self {
+        sample_count: 0,
         average: 0,
         peak: 0,
         p95: 0,
@@ -115,7 +121,12 @@ fn aggregate_f32(mut values: Vec<f32>) -> Aggregate {
     values.sort_by(f32::total_cmp);
     let peak = values[n - 1];
     let p95 = values[p95_index(n)];
-    Aggregate { average, peak, p95 }
+    Aggregate {
+        sample_count: n,
+        average,
+        peak,
+        p95,
+    }
 }
 
 /// Folds `u64` samples into a [`MemoryAggregate`]; empty yields
@@ -131,7 +142,12 @@ fn aggregate_u64(mut values: Vec<u64>) -> MemoryAggregate {
     values.sort_unstable();
     let peak = values[n - 1];
     let p95 = values[p95_index(n)];
-    MemoryAggregate { average, peak, p95 }
+    MemoryAggregate {
+        sample_count: n,
+        average,
+        peak,
+        p95,
+    }
 }
 
 /// A fixed-capacity sliding window of [`FrameCounters`] samples.
@@ -225,10 +241,12 @@ impl FrameWindow {
             if c.cpu_frame_ms.is_finite() {
                 cpu.push(c.cpu_frame_ms);
             }
-            if c.gpu_frame_ms.is_finite() {
-                gpu.push(c.gpu_frame_ms);
+            if let Some(gpu_frame_ms) = c.gpu_frame_ms.filter(|value| value.is_finite()) {
+                gpu.push(gpu_frame_ms);
             }
-            mem.push(c.gpu_memory_bytes);
+            if let Some(gpu_memory_bytes) = c.gpu_memory_bytes {
+                mem.push(gpu_memory_bytes);
+            }
         }
         FrameStats {
             sample_count: self.samples.len(),
@@ -255,7 +273,7 @@ mod tests {
     }
 
     fn sample(idx: u64, cpu: f32, gpu: f32, mem: u64) -> FrameCounters {
-        FrameCounters::new(idx, cpu, gpu, mem)
+        FrameCounters::new(idx, cpu, Some(gpu), Some(mem))
     }
 
     #[test]
@@ -283,6 +301,8 @@ mod tests {
         w.push(sample(0, 12.5, 9.0, 2048));
         let s = w.stats();
         assert_eq!(s.sample_count, 1);
+        assert_eq!(s.gpu_frame_ms.sample_count, 1);
+        assert_eq!(s.gpu_memory_bytes.sample_count, 1);
         assert!(approx(s.cpu_frame_ms.average, 12.5));
         assert!(approx(s.cpu_frame_ms.peak, 12.5));
         assert!(approx(s.cpu_frame_ms.p95, 12.5));
@@ -378,6 +398,25 @@ mod tests {
         assert_eq!(s.gpu_frame_ms, Aggregate::ZERO);
         // Memory still aggregates.
         assert_eq!(s.gpu_memory_bytes.peak, 20);
+    }
+
+    #[test]
+    fn unavailable_gpu_telemetry_is_not_aggregated_as_zero() {
+        let mut w = FrameWindow::new(4);
+        w.push(FrameCounters::new(0, 8.0, None, None));
+        w.push(sample(1, 10.0, 0.0, 0));
+
+        let stats = w.stats();
+        assert_eq!(stats.sample_count, 2);
+        assert_eq!(stats.cpu_frame_ms.sample_count, 2);
+        assert_eq!(stats.gpu_frame_ms.sample_count, 1);
+        assert_eq!(stats.gpu_frame_ms.average, 0.0);
+        assert_eq!(stats.gpu_frame_ms.peak, 0.0);
+        assert_eq!(stats.gpu_frame_ms.p95, 0.0);
+        assert_eq!(stats.gpu_memory_bytes.sample_count, 1);
+        assert_eq!(stats.gpu_memory_bytes.average, 0);
+        assert_eq!(stats.gpu_memory_bytes.peak, 0);
+        assert_eq!(stats.gpu_memory_bytes.p95, 0);
     }
 
     #[test]

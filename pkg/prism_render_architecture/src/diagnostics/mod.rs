@@ -156,8 +156,9 @@ impl FeatureStatus {
 ///
 /// A stream of these is fed into [`FrameWindow`] to derive rolling frame-pacing
 /// statistics. The timing fields are milliseconds; `gpu_memory_bytes` is the
-/// resident allocation at sample time. The `GPU`-sourced fields are placeholder
-/// zero until the `GPU` backend populates them.
+/// resident allocation at sample time. `None` means the backend did not provide
+/// a measurement for that frame; it is deliberately distinct from a measured
+/// zero so unavailable telemetry cannot masquerade as a valid result.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct FrameCounters {
     /// Monotonic frame index this sample was taken on.
@@ -165,9 +166,9 @@ pub struct FrameCounters {
     /// `CPU`-side frame time in milliseconds.
     pub cpu_frame_ms: f32,
     /// `GPU`-side frame time in milliseconds.
-    pub gpu_frame_ms: f32,
+    pub gpu_frame_ms: Option<f32>,
     /// Resident `GPU` memory in bytes at sample time.
-    pub gpu_memory_bytes: u64,
+    pub gpu_memory_bytes: Option<u64>,
 }
 
 impl FrameCounters {
@@ -176,8 +177,8 @@ impl FrameCounters {
     pub const fn new(
         frame_index: u64,
         cpu_frame_ms: f32,
-        gpu_frame_ms: f32,
-        gpu_memory_bytes: u64,
+        gpu_frame_ms: Option<f32>,
+        gpu_memory_bytes: Option<u64>,
     ) -> Self {
         Self {
             frame_index,
@@ -228,11 +229,14 @@ mod tests {
 
     #[test]
     fn frame_counters_new_matches_default_fields() {
-        let c = FrameCounters::new(7, 5.0, 6.0, 1024);
+        let c = FrameCounters::new(7, 5.0, Some(6.0), Some(1024));
         assert_eq!(c.frame_index, 7);
         assert_eq!(c.cpu_frame_ms, 5.0);
-        assert_eq!(c.gpu_frame_ms, 6.0);
-        assert_eq!(c.gpu_memory_bytes, 1024);
-        assert_eq!(FrameCounters::default(), FrameCounters::new(0, 0.0, 0.0, 0));
+        assert_eq!(c.gpu_frame_ms, Some(6.0));
+        assert_eq!(c.gpu_memory_bytes, Some(1024));
+        assert_eq!(
+            FrameCounters::default(),
+            FrameCounters::new(0, 0.0, None, None)
+        );
     }
 }
