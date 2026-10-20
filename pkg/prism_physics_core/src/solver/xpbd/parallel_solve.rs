@@ -35,6 +35,7 @@ use super::graph_color::{self, DynamicBodies};
 use super::island_solve::SolveIslands;
 use super::{integrate, joint_constraint, velocity_solve};
 use crate::collider::{ColliderHandle, PhysicsMaterial};
+use crate::joint::ragdoll::RagdollConstraint;
 use crate::joint::Joint;
 use crate::state::body::{BodyKind, MassProperties};
 use crate::state::handle::BodyHandle;
@@ -72,6 +73,8 @@ struct IslandScratch {
     contacts: Vec<ContactConstraint>,
     /// Island joints, re-indexed to local slots.
     joints: Vec<Joint>,
+    /// Island ragdoll links, re-indexed to local slots.
+    ragdolls: Vec<RagdollConstraint>,
 }
 
 impl IslandScratch {
@@ -82,6 +85,7 @@ impl IslandScratch {
         island: usize,
         constraints: &[ContactConstraint],
         joints: &[&Joint],
+        ragdolls: &[RagdollConstraint],
     ) -> IslandScratch {
         // Union of every global slot the island's constraints and joints touch,
         // including static separators (contacts/joints may reference statics).
@@ -95,6 +99,11 @@ impl IslandScratch {
             let j = joints[ji];
             slots.push(j.anchor_a.body.index() as usize);
             slots.push(j.anchor_b.body.index() as usize);
+        }
+        for &ri in islands.ragdolls(island) {
+            let r = &ragdolls[ri];
+            slots.push(r.body_a.index() as usize);
+            slots.push(r.body_b.index() as usize);
         }
         slots.sort_unstable();
         slots.dedup();
@@ -120,6 +129,7 @@ impl IslandScratch {
             slots,
             contacts: Vec::new(),
             joints: Vec::new(),
+            ragdolls: Vec::new(),
         };
         for &g in &scratch.slots {
             scratch.positions.push(view.positions[g]);
@@ -157,6 +167,14 @@ impl IslandScratch {
             j.anchor_a.body = BodyHandle::new(la as u32, j.anchor_a.body.generation());
             j.anchor_b.body = BodyHandle::new(lb as u32, j.anchor_b.body.generation());
             scratch.joints.push(j);
+        }
+        for &ri in islands.ragdolls(island) {
+            let mut r = ragdolls[ri];
+            let la = scratch.local_of(r.body_a.index() as usize);
+            let lb = scratch.local_of(r.body_b.index() as usize);
+            r.body_a = BodyHandle::new(la as u32, r.body_a.generation());
+            r.body_b = BodyHandle::new(lb as u32, r.body_b.generation());
+            scratch.ragdolls.push(r);
         }
         scratch
     }
@@ -236,6 +254,9 @@ impl IslandScratch {
                         joint_constraint::solve_joint(&mut view, &self.joints[ji], h);
                     }
                 }
+                for ragdoll in &self.ragdolls {
+                    joint_constraint::solve_ragdoll(&mut view, ragdoll, h);
+                }
                 // Contacts in a colour write disjoint dynamic bodies, so the
                 // whole colour is relaxed across worker threads. This is
                 // bit-identical to the serial colour sweep (see `color_solve`).
@@ -253,10 +274,16 @@ impl IslandScratch {
                 for joint in &self.joints {
                     joint_constraint::solve_joint(&mut view, joint, h);
                 }
+                for ragdoll in &self.ragdolls {
+                    joint_constraint::solve_ragdoll(&mut view, ragdoll, h);
+                }
                 contact_constraint::solve_positions(&mut view, &mut self.contacts, config, h);
             }
         }
         integrate::recover_velocities(&mut view, h);
+        for ragdoll in &self.ragdolls {
+            joint_constraint::solve_ragdoll_velocity(&mut view, ragdoll, h);
+        }
         velocity_solve::solve(&mut view, &self.contacts, config, h);
     }
 
@@ -318,13 +345,14 @@ pub fn solve_islands_parallel(
     active: &[usize],
     constraints: &[ContactConstraint],
     joints: &[&Joint],
+    ragdolls: &[RagdollConstraint],
     config: &XpbdConfig,
     h: f32,
     use_threads: bool,
 ) {
     let mut scratches: Vec<IslandScratch> = active
         .iter()
-        .map(|&island| IslandScratch::gather(view, islands, island, constraints, joints))
+        .map(|&island| IslandScratch::gather(view, islands, island, constraints, joints, ragdolls))
         .collect();
 
     if use_threads {
@@ -444,6 +472,7 @@ mod tests {
                 &active,
                 &constraints,
                 &[],
+                &[],
                 &XpbdConfig::default(),
                 h,
                 use_threads,
@@ -532,6 +561,7 @@ mod tests {
                     &islands,
                     &active,
                     &constraints,
+                    &[],
                     &[],
                     &config,
                     h,

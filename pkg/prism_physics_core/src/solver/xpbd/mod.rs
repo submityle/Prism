@@ -52,16 +52,19 @@ pub use config::XpbdConfig;
 pub use contact_constraint::ContactConstraint;
 pub use island_solve::SolveIslands;
 
+use crate::joint::ragdoll::{RagdollBinding, RagdollConstraint};
 use crate::joint::Joint;
 use crate::pipeline::detect_contacts;
 use crate::solver::Solver;
 use crate::world::PhysicsWorld;
 
 /// A sub-stepped Extended Position Based Dynamics rigid-body solver.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct XpbdSolver {
     /// Tuning parameters for the position and velocity passes.
     pub config: XpbdConfig,
+    /// Live ragdoll Swing-Twist constraints solved alongside ordinary joints.
+    ragdolls: Vec<RagdollConstraint>,
 }
 
 impl XpbdSolver {
@@ -74,11 +77,33 @@ impl XpbdSolver {
     /// Creates a solver with the given configuration.
     #[must_use]
     pub fn with_config(config: XpbdConfig) -> XpbdSolver {
-        XpbdSolver { config }
+        XpbdSolver {
+            config,
+            ragdolls: Vec::new(),
+        }
+    }
+
+    /// Creates a solver with a bound ragdoll definition.
+    #[must_use]
+    pub fn with_ragdoll_binding(config: XpbdConfig, binding: &RagdollBinding) -> XpbdSolver {
+        XpbdSolver {
+            config,
+            ragdolls: binding.constraints().to_vec(),
+        }
+    }
+
+    /// Replaces the live ragdoll constraints used by this solver.
+    #[must_use]
+    pub fn with_ragdolls(mut self, ragdolls: Vec<RagdollConstraint>) -> XpbdSolver {
+        self.ragdolls = ragdolls;
+        self
     }
 
     /// Advances the world by a single sub-step of duration `h`.
     fn substep(&self, world: &mut PhysicsWorld, h: f32) {
+        world.breakable_joints.begin_substep();
+        let _ = world.prepare_external_substep(h);
+        let _ = world.step_articulations_substep(h);
         let gravity = world.config.gravity;
 
         // Phase 1: predict poses forward under gravity and damping.
@@ -113,7 +138,8 @@ impl XpbdSolver {
             // islands one after another is numerically identical to a single
             // global Gauss-Seidel pass because islands touch disjoint dynamic
             // bodies (statics are read-only separators).
-            let islands = SolveIslands::build(&view, &constraints, &active);
+            let islands =
+                SolveIslands::build_with_ragdolls(&view, &constraints, &active, &self.ragdolls);
             // Skip fully-asleep islands and wake the sleeping members of any
             // island that still has an awake body. Only the returned active
             // islands are solved below.
@@ -131,6 +157,7 @@ impl XpbdSolver {
                     &active_islands,
                     &constraints,
                     &active,
+                    &self.ragdolls,
                     &self.config,
                     h,
                     true,
@@ -149,6 +176,13 @@ impl XpbdSolver {
                         for &joint_index in islands.joints(island) {
                             joint_constraint::solve_joint(&mut view, active[joint_index], h);
                         }
+                        for &ragdoll_index in islands.ragdolls(island) {
+                            joint_constraint::solve_ragdoll(
+                                &mut view,
+                                &self.ragdolls[ragdoll_index],
+                                h,
+                            );
+                        }
                         contact_constraint::solve_positions_indexed(
                             &mut view,
                             &mut constraints,
@@ -163,6 +197,13 @@ impl XpbdSolver {
                 // velocity-level solve is then applied per active island.
                 integrate::recover_velocities(&mut view, h);
                 for &island in &active_islands {
+                    for &ragdoll_index in islands.ragdolls(island) {
+                        joint_constraint::solve_ragdoll_velocity(
+                            &mut view,
+                            &self.ragdolls[ragdoll_index],
+                            h,
+                        );
+                    }
                     velocity_solve::solve_indexed(
                         &mut view,
                         &constraints,
@@ -184,6 +225,7 @@ impl XpbdSolver {
         // proxies, performs two-way coupling, writes reactions back to rigid
         // bodies, and finally recovers particle velocities.
         world.step_soft_bodies_substep(h);
+        let _ = world.resolve_breakable_joints(h);
     }
 }
 

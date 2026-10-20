@@ -132,7 +132,7 @@ fn solve_isolated(work: IsolatedContact, alpha_tilde: f32) -> SolvedContact {
     let mut prev_positions = [a.prev_position, b.prev_position];
     let mut prev_orientations = [a.prev_orientation, b.prev_orientation];
     // The position solve never touches velocities, damping, sleeping or
-    // colliders, so those columns are inert placeholders.
+    // colliders, so those columns are unused by the position kernel.
     let mut linear_velocities = [Vec3::ZERO; 2];
     let mut angular_velocities = [Vec3::ZERO; 2];
     let mut sleeping = [false; 2];

@@ -20,6 +20,7 @@
 //! ([`IslandBuilder`](crate::island::IslandBuilder)).
 
 use crate::island::{IslandBuilder, IslandId};
+use crate::joint::ragdoll::RagdollConstraint;
 use crate::joint::Joint;
 use crate::solver::xpbd::contact_constraint::ContactConstraint;
 use crate::state::view::BodySolverView;
@@ -34,6 +35,7 @@ use crate::state::view::BodySolverView;
 pub struct SolveIslands {
     contact_indices: Vec<Vec<usize>>,
     joint_indices: Vec<Vec<usize>>,
+    ragdoll_indices: Vec<Vec<usize>>,
     /// Sorted, de-duplicated dynamic body slots per island. Used by the sleep
     /// bookkeeping to test and update every dynamic member of an island.
     member_slots: Vec<Vec<usize>>,
@@ -52,6 +54,17 @@ impl SolveIslands {
         view: &BodySolverView<'_>,
         constraints: &[ContactConstraint],
         joints: &[&Joint],
+    ) -> SolveIslands {
+        Self::build_with_ragdolls(view, constraints, joints, &[])
+    }
+
+    /// Builds the island partition including live ragdoll Swing-Twist links.
+    #[must_use]
+    pub fn build_with_ragdolls(
+        view: &BodySolverView<'_>,
+        constraints: &[ContactConstraint],
+        joints: &[&Joint],
+        ragdolls: &[RagdollConstraint],
     ) -> SolveIslands {
         let slot_count = view.slot_count();
         let mut builder = IslandBuilder::new(slot_count);
@@ -73,6 +86,19 @@ impl SolveIslands {
                 builder.union(slot_a, slot_b);
             }
         }
+        // Ragdoll links are solver-owned Swing-Twist constraints and must
+        // participate in the same connectivity graph as ordinary joints.
+        for ragdoll in ragdolls {
+            let slot_a = ragdoll.body_a.index() as usize;
+            let slot_b = ragdoll.body_b.index() as usize;
+            if slot_a < slot_count
+                && slot_b < slot_count
+                && view.is_dynamic(slot_a)
+                && view.is_dynamic(slot_b)
+            {
+                builder.union(slot_a, slot_b);
+            }
+        }
 
         let set = builder.build();
         // Compact map from raw IslandId to a dense bucket index. Only islands
@@ -80,11 +106,13 @@ impl SolveIslands {
         let mut bucket_of: Vec<Option<usize>> = vec![None; set.island_count()];
         let mut contact_indices: Vec<Vec<usize>> = Vec::new();
         let mut joint_indices: Vec<Vec<usize>> = Vec::new();
+        let mut ragdoll_indices: Vec<Vec<usize>> = Vec::new();
         let mut member_slots: Vec<Vec<usize>> = Vec::new();
 
         let mut bucket_for = |island: IslandId,
                               contacts: &mut Vec<Vec<usize>>,
                               jts: &mut Vec<Vec<usize>>,
+                              rags: &mut Vec<Vec<usize>>,
                               members: &mut Vec<Vec<usize>>|
          -> usize {
             let raw = island.0 as usize;
@@ -95,6 +123,7 @@ impl SolveIslands {
                     bucket_of[raw] = Some(b);
                     contacts.push(Vec::new());
                     jts.push(Vec::new());
+                    rags.push(Vec::new());
                     members.push(Vec::new());
                     b
                 }
@@ -110,6 +139,7 @@ impl SolveIslands {
                 set.island_of(dynamic_slot),
                 &mut contact_indices,
                 &mut joint_indices,
+                &mut ragdoll_indices,
                 &mut member_slots,
             );
             contact_indices[bucket].push(index);
@@ -133,9 +163,30 @@ impl SolveIslands {
                 set.island_of(dynamic_slot),
                 &mut contact_indices,
                 &mut joint_indices,
+                &mut ragdoll_indices,
                 &mut member_slots,
             );
             joint_indices[bucket].push(index);
+            push_dynamic_members(view, slot_a, slot_b, &mut member_slots[bucket]);
+        }
+
+        for (index, ragdoll) in ragdolls.iter().enumerate() {
+            let slot_a = ragdoll.body_a.index() as usize;
+            let slot_b = ragdoll.body_b.index() as usize;
+            if slot_a >= slot_count || slot_b >= slot_count {
+                continue;
+            }
+            let Some(dynamic_slot) = dynamic_slot_of(view, slot_a, slot_b) else {
+                continue;
+            };
+            let bucket = bucket_for(
+                set.island_of(dynamic_slot),
+                &mut contact_indices,
+                &mut joint_indices,
+                &mut ragdoll_indices,
+                &mut member_slots,
+            );
+            ragdoll_indices[bucket].push(index);
             push_dynamic_members(view, slot_a, slot_b, &mut member_slots[bucket]);
         }
 
@@ -147,6 +198,7 @@ impl SolveIslands {
         SolveIslands {
             contact_indices,
             joint_indices,
+            ragdoll_indices,
             member_slots,
         }
     }
@@ -177,6 +229,12 @@ impl SolveIslands {
     #[must_use]
     pub fn joints(&self, island: usize) -> &[usize] {
         self.joint_indices.get(island).map_or(&[], Vec::as_slice)
+    }
+
+    /// Returns the ragdoll Swing-Twist constraint indices belonging to `island`.
+    #[must_use]
+    pub fn ragdolls(&self, island: usize) -> &[usize] {
+        self.ragdoll_indices.get(island).map_or(&[], Vec::as_slice)
     }
 
     /// Returns the sorted dynamic body slots belonging to `island`.
@@ -323,5 +381,28 @@ mod tests {
         assert!(islands.is_empty());
         assert_eq!(islands.island_count(), 0);
         assert_eq!(islands.contacts(0), &[] as &[usize]);
+    }
+
+    #[test]
+    fn ragdoll_link_merges_dynamic_bodies_and_is_indexed() {
+        let mut storage = storage_with_kinds(&[BodyKind::Dynamic, BodyKind::Dynamic]);
+        let a = storage.handle_at_slot(0).expect("body a");
+        let b = storage.handle_at_slot(1).expect("body b");
+        let joint = crate::joint::SwingTwistJoint::try_new(
+            crate::joint::SwingTwistConfig::symmetric(Vec3::X, Vec3::X, Vec3::Y, Vec3::Y, 0.5, 0.5),
+        )
+        .expect("valid swing-twist");
+        let ragdolls = vec![RagdollConstraint {
+            body_a: a,
+            body_b: b,
+            local_point_a: Vec3::ZERO,
+            local_point_b: Vec3::ZERO,
+            joint,
+        }];
+        let view = storage.solver_view_mut();
+        let islands = SolveIslands::build_with_ragdolls(&view, &[], &[], &ragdolls);
+        assert_eq!(islands.island_count(), 1);
+        assert_eq!(islands.ragdolls(0), &[0]);
+        assert_eq!(islands.members(0), &[0, 1]);
     }
 }

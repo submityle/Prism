@@ -29,6 +29,8 @@ use super::rigid::{
 };
 use crate::joint::kind::{DistanceJoint, JointKind, PrismaticJoint, RevoluteJoint};
 use crate::joint::motor::{Motor, MotorTarget};
+use crate::joint::ragdoll::RagdollConstraint;
+use crate::joint::swing_twist::AngularJointInput;
 use crate::joint::{Joint, JointStorage};
 use crate::state::view::BodySolverView;
 use glam::{Mat3, Quat, Vec3};
@@ -57,6 +59,103 @@ pub fn solve_joints(view: &mut BodySolverView<'_>, joints: &JointStorage, h: f32
 /// or a pair with no dynamic body are skipped.
 pub fn solve_joint(view: &mut BodySolverView<'_>, joint: &Joint, h: f32) {
     solve_one(view, joint, h);
+}
+
+/// Solves one live ragdoll Swing-Twist link in the XPBD position phase.
+pub fn solve_ragdoll(view: &mut BodySolverView<'_>, constraint: &RagdollConstraint, h: f32) {
+    let slot_a = constraint.body_a.index() as usize;
+    let slot_b = constraint.body_b.index() as usize;
+    if !valid_pair(view, slot_a, slot_b) {
+        return;
+    }
+
+    let (r_a, world_a) = world_anchor(view, slot_a, constraint.local_point_a);
+    let (r_b, world_b) = world_anchor(view, slot_b, constraint.local_point_b);
+    let delta = world_a - world_b;
+    let distance = delta.length();
+    if distance > SOLVE_EPS {
+        apply_positional(
+            view,
+            slot_a,
+            slot_b,
+            r_a,
+            r_b,
+            delta / distance,
+            distance,
+            0.0,
+            f32::INFINITY,
+        );
+    }
+
+    let measurement = constraint
+        .joint
+        .measure(view.orientations[slot_a], view.orientations[slot_b]);
+    if measurement.swing_violation > SOLVE_EPS {
+        apply_angular(
+            view,
+            slot_a,
+            slot_b,
+            measurement.swing_correction_axis_world * measurement.swing_violation,
+            alpha_tilde(constraint.joint.config().swing_response.compliance, h),
+            f32::INFINITY,
+        );
+    }
+
+    let measurement = constraint
+        .joint
+        .measure(view.orientations[slot_a], view.orientations[slot_b]);
+    if measurement.twist_violation.abs() > SOLVE_EPS {
+        apply_angular(
+            view,
+            slot_a,
+            slot_b,
+            measurement.twist_axis_world * measurement.twist_violation,
+            alpha_tilde(constraint.joint.config().twist_response.compliance, h),
+            f32::INFINITY,
+        );
+    }
+}
+
+/// Applies the bounded friction, soft-limit, and pose-drive response of one
+/// ragdoll link after velocity recovery.
+pub fn solve_ragdoll_velocity(
+    view: &mut BodySolverView<'_>,
+    constraint: &RagdollConstraint,
+    h: f32,
+) {
+    let slot_a = constraint.body_a.index() as usize;
+    let slot_b = constraint.body_b.index() as usize;
+    if !valid_pair(view, slot_a, slot_b) {
+        return;
+    }
+    let input = AngularJointInput {
+        orientation_a: view.orientations[slot_a],
+        orientation_b: view.orientations[slot_b],
+        angular_velocity_a: view.angular_velocities[slot_a],
+        angular_velocity_b: view.angular_velocities[slot_b],
+        inv_inertia_a: if view.is_dynamic(slot_a) {
+            view.mass_props[slot_a].inv_inertia
+        } else {
+            Vec3::ZERO
+        },
+        inv_inertia_b: if view.is_dynamic(slot_b) {
+            view.mass_props[slot_b].inv_inertia
+        } else {
+            Vec3::ZERO
+        },
+        dt: h,
+    };
+    let mut angular_a = input.angular_velocity_a;
+    let mut angular_b = input.angular_velocity_b;
+    constraint
+        .joint
+        .apply_velocity_response(input, &mut angular_a, &mut angular_b);
+    if view.is_dynamic(slot_a) {
+        view.angular_velocities[slot_a] = angular_a;
+    }
+    if view.is_dynamic(slot_b) {
+        view.angular_velocities[slot_b] = angular_b;
+    }
 }
 
 /// Resolves a single joint's slots, guards them, and dispatches on its kind.
@@ -88,6 +187,14 @@ fn solve_one(view: &mut BodySolverView<'_>, joint: &Joint, h: f32) {
             solve_prismatic(view, joint, slot_a, slot_b, params, alpha, h);
         }
     }
+}
+
+fn valid_pair(view: &BodySolverView<'_>, slot_a: usize, slot_b: usize) -> bool {
+    slot_a < view.slot_count()
+        && slot_b < view.slot_count()
+        && view.is_active(slot_a)
+        && view.is_active(slot_b)
+        && (view.is_dynamic(slot_a) || view.is_dynamic(slot_b))
 }
 
 /// Holds the two anchor points coincident (ball-and-socket / weld position).
@@ -483,11 +590,29 @@ mod tests {
     use crate::joint::anchor::JointAnchor;
     use crate::joint::desc::JointDesc;
     use crate::joint::kind::{PrismaticJoint, RevoluteJoint};
+    use crate::joint::ragdoll::RagdollConstraint;
+    use crate::joint::{
+        AngularFriction, JointFriction, PoseDrive, SwingTwistConfig, SwingTwistJoint,
+    };
     use crate::state::body::BodyDesc;
     use crate::state::storage::BodyStorage;
 
     fn dynamic(pos: Vec3) -> BodyDesc {
         BodyDesc::dynamic_at(pos)
+    }
+
+    fn ragdoll_constraint(
+        a: crate::state::handle::BodyHandle,
+        b: crate::state::handle::BodyHandle,
+        joint: SwingTwistJoint,
+    ) -> RagdollConstraint {
+        RagdollConstraint {
+            body_a: a,
+            body_b: b,
+            local_point_a: Vec3::ZERO,
+            local_point_b: Vec3::ZERO,
+            joint,
+        }
     }
 
     #[test]
@@ -563,6 +688,60 @@ mod tests {
         )
         .length();
         assert!(err < 1.0e-2, "orientation not aligned, error = {err}");
+    }
+
+    #[test]
+    fn ragdoll_position_projection_converges_and_preserves_finite_pose() {
+        let mut storage = BodyStorage::new();
+        let parent = storage.insert(dynamic(Vec3::ZERO));
+        let child = storage.insert(dynamic(Vec3::ZERO));
+        storage.set_orientation(child, Quat::from_rotation_x(1.2));
+        let joint = SwingTwistJoint::try_new(SwingTwistConfig::symmetric(
+            Vec3::X,
+            Vec3::X,
+            Vec3::Y,
+            Vec3::Y,
+            0.5,
+            0.4,
+        ))
+        .expect("valid swing-twist config");
+        let constraint = ragdoll_constraint(parent, child, joint);
+        let mut view = storage.solver_view_mut();
+        for _ in 0..24 {
+            solve_ragdoll(&mut view, &constraint, 1.0 / 60.0);
+        }
+        let measurement = joint.measure(
+            view.orientations[parent.index() as usize],
+            view.orientations[child.index() as usize],
+        );
+        assert!(measurement.twist_violation.abs() < 1.0e-3);
+        assert!(measurement.swing_violation < 1.0e-3);
+        assert!(view.orientations[parent.index() as usize].is_finite());
+        assert!(view.orientations[child.index() as usize].is_finite());
+    }
+
+    #[test]
+    fn ragdoll_velocity_response_damps_friction_and_is_bounded() {
+        let mut storage = BodyStorage::new();
+        let parent = storage.insert(dynamic(Vec3::ZERO));
+        let child =
+            storage.insert(dynamic(Vec3::ZERO).with_angular_velocity(Vec3::new(8.0, 0.0, 0.0)));
+        let mut config = SwingTwistConfig::symmetric(Vec3::X, Vec3::X, Vec3::Y, Vec3::Y, 0.5, 0.5);
+        config.friction = JointFriction {
+            swing: AngularFriction::default(),
+            twist: AngularFriction::new(0.25, 0.5, 0.1).expect("valid friction"),
+        };
+        config.drive = PoseDrive::new(Quat::IDENTITY, 0.0, 0.0, 0.25);
+        let joint = SwingTwistJoint::try_new(config).expect("valid swing-twist config");
+        let constraint = ragdoll_constraint(parent, child, joint);
+        let mut view = storage.solver_view_mut();
+        let initial = view.angular_velocities[child.index() as usize].length();
+        for _ in 0..20 {
+            solve_ragdoll_velocity(&mut view, &constraint, 1.0 / 60.0);
+        }
+        let final_speed = view.angular_velocities[child.index() as usize].length();
+        assert!(final_speed < initial);
+        assert!(view.angular_velocities[child.index() as usize].is_finite());
     }
 
     #[test]
