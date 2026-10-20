@@ -338,6 +338,12 @@ impl<S> JsonRpcClient<S> {
         &mut self.transport
     }
 
+    /// Unwraps the client and returns its framed stream.
+    #[must_use]
+    pub fn into_inner(self) -> S {
+        self.transport.into_inner()
+    }
+
     /// Sends a JSON-RPC message, including notifications.
     pub fn send(&mut self, message: &JsonRpcMessage) -> Result<(), TransportError>
     where

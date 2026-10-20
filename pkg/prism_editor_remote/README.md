@@ -45,8 +45,41 @@ explicit, revision-checked `ChangeSet`. The session never mutates its edit
 baseline implicitly, and `PieStopResult::apply_commit` is the only explicit
 editor mutation path.
 
+## Runtime process bridge
+
+`RuntimeBridge<A>` supervises one controlled runtime process without exposing
+engine or ECS types. `RuntimeLaunchSpec` describes the executable, arguments,
+environment, working directory, and either a bounded stdio or TCP connection.
+`RuntimeLimits` bounds frame size, socket timing, startup/shutdown deadlines,
+and queued requests. The bridge provides:
+
+- `start`, `stop`, and `restart` with a monotonic generation and explicit
+  `RuntimeState` transitions;
+- `status` and `wait` with process ID, exit code, and failure diagnostics;
+- bounded correlated requests through `RuntimeRequest`, including deadline
+  timeout and cancellation;
+- child-process cleanup on startup failure, stop, bridge drop, timeout, and
+  cancellation.
+
+Engine-specific behavior is isolated behind `EngineRuntimeAdapter`: an adapter
+may transform a generic launch specification and perform a bounded startup
+handshake through the engine-neutral `RuntimeSession` trait. The crate ships
+`LoopbackRuntimeAdapter` as a deterministic mock adapter. Request cancellation
+terminates the controlled child because the synchronous framed worker may be
+blocked in an engine response read; the resulting process exit is observable
+through `RuntimeStatus`.
+
+The `prism_editor_remote_runtime_child` binary is a small loopback fixture used
+by integration tests. It is not an engine implementation and has no renderer,
+ECS, or Bevy dependency.
+
 Run the crate tests with:
 
 ```text
 cargo test --manifest-path pkg/prism_editor_remote/Cargo.toml
 ```
+
+For a standalone checkout, the runtime bridge integration tests are also
+included by `cargo test --all-targets`; they exercise both stdio and TCP child
+connections, startup retry, restart, exit-code reporting, timeout, and
+cancellation.
