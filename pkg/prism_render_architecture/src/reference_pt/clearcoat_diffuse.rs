@@ -58,10 +58,19 @@ impl ClearcoatDiffuse {
         coat_ior: f32,
         coat_weight: f32,
         coat_color: Vec3,
+        coat_darkening: f32,
     ) -> Self {
         Self {
             base: OrenNayar::new(albedo, sigma),
-            coat: CoatLayer::new(coat_roughness, coat_ior, coat_weight, coat_color),
+            coat: CoatLayer::new(
+                coat_roughness,
+                coat_ior,
+                coat_weight,
+                coat_color,
+                coat_darkening,
+                ((albedo.x + albedo.y + albedo.z) / 3.0).clamp(0.0, 1.0),
+                1.0,
+            ),
         }
     }
 
@@ -78,7 +87,10 @@ impl ClearcoatDiffuse {
         }
         let t_o = self.coat.transmission(cos_o);
         let t_i = self.coat.transmission(cos_i);
-        let base = self.base.evaluate(wo, wi, normal).scale(t_o * t_i);
+        let base = self
+            .base
+            .evaluate(wo, wi, normal)
+            .scale(t_o * t_i * self.coat.base_darkening(cos_o));
         base.add(self.coat.lobe(wo, wi, normal, cos_o, cos_i))
     }
 
@@ -160,7 +172,23 @@ mod tests {
     /// Builds a clear-coated matte paint with the given coat weight and
     /// roughness over a Lambertian base.
     fn coated_paint(coat_weight: f32, coat_roughness: f32) -> ClearcoatDiffuse {
-        ClearcoatDiffuse::new(ALBEDO, 0.0, coat_roughness, 1.5, coat_weight, Vec3::ONE)
+        coated_paint_with_darkening(coat_weight, coat_roughness, 1.0)
+    }
+
+    fn coated_paint_with_darkening(
+        coat_weight: f32,
+        coat_roughness: f32,
+        coat_darkening: f32,
+    ) -> ClearcoatDiffuse {
+        ClearcoatDiffuse::new(
+            ALBEDO,
+            0.0,
+            coat_roughness,
+            1.5,
+            coat_weight,
+            Vec3::ONE,
+            coat_darkening,
+        )
     }
 
     /// A view direction at the given cosine to the normal, tilted in the `x-y`
@@ -196,6 +224,31 @@ mod tests {
                 < 1e-6
         );
         assert!((coat.pdf(wo, wi, N) - bare.pdf(wo, wi, N)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn coat_darkening_scales_the_diffuse_substrate_but_not_the_coat_lobe() {
+        let neutral = coated_paint_with_darkening(1.0, 0.2, 0.0);
+        let darkened = coated_paint_with_darkening(1.0, 0.2, 1.0);
+        let wo = view_at(0.6);
+        let wi = Vec3::new(0.2, 0.94, 0.27).normalize_or_zero();
+        let cos_o = N.dot(wo).max(0.0);
+        let cos_i = N.dot(wi).max(0.0);
+
+        let transmission = darkened.coat.transmission(cos_o) * darkened.coat.transmission(cos_i);
+        let base = darkened
+            .base
+            .evaluate(wo, wi, N)
+            .scale(transmission * darkened.coat.base_darkening(cos_o));
+        let coat_lobe = darkened.coat.lobe(wo, wi, N, cos_o, cos_i);
+        let expected = base.add(coat_lobe);
+        let actual = darkened.evaluate(wo, wi, N);
+        assert!(actual.sub(expected).length() < 1.0e-6);
+        assert!(darkened.coat.base_darkening(cos_o) < 1.0);
+        assert!(
+            actual.max_component() < neutral.evaluate(wo, wi, N).max_component(),
+            "darkening should attenuate the substrate while preserving the coat highlight"
+        );
     }
 
     /// Adding a coat injects a specular highlight the matte base cannot produce:

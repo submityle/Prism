@@ -54,10 +54,21 @@ impl ClearcoatConductor {
         coat_ior: f32,
         coat_weight: f32,
         coat_color: Vec3,
+        coat_darkening: f32,
     ) -> Self {
+        let base_albedo = super::conductor::average_fresnel_conductor(eta, k);
+        let base_albedo = (base_albedo.x + base_albedo.y + base_albedo.z) / 3.0;
         Self {
             base: Conductor::new(eta, k, roughness),
-            coat: CoatLayer::new(coat_roughness, coat_ior, coat_weight, coat_color),
+            coat: CoatLayer::new(
+                coat_roughness,
+                coat_ior,
+                coat_weight,
+                coat_color,
+                coat_darkening,
+                base_albedo,
+                roughness,
+            ),
         }
     }
 
@@ -74,7 +85,10 @@ impl ClearcoatConductor {
         }
         let t_o = self.coat.transmission(cos_o);
         let t_i = self.coat.transmission(cos_i);
-        let base = self.base.evaluate(wo, wi, normal).scale(t_o * t_i);
+        let base = self
+            .base
+            .evaluate(wo, wi, normal)
+            .scale(t_o * t_i * self.coat.base_darkening(cos_o));
         base.add(self.coat.lobe(wo, wi, normal, cos_o, cos_i))
     }
 
@@ -149,8 +163,25 @@ mod tests {
 
     /// Builds a clear-coated gold with the given coat weight and roughness.
     fn coated_gold(coat_weight: f32, coat_roughness: f32) -> ClearcoatConductor {
+        coated_gold_with_darkening(coat_weight, coat_roughness, 1.0)
+    }
+
+    fn coated_gold_with_darkening(
+        coat_weight: f32,
+        coat_roughness: f32,
+        coat_darkening: f32,
+    ) -> ClearcoatConductor {
         let (eta, k) = Metal::Gold.complex_ior();
-        ClearcoatConductor::new(eta, k, 0.3, coat_roughness, 1.5, coat_weight, Vec3::ONE)
+        ClearcoatConductor::new(
+            eta,
+            k,
+            0.3,
+            coat_roughness,
+            1.5,
+            coat_weight,
+            Vec3::ONE,
+            coat_darkening,
+        )
     }
 
     /// A view direction at the given cosine to the normal, tilted in the `x-y`
@@ -188,6 +219,31 @@ mod tests {
                 < 1e-6
         );
         assert!((coat.pdf(wo, wi, N) - bare.pdf(wo, wi, N)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn coat_darkening_scales_the_conductor_substrate_but_not_the_coat_lobe() {
+        let neutral = coated_gold_with_darkening(1.0, 0.2, 0.0);
+        let darkened = coated_gold_with_darkening(1.0, 0.2, 1.0);
+        let wo = view_at(0.6);
+        let wi = Vec3::new(-0.2, 0.94, 0.27).normalize_or_zero();
+        let cos_o = N.dot(wo).max(0.0);
+        let cos_i = N.dot(wi).max(0.0);
+
+        let transmission = darkened.coat.transmission(cos_o) * darkened.coat.transmission(cos_i);
+        let base = darkened
+            .base
+            .evaluate(wo, wi, N)
+            .scale(transmission * darkened.coat.base_darkening(cos_o));
+        let coat_lobe = darkened.coat.lobe(wo, wi, N, cos_o, cos_i);
+        let expected = base.add(coat_lobe);
+        let actual = darkened.evaluate(wo, wi, N);
+        assert!(actual.sub(expected).length() < 1.0e-6);
+        assert!(darkened.coat.base_darkening(cos_o) < 1.0);
+        assert!(
+            actual.max_component() < neutral.evaluate(wo, wi, N).max_component(),
+            "darkening should attenuate the substrate while preserving the coat highlight"
+        );
     }
 
     /// Adding a coat injects an extra specular highlight: near the mirror

@@ -62,6 +62,12 @@ pub(super) struct CoatLayer {
     coat_weight: f32,
     /// Per-channel tint of the coat highlight (usually white for clear lacquer).
     coat_color: Vec3,
+    /// OpenPBR coat darkening control in [0, 1]; zero is an exact identity.
+    coat_darkening: f32,
+    /// Scalar normal-incidence albedo of the substrate.
+    base_albedo: f32,
+    /// Effective substrate roughness in [0, 1].
+    base_roughness: f32,
 }
 
 impl CoatLayer {
@@ -73,13 +79,46 @@ impl CoatLayer {
         coat_ior: f32,
         coat_weight: f32,
         coat_color: Vec3,
+        coat_darkening: f32,
+        base_albedo: f32,
+        base_roughness: f32,
     ) -> Self {
         Self {
             coat: GgxIsotropic::from_roughness(coat_roughness),
             coat_ior: coat_ior.max(MIN_COAT_IOR),
             coat_weight: coat_weight.clamp(0.0, 1.0),
             coat_color,
+            coat_darkening: coat_darkening.clamp(0.0, 1.0),
+            base_albedo: base_albedo.clamp(0.0, 1.0),
+            base_roughness: base_roughness.clamp(0.0, 1.0),
         }
+    }
+
+    /// Closed-form OpenPBR darkening multiplier for the substrate.
+    /// The coat lobe itself is deliberately excluded.
+    #[must_use]
+    pub(super) fn base_darkening(&self, cos_o: f32) -> f32 {
+        if self.coat_weight <= 0.0 || self.coat_darkening <= 0.0 {
+            return 1.0;
+        }
+        let eta = self.coat_ior;
+        let numerator = 10893.0 * eta - 1438.2;
+        let denominator = -774.4 * eta * eta + 10212.0 * eta + 1.0;
+        let hemispherical_fresnel = if numerator > 0.0 && denominator > 0.0 {
+            (numerator / denominator).ln().clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let k_rough = (1.0 - (1.0 - hemispherical_fresnel) / (eta * eta)).clamp(0.0, 1.0);
+        let k_smooth = fresnel_dielectric(cos_o, 1.0, eta);
+        let k = k_smooth + (k_rough - k_smooth) * self.base_roughness;
+        let denominator = 1.0 - self.base_albedo * k;
+        let delta = if denominator <= f32::MIN_POSITIVE {
+            1.0
+        } else {
+            ((1.0 - k) / denominator).clamp(0.0, 1.0)
+        };
+        1.0 + (delta - 1.0) * (self.coat_weight * self.coat_darkening)
     }
 
     /// The effective macroscopic coat reflectance `weight * Fresnel(cos)` for a

@@ -307,6 +307,8 @@ pub enum Bsdf {
         coat_weight: f32,
         /// Per-channel tint of the coat highlight (usually white).
         coat_color: Vec3,
+        /// OpenPBR coat darkening control in `[0, 1]`.
+        coat_darkening: f32,
     },
     /// Clear-coated diffuse: a matte pigmented base (lacquered car paint,
     /// varnished wood) viewed through a dielectric clear coat. The coat adds an
@@ -328,6 +330,8 @@ pub enum Bsdf {
         coat_weight: f32,
         /// Per-channel tint of the coat highlight (usually white).
         coat_color: Vec3,
+        /// OpenPBR coat darkening control in `[0, 1]`.
+        coat_darkening: f32,
     },
 }
 
@@ -459,6 +463,7 @@ impl Bsdf {
                 coat_ior,
                 coat_weight,
                 coat_color,
+                coat_darkening,
             } => ClearcoatConductor::new(
                 *eta,
                 *k,
@@ -467,6 +472,7 @@ impl Bsdf {
                 *coat_ior,
                 *coat_weight,
                 *coat_color,
+                *coat_darkening,
             )
             .evaluate(wo, wi, normal),
             Self::ClearcoatDiffuse {
@@ -476,6 +482,7 @@ impl Bsdf {
                 coat_ior,
                 coat_weight,
                 coat_color,
+                coat_darkening,
             } => ClearcoatDiffuse::new(
                 *albedo,
                 *sigma,
@@ -483,6 +490,7 @@ impl Bsdf {
                 *coat_ior,
                 *coat_weight,
                 *coat_color,
+                *coat_darkening,
             )
             .evaluate(wo, wi, normal),
         }
@@ -589,6 +597,7 @@ impl Bsdf {
                 coat_ior,
                 coat_weight,
                 coat_color,
+                coat_darkening,
             } => ClearcoatConductor::new(
                 *eta,
                 *k,
@@ -597,6 +606,7 @@ impl Bsdf {
                 *coat_ior,
                 *coat_weight,
                 *coat_color,
+                *coat_darkening,
             )
             .pdf(wo, wi, normal),
             Self::ClearcoatDiffuse {
@@ -606,6 +616,7 @@ impl Bsdf {
                 coat_ior,
                 coat_weight,
                 coat_color,
+                coat_darkening,
             } => ClearcoatDiffuse::new(
                 *albedo,
                 *sigma,
@@ -613,6 +624,7 @@ impl Bsdf {
                 *coat_ior,
                 *coat_weight,
                 *coat_color,
+                *coat_darkening,
             )
             .pdf(wo, wi, normal),
         }
@@ -829,6 +841,7 @@ impl Bsdf {
                 coat_ior,
                 coat_weight,
                 coat_color,
+                coat_darkening,
             } => ClearcoatConductor::new(
                 *eta,
                 *k,
@@ -837,6 +850,7 @@ impl Bsdf {
                 *coat_ior,
                 *coat_weight,
                 *coat_color,
+                *coat_darkening,
             )
             .sample(wo, normal, rng)
             .map(|s| BsdfSample {
@@ -852,6 +866,7 @@ impl Bsdf {
                 coat_ior,
                 coat_weight,
                 coat_color,
+                coat_darkening,
             } => ClearcoatDiffuse::new(
                 *albedo,
                 *sigma,
@@ -859,6 +874,7 @@ impl Bsdf {
                 *coat_ior,
                 *coat_weight,
                 *coat_color,
+                *coat_darkening,
             )
             .sample(wo, normal, rng)
             .map(|s| BsdfSample {
@@ -1677,6 +1693,7 @@ mod tests {
             coat_ior: 1.5,
             coat_weight: 1.0,
             coat_color: Vec3::ONE,
+            coat_darkening: 0.0,
         };
         assert!(!coated.is_specular());
         let bare = Bsdf::GgxConductorComplex {
@@ -1700,6 +1717,7 @@ mod tests {
             coat_ior: 1.5,
             coat_weight: 0.0,
             coat_color: Vec3::ONE,
+            coat_darkening: 1.0,
         };
         let wi2 = Vec3::new(-0.3, 0.92, 0.1).normalize_or_zero();
         let a = uncoated.evaluate(wo, wi2, N);
@@ -1720,6 +1738,7 @@ mod tests {
             coat_ior: 1.5,
             coat_weight: 1.0,
             coat_color: Vec3::ONE,
+            coat_darkening: 0.0,
         };
         assert!(!coated.is_specular());
         let bare = Bsdf::OrenNayar { albedo, sigma: 0.0 };
@@ -1738,6 +1757,7 @@ mod tests {
             coat_ior: 1.5,
             coat_weight: 0.0,
             coat_color: Vec3::ONE,
+            coat_darkening: 1.0,
         };
         let wi2 = Vec3::new(0.4, 0.9, 0.15).normalize_or_zero();
         let a = uncoated.evaluate(wo, wi2, N);

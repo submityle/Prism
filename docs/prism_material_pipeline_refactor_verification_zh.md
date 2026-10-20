@@ -1,7 +1,7 @@
 # Prism 材质重构文档 — 完成项 / 未完成项 核验报告
 
 - 核验对象：`docs/prism_material_pipeline_refactor_zh.md`（v10，1772 行）
-- 核验时间：2026-10-15；仓库 `/Users/wangkailong/Documents/GitHub/Prism`，本轮基线为 `11f18a5db`（当前工作树改动见 §2.2）
+- 核验时间：2026-10-20；仓库 `/Users/wangkailong/Documents/GitHub/Prism`，本轮基线为当前 `HEAD`（当前工作树改动见 §2.2）
 - 核验范围（用户口径）：**只核验文档中的完成项与未完成项**，不实现任何新功能
 - 方法：只读代码核对（含 6 路并行只读子代理逐项对抗核验）+ 本轮真跑部分门禁
 - 裁决档位：**成立** / **部分成立** / **不成立** / **未执行（无法判定）**
@@ -29,7 +29,7 @@
    - **P1-g**：路线图表无 ✅，但 S1+S2（schema 数据化 + codegen 生成物）已落地。
    - **coat_darkening**：doc:1041 记"仍因公式不确定而搁置"，实际 CPU + WESL 双线实现、双消费点、两个门禁，源码无占位标记。
 3. **有 1 处"文档说未做、实际已有结构级实现"**：nodedef 往返（`prism_render_material_authoring` 已有解析 + 导出 + 往返测试）；真正缺的是 nodedef ↔ `author_node` 映射与实例。
-4. **有 1 处"文档说做了、实际只做了一半"**：**P2-h 原理化分层 BSDF** —— coat/base 能量耦合闭式与零反照率再分配项已落地，**但 über 原理化路径不消费 `coat_darkening`**（该 lerp 只在专用 Clearcoat 瓣里），"coat 吸收/变暗统一进原理化分层"这半边未落地。
+4. **P2-h 原理化分层 BSDF 已通过局部验收**：coat/base 能量耦合闭式、零反照率再分配项，以及 `coat_darkening` 对 reflective base 与 transmission substrate 的统一消费均已落地。path-traced reference 已接入 `CoatLayer`、clearcoat conductor/diffuse 与 `Bsdf` 分发；2026-10-20 定向 `cargo test -p prism_render_architecture --lib reference_pt::clearcoat -- --nocapture` **13 passed, 0 failed**，覆盖两种 substrate darkening 和 coat lobe 保持不变。该结果证明局部参考 BSDF，不等于完整离线渲染/实时 GPU 跨路径图像 parity。
 5. **计数类偏差普遍存在**（都是历史快照，不影响结论、但影响可信度）：门禁数字、header 字数、烘表常量数、PRISM 占槽数与目录行数、`bake::tests` 项数。
 6. **文档内部自相矛盾 6 处**（编号冲突、状态冲突、已失效的失败记录），详见 §6.2。
 7. **当前工作树的生成物门禁已恢复绿色**：`prism-material-codegen write` 已重新生成 `surface_layout.rs` 与 `material_unpack.wesl`，`codegen_freshness` 全部通过；剩余设备能力失败仅属于需要真实 GPU 特性的独立门禁。
@@ -59,6 +59,8 @@
 | water Hybrid GPU 能力门禁 | 旧快照未执行 | **15 passed / 0 failed**；Apple M2 Metal，7 groups ≤ `max_bind_groups=8` | ✅ 严格 GPU 通过 |
 
 `prism_render_app` 另有 3 条无关 warning：unused import `Instance`、`PrepareContextError`、`prepare_extracted_assets_with_context`。
+
+2026-10-20 增量复验：`cargo test -p prism_render_architecture --lib reference_pt::clearcoat -- --nocapture` **13 passed / 0 failed**，覆盖 path-traced clearcoat conductor/diffuse substrate darkening 与 coat lobe 隔离。`cargo test -p prism_render_scene --lib material::systems::tests -- --nocapture` 未能编译到测试执行阶段：该次复验所见工作树中 `prism_render_scene` 有 12 个编译错误，涉及 composition 的 `CommandBuffer` 导入、water/spray 的 Fabric API 可见性与类型不匹配、area-light 对私有 `resolve` 模块的访问等；因此材料提取新增测试仍未验收。为避免并发 Cargo 使用期间删共享产物，本轮清理后又有并行 Cargo 持有 build lock，暂不继续清理或重跑。
 
 ### 2.2 已修复的历史红门禁与当前状态
 
@@ -110,7 +112,7 @@ pub const SURFACE_CACHE_AUX: [CacheAuxLayout; 1] = [
 | 项 | 文档声明 | 代码裁决 | 缺口 |
 |---|---|---|---|
 | **P2-e 四线正交** | 部分（缺 ①逐区域 illumination ②作者侧 `respond_custom` WESL） | **① 已落地（文档错）**；② 确实缺失 | ①：`material_classification.wesl:87` `material_class(header, region_illumination)`、`:104-106` 覆盖规则、`:152` 消费 `metadata.z`；CPU `classification.rs:686/716-722`；来源 `visibility_raster.wesl:127` `region_illumination_selector`（扫描 `SEMANTIC_ILLUMINATION_MASK` 纹理行，`:142-171`）+ `:47` `FEATURE_REGION_ILLUMINATION`；作者 API `record.rs:106`、`authoring.rs:82`；`raster.rs:179` 发 shader def；门禁 `classification.rs:788`、`:927`、`authoring.rs:154`。语义限制：选择子仅在 `header.illumination ∈ {Lit,Stylized}` 时生效，`Unlit`/`Custom` 忽略区域遮罩（`:716-722`）<br>②：全仓 `respond_custom` 仅 1 处注释（`prism_render_shading/src/classification.rs:145`），无 WESL；`custom_program` 只是 header u32 标记（`record.rs:158`、`material_classification.wesl:114`） |
-| **P2-h 原理化分层 BSDF** | 未做（路线图表无 ✅） | **半边已落地** | 已做：闭式 `t_slab=(1−f_v)(1−f_l)/(1−f_v·f_l)`、`r_slab`、基底乘 `coat_attenuation = 1 + coat·(coat_t_slab−1)`、零反照率再分配项 `coat·(r_slab−A)·n·l/π`（`lighting.rs:600-657`，WESL `brdf.wesl:985-1005`，门禁 `lighting.rs:1605`）<br>未做：über 原理化路径不消费 `coat_darkening`（该字段在 `lighting.rs` 只出现于 `:77/80/253`，`brdf.wesl` 只是结构字段 `:96-97`）；`lerp(1,Δ,C·δ)` 只在专用 Clearcoat 瓣（`clearcoat.rs:117/131/450/459-460/475`、`clearcoat.wesl:122/133/378-379/387`） |
+| **P2-h 原理化分层 BSDF** | 未做（路线图表无 ✅） | **实时与 reference 局部验收已成立** | 实时侧：闭式 `t_slab=(1−f_v)(1−f_l)/(1−f_v·f_l)`、`r_slab`、基底乘 `coat_attenuation = 1 + coat·(coat_t_slab−1)`、零反照率再分配项 `coat·(r_slab−A)·n·l/π`，以及 `coat_darkening = lerp(1,Δ,C·δ)` 对 reflective base 与 transmission substrate 的统一消费（CPU `lighting.rs:765-926`，WESL `brdf.wesl:1269-1386`，CPU/WESL 结构门禁 `lighting.rs:2070` / `shading/resolve/shader_tests.rs:223`）。reference 侧 `reference_pt/coat.rs` darkening 核、conductor/diffuse substrate 消费及 `Bsdf` 参数贯通由定向测试覆盖；`reference_pt::clearcoat` 结果为 **13 passed, 0 failed**。coat 自身高光不消费该衰减；尚无完整实时 GPU 与 path-traced 图像级 parity 证据。 |
 | **P1-g 自描述反射瓣 schema** | 路线图表无 ✅；§17.5.8 S2 标 ✅ | **S1+S2 已落地；S3/S4 未做** | 已做：`Field.name`（`prism_material_schema/src/lib.rs:286`）、字足迹由 `Field.ty` 派生（`:288-289`）、`registry_slot`、per-field `spec_subfield="closure_mask"`（`surface.toml:304`）、`closure` → `SURFACE_LOBE_CLOSURES`（`surface_layout.rs:190`，消费于 `classification.rs:486`）；`material_unpack.wesl` 与 `surface_layout.rs` 由 codegen 生成<br>未做：`material_classification.wesl` 仍手写；`SpecializationId` 位打包仍手写（`axis.rs:103`）；CPU golden/sample 未生成 |
 | **P0-b 高光抗锯齿** | P0 | **消费端成立，生产者缺失** | 消费端：`gi/specular_aa/normal_variance.rs:124` `filter_alpha_sq`、`:104` `kernel_roughness_sq = (2v).min(cap)`、`toksvig.rs`/`lean.rs`；主高光 `lighting.rs:408`；GPU 孪生 `specular_aa.wesl:81/106` + `brdf.wesl:836`<br>缺口：`normal_variance` 主路径生产者缺失（字段 `lighting.rs:171`，赋 0 于 `lighting.rs:274`、`resolve.rs:319`、`cloth_advanced.rs:374`；`screen_space_variance` 无生产消费者）。**例外**：SSR 分支已真实喂方差 —— `ssr_repack.wesl:154` `spec_aa_filter_roughness` 由 view-normal prepass 屏幕差分算方差并写 `normal_roughness`（`:445-447`） |
 | **P1-e 贵瓣采样缩放** | 路线图表无 ✅（§13.a 自述 pass uniform 未接线） | **类型 + CPU 全链已落地；GPU 侧未落地** | 已做：`prism_render_shading/src/quality.rs:109` `LobeSampleBudget` + `ShadingQuality`；CPU 真消费 `gi/subsurface/preintegrated.rs:211/213`、`separable.rs:197/208`、`sky_lut/multiscatter_lut.rs:264`、`translucency/diffusion.rs:278`、`lobe_sampling.rs:145/189`；生产设置画质档 `scene/src/shading/runtime.rs:9`（默认 High `:244`）、`shading/resolve/dispatch.rs:93`<br>缺口：`shaders/lobe_budget.wesl` 只被测试引用（`shading/lobe_budget/mod.rs` 只有 `#[cfg(test)] mod shader_tests;`）；`quality.rs:98` 写"Uploaded to the GPU as a plain pass uniform"但无生产写入者；PCM 只有 UID 登记（`builtin.rs:88`） |
@@ -121,7 +123,7 @@ pub const SURFACE_CACHE_AUX: [CacheAuxLayout; 1] = [
 
 | 文档说法 | 裁决 | 事实 |
 |---|---|---|
-| doc:1041 "coat_darkening 仍因公式不确定、仓库 path-traced 参考亦未实现而搁置" | **不成立** | CPU + WESL 双线实现（`clearcoat.rs:117/131/450/459-460/475`、`clearcoat.wesl:122/133/378-379/387`），两个门禁（`openpbr_reference.rs:1213`、`clearcoat.rs:1052`），三个文件均无占位或修复标记。**唯一成立的是后半句**：path-traced 参考确实没有（`pkg/prism_render_architecture/src/reference_pt/` 无 darkening 匹配） |
+| doc:1041 "coat_darkening 仍因公式不确定、仓库 path-traced 参考亦未实现而搁置" | **不成立** | CPU + WESL 双线实现（`clearcoat.rs:117/131/450/459-460/475`、`clearcoat.wesl:122/133/378-379/387`）与门禁已存在；reference path 现已实现 substrate darkening，并由 `reference_pt::clearcoat` 定向测试 **13/13** 覆盖。仍未证明完整离线/实时图像级 parity。 |
 | doc:1183/doc:1189 "逐区域 illumination 未完成" | **不成立** | 见 §3.2 P2-e ①，且 doc:1353 自证已实现 |
 | doc:1187 P3-b "未开始" | **不成立（低估）** | `shade.wgsl` 写 `incoming = light_radiance * max(dot(n, l), 0)`，`gpu/shade.rs:1-4` 明写 "stores view-independent incoming irradiance, not a material response" → §14.3 的架构约束已在独立 slice 落地；缺的是真实 producer、多光源/GI/SSS/emission |
 | doc:1166-1168 "`cargo test --lib -- --list` 因 `texel_cache::gpu::dispatch` 重复声明/重复导出失败" | **不成立（不可复现）** | `texel_cache/gpu/mod.rs:9` 只有一次 `pub mod dispatch;`；`texel_cache/mod.rs:22-24` 只用一次 `#[path = "gpu/tests.rs"] mod gpu_tests`；`gpu/mod.rs:8-17` 无 `tests` 声明；无重复 `pub use`。本轮 `-- --list` 正常输出 **1718 tests, 0 benchmarks** |
@@ -149,17 +151,16 @@ pub const SURFACE_CACHE_AUX: [CacheAuxLayout; 1] = [
 5. **P2-b 程序化节点 → VT 烘焙**：完全未开始。`bake.rs:254/614` 只是任意深度 layer stack 烘焙；无 noise/curve/blend 图求值。
 6. **P2-a 剩余 / 编辑器前端**：完整节点图求值、作者侧 VT 产线、编辑器集成。
 7. **P2-e ②**：作者侧 `respond_custom` WESL 逃生口不存在（`custom_program` 仅为 header 标记，运行期安全退化到 über）。
-8. **P2-h**：über 原理化路径不消费 `coat_darkening`（"coat 吸收/变暗统一进原理化分层"未完成）。
-9. **P2-i 第 9 类**：`author_node` 无任何实例（`pkg/prism_material_pcm/src/builtin.rs:274` `PRISM_IDENTITY_ONLY` 仅 5 行，`:260` 注释说明故意缺席，测试 `src/tests.rs:607` 断言其行为空）；schema 无 `[[author_node]]`。缺 nodedef ↔ author_node 映射与 PCM 实例。
-10. **P3-a 生产闭环**：① `ShadeDispatchInputs` 只有 init/extract（`plugin.rs:263/376`）**无 producer**；② `begin_shade_writes_from_registry` 仅测试调用，`ShadeDemandRegistry` 不自动提交 GPU 工作；③ **无主 render pass 端到端硬件门禁**（现有为 group-1 生产绑定 + test-owned wrapper）。
-11. **P3-b 生产化**：独立 slice 已存入射辐照度，但仅单方向光、无 GI/SSS/emission 接入生产 resolve。
-12. **P3-c 失效摊销 + 时序复用 + mip LOD**：`coarsen`/`Stale` 原语在，全库无 temporal/reprojection 实现。
-13. **P3-d 光谱（hero-wavelength）**：材质线完全没有；仅 hair 子系统 `prism_render_architecture/src/hair/spectral_absorption.rs:187` 有 `hero_wavelengths`（与 P3-d 无关）。
-14. **P3-e 四线 × 自定义契约的 pass/TAA 接线**：数学核 + 孪生已落地，接线未做。
-15. **P3-f 内存与压缩**：未开始。
-16. **P2-f "全部配置"白炉**：`metal(0.1)` 仍被 omit，且门禁文件内注释陈旧。
-17. **P1-b 门禁盲区**：第 6 个 `MaterialHeader` 镜像（`visibility_raster.wesl:24-35`）未纳入 `MIRRORS`。
-18. **历史生成物门禁**：曾因生成器排版差异失败；本轮已重新生成并由 `codegen_freshness` 的 **8 passed / 0 failed** 关闭该问题。
+8. **P2-i 第 9 类**：`author_node` 无任何实例（`pkg/prism_material_pcm/src/builtin.rs:274` `PRISM_IDENTITY_ONLY` 仅 5 行，`:260` 注释说明故意缺席，测试 `src/tests.rs:607` 断言其行为空）；schema 无 `[[author_node]]`。缺 nodedef ↔ author_node 映射与 PCM 实例。
+9. **P3-a 生产闭环**：① `ShadeDispatchInputs` 只有 init/extract（`plugin.rs:263/376`）**无 producer**；② `begin_shade_writes_from_registry` 仅测试调用，`ShadeDemandRegistry` 不自动提交 GPU 工作；③ **无主 render pass 端到端硬件门禁**（现有为 group-1 生产绑定 + test-owned wrapper）。
+10. **P3-b 生产化**：独立 slice 已存入射辐照度，但仅单方向光、无 GI/SSS/emission 接入生产 resolve。
+11. **P3-c 失效摊销 + 时序复用 + mip LOD**：`coarsen`/`Stale` 原语在，全库无 temporal/reprojection 实现。
+12. **P3-d 光谱（hero-wavelength）**：材质线完全没有；仅 hair 子系统 `prism_render_architecture/src/hair/spectral_absorption.rs:187` 有 `hero_wavelengths`（与 P3-d 无关）。
+13. **P3-e 四线 × 自定义契约的 pass/TAA 接线**：数学核 + 孪生已落地，接线未做。
+14. **P3-f 内存与压缩**：未开始。
+15. **P2-f "全部配置"白炉**：`metal(0.1)` 仍被 omit，且门禁文件内注释陈旧。
+16. **P1-b 门禁盲区**：第 6 个 `MaterialHeader` 镜像（`visibility_raster.wesl:24-35`）未纳入 `MIRRORS`。
+17. **历史生成物门禁**：曾因生成器排版差异失败；本轮已重新生成并由 `codegen_freshness` 的 **8 passed / 0 failed** 关闭该问题。
 
 ---
 
@@ -167,7 +168,7 @@ pub const SURFACE_CACHE_AUX: [CacheAuxLayout; 1] = [
 
 ### 5.1 内容偏差
 
-1. `doc:1041` coat_darkening"搁置"→ 改为"CPU/WESL 双线已实现并有门禁；仅 path-traced 参考未实现"。
+1. `doc:1041` coat_darkening"搁置"→ 改为"CPU/WESL 与 reference_pt 局部实现均已有定向门禁；当前 reference_pt clearcoat 定向测试 13/13；完整离线/实时图像级 parity 仍需独立验收"。
 2. `doc:1183/1189` 逐区域 illumination"未完成"→ 改为"已落地（CPU + WESL + 作者 API + 门禁）"，并删除与 `doc:1353` 的矛盾。
 3. `doc:1153/1187` P3-b"未开始"→ 改为"语义已落地于独立 slice（只存入射辐照度），缺生产 producer 与主 pass 门禁"。
 4. `doc:795` `bake::tests` 12 → **13**。
