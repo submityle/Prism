@@ -962,6 +962,285 @@ pub struct GizmoSession {
     active: bool,
 }
 
+/// The three deterministic gizmo axes used by screen-space hit testing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GizmoAxis {
+    /// The first axis in the fixed hit-test priority order.
+    X,
+    /// The second axis in the fixed hit-test priority order.
+    Y,
+    /// The third axis in the fixed hit-test priority order.
+    Z,
+}
+
+impl GizmoAxis {
+    /// Returns the stable numeric axis index used by draw commands.
+    #[must_use]
+    pub const fn index(self) -> u8 {
+        match self {
+            Self::X => 0,
+            Self::Y => 1,
+            Self::Z => 2,
+        }
+    }
+
+    const ALL: [Self; 3] = [Self::X, Self::Y, Self::Z];
+}
+
+/// A finite point in viewport screen coordinates, measured in pixels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScreenPoint {
+    x: f32,
+    y: f32,
+}
+
+impl ScreenPoint {
+    /// Creates a screen point. Non-finite values are rejected by layout and hit-test APIs.
+    #[must_use]
+    pub const fn new(x: f32, y: f32) -> Self {
+        Self { x, y }
+    }
+
+    /// Returns the horizontal pixel coordinate.
+    #[must_use]
+    pub const fn x(self) -> f32 {
+        self.x
+    }
+
+    /// Returns the vertical pixel coordinate.
+    #[must_use]
+    pub const fn y(self) -> f32 {
+        self.y
+    }
+
+    fn is_finite(self) -> bool {
+        self.x.is_finite() && self.y.is_finite()
+    }
+}
+
+/// A successful screen-space gizmo axis hit.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GizmoHit {
+    axis: GizmoAxis,
+}
+
+impl GizmoHit {
+    /// Creates a hit for an already-selected axis.
+    #[must_use]
+    pub const fn axis(axis: GizmoAxis) -> Self {
+        Self { axis }
+    }
+
+    /// Returns the selected axis.
+    #[must_use]
+    pub const fn selected_axis(self) -> GizmoAxis {
+        self.axis
+    }
+}
+
+/// Errors while constructing a screen-space gizmo layout.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ScreenGizmoLayoutError {
+    /// The origin, endpoint, or tolerance was not finite.
+    NonFiniteInput,
+    /// An axis endpoint coincides with the gizmo origin.
+    DegenerateAxis(GizmoAxis),
+    /// The hit tolerance is negative or greater than the supported bound.
+    ToleranceOutOfRange,
+}
+
+impl fmt::Display for ScreenGizmoLayoutError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NonFiniteInput => formatter.write_str("screen gizmo input must be finite"),
+            Self::DegenerateAxis(axis) => {
+                write!(
+                    formatter,
+                    "screen gizmo axis {} has zero length",
+                    axis.index()
+                )
+            }
+            Self::ToleranceOutOfRange => {
+                formatter.write_str("screen gizmo hit tolerance is outside the supported range")
+            }
+        }
+    }
+}
+
+impl core::error::Error for ScreenGizmoLayoutError {}
+
+/// Maximum accepted screen-space hit tolerance in pixels.
+pub const MAX_SCREEN_GIZMO_TOLERANCE_PX: f32 = 64.0;
+
+/// Renderer-independent screen-space geometry for a three-axis gizmo.
+///
+/// Each axis is the segment from `origin` to its corresponding endpoint. Hit
+/// testing uses point-to-segment distance, accepts the first axis within the
+/// bounded tolerance, and always checks axes in X, Y, Z order.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScreenGizmoLayout {
+    origin: ScreenPoint,
+    endpoints: [ScreenPoint; 3],
+    hit_tolerance_px: f32,
+}
+
+impl ScreenGizmoLayout {
+    /// Creates a validated screen-space gizmo layout.
+    pub fn new(
+        origin: ScreenPoint,
+        endpoints: [ScreenPoint; 3],
+        hit_tolerance_px: f32,
+    ) -> Result<Self, ScreenGizmoLayoutError> {
+        if !origin.is_finite()
+            || !hit_tolerance_px.is_finite()
+            || !(0.0..=MAX_SCREEN_GIZMO_TOLERANCE_PX).contains(&hit_tolerance_px)
+        {
+            return if !origin.is_finite() || !hit_tolerance_px.is_finite() {
+                Err(ScreenGizmoLayoutError::NonFiniteInput)
+            } else {
+                Err(ScreenGizmoLayoutError::ToleranceOutOfRange)
+            };
+        }
+        for (index, endpoint) in endpoints.into_iter().enumerate() {
+            if !endpoint.is_finite() {
+                return Err(ScreenGizmoLayoutError::NonFiniteInput);
+            }
+            if endpoint == origin {
+                return Err(ScreenGizmoLayoutError::DegenerateAxis(
+                    GizmoAxis::ALL[index],
+                ));
+            }
+        }
+        Ok(Self {
+            origin,
+            endpoints,
+            hit_tolerance_px,
+        })
+    }
+
+    /// Returns the gizmo origin.
+    #[must_use]
+    pub const fn origin(self) -> ScreenPoint {
+        self.origin
+    }
+
+    /// Returns an axis endpoint by deterministic axis.
+    #[must_use]
+    pub const fn endpoint(self, axis: GizmoAxis) -> ScreenPoint {
+        self.endpoints[axis.index() as usize]
+    }
+
+    /// Returns the bounded hit tolerance in pixels.
+    #[must_use]
+    pub const fn hit_tolerance_px(self) -> f32 {
+        self.hit_tolerance_px
+    }
+
+    /// Finds the deterministic axis under a screen-space pointer.
+    ///
+    /// The result is `None` for a miss or any non-finite pointer coordinate.
+    /// Overlapping axes resolve by fixed X, then Y, then Z priority rather than
+    /// by floating-point distance or iteration order supplied by a caller.
+    #[must_use]
+    pub fn hit_test(self, pointer: ScreenPoint) -> Option<GizmoHit> {
+        if !pointer.is_finite() {
+            return None;
+        }
+        let tolerance_sq = f64::from(self.hit_tolerance_px).powi(2);
+        for axis in GizmoAxis::ALL {
+            if point_segment_distance_sq(pointer, self.origin, self.endpoint(axis)) <= tolerance_sq
+            {
+                return Some(GizmoHit::axis(axis));
+            }
+        }
+        None
+    }
+}
+
+fn point_segment_distance_sq(point: ScreenPoint, start: ScreenPoint, end: ScreenPoint) -> f64 {
+    let point_x = f64::from(point.x);
+    let point_y = f64::from(point.y);
+    let start_x = f64::from(start.x);
+    let start_y = f64::from(start.y);
+    let axis_x = f64::from(end.x) - start_x;
+    let axis_y = f64::from(end.y) - start_y;
+    let point_x = point_x - start_x;
+    let point_y = point_y - start_y;
+    let axis_length_sq = axis_x.mul_add(axis_x, axis_y * axis_y);
+    let projection = (point_x.mul_add(axis_x, point_y * axis_y) / axis_length_sq).clamp(0.0, 1.0);
+    let closest_x = axis_x.mul_add(projection, -point_x);
+    let closest_y = axis_y.mul_add(projection, -point_y);
+    closest_x.mul_add(closest_x, closest_y * closest_y)
+}
+
+/// A gizmo drag bound to the axis selected by a screen-space hit.
+///
+/// The host supplies an axis-aware `TransformDelta`; this type owns only the
+/// hit-selected axis and delegates update, finish, and cancel semantics to the
+/// existing [`GizmoSession`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GizmoInteraction {
+    axis: GizmoAxis,
+    session: GizmoSession,
+}
+
+impl GizmoInteraction {
+    /// Starts an interaction from a successful hit.
+    #[must_use]
+    pub fn begin(mode: GizmoMode, snap: SnapSettings, hit: GizmoHit) -> Self {
+        Self {
+            axis: hit.selected_axis(),
+            session: GizmoSession::begin(mode, snap),
+        }
+    }
+
+    /// Hit-tests a pointer and starts an interaction only on a hit.
+    #[must_use]
+    pub fn begin_from_pointer(
+        layout: ScreenGizmoLayout,
+        pointer: ScreenPoint,
+        mode: GizmoMode,
+        snap: SnapSettings,
+    ) -> Option<Self> {
+        layout
+            .hit_test(pointer)
+            .map(|hit| Self::begin(mode, snap, hit))
+    }
+
+    /// Returns the axis selected when the interaction began.
+    #[must_use]
+    pub const fn axis(&self) -> GizmoAxis {
+        self.axis
+    }
+
+    /// Adds an axis-aware delta using `GizmoSession`'s existing snapping rules.
+    pub fn update(&mut self, delta: TransformDelta) -> Option<TransformDelta> {
+        self.session.update(delta)
+    }
+
+    /// Finishes the interaction and returns its one undoable cumulative delta.
+    pub fn finish(&mut self) -> Option<TransformDelta> {
+        self.session.finish()
+    }
+
+    /// Cancels the interaction without producing an edit.
+    pub fn cancel(&mut self) -> bool {
+        self.session.cancel()
+    }
+
+    /// Returns whether the underlying gizmo session is active.
+    #[must_use]
+    pub const fn is_active(&self) -> bool {
+        self.session.is_active()
+    }
+
+    /// Returns draw commands with this interaction's selected axis active.
+    #[must_use]
+    pub fn draw_commands(&self) -> [GizmoDrawCommand; 3] {
+        self.session.draw_commands(Some(self.axis.index()))
+    }
+}
+
 /// Declarative debug primitive emitted by a gizmo adapter.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GizmoDrawCommand {
@@ -1560,5 +1839,127 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn screen_gizmo_hit_testing_uses_bounded_tolerance_and_axis_priority() {
+        let layout = ScreenGizmoLayout::new(
+            ScreenPoint::new(100.0, 100.0),
+            [
+                ScreenPoint::new(200.0, 100.0),
+                ScreenPoint::new(100.0, 200.0),
+                ScreenPoint::new(200.0, 100.0),
+            ],
+            8.0,
+        )
+        .expect("valid layout");
+
+        assert_eq!(
+            layout.hit_test(ScreenPoint::new(150.0, 100.0)),
+            Some(GizmoHit::axis(GizmoAxis::X))
+        );
+        assert_eq!(
+            layout.hit_test(ScreenPoint::new(100.0, 150.0)),
+            Some(GizmoHit::axis(GizmoAxis::Y))
+        );
+        assert_eq!(layout.hit_test(ScreenPoint::new(109.0, 109.0)), None);
+        assert_eq!(
+            layout.hit_test(ScreenPoint::new(100.0, 100.0)),
+            Some(GizmoHit::axis(GizmoAxis::X))
+        );
+    }
+
+    #[test]
+    fn screen_gizmo_layout_rejects_non_finite_and_unbounded_inputs() {
+        let origin = ScreenPoint::new(0.0, 0.0);
+        let endpoints = [
+            ScreenPoint::new(10.0, 0.0),
+            ScreenPoint::new(0.0, 10.0),
+            ScreenPoint::new(-10.0, 0.0),
+        ];
+        assert_eq!(
+            ScreenGizmoLayout::new(origin, endpoints, f32::NAN),
+            Err(ScreenGizmoLayoutError::NonFiniteInput)
+        );
+        assert_eq!(
+            ScreenGizmoLayout::new(origin, endpoints, MAX_SCREEN_GIZMO_TOLERANCE_PX + 1.0),
+            Err(ScreenGizmoLayoutError::ToleranceOutOfRange)
+        );
+        assert_eq!(
+            ScreenGizmoLayout::new(ScreenPoint::new(f32::INFINITY, 0.0), endpoints, 4.0),
+            Err(ScreenGizmoLayoutError::NonFiniteInput)
+        );
+
+        let layout = ScreenGizmoLayout::new(origin, endpoints, 4.0).expect("valid layout");
+        assert_eq!(layout.hit_test(ScreenPoint::new(f32::NAN, 1.0)), None);
+        assert_eq!(
+            layout.hit_test(ScreenPoint::new(1.0, f32::NEG_INFINITY)),
+            None
+        );
+    }
+
+    #[test]
+    fn screen_gizmo_interaction_delegates_session_lifecycle() {
+        let layout = ScreenGizmoLayout::new(
+            ScreenPoint::new(0.0, 0.0),
+            [
+                ScreenPoint::new(20.0, 0.0),
+                ScreenPoint::new(0.0, 20.0),
+                ScreenPoint::new(-20.0, 0.0),
+            ],
+            3.0,
+        )
+        .expect("valid layout");
+        let mut interaction = GizmoInteraction::begin_from_pointer(
+            layout,
+            ScreenPoint::new(0.0, 10.0),
+            GizmoMode::Translate,
+            SnapSettings {
+                translation_milliunits: 100,
+                ..SnapSettings::default()
+            },
+        )
+        .expect("axis hit");
+
+        assert_eq!(interaction.axis(), GizmoAxis::Y);
+        assert!(interaction.is_active());
+        assert_eq!(
+            interaction
+                .update(TransformDelta {
+                    translation_milliunits: [0, 149, 0],
+                    scale_milliunits: [1000; 3],
+                    ..TransformDelta::default()
+                })
+                .expect("update")
+                .translation_milliunits,
+            [0, 100, 0]
+        );
+        assert_eq!(
+            interaction
+                .draw_commands()
+                .iter()
+                .filter_map(|command| match command {
+                    GizmoDrawCommand::Axis { axis, active, .. } if *active => Some(*axis),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            vec![1]
+        );
+        assert_eq!(
+            interaction.finish().expect("finish").translation_milliunits,
+            [0, 100, 0]
+        );
+        assert!(!interaction.is_active());
+        assert!(interaction.finish().is_none());
+        assert!(interaction.update(TransformDelta::default()).is_none());
+
+        let hit = layout
+            .hit_test(ScreenPoint::new(-10.0, 0.0))
+            .expect("axis hit");
+        let mut cancelled = GizmoInteraction::begin(GizmoMode::Scale, SnapSettings::default(), hit);
+        assert!(cancelled.cancel());
+        assert!(!cancelled.cancel());
+        assert!(cancelled.update(TransformDelta::default()).is_none());
+        assert!(cancelled.finish().is_none());
     }
 }

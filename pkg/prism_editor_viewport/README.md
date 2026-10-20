@@ -33,9 +33,11 @@ adapter:
   and forward/reverse depth-tested ID drawing on the host's shared wgpu device.
   The ID texture can be colorized entirely on GPU for object-ID debug preview;
   this is not an engine material/color renderer.
-- `ViewportInputFocus`, `GizmoSession`, `GizmoDrawCommand`, and `PixelRect` are
-  engine-neutral interaction contracts. Platform events, camera math, and
-  actual gizmo drawing remain outside this crate.
+- `ViewportInputFocus`, `ScreenGizmoLayout`, `GizmoInteraction`, `GizmoSession`,
+  `GizmoDrawCommand`, and `PixelRect` are engine-neutral interaction contracts.
+  Screen gizmo hit testing is deterministic and renderer-independent; platform
+  events, camera math, transform-delta mapping, and actual gizmo drawing remain
+  outside this crate.
 
 The scene delta is sorted by stable `SceneObjectId`, so adapters can apply
 changes without a full scene upload. Rejected snapshots/patches leave all state
@@ -66,6 +68,47 @@ table grows intentionally to avoid token reuse.
    result)`. Always pass current registry state, not a saved snapshot. On close,
    release input capture and cancel pending pick/box correlations. Outstanding
    GPU readbacks may finish, but closed/stale results cannot update selection.
+
+## Screen-space gizmo interaction
+
+`ScreenGizmoLayout` represents each axis as a screen-pixel segment from one
+origin to one endpoint. Construct it with a finite, non-negative tolerance no
+larger than `MAX_SCREEN_GIZMO_TOLERANCE_PX` (64 pixels). Layout coordinates,
+axis endpoints, tolerance, and pointer coordinates must be finite; invalid
+layouts return `ScreenGizmoLayoutError`, while a non-finite pointer is always a
+miss. A zero-length axis is rejected.
+
+`hit_test` uses point-to-segment distance with the bounded tolerance. Overlapping
+axes are resolved by the fixed priority X, then Y, then Z, so the result does
+not depend on a caller's collection order or tiny distance differences. A hit
+can start `GizmoInteraction`, which stores the selected axis and delegates
+`update`, `finish`, and `cancel` to the existing `GizmoSession` exactly once
+according to its active-state semantics:
+
+```rust
+let layout = ScreenGizmoLayout::new(
+    ScreenPoint::new(320.0, 240.0),
+    [
+        ScreenPoint::new(400.0, 240.0),
+        ScreenPoint::new(320.0, 320.0),
+        ScreenPoint::new(280.0, 240.0),
+    ],
+    6.0,
+)?;
+let mut interaction = GizmoInteraction::begin_from_pointer(
+    layout,
+    pointer,
+    GizmoMode::Translate,
+    SnapSettings::default(),
+)?;
+let preview = interaction.update(axis_aware_delta);
+let committed = interaction.finish();
+```
+
+The crate deliberately does not infer camera projection or convert pixel
+movement into world units. The host supplies an axis-aware `TransformDelta`;
+`GizmoInteraction::draw_commands()` exposes the selected axis for a renderer or
+UI adapter.
 
 Single-pick pending capacity is 1024; box pending capacity is 64, with an explicit
 per-result hit limit supplied to `BoxSelectionCoordinator::new`. Requests outside
@@ -231,10 +274,10 @@ double-submit. Blocking `submit_and_read_sync` / `submit_box_and_read_sync`
 are explicit tool/test policies, not a per-frame presentation path.
 
 Actual scene traversal/extraction, camera math, surface creation/compositing,
-platform events/focus, gizmo rendering/hit testing, edits/undo, and the engine's
-real material/render adapter remain host responsibilities. These GPU and
-interaction primitives do not mean those application integrations are wired or
-that a complete editor is implemented.
+platform events/focus, gizmo rendering, pixel-to-transform mapping, edits/undo,
+and the engine's real material/render adapter remain host responsibilities.
+These GPU and interaction primitives do not mean those application integrations
+are wired or that a complete editor is implemented.
 
 ## Validation
 
