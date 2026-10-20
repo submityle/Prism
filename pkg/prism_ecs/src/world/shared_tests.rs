@@ -619,6 +619,44 @@ fn matching_shared_eviction_compacts_large_warmed_query_snapshot() {
 }
 
 #[test]
+fn eviction_backlog_scan_compacts_matches_at_both_ends() {
+    for matching_eviction_position in [0, 3] {
+        let mut w = World::new();
+        let entities: Vec<_> = (0..16_i32)
+            .map(|value| w.spawn((Position(value), BatchKey(value as u32))))
+            .collect();
+        let state = w.query::<&Position>();
+        let before = state.matched_archetypes(&w);
+        assert_eq!(before.len(), 16);
+
+        let reordered = if matching_eviction_position == 0 {
+            [3, 0, 1, 2]
+        } else {
+            [0, 1, 2, 3]
+        };
+        let evicted_ids: Vec<_> = reordered
+            .iter()
+            .map(|&index| archetype_of(&w, entities[index]))
+            .collect();
+        for &index in &reordered {
+            assert!(w.despawn(entities[index]));
+        }
+
+        // E=4, M=16: four binary probes cost more than scanning M cached IDs,
+        // selecting the adaptive tombstone-scan branch. Hit first and last to
+        // cover both early exit and the full no-hit-prefix scan.
+        let after = state.matched_archetypes(&w);
+        assert_eq!(after.len(), 12);
+        assert!(evicted_ids.iter().all(|id| !after.contains(id)));
+        assert!(before
+            .iter()
+            .all(|id| after.contains(id) == !evicted_ids.contains(id)));
+        assert_eq!(before.len(), 16, "published Arc snapshot is immutable");
+        assert_eq!(state.iter(&w).count(), 12);
+    }
+}
+
+#[test]
 fn changing_shared_value_rebalances_refcounts() {
     let mut w = World::new();
     let a = w.spawn((Position(1), BatchKey(10)));
