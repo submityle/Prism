@@ -1,14 +1,28 @@
-//! Render-graph-ready scheduling contract for world placement streams.
+//! Deterministic heightfield-placement lifecycle and render-graph adapter.
 //!
-//! The graph is a backend-neutral description of resource hazards and ordered
-//! work.  It deliberately does not own a device or silently submit commands;
-//! a renderer can translate the plan to its graph API while retaining the same
-//! deterministic cell ordering and indirect-draw dependency.
+//! This module is the boundary between world residency and Prism's declarative
+//! frame graph. It owns no wgpu object and never submits work. Its graph
+//! resources are imported declarations: the existing heightfield placement
+//! owner remains responsible for raw wgpu buffers and compute encoding, while
+//! the compiled plan carries ordering and hazard metadata for a Prism RHI
+//! executor.
+//!
+//! The lifecycle is local to this crate. A runtime coordinator may feed it a
+//! PlacementCellManifest, but cannot mutate the resident table through a
+//! leaked mutable reference. Successful operations publish a new immutable
+//! stream snapshot; failed or stale operations leave the previous snapshot
+//! unchanged.
 
 use core::fmt;
+use std::collections::BTreeMap;
 use std::vec::Vec;
 
-use prism_world_stream::SectorId;
+use prism_render_graph::frame_graph::{
+    AccessKind, GpuFrameGraphBuilder, PassDescriptor, PassId, QueueClass, ResourceAccess,
+    ResourceDescriptor, ResourceId, ResourceLifetime,
+};
+use prism_render_graph::{BufferUse, CompileError, ExecutionPlan};
+use prism_world_stream::{CellManifest, SectorId};
 
 /// A stable placement stream identified by its source cell and revision.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -21,18 +35,269 @@ pub struct PlacementStream {
     pub candidate_count: u32,
 }
 
-/// Logical graph resource used by placement and rendering passes.
+/// Manifest information admitted by the placement lifecycle.
+///
+/// CellManifest remains the source of spatial identity and content metadata;
+/// revision is the placement-specific fence. This keeps a terrain rebake or
+/// placement recipe change distinct from a runtime cell payload revision.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PlacementCellManifest {
+    /// Runtime cell manifest used to identify the sector.
+    pub manifest: CellManifest,
+    /// Monotonically increasing placement revision for this sector.
+    pub revision: u64,
+    /// Number of primary placement candidates owned by the stream.
+    pub candidate_count: u32,
+}
+
+impl PlacementCellManifest {
+    /// Creates placement metadata for one runtime cell.
+    #[must_use]
+    pub const fn new(manifest: CellManifest, revision: u64, candidate_count: u32) -> Self {
+        Self {
+            manifest,
+            revision,
+            candidate_count,
+        }
+    }
+
+    /// Returns the manifest's sector without exposing lifecycle storage.
+    #[must_use]
+    pub const fn sector(self) -> SectorId {
+        self.manifest.sector
+    }
+
+    /// Converts admitted metadata to the graph-facing stream value.
+    #[must_use]
+    pub const fn stream(self) -> PlacementStream {
+        PlacementStream {
+            cell: self.manifest.sector,
+            revision: self.revision,
+            candidate_count: self.candidate_count,
+        }
+    }
+}
+
+/// A read-only deterministic view of all currently resident streams.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlacementStreamSnapshot {
+    streams: Vec<PlacementStream>,
+}
+
+impl PlacementStreamSnapshot {
+    /// Returns streams sorted by their full SectorId.
+    #[must_use]
+    pub fn as_slice(&self) -> &[PlacementStream] {
+        &self.streams
+    }
+
+    /// Returns the number of resident streams in the snapshot.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.streams.len()
+    }
+
+    /// Returns whether the snapshot contains no resident streams.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.streams.is_empty()
+    }
+
+    /// Iterates over the immutable stream snapshot.
+    pub fn iter(&self) -> impl Iterator<Item = &PlacementStream> {
+        self.streams.iter()
+    }
+}
+
+/// Lifecycle errors rejected before resident state is changed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PlacementLifecycleError {
+    /// A load attempted to publish a second stream for one sector.
+    DuplicateSector { sector: SectorId },
+    /// A reload or eviction referenced a sector that is not resident.
+    MissingSector { sector: SectorId },
+    /// A revision older than or equal to the resident stream was rejected.
+    StaleRevision {
+        sector: SectorId,
+        current: u64,
+        incoming: u64,
+    },
+    /// An eviction from a future revision cannot invalidate the current stream.
+    RevisionAhead {
+        sector: SectorId,
+        current: u64,
+        incoming: u64,
+    },
+    /// The graph plan could not reserve host-side declaration storage.
+    AllocationFailed,
+    /// The shared frame-graph compiler rejected the declaration contract.
+    GraphCompile(CompileError),
+}
+
+impl fmt::Display for PlacementLifecycleError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DuplicateSector { sector } => write!(f, "duplicate placement sector {sector:?}"),
+            Self::MissingSector { sector } => write!(f, "missing placement sector {sector:?}"),
+            Self::StaleRevision {
+                sector,
+                current,
+                incoming,
+            } => write!(
+                f,
+                "stale placement revision {incoming} for {sector:?}; current is {current}"
+            ),
+            Self::RevisionAhead {
+                sector,
+                current,
+                incoming,
+            } => write!(
+                f,
+                "placement eviction revision {incoming} is ahead of {sector:?} current {current}"
+            ),
+            Self::AllocationFailed => {
+                f.write_str("placement lifecycle snapshot reservation failed")
+            }
+            Self::GraphCompile(error) => {
+                write!(f, "placement render graph compilation failed: {error}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for PlacementLifecycleError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::GraphCompile(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+impl From<CompileError> for PlacementLifecycleError {
+    fn from(error: CompileError) -> Self {
+        Self::GraphCompile(error)
+    }
+}
+
+/// Local placement residency with an explicit stale-revision fence.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct PlacementLifecycle {
+    resident: BTreeMap<SectorId, PlacementStream>,
+}
+
+impl PlacementLifecycle {
+    /// Creates an empty placement lifecycle.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Loads a previously absent sector and publishes its stream.
+    pub fn load(
+        &mut self,
+        manifest: PlacementCellManifest,
+    ) -> Result<PlacementStream, PlacementLifecycleError> {
+        let sector = manifest.sector();
+        if self.resident.contains_key(&sector) {
+            return Err(PlacementLifecycleError::DuplicateSector { sector });
+        }
+        let stream = manifest.stream();
+        self.resident.insert(sector, stream);
+        Ok(stream)
+    }
+
+    /// Replaces a resident sector only with a strictly newer revision.
+    pub fn reload(
+        &mut self,
+        manifest: PlacementCellManifest,
+    ) -> Result<PlacementStream, PlacementLifecycleError> {
+        let sector = manifest.sector();
+        let current = self
+            .resident
+            .get(&sector)
+            .ok_or(PlacementLifecycleError::MissingSector { sector })?;
+        if manifest.revision <= current.revision {
+            return Err(PlacementLifecycleError::StaleRevision {
+                sector,
+                current: current.revision,
+                incoming: manifest.revision,
+            });
+        }
+        let stream = manifest.stream();
+        self.resident.insert(sector, stream);
+        Ok(stream)
+    }
+
+    /// Evicts a sector only when the caller names its exact resident revision.
+    pub fn evict(
+        &mut self,
+        sector: SectorId,
+        revision: u64,
+    ) -> Result<PlacementStream, PlacementLifecycleError> {
+        let current = *self
+            .resident
+            .get(&sector)
+            .ok_or(PlacementLifecycleError::MissingSector { sector })?;
+        if revision < current.revision {
+            return Err(PlacementLifecycleError::StaleRevision {
+                sector,
+                current: current.revision,
+                incoming: revision,
+            });
+        }
+        if revision > current.revision {
+            return Err(PlacementLifecycleError::RevisionAhead {
+                sector,
+                current: current.revision,
+                incoming: revision,
+            });
+        }
+        self.resident.remove(&sector);
+        Ok(current)
+    }
+
+    /// Returns a deterministic read-only snapshot for graph construction.
+    pub fn snapshot(&self) -> Result<PlacementStreamSnapshot, PlacementLifecycleError> {
+        let mut streams = Vec::new();
+        streams
+            .try_reserve_exact(self.resident.len())
+            .map_err(|_| PlacementLifecycleError::AllocationFailed)?;
+        streams.extend(self.resident.values().copied());
+        Ok(PlacementStreamSnapshot { streams })
+    }
+
+    /// Returns the resident stream for one sector, if present.
+    #[must_use]
+    pub fn stream(&self, sector: SectorId) -> Option<PlacementStream> {
+        self.resident.get(&sector).copied()
+    }
+
+    /// Returns the number of resident placement streams.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.resident.len()
+    }
+
+    /// Returns whether no placement stream is resident.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.resident.is_empty()
+    }
+}
+
+/// Logical resources used by the heightfield-placement graph.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum PlacementGraphResource {
-    /// CPU-authored or decompressed source records.
+    /// Uploaded source candidate records.
     Source,
-    /// Projected world-space placement records.
+    /// Projected world-space placement records and attributes.
     Placement,
     /// Compacted source-slot indices.
     Compact,
-    /// Indirect draw arguments.
+    /// Indirect draw arguments and live count.
     Indirect,
-    /// Final render target or scene instance consumer.
+    /// External scene target consumed by the draw stage.
     Scene,
 }
 
@@ -41,16 +306,16 @@ pub enum PlacementGraphResource {
 pub enum PlacementGraphStage {
     /// Upload/replace a cell's source stream.
     Upload,
-    /// Project source candidates onto terrain.
+    /// Project source candidates onto the heightfield.
     Project,
     /// Compact accepted candidates and produce draw count.
     Compact,
-    /// Consume indirect arguments in the render pass.
+    /// Consume indirect arguments in the external scene pass.
     DrawIndirect,
 }
 
 impl PlacementGraphStage {
-    /// Returns the stable stage order used by the graph compiler.
+    /// Returns the stable stage order used by the adapter.
     #[must_use]
     pub const fn ordinal(self) -> u8 {
         match self {
@@ -61,7 +326,7 @@ impl PlacementGraphStage {
         }
     }
 
-    /// Returns resources read by this stage.
+    /// Returns resources read by this stage in logical graph vocabulary.
     #[must_use]
     pub const fn reads(self) -> &'static [PlacementGraphResource] {
         match self {
@@ -76,7 +341,7 @@ impl PlacementGraphStage {
         }
     }
 
-    /// Returns resources written by this stage.
+    /// Returns resources written by this stage in logical graph vocabulary.
     #[must_use]
     pub const fn writes(self) -> &'static [PlacementGraphResource] {
         match self {
@@ -89,6 +354,75 @@ impl PlacementGraphStage {
             Self::DrawIndirect => &[PlacementGraphResource::Scene],
         }
     }
+
+    /// Returns the corresponding RHI uses without selecting a raw backend.
+    #[must_use]
+    pub const fn rhi_uses(self) -> &'static [PlacementRhiUse] {
+        match self {
+            Self::Upload => &[PlacementRhiUse::Buffer {
+                resource: PlacementGraphResource::Source,
+                use_kind: BufferUse::CopyDst,
+            }],
+            Self::Project => &[
+                PlacementRhiUse::Buffer {
+                    resource: PlacementGraphResource::Source,
+                    use_kind: BufferUse::StorageRead,
+                },
+                PlacementRhiUse::Buffer {
+                    resource: PlacementGraphResource::Placement,
+                    use_kind: BufferUse::StorageWrite,
+                },
+            ],
+            Self::Compact => &[
+                PlacementRhiUse::Buffer {
+                    resource: PlacementGraphResource::Placement,
+                    use_kind: BufferUse::StorageRead,
+                },
+                PlacementRhiUse::Buffer {
+                    resource: PlacementGraphResource::Compact,
+                    use_kind: BufferUse::StorageWrite,
+                },
+                PlacementRhiUse::Buffer {
+                    resource: PlacementGraphResource::Indirect,
+                    use_kind: BufferUse::StorageWrite,
+                },
+            ],
+            Self::DrawIndirect => &[
+                PlacementRhiUse::Buffer {
+                    resource: PlacementGraphResource::Placement,
+                    use_kind: BufferUse::StorageRead,
+                },
+                PlacementRhiUse::Buffer {
+                    resource: PlacementGraphResource::Compact,
+                    use_kind: BufferUse::StorageRead,
+                },
+                PlacementRhiUse::Buffer {
+                    resource: PlacementGraphResource::Indirect,
+                    use_kind: BufferUse::Indirect,
+                },
+                PlacementRhiUse::ColorAttachment {
+                    resource: PlacementGraphResource::Scene,
+                },
+            ],
+        }
+    }
+}
+
+/// Backend-neutral RHI use emitted by PlacementGraphStage::rhi_uses.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PlacementRhiUse {
+    /// A buffer access that can be lowered by a RenderDevice backend.
+    Buffer {
+        /// Logical placement resource.
+        resource: PlacementGraphResource,
+        /// RHI buffer access mode.
+        use_kind: BufferUse,
+    },
+    /// The external scene target is a render attachment, not a raw buffer.
+    ColorAttachment {
+        /// Logical scene resource.
+        resource: PlacementGraphResource,
+    },
 }
 
 /// A single cell-scoped graph pass.
@@ -100,180 +434,204 @@ pub struct PlacementGraphPass {
     pub stage: PlacementGraphStage,
 }
 
-/// A complete graph plan for a frame.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PlacementRenderGraph {
-    passes: Vec<PlacementGraphPass>,
-}
-
-/// Consumer invoked for each graph stage in deterministic submission order.
+/// Logical resource byte sizes supplied by the external GPU owner.
 ///
-/// A renderer implements this small adapter at its graph boundary. The world
-/// contract owns ordering and validation; the consumer owns device resources,
-/// barriers, and the actual render/compute API. Each method is called exactly
-/// once for every matching pass, including empty streams, so a consumer cannot
-/// silently skip a cell while still reporting a successful execution.
-pub trait PlacementGraphEncoder {
-    /// Consumer-specific failure type.
-    type Error;
-
-    /// Registers or uploads the source stream for one cell.
-    fn upload(&mut self, stream: PlacementStream) -> Result<(), Self::Error>;
-
-    /// Encodes the terrain projection/placement producer for one cell.
-    fn project(&mut self, stream: PlacementStream) -> Result<(), Self::Error>;
-
-    /// Encodes compaction and indirect-argument production for one cell.
-    fn compact(&mut self, stream: PlacementStream) -> Result<(), Self::Error>;
-
-    /// Registers the indirect draw consumer for one cell.
-    fn draw_indirect(&mut self, stream: PlacementStream) -> Result<(), Self::Error>;
-}
-
-/// Failure returned when a graph consumer rejects one pass.
-#[derive(Debug, Eq, PartialEq)]
-pub struct PlacementGraphEncodeError<E> {
-    /// Zero-based pass index in [`PlacementRenderGraph::passes`].
-    pub pass_index: usize,
-    /// Cell/revision associated with the rejected pass.
-    pub stream: PlacementStream,
-    /// Stage that was rejected.
-    pub stage: PlacementGraphStage,
-    /// Consumer-specific error.
-    pub error: E,
-}
-
-impl<E: fmt::Display> fmt::Display for PlacementGraphEncodeError<E> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "placement graph pass {} ({:?}, {:?}) failed: {}",
-            self.pass_index, self.stream, self.stage, self.error
-        )
-    }
-}
-
-impl<E: fmt::Debug + fmt::Display> core::error::Error for PlacementGraphEncodeError<E> {}
-
-/// Errors from graph construction.
+/// The graph adapter never allocates these resources. Zero is valid for a
+/// topology-only declaration; a production owner should provide exact imported
+/// byte footprints when it needs graph memory diagnostics.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum PlacementGraphError {
-    /// The same cell/revision was submitted twice.
-    DuplicateStream { cell: SectorId, revision: u64 },
-    /// More than one revision of a cell was submitted for one graph.
-    ConflictingCellRevision {
-        /// Cell submitted more than once.
-        cell: SectorId,
-        /// First revision in sorted graph order.
-        first_revision: u64,
-        /// Later revision in sorted graph order.
-        second_revision: u64,
-    },
-    /// Host allocation failed while reserving the pass list.
-    AllocationFailed,
+pub struct PlacementGraphLayout {
+    /// Source record buffer bytes.
+    pub source_bytes: u64,
+    /// Projected placement record buffer bytes.
+    pub placement_bytes: u64,
+    /// Compact index buffer bytes.
+    pub compact_bytes: u64,
+    /// Indirect argument buffer bytes.
+    pub indirect_bytes: u64,
 }
 
-impl fmt::Display for PlacementGraphError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::DuplicateStream { cell, revision } => {
-                write!(f, "duplicate placement stream {cell:?} revision {revision}")
-            }
-            Self::ConflictingCellRevision {
-                cell,
-                first_revision,
-                second_revision,
-            } => {
-                write!(
-                    f,
-                    "placement cell {cell:?} has conflicting revisions {first_revision} and {second_revision}"
-                )
-            }
-            Self::AllocationFailed => f.write_str("placement graph pass reservation failed"),
+impl PlacementGraphLayout {
+    /// A declaration that carries ordering and hazards without owning sizes.
+    #[must_use]
+    pub const fn topology_only() -> Self {
+        Self {
+            source_bytes: 0,
+            placement_bytes: 0,
+            compact_bytes: 0,
+            indirect_bytes: 0,
         }
     }
 }
 
-impl core::error::Error for PlacementGraphError {}
+/// A complete deterministic graph declaration for a frame.
+pub struct PlacementRenderGraph {
+    passes: Vec<PlacementGraphPass>,
+    declarations: GpuFrameGraphBuilder,
+}
 
 impl PlacementRenderGraph {
-    /// Builds a deterministic graph. Cells are sorted by full `SectorId`, then
-    /// every cell receives upload → project → compact → indirect draw stages.
-    pub fn build(streams: &[PlacementStream]) -> Result<Self, PlacementGraphError> {
+    /// Builds a topology-only graph using imported external resources.
+    pub fn build(streams: &[PlacementStream]) -> Result<Self, PlacementLifecycleError> {
+        Self::build_with_layout(streams, PlacementGraphLayout::topology_only())
+    }
+
+    /// Builds a graph with caller-supplied imported resource footprints.
+    pub fn build_with_layout(
+        streams: &[PlacementStream],
+        layout: PlacementGraphLayout,
+    ) -> Result<Self, PlacementLifecycleError> {
         let mut ordered = streams.to_vec();
         ordered.sort_unstable_by_key(|stream| (stream.cell, stream.revision));
         for pair in ordered.windows(2) {
             if pair[0].cell == pair[1].cell {
                 if pair[0].revision == pair[1].revision {
-                    return Err(PlacementGraphError::DuplicateStream {
-                        cell: pair[0].cell,
-                        revision: pair[0].revision,
+                    return Err(PlacementLifecycleError::DuplicateSector {
+                        sector: pair[0].cell,
                     });
                 }
-                return Err(PlacementGraphError::ConflictingCellRevision {
-                    cell: pair[0].cell,
-                    first_revision: pair[0].revision,
-                    second_revision: pair[1].revision,
+                return Err(PlacementLifecycleError::StaleRevision {
+                    sector: pair[0].cell,
+                    current: pair[0].revision,
+                    incoming: pair[1].revision,
                 });
             }
         }
+
+        let mut declarations = GpuFrameGraphBuilder::default();
+        let scene = declarations
+            .try_add_resource(resource(
+                "heightfield placement scene",
+                0,
+                ResourceLifetime::Imported,
+            ))
+            .map_err(|_| PlacementLifecycleError::AllocationFailed)?;
         let mut passes = Vec::new();
         passes
             .try_reserve_exact(ordered.len().saturating_mul(4))
-            .map_err(|_| PlacementGraphError::AllocationFailed)?;
+            .map_err(|_| PlacementLifecycleError::AllocationFailed)?;
+
+        let mut previous_draw: Option<PassId> = None;
         for stream in ordered {
-            for stage in [
-                PlacementGraphStage::Upload,
-                PlacementGraphStage::Project,
-                PlacementGraphStage::Compact,
-                PlacementGraphStage::DrawIndirect,
-            ] {
-                passes.push(PlacementGraphPass { stream, stage });
-            }
+            let source = declarations
+                .try_add_resource(resource(
+                    "heightfield placement source",
+                    layout.source_bytes,
+                    ResourceLifetime::Imported,
+                ))
+                .map_err(|_| PlacementLifecycleError::AllocationFailed)?;
+            let placement = declarations
+                .try_add_resource(resource(
+                    "heightfield placement projected",
+                    layout.placement_bytes,
+                    ResourceLifetime::Imported,
+                ))
+                .map_err(|_| PlacementLifecycleError::AllocationFailed)?;
+            let compact = declarations
+                .try_add_resource(resource(
+                    "heightfield placement compact",
+                    layout.compact_bytes,
+                    ResourceLifetime::Imported,
+                ))
+                .map_err(|_| PlacementLifecycleError::AllocationFailed)?;
+            let indirect = declarations
+                .try_add_resource(resource(
+                    "heightfield placement indirect",
+                    layout.indirect_bytes,
+                    ResourceLifetime::Imported,
+                ))
+                .map_err(|_| PlacementLifecycleError::AllocationFailed)?;
+
+            let upload = declarations
+                .try_add_pass(pass(
+                    "heightfield placement upload",
+                    QueueClass::Transfer,
+                    vec![access(source, AccessKind::TransferWrite)],
+                    previous_draw.into_iter().collect(),
+                ))
+                .map_err(|_| PlacementLifecycleError::AllocationFailed)?;
+            let project = declarations
+                .try_add_pass(pass(
+                    "heightfield placement project",
+                    QueueClass::Compute,
+                    vec![
+                        access(source, AccessKind::StorageRead),
+                        access(placement, AccessKind::StorageWrite),
+                    ],
+                    vec![upload],
+                ))
+                .map_err(|_| PlacementLifecycleError::AllocationFailed)?;
+            let compact_pass = declarations
+                .try_add_pass(pass(
+                    "heightfield placement compact",
+                    QueueClass::Compute,
+                    vec![
+                        access(placement, AccessKind::StorageRead),
+                        access(compact, AccessKind::StorageWrite),
+                        access(indirect, AccessKind::StorageWrite),
+                    ],
+                    vec![project],
+                ))
+                .map_err(|_| PlacementLifecycleError::AllocationFailed)?;
+            let draw = declarations
+                .try_add_pass(pass(
+                    "heightfield placement draw indirect",
+                    QueueClass::Graphics,
+                    vec![
+                        access(placement, AccessKind::StorageRead),
+                        access(compact, AccessKind::StorageRead),
+                        access(indirect, AccessKind::IndirectRead),
+                        access(scene, AccessKind::ColorAttachment),
+                    ],
+                    vec![compact_pass],
+                ))
+                .map_err(|_| PlacementLifecycleError::AllocationFailed)?;
+
+            previous_draw = Some(draw);
+            passes.extend([
+                PlacementGraphPass {
+                    stream,
+                    stage: PlacementGraphStage::Upload,
+                },
+                PlacementGraphPass {
+                    stream,
+                    stage: PlacementGraphStage::Project,
+                },
+                PlacementGraphPass {
+                    stream,
+                    stage: PlacementGraphStage::Compact,
+                },
+                PlacementGraphPass {
+                    stream,
+                    stage: PlacementGraphStage::DrawIndirect,
+                },
+            ]);
         }
-        Ok(Self { passes })
+
+        Ok(Self {
+            passes,
+            declarations,
+        })
     }
 
-    /// Returns passes in submission order.
+    /// Returns the placement-specific pass view in deterministic order.
     #[must_use]
     pub fn passes(&self) -> &[PlacementGraphPass] {
         &self.passes
     }
 
-    /// Executes every pass through a renderer-owned consumer.
-    ///
-    /// The graph is already validated and sorted by [`Self::build`]. This
-    /// method performs no allocation and never reorders or coalesces passes;
-    /// therefore a renderer can map each callback to one native graph node or
-    /// command section while retaining the same deterministic cell ordering.
-    /// If a consumer fails, the exact pass and stream are returned. Earlier
-    /// callbacks may already have been applied; callers that need rollback must
-    /// provide it in their consumer or discard the partially recorded command
-    /// encoder.
-    pub fn encode<E: PlacementGraphEncoder>(
-        &self,
-        encoder: &mut E,
-    ) -> Result<(), PlacementGraphEncodeError<E::Error>> {
-        for (pass_index, pass) in self.passes.iter().copied().enumerate() {
-            let result = match pass.stage {
-                PlacementGraphStage::Upload => encoder.upload(pass.stream),
-                PlacementGraphStage::Project => encoder.project(pass.stream),
-                PlacementGraphStage::Compact => encoder.compact(pass.stream),
-                PlacementGraphStage::DrawIndirect => encoder.draw_indirect(pass.stream),
-            };
-            if let Err(error) = result {
-                return Err(PlacementGraphEncodeError {
-                    pass_index,
-                    stream: pass.stream,
-                    stage: pass.stage,
-                    error,
-                });
-            }
-        }
-        Ok(())
+    /// Returns the actual Prism frame-graph declarations for external binding.
+    #[must_use]
+    pub fn declarations(&self) -> &GpuFrameGraphBuilder {
+        &self.declarations
     }
 
-    /// Returns whether the plan contains all producer-to-consumer barriers.
+    /// Compiles through Prism's shared SSA, barrier and scheduling kernel.
+    pub fn compile(&self) -> Result<ExecutionPlan, PlacementLifecycleError> {
+        self.declarations.compile().map_err(Into::into)
+    }
+
+    /// Returns whether the placement stages are strictly ordered per stream.
     #[must_use]
     pub fn has_complete_hazards(&self) -> bool {
         self.passes.chunks_exact(4).all(|passes| {
@@ -296,124 +654,146 @@ impl PlacementRenderGraph {
     }
 }
 
+fn resource(name: &'static str, size: u64, lifetime: ResourceLifetime) -> ResourceDescriptor {
+    ResourceDescriptor {
+        name: name.into(),
+        lifetime,
+        size,
+        alignment: 16,
+    }
+}
+
+fn access(resource: ResourceId, kind: AccessKind) -> ResourceAccess {
+    ResourceAccess { resource, kind }
+}
+
+fn pass(
+    name: &'static str,
+    queue: QueueClass,
+    accesses: Vec<ResourceAccess>,
+    depends_on: Vec<PassId>,
+) -> PassDescriptor {
+    PassDescriptor {
+        name: name.into(),
+        queue,
+        accesses,
+        depends_on,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[derive(Default)]
-    struct RecordingEncoder {
-        calls: Vec<(PlacementGraphStage, PlacementStream)>,
-        fail_at: Option<usize>,
-    }
-
-    impl PlacementGraphEncoder for RecordingEncoder {
-        type Error = &'static str;
-
-        fn upload(&mut self, stream: PlacementStream) -> Result<(), Self::Error> {
-            self.record(PlacementGraphStage::Upload, stream)
-        }
-
-        fn project(&mut self, stream: PlacementStream) -> Result<(), Self::Error> {
-            self.record(PlacementGraphStage::Project, stream)
-        }
-
-        fn compact(&mut self, stream: PlacementStream) -> Result<(), Self::Error> {
-            self.record(PlacementGraphStage::Compact, stream)
-        }
-
-        fn draw_indirect(&mut self, stream: PlacementStream) -> Result<(), Self::Error> {
-            self.record(PlacementGraphStage::DrawIndirect, stream)
+    fn manifest(x: i64) -> CellManifest {
+        CellManifest {
+            sector: SectorId::new(2, x, 0, 0),
+            bounds: prism_world_stream::AabbI64::new(
+                prism_world_stream::GlobalPos::new(0, 0, 0),
+                prism_world_stream::GlobalPos::new(1, 1, 1),
+            )
+            .expect("valid test bounds"),
+            scene_key: 7,
+            content_version: 1,
+            derived_hash: 11,
+            io_bytes: 0,
+            data_layers: prism_world_stream::DataLayerMask::EMPTY,
         }
     }
 
-    impl RecordingEncoder {
-        fn record(
-            &mut self,
-            stage: PlacementGraphStage,
-            stream: PlacementStream,
-        ) -> Result<(), &'static str> {
-            let index = self.calls.len();
-            self.calls.push((stage, stream));
-            if self.fail_at == Some(index) {
-                Err("consumer rejected pass")
-            } else {
-                Ok(())
-            }
-        }
-    }
-
-    fn stream(x: i64, revision: u64) -> PlacementStream {
-        PlacementStream {
-            cell: SectorId::new(2, x, 0, 0),
-            revision,
-            candidate_count: 128,
-        }
+    fn cell(x: i64, revision: u64, candidates: u32) -> PlacementCellManifest {
+        PlacementCellManifest::new(manifest(x), revision, candidates)
     }
 
     #[test]
-    fn multi_cell_graph_is_sorted_and_has_indirect_dependency_chain() {
-        let graph = PlacementRenderGraph::build(&[stream(3, 1), stream(-1, 2)]).unwrap();
+    fn lifecycle_fences_duplicate_stale_and_future_events() {
+        let mut lifecycle = PlacementLifecycle::new();
+        assert_eq!(lifecycle.load(cell(3, 4, 128)).unwrap().revision, 4);
+        assert!(matches!(
+            lifecycle.load(cell(3, 4, 128)),
+            Err(PlacementLifecycleError::DuplicateSector { .. })
+        ));
+        assert!(matches!(
+            lifecycle.reload(cell(3, 4, 256)),
+            Err(PlacementLifecycleError::StaleRevision { .. })
+        ));
+        assert_eq!(
+            lifecycle.reload(cell(3, 5, 256)).unwrap().candidate_count,
+            256
+        );
+        assert!(matches!(
+            lifecycle.evict(SectorId::new(2, 3, 0, 0), 4),
+            Err(PlacementLifecycleError::StaleRevision { .. })
+        ));
+        assert!(matches!(
+            lifecycle.evict(SectorId::new(2, 3, 0, 0), 6),
+            Err(PlacementLifecycleError::RevisionAhead { .. })
+        ));
+        lifecycle.evict(SectorId::new(2, 3, 0, 0), 5).unwrap();
+        assert!(lifecycle.is_empty());
+    }
+
+    #[test]
+    fn snapshot_is_sorted_and_read_only_for_graph_consumers() {
+        let mut lifecycle = PlacementLifecycle::new();
+        lifecycle.load(cell(3, 1, 3)).unwrap();
+        lifecycle.load(cell(-1, 1, 2)).unwrap();
+        let snapshot = lifecycle.snapshot().unwrap();
+        assert_eq!(snapshot.as_slice()[0].cell, SectorId::new(2, -1, 0, 0));
+        assert_eq!(snapshot.len(), 2);
+        assert_eq!(snapshot.iter().map(|s| s.candidate_count).sum::<u32>(), 5);
+    }
+
+    #[test]
+    fn graph_adapter_compiles_real_frame_graph_declarations() {
+        let streams = [cell(3, 1, 128).stream(), cell(-1, 2, 256).stream()];
+        let graph = PlacementRenderGraph::build_with_layout(
+            &streams,
+            PlacementGraphLayout {
+                source_bytes: 8_192,
+                placement_bytes: 16_384,
+                compact_bytes: 1_024,
+                indirect_bytes: 16,
+            },
+        )
+        .unwrap();
         assert!(graph.has_complete_hazards());
         assert_eq!(graph.passes().len(), 8);
-        assert_eq!(graph.passes()[0].stream.cell, SectorId::new(2, -1, 0, 0));
-        assert_eq!(graph.passes()[3].stage, PlacementGraphStage::DrawIndirect);
-        assert!(graph.passes()[3]
-            .stage
-            .reads()
-            .contains(&PlacementGraphResource::Compact));
+        assert_eq!(graph.declarations().resources().len(), 9);
+        assert_eq!(graph.declarations().passes().len(), 8);
+        let plan = graph.compile().unwrap();
+        assert_eq!(plan.pass_count(), 8);
+        assert!(plan.barrier_count() >= 8);
     }
 
     #[test]
-    fn duplicate_cell_revision_is_rejected_before_graph_publication() {
-        let error = PlacementRenderGraph::build(&[stream(1, 4), stream(1, 4)]).unwrap_err();
-        assert!(matches!(error, PlacementGraphError::DuplicateStream { .. }));
-    }
-
-    #[test]
-    fn conflicting_cell_revisions_are_rejected_before_graph_publication() {
-        let error = PlacementRenderGraph::build(&[stream(1, 4), stream(1, 5)]).unwrap_err();
+    fn graph_rejects_duplicate_sector_revision_before_publication() {
+        let stream = cell(1, 4, 1).stream();
         assert!(matches!(
-            error,
-            PlacementGraphError::ConflictingCellRevision {
-                first_revision: 4,
-                second_revision: 5,
-                ..
-            }
+            PlacementRenderGraph::build(&[stream, stream]),
+            Err(PlacementLifecycleError::DuplicateSector { .. })
         ));
     }
 
     #[test]
-    fn encode_delivers_every_stage_in_graph_order_without_reordering() {
-        let streams = [stream(3, 1), stream(-1, 2)];
-        let graph = PlacementRenderGraph::build(&streams).unwrap();
-        let mut encoder = RecordingEncoder::default();
-
-        graph.encode(&mut encoder).unwrap();
-
-        assert_eq!(
-            encoder.calls,
-            graph
-                .passes()
-                .iter()
-                .map(|pass| (pass.stage, pass.stream))
-                .collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
-    fn encode_reports_the_exact_rejected_pass_and_stops() {
-        let graph = PlacementRenderGraph::build(&[stream(1, 7)]).unwrap();
-        let mut encoder = RecordingEncoder {
-            fail_at: Some(2),
-            ..Default::default()
-        };
-
-        let error = graph.encode(&mut encoder).unwrap_err();
-
-        assert_eq!(error.pass_index, 2);
-        assert_eq!(error.stage, PlacementGraphStage::Compact);
-        assert_eq!(error.stream, stream(1, 7));
-        assert_eq!(error.error, "consumer rejected pass");
-        assert_eq!(encoder.calls.len(), 3);
+    fn rhi_mapping_keeps_indirect_and_scene_access_distinct() {
+        let uses = PlacementGraphStage::DrawIndirect.rhi_uses();
+        assert!(uses.iter().any(|use_kind| {
+            matches!(
+                use_kind,
+                PlacementRhiUse::Buffer {
+                    resource: PlacementGraphResource::Indirect,
+                    use_kind: BufferUse::Indirect,
+                }
+            )
+        }));
+        assert!(uses.iter().any(|use_kind| {
+            matches!(
+                use_kind,
+                PlacementRhiUse::ColorAttachment {
+                    resource: PlacementGraphResource::Scene
+                }
+            )
+        }));
     }
 }
