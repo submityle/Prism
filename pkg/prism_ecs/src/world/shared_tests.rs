@@ -535,15 +535,19 @@ fn evicted_shared_archetypes_reclaim_table_component_postings() {
         let second_archetype = archetype_of(&w, second);
         let batch_key = cid::<BatchKey>(&w);
         let binding = (batch_key, shared_sid(&w, first, batch_key));
-        let binding_posting = w.archetypes.with_shared_binding(binding.0, binding.1);
+        let binding_posting = w
+            .archetypes
+            .with_shared_binding(binding.0, binding.1)
+            .unwrap();
         assert_eq!(binding_posting.len(), 2);
         assert!(
             w.archetypes.len() > binding_posting.len(),
             "candidate posting stays local while stable tombstones accumulate"
         );
-        assert!(binding_posting.contains(&first_archetype));
-        assert!(binding_posting.contains(&second_archetype));
-        assert!(binding_posting.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(binding_posting.contains(first_archetype));
+        assert!(binding_posting.contains(second_archetype));
+        let binding_ids: Vec<_> = binding_posting.iter().collect();
+        assert!(binding_ids.windows(2).all(|pair| pair[0] < pair[1]));
 
         assert_eq!(
             state.iter(&w).count(),
@@ -551,7 +555,7 @@ fn evicted_shared_archetypes_reclaim_table_component_postings() {
             "the query cache sees both variants"
         );
         for id in [first_archetype, second_archetype] {
-            assert!(w.archetypes.with_component(position).contains(&id));
+            assert!(w.archetypes.with_component(position).unwrap().contains(id));
             assert!(state.matched_archetypes(&w).contains(&id));
         }
         let pre_eviction_snapshot = state.matched_archetypes(&w);
@@ -562,30 +566,41 @@ fn evicted_shared_archetypes_reclaim_table_component_postings() {
         assert!(
             w.archetypes
                 .with_shared_binding(binding.0, binding.1)
-                .is_empty(),
+                .is_none_or(|posting| posting.is_empty()),
             "eviction must reclaim every table-set variant from the shared-value posting"
         );
         let live_binding = shared_sid(&w, live, batch_key);
         assert_eq!(
-            w.archetypes.with_shared_binding(batch_key, live_binding),
-            &[live_archetype],
+            w.archetypes
+                .with_shared_binding(batch_key, live_binding)
+                .unwrap()
+                .iter()
+                .collect::<Vec<_>>(),
+            [live_archetype],
             "evicting a different value must retain the active binding posting"
         );
         let layer = cid::<Layer>(&w);
         let live_layer_binding = shared_sid(&w, live, layer);
         assert_eq!(
-            w.archetypes.with_shared_binding(layer, live_layer_binding),
-            &[live_archetype],
+            w.archetypes
+                .with_shared_binding(layer, live_layer_binding)
+                .unwrap()
+                .iter()
+                .collect::<Vec<_>>(),
+            [live_archetype],
             "eviction must also remove tombstones from their other shared-value postings"
         );
 
-        let position_posting = w.archetypes.with_component(position);
-        assert!(position_posting.contains(&live_archetype));
-        assert!(!position_posting.contains(&first_archetype));
-        assert!(!position_posting.contains(&second_archetype));
-        assert!(position_posting.windows(2).all(|pair| pair[0] < pair[1]));
+        let position_posting = w.archetypes.with_component(position).unwrap();
+        assert!(position_posting.contains(live_archetype));
+        assert!(!position_posting.contains(first_archetype));
+        assert!(!position_posting.contains(second_archetype));
+        let ids: Vec<_> = position_posting.iter().collect();
+        assert!(ids.windows(2).all(|pair| pair[0] < pair[1]));
         assert!(
-            w.archetypes.with_component(velocity).is_empty(),
+            w.archetypes
+                .with_component(velocity)
+                .is_none_or(|posting| posting.is_empty()),
             "repeated churn must not accumulate stale postings for variant-only columns"
         );
         for id in [first_archetype, second_archetype] {
@@ -631,18 +646,33 @@ fn non_tail_shared_eviction_preserves_later_component_and_binding_postings() {
     assert_eq!(shared_layer, shared_sid(&w, newer, layer));
 
     assert!(w.despawn(older));
-    assert_eq!(w.archetypes.with_component(position), &[newer_archetype]);
+    assert_eq!(
+        w.archetypes
+            .with_component(position)
+            .unwrap()
+            .iter()
+            .collect::<Vec<_>>(),
+        [newer_archetype]
+    );
     assert!(w
         .archetypes
         .with_shared_binding(batch_key, older_batch)
-        .is_empty());
+        .is_none_or(|posting| posting.is_empty()));
     assert_eq!(
-        w.archetypes.with_shared_binding(batch_key, newer_batch),
-        &[newer_archetype]
+        w.archetypes
+            .with_shared_binding(batch_key, newer_batch)
+            .unwrap()
+            .iter()
+            .collect::<Vec<_>>(),
+        [newer_archetype]
     );
     assert_eq!(
-        w.archetypes.with_shared_binding(layer, shared_layer),
-        &[newer_archetype],
+        w.archetypes
+            .with_shared_binding(layer, shared_layer)
+            .unwrap()
+            .iter()
+            .collect::<Vec<_>>(),
+        [newer_archetype],
         "non-suffix cleanup must retain later archetypes bound to the same value"
     );
 }

@@ -101,8 +101,12 @@ fn restore_roundtrips_after_mutation() {
         .map(|archetype| archetype.id())
         .collect();
     assert_eq!(
-        w.archetypes().with_component(pos_id),
-        expected_pos_archetypes.as_slice()
+        w.archetypes()
+            .with_component(pos_id)
+            .unwrap()
+            .iter()
+            .collect::<Vec<_>>(),
+        expected_pos_archetypes
     );
 
     // A fresh capture is byte+tick identical to the original.

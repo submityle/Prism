@@ -24,10 +24,12 @@
 //! recently-changed row has since been swap-removed. The design explicitly
 //! accepts this over-approximation for the coarse layer.
 
+use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, BinaryHeap};
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cmp::Reverse;
+use core::iter::Peekable;
 use hashbrown::HashSet;
 
 use crate::archetype::ArchetypeId;
@@ -205,6 +207,61 @@ pub(super) fn merge_sorted_chunks<T: Copy + Ord>(
             }
         }
         visit(chunk);
+    }
+    heap_operations
+}
+
+/// Merge sorted archetype postings as logical sources rather than exposing
+/// every bounded posting block as a separate source. This keeps heap width
+/// proportional to queried columns (plus sparse candidates), independent of
+/// archetype count.
+fn merge_sorted_archetype_iterators<'a>(
+    sources: &mut [Peekable<Box<dyn Iterator<Item = ArchetypeId> + 'a>>],
+    mut visit: impl FnMut(ArchetypeId),
+) -> usize {
+    if sources.len() <= 4 {
+        let mut last = None;
+        loop {
+            let next = sources
+                .iter_mut()
+                .filter_map(|source| source.peek().copied())
+                .min();
+            let Some(id) = next else { return 0 };
+            if last != Some(id) {
+                visit(id);
+                last = Some(id);
+            }
+            for source in sources.iter_mut() {
+                while source.peek().copied() == Some(id) {
+                    source.next();
+                }
+            }
+        }
+    }
+
+    let mut heap = BinaryHeap::new();
+    let mut heap_operations = 0;
+    for (source_index, source) in sources.iter_mut().enumerate() {
+        if let Some(&id) = source.peek() {
+            heap.push(Reverse((id, source_index)));
+            heap_operations += 1;
+        }
+    }
+    let mut last = None;
+    while let Some(Reverse((id, source_index))) = heap.pop() {
+        heap_operations += 1;
+        if last != Some(id) {
+            visit(id);
+            last = Some(id);
+        }
+        let source = &mut sources[source_index];
+        while source.peek().copied() == Some(id) {
+            source.next();
+        }
+        if let Some(&next) = source.peek() {
+            heap.push(Reverse((next, source_index)));
+            heap_operations += 1;
+        }
     }
     heap_operations
 }
@@ -508,7 +565,9 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
         // union keeps output ordering deterministic and does not alter the
         // interval-index superset semantics.
         let archetypes = world.archetypes();
-        let mut candidate_sources = Vec::new();
+        let mut sparse_archetypes = Vec::new();
+        let mut candidate_sources: Vec<Peekable<Box<dyn Iterator<Item = ArchetypeId> + '_>>> =
+            Vec::new();
         for &id in &access_ids {
             if !world
                 .components()
@@ -517,20 +576,23 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
             {
                 continue;
             }
-            let indexed = archetypes.with_component(id);
-            report.stats.archetype_index_entries_scanned += indexed.len();
-            if !indexed.is_empty() {
-                candidate_sources.push(indexed);
+            if let Some(indexed) = archetypes.with_component(id) {
+                report.stats.archetype_index_entries_scanned += indexed.len();
+                let source: Box<dyn Iterator<Item = ArchetypeId> + '_> = Box::new(indexed.iter());
+                candidate_sources.push(source.peekable());
             }
         }
-        let mut sparse_archetypes = Vec::new();
         if !sparse_chunks.is_empty() {
             sparse_archetypes.extend(sparse_chunks.keys().copied());
             sparse_archetypes.sort_unstable();
-            candidate_sources.push(&sparse_archetypes);
+            let source: Box<dyn Iterator<Item = ArchetypeId> + '_> =
+                Box::new(sparse_archetypes.iter().copied());
+            candidate_sources.push(source.peekable());
         }
         let mut candidate_archetypes = Vec::new();
-        merge_sorted_chunks(&candidate_sources, |id| candidate_archetypes.push(id));
+        merge_sorted_archetype_iterators(&mut candidate_sources, |id| {
+            candidate_archetypes.push(id)
+        });
 
         for archetype_id in candidate_archetypes {
             report.stats.candidate_archetype_checks += 1;

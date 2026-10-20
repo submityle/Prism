@@ -12,11 +12,12 @@
 //! (design §5.3, §9).
 
 use alloc::boxed::Box;
-use alloc::collections::{BinaryHeap, VecDeque};
+use alloc::collections::{BTreeMap, BinaryHeap, VecDeque};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::cell::UnsafeCell;
 use core::cmp::Reverse;
+use core::ops::Bound::{Excluded, Unbounded};
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::collections::HashMap;
@@ -550,20 +551,213 @@ impl ArchetypeKey {
     }
 }
 
-/// Remove a sorted batch from a sorted posting. Fresh archetypes receive
-/// monotonically increasing IDs, so transient churn commonly removes a suffix
-/// and can be handled without scanning the older live entries. Arbitrary
-/// non-suffix eviction retains the conservative linear filter.
-fn remove_posting_ids(posting: &mut Vec<ArchetypeId>, removed: &[ArchetypeId]) {
-    if removed.is_empty() {
-        return;
-    }
+/// A sorted archetype posting. Small postings stay in one bounded vector;
+/// larger postings use an ordered block directory. IDs are allocated in
+/// monotonically increasing order, so insertion appends. Non-tail eviction
+/// compacts only touched blocks for large postings.
+fn remove_small_posting_ids(posting: &mut Vec<ArchetypeId>, removed: &[ArchetypeId]) {
     if let Some(start) = posting.len().checked_sub(removed.len())
         && posting.get(start..) == Some(removed)
     {
         posting.truncate(start);
     } else {
         posting.retain(|id| removed.binary_search(id).is_err());
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct ArchetypePosting {
+    small: Vec<ArchetypeId>,
+    blocks: BTreeMap<ArchetypeId, Vec<ArchetypeId>>,
+    len: usize,
+}
+
+impl ArchetypePosting {
+    const BLOCK_CAPACITY: usize = 128;
+
+    fn push(&mut self, id: ArchetypeId) {
+        if self.blocks.is_empty() && self.small.len() < Self::BLOCK_CAPACITY {
+            self.small.push(id);
+            self.len += 1;
+            return;
+        }
+        if self.blocks.is_empty() {
+            let small = core::mem::take(&mut self.small);
+            self.blocks.insert(
+                *small.first().expect("full small posting is non-empty"),
+                small,
+            );
+        }
+        if self
+            .blocks
+            .last_key_value()
+            .is_none_or(|(_, block)| block.len() == Self::BLOCK_CAPACITY)
+        {
+            self.blocks
+                .insert(id, Vec::with_capacity(Self::BLOCK_CAPACITY));
+        }
+        self.blocks
+            .last_entry()
+            .expect("posting block was added")
+            .get_mut()
+            .push(id);
+        self.len += 1;
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.len
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    pub(crate) fn blocks(&self) -> impl Iterator<Item = &[ArchetypeId]> {
+        core::iter::once(self.small.as_slice())
+            .chain(self.blocks.values().map(Vec::as_slice))
+            .filter(|block| !block.is_empty())
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = ArchetypeId> + '_ {
+        self.blocks().flat_map(|block| block.iter().copied())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn contains(&self, id: ArchetypeId) -> bool {
+        if self.blocks.is_empty() {
+            return self.small.binary_search(&id).is_ok();
+        }
+        self.blocks
+            .range(..=id)
+            .next_back()
+            .is_some_and(|(_, block)| {
+                block.last().is_some_and(|&last| id <= last) && block.binary_search(&id).is_ok()
+            })
+    }
+
+    fn remove_sorted(&mut self, removed: &[ArchetypeId]) {
+        if removed.is_empty() || self.is_empty() {
+            return;
+        }
+        if self.blocks.is_empty() {
+            let old_len = self.small.len();
+            remove_small_posting_ids(&mut self.small, removed);
+            self.len -= old_len - self.small.len();
+            return;
+        }
+
+        // Keep the common newest-archetype churn path allocation-free.
+        if self.len >= removed.len()
+            && self
+                .blocks
+                .values()
+                .rev()
+                .flat_map(|block| block.iter().rev())
+                .take(removed.len())
+                .copied()
+                .eq(removed.iter().rev().copied())
+        {
+            self.truncate(self.len - removed.len());
+            return;
+        }
+
+        // Locate each touched block through the ordered directory and compact
+        // only that block. Removed IDs are sorted, so each block is visited at
+        // most once per batch.
+        let mut cursor = 0;
+        while cursor < removed.len() {
+            let id = removed[cursor];
+            let Some((&key, block)) = self.blocks.range(..=id).next_back() else {
+                cursor += 1;
+                continue;
+            };
+            let upper = *block.last().expect("posting blocks are non-empty");
+            if upper < id {
+                cursor += 1;
+                continue;
+            }
+            let end = cursor + removed[cursor..].partition_point(|&candidate| candidate <= upper);
+            let old_block = self.blocks.remove(&key).expect("located posting block");
+            let mut compacted = Vec::with_capacity(Self::BLOCK_CAPACITY);
+            let mut removal_cursor = cursor;
+            for candidate in old_block {
+                if removed.get(removal_cursor) == Some(&candidate) {
+                    removal_cursor += 1;
+                    self.len -= 1;
+                } else {
+                    compacted.push(candidate);
+                }
+            }
+            if let Some(&new_key) = compacted.first() {
+                self.blocks.insert(new_key, compacted);
+                self.coalesce(new_key);
+            }
+            cursor = end;
+        }
+        if self.len <= Self::BLOCK_CAPACITY {
+            self.small = self.blocks.values().flatten().copied().collect();
+            self.blocks.clear();
+        }
+    }
+
+    fn truncate(&mut self, new_len: usize) {
+        if self.blocks.is_empty() {
+            self.small.truncate(new_len);
+            self.len = new_len;
+            return;
+        }
+        while self.len > new_len {
+            let (key, block_len) = self
+                .blocks
+                .last_key_value()
+                .map(|(&key, block)| (key, block.len()))
+                .expect("non-empty posting");
+            let excess = self.len - new_len;
+            if excess >= block_len {
+                self.blocks.remove(&key);
+                self.len -= block_len;
+            } else {
+                let mut block = self.blocks.remove(&key).expect("last block exists");
+                block.truncate(block.len() - excess);
+                self.len = new_len;
+                self.blocks.insert(key, block);
+            }
+        }
+        if self.len <= Self::BLOCK_CAPACITY {
+            self.small = self.blocks.values().flatten().copied().collect();
+            self.blocks.clear();
+        }
+    }
+
+    fn coalesce(&mut self, mut key: ArchetypeId) {
+        if let Some(previous) = self.blocks.range(..key).next_back().map(|(&key, _)| key) {
+            let combined_len = self.blocks[&previous].len() + self.blocks[&key].len();
+            if combined_len <= Self::BLOCK_CAPACITY {
+                let mut merged = self
+                    .blocks
+                    .remove(&previous)
+                    .expect("previous block exists");
+                let mut current = self.blocks.remove(&key).expect("current block exists");
+                merged.append(&mut current);
+                self.blocks.insert(previous, merged);
+                key = previous;
+            }
+        }
+
+        if let Some(next) = self
+            .blocks
+            .range((Excluded(key), Unbounded))
+            .next()
+            .map(|(&key, _)| key)
+        {
+            let combined_len = self.blocks[&key].len() + self.blocks[&next].len();
+            if combined_len <= Self::BLOCK_CAPACITY {
+                let mut merged = self.blocks.remove(&key).expect("current block exists");
+                let mut following = self.blocks.remove(&next).expect("next block exists");
+                merged.append(&mut following);
+                self.blocks.insert(key, merged);
+            }
+        }
     }
 }
 
@@ -576,11 +770,11 @@ pub struct Archetypes {
     /// are removed when a shared-value archetype is permanently evicted.
     /// Dirty-query fallback uses it to avoid testing every matched archetype
     /// for every accessed table column.
-    by_component: HashMap<ComponentId, Vec<ArchetypeId>>,
+    by_component: HashMap<ComponentId, ArchetypePosting>,
     /// Shared-value reverse index. Each posting is ordered by stable
     /// `ArchetypeId` and contains every non-evicted archetype bound to the
     /// `(component, value)` pair, including currently live archetypes.
-    by_shared_binding: HashMap<(ComponentId, SharedValueId), Vec<ArchetypeId>>,
+    by_shared_binding: HashMap<(ComponentId, SharedValueId), ArchetypePosting>,
     column_journal: Arc<ColumnJournal>,
     /// Append-only eviction IDs let query caches skip full snapshot compaction
     /// when churn is unrelated to their matched archetypes. This is bounded by
@@ -663,10 +857,8 @@ impl Archetypes {
     /// permanently evicted tombstones. Callers must still apply their query
     /// match and live-row checks.
     #[inline]
-    pub(crate) fn with_component(&self, component: ComponentId) -> &[ArchetypeId] {
-        self.by_component
-            .get(&component)
-            .map_or(&[], |archetypes| archetypes.as_slice())
+    pub(crate) fn with_component(&self, component: ComponentId) -> Option<&ArchetypePosting> {
+        self.by_component.get(&component)
     }
 
     /// Archetypes bound to one interned shared value, in stable id order.
@@ -677,10 +869,8 @@ impl Archetypes {
         &self,
         component: ComponentId,
         value: SharedValueId,
-    ) -> &[ArchetypeId] {
-        self.by_shared_binding
-            .get(&(component, value))
-            .map_or(&[], |archetypes| archetypes.as_slice())
+    ) -> Option<&ArchetypePosting> {
+        self.by_shared_binding.get(&(component, value))
     }
 
     /// Permanently evicted archetype IDs, in eviction order.
@@ -801,7 +991,7 @@ impl Archetypes {
         let mut evicted: Vec<ArchetypeId> = by_shared_binding
             .get(&(cid, sid))
             .into_iter()
-            .flat_map(|posting| posting.iter().copied())
+            .flat_map(|posting| posting.blocks().flatten().copied())
             .filter(|id| archetypes[id.index() as usize].is_empty())
             .collect();
 
@@ -860,7 +1050,7 @@ impl Archetypes {
             removed_ids.clear();
             removed_ids.extend(component_evictions[index..end].iter().map(|&(_, id)| id));
             let remove_entry = if let Some(postings) = by_component.get_mut(&component) {
-                remove_posting_ids(postings, &removed_ids);
+                postings.remove_sorted(&removed_ids);
                 postings.is_empty()
             } else {
                 false
@@ -881,7 +1071,7 @@ impl Archetypes {
             removed_ids.clear();
             removed_ids.extend(binding_evictions[index..end].iter().map(|&(_, id)| id));
             let remove_entry = if let Some(postings) = by_shared_binding.get_mut(&binding) {
-                remove_posting_ids(postings, &removed_ids);
+                postings.remove_sorted(&removed_ids);
                 postings.is_empty()
             } else {
                 false
@@ -1219,6 +1409,71 @@ mod tests {
     }
 
     #[test]
+    fn component_posting_removes_sparse_ids_across_blocks_and_keeps_order() {
+        let mut posting = ArchetypePosting::default();
+        for id in 0..513 {
+            posting.push(ArchetypeId(id));
+        }
+
+        let removed = [
+            ArchetypeId(2),
+            ArchetypeId(127),
+            ArchetypeId(128),
+            ArchetypeId(256),
+            ArchetypeId(511),
+        ];
+        posting.remove_sorted(&removed);
+        let actual: Vec<_> = posting.iter().collect();
+        let expected: Vec<_> = (0..513)
+            .map(ArchetypeId)
+            .filter(|id| removed.binary_search(id).is_err())
+            .collect();
+        assert_eq!(actual, expected);
+        assert_eq!(posting.len(), 513 - removed.len());
+        assert!(actual.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(removed.iter().all(|&id| !posting.contains(id)));
+
+        // The append-only registry contract still holds after holes are
+        // compacted from earlier blocks.
+        posting.push(ArchetypeId(700));
+        assert!(posting
+            .iter()
+            .last()
+            .is_some_and(|id| id == ArchetypeId(700)));
+    }
+
+    #[test]
+    fn component_posting_truncates_multiple_suffix_blocks() {
+        let mut posting = ArchetypePosting::default();
+        for id in 0..385 {
+            posting.push(ArchetypeId(id));
+        }
+        let removed: Vec<_> = (260..385).map(ArchetypeId).collect();
+        posting.remove_sorted(&removed);
+        assert_eq!(
+            posting.iter().collect::<Vec<_>>(),
+            (0..260).map(ArchetypeId).collect::<Vec<_>>()
+        );
+        assert_eq!(posting.len(), 260);
+    }
+
+    #[test]
+    fn component_posting_coalesces_adjacent_sparse_blocks() {
+        let mut posting = ArchetypePosting::default();
+        for id in 0..256 {
+            posting.push(ArchetypeId(id));
+        }
+        let removed: Vec<_> = (0..64).chain(192..256).map(ArchetypeId).collect();
+        posting.remove_sorted(&removed);
+        assert!(posting.blocks.is_empty());
+        assert_eq!(posting.small.len(), ArchetypePosting::BLOCK_CAPACITY);
+        assert_eq!(
+            posting.iter().collect::<Vec<_>>(),
+            (64..192).map(ArchetypeId).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn get_or_create_dedups_by_set() {
         let mut comps = Components::new();
         let a = comps.register::<A>();
@@ -1238,8 +1493,22 @@ mod tests {
         assert_eq!(archetypes.len(), 3);
         assert!(archetypes.get(id3).unwrap().contains(a));
         assert!(!archetypes.get(id3).unwrap().contains(b));
-        assert_eq!(archetypes.with_component(a), &[id1, id3]);
-        assert_eq!(archetypes.with_component(b), &[id1]);
-        assert!(archetypes.with_component(ComponentId::new(99)).is_empty());
+        assert_eq!(
+            archetypes
+                .with_component(a)
+                .unwrap()
+                .iter()
+                .collect::<Vec<_>>(),
+            [id1, id3]
+        );
+        assert_eq!(
+            archetypes
+                .with_component(b)
+                .unwrap()
+                .iter()
+                .collect::<Vec<_>>(),
+            [id1]
+        );
+        assert!(archetypes.with_component(ComponentId::new(99)).is_none());
     }
 }
