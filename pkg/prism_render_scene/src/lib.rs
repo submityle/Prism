@@ -50,10 +50,12 @@ pub use geometry::{
 pub use gpu::{PrismGpu, PrismGpuInitError, PrismGpuPlugin};
 pub use lighting::{
     build_cluster_data, cubemap_faces_from_image, project_image_to_sh, ClusterBindGroup,
-    ClusterConfig, ClusterCpuData, ClusterGpuBuffers, ClusterViewFit, EnvironmentProbeCache,
-    ExtractedClusterView, ExtractedLights, GpuClusterGrid, GpuDirectionalLight,
-    GpuLightEnvironment, GpuPunctualLight, LightBindGroup, LightGpuBuffers, PrismLightingPlugin,
-    StylizedLighting, LIGHT_ENVIRONMENT_FLAG_IMAGE_BASED,
+    ClusterConfig, ClusterCpuData, ClusterGpuBuffers, ClusterViewFit, DirtyRange,
+    EnvironmentProbeCache, ExtractedClusterView, ExtractedLights, GpuClusterGrid,
+    GpuDirectionalLight, GpuLightEnvironment, GpuPunctualLight, IncrementalLightTable,
+    LightBindGroup, LightGpuBuffers, LightGpuPayload, LightSlotHandle, PrismLightingPlugin,
+    SlotRetirement, StylizedLighting, UploadPlan, UploadPolicy, UploadStats,
+    LIGHT_ENVIRONMENT_FLAG_IMAGE_BASED,
 };
 pub use material::{
     BindlessHeapStats, BindlessSlot, BindlessTextureHeap, MaterialBindGroup,
