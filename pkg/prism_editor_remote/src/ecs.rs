@@ -223,6 +223,20 @@ struct State {
     dirty: bool,
     entity_namespace: u64,
     archetype_generation: u64,
+    initialized: bool,
+    work: EcsSyncWork,
+}
+
+/// Cumulative projection work; counters saturate instead of wrapping.
+/// Includes work performed by scans that later reject an invalid projection.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct EcsSyncWork {
+    /// Full column projection attempts after constant-time admission checks.
+    pub scans: u64,
+    /// Entity rows visited by full column projection.
+    pub entities: u64,
+    /// Present registered components passed to the reflection encoder.
+    pub components: u64,
 }
 
 /// An exclusive, schedule-barrier adapter over actual Prism ECS storage.
@@ -287,6 +301,8 @@ impl<'w> EcsSyncStore<'w> {
                 dirty: false,
                 entity_namespace,
                 archetype_generation,
+                initialized: false,
+                work: EcsSyncWork::default(),
             }),
         })
     }
@@ -367,6 +383,11 @@ impl<'w> EcsSyncStore<'w> {
         self.world
     }
 
+    /// Real projection work, without triggering a refresh or cloning values.
+    pub fn projection_work(&self) -> EcsSyncWork {
+        self.state.borrow().work
+    }
+
     /// Encodes session/restore identity plus the full entity index/generation.
     pub fn entity_id(&self, entity: Entity) -> Result<EntityId, SyncError> {
         if self.world.id().get() != self.world_id || !self.world.contains(entity) {
@@ -386,8 +407,10 @@ impl<'w> EcsSyncStore<'w> {
             .ok_or(SyncError::MissingEntity { entity: id })
     }
 
-    /// Refreshes from real columns. A failed scan leaves history untouched, and
-    /// every protocol operation retries the scan instead of serving stale data.
+    /// Refreshes real columns after host mutation or component registration.
+    /// The exclusive borrow and host mutation barrier allow unchanged queries
+    /// to reuse the validated projection without traversing entities. A failed
+    /// scan leaves history untouched and is retried instead of serving stale data.
     /// Returns the current optimistic-write revision.
     pub fn synchronize(&self) -> Result<Revision, SyncError> {
         if self.world.id().get() != self.world_id {
@@ -406,6 +429,10 @@ impl<'w> EcsSyncStore<'w> {
         }
         let mut state = self.state.borrow_mut();
         let generation = self.world.archetype_generation();
+        if state.initialized && !state.dirty && generation == state.archetype_generation {
+            return Ok(state.snapshot.revision);
+        }
+        state.work.scans = state.work.scans.saturating_add(1);
         let namespace = if generation == state.archetype_generation {
             state.entity_namespace
         } else {
@@ -415,12 +442,14 @@ impl<'w> EcsSyncStore<'w> {
         let mut budget = Budget::new(self.limits);
         for arch in self.world.archetypes().iter() {
             for &entity in arch.table().entities() {
+                state.work.entities = state.work.entities.saturating_add(1);
                 if snapshot.entities.len() >= self.limits.max_entities {
                     return Err(invalid("ECS entity budget exceeded"));
                 }
                 let mut record = EntityRecord::new();
                 for (id, binding) in &self.bindings {
                     if let Some(value) = self.world.get_reflect(entity, binding.stable) {
+                        state.work.components = state.work.components.saturating_add(1);
                         budget.bytes(id.as_str().len())?;
                         record
                             .components
@@ -439,6 +468,7 @@ impl<'w> EcsSyncStore<'w> {
         }
         let changes = diff(&state.snapshot, &snapshot);
         if changes.is_empty() && !state.dirty {
+            state.initialized = true;
             return Ok(state.snapshot.revision);
         }
         snapshot.revision = next_revision(state.snapshot.revision)?;
@@ -457,6 +487,7 @@ impl<'w> EcsSyncStore<'w> {
         state.entity_namespace = namespace;
         state.archetype_generation = generation;
         state.dirty = false;
+        state.initialized = true;
         Ok(state.snapshot.revision)
     }
 

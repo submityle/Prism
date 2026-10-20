@@ -23,6 +23,121 @@ impl Component for Label {}
 const TARGET: TargetId = TargetId::from_raw(0xe5);
 
 #[test]
+fn idle_incremental_queries_do_no_projection_work_after_real_remote_commit() {
+    let mut world = World::new();
+    let entity = world.spawn(label(1));
+    for index in 2..4096 {
+        world.spawn(label(index));
+    }
+    let mut store = EcsSyncStore::new(&mut world, TARGET, EcsSyncLimits::default()).unwrap();
+    let component = store.register_component::<Label>();
+    let id = store.entity_id(entity).unwrap();
+    let base = store.synchronize().unwrap();
+    let initial = store.projection_work();
+    assert_eq!(initial.entities, 4095);
+    assert_eq!(initial.components, 4095);
+    for _ in 0..1000 {
+        assert!(store.read_changes(TARGET, base).unwrap().changes.is_empty());
+        assert_eq!(store.entity_id(entity).unwrap(), id);
+    }
+    assert_eq!(store.projection_work(), initial);
+    let commit = store
+        .apply_changes(
+            TARGET,
+            base,
+            &[field(id, &component, "order", Value::Unsigned(42))],
+        )
+        .unwrap();
+    assert_eq!(store.world().get::<Label>(entity).unwrap().order, 42);
+    assert_eq!(store.projection_work(), initial);
+    let delta = store.read_changes(TARGET, base).unwrap();
+    assert_eq!(delta.target_revision, commit.revision);
+    assert_eq!(delta.changes, commit.changes);
+    assert!(store
+        .read_changes(TARGET, commit.revision)
+        .unwrap()
+        .changes
+        .is_empty());
+    assert_eq!(store.projection_work(), initial);
+    store
+        .world_mut()
+        .unwrap()
+        .get_mut::<Label>(entity)
+        .unwrap()
+        .order = 43;
+    let changed = store.read_changes(TARGET, commit.revision).unwrap();
+    assert_eq!(changed.changes.len(), 1);
+    assert_eq!(store.world().get::<Label>(entity).unwrap().order, 43);
+    assert_eq!(store.projection_work().scans, initial.scans + 1);
+    let refreshed = store.projection_work();
+    assert!(store
+        .read_changes(TARGET, changed.target_revision)
+        .unwrap()
+        .changes
+        .is_empty());
+    assert_eq!(store.projection_work(), refreshed);
+}
+
+#[test]
+fn empty_initial_projection_and_failed_host_refresh_never_publish_stale_success() {
+    let mut world = World::new();
+    let limits = EcsSyncLimits {
+        max_value_bytes: 256,
+        ..EcsSyncLimits::default()
+    };
+    let mut store = EcsSyncStore::new(&mut world, TARGET, limits).unwrap();
+    assert_eq!(store.synchronize().unwrap(), Revision::ZERO);
+    let empty_work = store.projection_work();
+    assert!(store.read_snapshot(TARGET).unwrap().entities.is_empty());
+    assert_eq!(store.projection_work(), empty_work);
+    let component = store.register_component::<Label>();
+    let entity = store.world_mut().unwrap().spawn(label(1));
+    let id = store.entity_id(entity).unwrap();
+    let base = store.synchronize().unwrap();
+    store
+        .world_mut()
+        .unwrap()
+        .get_mut::<Label>(entity)
+        .unwrap()
+        .text = "x".repeat(1024);
+    let before_failures = store.projection_work();
+    assert!(store.read_changes(TARGET, base).is_err());
+    assert!(store.read_snapshot(TARGET).is_err());
+    assert!(store
+        .apply_changes(
+            TARGET,
+            base,
+            &[field(id, &component, "order", Value::Unsigned(8))]
+        )
+        .is_err());
+    assert_eq!(store.projection_work().scans, before_failures.scans + 3);
+    assert_eq!(store.world().get::<Label>(entity).unwrap().order, 1);
+    store
+        .world_mut()
+        .unwrap()
+        .get_mut::<Label>(entity)
+        .unwrap()
+        .text = "repaired".into();
+    let repaired = store.read_snapshot(TARGET).unwrap();
+    assert!(repaired.revision > base);
+    assert_eq!(
+        repaired.entities[&id].components[&component],
+        Value::object([
+            ("text", Value::String("repaired".into())),
+            ("order", Value::Unsigned(1)),
+        ])
+        .unwrap()
+    );
+    let repaired_work = store.projection_work();
+    assert!(store
+        .read_changes(TARGET, repaired.revision)
+        .unwrap()
+        .changes
+        .is_empty());
+    assert_eq!(store.projection_work(), repaired_work);
+}
+
+#[test]
 fn snapshot_reads_real_typed_columns_and_commit_writes_them() {
     let mut world = World::new();
     let entity = world.spawn(Label {

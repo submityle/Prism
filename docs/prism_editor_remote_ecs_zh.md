@@ -94,7 +94,7 @@ reflection 实现属于可信宿主代码，必须无 panic、无外部副作用
 
 ## 原子提交与 engine 行为
 
-每个请求首先从真实 ECS 同步，再验证精确 base revision。批次依次执行
+每个请求首先核对真实 ECS 的刷新边界，再验证精确 base revision。批次依次执行
 命令预算、实体身份、组件白名单、存在性、存储写权限与路径预算检查，
 在协议投影上计算最终值。全部动态值转换为具体 `T`，再编码核对精确相等，
 并验证最终完整投影预算。最终 delta、revision、历史与替换容器都在写入前准备好。
@@ -112,10 +112,18 @@ reflection 实现属于可信宿主代码，必须无 panic、无外部副作用
 
 ## revision、实体与刷新边界
 
-每次协议读写重新扫描真实列；扫描失败不替换已缓存状态，后续请求仍重新
-扫描并报错，不会把旧缓存包装成成功。`world_mut()` 在扫描失败后仍可用于
-宿主修复数据。实体 reservation 必须先 flush 再由 spawn_at 完成放置；
-未 flush 或仍 live/unplaced 均显式拒绝同步，不能静默遗漏实体。
+首次同步、登记组件、取得 `world_mut()` 或 archetype generation 改变后扫描真实列。
+其余查询复用已验证投影，不遍历实体或再次编码组件；真实远程批写已在发布前
+验证并更新投影，因此其后的查询也可直接复用。独占 World 借用保证所有宿主
+可变访问经过边界。每次请求仍以常数成本检查 World 身份、reservation 和实体数。
+扫描失败不替换已缓存状态，也不清除刷新要求；后续请求继续扫描并报错，
+不会把旧缓存包装成成功。`world_mut()` 在失败后仍可修复数据。实体 reservation
+必须先 flush 再由 spawn_at 完成放置；未 flush 或仍 live/unplaced 均拒绝同步。
+
+`projection_work()` 返回实际累计扫描次数、访问的实体行与编码的组件数，
+统计包含失败扫描且饱和不回绕。空闲 `read_changes` 无历史数据时不复制完整世界；
+`read_snapshot` 仍复制完整协议投影，宿主刷新与远程批写的 staging/最终预算检查
+仍与完整投影大小相关，不能据此宣称全部路径成本都只随变化量增长。
 
 每次成功取得 `world_mut()` 都标记宿主边界；下次同步使旧 revision 失效，
 即使值相同或经历 A→B→A。未观察的多个宿主阶段可以合并成一个 revision。
@@ -173,3 +181,12 @@ World 替换以及失败扫描后的宿主修复。Unix 子进程测试启动真
 
 验证结束后仅清理上述自有 target，cargo 报告回收 99.7MiB / 275 个文件；
 没有保留活动验证命令，未清理其他任务的 target。
+
+同日的空闲查询优化在共享 target `/private/tmp/prism-editor-joint-cr1ODK` 验证：
+`cargo test --offline -p prism_editor_remote --all-features --all-targets` 通过
+32 项包内、21 项 ECS 和 9 项进程桥测试；对应全部 targets/features 的
+`cargo clippy --offline -p prism_editor_remote --all-targets --all-features --no-deps -- -D warnings`
+通过。新增回归在 4095 个真实实体上连续执行 1000 次增量查询和身份查询，
+确认无额外投影；验证远程写入后复用、宿主写入后仅刷新一次，以及空世界
+首次同步和连续失败刷新不能返回陈旧成功。共享 target 仍供其他编辑器验证使用，
+尚未清理。
