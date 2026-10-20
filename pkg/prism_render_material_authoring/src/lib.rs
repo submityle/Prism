@@ -16,6 +16,7 @@
 )]
 
 mod archetype;
+mod author_node;
 mod diagnostic;
 mod evaluator;
 mod export;
@@ -25,6 +26,7 @@ mod parse;
 mod procedural;
 
 pub use archetype::MaterialArchetype;
+pub use author_node::author_node_manifest;
 pub use diagnostic::{AuthoringError, Diagnostic, DiagnosticCode, Severity, SourceLocation};
 pub use evaluator::evaluate_connection;
 pub use export::export_materialx;

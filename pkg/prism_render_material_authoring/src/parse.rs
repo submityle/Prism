@@ -100,6 +100,7 @@ pub fn parse_materialx(source: &str) -> Result<Document, AuthoringError> {
     }
     result.nodedefs.sort_by(|a, b| a.name.cmp(&b.name));
     result.nodegraphs.sort_by(|a, b| a.name.cmp(&b.name));
+    crate::author_node::validate_document(&result)?;
     validate_references(&xml, &result)?;
     Ok(result)
 }
@@ -255,7 +256,7 @@ fn parse_node(xml: &XmlDocument<'_>, element: XmlNode<'_, '_>) -> Result<Node, A
         "ifequal",
         "switch",
     ];
-    if !SUPPORTED.contains(&category.as_str()) {
+    if !SUPPORTED.contains(&category.as_str()) && element.attribute("nodedef").is_none() {
         return Err(fail(
             xml,
             element,
@@ -265,10 +266,20 @@ fn parse_node(xml: &XmlDocument<'_>, element: XmlNode<'_, '_>) -> Result<Node, A
     }
     let mut inputs = Vec::new();
     let mut outputs = Vec::new();
+    let mut input_ids = BTreeSet::new();
+    let mut output_ids = BTreeSet::new();
     for child in element.children().filter(XmlNode::is_element) {
         match child.tag_name().name() {
-            "input" => inputs.push(parse_input(xml, child, false)?),
-            "output" => outputs.push(parse_output(xml, child, false)?),
+            "input" => {
+                let input = parse_input(xml, child, false)?;
+                insert_id(xml, &mut input_ids, &input.name, child)?;
+                inputs.push(input);
+            }
+            "output" => {
+                let output = parse_output(xml, child, false)?;
+                insert_id(xml, &mut output_ids, &output.name, child)?;
+                outputs.push(output);
+            }
             _ => {
                 return Err(fail(
                     xml,

@@ -4,12 +4,13 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use crate::builtin::{
-    builtin_energy_policy, builtin_registry, full_capabilities, register_prism_extension,
-    UID_CACHE_AUX_SURFEL, UID_CHANNEL_DAMAGE, UID_CHANNEL_DISSOLVE, UID_CHANNEL_SNOW,
-    UID_CHANNEL_WETNESS, UID_COMPOSITE_OUTLINE, UID_DOWNGRADE_SAMPLE_BUDGET, UID_LOBE_ANISOTROPY,
-    UID_LOBE_CLEARCOAT, UID_LOBE_EMISSION, UID_LOBE_FACE, UID_LOBE_GLINT, UID_LOBE_SHEEN,
-    UID_LOBE_SUBSURFACE, UID_LOBE_THIN_FILM, UID_LOBE_TRANSMISSION, UID_MODE_LIT, UID_MODE_NPR,
-    UID_MODE_UNLIT, UID_PROVIDER_FACE_SHADOW_SDF, UID_PROVIDER_MEASURED_BRDF, UID_TRANSFER_SRGB,
+    builtin_author_node, builtin_energy_policy, builtin_registry, full_capabilities,
+    register_prism_extension, BUILTIN_AUTHOR_NODES, UID_CACHE_AUX_SURFEL, UID_CHANNEL_DAMAGE,
+    UID_CHANNEL_DISSOLVE, UID_CHANNEL_SNOW, UID_CHANNEL_WETNESS, UID_COMPOSITE_OUTLINE,
+    UID_DOWNGRADE_SAMPLE_BUDGET, UID_LOBE_ANISOTROPY, UID_LOBE_CLEARCOAT, UID_LOBE_EMISSION,
+    UID_LOBE_FACE, UID_LOBE_GLINT, UID_LOBE_SHEEN, UID_LOBE_SUBSURFACE, UID_LOBE_THIN_FILM,
+    UID_LOBE_TRANSMISSION, UID_MODE_LIT, UID_MODE_NPR, UID_MODE_UNLIT,
+    UID_PROVIDER_FACE_SHADOW_SDF, UID_PROVIDER_MEASURED_BRDF, UID_TRANSFER_SRGB,
 };
 use crate::namespace::Region;
 use crate::negotiate::negotiate;
@@ -595,9 +596,9 @@ fn energy_policies_are_lobe_only_and_roll_up_by_priority() {
     }
 }
 
-/// Every extension-point kind is represented in the catalogue by at least one
-/// real extension — except `author_node`, whose front-end (§4) does not exist
-/// yet, so there is nothing honest to register.
+/// Every extension-point kind is represented by at least one real extension.
+/// Surface/runtime rows live in `builtin_registry`; author nodes live in their
+/// bake-only catalogue because they never become surface-header identities.
 #[test]
 fn the_catalogue_covers_every_kind_that_has_an_implementation() {
     let registry = builtin_registry();
@@ -610,9 +611,9 @@ fn the_catalogue_covers_every_kind_that_has_an_implementation() {
         if kind == Kind::AuthorNode {
             assert!(
                 rows.is_empty(),
-                "§4's authoring front-end does not exist yet, so an author_node \
-                 registration would be a placeholder: {rows:?}"
+                "author nodes must not enter the surface catalogue"
             );
+            assert!(!BUILTIN_AUTHOR_NODES.is_empty());
             continue;
         }
         assert!(!rows.is_empty(), "{kind} has no registered extension");
@@ -655,6 +656,41 @@ fn the_catalogue_covers_every_kind_that_has_an_implementation() {
         .map(ExtensionManifest::uid)
         .collect();
     assert_eq!(modes, [UID_MODE_LIT, UID_MODE_NPR, UID_MODE_UNLIT]);
+}
+
+#[test]
+fn materialx_author_nodes_have_unique_identity_only_bake_manifests() {
+    let mut previous_category = None;
+    let mut uids = alloc::collections::BTreeSet::new();
+    for entry in &BUILTIN_AUTHOR_NODES {
+        if let Some(previous) = previous_category {
+            assert!(previous < entry.category(), "catalogue must stay sorted");
+        }
+        previous_category = Some(entry.category());
+        assert!(
+            uids.insert(entry.manifest().uid()),
+            "duplicate author-node uid"
+        );
+        assert_eq!(builtin_author_node(entry.category()), Some(entry));
+
+        let manifest = entry.manifest();
+        manifest.validate().expect("author-node manifest is valid");
+        assert_eq!(manifest.kind(), Kind::AuthorNode);
+        assert_eq!(manifest.namespace(), Namespace::Prism);
+        assert_eq!(manifest.stability(), Stability::Candidate);
+        assert_eq!(manifest.registry_slot(), None);
+        assert!(!manifest.is_header_resident());
+        assert_eq!(manifest.requires_caps(), CapabilitySet::EMPTY);
+        assert!(!manifest.view_dependent());
+    }
+    assert!(builtin_author_node("noise").is_none());
+
+    let hooks = Kind::AuthorNode.hooks();
+    assert_eq!(hooks.len(), 1);
+    assert_eq!(hooks[0].name(), "evaluate");
+    assert_eq!(hooks[0].stage(), Stage::Bake);
+    assert!(!hooks[0].twin().is_required());
+    assert_eq!(Kind::AuthorNode.runtime_hook_count(), 0);
 }
 
 /// A bake/pass-time row still negotiates its capabilities — just by name,

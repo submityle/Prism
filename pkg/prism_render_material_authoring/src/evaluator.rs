@@ -72,6 +72,9 @@ fn eval_node_inner(
     output: Option<&str>,
     stack: &mut BTreeSet<String>,
 ) -> Result<TypedValue, AuthoringError> {
+    if let Some((definition, _)) = crate::author_node::resolve(document, node)? {
+        return eval_author_node(document, graph, node, definition, output, stack);
+    }
     if let Some(value) = &node.value {
         if output.is_some_and(|name| name != "out") {
             return Err(error(
@@ -118,14 +121,129 @@ fn eval_node_inner(
         };
         values.push(value);
     }
-    match node.category.as_str() {
-        "convert" => values.into_iter().next().ok_or_else(|| {
+    evaluate_operator(&node.category, &values)
+}
+
+fn eval_author_node(
+    document: &Document,
+    graph: &NodeGraph,
+    node: &Node,
+    definition: &crate::NodeDef,
+    output: Option<&str>,
+    stack: &mut BTreeSet<String>,
+) -> Result<TypedValue, AuthoringError> {
+    let declared_output = match output {
+        Some(name) => definition
+            .outputs
+            .iter()
+            .find(|candidate| candidate.name == name)
+            .ok_or_else(|| {
+                error(
+                    DiagnosticCode::InvalidReference,
+                    format!(
+                        "output '{name}' does not exist on nodedef '{}'",
+                        definition.name
+                    ),
+                )
+            })?,
+        None => definition.outputs.first().ok_or_else(|| {
             error(
                 DiagnosticCode::InvalidStructure,
-                "convert requires one input",
+                format!("nodedef '{}' has no output", definition.name),
             )
-        }),
-        "add" | "subtract" | "multiply" | "divide" => binary(&node.category, &values),
+        })?,
+    };
+
+    let mut values = Vec::with_capacity(definition.inputs.len());
+    for declared in &definition.inputs {
+        let mut value = if let Some(instance) = node
+            .inputs
+            .iter()
+            .find(|candidate| candidate.name == declared.name)
+        {
+            evaluate_input_inner(document, graph, instance, stack)?.ok_or_else(|| {
+                error(
+                    DiagnosticCode::InvalidStructure,
+                    format!(
+                        "node '{}' input '{}' has no value or connection",
+                        node.name, instance.name
+                    ),
+                )
+            })?
+        } else {
+            declared.value.clone().ok_or_else(|| {
+                error(
+                    DiagnosticCode::InvalidStructure,
+                    format!(
+                        "node '{}' omits required nodedef input '{}'",
+                        node.name, declared.name
+                    ),
+                )
+            })?
+        };
+        let declared_type = declared
+            .type_name
+            .as_deref()
+            .expect("parsed nodedef inputs always carry a type");
+        if value.type_name == "string" {
+            value.type_name = declared_type.to_owned();
+        } else if value.type_name != declared_type {
+            return Err(error(
+                DiagnosticCode::InvalidValue,
+                format!(
+                    "node '{}' input '{}' evaluated to type '{}', expected '{}'",
+                    node.name, declared.name, value.type_name, declared_type
+                ),
+            ));
+        }
+        values.push(value);
+    }
+
+    let mut result = evaluate_operator(&definition.category, &values)?;
+    let output_type = declared_output
+        .type_name
+        .as_deref()
+        .expect("parsed nodedef outputs always carry a type");
+    if definition.category == "convert" {
+        let input_width = values
+            .first()
+            .and_then(|value| crate::author_node::numeric_width(&value.type_name));
+        let output_width = crate::author_node::numeric_width(output_type);
+        if input_width.is_none() || output_width.is_none() || input_width != output_width {
+            return Err(error(
+                DiagnosticCode::InvalidValue,
+                format!(
+                    "nodedef '{}' convert requires supported numeric input/output types with the same dimension",
+                    definition.name
+                ),
+            ));
+        }
+    } else if result.type_name != output_type {
+        return Err(error(
+            DiagnosticCode::InvalidValue,
+            format!(
+                "nodedef '{}' evaluated type '{}', expected output type '{}'",
+                definition.name, result.type_name, output_type
+            ),
+        ));
+    }
+    result.type_name = output_type.to_owned();
+    Ok(result)
+}
+
+fn evaluate_operator(category: &str, values: &[TypedValue]) -> Result<TypedValue, AuthoringError> {
+    match category {
+        "convert" => values
+            .into_iter()
+            .next()
+            .ok_or_else(|| {
+                error(
+                    DiagnosticCode::InvalidStructure,
+                    "convert requires one input",
+                )
+            })
+            .and_then(|value| typed(&value.type_name, numbers(value)?)),
+        "add" | "subtract" | "multiply" | "divide" => binary(category, values),
         "mix" => {
             if values.len() != 3 {
                 return Err(error(
@@ -179,10 +297,7 @@ fn eval_node_inner(
         }
         _ => Err(error(
             DiagnosticCode::UnsafeConnection,
-            format!(
-                "node '{}' uses '{}' which requires a bake/runtime",
-                node.name, node.category
-            ),
+            format!("node category '{category}' requires a bake/runtime"),
         )),
     }
 }
@@ -350,19 +465,35 @@ fn typed(name: &str, values: Vec<f32>) -> Result<TypedValue, AuthoringError> {
         type_name: name.to_owned(),
         value: values
             .iter()
-            .map(|v| {
-                let mut s = format!("{v:.9}");
-                while s.contains('.') && s.ends_with('0') {
-                    s.pop();
-                }
-                if s.ends_with('.') {
-                    s.pop();
-                }
-                s
-            })
+            .map(|value| canonical_number(*value))
             .collect::<Vec<_>>()
             .join(", "),
     })
+}
+
+fn canonical_number(value: f32) -> String {
+    if value == 0.0 {
+        return "0".to_owned();
+    }
+
+    // Authoring literals carry the meaningful decimal precision of an f32,
+    // not the incidental tail introduced by one arithmetic operation. Round
+    // to seven significant decimal digits before using the shortest decimal
+    // representation. This keeps small/large magnitudes while canonicalizing
+    // results such as `0.3 + 0.4 == 0.70000005f32` back to `0.7`.
+    let exponent = value.abs().log10().floor() as i32;
+    let shift = 6 - exponent;
+    let scale = 10_f64.powi(shift.unsigned_abs() as i32);
+    let rounded = if shift >= 0 {
+        ((value as f64) * scale).round() / scale
+    } else {
+        ((value as f64) / scale).round() * scale
+    };
+    if rounded == 0.0 {
+        "0".to_owned()
+    } else {
+        rounded.to_string()
+    }
 }
 fn binary(op: &str, v: &[TypedValue]) -> Result<TypedValue, AuthoringError> {
     if v.len() != 2 {

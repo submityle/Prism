@@ -69,6 +69,86 @@ fn duplicate_nodedef_ports_are_rejected_instead_of_overwriting_schema() {
 }
 
 #[test]
+fn author_node_instances_fail_closed_on_invalid_nodedef_contracts() {
+    let cases = [
+        (
+            r#"<materialx><nodegraph name="g"><add name="n" nodedef="ND_missing"/></nodegraph></materialx>"#,
+            DiagnosticCode::InvalidReference,
+            "unknown nodedef",
+        ),
+        (
+            r#"<materialx><nodedef name="ND_noise" node="noise"><input name="in" type="float" value="0"/><output name="out" type="float"/></nodedef><nodegraph name="g"><noise name="n" nodedef="ND_noise"/></nodegraph></materialx>"#,
+            DiagnosticCode::UnsupportedMaterial,
+            "no executable PCM author_node",
+        ),
+        (
+            r#"<materialx><nodedef name="ND_add" node="add"><input name="a" type="float" value="1"/><input name="b" type="float" value="2"/><output name="out" type="float"/></nodedef><nodegraph name="g"><multiply name="n" nodedef="ND_add"/></nodegraph></materialx>"#,
+            DiagnosticCode::InvalidStructure,
+            "does not match",
+        ),
+        (
+            r#"<materialx><nodedef name="ND_add" node="add"><input name="a" type="float"/><input name="b" type="float" value="2"/><output name="out" type="float"/></nodedef><nodegraph name="g"><add name="n" nodedef="ND_add"/></nodegraph></materialx>"#,
+            DiagnosticCode::InvalidStructure,
+            "omits required",
+        ),
+        (
+            r#"<materialx><nodedef name="ND_add" node="add"><input name="a" type="float" value="1"/><input name="b" type="float" value="2"/><output name="out" type="float"/></nodedef><nodegraph name="g"><add name="n" nodedef="ND_add"><input name="extra" type="float" value="3"/></add></nodegraph></materialx>"#,
+            DiagnosticCode::InvalidStructure,
+            "is not declared",
+        ),
+        (
+            r#"<materialx><nodedef name="ND_add" node="add"><input name="a" type="float" value="1"/><input name="b" type="float" value="2"/><output name="out" type="float"/></nodedef><nodegraph name="g"><add name="n" nodedef="ND_add"><input name="a" type="color3" value="1, 1, 1"/></add></nodegraph></materialx>"#,
+            DiagnosticCode::InvalidValue,
+            "expected 'float'",
+        ),
+        (
+            r#"<materialx><nodedef name="ND_add" node="add"><input name="a" type="float" value="1"/><input name="b" type="float" value="2"/><output name="out" type="float"/></nodedef><nodegraph name="g"><add name="n" nodedef="ND_add"><output name="other" type="float"/></add></nodegraph></materialx>"#,
+            DiagnosticCode::InvalidReference,
+            "is not declared",
+        ),
+        (
+            r#"<materialx><nodedef name="ND_base" node="add"><input name="a" type="float" value="1"/><input name="b" type="float" value="2"/><output name="out" type="float"/></nodedef><nodedef name="ND_child" node="add" inherit="ND_base"><input name="a" type="float" value="1"/><input name="b" type="float" value="2"/><output name="out" type="float"/></nodedef></materialx>"#,
+            DiagnosticCode::UnsupportedMaterial,
+            "inherited author-node semantics are unsupported",
+        ),
+        (
+            r#"<materialx><nodedef name="ND_expand" node="convert"><input name="in" type="float" value="1"/><output name="out" type="color3"/></nodedef><nodegraph name="g"><convert name="n" nodedef="ND_expand"/></nodegraph></materialx>"#,
+            DiagnosticCode::InvalidValue,
+            "same dimension",
+        ),
+        (
+            r#"<materialx><nodedef name="ND_boolean" node="convert"><input name="in" type="boolean" value="true"/><output name="out" type="boolean"/></nodedef><nodegraph name="g"><convert name="n" nodedef="ND_boolean"/></nodegraph></materialx>"#,
+            DiagnosticCode::InvalidValue,
+            "supported numeric",
+        ),
+    ];
+
+    for (source, code, message) in cases {
+        let error = parse_materialx(source).expect_err(message);
+        assert_eq!(error.0.code, code, "{source}");
+        assert!(error.to_string().contains(message), "{error}");
+    }
+}
+
+#[test]
+fn duplicate_author_node_instance_ports_are_rejected() {
+    let source = r#"<materialx>
+      <nodedef name="ND_add" node="add">
+        <input name="a" type="float" value="1"/><input name="b" type="float" value="2"/>
+        <output name="out" type="float"/>
+      </nodedef>
+      <nodegraph name="g"><add name="n" nodedef="ND_add">
+        <input name="a" type="float" value="3"/><input name="a" type="float" value="4"/>
+      </add></nodegraph>
+    </materialx>"#;
+    let error = parse_materialx(source).expect_err("duplicate instance input is ambiguous");
+    assert_eq!(error.0.code, DiagnosticCode::InvalidReference);
+    assert!(error
+        .to_string()
+        .contains("duplicate document identifier 'a'"));
+}
+
+#[test]
 fn unknown_node_is_rejected_with_location_and_machine_code() {
     let error = parse_materialx(
         r#"<materialx><nodegraph name="g"><mystery name="x"/></nodegraph></materialx>"#,

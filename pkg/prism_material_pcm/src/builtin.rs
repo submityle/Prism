@@ -90,6 +90,78 @@ pub const UID_TRANSFER_SRGB: &str = "org.prism.transfer.srgb";
 pub const UID_DOWNGRADE_SAMPLE_BUDGET: &str = "org.prism.downgrade.sample_budget";
 /// `uid` of the outline composite pass (`PRISM`).
 pub const UID_COMPOSITE_OUTLINE: &str = "org.prism.composite.outline";
+/// `uid` of the MaterialX `add` author node.
+pub const UID_AUTHOR_NODE_ADD: &str = "org.prism.author_node.materialx.add";
+/// `uid` of the MaterialX `clamp` author node.
+pub const UID_AUTHOR_NODE_CLAMP: &str = "org.prism.author_node.materialx.clamp";
+/// `uid` of the MaterialX `convert` author node.
+pub const UID_AUTHOR_NODE_CONVERT: &str = "org.prism.author_node.materialx.convert";
+/// `uid` of the MaterialX `divide` author node.
+pub const UID_AUTHOR_NODE_DIVIDE: &str = "org.prism.author_node.materialx.divide";
+/// `uid` of the MaterialX `mix` author node.
+pub const UID_AUTHOR_NODE_MIX: &str = "org.prism.author_node.materialx.mix";
+/// `uid` of the MaterialX `multiply` author node.
+pub const UID_AUTHOR_NODE_MULTIPLY: &str = "org.prism.author_node.materialx.multiply";
+/// `uid` of the MaterialX `subtract` author node.
+pub const UID_AUTHOR_NODE_SUBTRACT: &str = "org.prism.author_node.materialx.subtract";
+
+/// One executable MaterialX category in the bounded author-node catalogue.
+///
+/// Author nodes are PCM manifests, but live in an authoring/bake catalogue
+/// rather than the surface-header catalogue: they execute through the
+/// `evaluate` bake hook and disappear before runtime material layout exists.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuthorNodeBuiltin {
+    category: &'static str,
+    manifest: ExtensionManifest,
+}
+
+impl AuthorNodeBuiltin {
+    const fn new(category: &'static str, uid: &'static str) -> Self {
+        Self {
+            category,
+            manifest: ExtensionManifest::new_identity_only(uid, Namespace::Prism, Kind::AuthorNode)
+                .with_vendor(VENDOR_PRISM)
+                .with_stability(Stability::Candidate),
+        }
+    }
+
+    /// Canonical MaterialX node category consumed by the authoring evaluator.
+    pub const fn category(&self) -> &'static str {
+        self.category
+    }
+
+    /// Stable PCM identity and bake-hook contract for this category.
+    pub const fn manifest(&self) -> &ExtensionManifest {
+        &self.manifest
+    }
+}
+
+/// Bounded, sorted catalogue of pure numeric MaterialX author nodes.
+///
+/// Sorted category order permits allocation-free binary lookup. Adding an
+/// entry requires a real evaluator implementation and its conformance tests;
+/// this table is not an allow-list of future intentions.
+pub const BUILTIN_AUTHOR_NODES: [AuthorNodeBuiltin; 7] = [
+    AuthorNodeBuiltin::new("add", UID_AUTHOR_NODE_ADD),
+    AuthorNodeBuiltin::new("clamp", UID_AUTHOR_NODE_CLAMP),
+    AuthorNodeBuiltin::new("convert", UID_AUTHOR_NODE_CONVERT),
+    AuthorNodeBuiltin::new("divide", UID_AUTHOR_NODE_DIVIDE),
+    AuthorNodeBuiltin::new("mix", UID_AUTHOR_NODE_MIX),
+    AuthorNodeBuiltin::new("multiply", UID_AUTHOR_NODE_MULTIPLY),
+    AuthorNodeBuiltin::new("subtract", UID_AUTHOR_NODE_SUBTRACT),
+];
+
+/// Resolve a canonical MaterialX category to its PCM author-node descriptor.
+///
+/// Lookup is allocation-free and `O(log 7)`; no registry lookup survives into
+/// a runtime shader or material-header path.
+pub fn builtin_author_node(category: &str) -> Option<&'static AuthorNodeBuiltin> {
+    BUILTIN_AUTHOR_NODES
+        .binary_search_by(|entry| entry.category().cmp(category))
+        .ok()
+        .map(|index| &BUILTIN_AUTHOR_NODES[index])
+}
 
 /// The specification-core lobe slots, in schema order.
 ///
@@ -255,11 +327,10 @@ const PRISM_SLOTTED: [(&str, u32, Kind, Stability, CapabilitySet, bool); 4] = [
 ///   lobes' sample counts without touching the permutation key;
 /// * `outline` — the §8.5 step-6 composite pass.
 ///
-/// The `author_node` kind is deliberately absent: §4's authoring front-end
-/// (`prism_render_material_authoring`) is a separate roadmap item, so there is
-/// no node type to register yet. The kind and its hook ABI exist ([`Kind`],
-/// [`crate::hooks`]) so that front-end registers into the same table when it
-/// lands, instead of inventing a tenth mechanism.
+/// MaterialX author nodes are registered in [`BUILTIN_AUTHOR_NODES`], a
+/// separate authoring/bake catalogue. They deliberately do not enter this
+/// schema-mirrored surface catalogue because they own neither a surface header
+/// slot nor a runtime surface identity.
 ///
 /// The identity/governance/capability/view-dependence fields below are mirrored
 /// from `surface.toml`'s `[[identity_extension]]` rows and checked both ways by

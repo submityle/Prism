@@ -1,5 +1,6 @@
 use prism_render_material_authoring::{
-    evaluate_connection, parse_materialx, Connection, DiagnosticCode,
+    author_node_manifest, evaluate_connection, export_materialx, parse_materialx, Connection,
+    DiagnosticCode,
 };
 
 #[test]
@@ -135,4 +136,109 @@ fn evaluator_rejects_graph_output_cycles() {
     .unwrap_err();
     assert_eq!(error.0.code, DiagnosticCode::UnsafeConnection);
     assert!(error.to_string().contains("cyclic graph output"));
+}
+
+#[test]
+fn nodedef_author_node_uses_defaults_overrides_and_stable_pcm_identity() {
+    let source = r#"<materialx>
+      <nodedef name="ND_tint_add" node="add">
+        <input name="base" type="color3" value="0.1, 0.2, 0.3"/>
+        <input name="tint" type="color3" value="0.2, 0.3, 0.4"/>
+        <output name="out" type="color3"/>
+      </nodedef>
+      <nodegraph name="g">
+        <add name="defaulted" nodedef="ND_tint_add"/>
+        <add name="overridden" nodedef="ND_tint_add">
+          <input name="tint" type="color3" value="0.9, 0.8, 0.7"/>
+        </add>
+      </nodegraph>
+    </materialx>"#;
+    let document = parse_materialx(source).expect("valid author-node instances");
+    let graph = &document.nodegraphs[0];
+    let evaluate = |name: &str| {
+        evaluate_connection(
+            &document,
+            graph,
+            &Connection {
+                node: Some(name.into()),
+                output: Some("out".into()),
+                nodegraph: None,
+            },
+        )
+        .expect("author node evaluates")
+    };
+    assert_eq!(evaluate("defaulted").value, "0.3, 0.5, 0.7");
+    assert_eq!(evaluate("overridden").value, "1, 1, 1");
+
+    let manifest = author_node_manifest(&document, &graph.nodes[0])
+        .expect("binding resolves")
+        .expect("node has a nodedef");
+    assert_eq!(manifest.uid(), "org.prism.author_node.materialx.add");
+    assert_eq!(manifest.registry_slot(), None);
+}
+
+#[test]
+fn nodedef_author_node_round_trip_preserves_identity_and_evaluation() {
+    let source = r#"<materialx>
+      <nodedef name="ND_scale" node="multiply">
+        <input name="value" type="float"/>
+        <input name="scale" type="float" value="2"/>
+        <output name="result" type="float"/>
+      </nodedef>
+      <nodegraph name="g">
+        <multiply name="scaled" nodedef="ND_scale">
+          <input name="value" type="float" value="1.5"/>
+        </multiply>
+      </nodegraph>
+    </materialx>"#;
+    let first = parse_materialx(source).expect("parse");
+    let exported = export_materialx(&first);
+    let second = parse_materialx(&exported).expect("reparse");
+    let node = &second.nodegraphs[0].nodes[0];
+    let manifest = author_node_manifest(&second, node)
+        .expect("binding resolves")
+        .expect("node has a nodedef");
+    let value = evaluate_connection(
+        &second,
+        &second.nodegraphs[0],
+        &Connection {
+            node: Some("scaled".into()),
+            output: Some("result".into()),
+            nodegraph: None,
+        },
+    )
+    .expect("round-tripped author node evaluates");
+    assert_eq!(manifest.uid(), "org.prism.author_node.materialx.multiply");
+    assert_eq!(value.type_name, "float");
+    assert_eq!(value.value, "3");
+}
+
+#[test]
+fn nodedef_convert_preserves_components_across_equal_width_numeric_types() {
+    let document = parse_materialx(
+        r#"<materialx>
+      <nodedef name="ND_color_to_vector" node="convert">
+        <input name="in" type="color3"/>
+        <output name="out" type="vector3"/>
+      </nodedef>
+      <nodegraph name="g">
+        <convert name="converted" nodedef="ND_color_to_vector">
+          <input name="in" type="color3" value="0.1, 0.2, 0.3"/>
+        </convert>
+      </nodegraph>
+    </materialx>"#,
+    )
+    .expect("equal-width numeric convert is supported");
+    let value = evaluate_connection(
+        &document,
+        &document.nodegraphs[0],
+        &Connection {
+            node: Some("converted".into()),
+            output: Some("out".into()),
+            nodegraph: None,
+        },
+    )
+    .expect("convert evaluates");
+    assert_eq!(value.type_name, "vector3");
+    assert_eq!(value.value, "0.1, 0.2, 0.3");
 }
