@@ -75,6 +75,7 @@ fn manifest() -> CellManifest {
         content_version: 1,
         derived_hash: 7,
         io_bytes: CELL_HEADER_SIZE as u64,
+        data_layers: prism_world_stream::DataLayerMask::EMPTY,
     }
 }
 

@@ -19,7 +19,8 @@ bytes 0..4    magic: PRWC
 bytes 4..20   scene_key: u128
 bytes 20..28  content_version: u64
 bytes 28..44  derived_hash: u128
-bytes 44..    opaque scene payload
+bytes 44..52  data_layers: u64 little-endian canonical mask
+bytes 52..    opaque scene payload
 ```
 
 The payload is intentionally opaque. A host may reject it, retain it, decode
@@ -114,7 +115,7 @@ those remain owned by the downstream `SceneHost` and renderer layers.
 
 `IoSchedulerAdapter::with_byte_limits` and `FileCellProvider::with_byte_limits`
 accept `IoByteLimits { max_request_bytes, max_total_bytes }`. Both limits use
-the full declared `manifest.io_bytes`, including the 44-byte header, not just
+the full declared `manifest.io_bytes`, including the 52-byte header, not just
 the scene payload. `byte_limits()` returns the original limits, and
 `admitted_bytes()` reports current declared-byte admission. Source registration
 alone does not reserve bytes. The legacy `new` and `with_chunk_size` signatures

@@ -113,6 +113,7 @@ fn archive(payloads: &[&[u8]]) -> (RecordingProvider, Vec<CellReadRequest>, Vec<
             content_version: 7,
             derived_hash: index as u128 + 200,
             io_bytes: (CELL_HEADER_SIZE + payload.len()) as u64,
+            data_layers: prism_world_stream::DataLayerMask::EMPTY,
         };
         let mut bytes = ManifestHeader::from_manifest(manifest).encode();
         bytes.extend_from_slice(payload);

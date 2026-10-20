@@ -828,6 +828,7 @@ fn coordinator_cell_host_upload_and_indirect_draw_share_sector_lifecycle() {
         content_version: 9,
         derived_hash: 27,
         io_bytes: (CELL_HEADER_SIZE + b"derived fixture".len()) as u64,
+        data_layers: prism_world_stream::DataLayerMask::EMPTY,
     };
     let mut bytes = ManifestHeader::from_manifest(manifest).encode();
     bytes.extend_from_slice(b"derived fixture");
@@ -965,6 +966,7 @@ fn packed_file_validation_gates_sector_upload_and_real_indirect_pixels() {
             content_version: 7,
             derived_hash: 83,
             io_bytes: (CELL_HEADER_SIZE + payload.len()) as u64,
+            data_layers: prism_world_stream::DataLayerMask::EMPTY,
         })
         .collect();
     let mut packed = b"archive prefix".to_vec();

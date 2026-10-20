@@ -2,7 +2,7 @@
 
 use alloc::vec::Vec;
 
-use prism_world_stream::{AabbI64, CellManifest, GlobalPos, SectorId};
+use prism_world_stream::{AabbI64, CellManifest, DataLayerMask, GlobalPos, SectorId};
 
 use crate::{face_uv_to_direction, FaceUv, TileKey};
 
@@ -159,6 +159,7 @@ impl TerrainStreamAdapter {
             content_version: self.config.content_version,
             derived_hash: derived_hash(self.config.derived_hash_seed, tile),
             io_bytes: self.config.io_bytes,
+            data_layers: DataLayerMask::EMPTY,
         })
     }
 

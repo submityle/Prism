@@ -11,21 +11,15 @@ use alloc::vec::Vec;
 use core::fmt;
 use core::task::{Context, Poll};
 
-use prism_world_stream::{CellManifest, DemandSource, SectorId, StreamBudget};
+use prism_world_stream::{
+    CellManifest, DataLayerMask, DataLayerMaskError, DemandSource, SectorId, StreamBudget,
+    MAX_DATA_LAYERS,
+};
 
 use crate::{CellFrameCoordinator, CellIo, FrameReport, LoadedCell, SceneHost};
 
 /// Stable identity for one runtime Data Layer.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct DataLayerId(pub u32);
-
-impl DataLayerId {
-    /// Creates a layer identity.
-    #[must_use]
-    pub const fn new(value: u32) -> Self {
-        Self(value)
-    }
-}
+pub use prism_world_stream::DataLayerId;
 
 /// Runtime admission state for one Data Layer.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -58,6 +52,13 @@ pub enum DataLayerConfigError {
         /// Layer that is not declared by the cell.
         layer: DataLayerId,
     },
+    /// A layer identity cannot be represented by the canonical stream mask.
+    UnsupportedLayer {
+        /// Rejected layer identity.
+        layer: DataLayerId,
+    },
+    /// The base manifest already carries a different canonical layer mask.
+    ManifestLayerMismatch,
 }
 
 impl fmt::Display for DataLayerConfigError {
@@ -77,6 +78,16 @@ impl fmt::Display for DataLayerConfigError {
                     "Data Layer {layer:?} is not declared by the cell"
                 )
             }
+            Self::UnsupportedLayer { layer } => write!(
+                formatter,
+                "Data Layer {layer:?} is outside canonical range 0..{MAX_DATA_LAYERS}"
+            ),
+            Self::ManifestLayerMismatch => {
+                write!(
+                    formatter,
+                    "manifest Data Layer mask disagrees with layered declaration"
+                )
+            }
         }
     }
 }
@@ -84,6 +95,9 @@ impl fmt::Display for DataLayerConfigError {
 impl core::error::Error for DataLayerConfigError {}
 
 fn canonical_layers(layers: &[DataLayerId]) -> Result<Vec<DataLayerId>, DataLayerConfigError> {
+    if let Some(&layer) = layers.iter().find(|layer| layer.0 >= MAX_DATA_LAYERS) {
+        return Err(DataLayerConfigError::UnsupportedLayer { layer });
+    }
     let mut canonical = layers.to_vec();
     canonical.sort_unstable();
     for pair in canonical.windows(2) {
@@ -134,6 +148,18 @@ impl RuntimeDataLayers {
             .unwrap_or(DataLayerState::Unloaded)
     }
 
+    /// Returns every layer currently resident, including activated layers, as
+    /// the fixed-width mask consumed by the stream scheduler.
+    #[must_use]
+    pub fn available_mask(&self) -> DataLayerMask {
+        self.states
+            .iter()
+            .filter(|(_, state)| **state != DataLayerState::Unloaded)
+            .fold(DataLayerMask::EMPTY, |mask, (layer, _)| {
+                DataLayerMask::from_bits(mask.bits() | (1_u64 << layer.0))
+            })
+    }
+
     /// Returns all non-unloaded layer states in deterministic order.
     pub fn states(&self) -> alloc::collections::btree_map::Iter<'_, DataLayerId, DataLayerState> {
         self.states.iter()
@@ -144,6 +170,9 @@ impl RuntimeDataLayers {
         &mut self,
         states: &[(DataLayerId, DataLayerState)],
     ) -> Result<(), DataLayerConfigError> {
+        if let Some(&(layer, _)) = states.iter().find(|(layer, _)| layer.0 >= MAX_DATA_LAYERS) {
+            return Err(DataLayerConfigError::UnsupportedLayer { layer });
+        }
         let mut canonical = states.to_vec();
         canonical.sort_unstable_by_key(|(layer, _)| *layer);
         for pair in canonical.windows(2) {
@@ -182,6 +211,9 @@ impl RuntimeDataLayers {
         layer: DataLayerId,
         state: DataLayerState,
     ) -> Result<(), DataLayerConfigError> {
+        if layer.0 >= MAX_DATA_LAYERS {
+            return Err(DataLayerConfigError::UnsupportedLayer { layer });
+        }
         if state == DataLayerState::Activated && self.state(layer) != DataLayerState::Activated {
             let activated = self
                 .states
@@ -243,12 +275,27 @@ pub struct LayeredCellManifest {
 impl LayeredCellManifest {
     /// Creates a manifest with a unique, canonical layer membership list.
     pub fn new(
-        manifest: CellManifest,
+        mut manifest: CellManifest,
         layers: &[DataLayerId],
     ) -> Result<Self, DataLayerConfigError> {
+        let canonical = canonical_layers(layers)?;
+        let stream_layers = canonical
+            .iter()
+            .copied()
+            .map(|layer| prism_world_stream::DataLayerId::new(layer.0))
+            .collect::<Vec<_>>();
+        let mask = DataLayerMask::from_layers(&stream_layers).map_err(|error| match error {
+            DataLayerMaskError::OutOfRange { layer } | DataLayerMaskError::Duplicate { layer } => {
+                DataLayerConfigError::UnsupportedLayer { layer }
+            }
+        })?;
+        if manifest.data_layers != DataLayerMask::EMPTY && manifest.data_layers != mask {
+            return Err(DataLayerConfigError::ManifestLayerMismatch);
+        }
+        manifest.data_layers = mask;
         Ok(Self {
             manifest,
-            layers: canonical_layers(layers)?,
+            layers: canonical,
         })
     }
 
@@ -287,11 +334,22 @@ pub struct LayeredLoadedCell {
 impl LayeredLoadedCell {
     /// Creates a loaded snapshot and validates its active layer set.
     pub fn new(
-        manifest: CellManifest,
+        mut manifest: CellManifest,
         declared_layers: &[DataLayerId],
         active_layers: &[DataLayerId],
     ) -> Result<Self, DataLayerConfigError> {
         let declared = canonical_layers(declared_layers)?;
+        let stream_layers = declared
+            .iter()
+            .copied()
+            .map(|layer| prism_world_stream::DataLayerId::new(layer.0))
+            .collect::<Vec<_>>();
+        let declared_mask = DataLayerMask::from_layers(&stream_layers)
+            .map_err(|_| DataLayerConfigError::ManifestLayerMismatch)?;
+        if manifest.data_layers != DataLayerMask::EMPTY && manifest.data_layers != declared_mask {
+            return Err(DataLayerConfigError::ManifestLayerMismatch);
+        }
+        manifest.data_layers = declared_mask;
         let active = canonical_layers(active_layers)?;
         for layer in &active {
             if declared.binary_search(layer).is_err() {
@@ -566,11 +624,12 @@ impl<I: CellIo> LayeredCellFrameCoordinator<I> {
             );
             admitted_loaded.push(LoadedCell::new(cell.manifest));
         }
-        let plain_manifests: Vec<_> = manifests
+        let stream_demands: Vec<_> = demands
             .iter()
-            .filter(|cell| cell.stream_admission(&self.data_layers).0)
-            .map(|cell| cell.manifest)
+            .copied()
+            .map(|demand| demand.with_data_layers(self.data_layers.available_mask()))
             .collect();
+        let plain_manifests: Vec<_> = manifests.iter().map(|cell| cell.manifest).collect();
         let streaming = {
             let mut adapter = LayeredHostAdapter {
                 host,
@@ -578,7 +637,7 @@ impl<I: CellIo> LayeredCellFrameCoordinator<I> {
                 pre_evicted: &pre_evicted,
             };
             self.cells.plan_frame(
-                demands,
+                &stream_demands,
                 &plain_manifests,
                 &admitted_loaded,
                 budget,
@@ -745,12 +804,6 @@ fn validate_unique_loaded(loaded: &[LayeredLoadedCell]) -> Result<(), LayeredCoo
     Ok(())
 }
 
-impl From<u32> for DataLayerId {
-    fn from(value: u32) -> Self {
-        Self::new(value)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -770,6 +823,7 @@ mod tests {
             content_version: version,
             derived_hash: version as u128 + 10,
             io_bytes: 1,
+            data_layers: DataLayerMask::EMPTY,
         }
     }
 
@@ -848,15 +902,15 @@ mod tests {
     }
 
     fn coordinator(
-        cells: &[CellManifest],
+        cells: &[LayeredCellManifest],
         max_layers: usize,
     ) -> LayeredCellFrameCoordinator<crate::IoRuntime<Provider>> {
         let bytes = cells
             .iter()
             .map(|manifest| {
                 (
-                    (manifest.sector, manifest.content_version),
-                    bytes(*manifest, b"payload"),
+                    (manifest.manifest.sector, manifest.manifest.content_version),
+                    bytes(manifest.manifest, b"payload"),
                 )
             })
             .collect();
@@ -870,7 +924,7 @@ mod tests {
     fn unloaded_loaded_and_activated_states_are_distinct() {
         let cell = manifest(0, 1);
         let layered = LayeredCellManifest::new(cell, &[DataLayerId::new(2)]).unwrap();
-        let mut coordinator = coordinator(&[cell], 2);
+        let mut coordinator = coordinator(core::slice::from_ref(&layered), 2);
         let mut host = Host::default();
         let demand = DemandSource::new(cell.sector, 0, 1, 10).unwrap();
         coordinator
@@ -933,7 +987,7 @@ mod tests {
             ],
         )
         .unwrap();
-        let mut coordinator = coordinator(&[cell], 3);
+        let mut coordinator = coordinator(core::slice::from_ref(&layered), 3);
         coordinator
             .data_layers_mut()
             .replace_states(&[
@@ -967,7 +1021,7 @@ mod tests {
         let cell = manifest(4, 1);
         let layered =
             LayeredCellManifest::new(cell, &[DataLayerId::new(1), DataLayerId::new(2)]).unwrap();
-        let mut coordinator = coordinator(&[cell], 2);
+        let mut coordinator = coordinator(core::slice::from_ref(&layered), 2);
         coordinator
             .data_layers_mut()
             .set_state(DataLayerId::new(1), DataLayerState::Activated)
@@ -1018,7 +1072,7 @@ mod tests {
         let cell = manifest(5, 1);
         let layered =
             LayeredCellManifest::new(cell, &[DataLayerId::new(1), DataLayerId::new(2)]).unwrap();
-        let mut coordinator = coordinator(&[cell], 2);
+        let mut coordinator = coordinator(core::slice::from_ref(&layered), 2);
         coordinator
             .data_layers_mut()
             .replace_states(&[
@@ -1071,7 +1125,7 @@ mod tests {
     fn eviction_failure_keeps_resident_state_and_reports_atomically() {
         let cell = manifest(6, 1);
         let layered = LayeredCellManifest::new(cell, &[DataLayerId::new(8)]).unwrap();
-        let mut coordinator = coordinator(&[cell], 1);
+        let mut coordinator = coordinator(core::slice::from_ref(&layered), 1);
         let loaded = [
             LayeredLoadedCell::new(cell, &[DataLayerId::new(8)], &[DataLayerId::new(8)]).unwrap(),
         ];
@@ -1122,7 +1176,7 @@ mod tests {
     fn layer_failure_is_atomic_and_retryable() {
         let cell = manifest(2, 1);
         let layered = LayeredCellManifest::new(cell, &[DataLayerId::new(3)]).unwrap();
-        let mut coordinator = coordinator(&[cell], 1);
+        let mut coordinator = coordinator(core::slice::from_ref(&layered), 1);
         coordinator
             .data_layers_mut()
             .enable(DataLayerId::new(3))
@@ -1174,7 +1228,7 @@ mod tests {
         let new = manifest(3, 2);
         let layered_old = LayeredCellManifest::new(old, &[DataLayerId::new(5)]).unwrap();
         let layered_new = LayeredCellManifest::new(new, &[DataLayerId::new(5)]).unwrap();
-        let mut coordinator = coordinator(&[old, new], 1);
+        let mut coordinator = coordinator(&[layered_old.clone(), layered_new.clone()], 1);
         coordinator
             .data_layers_mut()
             .enable(DataLayerId::new(5))
@@ -1260,5 +1314,17 @@ mod tests {
             })
         );
         assert_eq!(layers.enabled(), &[DataLayerId::new(7)]);
+    }
+
+    #[test]
+    fn layer_ids_outside_stream_mask_are_rejected_without_mutation() {
+        let mut layers = RuntimeDataLayers::new(2);
+        assert_eq!(
+            layers.set_state(DataLayerId::new(MAX_DATA_LAYERS), DataLayerState::Loaded),
+            Err(DataLayerConfigError::UnsupportedLayer {
+                layer: DataLayerId::new(MAX_DATA_LAYERS)
+            })
+        );
+        assert!(layers.states().next().is_none());
     }
 }

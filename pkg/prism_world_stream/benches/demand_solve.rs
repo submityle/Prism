@@ -104,6 +104,7 @@ fn workload() -> (Vec<DemandSource>, Vec<CellManifest>, u64) {
             content_version: 1,
             derived_hash: index as u128 ^ 0xA5A5,
             io_bytes,
+            data_layers: prism_world_stream::DataLayerMask::EMPTY,
         });
         expected_bytes += io_bytes;
     }

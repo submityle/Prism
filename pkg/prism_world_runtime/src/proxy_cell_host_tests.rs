@@ -65,6 +65,7 @@ fn manifest(x: i64) -> CellManifest {
         content_version: 3,
         derived_hash: 17,
         io_bytes: (CELL_HEADER_SIZE + b"opaque payload".len()) as u64,
+        data_layers: prism_world_stream::DataLayerMask::EMPTY,
     }
 }
 

@@ -27,6 +27,7 @@ fn request(offset: u64, length: u64) -> CellReadRequest {
             content_version: 3,
             derived_hash: 9,
             io_bytes: length,
+            data_layers: prism_world_stream::DataLayerMask::EMPTY,
         },
         11,
     )

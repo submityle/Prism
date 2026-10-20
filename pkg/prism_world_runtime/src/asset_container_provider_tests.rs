@@ -22,6 +22,7 @@ fn cell_manifest(scene_key: u128, io_bytes: usize) -> CellManifest {
         content_version: 9,
         derived_hash: 11,
         io_bytes: io_bytes as u64,
+        data_layers: prism_world_stream::DataLayerMask::EMPTY,
     }
 }
 

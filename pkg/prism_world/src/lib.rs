@@ -259,6 +259,7 @@ mod tests {
             content_version: 1,
             derived_hash: 2,
             io_bytes: 4,
+            data_layers: prism_world_stream::DataLayerMask::EMPTY,
         };
         let demand = DemandSource::new(sector, 0, 1, 10).unwrap();
         let record = ResidencyRecord::new(1, ResidencyState::TierC, 0, 1, 1, 1);
@@ -293,6 +294,7 @@ mod tests {
             content_version: 1,
             derived_hash: 2,
             io_bytes: 4,
+            data_layers: prism_world_stream::DataLayerMask::EMPTY,
         };
         let duplicate = CellManifest {
             scene_key: 2,
@@ -369,6 +371,7 @@ mod tests {
                 content_version: 1,
                 derived_hash: 2,
                 io_bytes: 1,
+                data_layers: prism_world_stream::DataLayerMask::EMPTY,
             }],
             &[ResidencyRecord::new(7, ResidencyState::TierC, 0, 1, 1, 1)],
             1,

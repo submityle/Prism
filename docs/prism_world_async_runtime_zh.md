@@ -20,7 +20,7 @@
 | 容量等待记录 | 全部 provider clone 合计 `workers.capacity`，含尚未 poll 的准入与已获 grant |
 | worker 数量 | `workers.workers`，无每请求线程 |
 | provider 自有 payload | 最多 `workers.capacity × workers.max_chunk_size` 逻辑字节 |
-| 聚合准入 | 单请求和累计声明字节由 `IoByteLimits` 限制，包含 44 字节 header |
+| 聚合准入 | 单请求和累计声明字节由 `IoByteLimits` 限制，包含 52 字节 header |
 | 单次 scheduled poll | 最多 16 个 chunk 事件，之后显式唤醒并让出 |
 
 这些字节是逻辑载荷，不是 allocator/RSS 上限；线程栈、容器元数据、Vec 容量取整、已交还调用方的内容不在计数内。直接 adapter 保留 chunk 事件时可能形成第二份完整载荷；`ScheduledCellIo` 立即丢弃已聚合的 chunk 事件。host 的工作与析构在调用线程执行，其耗时必须独立受宿主控制。16-chunk 限额不是墙钟硬实时保证。

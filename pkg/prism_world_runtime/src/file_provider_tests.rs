@@ -46,6 +46,7 @@ fn manifest(x: i64, length: usize) -> CellManifest {
         content_version: 2,
         derived_hash: 123,
         io_bytes: length as u64,
+        data_layers: prism_world_stream::DataLayerMask::EMPTY,
     }
 }
 

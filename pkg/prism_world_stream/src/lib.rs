@@ -14,6 +14,153 @@ use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 use core::cmp::Ordering;
 
+/// Maximum number of canonical Data Layers represented by a cell manifest.
+///
+/// The mask is deliberately fixed-width so admission stays allocation-free
+/// in the streaming hot path. Layer ids outside `0..64` are rejected at the
+/// contract boundary instead of silently truncating into the mask.
+pub const MAX_DATA_LAYERS: u32 = 64;
+
+/// Stable Data Layer identity shared by world streaming and runtime adapters.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct DataLayerId(pub u32);
+
+impl DataLayerId {
+    /// Creates a Data Layer identity.
+    pub const fn new(value: u32) -> Self {
+        Self(value)
+    }
+
+    /// Returns the numeric identity.
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+
+impl From<u32> for DataLayerId {
+    fn from(value: u32) -> Self {
+        Self::new(value)
+    }
+}
+
+/// Error raised while constructing a fixed-width Data Layer mask.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DataLayerMaskError {
+    /// A layer id cannot be represented by the canonical mask.
+    OutOfRange {
+        /// Rejected layer identity.
+        layer: DataLayerId,
+    },
+    /// The same layer was supplied more than once.
+    Duplicate {
+        /// Repeated layer identity.
+        layer: DataLayerId,
+    },
+}
+
+impl core::fmt::Display for DataLayerMaskError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::OutOfRange { layer } => write!(
+                formatter,
+                "data layer {:?} is outside canonical range 0..{}",
+                layer, MAX_DATA_LAYERS
+            ),
+            Self::Duplicate { layer } => write!(formatter, "duplicate data layer {layer:?}"),
+        }
+    }
+}
+
+impl core::error::Error for DataLayerMaskError {}
+
+/// Allocation-free canonical membership set for Data Layers.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub struct DataLayerMask(u64);
+
+impl DataLayerMask {
+    /// Empty membership set.
+    pub const EMPTY: Self = Self(0);
+
+    /// Creates an empty mask.
+    pub const fn empty() -> Self {
+        Self::EMPTY
+    }
+
+    /// Builds a mask, rejecting duplicates and unrepresentable ids.
+    pub fn from_layers(layers: &[DataLayerId]) -> Result<Self, DataLayerMaskError> {
+        let mut bits = 0_u64;
+        for &layer in layers {
+            if layer.0 >= MAX_DATA_LAYERS {
+                return Err(DataLayerMaskError::OutOfRange { layer });
+            }
+            let bit = 1_u64 << layer.0;
+            if bits & bit != 0 {
+                return Err(DataLayerMaskError::Duplicate { layer });
+            }
+            bits |= bit;
+        }
+        Ok(Self(bits))
+    }
+
+    /// Creates a mask from raw bits. The value is already canonical.
+    pub const fn from_bits(bits: u64) -> Self {
+        Self(bits)
+    }
+
+    /// Returns the raw canonical bits.
+    pub const fn bits(self) -> u64 {
+        self.0
+    }
+
+    /// Returns whether the mask contains a layer.
+    pub const fn contains(self, layer: DataLayerId) -> bool {
+        layer.0 < MAX_DATA_LAYERS && self.0 & (1_u64 << layer.0) != 0
+    }
+
+    /// Returns whether every layer in `self` is present in `available`.
+    pub const fn is_subset_of(self, available: Self) -> bool {
+        self.0 & !available.0 == 0
+    }
+
+    /// Returns the number of layers in the mask.
+    pub const fn count(self) -> u32 {
+        self.0.count_ones()
+    }
+
+    /// Iterates layer ids in ascending canonical order.
+    pub const fn iter(self) -> DataLayerMaskIter {
+        DataLayerMaskIter { remaining: self.0 }
+    }
+}
+
+/// Iterator over a [`DataLayerMask`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DataLayerMaskIter {
+    remaining: u64,
+}
+
+impl Iterator for DataLayerMaskIter {
+    type Item = DataLayerId;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 {
+            return None;
+        }
+        let index = self.remaining.trailing_zeros();
+        self.remaining &= self.remaining - 1;
+        Some(DataLayerId(index))
+    }
+}
+
+impl IntoIterator for DataLayerMask {
+    type Item = DataLayerId;
+    type IntoIter = DataLayerMaskIter;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
 /// A signed, lossless world-space sector identity.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct SectorId {
@@ -234,6 +381,8 @@ pub struct CellManifest {
     pub derived_hash: u128,
     /// Approximate bytes required by the requested representation.
     pub io_bytes: u64,
+    /// Data Layers required by this cell payload.
+    pub data_layers: DataLayerMask,
 }
 
 /// A source of world interest.
@@ -249,6 +398,8 @@ pub struct DemandSource {
     pub priority: u16,
     /// Optional predicted next sector for one-step prefetch.
     pub predicted: Option<SectorId>,
+    /// Data Layers available/requested for admission.
+    pub data_layers: DataLayerMask,
 }
 
 impl DemandSource {
@@ -266,6 +417,7 @@ impl DemandSource {
                 unload_radius,
                 priority,
                 predicted: None,
+                data_layers: DataLayerMask::EMPTY,
             })
         } else {
             None
@@ -275,6 +427,13 @@ impl DemandSource {
     /// Adds a predicted sector used for prefetch.
     pub const fn with_prediction(mut self, predicted: SectorId) -> Self {
         self.predicted = Some(predicted);
+        self
+    }
+
+    /// Restricts admission to manifests whose Data Layer mask is a subset of
+    /// `layers`.
+    pub const fn with_data_layers(mut self, layers: DataLayerMask) -> Self {
+        self.data_layers = layers;
         self
     }
 }
@@ -403,6 +562,7 @@ impl ResidentState {
                 if previous.content_version != manifest.content_version
                     || previous.derived_hash != manifest.derived_hash
                     || previous.scene_key != manifest.scene_key
+                    || previous.data_layers != manifest.data_layers
         )
     }
 }
@@ -459,12 +619,20 @@ impl StreamScheduler {
         for demand in demands {
             trace.push(VmInstruction::Demand(demand.center));
         }
+        let manifest_by_sector: BTreeMap<_, _> = manifests
+            .iter()
+            .copied()
+            .map(|manifest| (manifest.sector, manifest))
+            .collect();
         let mut requests = BTreeMap::<SectorId, StreamRequest>::new();
         let mut stale_sectors = BTreeSet::new();
         for manifest in manifests {
             let mut best: Option<(u16, u64, StreamKind)> = None;
             for demand in demands {
                 if demand.center.level != manifest.sector.level {
+                    continue;
+                }
+                if !manifest.data_layers.is_subset_of(demand.data_layers) {
                     continue;
                 }
                 let distance = demand.center.distance(manifest.sector);
@@ -547,7 +715,9 @@ impl StreamScheduler {
             .resident
             .keys()
             .copied()
-            .filter(|sector| !within_unload(*sector, demands))
+            .filter(|sector| {
+                !within_unload(*sector, manifest_by_sector.get(sector).copied(), demands)
+            })
             .collect();
         evictions.sort_unstable();
         for sector in evictions {
@@ -597,9 +767,15 @@ fn request_order(a: &StreamRequest, b: &StreamRequest) -> Ordering {
         .then_with(|| a.sector.cmp(&b.sector))
 }
 
-fn within_unload(sector: SectorId, demands: &[DemandSource]) -> bool {
+fn within_unload(
+    sector: SectorId,
+    manifest: Option<CellManifest>,
+    demands: &[DemandSource],
+) -> bool {
     demands.iter().any(|d| {
-        d.center.level == sector.level && d.center.distance(sector) <= u64::from(d.unload_radius)
+        d.center.level == sector.level
+            && d.center.distance(sector) <= u64::from(d.unload_radius)
+            && manifest.is_none_or(|manifest| manifest.data_layers.is_subset_of(d.data_layers))
     })
 }
 
@@ -726,6 +902,82 @@ mod tests {
     }
 
     #[test]
+    fn data_layer_mask_is_fixed_width_canonical_and_ordered() {
+        let mask = DataLayerMask::from_layers(&[
+            DataLayerId::new(63),
+            DataLayerId::new(0),
+            DataLayerId::new(7),
+        ])
+        .unwrap();
+        assert_eq!(mask.bits(), (1_u64 << 63) | 1 | (1_u64 << 7));
+        assert_eq!(mask.count(), 3);
+        assert_eq!(
+            mask.into_iter().collect::<Vec<_>>(),
+            vec![
+                DataLayerId::new(0),
+                DataLayerId::new(7),
+                DataLayerId::new(63),
+            ]
+        );
+        assert_eq!(
+            DataLayerMask::from_layers(&[DataLayerId::new(7), DataLayerId::new(7)]),
+            Err(DataLayerMaskError::Duplicate {
+                layer: DataLayerId::new(7)
+            })
+        );
+        assert_eq!(
+            DataLayerMask::from_layers(&[DataLayerId::new(MAX_DATA_LAYERS)]),
+            Err(DataLayerMaskError::OutOfRange {
+                layer: DataLayerId::new(MAX_DATA_LAYERS)
+            })
+        );
+    }
+
+    #[test]
+    fn scheduler_admission_requires_manifest_layers_in_each_demand() {
+        let sector = SectorId::new(0, 0, 0, 0);
+        let manifest = CellManifest {
+            sector,
+            bounds: AabbI64::new(GlobalPos::new(0, 0, 0), GlobalPos::new(1, 1, 1)).unwrap(),
+            scene_key: 1,
+            content_version: 1,
+            derived_hash: 2,
+            io_bytes: 8,
+            data_layers: DataLayerMask::from_layers(&[DataLayerId::new(3)]).unwrap(),
+        };
+        let demand = DemandSource::new(sector, 0, 1, 10).unwrap();
+        let mut scheduler = StreamScheduler::new();
+        let blocked = scheduler
+            .try_plan(
+                &[demand],
+                &[manifest],
+                StreamBudget {
+                    io_bytes: 8,
+                    max_actions: 1,
+                },
+            )
+            .unwrap();
+        assert!(blocked.actions.is_empty());
+        assert_eq!(scheduler.frame(), 1);
+
+        let enabled = demand.with_data_layers(manifest.data_layers);
+        let admitted = scheduler
+            .try_plan(
+                &[enabled],
+                &[manifest],
+                StreamBudget {
+                    io_bytes: 8,
+                    max_actions: 1,
+                },
+            )
+            .unwrap();
+        assert!(matches!(
+            admitted.actions.as_slice(),
+            [StreamAction::Load(_)]
+        ));
+    }
+
+    #[test]
     fn scheduler_is_budgeted_hysteretic_and_deterministic() {
         let center = SectorId::new(0, 0, 0, 0);
         let demand = DemandSource::new(center, 1, 2, 10).unwrap();
@@ -738,6 +990,7 @@ mod tests {
                 content_version: 1,
                 derived_hash: 2,
                 io_bytes: 50,
+                data_layers: DataLayerMask::EMPTY,
             },
             CellManifest {
                 sector: SectorId::new(0, 1, 0, 0),
@@ -746,6 +999,7 @@ mod tests {
                 content_version: 1,
                 derived_hash: 3,
                 io_bytes: 60,
+                data_layers: DataLayerMask::EMPTY,
             },
             CellManifest {
                 sector: SectorId::new(0, 4, 0, 0),
@@ -754,6 +1008,7 @@ mod tests {
                 content_version: 1,
                 derived_hash: 4,
                 io_bytes: 70,
+                data_layers: DataLayerMask::EMPTY,
             },
         ];
         let mut scheduler = StreamScheduler::new();
@@ -800,6 +1055,7 @@ mod tests {
             content_version: 1,
             derived_hash: 2,
             io_bytes: 1,
+            data_layers: DataLayerMask::EMPTY,
         };
         let duplicate = CellManifest {
             scene_key: 9,
@@ -861,6 +1117,7 @@ mod tests {
             content_version: 1,
             derived_hash: 10,
             io_bytes: 4,
+            data_layers: DataLayerMask::EMPTY,
         };
         let new = CellManifest {
             content_version: 2,

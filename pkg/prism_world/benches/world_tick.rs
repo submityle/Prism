@@ -96,6 +96,7 @@ fn fixtures() -> (Vec<DemandSource>, Vec<CellManifest>, Vec<ResidencyRecord>) {
             content_version: 1,
             derived_hash: index as u128,
             io_bytes: 4096,
+            data_layers: prism_world_stream::DataLayerMask::EMPTY,
         });
         records.push(ResidencyRecord::new(
             index as u64,

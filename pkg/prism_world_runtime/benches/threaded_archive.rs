@@ -158,6 +158,7 @@ where
             content_version: 1,
             derived_hash: 42,
             io_bytes: CELL_BYTES as u64,
+            data_layers: prism_world_stream::DataLayerMask::EMPTY,
         };
         let mut bytes = ManifestHeader::from_manifest(m).encode();
         bytes.resize(CELL_BYTES, x as u8);

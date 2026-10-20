@@ -41,6 +41,7 @@ pub use data_layers::{
     LayeredEvictionReport, LayeredFrameReport, LayeredLoadedCell, LayeredPollReport,
     LayeredSceneHost, RuntimeDataLayers,
 };
+pub use prism_world_stream::{DataLayerMask, DataLayerMaskError, MAX_DATA_LAYERS};
 #[cfg(feature = "placement")]
 mod placement_persist;
 #[cfg(feature = "placement")]
@@ -122,7 +123,7 @@ pub use task_cell_io::TaskCellIo;
 pub use threaded_cell_io::ThreadedCellIo;
 
 /// The byte width of the fixed cell manifest header.
-pub const CELL_HEADER_SIZE: usize = 44;
+pub const CELL_HEADER_SIZE: usize = 52;
 
 const CELL_HEADER_MAGIC: [u8; 4] = *b"PRWC";
 
@@ -598,6 +599,8 @@ pub struct ManifestHeader {
     pub content_version: u64,
     /// Derived payload hash/version.
     pub derived_hash: u128,
+    /// Canonical Data Layer membership bits.
+    pub data_layers: prism_world_stream::DataLayerMask,
 }
 
 impl ManifestHeader {
@@ -608,6 +611,7 @@ impl ManifestHeader {
             scene_key: manifest.scene_key,
             content_version: manifest.content_version,
             derived_hash: manifest.derived_hash,
+            data_layers: manifest.data_layers,
         }
     }
 
@@ -619,6 +623,7 @@ impl ManifestHeader {
         bytes.extend_from_slice(&self.scene_key.to_le_bytes());
         bytes.extend_from_slice(&self.content_version.to_le_bytes());
         bytes.extend_from_slice(&self.derived_hash.to_le_bytes());
+        bytes.extend_from_slice(&self.data_layers.bits().to_le_bytes());
         bytes
     }
 
@@ -636,11 +641,15 @@ impl ManifestHeader {
             u64::from_le_bytes(bytes[20..28].try_into().expect("fixed header slice"));
         let derived_hash =
             u128::from_le_bytes(bytes[28..44].try_into().expect("fixed header slice"));
+        let data_layers = prism_world_stream::DataLayerMask::from_bits(u64::from_le_bytes(
+            bytes[44..52].try_into().expect("fixed header slice"),
+        ));
         Ok((
             Self {
                 scene_key,
                 content_version,
                 derived_hash,
+                data_layers,
             },
             &bytes[CELL_HEADER_SIZE..],
         ))
@@ -678,6 +687,13 @@ pub enum HeaderError {
         /// Encoded value.
         actual: u128,
     },
+    /// The Data Layer mask does not match the manifest.
+    DataLayerMaskMismatch {
+        /// Expected manifest value.
+        expected: prism_world_stream::DataLayerMask,
+        /// Encoded value.
+        actual: prism_world_stream::DataLayerMask,
+    },
 }
 
 impl fmt::Display for HeaderError {
@@ -703,6 +719,10 @@ impl fmt::Display for HeaderError {
                     "derived hash mismatch: {actual:#x} != {expected:#x}"
                 )
             }
+            Self::DataLayerMaskMismatch { expected, actual } => write!(
+                formatter,
+                "Data Layer mask mismatch: {actual:?} != {expected:?}"
+            ),
         }
     }
 }
@@ -725,6 +745,12 @@ fn validate_header(manifest: CellManifest, bytes: &[u8]) -> Result<&[u8], Header
         return Err(HeaderError::DerivedHashMismatch {
             expected: manifest.derived_hash,
             actual: header.derived_hash,
+        });
+    }
+    if header.data_layers != manifest.data_layers {
+        return Err(HeaderError::DataLayerMaskMismatch {
+            expected: manifest.data_layers,
+            actual: header.data_layers,
         });
     }
     Ok(payload)
@@ -1321,7 +1347,7 @@ mod tests {
     use super::*;
     use alloc::vec;
     use core::sync::atomic::{AtomicUsize, Ordering};
-    use prism_world_stream::{AabbI64, GlobalPos};
+    use prism_world_stream::{AabbI64, DataLayerMask, GlobalPos};
 
     fn manifest(x: i64, scene_key: u128, version: u64, derived_hash: u128) -> CellManifest {
         CellManifest {
@@ -1332,6 +1358,7 @@ mod tests {
             content_version: version,
             derived_hash,
             io_bytes: 1,
+            data_layers: prism_world_stream::DataLayerMask::EMPTY,
         }
     }
 
@@ -1575,8 +1602,16 @@ mod tests {
 
     #[test]
     fn manifest_header_mismatch_is_failed_without_scene_parse() {
-        let expected = manifest(0, 7, 2, 9);
-        let wrong = manifest(0, 7, 2, 10);
+        let layer_mask = DataLayerMask::from_layers(&[prism_world_stream::DataLayerId::new(2)])
+            .expect("valid layer mask");
+        let expected = CellManifest {
+            data_layers: layer_mask,
+            ..manifest(0, 7, 2, 9)
+        };
+        let wrong = CellManifest {
+            data_layers: DataLayerMask::EMPTY,
+            ..manifest(0, 7, 2, 10)
+        };
         let mut bytes_by_sector = BTreeMap::new();
         bytes_by_sector.insert(expected.sector, bytes(wrong, b"opaque"));
         let provider = MemoryProvider {
@@ -1586,7 +1621,9 @@ mod tests {
         let mut coordinator = WorldFrameCoordinator::new(provider, 1).expect("runtime config");
         let mut host = Host::default();
         coordinator.plan_frame(
-            &[DemandSource::new(expected.sector, 0, 1, 1).expect("demand")],
+            &[DemandSource::new(expected.sector, 0, 1, 1)
+                .expect("demand")
+                .with_data_layers(layer_mask)],
             &[expected],
             &[],
             StreamBudget {

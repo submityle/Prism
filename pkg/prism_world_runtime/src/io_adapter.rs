@@ -876,6 +876,7 @@ mod tests {
             content_version: 1,
             derived_hash: 9,
             io_bytes: io_bytes as u64,
+            data_layers: prism_world_stream::DataLayerMask::EMPTY,
         }
     }
 

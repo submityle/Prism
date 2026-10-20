@@ -24,6 +24,7 @@ fn request(x: i64) -> CellReadRequest {
             content_version: 1,
             derived_hash: 2,
             io_bytes: CELL_HEADER_SIZE as u64,
+            data_layers: prism_world_stream::DataLayerMask::EMPTY,
         },
         10,
     )

@@ -37,6 +37,7 @@ fn manifest(sector: SectorId) -> CellManifest {
         content_version: 1,
         derived_hash: 2,
         io_bytes: 1,
+        data_layers: prism_world_stream::DataLayerMask::EMPTY,
     }
 }
 
