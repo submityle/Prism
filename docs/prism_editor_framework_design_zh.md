@@ -1,7 +1,7 @@
 # Prism Loom 编辑器框架设计方案（Loom Studio）
 > v2 / 顶级次世代 AAA 级编辑器 — 高级特性增补 + 大世界编辑 + GPU 驱动视口 + 多人协同 + 分析诊断 + 域编辑器全景 + 模块化收口
 
-> 面向 Prism(Bevy fork)的**模块化、数据驱动、运行时解耦、AAA 规模**的编辑器框架。
+> 面向 Prism 原生引擎体系的**模块化、数据驱动、运行时解耦、AAA 规模**的编辑器框架。
 > 工作名 **Loom Studio**。以 Loom 声明式 UI/响应式内核为唯一 UI 地基。
 > 借形态不抄码,系统性对标:
 > **Unreal Editor 5**(World Partition / One-File-Per-Actor / Multi-User / Sequencer / Niagara / Insights / Live Coding / Gameplay Debugger)、
@@ -13,21 +13,21 @@
 > **Figma·Zed**(GPU 驱动画布 / CRDT 协同 / 瓦片重绘)、
 > **RenderDoc·PIX·Tracy**(帧捕获 / GPU 计时 / 性能回放)、**Perforce·Git**(大二进制资产版本控制)。
 >
-> 本文为**设计规格**。地基层(Loom `prism_ui*` 全家桶 + 已 pkg 化的 `prism_reflect`/`prism_asset`/`prism_diagnostic`/`prism_app`/`prism_ui_devtools`)为**已交付**(SHIPPED);`prism_editor_remote` 已补齐 BRP 风格协议/PIE 与有界 TCP transport，`prism_editor_viewport` 已补齐真实 ID-buffer readback 内核，但运行时进程桥、完整场景绘制、拾取输入/Gizmo 仍列为后续能力(见 §17、§19 依赖闸门)。**所有编辑器 pkg 禁止依赖已废弃的 `bevy_*` crate；文中 Bevy 名称仅作为历史迁移边界，不是实现依赖。**
-> 编辑器专有层(E 系列)为**规划项**(PLANNED);**域编辑器**的成熟度受对应引擎子系统成熟度约束,文中显式标注。
+> 本文为**设计规格**。地基层(Loom `prism_ui*` 全家桶 + 已 pkg 化的 `prism_reflect`/`prism_asset`/`prism_diagnostic`/`prism_app`/`prism_ui_devtools`)作为复用地基；编辑器已交付通用内核/数据层、运行时通用进程桥、协同 TCP、Loom 语义 action 绑定、窗口/surface 生命周期编排、世界异步 provider 驱动和多视口 ID target/readback。完整场景绘制、原生桌面渲染/输入/Gizmo、生产存储及具体域 UI 仍待接入(见 §17、§19)。**所有编辑器 pkg 禁止依赖已废弃的 `bevy_*` crate；文中 Bevy 名称仅作为历史迁移边界，不是实现依赖。**
+> 编辑器专有层(E 系列)须区分**已验证切片**与**尚未交付的产品流程**；**域编辑器**的成熟度受对应引擎子系统成熟度约束。2026-10-20 全编辑器验证：16 包、225 项测试通过(含 Apple M2/Metal 两项强制真实 GPU 测试)，不等于完整桌面编辑器已完成；详见 `prism_editor_framework_implementation_zh.md`。
 > 全文严格区分「已实现并通过测试」与「规划中」,不把未落地能力描述为已落地。
 >
 > **非目标(与引擎文档一致)**:纯经典数值与确定性工具链,**不含 AI / ML / 神经网络 / LLM** 功能;
 > 不以替代专业 DCC(Maya/Houdini/Substance)为目标,而以**无缝往返 + 引擎内权威编辑**为目标。
 
-- 版本: v2.1(修订:地基就绪度与 `pkg/prism_*` 真相源对齐、补前置依赖闸门;v2.0 AAA 高级特性设计;v1 内核/面板设计)
-- 适用引擎: Prism / Bevy ECS 生态
+- 版本: v2.2(2026-10-20：同步进程桥/协同/UI action/应用生命周期/世界执行层/视口 GPU 的验证边界；v2.1 地基闸门；v2.0 AAA 设计)
+- 适用引擎: Prism 原生 ECS / 反射 / 应用 / Loom / RHI 体系
 - 关键地基 — 已就绪(SHIPPED,`pkg/prism_*`): `prism_ui*`(响应/树/布局/样式/后端/调度/虚拟化/输入)、`prism_ui_inspector`、
   `prism_ui_timetravel`、`prism_ui_workbench`、`prism_ui_hotreload`、`prism_ui_ecs`、`prism_ui_overlay`、
   `prism_ui_form`、`prism_ui_router`、`prism_ui_i18n`、`prism_ui_a11y`、`prism_ui_sdui`、
   `prism_ui_render_backend`、`prism_ui_devtools`;`prism_reflect`、`prism_asset`、`prism_diagnostic`、`prism_app`
 - 关键边界 — **不引入 Bevy 机制底座**:历史 `bevy_scene`/`bevy_state`/`bevy_remote`/`bevy_input` 只作为迁移对照，编辑器实现使用 `prism_*` 契约、TCP transport、Loom 和 Prism RHI
-- 关键地基 — 分阶段建设: `prism_editor_remote` 已提供 BRP 风格 JSON-RPC/PIE 协议和有界 TCP transport；运行时进程桥、拾取/焦点(迁 `prism_ui_input`,S13 计划中)、Gizmo 调试绘制(暂无 pkg 等价)仍需接入
+- 关键地基 — 分阶段建设: `prism_editor_remote` 已提供 BRP 风格 JSON-RPC/PIE、有界 TCP 和通用子进程桥；引擎专属 runtime adapter、原生窗口/Loom 渲染输入、实际 geometry/depth 和 Gizmo 绘制仍需接入
 - 域子系统(编辑器挂接对象,成熟度各异): 材质/WESL 管线、`Ember` 粒子、`Animation` 动画、
   `Resonance` 音频、Lumen GI、物理、地形/世界系统、虚拟几何/体积/毛发 GPU 孪生
 - 核心契约: 继承 Loom「**成本 ∝ 变化量**」;编辑器一切编辑走**命令**,一切状态可**内省/回放**,一切长任务**异步可取消**。
@@ -129,13 +129,13 @@ UI 与模型混写 → 命令强制单向;整文档撤销快照(大世界爆内�
 └────────────────────────────────────────────────────────────────────────┘
         ↕ BRP(进程内快路径 / 跨进程 / PIE)        ↕ 协同通道(命令广播 / CRDT)
 ┌────────────────────────────────────────────────────────────────────────┐
-│ 被编辑运行时 Runtime(Prism/Bevy app):编辑态 & 播放态(PIE) & 远端真机         │
+│ 被编辑运行时 Runtime(Prism app):编辑态 & 播放态(PIE) & 远端真机              │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
 每层一个或多个独立 crate,可单独编译/测试/演进。L0 完全复用,L1–L4 新建。
 
-> **地基就绪度**:`prism_ui*` 全家桶及 `prism_reflect`/`prism_asset`/`prism_diagnostic`/`prism_app`/`prism_ui_devtools` 已 pkg 化、SHIPPED;**编辑器 pkg 不依赖 `bevy_*`**；`prism_editor_remote` 的协议/PIE/TCP transport 与 `prism_editor_viewport` 的 ID-buffer readback 内核已交付，运行时进程桥、拾取/焦点(迁 `prism_ui_input`)、Gizmo 调试绘制仍待建——相应编辑器阶段(E5/E6)须按依赖闸门推进(见 §19)。
+> **地基就绪度**:`prism_ui*` 及反射/资产/诊断/应用地基已 pkg 化；编辑器 normal/build/dev 依赖树无 `bevy_*`。远程协议/PIE/TCP/通用进程桥和多视口 ID target/readback 已验证，应用提供宿主生命周期编排。原生适配、引擎 runtime adapter、真实场景 geometry/depth、设备输入和 Gizmo 绘制仍按依赖闸门推进(见 §19)，不能用契约测试代替这些接入证据。
 
 ---
 
@@ -184,7 +184,7 @@ pub trait Command: Send {
 - `EditorModule` trait:一个模块 = 一组贡献 + 生命周期;卸载时 `Disposables` 自动回收,防泄漏。
 
 ### 4.6 运行时协议(D4,详见随文各处)
-- `prism_editor_remote` 封装 BRP 风格 JSON-RPC 2.0、PIE 隔离内核和有界 TCP transport;三拓扑目标仍是:**进程内快路径 / 跨进程 / PIE**，运行时进程桥另行接入。
+- `prism_editor_remote` 封装 BRP 风格 JSON-RPC 2.0、PIE 隔离内核、有界 TCP 和受控子进程 stdio/TCP 桥；支持启动/取消/超时/重启/退出诊断。**引擎专属 adapter 与实际场景运行时仍需接入**；附带 loopback fixture 不冒充引擎实现。
 - Inspector 直接吃 BRP 的反射数据,**本地无需链接游戏逻辑 crate**;变更回传经命令→BRP。
 
 ---
@@ -201,7 +201,7 @@ pub trait Command: Send {
 ---
 
 ## 6. 大世界编辑:World Partition / 数据层 / HLOD / OFPA(D8)
-> crate: `prism_editor_world`(规划);挂接地形/世界子系统
+> crate: `prism_editor_world`；元数据/异步 provider 执行、payload/dirty/租约保护及 OFPA/HLOD 计划已交付；生产存储、烘焙和 UI 仍待接入。
 
 借鉴 Unreal World Partition / Frostbite 大世界:
 
@@ -217,7 +217,7 @@ pub trait Command: Send {
 ---
 
 ## 7. GPU 驱动视口(D5/D8)
-> crate: `prism_editor_viewport`;挂接拾取(目标 `prism_ui_input`,前置待建)/Gizmo(暂无 pkg,前置待建)/`prism_virtual_geometry_gpu`
+> crate: `prism_editor_viewport`；稳定 ID/增量场景提交、多 viewport target 与异步单像素读回已交付；宿主 geometry/depth、GPU 矩形采集、设备输入/Gizmo 绘制待接，按需挂接 `prism_virtual_geometry_gpu`。
 
 - **多视口**:透视 + 正交(顶/前/侧)+ 可同步相机 + 独立显示模式(线框/光照/光照复杂度/overdraw/LOD 着色)。
 - **GPU 拾取(D8)**:十万实体下走 GPU id-buffer 拾取而非 CPU 射线逐个测,拾取能力由 `prism_ui_input` 提供(**前置待建**)为基线,
@@ -369,20 +369,20 @@ pub trait Command: Send {
 | `prism_editor_dock` | 嵌套 split/tab/浮动停靠 + 持久化 + 工作区 | ✅ 数据层已交付 |
 | `prism_editor_shell` | 外壳装配:活动栏/侧栏/命令面板/菜单/工具栏/状态栏/键位/主题 | ✅ 数据层已交付 |
 | `prism_editor_panels` | Inspector / Outliner / Content / Console 等通用面板 | ✅ 数据层已交付 |
-| `prism_editor_viewport` | 多视口、GPU 拾取、虚拟几何/GI 预览、高级 Gizmo、瓦片重绘 | 🟡 ID-buffer backend 已交付，场景绘制/输入/Gizmo 待接 |
-| `prism_editor_world` | World Partition 流送、数据层、HLOD、OFPA、层级实例 | 🟡 模型/计划已交付，真实 I/O/UI 待建 |
+| `prism_editor_viewport` | 多视口、GPU 拾取、虚拟几何/GI 预览、高级 Gizmo、瓦片重绘 | 🟡 增量 ID 提交/真实 target/异步读回已交付，geometry/depth/矩形采集/输入/Gizmo 待接 |
+| `prism_editor_world` | World Partition 流送、数据层、HLOD、OFPA、层级实例 | 🟡 异步 provider 执行/dirty/租约/计划已交付，生产持久化/烘焙/UI 待接 |
 | `prism_editor_graph` | 通用节点图内核(材质/VFX/动画/行为树/几何节点) | ✅ 通用内核已交付 |
 | `prism_editor_timeline` | 通用时间线/序列器/关键帧曲线 | ✅ 通用内核已交付 |
 | `prism_editor_domains` | 各域编辑器装配(挂接子系统) | ✅ 装配契约已交付，具体域待接入 |
 | `prism_editor_profiler` | 帧分析器、帧图调试、内存预算、Gameplay Debugger、可视日志 | 🟡 数据层已交付，真实采集待接入 |
-| `prism_editor_content` | 内容浏览器、依赖图、校验、导入导出、cook/构建、版本控制 | 🟡 模型/任务层已交付，真实 I/O/UI 待建 |
-| `prism_editor_remote` | BRP 风格 JSON-RPC、PIE、增量同步、安全 | 🟡 协议/TCP transport 已交付，进程桥待建 |
-| `prism_editor_collab` | 命令广播 / CRDT 协同 / 在场锁(可选) | 🟡 核心协同模型已交付，网络 transport 待建 |
-| `prism_editor_ui` | Loom Element 装配：Shell、面板、Dock、Viewport host、workspace | ✅ 已交付 |
-| `prism_editor_app` | 无头应用装配、`prism_app` 集成、workspace 组合 | 🟡 无头组合已交付，窗口/GPU 生命周期待建 |
+| `prism_editor_content` | 内容浏览器、依赖图、校验、导入导出、cook/构建、版本控制 | 🟡 目录/分页/缓存/依赖/VCS 元数据/任务层已交付，实际管线与 UI 待接 |
+| `prism_editor_remote` | BRP 风格 JSON-RPC、PIE、增量同步、安全 | 🟡 协议/TCP/受控进程桥已交付，引擎专属 adapter 待接 |
+| `prism_editor_collab` | 命令广播 / CRDT 协同 / 在场锁(可选) | 🟡 有界副本/TCP 广播/重连/能力拒绝已交付，认证与产品流程待接 |
+| `prism_editor_ui` | Loom Element 装配：Shell、面板、Dock、Viewport host、workspace | 🟡 Element 与语义 action 绑定已交付，设备事件/渲染/模型执行回路待接 |
+| `prism_editor_app` | 无头应用装配、`prism_app` 集成、workspace 组合 | 🟡 headless/宿主生命周期/恢复退出已交付，OS/GPU 呈现实现待接 |
 | — 复用地基(已 pkg 化) — | `prism_ui*` 全家桶 + `prism_ui_devtools` + `prism_reflect`/`prism_asset`/`prism_diagnostic`/`prism_app` | ✅ 已交付 |
 | — 禁止依赖的历史边界 — | `bevy_*` 仅作迁移对照，编辑器不链接 | ✅ 已隔离 |
-| — 前置待建(pkg 化中) — | 运行时进程桥 · 拾取/焦点→`prism_ui_input`(S13 计划) · Gizmo 调试绘制(暂无 pkg) · 完整场景 ID pass | 🔜 前置 |
+| — 产品集成闸门 — | 引擎 runtime adapter · 原生窗口/Loom 渲染输入 · geometry/depth ID pass · Gizmo/debug drawing · 生产存储 | 🔜 待接 |
 
 > 原则:每个新 crate 以「crate + 测试 + 文档」三件套闭环交付,不堆半成品;域编辑器成熟度受子系统约束;
 > 未落地并本地提交前不计入「已胜出」。
@@ -392,7 +392,7 @@ pub trait Command: Send {
 ## 18. 与 Bevy / BSN / Loom / 子系统的关系
 - **Loom 是唯一 UI 地基**:全部界面用 `loom!` 构建,享受成本契约与工具链。
 - **与 BSN 共存**:`.bsn`/`.scn` 作为场景资产格式(数据驱动、可分层),编辑器 UI 用 Loom;定位不冲突。
-- **与重构方案对齐(真相源)**:凡 `pkg/prism_*` 已覆盖的能力一律以 Prism 为唯一真相源(反射/资产/诊断/应用/devtools/RHI/transport 等);`crates/` 下 `bevy_*` 重复实现退役，编辑器仅挂接 Prism 侧真相源，未 pkg 化的进程桥/拾取/Gizmo 显式标注。
+- **与重构方案对齐(真相源)**:凡 `pkg/prism_*` 已覆盖的能力一律以 Prism 为唯一真相源(反射/资产/诊断/应用/devtools/RHI/transport 等)；编辑器不链接历史 `bevy_*`，未接入的引擎 adapter/原生输入/实际场景绘制/Gizmo 显式标注。
 - **与 ECS 解耦**:经 BRP + 反射访问运行时 World,本地不链接游戏逻辑,崩溃隔离。
 - **与子系统分工**:编辑器**不实现**渲染/物理/动画/音频算法,只提供其**权威编辑 + 预览 + 调试**界面;
   域编辑器随子系统成熟逐步点亮。
@@ -405,9 +405,9 @@ pub trait Command: Send {
 - **E1 内核地基**:`prism_editor_core`——Document/Layer、Command/Undo(+cell 裁剪)、Selection、Service/Contribution、异步任务、Disposable。配套命令回归测试。
 - **E2 反射 Inspector**:`prism_editor_reflect`——反射→控件、WidgetResolver、字段命令、覆盖机制、多选差异。
 - **E3 外壳 + 停靠**:`prism_editor_dock` + `prism_editor_shell`——停靠/命令面板/菜单键位/主题/工作区持久化。
-- **E4 核心面板**:`prism_editor_panels`——Inspector + Outliner(虚拟化)+ Console。`prism_editor_reflect::InspectorSession` 已打通「选择→检查→改字段→撤销/重做→模型快照回写」数据闭环，Loom 事件绑定仍需接入。
-- **E5 运行时桥 + PIE**:`prism_editor_remote`——BRP 风格 JSON-RPC、增量同步、PIE 隔离和有界 TCP transport 已落地；运行时进程管理与引擎专属 adapter 仍是后续接入。
-- **E6 GPU 视口 + Gizmo**:`prism_editor_viewport`——真实 ID-buffer target/readback 已落地；多 viewport 场景提交、拾取输入(`prism_ui_input`)与高级 Gizmo 绘制仍待接入。
+- **E4 核心面板**:`prism_editor_panels`——Inspector + Outliner(虚拟化)+ Console。`InspectorSession` 已打通选择→字段命令→Undo/Redo→快照回写，`prism_editor_ui` 已提供有界语义 action 绑定；原生设备事件到应用模型执行/绘制仍需接线。
+- **E5 运行时桥 + PIE**:`prism_editor_remote`——协议、增量同步、PIE、TCP 和受控子进程管理已落地；引擎专属 adapter 与真实场景 runtime 是后续接入，不将 loopback fixture 计作引擎实现。
+- **E6 GPU 视口 + Gizmo**:`prism_editor_viewport`——增量场景 ID 提交、多 viewport target、异步读回/过期拒绝已落地；宿主 geometry/depth、GPU 矩形采集、平台输入和 Gizmo 绘制/编辑回写仍需接入。
 - **E7 内容与管线**:`prism_editor_content`——内容浏览器 + 依赖图 + 校验 + 导入导出 + 版本控制贡献点。
 - **E8 大世界编辑**:`prism_editor_world`——World Partition 流送 + 数据层 + OFPA + 层级实例 + HLOD 预览。
 - **E9 分析诊断**:`prism_editor_profiler`——帧分析器 + 帧图调试 + 内存预算 + Gameplay Debugger + 可视日志。
@@ -418,7 +418,7 @@ pub trait Command: Send {
 **建议优先级**:E1→E2→E4 = 可用属性编辑器最短路径;E3 外壳并行;E5/E6 = 能动场景的分水岭;
 E7/E8 = AAA 规模前提;E9/E10/E11 = 高级生产力;E12 为增量。
 
-> **依赖闸门**:E5 的协议/PIE/TCP transport 已就绪，但运行时进程桥与引擎专属 adapter 仍未接入；E6 的 ID-buffer backend 已就绪，仍卡在完整场景提交、拾取(`prism_ui_input`)与 Gizmo 绘制。未就绪前相应能力不计入「完整编辑器」完成度(见 §17)。
+> **依赖闸门**:E5 的通用协议/PIE/TCP/进程桥已就绪，但真实引擎 adapter 未接入；E6 的增量 ID 提交与 target/readback 已就绪，但 geometry/depth、设备输入、Gizmo 与模型回写未闭环。应用宿主编排不等于 OS/GPU 呈现实现。下一验收主线为「原生窗口→Loom 渲染/输入→场景→拾取→Inspector 命令→Undo/Redo→保存重载」，不能用 contracts/recording tests 代替完整产品证据(见 §17)。
 
 ---
 
@@ -433,7 +433,7 @@ E7/E8 = AAA 规模前提;E9/E10/E11 = 高级生产力;E12 为增量。
 8. **版本控制大二进制**:LFS/Perforce 适配面大;先 Git-LFS + OFPA 文本化分片,Perforce 增量。
 9. **范围蔓延**:覆盖面极大;严格按 E1→E12 分批,每批三件套闭环,不堆半成品。
 10. **确定性守恒**:全链路整数/排序优先,避免浮点非确定,保证 CI 黄金测试可复现(D6)。
-11. **前置 pkg 化未就绪**:BRP 的 prism 封装、拾取/焦点(迁 `prism_ui_input`)、Gizmo 绘制尚无 pkg 等价;E5/E6 须等前置就绪或桥接过渡,路线图已加依赖闸门(§19),避免在未落地地基上承诺能动场景。
+11. **契约交付与集成交付混淆**:远程协议/进程桥、UI action、应用生命周期、视口 ID target/readback 都有可测试实现，但不自动产生原生桌面、引擎 adapter 或完整场景绘制；必须按 §19 的端到端依赖闸门验收。
 
 ---
 
@@ -446,7 +446,7 @@ E7/E8 = AAA 规模前提;E9/E10/E11 = 高级生产力;E12 为增量。
 - **HLOD**:分层 LOD 代理,远景用代理近景用全量。
 - **OFPA(One-File-Per-Actor)**:实体细粒度落盘,最小化多人编辑/版本控制冲突面。
 - **PIE(Play-In-Editor)**:编辑器内隔离运行游戏逻辑,编辑态不被污染。
-- **BRP 风格远程协议**:基于 JSON-RPC 2.0 的运行时远程检查/变更协议；`prism_editor_remote` 已提供协议/PIE/TCP transport，运行时进程桥仍需接入，不依赖 `bevy_remote`。
+- **BRP 风格远程协议**:基于 JSON-RPC 2.0 的运行时远程检查/变更协议；`prism_editor_remote` 已提供协议/PIE/TCP/通用进程桥，引擎专属 adapter 仍需接入，不依赖 `bevy_remote`。
 - **GPU 拾取**:用 GPU id-buffer 做大规模场景拾取,延迟与实体数解耦。
 - **帧图调试器**:列出渲染 pass/资源/依赖并逐 pass 预览中间缓冲(RenderDoc 式)。
 - **Gameplay Debugger / 可视日志**:运行态逻辑可视化 / 时间轴记录调试图元可回放。
@@ -455,6 +455,6 @@ E7/E8 = AAA 规模前提;E9/E10/E11 = 高级生产力;E12 为增量。
 
 ---
 
-> 本文为设计规格。L0 地基项(`pkg/prism_*`:`prism_ui*` 全家桶 + `prism_reflect`/`prism_asset`/`prism_diagnostic`/`prism_app`/`prism_ui_devtools`)均已实现并通过测试(600+ 测试,Clippy 零告警);
-> **不保留 Bevy 作为编辑器依赖**；**运行时进程桥、拾取/焦点、Gizmo 绘制和完整场景 GPU 提交仍待接入**，而 `prism_editor_remote` 的协议/PIE/TCP transport 与 `prism_editor_viewport` 的 ID-buffer 内核已落地;编辑器专有层(E1–E12)与域编辑器仍须按源码、测试和本地提交逐项计入,
-> 且域编辑器成熟度显式受对应子系统成熟度约束。本框架为**纯经典数值 / 确定性**工具链,不含 AI/ML/LLM 功能。
+> 本文为设计规格，不把 L0 历史测试数或编辑器正确性测试扩写为全仓库/全产品验收。
+> **不保留 Bevy 作为编辑器依赖**；2026-10-20 编辑器全 targets/features 强制 GPU 回归 225 项通过，编辑器范围严格 Clippy 通过(`--no-deps`)，依赖树无 `bevy_*`。
+> **完整桌面与场景编辑闭环尚未完成**：原生窗口/Loom 渲染输入、引擎 adapter、geometry/depth/Gizmo、生产存储和具体域 UI 继续按实现状态文档验收。域编辑器成熟度受子系统约束。本框架为**纯经典数值 / 确定性**工具链，不含 AI/ML/LLM 功能。
