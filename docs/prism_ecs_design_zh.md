@@ -635,7 +635,7 @@ ECS §12 Observer 是其他 crate 派生更新的统一入口，减少消费者�
 
 **已有真实空间消费者**：`pkg/prism_transform_ecs/src/lib.rs` 的 `sync_spatial_indexes` 将一次 drain 分发给已安装的 BVH（physics `DynamicBvh`）与 grid（replication `AoiGrid`）后端；grid 是 AABB 中心点的 XZ 兴趣查询，不是体积重叠查询。非零 spatial margin 代表最后提交的 fat bound，不保证每个中间姿态都更新索引。restore 通过世界身份/结构 generation 失效并协调重建，跨 world 清旧代理；初次接入/restore 可能全量同步，普通帧消费待更新集。传播使用按关系类型的有界变更日志与缓存父子拓扑；静态帧不枚举或排序全局关系边（`tests/ecs_relation_cache.rs` 有工作量断言）。变化发现仍需检查层级 chunk 摘要、关系日志和受影响子树；日志缺口/restore 会重建基线。因此已有增量机制不等于全链路严格 O(变化量)，也不等于当前运行硬件上的性能验收。
 
-**原生 UI 同样已有消费路径**：`pkg/prism_ui_ecs/src/` 已使用 `prism_ecs`；ECS→signal 通过变更/生命周期观察增量拉取，初始绑定和 restore 刷新基线；signal→ECS 仍逐绑定读取信号并比较，只跳过无变化的写入/tick。`schedule.rs` 以 non-send bridge + 独占 pull/push 系统接入 `LoomSyncSet` 顺序，并有 panic 时桥所有权恢复逻辑。inspector/timetravel 的可选 `ecs` feature 不等于整个编辑器/旧工程工作流已完成迁移。
+**原生 UI 同样已有消费路径**：`pkg/prism_ui_ecs/src/` 已使用 `prism_ecs`；ECS→signal 通过变更/生命周期观察增量拉取，初始绑定和 restore 刷新基线；signal→ECS 通过 `SignalChangeQueue` 收集通知，仅读取被通知的 two-way binding，干净帧不遍历 binding、不读取或克隆 signal 值。push 过程中新增的通知留待下一轮；panic 时未确认的当前项及余下批次可重试，已完成项不回滚。`schedule.rs` 以 non-send bridge + 独占 pull/push 系统接入 `LoomSyncSet` 顺序，并有 panic 时桥所有权恢复逻辑。inspector/timetravel 的可选 `ecs` feature 不等于整个编辑器/旧工程工作流已完成迁移。
 
 ### 24.3 反射驱动的动态组件 / 快照 / 网络增量
 
