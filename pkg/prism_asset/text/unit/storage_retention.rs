@@ -52,6 +52,25 @@ fn keepalive_boundary_and_unused_event_are_exact() {
     assert!(events[0].is_removed());
 }
 
+/// A same-frame fixpoint scan must not consume another KeepAlive reclaim point.
+#[test]
+fn same_frame_followup_does_not_age_keepalive() {
+    let mut assets = arena();
+    let handle = assets.insert(Sample(1));
+    let id = handle.id();
+    assets
+        .retain(&handle, 4, RetentionPolicy::KeepAlive { frames: 2 })
+        .unwrap();
+    drop(handle);
+
+    assert_eq!(assets.collect_releases(), 0);
+    assert_eq!(assets.retain_cache().get(id).unwrap().idle_frames, Some(0));
+    assert_eq!(assets.collect_releases_without_advancing(), 0);
+    assert_eq!(assets.retain_cache().get(id).unwrap().idle_frames, Some(0));
+    assert_eq!(assets.collect_releases(), 0);
+    assert_eq!(assets.retain_cache().get(id).unwrap().idle_frames, Some(1));
+}
+
 /// Zero frames releases immediately; the original reclamation API must advance policies too.
 #[test]
 fn zero_frame_keepalive_and_immediate_policy() {

@@ -485,6 +485,12 @@ impl<A: Asset> Assets<A> {
         self.collect_retained().reclaimed
     }
 
+    /// Reclaims newly abandoned slots during a same-frame server fixpoint
+    /// without advancing retention or grace-frame age a second time.
+    pub(crate) fn collect_releases_without_advancing(&mut self) -> usize {
+        self.collect_abandoned_without_advancing()
+    }
+
     /// Advances retention and normal reclamation together, returning diagnostics.
     ///
     /// Use once per reclaim frame **instead of** `collect_releases` when cache
@@ -521,6 +527,14 @@ impl<A: Asset> Assets<A> {
 
     fn collect_abandoned(&mut self) -> usize {
         self.frame = self.frame.wrapping_add(1);
+        self.collect_abandoned_at_current_frame()
+    }
+
+    fn collect_abandoned_without_advancing(&mut self) -> usize {
+        self.collect_abandoned_at_current_frame()
+    }
+
+    fn collect_abandoned_at_current_frame(&mut self) -> usize {
         let current = self.release.dropped_count();
         if current == self.seen_dropped && !self.has_pending_grace {
             // Nothing abandoned since last time and nothing mid-grace: the

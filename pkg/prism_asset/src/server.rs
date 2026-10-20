@@ -1918,6 +1918,7 @@ impl AssetServerInner {
     /// returning the total number of slots reclaimed.
     fn collect_releases(&mut self) -> usize {
         let mut total = 0;
+        let mut advance = true;
         loop {
             let collected_cycle = cycle_collector::collect_promoted_cycles(
                 &mut self.retained,
@@ -1925,12 +1926,17 @@ impl AssetServerInner {
                 &self.owner_weaks,
                 &self.stores,
             );
-            let reclaimed = self.stores.collect_releases();
+            let reclaimed = if advance {
+                self.stores.collect_releases()
+            } else {
+                self.stores.collect_releases_without_advancing()
+            };
             let pruned = self.prune_dead();
             total += reclaimed;
             if reclaimed == 0 && !pruned && !collected_cycle {
                 break;
             }
+            advance = false;
         }
         total
     }

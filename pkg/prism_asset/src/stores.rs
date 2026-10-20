@@ -105,6 +105,10 @@ pub trait ErasedAssetStore: Any + Send + Sync {
     /// window. Returns the count reclaimed this call.
     fn collect_releases(&mut self) -> usize;
 
+    /// Reclaims newly abandoned slots without advancing retention or grace
+    /// age; used by same-frame server fixpoint passes.
+    fn collect_releases_without_advancing(&mut self) -> usize;
+
     /// The number of live slots.
     fn len(&self) -> usize;
 
@@ -179,6 +183,10 @@ impl<A: Asset> ErasedAssetStore for Assets<A> {
 
     fn collect_releases(&mut self) -> usize {
         Assets::<A>::collect_releases(self)
+    }
+
+    fn collect_releases_without_advancing(&mut self) -> usize {
+        Assets::<A>::collect_releases_without_advancing(self)
     }
 
     fn len(&self) -> usize {
@@ -413,6 +421,15 @@ impl AssetStores {
     /// the total count reclaimed this call.
     pub fn collect_releases(&mut self) -> usize {
         self.stores.values_mut().map(|s| s.collect_releases()).sum()
+    }
+
+    /// Reclaims newly abandoned slots without advancing any arena's per-frame
+    /// retention or grace age.
+    pub fn collect_releases_without_advancing(&mut self) -> usize {
+        self.stores
+            .values_mut()
+            .map(|s| s.collect_releases_without_advancing())
+            .sum()
     }
 
     /// The total number of live slots across all arenas.
