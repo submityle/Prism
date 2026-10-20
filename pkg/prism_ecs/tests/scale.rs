@@ -408,6 +408,49 @@ fn scale_shared_binding_eviction_churn() {
     }
 }
 
+/// Measure the conservative non-suffix cleanup path. Target archetypes are
+/// created before the background archetypes, so each target eviction removes
+/// an older ID from the head of a still-live table-component posting.
+///
+/// The output is diagnostic, not a timing gate: run on an otherwise idle host
+/// before comparing sizes.
+#[test]
+#[ignore = "creates up to 5120 archetypes; run explicitly with --release --ignored"]
+fn scale_shared_binding_eviction_non_tail() {
+    const EVICTIONS_PER_SAMPLE: usize = 1_024;
+    const SAMPLES: usize = 7;
+    for live_values in [64usize, 256, 1_024, 4_096] {
+        let mut samples = Vec::with_capacity(SAMPLES);
+        for sample in 0..SAMPLES {
+            let mut world = World::new();
+            let targets: Vec<_> = (0..EVICTIONS_PER_SAMPLE)
+                .map(|offset| {
+                    let value = (sample * EVICTIONS_PER_SAMPLE + offset) as u32;
+                    world.spawn((Pos(value as f32, 1.0, 0.0), ChurnKey(value)))
+                })
+                .collect();
+
+            for value in 0..live_values {
+                let key = (EVICTIONS_PER_SAMPLE * SAMPLES + value) as u32;
+                world.spawn((Pos(value as f32, 0.0, 0.0), ChurnKey(key)));
+            }
+
+            let start = Instant::now();
+            for entity in targets {
+                assert!(world.despawn(entity));
+            }
+            samples.push(start.elapsed());
+            assert_eq!(world.entity_count() as usize, live_values);
+        }
+        samples.sort_unstable();
+        let median = samples[SAMPLES / 2];
+        println!(
+            "shared_binding_eviction_non_tail live_values={live_values} samples={SAMPLES} evictions/sample={EVICTIONS_PER_SAMPLE} median={median:?} median_ns/eviction={:.0}",
+            median.as_nanos() as f64 / EVICTIONS_PER_SAMPLE as f64
+        );
+    }
+}
+
 /// The design's headline claim is that the incremental path costs in proportion
 /// to what *changed*, not to world size. This measures both halves on 1M rows:
 /// the coarse `dirty_chunks` pass against a per-row `Changed<T>` scan, with the
