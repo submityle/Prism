@@ -633,6 +633,7 @@ fn validate_geometry(geometry: LightGeometry) -> Result<(), SceneError> {
             if dot(direction, right).abs() > 1e-4
                 || dot(direction, up).abs() > 1e-4
                 || dot(right, up).abs() > 1e-4
+                || dot(direction, cross(right, up)) < 1.0 - 1e-4
             {
                 return Err(SceneError::InvalidGeometry);
             }
@@ -667,7 +668,15 @@ fn validate_geometry(geometry: LightGeometry) -> Result<(), SceneError> {
                 return Err(SceneError::InvalidGeometry);
             }
         }
-        LightGeometry::Emissive { .. } => {}
+        LightGeometry::Emissive { emitter_id } => {
+            // `0` is reserved as the invalid source sentinel.  Emissive
+            // records are consumed by distribution builders and hit-time
+            // radiance queries, so accepting an unscoped source here would
+            // allow two unrelated emitters to alias the same distribution.
+            if emitter_id == 0 {
+                return Err(SceneError::InvalidGeometry);
+            }
+        }
     }
     Ok(())
 }
@@ -684,6 +693,14 @@ fn dot(a: [f32; 3], b: [f32; 3]) -> f64 {
         .zip(b)
         .map(|(a, b)| f64::from(a) * f64::from(b))
         .sum()
+}
+
+fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
 }
 
 fn validate_direction(direction: [f32; 3]) -> Result<(), SceneError> {
@@ -1876,6 +1893,75 @@ mod tests {
         assert!(matches!(error, SceneError::PatchMaskValueMismatch));
         assert_eq!(scene.sequence(), 1);
         assert_eq!(scene.scene_epoch(), 1);
+    }
+
+    #[test]
+    fn emissive_record_requires_a_stable_nonzero_source_identity() {
+        let mut scene = LightScene::new();
+        let invalid = LightRecord::new(
+            LightClassification {
+                class: LightClass::Emissive,
+                mobility: LightMobility::Static,
+            },
+            LightEmission::new([1.0; 3], 1.0, LightUnit::Radiance),
+            LightGeometry::Emissive { emitter_id: 0 },
+        );
+        assert_eq!(scene.insert(invalid, 1), Err(SceneError::InvalidGeometry));
+        assert!(scene.is_empty());
+
+        let valid = LightRecord::new(
+            LightClassification {
+                class: LightClass::Emissive,
+                mobility: LightMobility::Static,
+            },
+            LightEmission::new([1.0; 3], 1.0, LightUnit::Radiance),
+            LightGeometry::Emissive { emitter_id: 42 },
+        );
+        let (handle, _) = scene.insert(valid, 2).expect("nonzero emitter identity");
+        assert_eq!(
+            scene.get(handle).map(|record| record.geometry),
+            Some(valid.geometry)
+        );
+    }
+
+    #[test]
+    fn rect_basis_must_be_right_handed_and_face_propagation_direction() {
+        let mut scene = LightScene::new();
+        let valid = LightRecord::new(
+            LightClassification {
+                class: LightClass::Rect,
+                mobility: LightMobility::Dynamic,
+            },
+            LightEmission::new([1.0; 3], 4.0, LightUnit::Nits),
+            LightGeometry::Rect {
+                position: [0.0; 3],
+                direction: [0.0, 0.0, 1.0],
+                right: [1.0, 0.0, 0.0],
+                up: [0.0, 1.0, 0.0],
+                width: 2.0,
+                height: 1.0,
+            },
+        );
+        scene.insert(valid, 1).expect("right-handed rectangle");
+
+        let flipped = LightRecord::new(
+            LightClassification {
+                class: LightClass::Rect,
+                mobility: LightMobility::Dynamic,
+            },
+            LightEmission::new([1.0; 3], 4.0, LightUnit::Nits),
+            LightGeometry::Rect {
+                position: [0.0; 3],
+                direction: [0.0, 0.0, -1.0],
+                right: [1.0, 0.0, 0.0],
+                up: [0.0, 1.0, 0.0],
+                width: 2.0,
+                height: 1.0,
+            },
+        );
+        let before = scene.clone();
+        assert_eq!(scene.insert(flipped, 2), Err(SceneError::InvalidGeometry));
+        assert_eq!(scene, before);
     }
 
     #[test]
