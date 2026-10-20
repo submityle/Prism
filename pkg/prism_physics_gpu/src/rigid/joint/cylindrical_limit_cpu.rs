@@ -388,7 +388,7 @@ fn solve_limit(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bevy_math::ops;
+    use prism_math::ops;
     use glam::{Quat, Vec3};
 
     /// A static rod at the origin (body `0`) along `+Y` and a dynamic sleeve

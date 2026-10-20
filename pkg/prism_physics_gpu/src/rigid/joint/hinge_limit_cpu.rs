@@ -53,7 +53,7 @@ use super::config::JointSolverConfig;
 use super::hinge_limit::HingeLimitJoint;
 use super::math::{apply_rotation_delta, rotate, world_inv_inertia_apply, EPSILON};
 use super::stepper::{predict, recover_velocities, snapshot};
-use bevy_math::ops;
+use prism_math::ops;
 
 /// Advances `state` by `dt` under the hinge-limit joints in `joints`.
 ///

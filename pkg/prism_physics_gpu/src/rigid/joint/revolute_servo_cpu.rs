@@ -75,7 +75,7 @@
 //! reordered joint list and colour-batch order with the identical three-slot
 //! multiplier layout, read the same per-substep snapshot buffers for the damping
 //! term, and apply the identical multiplier clamp. The angle is taken with
-//! [`bevy_math::ops::atan2`] rather than `f32::atan2` so the `CPU` reference and
+//! [`prism_math::ops::atan2`] rather than `f32::atan2` so the `CPU` reference and
 //! the shader share one transcendental path.
 //!
 //! Provenance: the point-to-point (ball-socket) constraint, the hinge
@@ -97,7 +97,7 @@ use super::math::{
 };
 use super::revolute_servo::RevoluteServoJoint;
 use super::stepper::{predict, recover_velocities, snapshot};
-use bevy_math::ops;
+use prism_math::ops;
 use glam::{Quat, Vec3};
 
 /// Advances `state` by `dt` under the revolute servo joints in `joints`.

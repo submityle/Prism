@@ -78,7 +78,7 @@
 //! which walk the identical reordered joint list and colour-batch order with the
 //! identical twelve-slot multiplier layout and read the same per-substep
 //! snapshot buffers for the damping term. Angles are taken with
-//! [`bevy_math::ops::atan2`] rather than `f32::atan2` so the `CPU` reference and
+//! [`prism_math::ops::atan2`] rather than `f32::atan2` so the `CPU` reference and
 //! the shader share one transcendental path.
 //!
 //! Provenance: the per-axis spring-damper actuator of a general-purpose
@@ -103,7 +103,7 @@ use super::math::{
     world_inv_inertia_apply, EPSILON,
 };
 use super::stepper::{predict, recover_velocities, snapshot};
-use bevy_math::ops;
+use prism_math::ops;
 use glam::{Quat, Vec3};
 
 /// Advances `state` by `dt` under the configurable `D6` joints in `joints`, each

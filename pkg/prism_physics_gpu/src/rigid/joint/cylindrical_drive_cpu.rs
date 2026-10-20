@@ -454,7 +454,7 @@ fn anchor_displacement(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bevy_math::ops;
+    use prism_math::ops;
 
     /// A static rod at the origin (body `0`) along `+Y` and a dynamic sleeve
     /// (body `1`) coincident with it, free to slide and spin along `+Y`. Body

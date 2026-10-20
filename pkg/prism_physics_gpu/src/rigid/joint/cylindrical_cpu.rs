@@ -282,7 +282,7 @@ fn solve_point_on_line(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bevy_math::ops;
+    use prism_math::ops;
     use glam::{Quat, Vec3};
 
     /// Perpendicular distance from a joint's two world-space anchors to their

@@ -71,7 +71,7 @@
 //! (`GpuRevoluteDriveJointSolver`) and its shader, which walk the identical
 //! reordered joint list and colour-batch order with the identical three-slot
 //! multiplier layout and read the same per-substep snapshot buffers for the
-//! damping term. The angle is taken with [`bevy_math::ops::atan2`] rather than
+//! damping term. The angle is taken with [`prism_math::ops::atan2`] rather than
 //! `f32::atan2` so the `CPU` reference and the shader share one transcendental
 //! path.
 //!
@@ -93,7 +93,7 @@ use super::math::{
 };
 use super::revolute_drive::RevoluteDriveJoint;
 use super::stepper::{predict, recover_velocities, snapshot};
-use bevy_math::ops;
+use prism_math::ops;
 use glam::{Quat, Vec3};
 
 /// Advances `state` by `dt` under the revolute drive joints in `joints`.

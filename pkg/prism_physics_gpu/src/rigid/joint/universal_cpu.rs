@@ -49,7 +49,7 @@
 //! (`GpuUniversalJointSolver`) and its shader, which walk the identical
 //! reordered joint list and colour-batch order with the identical two-slot
 //! multiplier layout. The `CPU` reference takes its inverse cosine through
-//! [`bevy_math::ops::acos`] so the scalar matches the platform math library the
+//! [`prism_math::ops::acos`] so the scalar matches the platform math library the
 //! rest of the crate's `CPU` goldens use, while the shader uses the built-in
 //! `acos`; the tight parity tolerance bounds the resulting reassociation.
 //!
@@ -67,7 +67,7 @@ use super::config::JointSolverConfig;
 use super::math::{apply_rotation_delta, rotate, world_inv_inertia_apply, EPSILON};
 use super::stepper::{predict, recover_velocities, snapshot};
 use super::universal::UniversalJoint;
-use bevy_math::ops;
+use prism_math::ops;
 use glam::Vec3;
 use std::f32::consts::FRAC_PI_2;
 

@@ -64,7 +64,7 @@
 //! (`GpuSwingTwistJointSolver`) and its shader, which walk the identical
 //! reordered joint list and colour-batch order with the identical three-slot
 //! multiplier layout. The transcendental angles are taken with
-//! [`bevy_math::ops::acos`] and [`bevy_math::ops::atan2`] rather than the `f32`
+//! [`prism_math::ops::acos`] and [`prism_math::ops::atan2`] rather than the `f32`
 //! intrinsics so the `CPU` reference and the shader share one transcendental
 //! path.
 //!
@@ -82,7 +82,7 @@ use super::config::JointSolverConfig;
 use super::math::{apply_rotation_delta, rotate, world_inv_inertia_apply, EPSILON};
 use super::stepper::{predict, recover_velocities, snapshot};
 use super::swing_twist::SwingTwistJoint;
-use bevy_math::ops;
+use prism_math::ops;
 use glam::{Quat, Vec3};
 
 /// Advances `state` by `dt` under the swing-twist joints in `joints`.

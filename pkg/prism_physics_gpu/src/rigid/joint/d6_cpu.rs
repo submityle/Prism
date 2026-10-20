@@ -81,7 +81,7 @@
 //! Every arithmetic step here is mirrored by the `GPU` twin and its shader,
 //! which walk the identical reordered joint list and colour-batch order with the
 //! identical six-slot multiplier layout. The transcendental angles are taken
-//! with [`bevy_math::ops::atan2`] rather than the `f32` intrinsic so the `CPU`
+//! with [`prism_math::ops::atan2`] rather than the `f32` intrinsic so the `CPU`
 //! reference and the device agree bit-for-bit on the branch an angle falls into.
 //!
 //! Provenance: the point-to-point and single-axis positional/angular `XPBD`
@@ -101,7 +101,7 @@ use super::math::{
     EPSILON,
 };
 use super::stepper::{predict, recover_velocities, snapshot};
-use bevy_math::ops;
+use prism_math::ops;
 use glam::{Quat, Vec3};
 
 /// Advances `state` by `dt` under the configurable `D6` joints in `joints`.
