@@ -9,6 +9,7 @@ use crate::dirty::{
 use crate::graph::{BuildError, BuildGraph};
 use crate::hash::{derive_artifact_key, ArtifactKeyInputs, HashError};
 use crate::job::JobId;
+use crate::journal::read_committed_binding as input_binding;
 use crate::resources::{BuildResources, ResourceError};
 use crate::transaction::{PublishError, PublishedManifest, RevisionStore};
 use crate::types::{
@@ -18,7 +19,7 @@ use crate::types::{
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::thread;
 
@@ -81,6 +82,18 @@ pub struct BuildExecution {
     pub artifact_keys: BTreeMap<JobId, ArtifactKey>,
     /// Jobs whose bytes were loaded from the verified local DDC/CAS pair.
     pub cache_hits: BTreeSet<JobId>,
+    /// Coordinator-owned outputs retained for future consumers, sampled after
+    /// each completed wave. This excludes worker buffers and processor heaps.
+    pub output_memory: BuildOutputMemoryStats,
+}
+
+/// Retained DAG-frontier high-water marks, not a process-wide memory budget.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct BuildOutputMemoryStats {
+    /// Largest sum of retained output lengths after a completed wave.
+    pub peak_retained_bytes: u64,
+    /// Largest number of retained outputs after a completed wave.
+    pub peak_retained_outputs: usize,
 }
 
 /// Failure during deterministic execution or publication.
@@ -558,7 +571,10 @@ impl BuildExecutor {
                     // Even an empty store can retain aborted journal history.
                     // Reject history the read-only query cannot decode before
                     // publishing a revision that why could never retrieve.
-                    if input_binding(root, revision)?.is_some() {
+                    if input_binding(root, revision)
+                        .map_err(RebuildExplanationError::from)?
+                        .is_some()
+                    {
                         return Err(RebuildExplanationError::Invalid(
                             "journal already commits the requested cold revision",
                         )
@@ -615,7 +631,16 @@ impl BuildExecutor {
             }
         }
 
+        // Prepared outputs are already durable in CAS. Keep only the frontier
+        // borrowed by future jobs and protect unpublished blobs until commit.
+        let _output_lease = store.protect_build_outputs()?;
+        let mut remaining_consumers: BTreeMap<_, _> = dependents
+            .iter()
+            .map(|(&id, consumers)| (id, consumers.len()))
+            .collect();
         let mut outputs = BTreeMap::<JobId, Vec<u8>>::new();
+        let mut retained_bytes = 0u64;
+        let mut output_memory = BuildOutputMemoryStats::default();
         let mut descriptors = BTreeMap::<JobId, ArtifactDescriptor>::new();
         let mut artifact_keys = BTreeMap::new();
         let mut cache_hits = BTreeSet::new();
@@ -720,6 +745,22 @@ impl BuildExecutor {
                     .collect::<Vec<_>>()
             });
 
+            // All scoped workers have joined, so none can still borrow these
+            // inputs. Count dependency edges (including repeated input slots),
+            // retaining a shared output until its final consumer wave finishes.
+            for id in &wave {
+                for dependency in graph.job(*id).expect("wave job exists").dependencies() {
+                    let consumers = remaining_consumers
+                        .get_mut(dependency)
+                        .expect("dependency has a consumer");
+                    *consumers -= 1;
+                    if *consumers == 0 {
+                        let released = outputs.remove(dependency).expect("live input exists");
+                        retained_bytes -= released.len() as u64;
+                    }
+                }
+            }
+
             // Canonicalize at the side-effect boundary, independently of the
             // collector's arrival/join order. No cache mutation or failure
             // selection may happen before this ordering step.
@@ -750,7 +791,12 @@ impl BuildExecutor {
                 }
                 artifact_keys.insert(id, prepared.key);
                 descriptors.insert(id, prepared.descriptor);
-                outputs.insert(id, prepared.output);
+                if remaining_consumers.get(&id).copied().unwrap_or(0) != 0 {
+                    retained_bytes = retained_bytes
+                        .checked_add(prepared.output.len() as u64)
+                        .expect("allocated frontier byte count fits u64");
+                    outputs.insert(id, prepared.output);
+                }
                 completed.insert(id);
                 ready.remove(&id);
                 if let Some(children) = dependents.get(&id) {
@@ -765,6 +811,10 @@ impl BuildExecutor {
                     }
                 }
             }
+            output_memory.peak_retained_bytes =
+                output_memory.peak_retained_bytes.max(retained_bytes);
+            output_memory.peak_retained_outputs =
+                output_memory.peak_retained_outputs.max(outputs.len());
         }
 
         let mut transaction = if let (Some(snapshot), Some(plan)) = (inputs, explanation) {
@@ -801,17 +851,14 @@ impl BuildExecutor {
             store.begin(revision, expected_current)
         };
         for id in order {
-            transaction.stage(
-                specs[&id].asset,
-                descriptors[&id].clone(),
-                outputs.remove(&id).expect("completed output exists"),
-            )?;
+            transaction.stage_existing(specs[&id].asset, descriptors[&id].clone())?;
         }
         let published = transaction.commit()?;
         Ok(BuildExecution {
             published,
             artifact_keys,
             cache_hits,
+            output_memory,
         })
     }
 }
@@ -926,147 +973,6 @@ fn persist_input_record(path: &Path, bytes: &[u8]) -> Result<(), RebuildExplanat
     }
     sync_directory(parent)?;
     Ok(())
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct InputBinding {
-    id: TransactionId,
-    manifest_hash: ContentHash,
-    previous_revision: Option<BuildRevision>,
-    publication_hash: Option<ContentHash>,
-}
-
-fn input_binding(
-    root: &Path,
-    target: BuildRevision,
-) -> Result<Option<InputBinding>, RebuildExplanationError> {
-    // Read the existing journal v2 framing without TransactionJournal::open or
-    // scan: those APIs initialize/recover/truncate and are unsuitable for why.
-    // Fixed frames keep memory bounded independently of journal history length.
-    let file = fs::File::open(root.join("transactions/journal.bin"))?;
-    let metadata = file.metadata()?;
-    if !metadata.is_file() {
-        return Err(RebuildExplanationError::Invalid(
-            "journal is not a regular file",
-        ));
-    }
-    // Freeze the readable prefix so a busy publisher cannot extend this scan
-    // indefinitely. A partial final frame never proves commitment.
-    let mut reader = io::BufReader::new(file.take(metadata.len()));
-    let magic = b"PRISM-TXN-JNL\0\x02";
-    let mut header = vec![0; magic.len()];
-    reader.read_exact(&mut header)?;
-    if header != magic {
-        return Err(RebuildExplanationError::Invalid(
-            "invalid transaction journal header",
-        ));
-    }
-    let mut prepared = None;
-    let mut committed = None;
-    loop {
-        let mut frame_header = [0; 8];
-        match reader.read_exact(&mut frame_header) {
-            Ok(()) => {}
-            // A concurrently appended or interrupted tail never establishes
-            // commitment. Earlier complete Commit frames remain queryable.
-            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => break,
-            Err(error) => return Err(error.into()),
-        }
-        if &frame_header[..4] != b"TXN1" {
-            return Err(RebuildExplanationError::Invalid(
-                "invalid transaction journal frame",
-            ));
-        }
-        let length = u32::from_le_bytes(frame_header[4..].try_into().unwrap());
-        if length != 99 {
-            return Err(RebuildExplanationError::Invalid(
-                "journal record has no supported transaction binding",
-            ));
-        }
-        let mut frame = [0; 99 + 32];
-        match reader.read_exact(&mut frame) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => break,
-            Err(error) => return Err(error.into()),
-        }
-        let payload = &frame[..99];
-        if ContentHash::digest(payload).0 != frame[99..] {
-            return Err(RebuildExplanationError::Invalid(
-                "transaction journal checksum mismatch",
-            ));
-        }
-        let mut cursor = Cursor::bounded(payload)?;
-        let kind = cursor.u8()?;
-        let id = TransactionId(cursor.take(16)?.try_into().unwrap());
-        let revision = BuildRevision(cursor.u64()?);
-        let marker = cursor.u8()?;
-        let previous = cursor.u64()?;
-        let previous_revision = match (marker, previous) {
-            (0, 0) => None,
-            (1, previous) if kind == 1 => Some(BuildRevision(previous)),
-            _ => {
-                return Err(RebuildExplanationError::Invalid(
-                    "invalid journal baseline marker",
-                ))
-            }
-        };
-        let manifest_hash = ContentHash(cursor.array32()?);
-        let publication_marker = cursor.u8()?;
-        let publication = cursor.array32()?;
-        let publication_hash = match (publication_marker, publication) {
-            (0, hash) if hash == [0; 32] => None,
-            (1, hash) => Some(ContentHash(hash)),
-            _ => {
-                return Err(RebuildExplanationError::Invalid(
-                    "invalid journal publication marker",
-                ))
-            }
-        };
-        if !(1..=3).contains(&kind) {
-            return Err(RebuildExplanationError::Invalid(
-                "invalid transaction journal kind",
-            ));
-        }
-        if revision != target {
-            continue;
-        }
-        let binding = InputBinding {
-            id,
-            manifest_hash,
-            previous_revision,
-            publication_hash,
-        };
-        if committed.is_some() {
-            return Err(RebuildExplanationError::Invalid(
-                "journal changes an already committed revision",
-            ));
-        }
-        match kind {
-            1 if prepared.is_none() => prepared = Some(binding),
-            2 | 3 => {
-                let baseline = prepared.take().ok_or(RebuildExplanationError::Invalid(
-                    "journal terminal record has no prepare",
-                ))?;
-                if baseline.id != id
-                    || baseline.manifest_hash != manifest_hash
-                    || baseline.publication_hash != publication_hash
-                {
-                    return Err(RebuildExplanationError::Invalid(
-                        "journal terminal record differs from prepare",
-                    ));
-                }
-                if kind == 2 {
-                    committed = Some(baseline);
-                }
-            }
-            _ => {
-                return Err(RebuildExplanationError::Invalid(
-                    "duplicate journal prepare",
-                ))
-            }
-        }
-    }
-    Ok(committed)
 }
 
 struct PreparedJob {

@@ -1,5 +1,5 @@
 use crate::cas::{CasError, CasSweepReport, ContentAddressedStore};
-use crate::journal::{JournalRecord, TransactionJournal};
+use crate::journal::{read_committed_binding, JournalRecord, TransactionJournal};
 use crate::package::RuntimePackage;
 use crate::publication::PublicationDescriptor;
 use crate::types::{
@@ -9,7 +9,7 @@ use crate::types::{
 use fs4::fs_std::FileExt;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::mem::size_of;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -147,7 +147,60 @@ impl Drop for FilePublishLock {
     }
 }
 
+/// Shared cross-process protection for unpublished build outputs. Closing the
+/// file (including on process termination) releases the lease automatically.
+pub struct BuildOutputLease(File);
+
+impl Drop for BuildOutputLease {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.0);
+    }
+}
+
 impl RevisionStore {
+    /// Reads one durable committed manifest without opening a store, CAS or DDC,
+    /// recovering a journal, or creating files. Historical queries do not depend
+    /// on CURRENT. A matching Prepare and Commit must bind the exact canonical
+    /// bytes. Partial tails do not prove commitment and remain untouched.
+    ///
+    /// Admission rejects manifests above 64 MiB and journal prefixes above
+    /// 256 MiB; neither decoding nor graph traversal silently truncates input.
+    /// This validates manifest evidence, not the availability of CAS payloads.
+    pub fn read_committed_manifest(
+        root: impl AsRef<Path>,
+        revision: BuildRevision,
+    ) -> Result<(Manifest, crate::types::ContentHash), PublishError> {
+        const MAX_MANIFEST_BYTES: u64 = 64 * 1024 * 1024;
+        let root = root.as_ref();
+        let binding = read_committed_binding(root, revision)?.ok_or(PublishError::Invalid(
+            "revision has no durable committed manifest binding",
+        ))?;
+        let file = File::open(
+            root.join("revisions")
+                .join(format!("{}.manifest", revision.0)),
+        )?;
+        let metadata = file.metadata()?;
+        if !metadata.is_file() || metadata.len() > MAX_MANIFEST_BYTES {
+            return Err(PublishError::Invalid(
+                "manifest is not a regular file or exceeds 64 MiB admission limit",
+            ));
+        }
+        let mut bytes = Vec::new();
+        file.take(MAX_MANIFEST_BYTES + 1).read_to_end(&mut bytes)?;
+        if bytes.len() as u64 != metadata.len() || bytes.len() as u64 > MAX_MANIFEST_BYTES {
+            return Err(PublishError::Invalid(
+                "manifest changed during read or exceeds admission limit",
+            ));
+        }
+        if crate::types::ContentHash::digest(&bytes) != binding.manifest_hash {
+            return Err(PublishError::Invalid(
+                "manifest differs from committed journal digest",
+            ));
+        }
+        let manifest = decode_manifest(&bytes, revision)?;
+        Ok((manifest, binding.manifest_hash))
+    }
+
     pub fn open(root: impl Into<PathBuf>) -> Result<Self, PublishError> {
         let root = root.into();
         // Persist each newly-created directory entry in its parent. Otherwise a
@@ -181,12 +234,39 @@ impl RevisionStore {
         &self.cas
     }
 
+    /// Protects candidate CAS blobs against cooperating store sweeps. Multiple
+    /// builders may run concurrently. Hold this through publication or failure;
+    /// direct `ContentAddressedStore` sweeps still require caller coordination.
+    pub fn protect_build_outputs(&self) -> Result<BuildOutputLease, PublishError> {
+        let file = self.output_lease_file()?;
+        FileExt::lock_shared(&file)?;
+        Ok(BuildOutputLease(file))
+    }
+
+    fn output_lease_file(&self) -> Result<File, PublishError> {
+        Ok(OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(self.root.join(".build-output.lock"))?)
+    }
+
     /// Removes unreachable local CAS blobs after `grace`.
     ///
     /// Roots are derived only from committed journal revisions and CURRENT.
     /// A live prepare is treated as an active publisher and defers the whole
     /// sweep, because its CAS writes may precede its manifest write.
     pub fn sweep_unreachable_cas(&self, grace: Duration) -> Result<CasSweepReport, PublishError> {
+        // Acquire before publication locks, and never wait for a builder that
+        // may itself be about to publish. This avoids a build/GC lock cycle.
+        let lease_file = self.output_lease_file()?;
+        if !FileExt::try_lock_exclusive(&lease_file)? {
+            return Ok(CasSweepReport {
+                deferred_due_to_active_build: true,
+                ..CasSweepReport::default()
+            });
+        }
+        let _output_guard = BuildOutputLease(lease_file);
         let _publish_guard = self
             .publish_lock
             .lock()
@@ -658,9 +738,7 @@ impl RevisionStore {
         // a later build never treats a dangling CURRENT as a usable base.
         if validate_payloads {
             for descriptor in manifest.entries.values() {
-                let payload = self.cas.read(descriptor.content_hash)?;
-                let actual_len = u64::try_from(payload.len())
-                    .map_err(|_| PublishError::Invalid("CAS payload length overflows"))?;
+                let actual_len = self.cas.verify(descriptor.content_hash)?;
                 if actual_len != descriptor.byte_len {
                     return Err(PublishError::Invalid(
                         "CURRENT manifest payload length does not match CAS",
@@ -862,7 +940,7 @@ pub struct PublishTransaction {
     transaction_id: TransactionId,
     revision: BuildRevision,
     expected_current: Option<BuildRevision>,
-    staged: BTreeMap<AssetId, (ArtifactDescriptor, Vec<u8>)>,
+    staged: BTreeMap<AssetId, (ArtifactDescriptor, Option<Vec<u8>>)>,
     runtime_package: Option<RuntimePackage>,
 }
 
@@ -888,7 +966,23 @@ impl PublishTransaction {
         if self.staged.contains_key(&asset) {
             return Err(PublishError::Invalid("duplicate staged AssetId"));
         }
-        self.staged.insert(asset, (descriptor, bytes));
+        self.staged.insert(asset, (descriptor, Some(bytes)));
+        Ok(())
+    }
+
+    /// Stages an immutable CAS reference without retaining an owned payload.
+    /// Commit verifies the complete blob and exact length under the publication
+    /// lock; a missing, changed, or mismatched blob cannot become CURRENT.
+    pub fn stage_existing(
+        &mut self,
+        asset: AssetId,
+        descriptor: ArtifactDescriptor,
+    ) -> Result<(), PublishError> {
+        descriptor.validate().map_err(PublishError::Invalid)?;
+        if self.staged.contains_key(&asset) {
+            return Err(PublishError::Invalid("duplicate staged AssetId"));
+        }
+        self.staged.insert(asset, (descriptor, None));
         Ok(())
     }
 
@@ -1071,10 +1165,20 @@ impl PublishTransaction {
         // immutable blob phase, recovery can identify the orphaned output as a
         // transaction and leave it to reachability GC instead of losing the
         // publication's intent.
-        for (asset, (descriptor, bytes)) in &self.staged {
-            let hash = self.store.cas.put(bytes)?;
-            if hash != descriptor.content_hash {
-                return Err(PublishError::DescriptorMismatch(*asset));
+        for (asset, (descriptor, payload)) in &self.staged {
+            match payload {
+                Some(bytes) => {
+                    let hash = self.store.cas.put(bytes)?;
+                    if hash != descriptor.content_hash {
+                        return Err(PublishError::DescriptorMismatch(*asset));
+                    }
+                }
+                None => {
+                    let length = self.store.cas.verify(descriptor.content_hash)?;
+                    if length != descriptor.byte_len {
+                        return Err(PublishError::DescriptorMismatch(*asset));
+                    }
+                }
             }
         }
 
@@ -1157,8 +1261,8 @@ impl PublishTransaction {
 /// Verifies that the manifest being published contains a complete, acyclic
 /// closure for every staged artifact. This runs before the first CAS write so
 /// invalid revisions cannot create blobs as a side effect of validation.
-fn validate_dependency_closure(
-    staged: &BTreeMap<AssetId, (ArtifactDescriptor, Vec<u8>)>,
+fn validate_dependency_closure<T>(
+    staged: &BTreeMap<AssetId, (ArtifactDescriptor, T)>,
 ) -> Result<(), PublishError> {
     let mut artifact_owners = BTreeMap::<ArtifactKey, AssetId>::new();
     let mut descriptors = BTreeMap::<ArtifactKey, &ArtifactDescriptor>::new();
@@ -1316,7 +1420,7 @@ fn decode_manifest(
     let staged = manifest
         .entries
         .iter()
-        .map(|(&asset, descriptor)| (asset, (descriptor.clone(), Vec::new())))
+        .map(|(&asset, descriptor)| (asset, (descriptor.clone(), ())))
         .collect::<BTreeMap<_, _>>();
     validate_dependency_closure(&staged)?;
     if manifest.canonical_bytes() != bytes {

@@ -15,6 +15,9 @@ mod journal;
 
 /// Bounded in-process RuntimeDerived bake scheduling with owned results.
 pub mod bake;
+/// Opt-in entity-owned runtime bake requests and nonblocking App consumption.
+#[cfg(feature = "ecs")]
+pub mod bake_ecs;
 /// Immutable, content-addressed artifact byte storage.
 pub mod cas;
 /// Persistent local derived-data descriptor index.
@@ -70,19 +73,24 @@ pub mod virtual_geometry_payload;
 
 pub use bake::{
     BakeDescriptor, BakeError, BakeHandle, BakeKernel, BakeKernelDispatch, BakeKernelRegistry,
-    BakeRequest, BakeResult, BakeService, BakeServiceConfigError, CancellationToken,
-    DirtyBakeError, InvalidRequest, KernelDispatchError, KernelError, KernelRegistryError,
-    RuntimeCacheConfig, RuntimeCacheStats, StableInputKey,
+    BakeRequest, BakeResult, BakeService, BakeServiceConfigError, BakeSubscriptionLimits,
+    CancellationToken, DirtyBakeError, InvalidRequest, KernelDispatchError, KernelError,
+    KernelRegistryError, RuntimeCacheConfig, RuntimeCacheStats, StableInputKey,
 };
-pub use cas::{CasError, CasSweepReport, ContentAddressedStore};
+#[cfg(feature = "ecs")]
+pub use bake_ecs::{
+    BakeEcsConfig, BakeEcsConfigError, BakeEcsError, BakeEcsFrame, BakeEcsPlugin, BakeOutput,
+    BakeRequestComponent, BakeRevision, BakeRuntime, BakeState, BakeStatus,
+};
+pub use cas::{CasError, CasSweepReport, CasWriteResult, CasWriter, ContentAddressedStore};
 pub use ddc::{Ddc, DdcCapacity, DdcError, DdcEviction, DerivedDataCache, LocalDdc};
 pub use dirty::{
     BuildInputSnapshot, DirtySet, DirtySetError, InvalidationPlan, InvalidationReason,
     ProfileFieldChange, RebuildExplanationError,
 };
 pub use executor::{
-    ArtifactSpec, BuildExecution, BuildExecutionError, BuildExecutor, CommittedBuildInputs,
-    DeterminismDifference,
+    ArtifactSpec, BuildExecution, BuildExecutionError, BuildExecutor, BuildOutputMemoryStats,
+    CommittedBuildInputs, DeterminismDifference,
 };
 pub use graph::{BuildError, BuildGraph, BuildOutputs};
 pub use hash::{derive_artifact_key, ArtifactKeyInputs, HashError};
@@ -116,7 +124,8 @@ pub use runtime_patch::{
 pub use shader_package::{ShaderPackageAsset, ShaderPackageAssetError};
 pub use source::{SourceError, SourceIdentity, SourceSnapshot};
 pub use transaction::{
-    PublishError, PublishTransaction, PublishedManifest, RevisionStore, TransactionState,
+    BuildOutputLease, PublishError, PublishTransaction, PublishedManifest, RevisionStore,
+    TransactionState,
 };
 pub use types::{
     ArtifactDescriptor, ArtifactKey, ArtifactStorageClass, AssetId, BuildRevision, ContentHash,

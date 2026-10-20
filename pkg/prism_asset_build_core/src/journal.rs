@@ -8,7 +8,7 @@
 
 use crate::types::{BuildRevision, ContentHash, TransactionId};
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 const FILE_MAGIC: &[u8] = b"PRISM-TXN-JNL\0\x02";
@@ -42,6 +42,152 @@ pub(crate) enum JournalRecord {
         manifest_hash: ContentHash,
         publication_hash: Option<ContentHash>,
     },
+}
+
+/// Maximum frozen journal prefix admitted by read-only evidence queries.
+const MAX_QUERY_JOURNAL_BYTES: u64 = 256 * 1024 * 1024;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct CommittedBinding {
+    pub id: TransactionId,
+    pub manifest_hash: ContentHash,
+    pub previous_revision: Option<BuildRevision>,
+    pub publication_hash: Option<ContentHash>,
+}
+
+/// Reads existing transaction evidence without initialization or recovery.
+/// Memory is constant and the frozen prefix bounds work even during appends.
+/// An incomplete final frame cannot establish commitment and is never repaired.
+/// Legacy records have no reliable transaction pairing and are rejected.
+pub(crate) fn read_committed_binding(
+    root: &Path,
+    target: BuildRevision,
+) -> io::Result<Option<CommittedBinding>> {
+    let invalid = |message| io::Error::new(io::ErrorKind::InvalidData, message);
+    let file = File::open(root.join("transactions/journal.bin"))?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.len() > MAX_QUERY_JOURNAL_BYTES {
+        return Err(invalid(
+            "journal is not a regular file or exceeds 256 MiB admission limit",
+        ));
+    }
+    let mut reader = io::BufReader::new(file.take(metadata.len()));
+    let mut header = vec![0; FILE_MAGIC.len()];
+    reader.read_exact(&mut header)?;
+    if header != FILE_MAGIC {
+        return Err(invalid("invalid transaction journal header"));
+    }
+    let mut prepared: Option<CommittedBinding> = None;
+    let mut committed = None;
+    loop {
+        let mut header = [0; FRAME_HEADER_LEN];
+        match reader.read_exact(&mut header) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => break,
+            Err(error) => return Err(error),
+        }
+        if &header[..4] != FRAME_MAGIC
+            || u32::from_le_bytes(header[4..].try_into().unwrap()) as usize != PAYLOAD_LEN
+        {
+            return Err(invalid(
+                "journal record has no supported transaction binding",
+            ));
+        }
+        let mut frame = [0; PAYLOAD_LEN + CHECKSUM_LEN];
+        match reader.read_exact(&mut frame) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => break,
+            Err(error) => return Err(error),
+        }
+        let payload = &frame[..PAYLOAD_LEN];
+        if ContentHash::digest(payload).0 != frame[PAYLOAD_LEN..] {
+            return Err(invalid("transaction journal checksum mismatch"));
+        }
+        let record = decode_payload(payload)?;
+        if encode_payload(record) != payload {
+            return Err(invalid("noncanonical transaction journal record"));
+        }
+        let (revision, binding, terminal) = match record {
+            JournalRecord::Prepare {
+                transaction_id,
+                revision,
+                expected_current,
+                manifest_hash,
+                publication_hash,
+            } => {
+                if expected_current.map_or(revision.0 != 0, |previous| {
+                    previous.0.checked_add(1) != Some(revision.0)
+                }) {
+                    return Err(invalid("invalid journal baseline revision"));
+                }
+                (
+                    revision,
+                    CommittedBinding {
+                        id: transaction_id,
+                        manifest_hash,
+                        previous_revision: expected_current,
+                        publication_hash,
+                    },
+                    None,
+                )
+            }
+            JournalRecord::Commit {
+                transaction_id,
+                revision,
+                manifest_hash,
+                publication_hash,
+            } => (
+                revision,
+                CommittedBinding {
+                    id: transaction_id,
+                    manifest_hash,
+                    previous_revision: None,
+                    publication_hash,
+                },
+                Some(true),
+            ),
+            JournalRecord::Abort {
+                transaction_id,
+                revision,
+                manifest_hash,
+                publication_hash,
+            } => (
+                revision,
+                CommittedBinding {
+                    id: transaction_id,
+                    manifest_hash,
+                    previous_revision: None,
+                    publication_hash,
+                },
+                Some(false),
+            ),
+        };
+        if revision != target {
+            continue;
+        }
+        if committed.is_some() {
+            return Err(invalid("journal changes an already committed revision"));
+        }
+        match terminal {
+            None if prepared.is_none() => prepared = Some(binding),
+            Some(commit) => {
+                let baseline = prepared
+                    .take()
+                    .ok_or_else(|| invalid("journal terminal record has no prepare"))?;
+                if baseline.id != binding.id
+                    || baseline.manifest_hash != binding.manifest_hash
+                    || baseline.publication_hash != binding.publication_hash
+                {
+                    return Err(invalid("journal terminal record differs from prepare"));
+                }
+                if commit {
+                    committed = Some(baseline);
+                }
+            }
+            _ => return Err(invalid("duplicate journal prepare")),
+        }
+    }
+    Ok(committed)
 }
 
 #[derive(Clone, Debug)]

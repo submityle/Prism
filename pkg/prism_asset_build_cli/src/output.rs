@@ -29,6 +29,8 @@ pub enum CommandResult {
     Patch(PatchResult),
     Inspect(InspectResult),
     Why(RebuildExplanationResult),
+    Graph(crate::query::GraphResult),
+    Diff(crate::query::DiffResult),
     Help { help: String },
 }
 
@@ -534,6 +536,8 @@ impl CommandResult {
                 writeln!(out, "target_manifest_hash={}", result.target_manifest_hash)?;
             }
             Self::Help { help } => writeln!(out, "{help}")?,
+            Self::Graph(result) => result.write_human(out)?,
+            Self::Diff(result) => result.write_human(out)?,
         }
         Ok(())
     }

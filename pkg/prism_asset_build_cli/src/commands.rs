@@ -28,5 +28,7 @@ pub fn run(command: Command) -> Result<CommandResult, CommandError> {
         Command::Validate(command) => pipeline::validate(command).map(CommandResult::Validate),
         Command::Inspect(command) => pipeline::inspect(command.store).map(CommandResult::Inspect),
         Command::Why(command) => pipeline::why(command).map(CommandResult::Why),
+        Command::Graph(command) => crate::query::graph(command).map(CommandResult::Graph),
+        Command::Diff(command) => crate::query::diff(command).map(CommandResult::Diff),
     }
 }

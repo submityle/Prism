@@ -24,6 +24,8 @@ pub enum Command {
     Validate(Validate),
     Inspect(Inspect),
     Why(Why),
+    Graph(Graph),
+    Diff(Diff),
 }
 
 impl Command {
@@ -37,6 +39,8 @@ impl Command {
             Self::Validate(_) => "validate",
             Self::Inspect(_) => "inspect",
             Self::Why(_) => "why",
+            Self::Graph(_) => "graph",
+            Self::Diff(_) => "diff",
         }
     }
 }
@@ -193,4 +197,37 @@ pub struct Why {
     /// committed build revision whose rebuild explanation should be read
     #[argh(option)]
     pub revision: u64,
+}
+
+/// Query a committed dependency graph (manifest <=64 MiB, journal <=256 MiB).
+#[derive(FromArgs)]
+#[argh(subcommand, name = "graph")]
+pub struct Graph {
+    /// existing local revision store directory (opened read-only)
+    #[argh(option)]
+    pub store: PathBuf,
+    /// committed build revision
+    #[argh(option)]
+    pub revision: u64,
+    /// select this decimal u128 AssetId and its transitive dependencies
+    #[argh(option)]
+    pub asset_id: Option<u128>,
+    /// select transitive dependents instead; requires --asset-id
+    #[argh(switch)]
+    pub reverse: bool,
+}
+
+/// Compare committed descriptors (manifest <=64 MiB, journal <=256 MiB).
+#[derive(FromArgs)]
+#[argh(subcommand, name = "diff")]
+pub struct Diff {
+    /// existing local revision store directory (opened read-only)
+    #[argh(option)]
+    pub store: PathBuf,
+    /// base committed build revision
+    #[argh(option)]
+    pub base_revision: u64,
+    /// target committed revision; equal and older revisions are supported
+    #[argh(option)]
+    pub target_revision: u64,
 }

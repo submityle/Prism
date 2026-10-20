@@ -14,7 +14,49 @@
 - 参考形态：Unreal Asset Registry / Cook / DDC / IoStore、Unity Importer / Addressables、Bazel/Nix 内容寻址、DirectStorage/GDeflate、现代虚拟纹理与虚拟几何流水线
 - 关联文档：`docs/prism_asset_design_zh.md`、`docs/prism_material_pipeline_design_zh.md`、`docs/prism_rendering_architecture_zh.md`、`docs/prism_platform_design_zh.md`、`docs/prism_derived_data_contract_zh.md`（派生数据契约登记表）
 
-## 实施状态（2026-10-20）
+## 实施状态（2026-10-21）
+
+本节按能力边界验收；下方日期较早的记录保留为历史证据，同一能力以本段最新边界
+为准。新增的本地实现不代表本文全部目标已经交付。
+
+- **构建输出生命周期**：`BuildExecutor` 在消费者 wave 全部退出后释放不再需要的
+  DAG 输入，叶节点输出落 CAS 后不再保留到事务提交；事务通过 `stage_existing`
+  仅保存 descriptor，提交时流式复核完整 CAS hash 和精确长度。跨进程共享输出
+  lease 覆盖候选 CAS 写入到发布/失败，GC 先尝试独占 lease，遇到活跃 build
+  立即延期，避免与 publication lock 形成等待环。`BuildOutputMemoryStats` 只计
+  完成 wave 后的协调器输出 frontier，排除 worker 缓冲和 processor heap，不能
+  据此声称满足进程峰值内存预算。回归入口为 `tests/output_lifetime.rs` 和
+  `tests/cas_reference_publication.rs`。
+- **CAS 流式输出**：`ContentAddressedStore::begin_write(max_bytes)` 返回实现
+  `Write` 的 `CasWriter`；只按实际写入字节更新 BLAKE3/长度，越界、溢出和写入
+  失败使 writer 永久失败并释放临时文件；`finish` 同步文件、原子发布、校验去重
+  或修复损坏同名 blob，并同步目录。`tests/cas_streaming.rs` 覆盖分块、空输出、
+  中止、失败和并发发布。该 API 尚未把 `Processor::process -> Vec<u8>` 升级
+  为完整流式 Processor SDK；低层调用方仍负责与 GC 协调。
+- **RuntimeDerived ECS**：可选 `ecs` feature 的 `BakeEcsPlugin` 已将生命周期
+  hook、有限队列、每帧 admission/completion 配额和非阻塞结果消费接入 App。
+  请求实例独立于语义 revision；替换、取消、移除和 despawn 拒绝迟到结果，失败
+  保留最后成功输出。服务同时限制全部 live handles 和单次共享执行的订阅数，
+  已完成/已取消但尚未 drop 的 handle 仍占配额。回归入口为 `tests/bake_ecs.rs`
+  和 `tests/bake_subscriptions.rs`。这交付了 ECS 结果消费，实际 Image/材质/场景
+  等消费者、渲染采样和编辑器预览仍须分别验收。
+- **只读图查询与差异**：CLI 已增加 `graph`/`diff`，与 `why` 共用持久化
+  Prepare/Commit 绑定读取；历史查询不依赖 CURRENT，不初始化 store/DDC，
+  不恢复或截断 journal。Manifest admission 为 64 MiB、冻结 journal prefix
+  为 256 MiB；损坏、非 canonical、孤立或错配记录拒绝读取。graph 保留有序
+  dependency slot，diff 复用核心 Patch 规划并保留原 revision 身份。它们不是
+  通用 Cook、图形化 Build Monitor 或逐节点事件流。
+
+完整 EDL、实际纹理/VT/VG 流送消费者、编辑态资产/重导入、完整 Processor SDK、
+动态文件依赖、通用平台 Cook、远程 CAS/Worker、发行服务和规模性能验收仍未完成。
+
+2026-10-21 本地回归：`cargo test -j 1 -p prism_asset_build_core --features ecs
+--quiet` 共 299 项通过（162 项单元、137 项集成），0 失败、0 忽略；CLI
+`cargo test -j 1 -p prism_asset_build_cli --quiet` 共 51 项通过，0 失败、0 忽略。
+核心包含 ECS 16 项、订阅容量 9 项、CAS 流式输出 13 项、CAS 引用发布 8 项和
+输出生命周期 5 项；CLI 包含 graph/diff 10 项。命令使用单独临时 target、关闭
+debug info 和 incremental；这些是本地正确性证据，不是全 workspace、硬件
+流送或跨平台规模验收。
 
 运行时共享加载的等待图已补齐独立根请求间的 cycle gate，覆盖普通依赖、直接
 label → source 和 labeled 输出依赖；flight 结束按双向索引清理边。五项有界、
@@ -134,7 +176,7 @@ GPU 常驻范围输出和批量 dispatch，feedback/page-table 闭环仍未完�
 
 本文的 M0/M1…路线图是验收目标，不代表这些能力已经存在；只有有代码、测试和运行时对接的切片才可标为完成。
 
-### 可执行验收矩阵（2026-10-20）
+### 可执行验收矩阵（2026-10-21）
 
 补充状态（2026-10-16）：`prism_asset_build_core::release` 已增加持久化 `TrustPolicy`/`ReleaseTrustStore`，包含公钥派生 key-id、严格 canonical 编解码与校验和、key 添加/轮换/撤销、最低 revision、防止撤销 key 恢复、原子替换和 stale-writer 拒绝；CLI `validate --trust-policy-file` 已接入该持久化策略，并覆盖成功、撤销 key 和互斥参数回归。`provenance.rs` 与 CLI `provenance.bin` 已绑定并复核当前本地可见的 Manifest/Artifact/Publication/Container 事实。远程信任根、密钥托管、外部源码/工具链/Worker 证明和完整发行服务仍未完成。
 
@@ -145,7 +187,7 @@ GPU 常驻范围输出和批量 dispatch，feedback/page-table 闭环仍未完�
 | Artifact 身份、确定性 DAG 规划与处理器执行 | 已实现（本地核心切片） | `prism_asset_build_core/src/hash.rs`、`graph.rs`；测试 `recipe_key_is_deterministic_and_all_declared_inputs_matter`、`topological_order_is_stable_across_insertion_orders`、`reports_missing_dependencies`、`reports_cycles_with_stable_job_ids`、`executes_real_transforms_and_preserves_declared_input_order` | 完整导入插件协议、字段级失效分析、超大图/百万资产规模证据未完成 |
 | DAG wave 并行 | 已实现（BuildGraph 层） | `graph.rs`；`parallel_execution_matches_serial_outputs`、`parallel_execution_reports_smallest_failed_job_in_wave`、`parallel_execution_rejects_zero_concurrency`、`parallel_execution_with_limit_matches_serial_outputs` | 该 API 只执行 DAG processor，不负责 DDC/CAS/Revision 发布 |
 | BuildExecutor 并行执行 | 已实现（本地 ready-wave 切片） | `executor.rs` 的 `execute_parallel` / `execute_parallel_with_limit`；`tests/parallel_executor.rs` 的 7 项专项测试覆盖混合 DAG 串并行 Manifest/CAS/descriptor 等价、两种处理器放行顺序、真实并发峰值限流、重开 DDC 命中、损坏 CAS 选择性重建、错误/panic 不发布、按 JobId 选错及零并发无副作用；`executor/wave_results.rs` 对三个结果的全部六种完成顺序排列独立验证按 JobId 归约 | 不代表跨进程/远程调度、十万节点内存有界或大规模吞吐/延迟达标；处理器放行顺序不等同于线程实际完成顺序 |
-| RuntimeDerived 进程内 BakeService | 已实现（独立本地调度切片） | `pkg/prism_asset_build_core/src/bake.rs`；`tests/bake.rs` 的 15 项测试覆盖有界 admission、确定性 key/descriptor、取消发布竞态、kernel error/panic、RAII gate 恢复、并发峰值、成功结果缓存、entry/byte 容量、确定性驱逐、失败/取消不污染缓存、kernel registry 和重复请求合并；`tests/dirty_bake.rs` 的 3 项测试覆盖 dirty DAG 选择、重复请求、缓存、失败与取消；`7a8b26eed`、`19f3980c7` | 当前是有界 `prism_tasks::TaskPool` + owned memory result，尚未接入 ECS/渲染/编辑器消费、CAS/DDC/Manifest 或完整 RuntimeDerived 消费链 |
+| RuntimeDerived 进程内 BakeService | 已实现（本地调度与 ECS 结果消费切片） | `src/bake.rs`、可选 `ecs` 的 `src/bake_ecs.rs`；`tests/bake.rs`、`dirty_bake.rs`、`bake_subscriptions.rs`、`bake_ecs.rs` 覆盖 admission、确定性 key、共享执行、订阅容量、取消、失败、缓存、每帧消费配额、独立请求实例、替换/移除/despawn 和 last-good 保留 | 实际 Image/材质/场景消费者、渲染采样和编辑器预览仍待验收；RuntimeDerived 不进入离线 CAS/DDC/Manifest |
 | DirtySet 增量 BuildExecutor | 已实现（本地增量执行切片） | `pkg/prism_asset_build_core/src/executor.rs`；`tests/incremental_executor.rs` 的 8 项测试覆盖串行/并行/资源预算/双跑入口、直接变更的后继闭包、未受影响 DDC/CAS 复用、未知 job 拒绝、空 dirty set、失败不发布和串并行等价；`BakeService::submit_dirty` 另有 `tests/dirty_bake.rs` 的 3 项测试覆盖稳定选择、重复请求合并、缓存、失败与取消；commit `19f3980c7` | 仍未接入 ECS/渲染/编辑器消费、远程调度或大规模性能基准 |
 | 双跑确定性发布门禁 | 已实现（本机同进程切片） | `executor/determinism.rs`、`BuildExecutor::execute_verified_with_limit`；`tests/determinism_gate.rs` 的 7 项测试证明冷/持久 warm DDC 均逐节点执行两次、不记 cache hit、相同有序依赖、串并行等价、差异位置/长度/hash 诊断、第二次错误/panic 拒绝且不发布、失败候选不提前落 CAS/DDC；`prism_asset_build_cli/tests/determinism.rs` 对 `build/import --verify-determinism` 各有冷/普通 warm/强制 warm 完整命令回归 | 不隔离处理器外部状态；不证明跨进程/跨机器/跨工具链可复现，也不把历史 DDC 内容当作本次对照。成功节点可留下有效缓存，不承诺全图缓存回滚 |
 | 本地 CAS、DDC 与 BuildExecutor 缓存校验 | 部分实现 | `cas.rs`、`ddc.rs`、`executor.rs`；`detects_corruption_on_read`、`persists_and_restores_across_multiple_opens`、`ddc_hit_skips_processor_and_publishes_next_revision`、`corrupt_cas_blob_is_rebuilt_instead_of_returned_as_a_hit`、`concurrent_threads_merge_distinct_writes_without_lost_updates`、`readers_only_observe_complete_published_indexes` 和 DDC 容量驱逐回归测试；DDC 稳定锁文件通过 `fs4` 在 Unix/Windows 提供排他 read-modify-write 窗口 | 分层 DDC/L0–L3、隐式 recency policy、远端 CAS、跨机器协调、网络文件系统一致性和大规模性能证据未完成 |
@@ -594,7 +636,7 @@ begin_output
 
 ### 6.6 Bake Kernel 与两种调度
 
-状态补记（2026-10-16）：`7a8b26eed` 已补齐 BakeService 的 caller-owned stable kernel registry、成功结果的有界 process-local runtime cache、重复请求合并和确定性容量驱逐；`06da84996` 进一步把经过 DAG 校验的 `DirtySet` 后继闭包接入 BuildExecutor，`19f3980c7` 再补齐 `BakeService::submit_dirty` 的稳定选择与有界提交。该切片尚未接入 ECS/渲染/编辑器消费、远程调度或大规模性能基准。
+状态补记（2026-10-21）：`7a8b26eed` 已补齐 BakeService 的 caller-owned stable kernel registry、成功结果的有界 process-local runtime cache、重复请求合并和确定性容量驱逐；`06da84996` 把经过 DAG 校验的 `DirtySet` 后继闭包接入 BuildExecutor，`19f3980c7` 补齐 `BakeService::submit_dirty` 的稳定选择与有界提交。新增 `BakeEcsPlugin` 交付实体生命周期驱动的有限队列和非阻塞结果消费；实际资产与渲染/编辑器消费者、远程调度和大规模性能基准仍需独立验收。
 
 算法与调度分离，是“源资产烘焙”与“场景派生烘焙”收敛为一条线的关键：
 

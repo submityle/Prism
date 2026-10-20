@@ -11,8 +11,8 @@ use std::process::{Command, Output};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const LOGICAL_PATH: &str = "textures/events.png";
-const COMMANDS: [&str; 8] = [
-    "plan", "import", "build", "package", "patch", "validate", "inspect", "why",
+const COMMANDS: [&str; 10] = [
+    "plan", "import", "build", "package", "patch", "validate", "inspect", "why", "graph", "diff",
 ];
 
 struct Fixture {

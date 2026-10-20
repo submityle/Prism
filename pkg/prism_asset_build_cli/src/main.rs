@@ -11,6 +11,7 @@ mod mapping;
 mod output;
 mod patch;
 mod pipeline;
+mod query;
 
 use argh::FromArgs;
 use std::ffi::OsString;
@@ -103,6 +104,8 @@ fn command_hint(arguments: &[OsString]) -> Option<&'static str> {
         "validate" => Some("validate"),
         "inspect" => Some("inspect"),
         "why" => Some("why"),
+        "graph" => Some("graph"),
+        "diff" => Some("diff"),
         _ => None,
     }
 }

@@ -49,6 +49,9 @@ pub struct CasSweepReport {
     pub retained: usize,
     /// True when an in-flight publication prevented a safe sweep.
     pub deferred_due_to_pending_transaction: bool,
+    /// A running build holds a shared output lease, protecting not-yet-
+    /// published CAS blobs even before its publication journal Prepare.
+    pub deferred_due_to_active_build: bool,
 }
 
 /// Local immutable content-addressed storage. It verifies on both insertion
@@ -56,6 +59,166 @@ pub struct CasSweepReport {
 #[derive(Clone, Debug)]
 pub struct ContentAddressedStore {
     root: PathBuf,
+}
+
+/// The identity and exact length of a successfully persisted CAS stream.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CasWriteResult {
+    pub content_hash: ContentHash,
+    pub byte_len: u64,
+}
+
+/// A bounded, incrementally hashed CAS stream. Dropping it discards unpublished
+/// bytes. A failed write or flush poisons the stream, so `finish` cannot publish
+/// a successful prefix. Interrupted system calls are retried internally.
+///
+/// This low-level writer does not acquire a revision-store output lease. The
+/// caller must coordinate GC until the result has been published or discarded.
+#[must_use = "finish the writer to publish its bytes, or drop it to discard them"]
+pub struct CasWriter {
+    store: ContentAddressedStore,
+    temporary: Option<tempfile::NamedTempFile>,
+    hasher: blake3::Hasher,
+    byte_len: u64,
+    max_bytes: u64,
+    failure: Option<io::Error>,
+}
+
+impl CasWriter {
+    fn check_writable(&self) -> io::Result<()> {
+        match &self.failure {
+            Some(error) => Err(io::Error::new(error.kind(), error.to_string())),
+            None => Ok(()),
+        }
+    }
+
+    fn poison(&mut self, error: io::Error) -> io::Error {
+        self.failure = Some(io::Error::new(error.kind(), error.to_string()));
+        // NamedTempFile closes and unlinks the incomplete output immediately.
+        drop(self.temporary.take());
+        error
+    }
+
+    /// Flushes and syncs the complete stream before publishing its immutable
+    /// identity. Existing content is verified with the store's fixed buffer;
+    /// a corrupt occupant is atomically repaired as in `put`.
+    pub fn finish(mut self) -> Result<CasWriteResult, CasError> {
+        self.flush()?;
+        if let Err(error) = self
+            .temporary
+            .as_ref()
+            .expect("unpoisoned writer owns its temporary file")
+            .as_file()
+            .sync_all()
+        {
+            return Err(self.poison(error).into());
+        }
+        let result = CasWriteResult {
+            content_hash: ContentHash(*self.hasher.finalize().as_bytes()),
+            byte_len: self.byte_len,
+        };
+        let path = self.store.blob_path(result.content_hash);
+        let parent = path.parent().expect("blob path always has parent");
+        fs::create_dir_all(parent)?;
+        let temporary = self
+            .temporary
+            .take()
+            .expect("unpoisoned writer owns its temporary file");
+        match temporary.persist_noclobber(&path) {
+            Ok(file) => drop(file),
+            Err(error) => {
+                let temporary = error.file;
+                if error.error.kind() != io::ErrorKind::AlreadyExists {
+                    return Err(CasError::Io(error.error));
+                }
+                match self.store.verify(result.content_hash) {
+                    Ok(length) if length == result.byte_len => drop(temporary),
+                    Ok(_) => {
+                        return Err(CasError::Io(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "existing CAS blob has an unexpected length",
+                        )));
+                    }
+                    Err(CasError::Corrupt { .. }) => {
+                        // Match put's repair policy. A concurrent repair can
+                        // only replace this path with the same valid identity.
+                        let file = temporary
+                            .persist(&path)
+                            .map_err(|error| CasError::Io(error.error))?;
+                        drop(file);
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+        sync_directory(parent)?;
+        sync_directory(self.store.root())?;
+        Ok(result)
+    }
+}
+
+impl Write for CasWriter {
+    /// Rejects an entire call that would exceed the budget, poisoning the
+    /// writer even if earlier calls succeeded. Only bytes accepted by the
+    /// underlying file write advance the hash and exact length.
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.check_writable()?;
+        let requested_len = u64::try_from(bytes.len())
+            .ok()
+            .and_then(|count| self.byte_len.checked_add(count));
+        let Some(requested_len) = requested_len else {
+            return Err(self.poison(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "CAS write length overflow",
+            )));
+        };
+        if requested_len > self.max_bytes {
+            return Err(self.poison(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "CAS write exceeds maximum byte budget",
+            )));
+        }
+        let count = loop {
+            match self
+                .temporary
+                .as_mut()
+                .expect("unpoisoned writer owns its temporary file")
+                .as_file_mut()
+                .write(bytes)
+            {
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(self.poison(error)),
+                Ok(0) if !bytes.is_empty() => {
+                    return Err(self.poison(io::Error::new(
+                        io::ErrorKind::WriteZero,
+                        "CAS file write made no progress",
+                    )));
+                }
+                Ok(count) => break count,
+            }
+        };
+        self.hasher.update(&bytes[..count]);
+        // count <= bytes.len(), whose addition was checked before the write.
+        self.byte_len += count as u64;
+        Ok(count)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.check_writable()?;
+        loop {
+            match self
+                .temporary
+                .as_mut()
+                .expect("unpoisoned writer owns its temporary file")
+                .as_file_mut()
+                .flush()
+            {
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(self.poison(error)),
+                Ok(()) => return Ok(()),
+            }
+        }
+    }
 }
 
 impl ContentAddressedStore {
@@ -74,13 +237,30 @@ impl ContentAddressedStore {
         self.root.join(&hex[..2]).join(&hex[2..])
     }
 
+    /// Starts a stream with an explicit maximum payload length. Zero permits
+    /// an empty artifact. The temporary file is on the CAS filesystem, outside
+    /// the hash-shaped blob layout, and is not visible to readers or sweeps.
+    pub fn begin_write(&self, max_bytes: u64) -> Result<CasWriter, CasError> {
+        let temporary = tempfile::Builder::new()
+            .prefix(".cas-write-")
+            .tempfile_in(&self.root)?;
+        Ok(CasWriter {
+            store: self.clone(),
+            temporary: Some(temporary),
+            hasher: blake3::Hasher::new(),
+            byte_len: 0,
+            max_bytes,
+            failure: None,
+        })
+    }
+
     pub fn put(&self, bytes: &[u8]) -> Result<ContentHash, CasError> {
         let hash = ContentHash::digest(bytes);
         let path = self.blob_path(hash);
         let parent = path.parent().expect("blob path always has parent");
         fs::create_dir_all(parent)?;
         if path.exists() {
-            match self.read(hash) {
+            match self.verify(hash) {
                 Ok(_) => return Ok(hash),
                 Err(CasError::Corrupt { .. }) => {
                     // The expected content hash names this path, so a corrupt
@@ -115,7 +295,7 @@ impl ContentAddressedStore {
                 Ok(()) => Ok(()),
                 Err(_e) if path.exists() => {
                     // A concurrent writer may have won. Never trust it without verification.
-                    self.read(hash)?;
+                    self.verify(hash)?;
                     let _ = fs::remove_file(&temp);
                     Ok(())
                 }
@@ -144,6 +324,36 @@ impl ContentAddressedStore {
             });
         }
         Ok(bytes)
+    }
+
+    /// Verifies a complete blob with a fixed 64 KiB buffer, returning its exact
+    /// length. Publication and insertion collisions need no owned payload.
+    pub fn verify(&self, hash: ContentHash) -> Result<u64, CasError> {
+        let mut file = File::open(self.blob_path(hash))?;
+        let mut hasher = blake3::Hasher::new();
+        let mut buffer = [0u8; 64 * 1024];
+        let mut length = 0u64;
+        loop {
+            let count = match file.read(&mut buffer) {
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                result => result?,
+            };
+            if count == 0 {
+                break;
+            }
+            hasher.update(&buffer[..count]);
+            length = length.checked_add(count as u64).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "CAS blob length overflow")
+            })?;
+        }
+        let actual = ContentHash(*hasher.finalize().as_bytes());
+        if actual != hash {
+            return Err(CasError::Corrupt {
+                expected: hash,
+                actual,
+            });
+        }
+        Ok(length)
     }
 
     /// Removes old blobs that are not in `roots`.
@@ -323,6 +533,73 @@ mod tests {
         fs::write(cas.blob_path(hash), b"corrupted bytes").unwrap();
         assert!(matches!(cas.read(hash), Err(CasError::Corrupt { .. })));
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn file_write_failure_poisons_stream_and_discards_successful_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let cas = ContentAddressedStore::open(dir.path()).unwrap();
+        let mut writer = cas.begin_write(64).unwrap();
+        writer.write_all(b"successful prefix").unwrap();
+        let path = writer.temporary.as_ref().unwrap().path().to_path_buf();
+        // Replacing the owned descriptor with a read-only one deterministically
+        // makes the next real File::write fail, without disk or permission races.
+        let read_only = File::open(&path).unwrap();
+        *writer.temporary.as_mut().unwrap().as_file_mut() = read_only;
+        let failure = writer.write(b"rejected suffix").unwrap_err();
+        assert_ne!(failure.kind(), io::ErrorKind::Interrupted);
+        assert!(!path.exists());
+        assert_eq!(writer.flush().unwrap_err().kind(), failure.kind());
+        assert_eq!(writer.write(b"retry").unwrap_err().kind(), failure.kind());
+        assert!(matches!(
+            writer.finish(),
+            Err(CasError::Io(error)) if error.kind() == failure.kind()
+        ));
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn stream_length_overflow_poisons_before_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let cas = ContentAddressedStore::open(dir.path()).unwrap();
+        let mut writer = cas.begin_write(u64::MAX).unwrap();
+        // Exercise the u64 boundary without allocating or writing exabytes.
+        writer.byte_len = u64::MAX;
+        let failure = writer.write(b"x").unwrap_err();
+        assert_eq!(failure.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(failure.to_string(), "CAS write length overflow");
+        assert!(matches!(
+            writer.finish(),
+            Err(CasError::Io(error)) if error.kind() == io::ErrorKind::InvalidInput
+        ));
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn streaming_verification_checks_empty_multibuffer_truncated_and_repaired_blobs() {
+        let dir = tempfile::tempdir().unwrap();
+        let cas = ContentAddressedStore::open(dir.path()).unwrap();
+        let empty = cas.put(&[]).unwrap();
+        assert_eq!(cas.verify(empty).unwrap(), 0);
+        let bytes: Vec<_> = (0..(3 * 64 * 1024 + 17))
+            .map(|index| (index % 251) as u8)
+            .collect();
+        let hash = cas.put(&bytes).unwrap();
+        assert_eq!(cas.verify(hash).unwrap(), bytes.len() as u64);
+        assert_eq!(cas.put(&bytes).unwrap(), hash);
+        File::options()
+            .write(true)
+            .open(cas.blob_path(hash))
+            .unwrap()
+            .set_len(64 * 1024)
+            .unwrap();
+        assert!(matches!(cas.verify(hash), Err(CasError::Corrupt { .. })));
+        assert_eq!(cas.put(&bytes).unwrap(), hash);
+        assert_eq!(cas.verify(hash).unwrap(), bytes.len() as u64);
+        let mut corrupt = bytes.clone();
+        *corrupt.last_mut().unwrap() ^= 1;
+        fs::write(cas.blob_path(hash), corrupt).unwrap();
+        assert!(matches!(cas.verify(hash), Err(CasError::Corrupt { .. })));
     }
 
     #[test]

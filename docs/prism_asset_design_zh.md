@@ -845,6 +845,15 @@ NotResident ─▶ Promoting(目标层级,后台解码中) ─▶ Resident(level
 
 ### 13.2 进程内重烘适配（`BakeService`）
 
+2026-10-21 实现边界：`prism_asset_build_core` 可选 `ecs` feature 已提供
+`BakeEcsPlugin`，把有界请求队列、每帧提交/完成配额、非阻塞 polling、取消和
+实体生命周期接入 App；替换请求使用独立实例身份，即使语义 revision 相同也拒绝
+旧实例结果；失败保留最后成功的 `BakeOutput`，移除请求与移除输出由调用方分别
+控制。服务对活跃 handle 和同 job 订阅设独立上限，结果未消费或 handle 未释放
+不会绕过配额。这完成了通用 ECS 结果消费，尚不代表 Image/材质/场景等真实
+资产消费者、GPU 采样或编辑器预览链路已经完成。较早“尚未接入 ECS”的状态
+描述由此收窄为“实际资产与渲染/编辑器消费者尚待验收”。
+
 离线烘焙的处理器、缓存键与 DDC 归 `Prism Asset Build`（其 `Processor` trait 见该文 §6）。本 crate 只保留**进程内调度适配**，供编辑器实时预览与运行时 dirty 重烘调用同一个 Bake Kernel（`DerivationClass::RuntimeDerived`）：
 
 - **同一内核**：适配层不做任何格式解析或算法实现，只负责把场景/资产 IR 喂给 `prism_bake_*` 内核（Asset Build §6.6），并把产物装入本地 runtime cache。

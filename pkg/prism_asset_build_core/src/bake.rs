@@ -11,7 +11,7 @@ use crate::graph::{BuildError, BuildGraph};
 use crate::job::JobId;
 use crate::types::{ArtifactKey, ContentHash};
 use alloc::string::String;
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::fmt;
 use prism_tasks::{Counter, TaskPool};
@@ -476,6 +476,16 @@ pub enum BakeError {
         /// The configured admission limit.
         max_in_flight: usize,
     },
+    /// The service's live-handle budget is full, including undrained results.
+    SubscriptionLimit {
+        /// Maximum live handles across all clones of the service.
+        max_total: usize,
+    },
+    /// One shared execution has reached its live-handle budget.
+    JobSubscriptionLimit {
+        /// Maximum live handles attached to one shared execution.
+        max_per_job: usize,
+    },
     /// Cancellation won before result publication.
     Cancelled,
     /// The injected dispatch seam could not resolve the request kernel.
@@ -499,6 +509,18 @@ impl fmt::Display for BakeError {
                 write!(
                     formatter,
                     "bake service is full (max in flight: {max_in_flight})"
+                )
+            }
+            Self::SubscriptionLimit { max_total } => {
+                write!(
+                    formatter,
+                    "bake subscription budget is full (max total: {max_total})"
+                )
+            }
+            Self::JobSubscriptionLimit { max_per_job } => {
+                write!(
+                    formatter,
+                    "bake job subscription budget is full (max per job: {max_per_job})"
                 )
             }
             Self::Cancelled => formatter.write_str("bake request was cancelled"),
@@ -615,7 +637,8 @@ impl CancellationToken {
     }
 }
 
-/// A submitted bake request. Dropping the handle does not cancel the kernel;
+/// A submitted bake request. Dropping the handle detaches its subscription and
+/// releases its budget, without cancelling the kernel;
 /// call [`Self::cancel`] when cancellation is required. Duplicate requests
 /// share one kernel execution, while each handle receives an independent
 /// cancellation result.
@@ -624,6 +647,8 @@ pub struct BakeHandle {
     subscription: Option<Arc<Subscription>>,
     key: ArtifactKey,
     jobs: Arc<Mutex<BTreeMap<ArtifactKey, Arc<SharedJob>>>>,
+    // Retain admission through delivery until the handle itself is dropped.
+    _subscription_permit: SubscriptionPermit,
 }
 
 impl BakeHandle {
@@ -632,23 +657,34 @@ impl BakeHandle {
         let Some(subscription) = &self.subscription else {
             return false;
         };
+        // Admission and retirement both lock map -> job. No new subscriber can
+        // enter between the last-subscriber check and removal of this job.
+        let mut jobs = self
+            .jobs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if !subscription.cancel() {
             return false;
         }
-        if subscription.job.should_cancel() {
-            subscription.job.control.request_cancel();
-            let mut jobs = self
-                .jobs
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if jobs
+        if subscription.job.cancel_if_unobserved()
+            && jobs
                 .get(&self.key)
                 .is_some_and(|job| Arc::ptr_eq(job, &subscription.job))
-            {
-                jobs.remove(&self.key);
-            }
+        {
+            jobs.remove(&self.key);
         }
         true
+    }
+
+    /// Takes the sole result without waiting for the worker. `None` means it
+    /// is still pending; a disconnected worker is an observable bake error.
+    /// After receiving `Some`, discard this handle rather than polling again.
+    pub fn try_recv(&self) -> Option<Result<BakeResult, BakeError>> {
+        match self.receiver.try_recv() {
+            Ok(result) => Some(result),
+            Err(mpsc::TryRecvError::Empty) => None,
+            Err(mpsc::TryRecvError::Disconnected) => Some(Err(BakeError::WorkerDisconnected)),
+        }
     }
 
     /// Waits for the pool task and returns the sole result message.
@@ -656,6 +692,16 @@ impl BakeHandle {
         self.receiver
             .recv()
             .unwrap_or(Err(BakeError::WorkerDisconnected))
+    }
+}
+
+impl Drop for BakeHandle {
+    fn drop(&mut self) {
+        if let Some(subscription) = self.subscription.take() {
+            subscription.job.unsubscribe(&subscription);
+        }
+        // Deliberately leave the kernel running, even for the final handle.
+        // The permit is released by field drop after detaching the subscriber.
     }
 }
 
@@ -716,12 +762,13 @@ impl Subscription {
 struct SharedJob {
     control: Arc<JobControl>,
     state: Mutex<SharedJobState>,
+    active_subscriptions: Arc<AtomicUsize>,
 }
 
 #[derive(Default)]
 struct SharedJobState {
     completion: Option<Result<BakeResult, BakeError>>,
-    subscribers: Vec<Arc<Subscription>>,
+    subscribers: Vec<Weak<Subscription>>,
 }
 
 impl SharedJob {
@@ -729,42 +776,65 @@ impl SharedJob {
         Arc::new(Self {
             control: Arc::new(JobControl::new()),
             state: Mutex::new(SharedJobState::default()),
+            active_subscriptions: Arc::new(AtomicUsize::new(0)),
         })
     }
 
     fn subscribe(
         self: &Arc<Self>,
         sender: mpsc::Sender<Result<BakeResult, BakeError>>,
-    ) -> Arc<Subscription> {
+        permit: &mut SubscriptionPermit,
+        max_per_job: usize,
+    ) -> Result<Arc<Subscription>, BakeError> {
+        // The caller holds the jobs map throughout admission. Drop only takes
+        // this job lock and never follows it with the map lock.
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !try_increment(&self.active_subscriptions, max_per_job) {
+            return Err(BakeError::JobSubscriptionLimit { max_per_job });
+        }
+        permit.job = Some(Arc::clone(&self.active_subscriptions));
         let subscription = Arc::new(Subscription {
             state: std::sync::atomic::AtomicU8::new(SUBSCRIBER_OPEN),
             sender,
             job: Arc::clone(self),
         });
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(completion) = &state.completion {
             subscription.deliver(completion.clone());
         } else if self.control.is_cancelled() {
             subscription.deliver(Err(BakeError::Cancelled));
         } else {
-            state.subscribers.push(Arc::clone(&subscription));
+            state.subscribers.push(Arc::downgrade(&subscription));
         }
-        subscription
+        Ok(subscription)
     }
 
-    fn should_cancel(&self) -> bool {
+    fn unsubscribe(&self, subscription: &Arc<Subscription>) {
+        let weak = Arc::downgrade(subscription);
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .subscribers
+            .retain(|subscriber| !Weak::ptr_eq(subscriber, &weak));
+    }
+
+    fn cancel_if_unobserved(&self) -> bool {
         let state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.completion.is_none()
+        let unobserved = state.completion.is_none()
             && state
                 .subscribers
                 .iter()
-                .all(|subscription| subscription.state.load(Ordering::Acquire) != SUBSCRIBER_OPEN)
+                .filter_map(Weak::upgrade)
+                .all(|subscription| subscription.state.load(Ordering::Acquire) != SUBSCRIBER_OPEN);
+        if unobserved {
+            self.control.request_cancel();
+        }
+        unobserved
     }
 
     fn complete(&self, result: Result<BakeResult, BakeError>) {
@@ -780,7 +850,56 @@ impl SharedJob {
             std::mem::take(&mut state.subscribers)
         };
         for subscriber in subscribers {
-            subscriber.deliver(result.clone());
+            if let Some(subscriber) = subscriber.upgrade() {
+                subscriber.deliver(result.clone());
+            }
+        }
+    }
+}
+
+/// Limits on retained bake handles, including cancelled handles, completed
+/// results, and cache hits. Clones of one service share the global budget.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BakeSubscriptionLimits {
+    /// Maximum live handles across the service. Cache hits consume this budget.
+    pub max_total: usize,
+    /// Maximum live handles for one shared kernel execution.
+    pub max_per_job: usize,
+}
+
+impl Default for BakeSubscriptionLimits {
+    fn default() -> Self {
+        Self {
+            max_total: 4096,
+            max_per_job: 256,
+        }
+    }
+}
+
+struct SubscriptionPermit {
+    total: Arc<AtomicUsize>,
+    job: Option<Arc<AtomicUsize>>,
+}
+
+impl Drop for SubscriptionPermit {
+    fn drop(&mut self) {
+        if let Some(job) = &self.job {
+            job.fetch_sub(1, Ordering::AcqRel);
+        }
+        self.total.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+fn try_increment(count: &AtomicUsize, limit: usize) -> bool {
+    let mut current = count.load(Ordering::Acquire);
+    loop {
+        if current >= limit {
+            return false;
+        }
+        match count.compare_exchange_weak(current, current + 1, Ordering::AcqRel, Ordering::Acquire)
+        {
+            Ok(_) => return true,
+            Err(observed) => current = observed,
         }
     }
 }
@@ -867,6 +986,8 @@ impl Drop for InFlightPermit {
 pub struct BakeService {
     max_in_flight: usize,
     in_flight: Arc<AtomicUsize>,
+    subscription_limits: BakeSubscriptionLimits,
+    active_subscriptions: Arc<AtomicUsize>,
     dispatch: Arc<dyn BakeKernelDispatch>,
     cache: Arc<RuntimeCache>,
     jobs: Arc<Mutex<BTreeMap<ArtifactKey, Arc<SharedJob>>>>,
@@ -900,6 +1021,21 @@ impl BakeService {
         )
     }
 
+    /// Creates a service with explicit subscription budgets and no cache.
+    /// Kernel dispatch follows the compatibility contract of [`Self::new`].
+    pub fn new_with_subscription_limits(
+        max_in_flight: usize,
+        subscription_limits: BakeSubscriptionLimits,
+        kernel: Arc<dyn BakeKernel>,
+    ) -> Result<Self, BakeServiceConfigError> {
+        Self::new_with_dispatch_and_subscription_limits(
+            max_in_flight,
+            RuntimeCacheConfig::disabled(),
+            subscription_limits,
+            Arc::new(DirectKernelDispatch { kernel }),
+        )
+    }
+
     /// Creates a service with an explicit bounded process-local runtime cache.
     pub fn new_with_cache(
         max_in_flight: usize,
@@ -929,12 +1065,33 @@ impl BakeService {
         cache_config: RuntimeCacheConfig,
         dispatch: Arc<dyn BakeKernelDispatch>,
     ) -> Result<Self, BakeServiceConfigError> {
+        Self::new_with_dispatch_and_subscription_limits(
+            max_in_flight,
+            cache_config,
+            BakeSubscriptionLimits::default(),
+            dispatch,
+        )
+    }
+
+    /// Creates a service with explicit cache, dispatch, and live-handle budgets.
+    /// All constructors without explicit limits use [`BakeSubscriptionLimits::default`].
+    pub fn new_with_dispatch_and_subscription_limits(
+        max_in_flight: usize,
+        cache_config: RuntimeCacheConfig,
+        subscription_limits: BakeSubscriptionLimits,
+        dispatch: Arc<dyn BakeKernelDispatch>,
+    ) -> Result<Self, BakeServiceConfigError> {
         if max_in_flight == 0 {
             return Err(BakeServiceConfigError::ZeroInFlight);
+        }
+        if subscription_limits.max_total == 0 || subscription_limits.max_per_job == 0 {
+            return Err(BakeServiceConfigError::ZeroSubscriptionLimit);
         }
         Ok(Self {
             max_in_flight,
             in_flight: Arc::new(AtomicUsize::new(0)),
+            subscription_limits,
+            active_subscriptions: Arc::new(AtomicUsize::new(0)),
             dispatch,
             cache: Arc::new(RuntimeCache::new(cache_config)),
             jobs: Arc::new(Mutex::new(BTreeMap::new())),
@@ -948,6 +1105,25 @@ impl BakeService {
     #[must_use]
     pub const fn max_in_flight(&self) -> usize {
         self.max_in_flight
+    }
+
+    /// Returns the live-handle admission limits shared by service clones.
+    #[must_use]
+    pub const fn subscription_limits(&self) -> BakeSubscriptionLimits {
+        self.subscription_limits
+    }
+
+    /// Returns currently reserved live-handle slots, including undrained results.
+    #[must_use]
+    pub fn active_subscriptions(&self) -> usize {
+        self.active_subscriptions.load(Ordering::Acquire)
+    }
+
+    // ECS must reject the task runtime's explicitly synchronous fallback before
+    // any frame can invoke a kernel inline.
+    #[cfg(feature = "ecs")]
+    pub(crate) fn runs_inline(&self) -> bool {
+        self.pool.is_single_threaded()
     }
 
     /// Returns the number of currently admitted requests.
@@ -972,6 +1148,18 @@ impl BakeService {
     pub fn submit(&self, request: BakeRequest) -> Result<BakeHandle, BakeError> {
         request.validate().map_err(BakeError::InvalidRequest)?;
         let key = request.request_key();
+        if !try_increment(
+            &self.active_subscriptions,
+            self.subscription_limits.max_total,
+        ) {
+            return Err(BakeError::SubscriptionLimit {
+                max_total: self.subscription_limits.max_total,
+            });
+        }
+        let mut subscription_permit = SubscriptionPermit {
+            total: Arc::clone(&self.active_subscriptions),
+            job: None,
+        };
         let (sender, receiver) = mpsc::channel();
         if let Some(result) = self.cache.get(key) {
             let _ = sender.send(Ok(result));
@@ -980,6 +1168,7 @@ impl BakeService {
                 subscription: None,
                 key,
                 jobs: Arc::clone(&self.jobs),
+                _subscription_permit: subscription_permit,
             });
         }
 
@@ -992,12 +1181,17 @@ impl BakeService {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(job) = jobs.get(&key) {
-            let subscription = job.subscribe(sender);
+            let subscription = job.subscribe(
+                sender,
+                &mut subscription_permit,
+                self.subscription_limits.max_per_job,
+            )?;
             return Ok(BakeHandle {
                 receiver,
                 subscription: Some(subscription),
                 key,
                 jobs: Arc::clone(&self.jobs),
+                _subscription_permit: subscription_permit,
             });
         }
 
@@ -1005,7 +1199,11 @@ impl BakeService {
             max_in_flight: self.max_in_flight,
         })?;
         let job = SharedJob::new();
-        let subscription = job.subscribe(sender);
+        let subscription = job.subscribe(
+            sender,
+            &mut subscription_permit,
+            self.subscription_limits.max_per_job,
+        )?;
         jobs.insert(key, Arc::clone(&job));
         drop(jobs);
 
@@ -1072,6 +1270,7 @@ impl BakeService {
             subscription: Some(subscription),
             key,
             jobs: Arc::clone(&self.jobs),
+            _subscription_permit: subscription_permit,
         })
     }
 
@@ -1147,12 +1346,17 @@ impl BakeService {
 pub enum BakeServiceConfigError {
     /// At least one in-flight slot is required.
     ZeroInFlight,
+    /// Both global and per-job live-handle limits must be nonzero.
+    ZeroSubscriptionLimit,
 }
 
 impl fmt::Display for BakeServiceConfigError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ZeroInFlight => formatter.write_str("max_in_flight must be greater than zero"),
+            Self::ZeroSubscriptionLimit => {
+                formatter.write_str("subscription limits must be greater than zero")
+            }
         }
     }
 }
