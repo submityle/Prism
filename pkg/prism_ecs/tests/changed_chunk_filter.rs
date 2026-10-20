@@ -246,6 +246,64 @@ fn historical_and_wrapping_windows_match_row_tick_oracle() {
 }
 
 #[test]
+fn dirty_query_matches_row_oracle_for_ticks_straddling_u32_wrap() {
+    let (mut world, entities, rpc) = fixture();
+    let component = world.components().id_of::<Big>().unwrap();
+    let query = world.query_filtered::<Entity, Changed<Big>>();
+    let rows = [
+        (0, Tick::new(u32::MAX - 1)),
+        (rpc, Tick::MAX),
+        (2 * rpc, Tick::ZERO),
+        (3 * rpc, Tick::new(1)),
+        (rpc + 1, Tick::new(Tick::MAX_CHANGE_AGE)),
+    ];
+
+    // Exercise the real table chunk summaries and journal while positioning
+    // component ticks on both sides of the u32 wrap boundary.
+    for &(row, tick) in &rows {
+        let location = world.entities().location(entities[row]).unwrap();
+        let column = world
+            .archetypes()
+            .get(location.archetype_id)
+            .unwrap()
+            .table()
+            .column(component)
+            .unwrap();
+        // SAFETY: this test has exclusive access to `world`, and each row is
+        // written exactly once before any query iterator borrows the column.
+        unsafe {
+            *column.changed_tick_ptr(location.row as usize) = tick;
+            (*column.chunk_changed_ptr(location.row as usize)).record(tick);
+        }
+    }
+
+    let boundaries = [
+        Tick::ZERO,
+        Tick::new(1),
+        Tick::new(2),
+        Tick::new(Tick::MAX_CHANGE_AGE),
+        Tick::new(Tick::MAX_CHANGE_AGE + 1),
+        Tick::new(1 << 31),
+        Tick::new(u32::MAX - 1),
+        Tick::MAX,
+    ];
+    for &last in &boundaries {
+        for &now in &boundaries {
+            let expected = entities
+                .iter()
+                .copied()
+                .filter(|&entity| changed::<Big>(&world, entity, last, now))
+                .collect();
+            assert_eq!(
+                sorted(query.iter_with_ticks(&world, last, now).collect()),
+                sorted(expected),
+                "observer window ({last:?}, {now:?}]",
+            );
+        }
+    }
+}
+
+#[test]
 fn sparse_and_nested_or_and_filters_match_row_oracles() {
     let (mut world, mut entities, rpc) = fixture();
     for &index in &[0, rpc + 1, 2 * rpc] {
