@@ -626,14 +626,14 @@ prism_particle_tools  (可选) 图编辑器 / 预览(含着色预览) / 性能 H
 
 | 能力 | 代码位置 | 状态与验证边界 |
 |---|---|---|
-| CPU emitter runtime | `pkg/prism_render_architecture/src/particle/runtime.rs` | 已实现固定容量池、rate/burst、确定性采样、积分/力场、寿命回收及溢出计数；CPU 定向测试通过 |
+| CPU emitter runtime | `pkg/prism_render_architecture/src/particle/runtime.rs` | 已实现固定容量池、rate/burst、确定性采样、积分/力场、寿命回收及溢出计数；本轮无法完成 crate 测试编译，不能据此确认当前测试状态 |
 | `.ember` 二进制资产 | `pkg/prism_render_architecture/src/particle/authoring.rs` | 已实现版本化 little-endian codec、输入校验、迁移模型与 round-trip/损坏输入测试；RON API 已移除 |
-| GPU 仿真与间接绘制切片 | `pkg/prism_render_gpudriven/src/particle.rs` 与 `shaders/particle*.wgsl` | Prism RHI/RenderGraph 上的 pool update、spawn、活跃索引、indirect args 与 quad 绘制；仅代表最小竖切片，不代表全功能 Ember |
+| GPU 仿真与间接绘制切片 | `pkg/prism_render_gpudriven/src/particle.rs` 与 `shaders/particle*.wgsl` | Prism RHI/RenderGraph 上的 pool update、spawn、活跃索引、indirect args 与 quad 绘制；构造前校验设备缓冲/纹理/dispatch 限制，上传校验数值与记录；仅代表最小竖切片，不代表全功能 Ember |
 | 合同/算法模块 | `pkg/prism_render_architecture/src/particle/` | 包含池、发射、模拟、事件、排序/剔除、着色/OIT 等 CPU 合同；纯合同或单算法模块不等于 GPU 生产接线 |
 | ECS/App 生命周期与完整渲染集成 | Prism 粒子运行时/渲染 crate | 尚未形成完整端到端接线；需以实际代码和集成验收逐项完成，不能由本设计文档推定已完成 |
 | 图编译、完整渲染器矩阵、高级求解器及场景服务集成 | 对应 compiler/render/solver 模块 | 本轮 GPU 竖切片未覆盖；当前无可声称完成或已测的实现证据 |
 
-验证记录（2026-10-20）：`prism_render_gpudriven` 的粒子单测通过；`gpu_particle_vertical_slice_matches_reference_and_draws_indirectly` 在 Apple M2/Metal 物理 GPU 上通过，验证了 pool 更新、活跃索引、indirect 参数、CPU reference 对比及实际绘制。该结果仅覆盖此竖切片。当前 `cargo test -p prism_render_architecture --lib particle::runtime` 未能编译：共享工作树中的 `prism_physics_core/src/soft/topology.rs` 有三个 `TopologyTearEvent` 初始化缺少字段，故本轮 CPU runtime 与 verification tests 尚未复验；这不是粒子代码的编译诊断。历史 CPU 测试记录不替代本轮验证。结构化帧预算断言只是设计约束，不是 GPU 毫秒测量。
+验证记录（2026-10-20）：`cargo test -p prism_render_gpudriven --lib particle` 的 5 项测试通过；其中 `gpu_particle_vertical_slice_matches_reference_and_draws_indirectly` 在 Apple M2/Metal 物理 GPU 上通过，验证 pool 更新、活跃索引、indirect 参数、CPU reference 对比及实际绘制。设备资源上限与 simulation 参数校验也有定向测试。该结果仅覆盖此竖切片。当前 `cargo test -p prism_render_architecture --lib particle::runtime` 未能编译：共享工作树中的 `prism_physics_core/src/world.rs` 存在缺失函数/方法及 `BodyHandle: Ord` 错误，因此本轮 CPU runtime 与 verification tests 尚未运行；这不是粒子代码的编译诊断。此前的 CPU 测试记录不替代当前验证。结构化帧预算断言只是设计约束，不是 GPU 毫秒测量。
 
 ---
 

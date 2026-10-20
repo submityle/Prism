@@ -765,8 +765,11 @@ fn gpu_particle_vertical_slice_matches_reference_and_draws_indirectly() {
         spawn_velocity: [2.0, 0.0, 0.0],
     };
     let expected = simulate_cpu(&initial, params);
-    let stage = ParticleStage::new(&device, initial.len() as u32, 128);
-    stage.upload(&queue, &initial, params, [-4.0, -4.0], [8.0, 8.0], 0.25);
+    let stage = ParticleStage::new(&device, initial.len() as u32, 128)
+        .expect("device supports the particle stage configuration");
+    stage
+        .upload(&queue, &initial, params, [-4.0, -4.0], [8.0, 8.0], 0.25)
+        .expect("particle frame inputs are valid");
     let recorded = stage
         .render_graph(&device, &queue)
         .expect("particle render graph compiles and executes");

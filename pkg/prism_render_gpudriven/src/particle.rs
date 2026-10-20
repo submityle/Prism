@@ -17,11 +17,11 @@ use prism_render_graph::{
 use rhi::{
     BindGroupDescriptor, BindGroupId, BindGroupLayoutDescriptor, BindGroupLayoutId,
     BufferBindingType, BufferDescriptor, BufferId, BufferState, BufferUsages, ColorTargetState,
-    ComputePipelineDescriptor, ComputePipelineId, FragmentState, IndexFormat, MultisampleState,
-    PipelineLayoutDescriptor, PipelineLayoutId, PipelineStages, PrimitiveState, PrimitiveTopology,
-    RenderDevice, RenderPipelineDescriptor, RenderPipelineId, RenderQueue, ShaderModuleDescriptor,
-    ShaderModuleId, ShaderStages, TextureFormat, TextureId, TextureState, TextureUsages,
-    TextureViewId, VertexState,
+    ComputePipelineDescriptor, ComputePipelineId, Features, FragmentState, IndexFormat, Limits,
+    MultisampleState, PipelineLayoutDescriptor, PipelineLayoutId, PipelineStages, PrimitiveState,
+    PrimitiveTopology, RenderDevice, RenderPipelineDescriptor, RenderPipelineId, RenderQueue,
+    ShaderModuleDescriptor, ShaderModuleId, ShaderStages, TextureFormat, TextureId, TextureState,
+    TextureUsages, TextureViewId, VertexState,
 };
 
 use crate::encoding::IndirectArgs;
@@ -36,6 +36,165 @@ pub const PARTICLE_CONTROL_BYTES: u64 = 16;
 /// One indexed quad uses four indices.
 pub const PARTICLE_INDEX_COUNT: u32 = 4;
 const WORKGROUP_SIZE: u32 = 64;
+
+/// Configuration or input error detected before particle GPU resources are
+/// created or bytes are uploaded.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ParticleStageError {
+    /// The pool must contain at least one slot.
+    ZeroCapacity,
+    /// The square offscreen target must have nonzero dimensions.
+    ZeroResolution,
+    /// The target exceeds the device's 2D texture dimension limit.
+    TextureDimensionTooLarge {
+        /// Requested width and height of the square target.
+        requested: u32,
+        /// Maximum supported 2D texture dimension.
+        limit: u32,
+    },
+    /// A named storage buffer exceeds the device's per-binding limit.
+    StorageBufferTooLarge {
+        /// Name of the buffer that exceeds the limit.
+        resource: &'static str,
+        /// Requested storage binding size in bytes.
+        requested: u64,
+        /// Maximum storage binding size in bytes.
+        limit: u64,
+    },
+    /// A named uniform buffer exceeds the device's per-binding limit.
+    UniformBufferTooLarge {
+        /// Name of the uniform buffer that exceeds the limit.
+        resource: &'static str,
+        /// Requested uniform binding size in bytes.
+        requested: u64,
+        /// Maximum uniform binding size in bytes.
+        limit: u64,
+    },
+    /// The simulation would exceed the per-dimension compute dispatch limit.
+    DispatchTooLarge {
+        /// Workgroups requested along the X dimension.
+        workgroups: u32,
+        /// Maximum workgroups supported along one dimension.
+        limit: u32,
+    },
+    /// The device cannot run the stage's fixed 64-invocation workgroup.
+    ComputeWorkgroupTooLarge {
+        /// Invocations required by the shader.
+        requested: u32,
+        /// Maximum invocations supported by one workgroup.
+        limit: u32,
+    },
+    /// The device cannot bind all resources used by one stage pipeline.
+    BindingLimitTooSmall {
+        /// Number of bindings required by the stage.
+        requested: u32,
+        /// Maximum bindings supported by the device.
+        limit: u32,
+    },
+    /// The pipeline requires GPU-authored indirect draws.
+    MissingIndirectDraw,
+    /// The initial particle slice accepts at most `capacity` records per upload.
+    PoolExceedsCapacity {
+        /// Number of records supplied for upload.
+        requested: usize,
+        /// Configured fixed pool capacity.
+        capacity: u32,
+    },
+    /// A simulation scalar or vector contains an invalid value.
+    InvalidSimulationParameter(&'static str),
+    /// The camera rectangle or particle size is invalid.
+    InvalidViewParameter(&'static str),
+    /// An uploaded particle record contains a non-finite field or negative life.
+    InvalidParticleRecord {
+        /// Index of the malformed record in the upload slice.
+        index: usize,
+    },
+}
+
+/// Checks a particle stage's fixed resource footprint against device limits.
+pub fn validate_particle_stage_config(
+    capacity: u32,
+    resolution: u32,
+    features: Features,
+    limits: &Limits,
+) -> Result<(), ParticleStageError> {
+    if capacity == 0 {
+        return Err(ParticleStageError::ZeroCapacity);
+    }
+    if resolution == 0 {
+        return Err(ParticleStageError::ZeroResolution);
+    }
+    if !features.contains(Features::INDIRECT_DRAW) {
+        return Err(ParticleStageError::MissingIndirectDraw);
+    }
+    if limits.max_bind_groups < 1 {
+        return Err(ParticleStageError::BindingLimitTooSmall {
+            requested: 1,
+            limit: limits.max_bind_groups,
+        });
+    }
+    if limits.max_bindings_per_bind_group < 5 {
+        return Err(ParticleStageError::BindingLimitTooSmall {
+            requested: 5,
+            limit: limits.max_bindings_per_bind_group,
+        });
+    }
+    if limits.max_compute_invocations_per_workgroup < WORKGROUP_SIZE {
+        return Err(ParticleStageError::ComputeWorkgroupTooLarge {
+            requested: WORKGROUP_SIZE,
+            limit: limits.max_compute_invocations_per_workgroup,
+        });
+    }
+    if resolution > limits.max_texture_dimension_2d {
+        return Err(ParticleStageError::TextureDimensionTooLarge {
+            requested: resolution,
+            limit: limits.max_texture_dimension_2d,
+        });
+    }
+
+    let pool_bytes = u64::from(capacity) * PARTICLE_STRIDE;
+    let active_bytes = u64::from(capacity) * 4;
+    for (resource, requested) in [
+        ("particle pool", pool_bytes),
+        ("active indices", active_bytes),
+    ] {
+        if requested > limits.max_storage_buffer_binding_size {
+            return Err(ParticleStageError::StorageBufferTooLarge {
+                resource,
+                requested,
+                limit: limits.max_storage_buffer_binding_size,
+            });
+        }
+    }
+    if PARTICLE_CONTROL_BYTES > limits.max_storage_buffer_binding_size {
+        return Err(ParticleStageError::StorageBufferTooLarge {
+            resource: "particle control",
+            requested: PARTICLE_CONTROL_BYTES,
+            limit: limits.max_storage_buffer_binding_size,
+        });
+    }
+    for (resource, requested) in [
+        ("particle parameters", PARTICLE_PARAMS_BYTES),
+        ("particle view", 48),
+    ] {
+        if requested > limits.max_uniform_buffer_binding_size {
+            return Err(ParticleStageError::UniformBufferTooLarge {
+                resource,
+                requested,
+                limit: limits.max_uniform_buffer_binding_size,
+            });
+        }
+    }
+
+    let workgroups = capacity.div_ceil(WORKGROUP_SIZE);
+    if workgroups > limits.max_compute_workgroups_per_dimension {
+        return Err(ParticleStageError::DispatchTooLarge {
+            workgroups,
+            limit: limits.max_compute_workgroups_per_dimension,
+        });
+    }
+    Ok(())
+}
 
 /// One pool element. `position[3]` stores remaining life and the velocity
 /// vector is stored in the second four-word block.
@@ -107,6 +266,29 @@ impl Default for ParticleParams {
 }
 
 impl ParticleParams {
+    fn validate(self) -> Result<(), ParticleStageError> {
+        if !self.dt.is_finite() || self.dt < 0.0 {
+            return Err(ParticleStageError::InvalidSimulationParameter("dt"));
+        }
+        if !self.spawn_life.is_finite() || self.spawn_life < 0.0 {
+            return Err(ParticleStageError::InvalidSimulationParameter("spawn_life"));
+        }
+        if !self.gravity.into_iter().all(f32::is_finite) {
+            return Err(ParticleStageError::InvalidSimulationParameter("gravity"));
+        }
+        if !self.spawn_position.into_iter().all(f32::is_finite) {
+            return Err(ParticleStageError::InvalidSimulationParameter(
+                "spawn_position",
+            ));
+        }
+        if !self.spawn_velocity.into_iter().all(f32::is_finite) {
+            return Err(ParticleStageError::InvalidSimulationParameter(
+                "spawn_velocity",
+            ));
+        }
+        Ok(())
+    }
+
     fn to_bytes(self, capacity: u32) -> [u8; PARTICLE_PARAMS_BYTES as usize] {
         let words = [
             capacity,
@@ -196,7 +378,95 @@ pub fn particle_storage_bytes(particles: &[Particle]) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::{particle_storage_bytes, simulate_cpu, Particle, ParticleParams, PARTICLE_STRIDE};
+    use super::{
+        particle_storage_bytes, simulate_cpu, validate_particle_stage_config, Particle,
+        ParticleParams, ParticleStageError, PARTICLE_STRIDE,
+    };
+    use prism_render_driver::{Features, Limits};
+
+    #[test]
+    fn stage_config_validation_rejects_device_limit_violations_before_allocation() {
+        let features = Features::INDIRECT_DRAW;
+        let limits = Limits::baseline();
+        assert_eq!(
+            validate_particle_stage_config(0, 64, features, &limits),
+            Err(ParticleStageError::ZeroCapacity)
+        );
+        assert_eq!(
+            validate_particle_stage_config(1, 0, features, &limits),
+            Err(ParticleStageError::ZeroResolution)
+        );
+        assert_eq!(
+            validate_particle_stage_config(1, 64, Features::from_bits_truncate(0), &limits),
+            Err(ParticleStageError::MissingIndirectDraw)
+        );
+
+        let mut tiny_bindings = limits;
+        tiny_bindings.max_bindings_per_bind_group = 4;
+        assert_eq!(
+            validate_particle_stage_config(1, 64, features, &tiny_bindings),
+            Err(ParticleStageError::BindingLimitTooSmall {
+                requested: 5,
+                limit: 4,
+            })
+        );
+
+        let mut tiny_workgroup = limits;
+        tiny_workgroup.max_compute_invocations_per_workgroup = 32;
+        assert_eq!(
+            validate_particle_stage_config(1, 64, features, &tiny_workgroup),
+            Err(ParticleStageError::ComputeWorkgroupTooLarge {
+                requested: 64,
+                limit: 32,
+            })
+        );
+
+        let mut tiny_storage = limits;
+        tiny_storage.max_storage_buffer_binding_size = PARTICLE_STRIDE - 1;
+        assert_eq!(
+            validate_particle_stage_config(1, 64, features, &tiny_storage),
+            Err(ParticleStageError::StorageBufferTooLarge {
+                resource: "particle pool",
+                requested: PARTICLE_STRIDE,
+                limit: PARTICLE_STRIDE - 1,
+            })
+        );
+
+        let mut tiny_dispatch = limits;
+        tiny_dispatch.max_compute_workgroups_per_dimension = 1;
+        assert_eq!(
+            validate_particle_stage_config(65, 64, features, &tiny_dispatch),
+            Err(ParticleStageError::DispatchTooLarge {
+                workgroups: 2,
+                limit: 1,
+            })
+        );
+        assert_eq!(
+            validate_particle_stage_config(65_535, 64, features, &limits),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn simulation_parameter_validation_rejects_non_finite_and_negative_time() {
+        assert_eq!(
+            ParticleParams {
+                dt: f32::NAN,
+                ..ParticleParams::default()
+            }
+            .validate(),
+            Err(ParticleStageError::InvalidSimulationParameter("dt"))
+        );
+        assert_eq!(
+            ParticleParams {
+                dt: -0.1,
+                ..ParticleParams::default()
+            }
+            .validate(),
+            Err(ParticleStageError::InvalidSimulationParameter("dt"))
+        );
+        assert_eq!(ParticleParams::default().validate(), Ok(()));
+    }
 
     #[test]
     fn particle_storage_layout_contains_life_at_the_gpu_abi_offset() {
@@ -281,12 +551,13 @@ pub struct ParticleStage {
 impl ParticleStage {
     /// Creates a fixed-capacity GPU particle pool and offscreen target.
     #[must_use]
-    pub fn new(device: &impl RenderDevice, capacity: u32, resolution: u32) -> Self {
-        assert!(capacity > 0, "a particle pool needs at least one slot");
-        assert!(
-            resolution > 0,
-            "the particle target needs non-zero resolution"
-        );
+    pub fn new(
+        device: &impl RenderDevice,
+        capacity: u32,
+        resolution: u32,
+    ) -> Result<Self, ParticleStageError> {
+        let caps = device.capabilities();
+        validate_particle_stage_config(capacity, resolution, caps.features, &caps.limits)?;
         let pool = device.create_buffer(&BufferDescriptor {
             label: Some(String::from("particle-pool")),
             size: u64::from(capacity) * PARTICLE_STRIDE,
@@ -464,7 +735,7 @@ impl ParticleStage {
             ],
         });
 
-        Self {
+        Ok(Self {
             capacity,
             resolution,
             pool,
@@ -489,7 +760,7 @@ impl ParticleStage {
             render_shader,
             compute_bind_group,
             render_bind_group,
-        }
+        })
     }
 
     /// Uploads the initial pool, simulation parameters, camera rectangle and
@@ -502,11 +773,33 @@ impl ParticleStage {
         world_min: [f32; 2],
         world_size: [f32; 2],
         size: f32,
-    ) {
-        assert!(
-            pool.len() <= self.capacity as usize,
-            "particle upload exceeds capacity"
-        );
+    ) -> Result<(), ParticleStageError> {
+        if pool.len() > self.capacity as usize {
+            return Err(ParticleStageError::PoolExceedsCapacity {
+                requested: pool.len(),
+                capacity: self.capacity,
+            });
+        }
+        params.validate()?;
+        if !world_min.into_iter().all(f32::is_finite) {
+            return Err(ParticleStageError::InvalidViewParameter("world_min"));
+        }
+        if !world_size.into_iter().all(|v| v.is_finite() && v > 0.0) {
+            return Err(ParticleStageError::InvalidViewParameter("world_size"));
+        }
+        if !size.is_finite() || size < 0.0 {
+            return Err(ParticleStageError::InvalidViewParameter("size"));
+        }
+        for (index, particle) in pool.iter().enumerate() {
+            if !particle.position.into_iter().all(f32::is_finite)
+                || !particle.velocity.into_iter().all(f32::is_finite)
+                || !particle.life.is_finite()
+                || particle.life < 0.0
+                || !particle.padding.is_finite()
+            {
+                return Err(ParticleStageError::InvalidParticleRecord { index });
+            }
+        }
         let mut frame_bytes = Vec::with_capacity(48);
         for value in [
             self.resolution as f32,
@@ -530,6 +823,7 @@ impl ParticleStage {
         queue.write_buffer(self.params, 0, &params.to_bytes(self.capacity));
         queue.write_buffer(self.frame, 0, &frame_bytes);
         queue.write_buffer(self.index_buffer, 0, &[0, 0, 1, 0, 2, 0, 3, 0]);
+        Ok(())
     }
 
     /// Builds the reset, simulation, deterministic spawn, finalize and
