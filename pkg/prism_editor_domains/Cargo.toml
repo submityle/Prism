@@ -8,6 +8,18 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [dependencies]
+prism_ui = { path = "../prism_ui" }
+prism_ui_hotreload = { path = "../prism_ui_hotreload" }
+prism_ui_style = { path = "../prism_ui_style" }
+prism_render_driver = { path = "../prism_render_driver" }
+naga = { version = "30", features = ["wgsl-in"] }
+wesl = "0.4.2"
+serde_json = "1.0.140"
+
+[dev-dependencies]
+futures-lite = "2.0.1"
+prism_editor_core = { path = "../prism_editor_core" }
+wgpu = { version = "30", default-features = false, features = ["wgsl", "metal", "vulkan", "dx12"] }
 
 [lints.rust]
 unsafe_code = "forbid"
