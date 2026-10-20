@@ -522,7 +522,7 @@ mod tests {
             Err(PhysicsCellHostError::ManifestSectorMismatch { manifest: actual, decoded })
                 if actual == sector && decoded == SectorId::new(0, 9, 0, 0)
         ));
-        assert_eq!(host.loads, 0);
+        assert_eq!(adapter.host.loads, 0);
         assert!(adapter.residency().snapshots().is_empty());
     }
 
