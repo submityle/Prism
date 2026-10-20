@@ -172,66 +172,6 @@ pub struct ProxyRegistry {
     pending_uploads: bool,
 }
 
-/// A fully validated sector insertion or replacement that has not changed the registry yet.
-///
-/// The plan keeps the registry exclusively borrowed, so no edit can invalidate its reserved
-/// slots between preparation and [`Self::commit`]. Dropping the plan is a no-op. Committing uses
-/// only storage reserved by the registry constructor and by preparation; it has no recoverable
-/// allocation or validation failure after an authoritative host accepts the corresponding cell.
-pub struct PreparedSectorUpdate<'a> {
-    registry: &'a mut ProxyRegistry,
-    sector: SectorId,
-    proxies: Vec<ProxyInstance>,
-    handles: Vec<ProxyHandle>,
-    existed: bool,
-}
-
-impl PreparedSectorUpdate<'_> {
-    /// Atomically publishes the prepared sector and invalidates handles from its old generation.
-    pub fn commit(mut self) {
-        let old_handles = if self.existed {
-            std::mem::take(
-                self.registry
-                    .sectors
-                    .get_mut(&self.sector)
-                    .expect("prepared sector still exists while registry is exclusively borrowed"),
-            )
-        } else {
-            Vec::new()
-        };
-        self.registry.remove_handles(old_handles);
-
-        for (&handle, proxy) in self.handles.iter().zip(self.proxies.drain(..)) {
-            let index = self.registry.dense.len();
-            let slot = self
-                .registry
-                .free
-                .pop()
-                .expect("prepared sector reserved enough reusable slots");
-            debug_assert_eq!(slot, handle.slot);
-            debug_assert_eq!(
-                self.registry.slots[slot as usize].generation,
-                handle.generation
-            );
-            self.registry.slots[slot as usize].dense = Some(index);
-            self.registry.dense.push(proxy);
-            self.registry.dense_slots.push(slot);
-            self.registry.dirty[index] = true;
-        }
-        self.registry.pending_uploads |= !self.handles.is_empty();
-
-        if self.existed {
-            *self
-                .registry
-                .sectors
-                .get_mut(&self.sector)
-                .expect("prepared sector map entry remains reserved") = self.handles;
-        } else {
-            self.registry.sectors.insert(self.sector, self.handles);
-        }
-    }
-}
-
 impl ProxyRegistry {
     /// Reserves proxy storage and budgets `capacity.max(1)` registered sectors.
     /// Zero proxy capacity therefore still allows one empty sector.
@@ -345,94 +285,6 @@ impl ProxyRegistry {
         Ok(handles)
     }
 
-    /// Prepares an atomic insertion or same-sector replacement without changing registry state.
-    ///
-    /// Existing sector slots are treated as reusable capacity, except slots whose next generation
-    /// would be `u64::MAX` and therefore must retire. Proxy validation, duplicate detection, handle
-    /// storage allocation, sector-count admission, and capacity admission all complete before this
-    /// method returns. Dropping the returned plan preserves every registry field and dirty bit.
-    pub fn prepare_sector_update(
-        &mut self,
-        sector: SectorId,
-        proxies: Vec<ProxyInstance>,
-    ) -> Result<PreparedSectorUpdate<'_>, ProxyRegistryError> {
-        let old_handles = self.sectors.get(&sector);
-        let existed = old_handles.is_some();
-        if !existed && self.sector_count() >= self.sector_capacity {
-            return Err(ProxyRegistryError::SectorCapacityExceeded {
-                capacity: self.sector_capacity,
-            });
-        }
-
-        let reusable_old = old_handles
-            .into_iter()
-            .flatten()
-            .filter(|handle| {
-                self.slots[handle.slot as usize]
-                    .generation
-                    .checked_add(1)
-                    .is_some_and(|generation| generation != u64::MAX)
-            })
-            .count();
-        let available = self.free.len() + reusable_old;
-        if proxies.len() > available {
-            return Err(ProxyRegistryError::CapacityExceeded {
-                requested: proxies.len(),
-                available,
-            });
-        }
-
-        let mut ids = reserved(proxies.len())?;
-        for proxy in &proxies {
-            if !proxy.is_finite() {
-                return Err(ProxyRegistryError::InvalidProxy {
-                    proxy_id: proxy.proxy_id,
-                });
-            }
-            ids.push(proxy.proxy_id);
-        }
-        ids.sort_unstable();
-        if let Some(pair) = ids.windows(2).find(|pair| pair[0] == pair[1]) {
-            return Err(ProxyRegistryError::DuplicateProxyId { proxy_id: pair[0] });
-        }
-
-        let mut handles = reserved(proxies.len())?;
-        if let Some(old_handles) = old_handles {
-            for handle in old_handles.iter().rev() {
-                let Some(generation) = self.slots[handle.slot as usize].generation.checked_add(1)
-                else {
-                    continue;
-                };
-                if generation != u64::MAX {
-                    handles.push(ProxyHandle {
-                        slot: handle.slot,
-                        generation,
-                    });
-                    if handles.len() == proxies.len() {
-                        break;
-                    }
-                }
-            }
-        }
-        if handles.len() < proxies.len() {
-            for &slot in self.free.iter().rev().take(proxies.len() - handles.len()) {
-                handles.push(ProxyHandle {
-                    slot,
-                    generation: self.slots[slot as usize].generation,
-                });
-            }
-        }
-        debug_assert_eq!(handles.len(), proxies.len());
-
-        Ok(PreparedSectorUpdate {
-            registry: self,
-            sector,
-            proxies,
-            handles,
-            existed,
-        })
-    }
-
     /// Updates all fields except `proxy_id`; errors preserve data and dirtiness.
     pub fn update(
         &mut self,
@@ -533,11 +385,6 @@ impl ProxyRegistry {
         let Some(handles) = self.sectors.remove(&sector) else {
             return false;
         };
-        self.remove_handles(handles);
-        true
-    }
-
-    fn remove_handles(&mut self, handles: Vec<ProxyHandle>) {
         self.pending_uploads |= !handles.is_empty();
         for handle in handles {
             let index = self.slots[handle.slot as usize]
@@ -563,6 +410,7 @@ impl ProxyRegistry {
                 self.free.push(handle.slot);
             }
         }
+        true
     }
 
     /// Coalesces adjacent dirty rows, scanning only the active dense prefix.

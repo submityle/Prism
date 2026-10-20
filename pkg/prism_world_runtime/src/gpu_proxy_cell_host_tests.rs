@@ -91,14 +91,6 @@ fn decode(_: &CellManifest, _: &[u8]) -> Result<Vec<ProxyInstance>, TestError> {
     Ok(vec![proxy(7)])
 }
 
-fn decode_payload(_: &CellManifest, payload: &[u8]) -> Result<Vec<ProxyInstance>, TestError> {
-    let id = payload
-        .first()
-        .copied()
-        .ok_or(TestError("missing proxy id"))?;
-    Ok(vec![proxy(u32::from(id))])
-}
-
 #[test]
 #[ignore = "requires a native GPU adapter"]
 fn successful_load_and_evict_share_one_gpu_sector_lifecycle() {
@@ -130,89 +122,6 @@ fn successful_load_and_evict_share_one_gpu_sector_lifecycle() {
 
     assert_eq!(host.loads, vec![sector_manifest.sector]);
     assert_eq!(host.evictions, vec![sector_manifest.sector]);
-}
-
-#[test]
-#[ignore = "requires a native GPU adapter"]
-fn same_sector_reload_reuses_capacity_and_commits_only_after_host_success() {
-    let context = gpu_context();
-    let sector_manifest = manifest(0);
-    let mut host = Host::default();
-    let mut gpu = GpuSectorProxies::new(&context, 1, 1).unwrap();
-
-    {
-        let mut adapter = GpuProxyCellHost::new(&mut host, &mut gpu, decode_payload);
-        adapter.load_cell(&sector_manifest, &[7]).unwrap();
-        adapter.stage_upload().unwrap();
-    }
-    let old = gpu
-        .registry()
-        .sector_handles(sector_manifest.sector)
-        .unwrap()[0];
-
-    {
-        let mut adapter = GpuProxyCellHost::new(&mut host, &mut gpu, decode_payload);
-        adapter.load_cell(&sector_manifest, &[9]).unwrap();
-        assert_eq!(adapter.gpu().registry().get(old), None);
-        let replacement = adapter
-            .gpu()
-            .registry()
-            .sector_handles(sector_manifest.sector)
-            .unwrap()[0];
-        assert_eq!(adapter.gpu().registry().get(replacement), Some(&proxy(9)));
-        assert_eq!(adapter.gpu().registry().len(), 1);
-        assert!(adapter.gpu().registry().has_pending_uploads());
-    }
-
-    assert_eq!(host.loads, vec![sector_manifest.sector; 2]);
-}
-
-#[test]
-#[ignore = "requires a native GPU adapter"]
-fn rejected_or_panicking_reload_preserves_old_gpu_generation_and_upload_state() {
-    for behavior in [Behavior::Reject, Behavior::Panic] {
-        let context = gpu_context();
-        let sector_manifest = manifest(0);
-        let mut host = Host::default();
-        let mut gpu = GpuSectorProxies::new(&context, 1, 1).unwrap();
-        {
-            let mut adapter = GpuProxyCellHost::new(&mut host, &mut gpu, decode_payload);
-            adapter.load_cell(&sector_manifest, &[7]).unwrap();
-            adapter.stage_upload().unwrap();
-        }
-        let old = gpu
-            .registry()
-            .sector_handles(sector_manifest.sector)
-            .unwrap()[0];
-        host.load = behavior;
-
-        {
-            let mut adapter = GpuProxyCellHost::new(&mut host, &mut gpu, decode_payload);
-            match behavior {
-                Behavior::Reject => assert!(matches!(
-                    adapter.load_cell(&sector_manifest, &[9]),
-                    Err(GpuProxyCellHostError::Host(TestError("load rejected")))
-                )),
-                Behavior::Panic => assert!(catch_unwind(AssertUnwindSafe(|| {
-                    let _ = adapter.load_cell(&sector_manifest, &[9]);
-                }))
-                .is_err()),
-                Behavior::Succeed => unreachable!(),
-            }
-            assert_eq!(adapter.gpu().registry().get(old), Some(&proxy(7)));
-            assert_eq!(
-                adapter
-                    .gpu()
-                    .registry()
-                    .sector_handles(sector_manifest.sector),
-                Some([old].as_slice())
-            );
-            assert_eq!(adapter.gpu().registry().len(), 1);
-            assert!(!adapter.gpu().registry().has_pending_uploads());
-        }
-
-        assert_eq!(host.loads, vec![sector_manifest.sector; 2]);
-    }
 }
 
 #[test]

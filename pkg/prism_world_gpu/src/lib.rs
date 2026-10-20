@@ -29,7 +29,7 @@ pub use placement_render_bridge::{
     PlacementImportedBuffer, PlacementRenderBridgeError, PlacementRenderStream,
     PlacementRenderWork, PlacementSceneTarget,
 };
-pub use registry::{PreparedSectorUpdate, ProxyHandle, ProxyRegistry, ProxyRegistryError};
+pub use registry::{ProxyHandle, ProxyRegistry, ProxyRegistryError};
 pub use world_placement_graph::{
     PlacementCellManifest, PlacementGraphLayout, PlacementGraphPass, PlacementGraphResource,
     PlacementGraphStage, PlacementLifecycle, PlacementLifecycleError, PlacementRenderGraph,
