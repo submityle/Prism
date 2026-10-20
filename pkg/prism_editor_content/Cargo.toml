@@ -8,6 +8,7 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [dependencies]
+png = "0.18.1"
 
 [lints]
 workspace = true

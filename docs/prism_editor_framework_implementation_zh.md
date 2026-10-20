@@ -20,7 +20,7 @@
 | `prism_editor_graph` | 稳定图身份、类型/基数校验、分组/索引维护、确定性拓扑与评估回调 | 材质/VFX 等具体节点 UI 和编译器适配 | 10 |
 | `prism_editor_timeline` | 整数 tick、稳定轨道/关键帧、插值、维度校验、有序事件与采样 | 序列器 UI 和具体运行时播放适配 | 3 |
 | `prism_editor_profiler` | 有界 frame/span、帧图/关键路径、内存预算告警、可视日志投影 | Tracy/GPU/真实运行时采集和分析界面 | 9 |
-| `prism_editor_content` | 目录/子树索引、末项续查分页、有界缓存与诊断、增量反向依赖、真实异步文件扫描、精确快照围栏的源/VCS 原子发布、可贡献校验规则与精确快照门禁、导入导出任务状态 | 缩略图生产、实际 importer/exporter/Cook/VCS provider 和原生内容流程 | 59（目录/扫描/发布/校验） |
+| `prism_editor_content` | 目录/子树索引、末项续查分页、有界缓存与诊断、增量反向依赖、真实异步文件扫描、精确快照围栏的源/VCS 原子发布、可贡献校验规则与精确快照门禁、真实 PNG 缩略图解码/缩放/缓存、导入导出任务状态 | 缩略图网格/GPU 显示、实际 importer/exporter/Cook/VCS provider 和原生内容流程 | 59（目录/扫描/发布/校验）+14（缩略图） |
 | `prism_editor_domains` | 域/能力/贡献/Profile、版本约束、依赖启停、确定性冲突诊断 | 材质/VFX/动画/地形/音频/物理的具体编辑器 | 13 |
 | `prism_editor_remote` | 有界 JSON-RPC/二进制 codec、增量副本、PIE、TCP、受控子进程 stdio/TCP 桥及取消/重启/超时 | Prism 引擎专属 adapter 和生产场景运行时接线 | 41 |
 | `prism_editor_collab` | 有界因果副本/LWW/tombstone、Presence/租约软锁、TCP 接纳顺序/广播/重连/历史重放/能力拒绝 | 身份认证/TLS、产品级权限/部署和 UI 到命令栈协同接线 | 20 |
@@ -70,6 +70,10 @@
 `DiagnosticReport` 与 `ValidationReceipt` 的错误/警告计数独立于显示截断，隐藏错误仍然阻止操作。依赖深度未完成、规则执行失败均不能授权。`authorize` 在生成借用的 `ValidatedCatalog` 前核对精确目录快照、规则集合及 Save/Commit/Cook 操作；有效目录修改和规则变动撤销旧 receipt，相同 generation 的独立目录或分叉 clone 不能互用授权。无变化观察保留 receipt；严格策略另可拒绝警告。注册期间规则配置须保持不变，配置改变后重新注册；外部状态与异步输出发布还须由适配器检查其修订。此模块提供门禁能力，不能据此声称所有保存/提交/构建入口已接入。
 
 2026-10-20 新增 6 项实际校验回归，连同此前 50 项目录/扫描/发布测试全部通过。覆盖显示截断隐藏错误、零显示容量、操作策略、未完成检查、回调错误与被忽略的 sink 错误、重复诊断预算、同代际分叉快照以及规则变更。
+
+### 实际缩略图生产
+
+`thumbnail::ThumbnailService` 已读取真实 PNG 并在有界 worker 上解码与面积缩放，输出不可变 sRGB RGBA8；线性光和预乘透明度滤波、比例缩小不放大、源修订/路径/输出尺寸缓存身份、LRU、取消与项目 epoch 围栏均有实际文件测试。运行及已完成未消费请求一起计入并发；drop 不阻塞调用者，worker 保留额度至清理结束。编码/源像素/PNG 内部/输出/缓存分别有预算，协作截止时间不能中断单次阻塞 OS 或解码调用。14 项 PNG 回归与定向严格 Clippy 通过，色彩与文件系统边界见 `prism_editor_content_thumbnail_zh.md`；尚不以此声称图片已接入原生网格/GPU。
 
 ### 大世界执行数据层
 

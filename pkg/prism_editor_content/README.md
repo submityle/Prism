@@ -123,6 +123,21 @@ configuration immutable while registered and re-register after policy changes.
 External-state checks and asynchronous destination publication need their own
 revision fence. This API supplies the gate; operation adapters must consume it.
 
+## Real PNG thumbnails
+
+`thumbnail::ThumbnailService` produces actual PNG pixels on bounded workers.
+Keys contain stable host identity/revision, absolute source path and output bounds.
+Area filtering uses linear light and premultiplied alpha, preserves aspect ratio
+and never upscales. RGB/RGBA/grayscale/paletted and 16-bit inputs are normalized
+to straight-alpha sRGB RGBA8. Tagged sRGB, untagged and gamma-only inputs have
+explicit transfer behavior; unsupported profiles/HDR/animation fail visibly.
+Encoded bytes, source pixels, decoder memory, output bytes, request count and
+retained LRU pixels are bounded separately. Ready results retain request slots.
+Drop cancels without joining; workers retain capacity through cleanup. Only
+successful polling caches results; clearing revokes all outstanding epochs.
+Host revisions and UI publication freshness remain authoritative. See
+`docs/prism_editor_content_thumbnail_zh.md` for OS/color/memory boundaries.
+
 ## Verification
 
 The crate's tests cover deterministic ordering, cursor invalidation, tree
@@ -138,7 +153,8 @@ bounded iterator consumption, stale refresh refusal, resolver failure and real
 file rename with host-owned stable identity. Validation tests cover hidden errors,
 incomplete checks, operation policy, zero display capacity, stale snapshot/rule
 receipts, ignored sink errors and work budgets before callbacks. This does not verify importer,
-thumbnail production or the content UI. Run:
+the content UI. Fourteen additional real PNG tests cover thumbnail production,
+filtering, format errors, resource bounds, cancellation and cache publication. Run:
 
 ```text
 cargo fmt --package prism_editor_content

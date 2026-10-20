@@ -285,6 +285,7 @@ pub trait Command: Send {
 ## 11. 内容与资产管线(D7/D8/D10)
 > crate: `prism_editor_content`;挂接 `prism_asset`(SHIPPED)
 - **内容浏览器**:缩略图网格(虚拟化,`prism_ui_virtual`)+ 集合(Collections)+ 标签/过滤/搜索 + 收藏/固定。
+  当前实际 PNG worker 已提供有界解码、线性光/预乘透明度缩放、源修订缓存和异步取消围栏；14 项真实文件测试通过。网格/GPU 图像接入和完整格式/色彩管理仍按实现状态文档验收。
 - **资产依赖/引用图**:谁引用谁、反向引用、循环检测;复用通用节点图内核(§8)+ `prism_ui_inspector` 的
   依赖图分析(SHIPPED)渲染。删除前提示引用者,避免悬空引用。
 - **资产校验(Validation)**:可贡献校验规则(命名/预算/缺失引用/非法配置),保存/提交时门禁,报告可点击跳转。

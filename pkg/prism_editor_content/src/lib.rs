@@ -19,6 +19,7 @@ use core::{fmt, ops::Bound};
 
 pub mod filesystem;
 mod source;
+pub mod thumbnail;
 pub mod validation;
 pub use source::VcsSnapshotLimits;
 
