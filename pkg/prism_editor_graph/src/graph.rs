@@ -5,6 +5,7 @@ use core::any::type_name;
 use core::fmt;
 
 pub(crate) mod authoring;
+pub(crate) mod storage;
 
 /// Monotonic identity for a graph node.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Hash)]

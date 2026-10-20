@@ -1,6 +1,8 @@
 //! Atomic authoring over the generic kernel. Inverses own only touched records.
+use super::storage::{GraphDocument, GraphDocumentLimits, GraphSnapshot, GraphSnapshotToken};
 use super::*;
 use alloc::collections::VecDeque;
+use alloc::sync::Arc;
 
 mod codec;
 
@@ -207,13 +209,14 @@ struct Entry {
 /// oldest-first. Allocation failure/panics are outside the atomic error contract.
 #[derive(Debug)]
 pub struct GraphEditor {
-    graph: Graph<Vec<u8>>,
-    positions: BTreeMap<NodeId, GraphPoint>,
+    pub(super) graph: Graph<Vec<u8>>,
+    pub(super) positions: BTreeMap<NodeId, GraphPoint>,
     limits: GraphAuthoringLimits,
     undo: VecDeque<Entry>,
     redo: Vec<Entry>,
     history_bytes: usize,
     revision: u64,
+    snapshot: GraphSnapshotToken,
 }
 impl GraphEditor {
     /// Construct an empty editor with validated resource bounds.
@@ -227,11 +230,40 @@ impl GraphEditor {
             redo: Vec::new(),
             history_bytes: 0,
             revision: 0,
+            snapshot: GraphSnapshotToken(Arc::new(())),
         })
     }
     /// Read typed structure or evaluate using host semantics.
     pub fn graph(&self) -> &Graph<Vec<u8>> {
         &self.graph
+    }
+    /// Adopt a complete validated document with fresh identity and empty history.
+    pub fn from_document(
+        document: GraphDocument,
+        limits: GraphAuthoringLimits,
+    ) -> Result<Self, GraphAuthoringError> {
+        document.validate(GraphDocumentLimits {
+            graph: limits,
+            groups: 16384,
+        })?;
+        let mut editor = Self::new(limits)?;
+        (editor.graph, editor.positions) = document.into_parts();
+        Ok(editor)
+    }
+    /// Immutable identity of the current state, including successful undo/redo.
+    pub fn snapshot_token(&self) -> GraphSnapshotToken {
+        self.snapshot.clone()
+    }
+    /// Encode a complete document for saving; no undo entry or graph clone is made.
+    pub fn snapshot(
+        &self,
+        limits: GraphDocumentLimits,
+        max_bytes: usize,
+    ) -> Result<GraphSnapshot, GraphAuthoringError> {
+        Ok(GraphSnapshot {
+            bytes: GraphDocument::encode_parts(&self.graph, &self.positions, limits, max_bytes)?,
+            token: self.snapshot_token(),
+        })
     }
     /// Configured bounds.
     pub const fn limits(&self) -> GraphAuthoringLimits {
@@ -352,6 +384,7 @@ impl GraphEditor {
             }
         }
         self.revision = revision;
+        self.snapshot = GraphSnapshotToken(Arc::new(()));
         Ok(())
     }
     fn edit(&mut self, edit: &GraphEdit) -> Result<Inverse, GraphAuthoringError> {
@@ -471,6 +504,14 @@ impl GraphEditor {
                 Inverse::Delete(n) => Inverse::Restore(self.remove(n).expect("private inverse")),
                 Inverse::Restore(r) => {
                     let n = r.node.id;
+                    if let Some(group) = r.node.group {
+                        self.graph
+                            .groups
+                            .get_mut(&group)
+                            .expect("private inverse group")
+                            .nodes
+                            .insert(n);
+                    }
                     for p in r.ports {
                         self.graph.port_names.insert((n, p.name.clone()), p.id);
                         self.graph.ports.insert(p.id, p);

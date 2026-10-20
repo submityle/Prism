@@ -14,6 +14,8 @@ extern crate alloc;
 
 mod graph;
 
+pub use graph::storage::*;
+
 pub use graph::authoring::{
     GraphAuthoringError, GraphAuthoringLimits, GraphCommand, GraphEdit, GraphEditor,
     GraphNodeDraft, GraphPoint, GraphPortDraft,
