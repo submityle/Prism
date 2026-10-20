@@ -16,6 +16,26 @@
 
 ## 实施状态（2026-10-21）
 
+2026-10-21 编辑态保存与 Cook 增量：`editable_identity` 按资产身份、importer
+协议命名空间与持久 key 派生稳定子资产 ID，名称、顺序和内容不参与身份。
+`EditableWorkspace::save` 按完整包 hash 比较全部旧快照，校验候选引用图与
+工作区编码字节预算，再通过可恢复的多包事务发布；冲突拒绝整批。收据提供新
+hash，调用方可用它提交显式撤销。合作式 snapshot 读取者获得一致视图，直接
+文件读取者可能看到替换过程；编码预算不代表进程 heap 上限。
+`EditableBuildPlan` 从冻结的保存载荷构图，不重新读取或导入源文件；hard 依赖
+进入 Cook 闭包，缺失 soft 目标允许保留，editor-only 信息不进入 Cook key。
+内置 image cooker 严格消费保存的 mip artifact，输出上限参与 key，工具链和
+环境指纹先分别归约一次。`package_manifest` 在打包前核对已提交 Manifest 与
+计划的 key、kind、schema、alignment、依赖和输出长度，并保留 optional metadata。
+回归入口为 `tests/editable_asset.rs`、`editable_build.rs`、`editable_save.rs`
+和 `patch_optional_dependencies.rs`；批量保存专项 7 项已通过。CLI 的
+`editable-plan`/`editable-build` 与 `package`/`validate --workspace` 已调用同一
+冻结计划；支持显式 roots、快照/执行预算、环境指纹和双跑确定性检查。本轮
+core、CLI、container 默认配置合计 549 项测试通过，0 失败、0 忽略；另将
+六项 editable CLI 集成测试并行重复 20 轮，120 次执行全部通过。修复了测试
+夹具的时间戳碰撞，使用进程内唯一编号与排他目录创建隔离并行测试。typed settings、
+Schema 迁移、语义 diff/merge、CAS 外载荷、编辑器接线和通用平台 Cook 仍独立验收。
+
 本节按能力边界验收；下方日期较早的记录保留为历史证据，同一能力以本段最新边界
 为准。新增的本地实现不代表本文全部目标已经交付。
 
@@ -56,9 +76,30 @@
   会使 CAS sweep 延期。它不是 L0-L3 DDC、磁盘配额管理、远程缓存或抗恶意
   路径替换的文件描述符级实现。回归入口为
   `prism_asset_build_cli/tests/cache_commands.rs`。
+- **`.prism` 编辑态包协议**：`prism_asset_build_core::editable` 已提供
+  canonical 二进制编解码边界：包内固定记录 `AssetId`、kind、flags、规范设置、
+  SourceRecord、稳定子资产目录、强/软/editor-only 依赖、显式子资产引用、编辑载荷与可选预览。
+  解码受 schema、总长度和字段长度上限约束，拒绝截断、尾随字节、非 UTF-8/NUL 文本、
+  非 canonical 子资产/依赖排序、自依赖及内嵌源哈希不符；内嵌源可显式转换为
+  `SourceSnapshot`，外部源不会被误当作可重放快照。外部源可由调用方实现
+  `EditableSourceProvider`；内置 `LocalFileSourceProvider` 只读取 content root 内、
+  有界的普通文件，`resolve_source_snapshot` 会复核捕获字节与 `SourceRecord` 的 hash。
+  `read_from_path`/`write_to_path`
+  仅接受普通 `.prism` 文件，读取前有界，写入在同目录临时文件同步后原子替换并同步目录；
+  API 不创建父目录，也不提供多写者锁或冲突解决。回归入口为
+  `tests/editable_asset.rs`。其 `plan_subasset_reimport` 以 importer 提供的稳定
+  `SubAssetId` 做纯规划：相同 ID 保留，名字变化报告为重命名，ID 改变只接受显式
+  redirect，且删除被引用的子资产会拒绝计划；它不按枚举顺序或名称猜测身份。
+  `EditableWorkspace` 在本地排他锁下扫描非符号链接包、拒绝重复 `AssetId`，调用
+  caller-owned importer 和不透明载荷引用改写器，验证候选显式引用图，并通过带 prepare/commit
+  标记的可恢复多包事务发布；未完成 prepare 的暂存目录会在下次 open 时清理，未 commit
+  的事务回滚，已 commit 的事务保留新包并清理暂存。该切片仍不提供网络/凭据 source
+  provider、`prism_reflect` typed settings、语义 diff、CAS 外载荷、编辑器 UI 或 runtime
+  consumer 接线。
 
-完整 EDL、实际纹理/VT/VG 流送消费者、编辑态资产/重导入、完整 Processor SDK、
-动态文件依赖、通用平台 Cook、远程 CAS/Worker、发行服务和规模性能验收仍未完成。
+完整 EDL、实际纹理/VT/VG 流送消费者、编辑态资产的编辑器接线、
+完整 Processor SDK、动态文件依赖、通用平台 Cook、远程 CAS/Worker、发行服务和
+规模性能验收仍未完成。
 
 2026-10-21 运行时发布入口：`prism_asset::AssetServer` 已提供
 `insert_runtime`/`replace_runtime`，保持 typed arena、事件与 RenderAsset
@@ -211,6 +252,7 @@ GPU 常驻范围输出和批量 dispatch，feedback/page-table 闭环仍未完�
 | 本地 CAS、DDC 与 BuildExecutor 缓存校验 | 部分实现 | `cas.rs`、`ddc.rs`、`executor.rs`；`detects_corruption_on_read`、`persists_and_restores_across_multiple_opens`、`ddc_hit_skips_processor_and_publishes_next_revision`、`corrupt_cas_blob_is_rebuilt_instead_of_returned_as_a_hit`、`concurrent_threads_merge_distinct_writes_without_lost_updates`、`readers_only_observe_complete_published_indexes` 和 DDC 容量驱逐回归测试；CLI `cache status`/`verify` 在不初始化 store 的前提下枚举并复核 CAS、DDC 与 current Revision，`cache prune` 显式驱逐 DDC metadata 并按 Revision root sweep CAS，`tests/cache_commands.rs` 覆盖只读、损坏、lease/pending transaction 延期、容量与非普通路径拒绝；DDC 稳定锁文件通过 `fs4` 在 Unix/Windows 提供排他 read-modify-write 窗口 | 分层 DDC/L0–L3、隐式 recency policy、磁盘配额管理、远端 CAS、跨机器协调、网络文件系统一致性和大规模性能证据未完成；普通 path API 对恶意并发路径替换仍有 TOCTOU 边界 |
 | Artifact 与 Manifest 字节预算 | 已实现（质量门切片） | `validation.rs`；`max_artifact_bytes`、`max_total_manifest_bytes`、唯一 `ContentHash` 确定性计数、CAS 实际字节复核；默认策略保持兼容，单 artifact/总预算在预读阶段拒绝 | 尚未覆盖压缩后/平台 Cook 后预算、跨包聚合预算和远程发布服务 |
 | SourceSnapshot / Recipe / PNG 导入垂直链 | 部分实现 | `source.rs`、`recipe.rs`、`import/image.rs`、`executor.rs`、`prism_image::artifact`；除 v1 兼容外，PNG importer 现在发布 schema v2 完整语义 RGBA8 mip 链，覆盖 odd-size ceil-halving、metadata round-trip、确定性编码及严格异常拒绝 | 仍不代表通用 importer、BCn/ASTC/ETC2 压缩、平台 Cook、VT/page artifact 或完整远程 runtime texture delivery 已完成 |
+| `.prism` Editable Asset canonical 包 | 部分实现（本地协议、单包持久化与工作区重导入发布） | `prism_asset_build_core/src/editable.rs`；`EditableAsset` 以唯一 bytes 布局编码身份、设置、SourceRecord、稳定子资产、依赖、显式子资产引用、编辑载荷和预览。严格 decoder 校验 schema、长度、文本、排序/去重、自依赖与内嵌源 hash；`LocalFileSourceProvider` 只捕获 content root 内的有界普通文件。`EditableWorkspace` 在 `fs4` 排他锁下扫描非符号链接 `.prism` 文件、拒绝重复 AssetId，调用 caller-owned importer 和载荷引用改写器，校验候选显式引用图，并通过可恢复的暂存事务原子发布所有受影响包；未提交事务在下次 open 时回滚，已提交事务只清理暂存。`tests/editable_asset.rs` 覆盖协议、单包持久化、外部源重导入、引用重写和失败不发布边界 | Importer 的 stable-ID 派生、typed settings/迁移、CAS 外载荷、semantic diff/merge、编辑器 UI、远程 source provider、跨进程/跨主机协调，以及 `prism_asset` 运行时消费接线仍未实现 |
 | ImporterPlugin / ImporterRegistry | 已实现（进程内注册选择切片） | `prism_asset_build_core/src/import/mod.rs`、`import/image.rs`；`tests/import_registry.rs` 的 `built_in_registry_normalizes_and_selects_by_extension_or_mime`、`selection_has_explicit_missing_and_no_match_errors`、`registration_and_selection_are_deterministic_and_ambiguity_is_explicit`；覆盖扩展名/MIME 归一化、内置 PNG 注册、稳定身份排序、重复身份/歧义拒绝和 profile 字段元数据 | 动态插件加载、隔离 worker、更多格式、插件准入/签名和完整 Source/IR/Recipe 生态未完成 |
 | 本地 Revision 事务与恢复 | 部分实现 | `transaction.rs`、`journal.rs`；`publishes_and_failed_transaction_keeps_previous_revision`、`reopening_after_pointer_publish_recovers_missing_commit_marker`、`reopening_truncates_a_partial_journal_tail`、`reopening_fails_closed_on_a_corrupt_journal_frame`、`separate_store_handles_serialize_concurrent_revision_publication`、`publication_file_lock_blocks_until_guard_is_released`、`atomic_replace_overwrites_existing_pointer`；稳定锁文件通过 `fs4` 在 Unix/Windows 串行化 compare-and-publish，`NamedTempFile::persist` 可覆盖已有 `CURRENT` | 完整磁盘故障注入、远程幂等协议、跨机器协调、网络文件系统一致性和完整事务级恢复仍未完成；锁 I/O 失败直接中止，不提供无锁降级 |
 | 本地发布完整性与单调 Revision gate | 部分实现（含 CLI 持久化 trust policy 与本地 Provenance 接线） | `release.rs`、`provenance.rs`；`release_descriptor_is_deterministic_and_strictly_decodable`、`ed25519_release_signatures_are_deterministic_and_verifiable`、`ed25519_release_signatures_reject_tampering_and_wrong_keys`、`accepts_only_integral_current_manifest_and_cas`、`rejects_rollback_before_any_release_side_effect`、`failed_accept_does_not_advance_floor`、`stale_trust_store_cannot_overwrite_a_newer_policy`、`trust_store_file_lock_blocks_until_guard_is_released`；`ReleaseSigner`/`ReleaseVerifier` 使用域分离 canonical descriptor、内容派生 `ReleaseKeyId` 和严格 signed envelope；`ReleaseProvenance` 绑定 Build Manifest、Artifact、Runtime Publication 与 Container 的 revision/hash/长度/依赖事实；持久 trust policy 的跨进程锁在 Unix/Windows 覆盖 stale-writer 检查和原子替换；`package`/`validate` 写入并逐字节复核 `provenance.bin`；`prism_asset_build_cli` 的 `validate --trust-policy-file` 通过 `ReleaseTrustStore::open` 验证持久化策略，`package_validate.rs` 覆盖成功、撤销 key 和互斥参数 | 密钥托管、跨机器 anti-rollback、远程发布服务、外部源码/工具链/Worker 证明和审计服务仍未完成 |
@@ -497,6 +539,15 @@ FBX/USD/glTF 内部的 Mesh、Skeleton、Animation 等子资产不能只按数�
 - 重导入时输出子资产匹配报告：保留、增加、删除、疑似重命名。
 - 删除仍被引用的子资产时阻断提交，或要求显式重定向。
 
+> **当前实现边界**：`EditableAsset::plan_subasset_reimport` 提供无副作用的稳定 ID
+> 对账切片：输入与输出目录必须严格排序；同 ID 的 kind 变化被拒绝，名字变化被记录
+> 为确认重命名；ID 变化不做启发式匹配，只接受 caller 给出的 kind 相同 redirect。
+> `EditableWorkspace::reimport` 已将该计划接入本地工作区：它捕获嵌入或 caller-owned
+> external source snapshot，调用 caller-owned `EditableReimporter`，用显式
+> `EditableSubAssetReference` 找出被引用的删除，按 redirect 更新显式引用并通过
+> caller-owned `EditablePayloadReferenceRewriter` 更新不透明载荷；整个候选图验证后以
+> 有锁、可恢复的多包事务发布。稳定 ID 派生策略、远程源和语义合并仍由上层实现。
+
 ### 4.6 `DerivationClass`
 
 每一份派生数据（烘焙产物、缓存、代理、预计算场）都必须在 Recipe/Processor 描述符与 `docs/prism_derived_data_contract_zh.md` 中声明其调度与持久化等级：
@@ -544,6 +595,8 @@ Sub-asset Directory
   stable SubAssetId / name / kind
 Dependency Records
   hard / soft / editor-only dependencies
+Explicit Sub-asset References
+  target AssetId / stable SubAssetId / hard | soft | editor-only
 Editable Payload
   lossless or sufficiently high-fidelity authoring representation
 Optional Preview

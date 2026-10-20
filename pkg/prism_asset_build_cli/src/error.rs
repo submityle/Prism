@@ -7,6 +7,8 @@ pub enum CommandError {
     Io(std::io::Error),
     Source(prism_asset_build_core::SourceError),
     Build(prism_asset_build_core::BuildExecutionError),
+    Editable(prism_asset_build_core::EditableAssetError),
+    EditableBuild(prism_asset_build_core::EditableBuildError),
     Store(prism_asset_build_core::PublishError),
     Cas(CasError),
     Ddc(prism_asset_build_core::DdcError),
@@ -25,6 +27,8 @@ impl CommandError {
             Self::Io(_) => "io_error",
             Self::Source(_) => "source_error",
             Self::Build(_) => "build_error",
+            Self::Editable(_) => "editable_error",
+            Self::EditableBuild(_) => "editable_build_error",
             Self::Store(_) => "store_error",
             Self::Cas(_) => "cas_error",
             Self::Ddc(_) => "ddc_error",
@@ -44,6 +48,8 @@ impl fmt::Display for CommandError {
             Self::Io(error) => write!(f, "I/O error: {error}"),
             Self::Source(error) => write!(f, "source error: {error}"),
             Self::Build(error) => write!(f, "{error}"),
+            Self::Editable(error) => write!(f, "editable workspace error: {error}"),
+            Self::EditableBuild(error) => write!(f, "editable build failed: {error}"),
             Self::Store(error) => write!(f, "store error: {error}"),
             Self::Cas(error) => write!(f, "CAS error: {error}"),
             Self::Ddc(error) => write!(f, "DDC error: {error}"),
@@ -57,6 +63,18 @@ impl fmt::Display for CommandError {
 }
 
 impl std::error::Error for CommandError {}
+
+impl From<prism_asset_build_core::EditableAssetError> for CommandError {
+    fn from(error: prism_asset_build_core::EditableAssetError) -> Self {
+        Self::Editable(error)
+    }
+}
+
+impl From<prism_asset_build_core::EditableBuildError> for CommandError {
+    fn from(error: prism_asset_build_core::EditableBuildError) -> Self {
+        Self::EditableBuild(error)
+    }
+}
 
 impl From<std::io::Error> for CommandError {
     fn from(error: std::io::Error) -> Self {

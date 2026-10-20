@@ -1,4 +1,5 @@
 use crate::args::{Package, Plan, Validate, Why};
+use crate::editable::WorkspaceInput;
 use crate::error::CommandError;
 use crate::mapping;
 use crate::output::{
@@ -206,6 +207,14 @@ pub fn package(command: Package) -> Result<PackageResult, CommandError> {
         command.mapping.as_deref(),
         command.asset_id,
         command.logical_path.as_deref(),
+        WorkspaceInput {
+            workspace: command.workspace.as_deref(),
+            roots: &command.root,
+            max_snapshot_bytes: command.max_snapshot_bytes,
+            profile_hash: command.profile_hash.as_deref(),
+            toolchain_fingerprint: command.toolchain_fingerprint.as_deref(),
+            environment_fingerprint: command.environment_fingerprint.as_deref(),
+        },
     )?;
     write_package(&command.output, &prepared)?;
     if let Some(path) = command.signing_key_file.as_deref() {
@@ -231,6 +240,14 @@ pub fn validate(command: Validate) -> Result<PackageResult, CommandError> {
         command.mapping.as_deref(),
         command.asset_id,
         command.logical_path.as_deref(),
+        WorkspaceInput {
+            workspace: command.workspace.as_deref(),
+            roots: &command.root,
+            max_snapshot_bytes: command.max_snapshot_bytes,
+            profile_hash: command.profile_hash.as_deref(),
+            toolchain_fingerprint: command.toolchain_fingerprint.as_deref(),
+            environment_fingerprint: command.environment_fingerprint.as_deref(),
+        },
     )?;
     validate_package_output(&command.package, &prepared)?;
     let signature = validate_release_signature(
@@ -256,9 +273,12 @@ fn prepare_package(
     mapping_path: Option<&Path>,
     asset_id: Option<u128>,
     logical_path: Option<&str>,
+    editable: WorkspaceInput<'_>,
 ) -> Result<PreparedPackage, CommandError> {
-    let mappings = match mapping_path {
-        Some(path) => {
+    let editable_plan = editable.package_plan(mapping_path, asset_id, logical_path)?;
+    let mappings = match (editable_plan.as_ref(), mapping_path) {
+        (Some(_), _) => Vec::new(),
+        (None, Some(path)) => {
             if asset_id.is_some() || logical_path.is_some() {
                 return Err(CommandError::InvalidInput(
                     "--mapping cannot be combined with --asset-id or --logical-path".into(),
@@ -269,7 +289,7 @@ fn prepare_package(
                 CommandError::InvalidInput(format!("mapping {}: {error}", path.display()))
             })?
         }
-        None => {
+        (None, None) => {
             let asset_id = asset_id.ok_or_else(|| {
                 CommandError::InvalidInput(
                     "legacy package input requires --asset-id and --logical-path".into(),
@@ -292,11 +312,19 @@ fn prepare_package(
     let report = gate.validate_manifest(&manifest, store.cas())?;
 
     let build_manifest_hash = ContentHash::digest(&manifest.canonical_bytes());
-    let package = prism_asset_build_core::package_runtime(PackageRequest {
-        manifest: &manifest,
-        cas: store.cas(),
-        mappings: package_mappings(&manifest, mappings)?,
-    })?;
+    let package = match editable_plan {
+        Some(plan) => plan.package_manifest(
+            &manifest,
+            store.cas(),
+            "core",
+            prism_asset_build_core::PackageOptions::default(),
+        )?,
+        None => prism_asset_build_core::package_runtime(PackageRequest {
+            manifest: &manifest,
+            cas: store.cas(),
+            mappings: package_mappings(&manifest, mappings)?,
+        })?,
+    };
     if package.source_manifest_hash != build_manifest_hash {
         return Err(CommandError::InvalidInput(
             "runtime package source manifest hash is inconsistent".into(),

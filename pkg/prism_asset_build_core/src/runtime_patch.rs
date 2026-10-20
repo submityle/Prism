@@ -660,7 +660,8 @@ fn namespace_changed_mappings(
 /// These context routes intentionally do not add payload bytes: unchanged
 /// containers remain owned by the base package. Keeping the context routes in
 /// the patch manifest makes the delta self-describing while preserving the
-/// incremental payload guarantee.
+/// incremental payload guarantee. Optional targets contribute context only
+/// when present; missing hard targets remain errors.
 fn complete_patch_dependency_context(
     patch: &mut RuntimeManifest,
     target: &RuntimeManifest,
@@ -676,7 +677,13 @@ fn complete_patch_dependency_context(
             .metadata(guid)
             .ok_or(RuntimePatchError::TargetRouteMissing { guid })?;
         pending.extend(metadata.hard_dependencies.iter().copied());
-        pending.extend(metadata.optional_dependencies.iter().copied());
+        pending.extend(
+            metadata
+                .optional_dependencies
+                .iter()
+                .copied()
+                .filter(|dependency| target.route(*dependency).is_some()),
+        );
     }
 
     for guid in &closure {
@@ -822,6 +829,18 @@ fn build_target_runtime_manifest(
             .collect::<Result<BTreeSet<_>, _>>()?
             .into_iter()
             .collect::<Vec<_>>();
+        // Build descriptors carry only hard edges. Preserve soft references
+        // on reused routes, including targets removed by this patch.
+        let optional_dependencies = if selected_assets.contains(asset) {
+            Vec::new()
+        } else {
+            base_package
+                .runtime_manifest
+                .metadata(guid)
+                .ok_or(RuntimePatchError::TargetRouteMissing { guid })?
+                .optional_dependencies
+                .clone()
+        };
         target
             .insert_with_metadata(
                 ManifestRoute {
@@ -832,7 +851,7 @@ fn build_target_runtime_manifest(
                 },
                 ManifestMetadata {
                     hard_dependencies,
-                    optional_dependencies: Vec::new(),
+                    optional_dependencies,
                     initial_residency: 0,
                     streaming_level: 0,
                     codec: prism_asset_container::Codec::Raw,

@@ -7,6 +7,12 @@ use crate::pipeline;
 pub fn run(command: Command) -> Result<CommandResult, CommandError> {
     match command {
         Command::Plan(command) => pipeline::plan(command).map(CommandResult::Plan),
+        Command::EditablePlan(command) => {
+            crate::editable::plan(command).map(CommandResult::EditablePlan)
+        }
+        Command::EditableBuild(command) => {
+            crate::editable::build(command).map(CommandResult::EditableBuild)
+        }
         Command::Import(command) => pipeline::publish(
             command.source,
             command.logical_path,

@@ -24,6 +24,12 @@ pub mod cas;
 pub mod ddc;
 /// Deterministic changed-job propagation for incremental build planning.
 pub mod dirty;
+/// Canonical bounded `.prism` editable-asset package contract.
+pub mod editable;
+/// Saved editable payload cooking and runtime packaging.
+pub mod editable_build;
+/// Importer namespace and persistent-key based subasset identities.
+pub mod editable_identity;
 /// Executes a build graph through DDC/CAS into transactional publication.
 pub mod executor;
 /// Deterministic dependency graph and serial processor execution.
@@ -87,6 +93,24 @@ pub use ddc::{Ddc, DdcCapacity, DdcError, DdcEviction, DerivedDataCache, LocalDd
 pub use dirty::{
     BuildInputSnapshot, DirtySet, DirtySetError, InvalidationPlan, InvalidationReason,
     ProfileFieldChange, RebuildExplanationError,
+};
+pub use editable::{
+    EditableAsset, EditableAssetError, EditableDependency, EditableDependencyKind,
+    EditablePayloadReferenceRewriter, EditableReimportOutput, EditableReimporter,
+    EditableSourceProvider, EditableSubAsset, EditableSubAssetChange, EditableSubAssetRedirect,
+    EditableSubAssetReference, EditableSubAssetReferenceRewrite, EditableSubAssetReimportPlan,
+    EditableWorkspace, EditableWorkspaceEdit, EditableWorkspaceReimport, EditableWorkspaceSave,
+    LocalFileSourceProvider, SourceRecord, EDITABLE_ASSET_SCHEMA, MAX_EDITABLE_ASSET_BYTES,
+    MAX_EDITABLE_WORKSPACE_ENCODED_BYTES,
+};
+pub use editable_build::{
+    CanonicalEditableImageCooker, EditableBuildError, EditableBuildOptions, EditableBuildPlan,
+    EditableCookDependency, EditableCookInput, EditableCooker, EditableCookerDescriptor,
+    EditableCookerRegistry,
+};
+pub use editable_identity::{
+    build_editable_subasset_directory, derive_editable_subasset_id, EditableSubAssetIdentityError,
+    EditableSubAssetInput,
 };
 pub use executor::{
     ArtifactSpec, BuildExecution, BuildExecutionError, BuildExecutor, BuildOutputMemoryStats,

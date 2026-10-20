@@ -1,0 +1,771 @@
+use prism_asset::StableGuid;
+use prism_asset_build_core::{
+    import::IMAGE_ARTIFACT_KIND, AssetId, BuildResources, BuildRevision, DerivedDataCache,
+    EditableAsset, EditableBuildError, EditableBuildOptions, EditableBuildPlan,
+    EditableCookDependency, EditableCookInput, EditableCooker, EditableCookerDescriptor,
+    EditableCookerRegistry, EditableDependency, EditableDependencyKind as Kind, EditableSubAsset,
+    EditableSubAssetReference, EditableWorkspace, JobId, PackageOptions, ProcessorError,
+    ProcessorIdentity, RevisionStore, SourceRecord,
+};
+use prism_asset_container::{ContainerReader, OverlaySet, RuntimeManifest};
+use prism_image::{
+    AlphaCoveragePolicy, ImageArtifactMipLevel, ImageMipArtifact, RuntimeImageLoader,
+    TextureSemantic,
+};
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
+
+fn asset(id: u128, payload: &[u8]) -> EditableAsset {
+    EditableAsset::new(
+        AssetId(id),
+        42,
+        0,
+        b"settings".to_vec(),
+        SourceRecord::embedded("source.bin", "test/raw", b"old source".to_vec()).unwrap(),
+        vec![EditableSubAsset {
+            id: 4,
+            name: "part".into(),
+            kind: 42,
+        }],
+        Vec::new(),
+        Vec::new(),
+        payload.to_vec(),
+        None,
+    )
+    .unwrap()
+}
+
+fn dependency(id: u128, kind: Kind) -> EditableDependency {
+    EditableDependency {
+        asset: AssetId(id),
+        kind,
+    }
+}
+
+fn snapshot(assets: Vec<EditableAsset>) -> BTreeMap<AssetId, EditableAsset> {
+    assets.into_iter().map(|a| (a.asset, a)).collect()
+}
+
+struct Cooker {
+    calls: Arc<AtomicUsize>,
+    descriptions: Arc<AtomicUsize>,
+    expected_payload_pointer: Option<usize>,
+    max_output_bytes: u64,
+}
+impl EditableCooker for Cooker {
+    fn descriptor(&self) -> EditableCookerDescriptor {
+        self.descriptions.fetch_add(1, Ordering::SeqCst);
+        EditableCookerDescriptor {
+            authoring_kind: 42,
+            identity: ProcessorIdentity::new(123, 1),
+            output_kind: 43,
+            output_schema: 1,
+            alignment: 4,
+            max_output_bytes: self.max_output_bytes,
+            resources: BuildResources {
+                memory_bytes: 1024,
+                ..BuildResources::default()
+            },
+        }
+    }
+    fn cook(
+        &self,
+        input: &EditableCookInput,
+        dependencies: &[EditableCookDependency<'_>],
+    ) -> Result<Vec<u8>, ProcessorError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        if let Some(pointer) = self.expected_payload_pointer {
+            assert_eq!(input.authoring_payload.as_ptr() as usize, pointer);
+        }
+        assert!(input
+            .dependencies
+            .iter()
+            .all(|d| d.kind != Kind::EditorOnly));
+        assert!(input
+            .subasset_references
+            .iter()
+            .all(|r| r.kind != Kind::EditorOnly));
+        assert!(dependencies.windows(2).all(|d| d[0].asset < d[1].asset));
+        if input.authoring_payload == b"fail" {
+            return Err(ProcessorError::new("deliberate cook failure"));
+        }
+        let mut bytes = input.authoring_payload.clone();
+        for dependency in dependencies {
+            bytes.extend_from_slice(dependency.bytes);
+        }
+        Ok(bytes)
+    }
+}
+
+fn registry() -> (EditableCookerRegistry, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let descriptions = Arc::new(AtomicUsize::new(0));
+    let mut registry = EditableCookerRegistry::new();
+    registry
+        .register(Cooker {
+            calls: calls.clone(),
+            descriptions: descriptions.clone(),
+            expected_payload_pointer: None,
+            max_output_bytes: 4096,
+        })
+        .unwrap();
+    (registry, calls, descriptions)
+}
+
+fn plan(
+    assets: Vec<EditableAsset>,
+    roots: &[u128],
+    registry: &EditableCookerRegistry,
+) -> Result<EditableBuildPlan, EditableBuildError> {
+    EditableBuildPlan::from_snapshot(
+        snapshot(assets),
+        &roots.iter().map(|id| AssetId(*id)).collect::<Vec<_>>(),
+        registry,
+        &EditableBuildOptions::default(),
+    )
+}
+
+#[test]
+fn saved_image_payload_survives_workspace_snapshot_cook_package_and_runtime_load() {
+    let root = tempfile::tempdir().unwrap();
+    let image = ImageMipArtifact {
+        width: 2,
+        height: 2,
+        semantic: TextureSemantic::ColorSrgb,
+        alpha: AlphaCoveragePolicy::Preserve,
+        levels: vec![
+            ImageArtifactMipLevel {
+                width: 2,
+                height: 2,
+                rgba8: [17, 31, 47, 255].repeat(4),
+            },
+            ImageArtifactMipLevel {
+                width: 1,
+                height: 1,
+                rgba8: vec![19, 33, 49, 255],
+            },
+        ],
+    };
+    let mut saved = asset(7, &image.encode().unwrap());
+    saved.kind = IMAGE_ARTIFACT_KIND;
+    saved.dependencies = vec![
+        dependency(999, Kind::Soft),
+        dependency(1000, Kind::EditorOnly),
+    ];
+    saved.subasset_references = vec![EditableSubAssetReference {
+        asset: AssetId(999),
+        subasset: 4,
+        kind: Kind::Soft,
+    }];
+    saved
+        .write_to_path(root.path().join("edited.prism"))
+        .unwrap();
+    let workspace = EditableWorkspace::open(root.path()).unwrap();
+    let plan = EditableBuildPlan::from_workspace(
+        &workspace,
+        &[AssetId(7)],
+        &EditableCookerRegistry::with_builtin(),
+        &EditableBuildOptions::default(),
+    )
+    .unwrap();
+    // Replacing the persisted payload after planning cannot change the frozen job.
+    saved.authoring_payload = b"bad later edit".to_vec();
+    saved
+        .write_to_path(root.path().join("edited.prism"))
+        .unwrap();
+    let store = RevisionStore::open(root.path().join("build")).unwrap();
+    let mut ddc = DerivedDataCache::open(root.path().join("ddc")).unwrap();
+    let execution = plan
+        .execute(
+            &store,
+            &mut ddc,
+            BuildRevision(0),
+            2,
+            BuildResources::UNLIMITED,
+            true,
+        )
+        .unwrap();
+    assert_eq!(execution.published.manifest.entries.len(), 1);
+    let package = plan
+        .package(&execution, store.cas(), "images", PackageOptions::default())
+        .unwrap();
+    assert_eq!(
+        package,
+        plan.package(&execution, store.cas(), "images", PackageOptions::default())
+            .unwrap()
+    );
+    let reopened = RevisionStore::open(root.path().join("build")).unwrap();
+    assert_eq!(
+        package,
+        plan.package_manifest(
+            &reopened.manifest(BuildRevision(0)).unwrap(),
+            reopened.cas(),
+            "images",
+            PackageOptions::default(),
+        )
+        .unwrap()
+    );
+    let manifest = RuntimeManifest::decode(&package.runtime_manifest_bytes).unwrap();
+    let guid = StableGuid::from_u128(7);
+    assert_eq!(
+        manifest.metadata(guid).unwrap().optional_dependencies,
+        [StableGuid::from_u128(999)]
+    );
+    let mut overlays = OverlaySet::new();
+    overlays.mount(
+        "images",
+        0,
+        ContainerReader::new(package.container_bytes("images").unwrap().to_vec()).unwrap(),
+    );
+    let loaded = RuntimeImageLoader::new(manifest, overlays)
+        .load(guid)
+        .unwrap();
+    assert_eq!(loaded.data(), image.levels[0].rgba8);
+    assert_eq!(loaded.mip_level_count(), 2);
+    assert_eq!(loaded.mip_data(1).unwrap(), image.levels[1].rgba8);
+}
+
+#[test]
+fn hard_closure_is_ordered_while_soft_and_editor_only_targets_do_not_cook() {
+    let (registry, calls, descriptions) = registry();
+    let mut parent = asset(9, b"parent");
+    parent.dependencies = vec![
+        dependency(1, Kind::Hard),
+        dependency(4, Kind::Hard),
+        dependency(20, Kind::Soft),
+        dependency(30, Kind::EditorOnly),
+    ];
+    let mut ignored = asset(20, b"ignored");
+    ignored.kind = 999;
+    let plan = plan(
+        vec![parent, asset(4, b"four"), asset(1, b"one"), ignored],
+        &[9],
+        &registry,
+    )
+    .unwrap();
+    assert_eq!(
+        plan.graph().execution_order().unwrap(),
+        [JobId(1), JobId(4), JobId(9)]
+    );
+    let root = tempfile::tempdir().unwrap();
+    let store = RevisionStore::open(root.path()).unwrap();
+    let mut ddc = DerivedDataCache::open(root.path().join("ddc")).unwrap();
+    let execution = plan
+        .execute(
+            &store,
+            &mut ddc,
+            BuildRevision(0),
+            2,
+            BuildResources::UNLIMITED,
+            false,
+        )
+        .unwrap();
+    let output = &execution.published.manifest.entries[&AssetId(9)];
+    assert_eq!(
+        store.cas().read(output.content_hash).unwrap(),
+        b"parentonefour"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    assert_eq!(descriptions.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn semantic_edit_rebuilds_only_its_successors_and_editor_metadata_reuses_cache() {
+    let (registry, calls, _) = registry();
+    let root = tempfile::tempdir().unwrap();
+    let store = RevisionStore::open(root.path()).unwrap();
+    let mut ddc = DerivedDataCache::open(root.path().join("ddc")).unwrap();
+    let mut source = asset(1, b"original");
+    let mut consumer = asset(2, b"consumer");
+    consumer.dependencies = vec![dependency(1, Kind::Hard)];
+    let build = |source: EditableAsset| {
+        plan(
+            vec![source, consumer.clone(), asset(3, b"unrelated")],
+            &[2, 3],
+            &registry,
+        )
+        .unwrap()
+    };
+    build(source.clone())
+        .execute(
+            &store,
+            &mut ddc,
+            BuildRevision(0),
+            3,
+            BuildResources::UNLIMITED,
+            false,
+        )
+        .unwrap();
+    source.source =
+        SourceRecord::embedded("moved.bin", "new/format", b"different raw source".to_vec())
+            .unwrap();
+    source.preview = Some(b"different preview".to_vec());
+    source.dependencies = vec![dependency(999, Kind::EditorOnly)];
+    source.subasset_references = vec![EditableSubAssetReference {
+        asset: AssetId(999),
+        subasset: 4,
+        kind: Kind::EditorOnly,
+    }];
+    let warm = build(source.clone())
+        .execute(
+            &store,
+            &mut ddc,
+            BuildRevision(1),
+            3,
+            BuildResources::UNLIMITED,
+            false,
+        )
+        .unwrap();
+    assert_eq!(
+        warm.cache_hits,
+        BTreeSet::from([JobId(1), JobId(2), JobId(3)])
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    source.authoring_payload = b"edited".to_vec();
+    let next = build(source)
+        .execute(
+            &store,
+            &mut ddc,
+            BuildRevision(2),
+            3,
+            BuildResources::UNLIMITED,
+            false,
+        )
+        .unwrap();
+    assert_eq!(next.cache_hits, BTreeSet::from([JobId(3)]));
+    assert_eq!(calls.load(Ordering::SeqCst), 5);
+    let descriptor = &next.published.manifest.entries[&AssetId(2)];
+    assert_eq!(
+        store.cas().read(descriptor.content_hash).unwrap(),
+        b"consumeredited"
+    );
+}
+
+#[test]
+fn all_cooker_visible_metadata_and_build_contracts_participate_in_identity() {
+    let (registry, _, _) = registry();
+    let original = asset(1, b"payload");
+    let key = |value: EditableAsset, options: &EditableBuildOptions| {
+        let plan = EditableBuildPlan::from_snapshot(
+            snapshot(vec![value]),
+            &[AssetId(1)],
+            &registry,
+            options,
+        )
+        .unwrap();
+        plan.specs()[&JobId(1)].artifact_key(1, &[]).unwrap()
+    };
+    let options = EditableBuildOptions::default();
+    let expected = key(original.clone(), &options);
+    let mut variants = Vec::new();
+    let mut a = original.clone();
+    a.flags = 1;
+    variants.push(a);
+    let mut a = original.clone();
+    a.canonical_settings.push(1);
+    variants.push(a);
+    let mut a = original.clone();
+    a.subassets[0].name = "renamed".into();
+    variants.push(a);
+    let mut a = original.clone();
+    a.subassets[0].kind = 99;
+    variants.push(a);
+    let mut a = original.clone();
+    a.dependencies = vec![dependency(99, Kind::Soft)];
+    variants.push(a);
+    let mut a = original.clone();
+    a.subasset_references = vec![EditableSubAssetReference {
+        asset: AssetId(99),
+        subasset: 4,
+        kind: Kind::Soft,
+    }];
+    variants.push(a);
+    for value in variants {
+        assert_ne!(key(value, &options), expected);
+    }
+    for options in [
+        EditableBuildOptions {
+            profile_hash: [1; 32],
+            ..Default::default()
+        },
+        EditableBuildOptions {
+            toolchain_fingerprint: b"tool".to_vec(),
+            ..Default::default()
+        },
+        EditableBuildOptions {
+            environment_fingerprint: b"env".to_vec(),
+            ..Default::default()
+        },
+    ] {
+        assert_ne!(key(original.clone(), &options), expected);
+    }
+}
+
+#[test]
+fn missing_hard_invalid_subasset_and_cycles_reject_before_execution() {
+    let (registry, calls, _) = registry();
+    let mut first = asset(1, b"one");
+    first.dependencies = vec![dependency(2, Kind::Hard)];
+    assert!(matches!(
+        plan(vec![first.clone()], &[1], &registry),
+        Err(EditableBuildError::MissingAsset(AssetId(2)))
+    ));
+    let mut second = asset(2, b"two");
+    second.dependencies = vec![dependency(1, Kind::Hard)];
+    assert!(matches!(
+        plan(vec![first, second], &[1], &registry),
+        Err(EditableBuildError::Graph(_))
+    ));
+    let mut bad = asset(1, b"one");
+    bad.subasset_references = vec![EditableSubAssetReference {
+        asset: AssetId(2),
+        subasset: 999,
+        kind: Kind::Soft,
+    }];
+    assert!(matches!(
+        plan(vec![bad, asset(2, b"two")], &[1], &registry),
+        Err(EditableBuildError::MissingSubAsset { .. })
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn internal_subasset_references_do_not_form_artifact_cycles() {
+    let (registry, _, _) = registry();
+    let mut value = asset(1, b"one");
+    value.subasset_references = vec![EditableSubAssetReference {
+        asset: AssetId(1),
+        subasset: 4,
+        kind: Kind::Hard,
+    }];
+    let built = plan(vec![value.clone()], &[1], &registry).unwrap();
+    assert_eq!(built.graph().execution_order().unwrap(), [JobId(1)]);
+    value.subasset_references[0].subasset = 999;
+    assert!(matches!(
+        plan(vec![value], &[1], &registry),
+        Err(EditableBuildError::MissingSubAsset { .. })
+    ));
+}
+
+#[test]
+fn optional_cycles_roundtrip_without_entering_the_artifact_dag() {
+    let (registry, _, _) = registry();
+    let mut first = asset(1, b"one");
+    first.dependencies = vec![dependency(2, Kind::Soft)];
+    let mut second = asset(2, b"two");
+    second.dependencies = vec![dependency(1, Kind::Soft)];
+    let plan = plan(vec![first, second], &[1, 2], &registry).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let store = RevisionStore::open(root.path()).unwrap();
+    let mut ddc = DerivedDataCache::open(root.path().join("ddc")).unwrap();
+    let execution = plan
+        .execute(
+            &store,
+            &mut ddc,
+            BuildRevision(0),
+            2,
+            BuildResources::UNLIMITED,
+            false,
+        )
+        .unwrap();
+    let package = plan
+        .package(&execution, store.cas(), "data", PackageOptions::default())
+        .unwrap();
+    let decoded = RuntimeManifest::decode(&package.runtime_manifest_bytes).unwrap();
+    assert_eq!(
+        decoded
+            .metadata(StableGuid::from_u128(1))
+            .unwrap()
+            .optional_dependencies,
+        [StableGuid::from_u128(2)]
+    );
+    assert_eq!(
+        decoded
+            .metadata(StableGuid::from_u128(2))
+            .unwrap()
+            .optional_dependencies,
+        [StableGuid::from_u128(1)]
+    );
+}
+
+#[test]
+fn resource_output_and_cooker_failures_preserve_the_published_revision() {
+    let (registry, calls, _) = registry();
+    let root = tempfile::tempdir().unwrap();
+    let store = RevisionStore::open(root.path()).unwrap();
+    let mut ddc = DerivedDataCache::open(root.path().join("ddc")).unwrap();
+    let good = plan(vec![asset(1, b"good")], &[1], &registry).unwrap();
+    good.execute(
+        &store,
+        &mut ddc,
+        BuildRevision(0),
+        1,
+        BuildResources::UNLIMITED,
+        false,
+    )
+    .unwrap();
+    let changed = plan(vec![asset(1, b"new")], &[1], &registry).unwrap();
+    assert!(changed
+        .execute(
+            &store,
+            &mut ddc,
+            BuildRevision(1),
+            1,
+            BuildResources {
+                memory_bytes: 1,
+                ..BuildResources::UNLIMITED
+            },
+            false
+        )
+        .is_err());
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let failing = plan(vec![asset(1, b"fail")], &[1], &registry).unwrap();
+    assert!(failing
+        .execute(
+            &store,
+            &mut ddc,
+            BuildRevision(1),
+            1,
+            BuildResources::UNLIMITED,
+            false
+        )
+        .is_err());
+    let oversized = plan(vec![asset(1, &vec![0; 4097])], &[1], &registry).unwrap();
+    assert!(oversized
+        .execute(
+            &store,
+            &mut ddc,
+            BuildRevision(1),
+            1,
+            BuildResources::UNLIMITED,
+            false
+        )
+        .is_err());
+    assert_eq!(store.current_revision().unwrap(), Some(BuildRevision(0)));
+}
+
+#[test]
+fn tightened_output_contract_cannot_reuse_an_oversized_warm_artifact() {
+    let (registry, calls, _) = registry();
+    let root = tempfile::tempdir().unwrap();
+    let store = RevisionStore::open(root.path()).unwrap();
+    let mut ddc = DerivedDataCache::open(root.path().join("ddc")).unwrap();
+    let original = plan(vec![asset(1, b"oversized")], &[1], &registry).unwrap();
+    let first = original
+        .execute(
+            &store,
+            &mut ddc,
+            BuildRevision(0),
+            1,
+            BuildResources::UNLIMITED,
+            false,
+        )
+        .unwrap();
+    let warm = original
+        .execute(
+            &store,
+            &mut ddc,
+            BuildRevision(1),
+            1,
+            BuildResources::UNLIMITED,
+            false,
+        )
+        .unwrap();
+    assert_eq!(warm.cache_hits, BTreeSet::from([JobId(1)]));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    let mut tightened_registry = EditableCookerRegistry::new();
+    tightened_registry
+        .register(Cooker {
+            calls: calls.clone(),
+            descriptions: Arc::new(AtomicUsize::new(0)),
+            expected_payload_pointer: None,
+            max_output_bytes: 4,
+        })
+        .unwrap();
+    let tightened = plan(vec![asset(1, b"oversized")], &[1], &tightened_registry).unwrap();
+    assert_ne!(original.specs()[&JobId(1)], tightened.specs()[&JobId(1)]);
+    assert!(tightened
+        .execute(
+            &store,
+            &mut ddc,
+            BuildRevision(2),
+            1,
+            BuildResources::UNLIMITED,
+            false,
+        )
+        .is_err());
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(store.current_revision().unwrap(), Some(BuildRevision(1)));
+    assert_eq!(
+        store
+            .cas()
+            .read(first.published.manifest.entries[&AssetId(1)].content_hash)
+            .unwrap(),
+        b"oversized"
+    );
+}
+
+#[test]
+fn large_fingerprints_have_fixed_per_node_storage_and_preserve_input_identity() {
+    let (registry, _, _) = registry();
+    let mut options = EditableBuildOptions {
+        toolchain_fingerprint: vec![17; 1024 * 1024],
+        environment_fingerprint: vec![31; 1024 * 1024],
+        ..Default::default()
+    };
+    let build = |options: &EditableBuildOptions| {
+        EditableBuildPlan::from_snapshot(
+            snapshot((1..=128).map(|id| asset(id, b"small")).collect()),
+            &(1..=128).map(AssetId).collect::<Vec<_>>(),
+            &registry,
+            options,
+        )
+        .unwrap()
+    };
+    let original = build(&options);
+    assert_eq!(
+        original
+            .specs()
+            .values()
+            .map(|spec| spec.toolchain_fingerprint.len() + spec.environment_fingerprint.len())
+            .sum::<usize>(),
+        128 * 64
+    );
+    let original_key = original.specs()[&JobId(1)].artifact_key(1, &[]).unwrap();
+    options.toolchain_fingerprint[1024 * 1024 - 1] ^= 1;
+    assert_ne!(
+        build(&options).specs()[&JobId(1)]
+            .artifact_key(1, &[])
+            .unwrap(),
+        original_key
+    );
+    options.toolchain_fingerprint[1024 * 1024 - 1] ^= 1;
+    options.environment_fingerprint[1024 * 1024 - 1] ^= 1;
+    assert_ne!(
+        build(&options).specs()[&JobId(1)]
+            .artifact_key(1, &[])
+            .unwrap(),
+        original_key
+    );
+    options.environment_fingerprint.push(0);
+    assert!(matches!(
+        EditableBuildPlan::from_snapshot(
+            snapshot(vec![asset(1, b"small")]),
+            &[AssetId(1)],
+            &registry,
+            &options,
+        ),
+        Err(EditableBuildError::Limit("fingerprint bytes"))
+    ));
+}
+
+#[test]
+fn plan_moves_payload_allocation_and_freezes_the_cooker_descriptor_once() {
+    let value = asset(1, b"unique allocation");
+    let pointer = value.authoring_payload.as_ptr() as usize;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let descriptions = Arc::new(AtomicUsize::new(0));
+    let mut registry = EditableCookerRegistry::new();
+    registry
+        .register(Cooker {
+            calls: calls.clone(),
+            descriptions: descriptions.clone(),
+            expected_payload_pointer: Some(pointer),
+            max_output_bytes: 4096,
+        })
+        .unwrap();
+    let plan = plan(vec![value], &[1], &registry).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let store = RevisionStore::open(root.path()).unwrap();
+    let mut ddc = DerivedDataCache::open(root.path().join("ddc")).unwrap();
+    plan.execute(
+        &store,
+        &mut ddc,
+        BuildRevision(0),
+        1,
+        BuildResources::UNLIMITED,
+        true,
+    )
+    .unwrap();
+    assert_eq!(descriptions.load(Ordering::SeqCst), 1);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn packaging_rejects_an_execution_from_another_frozen_plan() {
+    let (registry, _, _) = registry();
+    let first = plan(vec![asset(1, b"one")], &[1], &registry).unwrap();
+    let second = plan(vec![asset(1, b"two")], &[1], &registry).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let store = RevisionStore::open(root.path()).unwrap();
+    let mut ddc = DerivedDataCache::open(root.path().join("ddc")).unwrap();
+    let execution = first
+        .execute(
+            &store,
+            &mut ddc,
+            BuildRevision(0),
+            1,
+            BuildResources::UNLIMITED,
+            false,
+        )
+        .unwrap();
+    assert!(matches!(
+        second.package(&execution, store.cas(), "data", PackageOptions::default()),
+        Err(EditableBuildError::ManifestMismatch)
+    ));
+    assert!(matches!(
+        second.package_manifest(
+            &execution.published.manifest,
+            store.cas(),
+            "data",
+            PackageOptions::default()
+        ),
+        Err(EditableBuildError::ManifestMismatch)
+    ));
+    let mut oversized = execution.published.manifest.clone();
+    oversized.entries.get_mut(&AssetId(1)).unwrap().byte_len = 4097;
+    assert!(matches!(
+        first.package_manifest(&oversized, store.cas(), "data", PackageOptions::default()),
+        Err(EditableBuildError::ManifestMismatch)
+    ));
+}
+
+#[test]
+fn invalid_identity_snapshot_budget_and_empty_roots_are_rejected() {
+    let (registry, _, _) = registry();
+    assert!(matches!(
+        plan(vec![], &[], &registry),
+        Err(EditableBuildError::EmptyRoots)
+    ));
+    assert!(matches!(
+        EditableBuildPlan::from_snapshot(
+            BTreeMap::from([(AssetId(2), asset(1, b"one"))]),
+            &[AssetId(2)],
+            &registry,
+            &Default::default()
+        ),
+        Err(EditableBuildError::InvalidIdentity(AssetId(2)))
+    ));
+    assert!(matches!(
+        EditableBuildPlan::from_snapshot(
+            snapshot(vec![asset(1, b"one")]),
+            &[AssetId(1)],
+            &registry,
+            &EditableBuildOptions {
+                max_snapshot_bytes: 1,
+                ..Default::default()
+            }
+        ),
+        Err(EditableBuildError::Limit(_))
+    ));
+    let mut unknown = asset(1, b"one");
+    unknown.kind = 999;
+    assert!(matches!(
+        plan(vec![unknown], &[1], &registry),
+        Err(EditableBuildError::MissingCooker { .. })
+    ));
+}

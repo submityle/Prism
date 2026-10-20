@@ -7,6 +7,7 @@
 mod args;
 mod cache;
 mod commands;
+mod editable;
 mod error;
 mod mapping;
 mod output;
@@ -98,6 +99,8 @@ fn command_hint(arguments: &[OsString]) -> Option<&'static str> {
     };
     match command.to_str()? {
         "plan" => Some("plan"),
+        "editable-plan" => Some("editable-plan"),
+        "editable-build" => Some("editable-build"),
         "import" => Some("import"),
         "build" => Some("build"),
         "package" => Some("package"),

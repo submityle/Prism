@@ -45,7 +45,9 @@ pub struct ManifestRoute {
 pub struct ManifestMetadata {
     /// Required route dependencies that must be available before this route.
     pub hard_dependencies: Vec<StableGuid>,
-    /// Optional route dependencies that may be prefetched or installed later.
+    /// Soft references that may be prefetched or installed later. Targets may
+    /// be absent, reference this route, or form cycles; only hard dependencies
+    /// constrain availability and dependency ordering.
     pub optional_dependencies: Vec<StableGuid>,
     /// Initial residency tier requested by the package.
     pub initial_residency: u8,
@@ -385,9 +387,6 @@ impl RuntimeManifest {
                 .iter()
                 .chain(&metadata.optional_dependencies)
             {
-                if !self.routes.contains_key(dependency) {
-                    return Err(ManifestError::InvalidFormat);
-                }
                 out.extend_from_slice(&dependency.to_u128().to_le_bytes());
             }
         }
@@ -581,17 +580,6 @@ impl RuntimeManifest {
                 ));
             }
         }
-        for metadata in metadata_map.values() {
-            for dependency in metadata
-                .hard_dependencies
-                .iter()
-                .chain(&metadata.optional_dependencies)
-            {
-                if !routes.contains_key(dependency) {
-                    return Err(ManifestError::InvalidFormat);
-                }
-            }
-        }
         validate_dependency_graph(&routes, &metadata_map)?;
         for name in containers.keys() {
             if !routes.values().any(|route| route.container_name == *name) {
@@ -617,11 +605,7 @@ fn validate_dependency_graph(
         .collect::<BTreeMap<_, _>>();
     let mut dependents = BTreeMap::<StableGuid, BTreeSet<StableGuid>>::new();
     for (guid, route_metadata) in metadata {
-        for dependency in route_metadata
-            .hard_dependencies
-            .iter()
-            .chain(&route_metadata.optional_dependencies)
-        {
+        for dependency in &route_metadata.hard_dependencies {
             if *dependency == *guid || !routes.contains_key(dependency) {
                 return Err(ManifestError::InvalidFormat);
             }

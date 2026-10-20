@@ -23,6 +23,8 @@ use std::io::{self, Write};
 #[serde(untagged)]
 pub enum CommandResult {
     Plan(PlanResult),
+    EditablePlan(crate::editable::EditablePlanResult),
+    EditableBuild(crate::editable::EditableBuildResult),
     Publish(PublishResult),
     Package(PackageResult),
     Validate(PackageResult),
@@ -408,6 +410,36 @@ fn text_atom(value: &str) -> String {
 impl CommandResult {
     fn write_human(&self, out: &mut impl Write) -> io::Result<()> {
         match self {
+            Self::EditablePlan(result) => {
+                writeln!(out, "roots={}", result.roots.join(","))?;
+                writeln!(out, "execution_order={}", result.execution_order.join(","))?;
+                for asset in &result.assets {
+                    writeln!(
+                        out,
+                        "asset={} kind={} schema={} processor={} version={}",
+                        asset.asset_id,
+                        asset.kind,
+                        asset.schema,
+                        asset.processor_id,
+                        asset.processor_version
+                    )?;
+                }
+            }
+            Self::EditableBuild(result) => {
+                writeln!(out, "revision={}", result.revision)?;
+                writeln!(out, "build_manifest_hash={}", result.build_manifest_hash)?;
+                writeln!(out, "cache_hits={}", result.cache_hits)?;
+                if let Some(count) = result.determinism_verified_jobs {
+                    writeln!(out, "determinism_verified_jobs={count}")?;
+                }
+                for asset in &result.artifacts {
+                    writeln!(
+                        out,
+                        "asset={} key={} hash={} bytes={}",
+                        asset.asset_id, asset.artifact_key, asset.content_hash, asset.bytes
+                    )?;
+                }
+            }
             Self::Plan(result) => {
                 writeln!(out, "source_path={}", result.source_path)?;
                 writeln!(out, "source_artifact_key={}", result.source_artifact_key)?;

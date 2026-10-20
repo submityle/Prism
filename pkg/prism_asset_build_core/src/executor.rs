@@ -214,6 +214,34 @@ impl BuildExecutor {
         max_concurrency: usize,
         verify_determinism: bool,
     ) -> Result<BuildExecution, BuildExecutionError> {
+        self.execute_explained_with_resources(
+            graph,
+            specs,
+            inputs,
+            store,
+            ddc,
+            revision,
+            max_concurrency,
+            BuildResources::UNLIMITED,
+            verify_determinism,
+        )
+    }
+
+    /// Persists invalidation explanations while enforcing declared concurrent
+    /// resource demand. Admission validates the entire graph before executing
+    /// processors; the budget is not a sandbox for processor allocations.
+    pub fn execute_explained_with_resources(
+        &self,
+        graph: &BuildGraph,
+        specs: &BTreeMap<JobId, ArtifactSpec>,
+        inputs: &BuildInputSnapshot,
+        store: &RevisionStore,
+        ddc: &mut DerivedDataCache,
+        revision: BuildRevision,
+        max_concurrency: usize,
+        budget: BuildResources,
+        verify_determinism: bool,
+    ) -> Result<BuildExecution, BuildExecutionError> {
         self.execute_with_limit(
             graph,
             specs,
@@ -222,7 +250,7 @@ impl BuildExecutor {
             revision,
             max_concurrency,
             verify_determinism,
-            BuildResources::UNLIMITED,
+            budget,
             None,
             Some(inputs),
         )

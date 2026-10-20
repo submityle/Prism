@@ -22,6 +22,13 @@
 
 ### 实施状态（2026-10-21）
 
+2026-10-21 编辑包消费边界：Build Core 已提供稳定子资产身份派生、冻结保存
+载荷的 Cook 计划，以及按完整旧包 hash 比较的批量保存。保存先校验整批引用
+和编码预算，失败不发布；成功复用本地 prepare/commit 恢复协议。Cook 不重新
+导入 source，hard/soft/editor-only 依赖分别处理，runtime 包保留 optional
+引用，允许目标尚未安装。该能力属于构建/编辑态协议，不改变运行时 loader
+的连续字节同步解码接口，也不代表完整 EDL 或编辑器工作流已经交付。
+
 2026-10-21 运行时值发布：`AssetServer::insert_runtime` 和 `replace_runtime`
 将进程内派生资产放入正常 typed arena，供现有事件快照与 RenderAsset 提取。
 替换保持原 handle/AssetId，只允许同 server 创建的 runtime allocation；
@@ -822,6 +829,15 @@ NotResident ─▶ Promoting(目标层级,后台解码中) ─▶ Resident(level
 > **归属声明**：离线烘焙、缓存键、DDC/CAS、Revision、打包与 Patch 的唯一持有者是 `Prism Asset Build`（`docs/prism_asset_build_design_zh.md` §2.7/§4.6/§10/§14）。本节只定义 `prism_asset` 侧的**消费契约**：读取编辑态资产包（§13.1）、适配进程内重烘（§13.2）、运行时容器与挂载（§13.3）；缓存键与 DDC 分层已收敛（§13.4）。
 
 `feature = "process"`（资产包与制品消费 + 进程内重烘适配）+ `pack`（运行时容器挂载）。「源资产 → 平台最优的运行时资产」的**生产**在 Asset Build，本 crate 负责**消费**与**挂载**，对标 Unreal cook 之后的运行时 IoStore 侧。
+
+> **当前实现边界**：`prism_asset_build_core::editable` 已有 `.prism` 的 canonical
+> 编解码、单包原子持久化和 `EditableWorkspace` 本地重导入发布。包覆盖身份、设置字节、
+> SourceRecord、子资产、依赖、显式子资产引用、编辑载荷和预览；`LocalFileSourceProvider`
+> 只读取 content root 内的有界普通文件。工作区以排他锁扫描非符号链接包，调用
+> caller-owned importer/不透明载荷引用改写器，验证候选引用图，并以可恢复的多包事务
+> 一次提交重导入包及其引用者；这仍属于 Asset Build 的编辑期所有权。其权威格式定义
+> 仍为 Asset Build 文档 §5.2。`prism_asset` 仍未提供 `process`/`pack` feature 所描述的
+> 编辑态包消费、source provider 接线、重导入调用入口或 runtime 装配接线。
 
 ### 13.1 单文件资产包（UE 形态：一个资产一个文件，无旁车）
 

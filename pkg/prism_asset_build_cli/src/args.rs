@@ -17,6 +17,8 @@ pub struct PrismAssetBuild {
 #[argh(subcommand)]
 pub enum Command {
     Plan(Plan),
+    EditablePlan(EditablePlan),
+    EditableBuild(EditableBuild),
     Import(Import),
     Build(Build),
     Package(Package),
@@ -33,6 +35,8 @@ impl Command {
     pub fn name(&self) -> &'static str {
         match self {
             Self::Plan(_) => "plan",
+            Self::EditablePlan(_) => "editable-plan",
+            Self::EditableBuild(_) => "editable-build",
             Self::Import(_) => "import",
             Self::Build(_) => "build",
             Self::Package(_) => "package",
@@ -60,6 +64,69 @@ pub struct Plan {
     /// published image AssetId as a decimal u128
     #[argh(option)]
     pub asset_id: u128,
+}
+
+/// Plan the hard closure of saved .prism payloads without importing source.
+#[derive(FromArgs)]
+#[argh(subcommand, name = "editable-plan")]
+pub struct EditablePlan {
+    /// editable workspace directory containing saved .prism packages
+    #[argh(option)]
+    pub workspace: PathBuf,
+    /// root AssetId as decimal u128; repeat for multiple roots
+    #[argh(option)]
+    pub root: Vec<u128>,
+    /// aggregate encoded snapshot budget, positive and at most 536870912 bytes
+    #[argh(option)]
+    pub max_snapshot_bytes: Option<u64>,
+    /// explicit 32-byte profile hash as 64 hexadecimal digits
+    #[argh(option)]
+    pub profile_hash: Option<String>,
+    /// explicit UTF-8 toolchain fingerprint, at most 1 MiB
+    #[argh(option)]
+    pub toolchain_fingerprint: Option<String>,
+    /// explicit UTF-8 environment fingerprint, at most 1 MiB
+    #[argh(option)]
+    pub environment_fingerprint: Option<String>,
+}
+
+/// Cook saved .prism payloads and atomically publish a build revision.
+#[derive(FromArgs)]
+#[argh(subcommand, name = "editable-build")]
+pub struct EditableBuild {
+    /// editable workspace directory containing saved .prism packages
+    #[argh(option)]
+    pub workspace: PathBuf,
+    /// root AssetId as decimal u128; repeat for multiple roots
+    #[argh(option)]
+    pub root: Vec<u128>,
+    /// local revision store directory
+    #[argh(option)]
+    pub store: PathBuf,
+    /// aggregate encoded snapshot budget, positive and at most 536870912 bytes
+    #[argh(option)]
+    pub max_snapshot_bytes: Option<u64>,
+    /// explicit 32-byte profile hash as 64 hexadecimal digits
+    #[argh(option)]
+    pub profile_hash: Option<String>,
+    /// explicit UTF-8 toolchain fingerprint, at most 1 MiB
+    #[argh(option)]
+    pub toolchain_fingerprint: Option<String>,
+    /// explicit UTF-8 environment fingerprint, at most 1 MiB
+    #[argh(option)]
+    pub environment_fingerprint: Option<String>,
+    /// maximum simultaneous cooker jobs; must be positive
+    #[argh(option, default = "1")]
+    pub max_concurrency: usize,
+    /// declared simultaneous CPU thread budget; must be positive
+    #[argh(option, default = "1")]
+    pub cpu_threads: u64,
+    /// declared cooker working memory budget in bytes (default 256 MiB)
+    #[argh(option, default = "268435456")]
+    pub memory_bytes: u64,
+    /// bypass DDC and compare two fresh executions per job before publication
+    #[argh(switch)]
+    pub verify_determinism: bool,
 }
 
 /// Import a PNG and publish its canonical RGBA8 artifact.
@@ -123,6 +190,24 @@ pub struct Package {
     /// explicit versioned runtime mapping file
     #[argh(option)]
     pub mapping: Option<PathBuf>,
+    /// saved .prism workspace; exclusive with mapping and legacy PNG identity
+    #[argh(option)]
+    pub workspace: Option<PathBuf>,
+    /// editable root AssetId as decimal u128; requires --workspace; repeatable
+    #[argh(option)]
+    pub root: Vec<u128>,
+    /// editable aggregate snapshot byte budget, positive and at most 536870912
+    #[argh(option)]
+    pub max_snapshot_bytes: Option<u64>,
+    /// editable build profile hash as 64 hexadecimal digits
+    #[argh(option)]
+    pub profile_hash: Option<String>,
+    /// explicit UTF-8 toolchain fingerprint used by the editable build
+    #[argh(option)]
+    pub toolchain_fingerprint: Option<String>,
+    /// explicit UTF-8 environment fingerprint used by the editable build
+    #[argh(option)]
+    pub environment_fingerprint: Option<String>,
     /// raw 32-byte Ed25519 seed file; writes release.sig without logging key material
     #[argh(option)]
     pub signing_key_file: Option<PathBuf>,
@@ -172,6 +257,24 @@ pub struct Validate {
     /// explicit versioned runtime mapping file
     #[argh(option)]
     pub mapping: Option<PathBuf>,
+    /// saved .prism workspace; exclusive with mapping and legacy PNG identity
+    #[argh(option)]
+    pub workspace: Option<PathBuf>,
+    /// editable root AssetId as decimal u128; requires --workspace; repeatable
+    #[argh(option)]
+    pub root: Vec<u128>,
+    /// editable aggregate snapshot byte budget, positive and at most 536870912
+    #[argh(option)]
+    pub max_snapshot_bytes: Option<u64>,
+    /// editable build profile hash as 64 hexadecimal digits
+    #[argh(option)]
+    pub profile_hash: Option<String>,
+    /// explicit UTF-8 toolchain fingerprint used by the editable build
+    #[argh(option)]
+    pub toolchain_fingerprint: Option<String>,
+    /// explicit UTF-8 environment fingerprint used by the editable build
+    #[argh(option)]
+    pub environment_fingerprint: Option<String>,
     /// raw 32-byte Ed25519 public key file used to verify release.sig
     #[argh(option)]
     pub verification_key_file: Option<PathBuf>,
