@@ -228,15 +228,11 @@ impl CpuRenderScene {
                 self.slots[handle.index as usize].record = None;
                 self.live_count -= 1;
                 report.destroyed += 1;
-                mark_dirty(
-                    report,
-                    handle,
-                    SceneFieldMask(
-                        SceneFieldMask::INSTANCE.0
-                            | SceneFieldMask::BOUNDS.0
-                            | SceneFieldMask::GENERATION.0,
-                    ),
-                );
+                // A tombstone is a complete zero row on the GPU. Mark every
+                // table so stale transforms cannot survive after the instance
+                // becomes inactive and later gets inspected by diagnostics,
+                // capture, or a reused stable slot.
+                mark_dirty(report, handle, SceneFieldMask::ALL);
             }
             SceneOperation::SetTransform { current, .. } => {
                 let slot = self.validate_slot_mut(handle)?;
@@ -308,9 +304,23 @@ impl CpuRenderScene {
         Ok(())
     }
 
-    pub fn record_at(&self, index: u32) -> Option<(u32, Option<&InstanceRecord>)> {
+    /// Returns the immutable generation and optional record stored at `index`.
+    ///
+    /// A missing vector entry returns `None`; an allocated tombstone returns
+    /// `Some((generation, None))`. The method deliberately exposes neither
+    /// the slot vector nor mutable records, so upload consumers can build GPU
+    /// rows without taking ownership of the CPU mirror.
+    pub fn row_at(&self, index: u32) -> Option<(u32, Option<&InstanceRecord>)> {
         let slot = self.slots.get(index as usize)?;
         Some((slot.generation, slot.record.as_ref()))
+    }
+
+    /// Returns the immutable generation and optional record stored at `index`.
+    ///
+    /// This compatibility spelling remains available to existing retained-scene
+    /// readers; new upload code should use [`Self::row_at`].
+    pub fn record_at(&self, index: u32) -> Option<(u32, Option<&InstanceRecord>)> {
+        self.row_at(index)
     }
 
     fn validate_slot(&self, handle: SceneHandle) -> Result<&CpuSceneSlot, SceneApplyError> {

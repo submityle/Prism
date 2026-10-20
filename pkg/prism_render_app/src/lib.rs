@@ -81,6 +81,7 @@ mod mesh_draw;
 mod mesh_pipeline;
 mod mesh_pipelines;
 mod mesh_source;
+mod native_scene_gpu;
 mod particle;
 mod pipeline_cache;
 mod pipeline_pass;
@@ -157,6 +158,10 @@ pub use mesh_pipeline::{
 pub use mesh_pipelines::{
     MeshPipelines, ResidentResponseModule, ResponseModuleCache, ResponseModuleCacheError,
     ResponseModuleSpec, SpineMeshPipeline,
+};
+pub use native_scene_gpu::{
+    extract_native_scene, prepare_native_scene_gpu, ExtractedNativeScene, NativeSceneGpuRow,
+    NativeSceneGpuState, NativeSceneGpuUploadError, NativeSceneGpuUploadReport,
 };
 pub use particle::{
     EmberCompiledGraphAssets, EmberExternalGpuResources, EmberGpuAssetRegistry,
@@ -255,6 +260,10 @@ pub mod prelude {
     pub use crate::mesh_pipelines::{
         MeshPipelines, ResidentResponseModule, ResponseModuleCache, ResponseModuleCacheError,
         ResponseModuleSpec, SpineMeshPipeline,
+    };
+    pub use crate::native_scene_gpu::{
+        ExtractedNativeScene, NativeSceneGpuRow, NativeSceneGpuState, NativeSceneGpuUploadError,
+        NativeSceneGpuUploadReport,
     };
     pub use crate::particle::{
         EmberCompiledGraphAssets, EmberExternalGpuResources, EmberGpuAssetRegistry,
