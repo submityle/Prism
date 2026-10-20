@@ -17,6 +17,7 @@
 RuntimeFence 同时保存 SequenceProjectToken、项目 revision 和 WorldId。prepare 只读世界并产生完整 before/after plan；apply 先逐项比较组件快照，再以无失败的 ECS 写入提交。rollback 只在 publication barrier 前、且组件仍等于 after-image 时恢复 before-image。相机 publication 或音频 graph hand-off 之后调用 publication_barrier，回滚会明确返回 Published，因为已对外部运行时可见的音频不能假装可逆。
 
 RuntimeTransport::Seek 不分发 crossed events，只从 samples 和 selector tracks 重建状态；Paused 保留音频 source frame；Stopped 停止所有已绑定播放器并停用绑定相机。所有更新受 max changes/events 限制。
+停止是控制面操作：即使资产已卸载或音频 runtime 尚未安装，仍会把绑定的 `AudioPlayer` 写成 `stop_requested = true`、`playing = false`，不会为了停止重新解析音频资源。
 
 ## 不在本切片内
 

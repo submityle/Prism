@@ -101,7 +101,7 @@ pub struct AudioTrackBinding {
     pub entity: Entity,
     /// Source-time track and offset.
     pub time: AudioTimeBinding,
-    /// Stable asset identity expected on the native AudioPlayer.
+    /// Stable asset identity expected on the native `AudioPlayer`.
     pub asset: AudioAssetHandle,
 }
 
@@ -168,7 +168,7 @@ pub enum SequenceRuntimeError {
     InvalidChannel(TrackId),
     /// A quaternion is zero-length or non-finite.
     InvalidRotation,
-    /// Native AudioPlayer asset differs from its binding.
+    /// Native `AudioPlayer` asset differs from its binding.
     AudioAssetMismatch(Entity),
     /// Audio content is unavailable, streaming, or outside source range.
     AudioUnavailable(Entity),
@@ -338,17 +338,6 @@ impl SequenceRuntimeAdapter {
         }
         let mut cameras = self.prepare_cameras(frame, transport, world)?;
         let mut audio = self.prepare_audio(frame, transport, world)?;
-        if matches!(transport, RuntimeTransport::Stopped) {
-            for binding in &self.audio_tracks {
-                let player = world
-                    .get::<AudioPlayer>(binding.entity)
-                    .ok_or(SequenceRuntimeError::MissingEntity(binding.entity))?;
-                let mut after = *player;
-                after.stop_requested = true;
-                after.playing = false;
-                replace_audio(&mut audio, binding.entity, *player, after);
-            }
-        }
         if matches!(transport, RuntimeTransport::Playing) {
             self.apply_camera_events(&mut cameras, frame);
             self.apply_audio_events(&mut audio, frame, world)?;
@@ -561,6 +550,17 @@ impl SequenceRuntimeAdapter {
                 .get::<AudioPlayer>(binding.entity)
                 .copied()
                 .ok_or(SequenceRuntimeError::MissingEntity(binding.entity))?;
+            // Stopping is a control-plane operation. It must remain possible
+            // after an asset unload or before the audio runtime is installed;
+            // requiring decoder metadata here would leave a native player
+            // visibly playing when its source is already unavailable.
+            if matches!(transport, RuntimeTransport::Stopped) {
+                let mut after = before;
+                after.stop_requested = true;
+                after.playing = false;
+                replace_audio(&mut result, binding.entity, before, after);
+                continue;
+            }
             if before.asset != Some(binding.asset) {
                 return Err(SequenceRuntimeError::AudioAssetMismatch(binding.entity));
             }
