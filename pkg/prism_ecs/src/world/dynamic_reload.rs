@@ -992,7 +992,11 @@ impl World {
         let mut outputs = Vec::new();
         let mut values = 0;
         if storage == StorageType::Table {
-            for arch in self.archetypes.iter().filter(|arch| arch.contains(id)) {
+            for arch in self
+                .archetypes
+                .iter()
+                .filter(|arch| arch.contains(id) && !arch.is_evicted())
+            {
                 let columns = arch.components().ids().to_vec();
                 let mut table = Table::new(columns.iter().map(|&cid| {
                     let info = self.components.info(cid).unwrap();

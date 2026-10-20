@@ -395,6 +395,9 @@ pub struct Archetype {
     components: ComponentSet,
     shared: Box<[SharedBinding]>,
     pairs: Box<[RelationPair]>,
+    /// Evicted stable-ID tombstones replace their backing table with an empty
+    /// shell, releasing column/chunk allocations while retaining the accessor
+    /// contract for existing ArchetypeId holders.
     table: Table,
     evicted: bool,
 }
@@ -493,6 +496,16 @@ impl Archetype {
     /// (design §17 原型预热).
     pub(crate) fn reserve(&mut self, additional: usize) {
         self.table.reserve(additional);
+    }
+
+    /// Drop storage and shared-value handles after permanent eviction. The
+    /// stable ID and lightweight match identity remain for published query
+    /// snapshots; evicted IDs are excluded before any table access.
+    fn release_evicted_storage(&mut self) {
+        debug_assert!(self.evicted);
+        debug_assert!(self.is_empty());
+        self.table = Table::new(core::iter::empty());
+        self.shared = Box::default();
     }
 }
 
@@ -828,6 +841,13 @@ impl Archetypes {
         component_evictions.sort_unstable();
         binding_evictions.sort_unstable();
         binding_evictions.dedup();
+
+        // All data needed to clean the postings is now copied into the
+        // eviction batches. Release each stable tombstone's heavyweight table
+        // and shared-value Arcs before touching the postings.
+        for &id in &evicted {
+            archetypes[id.index() as usize].release_evicted_storage();
+        }
 
         let mut removed_ids = Vec::new();
         let mut index = 0;

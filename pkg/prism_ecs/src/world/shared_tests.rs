@@ -590,7 +590,14 @@ fn evicted_shared_archetypes_reclaim_table_component_postings() {
         );
         for id in [first_archetype, second_archetype] {
             assert!(
-                w.archetypes.get(id).is_some_and(|arch| arch.is_empty()),
+                w.archetypes.get(id).is_some_and(|arch| {
+                    arch.is_empty()
+                        && arch.is_evicted()
+                        && arch.table().entities().is_empty()
+                        && arch.table().chunk_count() == 0
+                        && arch.table().column(position).is_none()
+                        && arch.shared_bindings().is_empty()
+                }),
                 "the tombstone remains addressable so ArchetypeIds stay stable"
             );
             assert!(

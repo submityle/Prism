@@ -109,6 +109,9 @@ fn capture_with_base(
 fn collect_entities(world: &World) -> Vec<Entity> {
     let mut entities: Vec<Entity> = Vec::new();
     for arch in world.archetypes.iter() {
+        if arch.is_empty() {
+            continue;
+        }
         // Entities that hold only shared components still live in a table (whose
         // component set is empty, since a shared id does not fragment the set —
         // design §6), so include any archetype that carries either table columns
@@ -140,7 +143,7 @@ fn component_has_holder(world: &World, id: ComponentId) -> bool {
         Some(StorageType::Table) => world
             .archetypes
             .iter()
-            .any(|arch| arch.contains(id) && !arch.table().is_empty()),
+            .any(|arch| arch.contains(id) && !arch.is_empty()),
         Some(StorageType::SparseSet) => world.sparse_sets.get(id).is_some_and(|s| !s.is_empty()),
         // A shared component holds entities through every archetype that binds a
         // value for it; the entities themselves live in that archetype's table
@@ -148,7 +151,7 @@ fn component_has_holder(world: &World, id: ComponentId) -> bool {
         Some(StorageType::Shared) => world
             .archetypes
             .iter()
-            .any(|arch| arch.shared_binding(id).is_some() && !arch.table().is_empty()),
+            .any(|arch| arch.shared_binding(id).is_some() && !arch.is_empty()),
         None => false,
     }
 }
@@ -176,7 +179,7 @@ fn capture_column(
     match storage {
         StorageType::Table => {
             for arch in world.archetypes.iter() {
-                if !arch.contains(id) {
+                if arch.is_empty() || !arch.contains(id) {
                     continue;
                 }
                 let table = arch.table();
@@ -415,6 +418,9 @@ fn capture_reusable_column(
     match info.storage() {
         StorageType::Table => {
             for arch in world.archetypes.iter() {
+                if arch.is_empty() {
+                    continue;
+                }
                 let table = arch.table();
                 let Some(column) = table.column(id) else {
                     continue;
