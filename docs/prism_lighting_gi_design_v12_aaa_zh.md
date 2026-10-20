@@ -826,7 +826,7 @@ CanonicalLightingScene
 ### 20.3 当前构建与验证状态（2026-10-20）
 
 - `cargo check -p prism_render_app --lib --message-format short`：**PASS**。该构建覆盖 `prism_render_architecture`、`prism_render_shading`、`prism_render_visibility` 和 `prism_render_app`；首次检查因 Bevy→`prism_math` 迁移缺少 `IVec3/UVec3::as_vec3` 失败，后续 API 已补齐并通过。本次检查仍报告大量跨 crate warning，warning 不等价于功能验收。
-- `cargo test -p prism_render_app --lib lighting_ -- --nocapture`：**未验证**。首轮测试目标首次编译期间遇到磁盘空间耗尽，未得到测试结果；之后 `target` 被清理。重试目前在等待共享 Cargo build lock，测试尚未启动完成。
+- `cargo test -p prism_render_app --lib lighting_ -- --nocapture`：**未验证**。两次测试目标编译都因共享磁盘空间耗尽（`No space left on device`）中断，未得到测试断言结果；第二次中断时另有 Cargo PID 持有共享 build lock 并写入 `target`。需等所有写入进程结束、空间稳定后重跑。
 - 真实物理 GPU、HDR 像素路径、present parity 和性能数据：**未由本轮验证**。App lighting composite 仍将表面样本写入 storage buffer；尚无证据表明其写入 scene HDR 颜色纹理并被 display transform/present 消费。
 
 上述构建结果只证明当前 Rust library 类型检查通过，不改变目标架构，也不能覆盖真实 GPU/HDR/性能退出门。所有未获得相应证据的项目继续标记为 `BLOCKED`、`PARTIAL` 或 `UNVERIFIED`。
