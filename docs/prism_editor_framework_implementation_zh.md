@@ -23,6 +23,14 @@ CARGO_TARGET_DIR=/private/tmp/prism-editor-core-target cargo test -p prism_edito
 
 验证结果：5 个单元测试通过，文档测试 0 个；该实现已提交为 `4e6d3a724`。
 
+### E4 面板数据层
+
+`pkg/prism_editor_panels` 已完成无 UI 状态模型：
+
+- Outliner 稳定节点、父子关系、展开/隐藏状态和窗口化可见节点查询。
+- 有界 Console 日志、单调序列号、级别/频道过滤和超容量淘汰。
+- 通过 `rustc` 独立测试验证 2 个测试用例；workspace 级 Cargo 验证待其他并行 crate 回传后执行。
+
 ## 当前未交付
 
 以下项目仍以代码和测试为准，不能仅因设计文档存在就视为完成：
