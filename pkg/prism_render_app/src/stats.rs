@@ -46,6 +46,9 @@ pub struct RenderFrameStats {
     pub lighting_debug_rejections: u64,
     /// Frames for which the selected lighting plan recorded a real GPU pass.
     pub lighting_gpu_passes_recorded: u64,
+    /// Canonical light-scene conversion failure for the latest attempted frame.
+    /// A present value means that frame was rejected before GPU recording.
+    pub lighting_input_error: Option<crate::lighting_scene::LightingSceneExtractError>,
     /// Trace compute dispatches recorded into host frame graphs.
     pub trace_gpu_dispatches_recorded: u64,
     /// The viewport of the most recently recorded frame, empty or not.

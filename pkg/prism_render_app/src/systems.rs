@@ -225,6 +225,12 @@ pub(crate) fn execute_frame<I>(
         .execution_trace
         .begin(&record, queues.len() as u64, &inputs);
     stats.execution_trace.assert_input_parity(&record, &inputs);
+    stats.lighting_input_error = inputs.light_scene_error;
+    if inputs.light_scene_error.is_some() {
+        stats.frames_failed = stats.frames_failed.saturating_add(1);
+        stats.execution_trace.outcome = FrameExecutionOutcome::Failed;
+        return;
+    }
     let runtime = runtime.runtime();
     lighting_gpu.prepare(&plan.plan, &inputs, record.frame_index, runtime.queue());
     let lighting_pass = lighting_gpu.pass(&plan.plan);

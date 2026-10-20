@@ -2822,6 +2822,16 @@ fn unsupported_canonical_light_rejects_the_whole_native_snapshot_explicitly() {
     ));
     assert!(extracted.directionals.is_empty());
     assert!(extracted.punctuals.is_empty());
+    let stats = render.world.resource::<RenderFrameStats>();
+    assert_eq!(stats.frames_submitted, 0);
+    assert_eq!(stats.frames_failed, 1);
+    assert!(matches!(
+        stats.lighting_input_error,
+        Some(crate::LightingSceneExtractError::UnsupportedClass {
+            class: LightClass::Rect,
+            ..
+        })
+    ));
 }
 
 #[test]

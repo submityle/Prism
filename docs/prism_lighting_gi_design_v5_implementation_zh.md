@@ -671,6 +671,7 @@ Render target 必须支持 HDR scene-linear 中间结果；`Rgba8Unorm` 不能�
 | ECS 场景渲染上传 | 现有 Bevy `ExtractedLights` 仍是独立入口；`LightGpuBuffers` 已按 ABI 值比较、合并脏区间并仅写入变化范围，扩容全量重传 | 绑定组按 GPU buffer identity 缓存；真实 device 上传测试待接通 |
 | stable GPU light slots | `IncrementalLightTable<T>` 提供稳定 slot、generation、retirement fence、dirty range/full rebuild policy、upload receipt | 有 10 个单元测试；尚未连接 scene adapter 到真实 buffer/queue lifecycle |
 | 原生 direct-light buffer 增量上传 | `LightingGpuState::prepare` 缓存方向光与点/聚光 ABI 内容；未变化时零次上传，稀疏变化合并成 byte-range 写入，密集变化使用整段写入；资源 bundle replay 后强制全量重传 | 上传规划单测已加入；当前 workspace 物理拓扑编译错误阻止 package 测试运行，真实设备上传量与 GPU 时间未测 |
+| 原生光源适配错误闸门 | canonical `LightScene` 无法无损映射到当前 direct-light ABI 时，`execute_frame` 在任何 lighting GPU 上传/图录制前拒绝该帧；`RenderFrameStats::lighting_input_error` 保留结构化原因 | 已扩展 Rect light 拒绝集成测试，验证不提交帧且能读取错误；测试受 workspace 编译错误影响，尚未执行通过 |
 | 实际 HDR/present 闭环 | 当前宿主光照仍未证明进入最终 scene-linear HDR texture 并被 present/readback | 未完成；不宣称生产照明闭环 |
 
 截至记录时，`cargo test -p prism_render_scene lighting::buffers::tests --lib` 编译被不相关的既有工作区错误阻断：`pkg/prism_render_scene/src/shading/lobe_budget/gpu.rs` 调用 `uniform_buffer()` 时缺少 `has_dynamic_offset: bool` 参数。该失败不是灯光测试失败，也不证明灯光测试通过。后续应在修复或隔离该阻断后重跑，并继续逐阶段记录 GPU/capture 证据。
