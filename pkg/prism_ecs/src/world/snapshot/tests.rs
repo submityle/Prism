@@ -91,6 +91,20 @@ fn restore_roundtrips_after_mutation() {
     assert_eq!(w.get::<Charge>(e2), Some(&Charge(9)));
     assert!(w.contains(e3));
 
+    // Snapshot restore replaces the archetype registry. Its component posting
+    // lists must be rebuilt in the same stable order as the restored tables.
+    let pos_id = w.components().id_of::<Pos>().unwrap();
+    let expected_pos_archetypes: Vec<_> = w
+        .archetypes()
+        .iter()
+        .filter(|archetype| archetype.components().contains(pos_id))
+        .map(|archetype| archetype.id())
+        .collect();
+    assert_eq!(
+        w.archetypes().with_component(pos_id),
+        expected_pos_archetypes.as_slice()
+    );
+
     // A fresh capture is byte+tick identical to the original.
     let after = w.snapshot();
     assert!(snap.structurally_eq(&after));

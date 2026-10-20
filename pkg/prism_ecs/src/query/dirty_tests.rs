@@ -428,6 +428,58 @@ fn journal_overflow_falls_back_without_missing_chunks_or_replaying_them() {
 }
 
 #[test]
+fn dirty_fallback_uses_table_component_index_for_optional_queries() {
+    use crate::archetype::COLUMN_CHANGE_LOG_CAPACITY;
+
+    let mut w = World::new();
+    for mask in 0_u8..(1 << 6) {
+        let entity = w.spawn(());
+        if mask & (1 << 0) != 0 {
+            w.insert(entity, Noise0);
+        }
+        if mask & (1 << 1) != 0 {
+            w.insert(entity, Noise1);
+        }
+        if mask & (1 << 2) != 0 {
+            w.insert(entity, Noise2);
+        }
+        if mask & (1 << 3) != 0 {
+            w.insert(entity, Noise3);
+        }
+        if mask & (1 << 4) != 0 {
+            w.insert(entity, Noise4);
+        }
+        if mask & (1 << 5) != 0 {
+            w.insert(entity, Noise5);
+        }
+    }
+    let target = w.spawn(Big::new(0));
+    assert_eq!(w.archetypes().len(), 65);
+
+    // `Option<&Big>` matches every archetype, including all 64 unrelated
+    // variants. Only one archetype actually owns the accessed table column.
+    let state = w.query::<Option<&Big>>();
+    let baseline = state.dirty_chunks_with_stats(&w, w.change_tick(), w.change_tick());
+    assert!(baseline.stats.journal_gap);
+
+    let last_run = w.change_tick();
+    w.increment_change_tick();
+    let this_run = w.change_tick();
+    for _ in 0..(COLUMN_CHANGE_LOG_CAPACITY + 1) {
+        w.get_mut::<Big>(target).unwrap().tag += 1;
+    }
+
+    let report = state.dirty_chunks_with_stats(&w, last_run, this_run);
+    assert!(report.stats.journal_gap);
+    assert_eq!(report.stats.archetype_index_entries_scanned, 1);
+    assert_eq!(report.stats.candidate_archetype_checks, 1);
+    assert_eq!(report.stats.matched_archetypes, 1);
+    assert_eq!(report.stats.column_candidates, 1);
+    assert_eq!(report.stats.reported_chunks, 1);
+    assert_eq!(report.chunks.len(), 1);
+}
+
+#[test]
 fn dirty_chunks_follow_an_archetype_migration() {
     #[derive(Clone, Copy)]
     struct Tag;
@@ -523,16 +575,18 @@ fn sorted_chunk_merge_scales_with_entries_not_sources_per_output() {
     const CHUNKS: usize = 512;
 
     let overlapping: Vec<Vec<usize>> = (0..SOURCES).map(|_| (0..CHUNKS).collect()).collect();
+    let overlapping_sources: Vec<&[usize]> = overlapping.iter().map(Vec::as_slice).collect();
     let mut merged = Vec::new();
-    let operations = merge_sorted_chunks(&overlapping, |chunk| merged.push(chunk));
+    let operations = merge_sorted_chunks(&overlapping_sources, |chunk| merged.push(chunk));
     assert_eq!(merged, (0..CHUNKS).collect::<Vec<_>>());
     assert_eq!(operations, 2 * SOURCES * CHUNKS);
 
     let disjoint: Vec<Vec<usize>> = (0..SOURCES)
         .map(|source| (source * CHUNKS..(source + 1) * CHUNKS).collect())
         .collect();
+    let disjoint_sources: Vec<&[usize]> = disjoint.iter().map(Vec::as_slice).collect();
     merged.clear();
-    let operations = merge_sorted_chunks(&disjoint, |chunk| merged.push(chunk));
+    let operations = merge_sorted_chunks(&disjoint_sources, |chunk| merged.push(chunk));
     assert_eq!(merged, (0..SOURCES * CHUNKS).collect::<Vec<_>>());
     assert_eq!(operations, 2 * SOURCES * CHUNKS);
 }

@@ -533,6 +533,11 @@ impl ArchetypeKey {
 pub struct Archetypes {
     archetypes: Vec<Archetype>,
     by_key: HashMap<ArchetypeKey, ArchetypeId>,
+    /// Inverted table-column index. Each posting list is append-only and
+    /// ordered by `ArchetypeId`, matching the registry's stable insertion
+    /// order. Dirty-query fallback uses it to avoid testing every matched
+    /// archetype for every accessed table column.
+    by_component: HashMap<ComponentId, Vec<ArchetypeId>>,
     column_journal: Arc<ColumnJournal>,
 }
 
@@ -543,6 +548,7 @@ impl Archetypes {
         let mut this = Self {
             archetypes: Vec::new(),
             by_key: HashMap::default(),
+            by_component: HashMap::default(),
             column_journal: Arc::new(ColumnJournal::new()),
         };
         let empty = ComponentSet::default();
@@ -600,6 +606,17 @@ impl Archetypes {
     #[inline]
     pub fn iter(&self) -> impl Iterator<Item = &Archetype> {
         self.archetypes.iter()
+    }
+
+    /// Archetypes whose table component set contains `component`, in stable
+    /// ascending id order. The returned index includes empty archetypes and
+    /// shared-value variants; callers must still apply their query match and
+    /// live-row checks.
+    #[inline]
+    pub(crate) fn with_component(&self, component: ComponentId) -> &[ArchetypeId] {
+        self.by_component
+            .get(&component)
+            .map_or(&[], |archetypes| archetypes.as_slice())
     }
 
     /// Discover writes/structural edits in O(retained events since cursor), not
@@ -724,6 +741,9 @@ impl Archetypes {
         components: &Components,
     ) -> ArchetypeId {
         let id = ArchetypeId(self.archetypes.len() as u32);
+        for &component in set.ids() {
+            self.by_component.entry(component).or_default().push(id);
+        }
         let columns = set.ids().iter().map(|&cid| {
             let info = components
                 .info(cid)
@@ -1048,5 +1068,8 @@ mod tests {
         assert_eq!(archetypes.len(), 3);
         assert!(archetypes.get(id3).unwrap().contains(a));
         assert!(!archetypes.get(id3).unwrap().contains(b));
+        assert_eq!(archetypes.with_component(a), &[id1, id3]);
+        assert_eq!(archetypes.with_component(b), &[id1]);
+        assert!(archetypes.with_component(ComponentId::new(99)).is_empty());
     }
 }

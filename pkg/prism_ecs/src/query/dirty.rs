@@ -4,11 +4,14 @@
 //! Where [`Changed<T>`](crate::query::Changed) filters row-by-row, the
 //! dirty-chunk accessor answers the *coarse* question "which row windows of
 //! which archetypes contain anything this query touched since `last_run`?" by
+//! consuming retained column-change events on the normal forward path and
 //! traversing a hierarchical [`ChunkVersions`](crate::storage::ChunkVersions)
-//! interval index, pruning entire clean subtrees. A GPU-resident uploader (design §15) or
-//! a push-reaction pass walks the returned [`DirtyChunk`]s to upload / react to
-//! only the changed windows; the per-row ticks remain available to refine
-//! within a flagged window.
+//! interval index on conservative paths. The fallback prunes archetypes through
+//! table-component postings before reading chunk intervals, and prunes clean
+//! interval subtrees within candidate columns. A GPU-resident uploader (design
+//! §15) or a push-reaction pass walks the returned [`DirtyChunk`]s to upload /
+//! react to only the changed windows; the per-row ticks remain available to
+//! refine within a flagged window.
 //!
 //! # Correctness: a superset, never a miss
 //!
@@ -42,7 +45,7 @@ use crate::world::World;
 /// the shape of the traversal without making machine-dependent timing claims.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DirtyChunkStats {
-    /// Number of matched archetypes considered by the pass.
+    /// Number of archetypes that pass query/filter matching and are inspected.
     pub matched_archetypes: usize,
     /// Number of distinct component ids in the query's read/write access.
     pub access_columns: usize,
@@ -87,8 +90,13 @@ pub struct DirtyChunkStats {
     /// are consumed.
     pub journal_records_scanned: usize,
     /// Number of distinct candidate archetypes checked against query data and
-    /// filters after journal and sparse-index candidates are grouped.
+    /// filters after the journal/sparse candidate union or fallback index lookup.
     pub candidate_archetype_checks: usize,
+    /// Number of table-component posting-list entries visited while building
+    /// the conservative fallback's candidate archetype set. This can exceed
+    /// the number of unique candidate archetypes when accessed columns share
+    /// archetypes.
+    pub archetype_index_entries_scanned: usize,
     /// Number of chunk candidates offered before per-archetype deduplication.
     pub candidate_chunk_marks: usize,
     /// Whether this request had to use the conservative path because the
@@ -143,10 +151,13 @@ impl DirtyChunkCandidates {
     }
 }
 
-/// Visit the sorted unique union of sorted chunk sources using a min-heap.
+/// Visit the sorted unique union of sorted sources using a min-heap.
 /// A small-source linear path avoids heap allocation for common low-arity
 /// queries. Returns heap pushes plus pops (zero for the linear path).
-pub(super) fn merge_sorted_chunks(sources: &[Vec<usize>], mut visit: impl FnMut(usize)) -> usize {
+pub(super) fn merge_sorted_chunks<T: Copy + Ord>(
+    sources: &[&[T]],
+    mut visit: impl FnMut(T),
+) -> usize {
     if sources.len() <= 4 {
         let mut cursors = [0usize; 4];
         loop {
@@ -353,8 +364,10 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
     /// write set) has a chunk-version newer than `last_run` for that window.
     /// This is the coarse layer: the returned windows form a superset of the
     /// rows a per-row [`Changed<T>`](crate::query::Changed) scan would visit (see
-    /// the module docs). The matched-archetype cache is refreshed first, so only
-    /// archetypes this query actually matches are inspected.
+    /// the module docs). The forward journal path checks event-derived archetypes;
+    /// a conservative tick-index fallback uses table-component postings plus
+    /// sparse-change locations to build candidates, then intersects them with
+    /// the incremental query-match cache before inspecting column intervals.
     pub fn dirty_chunks(&self, world: &World, last_run: Tick, this_run: Tick) -> Vec<DirtyChunk> {
         self.dirty_chunks_with_stats(world, last_run, this_run)
             .chunks
@@ -484,11 +497,47 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
         let journal_baseline =
             (this_run == world.change_tick()).then(|| world.archetypes().column_change_cursor());
 
-        let archetypes = self.matched_archetypes(world);
-        report.stats.matched_archetypes = archetypes.len();
+        let matched_archetypes = self.matched_archetypes(world);
         self.remember_sparse_window(last_run, this_run);
 
-        for &archetype_id in archetypes.iter() {
+        // A conservative tick-index fallback used to walk every matched
+        // archetype and probe every query access id for a table column. Build
+        // the candidate set from the registry's inverted table-component
+        // index instead. Sparse changes contribute their current archetypes
+        // separately because sparse values are not table columns. The sorted
+        // union keeps output ordering deterministic and does not alter the
+        // interval-index superset semantics.
+        let archetypes = world.archetypes();
+        let mut candidate_sources = Vec::new();
+        for &id in &access_ids {
+            if !world
+                .components()
+                .info(id)
+                .is_some_and(|info| info.storage() == StorageType::Table)
+            {
+                continue;
+            }
+            let indexed = archetypes.with_component(id);
+            report.stats.archetype_index_entries_scanned += indexed.len();
+            if !indexed.is_empty() {
+                candidate_sources.push(indexed);
+            }
+        }
+        let mut sparse_archetypes = Vec::new();
+        if !sparse_chunks.is_empty() {
+            sparse_archetypes.extend(sparse_chunks.keys().copied());
+            sparse_archetypes.sort_unstable();
+            candidate_sources.push(&sparse_archetypes);
+        }
+        let mut candidate_archetypes = Vec::new();
+        merge_sorted_chunks(&candidate_sources, |id| candidate_archetypes.push(id));
+
+        for archetype_id in candidate_archetypes {
+            report.stats.candidate_archetype_checks += 1;
+            if matched_archetypes.binary_search(&archetype_id).is_err() {
+                continue;
+            }
+            report.stats.matched_archetypes += 1;
             let Some(archetype) = world.archetypes().get(archetype_id) else {
                 continue;
             };
@@ -548,7 +597,8 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
             };
 
             let chunk_count = len.div_ceil(rpc);
-            merge_sorted_chunks(&candidates, |chunk| {
+            let candidate_sources: Vec<&[usize]> = candidates.iter().map(Vec::as_slice).collect();
+            merge_sorted_chunks(&candidate_sources, |chunk| {
                 report.stats.merged_candidates += 1;
                 if chunk >= chunk_count || !F::filter_chunk(filter_fetch, chunk) {
                     report.stats.filter_rejected += 1;
