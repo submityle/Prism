@@ -22,6 +22,39 @@ pub const MAX_TIMELINE_STORAGE_REQUESTS: usize = 8;
 pub const MAX_TIMELINE_STORAGE_BYTES: usize = 64 * 1024 * 1024;
 static TEMPORARY_ID: AtomicU64 = AtomicU64::new(1);
 
+/// Typed decoder used by the same bounded file worker for loads and saves.
+pub trait DocumentStorageCodec: Send + fmt::Debug + 'static {
+    /// Isolated decoded candidate; the worker never adopts host state.
+    type Document: Send + fmt::Debug + 'static;
+    /// Owned identity returned unchanged with a successful publication receipt.
+    type Token: Send + Clone + fmt::Debug + 'static;
+    /// Validates actual bytes under the worker's byte cap.
+    fn decode(
+        &self,
+        bytes: &[u8],
+        max_bytes: usize,
+    ) -> Result<Self::Document, TimelineStorageError>;
+}
+
+/// Timeline codec used by the original storage API.
+#[derive(Clone, Copy, Debug)]
+pub struct TimelineStorageCodec {
+    /// Limits applied to the real timeline document codec.
+    pub document: TimelineLimits,
+}
+impl DocumentStorageCodec for TimelineStorageCodec {
+    type Document = TimelineDocument;
+    type Token = TimelineSnapshotToken;
+    fn decode(
+        &self,
+        bytes: &[u8],
+        max_bytes: usize,
+    ) -> Result<Self::Document, TimelineStorageError> {
+        TimelineDocument::decode(bytes, self.document, max_bytes)
+            .map_err(TimelineStorageError::Codec)
+    }
+}
+
 /// Resource policy for one serial worker and its retained results.
 #[derive(Clone, Copy, Debug)]
 pub struct TimelineStorageLimits {
@@ -54,9 +87,9 @@ pub enum TimelineFileRevision {
 
 /// Validated candidate; adoption remains an explicit host decision.
 #[derive(Debug)]
-pub struct TimelineLoadCandidate {
+pub struct DocumentLoadCandidate<C: DocumentStorageCodec> {
     /// Real decoded document, independent from the live editor.
-    pub document: TimelineDocument,
+    pub document: C::Document,
     /// Exact observed bytes for a later conditional save.
     pub revision: TimelineFileRevision,
 }
@@ -75,9 +108,9 @@ pub enum TimelineSaveDurability {
 
 /// Publication receipt. Never automatically marks a live editor clean.
 #[derive(Clone, Debug)]
-pub struct TimelineSaveReceipt {
+pub struct DocumentSaveReceipt<C: DocumentStorageCodec> {
     /// Identity supplied with the bytes; compare with the current host token.
-    pub snapshot_token: TimelineSnapshotToken,
+    pub snapshot_token: C::Token,
     /// Exact published bytes for the next conditional save.
     pub revision: TimelineFileRevision,
     /// Explicit directory-sync outcome after publication.
@@ -88,12 +121,23 @@ pub struct TimelineSaveReceipt {
 
 /// Owned output, retained in a bounded request slot until polled/dropped.
 #[derive(Debug)]
-pub enum TimelineStorageResult {
+pub enum DocumentStorageResult<C: DocumentStorageCodec> {
     /// Decoded candidate and exact file revision.
-    Loaded(TimelineLoadCandidate),
+    Loaded(DocumentLoadCandidate<C>),
     /// Published file and original snapshot identity.
-    Saved(TimelineSaveReceipt),
+    Saved(DocumentSaveReceipt<C>),
 }
+
+/// Timeline candidate produced by the shared typed worker.
+pub type TimelineLoadCandidate = DocumentLoadCandidate<TimelineStorageCodec>;
+/// Timeline publication receipt, preserving the original host token type.
+pub type TimelineSaveReceipt = DocumentSaveReceipt<TimelineStorageCodec>;
+/// Timeline output from the shared typed worker.
+pub type TimelineStorageResult = DocumentStorageResult<TimelineStorageCodec>;
+/// Original timeline request API over the shared typed worker.
+pub type TimelineStorageRequest = DocumentStorageRequest<TimelineStorageCodec>;
+/// Original timeline service API over the shared typed worker.
+pub type TimelineStorageService = DocumentStorageService<TimelineStorageCodec>;
 
 /// Storage failures. Except `PublicationUncertain`, this operation did not replace
 /// the target. External writers remain responsible for their own writes.
@@ -117,6 +161,8 @@ pub enum TimelineStorageError {
     TimedOut,
     /// Actual document codec rejected bytes; the target was not replaced.
     Codec(TimelineError),
+    /// Complete sequence project codec rejected the loaded or submitted bytes.
+    SequenceCodec(crate::SequenceDocumentError),
     /// An OS operation failed before publication.
     Io {
         /// Fixed operation label.
@@ -143,6 +189,7 @@ impl fmt::Display for TimelineStorageError {
                 write!(f, "timeline publication uncertain: {kind}")
             }
             Self::Codec(error) => write!(f, "timeline file: {error}"),
+            Self::SequenceCodec(error) => write!(f, "sequence project file: {error}"),
             other => write!(f, "timeline storage {other:?}"),
         }
     }
@@ -169,26 +216,26 @@ enum Phase {
     Publishing,
     Complete,
 }
-struct State {
+struct State<C: DocumentStorageCodec = TimelineStorageCodec> {
     phase: Phase,
     abort: Option<TimelineStorageError>,
-    output: Option<Result<TimelineStorageResult, TimelineStorageError>>,
+    output: Option<Result<DocumentStorageResult<C>, TimelineStorageError>>,
 }
-struct Slot {
+struct Slot<C: DocumentStorageCodec = TimelineStorageCodec> {
     id: u64,
     deadline: Instant,
     shared: Arc<Shared>,
-    state: Mutex<State>,
+    state: Mutex<State<C>>,
     #[cfg(test)]
     hook: Option<Arc<TestHook>>,
 }
-impl Slot {
-    fn state(&self) -> std::sync::MutexGuard<'_, State> {
+impl<C: DocumentStorageCodec> Slot<C> {
+    fn state(&self) -> std::sync::MutexGuard<'_, State<C>> {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
-    fn expire(&self, state: &mut State) {
+    fn expire(&self, state: &mut State<C>) {
         if state.phase == Phase::Working && state.abort.is_none() {
             let reason = if self.shared.stopping.load(Ordering::Acquire) {
                 Some(TimelineStorageError::Cancelled)
@@ -217,7 +264,7 @@ impl Slot {
         state.phase = Phase::Publishing;
         Ok(())
     }
-    fn finish(&self, result: Result<TimelineStorageResult, TimelineStorageError>) {
+    fn finish(&self, result: Result<DocumentStorageResult<C>, TimelineStorageError>) {
         let mut state = self.state();
         self.expire(&mut state);
         if state.abort.is_none() {
@@ -267,9 +314,9 @@ mod tests {
             .unwrap()
             .snapshot_token()
     }
-    fn wait(
-        request: &mut TimelineStorageRequest,
-    ) -> Result<TimelineStorageResult, TimelineStorageError> {
+    fn wait<C: DocumentStorageCodec>(
+        request: &mut DocumentStorageRequest<C>,
+    ) -> Result<DocumentStorageResult<C>, TimelineStorageError> {
         let until = Instant::now() + WAIT;
         loop {
             if let Poll::Ready(result) = request.poll() {
@@ -299,14 +346,28 @@ mod tests {
         }
     }
     fn service(project: &Project, point: Checkpoint) -> (TimelineStorageService, Gate) {
+        typed_service(
+            project,
+            point,
+            TimelineStorageCodec {
+                document: TimelineLimits::default(),
+            },
+        )
+    }
+    fn typed_service<C: DocumentStorageCodec>(
+        project: &Project,
+        point: Checkpoint,
+        codec: C,
+    ) -> (DocumentStorageService<C>, Gate) {
         let (entered_tx, entered) = mpsc::sync_channel(1);
         let (resume, resume_rx) = mpsc::sync_channel(1);
-        let mut service = TimelineStorageService::new(
+        let mut service = DocumentStorageService::with_codec(
             project.path(),
             TimelineStorageLimits {
                 max_requests: 4,
                 ..Default::default()
             },
+            codec,
         )
         .unwrap();
         service.hook = Some(Arc::new(TestHook {
@@ -518,8 +579,111 @@ mod tests {
         );
         assert_eq!(fs::read(project.path()).unwrap(), bytes(240));
     }
+
+    fn sequence_editor(rate: u64) -> crate::SequenceProjectEditor {
+        let mut editor = crate::SequenceProjectEditor::new(
+            crate::SequenceProjectDocument::default(),
+            crate::SequenceDocumentLimits::default(),
+        )
+        .unwrap();
+        editor
+            .execute(crate::SequenceProjectCommand {
+                label: "authored sequence".into(),
+                edits: vec![
+                    crate::SequenceProjectEdit::PutDocument {
+                        id: crate::SequenceId(1),
+                        document: TimelineDocument {
+                            ticks_per_second: rate,
+                            timeline: Timeline::default(),
+                        },
+                    },
+                    crate::SequenceProjectEdit::SetRoot(Some(crate::SequenceId(1))),
+                ],
+            })
+            .unwrap();
+        editor
+    }
+
+    #[test]
+    fn sequence_codec_cancel_after_actual_stage_fsync_preserves_old_project_and_cleans_stage() {
+        let project = Project::new();
+        let old = sequence_editor(24);
+        let editor = sequence_editor(48);
+        let original = old.document().encode(old.limits()).unwrap();
+        fs::write(project.path(), &original).unwrap();
+        let (service, mut gate) = typed_service(
+            &project,
+            Checkpoint::Staged,
+            crate::SequenceProjectCodec {
+                limits: editor.limits(),
+            },
+        );
+        let mut save = service
+            .save(
+                editor.document().encode(editor.limits()).unwrap(),
+                editor.snapshot_token(),
+                TimelineFileRevision::Present(original.clone().into()),
+                WAIT,
+            )
+            .unwrap();
+        gate.arrived();
+        assert_eq!(fs::read_dir(&project.0).unwrap().count(), 3);
+        assert_eq!(save.cancel(), TimelineCancelOutcome::Cancelled);
+        assert!(matches!(
+            wait(&mut save),
+            Err(TimelineStorageError::Cancelled)
+        ));
+        gate.release();
+        let mut barrier = service.load(WAIT).unwrap();
+        let DocumentStorageResult::Loaded(candidate) = wait(&mut barrier).unwrap() else {
+            panic!()
+        };
+        assert_eq!(&candidate.document, old.document());
+        assert_eq!(fs::read(project.path()).unwrap(), original);
+        assert_eq!(fs::read_dir(&project.0).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn sequence_codec_post_fence_timeout_returns_real_publication_and_exact_project_token() {
+        let project = Project::new();
+        let editor = sequence_editor(48);
+        let bytes = editor.document().encode(editor.limits()).unwrap();
+        let (service, mut gate) = typed_service(
+            &project,
+            Checkpoint::Publishing,
+            crate::SequenceProjectCodec {
+                limits: editor.limits(),
+            },
+        );
+        let mut save = service
+            .save(
+                bytes.clone(),
+                editor.snapshot_token(),
+                TimelineFileRevision::Missing,
+                Duration::from_secs(2),
+            )
+            .unwrap();
+        gate.arrived();
+        assert_eq!(save.cancel(), TimelineCancelOutcome::TooLate);
+        drop(service);
+        thread::sleep(
+            save.slot.deadline.saturating_duration_since(Instant::now()) + Duration::from_millis(1),
+        );
+        assert!(matches!(save.poll(), Poll::Pending));
+        gate.release();
+        let DocumentStorageResult::Saved(receipt) = wait(&mut save).unwrap() else {
+            panic!()
+        };
+        assert_eq!(receipt.snapshot_token, editor.snapshot_token());
+        assert!(receipt.deadline_exceeded);
+        assert_eq!(
+            receipt.revision,
+            TimelineFileRevision::Present(bytes.clone().into())
+        );
+        assert_eq!(fs::read(project.path()).unwrap(), bytes);
+    }
 }
-impl Drop for Slot {
+impl<C: DocumentStorageCodec> Drop for Slot<C> {
     fn drop(&mut self) {
         self.shared.active.fetch_sub(1, Ordering::AcqRel);
     }
@@ -527,18 +691,18 @@ impl Drop for Slot {
 
 /// Nonblocking handle. Dropping fences unfinished work without joining a
 /// potentially blocked OS call; its slot remains reserved until the worker exits.
-pub struct TimelineStorageRequest {
-    slot: Arc<Slot>,
+pub struct DocumentStorageRequest<C: DocumentStorageCodec> {
+    slot: Arc<Slot<C>>,
     consumed: bool,
 }
-impl TimelineStorageRequest {
+impl<C: DocumentStorageCodec> DocumentStorageRequest<C> {
     /// Service-local monotonic identity for rejecting obsolete load results.
     pub fn id(&self) -> u64 {
         self.slot.id
     }
     /// Takes output once. A pre-publication timeout immediately fences later
     /// output. Calling this after consuming output returns Consumed.
-    pub fn poll(&mut self) -> Poll<Result<TimelineStorageResult, TimelineStorageError>> {
+    pub fn poll(&mut self) -> Poll<Result<DocumentStorageResult<C>, TimelineStorageError>> {
         if self.consumed {
             return Poll::Ready(Err(TimelineStorageError::Consumed));
         }
@@ -559,7 +723,7 @@ impl TimelineStorageRequest {
             || state.phase == Phase::Publishing
             || matches!(
                 state.output,
-                Some(Ok(TimelineStorageResult::Saved(_)))
+                Some(Ok(DocumentStorageResult::Saved(_)))
                     | Some(Err(TimelineStorageError::PublicationUncertain { .. }))
             )
         {
@@ -570,7 +734,7 @@ impl TimelineStorageRequest {
         TimelineCancelOutcome::Cancelled
     }
 }
-impl Drop for TimelineStorageRequest {
+impl<C: DocumentStorageCodec> Drop for DocumentStorageRequest<C> {
     fn drop(&mut self) {
         if !self.consumed {
             self.cancel();
@@ -578,35 +742,52 @@ impl Drop for TimelineStorageRequest {
     }
 }
 
-enum Operation {
+enum Operation<C: DocumentStorageCodec> {
     Load,
     Save {
         bytes: Vec<u8>,
-        snapshot_token: TimelineSnapshotToken,
+        snapshot_token: C::Token,
         expected: TimelineFileRevision,
     },
 }
-struct Job {
-    slot: Arc<Slot>,
-    operation: Operation,
+struct Job<C: DocumentStorageCodec> {
+    slot: Arc<Slot<C>>,
+    operation: Operation<C>,
 }
 
 /// One bounded worker for one absolute filename in an existing trusted parent.
 /// Construction/admission/poll do no filesystem I/O; all path checks, reads,
 /// codec validation, stage writes and sync/rename happen on the worker.
-pub struct TimelineStorageService {
-    sender: SyncSender<Job>,
+pub struct DocumentStorageService<C: DocumentStorageCodec> {
+    sender: SyncSender<Job<C>>,
     shared: Arc<Shared>,
     limits: TimelineStorageLimits,
     #[cfg(test)]
     hook: Option<Arc<TestHook>>,
 }
-impl TimelineStorageService {
+impl DocumentStorageService<TimelineStorageCodec> {
     /// Starts the worker. Parent must exist when used and remain trusted/stable.
     /// Dropping the service fences pre-publication work without blocking to join.
     pub fn new(
         path: impl Into<PathBuf>,
         limits: TimelineStorageLimits,
+    ) -> Result<Self, TimelineStorageError> {
+        Self::with_codec(
+            path,
+            limits,
+            TimelineStorageCodec {
+                document: limits.document,
+            },
+        )
+    }
+}
+impl<C: DocumentStorageCodec> DocumentStorageService<C> {
+    /// Starts one serial file worker with an owned decoder. The supplied codec
+    /// validates both loaded candidates and owned save bytes on that worker.
+    pub fn with_codec(
+        path: impl Into<PathBuf>,
+        limits: TimelineStorageLimits,
+        codec: C,
     ) -> Result<Self, TimelineStorageError> {
         let path = path.into();
         if !path.is_absolute()
@@ -619,7 +800,7 @@ impl TimelineStorageService {
         {
             return Err(TimelineStorageError::InvalidConfiguration);
         }
-        let (sender, receiver) = mpsc::sync_channel::<Job>(limits.max_requests);
+        let (sender, receiver) = mpsc::sync_channel::<Job<C>>(limits.max_requests);
         let shared = Arc::new(Shared {
             active: AtomicUsize::new(0),
             next: AtomicU64::new(1),
@@ -630,7 +811,7 @@ impl TimelineStorageService {
             .spawn(move || {
                 for job in receiver {
                     let output = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        run(&path, limits, &job.slot, job.operation)
+                        run(&path, limits, &codec, &job.slot, job.operation)
                     }))
                     .unwrap_or_else(|_| {
                         if job.slot.state().phase == Phase::Publishing {
@@ -654,7 +835,10 @@ impl TimelineStorageService {
         })
     }
     /// Queues actual bounded read/decode without changing any host editor.
-    pub fn load(&self, timeout: Duration) -> Result<TimelineStorageRequest, TimelineStorageError> {
+    pub fn load(
+        &self,
+        timeout: Duration,
+    ) -> Result<DocumentStorageRequest<C>, TimelineStorageError> {
         self.submit(Operation::Load, timeout)
     }
     /// Takes serialized bytes and token ownership. Worker validates the document
@@ -662,10 +846,10 @@ impl TimelineStorageService {
     pub fn save(
         &self,
         bytes: Vec<u8>,
-        snapshot_token: TimelineSnapshotToken,
+        snapshot_token: C::Token,
         expected: TimelineFileRevision,
         timeout: Duration,
-    ) -> Result<TimelineStorageRequest, TimelineStorageError> {
+    ) -> Result<DocumentStorageRequest<C>, TimelineStorageError> {
         if bytes.len() > self.limits.max_bytes
             || bytes.capacity() > self.limits.max_bytes
             || matches!(&expected, TimelineFileRevision::Present(bytes) if bytes.len() > self.limits.max_bytes)
@@ -683,9 +867,9 @@ impl TimelineStorageService {
     }
     fn submit(
         &self,
-        operation: Operation,
+        operation: Operation<C>,
         timeout: Duration,
-    ) -> Result<TimelineStorageRequest, TimelineStorageError> {
+    ) -> Result<DocumentStorageRequest<C>, TimelineStorageError> {
         let deadline = Instant::now()
             .checked_add(timeout)
             .ok_or(TimelineStorageError::InvalidConfiguration)?;
@@ -718,7 +902,7 @@ impl TimelineStorageService {
             #[cfg(test)]
             hook: self.hook.clone(),
         });
-        let request = TimelineStorageRequest {
+        let request = DocumentStorageRequest {
             slot: slot.clone(),
             consumed: false,
         };
@@ -729,7 +913,7 @@ impl TimelineStorageService {
         }
     }
 }
-impl Drop for TimelineStorageService {
+impl<C: DocumentStorageCodec> Drop for DocumentStorageService<C> {
     fn drop(&mut self) {
         self.shared.stopping.store(true, Ordering::Release);
     }
@@ -749,10 +933,10 @@ fn regular_or_missing(path: &Path) -> Result<bool, TimelineStorageError> {
         Err(e) => Err(os_error("inspect path", e)),
     }
 }
-fn read(
+fn read<C: DocumentStorageCodec>(
     path: &Path,
     max: usize,
-    slot: &Slot,
+    slot: &Slot<C>,
 ) -> Result<TimelineFileRevision, TimelineStorageError> {
     slot.check()?;
     if !regular_or_missing(path)? {
@@ -821,12 +1005,13 @@ fn stage(path: &Path) -> Result<(Stage, File), TimelineStorageError> {
     }
     Err(TimelineStorageError::Busy)
 }
-fn run(
+fn run<C: DocumentStorageCodec>(
     requested: &Path,
     limits: TimelineStorageLimits,
-    slot: &Slot,
-    operation: Operation,
-) -> Result<TimelineStorageResult, TimelineStorageError> {
+    codec: &C,
+    slot: &Slot<C>,
+    operation: Operation<C>,
+) -> Result<DocumentStorageResult<C>, TimelineStorageError> {
     slot.check()?;
     let parent = fs::canonicalize(requested.parent().expect("absolute filename"))
         .map_err(|e| os_error("resolve parent", e))?;
@@ -840,10 +1025,9 @@ fn run(
             let TimelineFileRevision::Present(bytes) = &current else {
                 return Err(TimelineStorageError::Missing);
             };
-            let document = TimelineDocument::decode(bytes, limits.document, limits.max_bytes)
-                .map_err(TimelineStorageError::Codec)?;
+            let document = codec.decode(bytes, limits.max_bytes)?;
             slot.check()?;
-            Ok(TimelineStorageResult::Loaded(TimelineLoadCandidate {
+            Ok(DocumentStorageResult::Loaded(DocumentLoadCandidate {
                 document,
                 revision: current,
             }))
@@ -856,8 +1040,7 @@ fn run(
             if current != expected {
                 return Err(TimelineStorageError::Conflict);
             }
-            TimelineDocument::decode(&bytes, limits.document, limits.max_bytes)
-                .map_err(TimelineStorageError::Codec)?;
+            codec.decode(&bytes, limits.max_bytes)?;
             slot.check()?;
             let (stage, mut file) = stage(&path)?;
             for block in bytes.chunks(16 * 1024) {
@@ -884,7 +1067,7 @@ fn run(
                 Ok(()) => TimelineSaveDurability::Synced,
                 Err(e) => TimelineSaveDurability::Uncertain { kind: e.kind() },
             };
-            Ok(TimelineStorageResult::Saved(TimelineSaveReceipt {
+            Ok(DocumentStorageResult::Saved(DocumentSaveReceipt {
                 snapshot_token,
                 revision: TimelineFileRevision::Present(bytes.into()),
                 durability,
@@ -908,13 +1091,13 @@ struct TestHook {
     resume: Mutex<mpsc::Receiver<()>>,
 }
 #[cfg(test)]
-impl Slot {
+impl<C: DocumentStorageCodec> Slot<C> {
     fn checkpoint(&self, point: Checkpoint) {
-        if let Some(hook) = &self.hook {
-            if hook.point == point {
-                hook.entered.send(()).unwrap();
-                hook.resume.lock().unwrap().recv().unwrap();
-            }
+        if let Some(hook) = &self.hook
+            && hook.point == point
+        {
+            hook.entered.send(()).unwrap();
+            hook.resume.lock().unwrap().recv().unwrap();
         }
     }
 }
