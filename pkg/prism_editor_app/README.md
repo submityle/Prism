@@ -47,6 +47,13 @@ viewport becomes a bounded rectangle copy and resolves all visible identities
 through one controller selection commit; stale target, scene, or controller
 revisions are rejected without mutating selection.
 
+Host gizmo/runtime adapters can update a single `DesktopSceneObject` through
+`DesktopScene::update_object_model`. A live device replaces only that instance
+transform bind group and advances the scene fence; unrelated mesh buffers are
+retained. Before device initialization or after suspension, the validated CPU
+transform is deferred to the next upload. Pending picks are cancelled so a
+transform edit cannot resolve against old pixels.
+
 Verification from the repository root:
 
 ```text

@@ -283,6 +283,48 @@ impl DesktopScene {
         Ok(())
     }
 
+    /// Updates one object's model transform without rebuilding unrelated mesh
+    /// buffers. When a native device is live, only that instance bind group is
+    /// replaced; otherwise the validated CPU change is deferred to resume.
+    /// Any pending readback is cancelled because the old pixels no longer
+    /// describe the current scene.
+    pub fn update_object_model(
+        &mut self,
+        id: SceneObjectId,
+        model: SceneIdMatrix,
+    ) -> Result<bool, DesktopError> {
+        validate_matrix(&model)?;
+        let index = self
+            .objects
+            .iter()
+            .position(|object| object.id == id)
+            .ok_or_else(|| message("unknown desktop scene object"))?;
+        if self.objects[index].model == model {
+            return Ok(false);
+        }
+
+        if let Some(gpu) = self.gpu.as_mut() {
+            gpu.renderer
+                .set_transform(&mut self.scene, index as u64, model)
+                .map_err(renderer_error)?;
+            self.needs_upload = false;
+        } else {
+            self.needs_upload = true;
+        }
+        self.cancel_pending();
+        self.objects[index].model = model;
+        Ok(true)
+    }
+
+    /// Returns the current model transform for an exact scene identity.
+    #[must_use]
+    pub fn object_model(&self, id: SceneObjectId) -> Option<SceneIdMatrix> {
+        self.objects
+            .iter()
+            .find(|object| object.id == id)
+            .map(|object| object.model)
+    }
+
     /// Sets a column-major world-to-clip matrix and matching `[0,1]` depth
     /// convention. Invalidates camera-correlated requests. On resize the host
     /// must supply a matrix with the desired new aspect; no camera is inferred.
@@ -1677,6 +1719,25 @@ mod tests {
         scene
             .replace_objects(Vec::new())
             .expect("valid empty scene");
+    }
+
+    #[test]
+    fn object_model_updates_are_deferred_without_rebuilding_the_scene() {
+        let descriptors = objects();
+        let mut scene = DesktopScene::new(descriptors.clone()).expect("valid scene");
+        let id = descriptors[0].id;
+        let mut model = descriptors[0].model;
+        model[3][0] = 0.25;
+
+        assert_eq!(scene.update_object_model(id, descriptors[0].model), Ok(false));
+        assert_eq!(scene.update_object_model(id, model), Ok(true));
+        assert_eq!(scene.object_model(id), Some(model));
+        assert_eq!(scene.objects()[1].model, descriptors[1].model);
+
+        let mut invalid = model;
+        invalid[0][0] = f32::NAN;
+        assert!(scene.update_object_model(id, invalid).is_err());
+        assert_eq!(scene.object_model(id), Some(model));
     }
 
     #[test]
