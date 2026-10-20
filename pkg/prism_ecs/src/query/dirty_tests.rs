@@ -53,7 +53,7 @@ macro_rules! noise_components {
     };
 }
 
-noise_components!(Noise0, Noise1, Noise2, Noise3, Noise4, Noise5);
+noise_components!(Noise0, Noise1, Noise2, Noise3, Noise4, Noise5, Noise6, Noise7, Noise8);
 
 /// Advance the world as if a system had just finished a run: the next window
 /// starts where this one ended, and the frame tick advances by one.
@@ -485,7 +485,7 @@ fn dirty_fallback_merges_overlapping_component_postings_once() {
 
     let mut w = World::new();
     let mut target = None;
-    for mask in 0_u8..(1 << 6) {
+    for mask in 0_u16..(1 << 9) {
         let entity = w.spawn(());
         if mask & (1 << 0) != 0 {
             w.insert(entity, Noise0);
@@ -505,7 +505,16 @@ fn dirty_fallback_merges_overlapping_component_postings_once() {
         if mask & (1 << 5) != 0 {
             w.insert(entity, Noise5);
         }
-        if mask == (1 << 6) - 1 {
+        if mask & (1 << 6) != 0 {
+            w.insert(entity, Noise6);
+        }
+        if mask & (1 << 7) != 0 {
+            w.insert(entity, Noise7);
+        }
+        if mask & (1 << 8) != 0 {
+            w.insert(entity, Noise8);
+        }
+        if mask == (1 << 9) - 1 {
             target = Some(entity);
         }
     }
@@ -518,6 +527,9 @@ fn dirty_fallback_merges_overlapping_component_postings_once() {
         Option<&Noise3>,
         Option<&Noise4>,
         Option<&Noise5>,
+        Option<&Noise6>,
+        Option<&Noise7>,
+        Option<&Noise8>,
     )>();
     let baseline = state.dirty_chunks_with_stats(&w, w.change_tick(), w.change_tick());
     assert!(baseline.stats.journal_gap);
@@ -531,11 +543,14 @@ fn dirty_fallback_merges_overlapping_component_postings_once() {
 
     let report = state.dirty_chunks_with_stats(&w, last_run, this_run);
     assert!(report.stats.journal_gap);
-    // Each of six columns is present in 32 component-set archetypes; their
-    // union is the 63 non-empty combinations, with overlaps removed once.
-    assert_eq!(report.stats.archetype_index_entries_scanned, 6 * 32);
-    assert_eq!(report.stats.candidate_archetype_checks, 63);
-    assert_eq!(report.stats.matched_archetypes, 63);
+    // Each of nine columns is present in 256 component-set archetypes, forcing
+    // every posting past the 128-item inline limit and through chunked storage.
+    // Their union is the 511 non-empty combinations, with overlaps removed
+    // once while the nine sorted posting sources are merged.
+    assert_eq!(w.archetypes().len(), 512);
+    assert_eq!(report.stats.archetype_index_entries_scanned, 9 * 256);
+    assert_eq!(report.stats.candidate_archetype_checks, 511);
+    assert_eq!(report.stats.matched_archetypes, 511);
     assert_eq!(report.stats.reported_chunks, 1);
     assert_eq!(report.chunks.len(), 1);
 }
