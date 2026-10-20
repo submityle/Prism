@@ -537,6 +537,7 @@ fn evicted_shared_archetypes_reclaim_table_component_postings() {
             assert!(w.archetypes.with_component(position).contains(&id));
             assert!(state.matched_archetypes(&w).contains(&id));
         }
+        let pre_eviction_snapshot = state.matched_archetypes(&w);
 
         assert!(w.despawn(first));
         assert!(w.despawn(second));
@@ -556,10 +557,14 @@ fn evicted_shared_archetypes_reclaim_table_component_postings() {
                 "the tombstone remains addressable so ArchetypeIds stay stable"
             );
             assert!(
-                state.matched_archetypes(&w).contains(&id),
-                "a warmed QueryState may retain the stable empty archetype id"
+                pre_eviction_snapshot.contains(&id),
+                "an already-published immutable snapshot remains valid"
             );
         }
+        let compacted = state.matched_archetypes(&w);
+        assert!(compacted.contains(&live_archetype));
+        assert!(!compacted.contains(&first_archetype));
+        assert!(!compacted.contains(&second_archetype));
         assert_eq!(state.iter(&w).count(), 1, "cached tombstones yield no rows");
     }
 }

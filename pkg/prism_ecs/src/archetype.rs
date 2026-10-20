@@ -396,6 +396,7 @@ pub struct Archetype {
     shared: Box<[SharedBinding]>,
     pairs: Box<[RelationPair]>,
     table: Table,
+    evicted: bool,
 }
 
 impl Archetype {
@@ -469,6 +470,13 @@ impl Archetype {
         self.table.is_empty()
     }
 
+    /// Whether this stable-id tombstone was permanently evicted from lookup
+    /// indexes after its last shared-value reference was released.
+    #[inline]
+    pub(crate) fn is_evicted(&self) -> bool {
+        self.evicted
+    }
+
     /// Immutable access to the backing table.
     #[inline]
     pub fn table(&self) -> &Table {
@@ -540,6 +548,7 @@ pub struct Archetypes {
     /// for every accessed table column.
     by_component: HashMap<ComponentId, Vec<ArchetypeId>>,
     column_journal: Arc<ColumnJournal>,
+    eviction_generation: u64,
 }
 
 impl Archetypes {
@@ -551,6 +560,7 @@ impl Archetypes {
             by_key: HashMap::default(),
             by_component: HashMap::default(),
             column_journal: Arc::new(ColumnJournal::new()),
+            eviction_generation: 0,
         };
         let empty = ComponentSet::default();
         let id = this.insert(empty, &[], &[], &Components::new());
@@ -619,6 +629,13 @@ impl Archetypes {
         self.by_component
             .get(&component)
             .map_or(&[], |archetypes| archetypes.as_slice())
+    }
+
+    /// Revision incremented when one or more permanently evicted shared-value
+    /// archetypes are removed from lookup indexes.
+    #[inline]
+    pub(crate) fn eviction_generation(&self) -> u64 {
+        self.eviction_generation
     }
 
     /// Discover writes/structural edits in O(retained events since cursor), not
@@ -726,30 +743,40 @@ impl Archetypes {
             archetypes,
             by_key,
             by_component,
+            eviction_generation,
             ..
         } = self;
-        let mut evicted = Vec::new();
-        by_key.retain(|_key, id| {
-            let arch = &archetypes[id.index() as usize];
-            let should_evict = arch.is_empty()
-                && arch
-                    .shared_bindings()
-                    .iter()
-                    .any(|&(c, s, _)| c == cid && s == sid);
-            if should_evict {
-                evicted.push(*id);
-            }
-            !should_evict
-        });
+        let mut evicted: Vec<ArchetypeId> = by_key
+            .iter()
+            .filter_map(|(_key, id)| {
+                let arch = &archetypes[id.index() as usize];
+                (arch.is_empty()
+                    && arch
+                        .shared_bindings()
+                        .iter()
+                        .any(|&(c, s, _)| c == cid && s == sid))
+                .then_some(*id)
+            })
+            .collect();
 
         if evicted.is_empty() {
             return;
         }
 
+        // This revision is only a cache-compaction hint. Wrapping can at worst
+        // leave empty stable-id tombstones in a QueryState snapshot until its
+        // next structural reset; it must never interrupt shared-value release.
+        *eviction_generation = eviction_generation.wrapping_add(1);
+
         // Keep stable ArchetypeIds in `archetypes`, but reclaim their inverted
         // index entries. Batch affected components so each posting is filtered
         // once even when one shared value had many table-set variants.
         evicted.sort_unstable();
+        for &id in &evicted {
+            archetypes[id.index() as usize].evicted = true;
+        }
+        by_key.retain(|_key, id| evicted.binary_search(id).is_err());
+
         let mut affected_components = Vec::new();
         for &id in &evicted {
             affected_components.extend_from_slice(archetypes[id.index() as usize].components.ids());
@@ -799,6 +826,7 @@ impl Archetypes {
             shared,
             pairs,
             table,
+            evicted: false,
         });
         self.by_key.insert(key, id);
         self.column_journal.record(ColumnChange {

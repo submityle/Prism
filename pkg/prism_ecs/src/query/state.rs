@@ -175,7 +175,10 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
             data_state,
             filter_state,
             access,
-            matched: SpinLock::new(MatchedArchetypes::new(world.archetype_generation())),
+            matched: SpinLock::new(MatchedArchetypes::new(
+                world.archetype_generation(),
+                world.archetypes().eviction_generation(),
+            )),
             dirty_tracker,
             dirty_sources,
             dirty_cursors,
@@ -347,12 +350,13 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
     /// The ids of archetypes this query matches.
     ///
     /// Brings the incremental cache up to date under its spin lock (testing only
-    /// archetypes created since the previous refresh, and rebuilding from
-    /// scratch when the world's structural generation changed) and returns an
-    /// immutable shared snapshot. Reusing a stable cache is O(1); it neither
-    /// re-tests archetypes nor copies the matched-id list. A new snapshot is
-    /// allocated only when the cache gains matching archetypes or its
-    /// structural generation is replaced.
+    /// archetypes created since the previous refresh, compacting permanently
+    /// evicted tombstones when needed, and rebuilding from scratch when the
+    /// world's structural generation changed) and returns an immutable shared
+    /// snapshot. Reusing a stable cache is O(1); it neither re-tests archetypes
+    /// nor copies the matched-id list. A new snapshot is allocated only when
+    /// matching archetypes are added, evictions are compacted, or the structural
+    /// generation is replaced.
     pub(crate) fn matched_archetypes(&self, world: &World) -> Arc<Vec<ArchetypeId>> {
         // Snapshot the scan cursor under the lock (applying any structural
         // generation reset), then release it *before* calling `D::matches` /
@@ -360,6 +364,7 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
         // across them risks a re-entrant deadlock, and a panic mid-scan would
         // otherwise leave a half-updated cache that duplicates ids on retry.
         let generation = world.archetype_generation();
+        let eviction_generation = world.archetypes().eviction_generation();
         let checked = {
             let mut cache = self.matched.lock();
             // A wholesale archetype-registry replacement (snapshot restore)
@@ -369,6 +374,19 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
                 cache.ids = Arc::new(Vec::new());
                 cache.checked = 0;
                 cache.generation = generation;
+                cache.eviction_generation = eviction_generation;
+            } else if cache.eviction_generation != eviction_generation {
+                // Shared-value eviction leaves stable registry tombstones, but
+                // they no longer need to occupy every warmed query's match
+                // snapshot. Compact once per eviction revision. `Arc::make_mut`
+                // preserves snapshots already held by an active iterator.
+                Arc::make_mut(&mut cache.ids).retain(|id| {
+                    world
+                        .archetypes()
+                        .get(*id)
+                        .is_some_and(|archetype| !archetype.is_evicted())
+                });
+                cache.eviction_generation = eviction_generation;
             }
             cache.checked
         };
@@ -383,7 +401,9 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
         // within a generation) so an id tested once never needs retesting.
         let mut appended: Vec<ArchetypeId> = Vec::new();
         for archetype in world.archetypes().iter().skip(checked) {
-            if D::matches(&self.data_state, archetype) && F::matches(&self.filter_state, archetype)
+            if !archetype.is_evicted()
+                && D::matches(&self.data_state, archetype)
+                && F::matches(&self.filter_state, archetype)
             {
                 appended.push(archetype.id());
             }
@@ -392,7 +412,10 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
         // Commit atomically. If another thread already advanced the cursor, keep
         // its (identical, deterministic) result and drop ours.
         let mut cache = self.matched.lock();
-        if cache.generation == generation && cache.checked == checked {
+        if cache.generation == generation
+            && cache.eviction_generation == eviction_generation
+            && cache.checked == checked
+        {
             if !appended.is_empty() {
                 Arc::make_mut(&mut cache.ids).extend(appended);
             }

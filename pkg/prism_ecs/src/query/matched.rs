@@ -20,16 +20,19 @@ use crate::archetype::ArchetypeId;
 
 /// Incrementally-maintained set of archetypes a query matches.
 ///
-/// Archetype component sets are immutable and archetypes are never removed
+/// Archetype component sets are immutable and archetype ids remain stable
 /// (except by a wholesale registry replacement on restore), so a match decision
-/// for a given [`ArchetypeId`] is permanent within a structural generation. The
-/// cache records how many archetypes have been examined (`checked`), the ids
-/// that matched (`ids`), and the `generation` they were computed against.
+/// for a live [`ArchetypeId`] is permanent within a structural generation.
+/// Permanently evicted shared-value tombstones are compacted from `ids` when
+/// the eviction revision changes. The cache records how many archetypes have
+/// been examined (`checked`), the ids that matched (`ids`), and the structural
+/// and eviction generations they were computed against.
 pub(crate) struct MatchedArchetypes {
-    /// Immutable, shareable ids of every archetype matched so far, in
-    /// ascending id order. Query iterators retain this snapshot without
+    /// Immutable, shareable ids of every non-evicted archetype matched so far,
+    /// in ascending id order. Query iterators retain this snapshot without
     /// copying the full list on every iteration; a new allocation is published
-    /// only when the structural generation changes or matching ids are added.
+    /// only when the structural generation changes, matching ids are added, or
+    /// evicted ids are compacted.
     pub(crate) ids: Arc<Vec<ArchetypeId>>,
     /// Number of the world's archetypes already tested. Archetypes with index
     /// `< checked` have a settled (permanent) match decision.
@@ -37,15 +40,20 @@ pub(crate) struct MatchedArchetypes {
     /// The `World::archetype_generation` these `ids`/`checked` were computed
     /// against; a mismatch clears the cache and re-scans from scratch.
     pub(crate) generation: u64,
+    /// `Archetypes::eviction_generation` the cache has compacted against.
+    /// Unlike a structural-generation reset, an eviction only removes stable
+    /// ids from this snapshot; the scan cursor remains valid.
+    pub(crate) eviction_generation: u64,
 }
 
 impl MatchedArchetypes {
     /// An empty cache stamped with the world's structural `generation`.
-    pub(crate) fn new(generation: u64) -> Self {
+    pub(crate) fn new(generation: u64, eviction_generation: u64) -> Self {
         Self {
             ids: Arc::new(Vec::new()),
             checked: 0,
             generation,
+            eviction_generation,
         }
     }
 }
