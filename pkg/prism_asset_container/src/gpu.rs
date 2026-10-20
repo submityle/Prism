@@ -1,6 +1,6 @@
-//! Optional real-device BlockDeflate backend.
+//! Optional real-device `BlockDeflate` backend.
 //!
-//! BlockDeflate stores independently addressable raw-DEFLATE streams. This
+//! `BlockDeflate` stores independently addressable raw-DEFLATE streams. This
 //! adapter owns only the format boundary: the GPU crate performs the complete
 //! raw-DEFLATE decode, while the container keeps range, budget, and BLAKE3
 //! validation authoritative.
@@ -22,9 +22,27 @@ use crate::block::{
 };
 use crate::budget::zeroed;
 use crate::format::{ChunkInfo, Codec, ContainerError, CHUNK_RECORD_SIZE, CHUNK_TABLE_RECORD_SIZE};
+#[cfg(feature = "mmap")]
+use crate::MmapRangeSource;
 use crate::{ContainerReadBudget, ContainerReader, MemoryRangeSource};
 
-/// A reusable GPU-preferred decoder for BlockDeflate blocks.
+enum ResidentBacking {
+    Owned(Arc<[u8]>),
+    #[cfg(feature = "mmap")]
+    Mapped(Arc<MmapRangeSource>),
+}
+
+impl ResidentBacking {
+    fn bytes(&self) -> &[u8] {
+        match self {
+            Self::Owned(bytes) => bytes,
+            #[cfg(feature = "mmap")]
+            Self::Mapped(source) => source.mapped_bytes(),
+        }
+    }
+}
+
+/// A reusable GPU-preferred decoder for `BlockDeflate` blocks.
 pub struct GpuBlockDecodeBackend {
     context: Arc<GpuContext>,
     decoder: GDeflateDecoder,
@@ -77,15 +95,57 @@ impl GpuBlockDecodeBackend {
         chunk_id: u32,
         budget: ContainerReadBudget,
     ) -> Result<GpuResidentBlockPayload, ContainerError> {
+        let source = MemoryRangeSource::new(bytes.clone());
+        self.bind_validated_source(
+            reader,
+            ResidentBacking::Owned(bytes),
+            &source,
+            chunk_id,
+            budget,
+        )
+    }
+
+    /// Binds a previously validated mmap-backed v2 chunk without copying the
+    /// complete container into an `Arc<[u8]>`. The reader must be the source of
+    /// the retained mapping, and mount-time container/block hashes remain the
+    /// integrity authority. The mapping must remain immutable for its lifetime.
+    #[cfg(feature = "mmap")]
+    pub fn bind_validated_mmap_chunk(
+        &self,
+        reader: &ContainerReader,
+        chunk_id: u32,
+        budget: ContainerReadBudget,
+    ) -> Result<GpuResidentBlockPayload, ContainerError> {
+        let source = reader
+            .validated_mmap_source()
+            .ok_or(ContainerError::InvalidDirectory)?;
+        self.bind_validated_source(
+            reader,
+            ResidentBacking::Mapped(source.clone()),
+            source.as_ref(),
+            chunk_id,
+            budget,
+        )
+    }
+
+    fn bind_validated_source(
+        &self,
+        reader: &ContainerReader,
+        backing: ResidentBacking,
+        source: &dyn crate::RangeSource,
+        chunk_id: u32,
+        budget: ContainerReadBudget,
+    ) -> Result<GpuResidentBlockPayload, ContainerError> {
         let info = reader.info();
         let limits = budget.limits();
         limits.check(
             "container bytes",
-            bytes.len() as u64,
+            info.total_len,
             limits.max_container_bytes,
         )?;
-        if bytes.len() as u64 != info.total_len
-            || blake3::hash(&bytes).as_bytes() != &info.content_hash
+        if let ResidentBacking::Owned(bytes) = &backing
+            && (bytes.len() as u64 != info.total_len
+                || blake3::hash(bytes).as_bytes() != &info.content_hash)
         {
             return Err(ContainerError::HashMismatch);
         }
@@ -113,9 +173,8 @@ impl GpuBlockDecodeBackend {
             u64::from(info.chunk_count),
             u64::from(limits.max_records),
         )?;
-        let source = MemoryRangeSource::new(bytes.clone());
         let index = crate::block::parse_index(
-            &source,
+            source,
             chunk.offset,
             chunk.stored_len,
             metadata_bytes,
@@ -139,7 +198,7 @@ impl GpuBlockDecodeBackend {
             .get_or_init(|| Arc::new(GpuDeflate::new(&self.context)))
             .clone();
         Ok(GpuResidentBlockPayload {
-            bytes,
+            backing,
             chunk,
             index,
             budget,
@@ -155,7 +214,7 @@ impl GpuBlockDecodeBackend {
 /// its context, decoder, bytes, and budgeted metadata independently of the
 /// original reader/backend. Stored bytes are retained; decoded bytes are not.
 pub struct GpuResidentBlockPayload {
-    bytes: Arc<[u8]>,
+    backing: ResidentBacking,
     chunk: ChunkInfo,
     index: crate::block::BlockIndex,
     budget: ContainerReadBudget,
@@ -294,7 +353,7 @@ impl GpuResidentBlockPayload {
         // Separate admission from preparation: even the last block can reject
         // this request before any input buffer is allocated or work submitted.
         for number in first..=last {
-            let record = resident_record(&self.bytes, &self.index, number)?;
+            let record = resident_record(self.backing.bytes(), &self.index, number)?;
             limits.unit(record.stored.len() as u64, record.raw_len)?;
             let padded = padded_len(record.stream_len()?)?;
             padded_bytes = padded_bytes
@@ -341,7 +400,7 @@ impl GpuResidentBlockPayload {
             .try_reserve_exact(count_usize)
             .map_err(|_| ContainerError::BackendAllocationFailed)?;
         for number in first..=last {
-            let record = resident_record(&self.bytes, &self.index, number)?;
+            let record = resident_record(self.backing.bytes(), &self.index, number)?;
             if !record.raw {
                 let decoded_len = validate_deflate_bounded(record.stored, record.raw_len as usize)
                     .map_err(|_| ContainerError::CompressionFailed)?;
@@ -352,7 +411,7 @@ impl GpuResidentBlockPayload {
             inputs.push(interleave_record(&record)?);
         }
         for (input, number) in inputs.iter().zip(first..=last) {
-            let record = resident_record(&self.bytes, &self.index, number)?;
+            let record = resident_record(self.backing.bytes(), &self.index, number)?;
             requests.push(DeflateTile {
                 interleaved: input,
                 compressed_size: usize::try_from(record.stream_len()?)
@@ -369,7 +428,7 @@ impl GpuResidentBlockPayload {
         }
         let mut covered = 0u64;
         for (tile, number) in tiles.into_iter().zip(first..=last) {
-            let record = resident_record(&self.bytes, &self.index, number)?;
+            let record = resident_record(self.backing.bytes(), &self.index, number)?;
             if tile.byte_len() != record.raw_len {
                 return Err(ContainerError::InvalidDecodeReport);
             }

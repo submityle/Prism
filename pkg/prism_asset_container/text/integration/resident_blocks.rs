@@ -148,6 +148,55 @@ fn mixed_batch_preserves_exact_ranges_owned_outputs_and_prior_validation() {
     assert_eq!(received, raw[start as usize..(start + len) as usize]);
 }
 
+#[cfg(feature = "mmap")]
+#[test]
+fn mmap_backing_survives_reader_drop_for_gpu_resident_ranges() {
+    let Some(context) = context() else { return };
+    static NEXT_PATH: AtomicUsize = AtomicUsize::new(1);
+    let raw = mixed_payload();
+    let bytes = container(&raw);
+    let path = std::env::temp_dir().join(format!(
+        "prism-resident-mmap-{}-{}.container",
+        std::process::id(),
+        NEXT_PATH.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::write(&path, &bytes).unwrap();
+    let reader = ContainerReader::from_mmap_file(&path).unwrap();
+    let budget = ContainerReadBudget::default();
+    let baseline = budget.in_flight_bytes();
+    let backend = GpuBlockDecodeBackend::new(context.clone());
+    let payload = backend
+        .bind_validated_mmap_chunk(&reader, 0, budget.clone())
+        .unwrap();
+    assert_eq!(budget.in_flight_bytes(), baseline + 3 * 80);
+    drop(reader);
+
+    let start = BLOCK as u64 - 5;
+    let len = BLOCK as u64 + 13;
+    let result = payload
+        .read_range_resident(start, len, admission())
+        .unwrap();
+    assert_eq!(result.slices().len(), 3);
+    let mut received = vec![0_u8; len as usize];
+    for slice in result.into_slices() {
+        let (tile, selected, destination) = slice.into_parts();
+        let copy_len = tile.byte_len().div_ceil(4) * 4;
+        let stage = buffer::staging(context.device(), "mmap_resident_consumer", copy_len);
+        let mut encoder = context.device().create_command_encoder(&Default::default());
+        encoder.copy_buffer_to_buffer(tile.buffer(), 0, &stage, 0, copy_len);
+        let submission = context.queue().submit([encoder.finish()]);
+        let words = buffer::read_back::<u32>(&context, &stage, submission).unwrap();
+        let decoded: Vec<u8> = words.into_iter().flat_map(u32::to_le_bytes).collect();
+        let amount = (selected.end - selected.start) as usize;
+        received[destination as usize..destination as usize + amount]
+            .copy_from_slice(&decoded[selected.start as usize..selected.end as usize]);
+    }
+    assert_eq!(received, raw[start as usize..(start + len) as usize]);
+    drop(payload);
+    assert_eq!(budget.in_flight_bytes(), baseline);
+    std::fs::remove_file(path).unwrap();
+}
+
 #[test]
 fn range_and_device_admission_fail_deterministically_then_valid_read_succeeds() {
     let Some(context) = context() else { return };

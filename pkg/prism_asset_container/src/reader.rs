@@ -99,6 +99,14 @@ impl DirectoryIndex {
             Self::Mmap(view) => GuidIter::Mmap(view.guid_iter()),
         }
     }
+
+    #[cfg(all(feature = "mmap", feature = "gpu"))]
+    fn mmap_source(&self) -> Option<Arc<crate::MmapRangeSource>> {
+        match self {
+            Self::Parsed { .. } => None,
+            Self::Mmap(view) => Some(view.source_clone()),
+        }
+    }
 }
 
 /// Normalizes a source's per-call cap once, before parsing or retaining it.
@@ -303,6 +311,11 @@ impl ContainerReader {
     #[must_use]
     pub fn budget(&self) -> &ContainerReadBudget {
         &self.budget
+    }
+
+    #[cfg(all(feature = "mmap", feature = "gpu"))]
+    pub(crate) fn validated_mmap_source(&self) -> Option<Arc<crate::MmapRangeSource>> {
+        self.directory.mmap_source()
     }
 
     /// Mounts a read-only memory-mapped local container file.

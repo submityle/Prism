@@ -527,6 +527,11 @@ impl MmapV2DirectoryView {
         }
     }
 
+    #[cfg(feature = "gpu")]
+    pub(crate) fn source_clone(&self) -> Arc<MmapRangeSource> {
+        Arc::clone(&self.source)
+    }
+
     fn decode_entry_record(&self, record: &[u8]) -> Option<EntryInfo> {
         let guid = read_guid(record).ok()?;
         let chunk_id = read_u32(record, 16).ok()?;
