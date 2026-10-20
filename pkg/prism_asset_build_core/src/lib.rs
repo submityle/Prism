@@ -99,7 +99,8 @@ pub use editable::{
     EditablePayloadReferenceRewriter, EditableReimportOutput, EditableReimporter,
     EditableSourceProvider, EditableSubAsset, EditableSubAssetChange, EditableSubAssetRedirect,
     EditableSubAssetReference, EditableSubAssetReferenceRewrite, EditableSubAssetReimportPlan,
-    EditableWorkspace, EditableWorkspaceEdit, EditableWorkspaceReimport, EditableWorkspaceSave,
+    EditableWorkspace, EditableWorkspaceChange, EditableWorkspaceEdit, EditableWorkspaceMutation,
+    EditableWorkspaceMutationReceipt, EditableWorkspaceReimport, EditableWorkspaceSave,
     LocalFileSourceProvider, SourceRecord, EDITABLE_ASSET_SCHEMA, MAX_EDITABLE_ASSET_BYTES,
     MAX_EDITABLE_WORKSPACE_ENCODED_BYTES,
 };

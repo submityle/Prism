@@ -258,40 +258,40 @@ impl BuildGraph {
             for id in &wave {
                 ready.remove(id);
             }
-            let results = thread::scope(|scope| {
-                wave.iter()
-                    .map(|&id| {
-                        let job = &self.jobs[&id];
-                        // Scoped workers may borrow immutable dependency outputs.
-                        // Copying them per consumer multiplies peak memory for
-                        // large textures/meshes and broad fan-out graphs.
-                        let inputs: Vec<&[u8]> = job
-                            .dependencies()
-                            .iter()
-                            .map(|dependency| outputs[dependency].as_slice())
-                            .collect();
-                        let processor = job.processor();
-                        (
-                            id,
-                            scope.spawn(move || {
-                                processor.process(&inputs).map_err(|source| {
-                                    BuildError::ProcessorFailed { job: id, source }
+            let results =
+                thread::scope(|scope| {
+                    wave.iter()
+                        .map(|&id| {
+                            let job = &self.jobs[&id];
+                            // Scoped workers may borrow immutable dependency outputs.
+                            // Copying them per consumer multiplies peak memory for
+                            // large textures/meshes and broad fan-out graphs.
+                            let inputs: Vec<&[u8]> = job
+                                .dependencies()
+                                .iter()
+                                .map(|dependency| outputs[dependency].as_slice())
+                                .collect();
+                            (
+                                id,
+                                scope.spawn(move || {
+                                    job.process(&inputs).map_err(|source| {
+                                        BuildError::ProcessorFailed { job: id, source }
+                                    })
+                                }),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .map(|(id, handle)| {
+                            handle.join().unwrap_or_else(|_| {
+                                Err(BuildError::ProcessorFailed {
+                                    job: id,
+                                    source: ProcessorError::new("processor thread panicked"),
                                 })
-                            }),
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .into_iter()
-                    .map(|(id, handle)| {
-                        handle.join().unwrap_or_else(|_| {
-                            Err(BuildError::ProcessorFailed {
-                                job: id,
-                                source: ProcessorError::new("processor thread panicked"),
                             })
                         })
-                    })
-                    .collect::<Vec<_>>()
-            });
+                        .collect::<Vec<_>>()
+                });
             for (&id, result) in wave.iter().zip(results) {
                 outputs.insert(id, result?);
                 completed += 1;

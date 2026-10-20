@@ -34,6 +34,7 @@ const MAX_AUTHORING_PAYLOAD_BYTES: usize = 32 * 1024 * 1024;
 const MAX_PREVIEW_BYTES: usize = 8 * 1024 * 1024;
 const MAX_SUBASSET_REFERENCES: usize = 65_536;
 const MAX_WORKSPACE_PACKAGES: usize = 65_536;
+const MAX_WORKSPACE_TRANSACTION_RECORDS: usize = 2 * MAX_WORKSPACE_PACKAGES;
 // Counts include unrelated entries and directories (including the root). The
 // reserved transaction subtree is recovered separately and is never imported.
 const MAX_WORKSPACE_ENTRIES: usize = 262_144;
@@ -41,7 +42,7 @@ const MAX_WORKSPACE_DIRECTORIES: usize = 16_384;
 const MAX_WORKSPACE_DIRECTORY_DEPTH: usize = 64;
 const EDITABLE_TRANSACTION_DIRECTORY: &str = ".prism-editable-transactions";
 const EDITABLE_TRANSACTION_MAGIC: &[u8] = b"PRISM-EDITABLE-TX\0";
-const EDITABLE_TRANSACTION_SCHEMA: u32 = 1;
+const EDITABLE_TRANSACTION_SCHEMA: u32 = 2;
 const EDITABLE_TRANSACTION_PREPARED: &[u8] = b"prepared";
 const EDITABLE_TRANSACTION_COMMITTED: &[u8] = b"committed";
 const MAX_EDITABLE_TRANSACTION_MANIFEST_BYTES: usize = 16 * 1024 * 1024;
@@ -217,6 +218,40 @@ pub struct EditableWorkspaceSave {
     /// Resulting hashes for every supplied edit, including no-ops. These become
     /// the expected hashes for subsequent saves or an explicit undo operation.
     pub content_hashes: BTreeMap<AssetId, ContentHash>,
+}
+
+/// One identity-based workspace mutation. Each identity may occur only once in
+/// a batch. `Put` creates when `expected_hash` is absent; otherwise it replaces
+/// the matching package and can move it to another relative path. Parent
+/// directories must already exist. Paths never become asset identities.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum EditableWorkspaceMutation {
+    Put {
+        expected_hash: Option<ContentHash>,
+        relative_path: PathBuf,
+        replacement: EditableAsset,
+    },
+    Remove {
+        asset: AssetId,
+        expected_hash: ContentHash,
+    },
+}
+
+/// Before/after identity and location of a changed package. Content hashes
+/// include all editor fields and can guard a subsequent edit or explicit undo.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EditableWorkspaceChange {
+    pub asset: AssetId,
+    pub old_path: Option<PathBuf>,
+    pub new_path: Option<PathBuf>,
+    pub old_hash: Option<ContentHash>,
+    pub new_hash: Option<ContentHash>,
+}
+
+/// Committed mutations in ascending identity order, excluding no-ops.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EditableWorkspaceMutationReceipt {
+    pub changes: Vec<EditableWorkspaceChange>,
 }
 
 /// Local root that owns a set of editable `.prism` packages.
@@ -443,6 +478,12 @@ pub enum EditableAssetError {
         expected: ContentHash,
         actual: ContentHash,
     },
+    WorkspacePathConflict {
+        path: PathBuf,
+    },
+    WorkspaceDependencyCycle {
+        assets: Vec<AssetId>,
+    },
     WorkspacePackageLimitExceeded {
         limit: usize,
     },
@@ -582,6 +623,16 @@ impl fmt::Display for EditableAssetError {
                 expected.to_hex(),
                 actual.to_hex()
             ),
+            Self::WorkspacePathConflict { path } => {
+                write!(
+                    f,
+                    "editable workspace path is already occupied: {}",
+                    path.display()
+                )
+            }
+            Self::WorkspaceDependencyCycle { assets } => {
+                write!(f, "editable workspace hard dependency cycle: {assets:?}")
+            }
             Self::WorkspacePackageLimitExceeded { limit } => {
                 write!(f, "editable workspace exceeds {limit} package files")
             }
@@ -1278,6 +1329,213 @@ impl EditableWorkspace {
         })
     }
 
+    /// Creates, replaces, moves and removes packages in one recoverable batch.
+    ///
+    /// Stable identities select existing packages, guarded by their complete
+    /// canonical hash. All comparisons, destination paths, final hard dependency
+    /// closure, subasset references and old/new encoded budgets are checked before
+    /// staging. Path swaps are supported; two final packages cannot share a path.
+    /// Soft targets may remain absent. Removing a required target is permitted
+    /// only when its consumers are removed or updated in the same batch.
+    ///
+    /// Parent directories are caller-owned and must already exist without
+    /// symlinks. No-op batches create no transaction. Readers and writers must
+    /// cooperate with the workspace lock; direct filesystem readers can observe
+    /// individual replacements. The receipt does not retain payload copies.
+    pub fn mutate(
+        &self,
+        mutations: Vec<EditableWorkspaceMutation>,
+        max_encoded_bytes: u64,
+    ) -> Result<EditableWorkspaceMutationReceipt, EditableAssetError> {
+        if max_encoded_bytes == 0 || max_encoded_bytes > MAX_EDITABLE_WORKSPACE_ENCODED_BYTES {
+            return Err(EditableAssetError::InvalidWorkspaceSnapshotBudget {
+                requested: max_encoded_bytes,
+                limit: MAX_EDITABLE_WORKSPACE_ENCODED_BYTES,
+            });
+        }
+        if mutations.len() > MAX_WORKSPACE_PACKAGES {
+            return Err(EditableAssetError::WorkspacePackageLimitExceeded {
+                limit: MAX_WORKSPACE_PACKAGES,
+            });
+        }
+        let mut ordered = BTreeMap::new();
+        let mut replacement_bytes = 0_u64;
+        for mutation in mutations {
+            let asset = match &mutation {
+                EditableWorkspaceMutation::Put {
+                    relative_path,
+                    replacement,
+                    ..
+                } => {
+                    validate_workspace_package_path(relative_path)?;
+                    replacement_bytes = replacement_bytes
+                        .saturating_add(replacement.validated_encoded_len()? as u64);
+                    replacement.asset
+                }
+                EditableWorkspaceMutation::Remove { asset, .. } => *asset,
+            };
+            if replacement_bytes > max_encoded_bytes {
+                return Err(EditableAssetError::WorkspaceEncodedBytesLimitExceeded {
+                    actual: replacement_bytes,
+                    limit: max_encoded_bytes,
+                });
+            }
+            if ordered.insert(asset, mutation).is_some() {
+                return Err(EditableAssetError::DuplicateWorkspaceAsset { asset });
+            }
+        }
+        self.with_lock(|| {
+            recover_workspace_transactions(&self.root)?;
+            let mut packages =
+                scan_workspace_packages(&self.root, WorkspaceScanLimits::new(max_encoded_bytes))?;
+            let old_paths = packages
+                .values()
+                .map(|package| package.relative_path.clone())
+                .collect::<BTreeSet<_>>();
+            let mut next_bytes = packages
+                .values()
+                .map(|package| package.encoded.len() as u64)
+                .sum::<u64>();
+            // Compare the complete batch before modifying the candidate graph.
+            for (&asset, mutation) in &ordered {
+                let expected = match mutation {
+                    EditableWorkspaceMutation::Put { expected_hash, .. } => *expected_hash,
+                    EditableWorkspaceMutation::Remove { expected_hash, .. } => Some(*expected_hash),
+                };
+                match (expected, packages.get(&asset)) {
+                    (None, Some(_)) => {
+                        return Err(EditableAssetError::DuplicateWorkspaceAsset { asset })
+                    }
+                    (Some(_), None) => {
+                        return Err(EditableAssetError::WorkspaceAssetNotFound { asset })
+                    }
+                    (Some(expected), Some(package)) => {
+                        let actual = ContentHash::digest(&package.encoded);
+                        if actual != expected {
+                            return Err(EditableAssetError::WorkspaceEditConflict {
+                                asset,
+                                expected,
+                                actual,
+                            });
+                        }
+                        next_bytes -= package.encoded.len() as u64;
+                    }
+                    (None, None) => {}
+                }
+            }
+            next_bytes += replacement_bytes;
+            if next_bytes > max_encoded_bytes {
+                return Err(EditableAssetError::WorkspaceEncodedBytesLimitExceeded {
+                    actual: next_bytes,
+                    limit: max_encoded_bytes,
+                });
+            }
+            let mut originals = BTreeMap::new();
+            let mut changes = Vec::with_capacity(ordered.len());
+            for (asset, mutation) in ordered {
+                let previous = packages.remove(&asset);
+                let mut change = EditableWorkspaceChange {
+                    asset,
+                    old_path: previous
+                        .as_ref()
+                        .map(|package| package.relative_path.clone()),
+                    new_path: None,
+                    old_hash: previous
+                        .as_ref()
+                        .map(|package| ContentHash::digest(&package.encoded)),
+                    new_hash: None,
+                };
+                if let Some(previous) = previous {
+                    originals.insert(asset, previous);
+                }
+                if let EditableWorkspaceMutation::Put {
+                    relative_path,
+                    replacement,
+                    ..
+                } = mutation
+                {
+                    ensure_workspace_package_parent(&self.root, &relative_path)?;
+                    let destination = self.root.join(&relative_path);
+                    match fs::symlink_metadata(&destination) {
+                        Ok(metadata)
+                            if metadata.is_file()
+                                && !metadata.file_type().is_symlink()
+                                && old_paths.contains(&relative_path) => {}
+                        Ok(_) => {
+                            return Err(EditableAssetError::WorkspacePathConflict {
+                                path: relative_path,
+                            })
+                        }
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                        Err(error) => return Err(io_error("inspect mutation destination", error)),
+                    }
+                    change.new_path = Some(relative_path.clone());
+                    packages.insert(
+                        asset,
+                        WorkspacePackage {
+                            relative_path,
+                            asset: replacement,
+                            encoded: Vec::new(),
+                        },
+                    );
+                }
+                changes.push(change);
+            }
+            if packages.len() > MAX_WORKSPACE_PACKAGES {
+                return Err(EditableAssetError::WorkspacePackageLimitExceeded {
+                    limit: MAX_WORKSPACE_PACKAGES,
+                });
+            }
+            let mut final_paths = BTreeSet::new();
+            for package in packages.values() {
+                if !final_paths.insert(&package.relative_path) {
+                    return Err(EditableAssetError::WorkspacePathConflict {
+                        path: package.relative_path.clone(),
+                    });
+                }
+            }
+            validate_workspace_reference_graph(&packages)?;
+            validate_workspace_required_dependencies(&packages)?;
+            // Each physical path has one before/after record. This makes swaps
+            // and moving onto a package removed by the same batch deterministic.
+            let mut records = BTreeMap::<PathBuf, WorkspaceTransactionRecord>::new();
+            for (_, previous) in originals {
+                records.insert(
+                    previous.relative_path.clone(),
+                    WorkspaceTransactionRecord {
+                        relative_path: previous.relative_path,
+                        old_bytes: previous.encoded,
+                        new_bytes: Vec::new(),
+                    },
+                );
+            }
+            for change in &mut changes {
+                if let Some(package) = packages.remove(&change.asset) {
+                    let next = package.asset.encode()?;
+                    change.new_hash = Some(ContentHash::digest(&next));
+                    records
+                        .entry(package.relative_path.clone())
+                        .or_insert_with(|| WorkspaceTransactionRecord {
+                            relative_path: package.relative_path,
+                            old_bytes: Vec::new(),
+                            new_bytes: Vec::new(),
+                        })
+                        .new_bytes = next;
+                }
+            }
+            drop(packages);
+            changes.retain(|change| {
+                change.old_path != change.new_path || change.old_hash != change.new_hash
+            });
+            let records = records
+                .into_values()
+                .filter(|record| record.old_bytes != record.new_bytes)
+                .collect::<Vec<_>>();
+            publish_workspace_transaction(&self.root, &records)?;
+            Ok(EditableWorkspaceMutationReceipt { changes })
+        })
+    }
+
     /// Reimports one package and atomically publishes every explicit reference
     /// update required by caller-provided stable subasset redirects.
     pub fn reimport<P, I, R>(
@@ -1451,6 +1709,7 @@ struct WorkspacePackage {
 #[derive(Clone, Debug)]
 struct WorkspaceTransactionRecord {
     relative_path: PathBuf,
+    // Empty bytes denote an absent file. A valid canonical package is nonempty.
     old_bytes: Vec<u8>,
     new_bytes: Vec<u8>,
 }
@@ -1483,10 +1742,30 @@ fn validate_workspace_package_path(path: &Path) -> Result<PathBuf, EditableAsset
         || path
             .components()
             .any(|component| !matches!(component, Component::Normal(_)))
+        || path
+            .components()
+            .any(|component| component.as_os_str() == EDITABLE_TRANSACTION_DIRECTORY)
     {
         return Err(EditableAssetError::PackageOutsideWorkspace);
     }
+    let text = path
+        .to_str()
+        .ok_or(EditableAssetError::InvalidText("workspace package path"))?;
+    validate_text(text, MAX_SOURCE_URI_BYTES, "workspace package path")?;
     Ok(path.to_path_buf())
+}
+
+fn ensure_workspace_package_parent(root: &Path, relative: &Path) -> Result<(), EditableAssetError> {
+    validate_workspace_package_path(relative)?;
+    ensure_directory(root)?;
+    let mut parent = root.to_path_buf();
+    if let Some(ancestors) = relative.parent() {
+        for component in ancestors.components() {
+            parent.push(component);
+            ensure_directory(&parent)?;
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy)]
@@ -1705,6 +1984,66 @@ fn validate_workspace_reference_graph(
     Ok(())
 }
 
+fn validate_workspace_required_dependencies(
+    packages: &BTreeMap<AssetId, WorkspacePackage>,
+) -> Result<(), EditableAssetError> {
+    let mut pending = packages
+        .keys()
+        .map(|&asset| (asset, 0_usize))
+        .collect::<BTreeMap<_, _>>();
+    let mut consumers = BTreeMap::<AssetId, BTreeSet<AssetId>>::new();
+    for (&asset, package) in packages {
+        for dependency in &package.asset.dependencies {
+            if dependency.kind == EditableDependencyKind::Soft {
+                continue;
+            }
+            if !packages.contains_key(&dependency.asset) {
+                return Err(EditableAssetError::MissingReferencedAsset {
+                    asset: dependency.asset,
+                });
+            }
+            if dependency.kind == EditableDependencyKind::Hard
+                && consumers.entry(dependency.asset).or_default().insert(asset)
+            {
+                *pending.get_mut(&asset).expect("known package") += 1;
+            }
+        }
+        // Explicit hard subasset references are also required graph edges even
+        // when a generic importer has not duplicated them as dependency records.
+        for reference in &package.asset.subasset_references {
+            if reference.kind == EditableDependencyKind::Hard
+                && reference.asset != asset
+                && consumers.entry(reference.asset).or_default().insert(asset)
+            {
+                *pending.get_mut(&asset).expect("known package") += 1;
+            }
+        }
+    }
+    let mut ready = pending
+        .iter()
+        .filter_map(|(&asset, &count)| (count == 0).then_some(asset))
+        .collect::<BTreeSet<_>>();
+    while let Some(asset) = ready.pop_first() {
+        if let Some(dependents) = consumers.get(&asset) {
+            for dependent in dependents {
+                let remaining = pending.get_mut(dependent).expect("known consumer");
+                *remaining -= 1;
+                if *remaining == 0 {
+                    ready.insert(*dependent);
+                }
+            }
+        }
+        pending.remove(&asset);
+    }
+    if pending.is_empty() {
+        Ok(())
+    } else {
+        Err(EditableAssetError::WorkspaceDependencyCycle {
+            assets: pending.into_keys().collect(),
+        })
+    }
+}
+
 fn workspace_transactions_root(root: &Path) -> PathBuf {
     root.join(EDITABLE_TRANSACTION_DIRECTORY)
 }
@@ -1734,39 +2073,93 @@ fn publish_workspace_transaction(
     if let Err(error) = apply {
         let rollback = recover_workspace_transaction(root, &transaction, false);
         if rollback.is_ok() {
-            let _ = fs::remove_dir_all(&transaction);
-            let _ = sync_directory(&transaction_root);
+            let _ = cleanup_workspace_transaction(&transaction_root, &transaction);
         }
         return Err(error);
     }
 
-    if let Err(error) = write_new_file(
-        &transaction.join("committed"),
-        EDITABLE_TRANSACTION_COMMITTED,
-    )
-    .and_then(|()| sync_directory(&transaction))
+    if let Err(error) =
+        write_transaction_marker(&transaction, "committed", EDITABLE_TRANSACTION_COMMITTED)
     {
+        // A marker may have been published before its directory sync failed.
+        // Durably disarm it before rolling back: otherwise a second failure
+        // could leave old packages beside a marker requesting roll-forward.
+        // If disarming fails, leave all new packages and recovery images intact.
+        disarm_workspace_commit(&transaction)?;
         let rollback = recover_workspace_transaction(root, &transaction, false);
         if rollback.is_ok() {
-            let _ = fs::remove_dir_all(&transaction);
-            let _ = sync_directory(&transaction_root);
+            let _ = cleanup_workspace_transaction(&transaction_root, &transaction);
         }
         return Err(error);
     }
-    let _ = fs::remove_dir_all(&transaction);
-    let _ = sync_directory(&transaction_root);
+    let _ = cleanup_workspace_transaction(&transaction_root, &transaction);
     Ok(())
+}
+
+fn disarm_workspace_recovery(transaction: &Path) -> Result<(), EditableAssetError> {
+    // Every package has reached its durable final state. Remove the prepared
+    // marker durably before deleting any recovery image: interrupted recursive
+    // cleanup must be recognizable without requiring already deleted blobs.
+    let prepared = transaction.join("prepared");
+    ensure_regular_file(&prepared)?;
+    fs::remove_file(&prepared).map_err(|error| io_error("retire workspace transaction", error))?;
+    sync_directory(transaction)
+}
+
+fn cleanup_workspace_transaction(
+    transaction_root: &Path,
+    transaction: &Path,
+) -> Result<(), EditableAssetError> {
+    disarm_workspace_recovery(transaction)?;
+    fs::remove_dir_all(transaction)
+        .map_err(|error| io_error("remove retired transaction", error))?;
+    sync_directory(transaction_root)
+}
+
+fn write_transaction_marker(
+    transaction: &Path,
+    name: &str,
+    bytes: &[u8],
+) -> Result<(), EditableAssetError> {
+    let mut temporary = tempfile::NamedTempFile::new_in(transaction)
+        .map_err(|error| io_error("create transaction marker", error))?;
+    temporary
+        .write_all(bytes)
+        .map_err(|error| io_error("write transaction marker", error))?;
+    temporary
+        .as_file()
+        .sync_all()
+        .map_err(|error| io_error("sync transaction marker", error))?;
+    temporary
+        .persist_noclobber(transaction.join(name))
+        .map_err(|error| io_error("publish transaction marker", error.error))?;
+    sync_directory(transaction)
+}
+
+fn disarm_workspace_commit(transaction: &Path) -> Result<(), EditableAssetError> {
+    let marker = transaction.join("committed");
+    match fs::symlink_metadata(&marker) {
+        Ok(_) => {
+            ensure_regular_file(&marker)?;
+            fs::remove_file(&marker)
+                .map_err(|error| io_error("remove transaction commit marker", error))?;
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(io_error("inspect transaction commit marker", error)),
+    }
+    sync_directory(transaction)
 }
 
 fn create_workspace_transaction(
     transaction_root: &Path,
     records: &[WorkspaceTransactionRecord],
 ) -> Result<PathBuf, EditableAssetError> {
-    if records.len() > MAX_WORKSPACE_PACKAGES {
+    if records.len() > MAX_WORKSPACE_TRANSACTION_RECORDS {
         return Err(EditableAssetError::WorkspacePackageLimitExceeded {
-            limit: MAX_WORKSPACE_PACKAGES,
+            limit: MAX_WORKSPACE_TRANSACTION_RECORDS,
         });
     }
+    let manifest = encode_workspace_transaction_manifest(records)?;
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -1787,17 +2180,22 @@ fn create_workspace_transaction(
                 &record.new_bytes,
             )?;
         }
-        let manifest = encode_workspace_transaction_manifest(records)?;
         write_new_file(&transaction.join("manifest"), &manifest)?;
         sync_directory(&transaction)?;
-        write_new_file(&transaction.join("prepared"), EDITABLE_TRANSACTION_PREPARED)?;
-        sync_directory(&transaction)
+        write_transaction_marker(&transaction, "prepared", EDITABLE_TRANSACTION_PREPARED)?;
+        // The rollback directory's name must survive before any package is
+        // changed; syncing its contents alone does not persist its parent entry.
+        sync_directory(transaction_root)
     })();
     match stage {
         Ok(()) => Ok(transaction),
         Err(error) => {
-            let _ = fs::remove_dir_all(&transaction);
-            let _ = sync_directory(transaction_root);
+            if transaction.join("prepared").exists() {
+                let _ = cleanup_workspace_transaction(transaction_root, &transaction);
+            } else {
+                let _ = fs::remove_dir_all(&transaction);
+                let _ = sync_directory(transaction_root);
+            }
             Err(error)
         }
     }
@@ -1809,12 +2207,13 @@ fn apply_workspace_transaction(
     records: &[WorkspaceTransactionRecord],
 ) -> Result<(), EditableAssetError> {
     for record in records {
-        let path = root.join(&record.relative_path);
-        let (_, current) = read_editable_package_bytes(&path)?;
+        let current = read_workspace_file_state(root, &record.relative_path)?;
         if current != record.old_bytes {
             return Err(EditableAssetError::TransactionConflict);
         }
-        replace_file_bytes(&path, &record.new_bytes)?;
+    }
+    for record in records {
+        set_workspace_file_state(root, &record.relative_path, &record.new_bytes)?;
     }
     sync_directory(transaction)?;
     Ok(())
@@ -1861,8 +2260,7 @@ fn recover_workspace_transactions(root: &Path) -> Result<(), EditableAssetError>
             false
         };
         recover_workspace_transaction(root, &transaction, is_committed)?;
-        fs::remove_dir_all(&transaction).map_err(|error| io_error("remove transaction", error))?;
-        sync_directory(&transaction_root)?;
+        cleanup_workspace_transaction(&transaction_root, &transaction)?;
     }
     Ok(())
 }
@@ -1876,19 +2274,29 @@ fn recover_workspace_transaction(
         &transaction.join("manifest"),
         MAX_EDITABLE_TRANSACTION_MANIFEST_BYTES,
     )?)?;
+    // Verify every rollback/forward image and every current state first. A
+    // damaged late record must not cause a partially recovered workspace.
     for (index, record) in records.iter().enumerate() {
-        let path = root.join(&record.relative_path);
         let old_bytes = read_transaction_blob(transaction, index, "old", record.old_hash)?;
         let new_bytes = read_transaction_blob(transaction, index, "new", record.new_hash)?;
-        let (_, current) = read_editable_package_bytes(&path)
-            .map_err(|_| EditableAssetError::TransactionConflict)?;
-        let desired = if committed { &new_bytes } else { &old_bytes };
-        let alternate = if committed { &old_bytes } else { &new_bytes };
-        if current != *desired && current != *alternate {
+        let current = read_workspace_file_state(root, &record.relative_path)?;
+        if current != old_bytes && current != new_bytes {
             return Err(EditableAssetError::TransactionConflict);
         }
-        if current != *desired {
-            replace_file_bytes(&path, desired)?;
+    }
+    for (index, record) in records.iter().enumerate() {
+        let desired = if committed {
+            read_transaction_blob(transaction, index, "new", record.new_hash)?
+        } else {
+            read_transaction_blob(transaction, index, "old", record.old_hash)?
+        };
+        let current = read_workspace_file_state(root, &record.relative_path)?;
+        let hash = ContentHash::digest(&current);
+        if hash != record.old_hash && hash != record.new_hash {
+            return Err(EditableAssetError::TransactionConflict);
+        }
+        if current != desired {
+            set_workspace_file_state(root, &record.relative_path, &desired)?;
         }
     }
     Ok(())
@@ -1938,6 +2346,10 @@ fn read_transaction_blob(
     if bytes.len() > MAX_EDITABLE_ASSET_BYTES || ContentHash::digest(&bytes) != expected_hash {
         return Err(EditableAssetError::InvalidWorkspaceTransaction);
     }
+    if !bytes.is_empty() {
+        EditableAsset::decode(&bytes)
+            .map_err(|_| EditableAssetError::InvalidWorkspaceTransaction)?;
+    }
     Ok(bytes)
 }
 
@@ -1955,14 +2367,23 @@ fn encode_workspace_transaction_manifest(
             }
         })?,
     );
+    let mut paths = BTreeSet::new();
     for record in records {
         let relative_path = validate_workspace_package_path(&record.relative_path)?;
+        if !paths.insert(relative_path.clone())
+            || (record.old_bytes.is_empty() && record.new_bytes.is_empty())
+        {
+            return Err(EditableAssetError::InvalidWorkspaceTransaction);
+        }
         let path = relative_path
             .to_str()
             .ok_or(EditableAssetError::InvalidWorkspaceTransaction)?;
         put_string(&mut out, path);
         out.extend_from_slice(&ContentHash::digest(&record.old_bytes).0);
         out.extend_from_slice(&ContentHash::digest(&record.new_bytes).0);
+        if out.len() > MAX_EDITABLE_TRANSACTION_MANIFEST_BYTES {
+            return Err(EditableAssetError::InvalidWorkspaceTransaction);
+        }
     }
     Ok(out)
 }
@@ -1985,10 +2406,14 @@ fn decode_workspace_transaction_manifest(
         return Err(EditableAssetError::InvalidWorkspaceTransaction);
     }
     let count = cursor
-        .count(MAX_WORKSPACE_PACKAGES, "workspace packages")
+        .count(
+            MAX_WORKSPACE_TRANSACTION_RECORDS,
+            "workspace transaction paths",
+        )
         .map_err(|_| EditableAssetError::InvalidWorkspaceTransaction)?;
     let mut paths = BTreeSet::new();
     let mut records = Vec::with_capacity(count);
+    let absent_hash = ContentHash::digest(&[]);
     for _ in 0..count {
         let path = cursor
             .string(MAX_SOURCE_URI_BYTES, "workspace package path")
@@ -1998,7 +2423,7 @@ fn decode_workspace_transaction_manifest(
         if !paths.insert(relative_path.clone()) {
             return Err(EditableAssetError::InvalidWorkspaceTransaction);
         }
-        records.push(WorkspaceTransactionManifestRecord {
+        let record = WorkspaceTransactionManifestRecord {
             relative_path,
             old_hash: ContentHash(
                 cursor
@@ -2010,7 +2435,11 @@ fn decode_workspace_transaction_manifest(
                     .array()
                     .map_err(|_| EditableAssetError::InvalidWorkspaceTransaction)?,
             ),
-        });
+        };
+        if record.old_hash == absent_hash && record.new_hash == absent_hash {
+            return Err(EditableAssetError::InvalidWorkspaceTransaction);
+        }
+        records.push(record);
     }
     if !cursor.is_empty() {
         return Err(EditableAssetError::InvalidWorkspaceTransaction);
@@ -2028,6 +2457,59 @@ fn write_new_file(path: &Path, bytes: &[u8]) -> Result<(), EditableAssetError> {
         .map_err(|error| io_error("write transaction file", error))?;
     file.sync_all()
         .map_err(|error| io_error("sync transaction file", error))
+}
+
+fn read_workspace_file_state(root: &Path, relative: &Path) -> Result<Vec<u8>, EditableAssetError> {
+    ensure_workspace_package_parent(root, relative)?;
+    let path = root.join(relative);
+    match fs::symlink_metadata(&path) {
+        Ok(_) => read_editable_package_bytes(&path).map(|(_, bytes)| bytes),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(io_error("inspect transaction package", error)),
+    }
+}
+
+fn set_workspace_file_state(
+    root: &Path,
+    relative: &Path,
+    bytes: &[u8],
+) -> Result<(), EditableAssetError> {
+    ensure_workspace_package_parent(root, relative)?;
+    let path = root.join(relative);
+    let parent = path
+        .parent()
+        .ok_or(EditableAssetError::PackageOutsideWorkspace)?;
+    let exists = match fs::symlink_metadata(&path) {
+        Ok(_) => {
+            ensure_regular_file(&path)?;
+            true
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+        Err(error) => return Err(io_error("inspect transaction package", error)),
+    };
+    if bytes.is_empty() {
+        if exists {
+            fs::remove_file(&path).map_err(|error| io_error("remove package", error))?;
+            sync_directory(parent)?;
+        }
+        return Ok(());
+    }
+    if exists {
+        return replace_file_bytes(&path, bytes);
+    }
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)
+        .map_err(|error| io_error("create package", error))?;
+    temporary
+        .write_all(bytes)
+        .map_err(|error| io_error("write package", error))?;
+    temporary
+        .as_file()
+        .sync_all()
+        .map_err(|error| io_error("sync package", error))?;
+    temporary
+        .persist_noclobber(&path)
+        .map_err(|error| io_error("publish new package", error.error))?;
+    sync_directory(parent)
 }
 
 fn replace_file_bytes(path: &Path, bytes: &[u8]) -> Result<(), EditableAssetError> {
@@ -2551,5 +3033,231 @@ mod tests {
 
         EditableWorkspace::open(directory.path()).unwrap();
         assert!(!incomplete.exists());
+    }
+
+    #[test]
+    fn every_partial_create_delete_move_and_swap_recovers_as_one_batch() {
+        let a = scan_test_asset().encode().unwrap();
+        let mut second = scan_test_asset();
+        second.asset = AssetId(2);
+        second.authoring_payload = b"second".to_vec();
+        let b = second.encode().unwrap();
+        let record = |path: &str, old: &[u8], new: &[u8]| WorkspaceTransactionRecord {
+            relative_path: path.into(),
+            old_bytes: old.to_vec(),
+            new_bytes: new.to_vec(),
+        };
+        let cases = [
+            vec![record("a.prism", &[], &a)],
+            vec![record("a.prism", &a, &[])],
+            vec![record("a.prism", &a, &[]), record("b.prism", &[], &a)],
+            vec![record("a.prism", &a, &b), record("b.prism", &b, &a)],
+            vec![
+                record("a.prism", &a, &[]),
+                record("b.prism", &b, &a),
+                record("c.prism", &[], &b),
+            ],
+        ];
+        for records in cases {
+            for committed in [false, true] {
+                for applied in 0..=records.len() {
+                    let root = tempfile::tempdir().unwrap();
+                    for record in &records {
+                        set_workspace_file_state(
+                            root.path(),
+                            &record.relative_path,
+                            &record.old_bytes,
+                        )
+                        .unwrap();
+                    }
+                    let transactions = ensure_workspace_transactions_root(root.path()).unwrap();
+                    let transaction =
+                        create_workspace_transaction(&transactions, &records).unwrap();
+                    for record in &records[..applied] {
+                        set_workspace_file_state(
+                            root.path(),
+                            &record.relative_path,
+                            &record.new_bytes,
+                        )
+                        .unwrap();
+                    }
+                    if committed {
+                        write_transaction_marker(
+                            &transaction,
+                            "committed",
+                            EDITABLE_TRANSACTION_COMMITTED,
+                        )
+                        .unwrap();
+                    }
+                    EditableWorkspace::open(root.path()).unwrap();
+                    for record in &records {
+                        let expected = if committed {
+                            &record.new_bytes
+                        } else {
+                            &record.old_bytes
+                        };
+                        assert_eq!(
+                            read_workspace_file_state(root.path(), &record.relative_path).unwrap(),
+                            *expected
+                        );
+                    }
+                    assert!(!transaction.exists());
+                    // A second open cannot change the recovered state.
+                    EditableWorkspace::open(root.path()).unwrap();
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn corrupt_late_recovery_blob_leaves_every_current_package_untouched() {
+        for committed in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let before = scan_test_asset().encode().unwrap();
+            let mut edited = scan_test_asset();
+            edited.authoring_payload = b"changed".to_vec();
+            let after = edited.encode().unwrap();
+            let records = vec![
+                WorkspaceTransactionRecord {
+                    relative_path: "a.prism".into(),
+                    old_bytes: before.clone(),
+                    new_bytes: after.clone(),
+                },
+                WorkspaceTransactionRecord {
+                    relative_path: "b.prism".into(),
+                    old_bytes: Vec::new(),
+                    new_bytes: before.clone(),
+                },
+            ];
+            set_workspace_file_state(root.path(), Path::new("a.prism"), &after).unwrap();
+            let transactions = ensure_workspace_transactions_root(root.path()).unwrap();
+            let transaction = create_workspace_transaction(&transactions, &records).unwrap();
+            if committed {
+                write_transaction_marker(&transaction, "committed", EDITABLE_TRANSACTION_COMMITTED)
+                    .unwrap();
+            }
+            fs::write(
+                transaction.join(transaction_blob_name(1, "new")),
+                b"corrupt",
+            )
+            .unwrap();
+            assert!(matches!(
+                EditableWorkspace::open(root.path()),
+                Err(EditableAssetError::InvalidWorkspaceTransaction)
+            ));
+            assert_eq!(fs::read(root.path().join("a.prism")).unwrap(), after);
+            assert!(!root.path().join("b.prism").exists());
+            assert!(transaction.exists());
+        }
+    }
+
+    #[test]
+    fn apply_preflights_late_conflicts_before_creating_any_package() {
+        let root = tempfile::tempdir().unwrap();
+        let before = scan_test_asset().encode().unwrap();
+        let mut unexpected = scan_test_asset();
+        unexpected.authoring_payload = b"uncooperative writer".to_vec();
+        let unexpected = unexpected.encode().unwrap();
+        let records = vec![
+            WorkspaceTransactionRecord {
+                relative_path: "a.prism".into(),
+                old_bytes: Vec::new(),
+                new_bytes: before.clone(),
+            },
+            WorkspaceTransactionRecord {
+                relative_path: "b.prism".into(),
+                old_bytes: before,
+                new_bytes: Vec::new(),
+            },
+        ];
+        set_workspace_file_state(root.path(), Path::new("b.prism"), &unexpected).unwrap();
+        let transactions = ensure_workspace_transactions_root(root.path()).unwrap();
+        let transaction = create_workspace_transaction(&transactions, &records).unwrap();
+        assert_eq!(
+            apply_workspace_transaction(root.path(), &transaction, &records),
+            Err(EditableAssetError::TransactionConflict)
+        );
+        assert!(!root.path().join("a.prism").exists());
+        assert_eq!(fs::read(root.path().join("b.prism")).unwrap(), unexpected);
+    }
+
+    #[test]
+    fn disarmed_commit_rolls_back_and_marker_publication_never_clobbers() {
+        let root = tempfile::tempdir().unwrap();
+        let bytes = scan_test_asset().encode().unwrap();
+        let records = vec![WorkspaceTransactionRecord {
+            relative_path: "a.prism".into(),
+            old_bytes: Vec::new(),
+            new_bytes: bytes.clone(),
+        }];
+        let transactions = ensure_workspace_transactions_root(root.path()).unwrap();
+        let transaction = create_workspace_transaction(&transactions, &records).unwrap();
+        apply_workspace_transaction(root.path(), &transaction, &records).unwrap();
+        write_transaction_marker(&transaction, "committed", EDITABLE_TRANSACTION_COMMITTED)
+            .unwrap();
+        assert!(write_transaction_marker(&transaction, "committed", b"other").is_err());
+        validate_transaction_marker(
+            &transaction.join("committed"),
+            EDITABLE_TRANSACTION_COMMITTED,
+        )
+        .unwrap();
+        disarm_workspace_commit(&transaction).unwrap();
+        disarm_workspace_commit(&transaction).unwrap();
+        EditableWorkspace::open(root.path()).unwrap();
+        assert!(!root.path().join("a.prism").exists());
+        assert!(!transaction.exists());
+    }
+
+    #[test]
+    fn transaction_manifest_rejects_records_without_a_before_or_after_package() {
+        let records = vec![WorkspaceTransactionRecord {
+            relative_path: "a.prism".into(),
+            old_bytes: scan_test_asset().encode().unwrap(),
+            new_bytes: Vec::new(),
+        }];
+        let mut manifest = encode_workspace_transaction_manifest(&records).unwrap();
+        let old_hash = manifest.len() - 64;
+        manifest[old_hash..old_hash + 32].copy_from_slice(&ContentHash::digest(&[]).0);
+        assert!(matches!(
+            decode_workspace_transaction_manifest(&manifest),
+            Err(EditableAssetError::InvalidWorkspaceTransaction)
+        ));
+    }
+
+    #[test]
+    fn interrupted_cleanup_does_not_require_retired_recovery_images() {
+        for committed in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let old = scan_test_asset().encode().unwrap();
+            let mut replacement = scan_test_asset();
+            replacement.authoring_payload = b"committed replacement".to_vec();
+            let new = replacement.encode().unwrap();
+            set_workspace_file_state(root.path(), Path::new("a.prism"), &old).unwrap();
+            let records = vec![WorkspaceTransactionRecord {
+                relative_path: "a.prism".into(),
+                old_bytes: old.clone(),
+                new_bytes: new.clone(),
+            }];
+            let transactions = ensure_workspace_transactions_root(root.path()).unwrap();
+            let transaction = create_workspace_transaction(&transactions, &records).unwrap();
+            apply_workspace_transaction(root.path(), &transaction, &records).unwrap();
+            if committed {
+                write_transaction_marker(&transaction, "committed", EDITABLE_TRANSACTION_COMMITTED)
+                    .unwrap();
+            }
+            recover_workspace_transaction(root.path(), &transaction, committed).unwrap();
+            disarm_workspace_recovery(&transaction).unwrap();
+            // Simulate a crash after recursive cleanup removed only some files.
+            fs::remove_file(transaction.join(transaction_blob_name(0, "old"))).unwrap();
+            fs::remove_file(transaction.join("manifest")).unwrap();
+            sync_directory(&transaction).unwrap();
+            EditableWorkspace::open(root.path()).unwrap();
+            assert_eq!(
+                fs::read(root.path().join("a.prism")).unwrap(),
+                if committed { new } else { old }
+            );
+            assert!(!transaction.exists());
+            EditableWorkspace::open(root.path()).unwrap();
+        }
     }
 }

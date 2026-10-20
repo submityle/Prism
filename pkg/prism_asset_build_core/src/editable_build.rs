@@ -15,10 +15,11 @@ use crate::editable::{
     MAX_EDITABLE_WORKSPACE_ENCODED_BYTES,
 };
 use crate::{
-    package_runtime_with_options, ArtifactSpec, AssetId, AssetPackageMapping, BuildExecution,
-    BuildExecutionError, BuildExecutor, BuildGraph, BuildInputSnapshot, BuildJob, BuildResources,
-    BuildRevision, ContentAddressedStore, DerivedDataCache, JobId, PackageError, PackageOptions,
-    PackageRequest, ProcessorError, ProcessorIdentity, RevisionStore, RuntimePackage,
+    package_runtime_with_options, ArtifactKey, ArtifactSpec, AssetId, AssetPackageMapping,
+    BuildExecution, BuildExecutionError, BuildExecutor, BuildGraph, BuildInputSnapshot, BuildJob,
+    BuildResources, BuildRevision, ContentAddressedStore, DerivedDataCache, JobId, PackageError,
+    PackageOptions, PackageRequest, ProcessorError, ProcessorIdentity, RevisionStore,
+    RuntimePackage,
 };
 
 const PROTOCOL_VERSION: u32 = 1;
@@ -27,6 +28,7 @@ const MAX_EDGES: usize = 1_048_576;
 const MAX_COOKERS: usize = 1024;
 const MAX_FINGERPRINT_BYTES: usize = 1024 * 1024;
 const MAX_OUTPUT_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_IMAGE_OUTPUT_BYTES: u64 = 32 * 1024 * 1024;
 
 /// All semantic fields visible to a cooker. Source and preview are excluded.
 /// Editor-only dependencies/references are removed before this input is frozen.
@@ -57,6 +59,8 @@ pub struct EditableCookerDescriptor {
     pub output_kind: u128,
     pub output_schema: u32,
     pub alignment: u32,
+    /// Per-artifact encoded output limit, at most 256 MiB. This is checked
+    /// after caller code returns; it is not a heap or aggregate-output budget.
     pub max_output_bytes: u64,
     pub resources: BuildResources,
 }
@@ -167,6 +171,7 @@ pub struct EditableBuildPlan {
     hard: BTreeMap<AssetId, Vec<AssetId>>,
     soft: BTreeMap<AssetId, Vec<AssetId>>,
     output_limits: BTreeMap<AssetId, u64>,
+    artifact_keys: BTreeMap<JobId, ArtifactKey>,
 }
 
 impl EditableBuildPlan {
@@ -378,21 +383,29 @@ impl EditableBuildPlan {
                                     bytes,
                                 })
                                 .collect::<Vec<_>>();
-                            let output = cooker.cook(&input, &dependencies)?;
-                            if output.len() as u64 > max_output_bytes {
-                                return Err(ProcessorError::new(
-                                    "editable cooker output exceeds declared byte bound",
-                                ));
-                            }
-                            Ok(output)
+                            cooker.cook(&input, &dependencies)
                         },
                     )
-                    .with_resources(contract.resources),
+                    .with_resources(contract.resources)
+                    .with_max_output_bytes(max_output_bytes),
                 )
                 .map_err(EditableBuildError::Graph)?;
             specs.insert(job, spec);
         }
-        graph.execution_order().map_err(EditableBuildError::Graph)?;
+        let mut artifact_keys = BTreeMap::new();
+        for job in graph.execution_order().map_err(EditableBuildError::Graph)? {
+            let dependencies = graph
+                .job(job)
+                .expect("ordered job exists")
+                .dependencies()
+                .iter()
+                .map(|dependency| artifact_keys[dependency])
+                .collect::<Vec<_>>();
+            let key = specs[&job]
+                .artifact_key(PROTOCOL_VERSION, &dependencies)
+                .map_err(EditableBuildError::Hash)?;
+            artifact_keys.insert(job, key);
+        }
         Ok(Self {
             graph,
             specs,
@@ -400,6 +413,7 @@ impl EditableBuildPlan {
             hard,
             soft,
             output_limits,
+            artifact_keys,
         })
     }
 
@@ -415,6 +429,9 @@ impl EditableBuildPlan {
 
     /// Executes with durable invalidation explanations and the ordinary
     /// all-or-nothing Revision publication. Failed builds may leave valid cache.
+    /// Every cache read and fresh output is checked against the frozen job's
+    /// output limit, including entries observed after DDC index refreshes.
+    /// Determinism verification checks two bounded fresh executions.
     pub fn execute(
         &self,
         store: &RevisionStore,
@@ -490,17 +507,9 @@ impl EditableBuildPlan {
                 .ok_or(EditableBuildError::ManifestMismatch)?;
             let dependencies = self.hard[&spec.asset]
                 .iter()
-                .map(|id| {
-                    manifest
-                        .entries
-                        .get(id)
-                        .map(|d| d.key)
-                        .ok_or(EditableBuildError::ManifestMismatch)
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            let key = spec
-                .artifact_key(PROTOCOL_VERSION, &dependencies)
-                .map_err(EditableBuildError::Hash)?;
+                .map(|id| self.artifact_keys[&JobId(id.0)])
+                .collect::<Vec<_>>();
+            let key = self.artifact_keys[&JobId(spec.asset.0)];
             if descriptor.key != key
                 || descriptor.kind != spec.kind
                 || descriptor.schema != spec.schema
@@ -619,11 +628,13 @@ impl EditableCooker for CanonicalEditableImageCooker {
     fn descriptor(&self) -> EditableCookerDescriptor {
         EditableCookerDescriptor {
             authoring_kind: crate::import::IMAGE_ARTIFACT_KIND,
-            identity: ProcessorIdentity::new(0x5052_4544_4954_494d_4147_4543_4f4f_4b31, 1),
+            // Version 2 rejects inconsistent image headers. A version-1 cache
+            // entry must not bypass that validation on a warm build.
+            identity: ProcessorIdentity::new(0x5052_4544_4954_494d_4147_4543_4f4f_4b31, 2),
             output_kind: crate::import::IMAGE_ARTIFACT_KIND,
             output_schema: prism_image::IMAGE_MIP_ARTIFACT_SCHEMA,
             alignment: 4,
-            max_output_bytes: 32 * 1024 * 1024,
+            max_output_bytes: MAX_IMAGE_OUTPUT_BYTES,
             resources: BuildResources {
                 memory_bytes: 128 * 1024 * 1024,
                 ..BuildResources::default()
@@ -636,9 +647,31 @@ impl EditableCooker for CanonicalEditableImageCooker {
         input: &EditableCookInput,
         _: &[EditableCookDependency<'_>],
     ) -> Result<Vec<u8>, ProcessorError> {
-        prism_image::ImageMipArtifact::decode(&input.authoring_payload)
-            .and_then(|image| image.encode())
-            .map_err(|e| ProcessorError::new(e.to_string()))
+        // This cooker preserves validated wire bytes, so their length is also
+        // the output length. Reject before decoding allocates any mip pixels.
+        if input.authoring_payload.len() as u64 > MAX_IMAGE_OUTPUT_BYTES {
+            return Err(ProcessorError::new(
+                "editable image payload exceeds declared output byte bound",
+            ));
+        }
+        let image = prism_image::ImageMipArtifact::decode(&input.authoring_payload)
+            .map_err(|e| ProcessorError::new(e.to_string()))?;
+        // The image decoder validates the level chain independently of the
+        // top-level dimensions. Runtime consumers must see a consistent header.
+        if image
+            .levels
+            .first()
+            .is_none_or(|level| level.width != image.width || level.height != image.height)
+        {
+            return Err(ProcessorError::new(
+                "editable image header dimensions differ from the first mip",
+            ));
+        }
+        // Decoding checks every level and trailing byte. These validated wire
+        // bytes are canonical; avoid encoding and cloning the mip chain again.
+        // Release decoded pixels before allocating the one owned output copy.
+        drop(image);
+        Ok(input.authoring_payload.clone())
     }
 }
 

@@ -24,6 +24,7 @@ use std::path::{Path, PathBuf};
 use std::thread;
 
 mod determinism;
+mod output_limits;
 mod wave_results;
 pub use determinism::DeterminismDifference;
 
@@ -722,6 +723,7 @@ impl BuildExecutor {
                     spec,
                     input_keys,
                     job.processor(),
+                    job.max_output_bytes(),
                     inputs,
                     if verify_determinism || force_rebuild {
                         None
@@ -734,25 +736,37 @@ impl BuildExecutor {
             let results = thread::scope(|scope| {
                 let handles = work
                     .into_iter()
-                    .map(|(id, key, spec, input_keys, processor, inputs, cached)| {
-                        let store = store;
-                        (
+                    .map(
+                        |(
                             id,
-                            scope.spawn(move || {
-                                prepare_job(
-                                    id,
-                                    key,
-                                    spec,
-                                    input_keys,
-                                    processor,
-                                    inputs,
-                                    cached,
-                                    store,
-                                    verify_determinism,
-                                )
-                            }),
-                        )
-                    })
+                            key,
+                            spec,
+                            input_keys,
+                            processor,
+                            max_output_bytes,
+                            inputs,
+                            cached,
+                        )| {
+                            let store = store;
+                            (
+                                id,
+                                scope.spawn(move || {
+                                    prepare_job(
+                                        id,
+                                        key,
+                                        spec,
+                                        input_keys,
+                                        processor,
+                                        max_output_bytes,
+                                        inputs,
+                                        cached,
+                                        store,
+                                        verify_determinism,
+                                    )
+                                }),
+                            )
+                        },
+                    )
                     .collect::<Vec<_>>();
                 handles
                     .into_iter()
@@ -1034,6 +1048,7 @@ fn prepare_job(
     spec: &ArtifactSpec,
     input_keys: Vec<ArtifactKey>,
     processor: std::sync::Arc<dyn crate::job::Processor>,
+    max_output_bytes: u64,
     inputs: Vec<&[u8]>,
     cached: Option<ArtifactDescriptor>,
     store: &RevisionStore,
@@ -1050,19 +1065,9 @@ fn prepare_job(
         {
             return Err((BuildExecutionError::DescriptorMismatch(id), false));
         }
-        match store.cas().read(descriptor.content_hash) {
-            Ok(payload)
-                if payload.len() as u64 == descriptor.byte_len
-                    && ContentHash::digest(&payload) == descriptor.content_hash =>
-            {
-                cached_bytes = Some(payload);
-            }
-            Ok(_) | Err(CasError::Corrupt { .. }) => invalidate_cache = true,
-            Err(CasError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-                invalidate_cache = true;
-            }
-            Err(error) => return Err((BuildExecutionError::Cas(error), false)),
-        }
+        cached_bytes = output_limits::read_cached(id, store.cas(), &descriptor, max_output_bytes)
+            .map_err(|error| (error, false))?;
+        invalidate_cache = cached_bytes.is_none();
     }
 
     let cache_hit = cached_bytes.is_some();
@@ -1076,9 +1081,18 @@ fn prepare_job(
                     invalidate_cache,
                 )
             })?;
+            output_limits::check_len(id, output.len() as u64, max_output_bytes)
+                .map_err(|error| (error, invalidate_cache))?;
             if verify_determinism {
-                determinism::verify_second_run(id, key, processor.as_ref(), &input_refs, &output)
-                    .map_err(|error| (error, invalidate_cache))?;
+                determinism::verify_second_run(
+                    id,
+                    key,
+                    processor.as_ref(),
+                    &input_refs,
+                    &output,
+                    max_output_bytes,
+                )
+                .map_err(|error| (error, invalidate_cache))?;
             }
             output
         }

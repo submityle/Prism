@@ -47,10 +47,12 @@ pub(super) fn verify_second_run(
     processor: &dyn Processor,
     inputs: &[&[u8]],
     first: &[u8],
+    max_output_bytes: u64,
 ) -> Result<(), BuildExecutionError> {
     let second = processor.process(inputs).map_err(|source| {
         BuildExecutionError::Graph(BuildError::ProcessorFailed { job, source })
     })?;
+    super::output_limits::check_len(job, second.len() as u64, max_output_bytes)?;
     if first == second {
         return Ok(());
     }

@@ -1,9 +1,10 @@
 use prism_asset::StableGuid;
 use prism_asset_build_core::{
-    import::IMAGE_ARTIFACT_KIND, AssetId, BuildResources, BuildRevision, DerivedDataCache,
-    EditableAsset, EditableBuildError, EditableBuildOptions, EditableBuildPlan,
-    EditableCookDependency, EditableCookInput, EditableCooker, EditableCookerDescriptor,
-    EditableCookerRegistry, EditableDependency, EditableDependencyKind as Kind, EditableSubAsset,
+    import::IMAGE_ARTIFACT_KIND, AssetId, BuildError, BuildExecutionError, BuildResources,
+    BuildRevision, CanonicalEditableImageCooker, DerivedDataCache, EditableAsset,
+    EditableBuildError, EditableBuildOptions, EditableBuildPlan, EditableCookDependency,
+    EditableCookInput, EditableCooker, EditableCookerDescriptor, EditableCookerRegistry,
+    EditableDependency, EditableDependencyKind as Kind, EditableSubAsset,
     EditableSubAssetReference, EditableWorkspace, JobId, PackageOptions, ProcessorError,
     ProcessorIdentity, RevisionStore, SourceRecord,
 };
@@ -189,6 +190,13 @@ fn saved_image_payload_survives_workspace_snapshot_cook_package_and_runtime_load
         )
         .unwrap();
     assert_eq!(execution.published.manifest.entries.len(), 1);
+    assert_eq!(
+        store
+            .cas()
+            .read(execution.published.manifest.entries[&AssetId(7)].content_hash)
+            .unwrap(),
+        image.encode().unwrap(),
+    );
     let package = plan
         .package(&execution, store.cas(), "images", PackageOptions::default())
         .unwrap();
@@ -226,6 +234,189 @@ fn saved_image_payload_survives_workspace_snapshot_cook_package_and_runtime_load
     assert_eq!(loaded.data(), image.levels[0].rgba8);
     assert_eq!(loaded.mip_level_count(), 2);
     assert_eq!(loaded.mip_data(1).unwrap(), image.levels[1].rgba8);
+}
+
+#[test]
+fn builtin_image_cooker_preserves_canonical_bytes_and_rejects_malformed_mips() {
+    let mut input = EditableCookInput {
+        asset: AssetId(7),
+        kind: IMAGE_ARTIFACT_KIND,
+        flags: 0,
+        canonical_settings: Vec::new(),
+        subassets: Vec::new(),
+        dependencies: Vec::new(),
+        subasset_references: Vec::new(),
+        authoring_payload: Vec::new(),
+    };
+    for semantic in [
+        TextureSemantic::ColorSrgb,
+        TextureSemantic::ColorLinear,
+        TextureSemantic::NormalMap,
+        TextureSemantic::Mask,
+    ] {
+        for alpha in [
+            AlphaCoveragePolicy::Preserve,
+            AlphaCoveragePolicy::Coverage { threshold: 128 },
+            AlphaCoveragePolicy::Mask { threshold: 64 },
+        ] {
+            input.authoring_payload = ImageMipArtifact {
+                width: 2,
+                height: 2,
+                semantic,
+                alpha,
+                levels: vec![
+                    ImageArtifactMipLevel {
+                        width: 2,
+                        height: 2,
+                        rgba8: [17, 31, 47, 255].repeat(4),
+                    },
+                    ImageArtifactMipLevel {
+                        width: 1,
+                        height: 1,
+                        rgba8: vec![19, 33, 49, 255],
+                    },
+                ],
+            }
+            .encode()
+            .unwrap();
+            assert_eq!(
+                CanonicalEditableImageCooker.cook(&input, &[]).unwrap(),
+                input.authoring_payload,
+            );
+        }
+    }
+    let valid = input.authoring_payload.clone();
+    let mut trailing = valid.clone();
+    trailing.push(0);
+    let mut wrong_schema = valid.clone();
+    wrong_schema[8..12].copy_from_slice(&u32::MAX.to_le_bytes());
+    let mut zero_levels = valid.clone();
+    zero_levels[24..28].copy_from_slice(&0u32.to_le_bytes());
+    let mut invalid_level = valid.clone();
+    // The first level header follows the 28-byte versioned image header.
+    invalid_level[28..32].copy_from_slice(&0u32.to_le_bytes());
+    let mut wrong_width = valid.clone();
+    wrong_width[12..16].copy_from_slice(&3u32.to_le_bytes());
+    let mut wrong_height = valid.clone();
+    wrong_height[16..20].copy_from_slice(&0u32.to_le_bytes());
+    for malformed in [
+        valid[..valid.len() - 1].to_vec(),
+        trailing,
+        wrong_schema,
+        zero_levels,
+        invalid_level,
+        wrong_width,
+        wrong_height,
+    ] {
+        input.authoring_payload = malformed;
+        assert!(CanonicalEditableImageCooker.cook(&input, &[]).is_err());
+    }
+}
+
+#[test]
+fn builtin_image_output_budget_is_checked_before_decoding() {
+    let output_limit = CanonicalEditableImageCooker.descriptor().max_output_bytes as usize;
+    let input = EditableCookInput {
+        asset: AssetId(7),
+        kind: IMAGE_ARTIFACT_KIND,
+        flags: 0,
+        canonical_settings: Vec::new(),
+        subassets: Vec::new(),
+        dependencies: Vec::new(),
+        subasset_references: Vec::new(),
+        // Deliberately malformed too: admission must reject its size before
+        // reaching format validation or allocating decoded pixel buffers.
+        authoring_payload: vec![0; output_limit + 1],
+    };
+    assert_eq!(
+        CanonicalEditableImageCooker
+            .cook(&input, &[])
+            .unwrap_err()
+            .to_string(),
+        "editable image payload exceeds declared output byte bound",
+    );
+}
+
+#[test]
+fn stricter_image_validation_cannot_reuse_a_legacy_warm_artifact() {
+    struct LegacyImageCooker;
+    impl EditableCooker for LegacyImageCooker {
+        fn descriptor(&self) -> EditableCookerDescriptor {
+            let mut descriptor = CanonicalEditableImageCooker.descriptor();
+            descriptor.identity.version = 1;
+            descriptor
+        }
+
+        fn cook(
+            &self,
+            input: &EditableCookInput,
+            _: &[EditableCookDependency<'_>],
+        ) -> Result<Vec<u8>, ProcessorError> {
+            ImageMipArtifact::decode(&input.authoring_payload)
+                .and_then(|image| image.encode())
+                .map_err(|error| ProcessorError::new(error.to_string()))
+        }
+    }
+    let payload = ImageMipArtifact {
+        // Version 1 accepted a header inconsistent with the first mip.
+        width: 2,
+        height: 1,
+        semantic: TextureSemantic::ColorLinear,
+        alpha: AlphaCoveragePolicy::Preserve,
+        levels: vec![ImageArtifactMipLevel {
+            width: 1,
+            height: 1,
+            rgba8: vec![17, 31, 47, 255],
+        }],
+    }
+    .encode()
+    .unwrap();
+    let mut saved = asset(7, &payload);
+    saved.kind = IMAGE_ARTIFACT_KIND;
+    let mut legacy_registry = EditableCookerRegistry::new();
+    legacy_registry.register(LegacyImageCooker).unwrap();
+    let legacy = plan(vec![saved.clone()], &[7], &legacy_registry).unwrap();
+    let current = plan(vec![saved], &[7], &EditableCookerRegistry::with_builtin()).unwrap();
+    let legacy_spec = &legacy.specs()[&JobId(7)];
+    let current_spec = &current.specs()[&JobId(7)];
+    assert_eq!(legacy_spec.processor_id, current_spec.processor_id);
+    assert_ne!(
+        legacy_spec.artifact_key(1, &[]).unwrap(),
+        current_spec.artifact_key(1, &[]).unwrap(),
+    );
+    let root = tempfile::tempdir().unwrap();
+    let store = RevisionStore::open(root.path()).unwrap();
+    let mut ddc = DerivedDataCache::open(root.path().join("ddc")).unwrap();
+    let baseline = legacy
+        .execute(
+            &store,
+            &mut ddc,
+            BuildRevision(0),
+            1,
+            BuildResources::UNLIMITED,
+            false,
+        )
+        .unwrap();
+    assert!(matches!(
+        current.execute(
+            &store,
+            &mut ddc,
+            BuildRevision(1),
+            1,
+            BuildResources::UNLIMITED,
+            false,
+        ),
+        Err(EditableBuildError::Execution(BuildExecutionError::Graph(
+            BuildError::ProcessorFailed { job: JobId(7), .. }
+        )))
+    ));
+    let old_descriptor = &baseline.published.manifest.entries[&AssetId(7)];
+    assert_eq!(store.current_revision().unwrap(), Some(BuildRevision(0)));
+    assert_eq!(ddc.get(old_descriptor.key).as_ref(), Some(old_descriptor));
+    assert_eq!(
+        store.cas().read(old_descriptor.content_hash).unwrap(),
+        payload
+    );
 }
 
 #[test]
@@ -610,6 +801,172 @@ fn tightened_output_contract_cannot_reuse_an_oversized_warm_artifact() {
 }
 
 #[test]
+fn oversized_cached_root_and_dependency_reject_before_cooking_or_publication() {
+    let (registry, calls, _) = registry();
+    let mut parent = asset(1, b"parent");
+    parent.dependencies = vec![dependency(2, Kind::Hard)];
+    let frozen = plan(vec![parent, asset(2, b"child")], &[1], &registry).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let store = RevisionStore::open(root.path()).unwrap();
+    let mut ddc = DerivedDataCache::open(root.path().join("ddc")).unwrap();
+    let baseline = frozen
+        .execute(
+            &store,
+            &mut ddc,
+            BuildRevision(0),
+            2,
+            BuildResources::UNLIMITED,
+            false,
+        )
+        .unwrap();
+    let oversized = vec![0; 4097];
+    let oversized_hash = store.cas().put(&oversized).unwrap();
+    frozen
+        .package_manifest(
+            &baseline.published.manifest,
+            store.cas(),
+            "data",
+            PackageOptions::default(),
+        )
+        .unwrap();
+    for id in [AssetId(1), AssetId(2)] {
+        let original = baseline.published.manifest.entries[&id].clone();
+        let mut poisoned = original.clone();
+        poisoned.byte_len = oversized.len() as u64;
+        poisoned.content_hash = oversized_hash;
+        ddc.invalidate(original.key).unwrap();
+        ddc.put_descriptor(poisoned).unwrap();
+        assert!(matches!(
+            frozen.execute(
+                &store,
+                &mut ddc,
+                BuildRevision(1),
+                2,
+                BuildResources::UNLIMITED,
+                false,
+            ),
+            Err(EditableBuildError::Execution(
+                BuildExecutionError::InvalidOutput(job, _)
+            )) if job == JobId(id.0)
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(store.current_revision().unwrap(), Some(BuildRevision(0)));
+        assert_eq!(
+            store.manifest(BuildRevision(0)).unwrap(),
+            baseline.published.manifest
+        );
+        ddc.invalidate(original.key).unwrap();
+        ddc.put_descriptor(original).unwrap();
+    }
+    // Only this plan's fully derived keys are admitted. An unrelated large
+    // cache result must not prevent a valid warm execution.
+    let other = plan(vec![asset(3, b"unrelated")], &[3], &registry).unwrap();
+    let mut unrelated = baseline.published.manifest.entries[&AssetId(2)].clone();
+    unrelated.key = other.specs()[&JobId(3)].artifact_key(1, &[]).unwrap();
+    unrelated.byte_len = oversized.len() as u64;
+    unrelated.content_hash = oversized_hash;
+    ddc.put_descriptor(unrelated).unwrap();
+    let warm = frozen
+        .execute(
+            &store,
+            &mut ddc,
+            BuildRevision(1),
+            2,
+            BuildResources::UNLIMITED,
+            false,
+        )
+        .unwrap();
+    assert_eq!(warm.cache_hits, BTreeSet::from([JobId(1), JobId(2)]));
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn determinism_failure_and_panicking_cooker_preserve_warm_revision_and_cache() {
+    struct FaultyCooker {
+        calls: Arc<AtomicUsize>,
+        panic: bool,
+    }
+    impl EditableCooker for FaultyCooker {
+        fn descriptor(&self) -> EditableCookerDescriptor {
+            Cooker {
+                calls: self.calls.clone(),
+                descriptions: Arc::new(AtomicUsize::new(0)),
+                expected_payload_pointer: None,
+                max_output_bytes: 4096,
+            }
+            .descriptor()
+        }
+
+        fn cook(
+            &self,
+            _: &EditableCookInput,
+            _: &[EditableCookDependency<'_>],
+        ) -> Result<Vec<u8>, ProcessorError> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            assert!(!self.panic, "deliberate cooker panic");
+            Ok(vec![call as u8])
+        }
+    }
+    let (registry, _, _) = registry();
+    let root = tempfile::tempdir().unwrap();
+    let store = RevisionStore::open(root.path()).unwrap();
+    let mut ddc = DerivedDataCache::open(root.path().join("ddc")).unwrap();
+    let baseline = plan(vec![asset(1, b"good")], &[1], &registry)
+        .unwrap()
+        .execute(
+            &store,
+            &mut ddc,
+            BuildRevision(0),
+            1,
+            BuildResources::UNLIMITED,
+            false,
+        )
+        .unwrap();
+    let descriptor = &baseline.published.manifest.entries[&AssetId(1)];
+    for panic in [false, true] {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut registry = EditableCookerRegistry::new();
+        registry
+            .register(FaultyCooker {
+                calls: calls.clone(),
+                panic,
+            })
+            .unwrap();
+        // Keep the same semantic key as the warm result. Verification must
+        // actually execute the cooker instead of accepting that cache hit.
+        let frozen = plan(vec![asset(1, b"good")], &[1], &registry).unwrap();
+        let error = frozen
+            .execute(
+                &store,
+                &mut ddc,
+                BuildRevision(1),
+                1,
+                BuildResources::UNLIMITED,
+                true,
+            )
+            .unwrap_err();
+        if panic {
+            assert!(matches!(
+                error,
+                EditableBuildError::Execution(BuildExecutionError::Graph(
+                    BuildError::ProcessorFailed { job: JobId(1), .. }
+                ))
+            ));
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+        } else {
+            assert!(matches!(
+                error,
+                EditableBuildError::Execution(BuildExecutionError::NonDeterministic(_))
+            ));
+            assert_eq!(calls.load(Ordering::SeqCst), 2);
+        }
+        assert_eq!(store.current_revision().unwrap(), Some(BuildRevision(0)));
+        assert_eq!(ddc.get(descriptor.key).as_ref(), Some(descriptor));
+        assert_eq!(store.cas().read(descriptor.content_hash).unwrap(), b"good");
+    }
+}
+
+#[test]
 fn large_fingerprints_have_fixed_per_node_storage_and_preserve_input_identity() {
     let (registry, _, _) = registry();
     let mut options = EditableBuildOptions {
@@ -732,6 +1089,31 @@ fn packaging_rejects_an_execution_from_another_frozen_plan() {
         first.package_manifest(&oversized, store.cas(), "data", PackageOptions::default()),
         Err(EditableBuildError::ManifestMismatch)
     ));
+    let descriptor = &execution.published.manifest.entries[&AssetId(1)];
+    let mut variants = Vec::new();
+    let mut changed = descriptor.clone();
+    changed.kind += 1;
+    variants.push(changed);
+    let mut changed = descriptor.clone();
+    changed.schema += 1;
+    variants.push(changed);
+    let mut changed = descriptor.clone();
+    changed.alignment *= 2;
+    variants.push(changed);
+    let mut changed = descriptor.clone();
+    changed.dependencies.push(descriptor.key);
+    variants.push(changed);
+    let mut changed = descriptor.clone();
+    changed.key.0[0] ^= 1;
+    variants.push(changed);
+    for changed in variants {
+        let mut manifest = execution.published.manifest.clone();
+        manifest.entries.insert(AssetId(1), changed);
+        assert!(matches!(
+            first.package_manifest(&manifest, store.cas(), "data", PackageOptions::default()),
+            Err(EditableBuildError::ManifestMismatch)
+        ));
+    }
 }
 
 #[test]

@@ -16,6 +16,41 @@
 
 ## 实施状态（2026-10-21）
 
+2026-10-21 编辑包事务增量：`EditableWorkspace::mutate` 在同一工作区锁下
+批量创建、替换、移动和删除包，支持路径交换及删除后复用路径；身份始终由包内
+`AssetId` 决定。已有包必须匹配完整旧包 hash。发布前统一检查最终路径唯一性、
+普通 hard/editor-only 目标、显式子资产引用、hard 依赖环和旧/新编码预算；soft
+目标可缺失。收据按身份排序，只返回变更前后路径与 hash，不保留载荷副本；
+调用方可用保留的旧数据和新 hash 构造受冲突保护的显式撤销。父目录由调用方
+预建，拒绝符号链接、保留事务路径和非普通目标。
+内部恢复清单升级为 schema 2，以缺席状态表示创建/删除，每个物理路径只有一条
+before/after 记录。应用前检查全部旧状态；恢复前检查全部恢复镜像与当前状态，
+损坏的后序记录不会先恢复前序包。prepare/commit 标记先同步临时文件再原子发布；
+提交标记同步失败时先持久化撤销标记，才能回滚。清理先持久化移除 prepare，再删
+恢复文件，清理中断可重复打开。验证冲突在写入前拒绝；磁盘 I/O 错误可能留下
+待恢复事务，调用方应重新打开工作区取得权威状态，不能把所有错误解释为旧字节
+必定保留。该协议要求读写者合作使用锁，不承诺直接文件读取者的多文件原子视图。
+`tests/editable_mutation.rs` 覆盖七组批量操作，`editable` 单元回归覆盖每个部分
+应用前缀、提交/回滚、损坏镜像、提交标记冲突和中断清理。最新 core/CLI/container
+默认配置回归合计 574 项通过，0 失败、0 忽略。
+
+构建输出预算现贯穿直接 BuildGraph、BuildExecutor、缓存命中和确定性第二次
+执行。缓存读取先检查 descriptor 与已打开文件的实际长度，再有界读取并复核
+hash；超限拒绝，损坏缓存重建。新输出在进入 CAS 前检查，第二次执行的超限
+输出不会作为确定性比较候选发布。`BuildJob::with_max_output_bytes` 的通用运行
+限额不改变语义 key，缓存命中仍服从当前限额；EditableCooker 声明的输出契约
+则参与 Cook key。`tests/output_limits.rs` 七项与 `editable_mutation.rs` 七项
+专项全部通过。编码输出长度门禁不限制 Processor 内部 heap 或所有输出的聚合
+峰值；流式 SDK 与实际资源治理仍独立验收。
+
+当前渲染消费边界：`prism_render_app/src/baked_image.rs` 已实现 opt-in 的
+Bake→Image 发布，复用正常 GpuImage 上传，专项测试使用 Null backend；真实
+GPU 采样、材质/场景 Bake 和编辑器预览仍需验收。`render_asset/page_feedback.rs`
+已有 opt-in 的固定 buffer 页 GPU feedback/page-table/consumer 接线和硬件测试
+入口，不能再整体归为未实现；它不填充材质 atlas，压缩容器 resident 到实际
+VT/VG 纹理/几何页的流送生产链仍未交付。下文早期无 ECS/Image 消费、无任何
+GPU feedback/page-table 的描述应按本段边界理解。
+
 2026-10-21 编辑态保存与 Cook 增量：`editable_identity` 按资产身份、importer
 协议命名空间与持久 key 派生稳定子资产 ID，名称、顺序和内容不参与身份。
 `EditableWorkspace::save` 按完整包 hash 比较全部旧快照，校验候选引用图与

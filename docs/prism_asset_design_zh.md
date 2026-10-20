@@ -22,6 +22,28 @@
 
 ### 实施状态（2026-10-21）
 
+2026-10-21 编辑工作区增量：Build Core 的 `EditableWorkspace::mutate` 已提供
+受完整旧包 hash 保护的批量创建、替换、移动、删除、路径交换和显式撤销基础。
+最终 hard/editor-only 引用、子资产引用、hard 环、路径与编码预算在发布前统一
+校验，soft 缺失允许保留；收据仅保留路径和 hash。恢复清单 schema 2 记录每条
+路径的有/无包状态，恢复前完整校验镜像，清理先持久化撤销 prepare 标记，避免
+清理中断依赖已删除镜像。磁盘 I/O 失败可能需要下次 open 恢复，不能承诺所有
+错误都保留旧字节；多包一致视图要求读写者合作使用工作区锁。回归入口为
+`prism_asset_build_core/tests/editable_mutation.rs` 和 `editable` 单元测试。
+这交付编辑协议能力，尚未接入编辑器命令历史、Inspector 或运行时包解码。
+构建侧新增单输出预算：直接图执行、缓存命中、首次执行和确定性第二次执行均
+检查限额；缓存按 descriptor/实际文件长度有界读取并复核 hash。最新
+core/CLI/container 默认配置共 574 项回归通过，0 失败、0 忽略；此结果不包含
+全 workspace、GPU、跨平台或性能验收，也不表示 Processor heap 已受硬限制。
+
+渲染侧已有 `prism_render_app/src/baked_image.rs` 的 opt-in Bake→Image 消费者，
+按精确请求实例拒绝迟到输出，发布到正常 AssetServer/GpuImage 链路；专项测试
+使用 Null backend，真实采样、材质/场景和预览仍独立验收。固定 buffer 页另有
+`render_asset/page_feedback.rs` 的 GPU feedback/page-table/consumer 接线与硬件
+测试入口；它不填充材质 atlas，不能据此声称实际 VT/VG 或压缩容器 resident
+到纹理/几何页的交付闭环完成。下文较早的无 ECS/Image 或无 GPU feedback
+记录由本段收窄。
+
 2026-10-21 编辑包消费边界：Build Core 已提供稳定子资产身份派生、冻结保存
 载荷的 Cook 计划，以及按完整旧包 hash 比较的批量保存。保存先校验整批引用
 和编码预算，失败不发布；成功复用本地 prepare/commit 恢复协议。Cook 不重新
