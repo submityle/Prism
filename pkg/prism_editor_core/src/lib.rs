@@ -12,6 +12,7 @@ extern crate alloc;
 mod command;
 mod contribution;
 mod document;
+pub mod prefab;
 mod selection;
 mod service;
 
