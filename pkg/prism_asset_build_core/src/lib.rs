@@ -28,8 +28,12 @@ pub mod dirty;
 pub mod editable;
 /// Saved editable payload cooking and runtime packaging.
 pub mod editable_build;
+/// Borrowed semantic differences between validated editable snapshots.
+pub mod editable_diff;
 /// Importer namespace and persistent-key based subasset identities.
 pub mod editable_identity;
+/// Canonical typed settings, validation, and explicit schema migrations.
+pub mod editable_settings;
 /// Executes a build graph through DDC/CAS into transactional publication.
 pub mod executor;
 /// Deterministic dependency graph and serial processor execution.
@@ -109,9 +113,17 @@ pub use editable_build::{
     EditableCookDependency, EditableCookInput, EditableCooker, EditableCookerDescriptor,
     EditableCookerRegistry,
 };
+pub use editable_diff::{
+    diff_editable_assets, EditableAssetDiff, EditableDiffError, EditableDiffImpact,
+    EditableSetDiff, EditableSubAssetDiff, EditableValueChange,
+};
 pub use editable_identity::{
     build_editable_subasset_directory, derive_editable_subasset_id, EditableSubAssetIdentityError,
     EditableSubAssetInput,
+};
+pub use editable_settings::{
+    canonical_settings_path, DecodedEditableSettings, EditableSettings, EditableSettingsCodec,
+    EditableSettingsError,
 };
 pub use executor::{
     ArtifactSpec, BuildExecution, BuildExecutionError, BuildExecutor, BuildOutputMemoryStats,

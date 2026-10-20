@@ -27,6 +27,7 @@
 //! before deserialization so their shape can be resolved.
 
 mod binary;
+mod canonical;
 mod de;
 mod encode;
 mod error;
@@ -38,6 +39,9 @@ mod stable_id;
 mod stream;
 
 pub use binary::{from_binary, from_binary_with_limits, to_binary};
+pub use canonical::{
+    to_canonical_binary, to_canonical_binary_with_schema, CanonicalError, CanonicalLimits,
+};
 pub use error::{DeserializeError, SerializeError};
 pub use limits::DeserializeLimits;
 pub use ron::{from_ron, to_ron};

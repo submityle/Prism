@@ -131,9 +131,10 @@ pub use runtime_type::{EnumTypeBuilder, StructTypeBuilder};
 pub use ser::StdStreamDecoder;
 pub use ser::{
     frame_binary, from_binary, from_binary_with_limits, from_ron, to_binary, to_binary_frame,
-    to_ron, BinaryStreamDecoder, DeserializeError, DeserializeLimits, SerializeError, StableTypeId,
-    StreamDecodeError, StreamDecodeLimits, StreamEncodeError, StreamFeed, StreamLimitsError,
-    StreamOffer, StreamTimeoutKind, StreamTimeoutPolicy, FRAME_PREFIX_BYTES,
+    to_canonical_binary, to_canonical_binary_with_schema, to_ron, BinaryStreamDecoder,
+    CanonicalError, CanonicalLimits, DeserializeError, DeserializeLimits, SerializeError,
+    StableTypeId, StreamDecodeError, StreamDecodeLimits, StreamEncodeError, StreamFeed,
+    StreamLimitsError, StreamOffer, StreamTimeoutKind, StreamTimeoutPolicy, FRAME_PREFIX_BYTES,
 };
 pub use static_info::{StaticField, StaticKind, StaticTypeInfo, StaticTyped};
 pub use type_data::{ReflectDefault, TypeData};

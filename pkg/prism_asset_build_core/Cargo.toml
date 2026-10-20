@@ -23,6 +23,7 @@ prism_mesh = { path = "../prism_mesh" }
 prism_render_architecture = { path = "../prism_render_architecture" }
 prism_render_driver = { path = "../prism_render_driver" }
 prism_tasks = { path = "../prism_tasks" }
+prism_reflect = { path = "../prism_reflect", default-features = false, features = ["std"] }
 prism_ecs = { path = "../prism_ecs", default-features = false, features = ["std"], optional = true }
 prism_app = { path = "../prism_app", default-features = false, features = ["std"], optional = true }
 tempfile = "3.27"

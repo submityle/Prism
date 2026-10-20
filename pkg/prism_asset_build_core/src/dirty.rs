@@ -218,6 +218,17 @@ impl BuildInputSnapshot {
             .insert(job, ProfileInput { hash, fields: None });
     }
 
+    /// Projects committed historical evidence onto the current executable graph.
+    /// Removed jobs remain recorded in their original revision, but cannot
+    /// require work in the new revision. Current inputs must still be validated
+    /// by `invalidation_plan` without this projection.
+    pub(crate) fn retained_for_graph(mut self, graph: &BuildGraph) -> Self {
+        self.sources.retain(|job, _| graph.job(*job).is_some());
+        self.settings.retain(|job, _| graph.job(*job).is_some());
+        self.profiles.retain(|job, _| graph.job(*job).is_some());
+        self
+    }
+
     /// Compares two input snapshots and computes the deterministic dirty plan.
     pub fn invalidation_plan(
         &self,

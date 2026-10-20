@@ -595,7 +595,10 @@ impl BuildExecutor {
             // writes. A successful build must have a decodable durable record.
             BuildInputSnapshot::from_canonical_bytes(&inputs.canonical_bytes())?;
             let previous = match expected_current {
-                Some(revision) => self.load_committed_build_inputs(root, revision)?.snapshot,
+                Some(revision) => self
+                    .load_committed_build_inputs(root, revision)?
+                    .snapshot
+                    .retained_for_graph(graph),
                 None => {
                     // Even an empty store can retain aborted journal history.
                     // Reject history the read-only query cannot decode before

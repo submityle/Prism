@@ -12,7 +12,7 @@
 - 版本：v0.2（开发中，允许破坏性调整；状态以本文“实施状态”和代码/测试为准）
 - 变更记录：本轮补充锁外异步 streaming executor、请求取消竞态门禁、异步 range 短读拒绝、容器单请求 range 预算门禁、异步 streaming gate 终态清理、构建验证字节预算、RenderAsset 延迟准备保留、`AssetServer` 事件/快照到 RenderAsset 的窄桥接、PrepareContext 事务 API 的根级/prelude 导出、CPU fixed-page residency、事务化 GPU fixed-page pool，以及有限范围的异步完整读/解码/依赖装配和独立 I/O/CPU 池切片；初次异步装配现会原子 staging labeled 输出及其声明的普通依赖，避免 payload 跨 await 借用；本轮另交付了已 resident 根资产的窄异步 reload、epoch supersede、source revision 门禁、失败不污染旧 revision，以及已 resident labeled outputs 的有限异步 staging 和回归测试；fixed-page key 现在绑定 source revision，范围检查覆盖末端溢出，失败/取消元数据按预算上限回收；新增 GPU fixed-page replacement 的调用方 completion proof、retiring/reclaim 状态和 CPU residency bridge 的显式 deferred API；新增 RenderApp fixed-page streaming 的 CPU read → owned extract → GPU upload 生产接线、按 revision 的稳定 slot 替换与迟到旧 revision 拒绝、CPU 驱逐后的 deferred release、驱逐前保存 slot/revision 元数据和每帧诊断；新增受 part/byte/concurrency 预算约束的 range-backed assembly、并行 range 读取、短读校验和协作取消；新增已解码 feedback demand 到 fixed-page CPU residency 的有界接线、运行时容器到 world cell provider 的同步兼容桥、可选只读 mmap range source，以及继续将 loader/AssetServer 的同步现实、RangeSource 的稳定内容前提、raw 容器能力边界和完整 EDL 目标规格显式分离。
 - 本文定位：运行时资产身份、存储、加载、VFS、热重载、流送与消费契约的**目标规格**；已交付能力与目标设计分开记录，不以设计段落冒充实现。
-- 当前基线：核心身份/存储/依赖核、同步 `AssetServer`/VFS/loader、bounded scheduler facade、锁外异步 range executor、CPU fixed-page residency、watch/reload 切片和 raw/v2 Chunk Table 容器消费切片已存在；渲染侧已有固定页 GPU pool、CPU residency bridge 和由调用方提供 completion proof 的 deferred replacement/reclaim，并新增一个真实的 RenderApp fixed-page 垂直接线（请求 → `read_range` → owned extract → render prepare 上传 → completion-safe reclaim）与已解码 feedback admission；`prism_world_runtime` 另有 opt-in 的容器到 CellProvider 同步桥。它仍不包含 EDL 并行装配、容器读取的可抢占取消、完整 runtime GPU 页流送、GPU feedback/page-table 生成与读回、按 GPU 反馈驱动的 page pool 淘汰、通用发行容器能力和全资产 ECS/渲染闭环。
+- 当前基线：核心身份/存储/依赖核、同步 `AssetServer`/VFS/loader、有限锁外异步装配、watch/reload、CPU fixed-page residency 和 v1/v2 容器消费已有实现。渲染侧有 GPU fixed-page pool、CPU residency bridge、completion-safe deferred reclaim，以及请求→范围读取→extract→上传的接线；固定 buffer 页另有 opt-in GPU feedback/page-table/consumer，Bake 已有 ECS 和 opt-in Image 消费者。容器提供独立 GPU resident 范围输出，world 另有同步 CellProvider 桥；这些仍未连成压缩容器到实际 VT/VG 页的生产链。完整 EDL、执行中可抢占取消、通用资产消费、编辑器预览和远程发行仍独立验收。
 - 兼容策略：开发期不承诺旧 API/格式兼容；一旦进入发行，`StableGuid`、容器 ToC、Runtime Manifest 和资产 ABI 必须通过显式 schema 版本与迁移窗口演进。
 - 适用引擎： Prism（后 Bevy 时代，独立运行时）
 - 关键依赖： `prism_utils`（稳定哈希/句柄位打包/小容器）、`prism_tasks`（异步作业图/优先级/背压）、`prism_reflect`（导入设置/元数据序列化）、`prism_diagnostic`（计数器/trace）、可选 `prism_gdeflate_gpu`（GPU 解压）
@@ -21,6 +21,20 @@
 - 烘焙/打包归属： 离线烘焙、缓存键、DDC/CAS、Revision、打包与 Patch 的唯一持有者是 `Prism Asset Build`（`docs/prism_asset_build_design_zh.md` §2.7/§4.6/§10/§14）；本 crate 只提供运行时消费契约（§13）与进程内重烘适配。派生数据分类与登记见 `docs/prism_derived_data_contract_zh.md`
 
 ### 实施状态（2026-10-21）
+
+2026-10-21 构建语义 diff 已接入保存/重开、Cook 和持久 DDC 回归，区分
+cooker 可见变化与源/预览/editor-only 元数据；外部 hard Artifact 的 key 传播
+仍由构建 DAG 决定。执行器已修复历史 JobId 移出当前构建图时的误拒绝，
+保留原始历史证据，并继续严格校验当前输入。diff 集成四项与失效解释十六项
+专项全部通过。三方 merge、CAS 外载荷、编辑器 UI 和运行时完整 EDL 仍未交付。
+
+2026-10-21 构建设置增量：Build Core 的 `EditableSettingsCodec` 已接入
+反射注册、canonical 设置编码、业务和嵌套 metadata 校验，以及逐版本的
+Schema 迁移。迁移按目标字段名递归编码，拒绝类型/shape 不符和不完整迁移链；
+旧设置升级由调用方显式采用，再通过工作区保存，不隐式改写磁盘。专项九项
+测试覆盖失败保留原字节、预算、嵌套约束和真实保存/Cook/DDC 链路。该能力
+属于编辑态构建协议；运行时同步 loader ABI、完整 EDL、CAS 外载荷和编辑器
+Inspector 接线仍须独立完成。
 
 2026-10-21 编辑工作区增量：Build Core 的 `EditableWorkspace::mutate` 已提供
 受完整旧包 hash 保护的批量创建、替换、移动、删除、路径交换和显式撤销基础。

@@ -42,12 +42,12 @@ pub const MAGIC: [u8; 4] = *b"PRB1";
 pub const VERSION: u8 = 1;
 
 /// An [`Encoder`] that appends the binary wire format to an owned buffer.
-struct BinaryEncoder {
-    out: Vec<u8>,
+pub(super) struct BinaryEncoder {
+    pub(super) out: Vec<u8>,
 }
 
 impl BinaryEncoder {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self { out: Vec::new() }
     }
 

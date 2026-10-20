@@ -509,6 +509,176 @@ fn explained_build_reopens_reuses_cache_propagates_source_and_retains_failure_ba
 }
 
 #[test]
+fn explained_revisions_can_remove_and_add_jobs_without_losing_history_or_cache() {
+    use prism_asset_build_core::{AssetId, DerivedDataCache, RevisionStore};
+    use std::collections::BTreeMap;
+    use std::sync::{Arc, Mutex};
+
+    let root = tempfile::tempdir().unwrap();
+    let calls = Arc::new(Mutex::new(BTreeMap::<u128, usize>::new()));
+    let executor = BuildExecutor {
+        protocol_version: 1,
+    };
+    let run = |revision, ids: &[u128], changed: Option<u128>| {
+        let mut dag = BuildGraph::new();
+        let mut specs = BTreeMap::new();
+        let mut inputs = BuildInputSnapshot::new();
+        for &id in ids {
+            let bytes = if changed == Some(id) {
+                b"changed".to_vec()
+            } else {
+                b"stable".to_vec()
+            };
+            let source = SourceSnapshot::new(&format!("inputs/{id}.bin"), bytes.clone()).unwrap();
+            let counters = calls.clone();
+            dag.add_job(BuildJob::new(JobId(id), [], move |_: &[&[u8]]| {
+                *counters.lock().unwrap().entry(id).or_default() += 1;
+                Ok(bytes.clone())
+            }))
+            .unwrap();
+            let mut spec = source.artifact_spec(AssetId(id));
+            spec.processor_id = id;
+            specs.insert(JobId(id), spec);
+            inputs.set_source(JobId(id), &source);
+            inputs.set_settings(JobId(id), b"settings".to_vec());
+            inputs.set_profile(JobId(id), profile(3, 1024));
+        }
+        let store = RevisionStore::open(root.path()).unwrap();
+        let mut ddc = DerivedDataCache::open(root.path().join("ddc")).unwrap();
+        executor
+            .execute_explained_with_limit(
+                &dag,
+                &specs,
+                &inputs,
+                &store,
+                &mut ddc,
+                BuildRevision(revision),
+                2,
+                false,
+            )
+            .unwrap()
+    };
+
+    let cold = run(0, &[1, 2], None);
+    assert!(cold.cache_hits.is_empty());
+    let original = executor
+        .load_committed_build_inputs(root.path(), BuildRevision(0))
+        .unwrap();
+    let shrunk = run(1, &[2], None);
+    assert_eq!(
+        shrunk.cache_hits.into_iter().collect::<Vec<_>>(),
+        [JobId(2)]
+    );
+    let retained = executor
+        .load_committed_build_inputs(root.path(), BuildRevision(1))
+        .unwrap();
+    assert!(retained.plan.is_empty());
+    assert_eq!(retained.previous_revision, Some(BuildRevision(0)));
+    let added = run(2, &[2, 3], None);
+    assert_eq!(added.cache_hits.into_iter().collect::<Vec<_>>(), [JobId(2)]);
+    let added_inputs = executor
+        .load_committed_build_inputs(root.path(), BuildRevision(2))
+        .unwrap();
+    assert_eq!(
+        added_inputs
+            .plan
+            .dirty_set()
+            .direct_jobs()
+            .collect::<Vec<_>>(),
+        [JobId(3)]
+    );
+    assert_eq!(added_inputs.plan.changes().len(), 3);
+    run(3, &[1, 2, 3], None);
+    let changed = run(4, &[2, 3], Some(2));
+    assert_eq!(
+        changed.cache_hits.into_iter().collect::<Vec<_>>(),
+        [JobId(3)]
+    );
+    let last = executor
+        .load_committed_build_inputs(root.path(), BuildRevision(4))
+        .unwrap();
+    assert_eq!(
+        last.plan.dirty_set().direct_jobs().collect::<Vec<_>>(),
+        [JobId(2)]
+    );
+    assert_eq!(
+        *calls.lock().unwrap(),
+        BTreeMap::from([(1, 2), (2, 2), (3, 1)])
+    );
+    assert_eq!(
+        executor
+            .load_committed_build_inputs(root.path(), BuildRevision(0))
+            .unwrap(),
+        original
+    );
+}
+
+#[test]
+fn explained_build_rejects_unknown_current_jobs_after_a_committed_revision() {
+    use prism_asset_build_core::{AssetId, DerivedDataCache, RevisionStore};
+    use std::collections::BTreeMap;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    let root = tempfile::tempdir().unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counter = calls.clone();
+    let source = SourceSnapshot::new("input.bin", b"stable".to_vec()).unwrap();
+    let mut dag = BuildGraph::new();
+    dag.add_job(BuildJob::new(JobId(1), [], move |_: &[&[u8]]| {
+        counter.fetch_add(1, Ordering::SeqCst);
+        Ok(b"stable".to_vec())
+    }))
+    .unwrap();
+    let specs = BTreeMap::from([(JobId(1), source.artifact_spec(AssetId(1)))]);
+    let baseline = BuildInputSnapshot::new().with_source(JobId(1), &source);
+    let executor = BuildExecutor {
+        protocol_version: 1,
+    };
+    let store = RevisionStore::open(root.path()).unwrap();
+    let mut ddc = DerivedDataCache::open(root.path().join("ddc")).unwrap();
+    executor
+        .execute_explained_with_limit(
+            &dag,
+            &specs,
+            &baseline,
+            &store,
+            &mut ddc,
+            BuildRevision(0),
+            1,
+            false,
+        )
+        .unwrap();
+    for inputs in [
+        baseline.clone().with_source(JobId(99), &source),
+        baseline
+            .clone()
+            .with_settings(JobId(99), b"unknown".to_vec()),
+        baseline.clone().with_profile(JobId(99), profile(3, 1024)),
+    ] {
+        assert!(executor
+            .execute_explained_with_limit(
+                &dag,
+                &specs,
+                &inputs,
+                &store,
+                &mut ddc,
+                BuildRevision(1),
+                1,
+                false,
+            )
+            .is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(store.current_revision().unwrap(), Some(BuildRevision(0)));
+        assert!(executor
+            .load_committed_build_inputs(root.path(), BuildRevision(1))
+            .is_err());
+    }
+}
+
+#[test]
 fn cold_explained_build_rejects_unqueryable_history_before_processing() {
     use prism_asset_build_core::{
         AssetId, BuildExecutionError, ContentHash, DerivedDataCache, RevisionStore,
