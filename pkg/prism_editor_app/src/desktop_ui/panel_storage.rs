@@ -16,10 +16,27 @@ pub enum DesktopPanelCancelOutcome {
     /// Publication started; retain and inspect the real eventual receipt.
     TooLate,
 }
+/// Complete sequence project codec and admission bounds for the shared file worker.
+#[derive(Clone, Copy, Debug)]
+pub struct DesktopSequenceStorageLimits {
+    /// Actual project/document/topology and history budgets.
+    pub document: prism_editor_timeline::SequenceDocumentLimits,
+    /// Maximum queued/owned requests admitted by the storage service.
+    pub max_requests: usize,
+}
+impl Default for DesktopSequenceStorageLimits {
+    fn default() -> Self {
+        Self {
+            document: prism_editor_timeline::SequenceDocumentLimits::default(),
+            max_requests: 2,
+        }
+    }
+}
 pub(super) struct FileFailure {
     message: String,
     reconcile: bool,
     cancelled: bool,
+    busy: bool,
 }
 #[derive(Clone, PartialEq)]
 pub(super) struct FileSnapshot<T> {
@@ -56,15 +73,16 @@ pub(super) trait StorageBackend {
     fn matches_receipt(started: &Self::Token, receipt: &Self::Token) -> bool;
 }
 macro_rules! backend {
-    ($module:ident, $service:ident, $token:ident, $revision:ident, $document:ident, $request:ident, $limits:ident, $result:ident, $error:ident, $durability:ident, $cancel:ident) => {
+    ($module:ident, $service:ident, $token:ident, $revision:ident, $document:ident, $request:ident, $limits:ty, $result:ident, $error:ident, $durability:ident, $cancel:ident) => {
         impl StorageBackend for $module::$service {
             type Token = FileSnapshot<$module::$token>;
             type Revision = $module::$revision;
             type Document = $module::$document;
             type Request = $module::$request;
-            type Limits = $module::$limits;
+            type Limits = $limits;
             fn load(&self, timeout: Duration) -> Result<Self::Request, FileFailure> {
                 self.load(timeout).map_err(|e| FileFailure {
+                    busy: matches!(e, $module::$error::Busy),
                     reconcile: matches!(e, $module::$error::PublicationUncertain { .. }),
                     cancelled: matches!(e, $module::$error::Cancelled),
                     message: e.to_string(),
@@ -79,6 +97,7 @@ macro_rules! backend {
             ) -> Result<Self::Request, FileFailure> {
                 self.save(bytes, token.model, revision, timeout)
                     .map_err(|e| FileFailure {
+                        busy: matches!(e, $module::$error::Busy),
                         reconcile: matches!(e, $module::$error::PublicationUncertain { .. }),
                         cancelled: matches!(e, $module::$error::Cancelled),
                         message: e.to_string(),
@@ -105,6 +124,7 @@ macro_rules! backend {
                             },
                         })
                         .map_err(|e| FileFailure {
+                            busy: matches!(e, $module::$error::Busy),
                             reconcile: matches!(e, $module::$error::PublicationUncertain { .. }),
                             cancelled: matches!(e, $module::$error::Cancelled),
                             message: e.to_string(),
@@ -130,7 +150,7 @@ backend!(
     GraphFileRevision,
     GraphDocument,
     GraphStorageRequest,
-    GraphStorageLimits,
+    prism_editor_graph::GraphStorageLimits,
     GraphStorageResult,
     GraphStorageError,
     GraphSaveDurability,
@@ -143,32 +163,66 @@ backend!(
     TimelineFileRevision,
     TimelineDocument,
     TimelineStorageRequest,
-    TimelineStorageLimits,
+    prism_editor_timeline::TimelineStorageLimits,
     TimelineStorageResult,
     TimelineStorageError,
     TimelineSaveDurability,
     TimelineCancelOutcome
 );
+backend!(
+    prism_editor_timeline,
+    SequenceProjectStorageService,
+    SequenceProjectToken,
+    TimelineFileRevision,
+    SequenceProjectDocument,
+    SequenceProjectStorageRequest,
+    DesktopSequenceStorageLimits,
+    SequenceProjectStorageResult,
+    TimelineStorageError,
+    TimelineSaveDurability,
+    TimelineCancelOutcome
+);
 
+enum FileOperation<R> {
+    Load,
+    Save { bytes: Vec<u8>, expected: R },
+}
+struct FilePlan<S: StorageBackend> {
+    operation: FileOperation<S::Revision>,
+    token: S::Token,
+    deadline: Instant,
+    attempts: u8,
+    retry_at: Instant,
+}
 pub(super) struct PanelFile<S: StorageBackend> {
     service: S,
+    path: std::path::PathBuf,
     pub(super) limits: S::Limits,
     expected: Option<S::Revision>,
     timeout: Duration,
     active: Option<(S::Request, S::Token)>,
+    plan: Option<FilePlan<S>>,
     pub(super) candidate: Option<(S::Document, S::Revision, S::Token)>,
     failed: bool,
     status: String,
     cancelling: bool,
 }
 impl<S: StorageBackend> PanelFile<S> {
-    fn new(service: S, limits: S::Limits, expected: S::Revision, timeout: Duration) -> Self {
+    fn new(
+        service: S,
+        limits: S::Limits,
+        expected: S::Revision,
+        timeout: Duration,
+        path: std::path::PathBuf,
+    ) -> Self {
         Self {
             service,
+            path,
             limits,
             expected: Some(expected),
             timeout,
             active: None,
+            plan: None,
             candidate: None,
             failed: false,
             status: "File binding ready".into(),
@@ -176,15 +230,21 @@ impl<S: StorageBackend> PanelFile<S> {
         }
     }
     pub(super) fn fenced(&self) -> bool {
-        self.active.is_some() || self.candidate.is_some() || self.failed || self.expected.is_none()
+        self.plan.is_some()
+            || self.active.is_some()
+            || self.candidate.is_some()
+            || self.failed
+            || self.expected.is_none()
     }
     pub(super) fn next_wake(&self) -> Option<Instant> {
-        self.active
-            .as_ref()
-            .map(|_| Instant::now() + Duration::from_millis(10))
+        if self.active.is_some() {
+            Some(Instant::now() + Duration::from_millis(10))
+        } else {
+            self.plan.as_ref().map(|p| p.retry_at)
+        }
     }
     fn available(&self) -> Result<(), String> {
-        if self.active.is_some() || self.candidate.is_some() {
+        if self.plan.is_some() || self.active.is_some() || self.candidate.is_some() {
             Err("Finish I/O or resolve the loaded candidate first".into())
         } else {
             Ok(())
@@ -195,7 +255,7 @@ impl<S: StorageBackend> PanelFile<S> {
             self.expected = None;
         }
         self.failed = !(self.cancelling && error.cancelled);
-        self.status = error.message;
+        self.status = format!("Panel file {}: {}", self.path.display(), error.message);
         self.cancelling = false;
         self.status.clone()
     }
@@ -205,35 +265,91 @@ impl<S: StorageBackend> PanelFile<S> {
             .expected
             .clone()
             .ok_or("Publication uncertain: load and reconcile the disk revision first")?;
-        match self
-            .service
-            .save(bytes, token.clone(), expected, self.timeout)
-        {
-            Ok(request) => {
-                self.active = Some((request, token));
-                self.failed = false;
-                self.cancelling = false;
-                self.status = "Saving".into();
-                Ok(())
-            }
-            Err(e) => Err(self.failure(e)),
-        }
+        self.start(FileOperation::Save { bytes, expected }, token)
     }
     fn load(&mut self, token: S::Token) -> Result<(), String> {
         self.available()?;
-        match self.service.load(self.timeout) {
+        self.start(FileOperation::Load, token)
+    }
+    fn start(
+        &mut self,
+        operation: FileOperation<S::Revision>,
+        token: S::Token,
+    ) -> Result<(), String> {
+        let now = Instant::now();
+        let deadline = now
+            .checked_add(self.timeout)
+            .ok_or("Invalid storage deadline")?;
+        self.plan = Some(FilePlan {
+            operation,
+            token,
+            deadline,
+            attempts: 0,
+            retry_at: now,
+        });
+        self.failed = false;
+        self.cancelling = false;
+        self.submit_plan()
+    }
+    fn submit_plan(&mut self) -> Result<(), String> {
+        let plan = self.plan.as_mut().expect("retained operation");
+        plan.attempts += 1;
+        let remaining = plan.deadline.saturating_duration_since(Instant::now());
+        // Keep the encoded snapshot only during this bounded operation. Retries
+        // never recapture a newer model or change the expected disk revision.
+        let (result, status) = match &plan.operation {
+            FileOperation::Load => (self.service.load(remaining), "Loading candidate"),
+            FileOperation::Save { bytes, expected } => (
+                self.service.save(
+                    bytes.clone(),
+                    plan.token.clone(),
+                    expected.clone(),
+                    remaining,
+                ),
+                "Saving",
+            ),
+        };
+        match result {
             Ok(request) => {
-                self.active = Some((request, token));
-                self.failed = false;
-                self.cancelling = false;
-                self.status = "Loading candidate".into();
+                self.active = Some((request, plan.token.clone()));
+                self.status = status.into();
                 Ok(())
             }
-            Err(e) => Err(self.failure(e)),
+            Err(error) => self.retry_failure(error),
         }
+    }
+    fn retry_failure(&mut self, error: FileFailure) -> Result<(), String> {
+        // Busy is pre-publication. Never retry conflicts, cancellation, unsafe
+        // paths, codec errors, or an uncertain publication. No UI thread sleep.
+        if error.busy
+            && !self.cancelling
+            && let Some(plan) = &mut self.plan
+        {
+            let next = Instant::now() + Duration::from_millis(1 << (plan.attempts - 1));
+            if plan.attempts < 8 && next < plan.deadline {
+                plan.retry_at = next;
+                self.status = format!(
+                    "Panel file {}: {}; retry {}/8 pending",
+                    self.path.display(),
+                    error.message,
+                    plan.attempts + 1
+                );
+                return Ok(());
+            }
+        }
+        self.plan = None;
+        Err(self.failure(error))
     }
     pub(super) fn poll(&mut self) -> Result<(bool, Option<S::Token>), String> {
         let Some((request, _)) = &mut self.active else {
+            if self
+                .plan
+                .as_ref()
+                .is_some_and(|p| Instant::now() >= p.retry_at)
+            {
+                self.submit_plan()?;
+                return Ok((true, None));
+            }
             return Ok((false, None));
         };
         let Poll::Ready(result) = S::poll(request) else {
@@ -242,6 +358,7 @@ impl<S: StorageBackend> PanelFile<S> {
         let (_, started) = self.active.take().expect("polled request");
         match result {
             Ok(FileOutput::Loaded(document, revision)) => {
+                self.plan = None;
                 self.candidate = Some((document, revision, started));
                 self.status = "Loaded candidate: review before adoption".into();
                 self.cancelling = false;
@@ -253,6 +370,7 @@ impl<S: StorageBackend> PanelFile<S> {
                 synced,
                 late,
             }) => {
+                self.plan = None;
                 if !S::matches_receipt(&started, &token) {
                     self.failed = true;
                     self.expected = None;
@@ -278,17 +396,24 @@ impl<S: StorageBackend> PanelFile<S> {
             }
             Err(error) => {
                 let cancelled = self.cancelling && error.cancelled;
-                let message = self.failure(error);
                 if cancelled {
+                    self.plan = None;
+                    self.failure(error);
                     Ok((true, None))
                 } else {
-                    Err(message)
+                    self.retry_failure(error)?;
+                    Ok((true, None))
                 }
             }
         }
     }
     fn cancel(&mut self) -> DesktopPanelCancelOutcome {
         let Some((request, _)) = &self.active else {
+            if self.plan.take().is_some() {
+                self.cancelling = false;
+                self.status = "Cancelled before retry; no pending publication".into();
+                return DesktopPanelCancelOutcome::Cancelled;
+            }
             return DesktopPanelCancelOutcome::Idle;
         };
         let outcome = S::cancel(request);
@@ -327,15 +452,23 @@ impl<S: StorageBackend> PanelFile<S> {
                 "Save panel",
                 editable
                     && self.active.is_none()
+                    && self.plan.is_none()
                     && self.candidate.is_none()
                     && self.expected.is_some(),
             ),
             (
                 "load",
                 "Load candidate",
-                editable && self.active.is_none() && self.candidate.is_none(),
+                editable
+                    && self.active.is_none()
+                    && self.plan.is_none()
+                    && self.candidate.is_none(),
             ),
-            ("cancel", "Cancel I/O", self.active.is_some()),
+            (
+                "cancel",
+                "Cancel I/O",
+                self.active.is_some() || self.plan.is_some(),
+            ),
             (
                 "adopt",
                 "Adopt candidate",
@@ -366,14 +499,14 @@ impl<S: StorageBackend> PanelFile<S> {
 }
 
 macro_rules! panel_file_api {
-    ($panel:ident,$prefix:literal,$module:ident,$service:ident,$limits:ident,$revision:ident,$token:ident) => {
+    ($panel:ident,$prefix:literal,$module:ident,$limits:ty,$revision:ident,$new_service:expr) => {
         impl $panel {
             /// Bind an explicit absolute host file and exact observed revision.
             /// Existing unsafe state prevents rebinding; construction performs no file I/O.
             pub fn mount_storage(
                 &mut self,
                 path: impl Into<std::path::PathBuf>,
-                limits: $module::$limits,
+                limits: $limits,
                 expected: $module::$revision,
                 timeout: Duration,
             ) -> Result<(), String> {
@@ -381,8 +514,9 @@ macro_rules! panel_file_api {
                 if self.file.as_ref().is_some_and(PanelFile::fenced) {
                     return Err("Resolve existing file state before rebinding".into());
                 }
-                let service = $module::$service::new(path, limits).map_err(|e| e.to_string())?;
-                self.file = Some(PanelFile::new(service, limits, expected, timeout));
+                let path = path.into();
+                let service = ($new_service)(path.clone(), limits).map_err(|e| e.to_string())?;
+                self.file = Some(PanelFile::new(service, limits, expected, timeout, path));
                 Ok(())
             }
             /// Current real storage status; absent means the host did not bind a file.
@@ -468,19 +602,33 @@ panel_file_api!(
     DesktopGraphPanel,
     "graph",
     prism_editor_graph,
-    GraphStorageService,
-    GraphStorageLimits,
+    prism_editor_graph::GraphStorageLimits,
     GraphFileRevision,
-    GraphSnapshotToken
+    |path: std::path::PathBuf, limits| prism_editor_graph::GraphStorageService::new(path, limits)
 );
 panel_file_api!(
     DesktopTimelinePanel,
     "timeline",
     prism_editor_timeline,
-    TimelineStorageService,
-    TimelineStorageLimits,
+    prism_editor_timeline::TimelineStorageLimits,
     TimelineFileRevision,
-    TimelineSnapshotToken
+    |path: std::path::PathBuf, limits| prism_editor_timeline::TimelineStorageService::new(
+        path, limits
+    )
+);
+panel_file_api!(
+    DesktopSequencePanel,
+    "sequence",
+    prism_editor_timeline,
+    DesktopSequenceStorageLimits,
+    TimelineFileRevision,
+    |path: std::path::PathBuf, limits: DesktopSequenceStorageLimits| {
+        prism_editor_timeline::SequenceProjectStorageService::new(
+            path,
+            limits.max_requests,
+            limits.document,
+        )
+    }
 );
 
 impl DesktopGraphPanel {
@@ -644,6 +792,74 @@ impl DesktopTimelinePanel {
     }
 }
 
+impl DesktopSequencePanel {
+    pub(super) fn file_ready(&self) -> Result<(), String> {
+        if self.has_clip_draft() || self.controller.error().is_some() {
+            Err(
+                "Apply/discard the clip draft and resolve sequence errors before file operations"
+                    .into(),
+            )
+        } else {
+            Ok(())
+        }
+    }
+    fn current_file_token(&self) -> FileSnapshot<prism_editor_timeline::SequenceProjectToken> {
+        FileSnapshot {
+            model: self.editor.snapshot_token(),
+            rate: None,
+        }
+    }
+    fn acknowledge_file_saved(
+        &mut self,
+        token: &FileSnapshot<prism_editor_timeline::SequenceProjectToken>,
+    ) {
+        self.acknowledge_saved(&token.model);
+    }
+    fn capture_file(
+        &self,
+    ) -> Result<
+        (
+            Vec<u8>,
+            FileSnapshot<prism_editor_timeline::SequenceProjectToken>,
+        ),
+        String,
+    > {
+        let limits = self.file.as_ref().ok_or("No host file binding")?.limits;
+        let bytes = self
+            .editor
+            .document()
+            .encode(limits.document)
+            .map_err(|e| e.to_string())?;
+        Ok((bytes, self.current_file_token()))
+    }
+    /// Explicit replacement approval for both the load-start and current project.
+    /// Drafts/errors reject adoption; constructing the replacement can fail safely.
+    pub fn adopt_loaded(
+        &mut self,
+        expected: &prism_editor_timeline::SequenceProjectToken,
+    ) -> Result<(), String> {
+        self.file_ready()?;
+        let file = self.file.as_ref().ok_or("No host file binding")?;
+        let (document, _, started) = file.candidate.as_ref().ok_or("No loaded candidate")?;
+        if *expected != self.editor.snapshot_token() || *started != self.current_file_token() {
+            return Err("Loaded candidate belongs to an older sequence project".into());
+        }
+        let editor = prism_editor_timeline::SequenceProjectEditor::new(
+            document.clone(),
+            self.editor.limits(),
+        )
+        .map_err(|e| e.to_string())?;
+        let controller = prism_editor_ui::SequencePanelController::new(self.limits)
+            .map_err(|e| e.to_string())?;
+        self.editor = editor;
+        self.controller = controller;
+        self.view = None;
+        self.saved = self.editor.snapshot_token();
+        self.file.as_mut().expect("bound file").adopted();
+        Ok(())
+    }
+}
+
 impl EditorDesktopUi {
     /// Route native Save/Open to the active panel's explicit host file binding.
     /// Returns false only when no native panel is active (scene route may proceed).
@@ -668,6 +884,12 @@ impl EditorDesktopUi {
                 panel.load_file()
             }
         } else if let Some(panel) = host.downcast_mut::<DesktopTimelinePanel>() {
+            if save {
+                panel.save_file()
+            } else {
+                panel.load_file()
+            }
+        } else if let Some(panel) = host.downcast_mut::<DesktopSequencePanel>() {
             if save {
                 panel.save_file()
             } else {

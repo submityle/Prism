@@ -257,3 +257,37 @@ again confirmed that the Mac was locked and automatic unlock failed. Native
 presentation and OS input therefore remain unverified; unlock the desktop before
 repeating the bounded smoke with `--png <absolute-path> --revision <u128>`.
 Offscreen GPU pixel evidence does not establish native presentation.
+
+Native authoring panels are host-owned contributions: `DesktopGraphPanel`,
+`DesktopTimelinePanel`, `DesktopPrefabPanel`, `DesktopWorldPanel`,
+`DesktopProfilerPanel`, `DesktopFrameGraphPanel` and `DesktopSequencePanel`.
+See `docs/prism_editor_native_panels_zh.md` for explicit ownership, providers,
+real semantic/pointer routing, exact dirty tokens and asynchronous file fences.
+
+`DesktopSequencePanel::new(SequenceProjectEditor, SequencePanelLimits)` mounts
+the real complete-project controller and keyed Loom view. The host supplies
+documents and limits; the app creates no sample project. Numeric clip drafts
+require Apply or explicit Discard before navigation/history/file replacement.
+Invalid input is retained by the actual controller and fences save/close.
+Active-panel native Undo/Redo uses real project inverse history. Evaluate
+reports actual nested kernel samples/events without continuous transport or
+runtime mutation.
+
+Sequence `mount_storage` accepts an absolute host path,
+`DesktopSequenceStorageLimits`, the observed `TimelineFileRevision` and timeout.
+Save/Open use the actual complete-project worker, retaining requests until
+terminal results. Loads remain isolated candidates until explicit adoption
+validates both the load-start and current project tokens; drafts/errors reject
+replacement. Old durable receipts cannot confirm newer authoring or clock edits.
+The eight native Sequence regressions exercise retained hit geometry and scrolling,
+text/Enter, actual inverse commands, nested diagnostics and real files, including
+temporary and persistent actual file locks. Graph/Timeline/Sequence file routes
+retry structured pre-publication Busy errors at most eight times within the
+original deadline. They retain the original encoded snapshot and observed disk
+revision, use monotonic wakeups without sleeping on the UI thread, and require
+explicit retry after exhaustion. Other failures remain visible and fenced.
+The default all-targets suite passed 100 tests (69 unit, 15 controller, 16 document).
+These results do not establish Sequence runtime execution or native OS input
+acceptance. Desktop strict Clippy and the planned repeated concurrency run were
+not rerun for this change after the disk emergency; the shared test binary was
+no longer present, and no replacement build was started.

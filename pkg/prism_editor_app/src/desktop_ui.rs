@@ -34,22 +34,26 @@ mod git;
 mod panel_pointer;
 mod panel_storage;
 mod panels;
+mod sequence_panel;
 mod validation;
 pub use authoring_panels::{DesktopFrameGraphPanel, DesktopGraphPanel, DesktopPrefabPanel};
 use content::NativeContent;
 pub use content::{ContentThumbnailSource, DesktopContentImage};
 pub use git::{ContentGitPhase, ContentGitStatus};
-pub use panel_storage::DesktopPanelCancelOutcome;
+pub use panel_storage::{DesktopPanelCancelOutcome, DesktopSequenceStorageLimits};
 pub use panels::{
     DesktopPanel, DesktopPanelUpdate, DesktopPanelView, DesktopProfilerPanel, DesktopTimelineFrame,
     DesktopTimelinePanel, DesktopWorldPanel,
 };
+pub use sequence_panel::DesktopSequencePanel;
 #[cfg(test)]
 mod authoring_panel_tests;
 #[cfg(test)]
 mod content_tests;
 #[cfg(test)]
 mod panel_tests;
+#[cfg(test)]
+mod sequence_panel_tests;
 
 /// Logical keys, independent of `winit` or any native keyboard API.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -815,7 +819,7 @@ impl EditorDesktopUi {
                     } else {
                         "redo"
                     };
-                    let target = ["timeline", "graph", "prefab"]
+                    let target = ["timeline", "graph", "prefab", "sequence"]
                         .into_iter()
                         .map(|prefix| format!("{prefix}:{operation}"))
                         .find(|target| self.panels.is_target(target));

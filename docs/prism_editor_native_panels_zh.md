@@ -16,6 +16,7 @@
 | `DesktopGraphPanel` | `GraphEditor`、宿主节点模板、视口和预算 | 提供领域无关的端口类型与 payload；显式绑定真实文件 | 实际节点/连线、指针预览、一次逆命令提交与独立存储 |
 | `DesktopPrefabPanel` | `PrefabPanelController`、真实 store 与显式传播目标 | 提供实际资产/实例；确认精确持久化结果 | 路由选择、revert、apply review/confirm、传播与历史；不创建虚假资产 |
 | `DesktopFrameGraphPanel` | `FrameGraphPanelController`、完成的 `Arc<GraphCaptureReport>` provider | 发布真实编译/执行采集；明确 capture 的证据等级 | 真实 pass/resource 导航，生产失败保留旧 publication 并围栏 |
+| `DesktopSequencePanel` | `SequenceProjectEditor`、显式 `SequencePanelLimits` | 提供真实完整项目、时钟/拓扑预算及独立文件绑定 | 子文档/clip 作者、一次逆命令、嵌套诊断与完整项目异步存储 |
 
 provider 返回 `DesktopPanelUpdate { changed, fenced, wake_at }`。宿主必须用 `fenced` 表达自身未提交元数据、在途发布或尚未解决的 I/O；world 的排队 intent、dirty cell、pending residency 另由 app 直接检查。回调必须非阻塞；延迟工作应提交给宿主服务，并通过单调 `Instant` deadline 或唤醒原生事件循环继续轮询。provider 错误保留 controller/source，显示错误并围栏；宿主解决原因后通过 `retry` 恢复。
 
@@ -43,7 +44,7 @@ ui.mount_native_panel(
 
 底部 dock 在 content 与贡献面板之间切换，保留每个面板的滚动位置。最多八个 slot，ID 为不超过 48 字节的 ASCII 字母/数字/连字符，标签不超过 64 字节。贡献实际树限制 16,384 节点、128 深度、4,096 绑定；显式键不得重复或侵占 `editor.`、`content:`、`native:` 保留空间。不同 trigger 可共享同一语义 target，例如 world cell 的 Select/Activate。
 
-命中、文本框与绘制共用 Loom 已计算的逻辑像素矩形和 pane clip；没有另造固定坐标控件。输入使用各面板真实 bound view 的精确绑定。文本草稿支持 IME、Enter/Tab 与 Escape；错误提交保留文本。面板切换不丢弃尚未解决的草稿。timeline、graph、prefab 活动时原生及工具栏 Undo/Redo 路由至其独立作者历史；只读诊断面板不会落入 scene 历史。Prefab review 确认前不改 store，确认只发布一笔逆命令，未确认 review 本身也围栏关闭/卸载。
+命中、文本框与绘制共用 Loom 已计算的逻辑像素矩形和 pane clip；没有另造固定坐标控件。输入使用各面板真实 bound view 的精确绑定。文本草稿支持 IME、Enter/Tab 与 Escape；错误提交保留文本。面板切换不丢弃尚未解决的草稿。timeline、graph、prefab、sequence 活动时原生及工具栏 Undo/Redo 路由至其独立作者历史；只读诊断面板不会落入 scene 历史。Prefab review 确认前不改 store，确认只发布一笔逆命令，未确认 review 本身也围栏关闭/卸载。
 
 `DesktopPanel` 允许额外实际 Loom 贡献，保留自己的绑定、poll、deadline、dirty 与作者版本。它不是空 custom 节点占位。
 
@@ -63,13 +64,17 @@ graph 捕获使用真实 `graph:canvas` 的保留矩形及 clip，再由 `BoundG
 
 ## 独立异步文件路由
 
-`DesktopGraphPanel::mount_storage` 与 `DesktopTimelinePanel::mount_storage` 接收宿主指定的绝对路径、codec/字节预算、精确已观察文件 revision 与超时。构造只建立服务，实际 Save/Load 才排队后台工作；没有每帧克隆完整作者文档。保存显式编码一次快照，主循环按 10ms deadline 轮询在途请求；停止播放仍会收取文件回执。
+`DesktopGraphPanel::mount_storage` 与 `DesktopTimelinePanel::mount_storage` 接收宿主指定的绝对路径、codec/字节预算、精确已观察文件 revision 与超时。构造只建立服务，实际 Save/Load 才排队后台工作；没有每帧克隆完整作者文档。保存显式编码一次快照，主循环按 10ms deadline 轮询在途请求；停止播放仍会收取文件回执。Graph/Timeline/Sequence 的结构化 `Busy` 仅在发布前重试，最多八次尝试，退避 1/2/4/8/16/32/64ms，始终受原始绝对截止时间限制。等待期间通过单调 deadline 唤醒，不在 UI 线程 sleep；保留原始编码字节、模型 token 与磁盘 revision，不重新捕获更新后的现场。冲突、取消、codec/path 错误及发布不确定均不自动重试。耗尽后保留带绑定路径的可见失败围栏并停止唤醒，要求显式 Save/Load；等待重试期间取消直接移除计划，没有遗留 worker 能在后续唤醒时发布。
 
 原生 Save/Open 先检查 scene I/O 与 reconciliation，再路由活动面板的独立文件绑定；没有绑定时显示错误。工具栏 `graph:file:*` / `timeline:file:*` 提供保存、加载候选、取消、采用与丢弃。加载只发布隔离候选，不隐式替换现场或清除 dirty。未保存编辑存在时禁用原生“采用”；宿主可以读取精确当前模型 token 后显式 `adopt_loaded(&token)` 批准替换。该 token 必须同时匹配加载开始状态与当前状态，timeline 还检查加载开始的频率；加载期间的任何作者改动都要求重新加载。验证失败同时保留现场和候选。采用成功后重建真实 editor/controller，保留宿主节点模板或传输配置，清空历史；timeline 停止并向实际 consumer 投递新现场。
 
 只有匹配所保存快照的 `Synced` 回执能更新保存基线；保存期间产生的新编辑或新频率仍保持 dirty。revision 冲突不覆盖磁盘。已发布但目录同步失败保留失败围栏并采用真实新 revision；`PublicationUncertain` 清除可写 revision，必须加载并明确协调后才能再次保存。取消后仍持有请求直到终态，`TooLate` 仍检查真实持久化结果，不伪造取消成功。候选、在途请求、失败、不确定 revision 与作者预览均围栏关闭、卸载及现场替换。
 
-Sequence 作者面板沿用同一 `DesktopPanel` 贡献槽位与 `sequence:` 命名空间，宿主可接真实 controller/bound view；Newton 的 UI 导出完成前，本轮不把子序列作者或 runtime 执行宣称为 app 已交付。`DocumentStorage*` 通用类型已从 timeline 根公开，后续接线复用其真实存储能力。帧图当前接入真实 capture 导航，生产资源缩略预览的 GPU provider/图像桥接另行验收；编译图声明捕获不代表 GPU 已执行。
+`DesktopSequencePanel::new(editor, limits)` 接收实际完整项目与显式 UI 预算，持有真实 `SequencePanelController` 和当前 `BoundSequencePanel`。所有作者事件最终调用 `handle_event` 校验 controller 身份与精确项目 token，包含错误输入；错误保留在真实 controller 并围栏关闭/保存。原生 Undo/Redo 操作完整项目历史。clip 数字输入仅暂存，`SaveClip`/`AddClip` 才写一次真实逆命令。未应用草稿阻止丢弃草稿的导航/历史操作、存储与卸载；显式“Discard clip draft / clear rejected action”还原实际选中 clip 或新 clip 基线，不把作者模型或文件错误标为已保存。检查只读 clip 元数据，不在轮询中克隆时间轴 payload。
+
+Sequence 的 `mount_storage(path, DesktopSequenceStorageLimits, observed_revision, timeout)` 复用实际 `SequenceProjectStorageService`。`document` 是完整项目 codec/拓扑/历史预算，`max_requests` 是 worker 准入预算；没有新增共享依赖。Save 编码一次完整项目，包含所有子文档、频率、轨道/事件、clip 拓扑及 ID 高水位。Open 取得隔离候选，复用同一 pending/cancel/durability/revision 围栏；采用同时验证加载开始 token、当前 token、草稿与 controller 错误，再构造独立 editor/controller，成功后一次替换并清空历史及诊断。失败保留现场与候选。`acknowledge_saved` 只认可精确项目 token；改变任一文档频率同样改变 token，旧保存回执不能清除新编辑。
+
+Sequence `Evaluate` 显式运行真实嵌套求值器并显示实际样本/事件诊断，未挂接持续 transport，也不调用 Gameplay 或写入 runtime。没有在途文件请求时不会安排周期唤醒。`DocumentStorage*` 通用类型已从 timeline 根公开。帧图当前接入真实 capture 导航，生产资源缩略预览的 GPU provider/图像桥接另行验收；编译图声明捕获不代表 GPU 已执行。
 
 ## 验证状态
 
@@ -97,4 +102,12 @@ collections/Git 并发错误已捕获结构化证据。旧测试二进制中，c
 - 原生环境 `PRISM_REQUIRE_GPU=1 cargo test -p prism_editor_app --all-targets --features desktop`：79 unit + 2 content images + 15 controller + 18 document + 4 Gizmo，118 项通过，session 10449 exit 0，日志 `/private/tmp/prism-app-desktop-native-check.log`。沙箱首次强制 GPU 检查因 Metal adapter 不可见而失败，原生环境重跑全项成功；不把失败重写为跳过。新增九项仍是作者/文件/布局路由证据，GPU 像素证据来自既有 scene/Gizmo/PNG 用例。
 - `cargo clippy -p prism_editor_app --no-deps --all-targets --features desktop -- -D warnings`：session 31470 exit 0，日志 `/private/tmp/prism-app-authoring-clippy.log`。依赖仍有其他任务的警告，不宣称全仓零警告。
 
-当前没有自有活动验证进程或待清理自有 target；共享 `/private/tmp/prism-editor-joint-cr1ODK` 保留给主线程，不执行清理。生产帧图 GPU runtime preview 的 provider 与图像桥接、Sequence 根导出后的专用宿主接线仍单独验收；本轮不将它们计入完成项。
+上述 Graph/Timeline 提交结束时没有自有活动验证进程或待清理自有 target；共享 `/private/tmp/prism-editor-joint-cr1ODK` 保留给主线程，不执行清理。生产帧图 GPU runtime preview 的 provider 与图像桥接仍单独验收。World membership 的完整项目保存/采用需要 UI controller 提供精确围栏的历史/同步/采用入口，现有 provider/intent 接线不等于此能力。
+
+Sequence 本轮新增六项真实 app 回归，定向 session 84029 exit 0，日志 `/private/tmp/prism-app-sequence-check.log`。覆盖实际 retained 节点非零命中矩形、原生 wheel/点击/文本/Enter、草稿应用单逆事务与 Undo/Redo，错误输入经过真实 controller 并保留围栏，陈旧 controller/project bound 拒绝，完整项目真实文件 round trip，异步旧回执/加载后新编辑/草稿拒绝采用，外部文件冲突与取消直到请求终态。真实三层项目 root/child/leaf 频率 2/4/8Hz，显式 elapsed=2 秒得到 leaf tick=16；leaf event=11 映射至 root tick=2，clip 路径为 `[20,30]`。求值前后项目 token 不变，无持续 transport 唤醒。这些是 CPU/文件/保留 UI 路由证据，不是 Sequence runtime 或新增 GPU 渲染验收。
+
+该次全量默认测试 session 44452 曾在 Graph 加载和 Timeline 保存出现真实 `Busy` 失败；未通过延长期限或串行测试掩盖。结构化有限重试修复后再新增两项实际 `.prism-timeline.lock` 回归：短暂占锁时现场继续编辑，释放后磁盘仍是原保存快照且旧回执不能清除新频率的 dirty；持续占锁耗尽后保留路径/Busy/围栏且无周期唤醒，显式重试并取消等待计划后释放锁也不写文件，最终显式保存恢复。该轮没有捕获足以证明具体 OS 锁继承根因的证据，不把有限重试称作系统性消除所有竞争。
+
+Sequence 与重试修复的最终默认 `cargo test --offline -p prism_editor_app --all-targets` 为 session 42691 exit 0：69 unit + 15 controller + 16 document，共 100 项通过，日志 `/private/tmp/prism-app-sequence-default.log`。八项 Sequence 测试全部通过。复用共享 target、jobs=2、debug=0、incremental=0，没有新建自有 target。磁盘紧急指令后未启动新编译；后续尝试直接复用测试二进制时，该文件已不存在，因此计划中的重复并发循环未执行，本轮 desktop strict Clippy 也未重跑。上文 118 项强制 GPU 与 strict Clippy 属于此前 Graph/Timeline 提交，不能冒充本轮 Sequence 的验收结果。
+
+本轮结束时无 app 活跃验证进程或可清理自有 target，共享 `/private/tmp/prism-editor-joint-cr1ODK` 未删除。Sequence runtime 的显式实体绑定、整帧预检/应用与 publication barrier 由独立任务提供，app 尚未挂接，等待正式 API 及真实 DSP/ViewData 证据；这里的 Evaluate 只表示实际 kernel 诊断。World membership controller/history/storage 候选入口也等待 UI 所有者交接，不能把现有 intent/provider 路由记作完整项目持久化。
