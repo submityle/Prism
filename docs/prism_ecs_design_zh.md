@@ -19,7 +19,7 @@
 
 > **现状核查口径（2026-10-20；当前工作树含其他未提交改动）**：本文同时保留完整设计目标与当前实现边界。「已实现」与「已验证」分开记录；提交历史中的测试入口或历史验收记录不等于本次重跑，也不等于跨机、NAT、真实 GPU 或性能目标完成。本轮增量查询与 change-observer 候选索引收口后，`prism_ecs --lib` 默认 feature 867 项、`--all-features` 1216 项均通过，observer fast-path 定向测试 13 项通过；不代表其他 crate、GPU、跨机或性能目标通过。当前工作树还包含并行中的渲染、设置与世界系统改动，未并入本轮交付。§17.1 与历史修复段落中的数值/通过次数仍是既有记录。
 
-> **本次 main 历史同步依据**：UDP/ACK/rebind 与 localhost 跨进程验收：`39bd3806a`、`0bf59f55a`、`d6000586b`、`c7201323e`、`1290d101b`；NUMA acceptance：`9390b7a5e`、`07a3d5b9c`；audio/source-route 与 event-log：`ea2ed8026`、`cd03b14c7`、`3e503dd38`；GPU resident/wgpu gate 与 benchmark：`22aebe26`、`a288cf12e`、`c7201323e`、`3a8120874`、`0e7e67259`；CPU SDF clipmap planner：`7e99fa30f`、`90ff7a89a`；shader package binding 与水体 parity：`a1e33a798`；heightfield/planetary placement 与 deletion：`13428ef38`、`2afc018fb`。
+> **本次 main 历史同步依据**：UDP/ACK/rebind 与 localhost 跨进程验收：`39bd3806a`、`0bf59f55a`、`d6000586b`、`c7201323e`、`1290d101b`；NUMA acceptance：`9390b7a5e`、`07a3d5b9c`；audio/source-route、设备 callback lifecycle 与 event-log：`ea2ed8026`、`cd03b14c7`、`3e503dd38`、`94d763d70`；GPU resident/wgpu gate 与 benchmark：`22aebe26`、`a288cf12e`、`c7201323e`、`3a8120874`、`0e7e67259`；CPU SDF clipmap planner：`7e99fa30f`、`90ff7a89a`；shader package binding 与水体 parity：`a1e33a798`；heightfield/planetary placement 与 deletion：`13428ef38`、`2afc018fb`。
 
 ---
 
@@ -684,12 +684,14 @@ ECS 确定性仿真（§14）不是孤立的，必须与三个地基 crate 的�
 
 ### 24.6 当前 `main` 的实现/验证/未验证矩阵
 
+音频设备生命周期切片（`94d763d70`）：`prism_audio_device` 提供后端启停/事件契约与 CPAL 输出实现；`prism_audio_ecs` 在控制线程处理断线/流错误、有限重开、格式变化与 runtime generation 替换，callback 不承担恢复工作。fake backend 生命周期与 ECS 接线测试通过，CPAL all-features 编译通过。严格物理设备测试因当前 CoreAudio 无默认输出端点未能通过；输入设备、设备枚举和系统默认路由变更通知尚未实现，应用/旧资产联合音频工作流也未验收。
+
 | 范围 | 已实现 | 已验证或已有验收入口 | 仍未验证/不可宣称 |
 |---|---|---|---|
 | ECS dirty query / archetype cache | 前向窗口 column journal；journal/SparseSet 候选按 archetype 聚合后匹配；fallback 多源用小来源线性快路径/大来源最小堆归并；匹配缓存用 COW `Arc<Vec<_>>` 共享稳定快照 | `query::dirty_tests` 21 项；同 archetype 三次 journal 写入仅匹配一次；48 来源高重叠/不重叠结果与每项一次 heap push/pop 计数回归。另有 cache 并发/快照与 restore generation 回归；当前完整默认/all-features 验证分别为 867/1216 项 | query 全链路严格 `O(change)`、并发写屏障/回绕与大规模性能；reader 持有快照时扩容仍会复制缓存 |
 | ECS change observer | 写入侧维护去重脏组件摘要；按组件活动索引选择候选；独立 pending 索引保存 panic 重试批次；按 id 删除不再线性扫描；restore 清理旧 pending 并重建 cursor 基线 | fast-path 13 项；覆盖空闲/无关组件零 slot visit、2048 历史槽 churn、注册删除顺序、回调中增删、panic retry、World replacement、table/Sparse 写入和 generation reuse；包含在默认 867 / all-features 1216 项全量通过中 | Query→Observer→Reaction 端到端严格 `O(change)`、并发写屏障/回绕、完整结构变更矩阵与高基数性能 |
 | UDP / ACK / rebind | 有限可靠 UDP、ACK 重传、候选端点与稳定 peer rebind | 真实 loopback fault-proxy 测试覆盖 data/ACK 丢包、顺序/exactly-once 与旧 socket 关闭后的 rebind；独立 server/client 子进程 localhost 验收覆盖握手、业务数据、确定性重传、双向 ACK 清空与稳定 peer（`1290d101b`，本轮定向复跑 1/1 通过） | 跨机、公网、NAT/ICE/relay、真实网络故障、HA 与生产迁移 |
 | NUMA / affinity | OS topology/affinity readback、worker outcome、显式 arena placement/fallback 语义；策略层拓扑模型 | `numa_acceptance` 入口；arena 默认测试 5 项、`vm` 测试 12 项、`--no-default-features` check 已通过；默认 acceptance 缺能力时 `SKIPPED`，`PRISM_REQUIRE_NUMA=1` 严格失败 | 当前机器 Linux strict pass、ECS node-local pages 的真实物理证明、拓扑感知调度收益与 NUMA 性能 |
-| audio / event-log | audio source-route/scene adapter/full-chain；bounded memory/file event-log 与 replay bridge；replication authority journal 插件接线 | 音频局部 unit/integration/full-chain 入口；durable plugin/file tests 覆盖 append/sync/publication/checkpoint 故障注入、重启恢复与子进程 SIGKILL 边界（测试源码存在；本轮未重跑） | 真实音频设备回调、完整应用/旧资产/editor 联合流程；真实断电/介质/文件系统耐久性与跨平台证明；跨机 HA/复制和生产恢复运维 |
+| audio / event-log | audio source-route/scene adapter/full-chain；CPAL callback 启停、断线/流错误处理、有限恢复与 runtime generation 重建；bounded memory/file event-log 与 replay bridge；replication authority journal 插件接线 | 音频默认/no-default 测试共 98 项通过、CPAL all-features 编译检查通过；物理设备 strict gate 因当前 CoreAudio 无默认输出端点而失败；durable plugin/file tests 覆盖 append/sync/publication/checkpoint 故障注入、重启恢复与子进程 SIGKILL 边界（本轮未重跑） | 可用物理设备上的真实启停/恢复；输入设备 lifecycle/枚举/默认路由通知；完整应用/旧资产/editor 联合流程；真实断电/介质/文件系统耐久性与跨平台证明；跨机 HA/复制和生产恢复运维 |
 | GPU resident / benchmark / SDF | CPU resident-column extraction；physical-GPU gate；virtual-texture CPU/GPU benchmark harness（`3a8120874`、`0e7e67259`）；CPU deterministic SDF planner | resident-column readback、wgpu hardware-evidence、benchmark 入口均存在，缺设备明确 skip/strict fail | 当前真实 adapter 通过、GPU sync/upload benefit、性能数字、GPU SDF sampling/ECS 集成 |
 | Render Fabric / placement parity | shader package/module/permutation/pass identity binding；缓存失效校验；水体整帧 parity 入口；heightfield/planetary placement deletion wrapper 与 WGSL | shader binding 与 placement 代码已提交；水体 parity 8 项、world GPU/runtime 定向测试已有通过记录 | Scene Fabric 真实 payload/prepare/record/submit 闭环、当前机器物理 GPU 通过、跨后端 parity、GPU 上传收益与 P50/P95/P99 仍未证明 |
