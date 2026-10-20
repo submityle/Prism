@@ -1,16 +1,20 @@
-//! Bounded, deterministic data models for the Prism editor profiler.
+//! Bounded data models and real capture producers for the Prism editor profiler.
 //!
 //! This crate is intentionally transport- and backend-neutral. A producer may
-//! adapt Tracy spans, GPU timestamps, render-frame graphs, or diagnostic
-//! counters into these types, while the crate itself performs no I/O and owns
-//! no runtime connection. Every collection is bounded by [`ProfilerLimits`]
+//! adapt Tracy spans, render-frame graphs, or diagnostic counters into these
+//! types. [`capture`] records real CPU time; optional `gpu` records and reads
+//! back hardware timestamps using an application-owned wgpu device/queue.
+//! Every model collection is bounded by [`ProfilerLimits`]
 //! and every externally visible ordering has an explicit stable tie-breaker.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod capture;
 pub mod frame;
 pub mod frame_graph;
+#[cfg(feature = "gpu")]
+pub mod gpu;
 pub mod memory;
 pub mod visual_log;
 

@@ -3,11 +3,21 @@ name = "prism_editor_profiler"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.96.0"
-description = "Deterministic, bounded editor profiling data models."
+description = "Bounded editor profiling models and real CPU/GPU capture producers."
 license = "MIT OR Apache-2.0"
 publish = false
 
+[features]
+default = []
+gpu = ["dep:wgpu"]
+gpu-tests = ["gpu", "wgpu/wgsl"]
+
 [dependencies]
+wgpu = { version = "30", default-features = false, features = ["std", "metal", "vulkan", "dx12"], optional = true }
+
+[[test]]
+name = "gpu_capture"
+required-features = ["gpu-tests"]
 
 [lints]
 [lints.rust]
