@@ -3,13 +3,18 @@
 use bytemuck::{bytes_of, cast_slice, Pod, Zeroable};
 use prism_ecs::prelude::Resource;
 use prism_render_architecture::lighting::contract::{GiCandidateSource, LightingPlan, RecipeId};
+use prism_render_architecture::lighting::{
+    CompletionProof, GpuSubmissionDomain, GpuTableHandle, GpuTablePayload, IncrementalGpuTable,
+    LightSceneHandle, SubmissionProof, UploadPlan,
+};
 use prism_render_driver::{
     BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor, BindGroupLayoutEntry,
     BindingResource, BindingType, BufferBindingType, BufferDescriptor, BufferUsages,
-    ComputePipelineDescriptor, PipelineLayoutDescriptor, RenderQueue, ShaderModuleDescriptor,
-    ShaderStages,
+    ComputePipelineDescriptor, FrameSync, PipelineLayoutDescriptor, RenderQueue,
+    ShaderModuleDescriptor, ShaderStages,
 };
 use prism_render_runtime::{RenderRuntime, ReplayHandle};
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
 use crate::lighting::{
@@ -17,8 +22,25 @@ use crate::lighting::{
     LightingPunctualInput,
 };
 
+impl GpuTablePayload for LightingDirectionalInput {
+    fn neutral() -> Self {
+        Self::default()
+    }
+}
+
+impl GpuTablePayload for LightingPunctualInput {
+    fn neutral() -> Self {
+        Self::default()
+    }
+}
+
 const MAX_DIRECTIONALS: usize = 1024;
 const MAX_PUNCTUALS: usize = 1024;
+/// The render runtime currently exposes one ordered submission stream.
+/// Device recovery is separated by `device_generation`; this logical id keeps
+/// the stable-table contract ready for additional queues without accepting a
+/// proof from another stream by accident.
+pub(crate) const LIGHTING_QUEUE_DOMAIN: u64 = 0;
 pub(crate) const GI_CANDIDATES_PER_SURFACE: usize = 64;
 pub(crate) const MAX_LIGHTING_SURFACES: usize = 1024;
 const WORKGROUP_SIZE: u32 = 64;
@@ -411,11 +433,39 @@ struct RadianceUploadCache {
     packed: Option<Arc<[[f32; 4]]>>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct LightUploadToken(u64);
+
+#[derive(Clone, Debug)]
+struct PendingLightUpload {
+    token: LightUploadToken,
+    expected_submission: SubmissionProof,
+    directional: UploadPlan,
+    punctual: UploadPlan,
+}
+
 #[derive(Default)]
 struct LightUploadCache {
     bundle: Option<Arc<LightingGpuBundle>>,
-    directionals: Vec<LightingDirectionalInput>,
-    punctuals: Vec<LightingPunctualInput>,
+    directionals: IncrementalGpuTable<LightingDirectionalInput>,
+    punctuals: IncrementalGpuTable<LightingPunctualInput>,
+    directional_slots: BTreeMap<LightSceneHandle, GpuTableHandle>,
+    punctual_slots: BTreeMap<LightSceneHandle, GpuTableHandle>,
+    next_upload_token: u64,
+    pending: Option<PendingLightUpload>,
+}
+
+pub(crate) const fn lighting_submission_domain(device_generation: u64) -> GpuSubmissionDomain {
+    GpuSubmissionDomain::new(device_generation, LIGHTING_QUEUE_DOMAIN)
+}
+
+/// A frame could not prepare a valid stable-slot light upload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LightingGpuPrepareError {
+    /// The light ABI payload and its canonical identities were misaligned.
+    IdentityPayloadMismatch,
+    /// A rare capacity-pressure compaction could not drain the queue safely.
+    QueueCompletionUnconfirmed,
 }
 
 impl<I> LightingGpuState<I>
@@ -445,8 +495,12 @@ where
         plan: &LightingPlan,
         inputs: &ExtractedLightingInputs,
         frame_index: u64,
-        queue: &I::Queue,
-    ) {
+        runtime: &RenderRuntime<I>,
+    ) -> Result<(), LightingGpuPrepareError>
+    where
+        I::Queue: FrameSync,
+    {
+        let queue = runtime.queue();
         let bundle = self.bundle.current();
         let surface_count = inputs.surfaces.len().min(MAX_LIGHTING_SURFACES);
         self.surface_count
@@ -498,8 +552,8 @@ where
             candidate_rays_per_surface,
             core::sync::atomic::Ordering::Release,
         );
-        let directional_count = inputs.directionals.len().min(MAX_DIRECTIONALS);
-        let punctual_count = inputs.punctuals.len().min(MAX_PUNCTUALS);
+        let (directional_count, punctual_count) =
+            self.prepare_light_tables(runtime, &bundle, inputs)?;
         let mut execution_flags = 0_u32;
         if plan.recipes.contains(&RecipeId::SpecializedDeterministic) {
             execution_flags |= 1;
@@ -580,39 +634,106 @@ where
             })
             .collect::<Vec<_>>();
         queue.write_buffer(bundle.surfaces, 0, cast_slice(&packed_surfaces));
-        {
-            let mut cache = self
-                .light_upload
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let same_bundle = cache
-                .bundle
-                .as_ref()
-                .is_some_and(|cached| Arc::ptr_eq(cached, &bundle));
-            if !same_bundle {
-                cache.directionals.clear();
-                cache.punctuals.clear();
-                cache.bundle = Some(Arc::clone(&bundle));
-            }
-            upload_changed_light_values(
-                queue,
-                bundle.directionals,
-                &mut cache.directionals,
-                &inputs.directionals[..directional_count],
-            );
-            upload_changed_light_values(
-                queue,
-                bundle.punctuals,
-                &mut cache.punctuals,
-                &inputs.punctuals[..punctual_count],
-            );
-        }
         if !packed_candidates.is_empty() {
             queue.write_buffer(bundle.candidates, 0, cast_slice(&packed_candidates));
         }
         queue.write_buffer(bundle.output, 0, &ZERO_OUTPUT);
         queue.write_buffer(bundle.direct_output, 0, &ZERO_OUTPUT);
         queue.write_buffer(bundle.gi_output, 0, &ZERO_OUTPUT);
+        Ok(())
+    }
+
+    fn prepare_light_tables(
+        &self,
+        runtime: &RenderRuntime<I>,
+        bundle: &Arc<LightingGpuBundle>,
+        inputs: &ExtractedLightingInputs,
+    ) -> Result<(usize, usize), LightingGpuPrepareError>
+    where
+        I::Queue: FrameSync,
+    {
+        if inputs.directional_handles.len() != inputs.directionals.len()
+            || inputs.punctual_handles.len() != inputs.punctuals.len()
+        {
+            return Err(LightingGpuPrepareError::IdentityPayloadMismatch);
+        }
+        // The bundle owns fixed-size buffers. Preserve the renderer's existing
+        // deterministic first-N admission policy before stable-slot
+        // reconciliation; compaction below may remove historical holes, but it
+        // must never rebuild more live entries than the physical buffer holds.
+        let directional_count = inputs.directionals.len().min(MAX_DIRECTIONALS);
+        let punctual_count = inputs.punctuals.len().min(MAX_PUNCTUALS);
+        let directional_handles = &inputs.directional_handles[..directional_count];
+        let directionals = &inputs.directionals[..directional_count];
+        let punctual_handles = &inputs.punctual_handles[..punctual_count];
+        let punctuals = &inputs.punctuals[..punctual_count];
+
+        let mut cache = self
+            .light_upload
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let same_bundle = cache
+            .bundle
+            .as_ref()
+            .is_some_and(|cached| Arc::ptr_eq(cached, bundle));
+        let domain = lighting_submission_domain(runtime.device_generation());
+        let reset_gpu_copy = !same_bundle
+            || cache.directionals.submission_domain() != domain
+            || cache.punctuals.submission_domain() != domain;
+        let completed = domain.completion(runtime.completed_value());
+        let expected_submission = domain
+            .submission(runtime.next_completion_value())
+            .expect("the runtime's next completion value is nonzero");
+        let (directional_count, punctual_count, token) = prepare_light_upload_transaction(
+            &mut cache,
+            domain,
+            completed,
+            reset_gpu_copy,
+            expected_submission,
+            directional_handles,
+            directionals,
+            punctual_handles,
+            punctuals,
+            || runtime.wait_idle(),
+        )?;
+        cache.bundle = Some(Arc::clone(bundle));
+        let pending = cache
+            .pending
+            .as_ref()
+            .filter(|pending| pending.token == token)
+            .expect("the prepared light upload transaction is current");
+        let directional_plan = pending.directional.clone();
+        let punctual_plan = pending.punctual.clone();
+        write_table_plan(
+            runtime.queue(),
+            bundle.directionals,
+            &cache.directionals,
+            &directional_plan,
+        );
+        write_table_plan(
+            runtime.queue(),
+            bundle.punctuals,
+            &cache.punctuals,
+            &punctual_plan,
+        );
+        Ok((directional_count, punctual_count))
+    }
+
+    /// Confirms the current table writes with the exact successful submission.
+    pub(crate) fn acknowledge_light_upload(&self, submission: SubmissionProof) {
+        let mut cache = self
+            .light_upload
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(token) = cache
+            .pending
+            .as_ref()
+            .filter(|pending| pending.expected_submission == submission)
+            .map(|pending| pending.token)
+        else {
+            return;
+        };
+        acknowledge_pending_light_uploads(&mut cache, token, submission);
     }
 
     /// Returns only the kernels admitted by the current plan.
@@ -679,52 +800,551 @@ where
 
 impl<I> Resource for LightingGpuState<I> where I: prism_render_driver::Instance + 'static {}
 
-fn upload_changed_light_values<T, Q>(
-    queue: &Q,
-    buffer: prism_render_driver::BufferId,
-    cached: &mut Vec<T>,
-    incoming: &[T],
-) where
-    T: Pod + Copy + PartialEq,
-    Q: RenderQueue,
-{
-    let ranges = dirty_light_ranges(cached, incoming);
-    for range in ranges {
-        let byte_offset = (range.start * core::mem::size_of::<T>()) as u64;
-        queue.write_buffer(buffer, byte_offset, cast_slice(&incoming[range.clone()]));
-    }
-    cached.clear();
-    cached.extend_from_slice(incoming);
+#[derive(Debug)]
+struct LightTableReconciliation {
+    removed: Vec<LightSceneHandle>,
+    insertions: usize,
 }
 
-fn dirty_light_ranges<T: PartialEq>(cached: &[T], incoming: &[T]) -> Vec<std::ops::Range<usize>> {
-    if incoming.is_empty() {
-        return Vec::new();
+fn validate_light_table_reconciliation<T>(
+    table: &IncrementalGpuTable<T>,
+    slots: &BTreeMap<LightSceneHandle, GpuTableHandle>,
+    handles: &[LightSceneHandle],
+    payloads: &[T],
+) -> Result<LightTableReconciliation, LightingGpuPrepareError>
+where
+    T: GpuTablePayload,
+{
+    if handles.len() != payloads.len() {
+        return Err(LightingGpuPrepareError::IdentityPayloadMismatch);
     }
-    let mut ranges = Vec::new();
-    let mut start = None;
-    let mut dirty_count = 0_usize;
-    for (index, value) in incoming.iter().enumerate() {
-        let changed = cached.get(index) != Some(value);
-        if changed {
-            dirty_count += 1;
+    let incoming = handles.iter().copied().collect::<BTreeSet<_>>();
+    if incoming.len() != handles.len()
+        || slots
+            .values()
+            .copied()
+            .any(|gpu_handle| table.get(gpu_handle).is_none())
+    {
+        return Err(LightingGpuPrepareError::IdentityPayloadMismatch);
+    }
+    Ok(LightTableReconciliation {
+        removed: slots
+            .keys()
+            .filter(|handle| !incoming.contains(handle))
+            .copied()
+            .collect(),
+        insertions: handles
+            .iter()
+            .filter(|handle| !slots.contains_key(handle))
+            .count(),
+    })
+}
+
+fn apply_light_table_reconciliation<T>(
+    table: &mut IncrementalGpuTable<T>,
+    slots: &mut BTreeMap<LightSceneHandle, GpuTableHandle>,
+    reconciliation: LightTableReconciliation,
+    handles: &[LightSceneHandle],
+    payloads: &[T],
+) where
+    T: GpuTablePayload + Copy,
+{
+    for handle in reconciliation.removed {
+        let gpu_handle = slots
+            .remove(&handle)
+            .expect("validated light slot must remain present until commit");
+        assert!(
+            table.retire(gpu_handle),
+            "validated light slot must remain live until commit"
+        );
+    }
+    for (&handle, &payload) in handles.iter().zip(payloads) {
+        if let Some(&gpu_handle) = slots.get(&handle) {
+            assert!(
+                table.update(gpu_handle, payload),
+                "validated light slot must remain live until commit"
+            );
+        } else {
+            slots.insert(handle, table.insert(payload));
         }
-        match (start, changed) {
-            (None, true) => start = Some(index),
-            (Some(begin), false) => {
-                ranges.push(begin..index);
-                start = None;
-            }
-            _ => {}
+    }
+}
+
+fn reconcile_light_table<T>(
+    table: &mut IncrementalGpuTable<T>,
+    slots: &mut BTreeMap<LightSceneHandle, GpuTableHandle>,
+    handles: &[LightSceneHandle],
+    payloads: &[T],
+) -> Result<(), LightingGpuPrepareError>
+where
+    T: GpuTablePayload + Copy,
+{
+    let reconciliation = validate_light_table_reconciliation(table, slots, handles, payloads)?;
+    apply_light_table_reconciliation(table, slots, reconciliation, handles, payloads);
+    Ok(())
+}
+
+fn rebuild_light_tables(
+    cache: &mut LightUploadCache,
+    domain: GpuSubmissionDomain,
+    directional_handles: &[LightSceneHandle],
+    directionals: &[LightingDirectionalInput],
+    punctual_handles: &[LightSceneHandle],
+    punctuals: &[LightingPunctualInput],
+) {
+    cache.directionals = IncrementalGpuTable::default();
+    cache.punctuals = IncrementalGpuTable::default();
+    cache.directionals.invalidate_gpu_copy(domain);
+    cache.punctuals.invalidate_gpu_copy(domain);
+    cache.directional_slots.clear();
+    cache.punctual_slots.clear();
+    for (&handle, &payload) in directional_handles.iter().zip(directionals) {
+        let gpu_handle = cache.directionals.insert(payload);
+        cache.directional_slots.insert(handle, gpu_handle);
+    }
+    for (&handle, &payload) in punctual_handles.iter().zip(punctuals) {
+        let gpu_handle = cache.punctuals.insert(payload);
+        cache.punctual_slots.insert(handle, gpu_handle);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_light_upload_transaction<F>(
+    cache: &mut LightUploadCache,
+    domain: GpuSubmissionDomain,
+    completed: CompletionProof,
+    reset_gpu_copy: bool,
+    expected_submission: SubmissionProof,
+    directional_handles: &[LightSceneHandle],
+    directionals: &[LightingDirectionalInput],
+    punctual_handles: &[LightSceneHandle],
+    punctuals: &[LightingPunctualInput],
+    wait_idle: F,
+) -> Result<(usize, usize, LightUploadToken), LightingGpuPrepareError>
+where
+    F: FnOnce() -> bool,
+{
+    assert_eq!(expected_submission.domain(), domain);
+    let directional_reconciliation = validate_light_table_reconciliation(
+        &cache.directionals,
+        &cache.directional_slots,
+        directional_handles,
+        directionals,
+    )?;
+    let punctual_reconciliation = validate_light_table_reconciliation(
+        &cache.punctuals,
+        &cache.punctual_slots,
+        punctual_handles,
+        punctuals,
+    )?;
+
+    let compact = !reset_gpu_copy
+        && (cache
+            .directionals
+            .projected_capacity_after_reclaim(completed, directional_reconciliation.insertions)
+            > MAX_DIRECTIONALS
+            || cache
+                .punctuals
+                .projected_capacity_after_reclaim(completed, punctual_reconciliation.insertions)
+                > MAX_PUNCTUALS);
+    if compact && !wait_idle() {
+        return Err(LightingGpuPrepareError::QueueCompletionUnconfirmed);
+    }
+
+    if reset_gpu_copy || compact {
+        rebuild_light_tables(
+            cache,
+            domain,
+            directional_handles,
+            directionals,
+            punctual_handles,
+            punctuals,
+        );
+    } else {
+        cache.directionals.reclaim_completed(completed);
+        cache.punctuals.reclaim_completed(completed);
+        apply_light_table_reconciliation(
+            &mut cache.directionals,
+            &mut cache.directional_slots,
+            directional_reconciliation,
+            directional_handles,
+            directionals,
+        );
+        apply_light_table_reconciliation(
+            &mut cache.punctuals,
+            &mut cache.punctual_slots,
+            punctual_reconciliation,
+            punctual_handles,
+            punctuals,
+        );
+    }
+
+    cache.next_upload_token = cache
+        .next_upload_token
+        .checked_add(1)
+        .expect("light upload token exhausted");
+    let token = LightUploadToken(cache.next_upload_token);
+    cache.pending = Some(PendingLightUpload {
+        token,
+        expected_submission,
+        directional: cache.directionals.plan_upload(),
+        punctual: cache.punctuals.plan_upload(),
+    });
+    Ok((
+        cache.directionals.capacity() as usize,
+        cache.punctuals.capacity() as usize,
+        token,
+    ))
+}
+
+fn acknowledge_pending_light_uploads(
+    cache: &mut LightUploadCache,
+    token: LightUploadToken,
+    submission: SubmissionProof,
+) -> bool {
+    let Some(pending) = cache.pending.as_ref() else {
+        return false;
+    };
+    if pending.token != token
+        || pending.expected_submission != submission
+        || !cache
+            .directionals
+            .can_acknowledge_upload(&pending.directional, submission)
+        || !cache
+            .punctuals
+            .can_acknowledge_upload(&pending.punctual, submission)
+    {
+        return false;
+    }
+
+    let pending = cache
+        .pending
+        .take()
+        .expect("validated light upload transaction must remain pending until commit");
+    assert!(cache
+        .directionals
+        .acknowledge_upload(&pending.directional, submission));
+    assert!(cache
+        .punctuals
+        .acknowledge_upload(&pending.punctual, submission));
+    true
+}
+
+#[cfg(test)]
+mod light_table_tests {
+    use super::*;
+    use prism_render_architecture::lighting::UploadPolicy;
+
+    fn canonical(slot: u32, generation: u32) -> LightSceneHandle {
+        LightSceneHandle::new(slot, generation)
+    }
+
+    fn submission(value: u64) -> SubmissionProof {
+        lighting_submission_domain(0)
+            .submission(value)
+            .expect("test submission is nonzero")
+    }
+
+    fn directional(value: f32) -> LightingDirectionalInput {
+        LightingDirectionalInput {
+            illuminance: [value, value, value],
+            ..LightingDirectionalInput::default()
         }
     }
-    if let Some(begin) = start {
-        ranges.push(begin..incoming.len());
+
+    #[test]
+    fn canonical_edits_preserve_gpu_slots_and_remove_to_neutral() {
+        let mut table = IncrementalGpuTable::new(UploadPolicy::default()).unwrap();
+        let mut slots = BTreeMap::new();
+        let first = canonical(10, 1);
+        let second = canonical(11, 1);
+        reconcile_light_table(
+            &mut table,
+            &mut slots,
+            &[first, second],
+            &[directional(1.0), directional(2.0)],
+        )
+        .unwrap();
+        let first_gpu = slots[&first];
+        let second_gpu = slots[&second];
+        assert_eq!((first_gpu.slot(), second_gpu.slot()), (0, 1));
+
+        let initial = table.plan_upload();
+        assert_eq!(initial.ranges()[0].elements, 0..2);
+        assert!(table.acknowledge_upload(&initial, submission(1)));
+        reconcile_light_table(
+            &mut table,
+            &mut slots,
+            &[first, second],
+            &[directional(1.0), directional(3.0)],
+        )
+        .unwrap();
+        let update = table.plan_upload();
+        assert_eq!(update.ranges()[0].elements, 1..2);
+        assert!(table.acknowledge_upload(&update, submission(2)));
+
+        reconcile_light_table(&mut table, &mut slots, &[second], &[directional(3.0)]).unwrap();
+        assert!(!slots.contains_key(&first));
+        assert_eq!(table.live_len(), 1);
+        assert_eq!(
+            table.payloads()[first_gpu.slot() as usize],
+            LightingDirectionalInput::default()
+        );
+        assert_eq!(slots[&second], second_gpu);
     }
-    if ranges.len() >= 64 || dirty_count * 5 >= incoming.len() * 3 {
-        return vec![0..incoming.len()];
+
+    #[test]
+    fn malformed_identity_payload_pairs_are_rejected_atomically() {
+        let mut table = IncrementalGpuTable::default();
+        let mut slots = BTreeMap::new();
+        let handle = canonical(3, 1);
+        assert_eq!(
+            reconcile_light_table(&mut table, &mut slots, &[handle], &[]),
+            Err(LightingGpuPrepareError::IdentityPayloadMismatch)
+        );
+        assert_eq!(table.live_len(), 0);
+        assert_eq!(
+            reconcile_light_table(
+                &mut table,
+                &mut slots,
+                &[handle, handle],
+                &[directional(1.0), directional(2.0)],
+            ),
+            Err(LightingGpuPrepareError::IdentityPayloadMismatch)
+        );
+        assert_eq!(table.live_len(), 0);
     }
-    ranges
+
+    #[test]
+    fn malformed_second_table_does_not_mutate_the_first_table() {
+        let mut cache = LightUploadCache::default();
+        let directional_handle = canonical(10, 1);
+        let punctual_handle = canonical(11, 1);
+        let result = prepare_light_upload_transaction(
+            &mut cache,
+            lighting_submission_domain(0),
+            lighting_submission_domain(0).completion(0),
+            false,
+            submission(1),
+            &[directional_handle],
+            &[directional(1.0)],
+            &[punctual_handle],
+            &[],
+            || panic!("malformed input must fail before compaction"),
+        );
+        assert_eq!(
+            result,
+            Err(LightingGpuPrepareError::IdentityPayloadMismatch)
+        );
+        assert!(cache.directional_slots.is_empty());
+        assert!(cache.punctual_slots.is_empty());
+        assert_eq!(cache.directionals.capacity(), 0);
+        assert_eq!(cache.punctuals.capacity(), 0);
+    }
+
+    #[test]
+    fn light_upload_acknowledgement_is_all_or_nothing_when_one_table_rejects() {
+        let mut cache = LightUploadCache::default();
+        cache.directionals.insert(directional(1.0));
+        cache.punctuals.insert(LightingPunctualInput::default());
+        let directional = cache.directionals.plan_upload();
+        let punctual = cache.punctuals.plan_upload();
+        let token = LightUploadToken(1);
+        cache.pending = Some(PendingLightUpload {
+            token,
+            expected_submission: submission(1),
+            directional,
+            punctual,
+        });
+
+        cache
+            .punctuals
+            .invalidate_gpu_copy(GpuSubmissionDomain::new(1, LIGHTING_QUEUE_DOMAIN));
+        assert!(!acknowledge_pending_light_uploads(
+            &mut cache,
+            token,
+            submission(1)
+        ));
+
+        assert!(cache.pending.is_some());
+        assert!(!cache.directionals.plan_upload().is_empty());
+        assert!(!cache.punctuals.plan_upload().is_empty());
+    }
+
+    #[test]
+    fn acknowledgement_validates_both_tables_before_committing_either() {
+        let mut cache = LightUploadCache::default();
+        cache.directionals.insert(directional(1.0));
+        cache.punctuals.insert(LightingPunctualInput::default());
+        let token = LightUploadToken(1);
+        cache.pending = Some(PendingLightUpload {
+            token,
+            expected_submission: submission(1),
+            directional: cache.directionals.plan_upload(),
+            punctual: cache.punctuals.plan_upload(),
+        });
+        cache
+            .punctuals
+            .invalidate_gpu_copy(GpuSubmissionDomain::new(1, LIGHTING_QUEUE_DOMAIN));
+
+        assert!(!acknowledge_pending_light_uploads(
+            &mut cache,
+            token,
+            submission(1)
+        ));
+        assert!(!cache.directionals.plan_upload().is_empty());
+        assert!(cache.pending.is_some());
+    }
+
+    #[test]
+    fn old_submission_cannot_acknowledge_a_new_upload_token() {
+        let mut cache = LightUploadCache::default();
+        cache.directionals.insert(directional(1.0));
+        let first = cache.directionals.plan_upload();
+        cache.pending = Some(PendingLightUpload {
+            token: LightUploadToken(1),
+            expected_submission: submission(1),
+            directional: first,
+            punctual: cache.punctuals.plan_upload(),
+        });
+        cache.pending = Some(PendingLightUpload {
+            token: LightUploadToken(2),
+            expected_submission: submission(1),
+            directional: cache.directionals.plan_upload(),
+            punctual: cache.punctuals.plan_upload(),
+        });
+
+        assert!(
+            acknowledge_pending_light_uploads(&mut cache, LightUploadToken(1), submission(1))
+                == false
+        );
+        assert!(cache.pending.is_some());
+        assert!(!cache.directionals.plan_upload().is_empty());
+    }
+
+    #[test]
+    fn compaction_wait_failure_keeps_both_tables_and_slot_maps_unchanged() {
+        let mut cache = LightUploadCache::default();
+        let old_directional_handles = (0..MAX_DIRECTIONALS)
+            .map(|index| canonical(index as u32, 1))
+            .collect::<Vec<_>>();
+        let old_punctual_handles = (MAX_DIRECTIONALS..MAX_PUNCTUALS * 2)
+            .map(|index| canonical(index as u32, 1))
+            .collect::<Vec<_>>();
+        let directional_payloads = vec![directional(1.0); MAX_DIRECTIONALS];
+        let punctual_payloads = vec![LightingPunctualInput::default(); MAX_PUNCTUALS];
+        reconcile_light_table(
+            &mut cache.directionals,
+            &mut cache.directional_slots,
+            &old_directional_handles,
+            &directional_payloads,
+        )
+        .unwrap();
+        reconcile_light_table(
+            &mut cache.punctuals,
+            &mut cache.punctual_slots,
+            &old_punctual_handles,
+            &punctual_payloads,
+        )
+        .unwrap();
+        let new_directional = canonical(10_000, 1);
+        let new_punctual = canonical(20_000, 1);
+        let result = prepare_light_upload_transaction(
+            &mut cache,
+            lighting_submission_domain(0),
+            lighting_submission_domain(0).completion(0),
+            false,
+            submission(1),
+            &[new_directional],
+            &[directional(2.0)],
+            &[new_punctual],
+            &[LightingPunctualInput::default()],
+            || false,
+        );
+        assert_eq!(
+            result,
+            Err(LightingGpuPrepareError::QueueCompletionUnconfirmed)
+        );
+        assert_eq!(cache.directionals.capacity() as usize, MAX_DIRECTIONALS);
+        assert_eq!(cache.punctuals.capacity() as usize, MAX_PUNCTUALS);
+        assert!(cache
+            .directional_slots
+            .contains_key(&old_directional_handles[0]));
+        assert!(cache.punctual_slots.contains_key(&old_punctual_handles[0]));
+        assert!(!cache.directional_slots.contains_key(&new_directional));
+        assert!(!cache.punctual_slots.contains_key(&new_punctual));
+    }
+
+    #[test]
+    fn empty_table_recovery_stages_an_empty_rebuild_transaction() {
+        let mut cache = LightUploadCache::default();
+        let (_, _, token) = prepare_light_upload_transaction(
+            &mut cache,
+            lighting_submission_domain(1),
+            lighting_submission_domain(1).completion(0),
+            true,
+            lighting_submission_domain(1).submission(1).unwrap(),
+            &[],
+            &[],
+            &[],
+            &[],
+            || panic!("recovery must not wait for idle"),
+        )
+        .unwrap();
+        let pending = cache.pending.as_ref().unwrap();
+        assert!(pending.directional.is_empty());
+        assert!(pending.punctual.is_empty());
+        assert!(acknowledge_pending_light_uploads(
+            &mut cache,
+            token,
+            lighting_submission_domain(1).submission(1).unwrap(),
+        ));
+        assert!(cache.pending.is_none());
+    }
+
+    #[test]
+    fn replacing_pending_plans_after_a_skipped_submit_preserves_dirty_work() {
+        let mut cache = LightUploadCache::default();
+        cache.directionals.insert(directional(1.0));
+        cache.pending = Some(PendingLightUpload {
+            token: LightUploadToken(1),
+            expected_submission: submission(1),
+            directional: cache.directionals.plan_upload(),
+            punctual: cache.punctuals.plan_upload(),
+        });
+        cache.pending = Some(PendingLightUpload {
+            token: LightUploadToken(2),
+            expected_submission: submission(1),
+            directional: cache.directionals.plan_upload(),
+            punctual: cache.punctuals.plan_upload(),
+        });
+
+        assert!(!acknowledge_pending_light_uploads(
+            &mut cache,
+            LightUploadToken(1),
+            submission(1),
+        ));
+        assert!(cache.pending.is_some());
+        assert!(!cache.directionals.plan_upload().is_empty());
+    }
+}
+
+fn write_table_plan<T, Q>(
+    queue: &Q,
+    buffer: prism_render_driver::BufferId,
+    table: &IncrementalGpuTable<T>,
+    plan: &UploadPlan,
+) where
+    T: GpuTablePayload,
+    Q: RenderQueue,
+{
+    for range in plan.ranges() {
+        let bytes = table
+            .payload_bytes(range.elements.clone())
+            .expect("upload plan range must be within the table payload");
+        debug_assert_eq!(bytes.len() as u64, range.byte_len);
+        queue.write_buffer(buffer, range.byte_offset, bytes);
+    }
 }
 
 fn storage_layout(binding: u32, min_binding_size: u64, read_only: bool) -> BindGroupLayoutEntry {
@@ -737,42 +1357,6 @@ fn storage_layout(binding: u32, min_binding_size: u64, read_only: bool) -> BindG
             min_binding_size: Some(min_binding_size),
         },
         count: None,
-    }
-}
-
-#[cfg(test)]
-mod light_upload_tests {
-    use super::{dirty_light_ranges, LightingDirectionalInput};
-
-    #[test]
-    fn unchanged_light_table_produces_no_upload_ranges() {
-        let values = [LightingDirectionalInput::default(); 4];
-        assert!(dirty_light_ranges(&values, &values).is_empty());
-    }
-
-    #[test]
-    fn sparse_light_edits_coalesce_adjacent_ranges_only() {
-        let old = [LightingDirectionalInput::default(); 8];
-        let mut new = old;
-        new[2].visibility = 0.5;
-        new[3].visibility = 0.25;
-        new[7].visibility = 0.75;
-        assert_eq!(dirty_light_ranges(&old, &new), vec![2..4, 7..8]);
-    }
-
-    #[test]
-    fn growth_uploads_only_new_slots_while_dense_changes_use_one_full_range() {
-        let old = [LightingDirectionalInput::default(); 2];
-        let grown = [LightingDirectionalInput::default(); 4];
-        assert_eq!(dirty_light_ranges(&old, &grown), vec![2..4]);
-        let mut dense = [LightingDirectionalInput::default(); 10];
-        for value in &mut dense[..6] {
-            value.visibility = 0.5;
-        }
-        assert_eq!(
-            dirty_light_ranges(&[LightingDirectionalInput::default(); 10], &dense),
-            vec![0..10]
-        );
     }
 }
 

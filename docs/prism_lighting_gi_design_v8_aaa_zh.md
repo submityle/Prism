@@ -897,9 +897,10 @@ v3.1 中的指标保留为候选 benchmark，不再是无条件产品承诺：
 ### 22.2 当前工作树候选，尚需完整集成证明
 
 - app 侧已存在 Directional/Point/Spot canonical payload、增量上传和真实 submission receipt 接线。
-- directional 与 punctual pending upload 正在拆分为独立 acknowledge，避免一张表失败污染另一张表。
+- directional 与 punctual stable upload 已统一为双表事务：prepare 先完成双侧校验、容量预测和必要的 wait-idle，再改变任一表；ack 先验证两侧 plan、domain、epoch、revision 与 submission，再统一确认。
+- upload transaction 已绑定单调 token，迟到的旧 submission 不会确认后续 frame 的 pending plan；compaction 失败保持两张表和两套 canonical-slot map 不变。
 - per-emitter rejection、有效灯保留和旧 Bevy lighting authority 删除正在并行迁移。
-- 这些改动仍需定向测试、真实 GPU、HDR 输出和精确 diff 审核后才能作为合并能力声明。
+- 事务边界已补充应用层定向测试；受当前工作树物理模块编译和宿主磁盘容量影响，完整 app 编译、真实 GPU、HDR 输出和精确 diff 审核仍不能作为已完成声明。
 
 ### 22.3 关键未闭环
 
