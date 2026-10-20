@@ -509,6 +509,62 @@ fn despawn_releases_shared_reference_and_recycles_slot() {
 }
 
 #[test]
+fn evicted_shared_archetypes_reclaim_table_component_postings() {
+    let mut w = World::new();
+    let live = w.spawn((Position(-1), BatchKey(u32::MAX)));
+    let live_archetype = archetype_of(&w, live);
+    let state = w.query::<(Entity, &Position)>();
+    assert_eq!(state.iter(&w).count(), 1);
+
+    let position = cid::<Position>(&w);
+
+    for value in 0..128_i32 {
+        // One shared value can bind several table-set variants. The active
+        // value deliberately shares `Position`, so eviction must remove only
+        // the stale archetypes from that posting.
+        let first = w.spawn((Position(value), BatchKey(value as u32)));
+        let second = w.spawn((Position(value), Velocity(value), BatchKey(value as u32)));
+        let velocity = cid::<Velocity>(&w);
+        let first_archetype = archetype_of(&w, first);
+        let second_archetype = archetype_of(&w, second);
+
+        assert_eq!(
+            state.iter(&w).count(),
+            3,
+            "the query cache sees both variants"
+        );
+        for id in [first_archetype, second_archetype] {
+            assert!(w.archetypes.with_component(position).contains(&id));
+            assert!(state.matched_archetypes(&w).contains(&id));
+        }
+
+        assert!(w.despawn(first));
+        assert!(w.despawn(second));
+
+        let position_posting = w.archetypes.with_component(position);
+        assert!(position_posting.contains(&live_archetype));
+        assert!(!position_posting.contains(&first_archetype));
+        assert!(!position_posting.contains(&second_archetype));
+        assert!(position_posting.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(
+            w.archetypes.with_component(velocity).is_empty(),
+            "repeated churn must not accumulate stale postings for variant-only columns"
+        );
+        for id in [first_archetype, second_archetype] {
+            assert!(
+                w.archetypes.get(id).is_some_and(|arch| arch.is_empty()),
+                "the tombstone remains addressable so ArchetypeIds stay stable"
+            );
+            assert!(
+                state.matched_archetypes(&w).contains(&id),
+                "a warmed QueryState may retain the stable empty archetype id"
+            );
+        }
+        assert_eq!(state.iter(&w).count(), 1, "cached tombstones yield no rows");
+    }
+}
+
+#[test]
 fn changing_shared_value_rebalances_refcounts() {
     let mut w = World::new();
     let a = w.spawn((Position(1), BatchKey(10)));

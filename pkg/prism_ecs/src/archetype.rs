@@ -533,10 +533,11 @@ impl ArchetypeKey {
 pub struct Archetypes {
     archetypes: Vec<Archetype>,
     by_key: HashMap<ArchetypeKey, ArchetypeId>,
-    /// Inverted table-column index. Each posting list is append-only and
-    /// ordered by `ArchetypeId`, matching the registry's stable insertion
-    /// order. Dirty-query fallback uses it to avoid testing every matched
-    /// archetype for every accessed table column.
+    /// Inverted table-column index. Each posting list is ordered by
+    /// `ArchetypeId`, matching the registry's stable insertion order. Entries
+    /// are removed when a shared-value archetype is permanently evicted.
+    /// Dirty-query fallback uses it to avoid testing every matched archetype
+    /// for every accessed table column.
     by_component: HashMap<ComponentId, Vec<ArchetypeId>>,
     column_journal: Arc<ColumnJournal>,
 }
@@ -609,9 +610,10 @@ impl Archetypes {
     }
 
     /// Archetypes whose table component set contains `component`, in stable
-    /// ascending id order. The returned index includes empty archetypes and
-    /// shared-value variants; callers must still apply their query match and
-    /// live-row checks.
+    /// ascending id order. The returned index includes empty archetypes that
+    /// remain addressable by key and shared-value variants, but excludes
+    /// permanently evicted tombstones. Callers must still apply their query
+    /// match and live-row checks.
     #[inline]
     pub(crate) fn with_component(&self, component: ComponentId) -> &[ArchetypeId] {
         self.by_component
@@ -721,16 +723,50 @@ impl Archetypes {
     /// [`EntityLocation`](crate::entity::EntityLocation).
     pub fn evict_shared_binding(&mut self, cid: ComponentId, sid: SharedValueId) {
         let Self {
-            archetypes, by_key, ..
+            archetypes,
+            by_key,
+            by_component,
+            ..
         } = self;
+        let mut evicted = Vec::new();
         by_key.retain(|_key, id| {
             let arch = &archetypes[id.index() as usize];
-            !(arch.is_empty()
+            let should_evict = arch.is_empty()
                 && arch
                     .shared_bindings()
                     .iter()
-                    .any(|&(c, s, _)| c == cid && s == sid))
+                    .any(|&(c, s, _)| c == cid && s == sid);
+            if should_evict {
+                evicted.push(*id);
+            }
+            !should_evict
         });
+
+        if evicted.is_empty() {
+            return;
+        }
+
+        // Keep stable ArchetypeIds in `archetypes`, but reclaim their inverted
+        // index entries. Batch affected components so each posting is filtered
+        // once even when one shared value had many table-set variants.
+        evicted.sort_unstable();
+        let mut affected_components = Vec::new();
+        for &id in &evicted {
+            affected_components.extend_from_slice(archetypes[id.index() as usize].components.ids());
+        }
+        affected_components.sort_unstable();
+        affected_components.dedup();
+        for component in affected_components {
+            let remove_entry = if let Some(postings) = by_component.get_mut(&component) {
+                postings.retain(|id| evicted.binary_search(id).is_err());
+                postings.is_empty()
+            } else {
+                false
+            };
+            if remove_entry {
+                by_component.remove(&component);
+            }
+        }
     }
 
     fn insert(
