@@ -69,6 +69,8 @@ mod scatter_persist_tests;
 mod asset_container_provider;
 #[cfg(feature = "std")]
 mod file_provider;
+#[cfg(feature = "gpu_proxy")]
+mod gpu_proxy_cell_host;
 #[cfg(feature = "std")]
 mod io_adapter;
 #[cfg(feature = "tasks")]
@@ -88,6 +90,8 @@ mod threaded_cell_io;
 mod asset_container_provider_tests;
 #[cfg(all(test, feature = "std"))]
 mod file_provider_tests;
+#[cfg(all(test, feature = "gpu_proxy"))]
+mod gpu_proxy_cell_host_tests;
 #[cfg(all(test, feature = "tasks"))]
 mod priority_cell_io_tests;
 #[cfg(all(test, feature = "proxy_host"))]
@@ -107,6 +111,8 @@ pub use asset_container_provider::{
 };
 #[cfg(feature = "std")]
 pub use file_provider::FileCellProvider;
+#[cfg(feature = "gpu_proxy")]
+pub use gpu_proxy_cell_host::{GpuProxyCellHost, GpuProxyCellHostError};
 #[cfg(feature = "std")]
 pub use io_adapter::{IoAdapterEvent, IoByteLimits, IoRequestId, IoSchedulerAdapter};
 #[cfg(feature = "tasks")]
