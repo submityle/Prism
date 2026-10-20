@@ -1,0 +1,26 @@
+[package]
+name = "prism_editor_app"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96.0"
+description = "Headless and window-independent assembly of the Prism editor kernel and panel data layers."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+prism_editor_core = { path = "../prism_editor_core" }
+prism_editor_panels = { path = "../prism_editor_panels" }
+prism_editor_content = { path = "../prism_editor_content" }
+prism_editor_viewport = { path = "../prism_editor_viewport" }
+prism_editor_profiler = { path = "../prism_editor_profiler" }
+prism_editor_ui = { path = "../prism_editor_ui" }
+prism_editor_dock = { path = "../prism_editor_dock" }
+prism_editor_reflect = { path = "../prism_editor_reflect" }
+prism_editor_shell = { path = "../prism_editor_shell" }
+prism_app = { path = "../prism_app", default-features = false, features = ["std"] }
+prism_ecs = { path = "../prism_ecs", default-features = false, features = ["std"] }
+prism_reflect = { path = "../prism_reflect" }
+prism_ui = { path = "../prism_ui" }
+
+[lints]
+workspace = true

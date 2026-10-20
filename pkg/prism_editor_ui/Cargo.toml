@@ -1,0 +1,30 @@
+[package]
+name = "prism_editor_ui"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96.0"
+description = "Loom Element assembly for the renderer-independent Prism editor shell and panels."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+prism_ui = { path = "../prism_ui" }
+prism_ui_component = { path = "../prism_ui_component" }
+prism_ui_component_kit = { path = "../prism_ui_component_kit" }
+prism_editor_core = { path = "../prism_editor_core" }
+prism_editor_panels = { path = "../prism_editor_panels" }
+prism_editor_reflect = { path = "../prism_editor_reflect" }
+prism_editor_shell = { path = "../prism_editor_shell" }
+prism_editor_dock = { path = "../prism_editor_dock" }
+prism_editor_viewport = { path = "../prism_editor_viewport" }
+prism_reflect = { path = "../prism_reflect" }
+
+[lints.rust]
+missing_docs = "deny"
+unsafe_code = "deny"
+unused_qualifications = "warn"
+
+[lints.clippy]
+type_complexity = "allow"
+too_many_arguments = "allow"
+semicolon_if_nothing_returned = "warn"

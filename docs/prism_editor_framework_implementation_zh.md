@@ -66,7 +66,7 @@ CARGO_TARGET_DIR=/private/tmp/prism-editor-core-target cargo test -p prism_edito
 - 层级分组、连线删除、节点删除和索引一致性维护。
 - 稳定拓扑排序、显式 cycle 错误和回调式确定性评估。
 
-### E5 运行时同步协议基础
+### E5 运行时同步协议与 PIE
 
 `pkg/prism_editor_remote` 已完成并通过 10 个测试：
 
@@ -74,7 +74,9 @@ CARGO_TARGET_DIR=/private/tmp/prism-editor-core-target cargo test -p prism_edito
 - Snapshot、incremental changes、revision conflict 和 history retention。
 - 有界确定性二进制 codec，拒绝 trailing bytes 并在分配前执行解码限额。
 - 客户端副本从 snapshot 到增量 commit 的收敛流程。
-- 该 crate 不实现 BRP，不依赖 `bevy_*`；BRP adapter 仍需在上层实现。
+- `jsonrpc` 模块提供有界 JSON-RPC 2.0 请求/响应/通知/批量解析、能力协商、BRP 风格 snapshot/change/apply/subscribe 方法和断档重同步通知；27 个测试通过。
+- `pie` 模块隔离编辑快照与运行快照，保留有序运行日志，并以显式 Rollback/Commit 返回结果；提交需再次经过编辑版本检查。
+- 该 crate 不依赖 `bevy_*`，也不假装提供 socket/进程管理或真实 `bevy_remote` transport；当前交付的是可接入实际 transport 的协议和隔离内核。
 
 ### E6 视口交互契约基础
 
@@ -100,7 +102,8 @@ CARGO_TARGET_DIR=/private/tmp/prism-editor-core-target cargo test -p prism_edito
 
 - `pkg/prism_editor_dock`：面板贡献映射、实例生命周期、工作区布局校验、Primary → LastGood → Default 恢复和有界双流持久化，9 个测试通过。
 - `pkg/prism_editor_shell`：命令面板索引/搜索、上下文键位与冲突检测、菜单/工具栏/状态栏贡献聚合，7 个测试通过。
-- 两者都不实现 Loom 控件渲染；最终 UI 装配仍待 `prism_ui`/Loom 应用层接入。
+- `pkg/prism_editor_ui` 已完成 Loom `Element` 装配：Shell chrome、命令面板、Outliner、Console、Inspector、Dock workspace、Viewport host 和完整 workspace；动态列表有硬上限，节点使用稳定 key。
+- `pkg/prism_editor_app` 的 `EditorApplication::workspace()` 已把这些 Element 与编辑器模型组合起来；该入口仍是无窗口、renderer-independent 的装配层。
 
 ### E9 分析器数据层
 
@@ -110,14 +113,31 @@ CARGO_TARGET_DIR=/private/tmp/prism-editor-core-target cargo test -p prism_edito
 - 内存预算样本/告警及结构化可视日志轨道投影。
 - 不连接 Tracy、GPU 或真实运行时采集；这些仍由诊断适配层提供。
 
+### E11 域装配契约
+
+`pkg/prism_editor_domains` 已完成通用域注册与生命周期层：
+
+- Domain/Capability/Contribution/Profile 的稳定 ID、版本范围匹配和能力冲突检测。
+- 面板、命令、图节点、时间线和校验器贡献契约。
+- 依赖优先启动、依赖者优先停止、确定性诊断和拓扑排序；13 个测试通过。
+- 该 crate 只提供域装配契约，不把 VFX、动画、地形、音频或物理业务规则写进通用编辑器。
+
+### E12 协同与无头应用
+
+`pkg/prism_editor_collab` 与 `pkg/prism_editor_app` 已完成第一批可验证能力：
+
+- 协同层提供 HLC/Lamport 时钟、命令 envelope、因果排序、去重、有限历史、字段级 LWW/tombstone、Presence 和 soft-lock；13 个测试通过。
+- 应用层提供有界 headless runner、确定性 snapshot/checksum、`prism_app` Update system 集成和 workspace 组合；4 个应用测试通过。
+- 当前没有宣称网络服务器、真实多人 transport、操作系统窗口或 GPU 视口已交付。
+
 ## 当前未交付
 
 以下项目仍以代码和测试为准，不能仅因设计文档存在就视为完成：
 
-- 反射 Inspector 到 Loom 控件的最终渲染适配。
-- Loom 核心面板、BRP adapter 和 PIE。
-- GPU 视口渲染、实际拾取/Gizmo 绘制、内容浏览器 UI、大世界编辑器 UI。
-- 域编辑器、协同和无头编辑器应用。
+- 真实 BRP/bevy_remote transport、跨进程连接和运行时进程管理。
+- GPU 视口后端、ID-buffer picking、实际 Gizmo/debug drawing、相机/网格 render target 和多 viewport GPU 提交。
+- 内容浏览器 UI、大世界编辑器 UI，以及各具体域编辑器的业务贡献。
+- 真实多人网络 transport、权限/服务器仲裁和操作系统窗口生命周期。
 
 ## 不变约束
 
