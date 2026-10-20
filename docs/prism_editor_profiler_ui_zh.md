@@ -5,10 +5,10 @@
 面板消费采集完成后插入的 `FrameStore`，输出标准 `Element`，不依赖 Bevy。
 帧图资源预览、内存预算面板和 native app 循环属于其他切片。
 
-## 公共集成增量（main 所有）
+## 公共集成（2026-10-21 已合入）
 
 本切片只新增 `profiler.rs`、`profiler_view.rs`、两个测试与本文档。
-`pkg/prism_editor_ui/Cargo.toml` 需要 main 合入以下增量，保留现有配置：
+`pkg/prism_editor_ui/Cargo.toml` 已合入以下配置：
 
 ```toml
 [dependencies]
@@ -144,7 +144,7 @@ parent 深度计算使用迭代方式。build 扫描可见轨道中的跨度，�
 - 像素证据来自 Loom RetainedScene 的 CPU 参考栅格；GPU 证据来自真实采集
   query/readback。这里不声明 native 窗口或 GPU UI renderer 挂接已经完成。
 
-main 合入公共导出和依赖后，可在其验证 target 中复跑：
+公共导出和依赖已合入主仓库；2026-10-21 默认 features 的 UI 全 targets 76 项通过，其中 profiler_panel 8 项；同范围 strict Clippy 通过。可复跑：
 
 ```sh
 cargo test -p prism_editor_ui --test profiler_panel
@@ -152,5 +152,4 @@ PRISM_REQUIRE_GPU=1 cargo test -p prism_editor_ui --features profiler-gpu-tests 
 cargo clippy -p prism_editor_ui --lib --test profiler_panel --features profiler-gpu-tests --test profiler_gpu_panel -- -D warnings
 ```
 
-剩余集成是 main 的公共导出/依赖与 native app 的 dock 贡献、采集快照发布、
-实际布局命中和事件转交；本切片没有改 app、全局设计文档或其他面板。
+剩余集成是 native app 的 dock 贡献、采集快照发布、实际布局命中和事件转交；公共导出/依赖已完成。上述历史 GPU 验证来自独立 harness，不能代替后续原生应用验收。

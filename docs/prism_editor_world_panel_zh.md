@@ -2,9 +2,9 @@
 
 本切片提供 `prism_editor_ui` 的真实 world 控制器、Loom Element 子树和交互测试。控制器持有 `EditorWorldData`，直接更新选择、数据层可见性/可编辑性、租约和 opaque cell bytes；加载、卸载、保存和跨 cell 发布通过有界队列交给宿主执行。入队不代表加载完成或保存成功。
 
-## main 集成
+## main 集成（2026-10-21 已完成）
 
-本切片仅写 `src/world.rs`、`src/world_view.rs`、`tests/world_panel.rs` 和本文。UI crate 的 `lib.rs`、`Cargo.toml` 由 main 集成。
+本切片实现 `src/world.rs`、`src/world_view.rs`、`tests/world_panel.rs`。UI crate 的 `lib.rs`、`Cargo.toml` 已由主线程集成，并在真实主仓库 UI 全 targets 76 项测试中通过全部 8 项 world_panel 回归；严格 Clippy 同时通过。以下保留所需集成 API，实际 feature 配置以 Cargo.toml 为准。
 
 `pkg/prism_editor_ui/src/lib.rs` 增加：
 

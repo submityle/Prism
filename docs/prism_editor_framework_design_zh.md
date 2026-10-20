@@ -20,7 +20,7 @@
 > **非目标(与引擎文档一致)**:纯经典数值与确定性工具链,**不含 AI / ML / 神经网络 / LLM** 功能;
 > 不以替代专业 DCC(Maya/Houdini/Substance)为目标,而以**无缝往返 + 引擎内权威编辑**为目标。
 
-- 版本: v2.2(2026-10-20：同步进程桥/协同/UI action/应用生命周期/世界执行层/视口 GPU 的验证边界；v2.1 地基闸门；v2.0 AAA 设计)
+- 版本: v2.3(2026-10-21：时间轴命令/文档/播放/UI、真实 ECS、world 事务和 profiler 采集/面板；v2.2 集成闸门；v2.0 AAA 设计)
 - 适用引擎: Prism 原生 ECS / 反射 / 应用 / Loom / RHI 体系
 - 关键地基 — 已就绪(SHIPPED,`pkg/prism_*`): `prism_ui*`(响应/树/布局/样式/后端/调度/虚拟化/输入)、`prism_ui_inspector`、
   `prism_ui_timetravel`、`prism_ui_workbench`、`prism_ui_hotreload`、`prism_ui_ecs`、`prism_ui_overlay`、
@@ -184,7 +184,7 @@ pub trait Command: Send {
 - `EditorModule` trait:一个模块 = 一组贡献 + 生命周期;卸载时 `Disposables` 自动回收,防泄漏。
 
 ### 4.6 运行时协议(D4,详见随文各处)
-- `prism_editor_remote` 封装 BRP 风格 JSON-RPC 2.0、PIE 隔离内核、有界 TCP 和受控子进程 stdio/TCP 桥；支持启动/取消/超时/重启/退出诊断。**引擎专属 adapter 与实际场景运行时仍需接入**；附带 loopback fixture 不冒充引擎实现。
+- `prism_editor_remote` 封装 BRP 风格 JSON-RPC 2.0、PIE 隔离内核、有界 TCP 和受控子进程 stdio/TCP 桥；支持启动/取消/超时/重启/退出诊断。`ecs` feature 已接入真实 Prism World 反射、快照/差分和已有组件原子批写；结构编辑与生产场景运行时挂载仍需完成。现有 adapter 每次扫描 World，不将协议差分视为增量读取性能证据。
 - Inspector 直接吃 BRP 的反射数据,**本地无需链接游戏逻辑 crate**;变更回传经命令→BRP。
 
 ---
@@ -201,7 +201,7 @@ pub trait Command: Send {
 ---
 
 ## 6. 大世界编辑:World Partition / 数据层 / HLOD / OFPA(D8)
-> crate: `prism_editor_world`；元数据/异步 provider 执行、版本化 cell 文件持久化及恢复、payload/dirty/租约保护和 OFPA/HLOD 计划已交付；actor 写盘执行、跨 cell/OFPA 事务、烘焙和 UI 仍待接入。
+> crate: `prism_editor_world`；版本化 cell/actor 真实存储、payload/dirty/租约、跨 cell/OFPA version-root 事务和故障恢复已交付。Loom world 面板已接入真实模型及 provider receipt；HLOD 烘焙/渲染、项目 membership codec 和原生宿主挂载仍需完成。事务目前复制完整有界 generation，尚无大世界吞吐证据。
 
 借鉴 Unreal World Partition / Frostbite 大世界:
 
@@ -252,7 +252,7 @@ pub trait Command: Send {
 **通用节点图内核**(`prism_editor_graph`):端口/连线/框选/对齐/折叠分组/子图;大图**虚拟化 + 视口裁剪**;
 连线即命令;渲染走保留绘制流。材质/VFX/动画状态机/行为树/几何节点**共用**此内核,只换节点贡献集(D3)。
 **通用时间线内核**(`prism_editor_timeline`):多轨 + 关键帧 + 曲线编辑器(复用 `prism_ui_anim` 曲线/弹簧,SHIPPED)+
-轨道虚拟化;序列器/动画/VFX 时间轴共用。
+轨道虚拟化;序列器/动画/VFX 时间轴共用。2026-10-21 已实现有界逆命令历史、确定性命令/完整文档 codec、显式 Hermite 切线、真实 Loom 作者面板、Once/Loop/有理数速率播放与借用事件派发。主仓库时间轴 37 项及 timeline UI 9 项通过；原生拖拽、切线手柄、子序列/相机/音频运行时适配继续实施，见 `prism_editor_timeline_authoring_zh.md`。
 
 ---
 
@@ -371,16 +371,16 @@ pub trait Command: Send {
 | `prism_editor_shell` | 外壳装配:活动栏/侧栏/命令面板/菜单/工具栏/状态栏/键位/主题 | ✅ 数据层已交付 |
 | `prism_editor_panels` | Inspector / Outliner / Content / Console 等通用面板 | ✅ 数据层已交付 |
 | `prism_editor_viewport` | 多视口、GPU 拾取、虚拟几何/GI 预览、高级 Gizmo、瓦片重绘 | 🟡 增量 ID 提交/geometry/depth/真实 target/单点读回/GPU 框选归约/屏幕轴命中已交付，引擎预览和原生 Gizmo 回写待接 |
-| `prism_editor_world` | World Partition 流送、数据层、HLOD、OFPA、层级实例 | 🟡 异步 provider/版本化 cell 文件存储及恢复/dirty/租约/计划已交付，actor 写盘/跨 cell 事务/烘焙/UI 待接 |
+| `prism_editor_world` | World Partition 流送、数据层、HLOD、OFPA、层级实例 | 🟡 cell/actor 文件、跨 cell/OFPA 事务/恢复、dirty/租约和 Loom 网格已验证；HLOD 烘焙/原生挂载/规模性能待验收 |
 | `prism_editor_graph` | 通用节点图内核(材质/VFX/动画/行为树/几何节点) | ✅ 通用内核已交付 |
-| `prism_editor_timeline` | 通用时间线/序列器/关键帧曲线 | ✅ 通用内核已交付 |
+| `prism_editor_timeline` | 通用时间线/序列器/关键帧曲线 | 🟡 有界原子作者命令、Hermite、命令/完整文档 codec、真实播放与 Loom 面板已验证；原生手势/子序列/具体域轨道待完成 |
 | `prism_editor_domains` | 各域编辑器装配(挂接子系统) | ✅ 装配契约已交付，具体域待接入 |
-| `prism_editor_profiler` | 帧分析器、帧图调试、内存预算、Gameplay Debugger、可视日志 | 🟡 数据层已交付，真实采集待接入 |
+| `prism_editor_profiler` | 帧分析器、帧图调试、内存预算、Gameplay Debugger、可视日志 | 🟡 真实 Instant/wgpu timestamp producer 与 Loom CPU/GPU 面板已验证；原生挂载、Tracy/帧图资源预览待完成 |
 | `prism_editor_content` | 内容浏览器、依赖图、校验、导入导出、cook/构建、版本控制 | 🟡 目录/末项续查分页/有界缓存与诊断/增量依赖/真实异步源扫描/原子目录发布/可贡献校验规则与精确快照门禁/原子 VCS 元数据/任务层已交付，实际管线与原生 UI 待接 |
-| `prism_editor_remote` | BRP 风格 JSON-RPC、PIE、增量同步、安全 | 🟡 协议/TCP/受控进程桥已交付，引擎专属 adapter 待接 |
+| `prism_editor_remote` | BRP 风格 JSON-RPC、PIE、增量同步、安全 | 🟡 协议/TCP/进程桥、真实 Prism ECS 反射与已有组件批写已验证；生产运行时挂载/结构编辑/增量读取优化待完成 |
 | `prism_editor_collab` | 命令广播 / CRDT 协同 / 在场锁(可选) | 🟡 有界副本/TCP 广播/重连/能力拒绝已交付，认证与产品流程待接 |
-| `prism_editor_ui` | Loom Element 装配：Shell、面板、Dock、Viewport host、workspace | 🟡 Element 与语义 action 绑定已交付，设备事件/渲染/模型执行回路待接 |
-| `prism_editor_app` | 无头应用装配、`prism_app` 集成、workspace 组合 | 🟡 headless/宿主生命周期/恢复退出已交付，OS/GPU 呈现实现待接 |
+| `prism_editor_ui` | Loom Element 装配：Shell、面板、Dock、Viewport host、workspace | 🟡 内容/world/profiler/timeline 真实面板及命令围栏已验证；新增面板原生宿主和具体域流程待接 |
+| `prism_editor_app` | 无头应用装配、`prism_app` 集成、workspace 组合 | 🟡 原生 wgpu/Loom、图像、Git、文档门禁/存储、Gizmo 已有离屏验证；锁屏导致窗口呈现/设备输入验收未完成 |
 | — 复用地基(已 pkg 化) — | `prism_ui*` 全家桶 + `prism_ui_devtools` + `prism_reflect`/`prism_asset`/`prism_diagnostic`/`prism_app` | ✅ 已交付 |
 | — 禁止依赖的历史边界 — | `bevy_*` 仅作迁移对照，编辑器不链接 | ✅ 已隔离 |
 | — 产品集成闸门 — | 引擎 runtime adapter · 原生窗口/Loom 渲染输入 · geometry/depth ID pass · Gizmo/debug drawing · 生产存储 | 🔜 待接 |

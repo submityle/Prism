@@ -18,9 +18,15 @@ prism_editor_reflect = { path = "../prism_editor_reflect" }
 prism_editor_shell = { path = "../prism_editor_shell" }
 prism_editor_dock = { path = "../prism_editor_dock" }
 prism_editor_viewport = { path = "../prism_editor_viewport" }
+prism_editor_timeline = { path = "../prism_editor_timeline" }
+prism_editor_profiler = { path = "../prism_editor_profiler" }
+prism_editor_world = { path = "../prism_editor_world" }
+prism_asset = { path = "../prism_asset" }
+prism_ecs = { path = "../prism_ecs" }
 prism_reflect = { path = "../prism_reflect" }
 
 [dev-dependencies]
+prism_ui_render_backend = { path = "../prism_ui_render_backend" }
 png = "0.18.1"
 futures-lite = "2"
 wgpu = { version = "30", default-features = false, features = ["wgsl", "metal"] }
@@ -28,6 +34,11 @@ wgpu = { version = "30", default-features = false, features = ["wgsl", "metal"] 
 [features]
 default = []
 gpu-tests = []
+profiler-gpu-tests = ["prism_editor_profiler/gpu"]
+
+[[test]]
+name = "profiler_gpu_panel"
+required-features = ["profiler-gpu-tests"]
 
 [lints.rust]
 missing_docs = "deny"

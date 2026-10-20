@@ -1,10 +1,12 @@
 # Prism 编辑器框架实现状态
 
-更新日期：2026-10-20。本文补充 `prism_editor_framework_design_zh.md`，只计入当前 checkout 的源码和已执行验证，不把设计目标、契约接口或测试替身视为完整桌面产品。
+更新日期：2026-10-21。本文补充 `prism_editor_framework_design_zh.md`，只计入当前 checkout 的源码和已执行验证，不把设计目标、契约接口或测试替身视为完整桌面产品。
 
 ## 当前结论
 
-可以继续实施，且内核、通用数据层、协议/进程桥、Loom 装配与视口 GPU 基础已落地。当前不是可直接投入生产的完整桌面编辑器；原生窗口、Loom 渲染/输入、真实场景绘制与模型编辑回写仍需组成同一条应用路径。2026-10-20 已接入原生文档会话：保存/加载通过事件循环异步轮询，保存确认受模型快照围栏保护，加载成功后原子替换 UI，并通过 `SceneDocumentAdapter` 候选/提交边界为宿主提供文档到场景的引擎中立绑定；尚未形成完整原生端到端验收证据。
+内核、通用数据层、协议/进程桥、Loom 装配和原生 GPU 应用路径已实现多个可验证切片，完整系统仍在实施。原生文档会话已提供异步保存/加载、精确快照确认及 `SceneDocumentAdapter` 候选/提交边界；app 已有真实内容图像、Git 刷新、校验保存门禁、集合持久化和 Gizmo 命令回写。2026-10-21 app 全 features/targets 的 94 项测试通过，包含 Apple M2/Metal 离屏图像/Gizmo/dock 测试。原生 smoke 因桌面锁定在 15 秒后 TimeLimit，呈现帧/原生输入均为 0；没有完整窗口交互验收证据。详见 `pkg/prism_editor_app/README.md`。
+
+本次主仓库验证时间轴 37 项和 UI 76 项（默认 features）通过，严格 Clippy 通过。时间轴已加入逆命令历史、完整文档 codec、Hermite 曲线、Loom 作者面板和真实播放控制；world/profiler 面板及集合存储已接入 UI 公共导出。真实 ECS adapter 已提交，原生面板挂载、实际构建 worker、帧图捕获和图编辑器继续分别实施，尚未计作完整交付。
 
 编辑器包此前的全 targets、全 features 普通回归与强制真实 GPU 回归以独立 target 执行；历史强制 GPU 证据使用 Apple M2 / Metal。当前视口增量已将矩形逐像素读回改为 GPU 去重归约，2026-10-20 重新执行的视口全 features 测试为 37 项通过，包含 8 项真实 GPU 测试。测试总数随切片增量变化，以下以命令输出和对应提交状态为准，不把固定总数当作产品完成度证据。此前 `prism_editor_app` 严格 Clippy(`--no-deps`)也通过，依赖树无 `bevy_*`。这证明当前切片可验证，不等于完整桌面产品或引擎集成已完成。
 
@@ -18,22 +20,24 @@
 | `prism_editor_shell` | 命令索引/搜索、上下文键位/冲突、菜单/工具栏/状态栏聚合 | 宿主键盘焦点和事件路由 | 7 |
 | `prism_editor_panels` | 稳定 Outliner 层级、展开/隐藏/窗口查询、有界 Console/过滤 | 生产内容浏览器与域编辑器界面 | 6 |
 | `prism_editor_graph` | 稳定图身份、类型/基数校验、分组/索引维护、确定性拓扑与评估回调 | 材质/VFX 等具体节点 UI 和编译器适配 | 10 |
-| `prism_editor_timeline` | 整数 tick、稳定轨道/关键帧、插值、维度校验、有序事件与采样 | 序列器 UI 和具体运行时播放适配 | 3 |
-| `prism_editor_profiler` | 有界 frame/span、帧图/关键路径、内存预算告警、可视日志投影 | Tracy/GPU/真实运行时采集和分析界面 | 9 |
+| `prism_editor_timeline` | 整数 tick、索引、Hermite 切线、有界原子逆命令历史、确定性命令/完整文档 codec、真实 Once/Loop 有理速率播放 | 异步磁盘接入、原生手势、子序列/相机/音频域适配 | 37（主仓库本次） |
+| `prism_editor_profiler` | 有界 frame/span、帧图/关键路径、预算、可视日志、真实 Instant 与可选 wgpu timestamp producer；Loom CPU/GPU 面板 | Tracy、原生采集挂载、真实帧图资源/中间缓冲预览 | 见 capture/UI 专用文档 |
 | `prism_editor_content` | 目录/子树索引、末项续查分页、有界缓存与诊断、增量反向依赖、真实异步文件扫描、精确快照围栏的源/VCS 原子发布、可贡献校验规则与精确快照门禁、真实 PNG 缩略图解码/缩放/缓存、真实只读 Git worker、导入导出任务状态 | 缩略图网格/原生图像接线、实际 importer/exporter/Cook 和完整原生内容流程 | 59（目录/扫描/发布/校验）+14（缩略图）+12（Git） |
 | `prism_editor_domains` | 域/能力/贡献/Profile、版本约束、依赖启停、确定性冲突诊断 | 材质/VFX/动画/地形/音频/物理的具体编辑器 | 13 |
-| `prism_editor_remote` | 有界 JSON-RPC/二进制 codec、增量副本、PIE、TCP、受控子进程 stdio/TCP 桥及取消/重启/超时 | Prism 引擎专属 adapter 和生产场景运行时接线 | 41 |
+| `prism_editor_remote` | 有界 JSON-RPC/codec、PIE、TCP、受控子进程、真实 Prism ECS 反射快照/差分/已有组件原子写入 | 生产场景运行时/Inspector 挂载、增量扫描优化和结构编辑 | 60（agent 的全 features 验证） |
 | `prism_editor_collab` | 有界因果副本/LWW/tombstone、Presence/租约软锁、TCP 接纳顺序/广播/重连/历史重放/能力拒绝 | 身份认证/TLS、产品级权限/部署和 UI 到命令栈协同接线 | 20 |
-| `prism_editor_ui` | Loom Element 装配、有界稳定 key、语义目标/事件到选择/展开/字段编辑/命令/Undo/Redo action 的绑定契约 | 真实设备事件、Loom reconciliation/render 和应用命令执行的端到端连接 | 20 |
+| `prism_editor_ui` | Loom Element/语义事件、内容网格/图像/诊断/集合持久化、真实 world/profiler/timeline 面板、精确快照围栏 | 新增面板的原生宿主挂载；通用图编辑界面和具体域流程 | 76（主仓库本次默认 features） |
 | `prism_editor_app` | 有界 headless runner、工作区组合、窗口/surface 生命周期、错误回滚/恢复/退出及 `prism_app` 退出传播；原生文档会话接线、Ctrl/Cmd+S 保存、Ctrl/Cmd+O 加载、receipt 围栏、引擎中立 `SceneDocumentAdapter` 候选/提交边界、点选/拖拽框选、重载 renderer 失效钩子、单对象 transform 增量更新和 native CLI smoke entry | 完整原生输入→Loom→真实场景→Inspector→保存重载验收，以及具体引擎/项目场景 adapter | 见验证命令 |
 | `prism_editor_viewport` | 稳定场景 ID/增量提交、indexed geometry/depth ID pass、真实整数 ID target/异步读回、GPU 矩形去重归约、多 viewport target 生命周期/过期拒绝、Gizmo 屏幕命中与会话、有界 sRGB 图像 GPU 合成 | 引擎材质/场景提取、完整原生产品接线 | 42（本次全 features） |
-| `prism_editor_world` | 有界异步 provider、版本化 cell 文件持久化、校验/并发锁/修订冲突/阶段文件恢复、payload 驻留、分层策略、dirty/租约保护、OFPA/HLOD 计划 | actor codec/写盘执行、跨 cell/OFPA 事务、HLOD 烘焙/渲染和世界 UI | 41（本次全 targets） |
+| `prism_editor_world` | cell/actor 真实文件、payload/数据层/dirty/租约、跨 cell/OFPA generation 事务/恢复、Loom world 面板 | HLOD 实际烘焙/渲染、项目 membership codec、原生宿主挂载及大世界吞吐优化 | 78 + 1 doc（事务切片），UI 8 |
 
 ### 运行时进程桥
 
 `RuntimeBridge<A>` 拥有受控子进程和有界 JSON-RPC worker，覆盖启动、握手、stdio/TCP 连接、状态/退出码、重启、取消和超时清理。`EngineRuntimeAdapter` 隔离引擎差异；当前附带 `LoopbackRuntimeAdapter` 和子进程测试 fixture，不是 Prism 场景运行时实现。
 
 请求上限覆盖**执行中加排队中**的未完成工作，不再取决于 worker 调度时机。worker 在交付响应前释放容量；调用者丢弃 `RuntimeRequest` 不会提前释放尚未完成的请求。32 项协议/传输单元测试与 9 项子进程集成测试通过。
+
+`ecs` feature 的真实 adapter 使用 Prism World、反射白名单与 typed FromReflect 回建；Table/Sparse 已有组件批写在全部验证后原子安装，Shared 只读。实体 namespace/generation、schema 和 host `world_mut` 修订围栏拒绝陈旧写入；宿主 spawn/despawn 在后续差分中可见。19 项真实 ECS 测试及 strict Clippy 通过（提交 `7b61c0d39`）；当前每次请求仍扫描整个 World，不能以协议差分宣称读取成本只随变化量增长。见 `prism_editor_remote_ecs_zh.md`。
 
 ### GPU 视口
 
@@ -87,7 +91,9 @@
 
 保存确认检查请求快照、当前修订、字节、有效锁和 actor dirty 状态，旧完成事件不能清掉新编辑。`FileCellIoProvider` 已在提交 `d70e41247` 落地真实文件持久化：64 字节版本化 envelope、坐标/GUID/长度/校验和验证、有界异步 worker、每 cell OS advisory lock、同目录 stage→fsync→rename→目录 fsync。加载恢复 durable revision，保存按已观察的 base revision 拒绝冲突；取消围栏阻止后续发布，rename 后目录同步失败显式返回 `CommitUncertain`，不能据此清除 dirty。临时目录测试包含实际文件往返、错误 envelope、符号链接拒绝、并发 provider 和子进程锁/进程退出恢复；故障注入不等于物理断电验证。
 
-文件持久化按 cell 原子提交，尚不提供跨 cell/OFPA 事务、备份修复或恶意目录替换隔离；具体格式与恢复步骤见 `pkg/prism_editor_world/README.md`。OFPA 目前仍是稳定 actor 文件计划，HLOD 是 show/hide 代理计划，不能计作 actor codec/写盘执行或实际烘焙。
+独立 cell/actor provider 的原子单位为单文件。另有 `FileWorldTransactionProvider` 实际执行跨 cell/OFPA put/delete/move：完整 version root、双 slot、CURRENT 与 durable redo journal、全目标 CAS、单 generation 读快照和精确 receipt。本地 dirty 只在所有 revision/lease/bytes 围栏匹配后清理；prepared/decided/published 三阶段真实 kill/reopen 验证已通过。每次事务复制完整有界 generation，未证明大世界吞吐量；HLOD 仍为 show/hide 代理计划。详见 `prism_editor_world_ofpa_zh.md`（提交 `0e15aece6`）。
+
+Loom world 面板使用真实网格、数据层、租约和 dirty 状态，加载/保存/跨 cell 操作向宿主交付有界 intent，并由实际 provider receipt 完成。主 UI 集成后的 8 项测试通过，包含真实文件保存与 actor move。每次 build 查询只覆盖可见槽位，20,000 cell 测试核对 lookup 数；操作时 residency planner/事务仍可能扫描模型。见 `prism_editor_world_panel_zh.md`。
 
 2026-10-20 在当前 checkout 执行 `cargo test --offline -p prism_editor_world --all-targets`，14 项单元、7 项执行层、12 项真实文件系统、8 项恢复测试全部通过。另重新执行编辑器全 features 的 normal/build/dev Cargo 依赖树检查，未发现 `bevy_*`。
 
