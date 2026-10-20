@@ -16,6 +16,16 @@
 
 ## 实施状态（2026-10-20）
 
+2026-10-20 Profile 规划增量：`ImportRecipe::plan_with_profile` 在 DDC 查询前通过
+`ProfileReader` 配置 owned processor，自动把实际读取字段的同一投影写入 ArtifactKey
+和 `BuildInputSnapshot`；条件分支选择字段、缺失的可选字段同样计入依赖，未读取字段
+变化不使节点失效。非 Profile 的 processor/设置/工具链/环境/输出契约与路由身份也
+一起记录，规划失败不修改快照。`tests/profiled_recipe.rs` 的四项回归覆盖真实
+BuildExecutor/DDC/CAS/Revision 发布、缓存复用、变更后继重建、已提交字段解释、
+条件/缺失字段及失败原子性。完整默认配置核心测试共 244 项通过，0 失败、0 忽略。
+该路径追踪的是规划工厂显式经过 reader 的访问，不自动拦截 Processor 的任意环境读取；
+动态文件依赖、通用设置字段追踪和所有内置 importer 的接入仍需独立完成。
+
 2026-10-20 DAG 执行增量：`BuildGraph::execute_parallel_with_limit` 在启动任何
 Processor 前完成整图校验，避免存在环时先执行无关 ready prefix；作用域线程直接
 借用依赖输出，fan-out 消费者不再逐个复制完整输入。线程 panic 保留实际 JobId，
@@ -74,7 +84,8 @@ status，全部成功后才一起返回 owned GPU buffer 与精确逻辑长度�
 这些已提交记录，不初始化 store/DDC、不执行恢复或截断 journal，拒绝孤立、损坏或错配记录。
 CAS 基线元数据在执行前校验，候选可修复损坏 blob，提交时仍完整校验所有基线 payload；
 未修复的损坏不能发布。显式 dirty job 在读取基线前校验。设置目前按完整规范化字节
-跟踪；Profile 已有显式读取记录与字段投影，完整处理器自动字段依赖集成仍待交付。
+跟踪；Profile 读取记录与字段投影已由上述 `plan_with_profile` 接入 Recipe 规划、
+缓存键和已提交重建解释，任意执行期环境/文件读取的自动依赖发现仍未交付。
 `prism_asset_build_cli` 的 JSONL protocol v1 已实现八个命令（含 `why`）的稳定启动/终态
 事件、结构化成功结果/错误、确定性退出码和 stdout/stderr 分离。
 本轮 `cargo test -j 1 -p prism_asset_build_core -p prism_asset_build_cli --quiet`：

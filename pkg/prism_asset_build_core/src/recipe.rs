@@ -3,7 +3,7 @@
 use crate::executor::ArtifactSpec;
 use crate::hash::HashError;
 use crate::job::{BuildJob, JobId, Processor};
-use crate::profile::{EffectiveProfile, ProfileError};
+use crate::profile::{EffectiveProfile, ProfileError, ProfileReader};
 use crate::source::SourceSnapshot;
 use crate::types::{ArtifactKey, AssetId};
 
@@ -54,6 +54,8 @@ pub enum ImportRecipeError {
     ImporterSelection(crate::import::ImporterSelectionError),
     /// The selected importer profile dependencies could not be projected.
     Profile(ProfileError),
+    /// The frozen output contract cannot be encoded.
+    Hash(HashError),
 }
 
 impl std::fmt::Display for ImportRecipeError {
@@ -71,6 +73,7 @@ impl std::fmt::Display for ImportRecipeError {
             ),
             Self::ImporterSelection(error) => error.fmt(f),
             Self::Profile(error) => error.fmt(f),
+            Self::Hash(error) => error.fmt(f),
         }
     }
 }
@@ -86,6 +89,12 @@ impl From<crate::import::ImporterSelectionError> for ImportRecipeError {
 impl From<ProfileError> for ImportRecipeError {
     fn from(value: ProfileError) -> Self {
         Self::Profile(value)
+    }
+}
+
+impl From<HashError> for ImportRecipeError {
+    fn from(value: HashError) -> Self {
+        Self::Hash(value)
     }
 }
 
@@ -115,6 +124,53 @@ pub struct ImportRecipe {
 }
 
 impl ImportRecipe {
+    /// Configures an owned processor through a recording profile reader.
+    ///
+    /// All successful reads, including absent optional fields and fields used
+    /// to choose a branch, enter both the artifact key and the input snapshot.
+    /// Unread fields do not invalidate this node. The factory runs during graph
+    /// planning, before any DDC lookup; it must capture every required value in
+    /// the returned processor rather than reading ambient state at execution.
+    /// The processor is owned and cannot retain the borrowed reader.
+    ///
+    /// The snapshot also records settings, identity, output contract, routing,
+    /// toolchain and environment, so callers need not maintain a parallel
+    /// dependency list. Planning failure leaves the snapshot unchanged.
+    pub fn plan_with_profile<P, F>(
+        &self,
+        asset: AssetId,
+        job_id: JobId,
+        source_job: JobId,
+        profile: &EffectiveProfile,
+        inputs: &mut crate::BuildInputSnapshot,
+        configure: F,
+        kind: u128,
+        schema: u32,
+        alignment: u32,
+    ) -> Result<ImportPlan, ImportRecipeError>
+    where
+        P: ImportProcessor + 'static,
+        F: FnOnce(&mut ProfileReader<'_>) -> Result<P, ProfileError>,
+    {
+        let mut reader = profile.reader();
+        let processor = configure(&mut reader)?;
+        let projection = reader.finish();
+        let mut recipe = self.clone();
+        recipe.profile_hash = projection.hash();
+        let plan = recipe.plan(
+            asset, job_id, source_job, processor, kind, schema, alignment,
+        )?;
+        // Profile changes are explained separately from processor settings.
+        // This fingerprint includes all remaining semantic contract fields.
+        let mut contract = plan.spec.clone();
+        contract.profile_hash = [0; 32];
+        let mut settings = asset.0.to_le_bytes().to_vec();
+        settings.extend_from_slice(&contract.artifact_key(1, &[])?.0);
+        inputs.set_settings(job_id, settings);
+        inputs.set_profile(job_id, projection);
+        Ok(plan)
+    }
+
     /// Binds a concrete importer to this recipe and creates its graph node.
     ///
     /// The identity check makes the processor implementation part of the

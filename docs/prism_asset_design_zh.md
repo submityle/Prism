@@ -22,6 +22,13 @@
 
 ### 实施状态（2026-10-20）
 
+构建侧新增 Profile 规划接线：`ImportRecipe::plan_with_profile` 记录配置处理器时
+实际访问的字段，并将同一投影用于缓存键和已提交重建解释；条件/缺失字段、
+未读取字段缓存复用、受影响后继重建和失败不修改快照已有四项集成回归。
+`cargo test -j 1 -p prism_asset_build_core --quiet` 完整默认配置共 244 项通过，
+0 失败、0 忽略。它仍不包含任意执行期文件/环境访问的自动依赖发现、完整 importer
+接入或运行时 EDL；设置仍按完整规范化契约字节跟踪。
+
 2026-10-20 新增 SHIPPED 切片：容器提供显式 `ContainerReadLimits` 与可跨 mount/clone
 共享的 `ContainerReadBudget`，在分配或解码前检查文件/元数据/记录数、stored/raw
 单元大小、展开比例、输出、累计挂载校验工作量和活跃字节缓冲。批次在首次 I/O
