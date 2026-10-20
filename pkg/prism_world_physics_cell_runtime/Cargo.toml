@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 prism_world_physics_bridge = { path = "../prism_world_physics_bridge" }
 prism_world_runtime = { path = "../prism_world_runtime" }
+prism_world_residency = { path = "../prism_world_residency" }
 prism_world_stream = { path = "../prism_world_stream" }
 prism_world_terrain = { path = "../prism_world_terrain" }
 

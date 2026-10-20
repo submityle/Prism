@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 prism_physics_gpu = { path = "../prism_physics_gpu" }
+prism_world_residency = { path = "../prism_world_residency" }
 prism_world_terrain = { path = "../prism_world_terrain" }
 glam = { version = "0.33.2", default-features = false, features = ["std"] }
 
