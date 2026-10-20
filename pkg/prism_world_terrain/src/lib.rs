@@ -24,6 +24,7 @@ mod planet_boundary;
 mod planet_mesh;
 mod planet_placement;
 mod planet_placement_deletion;
+mod planet_publication;
 mod rebake;
 mod representation;
 #[cfg(feature = "scatter")]
@@ -79,6 +80,11 @@ pub use planet_placement::{
 pub use planet_placement_deletion::{
     filter_planet_placement, DeletionFilteredPlanetPlacement, PlanetPlacementDeletionBudget,
     PlanetPlacementDeletionError, PlanetPlacementDeletionSet, PLANET_PLACEMENT_DELETION_VERSION,
+};
+pub use planet_publication::{
+    PlanetMeshPublication, PlanetMeshPublicationError, PlanetMeshPublicationLimits,
+    PlanetMeshPublicationReceipt, PlanetMeshPublicationTransaction, PublishedPlanetHeightfieldMesh,
+    PLANET_MESH_PUBLICATION_VERSION,
 };
 pub use rebake::{
     DirtyRegion, RebakeBudget, RebakeError, RebakePlan, RebakePlanner, RebakeRequest, RebakeTask,

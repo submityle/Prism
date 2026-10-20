@@ -1,7 +1,7 @@
 //! Cube-sphere face coordinates and deterministic direction mapping.
 
 /// The six oriented faces of the cube used by the cube-sphere.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 #[repr(u8)]
 pub enum CubeFace {
     /// Positive X face.

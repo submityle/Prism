@@ -287,6 +287,10 @@ impl PlanetHeightfieldMesh {
     pub fn uvs(&self) -> &[[f32; 2]] {
         &self.uvs
     }
+    /// Stable spatial tile identity.
+    pub const fn tile(&self) -> TileKey {
+        self.tile
+    }
     /// Outward triangle indices.
     pub fn indices(&self) -> &[u32] {
         &self.indices

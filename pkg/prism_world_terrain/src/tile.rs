@@ -59,7 +59,9 @@ pub enum TileQuadrant {
 }
 
 /// A face-local quadtree tile key.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+///
+/// Ordering is stable serialization order: face index, level, x, then y.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct TileKey {
     face: CubeFace,
     level: u8,
