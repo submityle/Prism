@@ -11,8 +11,8 @@ use std::ops::{Deref, DerefMut};
 use prism_app::{App, FixedUpdate, Plugin};
 use prism_ecs::prelude::*;
 use prism_physics_core::{
-    BodyDesc, BodyHandle, BodyKind, ColliderHandle, ColliderShape, MassProperties, PhysicsMaterial,
-    PhysicsWorld, SoftBody, SoftBodyHandle, XpbdSolver,
+    AeroBodyConfig, BodyDesc, BodyHandle, BodyKind, ColliderHandle, ColliderShape, MassProperties,
+    PhysicsMaterial, PhysicsWorld, SoftBody, SoftBodyHandle, XpbdSolver,
 };
 use prism_transform::Transform;
 
@@ -151,6 +151,12 @@ pub struct ExternalForce {
     pub torque: Vec3,
 }
 
+/// Rigid-body aerodynamic authoring data evaluated by the core during every
+/// XPBD substep. Removing this component unregisters the body from the aero
+/// pass; editing it replaces the registration without rebuilding the body.
+#[derive(Component, Clone, Debug, PartialEq)]
+pub struct RigidBodyAero(pub AeroBodyConfig);
+
 /// Authored soft-body template. Particles are world-space, independent of the
 /// entity's Transform. Editing the template replaces the simulated body; live
 /// particle output is read through the resource and [`PhysicsBindings`].
@@ -201,6 +207,7 @@ pub struct PhysicsBindings {
     retired: BTreeMap<(u32, u32), Entity>,
     soft: BTreeMap<Entity, SoftBinding>,
     soft_entities: BTreeMap<(u32, u32), Entity>,
+    aero: BTreeMap<Entity, (BodyHandle, AeroBodyConfig)>,
     trigger_roles: BTreeMap<(u64, u64), (BodyHandle, BodyHandle)>,
 }
 

@@ -435,7 +435,7 @@ prism_physics_core 不依赖 Prism ECS（纯数据 + trait），保证可被服�
 | M9 | GPU-Driven 持久化管线 + 实时 Voronoi 破碎 | 零拷贝 + 动态裂纹 | 🟡 CPU 破碎和部分 GPU stage 已有；动态拓扑、生产持久化调度与渲染回写未完成 |
 | M10 | 动态装配：力累加器/施力 API + 通用可断关节 + 装配图/复合体合并·拆分 + 吸附几何原语 + GrabDrive | 实时搭建 200+ 零件载具 60fps、焊点可断、抓取不穿墙 | 🟡 core 装配/施力切片已有；ECS/资产/演示场景/性能验收未完成 |
 | M11 | 力场子系统 + GPU 采样 + 风扇/推进器/浮力部件 + 断裂连锁 | 自建载具可驾驶/飞行、受击解体 | 🟡 core field 与 GPU 采样已有；功能部件和断裂连锁跨层验收未完成 |
-| M12 | 刚体/多体气动：各向异性阻力面元 + 翼面升力/失速 + 推进反扭矩 + 浮力（空气/水）+ 空间风场/滑流/地面效应 + 附加质量 | 自建飞行器可滑翔/配平飞行、气球浮空、水上载具 | 🟡 aero core 切片已有；完整刚体气动模型、ECS/GPU 接线和 Demo 未完成 |
+| M12 | 刚体/多体气动：各向异性阻力面元 + 翼面升力/失速 + 推进反扭矩 + 浮力（空气/水）+ 空间风场/滑流/地面效应 + 附加质量 | 自建飞行器可滑翔/配平飞行、气球浮空、水上载具 | 🟡 aero core 切片与 ECS `RigidBodyAero` 生命周期桥、固定步推进器路径已有；完整气动模型、GPU 采样、独立 ECS 部件族、Demo 和跨层性能验收未完成 |
 | M13 | 角色布偶：球关节 swing-twist 椭圆锥限/扭限 + 软限位 + 关节摩擦 + 位姿伺服 drive + RagdollBuilder | 人形布偶命中反应自然、不穿模不软面条、受击可配主动驱动 | 🟡 最大坐标关节与部分 motor/限位已有；高阶布偶能力和群体验收未完成 |
 | M14 | 降阶坐标铰接：Featherstone ABA O(n) 正向动力学 + 广义坐标限位/马达 + 与 XPBD 接触耦合 | 长机械臂/角色强铰接链极大质量比零漂移、少子步稳定 | 🟡 articulation core/固定步输入已有；完整接触耦合、退化、GPU 多链和性能验收未完成 |
 | M15 | 布料拓扑撕裂：顶点分裂 + 裂纹前沿 + 穿刺 + 各向异性织物 + 渲染网格缝合 + GPU 拓扑变更 | 旗帜被弹片撕开真实裂口、刀划布、撕裂口参与自碰撞 | 🟡 版本化 topology payload、core 原子 consumer 与 ECS 生命周期/失败重试 adapter bridge 已有；具体渲染缝合、GPU 重排、CCD/BVH 生产 consumer、CPU/GPU parity 和完整场景验收未完成 |
@@ -664,7 +664,7 @@ commands.entity(crate_entity).insert(GrabDrive::to(hand_pose).soft());
 
 ### 25.2 现状与差距
 
-- ✅ 已有：软体/布料逐面气动（`soft::aero`）；刚体各向同性 `linear_damping` / `angular_damping`（`dynamics/integrator.rs`，半隐式 `v *= 1/(1+c·dt)`，只是速度打折，**非真实气动**）。
+- ✅ 已有：软体/布料逐面气动（`soft::aero`）；刚体气动 core 切片（面元/推进器/浮力等，详见对应 API 与测试）；ECS `RigidBodyAero(AeroBodyConfig)` 在固定 Sync 阶段注册、替换、移除，并由 core 在 XPBD 子步评估。`linear_damping` / `angular_damping`（`dynamics/integrator.rs`）仍只是速度阻尼，**非真实气动**。
 - ❌ 缺：刚体形阻（方向/面积相关）、翼面升力+攻角曲线+失速、推进反作用+反扭矩、浮力（空气/水对刚体）、附加质量、马格努斯、空间风场、下洗/滑流/尾流/地面效应。
 - 本节把上述缺口补成可落地规格。
 
@@ -815,10 +815,11 @@ commands.entity(ball).insert(Buoyancy::air(volume));
 ### 25.15 落地映射与里程碑（接 §22 / §24.12）
 
 - **Crate**：面元/推进/浮力/附加质量/旋转效应入 `prism_physics_core` 新增 `aero` 模块（与 `soft::aero` 共享系数与 sanitize）；空间风场并入 `field` 模块；GPU 采样入 `prism_physics_gpu`。
-- **M12 刚体气动**（接 M11 力场）：
-  - 阶段一（L0）：各向异性 Drag 面元 + Thruster（含反扭矩）+ 解析 Buoyancy（空气/水）。验收：风扇车能跑、气球能浮、物体在风场里被按方向吹。
-  - 阶段二（L1）：`AeroSurface` 升力 + `AeroCurve` 失速 + 操纵面。验收：自建滑翔翼/飞机可配平飞行、失速可复现不炸。
-  - 阶段三（L2）：空间 `WindField3D`（阵风/上升气流/curl 湍流）+ 滑流/下洗 + 地面效应 + 附加质量。验收：上升气流滑翔、旋翼下压吹动布料/角色、水下推进有质感。
+- **M12 刚体气动**（接 M11 力场）：core 原语与 ECS 刚体级配置生命周期桥已接入，ECS 固定步推进器路径有生命周期测试；这不代表下列阶段全部通过验收。
+  - 阶段一（L0）：补齐并验收各向异性 Drag + Thruster（含反扭矩）+ 解析 Buoyancy（空气/水）完整链路。验收：风扇车能跑、气球能浮、物体在风场里被按方向吹。
+  - 阶段二（L1）：完整验收 `AeroSurface` 升力 + `AeroCurve` 失速 + 操纵面。验收：自建滑翔翼/飞机可配平飞行、失速可复现不炸。
+  - 阶段三（L2）：空间 `WindField3D` GPU 采样（阵风/上升气流/curl 湍流）+ 滑流/下洗 + 地面效应 + 附加质量跨层接线。验收：上升气流滑翔、旋翼下压吹动布料/角色、水下推进有质感。
+  - 所有阶段仍缺可复现 Demo、完整跨层回归和匹配硬件性能数据；单元测试或固定步推进器切片不等于里程碑验收。
 
 ### 25.16 验收 Demo（接 §19 基准套件）
 
@@ -1265,4 +1266,4 @@ CPU/GPU parity 已完成；这些仍作为 M15 未完成验收项。
 
 ---
 
-*本文档为 Prism Physics 设计规格 v0.7，不含 AI/ML 内容。已验证存在：CPU core 固定步、Prism ECS 的 `Sync -> Step -> Writeback` 刚体/软体桥、离线 driver 运行时切片、磁盘 cache 校验切片、MPM CPU/GPU stage、resident runtime 与 ECS 固定步粒子 snapshot bridge、公共 GPU fluid step 的 APIC 路由、M10–M12 的部分 core 原语、M14 articulation core，以及 M15 拓扑撕裂的版本化 render/collision update 原语、core 原子 consumer 和 ECS 生命周期/有序重试 adapter bridge。未完成：M5/M5.5 的表面重建、渲染/零拷贝接线、场景 Demo、广泛真机 GPU 覆盖与性能验收，M9–M12 的完整跨层生产链和 demo，M13 的完整布偶限位/群体验收，M14 的接触耦合/退化/GPU 多链验收，M15 的具体渲染缝合、GPU 重排、CCD/BVH 生产 consumer、CPU/GPU parity 与完整场景验收，以及性能目标的匹配硬件 P50/P95/P99 证据。当前主机无 wgpu adapter，因此 resident GPU parity 只能记录为 skipped，不能写成通过。*
+*本文档为 Prism Physics 设计规格 v0.7，不含 AI/ML 内容。已验证存在：CPU core 固定步、Prism ECS 的 `Sync -> Step -> Writeback` 刚体/软体桥、离线 driver 运行时切片、磁盘 cache 校验切片、MPM CPU/GPU stage、resident runtime 与 ECS 固定步粒子 snapshot bridge、公共 GPU fluid step 的 APIC 路由、M10–M12 的部分 core 原语（M12 含 `RigidBodyAero` ECS 生命周期桥与固定步推进器测试）、M14 articulation core，以及 M15 拓扑撕裂的版本化 render/collision update 原语、core 原子 consumer 和 ECS 生命周期/有序重试 adapter bridge。未完成：M5/M5.5 的表面重建、渲染/零拷贝接线、场景 Demo、广泛真机 GPU 覆盖与性能验收，M9–M12 的完整跨层生产链和 demo，M13 的完整布偶限位/群体验收，M14 的接触耦合/退化/GPU 多链验收，M15 的具体渲染缝合、GPU 重排、CCD/BVH 生产 consumer、CPU/GPU parity 与完整场景验收，以及性能目标的匹配硬件 P50/P95/P99 证据。当前主机无 wgpu adapter，因此 resident GPU parity 只能记录为 skipped，不能写成通过。*

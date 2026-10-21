@@ -120,6 +120,16 @@ before solving and after each substep; a transient pair can enter and exit in
 one tick. This is not an impact-impulse stream or a swept-hit notification.
 Within each sample, ends precede starts and handles are sorted stably.
 
+`RigidBodyAero(AeroBodyConfig)` optionally registers core rigid-body aerodynamics
+for the entity's managed body. Registration is reconciled during `Sync`, and
+the core evaluates the config at XPBD substeps. Editing the config replaces the
+registration without rebuilding the rigid body; removing the component or its
+body unregisters it. Rebuilding a body rotates its generational handle, so the
+bridge rebinds aero on the next fixed tick. Aero authoring on an entity without
+a valid active `RigidBody` remains dormant until one is available. The component
+exposes the core config as-is; it does not provide separate ECS components for
+surfaces, fields, or runtime GPU sampling.
+
 Native event buffers are frame-maintained, not fixed-tick-cleared, so a frame's
 multiple fixed ticks remain readable. Use an `EventCursor` as usual. Exit events
 retain the original entity identity even after despawn/reused body slots; check
@@ -199,10 +209,11 @@ Body removal cleans attached joints created through `PhysicsWorld::spawn_joint`
 (including disabled joints) and active raw-storage joints. Disabled joints
 inserted directly into raw storage without assembly edges remain caller-owned:
 core currently has no complete public generational joint iterator. Rebuilds
-invalidate joints and aero/grab/ragdoll/other handle-based registrations instead
-of migrating them. No authored ECS joint, articulation, assembly, ragdoll, or
-aero component is supplied. These features are available only through explicit
-core resource orchestration with lifetime management by the caller.
+invalidate joints, grab/ragdoll, and other handle-based registrations instead
+of migrating them. Aero registrations authored through `RigidBodyAero` are
+reconciled to the replacement handle at the next Sync. No authored ECS joint,
+articulation, assembly, or ragdoll component is supplied; these features need
+explicit core resource orchestration with lifetime management by the caller.
 
 There is no automatic streamed-terrain collider binding, render extraction,
 interpolation, rollback/replication, scene serialization, arbitrary parent/scale

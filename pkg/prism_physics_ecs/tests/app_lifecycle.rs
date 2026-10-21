@@ -403,6 +403,72 @@ fn sensor_events_keep_entity_identity_on_despawn_and_handle_reuse_and_queries_wo
 }
 
 #[test]
+fn rigid_body_aero_lifecycle_registers_replaces_and_removes_fixed_step_wrenches() {
+    let mut app = app();
+    let entity = app.world_mut().spawn((
+        RigidBody::dynamic(),
+        Transform::IDENTITY,
+        RigidBodyAero(
+            core::AeroBodyConfig::default().with_thruster(core::Thruster::new(
+                Vec3::ZERO,
+                Vec3::X,
+                10.0,
+            )),
+        ),
+    ));
+
+    app.update();
+    let handle = body(&app, entity);
+    near(
+        app.world()
+            .resource::<PhysicsWorldResource>()
+            .bodies
+            .linear_velocity(handle)
+            .unwrap()
+            .x,
+        0.1,
+    );
+    assert!(app
+        .world()
+        .resource::<PhysicsWorldResource>()
+        .aero_body(handle)
+        .is_some());
+
+    app.world_mut().get_mut::<RigidBodyAero>(entity).unwrap().0 = core::AeroBodyConfig::default()
+        .with_thruster(core::Thruster::new(Vec3::ZERO, Vec3::X, 20.0));
+    app.update();
+    near(
+        app.world()
+            .resource::<PhysicsWorldResource>()
+            .bodies
+            .linear_velocity(handle)
+            .unwrap()
+            .x,
+        0.3,
+    );
+
+    app.world_mut()
+        .get_mut::<RigidBody>(entity)
+        .unwrap()
+        .mass
+        .inv_mass = 0.5;
+    app.update();
+    let rebuilt = body(&app, entity);
+    assert_ne!(rebuilt, handle);
+    assert!(app
+        .world()
+        .resource::<PhysicsWorldResource>()
+        .aero_body(rebuilt)
+        .is_some());
+
+    assert!(app.world_mut().remove::<RigidBodyAero>(entity));
+    app.update();
+    let physics = app.world().resource::<PhysicsWorldResource>();
+    assert!(physics.aero_body(rebuilt).is_none());
+    near(physics.bodies.linear_velocity(rebuilt).unwrap().x, 0.4);
+}
+
+#[test]
 fn persistent_force_applies_every_substep_and_world_impulse_is_not_overwritten() {
     for substeps in [1, 4, 8] {
         let mut app = app();

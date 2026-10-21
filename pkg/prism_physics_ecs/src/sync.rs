@@ -358,6 +358,61 @@ pub(crate) fn reconcile(world: &mut World) {
                 .insert(entity, SoftBinding { handle, authored });
         }
     }
+
+    // Keep rigid-body aero registrations aligned with generational ECS body
+    // bindings. Reconcile in entity order so force reduction is deterministic.
+    let aero_query = world.query::<(Entity, &RigidBodyAero)>();
+    let mut authored_aero: Vec<_> = aero_query
+        .iter(world)
+        .map(|(entity, aero)| (entity, aero.0.clone()))
+        .collect();
+    authored_aero.sort_by_key(|(entity, _)| *entity);
+    let desired: BTreeMap<_, _> = authored_aero.into_iter().collect();
+    let stale: Vec<_> = bindings
+        .aero
+        .iter()
+        .filter_map(|(&entity, (registered_body, _))| {
+            let current_body = bindings
+                .bodies
+                .get(&entity)
+                .filter(|binding| binding.active);
+            (!desired.contains_key(&entity)
+                || current_body.is_none_or(|binding| {
+                    binding.handle != *registered_body || !physics.bodies.contains(binding.handle)
+                }))
+            .then_some(entity)
+        })
+        .collect();
+    for entity in stale {
+        if let Some((registered_body, _)) = bindings.aero.remove(&entity) {
+            physics.unregister_aero_body(registered_body);
+        }
+    }
+    for (entity, config) in desired {
+        let Some(body) = bindings
+            .bodies
+            .get(&entity)
+            .filter(|binding| binding.active)
+        else {
+            continue;
+        };
+        if bindings.aero.get(&entity) == Some(&(body.handle, config.clone()))
+            && physics.aero_body(body.handle) == Some(&config)
+        {
+            continue;
+        }
+        if let Some((registered_body, _)) = bindings.aero.remove(&entity) {
+            physics.unregister_aero_body(registered_body);
+        }
+        if physics
+            .register_aero_body(body.handle, config.clone())
+            .is_err()
+        {
+            issue(&mut diagnostics, Some(entity), PhysicsIssue::StaleBody);
+            continue;
+        }
+        bindings.aero.insert(entity, (body.handle, config));
+    }
     world.insert_resource(physics);
     world.insert_resource(bindings);
     world.insert_resource(diagnostics);
