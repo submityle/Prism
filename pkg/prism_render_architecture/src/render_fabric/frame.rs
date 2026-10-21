@@ -19,6 +19,25 @@ pub struct RenderFabricFrame {
 }
 
 impl RenderFabricFrame {
+    /// Validates and canonicalizes an owned batch without copying its items.
+    pub fn from_items(
+        frame: u64,
+        items: Vec<FrameRenderItem>,
+    ) -> Result<Self, RenderFabricFrameError> {
+        for item in &items {
+            validate_item(item)?;
+        }
+        let mut output = Self { frame, items };
+        output.canonicalize()?;
+        Ok(output)
+    }
+
+    /// Returns owned items without reallocating; the frame clock is discarded.
+    #[must_use]
+    pub fn into_items(self) -> Vec<FrameRenderItem> {
+        self.items
+    }
+
     #[must_use]
     pub const fn frame(&self) -> u64 {
         self.frame
@@ -62,6 +81,41 @@ impl RenderFabricFrame {
             }
             self.items.push(item);
         }
+        self.canonicalize()
+    }
+
+    /// Replaces one domain without cloning the other domains or their storage.
+    ///
+    /// The frame clock is unchanged. Every incoming item must belong to the
+    /// requested domain. Errors clear the whole frame, including other domains,
+    /// so consumers can never observe a partially refreshed publication.
+    pub fn replace_domain(
+        &mut self,
+        domain: RenderDomain,
+        items: impl IntoIterator<Item = FrameRenderItem>,
+    ) -> Result<(), RenderFabricFrameError> {
+        self.items.retain(|item| item.domain != domain);
+        for item in items {
+            let result = validate_item(&item).and_then(|()| {
+                if item.domain == domain {
+                    Ok(())
+                } else {
+                    Err(RenderFabricFrameError::DomainIdentityMismatch {
+                        object: item.object_id,
+                        declared: domain,
+                    })
+                }
+            });
+            if let Err(error) = result {
+                self.items.clear();
+                return Err(error);
+            }
+            self.items.push(item);
+        }
+        self.canonicalize()
+    }
+
+    fn canonicalize(&mut self) -> Result<(), RenderFabricFrameError> {
         // Equal keys are rejected below, so unstable sorting produces the same
         // canonical order as stable sorting without a scratch allocation.
         self.items.sort_unstable_by_key(identity);
@@ -289,6 +343,107 @@ mod tests {
         let mut other_frame = copy.clone();
         other_frame.replace(6, [item]).unwrap();
         assert_ne!(copy, other_frame);
+    }
+
+    #[test]
+    fn owned_batch_validates_without_reallocation() {
+        let first = value_item(objects(1, 1)[0], 0, 0);
+        let last = value_item(objects(2, 1)[4], 1, 2);
+        let mut items = Vec::with_capacity(8);
+        items.extend([last, first]);
+        let allocation = items.as_ptr();
+        let frame = RenderFabricFrame::from_items(5, items).unwrap();
+        assert_eq!(frame.frame(), 5);
+        assert_eq!(frame.items(), &[first, last]);
+        let items = frame.into_items();
+        assert_eq!(items.as_ptr(), allocation);
+        assert_eq!(items.capacity(), 8);
+        assert!(matches!(
+            RenderFabricFrame::from_items(6, alloc::vec![first, first]),
+            Err(RenderFabricFrameError::DuplicateItem { .. })
+        ));
+        assert!(matches!(
+            RenderFabricFrame::from_items(
+                6,
+                alloc::vec![with_value(first, PayloadValue::Scalar(f32::NAN))]
+            ),
+            Err(RenderFabricFrameError::NonFiniteValue { .. })
+        ));
+    }
+
+    #[test]
+    fn domain_refresh_preserves_other_domains_clock_and_allocation() {
+        let surface = value_item(objects(2, 1)[0], 0, 0);
+        let particle = value_item(objects(2, 1)[1], 0, 0);
+        let decal = value_item(objects(2, 1)[4], 0, 0);
+        let replacement = resource_item(objects(1, 2)[1], 64, 16);
+        let mut frame = RenderFabricFrame::default();
+        frame.replace(11, [surface, particle, decal]).unwrap();
+        let allocation = frame.items.as_ptr();
+        let capacity = frame.items.capacity();
+        frame
+            .replace_domain(RenderDomain::Particle, [replacement])
+            .unwrap();
+        assert_eq!(frame.frame(), 11);
+        assert_eq!(frame.items(), &[surface, replacement, decal]);
+        assert!(!frame.contains_object(particle.object_id));
+        assert_eq!(frame.items.capacity(), capacity);
+        assert_eq!(frame.items.as_ptr(), allocation);
+        frame.replace_domain(RenderDomain::Particle, []).unwrap();
+        assert_eq!(frame.items(), &[surface, decal]);
+        assert_eq!(frame.frame(), 11);
+        assert_eq!(frame.items.as_ptr(), allocation);
+        frame
+            .replace_domain(RenderDomain::Particle, [replacement])
+            .unwrap();
+        assert_eq!(frame.items(), &[surface, replacement, decal]);
+    }
+
+    #[test]
+    fn rejected_domain_refresh_clears_all_domains_and_allows_recovery() {
+        let surface = value_item(objects(2, 1)[0], 0, 0);
+        let particle = value_item(objects(2, 1)[1], 0, 0);
+        let mut frame = RenderFabricFrame::default();
+        for (items, error) in [
+            (
+                alloc::vec![particle, surface],
+                RenderFabricFrameError::DomainIdentityMismatch {
+                    object: surface.object_id,
+                    declared: RenderDomain::Particle,
+                },
+            ),
+            (
+                alloc::vec![particle, particle],
+                RenderFabricFrameError::DuplicateItem {
+                    object: particle.object_id,
+                    domain: RenderDomain::Particle,
+                    history_key: 0,
+                    role: particle.payload_role(),
+                },
+            ),
+            (
+                alloc::vec![
+                    particle,
+                    with_value(particle, PayloadValue::Scalar(f32::NAN))
+                ],
+                RenderFabricFrameError::NonFiniteValue {
+                    object: particle.object_id,
+                    role: particle.payload_role(),
+                },
+            ),
+        ] {
+            frame.replace(11, [surface, particle]).unwrap();
+            let allocation = frame.items.as_ptr();
+            assert_eq!(
+                frame.replace_domain(RenderDomain::Particle, items),
+                Err(error)
+            );
+            assert!(frame.is_empty());
+            assert_eq!(frame.frame(), 11);
+            assert_eq!(frame.items.as_ptr(), allocation);
+        }
+        frame.replace(12, [surface, particle]).unwrap();
+        assert_eq!(frame.len(), 2);
     }
 
     #[test]
