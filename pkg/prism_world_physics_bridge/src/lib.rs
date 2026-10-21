@@ -15,9 +15,10 @@ mod sdf;
 pub use sdf::{
     SdfBounds, SdfBridgeError, SdfDistanceGradient, SdfPhysicsBridgeBudget, SdfPhysicsSnapshot,
     SdfQueryResult, SdfRebakeError, SdfRebakeLimits, SdfRebakePoint, SdfRebakeRegion,
-    SdfRebakeReport, SdfRebakeResource, SdfRebakeUpdate, SdfRebakeWork, WorldSdfPhysicsBridge,
-    WorldSdfSnapshot, WorldSdfTransform, WORLD_SDF_BRICK_METADATA_BYTES, WORLD_SDF_HEADER_BYTES,
-    WORLD_SDF_SAMPLE_BYTES,
+    SdfRebakeReport, SdfRebakeResource, SdfRebakeUpdate, SdfRebakeWork, SdfSphereBatchError,
+    SdfSphereBatchLimits, SdfSphereBatchReport, SdfSphereBody, SdfSphereContactBatch,
+    WorldSdfPhysicsBridge, WorldSdfSnapshot, WorldSdfTransform, WORLD_SDF_BRICK_METADATA_BYTES,
+    WORLD_SDF_HEADER_BYTES, WORLD_SDF_SAMPLE_BYTES,
 };
 #[cfg(feature = "tasks")]
 pub use sdf::{SdfRebakeTask, SdfRebakeTaskError};

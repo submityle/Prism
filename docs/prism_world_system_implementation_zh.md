@@ -415,3 +415,11 @@ Clippy `-D warnings` 通过（依赖 render graph 的既有 unused-import warnin
 | `cargo test -p prism_world_gpu --features gpu --lib --offline` | 123 passed | 验证 `gpu` feature 编译与 lib 单测；不代表本次在真实 GPU 上执行 shader |
 
 两条命令均通过；临时 `CARGO_TARGET_DIR` 随后清理，Cargo 报告移除 5,614 个文件、约 1.1 GiB。测试是在含其他并行未提交改动的共享工作树上运行，结论仅适用于当时被编译的工作树内容；本节不声称独立干净 checkout、设备实测或端到端产品链路通过。
+
+## 2026-10-21 SDF sphere batch → XPBD 接触消费
+
+`prism_world_physics_bridge::SdfSphereContactBatch` 新增不可变、按 `(BodyHandle.index, generation)` 规范排序的 sphere 刚体批适配器：构造阶段校验重复/非法句柄、半径和球数/查询数/最坏接触数/逻辑 scratch 字节预算，并预留可复用 manifold scratch；每次调用按当前刚体位置做有界 SDF 查询，将完整可用采样生成的 manifold 暂存，只有全部查询成功且输出容量预留成功后才原子追加。Miss、Unknown、分离和接触分别计数；错误不改调用方输出。使用毫米世界坐标和浮动原点转换，有限性、范围及加法均检查。排序成本 `O(n log n)` 只在构造发生；每次生成 `O(n)` 查询、无排序，scratch 复用，输出按需扩容。
+
+验证：`CARGO_TARGET_DIR=/private/tmp/prism-world-physics-bridge-sphere-batch-target-20261021 cargo test -p prism_world_physics_bridge --lib --offline`，23 passed；`rustfmt --edition 2024` 与指定文件 `git diff --check` 通过。首次编译发现并修复新模块对未声明 `alloc` crate 的误用。依赖 `prism_physics_core` 当前在此工作树会产生既有 lint 警告；bridge 新增字段缺文档告警已补齐，本条测试结果不代表严格 Clippy 通过。
+
+本适配器只支持球心位于刚体原点的球体，且 core 暴露的 mass properties 无法区分“静态”与其他零逆质量 body，调用方须传入正确的静态 SDF body。它证明批量 SDF narrow-phase manifold 能经已有 XPBD contact-generator hook 推动动态球体；尚未接入 ECS 自动注册、broad phase、一般 collider shape、持久接触/摩擦、生产 tick/clipmap 调度，也未覆盖 GPU physics。这是 M7 的一段 CPU 消费链路，不等于 M7 多消费者或 World 系统整体完成。

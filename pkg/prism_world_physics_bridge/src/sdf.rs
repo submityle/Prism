@@ -15,6 +15,11 @@ use prism_world_residency::{SdfQueryConsumer, SparseSdfBrickGrid, SparseSdfQuery
 mod sampling;
 pub use sampling::SdfDistanceGradient;
 mod contact;
+mod sphere_batch;
+pub use sphere_batch::{
+    SdfSphereBatchError, SdfSphereBatchLimits, SdfSphereBatchReport, SdfSphereBody,
+    SdfSphereContactBatch,
+};
 mod rebake;
 pub use rebake::{
     SdfRebakeError, SdfRebakeLimits, SdfRebakePoint, SdfRebakeRegion, SdfRebakeReport,
