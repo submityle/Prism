@@ -3,7 +3,7 @@
 use super::*;
 use crate::query::DirtyChunk;
 use alloc::sync::Arc;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 #[derive(Clone)]
 struct Value(u32);
@@ -30,6 +30,36 @@ impl Component for ExtraA {}
 struct ExtraB;
 impl Component for ExtraB {}
 
+struct GapNoise<const N: usize>;
+impl<const N: usize> Component for GapNoise<N> {}
+
+fn populate_unrelated_gap_archetypes(world: &mut World) {
+    // Every subset is a distinct archetype, none containing Value or Sparse.
+    for mask in 0..64 {
+        for _ in 0..16 {
+            let entity = world.spawn(Noise);
+            if mask & 1 != 0 {
+                world.insert(entity, GapNoise::<0>);
+            }
+            if mask & 2 != 0 {
+                world.insert(entity, GapNoise::<1>);
+            }
+            if mask & 4 != 0 {
+                world.insert(entity, GapNoise::<2>);
+            }
+            if mask & 8 != 0 {
+                world.insert(entity, GapNoise::<3>);
+            }
+            if mask & 16 != 0 {
+                world.insert(entity, GapNoise::<4>);
+            }
+            if mask & 32 != 0 {
+                world.insert(entity, GapNoise::<5>);
+            }
+        }
+    }
+}
+
 fn count(counter: &Arc<AtomicUsize>) -> impl FnMut(&mut ChangeContext<'_>) + Send + Sync + 'static {
     let counter = counter.clone();
     move |ctx| {
@@ -49,6 +79,17 @@ fn assert_idle(world: &mut World) {
             ..FlushStats::default()
         }
     );
+}
+
+fn force_change_index_gap(
+    world: &mut World,
+    component: crate::component::ComponentId,
+    entity: Entity,
+) {
+    let tick = world.change_tick();
+    for _ in 0..=crate::change_index::MAX_RETAINED_EVENTS {
+        world.change_tracker.record(component, entity, tick);
+    }
 }
 
 #[test]
@@ -122,13 +163,153 @@ fn observer_rebuilds_candidates_after_a_log_gap() {
 
     world.get_mut::<Value>(entity).unwrap().0 += 1;
     let component = world.components().id_of::<Value>().unwrap();
-    let tick = world.change_tick();
-    for _ in 0..=crate::change_index::MAX_RETAINED_EVENTS {
-        world.change_tracker.record(component, entity, tick);
-    }
+    force_change_index_gap(&mut world, component, entity);
 
     assert_eq!(world.flush_changed_observers(), 1);
     assert_eq!(calls.load(Ordering::Relaxed), 1);
+    assert_eq!(world.flush_changed_observers(), 0);
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn table_gap_fallback_rebuilds_only_live_changed_component_rows() {
+    let mut world = World::new();
+    populate_unrelated_gap_archetypes(&mut world);
+    let value_only = world.spawn(Value(0));
+    let value_with_noise = world.spawn((Value(0), Noise));
+    let noise_only = world.spawn(Noise);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let value_only_seen = Arc::new(AtomicBool::new(false));
+    let value_with_noise_seen = Arc::new(AtomicBool::new(false));
+    let noise_only_seen = Arc::new(AtomicBool::new(false));
+
+    world.observe_changed::<Value, _>({
+        let calls = calls.clone();
+        let value_only_seen = value_only_seen.clone();
+        let value_with_noise_seen = value_with_noise_seen.clone();
+        let noise_only_seen = noise_only_seen.clone();
+        move |ctx| {
+            calls.fetch_add(ctx.len(), Ordering::Relaxed);
+            for &entity in ctx.changed() {
+                if entity == value_only {
+                    value_only_seen.store(true, Ordering::Relaxed);
+                }
+                if entity == value_with_noise {
+                    value_with_noise_seen.store(true, Ordering::Relaxed);
+                }
+                if entity == noise_only {
+                    noise_only_seen.store(true, Ordering::Relaxed);
+                }
+            }
+        }
+    });
+    assert_eq!(world.flush_changed_observers(), 0);
+
+    world.get_mut::<Value>(value_only).unwrap().0 += 1;
+    world.get_mut::<Value>(value_with_noise).unwrap().0 += 1;
+    let component = world.components().id_of::<Value>().unwrap();
+    force_change_index_gap(&mut world, component, value_only);
+
+    assert_eq!(world.flush_changed_observers(), 1);
+    assert_eq!(calls.load(Ordering::Relaxed), 2);
+    assert!(value_only_seen.load(Ordering::Relaxed));
+    assert!(value_with_noise_seen.load(Ordering::Relaxed));
+    assert!(!noise_only_seen.load(Ordering::Relaxed));
+    assert_eq!(world.change_observers.stats.gap_archetypes_scanned, 2);
+    assert_eq!(world.change_observers.stats.gap_rows_checked, 2);
+    assert_eq!(world.change_observers.stats.gap_sparse_entities_checked, 0);
+    assert_idle(&mut world);
+}
+
+#[test]
+fn sparse_gap_fallback_rebuilds_only_sparse_set_members() {
+    let mut world = World::new();
+    populate_unrelated_gap_archetypes(&mut world);
+    let changed = world.spawn(Sparse(0));
+    let unchanged = world.spawn((Sparse(0), Noise));
+    let unrelated = world.spawn((Value(0), Noise));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let changed_seen = Arc::new(AtomicBool::new(false));
+    let unchanged_seen = Arc::new(AtomicBool::new(false));
+    let unrelated_seen = Arc::new(AtomicBool::new(false));
+
+    world.observe_changed::<Sparse, _>({
+        let calls = calls.clone();
+        let changed_seen = changed_seen.clone();
+        let unchanged_seen = unchanged_seen.clone();
+        let unrelated_seen = unrelated_seen.clone();
+        move |ctx| {
+            calls.fetch_add(ctx.len(), Ordering::Relaxed);
+            for &entity in ctx.changed() {
+                if entity == changed {
+                    changed_seen.store(true, Ordering::Relaxed);
+                }
+                if entity == unchanged {
+                    unchanged_seen.store(true, Ordering::Relaxed);
+                }
+                if entity == unrelated {
+                    unrelated_seen.store(true, Ordering::Relaxed);
+                }
+            }
+        }
+    });
+    assert_eq!(world.flush_changed_observers(), 0);
+
+    world.get_mut::<Sparse>(changed).unwrap().0 += 1;
+    let component = world.components().id_of::<Sparse>().unwrap();
+    force_change_index_gap(&mut world, component, changed);
+
+    assert_eq!(world.flush_changed_observers(), 1);
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    assert!(changed_seen.load(Ordering::Relaxed));
+    assert!(!unchanged_seen.load(Ordering::Relaxed));
+    assert!(!unrelated_seen.load(Ordering::Relaxed));
+    assert_eq!(world.change_observers.stats.gap_archetypes_scanned, 0);
+    assert_eq!(world.change_observers.stats.gap_rows_checked, 0);
+    assert_eq!(world.change_observers.stats.gap_sparse_entities_checked, 2);
+    assert_idle(&mut world);
+}
+
+#[test]
+fn gap_fallback_does_not_replay_despawned_generation() {
+    let mut world = World::new();
+    let old = world.spawn(Value(0));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let old_seen = Arc::new(AtomicBool::new(false));
+    let replacement_seen = Arc::new(AtomicBool::new(false));
+
+    world.observe_changed::<Value, _>({
+        let calls = calls.clone();
+        let old_seen = old_seen.clone();
+        let replacement_seen = replacement_seen.clone();
+        move |ctx| {
+            calls.fetch_add(ctx.len(), Ordering::Relaxed);
+            for &entity in ctx.changed() {
+                if entity == old {
+                    old_seen.store(true, Ordering::Relaxed);
+                }
+                if entity.index() == old.index() && entity != old {
+                    replacement_seen.store(true, Ordering::Relaxed);
+                }
+            }
+        }
+    });
+    assert_eq!(world.flush_changed_observers(), 0);
+
+    world.get_mut::<Value>(old).unwrap().0 += 1;
+    assert!(world.despawn(old));
+    let replacement = world.spawn(Value(2));
+    let component = world.components().id_of::<Value>().unwrap();
+    force_change_index_gap(&mut world, component, old);
+
+    // A stale log record for `old` may survive until the gap, but the
+    // authoritative table scan must only return the live replacement.
+    assert_eq!(world.flush_changed_observers(), 1);
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    assert!(!old_seen.load(Ordering::Relaxed));
+    assert!(replacement_seen.load(Ordering::Relaxed));
+    assert_eq!(old.index(), replacement.index());
+    assert_ne!(old, replacement);
 }
 
 #[cfg(feature = "std")]

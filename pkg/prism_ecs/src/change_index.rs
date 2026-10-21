@@ -123,6 +123,12 @@ pub(crate) struct ChangeIndexStats {
     pub(crate) batches: usize,
     pub(crate) events: usize,
     pub(crate) gap: bool,
+    /// Number of live archetypes visited while rebuilding a gap fallback.
+    pub(crate) gap_archetypes_scanned: usize,
+    /// Number of table rows whose component ticks were checked by a gap fallback.
+    pub(crate) gap_rows_checked: usize,
+    /// Number of sparse-set entities whose component ticks were checked by a gap fallback.
+    pub(crate) gap_sparse_entities_checked: usize,
 }
 
 /// Per-world exact change index.

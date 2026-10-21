@@ -31,6 +31,7 @@ use core::marker::PhantomData;
 use crate::change::Tick;
 use crate::component::Component;
 use crate::component::ComponentId;
+use crate::component::StorageType;
 use crate::entity::Entity;
 use crate::observer::ObserverId;
 use crate::world::{World, WorldId};
@@ -107,24 +108,59 @@ where
         this_run: Tick,
         out: &mut Vec<Entity>,
     ) -> crate::change_index::ChangeIndexStats {
-        let stats = world
-            .change_tracker
-            .collect(self.component, cursor, last_run, this_run, out);
+        let mut stats =
+            world
+                .change_tracker
+                .collect(self.component, cursor, last_run, this_run, out);
         if stats.gap {
             // The event index is deliberately bounded. Rebuild the exact
             // current-state candidate set from authoritative component ticks;
             // removed/despawned entities are not delivered by this observer
             // contract because they have no readable current component.
             out.clear();
-            for archetype in world.archetypes().iter() {
-                for &entity in archetype.table().entities() {
-                    if world
-                        .get_ticks::<T>(entity)
-                        .is_some_and(|ticks| ticks.is_changed(last_run, this_run))
-                    {
-                        out.push(entity);
+            match world
+                .components()
+                .info(self.component)
+                .map(|info| info.storage())
+            {
+                Some(StorageType::SparseSet) => {
+                    if let Some(set) = world.sparse_sets().get(self.component) {
+                        stats.gap_sparse_entities_checked = set.entities().len();
+                        for &entity in set.entities() {
+                            if set
+                                .component_ticks(entity)
+                                .is_some_and(|ticks| ticks.is_changed(last_run, this_run))
+                            {
+                                out.push(entity);
+                            }
+                        }
                     }
                 }
+                Some(StorageType::Table) => {
+                    if let Some(posting) = world.archetypes().with_component(self.component) {
+                        for archetype_id in posting.iter() {
+                            let Some(archetype) = world.archetypes().get(archetype_id) else {
+                                continue;
+                            };
+                            stats.gap_archetypes_scanned += 1;
+                            let table = archetype.table();
+                            let Some(column) = table.column(self.component) else {
+                                continue;
+                            };
+                            let entities = table.entities();
+                            stats.gap_rows_checked += entities.len();
+                            // The posting already resolved the owning table.
+                            // Read its packed tick column directly instead of
+                            // looking up the entity and table again per row.
+                            for (row, &entity) in entities.iter().enumerate() {
+                                if column.component_ticks(row).is_changed(last_run, this_run) {
+                                    out.push(entity);
+                                }
+                            }
+                        }
+                    }
+                }
+                Some(StorageType::Shared) | None => {}
             }
         } else {
             out.retain(|&entity| {
@@ -170,6 +206,9 @@ struct FlushStats {
     candidate_slots: usize,
     log_batches: usize,
     log_events: usize,
+    gap_archetypes_scanned: usize,
+    gap_rows_checked: usize,
+    gap_sparse_entities_checked: usize,
     /// Auditable upper bound: current collection calls `get_ticks` once per
     /// event passed through the retain filter; derived from indexed events.
     retain_tick_lookup_upper_bound: usize,
@@ -654,6 +693,15 @@ impl World {
             {
                 guard.world.change_observers.stats.log_batches += _collect_stats.batches;
                 guard.world.change_observers.stats.log_events += _collect_stats.events;
+                guard.world.change_observers.stats.gap_archetypes_scanned +=
+                    _collect_stats.gap_archetypes_scanned;
+                guard.world.change_observers.stats.gap_rows_checked +=
+                    _collect_stats.gap_rows_checked;
+                guard
+                    .world
+                    .change_observers
+                    .stats
+                    .gap_sparse_entities_checked += _collect_stats.gap_sparse_entities_checked;
                 guard
                     .world
                     .change_observers
