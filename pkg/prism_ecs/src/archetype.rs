@@ -64,14 +64,39 @@ pub struct ColumnChanges {
 }
 
 /// Result and deterministic work count for the query-only filtered journal read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct FilteredColumnChangeRun {
+    pub change: ColumnChange,
+    /// Number of selected retained events represented by this run.
+    pub event_count: usize,
+}
+
 pub(crate) struct FilteredColumnChanges {
     pub cursor: ColumnChangeCursor,
     pub gap: bool,
-    pub events: Vec<ColumnChange>,
+    /// Consecutive events for the same archetype/chunk are coalesced. Structural
+    /// events without a chunk remain individual records.
+    pub events: Vec<FilteredColumnChangeRun>,
     /// Relevant event records selected/materialized for merge, including
     /// structural records. Binary-search probes over revision metadata and
     /// unrelated writes are not counted.
     pub records_scanned: usize,
+}
+
+#[inline]
+fn push_column_change_run(runs: &mut Vec<FilteredColumnChangeRun>, change: ColumnChange) {
+    if change.chunk.is_some()
+        && let Some(previous) = runs.last_mut()
+        && previous.change.archetype == change.archetype
+        && previous.change.chunk == change.chunk
+    {
+        previous.event_count += 1;
+    } else {
+        runs.push(FilteredColumnChangeRun {
+            change,
+            event_count: 1,
+        });
+    }
 }
 
 struct ColumnJournalState {
@@ -293,32 +318,53 @@ impl ColumnJournal {
             sources.push((&state.structural_events, structural_start));
         }
 
-        // Every source is already strictly ordered by revision, and sources
-        // are disjoint (one event has either one component or is structural).
-        // Merge the selected streams directly instead of materializing all
-        // revisions and sorting them. This keeps the filtered read at
-        // O(k log m), where k is the selected event count and m is the number
-        // of selected sources, rather than O(k log k). The output is copied
-        // while the journal lock is held so eviction cannot invalidate an
-        // event's offset before it is materialized.
-        let mut heap = BinaryHeap::with_capacity(sources.len());
-        for (source, (revisions, position)) in sources.iter().enumerate() {
-            if let Some(&revision) = revisions.get(*position) {
-                heap.push(Reverse((revision, source)));
+        // Allocate according to the number of distinct runs, not raw writes.
+        // Clustered row writes commonly collapse thousands of records to a
+        // handful of chunks; scattered workloads grow this buffer as needed.
+        let mut events: Vec<FilteredColumnChangeRun> = Vec::new();
+        if sources.len() <= 4 {
+            // The common query reads one or a few components. A stack cursor
+            // merge avoids allocating and mutating a heap once per journal
+            // event; retain the heap path only for high-arity queries.
+            let mut cursors = [0usize; 4];
+            loop {
+                let next = sources
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(source, (revisions, start))| {
+                        revisions
+                            .get(start + cursors[source])
+                            .copied()
+                            .map(|r| (r, source))
+                    })
+                    .min();
+                let Some((revision, source)) = next else {
+                    break;
+                };
+                let offset = (revision - first_retained - 1) as usize;
+                push_column_change_run(&mut events, state.events[offset]);
+                cursors[source] += 1;
             }
-        }
-        let mut events = Vec::with_capacity(records_scanned);
-        while let Some(Reverse((revision, source))) = heap.pop() {
-            // `first_retained` is the revision immediately before the first
-            // retained event; convert event revision to zero-based deque
-            // position.
-            let offset = (revision - first_retained - 1) as usize;
-            events.push(state.events[offset]);
+        } else {
+            // Every source is strictly ordered and sources are disjoint (each
+            // event belongs to one component index or the structural index).
+            // Merge in O(k log m), where k is selected event count and m is
+            // source count, without sorting a materialized revision list.
+            let mut heap = BinaryHeap::with_capacity(sources.len());
+            for (source, (revisions, position)) in sources.iter().enumerate() {
+                if let Some(&revision) = revisions.get(*position) {
+                    heap.push(Reverse((revision, source)));
+                }
+            }
+            while let Some(Reverse((revision, source))) = heap.pop() {
+                let offset = (revision - first_retained - 1) as usize;
+                push_column_change_run(&mut events, state.events[offset]);
 
-            let (revisions, position) = &mut sources[source];
-            *position += 1;
-            if let Some(&next) = revisions.get(*position) {
-                heap.push(Reverse((next, source)));
+                let (revisions, position) = &mut sources[source];
+                *position += 1;
+                if let Some(&next) = revisions.get(*position) {
+                    heap.push(Reverse((next, source)));
+                }
             }
         }
         FilteredColumnChanges {
@@ -1226,6 +1272,27 @@ mod tests {
         }
     }
 
+    fn coalesce_column_changes(
+        events: impl IntoIterator<Item = ColumnChange>,
+    ) -> Vec<FilteredColumnChangeRun> {
+        let mut runs: Vec<FilteredColumnChangeRun> = Vec::new();
+        for change in events {
+            if change.chunk.is_some()
+                && let Some(previous) = runs.last_mut()
+                && previous.change.archetype == change.archetype
+                && previous.change.chunk == change.chunk
+            {
+                previous.event_count += 1;
+            } else {
+                runs.push(FilteredColumnChangeRun {
+                    change,
+                    event_count: 1,
+                });
+            }
+        }
+        runs
+    }
+
     #[test]
     fn filtered_column_journal_merges_selected_components_and_structural_events_in_order() {
         let journal = ColumnJournal::new();
@@ -1248,7 +1315,7 @@ mod tests {
             .filter(|event| event.component.map_or(true, |id| id == a || id == b))
             .collect();
         assert!(!full.gap && !filtered.gap);
-        assert_eq!(filtered.events, expected);
+        assert_eq!(filtered.events, coalesce_column_changes(expected));
         assert_eq!(filtered.events.len(), 4);
         assert_eq!(filtered.records_scanned, 4);
         // The legacy full API's scan count is defined as the full returned
@@ -1258,9 +1325,46 @@ mod tests {
             filtered
                 .events
                 .iter()
-                .map(|event| event.chunk)
+                .map(|run| run.change.chunk)
                 .collect::<Vec<_>>(),
             vec![Some(0), Some(2), Some(0), Some(3)]
+        );
+    }
+
+    #[test]
+    fn filtered_column_journal_coalesces_only_consecutive_same_chunk_events() {
+        let journal = ColumnJournal::new();
+        let component = ComponentId::new(1);
+        let baseline = journal.since(None).cursor;
+        journal.record(component_event(component, 4));
+        journal.record(component_event(component, 4));
+        journal.record(component_event(component, 5));
+        journal.record(column_event());
+        journal.record(component_event(component, 4));
+
+        let filtered = journal.since_components(Some(baseline), &[component]);
+        assert!(!filtered.gap);
+        assert_eq!(filtered.records_scanned, 5);
+        assert_eq!(
+            filtered.events,
+            vec![
+                FilteredColumnChangeRun {
+                    change: component_event(component, 4),
+                    event_count: 2,
+                },
+                FilteredColumnChangeRun {
+                    change: component_event(component, 5),
+                    event_count: 1,
+                },
+                FilteredColumnChangeRun {
+                    change: column_event(),
+                    event_count: 1,
+                },
+                FilteredColumnChangeRun {
+                    change: component_event(component, 4),
+                    event_count: 1,
+                },
+            ]
         );
     }
 
@@ -1291,7 +1395,7 @@ mod tests {
             .collect();
 
         assert!(!full.gap && !filtered.gap);
-        assert_eq!(filtered.events, expected);
+        assert_eq!(filtered.events, coalesce_column_changes(expected));
         assert_eq!(filtered.records_scanned, selected.len() * 4 + 2);
     }
 
@@ -1311,7 +1415,13 @@ mod tests {
         // was lost and need not rebuild.
         let filtered = journal.since_components(Some(baseline), &[selected]);
         assert!(!filtered.gap);
-        assert_eq!(filtered.events, vec![component_event(selected, 7)]);
+        assert_eq!(
+            filtered.events,
+            vec![FilteredColumnChangeRun {
+                change: component_event(selected, 7),
+                event_count: 1,
+            }]
+        );
         assert_eq!(filtered.records_scanned, 1);
 
         // The compatibility API remains a global snapshot and therefore gaps

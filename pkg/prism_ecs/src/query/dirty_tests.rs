@@ -428,6 +428,8 @@ fn repeated_writes_deduplicate_dirty_chunk_candidates_before_sorting() {
     assert!(!report.stats.journal_gap);
     assert_eq!(report.stats.journal_events, WRITES);
     assert_eq!(report.stats.candidate_chunk_marks, WRITES);
+    assert_eq!(report.stats.journal_records_scanned, WRITES);
+    assert_eq!(report.stats.journal_runs_materialized, 1);
     assert_eq!(report.stats.merged_candidates, 1);
     assert_eq!(report.chunks.len(), 1);
 }
@@ -495,6 +497,7 @@ fn high_cardinality_dirty_query_work_tracks_distinct_journal_candidates() {
     let report = state.dirty_chunks_with_stats(&w, last_run, this_run);
     assert!(!report.stats.journal_gap);
     assert_eq!(report.stats.journal_records_scanned, CHUNKS);
+    assert_eq!(report.stats.journal_runs_materialized, CHUNKS);
     assert_eq!(report.stats.journal_events, CHUNKS);
     assert_eq!(report.stats.candidate_chunk_marks, CHUNKS);
     assert_eq!(report.stats.merged_candidates, CHUNKS);

@@ -100,6 +100,8 @@ pub struct DirtyChunkStats {
     /// are excluded. A conservative gap reports zero because no delta records
     /// are consumed.
     pub journal_records_scanned: usize,
+    /// Coalesced journal runs materialized after scanning the selected records.
+    pub journal_runs_materialized: usize,
     /// Number of distinct candidate archetypes checked against query data and
     /// filters after the journal/sparse candidate union or fallback index lookup.
     pub candidate_archetype_checks: usize,
@@ -333,6 +335,7 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
             .column_changes_since_components(self.dirty_column_cursor(), access_ids);
         report.stats.journal_gap = changes.gap;
         report.stats.journal_records_scanned = changes.records_scanned;
+        report.stats.journal_runs_materialized = changes.events.len();
         if changes.gap {
             return false;
         }
@@ -349,43 +352,21 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
                 candidate.insert_chunk(row / rows_per_chunk);
             }
         }
-        let mut event_index = 0;
-        while event_index < changes.events.len() {
-            let first = changes.events[event_index];
-            let Some(chunk) = first.chunk else {
-                event_index += 1;
+        for run in changes.events {
+            let change = run.change;
+            let Some(chunk) = change.chunk else {
                 continue;
             };
-
-            // Journal revisions preserve write order. Fold a consecutive run
-            // for one archetype/chunk before touching the archetype registry,
-            // candidate map, and per-chunk deduplicator. This is especially
-            // important for row-ordered writes, where thousands of row events
-            // commonly describe only a handful of physical chunks.
-            let mut run_end = event_index + 1;
-            while run_end < changes.events.len() {
-                let next = changes.events[run_end];
-                if next.archetype != first.archetype || next.chunk != Some(chunk) {
-                    break;
-                }
-                run_end += 1;
-            }
-
-            // `column_changes_since_components` already selects only these
-            // accessed components plus structural events.
-            let relevant_events = run_end - event_index;
-            event_index = run_end;
-
-            let Some(archetype) = world.archetypes().get(first.archetype) else {
+            let Some(archetype) = world.archetypes().get(change.archetype) else {
                 continue;
             };
             if chunk >= archetype.table().chunk_count() {
                 continue;
             }
-            let candidate = candidates.entry(first.archetype).or_default();
-            report.stats.candidate_chunk_marks += relevant_events;
+            let candidate = candidates.entry(change.archetype).or_default();
+            report.stats.candidate_chunk_marks += run.event_count;
             candidate.insert_chunk(chunk);
-            candidate.journal_events += relevant_events;
+            candidate.journal_events += run.event_count;
         }
 
         for (archetype_id, candidate) in candidates {
