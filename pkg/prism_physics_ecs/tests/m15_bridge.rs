@@ -64,10 +64,17 @@ impl M15TopologyAdapter for RecordingAdapter {
 }
 
 fn app() -> App {
+    physics_app(true)
+}
+
+fn physics_app(bridge: bool) -> App {
     let mut app = App::new();
     app.set_time_update_strategy(TimeUpdateStrategy::ManualDelta(Duration::from_millis(10)))
         .set_fixed_timestep(Duration::from_millis(10))
-        .add_plugins((PrismPhysicsPlugin, M15TopologyBridgePlugin));
+        .add_plugins(PrismPhysicsPlugin);
+    if bridge {
+        app.add_plugins(M15TopologyBridgePlugin);
+    }
     app.world_mut()
         .resource_mut::<PhysicsWorldResource>()
         .config
@@ -262,4 +269,133 @@ fn retiring_soft_body_unregisters_consumer_and_downstream_state() {
     assert_eq!(bridge.pending_len(), 0);
     assert_eq!(bridge.diagnostics().registered_bodies, 0);
     assert_eq!(log.lock().unwrap().removals, vec![body]);
+}
+
+#[test]
+fn late_plugin_without_history_registers_the_current_physics_revision() {
+    let mut app = physics_app(false);
+    let entity = app.world_mut().spawn((SoftBodyBinding(tearing_body()),));
+    app.update();
+    let body = soft_body(&app, entity);
+    {
+        let physics = app.world_mut().resource_mut::<PhysicsWorldResource>();
+        assert_eq!(physics.drain_topology_updates().len(), 1);
+        let live = physics.soft_bodies.get_mut(body).unwrap();
+        assert_eq!(live.topology_version(), Some(1));
+        live.topology_config.max_front_steps = 0;
+    }
+    app.add_plugins(M15TopologyBridgePlugin);
+    let log = Arc::new(Mutex::new(AdapterLog::default()));
+    app.world_mut()
+        .resource_mut::<M15TopologyBridge>()
+        .set_adapter(RecordingAdapter {
+            log: Arc::clone(&log),
+            reject_apply: false,
+        });
+    app.update();
+    let bridge = app.world().resource::<M15TopologyBridge>();
+    assert_eq!(bridge.revision(body), Some(1));
+    assert_eq!(bridge.pending_len(), 0);
+    assert_eq!(bridge.diagnostics().last_error, None);
+    let log = log.lock().unwrap();
+    assert_eq!(log.registrations, vec![(body, 1)]);
+    assert!(log.updates.is_empty());
+}
+
+#[test]
+fn late_plugin_bootstraps_missing_history_then_applies_retained_updates_in_order() {
+    let mut app = physics_app(false);
+    let entity = app.world_mut().spawn((SoftBodyBinding(tearing_body()),));
+    app.update();
+    let body = soft_body(&app, entity);
+    let mut retained = Vec::new();
+    {
+        let physics = app.world_mut().resource_mut::<PhysicsWorldResource>();
+        physics.drain_topology_updates();
+        let live = physics.soft_bodies.get_mut(body).unwrap();
+        for expected in [2, 3] {
+            let events = live
+                .puncture_topology(Vec3::ONE, Vec3::Z, 100.0)
+                .expect("remaining interior cloth edge");
+            assert!(!events.is_empty());
+            let update = live.topology_update.take().unwrap();
+            assert_eq!(update.topology_version, expected);
+            retained.push(WorldTopologyTearUpdate { body, update });
+        }
+        live.topology_config.max_front_steps = 0;
+        physics.topology_updates = retained.clone();
+    }
+    app.add_plugins(M15TopologyBridgePlugin);
+    let log = Arc::new(Mutex::new(AdapterLog::default()));
+    app.world_mut()
+        .resource_mut::<M15TopologyBridge>()
+        .set_adapter(RecordingAdapter {
+            log: Arc::clone(&log),
+            reject_apply: false,
+        });
+    app.update();
+    let bridge = app.world().resource::<M15TopologyBridge>();
+    assert_eq!(bridge.revision(body), Some(3));
+    assert_eq!(bridge.pending_len(), 0);
+    assert_eq!(bridge.diagnostics().last_error, None);
+    assert_eq!(bridge.diagnostics().applied_updates, 1);
+    let log = log.lock().unwrap();
+    assert_eq!(log.registrations, vec![(body, 2)]);
+    assert_eq!(log.updates, vec![retained[1].clone()]);
+}
+
+#[test]
+fn stable_stream_reuses_consumer_arrays_and_never_reregisters() {
+    let log = Arc::new(Mutex::new(AdapterLog::default()));
+    let mut app = app();
+    let entity = app.world_mut().spawn((SoftBodyBinding(tearing_body()),));
+    app.world_mut()
+        .resource_mut::<M15TopologyBridge>()
+        .set_adapter(RecordingAdapter {
+            log: Arc::clone(&log),
+            reject_apply: false,
+        });
+    app.update();
+    let body = soft_body(&app, entity);
+    app.world_mut()
+        .resource_mut::<PhysicsWorldResource>()
+        .soft_bodies
+        .get_mut(body)
+        .unwrap()
+        .topology_config
+        .max_front_steps = 0;
+    let arrays = {
+        let state = app
+            .world()
+            .resource::<M15TopologyBridge>()
+            .consumer(body)
+            .unwrap();
+        (
+            state.render().vertices.as_ptr(),
+            state.render().triangles.as_ptr(),
+            state.collision().triangle_bounds.as_ptr(),
+            state.previous_positions().as_ptr(),
+        )
+    };
+    for _ in 0..8 {
+        app.update();
+        let state = app
+            .world()
+            .resource::<M15TopologyBridge>()
+            .consumer(body)
+            .unwrap();
+        assert_eq!(state.topology_version(), 1);
+        assert_eq!(
+            arrays,
+            (
+                state.render().vertices.as_ptr(),
+                state.render().triangles.as_ptr(),
+                state.collision().triangle_bounds.as_ptr(),
+                state.previous_positions().as_ptr(),
+            )
+        );
+    }
+    let log = log.lock().unwrap();
+    assert_eq!(log.registrations, vec![(body, 0)]);
+    assert_eq!(log.updates.len(), 1);
 }

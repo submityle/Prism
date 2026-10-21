@@ -147,8 +147,12 @@ impl M15TopologyBridge {
         self.adapter = None;
     }
 
-    fn synchronize_live_bodies(&mut self, live: Vec<(SoftBodyHandle, TearableMesh)>) {
-        let live_handles: HashSet<_> = live.iter().map(|(body, _)| *body).collect();
+    fn synchronize_live_bodies(
+        &mut self,
+        live: Vec<(SoftBodyHandle, &TearableMesh, &TearableMesh)>,
+        updates: &mut Vec<WorldTopologyTearUpdate>,
+    ) {
+        let live_handles: HashSet<_> = live.iter().map(|(body, _, _)| *body).collect();
         let mut retired: Vec<_> = self
             .consumers
             .keys()
@@ -166,10 +170,49 @@ impl M15TopologyBridge {
             }
         }
 
-        for (body, mesh) in live {
-            self.consumers
-                .entry(body)
-                .or_insert_with(|| TopologyUpdateConsumer::from_mesh(&mesh));
+        let mut bootstrapped = HashSet::new();
+        for (body, authored, current) in live {
+            if self.consumers.contains_key(&body) {
+                continue;
+            }
+            let first = updates.iter().position(|update| update.body == body);
+            let state = match first {
+                // Preserve ordinary registration -> ordered updates, including
+                // the first fixed tick's tear. Never clone authored topology.
+                Some(index)
+                    if updates[index].update.topology_version
+                        <= authored.topology_version.saturating_add(1) =>
+                {
+                    TopologyUpdateConsumer::from_mesh(authored)
+                }
+                Some(index) => {
+                    // A late plugin may have missed history drained by an
+                    // earlier consumer. The earliest retained full payload is
+                    // an explicit registration baseline, not a revision jump
+                    // on an existing stream. Registration receives its events.
+                    match TopologyUpdateConsumer::new(updates[index].update.clone()) {
+                        Ok(state) => {
+                            bootstrapped.insert(index);
+                            state
+                        }
+                        // Preserve invalid input for the normal diagnostic and
+                        // retry path; do not silently drop malformed payloads.
+                        Err(_) => TopologyUpdateConsumer::from_mesh(authored),
+                    }
+                }
+                // With no retained history, use the authoritative current
+                // mesh, not the potentially many-revisions-old authoring copy.
+                None => TopologyUpdateConsumer::from_mesh(current),
+            };
+            self.consumers.insert(body, state);
+        }
+        if !bootstrapped.is_empty() {
+            let mut index = 0;
+            updates.retain(|_| {
+                let keep = !bootstrapped.contains(&index);
+                index += 1;
+                keep
+            });
         }
         self.refresh_diagnostics();
     }
@@ -299,43 +342,26 @@ fn route_topology_updates(world: &mut World) {
         return;
     }
 
-    let query = world.query::<(Entity, &SoftBodyBinding)>();
-    let mut authored: Vec<_> = query
-        .iter(world)
-        .filter_map(|(entity, binding)| {
-            binding
-                .0
-                .topology
-                .as_ref()
-                .map(|topology| (entity, topology.clone()))
-        })
-        .collect();
-    authored.sort_by_key(|(entity, _)| *entity);
-
-    let mut live = Vec::with_capacity(authored.len());
-    {
-        let bindings = world.resource::<PhysicsBindings>();
-        for (entity, topology) in authored {
-            if let Some(body) = bindings.soft_body(entity) {
-                live.push((body, topology));
-            }
-        }
-    }
-    live.sort_by_key(|(body, _)| handle_key(*body));
-
     let mut bridge = world
         .remove_resource::<M15TopologyBridge>()
         .expect("M15TopologyBridgePlugin initializes its resource");
-    bridge.synchronize_live_bodies(live);
-
-    let updates = {
-        let mut physics = world
-            .remove_resource::<PhysicsWorldResource>()
-            .expect("physics resource presence checked before routing");
-        let updates = physics.drain_topology_updates();
-        world.insert_resource(physics);
-        updates
-    };
+    let mut updates = world
+        .resource_mut::<PhysicsWorldResource>()
+        .drain_topology_updates();
+    let query = world.query::<(Entity, &SoftBodyBinding)>();
+    let bindings = world.resource::<PhysicsBindings>();
+    let physics = world.resource::<PhysicsWorldResource>();
+    let mut live: Vec<_> = query
+        .iter(world)
+        .filter_map(|(entity, binding)| {
+            let authored = binding.0.topology.as_ref()?;
+            let body = bindings.soft_body(entity)?;
+            let current = physics.soft_bodies.get(body)?.topology.as_ref()?;
+            Some((body, authored, current))
+        })
+        .collect();
+    live.sort_by_key(|(body, _, _)| handle_key(*body));
+    bridge.synchronize_live_bodies(live, &mut updates);
     bridge.enqueue(updates);
     bridge.flush();
     world.insert_resource(bridge);
