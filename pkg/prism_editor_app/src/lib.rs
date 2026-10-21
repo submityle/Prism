@@ -46,6 +46,8 @@ mod desktop_ui;
 mod document;
 mod ecs_document_bridge;
 mod lifecycle;
+#[cfg(feature = "desktop")]
+mod scene_project;
 
 pub use controller::{
     ControllerError, ControllerFieldEdit, ControllerLimits, ControllerOutcome, EditorController,
@@ -90,6 +92,8 @@ pub use backend::{
     WindowBackendErrorKind, WindowDescriptor, WindowEvent, WindowEventEnvelope, WindowId,
 };
 pub use lifecycle::{ApplicationState, ExitReason, ExitStatus, InvalidStateError, ShutdownReport};
+#[cfg(feature = "desktop")]
+pub use scene_project::{SceneProject, SceneProjectConfig, SceneProjectError, SceneProjectOpen};
 
 impl Resource for EditorApplication {}
 
