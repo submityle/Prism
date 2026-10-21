@@ -121,7 +121,9 @@ GPU header + dense execution binding
 
 当前文档不再把手写 `SpecializationId` 位布局或 illumination 轴当作 ABI 现状；它们只作为历史背景，不是当前数据来源。
 
-## 9. 最终收口验收矩阵 / 未完成项（2026-10-20 文档审计）
+## 9. 最终收口验收矩阵 / 未完成项（2026-10-21 文档审计）
+
+**2026-10-21 收口补记**：此前 `prism_render_scene --features legacy-bevy --lib` 的 `cargo check` 曾通过，确认当时的 Surface/Fabric 依赖可编译；一次后续尝试曾因 `prism_asset` 的 `Flight` 初始化缺少 `cancellation_waiters` 字段而停止，域帧定向测试未进入执行。该错误仅是历史记录：当前 `Flight` 定义已无此字段，后续编译反馈也已越过 asset 初始化；本次文档同步未运行 Cargo，不认定当前仍受该错误阻断。这些记录都不是 Surface ABI package freshness、真实 recorder 或 GPU parity 证据，未完成验收全部保留。
 
 本节区分源码、测试定义和实跑证据。`S`=源码事实，`D`=测试定义，`R`=本轮运行通过，`H`=已有运行记录，`G`=GPU 证据，`E`=全场景闭环。本轮 `prism_render_scene --lib` 为 1909/1909，material allocator 定向测试为 6/6；未运行完整 `prism_render_material` integration/codegen freshness 套件或真实 GPU 验收。
 

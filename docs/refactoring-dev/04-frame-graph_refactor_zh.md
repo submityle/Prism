@@ -122,7 +122,7 @@ response planes + coverage ──▶ response_composition ──▶ HDR
 | compatibility frame_graph 导出与底层契约 | `pkg/prism_render_architecture/src/frame_graph/mod.rs`、`pkg/prism_render_architecture/src/frame_graph/tests.rs` |
 | shading graph 单一 pass-count source、主链顺序、资源 barrier | `pkg/prism_render_scene/src/shading/graph.rs` 中 `declared_pass_count_matches_runtime_assertion` |
 | composition 固定位置、imported planes、HDR barrier | `pkg/prism_render_scene/text/unit/shading/composition_graph.rs` 中 `composition_is_resident_and_follows_water_response_producer` |
-| composition production recorder 与 GPU 回归 | `shading/composition.rs::response_composition_pass` / `record_composition_fabric_commands`；`text/integration/resident_composition_gpu.rs` 现与生产入口共用 recorder，覆盖真实 imports、Fabric compile/prepare/record、producer → composition → readback 顺序；修订后的 harness 尚待本轮运行。即使局部 GPU 回归通过，也不证明共享 Scene/Fabric/TAA 全帧闭环 |
+| composition production recorder 与 GPU 回归 | `shading/composition.rs::response_composition_pass` 使用共享 `SceneFabric` / `RenderFabricFrame`，经 `fabric_runtime::prepare_with_templates` 的 active-pass compile、真实 imports、prepare 与 encode 交给宿主；`text/integration/resident_composition_gpu.rs` 与生产入口共用 recorder。acceptance 的 `CompositionFabric` 仅封装同一 scene selection 构造器，不是第二份生产 ECS catalog。修订后的 harness 尚待复跑，局部切片不证明共享 Scene/Fabric/TAA 全帧闭环 |
 | pass skeleton codegen 的确定性、依赖校验、资源复用和 cycle diagnostics | `pkg/prism_render_graph/src/frame_graph/codegen.rs` 及其单元测试 |
 | 23 项 post inventory、声明/binding/executor 对齐和插件 registration | `pkg/prism_render_scene/src/shading/post_graph.rs`、`pkg/prism_render_scene/src/shading/plugin.rs` |
 | shading crate 历史运行记录 | `cargo test -p prism_render_scene --lib shading`：844 passed，0 failed；不是本轮复跑结果 |
@@ -137,7 +137,9 @@ response planes + coverage ──▶ response_composition ──▶ HDR
 
 本篇结论：当前 frame graph 已由统一 `prism_render_graph` 编译器承载；shading graph 以 8 个主链 pass、23 个生成式后处理 pass 和 resident composition 组成固定拓扑，资源访问、执行 ledger 与测试共同构成验收契约。
 
-## 8. 最终收口验收矩阵 / 未完成项（2026-10-20 文档审计）
+## 8. 最终收口验收矩阵 / 未完成项（2026-10-21 文档审计）
+
+**2026-10-21 收口补记**：此前 Scene/Fabric 相关源码的 `cargo check` 曾通过；`prism_asset` 的 `Flight` 初始化缺少 `cancellation_waiters` 字段是另一次尝试的历史阻断，当前定义已无该字段，后续反馈已越过 asset 初始化。本次仅同步源码事实，未运行 Cargo。composition 已消费共享 `SceneFabric` selection/runtime 的真实 compute 切片；native `RenderApp` 已有 Surface/Particle 聚合、GPU Prepare 后刷新、host graph record/submit 前 admission，以及 visibility 的共享帧/对象身份校验。native admission 不覆盖更早的 Particle Prepare simulation 提交，也不是 Bevy 31-pass 统一 recorder；通用 runtime 的全场景生产调度仍待闭合。真实 imports、barrier、record/submit 和 GPU/full-frame 未完成验收保持不变，新接线不预记测试通过。
 
 `S`=源码实现，`D`=测试定义，`R`=本轮运行通过，`H`=已有运行记录，`G`=实际 GPU 证据，`E`=全场景闭环。本轮 `prism_render_scene --lib` 为 1909/1909；`prism_render_graph` package tests、真实 GPU 与 full-frame replay 未由此覆盖。
 
@@ -145,7 +147,7 @@ response planes + coverage ──▶ response_composition ──▶ HDR
 |---|---|---|---|---|---|
 | graph compiler、SSA version、hazard、barrier、alias、lifetime | 当前统一编译器与资源依赖实现存在 | compiler/codegen/graph gate 已定义 | scene lib 1909/1909；graph package suite 未运行 | shading `844/0` 等为历史记录 | 否；没有 full-frame 复核 |
 | 31-pass shading topology（8 主链 + 23 post） | pass inventory、composition 固定位置和 runtime assertion 存在 | pass-count、order、resource/barrier gate 已定义 | scene lib 1909/1909 | 既有记录只证明相应历史工作树 | 否；未证明完整 Scene/Fabric/TAA 执行 |
-| resident Composition 与 imported resources | 生产 recorder、imports 和 HDR barrier 接线存在 | integration/GPU harness 定义存在 | scene lib 1909/1909；integration/GPU harness 未运行 | 水体/组合单 adapter 记录不等于整图 GPU 证据 | 否 |
+| resident Composition 与 imported resources | 共享 SceneFabric selection/runtime 下的生产切片、imports 和 HDR barrier 接线存在 | integration/GPU harness 定义存在 | scene lib 1909/1909；integration/GPU harness 未运行 | 水体/组合单 adapter 记录不等于整图 GPU 证据 | 否 |
 | TAA/history 与跨 adapter | TAA history 源码接线存在；跨 adapter strict/skip probe 存在 | history/adapter gate 已定义 | 无 | 单 Apple M2/Metal；第二 adapter 未验证 | 否；无 exact history full-frame parity |
 
 仍未验证：`prism_render_graph` package/integration suites；修订后的 resident composition GPU harness；全 31 pass 在真实 Scene imports、barrier、record/submit 上的完整运行；TAA completion-gated history 的真实 GPU 行为；第二 physical adapter；以及全帧图像 parity、资源峰值和 P50/P95/P99 性能数据。库内 1909 项通过及编译器/测试定义的存在不等于生产闭环完成。

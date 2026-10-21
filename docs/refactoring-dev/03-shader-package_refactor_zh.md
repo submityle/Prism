@@ -82,7 +82,7 @@ FeatureSelection
 
 `shader_package/pso_cache` 提供：
 
-- `WarmRuntime`：`Absent → Queued → Compiling → Ready/Failed`，draw 请求返回 `Draw`、`Placeholder` 或 `Skip` 决策，并把 miss 回馈给 `WarmSetPlanner`；
+- `WarmRuntime`：`Absent → Queued → Compiling → Ready/Failed`，draw 请求仅返回 `Draw` 或 `Skip`；`Ready` 才能绘制，未就绪时跳过，`Absent`/`Failed` 会重新入队并把 miss 回馈给 `WarmSetPlanner`；
 - `WarmSetPlanner`、`PackageWarmSpec`：按 package、密集 permutation 和状态生成确定性 warm set；
 - `LruPsoCache`：可选字节预算驻留；
 - `DeviceFingerprint`：绑定 backend、vendor/device、driver 和 ABI；
@@ -116,7 +116,7 @@ bin 路径位于 `pkg/prism_render_app/src/bin_queue.rs`：
 2. 完整 `PipelineState` 参与相等性和 canonical 校验，hash 只用于冷端索引与存储编码。
 3. typed key、cold key、module/package 的映射出现未注册、冲突或歧义时显式报错，不猜测反向映射。
 4. `asset_refs` 保持后端无关；PSO、driver fingerprint、native pipeline binary 属于 DriverLocal。
-5. 异步编译保持有界内存和非阻塞渲染线程；未就绪 draw 使用明确 fallback/placeholder 语义。
+5. 异步编译保持有界内存和非阻塞渲染线程；`WarmRuntime` 对未就绪 PSO 仅返回 `Skip`，不提供 placeholder。后端若另选真实已编译的 fallback PSO，仍须以该 PSO 自身的 key 通过就绪门禁后才能绘制。
 6. 一个材质的 pass set 由 descriptor table 描述；split 形态固定为两个 response arm 加一个 resident composition pass。
 7. `PassDescriptorClass` 不得回绕；表索引、粗分类和 pipeline identity 三者保持不同语义。
 
@@ -144,7 +144,9 @@ bin 路径位于 `pkg/prism_render_app/src/bin_queue.rs`：
 
 本篇结论：当前 shader package 的身份、typed render state、interned package handle、冻结 FeatureSelection 到 package/permutation/PSO identity 的映射闭环、有界编译队列、冷热缓存映射、DriverLocal 边界和 direct/bin/split pass set 已由源码与已标注的运行记录形成对应证据；后续变更必须保持上述语义分层，并继续把完整 Scene/Fabric 接线与跨适配器证据作为独立验收项。
 
-## 8. 最终收口验收矩阵 / 未完成项（2026-10-20 文档审计）
+## 8. 最终收口验收矩阵 / 未完成项（2026-10-21 文档审计）
+
+**2026-10-21 收口补记**：此前 `prism_render_scene` library `cargo check` 曾通过；一次后续尝试曾因 `prism_asset` 的 `Flight` 初始化缺少 `cancellation_waiters` 字段而停止。这是历史阻断，当前 `Flight` 定义已无此字段，后续反馈已越过 asset 初始化；本次文档同步未运行 Cargo，不据此判断当前编译结果。没有复跑 shader package/architecture acceptance，也没有增加真实 driver binary 或跨适配器证据；本篇未完成项不变。另，本轮仅核对 `pkg/prism_render_architecture/src/shader_package/pso_cache/warm_runtime.rs` 源码：`DrawDecision` 已仅有 `Draw`/`Skip`，`request_draw(&PsoCacheKey)` 已无 `allow_placeholder` 参数或 `Placeholder` 分支；未就绪 PSO 一律跳过，真实 fallback PSO 仍须按自身 key 通过就绪门禁。这只修正源码事实，不新增测试通过记录，也不扩大生产接线、GPU 或全场景验收范围；下列未完成验收目标全部保留。
 
 `S`=源码事实，`D`=测试定义，`R`=本轮运行通过，`H`=已有历史/先前记录，`G`=GPU 证据，`E`=全场景闭环。本轮 `prism_render_scene --lib` 为 1909/1909；architecture acceptance、driver binary 和跨适配器 GPU 仍未由此覆盖。
 
