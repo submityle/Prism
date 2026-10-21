@@ -8,7 +8,7 @@
 
 - 未发现编辑器包的 `bevy_*` normal/build/dev 直接或传递依赖。
 - 未发现 `TODO`、`FIXME`、`todo!` 或 `unimplemented!` 未完成标记。
-- 发现 3 个 `placeholder`，均为搜索框的用户提示属性，不是实现占位。
+- 发现 6 个 `.placeholder(...)`，均为输入控件的用户提示属性或复用 label，不是实现占位。
 - 当前主框架设计/实现状态文档明确区分了契约切片和完整产品，未发现把契约测试直接宣称为完整编辑器交付的表述。
 - 原始审计发现 2 项文档状态漂移；P1 已于 2026-10-21 在本闭环修正，P2 因对应框架文档正有并行改动，仍保留为未完成项。
 
@@ -43,6 +43,9 @@
 - `pkg/prism_editor_ui/src/outliner.rs:47`：`SearchField` 的 `Filter scene` 提示。
 - `pkg/prism_editor_ui/src/console.rs:33`：`SearchField` 的 `Filter console` 提示。
 - `pkg/prism_editor_ui/src/command.rs:70`：`SearchField` 的 `Search commands` 提示。
+- `pkg/prism_editor_ui/src/content_view.rs`：内容搜索框复用调用方提供的 placeholder 文本。
+- `pkg/prism_editor_ui/src/sequence_view.rs`：Sequence 数值输入复用字段 label 作为提示。
+- `pkg/prism_editor_ui/src/timeline_view.rs`：Timeline 搜索输入复用字段 label 作为提示。
 
 这些调用位于完整的搜索字段构建和列表渲染路径中，不是 `todo!`、空函数或错误占位。`docs/prism_editor_framework_implementation_zh.md:79` 对此已有正确说明，不需要删除或替换。
 
@@ -71,7 +74,7 @@
 rg -n -i --glob '*.rs' '\b(TODO|FIXME|todo!|unimplemented!|placeholder)\b' pkg/prism_editor_*
 ```
 
-结果仅为上面列出的 3 个 `.placeholder(...)`；没有 `TODO`、`FIXME`、`todo!` 或 `unimplemented!`。这只证明没有这些显式标记，不等价于证明完整产品已经交付。
+结果仅为上面列出的 6 个 `.placeholder(...)`；没有 `TODO`、`FIXME`、`todo!` 或 `unimplemented!`。这只证明没有这些显式标记，不等价于证明完整产品已经交付。
 
 ## 文档是否把契约测试误报为产品完成
 
@@ -84,16 +87,16 @@ rg -n -i --glob '*.rs' '\b(TODO|FIXME|todo!|unimplemented!|placeholder)\b' pkg/p
 
 需要修复的是上面的文档漂移和统计口径，而不是把当前契约测试扩写成产品完成声明。
 
-## 主任务未提交改动
+## 原始审计时的并行未提交改动
 
-审计时以下文件处于 dirty 状态，按用户指示只读检查，未编辑、暂存或回退：
+2026-10-20 原始审计时以下文件处于 dirty 状态，按用户指示只读检查，未编辑、暂存或回退；这是历史快照，不代表当前工作区状态：
 
 - `pkg/prism_editor_app/src/desktop.rs`
 - `pkg/prism_editor_app/src/desktop_document.rs`
 - `pkg/prism_editor_app/src/desktop_scene.rs`
 - `pkg/prism_editor_app/src/lib.rs`
 
-当前 diff 为 168 行新增、6 行删除，新增了 host-owned `SceneDocumentAdapter`、候选 scene prepare/discard/commit 流程及 2 个相关测试；例如实现位于 `pkg/prism_editor_app/src/desktop_scene.rs:60-82,305-336`，renderer 接口位于 `pkg/prism_editor_app/src/desktop.rs:115-130`。这些是“主任务未提交改动”，本审计不把它们计入已提交产品能力，也不以它们证明完整原生端到端闭环已经完成。当前文档仍将引擎专属 adapter、完整输入/渲染/编辑回写闭环列为未交付边界，口径是安全的。
+当时 diff 为 168 行新增、6 行删除，新增了 host-owned `SceneDocumentAdapter`、候选 scene prepare/discard/commit 流程及 2 个相关测试；例如实现位于 `pkg/prism_editor_app/src/desktop_scene.rs:60-82,305-336`，renderer 接口位于 `pkg/prism_editor_app/src/desktop.rs:115-130`。原始审计没有把这些并行 dirty 内容计入已提交产品能力，也没有以它们证明完整原生端到端闭环已经完成。
 
 ## 审计限制
 
@@ -178,7 +181,7 @@ Escape 文档取消闭环暴露出下一项独立缺口：失败或取消的 sce
 
 此前 `WorldPanelController` 已实现 membership project/history、精确保存 token、异步 storage、candidate 与 retired-world handoff，但 `DesktopWorldPanel` 没有在 app poll 中驱动 project storage，也没有把这些状态统一纳入关闭/卸载 fence。于是 controller 层能力虽存在，原生 app 生命周期仍可能漏轮询或在目录未保存、候选未处理、旧 world 未交接时放行。
 
-现在 `DesktopWorldPanel::poll` 先调用 `poll_project_storage()`，将 storage 状态变化并入 panel refresh；`fenced()` 直接检查 project dirty、project I/O pending、loaded candidate 和 retired world。宿主仍须自行绑定实际路径/revision，并接入 cell payload provider 与 runtime consumer；membership 文件与 OFPA payload 不构成跨文件原子事务。
+现在 `DesktopWorldPanel::poll` 先调用 `poll_project_storage()`，将 storage 状态变化并入 panel refresh；`fenced()` 直接检查 project dirty、project I/O pending、loaded candidate 和 retired world。该提交时宿主仍须自行保存路径/revision；后续闭环已由 app-owned binding 补齐。cell payload provider 与 runtime consumer 仍由正式宿主接入；membership 文件与 OFPA payload 不构成跨文件原子事务。
 
 新增真实临时目录 app 测试覆盖 app 自动 poll、精确 save receipt 清除 dirty fence、load candidate 保持 fence、adopt 后 retired world 保持 fence，以及宿主接管 retired world 后解除 fence并允许卸载。既有真实 World provider 路由回归测试也一并复核。
 
@@ -188,3 +191,11 @@ Escape 文档取消闭环暴露出下一项独立缺口：失败或取消的 sce
 - 两项定向测试（World project storage 生命周期、真实 World tree intent 路由）：各 1 passed。
 - `git diff --check`：通过。
 - 未运行全包测试或 strict Clippy；不据此宣称完整 Editor 或完整 World Project app 集成已经完成。
+
+## 2026-10-21 后续实现闭环：World app-owned binding 与独立会话恢复
+
+`DesktopWorldProjectBinding` 与 `DesktopWorldPanel::with_project` 现在把 membership 路径、observed revision、worker admission、`ProjectLimits` 与 timeout 作为一次 app-owned 构造操作安装。面板保留路径，controller 保留并更新精确文件 revision；`None` 强制先 load/adopt，`TimelineFileRevision::Missing` 只表示宿主明确确认的 create-only 路径。
+
+新增 app 回归销毁第一套 `EditorDesktopUi`/controller 后创建完全独立的第二套会话，以未知 revision 从真实临时文件加载 candidate，再采用并验证 world identity、layer/cell/actor membership、精确文件 revision、旧 controller intent 不可复用，以及 retired world 在宿主接管前持续关闭围栏。该测试是进程内的独立 app 会话恢复，不冒充真实 native event loop 或 OS 进程重启。
+
+后续补齐了静止事件循环中的 project I/O completion wake：request 保留期间，`DesktopWorldPanel::next_wake` 以 10ms deadline 参与原生 `WaitUntil`，并与 provider deadline 取最早值。正式 CLI `WorldProjectHost`/session、retired runtime detach/attach、真实 OFPA payload round-trip 以及 membership 与 payload 的跨文件恢复策略仍是 Editor 未完成项。

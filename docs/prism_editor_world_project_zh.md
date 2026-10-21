@@ -50,7 +50,9 @@ membership 项目文件出版与独立 OFPA payload 事务不是同一个跨文�
 
 `WorldPanelController` 已持有与真实 world 同步的 membership project、稀疏 `ProjectHistory`、精确 token、storage request、独立 loaded candidate 和 retired-world handoff。原生 app 现在驱动该 storage 生命周期，并将未保存 membership、在途 I/O、待处理 candidate 和未接管的 retired world 纳入关闭/卸载 fence；exact save receipt 才能清除对应快照的 dirty fence。真实临时目录 app 测试覆盖自动 poll、save、load candidate、adopt、retired-world handoff 和 fence 解除。
 
-仍由宿主负责显式绑定 project 文件路径与文件 revision、消费 cell intent 并接入实际 payload/provider/runtime consumer；这不是跨 membership 文件与 OFPA payload 的原子事务，也不代表 runtime 流式安装已完成。candidate 采用仍须服从 controller 的精确 token 和旧 world/payload 保护条件。
+app 现在可通过 `DesktopWorldProjectBinding` 与 `DesktopWorldPanel::with_project` 一次安装 membership 文件路径、已观察 revision、worker admission、项目预算与超时；面板持续保留真实路径，`project_path()` 与 `project_file_revision()` 分别暴露绑定路径和最新成功 load/save receipt 学到的精确 revision。`None` 表示文件状态未知，首次保存前必须 load/adopt；`TimelineFileRevision::Missing` 只允许宿主已经明确确认的 create-only 路径，不能用来跳过现有文件协调。
+
+宿主仍负责决定 open-existing/create-new 模式、消费 cell intent，并接入实际 payload/provider/runtime consumer；这不是跨 membership 文件与 OFPA payload 的原子事务，也不代表 runtime 流式安装已完成。candidate 采用仍须服从 controller 的精确 token 和旧 world/payload 保护条件。
 
 宿主需要保留同一个 `WorldProject`、有界 `ProjectHistory`、last-clean token、精确文件 revision、唯一在途 request 与独立 loaded candidate，复用当前 document worker。`WorldProjectStorageService::save(&project, expected_file_revision, timeout)` 和 `load(timeout)` 已可调用，request 支持 `poll()`/`cancel()`。加载后调用 `candidate.document.materialize(EditorWorldLimits, ProjectLimits)`，失败时保留旧模型和 candidate，成功构建也不等于宿主已经采用。
 
@@ -61,7 +63,9 @@ membership 项目文件出版与独立 OFPA payload 事务不是同一个跨文�
 3. 保存先保留 request 和本次 token。实际 receipt 总要更新所观察到的文件 revision；仅当当前目录匹配 `receipt.snapshot_token`、目录与真实 world 已同步时才更新 last-clean。过期 receipt 不清理更新后的编辑，`PublicationUncertain` 要求重新读取并对账；取消后仍轮询终态。membership dirty、候选待采用和不确定出版均进入宿主 `fenced`。
 4. candidate 采用前，宿主显式处理旧 world 的 dirty payload、在途 IO/事务、保留租约和运行时消费者；不能从 cell dirty=false 推断目录 clean。完整替换路径可在这些条件满足后，以 materialize 的全 unloaded 新 world 构造新 `WorldPanelController`，同时替换其 bound view、清空旧历史、拒绝旧 controller tickets/回执，并重新启动真实 payload 加载。未完成这些条件时保留 candidate，不自动覆盖。
 
-world 保留自己的 `WorldProjectStorageService` request/token 语义，不套用要求 `PartialEq` 的通用 bytes+token 面板宏，也不新增 worker。后续可继续增强宿主的路径选择/绑定交互，以及覆盖应用重启后的端到端保存重载和真实 payload consumer 的集成验收；这些不影响当前已经接通的 app poll 与生命周期 fence。
+world 保留自己的 `WorldProjectStorageService` request/token 语义，不套用要求 `PartialEq` 的通用 bytes+token 面板宏，也不新增 worker。当前 app 回归会销毁第一套 `EditorDesktopUi`/controller，再创建完全独立的第二套会话，从磁盘 load candidate、adopt 并验证 layer/cell/actor membership、identity、精确 revision、旧 controller intent 失效和 retired-world fence；这比单 controller 测试更接近重启，但不冒充真实 native event loop 或进程重启。
+
+`DesktopWorldPanel::next_wake` 在 project request 保留期间以 10ms 单调 deadline 驱动原生 `WaitUntil`，因此 save/load 不再依赖额外窗口输入才能收取完成结果；provider 自身更早的 deadline 仍优先。正式 CLI 入口的 `WorldProjectHost`/session、retired runtime detach/attach，以及真实 OFPA payload 的重启 round-trip 仍未接线，继续作为 Editor 未完成项。
 
 ## 验证范围
 

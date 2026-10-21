@@ -2,14 +2,19 @@
 use super::*;
 use alloc::collections::BTreeSet;
 use prism_editor_timeline::{
-    PlaybackStatus, TimelineEditor, TimelineEvent, TimelineSnapshotToken, TrackId,
+    PlaybackStatus, TimelineEditor, TimelineEvent, TimelineFileRevision, TimelineSnapshotToken,
+    TrackId,
 };
 use prism_editor_ui::{
     BoundProfilerPanel, BoundTimelinePanel, BoundWorldPanel, ProfilerController, ProfilerSources,
-    TimelinePanelController, WorldPanelController,
+    TimelinePanelController, WorldPanelController, WorldPanelError,
+};
+use prism_editor_world::project::{
+    ProjectLimits, WorldProjectStorageError, WorldProjectStorageService,
 };
 use std::{
     any::Any,
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
@@ -333,11 +338,78 @@ impl DesktopPanel for DesktopTimelinePanel {
 
 type WorldProvider =
     dyn FnMut(&mut WorldPanelController, Instant) -> Result<DesktopPanelUpdate, String>;
+const WORLD_PROJECT_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+/// App-owned binding for one durable world membership file. `None` revision
+/// means the file state is unknown and forces load/adopt before the first save;
+/// `Missing` is only for an explicitly confirmed create-only path.
+#[derive(Clone, Debug)]
+pub struct DesktopWorldProjectBinding {
+    path: PathBuf,
+    observed_revision: Option<TimelineFileRevision>,
+    max_requests: usize,
+    limits: ProjectLimits,
+    timeout: Duration,
+}
+impl DesktopWorldProjectBinding {
+    /// Retains the exact host path/revision and bounded worker policy until the
+    /// panel constructs the identity-checked service.
+    pub fn new(
+        path: impl Into<PathBuf>,
+        observed_revision: Option<TimelineFileRevision>,
+        max_requests: usize,
+        limits: ProjectLimits,
+        timeout: Duration,
+    ) -> Self {
+        Self {
+            path: path.into(),
+            observed_revision,
+            max_requests,
+            limits,
+            timeout,
+        }
+    }
+    /// Absolute project filename supplied by the host.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+/// Failure to install an app-owned world project binding before a usable panel
+/// can be returned.
+#[derive(Debug)]
+pub enum DesktopWorldProjectError {
+    /// Path, limits, identity or worker construction failed.
+    Storage(WorldProjectStorageError),
+    /// The controller rejected the lifecycle binding.
+    Controller(WorldPanelError),
+}
+impl fmt::Display for DesktopWorldProjectError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Storage(error) => error.fmt(f),
+            Self::Controller(error) => error.fmt(f),
+        }
+    }
+}
+impl std::error::Error for DesktopWorldProjectError {}
+impl From<WorldProjectStorageError> for DesktopWorldProjectError {
+    fn from(error: WorldProjectStorageError) -> Self {
+        Self::Storage(error)
+    }
+}
+impl From<WorldPanelError> for DesktopWorldProjectError {
+    fn from(error: WorldPanelError) -> Self {
+        Self::Controller(error)
+    }
+}
+
 /// The provider owns I/O policy and must retain real intent/transition/save
 /// tokens until completion. App never turns an intent into a success receipt.
 pub struct DesktopWorldPanel {
     /// Actual world controller, including its authoring data and intent queue.
     pub controller: WorldPanelController,
+    project_path: Option<PathBuf>,
     provider: Box<WorldProvider>,
     view: Option<BoundWorldPanel>,
     update: DesktopPanelUpdate,
@@ -353,11 +425,45 @@ impl DesktopWorldPanel {
     ) -> Self {
         Self {
             controller,
+            project_path: None,
             provider: Box::new(provider),
             view: None,
             update: DesktopPanelUpdate::default(),
             failed: false,
         }
+    }
+    /// Construct the native panel and bind its durable membership file in one
+    /// app-owned operation. This prevents callers from losing the path while a
+    /// controller continues to retain only the worker and byte revision.
+    pub fn with_project(
+        mut controller: WorldPanelController,
+        binding: DesktopWorldProjectBinding,
+        provider: impl FnMut(&mut WorldPanelController, Instant) -> Result<DesktopPanelUpdate, String>
+            + 'static,
+    ) -> Result<Self, DesktopWorldProjectError> {
+        let service = WorldProjectStorageService::new(
+            binding.path.clone(),
+            controller.project().identity(),
+            binding.max_requests,
+            binding.limits,
+        )?;
+        controller.bind_project_storage(service, binding.observed_revision, binding.timeout)?;
+        Ok(Self {
+            controller,
+            project_path: Some(binding.path),
+            provider: Box::new(provider),
+            view: None,
+            update: DesktopPanelUpdate::default(),
+            failed: false,
+        })
+    }
+    /// Durable membership filename retained by the app-owned binding.
+    pub fn project_path(&self) -> Option<&Path> {
+        self.project_path.as_deref()
+    }
+    /// Exact revision learned from the latest successful load/save receipt.
+    pub fn project_file_revision(&self) -> Option<&TimelineFileRevision> {
+        self.controller.project_file_revision()
     }
     /// Resume provider acquisition after the host resolves an error.
     pub fn retry(&mut self) {
@@ -409,7 +515,15 @@ impl DesktopPanel for DesktopWorldPanel {
         if self.failed {
             None
         } else {
-            self.update.wake_at
+            self.update
+                .wake_at
+                .into_iter()
+                .chain(
+                    self.controller
+                        .project_io_pending()
+                        .then(|| Instant::now() + WORLD_PROJECT_POLL_INTERVAL),
+                )
+                .min()
         }
     }
     fn fenced(&self) -> bool {

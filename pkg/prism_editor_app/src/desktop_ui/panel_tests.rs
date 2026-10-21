@@ -279,7 +279,7 @@ fn invalid_timeline_text_retains_draft_ime_and_blocks_tab_switch() {
     assert_eq!(ui.active_native_panel(), None);
 }
 
-fn world() -> WorldPanelController {
+fn world_controller(with_actor: bool) -> WorldPanelController {
     use prism_asset::StableGuid;
     use prism_ecs::partition::{cell::CellCoord, data_layer::DataLayerId};
     use prism_editor_world::{DataLayer, EditorWorldData, EditorWorldLimits};
@@ -294,6 +294,11 @@ fn world() -> WorldPanelController {
     world
         .add_cell(CellCoord::new(0, 0, 0), [DataLayerId::new(11)])
         .unwrap();
+    if with_actor {
+        world
+            .register_actor(StableGuid::from_path("host/actor"), CellCoord::new(0, 0, 0))
+            .unwrap();
+    }
     WorldPanelController::new(
         world,
         StableGuid::from_path("host/user"),
@@ -304,6 +309,14 @@ fn world() -> WorldPanelController {
         WorldPanelLimits::default(),
     )
     .unwrap()
+}
+
+fn world() -> WorldPanelController {
+    world_controller(false)
+}
+
+fn world_with_actor() -> WorldPanelController {
+    world_controller(true)
 }
 
 struct WorldProjectTemp(PathBuf);
@@ -329,97 +342,177 @@ impl Drop for WorldProjectTemp {
 }
 
 #[test]
-fn world_project_storage_is_polled_by_app_and_exact_save_releases_close_fence() {
-    use prism_editor_world::project::{ProjectLimits, WorldProjectStorageService};
+fn world_project_binding_survives_fresh_app_session_and_fences_retired_runtime() {
+    use prism_asset::StableGuid;
+    use prism_ecs::partition::cell::CellCoord;
+    use prism_editor_world::project::ProjectLimits;
 
     let dir = WorldProjectTemp::new();
-    let mut controller = world();
-    let service = WorldProjectStorageService::new(
-        dir.file(),
-        controller.project().identity(),
+    let path = dir.file();
+    let binding = DesktopWorldProjectBinding::new(
+        path.clone(),
+        Some(TimelineFileRevision::Missing),
         1,
         ProjectLimits::default(),
-    )
-    .unwrap();
-    controller
-        .bind_project_storage(
-            service,
-            Some(TimelineFileRevision::Missing),
-            Duration::from_secs(5),
-        )
-        .unwrap();
+        Duration::from_secs(5),
+    );
+    let controller = world_with_actor();
 
     let provider_polls = Rc::new(Cell::new(0));
     let observed = provider_polls.clone();
-    let mut ui = ui();
-    ui.mount_native_panel(
-        "world",
-        "World",
-        Box::new(DesktopWorldPanel::new(controller, move |_, _| {
-            observed.set(observed.get() + 1);
-            Ok(DesktopPanelUpdate::default())
-        })),
-    )
+    let first_panel = DesktopWorldPanel::with_project(controller, binding, move |_, _| {
+        observed.set(observed.get() + 1);
+        Ok(DesktopPanelUpdate::default())
+    })
     .unwrap();
-    assert!(ui.has_uncommitted_edit());
-    click(&mut ui, "world:project:save");
+    assert_eq!(first_panel.project_path(), Some(path.as_path()));
+    assert_eq!(
+        first_panel.project_file_revision(),
+        Some(&TimelineFileRevision::Missing)
+    );
+
+    let mut first = ui();
+    first
+        .mount_native_panel("world", "World", Box::new(first_panel))
+        .unwrap();
+    first.refresh().unwrap();
+    click(&mut first, "world:cell:0:0:0");
+    click(&mut first, "world:layer:11:visible");
+    assert!(
+        !first
+            .native_panel::<DesktopWorldPanel>("world")
+            .unwrap()
+            .controller
+            .project()
+            .layer(prism_ecs::partition::data_layer::DataLayerId::new(11))
+            .unwrap()
+            .visible
+    );
+    assert!(first.has_uncommitted_edit());
+    click(&mut first, "world:project:save");
+    assert!(first.next_native_panel_wake().is_some());
 
     let deadline = Instant::now() + Duration::from_secs(10);
-    while ui
+    while first
         .native_panel::<DesktopWorldPanel>("world")
         .unwrap()
         .controller
         .project_io_pending()
     {
-        ui.poll_native_panels(Instant::now()).unwrap();
+        first.poll_native_panels(Instant::now()).unwrap();
         assert!(Instant::now() < deadline, "world project save timed out");
         std::thread::yield_now();
     }
-    ui.refresh().unwrap();
+    first.refresh().unwrap();
 
-    let panel = ui.native_panel::<DesktopWorldPanel>("world").unwrap();
+    let panel = first.native_panel::<DesktopWorldPanel>("world").unwrap();
     assert!(provider_polls.get() > 0);
     assert!(!panel.controller.project_is_dirty());
-    assert!(dir.file().is_file());
-    assert!(!ui.has_uncommitted_edit());
+    assert!(matches!(
+        panel.project_file_revision(),
+        Some(TimelineFileRevision::Present(_))
+    ));
+    assert!(path.is_file());
+    assert!(!first.has_uncommitted_edit());
+    assert!(first.next_native_panel_wake().is_none());
 
-    click(&mut ui, "world:project:load");
+    click(&mut first, "world:cell:0:0:0");
+    click(&mut first, "world:load");
+    let old_intent = first
+        .native_panel_mut::<DesktopWorldPanel>("world")
+        .unwrap()
+        .controller
+        .take_intent()
+        .unwrap();
+    drop(first);
+
+    let reopened = DesktopWorldProjectBinding::new(
+        path.clone(),
+        None,
+        1,
+        ProjectLimits::default(),
+        Duration::from_secs(5),
+    );
+    let second_panel = DesktopWorldPanel::with_project(world_with_actor(), reopened, |_, _| {
+        Ok(DesktopPanelUpdate::default())
+    })
+    .unwrap();
+    assert_eq!(second_panel.project_path(), Some(path.as_path()));
+    assert_eq!(second_panel.project_file_revision(), None);
+    assert!(!second_panel.controller.project_can_save());
+
+    let mut second = ui();
+    second
+        .mount_native_panel("world", "World", Box::new(second_panel))
+        .unwrap();
+    second.refresh().unwrap();
+    click(&mut second, "world:project:load");
+    assert!(second.next_native_panel_wake().is_some());
     let deadline = Instant::now() + Duration::from_secs(10);
-    while ui
+    while second
         .native_panel::<DesktopWorldPanel>("world")
         .unwrap()
         .controller
         .project_io_pending()
     {
-        ui.poll_native_panels(Instant::now()).unwrap();
+        second.poll_native_panels(Instant::now()).unwrap();
         assert!(Instant::now() < deadline, "world project load timed out");
         std::thread::yield_now();
     }
-    ui.refresh().unwrap();
-    assert!(ui
+    second.refresh().unwrap();
+    assert!(second
         .native_panel::<DesktopWorldPanel>("world")
         .unwrap()
         .controller
         .project_candidate()
         .is_some());
-    assert!(ui.has_uncommitted_edit());
+    assert!(second.has_uncommitted_edit());
 
-    click(&mut ui, "world:project:adopt");
-    assert!(ui
-        .native_panel::<DesktopWorldPanel>("world")
+    click(&mut second, "world:project:adopt-discard");
+    let panel = second.native_panel::<DesktopWorldPanel>("world").unwrap();
+    let project = panel.controller.project();
+    assert_eq!(project.identity(), StableGuid::from_path("host/world"));
+    assert!(project.revision() > 0);
+    assert_eq!(project.layers().len(), 1);
+    assert!(
+        !project
+            .layer(prism_ecs::partition::data_layer::DataLayerId::new(11))
+            .unwrap()
+            .visible
+    );
+    assert_eq!(project.cells().len(), 1);
+    assert_eq!(project.actors().len(), 1);
+    assert_eq!(
+        project.actor_cell(StableGuid::from_path("host/actor")),
+        Some(CellCoord::new(0, 0, 0))
+    );
+    assert!(matches!(
+        panel.project_file_revision(),
+        Some(TimelineFileRevision::Present(_))
+    ));
+    assert!(panel.controller.has_retired_world());
+    assert!(second.has_uncommitted_edit());
+
+    assert!(second
+        .native_panel_mut::<DesktopWorldPanel>("world")
         .unwrap()
         .controller
-        .has_retired_world());
-    assert!(ui.has_uncommitted_edit());
-    assert!(ui
+        .begin_residency(&old_intent)
+        .is_err());
+    let retired = second
         .native_panel_mut::<DesktopWorldPanel>("world")
         .unwrap()
         .controller
         .take_retired_world()
-        .is_some());
-    ui.refresh().unwrap();
-    assert!(!ui.has_uncommitted_edit());
-    assert!(ui.unmount_native_panel("world").is_ok());
+        .unwrap();
+    assert!(retired
+        .model()
+        .layer(prism_ecs::partition::data_layer::DataLayerId::new(11))
+        .unwrap()
+        .is_visible());
+    second.refresh().unwrap();
+    assert!(!second.has_uncommitted_edit());
+    assert!(second.unmount_native_panel("world").is_ok());
 }
 
 #[test]
@@ -650,20 +743,20 @@ fn all_three_tabs_mount_without_model_copies_or_shared_root_changes() {
     ui.mount_native_panel("timeline", "Timeline", Box::new(timeline(|_| Ok(()))))
         .unwrap();
     ui.mount_native_panel(
-        "world",
-        "World",
-        Box::new(DesktopWorldPanel::new(world(), |_, _| {
-            Ok(DesktopPanelUpdate::default())
-        })),
-    )
-    .unwrap();
-    ui.mount_native_panel(
         "profiler",
         "Profiler",
         Box::new(DesktopProfilerPanel::new(
             ProfilerController::default(),
             |_| Ok((None, DesktopPanelUpdate::default())),
         )),
+    )
+    .unwrap();
+    ui.mount_native_panel(
+        "world",
+        "World",
+        Box::new(DesktopWorldPanel::new(world(), |_, _| {
+            Ok(DesktopPanelUpdate::default())
+        })),
     )
     .unwrap();
     for (tab, key) in [

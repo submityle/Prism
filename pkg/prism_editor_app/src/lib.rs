@@ -71,7 +71,8 @@ pub use desktop_ui::{
     DesktopFrameGraphPanel, DesktopGraphPanel, DesktopKey, DesktopPanel, DesktopPanelCancelOutcome,
     DesktopPanelUpdate, DesktopPanelView, DesktopPrefabPanel, DesktopProfilerPanel,
     DesktopSequencePanel, DesktopSequenceStorageLimits, DesktopTimelineFrame, DesktopTimelinePanel,
-    DesktopUiError, DesktopWorldPanel, EditorDesktopUi,
+    DesktopUiError, DesktopWorldPanel, DesktopWorldProjectBinding, DesktopWorldProjectError,
+    EditorDesktopUi,
 };
 #[cfg(feature = "runtime-preview")]
 pub use desktop_ui::{DesktopFrameGraphImage, DesktopRuntimePreviewSource};
