@@ -112,7 +112,10 @@ cancel with `gesture_cancel` (or
 `gizmo_cancel` with the same controller) before suspension, document replacement
 or dropping a scene, and must serialize document installation with input. Direct
 scene/camera/transform replacement is rejected during capture. The native host
-performs these cancellation and close checks even without a document session.
+performs these cancellation and close checks even without a document session:
+a dirty controller cannot be closed merely because no storage provider was
+configured. A completed load also rechecks transient drafts/interactions before
+replacing the retained UI, so input started after submission is never discarded.
 
 After release, Undo/Redo or external controller commands, the next encode reads
 only changed identities from a bounded revision journal and updates their

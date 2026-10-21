@@ -958,14 +958,17 @@ impl<R: DesktopRenderer> ApplicationHandler<DesktopWake> for DesktopHost<R> {
         }
         match event {
             WindowEvent::CloseRequested => {
-                let blocked = self.renderer.gesture_active()
-                    || self.ui.has_uncommitted_edit()
-                    || self.document.as_ref().is_some_and(|document| {
-                        self.ui.controller().is_dirty()
-                            || self.ui.has_uncommitted_edit()
-                            || document.is_busy()
-                            || document.reconciliation_required()
-                    });
+                let blocked = close_blocked(
+                    self.renderer.gesture_active(),
+                    self.ui.has_uncommitted_edit(),
+                    self.ui.controller().is_dirty(),
+                    self.document
+                        .as_ref()
+                        .is_some_and(DesktopDocumentSession::is_busy),
+                    self.document
+                        .as_ref()
+                        .is_some_and(DesktopDocumentSession::reconciliation_required),
+                );
                 if blocked {
                     self.ui.show_error(DesktopError::UnsavedChanges.to_string());
                     self.redraw = true;
@@ -1396,6 +1399,20 @@ fn accepts_key_text(primary: bool, modifiers: ModifiersState, composing: bool) -
     !primary && (!modifiers.control_key() || modifiers.alt_key()) && !composing
 }
 
+const fn close_blocked(
+    renderer_gesture_active: bool,
+    ui_uncommitted: bool,
+    model_dirty: bool,
+    document_busy: bool,
+    reconciliation_required: bool,
+) -> bool {
+    renderer_gesture_active
+        || ui_uncommitted
+        || model_dirty
+        || document_busy
+        || reconciliation_required
+}
+
 fn checked_scale(scale: f64) -> Result<f32, DesktopError> {
     if !scale.is_finite() || !(0.125..=16.0).contains(&scale) {
         return Err(DesktopError::InvalidConfig);
@@ -1664,6 +1681,16 @@ mod tests {
             }
         );
         assert!(pending.any());
+    }
+
+    #[test]
+    fn dirty_model_blocks_close_without_document_storage() {
+        assert!(close_blocked(false, false, true, false, false));
+    }
+
+    #[test]
+    fn clean_idle_model_can_close_without_document_storage() {
+        assert!(!close_blocked(false, false, false, false, false));
     }
 
     #[test]

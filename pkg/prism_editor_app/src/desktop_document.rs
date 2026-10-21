@@ -118,6 +118,7 @@ impl DesktopDocumentSession {
                 }))
             }
             DocumentIoEvent::Loaded(receipt) => {
+                ensure_load_install_idle(ui)?;
                 let prepared = receipt
                     .prepare(&self.catalog, self.controller_limits)
                     .map_err(document_error)?;
@@ -140,6 +141,15 @@ impl DesktopDocumentSession {
             }
         }
     }
+}
+
+fn ensure_load_install_idle(ui: &EditorDesktopUi) -> Result<(), DesktopError> {
+    if ui.has_uncommitted_edit() {
+        return Err(DesktopError::Document(
+            "document load cannot replace an active editor draft or interaction".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn prepare_renderer_document<R: DesktopRenderer>(
@@ -232,5 +242,25 @@ mod tests {
         assert_eq!(renderer.prepare_count, 1);
         assert_eq!(renderer.discard_count, 1);
         assert!(!renderer.candidate);
+    }
+
+    #[test]
+    fn load_install_rejects_an_interaction_started_after_submission() {
+        let mut ui = EditorDesktopUi::new(crate::EditorController::new()).expect("empty UI");
+        ui.controller_mut().begin_edit().expect("begin interaction");
+
+        assert_eq!(
+            ensure_load_install_idle(&ui),
+            Err(DesktopError::Document(
+                "document load cannot replace an active editor draft or interaction".into()
+            ))
+        );
+    }
+
+    #[test]
+    fn load_install_accepts_an_idle_ui() {
+        let ui = EditorDesktopUi::new(crate::EditorController::new()).expect("empty UI");
+
+        assert!(ensure_load_install_idle(&ui).is_ok());
     }
 }
