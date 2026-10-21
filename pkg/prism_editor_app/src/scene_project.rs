@@ -141,11 +141,14 @@ impl SceneProject {
         let config = config.validate()?;
         let (root, created_root) = prepare_new_root(path.as_ref())?;
         let scene_root = root.join(SCENE_DIRECTORY);
+        let mut scene_created = false;
+        let mut manifest_published = false;
         let result = (|| {
             fs::create_dir(&scene_root).map_err(|source| SceneProjectError::Io {
                 operation: "create scene directory",
                 source,
             })?;
+            scene_created = true;
             let project_guid = generate_project_guid(&root)?;
             if project_guid.is_nil() {
                 return Err(SceneProjectError::InvalidManifest("nil project identity"));
@@ -169,6 +172,7 @@ impl SceneProject {
                 }
             }
             publish_manifest(&root, project_guid)?;
+            manifest_published = true;
             build_open(
                 root.clone(),
                 project_guid,
@@ -179,7 +183,7 @@ impl SceneProject {
             )
         })();
         if result.is_err() {
-            cleanup_failed_create(&root, created_root);
+            cleanup_failed_create(&root, created_root, scene_created, manifest_published);
         }
         result
     }
@@ -498,6 +502,7 @@ fn publish_manifest(root: &Path, project_guid: StableGuid) -> Result<(), ScenePr
                 });
             }
         };
+        let mut published = false;
         let result = (|| {
             file.write_all(&bytes)
                 .map_err(|source| SceneProjectError::Io {
@@ -519,6 +524,7 @@ fn publish_manifest(root: &Path, project_guid: StableGuid) -> Result<(), ScenePr
                     }
                 }
             })?;
+            published = true;
             fs::remove_file(&stage).map_err(|source| SceneProjectError::Io {
                 operation: "remove manifest staging link",
                 source,
@@ -532,15 +538,28 @@ fn publish_manifest(root: &Path, project_guid: StableGuid) -> Result<(), ScenePr
         })();
         if result.is_err() {
             let _ = fs::remove_file(&stage);
+            if published {
+                let _ = fs::remove_file(&destination);
+                let _ = File::open(root).and_then(|directory| directory.sync_all());
+            }
         }
         return result;
     }
     Err(SceneProjectError::StageNameExhausted)
 }
 
-fn cleanup_failed_create(root: &Path, created_root: bool) {
-    let _ = fs::remove_file(root.join(MANIFEST_NAME));
-    let _ = fs::remove_dir_all(root.join(SCENE_DIRECTORY));
+fn cleanup_failed_create(
+    root: &Path,
+    created_root: bool,
+    scene_created: bool,
+    manifest_published: bool,
+) {
+    if manifest_published {
+        let _ = fs::remove_file(root.join(MANIFEST_NAME));
+    }
+    if scene_created {
+        let _ = fs::remove_dir_all(root.join(SCENE_DIRECTORY));
+    }
     if created_root {
         let _ = fs::remove_dir(root);
     }

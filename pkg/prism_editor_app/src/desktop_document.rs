@@ -61,6 +61,12 @@ impl DesktopDocumentSession {
         self.last_request
     }
 
+    /// Last successfully saved or installed durable revision.
+    #[must_use]
+    pub const fn durable_revision(&self) -> Option<u64> {
+        self.adapter.durable_revision()
+    }
+
     /// Starts a bounded save without clearing the UI dirty state.
     pub fn save(&mut self, ui: &mut EditorDesktopUi) -> Result<IoRequestId, DocumentError> {
         if ui.has_uncommitted_edit() {
