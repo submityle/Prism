@@ -9,6 +9,8 @@
 > 前版：[v19](prism_lighting_gi_design_v19_aaa_zh.md) 保留为评审基线；冲突以本版为准。
 >
 > 本次交付：设计文档；没有因此获得新的运行、GPU readback 或性能达标证据。
+>
+> 配套记录：[M1 实施状态与验收记录](prism_native_lighting_m1_implementation_status_zh.md)。实施状态独立更新，不将本设计中的目标自动标为已支持。
 
 阅读导航：[关键升级](#1-相对-v31--v19-的关键升级) · [Light 系统](#6-light-一级系统与-canonical-合同) · [逐像素材质](#7-viewsurface-与逐像素材质) · [性能控制](#17-planner自动质量与性能预算) · [验收](#21-验收体系与需求追踪) · [实施迁移](#22-破坏性实施与删除门)
 
@@ -106,12 +108,12 @@ Author / Import / Runtime edits
 | --- | --- | --- |
 | `pkg/prism_render_architecture/src/lighting/scene.rs` | 已有 canonical record、lineage / slot / generation / identity、字段变更模型 | 统一所有生产消费者并删除 index-only 语义歧义 |
 | `pkg/prism_render_app/src/lighting_scene.rs` | canonical 向原生灯表派生并可拒绝不支持输入 | 与旧 scene GPU 派生路径确定唯一 owner |
-| `pkg/prism_render_app/src/forward_lit.rs` | 现有工作树文件具备 MRT/frame/material 相关实现 | 纯 surface encode 职责、ABI 和真实绑定闭环仍需证明 |
-| `pkg/prism_render_app/src/queue_stage.rs` | queue 入口仍传入空 bind groups | 连接真实 view、material、动态 offset 与 provider layout |
-| `pkg/prism_render_app/src/views.rs` | RenderView 不包含完整 current/previous 矩阵 | 从 native camera 提取完整 View ABI，禁止 identity 兜底 |
-| `pkg/prism_render_app/src/target.rs` | 检查时为 position / normal / sRGB albedo / surface-id 加 depth；与更早的五平面描述不同 | 切换紧凑逐像素材质合同与 motion，检查 MRT 能力 |
+| `pkg/prism_render_app/src/forward_lit.rs` | 工作树 surface provider 有动态 uniform ABI；当前 shader/target 发出 XYZ world position、normal、albedo、surface ID 共六 color attachment | 去除 implicit identity frame；改为 v20 四 MRT 紧凑 profile，并接入真实材质参数/纹理 |
+| `pkg/prism_render_app/src/queue_stage.rs` | queue 入口仍传入空 bind groups；`VisibilityWorkList` 尚无 per-view identity/生产写入者 | 从真实 per-view culling 结果提取到 queue，并创建/绑定有 generation 的 view/material 数据 |
+| `pkg/prism_render_app/src/surface_views.rs` | 已提供 native camera 校验、拒绝诊断和连续 history；plugin 已注册 extraction | 与 culling view identity 合并，history 纳入 frame transaction 并在真实 pass 中消费 |
+| `pkg/prism_render_app/src/target.rs` | 当前 target 为拆分 position XYZ、normal、albedo、surface ID 加 depth；不是 v20 四 MRT | 切换紧凑逐像素材质合同与 motion，并校验格式能力/带宽 |
 | `pkg/prism_render_app/src/lighting_gpu.rs` | 已有 target cache 与上传确认相关路径 | 不能由此推断 direct/GI 已逐像素且输出正确 |
-| `pkg/prism_render_app/src/plugin.rs` | 已注册 lighting runtime / queue 等，也有默认 surface 输入 | 删除生产路径的假输入，接入真实 surface producer |
+| `pkg/prism_render_app/src/plugin.rs` | 已注册 lighting runtime / queue 与 native camera extraction；scene input 默认不再注入 surface | 接通真实 per-view surface/material producer；不能把空 surface 输入或 oracle fixture 当场景渲染 |
 | `pkg/prism_render_app/src/recovery.rs` | 已重建一部分 target/pipeline/material 资源 | 纳入 lighting、history、缓存与 binding generation 事务 |
 
 源目录中的 ReSTIR、DDGI、SSGI、SSR、VSM、TAA、exposure 等模块，只证明候选实现存在，不证明默认路径集成、原生依赖闭环或最终像素正确。
@@ -188,6 +190,25 @@ GPU 紧凑索引只在 `LightTableEpoch` 内有效。生成 current→previous �
 - Dynamic：按字段生成更新；仅改强度不应重建不依赖强度的几何 shadow page。
 
 灯通道、light linking、艺术限制是可选 profile 扩展，不能硬编码游戏玩法通道。
+
+### 6.5 八类灯的完整支持合同
+
+下表是目标支持矩阵，不是当前实现清单。每个 provider 分别申报 `Supported / Approximate / Unsupported`；支持一种灯的 direct eval 不意味着支持它的 shadow、bake 或动态 GI。
+
+| 灯型 | 发光与采样合同 | 遮挡/阴影合同 | 专项验收 |
+| --- | --- | --- | --- |
+| Directional | lux 语义；理想方向与有限角盘模型分开；离散选择概率与方向分布分开 | conventional cascade / virtual clipmap / trace；软影角度有来源 | 旋转方向、地表照度、级联边界、角盘半影 |
+| Point | candela 或总 lumen 的显式角分布；有限半径不能只改阴影而不说明 near-field 模型 | cubemap / virtual local pages / trace；六面接缝和近裁剪单独验证 | 逆平方远场、range 窗口、近场、六面遮挡 |
+| Spot | candela 与 cone profile；lumen 转换按实际 profile 的立体角积分，不套统一常数 | perspective map / virtual pages / trace；锥边界与 IES 一致 | inner/outer 半角、IES/光函数、投影方向与曝光 |
+| Rect | 面积、单双面、方向分布；LTC 为声明的解析近似，随机采样保留面积到立体角转换 | sampled trace 为参考；中心 shadow map 只能标近似 | 非均匀尺寸、近接触、掠射角、barn doors |
+| Disk | 圆盘/椭圆缩放规则；LTC/数值近似与 reference 使用同一实际发光面 | sampled trace 或明确标注的代理遮挡 | 半径、非均匀缩放、正反面、半影 |
+| Capsule | 长度/半径与发光面定义；线段/双球仅为可选近似，不等价真实 capsule emitter | sampled trace 或经过误差验证的代理；不得默认无阴影却标完整支持 | 长度趋零、端帽、近场、通量与遮挡连续性 |
+| Sky | 环境资产及旋转、强度、encoding；按 solid angle 的重要性分布；SH 仅用于声明的低频近似 | world visibility / probe sky occlusion；不为天空虚构普通灯 shadow page | 小太阳高亮、旋转、遮蔽、probe/environment 不双计 |
+| Emissive | 材质闭包产生 radiance；按世界面积与实际纹理功率建立 triangle 分布；退化三角拒绝 | 共用几何 opacity/trace；camera-visible emission 与照明采样分开记账 | 纹理热点、skinning、实例缩放、拓扑变化与动态失效 |
+
+修饰轴独立版本化：IES、光函数/纹理、色温、source size、barn doors、light linking、indirect/specular artistic multiplier。每个修饰器声明对 emission、proposal、visibility 和 bake 的影响；不能只修改最终 eval 而让实际 proposal/PDF 与采样实现不一致。必要时可用保守 proposal 再评价真实修饰，但必须量化采样效率与噪声。
+
+同一实际 emitter 被显式灯和 emissive mesh 同时表示时，须使用共享 emitter identity，指定唯一直射采样 owner 或有证明的合成方式；不得因“灯表与材质表不同”而双计功率。隐藏于相机的光源、可见却不参与照明的装饰发光等艺术意图应显式声明，不能靠意外漏采样实现。
 
 ## 7. View、Surface 与逐像素材质
 
@@ -533,6 +554,29 @@ H2 不能只写“中端显卡”：基准记录必须包含准确 GPU/driver/ba
 
 先消除全量提取、重复灯表、全灯逐像素、位置冗余、错误 history reset、无界 cache 和同步 readback；再做 tile classification、half-resolution GI、缓存增量、pass fusion / async。所有优化给出成本变化与质量误差，禁止只给平均帧时。
 
+### 17.5 可复现 workload manifest
+
+每个性能/质量准入测试都必须保存下列信息。以下只是拟议字段模板，不表示当前已有同名解析器；未测量字段不得填写虚构结果。
+
+```yaml
+schema: prism.lighting.workload.v1
+status: target_unmeasured
+source: { commit: required, dirty_diff_digest: required }
+device: { gpu: required, driver: required, backend: required, power_mode: required }
+host: { cpu: required, ram: required, os: required, toolchain: required }
+content: { scene_hash: required, asset_hash: required, camera_path_hash: required }
+render: { internal_extent: [2560, 1440], output_extent: required, profile_digest: required }
+sampling: { estimator_version: required, seed_set: required, repeated_runs: required }
+measurement: { warmup_frames: required, sample_frames: required, timestamp_method: required }
+limits: { lighting_gpu_p95_ms: required, total_frame_p99_ms: required, peak_resident_mib: required }
+quality: { reference_digest: required, image_error_limits: required, temporal_error_limits: required }
+evidence: { raw_timings: required, aovs: required, allocation_trace: required, diagnostics: required }
+```
+
+Many-light 测试至少包含“总灯增加但 overlap 固定”和“overlap 增加且总预算固定”两类，分别揭示场景管理成本与采样质量退化。Shader/PSO 冷缓存、热缓存、cache warming 和稳定运行分开报告；不能把 shader 编译卡顿排除后仍声称覆盖首次游玩体验。
+
+报告同时给出 lighting 成本归属和整帧关键路径。Async 开关各记录一组以解释重叠，不能把重叠 pass 时间机械相加；启用 async 的真实运行仍必须测量。DRS、质量控制与 streaming 固定档/自动档各有记录，避免控制器降质掩盖算法回归。
+
 ## 18. Authoring、Import、Bake 与 Explain
 
 ### 18.1 作者层
@@ -558,6 +602,19 @@ Importer 是外层适配包，不把外部引擎类型写进 canonical core。�
 `explain(frame, view, pixel/light/region)` 返回：输入 revisions、最终 provider、预算/压缩原因、候选/选中样本、visibility 来源、cache age/miss、history rejection、重建与 display transform。查询不能引入常态全屏同步回读。
 
 必需调试视图：surface identity、roughness/metallic/emission、motion、candidate overlap/entropy、reservoir age、shadow page state/dirty reason、GI coverage/probe validity、reflection miss、raw vs denoised、history reset、pre-exposure、HDR clipping/gamut、VRAM 与 pass timings。
+
+### 18.4 易用性也需要退出门
+
+| 工作流 | 作者必须看到的结果 | 验收方式 |
+| --- | --- | --- |
+| 新建灯并编辑 | 单位、形状、范围、视锥、阴影状态可见；非法字段准确定位；批量编辑原子发布 | 首次上手任务录制、撤销/重做回放；可见反馈延迟计量 |
+| 切换自动/固定 profile | 不改 canonical 光强；显示最终选择、预算原因、warming 和 unsupported | 相同 capture 对比 profile diff、能量归属和稳定时间 |
+| 导入外部场景 | 逐项转换/损失报告、可跳转源对象；错误不静默 clamp | glTF/USD/导出 fixture 与 roundtrip 或显式 loss report |
+| 烘焙与 scenario | 预检、增量进度、取消、过期提醒、原子发布；失败保留上一有效结果 | 编辑期间取消/重启、资产变化、空间不足故障注入 |
+| 诊断漏光/拖影/超预算 | 一键选择 view/pixel/region，解释 provider、历史、缓存和 display 链 | 从指定问题场景定位根因的步骤数、耗时和 capture 可复现性 |
+| 接入第三方 provider | 支持矩阵、manifest 校验、错误原因、测试包与 sample 可运行 | 仅按公开合同接入独立样例，不依赖私有字段 |
+
+操作反馈、取消响应和热切换延迟的目标要在具体编辑器/运行时 workload 中设定；不写无设备依据的统一毫秒承诺。编辑器 UI 属于外层工具，其撤销/重做命令调用 canonical mutation API，不另存一套灯强度或缓存真值。
 
 ## 19. Provider 运行时治理与维护
 
@@ -724,6 +781,21 @@ Lost(old generation)
 - [ACES：Output Transforms](https://docs.acescentral.com/system-components/output-transforms/)
 
 本次访问部分官方页面未取得可核对正文，因此本版不引用其具体版本、数值或逐字陈述。实现阶段必须将实际采用页面/论文/SDK 的 revision 与摘录结论写入 provider evidence；外链失效不能成为无法重现实验的理由。
+
+### A.1 参考机制与实施核对清单（2026-10-21）
+
+本轮访问未返回可留存的正文证据，因此下表是待逐项核实的参考主题与 Prism 设计推导，不是已完成的来源核对记录；相关章节定位也需在准入时复核。不采用竞品耗时作为 Prism 成绩。在线文档会变化；SDK 真正准入要锁定 commit/tag、许可证和本地 evidence digest。
+
+| 官方参考入口 / 待查主题 | 拟参考机制（待正文核实） | Prism 的设计约束 |
+| --- | --- | --- |
+| [Lumen Technical Details](https://dev.epicgames.com/documentation/en-us/unreal-engine/lumen-technical-details-in-unreal-engine)：开篇、Surface Cache | screen traces 与后续世界表示协作；surface cache 保存材质相关信息，存在覆盖问题 | 多表示必须可诊断；trace hit 不等于命中点材质已正确求值；覆盖缺口不能靠 ambient 隐藏 |
+| [Virtual Shadow Maps](https://dev.epicgames.com/documentation/en-us/unreal-engine/virtual-shadow-maps-in-unreal-engine)：Goals、Caching | 按 receiver 需求渲染页面；灯/物体变化使缓存失效 | page request、dirty-caster、驻留、淘汰与 telemetry 是完整系统组成，不是只建 atlas |
+| [MegaLights](https://dev.epicgames.com/documentation/en-us/unreal-engine/megalights-in-unreal-engine)：Lighting Complexity、Performance、Async Compute | 像素灯重叠影响选样成本和噪声；ray 场景影响阴影；async 收益取决于工作负载 | 分别测总灯/overlap/representation error；给 light complexity explain；async 必须 A/B 验证 |
+| [Unity 6.0 APV Streaming](https://docs.unity3d.com/6000.0/Documentation/Manual/urp/probevolumes-streaming.html) | 烘焙数据按需加载；CPU→GPU 与磁盘→CPU 的流式层次独立 | probe 资产、CPU 驻留、GPU 驻留与 cell 状态分开记账；不能把 probe 当作无限动态真值 |
+| [RTXDI Integration](https://github.com/NVIDIA-RTX/RTXDI/blob/main/Doc/Integration.md)：Integrating RTXDI | 应用负责材质、场景、trace、GBuffer/API 和 bridge，SDK 提供采样/重采样部分 | provider 不拥有 canonical scene；集成 bridge、identity remap 和 estimator 版本需要专项验收 |
+| [GPUOpen FSR2 技术手册](https://gpuopen.com/manuals/fidelityfx_sdk/techniques/super-resolution-temporal/)：Inputs、Motion vectors、Reactive mask、Exposure | 时域上采样需要一致的深度、motion、jitter、曝光与响应遮罩输入 | 由 Prism 定义并校验统一 temporal input；不能靠末端滤镜修复上游契约错误 |
+
+以上为参考机制到设计的推导，不声称 Prism 已实现这些机制，也不声明最新竞品版本、功能等价或全面超越。
 
 ## 附录 B. 实施评审最小清单
 
