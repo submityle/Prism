@@ -39,8 +39,11 @@ For document-driven native scenes, `DesktopScene::new_with_document_adapter`
 accepts a host-owned `SceneDocumentAdapter`. The adapter converts the validated
 `EditorController` candidate into indexed geometry, full selection identities,
 and a camera without embedding project gameplay types. Scene candidates are
-staged before UI publication and committed only after the document install
-succeeds; an install failure discards the candidate and keeps the active scene.
+staged from the initial controller before any native window/GPU publication.
+Startup rejection returns the still-owned UI and renderer without opening the
+event loop. Later load candidates are staged before UI publication and committed
+only after the document install succeeds; an install failure discards the
+candidate and keeps the active scene.
 
 Viewport clicks use asynchronous integer-ID readback. A native drag inside the
 viewport becomes a bounded rectangle copy and resolves all visible identities

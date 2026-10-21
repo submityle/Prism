@@ -274,7 +274,7 @@ pub fn run_desktop<R: DesktopRenderer>(
 pub fn run_desktop_with_document<R: DesktopRenderer>(
     config: DesktopConfig,
     ui: EditorDesktopUi,
-    renderer: R,
+    mut renderer: R,
     document: Option<DesktopDocumentSession>,
 ) -> DesktopOutcome<R> {
     let valid = !config.title.is_empty()
@@ -291,6 +291,15 @@ pub fn run_desktop_with_document<R: DesktopRenderer>(
             document,
             report: DesktopReport::default(),
             error: Some(DesktopError::InvalidConfig),
+        };
+    }
+    if let Err(error) = prepare_initial_document(&ui, &mut renderer) {
+        return DesktopOutcome {
+            ui,
+            renderer,
+            document,
+            report: DesktopReport::default(),
+            error: Some(error),
         };
     }
     let event_loop = match EventLoop::<DesktopWake>::with_user_event().build() {
@@ -347,6 +356,18 @@ pub fn run_desktop_with_document<R: DesktopRenderer>(
         report: host.report,
         error: host.error,
     }
+}
+
+fn prepare_initial_document<R: DesktopRenderer>(
+    ui: &EditorDesktopUi,
+    renderer: &mut R,
+) -> Result<(), DesktopError> {
+    if let Err(error) = renderer.prepare_document(ui.controller()) {
+        renderer.discard_document();
+        return Err(error);
+    }
+    renderer.commit_document();
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -1391,6 +1412,107 @@ fn scale_draw_list(source: &DrawList, scale: f32) -> Result<DrawList, DesktopErr
 mod tests {
     use super::*;
     use prism_ui_render_backend::{GlyphCmd, LayerCmd, RectCmd};
+
+    #[derive(Default)]
+    struct StartupRenderer {
+        fail_prepare: bool,
+        candidate: bool,
+        prepare_count: u32,
+        commit_count: u32,
+        discard_count: u32,
+        initialize_count: u32,
+    }
+
+    impl DesktopRenderer for StartupRenderer {
+        fn initialize(&mut self, _gpu: &DesktopGpu) -> Result<(), DesktopError> {
+            self.initialize_count += 1;
+            Ok(())
+        }
+
+        fn encode(
+            &mut self,
+            _gpu: &DesktopGpu,
+            _ui: &mut EditorDesktopUi,
+            _encoder: &mut wgpu::CommandEncoder,
+            _target: &wgpu::TextureView,
+            _bounds: DesktopViewportBounds,
+        ) -> Result<(), DesktopError> {
+            Ok(())
+        }
+
+        fn pointer(
+            &mut self,
+            _gpu: &DesktopGpu,
+            _ui: &mut EditorDesktopUi,
+            _position: [f32; 2],
+            _mode: SelectionMode,
+        ) -> Result<bool, DesktopError> {
+            Ok(false)
+        }
+
+        fn poll(
+            &mut self,
+            _gpu: &DesktopGpu,
+            _ui: &mut EditorDesktopUi,
+        ) -> Result<DesktopWork, DesktopError> {
+            Ok(DesktopWork::default())
+        }
+
+        fn prepare_document(&mut self, _controller: &EditorController) -> Result<(), DesktopError> {
+            self.prepare_count += 1;
+            self.candidate = true;
+            if self.fail_prepare {
+                return Err(DesktopError::Renderer("initial scene rejected".into()));
+            }
+            Ok(())
+        }
+
+        fn discard_document(&mut self) {
+            self.discard_count += 1;
+            self.candidate = false;
+        }
+
+        fn commit_document(&mut self) {
+            assert!(self.candidate, "commit requires a prepared candidate");
+            self.commit_count += 1;
+            self.candidate = false;
+        }
+
+        fn suspend(&mut self) {}
+    }
+
+    #[test]
+    fn initial_document_is_committed_before_native_gpu_initialization() {
+        let ui = EditorDesktopUi::new(EditorController::new()).expect("empty editor UI");
+        let mut renderer = StartupRenderer::default();
+
+        prepare_initial_document(&ui, &mut renderer).expect("prepare initial document");
+
+        assert_eq!(renderer.prepare_count, 1);
+        assert_eq!(renderer.commit_count, 1);
+        assert_eq!(renderer.discard_count, 0);
+        assert_eq!(renderer.initialize_count, 0);
+        assert!(!renderer.candidate);
+    }
+
+    #[test]
+    fn rejected_initial_document_is_discarded_without_publication() {
+        let ui = EditorDesktopUi::new(EditorController::new()).expect("empty editor UI");
+        let mut renderer = StartupRenderer {
+            fail_prepare: true,
+            ..StartupRenderer::default()
+        };
+
+        assert_eq!(
+            prepare_initial_document(&ui, &mut renderer),
+            Err(DesktopError::Renderer("initial scene rejected".into()))
+        );
+        assert_eq!(renderer.prepare_count, 1);
+        assert_eq!(renderer.commit_count, 0);
+        assert_eq!(renderer.discard_count, 1);
+        assert_eq!(renderer.initialize_count, 0);
+        assert!(!renderer.candidate);
+    }
 
     #[test]
     fn ordinary_text_is_not_blocked_by_ime_availability_and_altgr_is_printable() {
