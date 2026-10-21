@@ -97,7 +97,7 @@ Layer 0  后端抽象 Backend    (CPU-SIMD / GPU-Compute)
 ### 3.2 约束原语
 可组合、可插件扩展的 trait Constraint：
 - 接触约束（非穿透 + 摩擦，含 compliance 软硬度）
-- 固定(焊接)/距离/球/铰链/棱柱/马达关节；齿轮关节尚未实现。关节可选断裂阈值（见 §24）。球关节 swing-twist 锥限/扭限、关节柔韧与伺服 drive 见 §26；强铰接链可选降阶坐标求解见 §27
+- 固定(焊接)/距离/球/铰链/棱柱/马达/齿轮关节。`GearJoint` 经 XPBD 路径消费，保留连续转角和传动比/相位，支持 compliance、断裂及 parallel island 路径；齿轮生产场景与 GPU 孪生仍须单独验收。关节可选断裂阈值（见 §24）。球关节 swing-twist 锥限/扭限、关节柔韧与伺服 drive 见 §26；强铰接链可选降阶坐标求解见 §27
 - 体积保持（软体）、弯曲/拉伸（布料）
 - 密度约束（PBF 流体）
 
@@ -259,19 +259,23 @@ CPU/GPU 可运行时切换、可混合（刚体走 CPU、流体走 GPU）。
 `prism_physics_core::SimulationDriver` 已完成最小但真实的 Offline/Playback
 driver 切片。该切片不是完整的资产管线或编辑器功能，而是可测试的运行时内核：
 
-- `Offline` 每次 `drive` 执行一个离线 frame，按 bounded `substeps` 调用
-  `PhysicsBackend::step`，并把结果记录为 `StateSnapshot`；`target_frames` 和
-  `substeps` 都有硬上限，达到目标后返回 `Complete`，不会继续求解。
+- `Offline` 每次 `drive` 执行一个离线 frame，通过
+  `PhysicsBackend::step_offline(world, dt, OfflineStepConfig)` 传递 bounded
+  `substeps` 与 `iterations`，并把结果记录为 `FullStateSnapshot`；帧数、子步数和
+  迭代数都有硬上限，达到目标后返回 `Complete`，不会继续求解。
 - `Playback(CacheHandle)` 支持注册 bounded、versioned 的 `DriverCache`，每次
   `drive` 只应用下一帧快照，不调用 backend；world 的 slot/generation 不匹配时
   返回 `CacheMismatch`，不会静默写入错误实体。
 - 原有 Realtime `drive(backend, world, dt) -> DriveOutcome::Stepped` API 保持兼容。
 - 既有 `PhysicsCache`/`Player` 继续负责软体粒子轨迹的量化、插值和回放；driver
-  cache 使用完整 world snapshot，避免把刚体状态错误地塞进软体 track 格式。
+  cache 使用完整 world snapshot（`DRIVER_CACHE_VERSION = 2`），包含软体、拓扑、场、铰接和装配状态，避免把刚体状态错误地塞进软体 track 格式。
 
-当前切片的明确边界：尚未实现磁盘资产序列化/校验、流式加载、编辑器 Bake 按钮、
-软体 `PhysicsCache` 自动绑定到 world，以及完整的跨版本迁移。它们属于后续资产
-管线和编辑器集成，不应被当前 driver 的运行时验收冒充完成。
+软体粒子轨迹的磁盘格式已由 `cache::disk` 实现：`CacheReader` / `PhysicsCache::write_to`
+提供版本化编码、分配前预算校验、索引与帧随机读取，以及 header/index/payload
+CRC-32 校验（payload 按需校验，完整 `load` 检查所有 payload；CRC 不提供真实性保证）。
+这不是整个 `PhysicsWorld` / `DriverCache` 的磁盘资产序列化。当前尚未完成全世界
+资产格式、资产系统热重载/流式调度、编辑器 Bake 按钮、软体 `PhysicsCache` 自动
+绑定到 world，以及完整的跨版本迁移；不能把软体 cache 的磁盘能力当成这些管线的验收。
 
 ### 16.1 两种离线形态
 | 形态 | 用途 | 对标 |
@@ -289,8 +293,9 @@ enum DriveMode {
 }
 ```
 `SimulationDriver::drive` 按 `DriveMode` 分派：Realtime 保持单次 backend step；Offline
-和 Playback 已分别接入 bounded 执行与逐帧快照应用。后续 backend 若暴露 solver
-iterations，可再消费 `Offline::iterations`，当前 PhysicsBackend 合约只接收 `dt`。
+经 `step_offline` 消费 `OfflineStepConfig { substeps, iterations }`，Playback 逐帧应用
+快照。CPU XPBD 离线路径临时覆盖刚体位置迭代数和 live 软体迭代数，结束后恢复实时
+配置；不支持迭代求解的 backend/solver 必须在修改 world 前报错，不能静默忽略 iterations。
 
 ② 状态可序列化 = 缓存基础（Layer 2）：统一 XPBD 状态本就是纯数据。要求所有物理状态组件实现 Reflect + Serialize——烘焙缓存、快照回滚、确定性回放三者共用地基，一次投入三处收益。缓存格式：
 - 关键帧 + 增量压缩（位置量化、变化阈值剔除）。纯经典压缩，不使用任何学习/神经方法。
@@ -305,9 +310,10 @@ iterations，可再消费 `Offline::iterations`，当前 PhysicsBackend 合约�
 
 ### 16.3 数据流
 ```
-[运行时] Offline driver ---> bounded StateSnapshot sequence (内存)
+[运行时] Offline driver ---> bounded FullStateSnapshot sequence (内存)
                                   |
 [运行时] Playback driver <--- register DriverCache (逐帧、零求解)
+[运行时] 软体 PhysicsCache <-> cache::disk (版本/预算/CRC，按轨道与帧读取)
 [后续]   编辑器/CLI     ---> PhysicsCacheAsset 磁盘资产与流式管线
 ```
 软体 `Player` 仍支持时间缩放、循环和插值；本 driver 切片的 Playback 是离散逐帧
@@ -413,7 +419,11 @@ pkg/
   prism_physics_ecs      // Prism ECS/App 固定步同步桥
 ```
 
-prism_physics_core 不依赖 Prism ECS（纯数据 + trait），保证可被服务器逻辑或其他宿主复用；prism_physics_ecs 只做同步桥接。当前真实 ECS 固定步顺序为 `Sync -> Step -> Writeback`。MPM 已通过 `MpmBinding -> MpmRuntime -> MpmParticleSnapshot` 接入同一固定步边界：authoring/backend/budget 变化会重建 runtime，固定步不匹配或 snapshot 失败不会发布伪造状态，preferred-GPU 会记录实际 GPU authority 或显式 CPU fallback。可选 `MpmSurfaceConfig` 在 Writeback 中按有界 CPU scalar-field / marching-tetrahedra 路径发布与粒子快照同版本的 `MpmSurfaceSnapshot`；节点与单元预算在分配前校验，关闭配置或重建失败时清除旧 surface，空粒子快照发布空 mesh。该链路仍未包含 render-world extraction、mesh asset/GPU buffer 更新、零拷贝共享、场景 Demo 与性能验收。
+prism_physics_core 不依赖 Prism ECS（纯数据 + trait），保证可被服务器逻辑或其他宿主复用；prism_physics_ecs 只做同步桥接。当前真实 ECS 固定步顺序为 `Sync -> Step -> Writeback`。软体已有 `SoftBodyBinding -> PhysicsBindings -> SoftBodyHandle` 的创建、编辑替换、移除与代际映射，模拟状态由 `PhysicsWorld::soft_bodies` 所有，不再只是 core 存储插槽。
+
+MPM 已通过 `MpmBinding -> MpmRuntime -> MpmParticleSnapshot` 接入同一固定步边界：authoring/backend/budget 变化会重建 runtime，固定步不匹配或 snapshot 失败不会发布伪造状态，preferred-GPU 会记录实际 GPU authority 或显式 CPU fallback。可选 `MpmSurfaceConfig` 按有界 CPU scalar-field / marching-tetrahedra 路径发布 `MpmSurfaceSnapshot`；节点、单元、采样访问及输出顶点/三角预算受限。`version` 表示来源粒子版本，`epoch` 表示 runtime 生命周期，`revision` 表示该 epoch 内的表面发布序号；只改表面配置也能从最新粒子快照重建，不要求先成功步进，因此以 `(epoch, revision)` 去重。关闭/无效配置清除旧 surface，空粒子快照发布空 mesh。
+
+可选 `prism_render_app` 的 `physics` feature 已提供 `PhysicsSurfacePlugin`：`MpmSurfaceSnapshot.mesh: Arc<SurfaceMesh>` 经原生 `Mesh` / `Assets<Mesh>`、render-asset extraction 与 `RenderMesh` preparation 更新 vertex/index GPU buffer，再由 `SceneRegistry` geometry、可见性 instance、网格/材质绑定进入 native draw queue。新增发布会把 CPU 几何复制进原生 Mesh；未变化帧只克隆 snapshot 的 Arc，**不是 GPU resident 零拷贝**。当前仅支持一个被接受的 surface view；零视图或多视图会撤回自有绘制工作，不合并摄像机，也不清除其他生产者的工作。禁用、移除、空/非法网格的资源卸载、失败重试与原生 geometry revision 生命周期已有处理和 Null 后端集成回归用例，但测试文件存在不等于本轮已运行，更不代表物理 GPU parity 或真机画面/性能验收。零拷贝、多视图、场景 Demo 和匹配硬件性能证据仍未完成。
 
 ---
 
@@ -425,20 +435,20 @@ prism_physics_core 不依赖 Prism ECS（纯数据 + trait），保证可被服�
 | M1 | XPBD 刚体 MVP + 球/盒/胶囊 + 接触摩擦 + 子步 | 能堆箱子稳定 | ✅ 完成 |
 | M2 | 关节族 + 空间查询 + 事件/Observer | 可做门/车/机关 | ✅ 完成 |
 | M2.5 | 异步流水线 + 状态哈希（联机地基） | 插值无抖动 | ✅ 完成 |
-| M3 | Island 并行 + 睡眠 + warm-start + CCD（已升级为 rotational conservative-advancement：shape-cast + 位姿回绕，对齐 UE/Chaos） | 万级刚体 60fps | ✅ 完成 |
+| M3 | Island 并行 + 睡眠 + warm-start + rotational conservative-advancement CCD：shape-cast + 位姿回绕 | 万级刚体 60fps | 🟡 内核路径已有；万级刚体目标的匹配硬件 P50/P95/P99 与稳定帧预算尚未验收，不由算法存在推导与 UE/Chaos 整体对等 |
 | M4 | 布料 / 软体 / 绳索（统一约束复用） | 交互式布料 | ✅ 完成 |
-| M4.5 | 离线烘焙 + Golden replay CI | 缓存回放 demo | ✅ 完成 |
-| M5 | GPU 后端（流体/大布料/破碎） | 十万粒子 | 🟡 kernel 与独立 parity 测试已实现；MPM 已有统一 runtime 与 ECS 粒子 snapshot 回写，其他求解器跨层回写、真机覆盖和性能证据仍缺失 |
-| M5.5 | MPM（沙/雪/泥）+ FLIP/APIC 流体 + 表面重建 | 溃坝/沙堆 demo | 🟡 CPU/GPU MPM stage、resident runtime、ECS 固定步粒子快照、预算受限的 CPU 表面重建与版本化 surface snapshot、公共 GPU fluid step 的 APIC 路由已实现；render-world extraction、mesh/GPU buffer 更新、零拷贝接线、场景 Demo、真机 GPU 覆盖与性能验收未完成 |
+| M4.5 | 离线烘焙 + Golden replay CI | 缓存回放 demo | 🟡 bounded Offline/Playback、完整内存快照和软体轨迹磁盘 CRC 已有；全世界磁盘资产、Bake/热重载/流式集成及完整场景验收仍缺，见 §16 |
+| M5 | GPU 后端（流体/大布料/破碎） | 十万粒子 | 🟡 kernel 与独立 parity 测试已实现；MPM 已有统一 runtime、ECS 粒子 snapshot 与 CPU copy 原生渲染桥，其他求解器跨层回写、广泛真机覆盖和性能证据仍缺失 |
+| M5.5 | MPM（沙/雪/泥）+ FLIP/APIC 流体 + 表面重建 | 溃坝/沙堆 demo | 🟡 CPU/GPU MPM stage、resident runtime、ECS 固定步粒子快照、预算受限的 CPU 表面重建、版本化 surface snapshot、原生 Mesh/render-world extraction/GPU buffer/draw queue 桥与公共 GPU fluid step 的 APIC 路由已实现；渲染桥为 CPU copy、单视图，零拷贝、多视图、场景 Demo、广泛真机 GPU 覆盖与性能验收未完成 |
 | M7 | VBD / 降阶软体 + 自适应 LOD | 巨型软体实时 | ✅ 完成 |
 | M8 | 约束 DSL + 参数热重载 | 编辑器实时调参 | ✅ 完成 |
-| M9 | GPU-Driven 持久化管线 + 实时 Voronoi 破碎 | 零拷贝 + 动态裂纹 | 🟡 CPU 破碎和部分 GPU stage 已有；动态拓扑、生产持久化调度与渲染回写未完成 |
-| M10 | 动态装配：力累加器/施力 API + 通用可断关节 + 装配图/复合体合并·拆分 + 吸附几何原语 + GrabDrive | 实时搭建 200+ 零件载具 60fps、焊点可断、抓取不穿墙 | 🟡 core 装配/施力切片已有；ECS/资产/演示场景/性能验收未完成 |
-| M11 | 力场子系统 + GPU 采样 + 风扇/推进器/浮力部件 + 断裂连锁 | 自建载具可驾驶/飞行、受击解体 | 🟡 core field 与 GPU 采样已有；功能部件和断裂连锁跨层验收未完成 |
-| M12 | 刚体/多体气动：各向异性阻力面元 + 翼面升力/失速 + 推进反扭矩 + 浮力（空气/水）+ 空间风场/滑流/地面效应 + 附加质量 | 自建飞行器可滑翔/配平飞行、气球浮空、水上载具 | 🟡 aero core 切片与 ECS `RigidBodyAero` 生命周期桥、固定步推进器路径已有；完整气动模型、GPU 采样、独立 ECS 部件族、Demo 和跨层性能验收未完成 |
-| M13 | 角色布偶：球关节 swing-twist 椭圆锥限/扭限 + 软限位 + 关节摩擦 + 位姿伺服 drive + RagdollBuilder | 人形布偶命中反应自然、不穿模不软面条、受击可配主动驱动 | 🟡 最大坐标关节与部分 motor/限位已有；高阶布偶能力和群体验收未完成 |
-| M14 | 降阶坐标铰接：Featherstone ABA O(n) 正向动力学 + 广义坐标限位/马达 + 与 XPBD 接触耦合 | 长机械臂/角色强铰接链极大质量比零漂移、少子步稳定 | 🟡 articulation core/固定步输入已有；完整接触耦合、退化、GPU 多链和性能验收未完成 |
-| M15 | 布料拓扑撕裂：顶点分裂 + 裂纹前沿 + 穿刺 + 各向异性织物 + 渲染网格缝合 + GPU 拓扑变更 | 旗帜被弹片撕开真实裂口、刀划布、撕裂口参与自碰撞 | 🟡 版本化 topology payload、core 原子 consumer 与 ECS 生命周期/失败重试 adapter bridge 已有；具体渲染缝合、GPU 重排、CCD/BVH 生产 consumer、CPU/GPU parity 和完整场景验收未完成 |
+| M9 | GPU-Driven 持久化管线 + 实时 Voronoi 破碎 | 零拷贝 + 动态裂纹 | 🟡 CPU 破碎和部分 GPU stage 已有；动态拓扑、生产持久化调度与 GPU resident 零拷贝渲染回写未完成，已有 CPU copy MPM 渲染桥不等于本项验收 |
+| M10 | 动态装配：力累加器/施力 API + 通用可断关节 + 装配图/复合体合并·拆分 + 吸附几何原语 + GrabDrive | 实时搭建 200+ 零件载具 60fps、焊点可断、抓取不穿墙 | 🟡 core 装配/施力与 ECS 显式 assembly 请求、合并拆分及 generational entity/body 重映射已有；抓取/snap 交互闭环、自动接入普通 `RigidBody` authoring、Demo 和目标性能验收未完成 |
+| M11 | 力场子系统 + GPU 采样 + 风扇/推进器/浮力部件 + 断裂连锁 | 自建载具可驾驶/飞行、受击解体 | 🟡 core field/GPU sampler 与 ECS ForceField、AeroSurface/Thruster/Buoyancy 生命周期桥已有；GPU sampler 尚未驱动 PhysicsWorld/XPBD，破坏连锁、跨层场景和目标性能验收未完成 |
+| M12 | 刚体/多体气动：各向异性阻力面元 + 翼面升力/失速 + 推进反扭矩 + 浮力（空气/水）+ 空间风场/滑流/地面效应 + 附加质量 | 自建飞行器可滑翔/配平飞行、气球浮空、水上载具 | 🟡 升阻/失速、推进反扭矩、浮力、附加质量、Magnus 与风场/wake 等 core 原语、ECS `RigidBodyAero` 生命周期桥及固定步推进器路径已有；完整场景模型、GPU 采样、独立 ECS 部件族、Demo 和跨层性能验收未完成 |
+| M13 | 角色布偶：球关节 swing-twist 椭圆锥限/扭限 + 软限位 + 关节摩擦 + 位姿伺服 drive + RagdollBuilder | 人形布偶命中反应自然、不穿模不软面条、受击可配主动驱动 | 🟡 core 原语、按关节 humanoid preset，以及 `EcsRagdoll` 的稳定 part-ID authoring、generational body 映射、固定步约束接线与生命周期回归已有；骨骼/角色资产转换、完整碰撞场景、GPU 群体和性能验收未完成 |
+| M14 | 降阶坐标铰接：Featherstone ABA O(n) 正向动力学 + 广义坐标限位/马达 + 与 XPBD 接触耦合 | 长机械臂/角色强铰接链极大质量比零漂移、少子步稳定 | 🟡 core、ECS 生命周期/输入/snapshot、XPBD 自动混合接触及断裂后的最大坐标/ECS 实体接管均已有实现；接管支持非零 COM/完整惯量的主轴转换，仍拒绝重力不匹配、多 collider attachment 与部分存活关节参数；GPU 多链、完整场景和目标性能验收未完成 |
+| M15 | 布料拓扑撕裂：顶点分裂 + 裂纹前沿 + 穿刺 + 各向异性织物 + 渲染网格缝合 + GPU 拓扑变更 | 旗帜被弹片撕开真实裂口、刀划布、撕裂口参与自碰撞 | 🟡 版本化 topology payload、core 原子 consumer、ECS 生命周期/重试桥、render-app 原生 Mesh 转换及 Assets/SceneRegistry/draw queue 提交已有；GPU 重排、CCD/BVH 生产 consumer、CPU/GPU parity 和完整场景验收未完成 |
 
 关键预留原则：Tier S/A 的功能现在只在 trait Solver、DriveMode、序列化、后端抽象四个扩展点"留好插槽"，M0/M1 不实现，避免过度设计拖慢主线。
 
@@ -448,12 +458,13 @@ prism_physics_core 不依赖 Prism ECS（纯数据 + trait），保证可被服�
 
 ### 22.x 世界级软体所有权与固定 substep 接线
 
-这一步补的是核心 kernel 的端到端生命周期，不是 cloth gameplay 或 ECS 资源系统：
+核心 kernel 的端到端生命周期与可选 ECS 所有权桥已存在；它们不是 cloth gameplay 或完整资产/渲染资源系统：
 
 - `PhysicsWorld::spawn_soft_body` 把调用方构造好的 `SoftBody` 放入代际句柄存储；存储只知道粒子、约束和 solver 配置，不知道 cloth、角色、材质或玩法类型。
 - `XpbdSolver` 对每个 live slot 按升序固定顺序处理。软体先完成一个与刚体相同的固定 substep 的预测和内部约束投影，再按 `gather_rigid_proxies -> resolve_two_way_coupling -> reaction writeback` 执行耦合，最后用耦合后的位移恢复粒子速度。
 - 默认 `ClothRigidCouplingConfig::disabled()` 不进入 proxy/coupling/writeback 阶段；无世界软体时刚体路径保持原有 bit-identical。软体自身的空存储、确定性重放和 clone 边界已有回归测试。
-- 仍未纳入：ECS/资产层如何创建、销毁、映射和渲染 `SoftBodyHandle`；GPU 粒子/约束后端及 CPU/GPU 同步；跨 crate 的调度、网络复制、快照编码和渲染网格回写。这些必须由消费方契约接入，不能在 `prism_physics_core` 内硬编码。
+- ECS 所有权已接入：`SoftBodyBinding` 提供 authoring 模板，`PhysicsBindings` 维护 entity 与代际 `SoftBodyHandle` 双向映射；固定 Sync 创建或替换 world-owned 软体，组件移除/实体销毁会回收自有实例，非法 authoring 与失效句柄有诊断和清理路径。实时粒子状态从 world resource 读取，不回写 authoring 模板。
+- 仍未纳入完整验收：软体资产层装载与渲染网格回写、GPU 粒子/约束后端及 CPU/GPU 同步、网络复制与全世界快照磁盘资产集成。固定步 ECS 调度与软体轨迹磁盘 CRC 已有，不能再整体列为缺失；后续消费方仍须通过契约接入，不能在 `prism_physics_core` 内硬编码。
 
 ---
 
@@ -664,9 +675,9 @@ commands.entity(crate_entity).insert(GrabDrive::to(hand_pose).soft());
 
 ### 25.2 现状与差距
 
-- ✅ 已有：软体/布料逐面气动（`soft::aero`）；刚体气动 core 切片（面元/推进器/浮力等，详见对应 API 与测试）；ECS `RigidBodyAero(AeroBodyConfig)` 在固定 Sync 阶段注册、替换、移除，并由 core 在 XPBD 子步评估。`linear_damping` / `angular_damping`（`dynamics/integrator.rs`）仍只是速度阻尼，**非真实气动**。
-- ❌ 缺：刚体形阻（方向/面积相关）、翼面升力+攻角曲线+失速、推进反作用+反扭矩、浮力（空气/水对刚体）、附加质量、马格努斯、空间风场、下洗/滑流/尾流/地面效应。
-- 本节把上述缺口补成可落地规格。
+- ✅ 已有：软体/布料逐面气动（`soft::aero`）；刚体 `aero` 的面元升阻、`LiftCurve` 攻角/平滑失速、操纵面、推进反扭矩、空气/水浮力、附加质量与 Magnus 原语；解析 `WindField`、阵风/湍流、`Slipstream`/`Downwash` wake 和地面效应原语。ECS `RigidBodyAero(AeroBodyConfig)` 在固定 Sync 阶段注册、替换、移除，core 在 XPBD 子步评估，并先汇集活动推进器 wake 再计算各刚体受力。
+- 仍待完整接线与验收：GPU 空间风场采样、资产/编辑器调参、复杂飞行/水上场景的模型校准、跨层回归、Demo 与性能数据。ECS 已有 `AeroFunctionalComponents` 聚合组件持有 surfaces/thrusters/buoyancy，不等于每种部件各自拥有独立 ECS 组件与编辑器 authoring；不能把上述已有 CPU 原语和聚合组件生命周期整体列为缺失，也不能由原语存在推导完整气动生产链已经完成。
+- `linear_damping` / `angular_damping`（`dynamics/integrator.rs`）仍只是速度阻尼，**非真实气动**。下文为分层设计与验收规格；设计名 `AeroCurve` / `WindField3D` 不等于当前同名公共 API，现有入口以 `aero` 导出为准。
 
 ### 25.3 保真度分层（三档 LOD，可逐体选择）
 
@@ -814,7 +825,7 @@ commands.entity(ball).insert(Buoyancy::air(volume));
 
 ### 25.15 落地映射与里程碑（接 §22 / §24.12）
 
-- **Crate**：面元/推进/浮力/附加质量/旋转效应入 `prism_physics_core` 新增 `aero` 模块（与 `soft::aero` 共享系数与 sanitize）；空间风场并入 `field` 模块；GPU 采样入 `prism_physics_gpu`。
+- **Crate**：现有面元/推进/浮力/附加质量/旋转效应与解析风场位于 `prism_physics_core::aero`；与通用 `field` 的进一步整合及 `prism_physics_gpu` 空间采样按后续消费方契约推进。
 - **M12 刚体气动**（接 M11 力场）：core 原语与 ECS 刚体级配置生命周期桥已接入，ECS 固定步推进器路径有生命周期测试；这不代表下列阶段全部通过验收。
   - 阶段一（L0）：补齐并验收各向异性 Drag + Thruster（含反扭矩）+ 解析 Buoyancy（空气/水）完整链路。验收：风扇车能跑、气球能浮、物体在风场里被按方向吹。
   - 阶段二（L1）：完整验收 `AeroSurface` 升力 + `AeroCurve` 失速 + 操纵面。验收：自建滑翔翼/飞机可配平飞行、失速可复现不炸。
@@ -832,7 +843,7 @@ commands.entity(ball).insert(Buoyancy::air(volume));
 
 ## 26. 关节限位与角色布偶（Swing-Twist 锥限 / 柔韧阻尼 / 布偶稳定）
 
-> 定位：补齐 §3.2 关节族缺口。当前 `SphericalJoint`（`joint/kind.rs`）只有点重合 `compliance`、**无任何角度限位**，无法表达肩/髋/颈等生物关节的解剖运动范围——布偶会"软面条"、过度扭转、穿模。本节给出 swing-twist 四元数分解锥限、软限位、关节摩擦/阻尼、位姿伺服 drive 与布偶整体稳定方案。纯 XPBD 角位置约束，无 CFD、无 AI/ML。
+> 定位：深化 §3.2 关节族。基础 `SphericalJoint`（`joint/kind.rs`）仍只提供点重合 compliance；现有 `SwingTwistJoint` 已补上角度约束与驱动，不能再把球窝角限整体写成缺失。本节记录 swing-twist 分解锥限、软响应、关节摩擦/阻尼、位姿伺服及布偶稳定的设计与待验收目标。纯 XPBD 角位置约束，无 CFD、无 AI/ML。
 
 ### 26.1 对标与借鉴
 
@@ -851,9 +862,9 @@ commands.entity(ball).insert(Buoyancy::air(volume));
 
 ### 26.2 现状与差距
 
-- ✅ 已有：`RevoluteJoint`/`PrismaticJoint` 的 1-DOF `AngleLimit`/`LinearLimit` + `Motor`（位置域求解，`joint/motor.rs`）；`SphericalJoint` 点重合 compliance。
-- ❌ 缺：球窝 swing 锥限（含各向异性椭圆锥）、twist 扭限、软限位（soft limit）、关节角摩擦/阻尼、关节 **drive（目标相对姿态伺服）**、布偶级自碰撞屏蔽与稳定策略、质量比鲁棒性。
-- 本节把上述缺口补成可落地规格，复用既有 `AngleLimit`/`Motor` 语义，避免双份概念。
+- ✅ 已有：`RevoluteJoint`/`PrismaticJoint` 的 1-DOF 限位与 motor、`SphericalJoint` 点重合 compliance；`SwingTwistJoint` / `SwingTwistConfig` 的椭圆 swing 锥限、twist 范围、`SoftLimit`、摩擦/阻尼、`PoseDrive` 与主动/被动混合，并已有 XPBD 角约束消费路径。
+- ✅ 已有：通用 `RagdollBuilder` 生成排序/校验后的 `RagdollDefinition`，提供可选 `HumanoidPreset`、自碰撞过滤策略与质量/惯性条件诊断；这不是完整角色资产/动画管线。
+- 仍待完整验收：角色/骨骼资产与动画姿态接线、自碰撞策略在完整场景中的消费与稳定性、极端质量比回归、编辑器工具、GPU 孪生与群体性能。下文 `SwingTwistLimit` / `JointDrive` 等为设计表述，当前具体 API 以 `joint` 导出为准，不把示意接口当作已实现入口。
 
 ### 26.3 Swing-Twist 四元数分解
 
@@ -925,14 +936,14 @@ JointDrive
 
 ### 26.7 布偶装配与稳定
 
-- **RagdollBuilder**：输入骨骼层级 → 批量生成 `body + collider + SphericalJoint(+SwingTwistLimit)`；提供 humanoid 预设（肩/肘/髋/膝/颈/脊柱标准锥角表）。
+- **RagdollBuilder**：当前输入稳定 part ID、body 描述、局部锚点与 `SwingTwistJoint`，生成通用定义并支持可选 `HumanoidPreset`；骨骼资产自动转换、collider 生成与完整角色实例化仍按消费方集成，不由 builder 存在推导完成。
 - **自碰撞屏蔽**：相邻骨骼用 §24 `Aggregate` 屏蔽相邻自碰撞、保留远端（手打脸要碰、上臂贴肩不要互挤）。
 - **质量比鲁棒性**：相邻骨骼逆质量差过大（手指 vs 躯干）易发散——对策：子步 + warm-start + soft limit；提供相邻质量比 clamp 建议（如 ≤10:1）并在 builder 里告警。
 - **睡眠**：整条布偶归一个 island，用聚合动能阈值统一休眠/唤醒，防半截抖动。
 
 ### 26.8 人形解剖锥角预设（humanoid preset）
 
-供 `RagdollBuilder::humanoid` 直接套用的默认范围（右手系，近似解剖活动度；可被 DataAsset 覆盖）：
+以下为骨骼适配层的建议范围（右手系，近似解剖活动度；未来可被 DataAsset 覆盖），不是现有 `HumanoidPreset` 数值的逐项声明，也不代表已有 `RagdollBuilder::humanoid(&skeleton)` 入口：
 
 | 关节 | swing_y | swing_z | twist | 说明 |
 |---|---|---|---|---|
@@ -963,7 +974,7 @@ JointDrive
 - swing-twist 分解 + 锥投影为 O(1)/关节纯函数；提取角用一次 `atan2`/`asin`（可用多项式近似保确定性），非热路径瓶颈。
 - 角约束与点约束同图着色批，无额外同步点；SoA 存 `SwingTwistLimit`，SIMD 批处理多关节。
 - GPU：锥限/扭限/软限位为逐关节纯函数，可出 WGSL 孪生并入关节 kernel，CPU golden + 真机 parity（对齐 §7 验证范式）。
-- 1000 关节布偶群：锥限额外成本相对点约束可忽略（<5%），给基准看板。
+- 1000 关节布偶群：锥限额外成本相对点约束 <5% 为待测目标，需基准看板验证，不能写成已有实测结论。
 
 - **布偶 LOD（接 §10 空间 LOD）**：近距全锥限 + drive + 高子步；中距关 drive、仅保锥限、降子步；远距冻结为 kinematic/动画驱动或整岛休眠；切档带滞回防跳变。
 - **性能预算（参考量级，单线程 CPU，具体以基准看板为准）**：
@@ -978,7 +989,7 @@ JointDrive
 
 ### 26.11 易用性
 
-- 五行起步：
+- 目标易用性示意（非当前可直接编译的 API；当前构建入口为 `RagdollBuilder::new` / `HumanoidPreset::builder`）：
 ```
 let mut rag = RagdollBuilder::humanoid(&skeleton);
 rag.joint(Hip).swing_twist(deg(45), deg(25), AngleLimit::symmetric(deg(30)));
@@ -997,6 +1008,10 @@ handle.drive(Spine, pose_target, max_torque);// 可选：主动维持姿态
 
 ### 26.13 里程碑 M13（接 §22）
 
+锥/扭限、软响应、摩擦/drive 及 builder/预设/过滤策略/诊断原语已存在；以下分阶段列的是完整场景验收要求，不因 core 或测试文件存在而转为完整通过。
+
+ECS `EcsRagdoll` 以稳定 part ID 映射到调用方已有的 `RigidBody` 实体，并在固定 Sync 阶段安装 core 约束；它不创建角色刚体/碰撞体，也不负责骨骼资产、动画姿态或自动碰撞体生成。
+
 - 阶段一：swing 椭圆锥限 + twist 限（硬墙）+ 关节摩擦。验收：人形布偶倒地姿态自然、关节不过度扭转/穿模。
 - 阶段二：SoftLimit（软墙）+ JointDrive（位姿伺服）。验收：命中反应吸冲击不弹飞、半布偶可维持站姿。
 - 阶段三：RagdollBuilder humanoid 预设 + Aggregate 自碰撞屏蔽 + 质量比告警 + GPU 孪生。验收：100 具布偶群 60fps、确定性哈希一致。
@@ -1005,7 +1020,7 @@ handle.drive(Spine, pose_target, max_torque);// 可选：主动维持姿态
 
 ## 27. 降阶坐标铰接（Reduced-Coordinate Articulation：Featherstone）
 
-> 定位：对标 PhysX Articulation / MuJoCo / Bullet `btMultiBody`。极大质量比、长铰接链（机械臂、起重机、角色强约束链、索道吊舱）在**最大坐标 XPBD** 下需要大量子步才稳、且有残余关节漂移。降阶坐标用关节自由度本身作广义坐标，**结构上无穿透漂移、极稳、少子步**。本节设计一个可选高保真档，与主干 XPBD 共存并经接触耦合。注意：现有 `reduced/` 模块是**软体模态子空间**（Pentland/模态分析），与本节刚体铰接**无关**，不要混淆。无 AI/ML。
+> 定位：对标 PhysX Articulation / MuJoCo / Bullet `btMultiBody`。极大质量比、长铰接链（机械臂、起重机、角色强约束链、索道吊舱）在**最大坐标 XPBD** 下可能需要较多子步并有残余关节漂移。降阶坐标用关节自由度作广义坐标，在树内结构性消除关节连接漂移；这不保证碰撞无穿透或任意步长稳定。当前 `reduced/articulation.rs` 已有刚体铰接 core，与同目录软体模态子空间是独立模型，ECS 另有所有权/固定步桥；CPU core/XPBD 自动混合接触及断裂后 ECS 接管已有实现与定向回归，完整生产场景与 GPU 多链验收仍缺。无 AI/ML。
 
 ### 27.1 对标与借鉴
 
@@ -1024,8 +1039,12 @@ handle.drive(Spine, pose_target, max_torque);// 可选：主动维持姿态
 
 ### 27.2 现状与差距
 
-- ✅ 已有：最大坐标 XPBD 关节链（Fixed/Distance/Spherical/Revolute/Prismatic + Motor + 限位）；子步 + warm-start + island 并行。
-- ❌ 缺：广义坐标表达、Featherstone ABA O(n) 正向动力学、关节空间惯性/偏置力、广义坐标直接限位/驱动、铰接体与接触/外部约束的 Jacobian 耦合。
+- ✅ 已有：最大坐标 XPBD 关节链及子步/warm-start/island 并行；降阶 `Articulation` 的广义状态、spatial algebra、树形 ABA、fixed/floating base、revolute/prismatic/spherical/fixed 关节、限位/马达/阻尼/armature，及 world-owned storage 的固定子步推进。
+- ✅ 已有：`prism_physics_ecs::articulation::PrismArticulationPlugin` 的 `ArticulationBinding` authoring、代际映射、输入与 `ArticulationSnapshot` 发布、编辑替换/移除生命周期；core 另有接触冲量响应/写入、断裂停止与重建/最大坐标状态导出原语。
+- ✅ 已有：XPBD 固定步通过 `articulation_contact` 对普通刚体和注册的铰接 collider 做混合 broad/narrow phase，并将接触与限位响应耦合进铰接广义速度；固定顺序、回放确定性和限位接触有回归覆盖。
+- ✅ 已有：断裂后 core 原子生成最大坐标 body、存活关节与 collider；ECS 将同一 generational body handle 物化为独立实体并接入普通刚体同步、固定步输入/求解/回写和 snapshot。失败保留降阶运行态并重试；生命周期测试覆盖输入、移除、失效、generation 复用和重建清理。
+- 已有：handoff 把非零 COM 与完整对称惯量转换为 COM/右手主轴 body frame，并迁移速度、collider 和关节锚点；几何先只读验证、再提交，避免克隆整个 world/shape registry。ECS 物理实体使用 COM frame，独立 authored 子实体保留原 link frame，不能将同一 Transform 同时解释为两种坐标系。
+- 未完成：gravity mismatch、多 collider attachment、存活关节 motor/damping/armature 与部分限位策略仍采用原子拒绝；不以无声丢弃参数冒充无损接管。GPU 多链、完整场景及匹配硬件目标性能验收仍未完成。
 - 适用面：长链 + 极大质量比 + 需精确可控（机械臂末端、角色操纵）时降阶坐标显著优于最大坐标。
 
 ### 27.3 模型：铰接拓扑
@@ -1084,7 +1103,7 @@ state: q（广义位置）、q̇（广义速度）
 - 关节空间小矩阵求逆用固定尺寸（1/3 维）展开，无堆分配；SoA 存 spatial 量。
 - GPU：每链一个线程/工作组（链内串行、链间并行），适合大量同构链（如一群角色）；给 CPU golden + parity 预留。
 
-- **降阶 vs 最大坐标（10 连杆、100:1 质量比同场景对拍）**：
+- **降阶 vs 最大坐标（10 连杆、100:1 质量比的待验证对拍目标，非本轮实测）**：
 
 | 维度 | 最大坐标 XPBD | 降阶坐标 Featherstone |
 |---|---|---|
@@ -1094,11 +1113,11 @@ state: q（广义位置）、q̇（广义速度）
 | 可断 / 运行时装配 | 原生支持 | 需降解为最大坐标子图 |
 | 适用 | 默认、破坏 / 装配 / 松耦合 | 固定拓扑、强铰接、长链 |
 
-- 结论：强铰接长链在降阶下用约 1/4 子步达到更低漂移，CPU 预算显著下降；代价是失去原生可断 / 装配，故按实体选择档位，而非全局替换。
+- 待验假设：强铰接长链可在降阶下用约 1/4 子步达到更低连接漂移；CPU 收益须以同场景、匹配硬件测量，不能由算法复杂度直接推出。可断/装配还需生产退化路由，因此按实体选择档位，而非全局替换。
 
 ### 27.9 易用性
 
-- 复用 §26 `RagdollBuilder`，加 `.reduced()` 开关即把该布偶/机械臂编译为 `Articulation`；关节类型/限位/马达 API 不变（同一套 `JointKind`）。
+- 目标设计：复用 §26 `RagdollBuilder` 并提供降阶编译入口；`.reduced()` 是示意，不是当前已实现的统一 API。现有 core 使用 `ArticulationBuilder`，ECS 使用 `ArticulationBinding`。
 - 调试：广义坐标 `q/q̇` 面板、每关节力矩、ABA 残差、与最大坐标并排对拍（同场景双解验证）。
 - 默认不开；用户只在"长链 + 大质量比 + 要稳"时一行切换，符合"分层下钻"。
 
@@ -1106,6 +1125,7 @@ state: q（广义位置）、q̇（广义速度）
 
 - ABA 为确定性数值过程（固定扫描序、固定小矩阵求逆路径），`q/q̇` 进状态哈希与序列化，随 `SnapshotRing` 回滚。
 - M14 阶段：① 单链 revolute/prismatic ABA + 广义坐标限位/马达（验收：长机械臂末端精确、零漂移）；② spherical 自由度 + swing-twist 广义锥限（验收：角色主链布偶降阶稳定）；③ 接触 Jacobian 耦合 + 断裂退化 + GPU 多链（验收：极大质量比吊臂抓重物不发散、断裂切回最大坐标无缝）。
+- 上述为完整场景验收目标；混合自动接触和断裂后 ECS 接管已有 CPU 定向回归，但不能据此认定 GPU 多链、任意接管配置或完整生产场景已验收。
 
 ---
 
@@ -1132,7 +1152,7 @@ state: q（广义位置）、q̇（广义速度）
 - 边级断裂：`tear_flags`/`apply_tearing`（张应变超 `break_strain` 即移除边，列序确定性、保留存活边相对序以稳定图着色）；`tear_flag` 为 CPU/GPU 共享标量核。拓扑级撕裂另以三角膜应力（正交各向异性本构、面积聚合的最大主应力）驱动，避免把约束断裂阈值误当作网格裂纹判据。
 - `TearReport{inspected, over_threshold, max_strain}`；`TearingParams` 带 `sanitized()`（NaN/负阈→不撕）。
 - 塑性蠕变（rest-length 永久拉长）在 `soft::damage::plasticity`。
-- **局限**：只删约束、**不改网格拓扑** → 渲染网格仍相连、不生成裂口边界；相邻弯曲/面积/tether 约束未同步；无裂纹方向控制与穿刺；GPU 侧只删标记、无拓扑重排。
+- **边级损伤路径的局限**：`apply_tearing` 只删约束、不改网格拓扑，不生成裂口边界，也不负责相邻约束同步、方向控制与穿刺。另有拓扑级撕裂及版本化 payload/core/ECS/render consumer（见 §28.12），不能把边级路径的局限推广到所有 CPU 撕裂实现；GPU 拓扑重排仍未完成。
 
 ### 28.3 顶点分裂（Vertex Split）——拓扑撕裂核心
 
@@ -1206,11 +1226,12 @@ state: q（广义位置）、q̇（广义速度）
 - 调试可视化：前沿高亮、主应力方向、裂口边界、每帧撕裂步数看板。
 - M15 阶段：① 顶点分裂 + 裂口边界 + 约束同步（验收：拉扯撕开真实口子、渲染可见）；② 裂纹前沿 + 各向异性 + 穿刺（验收：刀划布沿纹路裂、弹片穿旗）；③ 自碰撞/CCD 更新 + 渲染缝合 + GPU 拓扑变更 parity（验收：撕裂口不自穿、GPU/CPU 哈希一致）。
 
-当前编码证据只覆盖版本化完整 payload、core 原子 consumer，以及
-`prism_physics_ecs::M15TopologyBridgePlugin` 的生命周期注册、原子 adapter
-交付、失败保留与有序重试。该 bridge 是 renderer-independent 的交付边界，
-不等于具体渲染网格缝合、GPU compact/reorder、生产 CCD/BVH consumer 或
-CPU/GPU parity 已完成；这些仍作为 M15 未完成验收项。
+当前编码证据覆盖版本化完整 payload、core 原子 consumer、
+`prism_physics_ecs::M15TopologyBridgePlugin` 的生命周期注册/失败重试，以及
+render-app adapter 将拓扑快照转换为 indexed native `Mesh`，由 render owner
+提交到 `Assets<Mesh>`、`SceneRegistry` 与 draw queue；定向集成测试覆盖提交、
+绘制注册和移除。该 Null 后端测试不证明真机画面或完整场景撕裂效果，也不等于
+GPU compact/reorder、生产 CCD/BVH consumer 或 CPU/GPU parity 已完成。
 
 ---
 
@@ -1266,4 +1287,18 @@ CPU/GPU parity 已完成；这些仍作为 M15 未完成验收项。
 
 ---
 
-*本文档为 Prism Physics 设计规格 v0.7，不含 AI/ML 内容。已验证存在：CPU core 固定步、Prism ECS 的 `Sync -> Step -> Writeback` 刚体/软体桥、离线 driver 运行时切片、磁盘 cache 校验切片、MPM CPU/GPU stage、resident runtime、ECS 固定步粒子快照及预算受限的 CPU 表面重建/surface snapshot bridge、公共 GPU fluid step 的 APIC 路由、M10–M12 的部分 core 原语（M12 含 `RigidBodyAero` ECS 生命周期桥与固定步推进器测试）、M14 articulation core，以及 M15 拓扑撕裂的版本化 render/collision update 原语、core 原子 consumer 和 ECS 生命周期/有序重试 adapter bridge。未完成：M5/M5.5 的 render-world surface extraction、mesh/GPU buffer 更新、零拷贝接线、场景 Demo、广泛真机 GPU 覆盖与性能验收，M9–M12 的完整跨层生产链和 demo，M13 的完整布偶限位/群体验收，M14 的接触耦合/退化/GPU 多链验收，M15 的具体渲染缝合、GPU 重排、CCD/BVH 生产 consumer、CPU/GPU parity 与完整场景验收，以及性能目标的匹配硬件 P50/P95/P99 证据。当前主机无 wgpu adapter，因此 resident GPU parity 只能记录为 skipped，不能写成通过。*
+## 当前验证记录（2026-10-21）
+
+本规格 v0.7 不含 AI/ML 内容。已实现的内核与跨层桥以各节“现状”及 §22 路线图为准；不能把设计 API、测试文件存在或历史测试数当作当前完整系统的验收证据。
+
+本轮定向验证（`--offline`，独立 target，debug 信息与 incremental 关闭）：
+
+| 包 / 测试选择 | 结果 | 验证范围 |
+|---|---|---|
+| `prism_physics_core --features parallel --test articulation_handoff` | 15 通过 | 断裂原子接管、连续铰链角及超主值范围限位等回归 |
+| 同包 `--test articulation_handoff_inertia` | 1 通过 | 非零 COM / 完整惯量的物理 frame 转换 |
+| 同包 `--test collision_exclusions` | 13 通过 | 代际碰撞排除及相关生命周期 |
+| 同包 `--test compound_assembly_geometry` | 7 通过 | 复合几何与装配路径 |
+| `prism_physics_ecs --lib articulation::handoff::tests` | 3 通过 | 接管退休的原子回滚、空成员与局部写集提交 |
+
+上述测试不证明完整 workspace、GPU parity、真机画面或目标性能通过。匹配硬件 P50/P95/P99、广泛 GPU 覆盖与完整场景仍须分别验收。接管的非零 COM / 完整惯量已实现；剩余拒绝策略以 §27.2 为准，不再笼统列为“不支持任意质量属性”。
