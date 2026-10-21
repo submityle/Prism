@@ -47,6 +47,13 @@ pub use sdf_clipmap::{
     WorldSdfClipmapCommit, WorldSdfClipmapConfig, WorldSdfClipmapError, WorldSdfClipmapPlan,
     WorldSdfClipmapScheduler,
 };
+#[cfg(any(test, feature = "gpu_proxy"))]
+mod sdf_clipmap_upload;
+#[cfg(feature = "gpu_proxy")]
+pub use sdf_clipmap_upload::{
+    WorldSdfClipmapUploadError, WorldSdfClipmapUploadStats, WorldSdfGpuClipmap,
+    WorldSdfGpuClipmapError,
+};
 mod data_layers;
 pub use data_layers::{
     DataLayerConfigError, DataLayerId, DataLayerState, LayeredCellFrameCoordinator,

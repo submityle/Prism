@@ -88,3 +88,7 @@ workspace 通过。本片源码无 `todo!`、`unimplemented!` 或占位实现，
 本切片不声明已完成 SDF 样本烘焙、GPU buffer 上传、相机系统接线、physics solver、GI、
 renderer 或导航消费者接入。调用方仍必须把 `entered`/`exited` 转换为实际 bake/upload/retire
 操作，并在成功完成后清除对应 dirty 坐标；失败应保留 dirty 以便重试。
+
+2026-10-21 后续的 runtime→GPU ring 上传 adapter 已单独实现和验收，见
+`prism_world_runtime_sdf_gpu_upload_zh.md`。它不改变本篇 scheduler 的 CPU-only 所有权边界；
+相机/焦点自动驱动、对象 dirty/bake 编排及 physics/GI/renderer/nav 消费仍未接通。

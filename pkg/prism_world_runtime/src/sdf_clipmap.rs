@@ -327,6 +327,13 @@ pub struct WorldSdfClipmapScheduler {
     dirty: Vec<BrickCoord>,
 }
 
+#[cfg(any(test, feature = "gpu_proxy"))]
+#[derive(Debug, PartialEq)]
+pub(crate) enum SdfClipmapApplyError<E> {
+    Scheduler(WorldSdfClipmapError),
+    Upload(E),
+}
+
 impl WorldSdfClipmapScheduler {
     /// Creates an uninitialized bounded scheduler.
     pub fn new(config: WorldSdfClipmapConfig) -> Result<Self, WorldSdfClipmapError> {
@@ -470,13 +477,63 @@ impl WorldSdfClipmapScheduler {
             return Err(WorldSdfClipmapError::ForeignPlan);
         }
         self.check_revision(plan.base_revision)?;
+        Ok(self.publish(plan))
+    }
+
+    fn publish(&mut self, plan: WorldSdfClipmapPlan) -> WorldSdfClipmapCommit {
         self.clipmap = plan.clipmap;
         self.dirty = plan.dirty;
         self.revision = plan.target_revision;
-        Ok(WorldSdfClipmapCommit {
+        WorldSdfClipmapCommit {
             revision: self.revision,
             update: plan.update,
-        })
+        }
+    }
+
+    // The caller exclusively owns both scheduler and upload backend. All CPU
+    // planning precedes upload, and publication after upload cannot fail. The
+    // backend uploads every entered key, including Unknown for absent samples,
+    // so only retained edited bricks remain dirty (no second edge upload).
+    #[cfg(any(test, feature = "gpu_proxy"))]
+    pub(crate) fn update_center_with<T, E>(
+        &mut self,
+        center: BrickCoord,
+        upload: impl FnOnce() -> Result<T, E>,
+    ) -> Result<T, SdfClipmapApplyError<E>> {
+        let mut plan = self
+            .plan_center(center)
+            .map_err(SdfClipmapApplyError::Scheduler)?;
+        plan.dirty
+            .retain(|&coord| self.clipmap.slot_index(coord).is_some());
+        let result = upload().map_err(SdfClipmapApplyError::Upload)?;
+        self.publish(plan);
+        Ok(result)
+    }
+
+    // A bounded sorted suffix can be uploaded without copying dirty coords or
+    // allocating acknowledgement scratch. Preflight revision exhaustion before
+    // any queue writes; the callback has no access to mutate this scheduler.
+    #[cfg(any(test, feature = "gpu_proxy"))]
+    pub(crate) fn upload_dirty_suffix_with<T, E>(
+        &mut self,
+        count: usize,
+        upload: impl FnOnce(&[BrickCoord]) -> Result<T, E>,
+    ) -> Result<T, SdfClipmapApplyError<E>> {
+        let count = count.min(self.dirty.len());
+        let revision = if count == 0 {
+            self.revision
+        } else {
+            self.revision
+                .checked_add(1)
+                .ok_or(SdfClipmapApplyError::Scheduler(
+                    WorldSdfClipmapError::RevisionOverflow,
+                ))?
+        };
+        let retained = self.dirty.len() - count;
+        let result = upload(&self.dirty[retained..]).map_err(SdfClipmapApplyError::Upload)?;
+        self.dirty.truncate(retained);
+        self.revision = revision;
+        Ok(result)
     }
 
     /// Plans and commits a center roll in one call.
@@ -1032,6 +1089,96 @@ mod tests {
         let plan = scheduler.plan_center(center(0)).unwrap();
         assert!(plan.is_noop());
         scheduler.commit(plan).unwrap();
+        assert_eq!(scheduler.revision(), u64::MAX);
+    }
+
+    #[test]
+    fn guarded_uploads_reject_revision_exhaustion_before_callback() {
+        let mut scheduler = WorldSdfClipmapScheduler::new(config(32, 4096)).unwrap();
+        scheduler
+            .update_center_with(center(0), || Ok::<_, ()>(()))
+            .unwrap();
+        scheduler.mark_dirty(&[center(0)]).unwrap();
+        scheduler.revision = u64::MAX;
+        let dirty = scheduler.dirty_bricks().to_vec();
+        assert_eq!(
+            scheduler.upload_dirty_suffix_with(1, |_| -> Result<(), ()> {
+                panic!("revision must be checked before upload")
+            }),
+            Err(SdfClipmapApplyError::Scheduler(
+                WorldSdfClipmapError::RevisionOverflow
+            ))
+        );
+        assert_eq!(
+            scheduler.update_center_with(center(1), || -> Result<(), ()> {
+                panic!("revision must be checked before roll")
+            }),
+            Err(SdfClipmapApplyError::Scheduler(
+                WorldSdfClipmapError::RevisionOverflow
+            ))
+        );
+        assert_eq!(scheduler.dirty_bricks(), dirty);
+        assert_eq!(scheduler.center(), Some(center(0)));
+        assert_eq!(scheduler.revision(), u64::MAX);
+    }
+
+    #[test]
+    fn guarded_roll_rejects_dirty_budget_before_upload() {
+        let mut scheduler = WorldSdfClipmapScheduler::new(config(1, 4096)).unwrap();
+        assert!(matches!(
+            scheduler.update_center_with(center(0), || -> Result<(), ()> {
+                panic!("scheduler capacity must be checked before upload")
+            }),
+            Err(SdfClipmapApplyError::Scheduler(_))
+        ));
+        assert_eq!(scheduler.center(), None);
+        assert_eq!(scheduler.revision(), 0);
+        assert!(scheduler.dirty_bricks().is_empty());
+    }
+
+    #[test]
+    fn guarded_suffix_is_sorted_and_only_acknowledged_after_success() {
+        let mut scheduler = WorldSdfClipmapScheduler::new(config(32, 4096)).unwrap();
+        scheduler
+            .update_center_with(center(0), || Ok::<_, ()>(()))
+            .unwrap();
+        scheduler
+            .mark_dirty(&[center(1), center(-1), center(0)])
+            .unwrap();
+        let revision = scheduler.revision();
+        let dirty = scheduler.dirty_bricks().to_vec();
+        assert_eq!(
+            scheduler.upload_dirty_suffix_with(2, |coords| {
+                assert_eq!(coords, &[center(0), center(1)]);
+                Err::<(), _>("upload failed")
+            }),
+            Err(SdfClipmapApplyError::Upload("upload failed"))
+        );
+        assert_eq!(scheduler.dirty_bricks(), dirty);
+        assert_eq!(scheduler.revision(), revision);
+        assert_eq!(
+            scheduler.upload_dirty_suffix_with(2, |coords| {
+                assert_eq!(coords, &[center(0), center(1)]);
+                Ok::<_, ()>(96)
+            }),
+            Ok(96)
+        );
+        assert_eq!(scheduler.dirty_bricks(), &[center(-1)]);
+        assert_eq!(scheduler.revision(), revision + 1);
+        scheduler
+            .upload_dirty_suffix_with(usize::MAX, |coords| {
+                assert_eq!(coords, &[center(-1)]);
+                Ok::<_, ()>(())
+            })
+            .unwrap();
+        assert!(scheduler.dirty_bricks().is_empty());
+        scheduler.revision = u64::MAX;
+        scheduler
+            .upload_dirty_suffix_with(0, |coords| {
+                assert!(coords.is_empty());
+                Ok::<_, ()>(())
+            })
+            .unwrap();
         assert_eq!(scheduler.revision(), u64::MAX);
     }
 }
