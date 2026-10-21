@@ -713,6 +713,20 @@ struct PendingDependency {
     ticket: Option<LoadTicket>,
 }
 
+struct PlannedReloadSource {
+    path: AssetPath,
+    type_id: AssetTypeId,
+}
+
+type ReloadDecodeFuture = Pin<
+    Box<dyn Future<Output = Result<(AssetPath, AssetTypeId, FullLoadOutput), LoadFailure>> + Send>,
+>;
+
+struct PendingReloadSource {
+    plan_index: usize,
+    future: ReloadDecodeFuture,
+}
+
 struct DependencyWaitSet {
     state: Arc<Mutex<SchedulerState>>,
     parent: FlightKey,
@@ -2165,73 +2179,26 @@ async fn execute_async_reload(
     )
     .await?;
     let mut decoded = BTreeMap::new();
-    let mut pending = VecDeque::new();
     decoded.insert(plan.path.clone(), (plan.type_id, output));
-    pending.push_back(plan.path.clone());
-    while let Some(current_path) = pending.pop_front() {
-        let requests = {
-            let (_, output) = decoded
-                .get(&current_path)
-                .expect("pending paths are inserted before they are queued");
-            let mut requests = Vec::new();
-            requests.extend(output.primary.dependencies.iter().cloned());
-            for labeled in &output.labeled {
-                requests.extend(labeled.dependencies.iter().cloned());
-            }
-            requests
-        };
-        for dependency in requests {
-            let source_path = dependency.path.clone().without_label();
-            if decoded.contains_key(&source_path) {
-                continue;
-            }
-            if decoded.len() >= MAX_REVISION_CLOSURE {
-                return Err(LoadFailure::AssemblyFailed(
-                    "async reload dependency closure exceeds the bounded candidate limit".into(),
-                ));
-            }
-            if flight.is_cancelled() {
-                return Err(LoadFailure::Cancelled);
-            }
-            let dependency_type = if dependency.path.has_label() {
-                plan.loaders
-                    .policy()
-                    .resolve_untyped(&source_path)
-                    .and_then(|loader| plan.loaders.policy().produced_type(loader))
-                    .ok_or_else(|| {
-                        LoadFailure::AssemblyFailed(format!("no loader for {source_path}"))
-                    })?
-            } else {
-                dependency
-                    .expected_type
-                    .or_else(|| {
-                        plan.loaders
-                            .policy()
-                            .resolve_untyped(&source_path)
-                            .and_then(|loader| plan.loaders.policy().produced_type(loader))
-                    })
-                    .ok_or_else(|| {
-                        LoadFailure::AssemblyFailed(format!("no loader for {source_path}"))
-                    })?
-            };
-            let output = decode_reload_source(
-                &scheduler,
-                plan.source_revision,
-                &plan.sources,
-                &plan.loaders,
-                &source_path,
-                dependency_type,
-                &flight,
-                false,
-            )
-            .await?;
-            if output.primary.type_id != dependency_type {
-                return Err(LoadFailure::AssemblyFailed(format!(
-                    "loader produced an unexpected asset type for {source_path}"
-                )));
-            }
-            decoded.insert(source_path.clone(), (dependency_type, output));
-            pending.push_back(source_path);
+    let mut frontier = vec![plan.path.clone()];
+    while !frontier.is_empty() {
+        let source_plan = plan_reload_frontier(&decoded, &frontier, &plan.loaders)?;
+        if source_plan.is_empty() {
+            break;
+        }
+        let decoded_frontier = decode_reload_batch(
+            &scheduler,
+            plan.source_revision,
+            &plan.sources,
+            &plan.loaders,
+            &flight,
+            source_plan,
+        )
+        .await?;
+        frontier = Vec::with_capacity(decoded_frontier.len());
+        for (source_path, dependency_type, output) in decoded_frontier {
+            frontier.push(source_path.clone());
+            decoded.insert(source_path, (dependency_type, output));
         }
     }
     let candidate = AsyncReloadCandidate {
@@ -2255,6 +2222,167 @@ async fn execute_async_reload(
         Err(AsyncReloadCommitError::Superseded) => Err(LoadFailure::Superseded),
         Err(AsyncReloadCommitError::Rejected(error)) => Err(LoadFailure::AssemblyFailed(error)),
     }
+}
+
+fn plan_reload_frontier(
+    decoded: &BTreeMap<AssetPath, (AssetTypeId, FullLoadOutput)>,
+    frontier: &[AssetPath],
+    loaders: &AssetLoaders,
+) -> Result<Vec<PlannedReloadSource>, LoadFailure> {
+    let mut source_indices = BTreeMap::<AssetPath, usize>::new();
+    let mut planned = Vec::<PlannedReloadSource>::new();
+    for current_path in frontier {
+        let (_, output) = decoded
+            .get(current_path)
+            .expect("reload frontier paths are decoded before they are planned");
+        for dependency in output.primary.dependencies.iter().chain(
+            output
+                .labeled
+                .iter()
+                .flat_map(|labeled| labeled.dependencies.iter()),
+        ) {
+            let source_path = dependency.path.clone().without_label();
+            let dependency_type = reload_dependency_source_type(loaders, dependency, &source_path)?;
+            if let Some((decoded_type, _)) = decoded.get(&source_path) {
+                if *decoded_type != dependency_type {
+                    return Err(reload_source_type_conflict(&source_path));
+                }
+                continue;
+            }
+            if let Some(index) = source_indices.get(&source_path).copied() {
+                if planned[index].type_id != dependency_type {
+                    return Err(reload_source_type_conflict(&source_path));
+                }
+                continue;
+            }
+            source_indices.insert(source_path.clone(), planned.len());
+            planned.push(PlannedReloadSource {
+                path: source_path,
+                type_id: dependency_type,
+            });
+        }
+    }
+    if decoded.len().saturating_add(planned.len()) > MAX_REVISION_CLOSURE {
+        return Err(LoadFailure::AssemblyFailed(
+            "async reload dependency closure exceeds the bounded candidate limit".into(),
+        ));
+    }
+    Ok(planned)
+}
+
+fn reload_dependency_source_type(
+    loaders: &AssetLoaders,
+    dependency: &DepRequest,
+    source_path: &AssetPath,
+) -> Result<AssetTypeId, LoadFailure> {
+    let inferred = || {
+        loaders
+            .policy()
+            .resolve_untyped(source_path)
+            .and_then(|loader| loaders.policy().produced_type(loader))
+    };
+    if dependency.path.has_label() {
+        inferred()
+    } else {
+        dependency.expected_type.or_else(inferred)
+    }
+    .ok_or_else(|| LoadFailure::AssemblyFailed(format!("no loader for {source_path}")))
+}
+
+fn reload_source_type_conflict(path: &AssetPath) -> LoadFailure {
+    LoadFailure::AssemblyFailed(format!(
+        "same reload source path declared with conflicting types: {path}"
+    ))
+}
+
+async fn decode_reload_batch(
+    scheduler: &LoadScheduler,
+    source_revision: u64,
+    sources: &AssetSources,
+    loaders: &AssetLoaders,
+    flight: &Arc<Flight>,
+    source_plan: Vec<PlannedReloadSource>,
+) -> Result<Vec<(AssetPath, AssetTypeId, FullLoadOutput)>, LoadFailure> {
+    let mut next = 0;
+    let mut pending = Vec::<PendingReloadSource>::with_capacity(source_plan.len());
+    let mut results: Vec<Option<(AssetPath, AssetTypeId, FullLoadOutput)>> =
+        (0..source_plan.len()).map(|_| None).collect();
+
+    while next < source_plan.len() || !pending.is_empty() {
+        if flight.is_cancelled() {
+            pending.clear();
+            return Err(LoadFailure::Cancelled);
+        }
+        while next < source_plan.len() && pending.len() < scheduler.limit {
+            let planned = &source_plan[next];
+            let decode_scheduler = scheduler.clone();
+            let decode_sources = sources.clone();
+            let decode_loaders = loaders.clone();
+            let decode_flight = Arc::clone(flight);
+            let source_path = planned.path.clone();
+            let dependency_type = planned.type_id;
+            let future = Box::pin(async move {
+                let output = decode_reload_source(
+                    &decode_scheduler,
+                    source_revision,
+                    &decode_sources,
+                    &decode_loaders,
+                    &source_path,
+                    dependency_type,
+                    &decode_flight,
+                    false,
+                )
+                .await?;
+                if output.primary.type_id != dependency_type {
+                    return Err(LoadFailure::AssemblyFailed(format!(
+                        "loader produced an unexpected asset type for {source_path}"
+                    )));
+                }
+                Ok((source_path, dependency_type, output))
+            });
+            pending.push(PendingReloadSource {
+                plan_index: next,
+                future,
+            });
+            next += 1;
+        }
+
+        core::future::poll_fn(|cx| {
+            if flight.poll_cancelled(cx) {
+                pending.clear();
+                return Poll::Ready(Err(LoadFailure::Cancelled));
+            }
+            let mut completed = false;
+            let mut index = 0;
+            while index < pending.len() {
+                let result = pending[index].future.as_mut().poll(cx);
+                match result {
+                    Poll::Pending => index += 1,
+                    Poll::Ready(Ok(output)) => {
+                        let plan_index = pending[index].plan_index;
+                        pending.swap_remove(index);
+                        results[plan_index] = Some(output);
+                        completed = true;
+                    }
+                    Poll::Ready(Err(error)) => {
+                        pending.clear();
+                        return Poll::Ready(Err(error));
+                    }
+                }
+            }
+            if completed {
+                Poll::Ready(Ok(()))
+            } else {
+                Poll::Pending
+            }
+        })
+        .await?;
+    }
+
+    Ok(results
+        .into_iter()
+        .map(|output| output.expect("completed reload source batch slot"))
+        .collect())
 }
 
 /// Reads and decodes one source revision outside the server state mutex.
@@ -4093,7 +4221,7 @@ mod tests {
         assert!(
             matches!(result, Err(LoadFailure::AssemblyFailed(error)) if error.contains("bounded candidate limit"))
         );
-        assert_eq!(reads.load(Ordering::Acquire), MAX_REVISION_CLOSURE);
+        assert_eq!(reads.load(Ordering::Acquire), 1);
         assert_eq!(server.total_assets(), 2);
         assert!(server.recursive_state(root.untyped_id()).is_loaded());
         assert!(server.recursive_state(label.untyped_id()).is_loaded());

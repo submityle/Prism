@@ -153,6 +153,26 @@ impl AssetLoader for SceneLoader {
                 ctx.add_labeled_asset("dependent", Label(122));
             }
             13 => panic!("revision decoder panicked"),
+            14 => {
+                ctx.add_typed_dependency(
+                    AssetPath::parse("first.async-leaf"),
+                    AssetTypeId::of::<Leaf>(),
+                );
+                ctx.add_typed_dependency(
+                    AssetPath::parse("second.async-leaf"),
+                    AssetTypeId::of::<Leaf>(),
+                );
+            }
+            15 => {
+                ctx.add_typed_dependency(
+                    AssetPath::parse("conflict.async-leaf"),
+                    AssetTypeId::of::<Leaf>(),
+                );
+                ctx.add_typed_dependency(
+                    AssetPath::parse("conflict.async-leaf"),
+                    AssetTypeId::of::<Scene>(),
+                );
+            }
             _ => return Err(LoadError::Malformed("unknown revision".into())),
         }
         Ok(Scene(revision))
@@ -526,6 +546,36 @@ fn async_reload_deduplicates_concurrent_reads_for_the_same_new_dependency() {
 }
 
 #[test]
+fn one_reload_reads_a_duplicate_source_once() {
+    let server = server(1);
+    let root = server.load::<Scene>("scene.async-revision");
+    let reads = Arc::new(AtomicUsize::new(0));
+    let release = Arc::new(AtomicBool::new(true));
+    let mut source = MemSource::new();
+    source.insert("scene.async-revision", [9]);
+    source.insert("shared.async-leaf", [0]);
+    server.mount(
+        "counted",
+        Arc::new(CountingSource {
+            source,
+            shared_reads: Arc::clone(&reads),
+            release,
+        }),
+        10,
+    );
+    let pool = TaskPool::with_threads(2);
+    let scheduler = LoadScheduler::new(Arc::clone(&server), pool.clone(), 2);
+    let result = pool.block_on(
+        scheduler
+            .schedule_reload("scene.async-revision", Priority::Normal)
+            .unwrap(),
+    );
+
+    assert_eq!(result.unwrap().id(), root.untyped_id());
+    assert_eq!(reads.load(Ordering::Acquire), 1);
+}
+
+#[test]
 fn cancelling_reload_ticket_does_not_publish_a_partial_candidate() {
     let server = server(1);
     let root = server.load::<Scene>("scene.async-revision");
@@ -820,6 +870,252 @@ fn wait_until(mut condition: impl FnMut() -> bool) {
         assert!(std::time::Instant::now() < deadline, "gate timed out");
         std::thread::yield_now();
     }
+}
+
+struct ReloadWaveSource {
+    revision: u8,
+    first_started: Arc<AtomicBool>,
+    second_started: Arc<AtomicBool>,
+    first_finished: Arc<AtomicBool>,
+    second_finished: Arc<AtomicBool>,
+    first_release: Arc<AtomicBool>,
+    second_release: Arc<AtomicBool>,
+    fail_second: bool,
+    conflict_reads: Arc<AtomicUsize>,
+}
+
+impl AssetReader for ReloadWaveSource {
+    fn read(&self, path: &str) -> Result<Vec<u8>, ReadError> {
+        match path {
+            "scene.async-revision" => Ok(vec![self.revision]),
+            "first.async-leaf" => {
+                self.first_started.store(true, Ordering::Release);
+                while !self.first_release.load(Ordering::Acquire) {
+                    std::thread::yield_now();
+                }
+                self.first_finished.store(true, Ordering::Release);
+                Ok(vec![0])
+            }
+            "second.async-leaf" => {
+                self.second_started.store(true, Ordering::Release);
+                if self.fail_second {
+                    return Err(ReadError::NotFound);
+                }
+                while !self.second_release.load(Ordering::Acquire) {
+                    std::thread::yield_now();
+                }
+                self.second_finished.store(true, Ordering::Release);
+                Ok(vec![0])
+            }
+            "conflict.async-leaf" => {
+                self.conflict_reads.fetch_add(1, Ordering::AcqRel);
+                Ok(vec![0])
+            }
+            _ => Err(ReadError::NotFound),
+        }
+    }
+
+    fn metadata(&self, _path: &str) -> Result<AssetMeta, ReadError> {
+        Ok(AssetMeta {
+            size: 1,
+            modified_ms: None,
+            is_dir: false,
+        })
+    }
+}
+
+struct ReloadWaveControls {
+    first_started: Arc<AtomicBool>,
+    second_started: Arc<AtomicBool>,
+    first_finished: Arc<AtomicBool>,
+    second_finished: Arc<AtomicBool>,
+    first_release: Arc<AtomicBool>,
+    second_release: Arc<AtomicBool>,
+    conflict_reads: Arc<AtomicUsize>,
+}
+
+fn mount_reload_wave(server: &AssetServer, revision: u8, fail_second: bool) -> ReloadWaveControls {
+    let controls = ReloadWaveControls {
+        first_started: Arc::new(AtomicBool::new(false)),
+        second_started: Arc::new(AtomicBool::new(false)),
+        first_finished: Arc::new(AtomicBool::new(false)),
+        second_finished: Arc::new(AtomicBool::new(false)),
+        first_release: Arc::new(AtomicBool::new(false)),
+        second_release: Arc::new(AtomicBool::new(false)),
+        conflict_reads: Arc::new(AtomicUsize::new(0)),
+    };
+    server.mount(
+        "reload-wave",
+        Arc::new(ReloadWaveSource {
+            revision,
+            first_started: Arc::clone(&controls.first_started),
+            second_started: Arc::clone(&controls.second_started),
+            first_finished: Arc::clone(&controls.first_finished),
+            second_finished: Arc::clone(&controls.second_finished),
+            first_release: Arc::clone(&controls.first_release),
+            second_release: Arc::clone(&controls.second_release),
+            fail_second,
+            conflict_reads: Arc::clone(&controls.conflict_reads),
+        }),
+        30,
+    );
+    controls
+}
+
+fn assert_stays_false(value: &AtomicBool) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(100);
+    while std::time::Instant::now() < deadline {
+        assert!(!value.load(Ordering::Acquire));
+        std::thread::yield_now();
+    }
+}
+
+#[test]
+fn reload_dependency_wave_starts_siblings_up_to_scheduler_capacity() {
+    let server = server(1);
+    let root = server.load::<Scene>("scene.async-revision");
+    let controls = mount_reload_wave(&server, 14, false);
+    let _release_first = ReleaseGate(Arc::clone(&controls.first_release));
+    let _release_second = ReleaseGate(Arc::clone(&controls.second_release));
+    let pool = TaskPool::with_threads(2);
+    let scheduler = LoadScheduler::new(Arc::clone(&server), pool.clone(), 2);
+    let ticket = scheduler
+        .schedule_reload("scene.async-revision", Priority::Normal)
+        .unwrap();
+
+    wait_until(|| {
+        controls.first_started.load(Ordering::Acquire)
+            && controls.second_started.load(Ordering::Acquire)
+    });
+    assert!(!controls.first_finished.load(Ordering::Acquire));
+    assert!(!controls.second_finished.load(Ordering::Acquire));
+    controls.first_release.store(true, Ordering::Release);
+    controls.second_release.store(true, Ordering::Release);
+    assert_eq!(pool.block_on(ticket).unwrap().id(), root.untyped_id());
+    assert_eq!(server.with_asset(root.id(), |value| value.0), Some(14));
+}
+
+#[test]
+fn reload_dependency_wave_capacity_one_admits_the_next_source_after_completion() {
+    let server = server(1);
+    let root = server.load::<Scene>("scene.async-revision");
+    let controls = mount_reload_wave(&server, 14, false);
+    let _release_first = ReleaseGate(Arc::clone(&controls.first_release));
+    let _release_second = ReleaseGate(Arc::clone(&controls.second_release));
+    let pool = TaskPool::with_threads(2);
+    let scheduler = LoadScheduler::new(Arc::clone(&server), pool.clone(), 1);
+    let ticket = scheduler
+        .schedule_reload("scene.async-revision", Priority::Normal)
+        .unwrap();
+
+    wait_until(|| controls.first_started.load(Ordering::Acquire));
+    assert_stays_false(&controls.second_started);
+    controls.first_release.store(true, Ordering::Release);
+    wait_until(|| controls.second_started.load(Ordering::Acquire));
+    controls.second_release.store(true, Ordering::Release);
+    assert_eq!(pool.block_on(ticket).unwrap().id(), root.untyped_id());
+}
+
+#[test]
+fn later_reload_dependency_can_finish_before_an_earlier_sibling() {
+    let server = server(1);
+    let root = server.load::<Scene>("scene.async-revision");
+    let controls = mount_reload_wave(&server, 14, false);
+    let _release_first = ReleaseGate(Arc::clone(&controls.first_release));
+    let _release_second = ReleaseGate(Arc::clone(&controls.second_release));
+    let pool = TaskPool::with_threads(2);
+    let scheduler = LoadScheduler::new(Arc::clone(&server), pool.clone(), 2);
+    let ticket = scheduler
+        .schedule_reload("scene.async-revision", Priority::Normal)
+        .unwrap();
+
+    wait_until(|| {
+        controls.first_started.load(Ordering::Acquire)
+            && controls.second_started.load(Ordering::Acquire)
+    });
+    controls.second_release.store(true, Ordering::Release);
+    wait_until(|| controls.second_finished.load(Ordering::Acquire));
+    assert!(!controls.first_finished.load(Ordering::Acquire));
+    controls.first_release.store(true, Ordering::Release);
+    assert_eq!(pool.block_on(ticket).unwrap().id(), root.untyped_id());
+}
+
+#[test]
+fn reload_dependency_failure_detaches_a_blocked_sibling() {
+    let server = server(1);
+    let root = server.load::<Scene>("scene.async-revision");
+    let controls = mount_reload_wave(&server, 14, true);
+    let _release_first = ReleaseGate(Arc::clone(&controls.first_release));
+    let pool = TaskPool::with_threads(2);
+    let scheduler = LoadScheduler::new(Arc::clone(&server), pool.clone(), 2);
+    let ticket = scheduler
+        .schedule_reload("scene.async-revision", Priority::Normal)
+        .unwrap();
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    let wait_pool = pool.clone();
+    let waiter = std::thread::spawn(move || sender.send(wait_pool.block_on(ticket)).unwrap());
+
+    wait_until(|| {
+        controls.first_started.load(Ordering::Acquire)
+            && controls.second_started.load(Ordering::Acquire)
+    });
+    let result = receiver
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("failed sibling must not wait for the blocked read");
+    assert!(
+        matches!(result, Err(LoadFailure::AssemblyFailed(error)) if error.contains("asset not found"))
+    );
+    assert!(!controls.first_finished.load(Ordering::Acquire));
+    assert_eq!(server.with_asset(root.id(), |value| value.0), Some(1));
+    controls.first_release.store(true, Ordering::Release);
+    waiter.join().unwrap();
+}
+
+#[test]
+fn cancelling_reload_dependency_wave_detaches_all_blocked_siblings() {
+    let server = server(1);
+    let root = server.load::<Scene>("scene.async-revision");
+    let controls = mount_reload_wave(&server, 14, false);
+    let _release_first = ReleaseGate(Arc::clone(&controls.first_release));
+    let _release_second = ReleaseGate(Arc::clone(&controls.second_release));
+    let pool = TaskPool::with_threads(2);
+    let scheduler = LoadScheduler::new(Arc::clone(&server), pool.clone(), 2);
+    let ticket = scheduler
+        .schedule_reload("scene.async-revision", Priority::Normal)
+        .unwrap();
+
+    wait_until(|| {
+        controls.first_started.load(Ordering::Acquire)
+            && controls.second_started.load(Ordering::Acquire)
+    });
+    ticket.cancel();
+    assert_eq!(pool.block_on(ticket), Err(LoadFailure::Cancelled));
+    wait_until(|| scheduler.in_flight() == 0);
+    assert!(!controls.first_finished.load(Ordering::Acquire));
+    assert!(!controls.second_finished.load(Ordering::Acquire));
+    assert_eq!(server.with_asset(root.id(), |value| value.0), Some(1));
+    controls.first_release.store(true, Ordering::Release);
+    controls.second_release.store(true, Ordering::Release);
+}
+
+#[test]
+fn reload_frontier_rejects_source_type_conflicts_before_child_io() {
+    let server = server(1);
+    let root = server.load::<Scene>("scene.async-revision");
+    let controls = mount_reload_wave(&server, 15, false);
+    let pool = TaskPool::with_threads(2);
+    let scheduler = LoadScheduler::new(Arc::clone(&server), pool.clone(), 2);
+    let result = pool.block_on(
+        scheduler
+            .schedule_reload("scene.async-revision", Priority::Normal)
+            .unwrap(),
+    );
+
+    assert!(
+        matches!(result, Err(LoadFailure::AssemblyFailed(error)) if error.contains("conflicting types"))
+    );
+    assert_eq!(controls.conflict_reads.load(Ordering::Acquire), 0);
+    assert_eq!(server.with_asset(root.id(), |value| value.0), Some(1));
 }
 
 fn mount_latest(server: &AssetServer, revision: u8) {
