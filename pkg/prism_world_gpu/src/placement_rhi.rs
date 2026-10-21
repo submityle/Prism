@@ -14,6 +14,7 @@
 //! Do not manually destroy resources obtained through native inspection APIs.
 
 use std::{
+    collections::BTreeSet,
     marker::PhantomData,
     num::NonZeroUsize,
     sync::{
@@ -35,13 +36,14 @@ use prism_world_terrain::{
     HeightfieldPlacementRegion, PlanarHeightfieldSurface,
 };
 
+use crate::placement_render_bridge::build_placement_render_graph_with_resident_upstreams;
 use crate::{
-    build_placement_render_graph, GpuContext, GpuHeightfieldPlacement,
-    GpuHeightfieldPlacementBufferSnapshot, GpuHeightfieldPlacementDeletionError,
-    GpuHeightfieldPlacementDeletionWorkBudget, GpuHeightfieldPlacementDeletions,
-    GpuHeightfieldPlacementError, GpuHeightfieldPlacementRegistrationSnapshot,
-    GpuHeightfieldPlacementStageSnapshot, GpuHeightfieldPlacementWorkBudget, PlacementComputeStage,
-    PlacementDeletionWork, PlacementDrawStage, PlacementEmptyDeletionWork, PlacementImportedBuffer,
+    GpuContext, GpuHeightfieldPlacement, GpuHeightfieldPlacementBufferSnapshot,
+    GpuHeightfieldPlacementDeletionError, GpuHeightfieldPlacementDeletionWorkBudget,
+    GpuHeightfieldPlacementDeletions, GpuHeightfieldPlacementError,
+    GpuHeightfieldPlacementRegistrationSnapshot, GpuHeightfieldPlacementStageSnapshot,
+    GpuHeightfieldPlacementWorkBudget, PlacementComputeStage, PlacementDeletionWork,
+    PlacementDrawStage, PlacementEmptyDeletionWork, PlacementImportedBuffer,
     PlacementRenderBridgeError, PlacementRenderStream, PlacementRenderWork, PlacementSceneTarget,
     PlacementStream,
 };
@@ -61,6 +63,10 @@ pub enum PlacementRhiError {
     Placement(GpuHeightfieldPlacementError),
     Deletion(GpuHeightfieldPlacementDeletionError),
     Graph(Box<PlacementRenderBridgeError>),
+    /// Native encode/submit failed validation, allocation, or internal checks.
+    /// No upstream residency is published. Drain the conservatively retained
+    /// pending packet before recovery; resource retirement is not execution.
+    Native(Box<wgpu::Error>),
     Poll(wgpu::PollError),
 }
 
@@ -78,6 +84,7 @@ impl std::fmt::Display for PlacementRhiError {
             Self::Placement(e) => e.fmt(f),
             Self::Deletion(e) => e.fmt(f),
             Self::Graph(e) => e.fmt(f),
+            Self::Native(e) => e.fmt(f),
             Self::Poll(e) => e.fmt(f),
         }
     }
@@ -197,6 +204,7 @@ impl PlacementRhiBridge {
             table: self.table.clone(),
             buffers: Vec::new(),
             stages: Vec::new(),
+            resident_upstream: ResidentUpstream::default(),
         }))
     }
 
@@ -321,6 +329,7 @@ impl PlacementRhiBridge {
             },
             bridge: self,
             streams: Vec::new(),
+            resident_upstreams: BTreeSet::new(),
             request: PhantomData,
         })
     }
@@ -454,12 +463,20 @@ impl RegisteredHeightfieldPlacement {
 }
 
 /// Full-key deletion producer with the same borrow/ordered-queue contract.
+/// Successfully submitted upstream outputs are reused while the complete
+/// placement recipe remains unchanged; deletion-only edits rerun the filter.
 pub struct RegisteredPlacementDeletions {
     producer: GpuHeightfieldPlacementDeletions,
     registrations: Arc<Mutex<Registrations>>,
 }
 
 impl RegisteredPlacementDeletions {
+    /// Read-only inspection of the owned producer. Before modifying its native
+    /// output buffers through an escape hatch (including native `encode`), call
+    /// [`Self::invalidate_resident_upstream`]. External writes must obey the
+    /// same queue ordering and request-borrow contract as adapter submissions:
+    /// enqueue the external writes before the next rebuilding submission, not
+    /// after that submission has reestablished residency.
     #[must_use]
     pub fn producer(&self) -> &GpuHeightfieldPlacementDeletions {
         &self.producer
@@ -477,6 +494,8 @@ impl RegisteredPlacementDeletions {
         deletions: &HeightfieldPlacementDeletionSet,
         budget: GpuHeightfieldPlacementDeletionWorkBudget,
     ) -> Result<(), GpuHeightfieldPlacementDeletionError> {
+        let previous_generation = self.producer.upstream_generation();
+        let previous_key = self.producer.cache_key().map(|key| key.upstream.clone());
         self.producer.write_request(
             config,
             region,
@@ -486,7 +505,43 @@ impl RegisteredPlacementDeletions {
             placement_budget,
             deletions,
             budget,
-        )
+        )?;
+        let unchanged = previous_key.as_ref() == self.producer.cache_key().map(|key| &key.upstream);
+        lock(&self.registrations).resident_upstream.rewrite(
+            previous_generation,
+            self.producer.upstream_generation(),
+            unchanged,
+        );
+        Ok(())
+    }
+
+    /// Forces the next nonempty frame to regenerate all placement outputs.
+    /// Use this before any external native mutation of upstream output buffers.
+    /// The mutable borrow prevents invalidation while a frame using the current
+    /// cache proof is declared or recorded. No GPU work or wait is performed.
+    pub fn invalidate_resident_upstream(&mut self) {
+        lock(&self.registrations).resident_upstream = ResidentUpstream::default();
+    }
+}
+
+// A generation is published only after native submit returns. Output validity
+// needs queue ordering, not CPU completion. Successful recipe-equivalent writes
+// can advance the proof; any intervening recipe change invalidates it (including
+// A -> B -> A without submitting B). No equality-only cache resurrection.
+#[derive(Default)]
+struct ResidentUpstream(Option<u64>);
+
+impl ResidentUpstream {
+    fn contains(&self, generation: u64) -> bool {
+        self.0 == Some(generation)
+    }
+
+    fn rewrite(&mut self, previous: u64, next: u64, unchanged: bool) {
+        self.0 = (unchanged && self.contains(previous)).then_some(next);
+    }
+
+    fn submitted(&mut self, generation: u64) {
+        self.0 = Some(generation);
     }
 }
 
@@ -495,6 +550,7 @@ struct Registrations {
     table: Arc<()>,
     buffers: Vec<(wgpu::Buffer, PlacementImportedBuffer)>,
     stages: Vec<RegisteredStage>,
+    resident_upstream: ResidentUpstream,
 }
 
 struct RegisteredStage {
@@ -685,9 +741,15 @@ pub struct PlacementRhiDrawPipeline(Arc<DrawOwner>);
 struct FrameResources {
     device: WgpuDevice,
     scene: Arc<SceneOwner>,
-    registrations: Vec<Arc<Mutex<Registrations>>>,
+    registrations: Vec<FrameRegistration>,
     pipelines: Vec<Arc<DrawOwner>>,
     draw_groups: Vec<rhi::BindGroupId>,
+}
+
+struct FrameRegistration {
+    lease: Arc<Mutex<Registrations>>,
+    // Only deletion producers currently participate in upstream reuse.
+    upstream_generation: Option<u64>,
 }
 
 impl Drop for FrameResources {
@@ -703,6 +765,7 @@ impl Drop for FrameResources {
 pub struct PlacementRhiFrame<'bridge, 'request> {
     bridge: &'bridge mut PlacementRhiBridge,
     streams: Vec<PlacementRenderStream>,
+    resident_upstreams: BTreeSet<SectorId>,
     resources: FrameResources,
     request: PhantomData<&'request ()>,
 }
@@ -784,9 +847,10 @@ impl<'bridge, 'request> PlacementRhiFrame<'bridge, 'request> {
                 draw: self.draw(&stream, stream.compact, pipeline),
             });
         }
-        self.resources
-            .registrations
-            .push(producer.registrations.clone());
+        self.resources.registrations.push(FrameRegistration {
+            lease: producer.registrations.clone(),
+            upstream_generation: None,
+        });
         self.streams.push(stream);
         Ok(())
     }
@@ -808,6 +872,12 @@ impl<'bridge, 'request> PlacementRhiFrame<'bridge, 'request> {
         let indirect = registrations.buffer(&snapshot.indirect);
         let clear_instance_count = registrations.stage(&snapshot.clear_instance_count);
         if let (Some(active), Some(filter)) = (&snapshot.upstream.active, &snapshot.active) {
+            if registrations
+                .resident_upstream
+                .contains(snapshot.upstream.request_generation)
+            {
+                self.resident_upstreams.insert(cell);
+            }
             let deletion = PlacementDeletionWork {
                 request: snapshot.request,
                 params: registrations.buffer(&snapshot.params),
@@ -831,9 +901,14 @@ impl<'bridge, 'request> PlacementRhiFrame<'bridge, 'request> {
                 clear_instance_count,
             });
         }
-        self.resources
-            .registrations
-            .push(producer.registrations.clone());
+        self.resources.registrations.push(FrameRegistration {
+            lease: producer.registrations.clone(),
+            upstream_generation: snapshot
+                .upstream
+                .active
+                .as_ref()
+                .map(|_| snapshot.upstream.request_generation),
+        });
         self.streams.push(stream);
         Ok(())
     }
@@ -851,8 +926,13 @@ impl<'bridge, 'request> PlacementRhiFrame<'bridge, 'request> {
                 array_layers: 1,
             },
         };
-        let graph = build_placement_render_graph(scene.extent, target, &self.streams)
-            .map_err(|e| PlacementRhiError::Graph(Box::new(e)))?;
+        let graph = build_placement_render_graph_with_resident_upstreams(
+            scene.extent,
+            target,
+            &self.streams,
+            &self.resident_upstreams,
+        )
+        .map_err(|e| PlacementRhiError::Graph(Box::new(e)))?;
         let recorded = graph
             .record(&self.bridge.device)
             .map_err(|e| PlacementRhiError::Graph(Box::new(e.into())))?;
@@ -860,6 +940,7 @@ impl<'bridge, 'request> PlacementRhiFrame<'bridge, 'request> {
             bridge: self.bridge,
             recorded: Some(recorded),
             resources: Some(self.resources),
+            reused_upstream_count: self.resident_upstreams.len(),
             request: PhantomData,
         })
     }
@@ -900,19 +981,72 @@ impl<'bridge, 'request> PlacementRhiFrame<'bridge, 'request> {
 ///     frame.record().unwrap().submit();
 /// }
 /// ```
+///
+/// Native output invalidation is also excluded while commands borrow a proof:
+///
+/// ```compile_fail,E0502
+/// use prism_world_gpu::placement_rhi::{PlacementRhiBridge, PlacementRhiScene,
+///     PlacementRhiDrawPipeline, RegisteredPlacementDeletions};
+/// use prism_world_stream::SectorId;
+/// fn invalidate(bridge: &mut PlacementRhiBridge, scene: &PlacementRhiScene,
+///     draw: &PlacementRhiDrawPipeline, producer: &mut RegisteredPlacementDeletions) {
+///     let mut frame = bridge.begin_frame(scene).unwrap();
+///     frame.add_deletions(producer, SectorId::new(0, 0, 0, 0), 1, draw).unwrap();
+///     let recorded = frame.record().unwrap();
+///     producer.invalidate_resident_upstream();
+///     recorded.submit();
+/// }
+/// ```
 #[must_use = "submit or drop to cancel this recorded placement frame"]
 pub struct PlacementRhiRecorded<'bridge, 'request> {
     bridge: &'bridge mut PlacementRhiBridge,
     recorded: Option<RecordedGraph>,
     resources: Option<FrameResources>,
+    reused_upstream_count: usize,
     request: PhantomData<&'request ()>,
 }
 
 impl PlacementRhiRecorded<'_, '_> {
+    /// Number of nonempty deletion streams that import previously submitted
+    /// placement outputs instead of dispatching reset/source/project/field/
+    /// finalize. Deletion filtering and drawing still execute on each stream.
+    #[must_use]
+    pub fn reused_upstream_count(&self) -> usize {
+        self.reused_upstream_count
+    }
+
     /// Consumes commands exactly once. Resource pins transfer to the bridge's
     /// bounded pending queue; callback captures only a completion signal.
-    pub fn submit(mut self) -> PlacementRhiSubmission {
+    /// Panics on native encode/submit errors; use [`Self::try_submit`] to handle
+    /// these errors explicitly. Host callbacks may still panic in either API.
+    pub fn submit(self) -> PlacementRhiSubmission {
+        self.try_submit()
+            .expect("placement native submission failed")
+    }
+
+    /// Captures native validation/internal/OOM errors without replacing host
+    /// callbacks or relying on an outer error scope. Only an error-free native
+    /// encode/submit establishes reusable upstream outputs. Native scope pops
+    /// resolve immediately on the supported wgpu-core backends; this does not
+    /// poll or wait for GPU completion. An error retains the packet until
+    /// whole-queue `drain` and invalidates its upstream proofs before returning.
+    pub fn try_submit(mut self) -> Result<PlacementRhiSubmission, PlacementRhiError> {
         let completion = Arc::new(Completion::default());
+        let native_device = self.bridge.context.device();
+        let oom_scope = native_device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+        let internal_scope = native_device.push_error_scope(wgpu::ErrorFilter::Internal);
+        let validation_scope = native_device.push_error_scope(wgpu::ErrorFilter::Validation);
+        // Withdraw old proofs before crossing any native or host-callback
+        // boundary. A cached stream can fail too; publishing only after success
+        // is insufficient if an earlier proof survives an encode/submit panic.
+        for registration in &self
+            .resources
+            .as_ref()
+            .expect("unsubmitted resources")
+            .registrations
+        {
+            lock(&registration.lease).resident_upstream = ResidentUpstream::default();
+        }
         let recorded = self.recorded.as_ref().expect("unsubmitted frame");
         let native = self.bridge.queue.encode(recorded.commands());
         let (commands, plan, allocations) = self
@@ -932,20 +1066,52 @@ impl PlacementRhiRecorded<'_, '_> {
             resources: self.resources.take(),
         });
         let index = self.bridge.context.queue().submit([native]);
-        self.bridge
-            .pending
-            .last_mut()
-            .expect("submitted packet")
-            .index = Some(index.clone());
+        let pending = self.bridge.pending.last_mut().expect("submitted packet");
+        pending.index = Some(index.clone());
+        let errors = [
+            futures_lite::future::block_on(validation_scope.pop()),
+            futures_lite::future::block_on(internal_scope.pop()),
+            futures_lite::future::block_on(oom_scope.pop()),
+        ];
+        if let Some(error) = errors.into_iter().flatten().next() {
+            // Native failure may have a returned index without a successful
+            // command submission. Never publish a proof or retire by that
+            // index; whole-queue drain is the conservative recovery boundary.
+            pending.index = None;
+            for registration in &pending
+                .resources
+                .as_ref()
+                .expect("submitted resources")
+                .registrations
+            {
+                lock(&registration.lease).resident_upstream = ResidentUpstream::default();
+            }
+            return Err(PlacementRhiError::Native(Box::new(error)));
+        }
+        // This is deliberately after submit, not declaration/record/encode.
+        // If submit unwinds after enqueueing, the next frame conservatively
+        // rebuilds rather than relying on an unproven cache entry.
+        for registration in &pending
+            .resources
+            .as_ref()
+            .expect("submitted resources")
+            .registrations
+        {
+            if let Some(generation) = registration.upstream_generation {
+                lock(&registration.lease)
+                    .resident_upstream
+                    .submitted(generation);
+            }
+        }
         let signal = completion.clone();
         self.bridge.context.queue().on_submitted_work_done(move || {
             signal.gpu_done.store(true, Ordering::Release);
         });
-        PlacementRhiSubmission {
+        Ok(PlacementRhiSubmission {
             table: self.bridge.table.clone(),
             index,
             completion,
-        }
+        })
     }
 }
 
@@ -974,6 +1140,38 @@ fn confirm_completed_prefix(pending: &[Pending], completion: &Arc<Completion>) {
 #[cfg(test)]
 mod completion_tests {
     use super::*;
+
+    #[test]
+    fn resident_proof_requires_submission_and_exact_generation() {
+        let mut proof = ResidentUpstream::default();
+        assert!(!proof.contains(0));
+        proof.rewrite(0, 1, true);
+        assert!(!proof.contains(1));
+        proof.submitted(1);
+        assert!(proof.contains(1));
+        assert!(!proof.contains(0));
+        proof.rewrite(1, 2, true);
+        assert!(proof.contains(2));
+        assert!(!proof.contains(1));
+        // A mismatched old generation cannot transfer a proof.
+        proof.rewrite(1, 3, true);
+        assert!(!proof.contains(3));
+    }
+
+    #[test]
+    fn changed_recipe_cannot_resurrect_resident_outputs() {
+        let mut proof = ResidentUpstream::default();
+        proof.submitted(1);
+        proof.rewrite(1, 2, false); // A -> B, not submitted
+        proof.rewrite(2, 3, false); // B -> A, not submitted
+        assert!(!proof.contains(3));
+        proof.rewrite(3, 4, true);
+        assert!(!proof.contains(4));
+        proof.submitted(4);
+        assert!(proof.contains(4));
+        proof = ResidentUpstream::default(); // native external write
+        assert!(!proof.contains(4));
+    }
 
     #[test]
     fn shutdown_contains_panics_without_dropping_host_payload() {

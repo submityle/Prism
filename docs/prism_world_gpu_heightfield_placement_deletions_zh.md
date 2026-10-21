@@ -329,3 +329,118 @@ WGPU_BACKEND=metal PRISM_REQUIRE_GPU=1 cargo bench -p prism_world_gpu --features
 cargo clippy -p prism_world_gpu --features terrain_scatter --bench heightfield_placement_deletion --offline --no-deps -j 1 -- -D warnings
 cargo clippy -p prism_world_gpu --features terrain_scatter --bench heightfield_placement_deletion --offline --no-deps -j 1 -- -D warnings -A clippy::too_many_arguments -A clippy::result_large_err -A clippy::useless_conversion
 ```
+
+## 2026-10-22 删除流上游驻留复用与原生错误恢复
+
+`RegisteredPlacementDeletions` 现在跟踪已经成功提交的 upstream request generation。
+仅删除集合变化、或 placement recipe 结构完全相等的成功请求可以延续该证明；比较包含
+placement config、region、author field、terrain surface/embedding 和 filters，不以 hash 或
+revision 相同代替结构相等。证明属于同一 producer 的同一 RHI table；初次写入、声明、
+record、取消、预算失败均不能发布新证明。recipe 改变会撤销证明，即使随后 A → B → A
+而 B 未提交，也必须重建。空请求仍执行三步双计数复位，之后非空请求必须重新建立证明。
+
+命中后仍运行完整的资源、别名、ABI、dispatch、draw offset 和重复 cell 校验；图只省略
+upstream reset/source/project/field/finalize 五个 compute pass。剩余四个 pass 是
+16-byte indirect copy → deletion count reset → full-key filter → indirect raster，
+不是跳过删除或复用旧的删除输出。raw `build_placement_render_graph` 始终生成完整链，
+不接受调用方伪造的驻留提示；仅 owning adapter 可使用内部复用入口。
+`PlacementRhiRecorded::reused_upstream_count()` 提供实际请求的命中数量。
+
+`try_submit()` 在进入 native encode 前撤销所有参与 producer 的旧证明，只有 native
+encode/submit 返回且 validation/internal/OOM 三类 error scope 均无错时才重新发布。
+因此冷缓存失败不发布，热缓存失败也不能留下旧证明。原生错误返回
+`PlacementRhiError::Native`，保留 pending 资源且清除不可靠 submission index，恢复时
+通过 whole-queue `drain` 确认退休；`submit()` 保留遇错 panic 的便捷行为，宿主 callback
+panic 仍可能从两个 API 展开。scope 使用 wgpu 30 的 RAII guard，逆序 pop，展开时恢复栈，
+不替换宿主 callback。`placement_rhi` 显式启用 `wgpu/std`，保证同设备多线程 scope 的
+线程隔离与 unwind 检测，不能依赖其他依赖偶然统一该 feature。scope pop 在支持的 native
+wgpu-core backend 立即 resolve，不代表 GPU 完成；绘制正确性依赖原 queue 提交顺序。
+
+通过 `producer()` 或 native snapshot 逃生口修改上游输出前，必须先调用
+`invalidate_resident_upstream(&mut self)`，并将外部写入排在下一次重建提交之前。
+此方法不做 GPU 工作或等待；mutable borrow 受新增 compile-fail doctest 约束，不能在
+已声明/录制的 frame 使用证明期间调用。外部写入后仍须遵守同 queue 的提交顺序，不能
+在重建已提交后再插入旧写入。适配层无法检测或认证任意外部 native 写入。
+
+### 驻留复用实卡对照基准
+
+`placement_rhi_reuse` 使用同一固定 producer/bridge/scene/draw，10,000 候选与 128 个
+删除键，交替单槽中段替换 A ↔ B。每模式先进行不计时完整重建，8 次预热后计时 64 个
+样本；对照模式每次先显式 invalidate，且 invalidate 不在时钟内。每次均断言原生 buffer
+身份和逻辑容量不变、命中数为 1/0、uniform 上传为 0、key 上传为 56 字节。每模式最后
+两个真实计时输出均回读检查完整 CPU survivor key 集合和全部 source-slot raster 像素，
+不回放或另做一次绘制来代替被测输出。
+
+2026-10-22 沙盒外 Apple M2 / Metal / IntegratedGpu，未优化 dev profile，nearest-rank
+主机微秒；不是 GPU timestamp，也不是 release/product benchmark：
+
+| 模式 | 图 pass 数 | write P50/P95/P99 | begin+add+record P50/P95/P99 | submit+wait P50/P95/P99 |
+| --- | ---: | --- | --- | --- |
+| 上游驻留命中 | 4 | 55.792/75.125/130.541 | 77.625/106.750/179.708 | 1052.000/1424.291/2097.417 |
+| 强制完整重建 | 9 | 64.250/81.792/93.916 | 148.500/166.334/208.792 | 2034.833/2339.167/3191.792 |
+
+pass 数由单流拓扑导出且由 Null RHI 图测试核对；基准逐帧直接断言命中数。
+submit+wait 包含 native RHI encode/finish/error scopes、待上传数据、GPU 执行和精确
+receipt 等待/退休；资源创建、CPU reference、断言与验证 readback 不计时。两个模式
+相同逻辑 payload：producer buffer 1,568,648 字节（其中 deletion 47,312），host key
+scratch 7,168 字节，带对齐/padding 的验证 readback 884,992 字节和 RGBA8 target
+160,000 字节。不是物理 VRAM/RSS，未计 opaque driver/RHI/pipeline/command 分配、
+upstream host scratch 和保留的 recipe snapshot。本次顺序单机采样不能证明产品帧时、
+多厂商、功耗或显存峰值达标，也不把分段 P50 相加当作整帧 P50。
+
+在前述低磁盘环境变量下运行：
+
+```bash
+WGPU_BACKEND=metal PRISM_REQUIRE_GPU=1 cargo bench -p prism_world_gpu --features placement_rhi --bench placement_rhi_reuse --profile dev --offline -j 1
+```
+
+本次仍不修改 runtime、产品 renderer 或其他 World 模块。产品 mesh/material/unified
+visibility、scene/ECS decoder、持久删除自动消费与跨硬件产品验收不由驻留复用代替。
+
+### 本轮最终验证
+
+2026-10-22 在共享 dirty checkout 上复验，不代表其他 agent 的未提交依赖已在 clean HEAD
+独立验收。上文旧计数属于各阶段历史结果，本轮结果如下：
+
+| 验证 | 结果 |
+| --- | --- |
+| runtime lib，offline | 183/183 |
+| GPU feature lib，offline | 139/139 |
+| placement_rhi lib，offline | 163/163 |
+| placement_rhi compile-fail doctest | 3/3 |
+| WGSL 编译/ABI 闸门 | 11/11 |
+| no-default-features lib check | 通过 |
+| Metal 实卡 heightfield_placement_deletion | 4/4，无忽略 |
+| Metal 实卡 placement_rhi | 13/13，无忽略 |
+
+实卡 RHI 覆盖完整 CPU survivor key 与间接绘制像素、无 CPU wait 的同 queue 连续复用、
+完整 recipe 依赖失效、声明/录制取消、预算失败、未提交 A → B → A、外部 storage 写入后
+显式失效、冷热缓存原生 validation 错误、submit/wait callback panic 后 drain/重建，以及
+同 device 双线程 error scope 的确定性交错隔离。故障注入测试打印被捕获的 panic 是预期
+行为，不是忽略失败。原有 `LayeredCellManifest.admitted_layers` 编译错误本轮未复现，
+没有为此修改 runtime 源文件。
+
+复验命令（每行是独立命令；GPU 两项在沙盒外运行）：
+
+```bash
+export CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0
+cargo test -p prism_world_runtime --lib --offline -j 1
+cargo test -p prism_world_gpu --features gpu --lib --offline -j 1
+cargo test -p prism_world_gpu --features placement_rhi --lib --offline -j 1
+cargo test -p prism_world_gpu --features placement_rhi --doc --offline -j 1
+cargo test -p prism_world_gpu --features placement_rhi --test wgsl_compile --offline -j 1
+cargo check -p prism_world_gpu --no-default-features --lib --offline -j 1
+WGPU_BACKEND=metal PRISM_REQUIRE_GPU=1 cargo test -p prism_world_gpu --features terrain_scatter --test heightfield_placement_deletion --offline -j 1 -- --nocapture --test-threads=1
+WGPU_BACKEND=metal PRISM_REQUIRE_GPU=1 cargo test -p prism_world_gpu --features placement_rhi --test placement_rhi --offline -j 1 -- --nocapture --test-threads=1
+```
+
+本轮 Rust 文件通过定向 rustfmt 和 diff whitespace 检查，无 TODO、占位或未实现分支。
+以上结果证明当前删除切片，不证明整个 World 系统或产品 renderer 已交付。
+
+新增基准与 RHI 集成测试的定向 Clippy 已检查：严格 `-D warnings` 仍被前述原有
+6 项诊断阻断；修正本轮基准整数整除断言和测试错误断言写法后，仅放行原有三类 lint
+的命令通过，不等于严格 Clippy 通过：
+
+```bash
+cargo clippy -p prism_world_gpu --features placement_rhi --bench placement_rhi_reuse --test placement_rhi --offline --no-deps -j 1 -- -D warnings -A clippy::too_many_arguments -A clippy::result_large_err -A clippy::useless_conversion
+```

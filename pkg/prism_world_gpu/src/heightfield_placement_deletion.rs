@@ -596,6 +596,11 @@ impl GpuHeightfieldPlacementDeletions {
         self.placement.device_identity()
     }
 
+    #[cfg(feature = "placement_rhi")]
+    pub(crate) fn upstream_generation(&self) -> u64 {
+        self.placement.request_generation()
+    }
+
     pub fn records(&self) -> &wgpu::Buffer {
         self.placement.records()
     }

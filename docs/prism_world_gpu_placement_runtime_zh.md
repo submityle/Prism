@@ -65,3 +65,42 @@ RHI 实卡回归 7/7（无忽略）。后者包括 submit/wait 宿主 callback p
 非相邻修改合并一次写入，重新增长会覆盖 stale 尾部。仍须先 submit 再改写；RHI frame
 借用对此顺序保持约束。实卡 deletion 转换回归 4/4；确定性上传量、复杂度和未优化 dev
 专项基准见上述删除文档，不将其视为产品性能验收。
+
+## 删除流上游驻留与失败恢复
+
+`RegisteredPlacementDeletions` 的相同 placement recipe 可以复用已成功提交的上游输出。
+缓存证明属于同一 producer/table 与 request generation，仅结构等价的成功写入可延续，
+不依赖 cell revision 或 hash 相同。声明/录制取消不发布；A → B → A 未提交的请求转换
+不能复活旧证明；空请求仍执行双计数复位。raw graph builder 不使用此优化。
+命中图保留 indirect copy → deletion count reset → full-key filter → indirect draw 四步，
+只跳过五步 upstream 重建，所有资源/ABI/别名校验不变。
+
+`PlacementRhiRecorded::reused_upstream_count()` 可检查实际命中数；`try_submit()` 捕获
+native validation/internal/OOM error，返回 `PlacementRhiError::Native`，而 `submit()`
+保留遇错 panic 行为。进入 native encode 前先撤销旧证明，三类 scope 均无错且 submit
+返回后才重新建立；因此热缓存失败、宿主 callback 展开也不能保留旧证明。失败包仍由
+pending 保活，无可靠 index 时通过 whole-queue `drain` 退休；退休不等于失败工作的
+语义执行成功。scope 使用 RAII 且逆序 pop，不覆盖宿主 callback；feature 显式启用
+`wgpu/std` 保证线程隔离与 unwind 检测，不依赖宿主偶然启用。native scope pop 不等待
+GPU，复用仍只依赖同 queue 的先后提交，不增加逐帧 CPU fence。
+
+通过 native inspection 逃生口改写上游输出前必须调用
+`RegisteredPlacementDeletions::invalidate_resident_upstream(&mut self)`，并在下一次
+重建提交前排入外部写入；不能在已重建之后再提交旧写入。mutable borrow 同样受 frame
+借用保护，第三个 compile-fail doctest 覆盖该约束。适配层无法检测任意外部 native 改写。
+
+专项 `placement_rhi_reuse` 基准在沙盒外 Apple M2/Metal 上验证固定资源的 10,000 候选、
+128 删除键、单槽 56-byte 更新；每模式 8 次预热和 64 次采样，并对两个方向的真实计时
+输出核对完整键与每 source-slot 像素。dev profile 的 submit+精确 wait P50 为驻留
+1.052 ms、强制重建 2.035 ms；它包含 native encode/error scopes、上传、GPU 工作和退休，
+不是纯 GPU 时间或产品性能承诺。完整 P50/P95/P99、逻辑容量、命令和验收范围见
+`prism_world_gpu_heightfield_placement_deletions_zh.md` 的驻留复用章节。
+
+本轮最终复验（2026-10-22，共享 dirty checkout）：runtime lib 183/183、GPU feature
+lib 139/139、placement_rhi lib 163/163、compile-fail doctest 3/3、WGSL 11/11，
+no-default-features lib check 通过；沙盒外 Apple M2/Metal
+实卡 deletion 4/4、RHI 13/13，无忽略。RHI 新增覆盖精确 recipe 失效、取消/ABA、
+显式 native 写入失效、冷热缓存 validation 错误、热缓存 submit panic 后强制重建，以及
+同 device 跨线程 error scope 隔离。上文 136/158/7 等是初版历史计数，不是本轮结果。
+原 `admitted_layers` 编译错误未复现，本次不改 runtime；复现命令、基准口径及产品
+未覆盖边界见删除文档的“本轮最终验证”。本轮不宣称整个 World 系统完成。

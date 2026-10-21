@@ -10,7 +10,7 @@ publish = false
 default = []
 gpu = ["dep:bytemuck", "dep:futures-lite", "dep:wgpu", "dep:prism_world_residency"]
 terrain_scatter = ["gpu", "dep:prism_world_terrain"]
-placement_rhi = ["terrain_scatter", "dep:prism_render_driver_wgpu"]
+placement_rhi = ["terrain_scatter", "dep:prism_render_driver_wgpu", "wgpu/std"]
 
 [dependencies]
 prism_world_stream = { path = "../prism_world_stream", default-features = false }
@@ -75,3 +75,8 @@ required-features = ["terrain_scatter"]
 name = "heightfield_placement_deletion"
 harness = false
 required-features = ["terrain_scatter"]
+
+[[bench]]
+name = "placement_rhi_reuse"
+harness = false
+required-features = ["placement_rhi"]

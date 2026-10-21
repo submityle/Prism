@@ -7,7 +7,7 @@
 //! retired here.
 
 use core::fmt;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::vec::Vec;
 
 use prism_render_driver::{
@@ -341,6 +341,18 @@ pub fn build_placement_render_graph(
     scene: PlacementSceneTarget,
     streams: &[PlacementRenderStream],
 ) -> Result<RenderGraph, PlacementRenderBridgeError> {
+    build_placement_render_graph_with_resident_upstreams(extent, scene, streams, &BTreeSet::new())
+}
+
+// Only the owning same-queue adapter may attest that the upstream outputs have
+// already been submitted for this exact request. Raw graph callers always run
+// the complete chain. Validation remains identical even on a cache hit.
+pub(crate) fn build_placement_render_graph_with_resident_upstreams(
+    extent: Extent3d,
+    scene: PlacementSceneTarget,
+    streams: &[PlacementRenderStream],
+    resident_upstreams: &BTreeSet<prism_world_stream::SectorId>,
+) -> Result<RenderGraph, PlacementRenderBridgeError> {
     let mut ordered = streams.to_vec();
     ordered.sort_unstable_by_key(|item| (item.stream.cell, item.stream.revision));
     for pair in ordered.windows(2) {
@@ -363,15 +375,14 @@ pub fn build_placement_render_graph(
     for item in ordered {
         let handles = import_stream(&mut graph, &mut imported_buffers, &item)?;
 
-        let (indirect, status) = add_reset_pass(
-            &mut graph,
-            handles.indirect,
-            handles.status,
-            item.reset,
-            item.stream,
-        )?;
-
         let Some(work) = item.work else {
+            let (indirect, _) = add_reset_pass(
+                &mut graph,
+                handles.indirect,
+                handles.status,
+                item.reset,
+                item.stream,
+            )?;
             if let Some(deletion) = item.empty_deletion {
                 let deletion_indirect = import_buffer(
                     &mut graph,
@@ -393,57 +404,19 @@ pub fn build_placement_render_graph(
             continue;
         };
 
-        let attributes = handles.attributes;
-        let compact = handles.compact;
-        let source_params = handles.source_params;
-        let source_records = handles.records;
-        let source_stage = work.source;
-        let source_records =
-            graph_handle_write(&mut graph, source_params, source_records, source_stage)?;
-
-        let project_params = handles.project_params;
-        let heights = handles.heights;
-        let samples = handles.samples;
-        let project_stage = work.project;
-        let (records, samples, status, indirect, attributes) = add_project_pass(
-            &mut graph,
-            project_params,
-            source_records,
-            heights,
-            samples,
-            status,
-            indirect,
-            attributes,
-            project_stage,
-            item.stream,
-        )?;
-
-        let field_params = handles.field_params;
-        let brushes = handles.brushes;
-        let field_stage = work.field;
-        let (attributes, compact, indirect) = add_field_pass(
-            &mut graph,
-            field_params,
+        let outputs = if resident_upstreams.contains(&item.stream.cell) {
+            handles
+        } else {
+            add_upstream_passes(&mut graph, handles, item.reset, work, item.stream)?
+        };
+        let StreamHandles {
             records,
-            brushes,
+            samples,
             attributes,
             compact,
             indirect,
-            field_stage,
-            item.stream,
-        )?;
-
-        let (records, samples, _status, attributes, indirect) = add_finalize_pass(
-            &mut graph,
-            project_params,
-            records,
-            samples,
-            status,
-            attributes,
-            indirect,
-            work.finalize,
-            item.stream,
-        )?;
+            ..
+        } = outputs;
 
         let (draw_compact, draw_indirect) = if let Some(deletion) = work.deletion {
             let deletion_handles = import_deletion(&mut graph, &mut imported_buffers, deletion)?;
@@ -515,6 +488,60 @@ struct StreamHandles {
     status: BufferHandle,
     heights: BufferHandle,
     brushes: BufferHandle,
+}
+
+fn add_upstream_passes(
+    graph: &mut RenderGraph,
+    mut handles: StreamHandles,
+    reset: PlacementComputeStage,
+    work: PlacementRenderWork,
+    stream: PlacementStream,
+) -> Result<StreamHandles, CompileError> {
+    let (indirect, status) =
+        add_reset_pass(graph, handles.indirect, handles.status, reset, stream)?;
+    let source_records =
+        graph_handle_write(graph, handles.source_params, handles.records, work.source)?;
+    let (records, samples, status, indirect, attributes) = add_project_pass(
+        graph,
+        handles.project_params,
+        source_records,
+        handles.heights,
+        handles.samples,
+        status,
+        indirect,
+        handles.attributes,
+        work.project,
+        stream,
+    )?;
+    let (attributes, compact, indirect) = add_field_pass(
+        graph,
+        handles.field_params,
+        records,
+        handles.brushes,
+        attributes,
+        handles.compact,
+        indirect,
+        work.field,
+        stream,
+    )?;
+    let (records, samples, status, attributes, indirect) = add_finalize_pass(
+        graph,
+        handles.project_params,
+        records,
+        samples,
+        status,
+        attributes,
+        indirect,
+        work.finalize,
+        stream,
+    )?;
+    handles.records = records;
+    handles.samples = samples;
+    handles.status = status;
+    handles.attributes = attributes;
+    handles.compact = compact;
+    handles.indirect = indirect;
+    Ok(handles)
 }
 
 #[derive(Clone, Copy)]
@@ -1552,6 +1579,207 @@ mod tests {
                 RenderCommand::DrawIndirect { buffer, offset: 0 },
             ] if *buffer == deletion_indirect
         ));
+    }
+
+    #[test]
+    fn resident_deletion_keeps_copy_reset_filter_draw_and_imported_output_hazards() {
+        let device = device();
+        let item = with_deletion(&device);
+        let deletion = item.work.unwrap().deletion.unwrap();
+        let resident = BTreeSet::from([item.stream.cell]);
+        let graph = build_placement_render_graph_with_resident_upstreams(
+            Extent3d::new_2d(4, 4),
+            scene(&device),
+            &[item],
+            &resident,
+        )
+        .unwrap();
+        let recorded = graph.record(&device).unwrap();
+        let plan = recorded.plan();
+        assert_eq!(plan.order, [0, 1, 2, 3]);
+        assert_eq!(plan.used_buffers.len(), 15);
+        assert_eq!(plan.used_buffers.iter().filter(|&&used| used).count(), 9);
+        let [copy, clear, filter, draw] = plan.accesses.as_slice() else {
+            panic!("resident upstream must leave exactly four passes");
+        };
+        assert_eq!(copy.len(), 2);
+        assert_eq!(clear.len(), 1);
+        assert_eq!(filter.len(), 7);
+        assert_eq!(draw.len(), 6);
+        assert_eq!(copy[0].resource, filter[3].resource);
+        assert_eq!(copy[1].resource, clear[0].resource);
+        assert_eq!(Some(clear[0].input_version), copy[1].output_version);
+        assert_eq!(clear[0].resource, filter[6].resource);
+        assert_eq!(Some(filter[6].input_version), clear[0].output_version);
+        // Compiled accesses list textures first, then buffers.
+        assert_eq!(filter[1].resource, draw[1].resource);
+        assert_eq!(filter[5].resource, draw[4].resource);
+        assert_eq!(filter[6].resource, draw[5].resource);
+        assert_eq!(Some(draw[4].input_version), filter[5].output_version);
+        assert_eq!(Some(draw[5].input_version), filter[6].output_version);
+        // Every upstream output is imported at version zero, read-only. The
+        // deletion destinations alone acquire new buffer versions this frame.
+        for access in [
+            copy[0], filter[1], filter[2], filter[3], draw[1], draw[2], draw[3],
+        ] {
+            assert_eq!(access.input_version, 0);
+            assert_eq!(access.output_version, None);
+        }
+        for (source, destination, resource) in [
+            (0, 1, copy[1].resource),
+            (1, 2, clear[0].resource),
+            (2, 3, filter[5].resource),
+            (2, 3, filter[6].resource),
+        ] {
+            assert!(plan.logical_barriers.iter().any(|barrier| {
+                barrier.source == source
+                    && barrier.destination == destination
+                    && barrier.resource == resource
+            }));
+        }
+        let [Pass::Transfer { commands: copy, .. }, Pass::Compute {
+            commands: clear, ..
+        }, Pass::Compute {
+            commands: filter, ..
+        }, Pass::Render { commands: draw, .. }] = recorded.commands().passes.as_slice()
+        else {
+            panic!("resident deletion must copy, reset, filter and draw");
+        };
+        assert_eq!(
+            copy.as_slice(),
+            &[CopyCommand::CopyBufferToBuffer {
+                src: item.indirect.imported.buffer,
+                src_offset: 0,
+                dst: deletion.indirect.imported.buffer,
+                dst_offset: 0,
+                size: 16,
+            }]
+        );
+        for (commands, stage) in [
+            (clear, deletion.clear_instance_count),
+            (filter, deletion.stage),
+        ] {
+            assert_eq!(
+                commands.as_slice(),
+                &[
+                    ComputeCommand::SetPipeline(stage.pipeline),
+                    ComputeCommand::SetBindGroup {
+                        index: 0,
+                        bind_group: stage.bind_group,
+                        dynamic_offsets: Vec::new()
+                    },
+                    ComputeCommand::Dispatch { x: 1, y: 1, z: 1 },
+                ]
+            );
+        }
+        assert!(
+            matches!(draw.last(), Some(RenderCommand::DrawIndirect { buffer, offset: 0 }) if *buffer == deletion.indirect.imported.buffer)
+        );
+        recorded.release(&device);
+        // The public backend-neutral API cannot attest queue submission and
+        // must continue to run all five upstream passes.
+        let raw = build_placement_render_graph(Extent3d::new_2d(4, 4), scene(&device), &[item])
+            .unwrap()
+            .record(&device)
+            .unwrap();
+        assert_eq!(raw.plan().pass_count(), 9);
+        raw.release(&device);
+    }
+
+    #[test]
+    fn mixed_resident_streams_preserve_cell_sort_and_scene_ssa_chain() {
+        let device = device();
+        let cached = with_deletion(&device);
+        let mut full = with_deletion(&device);
+        full.stream.cell = prism_world_stream::SectorId::new(1, 1, 0, 0);
+        let graph = build_placement_render_graph_with_resident_upstreams(
+            Extent3d::new_2d(4, 4),
+            scene(&device),
+            &[full, cached],
+            &BTreeSet::from([cached.stream.cell]),
+        )
+        .unwrap();
+        let recorded = graph.record(&device).unwrap();
+        assert_eq!(recorded.plan().pass_count(), 13);
+        let passes = &recorded.commands().passes;
+        assert!(matches!(passes[0], Pass::Transfer { .. }));
+        assert!(matches!(passes[3], Pass::Render { .. }));
+        assert!(passes[4..9]
+            .iter()
+            .all(|pass| matches!(pass, Pass::Compute { .. })));
+        assert!(matches!(passes[9], Pass::Transfer { .. }));
+        assert!(matches!(passes[12], Pass::Render { .. }));
+        let first_scene = recorded.plan().accesses[3][0];
+        let last_scene = recorded.plan().accesses[12][0];
+        assert_eq!(first_scene.resource, last_scene.resource);
+        assert_eq!(first_scene.output_version, Some(last_scene.input_version));
+        assert!(recorded.plan().logical_barriers.iter().any(|barrier| {
+            barrier.source == 3
+                && barrier.destination == 12
+                && barrier.resource == first_scene.resource
+        }));
+        recorded.release(&device);
+    }
+
+    #[test]
+    fn resident_hint_never_skips_empty_deletion_reset_or_full_validation() {
+        let device = device();
+        let empty = with_empty_deletion(&device);
+        let resident = BTreeSet::from([empty.stream.cell]);
+        let graph = build_placement_render_graph_with_resident_upstreams(
+            Extent3d::new_2d(4, 4),
+            scene(&device),
+            &[empty],
+            &resident,
+        )
+        .unwrap();
+        let recorded = graph.record(&device).unwrap();
+        assert_eq!(recorded.plan().pass_count(), 3);
+        assert!(matches!(
+            recorded.commands().passes[0],
+            Pass::Compute { .. }
+        ));
+        recorded.release(&device);
+
+        let base = with_deletion(&device);
+        let mut short = base;
+        short.records.bytes -= 1;
+        let mut alias = base;
+        alias
+            .work
+            .as_mut()
+            .unwrap()
+            .deletion
+            .as_mut()
+            .unwrap()
+            .compact = alias.compact;
+        let mut bad_dispatch = base;
+        bad_dispatch.work.as_mut().unwrap().project.dispatch = [0, 1, 1];
+        let mut bad_request = base;
+        bad_request
+            .work
+            .as_mut()
+            .unwrap()
+            .deletion
+            .as_mut()
+            .unwrap()
+            .request
+            .candidate_count += 1;
+        for invalid in [short, alias, bad_dispatch, bad_request] {
+            let full_error =
+                build_placement_render_graph(Extent3d::new_2d(4, 4), scene(&device), &[invalid])
+                    .err()
+                    .expect("full path must reject invalid input");
+            let cached_error = build_placement_render_graph_with_resident_upstreams(
+                Extent3d::new_2d(4, 4),
+                scene(&device),
+                &[invalid],
+                &resident,
+            )
+            .err()
+            .expect("cache hit must also reject invalid input");
+            assert_eq!(cached_error, full_error);
+        }
     }
 
     #[test]

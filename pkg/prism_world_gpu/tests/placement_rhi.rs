@@ -444,6 +444,24 @@ fn observe(
     }
 }
 
+fn observe_registered_deletions(
+    context: &GpuContext,
+    gpu: &RegisteredPlacementDeletions,
+    config: HeightfieldPlacementConfig,
+    target: &PlacementRhiScene,
+) -> Observation {
+    let snapshot = gpu.producer().registration_snapshot().unwrap();
+    observe(
+        context,
+        config,
+        (snapshot.upstream.records.bytes() / 64) as usize,
+        snapshot.indirect.buffer(),
+        snapshot.upstream.records.buffer(),
+        snapshot.compact.buffer(),
+        &target.native_texture(),
+    )
+}
+
 fn assert_pixels(observed: &Observation, expected: &BTreeSet<HeightfieldPlacementKey>) {
     for z in -3..0 {
         for x in -3..0 {
@@ -822,9 +840,7 @@ fn physical_rhi_panicking_submit_callback_preserves_pending_until_drain() {
         .register_deletions(fixture.deletions(&context))
         .unwrap();
     fixture.write_deletions(&mut gpu, fixture.region, &deletion_set(Vec::new()));
-    let snapshot = gpu.producer().registration_snapshot().unwrap();
     let target = scene(&bridge);
-    let texture = target.native_texture();
     let draw = pipeline(&bridge);
     let mut frame = bridge.begin_frame(&target).unwrap();
     frame.add_deletions(&gpu, CELL, 1, &draw).unwrap();
@@ -879,22 +895,9 @@ fn physical_rhi_panicking_submit_callback_preserves_pending_until_drain() {
     drop(gpu);
     drop(draw);
     drop(target);
-    // Native handle clones do not protect against SceneOwner::drop calling
-    // Texture::destroy. Observe while the pending packet still pins its owner,
-    // BEFORE drain releases the last scene owner and destroys the texture.
-    let actual = observe(
-        &context,
-        fixture.config,
-        fixture.budgets(fixture.region).2,
-        snapshot.indirect.buffer(),
-        snapshot.upstream.records.buffer(),
-        snapshot.compact.buffer(),
-        &texture,
-    );
-    let expected = fixture.cpu_keys();
-    assert_eq!(actual.keys, expected);
-    assert_pixels(&actual, &expected);
-    assert_eq!(bridge.pending_count(), 1);
+    // Recover the unknown submit index directly. A readback would append a
+    // fresh native submission and could mask a broken whole-queue drain.
+    // The dropped scene is destroyed at retirement; do not read it afterward.
     assert_eq!(bridge.drain().unwrap(), 1);
     assert_eq!(bridge.pending_count(), 0);
     assert_eq!(bridge.drain().unwrap(), 0);
@@ -950,9 +953,7 @@ fn physical_rhi_exact_wait_recovers_after_host_completion_callback_panics() {
         submission_index: None,
         timeout: Some(Duration::from_secs(30)),
     });
-    let payload = outcome
-        .err()
-        .expect("first native wait callback must panic");
+    let payload = outcome.expect_err("first native wait callback must panic");
     assert_eq!(payload.downcast_ref::<&str>(), Some(&PANIC));
     cleanup.unwrap();
     assert!(fired.load(Ordering::Acquire));
@@ -965,5 +966,781 @@ fn physical_rhi_exact_wait_recovers_after_host_completion_callback_panics() {
     assert!(token.is_complete());
     assert_eq!(bridge.pending_count(), 0);
     assert_eq!(bridge.wait(&token).unwrap(), 0);
+    assert_eq!(bridge.drain().unwrap(), 0);
+}
+
+#[test]
+fn physical_rhi_deletion_upstream_residency_requires_submit_and_reuses_same_queue() {
+    let context = context();
+    let mut bridge = bridge(&context);
+    let fixture = Fixture::new();
+    let cpu = fixture.cpu_keys();
+    assert_eq!(cpu.len(), 9);
+    let keys: Vec<_> = cpu.iter().copied().collect();
+    let first = deletion_set(vec![keys[0]]);
+    let changed = deletion_set(vec![keys[1], keys[4], keys[7]]);
+    let mut gpu = bridge
+        .register_deletions(fixture.deletions(&context))
+        .unwrap();
+    fixture.write_deletions(&mut gpu, fixture.region, &first);
+    let draw = pipeline(&bridge);
+    let targets: Vec<_> = (0..4).map(|_| scene(&bridge)).collect();
+
+    // Neither declaration Drop nor a successfully recorded but unsubmitted
+    // graph may promote CPU-side upload state to GPU-resident upstream work.
+    {
+        let mut frame = bridge.begin_frame(&targets[0]).unwrap();
+        frame.add_deletions(&gpu, CELL, 1, &draw).unwrap();
+    }
+    for revision in 2..4 {
+        let mut frame = bridge.begin_frame(&targets[0]).unwrap();
+        frame.add_deletions(&gpu, CELL, revision, &draw).unwrap();
+        let recorded = frame.record().unwrap();
+        assert_eq!(recorded.reused_upstream_count(), 0);
+        drop(recorded);
+        assert_eq!(bridge.pending_count(), 0);
+    }
+
+    let expected: Vec<BTreeSet<_>> = [&first, &first, &first, &changed]
+        .into_iter()
+        .map(|deletions| {
+            cpu.iter()
+                .copied()
+                .filter(|key| !deletions.is_deleted(*key))
+                .collect()
+        })
+        .collect();
+    let mut tokens = Vec::new();
+    for (index, target) in targets.iter().enumerate() {
+        match index {
+            0 | 1 => {} // Second submit uses the exact same uploaded request.
+            2 => fixture.write_deletions(&mut gpu, fixture.region, &first),
+            3 => fixture.write_deletions(&mut gpu, fixture.region, &changed),
+            _ => unreachable!(),
+        }
+        let mut frame = bridge.begin_frame(target).unwrap();
+        frame
+            .add_deletions(&gpu, CELL, 10 + index as u64, &draw)
+            .unwrap();
+        let recorded = frame.record().unwrap();
+        assert_eq!(
+            recorded.reused_upstream_count(),
+            usize::from(index != 0),
+            "scene {index}: only a returned submit establishes residency"
+        );
+        tokens.push(recorded.submit());
+        // No wait, readback or drain between these four submissions. Reuse
+        // must be safe by native same-queue ordering, not GPU completion.
+    }
+
+    for (index, (target, expected)) in targets.iter().zip(&expected).enumerate() {
+        let actual = observe_registered_deletions(&context, &gpu, fixture.config, target);
+        assert_pixels(&actual, expected);
+        // Earlier frames are proved by their independent scene textures. The
+        // shared records/compact/indirect now describe only the latest frame.
+        if index + 1 == targets.len() {
+            assert_eq!(actual.args[1] as usize, expected.len());
+            assert_eq!(&actual.keys, expected);
+        }
+    }
+    bridge.wait(tokens.last().unwrap()).unwrap();
+    assert!(tokens.iter().all(|token| token.is_complete()));
+    assert_eq!(bridge.pending_count(), 0);
+}
+
+#[test]
+fn physical_rhi_deletion_upstream_input_changes_invalidate_then_reestablish_residency() {
+    let context = context();
+    let mut bridge = bridge(&context);
+    let mut fixture = Fixture::new();
+    let deletions = deletion_set(vec![*fixture.cpu_keys().iter().next().unwrap()]);
+    let mut gpu = bridge
+        .register_deletions(fixture.deletions(&context))
+        .unwrap();
+    let draw = pipeline(&bridge);
+    let mut filters = fixture.filters();
+    let mut previous_cache = None;
+    for (index, label) in ["initial", "config", "region", "field", "surface", "filters"]
+        .into_iter()
+        .enumerate()
+    {
+        match label {
+            "initial" => {}
+            "config" => fixture.config.seed ^= 1u64 << 40,
+            "region" => {
+                fixture.region =
+                    HeightfieldPlacementRegion::new([-3_000, -3_000], [-1_000, 0]).unwrap();
+            }
+            "field" => {
+                fixture.field = ScatterDensityField::new(
+                    ScatterFieldConfig {
+                        base_density: u16::MAX / 2,
+                        ..fixture.field.config()
+                    },
+                    Vec::new(),
+                    ScatterFieldBuildBudget {
+                        max_brushes: 0,
+                        max_brush_bytes: 0,
+                    },
+                )
+                .unwrap();
+            }
+            "surface" => {
+                fixture.surface = PlanarHeightfieldSurface::new(
+                    Arc::clone(fixture.surface.tile()),
+                    PlanarHeightfieldEmbedding {
+                        sample_origin_mm: [-3_000, 500, -3_000],
+                        ..fixture.surface.embedding()
+                    },
+                )
+                .unwrap();
+            }
+            "filters" => filters.surface_height_mm = [501, 1_000],
+            _ => unreachable!(),
+        }
+        let (budget, cpu_budget, n) = fixture.budgets(fixture.region);
+        assert!(n > 0, "resident optimization is for nonempty upstream work");
+        let expected: BTreeSet<_> = scatter_on_heightfield(
+            fixture.config,
+            fixture.region,
+            &fixture.field,
+            &fixture.surface,
+            filters,
+            cpu_budget,
+        )
+        .unwrap()
+        .points
+        .iter()
+        .map(|point| point.key)
+        .filter(|key| !deletions.is_deleted(*key))
+        .collect();
+        if label == "filters" {
+            assert!(
+                expected.is_empty(),
+                "changed filter rejects the raised surface"
+            );
+        }
+        // The second write is structurally identical but advances the upload
+        // generation: residency must compare complete upstream inputs, not it.
+        for repeat in 0..2 {
+            gpu.write_request(
+                fixture.config,
+                fixture.region,
+                &fixture.field,
+                &fixture.surface,
+                filters,
+                budget,
+                &deletions,
+                GpuHeightfieldPlacementDeletionWorkBudget {
+                    max_input_slots: n as u64,
+                    max_keys: 32,
+                    max_key_comparisons: u64::MAX,
+                },
+            )
+            .unwrap();
+            let cache = gpu.producer().cache_key().unwrap().upstream.clone();
+            if repeat == 0 {
+                assert_ne!(previous_cache.as_ref(), Some(&cache), "{label}");
+                previous_cache = Some(cache);
+            } else {
+                assert_eq!(previous_cache.as_ref(), Some(&cache), "{label}");
+            }
+            let target = scene(&bridge);
+            let mut frame = bridge.begin_frame(&target).unwrap();
+            frame
+                .add_deletions(&gpu, CELL, (index * 2 + repeat) as u64, &draw)
+                .unwrap();
+            let recorded = frame.record().unwrap();
+            assert_eq!(recorded.reused_upstream_count(), repeat, "{label}");
+            let token = recorded.submit();
+            let actual = observe_registered_deletions(&context, &gpu, fixture.config, &target);
+            assert_eq!(actual.args[1] as usize, expected.len(), "{label}");
+            assert_eq!(actual.keys, expected, "{label}");
+            assert_pixels(&actual, &expected);
+            bridge.wait(&token).unwrap();
+        }
+    }
+    // An empty upstream request still resets/copies/clears indirect counts,
+    // but does not establish a reusable five-stage upstream computation.
+    let empty_region = HeightfieldPlacementRegion::new([0, 0], [0, 0]).unwrap();
+    for revision in 20..22 {
+        fixture.write_deletions(&mut gpu, empty_region, &deletions);
+        let target = scene(&bridge);
+        let mut frame = bridge.begin_frame(&target).unwrap();
+        frame.add_deletions(&gpu, CELL, revision, &draw).unwrap();
+        let recorded = frame.record().unwrap();
+        assert_eq!(
+            recorded.reused_upstream_count(),
+            0,
+            "empty source is not cached"
+        );
+        let token = recorded.submit();
+        let actual = observe_registered_deletions(&context, &gpu, fixture.config, &target);
+        assert_eq!(actual.args, [3, 0, 0, 0]);
+        assert!(actual.keys.is_empty());
+        assert_pixels(&actual, &BTreeSet::new());
+        bridge.wait(&token).unwrap();
+    }
+    assert_eq!(bridge.pending_count(), 0);
+}
+
+#[test]
+fn physical_rhi_deletion_failed_write_aba_and_explicit_native_invalidation() {
+    let context = context();
+    let mut bridge = bridge(&context);
+    let fixture = Fixture::new();
+    let cpu = fixture.cpu_keys();
+    let deletions = deletion_set(vec![*cpu.iter().next().unwrap()]);
+    let expected: BTreeSet<_> = cpu
+        .iter()
+        .copied()
+        .filter(|key| !deletions.is_deleted(*key))
+        .collect();
+    let mut gpu = bridge
+        .register_deletions(fixture.deletions(&context))
+        .unwrap();
+    let draw = pipeline(&bridge);
+    let target = scene(&bridge);
+    fixture.write_deletions(&mut gpu, fixture.region, &deletions);
+    let mut frame = bridge.begin_frame(&target).unwrap();
+    frame.add_deletions(&gpu, CELL, 1, &draw).unwrap();
+    let recorded = frame.record().unwrap();
+    assert_eq!(recorded.reused_upstream_count(), 0);
+    let first = recorded.submit();
+
+    let before_cache = gpu.producer().cache_key().cloned();
+    let before_stats = gpu.producer().upload_stats();
+    let before = gpu.producer().registration_snapshot().unwrap();
+    let changed_config = HeightfieldPlacementConfig {
+        seed: fixture.config.seed ^ (1u64 << 40),
+        ..fixture.config
+    };
+    let (budget, _, n) = fixture.budgets(fixture.region);
+    assert!(matches!(
+        gpu.write_request(
+            changed_config,
+            fixture.region,
+            &fixture.field,
+            &fixture.surface,
+            fixture.filters(),
+            budget,
+            &deletions,
+            GpuHeightfieldPlacementDeletionWorkBudget {
+                max_input_slots: n as u64,
+                max_keys: 0,
+                max_key_comparisons: u64::MAX,
+            },
+        ),
+        Err(
+            prism_world_gpu::GpuHeightfieldPlacementDeletionError::KeyBudgetExceeded {
+                required: 1,
+                limit: 0,
+            }
+        )
+    ));
+    assert_eq!(gpu.producer().cache_key(), before_cache.as_ref());
+    assert_eq!(gpu.producer().upload_stats(), before_stats);
+    let after = gpu.producer().registration_snapshot().unwrap();
+    assert_eq!(after.request, before.request);
+    assert_eq!(
+        after.upstream.request_generation,
+        before.upstream.request_generation
+    );
+    let mut frame = bridge.begin_frame(&target).unwrap();
+    frame.add_deletions(&gpu, CELL, 2, &draw).unwrap();
+    let recorded = frame.record().unwrap();
+    assert_eq!(
+        recorded.reused_upstream_count(),
+        1,
+        "rejected B preserves resident A"
+    );
+    let retained = recorded.submit();
+    let actual = observe_registered_deletions(&context, &gpu, fixture.config, &target);
+    assert_eq!(actual.keys, expected);
+    assert_pixels(&actual, &expected);
+    bridge.wait(&retained).unwrap();
+    assert!(first.is_complete());
+
+    // Successful A -> B -> A uploads overwrite shared native data even when B
+    // is never recorded/submitted. Returning to an equal A key cannot restore
+    // the old residency proof, and cancelling its rebuild cannot do so either.
+    gpu.write_request(
+        changed_config,
+        fixture.region,
+        &fixture.field,
+        &fixture.surface,
+        fixture.filters(),
+        budget,
+        &deletions,
+        GpuHeightfieldPlacementDeletionWorkBudget {
+            max_input_slots: n as u64,
+            max_keys: 32,
+            max_key_comparisons: u64::MAX,
+        },
+    )
+    .unwrap();
+    fixture.write_deletions(&mut gpu, fixture.region, &deletions);
+    assert_eq!(gpu.producer().cache_key(), before_cache.as_ref());
+    for submit in [false, true] {
+        let mut frame = bridge.begin_frame(&target).unwrap();
+        frame.add_deletions(&gpu, CELL, 3, &draw).unwrap();
+        let recorded = frame.record().unwrap();
+        assert_eq!(
+            recorded.reused_upstream_count(),
+            0,
+            "A -> B -> A invalidates"
+        );
+        if submit {
+            let token = recorded.submit();
+            let actual = observe_registered_deletions(&context, &gpu, fixture.config, &target);
+            assert_eq!(actual.keys, expected);
+            assert_pixels(&actual, &expected);
+            bridge.wait(&token).unwrap();
+        } else {
+            drop(recorded);
+        }
+    }
+    {
+        let mut frame = bridge.begin_frame(&target).unwrap();
+        frame.add_deletions(&gpu, CELL, 4, &draw).unwrap();
+        let recorded = frame.record().unwrap();
+        assert_eq!(recorded.reused_upstream_count(), 1);
+        drop(recorded);
+    }
+
+    // The explicit escape-hatch contract invalidates BEFORE an external write.
+    // Poison both source data and the upstream draw count on the same queue;
+    // a missing rebuild now yields incorrect/empty indirect draws and pixels.
+    gpu.invalidate_resident_upstream();
+    let snapshot = gpu.producer().registration_snapshot().unwrap();
+    // Geometry is STORAGE | COPY_SRC, not COPY_DST. Mutate it through its
+    // actual storage contract rather than requiring a production usage change.
+    let shader = context
+        .device()
+        .create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("placement RHI external storage write"),
+            source: wgpu::ShaderSource::Wgsl(
+                r#"
+@group(0) @binding(0) var<storage, read_write> records: array<u32>;
+@group(0) @binding(1) var<storage, read_write> indirect: array<u32>;
+@compute @workgroup_size(1) fn poison() {
+    for (var i = 0u; i < arrayLength(&records); i++) {
+        records[i] = 0u;
+    }
+    indirect[1] = 0u;
+}
+"#
+                .into(),
+            ),
+        });
+    let poison = context
+        .device()
+        .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("placement RHI external storage write"),
+            layout: None,
+            module: &shader,
+            entry_point: Some("poison"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+    let bindings = context
+        .device()
+        .create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("placement RHI external storage write"),
+            layout: &poison.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: snapshot.upstream.records.buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: snapshot.upstream.indirect.buffer().as_entire_binding(),
+                },
+            ],
+        });
+    let mut encoder = context.device().create_command_encoder(&Default::default());
+    {
+        let mut pass = encoder.begin_compute_pass(&Default::default());
+        pass.set_pipeline(&poison);
+        pass.set_bind_group(0, &bindings, &[]);
+        pass.dispatch_workgroups(1, 1, 1);
+    }
+    context.queue().submit([encoder.finish()]);
+    for (revision, reused) in [(5, 0), (6, 1)] {
+        let mut frame = bridge.begin_frame(&target).unwrap();
+        frame.add_deletions(&gpu, CELL, revision, &draw).unwrap();
+        let recorded = frame.record().unwrap();
+        assert_eq!(recorded.reused_upstream_count(), reused);
+        let token = recorded.submit();
+        let actual = observe_registered_deletions(&context, &gpu, fixture.config, &target);
+        assert_eq!(actual.args[1] as usize, expected.len());
+        assert_eq!(actual.keys, expected);
+        assert_pixels(&actual, &expected);
+        bridge.wait(&token).unwrap();
+    }
+    assert_eq!(bridge.pending_count(), 0);
+}
+
+#[test]
+fn physical_rhi_deletion_resident_upstream_submit_panic_requires_rebuild() {
+    use std::{
+        panic::{catch_unwind, panic_any, AssertUnwindSafe},
+        sync::atomic::{AtomicBool, Ordering},
+    };
+
+    const PANIC: &str = "placement RHI injected resident submit completion panic";
+    let context = context();
+    let mut bridge = bridge(&context);
+    let fixture = Fixture::new();
+    let cpu = fixture.cpu_keys();
+    let deletions = deletion_set(cpu.iter().step_by(3).copied().collect());
+    let expected: BTreeSet<_> = cpu
+        .iter()
+        .copied()
+        .filter(|key| !deletions.is_deleted(*key))
+        .collect();
+    assert!(!expected.is_empty());
+    let mut gpu = bridge
+        .register_deletions(fixture.deletions(&context))
+        .unwrap();
+    fixture.write_deletions(&mut gpu, fixture.region, &deletions);
+    let draw = pipeline(&bridge);
+    let targets: Vec<_> = (0..4).map(|_| scene(&bridge)).collect();
+
+    // Start warm: clearing only a cold proof on failure would miss the bug.
+    let mut frame = bridge.begin_frame(&targets[0]).unwrap();
+    frame.add_deletions(&gpu, CELL, 1, &draw).unwrap();
+    let recorded = frame.record().unwrap();
+    assert_eq!(recorded.reused_upstream_count(), 0);
+    let first = recorded.try_submit().unwrap();
+    bridge.wait(&first).unwrap();
+    assert!(first.is_complete());
+    assert_eq!(bridge.pending_count(), 0);
+
+    let mut frame = bridge.begin_frame(&targets[1]).unwrap();
+    frame.add_deletions(&gpu, CELL, 2, &draw).unwrap();
+    let recorded = frame.record().unwrap();
+    assert_eq!(recorded.reused_upstream_count(), 1);
+
+    // Same ready-callback injection as the ownership regression above. In
+    // wgpu-core 30 an idle queue stores this closure until the next submit's
+    // unconditional triage; it fires after native enqueue, before index return.
+    // Flush/wait BEFORE arming, and do not poll between arming and submit.
+    context.queue().submit([]);
+    context
+        .device()
+        .poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: Some(Duration::from_secs(30)),
+        })
+        .unwrap();
+    let fired = Arc::new(AtomicBool::new(false));
+    let callback_fired = fired.clone();
+    let armed = Arc::new(AtomicBool::new(true));
+    let callback_armed = armed.clone();
+    context.queue().on_submitted_work_done(move || {
+        if callback_armed.swap(false, Ordering::AcqRel) {
+            callback_fired.store(true, Ordering::Release);
+            panic_any(PANIC);
+        }
+    });
+    let outcome = catch_unwind(AssertUnwindSafe(|| recorded.submit()));
+    // Always disarm AND consume a deferred closure before any assertion, so
+    // an unexpected scheduling change cannot cause a second teardown panic.
+    armed.store(false, Ordering::Release);
+    let cleanup = context.device().poll(wgpu::PollType::Wait {
+        submission_index: None,
+        timeout: Some(Duration::from_secs(30)),
+    });
+    let payload = outcome
+        .err()
+        .expect("ready native submit callback must panic");
+    assert_eq!(payload.downcast_ref::<&str>(), Some(&PANIC));
+    cleanup.unwrap();
+    assert!(fired.load(Ordering::Acquire));
+    assert_eq!(
+        bridge.pending_count(),
+        1,
+        "unwind must retain native owners"
+    );
+    // No readback submit may advance the queue before unknown-index recovery.
+    assert_eq!(bridge.drain().unwrap(), 1);
+    assert_eq!(bridge.pending_count(), 0);
+    // Unlike the drop-ownership regression, these public owners remain alive,
+    // so observation after drain is valid without relying on native clones.
+    let actual = observe_registered_deletions(&context, &gpu, fixture.config, &targets[1]);
+    assert_eq!(actual.keys, expected);
+    assert_pixels(&actual, &expected);
+
+    // No write_request or explicit invalidation: submit failure itself must
+    // revoke the previously resident proof, even when the failed frame reused it.
+    let mut tokens = Vec::new();
+    for (index, reused) in [(2, 0), (3, 1)] {
+        let mut frame = bridge.begin_frame(&targets[index]).unwrap();
+        frame
+            .add_deletions(&gpu, CELL, index as u64 + 1, &draw)
+            .unwrap();
+        let recorded = frame.record().unwrap();
+        assert_eq!(recorded.reused_upstream_count(), reused);
+        tokens.push(recorded.try_submit().unwrap());
+        // No wait between rebuild and reuse; native queue ordering suffices.
+    }
+    for target in &targets[2..] {
+        let actual = observe_registered_deletions(&context, &gpu, fixture.config, target);
+        assert_eq!(actual.args[1] as usize, expected.len());
+        assert_eq!(actual.keys, expected);
+        assert_pixels(&actual, &expected);
+    }
+    bridge.wait(tokens.last().unwrap()).unwrap();
+    assert!(tokens.iter().all(|token| token.is_complete()));
+    assert_eq!(bridge.pending_count(), 0);
+    assert_eq!(bridge.drain().unwrap(), 0);
+}
+
+#[test]
+fn physical_rhi_deletion_native_validation_error_does_not_publish_residency() {
+    use prism_world_gpu::placement_rhi::PlacementRhiError;
+
+    let context = context();
+    let mut bridge = bridge(&context);
+    let fixture = Fixture::new();
+    let cpu = fixture.cpu_keys();
+    let deletions = deletion_set(cpu.iter().step_by(3).copied().collect());
+    let expected: BTreeSet<_> = cpu
+        .iter()
+        .copied()
+        .filter(|key| !deletions.is_deleted(*key))
+        .collect();
+    assert!(!expected.is_empty());
+    let draw = pipeline(&bridge);
+    let shader = bridge
+        .device()
+        .create_shader_module(&rhi::ShaderModuleDescriptor::wgsl(DRAW_WGSL));
+
+    // Capture the intentional creation error, leaving a real native invalid
+    // pipeline in the RHI table. This is not an adapter-side ABI rejection.
+    let scope_guard = context
+        .device()
+        .push_error_scope(wgpu::ErrorFilter::Validation);
+    let invalid = bridge
+        .create_draw_pipeline(&rhi::RenderPipelineDescriptor {
+            label: Some("placement RHI intentional missing vertex entry".into()),
+            layout: None,
+            vertex: rhi::VertexState {
+                module: shader,
+                entry_point: "missing_placement_rhi_vertex_entry".into(),
+                buffers: Vec::new(),
+            },
+            primitive: rhi::PrimitiveState {
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: Default::default(),
+            fragment: Some(rhi::FragmentState {
+                module: shader,
+                entry_point: "fs".into(),
+                targets: vec![Some(rhi::ColorTargetState::opaque(
+                    rhi::TextureFormat::Rgba8Unorm,
+                ))],
+            }),
+        })
+        .unwrap();
+    let creation_error = futures_lite::future::block_on(scope_guard.pop());
+    bridge.device().destroy_shader_module(shader);
+    assert!(matches!(
+        creation_error,
+        Some(wgpu::Error::Validation { .. })
+    ));
+
+    // Exercise both a cold producer and an already resident producer: native
+    // failure must neither publish a new proof nor preserve an old one.
+    for resident in [false, true] {
+        let mut gpu = bridge
+            .register_deletions(fixture.deletions(&context))
+            .unwrap();
+        fixture.write_deletions(&mut gpu, fixture.region, &deletions);
+        let target = scene(&bridge);
+        if resident {
+            let mut frame = bridge.begin_frame(&target).unwrap();
+            frame.add_deletions(&gpu, CELL, 1, &draw).unwrap();
+            let recorded = frame.record().unwrap();
+            assert_eq!(recorded.reused_upstream_count(), 0);
+            let token = recorded.try_submit().unwrap();
+            bridge.wait(&token).unwrap();
+        }
+
+        let mut frame = bridge.begin_frame(&target).unwrap();
+        frame.add_deletions(&gpu, CELL, 2, &invalid).unwrap();
+        let recorded = frame.record().unwrap();
+        assert_eq!(recorded.reused_upstream_count(), usize::from(resident));
+        // An outer scope must not hide errors from try_submit's own scopes.
+        // Pop it even on an unexpected Ok before asserting either result.
+        let scope_guard = context
+            .device()
+            .push_error_scope(wgpu::ErrorFilter::Validation);
+        let result = recorded.try_submit();
+        let escaped = futures_lite::future::block_on(scope_guard.pop());
+        assert!(
+            escaped.is_none(),
+            "try_submit must capture its native error"
+        );
+        match result {
+            Err(PlacementRhiError::Native(error)) => {
+                assert!(matches!(error.as_ref(), wgpu::Error::Validation { .. }));
+            }
+            Err(error) => panic!("expected native validation error, got {error:?}"),
+            Ok(_) => panic!("invalid native pipeline must not return a success token"),
+        }
+        assert_eq!(bridge.pending_count(), 1, "failed packet pins stay owned");
+        assert_eq!(bridge.drain().unwrap(), 1);
+        assert_eq!(bridge.pending_count(), 0);
+
+        // Recover the SAME producer, with no upload/invalidate to mask a stale
+        // proof. Only the first error-free native submit may make it reusable.
+        for (revision, reused) in [(3, 0), (4, 1)] {
+            let mut frame = bridge.begin_frame(&target).unwrap();
+            frame.add_deletions(&gpu, CELL, revision, &draw).unwrap();
+            let recorded = frame.record().unwrap();
+            assert_eq!(recorded.reused_upstream_count(), reused);
+            let token = recorded.try_submit().unwrap();
+            let actual = observe_registered_deletions(&context, &gpu, fixture.config, &target);
+            assert_eq!(actual.args[1] as usize, expected.len());
+            assert_eq!(actual.keys, expected);
+            assert_pixels(&actual, &expected);
+            bridge.wait(&token).unwrap();
+        }
+        assert_eq!(bridge.pending_count(), 0);
+    }
+    assert_eq!(bridge.drain().unwrap(), 0);
+}
+
+#[test]
+fn physical_rhi_same_device_thread_local_error_scopes_isolate_try_submit() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    const BACKGROUND_ERROR: &str = "placement RHI background scope isolation probe";
+    let context = context();
+    let mut bridge = bridge(&context);
+    let fixture = Fixture::new();
+    let cpu = fixture.cpu_keys();
+    assert_eq!(cpu.len(), 9);
+    let deletions = deletion_set(cpu.iter().step_by(3).copied().collect());
+    let expected: BTreeSet<_> = cpu
+        .iter()
+        .copied()
+        .filter(|key| !deletions.is_deleted(*key))
+        .collect();
+    assert_eq!(expected.len(), 6);
+    let mut gpu = bridge
+        .register_deletions(fixture.deletions(&context))
+        .unwrap();
+    fixture.write_deletions(&mut gpu, fixture.region, &deletions);
+    let target = scene(&bridge);
+    let draw = pipeline(&bridge);
+    let mut frame = bridge.begin_frame(&target).unwrap();
+    frame.add_deletions(&gpu, CELL, 1, &draw).unwrap();
+    let recorded = frame.record().unwrap();
+    assert_eq!(recorded.reused_upstream_count(), 0);
+
+    // Flush uploads and make the next work-done callback ready before arming.
+    // wgpu-core 30 fires this idle-queue callback inside native submit, before
+    // try_submit pops its three native scopes. No sleeps or GPU speed assumptions.
+    context.queue().submit([]);
+    context
+        .device()
+        .poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: Some(Duration::from_secs(30)),
+        })
+        .unwrap();
+
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let (inject_tx, inject_rx) = mpsc::channel();
+    let (injected_tx, injected_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let background_device = context.device().clone();
+    let background = std::thread::spawn(move || {
+        // Clone the SAME device, not a new context. The !Send wgpu 30 guard is
+        // created, kept alive, and explicitly popped only on this thread.
+        let scope_guard = background_device.push_error_scope(wgpu::ErrorFilter::Validation);
+        ready_tx.send(()).unwrap();
+        let inject = inject_rx.recv_timeout(Duration::from_secs(30));
+        if matches!(inject, Ok(true)) {
+            let _invalid = background_device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some(BACKGROUND_ERROR),
+                source: wgpu::ShaderSource::Wgsl(
+                    r#"
+@compute @workgroup_size(1) fn scope_isolation_probe() {
+    let invalid: u32 = true;
+}
+"#
+                    .into(),
+                ),
+            });
+            injected_tx.send(()).unwrap();
+        }
+        // Keep the scope until try_submit AND the foreground outer scope pop.
+        // Even without wgpu/std the global stack is popped in reverse order:
+        // the regression fails by error routing, not a double-unwind abort.
+        let released = release_rx.recv_timeout(Duration::from_secs(30));
+        let error = futures_lite::future::block_on(scope_guard.pop());
+        inject.expect("foreground must request injection or cancellation");
+        released.expect("foreground must release the background scope");
+        error
+    });
+    ready_rx.recv_timeout(Duration::from_secs(30)).unwrap();
+
+    let foreground_scope = context
+        .device()
+        .push_error_scope(wgpu::ErrorFilter::Validation);
+    let armed = Arc::new(AtomicBool::new(true));
+    let callback_armed = armed.clone();
+    let fired = Arc::new(AtomicBool::new(false));
+    let callback_fired = fired.clone();
+    let cancel_tx = inject_tx.clone();
+    context.queue().on_submitted_work_done(move || {
+        if callback_armed.swap(false, Ordering::AcqRel) {
+            inject_tx.send(true).unwrap();
+            injected_rx.recv_timeout(Duration::from_secs(30)).unwrap();
+            callback_fired.store(true, Ordering::Release);
+        }
+    });
+    let result = recorded.try_submit();
+    let injected_during_submit = fired.load(Ordering::Acquire);
+    // If callback scheduling changes, disarm deferred work and unblock/join
+    // the thread BEFORE assertions, leaving no panic callback for teardown.
+    armed.store(false, Ordering::Release);
+    if !injected_during_submit {
+        let _ = cancel_tx.send(false);
+    }
+    let foreground_error = futures_lite::future::block_on(foreground_scope.pop());
+    release_tx.send(()).unwrap();
+    let background_error = background.join().expect("background scope thread panicked");
+
+    assert!(
+        injected_during_submit,
+        "injection must overlap native scopes"
+    );
+    assert!(
+        foreground_error.is_none(),
+        "background error escaped its thread"
+    );
+    match background_error {
+        Some(wgpu::Error::Validation { description, .. }) => {
+            assert!(description.contains(BACKGROUND_ERROR), "{description}");
+        }
+        error => panic!("background scope must capture its own validation error: {error:?}"),
+    }
+    let token = result.expect("another thread's validation error must not fail try_submit");
+    assert_eq!(bridge.pending_count(), 1);
+    let actual = observe_registered_deletions(&context, &gpu, fixture.config, &target);
+    assert_eq!(actual.args[1] as usize, expected.len());
+    assert_eq!(actual.keys, expected);
+    assert_pixels(&actual, &expected);
+    bridge.wait(&token).unwrap();
+    assert!(token.is_complete());
+    assert_eq!(bridge.pending_count(), 0);
     assert_eq!(bridge.drain().unwrap(), 0);
 }
