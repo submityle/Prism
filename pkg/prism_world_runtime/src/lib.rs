@@ -72,6 +72,8 @@ mod decoded_scene_host_tests;
 #[cfg(test)]
 mod scatter_persist_tests;
 
+#[cfg(all(feature = "asset_container", feature = "tasks"))]
+mod asset_container_cell_io;
 #[cfg(feature = "asset_container")]
 mod asset_container_provider;
 #[cfg(feature = "std")]
@@ -110,6 +112,10 @@ mod scheduled_io_tests;
 #[cfg(all(test, feature = "tasks"))]
 mod task_cell_io_tests;
 
+#[cfg(all(feature = "asset_container", feature = "tasks"))]
+pub use asset_container_cell_io::{
+    AssetContainerCellIo, AssetContainerCellIoLimits, AssetContainerCellIoLimitsError,
+};
 #[cfg(feature = "asset_container")]
 pub use asset_container_provider::{
     AssetContainerCellProvider, AssetContainerCellRangePlan, AssetContainerProviderError,
