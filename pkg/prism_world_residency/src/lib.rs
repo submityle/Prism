@@ -29,6 +29,7 @@ mod sdf;
 
 pub use clipmap::{
     ClipmapAxis, CpuSdfClipmap, SdfClipmapConfig, SdfClipmapError, SdfClipmapUpdate,
+    SdfToroidalClipmap,
 };
 pub use hlod::{HlodCluster, HlodError, HlodLevel, LodTransition};
 pub use pcg::{
