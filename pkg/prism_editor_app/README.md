@@ -102,6 +102,11 @@ history limits also apply. Duplicate field targets are rejected.
 An active gesture fences selection, other model commands, document encoding,
 save/load submission, active-panel file commands and native close. Failed scene
 file requests do not leave the native event loop in pending-I/O polling. Native
+renderer, scene-document and UI/background work retain independent pending
+state: a terminal result clears only its own source, while suspend or device loss
+stops GPU polling without forgetting CPU document I/O. Each native-loop pass
+recomputes background pending state from the owning services, so completed work
+cannot leave a stale 4 ms poll loop behind or mask another active source. Native
 press also fences pending document I/O and Inspector drafts. External hosts must
 cancel with `gesture_cancel` (or
 `gizmo_cancel` with the same controller) before suspension, document replacement

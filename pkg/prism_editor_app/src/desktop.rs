@@ -85,6 +85,34 @@ pub struct DesktopWork {
     pub pending: bool,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct DesktopPending {
+    renderer: bool,
+    document: bool,
+    ui: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DesktopPendingSource {
+    Renderer,
+    Document,
+    Ui,
+}
+
+impl DesktopPending {
+    fn set(&mut self, source: DesktopPendingSource, pending: bool) {
+        match source {
+            DesktopPendingSource::Renderer => self.renderer = pending,
+            DesktopPendingSource::Document => self.document = pending,
+            DesktopPendingSource::Ui => self.ui = pending,
+        }
+    }
+
+    const fn any(self) -> bool {
+        self.renderer || self.document || self.ui
+    }
+}
+
 /// Engine-neutral native viewport adapter, sharing the host's GPU submission.
 /// Implementations retain scene resources, reject stale picks, and update the
 /// controller through commands rather than keeping a second authority.
@@ -335,7 +363,7 @@ pub fn run_desktop_with_document<R: DesktopRenderer>(
         gpu_generation: 0,
         occluded: false,
         redraw: true,
-        pending: false,
+        pending: DesktopPending::default(),
         retry_at: None,
         consecutive_retries: 0,
         started: Instant::now(),
@@ -411,7 +439,7 @@ struct DesktopHost<R> {
     gpu_generation: u64,
     occluded: bool,
     redraw: bool,
-    pending: bool,
+    pending: DesktopPending,
     retry_at: Option<Instant>,
     consecutive_retries: u32,
     started: Instant,
@@ -759,7 +787,7 @@ impl<R: DesktopRenderer> DesktopHost<R> {
         }
         match self.ui.panel_document_command(save) {
             Ok(true) => {
-                self.pending = true;
+                self.pending.set(DesktopPendingSource::Ui, true);
                 return;
             }
             Err(error) => {
@@ -782,7 +810,7 @@ impl<R: DesktopRenderer> DesktopHost<R> {
         };
         let (result, pending) = document_request_result(result);
         self.input_result(result);
-        self.pending |= pending;
+        self.pending.set(DesktopPendingSource::Document, pending);
     }
 
     fn sync_text_input(&mut self) {
@@ -865,7 +893,7 @@ impl<R: DesktopRenderer> ApplicationHandler<DesktopWake> for DesktopHost<R> {
         self.native = None;
         self.cursor = None;
         self.drag_start = None;
-        self.pending = false;
+        self.pending.set(DesktopPendingSource::Renderer, false);
         self.sync_text_input();
     }
 
@@ -874,9 +902,11 @@ impl<R: DesktopRenderer> ApplicationHandler<DesktopWake> for DesktopHost<R> {
             match self.poll_document() {
                 Ok(work) => {
                     self.redraw |= work.redraw;
-                    self.pending = work.pending;
+                    self.pending
+                        .set(DesktopPendingSource::Document, work.pending);
                 }
                 Err(error) => {
+                    self.pending.set(DesktopPendingSource::Document, false);
                     self.ui.show_error(error.to_string());
                     self.redraw = true;
                 }
@@ -909,7 +939,7 @@ impl<R: DesktopRenderer> ApplicationHandler<DesktopWake> for DesktopHost<R> {
                 self.input_result(result);
                 self.renderer.suspend();
                 self.native = None;
-                self.pending = false;
+                self.pending.set(DesktopPendingSource::Renderer, false);
                 self.retry_at = None;
                 match self.initialize(event_loop) {
                     Ok(()) => {
@@ -1135,7 +1165,7 @@ impl<R: DesktopRenderer> ApplicationHandler<DesktopWake> for DesktopHost<R> {
                             } else {
                                 Ok(false)
                             };
-                            self.pending = true;
+                            self.pending.set(DesktopPendingSource::Renderer, true);
                             self.input_result(result);
                         }
                     }
@@ -1282,20 +1312,25 @@ impl<R: DesktopRenderer> ApplicationHandler<DesktopWake> for DesktopHost<R> {
             match self.renderer.poll(&native.gpu, &mut self.ui) {
                 Ok(work) => {
                     self.redraw |= work.redraw;
-                    self.pending = work.pending;
+                    self.pending
+                        .set(DesktopPendingSource::Renderer, work.pending);
                 }
                 Err(error) => {
                     self.fail(event_loop, error);
                     return;
                 }
             }
+        } else {
+            self.pending.set(DesktopPendingSource::Renderer, false);
         }
         match self.poll_document() {
             Ok(work) => {
                 self.redraw |= work.redraw;
-                self.pending |= work.pending;
+                self.pending
+                    .set(DesktopPendingSource::Document, work.pending);
             }
             Err(error) => {
+                self.pending.set(DesktopPendingSource::Document, false);
                 self.ui.show_error(error.to_string());
                 self.redraw = true;
             }
@@ -1316,9 +1351,12 @@ impl<R: DesktopRenderer> ApplicationHandler<DesktopWake> for DesktopHost<R> {
                 return;
             }
         }
-        self.pending |= self.ui.content_thumbnails_pending();
-        self.pending |= self.ui.content_git_pending();
-        self.pending |= self.ui.content_collections_pending();
+        self.pending.set(
+            DesktopPendingSource::Ui,
+            self.ui.content_thumbnails_pending()
+                || self.ui.content_git_pending()
+                || self.ui.content_collections_pending(),
+        );
         self.sync_text_input();
         let now = Instant::now();
         if self.redraw
@@ -1332,7 +1370,7 @@ impl<R: DesktopRenderer> ApplicationHandler<DesktopWake> for DesktopHost<R> {
                 window.request_redraw();
             }
         }
-        let poll_at = self.pending.then(|| now + Duration::from_millis(4));
+        let poll_at = self.pending.any().then(|| now + Duration::from_millis(4));
         let deadline = self
             .config
             .time_limit
@@ -1572,6 +1610,60 @@ mod tests {
 
         assert_eq!(result, Ok(true));
         assert!(pending);
+    }
+
+    #[test]
+    fn document_completion_does_not_clear_other_pending_sources() {
+        let mut pending = DesktopPending {
+            renderer: true,
+            document: true,
+            ui: true,
+        };
+
+        pending.set(DesktopPendingSource::Document, false);
+
+        assert_eq!(
+            pending,
+            DesktopPending {
+                renderer: true,
+                document: false,
+                ui: true,
+            }
+        );
+        assert!(pending.any());
+    }
+
+    #[test]
+    fn document_terminal_failure_stops_document_polling() {
+        let mut pending = DesktopPending {
+            document: true,
+            ..DesktopPending::default()
+        };
+
+        pending.set(DesktopPendingSource::Document, false);
+
+        assert!(!pending.any());
+    }
+
+    #[test]
+    fn renderer_suspend_preserves_pending_document_io() {
+        let mut pending = DesktopPending {
+            renderer: true,
+            document: true,
+            ..DesktopPending::default()
+        };
+
+        pending.set(DesktopPendingSource::Renderer, false);
+
+        assert_eq!(
+            pending,
+            DesktopPending {
+                renderer: false,
+                document: true,
+                ui: false,
+            }
+        );
+        assert!(pending.any());
     }
 
     #[test]
