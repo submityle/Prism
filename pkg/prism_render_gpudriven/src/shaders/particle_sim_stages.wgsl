@@ -45,6 +45,7 @@ struct EventRecord {
     pad1: u32,
 };
 struct CollisionResult { position: vec3<f32>, velocity: vec3<f32>, hit: u32 };
+struct Contact { normal: vec3<f32>, penetration: f32, point: vec3<f32>, hit: bool };
 
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var<storage, read_write> particles: array<Particle>;
@@ -243,47 +244,124 @@ fn emit_event(kind: u32, index: u32, pos: vec3<f32>, age: f32) {
         atomicAdd(&control[7], 1u);
     }
 }
-fn collider_contact(c: ColliderEntry, pos: vec3<f32>, radius: f32) -> vec4<f32> {
+fn collision_radius(radius: f32) -> f32 {
+    if (!finite1(radius)) { return 0.0; }
+    return max(radius, 0.0);
+}
+fn collision_normal(v: vec3<f32>) -> vec3<f32> {
+    let l2 = dot(v, v);
+    if (!is_finite3(v) || l2 <= EPS * EPS) { return vec3<f32>(0.0, 1.0, 0.0); }
+    return v * (1.0 / sqrt(l2));
+}
+fn contact_miss() -> Contact {
+    return Contact(vec3<f32>(0.0), 0.0, vec3<f32>(0.0), false);
+}
+fn contact_hit(normal: vec3<f32>, penetration: f32, point: vec3<f32>) -> Contact {
+    return Contact(collision_normal(normal), collision_radius(penetration), finite3(point), true);
+}
+// Order finite floats exactly like Rust total_cmp, including signed zero.
+fn float_order_key(value: f32) -> u32 {
+    let bits = bitcast<u32>(value);
+    if ((bits & 0x80000000u) != 0u) { return ~bits; }
+    return bits ^ 0x80000000u;
+}
+fn contact_precedes(candidate: Contact, current: Contact) -> bool {
+    let a = array<f32, 6>(candidate.normal.x, candidate.normal.y, candidate.normal.z,
+        candidate.point.x, candidate.point.y, candidate.point.z);
+    let b = array<f32, 6>(current.normal.x, current.normal.y, current.normal.z,
+        current.point.x, current.point.y, current.point.z);
+    for (var i = 0u; i < 6u; i += 1u) {
+        let ak = float_order_key(a[i]); let bk = float_order_key(b[i]);
+        if (ak < bk) { return true; }
+        if (ak > bk) { return false; }
+    }
+    return false;
+}
+fn collider_contact(c: ColliderEntry, pos: vec3<f32>, radius_in: f32) -> Contact {
+    if (!is_finite3(pos)) { return contact_miss(); }
+    let radius = collision_radius(radius_in);
     if (c.kind == 0u) {
-        let n = safe_normalize(c.data[0].xyz); let penetration = radius - (dot(n,pos) + c.data[0].w);
-        return vec4<f32>(n, penetration);
+        let plane = c.data[0]; let len = length(plane.xyz);
+        if (!is_finite3(plane.xyz) || !finite1(plane.w) || !finite1(len) || len <= EPS) { return contact_miss(); }
+        let n = plane.xyz * (1.0 / len);
+        let sd = dot(n, pos) + plane.w / len;
+        let penetration = radius - sd;
+        if (penetration <= 0.0) { return contact_miss(); }
+        let normal = collision_normal(n);
+        return contact_hit(normal, penetration, pos - normal * sd);
     }
     if (c.kind == 1u) {
-        let delta = pos - c.data[0].xyz; let dist = length(delta); let penetration = c.data[0].w + radius - dist;
-        return vec4<f32>(select(vec3<f32>(0.0,1.0,0.0), delta / max(dist,EPS), dist > EPS), penetration);
+        let sphere = c.data[0];
+        if (!is_finite3(sphere.xyz) || !finite1(sphere.w)) { return contact_miss(); }
+        let delta = pos - sphere.xyz; let r = collision_radius(sphere.w);
+        let penetration = radius - (length(delta) - r);
+        if (penetration <= 0.0) { return contact_miss(); }
+        let normal = collision_normal(delta);
+        return contact_hit(normal, penetration, sphere.xyz + normal * r);
     }
     if (c.kind == 2u) {
-        let lo = c.data[0].xyz; let hi = c.data[1].xyz; let closest = clamp(pos,lo,hi); let delta=pos-closest; let dist=length(delta);
-        if (dist > EPS) { return vec4<f32>(delta/dist, radius-dist); }
-        let distances = min(pos-lo, hi-pos); let axis = select(select(vec3<f32>(0.0,0.0,1.0),vec3<f32>(0.0,1.0,0.0), distances.y < distances.z),vec3<f32>(1.0,0.0,0.0), distances.x < min(distances.y,distances.z));
-        let sign_axis = select(-1.0,1.0, dot(pos-(lo+hi)*0.5,axis)>=0.0);
-        return vec4<f32>(axis*sign_axis, radius + min(distances.x,min(distances.y,distances.z)));
+        let lo = c.data[0].xyz; let hi = c.data[1].xyz;
+        if (!is_finite3(lo) || !is_finite3(hi) || any(lo > hi)) { return contact_miss(); }
+        let closest = clamp(pos, lo, hi); let delta = pos - closest;
+        if (dot(delta, delta) > EPS * EPS) {
+            let dist = length(delta); let penetration = radius - dist;
+            if (penetration <= 0.0) { return contact_miss(); }
+            return contact_hit(delta * (1.0 / dist), penetration, closest);
+        }
+        let relative = pos - (lo + hi) * 0.5;
+        let q = abs(relative) - (hi - lo) * 0.5;
+        let sd = length(max(q, vec3<f32>(0.0))) + min(max(q.x, max(q.y, q.z)), 0.0);
+        var axis = 2u;
+        if (q.x >= q.y && q.x >= q.z) { axis = 0u; }
+        else if (q.y >= q.z) { axis = 1u; }
+        var normal = vec3<f32>(0.0);
+        normal[axis] = bitcast<f32>((bitcast<u32>(relative[axis]) & 0x80000000u) | 0x3f800000u);
+        return contact_hit(normal, radius - sd, clamp(pos + normal * radius, lo, hi));
     }
     if (c.kind == 3u) {
-        let a=c.data[0].xyz; let b=c.data[1].xyz; let ab=b-a; let t=clamp(dot(pos-a,ab)/max(dot(ab,ab),EPS*EPS),0.0,1.0);
-        let delta=pos-(a+ab*t); let dist=length(delta); let penetration=c.data[1].w+radius-dist;
-        return vec4<f32>(select(vec3<f32>(0.0,1.0,0.0),delta/max(dist,EPS),dist>EPS),penetration);
+        let a = c.data[0].xyz; let b = c.data[1].xyz; let r_in = c.data[1].w;
+        if (!is_finite3(a) || !is_finite3(b) || !finite1(r_in)) { return contact_miss(); }
+        let ab = b - a; let denom = dot(ab, ab); var closest = a;
+        if (denom > EPS * EPS) { closest = a + ab * clamp(dot(pos - a, ab) / denom, 0.0, 1.0); }
+        let delta = pos - closest; let r = collision_radius(r_in);
+        let penetration = radius - (length(delta) - r);
+        if (penetration <= 0.0) { return contact_miss(); }
+        let normal = collision_normal(delta);
+        return contact_hit(normal, penetration, closest + normal * r);
     }
-    let grad=safe_normalize(c.data[0].xyz); return vec4<f32>(grad, radius-c.data[0].w);
+    if (c.kind == 4u) {
+        let sample = c.data[0];
+        if (!is_finite3(sample.xyz) || !finite1(sample.w)) { return contact_miss(); }
+        let penetration = radius - sample.w;
+        if (penetration <= 0.0) { return contact_miss(); }
+        let normal = collision_normal(sample.xyz);
+        return contact_hit(normal, penetration, pos - normal * sample.w);
+    }
+    return contact_miss();
 }
 fn resolve(pos_in: vec3<f32>, vel_in: vec3<f32>, radius: f32, index: u32, age: f32) -> CollisionResult {
-    var pos=pos_in; var vel=vel_in; var collided=false; var best=vec4<f32>(0.0);
+    var pos = finite3(pos_in); var vel = finite3(vel_in); var best = contact_miss();
     for (var i=0u; i<params.collider_count; i+=1u) {
-        let contact=collider_contact(colliders[i],pos,radius);
-        if (contact.w > best.w && dot(contact.xyz,contact.xyz)>EPS*EPS) {
-            collided=true; best=contact;
+        let contact = collider_contact(colliders[i], pos_in, radius);
+        if (contact.hit && (!best.hit || contact.penetration > best.penetration + EPS ||
+            (abs(contact.penetration - best.penetration) <= EPS && contact_precedes(contact, best)))) {
+            best = contact;
         }
     }
-    if (collided) {
-        let n=safe_normalize(best.xyz); pos+=n*best.w;
-        let vn=dot(vel,n); let vn_after=select(vn,-clamp(params.restitution,0.0,1.0)*vn,vn<0.0);
+    if (best.hit) {
+        let n = collision_normal(best.normal); pos += n * best.penetration;
+        var restitution = 0.0; var friction = 0.0;
+        if (finite1(params.restitution)) { restitution = clamp(params.restitution, 0.0, 1.0); }
+        if (finite1(params.friction)) { friction = clamp(params.friction, 0.0, 1.0); }
+        let vn=dot(vel,n); let vn_after=select(vn,-restitution*vn,vn<0.0);
         let tangent=vel-n*vn; let tangent_speed=length(tangent);
-        let new_tangent_speed=max(tangent_speed-clamp(params.friction,0.0,1.0)*abs(vn_after-vn),0.0);
-        let tangent_after=select(vec3<f32>(0.0),tangent*(new_tangent_speed/max(tangent_speed,EPS)),tangent_speed>EPS);
+        let new_tangent_speed=max(tangent_speed-friction*abs(vn_after-vn),0.0);
+        var tangent_after = vec3<f32>(0.0);
+        if (dot(tangent, tangent) > EPS * EPS) { tangent_after = (tangent * (1.0 / tangent_speed)) * new_tangent_speed; }
         vel=n*vn_after+tangent_after;
+        emit_event(2u,index,pos,age);
     }
-    if (collided) { emit_event(2u,index,pos,age); }
-    return CollisionResult(pos,vel,select(0u,1u,collided));
+    return CollisionResult(pos,vel,select(0u,1u,best.hit));
 }
 
 @compute @workgroup_size(64)

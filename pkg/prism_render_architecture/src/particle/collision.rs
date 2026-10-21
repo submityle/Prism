@@ -2,8 +2,8 @@
 //! distance-field response, screen-space depth-buffer contacts, and continuous
 //! (swept) collision (design §10, §13).
 //!
-//! This is the deterministic `CPU` reference for the collision layer that a
-//! future `GPU` compute kernel fills in. It aligns at the algorithm level with
+//! This is the deterministic `CPU` reference for the collision layer used by
+//! the particle `GPU` compute kernel. It aligns at the algorithm level with
 //! Unreal `Niagara`'s *Collision* module, Unity `VFX Graph`'s *Collide with
 //! Sphere / Plane / Depth Buffer* blocks, and the `GPU` screen-space depth
 //! collision every production particle stack ships — without reusing any of
@@ -28,9 +28,9 @@
 //!
 //! Everything here is pure and deterministic: the only floating-point primitive
 //! beyond ordinary arithmetic is `sqrt` (through the hand-rolled [`Vec3`] math
-//! and the quadratic `TOI` solves). There are no transcendental calls, so a
-//! `GPU` kernel evaluating the same contacts in the same order produces bit-
-//! identical results. Analytic primitives reuse [`Aabb`] and [`Plane`] from
+//! and the quadratic `TOI` solves). CPU/GPU agreement is checked with a numeric
+//! tolerance: GPU contraction and square-root implementations need not be bit
+//! identical. Analytic primitives reuse [`Aabb`] and [`Plane`] from
 //! [`super::sort_cull`] verbatim rather than redefining them.
 
 use super::sort_cull::{Aabb, Plane};
@@ -479,7 +479,7 @@ pub fn collide_sphere(sphere: Sphere, state: ParticleState) -> Contact {
         return Contact::miss();
     }
     let sd = sd_sphere(sphere, state.pos);
-    let penetration = state.radius - sd;
+    let penetration = particle_radius(state.radius) - sd;
     if penetration <= 0.0 {
         return Contact::miss();
     }
@@ -537,7 +537,10 @@ pub fn collide_aabb(box_: Aabb, state: ParticleState) -> Contact {
         aabb_interior_normal(box_, state.pos),
         Vec3::new(0.0, 1.0, 0.0),
     );
-    let surface = closest_point_aabb(box_, state.pos.add(normal.scale(state.radius)));
+    let surface = closest_point_aabb(
+        box_,
+        state.pos.add(normal.scale(particle_radius(state.radius))),
+    );
     Contact::hit(normal, penetration, surface)
 }
 
@@ -637,9 +640,9 @@ pub fn resolve_contact(
 /// the *deepest* penetrating contact (design §13).
 ///
 /// Colliders are scanned in slice order and the one with the greatest
-/// penetration wins (ties keep the earliest), so the result is independent of
-/// how the caller ordered equal contacts and is deterministic. Returns an
-/// unchanged response when nothing is hit.
+/// penetration wins. Contacts within [`EPS`] are compared lexicographically by
+/// normal and contact point, so exactly equal-depth contacts do not depend on
+/// collider order. Returns an unchanged response when nothing is hit.
 #[must_use]
 pub fn resolve_particle_collision(
     state: ParticleState,
@@ -650,7 +653,8 @@ pub fn resolve_particle_collision(
     for collider in colliders {
         let contact = collide(*collider, state);
         if contact.hit
-            && (contact.penetration > deepest.penetration + EPS
+            && (!deepest.hit
+                || contact.penetration > deepest.penetration + EPS
                 || ((contact.penetration - deepest.penetration).abs() <= EPS
                     && contact_precedes(contact, deepest)))
         {
@@ -1082,6 +1086,49 @@ mod tests {
         ];
         let state = ParticleState::new(Vec3::new(0.0, 50.0, 0.0), Vec3::ZERO, 0.5);
         assert!(!resolve_particle_collision(state, &colliders, ResponseParams::new(0.0, 0.0)).hit);
+    }
+
+    #[test]
+    fn invalid_particle_radius_is_zero_for_every_primitive() {
+        let colliders = [
+            Collider::HalfSpace(Plane::new(Vec3::new(0.0, 1.0, 0.0), 0.0)),
+            Collider::Sphere(Sphere::new(Vec3::ZERO, 1.0)),
+            Collider::Box(Aabb {
+                min: Vec3::splat(-1.0),
+                max: Vec3::splat(1.0),
+            }),
+            Collider::Capsule(Capsule::new(Vec3::ZERO, Vec3::ZERO, 1.0)),
+            Collider::Sdf(SdfSample::new(-0.25, Vec3::new(0.0, 1.0, 0.0))),
+        ];
+        let state = ParticleState::new(Vec3::new(0.0, -0.25, 0.0), Vec3::ZERO, 0.0);
+        for collider in colliders {
+            let reference = collide(collider, state);
+            for radius in [-1.0, f32::NAN, f32::INFINITY] {
+                assert_eq!(
+                    collide(collider, ParticleState { radius, ..state }),
+                    reference
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn shallow_and_zero_depth_contacts_are_not_lost_against_miss() {
+        let state = ParticleState::new(Vec3::ZERO, Vec3::new(-1.0, -1.0, 0.0), 0.0);
+        for depth in [0.0, 0.25 * EPS] {
+            let collider = if depth > 0.0 {
+                Collider::Sdf(SdfSample::new(-depth, Vec3::new(0.0, 1.0, 0.0)))
+            } else {
+                Collider::Box(Aabb {
+                    min: Vec3::ZERO,
+                    max: Vec3::ZERO,
+                })
+            };
+            let response =
+                resolve_particle_collision(state, &[collider], ResponseParams::new(1.0, 0.0));
+            assert!(response.hit);
+            assert!(response.new_vel.dot(collide(collider, state).normal) >= 0.0);
+        }
     }
 
     // ----- continuous (TOI) collision -----------------------------------

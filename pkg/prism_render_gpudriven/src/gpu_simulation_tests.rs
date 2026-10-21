@@ -1,6 +1,9 @@
 use super::*;
 use prism_render_architecture::particle::{
-    collision::Collider,
+    collision::{
+        resolve_particle_collision, sd_aabb, sd_capsule, sd_sphere, Collider, ParticleState,
+        ResponseParams,
+    },
     forces::{Falloff, Force, ForceEntry, ForceField},
     simulation::{integrate, Kinematics},
     sort_cull::Plane,
@@ -725,6 +728,316 @@ fn physical_gpu_force_library_matches_cpu_reference() {
         }
     }
     stage.destroy(&device);
+}
+
+#[test]
+fn physical_gpu_collision_library_matches_cpu_reference() {
+    let (device, queue) = match WgpuInstance::new().request_default_hardware_device() {
+        Ok(pair) => pair,
+        Err(HardwareDeviceError::NoAdapter | HardwareDeviceError::NonHardware(_)) => {
+            assert!(
+                !require_hardware_gpu(),
+                "physical GPU required for collision parity"
+            );
+            eprintln!("SKIPPED collision parity: no hardware adapter");
+            return;
+        }
+        Err(HardwareDeviceError::Device(error)) => panic!("GPU device creation failed: {error}"),
+    };
+    let plane = |normal, d| Collider::HalfSpace(Plane::new(normal, d));
+    let sphere = |center, radius| Collider::Sphere(Sphere { center, radius });
+    let capsule = |a, b, radius| Collider::Capsule(Capsule { a, b, radius });
+    let sdf = |gradient, distance| Collider::Sdf(SdfSample { gradient, distance });
+    let aabb = |min, max| Collider::Box(Aabb { min, max });
+    let x = Vec3::new(1.0, 0.0, 0.0);
+    let y = Vec3::new(0.0, 1.0, 0.0);
+    let invalid = Vec3::new(f32::NAN, 0.0, f32::INFINITY);
+    let mut cases = vec![
+        ("unit-plane", vec![plane(y, 0.0)]),
+        ("non-unit-offset-plane", vec![plane(y.scale(4.0), -2.0)]),
+        (
+            "oblique-plane",
+            vec![plane(Vec3::new(2.0, 3.0, -1.0), 0.25)],
+        ),
+        ("degenerate-plane", vec![plane(Vec3::ZERO, -2.0)]),
+        (
+            "invalid-plane",
+            vec![plane(invalid, 0.0), plane(y, f32::NAN)],
+        ),
+        ("overflow-plane", vec![plane(Vec3::splat(f32::MAX), 0.0)]),
+        ("sphere", vec![sphere(Vec3::ZERO, 1.0)]),
+        ("negative-sphere-radius", vec![sphere(Vec3::ZERO, -1.0)]),
+        (
+            "invalid-sphere",
+            vec![sphere(invalid, 1.0), sphere(Vec3::ZERO, f32::INFINITY)],
+        ),
+        ("box", vec![aabb(Vec3::splat(-1.0), Vec3::splat(1.0))]),
+        ("degenerate-box", vec![aabb(Vec3::ZERO, Vec3::ZERO)]),
+        (
+            "invalid-box",
+            vec![
+                aabb(Vec3::splat(1.0), Vec3::splat(-1.0)),
+                aabb(invalid, Vec3::splat(1.0)),
+            ],
+        ),
+        ("capsule", vec![capsule(x.scale(-1.0), x, 0.5)]),
+        (
+            "degenerate-capsule",
+            vec![capsule(Vec3::ZERO, Vec3::ZERO, 0.5)],
+        ),
+        (
+            "tiny-capsule",
+            vec![capsule(Vec3::ZERO, x.scale(0.5e-6), 0.5)],
+        ),
+        (
+            "negative-capsule-radius",
+            vec![capsule(x.scale(-1.0), x, -0.5)],
+        ),
+        (
+            "invalid-capsule",
+            vec![capsule(invalid, x, 1.0), capsule(x, y, f32::NAN)],
+        ),
+        ("sdf", vec![sdf(Vec3::new(2.0, 3.0, -1.0), -0.25)]),
+        ("zero-gradient-sdf", vec![sdf(Vec3::ZERO, -0.25)]),
+        (
+            "invalid-sdf",
+            vec![sdf(invalid, -0.25), sdf(y, f32::INFINITY)],
+        ),
+        ("empty", vec![]),
+    ];
+    let mut equal = vec![plane(x, 0.0), plane(y, 0.0)];
+    cases.push(("equal-depth-xy", equal.clone()));
+    equal.reverse();
+    cases.push(("equal-depth-yx", equal));
+    cases.push(("shallow-positive-contact", vec![sdf(y, -0.25e-6)]));
+    cases.push((
+        "mixed-deepest",
+        vec![plane(y, 0.0), sphere(Vec3::ZERO, 0.25), sdf(x, -0.5)],
+    ));
+
+    let positions = [
+        [0.0; 3],
+        [0.125, -0.25, 0.5],
+        [1.125, 0.25, -0.125],
+        [0.25, 1.125, -0.5],
+        [1.125, 1.125, 0.0],
+        [3.0, 4.0, -2.0],
+        [-0.75, -0.5, -0.25],
+        [1.0, 1.0, 1.0],
+        [0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0],
+        [f32::NAN, -0.25, f32::INFINITY],
+        [0.0, -0.25, 0.0],
+    ];
+    let mut initial: Vec<_> = positions
+        .into_iter()
+        .enumerate()
+        .map(|(i, pos)| {
+            let velocity = if i % 2 == 0 {
+                [0.5, -2.0, 0.125]
+            } else {
+                [-0.25, 1.0, -0.5]
+            };
+            GpuParticle::live(pos, velocity, 10.0, 0.25, i as u32 + 1, 7)
+        })
+        .collect();
+    initial[8].radius = -1.0;
+    initial[9].radius = f32::NAN;
+    initial[10].radius = f32::INFINITY;
+    initial[11].radius = 0.0;
+    initial[13].velocity = [f32::NAN, -2.0, f32::INFINITY];
+    let stage = GpuSimulationStage::new(&device, initial.len() as u32, 64);
+    for (label, colliders) in cases {
+        for (restitution, friction) in [(0.625, 0.25), (2.0, -1.0), (f32::NAN, f32::INFINITY)] {
+            stage.initialize_particles(&queue, &initial);
+            stage.upload_inputs(
+                &queue,
+                &[],
+                &colliders,
+                GpuSimulationParams {
+                    dt: 0.0,
+                    restitution,
+                    friction,
+                    ..Default::default()
+                },
+            );
+            let mut reference: Vec<_> = initial
+                .iter()
+                .map(|p| {
+                    ParticleState::new(
+                        Vec3::new(p.position[0], p.position[1], p.position[2]),
+                        Vec3::new(p.velocity[0], p.velocity[1], p.velocity[2]),
+                        p.radius,
+                    )
+                })
+                .collect();
+            for frame in 0..3 {
+                let entering_states = reference.clone();
+                let mut hits = Vec::new();
+                for (i, state) in reference.iter_mut().enumerate() {
+                    let response = resolve_particle_collision(
+                        *state,
+                        &colliders,
+                        ResponseParams {
+                            restitution,
+                            friction,
+                        },
+                    );
+                    state.pos = response.new_pos;
+                    state.vel = response.new_vel;
+                    if response.hit {
+                        hits.push(i as u32);
+                    }
+                }
+                let actual = stage.run(&queue);
+                assert_eq!(actual.active_indices.len(), initial.len(), "{label}");
+                let mut event_indices: Vec<_> = actual
+                    .compact_events
+                    .iter()
+                    .filter(|e| e.kind == 2)
+                    .map(|e| e.particle_index)
+                    .collect();
+                event_indices.sort_unstable();
+                assert!(event_indices.windows(2).all(|pair| pair[0] < pair[1]));
+                assert!(event_indices
+                    .iter()
+                    .all(|&index| index < initial.len() as u32));
+                for (i, state) in entering_states.iter().enumerate() {
+                    let gpu_hit = event_indices.binary_search(&(i as u32)).is_ok();
+                    let cpu_hit = hits.binary_search(&(i as u32)).is_ok();
+                    assert!(
+                        gpu_hit == cpu_hit
+                            || (frame > 0 && collision_event_on_roundoff_boundary(*state, &colliders)),
+                        "{label} frame {frame} particle {i} collision event GPU={gpu_hit} CPU={cpu_hit}"
+                    );
+                }
+                for (i, (expected, actual)) in reference.iter().zip(&actual.particles).enumerate() {
+                    assert_eq!(actual.particle_id, initial[i].particle_id);
+                    assert_eq!(actual.emitter_id, initial[i].emitter_id);
+                    assert_vec3_close(
+                        actual.position,
+                        [expected.pos.x, expected.pos.y, expected.pos.z],
+                        IntegratorKind::SemiImplicitEuler,
+                        i,
+                        &format!("{label} frame {frame} position"),
+                    );
+                    assert_vec3_close(
+                        actual.velocity,
+                        [expected.vel.x, expected.vel.y, expected.vel.z],
+                        IntegratorKind::SemiImplicitEuler,
+                        i,
+                        &format!("{label} frame {frame} velocity"),
+                    );
+                }
+            }
+        }
+    }
+    stage.destroy(&device);
+}
+
+// Repeated push-outs can leave a particle a few ulps either side of a surface.
+// This only classifies the event bit, never relaxes position/velocity checks or
+// first-frame event checks. A deeper contact anywhere in the batch prevents the
+// exception. The budget covers the short f32 distance/normal/push-out chain,
+// scaled by both geometry and particle coordinates rather than a scene-unit
+// epsilon. Invalid geometry is excluded using the same contract as detection.
+fn collision_event_on_roundoff_boundary(state: ParticleState, colliders: &[Collider]) -> bool {
+    fn finite(v: Vec3) -> bool {
+        v.x.is_finite() && v.y.is_finite() && v.z.is_finite()
+    }
+    fn magnitude(v: Vec3) -> f32 {
+        v.x.abs().max(v.y.abs()).max(v.z.abs())
+    }
+    if !finite(state.pos) {
+        return false;
+    }
+    let radius = if state.radius.is_finite() {
+        state.radius.max(0.0)
+    } else {
+        0.0
+    };
+    let mut nearest = f32::INFINITY;
+    for &collider in colliders {
+        let (distance, geometry_scale) = match collider {
+            Collider::HalfSpace(plane) => {
+                let length = plane.normal.length();
+                if !finite(plane.normal)
+                    || !plane.d.is_finite()
+                    || !length.is_finite()
+                    || length <= 1e-6
+                {
+                    continue;
+                }
+                let d = plane.d / length;
+                (plane.normal.scale(1.0 / length).dot(state.pos) + d, d.abs())
+            }
+            Collider::Sphere(sphere) => (
+                sd_sphere(sphere, state.pos),
+                magnitude(sphere.center).max(sphere.radius.abs()),
+            ),
+            Collider::Capsule(capsule) => (
+                sd_capsule(capsule, state.pos),
+                magnitude(capsule.a)
+                    .max(magnitude(capsule.b))
+                    .max(capsule.radius.abs()),
+            ),
+            Collider::Box(bounds) => (
+                sd_aabb(bounds, state.pos),
+                magnitude(bounds.min).max(magnitude(bounds.max)),
+            ),
+            Collider::Sdf(sample) => {
+                if !sample.distance.is_finite() || !finite(sample.gradient) {
+                    continue;
+                }
+                (sample.distance, sample.distance.abs())
+            }
+        };
+        if !distance.is_finite() {
+            continue;
+        }
+        let scale = magnitude(state.pos)
+            .max(radius)
+            .max(geometry_scale)
+            .max(1.0);
+        let roundoff = 32.0 * f32::EPSILON * scale;
+        nearest = nearest.min((distance - radius) / roundoff);
+    }
+    nearest.abs() <= 1.0
+}
+
+#[test]
+fn collision_event_roundoff_band_rejects_deep_and_separated_contacts() {
+    let floor = Collider::HalfSpace(Plane::new(Vec3::new(0.0, 1.0, 0.0), 0.0));
+    let state = ParticleState::new(Vec3::ZERO, Vec3::ZERO, 0.0);
+    assert!(collision_event_on_roundoff_boundary(state, &[floor]));
+    for y in [-0.01, 0.01] {
+        assert!(!collision_event_on_roundoff_boundary(
+            ParticleState {
+                pos: Vec3::new(0.0, y, 0.0),
+                ..state
+            },
+            &[floor]
+        ));
+    }
+    let deep = Collider::Sdf(SdfSample {
+        distance: -0.25,
+        gradient: Vec3::new(0.0, 1.0, 0.0),
+    });
+    assert!(!collision_event_on_roundoff_boundary(state, &[floor, deep]));
+    assert!(!collision_event_on_roundoff_boundary(state, &[]));
+    assert!(!collision_event_on_roundoff_boundary(
+        state,
+        &[Collider::HalfSpace(Plane::new(Vec3::ZERO, 0.0))]
+    ));
+    assert!(!collision_event_on_roundoff_boundary(
+        ParticleState {
+            pos: Vec3::splat(f32::NAN),
+            ..state
+        },
+        &[floor]
+    ));
 }
 
 fn assert_vec3_close(
