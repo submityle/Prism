@@ -96,16 +96,28 @@ import prism_render_scene::shaders::gpu_scene::{
     GpuSceneTransform,
 };
 import prism_render_scene::shaders::material_sample::{
+    SampledMaterial,
+    PRISM_MIN_SCREEN_AREA,
+    material_is_normal_semantic,
+    decode_tangent_normal,
     sampled_material_defaults,
     material_texture_record_is_valid,
     sample_texture_slot,
     fold_material_texel,
+    prism_lod_in_range,
     prism_uv_gradients,
     prism_texture_lod,
+};
+import prism_render_scene::shaders::specular_aa::{
+    SPEC_AA_SIGMA2,
+    spec_aa_screen_space_variance,
 };
 import prism_render_scene::shaders::lobe_sampling::{
     ls_select_expensive_lobe_factors,
     LS_SEED_SALT,
+};
+import prism_render_scene::shaders::lobe_budget::{
+    lb_expensive_lobe_limit,
 };
 import prism_render_scene::shaders::measured_lobe::{
     measured_direct,
@@ -123,7 +135,88 @@ import bevy_render::maths::affine3_to_square;
 // `material_sample` folds bindless textures through a `binding_array`, so this
 // merged module must enable the extension. WESL requires every `enable` to
 // follow all `import`s.
-enable wgpu_binding_array;
+@if(MATERIAL_BINDLESS) enable wgpu_binding_array;
+
+fn shading_resolve_vec3_is_finite(value: vec3<f32>) -> bool {
+    return prism_lod_in_range(value.x)
+        && prism_lod_in_range(value.y)
+        && prism_lod_in_range(value.z);
+}
+
+fn shading_resolve_normal_footprint_is_finite(
+    center: vec3<f32>,
+    forward_x: vec3<f32>,
+    forward_y: vec3<f32>,
+    normal_scale: f32,
+) -> bool {
+    return shading_resolve_vec3_is_finite(center)
+        && shading_resolve_vec3_is_finite(forward_x)
+        && shading_resolve_vec3_is_finite(forward_y)
+        && prism_lod_in_range(normal_scale);
+}
+
+// Zero gradients can mean either a constant UV on a valid triangle or the LOD
+// helper's invalid-input fallback. Only the former is a valid zero footprint.
+fn shading_resolve_normal_uv_footprint_is_valid(
+    uv: array<vec2<f32>, 3>,
+    screen: array<vec2<f32>, 3>,
+    gradients: array<vec2<f32>, 2>,
+) -> bool {
+    for (var vertex = 0u; vertex < 3u; vertex = vertex + 1u) {
+        if !prism_lod_in_range(uv[vertex].x)
+            || !prism_lod_in_range(uv[vertex].y)
+            || !prism_lod_in_range(screen[vertex].x)
+            || !prism_lod_in_range(screen[vertex].y) {
+            return false;
+        }
+    }
+    let e1 = screen[1] - screen[0];
+    let e2 = screen[2] - screen[0];
+    let det = e1.x * e2.y - e1.y * e2.x;
+    return prism_lod_in_range(det) && abs(det) > PRISM_MIN_SCREEN_AREA
+        && prism_lod_in_range(gradients[0].x)
+        && prism_lod_in_range(gradients[0].y)
+        && prism_lod_in_range(gradients[1].x)
+        && prism_lod_in_range(gradients[1].y);
+}
+
+// Offline alpha is already projected variance sigma^2 for this exact normal
+// record/UV/LOD/scale. It is a fallback, never an extra term. In particular a
+// valid flat realtime footprint must replace nonzero offline variance by zero.
+fn shading_resolve_normal_variance(
+    sampled: SampledMaterial,
+    basis: TangentBasis,
+    geometry_normal: vec3<f32>,
+    normal_center_valid: bool,
+    normal_footprint_valid: bool,
+    normal_forward_x_tangent: vec3<f32>,
+    normal_forward_y_tangent: vec3<f32>,
+) -> f32 {
+    if !sampled.has_normal_map || !normal_center_valid
+        || !shading_resolve_vec3_is_finite(sampled.normal_tangent)
+        || !shading_resolve_vec3_is_finite(basis.tangent)
+        || !shading_resolve_vec3_is_finite(basis.bitangent)
+        || !shading_resolve_vec3_is_finite(geometry_normal) {
+        return 0.0;
+    }
+    let center = apply_tangent_space_normal(basis, geometry_normal, sampled.normal_tangent);
+    if !shading_resolve_vec3_is_finite(center) {
+        return 0.0;
+    }
+    let fallback = sampled.offline_normal_variance;
+    if !normal_footprint_valid
+        || !shading_resolve_vec3_is_finite(normal_forward_x_tangent)
+        || !shading_resolve_vec3_is_finite(normal_forward_y_tangent) {
+        return fallback;
+    }
+    let forward_x = apply_tangent_space_normal(basis, geometry_normal, normal_forward_x_tangent);
+    let forward_y = apply_tangent_space_normal(basis, geometry_normal, normal_forward_y_tangent);
+    if !shading_resolve_vec3_is_finite(forward_x)
+        || !shading_resolve_vec3_is_finite(forward_y) {
+        return fallback;
+    }
+    return spec_aa_screen_space_variance(forward_x - center, forward_y - center, SPEC_AA_SIGMA2);
+}
 
 // The render-startup linker replaces this exact seam with the finite registered
 // response ABI and switch table. The embedded source keeps a type-correct,
@@ -543,9 +636,14 @@ fn inverse_transpose_3x3(value: mat3x3<f32>) -> mat3x3<f32> {
     let z = cross(value[0], value[1]);
     let determinant = dot(value[2], z);
     if abs(determinant) <= 1.0e-8 {
-        return mat3x3<f32>(1.0);
+        return mat3x3<f32>(
+            vec3<f32>(1.0, 0.0, 0.0),
+            vec3<f32>(0.0, 1.0, 0.0),
+            vec3<f32>(0.0, 0.0, 1.0),
+        );
     }
-    return mat3x3<f32>(x, y, z) / determinant;
+    let inverse_determinant = 1.0 / determinant;
+    return mat3x3<f32>(x * inverse_determinant, y * inverse_determinant, z * inverse_determinant);
 }
 
 // Projects a world-space point through `clip_from_world` and returns the
@@ -1075,6 +1173,8 @@ const AL_TWO_PI: f32 = 6.28318530717958648;
 const AL_F32_FINITE_MAX: f32 = 3.40282347e38;
 // Shape tag for a planar rectangle (quad); mirrors `AREA_LIGHT_SHAPE_RECT`.
 const AL_SHAPE_RECT: u32 = 0u;
+const AL_SHAPE_DISK: u32 = 1u;
+const AL_SHAPE_TUBE: u32 = 2u;
 
 // The two packed `LTC` inverse-matrix rows sampled from the LUT:
 // `coeffs0 = (a00, a02, a11, a20)`, `coeffs1 = (a22, amplitude, 0, 0)`.
@@ -1089,6 +1189,34 @@ fn al_is_finite(x: f32) -> bool {
 
 fn al_vec_is_finite(v: vec3<f32>) -> bool {
     return al_is_finite(v.x) && al_is_finite(v.y) && al_is_finite(v.z);
+}
+
+fn al_area_light_is_valid(light: AreaLight) -> bool {
+    let center = vec3<f32>(light.pos_x, light.pos_y, light.pos_z);
+    let color = vec3<f32>(light.color_x, light.color_y, light.color_z);
+    let axis_u = vec3<f32>(light.axis_u_x, light.axis_u_y, light.axis_u_z);
+    let axis_v = vec3<f32>(light.axis_v_x, light.axis_v_y, light.axis_v_z);
+    let axis_cross = cross(axis_u, axis_v);
+    if (!al_vec_is_finite(center) || !al_vec_is_finite(color)
+        || !al_vec_is_finite(axis_u) || !al_vec_is_finite(axis_v)
+        || !al_vec_is_finite(axis_cross)
+        || !al_is_finite(light.intensity) || light.intensity < 0.0
+        || !al_is_finite(light.range)
+        || !al_is_finite(light.half_width) || !al_is_finite(light.half_height)
+        || !al_is_finite(light.radius)
+        || dot(axis_cross, axis_cross) <= 1.0e-12) {
+        return false;
+    }
+    if (light.shape == AL_SHAPE_RECT) {
+        return light.half_width > 0.0 && light.half_height > 0.0;
+    }
+    if (light.shape == AL_SHAPE_DISK) {
+        return light.radius > 0.0;
+    }
+    if (light.shape == AL_SHAPE_TUBE) {
+        return light.radius > 0.0 && light.half_width >= 0.0;
+    }
+    return false;
 }
 
 // Vector edge integral of a clamped-cosine distribution (golden
@@ -1133,9 +1261,8 @@ fn al_intersect_horizon(a: vec3<f32>, b: vec3<f32>) -> vec4<f32> {
 // Normalised clamped-cosine form factor `F` in `[0, 1]` of the quad (golden
 // `polygon_form_factor`): Sutherland-Hodgman horizon clip against `z = 0`,
 // project survivors onto the unit sphere, sum the edge integrals, `/ 2*pi`.
-fn al_polygon_form_factor_quad(input: array<vec3<f32>, 4>) -> f32 {
-    let n = 4u;
-    var clipped: array<vec3<f32>, 8>;
+fn al_polygon_form_factor(input: array<vec3<f32>, 16>, n: u32) -> f32 {
+    var clipped: array<vec3<f32>, 16>;
     var cc = 0u;
     for (var i = 0u; i < n; i = i + 1u) {
         let cur = input[i];
@@ -1163,7 +1290,7 @@ fn al_polygon_form_factor_quad(input: array<vec3<f32>, 4>) -> f32 {
     if (cc < 3u) {
         return 0.0;
     }
-    var dirs: array<vec3<f32>, 8>;
+    var dirs: array<vec3<f32>, 16>;
     var k = 0u;
     for (var i = 0u; i < cc; i = i + 1u) {
         let p = clipped[i];
@@ -1191,6 +1318,14 @@ fn al_polygon_form_factor_quad(input: array<vec3<f32>, 4>) -> f32 {
         return clamp(f, 0.0, 1.0);
     }
     return 0.0;
+}
+
+fn al_polygon_form_factor_quad(input: array<vec3<f32>, 4>) -> f32 {
+    var polygon: array<vec3<f32>, 16>;
+    for (var i = 0u; i < 4u; i = i + 1u) {
+        polygon[i] = input[i];
+    }
+    return al_polygon_form_factor(polygon, 4u);
 }
 
 // Applies the `LTC` inverse transform `M-inverse` to a direction (golden
@@ -1226,6 +1361,22 @@ fn al_ltc_evaluate_quad(c: AlCoeffs, p0: vec3<f32>, p1: vec3<f32>, p2: vec3<f32>
     let r = amplitude * f;
     if (al_is_finite(r)) {
         return max(r, 0.0);
+    }
+    return 0.0;
+}
+
+fn al_ltc_evaluate_polygon(c: AlCoeffs, input: array<vec3<f32>, 16>, n: u32) -> f32 {
+    var transformed: array<vec3<f32>, 16>;
+    for (var i = 0u; i < n; i = i + 1u) {
+        transformed[i] = al_apply(c, input[i]);
+        if (!al_vec_is_finite(transformed[i])) {
+            transformed[i] = vec3<f32>(0.0, 0.0, 0.0);
+        }
+    }
+    let form_factor = al_polygon_form_factor(transformed, n);
+    let result = clamp(c.coeffs1.y, 0.0, 1.0) * form_factor;
+    if (al_is_finite(result)) {
+        return max(result, 0.0);
     }
     return 0.0;
 }
@@ -1320,13 +1471,76 @@ fn al_evaluate(n: vec3<f32>, v: vec3<f32>, p: vec3<f32>, light: AreaLight, coeff
     return vec2<f32>(spec, diff);
 }
 
-// Accumulates every resident rectangle area light at the shaded surface. The
+// Disk and tube emitters use bounded deterministic polygon estimators. The
+// disk is an octagon and the tube is a convex capsule hull; both share the
+// same LTC transform and horizon clipping as the rectangle path.
+fn al_evaluate_shape(n: vec3<f32>, v: vec3<f32>, p: vec3<f32>, light: AreaLight, coeffs: AlCoeffs) -> vec2<f32> {
+    if (light.shape == AL_SHAPE_RECT) {
+        return al_evaluate(n, v, p, light, coeffs);
+    }
+
+    let projected = v - n * dot(n, v);
+    var t1: vec3<f32>;
+    if (dot(projected, projected) > 1.0e-12) {
+        t1 = normalize(projected);
+    } else {
+        var helper = vec3<f32>(0.0, 1.0, 0.0);
+        if (abs(n.y) >= 0.999) {
+            helper = vec3<f32>(1.0, 0.0, 0.0);
+        }
+        t1 = normalize(cross(helper, n));
+    }
+    let t2 = cross(n, t1);
+    let center = vec3<f32>(light.pos_x, light.pos_y, light.pos_z);
+    let axis_u = brdf_normalize_or(vec3<f32>(light.axis_u_x, light.axis_u_y, light.axis_u_z), vec3<f32>(1.0, 0.0, 0.0));
+    let axis_v = brdf_normalize_or(vec3<f32>(light.axis_v_x, light.axis_v_y, light.axis_v_z), vec3<f32>(0.0, 1.0, 0.0));
+    let q = 0.70710678118;
+    var points: array<vec3<f32>, 16>;
+    var count = 0u;
+
+    if (light.shape == AL_SHAPE_DISK) {
+        let radius = max(light.radius, 0.0);
+        points[0] = center + axis_u * radius - p;
+        points[1] = center + (axis_u + axis_v) * q * radius - p;
+        points[2] = center + axis_v * radius - p;
+        points[3] = center + (-axis_u + axis_v) * q * radius - p;
+        points[4] = center - axis_u * radius - p;
+        points[5] = center + (-axis_u - axis_v) * q * radius - p;
+        points[6] = center - axis_v * radius - p;
+        points[7] = center + (axis_u - axis_v) * q * radius - p;
+        count = 8u;
+    } else {
+        let half_length = max(light.half_width, 0.0);
+        let radius = light.radius;
+        // Ordered ten-vertex convex capsule hull in the segment/perpendicular
+        // plane. The CPU oracle uses the identical constants and winding.
+        points[0] = center - axis_u * half_length - axis_v * radius - p;
+        points[1] = center + axis_u * half_length - axis_v * radius - p;
+        points[2] = center + axis_u * (half_length + q * radius) - axis_v * (q * radius) - p;
+        points[3] = center + axis_u * (half_length + radius) - p;
+        points[4] = center + axis_u * (half_length + q * radius) + axis_v * (q * radius) - p;
+        points[5] = center + axis_u * half_length + axis_v * radius - p;
+        points[6] = center - axis_u * half_length + axis_v * radius - p;
+        points[7] = center - axis_u * (half_length + q * radius) + axis_v * (q * radius) - p;
+        points[8] = center - axis_u * (half_length + radius) - p;
+        points[9] = center - axis_u * (half_length + q * radius) - axis_v * (q * radius) - p;
+        count = 10u;
+    }
+
+    var frame_points: array<vec3<f32>, 16>;
+    for (var i = 0u; i < count; i = i + 1u) {
+        frame_points[i] = al_to_frame(points[i], t1, t2, n);
+    }
+    let diffuse = al_polygon_form_factor(frame_points, count);
+    let specular = al_ltc_evaluate_polygon(coeffs, frame_points, count);
+    return vec2<f32>(specular, diffuse);
+}
+
+// Accumulates every resident extended area light at the shaded surface. The
 // specular lobe uses the `LTC`-fit transform (so it tracks roughness), the
-// diffuse lobe the identity clamped-cosine form factor; both are weighted by
-// the material response exactly like the clustered-lighting loops. Non-rect
-// shapes and degenerate / disabled records are skipped. No `env_brdf` factor is
-// applied so this never double-counts the image-based specular already folded
-// into the indirect term.
+// diffuse lobe the identity clamped-cosine form factor; disk and tube records
+// use bounded polygon estimators. No `env_brdf` factor is applied so this never
+// double-counts the image-based specular already folded into the indirect term.
 fn accumulate_area_lights(lit: SurfaceSample, frame: ShadingFrame, world_position: vec3<f32>) -> vec3<f32> {
     let count = arrayLength(&area_lights);
     let n = brdf_normalize_or(frame.normal, vec3<f32>(0.0, 1.0, 0.0));
@@ -1340,20 +1554,15 @@ fn accumulate_area_lights(lit: SurfaceSample, frame: ShadingFrame, world_positio
     var total = vec3<f32>(0.0, 0.0, 0.0);
     for (var i = 0u; i < count; i = i + 1u) {
         let light = area_lights[i];
-        if (light.shape != AL_SHAPE_RECT) {
-            continue;
-        }
-        // Degenerate / disabled record (the pass binds one of these when the
-        // subsystem is off), skip it.
-        if (light.half_width <= 0.0 || light.half_height <= 0.0) {
+        if (!al_area_light_is_valid(light)) {
             continue;
         }
         let center = vec3<f32>(light.pos_x, light.pos_y, light.pos_z);
         let axis_u = vec3<f32>(light.axis_u_x, light.axis_u_y, light.axis_u_z);
         let axis_v = vec3<f32>(light.axis_v_x, light.axis_v_y, light.axis_v_z);
         // One-sided emitters cull receivers behind the emitter plane.
-        let lnormal = normalize(cross(axis_u, axis_v));
-        if (light.two_sided == 0u && dot(world_position - center, lnormal) < 0.0) {
+        let lnormal = brdf_normalize_or(cross(axis_u, axis_v), vec3<f32>(0.0, 0.0, 1.0));
+        if (light.two_sided == 0u && light.shape != AL_SHAPE_TUBE && dot(world_position - center, lnormal) < 0.0) {
             continue;
         }
         // Optional smooth range window (`range <= 0` disables it).
@@ -1366,44 +1575,99 @@ fn accumulate_area_lights(lit: SurfaceSample, frame: ShadingFrame, world_positio
             let x = clamp(1.0 - dist / light.range, 0.0, 1.0);
             atten = x * x;
         }
-        let ff = al_evaluate(n, v, world_position, light, coeffs);
+        let ff = al_evaluate_shape(n, v, world_position, light, coeffs);
         let radiance = vec3<f32>(light.color_x, light.color_y, light.color_z) * light.intensity;
-        total = total + radiance * (f0 * ff.x + diffuse_color * ff.y) * atten;
+        let contribution = radiance * (f0 * ff.x + diffuse_color * ff.y) * atten;
+        if (al_vec_is_finite(contribution)) {
+            total = total + contribution;
+        }
+    }
+    if (!al_vec_is_finite(total)) {
+        return vec3<f32>(0.0, 0.0, 0.0);
     }
     return total;
 }
 
-// Converts a rectangle area light into an equivalent `DirectLightSample` for
-// the specialized toon / hair / water lobes using the Most-Representative-Point
-// technique (Karis 2013). The GGX-family closures take the full LTC
-// `accumulate_area_lights` term instead; these lobes use specialized BRDFs for
-// which the raw LTC specular transform is meaningless. `visibility < 0` signals
-// a non-contributing light the caller must skip. Byte-exact twin of the CPU
-// golden `prism_render_shading::gi::area_light::representative`.
+// Converts a Rect/Disk/Capsule area light into an equivalent `DirectLightSample`
+// for the specialized toon / hair / water lobes using the
+// Most-Representative-Point technique (Karis 2013). The GGX-family closures
+// take the full LTC `accumulate_area_lights` term instead; these lobes use
+// specialized BRDFs for which the raw LTC specular transform is meaningless.
+// `visibility < 0` signals a non-contributing light the caller must skip. This
+// is the byte-exact twin of the CPU `area_representative_sample` oracle.
 fn rect_representative_sample(world_position: vec3<f32>, normal_in: vec3<f32>, light: AreaLight) -> DirectLightSample {
     var out: DirectLightSample;
     out.direction = vec3<f32>(0.0, 1.0, 0.0);
     out.illuminance = vec3<f32>(0.0, 0.0, 0.0);
     out.visibility = -1.0;
 
-    // Non-rect shapes and degenerate / disabled records contribute nothing.
-    if (light.shape != AL_SHAPE_RECT) {
-        return out;
-    }
-    if (light.half_width <= 0.0 || light.half_height <= 0.0) {
+    // Unknown shapes and degenerate / disabled records contribute nothing.
+    if (!al_area_light_is_valid(light)) {
         return out;
     }
 
     let center = vec3<f32>(light.pos_x, light.pos_y, light.pos_z);
     let axis_u = vec3<f32>(light.axis_u_x, light.axis_u_y, light.axis_u_z);
     let axis_v = vec3<f32>(light.axis_v_x, light.axis_v_y, light.axis_v_z);
+    let n = brdf_normalize_or(normal_in, vec3<f32>(0.0, 1.0, 0.0));
 
-    // One-sided emitters cull receivers strictly behind the emitter plane.
-    if (light.two_sided == 0u) {
-        let lnormal = normalize(cross(axis_u, axis_v));
+    // Planar emitters cull receivers strictly behind their front face. A
+    // capsule is volumetric and therefore always contributes from both sides.
+    if (light.shape != AL_SHAPE_TUBE && light.two_sided == 0u) {
+        let lnormal = brdf_normalize_or(cross(axis_u, axis_v), vec3<f32>(0.0, 0.0, 1.0));
         if (dot(world_position - center, lnormal) < 0.0) {
             return out;
         }
+    }
+
+    if (light.shape != AL_SHAPE_RECT) {
+        let au = brdf_normalize_or(axis_u, vec3<f32>(1.0, 0.0, 0.0));
+        let av = brdf_normalize_or(axis_v, vec3<f32>(0.0, 1.0, 0.0));
+        let to_receiver = world_position - center;
+        var closest = center;
+        if (light.shape == AL_SHAPE_DISK) {
+            let u = dot(to_receiver, au);
+            let v = dot(to_receiver, av);
+            let radial = au * u + av * v;
+            let radial_len = length(radial);
+            closest = center + radial;
+            if (radial_len > light.radius) {
+                closest = center + radial * (light.radius / max(radial_len, 1.0e-5));
+            }
+        } else {
+            let half_length = max(light.half_width, 0.0);
+            let segment_point = center + au * clamp(dot(to_receiver, au), -half_length, half_length);
+            let radial = world_position - segment_point;
+            let radial_len = length(radial);
+            closest = segment_point;
+            if (radial_len > light.radius) {
+                closest = segment_point + radial * (light.radius / max(radial_len, 1.0e-5));
+            }
+        }
+        let direction = brdf_normalize_or(closest - world_position, n);
+        let n_dot_l = max(dot(n, direction), 1.0e-3);
+        var identity: AlCoeffs;
+        identity.coeffs0 = vec4<f32>(1.0, 0.0, 1.0, 0.0);
+        identity.coeffs1 = vec4<f32>(1.0, 1.0, 0.0, 0.0);
+        let ff = al_evaluate_shape(n, n, world_position, light, identity).y;
+        var atten = 1.0;
+        if (light.range > 0.0) {
+            let dist = length(center - world_position);
+            if (dist >= light.range) {
+                return out;
+            }
+            let x = clamp(1.0 - dist / light.range, 0.0, 1.0);
+            atten = x * x;
+        }
+        let radiance = vec3<f32>(light.color_x, light.color_y, light.color_z) * light.intensity;
+        out.direction = direction;
+        out.illuminance = radiance * (ff / n_dot_l) * atten;
+        if (al_vec_is_finite(out.illuminance) && ff > 0.0) {
+            out.visibility = 1.0;
+        } else {
+            out.visibility = 0.0;
+        }
+        return out;
     }
 
     // Optional smooth range window (`range <= 0` disables it).
@@ -1416,8 +1680,6 @@ fn rect_representative_sample(world_position: vec3<f32>, normal_in: vec3<f32>, l
         let x = clamp(1.0 - dist / light.range, 0.0, 1.0);
         atten = x * x;
     }
-
-    let n = brdf_normalize_or(normal_in, vec3<f32>(0.0, 1.0, 0.0));
 
     // Clamped-cosine form factor in an orthonormal LTC frame about the normal.
     // The clamped cosine only reads the +Z (normal) component, so any stable
@@ -2343,7 +2605,7 @@ fn evaluate_response_arm(
         emissive.x,
         emissive.y,
         emissive.z,
-        clamp(surface.geometry_opacity, 0.0, 1.0),
+        clamp(parameters.geometry_opacity, 0.0, 1.0),
     ));
     arm.valid = 1u;
     return arm;
@@ -2522,6 +2784,7 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     // only ever remove aliasing/bandwidth, never change a well-formed surface's
     // material.
     var uv_gradients = array<vec2<f32>, 2>(vec2<f32>(0.0, 0.0), vec2<f32>(0.0, 0.0));
+    var normal_uv_footprint_valid = false;
     if scene_index < arrayLength(&scene_current_transforms) {
         let world_from_local =
             affine3_to_square(scene_current_transforms[scene_index].world_from_local);
@@ -2540,13 +2803,18 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
         );
         if projected_a.z > 0.0 && projected_b.z > 0.0 && projected_c.z > 0.0 {
             let resolution = vec2<f32>(f32(params.width), f32(params.height));
+            let normal_uv = array<vec2<f32>, 3>(vertex_a.uv, vertex_b.uv, vertex_c.uv);
+            let normal_screen = array<vec2<f32>, 3>(
+                projected_a.xy * resolution,
+                projected_b.xy * resolution,
+                projected_c.xy * resolution,
+            );
             uv_gradients = prism_uv_gradients(
-                array<vec2<f32>, 3>(vertex_a.uv, vertex_b.uv, vertex_c.uv),
-                array<vec2<f32>, 3>(
-                    projected_a.xy * resolution,
-                    projected_b.xy * resolution,
-                    projected_c.xy * resolution,
-                ),
+                normal_uv,
+                normal_screen,
+            );
+            normal_uv_footprint_valid = shading_resolve_normal_uv_footprint_is_valid(
+                normal_uv, normal_screen, uv_gradients,
             );
         }
     }
@@ -2571,7 +2839,16 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     // texture-modulated base color, emissive and occlusion. Guarded twice: by
     // the header's logical `texture_count` and by the physical table length.
     // Mirrors `resolve_pixel`'s texture fold in the CPU golden arm-for-arm.
+    // Initialise the shade-time variance before texture folding so the
+    // response path always observes a defined identity value, even when the
+    // material has no normal-map record or its footprint is invalid.
+    var surface: SurfaceSample;
+    surface.normal_variance = 0.0;
     var sampled = sampled_material_defaults(parameters);
+    var normal_center_valid = false;
+    var normal_forward_x_tangent = vec3<f32>(0.0, 0.0, 1.0);
+    var normal_forward_y_tangent = vec3<f32>(0.0, 0.0, 1.0);
+    var normal_footprint_valid = false;
     let tex_end = material_header.texture_offset + material_header.texture_count;
     let tex_physical = arrayLength(&material_textures);
     for (var i = material_header.texture_offset; i < tex_end && i < tex_physical; i = i + 1u) {
@@ -2586,11 +2863,36 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
         }
         let lod = prism_texture_lod(uv_gradients, texel_dimensions);
         let texel = sample_texture_slot(record, geometry.uv, lod);
+        if material_is_normal_semantic(record.semantic) {
+            // Both kinds replace all normal state, even when the new record's
+            // footprint is invalid. Never retain a previous record's estimate.
+            normal_center_valid = shading_resolve_vec3_is_finite(texel.xyz)
+                && prism_lod_in_range(parameters.normal_scale);
+            let forward_x_texel = sample_texture_slot(record, geometry.uv + uv_gradients[0], lod);
+            let forward_y_texel = sample_texture_slot(record, geometry.uv + uv_gradients[1], lod);
+            normal_footprint_valid = normal_uv_footprint_valid && shading_resolve_normal_footprint_is_finite(
+                texel.xyz,
+                forward_x_texel.xyz,
+                forward_y_texel.xyz,
+                parameters.normal_scale,
+            );
+            if normal_footprint_valid {
+                normal_forward_x_tangent = decode_tangent_normal(
+                    forward_x_texel.xyz,
+                    parameters.normal_scale,
+                );
+                normal_forward_y_tangent = decode_tangent_normal(
+                    forward_y_texel.xyz,
+                    parameters.normal_scale,
+                );
+                normal_footprint_valid = shading_resolve_vec3_is_finite(normal_forward_x_tangent)
+                    && shading_resolve_vec3_is_finite(normal_forward_y_tangent);
+            }
+        }
         sampled = fold_material_texel(record, texel, parameters.normal_scale, sampled);
     }
 
     // Assemble the analytic BSDF sample from the stable surface parameters.
-    var surface: SurfaceSample;
     surface.base_color = sampled.base_color;
     surface.base_weight = parameters.base_weight;
     surface.diffuse_roughness = parameters.base_diffuse_roughness;
@@ -2603,7 +2905,6 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     surface.index_of_refraction = parameters.index_of_refraction;
     surface.dispersion = parameters.transmission_dispersion_scale;
     surface.thin_walled = parameters.thin_walled;
-    surface.geometry_opacity = parameters.geometry_opacity;
     surface.transmission_color = parameters.transmission_color.xyz;
     surface.transmission_scatter = parameters.transmission_scatter.xyz;
     surface.transmission_scatter_anisotropy = parameters.transmission_scatter_anisotropy;
@@ -2688,6 +2989,10 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     } else {
         frame.normal = geometry.normal;
     }
+    surface.normal_variance = shading_resolve_normal_variance(
+        sampled, basis, geometry.normal, normal_center_valid, normal_footprint_valid,
+        normal_forward_x_tangent, normal_forward_y_tangent,
+    );
     // `OpenPBR` `coat_normal`: the coat layer's own interface normal, taken from
     // the clearcoat normal map when one is bound. Without a map it stays the
     // zero sentinel, so the coat uses the base shading normal exactly as before.
@@ -2764,9 +3069,12 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     );
     // §17.4 single-lobe sampling: one draw per pixel decides the glint mixture
     // state and (with more than one additive heavy lobe) which one is evaluated.
+    // The immediate is the quality-tier ceiling; the uploaded effective budget
+    // can lower it at runtime when sample shedding scales that tier down.
+    let max_full_lobes = min(params.max_full_lobes, lb_expensive_lobe_limit());
     let lobe_factors = ls_select_expensive_lobe_factors(
         vec2<f32>(parameters.glint_weight, parameters.measured_weight),
-        params.max_full_lobes,
+        max_full_lobes,
         vec2<u32>(u32(coord.x), u32(coord.y)),
         params.frame_index,
         0u,

@@ -582,3 +582,48 @@ fn specular_aa_image_fixture_shape_is_stable() {
     }));
     assert_eq!(OUTPUT_ROWS, 1);
 }
+
+#[test]
+fn specular_aa_tagged_variance_contract_covers_fallback_and_realtime_override() {
+    use prism_render_shading::gi::specular_aa::normal_variance::{
+        bake_normal_variance_texel, normal_variance_from_texel, SEMANTIC_NORMAL_VARIANCE,
+    };
+
+    let offline_texel =
+        bake_normal_variance_texel([0.5, 0.5, 1.0], &[[0.8, 0.5, 1.0], [0.2, 0.5, 1.0]], 1.0)
+            .expect("valid tagged normal footprint");
+    let offline = normal_variance_from_texel(SEMANTIC_NORMAL_VARIANCE, offline_texel);
+    assert!(offline > 0.0);
+
+    // The CPU side of this image fixture carries the resolved variance in the
+    // same SurfaceSample field used by the GPU BRDF. A valid flat realtime
+    // footprint is zero and must replace, rather than add to, the offline value.
+    let realtime_zero = prism_render_shading::gi::specular_aa::screen_space_variance(
+        Vec3::ZERO,
+        Vec3::ZERO,
+        SIGMA2,
+    );
+    assert_eq!(realtime_zero, 0.0);
+    assert_ne!(
+        prism_render_shading::gi::specular_aa::normal_variance::filter_alpha_sq(
+            0.08 * 0.08 * 0.08 * 0.08,
+            offline,
+            KAPPA_MAX,
+        ),
+        prism_render_shading::gi::specular_aa::normal_variance::filter_alpha_sq(
+            0.08 * 0.08 * 0.08 * 0.08,
+            realtime_zero,
+            KAPPA_MAX,
+        )
+    );
+
+    // This integration harness executes the production BRDF/specAA module, not
+    // the complete visibility resolve. Keep the source gate explicit so the
+    // test proves the resolve owns the fallback/override seam without claiming
+    // bindless/VT sampling or geometry reconstruction was dispatched here.
+    let resolve = include_str!("../../src/shaders/shading_resolve.wesl");
+    assert!(resolve.contains("material_is_normal_semantic(record.semantic)"));
+    assert!(resolve.contains("shading_resolve_normal_variance("));
+    assert!(resolve.contains("let fallback = sampled.offline_normal_variance;"));
+    assert!(resolve.contains("return spec_aa_screen_space_variance("));
+}
