@@ -35,6 +35,13 @@ use prism_render_graph::{BufferDesc, BufferHandle, ImportedBuffer, RenderGraph, 
 use crate::config::RenderAppConfig;
 use crate::runtime_resource::RenderRuntimeResource;
 
+mod graph_compile;
+pub use graph_compile::{
+    EmberGraphCompileBudget, EmberGraphCompileError, EmberGraphCompilePhase,
+    EmberGraphCompileRequestError, EmberGraphCompileStatus, EmberGraphCompileTicket,
+    EmberGraphSource, EmberGraphStageModule,
+};
+
 /// GPU resources owned by the render world for the built-in Ember bridge.
 ///
 /// The CPU runtime remains authoritative. This resource only owns persistent
@@ -95,6 +102,7 @@ impl Resource for ParticleGpuState {}
 #[derive(Default)]
 pub struct EmberCompiledGraphAssets {
     registry: EmberCompiledGraphRegistry,
+    compiler: graph_compile::GraphCompiler,
 }
 
 /// Main-world publication point for caller-owned Ember GPU resources.
@@ -178,6 +186,7 @@ impl EmberCompiledGraphAssets {
     pub const fn new() -> Self {
         Self {
             registry: EmberCompiledGraphRegistry::new(),
+            compiler: graph_compile::GraphCompiler::new(EmberGraphCompileBudget::DEFAULT),
         }
     }
 
@@ -187,10 +196,68 @@ impl EmberCompiledGraphAssets {
         &self.registry
     }
 
-    /// Returns the mutable publication registry used by the compiler host.
+    /// Returns the mutable registry, cancelling all authoring requests first.
+    /// This external-publication boundary prevents late workers from overwriting
+    /// manual replacement or removal, even if a graph handle is reused.
     #[must_use]
-    pub const fn registry_mut(&mut self) -> &mut EmberCompiledGraphRegistry {
+    pub fn registry_mut(&mut self) -> &mut EmberCompiledGraphRegistry {
+        self.compiler.cancel_all();
         &mut self.registry
+    }
+
+    /// Creates a compiler with explicit nonzero admission limits.
+    pub fn with_compile_budget(
+        budget: EmberGraphCompileBudget,
+    ) -> Result<Self, EmberGraphCompileRequestError> {
+        Ok(Self {
+            registry: EmberCompiledGraphRegistry::new(),
+            compiler: graph_compile::GraphCompiler::with_budget(budget)?,
+        })
+    }
+
+    /// Queues the latest immutable source without running plugins on this thread.
+    pub fn request_compile(
+        &mut self,
+        graph: GraphAssetRef,
+        source_revision: u64,
+        source: Arc<EmberGraphSource>,
+    ) -> Result<EmberGraphCompileTicket, EmberGraphCompileRequestError> {
+        self.compiler
+            .request(&self.registry, graph, source_revision, source)
+    }
+
+    /// Polls without waiting; returns the number of atomic publications (0 or 1).
+    /// RenderApp extraction invokes this even without cameras or live instances.
+    pub fn poll_compilations(&mut self) -> usize {
+        self.compiler.poll(&mut self.registry)
+    }
+
+    /// Latest desired source and its observable state.
+    #[must_use]
+    pub fn compile_status(&self, graph: GraphAssetRef) -> Option<&EmberGraphCompileStatus> {
+        self.compiler.status(graph)
+    }
+
+    /// Explicitly retries a current failed ticket, never an invalidated publication.
+    pub fn retry_compile(&mut self, ticket: EmberGraphCompileTicket) -> bool {
+        self.compiler.retry(ticket)
+    }
+
+    /// Cancels pending publication and releases a queue slot, preserving the live graph.
+    pub fn cancel_compile(&mut self, graph: GraphAssetRef) -> bool {
+        self.compiler.cancel(graph)
+    }
+
+    /// Removes a graph and cancels its pending authoring publication.
+    pub fn remove_graph(
+        &mut self,
+        graph: GraphAssetRef,
+    ) -> Result<
+        Arc<CompiledGraph>,
+        prism_render_architecture::particle::asset_registry::EmberCompiledGraphRegistryError,
+    > {
+        self.compiler.cancel(graph);
+        self.registry.remove(graph)
     }
 }
 
@@ -281,6 +348,19 @@ pub struct ExtractedEmberRenderAssets {
 
 impl Resource for ExtractedEmberRenderAssets {}
 
+impl ExtractedEmberRenderAssets {
+    /// Looks up the exact revisioned input consumed by render preparation.
+    #[must_use]
+    pub fn get(&self, handle: EmberAssetHandle) -> Option<&EmberRenderAsset> {
+        self.entries.get(&handle)
+    }
+
+    /// Iterates extracted instances in stable asset-handle order.
+    pub fn iter(&self) -> impl Iterator<Item = (EmberAssetHandle, &EmberRenderAsset)> {
+        self.entries.iter().map(|(handle, entry)| (*handle, entry))
+    }
+}
+
 /// Render-world snapshot of [`EmberExternalGpuResources`].
 #[derive(Clone, Default)]
 pub struct ExtractedEmberExternalGpuResources {
@@ -318,6 +398,9 @@ impl ExtractedEmberExternalGpuResources {
 /// Incrementally extracts changed Ember graph inputs without copying compiled
 /// shader source or unchanged runtime payloads.
 pub fn extract_ember_render_assets(main: &mut World, render: &mut World) {
+    if let Some(mut graphs) = main.get_resource_mut::<EmberCompiledGraphAssets>() {
+        graphs.poll_compilations();
+    }
     render.init_resource::<ExtractedEmberRenderAssets>();
     let Some(source) = main.get_resource::<EmberRenderAssets>() else {
         render
@@ -326,14 +409,12 @@ pub fn extract_ember_render_assets(main: &mut World, render: &mut World) {
             .clear();
         return;
     };
-    let source_entries: Vec<_> = source.iter().collect();
     let graphs = main.get_resource::<EmberCompiledGraphAssets>();
     let extracted = render.resource_mut::<ExtractedEmberRenderAssets>();
-    let live_handles: BTreeSet<_> = source_entries.iter().map(|(handle, _)| *handle).collect();
     extracted
         .entries
-        .retain(|handle, _| live_handles.contains(handle));
-    for (handle, entry) in source_entries {
+        .retain(|handle, _| source.entries.contains_key(handle));
+    for (handle, entry) in source.iter() {
         let graph = entry.asset.graph;
         let graph_entry = graphs.and_then(|graphs| graphs.registry().get(graph));
         let graph_revision = graph_entry.map(|entry| entry.revision());
@@ -350,7 +431,7 @@ pub fn extract_ember_render_assets(main: &mut World, render: &mut World) {
                     graph,
                     graph_revision,
                     asset: entry.asset.clone(),
-                    compiled: graph_entry.map(|entry| Arc::new(entry.graph().clone())),
+                    compiled: graph_entry.map(|entry| Arc::clone(entry.shared_graph())),
                     runtime_values: entry.runtime_values.clone(),
                     stage_counts: entry.stage_counts.clone(),
                     attribute_bytes: entry.attribute_bytes.clone(),
@@ -1519,7 +1600,7 @@ mod tests {
             .as_ref()
             .expect("published graph remains available")
             .clone();
-        assert!(!std::sync::Arc::ptr_eq(&first, &third));
+        assert!(std::sync::Arc::ptr_eq(&first, &third));
     }
 
     #[test]

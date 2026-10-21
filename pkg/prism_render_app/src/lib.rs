@@ -166,8 +166,11 @@ pub use native_scene_gpu::{
     NativeSceneGpuState, NativeSceneGpuUploadError, NativeSceneGpuUploadReport,
 };
 pub use particle::{
-    EmberCompiledGraphAssets, EmberExternalGpuResources, EmberGpuAssetRegistry,
-    EmberGpuAssetRegistryError, EmberGpuPrepareError, EmberPrepareErrorKind, EmberPrepareOutcome,
+    extract_ember_render_assets, EmberCompiledGraphAssets, EmberExternalGpuResources,
+    EmberGpuAssetRegistry, EmberGpuAssetRegistryError, EmberGpuPrepareError,
+    EmberGraphCompileBudget, EmberGraphCompileError, EmberGraphCompilePhase,
+    EmberGraphCompileRequestError, EmberGraphCompileStatus, EmberGraphCompileTicket,
+    EmberGraphSource, EmberGraphStageModule, EmberPrepareErrorKind, EmberPrepareOutcome,
     EmberPrepareStatus, EmberRenderAsset, EmberRenderAssets, ExtractedEmberExternalGpuResources,
     ExtractedEmberRenderAssets, ParticleGpuState, ParticleUploadStatus,
 };
@@ -275,10 +278,12 @@ pub mod prelude {
     };
     pub use crate::particle::{
         EmberCompiledGraphAssets, EmberExternalGpuResources, EmberGpuAssetRegistry,
-        EmberGpuAssetRegistryError, EmberGpuPrepareError, EmberPrepareErrorKind,
-        EmberPrepareOutcome, EmberPrepareStatus, EmberRenderAsset, EmberRenderAssets,
-        ExtractedEmberExternalGpuResources, ExtractedEmberRenderAssets, ParticleGpuState,
-        ParticleUploadStatus,
+        EmberGpuAssetRegistryError, EmberGpuPrepareError, EmberGraphCompileBudget,
+        EmberGraphCompileError, EmberGraphCompilePhase, EmberGraphCompileRequestError,
+        EmberGraphCompileStatus, EmberGraphCompileTicket, EmberGraphSource, EmberGraphStageModule,
+        EmberPrepareErrorKind, EmberPrepareOutcome, EmberPrepareStatus, EmberRenderAsset,
+        EmberRenderAssets, ExtractedEmberExternalGpuResources, ExtractedEmberRenderAssets,
+        ParticleGpuState, ParticleUploadStatus,
     };
     pub use crate::pipeline_cache::{
         cold_key_from_pipeline_key, hash_vertex_layouts, pso_device_fingerprint,

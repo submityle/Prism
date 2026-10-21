@@ -1,11 +1,12 @@
 //! Deterministic runtime registry for versioned `.ember` assets.
 //!
-//! The registry owns the CPU-side asset lifetime and the generation used by
-//! render preparation to reject stale asynchronous reload results. It does
-//! not own compiled graphs, GPU buffers, or pipeline objects; those resources
-//! consume an [`EmberAsset`] through the generation returned here.
+//! Registries own CPU-side assets and immutable compiled-graph publications,
+//! with revisions used to reject stale asynchronous reload results. Extracted
+//! readers share publications without copying their shader source or metadata.
+//! GPU buffers and pipeline objects remain owned by the render layer.
 
 use alloc::collections::BTreeMap;
+use alloc::sync::Arc;
 
 use super::authoring::{
     decode_binary, EmberAsset, EmberAssetHandle, EmberCodecError, GraphAssetRef, HotReload,
@@ -116,14 +117,22 @@ pub enum EmberAssetRegistryError {
 
 /// An immutable compiled graph together with its published revision.
 pub struct EmberCompiledGraphEntry {
-    graph: CompiledGraph,
+    graph: Arc<CompiledGraph>,
     revision: EmberAssetRevision,
 }
 
 impl EmberCompiledGraphEntry {
     /// Returns the validated compiled graph.
     #[must_use]
-    pub const fn graph(&self) -> &CompiledGraph {
+    pub fn graph(&self) -> &CompiledGraph {
+        &self.graph
+    }
+
+    /// Shares this exact immutable publication without copying shader source,
+    /// reflection or dispatch metadata. Older publications remain alive until
+    /// all extracted instances and pending GPU builds release their references.
+    #[must_use]
+    pub const fn shared_graph(&self) -> &Arc<CompiledGraph> {
         &self.graph
     }
 
@@ -209,7 +218,7 @@ impl EmberCompiledGraphRegistry {
         self.graphs.insert(
             graph,
             EmberCompiledGraphEntry {
-                graph: compiled,
+                graph: Arc::new(compiled),
                 revision,
             },
         );
@@ -231,7 +240,7 @@ impl EmberCompiledGraphRegistry {
         self.graphs.insert(
             graph,
             EmberCompiledGraphEntry {
-                graph: compiled,
+                graph: Arc::new(compiled),
                 revision,
             },
         );
@@ -258,18 +267,19 @@ impl EmberCompiledGraphRegistry {
         self.graphs.insert(
             graph,
             EmberCompiledGraphEntry {
-                graph: compiled,
+                graph: Arc::new(compiled),
                 revision,
             },
         );
         Ok(())
     }
 
-    /// Removes and returns a published compiled graph.
+    /// Removes and returns the shared publication without copying it, even
+    /// while extracted readers or pending device builds retain the same graph.
     pub fn remove(
         &mut self,
         graph: GraphAssetRef,
-    ) -> Result<CompiledGraph, EmberCompiledGraphRegistryError> {
+    ) -> Result<Arc<CompiledGraph>, EmberCompiledGraphRegistryError> {
         self.graphs
             .remove(&graph)
             .map(|entry| entry.graph)
@@ -659,6 +669,33 @@ mod tests {
             }
         );
         assert_eq!(registry.get(graph).unwrap().revision(), current);
+    }
+
+    #[test]
+    fn compiled_graph_publications_survive_replacement_and_removal_without_copying() {
+        let mut registry = EmberCompiledGraphRegistry::new();
+        let graph = GraphAssetRef(19);
+        let mut initial = compiled_graph();
+        initial.source = String::from("first publication");
+        registry.publish(graph, initial).unwrap();
+        let first = Arc::clone(registry.get(graph).unwrap().shared_graph());
+        assert_eq!(Arc::strong_count(&first), 2);
+
+        let mut replacement = compiled_graph();
+        replacement.source = String::from("replacement publication");
+        registry.publish(graph, replacement).unwrap();
+        let current = Arc::clone(registry.get(graph).unwrap().shared_graph());
+        assert!(!Arc::ptr_eq(&first, &current));
+        assert_eq!(first.source, "first publication");
+        assert_eq!(Arc::strong_count(&first), 1);
+
+        let removed = registry.remove(graph).unwrap();
+        assert!(Arc::ptr_eq(&current, &removed));
+        assert_eq!(Arc::strong_count(&current), 2);
+        assert!(registry.get(graph).is_none());
+        drop(registry);
+        assert_eq!(current.source, "replacement publication");
+        assert_eq!(first.source, "first publication");
     }
 
     #[test]
