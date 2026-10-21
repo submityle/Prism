@@ -132,7 +132,7 @@ impl EditorSceneSession {
     }
 
     /// Publishes committed edits only. Uncommitted Gizmo previews remain owned
-    /// by DesktopScene until release/cancel. Idle and UI-only paths are O(1).
+    /// by `DesktopScene` until release/cancel. Idle and UI-only paths are O(1).
     pub fn synchronize(&mut self, controller: &EditorController) -> Result<bool, DesktopError> {
         // A host may render/poll the old controller between prepare and commit.
         // Never let that path replace or publish over the staged candidate.
@@ -346,10 +346,10 @@ fn build_projection(
     )?;
     let mut rows = BTreeMap::new();
     for row in controller.document_outliner_nodes() {
-        if let Some(item) = row.selection() {
-            if rows.insert(item, row.id()).is_some() {
-                return Err(error("scene object has multiple Outliner identities"));
-            }
+        if let Some(item) = row.selection()
+            && rows.insert(item, row.id()).is_some()
+        {
+            return Err(error("scene object has multiple Outliner identities"));
         }
     }
     let mut objects = Vec::with_capacity(controller.document_objects().len());

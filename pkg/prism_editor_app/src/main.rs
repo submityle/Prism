@@ -5,9 +5,10 @@
     reason = "the command-line application emits deterministic run reports"
 )]
 
+use core::fmt;
 use std::{
     ffi::{OsStr, OsString},
-    fmt,
+    io::Write,
     path::PathBuf,
     process::ExitCode,
 };
@@ -19,9 +20,9 @@ use std::time::Duration;
 
 #[cfg(feature = "desktop")]
 use prism_editor_app::{
-    editor_scene_mesh_catalog, run_desktop_with_document, DesktopConfig, DesktopError,
-    DesktopUiError, EditorController, EditorDesktopUi, EditorSceneSession, SceneProject,
-    SceneProjectConfig, SceneProjectError,
+    editor_scene_mesh_catalog, install_scene_authoring_commands, run_desktop_with_document,
+    DesktopConfig, DesktopError, DesktopUiError, EditorController, EditorDesktopUi,
+    EditorSceneSession, SceneProject, SceneProjectConfig, SceneProjectError,
 };
 
 const DEFAULT_HEADLESS_FRAMES: u64 = 1;
@@ -36,7 +37,8 @@ fn main() -> ExitCode {
     match run(std::env::args_os().skip(1)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("prism_editor_app: {error}");
+            // An unavailable stderr must still produce a failing process exit.
+            let _ = writeln!(std::io::stderr().lock(), "prism_editor_app: {error}");
             ExitCode::FAILURE
         }
     }
@@ -76,7 +78,7 @@ fn run_headless(frames: u64) -> Result<(), RunError> {
 #[cfg(feature = "desktop")]
 fn run_native(options: CliOptions) -> Result<(), RunError> {
     let time_limit = options.desktop_time_limit();
-    let (ui, document) = match options.project {
+    let (mut ui, document) = match options.project {
         Some(ProjectAction::Create(path)) => {
             let opened =
                 SceneProject::create_with(path, scene_catalog()?, SceneProjectConfig::default())?;
@@ -95,6 +97,8 @@ fn run_native(options: CliOptions) -> Result<(), RunError> {
             (ui, None)
         }
     };
+    install_scene_authoring_commands(ui.controller_mut()).map_err(DesktopUiError::from)?;
+    ui.refresh()?;
     let scene = EditorSceneSession::new(ui.controller())?;
     let outcome = run_desktop_with_document(
         DesktopConfig {

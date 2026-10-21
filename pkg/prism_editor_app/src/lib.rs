@@ -48,6 +48,8 @@ mod document;
 mod ecs_document_bridge;
 mod lifecycle;
 #[cfg(feature = "desktop")]
+mod scene_authoring;
+#[cfg(feature = "desktop")]
 mod scene_mesh;
 #[cfg(feature = "desktop")]
 mod scene_project;
@@ -56,8 +58,8 @@ mod scene_session;
 mod world_session;
 
 pub use controller::{
-    ControllerError, ControllerFieldEdit, ControllerLimits, ControllerOutcome, EditorController,
-    PreparedControllerEdit,
+    ControllerAuthoringCommand, ControllerError, ControllerFieldEdit, ControllerLimits,
+    ControllerObject, ControllerOutcome, EditorController, PreparedControllerEdit,
 };
 pub use controller_validation::ControllerObjectValidator;
 #[cfg(feature = "desktop")]
@@ -99,6 +101,10 @@ pub use backend::{
     WindowBackendErrorKind, WindowDescriptor, WindowEvent, WindowEventEnvelope, WindowId,
 };
 pub use lifecycle::{ApplicationState, ExitReason, ExitStatus, InvalidStateError, ShutdownReport};
+#[cfg(feature = "desktop")]
+pub use scene_authoring::{
+    install_scene_authoring_commands, SCENE_ADD_TRIANGLE_COMMAND, SCENE_DELETE_SELECTION_COMMAND,
+};
 #[cfg(feature = "desktop")]
 pub use scene_mesh::{editor_scene_mesh_catalog, editor_scene_mesh_registry, EditorSceneMesh};
 #[cfg(feature = "desktop")]

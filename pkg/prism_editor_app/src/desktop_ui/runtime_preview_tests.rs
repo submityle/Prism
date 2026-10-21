@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::{DesktopContentImages, DesktopGpu};
+use alloc::sync::Arc;
 use prism_editor_profiler::{
     runtime_preview::RuntimePreviewFrame, GraphCaptureInputs, GraphCaptureLimits,
 };
@@ -15,10 +16,7 @@ use prism_render_driver_wgpu::{WgpuDevice, WgpuInstance, WgpuQueue};
 use prism_render_graph::{capacity::GraphLimits, ImportedTexture};
 use prism_ui_layout::{Point, Rect, Size};
 use std::{
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    },
+    sync::atomic::{AtomicUsize, Ordering},
     time::{Duration, Instant},
 };
 

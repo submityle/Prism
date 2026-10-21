@@ -825,8 +825,9 @@ impl PreparedDocumentLoad {
     }
 
     /// Publishes the candidate and durable base only after validating the owner,
-    /// operation generation and unchanged live snapshot. Rebind host callbacks
-    /// after successful installation; callbacks and history are not serialized.
+    /// operation generation and unchanged live snapshot. Host command factories
+    /// are retained after budget validation; callbacks and history are never
+    /// read from the document. Model history resets on installation.
     pub fn install(
         self,
         adapter: &mut DocumentFileAdapter,
@@ -834,9 +835,11 @@ impl PreparedDocumentLoad {
         catalog: &DocumentSchemaCatalog,
     ) -> Result<(), DocumentError> {
         self.validate_install(adapter, controller, catalog)?;
+        let mut candidate = self.decoded.into_controller();
+        candidate.inherit_commands(controller)?;
         // All fallible work precedes either mutation. These two assignments are
         // the host's publication point; old controller is dropped only here.
-        *controller = self.decoded.into_controller();
+        *controller = candidate;
         adapter.durable_revision = Some(self.receipt.durable_revision);
         adapter.retry = None;
         adapter.reconciliation_required = false;
@@ -855,7 +858,9 @@ impl PreparedDocumentLoad {
     ) -> Result<(), DocumentError> {
         self.validate_install(adapter, ui.controller(), catalog)?;
         let size = ui.size();
-        let mut candidate = EditorDesktopUi::new(self.decoded.into_controller())?;
+        let mut controller = self.decoded.into_controller();
+        controller.inherit_commands(ui.controller())?;
+        let mut candidate = EditorDesktopUi::new(controller)?;
         candidate.resize(size.width, size.height)?;
         // No fallible work or user callbacks after the publication point.
         // Keep the old UI alive until both adapter and UI state are published.

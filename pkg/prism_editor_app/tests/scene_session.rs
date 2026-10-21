@@ -2,28 +2,34 @@
 
 #![cfg(feature = "desktop")]
 
+extern crate alloc;
+
+use alloc::{sync::Arc, task::Wake};
+use core::task::{Context, Poll, Waker};
+use std::any::{type_name, Any};
 use std::fs;
 use std::io;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use std::task::{Context, Poll, Wake, Waker};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use prism_ecs::prelude::ChildOf;
 use prism_editor_app::{
-    editor_scene_mesh_catalog, editor_scene_mesh_registry, ControllerFieldEdit, ControllerLimits,
-    DesktopDocumentSession, DesktopGpu, DesktopRenderer, DesktopViewportBounds, DocumentCodec,
-    DocumentLimits, EditorController, EditorDesktopUi, EditorSceneMesh, EditorSceneSession,
-    SceneProject, SceneProjectConfig,
+    editor_scene_mesh_catalog, editor_scene_mesh_registry, install_scene_authoring_commands,
+    ControllerFieldEdit, ControllerLimits, ControllerObject, DesktopDocumentSession, DesktopGpu,
+    DesktopRenderer, DesktopViewportBounds, DocumentCodec, DocumentLimits, EditorController,
+    EditorDesktopUi, EditorSceneMesh, EditorSceneSession, SceneProject, SceneProjectConfig,
+    SCENE_ADD_TRIANGLE_COMMAND, SCENE_DELETE_SELECTION_COMMAND,
 };
-use prism_editor_core::SelectionItem;
+use prism_editor_core::{SelectionItem, SelectionKind};
 use prism_editor_panels::{OutlinerId, OutlinerNode};
 use prism_editor_reflect::FieldPath;
 use prism_editor_ui::{ActionValue, EditorAction, SelectionMode};
 use prism_editor_viewport::SCENE_ID_IDENTITY_MATRIX;
-use prism_reflect::{Reflect, TypeRegistry};
+use prism_reflect::{
+    DynamicStruct, List, Reflect, ReflectMut, ReflectRef, TypeInfo, TypeRegistry, Typed,
+};
 use prism_ui_layout::{Point, Rect, Size};
 
 const OBJECT: u128 = 0x1234;
@@ -379,6 +385,214 @@ fn visibility_and_coalesced_properties_preserve_cpu_geometry_allocations() {
         assert_eq!(session.work().document_rebuilds, before.document_rebuilds);
         assert!(!session.synchronize(&controller).unwrap());
     }
+}
+
+// An adversarial host can change its reflected lengths after controller
+// admission. The session must reject the aggregate before cloning or reading
+// any of these synthetic elements; no large allocation is needed for this test.
+struct BudgetPositions {
+    values: Vec<[f32; 3]>,
+    reported_len: Arc<AtomicUsize>,
+    reads: Arc<AtomicUsize>,
+    clones: Arc<AtomicUsize>,
+}
+
+impl BudgetPositions {
+    fn assert_readable(&self) {
+        assert_eq!(
+            self.reported_len.load(Ordering::Relaxed),
+            self.values.len(),
+            "aggregate budget must be checked before geometry access"
+        );
+    }
+}
+
+impl List for BudgetPositions {
+    fn get(&self, index: usize) -> Option<&dyn Reflect> {
+        self.assert_readable();
+        self.reads.fetch_add(1, Ordering::Relaxed);
+        self.values.as_slice().get(index).map(|v| v as &dyn Reflect)
+    }
+    fn get_mut(&mut self, index: usize) -> Option<&mut dyn Reflect> {
+        self.assert_readable();
+        self.values
+            .as_mut_slice()
+            .get_mut(index)
+            .map(|v| v as &mut dyn Reflect)
+    }
+    fn len(&self) -> usize {
+        self.reported_len.load(Ordering::Relaxed)
+    }
+    fn push(&mut self, _: Box<dyn Reflect>) -> Result<(), Box<dyn Reflect>> {
+        panic!("test geometry must not be resized")
+    }
+    fn as_list(&self) -> &dyn List {
+        self
+    }
+}
+
+impl Reflect for BudgetPositions {
+    fn type_name(&self) -> &'static str {
+        type_name::<Vec<[f32; 3]>>()
+    }
+    fn type_info(&self) -> &'static TypeInfo {
+        <Vec<[f32; 3]> as Typed>::type_info()
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+    fn into_any(self: Box<Self>) -> Box<dyn Any> {
+        self
+    }
+    fn as_reflect(&self) -> &dyn Reflect {
+        self
+    }
+    fn as_reflect_mut(&mut self) -> &mut dyn Reflect {
+        self
+    }
+    fn reflect_ref(&self) -> ReflectRef<'_> {
+        ReflectRef::List(self)
+    }
+    fn reflect_mut(&mut self) -> ReflectMut<'_> {
+        ReflectMut::List(self)
+    }
+    fn reflect_clone(&self) -> Box<dyn Reflect> {
+        self.assert_readable();
+        self.clones.fetch_add(1, Ordering::Relaxed);
+        self.values.reflect_clone()
+    }
+}
+
+#[test]
+fn aggregate_budget_rejection_precedes_geometry_access_and_preserves_all_live_objects() {
+    const BUDGET: usize = 64 * 1024 * 1024;
+    let reported_len = Arc::new(AtomicUsize::new(3));
+    let reads = Arc::new(AtomicUsize::new(0));
+    let clones = Arc::new(AtomicUsize::new(0));
+    let mut root = DynamicStruct::new();
+    root.set_represented_type_name(type_name::<EditorSceneMesh>());
+    root.insert(
+        "positions",
+        BudgetPositions {
+            values: triangle().positions,
+            reported_len: reported_len.clone(),
+            reads: reads.clone(),
+            clones: clones.clone(),
+        },
+    );
+    root.insert("indices", vec![0_u32, 1, 2]);
+    root.insert("matrix", SCENE_ID_IDENTITY_MATRIX);
+    root.insert("visible", true);
+    let mut controller = EditorController::new();
+    controller
+        .register_object(
+            SelectionItem::entity(OBJECT),
+            Box::new(root),
+            editor_scene_mesh_registry(),
+        )
+        .unwrap();
+    register_mesh(&mut controller, OBJECT + 1, triangle());
+    let original = round_trip(&controller);
+    let mut session = EditorSceneSession::new(&controller).unwrap();
+    let before = session.work();
+    let status = session.scene().status();
+    let uploads = upload_counts(&session);
+    let entities: Vec<_> = [OBJECT, OBJECT + 1]
+        .map(|id| {
+            session
+                .bridge()
+                .entity_for_object(&SelectionItem::entity(id))
+                .unwrap()
+        })
+        .into_iter()
+        .collect();
+    let pointers = |session: &EditorSceneSession| {
+        entities
+            .iter()
+            .map(|entity| {
+                let mesh = session.world().get::<EditorSceneMesh>(*entity).unwrap();
+                (mesh.positions.as_ptr(), mesh.indices.as_ptr())
+            })
+            .chain(
+                session
+                    .scene()
+                    .objects()
+                    .iter()
+                    .map(|object| (object.positions.as_ptr(), object.indices.as_ptr())),
+            )
+            .collect::<Vec<_>>()
+    };
+    let geometry = pointers(&session);
+    let prepared = controller
+        .prepare_edits(
+            [
+                (OBJECT, "positions[0][0]", ActionValue::float(0.125)),
+                (OBJECT + 1, "matrix[3][0]", ActionValue::float(0.25)),
+                (OBJECT + 1, "visible", ActionValue::bool(false)),
+            ]
+            .into_iter()
+            .map(|(id, path, value)| ControllerFieldEdit {
+                item: SelectionItem::entity(id),
+                path: FieldPath::parse(path).unwrap(),
+                value,
+            })
+            .collect(),
+        )
+        .unwrap();
+    controller.commit_edits(prepared).unwrap();
+    // Individually legal (BUDGET - 4 bytes), but together with the untouched
+    // 48-byte sibling exceeds the document limit. Make element access fatal.
+    reported_len.store((BUDGET - 12) / 12, Ordering::Relaxed);
+    reads.store(0, Ordering::Relaxed);
+    clones.store(0, Ordering::Relaxed);
+    for _ in 0..2 {
+        let error = session.synchronize(&controller).unwrap_err();
+        assert!(error.to_string().contains("64 MiB"), "{error}");
+        assert_eq!(reads.load(Ordering::Relaxed), 0);
+        assert_eq!(clones.load(Ordering::Relaxed), 0);
+        assert_eq!(session.work(), before);
+        let rejected = session.scene().status();
+        assert_eq!(rejected.scene_generation, status.scene_generation);
+        assert_eq!(rejected.target, status.target);
+        assert_eq!(rejected.identity_allocations, status.identity_allocations);
+        assert_eq!(upload_counts(&session), uploads);
+        assert_eq!(pointers(&session), geometry);
+        for (id, entity) in [OBJECT, OBJECT + 1].into_iter().zip(&entities) {
+            assert_eq!(
+                session
+                    .bridge()
+                    .entity_for_object(&SelectionItem::entity(id)),
+                Some(*entity)
+            );
+            assert_mesh(&session, &original, id, &triangle());
+        }
+    }
+
+    // A rejected sync must not consume the journal or publish the sibling's
+    // matrix/visibility. Restoring the length permits retry of the entire batch.
+    reported_len.store(3, Ordering::Relaxed);
+    assert!(session.synchronize(&controller).unwrap());
+    let mut changed = triangle();
+    changed.positions[0][0] = 0.125;
+    let mut sibling = triangle();
+    sibling.matrix[3][0] = 0.25;
+    sibling.visible = false;
+    assert_mesh(&session, &controller, OBJECT, &changed);
+    assert_mesh(&session, &controller, OBJECT + 1, &sibling);
+    assert_eq!(session.work().document_rebuilds, before.document_rebuilds);
+    assert_eq!(
+        session.work().geometry_replacements,
+        before.geometry_replacements + 1
+    );
+    controller.execute(EditorAction::Undo).unwrap();
+    assert!(session.synchronize(&controller).unwrap());
+    for id in [OBJECT, OBJECT + 1] {
+        assert_mesh(&session, &controller, id, &triangle());
+    }
+    assert!(!session.synchronize(&controller).unwrap());
 }
 
 #[test]
@@ -800,9 +1014,19 @@ fn pick_session(
     ui: &mut EditorDesktopUi,
     visible: bool,
 ) {
+    pick_session_at(session, gpu, ui, [16.0, 16.0], visible.then_some(OBJECT));
+}
+
+fn pick_session_at(
+    session: &mut EditorSceneSession,
+    gpu: &DesktopGpu,
+    ui: &mut EditorDesktopUi,
+    position: [f32; 2],
+    expected: Option<u128>,
+) {
     let before = session.scene().status();
     assert!(session
-        .pointer(gpu, ui, [16.0, 16.0], SelectionMode::Replace)
+        .pointer(gpu, ui, position, SelectionMode::Replace)
         .unwrap());
     assert!(session.scene().status().pending);
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -820,7 +1044,7 @@ fn pick_session(
         session.scene().status().accepted_picks,
         before.accepted_picks + 1
     );
-    let expected = visible.then(|| SelectionItem::entity(OBJECT));
+    let expected = expected.map(SelectionItem::entity);
     assert_eq!(ui.controller().selection().primary(), expected.as_ref());
 }
 
@@ -832,6 +1056,354 @@ fn upload_counts(session: &EditorSceneSession) -> (u64, u64, u64, u64) {
         status.transform_uploads,
         status.geometry_renderer_creations,
     )
+}
+
+fn box_session(
+    session: &mut EditorSceneSession,
+    gpu: &DesktopGpu,
+    ui: &mut EditorDesktopUi,
+    expected: &[u128],
+) {
+    let before = session.scene().status();
+    assert!(session
+        .box_select(gpu, ui, [0.0, 0.0], [32.0, 32.0], SelectionMode::Replace)
+        .unwrap());
+    assert!(session.scene().status().pending_box);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while session.scene().status().pending_box {
+        session.poll(gpu, ui).unwrap();
+        assert!(
+            Instant::now() < deadline,
+            "scene-session GPU box pick timed out"
+        );
+        if session.scene().status().pending_box {
+            thread::park_timeout(Duration::from_millis(1));
+        }
+    }
+    assert_eq!(
+        session.scene().status().accepted_picks,
+        before.accepted_picks + 1
+    );
+    let mut actual = ui.controller().selection().items().to_vec();
+    let mut expected: Vec<_> = expected
+        .iter()
+        .copied()
+        .map(SelectionItem::entity)
+        .collect();
+    actual.sort();
+    expected.sort();
+    assert_eq!(
+        actual, expected,
+        "box picks resolve the current authored identities"
+    );
+}
+
+fn session_output(gpu: &DesktopGpu, label: &'static str) -> wgpu::Texture {
+    gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: wgpu::Extent3d {
+            width: 32,
+            height: 32,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: gpu.format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    })
+}
+
+#[test]
+fn gpu_authoring_create_delete_undo_redo_fences_point_and_box_picks_across_empty_shapes() {
+    let Some(gpu) = gpu() else { return };
+    let mut controller = EditorController::new();
+    install_scene_authoring_commands(&mut controller).unwrap();
+    let (item, _) = controller.next_entity_identity().unwrap();
+    let SelectionKind::Entity(id) = *item.kind() else {
+        panic!("authoring must allocate an entity identity");
+    };
+    let mut session = EditorSceneSession::new(&controller).unwrap();
+    let mut ui = EditorDesktopUi::new(controller).unwrap();
+    session.initialize(&gpu).unwrap();
+    let output = session_output(&gpu, "scene-session structural authoring proof");
+    render_session(&mut session, &gpu, &mut ui, &output);
+    assert_eq!(session.scene().status().identity_allocations, 0);
+    pick_session_at(&mut session, &gpu, &mut ui, [16.0, 16.0], None);
+    box_session(&mut session, &gpu, &mut ui, &[]);
+
+    // These are the installed production UI commands, not fabricated roots or
+    // a replacement document. Picks never add a second Undo/Redo history.
+    for (step, (action, present)) in [
+        (
+            EditorAction::ExecuteCommand {
+                command_id: SCENE_ADD_TRIANGLE_COMMAND.into(),
+            },
+            true,
+        ),
+        (EditorAction::Undo, false),
+        (EditorAction::Redo, true),
+        (
+            EditorAction::ExecuteCommand {
+                command_id: SCENE_DELETE_SELECTION_COMMAND.into(),
+            },
+            false,
+        ),
+        (EditorAction::Undo, true),
+        (EditorAction::Redo, false),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        // Leave real submitted GPU work unpolled; shape publication must fence
+        // both channels even if the hardware has already finished the copy.
+        if step % 2 == 0 {
+            assert!(session
+                .pointer(&gpu, &mut ui, [16.0, 16.0], SelectionMode::Replace)
+                .unwrap());
+            assert!(session.scene().status().pending);
+        } else {
+            assert!(session
+                .box_select(
+                    &gpu,
+                    &mut ui,
+                    [0.0, 0.0],
+                    [32.0, 32.0],
+                    SelectionMode::Replace
+                )
+                .unwrap());
+            assert!(session.scene().status().pending_box);
+        }
+        let before = session.scene().status();
+        let rebuilds = session.work().document_rebuilds;
+        let outcome = ui.execute(action).unwrap();
+        assert!(outcome.model_changed);
+        let selection = ui.controller().selection().items().to_vec();
+        assert!(session.poll(&gpu, &mut ui).unwrap().redraw);
+        let after = session.scene().status();
+        assert!(!after.pending && !after.pending_box);
+        assert_eq!(after.accepted_picks, before.accepted_picks);
+        assert_eq!(after.rejected_picks, before.rejected_picks + 1);
+        assert_eq!(ui.controller().selection().items(), selection.as_slice());
+        assert_eq!(session.work().document_rebuilds, rebuilds + 1);
+        let count = usize::from(present);
+        assert_eq!(ui.controller().document_objects().len(), count);
+        assert_eq!(ui.controller().document_outliner_nodes().len(), count);
+        assert_eq!(session.bridge().entity_count(), count);
+        assert_eq!(session.scene().objects().len(), count);
+        assert_eq!(session.bridge().entity_for_object(&item).is_some(), present);
+        if present {
+            let expected = EditorSceneMesh {
+                positions: vec![[-0.5, -0.5, 0.5], [0.5, -0.5, 0.5], [0.0, 0.5, 0.5]],
+                indices: vec![0, 1, 2],
+                matrix: SCENE_ID_IDENTITY_MATRIX,
+                visible: true,
+            };
+            assert_mesh(&session, ui.controller(), id, &expected);
+        }
+        // The previous targets cannot service either kind of pick until the
+        // new shape has been encoded (including the one-to-zero transition).
+        assert!(!session
+            .pointer(&gpu, &mut ui, [16.0, 16.0], SelectionMode::Replace)
+            .unwrap());
+        assert!(!session
+            .box_select(
+                &gpu,
+                &mut ui,
+                [0.0, 0.0],
+                [32.0, 32.0],
+                SelectionMode::Replace
+            )
+            .unwrap());
+        assert_eq!(
+            upload_counts(&session),
+            (
+                before.geometry_uploads,
+                before.geometry_uploaded_bytes,
+                before.transform_uploads,
+                before.geometry_renderer_creations,
+            )
+        );
+        render_session(&mut session, &gpu, &mut ui, &output);
+        // Shape changes intentionally attach a fresh renderer. An empty shape
+        // allocates no IDs; restored entries must populate it even if unchanged.
+        assert_eq!(
+            upload_counts(&session),
+            (
+                before.geometry_uploads + count as u64,
+                before.geometry_uploaded_bytes + 48 * count as u64,
+                before.transform_uploads + count as u64,
+                before.geometry_renderer_creations + 1,
+            )
+        );
+        assert_eq!(
+            session.scene().status().identity_allocations,
+            before.identity_allocations + count as u64
+        );
+        pick_session_at(
+            &mut session,
+            &gpu,
+            &mut ui,
+            [16.0, 16.0],
+            present.then_some(id),
+        );
+        box_session(
+            &mut session,
+            &gpu,
+            &mut ui,
+            if present {
+                std::slice::from_ref(&id)
+            } else {
+                &[]
+            },
+        );
+        let stable = upload_counts(&session);
+        let identities = session.scene().status().identity_allocations;
+        render_session(&mut session, &gpu, &mut ui, &output);
+        assert_eq!(upload_counts(&session), stable);
+        assert_eq!(session.scene().status().identity_allocations, identities);
+        assert_eq!(session.work().document_rebuilds, rebuilds + 1);
+    }
+    assert_eq!(ui.controller().document_history_lengths(), (2, 0));
+}
+
+#[test]
+fn gpu_structural_batch_create_and_middle_delete_undo_redo_remap_survivor_draw_keys() {
+    let Some(gpu) = gpu() else { return };
+    let mut controller = EditorController::new();
+    install_scene_authoring_commands(&mut controller).unwrap();
+    let mut session = EditorSceneSession::new(&controller).unwrap();
+    let mut ui = EditorDesktopUi::new(controller).unwrap();
+    session.initialize(&gpu).unwrap();
+    let output = session_output(&gpu, "scene-session structural survivor proof");
+    render_session(&mut session, &gpu, &mut ui, &output);
+
+    let mut objects = Vec::new();
+    for (offset, x) in [-0.6, 0.0, 0.6].into_iter().enumerate() {
+        let item = SelectionItem::entity(OBJECT + offset as u128);
+        let mut row = OutlinerNode::new(OutlinerId::from_raw(ROW + offset as u128), None, "Mesh");
+        row.set_selection(item.clone());
+        let mut mesh = triangle();
+        // Distinct payload lengths AND silhouettes: using the deleted middle
+        // mesh for the right survivor must fail actual pixel picks below.
+        match offset {
+            0 => {
+                mesh.positions = vec![[-0.2, -0.6, 0.5], [0.2, -0.6, 0.5], [0.0, 0.6, 0.5]];
+            }
+            1 => {
+                mesh.positions = vec![
+                    [-0.2, 0.1, 0.5],
+                    [0.2, 0.1, 0.5],
+                    [0.2, 0.9, 0.5],
+                    [-0.2, 0.9, 0.5],
+                ];
+                mesh.indices = vec![0, 1, 2, 0, 2, 3];
+            }
+            _ => {
+                mesh.positions = vec![[-0.2, -0.9, 0.5], [0.2, -0.9, 0.5], [0.0, -0.1, 0.5]];
+            }
+        }
+        mesh.matrix[3][0] = x;
+        objects.push(ControllerObject {
+            item,
+            row,
+            root: Box::new(mesh),
+            registry: editor_scene_mesh_registry(),
+        });
+    }
+    ui.controller_mut().create_objects(objects).unwrap();
+    ui.refresh().unwrap();
+    // encode itself observes shape_revision; no explicit synchronize is needed.
+    render_session(&mut session, &gpu, &mut ui, &output);
+    assert_eq!(session.scene().status().identity_allocations, 3);
+    box_session(
+        &mut session,
+        &gpu,
+        &mut ui,
+        &[OBJECT, OBJECT + 1, OBJECT + 2],
+    );
+    pick_session_at(&mut session, &gpu, &mut ui, [16.0, 8.0], Some(OBJECT + 1));
+
+    for (action, expected) in [
+        (
+            EditorAction::ExecuteCommand {
+                command_id: SCENE_DELETE_SELECTION_COMMAND.into(),
+            },
+            vec![OBJECT, OBJECT + 2],
+        ),
+        (EditorAction::Undo, vec![OBJECT, OBJECT + 1, OBJECT + 2]),
+        (EditorAction::Redo, vec![OBJECT, OBJECT + 2]),
+        (EditorAction::Undo, vec![OBJECT, OBJECT + 1, OBJECT + 2]),
+        (EditorAction::Undo, vec![]), // Undo the original atomic three-object create.
+        (EditorAction::Redo, vec![OBJECT, OBJECT + 1, OBJECT + 2]),
+    ] {
+        let before = session.scene().status();
+        let rebuilds = session.work().document_rebuilds;
+        assert!(ui.execute(action).unwrap().model_changed);
+        render_session(&mut session, &gpu, &mut ui, &output);
+        let count = expected.len() as u64;
+        let bytes = expected
+            .iter()
+            .map(|id| if *id == OBJECT + 1 { 72 } else { 48 })
+            .sum::<u64>();
+        assert_eq!(session.work().document_rebuilds, rebuilds + 1);
+        assert_eq!(
+            upload_counts(&session),
+            (
+                before.geometry_uploads + count,
+                before.geometry_uploaded_bytes + bytes,
+                before.transform_uploads + count,
+                before.geometry_renderer_creations + 1,
+            )
+        );
+        assert_eq!(
+            session.scene().status().identity_allocations,
+            before.identity_allocations + count
+        );
+        assert_eq!(
+            session.scene().status().scene_metadata_upserts,
+            before.scene_metadata_upserts + count
+        );
+        assert_eq!(session.bridge().entity_count(), expected.len());
+        assert_eq!(session.scene().objects().len(), expected.len());
+        for (offset, position) in [[6.0, 16.0], [16.0, 8.0], [25.0, 24.0]]
+            .into_iter()
+            .enumerate()
+        {
+            let id = OBJECT + offset as u128;
+            let present = expected.contains(&id);
+            assert_eq!(
+                session
+                    .bridge()
+                    .entity_for_object(&SelectionItem::entity(id))
+                    .is_some(),
+                present
+            );
+            assert_eq!(
+                ui.controller()
+                    .object_root(&SelectionItem::entity(id))
+                    .is_ok(),
+                present
+            );
+            // Removing the middle descriptor shifts the right survivor from
+            // draw/instance key 2 to 1; it must keep its own geometry and ID.
+            pick_session_at(&mut session, &gpu, &mut ui, position, present.then_some(id));
+        }
+        // Negative silhouette controls distinguish vertex/index payloads from
+        // correctly remapped transforms and identity uniforms alone.
+        pick_session_at(&mut session, &gpu, &mut ui, [25.0, 8.0], None);
+        pick_session_at(&mut session, &gpu, &mut ui, [16.0, 24.0], None);
+        box_session(&mut session, &gpu, &mut ui, &expected);
+        let stable = upload_counts(&session);
+        render_session(&mut session, &gpu, &mut ui, &output);
+        assert_eq!(upload_counts(&session), stable);
+        assert_eq!(
+            session.scene().status().identity_allocations,
+            before.identity_allocations + count
+        );
+    }
+    assert_eq!(ui.controller().document_history_lengths(), (1, 1));
 }
 
 #[test]
@@ -870,6 +1442,8 @@ fn gpu_visibility_undo_redo_picking_retains_renderer_without_geometry_or_transfo
     );
     assert_eq!(baseline.2, 1);
     assert!(baseline.3 > 0);
+    assert_eq!(session.scene().status().identity_allocations, 1);
+    assert_eq!(session.scene().status().scene_metadata_upserts, 1);
     let before = session.work();
 
     // An in-flight old pick is fenced immediately, before the next encode.
@@ -897,12 +1471,14 @@ fn gpu_visibility_undo_redo_picking_retains_renderer_without_geometry_or_transfo
     render_session(&mut session, &gpu, &mut ui, &output);
     pick_session(&mut session, &gpu, &mut ui, false);
     assert_eq!(upload_counts(&session), baseline);
+    assert_eq!(session.scene().status().identity_allocations, 1);
 
     for (action, visible) in [(EditorAction::Undo, true), (EditorAction::Redo, false)] {
         ui.controller_mut().execute(action).unwrap();
         render_session(&mut session, &gpu, &mut ui, &output);
         pick_session(&mut session, &gpu, &mut ui, visible);
         assert_eq!(upload_counts(&session), baseline);
+        assert_eq!(session.scene().status().identity_allocations, 1);
     }
     assert_eq!(
         session.work().visibility_updates,
@@ -913,6 +1489,7 @@ fn gpu_visibility_undo_redo_picking_retains_renderer_without_geometry_or_transfo
         before.geometry_replacements
     );
     assert_eq!(session.work().document_rebuilds, before.document_rebuilds);
+    assert_eq!(session.scene().status().scene_metadata_upserts, 4);
 
     // Positive controls ensure these counters really observe GPU upload calls.
     edit(
@@ -926,6 +1503,7 @@ fn gpu_visibility_undo_redo_picking_retains_renderer_without_geometry_or_transfo
         upload_counts(&session),
         (baseline.0, baseline.1, baseline.2 + 1, baseline.3)
     );
+    assert_eq!(session.scene().status().scene_metadata_upserts, 4);
     edit(
         ui.controller_mut(),
         OBJECT,
@@ -936,8 +1514,10 @@ fn gpu_visibility_undo_redo_picking_retains_renderer_without_geometry_or_transfo
     let after_geometry = upload_counts(&session);
     assert_eq!(
         after_geometry,
-        (baseline.0 + 1, baseline.1 * 2, baseline.2 + 2, baseline.3)
+        (baseline.0 + 1, baseline.1 * 2, baseline.2 + 1, baseline.3),
+        "pure geometry retains the existing transform binding"
     );
+    assert_eq!(session.scene().status().scene_metadata_upserts, 5);
     assert_eq!(
         session.work().geometry_replacements,
         before.geometry_replacements + 1
@@ -948,4 +1528,298 @@ fn gpu_visibility_undo_redo_picking_retains_renderer_without_geometry_or_transfo
         after_geometry,
         "idle encode uploads nothing"
     );
+    assert_eq!(session.scene().status().identity_allocations, 1);
+    assert_eq!(session.scene().status().scene_metadata_upserts, 5);
+}
+
+#[test]
+fn gpu_multiple_syncs_before_encode_retain_unrelated_identity_resources_and_final_visibility() {
+    let Some(gpu) = gpu() else {
+        return;
+    };
+    let mut controller = EditorController::new();
+    for (offset, x) in [-0.6, 0.0, 0.6].into_iter().enumerate() {
+        let mut mesh = triangle();
+        mesh.positions = vec![[-0.2, -0.6, 0.5], [0.2, -0.6, 0.5], [0.0, 0.6, 0.5]];
+        mesh.matrix[3][0] = x;
+        register_mesh(&mut controller, OBJECT + offset as u128, mesh);
+    }
+    let controller = round_trip(&controller);
+    let mut session = EditorSceneSession::new(&controller).unwrap();
+    let mut ui = EditorDesktopUi::new(controller).unwrap();
+    session.initialize(&gpu).unwrap();
+    let output = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("scene-session retained identity proof"),
+        size: wgpu::Extent3d {
+            width: 32,
+            height: 32,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: gpu.format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    render_session(&mut session, &gpu, &mut ui, &output);
+    let baseline = upload_counts(&session);
+    assert_eq!((baseline.0, baseline.1, baseline.2), (3, 144, 3));
+    assert_eq!(session.scene().status().identity_allocations, 3);
+    assert_eq!(session.scene().status().scene_metadata_upserts, 3);
+    for (x, id) in [(6.0, OBJECT), (16.0, OBJECT + 1), (25.0, OBJECT + 2)] {
+        pick_session_at(&mut session, &gpu, &mut ui, [x, 16.0], Some(id));
+    }
+
+    // Publish several CPU deltas without encoding: the first mesh is edited
+    // twice and hidden/restored, while a different object remains hidden.
+    for (id, path, value) in [
+        (OBJECT, "positions[0][0]", ActionValue::float(-0.25)),
+        (OBJECT, "visible", ActionValue::bool(false)),
+        (OBJECT + 1, "visible", ActionValue::bool(false)),
+        (OBJECT, "positions[1][0]", ActionValue::float(0.25)),
+        (OBJECT + 2, "matrix[3][0]", ActionValue::float(0.55)),
+        (OBJECT, "visible", ActionValue::bool(true)),
+    ] {
+        edit(ui.controller_mut(), id, path, value);
+        assert!(session.synchronize(ui.controller()).unwrap());
+        assert_eq!(session.scene().status().identity_allocations, 3);
+    }
+    // Coalesce geometry AND matrix into one replacement, not the matrix-only
+    // path. It must upload the changed transform now, and not again at encode.
+    edit(
+        ui.controller_mut(),
+        OBJECT,
+        "positions[2][0]",
+        ActionValue::float(0.01),
+    );
+    edit(
+        ui.controller_mut(),
+        OBJECT,
+        "matrix[3][0]",
+        ActionValue::float(-0.55),
+    );
+    assert!(session.synchronize(ui.controller()).unwrap());
+    assert_eq!(
+        upload_counts(&session),
+        (baseline.0, baseline.1, baseline.2 + 2, baseline.3),
+        "only the independent and replacement matrix changes upload before encode"
+    );
+    assert_eq!(session.scene().status().scene_metadata_upserts, 3);
+    assert!(!session
+        .pointer(&gpu, &mut ui, [6.0, 16.0], SelectionMode::Replace)
+        .unwrap());
+    render_session(&mut session, &gpu, &mut ui, &output);
+    let first_upload = upload_counts(&session);
+    assert_eq!(
+        first_upload,
+        (baseline.0 + 1, baseline.1 + 48, baseline.2 + 2, baseline.3),
+        "coalesced geometry edits upload only one mesh, without another transform or renderer"
+    );
+    assert_eq!(
+        session.scene().status().scene_metadata_upserts,
+        5,
+        "one geometry and two visibility dirty indices form a two-object union, not three"
+    );
+    assert_eq!(
+        session.scene().status().identity_allocations,
+        3,
+        "one mesh edit must not rebuild its or unrelated objects' ID bindings"
+    );
+    for (x, expected) in [(6.0, Some(OBJECT)), (16.0, None), (25.0, Some(OBJECT + 2))] {
+        pick_session_at(&mut session, &gpu, &mut ui, [x, 16.0], expected);
+    }
+
+    // Two dirty meshes, plus visibility changes both before and after their
+    // replacements. The last state must win when the dirty patch is applied.
+    for (id, path, value) in [
+        (OBJECT + 1, "visible", ActionValue::bool(true)),
+        (OBJECT + 1, "positions[0][0]", ActionValue::float(-0.25)),
+        (OBJECT + 2, "visible", ActionValue::bool(false)),
+        (OBJECT, "positions[2][1]", ActionValue::float(0.7)),
+        (OBJECT + 2, "visible", ActionValue::bool(true)),
+        (OBJECT + 2, "visible", ActionValue::bool(false)),
+    ] {
+        edit(ui.controller_mut(), id, path, value);
+        assert!(session.synchronize(ui.controller()).unwrap());
+    }
+    render_session(&mut session, &gpu, &mut ui, &output);
+    let second_upload = upload_counts(&session);
+    assert_eq!(
+        second_upload,
+        (
+            first_upload.0 + 2,
+            first_upload.1 + 96,
+            first_upload.2,
+            baseline.3
+        )
+    );
+    assert_eq!(session.scene().status().scene_metadata_upserts, 8);
+    assert_eq!(session.scene().status().identity_allocations, 3);
+    for (x, expected) in [(6.0, Some(OBJECT)), (16.0, Some(OBJECT + 1)), (25.0, None)] {
+        pick_session_at(&mut session, &gpu, &mut ui, [x, 16.0], expected);
+    }
+    render_session(&mut session, &gpu, &mut ui, &output);
+    assert_eq!(upload_counts(&session), second_upload);
+    assert_eq!(session.scene().status().identity_allocations, 3);
+    assert_eq!(session.scene().status().scene_metadata_upserts, 8);
+
+    // A geometry-only update in a three-object scene visits just one metadata
+    // item, allocates no transform or identity, and retains unrelated entries.
+    edit(
+        ui.controller_mut(),
+        OBJECT,
+        "positions[1][0]",
+        ActionValue::float(0.26),
+    );
+    render_session(&mut session, &gpu, &mut ui, &output);
+    let third_upload = upload_counts(&session);
+    assert_eq!(
+        third_upload,
+        (
+            second_upload.0 + 1,
+            second_upload.1 + 48,
+            second_upload.2,
+            baseline.3
+        )
+    );
+    assert_eq!(session.scene().status().scene_metadata_upserts, 9);
+    assert_eq!(session.scene().status().identity_allocations, 3);
+    for (x, expected) in [(6.0, Some(OBJECT)), (16.0, Some(OBJECT + 1)), (25.0, None)] {
+        pick_session_at(&mut session, &gpu, &mut ui, [x, 16.0], expected);
+    }
+    box_session(&mut session, &gpu, &mut ui, &[OBJECT, OBJECT + 1]);
+
+    // Positive control: a fresh document upload really creates three identity
+    // uniform/bind-group pairs (including the hidden object's retained entry).
+    session.prepare_document(ui.controller()).unwrap();
+    session.commit_document();
+    render_session(&mut session, &gpu, &mut ui, &output);
+    assert_eq!(session.scene().status().identity_allocations, 6);
+    assert_eq!(session.scene().status().scene_metadata_upserts, 12);
+    assert_eq!(
+        upload_counts(&session),
+        (
+            third_upload.0 + 3,
+            third_upload.1 + 144,
+            third_upload.2 + 3,
+            baseline.3 + 1
+        )
+    );
+    for (x, expected) in [(6.0, Some(OBJECT)), (16.0, Some(OBJECT + 1)), (25.0, None)] {
+        pick_session_at(&mut session, &gpu, &mut ui, [x, 16.0], expected);
+    }
+}
+
+#[test]
+fn gpu_deferred_dirty_meshes_attach_and_resume_with_final_transforms_and_visibility() {
+    let Some(gpu) = gpu() else { return };
+    let mut controller = EditorController::new();
+    for (offset, x) in [-0.5, 0.5].into_iter().enumerate() {
+        let mut mesh = triangle();
+        mesh.positions = vec![[-0.3, -0.6, 0.5], [0.3, -0.6, 0.5], [0.0, 0.6, 0.5]];
+        mesh.matrix[3][0] = x;
+        register_mesh(&mut controller, OBJECT + offset as u128, mesh);
+    }
+    let controller = round_trip(&controller);
+    let mut session = EditorSceneSession::new(&controller).unwrap();
+    let mut ui = EditorDesktopUi::new(controller).unwrap();
+
+    // Pending geometry/property deltas exist before any native renderer does.
+    for (id, path, value) in [
+        (OBJECT, "positions[0][0]", ActionValue::float(-0.35)),
+        (OBJECT, "matrix[3][0]", ActionValue::float(-0.45)),
+        (OBJECT, "visible", ActionValue::bool(false)),
+    ] {
+        edit(ui.controller_mut(), id, path, value);
+    }
+    assert!(session.synchronize(ui.controller()).unwrap());
+    for (id, visible) in [(OBJECT, true), (OBJECT + 1, false)] {
+        edit(
+            ui.controller_mut(),
+            id,
+            "visible",
+            ActionValue::bool(visible),
+        );
+        assert!(session.synchronize(ui.controller()).unwrap());
+    }
+    assert_eq!(upload_counts(&session), (0, 0, 0, 0));
+    assert_eq!(session.scene().status().scene_metadata_upserts, 0);
+    assert_eq!(session.scene().status().identity_allocations, 0);
+
+    session.initialize(&gpu).unwrap();
+    let output = session_output(&gpu, "scene-session deferred dirty recovery proof");
+    render_session(&mut session, &gpu, &mut ui, &output);
+    let attached = upload_counts(&session);
+    assert_eq!((attached.0, attached.1, attached.2), (2, 96, 2));
+    assert_eq!(session.scene().status().scene_metadata_upserts, 2);
+    assert_eq!(session.scene().status().identity_allocations, 2);
+    pick_session_at(&mut session, &gpu, &mut ui, [9.0, 16.0], Some(OBJECT));
+    pick_session_at(&mut session, &gpu, &mut ui, [23.0, 16.0], None);
+    box_session(&mut session, &gpu, &mut ui, &[OBJECT]);
+
+    // Recovery must populate all resources, not just the dirty union, including
+    // the hidden unchanged mesh. Several suspended syncs leave only final data.
+    session.suspend();
+    for (id, path, value) in [
+        (OBJECT + 1, "positions[0][0]", ActionValue::float(-0.35)),
+        (OBJECT + 1, "matrix[3][0]", ActionValue::float(0.45)),
+        (OBJECT + 1, "visible", ActionValue::bool(true)),
+    ] {
+        edit(ui.controller_mut(), id, path, value);
+    }
+    assert!(session.synchronize(ui.controller()).unwrap());
+    for (id, visible) in [(OBJECT, false), (OBJECT + 1, false), (OBJECT + 1, true)] {
+        edit(
+            ui.controller_mut(),
+            id,
+            "visible",
+            ActionValue::bool(visible),
+        );
+        assert!(session.synchronize(ui.controller()).unwrap());
+    }
+    assert_eq!(upload_counts(&session), attached);
+    assert_eq!(session.scene().status().scene_metadata_upserts, 2);
+    session.initialize(&gpu).unwrap();
+    render_session(&mut session, &gpu, &mut ui, &output);
+    let resumed = upload_counts(&session);
+    assert_eq!(resumed, (4, 192, 4, attached.3 + 2));
+    assert_eq!(session.scene().status().scene_metadata_upserts, 4);
+    assert_eq!(session.scene().status().identity_allocations, 4);
+    pick_session_at(&mut session, &gpu, &mut ui, [9.0, 16.0], None);
+    pick_session_at(&mut session, &gpu, &mut ui, [23.0, 16.0], Some(OBJECT + 1));
+    box_session(&mut session, &gpu, &mut ui, &[OBJECT + 1]);
+
+    // One replacement carries both matrix and geometry. Actual picks distinguish
+    // its new binding from the old transform; encode must not upload it twice.
+    for (path, value) in [
+        ("positions[1][0]", ActionValue::float(0.35)),
+        ("matrix[3][0]", ActionValue::float(0.0)),
+        ("visible", ActionValue::bool(false)),
+    ] {
+        edit(ui.controller_mut(), OBJECT + 1, path, value);
+    }
+    assert!(session.synchronize(ui.controller()).unwrap());
+    assert_eq!(
+        upload_counts(&session),
+        (resumed.0, resumed.1, resumed.2 + 1, resumed.3)
+    );
+    edit(
+        ui.controller_mut(),
+        OBJECT + 1,
+        "visible",
+        ActionValue::bool(true),
+    );
+    assert!(session.synchronize(ui.controller()).unwrap());
+    render_session(&mut session, &gpu, &mut ui, &output);
+    let retained = upload_counts(&session);
+    assert_eq!(retained, (5, 240, 5, resumed.3));
+    assert_eq!(session.scene().status().scene_metadata_upserts, 5);
+    assert_eq!(session.scene().status().identity_allocations, 4);
+    pick_session_at(&mut session, &gpu, &mut ui, [16.0, 16.0], Some(OBJECT + 1));
+    pick_session_at(&mut session, &gpu, &mut ui, [23.0, 16.0], None);
+    box_session(&mut session, &gpu, &mut ui, &[OBJECT + 1]);
+    render_session(&mut session, &gpu, &mut ui, &output);
+    assert_eq!(upload_counts(&session), retained);
+    assert_eq!(session.scene().status().scene_metadata_upserts, 5);
 }

@@ -140,6 +140,12 @@ pub struct DesktopSceneStatus {
     pub transform_uploads: u64,
     /// Geometry renderer allocations, including initialize/resume and reload.
     pub geometry_renderer_creations: u64,
+    /// Actual per-object ID resource allocations across renderer replacements.
+    /// Each allocation creates one identity uniform buffer and one bind group.
+    pub identity_allocations: u64,
+    /// Metadata items submitted for fresh snapshots or retained dirty patches.
+    /// Unchanged objects outside a retained dirty union are not visited here.
+    pub scene_metadata_upserts: u64,
 }
 
 struct PendingClick {
@@ -356,11 +362,19 @@ impl DesktopScene {
                 visibility_changes.push((index, *visible));
             }
         }
+        // A replacement can carry a matrix edit as well as geometry. Publish
+        // its final matrix through the same equality-checked transform path;
+        // retained geometry uploads must not recreate transform bindings.
+        let model_updates: Vec<_> = models
+            .iter()
+            .copied()
+            .chain(replacements.iter().map(|object| (object.id, object.model)))
+            .collect();
         self.scene
             .generation()
-            .checked_add(models.len() as u64 + 1)
+            .checked_add(model_updates.len() as u64 + 1)
             .ok_or_else(|| message("scene generation exhausted"))?;
-        self.apply_models(models)?;
+        self.apply_models(&model_updates)?;
         if !replacements.is_empty() || !visibility_changes.is_empty() {
             self.scene.invalidate_content().map_err(renderer_error)?;
             self.cancel_pending();
@@ -1182,43 +1196,15 @@ impl DesktopScene {
     }
 
     fn upload(&mut self, gpu: &DesktopGpu) -> Result<(), DesktopError> {
-        if !self.needs_upload && self.geometry_dirty.is_empty() {
-            let native = self
-                .gpu
-                .as_mut()
-                .ok_or_else(|| message("missing GPU scene"))?;
-            // Patch only draw metadata. Keep the renderer, mesh buffers,
-            // transforms and stable per-object ID bindings; never visit geometry.
-            let operations = self
-                .visibility_dirty
-                .iter()
-                .map(|index| {
-                    let object = &self.objects[*index];
-                    let key = *index as u64;
-                    SceneIdPassOperation::Upsert(SceneIdPassItem::new(
-                        object.id,
-                        key,
-                        key,
-                        object.visible,
-                        object.sort_key,
-                    ))
-                })
-                .collect::<Vec<_>>();
-            let commit = self.scene.apply_patch(operations).map_err(renderer_error)?;
-            self.scene
-                .record_commit(&commit, &mut native.renderer)
-                .unwrap_or_else(|never| match never {});
-            self.visibility_dirty.clear();
-            return Ok(());
-        }
         let uploads = if self.needs_upload {
             self.objects.len()
         } else {
             self.geometry_dirty.len()
         };
+        let invalidations_per_upload = if self.needs_upload { 2 } else { 1 };
         self.scene
             .generation()
-            .checked_add(uploads as u64 * 2 + 1)
+            .checked_add(uploads as u64 * invalidations_per_upload + 1)
             .ok_or_else(|| message("scene generation exhausted"))?;
         let mut fresh = self
             .needs_upload
@@ -1237,8 +1223,20 @@ impl DesktopScene {
                     .renderer
             }
         };
-        let mut items = Vec::with_capacity(self.objects.len());
-        for (index, object) in self.objects.iter().enumerate() {
+        // Only fresh attach/recovery scans the full scene. The retained path
+        // visits the union once, including final visibility from any number of
+        // CPU synchronizations before encode; no unrelated geometry is read.
+        let indices: Vec<_> = if self.needs_upload {
+            (0..self.objects.len()).collect()
+        } else {
+            self.geometry_dirty
+                .union(&self.visibility_dirty)
+                .copied()
+                .collect()
+        };
+        let mut items = Vec::with_capacity(indices.len());
+        for index in indices {
+            let object = &self.objects[index];
             let key = index as u64;
             if self.needs_upload || self.geometry_dirty.contains(&index) {
                 renderer
@@ -1249,6 +1247,8 @@ impl DesktopScene {
                     .counters
                     .geometry_uploaded_bytes
                     .saturating_add(geometry_bytes(object));
+            }
+            if self.needs_upload {
                 renderer
                     .set_transform(&mut self.scene, key, object.model)
                     .map_err(renderer_error)?;
@@ -1262,8 +1262,34 @@ impl DesktopScene {
                 object.sort_key,
             ));
         }
-        self.scene.submit(items).map_err(renderer_error)?;
-        renderer.synchronize(&self.scene);
+        let metadata_upserts = items.len() as u64;
+        let commit = if self.needs_upload {
+            self.scene.submit(items)
+        } else {
+            self.scene
+                .apply_patch(items.into_iter().map(SceneIdPassOperation::Upsert))
+        }
+        .map_err(renderer_error)?;
+        self.counters.scene_metadata_upserts = self
+            .counters
+            .scene_metadata_upserts
+            .saturating_add(metadata_upserts);
+        let identities_before = renderer.identity_allocations();
+        if self.needs_upload {
+            // Fresh attach/recovery must populate even unchanged pass entries.
+            renderer.synchronize(&self.scene);
+        } else {
+            // Geometry uploads already replaced only dirty mesh resources.
+            // Apply final metadata (including any accumulated visibility edits)
+            // without clearing unrelated retained identity uniforms/bind groups.
+            self.scene
+                .record_commit(&commit, renderer)
+                .unwrap_or_else(|never| match never {});
+        }
+        self.counters.identity_allocations = self
+            .counters
+            .identity_allocations
+            .saturating_add(renderer.identity_allocations() - identities_before);
         if let Some(renderer) = fresh {
             self.gpu
                 .as_mut()
@@ -1838,7 +1864,7 @@ mod tests {
             }),
         })
         .expect("adapter scene");
-        let controller = controller(&[object.clone()]);
+        let controller = controller(core::slice::from_ref(&object));
 
         DesktopRenderer::prepare_document(&mut scene, &controller).expect("stage candidate");
         assert!(

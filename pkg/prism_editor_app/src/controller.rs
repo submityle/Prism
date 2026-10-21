@@ -28,6 +28,10 @@ use prism_reflect::{
 
 use crate::ControllerObjectValidator;
 
+mod structure;
+use structure::StoredStructure;
+pub use structure::{ControllerAuthoringCommand, ControllerObject};
+
 /// Resource bounds checked before committing controller state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ControllerLimits {
@@ -211,13 +215,33 @@ impl From<OutlinerError> for ControllerError {
     }
 }
 
-type CommandFactory =
-    dyn Fn(&EditorController) -> Result<EditorAction, ControllerError> + Send + Sync;
+#[derive(Clone)]
+enum CommandFactory {
+    Action(Arc<dyn Fn(&EditorController) -> Result<EditorAction, ControllerError> + Send + Sync>),
+    Authoring(
+        Arc<
+            dyn Fn(&EditorController) -> Result<ControllerAuthoringCommand, ControllerError>
+                + Send
+                + Sync,
+        >,
+    ),
+}
 
 // Capture the target at execution, never resolve it from current selection.
 // Only scalar leaves are exchanged, preserving the concrete host roots.
 struct DocumentEdit {
     fields: Vec<StoredField>,
+    structure: Option<StoredStructure>,
+}
+
+impl DocumentEdit {
+    fn touches(&self, item: &SelectionItem) -> bool {
+        self.fields.iter().any(|field| &field.item == item)
+            || self
+                .structure
+                .as_ref()
+                .is_some_and(|s| s.objects.contains_key(item))
+    }
 }
 
 struct StoredField {
@@ -242,108 +266,7 @@ fn changed_fields(fields: &[StoredField]) -> ChangedFields {
 }
 
 #[cfg(test)]
-mod journal_tests {
-    use super::*;
-
-    #[derive(Clone, Reflect)]
-    struct Model {
-        matrix: [[f32; 2]; 2],
-        visible: bool,
-    }
-
-    #[test]
-    fn field_journal_coalesces_nested_fields_and_tracks_history_navigation() {
-        let mut controller = EditorController::new();
-        let item = SelectionItem::entity(1);
-        let mut registry = TypeRegistry::new();
-        registry.register::<Model>();
-        controller
-            .register_object(
-                item.clone(),
-                Box::new(Model {
-                    matrix: [[0.0; 2]; 2],
-                    visible: true,
-                }),
-                registry,
-            )
-            .unwrap();
-        let shape = controller.shape_revision();
-        controller.select(item.clone()).unwrap();
-        assert_eq!(controller.shape_revision(), shape);
-        let prepared = controller
-            .prepare_edits(vec![
-                ControllerFieldEdit {
-                    item: item.clone(),
-                    path: FieldPath::parse("matrix[0][0]").unwrap(),
-                    value: ActionValue::float(1.0),
-                },
-                ControllerFieldEdit {
-                    item: item.clone(),
-                    path: FieldPath::parse("matrix[1][1]").unwrap(),
-                    value: ActionValue::float(1.0),
-                },
-            ])
-            .unwrap();
-        controller.commit_edits(prepared).unwrap();
-        assert_eq!(
-            controller.changed_fields_since(0).unwrap()[&item],
-            BTreeSet::from(["matrix".to_owned()])
-        );
-        controller.execute(EditorAction::Undo).unwrap();
-        assert_eq!(
-            controller.changed_fields_since(1).unwrap()[&item],
-            BTreeSet::from(["matrix".to_owned()])
-        );
-        controller.execute(EditorAction::Redo).unwrap();
-        assert_eq!(
-            controller.changed_objects_since(2),
-            Some(vec![item.clone()])
-        );
-        controller
-            .execute(EditorAction::EditInspectorField {
-                path: FieldPath::parse("visible").unwrap(),
-                value: ActionValue::bool(false),
-            })
-            .unwrap();
-        assert_eq!(
-            controller.changed_fields_since(0).unwrap()[&item],
-            BTreeSet::from(["matrix".to_owned(), "visible".to_owned()])
-        );
-        assert_eq!(controller.shape_revision(), shape);
-        assert!(controller.changed_fields_since(5).is_none());
-    }
-
-    #[test]
-    fn bounded_journal_requests_full_resync_after_history_gap() {
-        let mut controller = EditorController::with_limits(ControllerLimits {
-            max_history: 1,
-            ..ControllerLimits::default()
-        });
-        let item = SelectionItem::entity(1);
-        let mut registry = TypeRegistry::new();
-        registry.register::<Model>();
-        controller
-            .register_object(
-                item.clone(),
-                Box::new(Model {
-                    matrix: [[0.0; 2]; 2],
-                    visible: true,
-                }),
-                registry,
-            )
-            .unwrap();
-        controller.select(item).unwrap();
-        controller
-            .execute(EditorAction::EditInspectorField {
-                path: FieldPath::parse("visible").unwrap(),
-                value: ActionValue::bool(false),
-            })
-            .unwrap();
-        controller.execute(EditorAction::Undo).unwrap();
-        assert!(controller.changed_fields_since(0).is_none());
-        assert!(controller.changed_fields_since(1).is_some());
-    }
-}
+mod journal_tests;
 
 /// One explicit host-authored field replacement in an atomic document command.
 pub struct ControllerFieldEdit {
@@ -360,6 +283,7 @@ pub struct PreparedControllerEdit {
     objects: BTreeMap<SelectionItem, ReflectEditorContext>,
     fields: Vec<StoredField>,
     model_revision: u64,
+    shape_revision: u64,
     owner: Arc<()>,
 }
 
@@ -373,9 +297,9 @@ impl PreparedControllerEdit {
 /// Owns editor models, selection, projections, and bounded action execution.
 ///
 /// No mutable object/context getters are exposed: every accepted model edit goes
-/// through existing reversible reflection field commands. Command
-/// factories only receive a shared controller and return one action; controller
-/// mutations are therefore still validated and committed by this executor.
+/// through reversible field or structural commands. Command factories only
+/// receive a shared controller; their results are validated and committed by
+/// this executor. Factories are host configuration, not serialized model data.
 pub struct EditorController {
     objects: BTreeMap<SelectionItem, ReflectEditorContext>,
     undo: Vec<DocumentEdit>,
@@ -385,11 +309,12 @@ pub struct EditorController {
     // Parent-before-child insertion order, without the projection's child lists.
     rows: Vec<OutlinerNode>,
     anchor: Option<OutlinerId>,
-    commands: BTreeMap<String, Box<CommandFactory>>,
+    commands: BTreeMap<String, CommandFactory>,
     limits: ControllerLimits,
     revision: u64,
     model_revision: u64,
     shape_revision: u64,
+    identity_high_water: u128,
     saved_model_revision: u64,
     edit_active: bool,
     changes: VecDeque<(u64, ChangedFields)>,
@@ -425,6 +350,7 @@ impl EditorController {
             revision: 0,
             model_revision: 0,
             shape_revision: 0,
+            identity_high_water: 0,
             saved_model_revision: 0,
             edit_active: false,
             changes: VecDeque::new(),
@@ -454,6 +380,8 @@ impl EditorController {
         }
         validate_object(&item, &*root, &registry, &[])?;
         self.ensure_revision(false)?;
+        self.ensure_shape_revision()?;
+        self.observe_identity(&item);
         self.objects
             .insert(item, ReflectEditorContext::new(root, registry));
         self.advance(false);
@@ -493,8 +421,10 @@ impl EditorController {
             parent = ancestor.parent();
         }
         self.ensure_revision(false)?;
+        self.ensure_shape_revision()?;
         let row = copy_row(&node);
         self.outliner.insert(row.clone())?;
+        self.identity_high_water = self.identity_high_water.max(row.id().raw());
         self.rows.push(row);
         self.advance(false);
         self.shape_revision += 1;
@@ -525,8 +455,55 @@ impl EditorController {
             "registered commands",
         )?;
         self.ensure_revision(false)?;
-        self.commands.insert(command_id, Box::new(factory));
+        self.commands
+            .insert(command_id, CommandFactory::Action(Arc::new(factory)));
         self.advance(false);
+        Ok(())
+    }
+
+    /// Registers a complete authoring profile atomically. Duplicate IDs,
+    /// exhausted budgets or invalid IDs leave all registrations unchanged.
+    /// Factory evaluation happens only when the user executes a command.
+    pub fn register_authoring_commands<I, F>(&mut self, commands: I) -> Result<(), ControllerError>
+    where
+        I: IntoIterator<Item = (String, F)>,
+        F: Fn(&EditorController) -> Result<ControllerAuthoringCommand, ControllerError>
+            + Send
+            + Sync
+            + 'static,
+    {
+        let mut candidate = BTreeMap::new();
+        for (id, factory) in commands {
+            ActionTemplate::execute_command(id.clone())?;
+            if self.commands.contains_key(&id) || candidate.contains_key(&id) {
+                return Err(ControllerError::DuplicateCommand(id));
+            }
+            ensure_capacity(
+                candidate.len(),
+                self.limits.max_commands.saturating_sub(self.commands.len()),
+                "registered commands",
+            )?;
+            candidate.insert(id, CommandFactory::Authoring(Arc::new(factory)));
+        }
+        if candidate.is_empty() {
+            return Ok(());
+        }
+        self.ensure_revision(false)?;
+        self.commands.append(&mut candidate);
+        self.advance(false);
+        Ok(())
+    }
+
+    // A decoded document has no factories. Reuse the current host's immutable
+    // callbacks before constructing replacement UI; never read code from disk.
+    pub(crate) fn inherit_commands(&mut self, source: &Self) -> Result<(), ControllerError> {
+        ensure_bound(
+            source.commands.len(),
+            self.limits.max_commands,
+            "registered commands",
+        )?;
+        debug_assert!(self.commands.is_empty());
+        self.commands = source.commands.clone();
         Ok(())
     }
 
@@ -555,7 +532,16 @@ impl EditorController {
                 .ok_or_else(|| ControllerError::UnknownCommand(command_id.clone()))?;
             ensure_capacity(depth, self.limits.max_command_depth, "command indirections")?;
             depth += 1;
-            action = factory(self)?;
+            match factory {
+                CommandFactory::Action(factory) => action = factory(self)?,
+                CommandFactory::Authoring(factory) => {
+                    let command = factory(self)?;
+                    return match command {
+                        ControllerAuthoringCommand::Create(objects) => self.create_objects(objects),
+                        ControllerAuthoringCommand::Delete(items) => self.delete_objects(&items),
+                    };
+                }
+            }
         }
         match action {
             EditorAction::SelectOutliner { node, mode } => self.select_outliner(node, mode),
@@ -696,16 +682,18 @@ impl EditorController {
     /// Counts this object's entries within the global undo/redo timeline. These
     /// counts are diagnostic only: navigation always follows document order.
     pub fn history_lengths(&self, item: &SelectionItem) -> Result<(usize, usize), ControllerError> {
-        self.editor(item)?;
+        if !self.objects.contains_key(item)
+            && !self
+                .undo
+                .iter()
+                .chain(&self.redo)
+                .any(|entry| entry.touches(item))
+        {
+            return Err(ControllerError::MissingObject(item.clone()));
+        }
         Ok((
-            self.undo
-                .iter()
-                .filter(|entry| entry.fields.iter().any(|field| &field.item == item))
-                .count(),
-            self.redo
-                .iter()
-                .filter(|entry| entry.fields.iter().any(|field| &field.item == item))
-                .count(),
+            self.undo.iter().filter(|entry| entry.touches(item)).count(),
+            self.redo.iter().filter(|entry| entry.touches(item)).count(),
         ))
     }
 
@@ -913,7 +901,8 @@ impl EditorController {
     }
 
     /// Changed identities since a renderer revision. None requests a full resync
-    /// when the bounded journal no longer covers the requested revision.
+    /// when the bounded journal no longer covers the requested revision or an
+    /// object/row structure change requires rebuilding the projection.
     pub fn changed_objects_since(&self, revision: u64) -> Option<Vec<SelectionItem>> {
         self.changed_fields_since(revision)
             .map(|changed| changed.into_keys().collect())
@@ -1044,10 +1033,7 @@ impl EditorController {
             ensure_capacity(self.undo.len(), self.limits.max_history, "document history")?;
             for item in objects.keys() {
                 ensure_capacity(
-                    self.undo
-                        .iter()
-                        .filter(|e| e.fields.iter().any(|field| &field.item == item))
-                        .count(),
+                    self.undo.iter().filter(|e| e.touches(item)).count(),
                     self.limits.max_history_per_object,
                     "object commands in document history",
                 )?;
@@ -1058,6 +1044,7 @@ impl EditorController {
             objects,
             fields,
             model_revision: self.model_revision,
+            shape_revision: self.shape_revision,
             owner: self.identity.clone(),
         })
     }
@@ -1071,6 +1058,7 @@ impl EditorController {
         self.ensure_idle()?;
         if !Arc::ptr_eq(&prepared.owner, &self.identity)
             || prepared.model_revision != self.model_revision
+            || prepared.shape_revision != self.shape_revision
         {
             return Err(ControllerError::EditConflict);
         }
@@ -1083,6 +1071,7 @@ impl EditorController {
         self.redo.clear();
         self.undo.push(DocumentEdit {
             fields: prepared.fields,
+            structure: None,
         });
         self.advance(true);
         self.record_changes(items);
@@ -1102,6 +1091,36 @@ impl EditorController {
             return Ok(self.outcome(false, false));
         };
         self.ensure_revision(true)?;
+        if source.last().is_some_and(|entry| entry.structure.is_some()) {
+            self.ensure_shape_revision()?;
+            // Keep the entry owned on every validation failure. Structural
+            // exchange validates its complete row/object candidate first.
+            let mut entry = if redo {
+                self.redo.pop()
+            } else {
+                self.undo.pop()
+            }
+            .expect("history checked above");
+            let result =
+                self.exchange_structure(entry.structure.as_mut().expect("structural entry"));
+            if let Err(error) = result {
+                if redo {
+                    self.redo.push(entry);
+                } else {
+                    self.undo.push(entry);
+                };
+                return Err(error);
+            }
+            if redo {
+                self.undo.push(entry);
+            } else {
+                self.redo.push(entry);
+            };
+            self.advance(true);
+            self.shape_revision += 1;
+            self.changes.clear();
+            return Ok(self.outcome(true, true));
+        }
         let (source, destination) = if redo {
             (&mut self.redo, &mut self.undo)
         } else {

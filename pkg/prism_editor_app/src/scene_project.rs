@@ -4,16 +4,14 @@
 //! project manifest only after revision zero of that cell is durable. Opening
 //! fully validates and installs the document before the native window starts.
 
+use alloc::{sync::Arc, task::Wake};
+use core::fmt;
 use std::{
-    fmt,
     fs::{self, File, OpenOptions},
     io::{self, Write},
     path::{Component, Path, PathBuf},
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc,
-    },
-    task::{Context, Poll, Wake, Waker},
+    sync::atomic::{AtomicU64, Ordering},
+    task::{Context, Poll, Waker},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };

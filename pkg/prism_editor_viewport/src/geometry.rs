@@ -129,6 +129,7 @@ pub struct SceneIdGeometryRenderer {
     geometry: BTreeMap<u64, Geometry>,
     transforms: BTreeMap<u64, wgpu::BindGroup>,
     draws: BTreeMap<SceneObjectId, Draw>,
+    identity_allocations: u64,
 }
 
 impl SceneIdGeometryRenderer {
@@ -161,7 +162,16 @@ impl SceneIdGeometryRenderer {
             geometry: BTreeMap::new(),
             transforms: BTreeMap::new(),
             draws: BTreeMap::new(),
+            identity_allocations: 0,
         }
+    }
+
+    /// Actual identity resource allocations over this renderer's lifetime.
+    /// Each allocation creates one uniform buffer and one bind group; retained
+    /// entries with unchanged tokens do not increment this count.
+    #[must_use]
+    pub const fn identity_allocations(&self) -> u64 {
+        self.identity_allocations
     }
 
     /// Uploads/replaces an indexed triangle-list mesh for `draw_key`. Positions
@@ -332,6 +342,7 @@ impl SceneIdGeometryRenderer {
             .flat_map(|word| word.to_le_bytes())
             .collect();
         let identity = uniform(&self.device, &self.identity_layout, &bytes);
+        self.identity_allocations = self.identity_allocations.saturating_add(1);
         self.draws.insert(entry.item().id, Draw { entry, identity });
     }
 }

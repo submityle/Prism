@@ -21,7 +21,7 @@ use std::{
 use prism_asset::StableGuid;
 use prism_ecs::partition::cell::CellCoord;
 use prism_editor_app::{
-    ControllerLimits, DecodedDocument, DesktopKey, DocumentCodec, DocumentError,
+    ControllerError, ControllerLimits, DecodedDocument, DesktopKey, DocumentCodec, DocumentError,
     DocumentFileAdapter, DocumentIoEvent, DocumentLimits, DocumentLoadReceipt, DocumentSaveReceipt,
     DocumentSchemaCatalog, EditorController, EditorDesktopUi,
 };
@@ -1014,6 +1014,160 @@ fn cancelled_save_requires_reconciliation_and_retry_never_marks_clean_implicitly
     assert!(!controller.is_dirty());
     assert!(!adapter.reconciliation_required());
     assert!(matches!(adapter.retry_save(), Err(DocumentError::NoRetry)));
+}
+
+#[test]
+fn reload_retains_host_factories_without_executing_them_and_rejects_smaller_budget() {
+    use std::sync::atomic::AtomicUsize;
+    let temp = Temp::new();
+    seed(&temp, &mut controller());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut current = EditorController::new();
+    let observed = calls.clone();
+    current
+        .register_command("host.edit", move |_| {
+            observed.fetch_add(1, Ordering::Relaxed);
+            Ok(EditorAction::EditInspectorField {
+                path: FieldPath::parse("count").unwrap(),
+                value: ActionValue::integer(73),
+            })
+        })
+        .unwrap();
+    let mut adapter = temp.adapter();
+    adapter.submit_load(&current, &catalog()).unwrap();
+    let prepared = loaded(&mut adapter)
+        .prepare(
+            &catalog(),
+            ControllerLimits {
+                max_commands: 0,
+                ..ControllerLimits::default()
+            },
+        )
+        .unwrap();
+    let revision = current.revision();
+    assert!(matches!(
+        prepared.install(&mut adapter, &mut current, &catalog()),
+        Err(DocumentError::Controller(
+            ControllerError::BudgetExceeded { .. }
+        ))
+    ));
+    assert!(current.has_command("host.edit"));
+    assert_eq!(current.revision(), revision);
+    assert_eq!(current.document_objects().len(), 0);
+    assert_eq!(adapter.durable_revision(), None);
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+    open(&mut adapter, &mut current);
+    assert!(current.has_command("host.edit"));
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+    assert!(!current.is_dirty());
+    current.select(items()[0].clone()).unwrap();
+    current
+        .execute(EditorAction::ExecuteCommand {
+            command_id: "host.edit".into(),
+        })
+        .unwrap();
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    assert_eq!(snapshot(&current, &items()[0]).count, 73);
+    current.execute(EditorAction::Undo).unwrap();
+    assert_eq!(snapshot(&current, &items()[0]).count, 0);
+}
+
+#[test]
+fn reload_ui_command_budget_failure_preserves_live_ui_and_durable_base() {
+    let temp = Temp::new();
+    seed(&temp, &mut controller());
+    let mut current = EditorController::new();
+    current
+        .register_command("host.undo", |_| Ok(EditorAction::Undo))
+        .unwrap();
+    let mut ui = EditorDesktopUi::new(current).unwrap();
+    ui.resize(987.0, 654.0).unwrap();
+    let size = ui.size();
+    let revision = ui.controller().revision();
+    let mut adapter = temp.adapter();
+    adapter.submit_load(ui.controller(), &catalog()).unwrap();
+    let prepared = loaded(&mut adapter)
+        .prepare(
+            &catalog(),
+            ControllerLimits {
+                max_commands: 0,
+                ..ControllerLimits::default()
+            },
+        )
+        .unwrap();
+    assert!(matches!(
+        prepared.install_ui(&mut adapter, &mut ui, &catalog()),
+        Err(DocumentError::Controller(
+            ControllerError::BudgetExceeded { .. }
+        ))
+    ));
+    assert_eq!(ui.size(), size);
+    assert_eq!(ui.controller().revision(), revision);
+    assert!(ui.controller().has_command("host.undo"));
+    assert_eq!(ui.controller().document_objects().len(), 0);
+    assert_eq!(adapter.durable_revision(), None);
+}
+
+#[cfg(feature = "desktop")]
+#[test]
+fn mesh_reload_retains_authoring_ui_commands_and_real_scene_sync() {
+    use prism_editor_app::{
+        editor_scene_mesh_catalog, install_scene_authoring_commands, EditorSceneSession,
+        SCENE_ADD_TRIANGLE_COMMAND, SCENE_DELETE_SELECTION_COMMAND,
+    };
+    let temp = Temp::new();
+    let catalog = editor_scene_mesh_catalog().unwrap();
+    let mut source = EditorController::new();
+    install_scene_authoring_commands(&mut source).unwrap();
+    source
+        .execute(EditorAction::ExecuteCommand {
+            command_id: SCENE_ADD_TRIANGLE_COMMAND.into(),
+        })
+        .unwrap();
+    let original = source.selection().primary().unwrap().clone();
+    let mut writer = temp.adapter();
+    writer.submit_save(&source, &catalog).unwrap();
+    saved(&mut writer)
+        .acknowledge(&mut source, &catalog)
+        .unwrap();
+    let mut current = EditorController::new();
+    install_scene_authoring_commands(&mut current).unwrap();
+    let mut ui = EditorDesktopUi::new(current).unwrap();
+    ui.resize(1000.0, 700.0).unwrap();
+    let mut adapter = temp.adapter();
+    adapter.submit_load(ui.controller(), &catalog).unwrap();
+    let prepared = loaded(&mut adapter)
+        .prepare(&catalog, ControllerLimits::default())
+        .unwrap();
+    prepared
+        .install_ui(&mut adapter, &mut ui, &catalog)
+        .unwrap();
+    assert_eq!(ui.size().width, 1000.0);
+    assert!(ui.controller().has_command(SCENE_ADD_TRIANGLE_COMMAND));
+    assert!(ui.controller().has_command(SCENE_DELETE_SELECTION_COMMAND));
+    assert!(glyphs(&ui).iter().any(|s| s == "Add triangle"));
+    assert!(!ui.controller().is_dirty());
+    assert_eq!(ui.controller().document_history_lengths(), (0, 0));
+    let mut scene = EditorSceneSession::new(ui.controller()).unwrap();
+    assert_eq!(scene.bridge().entity_count(), 1);
+    ui.controller_mut()
+        .execute(EditorAction::ExecuteCommand {
+            command_id: SCENE_ADD_TRIANGLE_COMMAND.into(),
+        })
+        .unwrap();
+    assert_ne!(ui.controller().selection().primary(), Some(&original));
+    scene.synchronize(ui.controller()).unwrap();
+    assert_eq!(scene.scene().objects().len(), 2);
+    ui.controller_mut()
+        .execute(EditorAction::ExecuteCommand {
+            command_id: SCENE_DELETE_SELECTION_COMMAND.into(),
+        })
+        .unwrap();
+    scene.synchronize(ui.controller()).unwrap();
+    assert_eq!(scene.scene().objects().len(), 1);
+    ui.controller_mut().execute(EditorAction::Undo).unwrap();
+    scene.synchronize(ui.controller()).unwrap();
+    assert_eq!(scene.scene().objects().len(), 2);
 }
 
 #[test]

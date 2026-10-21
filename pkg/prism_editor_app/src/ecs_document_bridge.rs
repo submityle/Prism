@@ -1,8 +1,8 @@
 //! Explicit bridge between validated editor documents and reflected ECS models.
 //!
-//! The editor owns stable SelectionItem identities and authoring metadata;
+//! The editor owns stable `SelectionItem` identities and authoring metadata;
 //! ECS owns live generational entities. This bridge records their mapping,
-//! projects Outliner rows into ChildOf, and transfers only model roots whose
+//! projects Outliner rows into `ChildOf`, and transfers only model roots whose
 //! component types the host registered with World reflection. It embeds no
 //! project-specific gameplay types.
 
@@ -156,7 +156,7 @@ impl From<ControllerError> for EditorEcsDocumentError {
 /// It creates one entity per Outliner row, including grouping rows. Objects
 /// absent from the Outliner receive detached entities. An object may bind to at
 /// most one row. Capturing returns a new clean controller suitable for
-/// DocumentCodec encoding; it never mutates the source controller or its
+/// `DocumentCodec` encoding; it never mutates the source controller or its
 /// undo/redo history.
 pub struct EditorEcsDocumentBridge {
     objects: BTreeMap<SelectionItem, Entity>,

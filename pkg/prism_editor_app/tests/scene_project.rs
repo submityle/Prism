@@ -2,14 +2,16 @@
 
 #![cfg(feature = "desktop")]
 
+extern crate alloc;
+
+use alloc::{sync::Arc, task::Wake};
+use core::task::{Context, Poll, Waker};
 use std::fs;
 use std::io;
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use std::task::{Context, Poll, Wake, Waker};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -154,9 +156,8 @@ fn open(path: &Path) -> SceneProjectOpen {
 }
 
 fn assert_create_rejected(path: &Path) {
-    let error = match SceneProject::create(path) {
-        Ok(_) => panic!("unsafe scene project create unexpectedly succeeded at {path:?}"),
-        Err(error) => error,
+    let Err(error) = SceneProject::create(path) else {
+        panic!("unsafe scene project create unexpectedly succeeded at {path:?}");
     };
     assert!(
         !error.to_string().is_empty(),
@@ -165,9 +166,8 @@ fn assert_create_rejected(path: &Path) {
 }
 
 fn assert_open_rejected(path: &Path) {
-    let error = match SceneProject::open(path) {
-        Ok(_) => panic!("unsafe scene project open unexpectedly succeeded at {path:?}"),
-        Err(error) => error,
+    let Err(error) = SceneProject::open(path) else {
+        panic!("unsafe scene project open unexpectedly succeeded at {path:?}");
     };
     assert!(
         !error.to_string().is_empty(),
@@ -377,7 +377,7 @@ fn open_rejects_bad_magic_unsupported_version_nil_guid_and_trailing_bytes() {
     let trailing = temp.project("trailing");
     drop(create(&trailing));
     mutate_manifest(&trailing, |bytes| {
-        bytes.extend_from_slice(b"not-manifest-data")
+        bytes.extend_from_slice(b"not-manifest-data");
     });
     assert_open_rejected(&trailing);
 }

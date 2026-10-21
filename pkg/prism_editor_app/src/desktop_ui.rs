@@ -20,6 +20,8 @@ use prism_ui_render_backend::draw::{DrawCommand, DrawList, LayerCmd};
 use prism_ui_render_backend::scene::RetainedScene;
 
 use crate::controller::{ControllerError, ControllerOutcome, EditorController};
+#[cfg(feature = "desktop")]
+use crate::scene_authoring::{SCENE_ADD_TRIANGLE_COMMAND, SCENE_DELETE_SELECTION_COMMAND};
 
 const ROW_HEIGHT: f32 = 26.0;
 const TOOLBAR_HEIGHT: f32 = 38.0;
@@ -282,6 +284,8 @@ impl EditorDesktopUi {
 
     /// Executes an action and updates the retained projection immediately.
     pub fn execute(&mut self, action: EditorAction) -> Result<ControllerOutcome, DesktopUiError> {
+        #[cfg(feature = "desktop")]
+        self.fence_scene_authoring(&action)?;
         match self.controller.execute(action) {
             Ok(outcome) => {
                 if outcome.changed {
@@ -295,6 +299,22 @@ impl EditorDesktopUi {
             }
             Err(error) => self.reject(error.into()),
         }
+    }
+
+    #[cfg(feature = "desktop")]
+    fn fence_scene_authoring(&mut self, action: &EditorAction) -> Result<(), DesktopUiError> {
+        if matches!(action, EditorAction::ExecuteCommand { command_id }
+            if matches!(command_id.as_str(), SCENE_ADD_TRIANGLE_COMMAND | SCENE_DELETE_SELECTION_COMMAND))
+            && (self.focus.is_some()
+                || self.controller.has_active_edit()
+                || self.panel_pointer_active())
+        {
+            return self.reject(DesktopUiError::Validation(
+                "Commit or cancel the draft/IME and finish the gesture before adding or deleting objects"
+                    .into(),
+            ));
+        }
+        Ok(())
     }
 
     /// Last refreshed, absolute logical-pixel draw commands; no `GPU` submission.
@@ -702,6 +722,10 @@ impl EditorDesktopUi {
                     });
                 }
                 let action = self.bindings.dispatch(&hit.target, &event)?;
+                // Check before taking focus: rejected structural commands must
+                // preserve the user's draft and IME composition.
+                #[cfg(feature = "desktop")]
+                self.fence_scene_authoring(&action)?;
                 let cancelled = self.focus.take().is_some();
                 self.invalidated |= cancelled;
                 let outcome = self.execute(action)?;
@@ -1108,6 +1132,34 @@ impl EditorDesktopUi {
                     .child(Element::text("Redo")),
             )
             .child(Element::text(dirty).class("desktop-dirty"));
+        #[cfg(feature = "desktop")]
+        for (id, target, label) in [
+            (
+                SCENE_ADD_TRIANGLE_COMMAND,
+                "editor.scene.add_triangle",
+                "Add triangle",
+            ),
+            (
+                SCENE_DELETE_SELECTION_COMMAND,
+                "editor.scene.delete_selection",
+                "Delete selection",
+            ),
+        ] {
+            if self.controller.has_command(id) {
+                bindings.bind(prism_editor_ui::ActionBinding::activate(
+                    target,
+                    prism_editor_ui::ActionTemplate::execute_command(id)?,
+                )?)?;
+                toolbar = toolbar.child(
+                    Element::box_()
+                        .key_str(target)
+                        .class("desktop-button")
+                        .style(StyleProp::Width, StyleValue::px(124.0))
+                        .style(StyleProp::FlexShrink, StyleValue::Number(0.0))
+                        .child(Element::text(label)),
+                );
+            }
+        }
         if self.panels.fenced() {
             toolbar = toolbar.child(Element::text("Panel data pending *"));
         }
@@ -1620,6 +1672,108 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn scene_authoring_toolbar_is_opt_in_and_dispatches_normal_commands() {
+        let mut ui = EditorDesktopUi::new(EditorController::new()).unwrap();
+        for label in ["Add triangle", "Delete selection"] {
+            assert!(!glyphs(&ui).iter().any(|text| text == label));
+        }
+        assert!(!ui
+            .hits
+            .iter()
+            .any(|hit| hit.target.starts_with("editor.scene.")));
+        crate::install_scene_authoring_commands(ui.controller_mut()).unwrap();
+        ui.refresh().unwrap();
+        for label in ["Add triangle", "Delete selection"] {
+            assert!(glyphs(&ui).iter().any(|text| text == label));
+        }
+        assert_eq!(ui.controller().document_objects().len(), 0);
+        assert!(!ui.controller().is_dirty());
+        assert!(click_target(&mut ui, "editor.scene.add_triangle"));
+        let item = ui.controller().selection().primary().unwrap().clone();
+        assert_eq!(ui.controller().document_objects().len(), 1);
+        assert_eq!(ui.controller().document_history_lengths(), (1, 0));
+        assert!(click_target(&mut ui, "editor.scene.delete_selection"));
+        assert_eq!(ui.controller().document_objects().len(), 0);
+        assert!(click_target(&mut ui, "editor.undo"));
+        assert_eq!(ui.controller().selection().primary(), Some(&item));
+        assert_eq!(ui.controller().document_objects().len(), 1);
+        assert!(click_target(&mut ui, "editor.redo"));
+        assert_eq!(ui.controller().document_objects().len(), 0);
+    }
+
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn scene_authoring_rejects_draft_and_ime_without_losing_input() {
+        let mut ui = selected();
+        crate::install_scene_authoring_commands(ui.controller_mut()).unwrap();
+        ui.refresh().unwrap();
+        click_target(&mut ui, "field:.label");
+        ui.text("pending draft ").unwrap();
+        ui.preedit("输入").unwrap();
+        let draft = ui.focus.clone();
+        let revision = ui.controller().revision();
+        for id in [SCENE_ADD_TRIANGLE_COMMAND, SCENE_DELETE_SELECTION_COMMAND] {
+            assert!(ui
+                .execute(EditorAction::ExecuteCommand {
+                    command_id: id.into()
+                })
+                .is_err());
+            assert_eq!(ui.focus, draft);
+            assert_eq!(ui.controller().revision(), revision);
+        }
+        for target in ["editor.scene.add_triangle", "editor.scene.delete_selection"] {
+            let rect = ui
+                .hits
+                .iter()
+                .find(|hit| hit.target == target)
+                .unwrap()
+                .rect;
+            assert!(ui
+                .click(
+                    rect.left() + rect.size.width * 0.5,
+                    rect.top() + rect.size.height * 0.5,
+                    SelectionMode::Replace,
+                )
+                .is_err());
+            assert_eq!(ui.focus, draft);
+            assert_eq!(ui.controller().revision(), revision);
+            assert_eq!(ui.controller().document_objects().len(), 1);
+            assert_eq!(ui.controller().document_history_lengths(), (0, 0));
+        }
+        assert_eq!(snapshot(&ui), original());
+        assert!(ui.key(DesktopKey::Escape).unwrap());
+        assert!(click_target(&mut ui, "editor.scene.add_triangle"));
+        assert_eq!(ui.controller().document_objects().len(), 2);
+    }
+
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn scene_authoring_waits_for_active_controller_gesture() {
+        let mut ui = EditorDesktopUi::new(EditorController::new()).unwrap();
+        crate::install_scene_authoring_commands(ui.controller_mut()).unwrap();
+        ui.refresh().unwrap();
+        ui.controller_mut().begin_edit().unwrap();
+        let revision = ui.controller().revision();
+        for id in [SCENE_ADD_TRIANGLE_COMMAND, SCENE_DELETE_SELECTION_COMMAND] {
+            assert!(ui
+                .execute(EditorAction::ExecuteCommand {
+                    command_id: id.into()
+                })
+                .is_err());
+            assert_eq!(ui.controller().revision(), revision);
+            assert_eq!(ui.controller().document_objects().len(), 0);
+            assert!(ui.controller().has_active_edit());
+        }
+        ui.controller_mut().end_edit();
+        ui.execute(EditorAction::ExecuteCommand {
+            command_id: SCENE_ADD_TRIANGLE_COMMAND.into(),
+        })
+        .unwrap();
+        assert_eq!(ui.controller().document_objects().len(), 1);
     }
 
     #[test]

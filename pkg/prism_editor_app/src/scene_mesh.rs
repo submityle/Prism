@@ -49,7 +49,7 @@ impl EditorSceneMesh {
 
 /// Registers the root and every recursive field/container/leaf type.
 /// No readonly metadata is installed: geometry is editable by default.
-/// Root TypeData admits complete objects and validates affected edit groups.
+/// Root `TypeData` admits complete objects and validates affected edit groups.
 #[must_use]
 pub fn editor_scene_mesh_registry() -> TypeRegistry {
     let mut registry = TypeRegistry::new();
@@ -227,7 +227,7 @@ pub fn editor_scene_mesh_matrix(root: &dyn Reflect) -> Result<SceneIdMatrix, Des
     Ok(matrix)
 }
 
-/// Stateless cumulative TRS adapter for the explicit EditorSceneMesh profile.
+/// Stateless cumulative TRS adapter for the explicit `EditorSceneMesh` profile.
 /// The caller supplies the unchanged drag-start root on each preview.
 pub struct EditorSceneMeshTransform;
 

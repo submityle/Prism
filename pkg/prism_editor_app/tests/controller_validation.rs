@@ -1,10 +1,13 @@
 //! Schema admission runs on complete isolated candidates, never partial models.
 
+extern crate alloc;
+
+use alloc::sync::Arc;
 use std::{
     any::{type_name, Any},
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc, Mutex, OnceLock,
+        Mutex, OnceLock,
     },
 };
 

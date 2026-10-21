@@ -102,7 +102,7 @@ struct InFlight {
     completion: Option<IoCompletion<String>>,
 }
 
-/// Real FileCellIoProvider + WorldIoDriver host for a detached world panel.
+/// Real `FileCellIoProvider` + `WorldIoDriver` host for a detached world panel.
 ///
 /// Serial admission deliberately avoids multiple model-wide residency plans
 /// and duplicate byte snapshots in a frame. The queue remains in the controller
@@ -176,7 +176,7 @@ impl WorldProjectSession {
     }
 
     /// Explicitly authorize a new project snapshot of the same stable world.
-    /// This does not take retired_world or rewrite any accepted generation
+    /// This does not take `retired_world` or rewrite any accepted generation
     /// ticket. Even after rebind, a foreign controller cannot accept old IO.
     /// The caller must continue to guarantee no runtime consumers exist.
     pub fn rebind_detached(&mut self, controller: &WorldPanelController) -> Result<(), String> {
@@ -224,7 +224,7 @@ impl WorldProjectSession {
         self.failure.as_ref()
     }
 
-    /// Explicit ownership handoff, including CrossCell's unexecuted ticket.
+    /// Explicit ownership handoff, including `CrossCell`'s unexecuted ticket.
     /// An unreconciled record must be repaired with its original controller;
     /// simply discarding it can leave that model fenced in Loading/Unloading.
     pub fn take_failure(&mut self) -> Option<WorldProjectSessionFailure> {
@@ -235,7 +235,7 @@ impl WorldProjectSession {
     ///
     /// Deadline expiry remains fenced and schedules another wake until the real
     /// completion. A late genuine save may clean only via controller receipt
-    /// validation. Errors retain every ticket/receipt; DesktopWorldPanel hosts
+    /// validation. Errors retain every ticket/receipt; `DesktopWorldPanel` hosts
     /// must retry the panel after handling the error, not drop this session.
     pub fn poll(
         &mut self,
