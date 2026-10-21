@@ -20,6 +20,8 @@ mod editor;
 mod playback;
 mod sequence;
 mod sequence_document;
+#[cfg(feature = "sequence-runtime")]
+pub mod sequence_runtime;
 mod sequence_storage;
 mod storage;
 mod wire;
@@ -37,6 +39,8 @@ pub use sequence_document::{
     SequenceDocumentError, SequenceDocumentLimits, SequenceProjectCommand, SequenceProjectDocument,
     SequenceProjectEdit, SequenceProjectEditor, SequenceProjectToken,
 };
+#[cfg(feature = "sequence-runtime")]
+pub use sequence_runtime::*;
 pub use sequence_storage::{
     SequenceProjectCodec, SequenceProjectLoadCandidate, SequenceProjectSaveReceipt,
     SequenceProjectStorageRequest, SequenceProjectStorageResult, SequenceProjectStorageService,

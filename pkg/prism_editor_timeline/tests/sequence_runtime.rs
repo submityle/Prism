@@ -2,6 +2,9 @@
 
 #![cfg(feature = "sequence-runtime")]
 
+extern crate alloc;
+
+use alloc::collections::BTreeMap;
 use prism_app::App;
 use prism_audio_assets::asset::AudioAssetHandle;
 use prism_audio_assets::bank::{BankId, BankManifest, EntryId, MediaEntry, MediaFormat, Residency};
@@ -17,7 +20,6 @@ use prism_camera_ecs::{
 };
 use prism_editor_timeline::*;
 use prism_math::DVec3;
-use std::collections::BTreeMap;
 
 fn source_document() -> TimelineDocument {
     TimelineDocument {
