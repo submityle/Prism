@@ -54,9 +54,14 @@ scene version 0 清黑，同帧后续 cell 通过 SSA Load 累加；不能用于
 全部为空时没有 raster，保持已有颜色；宿主若需清空旧画面须自行清屏或替换目标。
 
 2026-10-22 主工作树复验：runtime lib 183/183、GPU feature lib 136/136、placement_rhi lib
-155/155、借用约束 doctest 2/2、WGSL 11/11，以及沙盒外 Apple M2/Metal IntegratedGpu 的
+158/158、借用约束 doctest 2/2、WGSL 11/11，以及沙盒外 Apple M2/Metal IntegratedGpu 的
 RHI 实卡回归 7/7（无忽略）。后者包括 submit/wait 宿主 callback panic 注入和恢复。
 这是共享 dirty checkout 验证，非 clean-HEAD 隔离验证；严格 Clippy 仍有 6 项已记录告警。
 完整命令和证据边界见 `prism_world_gpu_heightfield_placement_deletions_zh.md`。
 产品 `prism_render_scene` mesh/material/unified visibility 消费、scene/ECS decoder、持久删除的
 自动产品消费、多厂商和产品负载的性能/显存/功耗验收仍独立于此适配层。
+
+删除键更新已改为最小单一连续 GPU 槽位区间上传：追加只传尾部、相同前缀截短不传键，
+非相邻修改合并一次写入，重新增长会覆盖 stale 尾部。仍须先 submit 再改写；RHI frame
+借用对此顺序保持约束。实卡 deletion 转换回归 4/4；确定性上传量、复杂度和未优化 dev
+专项基准见上述删除文档，不将其视为产品性能验收。

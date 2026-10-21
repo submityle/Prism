@@ -56,6 +56,9 @@ pub struct GpuHeightfieldPlacementDeletionWorkBudget {
 }
 
 /// Uploads caused by the latest successful deletion request.
+///
+/// Key bytes count the single changed slot interval, not the complete active
+/// set. Unchanged sets and prefix-only truncations enqueue no key writes.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct GpuHeightfieldPlacementDeletionUploadStats {
     pub uniform_bytes: u64,
@@ -478,19 +481,21 @@ impl GpuHeightfieldPlacementDeletions {
                 .write_buffer(&self.params, 0, bytemuck::cast_slice(&words));
             stats.uniform_bytes = PARAM_BYTES;
         }
-        if self
+        let previous_keys = self
             .request
             .as_ref()
-            .is_none_or(|old| old.key.deletions != *deletions)
-        {
+            .map_or(&[][..], |old| old.key.deletions.keys());
+        let changed = changed_key_range(previous_keys, deletions.keys());
+        if !changed.is_empty() {
             self.key_scratch.clear();
             self.key_scratch
-                .extend(deletions.keys().iter().map(key_words));
-            if !self.key_scratch.is_empty() {
-                self.queue
-                    .write_buffer(&self.keys, 0, bytemuck::cast_slice(&self.key_scratch));
-                stats.key_bytes = KEY_BYTES * self.key_scratch.len() as u64;
-            }
+                .extend(deletions.keys()[changed.clone()].iter().map(key_words));
+            self.queue.write_buffer(
+                &self.keys,
+                KEY_BYTES * changed.start as u64,
+                bytemuck::cast_slice(&self.key_scratch),
+            );
+            stats.key_bytes = KEY_BYTES * self.key_scratch.len() as u64;
         }
         self.request = Some(Request {
             words,
@@ -650,6 +655,30 @@ fn placement_key(
         surface: surface.clone(),
         field: field.clone(),
     }
+}
+
+// Compare positions, not set differences: sorted insertions can shift every
+// following slot. One upload bounds driver calls even for disconnected edits.
+// Slots beyond next.len() are invisible to the shader's key_count fence. A
+// future grow compares against this request's active keys and rewrites all new
+// slots, so stale suffix bytes are never treated as a cache hit.
+fn changed_key_range(
+    previous: &[prism_world_terrain::HeightfieldPlacementKey],
+    next: &[prism_world_terrain::HeightfieldPlacementKey],
+) -> std::ops::Range<usize> {
+    if std::ptr::eq(previous, next) {
+        return next.len()..next.len();
+    }
+    let start = previous
+        .iter()
+        .zip(next)
+        .position(|(old, new)| old != new)
+        .unwrap_or(previous.len().min(next.len()));
+    let mut end = next.len();
+    while end > start && previous.get(end - 1) == Some(&next[end - 1]) {
+        end -= 1;
+    }
+    start..end
 }
 
 fn key_words(key: &prism_world_terrain::HeightfieldPlacementKey) -> [u32; 14] {
@@ -832,4 +861,112 @@ fn validate_work(
     }
     dispatch(n, max_groups)
         .map_err(|error| GpuHeightfieldPlacementDeletionError::Placement(error.into()))
+}
+
+#[cfg(test)]
+mod incremental_upload_tests {
+    use super::*;
+    use prism_world_residency::{ScatterCandidateKey, SectorCoord};
+    use prism_world_terrain::HeightfieldPlacementKey;
+
+    fn key(x: i64) -> HeightfieldPlacementKey {
+        HeightfieldPlacementKey {
+            placement_version: HEIGHTFIELD_PLACEMENT_VERSION,
+            source: ScatterCandidateKey {
+                kernel_version: SCATTER_KERNEL_VERSION,
+                seed: 0x1234_5678_9abc_def0,
+                version: 3,
+                salt: 0x0fed_cba9_8765_4321,
+                grid_spacing_mm: 1,
+                grid: SectorCoord::new(x, 0, -x),
+            },
+        }
+    }
+
+    #[test]
+    fn upload_range_tracks_slot_changes_not_membership_changes() {
+        let a = [key(-3), key(-1), key(1), key(3)];
+        assert!(changed_key_range(&a, &a).is_empty());
+        assert!(changed_key_range(&a, &a.to_vec()).is_empty());
+        assert_eq!(changed_key_range(&[], &a), 0..4);
+        assert_eq!(changed_key_range(&a[..3], &a), 3..4);
+        assert!(changed_key_range(&a, &a[..3]).is_empty());
+        assert!(changed_key_range(&a, &[]).is_empty());
+        assert_eq!(
+            changed_key_range(&a, &[key(-3), key(0), key(1), key(3)]),
+            1..2
+        );
+        assert_eq!(
+            changed_key_range(&a, &[key(-3), key(0), key(1), key(4)]),
+            1..4
+        );
+        assert_eq!(
+            changed_key_range(&a, &[key(-4), key(-3), key(-1), key(1), key(3)]),
+            0..5
+        );
+        assert_eq!(changed_key_range(&a, &[key(-3), key(1), key(3)]), 1..3);
+    }
+
+    #[test]
+    fn every_small_canonical_pair_reconstructs_the_active_gpu_prefix_minimally() {
+        let universe: Vec<_> = (-4..4).map(key).collect();
+        let sets: Vec<Vec<_>> = (0..256)
+            .map(|mask| {
+                universe
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| mask & (1 << index) != 0)
+                    .map(|(_, key)| *key)
+                    .collect()
+            })
+            .collect();
+        for old in &sets {
+            for next in &sets {
+                let span = changed_key_range(old, next);
+                let mismatches: Vec<_> = next
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, value)| old.get(*i) != Some(*value))
+                    .map(|(i, _)| i)
+                    .collect();
+                match (mismatches.first(), mismatches.last()) {
+                    (Some(first), Some(last)) => assert_eq!(span, *first..last + 1),
+                    _ => assert!(span.is_empty()),
+                }
+                // Preserve a deliberately unrelated stale suffix. The range
+                // must reconstruct every visible slot without relying on it.
+                let mut gpu_words = vec![key_words(&key(99)); universe.len()];
+                for (slot, value) in gpu_words.iter_mut().zip(old) {
+                    *slot = key_words(value);
+                }
+                for index in span {
+                    gpu_words[index] = key_words(&next[index]);
+                }
+                let expected: Vec<_> = next.iter().map(key_words).collect();
+                assert_eq!(&gpu_words[..next.len()], expected);
+            }
+        }
+    }
+
+    #[test]
+    fn dirty_span_detects_changes_in_every_full_identity_component() {
+        let baseline = key(1);
+        let mut edits = [baseline; 10];
+        edits[0].placement_version ^= 1;
+        edits[1].source.kernel_version ^= 1;
+        edits[2].source.seed ^= 1;
+        edits[3].source.seed ^= 1 << 63;
+        edits[4].source.version ^= 1;
+        edits[5].source.salt ^= 1 << 63;
+        edits[6].source.grid_spacing_mm ^= 1;
+        edits[7].source.grid.x ^= 1 << 32;
+        edits[8].source.grid.y ^= 1 << 32;
+        edits[9].source.grid.z ^= 1 << 32;
+        // This helper accepts raw identity values; validation remains the
+        // deletion set's constructor responsibility, before GPU admission.
+        for edit in edits {
+            assert_eq!(changed_key_range(&[baseline], &[edit]), 0..1);
+            assert_ne!(key_words(&baseline), key_words(&edit));
+        }
+    }
 }

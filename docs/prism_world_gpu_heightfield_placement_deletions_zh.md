@@ -273,3 +273,59 @@ WGPU_BACKEND=metal PRISM_REQUIRE_GPU=1 cargo test -p prism_world_gpu --features 
 完整 API、资源来源与 native inspection 逃生口约束见 `prism_world_gpu_placement_runtime_zh.md`。
 产品 `prism_render_scene` mesh/material/unified visibility、scene/ECS decoder、持久删除的
 自动消费、多厂商及产品负载性能/显存/功耗仍须分别交付，不能由这 7 个测试替代。
+
+## 2026-10-22 删除键增量上传
+
+`write_request` 现在按新旧 canonical 集合的 **GPU 槽位** 比较，上传包含所有 active
+变化槽位的最小单一连续区间。不是集合差集：排序插入会移动后续槽位，必须一起上传。
+同一共享集合直接命中；独立但相同的集合不上传；追加只传新尾部；只截短相同前缀或清空
+不传键，只更新 128-byte uniform 中的 count。离散修改之间的未变槽位也包含在一次写入中，
+避免将 driver 调用数扩张到修改数量。ABI、完整键比较和过滤语义均不变。
+
+比较最坏 O(D)，打包/上传 O(S)，D 是集合长度量级，S 是变化区间长度；复用预分配 scratch，
+不因本次增量打包新建 Vec。shader 二分搜索严格限定在 `key_count` 的 active 前缀，旧尾部
+不可见；未来增长必定重写新激活槽位，不能把 stale buffer 字节当作缓存命中。
+原有先 submit 再改写的同 queue 契约仍有效，不能在旧 commands 尚未提交时写下一请求；
+可恢复准入失败不改变旧 request、generation、stats 或 GPU 输出。
+
+本轮共享 dirty checkout 验证：runtime lib 183/183、GPU feature lib 136/136、
+placement_rhi lib 158/158、compile-fail doctest 2/2、WGSL 11/11、no-default check 通过。
+新增三个 device-free 单测含 65,536 组集合转换，证明 active 前缀重建及最小连续区间；
+Apple M2/Metal 实卡 deletion 4/4、RHI 7/7，均 0 ignored。新实卡回归逐次检查追加、截短、
+清空/恢复、中段替换、前缀插入、独立等价集合、离散修改、预算失败/重试；同时通过直接
+encode 与 native snapshot 两条消费链比较完整键 CPU parity。
+
+新增 benchmark `heightfield_placement_deletion`，固定 10,000 候选、8 次预热与每场景
+64 样本，集合/资源预建，严格要求物理 GPU；计时后检查完整 survivor 集合、固定 buffer
+身份与实际上传量。此次为 **未优化 dev profile**，nearest-rank 主机微秒，非 GPU timestamp：
+
+| 键数 | 场景 | 键上传字节 | write P50/P95/P99 | encode+finish P50/P95/P99 | submit+wait P50/P95/P99 |
+| --- | --- | ---: | --- | --- | --- |
+| 128 | 单槽中段替换 | 56 | 51.917/64.375/82.500 | 397.208/425.250/830.417 | 1068.084/1153.708/1231.750 |
+| 128 | 不变 | 0 | 3.833/4.959/6.417 | 398.125/424.250/448.083 | 1010.458/1055.458/1192.917 |
+| 8192 | 单槽中段替换 | 56 | 163.458/179.583/200.916 | 406.042/425.750/448.500 | 1120.541/1181.583/1239.333 |
+| 8192 | 不变 | 0 | 4.083/5.625/6.542 | 405.791/454.833/591.166 | 1057.250/1128.542/1261.667 |
+
+以上场景 uniform 均为 0 字节；追加为 56-byte key + 128-byte uniform，截短为
+0-byte key + 128-byte uniform。单槽替换此前整表路径分别上传 7,168/458,752 字节，
+现在均 56 字节；仅此带宽量是确定性前后比较，没有旧实现计时对照，不能声称同倍帧时加速。
+两档总逻辑 GPU buffer 为 1,568,704/2,020,288 字节，host key scratch 为 7,224/458,808
+字节，另有 680,016-byte 验证 readback；不是物理显存/RSS 测量。
+encode 计时不含 encoder 创建；submit+wait 包含 pending 上传、完整 placement/deletion
+计算与精确有界等待；资源创建、集合构造、断言、回读在计时外。不是 release 或产品基准。
+
+在上节低磁盘环境变量基础上复现新增 benchmark（实卡需允许 Metal 设备）：
+
+```bash
+WGPU_BACKEND=metal PRISM_REQUIRE_GPU=1 cargo bench -p prism_world_gpu --features terrain_scatter --bench heightfield_placement_deletion --profile dev --offline -j 1
+```
+
+本次不修改 runtime；持久删除自动消费和产品 renderer 接线边界保持不变。
+
+专项 benchmark 的严格 Clippy 仍被原有 6 项诊断阻断（bridge 三个参数数目、GPU acquisition
+两个大 Err、planet 一处冗余转换）；仅显式放行这三类 lint 后检查通过，不等于严格通过：
+
+```bash
+cargo clippy -p prism_world_gpu --features terrain_scatter --bench heightfield_placement_deletion --offline --no-deps -j 1 -- -D warnings
+cargo clippy -p prism_world_gpu --features terrain_scatter --bench heightfield_placement_deletion --offline --no-deps -j 1 -- -D warnings -A clippy::too_many_arguments -A clippy::result_large_err -A clippy::useless_conversion
+```

@@ -653,6 +653,187 @@ fn admission_is_atomic_and_encode_requires_an_uploaded_request() {
 }
 
 #[test]
+fn physical_gpu_canonical_deletion_incremental_upload_transitions_match_cpu() {
+    use std::collections::BTreeSet;
+
+    let context = context();
+    let c = HeightfieldPlacementConfig {
+        grid_spacing_mm: 250,
+        ..config()
+    };
+    let r = region();
+    let f = field();
+    let s = surface();
+    let selection = filters();
+    let (placement_budget, cpu_budget, n) = budgets(c, r, &f);
+    let cpu = scatter_on_heightfield(c, r, &f, &s, selection, cpu_budget).unwrap();
+    let cpu_keys: BTreeSet<_> = cpu.points.iter().map(|point| point.key).collect();
+    assert_eq!(cpu_keys.len(), cpu.points.len());
+    let keys: Vec<_> = cpu_keys.iter().copied().collect();
+    assert!(
+        keys.len() > 110,
+        "fixture needs distinct accepted placement keys"
+    );
+    let capacity = 16;
+    let mut gpu = gpu(&context, n, capacity);
+
+    let assert_parity = |label: &str,
+                         gpu: &GpuHeightfieldPlacementDeletions,
+                         deletions: &HeightfieldPlacementDeletionSet| {
+        let expected: BTreeSet<_> = cpu_keys
+            .iter()
+            .copied()
+            .filter(|key| !deletions.is_deleted(*key))
+            .collect();
+        // Every deleted key is a real accepted candidate, so stale slots or a
+        // bad write offset must change membership, not just unused GPU bytes.
+        assert_eq!(expected.len(), cpu_keys.len() - deletions.keys().len());
+        // This helper encodes, submits and reads back both the direct chain
+        // and the independently encoded native registration-snapshot stages.
+        let actual = submit_read(&context, gpu, n, c);
+        assert_eq!(actual.len(), expected.len(), "{label}: instance count");
+        assert_eq!(
+            actual.into_iter().collect::<BTreeSet<_>>(),
+            expected,
+            "{label}: exact full-key CPU parity"
+        );
+    };
+
+    // Literal expected slot counts deliberately do not reproduce the diff
+    // algorithm. Indices refer to the canonical ascending CPU key order.
+    let transitions: &[(&str, &[usize], u64, u64)] = &[
+        ("initial", &[10, 30, 50, 70, 90], 5, 128),
+        ("append", &[10, 30, 50, 70, 90, 110], 1, 128),
+        ("prefix-preserving truncate", &[10, 30, 50, 70, 90], 0, 128),
+        ("nonempty to empty", &[], 0, 128),
+        ("unchanged empty", &[], 0, 0),
+        ("empty to restore", &[10, 30, 50, 70, 90], 5, 128),
+        ("same-count middle replacement", &[10, 30, 51, 70, 90], 1, 0),
+        ("prefix insertion shifts", &[0, 10, 30, 51, 70, 90], 6, 128),
+        // A separate allocation with reversed and duplicate input must be
+        // equivalent after canonicalization, not detected as a new table.
+        (
+            "independent equal set",
+            &[90, 70, 51, 30, 10, 0, 51, 10],
+            0,
+            0,
+        ),
+        // Slots 1 and 4 change; slots 2 and 3 must still be included in the
+        // one contiguous four-slot write, while both endpoints stay intact.
+        ("two nonadjacent edits", &[0, 11, 30, 51, 71, 90], 4, 0),
+    ];
+    let mut previous_generation = None;
+    for &(label, indices, changed_slots, uniform_bytes) in transitions {
+        let deletions = deletion_set(indices.iter().map(|&i| keys[i]).collect(), capacity);
+        if label == "independent equal set" {
+            let old = gpu.deletions().unwrap();
+            assert_eq!(old, &deletions);
+            assert_ne!(old.keys().as_ptr(), deletions.keys().as_ptr());
+        }
+        gpu.write_request(
+            c,
+            r,
+            &f,
+            &s,
+            selection,
+            placement_budget,
+            &deletions,
+            deletion_budget(n, deletions.keys().len()),
+        )
+        .unwrap();
+        let stats = gpu.upload_stats();
+        assert_eq!(stats.key_bytes, 56 * changed_slots, "{label}: key bytes");
+        assert_eq!(stats.uniform_bytes, uniform_bytes, "{label}: uniform bytes");
+        assert_eq!(gpu.deletions(), Some(&deletions), "{label}: cached keys");
+        let snapshot = gpu.registration_snapshot().unwrap();
+        assert_eq!(snapshot.request.key_count as usize, deletions.keys().len());
+        if let Some(previous) = previous_generation {
+            assert_eq!(
+                snapshot.upstream.request_generation,
+                previous + 1,
+                "{label}"
+            );
+        }
+        previous_generation = Some(snapshot.upstream.request_generation);
+        assert_parity(label, &gpu, &deletions);
+    }
+
+    // Reject a genuinely different table, including a count change. Neither
+    // CPU metadata nor pending GPU uploads may move to this rejected request.
+    let before_deletions = gpu.deletions().unwrap().clone();
+    let before_cache = gpu.cache_key().cloned();
+    let before_stats = gpu.upload_stats();
+    assert_eq!(before_stats.key_bytes, 4 * 56);
+    let before_snapshot = gpu.registration_snapshot().unwrap();
+    let before_scratch = gpu.key_scratch_bytes();
+    let rejected = deletion_set(
+        [0, 11, 30, 51, 60, 71, 90]
+            .into_iter()
+            .map(|i| keys[i])
+            .collect(),
+        capacity,
+    );
+    assert_eq!(
+        gpu.write_request(
+            c,
+            r,
+            &f,
+            &s,
+            selection,
+            placement_budget,
+            &rejected,
+            GpuHeightfieldPlacementDeletionWorkBudget {
+                max_keys: 6,
+                ..deletion_budget(n, 7)
+            },
+        ),
+        Err(GpuHeightfieldPlacementDeletionError::KeyBudgetExceeded {
+            required: 7,
+            limit: 6,
+        })
+    );
+    assert_eq!(gpu.cache_key(), before_cache.as_ref());
+    assert_eq!(gpu.deletions(), Some(&before_deletions));
+    assert_eq!(gpu.upload_stats(), before_stats);
+    assert_eq!(gpu.key_scratch_bytes(), before_scratch);
+    let after_failure = gpu.registration_snapshot().unwrap();
+    assert_eq!(after_failure.request, before_snapshot.request);
+    assert_eq!(
+        after_failure.upstream.request_generation,
+        before_snapshot.upstream.request_generation
+    );
+    assert_parity(
+        "failed budget retains old GPU table",
+        &gpu,
+        &before_deletions,
+    );
+
+    // Successful retry must diff against the last admitted table: inserting
+    // slot 4 shifts slots 5 and 6, so all three trailing slots are uploaded.
+    gpu.write_request(
+        c,
+        r,
+        &f,
+        &s,
+        selection,
+        placement_budget,
+        &rejected,
+        deletion_budget(n, 7),
+    )
+    .unwrap();
+    assert_eq!(gpu.upload_stats().key_bytes, 3 * 56);
+    assert_eq!(gpu.upload_stats().uniform_bytes, 128);
+    assert_eq!(gpu.deletions(), Some(&rejected));
+    let retried = gpu.registration_snapshot().unwrap();
+    assert_eq!(retried.request.key_count, 7);
+    assert_eq!(
+        retried.upstream.request_generation,
+        before_snapshot.upstream.request_generation + 1
+    );
+    assert_parity("retry after failed budget", &gpu, &rejected);
+}
+
+#[test]
 fn constructor_enforces_scratch_budget_and_zero_capacity_is_valid() {
     let context = context();
     let c = config();
