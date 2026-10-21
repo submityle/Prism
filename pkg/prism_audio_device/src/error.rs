@@ -17,6 +17,8 @@ pub enum DeviceError {
     NoOutputDevice,
     /// The default host exposed no usable input device.
     NoInputDevice,
+    /// The requested stable input endpoint ID is not present in the current catalog.
+    InputDeviceNotFound(String),
     /// Querying a device's default or supported stream configuration failed.
     ConfigQuery(String),
     /// Constructing the platform audio stream failed.
@@ -41,6 +43,13 @@ pub enum DeviceError {
         /// Channel count the device stream expects.
         device: usize,
     },
+    /// Capture ring channel count does not match the selected input endpoint.
+    CaptureChannelCountMismatch {
+        /// Channel count the capture ring accepts.
+        sink: usize,
+        /// Channel count the input stream supplies.
+        device: usize,
+    },
     /// The device reported a channel count with no matching engine
     /// [`ChannelLayout`](prism_audio_core::buffer::ChannelLayout).
     UnsupportedChannelCount(usize),
@@ -57,6 +66,9 @@ impl fmt::Display for DeviceError {
         match self {
             DeviceError::NoOutputDevice => f.write_str("no output device available"),
             DeviceError::NoInputDevice => f.write_str("no input device available"),
+            DeviceError::InputDeviceNotFound(id) => {
+                write!(f, "input device with CPAL ID {id:?} was not found")
+            }
             DeviceError::ConfigQuery(msg) => write!(f, "device configuration query failed: {msg}"),
             DeviceError::BuildStream(msg) => write!(f, "failed to build audio stream: {msg}"),
             DeviceError::PlayStream(msg) => write!(f, "failed to start audio stream: {msg}"),
@@ -68,6 +80,10 @@ impl fmt::Display for DeviceError {
             DeviceError::ChannelCountMismatch { renderer, device } => write!(
                 f,
                 "renderer produces {renderer} channels but the device stream expects {device}"
+            ),
+            DeviceError::CaptureChannelCountMismatch { sink, device } => write!(
+                f,
+                "capture ring accepts {sink} channels but the input stream supplies {device}"
             ),
             DeviceError::UnsupportedChannelCount(n) => {
                 write!(f, "device channel count {n} has no matching engine layout")

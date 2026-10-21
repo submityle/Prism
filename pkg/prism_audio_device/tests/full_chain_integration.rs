@@ -479,6 +479,7 @@ fn device_error_is_thread_safe_and_formats_each_variant() {
     let errors = [
         DeviceError::NoOutputDevice,
         DeviceError::NoInputDevice,
+        DeviceError::InputDeviceNotFound("host:gone".into()),
         DeviceError::ConfigQuery("rate unsupported".into()),
         DeviceError::BuildStream("alsa refused".into()),
         DeviceError::PlayStream("device busy".into()),
@@ -486,6 +487,7 @@ fn device_error_is_thread_safe_and_formats_each_variant() {
             renderer: 2,
             device: 6,
         },
+        DeviceError::CaptureChannelCountMismatch { sink: 2, device: 6 },
         DeviceError::UnsupportedChannelCount(3),
         DeviceError::UnsupportedSampleFormat("u24".into()),
         DeviceError::InvalidBlockFrames,

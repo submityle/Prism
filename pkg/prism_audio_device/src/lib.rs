@@ -18,14 +18,16 @@
 //!   sharing the exact [`BlockRenderer`] path for sample-identical goldens.
 //! - [`capture`] — lock-free interleaved input capture into planar buffers.
 //! - [`cpal_backend`] — a live `cpal` output stream driven by a
-//!   [`BlockRenderer`] (enabled by the default `cpal-backend` feature).
+//!   [`BlockRenderer`], plus [`cpal_input`] for live capture and input-device
+//!   enumeration (enabled by the default `cpal-backend` feature).
 //!
 //! # Real-time contract
 //!
 //! Everything reachable from a device callback — [`BlockRenderer::render_interleaved`],
-//! [`capture::CaptureSink::push_interleaved`], and the interleave helpers — is
-//! allocation free, lock free, and panic free on the steady-state path. Scratch
-//! buffers are sized once at construction. The offline sink and live device
+//! [`capture::CaptureSink::push_interleaved`], its conversion variant, and the
+//! interleave helpers — is allocation free, lock free, and panic free on the
+//! steady-state path. Input callbacks convert directly into the bounded ring.
+//! Output scratch buffers are sized once at construction. The offline sink and live device
 //! share the identical render path, so an offline WAV render is bit-identical
 //! to live playback for the same graph and command stream.
 //!
@@ -42,6 +44,8 @@ extern crate alloc;
 
 pub mod backend;
 pub mod capture;
+#[cfg(feature = "cpal-backend")]
+pub mod cpal_input;
 pub mod error;
 pub mod file_sink;
 pub mod interleave;
@@ -55,6 +59,12 @@ pub use backend::{
     DeviceSampleFormat, DeviceState, FakeAudioBackend, FakeAudioControl,
 };
 pub use capture::{capture_ring, CaptureConsumer, CaptureSink};
+#[cfg(feature = "cpal-backend")]
+pub use cpal_input::{
+    open_default_input, open_default_input_paused, open_input_device, open_input_device_paused,
+    CaptureEvent, CaptureEventLogStats, CaptureEventRecord, CpalInput, CpalInputCatalog,
+    DefaultInputChange, InputCatalogChange, InputDeviceInfo, InputRecovery, InputStreamInfo,
+};
 pub use error::DeviceError;
 pub use file_sink::render_to_wav;
 pub use interleave::{interleaved_to_planar, planar_to_interleaved};

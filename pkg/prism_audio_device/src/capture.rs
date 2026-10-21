@@ -17,6 +17,10 @@ use prism_audio_rt::ring::{ring, RingConsumer, RingProducer};
 
 /// Real-time producer half of a capture ring. Cheap to clone; move into the
 /// device input callback.
+///
+/// Only one producer may push at a time, including through clones. The backing
+/// queue is thread-safe, but concurrent per-sample pushes can interleave channel
+/// frames and invalidate the whole-frame overflow guarantee.
 #[derive(Clone)]
 pub struct CaptureSink {
     /// Producer half of the interleaved-sample ring.
@@ -35,6 +39,19 @@ impl CaptureSink {
     /// ring frame-aligned. Returns the number of samples actually enqueued.
     /// Real-time safe: no allocation, no locking.
     pub fn push_interleaved(&self, data: &[Sample]) -> usize {
+        self.push_interleaved_with(data, |sample| sample)
+    }
+
+    /// Converts and pushes interleaved samples without an intermediate buffer.
+    ///
+    /// The converter is invoked only for samples belonging to complete input
+    /// frames that fit in the ring. This lets hardware callbacks convert native
+    /// PCM directly into the ring without allocating or taking a lock.
+    pub(crate) fn push_interleaved_with<T, F>(&self, data: &[T], mut convert: F) -> usize
+    where
+        F: FnMut(T) -> Sample,
+        T: Copy,
+    {
         if self.channels == 0 {
             return 0;
         }
@@ -55,7 +72,7 @@ impl CaptureSink {
                 // Room was checked above; a failed push here would only occur
                 // under an impossible concurrent producer, so account for it as
                 // a drop rather than panicking on the real-time thread.
-                if self.tx.push(data[base + channel]).is_err() {
+                if self.tx.push(convert(data[base + channel])).is_err() {
                     self.dropped.fetch_add(1, Ordering::Relaxed);
                 } else {
                     pushed += 1;
