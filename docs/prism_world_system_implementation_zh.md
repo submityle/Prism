@@ -348,6 +348,8 @@ CPU release 基准为确定性平面、16 次预热、每项 128 次测量；下
 
 `cargo clippy -D warnings` 在包含 `prism_world` 依赖闭包时会进入仓库其他并行改动的 `prism_asset`/`prism_ecs`，当前被这些既有告警阻断；world 自身新增代码已按相应 crate 的局部检查验证，不能把依赖闭包失败误报为全 workspace 通过。
 
+cell host 后台 SDF 重烘装配增加默认关闭的 `tasks` feature：复用共享 pool，限制未收集任务总数/样本/scratch，终态收集才释放额度；成功 reload/evict/同 cell 重烘使旧工作失效，失败保留，提交前复验 aggregate resident 预算。wrapper 与现有 SceneHost/查询生命周期接通，不复制整张 grid、不重新加载作者内容。专项测试覆盖真实 worker 生命周期与跨 cell 预算竞争；pending 轮询基准覆盖满任务表最差索引，本机容量 1024 的 P99 为 1.482 µs。该能力不代表对象自动脏传播、相机 clipmap、跨消费者调度或 solver/GI/renderer 接入完成；资源与验证边界见 `prism_world_physics_sdf_runtime_zh.md`。
+
 ## 尚未交付的边界
 
 以下项目仍需要独立硬件或端到端证据，不能用 policy primitive 冒充完成：

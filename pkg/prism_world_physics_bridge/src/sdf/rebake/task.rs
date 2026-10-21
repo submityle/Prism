@@ -155,6 +155,26 @@ impl<E> SdfRebakeTask<'_, E> {
         &mut self,
         bridge: &mut WorldSdfPhysicsBridge,
     ) -> Result<Option<SdfRebakeReport>, SdfRebakeTaskError<E>> {
+        let Some(update) = self.collect_finished()? else {
+            return Ok(None);
+        };
+        bridge
+            .commit_rebake(update)
+            .map(Some)
+            .map_err(|error| SdfRebakeTaskError::Rebake(widen(error)))
+    }
+
+    /// Collects and discards a finished result without publishing it.
+    ///
+    /// Returns `Ok(None)` while computing and `Ok(Some(()))` after discarding a
+    /// successful result. Source errors, cancellation and panic payloads remain
+    /// observable. Like commit, this consumes the result exactly once and never
+    /// help-runs queued work. Useful when an owner's aggregate budget changed.
+    pub fn try_discard(&mut self) -> Result<Option<()>, SdfRebakeTaskError<E>> {
+        self.collect_finished().map(|update| update.map(|_| ()))
+    }
+
+    fn collect_finished(&mut self) -> Result<Option<SdfRebakeUpdate>, SdfRebakeTaskError<E>> {
         let Some(job) = &self.job else {
             return Err(SdfRebakeTaskError::AlreadyCollected);
         };
@@ -173,10 +193,7 @@ impl<E> SdfRebakeTask<'_, E> {
         if self.cancel.is_cancelled() {
             return Err(SdfRebakeTaskError::Rebake(SdfRebakeError::Cancelled));
         }
-        bridge
-            .commit_rebake(update)
-            .map(Some)
-            .map_err(|error| SdfRebakeTaskError::Rebake(widen(error)))
+        Ok(Some(update))
     }
 }
 

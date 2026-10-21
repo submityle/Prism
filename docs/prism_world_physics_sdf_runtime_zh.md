@@ -79,7 +79,7 @@ Record 的 0/4/8 偏移分别为 i32 X/Y/Z，12 为 u8 mip，13–15 必须为�
 
 设受影响总 brick 数为 K、总样本数为 S、驻留 brick 数为 B、mip 数为 M：预检为 `O(M + K log B)`，重烘/提交为 `O(S + K log(B + K))`；scratch 为 `K × size_of::<Replacement>() + 2S` 逻辑字节，尺寸随目标 ABI 而定。它不包含驻留数据、树节点、allocator 元数据或 source 自有内存；不是 RSS/VRAM 上限。每个受影响 brick 都完整重新求值，尚未做 brick 内稀疏样本编辑或已知空场压缩。
 
-重烘成功后可从 `evict()` 的 `Some` 结果取得 snapshot，再调用 `into_source()` 转移所有权至 `SdfCellSnapshot`，无需复制样本，再交给 PSDC codec 和既有 cell host 的聚合预算/宿主提交。真实文件集成测试覆盖本地求值失败后重试、编码、archive offset/分块读取、下游拒绝后旧查询与 usage 保留，以及成功重载后的新梯度/距离。同步 `rebake_region` 不调度任务；下节可选 `tasks` adapter 提供 worker 求值与显式 owner 提交，两者均不更新 cell host 内部聚合统计或执行 GPU 上传。相机 clipmap 滚动、对象自动脏传播和多消费者作业调度仍需独立运行时接线。
+重烘成功后可从 `evict()` 的 `Some` 结果取得 snapshot，再调用 `into_source()` 转移所有权至 `SdfCellSnapshot`，无需复制样本，再交给 PSDC codec 和既有 cell host 的聚合预算/宿主提交。真实文件集成测试覆盖本地求值失败后重试、编码、archive offset/分块读取、下游拒绝后旧查询与 usage 保留，以及成功重载后的新梯度/距离。同步 `rebake_region` 不调度任务；下节可选 bridge `tasks` adapter 提供 worker 求值与显式 owner 提交。桥自身不更新 cell host 内部聚合统计；再下一节 cell runtime `tasks` 装配负责该计费与生命周期。上述入口不执行 GPU 上传；相机 clipmap 滚动、对象自动脏传播和多消费者作业调度仍需独立运行时接线。
 
 ### 局部重烘多维质量评估
 
@@ -106,7 +106,7 @@ Record 的 0/4/8 偏移分别为 i32 X/Y/Z，12 为 u8 mip，13–15 必须为�
 
 每个 task 使用 scope 的独立 child token，单独取消不影响 sibling；父 scope 取消会传播。取消在每次 source 回调之前、最终回调之后及 owner 提交之前检查，因此计算已完成但尚未提交的结果仍可取消。正在执行的回调不能被抢占；最后提交检查之后的并发取消不撤销已开始的提交。丢弃未收集句柄只请求取消、不等待、不发布；pool 的最终 shutdown 由其 owner 管理。
 
-工作 scratch 限额仍为单个 work 的 descriptor 加样本缓冲，不限制同时准备/排队的任务总数或总字节；token/header、allocator/树节点、source 自有数据和 pool 队列均不在该逻辑预算内。调用者必须额外限制 in-flight 总量，并在 frame 热路径之外安排 prepare/spawn。该基础接口没有实现相机/对象调度器、cell host 的异步状态机、跨消费者预算或 GPU 上传。
+工作 scratch 限额仍为单个 work 的 descriptor 加样本缓冲，不限制同时准备/排队的任务总数或总字节；token/header、allocator/树节点、source 自有数据和 pool 队列均不在该逻辑预算内。直接使用 bridge adapter 的调用者必须额外限制 in-flight 总量，并在 frame 热路径之外安排 prepare/spawn；cell 层可使用下节装配。该基础接口本身没有实现相机/对象调度器、跨消费者预算或 GPU 上传。
 
 ### 分离式重烘多维质量评估
 
@@ -120,6 +120,33 @@ Record 的 0/4/8 偏移分别为 i32 X/Y/Z，12 为 u8 mip，13–15 必须为�
 | 易迭代性 | 原同步 API 与 codec 不变，默认构建不引入 tasks，新增接口可独立采用 |
 | 健壮性 | ABA/foreign/clone/intervening edit 拒绝，取消边界、panic、单次收集及 pool 生命周期有回归 |
 | 安全 | 无 unsafe；类型限制 pool 生命周期，私有 update 防伪造，提交独占；OOM 与回调副作用边界保持明确 |
+
+## cell host 后台重烘与聚合预算
+
+对应 World 设计 §17.3 的局部增量更新。cell runtime 的默认关闭 `tasks` feature 增加 `SdfCellRebakeRuntime`，拥有现有 `SdfPhysicsCellHost` 并借用调用者的 `TaskPool`。cell host 内部保存 bridge，公开 `resident()` 仍返回同一查询快照；加载和后台发布均不复制 resident grid。`physics()` 只读，`decoder_mut()` 仅影响未来加载，避免绕过聚合统计的可变 bridge 入口。
+
+`SdfCellRebakeBudget` 约束未收集任务数、总样本数和逻辑 scratch 字节。构造时 fallible 预分配全部 task index；`start` 在准备前先限制任务数，把 per-work 样本/scratch 上限收紧为剩余额度，再调用 bridge prepare。因此拒绝不会先临时分配超出 pending 额度的样本缓冲，也不会调用 source。就绪结果、被取消/被替换但仍执行中的回调继续占用额度，只有 worker terminal 且被 `try_commit(id)` 收集才释放。`pending_usage()` 可用于上层背压；取消并不是完成。
+
+发布增长在 admission 和 commit 两处检查 cell host 的 aggregate bricks/samples/bytes。多个 cell 的工作可能同时通过 admission，先提交者消耗空间后，后提交者重新检查并原子拒绝；不承诺为每个 pending 工作预留最终 resident 容量。成功重烘仅变更派生 physics/revision/usage，不重新调用下游 scene load，不把派生修改冒充作者内容事务。
+
+wrapper 实现 `SceneHost`：只有加载/驱逐成功才取消并标记同 cell 工作失效；decode/stage/宿主返回错误或 unwind 保留旧快照和原工作。驱逐再加载相同 revision 不恢复旧任务的发布资格。第一个成功重烘也使所有同 cell 同 base 工作失效，包含互不相交编辑；不同 cell 工作保留。任务 ID 具有私有 runtime identity 和不复用的 checked u64 序号，foreign/collected ID 被拒绝。
+
+`try_commit` 对未完成工作返回 `None`，不执行 source、不 help-run、不等待 worker。终态成功/失败均只收集一次。新增 bridge `try_discard` 允许 owner 拒绝发布时仍收集 source 错误和原 panic payload；这些错误优先保留，已失效工作的 cancellation 则返回 `Invalidated`。`cancel`/`cancel_all` 不撤销已开始的提交。失败重试须新建工作；没有隐式 merge 或自动重试。
+
+所有任务收集后可 `try_into_host` 取回原 host；仍有任务时返回装箱的原 runtime，这个失败路径分配内存。直接 drop 请求取消且不 join；活动 source 回调不可抢占，可能在 runtime 销毁后继续执行。预算只作用于当前 runtime 生命周期，不能通过连续销毁/重建 runtime 声称全进程受限；有序替换应先取消、逐个收集到 idle，再取回 host。
+
+resident 与 pending 是两套独立逻辑预算，同时驻留时必须合并考虑。task index、Arc/token/队列、source 捕获、allocator/树节点以及重载候选快照不计入 pending scratch，未提供 RSS/VRAM 上限。prepare、spawn、终态结果 mutex、树节点插入和旧样本释放仍有成本；pending ID 查找和同 cell 失效扫描是 O(在途任务数)，index 不在 poll 时增长。相机/对象自动脏传播、跨消费者统一调度、实际 solver/GI/renderer 与 GPU 上传仍未完成。
+
+| 维度 | 本片取舍与证据要求 |
+|---|---|
+| 性能 | 复用共享 pool；不 clone resident grid，index 预分配，unfinished poll 不求值/等待；线性任务查找须按配置容量实测 |
+| 效果 | 明确提交前旧查询可用；新样本、revision 与聚合 usage 同次发布；拒绝不部分写入 |
+| 易用性 | SceneHost wrapper、opaque ID、pending usage、cancel/drain 与 idle host 提取 |
+| 易维护性 | 生命周期复用原 host；调度单列 rebake 模块，原查询 API 不变 |
+| 易拓展性 | 泛型 decoder/scene host/source，使用既有 pool，不绑定几何或 gameplay 规则 |
+| 易迭代性 | 默认关闭 tasks，原同步路径保留；失败后可重新提交新工作 |
+| 健壮性 | terminal-only 释放；成功-only invalidation；发布前复验总预算；错误与 panic 不被覆盖 |
+| 安全 | 无 unsafe；pool 借用约束，私有 ID/bridge 防绕过计费；逻辑预算、不可抢占与 OOM 边界明确 |
 
 ## 验证边界
 
@@ -136,10 +163,12 @@ cargo test -p prism_world_physics_bridge --doc --offline
 cargo test -p prism_world_physics_bridge --features tasks --doc --offline
 cargo test -p prism_world_physics_cell_runtime --test sdf_sampling_lifecycle --offline
 cargo test -p prism_world_physics_cell_runtime --test sdf_cell_codec --test sdf_cell_file_runtime --offline
+cargo test -p prism_world_physics_cell_runtime --features tasks --test sdf_cell_rebake --offline
 cargo bench -p prism_world_physics_bridge --bench sdf_sampling --offline
 cargo bench -p prism_world_physics_bridge --bench sdf_rebake --offline
 cargo bench -p prism_world_physics_bridge --features tasks --bench sdf_rebake_task --offline
 cargo bench -p prism_world_physics_cell_runtime --bench sdf_cell_codec --offline
+cargo bench -p prism_world_physics_cell_runtime --features tasks --bench sdf_cell_rebake --offline
 ```
 
 这些测试证明 cell 生命周期到 physics 查询的原子接入，不证明 `prism_physics_core` 已使用该场生成 SDF 接触，也不证明 `prism_render_scene`、GI 或 GPU renderer graph 已消费同一份 World SDF。后续消费者必须复用 `WorldSdfSnapshot` 的尺度、revision 和 `Unknown` 语义，不能另建未版本化的平行场。
@@ -209,3 +238,21 @@ Apple M2、`aarch64-apple-darwin`、rustc 1.96.1、默认优化 bench profile、
 | 4096 / 完整 X 行及父级 | 7168 / 3670016 / 7626752 | 558750 / 1348000 / 2123958 | 99136458 / 164211583 / 201487750 | 581834 / 1027083 / 1470500 |
 
 完整行案例 worker 观测 P50 约 99.1 ms、P99 约 201.5 ms，而 owner prepare/commit 各自 P99 仍约 2.124/1.471 ms，说明求值离开 owner 不等于已满足产品帧预算。调度与取消检查有额外开销；此前同步基准和本轮负载均受并行任务影响，不能据此推导加速比或驻留规模无关性。本基准是 CPU 主机阶段墙钟，使用刻意便宜的量化 source，不含真实几何、文件 IO、GPU、RSS/VRAM 或产品多消费者总预算。
+
+### 2026-10-21 cell 后台装配验证
+
+独立 target `/private/tmp/prism-world-cell-rebake-20261021.SotWJk`，offline、单编译任务、dev/test debug=0、incremental=0。关闭 tasks 的 bridge/cell 联合 `--no-default-features --lib --tests` 共 76 项通过；启用 cell `tasks` 的 bridge/cell 联合 `--lib --tests` 共 91 项通过（bridge 49、cell 42），包括真实 worker reload/取消、失败 reload 保留、runtime-scoped ID 与跨 cell 驻留竞争原子拒绝。`tasks,prism_tasks/single` cell 库与专项集成共 27 项通过；其中 2 个依赖真实 worker gate 的测试在 zero-worker 模式按设计返回，其余 inline 语义实际执行。bridge 新增 `try_discard` 覆盖 pending、成功、重复收集、source 错误、原始 panic payload 与完成后取消。文档测试中 bridge 3 项及 cell 新示例 1 项通过。另行重跑 `cargo test -j1 -p prism_world_runtime --lib --offline` 108 项和 `cargo test -j1 -p prism_world_gpu --features gpu --lib --offline` 123 项全部通过；这不构成本轮 GPU shader 实测。
+
+cell 库 `cargo clippy -j1 -p prism_world_physics_cell_runtime --features tasks --lib --no-deps --offline -- -D warnings` 通过。bridge 的库与 task test 在命令行排除既有 `collapsible_if`、`std_instead_of_alloc` 后通过；该结果是新增告警诊断，不是 bridge 严格 lint 门禁通过。依赖 `prism_physics_core` 仍报告既有警告。本片只读复审未发现阻断缺陷；复审核对 terminal 销毁后释放额度、成功后失效、两阶段总驻留预算、错误优先级、pool 借用及无可变入口绕过计费。
+
+### 2026-10-21 cell 后台轮询基准
+
+`aarch64-apple-darwin`、默认优化 bench profile、debug=0、incremental=0、offline、单编译任务；共享 pool 只有一个真实 worker，首任务用 channel gate 阻塞 source，其余任务排队。任务表全部占满，轮询最后一个 ID，覆盖线性查找的最差索引；每项 8 批预热、128 批测量，每批 256 次 `try_commit`，下表为批平均 ns/poll 的 nearest-rank 分位数。计时包含 pending 结果检查，排除 start、求值、发布、构造与销毁。
+
+| 未收集任务数 | 样本 / 逻辑 scratch 字节 | Pending poll P50 / P95 / P99（ns） |
+|---:|---:|---:|
+| 1 | 8 / 56 | 7 / 8 / 8 |
+| 64 | 512 / 3584 | 48 / 48 / 97 |
+| 1024 | 8192 / 57344 | 359 / 441 / 1482 |
+
+每项同时断言轮询不释放额度、`cancel_all` 不提前释放额度、gate 放行后逐个收集 cancellation 且 usage 归零、完整旧快照保持不变。这个基准验证真实 worker 下 pending 路径，不衡量单次尾延迟、source 成本、终态收集/驻留发布、RSS/VRAM、GPU 或产品帧预算，也不承诺任意容量下固定成本。

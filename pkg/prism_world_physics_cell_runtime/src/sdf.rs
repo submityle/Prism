@@ -10,6 +10,14 @@ use prism_world_residency::{SdfError, SdfQueryConsumer};
 use prism_world_runtime::SceneHost;
 use prism_world_stream::{CellManifest, SectorId};
 
+#[cfg(feature = "tasks")]
+mod rebake;
+#[cfg(feature = "tasks")]
+pub use rebake::{
+    SdfCellRebakeBudget, SdfCellRebakeError, SdfCellRebakeId, SdfCellRebakeResource,
+    SdfCellRebakeRuntime,
+};
+
 /// A decoder-owned sparse-SDF snapshot associated with one world cell.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SdfCellSnapshot {
@@ -195,7 +203,7 @@ pub struct SdfPhysicsCellHost<'a, H: SceneHost, D: SdfCellDecoder> {
     decoder: D,
     per_cell_budget: SdfPhysicsBridgeBudget,
     residency_budget: SdfResidencyBudget,
-    residents: Vec<(SectorId, SdfPhysicsSnapshot)>,
+    residents: Vec<(SectorId, WorldSdfPhysicsBridge)>,
     resident_bricks: usize,
     resident_samples: usize,
     resident_bytes: usize,
@@ -239,7 +247,7 @@ impl<'a, H: SceneHost, D: SdfCellDecoder> SdfPhysicsCellHost<'a, H, D> {
         self.residents
             .binary_search_by_key(&sector, |(key, _)| *key)
             .ok()
-            .map(|index| &self.residents[index].1)
+            .and_then(|index| self.residents[index].1.current())
     }
 
     /// Returns aggregate resident `(cells, bricks, samples, bytes)`.
@@ -316,7 +324,7 @@ impl<'a, H: SceneHost, D: SdfCellDecoder> SdfPhysicsCellHost<'a, H, D> {
         manifest: &CellManifest,
         decoded: SdfCellSnapshot,
     ) -> Result<
-        (SdfPhysicsSnapshot, (usize, usize, usize)),
+        (WorldSdfPhysicsBridge, (usize, usize, usize)),
         SdfPhysicsCellHostError<D::Error, H::Error>,
     > {
         if decoded.sector() != manifest.sector {
@@ -325,17 +333,17 @@ impl<'a, H: SceneHost, D: SdfCellDecoder> SdfPhysicsCellHost<'a, H, D> {
                 decoded: decoded.sector(),
             });
         }
-        if let Some(current) = self.resident(manifest.sector) {
-            if decoded.revision() <= current.revision() {
-                return Err(SdfPhysicsCellHostError::StaleRevision {
-                    current: current.revision(),
-                    incoming: decoded.revision(),
-                });
-            }
+        if let Some(current) = self.resident(manifest.sector)
+            && decoded.revision() <= current.revision()
+        {
+            return Err(SdfPhysicsCellHostError::StaleRevision {
+                current: current.revision(),
+                incoming: decoded.revision(),
+            });
         }
-        let bridge = WorldSdfPhysicsBridge::new(self.per_cell_budget);
+        let mut bridge = WorldSdfPhysicsBridge::new(self.per_cell_budget);
         let staged = bridge
-            .stage(decoded.into_snapshot())
+            .publish(decoded.into_snapshot())
             .map_err(SdfPhysicsCellHostError::Physics)?;
         let old = self.resident(manifest.sector);
         let old_bricks = old.map_or(0, |value| value.grid().brick_count());
@@ -406,13 +414,13 @@ impl<'a, H: SceneHost, D: SdfCellDecoder> SdfPhysicsCellHost<'a, H, D> {
                 .try_reserve(1)
                 .map_err(|_| SdfPhysicsCellHostError::AllocationFailed)?;
         }
-        Ok((staged, (next_bricks, next_samples, next_bytes)))
+        Ok((bridge, (next_bricks, next_samples, next_bytes)))
     }
 
     fn commit(
         &mut self,
         sector: SectorId,
-        staged: SdfPhysicsSnapshot,
+        staged: WorldSdfPhysicsBridge,
         usage: (usize, usize, usize),
     ) {
         match self
@@ -452,7 +460,10 @@ impl<H: SceneHost, D: SdfCellDecoder> SceneHost for SdfPhysicsCellHost<'_, H, D>
             .binary_search_by_key(&sector, |(key, _)| *key)
             .ok();
         let next_usage = if let Some(index) = index {
-            let resident = &self.residents[index].1;
+            let resident = self.residents[index]
+                .1
+                .current()
+                .ok_or(SdfPhysicsCellHostError::AccountingOverflow)?;
             let bricks = resident.grid().brick_count();
             let samples = resident
                 .grid()

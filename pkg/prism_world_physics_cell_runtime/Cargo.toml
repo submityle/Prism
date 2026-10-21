@@ -6,7 +6,12 @@ description = "Atomic world-cell terrain decoding and physics heightfield reside
 license = "MIT OR Apache-2.0"
 publish = false
 
+[features]
+default = []
+tasks = ["dep:prism_tasks", "prism_world_physics_bridge/tasks"]
+
 [dependencies]
+prism_tasks = { path = "../prism_tasks", optional = true }
 prism_world_physics_bridge = { path = "../prism_world_physics_bridge" }
 prism_world_runtime = { path = "../prism_world_runtime" }
 prism_world_residency = { path = "../prism_world_residency" }
@@ -31,4 +36,15 @@ path = "text/integration/sdf_cell_file_runtime.rs"
 [[bench]]
 name = "sdf_cell_codec"
 path = "text/integration/sdf_cell_codec_bench.rs"
+harness = false
+
+[[test]]
+name = "sdf_cell_rebake"
+path = "text/integration/sdf_cell_rebake.rs"
+required-features = ["tasks"]
+
+[[bench]]
+name = "sdf_cell_rebake"
+path = "text/integration/sdf_cell_rebake_bench.rs"
+required-features = ["tasks"]
 harness = false

@@ -6,6 +6,12 @@
 //! is called, and a failed host operation leaves the previous physics snapshot
 //! unchanged. Physics data remains disposable derived state and can be evicted
 //! independently of the authoritative cell payload.
+//!
+//! Sparse SDF cells use [`SdfPhysicsCellHost`] with [`SdfCellCodec`]. The optional
+//! `tasks` feature adds `SdfCellRebakeRuntime`: it runs bounded local rebakes on
+//! a caller-owned pool and publishes only on explicit owner collection. Queries
+//! retain the previous revision while work is pending; successful reloads and
+//! evictions invalidate that cell's old work without waiting for its evaluator.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -15,6 +21,12 @@ extern crate alloc;
 mod codec;
 mod sdf;
 mod sdf_codec;
+
+#[cfg(feature = "tasks")]
+pub use sdf::{
+    SdfCellRebakeBudget, SdfCellRebakeError, SdfCellRebakeId, SdfCellRebakeResource,
+    SdfCellRebakeRuntime,
+};
 
 pub use codec::{
     TerrainCellCodec, TerrainCellCodecError, TerrainCellCodecLimits, TERRAIN_CELL_CODEC_VERSION,

@@ -92,6 +92,7 @@ fn real_worker_keeps_old_queries_available_until_explicit_commit() {
     assert!(worker_index.is_some());
     assert!(!task.is_finished());
     assert_eq!(task.try_commit(&mut bridge).expect("pending"), None);
+    assert_eq!(task.try_discard().expect("pending discard"), None);
     assert_eq!(bridge.current(), Some(&old));
     assert_eq!(
         bridge
@@ -122,6 +123,64 @@ fn real_worker_keeps_old_queries_available_until_explicit_commit() {
         task.try_commit(&mut bridge),
         Err(SdfRebakeTaskError::AlreadyCollected)
     ));
+}
+
+/// Discard frees terminal results once while preserving source/panic diagnostics.
+#[test]
+fn terminal_discard_never_publishes_and_preserves_failures() {
+    let pool = TaskPool::with_threads(0);
+    let mut bridge = bridge();
+    let before = bridge.current().expect("current").clone();
+    let mut success = bridge.prepare_rebake(EDIT, 2, LIMITS).expect("work").spawn(
+        &pool,
+        &CancelToken::new(),
+        sample,
+    );
+    assert_eq!(success.try_discard().expect("discard"), Some(()));
+    assert!(matches!(
+        success.try_discard(),
+        Err(SdfRebakeTaskError::AlreadyCollected)
+    ));
+    assert!(matches!(
+        success.try_commit(&mut bridge),
+        Err(SdfRebakeTaskError::AlreadyCollected)
+    ));
+    let mut failure = bridge.prepare_rebake(EDIT, 2, LIMITS).expect("work").spawn(
+        &pool,
+        &CancelToken::new(),
+        |_| Err::<i16, _>("source failure"),
+    );
+    assert!(matches!(
+        failure.try_discard(),
+        Err(SdfRebakeTaskError::Rebake(SdfRebakeError::Source {
+            error: "source failure",
+            ..
+        }))
+    ));
+    let mut panicked = bridge.prepare_rebake(EDIT, 2, LIMITS).expect("work").spawn(
+        &pool,
+        &CancelToken::new(),
+        |_| -> Result<i16, Infallible> {
+            std::panic::panic_any(37_u32);
+        },
+    );
+    match panicked.try_discard() {
+        Err(SdfRebakeTaskError::Panicked(payload)) => {
+            assert_eq!(payload.downcast_ref::<u32>(), Some(&37));
+        }
+        other => panic!("expected original panic payload, got {other:?}"),
+    }
+    let mut cancelled = bridge.prepare_rebake(EDIT, 2, LIMITS).expect("work").spawn(
+        &pool,
+        &CancelToken::new(),
+        sample,
+    );
+    cancelled.cancel();
+    assert!(matches!(
+        cancelled.try_discard(),
+        Err(SdfRebakeTaskError::Rebake(SdfRebakeError::Cancelled))
+    ));
+    assert_eq!(bridge.current(), Some(&before));
 }
 
 /// Collecting a completed result cannot join a different job on the same pool.
