@@ -111,6 +111,19 @@ pub struct PlacementDeletionWork {
     pub stage: PlacementComputeStage,
 }
 
+/// Reset-only deletion output for a placement stream with no candidates.
+///
+/// The graph copies the upstream reset's four-word indirect record, then clears
+/// the output instance count. No filter or draw is recorded. The clear bind
+/// group must bind `indirect`; opaque RHI bindings cannot be inspected here.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PlacementEmptyDeletionWork {
+    /// Four-word deletion indirect output, distinct from every other binding.
+    pub indirect: PlacementImportedBuffer,
+    /// Singleton stage clearing word 1 while preserving the other words.
+    pub clear_instance_count: PlacementComputeStage,
+}
+
 /// Shader-visible dimensions of one uploaded full-key deletion request.
 /// These correspond to uniform words 0..4, not to allocated capacities.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -159,6 +172,9 @@ pub struct PlacementRenderStream {
     /// Candidate-dependent compute and draw work. This must be absent exactly
     /// when `stream.candidate_count == 0`.
     pub work: Option<PlacementRenderWork>,
+    /// Optional reset-only deletion output. May only be supplied when
+    /// `stream.candidate_count == 0` and `work` is absent.
+    pub empty_deletion: Option<PlacementEmptyDeletionWork>,
 }
 
 /// Imported scene color target consumed by the placement raster passes.
@@ -214,7 +230,8 @@ pub enum PlacementRenderBridgeError {
         stream: PlacementStream,
         offset: u64,
     },
-    /// Shader work dimensions disagree with the uploaded request or its bounds.
+    /// Shader work dimensions disagree with the uploaded request or its bounds,
+    /// or reset-only deletion work was supplied for a nonempty/workful stream.
     InvalidDeletionRequest { stream: PlacementStream },
     /// The singleton reset kernel must not race itself in multiple workgroups.
     InvalidResetDispatch {
@@ -279,7 +296,7 @@ impl fmt::Display for PlacementRenderBridgeError {
             Self::UnsupportedIndirectOffset { stream, offset } => write!(f,
                 "placement indirect offset {offset} must be zero for the fixed ABI in {stream:?}"),
             Self::InvalidDeletionRequest { stream } => write!(f,
-                "placement deletion request dimensions or dispatch are inconsistent for {stream:?}"),
+                "placement deletion request dimensions, dispatch, or empty-work metadata are inconsistent for {stream:?}"),
             Self::InvalidResetDispatch { stream, stage, dispatch } => write!(f,
                 "placement {stage} dispatch {dispatch:?} must be [1, 1, 1] for {stream:?}"),
             Self::AliasedBuffer { stream, resource, other_stream, other_resource } => write!(f,
@@ -355,6 +372,24 @@ pub fn build_placement_render_graph(
         )?;
 
         let Some(work) = item.work else {
+            if let Some(deletion) = item.empty_deletion {
+                let deletion_indirect = import_buffer(
+                    &mut graph,
+                    &mut imported_buffers,
+                    "world placement deletion indirect",
+                    deletion.indirect,
+                )?;
+                // Reuse the upstream reset's SSA output, not a second import
+                // of the same physical buffer or its stale entry-state handle.
+                let copied_indirect =
+                    add_deletion_args_copy(&mut graph, indirect, deletion_indirect, item.stream)?;
+                add_deletion_count_reset(
+                    &mut graph,
+                    copied_indirect,
+                    deletion.clear_instance_count,
+                    item.stream,
+                )?;
+            }
             continue;
         };
 
@@ -816,6 +851,9 @@ fn validate_physical_buffers(
                 check(name, buffer, writable)?;
             }
         }
+        if let Some(deletion) = item.empty_deletion {
+            check("deletion_indirect", deletion.indirect, true)?;
+        }
     }
     Ok(())
 }
@@ -886,6 +924,25 @@ fn validate_stream(item: &PlacementRenderStream) -> Result<(), PlacementRenderBr
             stream: item.stream,
             work_present: item.work.is_some(),
         });
+    }
+    if let Some(deletion) = item.empty_deletion {
+        if item.stream.candidate_count != 0 || item.work.is_some() {
+            return Err(PlacementRenderBridgeError::InvalidDeletionRequest {
+                stream: item.stream,
+            });
+        }
+        if deletion.indirect.bytes == 0 {
+            return Err(PlacementRenderBridgeError::ZeroBuffer {
+                stream: item.stream,
+                resource: "deletion_indirect",
+            });
+        }
+        validate_size(item, "deletion_indirect", deletion.indirect, 16)?;
+        validate_reset(
+            item,
+            "deletion_count_reset",
+            deletion.clear_instance_count.dispatch,
+        )?;
     }
     let slots = u64::from(item.stream.candidate_count.max(1));
     for (resource, binding, minimum) in [
@@ -1076,6 +1133,7 @@ mod tests {
                     indirect_offset: 0,
                 },
             }),
+            empty_deletion: None,
         }
     }
 
@@ -1083,6 +1141,19 @@ mod tests {
         let mut item = item(device);
         item.stream.candidate_count = 0;
         item.work = None;
+        item
+    }
+
+    fn with_empty_deletion(device: &impl RenderDevice) -> PlacementRenderStream {
+        let mut item = reset_only_item(device);
+        item.empty_deletion = Some(PlacementEmptyDeletionWork {
+            indirect: imported_buffer(device, 16),
+            clear_instance_count: PlacementComputeStage {
+                pipeline: ComputePipelineId::from_parts(7, 0),
+                bind_group: BindGroupId::from_parts(7, 0),
+                dispatch: [1, 1, 1],
+            },
+        });
         item
     }
 
@@ -1211,6 +1282,218 @@ mod tests {
                 ComputeCommand::SetBindGroup { index: 0, .. },
                 ComputeCommand::Dispatch { x: 1, y: 1, z: 1 },
             ]
+        ));
+    }
+
+    #[test]
+    fn empty_deletion_copies_upstream_reset_then_clears_output_without_filter_or_draw() {
+        let device = device();
+        let item = with_empty_deletion(&device);
+        let deletion = item.empty_deletion.unwrap();
+        let graph = build_placement_render_graph(Extent3d::new_2d(4, 4), scene(&device), &[item])
+            .expect("empty deletion graph lowering");
+        let recorded = graph.record(&device).expect("empty deletion recording");
+        let plan = recorded.plan();
+        assert_eq!(plan.order, [0, 1, 2]);
+        // Eleven upstream imports plus one deletion output. In particular the
+        // copy source must not be reimported under a new logical identity.
+        assert_eq!(plan.used_buffers.len(), 12);
+        assert_eq!(plan.used_buffers.iter().filter(|&&used| used).count(), 3);
+        assert!(plan.used_textures.iter().all(|&used| !used));
+        let [reset_accesses, copy_accesses, clear_accesses] = plan.accesses.as_slice() else {
+            panic!("empty output must have exactly three pass declarations");
+        };
+        assert_eq!(reset_accesses.len(), 2);
+        assert_eq!(copy_accesses.len(), 2);
+        assert_eq!(clear_accesses.len(), 1);
+        let upstream = reset_accesses[0];
+        let copy_source = copy_accesses[0];
+        let copy_destination = copy_accesses[1];
+        let clear = clear_accesses[0];
+        assert_eq!(copy_source.resource, upstream.resource);
+        assert_eq!(Some(copy_source.input_version), upstream.output_version);
+        assert_eq!(copy_source.output_version, None);
+        assert_ne!(copy_destination.resource, upstream.resource);
+        assert_eq!(clear.resource, copy_destination.resource);
+        assert_eq!(Some(clear.input_version), copy_destination.output_version);
+        assert!(clear.output_version.is_some());
+        for (source, destination, resource) in [(0, 1, upstream.resource), (1, 2, clear.resource)] {
+            assert!(plan.logical_barriers.iter().any(|barrier| {
+                barrier.source == source
+                    && barrier.destination == destination
+                    && barrier.resource == resource
+            }));
+        }
+
+        let [Pass::Compute {
+            commands: reset, ..
+        }, Pass::Transfer { commands: copy, .. }, Pass::Compute {
+            commands: clear, ..
+        }] = recorded.commands().passes.as_slice()
+        else {
+            panic!("empty deletion must only reset, copy, and clear; never filter or draw");
+        };
+        for (commands, stage) in [(reset, item.reset), (clear, deletion.clear_instance_count)] {
+            assert_eq!(
+                commands.as_slice(),
+                &[
+                    ComputeCommand::SetPipeline(stage.pipeline),
+                    ComputeCommand::SetBindGroup {
+                        index: 0,
+                        bind_group: stage.bind_group,
+                        dynamic_offsets: Vec::new(),
+                    },
+                    ComputeCommand::Dispatch { x: 1, y: 1, z: 1 },
+                ]
+            );
+        }
+        assert_eq!(
+            copy.as_slice(),
+            &[CopyCommand::CopyBufferToBuffer {
+                src: item.indirect.imported.buffer,
+                src_offset: 0,
+                dst: deletion.indirect.imported.buffer,
+                dst_offset: 0,
+                size: 16,
+            }]
+        );
+        recorded.release(&device);
+    }
+
+    #[test]
+    fn rejects_empty_deletion_on_nonempty_or_workful_streams() {
+        let device = device();
+        for (candidate_count, work_present) in [(0, true), (32, false), (32, true)] {
+            let mut invalid = with_empty_deletion(&device);
+            invalid.stream.candidate_count = candidate_count;
+            if work_present {
+                invalid.work = item(&device).work;
+            }
+            assert!(matches!(
+                build_placement_render_graph(Extent3d::new_2d(4, 4), scene(&device), &[invalid]),
+                Err(PlacementRenderBridgeError::CandidateWorkMismatch { .. })
+                    | Err(PlacementRenderBridgeError::InvalidDeletionRequest { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn rejects_empty_deletion_with_short_indirect_or_invalid_clear_dispatch() {
+        let device = device();
+        let base = with_empty_deletion(&device);
+        for bytes in 0..16 {
+            let mut item = base;
+            item.empty_deletion.as_mut().unwrap().indirect.bytes = bytes;
+            let result =
+                build_placement_render_graph(Extent3d::new_2d(4, 4), scene(&device), &[item]);
+            if bytes == 0 {
+                assert!(matches!(
+                    result,
+                    Err(PlacementRenderBridgeError::ZeroBuffer {
+                        resource: "deletion_indirect",
+                        ..
+                    })
+                ));
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(PlacementRenderBridgeError::InvalidBufferSize {
+                        resource: "deletion_indirect",
+                        minimum: 16,
+                        ..
+                    })
+                ));
+            }
+        }
+        for dispatch in [
+            [0, 1, 1],
+            [1, 0, 1],
+            [1, 1, 0],
+            [2, 1, 1],
+            [1, 2, 1],
+            [1, 1, 2],
+        ] {
+            let mut item = base;
+            item.empty_deletion
+                .as_mut()
+                .unwrap()
+                .clear_instance_count
+                .dispatch = dispatch;
+            let result =
+                build_placement_render_graph(Extent3d::new_2d(4, 4), scene(&device), &[item]);
+            if dispatch.contains(&0) {
+                assert!(matches!(
+                    result,
+                    Err(PlacementRenderBridgeError::ZeroDispatch {
+                        stage: "deletion_count_reset",
+                        ..
+                    })
+                ));
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(PlacementRenderBridgeError::InvalidResetDispatch {
+                        stage: "deletion_count_reset",
+                        ..
+                    })
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_empty_deletion_output_aliases_within_and_between_streams() {
+        let device = device();
+        let base = with_empty_deletion(&device);
+        let mut distinct = with_deletion(&device);
+        distinct.stream.cell = prism_world_stream::SectorId::new(1, 1, 0, 0);
+        for other in BUFFER_NAMES {
+            for across_streams in [false, true] {
+                if !across_streams && other.starts_with("deletion_") {
+                    continue;
+                }
+                let mut first = base;
+                let mut second = distinct;
+                let imported = if across_streams {
+                    binding_mut(&mut second, other).imported
+                } else {
+                    binding_mut(&mut first, other).imported
+                };
+                first.empty_deletion.as_mut().unwrap().indirect.imported = imported;
+                let streams = if across_streams {
+                    vec![first, second]
+                } else {
+                    vec![first]
+                };
+                assert!(
+                    matches!(
+                        build_placement_render_graph(
+                            Extent3d::new_2d(4, 4),
+                            scene(&device),
+                            &streams,
+                        ),
+                        Err(PlacementRenderBridgeError::AliasedBuffer { .. })
+                    ),
+                    "empty deletion aliases {other}, across_streams={across_streams}"
+                );
+            }
+        }
+
+        let mut second_empty = with_empty_deletion(&device);
+        second_empty.stream.cell = distinct.stream.cell;
+        second_empty.empty_deletion.as_mut().unwrap().indirect =
+            base.empty_deletion.unwrap().indirect;
+        assert!(matches!(
+            build_placement_render_graph(
+                Extent3d::new_2d(4, 4),
+                scene(&device),
+                &[base, second_empty],
+            ),
+            Err(PlacementRenderBridgeError::AliasedBuffer {
+                resource: "deletion_indirect",
+                other_resource: "deletion_indirect",
+                ..
+            })
         ));
     }
 

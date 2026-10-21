@@ -1,6 +1,6 @@
 # World streaming placement runtime slice
 
-本切片把 world streaming 的剩余可落地部分限制在两个 engine-neutral 契约内：
+本切片覆盖 world streaming placement 的 engine-neutral 契约与可选原生 RHI 适配：
 
 - `prism_world_runtime::WorldCellStore` 维护 resident cell 与 `PersistentId` 的稳定索引。索引支持多 cell、跨 cell `relocate`、cell replacement/eviction，以及有明确 byte/cell/object 上限的 canonical restart snapshot。
 - `StableRefSceneHost` 是 `SceneHost` 的生命周期适配器。stable-ref decoder 必须由产品 scene 提供，不假设 cell payload 格式；decode/store validation 失败不会调用 scene host，scene host load/reload 失败保留旧索引，eviction 只有在 host 成功后才删除索引。
@@ -9,4 +9,54 @@
 - `GpuHeightfieldPlacement::registration_snapshot` 暴露同一原生设备上的 11 个 buffer handle、精确逻辑 byte size、reset stage、候选阶段、request generation 与 candidate count。snapshot 只克隆句柄，不分配或复制 GPU 内存；空请求以 `active=None` 表达 reset-only。它是生产 RHI 注册的完整输入面，不冒充持久注册所有权或资源退休机制。
 - `prism_world_gpu::build_placement_render_graph` 将 renderer 已注册的真实 RHI buffer、scene texture、pipeline 与 bind group identity 降低为 `prism_render_graph::RenderGraph`。active cell 记录 `reset → source → project → field/compact → finalize` 五个 compute pass 和一个 indirect raster pass；empty cell 只记录一个 reset compute pass。reset hazard 只声明 indirect/status 写入，候选资源由后续阶段声明；scene attachment 通过 SSA handle 串接，多 cell 按稳定 cell/revision 顺序记录。零字节 buffer、零维 dispatch、候选数量与 work presence 不一致、未按四字节对齐的 indirect offset 与同 cell 重复输入都在返回 graph 前 fail-closed。
 
-验证覆盖：runtime 多 cell load、跨 cell resolve/relocation、reload 失败保持旧状态、eviction 后不可解析、磁盘 restart round-trip；GPU plan 的排序、hazard chain、重复/冲突 revision rejection，以及 encoder 对每个 pass 的顺序投递和精确失败定位。Null RHI command-recording 回归分别核对 active 的五次 compute dispatch 加一次 indirect draw，以及 empty 的单次 reset dispatch；Naga 闸门检查 reset 的两个 read-write storage binding、无 uniform、核心 u32 atomic ABI。2026-10-20 在独立离线 target 上，terrain-scatter 库 135/135、WGSL 9/9、`cargo test -p prism_world_gpu --features gpu --lib --offline` 119/119、`cargo test -p prism_world_runtime --lib --offline` 104/104；沙盒外 Apple M2/Metal IntegratedGpu 的 `heightfield_placement` 真实 GPU 集成 10/10 通过。该证据不冒充生产 renderer：尚未交付 persistent RHI registration RAII lease、renderer draw pipeline/bind group 与 scene target、实际 RenderGraph native record/encode/submit、completion tracker/generation retirement、`prism_render_scene` mesh/material/unified visibility 消费和产品 scene/ECS decoder。
+验证覆盖：runtime 多 cell load、跨 cell resolve/relocation、reload 失败保持旧状态、eviction 后不可解析、磁盘 restart round-trip；GPU plan 的排序、hazard chain、重复/冲突 revision rejection，以及 encoder 对每个 pass 的顺序投递和精确失败定位。Null RHI command-recording 回归分别核对 active 的五次 compute dispatch 加一次 indirect draw，以及 empty 的单次 reset dispatch；Naga 闸门检查 reset 的两个 read-write storage binding、无 uniform、核心 u32 atomic ABI。2026-10-20 在独立离线 target 上，terrain-scatter 库 135/135、WGSL 9/9、`cargo test -p prism_world_gpu --features gpu --lib --offline` 119/119、`cargo test -p prism_world_runtime --lib --offline` 104/104；沙盒外 Apple M2/Metal IntegratedGpu 的 `heightfield_placement` 真实 GPU 集成 10/10 通过。这是历史验证；原生 RHI 注册、提交与退休的后续交付见下节，不能将其扩大为完整产品 renderer 交付。
+
+## 原生 RHI 适配与生命周期
+
+`placement_rhi` feature 提供 `PlacementRhiBridge`，从原始 `GpuContext` 的同一
+adapter/device/queue 元组采用一个私有 RHI table，不请求第二个设备、不替换宿主错误或
+device-lost callback。注册消耗 producer 并形成稳定 wrapper；不同 context 或同 context 的
+另一 bridge 的 producer/scene/draw wrapper 都会在录制前拒绝。
+
+每个 producer 缓存 native buffer、compute pipeline 与 bind group 的注册。同一 native
+buffer 在后续请求中复用同一 `BufferId`，防止通过重复注册逃避图的物理别名校验。注册只释放
+table entry，不对外部 native buffer 调用 `destroy`；部分 stage 注册的 unwind 路径也有 RAII。
+每个 scene 持有 color texture/view，draw pipeline 持有其 pipeline/layout/group layout。
+调用方提供 shader，固定 group 0 绑定为 records、terrain samples、attributes、compact；
+删除流绑定 filtered compact。只支持单层、单 mip、单采样 2D color target 和无 vertex buffer、
+无 depth 的单 color attachment draw。raw shader IDs 必须来自 `bridge.device()`；这些逃生口
+不认证任意调用方的资源来源，也禁止调用方提前销毁 native inspection 返回的资源。
+
+`begin_frame → add_heightfield/add_deletions → record → submit` 的 move-only owner 保持
+producer 请求的共享借用直到真实提交或取消，提交前不能覆写请求；两个 compile-fail doctest
+分别覆盖 declaration 和 recorded 阶段。提交后可以按同一原始 queue 的顺序更新下一请求，
+不必 CPU 等待 GPU。声明或 recorded owner 被丢弃时不提交，并先丢弃命令再释放 graph allocations。
+
+native encode 后、进入真实 submit 前，graph allocations 和 frame resources 一起转入有界 pending 队列。
+completion callback 只写原子信号，不捕获资源图；`poll` 非阻塞推进，`wait` 等待指定同桥 receipt，
+精确 `wait` 成功即确认该 receipt 及前序提交完成，不依赖可能覆盖外部更晚提交的回调；
+`drain` 成功后确认全部 pending 并回收。receipt 的 `is_complete()` 只有在 allocation/registration pin
+真正回收后才为真，不把“submit 返回”当完成。丢弃 receipt 不等待也不丢失 pending 所有权。
+提交期间宿主回调 panic 时，pending 保留资源；未取得 submission index 的包在 `drain` 时等待
+整个原始 queue，而不是误走取消释放。桥析构只在 shutdown 时 drain，并捕获回调 panic；
+30 秒等待失败或 shutdown panic 时保留未完成资源，不能提前 destroy；panic payload 也保留，
+以免任意宿主 payload 的析构再次 panic。
+这表示资源不再 in-flight，不表示 device-loss 时的语义执行成功或自动恢复。
+
+pending vector 在构造时按上限预留，退休原位稳定压缩为 `O(in-flight frames)`，不反复移除导致
+平方搬移。注册集合固定于 producer 的容量与 stage 数；请求之间只更新 dispatch，不重复注册
+持久 compute 对象。每个非空 frame/stream 仍创建 draw bind group，并有 graph/命令 CPU 分配；
+没有宣称零分配或产品 P99 达标。候选评估、删除与绘制不走 CPU readback；测试 readback 仅用于观察。
+
+空删除请求也记录 upstream reset → 16-byte indirect copy → deletion count reset 三个 pass，
+不录制候选 filter/draw，避免上一请求的 instance count 残留。当前图的首个非空 raster 对
+scene version 0 清黑，同帧后续 cell 通过 SSA Load 累加；不能用于保留已有颜色的任意叠加。
+全部为空时没有 raster，保持已有颜色；宿主若需清空旧画面须自行清屏或替换目标。
+
+2026-10-22 主工作树复验：runtime lib 183/183、GPU feature lib 136/136、placement_rhi lib
+155/155、借用约束 doctest 2/2、WGSL 11/11，以及沙盒外 Apple M2/Metal IntegratedGpu 的
+RHI 实卡回归 7/7（无忽略）。后者包括 submit/wait 宿主 callback panic 注入和恢复。
+这是共享 dirty checkout 验证，非 clean-HEAD 隔离验证；严格 Clippy 仍有 6 项已记录告警。
+完整命令和证据边界见 `prism_world_gpu_heightfield_placement_deletions_zh.md`。
+产品 `prism_render_scene` mesh/material/unified visibility 消费、scene/ECS decoder、持久删除的
+自动产品消费、多厂商和产品负载的性能/显存/功耗验收仍独立于此适配层。

@@ -586,6 +586,11 @@ impl GpuHeightfieldPlacementDeletions {
         })
     }
 
+    #[cfg(feature = "placement_rhi")]
+    pub(crate) fn device_identity(&self) -> &std::sync::Arc<()> {
+        self.placement.device_identity()
+    }
+
     pub fn records(&self) -> &wgpu::Buffer {
         self.placement.records()
     }

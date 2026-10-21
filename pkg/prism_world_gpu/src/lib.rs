@@ -18,6 +18,9 @@ mod placement_render_bridge;
 mod registry;
 mod world_placement_graph;
 
+#[cfg(feature = "placement_rhi")]
+pub mod placement_rhi;
+
 pub use contract::{
     Cluster, FrustumPlane, ProxyInstance, VisibilityInput, VisibilityOutput, ERROR_QUANTUM,
     LOD_THRESHOLDS,
@@ -26,8 +29,8 @@ pub use density::{density_dither_visible, DensityPolicy, DensityPolicyError};
 pub use packing::{ClusterSoa, ProxySoa, SoaBufferPack};
 pub use placement_render_bridge::{
     build_placement_render_graph, PlacementComputeStage, PlacementDeletionRequest,
-    PlacementDeletionWork, PlacementDrawStage, PlacementImportedBuffer, PlacementRenderBridgeError,
-    PlacementRenderStream, PlacementRenderWork, PlacementSceneTarget,
+    PlacementDeletionWork, PlacementDrawStage, PlacementEmptyDeletionWork, PlacementImportedBuffer,
+    PlacementRenderBridgeError, PlacementRenderStream, PlacementRenderWork, PlacementSceneTarget,
     PLACEMENT_INDIRECT_COUNT_RESET_WGSL,
 };
 pub use registry::{PreparedSectorUpdate, ProxyHandle, ProxyRegistry, ProxyRegistryError};

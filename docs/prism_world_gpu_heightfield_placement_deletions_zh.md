@@ -201,6 +201,75 @@ Metal 实卡 3/3。新增 bridge 回归覆盖全部 15 个 buffer 的欠容量�
 以及 `planet_placement.rs` 的 1 条冗余转换告警。未修改这些其他路径，也未通过关闭 lint 掩盖结果。
 本次新增 alias error 的大枚举告警已通过缩小错误布局消除。
 
-这些结果证明 native compute 链和图声明/录制分别通过，并不证明真实 RHI RenderGraph 的
-注册、GPU submit、draw bind group 与 retirement 整条链已集成；scene/ECS、产品 renderer、
-持久化消费和性能/画质 benchmark 仍不在本切片交付范围内。
+上述 ABI 加固阶段的结果只证明 native compute 链和图声明/录制分别通过；后续原生 RHI
+注册、提交和退休的独立实现及验证见下一节。scene/ECS、产品 renderer、持久化消费和
+性能/画质 benchmark 仍不在本切片交付范围内。
+
+## 2026-10-22 原生 RHI 注册、提交与退休
+
+新增可选 `placement_rhi` feature 与 `PlacementRhiBridge`，采用原 `GpuContext` 的同一
+adapter/device/queue；不创建设备替身、不覆盖宿主错误回调。它完成本切片的真实
+RenderGraph record → native encode → queue submit → completion retirement，不再只验证
+独立的图声明与手写 native compute 链。producer 的 buffer/compute 注册有 RAII lease，
+scene color texture/view、draw pipeline/layout/group 和 graph allocations 在取消或完成前
+由明确的 owner 保活。不同 context、同 context 的不同 RHI table 均拒绝混用。
+
+producer 被移入稳定 wrapper，frame/recorded owner 在提交或取消前持有请求借用；两项
+compile-fail doctest 防止提前覆写。提交后可经同一 queue 顺序更新请求，不要求 CPU 等待。
+pending 队列有固定准入上限并预留容量，退休原位稳定压缩，复杂度为 O(in-flight frames)。
+同一 native buffer 与 compute stage 缓存注册；每个非空 frame/stream 仍创建 draw bind group，
+图/命令仍有 CPU 分配，因此不宣称零分配、产品 P99、VRAM 峰值或功耗达标。
+
+空 deletion 请求记录 upstream reset → 16-byte indirect copy → deletion count reset，
+无 filter、无 raster，确保上游及删除输出计数都归零。首个非空 raster 清黑，同帧后续
+cell 以 SSA Load 累加；整帧为空则保留原 scene 颜色，宿主需要清旧画面时须显式清屏。
+当前 draw ABI 是调用方 shader 的四个 vertex-stage storage binding 和单 color attachment，
+不支持 vertex buffer、depth、MSAA，也不是产品 mesh/material renderer。
+
+提交前先将所有权转入 pending，处理“native submit 已入队但宿主回调 panic、尚未返回
+submission index”的情况。精确 wait 成功直接确认对应提交及前序包，不依赖可能覆盖更晚
+外部提交的 callback；未知 index 的包由 whole-queue drain 确认。shutdown 的 30 秒等待失败
+或宿主回调 panic 不允许提前释放资源，未退休 owner 有意保留；panic payload 也保留，
+避免其析构再次 panic。正常 frame/receipt 析构不阻塞，bridge 析构才执行 shutdown drain。
+此安全规则不承诺 device loss 后的语义执行成功，也不提供自动恢复。
+
+本轮主工作树验收（共享 dirty checkout，不宣称 clean-HEAD 隔离验证）：
+
+| 验证 | 结果 |
+| --- | --- |
+| runtime lib | 183/183 |
+| GPU feature lib | 136/136 |
+| placement_rhi lib | 155/155 |
+| placement_rhi compile-fail doctest | 2/2 |
+| terrain_scatter WGSL/Naga | 11/11 |
+| no-default GPU lib check | 通过 |
+| Apple M2 / Metal / IntegratedGpu 原生 RHI 集成 | 7/7，0 ignored |
+| Apple M2 / Metal / IntegratedGpu 原 deletion 集成 | 3/3，0 ignored |
+
+7 项实卡回归覆盖完整 56-byte key（包括高位 limb）CPU parity 与逐 source-slot 间接绘制
+像素、非空→空→非空双计数复位、跨 context/table 拒绝、声明/录制取消、丢弃 producer/draw/
+scene 后在途保活、同 queue 三次请求无中间 wait 的独立 scene 输出与丢弃 receipt，以及
+submit callback panic 的 pending 恢复和 completion callback panic 后精确 wait 的恢复。
+panic 注入由测试捕获，日志中的两次 panic 是预期路径，不是忽略失败。
+此前 `LayeredCellManifest.admitted_layers` 编译错误在上述 runtime/GPU feature 复验中
+未复现；本提交不修改 runtime 文件。
+
+复现命令（低磁盘占用：关闭 debug info/incremental，单 job；实卡命令需允许 Metal 设备）：
+
+```bash
+export CARGO_PROFILE_DEV_DEBUG=0
+export CARGO_INCREMENTAL=0
+cargo test -p prism_world_runtime --lib --offline -j 1
+cargo test -p prism_world_gpu --features gpu --lib --offline -j 1
+cargo test -p prism_world_gpu --features placement_rhi --lib --offline -j 1
+cargo test -p prism_world_gpu --features placement_rhi --doc --offline -j 1
+cargo test -p prism_world_gpu --features terrain_scatter --test wgsl_compile --offline -j 1
+cargo check -p prism_world_gpu --no-default-features --lib --offline -j 1
+WGPU_BACKEND=metal PRISM_REQUIRE_GPU=1 cargo test -p prism_world_gpu --features placement_rhi --test placement_rhi --offline -j 1 -- --nocapture --test-threads=1
+WGPU_BACKEND=metal PRISM_REQUIRE_GPU=1 cargo test -p prism_world_gpu --features terrain_scatter --test heightfield_placement_deletion --offline -j 1 -- --nocapture --test-threads=1
+```
+
+严格 Clippy 的 6 项已有告警仍按上节记录保留，不把测试通过扩展为严格 lint 通过。
+完整 API、资源来源与 native inspection 逃生口约束见 `prism_world_gpu_placement_runtime_zh.md`。
+产品 `prism_render_scene` mesh/material/unified visibility、scene/ECS decoder、持久删除的
+自动消费、多厂商及产品负载性能/显存/功耗仍须分别交付，不能由这 7 个测试替代。

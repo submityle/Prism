@@ -235,6 +235,20 @@ impl GpuContext {
         &self.device_identity
     }
 
+    #[cfg(feature = "placement_rhi")]
+    pub(crate) fn adopt_placement_rhi(
+        &self,
+    ) -> (
+        prism_render_driver_wgpu::WgpuDevice,
+        prism_render_driver_wgpu::WgpuQueue,
+    ) {
+        prism_render_driver_wgpu::WgpuDevice::adopt(
+            self.adapter.clone(),
+            self.device.clone(),
+            self.queue.clone(),
+        )
+    }
+
     /// Returns the native submission queue.
     #[must_use]
     pub fn queue(&self) -> &Queue {

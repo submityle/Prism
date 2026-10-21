@@ -10,11 +10,13 @@ publish = false
 default = []
 gpu = ["dep:bytemuck", "dep:futures-lite", "dep:wgpu", "dep:prism_world_residency"]
 terrain_scatter = ["gpu", "dep:prism_world_terrain"]
+placement_rhi = ["terrain_scatter", "dep:prism_render_driver_wgpu"]
 
 [dependencies]
 prism_world_stream = { path = "../prism_world_stream", default-features = false }
 prism_render_driver = { path = "../prism_render_driver", default-features = false, features = ["std"] }
 prism_render_graph = { path = "../prism_render_graph" }
+prism_render_driver_wgpu = { path = "../../os-backends/prism_render_driver_wgpu", optional = true }
 prism_world_residency = { path = "../prism_world_residency", optional = true }
 prism_world_terrain = { path = "../prism_world_terrain", features = ["scatter"], optional = true }
 bytemuck = { version = "1.5", features = ["derive"], optional = true }
