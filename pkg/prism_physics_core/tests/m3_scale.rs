@@ -14,7 +14,7 @@
 //!    fraction. This is the property that keeps large scenes real-time.
 //!
 //! Every number asserted below is the outcome of stepping a real
-//! [`XpbdSolver`] over the world; nothing is stubbed.
+//! [`XpbdSolver`] over the world; every assertion observes the solver output.
 //!
 //! # Provenance
 //!

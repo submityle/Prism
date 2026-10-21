@@ -5,6 +5,7 @@
 //! backends operate on it but are not owned by it.
 
 use crate::aero::{AeroBodyConfig, AeroBodyState, AeroWrench, WindField};
+use crate::collider::compound::{CompoundLeafPolicy, PreparedCompound, MAX_COMPOUND_CHILDREN};
 use crate::collider::{CompoundChild, ShapeRegistry};
 use crate::collision_filter::{
     CollisionExclusionError, CollisionExclusionGroupId, CollisionExclusions,
@@ -18,7 +19,7 @@ use crate::dynamics::assembly::{
 use crate::dynamics::field::{
     FieldBatchError, FieldBatchSampler, FieldBody, FieldRegistry, FieldTargetMask,
 };
-use crate::dynamics::force::ForceAccumulator;
+use crate::dynamics::force::{ForceAccumulator, ForceError, PreparedForceRemap};
 use crate::dynamics::Integrator;
 use crate::events::{ContactEventTracker, PhysicsEvent};
 use crate::joint::{Joint, JointDesc, JointHandle, JointStorage};
@@ -38,9 +39,12 @@ use crate::soft::topology::TopologyTearUpdate;
 use crate::soft::{SoftBody, SoftBodyHandle, SoftBodyStorage, TopologyTearEvent};
 use crate::state::body::{BodyDesc, SolverMassProperties};
 use crate::state::handle::BodyHandle;
-use crate::state::storage::BodyStorage;
+use crate::state::storage::{BodyReplacementPlan, BodyStorage};
 use glam::Vec3;
 use std::collections::BTreeMap;
+
+mod assembly_break;
+pub use assembly_break::{AssemblyMemberRemap, AssemblySplitReport, JointBoundaryFailure};
 
 #[derive(Clone, Debug)]
 struct AssemblyJointSnapshot {
@@ -54,6 +58,35 @@ struct AssemblyMergeState {
     component: Vec<BodySnapshot>,
     compound: CompoundBody,
     connections: Vec<AssemblyJointSnapshot>,
+}
+
+// These plans never escape the public operation's exclusive world borrow.
+// Every recoverable failure happens while preparing; commit has no Result.
+struct PreparedAssemblyMerge {
+    allocation: BodyReplacementPlan,
+    descriptor: BodyDesc,
+    collider: Option<PreparedCompound>,
+    gravity: Option<Vec3>,
+    graph: AssemblyGraph,
+    forces: PreparedForceRemap,
+    joints: Vec<(JointHandle, Joint)>,
+    recovery: AssemblyMergeState,
+}
+
+struct PreparedAssemblySplit {
+    allocation: BodyReplacementPlan,
+    descriptors: Vec<BodyDesc>,
+    parts: Vec<PreparedAssemblySplitPart>,
+    graph: AssemblyGraph,
+}
+
+struct PreparedAssemblySplitPart {
+    proxy: BodyHandle,
+    range: std::ops::Range<usize>,
+    proxy_snapshot: BodySnapshot,
+    gravity: Option<Vec3>,
+    forces: PreparedForceRemap,
+    joints: Vec<(JointHandle, Joint)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -74,6 +107,10 @@ pub enum AssemblyWorldError {
     /// World-following and explicit overrides remain distinct even when their
     /// current accelerations happen to match.
     GravityPolicyConflict,
+    /// A member's damping coefficient is negative or non-finite.
+    InvalidDamping,
+    /// Pending wrench remapping failed, including finite-input overflow.
+    Force(ForceError),
 }
 
 /// Error returned when aerodynamic data cannot be registered for a body.
@@ -178,6 +215,8 @@ pub struct PhysicsWorld {
     pub articulation_degradations: Vec<ArticulationDegradationEvent>,
     collision_exclusions: CollisionExclusions,
     assembly_merges: BTreeMap<u64, AssemblyMergeState>,
+    assembly_split_reports: Vec<AssemblySplitReport>,
+    joint_boundary_failure: Option<JointBoundaryFailure>,
 }
 
 impl PhysicsWorld {
@@ -206,6 +245,8 @@ impl PhysicsWorld {
             articulation_degradations: Vec::new(),
             collision_exclusions: CollisionExclusions::default(),
             assembly_merges: BTreeMap::new(),
+            assembly_split_reports: Vec::new(),
+            joint_boundary_failure: None,
         }
     }
 
@@ -234,9 +275,10 @@ impl PhysicsWorld {
         &mut self,
         members: &[(BodyHandle, bool)],
     ) -> Result<CollisionExclusionGroupId, CollisionExclusionError> {
-        if let Some(&(body, _)) = members.iter().find(|(body, _)| {
-            self.assembly_merges.contains_key(&body_sort_key(body))
-        }) {
+        if let Some(&(body, _)) = members
+            .iter()
+            .find(|(body, _)| self.assembly_merges.contains_key(&body_sort_key(body)))
+        {
             return Err(CollisionExclusionError::MergedBody(body));
         }
         self.collision_exclusions.install(&self.bodies, members)
@@ -421,7 +463,8 @@ impl PhysicsWorld {
         handle
     }
 
-    /// Registers an assembly edge with an explicit break policy.
+    /// Atomically registers an assembly edge and its explicit break policy.
+    /// Rejection preserves both stores, including connection IDs and fatigue.
     pub fn connect_assembly(
         &mut self,
         a: BodyHandle,
@@ -430,13 +473,14 @@ impl PhysicsWorld {
         kind: crate::joint::JointKind,
         break_limit: Option<BreakLimit>,
     ) -> Result<ConnectionId, AssemblyError> {
-        let id = self.assemblies.connect(a, b, joint, kind, break_limit)?;
-        if let (Some(joint), Some(limit)) = (joint, break_limit) {
-            self.breakable_joints
-                .register(joint, limit)
-                .map_err(|_| AssemblyError::InvalidLimit)?;
-        }
-        Ok(id)
+        self.assemblies.connect_with_policy(
+            &mut self.breakable_joints,
+            a,
+            b,
+            joint,
+            kind,
+            break_limit,
+        )
     }
 
     /// Commits measured solver constraint loads at one fixed-step boundary.
@@ -454,10 +498,11 @@ impl PhysicsWorld {
             .copied()
             .filter(|item| self.breakable_joints.contains(item.joint))
             .collect();
-        let events =
+        let (policies, events) =
             self.breakable_joints
-                .submit_solver_boundary(dt, &breakable_loads, &mut self.joints)?;
+                .prepare_solver_boundary(dt, &breakable_loads, &self.joints)?;
         if events.is_empty() {
+            self.breakable_joints = policies;
             return Ok(events);
         }
 
@@ -478,13 +523,38 @@ impl PhysicsWorld {
         }
         proxies.sort_by_key(body_sort_key);
         proxies.dedup();
-        for proxy in proxies {
-            self.split_assembly(proxy)
-                .expect("a live assembly merge state always has a splittable proxy");
+        if !proxies.is_empty() {
+            // One allocator plan covers the entire boundary: independently
+            // preparing each proxy would predict overlapping free-list slots.
+            let prepared = self
+                .prepare_assembly_splits(&proxies, None)
+                .map_err(|(proxy, error)| BoundaryLoadError::AssemblySplit { proxy, error })?;
+            let reports: Vec<_> = prepared
+                .parts
+                .iter()
+                .map(|part| {
+                    let state = &self.assembly_merges[&body_sort_key(&part.proxy)];
+                    AssemblySplitReport {
+                        proxy: part.proxy,
+                        members: state
+                            .component
+                            .iter()
+                            .zip(&prepared.allocation.handles()[part.range.clone()])
+                            .map(|(snapshot, &current)| AssemblyMemberRemap {
+                                original: snapshot.handle,
+                                current,
+                            })
+                            .collect(),
+                    }
+                })
+                .collect();
+            self.commit_assembly_split(prepared);
+            self.assembly_split_reports.extend(reports);
         }
 
         // Splitting restores the pre-merge joint snapshots, so re-apply the
         // policy outcome before exposing the post-break graph.
+        self.breakable_joints = policies;
         self.breakable_joints
             .disable_broken(&mut self.joints, &events);
 
@@ -506,6 +576,15 @@ impl PhysicsWorld {
         Ok(events)
     }
 
+    /// Drains ownership handoffs generated by automatic break splits.
+    ///
+    /// Explicit ECS-requested splits do not enqueue a report because their
+    /// caller already owns the split transaction and receives the handles
+    /// directly.
+    pub fn drain_assembly_split_reports(&mut self) -> Vec<AssemblySplitReport> {
+        std::mem::take(&mut self.assembly_split_reports)
+    }
+
     /// Replaces one connected runtime assembly by a single physical proxy.
     /// The operation is deterministic, conserves rigid-body momentum, keeps
     /// a conservative compound convex collider, and stores enough state for a
@@ -514,6 +593,28 @@ impl PhysicsWorld {
         &mut self,
         component: &[BodyHandle],
     ) -> Result<BodyHandle, AssemblyWorldError> {
+        let prepared = self.prepare_assembly_merge(component, None)?;
+        Ok(self.commit_assembly_merge(prepared))
+    }
+
+    /// Atomically merges with one policy per expanded collider leaf, ordered
+    /// by sorted original body handle and then that collider's leaf order.
+    /// Callers can resolve member material inheritance before merging. Geometry
+    /// and policies are validated together before any world state is changed.
+    pub fn merge_assembly_with_leaf_policies(
+        &mut self,
+        component: &[BodyHandle],
+        policies: &[CompoundLeafPolicy],
+    ) -> Result<BodyHandle, AssemblyWorldError> {
+        let prepared = self.prepare_assembly_merge(component, Some(policies))?;
+        Ok(self.commit_assembly_merge(prepared))
+    }
+
+    fn prepare_assembly_merge(
+        &self,
+        component: &[BodyHandle],
+        policies: Option<&[CompoundLeafPolicy]>,
+    ) -> Result<PreparedAssemblyMerge, AssemblyWorldError> {
         let mut members = component.to_vec();
         members.sort_by_key(body_sort_key);
         members.dedup();
@@ -523,7 +624,10 @@ impl PhysicsWorld {
         if members.iter().any(|body| !self.bodies.contains(*body)) {
             return Err(AssemblyWorldError::InvalidBody);
         }
-        let gravity_override = self.bodies.gravity_override(members[0]).expect("live member");
+        let gravity_override = self
+            .bodies
+            .gravity_override(members[0])
+            .expect("live member");
         if members
             .iter()
             .any(|body| self.bodies.gravity_override(*body) != Some(gravity_override))
@@ -532,7 +636,10 @@ impl PhysicsWorld {
         }
         // A single proxy cannot encode per-member flags or exclusions against
         // members left outside this component. Reject before any mutation.
-        if members.iter().any(|body| self.collision_exclusions.membership(*body).is_some()) {
+        if members
+            .iter()
+            .any(|body| self.collision_exclusions.membership(*body).is_some())
+        {
             return Err(AssemblyWorldError::CollisionExclusionConflict);
         }
         let Some(graph_component) = self.assemblies.component_of(members[0]) else {
@@ -576,10 +683,14 @@ impl PhysicsWorld {
             })
             .collect();
         let compound = CompoundBody::from_states(&states).map_err(AssemblyWorldError::Compound)?;
-        let affected = self
-            .assemblies
-            .clone()
-            .collapse_component(&members, BodyHandle::INVALID)
+        let allocation = self
+            .bodies
+            .prepare_replacement(&members, 1)
+            .ok_or(AssemblyWorldError::InvalidBody)?;
+        let proxy = allocation.handles()[0];
+        let mut graph = self.assemblies.clone();
+        let affected = graph
+            .collapse_component(&members, proxy)
             .map_err(AssemblyWorldError::Graph)?;
         let mut joint_snapshots = Vec::with_capacity(affected.len());
         for connection in &affected {
@@ -597,20 +708,41 @@ impl PhysicsWorld {
                 joint,
             });
         }
-        let collider = self.build_compound_collider(&snapshots, &compound)?;
+        let collider = self.prepare_assembly_collider(&snapshots, &compound, policies)?;
         let (proxy_orientation, inverse_inertia) = compound.principal_mass_properties();
         let first = snapshots[0].desc;
         let total_mass = compound.properties.mass;
+        if snapshots.iter().any(|snapshot| {
+            !snapshot.desc.linear_damping.is_finite()
+                || snapshot.desc.linear_damping < 0.0
+                || !snapshot.desc.angular_damping.is_finite()
+                || snapshot.desc.angular_damping < 0.0
+        }) {
+            return Err(AssemblyWorldError::InvalidDamping);
+        }
+        // A finite weighted mean must not overflow just because its f32
+        // numerator does. Use the same f64 mass sum for both coefficients;
+        // normalizing by the rounded compound mass can also exceed f32::MAX.
+        let damping_mass = snapshots
+            .iter()
+            .map(|snapshot| f64::from(snapshot.desc.mass_properties.mass()))
+            .sum::<f64>();
         let linear_damping = snapshots
             .iter()
-            .map(|snapshot| snapshot.desc.linear_damping * snapshot.desc.mass_properties.mass())
-            .sum::<f32>()
-            / total_mass;
+            .map(|snapshot| {
+                f64::from(snapshot.desc.linear_damping)
+                    * f64::from(snapshot.desc.mass_properties.mass())
+            })
+            .sum::<f64>()
+            / damping_mass;
         let angular_damping = snapshots
             .iter()
-            .map(|snapshot| snapshot.desc.angular_damping * snapshot.desc.mass_properties.mass())
-            .sum::<f32>()
-            / total_mass;
+            .map(|snapshot| {
+                f64::from(snapshot.desc.angular_damping)
+                    * f64::from(snapshot.desc.mass_properties.mass())
+            })
+            .sum::<f64>()
+            / damping_mass;
         let proxy_desc = BodyDesc {
             kind: crate::state::body::BodyKind::Dynamic,
             position: compound.properties.center_of_mass,
@@ -621,9 +753,9 @@ impl PhysicsWorld {
                 inv_mass: 1.0 / total_mass,
                 inv_inertia: inverse_inertia,
             },
-            linear_damping,
-            angular_damping,
-            collider,
+            linear_damping: linear_damping as f32,
+            angular_damping: angular_damping as f32,
+            collider: None,
             material: first.material,
             is_sensor: false,
             ccd: snapshots.iter().any(|snapshot| snapshot.desc.ccd),
@@ -633,23 +765,14 @@ impl PhysicsWorld {
             .map(|snapshot| (snapshot.handle, snapshot.desc.position))
             .collect();
 
-        for snapshot in &snapshots {
-            self.bodies.remove(snapshot.handle);
-            self.collision_exclusions.remove(snapshot.handle);
-        }
-        let proxy = self.bodies.insert(proxy_desc);
-        assert!(self.bodies.set_gravity_override(proxy, gravity_override));
-        self.external_forces.merge_bodies(
-            &source_centers,
-            proxy,
-            compound.properties.center_of_mass,
-        );
-        self.assemblies
-            .collapse_component(&members, proxy)
-            .map_err(AssemblyWorldError::Graph)?;
+        let (forces, _) = self
+            .external_forces
+            .prepare_merge_bodies(&source_centers, proxy, compound.properties.center_of_mass)
+            .map_err(AssemblyWorldError::Force)?;
+        let mut joints = Vec::new();
         for entry in &joint_snapshots {
             if let Some(handle) = entry.connection.joint {
-                if let Some(joint) = self.joints.get_mut(handle) {
+                if let Some(mut joint) = entry.joint {
                     if members.contains(&joint.anchor_a.body) {
                         joint.anchor_a.body = proxy;
                     }
@@ -661,19 +784,44 @@ impl PhysicsWorld {
                     {
                         joint.enabled = false;
                     }
+                    joints.push((handle, joint));
                 }
             }
         }
-        self.assembly_merges.insert(
-            body_sort_key(&proxy),
-            AssemblyMergeState {
+        Ok(PreparedAssemblyMerge {
+            allocation,
+            descriptor: proxy_desc,
+            collider,
+            gravity: gravity_override,
+            graph,
+            forces,
+            joints,
+            recovery: AssemblyMergeState {
                 proxy,
                 component: snapshots,
                 compound,
                 connections: joint_snapshots,
             },
-        );
-        Ok(proxy)
+        })
+    }
+
+    fn commit_assembly_merge(&mut self, mut prepared: PreparedAssemblyMerge) -> BodyHandle {
+        prepared.descriptor.collider = prepared
+            .collider
+            .map(|collider| self.shapes.insert_prepared_compound(collider));
+        let handles = self
+            .bodies
+            .commit_replacement(prepared.allocation, &[prepared.descriptor]);
+        let proxy = handles[0];
+        assert!(self.bodies.set_gravity_override(proxy, prepared.gravity));
+        self.assemblies = prepared.graph;
+        self.external_forces.commit_remap(prepared.forces);
+        for (handle, joint) in prepared.joints {
+            *self.joints.get_mut(handle).expect("prepared live joint") = joint;
+        }
+        self.assembly_merges
+            .insert(body_sort_key(&proxy), prepared.recovery);
+        proxy
     }
 
     /// Splits a previously merged proxy and restores all member bodies,
@@ -682,10 +830,100 @@ impl PhysicsWorld {
         &mut self,
         proxy: BodyHandle,
     ) -> Result<Vec<BodyHandle>, AssemblyWorldError> {
-        let Some(state) = self.assembly_merges.get(&body_sort_key(&proxy)).cloned() else {
-            return Err(AssemblyWorldError::NotMerged);
-        };
-        if state.proxy != proxy || !self.bodies.contains(proxy) {
+        let prepared = self.prepare_assembly_split(proxy, None)?;
+        Ok(self.commit_assembly_split(prepared))
+    }
+
+    /// Splits only if the recovery record matches the caller's original
+    /// generational member handles in exact order. A mismatch leaves the world
+    /// unchanged, just like graph, allocation, or force preparation failure.
+    pub fn split_assembly_checked(
+        &mut self,
+        proxy: BodyHandle,
+        expected_original_members: &[BodyHandle],
+    ) -> Result<Vec<BodyHandle>, AssemblyWorldError> {
+        let prepared = self.prepare_assembly_split(proxy, Some(expected_original_members))?;
+        Ok(self.commit_assembly_split(prepared))
+    }
+
+    fn prepare_assembly_split(
+        &self,
+        proxy: BodyHandle,
+        expected_original_members: Option<&[BodyHandle]>,
+    ) -> Result<PreparedAssemblySplit, AssemblyWorldError> {
+        self.prepare_assembly_splits(&[proxy], expected_original_members)
+            .map_err(|(_, error)| error)
+    }
+
+    fn prepare_assembly_splits(
+        &self,
+        proxies: &[BodyHandle],
+        expected_original_members: Option<&[BodyHandle]>,
+    ) -> Result<PreparedAssemblySplit, (BodyHandle, AssemblyWorldError)> {
+        let mut count = 0usize;
+        for &proxy in proxies {
+            let state = self
+                .assembly_merges
+                .get(&body_sort_key(&proxy))
+                .ok_or((proxy, AssemblyWorldError::NotMerged))?;
+            if state.proxy != proxy {
+                return Err((proxy, AssemblyWorldError::InvalidProxy));
+            }
+            count = count
+                .checked_add(state.component.len())
+                .ok_or((proxy, AssemblyWorldError::InvalidProxy))?;
+        }
+        let allocation = self
+            .bodies
+            .prepare_replacement(proxies, count)
+            .ok_or((proxies[0], AssemblyWorldError::InvalidProxy))?;
+        let mut descriptors = Vec::with_capacity(count);
+        let mut parts = Vec::with_capacity(proxies.len());
+        let mut graph = self.assemblies.clone();
+        for &proxy in proxies {
+            let state = &self.assembly_merges[&body_sort_key(&proxy)];
+            let start = descriptors.len();
+            let range = start..start + state.component.len();
+            let part = self
+                .prepare_assembly_split_part(
+                    state,
+                    expected_original_members,
+                    &allocation.handles()[range.clone()],
+                    &mut descriptors,
+                    &mut graph,
+                    range,
+                )
+                .map_err(|error| (proxy, error))?;
+            parts.push(part);
+        }
+        Ok(PreparedAssemblySplit {
+            allocation,
+            descriptors,
+            parts,
+            graph,
+        })
+    }
+
+    fn prepare_assembly_split_part(
+        &self,
+        state: &AssemblyMergeState,
+        expected_original_members: Option<&[BodyHandle]>,
+        new_handles: &[BodyHandle],
+        descriptors: &mut Vec<BodyDesc>,
+        graph: &mut AssemblyGraph,
+        range: std::ops::Range<usize>,
+    ) -> Result<PreparedAssemblySplitPart, AssemblyWorldError> {
+        let proxy = state.proxy;
+        if !self.bodies.contains(proxy) {
+            return Err(AssemblyWorldError::InvalidProxy);
+        }
+        if expected_original_members.is_some_and(|expected| {
+            !expected
+                .iter()
+                .copied()
+                .eq(state.component.iter().map(|snapshot| snapshot.handle))
+        }) || state.component.len() != state.compound.parts.len()
+        {
             return Err(AssemblyWorldError::InvalidProxy);
         }
         if self.collision_exclusions.membership(proxy).is_some() {
@@ -695,53 +933,55 @@ impl PhysicsWorld {
             .capture_body_snapshot(proxy)
             .ok_or(AssemblyWorldError::InvalidProxy)?;
         let gravity_override = self.bodies.gravity_override(proxy).expect("live proxy");
-        let mut new_handles = Vec::with_capacity(state.component.len());
         let mut mapping = BTreeMap::new();
-        self.bodies.remove(proxy);
-        self.collision_exclusions.remove(proxy);
-        for (snapshot, part) in state.component.iter().zip(&state.compound.parts) {
+        for ((snapshot, part), &handle) in state
+            .component
+            .iter()
+            .zip(&state.compound.parts)
+            .zip(new_handles)
+        {
             let world_radius = proxy_snapshot.desc.orientation * part.relative_pose.position;
             let position = proxy_snapshot.desc.position + world_radius;
             let orientation =
                 (proxy_snapshot.desc.orientation * part.relative_pose.orientation).normalize();
             let linear_velocity = proxy_snapshot.desc.linear_velocity
-                + proxy_snapshot
-                    .desc
-                    .angular_velocity
-                    .cross(world_radius);
+                + proxy_snapshot.desc.angular_velocity.cross(world_radius);
             let mut desc = snapshot.desc;
             desc.position = position;
             desc.orientation = orientation;
             desc.linear_velocity = linear_velocity;
             desc.angular_velocity = proxy_snapshot.desc.angular_velocity;
-            let handle = self.bodies.insert(desc);
-            // The live proxy owns the current uniform policy, including any
-            // deliberate changes made after merging. Do not resurrect the
-            // pre-merge policy when splitting.
-            assert!(self.bodies.set_gravity_override(handle, gravity_override));
-            self.restore_body_runtime(handle, &proxy_snapshot, position, orientation);
+            if !position.is_finite()
+                || !orientation.is_finite()
+                || !orientation.is_normalized()
+                || !linear_velocity.is_finite()
+                || !desc.angular_velocity.is_finite()
+            {
+                return Err(AssemblyWorldError::Compound(CompoundError::NonFinite));
+            }
+            descriptors.push(desc);
             mapping.insert(body_sort_key(&snapshot.handle), handle);
-            new_handles.push(handle);
         }
         let remapped_connections: Vec<Connection> = state
             .connections
             .iter()
             .map(|entry| remap_connection(entry.connection, &mapping))
             .collect();
-        self.assemblies
-            .restore_component(proxy, &new_handles, &remapped_connections)
+        graph
+            .restore_component(proxy, new_handles, &remapped_connections)
             .map_err(AssemblyWorldError::Graph)?;
+        let mut joints = Vec::new();
         for entry in &state.connections {
             if let Some(handle) = entry.connection.joint {
-                if let (Some(joint), Some(original)) = (self.joints.get_mut(handle), entry.joint) {
-                    *joint = remap_joint(original, &mapping);
+                if let (Some(_), Some(original)) = (self.joints.get(handle), entry.joint) {
+                    joints.push((handle, remap_joint(original, &mapping)));
                 }
             }
         }
         let targets: Vec<(BodyHandle, f32, Vec3)> = state
             .component
             .iter()
-            .zip(&new_handles)
+            .zip(new_handles)
             .zip(&state.compound.parts)
             .map(|((_snapshot, handle), part)| {
                 (
@@ -752,49 +992,58 @@ impl PhysicsWorld {
                 )
             })
             .collect();
-        self.external_forces
-            .split_body(proxy, proxy_snapshot.desc.position, &targets);
-        self.assembly_merges.remove(&body_sort_key(&proxy));
-        Ok(new_handles)
+        let (forces, _) = self
+            .external_forces
+            .prepare_split_body(proxy, proxy_snapshot.desc.position, &targets)
+            .map_err(AssemblyWorldError::Force)?;
+        Ok(PreparedAssemblySplitPart {
+            proxy,
+            range,
+            proxy_snapshot,
+            gravity: gravity_override,
+            forces,
+            joints,
+        })
     }
 
-    fn capture_body_snapshot(&mut self, body: BodyHandle) -> Option<BodySnapshot> {
-        let index = body.index() as usize;
-        if !self.bodies.contains(body) {
-            return None;
+    fn commit_assembly_split(&mut self, prepared: PreparedAssemblySplit) -> Vec<BodyHandle> {
+        let handles = self
+            .bodies
+            .commit_replacement(prepared.allocation, &prepared.descriptors);
+        for part in prepared.parts {
+            for (&handle, desc) in handles[part.range.clone()]
+                .iter()
+                .zip(&prepared.descriptors[part.range.clone()])
+            {
+                // The live proxy owns current policy and lifecycle state.
+                assert!(self.bodies.set_gravity_override(handle, part.gravity));
+                self.restore_body_runtime(
+                    handle,
+                    &part.proxy_snapshot,
+                    desc.position,
+                    desc.orientation,
+                );
+            }
+            self.external_forces.commit_remap(part.forces);
+            for (handle, joint) in part.joints {
+                *self.joints.get_mut(handle).expect("prepared live joint") = joint;
+            }
+            self.assembly_merges.remove(&body_sort_key(&part.proxy));
         }
-        let kind = self.bodies.kind(body)?;
-        let collider = self.bodies.collider(body);
-        let material = self.bodies.material(body)?;
-        let is_sensor = self.bodies.is_sensor(body)?;
-        let ccd = self.bodies.ccd(body)?;
-        let mass_properties = self.bodies.mass_properties(body)?;
-        let view = self.bodies.solver_view_mut();
-        if !view.is_active(index) {
-            return None;
-        }
+        self.assemblies = prepared.graph;
+        handles
+    }
+
+    fn capture_body_snapshot(&self, body: BodyHandle) -> Option<BodySnapshot> {
         Some(BodySnapshot {
             handle: body,
-            desc: BodyDesc {
-                kind,
-                position: view.positions[index],
-                orientation: view.orientations[index],
-                linear_velocity: view.linear_velocities[index],
-                angular_velocity: view.angular_velocities[index],
-                mass_properties,
-                linear_damping: view.linear_damping[index],
-                angular_damping: view.angular_damping[index],
-                collider,
-                material,
-                is_sensor,
-                ccd,
-            },
+            desc: self.bodies.descriptor(body)?,
             previous_pose: Pose {
-                position: view.prev_positions[index],
-                orientation: view.prev_orientations[index],
+                position: self.bodies.prev_position(body)?,
+                orientation: self.bodies.prev_orientation(body)?,
             },
-            sleeping: view.sleeping[index],
-            sleep_timer: view.sleep_timers[index],
+            sleeping: self.bodies.is_sleeping(body)?,
+            sleep_timer: self.bodies.sleep_timer(body)?,
         })
     }
 
@@ -817,34 +1066,80 @@ impl PhysicsWorld {
         }
     }
 
-    fn build_compound_collider(
-        &mut self,
+    fn prepare_assembly_collider(
+        &self,
         snapshots: &[BodySnapshot],
         compound: &CompoundBody,
-    ) -> Result<Option<crate::collider::ColliderHandle>, AssemblyWorldError> {
+        policies: Option<&[CompoundLeafPolicy]>,
+    ) -> Result<Option<PreparedCompound>, AssemblyWorldError> {
         let proxy_pose = Isometry::new(
             compound.properties.center_of_mass,
             compound.principal_mass_properties().0,
         );
         let world_to_proxy = proxy_pose.inverse();
-        let mut children = Vec::new();
-        for snapshot in snapshots {
-            let Some(collider) = snapshot.desc.collider else {
-                continue;
+        let roots: Vec<_> = snapshots
+            .iter()
+            .filter_map(|snapshot| {
+                Some(CompoundChild {
+                    collider: snapshot.desc.collider?,
+                    local_pose: world_to_proxy.mul(&Isometry::new(
+                        snapshot.desc.position,
+                        snapshot.desc.orientation,
+                    )),
+                })
+            })
+            .collect();
+        if roots.is_empty() {
+            return if policies.is_some_and(|policies| !policies.is_empty()) {
+                Err(AssemblyWorldError::UnsupportedCollider)
+            } else {
+                Ok(None)
             };
-            children.push(CompoundChild {
-                collider,
-                local_pose: world_to_proxy.mul(&Isometry::new(
-                    snapshot.desc.position,
-                    snapshot.desc.orientation,
-                )),
-            });
         }
-        if children.is_empty() {
-            return Ok(None);
+        // Validate the original compound handles and their inline caches too;
+        // flattening them ourselves first would hide forged cache metadata.
+        let inherited = self
+            .shapes
+            .prepare_compound(&roots)
+            .map_err(|_| AssemblyWorldError::UnsupportedCollider)?;
+        let Some(policies) = policies else {
+            return Ok(Some(inherited));
+        };
+        let mut children = Vec::new();
+        for root in roots {
+            let collider = root.collider;
+            let local = root.local_pose;
+            if let Some(crate::collider::ColliderShape::Compound { compound, .. }) =
+                self.shapes.get(collider)
+            {
+                let data = self
+                    .shapes
+                    .compound(*compound)
+                    .ok_or(AssemblyWorldError::UnsupportedCollider)?;
+                if children.len() + data.children().len() > MAX_COMPOUND_CHILDREN {
+                    return Err(AssemblyWorldError::UnsupportedCollider);
+                }
+                for child in data.children() {
+                    children.push(CompoundChild {
+                        collider: child.collider,
+                        local_pose: local.mul(&child.local_pose),
+                    });
+                }
+            } else {
+                if children.len() == MAX_COMPOUND_CHILDREN {
+                    return Err(AssemblyWorldError::UnsupportedCollider);
+                }
+                children.push(CompoundChild {
+                    collider,
+                    local_pose: local,
+                });
+            }
+        }
+        if policies.len() != children.len() {
+            return Err(AssemblyWorldError::UnsupportedCollider);
         }
         self.shapes
-            .insert_compound(&children)
+            .prepare_compound_with_policies(&children, policies)
             .map(Some)
             .map_err(|_| AssemblyWorldError::UnsupportedCollider)
     }
@@ -1141,10 +1436,13 @@ impl PhysicsWorld {
                 continue;
             }
             self.external_forces
-                .accumulate(body, crate::dynamics::force::ForceTorque {
-                    force: sample.force,
-                    torque: sample.torque,
-                })
+                .accumulate(
+                    body,
+                    crate::dynamics::force::ForceTorque {
+                        force: sample.force,
+                        torque: sample.torque,
+                    },
+                )
                 .expect("all unique body sums were validated before commit");
             self.bodies.wake(body);
             applied += 1;
@@ -1237,6 +1535,9 @@ impl PhysicsWorld {
         let Some(force) = drive.sample(&state, dt) else {
             return false;
         };
+        if force.force == Vec3::ZERO && force.torque == Vec3::ZERO {
+            return true;
+        }
         if self
             .external_forces
             .accumulate(drive.target, force)
@@ -1427,8 +1728,12 @@ fn remap_connection(mut connection: Connection, mapping: &BTreeMap<u64, BodyHand
 fn remap_joint(mut joint: Joint, mapping: &BTreeMap<u64, BodyHandle>) -> Joint {
     joint.anchor_a.body = remap_body(joint.anchor_a.body, mapping);
     joint.anchor_b.body = remap_body(joint.anchor_b.body, mapping);
-    joint.gear_state.remap_bodies(joint.anchor_a.body, joint.anchor_b.body);
-    joint.revolute_state.remap_bodies(joint.anchor_a.body, joint.anchor_b.body);
+    joint
+        .gear_state
+        .remap_bodies(joint.anchor_a.body, joint.anchor_b.body);
+    joint
+        .revolute_state
+        .remap_bodies(joint.anchor_a.body, joint.anchor_b.body);
     joint
 }
 

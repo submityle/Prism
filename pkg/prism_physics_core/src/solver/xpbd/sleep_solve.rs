@@ -81,12 +81,55 @@ pub fn update_after_solve(
     config: &SleepConfig,
     h: f32,
 ) {
+    update_after_solve_with_activity(view, islands, active, config, h, &[]);
+}
+
+/// Wakes every dynamic member of a driven joint/ragdoll component before
+/// prediction. Static separators do not propagate wake to other components.
+pub(super) fn wake_driven_islands(
+    view: &mut BodySolverView<'_>,
+    islands: &SolveIslands,
+    activity: &[bool],
+) {
+    for island in 0..islands.island_count() {
+        if islands
+            .members(island)
+            .iter()
+            .any(|&slot| activity.get(slot) == Some(&true))
+        {
+            for &slot in islands.members(island) {
+                wake_slot(view, slot);
+            }
+        }
+    }
+}
+
+/// A nonzero accepted actuator effort keeps its final contact/joint island
+/// awake even when opposed by a hard stop. Zero effort does not inhibit sleep.
+pub(super) fn update_after_solve_with_activity(
+    view: &mut BodySolverView<'_>,
+    islands: &SolveIslands,
+    active: &[usize],
+    config: &SleepConfig,
+    h: f32,
+    activity: &[bool],
+) {
     if !config.enabled {
         return;
     }
     for &island in active {
         let members = islands.members(island);
         if members.is_empty() {
+            continue;
+        }
+        if members
+            .iter()
+            .any(|&slot| activity.get(slot) == Some(&true))
+        {
+            for &slot in members {
+                view.sleeping[slot] = false;
+                view.sleep_timers[slot] = 0.0;
+            }
             continue;
         }
 

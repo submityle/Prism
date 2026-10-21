@@ -17,7 +17,7 @@
 //! 5. **Zero solve** &mdash; playback never mutates the source body.
 //!
 //! Every number asserted below comes from baking and replaying a real
-//! [`SoftBody`]; nothing is stubbed.
+//! [`SoftBody`]; every assertion observes the cache and solver output.
 //!
 //! # Provenance
 //!

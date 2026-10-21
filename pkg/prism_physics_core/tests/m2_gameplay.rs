@@ -4,7 +4,7 @@
 //! from the M2 feature set — an articulated door, a vehicle (spinning wheel and
 //! sprung suspension), and a load-bearing linkage — and then verifies the
 //! settled poses, plus the spatial-query and trigger-event surfaces. Nothing is
-//! asserted from a stubbed value: every number checked below is the outcome of
+//! asserted from a fabricated value: every number checked below is the outcome of
 //! stepping `XpbdSolver` over the world.
 //!
 //! # Provenance

@@ -219,6 +219,40 @@ impl StateSnapshot {
         let b = target.pose(handle)?;
         Some(pose::lerp_pose(a, b, alpha))
     }
+
+    /// Writes an interpolated render projection, reusing `output` allocations.
+    /// Occupancy and generations come from `self`: births, removals and slot
+    /// reuse switch only when the caller selects the next boundary snapshot.
+    /// Bodies absent from `target` keep their earlier pose and velocity; they
+    /// are never blended with a different occupant of the same slot. This is a
+    /// render projection only, not a fractional solver/rollback snapshot.
+    pub fn interpolate_into(&self, target: &Self, alpha: f32, output: &mut Self) {
+        output.occupied.clone_from(&self.occupied);
+        output.generations.clone_from(&self.generations);
+        output.poses.clone_from(&self.poses);
+        output.linear_velocities.clone_from(&self.linear_velocities);
+        output
+            .angular_velocities
+            .clone_from(&self.angular_velocities);
+        let alpha = if alpha.is_finite() {
+            alpha.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        for slot in 0..self.slot_count().min(target.slot_count()) {
+            if !self.occupied[slot]
+                || !target.occupied[slot]
+                || self.generations[slot] != target.generations[slot]
+            {
+                continue;
+            }
+            output.poses[slot] = pose::lerp_pose(self.poses[slot], target.poses[slot], alpha);
+            output.linear_velocities[slot] =
+                self.linear_velocities[slot].lerp(target.linear_velocities[slot], alpha);
+            output.angular_velocities[slot] =
+                self.angular_velocities[slot].lerp(target.angular_velocities[slot], alpha);
+        }
+    }
 }
 
 #[cfg(test)]

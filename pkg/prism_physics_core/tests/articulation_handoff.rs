@@ -202,7 +202,7 @@ fn unsupported_joint_policies() -> [(&'static str, ArticulationJoint); 6] {
     [
         (
             "motor",
-            ArticulationJoint::revolute(Vec3::Y).with_motor(motor),
+            ArticulationJoint::spherical().with_motor(motor),
         ),
         (
             "damping",

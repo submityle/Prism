@@ -16,7 +16,7 @@
 //!    bit-identical particle positions, so simulations are reproducible.
 //!
 //! Every number asserted below is the outcome of stepping a real
-//! [`SoftBody`] solver; nothing is stubbed.
+//! [`SoftBody`] solver; every assertion observes the solver output.
 //!
 //! # Provenance
 //!

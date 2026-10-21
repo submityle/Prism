@@ -46,7 +46,99 @@ pub struct BodyStorage {
     live: usize,
 }
 
+/// Allocation order for a replacement prepared under an exclusive world borrow.
+/// Only the removed members and future handles are copied, not the storage or
+/// its free list. The caller must not mutate storage between prepare and commit.
+pub(crate) struct BodyReplacementPlan {
+    removed: Vec<BodyHandle>,
+    inserted: Vec<BodyHandle>,
+}
+
+impl BodyReplacementPlan {
+    pub(crate) fn handles(&self) -> &[BodyHandle] {
+        &self.inserted
+    }
+}
+
 impl BodyStorage {
+    pub(crate) fn prepare_replacement(
+        &self,
+        removed: &[BodyHandle],
+        insert_count: usize,
+    ) -> Option<BodyReplacementPlan> {
+        if removed
+            .iter()
+            .enumerate()
+            .any(|(i, body)| !self.contains(*body) || removed[..i].contains(body))
+        {
+            return None;
+        }
+        let mut inserted = Vec::with_capacity(insert_count);
+        let mut old_free = self.free_list.iter().rev();
+        let mut newly_free = removed.iter().rev();
+        let mut next_slot = self.positions.len();
+        for _ in 0..insert_count {
+            let handle = if let Some(body) = newly_free.next() {
+                BodyHandle::new(body.index(), body.generation().wrapping_add(1))
+            } else if let Some(&slot) = old_free.next() {
+                BodyHandle::new(slot, self.generations[slot as usize])
+            } else {
+                let slot = u32::try_from(next_slot).ok()?;
+                next_slot = next_slot.checked_add(1)?;
+                BodyHandle::new(slot, 0)
+            };
+            inserted.push(handle);
+        }
+        Some(BodyReplacementPlan {
+            removed: removed.to_vec(),
+            inserted,
+        })
+    }
+
+    pub(crate) fn commit_replacement(
+        &mut self,
+        plan: BodyReplacementPlan,
+        descriptors: &[BodyDesc],
+    ) -> Vec<BodyHandle> {
+        assert_eq!(plan.inserted.len(), descriptors.len());
+        for body in plan.removed {
+            assert!(
+                self.remove(body),
+                "replacement plan must be committed unchanged"
+            );
+        }
+        for (&expected, &desc) in plan.inserted.iter().zip(descriptors) {
+            assert_eq!(
+                self.insert(desc),
+                expected,
+                "replacement allocation changed"
+            );
+        }
+        plan.inserted
+    }
+
+    /// Immutable descriptor capture for transaction preparation.
+    pub(crate) fn descriptor(&self, handle: BodyHandle) -> Option<BodyDesc> {
+        if !self.contains(handle) {
+            return None;
+        }
+        let i = handle.index() as usize;
+        Some(BodyDesc {
+            kind: self.kinds[i],
+            position: self.positions[i],
+            orientation: self.orientations[i],
+            linear_velocity: self.linear_velocities[i],
+            angular_velocity: self.angular_velocities[i],
+            mass_properties: self.mass_props[i],
+            linear_damping: self.linear_damping[i],
+            angular_damping: self.angular_damping[i],
+            collider: self.colliders[i],
+            material: self.materials[i],
+            is_sensor: self.is_sensor[i],
+            ccd: self.ccd[i],
+        })
+    }
+
     /// Creates an empty storage.
     #[must_use]
     pub fn new() -> BodyStorage {
@@ -595,6 +687,40 @@ impl BodyStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replacement_plan_preserves_allocator_order_and_wrapping_generation() {
+        let mut storage = BodyStorage::new();
+        let a = storage.insert(BodyDesc::default());
+        let b = storage.insert(BodyDesc::default());
+        let spare = storage.insert(BodyDesc::default());
+        assert!(storage.remove(spare));
+        storage.generations[b.index() as usize] = u32::MAX;
+        let b = BodyHandle::new(b.index(), u32::MAX);
+        let before = format!("{storage:?}");
+        assert!(storage.prepare_replacement(&[a, a], 2).is_none());
+        assert!(storage
+            .prepare_replacement(&[BodyHandle::INVALID], 2)
+            .is_none());
+        let plan = storage.prepare_replacement(&[a, b], 4).unwrap();
+        assert_eq!(format!("{storage:?}"), before);
+        assert_eq!(plan.handles()[0], BodyHandle::new(b.index(), 0));
+        let mut legacy = storage.clone();
+        assert!(legacy.remove(a));
+        assert!(legacy.remove(b));
+        let descriptors = [BodyDesc::default(); 4];
+        let expected: Vec<_> = descriptors
+            .iter()
+            .map(|&desc| legacy.insert(desc))
+            .collect();
+        assert_eq!(storage.commit_replacement(plan, &descriptors), expected);
+        assert_eq!(format!("{storage:?}"), format!("{legacy:?}"));
+        assert_eq!(
+            storage.insert(BodyDesc::default()),
+            legacy.insert(BodyDesc::default())
+        );
+        assert!(storage.columns_consistent());
+    }
 
     #[test]
     fn insert_and_accessors() {

@@ -35,6 +35,7 @@
 //! or derived code.
 
 mod articulation_contact;
+mod bounded_pd;
 #[cfg(feature = "parallel")]
 pub mod color_solve;
 pub mod config;
@@ -69,6 +70,8 @@ pub struct XpbdSolver {
     pub config: XpbdConfig,
     /// Live ragdoll Swing-Twist constraints solved alongside ordinary joints.
     ragdolls: Vec<RagdollConstraint>,
+    /// Retained disposable work only; never part of world state or snapshots.
+    bounded_pd_scratch: bounded_pd::ScratchCache,
 }
 
 /// External field sampling failed before the next substep mutated the world.
@@ -76,6 +79,12 @@ pub struct XpbdSolver {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FieldStepError<E> {
     InvalidTimeStep,
+    /// Integration reached a rejected joint boundary. Its loads are retained
+    /// by the world and retried before another substep can mutate it.
+    JointBoundary {
+        completed_substeps: u32,
+        source: crate::dynamics::assembly::BoundaryLoadError,
+    },
     Sampling {
         completed_substeps: u32,
         source: FieldBatchError<E>,
@@ -95,6 +104,7 @@ impl XpbdSolver {
         XpbdSolver {
             config,
             ragdolls: Vec::new(),
+            bounded_pd_scratch: bounded_pd::ScratchCache::default(),
         }
     }
 
@@ -104,6 +114,7 @@ impl XpbdSolver {
         XpbdSolver {
             config,
             ragdolls: binding.constraints().to_vec(),
+            bounded_pd_scratch: bounded_pd::ScratchCache::default(),
         }
     }
 
@@ -127,6 +138,9 @@ impl XpbdSolver {
             &mut dyn FnMut(&PhysicsWorld, &mut Vec<crate::collide::ContactManifold>),
         >,
     ) {
+        if world.retry_joint_boundary().is_err() {
+            return;
+        }
         let _ = world.prepare_external_substep(h);
         self.solve_prepared_substep(world, h, generate_external_contacts);
     }
@@ -145,8 +159,39 @@ impl XpbdSolver {
 
         // Phase 1: predict poses forward under gravity and damping.
         let mut joint_loads = JointLoadAccumulator::new();
+        // External field preparation has already succeeded. Sample all
+        // explicit drives from the same velocities, then spend effort*h once.
+        // Prediction carries this impulse into velocity recovery in both the
+        // serial and parallel paths; no iteration or recovery reapplies it.
+        // Skip even the cache lock when no drive is enabled. Some platforms
+        // initialize mutex storage lazily, which must not cost a no-drive step.
+        let mut drive_scratch = world
+            .joints
+            .active_entries()
+            .any(|(_, joint)| joint.bounded_pd.is_some())
+            .then(|| self.bounded_pd_scratch.checkout());
+        let drive_activity = if let Some(scratch) = drive_scratch.as_mut() {
+            bounded_pd::apply(
+                &mut world.bodies,
+                &mut world.joints,
+                h,
+                &mut joint_loads,
+                scratch,
+            )
+        } else {
+            for (_, joint) in world.joints.active_entries_mut() {
+                joint.bounded_pd_failure = None;
+            }
+            &[]
+        };
         {
             let mut view = world.bodies.solver_view_mut();
+            if drive_activity.iter().any(|&active| active) {
+                let active: Vec<_> = world.joints.active_joints().collect();
+                let islands =
+                    SolveIslands::build_with_ragdolls(&view, &[], &active, &self.ragdolls);
+                sleep_solve::wake_driven_islands(&mut view, &islands, drive_activity);
+            }
             gear::begin_substep(&view, &mut world.joints);
             joint_constraint::begin_revolute_substep(&view, &mut world.joints, h);
             integrate::predict(&mut view, gravity, h);
@@ -273,7 +318,14 @@ impl XpbdSolver {
             // Advance idle timers for the solved islands and sleep the ones that
             // have settled below the velocity thresholds long enough. This runs
             // once for whichever solve path executed above.
-            sleep_solve::update_after_solve(&mut view, &islands, &active_islands, &sleep_config, h);
+            sleep_solve::update_after_solve_with_activity(
+                &mut view,
+                &islands,
+                &active_islands,
+                &sleep_config,
+                h,
+                drive_activity,
+            );
         }
 
         // Recover rigid velocities before coupling reduced-coordinate trees:
@@ -297,9 +349,7 @@ impl XpbdSolver {
         let loads = joint_loads
             .loads()
             .expect("XPBD joint projections must produce finite fixed-step loads");
-        world
-            .submit_joint_loads(h, &loads)
-            .expect("XPBD reports only live joints with the current sub-step dt");
+        world.submit_solver_joint_loads(h, loads);
     }
 }
 
@@ -312,6 +362,9 @@ impl Solver for XpbdSolver {
         }
         for _ in 0..n {
             self.substep(world, h);
+            if world.joint_boundary_failure().is_some() {
+                return;
+            }
         }
     }
 
@@ -338,9 +391,24 @@ impl XpbdSolver {
         }
         for completed_substeps in 0..n {
             world
+                .retry_joint_boundary()
+                .map_err(|source| FieldStepError::JointBoundary {
+                    completed_substeps,
+                    source,
+                })?;
+            world
                 .prepare_external_substep_with(h, sampler)
-                .map_err(|source| FieldStepError::Sampling { completed_substeps, source })?;
+                .map_err(|source| FieldStepError::Sampling {
+                    completed_substeps,
+                    source,
+                })?;
             self.solve_prepared_substep(world, h, None);
+            if let Some(failure) = world.joint_boundary_failure() {
+                return Err(FieldStepError::JointBoundary {
+                    completed_substeps: completed_substeps + 1,
+                    source: failure.error,
+                });
+            }
         }
         Ok(())
     }
@@ -374,6 +442,9 @@ impl XpbdSolver {
         }
         for _ in 0..n {
             self.substep_with_contact_generator(world, h, Some(&mut generate_external_contacts));
+            if world.joint_boundary_failure().is_some() {
+                return;
+            }
         }
     }
 }

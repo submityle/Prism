@@ -17,9 +17,10 @@ use crate::snapshot::FullStateSnapshot;
 use crate::world::PhysicsWorld;
 
 pub mod fixed_step;
+pub mod playback;
 
 /// Version of the driver-owned snapshot cache format.
-pub const DRIVER_CACHE_VERSION: u32 = 2;
+pub const DRIVER_CACHE_VERSION: u32 = 3;
 
 /// Hard upper bound for frames retained by one driver cache.
 pub const MAX_DRIVER_CACHE_FRAMES: u32 = 16_384;
@@ -64,6 +65,7 @@ pub struct CacheFrame {
     index: u32,
     snapshot: FullStateSnapshot,
     dt: f32,
+    time: f64,
     config: OfflineStepConfig,
 }
 
@@ -92,6 +94,13 @@ impl CacheFrame {
         self.dt
     }
 
+    /// Time in seconds from the beginning of the recording to this post-step
+    /// snapshot. Durations are accumulated in f64, including variable steps.
+    #[must_use]
+    pub fn time(&self) -> f64 {
+        self.time
+    }
+
     /// Returns the effective (bounded) per-frame solver overrides.
     #[must_use]
     pub fn config(&self) -> OfflineStepConfig {
@@ -108,6 +117,7 @@ pub struct DriverCache {
     version: u32,
     max_frames: u32,
     frames: Vec<CacheFrame>,
+    timeline_valid: bool,
 }
 
 impl DriverCache {
@@ -128,6 +138,7 @@ impl DriverCache {
             version,
             max_frames: max_frames.min(MAX_DRIVER_CACHE_FRAMES),
             frames: Vec::new(),
+            timeline_valid: true,
         }
     }
 
@@ -161,6 +172,12 @@ impl DriverCache {
         self.frames.get(index as usize)
     }
 
+    /// Total recorded time, including the step preceding the first snapshot.
+    #[must_use]
+    pub fn duration(&self) -> f64 {
+        self.frames.last().map_or(0.0, CacheFrame::time)
+    }
+
     fn push(
         &mut self,
         snapshot: FullStateSnapshot,
@@ -171,11 +188,15 @@ impl DriverCache {
             return None;
         }
         let index = self.frame_count();
+        let previous_time = self.duration();
+        let time = previous_time + f64::from(dt);
+        self.timeline_valid &= dt.is_finite() && dt > 0.0 && time > previous_time;
         self.frames.push(CacheFrame {
             version: self.version,
             index,
             snapshot,
             dt,
+            time,
             config,
         });
         Some(index)

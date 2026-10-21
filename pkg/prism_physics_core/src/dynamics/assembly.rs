@@ -95,6 +95,12 @@ pub enum BoundaryLoadError {
     NonFiniteLoad,
     MismatchedDt,
     UnknownJoint,
+    /// A collapsed assembly cannot currently be restored. No policies,
+    /// topology, allocator state, or queued forces were committed.
+    AssemblySplit {
+        proxy: BodyHandle,
+        error: crate::world::AssemblyWorldError,
+    },
 }
 
 /// Deterministic collection of all constraint impulses produced during one
@@ -312,6 +318,13 @@ impl BreakableJointSet {
         if !limit.valid() || self.policies.contains_key(&joint_key(joint)) {
             return Err(limit);
         }
+        self.insert_validated(joint, limit);
+        Ok(())
+    }
+
+    // Only called after validating the limit and policy uniqueness while
+    // holding exclusive access. There is no recoverable failure after this.
+    fn insert_validated(&mut self, joint: JointHandle, limit: BreakLimit) {
         self.policies.insert(
             joint_key(joint),
             BreakState {
@@ -323,7 +336,6 @@ impl BreakableJointSet {
                 broken: false,
             },
         );
-        Ok(())
     }
 
     #[must_use]
@@ -376,6 +388,21 @@ impl BreakableJointSet {
         loads: &[SolverJointLoad],
         joints: &mut JointStorage,
     ) -> Result<Vec<BreakEvent>, BoundaryLoadError> {
+        let (candidate, events) = self.prepare_solver_boundary(dt, loads, joints)?;
+        candidate.disable_broken(joints, &events);
+        *self = candidate;
+        Ok(events)
+    }
+
+    /// Computes policy and fatigue changes without disabling any live joint.
+    /// World-level topology transactions commit this only after every affected
+    /// assembly has been validated against the same replacement allocation.
+    pub(crate) fn prepare_solver_boundary(
+        &self,
+        dt: f32,
+        loads: &[SolverJointLoad],
+        joints: &JointStorage,
+    ) -> Result<(Self, Vec<BreakEvent>), BoundaryLoadError> {
         if !dt.is_finite() || dt <= 0.0 {
             return Err(BoundaryLoadError::InvalidDt);
         }
@@ -418,9 +445,7 @@ impl BreakableJointSet {
             }
         }
         let events = candidate.evaluate(dt);
-        candidate.disable_broken(joints, &events);
-        *self = candidate;
-        Ok(events)
+        Ok((candidate, events))
     }
 
     /// Evaluates all policies in stable handle order and returns newly broken
@@ -540,6 +565,21 @@ impl AssemblyGraph {
         kind: JointKind,
         break_limit: Option<BreakLimit>,
     ) -> Result<ConnectionId, AssemblyError> {
+        let connection = self.prepare_connection(a, b, joint, kind, break_limit)?;
+        Ok(self.commit_connection(connection))
+    }
+
+    // Preparation is read-only, including ID exhaustion. Keeping graph
+    // validation separate lets the policy transaction share it without
+    // cloning unrelated graph nodes, edges or accumulated fatigue state.
+    fn prepare_connection(
+        &self,
+        a: BodyHandle,
+        b: BodyHandle,
+        joint: Option<JointHandle>,
+        kind: JointKind,
+        break_limit: Option<BreakLimit>,
+    ) -> Result<Connection, AssemblyError> {
         if a == b {
             return Err(AssemblyError::SameBody);
         }
@@ -555,31 +595,32 @@ impl AssemblyGraph {
         {
             return Err(AssemblyError::DuplicateConnection);
         }
-        let next_id = self
+        let id = self
             .next_id
             .checked_add(1)
             .ok_or(AssemblyError::IdExhausted)?;
-        self.add_body(a);
-        self.add_body(b);
-        self.next_id = next_id;
-        let id = ConnectionId(self.next_id);
-        self.connections.insert(
-            id,
-            Connection {
-                id,
-                a,
-                b,
-                joint,
-                kind,
-                break_limit,
-                enabled: true,
-            },
-        );
-        Ok(id)
+        Ok(Connection {
+            id: ConnectionId(id),
+            a,
+            b,
+            joint,
+            kind,
+            break_limit,
+            enabled: true,
+        })
+    }
+
+    fn commit_connection(&mut self, connection: Connection) -> ConnectionId {
+        self.add_body(connection.a);
+        self.add_body(connection.b);
+        self.next_id = connection.id.0;
+        self.connections.insert(connection.id, connection);
+        connection.id
     }
 
     /// Atomically connects an edge and registers its break policy. Both
-    /// stores are committed only after every validation succeeds.
+    /// stores are committed only after every validation succeeds. Validation
+    /// scans existing edges for duplicates, but does not clone either store.
     pub fn connect_with_policy(
         &mut self,
         policies: &mut BreakableJointSet,
@@ -589,19 +630,19 @@ impl AssemblyGraph {
         kind: JointKind,
         break_limit: Option<BreakLimit>,
     ) -> Result<ConnectionId, AssemblyError> {
-        let mut graph = self.clone();
-        let mut candidate_policies = policies.clone();
-        let id = graph.connect(a, b, joint, kind, break_limit)?;
-        if let (Some(joint), Some(limit)) = (joint, break_limit) {
-            if candidate_policies.contains(joint) {
+        let connection = self.prepare_connection(a, b, joint, kind, break_limit)?;
+        if let (Some(joint), Some(_)) = (joint, break_limit) {
+            if policies.contains(joint) {
                 return Err(AssemblyError::DuplicatePolicy);
             }
-            candidate_policies
-                .register(joint, limit)
-                .map_err(|_| AssemblyError::InvalidLimit)?;
         }
-        *self = graph;
-        *policies = candidate_policies;
+        // Exclusive borrows keep all validated inputs unchanged between
+        // preparation and commit. Allocation failure is process-fatal, not
+        // a recoverable transaction error.
+        let id = self.commit_connection(connection);
+        if let (Some(joint), Some(limit)) = (joint, break_limit) {
+            policies.insert_validated(joint, limit);
+        }
         Ok(id)
     }
     pub fn disconnect(&mut self, id: ConnectionId) -> Option<Connection> {
@@ -1198,6 +1239,13 @@ pub trait CompoundWorldAdapter {
     ) -> Result<Vec<BodyHandle>, CompoundAdapterError>;
 }
 
+use glam::{DQuat, DVec3};
+
+/// A compliant world-space pose drive, sampled without mutating body state.
+/// Compliance must be finite and nonnegative. Magnitude caps may be zero or
+/// positive infinity (unbounded); negative and NaN caps are invalid. A zero
+/// speed cap requests rest (so it can still brake); a zero force/torque cap
+/// disables that wrench component. Even unbounded drives return finite loads.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GrabDrive {
     pub target: BodyHandle,
@@ -1224,34 +1272,96 @@ impl GrabDrive {
             max_angular_speed: 30.0,
         }
     }
+    /// Returns `None` for mismatched bodies, malformed/nonunit poses, invalid
+    /// parameters, non-finite velocities, or invalid inverse mass/inertia.
+    /// Zero inverse inertia locks that principal axis. Computation uses f64
+    /// intermediates before magnitude limiting; an unbounded result outside
+    /// finite f32 representation is rejected rather than silently saturated.
     pub fn sample(&self, state: &BodyState, dt: f32) -> Option<ForceTorque> {
         if state.handle != self.target
             || !dt.is_finite()
             || dt <= 0.0
-            || !self.target_pose.position.is_finite()
-            || !self.target_pose.orientation.is_finite()
+            || !grab_valid_pose(self.target_pose)
+            || !grab_valid_pose(state.pose)
+            || !state.linear_velocity.is_finite()
+            || !state.angular_velocity.is_finite()
+            || !state.mass_properties.inv_mass.is_finite()
+            || state.mass_properties.inv_mass <= 0.0
+            || !state.mass_properties.inv_inertia.is_finite()
+            || state.mass_properties.inv_inertia.min_element() < 0.0
+            || [self.linear_compliance, self.angular_compliance]
+                .into_iter()
+                .any(|value| !value.is_finite() || value < 0.0)
+            || [
+                self.max_force,
+                self.max_torque,
+                self.max_linear_speed,
+                self.max_angular_speed,
+            ]
+            .into_iter()
+            .any(|value| value.is_nan() || value < 0.0)
         {
             return None;
         }
-        let mass = state.mass_properties.inv_mass;
-        if mass <= 0.0 || !mass.is_finite() {
-            return None;
-        }
-        let desired_linear = clamp_length(
-            (self.target_pose.position - state.pose.position) / dt,
+        // All authored inputs are f32: even their most extreme finite values
+        // and positive subnormal dt/mass fit these f64 intermediate products.
+        let dt = f64::from(dt);
+        let dt_squared = dt * dt;
+        let desired_linear = grab_limit(
+            (self.target_pose.position.as_dvec3() - state.pose.position.as_dvec3()) / dt,
             self.max_linear_speed,
         );
-        let linear_gain = dt * dt / (dt * dt + self.linear_compliance.max(0.0));
-        let force = ((desired_linear - state.linear_velocity) * linear_gain / dt) / mass;
-        let delta = (self.target_pose.orientation * state.pose.orientation.inverse()).normalize();
-        let (axis, angle) = delta.to_axis_angle();
-        let desired_angular = clamp_length(axis * angle / dt, self.max_angular_speed);
-        let angular_gain = dt * dt / (dt * dt + self.angular_compliance.max(0.0));
-        let torque = inertia_world(state.pose.orientation, state.mass_properties)
-            * ((desired_angular - state.angular_velocity) * angular_gain / dt);
+        let linear_gain = dt_squared / (dt_squared + f64::from(self.linear_compliance));
+        let force = (desired_linear - state.linear_velocity.as_dvec3()) * linear_gain
+            / dt
+            / f64::from(state.mass_properties.inv_mass);
+
+        let orientation = grab_quat(state.pose.orientation);
+        let mut delta =
+            (grab_quat(self.target_pose.orientation) * orientation.conjugate()).normalize();
+        // q and -q encode the same orientation. Canonicalize the hemisphere,
+        // including a deterministic tie at exactly pi, before taking the log.
+        let first_nonzero = [delta.w, delta.x, delta.y, delta.z]
+            .into_iter()
+            .find(|value| *value != 0.0)
+            .unwrap_or(1.0);
+        if first_nonzero < 0.0 {
+            delta = -delta;
+        }
+        let imaginary = DVec3::new(delta.x, delta.y, delta.z);
+        let sine = imaginary.length();
+        let rotation = if sine == 0.0 {
+            DVec3::ZERO
+        } else {
+            imaginary * (2.0 * sine.atan2(delta.w) / sine)
+        };
+        let desired_angular = grab_limit(rotation / dt, self.max_angular_speed);
+        let angular_gain = dt_squared / (dt_squared + f64::from(self.angular_compliance));
+        let acceleration =
+            (desired_angular - state.angular_velocity.as_dvec3()) * angular_gain / dt;
+        let local_acceleration = orientation.conjugate() * acceleration;
+        let inverse = state.mass_properties.inv_inertia.as_dvec3();
+        let local_torque = DVec3::new(
+            if inverse.x > 0.0 {
+                local_acceleration.x / inverse.x
+            } else {
+                0.0
+            },
+            if inverse.y > 0.0 {
+                local_acceleration.y / inverse.y
+            } else {
+                0.0
+            },
+            if inverse.z > 0.0 {
+                local_acceleration.z / inverse.z
+            } else {
+                0.0
+            },
+        );
+        let torque = orientation * local_torque;
         Some(ForceTorque {
-            force: clamp_length(force, self.max_force),
-            torque: clamp_length(torque, self.max_torque),
+            force: grab_wrench_component(force, self.max_force)?,
+            torque: grab_wrench_component(torque, self.max_torque)?,
         })
     }
 }
@@ -1262,6 +1372,10 @@ pub struct SnapResult {
     pub score: f32,
 }
 
+/// Aligns the local anchor normal opposite the target normal. Poses must be
+/// finite with unit orientation; normal magnitudes are irrelevant but must
+/// be finite and nonzero. Returns `None` if the solved position is not finite
+/// in f32. No malformed input is silently replaced with an identity pose.
 #[must_use]
 pub fn solve_snap(
     current: Pose,
@@ -1270,45 +1384,104 @@ pub fn solve_snap(
     target_position: Vec3,
     target_normal: Vec3,
 ) -> Option<SnapResult> {
-    let local_normal = safe_normalize(local_normal);
-    let target_normal = safe_normalize(target_normal);
-    if local_normal.length_squared() <= EPS || target_normal.length_squared() <= EPS {
+    if !grab_valid_pose(current)
+        || !local_position.is_finite()
+        || !target_position.is_finite()
+        || !local_normal.is_finite()
+        || !target_normal.is_finite()
+        || local_normal == Vec3::ZERO
+        || target_normal == Vec3::ZERO
+    {
         return None;
     }
-    let world_normal = current.orientation * local_normal;
-    let align = Quat::from_rotation_arc(world_normal, -target_normal);
-    let orientation = (align * current.orientation).normalize();
-    let position = target_position - orientation * local_position;
+    let current_orientation = grab_quat(current.orientation);
+    let world_normal = (current_orientation * local_normal.as_dvec3().normalize()).normalize();
+    let desired_normal = -target_normal.as_dvec3().normalize();
+    let cross = world_normal.cross(desired_normal);
+    let sine = cross.length();
+    let cosine = world_normal.dot(desired_normal).clamp(-1.0, 1.0);
+    let align = if sine > 0.0 {
+        DQuat::from_axis_angle(cross / sine, sine.atan2(cosine))
+    } else if cosine < 0.0 {
+        DQuat::from_rotation_arc(world_normal, desired_normal)
+    } else {
+        DQuat::IDENTITY
+    };
+    let orientation = (align * current_orientation).normalize();
+    let position = (target_position.as_dvec3() - orientation * local_position.as_dvec3()).as_vec3();
+    if !position.is_finite() {
+        return None;
+    }
     Some(SnapResult {
         pose: Pose {
             position,
-            orientation,
+            orientation: Quat::from_xyzw(
+                orientation.x as f32,
+                orientation.y as f32,
+                orientation.z as f32,
+                orientation.w as f32,
+            )
+            .normalize(),
         },
-        score: world_normal.dot(-target_normal).clamp(-1.0, 1.0),
+        score: cosine as f32,
     })
 }
 
-fn clamp_length(value: Vec3, max: f32) -> Vec3 {
-    if !max.is_finite() || max <= 0.0 {
-        Vec3::ZERO
-    } else if value.length_squared() > max * max {
-        safe_normalize(value) * max
-    } else {
+fn grab_valid_pose(pose: Pose) -> bool {
+    pose.position.is_finite() && pose.orientation.is_finite() && pose.orientation.is_normalized()
+}
+
+fn grab_quat(value: Quat) -> DQuat {
+    DQuat::from_xyzw(
+        f64::from(value.x),
+        f64::from(value.y),
+        f64::from(value.z),
+        f64::from(value.w),
+    )
+    .normalize()
+}
+
+fn grab_limit(value: DVec3, max: f32) -> DVec3 {
+    // Squaring an extreme but finite f64 force can itself overflow. Compare
+    // lengths in a scaled frame instead, preserving direction when limiting.
+    let scale = value.abs().max_element();
+    if max == 0.0 {
+        DVec3::ZERO
+    } else if scale == 0.0 || !value.is_finite() {
         value
+    } else {
+        let scaled = value / scale;
+        let length = scaled.length();
+        if scale > f64::from(max) / length {
+            scaled * (f64::from(max) / length)
+        } else {
+            value
+        }
     }
 }
 
-#[must_use]
-fn safe_normalize(value: Vec3) -> Vec3 {
-    if !value.is_finite() {
-        return Vec3::ZERO;
+fn grab_wrench_component(value: DVec3, max: f32) -> Option<Vec3> {
+    let value = grab_limit(value, max);
+    if !value.is_finite() || value.abs().max_element() > f64::from(f32::MAX) {
+        return None;
     }
-    let length_squared = value.length_squared();
-    if length_squared.is_finite() && length_squared > EPS * EPS {
-        value / length_squared.sqrt()
-    } else {
-        Vec3::ZERO
+    let mut result = value.as_vec3();
+    if !result.is_finite() {
+        return None;
     }
+    // Component rounding must not push a finite cap's magnitude above its
+    // bound. Leave one f32 relative ULP of room when correction is needed.
+    let rounded_length = result.as_dvec3().length();
+    if max.is_finite() && rounded_length > f64::from(max) {
+        result = (result.as_dvec3()
+            * (f64::from(max) * (1.0 - f64::from(f32::EPSILON)) / rounded_length))
+            .as_vec3();
+        // Subnormal rounding can still exceed a cap smaller than one ULP.
+        if result.as_dvec3().length() > f64::from(max) {
+            result = Vec3::ZERO;
+        }
+    }
+    Some(result)
 }
 
 #[cfg(test)]
@@ -1460,6 +1633,38 @@ mod tests {
             Err(BoundaryLoadError::UnknownJoint)
         );
         assert_eq!(policies, before);
+    }
+
+    #[test]
+    fn exhausted_connection_ids_preserve_graph_and_policy() {
+        let bodies = handles(2);
+        let mut joints = JointStorage::new();
+        let handle = joint(&mut joints);
+        let kind = joints.get(handle).unwrap().kind;
+        let mut graph = AssemblyGraph::new();
+        graph.next_id = u64::MAX;
+        let mut policies = BreakableJointSet::default();
+        let before = graph.clone();
+        let policies_before = policies.clone();
+        let limit = BreakLimit::new(10.0, 10.0);
+        assert_eq!(
+            graph.connect_with_policy(
+                &mut policies,
+                bodies[0],
+                bodies[1],
+                Some(handle),
+                kind,
+                Some(limit)
+            ),
+            Err(AssemblyError::IdExhausted)
+        );
+        assert_eq!(graph, before);
+        assert_eq!(policies, policies_before);
+        assert_eq!(
+            graph.connect(bodies[0], bodies[1], None, kind, None),
+            Err(AssemblyError::IdExhausted)
+        );
+        assert_eq!(graph, before);
     }
 
     #[test]

@@ -16,6 +16,7 @@
 //! code**.
 
 pub mod anchor;
+pub mod bounded_pd;
 pub mod desc;
 pub mod drive;
 pub mod gear;
@@ -26,6 +27,7 @@ pub mod revolute;
 pub mod swing_twist;
 
 pub use anchor::JointAnchor;
+pub use bounded_pd::{BoundedPd, BoundedPdError, BoundedPdFailure};
 pub use desc::JointDesc;
 pub use drive::{ActuationBlend, AngularFriction, PoseDrive, SoftLimit};
 pub use gear::GearJointState;
@@ -34,12 +36,12 @@ pub use kind::{
     SphericalJoint,
 };
 pub use motor::{AngleLimit, LinearLimit, Motor, MotorTarget};
-pub use revolute::RevoluteJointState;
 pub use ragdoll::{
     HumanoidPart, HumanoidPreset, MassRatioPolicy, MassRatioWarning, RagdollBuildError,
     RagdollBuilder, RagdollDefinition, RagdollDiagnostics, RagdollLink, RagdollPart, RagdollPartId,
     SelfCollisionFilter, SelfCollisionPolicy,
 };
+pub use revolute::RevoluteJointState;
 pub use swing_twist::{
     AngularJointInput, AngularJointResponse, JointFriction, SwingTwistConfig,
     SwingTwistConfigError, SwingTwistJoint, SwingTwistMeasurement,
@@ -99,6 +101,14 @@ pub struct Joint {
     pub kind: JointKind,
     /// Whether the joint is solved this step.
     pub enabled: bool,
+    /// Explicit scalar force/torque servo, supported on revolute/prismatic
+    /// joints only. Do not combine with the family's XPBD `Motor`.
+    #[cfg_attr(feature = "serialize", serde(default))]
+    pub bounded_pd: Option<BoundedPd>,
+    /// Last enabled actuator sample failure. Cleared after a successful
+    /// sample, including a zero effort. A failed sample applies no impulse.
+    #[cfg_attr(feature = "serialize", serde(default))]
+    pub bounded_pd_failure: Option<BoundedPdFailure>,
     /// World-owned continuous angular history and substep XPBD multiplier.
     /// Cloned by full snapshots; never shared with another joint or solver.
     #[cfg_attr(feature = "serialize", serde(default))]
@@ -117,6 +127,8 @@ impl Joint {
             anchor_b: desc.anchor_b,
             kind: desc.kind,
             enabled: desc.enabled,
+            bounded_pd: desc.bounded_pd,
+            bounded_pd_failure: None,
             gear_state: GearJointState::default(),
             revolute_state: RevoluteJointState::default(),
         }
@@ -148,7 +160,11 @@ impl Joint {
     /// or limit clamp is applied. Nonfinite coordinates, non-hinges, invalid
     /// frames/axes and undefined twist return false without changing history.
     #[must_use]
-    pub fn set_revolute_coordinate(&mut self, angle: f64, body_orientations: [glam::Quat; 2]) -> bool {
+    pub fn set_revolute_coordinate(
+        &mut self,
+        angle: f64,
+        body_orientations: [glam::Quat; 2],
+    ) -> bool {
         let JointKind::Revolute(params) = self.kind else {
             return false;
         };

@@ -38,9 +38,44 @@ pub enum ForceError {
 /// Entries remain sorted by `(slot, generation)`. Lookup is logarithmic and
 /// ascending field batches append without shifting existing entries. The
 /// consumption order never depends on hash iteration or thread scheduling.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Debug, Default, PartialEq)]
 pub struct ForceAccumulator {
     entries: Vec<(BodyHandle, ExternalForce)>,
+}
+
+/// A validated sparse edit. It is committed under the same exclusive world
+/// operation that prepared it, so unrelated queued loads never need copying.
+#[derive(Default)]
+pub(crate) struct PreparedForceRemap {
+    removed: Vec<BodyHandle>,
+    written: Vec<(BodyHandle, ExternalForce)>,
+}
+
+fn handle_key(body: &BodyHandle) -> (u32, u32) {
+    (body.index(), body.generation())
+}
+
+fn sorted_unique_handles(
+    handles: impl Iterator<Item = BodyHandle>,
+) -> Result<Vec<BodyHandle>, ForceError> {
+    let mut sorted: Vec<_> = handles.collect();
+    sorted.sort_unstable_by_key(handle_key);
+    if sorted.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(ForceError::NonFiniteInput);
+    }
+    Ok(sorted)
+}
+
+impl Clone for ForceAccumulator {
+    fn clone(&self) -> Self {
+        Self {
+            entries: self.entries.clone(),
+        }
+    }
+
+    fn clone_from(&mut self, source: &Self) {
+        self.entries.clone_from(&source.entries);
+    }
 }
 
 impl ForceAccumulator {
@@ -82,45 +117,58 @@ impl ForceAccumulator {
         target: BodyHandle,
         target_center: Vec3,
     ) -> Option<ExternalForce> {
+        let (edit, combined) = self
+            .prepare_merge_bodies(sources, target, target_center)
+            .ok()?;
+        self.commit_remap(edit);
+        combined
+    }
+
+    /// Stages remapping without changing pending loads. Absence is a successful
+    /// no-op, while overflow must reject the enclosing body transaction.
+    pub(crate) fn prepare_merge_bodies(
+        &self,
+        sources: &[(BodyHandle, Vec3)],
+        target: BodyHandle,
+        target_center: Vec3,
+    ) -> Result<(PreparedForceRemap, Option<ExternalForce>), ForceError> {
         if !target_center.is_finite()
             || sources.is_empty()
-            || sources.iter().enumerate().any(|(index, (body, center))| {
-                !center.is_finite() || sources[..index].iter().any(|(other, _)| other == body)
-            })
+            || sources.iter().any(|(_, center)| !center.is_finite())
         {
-            return None;
+            return Err(ForceError::NonFiniteInput);
         }
+        let removed = sorted_unique_handles(sources.iter().map(|(body, _)| *body))?;
         let mut combined = ExternalForce::default();
         let mut found = false;
         for (body, center) in sources {
-            if !center.is_finite() {
-                return None;
-            }
-            if let Some((_, pending)) = self.entries.iter().find(|(candidate, _)| candidate == body)
-            {
+            if let Some(pending) = self.pending(*body) {
                 found = true;
                 combined.force += pending.force;
                 combined.torque += pending.torque + (*center - target_center).cross(pending.force);
             }
         }
         if !found {
-            return None;
+            return Ok((PreparedForceRemap::default(), None));
         }
-        let mut candidate = self.clone();
-        candidate
-            .entries
-            .retain(|(body, _)| !sources.iter().any(|(source, _)| source == body));
-        candidate
-            .accumulate(
-                target,
-                ForceTorque {
-                    force: combined.force,
-                    torque: combined.torque,
-                },
-            )
-            .ok()?;
-        *self = candidate;
-        Some(combined)
+        // A target may already have a load (including when it is a source).
+        // Source loads are removed first, exactly as in the physical merge.
+        let existing = if removed
+            .binary_search_by_key(&handle_key(&target), handle_key)
+            .is_ok()
+        {
+            ExternalForce::default()
+        } else {
+            self.pending(target).unwrap_or_default()
+        };
+        let value = checked_sum(existing, combined)?;
+        Ok((
+            PreparedForceRemap {
+                removed,
+                written: vec![(target, value)],
+            },
+            Some(combined),
+        ))
     }
 
     /// Distributes a pending compound wrench to restored bodies. The force is
@@ -132,16 +180,24 @@ impl ForceAccumulator {
         target_center: Vec3,
         targets: &[(BodyHandle, f32, Vec3)],
     ) -> bool {
+        let Ok((edit, found)) = self.prepare_split_body(source, target_center, targets) else {
+            return false;
+        };
+        self.commit_remap(edit);
+        found
+    }
+
+    pub(crate) fn prepare_split_body(
+        &self,
+        source: BodyHandle,
+        target_center: Vec3,
+        targets: &[(BodyHandle, f32, Vec3)],
+    ) -> Result<(PreparedForceRemap, bool), ForceError> {
         if !target_center.is_finite() || targets.is_empty() {
-            return false;
+            return Err(ForceError::NonFiniteInput);
         }
-        let Some((_, pending)) = self
-            .entries
-            .iter()
-            .find(|(body, _)| *body == source)
-            .copied()
-        else {
-            return false;
+        let Some(pending) = self.pending(source) else {
+            return Ok((PreparedForceRemap::default(), false));
         };
         let total_mass: f32 = targets.iter().map(|(_, mass, _)| *mass).sum();
         if !total_mass.is_finite()
@@ -149,27 +205,77 @@ impl ForceAccumulator {
             || targets
                 .iter()
                 .any(|(_, mass, center)| !mass.is_finite() || *mass <= 0.0 || !center.is_finite())
-            || targets.iter().enumerate().any(|(index, (body, _, _))| {
-                targets[..index].iter().any(|(other, _, _)| other == body)
-            })
         {
-            return false;
+            return Err(ForceError::NonFiniteInput);
         }
-        let mut candidate = self.clone();
-        candidate.entries.retain(|(body, _)| *body != source);
+        let _ = sorted_unique_handles(targets.iter().map(|(body, _, _)| *body))?;
+        let mut written = Vec::with_capacity(targets.len());
         for (body, mass, center) in targets {
             let ratio = *mass / total_mass;
             let force = pending.force * ratio;
             let torque = pending.torque * ratio - (*center - target_center).cross(force);
-            if candidate
-                .accumulate(*body, ForceTorque { force, torque })
-                .is_err()
+            let existing = if *body == source {
+                ExternalForce::default()
+            } else {
+                self.pending(*body).unwrap_or_default()
+            };
+            written.push((
+                *body,
+                checked_sum(existing, ExternalForce { force, torque })?,
+            ));
+        }
+        Ok((
+            PreparedForceRemap {
+                removed: vec![source],
+                written,
+            },
+            true,
+        ))
+    }
+
+    /// No recoverable errors remain after preparation. Reuse the accumulator's
+    /// allocation, and leave unrelated values and generational ordering intact.
+    pub(crate) fn commit_remap(&mut self, mut edit: PreparedForceRemap) {
+        if edit.removed.is_empty() && edit.written.is_empty() {
+            return;
+        }
+        let mut removed_index = 0;
+        self.entries.retain(|(body, _)| {
+            while removed_index < edit.removed.len()
+                && handle_key(&edit.removed[removed_index]) < handle_key(body)
             {
-                return false;
+                removed_index += 1;
+            }
+            edit.removed.get(removed_index) != Some(body)
+        });
+        edit.written
+            .sort_unstable_by_key(|(body, _)| handle_key(body));
+        let additional = edit
+            .written
+            .iter()
+            .filter(|(body, _)| self.pending(*body).is_none())
+            .count();
+        let mut remaining = self.entries.len();
+        self.entries.resize(
+            remaining + additional,
+            (BodyHandle::INVALID, ExternalForce::default()),
+        );
+        let mut destination = self.entries.len();
+        // Merge backwards in place. Repeated Vec::insert would shift every
+        // unrelated load once per restored member (quadratic split traffic).
+        while let Some(&(body, value)) = edit.written.last() {
+            destination -= 1;
+            if remaining > 0 && handle_key(&self.entries[remaining - 1].0) > handle_key(&body) {
+                remaining -= 1;
+                self.entries[destination] = self.entries[remaining];
+            } else {
+                if remaining > 0 && self.entries[remaining - 1].0 == body {
+                    remaining -= 1;
+                }
+                self.entries[destination] = (body, value);
+                edit.written.pop();
             }
         }
-        *self = candidate;
-        true
     }
 
     pub fn accumulate_force(&mut self, body: BodyHandle, force: Vec3) -> Result<(), ForceError> {
@@ -333,6 +439,18 @@ impl ForceAccumulator {
     }
 }
 
+fn checked_sum(a: ExternalForce, b: ExternalForce) -> Result<ExternalForce, ForceError> {
+    let value = ExternalForce {
+        force: a.force + b.force,
+        torque: a.torque + b.torque,
+    };
+    if value.force.is_finite() && value.torque.is_finite() {
+        Ok(value)
+    } else {
+        Err(ForceError::NonFiniteInput)
+    }
+}
+
 /// Adapter for a backend that owns a different body store.
 pub trait ExternalForceTarget {
     fn consume_external_forces(&mut self, accumulator: &mut ForceAccumulator, dt: f32) -> usize;
@@ -385,6 +503,157 @@ fn safe_quat(value: Quat) -> Quat {
 mod tests {
     use super::*;
     use crate::state::body::{BodyDesc, MassProperties};
+
+    #[test]
+    fn sparse_remap_matches_individual_edits_with_aliases_and_generations() {
+        let handles: Vec<_> = (0..32)
+            .flat_map(|slot| [BodyHandle::new(slot, 2), BodyHandle::new(slot, 7)])
+            .collect();
+        let mut seed = ForceAccumulator::new();
+        for (i, body) in handles.iter().enumerate() {
+            seed.accumulate(
+                *body,
+                ForceTorque {
+                    force: Vec3::X * i as f32,
+                    torque: Vec3::Z,
+                },
+            )
+            .unwrap();
+        }
+        // Existing target, target overlapping a source, and a new generation.
+        for target in [
+            handles[4],
+            handles[6],
+            BodyHandle::new(0, 3),
+            BodyHandle::new(40, 1),
+        ] {
+            let sources = [
+                (handles[60], Vec3::X),
+                (handles[6], Vec3::Y),
+                (handles[1], -Vec3::Z),
+            ];
+            let mut expected = seed.clone();
+            let mut combined = ExternalForce::default();
+            for (body, center) in sources {
+                let load = seed.pending(body).unwrap();
+                combined.force += load.force;
+                combined.torque += load.torque + center.cross(load.force);
+            }
+            expected
+                .entries
+                .retain(|(body, _)| !sources.iter().any(|(source, _)| source == body));
+            expected
+                .accumulate(
+                    target,
+                    ForceTorque {
+                        force: combined.force,
+                        torque: combined.torque,
+                    },
+                )
+                .unwrap();
+            let mut actual = seed.clone();
+            let pointer = actual.entries.as_ptr();
+            let (edit, reported) = actual
+                .prepare_merge_bodies(&sources, target, Vec3::ZERO)
+                .unwrap();
+            assert_eq!(edit.removed.len(), 3);
+            assert_eq!(edit.written.len(), 1);
+            assert_eq!(reported, Some(combined));
+            assert_eq!(actual, seed, "preparation must be read-only");
+            actual.commit_remap(edit);
+            assert_eq!(actual, expected);
+            assert_eq!(actual.entries.as_ptr(), pointer);
+
+            // Unsorted restored handles include existing loads, the source
+            // itself, a new generation between live entries, and an appended slot.
+            let existing_target = if target == handles[4] {
+                handles[8]
+            } else {
+                handles[4]
+            };
+            let targets = [
+                (BodyHandle::new(45, 0), 1.0, Vec3::X),
+                (existing_target, 2.0, -Vec3::Y),
+                (target, 3.0, Vec3::Z),
+                (BodyHandle::new(0, 5), 2.0, -Vec3::X),
+            ];
+            let pending = actual.pending(target).unwrap();
+            let mut expected = actual.clone();
+            expected.entries.retain(|(body, _)| *body != target);
+            for (body, mass, center) in targets {
+                let force = pending.force * (mass / 8.0);
+                let torque = pending.torque * (mass / 8.0) - center.cross(force);
+                expected
+                    .accumulate(body, ForceTorque { force, torque })
+                    .unwrap();
+            }
+            assert!(actual.split_body(target, Vec3::ZERO, &targets));
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn sparse_remap_target_overflow_or_duplicate_rejects_without_writes() {
+        let a = BodyHandle::new(1, 2);
+        let b = BodyHandle::new(1, 3);
+        let mut loads = ForceAccumulator::new();
+        loads
+            .accumulate_force(a, Vec3::X * (f32::MAX * 0.75))
+            .unwrap();
+        loads
+            .accumulate_force(b, Vec3::X * (f32::MAX * 0.75))
+            .unwrap();
+        let before = loads.clone();
+        assert!(loads
+            .merge_bodies(&[(a, Vec3::ZERO)], b, Vec3::ZERO)
+            .is_none());
+        assert_eq!(loads, before);
+        assert!(!loads.split_body(a, Vec3::ZERO, &[(b, 1.0, Vec3::ZERO)]));
+        assert_eq!(loads, before);
+        assert!(loads
+            .merge_bodies(&[(a, Vec3::ZERO), (a, Vec3::ZERO)], b, Vec3::ZERO)
+            .is_none());
+        assert_eq!(loads, before);
+        assert!(!loads.split_body(a, Vec3::ZERO, &[(b, 1.0, Vec3::ZERO), (b, 1.0, Vec3::ZERO)]));
+        assert_eq!(loads, before);
+    }
+
+    #[test]
+    fn checkpoint_clone_from_retains_capacity_and_generational_order() {
+        let mut source = ForceAccumulator::new();
+        for slot in (0..32).rev() {
+            source
+                .accumulate_force(BodyHandle::new(slot, slot % 3), Vec3::X * slot as f32)
+                .unwrap();
+        }
+        let mut checkpoint = ForceAccumulator::new();
+        checkpoint.clone_from(&source);
+        let pointer = checkpoint.entries.as_ptr();
+        let capacity = checkpoint.entries.capacity();
+        for count in [16, 0, 8, 32, 1, 0] {
+            source.clear();
+            for slot in (0..count).rev() {
+                source
+                    .accumulate_force(BodyHandle::new(slot, 7), Vec3::Y * slot as f32)
+                    .unwrap();
+            }
+            checkpoint.clone_from(&source);
+            assert_eq!(checkpoint, source);
+            assert_eq!(checkpoint.entries.as_ptr(), pointer);
+            assert_eq!(checkpoint.entries.capacity(), capacity);
+            assert!(checkpoint.entries.windows(2).all(|pair| {
+                (pair[0].0.index(), pair[0].0.generation())
+                    < (pair[1].0.index(), pair[1].0.generation())
+            }));
+            if count > 1 {
+                assert_eq!(
+                    checkpoint.pending(BodyHandle::new(1, 7)).unwrap().force,
+                    Vec3::Y
+                );
+                assert_eq!(checkpoint.pending(BodyHandle::new(1, 0)), None);
+            }
+        }
+    }
 
     #[test]
     fn off_center_force_accumulates_torque() {

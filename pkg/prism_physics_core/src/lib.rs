@@ -90,6 +90,7 @@ pub use collision_filter::{
 pub use command::{CommandQueue, PhysicsCommand};
 pub use config::WorldConfig;
 pub use driver::fixed_step::{AdvanceReport, FixedStepPipeline};
+pub use driver::playback::{PlaybackError, PlaybackRepeat, PlaybackSample, TimedPlayback};
 pub use driver::{
     CacheFrame, CacheHandle, CacheRegistrationError, DriveMode, DriveOutcome, DriverCache,
     SimulationDriver, DRIVER_CACHE_VERSION, MAX_DRIVER_CACHE_FRAMES, MAX_OFFLINE_SUBSTEPS,
@@ -194,5 +195,5 @@ pub use vbd::{
 };
 pub use world::{
     AeroApplyReport, AeroBodyRegistration, AeroBodySample, AeroRegistrationError, AeroStepReport,
-    PhysicsWorld,
+    AssemblyMemberRemap, AssemblySplitReport, JointBoundaryFailure, PhysicsWorld,
 };

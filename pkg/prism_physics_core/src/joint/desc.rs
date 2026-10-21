@@ -10,6 +10,7 @@
 //! code**.
 
 use crate::joint::anchor::JointAnchor;
+use crate::joint::bounded_pd::BoundedPd;
 use crate::joint::kind::{
     DistanceJoint, FixedJoint, GearJoint, JointKind, PrismaticJoint, RevoluteJoint, SphericalJoint,
 };
@@ -29,6 +30,10 @@ pub struct JointDesc {
     pub kind: JointKind,
     /// Whether the joint is solved. Disabled joints are skipped entirely.
     pub enabled: bool,
+    /// Scalar bounded-PD force law, distinct from an XPBD position motor.
+    /// Supported on revolute/prismatic joints without a legacy `Motor`.
+    #[cfg_attr(feature = "serialize", serde(default))]
+    pub bounded_pd: Option<BoundedPd>,
 }
 
 impl JointDesc {
@@ -40,6 +45,7 @@ impl JointDesc {
             anchor_b,
             kind,
             enabled: true,
+            bounded_pd: None,
         }
     }
 
@@ -47,6 +53,14 @@ impl JointDesc {
     #[must_use]
     pub const fn with_enabled(mut self, enabled: bool) -> JointDesc {
         self.enabled = enabled;
+        self
+    }
+
+    /// Attaches a force law. Unsupported families or simultaneous legacy
+    /// motors are reported by `Joint::bounded_pd_failure` when sampled.
+    #[must_use]
+    pub const fn with_bounded_pd(mut self, policy: BoundedPd) -> JointDesc {
+        self.bounded_pd = Some(policy);
         self
     }
 

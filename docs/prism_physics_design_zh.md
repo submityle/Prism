@@ -268,7 +268,7 @@ driver 切片。该切片不是完整的资产管线或编辑器功能，而是�
   一并恢复，不要求与回放前相同。缓存帧版本不匹配时返回 `CacheMismatch`。
 - `Realtime` 每次 `drive(backend, world, dt)` 执行单次 backend step，并返回 `DriveOutcome::Stepped`。
 - 既有 `PhysicsCache`/`Player` 继续负责软体粒子轨迹的量化、插值和回放；driver
-  cache 使用完整 world snapshot（`DRIVER_CACHE_VERSION = 2`），包含软体、拓扑、场、铰接和装配状态，避免把刚体状态错误地塞进软体 track 格式。
+  cache 使用完整 world snapshot（`DRIVER_CACHE_VERSION = 3`），包含软体、拓扑、场、铰接和装配状态，并记录 f64 累计帧时间；避免把刚体状态错误地塞进软体 track 格式。不保留旧版本兼容。
 
 软体粒子轨迹的磁盘格式已由 `cache::disk` 实现：`CacheReader` / `PhysicsCache::write_to`
 提供版本化编码、分配前预算校验、索引与帧随机读取，以及 header/index/payload
@@ -316,8 +316,14 @@ enum DriveMode {
 [运行时] 软体 PhysicsCache <-> cache::disk (版本/预算/CRC，按轨道与帧读取)
 [后续]   编辑器/CLI     ---> PhysicsCacheAsset 磁盘资产与流式管线
 ```
-软体 `Player` 仍支持时间缩放、循环和插值；本 driver 切片的 Playback 是离散逐帧
-快照应用，尚未加入时间插值或与实时物体的单向交互。
+软体 `Player` 支持时间缩放、循环和插值。`SimulationDriver::Playback` 保留逐帧完整
+快照应用；`DriverCache::sample_at` / `TimedPlayback` 另提供可变帧长时间轴、seek、
+暂停、正反倍速与循环，二分查找 O(log frames)，单体姿态采样不分配，整帧刚体显示
+投影复用输出容量。播放器以 `Arc<DriverCache>` 共享缓存，克隆播放器不深拷贝世界。
+缓存保存 post-step 状态，因此首帧时间之前保持首帧，不虚构未记录的初始世界；
+只对两帧都存在且 generation 相同的刚体插值姿态/速度，出生、移除及槽位复用在
+边界切换。`PlaybackSample::restore_boundary` 恢复完整边界 world，显示插值不写回
+求解器状态。软体/拓扑等完整世界状态仍按边界应用，与实时物体的单向交互尚未完成。
 
 ---
 
@@ -428,7 +434,7 @@ prism_physics_core 不依赖 Prism ECS（纯数据 + trait），保证可被服�
 
 MPM 已通过 `MpmBinding -> MpmRuntime -> MpmParticleSnapshot` 接入同一固定步边界：authoring/backend/budget 变化会重建 runtime，固定步不匹配或 snapshot 失败不会发布伪造状态，preferred-GPU 会记录实际 GPU authority 或显式 CPU fallback。可选 `MpmSurfaceConfig` 按有界 CPU scalar-field / marching-tetrahedra 路径发布 `MpmSurfaceSnapshot`；节点、单元、采样访问及输出顶点/三角预算受限。`version` 表示来源粒子版本，`epoch` 表示 runtime 生命周期，`revision` 表示该 epoch 内的表面发布序号；只改表面配置也能从最新粒子快照重建，不要求先成功步进，因此以 `(epoch, revision)` 去重。关闭/无效配置清除旧 surface，空粒子快照发布空 mesh。
 
-可选 `prism_render_app` 的 `physics` feature 已提供 `PhysicsSurfacePlugin`：`MpmSurfaceSnapshot.mesh: Arc<SurfaceMesh>` 经原生 `Mesh` / `Assets<Mesh>`、render-asset extraction 与 `RenderMesh` preparation 更新 vertex/index GPU buffer，再由 `SceneRegistry` geometry、可见性 instance、网格/材质绑定进入 native draw queue。新增发布会把 CPU 几何复制进原生 Mesh；未变化帧只克隆 snapshot 的 Arc，**不是 GPU resident 零拷贝**。当前仅支持一个被接受的 surface view；零视图或多视图会撤回自有绘制工作，不合并摄像机，也不清除其他生产者的工作。禁用、移除、空/非法网格的资源卸载、失败重试与原生 geometry revision 生命周期已有处理和 Null 后端集成回归用例，但测试文件存在不等于本轮已运行，更不代表物理 GPU parity 或真机画面/性能验收。零拷贝、多视图、场景 Demo 和匹配硬件性能证据仍未完成。
+可选 `prism_render_app` 的 `physics` feature 已提供 `PhysicsSurfacePlugin`：`MpmSurfaceSnapshot.mesh: Arc<SurfaceMesh>` 经原生 `Mesh` / `Assets<Mesh>`、render-asset extraction 与 `RenderMesh` preparation 更新 vertex/index GPU buffer，再由 `SceneRegistry` geometry、可见性 instance、网格/材质绑定进入 native draw queue。新增发布会把 CPU 几何复制进原生 Mesh；未变化帧只克隆 snapshot 的 Arc，**不是 GPU resident 零拷贝**。物理代理走普通的按视图可见性提取；render app 会为每个 `(camera, output, viewport)` 使用局部 target，并在统一帧图中稳定合成到输出。零视图不会虚构绘制工作；某个输出容不下相机视口时只拒绝该相机/输出组合，不合并摄像机，也不清除其他生产者的工作。禁用、移除、空/非法网格的资源卸载、失败重试与原生 geometry revision 生命周期已有处理；本轮多视图图准入/异常路径与物理 surface 生命周期分别有定向回归，但尚无 MPM 双摄像机真机画面集成测试，更不代表物理 GPU parity 或真机画面/性能验收。GPU resident 零拷贝、场景 Demo、广泛真机 GPU 覆盖与匹配硬件性能证据仍未完成。
 
 ---
 
@@ -440,15 +446,15 @@ MPM 已通过 `MpmBinding -> MpmRuntime -> MpmParticleSnapshot` 接入同一固�
 | M1 | XPBD 刚体 MVP + 球/盒/胶囊 + 接触摩擦 + 子步 | 能堆箱子稳定 | ✅ 完成 |
 | M2 | 关节族 + 空间查询 + 事件/Observer | 可做门/车/机关 | ✅ 完成 |
 | M2.5 | 异步流水线 + 状态哈希（联机地基） | 插值无抖动 | ✅ 完成 |
-| M3 | Island 并行 + 睡眠 + warm-start + rotational conservative-advancement CCD：shape-cast + 位姿回绕 | 万级刚体 60fps | 🟡 内核路径已有；万级刚体目标的匹配硬件 P50/P95/P99 与稳定帧预算尚未验收，不由算法存在推导与 UE/Chaos 整体对等 |
+| M3 | Island 并行 + 睡眠 + warm-start + rotational conservative-advancement CCD：shape-cast + 位姿回绕 | 万级刚体 60fps | 🟡 内核路径已有；可复现基准已输出 P50/P95/P99 和尾部超预算计数，但验收仍未通过：当前 Apple Silicon/aarch64、8 Rayon worker、`dt=1/60`、4 substeps 的独立 10,000 刚体场景，全醒模式 P50 58.580 ms / P95 79.203 ms / P99 175.736 ms，睡眠模式 P50 25.507 ms / P95 27.918 ms / P99 34.024 ms，均超过 16.667 ms 稳定帧预算；尚无匹配硬件矩阵，也不由算法存在推导与 UE/Chaos 整体对等 |
 | M4 | 布料 / 软体 / 绳索（统一约束复用） | 交互式布料 | ✅ 完成 |
-| M4.5 | 离线烘焙 + Golden replay CI | 缓存回放 demo | 🟡 bounded Offline/Playback、完整内存快照和软体轨迹磁盘 CRC 已有；全世界磁盘资产、Bake/热重载/流式集成及完整场景验收仍缺，见 §16 |
+| M4.5 | 离线烘焙 + Golden replay CI | 缓存回放 demo | 🟡 bounded Offline/Playback、完整内存快照、可变帧长刚体显示插值播放器和软体轨迹磁盘 CRC 已有；全世界磁盘资产、Bake/热重载/流式集成、实时单向交互及完整场景验收仍缺，见 §16 |
 | M5 | GPU 后端（流体/大布料/破碎） | 十万粒子 | 🟡 kernel 与独立 parity 测试已实现；MPM 已有统一 runtime、ECS 粒子 snapshot 与 CPU copy 原生渲染桥，其他求解器跨层回写、广泛真机覆盖和性能证据仍缺失 |
-| M5.5 | MPM（沙/雪/泥）+ FLIP/APIC 流体 + 表面重建 | 溃坝/沙堆 demo | 🟡 CPU/GPU MPM stage、resident runtime、ECS 固定步粒子快照、预算受限的 CPU 表面重建、版本化 surface snapshot、原生 Mesh/render-world extraction/GPU buffer/draw queue 桥与公共 GPU fluid step 的 APIC 路由已实现；渲染桥为 CPU copy、单视图，零拷贝、多视图、场景 Demo、广泛真机 GPU 覆盖与性能验收未完成 |
+| M5.5 | MPM（沙/雪/泥）+ FLIP/APIC 流体 + 表面重建 | 溃坝/沙堆 demo | 🟡 CPU/GPU MPM stage、resident runtime、ECS 固定步粒子快照、预算受限的 CPU 表面重建、版本化 surface snapshot、原生 Mesh/render-world extraction/GPU buffer/draw queue 桥、按 `(camera, output, viewport)` 的局部 surface target 与统一帧图合成、以及公共 GPU fluid step 的 APIC 路由已实现；渲染桥仍为 CPU copy 而非零拷贝。MPM 双摄像机真机画面集成、场景 Demo、广泛真机 GPU 覆盖与性能 P50/P95/P99 验收仍未完成 |
 | M7 | VBD / 降阶软体 + 自适应 LOD | 巨型软体实时 | ✅ 完成 |
 | M8 | 约束 DSL + 参数热重载 | 编辑器实时调参 | ✅ 完成 |
 | M9 | GPU-Driven 持久化管线 + 实时 Voronoi 破碎 | 零拷贝 + 动态裂纹 | 🟡 CPU 破碎和部分 GPU stage 已有；动态拓扑、生产持久化调度与 GPU resident 零拷贝渲染回写未完成，已有 CPU copy MPM 渲染桥不等于本项验收 |
-| M10 | 动态装配：力累加器/施力 API + 通用可断关节 + 装配图/复合体合并·拆分 + 吸附几何原语 + GrabDrive | 实时搭建 200+ 零件载具 60fps、焊点可断、抓取不穿墙 | 🟡 core 装配/施力与 ECS 显式 assembly 请求、合并拆分及 generational entity/body 重映射已有；抓取/snap 交互闭环、自动接入普通 `RigidBody` authoring、Demo 和目标性能验收未完成 |
+| M10 | 动态装配：力累加器/施力 API + 通用可断关节 + 装配图/复合体合并·拆分 + 吸附几何原语 + GrabDrive | 实时搭建 200+ 零件载具 60fps、焊点可断、抓取不穿墙 | 🟡 core 装配/施力、ECS 显式 assembly 请求及普通 `RigidBody` authoring 的合并拆分、完整成员坐标系/速度/偏心力映射和力驱动 Grab/Snap 已有；普通刚体装配仍拒绝可断连接、sensor、气动/布偶/接管所有权冲突，完整 Demo 和目标性能验收未完成 |
 | M11 | 力场子系统 + GPU 采样 + 风扇/推进器/浮力部件 + 断裂连锁 | 自建载具可驾驶/飞行、受击解体 | 🟡 core field/GPU sampler、XPBD 每子步 provider 与 ECS 显式 GPU runtime、ForceField、AeroSurface/Thruster/Buoyancy 生命周期桥已有；GPU 采样同步回读后仍由 CPU XPBD 求解，不是零拷贝；破坏连锁、跨层场景和目标性能验收未完成 |
 | M12 | 刚体/多体气动：各向异性阻力面元 + 翼面升力/失速 + 推进反扭矩 + 浮力（空气/水）+ 空间风场/滑流/地面效应 + 附加质量 | 自建飞行器可滑翔/配平飞行、气球浮空、水上载具 | 🟡 升阻/失速、推进反扭矩、浮力、附加质量、Magnus 与风场/wake 等 core 原语、ECS `RigidBodyAero` 与独立气动部件生命周期桥及固定步推进器路径已有；完整场景模型、气动空间风场 GPU 采样、Demo 和跨层性能验收未完成 |
 | M13 | 角色布偶：球关节 swing-twist 椭圆锥限/扭限 + 软限位 + 关节摩擦 + 位姿伺服 drive + RagdollBuilder | 人形布偶命中反应自然、不穿模不软面条、受击可配主动驱动 | 🟡 core 原语、按关节 humanoid preset，以及 `EcsRagdoll` 的稳定 part-ID authoring、generational body 映射、固定步约束接线与生命周期回归已有；骨骼/角色资产转换、完整碰撞场景、GPU 群体和性能验收未完成 |
@@ -545,7 +551,19 @@ CompoundBody                      // 由一个连通分量烘焙而成的单一�
 
 ### 24.4 可断关节（Breakable Joints）
 
-当前 `FixedJoint` 无断裂阈值，本节补齐（作用于**所有** `JointKind`）：
+core 已有 `BreakLimit` 与 world-owned 可断关节注册/求解路径；以下是完整设计契约，不表示普通 `RigidBody` 合并装配已支持这些连接的生命周期迁移：
+
+core 的固定子步断裂结算已支持跨多个合并装配体的一次性预验证和提交：
+先验证全部载荷、疲劳策略、图恢复、代际句柄分配和待施力映射，再修改世界。
+任一装配体失败不会提前消费疲劳、禁用关节、退休其他 proxy 或占用句柄；
+成功后发布排序稳定的 `AssemblySplitReport` 原成员到新句柄映射。
+自动求解边界失败时，`JointBoundaryFailure` 保留已完成子步的精确冲量与 dt，
+`retry_joint_boundary` 只重试结算，不重复积分或施力；失败未修复前 XPBD
+普通、外部接触及场采样入口均不再推进。多 proxy 原子性、力矩守恒、重复拒绝、
+修复后单次重试及 snapshot/hash 一致性已有回归。
+这仍不是合并结构受力断裂的完整验收：被合并体折叠的内部关节不参与 XPBD
+投影，仍须补齐真实成员载荷到连接反力的传递及按存活连通分量局部重烘焙；
+不能用手工提交关节载荷的测试替代碰撞/施力触发断裂的场景证据。
 
 ```
 BreakLimit
@@ -572,23 +590,24 @@ BreakLimit
 
 ### 24.6 柔性抓取 / 操纵原语（Grab / Drive）
 
-"举起物体悬浮在手上"用**驱动约束**实现，保证全程走物理求解（不穿墙、能互推）：
+"举起物体悬浮在手上"通过有界力/力矩驱动，使目标保持参与普通碰撞求解；不通过 teleport 或关闭碰撞实现抓取。真实场景中是否穿透仍须按速度、子步、CCD 和内容验收，不能仅由驱动原语的存在保证：
 
 ```
 GrabDrive                         // 把目标刚体柔性拉向一个运动学"手点"
   target: BodyHandle
   anchor_world: Isometry          // 玩法层每帧写入的期望位姿
   linear_compliance, angular_compliance   // 柔度=弹簧软硬
-  max_force, max_torque           // 冲量钳制（防抽搐/爆炸，对应 BreakLimit 复用）
+  max_force, max_torque           // 力/力矩幅值上限（N / N·m）
   max_linear_speed, max_angular_speed      // 速度上限
 ```
 
-- 实现 = 一个运动学抓取体 + 带 `compliance` 与冲量上限的 `FixedJoint`，复用现有 Motor 的 `λ_max = n·h²` 钳制逻辑，无需新求解器。
-- 举着复合体时直接驱动其合并刚体，零件整体跟随，手感与单体一致。
+- core `GrabDrive` 计算有界 wrench，经 `apply_force/apply_torque` 在子步预测前施加，不创建辅助运动学 body 或 FixedJoint。有限输入和中间运算经过校验；零输出不会无故唤醒休眠体。
+- ECS `EcsGrabDrive` 支持世界 Pose 和实体间 Snap；Snap 每个子步重新采样接收体的实时位姿。源实体按完整代际 Entity 稳定排序，缺失/失效/自代理目标提供诊断，不静默 teleport。
+- 举着普通刚体装配成员时，将成员 authored frame 的目标换算到 proxy COM frame；完整旋转和位置偏移均参与换算。GPU 场采样拒绝本子步时，恢复调用方待施力及抓取/持续力引发的休眠状态变更，再允许重试。
 
 ### 24.7 外力 / 冲量命令 API（内核新增）
 
-当前运行时只有 `set_velocity/set_position`，补齐**力累加器**：
+core 运行时已有**力累加器**及世界系施力/力矩/冲量 API，不再局限于 `set_velocity/set_position`：
 
 ```
 world.apply_force(body, force, point)      // 世界系力（可偏心产生力矩）
@@ -1051,7 +1070,8 @@ ECS `EcsRagdoll` 以稳定 part ID 映射到调用方已有的 `RigidBody` 实�
 - 已有：handoff 把非零 COM 与完整对称惯量转换为 COM/右手主轴 body frame，并迁移速度、collider 和关节锚点；几何先只读验证、再提交，避免克隆整个 world/shape registry。ECS 物理实体使用 COM frame，独立 authored 子实体保留原 link frame，不能将同一 Transform 同时解释为两种坐标系。
 - 已有：有限值重力通过持久的 per-body override 接管，不随后续 world gravity 修改而丢失；非有限值重力仍被拒绝。
 - 已有：同一 link/base 的多个 collider attachment 会预验证并合并为真实 compound leaves；逐叶保留 material/self-collision，`body_child_range` 将扁平叶索引映射回原始 attachment。普通/混合接触、软体耦合、CCD 和 leaf-aware queries 消费该策略，而不是用聚合凸包填平几何间隙；超预算或非法几何在提交前拒绝。
-- 未完成：存活关节 motor/damping/armature 与部分限位策略仍采用原子拒绝；不以无声丢弃参数冒充无损接管。GPU 多链、完整场景及匹配硬件目标性能验收仍未完成。
+- 已有：存活 Revolute/Prismatic 的 scalar motor 以等价的 bounded-PD effort law 接管，在每子步采样一次速度并施加 effort·h，不转写为不同语义的 XPBD 位置马达。scratch 容量跨步复用，solver clone 不共享 scratch；这不表示整个 XPBD solve 无分配。
+- 未完成：独立 damping/armature、Fixed/Spherical motor 和这两类关节的 enabled limits 仍采用原子拒绝；不以无声丢弃参数冒充无损接管。GPU 多链、完整场景及匹配硬件目标性能验收仍未完成。
 - 适用面：长链 + 极大质量比 + 需精确可控（机械臂末端、角色操纵）时降阶坐标显著优于最大坐标。
 
 ### 27.3 模型：铰接拓扑
@@ -1302,7 +1322,7 @@ GPU compact/reorder、生产 CCD/BVH consumer 或 CPU/GPU parity 已完成。
 
 | 包 / 测试选择 | 结果 | 验证范围 |
 |---|---|---|
-| `prism_physics_core --features parallel --lib --tests` | 2728 单元 + 258 集成通过 | core 全量默认测试目标及 parallel 路径；含接管、多 attachment 逐叶策略、非零 COM / 完整惯量、碰撞排除、旋转根位姿 CCD 回归 |
+| `prism_physics_core --features parallel --lib --tests` | 2756 单元 + 333 集成通过 | core 全量默认测试目标及 parallel 路径；含接管、多 attachment 逐叶策略、非零 COM / 完整惯量、碰撞排除、旋转根位姿 CCD、定时回放、bounded-PD、装配图/施力原子事务、多装配体断裂结算与失败重试回归 |
 | `prism_physics_ecs --lib --tests`，`PRISM_REQUIRE_GPU=1` | 16 单元 + 108 集成通过 | 固定步生命周期、接管回滚/退休、多碰撞体所有权及编辑/移除/重试、装配、布偶、MPM 与 6 项真实 GPU field runtime 测试 |
 | `prism_physics_gpu --lib field::`，`PRISM_REQUIRE_GPU=1` | 24 通过 | GPU 场采样、批次/预算/设备身份、workspace 复用、初始化及提交/读回错误作用域和失败后恢复；不是全包 GPU parity 验收 |
 
