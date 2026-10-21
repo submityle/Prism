@@ -47,7 +47,7 @@ pub use git::{ContentGitPhase, ContentGitStatus};
 pub use panel_storage::{DesktopPanelCancelOutcome, DesktopSequenceStorageLimits};
 pub use panels::{
     DesktopPanel, DesktopPanelUpdate, DesktopPanelView, DesktopProfilerPanel, DesktopTimelineFrame,
-    DesktopTimelinePanel, DesktopWorldPanel,
+    DesktopTimelinePanel, DesktopWorldPanel, DesktopWorldProjectBinding, DesktopWorldProjectError,
 };
 pub use sequence_panel::DesktopSequencePanel;
 #[cfg(test)]

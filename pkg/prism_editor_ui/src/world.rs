@@ -521,6 +521,12 @@ impl WorldPanelController {
             .as_ref()
             .map_or(WorldProjectIoState::Unbound, |s| s.state.clone())
     }
+    /// Exact bytes revision currently observed for the bound project file.
+    /// None means either no service is bound or publication state is unknown;
+    /// callers must load/adopt before attempting a conditional save.
+    pub fn project_file_revision(&self) -> Option<&TimelineFileRevision> {
+        self.project_io.as_ref()?.expected.as_ref()
+    }
     /// Whether a real request is retained, including cancellation too late.
     pub fn project_io_pending(&self) -> bool {
         self.project_io
