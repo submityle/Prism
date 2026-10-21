@@ -16,12 +16,17 @@
 - 同步 load 与异步 reload 的 provisional label/source reservation 都有回滚；factory panic 不再绕过 journal。
 - reload factory panic 保留旧 root revision 与既有 label，撤销新依赖和新 label 的 intern、catalog、retained、owner、graph 与 storage 状态。
 - panic payload、未发布 candidate 和替换下来的旧 payload 在 server mutex 与 reload epoch gate 外析构；回归覆盖析构重入和单析构 panic。
+- 普通首次异步加载会先完整规划 primary 与全部 labeled dependencies，再启动 child I/O：按声明顺序稳定展开、按 `AssetPath` 去重、合并兼容类型与 ancestry，并在调度前拒绝 ancestry cycle 或同路径具体类型冲突。
+- 普通首次异步依赖使用 scheduler 容量约束下的增量 ready-wave admission；已准入 siblings 被并发轮询，后声明依赖可以先完成，但最终仍按 primary/label 原始槽位顺序回填。
+- 每个唯一 child flight 都继承 parent 的动态优先级；跨 root wait-edge 的 cycle detection 与插边在同一 scheduler 临界区完成，guard 同时校验 parent/child flight identity，避免旧 generation 清理新 generation 的边。
+- 任一 child 失败或 parent 取消时，普通首次异步依赖批次立即 detach 全部未完成 tickets，不等待被阻塞 sibling 的 source I/O 排空；共享 child 仅在最后一个消费者离开后取消。
 
 ## 精确边界
 
 - 当前取消是协作式的阶段边界取消，不是 CPU 抢占、线程终止或 OS I/O 取消。
 - `panic=unwind` 下执行 panic 隔离与回滚；`panic=abort`、OOM、进程终止和同一次清理中的多重析构 panic 不在保证范围内。
 - 当前 loom 只覆盖抽取出的关键状态机小模型；尚未形成完整 scheduler、AssetServer、source、loader 与 storage 的穷举模型。
+- 本批 ready-wave 只覆盖普通首次异步加载；reload candidate 的完整 dependency closure、同等 wave admission 与更大规模交错验证仍未完成。
 - 本批证明的是有界进程内运行时安全，不是完整 EDL、GPU 页流送、远程发行或构建农场能力。
 
 ## 验证证据
@@ -33,18 +38,24 @@ cargo test -j 1 --locked -p prism_asset server_panic_drop_tests --quiet
 15 passed; 0 failed
 
 cargo test -j 1 --locked -p prism_asset scheduler_cancellation_tests --quiet
-19 passed; 0 failed
+27 passed; 0 failed
+
+cargo test -p prism_asset --test scheduler_wait_cycles -- --nocapture
+5 passed; 0 failed
+
+cargo test -p prism_asset --lib scheduler::range_tests -- --nocapture
+6 passed; 0 failed
 
 cargo test -j 1 --locked -p prism_asset --lib --quiet
-375 passed; 0 failed
+383 passed; 0 failed
 
 cargo test -j 1 --locked -p prism_asset --all-targets --quiet
-375 + 4 + 27 + 4 + 6 + 1 + 7 + 9 + 14 + 5 passed; 0 failed
+383 + 4 + 27 + 4 + 6 + 1 + 7 + 9 + 14 + 5 passed; 0 failed
 ```
 
 ## 后续未完成项
 
-1. 完整 EDL：依赖增量就绪、阶段化可抢占作业、跨 source/loader/storage 的更大状态空间验证。
+1. 完整 EDL：reload dependency closure 的 ready-wave、阶段化可抢占作业，以及跨 source/loader/storage 的更大状态空间验证。
 2. 完整 labeled revision 生命周期：大规模交错、promotion/retirement 与 watcher 重载压力测试。
 3. 压缩容器到 VT/VG 的 feedback、解码、上传、page table、consumer 与 eviction 生产闭环。
 4. Prefetch、DirectStorage 形态队列、上传时间预算和真实平台 I/O 后端。

@@ -17,7 +17,7 @@
 //! while another consumer remains; the last consumer cancels at stage boundaries.
 //! Reload cancellation also prevents publication of its staged revision.
 
-use crate::loader_exec::{AssetLoaders, FullLoadOutput};
+use crate::loader_exec::{AssetLoaders, DepRequest, FullLoadOutput};
 use crate::server::{
     AsyncLoadPreparation, AsyncReloadCandidate, AsyncReloadCandidateAsset, AsyncReloadCommitError,
     AsyncReloadPlan, SoftLoadError,
@@ -564,6 +564,7 @@ struct DependencyWait {
     parent: FlightKey,
     parent_flight: Arc<Flight>,
     dependency: FlightKey,
+    dependency_flight: Arc<Flight>,
 }
 
 impl Drop for DependencyWait {
@@ -573,8 +574,170 @@ impl Drop for DependencyWait {
             .in_flight
             .get(&self.parent)
             .is_some_and(|flight| Arc::ptr_eq(flight, &self.parent_flight))
+            && state
+                .in_flight
+                .get(&self.dependency)
+                .is_some_and(|flight| Arc::ptr_eq(flight, &self.dependency_flight))
         {
             state.remove_wait(&self.parent, &self.dependency);
+        }
+    }
+}
+
+struct PlannedDependency {
+    path: AssetPath,
+    expected_type: Option<AssetTypeId>,
+    ancestors: BTreeSet<AssetPath>,
+}
+
+struct DependencyBatchPlan {
+    unique: Vec<PlannedDependency>,
+    primary_slots: Vec<usize>,
+    labeled_slots: Vec<Vec<usize>>,
+}
+
+struct ResolvedDependencyBatch {
+    primary: Vec<UntypedHandle>,
+    labeled: Vec<Vec<UntypedHandle>>,
+}
+
+impl DependencyBatchPlan {
+    fn new(
+        output: &FullLoadOutput,
+        source_path: &AssetPath,
+        ancestors: &BTreeSet<AssetPath>,
+    ) -> Result<Self, LoadFailure> {
+        let mut unique = Vec::new();
+        let mut indices = BTreeMap::new();
+        let mut primary_slots = Vec::with_capacity(output.primary.dependencies.len());
+        for request in &output.primary.dependencies {
+            primary_slots.push(Self::plan_request(
+                request,
+                ancestors,
+                &mut unique,
+                &mut indices,
+            )?);
+        }
+
+        let mut labeled_slots = Vec::with_capacity(output.labeled.len());
+        for labeled in &output.labeled {
+            let label_path = source_path.clone().with_label(labeled.label.clone());
+            let mut label_ancestors = ancestors.clone();
+            let is_requested_source_label = ancestors.contains(&label_path)
+                && label_path.clone().without_label() == *source_path;
+            if !is_requested_source_label && !label_ancestors.insert(label_path.clone()) {
+                return Err(LoadFailure::AssemblyFailed(format!(
+                    "dependency cycle at {label_path}"
+                )));
+            }
+            let mut slots = Vec::with_capacity(labeled.dependencies.len());
+            for request in &labeled.dependencies {
+                slots.push(Self::plan_request(
+                    request,
+                    &label_ancestors,
+                    &mut unique,
+                    &mut indices,
+                )?);
+            }
+            labeled_slots.push(slots);
+        }
+
+        Ok(Self {
+            unique,
+            primary_slots,
+            labeled_slots,
+        })
+    }
+
+    fn plan_request(
+        request: &DepRequest,
+        ancestors: &BTreeSet<AssetPath>,
+        unique: &mut Vec<PlannedDependency>,
+        indices: &mut BTreeMap<AssetPath, usize>,
+    ) -> Result<usize, LoadFailure> {
+        if ancestors.contains(&request.path) {
+            return Err(LoadFailure::AssemblyFailed(format!(
+                "dependency cycle at {}",
+                request.path
+            )));
+        }
+        if let Some(index) = indices.get(&request.path).copied() {
+            let planned = &mut unique[index];
+            match (planned.expected_type, request.expected_type) {
+                (Some(existing), Some(requested)) if existing != requested => {
+                    return Err(LoadFailure::AssemblyFailed(format!(
+                        "same dependency path declared with conflicting types: {}",
+                        request.path
+                    )));
+                }
+                (None, Some(requested)) => planned.expected_type = Some(requested),
+                _ => {}
+            }
+            planned.ancestors.extend(ancestors.iter().cloned());
+            return Ok(index);
+        }
+
+        let index = unique.len();
+        indices.insert(request.path.clone(), index);
+        unique.push(PlannedDependency {
+            path: request.path.clone(),
+            expected_type: request.expected_type,
+            ancestors: ancestors.clone(),
+        });
+        Ok(index)
+    }
+
+    fn resolve(self, unique: &[UntypedHandle]) -> ResolvedDependencyBatch {
+        let primary = self
+            .primary_slots
+            .into_iter()
+            .map(|index| unique[index].clone())
+            .collect();
+        let labeled = self
+            .labeled_slots
+            .into_iter()
+            .map(|slots| {
+                slots
+                    .into_iter()
+                    .map(|index| unique[index].clone())
+                    .collect()
+            })
+            .collect();
+        ResolvedDependencyBatch { primary, labeled }
+    }
+}
+
+struct PendingDependency {
+    unique_index: usize,
+    path: AssetPath,
+    ticket: Option<LoadTicket>,
+}
+
+struct DependencyWaitSet {
+    state: Arc<Mutex<SchedulerState>>,
+    parent: FlightKey,
+    parent_flight: Arc<Flight>,
+    dependencies: Vec<(FlightKey, Arc<Flight>)>,
+}
+
+impl Drop for DependencyWaitSet {
+    fn drop(&mut self) {
+        let mut state = self.state.lock().expect("load scheduler poisoned");
+        if !state
+            .in_flight
+            .get(&self.parent)
+            .is_some_and(|flight| Arc::ptr_eq(flight, &self.parent_flight))
+        {
+            return;
+        }
+        for (dependency, dependency_flight) in &self.dependencies {
+            if state
+                .in_flight
+                .get(dependency)
+                .is_some_and(|flight| Arc::ptr_eq(flight, dependency_flight))
+            {
+                state.remove_wait(&self.parent, dependency);
+            }
         }
     }
 }
@@ -1302,6 +1465,7 @@ impl LoadScheduler {
                     parent,
                     parent_flight: Arc::clone(parent_flight),
                     dependency,
+                    dependency_flight: Arc::clone(&ticket.flight),
                 })
             } else {
                 // Completion and map removal are atomic with respect to the
@@ -1317,6 +1481,217 @@ impl LoadScheduler {
             }
         })
         .await
+    }
+
+    fn register_dependency_wait_set(
+        &self,
+        parent_path: &AssetPath,
+        parent_flight: &Arc<Flight>,
+        pending: &[PendingDependency],
+    ) -> Result<Option<DependencyWaitSet>, LoadFailure> {
+        let parent = FlightKey::Load(parent_path.clone());
+        let mut owned = Vec::with_capacity(pending.len());
+        let mut failure = None;
+        {
+            let mut state = self.state.lock().expect("load scheduler poisoned");
+            let parent_live = state
+                .in_flight
+                .get(&parent)
+                .is_some_and(|flight| Arc::ptr_eq(flight, parent_flight));
+            if parent_live {
+                for entry in pending {
+                    let ticket = entry
+                        .ticket
+                        .as_ref()
+                        .expect("new dependency batch entry must own its ticket");
+                    let dependency = FlightKey::Load(entry.path.clone());
+                    let dependency_live = state
+                        .in_flight
+                        .get(&dependency)
+                        .is_some_and(|flight| Arc::ptr_eq(flight, &ticket.flight));
+                    if !dependency_live {
+                        continue;
+                    }
+
+                    let mut reachable = vec![dependency.clone()];
+                    let mut visited = BTreeSet::new();
+                    while let Some(key) = reachable.pop() {
+                        if key == parent {
+                            failure = Some(LoadFailure::AssemblyFailed(format!(
+                                "dependency cycle at {}",
+                                entry.path
+                            )));
+                            break;
+                        }
+                        if visited.insert(key.clone())
+                            && let Some(dependencies) = state.dependency_waits.get(&key)
+                        {
+                            reachable.extend(dependencies.iter().cloned());
+                        }
+                    }
+                    if failure.is_some() {
+                        break;
+                    }
+
+                    let inserted = state
+                        .dependency_waits
+                        .entry(parent.clone())
+                        .or_default()
+                        .insert(dependency.clone());
+                    if inserted {
+                        state
+                            .dependency_parents
+                            .entry(dependency.clone())
+                            .or_default()
+                            .insert(parent.clone());
+                        owned.push((dependency, Arc::clone(&ticket.flight)));
+                    }
+                }
+            }
+            if failure.is_some() {
+                for (dependency, _) in &owned {
+                    state.remove_wait(&parent, dependency);
+                }
+            }
+        }
+        if let Some(failure) = failure {
+            return Err(failure);
+        }
+        if owned.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(DependencyWaitSet {
+                state: Arc::clone(&self.state),
+                parent,
+                parent_flight: Arc::clone(parent_flight),
+                dependencies: owned,
+            }))
+        }
+    }
+
+    async fn resolve_dependency_batch(
+        &self,
+        parent_path: &AssetPath,
+        parent_flight: &Arc<Flight>,
+        requests: &[PlannedDependency],
+    ) -> Result<Vec<UntypedHandle>, LoadFailure> {
+        let mut next = 0;
+        let mut pending = Vec::<PendingDependency>::with_capacity(requests.len());
+        let mut waits = Vec::<DependencyWaitSet>::new();
+        let mut results: Vec<Option<UntypedHandle>> = (0..requests.len()).map(|_| None).collect();
+
+        while next < requests.len() || pending.iter().any(|entry| entry.ticket.is_some()) {
+            if parent_flight.is_cancelled() {
+                for entry in &mut pending {
+                    entry.ticket.take();
+                }
+                return Err(LoadFailure::Cancelled);
+            }
+
+            let wave_start = pending.len();
+            while next < requests.len() {
+                let request = &requests[next];
+                match self.schedule_typed_with_ancestors(
+                    request.path.clone(),
+                    parent_flight.priority.effective_priority(),
+                    request.expected_type,
+                    request.ancestors.clone(),
+                ) {
+                    Ok(ticket) => {
+                        parent_flight.priority.inherit(&ticket.flight.priority);
+                        pending.push(PendingDependency {
+                            unique_index: next,
+                            path: request.path.clone(),
+                            ticket: Some(ticket),
+                        });
+                        next += 1;
+                    }
+                    Err(ScheduleError::DependencyQueueFull { .. })
+                        if pending.iter().any(|entry| entry.ticket.is_some()) =>
+                    {
+                        break;
+                    }
+                    Err(error) => {
+                        for entry in &mut pending {
+                            entry.ticket.take();
+                        }
+                        return Err(LoadFailure::AssemblyFailed(error.to_string()));
+                    }
+                }
+            }
+
+            if wave_start < pending.len()
+                && let Some(wait) = self.register_dependency_wait_set(
+                    parent_path,
+                    parent_flight,
+                    &pending[wave_start..],
+                )?
+            {
+                waits.push(wait);
+            }
+
+            core::future::poll_fn(|cx| {
+                if parent_flight.poll_cancelled(cx) {
+                    for entry in &mut pending {
+                        entry.ticket.take();
+                    }
+                    return Poll::Ready(Err(LoadFailure::Cancelled));
+                }
+
+                let mut completed = false;
+                let mut failure = None;
+                for entry in &mut pending {
+                    let Some(ticket) = entry.ticket.as_mut() else {
+                        continue;
+                    };
+                    let result = Pin::new(ticket).poll(cx);
+                    match result {
+                        Poll::Pending => {}
+                        Poll::Ready(Ok(handle)) if self.server.is_loaded(handle.id()) => {
+                            results[entry.unique_index] = Some(handle);
+                            entry.ticket.take();
+                            completed = true;
+                        }
+                        Poll::Ready(Ok(_)) => {
+                            failure.get_or_insert_with(|| {
+                                LoadFailure::AssemblyFailed(format!(
+                                    "dependency {} failed to load",
+                                    entry.path
+                                ))
+                            });
+                        }
+                        Poll::Ready(Err(LoadFailure::Cancelled)) => {
+                            failure.get_or_insert(LoadFailure::Cancelled);
+                        }
+                        Poll::Ready(Err(error)) => {
+                            failure.get_or_insert_with(|| {
+                                LoadFailure::AssemblyFailed(format!(
+                                    "dependency {} failed: {error:?}",
+                                    entry.path
+                                ))
+                            });
+                        }
+                    }
+                }
+                if let Some(failure) = failure {
+                    for entry in &mut pending {
+                        entry.ticket.take();
+                    }
+                    Poll::Ready(Err(failure))
+                } else if completed {
+                    Poll::Ready(Ok(()))
+                } else {
+                    Poll::Pending
+                }
+            })
+            .await?;
+        }
+
+        drop(waits);
+        Ok(results
+            .into_iter()
+            .map(|handle| handle.expect("resolved dependency batch slot"))
+            .collect())
     }
 
     fn admit_queued_locked(&self, state: &mut SchedulerState) -> Vec<QueuedFlight> {
@@ -1709,134 +2084,42 @@ async fn execute_async_load(
         server.fail_async_load(&plan, "asset load cancelled");
         return Err(LoadFailure::Cancelled);
     }
-    for dependency in &output.primary.dependencies {
-        if ancestors.contains(&dependency.path) {
-            let error = format!("dependency cycle at {}", dependency.path);
+    let dependency_plan = match DependencyBatchPlan::new(&output, &source_path, &ancestors) {
+        Ok(plan) => plan,
+        Err(LoadFailure::AssemblyFailed(error)) => {
             server.fail_async_load(&plan, &error);
             return Err(LoadFailure::AssemblyFailed(error));
         }
-    }
-    let has_labeled_dependencies = output
-        .labeled
-        .iter()
-        .any(|labeled| !labeled.dependencies.is_empty());
-    if !output.primary.dependencies.is_empty() || has_labeled_dependencies {
+        Err(error) => return Err(error),
+    };
+    let has_dependencies = !dependency_plan.unique.is_empty();
+    if has_dependencies {
         scheduler.release_execution_slot(&FlightKey::Load(requested_path.clone()), &flight);
     }
-    let has_dependencies = !output.primary.dependencies.is_empty();
-    let mut dependencies = Vec::with_capacity(output.primary.dependencies.len());
-    for dependency in &output.primary.dependencies {
-        if flight.is_cancelled() {
-            server.fail_async_load(&plan, "asset load cancelled");
-            return Err(LoadFailure::Cancelled);
-        }
-        let ticket = match scheduler.schedule_typed_with_ancestors(
-            dependency.path.clone(),
-            flight.priority.effective_priority(),
-            dependency.expected_type,
-            ancestors.clone(),
-        ) {
-            Ok(ticket) => ticket,
-            Err(error) => {
-                let error = error.to_string();
-                server.fail_async_load(&plan, &error);
-                return Err(LoadFailure::AssemblyFailed(error));
-            }
-        };
-        flight.priority.inherit(&ticket.flight.priority);
-        let dependency_path = dependency.path.clone();
+    let resolved_unique = if has_dependencies {
         match scheduler
-            .wait_for_dependency(&requested_path, &flight, &dependency_path, ticket)
+            .resolve_dependency_batch(&requested_path, &flight, &dependency_plan.unique)
             .await
         {
-            Ok(handle) if server.is_loaded(handle.id()) => dependencies.push(handle),
-            Ok(_) => {
-                let error = format!("dependency {} failed to load", dependency_path);
-                server.fail_async_load(&plan, &error);
-                return Err(LoadFailure::AssemblyFailed(error));
-            }
+            Ok(resolved) => resolved,
             Err(LoadFailure::Cancelled) => {
                 server.fail_async_load(&plan, "asset load cancelled");
                 return Err(LoadFailure::Cancelled);
             }
-            Err(error) => {
-                let error = format!("dependency {} failed: {error:?}", dependency_path);
+            Err(LoadFailure::AssemblyFailed(error)) => {
                 server.fail_async_load(&plan, &error);
                 return Err(LoadFailure::AssemblyFailed(error));
             }
+            Err(error) => return Err(error),
         }
-    }
-    // Do not hold a borrow of `ErasedLoadedAsset` across dependency awaits:
-    // its boxed payload is `dyn Any + Send`, not `Sync`, so retaining that
-    // borrow would make the worker future fail the task pool's `Send` bound.
-    // Dependency metadata is owned and `Send`, while the erased payload stays
-    // parked in `output` until the atomic commit below.
-    let labeled_requests: Vec<_> = output
-        .labeled
-        .iter()
-        .map(|labeled| (labeled.label.clone(), labeled.dependencies.clone()))
-        .collect();
-    let mut labeled_dependencies = Vec::with_capacity(labeled_requests.len());
-    for (label, requests) in labeled_requests {
-        let label_path = source_path.clone().with_label(label);
-        let mut label_ancestors = ancestors.clone();
-        let is_requested_source_label =
-            ancestors.contains(&label_path) && label_path.clone().without_label() == source_path;
-        if !is_requested_source_label && !label_ancestors.insert(label_path.clone()) {
-            let error = format!("dependency cycle at {label_path}");
-            server.fail_async_load(&plan, &error);
-            return Err(LoadFailure::AssemblyFailed(error));
-        }
-        let mut resolved = Vec::with_capacity(requests.len());
-        for dependency in requests {
-            if flight.is_cancelled() {
-                server.fail_async_load(&plan, "asset load cancelled");
-                return Err(LoadFailure::Cancelled);
-            }
-            if label_ancestors.contains(&dependency.path) {
-                let error = format!("dependency cycle at {}", dependency.path);
-                server.fail_async_load(&plan, &error);
-                return Err(LoadFailure::AssemblyFailed(error));
-            }
-            let ticket = match scheduler.schedule_typed_with_ancestors(
-                dependency.path.clone(),
-                flight.priority.effective_priority(),
-                dependency.expected_type,
-                label_ancestors.clone(),
-            ) {
-                Ok(ticket) => ticket,
-                Err(error) => {
-                    let error = error.to_string();
-                    server.fail_async_load(&plan, &error);
-                    return Err(LoadFailure::AssemblyFailed(error));
-                }
-            };
-            flight.priority.inherit(&ticket.flight.priority);
-            let dependency_path = dependency.path.clone();
-            match scheduler
-                .wait_for_dependency(&requested_path, &flight, &dependency_path, ticket)
-                .await
-            {
-                Ok(handle) if server.is_loaded(handle.id()) => resolved.push(handle),
-                Ok(_) => {
-                    let error = format!("dependency {} failed to load", dependency_path);
-                    server.fail_async_load(&plan, &error);
-                    return Err(LoadFailure::AssemblyFailed(error));
-                }
-                Err(LoadFailure::Cancelled) => {
-                    server.fail_async_load(&plan, "asset load cancelled");
-                    return Err(LoadFailure::Cancelled);
-                }
-                Err(error) => {
-                    let error = format!("dependency {} failed: {error:?}", dependency_path);
-                    server.fail_async_load(&plan, &error);
-                    return Err(LoadFailure::AssemblyFailed(error));
-                }
-            }
-        }
-        labeled_dependencies.push(resolved);
-    }
-    if has_dependencies || has_labeled_dependencies {
+    } else {
+        Vec::new()
+    };
+    let ResolvedDependencyBatch {
+        primary: dependencies,
+        labeled: labeled_dependencies,
+    } = dependency_plan.resolve(&resolved_unique);
+    if has_dependencies {
         if let Err(error) = scheduler
             .acquire_execution_slot(
                 FlightKey::Load(requested_path.clone()),

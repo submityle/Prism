@@ -16,9 +16,16 @@ const WAIT: Duration = Duration::from_secs(5);
 const GATE_WAIT: Duration = Duration::from_secs(30);
 const ROOT: &str = "root.cancel";
 const CHILD: &str = "child.cancel";
+const CHILD_A: &str = "child-a.cancel";
+const CHILD_B: &str = "child-b.cancel";
+const CHILD_C: &str = "child-c.cancel";
 const OTHER: &str = "other.cancel";
 const FRESH: &str = "fresh.cancel";
 const CHILD_DEPENDENCIES: &[&str] = &[CHILD];
+const TWO_CHILDREN: &[&str] = &[CHILD_A, CHILD_B];
+const THREE_CHILDREN: &[&str] = &[CHILD_A, CHILD_B, CHILD_C];
+const SHARED_DEPENDENCIES: &[&str] = &[CHILD_B, CHILD_A, CHILD_B];
+const FAILING_SIBLINGS: &[&str] = &[CHILD, "missing.cancel"];
 const INITIAL_BYTES: &[u8] = &[4, 5, 0, 1, 2, 3, 6, 7];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -33,6 +40,8 @@ struct Node {
     path: &'static str,
     dependencies: &'static [&'static str],
     labeled: bool,
+    primary_too: bool,
+    labeled_copies: usize,
     block_reads: bool,
     block_decode: bool,
 }
@@ -43,6 +52,8 @@ impl Node {
             path,
             dependencies: &[],
             labeled: false,
+            primary_too: false,
+            labeled_copies: 0,
             block_reads: false,
             block_decode: false,
         }
@@ -61,6 +72,19 @@ impl Node {
     const fn parent(mut self, labeled: bool) -> Self {
         self.dependencies = CHILD_DEPENDENCIES;
         self.labeled = labeled;
+        self.labeled_copies = labeled as usize;
+        self
+    }
+
+    const fn with_dependencies(mut self, dependencies: &'static [&'static str]) -> Self {
+        self.dependencies = dependencies;
+        self
+    }
+
+    const fn shared_primary_and_labels(mut self) -> Self {
+        self.primary_too = true;
+        self.labeled = true;
+        self.labeled_copies = 2;
         self
     }
 }
@@ -293,19 +317,20 @@ impl AssetLoader for Loader {
         }
         drop(state);
         let value = Value(bytes.to_vec());
-        if node.labeled {
+        if !node.labeled || node.primary_too {
+            for dependency in node.dependencies {
+                ctx.add_typed_dependency((*dependency).into(), AssetTypeId::of::<Value>());
+            }
+        }
+        for label in ["part", "part-two"].into_iter().take(node.labeled_copies) {
             ctx.add_labeled_asset_with_deps(
-                "part",
+                label,
                 value.clone(),
                 node.dependencies
                     .iter()
                     .map(|path| DepRequest::typed((*path).into(), AssetTypeId::of::<Value>()))
                     .collect(),
             );
-        } else {
-            for dependency in node.dependencies {
-                ctx.add_typed_dependency((*dependency).into(), AssetTypeId::of::<Value>());
-            }
         }
         Ok(value)
     }
@@ -577,6 +602,7 @@ fn staged_protocol_commit() -> (
 ) {
     let node = Node {
         labeled: true,
+        labeled_copies: 1,
         ..Node::leaf(ROOT)
     };
     let control = Arc::new(Control::new(&[node]));
@@ -597,6 +623,25 @@ fn staged_protocol_commit() -> (
         .load_for_type(&plan.path, plan.type_id, &[4, 5, 0, 1, 2, 3, 6, 7])
         .unwrap();
     (server, plan, output)
+}
+
+fn decoded_output(node: Node) -> FullLoadOutput {
+    let control = Arc::new(Control::new(&[node]));
+    let server = AssetServer::new();
+    server.register_loader(Loader {
+        nodes: [(node.path, node)].into_iter().collect(),
+        control,
+    });
+    let plan = match server
+        .prepare_async_load(node.path.into(), Some(AssetTypeId::of::<Value>()))
+        .unwrap()
+    {
+        AsyncLoadPreparation::New(plan) => plan,
+        AsyncLoadPreparation::Existing(_) => panic!("expected a fresh decoded-output reservation"),
+    };
+    plan.loaders
+        .load_for_type(&plan.path, plan.type_id, INITIAL_BYTES)
+        .unwrap()
 }
 
 fn commit_protocol(
@@ -1280,6 +1325,278 @@ fn cancelling_during_decode_never_schedules_ordinary_or_labeled_dependencies_or_
         scenario.assert_unpublished();
         scenario.assert_clean();
     }
+}
+
+#[test]
+fn dependency_batch_starts_siblings_before_either_finishes_and_inherits_priority() {
+    let scenario = Scenario::new(
+        &[
+            Node::leaf(ROOT).with_dependencies(TWO_CHILDREN),
+            Node::leaf(CHILD_A).reading(),
+            Node::leaf(CHILD_B).reading(),
+        ],
+        2,
+    );
+    let parent = scenario.schedule(ROOT);
+    scenario
+        .control
+        .wait_for(CHILD_A, |activity| activity.active == 2);
+    scenario
+        .control
+        .wait_for(CHILD_B, |activity| activity.active == 2);
+
+    let parent_key = FlightKey::Load(ROOT.into());
+    let child_a_key = FlightKey::Load(CHILD_A.into());
+    let child_b_key = FlightKey::Load(CHILD_B.into());
+    {
+        let state = scenario.scheduler.state.lock().unwrap();
+        assert_eq!(state.dependency_waits[&parent_key].len(), 2);
+        assert!(state.dependency_waits[&parent_key].contains(&child_a_key));
+        assert!(state.dependency_waits[&parent_key].contains(&child_b_key));
+        assert_eq!(state.running.len(), 2);
+        assert!(!state.running.contains_key(&parent_key));
+    }
+
+    parent.reprioritize(Priority::Critical);
+    {
+        let state = scenario.scheduler.state.lock().unwrap();
+        assert_eq!(
+            state.in_flight[&child_a_key].priority.effective_priority(),
+            Priority::Critical
+        );
+        assert_eq!(
+            state.in_flight[&child_b_key].priority.effective_priority(),
+            Priority::Critical
+        );
+    }
+
+    scenario.control.release_reads(CHILD_B);
+    scenario
+        .control
+        .wait_for(CHILD_B, |activity| activity.decodes == 1);
+    assert!(!scenario.server.is_loaded(scenario.reserved(ROOT).id()));
+    scenario.control.release_reads(CHILD_A);
+    let root = finish(parent).expect("dependency batch must publish the parent");
+    assert!(scenario.server.is_loaded(root.id()));
+    let activity = scenario.control.activity.lock().unwrap();
+    assert_eq!(activity[CHILD_A].decodes, 1);
+    assert_eq!(activity[CHILD_B].decodes, 1);
+    drop(activity);
+    scenario.assert_clean();
+}
+
+#[test]
+fn dependency_batch_uses_bounded_waves_at_capacity_one() {
+    let scenario = Scenario::new(
+        &[
+            Node::leaf(ROOT).with_dependencies(THREE_CHILDREN),
+            Node::leaf(CHILD_A),
+            Node::leaf(CHILD_B),
+            Node::leaf(CHILD_C),
+        ],
+        1,
+    );
+    let root = finish(scenario.schedule(ROOT))
+        .expect("three dependencies must make progress through the bounded queue");
+    assert!(scenario.server.is_loaded(root.id()));
+    let activity = scenario.control.activity.lock().unwrap();
+    assert_eq!(activity[CHILD_A].decodes, 1);
+    assert_eq!(activity[CHILD_B].decodes, 1);
+    assert_eq!(activity[CHILD_C].decodes, 1);
+    drop(activity);
+    scenario.assert_clean();
+}
+
+#[test]
+fn dependency_batch_plan_preserves_slots_while_merging_paths_and_ancestry() {
+    let output = decoded_output(
+        Node::leaf(ROOT)
+            .with_dependencies(SHARED_DEPENDENCIES)
+            .shared_primary_and_labels(),
+    );
+    let source_path = AssetPath::from(ROOT);
+    let ancestors = [source_path.clone()].into_iter().collect();
+    let plan = DependencyBatchPlan::new(&output, &source_path, &ancestors).unwrap();
+
+    assert_eq!(
+        plan.unique
+            .iter()
+            .map(|request| request.path.path())
+            .collect::<Vec<_>>(),
+        vec![CHILD_B, CHILD_A]
+    );
+    assert_eq!(plan.primary_slots, vec![0, 1, 0]);
+    assert_eq!(plan.labeled_slots, vec![vec![0, 1, 0], vec![0, 1, 0]]);
+    for request in &plan.unique {
+        assert!(request.ancestors.contains(&source_path));
+        assert!(request
+            .ancestors
+            .contains(&source_path.clone().with_label("part")));
+        assert!(request
+            .ancestors
+            .contains(&source_path.clone().with_label("part-two")));
+    }
+}
+
+#[test]
+fn dependency_batch_plan_rejects_duplicate_type_conflict_before_scheduling() {
+    let mut output = decoded_output(
+        Node::leaf(ROOT)
+            .with_dependencies(CHILD_DEPENDENCIES)
+            .shared_primary_and_labels(),
+    );
+    output.labeled[0].dependencies[0].expected_type = Some(AssetTypeId::of_name(
+        "scheduler_cancellation_tests::ConflictingValue",
+    ));
+    let source_path = AssetPath::from(ROOT);
+    let ancestors = [source_path.clone()].into_iter().collect();
+    assert!(matches!(
+        DependencyBatchPlan::new(&output, &source_path, &ancestors),
+        Err(LoadFailure::AssemblyFailed(error))
+            if error.contains("same dependency path declared with conflicting types")
+    ));
+}
+
+#[test]
+fn dependency_batch_plan_merges_untyped_and_typed_declarations() {
+    let mut output = decoded_output(
+        Node::leaf(ROOT)
+            .with_dependencies(CHILD_DEPENDENCIES)
+            .shared_primary_and_labels(),
+    );
+    output.primary.dependencies[0].expected_type = None;
+    let source_path = AssetPath::from(ROOT);
+    let ancestors = [source_path.clone()].into_iter().collect();
+    let plan = DependencyBatchPlan::new(&output, &source_path, &ancestors).unwrap();
+    assert_eq!(plan.unique.len(), 1);
+    assert_eq!(
+        plan.unique[0].expected_type,
+        Some(AssetTypeId::of::<Value>())
+    );
+
+    for request in output.primary.dependencies.iter_mut().chain(
+        output
+            .labeled
+            .iter_mut()
+            .flat_map(|labeled| labeled.dependencies.iter_mut()),
+    ) {
+        request.expected_type = None;
+    }
+    let plan = DependencyBatchPlan::new(&output, &source_path, &ancestors).unwrap();
+    assert_eq!(plan.unique.len(), 1);
+    assert_eq!(plan.unique[0].expected_type, None);
+}
+
+#[test]
+fn primary_and_labeled_slots_share_one_dependency_ticket_and_wait_edge() {
+    let scenario = Scenario::new(
+        &[
+            Node::leaf(ROOT)
+                .with_dependencies(CHILD_DEPENDENCIES)
+                .shared_primary_and_labels(),
+            Node::leaf(CHILD).reading(),
+        ],
+        1,
+    );
+    let parent = scenario.schedule(ROOT);
+    scenario
+        .control
+        .wait_for(CHILD, |activity| activity.active == 2);
+    let parent_key = FlightKey::Load(ROOT.into());
+    let child_key = FlightKey::Load(CHILD.into());
+    {
+        let state = scenario.scheduler.state.lock().unwrap();
+        assert_eq!(state.dependency_waits[&parent_key].len(), 1);
+        assert_eq!(state.dependency_parents[&child_key].len(), 1);
+        assert_eq!(state.in_flight[&child_key].waiter_count(), 1);
+    }
+    scenario.control.release_reads(CHILD);
+    finish(parent).expect("shared dependency must resolve every declaration slot");
+    assert_eq!(scenario.control.activity.lock().unwrap()[CHILD].decodes, 1);
+    scenario.assert_clean();
+}
+
+#[test]
+fn dependency_failure_drops_blocked_sibling_without_waiting_for_its_io() {
+    let scenario = Scenario::new(
+        &[
+            Node::leaf(ROOT).with_dependencies(FAILING_SIBLINGS),
+            Node::leaf(CHILD).reading(),
+        ],
+        2,
+    );
+    let parent = scenario.schedule(ROOT);
+    scenario
+        .control
+        .wait_for(CHILD, |activity| activity.active == 2);
+    let child_key = FlightKey::Load(CHILD.into());
+    let child_flight = {
+        let state = scenario.scheduler.state.lock().unwrap();
+        Arc::clone(&state.in_flight[&child_key])
+    };
+
+    assert!(matches!(
+        finish(parent),
+        Err(LoadFailure::AssemblyFailed(error)) if error.contains("missing.cancel")
+    ));
+    assert!(child_flight.is_cancelled());
+    assert_eq!(child_flight.waiter_count(), 0);
+    {
+        let state = scenario.scheduler.state.lock().unwrap();
+        assert!(state.dependency_waits.is_empty());
+        assert!(state.dependency_parents.is_empty());
+        assert_eq!(state.in_flight.len(), 1);
+        assert!(Arc::ptr_eq(&state.in_flight[&child_key], &child_flight));
+    }
+    assert_eq!(scenario.control.activity.lock().unwrap()[CHILD].active, 2);
+    scenario.control.release_reads(CHILD);
+    assert_eq!(finish(observe(&child_flight)), Err(LoadFailure::Cancelled));
+    scenario.assert_clean();
+}
+
+#[test]
+fn cancelling_parent_detaches_every_unresolved_batch_dependency() {
+    let scenario = Scenario::new(
+        &[
+            Node::leaf(ROOT).with_dependencies(TWO_CHILDREN),
+            Node::leaf(CHILD_A).reading(),
+            Node::leaf(CHILD_B).reading(),
+        ],
+        2,
+    );
+    let parent = scenario.schedule(ROOT);
+    scenario
+        .control
+        .wait_for(CHILD_A, |activity| activity.active == 2);
+    scenario
+        .control
+        .wait_for(CHILD_B, |activity| activity.active == 2);
+    let (child_a, child_b) = {
+        let state = scenario.scheduler.state.lock().unwrap();
+        (
+            Arc::clone(&state.in_flight[&FlightKey::Load(CHILD_A.into())]),
+            Arc::clone(&state.in_flight[&FlightKey::Load(CHILD_B.into())]),
+        )
+    };
+
+    let parent_flight = Arc::clone(&parent.flight);
+    parent.cancel();
+    assert_eq!(finish(parent), Err(LoadFailure::Cancelled));
+    assert_eq!(finish(observe(&parent_flight)), Err(LoadFailure::Cancelled));
+    for child in [&child_a, &child_b] {
+        assert!(child.is_cancelled());
+        assert_eq!(child.waiter_count(), 0);
+    }
+    {
+        let state = scenario.scheduler.state.lock().unwrap();
+        assert!(state.dependency_waits.is_empty());
+        assert!(state.dependency_parents.is_empty());
+    }
+    scenario.control.release_reads(CHILD_A);
+    scenario.control.release_reads(CHILD_B);
+    assert_eq!(finish(observe(&child_a)), Err(LoadFailure::Cancelled));
+    assert_eq!(finish(observe(&child_b)), Err(LoadFailure::Cancelled));
+    scenario.assert_clean();
 }
 
 #[test]
