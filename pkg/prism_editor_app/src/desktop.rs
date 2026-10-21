@@ -372,8 +372,10 @@ pub fn run_desktop_with_document<R: DesktopRenderer>(
         host.error
             .get_or_insert_with(|| DesktopError::Window(error.to_string()));
     }
-    if let Err(error) = host.renderer.gesture_cancel(&mut host.ui) {
-        host.error = Some(error);
+    if let Err(error) =
+        cancel_native_interactions(&mut host.ui, &mut host.renderer, &mut host.drag_start)
+    {
+        host.error.get_or_insert(error);
     }
     host.renderer.suspend();
     host.native = None;
@@ -865,6 +867,22 @@ fn document_request_result<E>(result: Result<impl Sized, E>) -> (Result<bool, E>
     }
 }
 
+fn cancel_native_interactions<R: DesktopRenderer>(
+    ui: &mut EditorDesktopUi,
+    renderer: &mut R,
+    drag_start: &mut Option<([f32; 2], SelectionMode)>,
+) -> Result<bool, DesktopError> {
+    let panel = ui
+        .cancel_panel_pointer()
+        .map_err(|error| DesktopError::Ui(error.to_string()));
+    let viewport = renderer.gesture_cancel(ui);
+    *drag_start = None;
+    match (panel, viewport) {
+        (Ok(panel), Ok(viewport)) => Ok(panel || viewport),
+        (Err(error), _) | (_, Err(error)) => Err(error),
+    }
+}
+
 struct DocumentWake {
     proxy: EventLoopProxy<DesktopWake>,
 }
@@ -885,14 +903,12 @@ impl<R: DesktopRenderer> ApplicationHandler<DesktopWake> for DesktopHost<R> {
     }
 
     fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
-        let result = self.ui.cancel_panel_pointer();
-        self.input_result(result);
-        let result = self.renderer.gesture_cancel(&mut self.ui);
+        let result =
+            cancel_native_interactions(&mut self.ui, &mut self.renderer, &mut self.drag_start);
         self.input_result(result);
         self.renderer.suspend();
         self.native = None;
         self.cursor = None;
-        self.drag_start = None;
         self.pending.set(DesktopPendingSource::Renderer, false);
         self.sync_text_input();
     }
@@ -935,7 +951,11 @@ impl<R: DesktopRenderer> ApplicationHandler<DesktopWake> for DesktopHost<R> {
                     self.fail(event_loop, DesktopError::Gpu(message));
                     return;
                 }
-                let result = self.renderer.gesture_cancel(&mut self.ui);
+                let result = cancel_native_interactions(
+                    &mut self.ui,
+                    &mut self.renderer,
+                    &mut self.drag_start,
+                );
                 self.input_result(result);
                 self.renderer.suspend();
                 self.native = None;
@@ -977,11 +997,12 @@ impl<R: DesktopRenderer> ApplicationHandler<DesktopWake> for DesktopHost<R> {
                 }
             }
             WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
-                let result = self.ui.cancel_panel_pointer();
+                let result = cancel_native_interactions(
+                    &mut self.ui,
+                    &mut self.renderer,
+                    &mut self.drag_start,
+                );
                 self.input_result(result);
-                let result = self.renderer.gesture_cancel(&mut self.ui);
-                self.input_result(result);
-                self.drag_start = None;
                 if let Err(error) = self.resize() {
                     self.fail(event_loop, error);
                 }
@@ -1025,9 +1046,12 @@ impl<R: DesktopRenderer> ApplicationHandler<DesktopWake> for DesktopHost<R> {
             WindowEvent::Focused(false) => {
                 self.modifiers = ModifiersState::empty();
                 self.cursor = None;
-                self.drag_start = None;
                 self.composing = false;
-                let result = self.renderer.gesture_cancel(&mut self.ui);
+                let result = cancel_native_interactions(
+                    &mut self.ui,
+                    &mut self.renderer,
+                    &mut self.drag_start,
+                );
                 self.input_result(result);
                 let result = self.ui.key(DesktopKey::Escape);
                 self.input_result(result);
@@ -1507,9 +1531,20 @@ mod tests {
         commit_count: u32,
         discard_count: u32,
         initialize_count: u32,
+        cancel_count: u32,
+        cancel_changed: bool,
+        fail_cancel: bool,
     }
 
     impl DesktopRenderer for StartupRenderer {
+        fn gesture_cancel(&mut self, _ui: &mut EditorDesktopUi) -> Result<bool, DesktopError> {
+            self.cancel_count += 1;
+            if self.fail_cancel {
+                return Err(DesktopError::Renderer("gesture cancel rejected".into()));
+            }
+            Ok(self.cancel_changed)
+        }
+
         fn initialize(&mut self, _gpu: &DesktopGpu) -> Result<(), DesktopError> {
             self.initialize_count += 1;
             Ok(())
@@ -1598,6 +1633,40 @@ mod tests {
         assert_eq!(renderer.discard_count, 1);
         assert_eq!(renderer.initialize_count, 0);
         assert!(!renderer.candidate);
+    }
+
+    #[test]
+    fn native_interaction_cancel_calls_renderer_and_clears_box_drag() {
+        let mut ui = EditorDesktopUi::new(EditorController::new()).expect("empty editor UI");
+        let mut renderer = StartupRenderer {
+            cancel_changed: true,
+            ..StartupRenderer::default()
+        };
+        let mut drag_start = Some(([12.0, 24.0], SelectionMode::Add));
+
+        assert_eq!(
+            cancel_native_interactions(&mut ui, &mut renderer, &mut drag_start),
+            Ok(true)
+        );
+        assert_eq!(renderer.cancel_count, 1);
+        assert_eq!(drag_start, None);
+    }
+
+    #[test]
+    fn native_interaction_cancel_clears_box_drag_when_renderer_rejects() {
+        let mut ui = EditorDesktopUi::new(EditorController::new()).expect("empty editor UI");
+        let mut renderer = StartupRenderer {
+            fail_cancel: true,
+            ..StartupRenderer::default()
+        };
+        let mut drag_start = Some(([12.0, 24.0], SelectionMode::Replace));
+
+        assert_eq!(
+            cancel_native_interactions(&mut ui, &mut renderer, &mut drag_start),
+            Err(DesktopError::Renderer("gesture cancel rejected".into()))
+        );
+        assert_eq!(renderer.cancel_count, 1);
+        assert_eq!(drag_start, None);
     }
 
     #[test]

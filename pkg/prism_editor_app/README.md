@@ -179,6 +179,11 @@ include frequency: external persistence acknowledges with
 `acknowledge_saved(&token, ticks_per_second)`. Capture declaration navigation
 does not by itself prove GPU execution or preview image presentation.
 
+The native host uses one lifecycle cancellation boundary for panel pointer
+captures, viewport transform gestures and pending viewport box selection. Focus
+loss, resize, suspension, device loss and final shutdown therefore cannot retain
+a preview whose originating native pointer sequence no longer exists.
+
 Timeline key/tangent pointer input uses actual retained lane/curve origins,
 pauses playback and paints bounded previews. Release validates its final position
 before publishing one undoable transaction. Escape, focus loss, resize, suspend
