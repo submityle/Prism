@@ -236,6 +236,7 @@ impl EditorController {
         self.undo.push(DocumentEdit {
             fields: Vec::new(),
             structure: Some(change),
+            costs: CostPatch::default(),
         });
         self.advance(true);
         self.shape_revision += 1;
@@ -398,6 +399,13 @@ impl EditorController {
             .map(|(index, row)| (index, copy_row(row)))
             .collect();
         let inverse_remove = change.insert_rows.iter().map(|(_, row)| row.id()).collect();
+        let mut costs = self.prepare_costs(
+            change
+                .objects
+                .iter()
+                .map(|(item, desired)| (item, desired.as_ref().map(ReflectEditorContext::root))),
+        )?;
+        let totals = self.check_costs(&costs)?;
 
         // No fallible operation follows this publication boundary. Roots move,
         // preserving concrete types and allocations through delete/undo/redo.
@@ -412,6 +420,7 @@ impl EditorController {
         for row in &rows {
             self.identity_high_water = self.identity_high_water.max(row.id().raw());
         }
+        self.exchange_costs(&mut costs, totals);
         core::mem::swap(&mut self.selection, &mut change.selection);
         core::mem::swap(&mut self.anchor, &mut change.anchor);
         change.insert_rows = inverse_rows;

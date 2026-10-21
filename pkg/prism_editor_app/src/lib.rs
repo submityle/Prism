@@ -58,8 +58,9 @@ mod scene_session;
 mod world_session;
 
 pub use controller::{
-    ControllerAuthoringCommand, ControllerError, ControllerFieldEdit, ControllerLimits,
-    ControllerObject, ControllerOutcome, EditorController, PreparedControllerEdit,
+    ControllerAuthoringCommand, ControllerDocumentBudget, ControllerError, ControllerFieldEdit,
+    ControllerLimits, ControllerObject, ControllerOutcome, EditorController,
+    PreparedControllerEdit,
 };
 pub use controller_validation::ControllerObjectValidator;
 #[cfg(feature = "desktop")]

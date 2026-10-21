@@ -21,9 +21,10 @@ use std::{
 use prism_asset::StableGuid;
 use prism_ecs::partition::cell::CellCoord;
 use prism_editor_app::{
-    ControllerError, ControllerLimits, DecodedDocument, DesktopKey, DocumentCodec, DocumentError,
-    DocumentFileAdapter, DocumentIoEvent, DocumentLimits, DocumentLoadReceipt, DocumentSaveReceipt,
-    DocumentSchemaCatalog, EditorController, EditorDesktopUi,
+    ControllerDocumentBudget, ControllerError, ControllerLimits, DecodedDocument, DesktopKey,
+    DocumentCodec, DocumentError, DocumentFileAdapter, DocumentIoEvent, DocumentLimits,
+    DocumentLoadReceipt, DocumentSaveReceipt, DocumentSchemaCatalog, EditorController,
+    EditorDesktopUi,
 };
 use prism_editor_core::SelectionItem;
 use prism_editor_panels::{OutlinerId, OutlinerNode};
@@ -1108,6 +1109,149 @@ fn reload_ui_command_budget_failure_preserves_live_ui_and_durable_base() {
     assert_eq!(adapter.durable_revision(), None);
 }
 
+#[test]
+fn reload_remeasures_budget_roots_atomically_for_controller_and_ui_install() {
+    const ID: &str = "test.model_count";
+    for through_ui in [false, true] {
+        let temp = Temp::new();
+        let policy = ControllerDocumentBudget::new(ID, 20, |_, root| {
+            if root.type_name() != core::any::type_name::<Model>() {
+                return Ok(0);
+            }
+            let prism_reflect::ReflectRef::Struct(fields) = root.reflect_ref() else {
+                return Err("expected Model struct".into());
+            };
+            let count = fields
+                .field("count")
+                .and_then(|field| field.downcast_ref::<i32>())
+                .ok_or_else(|| "missing Model.count".to_owned())?;
+            u64::try_from(*count).map_err(|_| "negative count".into())
+        });
+        let mut current = controller();
+        current.register_document_budgets([policy.clone()]).unwrap();
+        current
+            .register_command("host.count4", |_| {
+                Ok(EditorAction::EditInspectorField {
+                    path: FieldPath::parse("count").unwrap(),
+                    value: ActionValue::integer(4),
+                })
+            })
+            .unwrap();
+        let mut adapter = temp.adapter();
+        adapter.submit_save(&current, &catalog()).unwrap();
+        saved(&mut adapter)
+            .acknowledge(&mut current, &catalog())
+            .unwrap();
+        let durable = adapter.durable_revision();
+        assert!(durable.is_some());
+        // Keep the live host dirty; failed reload must not acknowledge it.
+        edit(&mut current, 1);
+        assert_eq!(current.document_budget_usage(ID), Some((7, 20)));
+        let mut ui = EditorDesktopUi::new(current).unwrap();
+        ui.resize(987.0, 654.0).unwrap();
+
+        // A separate provider/adapter publishes a valid document whose aggregate
+        // violates only the live host policy, not its schema or codec limits.
+        let mut writer = temp.adapter();
+        let mut incoming = EditorController::new();
+        open(&mut writer, &mut incoming);
+        edit(&mut incoming, 30);
+        writer.submit_save(&incoming, &catalog()).unwrap();
+        saved(&mut writer)
+            .acknowledge(&mut incoming, &catalog())
+            .unwrap();
+        let before = encode(ui.controller());
+        let revision = ui.controller().revision();
+        let history = ui.controller().document_history_lengths();
+        let size = ui.size();
+        let text = glyphs(&ui);
+        adapter.submit_load(ui.controller(), &catalog()).unwrap();
+        let prepared = loaded(&mut adapter)
+            .prepare(&catalog(), ControllerLimits::default())
+            .unwrap();
+        let rejected = if through_ui {
+            prepared.install_ui(&mut adapter, &mut ui, &catalog())
+        } else {
+            prepared.install(&mut adapter, ui.controller_mut(), &catalog())
+        };
+        assert!(matches!(
+            rejected,
+            Err(DocumentError::Controller(
+                ControllerError::DocumentBudgetExceeded {
+                    budget: ID,
+                    limit: 20
+                }
+            ))
+        ));
+        assert_eq!(encode(ui.controller()), before);
+        assert_eq!(ui.controller().revision(), revision);
+        assert_eq!(ui.controller().document_history_lengths(), history);
+        assert_eq!(ui.controller().document_budget_usage(ID), Some((7, 20)));
+        assert!(ui.controller().is_dirty());
+        assert!(ui.controller().has_command("host.count4"));
+        assert_eq!(ui.size(), size);
+        assert_eq!(glyphs(&ui), text);
+        assert_eq!(adapter.durable_revision(), durable);
+
+        edit(&mut incoming, 2);
+        writer.submit_save(&incoming, &catalog()).unwrap();
+        saved(&mut writer)
+            .acknowledge(&mut incoming, &catalog())
+            .unwrap();
+        adapter.submit_load(ui.controller(), &catalog()).unwrap();
+        let prepared = loaded(&mut adapter)
+            .prepare(&catalog(), ControllerLimits::default())
+            .unwrap();
+        let incoming_revision = prepared.durable_revision();
+        if through_ui {
+            prepared
+                .install_ui(&mut adapter, &mut ui, &catalog())
+                .unwrap();
+        } else {
+            prepared
+                .install(&mut adapter, ui.controller_mut(), &catalog())
+                .unwrap();
+        }
+        assert_eq!(adapter.durable_revision(), Some(incoming_revision));
+        assert_ne!(adapter.durable_revision(), durable);
+        assert_eq!(snapshot(ui.controller(), &items()[0]).count, 2);
+        assert_eq!(ui.controller().document_budget_usage(ID), Some((8, 20)));
+        assert!(ui.controller().has_command("host.count4"));
+        assert!(!ui.controller().is_dirty());
+        assert_eq!(ui.controller().document_history_lengths(), (0, 0));
+        assert_eq!(ui.size(), size);
+        let revision = ui.controller().revision();
+        ui.controller_mut()
+            .register_document_budgets([policy.clone()])
+            .unwrap();
+        assert_eq!(
+            ui.controller().revision(),
+            revision,
+            "same callback Arc survived reload"
+        );
+        ui.controller_mut().select(items()[0].clone()).unwrap();
+        ui.controller_mut()
+            .execute(EditorAction::ExecuteCommand {
+                command_id: "host.count4".into(),
+            })
+            .unwrap();
+        assert_eq!(ui.controller().document_budget_usage(ID), Some((10, 20)));
+        ui.controller_mut().execute(EditorAction::Undo).unwrap();
+        assert_eq!(ui.controller().document_budget_usage(ID), Some((8, 20)));
+        ui.controller_mut().execute(EditorAction::Redo).unwrap();
+        assert_eq!(ui.controller().document_budget_usage(ID), Some((10, 20)));
+        let revision = ui.controller().revision();
+        ui.controller_mut()
+            .register_document_budgets([policy])
+            .unwrap();
+        assert_eq!(
+            ui.controller().revision(),
+            revision,
+            "idempotent even with history"
+        );
+    }
+}
+
 #[cfg(feature = "desktop")]
 #[test]
 fn mesh_reload_retains_authoring_ui_commands_and_real_scene_sync() {
@@ -1148,7 +1292,12 @@ fn mesh_reload_retains_authoring_ui_commands_and_real_scene_sync() {
     assert!(glyphs(&ui).iter().any(|s| s == "Add triangle"));
     assert!(!ui.controller().is_dirty());
     assert_eq!(ui.controller().document_history_lengths(), (0, 0));
-    let mut scene = EditorSceneSession::new(ui.controller()).unwrap();
+    assert_eq!(
+        ui.controller()
+            .document_budget_usage("scene.geometry_bytes"),
+        Some((48, 64 * 1024 * 1024))
+    );
+    let mut scene = EditorSceneSession::new(ui.controller_mut()).unwrap();
     assert_eq!(scene.bridge().entity_count(), 1);
     ui.controller_mut()
         .execute(EditorAction::ExecuteCommand {
@@ -1158,6 +1307,11 @@ fn mesh_reload_retains_authoring_ui_commands_and_real_scene_sync() {
     assert_ne!(ui.controller().selection().primary(), Some(&original));
     scene.synchronize(ui.controller()).unwrap();
     assert_eq!(scene.scene().objects().len(), 2);
+    assert_eq!(
+        ui.controller()
+            .document_budget_usage("scene.geometry_bytes"),
+        Some((96, 64 * 1024 * 1024))
+    );
     ui.controller_mut()
         .execute(EditorAction::ExecuteCommand {
             command_id: SCENE_DELETE_SELECTION_COMMAND.into(),
@@ -1165,9 +1319,19 @@ fn mesh_reload_retains_authoring_ui_commands_and_real_scene_sync() {
         .unwrap();
     scene.synchronize(ui.controller()).unwrap();
     assert_eq!(scene.scene().objects().len(), 1);
+    assert_eq!(
+        ui.controller()
+            .document_budget_usage("scene.geometry_bytes"),
+        Some((48, 64 * 1024 * 1024))
+    );
     ui.controller_mut().execute(EditorAction::Undo).unwrap();
     scene.synchronize(ui.controller()).unwrap();
     assert_eq!(scene.scene().objects().len(), 2);
+    assert_eq!(
+        ui.controller()
+            .document_budget_usage("scene.geometry_bytes"),
+        Some((96, 64 * 1024 * 1024))
+    );
 }
 
 #[test]

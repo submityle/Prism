@@ -4,8 +4,8 @@
 
 use prism_editor_app::{
     editor_scene_mesh_catalog, editor_scene_mesh_registry, install_scene_authoring_commands,
-    ControllerError, ControllerLimits, DocumentCodec, DocumentLimits, EditorController,
-    EditorSceneMesh, EditorSceneSession, SCENE_ADD_TRIANGLE_COMMAND,
+    ControllerDocumentBudget, ControllerError, ControllerLimits, DocumentCodec, DocumentLimits,
+    EditorController, EditorSceneMesh, EditorSceneSession, SCENE_ADD_TRIANGLE_COMMAND,
     SCENE_DELETE_SELECTION_COMMAND,
 };
 use prism_editor_core::SelectionItem;
@@ -32,6 +32,16 @@ fn primary(controller: &EditorController) -> SelectionItem {
     controller.selection().primary().unwrap().clone()
 }
 
+const GEOMETRY_BUDGET: &str = "scene.geometry_bytes";
+const GEOMETRY_LIMIT: u64 = 64 * 1024 * 1024;
+
+fn assert_geometry_usage(controller: &EditorController, bytes: u64) {
+    assert_eq!(
+        controller.document_budget_usage(GEOMETRY_BUDGET),
+        Some((bytes, GEOMETRY_LIMIT))
+    );
+}
+
 #[test]
 fn opt_in_is_clean_and_duplicate_install_does_not_touch_document() {
     let mut controller = EditorController::new();
@@ -45,6 +55,7 @@ fn opt_in_is_clean_and_duplicate_install_does_not_touch_document() {
     assert!(!controller.is_dirty());
     assert_eq!(controller.model_revision(), 0);
     assert_eq!(controller.document_history_lengths(), (0, 0));
+    assert_geometry_usage(&controller, 0);
     assert!(matches!(
         install_scene_authoring_commands(&mut controller),
         Err(ControllerError::DuplicateCommand(_))
@@ -57,7 +68,7 @@ fn opt_in_is_clean_and_duplicate_install_does_not_touch_document() {
 fn triangle_create_delete_undo_redo_updates_real_ecs_and_scene() {
     let mut controller = EditorController::new();
     install_scene_authoring_commands(&mut controller).unwrap();
-    let mut session = EditorSceneSession::new(&controller).unwrap();
+    let mut session = EditorSceneSession::new(&mut controller).unwrap();
     assert!(session.scene().objects().is_empty());
 
     execute(&mut controller, SCENE_ADD_TRIANGLE_COMMAND);
@@ -69,6 +80,7 @@ fn triangle_create_delete_undo_redo_updates_real_ecs_and_scene() {
     assert_eq!(expected.matrix, SCENE_ID_IDENTITY_MATRIX);
     assert!(expected.visible);
     assert_eq!(controller.document_objects().len(), 1);
+    assert_geometry_usage(&controller, 48);
     assert_eq!(controller.document_outliner_nodes().len(), 1);
     assert_eq!(
         controller.document_outliner_nodes()[0].selection(),
@@ -92,28 +104,33 @@ fn triangle_create_delete_undo_redo_updates_real_ecs_and_scene() {
     assert!(scene_mesh.visible);
 
     controller.execute(EditorAction::Undo).unwrap();
+    assert_geometry_usage(&controller, 0);
     assert!(controller.document_outliner_nodes().is_empty());
     assert!(controller.selection().items().is_empty());
     assert!(session.synchronize(&controller).unwrap());
     assert_eq!(session.bridge().entity_count(), 0);
     assert!(session.scene().objects().is_empty());
     controller.execute(EditorAction::Redo).unwrap();
+    assert_geometry_usage(&controller, 48);
     assert_eq!(primary(&controller), item);
     assert_eq!(mesh(&controller, &item), expected);
     assert!(session.synchronize(&controller).unwrap());
 
     execute(&mut controller, SCENE_DELETE_SELECTION_COMMAND);
+    assert_geometry_usage(&controller, 0);
     assert!(controller.selection().items().is_empty());
     assert!(controller.document_outliner_nodes().is_empty());
     assert_eq!(controller.document_objects().len(), 0);
     assert!(session.synchronize(&controller).unwrap());
     assert!(session.scene().objects().is_empty());
     controller.execute(EditorAction::Undo).unwrap();
+    assert_geometry_usage(&controller, 48);
     assert_eq!(primary(&controller), item);
     assert_eq!(mesh(&controller, &item), expected);
     assert!(session.synchronize(&controller).unwrap());
     assert_eq!(session.bridge().entity_count(), 1);
     controller.execute(EditorAction::Redo).unwrap();
+    assert_geometry_usage(&controller, 0);
     assert!(session.synchronize(&controller).unwrap());
     assert!(session.scene().objects().is_empty());
     assert!(controller.is_dirty());
@@ -180,11 +197,13 @@ fn bootstrap_identities_and_document_roundtrip_admit_further_authoring() {
     assert!(!decoded.has_command(SCENE_ADD_TRIANGLE_COMMAND));
     assert_eq!(mesh(&decoded, &bootstrap), expected);
     install_scene_authoring_commands(&mut decoded).unwrap();
+    assert_geometry_usage(&decoded, 48);
     execute(&mut decoded, SCENE_ADD_TRIANGLE_COMMAND);
     assert_eq!(primary(&decoded), next.0);
     assert_eq!(decoded.selected_outliner(), Some(next.1));
     assert_eq!(decoded.document_objects().len(), 2);
-    let session = EditorSceneSession::new(&decoded).unwrap();
+    assert_geometry_usage(&decoded, 96);
+    let session = EditorSceneSession::new(&mut decoded).unwrap();
     assert_eq!(session.bridge().entity_count(), 2);
     assert_eq!(session.scene().objects().len(), 2);
 }
@@ -243,6 +262,7 @@ fn command_budget_failure_is_atomic_without_creating_sample_objects() {
     assert!(install_scene_authoring_commands(&mut controller).is_err());
     assert!(!controller.has_command(SCENE_ADD_TRIANGLE_COMMAND));
     assert!(!controller.has_command(SCENE_DELETE_SELECTION_COMMAND));
+    assert_eq!(controller.document_budget_usage(GEOMETRY_BUDGET), None);
     assert_eq!(controller.document_objects().len(), 0);
     assert_eq!(controller.model_revision(), 0);
     assert_eq!(controller.revision(), 0);
@@ -387,7 +407,83 @@ fn conflicting_delete_id_is_detected_before_installing_add_factory() {
         Err(ControllerError::DuplicateCommand(_))
     ));
     assert!(!controller.has_command(SCENE_ADD_TRIANGLE_COMMAND));
+    assert_eq!(controller.document_budget_usage(GEOMETRY_BUDGET), None);
     assert_eq!(controller.revision(), revision);
     assert_eq!(controller.document_objects().len(), 0);
     assert!(!controller.is_dirty());
+}
+
+#[test]
+fn conflicting_geometry_policy_rejects_both_commands_atomically() {
+    let mut controller = EditorController::new();
+    controller
+        .register_document_budgets([ControllerDocumentBudget::new(
+            GEOMETRY_BUDGET,
+            GEOMETRY_LIMIT,
+            |_, _| Ok(0),
+        )])
+        .unwrap();
+    let revision = controller.revision();
+    assert!(install_scene_authoring_commands(&mut controller).is_err());
+    assert!(!controller.has_command(SCENE_ADD_TRIANGLE_COMMAND));
+    assert!(!controller.has_command(SCENE_DELETE_SELECTION_COMMAND));
+    assert_eq!(controller.revision(), revision);
+    assert_geometry_usage(&controller, 0);
+    assert_eq!(controller.document_history_lengths(), (0, 0));
+}
+
+#[test]
+fn exhausted_document_policy_slots_do_not_install_profile_commands() {
+    let mut controller = EditorController::with_limits(ControllerLimits {
+        max_document_budgets: 0,
+        ..ControllerLimits::default()
+    });
+    assert!(install_scene_authoring_commands(&mut controller).is_err());
+    assert!(!controller.has_command(SCENE_ADD_TRIANGLE_COMMAND));
+    assert!(!controller.has_command(SCENE_DELETE_SELECTION_COMMAND));
+    assert_eq!(controller.document_budget_usage(GEOMETRY_BUDGET), None);
+    assert_eq!(controller.revision(), 0);
+}
+
+#[test]
+fn mixed_schema_profile_counts_only_meshes_but_scene_rejects_unknown_roots() {
+    let mut controller = EditorController::new();
+    let mut registry = prism_reflect::TypeRegistry::new();
+    registry.register::<u32>();
+    controller
+        .register_object(SelectionItem::entity(100), Box::new(7_u32), registry)
+        .unwrap();
+    install_scene_authoring_commands(&mut controller).unwrap();
+    assert_geometry_usage(&controller, 0);
+    execute(&mut controller, SCENE_ADD_TRIANGLE_COMMAND);
+    assert_geometry_usage(&controller, 48);
+    let revision = controller.revision();
+    assert!(EditorSceneSession::new(&mut controller).is_err());
+    assert_eq!(controller.revision(), revision);
+    assert_geometry_usage(&controller, 48);
+    controller.execute(EditorAction::Undo).unwrap();
+    assert_geometry_usage(&controller, 0);
+    assert_eq!(controller.document_objects().len(), 1);
+}
+
+#[test]
+fn scene_constructor_and_profile_share_policy_even_with_authored_history() {
+    let mut controller = EditorController::new();
+    let session = EditorSceneSession::new(&mut controller).unwrap();
+    assert_geometry_usage(&controller, 0);
+    assert!(!controller.has_command(SCENE_ADD_TRIANGLE_COMMAND));
+    install_scene_authoring_commands(&mut controller).unwrap();
+    execute(&mut controller, SCENE_ADD_TRIANGLE_COMMAND);
+    drop(session);
+    let revision = controller.revision();
+    let session = EditorSceneSession::new(&mut controller).unwrap();
+    assert_eq!(controller.revision(), revision, "shared policy is a no-op");
+    assert_eq!(session.scene().objects().len(), 1);
+    assert_geometry_usage(&controller, 48);
+    controller.execute(EditorAction::Undo).unwrap();
+    assert_geometry_usage(&controller, 0);
+    let revision = controller.revision();
+    assert!(EditorSceneSession::new(&mut controller).is_ok());
+    assert_eq!(controller.revision(), revision);
+    assert_eq!(controller.document_history_lengths(), (0, 1));
 }

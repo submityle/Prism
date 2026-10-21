@@ -28,7 +28,10 @@ use prism_reflect::{
 
 use crate::ControllerObjectValidator;
 
+mod budget;
 mod structure;
+pub use budget::ControllerDocumentBudget;
+use budget::{BudgetState, CostPatch};
 use structure::StoredStructure;
 pub use structure::{ControllerAuthoringCommand, ControllerObject};
 
@@ -47,6 +50,8 @@ pub struct ControllerLimits {
     pub max_batch_fields: usize,
     /// Maximum number of registered command factories.
     pub max_commands: usize,
+    /// Maximum aggregate document policies; hard-capped at 64.
+    pub max_document_budgets: usize,
     /// Maximum command-factory indirections during one execution.
     pub max_command_depth: usize,
     /// Maximum retained document commands (undo plus redo). A full history
@@ -71,6 +76,7 @@ impl Default for ControllerLimits {
             max_selection: 1_024,
             max_batch_fields: 16_384,
             max_commands: 256,
+            max_document_budgets: 16,
             max_command_depth: 16,
             max_history: 256,
             max_history_per_object: 256,
@@ -132,6 +138,24 @@ pub enum ControllerError {
     },
     /// A command id is already registered.
     DuplicateCommand(String),
+    /// A host aggregate resource policy would be exceeded.
+    DocumentBudgetExceeded {
+        /// Stable host policy identifier.
+        budget: &'static str,
+        /// Maximum aggregate contribution.
+        limit: u64,
+    },
+    /// An ID is empty or already belongs to a different policy.
+    DuplicateDocumentBudget(&'static str),
+    /// A host could not measure a candidate root.
+    DocumentBudgetContribution {
+        /// Stable host policy identifier.
+        budget: &'static str,
+        /// Candidate identity.
+        item: SelectionItem,
+        /// Host diagnostic.
+        reason: String,
+    },
     /// No executable factory is registered for this command ID.
     UnknownCommand(String),
     /// A model revision changed while an asynchronous save was in flight.
@@ -179,6 +203,25 @@ impl fmt::Display for ControllerError {
                 write!(f, "{resource} limit {limit} exceeded")
             }
             Self::DuplicateCommand(id) => write!(f, "command {id:?} is already registered"),
+            Self::DocumentBudgetExceeded { budget, limit } => {
+                write!(f, "document budget {budget:?} limit {limit} exceeded")
+            }
+            Self::DuplicateDocumentBudget(id) => {
+                write!(
+                    f,
+                    "document budget ID {id:?} is empty or conflicts with a registered policy"
+                )
+            }
+            Self::DocumentBudgetContribution {
+                budget,
+                item,
+                reason,
+            } => {
+                write!(
+                    f,
+                    "document budget {budget:?} cannot measure {item:?}: {reason}"
+                )
+            }
             Self::UnknownCommand(id) => write!(f, "command {id:?} is not registered"),
             Self::StaleRevision { saved, current } => {
                 write!(
@@ -232,6 +275,7 @@ enum CommandFactory {
 struct DocumentEdit {
     fields: Vec<StoredField>,
     structure: Option<StoredStructure>,
+    costs: CostPatch,
 }
 
 impl DocumentEdit {
@@ -282,6 +326,7 @@ pub struct ControllerFieldEdit {
 pub struct PreparedControllerEdit {
     objects: BTreeMap<SelectionItem, ReflectEditorContext>,
     fields: Vec<StoredField>,
+    costs: CostPatch,
     model_revision: u64,
     shape_revision: u64,
     owner: Arc<()>,
@@ -310,6 +355,7 @@ pub struct EditorController {
     rows: Vec<OutlinerNode>,
     anchor: Option<OutlinerId>,
     commands: BTreeMap<String, CommandFactory>,
+    budgets: Vec<BudgetState>,
     limits: ControllerLimits,
     revision: u64,
     model_revision: u64,
@@ -346,6 +392,7 @@ impl EditorController {
             rows: Vec::new(),
             anchor: None,
             commands: BTreeMap::new(),
+            budgets: Vec::new(),
             limits,
             revision: 0,
             model_revision: 0,
@@ -379,11 +426,14 @@ impl EditorController {
             return Err(EditorError::Validation(report).into());
         }
         validate_object(&item, &*root, &registry, &[])?;
+        let mut costs = self.prepare_costs(core::iter::once((&item, Some(&*root))))?;
+        let totals = self.check_costs(&costs)?;
         self.ensure_revision(false)?;
         self.ensure_shape_revision()?;
         self.observe_identity(&item);
         self.objects
             .insert(item, ReflectEditorContext::new(root, registry));
+        self.exchange_costs(&mut costs, totals);
         self.advance(false);
         self.shape_revision += 1;
         Ok(())
@@ -472,6 +522,25 @@ impl EditorController {
             + Sync
             + 'static,
     {
+        self.register_authoring_profile(commands, core::iter::empty())
+    }
+
+    /// Atomically installs command factories and aggregate admission policies.
+    /// Failure publishes neither commands nor policies and preserves revisions.
+    pub fn register_authoring_profile<I, F, B>(
+        &mut self,
+        commands: I,
+        budgets: B,
+    ) -> Result<(), ControllerError>
+    where
+        I: IntoIterator<Item = (String, F)>,
+        F: Fn(&EditorController) -> Result<ControllerAuthoringCommand, ControllerError>
+            + Send
+            + Sync
+            + 'static,
+        B: IntoIterator<Item = ControllerDocumentBudget>,
+    {
+        self.ensure_idle()?;
         let mut candidate = BTreeMap::new();
         for (id, factory) in commands {
             ActionTemplate::execute_command(id.clone())?;
@@ -485,25 +554,14 @@ impl EditorController {
             )?;
             candidate.insert(id, CommandFactory::Authoring(Arc::new(factory)));
         }
-        if candidate.is_empty() {
+        let mut policies = self.prepare_budget_registrations(budgets)?;
+        if candidate.is_empty() && policies.is_empty() {
             return Ok(());
         }
         self.ensure_revision(false)?;
         self.commands.append(&mut candidate);
+        self.budgets.append(&mut policies);
         self.advance(false);
-        Ok(())
-    }
-
-    // A decoded document has no factories. Reuse the current host's immutable
-    // callbacks before constructing replacement UI; never read code from disk.
-    pub(crate) fn inherit_commands(&mut self, source: &Self) -> Result<(), ControllerError> {
-        ensure_bound(
-            source.commands.len(),
-            self.limits.max_commands,
-            "registered commands",
-        )?;
-        debug_assert!(self.commands.is_empty());
-        self.commands = source.commands.clone();
         Ok(())
     }
 
@@ -1040,9 +1098,15 @@ impl EditorController {
             }
             self.ensure_revision(true)?;
         }
+        let costs = self.prepare_costs(
+            objects
+                .iter()
+                .map(|(item, editor)| (item, Some(editor.root()))),
+        )?;
         Ok(PreparedControllerEdit {
             objects,
             fields,
+            costs,
             model_revision: self.model_revision,
             shape_revision: self.shape_revision,
             owner: self.identity.clone(),
@@ -1062,16 +1126,19 @@ impl EditorController {
         {
             return Err(ControllerError::EditConflict);
         }
+        let totals = self.check_costs(&prepared.costs)?;
         if prepared.objects.is_empty() {
             return Ok(self.outcome(false, false));
         }
         self.ensure_revision(true)?;
         let items = changed_fields(&prepared.fields);
         exchange_fields(&mut self.objects, &mut prepared.fields)?;
+        self.exchange_costs(&mut prepared.costs, totals);
         self.redo.clear();
         self.undo.push(DocumentEdit {
             fields: prepared.fields,
             structure: None,
+            costs: prepared.costs,
         });
         self.advance(true);
         self.record_changes(items);
@@ -1121,18 +1188,27 @@ impl EditorController {
             self.changes.clear();
             return Ok(self.outcome(true, true));
         }
-        let (source, destination) = if redo {
-            (&mut self.redo, &mut self.undo)
+        let totals = self.check_costs(&source.last().expect("history checked above").costs)?;
+        let mut entry = if redo {
+            self.redo.pop()
         } else {
-            (&mut self.undo, &mut self.redo)
-        };
-        let mut items = ChangedFields::new();
-        if let Some(entry) = source.last_mut() {
-            exchange_fields(&mut self.objects, &mut entry.fields)?;
-            items = changed_fields(&entry.fields);
+            self.undo.pop()
         }
-        if let Some(entry) = source.pop() {
-            destination.push(entry);
+        .expect("history checked above");
+        if let Err(error) = exchange_fields(&mut self.objects, &mut entry.fields) {
+            if redo {
+                self.redo.push(entry);
+            } else {
+                self.undo.push(entry);
+            }
+            return Err(error);
+        }
+        self.exchange_costs(&mut entry.costs, totals);
+        let items = changed_fields(&entry.fields);
+        if redo {
+            self.undo.push(entry);
+        } else {
+            self.redo.push(entry);
         }
         self.advance(true);
         self.record_changes(items);

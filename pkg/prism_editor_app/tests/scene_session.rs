@@ -160,8 +160,8 @@ fn assert_mesh(
 
 #[test]
 fn empty_production_document_stays_empty_and_idle() {
-    let controller = EditorController::new();
-    let mut session = EditorSceneSession::new(&controller).expect("empty document projection");
+    let mut controller = EditorController::new();
+    let mut session = EditorSceneSession::new(&mut controller).expect("empty document projection");
     assert_eq!(session.world().entity_count(), 0);
     assert_eq!(session.bridge().entity_count(), 0);
     assert!(session.scene().objects().is_empty());
@@ -170,6 +170,80 @@ fn empty_production_document_stays_empty_and_idle() {
     assert_eq!(before.objects_synchronized, 0);
     assert!(!session.synchronize(&controller).unwrap());
     assert_eq!(session.work(), before);
+    assert_eq!(
+        controller.document_budget_usage("scene.geometry_bytes"),
+        Some((0, 64 * 1024 * 1024))
+    );
+    assert!(!controller.has_command(SCENE_ADD_TRIANGLE_COMMAND));
+}
+
+#[test]
+fn constructor_rejects_unbudgeted_undo_or_redo_without_installing_policy() {
+    let mut controller = document(triangle());
+    edit(&mut controller, OBJECT, "visible", ActionValue::bool(false));
+    for history in [(1, 0), (0, 1)] {
+        let revision = controller.revision();
+        assert_eq!(controller.document_history_lengths(), history);
+        let error = EditorSceneSession::new(&mut controller).err().unwrap();
+        assert!(error.to_string().contains("undo/redo history"));
+        assert_eq!(
+            controller.document_budget_usage("scene.geometry_bytes"),
+            None
+        );
+        assert_eq!(controller.revision(), revision);
+        assert_eq!(controller.document_history_lengths(), history);
+        assert!(!controller.has_command(SCENE_ADD_TRIANGLE_COMMAND));
+        assert!(install_scene_authoring_commands(&mut controller).is_err());
+        assert!(!controller.has_command(SCENE_ADD_TRIANGLE_COMMAND));
+        assert!(!controller.has_command(SCENE_DELETE_SELECTION_COMMAND));
+        assert_eq!(
+            controller.document_budget_usage("scene.geometry_bytes"),
+            None
+        );
+        assert_eq!(controller.revision(), revision);
+        if history == (1, 0) {
+            controller.execute(EditorAction::Undo).unwrap();
+        }
+    }
+}
+
+#[test]
+fn constructor_validation_failure_never_installs_document_policy() {
+    let mut invalid_mesh = triangle();
+    invalid_mesh.indices[2] = 99;
+    let mut invalid = unvalidated_document(invalid_mesh);
+    let revision = invalid.revision();
+    assert!(EditorSceneSession::new(&mut invalid).is_err());
+    assert_eq!(invalid.document_budget_usage("scene.geometry_bytes"), None);
+    assert_eq!(invalid.revision(), revision);
+    assert!(!invalid.is_dirty());
+
+    let mut valid = document(triangle());
+    let revision = valid.revision();
+    let mut bad_camera = SCENE_ID_IDENTITY_MATRIX;
+    bad_camera[0][0] = f32::NAN;
+    assert!(EditorSceneSession::with_camera(
+        &mut valid,
+        bad_camera,
+        prism_editor_viewport::SceneIdDepth::Forward
+    )
+    .is_err());
+    assert_eq!(valid.document_budget_usage("scene.geometry_bytes"), None);
+    assert_eq!(valid.revision(), revision);
+
+    let mut exhausted = EditorController::with_limits(ControllerLimits {
+        max_document_budgets: 0,
+        ..ControllerLimits::default()
+    });
+    register_mesh(&mut exhausted, OBJECT, triangle());
+    let revision = exhausted.revision();
+    assert!(EditorSceneSession::new(&mut exhausted).is_err());
+    assert_eq!(
+        exhausted.document_budget_usage("scene.geometry_bytes"),
+        None
+    );
+    assert_eq!(exhausted.revision(), revision);
+    assert!(!exhausted.has_command(SCENE_ADD_TRIANGLE_COMMAND));
 }
 
 #[test]
@@ -182,7 +256,7 @@ fn decoded_reflect_document_materializes_matching_ecs_scene_and_hierarchy() {
         .unwrap();
     register_mesh(&mut authored, OBJECT, mesh.clone());
     register_row(&mut authored, ROW, OBJECT, Some(10));
-    let loaded = round_trip(&authored);
+    let mut loaded = round_trip(&authored);
     assert!(
         loaded
             .object_root(&SelectionItem::entity(OBJECT))
@@ -192,7 +266,7 @@ fn decoded_reflect_document_materializes_matching_ecs_scene_and_hierarchy() {
         "exercise decoded dynamic reflection, not just typed roots"
     );
 
-    let session = EditorSceneSession::new(&loaded).expect("materialize decoded mesh");
+    let session = EditorSceneSession::new(&mut loaded).expect("materialize decoded mesh");
     assert_mesh(&session, &loaded, OBJECT, &mesh);
     let entity = session
         .bridge()
@@ -225,7 +299,7 @@ fn decoded_reflect_document_materializes_matching_ecs_scene_and_hierarchy() {
 #[test]
 fn matrix_edits_undo_redo_and_selection_do_not_replace_geometry_or_entities() {
     let mut controller = round_trip(&document(triangle()));
-    let mut session = EditorSceneSession::new(&controller).unwrap();
+    let mut session = EditorSceneSession::new(&mut controller).unwrap();
     let entity = session
         .bridge()
         .entity_for_object(&SelectionItem::entity(OBJECT))
@@ -276,7 +350,7 @@ fn matrix_edits_undo_redo_and_selection_do_not_replace_geometry_or_entities() {
 #[test]
 fn geometry_and_visibility_follow_the_real_document_undo_redo_history() {
     let mut controller = round_trip(&document(triangle()));
-    let mut session = EditorSceneSession::new(&controller).unwrap();
+    let mut session = EditorSceneSession::new(&mut controller).unwrap();
     let before = session.work();
     let mut changed = triangle();
     changed.positions[1][0] = 0.75;
@@ -314,7 +388,7 @@ fn geometry_and_visibility_follow_the_real_document_undo_redo_history() {
     assert_eq!(after.matrix_updates, before.matrix_updates);
     assert_eq!(after.objects_synchronized, before.objects_synchronized + 6);
     assert_mesh(
-        &EditorSceneSession::new(&round_trip(&controller)).unwrap(),
+        &EditorSceneSession::new(&mut round_trip(&controller)).unwrap(),
         &controller,
         OBJECT,
         &hidden,
@@ -330,7 +404,7 @@ fn visibility_and_coalesced_properties_preserve_cpu_geometry_allocations() {
         } else {
             authored
         };
-        let mut session = EditorSceneSession::new(&controller).unwrap();
+        let mut session = EditorSceneSession::new(&mut controller).unwrap();
         let entity = session
             .bridge()
             .entity_for_object(&SelectionItem::entity(OBJECT))
@@ -467,6 +541,93 @@ impl Reflect for BudgetPositions {
 }
 
 #[test]
+fn profile_budget_admits_borrowed_lengths_and_blocks_create_and_bootstrap_overflow() {
+    const LIMIT: usize = 64 * 1024 * 1024;
+    // Deliberately synthetic reflected lengths: exercise the 64 MiB arithmetic
+    // without allocating that payload. Production projection must still reject
+    // unreadable geometry, as covered by the defence test below.
+    for sibling in [false, true] {
+        let reported_len = Arc::new(AtomicUsize::new(3));
+        let reads = Arc::new(AtomicUsize::new(0));
+        let clones = Arc::new(AtomicUsize::new(0));
+        let mut root = DynamicStruct::new();
+        root.set_represented_type_name(type_name::<EditorSceneMesh>());
+        root.insert(
+            "positions",
+            BudgetPositions {
+                values: triangle().positions,
+                reported_len: reported_len.clone(),
+                reads: reads.clone(),
+                clones: clones.clone(),
+            },
+        );
+        root.insert("indices", vec![0_u32, 1, 2]);
+        root.insert("matrix", SCENE_ID_IDENTITY_MATRIX);
+        root.insert("visible", false);
+        let mut controller = EditorController::new();
+        controller
+            .register_object(
+                SelectionItem::entity(OBJECT),
+                Box::new(root),
+                editor_scene_mesh_registry(),
+            )
+            .unwrap();
+        if sibling {
+            register_mesh(&mut controller, OBJECT + 1, triangle());
+        }
+        // This root contributes LIMIT - 4; a 48-byte sibling cannot fit.
+        reported_len.store(LIMIT / 12 - 1, Ordering::Relaxed);
+        reads.store(0, Ordering::Relaxed);
+        clones.store(0, Ordering::Relaxed);
+        let revision = controller.revision();
+        let installed = install_scene_authoring_commands(&mut controller);
+        assert_eq!(reads.load(Ordering::Relaxed), 0);
+        assert_eq!(clones.load(Ordering::Relaxed), 0);
+        if sibling {
+            assert!(installed.is_err());
+            assert_eq!(controller.revision(), revision);
+            assert_eq!(
+                controller.document_budget_usage("scene.geometry_bytes"),
+                None
+            );
+            assert!(!controller.has_command(SCENE_ADD_TRIANGLE_COMMAND));
+            assert!(!controller.has_command(SCENE_DELETE_SELECTION_COMMAND));
+            continue;
+        }
+        installed.unwrap();
+        assert_eq!(
+            controller.document_budget_usage("scene.geometry_bytes"),
+            Some((LIMIT as u64 - 4, LIMIT as u64))
+        );
+        let revision = controller.revision();
+        let identity = controller.next_entity_identity().unwrap();
+        assert!(controller
+            .execute(EditorAction::ExecuteCommand {
+                command_id: SCENE_ADD_TRIANGLE_COMMAND.into(),
+            })
+            .is_err());
+        assert!(controller
+            .register_object(
+                SelectionItem::entity(OBJECT + 1),
+                Box::new(triangle()),
+                editor_scene_mesh_registry()
+            )
+            .is_err());
+        assert_eq!(controller.revision(), revision);
+        assert_eq!(controller.next_entity_identity().unwrap(), identity);
+        assert_eq!(controller.document_history_lengths(), (0, 0));
+        assert_eq!(controller.document_objects().len(), 1);
+        assert!(!controller.is_dirty());
+        assert_eq!(reads.load(Ordering::Relaxed), 0);
+        assert_eq!(clones.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            controller.document_budget_usage("scene.geometry_bytes"),
+            Some((LIMIT as u64 - 4, LIMIT as u64))
+        );
+    }
+}
+
+#[test]
 fn aggregate_budget_rejection_precedes_geometry_access_and_preserves_all_live_objects() {
     const BUDGET: usize = 64 * 1024 * 1024;
     let reported_len = Arc::new(AtomicUsize::new(3));
@@ -496,7 +657,7 @@ fn aggregate_budget_rejection_precedes_geometry_access_and_preserves_all_live_ob
         .unwrap();
     register_mesh(&mut controller, OBJECT + 1, triangle());
     let original = round_trip(&controller);
-    let mut session = EditorSceneSession::new(&controller).unwrap();
+    let mut session = EditorSceneSession::new(&mut controller).unwrap();
     let before = session.work();
     let status = session.scene().status();
     let uploads = upload_counts(&session);
@@ -598,7 +759,7 @@ fn aggregate_budget_rejection_precedes_geometry_access_and_preserves_all_live_ob
 #[test]
 fn structural_registration_rebuilds_even_at_model_revision_zero() {
     let mut controller = EditorController::new();
-    let mut session = EditorSceneSession::new(&controller).unwrap();
+    let mut session = EditorSceneSession::new(&mut controller).unwrap();
     register_mesh(&mut controller, OBJECT, triangle());
     assert_eq!(controller.model_revision(), 0);
     assert!(session.synchronize(&controller).unwrap());
@@ -629,14 +790,18 @@ fn structural_registration_rebuilds_even_at_model_revision_zero() {
 
 #[test]
 fn foreign_controller_with_identical_revisions_and_shape_rebuilds_by_identity() {
-    let original = document(triangle());
+    let mut original = document(triangle());
     let mut other_mesh = triangle();
     other_mesh.positions[0][1] = 0.25;
-    let foreign = document(other_mesh.clone());
+    let mut foreign = document(other_mesh.clone());
+    // Both hosts carry the same production policy/configuration; only their
+    // document identities (and geometry values) differ, not their revisions.
+    install_scene_authoring_commands(&mut original).unwrap();
+    install_scene_authoring_commands(&mut foreign).unwrap();
     assert_eq!(original.revision(), foreign.revision());
     assert_eq!(original.model_revision(), foreign.model_revision());
     assert_eq!(original.shape_revision(), foreign.shape_revision());
-    let mut session = EditorSceneSession::new(&original).unwrap();
+    let mut session = EditorSceneSession::new(&mut original).unwrap();
     assert!(session.synchronize(&foreign).unwrap());
     assert_mesh(&session, &foreign, OBJECT, &other_mesh);
     assert_eq!(session.work().document_rebuilds, 2);
@@ -648,12 +813,12 @@ fn foreign_controller_with_identical_revisions_and_shape_rebuilds_by_identity() 
 
 #[test]
 fn prepare_and_discard_preserve_live_projection_until_explicit_commit() {
-    let original = document(triangle());
+    let mut original = document(triangle());
     let mut mesh = triangle();
     mesh.visible = false;
     mesh.matrix[3][1] = 0.5;
     let candidate = round_trip(&document(mesh.clone()));
-    let mut session = EditorSceneSession::new(&original).unwrap();
+    let mut session = EditorSceneSession::new(&mut original).unwrap();
     let before = session.work();
     let generation = session.scene().status().scene_generation;
 
@@ -691,7 +856,7 @@ fn pending_candidate_fences_idle_changed_and_foreign_synchronization() {
     mesh.visible = false;
     let candidate = round_trip(&document(mesh.clone()));
     let foreign = document(triangle());
-    let mut session = EditorSceneSession::new(&original).unwrap();
+    let mut session = EditorSceneSession::new(&mut original).unwrap();
     let before = session.work();
     let generation = session.scene().status().scene_generation;
     session.prepare_document(&candidate).unwrap();
@@ -735,15 +900,15 @@ fn pending_candidate_fences_idle_changed_and_foreign_synchronization() {
 
 #[test]
 fn invalid_prepare_drops_stale_candidate_without_publishing_any_new_state() {
-    let original = document(triangle());
+    let mut original = document(triangle());
     let mut candidate_mesh = triangle();
     candidate_mesh.visible = false;
     let candidate = document(candidate_mesh);
     let mut invalid_mesh = triangle();
     invalid_mesh.indices[2] = 99;
-    let invalid = unvalidated_document(invalid_mesh);
-    assert!(EditorSceneSession::new(&invalid).is_err());
-    let mut session = EditorSceneSession::new(&original).unwrap();
+    let mut invalid = unvalidated_document(invalid_mesh);
+    assert!(EditorSceneSession::new(&mut invalid).is_err());
+    let mut session = EditorSceneSession::new(&mut original).unwrap();
     let before = session.work();
     let generation = session.scene().status().scene_generation;
     session.prepare_document(&candidate).unwrap();
@@ -760,7 +925,7 @@ fn invalid_prepare_drops_stale_candidate_without_publishing_any_new_state() {
 fn invalid_incremental_geometry_rejects_legal_sibling_batch_atomically() {
     let mut controller = document(triangle());
     register_mesh(&mut controller, OBJECT + 1, triangle());
-    let mut session = EditorSceneSession::new(&controller).unwrap();
+    let mut session = EditorSceneSession::new(&mut controller).unwrap();
     let before = session.work();
     let revision = controller.revision();
     let model_revision = controller.model_revision();
@@ -899,7 +1064,7 @@ fn filesystem_scene_project_save_open_restores_authored_mesh_ecs_and_scene() {
     .expect("create real mesh-profile project");
     let guid = project.project_guid();
     let (mut ui, mut persistence) = project.into_desktop();
-    let mut renderer = EditorSceneSession::new(ui.controller()).unwrap();
+    let mut renderer = EditorSceneSession::new(ui.controller_mut()).unwrap();
     assert!(renderer.scene().objects().is_empty());
     register_mesh(ui.controller_mut(), OBJECT, triangle());
     register_row(ui.controller_mut(), ROW, OBJECT, None);
@@ -927,11 +1092,13 @@ fn filesystem_scene_project_save_open_restores_authored_mesh_ecs_and_scene() {
     .expect("reopen durably saved mesh-profile project");
     assert_eq!(reopened.project_guid(), guid);
     assert_eq!(reopened.document_session().durable_revision(), durable);
-    let controller = reopened.ui().controller();
+    let (mut reopened_ui, _persistence) = reopened.into_desktop();
+    let restored = EditorSceneSession::new(reopened_ui.controller_mut())
+        .expect("materialize reopened real scene");
+    let controller = reopened_ui.controller();
     assert!(!controller.is_dirty());
     assert_eq!(controller.document_objects().len(), 1);
     assert_eq!(controller.document_outliner_nodes().len(), 1);
-    let restored = EditorSceneSession::new(controller).expect("materialize reopened real scene");
     assert_mesh(&restored, controller, OBJECT, &expected);
     assert_eq!(
         restored.scene().objects()[0].outliner,
@@ -1124,7 +1291,7 @@ fn gpu_authoring_create_delete_undo_redo_fences_point_and_box_picks_across_empty
     let SelectionKind::Entity(id) = *item.kind() else {
         panic!("authoring must allocate an entity identity");
     };
-    let mut session = EditorSceneSession::new(&controller).unwrap();
+    let mut session = EditorSceneSession::new(&mut controller).unwrap();
     let mut ui = EditorDesktopUi::new(controller).unwrap();
     session.initialize(&gpu).unwrap();
     let output = session_output(&gpu, "scene-session structural authoring proof");
@@ -1273,7 +1440,7 @@ fn gpu_structural_batch_create_and_middle_delete_undo_redo_remap_survivor_draw_k
     let Some(gpu) = gpu() else { return };
     let mut controller = EditorController::new();
     install_scene_authoring_commands(&mut controller).unwrap();
-    let mut session = EditorSceneSession::new(&controller).unwrap();
+    let mut session = EditorSceneSession::new(&mut controller).unwrap();
     let mut ui = EditorDesktopUi::new(controller).unwrap();
     session.initialize(&gpu).unwrap();
     let output = session_output(&gpu, "scene-session structural survivor proof");
@@ -1413,8 +1580,8 @@ fn gpu_visibility_undo_redo_picking_retains_renderer_without_geometry_or_transfo
     };
     let mut mesh = triangle();
     mesh.positions = vec![[-0.75, -0.75, 0.5], [0.75, -0.75, 0.5], [0.0, 0.75, 0.5]];
-    let controller = round_trip(&document(mesh));
-    let mut session = EditorSceneSession::new(&controller).unwrap();
+    let mut controller = round_trip(&document(mesh));
+    let mut session = EditorSceneSession::new(&mut controller).unwrap();
     let mut ui = EditorDesktopUi::new(controller).unwrap();
     session.initialize(&gpu).unwrap();
     let output = gpu.device.create_texture(&wgpu::TextureDescriptor {
@@ -1544,8 +1711,8 @@ fn gpu_multiple_syncs_before_encode_retain_unrelated_identity_resources_and_fina
         mesh.matrix[3][0] = x;
         register_mesh(&mut controller, OBJECT + offset as u128, mesh);
     }
-    let controller = round_trip(&controller);
-    let mut session = EditorSceneSession::new(&controller).unwrap();
+    let mut controller = round_trip(&controller);
+    let mut session = EditorSceneSession::new(&mut controller).unwrap();
     let mut ui = EditorDesktopUi::new(controller).unwrap();
     session.initialize(&gpu).unwrap();
     let output = gpu.device.create_texture(&wgpu::TextureDescriptor {
@@ -1721,8 +1888,8 @@ fn gpu_deferred_dirty_meshes_attach_and_resume_with_final_transforms_and_visibil
         mesh.matrix[3][0] = x;
         register_mesh(&mut controller, OBJECT + offset as u128, mesh);
     }
-    let controller = round_trip(&controller);
-    let mut session = EditorSceneSession::new(&controller).unwrap();
+    let mut controller = round_trip(&controller);
+    let mut session = EditorSceneSession::new(&mut controller).unwrap();
     let mut ui = EditorDesktopUi::new(controller).unwrap();
 
     // Pending geometry/property deltas exist before any native renderer does.

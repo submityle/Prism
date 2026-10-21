@@ -13,11 +13,12 @@ use prism_reflect::{FromReflect, Reflect, ReflectRef};
 
 use crate::{
     desktop_scene::{MAX_GEOMETRY_BYTES, MAX_OBJECTS},
+    scene_authoring::scene_document_budget,
     scene_mesh::{
         editor_scene_mesh_geometry_bytes, editor_scene_mesh_matrix, editor_scene_mesh_validate,
         EditorSceneMeshTransform,
     },
-    DesktopError, DesktopGpu, DesktopRenderer, DesktopScene, DesktopSceneDocument,
+    ControllerError, DesktopError, DesktopGpu, DesktopRenderer, DesktopScene, DesktopSceneDocument,
     DesktopSceneObject, DesktopViewportBounds, DesktopWork, EditorController, EditorDesktopUi,
     EditorEcsDocumentBridge, EditorSceneMesh,
 };
@@ -63,13 +64,15 @@ pub struct EditorSceneSession {
 impl EditorSceneSession {
     /// Materializes the complete document using an identity clip-space camera.
     /// An empty new project remains empty; no demo objects are injected.
-    pub fn new(controller: &EditorController) -> Result<Self, DesktopError> {
+    /// Installs the host's aggregate geometry budget before authored history.
+    /// An already installed budget permits attaching with existing history.
+    pub fn new(controller: &mut EditorController) -> Result<Self, DesktopError> {
         Self::with_camera(controller, SCENE_ID_IDENTITY_MATRIX, SceneIdDepth::Forward)
     }
 
     /// Materializes a profile with an explicit host-owned world-to-clip camera.
     pub fn with_camera(
-        controller: &EditorController,
+        controller: &mut EditorController,
         camera: SceneIdMatrix,
         depth: SceneIdDepth,
     ) -> Result<Self, DesktopError> {
@@ -77,6 +80,18 @@ impl EditorSceneSession {
         let mut scene = DesktopScene::new(Vec::new())?;
         scene.set_transform_adapter(EditorSceneMeshTransform)?;
         scene.stage_document(controller, document)?;
+        // Validate/stage the complete projection before changing host policy.
+        // A missing budget cannot be retrofitted across existing undo/redo.
+        // Registration is the last fallible step, so failures leave no policy
+        // (or authoring commands) installed on the supplied controller.
+        controller
+            .register_document_budgets([scene_document_budget()])
+            .map_err(|cause| match cause {
+                ControllerError::EditConflict => error(
+                    "scene geometry budget must be installed before authored undo/redo history",
+                ),
+                cause => error(&cause.to_string()),
+            })?;
         DesktopRenderer::commit_document(&mut scene);
         Ok(Self {
             scene,

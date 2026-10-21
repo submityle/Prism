@@ -99,7 +99,7 @@ fn run_native(options: CliOptions) -> Result<(), RunError> {
     };
     install_scene_authoring_commands(ui.controller_mut()).map_err(DesktopUiError::from)?;
     ui.refresh()?;
-    let scene = EditorSceneSession::new(ui.controller())?;
+    let scene = EditorSceneSession::new(ui.controller_mut())?;
     let outcome = run_desktop_with_document(
         DesktopConfig {
             logical_size: [options.width, options.height],

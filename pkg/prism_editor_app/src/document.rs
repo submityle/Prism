@@ -836,7 +836,7 @@ impl PreparedDocumentLoad {
     ) -> Result<(), DocumentError> {
         self.validate_install(adapter, controller, catalog)?;
         let mut candidate = self.decoded.into_controller();
-        candidate.inherit_commands(controller)?;
+        candidate.inherit_host_configuration(controller)?;
         // All fallible work precedes either mutation. These two assignments are
         // the host's publication point; old controller is dropped only here.
         *controller = candidate;
@@ -859,7 +859,7 @@ impl PreparedDocumentLoad {
         self.validate_install(adapter, ui.controller(), catalog)?;
         let size = ui.size();
         let mut controller = self.decoded.into_controller();
-        controller.inherit_commands(ui.controller())?;
+        controller.inherit_host_configuration(ui.controller())?;
         let mut candidate = EditorDesktopUi::new(controller)?;
         candidate.resize(size.width, size.height)?;
         // No fallible work or user callbacks after the publication point.

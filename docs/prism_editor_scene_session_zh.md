@@ -6,8 +6,19 @@
 
 `EditorController` 是唯一作者数据权威。场景与 ECS 只读投影，不另建 Undo/Redo。`world()`、`bridge()`、`scene()` 只提供只读访问；模型变更须经 controller 命令。明确摄像机通过 `with_camera` / `set_camera` 安装；默认使用单位 clip-space 矩阵，不推断项目相机或物理规则。
 
+## 构造与宿主预算
+
+构造 API 现为 `EditorSceneSession::new(&mut EditorController) -> Result<Self, DesktopError>` 与 `EditorSceneSession::with_camera(&mut EditorController, SceneIdMatrix, SceneIdDepth) -> Result<Self, DesktopError>`。可变借用用于安装宿主策略，而不是把 ECS 投影写回作者模型。先执行完整投影验证/装配并 stage scene，再以最后一个可失败步骤调用 `register_document_budgets`，成功后发布 scene。此前任何失败均不留下部分策略或 scene。
+
+session 与 `install_scene_authoring_commands` 使用共享不可变策略 `scene.geometry_bytes`：所有 mesh（包括隐藏对象）的 position/index payload 合计最多 64 MiB（`64 * 1024 * 1024` bytes）。借用式计量只读长度，不读几何元素、不 clone；其他 schema 贡献零，但完整投影仍拒绝不支持的 schema。应在首次编辑前安装 profile/预算；已有 undo/redo 且未预装该策略的 controller 不能事后 attach，已预装同一共享策略则可带历史 attach。
+
+通用 `ControllerDocumentBudget::new(id, limit, contribution)` 的计量回调接收 `&SelectionItem` 和 `&dyn Reflect`，返回 `Result<u64, String>`；策略是宿主配置，不是文档可执行内容。`register_authoring_profile(commands, budgets)` 原子安装命令及策略：命令容量、策略冲突、候选计量或预算失败均不发布其中任何部分。`document_budget_usage(id)` 只返回缓存的 used/limit。同一共享回调 `Arc` 和上限的策略 clone 可幂等重装；新增策略仅允许在 undo/redo 均为空时安装，并使安装前的 prepared（包括空操作）失效。完整 API 与错误契约见 [Editor 文档聚合预算](prism_editor_document_budget_zh.md)。
+
+Reload 的 `PreparedDocumentLoad::install/install_ui` 在发布前继承宿主命令和策略，并对加载候选的新根重新计量，绝不沿用旧文档 used 缓存。失败保留原 controller/UI、历史及 durable base；成功清空文档历史但保留宿主配置。直接替换 controller 的宿主也须显式转交配置。
+
 ## 事务与差分同步
 
+- `scene.geometry_bytes` 在 controller 的 bootstrap、属性候选及结构变更发布前检查全文档总量，而不是提交成功后才由 scene 投影报错。属性批次仅计量最终 changed roots；先减全部旧贡献再加全部新贡献，任一策略超限、checked arithmetic 溢出或贡献错误均保留模型、selection、history、dirty 和 revisions。标量 Undo/Redo 使用稀疏缓存逆补丁，从当前总量推导，保留其后 bootstrap 的贡献；结构恢复可重新计量涉及根。
 - controller 用实例身份、shape revision 与 model revision 区分外来文档、对象/层级变化和属性修改；选择等 UI-only 修改不触发几何重建。
 - 有界 changed-fields 日志按对象合并顶层字段，Undo/Redo 也记录同样路径。日志缺口保守回退完整重建；idle 路径只核对身份/revision，O(1)。
 - 完整构建先检查对象数、entity 身份和借用长度的累计几何预算，再执行 `FromReflect`、描述符克隆和 ECS 装配。上限为 4096 objects / 64 MiB vertex-index payload；这不是总进程内存上限。
@@ -16,6 +27,8 @@
 - 活跃 controller 编辑或 Gizmo preview 期间暂停已提交投影同步。Gizmo 仍使用 drag-start 快照和 controller 稀疏命令，释放后归入同一文档历史。
 
 controller 的 `ControllerObjectValidator` TypeData 在注册/解码时验证完整根，在隔离编辑候选完成后验证最终状态；不会因耦合字段的临时无效中间状态拒绝合法批次。readonly、metadata、标量转换和资源限制仍生效。准入失败不发布模型、selection、history 或 revision。
+
+对象 validator 负责单根 schema/finite/indices/matrix 等合法性，文档策略负责聚合贡献；两者互补。session 的 `document_geometry_bytes` 及增量累计预检仍保留为 `FromReflect`、descriptor/ECS allocation 之前的防御性边界，不能替代 controller 的预发布准入。64 MiB 仅指当前几何 payload，不是总进程、历史根或 GPU 内存上限。
 
 ## GPU 成本与边界
 
@@ -37,15 +50,19 @@ desktop 默认持续运行，只有显式 `--frames` / `--time-limit-seconds` �
 
 ## 验证
 
-以下区分当前主线统一验证与较早历史记录；本次仅依据主线结果更新文档，未另外运行 Cargo 或 GPU 测试。
+以下区分最新预算切片统一验证与较早已完成记录，不将不同版本的测试数量相加。
 
-### 当前主线统一验证
+### 最新预算切片：统一回归已通过
+
+session `59915` 的强制 GPU app + viewport、all features/targets 统一回归已 exit 0：353 passed、0 failed/ignored。覆盖全部 16 项聚合预算测试，包括独立多预算原子拒绝、scalar 编辑后 bootstrap 的 Undo/Redo 基线、空 prepared 在新 policy 安装后的失效，以及 Reload 重计量和 `new/with_camera` 可变 controller 构造准入。session `75350` 的同范围 strict Clippy（`--no-deps -- -D warnings`）exit 0；依赖树无 Bevy。精确命令和日志见 [Editor 文档聚合预算](prism_editor_document_budget_zh.md)。这些结果不代替原生输入 E2E 或完整 Editor 验收。
+
+### 上一切片统一验证（早于本次预算接线）
 
 - session `36236`：`PRISM_REQUIRE_GPU=1 cargo test --offline -j1 -p prism_editor_app -p prism_editor_viewport --all-features --all-targets`，exit 0；各结果为 `146/17/2/15/14/6/23/8/4/11/9/18/14/0/42`，共 329 项通过，0 failed/ignored。日志：`/private/tmp/prism-editor-authoring-final-gpu.log`。
 - session `40272`：同两包 `--all-features --all-targets` 的 `cargo clippy --no-deps -- -D warnings`，exit 0。日志：`/private/tmp/prism-editor-authoring-strict.log`。
 - `cargo tree` 检查同两包所有 features 的 normal/build/dev 依赖，无 `bevy` 匹配。
 
-本轮统一验证覆盖 retained dirty-union、transform binding 保留、metadata upsert 计数、异构 geometry survivor 重排、初始化/恢复及 selection pruning/range anchor 回归。native 仍仅验证呈现 3 帧，没有 input E2E；不能以 offscreen GPU 测试替代原生输入验收。
+该轮统一验证覆盖 retained dirty-union、transform binding 保留、metadata upsert 计数、异构 geometry survivor 重排、初始化/恢复及 selection pruning/range anchor 回归。native 仍仅验证呈现 3 帧，没有 input E2E；不能以 offscreen GPU 测试替代原生输入验收。
 
 ### 较早历史验证
 
@@ -67,7 +84,7 @@ exit 0：142 library + 17 CLI + 15 controller + 6 controller validation + 13 sce
 
 主线此前报告 app + viewport 强制 GPU 回归共 325 项通过，以及结构定向回归 12 项通过。这些均早于最新 retained dirty-union / transform binding patch，保留作版本边界；不与当前 329 项结果相加，也不将两个历史计数简单相加。native smoke 已实际呈现 3 帧，但没有原生输入 E2E，不构成桌面输入闭环验收。
 
-### 当前回归范围
+### 已记录的 GPU/结构回归范围
 
 下列回归及新增计数、异构 geometry 和恢复断言已纳入上述 session `36236` 的统一测试通过记录。
 
@@ -78,6 +95,6 @@ exit 0：142 library + 17 CLI + 15 controller + 6 controller validation + 13 sce
 - `gpu_structural_batch_create_and_middle_delete_undo_redo_remap_survivor_draw_keys`：原子创建三个分离 mesh，通过正式删除命令移除中间对象，覆盖删除与批量创建的 Undo/Redo、全空与恢复。最新增量改用不同 silhouette 和 payload 长度的异构 geometry（三角形/四边形），通过正反像素与全视口框选检查右侧 survivor 从 draw/instance key 2 重排为 1 后仍匹配自身几何与身份，并按实际 geometry bytes 与 metadata upserts 断言成本；资源计数明确允许结构全量重建。
 - 新增 `gpu_deferred_dirty_meshes_attach_and_resume_with_final_transforms_and_visibility`：在无 GPU 阶段先产生 geometry/matrix/visibility dirty，初始化时检查完整上传；suspend 期间多次同步再恢复，验证最终可见性、矩阵、点选/框选以及隐藏对象绑定也已装配。恢复后的混合 replacement 断言矩阵在同步时仅上传一次，encode 不重复上传，并检查 metadata/identity 分配和 idle 不增加上传。
 
-指定 Rust 文件此前已完成定向 rustfmt（`skip_children=true`）及 diff whitespace 检查；最新 GPU patch、selection pruning 和结构删除/Undo/Redo 后 range anchor 恢复回归已由上述统一测试及 strict Clippy 验证。格式检查不替代运行验证，测试通过也不扩大本切片的功能边界。
+指定 Rust 文件已完成定向 rustfmt（`skip_children=true`）及 diff whitespace 检查；最新统一回归覆盖上述 GPU patch、selection pruning、结构删除/Undo/Redo 后 range anchor 恢复和本次预算接线。格式检查不替代运行验证，测试通过也不扩大本切片的功能边界。
 
 上述不是原生输入/窗口恢复验收，也不是完整 World 或完整 Editor 交付。对象创建/删除及最新 GPU 性能增量已有上述统一验证记录；native 仍仅有 3 帧呈现、无 input E2E，真实桌面端到端输入、World runtime/OFPA 正式接线、具体域工具、项目恢复/迁移、多窗口及规模性能验收仍是独立边界。

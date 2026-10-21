@@ -9,9 +9,10 @@
 ```rust,ignore
 install_scene_authoring_commands(&mut controller)?;
 // 安装成功后再构造 UI / EditorSceneSession；已有 UI 安装后需 refresh。
+let scene_session = EditorSceneSession::new(&mut controller)?;
 ```
 
-这只注册命令工厂，不创建对象、不改变选择、不写模型历史、不标 dirty；命令注册可以推进 UI revision。CLI 的 desktop 路径在 create/open 得到 controller 后、构造 `EditorSceneSession` 前安装。无项目启动仍是空 scene，没有默认示例数据。
+这会原子注册命令工厂和 `scene.geometry_bytes` 文档聚合预算，不创建对象、不改变选择、不写模型历史、不标 dirty；成功安装新配置可以推进 UI revision。CLI 的 desktop 路径在 create/open 得到 controller 后、构造 `EditorSceneSession` 前安装。无项目启动仍是空 scene，没有默认示例数据。
 
 已注册对应命令时，toolbar 显示：
 
@@ -22,7 +23,17 @@ install_scene_authoring_commands(&mut controller)?;
 
 按钮使用普通 `ExecuteCommand`，不是直接改 ECS 或 renderer。未提交 field draft、IME composition 或活动 gesture/pointer capture 会阻止这两条操作；应先提交、取消输入或结束交互，拒绝时保留 draft。直接使用 controller 的宿主仍须自行管理 UI draft，不能绕过 UI 后声称已处理输入围栏。
 
-安装使用 `register_authoring_commands` 的有界候选，一次验证全部命令 ID、重复/既有冲突、剩余命令预算和 revision，再原子发布。预算只剩一个时，两条命令均不注册；失败不推进 UI revision，不创建对象，也不改变选择、模型或历史。工厂只在用户执行命令时求值，注册不会调用它们。CLI 在安装错误时退出。
+安装使用 `register_authoring_profile(commands, budgets)` 的有界候选，一次验证全部命令 ID、重复/既有冲突、剩余命令/策略容量、已有对象的预算贡献及 revision，再原子发布。命令槽位只剩一个时，两条命令和新预算均不注册；预算安装失败时，也不留下任何新命令。失败不推进 UI revision，不创建对象，也不改变选择、模型或历史。工厂只在用户执行命令时求值，注册不会调用它们。CLI 在安装错误时退出。仅需命令的 `register_authoring_commands` 仍通过同一入口传入空预算集合。
+
+## 文档预算与预发布准入
+
+`ControllerDocumentBudget::new(id, limit, contribution)` 定义宿主拥有的通用聚合策略；回调类型为 `Fn(&SelectionItem, &dyn Reflect) -> Result<u64, String> + Send + Sync + 'static`。它按反射字段读取 typed/dynamic root，须只读、确定且不依赖可变外部状态。`register_document_budgets` 可单独安装策略，`document_budget_usage(id)` 返回缓存的 `Option<(used, limit)>`，不重新扫描根。策略不序列化，完整契约见 [Editor 文档聚合预算](prism_editor_document_budget_zh.md)。
+
+mesh profile 的 `scene.geometry_bytes` 上限为 64 MiB（`64 * 1024 * 1024` bytes），累计所有 mesh 的 position/index payload，隐藏 mesh 也计入；其他 schema 贡献零不等于场景支持渲染这些类型。计量只借用几何长度、不克隆或读取元素。bootstrap、结构创建/删除和属性批次都在 controller 发布前准入，不能等已提交模型投影失败后才报告超限。同批替换先减全部旧贡献，再加最终新贡献，允许合法的 grow/shrink 平衡；checked arithmetic、贡献回调错误或任一预算超限均原子拒绝。
+
+属性历史保存稀疏贡献逆补丁，Undo/Redo 不重新调用计量回调，总量从当前基线推导并保留后来 bootstrap 对象的贡献；结构恢复允许重新计量涉及根。新策略只能在 undo/redo 均为空时加入；同一共享回调 `Arc` 和上限的策略 clone 可幂等重装，不受既有历史限制，但重复安装整个创作 profile 仍会因命令 ID 冲突失败。新增策略会使此前 prepared（包括空操作）失效。
+
+`EditorSceneSession::new` 和 `with_camera` 现接收 `&mut EditorController`。构造先完整验证并 stage 投影，再以最后一个可失败步骤安装共享的几何策略，随后发布 scene；投影或安装失败不会留下部分新配置。已有历史但未安装策略的 controller 不能事后 attach，应在首次编辑前安装 profile/预算；已预装同一策略则允许带历史 attach。64 MiB 是当前几何 payload 准入，不涵盖历史、候选根、GPU 或总进程内存。
 
 ## 对象与历史语义
 
@@ -45,7 +56,7 @@ install_scene_authoring_commands(&mut controller)?;
 
 对象可经 mesh schema catalog 和既有 document codec 保存/加载。磁盘保存仍需显式 SceneProject/document session，不会因 Add 自动创建项目或保存。命令工厂属于宿主配置，不序列化，也不会从磁盘读取可执行回调。
 
-CLI 的初次 create/open 安装 profile。后续 `PreparedDocumentLoad::install` / `install_ui` 在候选发布前继承当前宿主的 action 和 authoring 工厂；回调经 `Arc` 共享，不执行工厂，候选预算不足则保留原 controller/UI 和 durable base。成功 Reload 清空文档历史及临时 UI 状态，保留窗口逻辑尺寸和宿主命令，因此创作按钮可在新 UI 中重新构建。直接替换 controller 的其他宿主必须自行转交配置，不能从 codec 推断 profile。
+CLI 的初次 create/open 安装 profile。后续 `PreparedDocumentLoad::install` / `install_ui` 在候选及 durable base 发布前继承当前宿主的 action/authoring 工厂和文档预算策略；回调经 `Arc` 共享，不执行命令工厂。预算针对加载候选的新根重新计量，不能复制旧 controller 的 used 缓存；容量、计量或总量失败保留原 controller/UI、历史和 durable base。成功 Reload 清空文档历史及临时 UI 状态，保留窗口逻辑尺寸、宿主命令及策略，因此创作按钮可在新 UI 中重新构建。直接替换 controller 的其他宿主必须自行转交配置，不能从 codec 推断 profile。
 
 不包含任意 mesh 导入、其他 schema 的对象创建菜单、层级重排/复制、多选创作 UI、OFPA、World cell payload 的正式 runtime consumers、物理或 gameplay 集成。Delete 使用当前 selection；此 profile 不限制删除对象必须是 mesh。
 
@@ -55,7 +66,9 @@ CLI 的初次 create/open 安装 profile。后续 `PreparedDocumentLoad::install
 
 `desktop_ui.rs` 内包含 retained-layout 按钮分发、opt-in 可见性、draft/IME 保留及活动 controller gesture 拒绝测试。selection pruning 的选择顺序/primary 语义、结构删除/Undo/Redo 后 range anchor 恢复，以及 GPU dirty-union、transform binding 保留等 patch 已纳入下述主线统一验证。
 
-当前验证记录（主线报告）：
+最新预算切片已由 session `59915` 完成强制 GPU 的 app + viewport、all features/targets 统一回归：353 passed、0 failed/ignored，exit 0；包含全部 16 项聚合预算测试及 Reload 重计量、场景构造签名/准入变更。session `75350` 的同范围 strict Clippy（`--no-deps -- -D warnings`）亦 exit 0；依赖树未发现 Bevy。精确命令、日志和覆盖边界见 `prism_editor_document_budget_zh.md`。
+
+上一已完成切片的验证记录（主线报告，早于本次预算接线）：
 
 - session `36236`：`PRISM_REQUIRE_GPU=1 cargo test --offline -j1 -p prism_editor_app -p prism_editor_viewport --all-features --all-targets`，exit 0；各结果为 `146/17/2/15/14/6/23/8/4/11/9/18/14/0/42`，共 329 项通过，0 failed/ignored。日志：`/private/tmp/prism-editor-authoring-final-gpu.log`。
 - session `40272`：同两包 `--all-features --all-targets` 的 `cargo clippy --no-deps -- -D warnings`，exit 0。日志：`/private/tmp/prism-editor-authoring-strict.log`。
