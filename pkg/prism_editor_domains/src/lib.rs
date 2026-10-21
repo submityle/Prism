@@ -15,6 +15,12 @@
 mod lifecycle;
 mod model;
 mod registry;
+/// Bounded asynchronous source capture and last-good publication.
+pub mod reload;
+/// Literal Loom and style reload through the Prism state-preserving reloader.
+pub mod reload_loom;
+/// WESL/WGSL preparation and fallible host GPU publication.
+pub mod reload_shader;
 
 pub use lifecycle::{
     DomainRuntime, DomainState, LifecycleAction, LifecycleError, LifecycleReport, LifecycleStep,
