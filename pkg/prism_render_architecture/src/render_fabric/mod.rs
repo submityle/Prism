@@ -12,6 +12,7 @@ mod compile;
 mod device;
 mod frame;
 mod history;
+mod instances;
 mod payload;
 mod pcm;
 mod pipeline;
@@ -31,16 +32,17 @@ pub use builtins::{
     NPR_VARIANT_ID, PARTICLE_ALIVE_RESOURCE, PARTICLE_CLUSTERED_LIGHTS, PARTICLE_FEATURE_ID,
     PARTICLE_GLOBAL_ILLUMINATION, PARTICLE_LIGHTING_CAPABILITIES, PARTICLE_LIGHTING_SERVICE_IDS,
     PARTICLE_RAY_TRACING, PARTICLE_SHADOW_MAPS, PARTICLE_SPRAY_RESOURCE, PARTICLE_STREAM_RESOURCE,
-    SPRAY_FEEDBACK_FEATURE_ID, SPRAY_FEEDBACK_SERVICE, VOLUME_DENSITY_RESOURCE, VOLUME_FEATURE_ID,
-    VOLUME_FROXEL_RESOURCE, VOLUME_SERVICE_IDS, VOLUME_VELOCITY_RESOURCE, WATER_FEATURE_ID,
-    WATER_FOAM_RESOURCE, WATER_SERVICE_IDS, WATER_SPRAY_RESOURCE, WATER_SURFACE_RESOURCE,
-    WATER_VARIANT_ID,
+    SPRAY_FEEDBACK_FEATURE_ID, SPRAY_FEEDBACK_SERVICE, TAA_HISTORY_RESOURCE,
+    VOLUME_DENSITY_RESOURCE, VOLUME_FEATURE_ID, VOLUME_FROXEL_RESOURCE, VOLUME_SERVICE_IDS,
+    VOLUME_VELOCITY_RESOURCE, WATER_FEATURE_ID, WATER_FOAM_RESOURCE, WATER_SERVICE_IDS,
+    WATER_SPRAY_RESOURCE, WATER_SURFACE_RESOURCE, WATER_VARIANT_ID,
 };
 pub use catalog::{CatalogError, FeatureCatalog, RequirementKind, ServiceProvider};
 pub use compile::*;
 pub use device::*;
 pub use frame::{RenderFabricFrame, RenderFabricFrameError};
 pub use history::*;
+pub use instances::*;
 pub use payload::*;
 pub use pcm::*;
 pub use pipeline::*;
@@ -51,6 +53,8 @@ pub use selection::{
 };
 pub use types::*;
 
+#[cfg(test)]
+mod alternatives_tests;
 #[cfg(test)]
 mod compile_tests;
 #[cfg(test)]

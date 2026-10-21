@@ -1,8 +1,8 @@
 use super::{runtime::verify_plan, *};
 use crate::frame_graph::{AccessKind, QueueClass, ResourceId, ResourceLifetime};
 use prism_render_driver::{
-    Barrier, BufferId, BufferState, BufferUsages, Extent3d, SubresourceRange, TextureState,
-    TextureViewId,
+    Accesses, Barrier, BufferId, BufferState, BufferUsages, Extent3d, PipelineStages,
+    SubresourceRange, TextureState, TextureViewId,
 };
 use prism_render_graph::{
     BufferDesc, ExecutionPlan, ImportedBuffer, ImportedTexture, LogicalResource, PassFlags,
@@ -14,6 +14,230 @@ const RESOURCE: ResourceKey = ResourceKey::of(FEATURE, 0);
 
 fn table<T>(values: Vec<T>) -> &'static [T] {
     Box::leak(values.into_boxed_slice())
+}
+
+fn mixed_frame_items() -> Vec<FrameRenderItem> {
+    let mut items = Vec::new();
+    for index in 0..2 {
+        let handle = DomainObjectHandle::new(index, 3);
+        for object_id in [
+            RenderObjectId::Hair(handle),
+            RenderObjectId::Surface(crate::gpu_scene::SceneHandle {
+                index,
+                generation: 3,
+            }),
+            RenderObjectId::Decal(handle),
+            RenderObjectId::Volume(handle),
+            RenderObjectId::Particle(handle),
+        ] {
+            items.push(FrameRenderItem {
+                object_id,
+                domain: object_id.domain(),
+                history_key: 19,
+                motion_source: crate::motion::MotionSource::Rigid,
+                payload: DomainPayload::Value(ValuePayload {
+                    value: PayloadValue::Scalar(index as f32),
+                    role: PayloadRole(0),
+                }),
+            });
+        }
+    }
+    // Neither a different role nor a different history stream is a duplicate.
+    let mut another_role = items[0];
+    another_role.payload = DomainPayload::Value(ValuePayload {
+        value: PayloadValue::Scalar(27.0),
+        role: PayloadRole(1),
+    });
+    items.push(another_role);
+    let mut another_history = items[0];
+    another_history.history_key += 1;
+    items.push(another_history);
+    items
+}
+
+#[test]
+fn runtime_frame_item_index_preserves_every_domain_and_global_order() {
+    use super::runtime::RuntimeFrameItems;
+    use std::sync::Arc;
+
+    let items: Arc<[FrameRenderItem]> = mixed_frame_items().into();
+    let indexed = RuntimeFrameItems::new(Arc::clone(&items));
+    for domain in [
+        None,
+        Some(RenderDomain::Surface),
+        Some(RenderDomain::Particle),
+        Some(RenderDomain::Volume),
+        Some(RenderDomain::Hair),
+        Some(RenderDomain::Decal),
+    ] {
+        let expected: Vec<_> = items
+            .iter()
+            .filter(|item| domain.is_none_or(|domain| item.domain == domain))
+            .collect();
+        for _ in 0..3 {
+            let mut actual = indexed.iter(domain);
+            assert_eq!(actual.len(), expected.len());
+            assert_eq!(actual.size_hint(), (expected.len(), Some(expected.len())));
+            assert!(core::ptr::eq(actual.next().unwrap(), expected[0]));
+            assert_eq!(actual.len(), expected.len() - 1);
+            assert!(core::ptr::eq(
+                actual.next_back().unwrap(),
+                *expected.last().unwrap()
+            ));
+            assert_eq!(actual.collect::<Vec<_>>(), expected[1..expected.len() - 1]);
+            assert_eq!(
+                indexed.iter(domain).rev().collect::<Vec<_>>(),
+                expected.iter().rev().copied().collect::<Vec<_>>()
+            );
+            let mut exhausted = indexed.iter(domain);
+            assert!(exhausted.nth(expected.len()).is_none());
+            assert_eq!(exhausted.len(), 0);
+            assert!(exhausted.next().is_none());
+            assert!(exhausted.next_back().is_none());
+        }
+    }
+    // The runtime retains the original item allocation, not a second payload copy.
+    assert_eq!(Arc::strong_count(&items), 2);
+}
+
+#[test]
+fn runtime_frame_item_index_handles_empty_and_absent_domains() {
+    use super::runtime::RuntimeFrameItems;
+    use std::sync::Arc;
+
+    for items in [Vec::new(), vec![mixed_frame_items()[1]]] {
+        let items: Arc<[FrameRenderItem]> = items.into();
+        let indexed = RuntimeFrameItems::new(Arc::clone(&items));
+        assert_eq!(indexed.iter(None).len(), items.len());
+        assert_eq!(indexed.iter(Some(RenderDomain::Surface)).len(), items.len());
+        for domain in [
+            RenderDomain::Particle,
+            RenderDomain::Volume,
+            RenderDomain::Hair,
+            RenderDomain::Decal,
+        ] {
+            let mut iter = indexed.iter(Some(domain));
+            assert_eq!(iter.len(), 0);
+            assert!(iter.next().is_none());
+            assert!(iter.next_back().is_none());
+        }
+    }
+}
+
+#[test]
+fn runtime_recorders_share_compiled_items_and_visit_only_their_domain() {
+    use std::sync::{Arc, Mutex};
+
+    let domains = [
+        RenderDomain::Surface,
+        RenderDomain::Particle,
+        RenderDomain::Volume,
+        RenderDomain::Hair,
+        RenderDomain::Decal,
+    ];
+    let variant = |index: u32| {
+        table(vec![FeatureVariant {
+            id: VariantId(100 + index),
+            rank: 0,
+            min_quality: RenderQualityTier::Low,
+            required_caps: CapabilitySet::EMPTY,
+            requires_services_extra: ServiceSet::EMPTY,
+            passes: table(vec![pass(100 + index, QueueClass::Compute, vec![])]),
+            shader_permutation: None,
+        }])
+    };
+    let mut features: Vec<_> = domains
+        .iter()
+        .enumerate()
+        .map(|(index, &domain)| {
+            FeatureDefinition::subsystem(
+                FeatureId(1000 + index as u32),
+                domain,
+                ServiceSet::EMPTY,
+                variant(index as u32),
+            )
+        })
+        .collect();
+    features.push(FeatureDefinition::response(
+        FeatureId(1005),
+        ServiceSet::new(&[ServiceId(500)]),
+        variant(5),
+    ));
+    features.push(FeatureDefinition::service(
+        FeatureId(1006),
+        &[ServiceOutput {
+            service: ServiceId(500),
+            resources: &[],
+        }],
+        ServiceSet::EMPTY,
+        variant(6),
+    ));
+    let catalog = FeatureCatalog::new(table(features), &[]).unwrap();
+    let roots = FrozenRoots::from_build_profile(
+        &catalog,
+        &[
+            FeatureId(1000),
+            FeatureId(1001),
+            FeatureId(1002),
+            FeatureId(1003),
+            FeatureId(1004),
+        ],
+        &[FeatureId(1005)],
+    )
+    .unwrap();
+    let selection = FeatureSelection::resolve(
+        &catalog,
+        &roots,
+        CapabilitySet::WEBGPU_BASELINE,
+        RenderQualityTier::Low,
+    )
+    .unwrap();
+    let items = mixed_frame_items();
+    let declaration = ResourceTemplates::new(&catalog, &[])
+        .unwrap()
+        .compile(&selection, 42, &[], &items, GraphLimits::default())
+        .unwrap();
+    let storage = declaration.shared_items();
+    assert!(Arc::ptr_eq(&storage, &declaration.clone().shared_items()));
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let recorders = (0..7)
+        .map(|index| {
+            let observed = Arc::clone(&observed);
+            let storage = Arc::clone(&storage);
+            RuntimePassBinding::new(PassKey(100 + index), move |context| {
+                let domain = (index < 5).then(|| domains[index as usize]);
+                assert_eq!(context.pass().domain(), domain);
+                let expected: Vec<_> = storage
+                    .iter()
+                    .filter(|item| domain.is_none_or(|domain| item.domain == domain))
+                    .collect();
+                assert_eq!(context.items().len(), expected.len());
+                for (actual, expected) in context.items().zip(&expected) {
+                    assert!(core::ptr::eq(actual, *expected));
+                }
+                assert_eq!(
+                    context.items().rev().collect::<Vec<_>>(),
+                    expected.into_iter().rev().collect::<Vec<_>>()
+                );
+                observed.lock().unwrap().push(index);
+            })
+        })
+        .collect();
+    let runtime = declaration
+        .prepare_runtime(Extent3d::new_2d(1, 1), &[], recorders)
+        .unwrap();
+    assert!(core::ptr::eq(
+        runtime.declaration().items().as_ptr(),
+        storage.as_ptr()
+    ));
+    assert!(observed.lock().unwrap().is_empty());
+    let device = recording_device();
+    let recorded = runtime.record(&device);
+    let mut calls = observed.lock().unwrap().clone();
+    calls.sort_unstable();
+    assert_eq!(calls, (0..7).collect::<Vec<_>>());
+    recorded.release(&device);
+    assert_eq!(device.live_resource_count(), 0);
 }
 
 fn fixture() -> (FeatureCatalog, ResourceTemplate) {
@@ -95,12 +319,11 @@ fn pass(key: u32, queue: QueueClass, accesses: Vec<ResourceUse>) -> PassTemplate
     }
 }
 
-fn compile_passes(
+fn pass_catalog(
     passes: Vec<PassTemplate>,
     resources: &[ResourceTemplate],
-    external: &[FrameResourceBinding],
-) -> CompiledFeatureGraph {
-    let catalog = FeatureCatalog::new(
+) -> Result<FeatureCatalog, CatalogError> {
+    FeatureCatalog::new(
         table(vec![FeatureDefinition::subsystem(
             FEATURE,
             RenderDomain::Surface,
@@ -117,7 +340,14 @@ fn compile_passes(
         )]),
         table(resources.iter().map(|resource| resource.key).collect()),
     )
-    .unwrap();
+}
+
+fn compile_passes(
+    passes: Vec<PassTemplate>,
+    resources: &[ResourceTemplate],
+    external: &[FrameResourceBinding],
+) -> CompiledFeatureGraph {
+    let catalog = pass_catalog(passes, resources).unwrap();
     let roots = FrozenRoots::from_build_profile(&catalog, &[FEATURE], &[]).unwrap();
     let selection = FeatureSelection::resolve(
         &catalog,
@@ -217,6 +447,674 @@ fn compiled_import(template: ResourceTemplate, physical: PhysicalResource) -> Co
         &[template],
         &[binding(template, physical)],
     )
+}
+
+fn readonly_import_fixture(
+    access: AccessKind,
+) -> (ResourceTemplate, FrameResourceBinding, RuntimeImport) {
+    match access {
+        AccessKind::UniformRead | AccessKind::IndexRead => {
+            let mut template = buffer(RESOURCE, ResourceLifetime::Imported);
+            template.layout = ResourceLayout::Buffer {
+                bytes: 64,
+                usage: if access == AccessKind::UniformRead {
+                    BufferUsages::UNIFORM
+                } else {
+                    BufferUsages::INDEX
+                },
+            };
+            let id = BufferId::from_parts(7, 1);
+            (
+                template,
+                binding(template, PhysicalResource::Buffer { id, offset: 16 }),
+                RuntimeImport::Buffer {
+                    resource: ResourceId(0),
+                    imported: ImportedBuffer {
+                        entry_state: BufferState::new(
+                            PipelineStages::COMPUTE_SHADER,
+                            Accesses::SHADER_WRITE,
+                        ),
+                        ..imported_buffer(id)
+                    },
+                },
+            )
+        }
+        AccessKind::DepthAttachmentRead => {
+            let mut template = texture(RESOURCE, ResourceLifetime::Imported);
+            template.layout = ResourceLayout::Texture {
+                extent: [8, 8, 1],
+                dimension: TextureDimension::D2,
+                format: TextureFormat::Depth32Float,
+                mip_levels: 1,
+                samples: 1,
+                usage: TextureUsages::RENDER_ATTACHMENT,
+            };
+            let id = TextureId::from_parts(7, 1);
+            (
+                template,
+                binding(template, PhysicalResource::Texture(id)),
+                RuntimeImport::Texture {
+                    resource: ResourceId(0),
+                    imported: ImportedTexture {
+                        mip_levels: 1,
+                        array_layers: 1,
+                        ..imported_texture(id)
+                    },
+                },
+            )
+        }
+        _ => panic!("fixture requires uniform, index or readonly depth"),
+    }
+}
+
+#[test]
+fn resource_layout_requires_uniform_and_index_buffer_usages() {
+    for (access, required, other) in [
+        (
+            AccessKind::UniformRead,
+            BufferUsages::UNIFORM,
+            BufferUsages::INDEX,
+        ),
+        (
+            AccessKind::IndexRead,
+            BufferUsages::INDEX,
+            BufferUsages::UNIFORM,
+        ),
+    ] {
+        for (flags, supported) in [
+            (required, true),
+            (required | BufferUsages::STORAGE, true),
+            (other, false),
+            (BufferUsages::STORAGE, false),
+            (BufferUsages::COPY_SRC, false),
+        ] {
+            assert_eq!(
+                ResourceLayout::Buffer {
+                    bytes: 64,
+                    usage: flags
+                }
+                .supports(access),
+                supported,
+                "{access:?} with {flags:?}"
+            );
+        }
+        assert!(!texture(RESOURCE, ResourceLifetime::Imported)
+            .layout
+            .supports(access));
+    }
+}
+
+#[test]
+fn resource_layout_requires_depth_format_and_attachment_usage_for_readonly_depth() {
+    for format in [
+        TextureFormat::Depth32Float,
+        TextureFormat::Depth24PlusStencil8,
+        TextureFormat::Rgba8Unorm,
+    ] {
+        for flags in [
+            TextureUsages::RENDER_ATTACHMENT,
+            TextureUsages::TEXTURE_BINDING,
+        ] {
+            let layout = ResourceLayout::Texture {
+                extent: [8, 8, 1],
+                dimension: TextureDimension::D2,
+                format,
+                mip_levels: 1,
+                samples: 1,
+                usage: flags,
+            };
+            assert_eq!(
+                layout.supports(AccessKind::DepthAttachmentRead),
+                format != TextureFormat::Rgba8Unorm && flags == TextureUsages::RENDER_ATTACHMENT,
+                "{format:?} with {flags:?}"
+            );
+        }
+    }
+    assert!(!buffer(RESOURCE, ResourceLifetime::Imported)
+        .layout
+        .supports(AccessKind::DepthAttachmentRead));
+}
+
+#[test]
+fn runtime_restricts_uniform_index_and_readonly_depth_queues() {
+    for access in [
+        AccessKind::UniformRead,
+        AccessKind::IndexRead,
+        AccessKind::DepthAttachmentRead,
+    ] {
+        let (template, external, import) = readonly_import_fixture(access);
+        for queue in [
+            QueueClass::Graphics,
+            QueueClass::Compute,
+            QueueClass::Transfer,
+        ] {
+            let passes = vec![pass(1, queue, vec![usage(RESOURCE, access)])];
+            if queue == QueueClass::Graphics
+                || access == AccessKind::UniformRead && queue == QueueClass::Compute
+            {
+                let declaration = compile_passes(passes, &[template], &[external]);
+                let runtime = prepare(declaration, &[import], &[1]).unwrap();
+                assert_eq!(runtime.plan().pass_count(), 1);
+                assert_eq!(runtime.plan().queue_batches[0].queue, queue);
+                assert!(runtime.declaration().versions().is_empty());
+                assert_eq!(runtime.plan().accesses[0][0].input_version, 0);
+                assert_eq!(runtime.plan().accesses[0][0].output_version, None);
+                if access == AccessKind::DepthAttachmentRead {
+                    let depth = runtime.plan().attachments[0]
+                        .as_ref()
+                        .unwrap()
+                        .depth
+                        .as_ref()
+                        .unwrap();
+                    assert!(!depth.writes);
+                    assert_eq!(depth.output_version, 0);
+                    assert_eq!(depth.depth_load, prism_render_driver::DepthLoadOp::Load);
+                    assert_eq!(depth.depth_store, prism_render_driver::StoreOp::Store);
+                    let Barrier::Texture(exit) = runtime.plan().final_barriers[0] else {
+                        panic!("readonly depth must retain its imported exit transition")
+                    };
+                    assert_eq!(exit.before, TextureState::depth_read());
+                    assert_eq!(exit.after, TextureState::present());
+                    assert_eq!(exit.range, SubresourceRange::single(0, 0));
+                    assert!(runtime.plan().alias.texture_slots[0].is_none());
+                } else {
+                    let Barrier::Buffer(entry) = runtime.plan().barriers[0][0] else {
+                        panic!("imported buffer read requires a buffer state transition")
+                    };
+                    assert_eq!(
+                        entry.before,
+                        BufferState::new(PipelineStages::COMPUTE_SHADER, Accesses::SHADER_WRITE)
+                    );
+                    assert_eq!(
+                        entry.after.accesses,
+                        if access == AccessKind::UniformRead {
+                            Accesses::UNIFORM_READ
+                        } else {
+                            Accesses::INDEX_READ
+                        }
+                    );
+                }
+            } else {
+                // Transfer is rejected by the catalog. Exercise the runtime guard
+                // for any other forbidden pair still admitted by that frontend.
+                if let Some(error) = pass_catalog(passes.clone(), &[template]).err() {
+                    assert_eq!(
+                        error,
+                        CatalogError::UnsupportedQueueAccess {
+                            pass: PassKey(1),
+                            queue,
+                            access,
+                        }
+                    );
+                } else {
+                    let declaration = compile_passes(passes, &[template], &[external]);
+                    assert_eq!(
+                        prepare(declaration, &[import], &[1]).err(),
+                        Some(FabricRuntimeError::UnsupportedAccess {
+                            pass: PassKey(1),
+                            resource: RESOURCE,
+                        }),
+                        "{access:?} on {queue:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn runtime_counts_readonly_and_writable_depth_in_one_attachment_slot() {
+    let (first, external, import) = readonly_import_fixture(AccessKind::DepthAttachmentRead);
+    let second = ResourceTemplate {
+        key: ResourceKey::of(FEATURE, 1),
+        ..first
+    };
+    let second_binding = binding(
+        second,
+        PhysicalResource::Texture(TextureId::from_parts(8, 1)),
+    );
+    for (before, after) in [
+        (
+            AccessKind::DepthAttachmentRead,
+            AccessKind::DepthAttachmentRead,
+        ),
+        (AccessKind::DepthAttachment, AccessKind::DepthAttachmentRead),
+        (AccessKind::DepthAttachmentRead, AccessKind::DepthAttachment),
+    ] {
+        let declaration = compile_passes(
+            vec![pass(
+                1,
+                QueueClass::Graphics,
+                vec![usage(first.key, before), usage(second.key, after)],
+            )],
+            &[first, second],
+            &[external, second_binding],
+        );
+        assert_eq!(
+            prepare(declaration, &[import], &[1]).err(),
+            Some(FabricRuntimeError::UnsupportedAccess {
+                pass: PassKey(1),
+                resource: second.key,
+            }),
+            "{before:?} followed by {after:?}"
+        );
+    }
+    // Repeating the same readonly resource still declares two attachment slots.
+    let declaration = compile_passes(
+        vec![pass(
+            1,
+            QueueClass::Graphics,
+            vec![
+                usage(RESOURCE, AccessKind::DepthAttachmentRead),
+                usage(RESOURCE, AccessKind::DepthAttachmentRead),
+            ],
+        )],
+        &[first],
+        &[external],
+    );
+    assert_eq!(
+        prepare(declaration, &[import], &[1]).err(),
+        Some(FabricRuntimeError::UnsupportedAccess {
+            pass: PassKey(1),
+            resource: RESOURCE,
+        })
+    );
+}
+
+#[test]
+fn runtime_rejects_readonly_depth_multiple_mips_layers_and_non_2d() {
+    let (base, _, _) = readonly_import_fixture(AccessKind::DepthAttachmentRead);
+    for (extent, dimension, mip_levels) in [
+        ([8, 8, 1], TextureDimension::D2, 2),
+        ([8, 8, 2], TextureDimension::D2, 1),
+        ([8, 8, 1], TextureDimension::D3, 1),
+        ([8, 1, 1], TextureDimension::D1, 1),
+    ] {
+        let template = ResourceTemplate {
+            layout: ResourceLayout::Texture {
+                extent,
+                dimension,
+                mip_levels,
+                format: TextureFormat::Depth32Float,
+                samples: 1,
+                usage: TextureUsages::RENDER_ATTACHMENT,
+            },
+            ..base
+        };
+        // These are valid resource layouts; rejection belongs to runtime attachment admission.
+        assert!(template.layout.size().is_some());
+        assert!(template.layout.supports(AccessKind::DepthAttachmentRead));
+        let declaration = compile_passes(
+            vec![pass(
+                1,
+                QueueClass::Graphics,
+                vec![usage(RESOURCE, AccessKind::DepthAttachmentRead)],
+            )],
+            &[template],
+            &[binding(
+                template,
+                PhysicalResource::Texture(TextureId::from_parts(7, 1)),
+            )],
+        );
+        assert_eq!(
+            prepare(declaration, &[], &[1]).err(),
+            Some(FabricRuntimeError::UnsupportedAccess {
+                pass: PassKey(1),
+                resource: RESOURCE,
+            }),
+            "{extent:?}, {dimension:?}, {mip_levels} mips"
+        );
+    }
+}
+
+#[test]
+fn runtime_validates_new_read_import_coverage_identity_and_depth_metadata() {
+    for access in [
+        AccessKind::UniformRead,
+        AccessKind::IndexRead,
+        AccessKind::DepthAttachmentRead,
+    ] {
+        let (template, external, import) = readonly_import_fixture(access);
+        let declaration = || {
+            compile_passes(
+                vec![pass(1, QueueClass::Graphics, vec![usage(RESOURCE, access)])],
+                &[template],
+                &[external],
+            )
+        };
+        assert_eq!(
+            prepare(declaration(), &[], &[1]).err(),
+            Some(FabricRuntimeError::MissingImport(ResourceId(0)))
+        );
+        assert_eq!(
+            prepare(declaration(), &[import, import], &[1]).err(),
+            Some(FabricRuntimeError::DuplicateImport(ResourceId(0)))
+        );
+        let invalid = match import {
+            RuntimeImport::Buffer { imported, .. } => vec![
+                RuntimeImport::Buffer {
+                    resource: ResourceId(0),
+                    imported: ImportedBuffer {
+                        buffer: BufferId::from_parts(7, 2),
+                        ..imported
+                    },
+                },
+                RuntimeImport::Texture {
+                    resource: ResourceId(0),
+                    imported: imported_texture(TextureId::from_parts(7, 1)),
+                },
+            ],
+            RuntimeImport::Texture { imported, .. } => vec![
+                RuntimeImport::Texture {
+                    resource: ResourceId(0),
+                    imported: ImportedTexture {
+                        texture: TextureId::from_parts(7, 2),
+                        ..imported
+                    },
+                },
+                RuntimeImport::Texture {
+                    resource: ResourceId(0),
+                    imported: ImportedTexture {
+                        mip_levels: 2,
+                        ..imported
+                    },
+                },
+                RuntimeImport::Texture {
+                    resource: ResourceId(0),
+                    imported: ImportedTexture {
+                        array_layers: 2,
+                        ..imported
+                    },
+                },
+                RuntimeImport::Buffer {
+                    resource: ResourceId(0),
+                    imported: imported_buffer(BufferId::from_parts(7, 1)),
+                },
+            ],
+        };
+        for import in invalid {
+            assert_eq!(
+                prepare(declaration(), &[import], &[1]).err(),
+                Some(FabricRuntimeError::InvalidImport(ResourceId(0))),
+                "{access:?}: {import:?}"
+            );
+        }
+        let runtime = prepare(declaration(), &[import], &[1]).unwrap();
+        let bound = runtime.declaration().passes()[0].accesses()[0];
+        assert_eq!((bound.input_ssa_version, bound.ssa_version), (0, 0));
+        assert_eq!((bound.input_content_version, bound.content_version), (5, 5));
+        assert_eq!((bound.input_producer, bound.producer), (None, None));
+        assert!(runtime.declaration().versions().is_empty());
+    }
+}
+
+#[test]
+fn runtime_new_reads_retain_initial_and_intermediate_ssa_without_writing() {
+    for read in [
+        AccessKind::UniformRead,
+        AccessKind::IndexRead,
+        AccessKind::DepthAttachmentRead,
+    ] {
+        let (mut template, mut external, import) = readonly_import_fixture(read);
+        let write = if let ResourceLayout::Buffer { usage, .. } = &mut template.layout {
+            *usage |= BufferUsages::STORAGE;
+            external.layout = template.layout;
+            AccessKind::StorageWrite
+        } else {
+            AccessKind::DepthAttachment
+        };
+        let access = |kind, input| ResourceUse {
+            input,
+            ..usage(RESOURCE, kind)
+        };
+        let declaration = compile_passes(
+            vec![
+                pass(
+                    40,
+                    QueueClass::Graphics,
+                    vec![access(read, ResourceInput::ProducedBy(PassKey(30)))],
+                ),
+                pass(
+                    30,
+                    QueueClass::Graphics,
+                    vec![access(write, ResourceInput::ProducedBy(PassKey(10)))],
+                ),
+                pass(
+                    20,
+                    QueueClass::Graphics,
+                    vec![access(read, ResourceInput::ProducedBy(PassKey(10)))],
+                ),
+                pass(
+                    10,
+                    QueueClass::Graphics,
+                    vec![access(write, ResourceInput::Initial)],
+                ),
+                pass(
+                    5,
+                    QueueClass::Graphics,
+                    vec![access(read, ResourceInput::Initial)],
+                ),
+            ],
+            &[template],
+            &[external],
+        );
+        let runtime = prepare(declaration, &[import], &[40, 30, 20, 10, 5]).unwrap();
+        let declaration = runtime.declaration();
+        assert_eq!(declaration.versions().len(), 2);
+        assert_eq!(
+            runtime
+                .plan()
+                .order
+                .iter()
+                .map(|&i| declaration.passes()[i].key())
+                .collect::<Vec<_>>(),
+            vec![
+                PassKey(5),
+                PassKey(10),
+                PassKey(20),
+                PassKey(30),
+                PassKey(40)
+            ]
+        );
+        for (key, version, producer) in [
+            (5, 0, None),
+            (20, 1, Some(PassKey(10))),
+            (40, 2, Some(PassKey(30))),
+        ] {
+            let (index, pass) = declaration
+                .passes()
+                .iter()
+                .enumerate()
+                .find(|(_, pass)| pass.key() == PassKey(key))
+                .unwrap();
+            let bound = pass.accesses()[0];
+            assert_eq!(
+                (bound.input_ssa_version, bound.ssa_version),
+                (version, version),
+                "{read:?}: {key}"
+            );
+            assert_eq!(
+                (bound.input_content_version, bound.content_version),
+                (5 + version, 5 + version)
+            );
+            assert_eq!((bound.input_producer, bound.producer), (producer, producer));
+            assert_eq!(runtime.plan().accesses[index][0].input_version, version);
+            assert_eq!(runtime.plan().accesses[index][0].output_version, None);
+        }
+        for (source, destination, before, after) in [
+            (5, 10, read, write),
+            (10, 20, write, read),
+            (20, 30, read, write),
+            (30, 40, write, read),
+        ] {
+            assert!(
+                declaration.barriers().iter().any(|barrier| {
+                    declaration.passes()[barrier.source.0 as usize].key() == PassKey(source)
+                        && declaration.passes()[barrier.destination.0 as usize].key()
+                            == PassKey(destination)
+                        && barrier.before == before
+                        && barrier.after == after
+                }),
+                "{read:?}: missing {source} -> {destination}"
+            );
+        }
+    }
+}
+
+#[test]
+fn runtime_mixed_new_reads_preserve_texture_first_ssa_and_import_first_indices() {
+    let (mut uniform, _, _) = readonly_import_fixture(AccessKind::UniformRead);
+    uniform.lifetime = ResourceLifetime::Transient;
+    if let ResourceLayout::Buffer { usage, .. } = &mut uniform.layout {
+        *usage |= BufferUsages::STORAGE;
+    }
+    let (mut depth, mut depth_binding, mut depth_import) =
+        readonly_import_fixture(AccessKind::DepthAttachmentRead);
+    depth.key = ResourceKey::of(FEATURE, 1);
+    depth_binding.key = depth.key;
+    if let RuntimeImport::Texture { resource, .. } = &mut depth_import {
+        *resource = ResourceId(1);
+    }
+    let (mut index, mut index_binding, mut index_import) =
+        readonly_import_fixture(AccessKind::IndexRead);
+    index.key = ResourceKey::of(FEATURE, 2);
+    index_binding.key = index.key;
+    if let RuntimeImport::Buffer { resource, .. } = &mut index_import {
+        *resource = ResourceId(2);
+    }
+    // Depth is never written/sampled: only DepthAttachmentRead can establish its namespace.
+    let declaration = compile_passes(
+        vec![
+            pass(
+                1,
+                QueueClass::Compute,
+                vec![usage(RESOURCE, AccessKind::StorageWrite)],
+            ),
+            pass(
+                2,
+                QueueClass::Graphics,
+                vec![
+                    usage(RESOURCE, AccessKind::UniformRead),
+                    usage(depth.key, AccessKind::DepthAttachmentRead),
+                    usage(index.key, AccessKind::IndexRead),
+                ],
+            ),
+        ],
+        &[uniform, depth, index],
+        &[depth_binding, index_binding],
+    );
+    let bound = declaration.passes()[1].accesses();
+    assert_eq!(
+        (
+            bound[0].input_ssa_version,
+            bound[0].ssa_version,
+            bound[0].content_version
+        ),
+        (1, 1, 1)
+    );
+    for access in &bound[1..] {
+        assert_eq!(
+            (
+                access.input_ssa_version,
+                access.ssa_version,
+                access.content_version
+            ),
+            (0, 0, 5)
+        );
+    }
+    assert_eq!(declaration.versions().len(), 1);
+    assert_eq!(declaration.versions()[0].key, RESOURCE);
+    let declared_accesses = &declaration.plan().accesses[1];
+    assert_eq!(declared_accesses.len(), 3);
+    assert!(matches!(
+        declared_accesses[0].resource,
+        LogicalResource::Texture(i) if i.get() == 0
+    ));
+    assert_eq!(declared_accesses[0].input_version, 0);
+    assert_eq!(declared_accesses[0].output_version, None);
+    assert!(declared_accesses
+        .iter()
+        .skip(1)
+        .all(|access| matches!(access.resource, LogicalResource::Buffer(_))));
+    let runtime = prepare(declaration, &[index_import, depth_import], &[2, 1]).unwrap();
+    let accesses = &runtime.plan().accesses[1];
+    assert_eq!(accesses.len(), 3);
+    assert!(matches!(accesses[0].resource, LogicalResource::Texture(i) if i.get() == 0));
+    assert!(matches!(accesses[1].resource, LogicalResource::Buffer(i) if i.get() == 1));
+    assert!(matches!(accesses[2].resource, LogicalResource::Buffer(i) if i.get() == 0));
+    assert_eq!(
+        accesses
+            .iter()
+            .map(|access| access.input_version)
+            .collect::<Vec<_>>(),
+        vec![0, 1, 0]
+    );
+    assert!(accesses
+        .iter()
+        .all(|access| access.output_version.is_none()));
+    assert_eq!(runtime.plan().logical_barriers.len(), 1);
+    assert!(
+        matches!(runtime.plan().logical_barriers[0].resource, LogicalResource::Buffer(i) if i.get() == 1)
+    );
+    assert!(
+        matches!(runtime.declaration().plan().logical_barriers[0].resource, LogicalResource::Buffer(i) if i.get() == 0)
+    );
+    assert!(runtime.plan().logical_barriers[0].queue_transfer);
+}
+
+#[test]
+fn runtime_depth_read_establishes_texture_namespace_for_generic_write_barrier() {
+    let (mut template, mut external, import) =
+        readonly_import_fixture(AccessKind::DepthAttachmentRead);
+    if let ResourceLayout::Texture { usage, .. } = &mut template.layout {
+        *usage |= TextureUsages::COPY_DST;
+    }
+    external.layout = template.layout;
+    let declaration = compile_passes(
+        vec![
+            pass(
+                1,
+                QueueClass::Graphics,
+                vec![ResourceUse {
+                    input: ResourceInput::Initial,
+                    ..usage(RESOURCE, AccessKind::DepthAttachmentRead)
+                }],
+            ),
+            pass(
+                2,
+                QueueClass::Transfer,
+                vec![ResourceUse {
+                    input: ResourceInput::Initial,
+                    ..usage(RESOURCE, AccessKind::TransferWrite)
+                }],
+            ),
+        ],
+        &[template],
+        &[external],
+    );
+    assert_eq!(declaration.versions().len(), 1);
+    assert_eq!(declaration.versions()[0].writer, PassKey(2));
+    assert_eq!(declaration.passes()[0].accesses()[0].input_ssa_version, 0);
+    assert_eq!(declaration.passes()[0].accesses()[0].ssa_version, 0);
+    assert!(matches!(
+        declaration.plan().accesses[0][0].resource,
+        LogicalResource::Texture(i) if i.get() == 0
+    ));
+    assert_eq!(declaration.plan().accesses[0][0].output_version, None);
+    assert!(declaration.barriers().iter().any(|barrier| {
+        barrier.resource == ResourceId(0)
+            && barrier.before == AccessKind::DepthAttachmentRead
+            && barrier.after == AccessKind::TransferWrite
+            && barrier.queue_transfer
+    }));
+
+    let runtime = prepare(declaration, &[import], &[1, 2]).unwrap();
+    assert!(matches!(
+        runtime.plan().accesses[0][0].resource,
+        LogicalResource::Texture(i) if i.get() == 0
+    ));
+    assert_eq!(runtime.plan().accesses[0][0].output_version, None);
+    assert_eq!(runtime.plan().accesses[1][0].output_version, Some(1));
 }
 
 fn duplicate_access_plan(

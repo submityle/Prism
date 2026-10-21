@@ -76,6 +76,8 @@ impl ResourceLayout {
     pub fn supports(self, access: AccessKind) -> bool {
         match self {
             Self::Buffer { usage, .. } => match access {
+                AccessKind::UniformRead => usage.contains(BufferUsages::UNIFORM),
+                AccessKind::IndexRead => usage.contains(BufferUsages::INDEX),
                 AccessKind::StorageRead | AccessKind::StorageWrite => {
                     usage.contains(BufferUsages::STORAGE)
                 }
@@ -100,12 +102,12 @@ impl ResourceLayout {
                 AccessKind::ColorAttachment => {
                     !format.is_depth_stencil() && usage.contains(TextureUsages::RENDER_ATTACHMENT)
                 }
-                AccessKind::DepthAttachment => {
+                AccessKind::DepthAttachment | AccessKind::DepthAttachmentRead => {
                     format.has_depth() && usage.contains(TextureUsages::RENDER_ATTACHMENT)
                 }
                 AccessKind::TransferRead => usage.contains(TextureUsages::COPY_SRC),
                 AccessKind::TransferWrite => usage.contains(TextureUsages::COPY_DST),
-                AccessKind::IndirectRead => false,
+                AccessKind::UniformRead | AccessKind::IndexRead | AccessKind::IndirectRead => false,
             },
         }
     }

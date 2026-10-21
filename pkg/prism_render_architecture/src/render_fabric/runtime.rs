@@ -5,9 +5,9 @@ use alloc::{boxed::Box, collections::BTreeMap, sync::Arc, vec, vec::Vec};
 use core::fmt;
 use prism_render_driver::{Extent3d, RenderDevice, RenderQueue};
 use prism_render_graph::{
-    full_range, BufferDesc, BufferHandle, BufferUse, CompileError, ExecuteContext, ExecutionPlan,
+    full_range, BufferDesc, BufferHandle, CompileError, ExecuteContext, ExecutionPlan,
     ImportedBuffer, ImportedTexture, LogicalResource, PassBuilder, PassFlags, PassKind,
-    PreparedGraph, RecordedGraph, RenderGraph, SizeClass, TextureDesc, TextureHandle, TextureUse,
+    PreparedGraph, RecordedGraph, RenderGraph, SizeClass, TextureDesc, TextureHandle,
 };
 
 /// Entry/exit state and default view supplied by the external resource owner.
@@ -31,6 +31,16 @@ impl RuntimeImport {
     }
 }
 
+/// Object imports authenticate the complete compiled semantic address and
+/// storage description, including buffer range and external content version.
+/// A raw ResourceId/physical ID alone cannot distinguish suballocated objects.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ObjectRuntimeImport {
+    pub address: ResourceAddress,
+    pub binding: FrameResourceBinding,
+    pub imported: RuntimeImport,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FabricRuntimeError {
     DuplicateRecorder(PassKey),
@@ -40,6 +50,7 @@ pub enum FabricRuntimeError {
     UnexpectedImport(ResourceId),
     MissingImport(ResourceId),
     InvalidImport(ResourceId),
+    InvalidObjectImport(ResourceAddress),
     UnsupportedAccess {
         pass: PassKey,
         resource: ResourceKey,
@@ -88,11 +99,69 @@ pub struct RuntimeResourceUse {
     pub handle: RuntimeResourceHandle,
 }
 
+/// One immutable frame allocation is shared with the compiled declaration.
+/// Stable domain indices cost one usize per item, rather than another payload
+/// copy or a full-frame scan every time a subsystem recorder visits its items.
+pub(super) struct RuntimeFrameItems {
+    items: Arc<[FrameRenderItem]>,
+    indices: Box<[usize]>,
+    offsets: [usize; 6],
+}
+
+impl RuntimeFrameItems {
+    pub(super) fn new(items: Arc<[FrameRenderItem]>) -> Self {
+        let mut offsets = [0; 6];
+        for item in items.iter() {
+            offsets[Self::domain_index(item.domain) + 1] += 1;
+        }
+        for domain in 1..offsets.len() {
+            offsets[domain] += offsets[domain - 1];
+        }
+        let mut next = offsets;
+        let mut indices = vec![0; items.len()].into_boxed_slice();
+        for (index, item) in items.iter().enumerate() {
+            let domain = Self::domain_index(item.domain);
+            indices[next[domain]] = index;
+            next[domain] += 1;
+        }
+        Self {
+            items,
+            indices,
+            offsets,
+        }
+    }
+
+    const fn domain_index(domain: RenderDomain) -> usize {
+        // Exhaustive on purpose: a new domain must update the index contract,
+        // not silently rely on enum discriminants or alias another domain.
+        match domain {
+            RenderDomain::Surface => 0,
+            RenderDomain::Particle => 1,
+            RenderDomain::Volume => 2,
+            RenderDomain::Hair => 3,
+            RenderDomain::Decal => 4,
+        }
+    }
+
+    pub(super) fn iter(
+        &self,
+        domain: Option<RenderDomain>,
+    ) -> impl ExactSizeIterator<Item = &FrameRenderItem> + DoubleEndedIterator + core::iter::FusedIterator
+    {
+        let indices = domain.map(|domain| {
+            let domain = Self::domain_index(domain);
+            &self.indices[self.offsets[domain]..self.offsets[domain + 1]]
+        });
+        let len = indices.map_or(self.items.len(), <[usize]>::len);
+        (0..len).map(move |index| &self.items[indices.map_or(index, |indices| indices[index])])
+    }
+}
+
 /// A recorder gets only its selected pass and already-lowered accesses.
 /// It cannot declare resources, replace accesses, or reselect variants.
 pub struct RuntimePassContext<'a, 'graph> {
     pass: &'a PassSpec,
-    items: &'a [FrameRenderItem],
+    items: &'a RuntimeFrameItems,
     accesses: &'a [RuntimeResourceUse],
     commands: &'a mut ExecuteContext<'graph>,
 }
@@ -106,17 +175,49 @@ impl<'a, 'graph> RuntimePassContext<'a, 'graph> {
 
     /// Subsystems see only their declared domain. Domainless services/responses
     /// may consume all items; no implicit Surface domain is introduced.
-    pub fn items(&self) -> impl Iterator<Item = &FrameRenderItem> {
-        self.items.iter().filter(|item| {
-            self.pass
-                .domain()
-                .is_none_or(|domain| item.domain == domain)
-        })
+    /// The index is built once per prepared frame; repeated visits allocate
+    /// nothing and touch only this domain's items, in their original order.
+    pub fn items(
+        &self,
+    ) -> impl ExactSizeIterator<Item = &FrameRenderItem> + DoubleEndedIterator + core::iter::FusedIterator
+    {
+        self.items.iter(self.pass.domain())
     }
 
-    /// Resolve the access ordinal in the original PassTemplate order.
+    /// Resolve the original template ordinal with explicit shared/object scope.
+    /// An absent instance never falls back to a shared or first-object access.
+    pub fn access(
+        &self,
+        identity: Option<ObjectResourceIdentity>,
+        ordinal: usize,
+    ) -> Option<&RuntimeResourceUse> {
+        self.accesses
+            .get(self.pass.access_index(identity, ordinal)?)
+    }
+    pub fn shared_access(&self, ordinal: usize) -> Option<&RuntimeResourceUse> {
+        self.access(None, ordinal)
+    }
+    pub fn object_access(
+        &self,
+        identity: ObjectResourceIdentity,
+        ordinal: usize,
+    ) -> Option<&RuntimeResourceUse> {
+        self.access(Some(identity), ordinal)
+    }
+
+    /// Shared-only access in the original PassTemplate order.
     pub fn buffer(&self, access: usize) -> Option<(BufferId, u64, u64)> {
-        match self.accesses.get(access)?.handle {
+        self.resolve_buffer(self.shared_access(access)?)
+    }
+    pub fn object_buffer(
+        &self,
+        identity: ObjectResourceIdentity,
+        ordinal: usize,
+    ) -> Option<(BufferId, u64, u64)> {
+        self.resolve_buffer(self.object_access(identity, ordinal)?)
+    }
+    fn resolve_buffer(&self, access: &RuntimeResourceUse) -> Option<(BufferId, u64, u64)> {
+        match access.handle {
             RuntimeResourceHandle::Buffer {
                 handle,
                 offset,
@@ -126,13 +227,36 @@ impl<'a, 'graph> RuntimePassContext<'a, 'graph> {
         }
     }
     pub fn texture(&self, access: usize) -> Option<TextureId> {
-        match self.accesses.get(access)?.handle {
+        self.resolve_texture(self.shared_access(access)?)
+    }
+    pub fn object_texture(
+        &self,
+        identity: ObjectResourceIdentity,
+        ordinal: usize,
+    ) -> Option<TextureId> {
+        self.resolve_texture(self.object_access(identity, ordinal)?)
+    }
+    fn resolve_texture(&self, access: &RuntimeResourceUse) -> Option<TextureId> {
+        match access.handle {
             RuntimeResourceHandle::Texture(handle) => Some(self.commands.texture(handle)),
             RuntimeResourceHandle::Buffer { .. } => None,
         }
     }
     pub fn texture_view(&self, access: usize) -> Option<prism_render_driver::TextureViewId> {
-        match self.accesses.get(access)?.handle {
+        self.resolve_texture_view(self.shared_access(access)?)
+    }
+    pub fn object_texture_view(
+        &self,
+        identity: ObjectResourceIdentity,
+        ordinal: usize,
+    ) -> Option<prism_render_driver::TextureViewId> {
+        self.resolve_texture_view(self.object_access(identity, ordinal)?)
+    }
+    fn resolve_texture_view(
+        &self,
+        access: &RuntimeResourceUse,
+    ) -> Option<prism_render_driver::TextureViewId> {
+        match access.handle {
             RuntimeResourceHandle::Texture(handle) => Some(self.commands.texture_view(handle)),
             RuntimeResourceHandle::Buffer { .. } => None,
         }
@@ -215,6 +339,42 @@ impl CompiledFeatureGraph {
         imports: &[RuntimeImport],
         recorders: Vec<RuntimePassBinding>,
     ) -> Result<RuntimeFeatureGraph, FabricRuntimeError> {
+        self.prepare_runtime_with_object_imports(extent, imports, &[], recorders)
+    }
+
+    /// Explicit object-import entrypoint. Recorder coverage remains per PassKey,
+    /// not per instance; existing graph origin/SSA/plan checks stay authoritative.
+    pub fn prepare_runtime_with_object_imports(
+        self,
+        extent: Extent3d,
+        shared_imports: &[RuntimeImport],
+        object_imports: &[ObjectRuntimeImport],
+        recorders: Vec<RuntimePassBinding>,
+    ) -> Result<RuntimeFeatureGraph, FabricRuntimeError> {
+        let mut imports = Vec::with_capacity(shared_imports.len() + object_imports.len());
+        for &entry in shared_imports {
+            if self
+                .resources()
+                .get(entry.resource().0 as usize)
+                .is_some_and(|resource| resource.identity.is_some())
+            {
+                return Err(FabricRuntimeError::UnexpectedImport(entry.resource()));
+            }
+            imports.push(entry);
+        }
+        for entry in object_imports {
+            let id = entry.imported.resource();
+            if entry.address.identity.is_none()
+                || self.resource_id_at(entry.address) != Some(id)
+                || self
+                    .resources()
+                    .get(id.0 as usize)
+                    .is_none_or(|resource| resource.external != Some(entry.binding))
+            {
+                return Err(FabricRuntimeError::InvalidObjectImport(entry.address));
+            }
+            imports.push(entry.imported);
+        }
         // Resolve stable keys once, then keep move-only recorders in pass order.
         // Coverage is O((P + R) log P), not a full pass scan per recorder.
         let pass_indices: BTreeMap<_, _> = self
@@ -240,7 +400,7 @@ impl CompiledFeatureGraph {
             validate_pass(pass, self.resources())?;
         }
         let mut imported = BTreeMap::new();
-        for &entry in imports {
+        for &entry in &imports {
             let id = entry.resource();
             let resource = self
                 .resources()
@@ -297,7 +457,7 @@ impl CompiledFeatureGraph {
             handles[resource.id.0 as usize] = Some(handle);
             versions[resource.id.0 as usize].insert(0, handle);
         }
-        let items: Arc<[FrameRenderItem]> = self.items().into();
+        let items = Arc::new(RuntimeFrameItems::new(self.shared_items()));
         for (index, (pass, callback)) in self.passes().iter().zip(callbacks).enumerate() {
             let callback = callback.expect("validated recorder coverage");
             let mut setup_error = None;
@@ -417,11 +577,12 @@ fn valid_import(entry: RuntimeImport, resource: &BoundResource) -> bool {
 fn validate_pass(pass: &PassSpec, resources: &[BoundResource]) -> Result<(), FabricRuntimeError> {
     let mut depths = 0;
     for usage in pass.accesses() {
-        let attachment = matches!(
-            usage.declaration.access,
-            AccessKind::ColorAttachment | AccessKind::DepthAttachment
-        );
-        depths += usize::from(usage.declaration.access == AccessKind::DepthAttachment);
+        let access = usage.declaration.access;
+        let attachment = access.is_attachment();
+        depths += usize::from(matches!(
+            access,
+            AccessKind::DepthAttachment | AccessKind::DepthAttachmentRead
+        ));
         let invalid_attachment = attachment
             && !matches!(
                 resources[usage.resource.0 as usize].template.layout,
@@ -432,7 +593,8 @@ fn validate_pass(pass: &PassSpec, resources: &[BoundResource]) -> Result<(), Fab
                     ..
                 }
             );
-        if attachment && pass.template().queue != QueueClass::Graphics
+        if (attachment || access == AccessKind::IndexRead)
+            && pass.template().queue != QueueClass::Graphics
             || invalid_attachment
             || depths > 1
             || pass.template().queue == QueueClass::Transfer
@@ -511,14 +673,7 @@ fn lower_access(
             offset,
             bytes,
         } => {
-            let usage = match access {
-                AccessKind::StorageRead => BufferUse::StorageRead,
-                AccessKind::StorageWrite => BufferUse::StorageWrite,
-                AccessKind::IndirectRead => BufferUse::Indirect,
-                AccessKind::TransferRead => BufferUse::CopySrc,
-                AccessKind::TransferWrite => BufferUse::CopyDst,
-                _ => unreachable!("all-variant layout validation"),
-            };
+            let usage = access.buffer_use().expect("all-variant layout validation");
             RuntimeResourceHandle::Buffer {
                 handle: builder.try_use_buffer(handle, usage)?,
                 offset,
@@ -526,16 +681,7 @@ fn lower_access(
             }
         }
         RuntimeResourceHandle::Texture(handle) => {
-            let usage = match access {
-                AccessKind::SampledRead => TextureUse::Sampled,
-                AccessKind::StorageRead => TextureUse::StorageRead,
-                AccessKind::StorageWrite => TextureUse::StorageWrite,
-                AccessKind::ColorAttachment => TextureUse::ColorAttachment,
-                AccessKind::DepthAttachment => TextureUse::DepthAttachment,
-                AccessKind::TransferRead => TextureUse::CopySrc,
-                AccessKind::TransferWrite => TextureUse::CopyDst,
-                AccessKind::IndirectRead => unreachable!("all-variant layout validation"),
-            };
+            let usage = access.texture_use().expect("all-variant layout validation");
             RuntimeResourceHandle::Texture(builder.try_access_texture(
                 handle,
                 usage,
@@ -566,10 +712,7 @@ pub(super) fn verify_plan(
 
     let mut declared_textures = vec![false; declaration.resources().len()];
     for usage in declaration.passes().iter().flat_map(PassSpec::accesses) {
-        if matches!(
-            usage.declaration.access,
-            AccessKind::SampledRead | AccessKind::ColorAttachment | AccessKind::DepthAttachment
-        ) {
+        if usage.declaration.access.requires_texture() {
             declared_textures[usage.resource.0 as usize] = true;
         }
     }

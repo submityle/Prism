@@ -1,14 +1,14 @@
-use alloc::vec::Vec;
+use alloc::{collections::BTreeMap, vec::Vec};
 use core::fmt;
 use core::num::NonZeroU32;
 
-use super::selection::SelectedFeature;
+use super::selection::{FeatureSelection, SelectedFeature};
 
 pub use crate::backend::capability::CapabilitySet;
 pub use crate::frame_graph::{AccessKind, QueueClass};
 use crate::shader_package::{
     ArtifactDigest, ModuleIdentity, PermutationError, PermutationIndex, PermutationKey,
-    PermutationSpace, ShaderPackageId,
+    PermutationSpace, PipelineStateHash, PsoCacheKey, ShaderPackageId,
 };
 
 /// Author-supplied, persistent semantic identity; never assigned by a catalog.
@@ -233,6 +233,16 @@ pub struct ShaderPermutationBinding {
     pub key: &'static PermutationKey,
 }
 
+impl ShaderPermutationBinding {
+    /// Resolves the selected key against the exact space declared by the
+    /// variant.  Callers must use this result when constructing a pipeline
+    /// identity; a dense index supplied independently is not accepted by the
+    /// Render Fabric binding layer.
+    pub fn checked_index(&self) -> Result<PermutationIndex, PermutationError> {
+        self.space.checked_index_of(self.key)
+    }
+}
+
 /// The pass identity exported by a Render Fabric variant's shader package.
 ///
 /// `PassTemplate` is the semantic declaration consumed by the fabric compiler;
@@ -323,6 +333,12 @@ pub enum ShaderBindingError {
     CacheIdentityMismatch {
         variant: VariantId,
     },
+    MissingVariantBinding {
+        variant: VariantId,
+    },
+    UnexpectedVariantBinding {
+        variant: VariantId,
+    },
     BuiltinVariantUnavailable {
         variant: VariantId,
     },
@@ -363,8 +379,7 @@ impl ShaderPackageBinding {
         }
         if let Some(permutation) = self.permutation {
             permutation
-                .space
-                .checked_index_of(permutation.key)
+                .checked_index()
                 .map_err(ShaderBindingError::Permutation)?;
         }
         if let Some(fallback) = self.module.full_lobe_fallback {
@@ -396,8 +411,7 @@ impl ShaderPackageBinding {
     pub fn permutation_index(&self) -> Result<PermutationIndex, ShaderBindingError> {
         match self.permutation {
             Some(permutation) => permutation
-                .space
-                .checked_index_of(permutation.key)
+                .checked_index()
                 .map_err(ShaderBindingError::Permutation),
             None => PermutationSpace::new([])
                 .check_index(0)
@@ -504,6 +518,9 @@ const fn access_tag(access: AccessKind) -> u8 {
         AccessKind::IndirectRead => 5,
         AccessKind::TransferRead => 6,
         AccessKind::TransferWrite => 7,
+        AccessKind::UniformRead => 8,
+        AccessKind::IndexRead => 9,
+        AccessKind::DepthAttachmentRead => 10,
     }
 }
 
@@ -590,8 +607,156 @@ impl SelectedFeatureShaderBinding {
         self.binding.identity_digest()
     }
 
+    /// Produces the cold PSO identity for this already-bound selection.
+    ///
+    /// This is intentionally the only architecture-side path from a selected
+    /// package binding to a `PsoCacheKey`: the package owns the permutation
+    /// space and the selected key, so consumers cannot substitute a different
+    /// dense index while retaining the same feature/variant identity.
+    pub fn pso_cache_key(
+        &self,
+        state: PipelineStateHash,
+    ) -> Result<PsoCacheKey, ShaderBindingError> {
+        Ok(PsoCacheKey::new(
+            self.package(),
+            self.permutation_index()?.get(),
+            state,
+        ))
+    }
+
     pub fn binding(&self) -> &ShaderPackageBinding {
         &self.binding
+    }
+}
+
+/// All shader package bindings derived from one immutable semantic selection.
+///
+/// The selection is retained alongside the package bindings so a production
+/// consumer can prove that it is using the same frozen result used by feature
+/// admission.  No method on this type performs feature resolution.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FrozenShaderSelection {
+    selection: FeatureSelection,
+    bindings: Vec<SelectedFeatureShaderBinding>,
+    identity: ArtifactDigest,
+}
+
+impl FrozenShaderSelection {
+    pub fn selection(&self) -> &FeatureSelection {
+        &self.selection
+    }
+
+    pub fn bindings(&self) -> &[SelectedFeatureShaderBinding] {
+        &self.bindings
+    }
+
+    pub fn binding(&self, feature: FeatureId) -> Option<&SelectedFeatureShaderBinding> {
+        self.bindings
+            .iter()
+            .find(|binding| binding.feature_id() == feature)
+    }
+
+    /// Stable identity for cache generations and diagnostics.  The encoding is
+    /// independent of declaration/registration order because the selection is
+    /// already emitted in the deterministic resolver order and bindings are
+    /// appended in that same order.
+    pub fn identity_digest(&self) -> ArtifactDigest {
+        self.identity
+    }
+
+    pub fn len(&self) -> usize {
+        self.bindings.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.bindings.is_empty()
+    }
+}
+
+impl FeatureSelection {
+    /// Binds every selected variant to a package declaration.  The map must
+    /// contain exactly the selected variants: missing or extra entries are
+    /// rejected so a consumer cannot silently fabricate a package/permutation
+    /// for a feature that was not part of the frozen selection.
+    pub fn bind_shader_packages(
+        &self,
+        packages: &BTreeMap<VariantId, ShaderPackageBinding>,
+    ) -> Result<FrozenShaderSelection, ShaderBindingError> {
+        let selected_variants: BTreeMap<_, _> = self
+            .selected()
+            .iter()
+            .map(|selected| (selected.variant_id(), selected))
+            .collect();
+        for variant in selected_variants.keys() {
+            if !packages.contains_key(variant) {
+                return Err(ShaderBindingError::MissingVariantBinding { variant: *variant });
+            }
+        }
+        for variant in packages.keys() {
+            if !selected_variants.contains_key(variant) {
+                return Err(ShaderBindingError::UnexpectedVariantBinding { variant: *variant });
+            }
+        }
+
+        let mut bindings = Vec::with_capacity(self.selected().len());
+        for selected in self.selected() {
+            bindings.push(
+                selected.bind_shader_package(
+                    packages
+                        .get(&selected.variant_id())
+                        .expect("validated selected variant binding")
+                        .clone(),
+                )?,
+            );
+        }
+        Ok(FrozenShaderSelection::new(self.clone(), bindings))
+    }
+
+    /// Binds the canonical package declaration for every selected built-in
+    /// variant.  This is a convenience over [`Self::bind_shader_packages`],
+    /// not a second selection or package resolver.
+    pub fn bind_builtin_shader_packages(
+        &self,
+    ) -> Result<FrozenShaderSelection, ShaderBindingError> {
+        let mut bindings = Vec::with_capacity(self.selected().len());
+        for selected in self.selected() {
+            bindings.push(selected.bind_builtin_shader_package()?);
+        }
+        Ok(FrozenShaderSelection::new(self.clone(), bindings))
+    }
+}
+
+impl FrozenShaderSelection {
+    fn new(selection: FeatureSelection, bindings: Vec<SelectedFeatureShaderBinding>) -> Self {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"PRISM-FROZEN-SHADER-SELECTION-V1");
+        bytes.extend_from_slice(&(selection.roots().ids().len() as u64).to_le_bytes());
+        for id in selection.roots().ids() {
+            bytes.extend_from_slice(&id.0.to_le_bytes());
+        }
+        bytes.extend_from_slice(&selection.device_caps().bits().to_le_bytes());
+        bytes.push(quality_tag(selection.quality()));
+        bytes.extend_from_slice(&(bindings.len() as u64).to_le_bytes());
+        for binding in &bindings {
+            bytes.extend_from_slice(&binding.feature_id().0.to_le_bytes());
+            bytes.extend_from_slice(&binding.variant_id().0.to_le_bytes());
+            bytes.extend_from_slice(&binding.identity_digest().0);
+        }
+        let identity = ArtifactDigest::from_bytes(&bytes);
+        Self {
+            selection,
+            bindings,
+            identity,
+        }
+    }
+}
+
+const fn quality_tag(quality: RenderQualityTier) -> u8 {
+    match quality {
+        RenderQualityTier::Low => 0,
+        RenderQualityTier::Medium => 1,
+        RenderQualityTier::High => 2,
+        RenderQualityTier::Ultra => 3,
     }
 }
 
@@ -607,7 +772,7 @@ pub enum ShaderBindingCacheStatus {
 /// before a new declaration can be admitted for the same semantic variant.
 #[derive(Clone, Debug, Default)]
 pub struct ShaderBindingCache {
-    entries: std::collections::BTreeMap<VariantId, ShaderPackageBinding>,
+    entries: BTreeMap<VariantId, ShaderPackageBinding>,
 }
 
 impl ShaderBindingCache {
@@ -675,6 +840,10 @@ pub struct FeatureDefinition {
     pub domain: Option<RenderDomain>,
     pub requires_services: ServiceSet,
     pub variants: &'static [FeatureVariant],
+    /// Disjoint groups of mutually exclusive execution paths. Selection freezes
+    /// all templates; a frame/stage may admit at most one member of each group.
+    /// A variant contains either every member of a group or none of them.
+    pub pass_alternatives: &'static [&'static [PassKey]],
 }
 
 impl FeatureDefinition {
@@ -690,6 +859,7 @@ impl FeatureDefinition {
             domain: Some(domain),
             requires_services,
             variants,
+            pass_alternatives: &[],
         }
     }
 
@@ -705,6 +875,7 @@ impl FeatureDefinition {
             domain: None,
             requires_services,
             variants,
+            pass_alternatives: &[],
         }
     }
 
@@ -719,6 +890,20 @@ impl FeatureDefinition {
             domain: None,
             requires_services,
             variants,
+            pass_alternatives: &[],
         }
+    }
+
+    pub const fn with_pass_alternatives(mut self, groups: &'static [&'static [PassKey]]) -> Self {
+        self.pass_alternatives = groups;
+        self
+    }
+
+    pub(crate) fn passes_are_alternatives(&self, first: PassKey, second: PassKey) -> bool {
+        first != second
+            && self
+                .pass_alternatives
+                .iter()
+                .any(|group| group.contains(&first) && group.contains(&second))
     }
 }

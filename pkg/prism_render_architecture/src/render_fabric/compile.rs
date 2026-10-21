@@ -5,6 +5,7 @@ use crate::frame_graph::*;
 use alloc::{
     collections::{BTreeMap, BTreeSet},
     format,
+    sync::Arc,
     vec::Vec,
 };
 use core::fmt;
@@ -28,6 +29,11 @@ pub enum FabricCompileError {
     MissingSelectedPass(PassKey),
     DuplicateActivePass(PassKey),
     ForeignActivePass(PassKey),
+    ConflictingAlternativePasses {
+        feature: FeatureId,
+        first: PassKey,
+        second: PassKey,
+    },
     DuplicateFulfilledDependency(PassKey),
     ForeignFulfilledDependency(PassKey),
     MissingActiveDependency {
@@ -87,6 +93,20 @@ pub enum FabricCompileError {
         object: RenderObjectId,
         declared: RenderDomain,
     },
+    InvalidObjectAccess {
+        pass: PassKey,
+        ordinal: usize,
+    },
+    InconsistentObjectResource(ResourceKey),
+    MissingObjectPayload {
+        resource: ResourceKey,
+        identity: ObjectResourceIdentity,
+    },
+    UnexpectedObjectBinding(ResourceAddress),
+    DuplicateObjectBinding(ResourceAddress),
+    MissingObjectBinding(ResourceAddress),
+    InvalidObjectBinding(ResourceAddress),
+    PayloadInstanceMismatch(ResourceKey),
     Graph(CompileError),
 }
 
@@ -107,6 +127,79 @@ impl From<CompileError> for FabricCompileError {
 pub struct ResourceTemplates<'a> {
     catalog: &'a FeatureCatalog,
     templates: BTreeMap<ResourceKey, ResourceTemplate>,
+    object_accesses: BTreeMap<(PassKey, usize), ObjectResourceAccess>,
+    object_resources:
+        BTreeMap<ResourceKey, (RenderDomain, ObjectLayoutPolicy, BTreeSet<PayloadRole>)>,
+}
+
+#[derive(Clone, Copy)]
+struct ExpandedResourceUse {
+    ordinal: usize,
+    declaration: ResourceUse,
+    address: ResourceAddress,
+}
+
+#[derive(Default)]
+struct IndexedObjectPayloads {
+    streams: BTreeMap<u32, BTreeSet<(RenderObjectId, u32)>>,
+    payloads: BTreeMap<(ResourceKey, ObjectResourceIdentity), ResourcePayload>,
+    item_indices: BTreeMap<ObjectResourceIdentity, usize>,
+}
+
+#[derive(Default)]
+struct ExternalBindingIndex {
+    buffers: BTreeMap<BufferId, BTreeMap<u64, IndexedBufferBinding>>,
+    textures: BTreeMap<TextureId, FrameResourceBinding>,
+}
+
+struct IndexedBufferBinding {
+    order: usize,
+    binding: FrameResourceBinding,
+}
+
+impl ExternalBindingIndex {
+    /// Only insert bindings after layout/range/version validation. Accepted
+    /// ranges are disjoint, so successful queries inspect at most a predecessor
+    /// plus an empty successor range. The first failure may visit O(n) ranges,
+    /// but aborts compilation: total alias validation remains O(n log n).
+    fn insert(
+        &mut self,
+        binding: FrameResourceBinding,
+        order: usize,
+    ) -> Result<(), FrameResourceBinding> {
+        match binding.physical {
+            PhysicalResource::Texture(id) => match self.textures.entry(id) {
+                alloc::collections::btree_map::Entry::Occupied(previous) => {
+                    return Err(*previous.get());
+                }
+                alloc::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(binding);
+                }
+            },
+            PhysicalResource::Buffer { id, offset } => {
+                let end = offset
+                    .checked_add(binding.layout.size().expect("validated layout"))
+                    .expect("validated binding range");
+                let ranges = self.buffers.entry(id).or_default();
+                let predecessor = ranges
+                    .range(..offset)
+                    .next_back()
+                    .map(|(_, previous)| previous)
+                    .filter(|previous| binding.overlaps(previous.binding));
+                // Preserve the old first-prior-resource diagnostic, not the
+                // lowest physical offset, if this range spans several entries.
+                let collision = predecessor
+                    .into_iter()
+                    .chain(ranges.range(offset..end).map(|(_, previous)| previous))
+                    .min_by_key(|previous| previous.order);
+                if let Some(previous) = collision {
+                    return Err(previous.binding);
+                }
+                ranges.insert(offset, IndexedBufferBinding { order, binding });
+            }
+        }
+        Ok(())
+    }
 }
 
 impl<'a> ResourceTemplates<'a> {
@@ -114,9 +207,21 @@ impl<'a> ResourceTemplates<'a> {
         catalog: &'a FeatureCatalog,
         templates: &[ResourceTemplate],
     ) -> Result<Self, FabricCompileError> {
+        Self::new_with_object_accesses(catalog, templates, &[])
+    }
+
+    /// Accesses absent from this explicit table retain shared semantics. A key
+    /// cannot mix shared and per-object uses, even across alternate variants.
+    pub fn new_with_object_accesses(
+        catalog: &'a FeatureCatalog,
+        templates: &[ResourceTemplate],
+        object_accesses: &[ObjectResourceAccess],
+    ) -> Result<Self, FabricCompileError> {
         let mut result = Self {
             catalog,
             templates: BTreeMap::new(),
+            object_accesses: BTreeMap::new(),
+            object_resources: BTreeMap::new(),
         };
         let declared: BTreeSet<_> = catalog.resources().collect();
         for &template in templates {
@@ -159,7 +264,125 @@ impl<'a> ResourceTemplates<'a> {
                 }
             }
         }
+        result.validate_object_accesses(object_accesses)?;
         Ok(result)
+    }
+
+    fn validate_object_accesses(
+        &mut self,
+        declarations: &[ObjectResourceAccess],
+    ) -> Result<(), FabricCompileError> {
+        // A catalog that validated role-separated writers binds that proof to
+        // the exact scopes. Do not let callers erase or relabel it at lowering.
+        if !self.catalog.object_accesses().is_empty() {
+            let mut supplied = BTreeMap::new();
+            for &scope in declarations {
+                if self
+                    .catalog
+                    .object_accesses()
+                    .get(&(scope.pass, scope.ordinal))
+                    != Some(&scope)
+                    || supplied
+                        .insert((scope.pass, scope.ordinal), scope)
+                        .is_some()
+                {
+                    return Err(FabricCompileError::InvalidObjectAccess {
+                        pass: scope.pass,
+                        ordinal: scope.ordinal,
+                    });
+                }
+            }
+            for &(pass, ordinal) in self.catalog.object_accesses().keys() {
+                if !supplied.contains_key(&(pass, ordinal)) {
+                    return Err(FabricCompileError::InvalidObjectAccess { pass, ordinal });
+                }
+            }
+        }
+        // Preserve the original first catalog occurrence for repeated pass
+        // declarations across variants, and declaration-order diagnostics.
+        let mut passes = BTreeMap::new();
+        for feature in self.catalog.features() {
+            for variant in feature.variants {
+                for pass in variant.passes {
+                    passes.entry(pass.id).or_insert((feature, pass));
+                }
+            }
+        }
+        for &declaration in declarations {
+            let invalid = FabricCompileError::InvalidObjectAccess {
+                pass: declaration.pass,
+                ordinal: declaration.ordinal,
+            };
+            let &(feature, pass) = passes
+                .get(&declaration.pass)
+                .ok_or_else(|| invalid.clone())?;
+            let domain = feature.domain.ok_or_else(|| invalid.clone())?;
+            let usage = pass
+                .accesses
+                .get(declaration.ordinal)
+                .ok_or_else(|| invalid.clone())?;
+            // Object storage belongs to a subsystem, never a shared service output.
+            let ResourceOwner::Feature(owner) = usage.key.owner() else {
+                return Err(invalid);
+            };
+            if self.catalog.feature(owner).and_then(|owner| owner.domain) != Some(domain)
+                || !declaration.layout.accepts(
+                    self.templates[&usage.key].layout,
+                    self.templates[&usage.key].layout,
+                )
+                || self
+                    .object_accesses
+                    .insert((declaration.pass, declaration.ordinal), declaration)
+                    .is_some()
+            {
+                return Err(invalid);
+            }
+            let scope = self
+                .object_resources
+                .entry(usage.key)
+                .or_insert_with(|| (domain, declaration.layout, BTreeSet::new()));
+            if scope.0 != domain || scope.1 != declaration.layout {
+                return Err(FabricCompileError::InconsistentObjectResource(usage.key));
+            }
+            scope.2.insert(declaration.role);
+        }
+        for feature in self.catalog.features() {
+            for variant in feature.variants {
+                for pass in variant.passes {
+                    for (ordinal, usage) in pass.accesses.iter().enumerate() {
+                        if self.object_resources.contains_key(&usage.key)
+                            && !self.object_accesses.contains_key(&(pass.id, ordinal))
+                        {
+                            return Err(FabricCompileError::InconsistentObjectResource(usage.key));
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Compiles object resources alongside explicit shared bindings. Each
+    /// selected pass remains one domain batch, regardless of instance count.
+    pub fn compile_with_instances(
+        &self,
+        selection: &FeatureSelection,
+        frame: u64,
+        shared: &[FrameResourceBinding],
+        objects: &[ObjectResourceBinding],
+        items: &[FrameRenderItem],
+        limits: GraphLimits,
+    ) -> Result<CompiledFeatureGraph, FabricCompileError> {
+        self.compile_selected(
+            selection,
+            frame,
+            shared,
+            objects,
+            items,
+            None,
+            &BTreeSet::new(),
+            limits,
+        )
     }
 
     pub fn compile(
@@ -174,6 +397,7 @@ impl<'a> ResourceTemplates<'a> {
             selection,
             frame,
             external,
+            &[],
             items,
             None,
             &BTreeSet::new(),
@@ -194,6 +418,54 @@ impl<'a> ResourceTemplates<'a> {
         selection: &FeatureSelection,
         frame: u64,
         external: &[FrameResourceBinding],
+        items: &[FrameRenderItem],
+        active_passes: &[PassKey],
+        fulfilled_dependencies: &[PassKey],
+        limits: GraphLimits,
+    ) -> Result<CompiledFeatureGraph, FabricCompileError> {
+        self.compile_active_with_instances(
+            selection,
+            frame,
+            external,
+            &[],
+            items,
+            active_passes,
+            fulfilled_dependencies,
+            limits,
+        )
+    }
+
+    pub fn compile_active_with_instances(
+        &self,
+        selection: &FeatureSelection,
+        frame: u64,
+        external: &[FrameResourceBinding],
+        object_external: &[ObjectResourceBinding],
+        items: &[FrameRenderItem],
+        active_passes: &[PassKey],
+        fulfilled_dependencies: &[PassKey],
+        limits: GraphLimits,
+    ) -> Result<CompiledFeatureGraph, FabricCompileError> {
+        self.compile_active_instanced(
+            selection,
+            frame,
+            external,
+            object_external,
+            items,
+            active_passes,
+            fulfilled_dependencies,
+            limits,
+        )
+    }
+
+    /// Instance-aware active slice; omitted dependencies must be explicitly
+    /// fulfilled, exactly as for the shared-only active compiler entrypoint.
+    pub fn compile_active_instanced(
+        &self,
+        selection: &FeatureSelection,
+        frame: u64,
+        external: &[FrameResourceBinding],
+        object_external: &[ObjectResourceBinding],
         items: &[FrameRenderItem],
         active_passes: &[PassKey],
         fulfilled_dependencies: &[PassKey],
@@ -226,6 +498,7 @@ impl<'a> ResourceTemplates<'a> {
             selection,
             frame,
             external,
+            object_external,
             items,
             Some(&active),
             &fulfilled,
@@ -238,20 +511,48 @@ impl<'a> ResourceTemplates<'a> {
         selection: &FeatureSelection,
         frame: u64,
         external: &[FrameResourceBinding],
+        object_external: &[ObjectResourceBinding],
         items: &[FrameRenderItem],
         active_passes: Option<&BTreeSet<PassKey>>,
         fulfilled_dependencies: &BTreeSet<PassKey>,
         limits: GraphLimits,
     ) -> Result<CompiledFeatureGraph, FabricCompileError> {
         for selected in selection.selected() {
-            let valid = self
+            let definition = self
                 .catalog
                 .feature(selected.feature_id())
-                .is_some_and(|feature| selected.matches_definition(feature));
-            if !valid {
-                return Err(FabricCompileError::ForeignSelection(selected.feature_id()));
+                .filter(|feature| selected.matches_definition(feature))
+                .ok_or(FabricCompileError::ForeignSelection(selected.feature_id()))?;
+            let selected_passes: BTreeSet<_> =
+                selected.passes().iter().map(|pass| pass.id).collect();
+            for group in definition.pass_alternatives {
+                // Catalog validation guarantees a variant contains the whole
+                // group or none. Check membership once, not per group member.
+                if !selected_passes.contains(&group[0]) {
+                    continue;
+                }
+                let mut first = None;
+                for &pass in *group {
+                    let admitted = active_passes.is_none_or(|active| active.contains(&pass))
+                        || fulfilled_dependencies.contains(&pass);
+                    if admitted {
+                        if let Some(first) = first {
+                            return Err(FabricCompileError::ConflictingAlternativePasses {
+                                feature: selected.feature_id(),
+                                first,
+                                second: pass,
+                            });
+                        }
+                        first = Some(pass);
+                    }
+                }
             }
         }
+        let IndexedObjectPayloads {
+            streams,
+            payloads: object_payloads,
+            item_indices,
+        } = self.index_object_payloads(items)?;
         let mut declarations = Vec::new();
         for feature in selection.selected() {
             for pass in feature.passes() {
@@ -267,21 +568,59 @@ impl<'a> ResourceTemplates<'a> {
             .enumerate()
             .map(|(index, (_, _, pass))| (pass.id, index))
             .collect();
-        let mut writers = BTreeMap::<ResourceKey, Vec<usize>>::new();
+        let mut expanded = Vec::with_capacity(declarations.len());
+        let mut writers = BTreeMap::<ResourceAddress, Vec<usize>>::new();
         let mut needed = BTreeSet::new();
         for (index, &(_, _, pass)) in declarations.iter().enumerate() {
-            GraphLimits::check_count("accesses", pass.accesses.len(), limits.accesses_per_pass)?;
-            for usage in pass.accesses {
-                let resource_frame = use_frame(frame, *usage)?;
-                let address = (usage.key, resource_frame);
+            let mut accesses = Vec::new();
+            for (ordinal, &usage) in pass.accesses.iter().enumerate() {
+                let resource_frame = use_frame(frame, usage)?;
+                let mut push = |identity| -> Result<(), FabricCompileError> {
+                    GraphLimits::check_count(
+                        "accesses",
+                        accesses.len() + 1,
+                        limits.accesses_per_pass,
+                    )?;
+                    accesses.push(ExpandedResourceUse {
+                        ordinal,
+                        declaration: usage,
+                        address: ResourceAddress {
+                            key: usage.key,
+                            frame: resource_frame,
+                            identity,
+                        },
+                    });
+                    Ok(())
+                };
+                if let Some(scope) = self.object_accesses.get(&(pass.id, ordinal)) {
+                    let domain = self.object_resources[&usage.key].0;
+                    for &(object, history_key) in
+                        streams.get(&(domain as u32)).into_iter().flatten()
+                    {
+                        let identity = ObjectResourceIdentity::new(object, history_key, scope.role);
+                        if !object_payloads.contains_key(&(usage.key, identity)) {
+                            return Err(FabricCompileError::MissingObjectPayload {
+                                resource: usage.key,
+                                identity,
+                            });
+                        }
+                        push(Some(identity))?;
+                    }
+                } else {
+                    push(None)?;
+                }
+            }
+            for usage in &accesses {
+                let address = usage.address;
                 if !needed.contains(&address) {
                     GraphLimits::check_count("resources", needed.len() + 1, limits.resources)?;
                     needed.insert(address);
                 }
-                if usage.access.writes() {
-                    writers.entry(usage.key).or_default().push(index);
+                if usage.declaration.access.writes() {
+                    writers.entry(address).or_default().push(index);
                 }
             }
+            expanded.push(accesses);
         }
 
         // Preserve the producer-first Fabric pass identity required by runtime
@@ -307,9 +646,13 @@ impl<'a> ResourceTemplates<'a> {
                     });
                 }
             }
-            let mut pass_sources = Vec::with_capacity(pass.accesses.len());
-            for usage in pass.accesses {
-                let resource_writers = writers.get(&usage.key).map(Vec::as_slice).unwrap_or(&[]);
+            let mut pass_sources = Vec::with_capacity(expanded[index].len());
+            for expanded_usage in &expanded[index] {
+                let usage = &expanded_usage.declaration;
+                let resource_writers = writers
+                    .get(&expanded_usage.address)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
                 let source = if usage.frame_lag.is_some() {
                     if matches!(usage.input, ResourceInput::ProducedBy(_)) {
                         return Err(FabricCompileError::HistoryProducer {
@@ -336,7 +679,9 @@ impl<'a> ResourceTemplates<'a> {
                                 .get(&producer)
                                 .copied()
                                 .filter(|source| {
-                                    *source != index && resource_writers.contains(source)
+                                    // Writers are appended in declaration order.
+                                    *source != index
+                                        && resource_writers.binary_search(source).is_ok()
                                 })
                                 .ok_or(FabricCompileError::InvalidProducer {
                                     pass: pass.id,
@@ -360,7 +705,7 @@ impl<'a> ResourceTemplates<'a> {
                 {
                     return Err(FabricCompileError::MissingProducer(usage.key));
                 }
-                if usage.access.writes() && !successors.insert((usage.key, source)) {
+                if usage.access.writes() && !successors.insert((expanded_usage.address, source)) {
                     return Err(FabricCompileError::MultipleWriters(usage.key));
                 }
                 pass_sources.push(source);
@@ -391,7 +736,7 @@ impl<'a> ResourceTemplates<'a> {
                     frame: binding.frame,
                 });
             };
-            if !needed.contains(&(binding.key, binding.frame))
+            if !needed.contains(&ResourceAddress::shared(binding.key, binding.frame))
                 || template.lifetime == ResourceLifetime::Transient
             {
                 return Err(FabricCompileError::UnexpectedBinding {
@@ -401,7 +746,7 @@ impl<'a> ResourceTemplates<'a> {
             }
         }
         for &binding in external {
-            let address = (binding.key, binding.frame);
+            let address = ResourceAddress::shared(binding.key, binding.frame);
             if supplied.insert(address, binding).is_some() {
                 return Err(FabricCompileError::DuplicateBinding {
                     resource: binding.key,
@@ -409,25 +754,69 @@ impl<'a> ResourceTemplates<'a> {
                 });
             }
         }
+        for &object in object_external {
+            let address = object.address();
+            if !needed.contains(&address)
+                || self
+                    .templates
+                    .get(&address.key)
+                    .is_none_or(|template| template.lifetime == ResourceLifetime::Transient)
+            {
+                return Err(FabricCompileError::UnexpectedObjectBinding(address));
+            }
+            if supplied.insert(address, object.binding).is_some() {
+                return Err(FabricCompileError::DuplicateObjectBinding(address));
+            }
+        }
         let mut graph = GpuFrameGraphBuilder::with_limits(limits);
         let mut resources: Vec<BoundResource> = Vec::new();
         let mut ids = BTreeMap::new();
-        for (key, resource_frame) in needed {
-            let template = *self
+        let mut binding_index = ExternalBindingIndex::default();
+        for address in needed {
+            let ResourceAddress {
+                key,
+                frame: resource_frame,
+                identity,
+            } = address;
+            let mut template = *self
                 .templates
                 .get(&key)
                 .ok_or(FabricCompileError::MissingTemplate(key))?;
             let history = resource_frame != frame;
+            if let Some(identity) = identity {
+                let layout = if history {
+                    supplied
+                        .get(&address)
+                        .ok_or(FabricCompileError::MissingObjectBinding(address))?
+                        .layout
+                } else {
+                    object_payloads[&(key, identity)].layout
+                };
+                if !self.object_resources[&key]
+                    .1
+                    .accepts(template.layout, layout)
+                {
+                    return Err(FabricCompileError::InvalidObjectBinding(address));
+                }
+                template.layout = layout;
+            }
             let binding = if template.lifetime == ResourceLifetime::Transient {
                 None
             } else {
-                let binding = supplied.get(&(key, resource_frame)).copied().ok_or(
-                    FabricCompileError::MissingBinding {
-                        resource: key,
-                        frame: resource_frame,
-                    },
-                )?;
+                let binding = supplied.get(&address).copied().ok_or_else(|| {
+                    if identity.is_some() {
+                        FabricCompileError::MissingObjectBinding(address)
+                    } else {
+                        FabricCompileError::MissingBinding {
+                            resource: key,
+                            frame: resource_frame,
+                        }
+                    }
+                })?;
                 if !binding.matches(template) {
+                    if identity.is_some() {
+                        return Err(FabricCompileError::InvalidObjectBinding(address));
+                    }
                     return Err(FabricCompileError::InvalidBinding {
                         resource: key,
                         frame: resource_frame,
@@ -440,22 +829,18 @@ impl<'a> ResourceTemplates<'a> {
                     }
                     .into());
                 }
-                for previous in &resources {
-                    if let Some(other) = previous.external
-                        && binding.overlaps(other)
-                    {
-                        return Err(FabricCompileError::OverlappingBindings {
-                            first: other.key,
-                            first_frame: other.frame,
-                            second: key,
-                            second_frame: resource_frame,
-                        });
-                    }
+                if let Err(other) = binding_index.insert(binding, resources.len()) {
+                    return Err(FabricCompileError::OverlappingBindings {
+                        first: other.key,
+                        first_frame: other.frame,
+                        second: key,
+                        second_frame: resource_frame,
+                    });
                 }
                 Some(binding)
             };
             let descriptor = ResourceDescriptor {
-                name: format!("{:?}@{}", key, resource_frame).into(),
+                name: format!("{:?}", address).into(),
                 lifetime: if history {
                     ResourceLifetime::Imported
                 } else {
@@ -465,16 +850,20 @@ impl<'a> ResourceTemplates<'a> {
                 alignment: template.alignment,
             };
             let id = graph.try_add_resource(descriptor.clone())?;
-            ids.insert((key, resource_frame), id);
+            ids.insert(address, id);
             resources.push(BoundResource {
                 id,
                 key,
                 frame: resource_frame,
+                identity,
                 template,
                 descriptor,
                 external: binding,
             });
         }
+        // The physical-range index is validation-only; release it before the
+        // graph compiler allocates its SSA/hazard tables.
+        drop(binding_index);
         let admitted_indices: BTreeMap<_, _> = admission_order
             .iter()
             .enumerate()
@@ -483,16 +872,15 @@ impl<'a> ResourceTemplates<'a> {
         let mut passes = Vec::new();
         for &admitted in &admission_order {
             let (feature, variant, template) = declarations[admitted];
-            let accesses = template
-                .accesses
+            let accesses = expanded[admitted]
                 .iter()
                 .map(|usage| {
                     Ok(ResourceAccess {
                         resource: ids
-                            .get(&(usage.key, use_frame(frame, *usage)?))
+                            .get(&usage.address)
                             .copied()
-                            .ok_or(FabricCompileError::MissingTemplate(usage.key))?,
-                        kind: usage.access,
+                            .ok_or(FabricCompileError::MissingTemplate(usage.declaration.key))?,
+                        kind: usage.declaration.access,
                     })
                 })
                 .collect::<Result<Vec<_>, FabricCompileError>>()?;
@@ -516,6 +904,11 @@ impl<'a> ResourceTemplates<'a> {
                     .expect("validated selection")
                     .domain,
                 template,
+                template_ordinals: expanded[admitted]
+                    .iter()
+                    .map(|usage| usage.ordinal)
+                    .collect(),
+                access_indices: BTreeMap::new(),
                 descriptor,
                 bound_accesses: Vec::new(),
             });
@@ -526,9 +919,12 @@ impl<'a> ResourceTemplates<'a> {
         let access_orders = normalized_access_orders(&passes, resources.len());
         let mut writer_accesses = BTreeMap::new();
         for pass in &passes {
-            for (ordinal, usage) in pass.template.accesses.iter().enumerate() {
-                if usage.access.writes() {
-                    writer_accesses.insert((pass.key(), usage.key), (pass.id, ordinal));
+            for (ordinal, usage) in pass.descriptor.accesses.iter().enumerate() {
+                if usage.kind.writes() {
+                    writer_accesses.insert(
+                        (pass.key(), resources[usage.resource.0 as usize].address()),
+                        (pass.id, ordinal),
+                    );
                 }
             }
         }
@@ -537,19 +933,19 @@ impl<'a> ResourceTemplates<'a> {
             .map(|&original| {
                 sources[original]
                     .iter()
-                    .zip(declarations[original].2.accesses)
+                    .zip(&expanded[original])
                     .map(|(source, usage)| {
                         let Some(source) = source else {
                             return Ok(AccessInput::Version(0));
                         };
                         let producer = declarations[*source].2.id;
-                        let &(pass, access) = writer_accesses.get(&(producer, usage.key)).ok_or(
-                            FabricCompileError::InvalidProducer {
+                        let &(pass, access) = writer_accesses
+                            .get(&(producer, usage.address))
+                            .ok_or(FabricCompileError::InvalidProducer {
                                 pass: declarations[original].2.id,
-                                resource: usage.key,
+                                resource: usage.declaration.key,
                                 producer,
-                            },
-                        )?;
+                            })?;
                         Ok(AccessInput::ProducedBy { pass, access })
                     })
                     .collect::<Result<Vec<_>, FabricCompileError>>()
@@ -566,6 +962,10 @@ impl<'a> ResourceTemplates<'a> {
                 let Some(ssa_version) = access.output_version else {
                     continue;
                 };
+                debug_assert!(
+                    pass.descriptor.accesses[ordinal].kind.writes(),
+                    "only writes may produce an SSA output version"
+                );
                 let resource = &resources[pass.descriptor.accesses[ordinal].resource.0 as usize];
                 let base = resource.external.map_or(0, |binding| binding.version);
                 let content_version = base
@@ -578,6 +978,7 @@ impl<'a> ResourceTemplates<'a> {
                 versions.push(FrameResourceVersion {
                     key: resource.key,
                     frame: resource.frame,
+                    identity: resource.identity,
                     resource: resource.id,
                     writer: passes[pass_index].key(),
                     ssa_version,
@@ -592,17 +993,17 @@ impl<'a> ResourceTemplates<'a> {
             .map(|version| ((version.resource.0, version.ssa_version), *version))
             .collect();
         for (index, pass) in passes.iter_mut().enumerate() {
-            let mut authority = vec![None; pass.template.accesses.len()];
+            let mut authority = vec![None; pass.descriptor.accesses.len()];
             for (&ordinal, access) in access_orders[index].iter().zip(&plan.accesses[index]) {
                 authority[ordinal] = Some(*access);
             }
             pass.bound_accesses = pass
-                .template
-                .accesses
+                .template_ordinals
                 .iter()
                 .zip(&pass.descriptor.accesses)
                 .zip(authority)
-                .map(|((&declaration, access), authority)| {
+                .map(|((&template_ordinal, access), authority)| {
+                    let declaration = pass.template.accesses[template_ordinal];
                     let authority = authority.expect("authority preserves admitted accesses");
                     let resource = &resources[access.resource.0 as usize];
                     let version = authority.output_version.unwrap_or(authority.input_version);
@@ -610,6 +1011,8 @@ impl<'a> ResourceTemplates<'a> {
                     let input = outputs.get(&(access.resource.0, authority.input_version));
                     BoundResourceUse {
                         declaration,
+                        template_ordinal,
+                        identity: resource.identity,
                         resource: resource.id,
                         frame: resource.frame,
                         input_ssa_version: authority.input_version,
@@ -627,6 +1030,12 @@ impl<'a> ResourceTemplates<'a> {
                     }
                 })
                 .collect();
+            pass.access_indices = pass
+                .bound_accesses
+                .iter()
+                .enumerate()
+                .map(|(index, usage)| ((usage.identity, usage.template_ordinal), index))
+                .collect();
         }
         let barriers = project_barriers(&plan, &passes, resources.len());
         let mut compiled = CompiledFeatureGraph {
@@ -639,7 +1048,8 @@ impl<'a> ResourceTemplates<'a> {
             plan,
             barriers,
             barriers_by_destination: Vec::new(),
-            items: Vec::new(),
+            items: Arc::from(items),
+            item_indices,
         };
         compiled.barriers_by_destination = vec![Vec::new(); compiled.plan.declared_pass_count];
         for (index, barrier) in compiled.barriers.iter().enumerate() {
@@ -655,24 +1065,30 @@ impl<'a> ResourceTemplates<'a> {
                 pass.accesses()
                     .iter()
                     .filter(|access| access.frame == frame)
-                    .map(move |access| (access.declaration.key, domain as u32))
+                    .map(move |access| (access.address(), domain as u32))
             })
             .collect();
-        let mut payload_roles = BTreeSet::new();
         for item in items {
+            self.validate_payload(&compiled, &payload_accesses, item)?;
+        }
+        Ok(compiled)
+    }
+
+    fn index_object_payloads(
+        &self,
+        items: &[FrameRenderItem],
+    ) -> Result<IndexedObjectPayloads, FabricCompileError> {
+        let mut indexed = IndexedObjectPayloads::default();
+        for (index, item) in items.iter().enumerate() {
             if item.object_id.domain() != item.domain {
                 return Err(FabricCompileError::DomainIdentityMismatch {
                     object: item.object_id,
                     declared: item.domain,
                 });
             }
-            let identity = (
-                item.object_id,
-                item.domain as u32,
-                item.history_key,
-                item.payload_role(),
-            );
-            if !payload_roles.insert(identity) {
+            let identity =
+                ObjectResourceIdentity::new(item.object_id, item.history_key, item.payload_role());
+            if indexed.item_indices.insert(identity, index).is_some() {
                 return Err(FabricCompileError::DuplicatePayloadRole {
                     object: item.object_id,
                     domain: item.domain,
@@ -680,28 +1096,61 @@ impl<'a> ResourceTemplates<'a> {
                     role: item.payload_role(),
                 });
             }
-            self.validate_payload(&compiled, &payload_accesses, item)?;
+            indexed
+                .streams
+                .entry(item.domain as u32)
+                .or_default()
+                .insert((item.object_id, item.history_key));
+            let DomainPayload::Resource(payload) = item.payload else {
+                continue;
+            };
+            let Some((domain, policy, roles)) = self.object_resources.get(&payload.resource) else {
+                continue;
+            };
+            if *domain != item.domain || !roles.contains(&payload.role) {
+                return Err(FabricCompileError::PayloadInstanceMismatch(
+                    payload.resource,
+                ));
+            }
+            let template = self.templates[&payload.resource];
+            if payload.lifetime != template.lifetime
+                || payload.alignment != template.alignment
+                || payload.layout.size() != Some(payload.size)
+                || !policy.accepts(template.layout, payload.layout)
+            {
+                return Err(FabricCompileError::PayloadLayoutMismatch(payload.resource));
+            }
+            indexed
+                .payloads
+                .insert((payload.resource, identity), payload);
         }
-        compiled.items.extend_from_slice(items);
-        Ok(compiled)
+        Ok(indexed)
     }
 
     fn validate_payload(
         &self,
         graph: &CompiledFeatureGraph,
-        accesses: &BTreeSet<(ResourceKey, u32)>,
+        accesses: &BTreeSet<(ResourceAddress, u32)>,
         item: &FrameRenderItem,
     ) -> Result<(), FabricCompileError> {
         if let DomainPayload::Resource(payload) = item.payload {
             // A current-frame domain payload must actually occur in a pass, not
             // merely be present in the resource declaration table/history map.
-            if graph.resource_id(payload.resource, graph.frame).is_none() {
-                return Err(FabricCompileError::PayloadNotReferenced(payload.resource));
-            }
-            let template = *self
-                .templates
-                .get(&payload.resource)
-                .ok_or(FabricCompileError::MissingTemplate(payload.resource))?;
+            let identity = self
+                .object_resources
+                .contains_key(&payload.resource)
+                .then(|| {
+                    ObjectResourceIdentity::new(item.object_id, item.history_key, payload.role)
+                });
+            let address = ResourceAddress {
+                key: payload.resource,
+                frame: graph.frame,
+                identity,
+            };
+            let id = graph
+                .resource_id_at(address)
+                .ok_or(FabricCompileError::PayloadNotReferenced(payload.resource))?;
+            let template = graph.resources[id.0 as usize].template;
             if payload.lifetime != template.lifetime
                 || payload.layout != template.layout
                 || payload.size != template.layout.size().expect("validated layout")
@@ -715,7 +1164,7 @@ impl<'a> ResourceTemplates<'a> {
             {
                 return Err(FabricCompileError::PayloadDomainMismatch(payload.resource));
             }
-            if !accesses.contains(&(payload.resource, item.domain as u32)) {
+            if !accesses.contains(&(address, item.domain as u32)) {
                 return Err(FabricCompileError::PayloadNotReferenced(payload.resource));
             }
         }
@@ -738,16 +1187,18 @@ fn use_frame(frame: u64, usage: ResourceUse) -> Result<u64, FabricCompileError> 
 /// Original access ordinals in the authority's texture-then-buffer order.
 /// Resource namespace inference mirrors the declaration frontend; it does not
 /// assign versions or derive dependencies.
-fn normalized_access_orders(passes: &[PassSpec], resource_count: usize) -> Vec<Vec<usize>> {
+fn texture_resources(passes: &[PassSpec], resource_count: usize) -> Vec<bool> {
     let mut textures = vec![false; resource_count];
     for access in passes.iter().flat_map(|pass| &pass.descriptor.accesses) {
-        if matches!(
-            access.kind,
-            AccessKind::SampledRead | AccessKind::ColorAttachment | AccessKind::DepthAttachment
-        ) {
+        if access.kind.requires_texture() {
             textures[access.resource.0 as usize] = true;
         }
     }
+    textures
+}
+
+fn normalized_access_orders(passes: &[PassSpec], resource_count: usize) -> Vec<Vec<usize>> {
+    let textures = texture_resources(passes, resource_count);
     passes
         .iter()
         .map(|pass| {
@@ -774,9 +1225,19 @@ pub struct BoundResource {
     pub id: ResourceId,
     pub key: ResourceKey,
     pub frame: u64,
+    pub identity: Option<ObjectResourceIdentity>,
     pub template: ResourceTemplate,
     pub descriptor: ResourceDescriptor,
     pub external: Option<FrameResourceBinding>,
+}
+impl BoundResource {
+    pub const fn address(&self) -> ResourceAddress {
+        ResourceAddress {
+            key: self.key,
+            frame: self.frame,
+            identity: self.identity,
+        }
+    }
 }
 
 /// The only bound pass representation; constructed from a selected template.
@@ -787,6 +1248,8 @@ pub struct PassSpec {
     variant: VariantId,
     domain: Option<RenderDomain>,
     template: &'static PassTemplate,
+    template_ordinals: Vec<usize>,
+    access_indices: BTreeMap<(Option<ObjectResourceIdentity>, usize), usize>,
     descriptor: PassDescriptor,
     bound_accesses: Vec<BoundResourceUse>,
 }
@@ -816,6 +1279,23 @@ impl PassSpec {
     pub fn accesses(&self) -> &[BoundResourceUse] {
         &self.bound_accesses
     }
+    /// Lookup is by original template ordinal, never an expanded-vector index.
+    /// `None` explicitly requests shared storage.
+    pub fn access(
+        &self,
+        identity: Option<ObjectResourceIdentity>,
+        ordinal: usize,
+    ) -> Option<&BoundResourceUse> {
+        self.bound_accesses
+            .get(self.access_index(identity, ordinal)?)
+    }
+    pub(super) fn access_index(
+        &self,
+        identity: Option<ObjectResourceIdentity>,
+        ordinal: usize,
+    ) -> Option<usize> {
+        self.access_indices.get(&(identity, ordinal)).copied()
+    }
 }
 
 /// Read provenance or write output from the compiled authority, with the frame
@@ -823,6 +1303,8 @@ impl PassSpec {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BoundResourceUse {
     pub declaration: ResourceUse,
+    pub template_ordinal: usize,
+    pub identity: Option<ObjectResourceIdentity>,
     pub resource: ResourceId,
     pub frame: u64,
     /// Input observed before this access; writes retain their predecessor too.
@@ -834,15 +1316,34 @@ pub struct BoundResourceUse {
     /// None denotes imported initial/history contents, never an implicit pass.
     pub producer: Option<PassKey>,
 }
+impl BoundResourceUse {
+    pub const fn address(self) -> ResourceAddress {
+        ResourceAddress {
+            key: self.declaration.key,
+            frame: self.frame,
+            identity: self.identity,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FrameResourceVersion {
     pub key: ResourceKey,
     pub frame: u64,
+    pub identity: Option<ObjectResourceIdentity>,
     pub resource: ResourceId,
     pub writer: PassKey,
     pub ssa_version: u32,
     pub content_version: u32,
+}
+impl FrameResourceVersion {
+    pub const fn address(self) -> ResourceAddress {
+        ResourceAddress {
+            key: self.key,
+            frame: self.frame,
+            identity: self.identity,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -850,13 +1351,14 @@ pub struct CompiledFeatureGraph {
     frame: u64,
     limits: GraphLimits,
     resources: Vec<BoundResource>,
-    ids: BTreeMap<(ResourceKey, u64), ResourceId>,
+    ids: BTreeMap<ResourceAddress, ResourceId>,
     passes: Vec<PassSpec>,
     versions: Vec<FrameResourceVersion>,
     plan: ExecutionPlan,
     barriers: Vec<Barrier>,
     barriers_by_destination: Vec<Vec<usize>>,
-    items: Vec<FrameRenderItem>,
+    items: Arc<[FrameRenderItem]>,
+    item_indices: BTreeMap<ObjectResourceIdentity, usize>,
 }
 impl CompiledFeatureGraph {
     pub const fn frame(&self) -> u64 {
@@ -866,7 +1368,18 @@ impl CompiledFeatureGraph {
         self.limits
     }
     pub fn resource_id(&self, key: ResourceKey, frame: u64) -> Option<ResourceId> {
-        self.ids.get(&(key, frame)).copied()
+        self.resource_id_at(ResourceAddress::shared(key, frame))
+    }
+    pub fn resource_id_at(&self, address: ResourceAddress) -> Option<ResourceId> {
+        self.ids.get(&address).copied()
+    }
+    pub fn object_resource_id(
+        &self,
+        key: ResourceKey,
+        frame: u64,
+        identity: ObjectResourceIdentity,
+    ) -> Option<ResourceId> {
+        self.resource_id_at(ResourceAddress::object(key, frame, identity))
     }
     pub fn resources(&self) -> &[BoundResource] {
         &self.resources
@@ -879,6 +1392,19 @@ impl CompiledFeatureGraph {
     }
     pub fn items(&self) -> &[FrameRenderItem] {
         &self.items
+    }
+    pub(super) fn shared_items(&self) -> Arc<[FrameRenderItem]> {
+        Arc::clone(&self.items)
+    }
+    /// O(log n) identity lookup followed by full validated item equality,
+    /// including payload metadata/value and motion. Float equality retains the
+    /// same semantics as `items().contains(item)`; payloads need not implement Ord.
+    pub fn contains_item(&self, item: &FrameRenderItem) -> bool {
+        let identity =
+            ObjectResourceIdentity::new(item.object_id, item.history_key, item.payload_role());
+        self.item_indices
+            .get(&identity)
+            .is_some_and(|&index| self.items[index] == *item)
     }
     pub const fn plan(&self) -> &ExecutionPlan {
         &self.plan
@@ -925,18 +1451,7 @@ fn project_barriers(
     passes: &[PassSpec],
     resource_count: usize,
 ) -> Vec<Barrier> {
-    let mut resource_is_texture = vec![false; resource_count];
-    for access in passes
-        .iter()
-        .flat_map(|pass| pass.descriptor.accesses.iter())
-    {
-        if matches!(
-            access.kind,
-            AccessKind::SampledRead | AccessKind::ColorAttachment | AccessKind::DepthAttachment
-        ) {
-            resource_is_texture[access.resource.0 as usize] = true;
-        }
-    }
+    let resource_is_texture = texture_resources(passes, resource_count);
     // `ExecutionPlan` keeps texture and buffer resource indices in separate
     // namespaces. `PassSpec` still exposes the feature-graph's single
     // ResourceId namespace, so build dense namespace-local projections before
@@ -987,4 +1502,118 @@ fn project_barriers(
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod binding_index_tests {
+    use super::*;
+
+    #[test]
+    fn indexed_alias_diagnostics_match_linear_reference() {
+        for permutation in [1, 3, 17, 63] {
+            let mut index = ExternalBindingIndex::default();
+            let mut accepted: Vec<FrameResourceBinding> = Vec::new();
+            // All permutations visit the same disjoint ranges, but in different
+            // insertion orders. Later candidates cross several of those ranges.
+            for ordinal in 0..384_u64 {
+                let (offset, bytes) = if ordinal < 64 {
+                    ((ordinal * permutation % 64) * 64, 32)
+                } else {
+                    ((ordinal * 113 % 270) * 16, (1 + ordinal % 23) * 16)
+                };
+                let binding = FrameResourceBinding {
+                    key: ResourceKey::of(FeatureId(700), ordinal as u16),
+                    frame: ordinal,
+                    version: 0,
+                    physical: PhysicalResource::Buffer {
+                        id: BufferId::from_parts(1, 1),
+                        offset,
+                    },
+                    layout: ResourceLayout::Buffer {
+                        bytes,
+                        usage: BufferUsages::STORAGE,
+                    },
+                    alignment: 16,
+                };
+                let expected = accepted
+                    .iter()
+                    .copied()
+                    .find(|&other| binding.overlaps(other));
+                assert_eq!(index.insert(binding, accepted.len()).err(), expected);
+                if expected.is_none() {
+                    accepted.push(binding);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn alias_index_keeps_touching_ranges_generations_and_resource_kinds_distinct() {
+        let mut index = ExternalBindingIndex::default();
+        let first = FrameResourceBinding {
+            key: ResourceKey::of(FeatureId(700), 0),
+            frame: 10,
+            version: 0,
+            physical: PhysicalResource::Buffer {
+                id: BufferId::from_parts(1, 1),
+                offset: 0,
+            },
+            layout: ResourceLayout::Buffer {
+                bytes: 64,
+                usage: BufferUsages::STORAGE,
+            },
+            alignment: 16,
+        };
+        let touching = FrameResourceBinding {
+            physical: PhysicalResource::Buffer {
+                id: BufferId::from_parts(1, 1),
+                offset: 64,
+            },
+            ..first
+        };
+        let recycled = FrameResourceBinding {
+            physical: PhysicalResource::Buffer {
+                id: BufferId::from_parts(1, 2),
+                offset: 0,
+            },
+            ..first
+        };
+        let texture = FrameResourceBinding {
+            physical: PhysicalResource::Texture(TextureId::from_parts(1, 1)),
+            layout: ResourceLayout::Texture {
+                extent: [4, 4, 1],
+                dimension: TextureDimension::D2,
+                format: TextureFormat::Rgba8Unorm,
+                mip_levels: 1,
+                samples: 1,
+                usage: TextureUsages::TEXTURE_BINDING,
+            },
+            ..first
+        };
+        for (order, binding) in [first, touching, recycled, texture].into_iter().enumerate() {
+            assert_eq!(index.insert(binding, order), Ok(()));
+        }
+        assert_eq!(index.insert(first, 4), Err(first));
+        assert_eq!(index.insert(texture, 4), Err(texture));
+        assert_eq!(
+            index.insert(
+                FrameResourceBinding {
+                    frame: 9,
+                    ..texture
+                },
+                4
+            ),
+            Err(texture)
+        );
+        assert_eq!(
+            index.insert(
+                FrameResourceBinding {
+                    physical: PhysicalResource::Texture(TextureId::from_parts(1, 2)),
+                    ..texture
+                },
+                4
+            ),
+            Ok(())
+        );
+    }
 }

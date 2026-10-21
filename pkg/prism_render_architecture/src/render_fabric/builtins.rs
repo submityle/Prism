@@ -170,6 +170,27 @@ pub const DECAL_INSTANCE_RESOURCE: ResourceKey = ResourceKey::of(DECAL_FEATURE_I
 pub const DECAL_INDIRECT_RESOURCE: ResourceKey = ResourceKey::of(DECAL_FEATURE_ID, 1);
 pub const DECAL_RESOLVE_RESOURCE: ResourceKey = ResourceKey::of(DECAL_FEATURE_ID, 2);
 
+/// Response-composition resources are owned by the water/frame fabric and
+/// mirrored here so response variants use the same semantic identities.
+pub const RESPONSE_LEFT_RESOURCE: ResourceKey = crate::water::fabric::RESPONSE_LEFT_RESOURCE;
+pub const RESPONSE_RIGHT_RESOURCE: ResourceKey = crate::water::fabric::RESPONSE_RIGHT_RESOURCE;
+pub const RESPONSE_CONTROLS_RESOURCE: ResourceKey =
+    crate::water::fabric::RESPONSE_CONTROLS_RESOURCE;
+pub const RESPONSE_AUXILIARY_RESOURCE: ResourceKey =
+    crate::water::fabric::RESPONSE_AUXILIARY_RESOURCE;
+pub const WATER_COVERAGE_RESOURCE: ResourceKey = crate::water::fabric::WATER_COVERAGE_RESOURCE;
+
+/// Custom is a third response root and is selected alongside Lit/NPR.  It
+/// therefore needs a root-owned output lane instead of becoming a second
+/// writer of either shared composition plane.
+pub const CUSTOM_RESPONSE_RESOURCE: ResourceKey = ResourceKey::of(CUSTOM_FEATURE_ID, 0);
+
+/// Persistent per-view temporal resolve storage. The extent is supplied by the
+/// active viewport, so the render-world producer creates the exact
+/// `ResourceTemplate` for each allocation rather than putting a fake fixed
+/// extent in the static catalog.
+pub const TAA_HISTORY_RESOURCE: ResourceKey = ResourceKey::engine(0x7208);
+
 const WATER_ACCESSES: &[ResourceUse] = &[
     ResourceUse {
         input: ResourceInput::Automatic,
@@ -310,6 +331,49 @@ const DECAL_PASSES: &[PassTemplate] = &[PassTemplate {
     queue: QueueClass::Compute,
 }];
 
+const LIT_RESPONSE_ACCESSES: &[ResourceUse] = &[ResourceUse {
+    input: ResourceInput::Automatic,
+    key: RESPONSE_LEFT_RESOURCE,
+    access: AccessKind::StorageWrite,
+    scope: ResourceScope::Whole,
+    frame_lag: None,
+}];
+
+const NPR_RESPONSE_ACCESSES: &[ResourceUse] = &[ResourceUse {
+    input: ResourceInput::Automatic,
+    key: RESPONSE_RIGHT_RESOURCE,
+    access: AccessKind::StorageWrite,
+    scope: ResourceScope::Whole,
+    frame_lag: None,
+}];
+
+const CUSTOM_RESPONSE_ACCESSES: &[ResourceUse] = &[ResourceUse {
+    input: ResourceInput::Automatic,
+    key: CUSTOM_RESPONSE_RESOURCE,
+    access: AccessKind::StorageWrite,
+    scope: ResourceScope::Whole,
+    frame_lag: None,
+}];
+
+const LIT_RESPONSE_PASSES: &[PassTemplate] = &[PassTemplate {
+    depends_on: &[],
+    id: PassKey(0x7300),
+    accesses: LIT_RESPONSE_ACCESSES,
+    queue: QueueClass::Compute,
+}];
+const NPR_RESPONSE_PASSES: &[PassTemplate] = &[PassTemplate {
+    depends_on: &[],
+    id: PassKey(0x7301),
+    accesses: NPR_RESPONSE_ACCESSES,
+    queue: QueueClass::Compute,
+}];
+const CUSTOM_RESPONSE_PASSES: &[PassTemplate] = &[PassTemplate {
+    depends_on: &[],
+    id: PassKey(0x7302),
+    accesses: CUSTOM_RESPONSE_ACCESSES,
+    queue: QueueClass::Compute,
+}];
+
 const WATER_VARIANTS: &[FeatureVariant] = &[FeatureVariant {
     id: WATER_VARIANT_ID,
     rank: 0,
@@ -361,7 +425,7 @@ const LIT_VARIANTS: &[FeatureVariant] = &[FeatureVariant {
     min_quality: RenderQualityTier::Low,
     required_caps: CapabilitySet::EMPTY,
     requires_services_extra: ServiceSet::EMPTY,
-    passes: &[],
+    passes: LIT_RESPONSE_PASSES,
     shader_permutation: None,
 }];
 const NPR_VARIANTS: &[FeatureVariant] = &[FeatureVariant {
@@ -370,7 +434,7 @@ const NPR_VARIANTS: &[FeatureVariant] = &[FeatureVariant {
     min_quality: RenderQualityTier::Low,
     required_caps: CapabilitySet::EMPTY,
     requires_services_extra: ServiceSet::EMPTY,
-    passes: &[],
+    passes: NPR_RESPONSE_PASSES,
     shader_permutation: None,
 }];
 const CUSTOM_VARIANTS: &[FeatureVariant] = &[FeatureVariant {
@@ -379,7 +443,7 @@ const CUSTOM_VARIANTS: &[FeatureVariant] = &[FeatureVariant {
     min_quality: RenderQualityTier::Low,
     required_caps: CapabilitySet::EMPTY,
     requires_services_extra: ServiceSet::EMPTY,
-    passes: &[],
+    passes: CUSTOM_RESPONSE_PASSES,
     shader_permutation: None,
 }];
 
@@ -479,7 +543,7 @@ const SERVICE_FEATURES: [FeatureDefinition; 17] = [
     SPRAY_FEEDBACK,
 ];
 
-const BUILTIN_RESOURCE_KEYS: [ResourceKey; 30] = [
+const BUILTIN_RESOURCE_KEYS: [ResourceKey; 36] = [
     WATER_SURFACE_RESOURCE,
     WATER_FOAM_RESOURCE,
     VOLUME_DENSITY_RESOURCE,
@@ -510,6 +574,12 @@ const BUILTIN_RESOURCE_KEYS: [ResourceKey; 30] = [
     ResourceKey::of(FeatureId(0x2014), 0),
     ResourceKey::of(FeatureId(0x2015), 0),
     ResourceKey::of(FeatureId(0x2016), 0),
+    RESPONSE_LEFT_RESOURCE,
+    RESPONSE_RIGHT_RESOURCE,
+    RESPONSE_CONTROLS_RESOURCE,
+    RESPONSE_AUXILIARY_RESOURCE,
+    WATER_COVERAGE_RESOURCE,
+    CUSTOM_RESPONSE_RESOURCE,
 ];
 
 const fn resource_template(key: ResourceKey) -> ResourceTemplate {
@@ -521,6 +591,23 @@ const fn resource_template(key: ResourceKey) -> ResourceTemplate {
             usage: BufferUsages::STORAGE,
         },
         alignment: 16,
+    }
+}
+
+const fn response_resource_template(
+    key: ResourceKey,
+    lifetime: ResourceLifetime,
+    bytes: u64,
+    alignment: u64,
+) -> ResourceTemplate {
+    ResourceTemplate {
+        key,
+        lifetime,
+        layout: ResourceLayout::Buffer {
+            bytes,
+            usage: BufferUsages::STORAGE,
+        },
+        alignment,
     }
 }
 
@@ -555,6 +642,17 @@ pub const BUILTIN_RESOURCE_TEMPLATES: &[ResourceTemplate] = &[
     resource_template(ResourceKey::of(FeatureId(0x2014), 0)),
     resource_template(ResourceKey::of(FeatureId(0x2015), 0)),
     resource_template(ResourceKey::of(FeatureId(0x2016), 0)),
+    crate::water::fabric::ResponseCompositionPlane::Left.template(64),
+    crate::water::fabric::ResponseCompositionPlane::Right.template(64),
+    crate::water::fabric::ResponseCompositionPlane::Controls.template(16),
+    crate::water::fabric::ResponseCompositionPlane::Auxiliary.template(64),
+    crate::water::fabric::ResponseCompositionPlane::WaterCoverage.template(4),
+    response_resource_template(
+        CUSTOM_RESPONSE_RESOURCE,
+        ResourceLifetime::Transient,
+        64,
+        16,
+    ),
 ];
 
 const WATER_FEATURE: FeatureDefinition = FeatureDefinition::subsystem(
@@ -729,6 +827,31 @@ mod tests {
         assert_eq!(PARTICLE_GLOBAL_ILLUMINATION, WATER_SERVICE_IDS[1]);
         assert_eq!(PARTICLE_LIGHTING_CAPABILITIES.len(), 3);
         assert!(!PARTICLE_LIGHTING_CAPABILITIES.contains(PARTICLE_CLUSTERED_LIGHTS));
+    }
+
+    #[test]
+    fn response_templates_use_the_water_owned_plane_identity_table() {
+        let expected = crate::water::fabric::response_composition_templates(64, 64, 16, 64, 4);
+        let actual = [
+            RESPONSE_LEFT_RESOURCE,
+            RESPONSE_RIGHT_RESOURCE,
+            RESPONSE_CONTROLS_RESOURCE,
+            RESPONSE_AUXILIARY_RESOURCE,
+            WATER_COVERAGE_RESOURCE,
+        ]
+        .map(|key| {
+            BUILTIN_RESOURCE_TEMPLATES
+                .iter()
+                .copied()
+                .find(|template| template.key == key)
+                .expect("response resource has a builtin template")
+        });
+        assert_eq!(actual, expected);
+        assert_eq!(
+            crate::water::fabric::ResponseCompositionPlane::ALL
+                .map(crate::water::fabric::ResponseCompositionPlane::key),
+            actual.map(|template| template.key)
+        );
     }
 
     #[test]

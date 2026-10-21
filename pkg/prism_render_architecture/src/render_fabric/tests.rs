@@ -1,5 +1,16 @@
 use super::*;
 use crate::backend::capability::Capability;
+use crate::frame_graph::ResourceLifetime;
+use crate::shader_package::{
+    ArtifactDigest, ModuleIdentity, PermutationKey, PermutationSelector, PermutationSpace,
+    ShaderPackageId,
+};
+use std::collections::BTreeMap;
+
+use super::builtins::{
+    CUSTOM_RESPONSE_RESOURCE, RESPONSE_AUXILIARY_RESOURCE, RESPONSE_CONTROLS_RESOURCE,
+    RESPONSE_LEFT_RESOURCE, RESPONSE_RIGHT_RESOURCE, WATER_COVERAGE_RESOURCE,
+};
 
 const A: FeatureId = FeatureId(100);
 const B: FeatureId = FeatureId(200);
@@ -533,39 +544,81 @@ fn all_write_access_kinds_satisfy_output_contract() {
 #[test]
 fn queue_access_combinations_are_rejected_before_runtime_lowering() {
     let key = ResourceKey::of(ROOT, 0);
-    let mut transfer_storage = pass(100, vec![usage(key, AccessKind::StorageWrite)]);
-    transfer_storage.queue = QueueClass::Transfer;
-    assert_eq!(
-        error(
-            vec![replace_variants(
-                root(&[]),
-                vec![variant(100, 0, vec![transfer_storage])]
-            )],
-            vec![key]
-        ),
-        CatalogError::UnsupportedQueueAccess {
-            pass: PassKey(100),
-            queue: QueueClass::Transfer,
-            access: AccessKind::StorageWrite,
+    let queues = [
+        QueueClass::Graphics,
+        QueueClass::Compute,
+        QueueClass::Transfer,
+    ];
+    // Independent expectations, in queue order. Do not derive this oracle
+    // from the AccessKind helpers used by production validation.
+    let cases = [
+        (AccessKind::SampledRead, [true, true, false]),
+        (AccessKind::StorageRead, [true, true, false]),
+        (AccessKind::StorageWrite, [true, true, false]),
+        (AccessKind::ColorAttachment, [true, false, false]),
+        (AccessKind::DepthAttachment, [true, false, false]),
+        (AccessKind::IndirectRead, [true, true, false]),
+        (AccessKind::TransferRead, [true, true, true]),
+        (AccessKind::TransferWrite, [true, true, true]),
+        (AccessKind::UniformRead, [true, true, false]),
+        (AccessKind::IndexRead, [true, false, false]),
+        (AccessKind::DepthAttachmentRead, [true, false, false]),
+    ];
+    for (access, allowed) in cases {
+        for (queue, allowed) in queues.into_iter().zip(allowed) {
+            let checked = PassTemplate {
+                queue,
+                ..pass(100, vec![usage(key, access)])
+            };
+            // A subsystem with no service outputs makes read-only cases valid
+            // independently of the queue rule; all resources are declared.
+            let result = catalog(
+                vec![replace_variants(
+                    root(&[]),
+                    vec![variant(100, 0, vec![checked])],
+                )],
+                vec![key],
+            );
+            if allowed {
+                result.unwrap_or_else(|error| panic!("{queue:?}/{access:?}: {error:?}"));
+            } else {
+                assert_eq!(
+                    result.unwrap_err(),
+                    CatalogError::UnsupportedQueueAccess {
+                        pass: checked.id,
+                        queue,
+                        access,
+                    },
+                    "{queue:?}/{access:?}"
+                );
+            }
         }
-    );
+    }
+}
 
-    let mut compute_attachment = pass(101, vec![usage(key, AccessKind::ColorAttachment)]);
-    compute_attachment.queue = QueueClass::Compute;
-    assert_eq!(
-        error(
-            vec![replace_variants(
-                root(&[]),
-                vec![variant(101, 0, vec![compute_attachment])]
-            )],
-            vec![key]
-        ),
-        CatalogError::UnsupportedQueueAccess {
-            pass: PassKey(101),
-            queue: QueueClass::Compute,
-            access: AccessKind::ColorAttachment,
+#[test]
+fn catalog_rejects_graphics_only_reads_in_all_variant_states() {
+    for access in [AccessKind::DepthAttachmentRead, AccessKind::IndexRead] {
+        for queue in [QueueClass::Compute, QueueClass::Transfer] {
+            let checked = PassTemplate {
+                queue,
+                ..pass(100, vec![usage(KA, access)])
+            };
+            assert_catalog_pass_error_for_all_variant_states(
+                vec![
+                    checked,
+                    // Satisfy the provider output contract even if the queue
+                    // check regresses, so it cannot mask the missing rejection.
+                    pass(198, vec![usage(KA, AccessKind::StorageWrite)]),
+                ],
+                CatalogError::UnsupportedQueueAccess {
+                    pass: checked.id,
+                    queue,
+                    access,
+                },
+            );
         }
-    );
+    }
 }
 
 #[test]
@@ -974,7 +1027,6 @@ fn frame_lag_is_positive_read_only_declaration() {
 
 #[test]
 fn shader_binding_reuses_public_permutation_space() {
-    use crate::shader_package::{PermutationKey, PermutationSpace};
     let space = Box::leak(Box::new(PermutationSpace::new([2, 3])));
     for (coords, valid) in [(vec![1, 2], true), (vec![2, 0], false), (vec![1], false)] {
         let key = Box::leak(Box::new(PermutationKey::new(coords)));
@@ -992,6 +1044,248 @@ fn shader_binding_reuses_public_permutation_space() {
                 CatalogError::InvalidShaderPermutation(VariantId(1))
             );
         }
+    }
+}
+
+#[test]
+fn frozen_selection_binds_the_existing_selector_and_dense_permutation() {
+    let space = Box::leak(Box::new(PermutationSpace::new([2, 3])));
+    let key = Box::leak(Box::new(
+        PermutationSelector::new()
+            .select(1)
+            .select(2)
+            .finish_in(space)
+            .expect("selector coordinates must belong to the declared space"),
+    ));
+    let mut feature = root(&[]);
+    let mut implementation = variant(1, 0, vec![]);
+    implementation.shader_permutation = Some(ShaderPermutationBinding { space, key });
+    feature.variants = table(vec![implementation]);
+    let catalog = catalog(vec![feature], vec![]).unwrap();
+    let selection = resolve(&catalog);
+
+    let package = ShaderPackageId::new("test.frozen-selection.permuted");
+    let selected = selection.feature(ROOT).unwrap();
+    let binding = ShaderPackageBinding {
+        package,
+        module: ShaderModuleBinding {
+            identity: ModuleIdentity {
+                package,
+                digest: ArtifactDigest::from_bytes(b"test.frozen-selection.module"),
+                entry_point: "main".into(),
+                binding_layout_digest: ArtifactDigest::from_bytes(b"test.frozen-selection.layout")
+                    .0,
+            },
+            permutations: space.clone(),
+            full_lobe_fallback: None,
+        },
+        permutation: Some(ShaderPermutationBinding { space, key }),
+        pass_descriptors: selected
+            .passes()
+            .iter()
+            .map(PassDescriptorIdentity::from_template)
+            .collect(),
+    };
+    let mut packages = BTreeMap::new();
+    packages.insert(selected.variant_id(), binding);
+    let frozen = selection.bind_shader_packages(&packages).unwrap();
+
+    assert_eq!(
+        frozen
+            .binding(ROOT)
+            .unwrap()
+            .permutation_index()
+            .unwrap()
+            .get(),
+        5
+    );
+    assert_eq!(
+        frozen
+            .binding(ROOT)
+            .unwrap()
+            .permutation()
+            .unwrap()
+            .key
+            .coords(),
+        key.coords()
+    );
+    assert_eq!(frozen.selection(), &selection);
+}
+
+#[test]
+fn frozen_selection_requires_exact_bindings_and_is_registration_order_independent() {
+    let catalog = builtin_catalog().unwrap();
+    let roots = builtin_roots(&catalog).unwrap();
+    let selection = FeatureSelection::resolve(
+        &catalog,
+        &roots,
+        CapabilitySet::EMPTY,
+        RenderQualityTier::Low,
+    )
+    .unwrap();
+
+    let mut forward = BTreeMap::new();
+    let mut reverse = BTreeMap::new();
+    let selected = selection.selected();
+    for selected_feature in selected {
+        let binding = selected_feature.bind_builtin_shader_package().unwrap();
+        forward.insert(selected_feature.variant_id(), binding.binding().clone());
+    }
+    for selected_feature in selected.iter().rev() {
+        let binding = selected_feature.bind_builtin_shader_package().unwrap();
+        reverse.insert(selected_feature.variant_id(), binding.binding().clone());
+    }
+
+    let first = selection.bind_shader_packages(&forward).unwrap();
+    let second = selection.bind_shader_packages(&reverse).unwrap();
+    assert_eq!(first.identity_digest(), second.identity_digest());
+    assert_eq!(first.bindings(), second.bindings());
+
+    let missing_variant = selected[0].variant_id();
+    forward.remove(&missing_variant);
+    assert_eq!(
+        selection.bind_shader_packages(&forward),
+        Err(ShaderBindingError::MissingVariantBinding {
+            variant: missing_variant,
+        })
+    );
+
+    let mut extra = reverse;
+    let extra_binding = extra.values().next().unwrap().clone();
+    extra.insert(VariantId(0x7fff_ffff), extra_binding);
+    assert_eq!(
+        selection.bind_shader_packages(&extra),
+        Err(ShaderBindingError::UnexpectedVariantBinding {
+            variant: VariantId(0x7fff_ffff),
+        })
+    );
+}
+
+#[test]
+fn builtin_response_contracts_validate_resources_and_package_pass_identity() {
+    let catalog = builtin_catalog().expect("built-in catalog must validate");
+    ResourceTemplates::new(&catalog, builtin_resource_templates())
+        .expect("every built-in response access must have a compatible layout");
+
+    assert_eq!(
+        RESPONSE_LEFT_RESOURCE,
+        crate::water::fabric::RESPONSE_LEFT_RESOURCE
+    );
+    assert_eq!(
+        RESPONSE_RIGHT_RESOURCE,
+        crate::water::fabric::RESPONSE_RIGHT_RESOURCE
+    );
+    assert_eq!(
+        RESPONSE_CONTROLS_RESOURCE,
+        crate::water::fabric::RESPONSE_CONTROLS_RESOURCE
+    );
+    assert_eq!(
+        RESPONSE_AUXILIARY_RESOURCE,
+        crate::water::fabric::RESPONSE_AUXILIARY_RESOURCE
+    );
+    assert_eq!(
+        WATER_COVERAGE_RESOURCE,
+        crate::water::fabric::WATER_COVERAGE_RESOURCE
+    );
+
+    let cases = [
+        (
+            LIT_FEATURE_ID,
+            LIT_VARIANT_ID,
+            RESPONSE_LEFT_RESOURCE,
+            64,
+            16,
+            ResourceLifetime::Imported,
+            "builtin.render_fabric.lit",
+        ),
+        (
+            NPR_FEATURE_ID,
+            NPR_VARIANT_ID,
+            RESPONSE_RIGHT_RESOURCE,
+            64,
+            16,
+            ResourceLifetime::Imported,
+            "builtin.render_fabric.npr",
+        ),
+        (
+            CUSTOM_FEATURE_ID,
+            CUSTOM_VARIANT_ID,
+            CUSTOM_RESPONSE_RESOURCE,
+            64,
+            16,
+            ResourceLifetime::Transient,
+            "builtin.render_fabric.custom",
+        ),
+    ];
+
+    let mut output_keys = BTreeMap::new();
+    for (feature_id, variant_id, output, bytes, alignment, lifetime, package_name) in cases {
+        let feature = catalog
+            .feature(feature_id)
+            .expect("response feature exists");
+        assert_eq!(feature.variants.len(), 1);
+        let variant = &feature.variants[0];
+        assert_eq!(variant.id, variant_id);
+        assert_eq!(variant.passes.len(), 1);
+
+        let pass = &variant.passes[0];
+        assert_eq!(pass.queue, QueueClass::Compute);
+        assert!(pass.depends_on.is_empty());
+        assert_eq!(pass.accesses.len(), 1);
+
+        let usage = pass.accesses[0];
+        assert_eq!(usage.input, ResourceInput::Automatic);
+        assert_eq!(usage.key, output);
+        assert_eq!(usage.access, AccessKind::StorageWrite);
+        assert_eq!(usage.scope, ResourceScope::Whole);
+        assert_eq!(usage.frame_lag, None);
+        assert!(output_keys.insert(output, feature_id).is_none());
+
+        let template = builtin_resource_templates()
+            .iter()
+            .find(|template| template.key == usage.key)
+            .expect("every response access has a resource template");
+        assert_eq!(template.lifetime, lifetime);
+        assert_eq!(
+            template.layout,
+            ResourceLayout::Buffer {
+                bytes,
+                usage: BufferUsages::STORAGE,
+            }
+        );
+        assert_eq!(template.alignment, alignment);
+        assert!(template.layout.supports(usage.access));
+        assert!(template.alignment.is_power_of_two());
+
+        let binding = variant
+            .builtin_shader_package()
+            .expect("response variant has a canonical shader package");
+        assert_eq!(binding.package.as_str(), package_name);
+        assert_eq!(binding.pass_descriptors.len(), 1);
+        assert!(binding.pass_descriptors[0].matches_template(pass));
+    }
+    assert_eq!(output_keys.len(), 3);
+
+    for (key, bytes, alignment) in [
+        (RESPONSE_LEFT_RESOURCE, 64, 16),
+        (RESPONSE_RIGHT_RESOURCE, 64, 16),
+        (RESPONSE_CONTROLS_RESOURCE, 16, 16),
+        (RESPONSE_AUXILIARY_RESOURCE, 64, 16),
+        (WATER_COVERAGE_RESOURCE, 4, 4),
+    ] {
+        let template = builtin_resource_templates()
+            .iter()
+            .find(|template| template.key == key)
+            .expect("every resident composition plane has a resource template");
+        assert_eq!(template.lifetime, ResourceLifetime::Imported);
+        assert_eq!(
+            template.layout,
+            ResourceLayout::Buffer {
+                bytes,
+                usage: BufferUsages::STORAGE,
+            }
+        );
+        assert_eq!(template.alignment, alignment);
     }
 }
 

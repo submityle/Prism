@@ -71,6 +71,33 @@ impl DeviceFabric {
             limits,
         )
     }
+
+    /// Expands explicitly object-scoped accesses under this device's frozen
+    /// catalog/selection. Pass admission and shared services remain unchanged.
+    pub fn compile_active_instanced(
+        &self,
+        templates: &[ResourceTemplate],
+        object_accesses: &[ObjectResourceAccess],
+        frame: u64,
+        shared_bindings: &[FrameResourceBinding],
+        object_bindings: &[ObjectResourceBinding],
+        items: &[FrameRenderItem],
+        active_passes: &[PassKey],
+        fulfilled_dependencies: &[PassKey],
+        limits: GraphLimits,
+    ) -> Result<CompiledFeatureGraph, FabricCompileError> {
+        ResourceTemplates::new_with_object_accesses(&self.catalog, templates, object_accesses)?
+            .compile_active_instanced(
+                &self.selection,
+                frame,
+                shared_bindings,
+                object_bindings,
+                items,
+                active_passes,
+                fulfilled_dependencies,
+                limits,
+            )
+    }
 }
 
 #[cfg(test)]
