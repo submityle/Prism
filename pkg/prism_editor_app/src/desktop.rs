@@ -17,7 +17,8 @@ use winit::{
 };
 
 use crate::{
-    DesktopDocumentSession, DesktopKey, DesktopUiError, EditorController, EditorDesktopUi,
+    DesktopDocumentCancelOutcome, DesktopDocumentSession, DesktopKey, DesktopUiError,
+    EditorController, EditorDesktopUi,
 };
 
 /// Native window and bounded validation-run configuration.
@@ -896,12 +897,26 @@ fn cancel_native_interactions<R: DesktopRenderer>(
     }
 }
 
-fn should_cancel_native_interactions_on_escape(
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EscapeTarget {
+    NativeInteractions,
+    DocumentIo,
+    Ui,
+}
+
+fn escape_target(
     panel_pointer_active: bool,
     renderer_gesture_active: bool,
     box_selection_active: bool,
-) -> bool {
-    panel_pointer_active || renderer_gesture_active || box_selection_active
+    document_busy: bool,
+) -> EscapeTarget {
+    if panel_pointer_active || renderer_gesture_active || box_selection_active {
+        EscapeTarget::NativeInteractions
+    } else if document_busy {
+        EscapeTarget::DocumentIo
+    } else {
+        EscapeTarget::Ui
+    }
 }
 
 struct DocumentWake {
@@ -1237,15 +1252,30 @@ impl<R: DesktopRenderer> ApplicationHandler<DesktopWake> for DesktopHost<R> {
                 if self.composing {
                     return;
                 }
-                if event.logical_key == Key::Named(NamedKey::Escape)
-                    && should_cancel_native_interactions_on_escape(
+                if event.logical_key == Key::Named(NamedKey::Escape) {
+                    match escape_target(
                         self.ui.panel_pointer_active(),
                         self.renderer.gesture_active(),
                         self.drag_start.is_some(),
-                    )
-                {
-                    self.cancel_native_interactions_or_fail(event_loop);
-                    return;
+                        self.document
+                            .as_ref()
+                            .is_some_and(DesktopDocumentSession::is_busy),
+                    ) {
+                        EscapeTarget::NativeInteractions => {
+                            self.cancel_native_interactions_or_fail(event_loop);
+                            return;
+                        }
+                        EscapeTarget::DocumentIo => {
+                            let consumed = self.document.as_mut().is_some_and(|document| {
+                                !matches!(document.cancel(), DesktopDocumentCancelOutcome::Idle)
+                            });
+                            if consumed {
+                                self.pending.set(DesktopPendingSource::Document, true);
+                                return;
+                            }
+                        }
+                        EscapeTarget::Ui => {}
+                    }
                 }
                 let primary = if cfg!(target_os = "macos") {
                     self.modifiers.super_key()
@@ -1686,19 +1716,24 @@ mod tests {
     }
 
     #[test]
-    fn escape_cancels_each_native_interaction_source() {
-        assert!(should_cancel_native_interactions_on_escape(
-            true, false, false
-        ));
-        assert!(should_cancel_native_interactions_on_escape(
-            false, true, false
-        ));
-        assert!(should_cancel_native_interactions_on_escape(
-            false, false, true
-        ));
-        assert!(!should_cancel_native_interactions_on_escape(
-            false, false, false
-        ));
+    fn escape_prioritizes_native_interactions_then_document_io_then_ui() {
+        assert_eq!(
+            escape_target(true, false, false, true),
+            EscapeTarget::NativeInteractions
+        );
+        assert_eq!(
+            escape_target(false, true, false, true),
+            EscapeTarget::NativeInteractions
+        );
+        assert_eq!(
+            escape_target(false, false, true, true),
+            EscapeTarget::NativeInteractions
+        );
+        assert_eq!(
+            escape_target(false, false, false, true),
+            EscapeTarget::DocumentIo
+        );
+        assert_eq!(escape_target(false, false, false, false), EscapeTarget::Ui);
     }
 
     #[test]

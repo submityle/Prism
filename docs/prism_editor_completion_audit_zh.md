@@ -120,3 +120,24 @@ rg -n -i --glob '*.rs' '\b(TODO|FIXME|todo!|unimplemented!|placeholder)\b' pkg/p
 - `git diff --check -- pkg/prism_editor_app/src/desktop.rs`：通过。
 - `cargo fmt --manifest-path pkg/prism_editor_app/Cargo.toml -- --check`：通过。
 - `cargo test --manifest-path pkg/prism_editor_app/Cargo.toml --features desktop --lib native_interaction_cancel`：未完成；共享 `target` 被清理后触发依赖重建，编译 `prism_render_architecture` 时因磁盘空间耗尽中止，尚未进入本次 Editor 测试断言。该结果不计为测试通过，也不是本次代码的编译错误证据。
+
+## 2026-10-21 后续实现闭环：Escape 接入原生场景文档 I/O 取消
+
+此前 `DesktopDocumentSession` 已能向底层提交取消，但原生宿主没有调用入口：没有 panel、viewport 或框选交互时，Escape 会直接交给普通 UI；同时 `DocumentIoEvent::Cancelled` 被转换成 UI 错误。结果是用户无法从桌面事件链取消正在进行的场景保存/加载，主动取消还会被错误展示为故障。
+
+现在的行为为：
+
+- Escape 明确按“原生 panel/viewport/框选交互 -> 场景文档 I/O -> 普通 UI Escape”的顺序分派，避免文档取消抢占正在回滚的编辑交互。
+- `DesktopDocumentSession::cancel` 返回 `Accepted`、`AwaitingTerminal` 或 `Idle`，不再用 `bool` 混淆“已经接受取消”和“取消终态尚未消费”。
+- 接受取消后仍保持 busy/pending，必须由 poll 消费 `DocumentIoEvent::Cancelled` 后才清除请求身份；重复 Escape 只等待同一个终态，不重复提交取消。
+- 用户主动取消是正常终态，触发 redraw 并清除 document pending，不再写入错误提示。
+- 被取消的保存仍保留底层 retry 快照与 reconciliation fence；不会把 UI/model 错误标记为已保存。
+
+新增测试覆盖取消接受、重复取消等待终态、终态 poll 后恢复 idle、idle 取消、保存取消后的 reconciliation fence，以及 Escape 的三级优先级。
+
+本次验证：
+
+- `rustfmt --edition 2024`（本次 4 个 Rust 文件）：通过。
+- `git diff --check`（本次 4 个 Rust 文件）：通过。
+- `cargo fmt --manifest-path pkg/prism_editor_app/Cargo.toml -- --check`：通过。
+- `cargo check --manifest-path pkg/prism_editor_app/Cargo.toml --features desktop --lib`：未完成；等待共享 build lock 后从依赖重建开始，链接 `proc-macro2`、`quote`、`libm`、`objc2` 等 build script 时磁盘仅剩约 1.1 GiB 并报 `No space left on device`，尚未编译到 `prism_editor_app`。该结果不计为编译通过，也没有产生本次 Editor 源码的编译错误证据。

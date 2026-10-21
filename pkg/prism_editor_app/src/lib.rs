@@ -56,7 +56,7 @@ pub use desktop::{
     DesktopOutcome, DesktopRenderer, DesktopReport, DesktopViewportBounds, DesktopWork,
 };
 #[cfg(feature = "desktop")]
-pub use desktop_document::DesktopDocumentSession;
+pub use desktop_document::{DesktopDocumentCancelOutcome, DesktopDocumentSession};
 #[cfg(feature = "desktop")]
 pub use desktop_images::DesktopContentImages;
 #[cfg(feature = "desktop")]

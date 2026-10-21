@@ -9,6 +9,17 @@ use crate::{
     DocumentIoEvent, DocumentSchemaCatalog, EditorDesktopUi,
 };
 
+/// Result of requesting cancellation for the native scene document operation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DesktopDocumentCancelOutcome {
+    /// The active operation was removed and its terminal cancellation is queued.
+    Accepted,
+    /// Cancellation was already requested; polling must consume its terminal event.
+    AwaitingTerminal,
+    /// No document operation is awaiting a terminal event.
+    Idle,
+}
+
 /// Owns one document adapter and its schema policy for a native editor run.
 pub struct DesktopDocumentSession {
     adapter: DocumentFileAdapter,
@@ -88,10 +99,21 @@ impl DesktopDocumentSession {
         Ok(request)
     }
 
-    /// Cancels the accepted request while preserving save reconciliation rules.
-    pub fn cancel(&mut self) -> bool {
-        self.last_request
-            .is_some_and(|request| self.adapter.cancel(request))
+    /// Requests cancellation while preserving the pending terminal event and
+    /// save reconciliation rules.
+    #[must_use]
+    pub fn cancel(&mut self) -> DesktopDocumentCancelOutcome {
+        let Some(request) = self.last_request else {
+            return DesktopDocumentCancelOutcome::Idle;
+        };
+        if self.adapter.cancel(request) {
+            DesktopDocumentCancelOutcome::Accepted
+        } else if self.adapter.is_busy() {
+            DesktopDocumentCancelOutcome::AwaitingTerminal
+        } else {
+            self.last_request = None;
+            DesktopDocumentCancelOutcome::Idle
+        }
     }
 
     /// Polls one terminal event and applies it atomically to the UI/renderer.
@@ -136,9 +158,10 @@ impl DesktopDocumentSession {
             DocumentIoEvent::Failed { error, .. } => Err(DesktopError::Document(format!(
                 "document I/O failed: {error:?}"
             ))),
-            DocumentIoEvent::Cancelled { .. } => {
-                Err(DesktopError::Document("document I/O cancelled".into()))
-            }
+            DocumentIoEvent::Cancelled { .. } => Ok(Poll::Ready(crate::desktop::DesktopWork {
+                redraw: true,
+                pending: false,
+            })),
         }
     }
 }

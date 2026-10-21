@@ -1115,6 +1115,48 @@ fn native_document_load_rejects_unsaved_controller_changes_before_io() {
 
 #[cfg(feature = "desktop")]
 #[test]
+fn native_document_cancellation_is_idempotent_until_terminal_poll() {
+    use prism_editor_app::{
+        DesktopDocumentCancelOutcome, DesktopDocumentSession, DesktopScene, DesktopWork,
+    };
+
+    let temp = Temp::new();
+    let provider = temp.provider();
+    let adapter =
+        DocumentFileAdapter::new(provider.clone(), request(), DocumentLimits::default()).unwrap();
+    let mut ui = EditorDesktopUi::new(controller()).unwrap();
+    edit(ui.controller_mut(), 42);
+    let mut session = DesktopDocumentSession::new(adapter, catalog(), ControllerLimits::default());
+    let request_id = session.save(&mut ui).unwrap();
+
+    assert_eq!(session.last_request(), Some(request_id));
+    assert_eq!(session.cancel(), DesktopDocumentCancelOutcome::Accepted);
+    assert!(session.is_busy());
+    assert_eq!(
+        session.cancel(),
+        DesktopDocumentCancelOutcome::AwaitingTerminal
+    );
+
+    let mut scene = DesktopScene::new(Vec::new()).unwrap();
+    let waker = Waker::from(Arc::new(Notify(thread::current())));
+    let mut context = Context::from_waker(&waker);
+    assert_eq!(
+        session.poll(&mut context, &mut ui, &mut scene).unwrap(),
+        Poll::Ready(DesktopWork {
+            redraw: true,
+            pending: false,
+        })
+    );
+    assert!(!session.is_busy());
+    assert!(session.last_request().is_none());
+    assert!(session.reconciliation_required());
+    assert!(ui.controller().is_dirty());
+    assert_eq!(session.cancel(), DesktopDocumentCancelOutcome::Idle);
+    workers_finished(&provider);
+}
+
+#[cfg(feature = "desktop")]
+#[test]
 fn native_document_save_runs_content_gate_before_real_io_and_revalidates() {
     use prism_editor_app::{DesktopDocumentSession, DesktopScene};
     use prism_editor_content::{
