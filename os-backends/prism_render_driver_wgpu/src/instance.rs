@@ -309,6 +309,37 @@ impl WgpuInstance {
         .ok()
     }
 
+    /// Converts an RHI device request using the same configuration as
+    /// [`rhi::Instance::create_device`], without requesting a device.
+    ///
+    /// Mapped features are intersected with the adapter's supported set;
+    /// limits use the existing RHI-to-wgpu conversion without additional
+    /// clamping. Other wgpu descriptor fields keep their defaults, including
+    /// the experimental-feature opt-in. A rejected limits/experimental-feature
+    /// request remains an error from `wgpu::Adapter::request_device`.
+    ///
+    /// The label borrows only from `descriptor`, with the same fallback label
+    /// as normal RHI bring-up when it is absent. External callers can request
+    /// the original native tuple with this descriptor, retain native clones
+    /// for sharing, and pass the tuple to [`WgpuDevice::own_original`]. This
+    /// conversion does not authenticate tuple ancestry or enable extra features.
+    #[must_use]
+    pub fn device_descriptor<'a>(
+        adapter: &wgpu::Adapter,
+        descriptor: &'a rhi::DeviceDescriptor,
+    ) -> wgpu::DeviceDescriptor<'a> {
+        wgpu::DeviceDescriptor {
+            label: descriptor
+                .label
+                .as_deref()
+                .or(Some("prism_render_driver_wgpu device")),
+            required_features: convert::features_to_wgpu(descriptor.required_features)
+                & adapter.features(),
+            required_limits: convert::limits_to_wgpu(descriptor.required_limits),
+            ..Default::default()
+        }
+    }
+
     /// Brings up a [`WgpuDevice`]/[`WgpuQueue`] pair from `adapter`.
     ///
     /// Requests every non-experimental feature the adapter supports (plus
@@ -489,16 +520,12 @@ impl rhi::Instance for WgpuInstance {
         adapter: &WgpuAdapter,
         descriptor: &rhi::DeviceDescriptor,
     ) -> Result<(WgpuDevice, WgpuQueue), rhi::DeviceError> {
-        // Intersect the request with what the adapter supports so an
-        // over-specified descriptor degrades instead of failing the request.
-        let features =
-            convert::features_to_wgpu(descriptor.required_features) & adapter.adapter.features();
-        let limits = convert::limits_to_wgpu(descriptor.required_limits);
+        let descriptor = Self::device_descriptor(&adapter.adapter, descriptor);
         self.bring_up(
             &adapter.adapter,
-            features,
-            limits,
-            descriptor.label.as_deref(),
+            descriptor.required_features,
+            descriptor.required_limits,
+            descriptor.label,
         )
         .map_err(|error| rhi::DeviceError::Request(alloc::format!("{error}")))
     }

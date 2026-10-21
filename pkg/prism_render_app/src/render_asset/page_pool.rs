@@ -22,6 +22,9 @@ use prism_render_driver::{BufferDescriptor, BufferId, BufferUsages, RenderDevice
 
 use super::{PrepareContext, PrepareContextError};
 
+#[cfg(feature = "resident-page-streaming")]
+mod resident_copy;
+
 /// The descriptor for one fixed-page GPU buffer.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct FixedPagePoolDescriptor {
@@ -31,6 +34,10 @@ pub struct FixedPagePoolDescriptor {
     pub page_size: u64,
     /// Number of pages in the backing buffer.
     pub page_count: u32,
+    /// Requested vector payload budget for page states, deferred reclaim
+    /// records and one maximum-size reclaim result. Allocator overhead, the
+    /// label and result batches retained by the caller are not included.
+    pub max_host_bytes: u64,
     /// GPU usages for the backing buffer. [`BufferUsages::COPY_DST`] is
     /// required because uploads use the queue write path.
     pub usage: BufferUsages,
@@ -44,8 +51,19 @@ impl FixedPagePoolDescriptor {
             label: None,
             page_size,
             page_count,
+            max_host_bytes: 64 * 1024 * 1024,
             usage,
         }
+    }
+
+    /// Worst-case vector payload bytes, including one complete reclaim batch.
+    pub fn required_host_bytes(&self) -> Result<u64, PagePoolError> {
+        let bytes_per_page = core::mem::size_of::<PageState>()
+            + core::mem::size_of::<PendingPageReclaim>()
+            + core::mem::size_of::<FixedPageReclaimEvent>();
+        u64::from(self.page_count)
+            .checked_mul(bytes_per_page as u64)
+            .ok_or(PagePoolError::SizeOverflow)
     }
 }
 
@@ -213,6 +231,15 @@ pub enum PagePoolError {
     ZeroPageCount,
     /// The total backing-buffer size overflowed `u64`.
     SizeOverflow,
+    /// Page bookkeeping would exceed its explicit host admission budget.
+    HostBudgetExceeded {
+        /// Worst-case requested vector payload bytes.
+        required: u64,
+        /// Configured host admission limit.
+        limit: u64,
+    },
+    /// The host allocator could not reserve page bookkeeping or reclaim output.
+    HostAllocation,
     /// The backing buffer cannot receive queue uploads.
     MissingCopyDestination,
     /// The upload has no bytes.
@@ -299,6 +326,27 @@ impl FixedPagePool {
             .page_size
             .checked_mul(u64::from(descriptor.page_count))
             .ok_or(PagePoolError::SizeOverflow)?;
+        let required = descriptor.required_host_bytes()?;
+        if required > descriptor.max_host_bytes {
+            return Err(PagePoolError::HostBudgetExceeded {
+                required,
+                limit: descriptor.max_host_bytes,
+            });
+        }
+        // One pending record consumes at least one distinct quarantined page.
+        // Reserving this bound before creating the GPU buffer makes deferred
+        // commits allocation-free and prevents host OOM after publication.
+        let page_count =
+            usize::try_from(descriptor.page_count).map_err(|_| PagePoolError::SizeOverflow)?;
+        let mut pages = Vec::new();
+        pages
+            .try_reserve_exact(page_count)
+            .map_err(|_| PagePoolError::HostAllocation)?;
+        pages.resize(page_count, PageState::Free);
+        let mut pending_reclaims = Vec::new();
+        pending_reclaims
+            .try_reserve_exact(page_count)
+            .map_err(|_| PagePoolError::HostAllocation)?;
         let buffer = context
             .create_buffer(&BufferDescriptor {
                 label: descriptor.label.clone(),
@@ -312,8 +360,8 @@ impl FixedPagePool {
             buffer,
             page_size: descriptor.page_size,
             page_count: descriptor.page_count,
-            pages: alloc::vec![PageState::Free; descriptor.page_count as usize],
-            pending_reclaims: Vec::new(),
+            pages,
+            pending_reclaims,
             next_token: 1,
             destroyed: AtomicBool::new(false),
         })
@@ -442,22 +490,32 @@ impl FixedPagePool {
             }
         }
 
-        let pending = core::mem::take(&mut self.pending_reclaims);
         let mut ready = Vec::new();
-        let mut deferred = Vec::with_capacity(pending.len());
-        for pending in pending {
+        let ready_count = self
+            .pending_reclaims
+            .iter()
+            .filter(|pending| pending.reclaim_after <= completed)
+            .count();
+        ready
+            .try_reserve_exact(ready_count)
+            .map_err(|_| PagePoolError::HostAllocation)?;
+        let pages = &mut self.pages;
+        self.pending_reclaims.retain(|pending| {
             if pending.reclaim_after <= completed {
-                self.set_state(pending.allocation, PageState::Free);
+                let allocation = pending.allocation;
+                let range = allocation.first_page as usize
+                    ..(allocation.first_page + allocation.page_count) as usize;
+                pages[range].fill(PageState::Free);
                 ready.push(FixedPageReclaimEvent {
-                    allocation: pending.allocation,
+                    allocation,
                     reclaim_after: pending.reclaim_after,
                     completed,
                 });
+                false
             } else {
-                deferred.push(pending);
+                true
             }
-        }
-        self.pending_reclaims = deferred;
+        });
         Ok(ready)
     }
 

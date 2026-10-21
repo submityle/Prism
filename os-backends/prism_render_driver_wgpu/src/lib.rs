@@ -15,7 +15,12 @@
 //!
 //! Device loss (a driver reset or crash, or an explicit `destroy`) is reported
 //! through [`RenderDevice::take_device_lost`](prism_render_driver::RenderDevice::take_device_lost);
-//! see [`DeviceLostReason`]. This applies to devices created by this backend.
+//! see [`DeviceLostReason`]. This applies to devices created by this backend
+//! and original native tuples passed to [`WgpuDevice::own_original`], which
+//! takes over the loss callback and creates fresh RHI resource tables. Tuple
+//! ancestry is caller-supplied, not authenticated. External native acquisition
+//! can use [`WgpuInstance::device_descriptor`] for the same configuration as
+//! [`prism_render_driver::Instance::create_device`].
 //! [`WgpuDevice::adopt`] instead preserves the host's loss callback and leaves
 //! recovery to the host. [`WgpuQueue::encode`] supports record-only native
 //! handoff without transferring submission ownership to Prism.

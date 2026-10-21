@@ -20,6 +20,8 @@ mod context;
 mod extract;
 mod page_pool;
 mod page_residency_bridge;
+#[cfg(feature = "resident-page-streaming")]
+mod page_resident;
 mod page_streaming;
 mod page_streaming_stage;
 mod prepare;
@@ -45,6 +47,10 @@ pub use page_pool::{
     PageReleaseTransaction, PageReplaceTransaction, PageUploadTransaction,
 };
 pub use page_residency_bridge::{FixedPageResidencyBridge, PageResidencyBridgeError};
+#[cfg(feature = "resident-page-streaming")]
+pub use page_resident::{
+    ResidentPageAllocation, ResidentPageError, ResidentPagePool, ResidentPagePublication,
+};
 pub use page_streaming::{
     FixedPageBytesUploader, FixedPageIoReport, FixedPageReleasePayload, FixedPageRenderPayload,
     FixedPageRenderQueue, FixedPageSlotKey, FixedPageStreamingManager, FixedPageStreamingSource,

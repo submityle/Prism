@@ -29,9 +29,15 @@ prism_transform = { path = "../prism_transform", features = ["ecs"] }
 prism_window = { path = "../prism_window" }
 raw-window-handle = { version = "0.6", default-features = false }
 prism_window_winit = { path = "../prism_window_winit", optional = true }
+prism_render_driver_wgpu = { path = "../../os-backends/prism_render_driver_wgpu", optional = true }
+wgpu = { version = "30", default-features = false, features = ["wgsl", "metal"], optional = true }
+futures-lite = { version = "2", optional = true }
+prism_gdeflate_gpu = { path = "../prism_gdeflate_gpu", optional = true }
+prism_asset_container = { path = "../prism_asset_container", features = ["gpu"], optional = true }
 
 [features]
 default = []
+resident-page-streaming = ["dep:prism_render_driver_wgpu", "dep:wgpu", "dep:futures-lite", "dep:prism_gdeflate_gpu", "dep:prism_asset_container"]
 # Connect the App's real OS windows to the same presentation driver.
 winit = ["prism_app/winit", "dep:prism_window_winit"]
 

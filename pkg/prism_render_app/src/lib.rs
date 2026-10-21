@@ -92,6 +92,8 @@ mod queue_stage;
 mod record;
 mod recovery;
 mod render_asset;
+#[cfg(feature = "resident-page-streaming")]
+mod resident_instance;
 mod runtime_resource;
 mod scene;
 mod sets;
@@ -206,6 +208,12 @@ pub use render_asset::{
     register_fixed_page_feedback, FixedPageFeedback, FixedPageFeedbackConfig,
     FixedPageFeedbackError, FixedPageFeedbackGpu, FixedPageFeedbackSample, FixedPageQuery,
 };
+#[cfg(feature = "resident-page-streaming")]
+pub use render_asset::{
+    ResidentPageAllocation, ResidentPageError, ResidentPagePool, ResidentPagePublication,
+};
+#[cfg(feature = "resident-page-streaming")]
+pub use resident_instance::{ResidentRenderDevice, ResidentWgpuAdapter, ResidentWgpuInstance};
 pub use runtime_resource::RenderRuntimeResource;
 pub use scene::{MeshClass, SceneRegistry, VisibilityWorkList};
 pub use sets::{
@@ -325,4 +333,9 @@ pub mod prelude {
     pub use crate::view_driver::{for_each_view, with_current_view};
     pub use crate::view_query::{CurrentView, ViewQuery, ViewQueryState};
     pub use crate::views::{RenderView, RenderViews};
+    #[cfg(feature = "resident-page-streaming")]
+    pub use crate::{
+        ResidentPageAllocation, ResidentPageError, ResidentPagePool, ResidentPagePublication,
+        ResidentRenderDevice, ResidentWgpuAdapter, ResidentWgpuInstance,
+    };
 }

@@ -41,6 +41,94 @@ fn null_pool(device: &NullDevice, queue: &NullQueue) -> FixedPagePool {
     pool
 }
 
+#[test]
+fn host_metadata_admission_precedes_gpu_allocation() {
+    let (device, queue) = null_device();
+    let mut descriptor = FixedPagePoolDescriptor::new(4, u32::MAX, BufferUsages::COPY_DST);
+    let required = descriptor.required_host_bytes().unwrap();
+    let mut budget = GpuPrepareBudget::new(u64::MAX);
+    let cancellation = AtomicBool::new(false);
+    {
+        let mut context = PrepareContext::new(&device, &queue, &mut budget, &cancellation);
+        let error = FixedPagePool::new(&mut context, &descriptor).err().unwrap();
+        assert_eq!(
+            error,
+            PagePoolError::HostBudgetExceeded {
+                required,
+                limit: descriptor.max_host_bytes,
+            }
+        );
+        assert_eq!(device.live_resource_count(), 0);
+        // Even a failed prepare that the caller commits has no GPU side effects.
+        context.commit();
+    }
+    descriptor.page_count = 4;
+    descriptor.max_host_bytes = descriptor.required_host_bytes().unwrap() - 1;
+    {
+        let mut context = PrepareContext::new(&device, &queue, &mut budget, &cancellation);
+        assert!(matches!(
+            FixedPagePool::new(&mut context, &descriptor),
+            Err(PagePoolError::HostBudgetExceeded { .. })
+        ));
+        assert_eq!(device.live_resource_count(), 0);
+    }
+    descriptor.max_host_bytes += 1;
+    let mut context = PrepareContext::new(&device, &queue, &mut budget, &cancellation);
+    let pool = FixedPagePool::new(&mut context, &descriptor).unwrap();
+    context.commit();
+    assert_eq!(pool.free_page_count(), 4);
+    pool.destroy(&device);
+    assert_eq!(device.live_resource_count(), 0);
+}
+
+#[test]
+fn mixed_completion_batches_preserve_order_and_quarantine_unfinished_pages() {
+    let (device, queue) = null_device();
+    let mut pool = null_pool(&device, &queue);
+    let mut allocations = Vec::new();
+    for revision in 0..4 {
+        let mut upload = pool
+            .begin_upload(FixedPageUpload::new(revision, &[0; 4]))
+            .unwrap();
+        let allocation = upload.allocation();
+        upload.upload(&queue).unwrap();
+        upload.commit().unwrap();
+        allocations.push(allocation);
+    }
+    for (allocation, completion) in allocations.iter().zip([7, 3, 7, 3]) {
+        pool.begin_release(*allocation, 10)
+            .unwrap()
+            .commit_deferred(GpuCompletionValue(completion))
+            .unwrap();
+    }
+    assert_eq!(pool.pending_reclaim_page_count(), 4);
+    let first = pool.reclaim_completed(GpuCompletionValue(3)).unwrap();
+    assert_eq!(
+        first
+            .iter()
+            .map(|event| event.allocation)
+            .collect::<Vec<_>>(),
+        vec![allocations[1], allocations[3]]
+    );
+    assert_eq!(pool.free_page_count(), 2);
+    assert_eq!(pool.pending_reclaim_page_count(), 2);
+    assert!(pool
+        .reclaim_completed(GpuCompletionValue(6))
+        .unwrap()
+        .is_empty());
+    let second = pool.reclaim_completed(GpuCompletionValue(7)).unwrap();
+    assert_eq!(
+        second
+            .iter()
+            .map(|event| event.allocation)
+            .collect::<Vec<_>>(),
+        vec![allocations[0], allocations[2]]
+    );
+    assert_eq!(pool.free_page_count(), 4);
+    assert_eq!(pool.pending_reclaim_page_count(), 0);
+    pool.destroy(&device);
+}
+
 /// A forwarding queue makes the RHI call observable without replacing the
 /// real null device or changing the pool's upload path.
 #[derive(Default)]

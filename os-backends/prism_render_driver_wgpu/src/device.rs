@@ -442,6 +442,48 @@ pub struct WgpuDevice {
 }
 
 impl WgpuDevice {
+    /// Takes ownership of an original wgpu adapter/device/queue tuple and
+    /// installs Prism's device-lost callback via the owned-device path.
+    ///
+    /// This is not host adoption: it replaces any existing device-lost
+    /// callback so [`RenderDevice::take_device_lost`] observes future loss.
+    /// The uncaptured-error callback is left unchanged. Use [`Self::adopt`]
+    /// when the host must retain loss handling and recovery ownership.
+    /// Capabilities reflect the device's enabled features and limits, not
+    /// everything the adapter could support. No device is requested and no
+    /// work is submitted.
+    ///
+    /// # Caller-supplied ancestry and resource boundary
+    ///
+    /// The caller must supply the adapter, device, and queue from the same
+    /// original device request. Their ancestry is caller-supplied, not
+    /// authenticated here: this method cannot certify the pairing, and native
+    /// device equality is not a cross-instance ownership proof. Retained
+    /// native clones still share this device and its callback; do not install
+    /// another loss callback if Prism must continue observing loss.
+    ///
+    /// Each call creates fresh RHI resource tables; no existing resources are
+    /// imported. IDs cannot cross tables, even for the same native device,
+    /// and may collide. Register native resources separately under the
+    /// same-device contract in [`Self::register_buffer`]. Dropping the returned
+    /// pair releases handles without explicitly destroying the native device;
+    /// device replacement requires fresh tables and resource registrations.
+    #[must_use]
+    pub fn own_original(
+        adapter: wgpu::Adapter,
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+    ) -> (Self, crate::WgpuQueue) {
+        let caps = rhi::DeviceCapabilities {
+            backend: convert::backend_from_wgpu(device.adapter_info().backend),
+            features: convert::features_from_wgpu(device.features()),
+            limits: convert::limits_from_wgpu(&device.limits()),
+        };
+        let device = Self::from_parts(adapter, device, caps);
+        let queue = crate::WgpuQueue::from_parts(queue, device.inner());
+        (device, queue)
+    }
+
     /// Adopts an existing host-owned wgpu device/queue without requesting a
     /// device or replacing either of the host's error/loss callbacks.
     ///
@@ -1471,6 +1513,117 @@ mod tests {
                 None
             }
         }
+    }
+
+    #[test]
+    fn original_tuple_apis_are_public_with_descriptor_only_label_lifetime() {
+        let _: fn(wgpu::Adapter, wgpu::Device, wgpu::Queue) -> (WgpuDevice, crate::WgpuQueue) =
+            WgpuDevice::own_original;
+        let _: for<'adapter, 'descriptor> fn(
+            &'adapter wgpu::Adapter,
+            &'descriptor rhi::DeviceDescriptor,
+        ) -> wgpu::DeviceDescriptor<'descriptor> = crate::WgpuInstance::device_descriptor;
+    }
+
+    #[test]
+    fn original_tuple_preserves_enabled_caps_and_takes_over_loss_callback() {
+        let instance = crate::WgpuInstance::new();
+        let Some(adapter) = instance.enumerate_adapters().into_iter().find(|adapter| {
+            matches!(
+                adapter.get_info().device_type,
+                wgpu::DeviceType::IntegratedGpu | wgpu::DeviceType::DiscreteGpu
+            )
+        }) else {
+            assert!(
+                !crate::require_hardware_gpu(),
+                "PRISM_REQUIRE_GPU=1: no physical adapter for original tuple test"
+            );
+            eprintln!("SKIPPED original tuple GPU test: no physical adapter");
+            return;
+        };
+        let mut descriptor = rhi::DeviceDescriptor {
+            label: Some("original-tuple-test".into()),
+            required_features: rhi::Features::all(),
+            required_limits: convert::limits_from_wgpu(&wgpu::Limits::default()),
+        };
+        descriptor.required_limits.max_texture_dimension_2d = 1024;
+        {
+            // The adapter borrow must not constrain the returned label.
+            let native = {
+                let adapter_clone = adapter.clone();
+                crate::WgpuInstance::device_descriptor(&adapter_clone, &descriptor)
+            };
+            assert_eq!(native.label, descriptor.label.as_deref());
+            assert_eq!(
+                native.required_features,
+                convert::features_to_wgpu(descriptor.required_features) & adapter.features()
+            );
+            assert_eq!(
+                native.required_limits,
+                convert::limits_to_wgpu(descriptor.required_limits)
+            );
+        }
+        descriptor.label = Some("".into());
+        assert_eq!(
+            crate::WgpuInstance::device_descriptor(&adapter, &descriptor).label,
+            Some("")
+        );
+        descriptor.label = None;
+        assert_eq!(
+            crate::WgpuInstance::device_descriptor(&adapter, &descriptor).label,
+            Some("prism_render_driver_wgpu device")
+        );
+        // Request no optional features so capability checks cannot merely
+        // echo the adapter's larger supported feature set.
+        descriptor.required_features = rhi::Features::NONE;
+        let (native_device, native_queue) = futures_lite::future::block_on(adapter.request_device(
+            &crate::WgpuInstance::device_descriptor(&adapter, &descriptor),
+        ))
+        .expect("physical adapter must create the original tuple");
+        let (adopted, _adopted_queue) =
+            WgpuDevice::adopt(adapter.clone(), native_device.clone(), native_queue.clone());
+        let existing =
+            adopted.create_buffer(&rhi::BufferDescriptor::new(4, rhi::BufferUsages::COPY_DST));
+        let host_loss = Arc::new(Mutex::new(false));
+        let callback_loss = Arc::clone(&host_loss);
+        native_device.set_device_lost_callback(move |_, _| *lock(&callback_loss) = true);
+        let (device, queue) =
+            WgpuDevice::own_original(adapter.clone(), native_device.clone(), native_queue.clone());
+        // Equality here compares retained handles from one original request,
+        // not arbitrary devices or resources from independent instances.
+        assert_eq!(device.wgpu_device(), &native_device);
+        assert_eq!(device.wgpu_adapter(), &adapter);
+        assert_eq!(queue.wgpu_queue(), &native_queue);
+        assert_eq!(
+            device.capabilities(),
+            &rhi::DeviceCapabilities {
+                backend: convert::backend_from_wgpu(native_device.adapter_info().backend),
+                features: convert::features_from_wgpu(native_device.features()),
+                limits: convert::limits_from_wgpu(&native_device.limits()),
+            }
+        );
+        assert!(!Arc::ptr_eq(&device.inner, &adopted.inner));
+        assert!(lock(&device.inner.buffers).is_empty());
+        assert_eq!(adopted.wgpu_buffer(existing).size(), 4);
+        adopted.destroy_buffer(existing);
+        assert!(device.take_device_lost().is_none());
+        native_device.destroy();
+        let mut observed = None;
+        for _ in 0..200 {
+            let _ = native_device.poll(wgpu::PollType::Poll);
+            observed = device.take_device_lost();
+            if observed.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(observed, Some(DeviceLostReason::Destroyed));
+        assert!(
+            !*lock(&host_loss),
+            "Prism must replace the old loss callback"
+        );
+        assert!(device.take_device_lost().is_none(), "loss is drained once");
+        assert!(adopted.take_device_lost().is_none());
     }
 
     #[test]
