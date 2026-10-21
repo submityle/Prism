@@ -28,6 +28,108 @@ pub struct GpuPlanetPlacementWorkBudget {
     pub max_sample_reads: u64,
 }
 
+/// One immutable native buffer handle plus its logical imported byte size.
+///
+/// Cloning this value clones the native handle; it does not allocate or copy
+/// GPU memory. Registration must remain on the same device as the producer.
+#[derive(Clone)]
+pub struct GpuPlanetPlacementBufferSnapshot {
+    buffer: wgpu::Buffer,
+    bytes: u64,
+}
+
+impl GpuPlanetPlacementBufferSnapshot {
+    /// Returns the native buffer owned by the placement producer.
+    #[must_use]
+    pub fn buffer(&self) -> &wgpu::Buffer {
+        &self.buffer
+    }
+
+    /// Returns the exact logical byte size for RHI import.
+    #[must_use]
+    pub const fn bytes(&self) -> u64 {
+        self.bytes
+    }
+}
+
+/// One native compute pipeline, bind group, and dispatch tuple.
+#[derive(Clone)]
+pub struct GpuPlanetPlacementStageSnapshot {
+    pipeline: wgpu::ComputePipeline,
+    bind_group: wgpu::BindGroup,
+    dispatch: [u32; 3],
+}
+
+impl GpuPlanetPlacementStageSnapshot {
+    /// Returns the native compute pipeline.
+    #[must_use]
+    pub fn pipeline(&self) -> &wgpu::ComputePipeline {
+        &self.pipeline
+    }
+
+    /// Returns the native bind group compatible with this pipeline.
+    #[must_use]
+    pub fn bind_group(&self) -> &wgpu::BindGroup {
+        &self.bind_group
+    }
+
+    /// Returns nonzero workgroup dimensions for this stage.
+    #[must_use]
+    pub const fn dispatch(&self) -> [u32; 3] {
+        self.dispatch
+    }
+}
+
+/// Complete native registration surface for one uploaded planetary request.
+///
+/// The six buffers and both compute stages correspond exactly to the planetary
+/// placement shader ABI. `active` is absent for an empty request; callers must
+/// execute no candidate or finalize dispatch in that case. The snapshot does
+/// not freeze queue contents: submit work before uploading another request and
+/// retain registered resources until GPU completion.
+#[derive(Clone)]
+pub struct GpuPlanetPlacementRegistrationSnapshot {
+    /// Monotonic successful request upload generation.
+    pub request_generation: u64,
+    /// Number of source candidates represented by the request.
+    pub candidate_count: u32,
+    /// Uniform request parameters.
+    pub params: GpuPlanetPlacementBufferSnapshot,
+    /// Candidate-aligned output records.
+    pub records: GpuPlanetPlacementBufferSnapshot,
+    /// Signed-i128-limb height samples.
+    pub heights: GpuPlanetPlacementBufferSnapshot,
+    /// Compact source-slot output.
+    pub compact: GpuPlanetPlacementBufferSnapshot,
+    /// Accepted-count and projection-failure status.
+    pub status: GpuPlanetPlacementBufferSnapshot,
+    /// Four-word indirect draw arguments.
+    pub indirect: GpuPlanetPlacementBufferSnapshot,
+    /// Candidate generation stage, absent for an empty request.
+    pub active: Option<GpuPlanetPlacementStageSnapshot>,
+    /// One-workgroup indirect finalization stage, absent for an empty request.
+    pub finalize: Option<GpuPlanetPlacementStageSnapshot>,
+}
+
+impl GpuPlanetPlacementRegistrationSnapshot {
+    /// Encodes the complete request, including the transient reset, without
+    /// submission or readback.
+    ///
+    /// This is the executable form of the native registration snapshot. It
+    /// preserves the producer's ABI: the indirect instance-count word is
+    /// cleared while the fixed vertex-count word is retained, status is reset,
+    /// and candidate/finalize work is omitted for an empty request.
+    pub fn encode(&self, encoder: &mut wgpu::CommandEncoder) {
+        encode_request(
+            encoder,
+            &self.indirect.buffer,
+            &self.status.buffer,
+            self.active.as_ref(),
+            self.finalize.as_ref(),
+        );
+    }
+}
+
 /// Stable cache identity for a GPU planetary placement request.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GpuPlanetPlacementCacheKey {
@@ -308,6 +410,54 @@ impl GpuPlanetPlacement {
         Ok(())
     }
 
+    /// Clones the complete native registration surface for the current request.
+    ///
+    /// This does not allocate GPU memory or submit work. The target RHI must
+    /// register every handle on the same native device and keep those
+    /// registrations alive until all submitted work has completed. An empty
+    /// uploaded request has `active == None` and `finalize == None`.
+    pub fn registration_snapshot(
+        &self,
+    ) -> Result<GpuPlanetPlacementRegistrationSnapshot, GpuPlanetPlacementError> {
+        let request = self
+            .request
+            .as_ref()
+            .ok_or(GpuScatterError::RequestNotUploaded)?;
+        let slots = self.capacity.max(1) as u64;
+        let buffer = |buffer: &wgpu::Buffer, bytes| GpuPlanetPlacementBufferSnapshot {
+            buffer: buffer.clone(),
+            bytes,
+        };
+        let stage = |pipeline: &wgpu::ComputePipeline, bind_group: &wgpu::BindGroup, dispatch| {
+            GpuPlanetPlacementStageSnapshot {
+                pipeline: pipeline.clone(),
+                bind_group: bind_group.clone(),
+                dispatch,
+            }
+        };
+        let active = (request.candidate_count != 0).then(|| {
+            stage(
+                &self.pipeline,
+                &self.bind_group,
+                [request.groups[0], request.groups[1], 1],
+            )
+        });
+        let finalize = (request.candidate_count != 0)
+            .then(|| stage(&self.finalize_pipeline, &self.bind_group, [1, 1, 1]));
+        Ok(GpuPlanetPlacementRegistrationSnapshot {
+            request_generation: self.request_generation,
+            candidate_count: request.candidate_count,
+            params: buffer(&self.params, PARAM_BYTES),
+            records: buffer(&self.records, RECORD_BYTES * slots),
+            heights: buffer(&self.heights, 16 * self.max_surface_samples.max(1) as u64),
+            compact: buffer(&self.compact, 4 * slots),
+            status: buffer(&self.status, 8),
+            indirect: buffer(&self.indirect, 16),
+            active,
+            finalize,
+        })
+    }
+
     /// Encodes placement and final indirect-count passes without submission or readback.
     pub fn encode(
         &self,
@@ -320,21 +470,20 @@ impl GpuPlanetPlacement {
         encoder.clear_buffer(&self.indirect, 4, Some(4));
         encoder.clear_buffer(&self.status, 0, None);
         if request.candidate_count != 0 {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("planet placement candidates"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &self.bind_group, &[]);
-            pass.dispatch_workgroups(request.groups[0], request.groups[1], 1);
-            drop(pass);
-            let mut finalize = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("planet placement indirect finalize"),
-                timestamp_writes: None,
-            });
-            finalize.set_pipeline(&self.finalize_pipeline);
-            finalize.set_bind_group(0, &self.bind_group, &[]);
-            finalize.dispatch_workgroups(1, 1, 1);
+            encode_stage(
+                encoder,
+                &self.pipeline,
+                &self.bind_group,
+                [request.groups[0], request.groups[1], 1],
+                "planet placement candidates",
+            );
+            encode_stage(
+                encoder,
+                &self.finalize_pipeline,
+                &self.bind_group,
+                [1, 1, 1],
+                "planet placement indirect finalize",
+            );
         }
         Ok(())
     }
@@ -456,6 +605,51 @@ impl GpuPlanetPlacement {
         )
         .map(|_| ())
     }
+}
+
+fn encode_request(
+    encoder: &mut wgpu::CommandEncoder,
+    indirect: &wgpu::Buffer,
+    status: &wgpu::Buffer,
+    active: Option<&GpuPlanetPlacementStageSnapshot>,
+    finalize: Option<&GpuPlanetPlacementStageSnapshot>,
+) {
+    encoder.clear_buffer(indirect, 4, Some(4));
+    encoder.clear_buffer(status, 0, None);
+    if let Some(stage) = active {
+        encode_stage(
+            encoder,
+            &stage.pipeline,
+            &stage.bind_group,
+            stage.dispatch,
+            "planet placement candidates",
+        );
+    }
+    if let Some(stage) = finalize {
+        encode_stage(
+            encoder,
+            &stage.pipeline,
+            &stage.bind_group,
+            stage.dispatch,
+            "planet placement indirect finalize",
+        );
+    }
+}
+
+fn encode_stage(
+    encoder: &mut wgpu::CommandEncoder,
+    pipeline: &wgpu::ComputePipeline,
+    bind_group: &wgpu::BindGroup,
+    dispatch: [u32; 3],
+    label: &'static str,
+) {
+    let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        label: Some(label),
+        timestamp_writes: None,
+    });
+    pass.set_pipeline(pipeline);
+    pass.set_bind_group(0, bind_group, &[]);
+    pass.dispatch_workgroups(dispatch[0], dispatch[1], dispatch[2]);
 }
 
 fn put64(words: &mut [u32; 48], index: usize, value: u64) {

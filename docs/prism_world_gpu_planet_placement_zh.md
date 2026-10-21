@@ -17,7 +17,11 @@ pass，不提交、不等待、不读回，必须由调用者在提交 encoder �
 高度、半径和 origin 先以 signed-i128 limbs 上传，再在 shader 中转换为 `f32`。完整的 i64
 CPU 配置、tile、region 和样本仍保存在 `GpuPlanetPlacementCacheKey` 中。该切片
 提供 GPU placement 资源和 indirect 输出，不宣称与 CPU `place_on_planet_heightfield` 的
-i64 毫米坐标逐位相等，也不包含 scene/ECS、renderer graph 或跨 LOD seam。GPU 候选记录现在
+i64 毫米坐标逐位相等，也不包含 scene/ECS、renderer graph 或跨 LOD seam。
+`GpuPlanetPlacement::registration_snapshot` 现在暴露同设备 RHI 注册所需的完整 6-buffer、
+candidate/finalize pipeline、bind group、dispatch、request generation 和 candidate count，
+并提供可复用的 `snapshot.encode()`，覆盖 indirect/status reset 与非空请求的两个 dispatch；
+它只 clone native handles，不负责注册、提交或 completion retirement。GPU 候选记录现在
 提供独立的 diagnostic readback；真实设备回归逐候选核对 tile/cell identity、CPU 导出的稳定
 rank、四角高度 numerator、threshold accepted 和 invalid 标志。这是候选语义 parity，不是
 `f32` 几何位置的 i64 毫米逐位 parity。`planet_placement_deletion` 已在 Apple M2 / Metal /

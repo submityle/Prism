@@ -126,8 +126,9 @@ mod planet_placement;
 
 #[cfg(feature = "terrain_scatter")]
 pub use planet_placement::{
-    GpuPlanetPlacement, GpuPlanetPlacementCacheKey, GpuPlanetPlacementError,
-    GpuPlanetPlacementWorkBudget,
+    GpuPlanetPlacement, GpuPlanetPlacementBufferSnapshot, GpuPlanetPlacementCacheKey,
+    GpuPlanetPlacementError, GpuPlanetPlacementRegistrationSnapshot,
+    GpuPlanetPlacementStageSnapshot, GpuPlanetPlacementWorkBudget,
 };
 
 #[cfg(feature = "terrain_scatter")]

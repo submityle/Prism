@@ -131,6 +131,20 @@ fn planetary_placement_dispatch_produces_all_flat_tile_candidates() {
             },
         )
         .unwrap();
+    let registration = placement.registration_snapshot().unwrap();
+    assert_eq!(registration.request_generation, 1);
+    assert_eq!(registration.candidate_count, 4);
+    assert_eq!(registration.params.bytes(), 192);
+    assert_eq!(registration.records.bytes(), 4 * 80);
+    assert_eq!(registration.heights.bytes(), 16 * 16);
+    assert_eq!(registration.compact.bytes(), 4 * 4);
+    assert_eq!(registration.status.bytes(), 8);
+    assert_eq!(registration.indirect.bytes(), 16);
+    assert_eq!(registration.active.as_ref().unwrap().dispatch(), [1, 1, 1]);
+    assert_eq!(
+        registration.finalize.as_ref().unwrap().dispatch(),
+        [1, 1, 1]
+    );
 
     let readback = context.device().create_buffer(&wgpu::BufferDescriptor {
         label: Some("planet placement GPU readback"),
@@ -149,7 +163,7 @@ fn planetary_placement_dispatch_produces_all_flat_tile_candidates() {
         .create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("planet placement GPU test encoder"),
         });
-    placement.encode(&mut encoder).unwrap();
+    registration.encode(&mut encoder);
     placement.encode_readback(&mut encoder, &readback).unwrap();
     placement
         .encode_records_readback(&mut encoder, &records)
