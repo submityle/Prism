@@ -37,7 +37,10 @@ impl PhysicsWorld {
         }
     }
 
-    pub(crate) fn submit_solver_joint_loads(&mut self, dt: Real, loads: Vec<SolverJointLoad>) {
+    pub(crate) fn submit_solver_joint_loads(&mut self, dt: Real, mut loads: Vec<SolverJointLoad>) {
+        // Disabled internal welds have no XPBD projection. Their member-load
+        // reactions share this exact boundary and its retained retry payload.
+        loads.append(&mut self.assembly_stress.measured);
         if let Err(error) = self.submit_joint_loads(dt, &loads) {
             self.joint_boundary_failure = Some(JointBoundaryFailure { dt, loads, error });
         }

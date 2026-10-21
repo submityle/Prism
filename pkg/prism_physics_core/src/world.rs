@@ -45,6 +45,8 @@ use std::collections::BTreeMap;
 
 mod assembly_break;
 pub use assembly_break::{AssemblyMemberRemap, AssemblySplitReport, JointBoundaryFailure};
+mod assembly_stress;
+pub use assembly_stress::{AssemblyConnectionReaction, AssemblyMemberWrench, AssemblyStressError};
 
 #[derive(Clone, Debug)]
 struct AssemblyJointSnapshot {
@@ -111,6 +113,8 @@ pub enum AssemblyWorldError {
     InvalidDamping,
     /// Pending wrench remapping failed, including finite-input overflow.
     Force(ForceError),
+    /// Consume or explicitly cancel member-resolved loads before a manual split.
+    PendingMemberWrenches,
 }
 
 /// Error returned when aerodynamic data cannot be registered for a body.
@@ -217,6 +221,7 @@ pub struct PhysicsWorld {
     assembly_merges: BTreeMap<u64, AssemblyMergeState>,
     assembly_split_reports: Vec<AssemblySplitReport>,
     joint_boundary_failure: Option<JointBoundaryFailure>,
+    assembly_stress: assembly_stress::AssemblyStressState,
 }
 
 impl PhysicsWorld {
@@ -247,6 +252,7 @@ impl PhysicsWorld {
             assembly_merges: BTreeMap::new(),
             assembly_split_reports: Vec::new(),
             joint_boundary_failure: None,
+            assembly_stress: assembly_stress::AssemblyStressState::default(),
         }
     }
 
@@ -485,7 +491,29 @@ impl PhysicsWorld {
 
     /// Commits measured solver constraint loads at one fixed-step boundary.
     /// This is the only world entry point that may disable a breakable joint.
+    /// Includes member reactions measured by `consume_external_forces`; callers
+    /// must not resubmit those reactions in `loads`. On rejection those member
+    /// measurements remain pending, so a custom backend may repair the cause
+    /// and retry with the same solver loads without consuming forces again.
     pub fn submit_joint_loads(
+        &mut self,
+        dt: Real,
+        loads: &[SolverJointLoad],
+    ) -> Result<Vec<BreakEvent>, BoundaryLoadError> {
+        // Custom backends using consume_external_forces share the same
+        // disabled-weld measurement protocol as XPBD. Failed explicit
+        // submissions leave those measurements available for an exact retry.
+        if self.assembly_stress.measured.is_empty() {
+            return self.commit_joint_loads(dt, loads);
+        }
+        let mut combined = loads.to_vec();
+        combined.extend_from_slice(&self.assembly_stress.measured);
+        let events = self.commit_joint_loads(dt, &combined)?;
+        self.assembly_stress.measured.clear();
+        Ok(events)
+    }
+
+    fn commit_joint_loads(
         &mut self,
         dt: Real,
         loads: &[SolverJointLoad],
@@ -862,6 +890,9 @@ impl PhysicsWorld {
     ) -> Result<PreparedAssemblySplit, (BodyHandle, AssemblyWorldError)> {
         let mut count = 0usize;
         for &proxy in proxies {
+            if self.assembly_stress.has_pending(proxy) {
+                return Err((proxy, AssemblyWorldError::PendingMemberWrenches));
+            }
             let state = self
                 .assembly_merges
                 .get(&body_sort_key(&proxy))
@@ -1453,17 +1484,22 @@ impl PhysicsWorld {
     /// Consumes accumulated external forces into velocities for one sub-step.
     /// Backends call this immediately before their prediction phase.
     pub fn consume_external_forces(&mut self, dt: Real) -> usize {
-        self.external_forces.consume(&mut self.bodies, dt)
+        let additional = self.consume_assembly_member_wrenches(dt);
+        additional + self.external_forces.consume(&mut self.bodies, dt)
     }
 
     /// Complete free-body M10/M11 step: field sampling, force consumption,
     /// then gravity and damping integration.
     pub fn step_external_dynamics(&mut self, dt: Real) -> usize {
+        if !dt.is_finite() || dt <= 0.0 || self.retry_joint_boundary().is_err() {
+            return 0;
+        }
         self.collision_exclusions.retain_live(&self.bodies);
         self.sample_fields();
         let _ = self.step_aero_substep(dt);
         let count = self.consume_external_forces(dt);
         Integrator::integrate(&mut self.bodies, self.config.gravity, dt);
+        self.submit_solver_joint_loads(dt, Vec::new());
         count
     }
 
