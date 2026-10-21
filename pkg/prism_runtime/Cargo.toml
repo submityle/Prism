@@ -1,0 +1,21 @@
+[package]
+name = "prism_runtime"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96.0"
+description = "Prism's Bevy-free production launcher with a verifiable headless native frame loop."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+prism_app = { path = "../prism_app" }
+prism_render_app = { path = "../prism_render_app" }
+prism_render_driver = { path = "../prism_render_driver" }
+prism_render_driver_null = { path = "../../os-backends/prism_render_driver_null" }
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "prism_runtime"
+path = "src/main.rs"

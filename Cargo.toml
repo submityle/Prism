@@ -51,6 +51,8 @@ members = [
   # Render sub-app integration: wires the RHI runtime into prism_app as a
   # dedicated render SubApp (the in-house bevy_render `RenderApp` replacement).
   "pkg/prism_render_app",
+  # Bevy-free production launcher and headless native frame-loop entry point.
+  "pkg/prism_runtime",
   # GPU-driven culling vertical slice (compute cull + indirect draw) on the RHI.
   "pkg/prism_render_gpudriven",
   # Engine-neutral mesh geometry (vertex model + primitives + RHI upload),
@@ -263,6 +265,7 @@ members = [
   # Bevy's error codes. This is a crate so we can automatically check all of the code blocks.
   "errors",
 ]
+default-members = ["pkg/prism_runtime"]
 exclude = [
   # Integration tests are not part of the workspace
   "tests-integration",
