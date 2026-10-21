@@ -684,8 +684,12 @@ impl ArchetypePosting {
             .filter(|block| !block.is_empty())
     }
 
-    pub(crate) fn iter(&self) -> impl Iterator<Item = ArchetypeId> + '_ {
-        self.blocks().flat_map(|block| block.iter().copied())
+    pub(crate) fn iter(&self) -> ArchetypePostingIter<'_> {
+        ArchetypePostingIter {
+            small: self.small.iter(),
+            blocks: self.blocks.values(),
+            block: [].iter(),
+        }
     }
 
     #[cfg(test)]
@@ -823,6 +827,29 @@ impl ArchetypePosting {
                 merged.append(&mut following);
                 self.blocks.insert(key, merged);
             }
+        }
+    }
+}
+
+/// Allocation-free iterator over a posting's inline vector and ordered blocks.
+pub(crate) struct ArchetypePostingIter<'a> {
+    small: core::slice::Iter<'a, ArchetypeId>,
+    blocks: alloc::collections::btree_map::Values<'a, ArchetypeId, Vec<ArchetypeId>>,
+    block: core::slice::Iter<'a, ArchetypeId>,
+}
+
+impl Iterator for ArchetypePostingIter<'_> {
+    type Item = ArchetypeId;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(&id) = self.small.next() {
+            return Some(id);
+        }
+        loop {
+            if let Some(&id) = self.block.next() {
+                return Some(id);
+            }
+            self.block = self.blocks.next()?.iter();
         }
     }
 }

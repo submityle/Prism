@@ -24,7 +24,6 @@
 //! recently-changed row has since been swap-removed. The design explicitly
 //! accepts this over-approximation for the coarse layer.
 
-use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, BinaryHeap};
 use alloc::vec;
 use alloc::vec::Vec;
@@ -32,7 +31,7 @@ use core::cmp::Reverse;
 use core::iter::Peekable;
 use hashbrown::HashSet;
 
-use crate::archetype::ArchetypeId;
+use crate::archetype::{ArchetypeId, ArchetypePostingIter};
 use crate::change::Tick;
 use crate::component::StorageType;
 use crate::query::fetch::QueryData;
@@ -226,8 +225,24 @@ pub(super) fn merge_sorted_chunks<T: Copy + Ord>(
 /// every bounded posting block as a separate source. This keeps heap width
 /// proportional to queried columns (plus sparse candidates), independent of
 /// archetype count.
+enum ArchetypeCandidateIter<'a> {
+    Posting(ArchetypePostingIter<'a>),
+    Sparse(core::iter::Copied<alloc::collections::btree_map::Keys<'a, ArchetypeId, Vec<usize>>>),
+}
+
+impl Iterator for ArchetypeCandidateIter<'_> {
+    type Item = ArchetypeId;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Posting(iter) => iter.next(),
+            Self::Sparse(iter) => iter.next(),
+        }
+    }
+}
+
 fn merge_sorted_archetype_iterators<'a>(
-    sources: &mut [Peekable<Box<dyn Iterator<Item = ArchetypeId> + 'a>>],
+    sources: &mut [Peekable<ArchetypeCandidateIter<'a>>],
     mut visit: impl FnMut(ArchetypeId),
 ) -> usize {
     if sources.len() <= 4 {
@@ -639,9 +654,7 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
         // union keeps output ordering deterministic and does not alter the
         // interval-index superset semantics.
         let archetypes = world.archetypes();
-        let mut sparse_archetypes = Vec::new();
-        let mut candidate_sources: Vec<Peekable<Box<dyn Iterator<Item = ArchetypeId> + '_>>> =
-            Vec::new();
+        let mut candidate_sources: Vec<Peekable<ArchetypeCandidateIter<'_>>> = Vec::new();
         for &id in &access_ids {
             if !world
                 .components()
@@ -652,16 +665,12 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
             }
             if let Some(indexed) = archetypes.with_component(id) {
                 report.stats.archetype_index_entries_scanned += indexed.len();
-                let source: Box<dyn Iterator<Item = ArchetypeId> + '_> = Box::new(indexed.iter());
-                candidate_sources.push(source.peekable());
+                candidate_sources.push(ArchetypeCandidateIter::Posting(indexed.iter()).peekable());
             }
         }
         if !sparse_chunks.is_empty() {
-            sparse_archetypes.extend(sparse_chunks.keys().copied());
-            sparse_archetypes.sort_unstable();
-            let source: Box<dyn Iterator<Item = ArchetypeId> + '_> =
-                Box::new(sparse_archetypes.iter().copied());
-            candidate_sources.push(source.peekable());
+            candidate_sources
+                .push(ArchetypeCandidateIter::Sparse(sparse_chunks.keys().copied()).peekable());
         }
         // The union is already visited in deterministic ArchetypeId order.
         // Process each candidate inside the merge instead of materializing a
