@@ -10,7 +10,7 @@
 //!
 //! Regenerate with `cargo test -p prism_render_shading --lib print_eon_table --
 //! --ignored --nocapture` (see `openpbr_reference::table_gen`); the same numbers
-//! are mirrored into `pkg/prism_render_scene/src/shaders/eon_albedo.wesl`, and
+//! are mirrored into src/shaders/eon_albedo.wesl, and
 //! `eon_albedo_table_mirrors_the_wesl` fails if the two ever drift.
 //!
 //! Layout: `EON_ALBEDO[j * EON_N_MU + i]` is `Ê_ON(μ_i, σ_j)` with
@@ -82,19 +82,18 @@ pub fn eon_average_lookup(sigma01: f32) -> f32 {
 mod tests {
     use super::*;
 
-    /// The WESL mirror lives in `prism_render_scene` (a sibling crate — this crate
-    /// does not depend on it, so the source is read by path). Any drift between
-    /// the baked tables here and the shader's copy fails immediately.
-    const BRDF_WESL: &str = include_str!("../../prism_render_scene/src/shaders/brdf.wesl");
+    /// The WESL mirror is owned by this crate. Any drift between the baked
+    /// tables here and the shader's copy fails immediately.
+    const EON_WESL: &str = include_str!("shaders/eon_albedo.wesl");
 
     /// Pull the float literals out of a WESL `const ... = array<f32, N>(...)`.
     fn wesl_floats(name: &str) -> Vec<f32> {
-        let start = BRDF_WESL
+        let start = EON_WESL
             .find(&format!("const {name}:"))
-            .unwrap_or_else(|| panic!("{name} missing from brdf.wesl"));
-        let open = BRDF_WESL[start..].find('(').expect("array constructor") + start;
-        let close = BRDF_WESL[open..].find(')').expect("array terminator") + open;
-        BRDF_WESL[open + 1..close]
+            .unwrap_or_else(|| panic!("{name} missing from eon_albedo.wesl"));
+        let open = EON_WESL[start..].find('(').expect("array constructor") + start;
+        let close = EON_WESL[open..].find(')').expect("array terminator") + open;
+        EON_WESL[open + 1..close]
             .split(',')
             .map(str::trim)
             .filter(|s| !s.is_empty())
