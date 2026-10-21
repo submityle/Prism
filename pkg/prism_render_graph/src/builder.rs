@@ -740,6 +740,16 @@ impl<'e> ExecuteContext<'e> {
         self
     }
 
+    /// Writes owned push-constant bytes after binding the compute pipeline.
+    /// No payload copy is made. Offset and length must meet the backend's
+    /// alignment, enabled device limits and pipeline range requirements; this
+    /// command-only context cannot reflect the bound device or pipeline layout.
+    pub fn set_compute_push_constants(&mut self, offset: u32, data: Vec<u8>) -> &mut Self {
+        self.compute_commands
+            .push(ComputeCommand::SetPushConstants { offset, data });
+        self
+    }
+
     /// Dispatches a grid of workgroups.
     pub fn dispatch(&mut self, x: u32, y: u32, z: u32) -> &mut Self {
         self.compute_commands
@@ -874,5 +884,62 @@ impl<'e> ExecuteContext<'e> {
     /// Drains the recorded copy commands.
     pub(crate) fn take_copy_commands(&mut self) -> Vec<CopyCommand> {
         core::mem::take(&mut self.copy_commands)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::vec;
+
+    #[test]
+    fn compute_push_constants_move_exact_bytes_in_command_order() {
+        let pipeline = ComputePipelineId::from_parts(2, 3);
+        let group = BindGroupId::from_parts(4, 5);
+        let payload: Vec<u8> = (0..20).collect();
+        let allocation = payload.as_ptr();
+        let mut context = ExecuteContext::new(&[], &[], PassKind::Compute);
+        context
+            .set_compute_pipeline(pipeline)
+            .set_compute_bind_group(0, group, Vec::new())
+            .set_compute_push_constants(4, payload)
+            .dispatch(1, 2, 3);
+        let commands = context.take_compute_commands();
+        let ComputeCommand::SetPushConstants { offset, data } = &commands[2] else {
+            panic!("push constants must precede dispatch");
+        };
+        assert_eq!(*offset, 4);
+        assert_eq!(
+            data.as_ptr(),
+            allocation,
+            "payload must move without copying"
+        );
+        assert_eq!(
+            commands,
+            vec![
+                ComputeCommand::SetPipeline(pipeline),
+                ComputeCommand::SetBindGroup {
+                    index: 0,
+                    bind_group: group,
+                    dynamic_offsets: Vec::new()
+                },
+                ComputeCommand::SetPushConstants {
+                    offset: 4,
+                    data: (0..20).collect()
+                },
+                ComputeCommand::Dispatch { x: 1, y: 2, z: 3 },
+            ]
+        );
+        assert!(context.take_compute_commands().is_empty());
+    }
+
+    #[test]
+    fn compute_without_push_constants_keeps_existing_command_stream() {
+        let mut context = ExecuteContext::new(&[], &[], PassKind::Compute);
+        context.dispatch(1, 1, 1);
+        assert_eq!(
+            context.take_compute_commands(),
+            vec![ComputeCommand::Dispatch { x: 1, y: 1, z: 1 }]
+        );
     }
 }
