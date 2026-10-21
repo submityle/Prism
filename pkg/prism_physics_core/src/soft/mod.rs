@@ -30,6 +30,7 @@ pub mod particle;
 pub mod rigid_coupling;
 pub mod solver;
 pub mod storage;
+pub mod topology;
 pub mod vbd_sweep;
 
 pub use aero::{
@@ -72,3 +73,7 @@ pub use solver::{
     SelfCollisionParams, SoftContacts, SoftSolver, SoftSolverConfig, VirtualSelfCollisionParams,
 };
 pub use storage::{SoftBodyHandle, SoftBodyStorage};
+pub use topology::{
+    MembraneMaterial, PrincipalMembraneStress, TearableMesh, TopologyEdge, TopologyMeshError,
+    TopologyTearEvent, TopologyTearEventKind, TopologyTearingConfig,
+};

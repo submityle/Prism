@@ -93,6 +93,48 @@ impl ParticleStorage {
         ParticleHandle::from_index(index)
     }
 
+    /// Appends a fully specified particle state and returns its new handle.
+    ///
+    /// This is the topology-editing boundary: a mesh split must duplicate the
+    /// current position, substep history, velocity, and inverse mass as one
+    /// atomic column append. Inputs are sanitized to the same representation
+    /// used by ordinary particle creation; invalid inverse masses become a
+    /// pinned particle instead of entering the solver as negative or NaN data.
+    pub fn append_state(
+        &mut self,
+        position: Vec3,
+        prev_position: Vec3,
+        velocity: Vec3,
+        inverse_mass: Real,
+    ) -> ParticleHandle {
+        let position = if position.is_finite() {
+            position
+        } else {
+            Vec3::ZERO
+        };
+        let prev_position = if prev_position.is_finite() {
+            prev_position
+        } else {
+            position
+        };
+        let velocity = if velocity.is_finite() {
+            velocity
+        } else {
+            Vec3::ZERO
+        };
+        let inverse_mass = if inverse_mass.is_finite() && inverse_mass >= 0.0 {
+            inverse_mass
+        } else {
+            0.0
+        };
+        let index = self.positions.len() as u32;
+        self.positions.push(position);
+        self.prev_positions.push(prev_position);
+        self.velocities.push(velocity);
+        self.inverse_masses.push(inverse_mass);
+        ParticleHandle::from_index(index)
+    }
+
     /// Returns the number of particles in the store.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -163,6 +205,18 @@ impl ParticleStorage {
         if let Some(slot) = self.inverse_masses.get_mut(handle.index()) {
             *slot = if mass > 0.0 && mass.is_finite() {
                 1.0 / mass
+            } else {
+                0.0
+            };
+        }
+    }
+
+    /// Sets the inverse mass directly for topology and backend adapters.
+    /// Non-finite or negative values are converted to the pinned value `0`.
+    pub fn set_inverse_mass(&mut self, handle: ParticleHandle, inverse_mass: Real) {
+        if let Some(slot) = self.inverse_masses.get_mut(handle.index()) {
+            *slot = if inverse_mass.is_finite() && inverse_mass >= 0.0 {
+                inverse_mass
             } else {
                 0.0
             };

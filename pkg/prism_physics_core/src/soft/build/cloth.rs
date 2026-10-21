@@ -28,6 +28,7 @@ use crate::soft::body::SoftBody;
 use crate::soft::constraint::{BendingConstraint, DistanceConstraint};
 use crate::soft::particle::ParticleHandle;
 use crate::soft::solver::SoftSolverConfig;
+use crate::soft::topology::TearableMesh;
 
 /// Description of a rectangular cloth sheet to build.
 ///
@@ -79,17 +80,23 @@ impl ClothGrid {
     pub fn build(&self, config: SoftSolverConfig) -> Cloth {
         let columns = self.columns.max(1);
         let rows = self.rows.max(1);
+        let spacing = if self.spacing.is_finite() && self.spacing > 0.0 {
+            self.spacing
+        } else {
+            0.1
+        };
+        let origin = if self.origin.is_finite() {
+            self.origin
+        } else {
+            Vec3::ZERO
+        };
         let mut body = SoftBody::new(config);
         let mut handles = Vec::with_capacity((columns * rows) as usize);
 
         for row in 0..rows {
             for column in 0..columns {
-                let position = self.origin
-                    + Vec3::new(
-                        column as Real * self.spacing,
-                        0.0,
-                        row as Real * self.spacing,
-                    );
+                let position =
+                    origin + Vec3::new(column as Real * spacing, 0.0, row as Real * spacing);
                 handles.push(body.spawn(position, self.particle_mass));
             }
         }
@@ -166,6 +173,35 @@ impl ClothGrid {
                     }
                 }
             }
+        }
+
+        // The triangle index buffer is the authoritative render/topology
+        // representation. It is installed alongside the grid constraints so
+        // a later tear can duplicate real vertices and rebuild its structural
+        // and dihedral constraints without guessing the authored layout.
+        let mut triangles = Vec::with_capacity(
+            ((columns.saturating_sub(1)) * (rows.saturating_sub(1)) * 2) as usize,
+        );
+        for row in 0..rows.saturating_sub(1) {
+            for column in 0..columns.saturating_sub(1) {
+                let a = handles[index(row, column)].index() as u32;
+                let b = handles[index(row, column + 1)].index() as u32;
+                let c = handles[index(row + 1, column)].index() as u32;
+                let d = handles[index(row + 1, column + 1)].index() as u32;
+                triangles.push([a, b, d]);
+                triangles.push([a, d, c]);
+            }
+        }
+        if !triangles.is_empty() {
+            let topology = TearableMesh::new(
+                body.particles.positions().to_vec(),
+                body.particles.positions().to_vec(),
+                body.particles.inverse_masses().to_vec(),
+                triangles,
+            )
+            .expect("sanitized cloth builder must produce valid topology");
+            body.attach_topology(topology, self.compliance, self.bending_compliance)
+                .expect("cloth topology must match its particle columns");
         }
 
         Cloth {

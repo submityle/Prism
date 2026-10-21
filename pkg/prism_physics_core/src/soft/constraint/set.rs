@@ -18,8 +18,9 @@ use glam::Vec3;
 use crate::math::scalar::Real;
 
 use super::{
-    AttachmentConstraint, BendingConstraint, DistanceConstraint, LongRangeConstraint,
-    ParticleConstraint, PressureConstraint, StrainLimitConstraint, TetraVolumeConstraint,
+    AttachmentConstraint, BendingConstraint, DistanceConstraint, IsometricBendingConstraint,
+    LongRangeConstraint, ParticleConstraint, PressureConstraint, StrainLimitConstraint,
+    TetraVolumeConstraint,
 };
 
 /// A typed collection of every constraint acting on a soft body's particles.
@@ -34,8 +35,14 @@ use super::{
 pub struct ConstraintSet {
     /// Distance (stretch) constraints: cloth edges, rope links, lattice edges.
     pub distance: Vec<DistanceConstraint>,
+    /// Structural distance constraints generated from the current tearable
+    /// triangle topology. Kept separate so topology edits cannot erase
+    /// authored distances.
+    pub topology_distance: Vec<DistanceConstraint>,
     /// Bending constraints resisting folding.
     pub bending: Vec<BendingConstraint>,
+    /// Four-point isometric hinges rebuilt from triangle topology after a tear.
+    pub isometric_bending: Vec<IsometricBendingConstraint>,
     /// Tetrahedral volume-preservation constraints.
     pub volume: Vec<TetraVolumeConstraint>,
     /// Closed-mesh pressure (enclosed-volume) constraints for inflatable cloth.
@@ -54,7 +61,9 @@ impl ConstraintSet {
     pub const fn new() -> ConstraintSet {
         ConstraintSet {
             distance: Vec::new(),
+            topology_distance: Vec::new(),
             bending: Vec::new(),
+            isometric_bending: Vec::new(),
             volume: Vec::new(),
             pressure: Vec::new(),
             attachment: Vec::new(),
@@ -67,7 +76,9 @@ impl ConstraintSet {
     #[must_use]
     pub fn len(&self) -> usize {
         self.distance.len()
+            + self.topology_distance.len()
             + self.bending.len()
+            + self.isometric_bending.len()
             + self.volume.len()
             + self.pressure.len()
             + self.attachment.len()
@@ -79,7 +90,9 @@ impl ConstraintSet {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.distance.is_empty()
+            && self.topology_distance.is_empty()
             && self.bending.is_empty()
+            && self.isometric_bending.is_empty()
             && self.volume.is_empty()
             && self.pressure.is_empty()
             && self.attachment.is_empty()
@@ -93,7 +106,13 @@ impl ConstraintSet {
         for c in &mut self.distance {
             c.reset();
         }
+        for c in &mut self.topology_distance {
+            c.reset();
+        }
         for c in &mut self.bending {
+            c.reset();
+        }
+        for c in &mut self.isometric_bending {
             c.reset();
         }
         for c in &mut self.volume {
@@ -119,7 +138,13 @@ impl ConstraintSet {
         for c in &mut self.distance {
             c.project(positions, inverse_masses, dt);
         }
+        for c in &mut self.topology_distance {
+            c.project(positions, inverse_masses, dt);
+        }
         for c in &mut self.bending {
+            c.project(positions, inverse_masses, dt);
+        }
+        for c in &mut self.isometric_bending {
             c.project(positions, inverse_masses, dt);
         }
         for c in &mut self.volume {
