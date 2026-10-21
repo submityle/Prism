@@ -11,7 +11,7 @@
 ## 0.1 2026-10-20 工作树增量（原静态核对；后续运行证据见 §0.2 / §2.1.1）
 
 - **材质 VT 的 source 裁剪已补上实现**：`MaterialVtMaterialSourceQueries` 维护已发布材质实际引用的 image 集合；bootstrap demand 与 VT producer 只从该集合读取 source，避免未被材质引用的 image 抢占有限 page capacity。后续 scene lib 全量测试已编译此生产代码；完整 Material-VT GPU 生命周期与主 render pass readback 仍未验收。
-- **P1-e GPU budget 已有部分生产消费者**：`LobeSampleBudgetGpu` 在 `PrepareResources` 上传 32-byte pass uniform，resolve 的贵瓣选择器同时受 dispatch ceiling 与上传的 `max_full_lobes` 限制；`multiscatter_dir_samples` / `multiscatter_march_samples` 也已进入天空多散射 LUT 的真实 GPU dispatch 参数。其余 SSS separable taps、SSS preintegration steps、translucency profile samples 尚无对应生产 GPU kernel 消费。scene lib 全量测试已编译包含这些接线的 target；具体 GPU readback、质量档画质/成本门禁仍需补齐，不能把预算结构或独立 fixture 当作生产采样验收。
+- **P1-e GPU budget 已有生产消费者**：`LobeSampleBudgetGpu` 在 `PrepareResources` 上传 32-byte pass uniform，resolve 的贵瓣选择器同时受 dispatch ceiling 与上传的 `max_full_lobes` 限制；`multiscatter_dir_samples` / `multiscatter_march_samples` 也已进入天空多散射 LUT 的真实 GPU dispatch 参数。2026-10-21 复核确认 SSS separable taps、SSS preintegration steps、translucency profile samples 已驱动生产 direct SSS evaluator 内的动态积分循环，定向 CPU/WESL/真机 GPU 证据见 §0.5。完整 resolve 全帧 readback、各质量档画质/成本验收仍未闭合，不能把小型 wrapper 门禁等同于全场景生产验收。
 - **编译阻塞已解除**：工作树曾在 Bevy bridge 移除后请求已删除的 `bevy` feature，并出现 scene 编译错误；后续材质提取 target **16/16** 与 scene lib target **1909/1909** 已通过。它们不替代 Material-VT/P1-e 的独立 GPU 门禁。
 
 ## 0.2 2026-10-20 后续复验
@@ -24,6 +24,60 @@
 
 - 严格命令 `PRISM_REQUIRE_GPU=1 CARGO_INCREMENTAL=0 cargo --config profile.test.debug=0 test -p prism_render_scene --test sky_multiscatter_budget_gpu --jobs 1 -- --nocapture` 在 Apple M2 / Metal 上 **1 passed / 0 failed**。测试直接编译生产 `sky_multiscatter_lut.wesl`，对 High 与 0.25 缩放预算各执行 4×4 LUT，并逐 texel 与 CPU `bake_multiscatter_lut` reference 比较；RGBA16F readback 容差为 `max(0.003, 2.5% * abs(reference))`。
 - 扩展覆盖发现并修正 GPU LUT 的 U/V 轴次序错误：生产 shader 原先把高度写在 X、太阳余弦写在 Y，与 CPU/采样契约的 U=太阳余弦、V=高度相反。多 texel GPU/CPU 对拍现已通过；证据限于该 LUT kernel 和两组采样预算，不代表全场景天空生产 pass、SSS/透射 GPU budget 或全帧画质/成本验收完成。
+
+## 0.4 2026-10-21 P1-a Material-VT publication 原子性切片
+
+- portable residency 构建遇到某个已引用 image 尚无 texture slot 时，现按 source 跳过，不再让整个批次提前返回；该 source 不进入 active publication，material row 继续保留 authored texture index/sampler fallback。回归同时断言其他已有 slot 的 source 仍能产生 page record、atlas upload 与 publication identity。
+- page-table active slice 获得 completion proof 后，生产路径在同帧重新发布引用受影响 image 的 material rows，使 row 中的 VT source revision/geometry 与 active publication 一起可见；失败的 row 会重新记录 source change，等待后续 extraction 重试。
+- 定向结果：`material::vt_producer::tests` **8 passed / 0 failed**，`material::` **91 passed / 0 failed**，`material_virtual_texture_wesl` **1 passed / 0 failed**。严格 GPU `material_vt_gpu_parity` 为 **0 passed / 3 failed**：当前运行环境找不到可用 graphics adapter，三项均在 adapter 请求阶段失败，未发生 dispatch/readback；因此本切片不声明 GPU 或跨设备完成。
+
+## 0.5 2026-10-21 P1-e direct SSS 预算生产切片
+
+### 生产消费与 layout 审计
+
+- 当前工作树的生产接线已存在，本切片仅补充门禁并修正文档，不重复改写生产算法。`subsurface.wesl::subsurface_direct` 通过 `lb_uploaded()` 读取 `LobeSampleBudgetGpu`；`brdf.wesl::principled_direct_channels_with` 也读取同一 uniform，生产 `shading_resolve.wesl` 的 principled 与独立 SSS 路径均调用这些 evaluator。
+- 三字段不是只读回 uniform 或改一个输出倍率：`brdf_sss_budget_quality` 的 separable 积分执行 `sss_separable_taps` 次循环；`brdf_sss_preintegrated_channel` 按 `sss_preintegration_steps` 对每个 RGB 通道积分；`brdf_sss_profile_energy` 按 `translucency_profile_samples` 积分，结果进入背光透射的归一化。门禁逐函数锁定 runtime count、循环上限及预算传参，GPU 则实际执行这些生产函数并检查输出变化。本轮测试分别将 High 的 **13 / 160 / 48** 独立降为 **3 / 16 / 8**，其他预算保持不变。
+- **group 7 binding 9 与全部当前实际消费该预算的生产 pipeline layout 相容**：resolve 的 `area_light_layout_entries()` 是固定十项，binding 9 为 COMPUTE-visible、无动态偏移的 uniform；host/WESL 均为 8×u32 = 32 bytes。group 7 的顺序绑定第十项为 `lobe_budget.buffer()`，dispatch 固定绑定 group 0..7。初始化的 bindless/non-bindless 两种 variant、registered-response 热重链、area-light/shade-cache 启用与 disabled fallback 共用同一八组 layout。预算更新写入稳定 buffer，不因质量变化换 allocation 或新增 pipeline permutation。
+- 全部生产 WESL/WGSL 调用点搜索表明：当前读取该 uniform 的路径只有上述 resolve。water raster、cloth、hair、clearcoat 等导入公共 BRDF 类型/helpers，但不调用读取预算的 integrator，不需给这些无关 layout 强加 binding 9；天空 LUT 使用自己的 dispatch 参数。此结论不等于“所有 renderer pipeline 都有 group 7 binding 9”，也不等于全部 resolve PSO 已在所有设备上完成硬件创建/dispatch。
+- 本切片的范围是 **direct SSS 的 angular/separable quadrature、Penner preintegration quadrature、translucency radial-energy normalization**；不是新增屏幕空间 SSS 图像卷积 pass，也不是独立 preintegration LUT 预烘焙。
+
+### 本轮实际运行结果
+
+- 低调试信息、单 job、关闭增量缓存编译当前 scene lib-test 成功。首次普通运行的两个 GPU 用例因沙盒无 adapter 而跳过，不算 GPU 通过；随后严格模式在沙盒外成功访问 **Apple M2 / Metal / IntegratedGpu**。
+- 严格 `shading::lobe_budget::`：**10 passed / 0 failed**，包含 CPU ABI/policy 3 项、CPU 三字段行为 1 项、生产调用链/循环及 layout variant 守护 2 项、WESL helper/生产 SSS 链接 2 项、真实 GPU dispatch/readback 2 项。没有用 skip 冒充严格通过。
+- SSS GPU 门禁直接链接生产 `brdf.wesl + subsurface.wesl`，对四组预算分别执行前光与背光求值，24 个 RGB 输出通道均与 CPU `evaluate_subsurface_direct_with_budget` 对拍，绝对误差门限 `2e-4`。分别降低 taps、steps、profile samples 的红通道差约为 `4.55e-4`、`3.48e-5`、`0.1181`，分别超过 `1e-5`、`1e-5`、`1e-3` 的变化门限。preintegration fixture 选在 terminator 附近以显露积分误差，未放宽断言阈值。
+- 贵瓣选择 GPU 门禁同时通过：High 与 0.5 缩放预算使真实 selector 的 full evaluations 从 **2 降至 1**，并改变 readback 的 lobe mixture；它不是 GPU timing 测量。
+- `resolve_auxiliary_layout_matches_shader_bindings` 与 `resolve_shader_and_dispatch_stay_within_eight_groups`：**2 passed / 0 failed**，覆盖实际 host binding 类型/顺序、WESL 声明、dispatch 绑定与八组上限；新增 variant 门禁锁定初始化与热重链复用相同 descriptor。
+- `shading_resolve_wesl_compiles_and_resolves_all_imports`：**1 passed / 0 failed**，实际包含普通 bindless/non-bindless、空 registered table、有限 registered-response 的 bindless/non-bindless 链接。该测试验证完整生产 WESL 链接，不是完整 resolve GPU dispatch。
+
+本轮使用的命令（后三条复用第一条生成的测试二进制，避免重复编译共享 target）：
+
+```sh
+CARGO_INCREMENTAL=0 cargo --config profile.test.debug=0 test -p prism_render_scene --lib --jobs 1 shading::lobe_budget::shader_tests:: -- --nocapture
+PRISM_REQUIRE_GPU=1 target/debug/deps/prism_render_scene-52519585a36c04ae shading::lobe_budget:: --nocapture
+target/debug/deps/prism_render_scene-52519585a36c04ae shading::resolve::pipeline::layout_tests:: --nocapture
+target/debug/deps/prism_render_scene-52519585a36c04ae shading_resolve_wesl_compiles_and_resolves_all_imports --nocapture
+```
+
+二进制 hash 随构建变化；重建复跑可将第二条改为 `PRISM_REQUIRE_GPU=1 CARGO_INCREMENTAL=0 cargo --config profile.test.debug=0 test -p prism_render_scene --lib --jobs 1 shading::lobe_budget:: -- --nocapture`。严格 GPU 命令必须在能访问物理 GPU 的环境执行。未清理共享 target、未全仓格式化、未提交；本切片写集仅 `shading/lobe_budget/shader_tests.rs` 与本文档。
+
+**剩余边界**：本切片关闭“三个 SSS/透射字段没有生产 GPU 消费与定向数值门禁”的缺口，但不将整个 P1-e 标为完成。完整 `shading_resolve` 全帧 dispatch/readback、各质量档图像误差与 GPU timing/成本回归、跨设备/后端仍未验收；§0.3 天空 LUT 的历史真机结果未在本轮重跑。
+
+## 0.6 2026-10-21 材质 schema / ABI / authoring 干净构建复验
+
+- 当前工作树下 `cargo test -p prism_material_schema --lib --jobs 1`：**32 passed / 0 failed**。
+- `cargo run -p prism_material_schema --bin prism-material-codegen -- check`：**4 个生成产品均最新**。
+- `cargo test -p prism_render_material --test material_header_abi --jobs 1`：**4 passed / 0 failed**，覆盖 Rust/WESL header 镜像、schema 动态字段顺序与 ABI8 execution binding。
+- `cargo test -p prism_render_material_authoring --all-targets --jobs 1`：**39 passed / 0 failed**（archetypes 2、evaluator 8、MaterialX 27、procedural 2；lib target 0 项）。该结果只证明当前已实现的受限 MaterialX/nodedef/procedural 子集；unsupported 节点仍明确 fail-closed，不表示完整节点集、完整 procedural bake 或编辑器 authoring 已完成。
+- `cargo test -p prism_render_material --all-targets --jobs 1` 未进入测试执行：lib-test harness 链接时 LLVM 报 `No space left on device`。这是环境容量失败，不是测试断言失败；因此 schema parity 等其他 integration targets 在本次未验收。
+- `prism_render_scene` 材质 VT、resolve、response composition、TAA、生产 GI 材质命中与完整全帧 readback **本轮未运行/未验收**。局部 ABI/schema 成功不能上推为实时生产帧闭环；path-traced reference 也仍是独立 oracle，不能替代生产闭环。
+- 为释放本仓库构建空间执行了 `cargo clean`，最多一次成功回收 **4.3 GiB**；未删除源码。最终 `git diff --check` 通过。
+
+## 0.7 2026-10-21 Material-VT GPU 门禁迁移状态复核
+
+- 本轮尝试执行 `material_vt_gpu_parity` 时，Cargo 明确提示该 integration target 需要 `prism_render_scene/legacy-bevy`；不带该 feature 的命令未进入编译或测试。该 target 仍使用 Bevy `RenderDevice`、`RenderQueue`、`MaterialBindGroup` 与 `MaterialTextureArrays` 搭建测试环境，因此当前它不是 Bevy-free Prism driver 的生产路径门禁。
+- 随后以 `--features legacy-bevy` 在物理 GPU 环境启动严格复验；干净构建在编译 `bevy_pbr` 时因 `No space left on device` 中止，未生成测试二进制，也未发生 GPU adapter 请求、dispatch 或 readback。构建结束后确认共享 target 无活动 Cargo/rustc 使用者，按项目要求执行 `cargo clean`，回收 **196.9 MiB**。
+- **结论**：既有 Material-VT GPU parity 结果仍仅是旧 adapter 下的局部 shader/布局门禁；本轮没有新增 GPU 通过证据。将该验证迁移到 Bevy-free 生产 Material-VT bindings/driver，并连接实际 publication 与主 resolve，是仍需完成的 P0 工作，不能通过继续启用 `legacy-bevy` 宣称收口。
 
 ## 0. 2026-10-15 增量复核
 
@@ -141,10 +195,10 @@ pub const SURFACE_CACHE_AUX: [CacheAuxLayout; 1] = [
 | 项 | 文档声明 | 代码裁决 | 缺口 |
 |---|---|---|---|
 | **P2-e 四线正交** | 部分（缺 ①逐区域 illumination ②作者侧 `respond_custom` WESL） | **① 已落地（文档错）**；② 确实缺失 | ①：`material_classification.wesl:87` `material_class(header, region_illumination)`、`:104-106` 覆盖规则、`:152` 消费 `metadata.z`；CPU `classification.rs:686/716-722`；来源 `visibility_raster.wesl:127` `region_illumination_selector`（扫描 `SEMANTIC_ILLUMINATION_MASK` 纹理行，`:142-171`）+ `:47` `FEATURE_REGION_ILLUMINATION`；作者 API `record.rs:106`、`authoring.rs:82`；`raster.rs:179` 发 shader def；门禁 `classification.rs:788`、`:927`、`authoring.rs:154`。语义限制：选择子仅在 `header.illumination ∈ {Lit,Stylized}` 时生效，`Unlit`/`Custom` 忽略区域遮罩（`:716-722`）<br>②：全仓 `respond_custom` 仅 1 处注释（`prism_render_shading/src/classification.rs:145`），无 WESL；`custom_program` 只是 header u32 标记（`record.rs:158`、`material_classification.wesl:114`） |
-| **P2-h 原理化分层 BSDF** | 未做（路线图表无 ✅） | **实时与 reference 局部验收已成立** | 实时侧：闭式 `t_slab=(1−f_v)(1−f_l)/(1−f_v·f_l)`、`r_slab`、基底乘 `coat_attenuation = 1 + coat·(coat_t_slab−1)`、零反照率再分配项 `coat·(r_slab−A)·n·l/π`，以及 `coat_darkening = lerp(1,Δ,C·δ)` 对 reflective base 与 transmission substrate 的统一消费（CPU `lighting.rs:765-926`，WESL `brdf.wesl:1269-1386`，CPU/WESL 结构门禁 `lighting.rs:2070` / `shading/resolve/shader_tests.rs:223`）。reference 侧 `reference_pt/coat.rs` darkening 核、conductor/diffuse substrate 消费及 `Bsdf` 参数贯通由定向测试覆盖；`reference_pt::clearcoat` 结果为 **13 passed, 0 failed**。coat 自身高光不消费该衰减；尚无完整实时 GPU 与 path-traced 图像级 parity 证据。 |
+| **P2-h 原理化分层 BSDF** | 未做（路线图表无 ✅） | **实时与 reference 局部验收成立；已补受限 adapter + CPU image parity fixture** | 实时侧：闭式 `t_slab=(1−f_v)(1−f_l)/(1−f_v·f_l)`、`r_slab`、基底乘 `coat_attenuation = 1 + coat·(coat_t_slab−1)`、零反照率再分配项 `coat·(r_slab−A)·n·l/π`，以及 `coat_darkening = lerp(1,Δ,C·δ)` 对 reflective base 与 transmission substrate 的统一消费（CPU `lighting.rs:765-926`，WESL `brdf.wesl:1269-1386`，CPU/WESL 结构门禁 `lighting.rs:2070` / `shading/resolve/shader_tests.rs:223`）。reference 侧 `reference_pt/coat.rs` darkening 核、conductor/diffuse substrate 消费及 `Bsdf` 参数贯通由定向测试覆盖；`reference_pt::clearcoat` 结果为 **13 passed, 0 failed**。新增 `prism_render_shading::reference_pt_adapter`：只接受已证明的 Lambert diffuse substrate，并直接映射到 `reference_pt::Bsdf::ClearcoatDiffuse`；对不可表示或尚未严格对拍的 diffuse roughness、metallic/specular/transmission/SSS/sheen/thin-film/glint/coat-frame/非白 coat-color 显式拒绝。4×4 固定方向像素 fixture 覆盖 coat off、coat on + darkening 0/1，`cargo test -p prism_render_shading reference_pt_adapter --lib` **2 passed, 0 failed**，fixture `max_abs < 3e-5`。这仍是 CPU 生产 evaluator ↔ reference BSDF 的小图对拍，不是实时 GPU readback，也不是完整 path-traced 场景图像 parity；粗糙 diffuse 的严格 parity 尚未闭合。 |
 | **P1-g 自描述反射瓣 schema** | 路线图表无 ✅；§17.5.8 S2 标 ✅ | **S1+S2 已落地；S3/S4 未做** | 已做：`Field.name`（`prism_material_schema/src/lib.rs:286`）、字足迹由 `Field.ty` 派生（`:288-289`）、`registry_slot`、per-field `spec_subfield="closure_mask"`（`surface.toml:304`）、`closure` → `SURFACE_LOBE_CLOSURES`（`surface_layout.rs:190`，消费于 `classification.rs:486`）；`material_unpack.wesl` 与 `surface_layout.rs` 由 codegen 生成<br>未做：`material_classification.wesl` 仍手写；`SpecializationId` 位打包仍手写（`axis.rs:103`）；CPU golden/sample 未生成 |
 | **P0-b 高光抗锯齿** | P0 | **主路径接线 + 生产 WESL 小图 GPU/readback 已成立；完整验收仍有边界** | 消费端：`gi/specular_aa/normal_variance.rs:124` `filter_alpha_sq`、`:104` `kernel_roughness_sq = (2v).min(cap)`、`toksvig.rs`/`lean.rs`；主高光 `lighting.rs:408`；GPU 孪生 `specular_aa.wesl:81/106` + `brdf.wesl:836`。主 resolve 已从同一 normal-map 记录、同一 mip 和同一 UV footprint 生成方差，并由顺序门禁锁定 `reset < center_sample < normal_record < forward samples < variance < response`，且 `variance..response` 不允许再次 reset。新增 29×17 fixture 真实编译并 dispatch 生产 `specular_aa.wesl + brdf.wesl`，readback 493 像素 / 1972 通道与 CPU golden 对拍：Apple M2 / Metal 最差 34 ULP（门限 64）、最大绝对误差 `4.768371582e-6`；493/493 像素均有非零方差且 filtered alpha 增大，尾部 guard 未被覆盖。仍缺完整 `shading_resolve` 全帧 dispatch/readback、无有效 footprint 时的烘焙方差图输入，以及 Metal 外后端验证。**例外**：SSR 分支已有独立方差来源 —— `ssr_repack.wesl:154` / `:445-447` |
-| **P1-e 贵瓣采样缩放** | 路线图表无 ✅（GPU 采样闭环仍未完成） | **类型、CPU 全链、GPU uniform、贵瓣选择上限和天空多散射 LUT budget 参数接线已落地；SSS/透射 GPU 消费与完整验收未闭合** | 已做：`prism_render_shading/src/quality.rs:109` `LobeSampleBudget` + `ShadingQuality`；CPU 真消费 `gi/subsurface/preintegrated.rs:211/213`、`separable.rs:197/208`、`sky_lut/multiscatter_lut.rs:264`、`translucency/diffusion.rs:278`、`lobe_sampling.rs:145/189`；`PrepareResources` 上传 32-byte `LobeSampleBudgetGpu`，resolve 选择器消费 `max_full_lobes`；天空多散射将方向数/步进数传入 LUT GPU dispatch，并在 Apple M2/Metal 的 4×4 生产 kernel readback 对拍中以 High 与 0.25 缩放预算通过 CPU reference。缺口：SSS taps、SSS preintegration steps、translucency profile samples 尚未进入生产 GPU kernel；缺少 resolve/SSS/透射完整生产路径的预算效果及成本验收 |
+| **P1-e 贵瓣采样缩放** | 路线图表无 ✅（完整采样验收仍未完成） | **GPU uniform、贵瓣选择器、天空 LUT 与 direct SSS 三项动态积分循环均有真实消费；定向 GPU 门禁已通过** | `PrepareResources` 上传 32-byte `LobeSampleBudgetGpu`，resolve 消费 `max_full_lobes`；天空 LUT 方向/步进预算见 §0.3。生产 `subsurface_direct` 与 principled SSS 读取同一预算，taps/steps/profile samples 分别改变真实 GPU 循环。§0.5 严格 M2/Metal 定向模块 **10 passed**（含两项 GPU dispatch/readback），实际 layout 门禁 **2 passed**、完整 resolve WESL 链接 **1 passed**。剩余：完整 resolve 全帧 readback、各质量档图像误差与 GPU timing/成本、跨设备验收 |
 | **P2-a 作者前端（完整）** | 部分 | **首片成立，剩余未做** | 缺完整节点图求值/bake、作者侧 VT 产线、编辑器集成；noise/curve/blend 被白名单排除（`parse.rs:215-232`），evaluator 返回 `UnsafeConnection` |
 | **P3-a 解耦着色地基** | 部分 | **地基与独立 slice 成立；生产闭环缺失** | 见 §4 与 §5 |
 
@@ -175,7 +229,7 @@ pub const SURFACE_CACHE_AUX: [CacheAuxLayout; 1] = [
 
 1. **P1-a 余量**：VT source、demand、page-table/atlas publication 与 shader resolve 已有结构闭环，且本轮补了按实际材质引用裁剪；仍缺非 bindless 设备上的 authored-texture fallback、source publication 与 material row 的同帧原子握手，以及完整跨设备/主 render pass 图像级门禁。现行 row ABI 以 `texture_id + 尺寸 + page_size` 寻址 VT，不应再把旧提案中的 `vt_page_offset/count` 当作当前字段。
 2. **P0-b 剩余边界**：同一 normal-map 记录的 mip/UV 前向样本已接入 CPU resolve 与 WESL 主 resolve，并由 `spec_aa_screen_space_variance` 生产 `normal_variance`；CPU 行为、shader-source 顺序门禁以及生产 `specular_aa.wesl + brdf.wesl` 的 29×17 真机 GPU dispatch/readback 与 CPU image parity 均已补齐。仍缺完整 `shading_resolve` 全帧 dispatch/readback、烘焙方差图作为没有有效前向足迹时的离线输入，以及 Metal 外后端验证。
-3. **P1-e GPU 侧**：pass uniform 上传与贵瓣选择上限消费已接入；天空多散射方向数/步进数也已驱动真实 LUT GPU dispatch。SSS separable taps、SSS preintegration steps 与 translucency profile samples 仍没有对应生产 GPU kernel 消费；另需对已有天空消费者及 resolve 选择策略补真实 GPU readback、质量档误差和成本验收。
+3. **P1-e 完整验收**：pass uniform、贵瓣选择上限、天空 LUT 与 direct SSS 的 taps/preintegration/profile 三项动态积分循环均已接入；§0.5 已补定向 SSS 与 selector 真机 GPU readback、CPU 对拍及 layout/WESL 门禁。仍缺完整 resolve 全帧 readback、所有质量档的图像误差与 GPU timing/成本回归、跨设备/后端验收；不能把局部生产函数 wrapper 对拍等同于完整帧闭环。
 4. **P1-g S3/S4**：`material_classification.wesl` 与 `SpecializationId` 位打包仍未由 schema 生成；CPU golden/sample 未 codegen。
 5. **P2-b 程序化节点 → VT 烘焙**：完全未开始。`bake.rs:254/614` 只是任意深度 layer stack 烘焙；无 noise/curve/blend 图求值。
 6. **P2-a 剩余 / 编辑器前端**：完整节点图求值、作者侧 VT 产线、编辑器集成。
@@ -197,7 +251,7 @@ pub const SURFACE_CACHE_AUX: [CacheAuxLayout; 1] = [
 
 ### 5.1 内容偏差
 
-1. `doc:1041` coat_darkening"搁置"→ 改为"CPU/WESL 与 reference_pt 局部实现均已有定向门禁；当前 reference_pt clearcoat 定向测试 13/13；完整离线/实时图像级 parity 仍需独立验收"。
+1. `doc:1041` coat_darkening"搁置"→ 改为"CPU/WESL 与 reference_pt 局部实现均已有定向门禁；当前 reference_pt clearcoat 定向测试 13/13，且 `reference_pt_adapter` 已有 4×4 CPU image parity fixture；完整实时 GPU readback 与离线场景图像 parity 仍需独立验收"。
 2. `doc:1183/1189` 逐区域 illumination"未完成"→ 改为"已落地（CPU + WESL + 作者 API + 门禁）"，并删除与 `doc:1353` 的矛盾。
 3. `doc:1153/1187` P3-b"未开始"→ 改为"语义已落地于独立 slice（只存入射辐照度），缺生产 producer 与主 pass 门禁"。
 4. `doc:795` `bake::tests` 12 → **13**。
@@ -212,7 +266,7 @@ pub const SURFACE_CACHE_AUX: [CacheAuxLayout; 1] = [
 13. "无任何注册瓣声明能力需求" → 限定为 lobe；非 lobe 有 4 处非空。
 14. `texture_uv_gradients` 若被写成 Rust 符号 → 实为 `uv_gradients`（`prism_uv_gradients` 是 WESL 名）。
 15. "normal_variance 恒为 0.0" → 补 SSR 分支例外（`ssr_repack.wesl:154/445-447`）。
-16. P1-e"只有类型、无上传/消费" → 改为"类型 + CPU 全链已落地；GPU pass uniform 与贵瓣 shader 未落地"。
+16. P1-e“只有类型、无上传/消费” → 改为“类型、CPU 全链、GPU pass uniform、贵瓣 selector、天空 LUT 与 direct SSS 预算消费均已有；定向 CPU/WESL/真机 GPU 门禁见 §0.3/§0.5，完整帧画质与成本仍未验收”。
 17. `pkg/prism_material_schema/src/lib.rs:18-20` 头注释仍写"当前 S1、nothing is generated yet" → 陈旧，应改为 S1+S2 已落地。
 18. `doc:1166-1168` 的 `--list` 失败记录 → 已不可复现，应删除或标注已修复。
 
@@ -251,7 +305,7 @@ pub const SURFACE_CACHE_AUX: [CacheAuxLayout; 1] = [
 | **M0** | workspace 编译与验收基线 | `prism_render_scene`、`prism_render_shading` 和材质定向 target 能在当前工作树编译；保留严格 GPU/skip 语义，重新生成当前测试矩阵 | 当前编译失败会让所有材质局部记录失去“当前证据”资格 |
 | **P0-b** | 高光抗锯齿主路径 | normal-map 同记录、同 mip、同 UV footprint 的方差生产，CPU/WESL/GPU readback 一致；无有效 footprint 时有明确离线方差图输入；至少有图像级回归 | 直接影响高光稳定性，且现有消费端已存在，剩余是主路径生产和验收闭环 |
 | **P1-a** | Material-VT 真实消费 | 只为实际引用材质供给 source；material row 与 VT publication 同一代际原子可见；non-bindless miss 回 authored texture；主 render pass 与跨设备门禁通过 | 它决定开放纹理数量、驻留容量和材质画质是否在真实场景中成立 |
-| **P1-e** | GPU 贵瓣预算 | SSS/透射的 sample-count 进入生产 GPU kernel；天空多散射 LUT 与 resolve 选择器在各质量档有真实 GPU readback、误差和成本回归 | 上传与 resolve 选择上限已接入，天空多散射参数已驱动 LUT dispatch；SSS/透射 GPU 消费及预算效果/成本门禁仍缺 |
+| **P1-e** | GPU 贵瓣预算完整验收 | 在已通过的 SSS/透射动态循环与 selector/LUT 定向 GPU 门禁上，补完整 resolve 全帧 readback、各质量档图像误差、GPU timing/成本及跨设备回归 | 三项 SSS/透射 sample-count 已真实改变生产循环与输出，group 7 binding 9 对全部当前预算消费者的生产 resolve layout 相容；尚缺完整帧与质量/成本验收，见 §0.5 |
 | **P1-g / ABI 护栏** | schema 完整生成 | `material_classification.wesl`、`SpecializationId` 位打包和 CPU golden/sample 由 schema 生成；补齐第 6 个 `MaterialHeader` mirror 门禁 | 防止开放瓣继续靠手写表扩张，避免下一轮 ABI 漂移 |
 | **P2-h** | 原理化分层 BSDF | 实时 CPU/WESL、GPU resolve 和 `reference_pt` 使用同一组 OpenPBR 参数语义；coat/base/transmission darkening 做图像级 parity，而不只做局部公式测试 | 实时与 reference 局部实现均已存在；clearcoat reference 定向测试 13/13。剩余是 GPU resolve 到 reference 的图像级 parity，不是补写 reference BSDF |
 | **P2-a/b/i** | 完整作者链 | MaterialX 图求值、procedural → VT、`author_node` 实例和 nodedef 往返接入同一 MaterialArtifact；不再把不支持节点静默降成默认材质 | 依赖 ABI、VT 和 über 消费稳定，提前做会反复改作者产物格式 |
