@@ -1141,3 +1141,163 @@ fn runtime_preserves_control_only_dependencies_without_synthetic_resource_edges(
     assert!(runtime.plan().logical_barriers.is_empty());
     assert_eq!(runtime.plan().order, vec![0, 1, 2]);
 }
+
+fn recording_device() -> prism_render_driver_null::NullDevice {
+    use prism_render_driver::{DeviceDescriptor, Instance};
+    let instance = prism_render_driver_null::NullInstance::new();
+    let adapter = instance.enumerate_adapters().pop().unwrap();
+    instance
+        .create_device(&adapter, &DeviceDescriptor::default())
+        .unwrap()
+        .0
+}
+
+#[test]
+fn runtime_recording_preserves_import_identity_range_and_external_ownership() {
+    use prism_render_driver::{
+        BufferDescriptor, RenderDevice, TextureDescriptor, TextureViewDescriptor,
+    };
+    use std::sync::{Arc, Mutex};
+
+    // This exercises lowering and actual command recording, not GPU execution.
+    let device = recording_device();
+    let buffer_id = device.create_buffer(&BufferDescriptor::new(512, BufferUsages::STORAGE));
+    let image = ResourceKey::of(FEATURE, 1);
+    let buffer_template = buffer(RESOURCE, ResourceLifetime::Imported);
+    let image_template = texture(image, ResourceLifetime::Imported);
+    let mut descriptor = TextureDescriptor::new_2d(
+        Extent3d {
+            width: 8,
+            height: 8,
+            depth_or_array_layers: 2,
+        },
+        TextureFormat::Rgba8Unorm,
+        TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
+    );
+    descriptor.mip_level_count = 2;
+    let texture_id = device.create_texture(&descriptor);
+    let view = device.create_texture_view(
+        texture_id,
+        &TextureViewDescriptor {
+            dimension: prism_render_driver::TextureViewDimension::D2Array,
+            ..Default::default()
+        },
+    );
+    let initial_resources = device.live_resource_count();
+    let declaration = compile_passes(
+        vec![pass(
+            1,
+            QueueClass::Compute,
+            vec![
+                usage(image, AccessKind::SampledRead),
+                usage(RESOURCE, AccessKind::StorageRead),
+            ],
+        )],
+        &[buffer_template, image_template],
+        &[
+            binding(
+                buffer_template,
+                PhysicalResource::Buffer {
+                    id: buffer_id,
+                    offset: 256,
+                },
+            ),
+            binding(image_template, PhysicalResource::Texture(texture_id)),
+        ],
+    );
+    let imports = declaration
+        .resources()
+        .iter()
+        .map(|resource| match resource.template.layout {
+            ResourceLayout::Buffer { .. } => RuntimeImport::Buffer {
+                resource: resource.id,
+                imported: imported_buffer(buffer_id),
+            },
+            ResourceLayout::Texture { .. } => RuntimeImport::Texture {
+                resource: resource.id,
+                imported: ImportedTexture {
+                    default_view: view,
+                    ..imported_texture(texture_id)
+                },
+            },
+        })
+        .collect::<Vec<_>>();
+    let calls = Arc::new(Mutex::new(0));
+    let observed = Arc::clone(&calls);
+    let runtime = declaration
+        .prepare_runtime(
+            Extent3d::new_2d(8, 8),
+            &imports,
+            vec![RuntimePassBinding::new(PassKey(1), move |ctx| {
+                assert_eq!(ctx.texture(0), Some(texture_id));
+                assert_eq!(ctx.texture_view(0), Some(view));
+                assert_eq!(ctx.buffer(0), None);
+                assert_eq!(ctx.buffer(1), Some((buffer_id, 256, 64)));
+                assert_eq!(ctx.texture(1), None);
+                assert_eq!(ctx.texture_view(1), None);
+                assert_eq!(ctx.buffer(2), None);
+                *observed.lock().unwrap() += 1;
+            })],
+        )
+        .unwrap();
+    assert_eq!(*calls.lock().unwrap(), 0);
+    assert_eq!(device.live_resource_count(), initial_resources);
+    let recorded = runtime.record(&device);
+    assert_eq!(*calls.lock().unwrap(), 1);
+    assert!(recorded.allocations().is_empty());
+    recorded.release(&device); // Never submitted: safe cancellation.
+    assert_eq!(device.live_resource_count(), initial_resources);
+    device.destroy_texture_view(view);
+    device.destroy_texture(texture_id);
+    device.destroy_buffer(buffer_id);
+    assert_eq!(device.live_resource_count(), 0);
+}
+
+#[test]
+fn runtime_recording_allocates_transients_once_and_retains_them_until_release() {
+    use std::sync::{Arc, Mutex};
+    let device = recording_device();
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let declaration = compile_passes(
+        vec![
+            pass(
+                1,
+                QueueClass::Compute,
+                vec![usage(RESOURCE, AccessKind::StorageWrite)],
+            ),
+            pass(
+                2,
+                QueueClass::Compute,
+                vec![usage(RESOURCE, AccessKind::StorageRead)],
+            ),
+        ],
+        &[buffer(RESOURCE, ResourceLifetime::Transient)],
+        &[],
+    );
+    let callbacks = [2, 1]
+        .into_iter()
+        .map(|key| {
+            let observed = Arc::clone(&observed);
+            RuntimePassBinding::new(PassKey(key), move |ctx| {
+                assert_eq!(ctx.pass().key(), PassKey(key));
+                observed.lock().unwrap().push((key, ctx.buffer(0).unwrap()));
+            })
+        })
+        .collect();
+    let runtime = declaration
+        .prepare_runtime(Extent3d::new_2d(1, 1), &[], callbacks)
+        .unwrap();
+    assert_eq!(device.live_resource_count(), 0);
+    assert!(observed.lock().unwrap().is_empty());
+    let recorded = runtime.record(&device);
+    let calls = observed.lock().unwrap();
+    assert_eq!(calls.len(), 2);
+    assert_eq!((calls[0].0, calls[1].0), (1, 2));
+    assert_eq!(calls[0].1, calls[1].1);
+    assert_eq!((calls[0].1 .1, calls[0].1 .2), (0, 64));
+    assert_eq!(recorded.allocations().buffers().len(), 1);
+    assert_eq!(recorded.allocations().buffers()[0].2, calls[0].1 .0);
+    assert_eq!(device.live_resource_count(), 1);
+    recorded.release(&device);
+    assert_eq!(device.live_resource_count(), 0);
+}
