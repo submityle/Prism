@@ -768,8 +768,12 @@ impl<R: DesktopRenderer> DesktopHost<R> {
             }
             Ok(false) => {}
         }
-        let Some(document) = self.document.as_mut() else {
-            return;
+        let document = match require_scene_document(self.document.as_mut()) {
+            Ok(document) => document,
+            Err(error) => {
+                self.input_result(Err(error));
+                return;
+            }
         };
         let result = if save {
             document.save(&mut self.ui)
@@ -818,6 +822,12 @@ fn ensure_file_command_idle(renderer_gesture_active: bool) -> Result<(), Desktop
         ));
     }
     Ok(())
+}
+
+fn require_scene_document(
+    document: Option<&mut DesktopDocumentSession>,
+) -> Result<&mut DesktopDocumentSession, DesktopUiError> {
+    document.ok_or_else(|| DesktopUiError::Panel("No scene document storage is configured".into()))
 }
 
 fn document_request_result<E>(result: Result<impl Sized, E>) -> (Result<bool, E>, bool) {
@@ -1568,6 +1578,16 @@ mod tests {
     fn active_viewport_gesture_blocks_panel_and_scene_file_commands() {
         assert!(ensure_file_command_idle(true).is_err());
         assert!(ensure_file_command_idle(false).is_ok());
+    }
+
+    #[test]
+    fn missing_scene_document_storage_is_reported() {
+        assert_eq!(
+            require_scene_document(None).err(),
+            Some(DesktopUiError::Panel(
+                "No scene document storage is configured".into()
+            ))
+        );
     }
 
     #[test]
