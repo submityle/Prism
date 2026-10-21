@@ -26,6 +26,7 @@ pub fn block_on<F: Future>(future: F) -> F::Output {
 }
 
 /// The long-lived `wgpu` handles shared by every compute kernel in this crate.
+#[derive(Clone)]
 pub struct GpuContext {
     /// Host ownership identity, independent of backend instance-local IDs.
     identity: Arc<()>,
@@ -40,6 +41,29 @@ pub struct GpuContext {
 }
 
 impl GpuContext {
+    /// Adopts an existing host's original instance/adapter/device/queue tuple.
+    ///
+    /// The caller must supply handles from the same host; wgpu cannot validate
+    /// arbitrary tuples here. No device is requested and no callbacks are
+    /// replaced. Clone this context to share its provenance token: adopting
+    /// the same handles twice intentionally creates distinct identities.
+    #[must_use]
+    pub fn from_wgpu(instance: Instance, adapter: Adapter, device: Device, queue: Queue) -> Self {
+        Self {
+            identity: Arc::new(()),
+            instance,
+            adapter,
+            device,
+            queue,
+        }
+    }
+
+    /// Whether two contexts share the same host adoption, including clones.
+    #[must_use]
+    pub fn shares_device(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.identity, &other.identity)
+    }
+
     /// Attempts to acquire a headless compute device across the native backends.
     ///
     /// Returns [`None`] when no adapter or device can be obtained so callers can

@@ -9,6 +9,7 @@
 use prism_physics_core::mpm::{BoundaryCondition, MaterialPoints, MpmSolver};
 
 use crate::context::GpuContext;
+use crate::mpm::gpu::surface::{ResidentSurface, ResidentSurfaceConfig, ResidentSurfaceError};
 use crate::mpm::{BoundaryMode, GpuMpmResident, StepConfig, StepInputs, StepParticles};
 
 /// Selects how the runtime acquires its execution backend.
@@ -34,6 +35,8 @@ pub enum MpmBackend {
 /// Reason a preferred GPU runtime fell back to CPU.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MpmFallbackReason {
+    /// The adopted device cannot hold/dispatch the authored resident state.
+    DeviceLimits,
     /// No adapter or device could be acquired.
     GpuUnavailable,
     /// The state is empty and is handled directly by CPU.
@@ -43,6 +46,8 @@ pub enum MpmFallbackReason {
 /// Runtime construction and synchronization errors.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MpmRuntimeError {
+    /// The adopted device cannot hold/dispatch the authored resident state.
+    DeviceLimits,
     /// A required GPU could not be acquired.
     GpuUnavailable,
     /// A required GPU cannot be initialized for an empty state.
@@ -97,6 +102,25 @@ pub struct MpmRuntime {
 impl MpmRuntime {
     /// Creates a runtime from a core solver and backend policy.
     pub fn new(solver: MpmSolver, config: MpmRuntimeConfig) -> Result<Self, MpmRuntimeError> {
+        Self::create(solver, config, None)
+    }
+
+    /// Uses the host's exact logical device and submission queue, rather than
+    /// requesting an independent headless device. Clone one adopted context
+    /// for physics and rendering so native publications can be imported.
+    pub fn with_gpu_context(
+        solver: MpmSolver,
+        config: MpmRuntimeConfig,
+        context: GpuContext,
+    ) -> Result<Self, MpmRuntimeError> {
+        Self::create(solver, config, Some(context))
+    }
+
+    fn create(
+        solver: MpmSolver,
+        config: MpmRuntimeConfig,
+        context: Option<GpuContext>,
+    ) -> Result<Self, MpmRuntimeError> {
         if config.max_steps_per_advance == 0 {
             return Err(MpmRuntimeError::InvalidStepBudget);
         }
@@ -120,7 +144,14 @@ impl MpmRuntime {
                         return Err(MpmRuntimeError::EmptyGpuState);
                     }
                     runtime.fallback = Some(MpmFallbackReason::EmptyState);
-                } else if let Some(context) = GpuContext::try_headless() {
+                } else if let Some(context) = context.or_else(GpuContext::try_headless) {
+                    if !gpu_fits(&context, &runtime.cpu) {
+                        if config.backend == MpmBackendPolicy::RequireGpu {
+                            return Err(MpmRuntimeError::DeviceLimits);
+                        }
+                        runtime.fallback = Some(MpmFallbackReason::DeviceLimits);
+                        return Ok(runtime);
+                    }
                     let mut resident = GpuMpmResident::new(&context);
                     resident.upload(
                         &context,
@@ -138,6 +169,22 @@ impl MpmRuntime {
             }
         }
         Ok(runtime)
+    }
+
+    /// Generates a resident triangle-list lease from the live GPU particles.
+    /// This never calls snapshot, maps buffers, or waits for the device.
+    pub fn publish_surface(
+        &mut self,
+        config: ResidentSurfaceConfig,
+    ) -> Result<ResidentSurface, ResidentSurfaceError> {
+        let context = self
+            .context
+            .as_ref()
+            .ok_or(ResidentSurfaceError::BackendUnavailable)?;
+        self.resident
+            .as_mut()
+            .ok_or(ResidentSurfaceError::BackendUnavailable)?
+            .publish_surface(context, config)
     }
 
     /// Returns the backend executing fixed steps.
@@ -226,6 +273,36 @@ impl MpmRuntime {
         }
         Ok(())
     }
+}
+
+fn gpu_fits(context: &GpuContext, solver: &MpmSolver) -> bool {
+    let limits = context.device().limits();
+    let max = limits
+        .max_buffer_size
+        .min(u64::from(limits.max_storage_buffer_binding_size));
+    let Some(nodes) = solver
+        .grid
+        .nx()
+        .checked_mul(solver.grid.ny())
+        .and_then(|n| n.checked_mul(solver.grid.nz()))
+    else {
+        return false;
+    };
+    let particles = solver.particles.len();
+    limits.max_storage_buffers_per_shader_stage >= 12
+        && limits.max_bindings_per_bind_group >= 13
+        && limits.max_compute_invocations_per_workgroup >= 64
+        && limits.max_compute_workgroup_size_x >= 64
+        && nodes <= u32::MAX as usize
+        && particles <= u32::MAX as usize
+        && (nodes as u64)
+            .checked_mul(16)
+            .is_some_and(|bytes| bytes <= max)
+        && (particles as u64)
+            .checked_mul(48)
+            .is_some_and(|bytes| bytes <= max)
+        && nodes.div_ceil(64) <= limits.max_compute_workgroups_per_dimension as usize
+        && particles.div_ceil(64) <= limits.max_compute_workgroups_per_dimension as usize
 }
 
 fn inputs(particles: &MaterialPoints) -> StepInputs<'_> {

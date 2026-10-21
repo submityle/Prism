@@ -34,6 +34,7 @@ pub mod p2g;
 pub mod params;
 pub mod solver;
 pub mod step;
+pub mod surface;
 
 pub use constitutive::{ConstitutiveOutput, GpuMpmConstitutive};
 pub use g2p::{G2pParticles, GpuMpmG2p};

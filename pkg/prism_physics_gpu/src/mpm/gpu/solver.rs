@@ -46,6 +46,9 @@ use crate::context::GpuContext;
 use super::layout::entry;
 use super::params::{cols_to_mat3, mat3_to_cols, vec3_to_vec4};
 use super::step::{build_step_params, GpuMpmStep, StepConfig, StepInputs, StepParticles};
+use super::surface::{
+    ResidentSurface, ResidentSurfaceConfig, ResidentSurfaceError, SurfaceProducer,
+};
 
 /// The device-resident buffer set backing an uploaded particle batch.
 ///
@@ -101,6 +104,8 @@ pub struct GpuMpmResident {
     step: GpuMpmStep,
     /// The currently uploaded batch, if any.
     resident: Option<Resident>,
+    device_identity: std::sync::Arc<()>,
+    surface: Option<SurfaceProducer>,
 }
 
 impl GpuMpmResident {
@@ -110,6 +115,8 @@ impl GpuMpmResident {
         GpuMpmResident {
             step: GpuMpmStep::new(ctx),
             resident: None,
+            device_identity: ctx.device_identity().clone(),
+            surface: None,
         }
     }
 
@@ -118,8 +125,13 @@ impl GpuMpmResident {
     ///
     /// # Panics
     ///
-    /// Panics if the [`StepInputs`] slices do not all have the same length.
+    /// Panics if the [`StepInputs`] slices do not all have the same length,
+    /// or `ctx` does not share the original host adoption.
     pub fn upload(&mut self, ctx: &GpuContext, inputs: &StepInputs, cfg: &StepConfig) {
+        assert!(
+            std::sync::Arc::ptr_eq(&self.device_identity, ctx.device_identity()),
+            "GpuMpmResident context must share its original host adoption"
+        );
         let count = inputs.positions.len();
         assert!(
             inputs.velocities.len() == count
@@ -219,6 +231,27 @@ impl GpuMpmResident {
         self.resident.as_ref().map_or(0, |r| r.count)
     }
 
+    /// Reconstructs and submits an immutable surface without particle/count
+    /// readback. Upload replacement and later steps never mutate old leases.
+    pub fn publish_surface(
+        &mut self,
+        ctx: &GpuContext,
+        config: ResidentSurfaceConfig,
+    ) -> Result<ResidentSurface, ResidentSurfaceError> {
+        if !std::sync::Arc::ptr_eq(&self.device_identity, ctx.device_identity()) {
+            return Err(ResidentSurfaceError::WrongDevice);
+        }
+        let resident = self
+            .resident
+            .as_ref()
+            .ok_or(ResidentSurfaceError::BackendUnavailable)?;
+        SurfaceProducer::preflight(ctx, config, resident.count)?;
+        let producer = self
+            .surface
+            .get_or_insert_with(|| SurfaceProducer::new(ctx));
+        producer.publish(ctx, &resident.positions, resident.count, config)
+    }
+
     /// Advances the resident batch by `steps` full MLS-MPM steps in a single
     /// command submission, without transferring any state back across the bus.
     ///
@@ -227,8 +260,13 @@ impl GpuMpmResident {
     ///
     /// # Panics
     ///
-    /// Panics if no batch has been uploaded with [`GpuMpmResident::upload`].
+    /// Panics if no batch has been uploaded with [`GpuMpmResident::upload`],
+    /// or `ctx` does not share the original host adoption.
     pub fn step(&self, ctx: &GpuContext, steps: usize) {
+        assert!(
+            std::sync::Arc::ptr_eq(&self.device_identity, ctx.device_identity()),
+            "GpuMpmResident context must share its original host adoption"
+        );
         let resident = self
             .resident
             .as_ref()
@@ -275,9 +313,14 @@ impl GpuMpmResident {
     ///
     /// # Panics
     ///
-    /// Panics if no batch has been uploaded with [`GpuMpmResident::upload`].
+    /// Panics if no batch has been uploaded with [`GpuMpmResident::upload`],
+    /// or `ctx` does not share the original host adoption.
     #[must_use]
     pub fn snapshot(&self, ctx: &GpuContext) -> StepParticles {
+        assert!(
+            std::sync::Arc::ptr_eq(&self.device_identity, ctx.device_identity()),
+            "GpuMpmResident context must share its original host adoption"
+        );
         let resident = self
             .resident
             .as_ref()
