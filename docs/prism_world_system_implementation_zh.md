@@ -365,11 +365,25 @@ cell host 后台 SDF 重烘装配增加默认关闭的 `tasks` feature：复用�
 逐轴迟滞、stationary no-op 和上传成功后的 focus 提交；单 Y 平面覆盖强制要求 Y 无迟滞、
 水平有迟滞时 radius >= 1，详见 `prism_world_runtime_sdf_focus_zh.md`。这些接缝不代替
 对象自动 dirty/bake、真实消费者、三维窗口或跨消费者实时帧预算。
-本轮 focus 验证：runtime lib 148 passed，`gpu_proxy` lib 168 passed / 7 ignored，
+focus 切片当时的验证：runtime lib 148 passed，`gpu_proxy` lib 168 passed / 7 ignored，
 no-default check 与限定范围 Clippy 通过；Apple M2/Metal 跨沙盒 focus 7/7、既有上传
 4/4 实卡测试通过，默认忽略的宿主生命周期测试也已显式补跑 7/7 通过。
-主树 GPU lib 仍被其他模块 `prism_asset::scheduler` 的编译错误
-阻断，隔离副本 123 passed 不算主树通过；详细命令、微基准尾部及范围见上述 focus 文档。
+当时主树 GPU lib 被其他模块 `prism_asset::scheduler` 的编译错误
+阻断，隔离副本 123 passed 不算主树通过；这是历史验证边界，不代表当前编译状态。
+详细命令、微基准尾部及范围见上述 focus 文档。
+
+2026-10-21 对象 SDF 更新：`WorldSdfObjectStore<T>` 已实现不可变对象 source、
+每 brick contributor 索引、旧/新覆盖自动标脏、所有存活贡献者的局部 min 重烘，以及
+owner/revision 隔离的 detached work。`WorldSdfLocalVolume` 提供规则量化体积的
+i128 三线性采样；`WorldSdfGpuObjects<T>` 将 CPU 发布与 resident GPU dirty 准入连接，
+CPU 重烘和 GPU 上传分别完成前均拒绝消费，窗口外修改在进入时加载最新结果。
+它不是 ECS object-edit observer 或线程池装配，也不将现有单 Y 平面升级为三维窗口。
+默认 runtime lib 183 passed，`gpu_proxy` lib 203 passed / 7 ignored，no-default check
+通过，`prism_world_gpu --features gpu` lib 123 passed，release CPU 局部工作量微基准
+1 passed；Apple M2/Metal 对象 GPU 6/6、focus 7/7、clipmap 上传 4/4 通过，限定范围
+Clippy `-D warnings` 通过（依赖 render graph 的既有 unused-import warning 不在 lint 范围）。
+对象测试在 sandbox 因无 Metal adapter 无法初始化，获准宿主环境实卡运行通过。
+资源、精度、性能尾部及验收边界见 `prism_world_runtime_sdf_objects_zh.md`。
 
 以下项目仍需要独立硬件或端到端证据，不能用 policy primitive 冒充完成：
 

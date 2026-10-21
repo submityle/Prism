@@ -42,6 +42,18 @@ pub use hlod_runtime::{
     HlodDistanceRequest, HlodRuntime, HlodRuntimeError, HlodSelection, HlodSelectionBudget,
     HlodSelectionPlan, HLOD_RUNTIME_SELECTION_VERSION,
 };
+mod sdf_local_volume;
+pub use sdf_local_volume::{WorldSdfLocalVolume, WorldSdfLocalVolumeError};
+mod sdf_objects;
+pub use sdf_objects::{
+    WorldSdfObject, WorldSdfObjectBake, WorldSdfObjectBakeBudget, WorldSdfObjectBakeError,
+    WorldSdfObjectBakeReport, WorldSdfObjectConfig, WorldSdfObjectError, WorldSdfObjectLimits,
+    WorldSdfObjectResource, WorldSdfObjectSample, WorldSdfObjectStore, WorldSdfObjectUpdate,
+};
+#[cfg(feature = "gpu_proxy")]
+mod sdf_objects_gpu;
+#[cfg(feature = "gpu_proxy")]
+pub use sdf_objects_gpu::{WorldSdfGpuObjects, WorldSdfGpuObjectsConfig, WorldSdfGpuObjectsError};
 mod sdf_clipmap;
 pub use sdf_clipmap::{
     WorldSdfClipmapCommit, WorldSdfClipmapConfig, WorldSdfClipmapError, WorldSdfClipmapPlan,
