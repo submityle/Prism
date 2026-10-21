@@ -35,3 +35,8 @@ path = "text/integration/block_format.rs"
 name = "resident_blocks"
 path = "text/integration/resident_blocks.rs"
 required-features = ["gpu"]
+
+[[test]]
+name = "resident_manifest"
+path = "text/integration/resident_manifest.rs"
+required-features = ["gpu"]

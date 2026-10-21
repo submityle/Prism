@@ -12,8 +12,13 @@ use prism_asset::StableGuid;
 
 use crate::range_batch::{checked_physical_range_within, validate_range, RangeBatchPolicy};
 use crate::{
-    ContainerError, ContainerReader, ManifestRoute, OverlaySet, RangeRequest, RuntimeManifest,
-    CHUNK_FORMAT_VERSION,
+    Codec, ContainerError, ContainerReader, EntryInfo, ManifestRoute, OverlaySet, RangeRequest,
+    RuntimeManifest, CHUNK_FORMAT_VERSION,
+};
+
+#[cfg(feature = "gpu")]
+use crate::{
+    GpuBlockDecodeBackend, GpuResidentBlockPayload, GpuResidentBlockRange, GpuResidentBlockSlice,
 };
 
 /// Errors raised while binding or reading a logical manifest route.
@@ -184,6 +189,118 @@ pub struct ManifestRangeRequest {
     pub len: u64,
 }
 
+/// A logical manifest asset authorized for GPU-resident `BlockDeflate` reads.
+///
+/// Binding captures the current immutable route. Remounting does not revoke an
+/// existing capability; bind again to select a new winning revision. Reads
+/// validate asset-relative bounds, but returned buffers contain whole decoded
+/// blocks: selected byte ranges are not an access-control boundary between
+/// entries sharing a chunk. Mapped files must remain immutable for the entire
+/// capability lifetime, including after the reader is dropped.
+#[cfg(feature = "gpu")]
+pub struct GpuResidentManifestAsset {
+    logical_guid: StableGuid,
+    entry: EntryInfo,
+    payload: GpuResidentBlockPayload,
+}
+
+#[cfg(feature = "gpu")]
+impl GpuResidentManifestAsset {
+    /// Logical GUID used to authorize this routed asset.
+    #[must_use]
+    pub const fn logical_guid(&self) -> StableGuid {
+        self.logical_guid
+    }
+
+    /// Validated container-local entry metadata.
+    #[must_use]
+    pub const fn entry(&self) -> EntryInfo {
+        self.entry
+    }
+
+    /// Shared context on which returned GPU buffers were allocated.
+    #[must_use]
+    pub fn context(&self) -> &std::sync::Arc<prism_gdeflate_gpu::GpuContext> {
+        self.payload.context()
+    }
+
+    /// Decodes an asset-relative range into owned GPU-resident block outputs.
+    ///
+    /// Admission bounds one batch, not the lifetime aggregate of GPU outputs.
+    pub fn read_range_resident(
+        &self,
+        offset: u64,
+        len: u64,
+        admission: prism_gdeflate_gpu::DeflateBatchLimits,
+    ) -> Result<GpuResidentAssetRange, ManifestReadError> {
+        let end = offset
+            .checked_add(len)
+            .ok_or_else(|| self.invalid_range(offset, len))?;
+        if offset > self.entry.raw_len || end > self.entry.raw_len {
+            return Err(self.invalid_range(offset, len));
+        }
+        let chunk_offset = self
+            .entry
+            .raw_offset
+            .checked_add(offset)
+            .ok_or_else(|| self.invalid_range(offset, len))?;
+        self.payload
+            .read_range_resident(chunk_offset, len, admission)
+            .map(|blocks| GpuResidentAssetRange {
+                logical_guid: self.logical_guid,
+                range: offset..end,
+                blocks,
+            })
+            .map_err(ManifestReadError::Container)
+    }
+
+    fn invalid_range(&self, offset: u64, len: u64) -> ManifestReadError {
+        ManifestReadError::InvalidRange {
+            logical_guid: self.logical_guid,
+            offset,
+            len: usize::try_from(len).unwrap_or(usize::MAX),
+        }
+    }
+}
+
+/// An owned resident result whose requested range is relative to one asset,
+/// rather than to the physical chunk shared by multiple entries.
+#[cfg(feature = "gpu")]
+#[derive(Debug)]
+pub struct GpuResidentAssetRange {
+    logical_guid: StableGuid,
+    range: core::ops::Range<u64>,
+    blocks: GpuResidentBlockRange,
+}
+
+#[cfg(feature = "gpu")]
+impl GpuResidentAssetRange {
+    /// Logical asset identity authorized when the capability was bound.
+    #[must_use]
+    pub const fn logical_guid(&self) -> StableGuid {
+        self.logical_guid
+    }
+
+    /// Exact requested range relative to the decoded asset.
+    #[must_use]
+    pub fn range(&self) -> core::ops::Range<u64> {
+        self.range.clone()
+    }
+
+    /// Whole decoded blocks and exact selected byte ranges. Slice output
+    /// offsets are relative to the beginning of this request, not the chunk.
+    #[must_use]
+    pub fn slices(&self) -> &[GpuResidentBlockSlice] {
+        self.blocks.slices()
+    }
+
+    /// Transfers outputs independently of the manifest, reader and capability.
+    #[must_use]
+    pub fn into_slices(self) -> Vec<GpuResidentBlockSlice> {
+        self.blocks.into_slices()
+    }
+}
+
 impl ManifestRangeRequest {
     /// Creates a logical manifest range request.
     #[must_use]
@@ -303,7 +420,7 @@ impl<'manifest, 'overlay> ManifestReader<'manifest, 'overlay> {
             // Deflate payload is decoded from its complete stored record, so
             // its logical raw offset must not be compared with the shorter
             // compressed byte range in the container.
-            if entry.codec == crate::Codec::Raw {
+            if entry.codec == Codec::Raw {
                 checked_physical_range_within(
                     entry
                         .offset
@@ -460,7 +577,7 @@ impl<'manifest, 'overlay> ManifestReader<'manifest, 'overlay> {
                     error,
                 )
             })?;
-            if entry.codec == crate::Codec::Raw {
+            if entry.codec == Codec::Raw {
                 let base = entry
                     .offset
                     .checked_add(if reader.info().version == CHUNK_FORMAT_VERSION {
@@ -570,10 +687,7 @@ impl<'manifest, 'overlay> ManifestReader<'manifest, 'overlay> {
     /// This is used by the [`ManifestAssetReader`](crate::ManifestAssetReader)
     /// adapter so the runtime can perform size accounting without reading the
     /// complete payload first.
-    pub fn entry_info(
-        &self,
-        logical_guid: StableGuid,
-    ) -> Result<crate::EntryInfo, ManifestReadError> {
+    pub fn entry_info(&self, logical_guid: StableGuid) -> Result<EntryInfo, ManifestReadError> {
         let route = self.route(logical_guid)?;
         let reader = self.resolve(route)?;
         reader
@@ -583,6 +697,36 @@ impl<'manifest, 'overlay> ManifestReader<'manifest, 'overlay> {
                 container_name: route.container_name.clone(),
                 container_guid: route.container_guid,
             })
+    }
+
+    /// Authorizes a logical manifest asset for GPU-resident `BlockDeflate`
+    /// reads using the winning reader's own immutable backing and budget.
+    #[cfg(feature = "gpu")]
+    pub fn bind_gpu_resident_asset(
+        &self,
+        logical_guid: StableGuid,
+        backend: &GpuBlockDecodeBackend,
+    ) -> Result<GpuResidentManifestAsset, ManifestReadError> {
+        let route = self.route(logical_guid)?;
+        let reader = self.resolve(route)?;
+        let entry = reader.entry(route.container_guid).ok_or_else(|| {
+            ManifestReadError::MissingContainerGuid {
+                logical_guid,
+                container_name: route.container_name.clone(),
+                container_guid: route.container_guid,
+            }
+        })?;
+        if reader.info().version != CHUNK_FORMAT_VERSION || entry.codec != Codec::BlockDeflate {
+            return Err(ManifestReadError::Container(
+                ContainerError::CodecNotSupportedForLayout(entry.codec),
+            ));
+        }
+        let payload = backend.bind_validated_reader_chunk(reader, entry.chunk_id)?;
+        Ok(GpuResidentManifestAsset {
+            logical_guid,
+            entry,
+            payload,
+        })
     }
 
     fn route(&self, logical_guid: StableGuid) -> Result<&ManifestRoute, ManifestReadError> {

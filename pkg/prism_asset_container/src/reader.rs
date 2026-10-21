@@ -314,6 +314,14 @@ impl ContainerReader {
         &self.budget
     }
 
+    #[cfg(feature = "gpu")]
+    pub(crate) fn validated_memory_bytes(&self) -> Option<Arc<[u8]>> {
+        match &self.backing {
+            Backing::Memory(bytes) => Some(bytes.clone()),
+            Backing::Range(_) => None,
+        }
+    }
+
     #[cfg(all(feature = "mmap", feature = "gpu"))]
     pub(crate) fn validated_mmap_source(&self) -> Option<Arc<crate::MmapRangeSource>> {
         self.directory.mmap_source()

@@ -125,6 +125,8 @@ pub enum ContainerError {
     UnsupportedCodec(u8),
     /// A known codec cannot be used with the requested physical layout.
     CodecNotSupportedForLayout(Codec),
+    /// GPU-resident decode requires immutable memory or mmap container bytes.
+    ResidentBackingUnsupported,
     /// A directory or complete-payload digest does not match its bytes.
     HashMismatch,
     /// A payload codec failed while encoding or decoding.
@@ -181,6 +183,9 @@ impl fmt::Display for ContainerError {
                     "payload codec {codec:?} is not supported for this layout"
                 )
             }
+            Self::ResidentBackingUnsupported => f.write_str(
+                "GPU-resident decode requires memory-backed or mmap-backed container bytes",
+            ),
             Self::HashMismatch => f.write_str("container or payload hash mismatch"),
             Self::CompressionFailed => f.write_str("container payload compression failed"),
             Self::InvalidDecodeReport => f.write_str("inconsistent block decode report"),

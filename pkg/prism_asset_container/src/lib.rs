@@ -49,7 +49,9 @@ pub use format::{
     FORMAT_VERSION, MAGIC, SUPPORTED_FORMAT_VERSIONS,
 };
 #[cfg(feature = "gpu")]
-pub use gpu::GpuBlockDecodeBackend;
+pub use gpu::{
+    GpuBlockDecodeBackend, GpuResidentBlockPayload, GpuResidentBlockRange, GpuResidentBlockSlice,
+};
 pub use install::{
     install_runtime_package, install_runtime_package_transaction,
     install_runtime_package_transaction_with_policy, install_runtime_package_with_policy,
@@ -61,6 +63,8 @@ pub use manifest::{
     ContainerIdentity, ManifestError, ManifestMetadata, ManifestRoute, RuntimeManifest,
     MANIFEST_MAGIC, MANIFEST_VERSION,
 };
+#[cfg(feature = "gpu")]
+pub use manifest_reader::{GpuResidentAssetRange, GpuResidentManifestAsset};
 pub use manifest_reader::{ManifestRangeRequest, ManifestReadError, ManifestReader};
 pub use overlay::{MountedContainer, OverlaySet};
 pub use patch::{PatchDescriptorError, RuntimePatchDescriptor, PATCH_MAGIC, PATCH_VERSION};

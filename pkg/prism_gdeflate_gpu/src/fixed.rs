@@ -186,9 +186,29 @@ impl std::error::Error for DeflateBatchError {}
 pub struct ResidentDeflateTile {
     buffer: wgpu::Buffer,
     byte_len: u64,
+    instance: wgpu::Instance,
+    device: wgpu::Device,
 }
 
 impl ResidentDeflateTile {
+    pub(crate) fn from_buffer(ctx: &GpuContext, buffer: wgpu::Buffer, byte_len: u64) -> Self {
+        Self {
+            buffer,
+            byte_len,
+            instance: ctx.instance().clone(),
+            device: ctx.device().clone(),
+        }
+    }
+
+    /// Whether this output belongs to the context's exact logical device.
+    ///
+    /// Both retained instance and device are checked: resource IDs alone can
+    /// collide between independently created wgpu instances.
+    #[must_use]
+    pub fn is_on_context(&self, ctx: &GpuContext) -> bool {
+        &self.instance == ctx.instance() && &self.device == ctx.device()
+    }
+
     /// Buffer for downstream GPU binding or copying on the same device.
     #[must_use]
     pub fn buffer(&self) -> &wgpu::Buffer {
@@ -451,10 +471,11 @@ impl GpuFixedGDeflate {
         .map_err(DeflateBatchError::Device)?;
         validate_statuses(&statuses, requests)?;
         for (tile, request) in dispatches.into_iter().zip(requests) {
-            outputs.push(ResidentDeflateTile {
-                buffer: tile.output,
-                byte_len: request.expected_output_size as u64,
-            });
+            outputs.push(ResidentDeflateTile::from_buffer(
+                ctx,
+                tile.output,
+                request.expected_output_size as u64,
+            ));
         }
         Ok(outputs)
     }
@@ -464,7 +485,7 @@ fn host_allocation_error() -> FixedDecodeError {
     FixedDecodeError::Readback(buffer::ReadbackError::Allocation)
 }
 
-fn with_device_errors<T>(
+pub(crate) fn with_device_errors<T>(
     device: &wgpu::Device,
     operation: impl FnOnce() -> Result<T, FixedDecodeError>,
 ) -> Result<T, FixedDecodeError> {

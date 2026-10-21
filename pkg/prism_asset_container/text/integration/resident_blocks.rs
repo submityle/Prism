@@ -90,19 +90,21 @@ fn mixed_batch_preserves_exact_ranges_owned_outputs_and_prior_validation() {
     let raw = mixed_payload();
     let mut bytes = container(&raw);
     let calls = Arc::new(CountBackend(AtomicUsize::new(0)));
-    let reader =
-        ContainerReader::new_with_block_decode_backend(bytes.clone(), calls.clone()).unwrap();
+    let budget = ContainerReadBudget::default();
+    let reader = ContainerReader::with_budget_and_block_decode_backend(
+        bytes.clone(),
+        budget.clone(),
+        calls.clone(),
+    )
+    .unwrap();
     let validated_calls = calls.0.load(Ordering::Relaxed);
     assert_eq!(validated_calls, 3);
     let chunk = reader.chunk(0).unwrap();
     let base = chunk.offset as usize;
     assert_eq!(bytes[base + 144 + 32], 1);
     assert_eq!(bytes[base + 144 + 80 + 32], 0);
-    let budget = ContainerReadBudget::default();
     let backend = GpuBlockDecodeBackend::new(context.clone());
-    let payload = backend
-        .bind_validated_chunk(&reader, bytes.clone(), 0, budget.clone())
-        .unwrap();
+    let payload = backend.bind_validated_reader_chunk(&reader, 0).unwrap();
     assert_eq!(payload.chunk(), chunk);
     assert!(Arc::ptr_eq(payload.context(), &context));
     assert!(Arc::get_mut(&mut bytes).is_none());
@@ -161,13 +163,11 @@ fn mmap_backing_survives_reader_drop_for_gpu_resident_ranges() {
         NEXT_PATH.fetch_add(1, Ordering::Relaxed)
     ));
     std::fs::write(&path, &bytes).unwrap();
-    let reader = ContainerReader::from_mmap_file(&path).unwrap();
     let budget = ContainerReadBudget::default();
+    let reader = ContainerReader::from_mmap_file_with_budget(&path, budget.clone()).unwrap();
     let baseline = budget.in_flight_bytes();
     let backend = GpuBlockDecodeBackend::new(context.clone());
-    let payload = backend
-        .bind_validated_mmap_chunk(&reader, 0, budget.clone())
-        .unwrap();
+    let payload = backend.bind_validated_reader_chunk(&reader, 0).unwrap();
     assert_eq!(budget.in_flight_bytes(), baseline + 3 * 80);
     drop(reader);
 
@@ -202,12 +202,10 @@ fn range_and_device_admission_fail_deterministically_then_valid_read_succeeds() 
     let Some(context) = context() else { return };
     let raw = mixed_payload();
     let bytes = container(&raw);
-    let reader = ContainerReader::new(bytes.clone()).unwrap();
     let budget = ContainerReadBudget::default();
+    let reader = ContainerReader::with_budget(bytes, budget.clone()).unwrap();
     let backend = GpuBlockDecodeBackend::new(context);
-    let payload = backend
-        .bind_validated_chunk(&reader, bytes, 0, budget.clone())
-        .unwrap();
+    let payload = backend.bind_validated_reader_chunk(&reader, 0).unwrap();
     let baseline = budget.in_flight_bytes();
     assert_eq!(
         payload
@@ -289,50 +287,32 @@ fn range_and_device_admission_fail_deterministically_then_valid_read_succeeds() 
 }
 
 #[test]
-fn validated_identity_rejects_changed_bytes_and_unrelated_mounts() {
+fn validated_backing_cannot_be_substituted_and_invalid_chunk_is_rejected() {
     let Some(context) = context() else { return };
     let raw = mixed_payload();
     let bytes = container(&raw);
     let reader = ContainerReader::new(bytes.clone()).unwrap();
-    let chunk = reader.chunk(0).unwrap();
     let backend = GpuBlockDecodeBackend::new(context);
-    let budget = ContainerReadBudget::default();
-    for position in [0, chunk.offset as usize + 144 + 36, bytes.len() - 1] {
+    let budget = reader.budget().clone();
+    for position in [
+        0,
+        reader.chunk(0).unwrap().offset as usize + 144 + 36,
+        bytes.len() - 1,
+    ] {
         let mut changed = bytes.to_vec();
         changed[position] ^= 1;
-        assert_eq!(
-            backend
-                .bind_validated_chunk(&reader, changed.into(), 0, budget.clone())
-                .err()
-                .unwrap(),
-            ContainerError::HashMismatch,
-        );
+        assert!(ContainerReader::new(changed).is_err());
     }
-    let mut different = raw.clone();
-    different[0] ^= 1;
-    let different_bytes = container(&different);
-    let different_reader = ContainerReader::new(different_bytes).unwrap();
     assert_eq!(
         backend
-            .bind_validated_chunk(&different_reader, bytes.clone(), 0, budget.clone())
-            .err()
-            .unwrap(),
-        ContainerError::HashMismatch,
-    );
-    assert_eq!(
-        backend
-            .bind_validated_chunk(&reader, bytes.clone(), 99, budget.clone())
+            .bind_validated_reader_chunk(&reader, 99)
             .err()
             .unwrap(),
         ContainerError::InvalidDirectory,
     );
-    // Identical content in a distinct Arc is safe: identity is a full BLAKE3
-    // digest, not a forgeable caller token or an allocator pointer comparison.
-    let independent: Arc<[u8]> = bytes.to_vec().into();
-    assert!(!Arc::ptr_eq(&bytes, &independent));
-    let bound = backend
-        .bind_validated_chunk(&reader, independent, 0, budget.clone())
-        .unwrap();
+    // The public API has no bytes argument: only the reader's exact retained
+    // backing can authorize a resident payload.
+    let bound = backend.bind_validated_reader_chunk(&reader, 0).unwrap();
     drop(bound);
     assert_eq!(budget.in_flight_bytes(), 0);
 }
@@ -380,7 +360,7 @@ fn authoritative_block_and_inner_payload_hashes_cannot_be_skipped() {
         Err(error) => assert_eq!(error, ContainerError::HashMismatch),
         Ok(reader) => assert_eq!(
             backend
-                .bind_validated_chunk(&reader, bad_payload_hash, 0, ContainerReadBudget::default())
+                .bind_validated_reader_chunk(&reader, 0)
                 .err()
                 .unwrap(),
             ContainerError::HashMismatch,
@@ -393,24 +373,27 @@ fn budgets_are_shared_and_released_on_rejection() {
     let Some(context) = context() else { return };
     let raw = mixed_payload();
     let bytes = container(&raw);
-    let reader = ContainerReader::new(bytes.clone()).unwrap();
     let backend = GpuBlockDecodeBackend::new(context);
     let limits = ContainerReadLimits {
         max_output_bytes: 1,
-        max_in_flight_bytes: 2048,
+        max_in_flight_bytes: 270_000,
         ..Default::default()
     };
     let budget = ContainerReadBudget::new(limits);
-    let payload = backend
-        .bind_validated_chunk(&reader, bytes.clone(), 0, budget.clone())
-        .unwrap();
+    let reader = ContainerReader::with_budget(bytes.clone(), budget.clone()).unwrap();
+    let payload = backend.bind_validated_reader_chunk(&reader, 0).unwrap();
     let baseline = budget.in_flight_bytes();
-    let sibling = backend
-        .bind_validated_chunk(&reader, bytes.clone(), 0, budget.clone())
-        .unwrap();
+    let sibling = backend.bind_validated_reader_chunk(&reader, 0).unwrap();
     assert_eq!(budget.in_flight_bytes(), baseline * 2);
     drop(sibling);
     assert_eq!(budget.in_flight_bytes(), baseline);
+    // Mount validation and resident reads now share the very same immutable
+    // policy. Retained sibling indexes exercise live-budget pressure without
+    // swapping in an unrelated, artificially smaller post-mount budget.
+    let mut siblings = Vec::new();
+    while limits.max_in_flight_bytes - budget.in_flight_bytes() > 2048 + baseline {
+        siblings.push(backend.bind_validated_reader_chunk(&reader, 0).unwrap());
+    }
     assert_eq!(
         payload.read_range_resident(0, 2, admission()).unwrap_err(),
         ContainerError::ResourceLimit {
@@ -419,6 +402,7 @@ fn budgets_are_shared_and_released_on_rejection() {
             limit: 1
         },
     );
+    let pressured = budget.in_flight_bytes();
     assert!(matches!(
         payload.read_range_resident(BLOCK as u64, 1, admission()),
         Err(ContainerError::ResourceLimit {
@@ -426,7 +410,7 @@ fn budgets_are_shared_and_released_on_rejection() {
             ..
         }),
     ));
-    assert_eq!(budget.in_flight_bytes(), baseline);
+    assert_eq!(budget.in_flight_bytes(), pressured);
     // A smaller compressed block still fits the shared host-byte budget.
     assert_eq!(
         payload
@@ -436,6 +420,8 @@ fn budgets_are_shared_and_released_on_rejection() {
             .len(),
         1
     );
+    drop(siblings);
+    assert_eq!(budget.in_flight_bytes(), baseline);
     drop(payload);
     assert_eq!(budget.in_flight_bytes(), 0);
     let limited = ContainerReadBudget::new(ContainerReadLimits {
@@ -443,7 +429,7 @@ fn budgets_are_shared_and_released_on_rejection() {
         ..Default::default()
     });
     assert!(matches!(
-        backend.bind_validated_chunk(&reader, bytes, 0, limited.clone()),
+        ContainerReader::with_budget(bytes, limited.clone()),
         Err(ContainerError::ResourceLimit {
             resource: "metadata bytes",
             ..
@@ -453,11 +439,10 @@ fn budgets_are_shared_and_released_on_rejection() {
 }
 
 #[test]
-fn binding_enforces_container_metadata_and_complete_block_unit_limits() {
+fn reader_owned_policy_enforces_mount_limits_before_resident_binding() {
     let Some(context) = context() else { return };
     let raw = mixed_payload();
     let bytes = container(&raw);
-    let reader = ContainerReader::new(bytes.clone()).unwrap();
     let backend = GpuBlockDecodeBackend::new(context);
     let policies = [
         (
@@ -505,10 +490,7 @@ fn binding_enforces_container_metadata_and_complete_block_unit_limits() {
     ];
     for (limits, expected_resource) in policies {
         let budget = ContainerReadBudget::new(limits);
-        let error = backend
-            .bind_validated_chunk(&reader, bytes.clone(), 0, budget.clone())
-            .err()
-            .unwrap();
+        let error = ContainerReader::with_budget(bytes.clone(), budget.clone()).unwrap_err();
         assert!(
             matches!(error, ContainerError::ResourceLimit { resource, .. } if resource == expected_resource),
             "{error:?}"
@@ -520,7 +502,7 @@ fn binding_enforces_container_metadata_and_complete_block_unit_limits() {
         let reader = ContainerReader::new(bytes.clone()).unwrap();
         assert_eq!(
             backend
-                .bind_validated_chunk(&reader, bytes, 0, ContainerReadBudget::default())
+                .bind_validated_reader_chunk(&reader, 0)
                 .err()
                 .unwrap(),
             ContainerError::CodecNotSupportedForLayout(codec),
@@ -529,7 +511,7 @@ fn binding_enforces_container_metadata_and_complete_block_unit_limits() {
 }
 
 #[test]
-fn range_backed_validated_reader_can_bind_exact_owned_content() {
+fn range_backed_reader_cannot_silently_copy_into_resident_backing() {
     let Some(context) = context() else { return };
     let raw = mixed_payload();
     let bytes = container(&raw);
@@ -537,15 +519,12 @@ fn range_backed_validated_reader_can_bind_exact_owned_content() {
         ContainerReader::from_range_source(Arc::new(MemoryRangeSource::new(bytes.clone())))
             .unwrap();
     let backend = GpuBlockDecodeBackend::new(context);
-    let payload = backend
-        .bind_validated_chunk(&reader, bytes, 0, ContainerReadBudget::default())
-        .unwrap();
-    // An exact boundary selects only the next block, never its predecessor.
-    let result = payload
-        .read_range_resident(BLOCK as u64, 4, admission())
-        .unwrap();
-    assert_eq!(result.slices().len(), 1);
-    assert_eq!(result.slices()[0].block_index(), 1);
-    assert_eq!(result.slices()[0].buffer_range(), 0..4);
-    assert_eq!(result.slices()[0].output_offset(), 0);
+    assert_eq!(
+        backend
+            .bind_validated_reader_chunk(&reader, 0)
+            .err()
+            .unwrap(),
+        ContainerError::ResidentBackingUnsupported,
+    );
+    assert_eq!(reader.budget().in_flight_bytes(), 0);
 }

@@ -44,9 +44,10 @@ pub mod decoder;
 pub mod deflate;
 pub mod deinterleave;
 pub mod fixed;
+pub mod resident;
 pub mod stored;
 
-pub use context::{GpuContext, GpuProbeError};
+pub use context::{GpuAdapter, GpuContext, GpuProbeError};
 pub use decoder::{
     DecodePath, DecodeReport, DecodedGDeflate, DecoderError, GDeflateDecoder, GpuFallbackReason,
 };
@@ -57,5 +58,8 @@ pub use deinterleave::{
 pub use fixed::{
     DeflateBatchError, DeflateBatchLimits, DeflateTile, FixedDecodeError, GpuFixedGDeflate,
     ResidentDeflateTile,
+};
+pub use resident::{
+    GpuResidentAssembler, ResidentAssemblyError, ResidentAssemblyLimits, ResidentByteRange,
 };
 pub use stored::{plan_stored_deflate, GpuStoredGDeflate, StoredBlockPlan, StoredPlanError};

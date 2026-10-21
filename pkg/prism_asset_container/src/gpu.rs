@@ -76,56 +76,43 @@ impl GpuBlockDecodeBackend {
         &self.context
     }
 
-    /// Binds a previously validated chunk to its exact immutable stored bytes.
+    /// Binds a validated `BlockDeflate` chunk using the reader's own immutable
+    /// memory or mmap backing and shared budget.
     ///
-    /// The reader must already have completed ordinary mount validation,
-    /// including every block hash and the decoded chunk hash. This method
-    /// hashes the complete *stored* container and compares its identity with
-    /// that reader; caller-supplied metadata or a parsed index alone cannot
-    /// create this capability. The retained `Arc` prevents subsequent mutation.
-    /// As with ordinary reader access, range sources and injected decoders used
-    /// at mount must obey their immutable-source and decode contracts.
-    ///
-    /// No decoded payload is produced here. Resident reads subsequently use
-    /// GPU-only batch decoding, with no payload readback or CPU fallback.
-    pub fn bind_validated_chunk(
-        &self,
-        reader: &ContainerReader,
-        bytes: Arc<[u8]>,
-        chunk_id: u32,
-        budget: ContainerReadBudget,
-    ) -> Result<GpuResidentBlockPayload, ContainerError> {
-        let source = MemoryRangeSource::new(bytes.clone());
-        self.bind_validated_source(
-            reader,
-            ResidentBacking::Owned(bytes),
-            &source,
-            chunk_id,
-            budget,
-        )
-    }
-
-    /// Binds a previously validated mmap-backed v2 chunk without copying the
-    /// complete container into an `Arc<[u8]>`. The reader must be the source of
-    /// the retained mapping, and mount-time container/block hashes remain the
-    /// integrity authority. The mapping must remain immutable for its lifetime.
-    #[cfg(feature = "mmap")]
-    pub fn bind_validated_mmap_chunk(
+    /// This deliberately does not accept caller-supplied bytes, chunk
+    /// metadata, or a second budget: the same reader that authorized the
+    /// container identity also supplies every retained capability. Ordinary
+    /// range/remote readers return [`ContainerError::ResidentBackingUnsupported`]
+    /// rather than copying the complete container. No decoded payload is
+    /// produced here; resident reads use GPU-only batch decoding with no
+    /// payload readback or CPU fallback.
+    pub fn bind_validated_reader_chunk(
         &self,
         reader: &ContainerReader,
         chunk_id: u32,
-        budget: ContainerReadBudget,
     ) -> Result<GpuResidentBlockPayload, ContainerError> {
-        let source = reader
-            .validated_mmap_source()
-            .ok_or(ContainerError::InvalidDirectory)?;
-        self.bind_validated_source(
-            reader,
-            ResidentBacking::Mapped(source.clone()),
-            source.as_ref(),
-            chunk_id,
-            budget,
-        )
+        let budget = reader.budget().clone();
+        if let Some(bytes) = reader.validated_memory_bytes() {
+            let source = MemoryRangeSource::new(bytes.clone());
+            return self.bind_validated_source(
+                reader,
+                ResidentBacking::Owned(bytes),
+                &source,
+                chunk_id,
+                budget,
+            );
+        }
+        #[cfg(feature = "mmap")]
+        if let Some(source) = reader.validated_mmap_source() {
+            return self.bind_validated_source(
+                reader,
+                ResidentBacking::Mapped(source.clone()),
+                source.as_ref(),
+                chunk_id,
+                budget,
+            );
+        }
+        Err(ContainerError::ResidentBackingUnsupported)
     }
 
     fn bind_validated_source(
@@ -143,12 +130,6 @@ impl GpuBlockDecodeBackend {
             info.total_len,
             limits.max_container_bytes,
         )?;
-        if let ResidentBacking::Owned(bytes) = &backing
-            && (bytes.len() as u64 != info.total_len
-                || blake3::hash(bytes).as_bytes() != &info.content_hash)
-        {
-            return Err(ContainerError::HashMismatch);
-        }
         let chunk = reader
             .chunk(chunk_id)
             .ok_or(ContainerError::InvalidDirectory)?;
@@ -210,7 +191,7 @@ impl GpuBlockDecodeBackend {
 
 /// A private validation capability bound to an immutable stored container.
 ///
-/// Created only by [`GpuBlockDecodeBackend::bind_validated_chunk`]. It retains
+/// Created only by [`GpuBlockDecodeBackend::bind_validated_reader_chunk`]. It retains
 /// its context, decoder, bytes, and budgeted metadata independently of the
 /// original reader/backend. Stored bytes are retained; decoded bytes are not.
 pub struct GpuResidentBlockPayload {
