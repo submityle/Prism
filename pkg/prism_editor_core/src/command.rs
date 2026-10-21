@@ -169,8 +169,29 @@ impl<C: EditContext> Command<C> for TransactionCommand<C> {
     }
 
     fn undo(&mut self, context: &mut C) -> Result<(), CommandError> {
-        for command in self.commands.iter_mut().rev() {
-            command.undo(context)?;
+        let mut index = self.commands.len();
+        while index > 0 {
+            index -= 1;
+            if let Err(error) = self.commands[index].undo(context) {
+                let failed_label = String::from(self.commands[index].label());
+                let mut recovery_failures = Vec::new();
+                for command in &mut self.commands[index + 1..] {
+                    if let Err(recovery_error) = command.apply(context) {
+                        recovery_failures.push((String::from(command.label()), recovery_error));
+                    }
+                }
+                if !recovery_failures.is_empty() {
+                    let mut message = format!(
+                        "transaction `{}` failed while undoing `{failed_label}`: {error}; recovery failed",
+                        self.label
+                    );
+                    for (label, recovery_error) in recovery_failures {
+                        message.push_str(&format!("; `{label}`: {recovery_error}"));
+                    }
+                    return Err(CommandError::context_uncertain(message));
+                }
+                return Err(error);
+            }
         }
         Ok(())
     }
@@ -421,7 +442,9 @@ mod tests {
     struct FailingCommand {
         label: &'static str,
         apply_delta: i32,
-        fail_apply: bool,
+        apply_attempts: usize,
+        fail_apply_at: Option<usize>,
+        fail_undo: bool,
         fail_undo_after_delta: Option<i32>,
         affect: AffectSet,
     }
@@ -431,7 +454,9 @@ mod tests {
             Self {
                 label,
                 apply_delta,
-                fail_apply: false,
+                apply_attempts: 0,
+                fail_apply_at: None,
+                fail_undo: false,
                 fail_undo_after_delta: None,
                 affect: AffectSet::new(),
             }
@@ -440,7 +465,8 @@ mod tests {
 
     impl Command<Context> for FailingCommand {
         fn apply(&mut self, context: &mut Context) -> Result<(), CommandError> {
-            if self.fail_apply {
+            self.apply_attempts += 1;
+            if self.fail_apply_at == Some(self.apply_attempts) {
                 return Err(CommandError::new(format!("{} apply failed", self.label)));
             }
             context.value += self.apply_delta;
@@ -448,6 +474,9 @@ mod tests {
         }
 
         fn undo(&mut self, context: &mut Context) -> Result<(), CommandError> {
+            if self.fail_undo {
+                return Err(CommandError::new(format!("{} undo failed", self.label)));
+            }
             if let Some(delta) = self.fail_undo_after_delta {
                 context.value += delta;
                 return Err(CommandError::context_uncertain(format!(
@@ -479,7 +508,7 @@ mod tests {
         let mut transaction = Transaction::new("rollback");
         transaction.push(FailingCommand::new("first", 4));
         let mut rejected = FailingCommand::new("second", 0);
-        rejected.fail_apply = true;
+        rejected.fail_apply_at = Some(1);
         transaction.push(rejected);
 
         let error = stack
@@ -505,7 +534,7 @@ mod tests {
         first.fail_undo_after_delta = Some(7);
         transaction.push(first);
         let mut rejected = FailingCommand::new("second", 0);
-        rejected.fail_apply = true;
+        rejected.fail_apply_at = Some(1);
         transaction.push(rejected);
 
         let error = stack
@@ -531,6 +560,53 @@ mod tests {
         stack
             .execute(Box::new(Add::new(2)), &mut context)
             .expect("reconciled history accepts edits");
+        assert_eq!(context.value, 2);
+    }
+
+    #[test]
+    fn transaction_undo_failure_recovers_already_undone_commands() {
+        let mut stack = CommandStack::default();
+        let mut context = Context::default();
+        let mut transaction = Transaction::new("undo recovery");
+        let mut first = FailingCommand::new("first", 2);
+        first.fail_undo = true;
+        transaction.push(first);
+        transaction.push(FailingCommand::new("second", 3));
+        stack
+            .execute_transaction(transaction, &mut context)
+            .expect("apply transaction");
+
+        let error = stack.undo(&mut context).expect_err("undo must fail");
+
+        assert_eq!(error.to_string(), "first undo failed");
+        assert!(!error.reconciliation_required());
+        assert!(!stack.reconciliation_required());
+        assert_eq!(context.value, 5);
+        assert_eq!((stack.undo_len(), stack.redo_len()), (1, 0));
+    }
+
+    #[test]
+    fn transaction_undo_recovery_failure_blocks_stale_history() {
+        let mut stack = CommandStack::default();
+        let mut context = Context::default();
+        let mut transaction = Transaction::new("undo recovery");
+        let mut first = FailingCommand::new("first", 2);
+        first.fail_undo = true;
+        transaction.push(first);
+        let mut second = FailingCommand::new("second", 3);
+        second.fail_apply_at = Some(2);
+        transaction.push(second);
+        stack
+            .execute_transaction(transaction, &mut context)
+            .expect("apply transaction");
+
+        let error = stack.undo(&mut context).expect_err("undo must fail");
+
+        assert!(error.reconciliation_required());
+        assert!(error.to_string().contains("recovery failed"));
+        assert!(error.to_string().contains("`second`: second apply failed"));
+        assert!(stack.reconciliation_required());
+        assert_eq!((stack.undo_len(), stack.redo_len()), (0, 0));
         assert_eq!(context.value, 2);
     }
 }

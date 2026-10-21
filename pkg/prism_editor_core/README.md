@@ -10,10 +10,11 @@ across a desktop host, headless automation, and remote adapters.
   with active-layer selection, revision tracking, and dirty state.
 - `Command`, `Transaction`, and `CommandStack` provide reversible edits,
   failure rollback, merge hooks, and deterministic undo/redo history. A failed
-  transaction reports every rollback failure and blocks stale history until
-  the host reconciles context and calls `reset_after_reconciliation`; command
-  implementations use `CommandError::context_uncertain` whenever an error may
-  follow a partial mutation.
+  apply or undo restores completed sub-operations before returning; failed
+  restoration reports every rollback/recovery error and blocks stale history
+  until the host reconciles context and calls `reset_after_reconciliation`.
+  Command implementations use `CommandError::context_uncertain` whenever an
+  error may follow a partial mutation.
 - `Selection` stores ordered, duplicate-free entity, asset, and sub-object
   identities with an explicit primary item.
 - `ServiceRegistry` stores type-keyed `Send + Sync` services, while
