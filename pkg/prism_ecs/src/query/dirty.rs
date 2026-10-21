@@ -349,25 +349,43 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
                 candidate.insert_chunk(row / rows_per_chunk);
             }
         }
-        for change in changes.events {
-            if let Some(component) = change.component
-                && access_ids.binary_search(&component).is_err()
-            {
-                continue;
-            }
-            let Some(archetype) = world.archetypes().get(change.archetype) else {
+        let mut event_index = 0;
+        while event_index < changes.events.len() {
+            let first = changes.events[event_index];
+            let Some(chunk) = first.chunk else {
+                event_index += 1;
                 continue;
             };
-            let Some(chunk) = change.chunk else {
+
+            // Journal revisions preserve write order. Fold a consecutive run
+            // for one archetype/chunk before touching the archetype registry,
+            // candidate map, and per-chunk deduplicator. This is especially
+            // important for row-ordered writes, where thousands of row events
+            // commonly describe only a handful of physical chunks.
+            let mut run_end = event_index + 1;
+            while run_end < changes.events.len() {
+                let next = changes.events[run_end];
+                if next.archetype != first.archetype || next.chunk != Some(chunk) {
+                    break;
+                }
+                run_end += 1;
+            }
+
+            // `column_changes_since_components` already selects only these
+            // accessed components plus structural events.
+            let relevant_events = run_end - event_index;
+            event_index = run_end;
+
+            let Some(archetype) = world.archetypes().get(first.archetype) else {
                 continue;
             };
             if chunk >= archetype.table().chunk_count() {
                 continue;
             }
-            let candidate = candidates.entry(change.archetype).or_default();
-            report.stats.candidate_chunk_marks += 1;
+            let candidate = candidates.entry(first.archetype).or_default();
+            report.stats.candidate_chunk_marks += relevant_events;
             candidate.insert_chunk(chunk);
-            candidate.journal_events += 1;
+            candidate.journal_events += relevant_events;
         }
 
         for (archetype_id, candidate) in candidates {
