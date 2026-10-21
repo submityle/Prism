@@ -6,8 +6,8 @@ use crate::collider::{
 };
 use crate::collision_filter::CollisionExclusionError;
 use crate::joint::{
-    AngleLimit, JointAnchor, JointDesc, JointHandle, JointKind, LinearLimit, PrismaticJoint,
-    RevoluteJoint, RevoluteJointState, SphericalJoint,
+    AngleLimit, BoundedPd, JointAnchor, JointDesc, JointHandle, JointKind, LinearLimit,
+    PrismaticJoint, RevoluteJoint, RevoluteJointState, SphericalJoint,
 };
 use crate::math::transform::Isometry;
 use crate::reduced::articulation::ArticulationBodyState;
@@ -64,9 +64,21 @@ pub struct ArticulationHandoffReport {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UnsupportedJointPolicy {
-    Motor { link: usize },
-    InertOrExtraParameters { link: usize },
-    Family { link: usize },
+    /// Motor family has no equivalent scalar generalized coordinate contract.
+    Motor {
+        link: usize,
+    },
+    /// Independent damping, armature, or non-equivalent fixed/spherical limits.
+    InertOrExtraParameters {
+        link: usize,
+    },
+    /// Scalar motor parameters failed bounded-PD validation.
+    InvalidMotor {
+        link: usize,
+    },
+    Family {
+        link: usize,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -120,6 +132,18 @@ impl PhysicsWorld {
         }
         validate_attachments(&self.shapes, &attachments, links.len())?;
         validate_joint_policies(&links, broken_link)?;
+        // Stage validated force laws before any allocation or topology change.
+        let motors = links
+            .iter()
+            .enumerate()
+            .map(|(link, model)| {
+                if link == broken_link {
+                    Ok(None)
+                } else {
+                    scalar_motor(link, model)
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let frames = states
             .iter()
             .map(prepare_body_frame)
@@ -324,7 +348,8 @@ impl PhysicsWorld {
                 .map_or(body_handles[0], |parent| body_handles[parent + 1]);
             let child_body = body_handles[link + 1];
             let (a, b) = joint_frames[link].expect("validated surviving joint frames");
-            let desc = joint_desc(model, parent_body, child_body, a, b);
+            let mut desc = joint_desc(model, parent_body, child_body, a, b);
+            desc.bounded_pd = motors[link];
             let joint = self.spawn_joint(desc);
             if let Some(mut state) = revolute_states[link] {
                 state.remap_bodies(parent_body, child_body);
@@ -662,7 +687,12 @@ fn validate_joint_policies(
             continue;
         }
         let joint = &model.joint;
-        if joint.motor.is_some() {
+        if joint.motor.is_some()
+            && !matches!(
+                joint.kind,
+                ArticulationJointKind::Revolute { .. } | ArticulationJointKind::Prismatic { .. }
+            )
+        {
             return Err(ArticulationHandoffError::UnsupportedJointPolicy(
                 UnsupportedJointPolicy::Motor { link },
             ));
@@ -680,6 +710,30 @@ fn validate_joint_policies(
         }
     }
     Ok(())
+}
+
+fn scalar_motor(
+    link: usize,
+    model: &ArticulationLink,
+) -> Result<Option<BoundedPd>, ArticulationHandoffError> {
+    let Some(motor) = model.joint.motor else {
+        return Ok(None);
+    };
+    // Only the active scalar x component participates, exactly as in the
+    // reduced effort law. Never convert this policy into an XPBD `Motor`.
+    BoundedPd::new(
+        f64::from(motor.target_position.x),
+        f64::from(motor.target_velocity.x),
+        f64::from(motor.stiffness),
+        f64::from(motor.damping),
+        f64::from(motor.max_force.x),
+    )
+    .map(Some)
+    .map_err(|_| {
+        ArticulationHandoffError::UnsupportedJointPolicy(UnsupportedJointPolicy::InvalidMotor {
+            link,
+        })
+    })
 }
 
 fn joint_desc(
