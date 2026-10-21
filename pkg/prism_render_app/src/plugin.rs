@@ -390,6 +390,9 @@ where
             .insert_resource(crate::particle::ExtractedEmberExternalGpuResources::default());
         render
             .world
+            .insert_resource(crate::particle::ParticleGpuBuildQueue::default());
+        render
+            .world
             .insert_resource(crate::particle::ParticleUploadStatus::default());
         render
             .world
