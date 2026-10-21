@@ -19,6 +19,11 @@ use prism_render_graph::{
 
 use crate::world_placement_graph::PlacementStream;
 
+/// WGSL for clearing only the instance-count word of a placement indirect
+/// argument buffer. Bind group 0 contains that storage buffer at binding 0.
+pub const PLACEMENT_INDIRECT_COUNT_RESET_WGSL: &str =
+    include_str!("shaders/placement_indirect_count_reset.wgsl");
+
 /// One imported buffer together with its physical byte footprint.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PlacementImportedBuffer {
@@ -40,6 +45,10 @@ pub struct PlacementComputeStage {
 }
 
 /// The raster consumer for one compacted placement stream.
+///
+/// The opaque bind group must bind the same compact buffer declared to this
+/// pass; with deletion enabled that is the filtered deletion output. The graph
+/// can enforce resource barriers but cannot introspect an RHI bind group.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PlacementDrawStage {
     /// Registered render pipeline on the graph's device table.
@@ -65,8 +74,36 @@ pub struct PlacementRenderWork {
     pub field: PlacementComputeStage,
     /// Fail-closed finalization kernel.
     pub finalize: PlacementComputeStage,
+    /// Optional full-key deletion stage. When present, the graph copies the
+    /// finalized placement indirect arguments, runs deletion, and routes draw
+    /// through the deletion compact/indirect outputs.
+    pub deletion: Option<PlacementDeletionWork>,
     /// Production raster consumer.
     pub draw: PlacementDrawStage,
+}
+
+/// Resources and stage for filtering a placement stream by canonical full key.
+///
+/// The bind group must match the full-key deletion shader ABI: request params,
+/// placement records, upstream compact indices, upstream indirect args, sorted
+/// deletion keys, output compact indices, and output indirect args. The graph
+/// declares these accesses explicitly and preserves the upstream placement
+/// outputs.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PlacementDeletionWork {
+    /// Deletion request parameters.
+    pub params: PlacementImportedBuffer,
+    /// Sorted canonical full-key deletion set.
+    pub keys: PlacementImportedBuffer,
+    /// Filtered compact source-slot indices.
+    pub compact: PlacementImportedBuffer,
+    /// Filtered four-word indirect draw arguments.
+    pub indirect: PlacementImportedBuffer,
+    /// Stage that clears word 1 (instance count) of `indirect` while preserving
+    /// the other words. It runs after the argument copy and before filtering.
+    pub clear_instance_count: PlacementComputeStage,
+    /// Registered deletion compute pipeline and bind group.
+    pub stage: PlacementComputeStage,
 }
 
 /// Complete physical resource/pipeline binding for one placement stream.
@@ -128,6 +165,17 @@ pub enum PlacementRenderBridgeError {
         /// Binding label.
         resource: &'static str,
     },
+    /// A shader-visible resource is smaller than its fixed ABI/budget minimum.
+    InvalidBufferSize {
+        /// Stream owning the invalid binding.
+        stream: PlacementStream,
+        /// Binding label.
+        resource: &'static str,
+        /// Actual physical byte size.
+        bytes: u64,
+        /// Minimum byte size required by the shader ABI.
+        minimum: u64,
+    },
     /// A dispatch dimension of zero would silently omit work.
     ZeroDispatch {
         /// Stream owning the invalid stage.
@@ -164,6 +212,15 @@ impl fmt::Display for PlacementRenderBridgeError {
             Self::ZeroBuffer { stream, resource } => {
                 write!(f, "placement {resource} buffer is empty for {stream:?}")
             }
+            Self::InvalidBufferSize {
+                stream,
+                resource,
+                bytes,
+                minimum,
+            } => write!(
+                f,
+                "placement {resource} buffer has {bytes} bytes; needs at least {minimum} for {stream:?}"
+            ),
             Self::ZeroDispatch {
                 stream,
                 stage,
@@ -296,10 +353,40 @@ pub fn build_placement_render_graph(
             item.stream,
         )?;
 
+        let (draw_compact, draw_indirect) = if let Some(deletion) = work.deletion {
+            let deletion_handles = import_deletion(&mut graph, deletion)?;
+            let copied_indirect = add_deletion_args_copy(
+                &mut graph,
+                indirect,
+                deletion_handles.indirect,
+                item.stream,
+            )?;
+            let reset_indirect = add_deletion_count_reset(
+                &mut graph,
+                copied_indirect,
+                deletion.clear_instance_count,
+                item.stream,
+            )?;
+            let (filtered_compact, filtered_indirect) = add_deletion_pass(
+                &mut graph,
+                records,
+                compact,
+                indirect,
+                reset_indirect,
+                deletion_handles,
+                deletion.stage,
+                item.stream,
+            )?;
+            (filtered_compact, filtered_indirect)
+        } else {
+            (compact, indirect)
+        };
+
         let draw_records = records;
         let draw_samples = samples;
         let draw_attributes = attributes;
-        let draw_compact = compact;
+        let draw_compact = draw_compact;
+        let draw_indirect = draw_indirect;
         let draw_stage = work.draw;
         let previous_scene = scene_handle;
         let mut next_scene = previous_scene;
@@ -311,13 +398,13 @@ pub fn build_placement_render_graph(
                 let _ = builder.read_storage_buffer(draw_samples);
                 let _ = builder.read_storage_buffer(draw_attributes);
                 let _ = builder.read_storage_buffer(draw_compact);
-                let _ = builder.read_indirect(indirect);
+                let _ = builder.read_indirect(draw_indirect);
                 next_scene = builder.color_attachment(previous_scene);
                 move |commands: &mut ExecuteContext<'_>| {
                     commands
                         .set_render_pipeline(draw_stage.pipeline)
                         .set_render_bind_group(0, draw_stage.bind_group, Vec::new())
-                        .draw_indirect(indirect, draw_stage.indirect_offset);
+                        .draw_indirect(draw_indirect, draw_stage.indirect_offset);
                 }
             },
         )?;
@@ -340,6 +427,100 @@ struct StreamHandles {
     status: BufferHandle,
     heights: BufferHandle,
     brushes: BufferHandle,
+}
+
+#[derive(Clone, Copy)]
+struct DeletionHandles {
+    params: BufferHandle,
+    keys: BufferHandle,
+    compact: BufferHandle,
+    indirect: BufferHandle,
+}
+
+fn import_deletion(
+    graph: &mut RenderGraph,
+    work: PlacementDeletionWork,
+) -> Result<DeletionHandles, CompileError> {
+    let import = |name: &'static str, value: PlacementImportedBuffer, graph: &mut RenderGraph| {
+        graph.try_import_buffer(
+            name,
+            BufferDesc::new(value.bytes, BufferUsages::NONE),
+            value.imported,
+        )
+    };
+    Ok(DeletionHandles {
+        params: import("world placement deletion params", work.params, graph)?,
+        keys: import("world placement deletion keys", work.keys, graph)?,
+        compact: import("world placement deletion compact", work.compact, graph)?,
+        indirect: import("world placement deletion indirect", work.indirect, graph)?,
+    })
+}
+
+fn add_deletion_args_copy(
+    graph: &mut RenderGraph,
+    source: BufferHandle,
+    destination: BufferHandle,
+    stream: PlacementStream,
+) -> Result<BufferHandle, CompileError> {
+    let mut output = destination;
+    graph.try_add_transfer_pass(
+        format!("world placement deletion args {:?}", stream),
+        PassFlags::NEVER_CULL,
+        |builder| {
+            let source = builder.copy_src_buffer(source);
+            output = builder.copy_dst_buffer(destination);
+            move |commands: &mut ExecuteContext<'_>| {
+                commands.copy_buffer_to_buffer(source, 0, output, 0, 16);
+            }
+        },
+    )?;
+    Ok(output)
+}
+
+fn add_deletion_pass(
+    graph: &mut RenderGraph,
+    records: BufferHandle,
+    upstream_compact: BufferHandle,
+    upstream_indirect: BufferHandle,
+    copied_indirect: BufferHandle,
+    deletion: DeletionHandles,
+    stage: PlacementComputeStage,
+    stream: PlacementStream,
+) -> Result<(BufferHandle, BufferHandle), CompileError> {
+    let mut output = (deletion.compact, copied_indirect);
+    graph.try_add_compute_pass(
+        format!("world placement deletion {:?}", stream),
+        PassFlags::NEVER_CULL,
+        |builder| {
+            let _ = builder.read_uniform(deletion.params);
+            let _ = builder.read_storage_buffer(records);
+            let _ = builder.read_storage_buffer(upstream_compact);
+            let _ = builder.read_storage_buffer(upstream_indirect);
+            let _ = builder.read_storage_buffer(deletion.keys);
+            output.0 = builder.write_storage_buffer(deletion.compact);
+            output.1 = builder.write_storage_buffer(copied_indirect);
+            move |commands: &mut ExecuteContext<'_>| record_compute(commands, stage)
+        },
+    )?;
+    Ok(output)
+}
+
+fn add_deletion_count_reset(
+    graph: &mut RenderGraph,
+    indirect: BufferHandle,
+    stage: PlacementComputeStage,
+    stream: PlacementStream,
+) -> Result<BufferHandle, CompileError> {
+    let mut output = indirect;
+    graph.try_add_compute_pass(
+        format!("world placement deletion count reset {:?}", stream),
+        PassFlags::NEVER_CULL,
+        |builder| {
+            output = builder.write_storage_buffer(indirect);
+            move |commands: &mut ExecuteContext<'_>| record_compute(commands, stage)
+        },
+    )?;
+    Ok(output)
 }
 
 fn import_stream(
@@ -566,10 +747,81 @@ fn validate_stream(item: &PlacementRenderStream) -> Result<(), PlacementRenderBr
             });
         }
     }
+    if let Some(deletion) = work.deletion {
+        for (resource, binding) in [
+            ("deletion_params", deletion.params),
+            ("deletion_keys", deletion.keys),
+            ("deletion_compact", deletion.compact),
+            ("deletion_indirect", deletion.indirect),
+        ] {
+            if binding.bytes == 0 {
+                return Err(PlacementRenderBridgeError::ZeroBuffer {
+                    stream: item.stream,
+                    resource,
+                });
+            }
+        }
+        let candidate_bytes = u64::from(item.stream.candidate_count) * 4;
+        for (resource, binding, minimum) in [
+            (
+                "records",
+                item.records,
+                u64::from(item.stream.candidate_count) * 64,
+            ),
+            ("compact", item.compact, candidate_bytes),
+            ("indirect", item.indirect, 16),
+            ("deletion_params", deletion.params, 128),
+            ("deletion_keys", deletion.keys, 56),
+            ("deletion_compact", deletion.compact, candidate_bytes),
+            ("deletion_indirect", deletion.indirect, 16),
+        ] {
+            if binding.bytes < minimum {
+                return Err(PlacementRenderBridgeError::InvalidBufferSize {
+                    stream: item.stream,
+                    resource,
+                    bytes: binding.bytes,
+                    minimum,
+                });
+            }
+        }
+        if deletion.clear_instance_count.dispatch.contains(&0) {
+            return Err(PlacementRenderBridgeError::ZeroDispatch {
+                stream: item.stream,
+                stage: "deletion_count_reset",
+                dispatch: deletion.clear_instance_count.dispatch,
+            });
+        }
+        if deletion.stage.dispatch.contains(&0) {
+            return Err(PlacementRenderBridgeError::ZeroDispatch {
+                stream: item.stream,
+                stage: "deletion",
+                dispatch: deletion.stage.dispatch,
+            });
+        }
+    }
     if work.draw.indirect_offset % 4 != 0 {
         return Err(PlacementRenderBridgeError::MisalignedIndirectOffset {
             stream: item.stream,
             offset: work.draw.indirect_offset,
+        });
+    }
+    let draw_indirect = work
+        .deletion
+        .map_or(item.indirect, |deletion| deletion.indirect);
+    let Some(indirect_end) = work.draw.indirect_offset.checked_add(16) else {
+        return Err(PlacementRenderBridgeError::InvalidBufferSize {
+            stream: item.stream,
+            resource: "draw_indirect",
+            bytes: draw_indirect.bytes,
+            minimum: u64::MAX,
+        });
+    };
+    if draw_indirect.bytes < indirect_end {
+        return Err(PlacementRenderBridgeError::InvalidBufferSize {
+            stream: item.stream,
+            resource: "draw_indirect",
+            bytes: draw_indirect.bytes,
+            minimum: indirect_end,
         });
     }
     Ok(())
@@ -579,9 +831,9 @@ fn validate_stream(item: &PlacementRenderStream) -> Result<(), PlacementRenderBr
 mod tests {
     use super::*;
     use prism_render_driver::{
-        BufferDescriptor, BufferState, ComputeCommand, DeviceDescriptor, Instance, Pass,
-        RenderCommand, RenderDevice, RequestAdapterOptions, TextureDescriptor, TextureDimension,
-        TextureFormat, TextureState, TextureUsages,
+        BufferDescriptor, BufferState, ComputeCommand, CopyCommand, DeviceDescriptor, Instance,
+        Pass, RenderCommand, RenderDevice, RequestAdapterOptions, TextureDescriptor,
+        TextureDimension, TextureFormat, TextureState, TextureUsages,
     };
     use prism_render_driver_null::{NullInstance, NullQueue};
 
@@ -634,10 +886,11 @@ mod tests {
                 project: stage(3, [3, 1, 1]),
                 field: stage(4, [4, 1, 1]),
                 finalize: stage(5, [5, 1, 1]),
+                deletion: None,
                 draw: PlacementDrawStage {
                     pipeline: RenderPipelineId::from_parts(6, 0),
                     bind_group: BindGroupId::from_parts(6, 0),
-                    indirect_offset: 4,
+                    indirect_offset: 0,
                 },
             }),
         }
@@ -647,6 +900,27 @@ mod tests {
         let mut item = item(device);
         item.stream.candidate_count = 0;
         item.work = None;
+        item
+    }
+
+    fn with_deletion(device: &impl RenderDevice) -> PlacementRenderStream {
+        let mut item = item(device);
+        item.records = imported_buffer(device, u64::from(item.stream.candidate_count) * 64);
+        item.compact = imported_buffer(device, u64::from(item.stream.candidate_count) * 4);
+        let stage = |id, dispatch| PlacementComputeStage {
+            pipeline: ComputePipelineId::from_parts(id, 0),
+            bind_group: BindGroupId::from_parts(id, 0),
+            dispatch,
+        };
+        item.work.as_mut().unwrap().draw.indirect_offset = 0;
+        item.work.as_mut().unwrap().deletion = Some(PlacementDeletionWork {
+            params: imported_buffer(device, 128),
+            keys: imported_buffer(device, 56),
+            compact: imported_buffer(device, 128),
+            indirect: imported_buffer(device, 16),
+            clear_instance_count: stage(7, [1, 1, 1]),
+            stage: stage(8, [8, 1, 1]),
+        });
         item
     }
 
@@ -717,7 +991,7 @@ mod tests {
             [
                 RenderCommand::SetPipeline(_),
                 RenderCommand::SetBindGroup { index: 0, .. },
-                RenderCommand::DrawIndirect { offset: 4, .. },
+                RenderCommand::DrawIndirect { offset: 0, .. },
             ]
         ));
     }
@@ -749,6 +1023,63 @@ mod tests {
                 ComputeCommand::SetBindGroup { index: 0, .. },
                 ComputeCommand::Dispatch { x: 1, y: 1, z: 1 },
             ]
+        ));
+    }
+
+    #[test]
+    fn deletion_copies_resets_filters_then_draws_from_filtered_indirect() {
+        let device = device();
+        let item = with_deletion(&device);
+        let upstream_indirect = item.indirect.imported.buffer;
+        let deletion_indirect = item
+            .work
+            .unwrap()
+            .deletion
+            .unwrap()
+            .indirect
+            .imported
+            .buffer;
+        let graph = build_placement_render_graph(Extent3d::new_2d(4, 4), scene(&device), &[item])
+            .expect("deletion graph lowering");
+        let recorded = graph.record(&device).expect("deletion graph recording");
+        let passes = &recorded.commands().passes;
+        assert_eq!(recorded.plan().pass_count(), 9);
+        let Pass::Transfer { commands, .. } = &passes[5] else {
+            panic!("argument initialization must begin with a transfer copy");
+        };
+        assert_eq!(
+            commands.as_slice(),
+            &[CopyCommand::CopyBufferToBuffer {
+                src: upstream_indirect,
+                src_offset: 0,
+                dst: deletion_indirect,
+                dst_offset: 0,
+                size: 16,
+            }]
+        );
+        for (index, expected_dispatch) in [(6, 1), (7, 8)] {
+            let Pass::Compute { commands, .. } = &passes[index] else {
+                panic!("deletion preparation/filter pass must be compute");
+            };
+            assert!(matches!(
+                commands.as_slice(),
+                [
+                    ComputeCommand::SetPipeline(_),
+                    ComputeCommand::SetBindGroup { index: 0, .. },
+                    ComputeCommand::Dispatch { x, y: 1, z: 1 },
+                ] if *x == expected_dispatch
+            ));
+        }
+        let Pass::Render { commands, .. } = passes.last().expect("draw pass") else {
+            panic!("last pass must draw");
+        };
+        assert!(matches!(
+            commands.as_slice(),
+            [
+                RenderCommand::SetPipeline(_),
+                RenderCommand::SetBindGroup { index: 0, .. },
+                RenderCommand::DrawIndirect { buffer, offset: 0 },
+            ] if *buffer == deletion_indirect
         ));
     }
 

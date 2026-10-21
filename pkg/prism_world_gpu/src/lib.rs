@@ -25,9 +25,9 @@ pub use contract::{
 pub use density::{density_dither_visible, DensityPolicy, DensityPolicyError};
 pub use packing::{ClusterSoa, ProxySoa, SoaBufferPack};
 pub use placement_render_bridge::{
-    build_placement_render_graph, PlacementComputeStage, PlacementDrawStage,
+    build_placement_render_graph, PlacementComputeStage, PlacementDeletionWork, PlacementDrawStage,
     PlacementImportedBuffer, PlacementRenderBridgeError, PlacementRenderStream,
-    PlacementRenderWork, PlacementSceneTarget,
+    PlacementRenderWork, PlacementSceneTarget, PLACEMENT_INDIRECT_COUNT_RESET_WGSL,
 };
 pub use registry::{PreparedSectorUpdate, ProxyHandle, ProxyRegistry, ProxyRegistryError};
 pub use world_placement_graph::{

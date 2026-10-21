@@ -119,3 +119,27 @@ adapter 迁移或产品 renderer draw graph。没有新增 benchmark，因此不
 但当前运行环境没有 Metal adapter，3 个测试均在设备获取阶段返回
 `metal found no adapters`；因此本次没有新增物理 GPU 通过证据，历史 Apple M2 3/3 记录仍单独
 按历史结果保留。
+
+## 2026-10-21 RenderGraph lowering 补充
+
+`prism_world_gpu::build_placement_render_graph` 的可选 deletion 分支将图顺序声明为：placement
+finalize → 复制 16-byte indirect 参数 → 清零输出参数的 `instance_count` → 完整键 deletion
+compute → draw。清零是必需步骤：deletion shader 以 atomic add 累加保留实例数，若沿用复制来的
+上游 count，结果会重复计数。`PlacementDeletionWork` 显式接收清零 compute stage；其单 binding
+WGSL ABI 可由 `PLACEMENT_INDIRECT_COUNT_RESET_WGSL` 获取。
+
+bridge 对 deletion 固定 ABI 做最小容量检查（128-byte params、至少一个 56-byte key 槽、候选容量
+对应的 64-byte records 与 4-byte compact slots、16-byte indirect 参数），并校验 draw indirect
+offset 的对齐与完整参数范围。Null RHI 回归验证 copy 源/目标、copy → reset → filter 顺序、dispatch
+命令与 draw 使用 deletion indirect buffer。
+
+draw 的 native bind group 是 opaque RHI ID；RenderGraph 可以声明 filtered compact 的读依赖和
+barrier，但无法反射或强制 bind group 内具体 buffer。因此调用方必须使用 deletion compact buffer
+构造 draw bind group。此 lowering 尚不是产品 renderer 注册/录制/提交/retirement 或 scene/ECS 消费
+链路的完成证明，也没有新增物理 GPU 或端到端性能证据。
+
+本次复验（2026-10-21）：`cargo test -p prism_world_gpu --features gpu --lib --offline`
+通过（124/124），`cargo test -p prism_world_runtime --lib --offline` 通过（183/183），
+`cargo test -p prism_world_gpu --features gpu --test wgsl_compile --offline` 通过（7/7），
+相关 Rust 文件 `rustfmt --check` 与切片 `git diff --check` 通过。GPU feature 编译成功；
+验证包含 Null RHI RenderGraph 录制测试，不包含物理 GPU 执行或端到端 renderer 性能测试。

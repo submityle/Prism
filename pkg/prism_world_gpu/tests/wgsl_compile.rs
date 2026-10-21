@@ -447,6 +447,41 @@ fn proxy_visibility_shader_parses_and_validates() {
 
 #[cfg(feature = "gpu")]
 #[test]
+fn placement_indirect_count_reset_shader_parses_and_matches_abi() {
+    use wgpu::naga::{AddressSpace, StorageAccess};
+
+    let source = prism_world_gpu::PLACEMENT_INDIRECT_COUNT_RESET_WGSL;
+    let module = wgpu::naga::front::wgsl::parse_str(source)
+        .unwrap_or_else(|error| panic!("placement indirect reset parse: {error}"));
+    wgpu::naga::valid::Validator::new(
+        wgpu::naga::valid::ValidationFlags::all(),
+        wgpu::naga::valid::Capabilities::empty(),
+    )
+    .validate(&module)
+    .unwrap_or_else(|error| panic!("placement indirect reset validation: {error}"));
+
+    let [entry] = module.entry_points.as_slice() else {
+        panic!("placement indirect reset must expose exactly one entry point");
+    };
+    assert_eq!(entry.name, "placement_indirect_count_reset_main");
+    assert_eq!(entry.workgroup_size, [1, 1, 1]);
+
+    let resources: Vec<_> = module.global_variables.iter().collect();
+    let [(_, indirect)] = resources.as_slice() else {
+        panic!("placement indirect reset must expose exactly one resource");
+    };
+    assert_eq!(indirect.binding.unwrap().group, 0);
+    assert_eq!(indirect.binding.unwrap().binding, 0);
+    assert_eq!(
+        indirect.space,
+        AddressSpace::Storage {
+            access: StorageAccess::LOAD | StorageAccess::STORE,
+        }
+    );
+}
+
+#[cfg(feature = "gpu")]
+#[test]
 fn world_shaders_validate_and_match_declared_binding_counts() {
     for (name, source, storage, uniform) in [
         (
