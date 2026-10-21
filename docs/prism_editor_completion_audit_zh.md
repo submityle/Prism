@@ -155,3 +155,21 @@ Escape 文档取消闭环暴露出下一项独立缺口：失败或取消的 sce
 - 原生文档测试现覆盖“取消 -> 正常终态 -> reconciliation-required -> identical retry -> durable save -> clean/解除 fence”的完整恢复链。
 
 本次格式和静态 diff 验证与上一闭环使用同一组限定命令；编译/测试仍受当前磁盘空间耗尽阻塞，不将其记录为通过。
+
+## 2026-10-21 后续实现闭环：异步 scene load 安装前 live-model fence
+
+此前 scene load 在提交时会拒绝未保存模型，底层 `SnapshotGuard` 也会在最终安装时精确核对 model revision 和完整编码快照；但 load I/O 进行期间，宿主仍可能通过 Undo/Redo 或 controller API 修改 live model。桌面层在 renderer 候选准备前只检查 draft/interaction，没有检查 controller dirty，因此 stale receipt 虽然最终不会覆盖数据，却会先执行一次无效的 renderer candidate 准备，再以文档错误晚失败。
+
+现在 `DesktopDocumentSession` 在消费 load 完成事件后、解码并准备 renderer 候选前同时检查：
+
+- 不存在活动 draft、原生交互或 panel file fence；
+- live controller 没有 load 提交后产生的未保存模型修改。
+
+任一条件不满足都会 fail closed，保留当前 UI/model，不进入 renderer candidate 准备；底层完整 `SnapshotGuard` 继续作为最终权威，覆盖 revision 相同但编码快照不同等仅靠 dirty 标志无法表达的情况。新增单元测试以真实反射模型编辑制造 dirty controller，并验证安装前检查拒绝该状态。
+
+本次验证：
+
+- `rustfmt --edition 2024 pkg/prism_editor_app/src/desktop_document.rs`：通过。
+- `git diff --check -- pkg/prism_editor_app/src/desktop_document.rs docs/prism_editor_completion_audit_zh.md`：通过。
+- `cargo fmt --manifest-path pkg/prism_editor_app/Cargo.toml -- --check`：通过。
+- `cargo test --manifest-path pkg/prism_editor_app/Cargo.toml --features desktop --lib desktop_document::tests::load_install_ -- --nocapture`：未完成；共享 target 的依赖重建将可用空间从约 7.2 GiB 消耗至约 2.2 GiB，并在写入 `prism_ui_render_backend`、`wgpu-core`、`prism_render_driver_wgpu` 等依赖产物时因 `No space left on device` 中止，尚未编译到 `prism_editor_app`。该结果不计为测试通过，也不是本次 Editor 源码的编译错误证据。

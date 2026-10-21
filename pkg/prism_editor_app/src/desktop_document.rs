@@ -180,6 +180,11 @@ fn ensure_load_install_idle(ui: &EditorDesktopUi) -> Result<(), DesktopError> {
             "document load cannot replace an active editor draft or interaction".into(),
         ));
     }
+    if ui.controller().is_dirty() {
+        return Err(DesktopError::Document(
+            "document load cannot replace editor changes made after submission".into(),
+        ));
+    }
     Ok(())
 }
 
@@ -202,7 +207,15 @@ fn document_error(error: DocumentError) -> DesktopError {
 mod tests {
     use super::*;
     use crate::{DesktopGpu, DesktopViewportBounds, DesktopWork};
-    use prism_editor_ui::SelectionMode;
+    use prism_editor_core::SelectionItem;
+    use prism_editor_reflect::FieldPath;
+    use prism_editor_ui::{ActionValue, EditorAction, SelectionMode};
+    use prism_reflect::{Reflect, TypeRegistry};
+
+    #[derive(Clone, Debug, PartialEq, Reflect)]
+    struct Model {
+        count: u8,
+    }
 
     #[derive(Default)]
     struct RejectingRenderer {
@@ -284,6 +297,33 @@ mod tests {
             ensure_load_install_idle(&ui),
             Err(DesktopError::Document(
                 "document load cannot replace an active editor draft or interaction".into()
+            ))
+        );
+    }
+
+    #[test]
+    fn load_install_rejects_model_changes_made_after_submission() {
+        let mut controller = crate::EditorController::new();
+        let item = SelectionItem::entity(1);
+        let mut registry = TypeRegistry::new();
+        registry.register::<Model>();
+        controller
+            .register_object(item.clone(), Box::new(Model { count: 1 }), registry)
+            .expect("register model");
+        controller.select(item).expect("select model");
+        controller
+            .execute(EditorAction::EditInspectorField {
+                path: FieldPath::parse("count").expect("field path"),
+                value: ActionValue::integer(2),
+            })
+            .expect("edit model");
+        let ui = EditorDesktopUi::new(controller).expect("dirty UI");
+
+        assert!(ui.controller().is_dirty());
+        assert_eq!(
+            ensure_load_install_idle(&ui),
+            Err(DesktopError::Document(
+                "document load cannot replace editor changes made after submission".into()
             ))
         );
     }
