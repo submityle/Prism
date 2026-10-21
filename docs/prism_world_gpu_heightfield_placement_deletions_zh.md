@@ -485,3 +485,25 @@ CARGO_TARGET_DIR=/Users/wangkailong/Documents/GitHub/Prism/target CARGO_PROFILE_
 验证结束后定向 `cargo clean -p prism_world_gpu` 删除该包 44 个构建文件、35.6 MiB；
 不清理共享 target 根目录或其他包。另已删除约 229 MiB 的本轮临时源码快照，未删除
 用户源文件或其他 agent 文件；上述生成物均可重建。
+
+### 最新测试提交的独立交付复验
+
+2026-10-22 对 `527b5ba22a6a2f126d296134c5076b077c2d66d4` 再次执行
+`git archive` 全部 tracked tree 导出；在导出目录运行以下命令，不设置
+`CARGO_TARGET_DIR`，不引用共享工作树源码或共享 target：
+
+```bash
+CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 cargo test -p prism_world_gpu --features placement_rhi --test placement_rhi --no-run --offline -j 1
+```
+
+命令 exit 101，仍在 workspace dependency resolution 阶段因
+`prism_render_scene` 请求不存在的 `prism_render_material/bevy` feature 失败；
+未进入 World 编译，也未生成导出目录的 target。因此最新测试提交的独立交付门槛
+仍未通过，不能把该检查称为干净构建成功。
+
+只读对比确认：共享工作树中 `pkg/prism_render_scene/Cargo.toml` 的其他 agent
+未提交改动已移除该 feature 请求，但该变更同时包含其他 renderer 重构，不能将其
+整体或其中片段作为本切片文件提交。本轮未修改该 manifest 或其他模块；需要模块
+所有者完成相应依赖修复交付，或用户明确扩展修改范围后，才能继续独立交付验收。
+约 229 MiB 的本轮临时导出源码随后清理，可从上述完整 commit 重新导出；共享 target
+和其他 agent 文件保持不动。
