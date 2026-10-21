@@ -48,7 +48,10 @@ staged from the initial controller before any native window/GPU publication.
 Startup rejection returns the still-owned UI and renderer without opening the
 event loop. Later load candidates are staged before UI publication and committed
 only after the document install succeeds; either scene preparation or document
-installation failure discards the candidate and keeps the active scene.
+installation failure discards the candidate and keeps the active scene. Scene,
+viewport, and live render-target generation fences are preflighted before the
+document adapter runs, including UI-only scenes without an adapter, so the
+post-install renderer commit remains infallible.
 
 Viewport clicks use asynchronous integer-ID readback. A native drag inside the
 viewport becomes a bounded rectangle copy and resolves all visible identities

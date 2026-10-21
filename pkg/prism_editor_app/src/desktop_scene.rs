@@ -417,6 +417,7 @@ impl DesktopScene {
             return Err(message("cancel active gizmo before loading document"));
         }
         self.pending_document = None;
+        self.preflight_document_reload()?;
         let Some(adapter) = self.document_adapter.as_mut() else {
             return Ok(());
         };
@@ -442,11 +443,35 @@ impl DesktopScene {
                 }
             }
         }
+        self.pending_document = Some(candidate);
+        Ok(())
+    }
+
+    fn preflight_document_reload(&self) -> Result<(), DesktopError> {
         self.scene
             .generation()
             .checked_add(1)
             .ok_or_else(|| message("scene generation exhausted"))?;
-        self.pending_document = Some(candidate);
+        let viewport = self
+            .viewports
+            .get(self.viewport.id())
+            .ok_or_else(|| message("missing viewport"))?;
+        if viewport.generation() != self.viewport.generation() {
+            return Err(message("desktop viewport state is out of sync"));
+        }
+        let generation = viewport
+            .generation()
+            .checked_add(1)
+            .ok_or_else(|| message("viewport generation exhausted"))?;
+        if self
+            .targets
+            .state(self.viewport.id())
+            .is_some_and(|target| generation < target.viewport_generation)
+        {
+            return Err(message(
+                "render target generation is ahead of the desktop viewport",
+            ));
+        }
         Ok(())
     }
 
@@ -1641,6 +1666,54 @@ mod tests {
         assert_eq!(scene.objects().len(), 1);
         assert_eq!(scene.objects()[0].id, object.id);
         assert!(scene.status().scene_generation > 0);
+    }
+
+    #[test]
+    fn document_prepare_preflights_reload_without_a_scene_adapter() {
+        let mut scene = DesktopScene::new(Vec::new()).expect("empty scene");
+        scene
+            .viewports
+            .close(scene.viewport.id())
+            .expect("private viewport exists");
+        let scene_generation = scene.status().scene_generation;
+        let viewport_generation = scene.viewport.generation();
+
+        let error = DesktopRenderer::prepare_document(&mut scene, &EditorController::new())
+            .expect_err("missing private viewport must reject preparation");
+
+        assert!(error.to_string().contains("missing viewport"));
+        assert_eq!(scene.status().scene_generation, scene_generation);
+        assert_eq!(scene.viewport.generation(), viewport_generation);
+        assert!(scene.pending_document.is_none());
+    }
+
+    #[test]
+    fn failed_document_reprepare_discards_the_previous_candidate() {
+        let object = objects().pop().expect("test object");
+        let mut scene = DesktopScene::new_with_document_adapter(StaticSceneAdapter {
+            document: Some(DesktopSceneDocument {
+                objects: vec![object.clone()],
+                camera: SCENE_ID_IDENTITY_MATRIX,
+                depth: SceneIdDepth::Forward,
+            }),
+        })
+        .expect("adapter scene");
+        let controller = controller(&[object]);
+
+        DesktopRenderer::prepare_document(&mut scene, &controller).expect("stage candidate");
+        assert!(scene.pending_document.is_some());
+        scene
+            .viewports
+            .close(scene.viewport.id())
+            .expect("private viewport exists");
+
+        let error = DesktopRenderer::prepare_document(&mut scene, &controller)
+            .expect_err("missing private viewport must reject reprepare");
+
+        assert!(error.to_string().contains("missing viewport"));
+        assert!(scene.pending_document.is_none());
+        DesktopRenderer::commit_document(&mut scene);
+        assert!(scene.objects().is_empty());
     }
 
     #[test]
