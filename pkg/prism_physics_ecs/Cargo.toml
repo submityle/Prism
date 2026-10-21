@@ -1,0 +1,21 @@
+[package]
+name = "prism_physics_ecs"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96.0"
+description = "Headless native Prism ECS/App fixed-step XPBD integration"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+prism_app = { path = "../prism_app", default-features = false, features = ["std"] }
+prism_ecs = { path = "../prism_ecs", default-features = false, features = ["std"] }
+prism_transform = { path = "../prism_transform", default-features = false, features = ["ecs"] }
+prism_math = { path = "../prism_math", default-features = false }
+prism_physics_core = { path = "../prism_physics_core" }
+prism_physics_geometry = { path = "../prism_physics_geometry" }
+prism_physics_gpu = { path = "../prism_physics_gpu" }
+glam = { version = "0.33.2", default-features = false, features = ["std"] }
+
+[lints]
+workspace = true
