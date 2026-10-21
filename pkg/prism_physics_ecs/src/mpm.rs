@@ -15,16 +15,70 @@ use prism_physics_core::reconstruct::{
     triangulate_bounded, FieldBudget, FieldBuildError, ScalarField, SurfaceBudget,
     SurfaceBuildError, SurfaceMesh,
 };
+use prism_physics_gpu::context::GpuContext;
+use prism_physics_gpu::mpm::gpu::surface::{
+    ResidentSurface, ResidentSurfaceConfig, ResidentSurfaceError,
+};
 use prism_physics_gpu::{
     MpmBackend, MpmBackendPolicy, MpmFallbackReason, MpmRuntime, MpmRuntimeConfig, MpmRuntimeError,
 };
 
+/// Optional native host shared with a resident-surface consumer. Adopt once,
+/// then clone this context into all producers/consumers. Changing its adoption
+/// identity (or adding/removing the resource) rebuilds runtime epochs; replacing
+/// it with a matching clone does not. Old leases remain independently valid on
+/// their old device until consumers retire them.
+#[derive(Resource, Clone)]
+pub struct MpmGpuHost(pub GpuContext);
+
+/// Opt-in GPU surface publication. The portable CPU path is unchanged unless
+/// particle readback is explicitly disabled here. CPU fallback and requested
+/// CPU surface reconstruction still publish portable particle snapshots.
+#[derive(Component, Clone, Copy, Debug, PartialEq)]
+pub struct MpmResidentSurfaceConfig {
+    /// Fixed sampling domain, kernel and publication resource ceilings.
+    pub surface: ResidentSurfaceConfig,
+    /// Whether to also publish portable particle snapshots on the GPU backend.
+    /// CPU fallback or requested CPU surface reconstruction still requires them.
+    pub readback_particles: bool,
+}
+
+impl MpmResidentSurfaceConfig {
+    /// Requests GPU-only output, without implicit particle/geometry readback.
+    #[must_use]
+    pub const fn resident_only(surface: ResidentSurfaceConfig) -> Self {
+        Self {
+            surface,
+            readback_particles: false,
+        }
+    }
+}
+
+/// Immutable native publication; retain a clone through confirmed GPU
+/// completion. This is not a portable rollback checkpoint or a completion fence.
+#[derive(Component, Clone, Debug)]
+pub struct MpmResidentSurfaceSnapshot {
+    /// Runtime incarnation; changes when the binding or native host is replaced.
+    pub epoch: u64,
+    /// Advances on successful publication, including configuration-only edits.
+    pub revision: u64,
+    /// Source simulation version, independent of CPU readback policy.
+    pub version: u64,
+    /// Bridge tick of the last accepted simulation step, not the retry tick.
+    pub tick: u64,
+    /// Native buffer lease to retain through confirmed consumer GPU completion.
+    pub surface: ResidentSurface,
+}
+
 /// Authored MPM state attached to an ECS entity.
 ///
 /// The solver is copied into the fixed-step runtime when the entity is first
-/// synchronized. Editing this component replaces the runtime at the next
-/// [`crate::PhysicsSystems::Sync`] boundary; the live particle state is exposed by
-/// [`MpmParticleSnapshot`] and is never written back into this authored value.
+/// synchronized. Editing the solver, backend or step budget replaces the runtime
+/// at the next [`crate::PhysicsSystems::Sync`] boundary; surface-only edits retain
+/// its simulation epoch. Publication observers may edit authoring in place: old
+/// outputs are retired before writeback returns, then retried at the next Sync.
+/// The live particle state is exposed by [`MpmParticleSnapshot`] and is never
+/// written back into this authored value. Edits must use ECS change detection.
 #[derive(Component, Clone, Debug)]
 pub struct MpmBinding {
     /// Initial material-point, grid, material and numerical configuration.
@@ -221,6 +275,9 @@ pub enum MpmAuthority {
 /// A bridge diagnostic tied to an ECS entity, or to the whole MPM subsystem.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MpmIssue {
+    /// Native publication rejected before submission. Data-dependent GPU
+    /// failures are instead exposed by the lease status/zero indirect draw.
+    ResidentSurface(ResidentSurfaceError),
     /// Solver columns, grid, material or numerical values are invalid.
     InvalidAuthoring,
     /// The runtime could not be created under the requested policy.
@@ -286,6 +343,12 @@ struct RuntimeEntry {
     surface_config: Option<MpmSurfaceConfig>,
     surface_pending: bool,
     surface_revision: u64,
+    host: Option<GpuContext>,
+    resident_config: Option<MpmResidentSurfaceConfig>,
+    resident_pending: bool,
+    resident_revision: u64,
+    source_version: u64,
+    source_tick: u64,
 }
 
 /// ECS-owned MPM runtimes and their latest portable snapshots.
@@ -321,7 +384,7 @@ impl MpmRuntimeResource {
             authority: authority(entry.runtime.backend()),
             fallback: entry.runtime.fallback_reason(),
             fixed_tick: entry.runtime.fixed_tick(),
-            snapshot_version: entry.latest.as_ref().map_or(0, |s| s.version),
+            snapshot_version: entry.source_version,
             particle_count: entry.runtime.cpu_solver().particles.len(),
         })
     }
@@ -355,7 +418,7 @@ pub struct MpmRuntimeInfo {
     pub fallback: Option<MpmFallbackReason>,
     /// Number of fixed steps executed by this runtime.
     pub fixed_tick: u64,
-    /// Latest published snapshot version, or zero before publication.
+    /// Latest accepted source version (also advances without CPU readback).
     pub snapshot_version: u64,
     /// Number of particles in the runtime.
     pub particle_count: usize,
@@ -424,7 +487,7 @@ fn issue(diagnostics: &mut MpmDiagnostics, entity: Option<Entity>, issue: MpmIss
 }
 
 #[derive(Resource, Default)]
-struct RemovedAuthoring(BTreeSet<Entity>);
+struct RemovedAuthoring(BTreeSet<Entity>, BTreeSet<Entity>);
 
 pub(crate) fn init(world: &mut World) {
     if !world.contains_resource::<RemovedAuthoring>() {
@@ -435,10 +498,19 @@ pub(crate) fn init(world: &mut World) {
                 .0
                 .insert(ctx.entity);
         });
+        world.observe::<MpmResidentSurfaceConfig, _>(LifecycleEvent::Remove, |ctx| {
+            ctx.world
+                .resource_mut::<RemovedAuthoring>()
+                .1
+                .insert(ctx.entity);
+        });
     }
 }
 
 pub(crate) fn sync(world: &mut World) {
+    let host = world
+        .get_resource::<MpmGpuHost>()
+        .map(|host| host.0.clone());
     let mut runtimes = world.remove_resource::<MpmRuntimeResource>().unwrap();
     let mut diagnostics = world.remove_resource::<MpmDiagnostics>().unwrap();
     diagnostics.simulated_dt = 0.0;
@@ -453,13 +525,16 @@ pub(crate) fn sync(world: &mut World) {
         for entity in entities {
             world.remove::<MpmParticleSnapshot>(entity);
             world.remove::<MpmSurfaceSnapshot>(entity);
+            world.remove::<MpmResidentSurfaceSnapshot>(entity);
         }
         return;
     };
     diagnostics.tick = tick;
     let removed = std::mem::take(&mut world.resource_mut::<RemovedAuthoring>().0);
+    let removed_resident = std::mem::take(&mut world.resource_mut::<RemovedAuthoring>().1);
     let mut clear_particles = BTreeSet::new();
     let mut clear_surfaces = BTreeSet::new();
+    let mut clear_resident = BTreeSet::new();
 
     let live: BTreeMap<_, _> = world
         .query::<(Entity, Ref<MpmBinding>)>()
@@ -477,9 +552,14 @@ pub(crate) fn sync(world: &mut World) {
         runtimes.remove(entity);
         clear_particles.insert(entity);
         clear_surfaces.insert(entity);
+        clear_resident.insert(entity);
     }
 
     for (entity, (authored_tick, surface)) in live {
+        let resident_config = world.get::<MpmResidentSurfaceConfig>(entity).copied();
+        if resident_config.is_none() {
+            clear_resident.insert(entity);
+        }
         // Configuration cleanup is independent of successful simulation work.
         // A rejected step must never keep a disabled or incompatible surface.
         if surface.is_none_or(|config| !config.valid()) {
@@ -493,13 +573,30 @@ pub(crate) fn sync(world: &mut World) {
             );
         }
         if let Some(entry) = runtimes.entries.get_mut(&entity) {
-            if entry.surface_config != surface {
+            if !same_resident_config(entry.resident_config, resident_config)
+                || removed_resident.contains(&entity)
+            {
+                clear_resident.insert(entity);
+                entry.resident_config = resident_config;
+                entry.resident_pending = true;
+                // Readback can be re-enabled without advancing simulation.
+                entry.surface_pending = true;
+            }
+            if entry.runtime.backend() == MpmBackend::Gpu
+                && resident_config.is_some_and(|config| !config.readback_particles)
+                && surface.is_none()
+            {
+                entry.latest = None;
+                clear_particles.insert(entity);
+            }
+            if !same_surface_config(entry.surface_config, surface) {
                 clear_surfaces.insert(entity);
                 entry.surface_config = surface;
                 entry.surface_pending = true;
             }
             entry.authored_tick.check_tick(world.change_tick());
-            if entry.authored_tick == authored_tick {
+            if entry.authored_tick == authored_tick && same_host(entry.host.as_ref(), host.as_ref())
+            {
                 if let Some(reason) = entry.runtime.fallback_reason() {
                     issue(
                         &mut diagnostics,
@@ -517,6 +614,7 @@ pub(crate) fn sync(world: &mut World) {
             runtimes.remove(entity);
             clear_particles.insert(entity);
             clear_surfaces.insert(entity);
+            clear_resident.insert(entity);
             issue(&mut diagnostics, Some(entity), MpmIssue::InvalidAuthoring);
             continue;
         }
@@ -525,6 +623,7 @@ pub(crate) fn sync(world: &mut World) {
             !same_solver(&entry.authored, &binding.solver)
                 || entry.authored_backend != binding.backend
                 || entry.authored_step_budget != binding.max_steps_per_advance
+                || !same_host(entry.host.as_ref(), host.as_ref())
         });
         if !rebuild {
             if let Some(entry) = runtimes.entries.get_mut(&entity) {
@@ -548,12 +647,19 @@ pub(crate) fn sync(world: &mut World) {
         // stepping its replacement fails.
         clear_particles.insert(entity);
         clear_surfaces.insert(entity);
+        clear_resident.insert(entity);
         let Some(epoch) = runtimes.last_epoch.checked_add(1) else {
             runtimes.remove(entity);
             issue(&mut diagnostics, Some(entity), MpmIssue::SequenceExhausted);
             continue;
         };
-        match MpmRuntime::new(binding.solver.clone(), config) {
+        let runtime = match host.as_ref() {
+            Some(host) => {
+                MpmRuntime::with_gpu_context(binding.solver.clone(), config, host.clone())
+            }
+            None => MpmRuntime::new(binding.solver.clone(), config),
+        };
+        match runtime {
             Ok(runtime) => {
                 runtimes.last_epoch = epoch;
                 if let Some(reason) = runtime.fallback_reason() {
@@ -577,6 +683,12 @@ pub(crate) fn sync(world: &mut World) {
                         surface_config: binding.surface,
                         surface_pending: true,
                         surface_revision: 0,
+                        host: host.clone(),
+                        resident_config,
+                        resident_pending: false,
+                        resident_revision: 0,
+                        source_version: 0,
+                        source_tick: 0,
                     },
                 );
             }
@@ -597,6 +709,131 @@ pub(crate) fn sync(world: &mut World) {
     for entity in clear_surfaces {
         world.remove::<MpmSurfaceSnapshot>(entity);
     }
+    for entity in clear_resident {
+        world.remove::<MpmResidentSurfaceSnapshot>(entity);
+    }
+}
+
+fn same_host(a: Option<&GpuContext>, b: Option<&GpuContext>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => a.shares_device(b),
+        _ => false,
+    }
+}
+
+// Configuration identity must be reflexive even for invalid authored NaNs.
+// Such a config rejects that surface, not otherwise valid portable outputs.
+fn same_surface_config(a: Option<MpmSurfaceConfig>, b: Option<MpmSurfaceConfig>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => {
+            a.radius.to_bits() == b.radius.to_bits()
+                && a.dx.to_bits() == b.dx.to_bits()
+                && a.iso.to_bits() == b.iso.to_bits()
+                && a.padding_cells == b.padding_cells
+                && a.max_field_nodes == b.max_field_nodes
+                && a.max_cells == b.max_cells
+                && a.max_sample_visits == b.max_sample_visits
+                && a.max_surface_vertices == b.max_surface_vertices
+                && a.max_surface_triangles == b.max_surface_triangles
+        }
+        _ => false,
+    }
+}
+
+fn same_resident_config(
+    a: Option<MpmResidentSurfaceConfig>,
+    b: Option<MpmResidentSurfaceConfig>,
+) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => {
+            a.readback_particles == b.readback_particles
+                && a.surface.origin.to_array().map(f32::to_bits)
+                    == b.surface.origin.to_array().map(f32::to_bits)
+                && a.surface.nodes == b.surface.nodes
+                && a.surface.dx.to_bits() == b.surface.dx.to_bits()
+                && a.surface.radius.to_bits() == b.surface.radius.to_bits()
+                && a.surface.iso.to_bits() == b.surface.iso.to_bits()
+                && a.surface.max_field_nodes == b.surface.max_field_nodes
+                && a.surface.max_cells == b.surface.max_cells
+                && a.surface.max_sample_visits == b.surface.max_sample_visits
+                && a.surface.max_vertices == b.surface.max_vertices
+                && a.surface.max_live_publications == b.surface.max_live_publications
+        }
+        _ => false,
+    }
+}
+
+fn runtime_authoring_matches(world: &World, entity: Entity, epoch: u64) -> bool {
+    if world.resource::<RemovedAuthoring>().0.contains(&entity) {
+        return false;
+    }
+    let Some(binding) = world.get_ref::<MpmBinding>(entity) else {
+        return false;
+    };
+    let Some(entry) = world.resource::<MpmRuntimeResource>().entries.get(&entity) else {
+        return false;
+    };
+    let mut authored_tick = entry.authored_tick;
+    authored_tick.check_tick(world.change_tick());
+    entry.epoch == epoch
+        && entry.authored_backend == binding.backend
+        && entry.authored_step_budget == binding.max_steps_per_advance
+        && same_host(
+            entry.host.as_ref(),
+            world.get_resource::<MpmGpuHost>().map(|host| &host.0),
+        )
+        // Multiple observer writes can share a tick. In that case compare
+        // values, not just ticks; ordinary unchanged frames avoid scanning the
+        // potentially large authored solver. Bypassing change detection is not
+        // supported by this authoring contract.
+        && ((authored_tick == binding.changed_tick()
+            && binding.changed_tick() != world.change_tick())
+            || same_solver(&entry.authored, &binding.solver))
+}
+
+fn publication_authoring_matches(world: &World, entity: Entity, epoch: u64) -> bool {
+    if !runtime_authoring_matches(world, entity, epoch) {
+        return false;
+    }
+    let entry = &world.resource::<MpmRuntimeResource>().entries[&entity];
+    !world.resource::<RemovedAuthoring>().1.contains(&entity)
+        && same_surface_config(
+            world.get::<MpmBinding>(entity).unwrap().surface,
+            entry.surface_config,
+        )
+        && same_resident_config(
+            world.get::<MpmResidentSurfaceConfig>(entity).copied(),
+            entry.resident_config,
+        )
+}
+
+// Reconcile before invoking removal observers, so they cannot obtain a stale
+// portable snapshot through MpmRuntimeResource either. Configuration-only edits
+// keep the simulation epoch, but retry all outputs against the next Sync's
+// accepted configuration, even when no further simulation step is accepted.
+fn discard_stale_publications(world: &mut World, entity: Entity, epoch: u64) -> bool {
+    let runtime_matches = runtime_authoring_matches(world, entity, epoch);
+    let mut changed = false;
+    {
+        let runtimes = world.resource_mut::<MpmRuntimeResource>();
+        if runtime_matches {
+            if let Some(entry) = runtimes.entries.get_mut(&entity) {
+                entry.latest = None;
+                entry.surface_pending = true;
+                entry.resident_pending = true;
+            }
+        } else {
+            changed = runtimes.entries.remove(&entity).is_some();
+        }
+    }
+    // Consumer-held native leases remain valid; only ECS's ownership is retired.
+    changed |= world.remove::<MpmParticleSnapshot>(entity);
+    changed |= world.remove::<MpmSurfaceSnapshot>(entity);
+    changed |= world.remove::<MpmResidentSurfaceSnapshot>(entity);
+    changed
 }
 
 pub(crate) fn step(world: &mut World) {
@@ -646,40 +883,97 @@ pub(crate) fn writeback(world: &mut World) {
     let mut outputs = Vec::new();
     let mut particles = Vec::new();
     let mut surfaces = BTreeMap::new();
-    let mut entities: Vec<_> = runtimes.entries.keys().copied().collect();
+    let mut resident_surfaces = BTreeMap::new();
+    let mut entities: Vec<_> = runtimes
+        .entries
+        .iter()
+        .map(|(&entity, entry)| (entity, entry.epoch))
+        .collect();
     entities.sort();
-    for entity in entities {
+    for &(entity, _) in &entities {
         let entry = runtimes
             .entries
             .get_mut(&entity)
             .expect("sorted runtime entity must remain present");
         if std::mem::take(&mut entry.publish_pending) {
-            let Some(version) = entry
-                .latest
-                .as_ref()
-                .map_or(Some(1), |snapshot| snapshot.version.checked_add(1))
-            else {
+            let Some(version) = entry.source_version.checked_add(1) else {
                 issue(&mut diagnostics, Some(entity), MpmIssue::SequenceExhausted);
                 continue;
             };
-            let snapshot = match entry.runtime.snapshot() {
-                Ok(particles) => {
-                    MpmParticleSnapshot::from_step(entry.epoch, version, tick, particles)
-                }
-                Err(error) => {
-                    issue(&mut diagnostics, Some(entity), MpmIssue::Snapshot(error));
-                    continue;
-                }
-            };
-            if !snapshot.valid() {
-                issue(&mut diagnostics, Some(entity), MpmIssue::InvalidSnapshot);
-                continue;
-            }
-            // Each column is shared between runtime inspection, ECS and render
-            // extraction; cloning a snapshot never duplicates its large arrays.
-            entry.latest = Some(snapshot.clone());
-            particles.push((entity, snapshot));
+            entry.source_version = version;
+            entry.source_tick = tick;
             entry.surface_pending = true;
+            entry.resident_pending = true;
+        }
+        let readback = entry.runtime.backend() == MpmBackend::Cpu
+            || entry.surface_config.is_some()
+            || entry
+                .resident_config
+                .is_none_or(|config| config.readback_particles);
+        if readback
+            && entry.source_version > 0
+            && entry
+                .latest
+                .as_ref()
+                .is_none_or(|s| s.version != entry.source_version)
+        {
+            match entry.runtime.snapshot() {
+                Ok(data) => {
+                    let snapshot = MpmParticleSnapshot::from_step(
+                        entry.epoch,
+                        entry.source_version,
+                        entry.source_tick,
+                        data,
+                    );
+                    if snapshot.valid() {
+                        entry.latest = Some(snapshot.clone());
+                        particles.push((entity, snapshot));
+                        entry.surface_pending = true;
+                    } else {
+                        issue(&mut diagnostics, Some(entity), MpmIssue::InvalidSnapshot);
+                    }
+                }
+                Err(error) => issue(&mut diagnostics, Some(entity), MpmIssue::Snapshot(error)),
+            }
+        }
+        if entry.source_version > 0 && std::mem::take(&mut entry.resident_pending) {
+            if let Some(config) = entry.resident_config {
+                match entry.resident_revision.checked_add(1) {
+                    None => {
+                        resident_surfaces.insert(entity, None);
+                        issue(&mut diagnostics, Some(entity), MpmIssue::SequenceExhausted);
+                    }
+                    Some(revision) => match entry.runtime.publish_surface(config.surface) {
+                        Ok(surface) => {
+                            entry.resident_revision = revision;
+                            resident_surfaces.insert(
+                                entity,
+                                Some(MpmResidentSurfaceSnapshot {
+                                    epoch: entry.epoch,
+                                    revision,
+                                    version: entry.source_version,
+                                    tick: entry.source_tick,
+                                    surface,
+                                }),
+                            );
+                        }
+                        Err(error) => {
+                            resident_surfaces.insert(entity, None);
+                            // Drop ECS's stale lease at commit. A held consumer
+                            // lease may delay publication; retry even if the
+                            // next simulation step is rejected by its clock.
+                            entry.resident_pending = error == ResidentSurfaceError::InFlightLimit;
+                            issue(
+                                &mut diagnostics,
+                                Some(entity),
+                                MpmIssue::ResidentSurface(error),
+                            );
+                        }
+                    },
+                }
+            } else {
+                resident_surfaces.insert(entity, None);
+            }
         }
         if std::mem::take(&mut entry.surface_pending) {
             if let Some(snapshot) = entry.latest.as_ref() {
@@ -764,18 +1058,57 @@ pub(crate) fn writeback(world: &mut World) {
     // Publication is a separate commit phase: insertion/removal can invoke
     // user observers, which must be able to inspect the committed resources.
     for (entity, snapshot) in particles {
-        if world.get::<MpmBinding>(entity).is_some() {
+        let epoch = snapshot.epoch;
+        if publication_authoring_matches(world, entity, epoch) {
             world.insert(entity, (snapshot,));
+        }
+        if !publication_authoring_matches(world, entity, epoch) {
+            discard_stale_publications(world, entity, epoch);
         }
     }
     for (entity, surface) in surfaces {
-        if world.get::<MpmBinding>(entity).is_some() {
-            if let Some(surface) = surface {
+        if let Some(surface) = surface {
+            let epoch = surface.epoch;
+            if publication_authoring_matches(world, entity, epoch) {
                 world.insert(entity, (surface,));
-                continue;
+            }
+            if !publication_authoring_matches(world, entity, epoch) {
+                discard_stale_publications(world, entity, epoch);
+            }
+        } else {
+            world.remove::<MpmSurfaceSnapshot>(entity);
+        }
+    }
+    for (entity, surface) in resident_surfaces {
+        if let Some(surface) = surface {
+            // Earlier portable output insertions can invoke user observers.
+            // Never commit a native lease for authoring they just removed or
+            // replaced, even when removal/reinsert keeps the same value.
+            let epoch = surface.epoch;
+            if publication_authoring_matches(world, entity, epoch) {
+                world.insert(entity, (surface,));
+                // Its own insertion observers can also replace authoring.
+                if publication_authoring_matches(world, entity, epoch) {
+                    continue;
+                }
+            }
+            discard_stale_publications(world, entity, epoch);
+        }
+        world.remove::<MpmResidentSurfaceSnapshot>(entity);
+    }
+    // A later entity's observer (including a removal observer) can edit one
+    // already committed above. Sweep to quiescence: each additional pass must
+    // retire an entry or an output, rather than merely setting retry flags.
+    loop {
+        let mut changed = false;
+        for &(entity, epoch) in &entities {
+            if !publication_authoring_matches(world, entity, epoch) {
+                changed |= discard_stale_publications(world, entity, epoch);
             }
         }
-        world.remove::<MpmSurfaceSnapshot>(entity);
+        if !changed {
+            break;
+        }
     }
 }
 

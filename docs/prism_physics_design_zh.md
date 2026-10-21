@@ -436,6 +436,8 @@ MPM 已通过 `MpmBinding -> MpmRuntime -> MpmParticleSnapshot` 接入同一固�
 
 GPU 生产端另已提供 `MpmRuntime::with_gpu_context` 与 `publish_surface`：从宿主收养同一组 wgpu handles，以共享 adoption identity 校验设备/队列来源；直接从驻留粒子生成固定域 scalar field，经 Freudenthal 六面体分解、GPU exclusive scan 与 triangle-list emission 发布不可变 `ResidentSurface` lease。32-byte vertex、16-byte draw-indirect、4-byte status ABI 明确；发布不映射粒子、几何、数量或状态，不等待 CPU。非法粒子/输出溢出抑制整次 indirect draw，预算和设备上限在提交前校验，存活 lease 数受限；消费者必须持有 lease 至 GPU 完成。上传替换不重置发布序号或覆写旧 lease。当前采样遍历全部 node/particle 对，复杂度 O(nodes × particles)，工作预算只限制成本、不代表大规模性能达标。7 项定向测试（其中 4 项真实 GPU）通过，不等于 ECS/渲染消费、动态域、全部求解器或端到端零拷贝已验收。
 
+ECS 已接入 `MpmGpuHost`、`MpmResidentSurfaceConfig` 与 `MpmResidentSurfaceSnapshot`。GPU backend 的 `resident_only` 路径在未要求 CPU 表面时不生成粒子 CPU snapshot；CPU fallback、显式 readback 或 CPU 表面需求仍发布 portable 输出。模拟来源 `(epoch, version, tick)` 与表面 `revision` 分开计数，配置修改或 lease 容量恢复可重试同一来源，不虚增模拟步。host 身份、backend、步预算或初始 solver 修改会退休旧 epoch；表面配置修改保留运行态。发布前后检查 authoring，覆盖 insertion observer 原地修改及后发布实体修改先发布实体的情况，不遗留不同 epoch/config 的 native、portable 或 runtime 缓存输出。旧 consumer lease 不因 ECS 移除而失效，非法含 NaN 的表面配置也不误删有效粒子来源。15 项定向回归（其中 11 项真实 GPU）通过；该生命周期接线不等于渲染提交/完成 fence、真实画面或规模性能已验收。
+
 可选 `prism_render_app` 的 `physics` feature 已提供 `PhysicsSurfacePlugin`：`MpmSurfaceSnapshot.mesh: Arc<SurfaceMesh>` 经原生 `Mesh` / `Assets<Mesh>`、render-asset extraction 与 `RenderMesh` preparation 更新 vertex/index GPU buffer，再由 `SceneRegistry` geometry、可见性 instance、网格/材质绑定进入 native draw queue。新增发布会把 CPU 几何复制进原生 Mesh；未变化帧只克隆 snapshot 的 Arc，**不是 GPU resident 零拷贝**。物理代理走普通的按视图可见性提取；render app 会为每个 `(camera, output, viewport)` 使用局部 target，并在统一帧图中稳定合成到输出。零视图不会虚构绘制工作；某个输出容不下相机视口时只拒绝该相机/输出组合，不合并摄像机，也不清除其他生产者的工作。禁用、移除、空/非法网格的资源卸载、失败重试与原生 geometry revision 生命周期已有处理；本轮多视图图准入/异常路径与物理 surface 生命周期分别有定向回归，但尚无 MPM 双摄像机真机画面集成测试，更不代表物理 GPU parity 或真机画面/性能验收。GPU resident 零拷贝、场景 Demo、广泛真机 GPU 覆盖与匹配硬件性能证据仍未完成。
 
 ---
@@ -1373,5 +1375,6 @@ GPU compact/reorder、生产 CCD/BVH consumer 或 CPU/GPU parity 已完成。
 | `prism_physics_ecs --lib --tests`，`PRISM_REQUIRE_GPU=1` | 16 单元 + 108 集成通过 | 固定步生命周期、接管回滚/退休、多碰撞体所有权及编辑/移除/重试、装配、布偶、MPM 与 6 项真实 GPU field runtime 测试 |
 | `prism_physics_gpu --lib field::`，`PRISM_REQUIRE_GPU=1` | 24 通过 | GPU 场采样、批次/预算/设备身份、workspace 复用、初始化及提交/读回错误作用域和失败后恢复；不是全包 GPU parity 验收 |
 | `prism_physics_gpu --test mpm_surface_publication`，`PRISM_REQUIRE_GPU=1` | 7 通过，0 ignored | 4 项真实 GPU 发布测试及 3 项 CPU/ABI/preflight 测试；覆盖 CPU 几何对拍、拓扑绕序、lease 容量/不可变性、空/非法/溢出、设备身份及坐标精度。不是 ECS/渲染链路、规模性能或全包 parity 验收 |
+| `prism_physics_ecs --test mpm_resident_surface`，`PRISM_REQUIRE_GPU=1` | 15 通过，0 ignored | 11 项真实 GPU 及 4 项 CPU 生命周期回归；覆盖 resident-only/readback、同来源重试、host/authoring epoch、旧 lease、observer 原地/跨实体修改、portable/native 来源一致性及 NaN 配置隔离。不证明 renderer 完成 fence、真机画面、规模性能或 ECS 全量回归 |
 
 上述测试不证明完整 workspace、全求解器 GPU parity、真机画面或目标性能通过。匹配硬件 P50/P95/P99、广泛 GPU 覆盖与完整场景仍须分别验收。接管的非零 COM / 完整惯量已实现；剩余拒绝策略以 §27.2 为准，不再笼统列为“不支持任意质量属性”。

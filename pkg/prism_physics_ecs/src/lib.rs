@@ -35,8 +35,9 @@ pub use m15_bridge::{
     M15TopologyBridgePlugin, M15TopologyDiagnostics,
 };
 pub use mpm::{
-    MpmAuthority, MpmBinding, MpmDiagnostic, MpmDiagnostics, MpmIssue, MpmParticleSnapshot,
-    MpmRuntimeInfo, MpmRuntimeResource, MpmSurfaceConfig, MpmSurfaceSnapshot,
+    MpmAuthority, MpmBinding, MpmDiagnostic, MpmDiagnostics, MpmGpuHost, MpmIssue,
+    MpmParticleSnapshot, MpmResidentSurfaceConfig, MpmResidentSurfaceSnapshot, MpmRuntimeInfo,
+    MpmRuntimeResource, MpmSurfaceConfig, MpmSurfaceSnapshot,
 };
 pub use ragdoll::{
     EcsRagdoll, EcsRagdollBindings, EcsRagdollDiagnostic, EcsRagdollDiagnostics,
