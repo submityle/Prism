@@ -9,7 +9,11 @@ across a desktop host, headless automation, and remote adapters.
 - `DocumentState` manages ordered base, override, and runtime layers together
   with active-layer selection, revision tracking, and dirty state.
 - `Command`, `Transaction`, and `CommandStack` provide reversible edits,
-  failure rollback, merge hooks, and deterministic undo/redo history.
+  failure rollback, merge hooks, and deterministic undo/redo history. A failed
+  transaction reports every rollback failure and blocks stale history until
+  the host reconciles context and calls `reset_after_reconciliation`; command
+  implementations use `CommandError::context_uncertain` whenever an error may
+  follow a partial mutation.
 - `Selection` stores ordered, duplicate-free entity, asset, and sub-object
   identities with an explicit primary item.
 - `ServiceRegistry` stores type-keyed `Send + Sync` services, while

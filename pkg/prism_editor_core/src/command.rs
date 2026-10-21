@@ -1,4 +1,4 @@
-use alloc::{string::String, vec::Vec};
+use alloc::{format, string::String, vec::Vec};
 use core::fmt;
 
 /// Sorted, duplicate-free domain names affected by an editor command.
@@ -45,15 +45,35 @@ pub trait EditContext {}
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CommandError {
     message: String,
+    reconciliation_required: bool,
 }
 
 impl CommandError {
-    /// Creates an error with the supplied message.
+    /// Creates an error for an operation that left the edit context unchanged.
+    ///
+    /// Command implementations must use [`Self::context_uncertain`] instead
+    /// when an error can be returned after partially mutating the context.
     #[must_use]
     pub fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
+            reconciliation_required: false,
         }
+    }
+
+    /// Creates an error for a failure that may have partially mutated context.
+    #[must_use]
+    pub fn context_uncertain(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            reconciliation_required: true,
+        }
+    }
+
+    /// Returns whether the owning history must be reconciled before reuse.
+    #[must_use]
+    pub fn reconciliation_required(&self) -> bool {
+        self.reconciliation_required
     }
 }
 
@@ -124,8 +144,22 @@ impl<C: EditContext> Command<C> for TransactionCommand<C> {
         let mut applied = 0;
         while applied < self.commands.len() {
             if let Err(error) = self.commands[applied].apply(context) {
+                let failed_label = String::from(self.commands[applied].label());
+                let mut rollback_failures = Vec::new();
                 for command in self.commands[..applied].iter_mut().rev() {
-                    let _ = command.undo(context);
+                    if let Err(rollback_error) = command.undo(context) {
+                        rollback_failures.push((String::from(command.label()), rollback_error));
+                    }
+                }
+                if !rollback_failures.is_empty() {
+                    let mut message = format!(
+                        "transaction `{}` failed while applying `{failed_label}`: {error}; rollback failed",
+                        self.label
+                    );
+                    for (label, rollback_error) in rollback_failures {
+                        message.push_str(&format!("; `{label}`: {rollback_error}"));
+                    }
+                    return Err(CommandError::context_uncertain(message));
                 }
                 return Err(error);
             }
@@ -190,6 +224,7 @@ impl<C: EditContext + 'static> Transaction<C> {
 pub struct CommandStack<C: EditContext + 'static> {
     undo: Vec<Box<dyn Command<C>>>,
     redo: Vec<Box<dyn Command<C>>>,
+    reconciliation_error: Option<CommandError>,
 }
 
 impl<C: EditContext + 'static> Default for CommandStack<C> {
@@ -197,18 +232,38 @@ impl<C: EditContext + 'static> Default for CommandStack<C> {
         Self {
             undo: Vec::new(),
             redo: Vec::new(),
+            reconciliation_error: None,
         }
     }
 }
 
 impl<C: EditContext + 'static> CommandStack<C> {
+    fn ready(&self) -> Result<(), CommandError> {
+        match &self.reconciliation_error {
+            Some(error) => Err(CommandError::context_uncertain(format!(
+                "command history requires context reconciliation after: {error}"
+            ))),
+            None => Ok(()),
+        }
+    }
+
+    fn record_failure(&mut self, error: CommandError) -> CommandError {
+        if error.reconciliation_required() {
+            self.reconciliation_error = Some(error.clone());
+        }
+        error
+    }
+
     /// Applies a command and records it, merging with the previous entry when supported.
     pub fn execute(
         &mut self,
         mut command: Box<dyn Command<C>>,
         context: &mut C,
     ) -> Result<CommandStatus, CommandError> {
-        command.apply(context)?;
+        self.ready()?;
+        if let Err(error) = command.apply(context) {
+            return Err(self.record_failure(error));
+        }
         let status = if let Some(previous) = self.undo.last_mut() {
             match previous.merge_from(&*command) {
                 MergeResult::Merged => CommandStatus::Merged,
@@ -239,12 +294,13 @@ impl<C: EditContext + 'static> CommandStack<C> {
 
     /// Undoes the most recent history entry, returning whether one existed.
     pub fn undo(&mut self, context: &mut C) -> Result<bool, CommandError> {
+        self.ready()?;
         let Some(mut command) = self.undo.pop() else {
             return Ok(false);
         };
         if let Err(error) = command.undo(context) {
             self.undo.push(command);
-            return Err(error);
+            return Err(self.record_failure(error));
         }
         self.redo.push(command);
         Ok(true)
@@ -252,12 +308,13 @@ impl<C: EditContext + 'static> CommandStack<C> {
 
     /// Reapplies the most recently undone history entry, returning whether one existed.
     pub fn redo(&mut self, context: &mut C) -> Result<bool, CommandError> {
+        self.ready()?;
         let Some(mut command) = self.redo.pop() else {
             return Ok(false);
         };
         if let Err(error) = command.apply(context) {
             self.redo.push(command);
-            return Err(error);
+            return Err(self.record_failure(error));
         }
         self.undo.push(command);
         Ok(true)
@@ -266,13 +323,37 @@ impl<C: EditContext + 'static> CommandStack<C> {
     /// Returns the number of entries currently available to undo.
     #[must_use]
     pub fn undo_len(&self) -> usize {
-        self.undo.len()
+        if self.reconciliation_error.is_some() {
+            0
+        } else {
+            self.undo.len()
+        }
     }
 
     /// Returns the number of entries currently available to redo.
     #[must_use]
     pub fn redo_len(&self) -> usize {
-        self.redo.len()
+        if self.reconciliation_error.is_some() {
+            0
+        } else {
+            self.redo.len()
+        }
+    }
+
+    /// Returns whether context reconciliation is required before history reuse.
+    #[must_use]
+    pub fn reconciliation_required(&self) -> bool {
+        self.reconciliation_error.is_some()
+    }
+
+    /// Clears stale history after the caller has reconciled the edit context.
+    ///
+    /// This method does not repair `context`; the caller must reload or
+    /// otherwise establish a known-good state before resetting the history.
+    pub fn reset_after_reconciliation(&mut self) {
+        self.undo.clear();
+        self.redo.clear();
+        self.reconciliation_error = None;
     }
 }
 
@@ -335,5 +416,121 @@ mod tests {
         assert_eq!(context.value, 0);
         stack.redo(&mut context).expect("redo");
         assert_eq!(context.value, 5);
+    }
+
+    struct FailingCommand {
+        label: &'static str,
+        apply_delta: i32,
+        fail_apply: bool,
+        fail_undo_after_delta: Option<i32>,
+        affect: AffectSet,
+    }
+
+    impl FailingCommand {
+        fn new(label: &'static str, apply_delta: i32) -> Self {
+            Self {
+                label,
+                apply_delta,
+                fail_apply: false,
+                fail_undo_after_delta: None,
+                affect: AffectSet::new(),
+            }
+        }
+    }
+
+    impl Command<Context> for FailingCommand {
+        fn apply(&mut self, context: &mut Context) -> Result<(), CommandError> {
+            if self.fail_apply {
+                return Err(CommandError::new(format!("{} apply failed", self.label)));
+            }
+            context.value += self.apply_delta;
+            Ok(())
+        }
+
+        fn undo(&mut self, context: &mut Context) -> Result<(), CommandError> {
+            if let Some(delta) = self.fail_undo_after_delta {
+                context.value += delta;
+                return Err(CommandError::context_uncertain(format!(
+                    "{} undo failed",
+                    self.label
+                )));
+            }
+            context.value -= self.apply_delta;
+            Ok(())
+        }
+
+        fn label(&self) -> &str {
+            self.label
+        }
+
+        fn affected(&self) -> &AffectSet {
+            &self.affect
+        }
+
+        fn merge_from(&mut self, _next: &dyn Command<Context>) -> MergeResult {
+            MergeResult::NotMergeable
+        }
+    }
+
+    #[test]
+    fn transaction_apply_failure_with_successful_rollback_keeps_history_usable() {
+        let mut stack = CommandStack::default();
+        let mut context = Context::default();
+        let mut transaction = Transaction::new("rollback");
+        transaction.push(FailingCommand::new("first", 4));
+        let mut rejected = FailingCommand::new("second", 0);
+        rejected.fail_apply = true;
+        transaction.push(rejected);
+
+        let error = stack
+            .execute_transaction(transaction, &mut context)
+            .expect_err("transaction must fail");
+
+        assert_eq!(error.to_string(), "second apply failed");
+        assert!(!error.reconciliation_required());
+        assert!(!stack.reconciliation_required());
+        assert_eq!(context.value, 0);
+        stack
+            .execute(Box::new(Add::new(2)), &mut context)
+            .expect("history remains usable");
+        assert_eq!(context.value, 2);
+    }
+
+    #[test]
+    fn transaction_rollback_failure_blocks_history_until_reconciliation() {
+        let mut stack = CommandStack::default();
+        let mut context = Context::default();
+        let mut transaction = Transaction::new("rollback");
+        let mut first = FailingCommand::new("first", 4);
+        first.fail_undo_after_delta = Some(7);
+        transaction.push(first);
+        let mut rejected = FailingCommand::new("second", 0);
+        rejected.fail_apply = true;
+        transaction.push(rejected);
+
+        let error = stack
+            .execute_transaction(transaction, &mut context)
+            .expect_err("transaction must fail");
+
+        assert!(error.reconciliation_required());
+        assert!(error.to_string().contains("rollback failed"));
+        assert!(error.to_string().contains("`first`: first undo failed"));
+        assert!(stack.reconciliation_required());
+        assert_eq!((stack.undo_len(), stack.redo_len()), (0, 0));
+        assert_eq!(context.value, 11);
+        let blocked = stack
+            .execute(Box::new(Add::new(2)), &mut context)
+            .expect_err("poisoned history must reject edits");
+        assert!(blocked.reconciliation_required());
+        assert!(blocked
+            .to_string()
+            .contains("requires context reconciliation"));
+
+        context.value = 0;
+        stack.reset_after_reconciliation();
+        stack
+            .execute(Box::new(Add::new(2)), &mut context)
+            .expect("reconciled history accepts edits");
+        assert_eq!(context.value, 2);
     }
 }
