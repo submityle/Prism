@@ -31,9 +31,12 @@ The harness owns frame advancement, snapshot hashing, and resource lifecycle:
 
 Document persistence is opt-in through `DesktopDocumentSession` and
 `run_desktop_with_document`; the session preserves dirty/draft state and
-fences stale save/load receipts. Runtime transport and domain-specific modules
-remain explicit adapters. Surface lifecycle tests use recording backends; the
-native smoke entry point is the path for actual OS window/GPU validation.
+fences stale save/load receipts. Native document replacement is rejected while
+the controller is dirty or an Inspector draft is active, so loading cannot
+silently overwrite unsaved edits. Runtime transport and domain-specific
+modules remain explicit adapters. Surface lifecycle tests use recording
+backends; the native smoke entry point is the path for actual OS window/GPU
+validation.
 
 For document-driven native scenes, `DesktopScene::new_with_document_adapter`
 accepts a host-owned `SceneDocumentAdapter`. The adapter converts the validated

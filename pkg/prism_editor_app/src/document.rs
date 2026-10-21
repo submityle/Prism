@@ -149,6 +149,8 @@ pub enum DocumentError {
     Ui(DesktopUiError),
     /// An accepted document operation has not yet delivered its terminal event.
     Busy,
+    /// Native document replacement was requested while the live model is dirty.
+    UnsavedChanges,
     /// An uncertain/failed save requires identical retry or explicit reload/install.
     ReconciliationRequired,
     /// No failed or cancelled save is retained for identical retry.
@@ -187,6 +189,7 @@ impl fmt::Display for DocumentError {
             Self::Controller(error) => error.fmt(f),
             Self::Ui(error) => error.fmt(f),
             Self::Busy => f.write_str("document I/O already pending"),
+            Self::UnsavedChanges => f.write_str("save or discard document changes before loading"),
             Self::ReconciliationRequired => f.write_str("retry identical save or reload first"),
             Self::NoRetry => f.write_str("no failed save retained for retry"),
             Self::RevisionExhausted => f.write_str("document revision exhausted"),

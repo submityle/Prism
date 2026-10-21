@@ -1093,6 +1093,28 @@ fn acknowledge_ui_marks_saved_without_dropping_text_or_ime_draft() {
 
 #[cfg(feature = "desktop")]
 #[test]
+fn native_document_load_rejects_unsaved_controller_changes_before_io() {
+    use prism_editor_app::DesktopDocumentSession;
+
+    let temp = Temp::new();
+    let mut ui = EditorDesktopUi::new(controller()).unwrap();
+    edit(ui.controller_mut(), 42);
+    let mut session =
+        DesktopDocumentSession::new(temp.adapter(), catalog(), ControllerLimits::default());
+
+    assert!(matches!(
+        session.load(&ui),
+        Err(DocumentError::UnsavedChanges)
+    ));
+    assert!(!session.is_busy());
+    assert!(session.last_request().is_none());
+    assert!(!temp.file().exists());
+    assert!(ui.controller().is_dirty());
+    assert_eq!(snapshot(ui.controller(), &items()[0]).count, 42);
+}
+
+#[cfg(feature = "desktop")]
+#[test]
 fn native_document_save_runs_content_gate_before_real_io_and_revalidates() {
     use prism_editor_app::{DesktopDocumentSession, DesktopScene};
     use prism_editor_content::{

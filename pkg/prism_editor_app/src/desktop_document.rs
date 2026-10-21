@@ -80,6 +80,9 @@ impl DesktopDocumentSession {
         if ui.has_uncommitted_edit() {
             return Err(DocumentError::Busy);
         }
+        if ui.controller().is_dirty() {
+            return Err(DocumentError::UnsavedChanges);
+        }
         let request = self.adapter.submit_load(ui.controller(), &self.catalog)?;
         self.last_request = Some(request);
         Ok(request)
