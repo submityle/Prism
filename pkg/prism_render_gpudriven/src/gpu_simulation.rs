@@ -19,8 +19,8 @@ use rhi::{
     BindGroupDescriptor, BindGroupId, BindGroupLayoutDescriptor, BindGroupLayoutId,
     BufferBindingType, BufferDescriptor, BufferId, BufferUsages, CommandBuffer, CommandEncoder,
     ComputeCommand, ComputePipelineDescriptor, ComputePipelineId, PipelineLayoutDescriptor,
-    PipelineLayoutId, RenderDevice, RenderQueue, ShaderModuleDescriptor, ShaderModuleId,
-    ShaderStages, PipelineStages,
+    PipelineLayoutId, PipelineStages, RenderDevice, RenderQueue, ShaderModuleDescriptor,
+    ShaderModuleId, ShaderStages,
 };
 
 use crate::gpu::{bind_buffer, buffer_entry};
@@ -618,9 +618,7 @@ impl GpuSimulationStage {
             graph,
             "particle-simulation-compact-events",
             self.compact_events,
-            u64::from(self.channel_capacity)
-                * u64::from(EVENT_CHANNEL_COUNT)
-                * GPU_EVENT_STRIDE,
+            u64::from(self.channel_capacity) * u64::from(EVENT_CHANNEL_COUNT) * GPU_EVENT_STRIDE,
             BufferUsages::STORAGE | BufferUsages::COPY_SRC,
             rhi::BufferState::storage_write(PipelineStages::COMPUTE_SHADER),
         );
@@ -653,34 +651,42 @@ impl GpuSimulationStage {
         let reset_pipeline = self.pipeline(GpuSimulationStageKind::Reset);
         let mut control_after_reset = control;
         let mut cursors_after_reset = event_cursors;
-        graph.try_add_compute_pass("particle-simulation-reset", PassFlags::SIDE_EFFECT, |builder| {
-            control_after_reset = builder.write_storage_buffer(control);
-            cursors_after_reset = builder.write_storage_buffer(event_cursors);
-            move |ctx| {
-                ctx.set_compute_pipeline(reset_pipeline)
-                    .set_compute_bind_group(0, bind_group, Vec::new())
-                    .dispatch(1, 1, 1);
-            }
-        })?;
+        graph.try_add_compute_pass(
+            "particle-simulation-reset",
+            PassFlags::SIDE_EFFECT,
+            |builder| {
+                control_after_reset = builder.write_storage_buffer(control);
+                cursors_after_reset = builder.write_storage_buffer(event_cursors);
+                move |ctx| {
+                    ctx.set_compute_pipeline(reset_pipeline)
+                        .set_compute_bind_group(0, bind_group, Vec::new())
+                        .dispatch(1, 1, 1);
+                }
+            },
+        )?;
 
         let dispatch_groups = self.capacity.div_ceil(SIMULATION_WORKGROUP_SIZE);
         let spawn_pipeline = self.pipeline(GpuSimulationStageKind::Spawn);
         let mut particles_after_spawn = particles;
         let mut control_after_spawn = control_after_reset;
         let mut source_after_spawn = source_events;
-        graph.try_add_compute_pass("particle-simulation-spawn", PassFlags::SIDE_EFFECT, |builder| {
-            builder.read_uniform(params);
-            builder.read_storage_buffer(forces);
-            builder.read_storage_buffer(colliders);
-            particles_after_spawn = builder.write_storage_buffer(particles);
-            control_after_spawn = builder.write_storage_buffer(control_after_reset);
-            source_after_spawn = builder.write_storage_buffer(source_events);
-            move |ctx| {
-                ctx.set_compute_pipeline(spawn_pipeline)
-                    .set_compute_bind_group(0, bind_group, Vec::new())
-                    .dispatch(dispatch_groups, 1, 1);
-            }
-        })?;
+        graph.try_add_compute_pass(
+            "particle-simulation-spawn",
+            PassFlags::SIDE_EFFECT,
+            |builder| {
+                builder.read_uniform(params);
+                builder.read_storage_buffer(forces);
+                builder.read_storage_buffer(colliders);
+                particles_after_spawn = builder.write_storage_buffer(particles);
+                control_after_spawn = builder.write_storage_buffer(control_after_reset);
+                source_after_spawn = builder.write_storage_buffer(source_events);
+                move |ctx| {
+                    ctx.set_compute_pipeline(spawn_pipeline)
+                        .set_compute_bind_group(0, bind_group, Vec::new())
+                        .dispatch(dispatch_groups, 1, 1);
+                }
+            },
+        )?;
 
         let simulate_pipeline = self.pipeline(GpuSimulationStageKind::Simulate);
         let mut particles_after_simulate = particles_after_spawn;
@@ -799,27 +805,47 @@ impl GpuSimulationStage {
         }
     }
 
-    /// GPU particle pool buffer.
-    #[must_use]
-    pub const fn particles(&self) -> BufferId {
-        self.particles
-    }
     /// GPU source event buffer.
     #[must_use]
     pub const fn source_events(&self) -> BufferId {
         self.source_events
+    }
+
+    /// GPU particle pool buffer used by graph consumers such as the renderer
+    /// bridge. Ownership remains with this simulation stage.
+    #[must_use]
+    pub const fn particles(&self) -> BufferId {
+        self.particles
+    }
+
+    /// GPU compact active-index buffer used by graph consumers.
+    #[must_use]
+    pub const fn active_indices(&self) -> BufferId {
+        self.active_indices
+    }
+
+    /// GPU control-word buffer used by graph consumers.
+    #[must_use]
+    pub const fn control(&self) -> BufferId {
+        self.control
+    }
+
+    /// Fixed simulation pool capacity.
+    #[must_use]
+    pub const fn capacity(&self) -> u32 {
+        self.capacity
+    }
+
+    /// Fixed per-channel event capacity.
+    #[must_use]
+    pub const fn event_capacity(&self) -> u32 {
+        self.event_capacity
     }
     /// GPU compact event buffer.
     #[must_use]
     pub const fn compact_events(&self) -> BufferId {
         self.compact_events
     }
-    /// GPU atomic control buffer.
-    #[must_use]
-    pub const fn control(&self) -> BufferId {
-        self.control
-    }
-
     /// Releases all resources owned by the stage.
     pub fn destroy(&self, device: &impl RenderDevice) {
         for buffer in [
@@ -857,7 +883,10 @@ fn import_buffer(
     graph.import_buffer(
         name,
         BufferDesc::new(size, usage),
-        ImportedBuffer { buffer, entry_state },
+        ImportedBuffer {
+            buffer,
+            entry_state,
+        },
     )
 }
 

@@ -1408,6 +1408,7 @@ mod tests {
     fn compiled_graph_with_texture() -> CompiledGraph {
         CompiledGraph {
             source: String::from("@compute @workgroup_size(64) fn main() {}"),
+            stage_order: vec![0],
             entry_points: vec![String::from("main")],
             dispatches: vec![
                 prism_render_architecture::particle::compiler::CompiledDispatch {
@@ -1418,7 +1419,10 @@ mod tests {
                     entry_point: String::from("main"),
                 },
             ],
-            bindings: vec![ResourceDecl::texture2d("field", 0, 0)],
+            bindings: vec![
+                ResourceDecl::texture2d("field", 0, 0),
+                ResourceDecl::buffer("ember_dispatch_counts", 1, 0),
+            ],
             ..empty_compiled_graph()
         }
     }

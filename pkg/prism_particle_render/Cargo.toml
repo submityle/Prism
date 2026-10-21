@@ -1,0 +1,15 @@
+[package]
+name = "prism_particle_render"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96.0"
+description = "Prism particle render data and Fabric adapter"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+thiserror = "2.0"
+prism_render_architecture = { path = "../prism_render_architecture" }
+
+[lints]
+workspace = true
