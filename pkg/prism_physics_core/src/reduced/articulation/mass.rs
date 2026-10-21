@@ -276,7 +276,10 @@ impl ArticulationImpulseSolver {
                         d[row][col] += axes[i].cols[row][k] * u[i][k][col];
                     }
                 }
-                d[row][row] += model.links[i].joint.armature + dt * model.links[i].joint.damping;
+                let diagonal = f64::from(d[row][row])
+                    + f64::from(model.links[i].joint.armature)
+                    + f64::from(dt) * f64::from(model.integration_damping(i, dt));
+                d[row][row] = diagonal.min(f64::from(Real::MAX)) as Real;
             }
             inverse_d[i] = invert_small(d, count);
             reduced[i] = mat6_sub(&inertia[i], &outer_from_cols(&u[i], inverse_d[i], count));

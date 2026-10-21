@@ -51,6 +51,18 @@ fn scalar_viscous_damping_depends_on_physical_mass_and_is_stable_when_stiff() {
 }
 
 #[test]
+fn maximum_finite_damping_keeps_the_backward_euler_step_finite() {
+    for revolute in [false, true] {
+        let mut tree = scalar_tree(revolute, 2.0, f32::MAX);
+        assert!(tree.set_velocity(0, -3.0));
+        let report = tree.step(0.04);
+        assert!(tree.velocities()[0].is_finite());
+        assert!(report.joint_accelerations[0].is_finite());
+        assert!(tree.velocities()[0].abs() <= 1.0e-4);
+    }
+}
+
+#[test]
 fn motor_effort_and_passive_damping_share_the_implicit_mass_solve() {
     let mass = 7.0;
     let damping = 3.0;

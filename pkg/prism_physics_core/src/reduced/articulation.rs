@@ -989,6 +989,7 @@ fn validate_link(
 /// A mutable reduced-coordinate articulation state and its external inputs.
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serialize", serde(try_from = "ArticulationSerde"))]
 pub struct Articulation {
     base_mode: ArticulationBase,
     base_inertia: SpatialInertia,
@@ -1004,7 +1005,142 @@ pub struct Articulation {
     broken_joint: Option<usize>,
 }
 
+#[cfg(feature = "serialize")]
+#[derive(serde::Deserialize)]
+struct ArticulationSerde {
+    base_mode: ArticulationBase,
+    base_inertia: SpatialInertia,
+    base_pose: Isometry,
+    base_velocity: SpatialMotion,
+    gravity: Vec3,
+    links: Vec<ArticulationLink>,
+    dof_offsets: Vec<usize>,
+    q: Vec<Real>,
+    qd: Vec<Real>,
+    link_forces: Vec<SpatialForce>,
+    base_force: SpatialForce,
+    broken_joint: Option<usize>,
+}
+
+#[cfg(feature = "serialize")]
+impl TryFrom<ArticulationSerde> for Articulation {
+    type Error = &'static str;
+
+    fn try_from(raw: ArticulationSerde) -> Result<Self, Self::Error> {
+        let articulation = Self {
+            base_mode: raw.base_mode,
+            base_inertia: raw.base_inertia,
+            base_pose: raw.base_pose,
+            base_velocity: raw.base_velocity,
+            gravity: raw.gravity,
+            links: raw.links,
+            dof_offsets: raw.dof_offsets,
+            q: raw.q,
+            qd: raw.qd,
+            link_forces: raw.link_forces,
+            base_force: raw.base_force,
+            broken_joint: raw.broken_joint,
+        };
+        articulation.validate_serialized_state()?;
+        Ok(articulation)
+    }
+}
+
 impl Articulation {
+    #[cfg(feature = "serialize")]
+    fn validate_serialized_state(&self) -> Result<(), &'static str> {
+        if !valid_pose(self.base_pose) || !self.gravity.is_finite() {
+            return Err("invalid articulation transform or gravity");
+        }
+        if !self
+            .base_velocity
+            .as_array()
+            .iter()
+            .all(|value| value.is_finite())
+            || !self
+                .base_force
+                .as_array()
+                .iter()
+                .all(|value| value.is_finite())
+        {
+            return Err("invalid articulation base state");
+        }
+        if self.base_mode == ArticulationBase::Floating {
+            validate_inertia(&self.base_inertia).map_err(|()| "invalid floating-base inertia")?;
+            if self.base_inertia.mass <= SOLVE_EPS {
+                return Err("invalid floating-base mass");
+            }
+        } else if self.base_velocity != SpatialMotion::default() {
+            return Err("fixed articulation has a moving base");
+        }
+
+        let mut expected_offsets = Vec::with_capacity(self.links.len());
+        let mut dofs = 0usize;
+        for (link, model) in self.links.iter().enumerate() {
+            if let Some(parent) = model.parent {
+                if parent >= link {
+                    return Err("articulation parent does not precede child");
+                }
+            }
+            if !valid_pose(Isometry::new(
+                model.x_tree.translation,
+                model.x_tree.rotation,
+            )) {
+                return Err("invalid articulation link transform");
+            }
+            validate_link(link, &model.inertia, &model.joint)
+                .map_err(|_| "invalid articulation link")?;
+            expected_offsets.push(dofs);
+            dofs = dofs
+                .checked_add(model.joint.kind.dofs())
+                .ok_or("articulation dof count overflow")?;
+        }
+        if self.dof_offsets != expected_offsets || self.q.len() != dofs || self.qd.len() != dofs {
+            return Err("inconsistent articulation coordinate layout");
+        }
+        if !self.q.iter().chain(&self.qd).all(|value| value.is_finite()) {
+            return Err("non-finite articulation coordinate state");
+        }
+        if !self.link_forces.is_empty() && self.link_forces.len() != self.links.len() {
+            return Err("inconsistent articulation force layout");
+        }
+        if !self
+            .link_forces
+            .iter()
+            .flat_map(|force| force.as_array())
+            .all(|value| value.is_finite())
+        {
+            return Err("non-finite articulation link force");
+        }
+        if self
+            .broken_joint
+            .is_some_and(|link| link >= self.links.len())
+        {
+            return Err("invalid articulation broken-joint index");
+        }
+        Ok(())
+    }
+
+    fn integration_damping(&self, link: usize, dt: Real) -> Real {
+        let damping = self.links[link].joint.damping;
+        if damping == 0.0 {
+            return 0.0;
+        }
+        let speed = self
+            .joint_velocities(link)
+            .to_array()
+            .into_iter()
+            .map(Real::abs)
+            .fold(0.0, Real::max);
+        // Keep both `dt * C` in the factorization and `C * qd` on the right
+        // hand side finite. Scaling the same coefficient in both places
+        // preserves the backward-Euler high-damping limit instead of allowing
+        // two independently saturated products to change the equation.
+        let scale = dt.abs().max(speed).max(1.0);
+        let cap = (f64::from(Real::MAX) / (4.0 * f64::from(scale))) as Real;
+        damping.min(cap)
+    }
+
     /// Number of links.
     #[must_use]
     pub fn link_count(&self) -> usize {
@@ -1673,7 +1809,7 @@ impl Articulation {
                 bias,
             )));
             let mut torque = self.joint_torque(i);
-            let damping = self.links[i].joint.damping;
+            let damping = self.integration_damping(i, dt);
             if damping != 0.0 {
                 torque -= self.joint_velocities(i) * damping;
             }
@@ -2472,5 +2608,45 @@ mod tests {
         let replacement = storage.insert(one_revolute());
         assert_eq!(replacement.index(), handle.index());
         assert_ne!(replacement.generation(), handle.generation());
+    }
+
+    #[cfg(feature = "serialize")]
+    fn serialized(articulation: Articulation) -> ArticulationSerde {
+        ArticulationSerde {
+            base_mode: articulation.base_mode,
+            base_inertia: articulation.base_inertia,
+            base_pose: articulation.base_pose,
+            base_velocity: articulation.base_velocity,
+            gravity: articulation.gravity,
+            links: articulation.links,
+            dof_offsets: articulation.dof_offsets,
+            q: articulation.q,
+            qd: articulation.qd,
+            link_forces: articulation.link_forces,
+            base_force: articulation.base_force,
+            broken_joint: articulation.broken_joint,
+        }
+    }
+
+    #[cfg(feature = "serialize")]
+    #[test]
+    fn serialized_articulation_revalidates_model_and_state_invariants() {
+        fn rejected(mut mutate: impl FnMut(&mut ArticulationSerde)) {
+            let mut raw = serialized(one_revolute());
+            mutate(&mut raw);
+            assert!(Articulation::try_from(raw).is_err());
+        }
+
+        rejected(|raw| raw.links[0].joint.damping = -1.0);
+        rejected(|raw| {
+            raw.links[0].joint = ArticulationJoint::fixed().with_damping(1.0);
+        });
+        rejected(|raw| raw.dof_offsets[0] = 1);
+        rejected(|raw| raw.qd[0] = Real::NAN);
+        rejected(|raw| raw.links[0].parent = Some(0));
+        rejected(|raw| raw.broken_joint = Some(1));
+
+        let valid = serialized(one_revolute());
+        assert!(Articulation::try_from(valid).is_ok());
     }
 }
