@@ -42,6 +42,11 @@ pub use hlod_runtime::{
     HlodDistanceRequest, HlodRuntime, HlodRuntimeError, HlodSelection, HlodSelectionBudget,
     HlodSelectionPlan, HLOD_RUNTIME_SELECTION_VERSION,
 };
+mod sdf_clipmap;
+pub use sdf_clipmap::{
+    WorldSdfClipmapCommit, WorldSdfClipmapConfig, WorldSdfClipmapError, WorldSdfClipmapPlan,
+    WorldSdfClipmapScheduler,
+};
 mod data_layers;
 pub use data_layers::{
     DataLayerConfigError, DataLayerId, DataLayerState, LayeredCellFrameCoordinator,
