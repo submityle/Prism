@@ -1,13 +1,13 @@
 //! Real-device `wgpu` orchestrator that runs a complete `FLIP`/`APIC` fluid
 //! step in a single command submission.
 //!
-//! [`GpuFluidStep`] compiles `shaders/fluid_step.wgsl` once — a fused module
-//! whose entry points reproduce, stage by stage, the arithmetic of the
-//! standalone transfer / grid-ops / pressure / extrapolation / advection
-//! kernels — and exposes [`GpuFluidStep::step`], which advances the markers by
-//! one full step in place. The whole pipeline runs over one resident set of
-//! grid buffers, so only the initial particle upload and the final particle
-//! read-back cross the bus:
+//! [`GpuFluidStep`] owns the fused `PIC`/`FLIP` pipeline from
+//! `shaders/fluid_step.wgsl` and the affine pipeline in [`GpuFluidApicStep`].
+//! [`GpuFluidStep::step`] selects the complete path from
+//! [`FluidConfig::transfer`](crate::fluid::config::FluidConfig::transfer) and
+//! advances the markers by one full step in place. Each path runs over one
+//! resident set of grid buffers, so only the initial particle upload and the
+//! final particle read-back cross the bus. The `PIC`/`FLIP` path performs:
 //!
 //! 1. `p2g_scatter` — fixed-point atomic splat of particle velocities.
 //! 2. `normalize` — momentum / weight per staggered face.
@@ -53,10 +53,11 @@ use wgpu::{
 
 use crate::buffer;
 use crate::context::GpuContext;
-use crate::fluid::config::{FluidConfig, FluidError};
+use crate::fluid::config::{FluidConfig, FluidError, TransferMode};
 use crate::fluid::grid::{CellType, GridDims};
 use crate::fluid::particle::FluidParticles;
 
+use super::apic_step::GpuFluidApicStep;
 use super::layout::{buffer_entry, entry};
 
 /// Uniform parameter block. Layout matches `StepParams` in
@@ -83,6 +84,7 @@ struct StepParams {
 
 /// A compiled, reusable full-step `GPU` fluid pipeline set.
 pub struct GpuFluidStep {
+    apic: GpuFluidApicStep,
     #[expect(
         dead_code,
         reason = "kept alive so the pipelines it produced stay valid"
@@ -144,6 +146,7 @@ impl GpuFluidStep {
             make(device, &module, entry_point, label, &pipeline_layout)
         };
         GpuFluidStep {
+            apic: GpuFluidApicStep::new(ctx),
             p2g_scatter: mk("p2g_scatter", "prism_fluid_step_p2g_scatter"),
             normalize: mk("normalize", "prism_fluid_step_normalize"),
             save_field: mk("save_field", "prism_fluid_step_save_field"),
@@ -172,9 +175,9 @@ impl GpuFluidStep {
     /// [`GridDims::cell_count`]); it drives the solid boundary condition and the
     /// free-surface Dirichlet condition of the pressure solve. `cfg` supplies
     /// the time step, gravity, blend, and the pressure / extrapolation sweep
-    /// counts. The transfer uses the `PIC`/`FLIP` blend from
-    /// [`FluidConfig::effective_flip_blend`]; the affine (`APIC`) transfer is a
-    /// later slice.
+    /// counts. [`TransferMode::PicFlip`] uses the blend from
+    /// [`FluidConfig::effective_flip_blend`], while [`TransferMode::Apic`]
+    /// preserves and refits the per-particle affine matrices.
     ///
     /// # Errors
     ///
@@ -190,6 +193,10 @@ impl GpuFluidStep {
         particles: &mut FluidParticles,
         cfg: &FluidConfig,
     ) -> Result<(), FluidError> {
+        if matches!(cfg.transfer, TransferMode::Apic) {
+            return self.apic.step(ctx, dims, cell_types, particles, cfg);
+        }
+
         if !dims.is_valid() {
             return Err(FluidError::EmptyGrid);
         }

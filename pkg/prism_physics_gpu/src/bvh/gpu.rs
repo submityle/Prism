@@ -332,13 +332,14 @@ impl GpuLbvh {
     /// primitive boxes, and sorted leaf-slot indices stay in device memory,
     /// ready to bind straight into
     /// [`query_resident`](crate::bvh::GpuBvhQuery::query_resident). Empty and
-    /// single-leaf inputs have no traversable hierarchy, so they yield an empty
-    /// resident tree that produces no pairs.
+    /// single-leaf inputs have no traversable hierarchy, so they allocate no
+    /// device buffers; the single leaf is retained on the host for query types
+    /// such as ray casts, while overlap-pair generation still produces no pairs.
     #[must_use]
     pub fn build_resident(&self, ctx: &GpuContext, boxes: &[Aabb]) -> GpuResidentLbvh {
         let n = boxes.len();
         if n <= 1 {
-            return GpuResidentLbvh::empty(n);
+            return GpuResidentLbvh::trivial(boxes.first().copied());
         }
         let device = ctx.device();
         let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {

@@ -67,7 +67,7 @@ impl ManifoldPoint {
 /// The points in [`points`](Self::points) up to [`count`](Self::count) all lie
 /// in the contact plane and share the single [`normal`](Self::normal), which
 /// runs from body `a` toward body `b` (the direction that separates them).
-/// Slots at or beyond `count` are unspecified padding and must not be read.
+/// Slots at or beyond `count` are zero-initialised but semantically inactive.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ContactManifold {
     /// Index of the first body (the `a` side of the contact).
@@ -87,7 +87,7 @@ impl ContactManifold {
     /// `points`.
     ///
     /// `count` is the number of live entries; slots beyond it are filled with a
-    /// zeroed placeholder so the fixed-size array is always fully initialised.
+    /// zeroed padding value so the fixed-size array is always fully initialised.
     ///
     /// # Panics
     ///
@@ -110,8 +110,8 @@ impl ContactManifold {
             points.len() >= count,
             "fewer points supplied than the live count"
         );
-        let placeholder = ManifoldPoint::new(Vec3::ZERO, 0.0);
-        let mut slots = [placeholder; MAX_MANIFOLD_POINTS];
+        let padding_point = ManifoldPoint::new(Vec3::ZERO, 0.0);
+        let mut slots = [padding_point; MAX_MANIFOLD_POINTS];
         for (slot, point) in slots.iter_mut().zip(points.iter()).take(count) {
             *slot = *point;
         }
@@ -192,6 +192,25 @@ mod tests {
     use super::*;
 
     const EPS: f32 = 1.0e-4;
+
+    #[test]
+    fn new_preserves_live_points_and_zero_initialises_inactive_slots() {
+        let live = [
+            ManifoldPoint::new(Vec3::new(1.0, 2.0, 3.0), 0.25),
+            ManifoldPoint::new(Vec3::new(-1.0, 0.5, 4.0), 0.75),
+        ];
+        let manifold = ContactManifold::new(7, 11, Vec3::Y, live.len(), &live);
+
+        assert_eq!(manifold.a, 7);
+        assert_eq!(manifold.b, 11);
+        assert_eq!(manifold.normal, Vec3::Y);
+        assert_eq!(manifold.count, 2);
+        assert_eq!(&manifold.points[..live.len()], &live);
+        for point in &manifold.points[live.len()..] {
+            assert_eq!(point.position, Vec3::ZERO);
+            assert_eq!(point.depth, 0.0);
+        }
+    }
 
     #[test]
     fn reduce_passes_through_four_or_fewer() {

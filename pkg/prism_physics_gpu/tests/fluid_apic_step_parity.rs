@@ -8,10 +8,10 @@
 //! regularised least-squares solve, and an `RK2` advection. Every shared stage
 //! is already parity-checked by the `FLIP` full-step test; this test anchors the
 //! affine endpoints: the scatter's `C·(x_face − x_p)` correction and the gather's
-//! moment-matrix solve. The device orchestrator [`GpuFluidApicStep`] runs all
-//! stages over one resident buffer set in a single submission, and its output —
-//! positions, velocities, and affine matrices — must track the sequentially
-//! executed host twin.
+//! moment-matrix solve. The public orchestrator [`GpuFluidStep`] must select
+//! that affine path when configured for [`TransferMode::Apic`], run all stages
+//! over one resident buffer set in a single submission, and track the host twin
+//! in positions, velocities, and affine matrices.
 //!
 //! The device reassociates the many sums (fused multiply-add, differing
 //! rounding) and inverts one moment matrix per particle per component, so parity
@@ -30,7 +30,7 @@
 use glam::{Mat3, Vec3};
 use prism_physics_gpu::{
     fluid::cpu::{fields::GoldenGrid, step::fluid_step},
-    CellType, FluidConfig, FluidParticles, GpuContext, GpuFluidApicStep, GridDims, TransferMode,
+    CellType, FluidConfig, FluidParticles, GpuContext, GpuFluidStep, GridDims, TransferMode,
 };
 
 /// Builds a solid-walled grid classification: the one-cell border is solid, the
@@ -134,12 +134,12 @@ fn max_affine_error(cpu: &FluidParticles, gpu: &FluidParticles) -> f32 {
     clippy::print_stderr,
     reason = "the skip notice and measured error must reach the test log"
 )]
-fn gpu_apic_step_matches_cpu_golden() {
+fn unified_gpu_step_selects_apic_and_matches_cpu_golden() {
     let Some(ctx) = GpuContext::try_headless() else {
         eprintln!("skipping GPU APIC full-step parity: no wgpu adapter on this host");
         return;
     };
-    let stepper = GpuFluidApicStep::new(&ctx);
+    let stepper = GpuFluidStep::new(&ctx);
     let dims = GridDims::new(12, 12, 12, 0.1, Vec3::ZERO);
     let cells = walled_cells(dims);
     let mut cfg = FluidConfig::new(5.0e-3, Vec3::new(0.0, -9.81, 0.0));

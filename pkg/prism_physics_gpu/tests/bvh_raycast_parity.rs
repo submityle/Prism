@@ -1,11 +1,13 @@
 //! Real-device parity tests for the device-resident `GPU` `BVH` closest-hit ray
 //! query.
 //!
-//! Each test builds the tree resident on device with
+//! Each test builds the tree resident with
 //! [`GpuLbvh::build_resident`], casts a batch of rays with
-//! [`GpuBvhRaycast::query_closest`] (no host round-trip between build and
-//! traversal), and compares each hit to the
+//! [`GpuBvhRaycast::query_closest`], and compares each hit to the
 //! [`cpu_bvh_raycast_closest`] brute-force twin over the host-built [`Lbvh`].
+//! Non-trivial trees stay on device with no host round-trip between build and
+//! traversal; the one-leaf case uses its host-retained box because it has no
+//! hierarchy to dispatch.
 //! The `GPU` traversal and the twin share the slab test bit-for-bit apart from
 //! the reciprocal, whose `WGSL` division carries up to 2.5 `ULP`, so the primitive
 //! index matches exactly and the entry distance within a small tolerance. The
@@ -211,25 +213,18 @@ fn t_max_clamps_the_hit() {
 }
 
 #[test]
-fn trivial_trees_report_only_misses() {
+fn trivial_trees_match_the_closest_hit_twin() {
     let Some(ctx) = GpuContext::try_headless() else {
         return;
     };
     let builder = GpuLbvh::new(&ctx);
     let raycast = GpuBvhRaycast::new(&ctx);
-    // A resident tree with fewer than two leaves owns no buffers, so the
-    // resident kernel reports a miss for every ray regardless of geometry. The
-    // full n <= 1 behaviour is covered by the CPU twin's own unit tests.
     let rays = [
         Ray::new(Vec3::ZERO, Vec3::X, 100.0),
         Ray::new(Vec3::new(1.0, 2.0, 3.0), Vec3::NEG_Z, 100.0),
     ];
     for boxes in [Vec::new(), vec![box_at(0.0, 0.0, 0.0)]] {
-        let resident = builder.build_resident(&ctx, &boxes);
-        let got = raycast.query_closest(&ctx, &resident, &rays);
-        ctx.wait();
-        assert_eq!(got.len(), rays.len());
-        assert!(got.iter().all(Option::is_none), "trivial tree hits nothing");
+        assert_closest_matches(&builder, &raycast, &ctx, &boxes, &rays);
     }
 }
 
@@ -375,25 +370,18 @@ fn t_max_gates_the_any_hit() {
 }
 
 #[test]
-fn trivial_trees_report_no_any_hit() {
+fn trivial_trees_match_the_any_hit_twin() {
     let Some(ctx) = GpuContext::try_headless() else {
         return;
     };
     let builder = GpuLbvh::new(&ctx);
     let raycast = GpuBvhRaycast::new(&ctx);
-    // A resident tree with fewer than two leaves owns no buffers, so the
-    // resident kernel reports no hit for every ray. The full n <= 1 behaviour is
-    // covered by the CPU twin's own unit tests.
     let rays = [
         Ray::new(Vec3::ZERO, Vec3::X, 100.0),
         Ray::new(Vec3::new(1.0, 2.0, 3.0), Vec3::NEG_Z, 100.0),
     ];
     for boxes in [Vec::new(), vec![box_at(0.0, 0.0, 0.0)]] {
-        let resident = builder.build_resident(&ctx, &boxes);
-        let got = raycast.query_any(&ctx, &resident, &rays);
-        ctx.wait();
-        assert_eq!(got.len(), rays.len());
-        assert!(got.iter().all(|hit| !hit), "trivial tree hits nothing");
+        assert_any_matches(&builder, &raycast, &ctx, &boxes, &rays);
     }
 }
 

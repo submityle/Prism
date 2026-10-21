@@ -9,7 +9,10 @@
 //! between build and traversal.
 //!
 //! Trees with fewer than two leaves have no traversable hierarchy, so they hold
-//! no buffers and a query over them yields no pairs.
+//! no device buffers. The optional single leaf is retained on the host so query
+//! types with meaningful one-primitive results (such as ray casts) can still
+//! implement their complete contract; pair generation correctly yields no
+//! pairs for either trivial size.
 //!
 //! # Provenance
 //!
@@ -21,6 +24,7 @@ use wgpu::Buffer;
 
 use crate::radix::gpu::SortedBuffers;
 
+use super::config::Aabb;
 use super::gpu::RecordedBuild;
 
 /// A device-resident `LBVH`: the built hierarchy kept in `GPU` memory so a query
@@ -29,6 +33,8 @@ pub struct GpuResidentLbvh {
     /// The resident device buffers, or `None` for fewer than two leaves (no
     /// traversable hierarchy).
     inner: Option<ResidentInner>,
+    /// Host-retained leaf for the one-primitive case, where no hierarchy exists.
+    singleton: Option<Aabb>,
     /// Number of leaf primitives (`0` or `1` when `inner` is `None`).
     num_leaves: usize,
 }
@@ -61,13 +67,16 @@ pub(crate) struct ResidentInner {
 }
 
 impl GpuResidentLbvh {
-    /// The resident tree for a trivial input of `num_leaves <= 1`: it owns no
-    /// device buffers, and any query over it yields no pairs.
+    /// Builds the resident representation for an empty or one-leaf input.
+    ///
+    /// Neither case owns hierarchy buffers. `singleton` preserves the one leaf
+    /// for query families whose result is meaningful without a hierarchy.
     #[must_use]
-    pub(crate) fn empty(num_leaves: usize) -> GpuResidentLbvh {
+    pub(crate) fn trivial(singleton: Option<Aabb>) -> GpuResidentLbvh {
         GpuResidentLbvh {
             inner: None,
-            num_leaves,
+            singleton,
+            num_leaves: usize::from(singleton.is_some()),
         }
     }
 
@@ -92,6 +101,7 @@ impl GpuResidentLbvh {
                 num_internal: rec.num_internal,
                 root: 0,
             }),
+            singleton: None,
             num_leaves,
         }
     }
@@ -114,5 +124,11 @@ impl GpuResidentLbvh {
     #[must_use]
     pub(crate) fn buffers(&self) -> Option<&ResidentInner> {
         self.inner.as_ref()
+    }
+
+    /// The only leaf box when this is a one-primitive tree.
+    #[must_use]
+    pub(crate) fn singleton(&self) -> Option<Aabb> {
+        self.singleton
     }
 }

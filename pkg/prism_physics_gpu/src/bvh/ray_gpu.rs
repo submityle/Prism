@@ -16,12 +16,11 @@
 //! # Resident-tree contract
 //!
 //! A resident tree with fewer than two leaves owns no device buffers (see
-//! [`GpuResidentLbvh`]), so it has no traversable hierarchy: every ray reports a
-//! miss. This mirrors the resident overlap query and is **not** a stub. An empty
-//! scene genuinely has nothing to hit, and a single-leaf scene is a degenerate
-//! tree a production host special-cases before it reaches a resident query; the
-//! full `n >= 0` behaviour is exercised by the `CPU` twin, and the resident kernel
-//! only mirrors the `n >= 2` resident contract.
+//! [`GpuResidentLbvh`]) because it has no hierarchy to traverse. Empty scenes
+//! therefore return misses immediately. A one-leaf tree retains that box on the
+//! host and evaluates the same slab test directly, giving the public query the
+//! same complete `n >= 0` contract as the `CPU` twin without allocating a
+//! degenerate device hierarchy.
 //!
 //! # Provenance
 //!
@@ -41,7 +40,7 @@ use crate::buffer;
 use crate::context::GpuContext;
 
 use super::layout::{buffer_entry, entry};
-use super::ray::{Ray, RayHit};
+use super::ray::{slab_enter, Ray, RayHit};
 use super::resident::GpuResidentLbvh;
 
 /// Lanes per workgroup; must match `@workgroup_size` in `bvh_raycast.wgsl`.
@@ -163,10 +162,16 @@ impl GpuBvhRaycast {
         lbvh: &GpuResidentLbvh,
         rays: &[Ray],
     ) -> Vec<Option<RayHit>> {
-        // A resident tree with fewer than two leaves owns no buffers and has no
-        // root to traverse, so every ray misses.
+        // Trivial trees have no hierarchy buffers. An empty tree misses; a
+        // singleton uses the same slab oracle directly.
         let Some(inner) = lbvh.buffers() else {
-            return vec![None; rays.len()];
+            return match lbvh.singleton() {
+                Some(aabb) => rays
+                    .iter()
+                    .map(|ray| slab_enter(ray, &aabb).map(|t| RayHit { prim: 0, t }))
+                    .collect(),
+                None => vec![None; rays.len()],
+            };
         };
         if rays.is_empty() {
             return Vec::new();
@@ -238,14 +243,20 @@ impl GpuBvhRaycast {
     /// Returns one flag per ray, in input order: `true` when the ray enters some
     /// primitive box within its extent, `false` otherwise. Traversal stops at the
     /// first crossing rather than searching for the nearest one, the occlusion
-    /// probe of a blocking line trace. A resident tree with fewer than two leaves
-    /// holds no hierarchy, so every ray misses (see the [module docs](self)).
+    /// probe of a blocking line trace. Empty and one-leaf trees are handled
+    /// directly without device hierarchy buffers (see the [module docs](self)).
     #[must_use]
     pub fn query_any(&self, ctx: &GpuContext, lbvh: &GpuResidentLbvh, rays: &[Ray]) -> Vec<bool> {
-        // A resident tree with fewer than two leaves owns no buffers and has no
-        // root to traverse, so every ray misses.
+        // Trivial trees have no hierarchy buffers. An empty tree misses; a
+        // singleton uses the same slab oracle directly.
         let Some(inner) = lbvh.buffers() else {
-            return vec![false; rays.len()];
+            return match lbvh.singleton() {
+                Some(aabb) => rays
+                    .iter()
+                    .map(|ray| slab_enter(ray, &aabb).is_some())
+                    .collect(),
+                None => vec![false; rays.len()],
+            };
         };
         if rays.is_empty() {
             return Vec::new();

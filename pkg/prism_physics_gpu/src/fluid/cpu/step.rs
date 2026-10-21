@@ -43,10 +43,10 @@ use crate::fluid::particle::FluidParticles;
 /// pressure solve. `cfg` supplies the time step, gravity, blend, and the
 /// pressure / extrapolation sweep counts.
 ///
-/// The transfer uses the `PIC`/`FLIP` blend from
-/// [`FluidConfig::effective_flip_blend`]; the affine (`APIC`) transfer is a
-/// later slice, so [`TransferMode::Apic`](crate::fluid::config::TransferMode)
-/// currently falls back to the same blend.
+/// [`TransferMode::PicFlip`] uses the blend from
+/// [`FluidConfig::effective_flip_blend`]. [`TransferMode::Apic`] uses affine
+/// particle-to-grid and grid-to-particle transfers and updates each particle's
+/// affine matrix.
 pub fn fluid_step(
     grid: &mut GoldenGrid,
     particles: &mut FluidParticles,
