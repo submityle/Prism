@@ -1,9 +1,8 @@
 //! Backend-neutral core kernel for Prism's next-generation physics engine.
 //!
-//! This crate provides the M0 foundation: a Structure-of-Arrays rigid-body
-//! state store, math helpers, a real semi-implicit Euler integrator, and the
-//! reserved extension points (solver / backend / driver / constraint / island)
-//! that later milestones build upon.
+//! This crate provides the rigid-body state store, math helpers, semi-implicit
+//! Euler integrator, solver, backend, driver, and island primitives used by the
+//! current physics pipeline.
 //!
 //! # Design overview
 //!
@@ -16,10 +15,9 @@
 //!   [`ShapeRegistry`].
 //! - [`world`] bundles the storage, colliders, and [`WorldConfig`] into a
 //!   single [`PhysicsWorld`].
-//! - [`solver`], [`backend`], [`driver`], [`constraint`], and [`island`] are
-//!   the reserved extension points. Each is a genuine trait or enum interface
-//!   with a working reference implementation where one is specified; none of
-//!   them use `todo!()`, `unimplemented!()`, or hollow stub logic.
+//! - [`solver`], [`backend`], [`driver`], and [`island`] expose the execution
+//!   contracts used by the current pipeline, with CPU reference implementations
+//!   where each contract requires one.
 //!
 //! # Provenance
 //!
@@ -42,7 +40,6 @@ pub mod collide;
 pub mod collider;
 pub mod command;
 pub mod config;
-pub mod constraint;
 pub mod driver;
 pub mod dsl;
 pub mod dynamics;
@@ -80,7 +77,6 @@ pub use collider::material::PhysicsMaterial;
 pub use collider::{ColliderHandle, ColliderShape, ShapeRegistry};
 pub use command::{CommandQueue, PhysicsCommand};
 pub use config::WorldConfig;
-pub use constraint::{Constraint, ConstraintKind};
 pub use driver::fixed_step::{AdvanceReport, FixedStepPipeline};
 pub use driver::{
     CacheFrame, CacheHandle, CacheRegistrationError, DriveMode, DriveOutcome, DriverCache,
