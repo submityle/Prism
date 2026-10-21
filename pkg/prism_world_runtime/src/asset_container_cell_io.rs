@@ -261,8 +261,7 @@ impl Shared {
                         return false;
                     }
                 }
-                RecordState::Ready(completion) => {
-                    let _ = completion;
+                RecordState::Ready(_) => {
                     return false;
                 }
             }
