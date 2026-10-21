@@ -663,19 +663,17 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
                 Box::new(sparse_archetypes.iter().copied());
             candidate_sources.push(source.peekable());
         }
-        let mut candidate_archetypes = Vec::new();
-        merge_sorted_archetype_iterators(&mut candidate_sources, |id| {
-            candidate_archetypes.push(id)
-        });
-
-        for archetype_id in candidate_archetypes {
+        // The union is already visited in deterministic ArchetypeId order.
+        // Process each candidate inside the merge instead of materializing a
+        // second O(candidate archetypes) vector before matching/filtering it.
+        merge_sorted_archetype_iterators(&mut candidate_sources, |archetype_id| {
             report.stats.candidate_archetype_checks += 1;
             if matched_archetypes.binary_search(&archetype_id).is_err() {
-                continue;
+                return;
             }
             report.stats.matched_archetypes += 1;
             let Some(archetype) = world.archetypes().get(archetype_id) else {
-                continue;
+                return;
             };
             let table = archetype.table();
             let rpc = table.rows_per_chunk();
@@ -717,7 +715,7 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
             }
 
             if candidates.is_empty() || len == 0 {
-                continue;
+                return;
             }
 
             // SAFETY: `archetype` is a matched archetype for F, so every
@@ -751,7 +749,7 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
                 report.stats.reported_chunks += 1;
                 report.stats.reported_rows += end - start;
             });
-        }
+        });
         if let Some(cursor) = journal_baseline {
             self.set_dirty_column_cursor(cursor);
         }
