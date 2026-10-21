@@ -256,3 +256,9 @@ cell 库 `cargo clippy -j1 -p prism_world_physics_cell_runtime --features tasks 
 | 1024 | 8192 / 57344 | 359 / 441 / 1482 |
 
 每项同时断言轮询不释放额度、`cancel_all` 不提前释放额度、gate 放行后逐个收集 cancellation 且 usage 归零、完整旧快照保持不变。这个基准验证真实 worker 下 pending 路径，不衡量单次尾延迟、source 成本、终态收集/驻留发布、RSS/VRAM、GPU 或产品帧预算，也不承诺任意容量下固定成本。
+
+## Sphere–World SDF 接触生成
+
+`SdfPhysicsSnapshot::sphere_contact_manifold` 将一个球心查询转换为至多一个 `ContactManifold`，可供 physics narrow-phase 调用方收集。球心、floating origin 和半径使用毫米；输出 witness 使用相对同一 `physics_origin_mm` 的米坐标。`body_a` 是静态 World/SDF，`body_b` 是球。接触方向取距离增加方向的单位梯度，witness 按 physics core 契约满足 `point_a = point_b + penetration * normal`。精确相切保留零穿透 manifold，严格分离返回 `Value(None)`，缺失采样继续返回 `Unknown`；零半径、无有效梯度或无法表示为有限 physics 坐标时报错，不伪造法线或接触。
+
+该接缝使用连续距离/梯度查询（固定八角点采样、无 heap 分配），对 SDF 做一阶局部投影；它假设输入场的 signed-distance 正负方向一致，且 `physics_origin_mm` 与 solver 当前 floating origin 相同。量化、截断、粗 mip 或不准确 SDF 会直接影响接触位置和穿透估计，单点 manifold 也不提供平面接触 patch。当前没有把 SDF 纳入 physics broad phase、接触刷新/失效生命周期或 solver 调度；调用方仍需自行将返回 manifold 纳入正确的 tick，并对 `Unknown` 采取显式的保守策略。本 slice 不执行 GPU 查询或接触生成。

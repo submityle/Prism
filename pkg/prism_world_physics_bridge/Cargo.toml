@@ -2,7 +2,7 @@
 name = "prism_world_physics_bridge"
 version = "0.1.0"
 edition = "2024"
-description = "Validated world-terrain snapshot adapter for Prism physics heightfields."
+description = "Validated world terrain and SDF snapshot adapters for Prism physics consumers."
 license = "MIT OR Apache-2.0"
 publish = false
 
@@ -12,6 +12,7 @@ tasks = ["dep:prism_tasks"]
 
 [dependencies]
 prism_tasks = { path = "../prism_tasks", optional = true }
+prism_physics_core = { path = "../prism_physics_core" }
 prism_physics_gpu = { path = "../prism_physics_gpu" }
 prism_world_residency = { path = "../prism_world_residency" }
 prism_world_terrain = { path = "../prism_world_terrain" }

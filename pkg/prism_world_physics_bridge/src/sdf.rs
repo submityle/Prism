@@ -14,6 +14,7 @@ use prism_world_residency::{SdfQueryConsumer, SparseSdfBrickGrid, SparseSdfQuery
 
 mod sampling;
 pub use sampling::SdfDistanceGradient;
+mod contact;
 mod rebake;
 pub use rebake::{
     SdfRebakeError, SdfRebakeLimits, SdfRebakePoint, SdfRebakeRegion, SdfRebakeReport,
@@ -222,6 +223,9 @@ pub enum SdfBridgeError {
         /// Maximum logical bytes admitted.
         limit: usize,
     },
+    /// Contact generation received an invalid radius or a resident field with
+    /// no usable gradient/finite physics-space representation.
+    InvalidContactData,
     /// A replacement revision is not newer than the resident revision.
     StaleRevision {
         /// Resident source revision.
@@ -254,6 +258,9 @@ impl core::fmt::Display for SdfBridgeError {
                 formatter,
                 "world SDF needs {required} logical bytes; limit is {limit}"
             ),
+            Self::InvalidContactData => {
+                formatter.write_str("world SDF contact input or gradient is invalid")
+            }
             Self::StaleRevision { current, incoming } => write!(
                 formatter,
                 "world SDF revision {incoming} is not newer than {current}"
