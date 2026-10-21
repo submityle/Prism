@@ -413,7 +413,7 @@ pkg/
   prism_physics_ecs      // Prism ECS/App 固定步同步桥
 ```
 
-prism_physics_core 不依赖 Prism ECS（纯数据 + trait），保证可被服务器逻辑或其他宿主复用；prism_physics_ecs 只做同步桥接。当前真实 ECS 固定步顺序为 `Sync -> Step -> Writeback`。MPM 已通过 `MpmBinding -> MpmRuntime -> MpmParticleSnapshot` 接入同一固定步边界：authoring/backend/budget 变化会重建 runtime，固定步不匹配或 snapshot 失败不会发布伪造状态，preferred-GPU 会记录实际 GPU authority 或显式 CPU fallback。该链路仍未包含表面重建、渲染提取和零拷贝 render-buffer 共享。
+prism_physics_core 不依赖 Prism ECS（纯数据 + trait），保证可被服务器逻辑或其他宿主复用；prism_physics_ecs 只做同步桥接。当前真实 ECS 固定步顺序为 `Sync -> Step -> Writeback`。MPM 已通过 `MpmBinding -> MpmRuntime -> MpmParticleSnapshot` 接入同一固定步边界：authoring/backend/budget 变化会重建 runtime，固定步不匹配或 snapshot 失败不会发布伪造状态，preferred-GPU 会记录实际 GPU authority 或显式 CPU fallback。可选 `MpmSurfaceConfig` 在 Writeback 中按有界 CPU scalar-field / marching-tetrahedra 路径发布与粒子快照同版本的 `MpmSurfaceSnapshot`；节点与单元预算在分配前校验，关闭配置或重建失败时清除旧 surface，空粒子快照发布空 mesh。该链路仍未包含 render-world extraction、mesh asset/GPU buffer 更新、零拷贝共享、场景 Demo 与性能验收。
 
 ---
 
@@ -429,7 +429,7 @@ prism_physics_core 不依赖 Prism ECS（纯数据 + trait），保证可被服�
 | M4 | 布料 / 软体 / 绳索（统一约束复用） | 交互式布料 | ✅ 完成 |
 | M4.5 | 离线烘焙 + Golden replay CI | 缓存回放 demo | ✅ 完成 |
 | M5 | GPU 后端（流体/大布料/破碎） | 十万粒子 | 🟡 kernel 与独立 parity 测试已实现；MPM 已有统一 runtime 与 ECS 粒子 snapshot 回写，其他求解器跨层回写、真机覆盖和性能证据仍缺失 |
-| M5.5 | MPM（沙/雪/泥）+ FLIP/APIC 流体 + 表面重建 | 溃坝/沙堆 demo | 🟡 CPU/GPU MPM stage、resident runtime、ECS 固定步 bridge 与公共 GPU fluid step 的 APIC 路由已实现；表面重建、渲染/零拷贝接线、场景 Demo 与性能验收未完成 |
+| M5.5 | MPM（沙/雪/泥）+ FLIP/APIC 流体 + 表面重建 | 溃坝/沙堆 demo | 🟡 CPU/GPU MPM stage、resident runtime、ECS 固定步粒子快照、预算受限的 CPU 表面重建与版本化 surface snapshot、公共 GPU fluid step 的 APIC 路由已实现；render-world extraction、mesh/GPU buffer 更新、零拷贝接线、场景 Demo、真机 GPU 覆盖与性能验收未完成 |
 | M7 | VBD / 降阶软体 + 自适应 LOD | 巨型软体实时 | ✅ 完成 |
 | M8 | 约束 DSL + 参数热重载 | 编辑器实时调参 | ✅ 完成 |
 | M9 | GPU-Driven 持久化管线 + 实时 Voronoi 破碎 | 零拷贝 + 动态裂纹 | 🟡 CPU 破碎和部分 GPU stage 已有；动态拓扑、生产持久化调度与渲染回写未完成 |
@@ -1266,4 +1266,4 @@ CPU/GPU parity 已完成；这些仍作为 M15 未完成验收项。
 
 ---
 
-*本文档为 Prism Physics 设计规格 v0.7，不含 AI/ML 内容。已验证存在：CPU core 固定步、Prism ECS 的 `Sync -> Step -> Writeback` 刚体/软体桥、离线 driver 运行时切片、磁盘 cache 校验切片、MPM CPU/GPU stage、resident runtime 与 ECS 固定步粒子 snapshot bridge、公共 GPU fluid step 的 APIC 路由、M10–M12 的部分 core 原语（M12 含 `RigidBodyAero` ECS 生命周期桥与固定步推进器测试）、M14 articulation core，以及 M15 拓扑撕裂的版本化 render/collision update 原语、core 原子 consumer 和 ECS 生命周期/有序重试 adapter bridge。未完成：M5/M5.5 的表面重建、渲染/零拷贝接线、场景 Demo、广泛真机 GPU 覆盖与性能验收，M9–M12 的完整跨层生产链和 demo，M13 的完整布偶限位/群体验收，M14 的接触耦合/退化/GPU 多链验收，M15 的具体渲染缝合、GPU 重排、CCD/BVH 生产 consumer、CPU/GPU parity 与完整场景验收，以及性能目标的匹配硬件 P50/P95/P99 证据。当前主机无 wgpu adapter，因此 resident GPU parity 只能记录为 skipped，不能写成通过。*
+*本文档为 Prism Physics 设计规格 v0.7，不含 AI/ML 内容。已验证存在：CPU core 固定步、Prism ECS 的 `Sync -> Step -> Writeback` 刚体/软体桥、离线 driver 运行时切片、磁盘 cache 校验切片、MPM CPU/GPU stage、resident runtime、ECS 固定步粒子快照及预算受限的 CPU 表面重建/surface snapshot bridge、公共 GPU fluid step 的 APIC 路由、M10–M12 的部分 core 原语（M12 含 `RigidBodyAero` ECS 生命周期桥与固定步推进器测试）、M14 articulation core，以及 M15 拓扑撕裂的版本化 render/collision update 原语、core 原子 consumer 和 ECS 生命周期/有序重试 adapter bridge。未完成：M5/M5.5 的 render-world surface extraction、mesh/GPU buffer 更新、零拷贝接线、场景 Demo、广泛真机 GPU 覆盖与性能验收，M9–M12 的完整跨层生产链和 demo，M13 的完整布偶限位/群体验收，M14 的接触耦合/退化/GPU 多链验收，M15 的具体渲染缝合、GPU 重排、CCD/BVH 生产 consumer、CPU/GPU parity 与完整场景验收，以及性能目标的匹配硬件 P50/P95/P99 证据。当前主机无 wgpu adapter，因此 resident GPU parity 只能记录为 skipped，不能写成通过。*

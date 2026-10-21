@@ -22,7 +22,7 @@ pub use m15_bridge::{
 };
 pub use mpm::{
     MpmAuthority, MpmBinding, MpmDiagnostic, MpmDiagnostics, MpmIssue, MpmParticleSnapshot,
-    MpmRuntimeInfo, MpmRuntimeResource,
+    MpmRuntimeInfo, MpmRuntimeResource, MpmSurfaceConfig, MpmSurfaceSnapshot,
 };
 pub use prism_physics_gpu::{MpmBackendPolicy, MpmFallbackReason, MpmRuntimeError};
 

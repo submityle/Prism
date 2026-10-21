@@ -4,7 +4,8 @@ use prism_app::{App, TimeUpdateStrategy};
 use prism_physics_core::mpm::{Grid, MaterialPoints, MpmConfig, MpmMaterial, MpmSolver};
 use prism_physics_ecs::{
     MpmAuthority, MpmBackendPolicy, MpmBinding, MpmDiagnostics, MpmFallbackReason, MpmIssue,
-    MpmParticleSnapshot, MpmRuntimeResource, PhysicsBindings, PrismPhysicsPlugin, RigidBody, Vec3,
+    MpmParticleSnapshot, MpmRuntimeResource, MpmSurfaceConfig, MpmSurfaceSnapshot, PhysicsBindings,
+    PrismPhysicsPlugin, RigidBody, Vec3,
 };
 use prism_transform::Transform;
 
@@ -75,6 +76,63 @@ fn mpm_runs_with_rigid_body_and_publishes_versioned_snapshot() {
     assert_eq!(diagnostics.tick, 2);
     assert_eq!(diagnostics.steps, 1);
     assert!(diagnostics.issues.is_empty());
+}
+
+#[test]
+fn mpm_surface_reconstruction_tracks_source_version_and_clears_when_disabled() {
+    let mut app = app();
+    let entity = app
+        .world_mut()
+        .spawn((
+            MpmBinding::cpu(solver()).with_surface_reconstruction(MpmSurfaceConfig {
+                radius: 0.2,
+                dx: 0.05,
+                iso: 0.1,
+                padding_cells: 1,
+                max_field_nodes: 100_000,
+                max_cells: 20_000,
+            }),
+        ));
+
+    app.update();
+    let particles = app.world().get::<MpmParticleSnapshot>(entity).unwrap();
+    let surface = app.world().get::<MpmSurfaceSnapshot>(entity).unwrap();
+    assert_eq!(surface.version, particles.version);
+    assert_eq!(surface.tick, particles.tick);
+    assert!(!surface.mesh.is_empty());
+    assert!(surface.mesh.indices_are_valid());
+    assert_eq!(surface.mesh.normals.len(), surface.mesh.positions.len());
+
+    app.world_mut()
+        .get_mut::<MpmBinding>(entity)
+        .unwrap()
+        .surface = None;
+    app.update();
+    assert!(app.world().get::<MpmSurfaceSnapshot>(entity).is_none());
+}
+
+#[test]
+fn mpm_surface_budget_rejects_unbounded_field_before_allocation() {
+    let mut app = app();
+    let entity = app
+        .world_mut()
+        .spawn((
+            MpmBinding::cpu(solver()).with_surface_reconstruction(MpmSurfaceConfig {
+                max_field_nodes: 8,
+                max_cells: 1,
+                ..MpmSurfaceConfig::default()
+            }),
+        ));
+
+    app.update();
+    assert!(app.world().get::<MpmSurfaceSnapshot>(entity).is_none());
+    assert!(app
+        .world()
+        .resource::<MpmDiagnostics>()
+        .issues
+        .iter()
+        .any(|diagnostic| diagnostic.entity == Some(entity)
+            && diagnostic.issue == MpmIssue::SurfaceBudgetExceeded));
 }
 
 #[test]
