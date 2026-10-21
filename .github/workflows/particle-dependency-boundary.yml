@@ -1,0 +1,30 @@
+name: Particle dependency boundary
+
+permissions:
+  contents: read
+
+on:
+  pull_request:
+    paths:
+      - "**/Cargo.toml"
+      - "Cargo.lock"
+      - "tools/check_particle_dependency_boundary.sh"
+      - ".github/workflows/particle-dependency-boundary.yml"
+  push:
+    branches: [main]
+    paths:
+      - "**/Cargo.toml"
+      - "Cargo.lock"
+      - "tools/check_particle_dependency_boundary.sh"
+      - ".github/workflows/particle-dependency-boundary.yml"
+
+jobs:
+  no-bevy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/install-rust
+      - name: Reject direct and transitive Bevy crates
+        run: bash tools/check_particle_dependency_boundary.sh
