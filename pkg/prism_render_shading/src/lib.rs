@@ -68,6 +68,7 @@ mod stylized;
 mod stylized_hair;
 mod subsurface;
 mod surface;
+mod surface_geometry;
 mod taa;
 mod tangent;
 mod texture_lod;
@@ -306,6 +307,12 @@ pub use subsurface::evaluate_subsurface_direct;
 pub use surface::{
     reconstruct_surface, GpuShadingPrimitive, GpuShadingVertex, SurfaceReconstructionError,
     SurfaceReconstructionFlags, SurfaceReconstructionInput, SurfaceSampleGeometry,
+};
+pub use surface_geometry::{
+    build_shading_geometry, ShadingGeometry, ShadingGeometryBuildError,
+    SHADING_GEOMETRY_FLAG_ACTIVE, SHADING_GEOMETRY_FLAG_INVALID,
+    SHADING_GEOMETRY_FLAG_MISSING_NORMAL, SHADING_GEOMETRY_FLAG_MISSING_TANGENT,
+    SHADING_GEOMETRY_FLAG_MISSING_UV,
 };
 pub use taa::{
     halton, resolve_taa, rgb_to_ycocg, taa_jitter, tonemap_weight, ycocg_to_rgb, TaaParams,

@@ -20,7 +20,8 @@ pub use shading::{
     build_shading_geometry, RenderShadingGeometry, RenderShadingGeometryHeader,
     RenderShadingPrimitive, RenderShadingVertex, ShadingGeometryBuildError,
     SHADING_GEOMETRY_FLAG_ACTIVE, SHADING_GEOMETRY_FLAG_INVALID,
-    SHADING_GEOMETRY_FLAG_MISSING_NORMAL, SHADING_GEOMETRY_FLAG_MISSING_UV,
+    SHADING_GEOMETRY_FLAG_MISSING_NORMAL, SHADING_GEOMETRY_FLAG_MISSING_TANGENT,
+    SHADING_GEOMETRY_FLAG_MISSING_UV,
 };
 
 pub use shading_buffers::RenderShadingGeometryBuffers;

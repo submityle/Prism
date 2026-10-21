@@ -5,8 +5,6 @@ use bevy_render::{
     render_resource::{AtomicPod, ShaderType},
 };
 use bytemuck::{Pod, Zeroable};
-use prism_mesh::{Mesh, VertexAttributeValues, POSITION_ATTRIBUTE};
-use prism_render_driver::PrimitiveTopology;
 use prism_render_shading::{GpuShadingPrimitive, GpuShadingVertex};
 
 /// Geometry-table header addressed by a stable geometry index.
@@ -38,177 +36,24 @@ impl RenderShadingGeometryHeader {
         self.vertex_offset.checked_add(local_index)
     }
 }
-
 /// Stable vertex row used by compute resolve and offline export.
 pub type RenderShadingVertex = GpuShadingVertex;
 
 /// Stable triangle row used by compute resolve and offline export.
 pub type RenderShadingPrimitive = GpuShadingPrimitive;
 
-/// CPU-side payload that is uploaded to the render-world shading table.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct RenderShadingGeometry {
-    pub vertices: Vec<RenderShadingVertex>,
-    pub primitives: Vec<RenderShadingPrimitive>,
-    pub flags: u32,
-}
+pub type RenderShadingGeometry = prism_render_shading::ShadingGeometry;
+pub type ShadingGeometryBuildError = prism_render_shading::ShadingGeometryBuildError;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ShadingGeometryBuildError {
-    MissingPositions,
-    UnsupportedPositions,
-    MismatchedAttributeLength,
-    UnsupportedTopology,
-    InvalidIndex,
-}
-
-/// Builds the stable surface table while the source mesh is still accessible
-/// in the main world. Meshes extracted with `RENDER_WORLD` only cannot provide
-/// this payload; callers must retain `MAIN_WORLD` usage for compute shading.
-pub fn build_shading_geometry(
-    mesh: &Mesh,
-) -> Result<RenderShadingGeometry, ShadingGeometryBuildError> {
-    let positions = match attribute_values(mesh, POSITION_ATTRIBUTE) {
-        Some(VertexAttributeValues::Float32x3(values)) => values,
-        Some(_) => return Err(ShadingGeometryBuildError::UnsupportedPositions),
-        None => return Err(ShadingGeometryBuildError::MissingPositions),
-    };
-    let normals = optional_float3(mesh, "Vertex_Normal")?;
-    let uvs = optional_float2(mesh, "Vertex_Uv0")?;
-    let tangents = optional_float4(mesh, "Vertex_Tangent")?;
-    if normals.is_some_and(|values| values.len() != positions.len())
-        || uvs.is_some_and(|values| values.len() != positions.len())
-        || tangents.is_some_and(|values| values.len() != positions.len())
-    {
-        return Err(ShadingGeometryBuildError::MismatchedAttributeLength);
-    }
-    let mut flags = 0;
-    if normals.is_none() {
-        flags |= SHADING_GEOMETRY_FLAG_MISSING_NORMAL;
-    }
-    if uvs.is_none() {
-        flags |= SHADING_GEOMETRY_FLAG_MISSING_UV;
-    }
-    if tangents.is_none() {
-        flags |= SHADING_GEOMETRY_FLAG_MISSING_TANGENT;
-    }
-    let vertices = positions
-        .iter()
-        .enumerate()
-        .map(|(index, position)| RenderShadingVertex {
-            position: *position,
-            _position_padding: 0.0,
-            normal: normals.map_or([0.0; 3], |values| values[index]),
-            _normal_padding: 0.0,
-            tangent: tangents.map_or([0.0, 0.0, 0.0, 1.0], |values| values[index]),
-            uv: uvs.map_or([0.0; 2], |values| values[index]),
-            flags,
-            _padding: 0,
-        })
-        .collect();
-    let indices: Vec<usize> = match mesh.indices() {
-        None => (0..positions.len()).collect(),
-        Some(indices) => indices
-            .to_u32()
-            .into_iter()
-            .map(|index| {
-                usize::try_from(index).map_err(|_| ShadingGeometryBuildError::InvalidIndex)
-            })
-            .collect::<Result<_, _>>()?,
-    };
-    let primitives = triangle_indices(mesh.primitive_topology(), &indices)?
-        .into_iter()
-        .map(|[a, b, c]| {
-            if [a, b, c].into_iter().any(|index| index >= positions.len()) {
-                return Err(ShadingGeometryBuildError::InvalidIndex);
-            }
-            Ok(RenderShadingPrimitive {
-                indices: [a as u32, b as u32, c as u32],
-                flags,
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(RenderShadingGeometry {
-        vertices,
-        primitives,
-        flags,
-    })
-}
-
-fn optional_float3<'a>(
-    mesh: &'a Mesh,
-    attribute: &'static str,
-) -> Result<Option<&'a Vec<[f32; 3]>>, ShadingGeometryBuildError> {
-    match attribute_values(mesh, attribute) {
-        None => Ok(None),
-        Some(VertexAttributeValues::Float32x3(values)) => Ok(Some(values)),
-        Some(_) => Err(ShadingGeometryBuildError::MismatchedAttributeLength),
-    }
-}
-
-fn optional_float2<'a>(
-    mesh: &'a Mesh,
-    attribute: &'static str,
-) -> Result<Option<&'a Vec<[f32; 2]>>, ShadingGeometryBuildError> {
-    match attribute_values(mesh, attribute) {
-        None => Ok(None),
-        Some(VertexAttributeValues::Float32x2(values)) => Ok(Some(values)),
-        Some(_) => Err(ShadingGeometryBuildError::MismatchedAttributeLength),
-    }
-}
-
-fn optional_float4<'a>(
-    mesh: &'a Mesh,
-    attribute: &'static str,
-) -> Result<Option<&'a Vec<[f32; 4]>>, ShadingGeometryBuildError> {
-    match attribute_values(mesh, attribute) {
-        None => Ok(None),
-        Some(VertexAttributeValues::Float32x4(values)) => Ok(Some(values)),
-        Some(_) => Err(ShadingGeometryBuildError::MismatchedAttributeLength),
-    }
-}
-
-fn attribute_values<'a>(mesh: &'a Mesh, name: &'static str) -> Option<&'a VertexAttributeValues> {
-    mesh.attributes()
-        .find(|(attribute, _)| attribute.name == name)
-        .map(|(_, values)| values)
-}
-
-fn triangle_indices(
-    topology: PrimitiveTopology,
-    indices: &[usize],
-) -> Result<Vec<[usize; 3]>, ShadingGeometryBuildError> {
-    match topology {
-        PrimitiveTopology::TriangleList => Ok(indices
-            .chunks_exact(3)
-            .map(|chunk| [chunk[0], chunk[1], chunk[2]])
-            .collect()),
-        PrimitiveTopology::TriangleStrip => Ok(indices
-            .windows(3)
-            .enumerate()
-            .map(|(index, window)| {
-                if index % 2 == 0 {
-                    [window[0], window[1], window[2]]
-                } else {
-                    [window[1], window[0], window[2]]
-                }
-            })
-            .collect()),
-        _ => Err(ShadingGeometryBuildError::UnsupportedTopology),
-    }
-}
-
-pub const SHADING_GEOMETRY_FLAG_ACTIVE: u32 = 1 << 0;
-pub const SHADING_GEOMETRY_FLAG_MISSING_NORMAL: u32 = 1 << 1;
-pub const SHADING_GEOMETRY_FLAG_MISSING_UV: u32 = 1 << 2;
-pub const SHADING_GEOMETRY_FLAG_INVALID: u32 = 1 << 3;
-pub const SHADING_GEOMETRY_FLAG_MISSING_TANGENT: u32 = 1 << 4;
+pub use prism_render_shading::{
+    build_shading_geometry, SHADING_GEOMETRY_FLAG_ACTIVE,
+    SHADING_GEOMETRY_FLAG_INVALID, SHADING_GEOMETRY_FLAG_MISSING_NORMAL,
+    SHADING_GEOMETRY_FLAG_MISSING_TANGENT, SHADING_GEOMETRY_FLAG_MISSING_UV,
+};
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use prism_mesh::{Indices, MeshVertexAttribute};
-    use prism_render_driver::VertexFormat;
 
     #[test]
     fn rows_match_compute_surface_abi() {
@@ -227,31 +72,5 @@ mod tests {
         assert_eq!(header.global_vertex_index(0), Some(11));
         assert_eq!(header.global_vertex_index(2), Some(13));
         assert_eq!(header.global_vertex_index(3), None);
-    }
-
-    #[test]
-    fn builds_indexed_mesh_and_marks_missing_attributes() {
-        let mesh = Mesh::new(PrimitiveTopology::TriangleList)
-            .with_attribute(
-                MeshVertexAttribute::new(POSITION_ATTRIBUTE, VertexFormat::Float32x3, 0),
-                VertexAttributeValues::Float32x3(vec![
-                    [0.0, 0.0, 0.0],
-                    [1.0, 0.0, 0.0],
-                    [0.0, 1.0, 0.0],
-                ]),
-            )
-            .unwrap()
-            .indexed(Indices::Uint16(vec![0, 1, 2]));
-        let table = build_shading_geometry(&mesh).unwrap();
-        assert_eq!(table.vertices.len(), 3);
-        assert_eq!(
-            table.primitives,
-            vec![RenderShadingPrimitive {
-                indices: [0, 1, 2],
-                flags: SHADING_GEOMETRY_FLAG_MISSING_NORMAL
-                    | SHADING_GEOMETRY_FLAG_MISSING_UV
-                    | SHADING_GEOMETRY_FLAG_MISSING_TANGENT,
-            }]
-        );
     }
 }
