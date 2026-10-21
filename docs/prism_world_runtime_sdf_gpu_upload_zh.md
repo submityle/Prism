@@ -86,6 +86,7 @@ IntegratedGpu 上 4/4 通过（测试严格要求硬件 adapter；沙盒内复�
 ## 产品边界
 
 本切片交付同步 runtime→GPU ring 上传与同提交消费契约，不是整个设计 §17 的完成证明。
-相机/焦点系统自动驱动、对象 dirty 传播及 bake 编排、真实 physics solver/GI/renderer/nav
+世界毫米坐标焦点驱动已由 `WorldSdfGpuFocus` 接通（见 `prism_world_runtime_sdf_focus_zh.md`）；
+renderer 相机 tick 的产品装配、对象 dirty 传播及 bake 编排、真实 physics solver/GI/renderer/nav
 消费者、跨消费者帧预算、设备恢复和产品性能验收仍须对应端到端证据。无需改变权威状态
 即可丢弃并重新创建该派生缓存。

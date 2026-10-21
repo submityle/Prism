@@ -358,6 +358,19 @@ cell host 后台 SDF 重烘装配增加默认关闭的 `tasks` feature：复用�
 
 ## 尚未交付的边界
 
+2026-10-21 runtime SDF 更新：`WorldSdfGpuClipmap` 已接通 bounded dirty scheduler 与
+固定槽 GPU ring 的增量上传、删除失效及同提交 consumer；专项证据与旧共享工作树依赖
+阻断记录见 `prism_world_runtime_sdf_gpu_upload_zh.md`（提交 `40af58469`）。
+`WorldSdfFocusDriver`/`WorldSdfGpuFocus` 进一步接通全局 i64 毫米坐标、负数 floor、
+逐轴迟滞、stationary no-op 和上传成功后的 focus 提交；单 Y 平面覆盖强制要求 Y 无迟滞、
+水平有迟滞时 radius >= 1，详见 `prism_world_runtime_sdf_focus_zh.md`。这些接缝不代替
+对象自动 dirty/bake、真实消费者、三维窗口或跨消费者实时帧预算。
+本轮 focus 验证：runtime lib 148 passed，`gpu_proxy` lib 168 passed / 7 ignored，
+no-default check 与限定范围 Clippy 通过；Apple M2/Metal 跨沙盒 focus 7/7、既有上传
+4/4 实卡测试通过，默认忽略的宿主生命周期测试也已显式补跑 7/7 通过。
+主树 GPU lib 仍被其他模块 `prism_asset::scheduler` 的编译错误
+阻断，隔离副本 123 passed 不算主树通过；详细命令、微基准尾部及范围见上述 focus 文档。
+
 以下项目仍需要独立硬件或端到端证据，不能用 policy primitive 冒充完成：
 
 - M4 散布：行星/曲率/数据层/跨散布层规则、风与交互、逐键并发删除协议、索引增量编辑、蓝噪声目标、产品 proxy renderer 接线及大规模产品散布性能验收；`GpuPlanetPlacement` 已交付固定容量的 source/projection/finalize kernel、signed-i128 上传 ABI、compact/indirect 输出、Naga/device-free 回归，并新增逐候选 identity/rank/height numerator/accepted/invalid 语义 parity 回归；本轮严格 Metal 运行因无可用 adapter 未执行 shader，真实设备 parity 仍待重跑。这仍不是 CPU i64 几何坐标逐位 parity，也没有 scene/ECS decoder 或完整行星产品链路。二维贴地 placement 已有 reset compute、原生 registration snapshot、backend-neutral RenderGraph lowering、Null RHI 命令记录及 Apple M2/Metal 真实 GPU 回归；仍未完成 persistent RHI registration RAII lease、renderer draw pipeline/bind group 与 scene target、实际 RenderGraph native record/encode/submit、completion tracker/generation retirement，以及 `prism_render_scene` mesh/material/unified visibility 接线。已有内容中立有界 CPU/GPU 源散布、CPU/GPU 作者密度/种类场及各自可选刷子空间/有序索引、真实heightfield的CPU/GPU高度/离地带/坡度精确稳定过滤、独立身份的CPU二维精确贴地放置及其PPLD完整键持久删除、CPU/GPU二维贴地放置 kernel、CPU源/作者场/地形及GPU完整键删除与CPU持久文件恢复、独立 resident 密度 coverage/dither 与真实消费测试，不等于完整产品散布链路。

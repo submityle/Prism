@@ -47,6 +47,15 @@ pub use sdf_clipmap::{
     WorldSdfClipmapCommit, WorldSdfClipmapConfig, WorldSdfClipmapError, WorldSdfClipmapPlan,
     WorldSdfClipmapScheduler,
 };
+mod sdf_focus;
+pub use sdf_focus::{
+    WorldSdfFocusConfig, WorldSdfFocusDriver, WorldSdfFocusError, WorldSdfFocusUpdate,
+    WorldSdfFocusUpdateError,
+};
+#[cfg(feature = "gpu_proxy")]
+mod sdf_focus_gpu;
+#[cfg(feature = "gpu_proxy")]
+pub use sdf_focus_gpu::{WorldSdfGpuFocus, WorldSdfGpuFocusError};
 #[cfg(any(test, feature = "gpu_proxy"))]
 mod sdf_clipmap_upload;
 #[cfg(feature = "gpu_proxy")]
