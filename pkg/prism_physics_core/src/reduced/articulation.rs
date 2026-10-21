@@ -646,7 +646,9 @@ pub struct ArticulationJoint {
     pub limits: JointLimits,
     /// Optional bounded servo.
     pub motor: Option<JointMotor>,
-    /// Viscous joint damping coefficient.
+    /// Mass-independent generalized-velocity decay rate in inverse seconds.
+    /// Integration uses `qd_next = (qd + dt * qdd) / (1 + dt * damping)`;
+    /// this is not a physical viscous torque/force coefficient.
     pub damping: Real,
     /// Reflected motor/gear inertia added in joint space.
     pub armature: Real,
@@ -703,7 +705,9 @@ impl ArticulationJoint {
         self
     }
 
-    /// Sets viscous damping.
+    /// Sets the implicit generalized-velocity decay rate (inverse seconds).
+    /// This scales the accelerated joint velocity, not the floating-base
+    /// velocity, and is distinct from motor feedback damping.
     #[must_use]
     pub const fn with_damping(mut self, damping: Real) -> Self {
         self.damping = damping;

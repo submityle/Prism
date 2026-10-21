@@ -68,7 +68,10 @@ pub enum UnsupportedJointPolicy {
     Motor {
         link: usize,
     },
-    /// Independent damping, armature, or non-equivalent fixed/spherical limits.
+    /// Independent generalized-velocity decay, armature, or non-equivalent
+    /// fixed/spherical limits. Reduced damping divides the accelerated joint
+    /// velocity by `1 + dt * damping`; a viscous bounded-PD effort is not an
+    /// equivalent replacement.
     InertOrExtraParameters {
         link: usize,
     },
@@ -102,6 +105,11 @@ pub enum ArticulationHandoffError {
 impl PhysicsWorld {
     /// Atomically converts a degraded articulation to maximum-coordinate
     /// bodies, surviving joints, and ordinary body colliders.
+    ///
+    /// Scalar motor feedback damping is preserved as effort. Independent
+    /// reduced velocity decay on a surviving joint has no equivalent policy
+    /// here and is rejected without mutating the world. Policies on the removed
+    /// broken joint do not need conversion.
     pub fn handoff_articulation(
         &mut self,
         handle: ArticulationHandle,
@@ -697,6 +705,9 @@ fn validate_joint_policies(
                 UnsupportedJointPolicy::Motor { link },
             ));
         }
+        // Reduced independent damping is an implicit, mass-independent decay
+        // of generalized velocity, not the physical effort -damping * qdot.
+        // Reject it before allocating anything rather than change its law.
         if joint.damping != 0.0
             || joint.armature != 0.0
             || (matches!(
@@ -720,7 +731,8 @@ fn scalar_motor(
         return Ok(None);
     };
     // Only the active scalar x component participates, exactly as in the
-    // reduced effort law. Never convert this policy into an XPBD `Motor`.
+    // reduced effort law. Motor feedback damping is a physical effort gain;
+    // independent reduced velocity decay has already been rejected above.
     BoundedPd::new(
         f64::from(motor.target_position.x),
         f64::from(motor.target_velocity.x),

@@ -13,12 +13,12 @@ use prism_physics_core::reduced::articulation::handoff::{
 };
 use prism_physics_core::reduced::{
     ArticulationBase, ArticulationBuilder, ArticulationJoint, JointLimits, JointMotor,
-    SpatialInertia, SpatialTransform,
+    SpatialForce, SpatialInertia, SpatialTransform,
 };
 use prism_physics_core::snapshot::{world_hash::hash_world, FullStateSnapshot};
 use prism_physics_core::solver::xpbd::FieldStepError;
 use prism_physics_core::solver::{Solver, XpbdConfig, XpbdSolver};
-use prism_physics_core::state::body::BodyDesc;
+use prism_physics_core::state::body::{BodyDesc, MassProperties};
 use prism_physics_core::state::handle::BodyHandle;
 use prism_physics_core::world::PhysicsWorld;
 
@@ -414,12 +414,189 @@ fn serial_and_parallel_islands_preserve_drives_history_loads_and_snapshot_hash()
 }
 
 #[test]
-fn damping_armature_and_non_equivalent_chart_policies_still_reject_atomically() {
+fn independent_reduced_decay_rejects_atomically_with_or_without_a_motor() {
+    let motor = JointMotor::new(Vec3::ONE, Vec3::ONE, 2.0, 1.0, Vec3::splat(10.0));
+    for base in [ArticulationBase::Fixed, ArticulationBase::Floating] {
+        for hinge in [false, true] {
+            for has_motor in [false, true] {
+                for broken in [0usize, 1] {
+                    let surviving = 1 - broken;
+                    let mut policy = if hinge {
+                        ArticulationJoint::revolute(Vec3::Z)
+                    } else {
+                        ArticulationJoint::prismatic(Vec3::X)
+                    }
+                    .with_damping(0.25);
+                    if has_motor {
+                        policy = policy.with_motor(motor);
+                    }
+                    let inertia = SpatialInertia::diagonal(2.0, Vec3::ZERO, Vec3::splat(7.0));
+                    let mut builder =
+                        ArticulationBuilder::new(base, inertia).with_gravity(Vec3::ZERO);
+                    for link in 0usize..2 {
+                        builder
+                            .add_link(
+                                link.checked_sub(1),
+                                SpatialTransform::IDENTITY,
+                                inertia,
+                                if link == surviving {
+                                    policy
+                                } else {
+                                    ArticulationJoint::fixed()
+                                },
+                            )
+                            .unwrap();
+                    }
+                    let mut tree = builder.build().unwrap();
+                    assert!(tree.set_velocity(0, 1.0));
+                    tree.break_joint(broken);
+                    let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+                    // Rejection must not affect unrelated live bodies either.
+                    world.spawn(BodyDesc::dynamic_at(Vec3::ONE));
+                    let source = world.spawn_articulation(tree);
+                    let before = hash_world(&world).unwrap();
+                    let mut replay = FullStateSnapshot::capture(0, &world).fork_world();
+                    let expected = Err(ArticulationHandoffError::UnsupportedJointPolicy(
+                        UnsupportedJointPolicy::InertOrExtraParameters { link: surviving },
+                    ));
+                    for _ in 0..2 {
+                        assert_eq!(world.handoff_articulation(source), expected);
+                        assert_eq!(replay.handoff_articulation(source), expected);
+                        assert_eq!(hash_world(&world).unwrap(), before);
+                        assert_eq!(hash_world(&replay).unwrap(), before);
+                        assert_eq!(world.bodies.len(), 1);
+                        assert!(world.joints.is_empty());
+                        assert!(world.articulations.contains(source));
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn reduced_decay_scales_accelerated_velocity_independently_of_mass_and_inertia() {
+    for hinge in [false, true] {
+        for effective_mass in [2.0f32, 7.0] {
+            for h in [0.01f32, 0.04] {
+                for initial_speed in [-1.0f32, 1.0] {
+                    for acceleration in [0.0f32, 3.0] {
+                        let damping = 1.25;
+                        let inertia = SpatialInertia::diagonal(
+                            effective_mass,
+                            Vec3::ZERO,
+                            Vec3::splat(effective_mass),
+                        );
+                        let joint = if hinge {
+                            ArticulationJoint::revolute(Vec3::Z)
+                        } else {
+                            ArticulationJoint::prismatic(Vec3::X)
+                        }
+                        .with_damping(damping);
+                        let mut builder =
+                            ArticulationBuilder::new(ArticulationBase::Fixed, inertia)
+                                .with_gravity(Vec3::ZERO);
+                        builder
+                            .add_link(None, SpatialTransform::IDENTITY, inertia, joint)
+                            .unwrap();
+                        let mut tree = builder.build().unwrap();
+                        assert!(tree.set_velocity(0, initial_speed));
+                        let effort = effective_mass * acceleration;
+                        assert!(tree.set_link_force(
+                            0,
+                            if hinge {
+                                SpatialForce::new(Vec3::Z * effort, Vec3::ZERO)
+                            } else {
+                                SpatialForce::new(Vec3::ZERO, Vec3::X * effort)
+                            }
+                        ));
+                        let mut speed = initial_speed;
+                        let mut position = 0.0;
+                        for _ in 0..4 {
+                            let report = tree.step(h);
+                            assert!(!report.degraded);
+                            near(
+                                f64::from(report.joint_accelerations[0]),
+                                f64::from(acceleration),
+                                1.0e-5,
+                            );
+                            speed = (speed + h * acceleration) / (1.0 + h * damping);
+                            position += h * speed;
+                            near(f64::from(tree.velocities()[0]), f64::from(speed), 1.0e-6);
+                            near(f64::from(tree.positions()[0]), f64::from(position), 1.0e-6);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn physical_joint_damping_is_not_reduced_implicit_decay() {
+    let h = 0.04f32;
+    let damping = 1.25;
+    let reduced_speed = 1.0 / (1.0 + f64::from(h) * damping);
+    for hinge in [false, true] {
+        let mut observed = Vec::new();
+        for effective_mass in [2.0f32, 7.0] {
+            let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+            world.config.sleep.enabled = false;
+            let a = world.spawn(BodyDesc::static_at(Vec3::ZERO));
+            let b = world.spawn(
+                BodyDesc::dynamic_at(Vec3::ZERO)
+                    .with_damping(0.0, 0.0)
+                    .with_mass_properties(MassProperties {
+                        inv_mass: effective_mass.recip(),
+                        inv_inertia: Vec3::splat(effective_mass.recip()),
+                    }),
+            );
+            let kind = if hinge {
+                world.bodies.set_angular_velocity(b, Vec3::Z);
+                JointKind::Revolute(RevoluteJoint::new(Vec3::Z))
+            } else {
+                world.bodies.set_linear_velocity(b, Vec3::X);
+                JointKind::Prismatic(PrismaticJoint::new(Vec3::X))
+            };
+            let policy = BoundedPd::new(0.0, 0.0, 0.0, 0.0, 0.0)
+                .unwrap()
+                .with_joint_damping(damping)
+                .unwrap();
+            let joint = world.spawn_joint(
+                JointDesc::new(JointAnchor::at_center(a), JointAnchor::at_center(b), kind)
+                    .with_bounded_pd(policy),
+            );
+            let mut replay = FullStateSnapshot::capture(0, &world).fork_world();
+            solver(4, false, false).step(&mut world, h, 1);
+            solver(4, false, false).step(&mut replay, h, 1);
+            assert_eq!(hash_world(&world).unwrap(), hash_world(&replay).unwrap());
+            assert_eq!(world.joints.get(joint).unwrap().bounded_pd_failure, None);
+            let speed = if hinge {
+                world.bodies.angular_velocity(b).unwrap().z
+            } else {
+                world.bodies.linear_velocity(b).unwrap().x
+            };
+            // Explicit physical effort changes velocity through inverse mass.
+            let predicted = 1.0 - f64::from(h) * damping / f64::from(effective_mass);
+            // XPBD's normalized first-order quaternion prediction/recovery is
+            // a separate, known discretization effect, not joint damping.
+            let expected = if hinge {
+                predicted / (1.0 + (0.5 * f64::from(h) * predicted).powi(2)).sqrt()
+            } else {
+                predicted
+            };
+            near(f64::from(speed), expected, 2.0e-6);
+            assert!((f64::from(speed) - reduced_speed).abs() > 0.01);
+            observed.push(speed);
+        }
+        assert!(observed[1] > observed[0] + 0.01);
+    }
+}
+
+#[test]
+fn armature_and_non_equivalent_chart_policies_still_reject_atomically() {
     let motor = JointMotor::new(Vec3::ONE, Vec3::ONE, 2.0, 1.0, Vec3::splat(10.0));
     for policy in [
-        ArticulationJoint::revolute(Vec3::Z)
-            .with_motor(motor)
-            .with_damping(0.1),
         ArticulationJoint::prismatic(Vec3::X)
             .with_motor(motor)
             .with_armature(0.1),

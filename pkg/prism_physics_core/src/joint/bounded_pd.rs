@@ -1,7 +1,8 @@
 //! Scalar generalized-force actuation, separate from an XPBD position motor.
 //!
-//! Both targets participate in the same effort law. The cap applies to effort,
-//! not to a position correction or an iteration-local multiplier. A solver
+//! Both targets participate in the same motor effort law. The cap bounds motor
+//! effort; optional independent viscous effort is uncapped. Neither is a
+//! position correction or an iteration-local multiplier. A solver
 //! samples this law once before prediction and applies `effort * h` once per
 //! accepted substep, independently of its position-iteration count.
 
@@ -87,8 +88,9 @@ impl core::error::Error for BoundedPdError {}
 
 impl BoundedPd {
     /// Constructs a policy. Negative caps are canonicalized to their absolute
-    /// value, matching reduced-coordinate motor semantics. Zero disables all
-    /// effort; infinite caps are allowed deliberately.
+    /// value, matching reduced-coordinate motor semantics. Zero disables motor
+    /// effort, not independent viscous damping added with `with_joint_damping`;
+    /// infinite caps are allowed deliberately.
     pub fn new(
         target_position: f64,
         target_velocity: f64,
@@ -118,8 +120,11 @@ impl BoundedPd {
     /// Adds viscous damping owned by the generalized joint coordinate.
     ///
     /// This term is applied after the bounded motor effort and is therefore
-    /// not limited by `max_effort`. It is useful when migrating reduced
-    /// articulation damping, whose law is `-joint_damping * speed`.
+    /// not limited by `max_effort`. The coefficient multiplies speed to produce
+    /// physical effort (torque for a hinge, force for a slider), so the resulting
+    /// acceleration depends on inverse inertia/mass. This is not equivalent to
+    /// reduced articulation's mass-independent implicit generalized-velocity
+    /// decay `qd_next = (qd + dt * qdd) / (1 + dt * damping)`.
     pub fn with_joint_damping(mut self, joint_damping: f64) -> Result<Self, BoundedPdError> {
         if !joint_damping.is_finite() || joint_damping < 0.0 {
             return Err(BoundedPdError::InvalidJointDamping);

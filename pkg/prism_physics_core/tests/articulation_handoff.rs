@@ -196,16 +196,13 @@ fn handoff_groups_members_without_colliders_and_does_not_group_separate_trees() 
     assert_eq!(world.collision_exclusions().len(), 3);
 }
 
-fn unsupported_joint_policies() -> [(&'static str, ArticulationJoint); 6] {
+fn unsupported_joint_policies() -> [(&'static str, ArticulationJoint); 7] {
     let motor = JointMotor::new(Vec3::ZERO, Vec3::ZERO, 2.0, 0.5, Vec3::splat(10.0));
     let limits = JointLimits::vector(Vec3::splat(-0.5), Vec3::splat(0.5));
     [
+        ("motor", ArticulationJoint::spherical().with_motor(motor)),
         (
-            "motor",
-            ArticulationJoint::spherical().with_motor(motor),
-        ),
-        (
-            "damping",
+            "implicit angular velocity decay (not viscous torque)",
             ArticulationJoint::revolute(Vec3::Y).with_damping(0.25),
         ),
         (
@@ -227,6 +224,10 @@ fn unsupported_joint_policies() -> [(&'static str, ArticulationJoint); 6] {
                 .with_damping(0.25)
                 .with_armature(0.5)
                 .with_limits(limits),
+        ),
+        (
+            "implicit linear velocity decay (not viscous force)",
+            ArticulationJoint::prismatic(Vec3::X).with_damping(0.25),
         ),
     ]
 }
@@ -314,6 +315,8 @@ fn handoff_ignores_unsupported_policies_only_on_the_broken_joint() {
 
 #[test]
 fn handoff_rejects_unsupported_policies_on_every_surviving_joint() {
+    use prism_physics_core::snapshot::world_hash::hash_world;
+
     let broken_policy = unsupported_joint_policies()[5].1;
     for (name, policy) in unsupported_joint_policies() {
         for broken_link in 0..3 {
@@ -323,6 +326,7 @@ fn handoff_rejects_unsupported_policies_on_every_surviving_joint() {
                 joints[broken_link] = broken_policy;
                 joints[surviving_link] = policy;
                 let (mut world, articulation) = world_with_broken_chain(joints, broken_link);
+                let hash_before = hash_world(&world).unwrap();
                 let states_before = world
                     .articulations
                     .get(articulation)
@@ -345,6 +349,7 @@ fn handoff_rejects_unsupported_policies_on_every_surviving_joint() {
                 );
                 assert!(world.bodies.is_empty());
                 assert!(world.joints.is_empty());
+                assert_eq!(hash_world(&world).unwrap(), hash_before);
                 let source = world.articulations.get(articulation).unwrap();
                 assert_eq!(source.broken_joint(), Some(broken_link));
                 assert_eq!(source.maximal_body_states(), states_before);
