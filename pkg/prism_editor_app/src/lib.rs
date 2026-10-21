@@ -34,6 +34,7 @@ use prism_ui::Element;
 
 mod backend;
 mod controller;
+mod controller_validation;
 #[cfg(feature = "desktop")]
 mod desktop;
 #[cfg(feature = "desktop")]
@@ -47,12 +48,17 @@ mod document;
 mod ecs_document_bridge;
 mod lifecycle;
 #[cfg(feature = "desktop")]
+mod scene_mesh;
+#[cfg(feature = "desktop")]
 mod scene_project;
+#[cfg(feature = "desktop")]
+mod scene_session;
 
 pub use controller::{
     ControllerError, ControllerFieldEdit, ControllerLimits, ControllerOutcome, EditorController,
     PreparedControllerEdit,
 };
+pub use controller_validation::ControllerObjectValidator;
 #[cfg(feature = "desktop")]
 pub use desktop::{
     run_desktop, run_desktop_with_document, DesktopConfig, DesktopError, DesktopGpu,
@@ -93,7 +99,11 @@ pub use backend::{
 };
 pub use lifecycle::{ApplicationState, ExitReason, ExitStatus, InvalidStateError, ShutdownReport};
 #[cfg(feature = "desktop")]
+pub use scene_mesh::{editor_scene_mesh_catalog, editor_scene_mesh_registry, EditorSceneMesh};
+#[cfg(feature = "desktop")]
 pub use scene_project::{SceneProject, SceneProjectConfig, SceneProjectError, SceneProjectOpen};
+#[cfg(feature = "desktop")]
+pub use scene_session::{EditorSceneSession, EditorSceneSyncWork};
 
 impl Resource for EditorApplication {}
 

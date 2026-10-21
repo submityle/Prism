@@ -14,16 +14,20 @@ use std::{
 
 use prism_editor_app::{EditorAppConfig, EditorAppError, EditorApplication};
 
-#[cfg(feature = "desktop")]
+#[cfg(any(feature = "desktop", test))]
 use std::time::Duration;
 
 #[cfg(feature = "desktop")]
 use prism_editor_app::{
-    run_desktop_with_document, DesktopConfig, DesktopError, DesktopScene, DesktopUiError,
-    EditorController, EditorDesktopUi, SceneProject, SceneProjectError,
+    editor_scene_mesh_catalog, run_desktop_with_document, DesktopConfig, DesktopError,
+    DesktopUiError, EditorController, EditorDesktopUi, EditorSceneSession, SceneProject,
+    SceneProjectConfig, SceneProjectError,
 };
 
-const DEFAULT_FRAMES: u64 = 1;
+const DEFAULT_HEADLESS_FRAMES: u64 = 1;
+#[cfg(any(feature = "desktop", test))]
+const DEFAULT_SMOKE_TIME_LIMIT_SECONDS: u64 = 30;
+const MAX_TIME_LIMIT_SECONDS: u64 = 86_400;
 const DEFAULT_WIDTH: u32 = 1280;
 const DEFAULT_HEIGHT: u32 = 800;
 const MAX_DESKTOP_DIMENSION: u32 = 32_768;
@@ -50,7 +54,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), RunError> {
             return Err(RunError::DesktopUnavailable);
         }
     }
-    run_headless(options.frames)
+    run_headless(options.frames.unwrap_or(DEFAULT_HEADLESS_FRAMES))
 }
 
 fn run_headless(frames: u64) -> Result<(), RunError> {
@@ -66,19 +70,22 @@ fn run_headless(frames: u64) -> Result<(), RunError> {
         report.snapshot.asset_count,
         report.snapshot.checksum,
     );
-    Ok(())
+    validate_frame_limit(Some(frames), report.frames)
 }
 
 #[cfg(feature = "desktop")]
 fn run_native(options: CliOptions) -> Result<(), RunError> {
+    let time_limit = options.desktop_time_limit();
     let (ui, document) = match options.project {
         Some(ProjectAction::Create(path)) => {
-            let opened = SceneProject::create(path)?;
+            let opened =
+                SceneProject::create_with(path, scene_catalog()?, SceneProjectConfig::default())?;
             let (ui, document) = opened.into_desktop();
             (ui, Some(document))
         }
         Some(ProjectAction::Open(path)) => {
-            let opened = SceneProject::open(path)?;
+            let opened =
+                SceneProject::open_with(path, scene_catalog()?, SceneProjectConfig::default())?;
             let (ui, document) = opened.into_desktop();
             (ui, Some(document))
         }
@@ -88,14 +95,12 @@ fn run_native(options: CliOptions) -> Result<(), RunError> {
             (ui, None)
         }
     };
-    // The production ECS-to-scene adapter is a separate Editor slice. This
-    // host starts with a valid empty renderer and never invents project types.
-    let scene = DesktopScene::new(Vec::new())?;
+    let scene = EditorSceneSession::new(ui.controller())?;
     let outcome = run_desktop_with_document(
         DesktopConfig {
             logical_size: [options.width, options.height],
-            frame_limit: Some(options.frames),
-            time_limit: Some(Duration::from_secs(5)),
+            frame_limit: options.frames,
+            time_limit,
             ..DesktopConfig::default()
         },
         ui,
@@ -113,13 +118,32 @@ fn run_native(options: CliOptions) -> Result<(), RunError> {
     if let Some(error) = outcome.error {
         return Err(error.into());
     }
+    validate_frame_limit(options.frames, outcome.report.presented_frames)
+}
+
+#[cfg(feature = "desktop")]
+fn scene_catalog() -> Result<prism_editor_app::DocumentSchemaCatalog, RunError> {
+    editor_scene_mesh_catalog().map_err(|error| DesktopError::Document(error.to_string()).into())
+}
+
+fn validate_frame_limit(limit: Option<u64>, completed: u64) -> Result<(), RunError> {
+    if let Some(expected) = limit
+        && completed < expected
+    {
+        return Err(RunError::FrameLimitNotReached {
+            expected,
+            completed,
+        });
+    }
     Ok(())
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct CliOptions {
     desktop: bool,
-    frames: u64,
+    // None keeps desktop interactive; headless applies its own one-frame default.
+    frames: Option<u64>,
+    time_limit_seconds: Option<u64>,
     width: u32,
     height: u32,
     project: Option<ProjectAction>,
@@ -129,12 +153,12 @@ impl CliOptions {
     fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Self, CliError> {
         let mut options = Self {
             desktop: false,
-            frames: DEFAULT_FRAMES,
+            frames: None,
+            time_limit_seconds: None,
             width: DEFAULT_WIDTH,
             height: DEFAULT_HEIGHT,
             project: None,
         };
-        let mut frames_seen = false;
         let mut width_seen = false;
         let mut height_seen = false;
         let mut arguments = args.into_iter();
@@ -145,12 +169,24 @@ impl CliOptions {
                 }
                 options.desktop = true;
             } else if argument == "--frames" {
-                if frames_seen {
+                if options.frames.is_some() {
                     return Err(CliError::Duplicate("--frames"));
                 }
-                frames_seen = true;
-                options.frames =
-                    parse_positive_u64("--frames", required_value("--frames", arguments.next())?)?;
+                options.frames = Some(parse_positive_u64(
+                    "--frames",
+                    required_value("--frames", arguments.next())?,
+                    u64::MAX,
+                )?);
+            } else if argument == "--time-limit-seconds" {
+                if options.time_limit_seconds.is_some() {
+                    return Err(CliError::Duplicate("--time-limit-seconds"));
+                }
+                // Bound native deadlines even for representable u64 input.
+                options.time_limit_seconds = Some(parse_positive_u64(
+                    "--time-limit-seconds",
+                    required_value("--time-limit-seconds", arguments.next())?,
+                    MAX_TIME_LIMIT_SECONDS,
+                )?);
             } else if argument == "--width" {
                 if width_seen {
                     return Err(CliError::Duplicate("--width"));
@@ -181,7 +217,19 @@ impl CliOptions {
         if (width_seen || height_seen) && !options.desktop {
             return Err(CliError::RequiresDesktop("--width and --height"));
         }
+        if options.time_limit_seconds.is_some() && !options.desktop {
+            return Err(CliError::RequiresDesktop("--time-limit-seconds"));
+        }
         Ok(options)
+    }
+
+    #[cfg(any(feature = "desktop", test))]
+    fn desktop_time_limit(&self) -> Option<Duration> {
+        self.time_limit_seconds
+            // An explicit frame target must not wait forever when no frame
+            // can be presented (for example, an occluded CI window).
+            .or_else(|| self.frames.map(|_| DEFAULT_SMOKE_TIME_LIMIT_SECONDS))
+            .map(Duration::from_secs)
     }
 }
 
@@ -203,7 +251,7 @@ fn looks_like_option(value: &OsStr) -> bool {
     value.as_encoded_bytes().starts_with(b"--")
 }
 
-fn parse_positive_u64(name: &'static str, value: OsString) -> Result<u64, CliError> {
+fn parse_positive_u64(name: &'static str, value: OsString, maximum: u64) -> Result<u64, CliError> {
     let parsed = value
         .to_str()
         .and_then(|value| value.parse::<u64>().ok())
@@ -211,11 +259,11 @@ fn parse_positive_u64(name: &'static str, value: OsString) -> Result<u64, CliErr
             name,
             value: value.clone(),
         })?;
-    if parsed == 0 {
+    if !(1..=maximum).contains(&parsed) {
         return Err(CliError::OutOfRange {
             name,
             minimum: 1,
-            maximum: u64::MAX,
+            maximum,
             value: parsed,
         });
     }
@@ -316,6 +364,10 @@ impl std::error::Error for CliError {}
 enum RunError {
     Cli(CliError),
     Application(EditorAppError),
+    FrameLimitNotReached {
+        expected: u64,
+        completed: u64,
+    },
     #[cfg(feature = "desktop")]
     Desktop(DesktopError),
     #[cfg(feature = "desktop")]
@@ -331,6 +383,13 @@ impl fmt::Display for RunError {
         match self {
             Self::Cli(error) => error.fmt(formatter),
             Self::Application(error) => error.fmt(formatter),
+            Self::FrameLimitNotReached {
+                expected,
+                completed,
+            } => write!(
+                formatter,
+                "frame limit not reached: expected {expected} frames, completed {completed}"
+            ),
             #[cfg(feature = "desktop")]
             Self::Desktop(error) => error.fmt(formatter),
             #[cfg(feature = "desktop")]
@@ -394,12 +453,86 @@ mod tests {
             parse(&[]),
             Ok(CliOptions {
                 desktop: false,
-                frames: DEFAULT_FRAMES,
+                frames: None,
+                time_limit_seconds: None,
                 width: DEFAULT_WIDTH,
                 height: DEFAULT_HEIGHT,
                 project: None,
             })
         );
+        assert_eq!(
+            parse(&[])
+                .unwrap()
+                .frames
+                .unwrap_or(DEFAULT_HEADLESS_FRAMES),
+            1
+        );
+        assert_eq!(parse(&["--frames", "7"]).unwrap().frames, Some(7));
+    }
+
+    #[test]
+    fn desktop_defaults_are_interactive_without_a_deadline() {
+        let options = parse(&["--desktop"]).unwrap();
+        assert!(options.desktop);
+        assert_eq!(options.frames, None);
+        assert_eq!(options.time_limit_seconds, None);
+        assert_eq!(options.desktop_time_limit(), None);
+    }
+
+    #[test]
+    fn explicit_desktop_frames_always_have_a_watchdog() {
+        for frames in ["1", "3", "18446744073709551615"] {
+            let options = parse(&["--frames", frames, "--desktop"]).unwrap();
+            assert_eq!(options.frames, Some(frames.parse::<u64>().unwrap()));
+            assert_eq!(options.time_limit_seconds, None);
+            assert_eq!(
+                options.desktop_time_limit(),
+                Some(Duration::from_secs(DEFAULT_SMOKE_TIME_LIMIT_SECONDS))
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_deadline_overrides_smoke_watchdog_in_any_argument_order() {
+        for seconds in ["1", "60", "86400"] {
+            for arguments in [
+                [
+                    "--desktop",
+                    "--frames",
+                    "3",
+                    "--time-limit-seconds",
+                    seconds,
+                ],
+                [
+                    "--time-limit-seconds",
+                    seconds,
+                    "--frames",
+                    "3",
+                    "--desktop",
+                ],
+            ] {
+                let options = parse(&arguments).unwrap();
+                let seconds = seconds.parse::<u64>().unwrap();
+                assert_eq!(options.frames, Some(3));
+                assert_eq!(options.time_limit_seconds, Some(seconds));
+                assert_eq!(
+                    options.desktop_time_limit(),
+                    Some(Duration::from_secs(seconds))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_deadline_does_not_imply_a_frame_target() {
+        for seconds in ["1", "86400"] {
+            let options = parse(&["--desktop", "--time-limit-seconds", seconds]).unwrap();
+            assert_eq!(options.frames, None);
+            assert_eq!(
+                options.desktop_time_limit(),
+                Some(Duration::from_secs(seconds.parse::<u64>().unwrap()))
+            );
+        }
     }
 
     #[test]
@@ -418,7 +551,8 @@ mod tests {
             ]),
             Ok(CliOptions {
                 desktop: true,
-                frames: 3,
+                frames: Some(3),
+                time_limit_seconds: None,
                 width: 1920,
                 height: 1080,
                 project: Some(ProjectAction::Create(PathBuf::from("sample.prism"))),
@@ -476,6 +610,176 @@ mod tests {
     }
 
     #[test]
+    fn rejects_missing_empty_duplicate_and_option_like_values() {
+        for name in ["--frames", "--time-limit-seconds", "--width", "--height"] {
+            assert_eq!(
+                parse(&["--desktop", name]),
+                Err(CliError::MissingValue(name))
+            );
+            for value in ["", "--desktop"] {
+                assert_eq!(
+                    parse(&[name, value]),
+                    Err(CliError::MissingValueBefore {
+                        name,
+                        next: OsString::from(value),
+                    })
+                );
+            }
+            assert_eq!(
+                parse(&["--desktop", name, "1", name, "2"]),
+                Err(CliError::Duplicate(name))
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_zero_and_overflowing_limits() {
+        for name in ["--frames", "--time-limit-seconds"] {
+            for value in ["many", "-1", "1.5", " 1", "18446744073709551616"] {
+                assert_eq!(
+                    parse(&["--desktop", name, value]),
+                    Err(CliError::InvalidNumber {
+                        name,
+                        value: OsString::from(value),
+                    })
+                );
+            }
+            assert_eq!(
+                parse(&["--desktop", name, "0"]),
+                Err(CliError::OutOfRange {
+                    name,
+                    minimum: 1,
+                    maximum: if name == "--frames" {
+                        u64::MAX
+                    } else {
+                        MAX_TIME_LIMIT_SECONDS
+                    },
+                    value: 0,
+                })
+            );
+        }
+        for value in [86_401, u64::MAX] {
+            assert_eq!(
+                parse(&["--desktop", "--time-limit-seconds", &value.to_string()]),
+                Err(CliError::OutOfRange {
+                    name: "--time-limit-seconds",
+                    minimum: 1,
+                    maximum: MAX_TIME_LIMIT_SECONDS,
+                    value,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn headless_frame_parser_accepts_both_positive_u64_boundaries() {
+        for (value, expected) in [("1", 1), ("18446744073709551615", u64::MAX)] {
+            let options = parse(&["--frames", value]).unwrap();
+            assert!(!options.desktop);
+            assert_eq!(options.frames, Some(expected));
+            assert_eq!(options.time_limit_seconds, None);
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_zero_and_overflowing_dimensions() {
+        for name in ["--width", "--height"] {
+            for value in ["-1", "wide", "4294967296"] {
+                assert_eq!(
+                    parse(&["--desktop", name, value]),
+                    Err(CliError::InvalidNumber {
+                        name,
+                        value: OsString::from(value),
+                    })
+                );
+            }
+            for value in [0, 32_769, u64::from(u32::MAX)] {
+                assert_eq!(
+                    parse(&["--desktop", name, &value.to_string()]),
+                    Err(CliError::OutOfRange {
+                        name,
+                        minimum: 1,
+                        maximum: u64::from(MAX_DESKTOP_DIMENSION),
+                        value,
+                    })
+                );
+            }
+            for value in ["1", "32768"] {
+                assert!(parse(&["--desktop", name, value]).is_ok());
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_time_limit_and_dimensions_outside_desktop_scope() {
+        for arguments in [
+            vec!["--time-limit-seconds", "2"],
+            vec!["--frames", "1", "--time-limit-seconds", "2"],
+        ] {
+            assert_eq!(
+                parse(&arguments),
+                Err(CliError::RequiresDesktop("--time-limit-seconds"))
+            );
+        }
+        for name in ["--width", "--height"] {
+            assert_eq!(
+                parse(&[name, "800"]),
+                Err(CliError::RequiresDesktop("--width and --height"))
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_non_unicode_numbers_and_preserves_non_unicode_project_paths() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+
+            let value = OsString::from_vec(vec![0xff]);
+            for name in ["--frames", "--time-limit-seconds", "--width", "--height"] {
+                assert_eq!(
+                    CliOptions::parse([OsString::from("--desktop"), name.into(), value.clone()]),
+                    Err(CliError::InvalidNumber {
+                        name,
+                        value: value.clone(),
+                    })
+                );
+            }
+            let options = CliOptions::parse([
+                OsString::from("--desktop"),
+                OsString::from("--open-project"),
+                value.clone(),
+            ])
+            .unwrap();
+            assert_eq!(options.project, Some(ProjectAction::Open(value.into())));
+        }
+    }
+
+    #[test]
+    fn frame_target_must_be_reached_even_after_a_clean_native_close() {
+        for completed in [0, 2] {
+            let error = validate_frame_limit(Some(3), completed).unwrap_err();
+            assert!(matches!(
+                error,
+                RunError::FrameLimitNotReached {
+                    expected: 3,
+                    completed: actual,
+                } if actual == completed
+            ));
+            assert_eq!(
+                error.to_string(),
+                format!("frame limit not reached: expected 3 frames, completed {completed}")
+            );
+        }
+        for completed in [3, 4, u64::MAX] {
+            assert!(validate_frame_limit(Some(3), completed).is_ok());
+        }
+        assert!(validate_frame_limit(Some(u64::MAX), u64::MAX).is_ok());
+        assert!(validate_frame_limit(None, 0).is_ok());
+        assert!(validate_frame_limit(None, 10).is_ok());
+    }
+
+    #[test]
     fn rejects_conflicting_or_non_desktop_project_actions() {
         assert_eq!(
             parse(&["--desktop", "--create-project", "a", "--open-project", "b",]),
@@ -489,5 +793,75 @@ mod tests {
             parse(&["--width", "800"]),
             Err(CliError::RequiresDesktop("--width and --height"))
         );
+    }
+
+    #[test]
+    fn preserves_project_actions_and_strict_argument_grammar() {
+        for name in ["--create-project", "--open-project"] {
+            let options = parse(&[name, "sample project.prism", "--desktop"]).unwrap();
+            let path = PathBuf::from("sample project.prism");
+            assert_eq!(
+                options.project,
+                Some(if name == "--create-project" {
+                    ProjectAction::Create(path)
+                } else {
+                    ProjectAction::Open(path)
+                })
+            );
+            assert_eq!(options.frames, None);
+            assert_eq!(options.desktop_time_limit(), None);
+            assert_eq!(parse(&[name]), Err(CliError::MissingValue(name)));
+            for value in ["", "--desktop"] {
+                assert_eq!(
+                    parse(&[name, value]),
+                    Err(CliError::MissingValueBefore {
+                        name,
+                        next: value.into(),
+                    })
+                );
+            }
+            assert_eq!(
+                parse(&["--desktop", name, "a", name, "b"]),
+                Err(CliError::ProjectConflict)
+            );
+            let other = if name == "--create-project" {
+                "--open-project"
+            } else {
+                "--create-project"
+            };
+            assert_eq!(
+                parse(&["--desktop", name, "a", other, "b"]),
+                Err(CliError::ProjectConflict)
+            );
+            assert_eq!(
+                parse(&[name, "a"]),
+                Err(CliError::RequiresDesktop("project options"))
+            );
+        }
+        for argument in [
+            "--help",
+            "--",
+            "--frames=3",
+            "--time-limit-seconds=5",
+            "--unknown",
+        ] {
+            assert_eq!(
+                parse(&[argument]),
+                Err(CliError::Unknown(OsString::from(argument)))
+            );
+        }
+    }
+
+    #[cfg(not(feature = "desktop"))]
+    #[test]
+    fn valid_desktop_requests_still_fail_without_the_feature() {
+        assert!(matches!(
+            run([OsString::from("--desktop")]),
+            Err(RunError::DesktopUnavailable)
+        ));
+        assert!(matches!(
+            run([OsString::from("--desktop"), "--frames".into(), "1".into()]),
+            Err(RunError::DesktopUnavailable)
+        ));
     }
 }

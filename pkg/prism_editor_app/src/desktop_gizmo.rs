@@ -476,7 +476,7 @@ impl DesktopScene {
         Ok(())
     }
 
-    fn apply_models(
+    pub(super) fn apply_models(
         &mut self,
         models: &[(SceneObjectId, SceneIdMatrix)],
     ) -> Result<(), DesktopError> {

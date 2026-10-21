@@ -30,8 +30,8 @@ use prism_editor_viewport::{
     GpuPickingConfig, InFlightBoxSelectionReadback, InFlightPickReadback, PickCoordinator,
     PickOutcome, PickResult, PixelPoint, PixelRect, RenderTargetRegistry, RenderTargetState,
     SceneIdCamera, SceneIdDepth, SceneIdGeometryRenderer, SceneIdMatrix, SceneIdPass,
-    SceneIdPassItem, SceneObjectId, SelectionOutcome, Viewport, ViewportRegistry,
-    SCENE_ID_IDENTITY_MATRIX,
+    SceneIdPassItem, SceneIdPassOperation, SceneObjectId, SelectionOutcome, Viewport,
+    ViewportRegistry, SCENE_ID_IDENTITY_MATRIX,
 };
 use wgpu::{CommandEncoder, TextureView};
 
@@ -41,8 +41,8 @@ use crate::desktop::{
 use crate::desktop_ui::EditorDesktopUi;
 use crate::EditorController;
 
-const MAX_OBJECTS: usize = 4096;
-const MAX_GEOMETRY_BYTES: u64 = 64 * 1024 * 1024;
+pub(crate) const MAX_OBJECTS: usize = 4096;
+pub(crate) const MAX_GEOMETRY_BYTES: u64 = 64 * 1024 * 1024;
 
 /// An actual indexed mesh and its explicit controller selection mapping.
 /// Multiple mesh/subobject identities may intentionally map to one selection.
@@ -132,6 +132,14 @@ pub struct DesktopSceneStatus {
     pub rejected_picks: u64,
     /// Number of preview bind groups created, including resize/reopen rebinding.
     pub preview_bindings: u64,
+    /// Successful vertex/index buffer uploads over this adapter's lifetime.
+    pub geometry_uploads: u64,
+    /// Vertex/index payload bytes actually uploaded (not allocator capacity).
+    pub geometry_uploaded_bytes: u64,
+    /// Successful instance-transform uploads, including initial population.
+    pub transform_uploads: u64,
+    /// Geometry renderer allocations, including initialize/resume and reload.
+    pub geometry_renderer_creations: u64,
 }
 
 struct PendingClick {
@@ -222,6 +230,8 @@ pub struct DesktopScene {
     pending_box: Option<PendingBox>,
     gpu: Option<GpuScene>,
     needs_upload: bool,
+    geometry_dirty: BTreeSet<usize>,
+    visibility_dirty: BTreeSet<usize>,
     matrix: SceneIdMatrix,
     depth: SceneIdDepth,
     bounds: Option<DesktopViewportBounds>,
@@ -256,6 +266,8 @@ impl DesktopScene {
             pending_box: None,
             gpu: None,
             needs_upload: true,
+            geometry_dirty: BTreeSet::new(),
+            visibility_dirty: BTreeSet::new(),
             matrix: SCENE_ID_IDENTITY_MATRIX,
             depth: SceneIdDepth::Forward,
             bounds: None,
@@ -286,6 +298,84 @@ impl DesktopScene {
         &self.objects
     }
 
+    pub(crate) fn object(&self, id: SceneObjectId) -> Option<&DesktopSceneObject> {
+        self.object_indices
+            .get(&id)
+            .map(|index| &self.objects[*index])
+    }
+
+    /// Applies prevalidated authoring changes without cloning unrelated meshes.
+    /// Replacements keep stable identity bindings; property-only batches never
+    /// visit vertex/index data. All fallible CPU checks precede publication.
+    pub(crate) fn update_document_objects(
+        &mut self,
+        replacements: Vec<DesktopSceneObject>,
+        models: &[(SceneObjectId, SceneIdMatrix)],
+        visibility: &[(SceneObjectId, bool)],
+    ) -> Result<(), DesktopError> {
+        if self.gizmo.drag_active() {
+            return Err(message("cancel active gizmo before synchronizing scene"));
+        }
+        validate_objects(&replacements)?;
+        let mut replacement_indices = Vec::with_capacity(replacements.len());
+        let mut bytes = 0u64;
+        if !replacements.is_empty() {
+            bytes = self.objects.iter().map(geometry_bytes).sum();
+        }
+        for object in &replacements {
+            let index = *self
+                .object_indices
+                .get(&object.id)
+                .ok_or_else(|| message("unknown replacement scene identity"))?;
+            let old = &self.objects[index];
+            if object.selection != old.selection || object.outliner != old.outliner {
+                return Err(message("replacement changes document identity bindings"));
+            }
+            bytes = bytes
+                .checked_sub(geometry_bytes(old))
+                .and_then(|value| value.checked_add(geometry_bytes(object)))
+                .ok_or_else(|| message("geometry byte count overflow"))?;
+            replacement_indices.push(index);
+        }
+        if bytes > MAX_GEOMETRY_BYTES {
+            return Err(message("desktop scene exceeds 64 MiB of vertex/index data"));
+        }
+        for (id, model) in models {
+            validate_matrix(model)?;
+            if !self.object_indices.contains_key(id) {
+                return Err(message("unbound scene transform"));
+            }
+        }
+        let mut visibility_changes = Vec::with_capacity(visibility.len());
+        for (id, visible) in visibility {
+            let index = *self
+                .object_indices
+                .get(id)
+                .ok_or_else(|| message("unbound scene visibility"))?;
+            if self.objects[index].visible != *visible {
+                visibility_changes.push((index, *visible));
+            }
+        }
+        self.scene
+            .generation()
+            .checked_add(models.len() as u64 + 1)
+            .ok_or_else(|| message("scene generation exhausted"))?;
+        self.apply_models(models)?;
+        if !replacements.is_empty() || !visibility_changes.is_empty() {
+            self.scene.invalidate_content().map_err(renderer_error)?;
+            self.cancel_pending();
+            for (index, object) in replacement_indices.into_iter().zip(replacements) {
+                self.objects[index] = object;
+                self.geometry_dirty.insert(index);
+            }
+            for (index, visible) in visibility_changes {
+                self.objects[index].visible = visible;
+                self.visibility_dirty.insert(index);
+            }
+        }
+        Ok(())
+    }
+
     /// Replaces descriptors after complete CPU validation. Invalid inputs leave
     /// current descriptors and pending picks intact. Valid changes immediately
     /// invalidate old requests; resources upload at the next encode. Identity
@@ -302,6 +392,8 @@ impl DesktopScene {
         self.cancel_pending();
         self.object_indices = objects.iter().enumerate().map(|(i, o)| (o.id, i)).collect();
         self.objects = objects;
+        self.geometry_dirty.clear();
+        self.visibility_dirty.clear();
         self.transform_revision = None;
         self.needs_upload = true;
         Ok(())
@@ -336,6 +428,7 @@ impl DesktopScene {
             gpu.renderer
                 .set_transform(&mut self.scene, index as u64, model)
                 .map_err(renderer_error)?;
+            self.counters.transform_uploads = self.counters.transform_uploads.saturating_add(1);
         } else {
             self.needs_upload = true;
         }
@@ -392,6 +485,8 @@ impl DesktopScene {
     /// current transforms again and publishes a fresh target/frame generation.
     pub fn document_reloaded(&mut self) {
         self.cancel_pending();
+        self.geometry_dirty.clear();
+        self.visibility_dirty.clear();
         self.transform_revision = None;
 
         // These counters are monotonic fences. Exhaustion is unreachable for a
@@ -422,6 +517,19 @@ impl DesktopScene {
             return Ok(());
         };
         let candidate = adapter.build(controller)?;
+        self.stage_document(controller, candidate)
+    }
+
+    pub(crate) fn stage_document(
+        &mut self,
+        controller: &EditorController,
+        candidate: DesktopSceneDocument,
+    ) -> Result<(), DesktopError> {
+        self.pending_document = None;
+        if self.gizmo.drag_active() || controller.has_active_edit() {
+            return Err(message("cancel active gizmo before loading document"));
+        }
+        self.preflight_document_reload()?;
         validate_matrix(&candidate.camera)?;
         validate_objects(&candidate.objects)?;
         for object in &candidate.objects {
@@ -543,7 +651,8 @@ impl DesktopScene {
                 )
                 .map_err(renderer_error)?;
         }
-        if self.needs_upload {
+        if self.needs_upload || !self.geometry_dirty.is_empty() || !self.visibility_dirty.is_empty()
+        {
             self.upload(gpu)?;
         }
         let native = self
@@ -661,7 +770,8 @@ impl DesktopScene {
         if position.iter().any(|value| !value.is_finite()) {
             return Err(message("pick coordinates must be finite"));
         }
-        if self.needs_upload {
+        if self.needs_upload || !self.geometry_dirty.is_empty() || !self.visibility_dirty.is_empty()
+        {
             return Ok(false);
         }
         let Some(bounds) = &self.bounds else {
@@ -746,7 +856,8 @@ impl DesktopScene {
         {
             return Err(message("box-pick coordinates must be finite"));
         }
-        if self.needs_upload {
+        if self.needs_upload || !self.geometry_dirty.is_empty() || !self.visibility_dirty.is_empty()
+        {
             return Ok(false);
         }
         let Some(bounds) = &self.bounds else {
@@ -1071,16 +1182,78 @@ impl DesktopScene {
     }
 
     fn upload(&mut self, gpu: &DesktopGpu) -> Result<(), DesktopError> {
-        let mut renderer = SceneIdGeometryRenderer::new(&gpu.device);
+        if !self.needs_upload && self.geometry_dirty.is_empty() {
+            let native = self
+                .gpu
+                .as_mut()
+                .ok_or_else(|| message("missing GPU scene"))?;
+            // Patch only draw metadata. Keep the renderer, mesh buffers,
+            // transforms and stable per-object ID bindings; never visit geometry.
+            let operations = self
+                .visibility_dirty
+                .iter()
+                .map(|index| {
+                    let object = &self.objects[*index];
+                    let key = *index as u64;
+                    SceneIdPassOperation::Upsert(SceneIdPassItem::new(
+                        object.id,
+                        key,
+                        key,
+                        object.visible,
+                        object.sort_key,
+                    ))
+                })
+                .collect::<Vec<_>>();
+            let commit = self.scene.apply_patch(operations).map_err(renderer_error)?;
+            self.scene
+                .record_commit(&commit, &mut native.renderer)
+                .unwrap_or_else(|never| match never {});
+            self.visibility_dirty.clear();
+            return Ok(());
+        }
+        let uploads = if self.needs_upload {
+            self.objects.len()
+        } else {
+            self.geometry_dirty.len()
+        };
+        self.scene
+            .generation()
+            .checked_add(uploads as u64 * 2 + 1)
+            .ok_or_else(|| message("scene generation exhausted"))?;
+        let mut fresh = self
+            .needs_upload
+            .then(|| SceneIdGeometryRenderer::new(&gpu.device));
+        if fresh.is_some() {
+            self.counters.geometry_renderer_creations =
+                self.counters.geometry_renderer_creations.saturating_add(1);
+        }
+        let renderer = match fresh.as_mut() {
+            Some(renderer) => renderer,
+            None => {
+                &mut self
+                    .gpu
+                    .as_mut()
+                    .ok_or_else(|| message("missing GPU scene"))?
+                    .renderer
+            }
+        };
         let mut items = Vec::with_capacity(self.objects.len());
         for (index, object) in self.objects.iter().enumerate() {
             let key = index as u64;
-            renderer
-                .upload_geometry(&mut self.scene, key, &object.positions, &object.indices)
-                .map_err(renderer_error)?;
-            renderer
-                .set_transform(&mut self.scene, key, object.model)
-                .map_err(renderer_error)?;
+            if self.needs_upload || self.geometry_dirty.contains(&index) {
+                renderer
+                    .upload_geometry(&mut self.scene, key, &object.positions, &object.indices)
+                    .map_err(renderer_error)?;
+                self.counters.geometry_uploads = self.counters.geometry_uploads.saturating_add(1);
+                self.counters.geometry_uploaded_bytes = self
+                    .counters
+                    .geometry_uploaded_bytes
+                    .saturating_add(geometry_bytes(object));
+                renderer
+                    .set_transform(&mut self.scene, key, object.model)
+                    .map_err(renderer_error)?;
+                self.counters.transform_uploads = self.counters.transform_uploads.saturating_add(1);
+            }
             items.push(SceneIdPassItem::new(
                 object.id,
                 key,
@@ -1091,11 +1264,15 @@ impl DesktopScene {
         }
         self.scene.submit(items).map_err(renderer_error)?;
         renderer.synchronize(&self.scene);
-        self.gpu
-            .as_mut()
-            .ok_or_else(|| message("missing GPU scene"))?
-            .renderer = renderer;
+        if let Some(renderer) = fresh {
+            self.gpu
+                .as_mut()
+                .ok_or_else(|| message("missing GPU scene"))?
+                .renderer = renderer;
+        }
         self.needs_upload = false;
+        self.geometry_dirty.clear();
+        self.visibility_dirty.clear();
         Ok(())
     }
 }
@@ -1153,6 +1330,8 @@ impl DesktopRenderer for DesktopScene {
         self.suspend();
         self.scene.invalidate_content().map_err(renderer_error)?;
         self.gpu = Some(GpuScene::new(gpu));
+        self.counters.geometry_renderer_creations =
+            self.counters.geometry_renderer_creations.saturating_add(1);
         self.needs_upload = true;
         Ok(())
     }
@@ -1479,6 +1658,10 @@ fn validate_objects(objects: &[DesktopSceneObject]) -> Result<(), DesktopError> 
         }
     }
     Ok(())
+}
+
+fn geometry_bytes(object: &DesktopSceneObject) -> u64 {
+    object.positions.len() as u64 * 12 + object.indices.len() as u64 * 4
 }
 
 fn validate_matrix(matrix: &SceneIdMatrix) -> Result<(), DesktopError> {
