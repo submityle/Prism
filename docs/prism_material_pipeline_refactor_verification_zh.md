@@ -303,6 +303,7 @@ pub const SURFACE_CACHE_AUX: [CacheAuxLayout; 1] = [
 | 顺序 | 工作包 | 必须达到的闭环 | 排序理由 |
 |---|---|---|---|
 | **M0** | workspace 编译与验收基线 | `prism_render_scene`、`prism_render_shading` 和材质定向 target 能在当前工作树编译；保留严格 GPU/skip 语义，重新生成当前测试矩阵 | 当前编译失败会让所有材质局部记录失去“当前证据”资格 |
+| **P0-material** | 默认 mesh 路径消费 canonical Material ABI | 默认 opaque mesh draw 从稳定材质身份解析并校验 `GpuMaterialHeader` / generation / execution binding，绑定 canonical 参数与纹理 heap，由生成的 surface 解包和注册 response 消费；移除私有 `ForwardLitMaterial { albedo, surface_id }` 消费契约；真实 draw/主 render pass 有 GPU readback 与 CPU golden parity | 当前 `ForwardLit` shader 仍直接读简化材质 uniform，draw recorder 尚无材质/场景资源生产绑定；若不先收口，P0-b、P1-a 等局部能力还不能证明属于默认材质生产路径 |
 | **P0-b** | 高光抗锯齿主路径 | normal-map 同记录、同 mip、同 UV footprint 的方差生产，CPU/WESL/GPU readback 一致；无有效 footprint 时有明确离线方差图输入；至少有图像级回归 | 直接影响高光稳定性，且现有消费端已存在，剩余是主路径生产和验收闭环 |
 | **P1-a** | Material-VT 真实消费 | 只为实际引用材质供给 source；material row 与 VT publication 同一代际原子可见；non-bindless miss 回 authored texture；主 render pass 与跨设备门禁通过 | 它决定开放纹理数量、驻留容量和材质画质是否在真实场景中成立 |
 | **P1-e** | GPU 贵瓣预算完整验收 | 在已通过的 SSS/透射动态循环与 selector/LUT 定向 GPU 门禁上，补完整 resolve 全帧 readback、各质量档图像误差、GPU timing/成本及跨设备回归 | 三项 SSS/透射 sample-count 已真实改变生产循环与输出，group 7 binding 9 对全部当前预算消费者的生产 resolve layout 相容；尚缺完整帧与质量/成本验收，见 §0.5 |
@@ -314,6 +315,6 @@ pub const SURFACE_CACHE_AUX: [CacheAuxLayout; 1] = [
 两个明确裁决：
 
 1. **über 分层消费有必要**。它是当前材质主链的运行时执行模型，必须作为 `SurfaceData → ShadingPlan → response → composition` 的唯一消费路径收口；不能用“有 path-traced reference”替代实时消费。
-2. **path-traced reference 也有必要，但角色不同**。production material ABI 到 `reference_pt::Bsdf` 的 coat/darkening 对应实现已存在，并有 clearcoat 定向测试 **13/13**；它应继续作为独立 oracle / 参考图生成器，用于 P2-h 图像级 parity，不应成为实时渲染运行时依赖，也不应阻塞 M0、P0-b、P1-a 的先行闭环。
+2. **path-traced reference 也有必要，但角色不同**。production material ABI 到 `reference_pt::Bsdf` 的 coat/darkening 对应实现已存在，并有 clearcoat 定向测试 **13/13**；它应继续作为独立 oracle / 参考图生成器，用于 P2-h 图像级 parity，不应成为实时渲染运行时依赖，也不应阻塞 M0、P0-material、P0-b、P1-a 的先行闭环。
 
-因此，当前最合理的并行关系是：M0 走主线；P0-b、P1-a、P1-e 分别收口实时质量、纹理驻留和预算；P2-h 同步补 reference adapter 与图像门禁；P2-a/b/i 和 P3 暂不抢占主线资源。
+因此，当前最合理的并行关系是：M0 走主线；先闭合 P0-material 的默认材质消费路径，再让 P0-b、P1-a、P1-e 并行收口实时质量、纹理驻留和预算；P2-h 可同步补 reference adapter 与图像门禁；P2-a/b/i 和 P3 暂不抢占主线资源。现有 `ForwardLitProvider` / `ForwardLitMaterial` 只证明简化 shader/provider 的存在，不计作 canonical material ABI 已被默认 mesh draw 消费；在 P0-material 完成前，所有独立 shader、VT 或材质预算门禁仍按局部证据登记。
