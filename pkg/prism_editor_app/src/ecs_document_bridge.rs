@@ -14,7 +14,7 @@ use alloc::{
 };
 use core::fmt;
 
-use prism_ecs::{entity::Entity, hierarchy::ChildOf, world::World};
+use prism_ecs::{entity::Entity, hierarchy::ChildOf, relation::Relation, world::World};
 use prism_editor_core::SelectionItem;
 use prism_editor_panels::{OutlinerId, OutlinerNode};
 use prism_reflect::{StableTypeId, TypeRegistry};
@@ -28,6 +28,8 @@ pub enum EditorEcsDocumentError {
     Busy,
     /// The destination World has no reflected component registration for a model type.
     UnregisteredComponent(String),
+    /// `ChildOf` is already registered with a noncanonical relation policy.
+    IncompatibleChildOfRelation,
     /// An object is attached to more than one Outliner row.
     DuplicateObjectRow(SelectionItem),
     /// An Outliner row refers to an object absent from the controller.
@@ -40,6 +42,8 @@ pub enum EditorEcsDocumentError {
     MissingOutlinerMapping(OutlinerId),
     /// An Outliner entity has a `ChildOf` target outside this document bridge.
     ForeignOutlinerParent(Entity),
+    /// A mapped Outliner row has more than one `ChildOf` target.
+    MultipleOutlinerParents(Entity),
     /// A mapped generational entity has been despawned or replaced.
     StaleEntity(Entity),
     /// A mapped entity no longer carries the reflected model component.
@@ -76,6 +80,9 @@ impl fmt::Display for EditorEcsDocumentError {
             Self::UnregisteredComponent(path) => {
                 write!(f, "ECS reflected component is not registered: {path}")
             }
+            Self::IncompatibleChildOfRelation => {
+                f.write_str("ECS ChildOf relation uses a noncanonical relation policy")
+            }
             Self::DuplicateObjectRow(item) => {
                 write!(f, "editor object has multiple Outliner rows: {item:?}")
             }
@@ -99,6 +106,9 @@ impl fmt::Display for EditorEcsDocumentError {
                     f,
                     "Outliner entity has a parent outside this document: {entity:?}"
                 )
+            }
+            Self::MultipleOutlinerParents(entity) => {
+                write!(f, "Outliner entity has multiple parents: {entity:?}")
             }
             Self::StaleEntity(entity) => write!(f, "ECS bridge entity is stale: {entity:?}"),
             Self::MissingComponent { item, type_path } => {
@@ -180,6 +190,20 @@ impl EditorEcsDocumentBridge {
             }
         }
 
+        let has_hierarchy = controller
+            .document_outliner_nodes()
+            .iter()
+            .any(|row| row.parent().is_some());
+        if has_hierarchy
+            && world
+                .components()
+                .id_of::<ChildOf>()
+                .and_then(|id| world.relations().kind(id))
+                .is_some_and(|kind| kind != &ChildOf::KIND)
+        {
+            return Err(EditorEcsDocumentError::IncompatibleChildOfRelation);
+        }
+
         let mut bridge = Self {
             objects: BTreeMap::new(),
             rows: BTreeMap::new(),
@@ -213,11 +237,7 @@ impl EditorEcsDocumentBridge {
             }
         }
 
-        if controller
-            .document_outliner_nodes()
-            .iter()
-            .any(|row| row.parent().is_some())
-        {
+        if has_hierarchy {
             world.register_child_of();
             for row in controller.document_outliner_nodes() {
                 let Some(parent_id) = row.parent() else {
@@ -319,16 +339,17 @@ impl EditorEcsDocumentBridge {
             if !world.contains(entity) {
                 return Err(EditorEcsDocumentError::StaleEntity(entity));
             }
-            let parent = world
-                .relation_targets::<ChildOf>(entity)
-                .first()
-                .map(|parent| {
+            let parents = world.relation_targets::<ChildOf>(entity);
+            let parent = match parents {
+                [] => None,
+                [parent] => Some(
                     self.row_ids
                         .get(parent)
                         .copied()
-                        .ok_or(EditorEcsDocumentError::ForeignOutlinerParent(*parent))
-                })
-                .transpose()?;
+                        .ok_or(EditorEcsDocumentError::ForeignOutlinerParent(*parent))?,
+                ),
+                _ => return Err(EditorEcsDocumentError::MultipleOutlinerParents(entity)),
+            };
             let node = copy_outliner_node(row, parent);
             if let Some(parent) = parent {
                 children.entry(parent).or_default().push(node);

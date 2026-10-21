@@ -1,6 +1,9 @@
 //! PRISMDOC-to-ECS materialization and save/reload contract tests.
 
-use prism_ecs::prelude::{ChildOf, Component, World};
+use prism_ecs::{
+    prelude::{ChildOf, Component, World},
+    relation::RelationKind,
+};
 use prism_editor_app::{
     ControllerLimits, DocumentCodec, DocumentLimits, DocumentSchemaCatalog, EditorController,
     EditorEcsDocumentBridge,
@@ -161,6 +164,42 @@ fn bridge_preflight_rejects_ambiguous_outliner_binding_without_allocating() {
     ));
     assert_eq!(world.entity_count(), 0);
 }
+
+#[test]
+fn bridge_preflight_preserves_custom_child_of_policy() {
+    let source = authored_document();
+    let mut world = World::new();
+    world.register_reflect_component::<ActorModel>();
+    world.register_relation::<ChildOf>(RelationKind::new());
+
+    assert!(matches!(
+        EditorEcsDocumentBridge::materialize(&mut world, &source),
+        Err(prism_editor_app::EditorEcsDocumentError::IncompatibleChildOfRelation)
+    ));
+    assert_eq!(world.entity_count(), 0);
+    let child_of = world.components().id_of::<ChildOf>().unwrap();
+    assert_eq!(world.relations().kind(child_of), Some(&RelationKind::new()));
+}
+
+#[test]
+fn capture_rejects_nonexclusive_multiple_outliner_parents() {
+    let source = authored_document();
+    let mut world = World::new();
+    world.register_reflect_component::<ActorModel>();
+    let bridge = EditorEcsDocumentBridge::materialize(&mut world, &source).unwrap();
+
+    let actor = bridge.entity_for_outliner(OutlinerId::from_raw(2)).unwrap();
+    let other_parent = bridge.entity_for_outliner(OutlinerId::from_raw(3)).unwrap();
+    world.register_relation::<ChildOf>(RelationKind::new());
+    world.add_relation::<ChildOf>(actor, other_parent);
+
+    assert!(matches!(
+        bridge.capture_controller(&world, &source, ControllerLimits::default()),
+        Err(prism_editor_app::EditorEcsDocumentError::MultipleOutlinerParents(entity))
+            if entity == actor
+    ));
+}
+
 #[test]
 fn capture_rejects_ecs_outliner_cycles() {
     let source = authored_document();
