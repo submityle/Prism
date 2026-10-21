@@ -24,6 +24,57 @@ use crate::{NullDevice, NullInstance, NullQueue};
 /// handle is a valid stand-in for a real window in a headless test.
 struct FakeWindow;
 
+#[test]
+fn configured_instance_preserves_the_baseline_and_device_request_contract() {
+    let baseline = NullInstance::default()
+        .request_adapter(&RequestAdapterOptions::default())
+        .unwrap();
+    assert_eq!(baseline.capabilities().features, rhi::Features::NONE);
+    assert_eq!(baseline.capabilities().limits, rhi::Limits::baseline());
+
+    let instance = NullInstance::with_capabilities(rhi::DeviceCapabilities {
+        backend: Backend::Metal,
+        features: rhi::Features::INDIRECT_DRAW,
+        limits: rhi::Limits::desktop(),
+    });
+    let adapter = instance
+        .request_adapter(&RequestAdapterOptions::default())
+        .unwrap();
+    assert_eq!(adapter.info().backend, Backend::Noop);
+    assert_eq!(adapter.capabilities().backend, Backend::Noop);
+    assert_eq!(
+        instance.enumerate_adapters()[0].capabilities(),
+        adapter.capabilities()
+    );
+    let descriptor = DeviceDescriptor {
+        required_features: rhi::Features::INDIRECT_DRAW,
+        required_limits: rhi::Limits::desktop(),
+        ..DeviceDescriptor::default()
+    };
+    let (device, _) = instance.create_device(&adapter, &descriptor).unwrap();
+    assert_eq!(device.capabilities(), adapter.capabilities());
+    assert!(NullInstance::new()
+        .create_device(&baseline, &descriptor)
+        .is_err());
+    let unsupported = DeviceDescriptor {
+        required_features: rhi::Features::RAY_TRACING,
+        ..descriptor.clone()
+    };
+    assert!(instance.create_device(&adapter, &unsupported).is_err());
+    let oversized = DeviceDescriptor {
+        required_limits: rhi::Limits {
+            max_storage_buffers_per_shader_stage: adapter
+                .capabilities()
+                .limits
+                .max_storage_buffers_per_shader_stage
+                + 1,
+            ..descriptor.required_limits
+        },
+        ..descriptor
+    };
+    assert!(instance.create_device(&adapter, &oversized).is_err());
+}
+
 impl raw_window_handle::HasWindowHandle for FakeWindow {
     fn window_handle(
         &self,

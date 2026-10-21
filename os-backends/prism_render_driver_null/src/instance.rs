@@ -23,19 +23,41 @@ use crate::surface::NullSurface;
 
 /// The null RHI instance: the entry point for adapter enumeration and
 /// device/surface creation.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct NullInstance;
+#[derive(Clone, Copy, Debug)]
+pub struct NullInstance {
+    caps: DeviceCapabilities,
+}
 
 impl NullInstance {
     /// Creates a null instance.
     #[must_use]
     pub const fn new() -> Self {
-        Self
+        Self::with_capabilities(DeviceCapabilities {
+            backend: Backend::Noop,
+            features: Features::NONE,
+            limits: Limits::baseline(),
+        })
+    }
+
+    /// Configures the advertised contract for resource-lifecycle and graph tests.
+    ///
+    /// This does not execute shaders or emulate optional hardware functionality.
+    /// The backend identity remains [`Backend::Noop`] regardless of the input.
+    #[must_use]
+    pub const fn with_capabilities(mut caps: DeviceCapabilities) -> Self {
+        caps.backend = Backend::Noop;
+        Self { caps }
+    }
+}
+
+impl Default for NullInstance {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 /// The null backend's single adapter: a CPU/[`Backend::Noop`] device that
-/// supports no optional features and only the baseline limits.
+/// advertises the instance's explicitly configured feature and limit contract.
 pub struct NullAdapter {
     /// The adapter's identifying description.
     info: AdapterInfo,
@@ -44,8 +66,8 @@ pub struct NullAdapter {
 }
 
 impl NullAdapter {
-    /// Builds the canonical null adapter.
-    fn new() -> Self {
+    /// Builds an adapter with the instance's advertised contract.
+    fn new(caps: DeviceCapabilities) -> Self {
         Self {
             info: AdapterInfo {
                 name: String::from("Prism Null Adapter"),
@@ -55,11 +77,7 @@ impl NullAdapter {
                 device_id: 0,
                 driver: Some(String::from("prism_render_driver_null")),
             },
-            caps: DeviceCapabilities {
-                backend: Backend::Noop,
-                features: Features::NONE,
-                limits: Limits::baseline(),
-            },
+            caps,
         }
     }
 }
@@ -81,11 +99,11 @@ impl Instance for NullInstance {
     type Surface = NullSurface;
 
     fn enumerate_adapters(&self) -> Vec<NullAdapter> {
-        alloc::vec![NullAdapter::new()]
+        alloc::vec![NullAdapter::new(self.caps)]
     }
 
     fn request_adapter(&self, _options: &RequestAdapterOptions) -> Option<NullAdapter> {
-        Some(NullAdapter::new())
+        Some(NullAdapter::new(self.caps))
     }
 
     fn request_adapter_for_surface(
@@ -93,7 +111,7 @@ impl Instance for NullInstance {
         _options: &RequestAdapterOptions,
         _surface: &NullSurface,
     ) -> Option<NullAdapter> {
-        Some(NullAdapter::new())
+        Some(NullAdapter::new(self.caps))
     }
 
     fn create_device(
