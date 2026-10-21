@@ -390,10 +390,14 @@ impl DesktopPanel for DesktopWorldPanel {
         if self.failed {
             return Ok(false);
         }
+        let project_changed = self
+            .controller
+            .poll_project_storage()
+            .map_err(|e| e.to_string())?;
         match (self.provider)(&mut self.controller, now) {
             Ok(update) => {
                 self.update = update;
-                Ok(update.changed)
+                Ok(project_changed || update.changed)
             }
             Err(e) => {
                 self.failed = true;
@@ -411,6 +415,10 @@ impl DesktopPanel for DesktopWorldPanel {
     fn fenced(&self) -> bool {
         self.failed
             || self.update.fenced
+            || self.controller.project_is_dirty()
+            || self.controller.project_io_pending()
+            || self.controller.project_candidate().is_some()
+            || self.controller.has_retired_world()
             || self.controller.pending_intents() != 0
             || self
                 .controller

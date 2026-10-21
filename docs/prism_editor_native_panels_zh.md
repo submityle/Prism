@@ -11,14 +11,14 @@
 | 面板 | 实际输入 | 宿主责任 | app 行为 |
 | --- | --- | --- | --- |
 | `DesktopTimelinePanel` | `TimelineEditor`、`TimelinePanelController` | 原子接收真实 `DesktopTimelineFrame`，持久化作者文档 | 路由作者/传输操作；单调时钟 advance；返回真实采样与跨越事件 |
-| `DesktopWorldPanel` | `WorldPanelController`、非阻塞 provider | 消费真实 intent，保留 transition/save token，轮询真实 I/O，发布匹配的完成结果 | 显示真实 world 树/地图并路由操作；不制造完成回执 |
+| `DesktopWorldPanel` | `WorldPanelController`、非阻塞 provider | 消费 cell intent，保留 transition/save token 并发布匹配的完成结果 | 每次 panel poll 同时轮询真实 project storage；project dirty、I/O pending、loaded candidate 与 retired world 均参与全局 fence；不制造完成回执 |
 | `DesktopProfilerPanel` | `ProfilerController`、非阻塞 provider | 提供实际完成的 CPU/GPU `ProfilerSources` | 发布不可变 store 并路由 frame/span/domain 导航；CPU/GPU 时钟不混用 |
 | `DesktopGraphPanel` | `GraphEditor`、宿主节点模板、视口和预算 | 提供领域无关的端口类型与 payload；显式绑定真实文件 | 实际节点/连线、指针预览、一次逆命令提交与独立存储 |
 | `DesktopPrefabPanel` | `PrefabPanelController`、真实 store 与显式传播目标 | 提供实际资产/实例；确认精确持久化结果 | 路由选择、revert、apply review/confirm、传播与历史；不创建虚假资产 |
 | `DesktopFrameGraphPanel` | `FrameGraphPanelController`、完成的 `Arc<GraphCaptureReport>` provider；可选 `DesktopRuntimePreviewSource` | 发布真实编译/执行采集；runtime source 必须交给 app 同步提供实际 `RuntimePreviewFrame` | 真实 pass/resource 导航；生产 capture 按 reserve-before-submit、bind、poll/cancel/drain 接入，并将真实 RGBA8 publication 交给共享 `ImageRenderer` |
 | `DesktopSequencePanel` | `SequenceProjectEditor`、显式 `SequencePanelLimits` | 提供真实完整项目、时钟/拓扑预算及独立文件绑定 | 子文档/clip 作者、一次逆命令、嵌套诊断与完整项目异步存储 |
 
-provider 返回 `DesktopPanelUpdate { changed, fenced, wake_at }`。宿主必须用 `fenced` 表达自身未提交元数据、在途发布或尚未解决的 I/O；world 的排队 intent、dirty cell、pending residency 另由 app 直接检查。回调必须非阻塞；延迟工作应提交给宿主服务，并通过单调 `Instant` deadline 或唤醒原生事件循环继续轮询。provider 错误保留 controller/source，显示错误并围栏；宿主解决原因后通过 `retry` 恢复。
+provider 返回 `DesktopPanelUpdate { changed, fenced, wake_at }`。宿主必须用 `fenced` 表达自身未提交元数据、在途发布或尚未解决的 I/O；world 的排队 intent、dirty cell、pending residency 与 project 生命周期状态由 app 直接检查。回调必须非阻塞；延迟工作应提交给宿主服务，并通过单调 `Instant` deadline 或唤醒原生事件循环继续轮询。provider 错误保留 controller/source，显示错误并围栏；宿主解决原因后通过 `retry` 恢复。
 
 timeline 的 consumer 返回 `Err` 必须表示整帧没有被接受。app 保留完全相同的 tick、iteration、sample 与 event delivery，停止自动唤醒；显式 `retry` 后重投同一帧，成功后才清除。宿主不得先写入部分外部状态再返回错误。advance 错误保留旧时钟锚点；不存在丢弃 elapsed 后假称成功的路径。
 

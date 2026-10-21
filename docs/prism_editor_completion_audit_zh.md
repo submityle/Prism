@@ -173,3 +173,18 @@ Escape 文档取消闭环暴露出下一项独立缺口：失败或取消的 sce
 - `git diff --check -- pkg/prism_editor_app/src/desktop_document.rs docs/prism_editor_completion_audit_zh.md`：通过。
 - `cargo fmt --manifest-path pkg/prism_editor_app/Cargo.toml -- --check`：通过。
 - `cargo test --manifest-path pkg/prism_editor_app/Cargo.toml --features desktop --lib desktop_document::tests::load_install_ -- --nocapture`：未完成；共享 target 的依赖重建将可用空间从约 7.2 GiB 消耗至约 2.2 GiB，并在写入 `prism_ui_render_backend`、`wgpu-core`、`prism_render_driver_wgpu` 等依赖产物时因 `No space left on device` 中止，尚未编译到 `prism_editor_app`。该结果不计为测试通过，也不是本次 Editor 源码的编译错误证据。
+
+## 2026-10-21 后续实现闭环：World membership storage 接入原生 panel 生命周期
+
+此前 `WorldPanelController` 已实现 membership project/history、精确保存 token、异步 storage、candidate 与 retired-world handoff，但 `DesktopWorldPanel` 没有在 app poll 中驱动 project storage，也没有把这些状态统一纳入关闭/卸载 fence。于是 controller 层能力虽存在，原生 app 生命周期仍可能漏轮询或在目录未保存、候选未处理、旧 world 未交接时放行。
+
+现在 `DesktopWorldPanel::poll` 先调用 `poll_project_storage()`，将 storage 状态变化并入 panel refresh；`fenced()` 直接检查 project dirty、project I/O pending、loaded candidate 和 retired world。宿主仍须自行绑定实际路径/revision，并接入 cell payload provider 与 runtime consumer；membership 文件与 OFPA payload 不构成跨文件原子事务。
+
+新增真实临时目录 app 测试覆盖 app 自动 poll、精确 save receipt 清除 dirty fence、load candidate 保持 fence、adopt 后 retired world 保持 fence，以及宿主接管 retired world 后解除 fence并允许卸载。既有真实 World provider 路由回归测试也一并复核。
+
+本次验证：
+
+- `rustfmt --edition 2024 pkg/prism_editor_app/src/desktop_ui/panels.rs pkg/prism_editor_app/src/desktop_ui/panel_tests.rs`：通过。
+- 两项定向测试（World project storage 生命周期、真实 World tree intent 路由）：各 1 passed。
+- `git diff --check`：通过。
+- 未运行全包测试或 strict Clippy；不据此宣称完整 Editor 或完整 World Project app 集成已经完成。

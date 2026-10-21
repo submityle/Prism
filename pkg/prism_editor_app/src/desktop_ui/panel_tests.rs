@@ -7,6 +7,8 @@ use prism_editor_ui::{
 };
 use std::{
     cell::{Cell, RefCell},
+    path::PathBuf,
+    sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
 };
 
@@ -302,6 +304,122 @@ fn world() -> WorldPanelController {
         WorldPanelLimits::default(),
     )
     .unwrap()
+}
+
+struct WorldProjectTemp(PathBuf);
+impl WorldProjectTemp {
+    fn new() -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "prism-editor-app-world-project-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&path).unwrap();
+        Self(path)
+    }
+    fn file(&self) -> PathBuf {
+        self.0.join("world.prismproject")
+    }
+}
+impl Drop for WorldProjectTemp {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.0).unwrap();
+    }
+}
+
+#[test]
+fn world_project_storage_is_polled_by_app_and_exact_save_releases_close_fence() {
+    use prism_editor_world::project::{ProjectLimits, WorldProjectStorageService};
+
+    let dir = WorldProjectTemp::new();
+    let mut controller = world();
+    let service = WorldProjectStorageService::new(
+        dir.file(),
+        controller.project().identity(),
+        1,
+        ProjectLimits::default(),
+    )
+    .unwrap();
+    controller
+        .bind_project_storage(
+            service,
+            Some(TimelineFileRevision::Missing),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+
+    let provider_polls = Rc::new(Cell::new(0));
+    let observed = provider_polls.clone();
+    let mut ui = ui();
+    ui.mount_native_panel(
+        "world",
+        "World",
+        Box::new(DesktopWorldPanel::new(controller, move |_, _| {
+            observed.set(observed.get() + 1);
+            Ok(DesktopPanelUpdate::default())
+        })),
+    )
+    .unwrap();
+    assert!(ui.has_uncommitted_edit());
+    click(&mut ui, "world:project:save");
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while ui
+        .native_panel::<DesktopWorldPanel>("world")
+        .unwrap()
+        .controller
+        .project_io_pending()
+    {
+        ui.poll_native_panels(Instant::now()).unwrap();
+        assert!(Instant::now() < deadline, "world project save timed out");
+        std::thread::yield_now();
+    }
+    ui.refresh().unwrap();
+
+    let panel = ui.native_panel::<DesktopWorldPanel>("world").unwrap();
+    assert!(provider_polls.get() > 0);
+    assert!(!panel.controller.project_is_dirty());
+    assert!(dir.file().is_file());
+    assert!(!ui.has_uncommitted_edit());
+
+    click(&mut ui, "world:project:load");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while ui
+        .native_panel::<DesktopWorldPanel>("world")
+        .unwrap()
+        .controller
+        .project_io_pending()
+    {
+        ui.poll_native_panels(Instant::now()).unwrap();
+        assert!(Instant::now() < deadline, "world project load timed out");
+        std::thread::yield_now();
+    }
+    ui.refresh().unwrap();
+    assert!(ui
+        .native_panel::<DesktopWorldPanel>("world")
+        .unwrap()
+        .controller
+        .project_candidate()
+        .is_some());
+    assert!(ui.has_uncommitted_edit());
+
+    click(&mut ui, "world:project:adopt");
+    assert!(ui
+        .native_panel::<DesktopWorldPanel>("world")
+        .unwrap()
+        .controller
+        .has_retired_world());
+    assert!(ui.has_uncommitted_edit());
+    assert!(ui
+        .native_panel_mut::<DesktopWorldPanel>("world")
+        .unwrap()
+        .controller
+        .take_retired_world()
+        .is_some());
+    ui.refresh().unwrap();
+    assert!(!ui.has_uncommitted_edit());
+    assert!(ui.unmount_native_panel("world").is_ok());
 }
 
 #[test]
