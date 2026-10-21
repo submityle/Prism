@@ -4,6 +4,10 @@
 //! workspace publication live here. Runtime artifacts remain outside this
 //! editing boundary.
 
+use crate::editable_payload::{
+    EditablePayload, EditablePayloadRef, MAX_EDITABLE_EXTERNAL_PAYLOAD_BYTES,
+};
+use crate::editable_storage::{validate_workspace_payloads, EditableWorkspaceSnapshot};
 use crate::source::SourceSnapshot;
 use crate::types::{AssetId, ContentHash};
 use fs4::fs_std::FileExt;
@@ -16,12 +20,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAGIC: &[u8] = b"PRISM-EDITABLE\0";
-// Fixed tags, identities, counts and four required byte/string length prefixes.
+// Fixed tags, identities, counts and three required byte/string length prefixes.
 // Shared with borrowed merge preflight so it need not allocate a second projection.
 pub(crate) const EDITABLE_FIXED_ENCODED_BYTES: usize =
-    MAGIC.len() + 4 + 16 + 16 + 4 + 32 + 1 + 4 + 4 + 4 + 1 + 4 * 4;
+    MAGIC.len() + 4 + 16 + 16 + 4 + 32 + 1 + 4 + 4 + 4 + 1 + 4 * 3;
 /// The canonical `.prism` editable-package schema.
-pub const EDITABLE_ASSET_SCHEMA: u32 = 2;
+pub const EDITABLE_ASSET_SCHEMA: u32 = 3;
 /// Maximum accepted encoded package size.
 pub const MAX_EDITABLE_ASSET_BYTES: usize = 64 * 1024 * 1024;
 /// Hard aggregate encoded-package budget for workspace snapshots and reimport scans.
@@ -169,6 +173,7 @@ pub trait EditablePayloadReferenceRewriter {
     fn rewrite_authoring_payload(
         &self,
         asset: &EditableAsset,
+        payload: &[u8],
         rewrites: &[EditableSubAssetReferenceRewrite],
     ) -> Result<Vec<u8>, EditableAssetError>;
 }
@@ -180,6 +185,7 @@ pub trait EditableReimporter {
     fn reimport(
         &self,
         previous: &EditableAsset,
+        previous_payload: &[u8],
         source: &SourceSnapshot,
     ) -> Result<EditableReimportOutput, EditableAssetError>;
 }
@@ -414,7 +420,7 @@ pub struct EditableAsset {
     pub subassets: Vec<EditableSubAsset>,
     pub dependencies: Vec<EditableDependency>,
     pub subasset_references: Vec<EditableSubAssetReference>,
-    pub authoring_payload: Vec<u8>,
+    pub authoring_payload: EditablePayload,
     pub preview: Option<Vec<u8>>,
 }
 
@@ -435,6 +441,13 @@ pub enum EditableAssetError {
     },
     InvalidText(&'static str),
     InvalidOptionTag,
+    InvalidPayloadReference,
+    PayloadUnavailable,
+    PayloadBudgetExceeded {
+        requested: u64,
+        limit: u64,
+    },
+    InvalidPayloadRetention,
     InvalidDependencyKind,
     NonCanonicalSubassets,
     DuplicateSubAssetName,
@@ -550,6 +563,19 @@ impl fmt::Display for EditableAssetError {
                 write!(f, "editable asset {field} is empty or contains NUL")
             }
             Self::InvalidOptionTag => f.write_str("invalid editable asset option tag"),
+            Self::InvalidPayloadReference => {
+                f.write_str("invalid or corrupt editable payload reference")
+            }
+            Self::PayloadUnavailable => {
+                f.write_str("external editable payload needs its owning workspace snapshot")
+            }
+            Self::PayloadBudgetExceeded { requested, limit } => write!(
+                f,
+                "editable payload needs {requested} bytes, limit is {limit}"
+            ),
+            Self::InvalidPayloadRetention => {
+                f.write_str("invalid editable payload retention record")
+            }
             Self::InvalidDependencyKind => f.write_str("invalid editable asset dependency kind"),
             Self::NonCanonicalSubassets => {
                 f.write_str("editable asset subassets are not strictly ordered by id")
@@ -722,7 +748,7 @@ impl EditableAsset {
         subassets: Vec<EditableSubAsset>,
         dependencies: Vec<EditableDependency>,
         subasset_references: Vec<EditableSubAssetReference>,
-        authoring_payload: Vec<u8>,
+        authoring_payload: impl Into<EditablePayload>,
         preview: Option<Vec<u8>>,
     ) -> Result<Self, EditableAssetError> {
         let value = Self {
@@ -734,7 +760,7 @@ impl EditableAsset {
             subassets,
             dependencies,
             subasset_references,
-            authoring_payload,
+            authoring_payload: authoring_payload.into(),
             preview,
         };
         value.validate()?;
@@ -787,7 +813,17 @@ impl EditableAsset {
             put_u64(&mut out, reference.subasset);
             out.push(reference.kind.tag());
         }
-        put_bytes(&mut out, &self.authoring_payload);
+        match &self.authoring_payload {
+            EditablePayload::Inline(bytes) => {
+                out.push(0);
+                put_bytes(&mut out, bytes);
+            }
+            EditablePayload::External(reference) => {
+                out.push(1);
+                out.extend_from_slice(&reference.content_hash.0);
+                put_u64(&mut out, reference.byte_len);
+            }
+        }
         match &self.preview {
             Some(bytes) => {
                 out.push(1);
@@ -856,7 +892,16 @@ impl EditableAsset {
                 kind: EditableDependencyKind::from_tag(cursor.byte()?)?,
             });
         }
-        let authoring_payload = cursor.bytes(MAX_AUTHORING_PAYLOAD_BYTES, "authoring payload")?;
+        let authoring_payload = match cursor.byte()? {
+            0 => EditablePayload::Inline(
+                cursor.bytes(MAX_AUTHORING_PAYLOAD_BYTES, "authoring payload")?,
+            ),
+            1 => EditablePayload::External(EditablePayloadRef {
+                content_hash: ContentHash(cursor.array()?),
+                byte_len: cursor.u64()?,
+            }),
+            _ => return Err(EditableAssetError::InvalidOptionTag),
+        };
         let preview = match cursor.byte()? {
             0 => None,
             1 => Some(cursor.bytes(MAX_PREVIEW_BYTES, "preview")?),
@@ -1064,12 +1109,16 @@ impl EditableAsset {
                 actual: self.canonical_settings.len(),
             });
         }
-        if self.authoring_payload.len() > MAX_AUTHORING_PAYLOAD_BYTES {
-            return Err(EditableAssetError::FieldTooLarge {
-                field: "authoring payload",
-                limit: MAX_AUTHORING_PAYLOAD_BYTES,
-                actual: self.authoring_payload.len(),
-            });
+        if let EditablePayload::Inline(bytes) = &self.authoring_payload {
+            if bytes.len() > MAX_AUTHORING_PAYLOAD_BYTES {
+                return Err(EditableAssetError::FieldTooLarge {
+                    field: "authoring payload",
+                    limit: MAX_AUTHORING_PAYLOAD_BYTES,
+                    actual: bytes.len(),
+                });
+            }
+        } else if self.authoring_payload.byte_len() > MAX_EDITABLE_EXTERNAL_PAYLOAD_BYTES {
+            return Err(EditableAssetError::InvalidPayloadReference);
         }
         if let Some(preview) = &self.preview {
             if preview.len() > MAX_PREVIEW_BYTES {
@@ -1134,10 +1183,10 @@ impl EditableAsset {
             self.canonical_settings.len(),
             self.source.uri.len(),
             self.source.format.len(),
-            self.authoring_payload.len(),
         ] {
             length = length.saturating_add(bytes);
         }
+        length = length.saturating_add(self.authoring_payload.encoded_len());
         if let Some(bytes) = &self.source.embedded_source {
             length = length.saturating_add(4).saturating_add(bytes.len());
         }
@@ -1199,7 +1248,7 @@ impl EditableWorkspace {
     pub fn snapshot(
         &self,
         max_encoded_bytes: u64,
-    ) -> Result<BTreeMap<AssetId, EditableAsset>, EditableAssetError> {
+    ) -> Result<EditableWorkspaceSnapshot, EditableAssetError> {
         if max_encoded_bytes == 0 || max_encoded_bytes > MAX_EDITABLE_WORKSPACE_ENCODED_BYTES {
             return Err(EditableAssetError::InvalidWorkspaceSnapshotBudget {
                 requested: max_encoded_bytes,
@@ -1211,10 +1260,13 @@ impl EditableWorkspace {
             let packages =
                 scan_workspace_packages(&self.root, WorkspaceScanLimits::new(max_encoded_bytes))?;
             validate_workspace_reference_graph(&packages)?;
-            Ok(packages
-                .into_iter()
-                .map(|(id, package)| (id, package.asset))
-                .collect())
+            EditableWorkspaceSnapshot::new(
+                self,
+                packages
+                    .into_iter()
+                    .map(|(id, package)| (id, package.asset))
+                    .collect(),
+            )
         })
     }
 
@@ -1307,6 +1359,7 @@ impl EditableWorkspace {
             let edited_ids = ordered.keys().copied().collect::<Vec<_>>();
             drop(ordered);
             validate_workspace_reference_graph(&packages)?;
+            validate_workspace_payloads(self, packages.values().map(|p| &p.asset))?;
             let mut records = Vec::new();
             let mut content_hashes = BTreeMap::new();
             let mut updated_assets = Vec::new();
@@ -1500,6 +1553,7 @@ impl EditableWorkspace {
             }
             validate_workspace_reference_graph(&packages)?;
             validate_workspace_required_dependencies(&packages)?;
+            validate_workspace_payloads(self, packages.values().map(|p| &p.asset))?;
             // Each physical path has one before/after record. This makes swaps
             // and moving onto a package removed by the same batch deterministic.
             let mut records = BTreeMap::<PathBuf, WorkspaceTransactionRecord>::new();
@@ -1555,6 +1609,41 @@ impl EditableWorkspace {
         I: EditableReimporter,
         R: EditablePayloadReferenceRewriter,
     {
+        self.reimport_with_payload_budget(
+            package_path,
+            provider,
+            importer,
+            payload_rewriter,
+            redirects,
+            MAX_EDITABLE_WORKSPACE_ENCODED_BYTES,
+        )
+    }
+
+    /// Reimports with a positive aggregate materialization budget (at most
+    /// 4 GiB). Selected old inputs are preflighted before any payload read and
+    /// shared by content identity. Callback output bytes have a separate
+    /// aggregate bound of the same size. These bounds do not constrain heap
+    /// allocations made inside trusted importer/rewriter callbacks.
+    pub fn reimport_with_payload_budget<P, I, R>(
+        &self,
+        package_path: impl AsRef<Path>,
+        provider: &P,
+        importer: &I,
+        payload_rewriter: &R,
+        redirects: &[EditableSubAssetRedirect],
+        max_payload_bytes: u64,
+    ) -> Result<EditableWorkspaceReimport, EditableAssetError>
+    where
+        P: EditableSourceProvider,
+        I: EditableReimporter,
+        R: EditablePayloadReferenceRewriter,
+    {
+        if max_payload_bytes == 0 || max_payload_bytes > MAX_EDITABLE_EXTERNAL_PAYLOAD_BYTES {
+            return Err(EditableAssetError::PayloadBudgetExceeded {
+                requested: max_payload_bytes,
+                limit: MAX_EDITABLE_EXTERNAL_PAYLOAD_BYTES,
+            });
+        }
         let package_path = package_path.as_ref().to_path_buf();
         self.with_lock(|| {
             recover_workspace_transactions(&self.root)?;
@@ -1574,8 +1663,54 @@ impl EditableWorkspace {
                 .asset
                 .clone();
 
+            let redirect_by_source = redirects
+                .iter()
+                .map(|redirect| (redirect.from, redirect.to))
+                .collect::<BTreeMap<_, _>>();
+            let selected = packages.values().filter(|package| {
+                package.asset.asset == target_asset
+                    || package.asset.subasset_references.iter().any(|reference| {
+                        reference.asset == target_asset
+                            && redirect_by_source.contains_key(&reference.subasset)
+                    })
+            });
+            let mut payloads = BTreeMap::new();
+            let mut input_bytes = 0u64;
+            for package in selected {
+                let payload = &package.asset.authoring_payload;
+                let identity = (payload.content_hash(), payload.byte_len());
+                if let std::collections::btree_map::Entry::Vacant(entry) = payloads.entry(identity)
+                {
+                    input_bytes = input_bytes.saturating_add(payload.byte_len());
+                    if input_bytes > max_payload_bytes {
+                        return Err(EditableAssetError::PayloadBudgetExceeded {
+                            requested: input_bytes,
+                            limit: max_payload_bytes,
+                        });
+                    }
+                    entry.insert(payload);
+                }
+            }
+            let mut materialized = BTreeMap::new();
+            for (identity, payload) in payloads {
+                materialized.insert(
+                    identity,
+                    self.resolve_payload_locked(payload, max_payload_bytes)?,
+                );
+            }
             let snapshot = capture_reimport_source(&previous, provider)?;
-            let output = importer.reimport(&previous, &snapshot)?;
+            let previous_payload = &materialized[&(
+                previous.authoring_payload.content_hash(),
+                previous.authoring_payload.byte_len(),
+            )];
+            let output = importer.reimport(&previous, previous_payload, &snapshot)?;
+            let mut output_bytes = output.authoring_payload.len() as u64;
+            if output_bytes > max_payload_bytes {
+                return Err(EditableAssetError::PayloadBudgetExceeded {
+                    requested: output_bytes,
+                    limit: max_payload_bytes,
+                });
+            }
             let referenced_subassets = packages
                 .values()
                 .flat_map(|package| package.asset.subasset_references.iter())
@@ -1597,6 +1732,11 @@ impl EditableWorkspace {
                     .as_ref()
                     .map(|_| snapshot.bytes().to_vec()),
             };
+            let payload = self.persist_reimport_payload(
+                output.authoring_payload,
+                matches!(previous.authoring_payload, EditablePayload::External(_)),
+                max_payload_bytes,
+            )?;
             let next = EditableAsset::new(
                 previous.asset,
                 previous.kind,
@@ -1606,7 +1746,7 @@ impl EditableWorkspace {
                 plan.subassets.clone(),
                 output.dependencies,
                 output.subasset_references,
-                output.authoring_payload,
+                payload,
                 output.preview,
             )?;
             packages
@@ -1614,10 +1754,6 @@ impl EditableWorkspace {
                 .expect("target was found in package map")
                 .asset = next;
 
-            let redirect_by_source = redirects
-                .iter()
-                .map(|redirect| (redirect.from, redirect.to))
-                .collect::<BTreeMap<_, _>>();
             if !redirect_by_source.is_empty() {
                 for package in packages.values_mut() {
                     let rewrites = package
@@ -1639,8 +1775,39 @@ impl EditableWorkspace {
                         continue;
                     }
 
-                    let authoring_payload =
-                        payload_rewriter.rewrite_authoring_payload(&package.asset, &rewrites)?;
+                    let identity = (
+                        package.asset.authoring_payload.content_hash(),
+                        package.asset.authoring_payload.byte_len(),
+                    );
+                    let payload = if let Some(bytes) = materialized.get(&identity) {
+                        bytes.clone()
+                    } else {
+                        input_bytes = input_bytes.saturating_add(identity.1);
+                        if input_bytes > max_payload_bytes {
+                            return Err(EditableAssetError::PayloadBudgetExceeded {
+                                requested: input_bytes,
+                                limit: max_payload_bytes,
+                            });
+                        }
+                        let bytes = self.resolve_payload_locked(
+                            &package.asset.authoring_payload,
+                            max_payload_bytes,
+                        )?;
+                        materialized.insert(identity, bytes.clone());
+                        bytes
+                    };
+                    let authoring_payload = payload_rewriter.rewrite_authoring_payload(
+                        &package.asset,
+                        &payload,
+                        &rewrites,
+                    )?;
+                    output_bytes = output_bytes.saturating_add(authoring_payload.len() as u64);
+                    if output_bytes > max_payload_bytes {
+                        return Err(EditableAssetError::PayloadBudgetExceeded {
+                            requested: output_bytes,
+                            limit: max_payload_bytes,
+                        });
+                    }
                     for reference in &mut package.asset.subasset_references {
                         if reference.asset == target_asset {
                             if let Some(&to) = redirect_by_source.get(&reference.subasset) {
@@ -1648,12 +1815,20 @@ impl EditableWorkspace {
                             }
                         }
                     }
-                    package.asset.authoring_payload = authoring_payload;
+                    package.asset.authoring_payload = self.persist_reimport_payload(
+                        authoring_payload,
+                        matches!(
+                            package.asset.authoring_payload,
+                            EditablePayload::External(_)
+                        ),
+                        max_payload_bytes,
+                    )?;
                     package.asset.validate()?;
                 }
             }
 
             validate_workspace_reference_graph(&packages)?;
+            validate_workspace_payloads(self, packages.values().map(|p| &p.asset))?;
             let mut changes = Vec::new();
             let mut updated_assets = Vec::new();
             for package in packages.values() {
@@ -1676,7 +1851,23 @@ impl EditableWorkspace {
         })
     }
 
-    fn with_lock<T>(
+    fn persist_reimport_payload(
+        &self,
+        bytes: Vec<u8>,
+        external: bool,
+        max_bytes: u64,
+    ) -> Result<EditablePayload, EditableAssetError> {
+        if external || bytes.len() > MAX_AUTHORING_PAYLOAD_BYTES {
+            Ok(EditablePayload::External(
+                self.store_payload_locked(bytes.as_slice(), max_bytes)?
+                    .reference(),
+            ))
+        } else {
+            Ok(EditablePayload::Inline(bytes))
+        }
+    }
+
+    pub(crate) fn with_lock<T>(
         &self,
         operation: impl FnOnce() -> Result<T, EditableAssetError>,
     ) -> Result<T, EditableAssetError> {
@@ -1701,12 +1892,26 @@ impl EditableWorkspace {
             (Ok(_), Err(error)) => Err(error),
         }
     }
+
+    pub(crate) fn capture_assets_locked(
+        &self,
+        max_encoded_bytes: u64,
+    ) -> Result<BTreeMap<AssetId, EditableAsset>, EditableAssetError> {
+        recover_workspace_transactions(&self.root)?;
+        let packages =
+            scan_workspace_packages(&self.root, WorkspaceScanLimits::new(max_encoded_bytes))?;
+        validate_workspace_reference_graph(&packages)?;
+        Ok(packages
+            .into_iter()
+            .map(|(id, package)| (id, package.asset))
+            .collect())
+    }
 }
 
 #[derive(Clone, Debug)]
-struct WorkspacePackage {
+pub(crate) struct WorkspacePackage {
     relative_path: PathBuf,
-    asset: EditableAsset,
+    pub(crate) asset: EditableAsset,
     encoded: Vec<u8>,
 }
 
@@ -1746,9 +1951,16 @@ fn validate_workspace_package_path(path: &Path) -> Result<PathBuf, EditableAsset
         || path
             .components()
             .any(|component| !matches!(component, Component::Normal(_)))
-        || path
-            .components()
-            .any(|component| component.as_os_str() == EDITABLE_TRANSACTION_DIRECTORY)
+        || path.components().any(|component| {
+            matches!(
+                component.as_os_str().to_str(),
+                Some(
+                    EDITABLE_TRANSACTION_DIRECTORY
+                        | ".prism-editable-payloads"
+                        | ".prism-editable-history"
+                )
+            )
+        })
     {
         return Err(EditableAssetError::PackageOutsideWorkspace);
     }
@@ -1862,7 +2074,16 @@ fn scan_workspace_directory(
             continue;
         }
         if metadata.is_dir() {
-            if stack.len() == 1 && entry.file_name() == EDITABLE_TRANSACTION_DIRECTORY {
+            if stack.len() == 1
+                && matches!(
+                    entry.file_name().to_str(),
+                    Some(
+                        EDITABLE_TRANSACTION_DIRECTORY
+                            | ".prism-editable-payloads"
+                            | ".prism-editable-history"
+                    )
+                )
+            {
                 continue;
             }
             // stack.len() is the depth that this child directory would have.
@@ -2804,7 +3025,7 @@ mod tests {
         let mut asset = scan_test_asset();
         asset.source.embedded_source = Some(Vec::new());
         asset.source.content_hash = ContentHash::digest(&[]);
-        asset.authoring_payload.clear();
+        asset.authoring_payload = Vec::new().into();
         assert_eq!(
             asset.validated_encoded_len().unwrap(),
             asset.encode().unwrap().len()
@@ -2817,12 +3038,15 @@ mod tests {
         asset.source =
             SourceRecord::embedded("source", "test/raw", vec![0; MAX_EMBEDDED_SOURCE_BYTES])
                 .unwrap();
-        asset.authoring_payload.clear();
+        asset.authoring_payload = Vec::new().into();
         let remaining = MAX_EDITABLE_ASSET_BYTES - asset.validated_encoded_len().unwrap();
         assert!(remaining < MAX_AUTHORING_PAYLOAD_BYTES);
-        asset.authoring_payload = vec![0; remaining];
+        asset.authoring_payload = vec![0; remaining].into();
         assert_eq!(asset.validated_encoded_len(), Ok(MAX_EDITABLE_ASSET_BYTES));
-        asset.authoring_payload.push(0);
+        let EditablePayload::Inline(bytes) = &mut asset.authoring_payload else {
+            panic!("inline fixture")
+        };
+        bytes.push(0);
         let expected = EditableAssetError::PackageTooLarge {
             actual: MAX_EDITABLE_ASSET_BYTES + 1,
         };
@@ -2907,7 +3131,10 @@ mod tests {
         let lengths =
             scan_workspace_directory(directory.path(), WorkspaceScanLimits::new(4096)).unwrap();
         let mut replacement = scan_test_asset();
-        replacement.authoring_payload.extend_from_slice(b"grown");
+        let EditablePayload::Inline(bytes) = &mut replacement.authoring_payload else {
+            panic!("inline fixture")
+        };
+        bytes.extend_from_slice(b"grown");
         replacement.write_to_path(&path).unwrap();
         assert_eq!(
             read_editable_package_bytes_at_length(&path, Some(lengths[0].1)),
@@ -2923,7 +3150,7 @@ mod tests {
         original.write_to_path(&path).unwrap();
         let workspace = EditableWorkspace::open(directory.path()).unwrap();
         let mut replacement = original.clone();
-        replacement.authoring_payload = b"new payload".to_vec();
+        replacement.authoring_payload = b"new payload".to_vec().into();
         let replacement_bytes = replacement.encode().unwrap();
         let transaction_root = ensure_workspace_transactions_root(directory.path()).unwrap();
         let transaction = create_workspace_transaction(
@@ -2962,7 +3189,7 @@ mod tests {
         original.write_to_path(&path).unwrap();
         let old_bytes = original.encode().unwrap();
         let mut replacement = original.clone();
-        replacement.authoring_payload = b"new".to_vec();
+        replacement.authoring_payload = b"new".to_vec().into();
         let new_bytes = replacement.encode().unwrap();
 
         let transaction_root = ensure_workspace_transactions_root(directory.path()).unwrap();
@@ -3002,7 +3229,7 @@ mod tests {
         original.write_to_path(&path).unwrap();
         let old_bytes = original.encode().unwrap();
         let mut replacement = original.clone();
-        replacement.authoring_payload = b"new".to_vec();
+        replacement.authoring_payload = b"new".to_vec().into();
         let new_bytes = replacement.encode().unwrap();
 
         let transaction_root = ensure_workspace_transactions_root(directory.path()).unwrap();
@@ -3044,7 +3271,7 @@ mod tests {
         let a = scan_test_asset().encode().unwrap();
         let mut second = scan_test_asset();
         second.asset = AssetId(2);
-        second.authoring_payload = b"second".to_vec();
+        second.authoring_payload = b"second".to_vec().into();
         let b = second.encode().unwrap();
         let record = |path: &str, old: &[u8], new: &[u8]| WorkspaceTransactionRecord {
             relative_path: path.into(),
@@ -3119,7 +3346,7 @@ mod tests {
             let root = tempfile::tempdir().unwrap();
             let before = scan_test_asset().encode().unwrap();
             let mut edited = scan_test_asset();
-            edited.authoring_payload = b"changed".to_vec();
+            edited.authoring_payload = b"changed".to_vec().into();
             let after = edited.encode().unwrap();
             let records = vec![
                 WorkspaceTransactionRecord {
@@ -3160,7 +3387,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let before = scan_test_asset().encode().unwrap();
         let mut unexpected = scan_test_asset();
-        unexpected.authoring_payload = b"uncooperative writer".to_vec();
+        unexpected.authoring_payload = b"uncooperative writer".to_vec().into();
         let unexpected = unexpected.encode().unwrap();
         let records = vec![
             WorkspaceTransactionRecord {
@@ -3234,7 +3461,7 @@ mod tests {
             let root = tempfile::tempdir().unwrap();
             let old = scan_test_asset().encode().unwrap();
             let mut replacement = scan_test_asset();
-            replacement.authoring_payload = b"committed replacement".to_vec();
+            replacement.authoring_payload = b"committed replacement".to_vec().into();
             let new = replacement.encode().unwrap();
             set_workspace_file_state(root.path(), Path::new("a.prism"), &old).unwrap();
             let records = vec![WorkspaceTransactionRecord {

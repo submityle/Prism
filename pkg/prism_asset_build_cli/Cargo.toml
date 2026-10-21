@@ -14,10 +14,10 @@ prism_asset_build_core = { path = "../prism_asset_build_core" }
 prism_asset_container = { path = "../prism_asset_container" }
 serde = { workspace = true }
 serde_json = { workspace = true }
+tempfile = "3.27"
 
 [dev-dependencies]
 png = "0.18.1"
-tempfile = "3.27"
 
 [lints]
 workspace = true

@@ -17,9 +17,9 @@ use crate::editable::{
 use crate::{
     package_runtime_with_options, ArtifactKey, ArtifactSpec, AssetId, AssetPackageMapping,
     BuildExecution, BuildExecutionError, BuildExecutor, BuildGraph, BuildInputSnapshot, BuildJob,
-    BuildResources, BuildRevision, ContentAddressedStore, DerivedDataCache, JobId, PackageError,
-    PackageOptions, PackageRequest, ProcessorError, ProcessorIdentity, RevisionStore,
-    RuntimePackage,
+    BuildResources, BuildRevision, ContentAddressedStore, ContentHash, DerivedDataCache,
+    EditablePayload, EditableWorkspaceSnapshot, JobId, PackageError, PackageOptions,
+    PackageRequest, ProcessorError, ProcessorIdentity, RevisionStore, RuntimePackage,
 };
 
 const PROTOCOL_VERSION: u32 = 1;
@@ -29,6 +29,8 @@ const MAX_COOKERS: usize = 1024;
 const MAX_FINGERPRINT_BYTES: usize = 1024 * 1024;
 const MAX_OUTPUT_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_IMAGE_OUTPUT_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_MATERIALIZED_PAYLOAD_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+const DEFAULT_MATERIALIZED_PAYLOAD_BYTES: u64 = 512 * 1024 * 1024;
 
 /// All semantic fields visible to a cooker. Source and preview are excluded.
 /// Editor-only dependencies/references are removed before this input is frozen.
@@ -41,7 +43,7 @@ pub struct EditableCookInput {
     pub subassets: Vec<EditableSubAsset>,
     pub dependencies: Vec<EditableDependency>,
     pub subasset_references: Vec<EditableSubAssetReference>,
-    pub authoring_payload: Vec<u8>,
+    pub authoring_payload: Arc<[u8]>,
 }
 
 /// Borrowed completed artifact of one hard dependency, in ascending AssetId order.
@@ -149,6 +151,12 @@ pub struct EditableBuildOptions {
     pub environment_fingerprint: Vec<u8>,
     /// Positive encoded snapshot budget, at most 512 MiB.
     pub max_snapshot_bytes: u64,
+    /// Positive materialized payload budget, at most 4 GiB. Every selected
+    /// inline payload counts separately; external blobs count once per hash.
+    /// Admission finishes before any external payload is read.
+    /// This counts frozen payload bytes, not snapshot metadata, resolver scratch
+    /// space or allocations made by caller-owned cookers.
+    pub max_materialized_payload_bytes: u64,
 }
 
 impl Default for EditableBuildOptions {
@@ -158,12 +166,13 @@ impl Default for EditableBuildOptions {
             toolchain_fingerprint: Vec::new(),
             environment_fingerprint: Vec::new(),
             max_snapshot_bytes: MAX_EDITABLE_WORKSPACE_ENCODED_BYTES,
+            max_materialized_payload_bytes: DEFAULT_MATERIALIZED_PAYLOAD_BYTES,
         }
     }
 }
 
-/// Immutable build closure. Payload allocations move from the snapshot into
-/// Arc-owned jobs; graph fan-out borrows dependency outputs without copying.
+/// Immutable build closure. Payload bytes are held by Arc-owned jobs; external
+/// blobs with the same hash share one allocation. Graph fan-out borrows outputs.
 pub struct EditableBuildPlan {
     graph: BuildGraph,
     specs: BTreeMap<JobId, ArtifactSpec>,
@@ -184,7 +193,7 @@ impl EditableBuildPlan {
         options: &EditableBuildOptions,
     ) -> Result<Self, EditableBuildError> {
         validate_options(options)?;
-        Self::from_snapshot(
+        Self::from_workspace_snapshot(
             workspace
                 .snapshot(options.max_snapshot_bytes)
                 .map_err(EditableBuildError::Editable)?,
@@ -194,10 +203,34 @@ impl EditableBuildPlan {
         )
     }
 
+    /// Resolves only the selected hard closure while the snapshot holds its
+    /// shared file lease. After planning, jobs own all required bytes and no
+    /// further workspace or payload-store access is needed.
+    pub fn from_workspace_snapshot(
+        snapshot: EditableWorkspaceSnapshot,
+        roots: &[AssetId],
+        registry: &EditableCookerRegistry,
+        options: &EditableBuildOptions,
+    ) -> Result<Self, EditableBuildError> {
+        Self::from_snapshot_resolving(&snapshot, Some(&snapshot), roots, registry, options)
+    }
+
     /// Selects only the hard dependency closure of roots. Missing soft targets
     /// are retained as metadata; editor-only targets do not enter the build.
+    /// Selected external payloads require `from_workspace_snapshot` instead:
+    /// a bare map supplies no payload store or file lease.
     pub fn from_snapshot(
-        mut snapshot: BTreeMap<AssetId, EditableAsset>,
+        snapshot: BTreeMap<AssetId, EditableAsset>,
+        roots: &[AssetId],
+        registry: &EditableCookerRegistry,
+        options: &EditableBuildOptions,
+    ) -> Result<Self, EditableBuildError> {
+        Self::from_snapshot_resolving(&snapshot, None, roots, registry, options)
+    }
+
+    fn from_snapshot_resolving(
+        snapshot: &BTreeMap<AssetId, EditableAsset>,
+        resolver: Option<&EditableWorkspaceSnapshot>,
         roots: &[AssetId],
         registry: &EditableCookerRegistry,
         options: &EditableBuildOptions,
@@ -210,7 +243,7 @@ impl EditableBuildPlan {
             return Err(EditableBuildError::Limit("assets or roots"));
         }
         let mut total = 0u64;
-        for (id, asset) in &snapshot {
+        for (id, asset) in snapshot {
             if id.0 == 0 || *id != asset.asset {
                 return Err(EditableBuildError::InvalidIdentity(*id));
             }
@@ -298,6 +331,52 @@ impl EditableBuildPlan {
             soft.insert(id, soft_ids.into_iter().collect::<Vec<_>>());
         }
 
+        // Complete aggregate admission before resolving even the first blob.
+        // A shared hash with contradictory lengths must not inherit whichever
+        // reference happens to be visited first.
+        let mut external_lengths = BTreeMap::new();
+        let mut materialized_bytes = 0u64;
+        for id in hard.keys() {
+            let asset = &snapshot[id];
+            if !registry.registrations.contains_key(&asset.kind) {
+                return Err(EditableBuildError::MissingCooker {
+                    asset: *id,
+                    kind: asset.kind,
+                });
+            }
+            let added = match &asset.authoring_payload {
+                EditablePayload::Inline(bytes) => bytes.len() as u64,
+                EditablePayload::External(reference) => {
+                    if resolver.is_none() {
+                        return Err(EditableBuildError::ExternalPayloadRequiresWorkspace {
+                            asset: *id,
+                        });
+                    }
+                    match external_lengths.insert(reference.content_hash, reference.byte_len) {
+                        Some(previous) if previous != reference.byte_len => {
+                            return Err(EditableBuildError::ConflictingPayloadLength {
+                                content_hash: reference.content_hash,
+                                expected: previous,
+                                actual: reference.byte_len,
+                            });
+                        }
+                        Some(_) => 0,
+                        None => reference.byte_len,
+                    }
+                }
+            };
+            materialized_bytes = materialized_bytes
+                .checked_add(added)
+                .ok_or(EditableBuildError::Limit("materialized payload bytes"))?;
+        }
+        if materialized_bytes > options.max_materialized_payload_bytes {
+            return Err(EditableBuildError::MaterializedPayloadBudgetExceeded {
+                actual: materialized_bytes,
+                limit: options.max_materialized_payload_bytes,
+            });
+        }
+
+        let mut payloads = BTreeMap::<ContentHash, Arc<[u8]>>::new();
         let mut graph = BuildGraph::new();
         let mut specs = BTreeMap::new();
         let mut inputs = BuildInputSnapshot::new();
@@ -314,7 +393,7 @@ impl EditableBuildPlan {
             &options.environment_fingerprint,
         );
         for (id, dependencies) in &hard {
-            let asset = snapshot.remove(id).expect("closure was validated");
+            let asset = &snapshot[id];
             let registration = registry.registrations.get(&asset.kind).ok_or(
                 EditableBuildError::MissingCooker {
                     asset: *id,
@@ -323,23 +402,43 @@ impl EditableBuildPlan {
             )?;
             let contract = &registration.descriptor;
             output_limits.insert(*id, contract.max_output_bytes);
+            let authoring_payload = match &asset.authoring_payload {
+                EditablePayload::Inline(bytes) => Arc::<[u8]>::from(bytes.as_slice()),
+                EditablePayload::External(reference) => {
+                    if let Some(bytes) = payloads.get(&reference.content_hash) {
+                        Arc::clone(bytes)
+                    } else {
+                        let bytes = resolver
+                            .expect("external payload resolver was preflighted")
+                            .resolve_payload(
+                                &asset.authoring_payload,
+                                options.max_materialized_payload_bytes,
+                            )
+                            .map_err(EditableBuildError::Editable)?;
+                        payloads.insert(reference.content_hash, Arc::clone(&bytes));
+                        bytes
+                    }
+                }
+            };
             let input = Arc::new(EditableCookInput {
                 asset: asset.asset,
                 kind: asset.kind,
                 flags: asset.flags,
-                canonical_settings: asset.canonical_settings,
-                subassets: asset.subassets,
+                canonical_settings: asset.canonical_settings.clone(),
+                subassets: asset.subassets.clone(),
                 dependencies: asset
                     .dependencies
-                    .into_iter()
+                    .iter()
+                    .copied()
                     .filter(|d| d.kind != EditableDependencyKind::EditorOnly)
                     .collect(),
                 subasset_references: asset
                     .subasset_references
-                    .into_iter()
+                    .iter()
+                    .copied()
                     .filter(|r| r.kind != EditableDependencyKind::EditorOnly)
                     .collect(),
-                authoring_payload: asset.authoring_payload,
+                authoring_payload,
             });
             let mut spec = ArtifactSpec {
                 asset: *id,
@@ -565,6 +664,14 @@ impl EditableBuildPlan {
 }
 
 fn validate_options(options: &EditableBuildOptions) -> Result<(), EditableBuildError> {
+    if options.max_materialized_payload_bytes == 0
+        || options.max_materialized_payload_bytes > MAX_MATERIALIZED_PAYLOAD_BYTES
+    {
+        return Err(EditableBuildError::InvalidMaterializedPayloadBudget {
+            requested: options.max_materialized_payload_bytes,
+            limit: MAX_MATERIALIZED_PAYLOAD_BYTES,
+        });
+    }
     if options.max_snapshot_bytes == 0
         || options.max_snapshot_bytes > MAX_EDITABLE_WORKSPACE_ENCODED_BYTES
     {
@@ -671,7 +778,7 @@ impl EditableCooker for CanonicalEditableImageCooker {
         // bytes are canonical; avoid encoding and cloning the mip chain again.
         // Release decoded pixels before allocating the one owned output copy.
         drop(image);
-        Ok(input.authoring_payload.clone())
+        Ok(input.authoring_payload.to_vec())
     }
 }
 
@@ -679,14 +786,36 @@ impl EditableCooker for CanonicalEditableImageCooker {
 #[derive(Debug)]
 pub enum EditableBuildError {
     Editable(EditableAssetError),
+    ExternalPayloadRequiresWorkspace {
+        asset: AssetId,
+    },
+    InvalidMaterializedPayloadBudget {
+        requested: u64,
+        limit: u64,
+    },
+    MaterializedPayloadBudgetExceeded {
+        actual: u64,
+        limit: u64,
+    },
+    ConflictingPayloadLength {
+        content_hash: ContentHash,
+        expected: u64,
+        actual: u64,
+    },
     InvalidCooker,
     DuplicateCooker,
     Limit(&'static str),
     InvalidIdentity(AssetId),
     EmptyRoots,
     MissingAsset(AssetId),
-    MissingCooker { asset: AssetId, kind: u128 },
-    MissingSubAsset { asset: AssetId, subasset: u64 },
+    MissingCooker {
+        asset: AssetId,
+        kind: u128,
+    },
+    MissingSubAsset {
+        asset: AssetId,
+        subasset: u64,
+    },
     Graph(crate::BuildError),
     Hash(crate::HashError),
     Execution(BuildExecutionError),
@@ -698,6 +827,18 @@ impl fmt::Display for EditableBuildError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Editable(e) => e.fmt(f),
+            Self::ExternalPayloadRequiresWorkspace { asset } => write!(
+                f, "asset {:032x} has an external payload; use a workspace snapshot to resolve it", asset.0
+            ),
+            Self::InvalidMaterializedPayloadBudget { requested, limit } => write!(
+                f, "invalid materialized payload budget {requested}, expected 1..={limit}"
+            ),
+            Self::MaterializedPayloadBudgetExceeded { actual, limit } => write!(
+                f, "selected payloads need {actual} materialized bytes, limit is {limit}"
+            ),
+            Self::ConflictingPayloadLength { content_hash, expected, actual } => write!(
+                f, "external payload {content_hash:?} has inconsistent lengths {expected} and {actual}"
+            ),
             Self::Graph(e) => e.fmt(f),
             Self::Hash(e) => e.fmt(f),
             Self::Execution(e) => e.fmt(f),

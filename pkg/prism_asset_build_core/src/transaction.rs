@@ -82,6 +82,32 @@ impl From<CasError> for PublishError {
     }
 }
 
+/// Internal acceptance failures retain the caller's diagnostic without making
+/// the publication protocol depend on a particular processor or scheduler.
+#[derive(Debug)]
+pub(crate) enum CommitError<E> {
+    Publish(PublishError),
+    Rejected(E),
+}
+
+impl<E> From<PublishError> for CommitError<E> {
+    fn from(error: PublishError) -> Self {
+        Self::Publish(error)
+    }
+}
+
+impl<E> From<io::Error> for CommitError<E> {
+    fn from(error: io::Error) -> Self {
+        Self::Publish(error.into())
+    }
+}
+
+impl<E> From<CasError> for CommitError<E> {
+    fn from(error: CasError) -> Self {
+        Self::Publish(error.into())
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PublishedManifest {
     pub manifest: Manifest,
@@ -1068,6 +1094,20 @@ impl PublishTransaction {
     }
 
     pub fn commit(self) -> Result<PublishedManifest, PublishError> {
+        match self.commit_checked(|| Ok::<(), std::convert::Infallible>(())) {
+            Ok(published) => Ok(published),
+            Err(CommitError::Publish(error)) => Err(error),
+            Err(CommitError::Rejected(never)) => match never {},
+        }
+    }
+
+    /// Runs acceptance after both publication locks and all pure validation,
+    /// immediately before Prepare. Rejection has no transaction side effects.
+    /// Once accepted, publication proceeds even if cancellation arrives later.
+    pub(crate) fn commit_checked<E>(
+        self,
+        accept: impl FnOnce() -> Result<(), E>,
+    ) -> Result<PublishedManifest, CommitError<E>> {
         let _publish_guard = self
             .store
             .publish_lock
@@ -1079,13 +1119,14 @@ impl PublishTransaction {
             return Err(PublishError::Conflict {
                 expected: self.expected_current,
                 actual,
-            });
+            }
+            .into());
         }
         let next = actual.map_or(0, |r| r.0.checked_add(1).unwrap_or(u64::MAX));
         if self.revision.0 != next || (actual == Some(BuildRevision(u64::MAX))) {
-            return Err(PublishError::Invalid(
-                "revision must be the next monotonic revision",
-            ));
+            return Err(
+                PublishError::Invalid("revision must be the next monotonic revision").into(),
+            );
         }
 
         validate_dependency_closure(&self.staged)?;
@@ -1105,7 +1146,8 @@ impl PublishTransaction {
         {
             return Err(PublishError::Invalid(
                 "runtime package was built from a different manifest",
-            ));
+            )
+            .into());
         }
         if let Some(package) = self.runtime_package.as_ref() {
             if package.asset_guids.len() != manifest.entries.len()
@@ -1120,13 +1162,15 @@ impl PublishTransaction {
             {
                 return Err(PublishError::Invalid(
                     "runtime package does not cover the build manifest assets",
-                ));
+                )
+                .into());
             }
             for guid in package.asset_guids.values() {
                 if package.runtime_manifest.route(*guid).is_none() {
                     return Err(PublishError::Invalid(
                         "runtime package asset route is absent from runtime manifest",
-                    ));
+                    )
+                    .into());
                 }
             }
         }
@@ -1151,6 +1195,8 @@ impl PublishTransaction {
         self.store
             .validate_new_transaction(self.transaction_id, self.revision)?;
 
+        accept().map_err(CommitError::Rejected)?;
+
         // From this point onward recovery can distinguish an interrupted
         // publication from an ordinary unused CAS blob.
         self.store.journal.append(JournalRecord::Prepare {
@@ -1170,13 +1216,13 @@ impl PublishTransaction {
                 Some(bytes) => {
                     let hash = self.store.cas.put(bytes)?;
                     if hash != descriptor.content_hash {
-                        return Err(PublishError::DescriptorMismatch(*asset));
+                        return Err(PublishError::DescriptorMismatch(*asset).into());
                     }
                 }
                 None => {
                     let length = self.store.cas.verify(descriptor.content_hash)?;
                     if length != descriptor.byte_len {
-                        return Err(PublishError::DescriptorMismatch(*asset));
+                        return Err(PublishError::DescriptorMismatch(*asset).into());
                     }
                 }
             }
@@ -1209,7 +1255,8 @@ impl PublishTransaction {
             return Err(PublishError::Conflict {
                 expected: self.expected_current,
                 actual: final_current,
-            });
+            }
+            .into());
         }
 
         // Last mutating operation is atomic pointer replacement. If anything above
@@ -1227,7 +1274,8 @@ impl PublishTransaction {
                 manifest_hash,
                 publication_hash,
                 source,
-            });
+            }
+            .into());
         }
         Ok(PublishedManifest {
             manifest,
@@ -2350,6 +2398,67 @@ mod tests {
                 .unwrap(),
             Some(BuildRevision(0))
         );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn publication_acceptance_observes_cancellation_after_local_lock_wait() {
+        assert_cancelled_publication_wait(true);
+    }
+
+    #[test]
+    fn publication_acceptance_observes_cancellation_after_file_lock_wait() {
+        assert_cancelled_publication_wait(false);
+    }
+
+    fn assert_cancelled_publication_wait(in_process: bool) {
+        let dir = temp_dir();
+        let store = RevisionStore::open(&dir).unwrap();
+        let mut initial = store.begin(BuildRevision(0), None);
+        initial
+            .stage(AssetId(1), descriptor(b"old"), b"old".to_vec())
+            .unwrap();
+        initial.commit().unwrap();
+        let old_records = store.journal.scan().unwrap();
+        let local_guard = in_process.then(|| store.publish_lock.lock().unwrap());
+        let file_guard = (!in_process).then(|| FilePublishLock::acquire(&dir).unwrap());
+        let cancellation = crate::processor::ProcessCancellation::default();
+        let worker_cancel = cancellation.clone();
+        let worker_store = store.clone();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (accepted_tx, accepted_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let mut transaction = worker_store.begin(BuildRevision(1), Some(BuildRevision(0)));
+            transaction
+                .stage(AssetId(1), descriptor(b"new"), b"new".to_vec())
+                .unwrap();
+            started_tx.send(()).unwrap();
+            transaction.commit_checked(|| {
+                accepted_tx.send(()).unwrap();
+                worker_cancel.check()
+            })
+        });
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(matches!(
+            accepted_rx.recv_timeout(Duration::from_millis(100)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
+        cancellation.cancel();
+        drop(local_guard);
+        drop(file_guard);
+        accepted_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(matches!(
+            worker.join().unwrap(),
+            Err(CommitError::Rejected(_))
+        ));
+        assert_eq!(store.current_revision().unwrap(), Some(BuildRevision(0)));
+        assert_eq!(store.journal.scan().unwrap(), old_records);
+        assert!(!dir.join("revisions/1.manifest").exists());
+        assert!(store
+            .cas
+            .verify(crate::types::ContentHash::digest(b"new"))
+            .is_err());
+        drop(store);
         fs::remove_dir_all(dir).unwrap();
     }
 

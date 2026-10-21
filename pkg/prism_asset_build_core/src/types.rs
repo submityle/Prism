@@ -47,7 +47,9 @@ impl TransactionId {
 }
 
 /// A committed artifact descriptor. `kind`/`schema` are explicit protocol IDs;
-/// dependencies preserve caller-declared order. Blob integrity is checked by CAS.
+/// Direct dependencies are unique and preserve first-occurrence input order.
+/// Ordered input slots, including repetitions, are separately bound into the
+/// artifact key. Blob integrity is checked by CAS.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ArtifactDescriptor {
     pub key: ArtifactKey,

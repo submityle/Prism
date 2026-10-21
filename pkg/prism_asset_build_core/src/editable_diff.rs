@@ -11,6 +11,7 @@ use crate::editable::{
     EditableSubAsset, EditableSubAssetReference, SourceRecord,
 };
 use crate::types::AssetId;
+use crate::EditablePayload;
 use std::fmt;
 
 /// Before and after values of one changed field. Large values remain borrowed.
@@ -51,7 +52,7 @@ impl<T> EditableSetDiff<'_, T> {
 pub struct EditableDiffImpact {
     /// At least one cooker-visible input field changed.
     pub cook: bool,
-    /// Source, preview, or EditorOnly dependency/reference metadata changed.
+    /// Source, preview, payload storage, or EditorOnly edge metadata changed.
     pub editor_import: bool,
 }
 
@@ -70,12 +71,24 @@ pub struct EditableAssetDiff<'a> {
     pub subassets: Vec<EditableSubAssetDiff<'a>>,
     pub dependencies: EditableSetDiff<'a, EditableDependency>,
     pub subasset_references: EditableSetDiff<'a, EditableSubAssetReference>,
-    pub authoring_payload: Option<EditableValueChange<&'a [u8]>>,
+    pub authoring_payload: Option<EditableValueChange<&'a EditablePayload>>,
     /// Preserves the distinction between no preview and an empty preview.
     pub preview: Option<EditableValueChange<Option<&'a [u8]>>>,
 }
 
 impl EditableAssetDiff<'_> {
+    /// Content identity affects Cook; changing Inline/External storage affects
+    /// editor/import metadata. External content is compared by hash and length
+    /// without reading CAS. Materialization must still verify those bytes.
+    pub fn authoring_payload_impact(&self) -> EditableDiffImpact {
+        self.authoring_payload
+            .map_or(EditableDiffImpact::default(), |change| EditableDiffImpact {
+                cook: !change.before.semantic_eq(change.after),
+                editor_import: std::mem::discriminant(change.before)
+                    != std::mem::discriminant(change.after),
+            })
+    }
+
     /// Mirrors the projection into `EditableCookInput`: source, preview and
     /// EditorOnly edges are excluded; subasset names and all flags are included.
     pub fn impact(&self) -> EditableDiffImpact {
@@ -91,14 +104,15 @@ impl EditableAssetDiff<'_> {
             .iter()
             .chain(&self.subasset_references.removed)
             .map(|edge| edge.kind);
+        let payload = self.authoring_payload_impact();
         let mut impact = EditableDiffImpact {
             cook: self.asset.is_some()
                 || self.kind.is_some()
                 || self.flags.is_some()
                 || self.canonical_settings.is_some()
                 || !self.subassets.is_empty()
-                || self.authoring_payload.is_some(),
-            editor_import: self.source.is_some() || self.preview.is_some(),
+                || payload.cook,
+            editor_import: self.source.is_some() || self.preview.is_some() || payload.editor_import,
         };
         for kind in dependency_kinds.chain(reference_kinds) {
             if kind == EditableDependencyKind::EditorOnly {
@@ -147,8 +161,9 @@ impl std::error::Error for EditableDiffError {
 }
 
 /// Validates both inputs and compares exact semantic fields without encoding or
-/// cloning them. Bytes are opaque: equal lengths or source hashes alone never
-/// establish payload equality. Allocation is proportional to changed records;
+/// cloning them. Inline bytes compare exactly; external payload content identity
+/// uses both hash and length, while storage changes remain visible metadata.
+/// Allocation is proportional to changed records;
 /// sorted collections are merged in linear time.
 pub fn diff_editable_assets<'a>(
     before: &'a EditableAsset,
@@ -185,10 +200,7 @@ pub fn diff_editable_assets<'a>(
         subassets,
         dependencies: set_diff(&before.dependencies, &after.dependencies),
         subasset_references: set_diff(&before.subasset_references, &after.subasset_references),
-        authoring_payload: changed(
-            before.authoring_payload.as_slice(),
-            after.authoring_payload.as_slice(),
-        ),
+        authoring_payload: changed(&before.authoring_payload, &after.authoring_payload),
         preview: changed(before.preview.as_deref(), after.preview.as_deref()),
     })
 }
@@ -424,7 +436,7 @@ mod tests {
             |a| a.kind += 1,
             |a| a.flags = 1,
             |a| a.canonical_settings.push(1),
-            |a| a.authoring_payload.push(1),
+            |a| a.authoring_payload = b"changed payload".to_vec().into(),
             |a| a.subassets.push(subasset(1, "part", 42)),
             |a| a.dependencies.push(dependency(2, Hard)),
             |a| a.dependencies.push(dependency(2, Soft)),
@@ -520,15 +532,16 @@ mod tests {
     fn same_length_payload_changes_are_exact_and_borrow_original_allocations() {
         let mut before = asset();
         let mut after = asset();
-        before.authoring_payload = vec![0; 1024 * 1024];
-        after.authoring_payload = vec![0; 1024 * 1024];
-        *after.authoring_payload.last_mut().unwrap() = 1;
+        before.authoring_payload = vec![0; 1024 * 1024].into();
+        let mut bytes = vec![0; 1024 * 1024];
+        *bytes.last_mut().unwrap() = 1;
+        after.authoring_payload = bytes.into();
         after.canonical_settings[0] = b'S';
         after.preview = Some(vec![1, 2, 3]);
         let diff = diff_editable_assets(&before, &after).unwrap();
         let payload = diff.authoring_payload.unwrap();
-        assert_eq!(payload.before.as_ptr(), before.authoring_payload.as_ptr());
-        assert_eq!(payload.after.as_ptr(), after.authoring_payload.as_ptr());
+        assert!(std::ptr::eq(payload.before, &before.authoring_payload));
+        assert!(std::ptr::eq(payload.after, &after.authoring_payload));
         assert_eq!(
             diff.canonical_settings.unwrap().after.as_ptr(),
             after.canonical_settings.as_ptr()
@@ -538,6 +551,75 @@ mod tests {
             after.preview.as_ref().unwrap().as_ptr()
         );
         assert!(diff.affects_cook());
+    }
+
+    #[test]
+    fn payload_storage_changes_are_nonempty_editor_only_in_both_directions() {
+        let before = asset();
+        let mut after = before.clone();
+        after.authoring_payload = EditablePayload::External(crate::EditablePayloadRef {
+            content_hash: before.authoring_payload.content_hash(),
+            byte_len: before.authoring_payload.byte_len(),
+        });
+        for (before, after) in [(&before, &after), (&after, &before)] {
+            let diff = diff_editable_assets(before, after).unwrap();
+            assert!(!diff.is_empty());
+            assert_eq!(
+                diff.impact(),
+                EditableDiffImpact {
+                    cook: false,
+                    editor_import: true
+                }
+            );
+            assert_eq!(diff.authoring_payload_impact(), diff.impact());
+            let change = diff.authoring_payload.unwrap();
+            assert!(std::ptr::eq(change.before, &before.authoring_payload));
+            assert!(std::ptr::eq(change.after, &after.authoring_payload));
+        }
+        assert!(diff_editable_assets(&after, &after).unwrap().is_empty());
+    }
+
+    #[test]
+    fn external_payload_content_requires_both_hash_and_length() {
+        let mut before = asset();
+        before.authoring_payload = EditablePayload::External(crate::EditablePayloadRef {
+            content_hash: before.authoring_payload.content_hash(),
+            byte_len: before.authoring_payload.byte_len(),
+        });
+        for reference in [
+            crate::EditablePayloadRef {
+                content_hash: crate::ContentHash::digest(b"other"),
+                byte_len: before.authoring_payload.byte_len(),
+            },
+            crate::EditablePayloadRef {
+                content_hash: before.authoring_payload.content_hash(),
+                byte_len: before.authoring_payload.byte_len() + 1,
+            },
+        ] {
+            let mut after = before.clone();
+            after.authoring_payload = EditablePayload::External(reference);
+            let diff = diff_editable_assets(&before, &after).unwrap();
+            assert_eq!(
+                diff.impact(),
+                EditableDiffImpact {
+                    cook: true,
+                    editor_import: false
+                }
+            );
+            assert!(!diff.is_empty());
+        }
+        let after = asset();
+        before.authoring_payload = EditablePayload::External(crate::EditablePayloadRef {
+            content_hash: crate::ContentHash::digest(b"other"),
+            byte_len: after.authoring_payload.byte_len(),
+        });
+        assert_eq!(
+            diff_editable_assets(&before, &after).unwrap().impact(),
+            EditableDiffImpact {
+                cook: true,
+                editor_import: true
+            }
+        );
     }
 
     #[test]

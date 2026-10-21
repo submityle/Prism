@@ -6,6 +6,7 @@ use crate::job::{BuildJob, JobId, Processor};
 use crate::profile::{EffectiveProfile, ProfileError, ProfileReader};
 use crate::source::SourceSnapshot;
 use crate::types::{ArtifactKey, AssetId};
+use std::sync::Arc;
 
 /// Stable processor identity used by recipes, registries, and artifact keys.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -24,7 +25,7 @@ impl ProcessorIdentity {
 }
 
 /// Processor identity that can be checked against an [`ImportRecipe`].
-pub trait ImportProcessor: Processor {
+pub trait ImportProcessor {
     /// Stable importer/processor protocol identity.
     const IMPORTER_ID: u128;
     /// Importer implementation/schema version.
@@ -56,6 +57,8 @@ pub enum ImportRecipeError {
     Profile(ProfileError),
     /// The frozen output contract cannot be encoded.
     Hash(HashError),
+    /// Recorded analysis rejected the request or processor contract.
+    Processor(crate::ProcessorError),
 }
 
 impl std::fmt::Display for ImportRecipeError {
@@ -74,6 +77,7 @@ impl std::fmt::Display for ImportRecipeError {
             Self::ImporterSelection(error) => error.fmt(f),
             Self::Profile(error) => error.fmt(f),
             Self::Hash(error) => error.fmt(f),
+            Self::Processor(error) => error.fmt(f),
         }
     }
 }
@@ -149,7 +153,7 @@ impl ImportRecipe {
         alignment: u32,
     ) -> Result<ImportPlan, ImportRecipeError>
     where
-        P: ImportProcessor + 'static,
+        P: ImportProcessor + Processor + 'static,
         F: FnOnce(&mut ProfileReader<'_>) -> Result<P, ProfileError>,
     {
         let mut reader = profile.reader();
@@ -187,7 +191,7 @@ impl ImportRecipe {
         alignment: u32,
     ) -> Result<ImportPlan, ImportRecipeError>
     where
-        P: ImportProcessor + 'static,
+        P: ImportProcessor + Processor + 'static,
     {
         if self.importer_id != P::IMPORTER_ID || self.importer_version != P::IMPORTER_VERSION {
             return Err(ImportRecipeError::ProcessorIdentityMismatch {
@@ -203,17 +207,60 @@ impl ImportRecipe {
         })
     }
 
-    /// Plans an import by selecting a registered plugin from extension/MIME metadata.
+    /// Records analysis and freezes the complete SDK contract before cache lookup.
+    pub fn plan_recorded(
+        &self,
+        asset: AssetId,
+        job_id: JobId,
+        processor: Arc<dyn crate::processor::Processor>,
+        catalog: &crate::processor::InputCatalog<'_>,
+        primary_inputs: Vec<String>,
+        limits: crate::processor::ProcessLimits,
+        cancellation: crate::processor::ProcessCancellation,
+    ) -> Result<ImportPlan, ImportRecipeError> {
+        let prepared = crate::processor::prepare_process(
+            processor,
+            catalog,
+            crate::processor::ProcessRequest {
+                job: job_id,
+                asset,
+                primary_inputs,
+                canonical_settings: self.canonical_settings.clone(),
+                profile_hash: self.profile_hash,
+                toolchain_fingerprint: self.toolchain_fingerprint.clone(),
+                environment_fingerprint: self.environment_fingerprint.clone(),
+            },
+            limits,
+            cancellation,
+        )
+        .map_err(ImportRecipeError::Processor)?;
+        if self.importer_id != prepared.spec.processor_id
+            || self.importer_version != prepared.spec.processor_version
+        {
+            return Err(ImportRecipeError::ProcessorIdentityMismatch {
+                recipe_id: self.importer_id,
+                recipe_version: self.importer_version,
+                processor_id: prepared.spec.processor_id,
+                processor_version: prepared.spec.processor_version,
+            });
+        }
+        Ok(ImportPlan {
+            job: prepared.job,
+            spec: prepared.spec,
+        })
+    }
+
+    /// Selects a registered SDK plugin and freezes its recorded analysis.
     pub fn plan_from_registry(
         &self,
         registry: &crate::import::ImporterRegistry,
         asset: AssetId,
         job_id: JobId,
-        source_job: JobId,
+        catalog: &crate::processor::InputCatalog<'_>,
+        primary_inputs: Vec<String>,
         selector: &crate::import::ImportSelector,
-        kind: u128,
-        schema: u32,
-        alignment: u32,
+        limits: crate::processor::ProcessLimits,
+        cancellation: crate::processor::ProcessCancellation,
     ) -> Result<ImportPlan, ImportRecipeError> {
         let importer = registry.select(selector)?;
         if self.importer_id != importer.identity().id
@@ -226,10 +273,15 @@ impl ImportRecipe {
                 processor_version: importer.identity().version,
             });
         }
-        Ok(ImportPlan {
-            job: BuildJob::new(job_id, vec![source_job], importer),
-            spec: self.artifact_spec(asset, kind, schema, alignment),
-        })
+        self.plan_recorded(
+            asset,
+            job_id,
+            importer.processor(),
+            catalog,
+            primary_inputs,
+            limits,
+            cancellation,
+        )
     }
 
     /// Returns a recipe whose profile hash covers exactly the selected fields.
@@ -447,19 +499,32 @@ mod tests {
         let mut recipe = recipe();
         recipe.importer_id = crate::import::CanonicalPngProcessor::IMPORTER_ID;
         recipe.importer_version = crate::import::CanonicalPngProcessor::IMPORTER_VERSION;
+        recipe.canonical_settings = crate::import::CanonicalPngProcessor::canonical_settings();
         let recipe = recipe
             .with_profile_dependencies(&profile, ["texture.semantic"])
             .unwrap();
+        let temporary = tempfile::tempdir().unwrap();
+        let store = crate::RevisionStore::open(temporary.path()).unwrap();
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut bytes, 1, 1);
+            encoder.set_color(png::ColorType::Rgba);
+            let mut writer = encoder.write_header().unwrap();
+            writer.write_image_data(&[1, 2, 3, 255]).unwrap();
+        }
+        let source = SourceSnapshot::new("textures/hero.PNG", bytes).unwrap();
+        let mut catalog = crate::processor::InputCatalog::new(&store).unwrap();
+        catalog.insert_source("source", JobId(11), &source).unwrap();
         let plan = recipe
             .plan_from_registry(
                 &registry,
                 AssetId(9),
                 JobId(10),
-                JobId(11),
+                &catalog,
+                vec!["source".into()],
                 &crate::import::ImportSelector::for_path("textures/hero.PNG", None),
-                crate::import::IMAGE_ARTIFACT_KIND,
-                2,
-                4,
+                crate::processor::ProcessLimits::default(),
+                crate::processor::ProcessCancellation::default(),
             )
             .unwrap();
         assert_eq!(plan.job.dependencies(), &[JobId(11)]);

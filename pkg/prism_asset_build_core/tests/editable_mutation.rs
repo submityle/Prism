@@ -63,7 +63,7 @@ fn create_replace_move_remove_and_receipts_preserve_identity() {
     assert_eq!(created.changes[0].old_hash, None);
     assert_eq!(created.changes[0].new_hash, Some(hash(&original)));
     let mut replacement = original.clone();
-    replacement.authoring_payload = b"edited".to_vec();
+    replacement.authoring_payload = b"edited".to_vec().into();
     let moved = workspace
         .mutate(
             vec![put("nested/b.prism", Some(&original), replacement.clone())],

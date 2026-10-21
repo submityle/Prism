@@ -82,6 +82,7 @@ impl EditableReimporter for TestReimporter {
     fn reimport(
         &self,
         _previous: &EditableAsset,
+        _previous_payload: &[u8],
         _source: &SourceSnapshot,
     ) -> Result<EditableReimportOutput, EditableAssetError> {
         Ok(self.output.clone())
@@ -93,10 +94,11 @@ struct NoopPayloadRewriter;
 impl EditablePayloadReferenceRewriter for NoopPayloadRewriter {
     fn rewrite_authoring_payload(
         &self,
-        asset: &EditableAsset,
+        _asset: &EditableAsset,
+        payload: &[u8],
         _rewrites: &[EditableSubAssetReferenceRewrite],
     ) -> Result<Vec<u8>, EditableAssetError> {
-        Ok(asset.authoring_payload.clone())
+        Ok(payload.to_vec())
     }
 }
 
@@ -105,10 +107,11 @@ struct RewritingPayloadRewriter;
 impl EditablePayloadReferenceRewriter for RewritingPayloadRewriter {
     fn rewrite_authoring_payload(
         &self,
-        asset: &EditableAsset,
+        _asset: &EditableAsset,
+        payload: &[u8],
         rewrites: &[EditableSubAssetReferenceRewrite],
     ) -> Result<Vec<u8>, EditableAssetError> {
-        assert_eq!(asset.authoring_payload, b"ref:9");
+        assert_eq!(payload, b"ref:9");
         assert_eq!(
             rewrites,
             &[EditableSubAssetReferenceRewrite {
@@ -127,6 +130,7 @@ impl EditablePayloadReferenceRewriter for FailingPayloadRewriter {
     fn rewrite_authoring_payload(
         &self,
         _asset: &EditableAsset,
+        _payload: &[u8],
         _rewrites: &[EditableSubAssetReferenceRewrite],
     ) -> Result<Vec<u8>, EditableAssetError> {
         Err(EditableAssetError::InvalidSourcePath)
@@ -415,7 +419,7 @@ fn atomic_file_persistence_round_trips_and_replaces_the_old_package() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("hero.prism");
     let mut replacement = embedded_asset();
-    replacement.authoring_payload = b"updated editable payload".to_vec();
+    replacement.authoring_payload = b"updated editable payload".to_vec().into();
 
     embedded_asset().write_to_path(&path).unwrap();
     let first_bytes = fs::read(&path).unwrap();
@@ -632,7 +636,10 @@ fn workspace_reimport_captures_the_current_external_source_and_publishes_the_pac
     );
     assert_eq!(reimported.canonical_settings, b"reimported-settings");
     assert_eq!(reimported.subassets, changed_subassets());
-    assert_eq!(reimported.authoring_payload, b"reimported-payload");
+    assert_eq!(
+        reimported.authoring_payload.inline_bytes(),
+        Some(b"reimported-payload".as_slice())
+    );
 }
 
 #[test]
@@ -694,7 +701,10 @@ fn workspace_reimport_rewrites_typed_and_payload_references_together() {
     assert_eq!(result.updated_assets, vec![AssetId(10), AssetId(20)]);
     let rewritten =
         EditableAsset::read_from_path(workspace_root.path().join("consumer.prism")).unwrap();
-    assert_eq!(rewritten.authoring_payload, b"ref:12");
+    assert_eq!(
+        rewritten.authoring_payload.inline_bytes(),
+        Some(b"ref:12".as_slice())
+    );
     assert_eq!(rewritten.subasset_references[0].subasset, 12);
 }
 
@@ -872,7 +882,7 @@ fn workspace_snapshot_owns_inputs_and_releases_the_workspace_lock() {
     FileExt::unlock(&lock).unwrap();
 
     let mut replacement = original.clone();
-    replacement.authoring_payload = b"replacement authoring bytes".to_vec();
+    replacement.authoring_payload = b"replacement authoring bytes".to_vec().into();
     replacement.subassets[0].name = "renamed".into();
     replacement.source =
         SourceRecord::embedded("textures/hero.png", "image/png", b"new source".to_vec()).unwrap();
@@ -897,7 +907,9 @@ fn workspace_snapshot_rejects_duplicate_ids_without_changing_packages() {
     }
     let workspace = EditableWorkspace::open(directory.path()).unwrap();
     assert_eq!(
-        workspace.snapshot(MAX_EDITABLE_WORKSPACE_ENCODED_BYTES),
+        workspace
+            .snapshot(MAX_EDITABLE_WORKSPACE_ENCODED_BYTES)
+            .map(|_| ()),
         Err(EditableAssetError::DuplicateWorkspaceAsset { asset: asset.asset })
     );
     for name in ["one.prism", "two.prism"] {
@@ -921,7 +933,7 @@ fn workspace_snapshot_checks_aggregate_budget_and_accepts_the_exact_boundary() {
     let total = (first.encode().unwrap().len() + second.encode().unwrap().len()) as u64;
     let workspace = EditableWorkspace::open(directory.path()).unwrap();
     assert_eq!(
-        workspace.snapshot(total - 1),
+        workspace.snapshot(total - 1).map(|_| ()),
         Err(EditableAssetError::WorkspaceEncodedBytesLimitExceeded {
             actual: total,
             limit: total - 1
@@ -943,7 +955,7 @@ fn workspace_snapshot_finishes_byte_preflight_before_decoding_any_packages() {
     let total = (malformed.len() + bytes.len()) as u64;
     let workspace = EditableWorkspace::open(directory.path()).unwrap();
     assert_eq!(
-        workspace.snapshot(total - 1),
+        workspace.snapshot(total - 1).map(|_| ()),
         Err(EditableAssetError::WorkspaceEncodedBytesLimitExceeded {
             actual: total,
             limit: total - 1
@@ -966,7 +978,9 @@ fn workspace_snapshot_rejects_malformed_packages_without_rewriting_any_files() {
     fs::write(directory.path().join("z.prism"), &malformed).unwrap();
     let workspace = EditableWorkspace::open(directory.path()).unwrap();
     assert_eq!(
-        workspace.snapshot(MAX_EDITABLE_WORKSPACE_ENCODED_BYTES),
+        workspace
+            .snapshot(MAX_EDITABLE_WORKSPACE_ENCODED_BYTES)
+            .map(|_| ()),
         Err(EditableAssetError::InvalidMagic)
     );
     assert_eq!(fs::read(directory.path().join("a.prism")).unwrap(), valid);
@@ -986,7 +1000,7 @@ fn workspace_snapshot_budget_must_be_positive_and_within_the_hard_cap() {
     let workspace = EditableWorkspace::open(directory.path()).unwrap();
     for requested in [0, MAX_EDITABLE_WORKSPACE_ENCODED_BYTES + 1, u64::MAX] {
         assert_eq!(
-            workspace.snapshot(requested),
+            workspace.snapshot(requested).map(|_| ()),
             Err(EditableAssetError::InvalidWorkspaceSnapshotBudget {
                 requested,
                 limit: MAX_EDITABLE_WORKSPACE_ENCODED_BYTES
@@ -1026,7 +1040,9 @@ fn workspace_snapshot_checks_explicit_reference_graph() {
     consumer.subasset_references[0].subasset = u64::MAX;
     consumer.write_to_path(&consumer_path).unwrap();
     assert_eq!(
-        workspace.snapshot(MAX_EDITABLE_WORKSPACE_ENCODED_BYTES),
+        workspace
+            .snapshot(MAX_EDITABLE_WORKSPACE_ENCODED_BYTES)
+            .map(|_| ()),
         Err(EditableAssetError::MissingReferencedSubAsset {
             asset: target.asset,
             subasset: u64::MAX
@@ -1035,7 +1051,9 @@ fn workspace_snapshot_checks_explicit_reference_graph() {
     consumer.subasset_references[0].asset = AssetId(99);
     consumer.write_to_path(&consumer_path).unwrap();
     assert_eq!(
-        workspace.snapshot(MAX_EDITABLE_WORKSPACE_ENCODED_BYTES),
+        workspace
+            .snapshot(MAX_EDITABLE_WORKSPACE_ENCODED_BYTES)
+            .map(|_| ()),
         Err(EditableAssetError::MissingReferencedAsset { asset: AssetId(99) })
     );
     assert_eq!(EditableAsset::read_from_path(target_path).unwrap(), target);
@@ -1073,7 +1091,9 @@ fn workspace_snapshot_allows_absent_soft_targets_but_checks_present_subassets() 
         consumer.subasset_references[0].kind = kind;
         consumer.write_to_path(&consumer_path).unwrap();
         assert_eq!(
-            workspace.snapshot(MAX_EDITABLE_WORKSPACE_ENCODED_BYTES),
+            workspace
+                .snapshot(MAX_EDITABLE_WORKSPACE_ENCODED_BYTES)
+                .map(|_| ()),
             Err(EditableAssetError::MissingReferencedAsset {
                 asset: target.asset
             })
@@ -1085,7 +1105,9 @@ fn workspace_snapshot_allows_absent_soft_targets_but_checks_present_subassets() 
         .write_to_path(directory.path().join("target.prism"))
         .unwrap();
     assert_eq!(
-        workspace.snapshot(MAX_EDITABLE_WORKSPACE_ENCODED_BYTES),
+        workspace
+            .snapshot(MAX_EDITABLE_WORKSPACE_ENCODED_BYTES)
+            .map(|_| ()),
         Err(EditableAssetError::MissingReferencedSubAsset {
             asset: target.asset,
             subasset: u64::MAX
@@ -1156,7 +1178,9 @@ fn workspace_reimport_obeys_the_hard_aggregate_scan_budget_before_decoding() {
         limit: MAX_EDITABLE_WORKSPACE_ENCODED_BYTES,
     };
     assert_eq!(
-        workspace.snapshot(MAX_EDITABLE_WORKSPACE_ENCODED_BYTES),
+        workspace
+            .snapshot(MAX_EDITABLE_WORKSPACE_ENCODED_BYTES)
+            .map(|_| ()),
         Err(expected.clone())
     );
     assert_eq!(
@@ -1191,7 +1215,7 @@ fn workspace_snapshot_has_a_finite_iterative_directory_depth() {
     assert!(workspace.snapshot(1).unwrap().is_empty());
     fs::create_dir(deepest.join("excess")).unwrap();
     assert_eq!(
-        workspace.snapshot(1),
+        workspace.snapshot(1).map(|_| ()),
         Err(EditableAssetError::WorkspaceDepthLimitExceeded { limit: 64 })
     );
 }

@@ -5,9 +5,10 @@ use prism_asset_build_core::{
     DerivedDataCache, EditableAsset, EditableAssetError, EditableBuildOptions, EditableBuildPlan,
     EditableCookDependency, EditableCookInput, EditableCooker, EditableCookerDescriptor,
     EditableCookerRegistry, EditableDependencyKind, EditableMergeError, EditableMergePath,
-    EditableMergeSide, EditableMergeValue, EditableSubAsset, EditableSubAssetReference,
-    EditableWorkspace, EditableWorkspaceEdit, JobId, ProcessorError, ProcessorIdentity,
-    RevisionStore, SourceRecord, MAX_EDITABLE_ASSET_BYTES, MAX_EDITABLE_WORKSPACE_ENCODED_BYTES,
+    EditableMergeSide, EditableMergeValue, EditablePayload, EditablePayloadRef, EditableSubAsset,
+    EditableSubAssetReference, EditableWorkspace, EditableWorkspaceEdit, JobId, ProcessorError,
+    ProcessorIdentity, RevisionStore, SourceRecord, MAX_EDITABLE_ASSET_BYTES,
+    MAX_EDITABLE_WORKSPACE_ENCODED_BYTES,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -19,6 +20,120 @@ use std::sync::{
 use tempfile::{tempdir, TempDir};
 
 const MERGE_LIMIT: u64 = MAX_EDITABLE_ASSET_BYTES as u64;
+
+#[test]
+fn external_merge_preserves_reference_and_budgets_encoded_bytes_exactly() {
+    let base = asset(1);
+    let mut local = base.clone();
+    local.canonical_settings = b"local settings".to_vec();
+    let mut incoming = base.clone();
+    // No CAS or gigabyte buffer is needed to merge an opaque reference.
+    incoming.authoring_payload = EditablePayload::External(EditablePayloadRef {
+        content_hash: ContentHash::digest(b"external content"),
+        byte_len: 1024 * 1024 * 1024,
+    });
+    let mut expected = local.clone();
+    expected.authoring_payload = incoming.authoring_payload.clone();
+    for (incoming, expected) in [(&base, &local), (&incoming, &expected)] {
+        let plan = plan_editable_merge(&base, &local, incoming).unwrap();
+        assert!(plan.conflicts().is_empty());
+        let exact = expected.encode().unwrap().len() as u64;
+        assert_eq!(plan.resolve(&BTreeMap::new(), exact).unwrap(), *expected);
+        assert_eq!(
+            plan.resolve(&BTreeMap::new(), exact - 1),
+            Err(EditableMergeError::OutputBudgetExceeded {
+                actual: exact,
+                limit: exact - 1,
+            })
+        );
+    }
+}
+
+#[test]
+fn mixed_storage_conflicts_borrow_enum_and_require_explicit_selection() {
+    let base = asset(1);
+    let mut local = base.clone();
+    local.authoring_payload = EditablePayload::External(EditablePayloadRef {
+        content_hash: base.authoring_payload.content_hash(),
+        byte_len: base.authoring_payload.byte_len(),
+    });
+    let mut incoming = base.clone();
+    incoming.authoring_payload = b"incoming payload".to_vec().into();
+    for external_incoming in [false, true] {
+        if external_incoming {
+            incoming.authoring_payload = EditablePayload::External(EditablePayloadRef {
+                content_hash: incoming.authoring_payload.content_hash(),
+                byte_len: incoming.authoring_payload.byte_len(),
+            });
+        }
+        // Payload is atomic, including its storage representation: a concurrent
+        // storage migration must not be silently discarded by a content edit.
+        let plan = plan_editable_merge(&base, &local, &incoming).unwrap();
+        assert_eq!(plan.conflicts().len(), 1);
+        let conflict = plan.conflicts()[0];
+        assert_eq!(conflict.path, EditableMergePath::AuthoringPayload);
+        for (evidence, original) in [
+            (conflict.base, &base.authoring_payload),
+            (conflict.local, &local.authoring_payload),
+            (conflict.incoming, &incoming.authoring_payload),
+        ] {
+            let EditableMergeValue::Payload(payload) = evidence else {
+                panic!("expected borrowed payload evidence, got {evidence:?}");
+            };
+            assert!(std::ptr::eq(payload, original));
+        }
+        assert_eq!(
+            plan.resolve(&BTreeMap::new(), MERGE_LIMIT),
+            Err(EditableMergeError::UnresolvedConflict(
+                EditableMergePath::AuthoringPayload
+            ))
+        );
+        for (side, expected) in [
+            (EditableMergeSide::Base, &base),
+            (EditableMergeSide::Local, &local),
+            (EditableMergeSide::Incoming, &incoming),
+        ] {
+            let resolutions = BTreeMap::from([(EditableMergePath::AuthoringPayload, side)]);
+            let exact = expected.encode().unwrap().len() as u64;
+            assert_eq!(plan.resolve(&resolutions, exact).unwrap(), *expected);
+            assert_eq!(
+                plan.resolve(&resolutions, exact - 1),
+                Err(EditableMergeError::OutputBudgetExceeded {
+                    actual: exact,
+                    limit: exact - 1,
+                })
+            );
+        }
+    }
+}
+
+#[test]
+fn storage_only_merge_survives_workspace_save_and_reuses_persistent_ddc() {
+    let base = asset(1);
+    let mut harness = Harness::new(std::slice::from_ref(&base));
+    let (baseline, baseline_bytes) = harness.cook(base.asset);
+    let workspace = harness.workspace();
+    let lease = workspace
+        .store_payload(base.authoring_payload.inline_bytes().unwrap(), 4096)
+        .unwrap();
+    let mut local = base.clone();
+    local.authoring_payload = EditablePayload::External(lease.reference());
+    let mut incoming = base.clone();
+    incoming.preview = Some(b"incoming preview".to_vec());
+    let plan = plan_editable_merge(&base, &local, &incoming).unwrap();
+    assert!(plan.conflicts().is_empty());
+    let merged = plan.resolve(&BTreeMap::new(), MERGE_LIMIT).unwrap();
+    assert_eq!(merged.authoring_payload, local.authoring_payload);
+    assert_eq!(merged.preview, incoming.preview);
+    harness.save(&base, merged.clone());
+    drop(lease);
+    assert_eq!(harness.saved(base.asset), merged);
+    let (warm, bytes) = harness.cook(base.asset);
+    assert_eq!(warm.cache_hits, BTreeSet::from([JobId(base.asset.0)]));
+    assert_eq!(warm.artifact_keys, baseline.artifact_keys);
+    assert_eq!(bytes, baseline_bytes);
+    assert_eq!(harness.call_count(), 1);
+}
 
 fn asset(id: u128) -> EditableAsset {
     EditableAsset::new(
@@ -131,7 +246,8 @@ impl Harness {
         self.workspace()
             .snapshot(MAX_EDITABLE_WORKSPACE_ENCODED_BYTES)
             .unwrap()
-            .remove(&asset)
+            .get(&asset)
+            .cloned()
             .unwrap()
     }
 
@@ -198,7 +314,7 @@ fn independent_edits_survive_save_reopen_and_actual_cook() {
     let mut local = base.clone();
     local.canonical_settings = b"local settings".to_vec();
     let mut incoming = base.clone();
-    incoming.authoring_payload = b"incoming payload".to_vec();
+    incoming.authoring_payload = b"incoming payload".to_vec().into();
     let mut harness = Harness::new(std::slice::from_ref(&local));
     let (baseline, _) = harness.cook(base.asset);
     let plan = plan_editable_merge(&base, &local, &incoming).unwrap();
@@ -211,7 +327,10 @@ fn independent_edits_survive_save_reopen_and_actual_cook() {
     let (cold, bytes) = harness.cook(base.asset);
     assert_eq!(
         bytes,
-        cooked_bytes(&local.canonical_settings, &incoming.authoring_payload)
+        cooked_bytes(
+            &local.canonical_settings,
+            incoming.authoring_payload.inline_bytes().unwrap()
+        )
     );
     assert!(cold.cache_hits.is_empty());
     assert_ne!(cold.artifact_keys, baseline.artifact_keys);
@@ -262,9 +381,9 @@ fn payload_conflict_requires_explicit_choice_and_cooks_each_selected_side() {
     ] {
         let base = asset(1);
         let mut local = base.clone();
-        local.authoring_payload = b"local payload".to_vec();
+        local.authoring_payload = b"local payload".to_vec().into();
         let mut incoming = base.clone();
-        incoming.authoring_payload = b"incoming payload".to_vec();
+        incoming.authoring_payload = b"incoming payload".to_vec().into();
         let mut harness = Harness::new(std::slice::from_ref(&local));
         let before = harness.package_bytes(base.asset);
         let plan = plan_editable_merge(&base, &local, &incoming).unwrap();
@@ -276,15 +395,15 @@ fn payload_conflict_requires_explicit_choice_and_cooks_each_selected_side() {
         let conflict = &plan.conflicts()[0];
         assert_eq!(
             conflict.base,
-            EditableMergeValue::Bytes(&base.authoring_payload)
+            EditableMergeValue::Payload(&base.authoring_payload)
         );
         assert_eq!(
             conflict.local,
-            EditableMergeValue::Bytes(&local.authoring_payload)
+            EditableMergeValue::Payload(&local.authoring_payload)
         );
         assert_eq!(
             conflict.incoming,
-            EditableMergeValue::Bytes(&incoming.authoring_payload)
+            EditableMergeValue::Payload(&incoming.authoring_payload)
         );
         assert!(matches!(
             plan.resolve(&BTreeMap::new(), MERGE_LIMIT),
@@ -319,7 +438,10 @@ fn payload_conflict_requires_explicit_choice_and_cooks_each_selected_side() {
         assert!(execution.cache_hits.is_empty());
         assert_eq!(
             bytes,
-            cooked_bytes(&expected.canonical_settings, &expected.authoring_payload)
+            cooked_bytes(
+                &expected.canonical_settings,
+                expected.authoring_payload.inline_bytes().unwrap()
+            )
         );
         assert_eq!(harness.call_count(), 1);
     }
@@ -330,10 +452,10 @@ fn partial_conflict_choices_cannot_publish_a_silent_fallback() {
     let base = asset(1);
     let mut local = base.clone();
     local.canonical_settings = b"local settings".to_vec();
-    local.authoring_payload = b"local payload".to_vec();
+    local.authoring_payload = b"local payload".to_vec().into();
     let mut incoming = base.clone();
     incoming.canonical_settings = b"incoming settings".to_vec();
-    incoming.authoring_payload = b"incoming payload".to_vec();
+    incoming.authoring_payload = b"incoming payload".to_vec().into();
     let mut harness = Harness::new(std::slice::from_ref(&local));
     let before = harness.package_bytes(base.asset);
     let plan = plan_editable_merge(&base, &local, &incoming).unwrap();
@@ -357,7 +479,10 @@ fn partial_conflict_choices_cannot_publish_a_silent_fallback() {
     let (_, bytes) = harness.cook(base.asset);
     assert_eq!(
         bytes,
-        cooked_bytes(&incoming.canonical_settings, &local.authoring_payload)
+        cooked_bytes(
+            &incoming.canonical_settings,
+            local.authoring_payload.inline_bytes().unwrap()
+        )
     );
 }
 
@@ -378,7 +503,7 @@ fn merged_subasset_deletion_is_rejected_without_changing_either_package() {
     let mut local = base.clone();
     local.subassets.clear();
     let mut incoming = base.clone();
-    incoming.authoring_payload = b"incoming payload".to_vec();
+    incoming.authoring_payload = b"incoming payload".to_vec().into();
     let plan = plan_editable_merge(&base, &local, &incoming).unwrap();
     assert!(plan.conflicts().is_empty());
     let merged = plan.resolve(&BTreeMap::new(), MERGE_LIMIT).unwrap();
@@ -409,7 +534,7 @@ fn caller_output_budget_counts_the_encoded_package_and_leaves_workspace_unchange
     let mut local = base.clone();
     local.canonical_settings = b"longer local settings".to_vec();
     let mut incoming = base.clone();
-    incoming.authoring_payload = b"longer incoming payload".to_vec();
+    incoming.authoring_payload = b"longer incoming payload".to_vec().into();
     let mut expected = local.clone();
     expected.authoring_payload = incoming.authoring_payload.clone();
     let actual = expected.encode().unwrap().len() as u64;
@@ -445,14 +570,14 @@ fn merged_output_cannot_bypass_the_hard_limit_with_the_maximum_caller_budget() {
     let mut local = base.clone();
     local.source = SourceRecord::embedded("source.bin", "test/raw", vec![1; half]).unwrap();
     let mut incoming = base.clone();
-    incoming.authoring_payload = vec![2; half];
+    incoming.authoring_payload = vec![2; half].into();
     // Each side is a valid package. Only their combination exceeds 64 MiB;
     // neither field exceeds its own 32 MiB maximum.
     assert!(local.encode().is_ok());
     assert!(incoming.encode().is_ok());
     let actual = before.len()
         - base.source.embedded_source.as_ref().unwrap().len()
-        - base.authoring_payload.len()
+        - base.authoring_payload.byte_len() as usize
         + 2 * half;
     assert!(actual > MAX_EDITABLE_ASSET_BYTES);
     let plan = plan_editable_merge(&base, &local, &incoming).unwrap();
@@ -522,7 +647,7 @@ fn intervening_workspace_save_rejects_stale_merged_hash_without_overwrite() {
     let mut local = base.clone();
     local.canonical_settings = b"local settings".to_vec();
     let mut incoming = base.clone();
-    incoming.authoring_payload = b"incoming payload".to_vec();
+    incoming.authoring_payload = b"incoming payload".to_vec().into();
     let plan = plan_editable_merge(&base, &local, &incoming).unwrap();
     let merged = plan.resolve(&BTreeMap::new(), MERGE_LIMIT).unwrap();
     // Deterministically interleave a second editor's commit between planning
@@ -553,6 +678,9 @@ fn intervening_workspace_save_rejects_stale_merged_hash_without_overwrite() {
     let (_, bytes) = harness.cook(base.asset);
     assert_eq!(
         bytes,
-        cooked_bytes(&base.canonical_settings, &base.authoring_payload)
+        cooked_bytes(
+            &base.canonical_settings,
+            base.authoring_payload.inline_bytes().unwrap()
+        )
     );
 }

@@ -1,7 +1,8 @@
 //! Source importers that emit versioned, deterministic runtime artifacts.
 
-use crate::job::{Processor, ProcessorError};
+use crate::processor::Processor;
 use crate::recipe::{ImportProcessor, ProcessorIdentity};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
 
 mod image;
@@ -52,7 +53,7 @@ pub struct ImporterDescriptor {
 
 impl ImporterDescriptor {
     fn from_plugin<P: ImporterPlugin>() -> Result<Self, ImporterRegistryError> {
-        let identity = P::identity();
+        let identity = ProcessorIdentity::new(P::IMPORTER_ID, P::IMPORTER_VERSION);
         let extensions = normalize_many(P::EXTENSIONS, normalize_extension)
             .map_err(|reason| ImporterRegistryError::InvalidDescriptor { identity, reason })?;
         let mime_types = normalize_many(P::MIME_TYPES, normalize_mime)
@@ -110,8 +111,8 @@ impl ImporterDescriptor {
     }
 }
 
-/// Compile-time plugin contract used to create runtime registry entries.
-pub trait ImporterPlugin: ImportProcessor + 'static {
+/// Importer metadata and SDK processor contract for runtime registry entries.
+pub trait ImporterPlugin: ImportProcessor + Processor + 'static {
     /// File extensions accepted by this plugin.
     const EXTENSIONS: &'static [&'static str];
     /// MIME types accepted by this plugin.
@@ -120,7 +121,7 @@ pub trait ImporterPlugin: ImportProcessor + 'static {
     const PROFILE_FIELDS: &'static [&'static str] = &[];
 }
 
-/// A selected importer handle that can be attached to a build job.
+/// Selected importer metadata and SDK processor for recorded analysis.
 #[derive(Clone)]
 pub struct ImporterHandle {
     descriptor: ImporterDescriptor,
@@ -144,11 +145,10 @@ impl ImporterHandle {
     pub fn descriptor(&self) -> &ImporterDescriptor {
         &self.descriptor
     }
-}
 
-impl Processor for ImporterHandle {
-    fn process(&self, inputs: &[&[u8]]) -> Result<Vec<u8>, ProcessorError> {
-        self.processor.process(inputs)
+    /// Shared SDK processor for recorded analysis and frozen execution.
+    pub fn processor(&self) -> Arc<dyn Processor> {
+        Arc::clone(&self.processor)
     }
 }
 
@@ -184,12 +184,27 @@ impl ImporterRegistry {
         Ok(registry)
     }
 
-    /// Registers a typed plugin and normalizes its metadata.
+    /// Normalizes plugin metadata and checks SDK identity against its constants.
+    /// Descriptor panics and identity mismatches leave the registry unchanged.
     pub fn register<P>(&mut self, processor: P) -> Result<(), ImporterRegistryError>
     where
         P: ImporterPlugin,
     {
         let descriptor = ImporterDescriptor::from_plugin::<P>()?;
+        let sdk_identity = catch_unwind(AssertUnwindSafe(|| processor.descriptor().identity))
+            .map_err(|_| ImporterRegistryError::InvalidDescriptor {
+                identity: descriptor.identity,
+                reason: "SDK processor descriptor panicked".into(),
+            })?;
+        if sdk_identity != descriptor.identity {
+            return Err(ImporterRegistryError::InvalidDescriptor {
+                identity: descriptor.identity,
+                reason: format!(
+                    "SDK processor identity {sdk_identity:?} differs from static importer identity {:?}",
+                    descriptor.identity
+                ),
+            });
+        }
         if self
             .importers
             .iter()

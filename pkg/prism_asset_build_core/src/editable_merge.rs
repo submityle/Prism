@@ -3,6 +3,8 @@
 //! Stable IDs identify records. Source, settings, preview and payload are atomic
 //! values: no format is guessed from opaque bytes. Conflicts borrow all three
 //! inputs; a caller must resolve every conflict before an owned result exists.
+//! Payload storage is part of that atomic value: concurrent storage and content
+//! edits require an explicit choice, without resolving external CAS objects.
 //! Publication remains a workspace compare-and-save operation, so a resolved
 //! merge cannot silently overwrite a newer saved revision.
 
@@ -11,7 +13,7 @@ use crate::editable::{
     EditableSubAssetReference, SourceRecord, EDITABLE_FIXED_ENCODED_BYTES, MAX_DEPENDENCIES,
     MAX_EDITABLE_ASSET_BYTES, MAX_SUBASSETS, MAX_SUBASSET_REFERENCES,
 };
-use crate::AssetId;
+use crate::{AssetId, EditablePayload};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
@@ -48,6 +50,7 @@ pub enum EditableMergeValue<'a> {
     U128(u128),
     U32(u32),
     Bytes(&'a [u8]),
+    Payload(&'a EditablePayload),
     Source(&'a SourceRecord),
     Preview(Option<&'a [u8]>),
     SubAsset(Option<&'a EditableSubAsset>),
@@ -268,7 +271,7 @@ impl<'a> EditableMergePlan<'a> {
                 .collect(),
             projection.dependencies,
             projection.references,
-            projection.payload.to_vec(),
+            projection.payload.clone(),
             projection.preview.map(<[u8]>::to_vec),
         )
         .map_err(EditableMergeError::InvalidMerged)?;
@@ -334,7 +337,7 @@ struct Projection<'a> {
     flags: u32,
     settings: &'a [u8],
     source: &'a SourceRecord,
-    payload: &'a [u8],
+    payload: &'a EditablePayload,
     preview: Option<&'a [u8]>,
     subassets: Vec<SubAsset<'a>>,
     dependencies: Vec<EditableDependency>,
@@ -348,7 +351,7 @@ impl Projection<'_> {
         self.settings.len() as u64
             + self.source.uri.len() as u64
             + self.source.format.len() as u64
-            + self.payload.len() as u64
+            + self.payload.encoded_len() as u64
             + self
                 .source
                 .embedded_source
@@ -392,10 +395,10 @@ fn project<'a>(
         ),
         payload: selector.select(
             P::AuthoringPayload,
-            base.authoring_payload.as_slice(),
-            local.authoring_payload.as_slice(),
-            incoming.authoring_payload.as_slice(),
-            V::Bytes,
+            &base.authoring_payload,
+            &local.authoring_payload,
+            &incoming.authoring_payload,
+            V::Payload,
         ),
         preview: selector.select(
             P::Preview,

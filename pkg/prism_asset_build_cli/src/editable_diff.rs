@@ -3,8 +3,8 @@
 use crate::{args, error::CommandError};
 use prism_asset_build_core::{
     diff_editable_assets, ContentHash, EditableAsset, EditableDependency, EditableDependencyKind,
-    EditableDiffImpact, EditableSubAsset, EditableSubAssetDiff, EditableSubAssetReference,
-    EditableValueChange, SourceRecord,
+    EditableDiffImpact, EditablePayload, EditableSubAsset, EditableSubAssetDiff,
+    EditableSubAssetReference, EditableValueChange, SourceRecord,
 };
 use serde::Serialize;
 use std::fs::{self, File, Metadata};
@@ -84,6 +84,26 @@ impl BlobResult {
         Self {
             bytes: bytes.len(),
             content_hash: ContentHash::digest(bytes).to_hex(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct PayloadResult {
+    bytes: u64,
+    content_hash: String,
+    storage: &'static str,
+}
+
+impl From<&EditablePayload> for PayloadResult {
+    fn from(payload: &EditablePayload) -> Self {
+        Self {
+            bytes: payload.byte_len(),
+            content_hash: payload.content_hash().to_hex(),
+            storage: match payload {
+                EditablePayload::Inline(_) => "inline",
+                EditablePayload::External(_) => "external",
+            },
         }
     }
 }
@@ -214,7 +234,7 @@ pub struct EditableDiffResult {
     flags: Option<Change<u32>>,
     canonical_settings: Option<Change<BlobResult>>,
     source: Option<Change<SourceResult>>,
-    authoring_payload: Option<Change<BlobResult>>,
+    authoring_payload: Option<Change<PayloadResult>>,
     preview: Option<Change<Option<BlobResult>>>,
     subassets: Vec<SubAssetChange>,
     dependencies: SetChanges<DependencyResult>,
@@ -252,7 +272,11 @@ pub fn run(command: args::EditableDiff) -> Result<EditableDiffResult, CommandErr
         flags: project_change(diff.flags, |flags| flags, COOK),
         canonical_settings: project_change(diff.canonical_settings, BlobResult::new, COOK),
         source: project_change(diff.source, SourceResult::from, EDITOR),
-        authoring_payload: project_change(diff.authoring_payload, BlobResult::new, COOK),
+        authoring_payload: project_change(
+            diff.authoring_payload,
+            PayloadResult::from,
+            diff.authoring_payload_impact().into(),
+        ),
         preview: project_change(diff.preview, |value| value.map(BlobResult::new), EDITOR),
         subassets: diff.subassets.iter().map(SubAssetChange::from).collect(),
         dependencies: SetChanges {

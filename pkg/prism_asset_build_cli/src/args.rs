@@ -81,6 +81,9 @@ pub struct EditablePlan {
     /// aggregate encoded snapshot budget, positive and at most 536870912 bytes
     #[argh(option)]
     pub max_snapshot_bytes: Option<u64>,
+    /// aggregate materialized payload budget, positive and at most 4294967296 bytes (default 512 MiB)
+    #[argh(option)]
+    pub max_materialized_payload_bytes: Option<u64>,
     /// explicit 32-byte profile hash as 64 hexadecimal digits
     #[argh(option)]
     pub profile_hash: Option<String>,
@@ -108,6 +111,9 @@ pub struct EditableBuild {
     /// aggregate encoded snapshot budget, positive and at most 536870912 bytes
     #[argh(option)]
     pub max_snapshot_bytes: Option<u64>,
+    /// aggregate materialized payload budget, positive and at most 4294967296 bytes (default 512 MiB)
+    #[argh(option)]
+    pub max_materialized_payload_bytes: Option<u64>,
     /// explicit 32-byte profile hash as 64 hexadecimal digits
     #[argh(option)]
     pub profile_hash: Option<String>,
@@ -216,6 +222,9 @@ pub struct Package {
     /// editable aggregate snapshot byte budget, positive and at most 536870912
     #[argh(option)]
     pub max_snapshot_bytes: Option<u64>,
+    /// editable materialized payload budget; requires --workspace; positive and at most 4294967296 bytes (default 512 MiB)
+    #[argh(option)]
+    pub max_materialized_payload_bytes: Option<u64>,
     /// editable build profile hash as 64 hexadecimal digits
     #[argh(option)]
     pub profile_hash: Option<String>,
@@ -283,6 +292,9 @@ pub struct Validate {
     /// editable aggregate snapshot byte budget, positive and at most 536870912
     #[argh(option)]
     pub max_snapshot_bytes: Option<u64>,
+    /// editable materialized payload budget; requires --workspace; positive and at most 4294967296 bytes (default 512 MiB)
+    #[argh(option)]
+    pub max_materialized_payload_bytes: Option<u64>,
     /// editable build profile hash as 64 hexadecimal digits
     #[argh(option)]
     pub profile_hash: Option<String>,

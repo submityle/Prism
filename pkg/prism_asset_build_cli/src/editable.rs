@@ -17,6 +17,7 @@ pub struct WorkspaceInput<'a> {
     pub workspace: Option<&'a Path>,
     pub roots: &'a [u128],
     pub max_snapshot_bytes: Option<u64>,
+    pub max_materialized_payload_bytes: Option<u64>,
     pub profile_hash: Option<&'a str>,
     pub toolchain_fingerprint: Option<&'a str>,
     pub environment_fingerprint: Option<&'a str>,
@@ -35,6 +36,9 @@ impl WorkspaceInput<'_> {
         let mut options = EditableBuildOptions::default();
         if let Some(limit) = self.max_snapshot_bytes {
             options.max_snapshot_bytes = limit;
+        }
+        if let Some(limit) = self.max_materialized_payload_bytes {
+            options.max_materialized_payload_bytes = limit;
         }
         if let Some(hash) = self.profile_hash {
             options.profile_hash = profile_hash(hash)?;
@@ -75,6 +79,7 @@ impl WorkspaceInput<'_> {
         }
         if !self.roots.is_empty()
             || self.max_snapshot_bytes.is_some()
+            || self.max_materialized_payload_bytes.is_some()
             || self.profile_hash.is_some()
             || self.toolchain_fingerprint.is_some()
             || self.environment_fingerprint.is_some()
@@ -147,6 +152,7 @@ pub fn plan(command: EditablePlan) -> Result<EditablePlanResult, CommandError> {
         workspace: Some(&command.workspace),
         roots: &command.root,
         max_snapshot_bytes: command.max_snapshot_bytes,
+        max_materialized_payload_bytes: command.max_materialized_payload_bytes,
         profile_hash: command.profile_hash.as_deref(),
         toolchain_fingerprint: command.toolchain_fingerprint.as_deref(),
         environment_fingerprint: command.environment_fingerprint.as_deref(),
@@ -191,6 +197,7 @@ pub fn build(command: EditableBuild) -> Result<EditableBuildResult, CommandError
         workspace: Some(&command.workspace),
         roots: &command.root,
         max_snapshot_bytes: command.max_snapshot_bytes,
+        max_materialized_payload_bytes: command.max_materialized_payload_bytes,
         profile_hash: command.profile_hash.as_deref(),
         toolchain_fingerprint: command.toolchain_fingerprint.as_deref(),
         environment_fingerprint: command.environment_fingerprint.as_deref(),

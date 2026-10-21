@@ -8,17 +8,20 @@ use crate::output::{
 };
 use prism_asset::StableGuid;
 use prism_asset_build_core::import::{
-    CanonicalPngProcessor, ImageMipArtifact, IMAGE_ARTIFACT_KIND, IMAGE_MIP_ARTIFACT_SCHEMA,
+    CanonicalPngProcessor, ImageMipArtifact, ImportSelector, ImporterRegistry,
 };
+use prism_asset_build_core::processor::{InputCatalog, ProcessCancellation, ProcessLimits};
 use prism_asset_build_core::{
-    ArtifactQualityGate, AssetId, BuildExecutor, BuildGraph, BuildInputSnapshot, BuildRevision,
-    ContentHash, DerivedDataCache, ImportRecipe, JobId, PackageRequest, PublicationDescriptor,
-    ReleaseDescriptor, ReleaseProvenance, ReleaseSignatureError, ReleaseSigner, ReleaseTrustStore,
-    ReleaseVerifier, RevisionStore, RuntimePackage, SignedReleaseDescriptor, SourceSnapshot,
+    ArtifactQualityGate, AssetId, BuildExecutor, BuildGraph, BuildInputSnapshot, BuildResources,
+    BuildRevision, ContentHash, DerivedDataCache, ImportPlan, ImportProcessor, ImportRecipe, JobId,
+    PackageRequest, PublicationDescriptor, ReleaseDescriptor, ReleaseProvenance,
+    ReleaseSignatureError, ReleaseSigner, ReleaseTrustStore, ReleaseVerifier, RevisionStore,
+    RuntimePackage, SignedReleaseDescriptor, SourceSnapshot,
 };
 use prism_asset_container::{ContainerReader, RuntimeManifest};
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 pub fn plan(command: Plan) -> Result<PlanResult, CommandError> {
@@ -67,35 +70,29 @@ pub fn publish(
     verify_determinism: bool,
 ) -> Result<PublishResult, CommandError> {
     let source = snapshot(&source_path, &logical_path)?;
-    let (source_key, image_key) = artifact_keys(&source, asset_id)?;
+    let source_asset = asset_id.checked_sub(1).ok_or_else(|| {
+        CommandError::InvalidInput(
+            "asset-id must be at least 1; id-1 is reserved for the source artifact".into(),
+        )
+    })?;
     let source_job = JobId(1);
     let image_job = JobId(2);
+    let store = RevisionStore::open(&store_root)?;
+    let mut catalog = InputCatalog::new(&store).map_err(import_error)?;
+    catalog
+        .insert_source(CanonicalPngProcessor::SOURCE_INPUT, source_job, &source)
+        .map_err(import_error)?;
     let mut graph = BuildGraph::new();
     graph
         .add_job(source.build_job(source_job))
         .map_err(|error| {
             CommandError::InvalidInput(format!("source graph setup failed: {error}"))
         })?;
-    let plan = recipe()
-        .plan(
-            AssetId(asset_id),
-            image_job,
-            source_job,
-            CanonicalPngProcessor,
-            IMAGE_ARTIFACT_KIND,
-            IMAGE_MIP_ARTIFACT_SCHEMA,
-            4,
-        )
-        .map_err(|error| CommandError::InvalidInput(format!("import recipe rejected: {error}")))?;
+    let plan = plan_import(&catalog, asset_id)?;
     graph.add_job(plan.job).map_err(|error| {
         CommandError::InvalidInput(format!("image graph setup failed: {error}"))
     })?;
     let mut specs = BTreeMap::new();
-    let source_asset = asset_id.checked_sub(1).ok_or_else(|| {
-        CommandError::InvalidInput(
-            "asset-id must be at least 1; id-1 is reserved for the source artifact".into(),
-        )
-    })?;
     specs.insert(source_job, source.artifact_spec(AssetId(source_asset)));
     specs.insert(image_job, plan.spec);
     let mut inputs = BuildInputSnapshot::new().with_source(source_job, &source);
@@ -108,6 +105,10 @@ pub fn publish(
             // The source processor's settings encode exactly the path/hash
             // already recorded by with_source above.
             contract.canonical_settings.clear();
+        } else {
+            // Recorded SDK settings bind input descriptors; source evidence
+            // is explained separately from the user settings contract.
+            contract.canonical_settings = recipe().canonical_settings;
         }
         contract.profile_hash = [0; 32];
         let mut settings = spec.asset.0.to_le_bytes().to_vec();
@@ -123,7 +124,6 @@ pub fn publish(
         inputs.set_profile_hash(job, spec.profile_hash);
     }
 
-    let store = RevisionStore::open(&store_root)?;
     let mut ddc = DerivedDataCache::open(store_root.join("ddc"))?;
     let revision = match store.current_revision()? {
         Some(revision) => revision
@@ -136,9 +136,16 @@ pub fn publish(
         protocol_version: 1,
     };
     let limit = std::thread::available_parallelism()
-        .map(|count| count.get())
+        .map(|count| count.get().min(64))
         .unwrap_or(1);
-    let execution = executor.execute_explained_with_limit(
+    let budget = BuildResources {
+        cpu_threads: limit as u64,
+        memory_bytes: 512 * 1024 * 1024,
+        disk_read_bytes: 2 * CanonicalPngProcessor::MAX_SOURCE_BYTES,
+        disk_write_bytes: CanonicalPngProcessor::MAX_ENCODED_BYTES,
+        ..BuildResources::default()
+    };
+    let execution = executor.execute_explained_with_resources(
         &graph,
         &specs,
         &inputs,
@@ -146,6 +153,7 @@ pub fn publish(
         &mut ddc,
         BuildRevision(revision),
         limit,
+        budget,
         verify_determinism,
     )?;
     let image_descriptor = execution
@@ -159,8 +167,8 @@ pub fn publish(
         revision: execution.published.manifest.revision.0,
         build_manifest_hash: ContentHash::digest(&execution.published.manifest.canonical_bytes())
             .to_hex(),
-        source_artifact_key: source_key.to_hex(),
-        image_artifact_key: image_key.to_hex(),
+        source_artifact_key: execution.artifact_keys[&source_job].to_hex(),
+        image_artifact_key: image_descriptor.key.to_hex(),
         image_asset_id: asset_id.to_string(),
         image_content_hash: image_descriptor.content_hash.to_hex(),
         image_width: image.width,
@@ -211,6 +219,7 @@ pub fn package(command: Package) -> Result<PackageResult, CommandError> {
             workspace: command.workspace.as_deref(),
             roots: &command.root,
             max_snapshot_bytes: command.max_snapshot_bytes,
+            max_materialized_payload_bytes: command.max_materialized_payload_bytes,
             profile_hash: command.profile_hash.as_deref(),
             toolchain_fingerprint: command.toolchain_fingerprint.as_deref(),
             environment_fingerprint: command.environment_fingerprint.as_deref(),
@@ -244,6 +253,7 @@ pub fn validate(command: Validate) -> Result<PackageResult, CommandError> {
             workspace: command.workspace.as_deref(),
             roots: &command.root,
             max_snapshot_bytes: command.max_snapshot_bytes,
+            max_materialized_payload_bytes: command.max_materialized_payload_bytes,
             profile_hash: command.profile_hash.as_deref(),
             toolchain_fingerprint: command.toolchain_fingerprint.as_deref(),
             environment_fingerprint: command.environment_fingerprint.as_deref(),
@@ -675,14 +685,37 @@ fn snapshot(path: &Path, logical_path: &str) -> Result<SourceSnapshot, CommandEr
             "logical-path must be an explicit non-empty project-relative path".into(),
         ));
     }
-    Ok(SourceSnapshot::new(logical_path, fs::read(path)?)?)
+    let file = fs::File::open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.len() > CanonicalPngProcessor::MAX_SOURCE_BYTES {
+        return Err(CommandError::InvalidInput(format!(
+            "PNG source must be a regular file of at most {} bytes",
+            CanonicalPngProcessor::MAX_SOURCE_BYTES,
+        )));
+    }
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(metadata.len() as usize + 1)
+        .map_err(|error| {
+            CommandError::InvalidInput(format!("source allocation rejected: {error}"))
+        })?;
+    file.take(CanonicalPngProcessor::MAX_SOURCE_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > CanonicalPngProcessor::MAX_SOURCE_BYTES
+        || bytes.len() as u64 != metadata.len()
+    {
+        return Err(CommandError::InvalidInput(
+            "PNG source size changed or exceeded its byte limit".into(),
+        ));
+    }
+    Ok(SourceSnapshot::new(logical_path, bytes)?)
 }
 
 fn recipe() -> ImportRecipe {
     ImportRecipe {
-        importer_id: 0x504e47,
-        importer_version: 2,
-        canonical_settings: b"rgba8+mips:sRGB,preserve,max=32,budget=268435456".to_vec(),
+        importer_id: CanonicalPngProcessor::IMPORTER_ID,
+        importer_version: CanonicalPngProcessor::IMPORTER_VERSION,
+        canonical_settings: CanonicalPngProcessor::canonical_settings(),
         profile_hash: [1; 32],
         toolchain_fingerprint: b"prism-png-0.18".to_vec(),
         environment_fingerprint: b"portable".to_vec(),
@@ -699,17 +732,58 @@ fn artifact_keys(
     ),
     CommandError,
 > {
+    let temporary = tempfile::tempdir()?;
+    let store = RevisionStore::open(temporary.path())?;
+    let mut catalog = InputCatalog::new(&store).map_err(import_error)?;
+    catalog
+        .insert_source(CanonicalPngProcessor::SOURCE_INPUT, JobId(1), source)
+        .map_err(import_error)?;
     let source_key = source.artifact_key();
-    let image_key = recipe()
-        .artifact_spec(
-            AssetId(asset_id),
-            IMAGE_ARTIFACT_KIND,
-            IMAGE_MIP_ARTIFACT_SCHEMA,
-            4,
-        )
+    let image_key = plan_import(&catalog, asset_id)?
+        .spec
         .artifact_key(1, &[source_key])
         .map_err(|error| CommandError::InvalidInput(format!("cannot derive image key: {error}")))?;
     Ok((source_key, image_key))
+}
+
+fn import_error(error: impl std::fmt::Display) -> CommandError {
+    CommandError::InvalidInput(format!("import preparation rejected: {error}"))
+}
+
+fn plan_import(catalog: &InputCatalog<'_>, asset_id: u128) -> Result<ImportPlan, CommandError> {
+    if asset_id == 0 {
+        return Err(CommandError::InvalidInput(
+            "asset-id must be at least 1".into(),
+        ));
+    }
+    let registry = ImporterRegistry::with_builtin().map_err(import_error)?;
+    recipe()
+        .plan_from_registry(
+            &registry,
+            AssetId(asset_id),
+            JobId(2),
+            catalog,
+            vec![CanonicalPngProcessor::SOURCE_INPUT.into()],
+            // This command imports PNG content. Logical asset paths need not
+            // have a file extension; the analyzer validates the source bytes.
+            &ImportSelector::new(None, Some("image/png")),
+            ProcessLimits {
+                max_output_bytes: CanonicalPngProcessor::MAX_ENCODED_BYTES,
+                ..ProcessLimits::default()
+            },
+            ProcessCancellation::default(),
+        )
+        .map_err(|error| match error {
+            prism_asset_build_core::ImportRecipeError::Processor(source) => {
+                CommandError::Build(prism_asset_build_core::BuildExecutionError::Graph(
+                    prism_asset_build_core::BuildError::ProcessorFailed {
+                        job: JobId(2),
+                        source,
+                    },
+                ))
+            }
+            error => import_error(error),
+        })
 }
 
 #[cfg(test)]

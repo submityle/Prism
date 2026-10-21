@@ -2,7 +2,7 @@
 
 use prism_asset_build_core::{
     AssetId, ContentHash, EditableAsset, EditableDependency, EditableDependencyKind as Kind,
-    EditableSubAsset, EditableSubAssetReference, SourceRecord,
+    EditablePayload, EditablePayloadRef, EditableSubAsset, EditableSubAssetReference, SourceRecord,
 };
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -195,6 +195,131 @@ fn blob(bytes: &[u8]) -> Value {
     json!({"bytes": bytes.len(), "content_hash": ContentHash::digest(bytes).to_hex()})
 }
 
+fn payload_summary(payload: &EditablePayload) -> Value {
+    json!({
+        "bytes": payload.byte_len(),
+        "content_hash": payload.content_hash().to_hex(),
+        "storage": match payload {
+            EditablePayload::Inline(_) => "inline",
+            EditablePayload::External(_) => "external",
+        },
+    })
+}
+
+#[test]
+fn payload_storage_changes_are_nonempty_editor_only_without_resolving_cas() {
+    let before = asset();
+    let mut after = before.clone();
+    after.authoring_payload = EditablePayload::External(EditablePayloadRef {
+        content_hash: before.authoring_payload.content_hash(),
+        byte_len: before.authoring_payload.byte_len(),
+    });
+    let fixture = Fixture::new(&before, &after);
+    let impact = json!({"cook": false, "editor_import": true});
+    for (old_path, new_path, old, new) in [
+        (&fixture.before, &fixture.after, &before, &after),
+        (&fixture.after, &fixture.before, &after, &before),
+    ] {
+        let result = fixture.json(old_path, new_path, &[], 0);
+        assert_eq!(result["identical"], false);
+        assert_eq!(result["impact"], impact);
+        assert_eq!(
+            result["authoring_payload"],
+            json!({
+                "before": payload_summary(&old.authoring_payload),
+                "after": payload_summary(&new.authoring_payload),
+                "impact": impact,
+            })
+        );
+        assert_ne!(
+            result["before"]["content_hash"],
+            result["after"]["content_hash"]
+        );
+        let text = fixture.run(old_path, new_path, &[], false);
+        assert!(text.status.success(), "{text:?}");
+        let text = String::from_utf8(text.stdout).unwrap();
+        assert!(text.starts_with("identical=false cook=false editor_import=true\n"));
+        assert!(text.contains("\"storage\":\"inline\""));
+        assert!(text.contains("\"storage\":\"external\""));
+    }
+    let identical = fixture.json(&fixture.after, &fixture.after, &[], 0);
+    assert_eq!(identical["identical"], true);
+    assert!(identical["authoring_payload"].is_null());
+    assert_eq!(
+        identical["impact"],
+        json!({"cook": false, "editor_import": false})
+    );
+}
+
+#[test]
+fn external_content_changes_compare_hash_and_length_with_encoded_input_budget() {
+    let mut before = asset();
+    let reference = EditablePayloadRef {
+        content_hash: ContentHash::digest(b"unavailable external content"),
+        byte_len: 1024 * 1024 * 1024,
+    };
+    before.authoring_payload = EditablePayload::External(reference);
+    for changed in [
+        EditablePayloadRef {
+            content_hash: ContentHash::digest(b"different external content"),
+            ..reference
+        },
+        EditablePayloadRef {
+            byte_len: reference.byte_len + 1,
+            ..reference
+        },
+    ] {
+        let mut after = before.clone();
+        after.authoring_payload = EditablePayload::External(changed);
+        let fixture = Fixture::new(&before, &after);
+        let limit = before
+            .encode()
+            .unwrap()
+            .len()
+            .max(after.encode().unwrap().len())
+            .to_string();
+        // Budget covers the small snapshot encoding, not the referenced GiB.
+        // Fixture verifies no CAS/store/workspace or other output is created.
+        let result = fixture.json(
+            &fixture.before,
+            &fixture.after,
+            &["--max-input-bytes", &limit],
+            0,
+        );
+        let impact = json!({"cook": true, "editor_import": false});
+        assert_eq!(result["identical"], false);
+        assert_eq!(result["impact"], impact);
+        assert_eq!(result["authoring_payload"]["impact"], impact);
+        assert_eq!(
+            result["authoring_payload"]["before"],
+            payload_summary(&before.authoring_payload)
+        );
+        assert_eq!(
+            result["authoring_payload"]["after"],
+            payload_summary(&after.authoring_payload)
+        );
+    }
+}
+
+#[test]
+fn changed_payload_content_and_storage_affect_both_domains() {
+    let before = asset();
+    let mut after = before.clone();
+    after.authoring_payload = EditablePayload::External(EditablePayloadRef {
+        content_hash: ContentHash::digest(b"different payload"),
+        byte_len: before.authoring_payload.byte_len(),
+    });
+    let fixture = Fixture::new(&before, &after);
+    let result = fixture.compare();
+    let impact = json!({"cook": true, "editor_import": true});
+    assert_eq!(result["impact"], impact);
+    assert_eq!(result["authoring_payload"]["impact"], impact);
+    assert_eq!(
+        result["authoring_payload"]["after"],
+        payload_summary(&after.authoring_payload)
+    );
+}
+
 #[test]
 fn identical_snapshots_and_same_path_have_stable_empty_diff() {
     let before = asset();
@@ -311,10 +436,10 @@ fn cook_changes_report_stable_id_matching_scalars_opaque_hashes_and_edge_transit
     after.kind = 43;
     after.flags = 9;
     after.canonical_settings = b"PRIVATE_SETTINGS_NEW".to_vec();
-    after.authoring_payload = b"PRIVATE_PAYLOAD_NEW".to_vec();
+    after.authoring_payload = b"PRIVATE_PAYLOAD_NEW".to_vec().into();
     assert_eq!(
-        before.authoring_payload.len(),
-        after.authoring_payload.len()
+        before.authoring_payload.byte_len(),
+        after.authoring_payload.byte_len()
     );
     after.subassets = vec![subasset(4, "renamed"), subasset(8, "added")];
     after.dependencies = vec![dependency(2, Kind::Soft), dependency(5, Kind::Hard)];
@@ -337,12 +462,19 @@ fn cook_changes_report_stable_id_matching_scalars_opaque_hashes_and_edge_transit
         ),
         (
             "authoring_payload",
-            before.authoring_payload.as_slice(),
-            after.authoring_payload.as_slice(),
+            before.authoring_payload.inline_bytes().unwrap(),
+            after.authoring_payload.inline_bytes().unwrap(),
         ),
     ] {
-        assert_eq!(result[field]["before"], blob(old));
-        assert_eq!(result[field]["after"], blob(new));
+        let expected = |bytes: &[u8]| {
+            if field == "authoring_payload" {
+                payload_summary(&EditablePayload::Inline(bytes.to_vec()))
+            } else {
+                blob(bytes)
+            }
+        };
+        assert_eq!(result[field]["before"], expected(old));
+        assert_eq!(result[field]["after"], expected(new));
         assert_ne!(
             result[field]["before"]["content_hash"],
             result[field]["after"]["content_hash"]

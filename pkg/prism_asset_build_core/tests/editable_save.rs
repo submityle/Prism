@@ -1,7 +1,7 @@
 use prism_asset_build_core::{
     AssetId, ContentHash, EditableAsset, EditableAssetError, EditableDependencyKind,
-    EditableSubAsset, EditableSubAssetReference, EditableWorkspace, EditableWorkspaceEdit,
-    SourceRecord, MAX_EDITABLE_WORKSPACE_ENCODED_BYTES,
+    EditablePayload, EditableSubAsset, EditableSubAssetReference, EditableWorkspace,
+    EditableWorkspaceEdit, SourceRecord, MAX_EDITABLE_WORKSPACE_ENCODED_BYTES,
 };
 use std::fs;
 use std::sync::{Arc, Barrier};
@@ -58,7 +58,7 @@ fn save_updates_references_in_one_batch_and_receipt_supports_explicit_undo() {
     next_target.subassets[0].id = 2;
     let mut next_consumer = consumer.clone();
     next_consumer.subasset_references[0].subasset = 2;
-    next_consumer.authoring_payload = b"ref:2".to_vec();
+    next_consumer.authoring_payload = b"ref:2".to_vec().into();
     // Input ordering does not influence publication or the receipt.
     let receipt = workspace
         .save(
@@ -115,7 +115,7 @@ fn stale_preview_only_edit_rejects_the_entire_batch_without_staging() {
         )
         .unwrap();
     let mut next_first = first.clone();
-    next_first.authoring_payload = b"edited".to_vec();
+    next_first.authoring_payload = b"edited".to_vec().into();
     let result = workspace.save(
         vec![edit(&first, next_first), edit(&second, second.clone())],
         MAX_EDITABLE_WORKSPACE_ENCODED_BYTES,
@@ -185,7 +185,10 @@ fn aggregate_budget_counts_unchanged_packages_before_encoding_outputs() {
     write(root.path(), &second);
     let old_bytes = (first.encode().unwrap().len() + second.encode().unwrap().len()) as u64;
     let mut next = first.clone();
-    next.authoring_payload.extend_from_slice(&[42; 100]);
+    let EditablePayload::Inline(payload) = &mut next.authoring_payload else {
+        panic!("test asset must have an inline payload");
+    };
+    payload.extend_from_slice(&[42; 100]);
     let workspace = EditableWorkspace::open(root.path()).unwrap();
     assert_eq!(
         workspace.save(vec![edit(&first, next)], old_bytes),
@@ -282,7 +285,7 @@ fn concurrent_editors_with_the_same_baseline_have_exactly_one_winner() {
             .map(|(i, workspace)| {
                 let barrier = barrier.clone();
                 let mut next = first.clone();
-                next.authoring_payload = vec![i as u8];
+                next.authoring_payload = vec![i as u8].into();
                 let request = edit(&first, next);
                 scope.spawn(move || {
                     barrier.wait();
@@ -304,5 +307,6 @@ fn concurrent_editors_with_the_same_baseline_have_exactly_one_winner() {
         1
     );
     let saved = EditableAsset::read_from_path(root.path().join("1.prism")).unwrap();
-    assert!(saved.authoring_payload == [0] || saved.authoring_payload == [1]);
+    let payload = saved.authoring_payload.inline_bytes().unwrap();
+    assert!(payload == [0] || payload == [1]);
 }

@@ -1,6 +1,10 @@
 use std::fmt;
 use std::sync::Arc;
 
+mod stream;
+pub(crate) use stream::{admit_materialized_inputs, materialize_inputs};
+pub use stream::{ProcessorInput, StreamingProcessor, DEFAULT_MATERIALIZED_INPUT_BYTES};
+
 /// Stable identity used to order jobs and refer to dependencies in a build graph.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct JobId(pub u128);
@@ -56,12 +60,73 @@ where
 pub struct BuildJob {
     id: JobId,
     dependencies: Vec<JobId>,
-    processor: Arc<dyn Processor>,
+    processor: JobProcessor,
     resources: crate::resources::BuildResources,
     max_output_bytes: u64,
+    max_materialized_input_bytes: u64,
+}
+
+#[derive(Clone)]
+pub(crate) enum JobProcessor {
+    Buffered(Arc<dyn Processor>),
+    Streaming(Arc<dyn StreamingProcessor>),
+    Planned(Arc<crate::processor::FrozenProcess>),
+}
+
+impl JobProcessor {
+    pub(crate) fn validate_admission(
+        &self,
+        spec: &crate::ArtifactSpec,
+        resources: crate::BuildResources,
+    ) -> Result<(), ProcessorError> {
+        match self {
+            Self::Planned(process) => process.validate_admission(spec, resources),
+            _ => Ok(()),
+        }
+    }
+
+    pub(crate) fn cacheable(&self) -> bool {
+        match self {
+            Self::Planned(process) => process.cacheable(),
+            _ => true,
+        }
+    }
+
+    pub(crate) fn check(&self) -> Result<(), ProcessorError> {
+        match self {
+            Self::Planned(process) => process.check(),
+            _ => Ok(()),
+        }
+    }
+
+    pub(crate) fn validate(
+        &self,
+        spec: &crate::ArtifactSpec,
+        inputs: &[crate::ArtifactDescriptor],
+    ) -> Result<(), ProcessorError> {
+        match self {
+            Self::Planned(process) => process.validate(spec, inputs),
+            _ => Ok(()),
+        }
+    }
 }
 
 impl BuildJob {
+    pub(crate) fn planned(
+        id: JobId,
+        dependencies: Vec<JobId>,
+        process: Arc<crate::processor::FrozenProcess>,
+    ) -> Self {
+        Self {
+            id,
+            dependencies,
+            processor: JobProcessor::Planned(process),
+            resources: crate::resources::BuildResources::default(),
+            max_output_bytes: u64::MAX,
+            max_materialized_input_bytes: DEFAULT_MATERIALIZED_INPUT_BYTES,
+        }
+    }
+
     /// Create a job. Dependency order is semantically significant and is
     /// preserved when the processor receives its input byte slices.
     pub fn new<P>(id: JobId, dependencies: impl Into<Vec<JobId>>, processor: P) -> Self
@@ -71,10 +136,40 @@ impl BuildJob {
         Self {
             id,
             dependencies: dependencies.into(),
-            processor: Arc::new(processor),
+            processor: JobProcessor::Buffered(Arc::new(processor)),
             resources: crate::resources::BuildResources::default(),
             max_output_bytes: u64::MAX,
+            max_materialized_input_bytes: DEFAULT_MATERIALIZED_INPUT_BYTES,
         }
+    }
+
+    /// Construct a native streaming node. The persistent executor never
+    /// materializes its input or output payloads in a coordinator-owned Vec.
+    pub fn streaming<P: StreamingProcessor + 'static>(
+        id: JobId,
+        dependencies: impl Into<Vec<JobId>>,
+        processor: P,
+    ) -> Self {
+        Self {
+            id,
+            dependencies: dependencies.into(),
+            processor: JobProcessor::Streaming(Arc::new(processor)),
+            resources: crate::resources::BuildResources::default(),
+            max_output_bytes: u64::MAX,
+            max_materialized_input_bytes: DEFAULT_MATERIALIZED_INPUT_BYTES,
+        }
+    }
+
+    /// Aggregate unique input byte admission for contiguous-input adapters.
+    /// It does not constrain trusted processor heap or native stream readers.
+    /// This execution limit does not alter the semantic artifact key.
+    pub fn with_max_materialized_input_bytes(mut self, max_bytes: u64) -> Self {
+        self.max_materialized_input_bytes = max_bytes;
+        self
+    }
+
+    pub fn max_materialized_input_bytes(&self) -> u64 {
+        self.max_materialized_input_bytes
     }
 
     pub fn id(&self) -> JobId {
@@ -103,7 +198,10 @@ impl BuildJob {
     }
 
     pub fn max_output_bytes(&self) -> u64 {
-        self.max_output_bytes
+        match &self.processor {
+            JobProcessor::Planned(process) => self.max_output_bytes.min(process.max_output_bytes()),
+            _ => self.max_output_bytes,
+        }
     }
 
     pub fn dependencies(&self) -> &[JobId] {
@@ -111,7 +209,27 @@ impl BuildJob {
     }
 
     pub(crate) fn process(&self, inputs: &[&[u8]]) -> Result<Vec<u8>, ProcessorError> {
-        let output = self.processor.process(inputs)?;
+        let output = match &self.processor {
+            JobProcessor::Buffered(processor) => processor.process(inputs)?,
+            JobProcessor::Streaming(processor) => {
+                let mut readers: Vec<_> = inputs
+                    .iter()
+                    .map(|bytes| ProcessorInput::borrowed(bytes))
+                    .collect();
+                let mut output = stream::BufferOutput::new(self.max_output_bytes);
+                processor.execute(&mut readers, &mut output)?;
+                output.finish()?
+            }
+            JobProcessor::Planned(processor) => {
+                let mut readers: Vec<_> = inputs
+                    .iter()
+                    .map(|bytes| ProcessorInput::borrowed(bytes))
+                    .collect();
+                let mut output = stream::BufferOutput::new(self.max_output_bytes);
+                processor.execute(&mut readers, &mut output)?;
+                output.finish()?
+            }
+        };
         if output.len() as u64 > self.max_output_bytes {
             return Err(ProcessorError::new(
                 "processor output exceeds declared byte bound",
@@ -120,7 +238,7 @@ impl BuildJob {
         Ok(output)
     }
 
-    pub(crate) fn processor(&self) -> Arc<dyn Processor> {
-        Arc::clone(&self.processor)
+    pub(crate) fn processor(&self) -> JobProcessor {
+        self.processor.clone()
     }
 }

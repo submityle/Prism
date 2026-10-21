@@ -6,7 +6,7 @@
 
 - 文档状态：开发期目标规格（Draft，允许破坏性调整；不是已交付能力声明）
 - 变更记录：本轮补充本地 DDC 显式容量驱逐、构建 artifact/Manifest 字节预算、确定性 BuildManifest Patch 规划（新增/变更/删除、内容哈希复用、下载与安装增长字节核算）、真实容器级 Runtime Patch vertical slice（增量容器、tombstone、descriptor、target manifest 和事务性应用校验）、运行时同步与锁外异步 range I/O、有限异步主资产/labeled 输出装配、异步短读拒绝、异步 streaming gate 终态清理、容器单请求 range 预算门禁、确定性 range batching、显式 bounded range-backed assembly、GDeflate stored/fixed/dynamic/mixed 全 GPU 解码路径和统一 CPU fallback 报告，以及 Runtime AssetServer→RenderAsset 窄桥接；CPU fixed-page key 已绑定 source revision，页范围校验覆盖末端溢出，终态诊断记录受预算约束；`prism_render_app` 现已把固定页请求、CPU residency、owned extraction、稳定 slot revision 替换与迟到旧 revision 拒绝、CPU 驱逐后的 deferred release、驱逐元数据保留、render prepare 上传、completion-safe deferred replacement/reclaim、按 revision 提取去重和每帧诊断接成可验证链路；新增 release descriptor 的 Ed25519 域分离签名、内容派生 key-id、严格 envelope 解码与验签回归；新增 `provenance.bin` 本地规范化发布审计 descriptor，绑定 Build Manifest、Artifact、Runtime Publication 与 Container 的 revision/hash/长度/依赖事实，并由 `package`/`validate` 写入和逐字节复核；新增有界 `ImporterPlugin`/`ImporterRegistry`，按规范化扩展名/MIME 唯一选择处理器并保持稳定身份顺序；新增真实有界进程内 `BakeService`（确定性 request key、取消发布竞态、kernel error/panic 隔离、RAII in-flight gate、owned descriptor/result、caller-owned kernel registry、重复请求合并和有界 runtime cache）；新增 BuildGraph dirty-set 的 DAG 校验、后继闭包传播、稳定拓扑计划、BuildExecutor 的串行/并行/资源预算/确定性增量执行入口，以及 `BakeService::submit_dirty` 的有界进程内 dirty 请求提交；这些已进一步接入 ECS 和 opt-in Image 消费，通用材质/场景消费者、编辑器与外部发布仍独立验收；新增 Runtime Patch 对目标 provenance 的重建、绑定校验和 CLI 篡改拒绝；容器侧新增可选只读 mmap range source，运行时另有 opt-in 的容器到 world cell provider 同步桥；密钥托管、远程信任根、加密、DLC 发行闭包、远程发布与实际 VT/VG 页流送仍保持独立验收项。
-- 当前基线：本地确定性 build/CAS/DDC/revision、ready-wave 并行执行、PNG 完整语义 mip 导入、虚拟几何 canonical processor 和本地打包/Patch 已有实现；编辑包支持工作区恢复事务、保存载荷 Cook、类型化设置迁移及语义 diff。CLI 除 PNG source 链外，已有 `editable-plan`/`editable-build` 和 `package`/`validate --workspace`，内置 image cooker 与 caller-owned 核心 cooker 仍不代表通用平台 Cook。运行时已有有限异步装配、CPU fixed-page residency、GPU pool 与 completion-safe reclaim；固定 buffer 页另有 opt-in GPU feedback/page-table/consumer，Bake 已有 ECS 和 opt-in Image 消费者。压缩容器 resident 到实际 VT/VG 页、完整 EDL、编辑器工作流、完整格式生态、远程构建与发行安全链仍未完成；具体证据及验收范围见下方实施状态和矩阵。
+- 当前基线：本地确定性 build/CAS/DDC/revision、ready-wave 并行执行、PNG 完整语义 mip 导入、虚拟几何 canonical processor 和本地打包/Patch 已有实现；编辑包支持工作区恢复事务、保存载荷 Cook、类型化设置迁移、语义 diff 及稳定 ID 三方合并。schema 3 的 Inline/External 载荷、本地编辑态 CAS、租约、持久历史 pin 和显式 GC 已有源码实现，CAS 增量的已验证路径和待验专项见本节最新记录。CLI 除 PNG source 链外，已有 `editable-plan`/`editable-build`、只读 `editable-diff` 和 `package`/`validate --workspace`，内置 image cooker 与 caller-owned 核心 cooker 仍不代表通用平台 Cook。运行时已有有限异步装配、CPU fixed-page residency、GPU pool 与 completion-safe reclaim；固定 buffer 页另有 opt-in GPU feedback/page-table/consumer，Bake 已有 ECS 和 opt-in Image 消费者。压缩容器 resident 到实际 VT/VG 页、完整 EDL、编辑器工作流、完整格式生态、远程构建与发行安全链仍未完成；具体证据及验收范围见下方实施状态和矩阵。
 - 运行时异步 I/O 验收边界：`AsyncStreamIoExecutor` 的请求 gate 已在成功、取消、失败等终态回收，并对重复执行/重复取消返回明确错误；CPU `PageResidency` 已证明固定页 `read_range`、source revision 隔离、范围末端溢出拒绝、终态元数据有界、预算、背压和确定性 eviction；`prism_render_app` 的 fixed-page bridge 已证明 owned bytes 经 extract 进入 render prepare、真实 buffer 写入并按 runtime completion value 延迟回收，注册测试覆盖 Null backend，已有 GPU pool 测试覆盖 wgpu 上传/替换读回；固定 buffer 页已有独立的 feedback/page-table 接线，实际 VT/VG 页消费、通用解码、DirectStorage 发行链和完整 Build/Cook 仍独立验收。
 - 兼容策略：开发期不承诺旧 API/格式兼容；发行前冻结 Artifact Key、Schema、Container、Manifest 与签名策略，并建立兼容矩阵及迁移/拒绝规则。
 - 目标：顶级次世代 AAA 内容规模，同时兼顾中小项目的渐进采用
@@ -16,11 +16,138 @@
 
 ## 实施状态（2026-10-21）
 
-本轮 core/container 默认配置回归合计 532 项通过，0 失败、0 忽略（33 个
+2026-10-21 进程内 Processor SDK 增量：`processor.rs` 已实现显式
+`ProcessorDescriptor`、`ProcessRequest`、`ProcessPlan` 和
+`Processor::descriptor/analyze/execute`。分析上下文仅从 caller 提供的
+`InputCatalog` 读取经过 CAS hash/长度验证的输入，并记录额外命名依赖；
+冻结后的执行上下文只允许访问这些名称。命名别名保留独立 reader cursor，
+同名重开延续 cursor。设置、profile、工具链、环境和按名称排序的完整输入槽位
+进入 ArtifactKey；输入顺序及重复次数保留在 key 中，发布 descriptor 的直接
+依赖则按首次出现顺序去重，不能混用两种语义。
+
+`ArtifactWriter` 提供私有有界流式输出；API 失败具有 sticky 语义，忽略未声明
+输入、读写失败或错误输出计数均不能发布。资源声明、输出类型、settings 和
+上游 descriptor 在执行前冻结，warm DDC 不能绕过校验或抬高输出限额；
+不可缓存计划跳过 DDC 读写。分析/执行 panic 隔离，协作取消在 SDK I/O、缓存
+复用和接受输出前检查；它不提供 OS 沙箱、插件 heap 配额、CPU 抢占或与最终
+Manifest commit 线性化的取消。分析 reader 的借用生命周期禁止逃出 callback。
+本轮完整默认 core/CLI/container 回归日志
+`/private/tmp/prism-asset-sdk-integration-20261021.log` 已核验退出码为 0：
+49 个测试套件、719 项通过、0 失败、0 忽略（套件数包含两个 doctest suite，
+其中 container doctest 为 0 项）。其中包含 SDK 19 项、PNG SDK 15 项、
+streaming 9 项及 reader 逃逸的 compile-fail doctest 1 项；这些是同一回归的
+子集，不能再次相加。隔离/远程 Worker、格式生态和通用平台 Cook 仍须交付，
+这不代表 GPU、跨平台、规模性能或整个系统验收完成。
+
+CLI 的 PNG 生产链已通过 ImporterRegistry 与 InputCatalog 使用相同冻结 SDK
+计划；plan 在 RAII 临时 store 中调用同一规划路径，不初始化持久 store。
+源捕获先检查普通文件和 32 MiB 上限，再有界读取；PNG 按显式 MIME 选择，
+逻辑资产路径允许没有扩展名。分析阶段 PNG 错误仍使用 build_error，输入
+文件 admission 错误为 invalid_input。CLI 对并发 CPU 声明最多 64、内存
+512 MiB、读 64 MiB、写 64 MiB 的 wave admission，不等于进程 heap 沙箱。
+`/private/tmp/prism-asset-source-admission-20261021.log` 另记录 4 项通过：
+稀疏超大文件/目录在建库前拒绝、plan 与真实发布 key/CAS 一致、伪造超大
+IHDR 在冷/已有 Revision 时均拒绝发布；该专项不在上述 719 项中。
+
+取消接受边界在 transaction 的两个发布锁获取及纯验证之后、journal Prepare
+之前再次检查全部 Processor；锁等待期间取消拒绝候选且不推进 CURRENT。
+接受后事务继续完成，不能把这描述为与 CURRENT 替换线性化的取消。
+executor/transaction 的两个锁等待专项已在
+`/private/tmp/prism-asset-acceptance-20261021.log` 验证，也包含于本轮默认回归。
+
+2026-10-21 streaming executor 增量（本地执行切片已有默认与定向回归证据）：
+`job.rs::BuildJob::streaming` 与 `job/stream.rs::StreamingProcessor::execute`
+已提供原生输入流/输出流接口。输入按声明的 dependency slot 顺序传入
+`ProcessorInput`（hash、长度、受限 `Read + Seek`）；`cas.rs::open_verified`
+先以固定 64 KiB 缓冲核验完整 BLAKE3 与实际长度，再回绕并交出同一文件句柄，
+执行器另核对 descriptor 的精确长度。reader 要求 CAS 内容在使用期间不可变，
+不提供文件快照或抗恶意并发路径替换的沙箱保证。
+
+持久化 `BuildExecutor` 的 job 间只交换 `ArtifactDescriptor`，协调器不保留
+载荷 Vec；原生节点直接向受 `max_output_bytes` 限制的私有 `CasWriter` 写出。
+旧 `Processor::process -> Vec<u8>` 通过 buffered adapter 保留：先按唯一 hash
+聚合 admission，再物化共享输入，默认 512 MiB，可用
+`with_max_materialized_input_bytes` 配置。该上限不改变 ArtifactKey，也不限制
+processor 自行分配的 heap、输出 Vec 或整个进程峰值。返回内存结果的直接
+`BuildGraph` API 仍缓冲输出，不能套用持久执行器的 descriptor-only 内存结论。
+
+双跑路径将两次结果留在私有临时输出中，`executor/determinism.rs::verify_streams`
+以有界缓冲逐字节比较；通过后才对第一份输出调用 `finish` 并登记 descriptor，
+失败或 panic 丢弃未发布候选。已经成功的其他节点仍可留下有效 CAS/DDC，
+不是全图缓存回滚。`BuildOutputMemoryStats` 当前只计协调器载荷且为零，
+不代表 worker/adapter/processor 内存为零。以下 output frontier 与低层 CAS writer
+记录保留为此前实现的历史边界。父任务已核验迁移后的完整默认
+core/CLI/container 日志 `/private/tmp/prism-asset-full-streaming-20261021.log`：
+46 suites、667 passed、0 failed、0 ignored；当前定向日志
+`/private/tmp/prism-asset-streaming-20261021.log`：5 suites、238 passed、
+0 failed、0 ignored。定向范围为 core 单元测试、`cas_read_stream`、
+`determinism_gate`、`output_lifetime` 和 `parallel_executor`；与默认回归
+有重叠，不合计为新的通过总数。这是 SDK 增量前的历史回归，不包含 storage
+专项；streaming 与 SDK 后续专项证据见本节首段。这些结果不代表 GPU、
+全 workspace、跨平台或性能验收。隔离/远程 worker 与通用平台 Cook 仍未交付。
+
+2026-10-21 编辑态 CAS 外载荷增量（默认回归已由父任务核验，专项边界见下）：
+`EditableAsset` 升至 schema 3，`EditablePayload` 区分 `Inline(Vec<u8>)` 与
+`External(EditablePayloadRef { content_hash, byte_len })`；inline 最多 32 MiB，
+单个 external 最多 4 GiB。外载荷属于工作区 `.prism-editable-payloads`，
+不是原始导入源，也不是 RevisionStore 的构建制品 CAS。严格解码只验证包和
+引用结构；保存/变更/重导入发布前在工作区锁下复核对象长度与 hash，消费前再
+按预算解析。schema 3 不隐式升级旧包；事务恢复清单仍为独立的 schema 2。
+
+`EditableWorkspaceSnapshot` 和 `store_payload` 返回的 writer lease 保护活跃
+快照及未发布对象；仅复制引用值不会保留保护。`retain_snapshot` /
+`retain_payloads` 写入持久历史 pin，`release_payloads` 显式释放；调用方须在
+丢弃最后一个 snapshot/writer lease 前 pin 住仍需撤销的数据。`collect_payloads`
+与发布使用同一工作区锁，先恢复事务，再以当前包和历史 pin 为根；遇到活跃
+lease 非阻塞延期整次 sweep，损坏包/pin 在删除前拒绝。它提供历史载荷保留
+基础，不提供完整命令历史、编辑器 Undo/Redo 或自动后台 GC。
+
+Cook 在读取外载荷前检查所选 hard 闭包的聚合物化预算，默认 512 MiB、最多
+4 GiB；inline 逐资产计数，external 按 hash 共享，随后冻结为 `Arc<[u8]>`。
+重导入默认同为 512 MiB，可显式指定正数且不超过 4 GiB；旧输入按内容身份
+去重，回调输出单独使用同额聚合预算。原为 External 的结果保持外置，超过
+32 MiB 的新载荷自动外置；这些限制不约束 importer/cooker 内部 heap。
+同内容的 Inline↔External 变化是非空 diff，`editor_import=true`、`cook=false`；
+完整包 hash 会改变，Cook key 仍由物化字节决定。merge 借用 enum 证据并按
+精确编码长度计预算，CLI 载荷摘要为 hash/逻辑长度/storage，不读取 CAS。
+详细接口、生命周期与限额见 §5.2、§10.4、§11.3；源码入口为
+`editable_payload.rs`、`editable_storage.rs`、`editable.rs`、`editable_build.rs`。
+回归入口包括 `tests/editable_payload_build.rs`、`editable_payload_reimport.rs`、
+`editable_diff.rs`、`editable_merge.rs` 和 CLI `tests/editable_semantic_diff.rs`；
+父任务核验 `/private/tmp/prism-asset-cas-full-20261021.log`，确认 core/CLI/container
+默认回归包含 Cook/reimport/diff/merge 的 CAS 迁移；此处不追加新的通过总数。
+该默认回归记录不包含后来补入的 storage 专项。2026-10-21 独立执行
+`cargo test --offline -j 1 -p prism_asset_build_core --test editable_payload_storage`
+退出码 0，21 项通过、0 失败、0 忽略；覆盖短读/中断/失败清理、跨 handle
+lease、当前包及持久 pin roots、pin 替换/释放、损坏与矛盾长度 fail-closed、
+发布前对象复核、物化预算、保留路径/符号链接拒绝和大于 inline 上限的外载荷。
+这 21 项单列，不与上述 719 项或历史回归重复合计，也不证明跨平台持久化。
+父任务另确认 CLI `tests/editable_workflow.rs` 最新 11 项全部通过，包含最新
+materialization flag 测试；这是单独的专项证据，不与默认回归合计，历史数量
+也不作为本轮结果。远程 CAS、编辑器接线、
+跨平台持久化故障矩阵仍须独立验收；进程内流式 SDK 的后续交付见本节首段。
+
+2026-10-21 三方合并与 CLI 语义 diff 增量（CAS 迁移前的历史验收记录）：`plan_editable_merge` 按稳定
+子资产 ID 和规范依赖目标规划三方合并；同一子资产的名称与 kind 可独立合并，
+设置、载荷、SourceRecord 和预览作为完整值处理，不猜测不透明格式。冲突证据
+借用三个输入，必须为全部冲突显式选择 Base/Local/Incoming，未知或过期地址
+拒绝；合并集合数量、精确编码长度和重复名称在复制大块载荷前检查。结果仍须
+通过工作区 expected-hash save 发布，引用失效或并发保存不会被静默覆盖。
+CLI `editable-diff --before FILE --after FILE [--max-input-bytes N]` 调用同一
+core diff，提供文本和 JSON 输出；每个输入最多 8 MiB、集合变化最多 65536 项、
+转义后输出最多 8 MiB，不透明字节只显示长度与 BLAKE3。文件类型、严格解码
+和完整输出预算在成功输出前验证；普通路径 API 不提供抵御恶意路径替换的
+文件描述符级保证。回归入口为 `tests/editable_merge.rs` 与 CLI
+`tests/editable_semantic_diff.rs`。本轮 core/CLI/container 默认配置共 43 个
+套件、619 项通过，0 失败、0 忽略；不包含完整 workspace、GPU 或性能验收。
+三方合并核心与 CLI diff 在该阶段已交付；当时未交付的 CAS 外载荷由本节首段
+更新，编辑器冲突界面和完整工作流仍待实现。历史数量不覆盖本轮 CAS 迁移。
+
+2026-10-21 较早一轮 core/container 默认配置回归合计 532 项通过，0 失败、0 忽略（33 个
 测试套件，包含空文档套件）；CLI 增量独立验收，不计入本次数量。
 查询命令并发测试已改用系统独占临时目录，避免时间戳重名导致夹具创建失败。
 
-2026-10-21 语义差异与图演进增量：`diff_editable_assets` 校验两个快照后，
+2026-10-21 语义差异与图演进增量（历史阶段记录，先于本节三方合并与 CLI 增量）：`diff_editable_assets` 校验两个快照后，
 按稳定子资产 ID 和有序依赖集合比较，借用设置、载荷、源和预览，不复制大块
 字节。Cook 影响严格对应 `EditableCookInput`：源、预览和 editor-only 边不影响
 Cook，其余可见字段参与判断；外部 hard Artifact 的变化仍由构建依赖 key 传播，
@@ -29,8 +156,8 @@ Cook，其余可见字段参与判断；外部 hard Artifact 的变化仍由构�
 执行器修复了历史快照含已删除 JobId 时错误拒绝新图的问题：仅将经过 journal、
 事务和 Manifest 绑定校验的历史输入投影到当前图，原始历史记录保留；当前输入
 仍严格拒绝未知 JobId。`tests/invalidation_plan.rs` 十六项全部通过，覆盖
-根集合缩小、扩张、恢复、缓存复用、真实变化与历史解释。三方 merge、CAS
-外载荷和编辑器工作流仍独立验收。
+根集合缩小、扩张、恢复、缓存复用、真实变化与历史解释。三方 merge 核心及
+CLI diff 的后续交付见上方历史记录；CAS 外载荷的当前边界见本节首段，编辑器工作流仍独立验收。
 
 2026-10-21 类型化设置增量：`EditableSettingsCodec` 将 `prism_reflect` 类型注册、
 Schema 历史和连续迁移链接入 `EditableAsset`。保存前执行显式语义规范化、
@@ -45,8 +172,8 @@ Schema 历史和连续迁移链接入 `EditableAsset`。保存前执行显式语
 解码峰值 heap 沙箱，也不约束可信业务回调的任意分配。
 `tests/editable_settings.rs` 九项专项已通过，包含保存/重开、真实 Cook、DDC
 复用、语义变更失效和双跑发布；反射默认配置 227 项单元与 6 项文档测试、
-仅 std 配置 224 项单元与 6 项文档测试均通过。CAS 外载荷、编辑器接线和
-通用平台 Cook 仍独立验收。
+仅 std 配置 224 项单元与 6 项文档测试均通过。以上为该阶段历史证据；CAS
+外载荷当前边界见本节首段，编辑器接线和通用平台 Cook 仍独立验收。
 
 2026-10-21 编辑包事务增量：`EditableWorkspace::mutate` 在同一工作区锁下
 批量创建、替换、移动和删除包，支持路径交换及删除后复用路径；身份始终由包内
@@ -63,7 +190,7 @@ before/after 记录。应用前检查全部旧状态；恢复前检查全部恢�
 待恢复事务，调用方应重新打开工作区取得权威状态，不能把所有错误解释为旧字节
 必定保留。该协议要求读写者合作使用锁，不承诺直接文件读取者的多文件原子视图。
 `tests/editable_mutation.rs` 覆盖七组批量操作，`editable` 单元回归覆盖每个部分
-应用前缀、提交/回滚、损坏镜像、提交标记冲突和中断清理。最新 core/CLI/container
+应用前缀、提交/回滚、损坏镜像、提交标记冲突和中断清理。该增量当轮 core/CLI/container
 默认配置回归合计 574 项通过，0 失败、0 忽略。
 
 构建输出预算现贯穿直接 BuildGraph、BuildExecutor、缓存命中和确定性第二次
@@ -101,26 +228,31 @@ hash，调用方可用它提交显式撤销。合作式 snapshot 读取者获得
 core、CLI、container 默认配置合计 549 项测试通过，0 失败、0 忽略；另将
 六项 editable CLI 集成测试并行重复 20 轮，120 次执行全部通过。修复了测试
 夹具的时间戳碰撞，使用进程内唯一编号与排他目录创建隔离并行测试。类型化设置、
-Schema 迁移和语义 diff 已由本节后续增量交付；三方 merge、CAS 外载荷、
-编辑器接线和通用平台 Cook 仍独立验收。
+Schema 迁移、语义 diff、三方 merge 核心和 CLI diff 已由本节后续增量交付；
+CAS 外载荷当前边界见本节首段；以上数量为该阶段历史证据，编辑器冲突界面
+及接线和通用平台 Cook 仍独立验收。
 
 本节按能力边界验收；下方日期较早的记录保留为历史证据，同一能力以本段最新边界
 为准。新增的本地实现不代表本文全部目标已经交付。
 
-- **构建输出生命周期**：`BuildExecutor` 在消费者 wave 全部退出后释放不再需要的
+- **构建输出生命周期（streaming executor 之前的历史实现）**：当时 `BuildExecutor` 在消费者 wave 全部退出后释放不再需要的
   DAG 输入，叶节点输出落 CAS 后不再保留到事务提交；事务通过 `stage_existing`
   仅保存 descriptor，提交时流式复核完整 CAS hash 和精确长度。跨进程共享输出
   lease 覆盖候选 CAS 写入到发布/失败，GC 先尝试独占 lease，遇到活跃 build
   立即延期，避免与 publication lock 形成等待环。`BuildOutputMemoryStats` 只计
   完成 wave 后的协调器输出 frontier，排除 worker 缓冲和 processor heap，不能
   据此声称满足进程峰值内存预算。回归入口为 `tests/output_lifetime.rs` 和
-  `tests/cas_reference_publication.rs`。
-- **CAS 流式输出**：`ContentAddressedStore::begin_write(max_bytes)` 返回实现
+  `tests/cas_reference_publication.rs`。最新持久执行器已改为 descriptor-only
+  协调器，见本节首条 streaming executor 增量；旧 frontier 统计不能作为当前
+  worker 缓冲或进程峰值内存证据。
+- **CAS 流式输出（早期低层 API 记录）**：`ContentAddressedStore::begin_write(max_bytes)` 返回实现
   `Write` 的 `CasWriter`；只按实际写入字节更新 BLAKE3/长度，越界、溢出和写入
   失败使 writer 永久失败并释放临时文件；`finish` 同步文件、原子发布、校验去重
   或修复损坏同名 blob，并同步目录。`tests/cas_streaming.rs` 覆盖分块、空输出、
-  中止、失败和并发发布。该 API 尚未把 `Processor::process -> Vec<u8>` 升级
-  为完整流式 Processor SDK；低层调用方仍负责与 GC 协调。
+  中止、失败和并发发布。当时尚无原生 streaming processor；最新源码已接入
+  `StreamingProcessor`，本地执行切片已有本节首条所列默认与定向回归证据，
+  原生 streaming 与进程内 SDK 专项已在本节最新回归通过；
+  独立使用低层 writer 的调用方仍负责与 GC 协调。
 - **RuntimeDerived ECS**：可选 `ecs` feature 的 `BakeEcsPlugin` 已将生命周期
   hook、有限队列、每帧 admission/completion 配额和非阻塞结果消费接入 App。
   请求实例独立于语义 revision；替换、取消、移除和 despawn 拒绝迟到结果，失败
@@ -145,7 +277,7 @@ Schema 迁移和语义 diff 已由本节后续增量交付；三方 merge、CAS 
   路径替换的文件描述符级实现。回归入口为
   `prism_asset_build_cli/tests/cache_commands.rs`。
 - **`.prism` 编辑态包协议**：`prism_asset_build_core::editable` 已提供
-  canonical 二进制编解码边界：包内固定记录 `AssetId`、kind、flags、规范设置、
+  schema 3 canonical 二进制编解码边界：包内固定记录 `AssetId`、kind、flags、规范设置、
   SourceRecord、稳定子资产目录、强/软/editor-only 依赖、显式子资产引用、编辑载荷与可选预览。
   解码受 schema、总长度和字段长度上限约束，拒绝截断、尾随字节、非 UTF-8/NUL 文本、
   非 canonical 子资产/依赖排序、自依赖及内嵌源哈希不符；内嵌源可显式转换为
@@ -161,12 +293,13 @@ Schema 迁移和语义 diff 已由本节后续增量交付；三方 merge、CAS 
   `EditableWorkspace` 在本地排他锁下扫描非符号链接包、拒绝重复 `AssetId`，调用
   caller-owned importer 和不透明载荷引用改写器，验证候选显式引用图，并通过带 prepare/commit
   标记的可恢复多包事务发布；未完成 prepare 的暂存目录会在下次 open 时清理，未 commit
-  的事务回滚，已 commit 的事务保留新包并清理暂存。类型化设置和语义 diff 已由
-  本节后续增量交付；网络/凭据 source provider、三方 merge、CAS 外载荷、
-  编辑器 UI 和完整 runtime consumer 接线仍独立验收。
+  的事务回滚，已 commit 的事务保留新包并清理暂存。类型化设置、语义 diff、
+  三方 merge 核心及 CLI diff 已由本节后续增量交付；Inline/External 载荷、工作区
+  CAS 与租约/pin/GC 的本轮边界见本节首段和 §5.2。网络/凭据 source provider、
+  编辑器冲突界面及其他 UI 和完整 runtime consumer 接线仍独立验收。
 
 完整 EDL、实际纹理/VT/VG 流送消费者、编辑态资产的编辑器接线、
-完整 Processor SDK、动态文件依赖、通用平台 Cook、远程 CAS/Worker、发行服务和
+隔离/远程 Processor、目录级动态文件发现、通用平台 Cook、远程 CAS/Worker、发行服务和
 规模性能验收仍未完成。
 
 2026-10-21 运行时发布入口：`prism_asset::AssetServer` 已提供
@@ -294,12 +427,12 @@ GPU 常驻范围输出和批量 dispatch，feedback/page-table 闭环仍未完�
 - **已完成（核心切片）**：`pkg/prism_asset_build_core` 已实现显式输入的确定性 `ArtifactKey`、内容哈希、BLAKE3 本地 CAS、确定性串行 `BuildGraph`/`Processor` 契约（节点依赖、拓扑、环/缺失依赖诊断、失败传播）；`BuildGraph::execute_parallel` 还提供按稳定 JobId 分波、线程安全 Processor、默认受主机并行度限制且可由 `execute_parallel_with_limit` 显式限流、确定性失败选择的真实独立 DAG wave 执行路径，以及本地 revision 事务。`BuildExecutor` 将这些组件接成单机串行/有界并行闭环：按显式 Processor/设置/Profile/工具链/环境/输出契约生成 key，校验 DDC descriptor 与 CAS 字节，缓存损坏时失效并重建，全部节点成功后才发布新 Revision；可选 `execute_verified_with_limit` 绕过 DDC，对每节点两次 fresh 输出逐字节比较，通过后才落该节点 CAS/DDC，结构化报告首个差异位置、长度与 hash。发布前现验证 Artifact dependency closure（缺失、自依赖、重复边、环）且拒绝重复 AssetId；Unix 和 Windows 使用 `fs4` advisory whole-file lock（分别映射 `flock`/`LockFileEx`）串行化独立 store handle，并在替换 `CURRENT` 前再次核对期望 Revision。虚拟几何 v1 资产已有 `CanonicalVirtualGeometryProcessor`，可验证、确定性重编码并生成 CAS/Manifest descriptor。
 - **部分完成**：本地 DDC 已提供持久化 `ArtifactKey -> ArtifactDescriptor` 索引、确定性编码/校验和原子文件替换，与 CAS 分离；Unix/Windows DDC 索引已用 `fs4` advisory whole-file lock 保护跨进程 read-modify-write，避免独立句柄互相覆盖更新。新增公开的 `DdcCapacity`/`DerivedDataCache::evict_to_capacity` 提供显式 `max_entries`/编码索引字节上限，按 `ArtifactKey` 升序确定性驱逐并原子发布；它不是隐式 LRU，也不是完整 L0–L3 分层策略。BuildExecutor 已有受限的 ready-wave 并行 DDC/CAS 路径，并按稳定 JobId 顺序应用结果；串并行等价、限流、DDC/CAS 命中和并行失败不发布已有回归测试。仍无完整字段级失效分析、远程 worker/CAS、跨机器协调和大规模性能证据。发布事务已接入 Unix/Windows 跨进程锁、带持久化 `TransactionId` 的 append-only journal（兼容读取旧 payload frame）、Prepare/Commit/Abort marker、可选 RuntimePackage 的 descriptor/hash 绑定、启动恢复、孤儿 manifest/runtime 输出清理、部分 journal 尾帧截断恢复、`UnknownCommit` 状态识别、事务状态查询、按 transaction id 的显式 reconcile 和提交 Revision 重放；RevisionStore 已提供基于已提交 Manifest roots、带宽限期并在 pending transaction 时延期的本地 CAS 可达性 sweep，但完整磁盘故障注入、远程幂等重试协议、跨机器协调和事务级持久化 registry 仍未完成。已加入并在本地通过 8 项真实独立进程验收，覆盖 DDC 合并、不可变键冲突、Revision 竞争、Trust Policy stale writer，以及锁持有进程被强制终止后的锁释放和已提交状态保留；该证据仍不等于 Windows 原生运行、磁盘故障注入或远程协调已完成。`release.rs` 现提供本地 Manifest/CAS/publication hash 复核、单调 Revision gate，以及由 caller-owned Ed25519 seed 生成的域分离签名、内容派生 key-id、严格 signed envelope 和验签；持久 trust policy 的 stale-writer 检查与原子替换在 Unix/Windows 均处于同一跨进程排他窗口，本地 key 轮换/撤销和 Provenance 已接入，但它不提供密钥托管、跨机器信任根、外部 Worker 证明或完整 anti-rollback 发布服务。
 - **部分完成**：`pkg/prism_asset_container` 已实现 v1 raw/per-payload raw-DEFLATE 容器和 v2 独立 Chunk Table 容器；v2 支持每 Chunk 独立 Raw/Deflate/`BlockDeflate`。BlockDeflate 采用独立 `PRBLKDF2` header/index、逐 block Raw/raw-DEFLATE、block hash 与完整 payload hash，支持 range-backed reader 只读取命中 block，并在 metadata、stored/raw budget、外层 Chunk Table 和压缩后 chunk overlap 上 fail-closed。v2 仍执行严格 ToC/Chunk Table/范围/哈希/对齐/零填充校验；Raw Chunk 支持确定性物理范围合并读取，整 Chunk Deflate 仍完整解码后切片。文件 `RangeSource`（positional I/O、短读/截断门禁、并发 range read）、overlay、确定性 Runtime Manifest v3（容器身份以及 route 级硬/可选依赖、初始驻留/streaming 层级、codec/schema、安装能力位图）均已有测试；`prism_asset_build_core::package_runtime` 已把 Build Manifest 的 artifact 依赖和 schema 映射到 Runtime Manifest v3，并将 `ChunkPlanner` 接入 v1/v2 实际容器布局。`package_runtime_patch` 现在能只读取新增/变更或 mapping 变化的 CAS payload，生成带 patch namespace 的容器、tombstone 和 canonical descriptor，并由 `RuntimePatchPackage::apply_to_manifest` 校验 base/patch/target manifest 绑定后返回目标路由快照；它还会重建并绑定 target `ReleaseProvenance`，拒绝 provenance 对象、字节、revision、manifest 或 container facts 不一致。当前仍不是完整发行协议：项目级驻留/streaming/install policy 仅有本地路由门禁，BlockDeflate 已有可注入且带执行报告的 GPU 解码桥，容器级 GPU 常驻/批处理范围输出已交付，runtime 页流送接线仍未完成；加密、签名信任根、跨包/远程 provenance 证明、DLC 闭包、远程发布和发布回滚尚未实现。容器层和 `prism_asset` 现在都有真实按范围读取接线；容器提供确定性有界 range batching，`AssetLoader::read_plan` 已允许声明完整输入或可拼接的有限物理 ranges，并在同步、初次异步和异步 reload 中，以 metadata/范围/预算/短读校验后装配连续 loader 输入；这仍不是 CDN/DirectStorage 按 Chunk 流送调度、任意格式的部分解码或完整 EDL。
-- **部分完成的构建主链**：SourceSnapshot/ImportRecipe 的显式身份、`ImportRecipe::plan` 对处理器身份的绑定、source-root → recipe processor → BuildExecutor 的真实垂直链、基于成熟 `png` crate 的 PNG→规范 RGBA8 artifact importer，以及调用同一核心的 `prism_asset_build_cli`（`plan/import/build/inspect`）已落地并有测试；`build/import --verify-determinism` 接入同一双跑发布门禁，冷/热缓存均重新执行，普通构建仍可命中 DDC。CLI 还提供受限的 `package`/`validate`：从当前 Revision 运行 `ArtifactQualityGate`，调用 `package_runtime` 生成 canonical Runtime Manifest/raw container/publication descriptor，并对已有发行目录做逐字节复核。除兼容旧 PNG 参数外，`package`/`validate` 现在接受严格的 `version=1` 显式 mapping 文件，要求完整覆盖当前 Manifest、拒绝重复/未知/缺失 AssetId、非法路径和不安全容器名；这仍只覆盖当前 PNG 垂直切片，不代表通用 Cook。BuildExecutor 现在还可接收已验证 `DirtySet`，强制重算受影响闭包、复用未受影响的 DDC/CAS，并在串行、并行、资源预算和双跑确定性入口中保持原子 Revision 发布；`BakeService::submit_dirty` 也能按同一稳定拓扑选择并有界提交 RuntimeDerived 请求。`prism_asset_build_core::BakeService` 覆盖有界并发、确定性 key、协作取消、失败/panic 隔离、结果 descriptor 和无外部发布副作用；调度现复用有界 `prism_tasks::TaskPool`，并限制 worker 数量为 64，尚未接入 ECS/渲染/编辑器消费。完整 Source/Importer 插件体系、IR、字段级失效、DDC L0–L3、远程 CAS/worker、跨进程/跨机器确定性隔离、完整崩溃恢复与质量报告仍未完成。当前 executor 仍不是完整生产 Cook 系统。
+- **部分完成的构建主链**：SourceSnapshot/ImportRecipe 的显式身份、`ImportRecipe::plan` 对处理器身份的绑定、source-root → recipe processor → BuildExecutor 的真实垂直链、基于成熟 `png` crate 的 PNG→规范 RGBA8 artifact importer，以及调用同一核心的 `prism_asset_build_cli`（`plan/import/build/inspect`）已落地并有测试；`build/import --verify-determinism` 接入同一双跑发布门禁，冷/热缓存均重新执行，普通构建仍可命中 DDC。CLI 还提供受限的 `package`/`validate`：从当前 Revision 运行 `ArtifactQualityGate`，调用 `package_runtime` 生成 canonical Runtime Manifest/raw container/publication descriptor，并对已有发行目录做逐字节复核。除兼容旧 PNG 参数外，`package`/`validate` 现在接受严格的 `version=1` 显式 mapping 文件，要求完整覆盖当前 Manifest、拒绝重复/未知/缺失 AssetId、非法路径和不安全容器名；这仍只覆盖当前 PNG 垂直切片，不代表通用 Cook。BuildExecutor 现在还可接收已验证 `DirtySet`，强制重算受影响闭包、复用未受影响的 DDC/CAS，并在串行、并行、资源预算和双跑确定性入口中保持原子 Revision 发布；`BakeService::submit_dirty` 也能按同一稳定拓扑选择并有界提交 RuntimeDerived 请求。`prism_asset_build_core::BakeService` 覆盖有界并发、确定性 key、协作取消、失败/panic 隔离、结果 descriptor 和无外部发布副作用；调度现复用有界 `prism_tasks::TaskPool`，并限制 worker 数量为 64；这些能力已进一步接入 ECS 和 opt-in Image 消费切片，但通用材质/场景消费者、编辑器与外部发布仍独立验收。完整 Source/Importer 插件体系、IR、字段级失效、DDC L0–L3、远程 CAS/worker、跨进程/跨机器确定性隔离、完整崩溃恢复与质量报告仍未完成。当前 executor 仍不是完整生产 Cook 系统。
 - **新增的导入器注册切片**：`ImporterPlugin`/`ImporterRegistry` 已把处理器身份、扩展名、MIME 和 profile 依赖字段纳入显式 descriptor；注册时规范化元数据、拒绝重复 `ProcessorIdentity`，注册表按身份稳定排序，选择时要求唯一匹配并对缺失、无匹配、歧义返回结构化错误。内置 PNG importer 已接入该协议，测试覆盖扩展名/MIME 归一化、路径选择、注册顺序确定性和歧义拒绝。它是进程内注册/选择契约，不是完整 importer 插件生态、动态加载、隔离 worker、格式覆盖或准入/签名系统。
 - **未完成的发行链**：构建侧 Runtime Manifest v3 和容器级 Patch vertical slice 已能持久化/校验 route 级依赖、tombstone、容器身份、descriptor 以及 target manifest 绑定；CLI 现已能读取已发布 base package 与 base/target mapping，生成确定性的本地 Patch descriptor、增量 manifest、target manifest、新增容器和 target `provenance.bin`，并拒绝 base route/container/mapping、provenance 或输出目录不一致；`patch` 的回归还会篡改 provenance 并确认应用失败。核心库和 CLI 现在能对 release descriptor 生成和验证 Ed25519 signed envelope：`package --signing-key-file` 写出 `release.sig`，`validate --verification-key-file` 在签名包上强制验签；`validate --trust-policy-file` 现在能读取持久化 `ReleaseTrustStore`，执行 key-id、撤销状态、最低 revision 和 anti-rollback 校验；`package`/`validate` 还写入并严格复核绑定 Build Manifest、Artifact、Runtime Publication 与 Container 事实的 `provenance.bin`；key file 仍是 caller-owned 原始 32 字节材料，不等于密钥托管或跨机器信任根。运行时容器安装另有基于 Runtime Manifest v3 元数据的本地 `RuntimeInstallPolicy`，并新增有界的本地 rollback/recovery handle，在 staged overlay 发布后可按 fingerprint、Manifest/container identity 和 provenance 复核后回滚或重启恢复。上述切片尚未形成远程信任根、密钥托管、DLC 独立闭包、平台 profile/能力矩阵和远程发布；CLI 仍只覆盖当前 PNG 垂直切片，release gate 已能在本地复核已提交 Revision 的 Manifest/CAS/publication 完整性并拒绝回退候选。
 - **未完成的 AAA 规模能力**：VT/HLOD/World Partition/长音频分块、遥测回灌、Build Farm、百万资产 Registry、插件隔离/准入和多项目 Artifact 治理；虚拟几何已有 canonical processor，但尚未完成运行时 VT/VG page streaming 的全链路验收。
 
-本轮收口的资产切片边界：`prism_image` 对 v1 单 mip artifact 保持兼容，同时提供 v2 完整 mip artifact 的确定性编码/解码、语义与 alpha metadata round-trip、截断/尾随/尺寸/预算拒绝；`CanonicalPngProcessor` 的 importer version 已提升为 2。对应回归命令为 `cargo test -p prism_image`、`cargo test -p prism_render_driver`、`cargo test -p prism_asset_build_core`、`cargo test -p prism_asset_build_cli` 和 `cargo test -p prism_asset`。这些命令证明当前切片的功能与失败门禁，不等于完整平台 Cook、压缩纹理、VT 或远程构建已完成。
+此前资产切片的历史边界：`prism_image` 对 v1 单 mip artifact 保持兼容，同时提供 v2 完整 mip artifact 的确定性编码/解码、语义与 alpha metadata round-trip、截断/尾随/尺寸/预算拒绝；该阶段 `CanonicalPngProcessor` 的 importer version 为 2，当前 SDK 冻结计划和限额契约已将其提升为 3，不能复用旧版本的 key。该阶段回归命令为 `cargo test -p prism_image`、`cargo test -p prism_render_driver`、`cargo test -p prism_asset_build_core`、`cargo test -p prism_asset_build_cli` 和 `cargo test -p prism_asset`；当前 SDK 验收见本节首段。这些记录证明对应切片的功能与失败门禁，不等于完整平台 Cook、压缩纹理、VT 或远程构建已完成。
 
 本文的 M0/M1…路线图是验收目标，不代表这些能力已经存在；只有有代码、测试和运行时对接的切片才可标为完成。
 
@@ -313,14 +446,20 @@ GPU 常驻范围输出和批量 dispatch，feedback/page-table 闭环仍未完�
 | --- | --- | --- | --- |
 | Artifact 身份、确定性 DAG 规划与处理器执行 | 已实现（本地核心切片） | `prism_asset_build_core/src/hash.rs`、`graph.rs`；测试 `recipe_key_is_deterministic_and_all_declared_inputs_matter`、`topological_order_is_stable_across_insertion_orders`、`reports_missing_dependencies`、`reports_cycles_with_stable_job_ids`、`executes_real_transforms_and_preserves_declared_input_order` | 完整导入插件协议、字段级失效分析、超大图/百万资产规模证据未完成 |
 | DAG wave 并行 | 已实现（BuildGraph 层） | `graph.rs`；`parallel_execution_matches_serial_outputs`、`parallel_execution_reports_smallest_failed_job_in_wave`、`parallel_execution_rejects_zero_concurrency`、`parallel_execution_with_limit_matches_serial_outputs` | 该 API 只执行 DAG processor，不负责 DDC/CAS/Revision 发布 |
+| 原生 streaming executor 与 descriptor 协调器 | 已实现（本地切片） | `job.rs::BuildJob::streaming`、`job/stream.rs`、`cas.rs::open_verified`、`executor.rs::run_processor` / `prepare_job`、`executor/determinism.rs::verify_streams`；声明顺序输入、完整验证的 CAS reader、私有有界 writer、descriptor-only 持久协调器、唯一输入聚合 admission 的 buffered adapter、双跑逐字节比较后才 finish；`tests/streaming_executor.rs` 9 项包含在本节最新 719 项默认回归中 | 零协调器载荷统计不代表 worker/processor heap 或进程峰值有界；隔离/远程 worker 和规模性能仍待实现/验收 |
+| 进程内 Processor SDK 与冻结分析计划 | 已实现（可信进程内切片） | `processor.rs`、`tests/processor_sdk.rs` 19 项；显式 InputCatalog、分析期命名依赖、冻结 settings/profile/toolchain/environment/input/resource/output 契约、私有有界 ArtifactWriter、sticky I/O 失败、panic/协作取消、非缓存输出、warm DDC 重验证；PNG SDK 15 项与 CLI 同一规划链另有证据，均见本节首条 | 动态文件系统发现需 caller 建立 catalog；没有 OS 隔离、插件 heap 硬限制或 CPU 抢占；隔离/远程 Worker、插件准入与多格式平台 Cook 仍须交付 |
 | BuildExecutor 并行执行 | 已实现（本地 ready-wave 切片） | `executor.rs` 的 `execute_parallel` / `execute_parallel_with_limit`；`tests/parallel_executor.rs` 的 7 项专项测试覆盖混合 DAG 串并行 Manifest/CAS/descriptor 等价、两种处理器放行顺序、真实并发峰值限流、重开 DDC 命中、损坏 CAS 选择性重建、错误/panic 不发布、按 JobId 选错及零并发无副作用；`executor/wave_results.rs` 对三个结果的全部六种完成顺序排列独立验证按 JobId 归约 | 不代表跨进程/远程调度、十万节点内存有界或大规模吞吐/延迟达标；处理器放行顺序不等同于线程实际完成顺序 |
 | RuntimeDerived 进程内 BakeService | 已实现（本地调度与 ECS 结果消费切片） | `src/bake.rs`、可选 `ecs` 的 `src/bake_ecs.rs`；`tests/bake.rs`、`dirty_bake.rs`、`bake_subscriptions.rs`、`bake_ecs.rs` 覆盖 admission、确定性 key、共享执行、订阅容量、取消、失败、缓存、每帧消费配额、独立请求实例、替换/移除/despawn 和 last-good 保留 | 已有 opt-in Bake→Image 消费与 Null backend 验证；真实 GPU 采样、材质/场景消费者和编辑器预览仍待验收；RuntimeDerived 不进入离线 CAS/DDC/Manifest |
-| DirtySet 增量 BuildExecutor | 已实现（本地增量执行切片） | `pkg/prism_asset_build_core/src/executor.rs`；`tests/incremental_executor.rs` 的 8 项测试覆盖串行/并行/资源预算/双跑入口、直接变更的后继闭包、未受影响 DDC/CAS 复用、未知 job 拒绝、空 dirty set、失败不发布和串并行等价；`BakeService::submit_dirty` 另有 `tests/dirty_bake.rs` 的 3 项测试覆盖稳定选择、重复请求合并、缓存、失败与取消；commit `19f3980c7` | 仍未接入 ECS/渲染/编辑器消费、远程调度或大规模性能基准 |
+| DirtySet 增量 BuildExecutor | 已实现（本地增量执行切片） | `pkg/prism_asset_build_core/src/executor.rs`；`tests/incremental_executor.rs` 的 8 项测试覆盖串行/并行/资源预算/双跑入口、直接变更的后继闭包、未受影响 DDC/CAS 复用、未知 job 拒绝、空 dirty set、失败不发布和串并行等价；`BakeService::submit_dirty` 另有 `tests/dirty_bake.rs` 的 3 项测试覆盖稳定选择、重复请求合并、缓存、失败与取消；commit `19f3980c7` | BuildExecutor 仍是离线构建侧入口；远程调度和大规模性能基准未完成，Bake 的 ECS/Image 消费切片与它保持独立验收边界 |
 | 双跑确定性发布门禁 | 已实现（本机同进程切片） | `executor/determinism.rs`、`BuildExecutor::execute_verified_with_limit`；`tests/determinism_gate.rs` 的 7 项测试证明冷/持久 warm DDC 均逐节点执行两次、不记 cache hit、相同有序依赖、串并行等价、差异位置/长度/hash 诊断、第二次错误/panic 拒绝且不发布、失败候选不提前落 CAS/DDC；`prism_asset_build_cli/tests/determinism.rs` 对 `build/import --verify-determinism` 各有冷/普通 warm/强制 warm 完整命令回归 | 不隔离处理器外部状态；不证明跨进程/跨机器/跨工具链可复现，也不把历史 DDC 内容当作本次对照。成功节点可留下有效缓存，不承诺全图缓存回滚 |
 | 本地 CAS、DDC 与 BuildExecutor 缓存校验 | 部分实现 | `cas.rs`、`ddc.rs`、`executor.rs`；`detects_corruption_on_read`、`persists_and_restores_across_multiple_opens`、`ddc_hit_skips_processor_and_publishes_next_revision`、`corrupt_cas_blob_is_rebuilt_instead_of_returned_as_a_hit`、`concurrent_threads_merge_distinct_writes_without_lost_updates`、`readers_only_observe_complete_published_indexes` 和 DDC 容量驱逐回归测试；CLI `cache status`/`verify` 在不初始化 store 的前提下枚举并复核 CAS、DDC 与 current Revision，`cache prune` 显式驱逐 DDC metadata 并按 Revision root sweep CAS，`tests/cache_commands.rs` 覆盖只读、损坏、lease/pending transaction 延期、容量与非普通路径拒绝；DDC 稳定锁文件通过 `fs4` 在 Unix/Windows 提供排他 read-modify-write 窗口 | 分层 DDC/L0–L3、隐式 recency policy、磁盘配额管理、远端 CAS、跨机器协调、网络文件系统一致性和大规模性能证据未完成；普通 path API 对恶意并发路径替换仍有 TOCTOU 边界 |
 | Artifact 与 Manifest 字节预算 | 已实现（质量门切片） | `validation.rs`；`max_artifact_bytes`、`max_total_manifest_bytes`、唯一 `ContentHash` 确定性计数、CAS 实际字节复核；默认策略保持兼容，单 artifact/总预算在预读阶段拒绝 | 尚未覆盖压缩后/平台 Cook 后预算、跨包聚合预算和远程发布服务 |
 | SourceSnapshot / Recipe / PNG 导入垂直链 | 部分实现 | `source.rs`、`recipe.rs`、`import/image.rs`、`executor.rs`、`prism_image::artifact`；除 v1 兼容外，PNG importer 现在发布 schema v2 完整语义 RGBA8 mip 链，覆盖 odd-size ceil-halving、metadata round-trip、确定性编码及严格异常拒绝 | 仍不代表通用 importer、BCn/ASTC/ETC2 压缩、平台 Cook、VT/page artifact 或完整远程 runtime texture delivery 已完成 |
-| `.prism` Editable Asset canonical 包 | 部分实现（本地协议、工作区事务、保存载荷 Cook 与类型化设置） | `prism_asset_build_core/src/editable.rs`；`EditableAsset` 以唯一 bytes 布局编码身份、设置、SourceRecord、稳定子资产、依赖、显式子资产引用、编辑载荷和预览。严格 decoder 校验 schema、长度、文本、排序/去重、自依赖与内嵌源 hash；`LocalFileSourceProvider` 只捕获 content root 内的有界普通文件。`EditableWorkspace` 在 `fs4` 排他锁下扫描非符号链接 `.prism` 文件、拒绝重复 AssetId，调用 caller-owned importer 和载荷引用改写器，校验候选显式引用图，并通过可恢复的暂存事务原子发布所有受影响包；未提交事务在下次 open 时回滚，已提交事务只清理暂存。`tests/editable_asset.rs` 覆盖协议、单包持久化、外部源重导入、引用重写和失败不发布边界；`editable_identity.rs`、`editable_build.rs`、`editable_settings.rs` 另覆盖稳定 ID 派生、保存载荷 Cook、类型化设置与逐版本迁移；`editable_diff.rs` 覆盖全部字段、保存/重开、Cook/DDC 和外部依赖影响；`tests/editable_save.rs`、`editable_mutation.rs` 覆盖保存及创建/替换/移动/删除的恢复事务 | CAS 外载荷、三方 semantic merge 与冲突解决、编辑器 UI、远程 source provider、跨主机协调和运行时完整资产消费仍未完成 |
+| `.prism` Editable Asset canonical 包 | 部分实现（schema 3 本地协议、工作区事务、保存载荷 Cook 与类型化设置） | `prism_asset_build_core/src/editable.rs`、`editable_payload.rs`；身份、设置、SourceRecord、稳定子资产、依赖/引用、Inline/External 载荷和预览采用 canonical 编码，严格 decoder 拒绝旧 schema、未知 tag、长度/排序/源 hash 错误。`EditableWorkspace` 在 `fs4` 排他锁下检查候选路径、引用图和外载荷对象，再通过可恢复事务发布；恢复清单 schema 2 独立演进。既有 `tests/editable_asset.rs`、`editable_identity.rs`、`editable_settings.rs`、`editable_save.rs`、`editable_mutation.rs` 记录协议、身份、设置及发布/恢复边界 | 外载荷生命周期和物化见下两行；编辑器冲突界面及其他 UI、远程 source provider、跨主机协调和运行时完整资产消费仍未完成 |
+| 编辑态工作区 CAS、leases 与 durable history pins/GC | 已实现（本地切片，storage 专项 21 项通过） | `editable_storage.rs` 的 `store_payload`、`EditablePayloadLease`、`EditableWorkspaceSnapshot`、`retain_snapshot` / `retain_payloads` / `release_payloads`、`collect_payloads`；当前包与 pin 为 roots，恢复后扫描，活跃 lease 非阻塞延期，损坏包/pin 删除前拒绝；`tests/editable_payload_storage.rs` 独立 21 项通过，另有 `tests/editable_payload_build.rs` 的快照到冻结计划消费回归 | durable pin 仅保留载荷根，调用方仍持有历史包/命令；完整编辑器历史接线、远程租约、后台配额 GC、跨平台故障矩阵仍未完成；21 项专项单列，不计入既有 719 项默认回归 |
+| 外载荷 Cook 与重导入物化预算 | 已实现（本地聚合 admission 与自动外置切片） | `editable_build.rs`、`editable.rs::reimport_with_payload_budget`；`tests/editable_payload_build.rs`、`editable_payload_reimport.rs` 记录 hard 闭包、去重、损坏拒绝、预算前置、回调输出预算及大于 32 MiB 自动外置；父任务已核验本次默认回归包含这些 CAS 迁移路径，另确认 CLI `tests/editable_workflow.rs` 最新 11 项全部通过（含 materialization flag），未在此追加总数 | 冻结/回调载荷限额不等于 heap 或峰值内存保证；作者态聚合物化与流式 Processor SDK 是不同边界；storage 专项证据见上一行 |
+| 编辑态稳定 ID 三方 semantic merge | 已实现（核心规划、显式冲突选择与受保护保存切片） | `prism_asset_build_core/src/editable_merge.rs` 的 `plan_editable_merge`、借用冲突证据及 `EditableMergePlan::resolve`；`tests/editable_merge.rs` 覆盖独立修改合并后保存/重开/真实 Cook、源与预览变化的持久 DDC 复用、不透明载荷显式选择、未完整选择拒绝、引用失效、编码预算、身份不符、重复名称及并发保存后旧 hash 拒绝；CAS 迁移借用 `&EditablePayload`，按 `encoded_len()` 精确预算，包含混合 storage 冲突和 storage-only 保存/DDC 场景 | 设置、载荷 enum、源和预览仍按完整值解决冲突；存储迁移与并发内容修改不隐式拼接；格式内部细粒度合并、编辑器冲突界面、完整命令历史和跨主机协作未完成 |
+| 编辑态快照 CLI semantic diff | 已实现（只读、有界文本与 JSONL 切片） | `prism_asset_build_cli/src/editable_diff.rs` 直接调用 core `diff_editable_assets`；`tests/editable_semantic_diff.rs` 的迁移前十项历史回归覆盖相同快照、metadata-only/Cook 分类、稳定 ID 子资产及依赖/引用变化、缺席与空预览、严格解码、每文件预算、非普通文件/符号链接拒绝、集合及转义后输出预算与输入无副作用；CAS 增量报告载荷 hash/逻辑长度/storage，不读对象。core `tests/editable_diff.rs` 另记录 storage-only 非空 editor/import 差异与保存/重开后的 key/DDC 复用 | 仅比较两个本地保存快照，摘要不证明外载荷存在；外部依赖 artifact 变化不由本地 diff 判定；不包含编辑器差异界面、自动 merge 发布或文件描述符级抗恶意路径替换保证 |
 | ImporterPlugin / ImporterRegistry | 已实现（进程内注册选择切片） | `prism_asset_build_core/src/import/mod.rs`、`import/image.rs`；`tests/import_registry.rs` 的 `built_in_registry_normalizes_and_selects_by_extension_or_mime`、`selection_has_explicit_missing_and_no_match_errors`、`registration_and_selection_are_deterministic_and_ambiguity_is_explicit`；覆盖扩展名/MIME 归一化、内置 PNG 注册、稳定身份排序、重复身份/歧义拒绝和 profile 字段元数据 | 动态插件加载、隔离 worker、更多格式、插件准入/签名和完整 Source/IR/Recipe 生态未完成 |
 | 本地 Revision 事务与恢复 | 部分实现 | `transaction.rs`、`journal.rs`；`publishes_and_failed_transaction_keeps_previous_revision`、`reopening_after_pointer_publish_recovers_missing_commit_marker`、`reopening_truncates_a_partial_journal_tail`、`reopening_fails_closed_on_a_corrupt_journal_frame`、`separate_store_handles_serialize_concurrent_revision_publication`、`publication_file_lock_blocks_until_guard_is_released`、`atomic_replace_overwrites_existing_pointer`；稳定锁文件通过 `fs4` 在 Unix/Windows 串行化 compare-and-publish，`NamedTempFile::persist` 可覆盖已有 `CURRENT` | 完整磁盘故障注入、远程幂等协议、跨机器协调、网络文件系统一致性和完整事务级恢复仍未完成；锁 I/O 失败直接中止，不提供无锁降级 |
 | 本地发布完整性与单调 Revision gate | 部分实现（含 CLI 持久化 trust policy 与本地 Provenance 接线） | `release.rs`、`provenance.rs`；`release_descriptor_is_deterministic_and_strictly_decodable`、`ed25519_release_signatures_are_deterministic_and_verifiable`、`ed25519_release_signatures_reject_tampering_and_wrong_keys`、`accepts_only_integral_current_manifest_and_cas`、`rejects_rollback_before_any_release_side_effect`、`failed_accept_does_not_advance_floor`、`stale_trust_store_cannot_overwrite_a_newer_policy`、`trust_store_file_lock_blocks_until_guard_is_released`；`ReleaseSigner`/`ReleaseVerifier` 使用域分离 canonical descriptor、内容派生 `ReleaseKeyId` 和严格 signed envelope；`ReleaseProvenance` 绑定 Build Manifest、Artifact、Runtime Publication 与 Container 的 revision/hash/长度/依赖事实；持久 trust policy 的跨进程锁在 Unix/Windows 覆盖 stale-writer 检查和原子替换；`package`/`validate` 写入并逐字节复核 `provenance.bin`；`prism_asset_build_cli` 的 `validate --trust-policy-file` 通过 `ReleaseTrustStore::open` 验证持久化策略，`package_validate.rs` 覆盖成功、撤销 key 和互斥参数 | 密钥托管、跨机器 anti-rollback、远程发布服务、外部源码/工具链/Worker 证明和审计服务仍未完成 |
@@ -666,12 +805,54 @@ Dependency Records
 Explicit Sub-asset References
   target AssetId / stable SubAssetId / hard | soft | editor-only
 Editable Payload
-  lossless or sufficiently high-fidelity authoring representation
+  schema 3: Inline(tag 0 / u32 length / bytes)
+          | External(tag 1 / ContentHash[32] / u64 byte_len)
 Optional Preview
   thumbnail / bounds / waveform / summary
 ```
 
-它不是运行时格式，也不是 DDC。为了版本控制友好，元数据支持确定性文本视图或专用语义 Diff；大型载荷可通过外部 CAS 引用，避免频繁改动大二进制。
+它不是运行时格式，也不是 DDC。schema 3 的编辑载荷可内联或引用工作区 CAS；
+External 段固定为 41 字节（含 tag），其逻辑长度不计作包内字节。仅复制外载荷
+包不能带走其内容；可迁移/归档的完整快照还需相应 CAS 对象。`SourceRecord`
+的外部源/内嵌源与此载荷存储选择互相独立。严格 decoder 拒绝旧 schema、未知
+tag 与超限引用，不隐式迁移或解析外载荷。
+
+当前源码的预算边界如下；父任务核验的默认回归与尚待验证的专项范围见实施状态：
+
+| 层次 | 上限或默认值 | 计数与含义 |
+| --- | --- | --- |
+| Inline 载荷 | 32 MiB | 包内作者态字节 |
+| External 对象 | 4 GiB | 单对象逻辑字节，引用本身不授权读取全部内容 |
+| 单包 / 工作区编码快照 | 64 MiB / 512 MiB | 编码长度；与外载荷物化预算分开 |
+| Cook 物化 | 默认 512 MiB，显式正数最多 4 GiB | 所选 roots 与 hard 闭包；inline 逐资产计，external 按 hash 计一次且长度必须一致 |
+| 重导入物化 | 默认 512 MiB，显式正数最多 4 GiB | 旧输入按 hash+length 去重；回调输出另有同额聚合预算，两者不是共享总额 |
+
+`editable_storage.rs` 提供工作区所属的 `.prism-editable-payloads` CAS、
+`.prism-editable-history` pin 目录及 `.prism-editable-payloads.lock` 租约文件；
+扫描和 mutation 路径校验将其保留，不把它们当作内容包。`store_payload(reader,
+max_bytes)` 在工作区锁下分块写入不可变对象，返回 `EditablePayloadLease`；
+调用方保留该 lease，直到包发布或 durable pin 接管。`snapshot` 返回只读、
+可 clone 的 `EditableWorkspaceSnapshot`，最后一个 clone drop 才释放共享租约。
+只取出 `EditablePayloadRef` 不会延长保护。save/mutate/reimport 在相同工作区
+锁下校验候选包的对象长度与完整 hash，再进入可恢复的多包发布事务；失败候选
+可能留下尚未引用的有效 CAS 对象，后续显式 GC 回收，不承诺 CAS 字节随事务回滚。
+
+Cook 从带租约的 workspace snapshot 解析所选载荷；聚合 admission 完成后才读
+外载荷，读取复核普通文件、已打开长度、实际长度和内容 hash。同 hash 的外载荷
+共用 `Arc<[u8]>`，计划完成后 job 持有冻结字节，执行不再访问源文件或工作区。
+普通 `BTreeMap` 形式的 `from_snapshot` 没有 resolver，若选中 External 则拒绝。
+预算只计冻结载荷，不覆盖元数据、解析临时缓冲、cooker heap 或输出总峰值；
+4 GiB 是协议/配置限额，不是任意平台可成功分配的保证，也不是流式 Cook SDK。
+
+当前已有 core 语义 diff、只读 `editable-diff` CLI 和稳定 ID 三方合并；二进制
+包不要求逐行文本合并。`semantic_eq` 对涉及 External 的比较使用 hash+length，
+不读 CAS；Inline↔External 同内容时 diff 非空，仅标记 editor/import 影响。
+保存用的完整包 hash 包含存储标签，因而会变；Cook key 哈希物化内容而不含
+存储标签，其他输入不变时保持 key 和 DDC 复用。源、预览及 editor-only 信息
+同样不进入 Cook key；外部 hard artifact 变化仍由 DAG key 传播，空本地 diff
+不能证明不重建。merge 将 `&EditablePayload` 作为完整冲突证据，预算使用
+精确 `encoded_len()`；存储迁移与并发内容修改仍须显式解决冲突，不猜测载荷格式。
+确定性文本旁视图、编辑器冲突 UI 与远程载荷协作仍是后续目标。
 
 ### 5.3 IR 设计原则
 
@@ -684,6 +865,15 @@ Optional Preview
 ---
 
 ## 6. Processor SDK
+
+当前实现边界（2026-10-21）：`processor.rs::Processor` 已交付进程内
+`descriptor/analyze/execute`、命名动态依赖记录、冻结输入/资源/输出契约、
+协作取消和私有 `ArtifactWriter`，由 `prepare_process` 生成 DAG 节点及匹配
+`ArtifactSpec`。底层另有 `StreamingProcessor::execute` 和有界输入物化的
+buffered Processor。SDK 的命名输入来自 caller 的显式 `InputCatalog`；它不
+解析任意源格式、不执行 OS 隔离，也不抢占第三方 CPU 工作。下列设计中
+隔离/远程 Worker、完整插件注册/准入和多格式生产链仍为目标；已交付接口、
+限制及测试证据见本文最新实施状态。
 
 ### 6.1 统一处理器，而非五套相互割裂接口
 
@@ -775,13 +965,13 @@ begin_output
 
 ### 6.6 Bake Kernel 与两种调度
 
-状态补记（2026-10-21）：`7a8b26eed` 已补齐 BakeService 的 caller-owned stable kernel registry、成功结果的有界 process-local runtime cache、重复请求合并和确定性容量驱逐；`06da84996` 把经过 DAG 校验的 `DirtySet` 后继闭包接入 BuildExecutor，`19f3980c7` 补齐 `BakeService::submit_dirty` 的稳定选择与有界提交。新增 `BakeEcsPlugin` 交付实体生命周期驱动的有限队列和非阻塞结果消费；实际资产与渲染/编辑器消费者、远程调度和大规模性能基准仍需独立验收。
+状态补记（2026-10-21）：`7a8b26eed` 已补齐 BakeService 的 caller-owned stable kernel registry、成功结果的有界 process-local runtime cache、重复请求合并和确定性容量驱逐；`06da84996` 把经过 DAG 校验的 `DirtySet` 后继闭包接入 BuildExecutor，`19f3980c7` 补齐 `BakeService::submit_dirty` 的稳定选择与有界提交。新增 `BakeEcsPlugin` 交付实体生命周期驱动的有限队列和非阻塞结果消费，并已有 opt-in Bake→Image 消费切片；通用材质/场景消费者、真实 GPU 采样、编辑器预览、远程调度和大规模性能基准仍需独立验收。
 
 算法与调度分离，是“源资产烘焙”与“场景派生烘焙”收敛为一条线的关键：
 
 - **Bake Kernel**：`prism_bake_*` crate，纯算法核心——无 I/O、无调度、无全局状态；输入为 IR/结构化参数，输出为字节或结构化产物。必须存在 CPU 金标准，GPU 实现（若有）与之逐元素对拍（范式见 `pkg/prism_micromap_gpu/tests/gpu_parity.rs`）。
-- **离线调度**：本系统的 `Processor` 包一层 Kernel，负责 `analyze` 声明输入与键材料、选择 `ArtifactKind`、经 `ArtifactWriter` 流式写入并提交事务。
-- **进程内调度**：目标形态是编辑器/运行时的 `BakeService`（由 `prism_tasks` 承载）以 dirty-set 驱动同一个 Kernel，产物进本地 runtime cache，不写 CAS/DDC（见 `prism_asset_design_zh.md` §13.2）。当前仓库已交付 `prism_asset_build_core::BakeService` 的独立本地切片：它以有界 `prism_tasks::TaskPool` 执行 caller-supplied Kernel，最多使用 64 个 worker，提供有界 in-flight、确定性 request key、协作取消、panic/error 隔离、RAII 配额释放、owned result descriptor、caller-owned kernel registry、有界 runtime cache、重复请求合并和确定性驱逐；`BakeService::submit_dirty` 现在以同一稳定拓扑顺序选择 dirty 请求并保持有界提交，`BuildExecutor` 另提供面向 OfflineShipped 图的 DirtySet 增量入口，强制重算受影响节点并复用未受影响缓存。两者仍未接入 ECS/渲染/编辑器消费或外部发布。
+- **离线调度**：进程内 SDK 已通过 `analyze` 记录命名输入与键材料、选择输出 kind/schema，并经 `ArtifactWriter` 流式写入私有候选，再由执行器验证与提交。buffered 适配和低层 `StreamingProcessor::execute` 同样保留；隔离/远程 Worker 和通用格式 Cook 仍须实现。
+- **进程内调度**：目标形态是编辑器/运行时的 `BakeService`（由 `prism_tasks` 承载）以 dirty-set 驱动同一个 Kernel，产物进本地 runtime cache，不写 CAS/DDC（见 `prism_asset_design_zh.md` §13.2）。当前仓库已交付 `prism_asset_build_core::BakeService` 的独立本地切片：它以有界 `prism_tasks::TaskPool` 执行 caller-supplied Kernel，最多使用 64 个 worker，提供有界 in-flight、确定性 request key、协作取消、panic/error 隔离、RAII 配额释放、owned result descriptor、caller-owned kernel registry、有界 runtime cache、重复请求合并和确定性驱逐；`BakeService::submit_dirty` 现在以同一稳定拓扑顺序选择 dirty 请求并保持有界提交，`BuildExecutor` 另提供面向 OfflineShipped 图的 DirtySet 增量入口，强制重算受影响节点并复用未受影响缓存。Bake 已有 ECS 结果消费和 opt-in Image 消费切片；通用材质/场景消费者、编辑器预览、远程调度和外部发布仍待验收。
 
 禁止在 Kernel 之外复制算法：任何“编辑器专用”或“运行时专用”的第二实现，都属于 §2.5 所禁止的行为不一致链，也是 `docs/prism_derived_data_contract_zh.md` 中 `OfflineShipped` 与 `RuntimeDerived` 必须指出同一内核的原因。
 
@@ -973,7 +1163,29 @@ L3 CI/Release immutable cache
 
 ### 10.4 CAS GC
 
-采用 Manifest/Revision 可达性 + 租约。当前仓库已提供本地 `RevisionStore::sweep_unreachable_cas(grace)`，以已提交 journal revision/CURRENT 的 Manifest content hash 为 roots；存在未完成 Prepare 时会延期整次 sweep，并在删除后同步 shard 与 CAS 根目录。完整的活跃编辑器 pin、远程租约、后台预算调度仍属于后续工作：
+构建制品与编辑态载荷分别管理根和生命周期。`RevisionStore::sweep_unreachable_cas(grace)`
+以已提交 journal revision/CURRENT 的 Manifest content hash 为 roots；存在未完成
+Prepare 或活跃 build lease 时延期整次 sweep，删除后同步 shard 与 CAS 根目录。
+
+编辑态工作区另有 `retain_snapshot(history, snapshot)` / `retain_payloads(history,
+refs)`、`release_payloads(history)` 和 `collect_payloads(grace)`。history 为调用方
+持有的非零 `u128`，pin 记录规范排序的 hash/length 集合及校验和，经对象复核、
+临时文件同步与原子替换持久化。限额为 65536 条 pin、每条 65536 个引用、
+全部 pin 合计 1048576 个引用；应在放弃最后一个 snapshot/writer lease 前保留，
+并在历史记录不再需要时显式释放。API 只保存载荷根，不保存完整撤销命令或资产
+历史快照，调用方仍负责历史内容。
+
+编辑态 GC 在工作区发布锁内先恢复事务、扫描当前包和 durable history pins，
+以其外载荷 hash 为 roots；损坏包/pin、限额或矛盾长度使删除前检查失败。
+collector 尝试非阻塞独占 GC 租约，任意活跃 snapshot/writer lease 都使
+`deferred_due_to_active_readers=true`，整次 sweep 延期；不在持有工作区锁时
+等待 reader。取得独占租约后才对不可达对象按 grace period sweep。两类 CAS
+不能相互代用 roots；构建 store 的 `cache prune` 不负责工作区作者态载荷。
+这些是本地合作式锁协议；普通路径检查不防恶意并发替换，不保护绕开 API 的
+文件读取者，Windows 不承诺 Unix 目录 fsync 的等价持久化。独立 storage
+专项 21 项已通过，覆盖租约/pin/GC 和损坏拒绝；数量不并入既有默认回归。完整
+编辑器历史接线、远程租约、后台 I/O/配额策略仍未完成。
+以下为更完整 GC 调度的目标，不能视为已全部实现：
 
 1. 活跃编辑器 Revision、已发布 Manifest、正在执行事务和用户 Pin 构成根集合。
 2. 标记可达 Artifact 与 Blob。
@@ -1012,6 +1224,18 @@ Discover → Detect → Inspect → Propose Settings → Import → Validate
 - 批量编辑显示将触发的重建范围和预计成本。
 
 ### 11.3 重导入
+
+当前 `EditableWorkspace::reimport_with_payload_budget` 在同一工作区锁下恢复、
+捕获旧包、物化旧载荷、调用 importer/引用改写器、校验并事务发布。默认
+`reimport` 使用 512 MiB；显式预算须为正且不超过 4 GiB。初始所选旧输入先
+按 hash+length 去重并完成预算预检，再读取并校验字节；改写过程中新增的输入
+也逐项检查后才物化。importer 与引用改写输出仍为 `Vec<u8>`，各次回调返回后
+累计到独立的同额输出预算；不限制回调内部预先分配。旧载荷为 External 时
+结果继续外置，其他结果大于 32 MiB 时自动写入工作区 CAS，较小结果保持 Inline。
+发布前复核全部候选外载荷；校验失败不发布包，I/O 失败仍服从恢复协议，已写
+入的未引用对象留待 GC。该预算不提升 SourceProvider 的源读取限额，不代表
+完整流式导入或编辑器自动重导入体验。回归入口为 `tests/editable_payload_reimport.rs`，
+本轮默认回归中的 CAS 重导入路径已由父任务核验，范围见实施状态。以下为完整重导入体验目标：
 
 - 源未变：零工作。
 - 设置变：复用 Source/IR，只重建相关后继。
@@ -1385,6 +1609,22 @@ prism_asset_build_cli patch --store <store> --base-revision <u64> --base-package
 
 `package` 从当前已提交 Revision 读取 Manifest/CAS，先运行 `ArtifactQualityGate`，再调用 `package_runtime` 写出 canonical `manifest.bin`、`publication.bin` 和 raw container；`validate` 重新计算同一 package 并逐字节校验发行目录。核心库和 CLI 已提供 `ReleaseSigner`/`ReleaseVerifier`：`package --signing-key-file` 写出 `release.sig`，`validate --verification-key-file` 对 signed package 强制验签；也可使用 `validate --trust-policy-file <persisted-policy>` 打开 canonical `ReleaseTrustStore`，按持久化信任策略验证签名并执行最低 revision/撤销 key 门禁。两个验证参数互斥；key file 仍是 caller-owned 原始 32 字节材料，不等于密钥托管或完整信任根服务。旧参数仍覆盖当前 PNG 纵切片的 source/image 映射（`source AssetId = image AssetId - 1`）；严格 `version=1` mapping 可显式列出每个 Manifest AssetId 的 GUID、容器和优先级，并由 `package`/`validate` 共用同一解析/覆盖校验。该命令组仍不代表通用 Cook、平台 Profile、压缩/加密或完整签名发行链。
 `patch` 读取 base Revision 的已提交 Build Manifest、已发布 base package、base mapping 和 target mapping，调用与库侧相同的 `package_runtime_patch`，写出 `descriptor.bin`、`patch_manifest.bin`、`target_manifest.bin` 和仅包含新增/变更/mapping 变化 payload 的 `containers/`；增量 manifest 可携带无 payload 的依赖上下文 route，以保证目标依赖元数据可完整验证。输出目录采用不可变写入并拒绝不一致的旧文件。该命令组仍不代表通用 Cook、平台 Profile、压缩/加密、签名或运行时自动安装发行链。
+
+当前编辑态快照语义比较命令为：
+
+```text
+prism_asset_build_cli [--json] editable-diff --before <before.prism> --after <after.prism> [--max-input-bytes <N>]
+```
+
+该命令直接调用 `diff_editable_assets`，只读两个严格解码的普通 `.prism` 文件，
+不创建 store/workspace，不解析外部源或读取 External CAS 对象。输入预算默认每文件 8 MiB 且仅可收紧；
+集合变化最多 65536 项，转义后输出最多 8 MiB。结果区分 Cook 与 editor/import
+影响，按稳定 ID 报告子资产增删改及依赖/引用变化；设置、载荷、源内嵌字节和
+预览只显示长度与 BLAKE3，不输出原始内容；载荷另报告 `storage=inline|external`，
+长度为逻辑字节数，输入预算计编码包大小。storage-only 变化为非空 editor/import
+差异，不改变同内容的 Cook key；摘要不证明外载荷对象可用。已提供文本输出及 JSONL 的
+started/succeeded/failed 协议；它与查询已提交构建 Revision 的 `diff`
+属于不同输入边界，空的本地快照 diff 不证明外部依赖 artifact 未变化。
 
 所有命令支持人类文本和稳定 JSON/Event Stream；CI 依赖错误码与结构化数据，不解析日志字符串。`--dry-run` 必须给出预计重建范围、DDC 命中、输出大小和门禁风险。
 

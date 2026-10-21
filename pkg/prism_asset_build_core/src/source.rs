@@ -4,12 +4,14 @@ use crate::executor::ArtifactSpec;
 use crate::job::{BuildJob, JobId, ProcessorError};
 use crate::types::{ArtifactKey, AssetId, ContentHash};
 use std::fmt;
+use std::io::Write;
+use std::sync::Arc;
 
 /// A canonical, immutable source file snapshot.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SourceSnapshot {
     logical_path: String,
-    bytes: Vec<u8>,
+    bytes: Arc<[u8]>,
     content_hash: ContentHash,
 }
 
@@ -58,7 +60,7 @@ impl SourceSnapshot {
         let content_hash = ContentHash::digest(&bytes);
         Ok(Self {
             logical_path,
-            bytes,
+            bytes: bytes.into(),
             content_hash,
         })
     }
@@ -127,15 +129,35 @@ impl SourceSnapshot {
     /// Creates a graph root job that emits this exact captured source.
     #[must_use]
     pub fn build_job(&self, id: JobId) -> BuildJob {
-        let bytes = self.bytes.clone();
-        BuildJob::new(id, Vec::<JobId>::new(), move |inputs: &[&[u8]]| {
-            if !inputs.is_empty() {
-                return Err(ProcessorError::new(
-                    "source root job cannot have dependencies",
-                ));
-            }
-            Ok(bytes.clone())
-        })
+        BuildJob::streaming(id, Vec::new(), SourceProcessor(Arc::clone(&self.bytes)))
+            .with_max_output_bytes(self.bytes.len() as u64)
+            .with_resources(crate::BuildResources {
+                memory_bytes: self.bytes.len() as u64 + 64 * 1024,
+                disk_write_bytes: self.bytes.len() as u64,
+                ..crate::BuildResources::default()
+            })
+    }
+}
+
+struct SourceProcessor(Arc<[u8]>);
+
+impl crate::job::StreamingProcessor for SourceProcessor {
+    fn execute(
+        &self,
+        inputs: &mut [crate::job::ProcessorInput<'_>],
+        output: &mut dyn Write,
+    ) -> Result<(), ProcessorError> {
+        if !inputs.is_empty() {
+            return Err(ProcessorError::new(
+                "source root job cannot have dependencies",
+            ));
+        }
+        for bytes in self.0.chunks(64 * 1024) {
+            output
+                .write_all(bytes)
+                .map_err(|error| ProcessorError::new(error.to_string()))?;
+        }
+        Ok(())
     }
 }
 

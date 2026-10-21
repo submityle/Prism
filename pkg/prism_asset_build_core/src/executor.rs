@@ -8,10 +8,12 @@ use crate::dirty::{
 };
 use crate::graph::{BuildError, BuildGraph};
 use crate::hash::{derive_artifact_key, ArtifactKeyInputs, HashError};
-use crate::job::JobId;
+use crate::job::{
+    admit_materialized_inputs, materialize_inputs, JobId, JobProcessor, ProcessorInput,
+};
 use crate::journal::read_committed_binding as input_binding;
 use crate::resources::{BuildResources, ResourceError};
-use crate::transaction::{PublishError, PublishedManifest, RevisionStore};
+use crate::transaction::{CommitError, PublishError, PublishedManifest, RevisionStore};
 use crate::types::{
     ArtifactDescriptor, ArtifactKey, AssetId, BuildRevision, ContentHash, Manifest, ManifestEntry,
     TransactionId,
@@ -83,12 +85,12 @@ pub struct BuildExecution {
     pub artifact_keys: BTreeMap<JobId, ArtifactKey>,
     /// Jobs whose bytes were loaded from the verified local DDC/CAS pair.
     pub cache_hits: BTreeSet<JobId>,
-    /// Coordinator-owned outputs retained for future consumers, sampled after
-    /// each completed wave. This excludes worker buffers and processor heaps.
+    /// Coordinator-owned payload memory. Persistent execution retains only
+    /// descriptors, so these counters are zero; worker/adapter heaps are excluded.
     pub output_memory: BuildOutputMemoryStats,
 }
 
-/// Retained DAG-frontier high-water marks, not a process-wide memory budget.
+/// Coordinator payload high-water marks, not a process-wide memory budget.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct BuildOutputMemoryStats {
     /// Largest sum of retained output lengths after a completed wave.
@@ -640,6 +642,11 @@ impl BuildExecutor {
         for &id in &order {
             let job = graph.job(id).expect("validated job exists");
             let request = job.resources();
+            job.processor()
+                .validate_admission(&specs[&id], request)
+                .map_err(|source| {
+                    BuildExecutionError::Graph(BuildError::ProcessorFailed { job: id, source })
+                })?;
             if request.cpu_threads == 0 {
                 return Err(BuildExecutionError::Resources(
                     ResourceError::ZeroCpuRequest(id),
@@ -663,16 +670,10 @@ impl BuildExecutor {
             }
         }
 
-        // Prepared outputs are already durable in CAS. Keep only the frontier
-        // borrowed by future jobs and protect unpublished blobs until commit.
+        // Jobs exchange durable CAS descriptors, never retained payload Vecs.
+        // Protect every unpublished output through publication or failure.
         let _output_lease = store.protect_build_outputs()?;
-        let mut remaining_consumers: BTreeMap<_, _> = dependents
-            .iter()
-            .map(|(&id, consumers)| (id, consumers.len()))
-            .collect();
-        let mut outputs = BTreeMap::<JobId, Vec<u8>>::new();
-        let mut retained_bytes = 0u64;
-        let mut output_memory = BuildOutputMemoryStats::default();
+        let output_memory = BuildOutputMemoryStats::default();
         let mut descriptors = BTreeMap::<JobId, ArtifactDescriptor>::new();
         let mut artifact_keys = BTreeMap::new();
         let mut cache_hits = BTreeSet::new();
@@ -713,22 +714,27 @@ impl BuildExecutor {
                     .iter()
                     .map(|dependency| artifact_keys[dependency])
                     .collect();
-                let inputs: Vec<&[u8]> = job
+                let inputs: Vec<ArtifactDescriptor> = job
                     .dependencies()
                     .iter()
-                    .map(|dependency| outputs[dependency].as_slice())
+                    .map(|dependency| descriptors[dependency].clone())
                     .collect();
                 let key = spec.artifact_key(self.protocol_version, &input_keys)?;
+                let processor = job.processor();
+                processor.validate(spec, &inputs).map_err(|source| {
+                    BuildExecutionError::Graph(BuildError::ProcessorFailed { job: id, source })
+                })?;
                 let force_rebuild = dirty.is_some_and(|dirty| dirty.contains(id));
                 work.push((
                     id,
                     key,
                     spec,
                     input_keys,
-                    job.processor(),
+                    processor.clone(),
                     job.max_output_bytes(),
+                    job.max_materialized_input_bytes(),
                     inputs,
-                    if verify_determinism || force_rebuild {
+                    if verify_determinism || force_rebuild || !processor.cacheable() {
                         None
                     } else {
                         ddc.get(key)
@@ -747,6 +753,7 @@ impl BuildExecutor {
                             input_keys,
                             processor,
                             max_output_bytes,
+                            max_materialized_input_bytes,
                             inputs,
                             cached,
                         )| {
@@ -761,6 +768,7 @@ impl BuildExecutor {
                                         input_keys,
                                         processor,
                                         max_output_bytes,
+                                        max_materialized_input_bytes,
                                         inputs,
                                         cached,
                                         store,
@@ -790,22 +798,6 @@ impl BuildExecutor {
                     .collect::<Vec<_>>()
             });
 
-            // All scoped workers have joined, so none can still borrow these
-            // inputs. Count dependency edges (including repeated input slots),
-            // retaining a shared output until its final consumer wave finishes.
-            for id in &wave {
-                for dependency in graph.job(*id).expect("wave job exists").dependencies() {
-                    let consumers = remaining_consumers
-                        .get_mut(dependency)
-                        .expect("dependency has a consumer");
-                    *consumers -= 1;
-                    if *consumers == 0 {
-                        let released = outputs.remove(dependency).expect("live input exists");
-                        retained_bytes -= released.len() as u64;
-                    }
-                }
-            }
-
             // Canonicalize at the side-effect boundary, independently of the
             // collector's arrival/join order. No cache mutation or failure
             // selection may happen before this ordering step.
@@ -829,19 +821,19 @@ impl BuildExecutor {
                 if prepared.invalidate_cache {
                     ddc.invalidate(prepared.key)?;
                 }
-                if !prepared.cache_hit {
+                if !prepared.cache_hit
+                    && graph
+                        .job(id)
+                        .expect("completed job exists")
+                        .processor()
+                        .cacheable()
+                {
                     ddc.put(prepared.key, prepared.descriptor.clone())?;
-                } else {
+                } else if prepared.cache_hit {
                     cache_hits.insert(id);
                 }
                 artifact_keys.insert(id, prepared.key);
                 descriptors.insert(id, prepared.descriptor);
-                if remaining_consumers.get(&id).copied().unwrap_or(0) != 0 {
-                    retained_bytes = retained_bytes
-                        .checked_add(prepared.output.len() as u64)
-                        .expect("allocated frontier byte count fits u64");
-                    outputs.insert(id, prepared.output);
-                }
                 completed.insert(id);
                 ready.remove(&id);
                 if let Some(children) = dependents.get(&id) {
@@ -856,12 +848,18 @@ impl BuildExecutor {
                     }
                 }
             }
-            output_memory.peak_retained_bytes =
-                output_memory.peak_retained_bytes.max(retained_bytes);
-            output_memory.peak_retained_outputs =
-                output_memory.peak_retained_outputs.max(outputs.len());
         }
 
+        for &id in &order {
+            graph
+                .job(id)
+                .expect("validated job exists")
+                .processor()
+                .check()
+                .map_err(|source| {
+                    BuildExecutionError::Graph(BuildError::ProcessorFailed { job: id, source })
+                })?;
+        }
         let mut transaction = if let (Some(snapshot), Some(plan)) = (inputs, explanation) {
             let manifest = Manifest::new(
                 revision,
@@ -895,10 +893,25 @@ impl BuildExecutor {
         } else {
             store.begin(revision, expected_current)
         };
-        for id in order {
+        for &id in &order {
             transaction.stage_existing(specs[&id].asset, descriptors[&id].clone())?;
         }
-        let published = transaction.commit()?;
+        let published = transaction
+            .commit_checked(|| {
+                for &id in &order {
+                    graph
+                        .job(id)
+                        .expect("validated job exists")
+                        .processor()
+                        .check()
+                        .map_err(|source| BuildError::ProcessorFailed { job: id, source })?;
+                }
+                Ok(())
+            })
+            .map_err(|error| match error {
+                CommitError::Publish(error) => BuildExecutionError::Publish(error),
+                CommitError::Rejected(error) => BuildExecutionError::Graph(error),
+            })?;
         Ok(BuildExecution {
             published,
             artifact_keys,
@@ -1023,7 +1036,6 @@ fn persist_input_record(path: &Path, bytes: &[u8]) -> Result<(), RebuildExplanat
 struct PreparedJob {
     key: ArtifactKey,
     descriptor: ArtifactDescriptor,
-    output: Vec<u8>,
     cache_hit: bool,
     invalidate_cache: bool,
 }
@@ -1050,91 +1062,156 @@ fn prepare_job(
     key: ArtifactKey,
     spec: &ArtifactSpec,
     input_keys: Vec<ArtifactKey>,
-    processor: std::sync::Arc<dyn crate::job::Processor>,
+    processor: JobProcessor,
     max_output_bytes: u64,
-    inputs: Vec<&[u8]>,
+    max_materialized_input_bytes: u64,
+    inputs: Vec<ArtifactDescriptor>,
     cached: Option<ArtifactDescriptor>,
     store: &RevisionStore,
     verify_determinism: bool,
 ) -> Result<PreparedJob, (BuildExecutionError, bool)> {
-    let mut cached_bytes = None;
+    // Input slots remain ordered and may repeat for key derivation and stream
+    // execution. A published descriptor records each direct dependency once,
+    // in first-occurrence order, as required by the publication graph.
+    let mut seen = BTreeSet::new();
+    let dependency_keys: Vec<_> = input_keys
+        .into_iter()
+        .filter(|key| seen.insert(*key))
+        .collect();
+    processor.validate(spec, &inputs).map_err(|source| {
+        (
+            BuildExecutionError::Graph(BuildError::ProcessorFailed { job: id, source }),
+            false,
+        )
+    })?;
     let mut invalidate_cache = false;
     if let Some(descriptor) = cached {
         if descriptor.key != key
             || descriptor.kind != spec.kind
             || descriptor.schema != spec.schema
             || descriptor.alignment != spec.alignment
-            || descriptor.dependencies != input_keys
+            || descriptor.dependencies != dependency_keys
         {
             return Err((BuildExecutionError::DescriptorMismatch(id), false));
         }
-        cached_bytes = output_limits::read_cached(id, store.cas(), &descriptor, max_output_bytes)
+        let valid = output_limits::verify_cached(id, store.cas(), &descriptor, max_output_bytes)
             .map_err(|error| (error, false))?;
-        invalidate_cache = cached_bytes.is_none();
-    }
-
-    let cache_hit = cached_bytes.is_some();
-    let output = match cached_bytes {
-        Some(payload) => payload,
-        None => {
-            let input_refs: Vec<&[u8]> = inputs.iter().copied().collect();
-            let output = processor.process(&input_refs).map_err(|source| {
-                (
-                    BuildExecutionError::Graph(BuildError::ProcessorFailed { job: id, source }),
-                    invalidate_cache,
-                )
-            })?;
-            output_limits::check_len(id, output.len() as u64, max_output_bytes)
-                .map_err(|error| (error, invalidate_cache))?;
-            if verify_determinism {
-                determinism::verify_second_run(
-                    id,
-                    key,
-                    processor.as_ref(),
-                    &input_refs,
-                    &output,
-                    max_output_bytes,
-                )
-                .map_err(|error| (error, invalidate_cache))?;
-            }
-            output
+        if valid {
+            return Ok(PreparedJob {
+                key,
+                descriptor,
+                cache_hit: true,
+                invalidate_cache: false,
+            });
         }
-    };
-    if spec.alignment == 0 || !spec.alignment.is_power_of_two() {
-        return Err((
-            BuildExecutionError::InvalidOutput(id, "alignment must be a non-zero power of two"),
+        invalidate_cache = true;
+    }
+    let mut output = run_processor(
+        id,
+        &processor,
+        &inputs,
+        store,
+        max_output_bytes,
+        max_materialized_input_bytes,
+    )
+    .map_err(|error| (error, invalidate_cache))?;
+    if verify_determinism {
+        let mut second = run_processor(
+            id,
+            &processor,
+            &inputs,
+            store,
+            max_output_bytes,
+            max_materialized_input_bytes,
+        )
+        .map_err(|error| (error, invalidate_cache))?;
+        determinism::verify_streams(id, key, &mut output, &mut second)
+            .map_err(|error| (error, invalidate_cache))?;
+    }
+    // Both executions have passed before any candidate output enters CAS.
+    processor.check().map_err(|source| {
+        (
+            BuildExecutionError::Graph(BuildError::ProcessorFailed { job: id, source }),
             invalidate_cache,
-        ));
-    }
-    let descriptor = ArtifactDescriptor::for_bytes(
+        )
+    })?;
+    let stored = output
+        .finish()
+        .map_err(|error| (BuildExecutionError::Cas(error), invalidate_cache))?;
+    let descriptor = ArtifactDescriptor {
         key,
-        spec.kind,
-        spec.schema,
-        spec.alignment,
-        input_keys,
-        &output,
-    );
-    if !cache_hit {
-        // Immutable CAS writes are safe to perform concurrently. The mutable
-        // DDC index is updated by the coordinator only after durable CAS put.
-        let stored_hash = store
-            .cas()
-            .put(&output)
-            .map_err(|error| (BuildExecutionError::Cas(error), invalidate_cache))?;
-        if stored_hash != descriptor.content_hash {
-            return Err((
-                BuildExecutionError::InvalidOutput(id, "CAS hash differs from descriptor"),
-                invalidate_cache,
-            ));
-        }
-    }
+        storage_class: crate::types::ArtifactStorageClass::Shared,
+        kind: spec.kind,
+        schema: spec.schema,
+        alignment: spec.alignment,
+        dependencies: dependency_keys,
+        content_hash: stored.content_hash,
+        byte_len: stored.byte_len,
+    };
     Ok(PreparedJob {
         key,
         descriptor,
-        output,
-        cache_hit,
+        cache_hit: false,
         invalidate_cache,
     })
+}
+
+fn run_processor(
+    id: JobId,
+    processor: &JobProcessor,
+    descriptors: &[ArtifactDescriptor],
+    store: &RevisionStore,
+    max_output_bytes: u64,
+    max_materialized_input_bytes: u64,
+) -> Result<crate::cas::CasWriter, BuildExecutionError> {
+    let failure =
+        |source| BuildExecutionError::Graph(BuildError::ProcessorFailed { job: id, source });
+    if matches!(processor, JobProcessor::Buffered(_)) {
+        admit_materialized_inputs(
+            descriptors
+                .iter()
+                .map(|input| (input.content_hash, input.byte_len)),
+            max_materialized_input_bytes,
+        )
+        .map_err(failure)?;
+    }
+    let mut inputs = Vec::with_capacity(descriptors.len());
+    for descriptor in descriptors {
+        let reader = store
+            .cas()
+            .open_verified(descriptor.content_hash, descriptor.byte_len)?;
+        if reader.byte_len() != descriptor.byte_len {
+            return Err(BuildExecutionError::InvalidOutput(
+                id,
+                "dependency CAS length differs from descriptor",
+            ));
+        }
+        inputs.push(ProcessorInput::verified(reader));
+    }
+    let mut output = store.cas().begin_write(max_output_bytes)?;
+    match processor {
+        JobProcessor::Buffered(processor) => {
+            let payloads =
+                materialize_inputs(&mut inputs, max_materialized_input_bytes).map_err(failure)?;
+            let refs: Vec<_> = payloads.iter().map(|bytes| bytes.as_ref()).collect();
+            let bytes = processor.process(&refs).map_err(failure)?;
+            output_limits::check_len(id, bytes.len() as u64, max_output_bytes)?;
+            output.write_all(&bytes).map_err(CasError::Io)?;
+        }
+        JobProcessor::Streaming(processor) => {
+            processor
+                .execute(&mut inputs, &mut output)
+                .map_err(failure)?;
+        }
+        JobProcessor::Planned(processor) => {
+            processor
+                .execute(&mut inputs, &mut output)
+                .map_err(failure)?;
+        }
+    }
+    // A processor cannot turn an ignored failed write into a valid prefix.
+    output.pending_result()?;
+    Ok(output)
 }
 
 fn output_contract_settings(spec: &ArtifactSpec) -> Vec<u8> {
@@ -1229,6 +1306,29 @@ mod tests {
             ))
             .unwrap();
         graph
+    }
+
+    #[test]
+    fn buffered_admission_rejects_before_opening_missing_cas_inputs() {
+        let root = tempfile::tempdir().unwrap();
+        let store = RevisionStore::open(root.path()).unwrap();
+        let job = crate::job::BuildJob::new(JobId(7), [], |_: &[&[u8]]| {
+            panic!("budget rejection must precede the callback");
+        });
+        let input =
+            ArtifactDescriptor::for_bytes(ArtifactKey([1; 32]), 1, 1, 1, vec![], b"missing input");
+        let error = match run_processor(JobId(7), &job.processor(), &[input], &store, 64, 0) {
+            Err(error) => error,
+            Ok(_) => panic!("over-budget input was accepted"),
+        };
+        match error {
+            BuildExecutionError::Graph(BuildError::ProcessorFailed { job, source }) => {
+                assert_eq!(job, JobId(7));
+                assert!(source.message().contains("materialization byte bound"));
+            }
+            other => panic!("expected admission before CAS I/O, got {other:?}"),
+        }
+        assert_eq!(store.current_revision().unwrap(), None);
     }
 
     fn run(
@@ -1348,28 +1448,32 @@ mod tests {
         graph.add_job(source.build_job(source_job)).unwrap();
         let recipe = crate::ImportRecipe {
             importer_id: crate::import::CanonicalPngProcessor::IMPORTER_ID,
-            importer_version: 2,
-            canonical_settings: b"rgba8+mips:sRGB,preserve,max=32,budget=268435456".to_vec(),
+            importer_version: crate::import::CanonicalPngProcessor::IMPORTER_VERSION,
+            canonical_settings: crate::import::CanonicalPngProcessor::canonical_settings(),
             profile_hash: [1; 32],
             toolchain_fingerprint: b"png-0.18".to_vec(),
             environment_fingerprint: b"portable".to_vec(),
         };
+        let store = RevisionStore::open(&root).unwrap();
+        let mut catalog = crate::processor::InputCatalog::new(&store).unwrap();
+        catalog
+            .insert_source("source", source_job, &source)
+            .unwrap();
         let plan = recipe
-            .plan(
+            .plan_recorded(
                 AssetId(11),
                 import_job,
-                source_job,
-                crate::import::CanonicalPngProcessor,
-                crate::import::IMAGE_ARTIFACT_KIND,
-                crate::import::IMAGE_MIP_ARTIFACT_SCHEMA,
-                4,
+                std::sync::Arc::new(crate::import::CanonicalPngProcessor),
+                &catalog,
+                vec!["source".into()],
+                crate::processor::ProcessLimits::default(),
+                crate::processor::ProcessCancellation::default(),
             )
             .unwrap();
         graph.add_job(plan.job).unwrap();
         let mut specs = BTreeMap::new();
         specs.insert(source_job, source.artifact_spec(AssetId(10)));
         specs.insert(import_job, plan.spec);
-        let store = RevisionStore::open(&root).unwrap();
         let mut ddc = DerivedDataCache::open(root.join("ddc")).unwrap();
         let execution = BuildExecutor {
             protocol_version: 1,
@@ -1386,15 +1490,8 @@ mod tests {
         assert_eq!(image.levels[0].rgba8, vec![9, 8, 7, 255]);
         assert_eq!(
             execution.artifact_keys[&import_job],
-            recipe
-                .artifact_key_for_output(
-                    1,
-                    &source,
-                    &[],
-                    crate::import::IMAGE_ARTIFACT_KIND,
-                    crate::import::IMAGE_MIP_ARTIFACT_SCHEMA,
-                    4,
-                )
+            specs[&import_job]
+                .artifact_key(1, &[source.artifact_key()])
                 .unwrap()
         );
 

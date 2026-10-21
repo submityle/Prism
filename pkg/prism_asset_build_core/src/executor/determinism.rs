@@ -1,8 +1,8 @@
 //! Exact local double-run checks. No CAS/DDC effects occur in this module.
 
 use super::BuildExecutionError;
-use crate::graph::BuildError;
-use crate::job::{JobId, Processor};
+use crate::cas::CasWriter;
+use crate::job::JobId;
 use crate::types::{ArtifactKey, ContentHash};
 use std::fmt;
 
@@ -41,34 +41,25 @@ impl fmt::Display for DeterminismDifference {
     }
 }
 
-pub(super) fn verify_second_run(
+pub(super) fn verify_streams(
     job: JobId,
     key: ArtifactKey,
-    processor: &dyn Processor,
-    inputs: &[&[u8]],
-    first: &[u8],
-    max_output_bytes: u64,
+    first: &mut CasWriter,
+    second: &mut CasWriter,
 ) -> Result<(), BuildExecutionError> {
-    let second = processor.process(inputs).map_err(|source| {
-        BuildExecutionError::Graph(BuildError::ProcessorFailed { job, source })
-    })?;
-    super::output_limits::check_len(job, second.len() as u64, max_output_bytes)?;
-    if first == second {
+    let Some(first_difference) = first.first_difference(second)? else {
         return Ok(());
-    }
-    let first_difference = first
-        .iter()
-        .zip(&second)
-        .position(|(a, b)| a != b)
-        .unwrap_or(first.len().min(second.len())) as u64;
+    };
+    let first = first.pending_result()?;
+    let second = second.pending_result()?;
     Err(BuildExecutionError::NonDeterministic(
         DeterminismDifference {
             job,
             key,
-            first_hash: ContentHash::digest(first),
-            second_hash: ContentHash::digest(&second),
-            first_len: first.len() as u64,
-            second_len: second.len() as u64,
+            first_hash: first.content_hash,
+            second_hash: second.content_hash,
+            first_len: first.byte_len,
+            second_len: second.byte_len,
             first_difference,
         },
     ))

@@ -53,7 +53,7 @@ fn snapshot(assets: Vec<EditableAsset>) -> BTreeMap<AssetId, EditableAsset> {
 struct Cooker {
     calls: Arc<AtomicUsize>,
     descriptions: Arc<AtomicUsize>,
-    expected_payload_pointer: Option<usize>,
+    payload_pointer: Option<Arc<AtomicUsize>>,
     max_output_bytes: u64,
 }
 impl EditableCooker for Cooker {
@@ -78,8 +78,12 @@ impl EditableCooker for Cooker {
         dependencies: &[EditableCookDependency<'_>],
     ) -> Result<Vec<u8>, ProcessorError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        if let Some(pointer) = self.expected_payload_pointer {
-            assert_eq!(input.authoring_payload.as_ptr() as usize, pointer);
+        if let Some(pointer) = &self.payload_pointer {
+            let address = input.authoring_payload.as_ptr() as usize;
+            let first = pointer
+                .compare_exchange(0, address, Ordering::SeqCst, Ordering::SeqCst)
+                .unwrap_or_else(|seen| seen);
+            assert!(first == 0 || first == address);
         }
         assert!(input
             .dependencies
@@ -90,10 +94,10 @@ impl EditableCooker for Cooker {
             .iter()
             .all(|r| r.kind != Kind::EditorOnly));
         assert!(dependencies.windows(2).all(|d| d[0].asset < d[1].asset));
-        if input.authoring_payload == b"fail" {
+        if input.authoring_payload.as_ref() == b"fail" {
             return Err(ProcessorError::new("deliberate cook failure"));
         }
-        let mut bytes = input.authoring_payload.clone();
+        let mut bytes = input.authoring_payload.to_vec();
         for dependency in dependencies {
             bytes.extend_from_slice(dependency.bytes);
         }
@@ -109,7 +113,7 @@ fn registry() -> (EditableCookerRegistry, Arc<AtomicUsize>, Arc<AtomicUsize>) {
         .register(Cooker {
             calls: calls.clone(),
             descriptions: descriptions.clone(),
-            expected_payload_pointer: None,
+            payload_pointer: None,
             max_output_bytes: 4096,
         })
         .unwrap();
@@ -173,7 +177,7 @@ fn saved_image_payload_survives_workspace_snapshot_cook_package_and_runtime_load
     )
     .unwrap();
     // Replacing the persisted payload after planning cannot change the frozen job.
-    saved.authoring_payload = b"bad later edit".to_vec();
+    saved.authoring_payload = b"bad later edit".to_vec().into();
     saved
         .write_to_path(root.path().join("edited.prism"))
         .unwrap();
@@ -246,7 +250,7 @@ fn builtin_image_cooker_preserves_canonical_bytes_and_rejects_malformed_mips() {
         subassets: Vec::new(),
         dependencies: Vec::new(),
         subasset_references: Vec::new(),
-        authoring_payload: Vec::new(),
+        authoring_payload: Vec::new().into(),
     };
     for semantic in [
         TextureSemantic::ColorSrgb,
@@ -278,14 +282,15 @@ fn builtin_image_cooker_preserves_canonical_bytes_and_rejects_malformed_mips() {
                 ],
             }
             .encode()
-            .unwrap();
+            .unwrap()
+            .into();
             assert_eq!(
                 CanonicalEditableImageCooker.cook(&input, &[]).unwrap(),
-                input.authoring_payload,
+                input.authoring_payload.as_ref(),
             );
         }
     }
-    let valid = input.authoring_payload.clone();
+    let valid = input.authoring_payload.to_vec();
     let mut trailing = valid.clone();
     trailing.push(0);
     let mut wrong_schema = valid.clone();
@@ -308,7 +313,7 @@ fn builtin_image_cooker_preserves_canonical_bytes_and_rejects_malformed_mips() {
         wrong_width,
         wrong_height,
     ] {
-        input.authoring_payload = malformed;
+        input.authoring_payload = malformed.into();
         assert!(CanonicalEditableImageCooker.cook(&input, &[]).is_err());
     }
 }
@@ -326,7 +331,7 @@ fn builtin_image_output_budget_is_checked_before_decoding() {
         subasset_references: Vec::new(),
         // Deliberately malformed too: admission must reject its size before
         // reaching format validation or allocating decoded pixel buffers.
-        authoring_payload: vec![0; output_limit + 1],
+        authoring_payload: vec![0; output_limit + 1].into(),
     };
     assert_eq!(
         CanonicalEditableImageCooker
@@ -515,7 +520,7 @@ fn semantic_edit_rebuilds_only_its_successors_and_editor_metadata_reuses_cache()
         BTreeSet::from([JobId(1), JobId(2), JobId(3)])
     );
     assert_eq!(calls.load(Ordering::SeqCst), 3);
-    source.authoring_payload = b"edited".to_vec();
+    source.authoring_payload = b"edited".to_vec().into();
     let next = build(source)
         .execute(
             &store,
@@ -773,7 +778,7 @@ fn tightened_output_contract_cannot_reuse_an_oversized_warm_artifact() {
         .register(Cooker {
             calls: calls.clone(),
             descriptions: Arc::new(AtomicUsize::new(0)),
-            expected_payload_pointer: None,
+            payload_pointer: None,
             max_output_bytes: 4,
         })
         .unwrap();
@@ -891,7 +896,7 @@ fn determinism_failure_and_panicking_cooker_preserve_warm_revision_and_cache() {
             Cooker {
                 calls: self.calls.clone(),
                 descriptions: Arc::new(AtomicUsize::new(0)),
-                expected_payload_pointer: None,
+                payload_pointer: None,
                 max_output_bytes: 4096,
             }
             .descriptor()
@@ -1021,9 +1026,9 @@ fn large_fingerprints_have_fixed_per_node_storage_and_preserve_input_identity() 
 }
 
 #[test]
-fn plan_moves_payload_allocation_and_freezes_the_cooker_descriptor_once() {
+fn plan_shares_immutable_payload_across_cooks_and_freezes_the_descriptor_once() {
     let value = asset(1, b"unique allocation");
-    let pointer = value.authoring_payload.as_ptr() as usize;
+    let pointer = Arc::new(AtomicUsize::new(0));
     let calls = Arc::new(AtomicUsize::new(0));
     let descriptions = Arc::new(AtomicUsize::new(0));
     let mut registry = EditableCookerRegistry::new();
@@ -1031,7 +1036,7 @@ fn plan_moves_payload_allocation_and_freezes_the_cooker_descriptor_once() {
         .register(Cooker {
             calls: calls.clone(),
             descriptions: descriptions.clone(),
-            expected_payload_pointer: Some(pointer),
+            payload_pointer: Some(Arc::clone(&pointer)),
             max_output_bytes: 4096,
         })
         .unwrap();
@@ -1050,6 +1055,7 @@ fn plan_moves_payload_allocation_and_freezes_the_cooker_descriptor_once() {
     .unwrap();
     assert_eq!(descriptions.load(Ordering::SeqCst), 1);
     assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_ne!(pointer.load(Ordering::SeqCst), 0);
 }
 
 #[test]

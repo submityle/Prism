@@ -34,8 +34,12 @@ pub mod editable_diff;
 pub mod editable_identity;
 /// Stable-ID three-way merge planning and explicit conflict resolution.
 pub mod editable_merge;
+/// Saved authoring payload storage and workspace retention.
+pub mod editable_payload;
 /// Canonical typed settings, validation, and explicit schema migrations.
 pub mod editable_settings;
+/// Workspace payload leases, durable history roots, and explicit collection.
+pub mod editable_storage;
 /// Executes a build graph through DDC/CAS into transactional publication.
 pub mod executor;
 /// Deterministic dependency graph and serial processor execution.
@@ -50,6 +54,8 @@ pub mod job;
 pub mod package;
 /// Deterministic diff and byte-accounting plans between build revisions.
 pub mod patch;
+/// Recorded processor analysis and frozen streaming execution contracts.
+pub mod processor;
 /// Deterministic, schema-checked build profile composition and projections.
 pub mod profile;
 /// Canonical local release provenance and package audit facts.
@@ -127,9 +133,15 @@ pub use editable_merge::{
     plan_editable_merge, EditableMergeConflict, EditableMergeError, EditableMergePath,
     EditableMergePlan, EditableMergeSide, EditableMergeValue,
 };
+pub use editable_payload::{
+    EditablePayload, EditablePayloadRef, MAX_EDITABLE_EXTERNAL_PAYLOAD_BYTES,
+};
 pub use editable_settings::{
     canonical_settings_path, DecodedEditableSettings, EditableSettings, EditableSettingsCodec,
     EditableSettingsError,
+};
+pub use editable_storage::{
+    EditablePayloadGcReport, EditablePayloadLease, EditableWorkspaceSnapshot,
 };
 pub use executor::{
     ArtifactSpec, BuildExecution, BuildExecutionError, BuildExecutor, BuildOutputMemoryStats,

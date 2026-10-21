@@ -332,7 +332,7 @@ fn metadata_semantics_nonfinite_and_failures_never_replace_asset_settings() {
     let mut asset = asset();
     asset.set_typed_settings(settings(), &codec).unwrap();
     let expected = asset.canonical_settings.clone();
-    let pointer = asset.authoring_payload.as_ptr();
+    let pointer = asset.authoring_payload.inline_bytes().unwrap().as_ptr();
     for bad in [11.0, f32::NAN, f32::INFINITY] {
         let mut value = settings();
         value.gain = bad;
@@ -355,7 +355,10 @@ fn metadata_semantics_nonfinite_and_failures_never_replace_asset_settings() {
     value.path = "../escape.png".into();
     assert!(asset.set_typed_settings(value, &codec).is_err());
     assert_eq!(asset.canonical_settings, expected);
-    assert_eq!(asset.authoring_payload.as_ptr(), pointer);
+    assert_eq!(
+        asset.authoring_payload.inline_bytes().unwrap().as_ptr(),
+        pointer
+    );
     let mut value = settings();
     value.gain = 11.0;
     assert!(matches!(
@@ -599,7 +602,7 @@ fn typed_settings_survive_save_reopen_and_real_cook_with_semantic_ddc_reuse() {
             calls: calls.clone(),
         })
         .unwrap();
-    let plan = EditableBuildPlan::from_snapshot(
+    let plan = EditableBuildPlan::from_workspace_snapshot(
         snapshot,
         &[AssetId(1)],
         &registry,
@@ -646,9 +649,10 @@ fn typed_settings_survive_save_reopen_and_real_cook_with_semantic_ddc_reuse() {
         1,
         "semantic aliases reuse the same DDC output"
     );
-    let mut edited = reopened
+    let snapshot = reopened
         .snapshot(MAX_EDITABLE_WORKSPACE_ENCODED_BYTES)
         .unwrap();
+    let mut edited = (*snapshot).clone();
     let mut changed = settings();
     changed.gain = 3.0;
     edited

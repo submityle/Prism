@@ -2,11 +2,11 @@
 
 use prism_asset_build_core::{
     diff_editable_assets, ArtifactKey, AssetId, BuildExecution, BuildResources, BuildRevision,
-    DerivedDataCache, EditableAsset, EditableBuildOptions, EditableBuildPlan,
+    ContentHash, DerivedDataCache, EditableAsset, EditableBuildOptions, EditableBuildPlan,
     EditableCookDependency, EditableCookInput, EditableCooker, EditableCookerDescriptor,
     EditableCookerRegistry, EditableDependency, EditableDependencyKind as Kind, EditableDiffImpact,
-    EditableSubAsset, EditableSubAssetReference, EditableWorkspace, ProcessorError,
-    ProcessorIdentity, RevisionStore, SourceRecord,
+    EditablePayload, EditableSubAsset, EditableSubAssetReference, EditableWorkspace,
+    EditableWorkspaceEdit, ProcessorError, ProcessorIdentity, RevisionStore, SourceRecord,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{
@@ -84,7 +84,7 @@ impl EditableCooker for CountingCooker {
             .all(|r| r.kind != Kind::EditorOnly));
         // A cooker need not use every visible field. Those fields must still
         // participate in artifact identity even if output bytes happen to match.
-        let mut bytes = input.authoring_payload.clone();
+        let mut bytes = input.authoring_payload.to_vec();
         for dependency in dependencies {
             bytes.extend_from_slice(dependency.bytes);
         }
@@ -193,6 +193,77 @@ fn hits(assets: &[u128]) -> BTreeSet<prism_asset_build_core::JobId> {
 type Mutation = fn(&mut EditableAsset);
 
 #[test]
+fn storage_only_diff_survives_save_reopen_and_reuses_durable_cache() {
+    let mut harness = Harness::new();
+    let before = asset(1, b"payload");
+    let path = harness.directory.path().join("workspace");
+    std::fs::create_dir(&path).unwrap();
+    let package = path.join("1.prism");
+    before.write_to_path(&package).unwrap();
+    let workspace = EditableWorkspace::open(&path).unwrap();
+    let baseline_plan = EditableBuildPlan::from_workspace(
+        &workspace,
+        &[before.asset],
+        &harness.registry,
+        &EditableBuildOptions::default(),
+    )
+    .unwrap();
+    let baseline_key = local_key(&baseline_plan, before.asset);
+    let baseline = harness.run(&baseline_plan, "payload storage", "inline baseline");
+    let lease = workspace
+        .store_payload(before.authoring_payload.inline_bytes().unwrap(), 4096)
+        .unwrap();
+    let mut external = before.clone();
+    external.authoring_payload = EditablePayload::External(lease.reference());
+    let mut previous = before.clone();
+    for (label, after) in [("external", &external), ("inline again", &before)] {
+        let diff = diff_editable_assets(&previous, after).unwrap();
+        assert!(!diff.is_empty(), "{label}");
+        assert!(!diff.affects_cook(), "{label}");
+        assert_eq!(
+            diff.impact(),
+            EditableDiffImpact {
+                cook: false,
+                editor_import: true,
+            },
+            "{label}"
+        );
+        let change = diff.authoring_payload.unwrap();
+        assert!(std::ptr::eq(change.before, &previous.authoring_payload));
+        assert!(std::ptr::eq(change.after, &after.authoring_payload));
+        workspace
+            .save(
+                vec![EditableWorkspaceEdit {
+                    expected_hash: ContentHash::digest(&previous.encode().unwrap()),
+                    replacement: after.clone(),
+                }],
+                prism_asset_build_core::MAX_EDITABLE_WORKSPACE_ENCODED_BYTES,
+            )
+            .unwrap();
+        assert_eq!(EditableAsset::read_from_path(&package).unwrap(), *after);
+        let reopened = EditableWorkspace::open(&path).unwrap();
+        let plan = EditableBuildPlan::from_workspace(
+            &reopened,
+            &[before.asset],
+            &harness.registry,
+            &EditableBuildOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(local_key(&plan, before.asset), baseline_key, "{label}");
+        let warm = harness.run(&plan, "payload storage", label);
+        assert_eq!(warm.artifact_keys, baseline.artifact_keys, "{label}");
+        assert_eq!(warm.cache_hits, hits(&[1]), "{label}");
+        assert_eq!(
+            warm.published.manifest.entries,
+            baseline.published.manifest.entries
+        );
+        assert_eq!(harness.call_count(), 1, "{label}");
+        previous = after.clone();
+    }
+    drop(lease);
+}
+
+#[test]
 fn metadata_only_diff_preserves_keys_and_reuses_durable_cache() {
     let mut harness = Harness::new();
     let before = asset(1, b"payload");
@@ -257,7 +328,9 @@ fn cooker_visible_diff_changes_keys_and_executes_before_becoming_warm() {
         ("kind", |a| a.kind = 43),
         ("flags", |a| a.flags = 1),
         ("settings", |a| a.canonical_settings.push(1)),
-        ("same length payload", |a| a.authoring_payload[0] = b'P'),
+        ("same length payload", |a| {
+            a.authoring_payload = b"Payload".to_vec().into()
+        }),
         ("subasset name", |a| a.subassets[0].name = "renamed".into()),
         ("subasset kind", |a| a.subassets[0].kind = 43),
         ("subasset stable ID", |a| a.subassets[0].id = 8),
@@ -417,7 +490,7 @@ fn external_artifact_changes_are_outside_local_diff_and_follow_edge_strength() {
         assert!(baseline.cache_hits.is_empty());
         assert_eq!(harness.call_count(), 3);
         let mut changed_supplier = supplier.clone();
-        changed_supplier.authoring_payload = b"new".to_vec();
+        changed_supplier.authoring_payload = b"new".to_vec().into();
         assert!(diff_editable_assets(&supplier, &changed_supplier)
             .unwrap()
             .affects_cook());

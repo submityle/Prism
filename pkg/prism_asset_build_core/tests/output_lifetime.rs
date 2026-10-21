@@ -210,7 +210,7 @@ fn fanout_nodes() -> Vec<Node> {
 }
 
 #[test]
-fn long_chain_retains_only_the_output_for_the_next_consumer() {
+fn long_chain_retains_descriptors_without_coordinator_payloads() {
     const JOBS: usize = 24;
     let nodes: Vec<_> = (1..=JOBS)
         .map(|id| {
@@ -227,8 +227,8 @@ fn long_chain_retains_only_the_output_for_the_next_consumer() {
         let calls = calls_for(&nodes);
         let execution = fixture.execute(&graph_for(&nodes, &calls), &specs_for(&nodes), 0, limit);
 
-        // The final, largest output is a sink and is never retained.
-        assert_retained(&execution, (64 + JOBS - 1) as u64, 1);
+        // Each worker reads its dependency from CAS; the coordinator keeps no bytes.
+        assert_retained(&execution, 0, 0);
         assert!(execution.cache_hits.is_empty());
         assert_calls(&calls, 1);
         assert_published(&fixture, &execution, &nodes);
@@ -236,17 +236,14 @@ fn long_chain_retains_only_the_output_for_the_next_consumer() {
 }
 
 #[test]
-fn fanout_keeps_shared_inputs_until_the_last_consumer_wave() {
+fn fanout_reads_shared_cas_inputs_without_coordinator_payloads() {
     let nodes = fanout_nodes();
     for limit in [1, 2] {
         let mut fixture = Fixture::new();
         let calls = calls_for(&nodes);
         let execution = fixture.execute(&graph_for(&nodes, &calls), &specs_for(&nodes), 0, limit);
 
-        // With one worker the frontier is {1}, {1,2}, {1,2}, {4}, {4}, {}.
-        // With two workers jobs 3 and 4 share the final consumer wave for 1/2.
-        // Keeping either old input alongside output 4 exceeds the byte peak.
-        assert_retained(&execution, 11 + 23, 2);
+        assert_retained(&execution, 0, 0);
         assert_calls(&calls, 1);
         assert_published(&fixture, &execution, &nodes);
     }
@@ -267,7 +264,7 @@ fn independent_sinks_publish_without_retaining_any_outputs() {
 }
 
 #[test]
-fn persisted_ddc_hits_preserve_the_frontier_bound_and_publish_every_output() {
+fn persisted_ddc_hits_publish_every_output_without_coordinator_payloads() {
     let nodes = fanout_nodes();
     let specs = specs_for(&nodes);
     let calls = calls_for(&nodes);
@@ -275,7 +272,7 @@ fn persisted_ddc_hits_preserve_the_frontier_bound_and_publish_every_output() {
     let mut fixture = Fixture::new();
     let cold = fixture.execute(&graph, &specs, 0, 1);
     assert!(cold.cache_hits.is_empty());
-    assert_retained(&cold, 11 + 23, 2);
+    assert_retained(&cold, 0, 0);
     assert_published(&fixture, &cold, &nodes);
 
     fixture.ddc = DerivedDataCache::open(fixture.root.path().join("ddc")).unwrap();
@@ -292,7 +289,7 @@ fn persisted_ddc_hits_preserve_the_frontier_bound_and_publish_every_output() {
         warm.published.manifest.entries,
         cold.published.manifest.entries
     );
-    assert_retained(&warm, 11 + 23, 2);
+    assert_retained(&warm, 0, 0);
     assert_calls(&calls, 1);
     assert_published(&fixture, &warm, &nodes);
 }
@@ -349,7 +346,7 @@ fn check_active_build_sweep() {
 
     let execution = fixture.execute(&graph, &specs_for(&nodes), 0, 1);
     assert_eq!(sweeps.load(Ordering::SeqCst), 1);
-    assert_retained(&execution, 29, 1);
+    assert_retained(&execution, 0, 0);
     assert_calls(&calls, 1);
     assert_published(&fixture, &execution, &nodes);
 
