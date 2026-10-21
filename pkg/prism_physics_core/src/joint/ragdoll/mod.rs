@@ -548,26 +548,153 @@ impl HumanoidPreset {
             debug_assert!(inserted.is_ok());
         }
 
-        let links = [
-            (HumanoidPart::Pelvis, HumanoidPart::Spine),
-            (HumanoidPart::Spine, HumanoidPart::Chest),
-            (HumanoidPart::Chest, HumanoidPart::Head),
-            (HumanoidPart::Chest, HumanoidPart::UpperArmLeft),
-            (HumanoidPart::UpperArmLeft, HumanoidPart::LowerArmLeft),
-            (HumanoidPart::LowerArmLeft, HumanoidPart::HandLeft),
-            (HumanoidPart::Chest, HumanoidPart::UpperArmRight),
-            (HumanoidPart::UpperArmRight, HumanoidPart::LowerArmRight),
-            (HumanoidPart::LowerArmRight, HumanoidPart::HandRight),
-            (HumanoidPart::Pelvis, HumanoidPart::UpperLegLeft),
-            (HumanoidPart::UpperLegLeft, HumanoidPart::LowerLegLeft),
-            (HumanoidPart::LowerLegLeft, HumanoidPart::FootLeft),
-            (HumanoidPart::Pelvis, HumanoidPart::UpperLegRight),
-            (HumanoidPart::UpperLegRight, HumanoidPart::LowerLegRight),
-            (HumanoidPart::LowerLegRight, HumanoidPart::FootRight),
+        // Limits are authored in radians in joint-local frames. Rigs with
+        // different local bases should replace the link frames and limits.
+        let links: [(HumanoidPart, HumanoidPart, f32, f32, f32, f32); 15] = [
+            (
+                HumanoidPart::Pelvis,
+                HumanoidPart::Spine,
+                0.35,
+                0.28,
+                -0.35,
+                0.35,
+            ),
+            (
+                HumanoidPart::Spine,
+                HumanoidPart::Chest,
+                0.32,
+                0.25,
+                -0.3,
+                0.3,
+            ),
+            (
+                HumanoidPart::Chest,
+                HumanoidPart::Head,
+                0.42,
+                0.32,
+                -0.65,
+                0.65,
+            ),
+            (
+                HumanoidPart::Chest,
+                HumanoidPart::UpperArmLeft,
+                1.05,
+                0.82,
+                -0.9,
+                0.9,
+            ),
+            (
+                HumanoidPart::UpperArmLeft,
+                HumanoidPart::LowerArmLeft,
+                0.12,
+                0.12,
+                -0.12,
+                2.35,
+            ),
+            (
+                HumanoidPart::LowerArmLeft,
+                HumanoidPart::HandLeft,
+                0.38,
+                0.3,
+                -0.45,
+                0.45,
+            ),
+            (
+                HumanoidPart::Chest,
+                HumanoidPart::UpperArmRight,
+                1.05,
+                0.82,
+                -0.9,
+                0.9,
+            ),
+            (
+                HumanoidPart::UpperArmRight,
+                HumanoidPart::LowerArmRight,
+                0.12,
+                0.12,
+                -0.12,
+                2.35,
+            ),
+            (
+                HumanoidPart::LowerArmRight,
+                HumanoidPart::HandRight,
+                0.38,
+                0.3,
+                -0.45,
+                0.45,
+            ),
+            (
+                HumanoidPart::Pelvis,
+                HumanoidPart::UpperLegLeft,
+                0.78,
+                0.58,
+                -0.52,
+                0.52,
+            ),
+            (
+                HumanoidPart::UpperLegLeft,
+                HumanoidPart::LowerLegLeft,
+                0.1,
+                0.1,
+                -0.08,
+                2.45,
+            ),
+            (
+                HumanoidPart::LowerLegLeft,
+                HumanoidPart::FootLeft,
+                0.34,
+                0.26,
+                -0.42,
+                0.42,
+            ),
+            (
+                HumanoidPart::Pelvis,
+                HumanoidPart::UpperLegRight,
+                0.78,
+                0.58,
+                -0.52,
+                0.52,
+            ),
+            (
+                HumanoidPart::UpperLegRight,
+                HumanoidPart::LowerLegRight,
+                0.1,
+                0.1,
+                -0.08,
+                2.45,
+            ),
+            (
+                HumanoidPart::LowerLegRight,
+                HumanoidPart::FootRight,
+                0.34,
+                0.26,
+                -0.42,
+                0.42,
+            ),
         ];
-        for (parent, child) in links {
-            let config =
-                super::SwingTwistConfig::symmetric(Vec3::X, Vec3::X, Vec3::Y, Vec3::Y, 0.75, 0.8);
+        for (parent, child, swing_1, swing_2, twist_min, twist_max) in links {
+            let mut config = super::SwingTwistConfig::symmetric(
+                Vec3::X,
+                Vec3::X,
+                Vec3::Y,
+                Vec3::Y,
+                swing_1,
+                twist_max.abs().max(twist_min.abs()),
+            )
+            .with_swing_limits(swing_1, swing_2)
+            .with_twist_limits(twist_min, twist_max);
+            config.friction = super::JointFriction {
+                swing: super::AngularFriction {
+                    viscous: 0.08,
+                    coulomb: 0.025,
+                    static_speed: 0.08,
+                },
+                twist: super::AngularFriction {
+                    viscous: 0.06,
+                    coulomb: 0.02,
+                    static_speed: 0.08,
+                },
+            };
             let joint = SwingTwistJoint::try_new(config).unwrap_or_else(|_| unreachable!());
             let inserted = builder.add_link(RagdollLink {
                 parent: parent.id(),
@@ -823,6 +950,29 @@ mod tests {
         assert_eq!(definition.part_count(), 16);
         assert_eq!(definition.link_count(), 15);
         assert!(definition.diagnostics.mass_ratio_warnings.is_empty());
+    }
+
+    #[test]
+    fn humanoid_preset_uses_role_specific_limits_and_friction() {
+        let definition = HumanoidPreset::builder().build().unwrap();
+        let config = |parent: HumanoidPart, child: HumanoidPart| {
+            definition
+                .links
+                .iter()
+                .find(|link| link.parent == parent.id() && link.child == child.id())
+                .expect("preset link exists")
+                .joint
+                .config()
+        };
+        let shoulder = config(HumanoidPart::Chest, HumanoidPart::UpperArmLeft);
+        let elbow = config(HumanoidPart::UpperArmLeft, HumanoidPart::LowerArmLeft);
+        let knee = config(HumanoidPart::UpperLegLeft, HumanoidPart::LowerLegLeft);
+        assert!(shoulder.swing_limit_1 > elbow.swing_limit_1);
+        assert!(shoulder.swing_limit_2 > knee.swing_limit_2);
+        assert!(elbow.twist_limit_max > 2.0);
+        assert!(knee.twist_limit_max > elbow.twist_limit_max);
+        assert!(shoulder.friction.swing.viscous > 0.0);
+        assert!(shoulder.friction.twist.coulomb > 0.0);
     }
 
     #[test]
