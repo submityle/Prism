@@ -51,13 +51,19 @@ impl ScalarField {
     /// Creates a zero-valued field with the given node dimensions.
     #[must_use]
     pub fn zeros(nx: usize, ny: usize, nz: usize, dx: Real, origin: Vec3) -> ScalarField {
+        let Some(count) = nx.checked_mul(ny).and_then(|n| n.checked_mul(nz)) else {
+            return ScalarField::default();
+        };
+        if count == 0 || !dx.is_finite() || dx <= 0.0 || !origin.is_finite() {
+            return ScalarField::default();
+        }
         ScalarField {
             nx,
             ny,
             nz,
             dx,
             origin,
-            values: vec![0.0; nx * ny * nz],
+            values: vec![0.0; count],
         }
     }
 
@@ -139,7 +145,13 @@ impl ScalarField {
         dx: Real,
         padding_cells: usize,
     ) -> ScalarField {
-        if positions.is_empty() {
+        if positions.is_empty()
+            || !radius.is_finite()
+            || radius <= 0.0
+            || !dx.is_finite()
+            || dx <= 0.0
+            || positions.iter().any(|position| !position.is_finite())
+        {
             return ScalarField::default();
         }
         let mut lo = positions[0];
@@ -149,13 +161,28 @@ impl ScalarField {
             hi = hi.max(p);
         }
         let pad = radius + padding_cells as Real * dx;
+        if !pad.is_finite() {
+            return ScalarField::default();
+        }
         let lo = lo - Vec3::splat(pad);
         let hi = hi + Vec3::splat(pad);
         let span = hi - lo;
-        let nx = (span.x / dx).ceil() as usize + 1;
-        let ny = (span.y / dx).ceil() as usize + 1;
-        let nz = (span.z / dx).ceil() as usize + 1;
+        if !span.is_finite() || span.min_element() < 0.0 {
+            return ScalarField::default();
+        }
+        let Some(nx) = axis_nodes(span.x, dx) else {
+            return ScalarField::default();
+        };
+        let Some(ny) = axis_nodes(span.y, dx) else {
+            return ScalarField::default();
+        };
+        let Some(nz) = axis_nodes(span.z, dx) else {
+            return ScalarField::default();
+        };
         let mut field = ScalarField::zeros(nx.max(2), ny.max(2), nz.max(2), dx, lo);
+        if field.is_empty() {
+            return field;
+        }
         let inv_r = 1.0 / radius;
         let reach = (radius / dx).ceil() as i64 + 1;
         for &p in positions {
@@ -213,6 +240,9 @@ impl ScalarField {
     /// differences of [`ScalarField::sample`].
     #[must_use]
     pub fn gradient(&self, p: Vec3) -> Vec3 {
+        if self.is_empty() {
+            return Vec3::ZERO;
+        }
         let h = 0.5 * self.dx;
         let gx = self.sample(p + Vec3::new(h, 0.0, 0.0)) - self.sample(p - Vec3::new(h, 0.0, 0.0));
         let gy = self.sample(p + Vec3::new(0.0, h, 0.0)) - self.sample(p - Vec3::new(0.0, h, 0.0));
@@ -230,6 +260,16 @@ impl ScalarField {
         let c1 = (i0 + 1).clamp(0, max);
         (c0 as usize, c1 as usize, frac.clamp(0.0, 1.0))
     }
+}
+
+#[inline]
+fn axis_nodes(extent: Real, dx: Real) -> Option<usize> {
+    let cells = (extent / dx).ceil();
+    if !cells.is_finite() || cells < 0.0 {
+        return None;
+    }
+    let nodes = cells as usize;
+    nodes.checked_add(1)
 }
 
 #[cfg(test)]
@@ -262,5 +302,19 @@ mod tests {
         let f = ScalarField::from_particles(&pts, 0.3, 0.05, 2);
         let g = f.gradient(Vec3::new(0.35, 0.5, 0.5));
         assert!(g.x > 0.0, "gradient toward cluster should be +x, got {g:?}");
+    }
+
+    #[test]
+    fn invalid_inputs_produce_empty_field_without_nan_gradient() {
+        let invalid = ScalarField::from_particles(&[Vec3::ZERO], 0.0, 0.05, 1);
+        assert!(invalid.is_empty());
+        assert_eq!(invalid.gradient(Vec3::ZERO), Vec3::ZERO);
+
+        let invalid_positions =
+            ScalarField::from_particles(&[Vec3::new(Real::NAN, 0.0, 0.0)], 0.2, 0.05, 1);
+        assert!(invalid_positions.is_empty());
+
+        let invalid_grid = ScalarField::zeros(usize::MAX, 2, 2, 0.1, Vec3::ZERO);
+        assert!(invalid_grid.is_empty());
     }
 }
