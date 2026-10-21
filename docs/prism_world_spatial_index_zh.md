@@ -19,6 +19,8 @@ manifest snapshot 的加速结构，不取代 `CellManifest`、scheduler residen
   revision、hysteresis、byte/action budget、eviction 和 VM trace 规则。默认的
   `try_plan` 保持线性兼容路径，索引由上层在 immutable manifest snapshot 更新时
   重建。
+- `WorldRuntime::try_tick_indexed` 将 indexed stream plan 与现有 residency plan
+  组合到同一个 `WorldFramePlan`，不接管 scene、IO 或 manifest snapshot 生命周期。
 
 ## 性能边界
 
@@ -38,6 +40,8 @@ cargo test --offline -p prism_world_stream --lib
 当前切片定向结果：**13 passed**。覆盖负数与 `i64::MIN`/`i64::MAX` 邻域、level
 隔离、确定性顺序、AABB 边界相交、重复 sector 拒绝，以及 indexed/linear planner
 的 action、admitted bytes、trace 和 hysteresis 对拍。
+
+`prism_world` facade 另有 **4 passed**，覆盖 indexed/linear frame plan 对拍。
 
 ## 未覆盖
 

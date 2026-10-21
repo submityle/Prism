@@ -18,8 +18,8 @@ use prism_world_residency::{
     MaterializationBudget, ResidencyPlan, ResidencyRecord, ResidencyScheduler,
 };
 use prism_world_stream::{
-    validate_manifests, CellManifest, DemandSource, ManifestValidationError, SectorId,
-    StreamAction, StreamBudget, StreamPlan, StreamScheduler,
+    validate_manifests, CellManifest, DemandSource, ManifestSpatialIndex, ManifestValidationError,
+    SectorId, StreamAction, StreamBudget, StreamPlan, StreamScheduler,
 };
 
 #[cfg(feature = "simulation")]
@@ -143,6 +143,26 @@ impl WorldRuntime {
                 .expect("manifest validation completed before stream planning"),
             residency: self.residency.plan(frame, records, budget.materialization),
         })
+    }
+
+    /// Plans a frame using a prebuilt hierarchical manifest index.
+    ///
+    /// The index must represent the same immutable manifest snapshot expected
+    /// by the caller. The policy output and residency plan are otherwise the
+    /// same as [`Self::try_tick`], while load/prefetch candidate generation
+    /// avoids scanning every manifest for every demand source.
+    pub fn try_tick_indexed(
+        &mut self,
+        demands: &[DemandSource],
+        index: &ManifestSpatialIndex,
+        records: &[ResidencyRecord],
+        frame: u64,
+        budget: WorldBudget,
+    ) -> WorldFramePlan {
+        WorldFramePlan {
+            stream: self.stream.try_plan_indexed(demands, index, budget.stream),
+            residency: self.residency.plan(frame, records, budget.materialization),
+        }
     }
 
     /// Plans a frame and panics on duplicate manifest input.
@@ -287,6 +307,37 @@ mod tests {
         assert_eq!(plan.stream.admitted_bytes, 4);
         assert_eq!(plan.residency.actions.len(), 1);
         assert_eq!(world.stream_frame(), 1);
+    }
+
+    #[test]
+    fn indexed_facade_matches_linear_stream_plan() {
+        let policy = ResidencyPolicy::new(1, 2, 3, 4, 0).unwrap();
+        let sector = SectorId::new(0, 0, 0, 0);
+        let manifest = CellManifest {
+            sector,
+            bounds: AabbI64::new(GlobalPos::new(0, 0, 0), GlobalPos::new(1, 1, 1)).unwrap(),
+            scene_key: 1,
+            content_version: 1,
+            derived_hash: 2,
+            io_bytes: 4,
+            data_layers: prism_world_stream::DataLayerMask::EMPTY,
+        };
+        let demand = DemandSource::new(sector, 0, 1, 10).unwrap();
+        let budget = WorldBudget {
+            stream: StreamBudget {
+                io_bytes: 8,
+                max_actions: 2,
+            },
+            materialization: MaterializationBudget::new(2, 2),
+        };
+        let index = ManifestSpatialIndex::build(&[manifest]).unwrap();
+        let mut linear = WorldRuntime::new(ResidencyScheduler::new(policy));
+        let mut indexed = WorldRuntime::new(ResidencyScheduler::new(policy));
+        let linear_plan = linear
+            .try_tick(&[demand], &[manifest], &[], 1, budget)
+            .unwrap();
+        let indexed_plan = indexed.try_tick_indexed(&[demand], &index, &[], 1, budget);
+        assert_eq!(indexed_plan, linear_plan);
     }
 
     #[test]
