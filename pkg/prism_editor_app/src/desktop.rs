@@ -755,6 +755,19 @@ impl<R: DesktopRenderer> DesktopHost<R> {
         }
     }
 
+    fn cancel_native_interactions_or_fail(&mut self, event_loop: &ActiveEventLoop) -> bool {
+        match cancel_native_interactions(&mut self.ui, &mut self.renderer, &mut self.drag_start) {
+            Ok(changed) => {
+                self.input_result(Ok::<_, DesktopError>(changed));
+                true
+            }
+            Err(error) => {
+                self.fail(event_loop, error);
+                false
+            }
+        }
+    }
+
     fn poll_document(&mut self) -> Result<DesktopWork, DesktopError> {
         let Some(document) = self.document.as_mut() else {
             return Ok(DesktopWork::default());
@@ -910,10 +923,8 @@ impl<R: DesktopRenderer> ApplicationHandler<DesktopWake> for DesktopHost<R> {
         }
     }
 
-    fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
-        let result =
-            cancel_native_interactions(&mut self.ui, &mut self.renderer, &mut self.drag_start);
-        self.input_result(result);
+    fn suspended(&mut self, event_loop: &ActiveEventLoop) {
+        self.cancel_native_interactions_or_fail(event_loop);
         self.renderer.suspend();
         self.native = None;
         self.cursor = None;
@@ -959,12 +970,13 @@ impl<R: DesktopRenderer> ApplicationHandler<DesktopWake> for DesktopHost<R> {
                     self.fail(event_loop, DesktopError::Gpu(message));
                     return;
                 }
-                let result = cancel_native_interactions(
-                    &mut self.ui,
-                    &mut self.renderer,
-                    &mut self.drag_start,
-                );
-                self.input_result(result);
+                if !self.cancel_native_interactions_or_fail(event_loop) {
+                    self.renderer.suspend();
+                    self.native = None;
+                    self.pending.set(DesktopPendingSource::Renderer, false);
+                    self.retry_at = None;
+                    return;
+                }
                 self.renderer.suspend();
                 self.native = None;
                 self.pending.set(DesktopPendingSource::Renderer, false);
@@ -1005,12 +1017,9 @@ impl<R: DesktopRenderer> ApplicationHandler<DesktopWake> for DesktopHost<R> {
                 }
             }
             WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
-                let result = cancel_native_interactions(
-                    &mut self.ui,
-                    &mut self.renderer,
-                    &mut self.drag_start,
-                );
-                self.input_result(result);
+                if !self.cancel_native_interactions_or_fail(event_loop) {
+                    return;
+                }
                 if let Err(error) = self.resize() {
                     self.fail(event_loop, error);
                 }
@@ -1055,12 +1064,9 @@ impl<R: DesktopRenderer> ApplicationHandler<DesktopWake> for DesktopHost<R> {
                 self.modifiers = ModifiersState::empty();
                 self.cursor = None;
                 self.composing = false;
-                let result = cancel_native_interactions(
-                    &mut self.ui,
-                    &mut self.renderer,
-                    &mut self.drag_start,
-                );
-                self.input_result(result);
+                if !self.cancel_native_interactions_or_fail(event_loop) {
+                    return;
+                }
                 let result = self.ui.key(DesktopKey::Escape);
                 self.input_result(result);
             }
@@ -1238,12 +1244,7 @@ impl<R: DesktopRenderer> ApplicationHandler<DesktopWake> for DesktopHost<R> {
                         self.drag_start.is_some(),
                     )
                 {
-                    let result = cancel_native_interactions(
-                        &mut self.ui,
-                        &mut self.renderer,
-                        &mut self.drag_start,
-                    );
-                    self.input_result(result);
+                    self.cancel_native_interactions_or_fail(event_loop);
                     return;
                 }
                 let primary = if cfg!(target_os = "macos") {

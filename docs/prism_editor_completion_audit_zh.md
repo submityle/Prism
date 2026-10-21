@@ -100,3 +100,23 @@ rg -n -i --glob '*.rs' '\b(TODO|FIXME|todo!|unimplemented!|placeholder)\b' pkg/p
 - 本次没有执行全仓库构建、测试或 GPU 验证；按请求只运行了限定范围的 `rg`、`cargo metadata`/`cargo tree` 和只读 diff/行号检查。
 - 因此本文不重新确认文档中历史记录的 GPU、native smoke 或全包测试通过事实；这些只能作为文档声称的历史证据，不能由本次审计重新背书。
 - 未触碰任何业务代码，也未清理或使用其他任务的 target 目录。
+
+## 2026-10-21 后续实现闭环：原生交互取消失败时宿主 fail-closed
+
+当前实现位于 `main`。本次只闭环一个独立的 Editor 宿主一致性缺口，不据此宣称编辑器产品已经全部完成。
+
+此前 suspend、设备丢失恢复、窗口 resize/scale-factor change、失焦和 Escape 路径在原生交互取消失败后仍会继续后继生命周期转换。由于 Gizmo 取消需要把编辑前矩阵重新应用到场景，而该恢复过程可能失败，继续 resize 或初始化后继设备会让宿主在部分回滚状态上运行。
+
+现在这些生命周期入口统一使用 fail-closed 语义：
+
+- 取消成功时仍通过既有输入结果路径更新 redraw/prepared 状态。
+- 取消失败时记录终止错误并请求退出；resize、失焦和 Escape 不再继续处理后继尺寸或输入状态。
+- suspend 与设备丢失路径即使取消失败，仍会 suspend renderer、释放 native device 状态并清除 renderer pending/retry 状态。
+- 设备丢失时若取消失败，不再初始化后继设备，避免把部分回滚场景迁移到新设备。
+
+本次验证：
+
+- `rustfmt --edition 2024 pkg/prism_editor_app/src/desktop.rs`：通过。
+- `git diff --check -- pkg/prism_editor_app/src/desktop.rs`：通过。
+- `cargo fmt --manifest-path pkg/prism_editor_app/Cargo.toml -- --check`：通过。
+- `cargo test --manifest-path pkg/prism_editor_app/Cargo.toml --features desktop --lib native_interaction_cancel`：未完成；共享 `target` 被清理后触发依赖重建，编译 `prism_render_architecture` 时因磁盘空间耗尽中止，尚未进入本次 Editor 测试断言。该结果不计为测试通过，也不是本次代码的编译错误证据。
