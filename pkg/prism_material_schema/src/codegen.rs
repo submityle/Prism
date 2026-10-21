@@ -6,7 +6,7 @@
 //! of two previously hand-maintained twins:
 //!
 //! * [`emit_wesl_unpack`] — the GPU word-heap decoder
-//!   (`prism_render_scene/src/shaders/material_unpack.wesl`): the lobe-bit
+//!   (`prism_render_material/src/shaders/material_unpack.wesl`): the lobe-bit
 //!   constants, the neutral surface, `prism_packed_word_count` and
 //!   `prism_unpack_surface`.
 //! * [`emit_rust_layout`] — the CPU layout constants, `LobeMask` layout facts,

@@ -22,7 +22,7 @@ use super::{
 };
 use crate::shading::texel_cache::ShadeDemandRegistry;
 use bevy_app::{App, Plugin};
-use bevy_asset::embedded_asset;
+use bevy_asset::io::embedded::EmbeddedAssetRegistry;
 use bevy_ecs::schedule::IntoScheduleConfigs;
 use bevy_render::{
     init_gpu_resource,
@@ -30,15 +30,44 @@ use bevy_render::{
     renderer::{RenderGraph, RenderGraphSystems},
     ExtractSchedule, Render, RenderApp, RenderStartup, RenderSystems,
 };
+use std::path::{Path, PathBuf};
+
+fn register_material_shader_assets(app: &mut App) {
+    let embedded = app.world().resource::<EmbeddedAssetRegistry>();
+    let source_root =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../prism_render_material/src/shaders");
+    embedded.insert_asset(
+        source_root.join("material.wesl"),
+        Path::new("prism_render_material/shaders/material.wesl"),
+        prism_render_material::shaders::MATERIAL_SHADER_BYTES,
+    );
+    embedded.insert_asset(
+        source_root.join("material_sample.wesl"),
+        Path::new("prism_render_material/shaders/material_sample.wesl"),
+        prism_render_material::shaders::MATERIAL_SAMPLE_SHADER_BYTES,
+    );
+    embedded.insert_asset(
+        source_root.join("material_virtual_texture.wesl"),
+        Path::new("prism_render_material/shaders/material_virtual_texture.wesl"),
+        prism_render_material::shaders::MATERIAL_VIRTUAL_TEXTURE_SHADER_BYTES,
+    );
+    embedded.insert_asset(
+        source_root.join("material_unpack.wesl"),
+        Path::new("prism_render_material/shaders/material_unpack.wesl"),
+        prism_render_material::shaders::MATERIAL_UNPACK_SHADER_BYTES,
+    );
+    embedded.insert_asset(
+        source_root.join("material_classification.wesl"),
+        Path::new("prism_render_material/shaders/material_classification.wesl"),
+        prism_render_material::shaders::MATERIAL_CLASSIFICATION_SHADER_BYTES,
+    );
+}
 
 /// Mirrors `StandardMaterial` assets into the unified Prism Material ABI.
 pub struct PrismMaterialPlugin;
 impl Plugin for PrismMaterialPlugin {
     fn build(&self, app: &mut App) {
-        embedded_asset!(app, "../shaders/material.wesl");
-        // Variable-length surface parameter word-heap decode (ABI v4), imported by
-        // every material consumer (opaque/transparent/visibility/shading_resolve/ssr_repack).
-        embedded_asset!(app, "../shaders/material_unpack.wesl");
+        register_material_shader_assets(app);
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };

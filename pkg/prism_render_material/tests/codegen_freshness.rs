@@ -4,7 +4,7 @@
 //! two committed, hand-reviewed twins:
 //!
 //! * the GPU word-heap decoder
-//!   `prism_render_scene/src/shaders/material_unpack.wesl`, and
+//!   `prism_render_material/src/shaders/material_unpack.wesl`, and
 //! * the CPU layout facts `prism_render_material/src/surface_layout.rs`.
 //!
 //! Both are pure functions of `schema/surface.toml`, so the committed files
@@ -23,15 +23,14 @@ use prism_render_material::{ClosureKind, SURFACE_LOBE_CLOSURES};
 
 /// Committed GPU decoder, read at compile time so the test has no runtime path
 /// dependency. Relative to this test file in `prism_render_material/tests/`.
-const COMMITTED_WESL: &str =
-    include_str!("../../prism_render_scene/src/shaders/material_unpack.wesl");
+const COMMITTED_WESL: &str = prism_render_material::shaders::MATERIAL_UNPACK_SHADER_SOURCE;
 
 /// Committed CPU layout module (lives next to the typed structs it guards).
 const COMMITTED_RUST_LAYOUT: &str = include_str!("../src/surface_layout.rs");
 const COMMITTED_SCHEMA_CONTRACT: &str =
     include_str!("../../prism_material_schema/src/generated_contract.rs");
 const COMMITTED_CLASSIFICATION: &str =
-    include_str!("../../prism_render_scene/src/shaders/material_classification.wesl");
+    prism_render_material::shaders::MATERIAL_CLASSIFICATION_SHADER_SOURCE;
 const HAND_WRITTEN_SURFACE: &str = include_str!("../src/surface.rs");
 
 #[test]

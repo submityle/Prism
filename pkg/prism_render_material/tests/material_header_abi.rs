@@ -111,6 +111,11 @@ fn mirror_source(file: &str) -> Cow<'static, str> {
     if file == "material.wesl" {
         return Cow::Borrowed(prism_render_material::shaders::MATERIAL_SHADER_SOURCE);
     }
+    if file == "material_classification.wesl" {
+        return Cow::Borrowed(
+            prism_render_material::shaders::MATERIAL_CLASSIFICATION_SHADER_SOURCE,
+        );
+    }
 
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../prism_render_scene/src/shaders")
@@ -240,10 +245,7 @@ fn abi8_execution_binding_replaces_legacy_specialization_packing() {
 
 #[test]
 fn material_classification_consumes_execution_identity_not_surface_payload() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../prism_render_scene/src/shaders/material_classification.wesl");
-    let source = std::fs::read_to_string(&path)
-        .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+    let source = prism_render_material::shaders::MATERIAL_CLASSIFICATION_SHADER_SOURCE;
 
     for required in [
         "header.execution_plan_index",

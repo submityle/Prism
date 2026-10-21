@@ -34,12 +34,12 @@
 //!   (a four-buffer subset of the resolve's group 2, which also carries the
 //!   worklist the repack does not need).
 
-import prism_render_scene::shaders::material::{
+import prism_render_material::shaders::material::{
     PrismMaterialHeader,
     PrismMaterialTexture,
     PrismSurfaceParameters,
 };
-import prism_render_scene::shaders::material_unpack::{
+import prism_render_material::shaders::material_unpack::{
     prism_unpack_surface, prism_packed_word_count, prism_neutral_surface
 };
 import prism_render_scene::shaders::surface::{
@@ -60,7 +60,7 @@ import prism_render_scene::shaders::tangent::{
     TangentBasis,
     apply_tangent_space_normal,
 };
-import prism_render_scene::shaders::material_sample::{
+import prism_render_material::shaders::material_sample::{
     SampledMaterial,
     sampled_material_defaults,
     sample_texture_slot,

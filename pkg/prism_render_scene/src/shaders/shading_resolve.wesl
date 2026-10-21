@@ -82,12 +82,12 @@ import prism_render_scene::shaders::shadow::{
     point_shadow_visibility,
     spot_shadow_visibility,
 };
-import prism_render_scene::shaders::material::{
+import prism_render_material::shaders::material::{
     PrismMaterialHeader,
     PrismMaterialTexture,
     PrismSurfaceParameters,
 };
-import prism_render_scene::shaders::material_unpack::{
+import prism_render_material::shaders::material_unpack::{
     prism_unpack_surface, prism_packed_word_count, prism_neutral_surface,
     PRISM_LOBE_SUBSURFACE
 };
@@ -95,7 +95,7 @@ import prism_render_scene::shaders::gpu_scene::{
     GpuSceneInstance,
     GpuSceneTransform,
 };
-import prism_render_scene::shaders::material_sample::{
+import prism_render_material::shaders::material_sample::{
     SampledMaterial,
     PRISM_MIN_SCREEN_AREA,
     material_is_normal_semantic,

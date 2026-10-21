@@ -6,11 +6,11 @@ import bevy_pbr::render::{
     view_transformations::position_world_to_clip
 };
 import bevy_render::maths::affine3_to_square;
-import prism_render_scene::shaders::material::PrismSurfaceParameters;
+import prism_render_material::shaders::material::PrismSurfaceParameters;
 import prism_render_scene::shaders::dynamic_mask::{
     dyn_dissolve_coverage,
 };
-import prism_render_scene::shaders::material_unpack::{
+import prism_render_material::shaders::material_unpack::{
     prism_unpack_surface, prism_packed_word_count, prism_neutral_surface
 };
 

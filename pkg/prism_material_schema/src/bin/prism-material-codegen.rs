@@ -5,11 +5,11 @@
 //! declarative source of truth for the über-BSDF layout. This binary emits its
 //! committed, generated twins:
 //!
-//! * `pkg/prism_render_scene/src/shaders/material_unpack.wesl` — the GPU decoder.
+//! * `pkg/prism_render_material/src/shaders/material_unpack.wesl` — the GPU decoder.
 //! * `pkg/prism_render_material/src/surface_layout.rs` — the CPU layout facts.
 //! * `pkg/prism_material_schema/src/generated_contract.rs` — S3/S4
 //!   specialization packing and CPU sample/golden field metadata.
-//! * `pkg/prism_render_scene/src/shaders/material_classification.wesl` — the
+//! * `pkg/prism_render_material/src/shaders/material_classification.wesl` — the
 //!   schema-owned classification metadata block.
 //!
 //! Usage:
@@ -65,11 +65,11 @@ fn products(root: &std::path::Path) -> std::io::Result<Vec<Product>> {
     // Preserve the current algorithm on disk, including concurrent runtime edits.
     // A compiled-in template could overwrite them when an existing binary runs.
     let classification_template = std::fs::read_to_string(
-        root.join("pkg/prism_render_scene/src/shaders/material_classification.wesl"),
+        root.join("pkg/prism_render_material/src/shaders/material_classification.wesl"),
     )?;
     Ok(vec![
         Product {
-            relative_path: "pkg/prism_render_scene/src/shaders/material_unpack.wesl",
+            relative_path: "pkg/prism_render_material/src/shaders/material_unpack.wesl",
             contents: emit_wesl_unpack(&schema),
         },
         Product {
@@ -81,7 +81,7 @@ fn products(root: &std::path::Path) -> std::io::Result<Vec<Product>> {
             contents: emit_schema_contract(&schema),
         },
         Product {
-            relative_path: "pkg/prism_render_scene/src/shaders/material_classification.wesl",
+            relative_path: "pkg/prism_render_material/src/shaders/material_classification.wesl",
             contents: emit_material_classification(&schema, &classification_template),
         },
     ])

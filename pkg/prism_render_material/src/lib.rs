@@ -50,6 +50,12 @@ pub mod shaders {
     /// Source for material virtual-texture page resolution.
     pub const MATERIAL_VIRTUAL_TEXTURE_SHADER_SOURCE: &str =
         include_str!("shaders/material_virtual_texture.wesl");
+    /// Schema-generated word-heap surface decoder.
+    pub const MATERIAL_UNPACK_SHADER_SOURCE: &str =
+        include_str!("shaders/material_unpack.wesl");
+    /// Schema-generated material classification compute shader.
+    pub const MATERIAL_CLASSIFICATION_SHADER_SOURCE: &str =
+        include_str!("shaders/material_classification.wesl");
 
     /// Embedded bytes for the material shader source.
     pub const MATERIAL_SHADER_BYTES: &[u8] = include_bytes!("shaders/material.wesl");
@@ -58,6 +64,12 @@ pub mod shaders {
     /// Embedded bytes for the material virtual-texture shader source.
     pub const MATERIAL_VIRTUAL_TEXTURE_SHADER_BYTES: &[u8] =
         include_bytes!("shaders/material_virtual_texture.wesl");
+    /// Embedded bytes for the schema-generated word-heap decoder.
+    pub const MATERIAL_UNPACK_SHADER_BYTES: &[u8] =
+        include_bytes!("shaders/material_unpack.wesl");
+    /// Embedded bytes for the schema-generated classification shader.
+    pub const MATERIAL_CLASSIFICATION_SHADER_BYTES: &[u8] =
+        include_bytes!("shaders/material_classification.wesl");
 }
 
 pub use authoring::{FACE_SHADOW_SDF_SEMANTIC, ILLUMINATION_MASK_SEMANTIC, MEASURED_BRDF_SEMANTIC};

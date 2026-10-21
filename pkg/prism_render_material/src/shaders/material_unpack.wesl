@@ -14,7 +14,7 @@
 //! Kept as a single generated source so all five consumers (opaque, transparent,
 //! visibility, shading_resolve, ssr_repack) decode identically.
 
-import prism_render_scene::shaders::material::PrismSurfaceParameters;
+import prism_render_material::shaders::material::PrismSurfaceParameters;
 
 const PRISM_LOBE_EMISSION: u32 = 1u;           // 1 << 0
 const PRISM_LOBE_CLEARCOAT: u32 = 2u;          // 1 << 1
