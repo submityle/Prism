@@ -1,7 +1,7 @@
 # Prism 编辑器范围完成度审计
 
-审计日期：2026-10-20
-审计分支：`codex/prism-editor-completion-audit`
+审计日期：2026-10-20；后续闭环更新：2026-10-21
+当前分支：`main`（原始审计来自已合入的 `codex/prism-editor-completion-audit`）
 审计范围：当前 checkout 的全部 `pkg/prism_editor_*` 源码、16 个编辑器 workspace 包的 Cargo normal/build/dev 依赖，以及编辑器相关设计/实现状态文档。本文只新增审计记录，不修改业务源码，不把契约测试当作产品闭环证据。
 
 ## 结论
@@ -10,9 +10,9 @@
 - 未发现 `TODO`、`FIXME`、`todo!` 或 `unimplemented!` 未完成标记。
 - 发现 3 个 `placeholder`，均为搜索框的用户提示属性，不是实现占位。
 - 当前主框架设计/实现状态文档明确区分了契约切片和完整产品，未发现把契约测试直接宣称为完整编辑器交付的表述。
-- 发现 2 项文档状态漂移，见下方 P1/P2；它们不改变运行时代码，但会误导实现计划或验证基线。
+- 原始审计发现 2 项文档状态漂移；P1 已于 2026-10-21 在本闭环修正，P2 因对应框架文档正有并行改动，仍保留为未完成项。
 
-## P1：远程设计文档把已存在的 crate 写成“尚未创建”
+## P1（已解决）：远程设计文档把已存在的 crate 写成“尚未创建”
 
 证据：
 
@@ -22,7 +22,7 @@
 
 影响：维护者可能按过时设计重新创建已经存在的协议层，或错误判断当前实现状态；同时该段与框架实现状态文档互相矛盾。
 
-建议：将 `docs/prism_editor_remote_design_zh.md:461` 改为“已实现的通用协议/transport/codec/PIE/进程桥”和“仍未实现的安全、产品认证、Prism 专属 runtime adapter、生产部署”等边界；保留设计代码块为目标或示例时必须逐项标注，不要再写“本 crate 尚未创建”。
+处置：`docs/prism_editor_remote_design_zh.md` 已统一首部状态、服务端/客户端接入、当前模块/features 和 M0–M6 路线图：明确通用协议、codec、JSON-RPC、PIE、TCP、process bridge 与真实 Prism ECS 适配已存在，同时继续保留生产场景宿主、安全/TLS/权限/部署、Loom 客户端和 `asset.*`/`pick.*`/`gizmo.*` 域适配缺口。文档不再把 `bevy_remote`/`bevy_ecs` 写成实现依赖，也不再声明本 crate 尚未创建。
 
 ## P2：测试数量基线与当前源码不一致，且表内总数自相矛盾
 

@@ -1,8 +1,8 @@
 # Prism 编辑器运行时桥设计方案（prism_editor_remote）
 > v1 / 顶级次世代 AAA 级 — 编辑器 ↔ 运行时的协议、传输、订阅、安全、稳定一体化设计
 
-> 面向 Prism(Bevy fork)的**运行时解耦、跨进程、可内省、规模无关**的编辑器远程协议层。
-> 本 crate 是 Loom Studio 编辑器(`prism_editor_framework_design_zh.md` §4/§13 的 BRP 前置待建项)的**运行时桥地基**:
+> 面向 Prism 的**运行时解耦、跨进程、可内省、规模无关**的编辑器远程协议层。
+> 本 crate 已作为 Loom Studio 编辑器(`prism_editor_framework_design_zh.md` §4/§13)的**通用运行时桥地基**落地:
 > 让编辑器(可同进程、可独立进程、可远程机)**查询 / 变更 / 订阅**运行时 World 的实体、组件、资源、调度与事件,
 > 并承载命令(撤销/重做)、资产操作、拾取/Gizmo 旁路、协同同步的底层通路。
 >
@@ -15,22 +15,24 @@
 > **Figma·Zed**（CRDT 增量、低延迟会话）、**gRPC·FlatBuffers·Cap'n Proto**（schema 化、零拷贝）、
 > **QUIC·WebTransport**（多路复用、0-RTT 重连、拥塞控制）、**Redis RESP·PostgreSQL wire**（紧凑帧 + 流水线）。
 >
-> 本文为**设计规格**。地基层(`bevy_remote` 的 BRP 实现、`prism_reflect` 反射/序列化/安全边界、`prism_tasks` 异步、
-> `prism_ui_store`/`prism_ui_async` 客户端消费)为**已交付**(SHIPPED);**`prism_editor_remote` 本体为全新规划项(PLANNED)**。
+> 本文为**设计规格兼实现边界说明**。`prism_editor_remote` 的通用 protocol、transport、session、binary codec、
+> JSON-RPC、PIE、TCP、受控 stdio/TCP 进程桥和真实 Prism ECS 反射适配已交付(SHIPPED)；生产场景宿主挂载、
+> 身份认证/TLS/权限/部署，以及 `asset.*`、`pick.*`、`gizmo.*` 的域适配仍为规划项(PLANNED)。
 > 全文严格区分「已实现并通过测试」与「规划中」,不把未落地能力描述为已落地。
 >
 > **非目标**:不含 AI / ML / 神经网络 / LLM;不替代通用 RPC 框架(gRPC/tonic),而是**面向编辑器语义、绑定 Prism 反射与 ECS**的专用桥;
 > 协同编辑的**冲突消解(CRDT/OT)不在本层**,本层只保证可靠、有序、可订阅的消息通路(见 §13)。
 
-- 版本: v1(初始设计)
-- 适用引擎: Prism / Bevy ECS 生态
+- 版本: v1(实现边界已校准)
+- 适用引擎: Prism 编辑器与 Prism runtime
 - Crate 名: `prism_editor_remote`
-- 关键地基 — 已就绪(SHIPPED): `bevy_remote`(BRP / JSON-RPC 2.0 / `world.*` + `+watch` / HTTP 传输)、
-  `prism_reflect`(`TypeRegistry` + `StableTypeId` + `ReflectSerialize` + 反射驱动序列化 + schema 版本化迁移 + `net_delta` 字段增量 + 不可信反序列化安全边界)、
-  `prism_tasks`(work-stealing 线程池 + `FrameArenas` + `join`)、`prism_diagnostic`、`prism_app`、
-  `prism_ui_store`/`prism_ui_async`(客户端状态/订阅消费)
-- 关键地基 — 保留 Bevy 机制底座: `bevy_remote`(协议参照与服务端复用,过渡期桥接)、`bevy_ecs`(World/Schedule/Observer)
-- 前置待建(本 crate 落地后方可被编辑器挂接): 见 §16 路线图 M0–M6
+- 已交付(SHIPPED): 传输中立 envelope/endpoint、确定性 binary codec、有界 JSON-RPC 2.0、订阅增量、PIE 隔离、
+  同步 TCP、受控 stdio/TCP 子进程生命周期，以及可选 `ecs` feature 下的真实 `prism_ecs::World` 反射读写与
+  `PrismEcsRuntimeAdapter` 启动握手。
+- 依赖边界: 默认核心不依赖 renderer、ECS、引擎或第三方 socket runtime；`ecs` feature 只接入 `prism_ecs` 与
+  `prism_reflect`。BRP/`bevy_remote` 仅作公开协议形态的历史参照，不是实现依赖。
+- 仍待产品接入(PLANNED): 生产场景宿主与调度屏障、身份认证/TLS/权限/部署、Loom 客户端状态接线，及
+  `asset.*`、`pick.*`、`gizmo.*` 等域适配。见 §16 路线图。
 - 核心契约: 继承 Loom「**成本 ∝ 变化量**」;一切读走订阅差分,一切写走命令事务,一切长任务异步可取消,一切输入默认不可信。
 
 ---
@@ -90,7 +92,7 @@
 | **Redis RESP / PG wire** | 紧凑帧 + 流水线(pipelining)+ 批 | §6 请求批处理与流水线 | — |
 | **Figma / Zed** | 低延迟协同会话、CRDT 增量 | §13 为协同提供可靠有序通路 | 其 CRDT 具体实现 |
 
-> **版权红线**:所有 Prism crate 不含任何 Unreal Engine / Unity / Omniverse 源码或衍生代码;仅借鉴**公开架构形态**与经典协议数值。协议本体为自研,过渡期在服务端复用保留的 `bevy_remote`(其为 MIT/Apache 开源)。
+> **版权红线**:所有 Prism crate 不含任何 Unreal Engine / Unity / Omniverse 源码或衍生代码;仅借鉴**公开架构形态**与经典协议数值。协议本体为自研，BRP/`bevy_remote` 只作历史协议参照，不进入当前实现依赖。
 
 ---
 
@@ -117,7 +119,7 @@
 │  服务端 SDK(prism_editor_remote::server)                      │
 │   · ECS systems(调度点注入)· 命令执行器 · 订阅跟踪 · 拦截器链  │
 ├──────────────────────────────────────────────────────────────┤
-│  Prism 运行时(bevy_ecs World / Schedule / Observer)           │  ← 被观测对象
+│  Prism 运行时(prism_ecs World / 宿主 Schedule / 变更发布)      │  ← 被观测对象
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -206,7 +208,7 @@ encoding: BINARY(reflect 紧凑) | JSON(调试/Web)
 
 ## 7. 语义层(Methods):域 · 方法 · 事件
 
-采用 CDP 式 `域.方法` 命名,**语义对齐并超集化 BRP**(`bevy_remote` 已有的 `world.*` 直接映射,过渡期可桥接):
+采用 CDP 式 `域.方法` 命名，**参考 BRP 的公开方法形态但由 Prism 自有协议实现**：
 
 ### 7.1 `world.*`(实体/组件/资源——对齐 BRP)
 | 方法 | 语义 | BRP 对应 |
@@ -358,54 +360,59 @@ encoding: BINARY(reflect 紧凑) | JSON(调试/Web)
 
 ## 14. 服务端集成(ECS)
 
-- **`RemoteServerPlugin`**:向 `App` 注入——传输监听(IO 任务)、入站请求队列、命令执行系统、订阅跟踪系统、出站增量系统。
-- **调度点**:
-  - 入站命令在 World 可变访问的**专用 Set**执行(排他,保证一致性)。
-  - 增量采集系统在帧末读 ECS 变更 tick,产出 `DirtyMask`。
-  - 出站下发在 IO 任务,不占 ECS 排他窗口。
-- **拦截器链(借 gRPC interceptor)**:认证 → 鉴权 → 速率 → 审计 → 分发,可插拔。
-- **过渡期桥接**:服务端可**复用保留的 `bevy_remote`** 的方法实现(`process_remote_*`),`prism_editor_remote` 做协议/传输/安全/增量的 prism 外壳,逐步内化。
+- ✅ **已实现**:`EcsSyncStore<'w>` 在宿主提供的排他屏障内借用真实 `prism_ecs::World`，对显式注册组件提供
+  snapshot、增量读取、revision check、组件/属性原子批写；任一值准备失败时不修改 World。结构编辑被明确拒绝，
+  不伪装为可回滚事务。
+- ✅ **已实现**:`PrismEcsRuntimeAdapter` 保留宿主 executable/args/env，完成协议、能力、目标和真实 snapshot
+  启动握手；`RuntimeBridge` 负责有界 stdio/TCP 子进程生命周期。宿主仍拥有 scene load、schedule 和监听服务。
+- ⬜ **生产接入目标**:由真实场景宿主在稳定 schedule barrier 借出 World，驱动入站命令、结构变化刷新、
+  订阅发布和诊断；当前 crate 不提供也不宣称存在通用 `RemoteServerPlugin`。
+- ⬜ **安全目标**:认证 → 鉴权 → 速率 → 审计 → 分发的拦截器链仍需产品实现；当前有界解析和 loopback 默认值
+  不能替代生产身份、TLS 与权限策略。
+- **依赖边界**:实现不复用 `bevy_remote`、`bevy_ecs` 或其他 Bevy runtime；BRP 名称只描述方法风格。
 
 ## 15. 客户端集成
 
-- **`RemoteClient`**:连接管理 + 请求/订阅 API,返回类型安全句柄(非裸 JSON)。
-- **订阅 → `prism_ui_store`**:增量 `apply` 后更新 store 切片,UI 经 selector 精确重渲(成本 ∝ 变化量)。
-- **异步 → `prism_ui_async`**:查询/命令作为 `Resource`,配 Suspense/ErrorBoundary;加载/错误/重连态天然可渲。
-- **Inspector 直连**:反射视图 + 命令提交 + 订阅刷新三合一,驱动 §4 编辑器 Inspector。
+- ✅ **已实现**:`JsonRpcClient` 提供有界同步请求/响应/通知收集，`Replica`/`SyncClient` 提供 transport-neutral
+  snapshot、增量和 revision-aware 同步状态。
+- ⬜ **Loom 产品接入**:把订阅增量应用到 `prism_ui_store`，并通过 `prism_ui_async` 表达加载、错误、取消和重连态。
+- ⬜ **Inspector 产品接入**:将反射视图、命令提交、冲突诊断和订阅刷新接到真实 Inspector；该 UI 闭环不能由
+  protocol/replica 单元测试代替。
 
 ---
 
 ## 16. Crate 结构 / 模块 / feature / 路线图
 
-### 16.1 模块
+### 16.1 当前源码模块
 ```
 prism_editor_remote/
-├── protocol/      # 帧格式、编码、错误码、能力协商(与传输无关)
-├── transport/     # Transport trait + 后端(inprocess/ipc/tcp/quic/websocket)
-├── session/       # 握手、多路复用、心跳、取消、重连
-├── codec/         # 绑定 prism_reflect 的 binary/json 编解码 + 安全边界
-├── delta/         # 订阅跟踪 + net_delta 增量采集/应用
-├── methods/       # world.*/asset.*/command.*/pick.*/gizmo.*/diag.* 语义
-├── command/       # 命令事务通路 + 权威历史接口
-├── security/      # 认证/鉴权/能力/速率/审计 拦截器
-├── server/        # ECS 插件、系统、调度点、bevy_remote 桥
-├── client/        # 客户端 SDK、store/async 集成
-└── diagnostics/   # 自观测指标
+├── model.rs       # envelope、能力、snapshot、change、revision 与错误模型
+├── endpoint.rs    # Endpoint/SyncStore 与内存参考实现
+├── codec.rs       # 确定性 binary codec 与不可信输入上限
+├── jsonrpc.rs     # 有界 JSON-RPC 2.0、方法分发、订阅与能力协商
+├── transport.rs   # length-prefixed stream、TCP client/listener/session
+├── replica.rs     # transport-neutral replica/sync client
+├── pie.rs         # 隔离 PIE、显式 commit/rollback
+├── runtime.rs     # 受控 stdio/TCP 子进程、取消/超时/重启/清理
+├── ecs.rs         # 可选真实 Prism ECS 投影与 runtime handshake adapter
+└── bin/           # 仅供集成测试的 loopback runtime child
 ```
 
 ### 16.2 features
-`inprocess`(默认)/ `ipc` / `tcp` / `quic` / `websocket` / `json`(调试)/ `compress` / `tls` / `bevy_remote_bridge`(过渡)/ `std`。核心 `no_std + alloc` 友好(协议/编解码),传输/网络在 `std`。
+当前 `default = []`；`ecs` 只启用 `prism_ecs` 与 `prism_reflect`。TCP、JSON-RPC、binary codec、PIE 和 process bridge
+属于当前 std crate 的常规能力，不以虚构 feature 名称表示。IPC、QUIC、WebSocket、压缩、TLS 和 `no_std + alloc`
+尚未实现；也不存在 `bevy_remote_bridge` feature。
 
 ### 16.3 路线图(M0–M6)
-| 里程碑 | 内容 | 依赖 |
+| 里程碑 | 当前状态 | 内容 / 剩余边界 |
 |---|---|---|
-| **M0** | protocol + codec(复用 reflect)+ InProcess 传输 + world.* 读 | prism_reflect ✅ |
-| **M1** | 订阅/增量(delta,复用 net_delta)+ world.*+watch | M0 |
-| **M2** | 命令事务通路 + undo/redo + 权威历史接口 | 编辑器命令内核 |
-| **M3** | IPC + TCP 传输 + 会话层(握手/心跳/取消/重连)+ 安全(认证/鉴权/速率/审计) | M0 |
-| **M4** | asset.*/diag.* 挂接 + 客户端 store/async 集成 | prism_asset / prism_diagnostic |
-| **M5** | pick.*/gizmo.* 视口旁路(依赖 S13 拾取 + Gizmo pkg) | 编辑器 §7 |
-| **M6** | QUIC/WebSocket + 压缩 + 协同多会话广播通路 | M3 / 协同层 |
+| **M0** | ✅ 已实现 | 通用模型、binary codec、内存 endpoint、snapshot/read/write |
+| **M1** | ✅ 核心已实现 | 订阅/增量、replica、真实 Prism ECS 投影；生产宿主发布节奏仍由接入方负责 |
+| **M2** | 🟡 部分实现 | revision-checked ChangeSet 与 PIE commit 已有；远程 undo/redo 权威历史尚未接入 |
+| **M3** | 🟡 部分实现 | TCP、握手、能力、取消/超时/重启和 stdio/TCP process bridge 已有；通用 IPC、心跳/重连、安全链未交付 |
+| **M4** | ⬜ 未交付 | `asset.*`/`diag.*` 与 Loom store/async 产品接入 |
+| **M5** | ⬜ 未交付 | `pick.*`/`gizmo.*` 视口旁路和宿主适配 |
+| **M6** | ⬜ 未交付 | QUIC/WebSocket、压缩和协同多会话广播通路 |
 
 ---
 
@@ -457,16 +464,16 @@ app.add_plugins(
 
 ## 19. 诚实边界(SHIPPED vs PLANNED)
 
-- ✅ **已存在底座(非本 crate)**:`bevy_remote` 的 BRP(JSON-RPC 2.0 / `world.*` + `+watch` / `observe` / HTTP:15702 / strict 语义 / `error_codes`)、`prism_reflect`(TypeRegistry / StableTypeId / ReflectSerialize / 反射驱动序列化 / schema 版本化迁移 / `net_delta` DirtyMask 字段增量 / 不可信反序列化安全边界:分配上限夹到剩余字节、不 panic、未注册类型拒绝 / property_bridge)、`prism_tasks`(work-stealing + FrameArenas + join)、`prism_ui_store` / `prism_ui_async`。
-- ✅ **当前已实现**:`prism_editor_remote` 的 protocol / transport / session / binary codec / JSON-RPC methods / PIE / TCP / 受控 stdio/TCP 进程桥和有界取消/重启/超时清理均已存在于 `pkg/prism_editor_remote`，并有单元与子进程集成测试；实现不依赖 Bevy、ECS 或渲染器。
-- ⬜ **仍需产品化**:真实 Prism runtime adapter、生产身份认证/TLS/权限与部署策略，以及 `asset.*` 流/热重载和 `pick.*`/`gizmo.*` 的宿主适配仍需分别接入；loopback adapter 与子进程 fixture 不冒充生产运行时。
+- ✅ **已存在 Prism 地基(非本 crate)**:`prism_reflect` 的类型注册、反射序列化与不可信输入边界，以及可供后续产品接入的 `prism_tasks`、`prism_ui_store` / `prism_ui_async`；BRP/`bevy_remote` 仅为外部历史参照。
+- ✅ **当前已实现**:`prism_editor_remote` 的 protocol / transport / session / binary codec / JSON-RPC methods / PIE / TCP / 受控 stdio/TCP 进程桥和有界取消/重启/超时清理均已存在于 `pkg/prism_editor_remote`，并有单元与子进程集成测试；默认核心不依赖 Bevy、ECS 或渲染器，可选 `ecs` feature 只依赖 Prism 自有 ECS/反射 crate。
+- ⬜ **仍需产品化**:生产场景 runtime 宿主挂载、身份认证/TLS/权限与部署策略，以及 `asset.*` 流/热重载和 `pick.*`/`gizmo.*` 的宿主适配仍需分别接入；`PrismEcsRuntimeAdapter` 的启动握手、loopback adapter 与子进程 fixture 不冒充完整生产运行时。
 - 诚实约束:协议本体为自研；BRP/`bevy_remote` 只保留为历史公开形态参照，不复用其代码或运行时依赖，不抄任何 Unreal/Unity/Omniverse 源码，仅借公开架构形态。
 
 ---
 
 ## 20. 术语表
 
-- **BRP**:Bevy Remote Protocol,`bevy_remote` 提供的 JSON-RPC 2.0 远程协议,本设计的参照与过渡底座。
+- **BRP**:Bevy Remote Protocol，`bevy_remote` 提供的 JSON-RPC 2.0 远程协议；仅作为本设计的历史公开形态参照。
 - **DirtyMask**:`prism_reflect::net_delta` 的字段级脏位集,增量下发的核心。
 - **InProcess 零拷贝**:编辑器与运行时同进程时不序列化、直传反射句柄的最优拓扑。
 - **能力模型(Capabilities)**:每会话绑定的权限集(只读/可写/可脚本/可资产),鉴权基础。
@@ -476,4 +483,4 @@ app.add_plugins(
 
 ---
 
-> 本文为 `prism_editor_remote` 的 v1 设计规格。实现须遵循仓库 `prism_bevy_refactor_plan_zh.md` 的「pkg 优先、`prism_*` 为唯一真相源」方向；当前协议底座已落地，后续以 `prism_editor_framework_design_zh.md` 的真实 runtime adapter、生产安全和宿主适配门禁为准，并与 `prism_reflect_design_zh.md`(序列化/安全/net_delta)、`prism_tasks_design_zh.md`(异步/背压)、`prism_asset_design_zh.md`(资产通路)协同演进。所有 Prism crate 不含任何 Unreal Engine / Unity / Omniverse 源码或衍生代码；BRP/Bevy 仅作公开形态参照。
+> 本文为 `prism_editor_remote` 的 v1 设计规格。实现须遵循仓库 `prism_bevy_refactor_plan_zh.md` 的「pkg 优先、`prism_*` 为唯一真相源」方向；当前协议底座与 Prism ECS 启动/反射适配已落地，后续以 `prism_editor_framework_design_zh.md` 的生产场景宿主、生产安全和域适配门禁为准，并与 `prism_reflect_design_zh.md`(序列化/安全/net_delta)、`prism_tasks_design_zh.md`(异步/背压)、`prism_asset_design_zh.md`(资产通路)协同演进。所有 Prism crate 不含任何 Unreal Engine / Unity / Omniverse 源码或衍生代码；BRP/Bevy 仅作公开形态参照。
