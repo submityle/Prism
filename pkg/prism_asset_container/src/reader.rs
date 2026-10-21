@@ -4,6 +4,7 @@ use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::mem::size_of;
 use flate2::{Decompress, FlushDecompress, Status};
 
 use prism_asset::StableGuid;
@@ -651,6 +652,317 @@ impl ContainerReader {
         Ok(outputs)
     }
 
+    /// Reads multiple payload ranges directly into one packed caller buffer.
+    ///
+    /// The output layout concatenates ranges in request order. All requests
+    /// are validated before the first source read, and compressed chunks are
+    /// still decoded once per batch key. On error, `output` may contain a
+    /// prefix or subset of the requested bytes and must be discarded.
+    pub fn read_ranges_into(
+        &self,
+        requests: &[RangeRequest],
+        policy: RangeBatchPolicy,
+        output: &mut [u8],
+    ) -> Result<(), ContainerError> {
+        if policy.max_batch_bytes == 0 {
+            return Err(ContainerError::InvalidBatchPolicy);
+        }
+        self.budget.limits().check(
+            "batch requests",
+            requests.len() as u64,
+            u64::from(self.budget.limits().max_records),
+        )?;
+        let offsets_bytes = requests
+            .len()
+            .checked_mul(size_of::<usize>())
+            .ok_or(ContainerError::IntegerOverflow)?;
+        let mut output_offsets = Vec::new();
+        output_offsets
+            .try_reserve_exact(requests.len())
+            .map_err(|_| ContainerError::AllocationFailed {
+                bytes: u64::try_from(offsets_bytes).unwrap_or(u64::MAX),
+            })?;
+        let mut total = 0_u64;
+        for request in requests {
+            output_offsets
+                .push(usize::try_from(total).map_err(|_| ContainerError::IntegerOverflow)?);
+            total = total
+                .checked_add(request.len)
+                .ok_or(ContainerError::IntegerOverflow)?;
+        }
+        if usize::try_from(total).map_err(|_| ContainerError::IntegerOverflow)? != output.len() {
+            return Err(ContainerError::LengthMismatch);
+        }
+        self.read_ranges_into_at(requests, policy, &output_offsets, output)
+    }
+
+    /// Writes a batch to explicit packed-output offsets. The offsets must be
+    /// monotonically ordered and non-overlapping in request order; gaps are
+    /// allowed so a manifest reader can group ranges by mounted container.
+    pub(crate) fn read_ranges_into_at(
+        &self,
+        requests: &[RangeRequest],
+        policy: RangeBatchPolicy,
+        output_offsets: &[usize],
+        output: &mut [u8],
+    ) -> Result<(), ContainerError> {
+        if policy.max_batch_bytes == 0 {
+            return Err(ContainerError::InvalidBatchPolicy);
+        }
+        if output_offsets.len() != requests.len() {
+            return Err(ContainerError::LengthMismatch);
+        }
+        let limits = self.budget.limits();
+        limits.check(
+            "batch requests",
+            requests.len() as u64,
+            u64::from(limits.max_records),
+        )?;
+
+        let mut total = 0_u64;
+        let mut previous_end = 0_usize;
+        for (&request, &output_offset) in requests.iter().zip(output_offsets) {
+            let length = self.validate_range_request(request)?;
+            policy.validate_request_len(request.len)?;
+            let end = output_offset
+                .checked_add(length)
+                .ok_or(ContainerError::IntegerOverflow)?;
+            if output_offset < previous_end || end > output.len() {
+                return Err(ContainerError::InvalidRange);
+            }
+            previous_end = end;
+            total = total
+                .checked_add(request.len)
+                .ok_or(ContainerError::IntegerOverflow)?;
+        }
+        limits.check("output bytes", total, limits.max_output_bytes)?;
+        let _outputs_reservation = self.budget.reserve(total)?;
+
+        if requests.iter().any(|request| {
+            self.directory.entry(request.guid).is_some_and(|entry| {
+                let codec = if self.info.version == CHUNK_FORMAT_VERSION {
+                    self.directory
+                        .chunk(entry.chunk_id)
+                        .map_or(entry.codec, |chunk| chunk.codec)
+                } else {
+                    entry.codec
+                };
+                matches!(codec, Codec::Deflate | Codec::BlockDeflate)
+            })
+        }) {
+            let mut compressed = Vec::new();
+            compressed.try_reserve_exact(requests.len()).map_err(|_| {
+                ContainerError::AllocationFailed {
+                    bytes: u64::try_from(requests.len().saturating_mul(size_of::<(u32, usize)>()))
+                        .unwrap_or(u64::MAX),
+                }
+            })?;
+            for (index, request) in requests.iter().copied().enumerate() {
+                if request.len == 0 {
+                    continue;
+                }
+                let entry = self
+                    .directory
+                    .entry(request.guid)
+                    .ok_or(ContainerError::MissingAsset(request.guid))?;
+                let codec = if self.info.version == CHUNK_FORMAT_VERSION {
+                    self.directory
+                        .chunk(entry.chunk_id)
+                        .ok_or(ContainerError::InvalidDirectory)?
+                        .codec
+                } else {
+                    entry.codec
+                };
+                if matches!(codec, Codec::Deflate | Codec::BlockDeflate) {
+                    let key = if self.info.version == CHUNK_FORMAT_VERSION {
+                        (entry.chunk_id, None)
+                    } else {
+                        (0, Some(entry.guid))
+                    };
+                    compressed.push((key, index));
+                } else {
+                    let start = output_offsets[index];
+                    let end = start
+                        .checked_add(
+                            usize::try_from(request.len)
+                                .map_err(|_| ContainerError::IntegerOverflow)?,
+                        )
+                        .ok_or(ContainerError::IntegerOverflow)?;
+                    self.read_range(
+                        request.guid,
+                        request.offset,
+                        output
+                            .get_mut(start..end)
+                            .ok_or(ContainerError::OutOfBounds)?,
+                    )?;
+                }
+            }
+            compressed.sort_unstable();
+            let mut position = 0;
+            while let Some(&(key, first)) = compressed.get(position) {
+                let first_request = requests[first];
+                let entry = self
+                    .directory
+                    .entry(first_request.guid)
+                    .ok_or(ContainerError::MissingAsset(first_request.guid))?;
+                let chunk = if self.info.version == CHUNK_FORMAT_VERSION {
+                    Some(
+                        self.directory
+                            .chunk(entry.chunk_id)
+                            .ok_or(ContainerError::InvalidDirectory)?,
+                    )
+                } else {
+                    None
+                };
+                if let Some(chunk) = chunk.filter(|chunk| chunk.codec == Codec::BlockDeflate) {
+                    let group_start = position;
+                    while position < compressed.len() && compressed[position].0 == key {
+                        position += 1;
+                    }
+                    let group_len = position - group_start;
+                    let mut group_requests = Vec::new();
+                    group_requests.try_reserve_exact(group_len).map_err(|_| {
+                        ContainerError::AllocationFailed {
+                            bytes: u64::try_from(
+                                group_len.saturating_mul(size_of::<RangeRequest>()),
+                            )
+                            .unwrap_or(u64::MAX),
+                        }
+                    })?;
+                    let mut group_offsets = Vec::new();
+                    group_offsets.try_reserve_exact(group_len).map_err(|_| {
+                        ContainerError::AllocationFailed {
+                            bytes: u64::try_from(group_len.saturating_mul(size_of::<usize>()))
+                                .unwrap_or(u64::MAX),
+                        }
+                    })?;
+                    for &(_, index) in &compressed[group_start..position] {
+                        group_requests.push(requests[index]);
+                        group_offsets.push(output_offsets[index]);
+                    }
+                    self.read_block_ranges_into_at(chunk, &group_requests, &group_offsets, output)?;
+                    continue;
+                }
+                let decoded = if let Some(chunk) = chunk {
+                    self.decode_chunk(chunk)?
+                } else {
+                    self.decode_entry(entry)?
+                };
+                while position < compressed.len() && compressed[position].0 == key {
+                    let index = compressed[position].1;
+                    let request = requests[index];
+                    let entry = self
+                        .directory
+                        .entry(request.guid)
+                        .ok_or(ContainerError::MissingAsset(request.guid))?;
+                    let start = usize::try_from(
+                        entry
+                            .raw_offset
+                            .checked_add(request.offset)
+                            .ok_or(ContainerError::IntegerOverflow)?,
+                    )
+                    .map_err(|_| ContainerError::IntegerOverflow)?;
+                    let output_start = output_offsets[index];
+                    let output_end = output_start
+                        .checked_add(
+                            usize::try_from(request.len)
+                                .map_err(|_| ContainerError::IntegerOverflow)?,
+                        )
+                        .ok_or(ContainerError::IntegerOverflow)?;
+                    let output_range = output
+                        .get_mut(output_start..output_end)
+                        .ok_or(ContainerError::OutOfBounds)?;
+                    let end = start
+                        .checked_add(output_range.len())
+                        .ok_or(ContainerError::IntegerOverflow)?;
+                    output_range.copy_from_slice(
+                        decoded.get(start..end).ok_or(ContainerError::OutOfBounds)?,
+                    );
+                    position += 1;
+                }
+            }
+            return Ok(());
+        }
+
+        let mut physical = Vec::new();
+        physical.try_reserve_exact(requests.len()).map_err(|_| {
+            ContainerError::AllocationFailed {
+                bytes: u64::try_from(requests.len().saturating_mul(size_of::<PhysicalRange>()))
+                    .unwrap_or(u64::MAX),
+            }
+        })?;
+        for (index, request) in requests.iter().copied().enumerate() {
+            if request.len == 0 {
+                continue;
+            }
+            let entry = self
+                .directory
+                .entry(request.guid)
+                .ok_or(ContainerError::MissingAsset(request.guid))?;
+            let base = entry
+                .offset
+                .checked_add(if self.info.version == CHUNK_FORMAT_VERSION {
+                    entry.raw_offset
+                } else {
+                    0
+                })
+                .ok_or(ContainerError::IntegerOverflow)?;
+            let start = base
+                .checked_add(request.offset)
+                .ok_or(ContainerError::IntegerOverflow)?;
+            let end = start
+                .checked_add(request.len)
+                .ok_or(ContainerError::IntegerOverflow)?;
+            physical.push(PhysicalRange { index, start, end });
+        }
+
+        physical.sort_by_key(|range| (range.start, range.end, range.index));
+        let mut batches = Vec::new();
+        batches.try_reserve_exact(physical.len()).map_err(|_| {
+            ContainerError::AllocationFailed {
+                bytes: u64::try_from(physical.len().saturating_mul(size_of::<PhysicalBatch>()))
+                    .unwrap_or(u64::MAX),
+            }
+        })?;
+        for range in physical {
+            let Some(batch) = batches.last_mut() else {
+                batches.push(PhysicalBatch::new(range));
+                continue;
+            };
+            if batch.can_merge(range, policy) {
+                batch.end = batch.end.max(range.end);
+                batch.ranges.push(range);
+            } else {
+                batches.push(PhysicalBatch::new(range));
+            }
+        }
+
+        for batch in batches {
+            let batch_len = usize::try_from(batch.end - batch.start)
+                .map_err(|_| ContainerError::IntegerOverflow)?;
+            let mut bytes = self.budget.buffer(batch_len as u64)?;
+            self.read_physical_range(batch.start, &mut bytes)?;
+            for range in batch.ranges {
+                let start = usize::try_from(range.start - batch.start)
+                    .map_err(|_| ContainerError::IntegerOverflow)?;
+                let len = usize::try_from(range.end - range.start)
+                    .map_err(|_| ContainerError::IntegerOverflow)?;
+                let end = start
+                    .checked_add(len)
+                    .ok_or(ContainerError::IntegerOverflow)?;
+                let output_start = output_offsets[range.index];
+                let output_end = output_start
+                    .checked_add(len)
+                    .ok_or(ContainerError::IntegerOverflow)?;
+                output
+                    .get_mut(output_start..output_end)
+                    .ok_or(ContainerError::OutOfBounds)?
+                    .copy_from_slice(bytes.get(start..end).ok_or(ContainerError::OutOfBounds)?);
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn validate_range_request(
         &self,
         request: RangeRequest,
@@ -750,6 +1062,148 @@ impl ContainerReader {
                 &self.budget,
                 self.block_decode_backend.as_ref(),
             )
+        })
+    }
+
+    fn read_block_ranges_into_at(
+        &self,
+        chunk: ChunkInfo,
+        requests: &[RangeRequest],
+        output_offsets: &[usize],
+        output: &mut [u8],
+    ) -> Result<(), ContainerError> {
+        if requests.len() != output_offsets.len() {
+            return Err(ContainerError::LengthMismatch);
+        }
+        self.with_source(|source| {
+            let index =
+                crate::block::parse_index(source, chunk.offset, chunk.stored_len, 0, &self.budget)?;
+            if index.raw_len() != chunk.raw_len {
+                return Err(ContainerError::InvalidDirectory);
+            }
+            let block_size = u64::from(index.block_size());
+            let mut block_ref_count = 0_u64;
+            for request in requests.iter().copied() {
+                if request.len == 0 {
+                    continue;
+                }
+                let entry = self
+                    .directory
+                    .entry(request.guid)
+                    .ok_or(ContainerError::MissingAsset(request.guid))?;
+                let start = entry
+                    .raw_offset
+                    .checked_add(request.offset)
+                    .ok_or(ContainerError::IntegerOverflow)?;
+                let end = start
+                    .checked_add(request.len)
+                    .ok_or(ContainerError::IntegerOverflow)?;
+                if end > index.raw_len() {
+                    return Err(ContainerError::InvalidRange);
+                }
+                let first = start / block_size;
+                let last = (end - 1) / block_size;
+                block_ref_count = block_ref_count
+                    .checked_add(last - first + 1)
+                    .ok_or(ContainerError::IntegerOverflow)?;
+            }
+            let ref_bytes = block_ref_count
+                .checked_mul(size_of::<(u32, usize)>() as u64)
+                .ok_or(ContainerError::IntegerOverflow)?;
+            let _block_refs_reservation = self.budget.reserve(ref_bytes)?;
+            let ref_capacity =
+                usize::try_from(block_ref_count).map_err(|_| ContainerError::IntegerOverflow)?;
+            let mut block_refs = Vec::new();
+            block_refs
+                .try_reserve_exact(ref_capacity)
+                .map_err(|_| ContainerError::AllocationFailed { bytes: ref_bytes })?;
+            for (request_index, request) in requests.iter().copied().enumerate() {
+                if request.len == 0 {
+                    continue;
+                }
+                let entry = self
+                    .directory
+                    .entry(request.guid)
+                    .ok_or(ContainerError::MissingAsset(request.guid))?;
+                let start = entry
+                    .raw_offset
+                    .checked_add(request.offset)
+                    .ok_or(ContainerError::IntegerOverflow)?;
+                let end = start
+                    .checked_add(request.len)
+                    .ok_or(ContainerError::IntegerOverflow)?;
+                let first = start / block_size;
+                let last = (end - 1) / block_size;
+                for block in first..=last {
+                    block_refs.push((
+                        u32::try_from(block).map_err(|_| ContainerError::IntegerOverflow)?,
+                        request_index,
+                    ));
+                }
+            }
+            block_refs.sort_unstable();
+
+            let mut position = 0;
+            while let Some(&(block_number, _)) = block_refs.get(position) {
+                let block_start = u64::from(block_number)
+                    .checked_mul(block_size)
+                    .ok_or(ContainerError::IntegerOverflow)?;
+                let block_end = block_start
+                    .checked_add(block_size)
+                    .ok_or(ContainerError::IntegerOverflow)?
+                    .min(index.raw_len());
+                let block_len = block_end
+                    .checked_sub(block_start)
+                    .ok_or(ContainerError::IntegerOverflow)?;
+                let mut decoded = self.budget.buffer(block_len)?;
+                index.decode_range_with_backend(
+                    source,
+                    block_start,
+                    &mut decoded,
+                    &self.budget,
+                    self.block_decode_backend.as_ref(),
+                )?;
+                while position < block_refs.len() && block_refs[position].0 == block_number {
+                    let request_index = block_refs[position].1;
+                    let request = requests[request_index];
+                    let entry = self
+                        .directory
+                        .entry(request.guid)
+                        .ok_or(ContainerError::MissingAsset(request.guid))?;
+                    let request_start = entry
+                        .raw_offset
+                        .checked_add(request.offset)
+                        .ok_or(ContainerError::IntegerOverflow)?;
+                    let request_end = request_start
+                        .checked_add(request.len)
+                        .ok_or(ContainerError::IntegerOverflow)?;
+                    let copy_start = request_start.max(block_start);
+                    let copy_end = request_end.min(block_end);
+                    let source_start = usize::try_from(copy_start - block_start)
+                        .map_err(|_| ContainerError::IntegerOverflow)?;
+                    let source_end = usize::try_from(copy_end - block_start)
+                        .map_err(|_| ContainerError::IntegerOverflow)?;
+                    let output_start = output_offsets[request_index]
+                        .checked_add(
+                            usize::try_from(copy_start - request_start)
+                                .map_err(|_| ContainerError::IntegerOverflow)?,
+                        )
+                        .ok_or(ContainerError::IntegerOverflow)?;
+                    let output_end = output_start
+                        .checked_add(source_end - source_start)
+                        .ok_or(ContainerError::IntegerOverflow)?;
+                    output
+                        .get_mut(output_start..output_end)
+                        .ok_or(ContainerError::OutOfBounds)?
+                        .copy_from_slice(
+                            decoded
+                                .get(source_start..source_end)
+                                .ok_or(ContainerError::OutOfBounds)?,
+                        );
+                    position += 1;
+                }
+            }
+            Ok(())
         })
     }
 

@@ -492,9 +492,6 @@ impl AssetContainerCellProvider {
             max_batch_bytes: self.limits.max_batch_bytes,
             max_gap_bytes: self.limits.max_gap_bytes,
         };
-        let ranges = reader
-            .read_ranges(plan.requests(), policy)
-            .map_err(|error| AssetContainerProviderError::Manifest(Box::new(error)))?;
         let length = usize::try_from(plan.total_bytes()).map_err(|_| {
             AssetContainerProviderError::LengthOverflow {
                 io_bytes: plan.total_bytes(),
@@ -507,43 +504,9 @@ impl AssetContainerCellProvider {
             }
         })?;
         bytes.resize(length, 0);
-        let mut cursor = 0_usize;
-        for (request, range) in plan.requests().iter().zip(ranges) {
-            let range_len = usize::try_from(request.len).map_err(|_| {
-                AssetContainerProviderError::LengthOverflow {
-                    io_bytes: plan.total_bytes(),
-                }
-            })?;
-            if range.len() != range_len {
-                return Err(AssetContainerProviderError::ReadLengthMismatch {
-                    scene_key: plan.manifest().scene_key,
-                    expected_io_bytes: plan.total_bytes(),
-                    actual_bytes: range.len(),
-                });
-            }
-            let end = cursor.checked_add(range_len).ok_or(
-                AssetContainerProviderError::LengthOverflow {
-                    io_bytes: plan.total_bytes(),
-                },
-            )?;
-            let total_bytes = bytes.len();
-            let destination = bytes.get_mut(cursor..end).ok_or(
-                AssetContainerProviderError::ReadLengthMismatch {
-                    scene_key: plan.manifest().scene_key,
-                    expected_io_bytes: plan.total_bytes(),
-                    actual_bytes: total_bytes,
-                },
-            )?;
-            destination.copy_from_slice(&range);
-            cursor = end;
-        }
-        if cursor != bytes.len() {
-            return Err(AssetContainerProviderError::ReadLengthMismatch {
-                scene_key: plan.manifest().scene_key,
-                expected_io_bytes: plan.total_bytes(),
-                actual_bytes: cursor,
-            });
-        }
+        reader
+            .read_ranges_into(plan.requests(), policy, &mut bytes)
+            .map_err(|error| AssetContainerProviderError::Manifest(Box::new(error)))?;
         validate_header(plan.manifest(), &bytes).map_err(AssetContainerProviderError::Header)?;
         Ok(bytes)
     }

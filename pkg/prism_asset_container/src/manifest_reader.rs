@@ -6,6 +6,7 @@
 //! payload read is attempted.
 
 use core::fmt;
+use core::mem::size_of;
 
 use prism_asset::StableGuid;
 
@@ -93,6 +94,12 @@ pub enum ManifestReadError {
     },
     /// The routed container failed an already-validated container read.
     Container(ContainerError),
+}
+
+impl From<ContainerError> for ManifestReadError {
+    fn from(error: ContainerError) -> Self {
+        Self::Container(error)
+    }
 }
 
 impl fmt::Display for ManifestReadError {
@@ -376,6 +383,186 @@ impl<'manifest, 'overlay> ManifestReader<'manifest, 'overlay> {
             }
         }
         Ok(outputs)
+    }
+
+    /// Reads logical ranges directly into one packed caller buffer.
+    ///
+    /// The buffer layout concatenates requests in input order. All routes and
+    /// ranges are resolved and validated before the first payload read. The
+    /// output may be partially written on error and must then be discarded.
+    pub fn read_ranges_into(
+        &self,
+        requests: &[ManifestRangeRequest],
+        policy: RangeBatchPolicy,
+        output: &mut [u8],
+    ) -> Result<(), ManifestReadError> {
+        policy.validate().map_err(ManifestReadError::Container)?;
+        let offsets_bytes =
+            requests
+                .len()
+                .checked_mul(size_of::<usize>())
+                .ok_or(ManifestReadError::Container(
+                    ContainerError::IntegerOverflow,
+                ))?;
+        let mut output_offsets = Vec::new();
+        output_offsets
+            .try_reserve_exact(requests.len())
+            .map_err(|_| {
+                ManifestReadError::Container(ContainerError::AllocationFailed {
+                    bytes: u64::try_from(offsets_bytes).unwrap_or(u64::MAX),
+                })
+            })?;
+        let mut total = 0_u64;
+        for request in requests {
+            output_offsets.push(
+                usize::try_from(total)
+                    .map_err(|_| ManifestReadError::Container(ContainerError::IntegerOverflow))?,
+            );
+            total = total
+                .checked_add(request.len)
+                .ok_or(ManifestReadError::Container(
+                    ContainerError::IntegerOverflow,
+                ))?;
+        }
+        if usize::try_from(total)
+            .map_err(|_| ManifestReadError::Container(ContainerError::IntegerOverflow))?
+            != output.len()
+        {
+            return Err(ManifestReadError::Container(ContainerError::LengthMismatch));
+        }
+
+        struct Group<'a> {
+            name: String,
+            reader: &'a ContainerReader,
+            requests: Vec<(usize, ManifestRangeRequest, RangeRequest)>,
+        }
+
+        let mut groups = Vec::<Group<'_>>::new();
+        for (index, request) in requests.iter().copied().enumerate() {
+            let route = self.route(request.logical_guid)?;
+            let reader = self.resolve(route)?;
+            let local = RangeRequest::new(route.container_guid, request.offset, request.len);
+            policy
+                .validate_request_len(request.len)
+                .map_err(ManifestReadError::Container)?;
+            let entry = reader.entry(route.container_guid).ok_or_else(|| {
+                ManifestReadError::MissingContainerGuid {
+                    logical_guid: request.logical_guid,
+                    container_name: route.container_name.clone(),
+                    container_guid: route.container_guid,
+                }
+            })?;
+            validate_range(request.offset, request.len, entry.raw_len).map_err(|error| {
+                self.map_read_error(
+                    request.logical_guid,
+                    request.offset,
+                    usize::try_from(request.len).unwrap_or(usize::MAX),
+                    error,
+                )
+            })?;
+            if entry.codec == crate::Codec::Raw {
+                let base = entry
+                    .offset
+                    .checked_add(if reader.info().version == CHUNK_FORMAT_VERSION {
+                        entry.raw_offset
+                    } else {
+                        0
+                    })
+                    .ok_or(ContainerError::IntegerOverflow)
+                    .map_err(|error| {
+                        self.map_read_error(
+                            request.logical_guid,
+                            request.offset,
+                            usize::try_from(request.len).unwrap_or(usize::MAX),
+                            error,
+                        )
+                    })?;
+                checked_physical_range_within(
+                    base,
+                    request.offset,
+                    request.len,
+                    reader.info().total_len,
+                )
+                .map_err(|error| {
+                    self.map_read_error(
+                        request.logical_guid,
+                        request.offset,
+                        usize::try_from(request.len).unwrap_or(usize::MAX),
+                        error,
+                    )
+                })?;
+            }
+            reader.validate_range_request(local).map_err(|error| {
+                self.map_read_error(
+                    request.logical_guid,
+                    request.offset,
+                    usize::try_from(request.len).unwrap_or(usize::MAX),
+                    error,
+                )
+            })?;
+            if let Some(group) = groups
+                .iter_mut()
+                .find(|group| group.name == route.container_name)
+            {
+                group.requests.push((index, request, local));
+            } else {
+                groups.push(Group {
+                    name: route.container_name.clone(),
+                    reader,
+                    requests: alloc::vec![(index, request, local)],
+                });
+            }
+        }
+
+        groups.sort_by(|left, right| left.name.cmp(&right.name));
+        for group in groups {
+            let mut local_requests = Vec::new();
+            let mut local_offsets = Vec::new();
+            let request_bytes = group
+                .requests
+                .len()
+                .checked_mul(size_of::<RangeRequest>())
+                .ok_or(ManifestReadError::Container(
+                    ContainerError::IntegerOverflow,
+                ))?;
+            local_requests
+                .try_reserve_exact(group.requests.len())
+                .map_err(|_| {
+                    ManifestReadError::Container(ContainerError::AllocationFailed {
+                        bytes: u64::try_from(request_bytes).unwrap_or(u64::MAX),
+                    })
+                })?;
+            local_offsets
+                .try_reserve_exact(group.requests.len())
+                .map_err(|_| {
+                    ManifestReadError::Container(ContainerError::AllocationFailed {
+                        bytes: u64::try_from(
+                            group.requests.len().saturating_mul(size_of::<usize>()),
+                        )
+                        .unwrap_or(u64::MAX),
+                    })
+                })?;
+            for (index, _, request) in &group.requests {
+                local_requests.push(*request);
+                local_offsets.push(output_offsets[*index]);
+            }
+            group
+                .reader
+                .read_ranges_into_at(&local_requests, policy, &local_offsets, output)
+                .map_err(|error| {
+                    if let Some((_, logical, _)) = group.requests.first() {
+                        self.map_read_error(
+                            logical.logical_guid,
+                            logical.offset,
+                            usize::try_from(logical.len).unwrap_or(usize::MAX),
+                            error,
+                        )
+                    } else {
+                        ManifestReadError::Container(error)
+                    }
+                })?;
+        }
+        Ok(())
     }
 
     /// Returns validated metadata for the payload selected by a logical GUID.

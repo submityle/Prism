@@ -2,6 +2,7 @@ use alloc::sync::Arc;
 use prism_asset::{AssetReader, StableGuid};
 use std::fs::{self, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -348,7 +349,7 @@ impl RangeSource for ToggleFailureSource {
     }
 
     fn read_range(&self, offset: u64, out: &mut [u8]) -> Result<(), RangeSourceError> {
-        if self.fail_reads.load(std::sync::atomic::Ordering::Relaxed) {
+        if self.fail_reads.load(Ordering::Relaxed) {
             return Err(RangeSourceError::Io("injected range failure".into()));
         }
         let start = usize::try_from(offset).map_err(|_| RangeSourceError::OutOfBounds)?;
@@ -1212,6 +1213,119 @@ fn reader_batches_overlapping_and_nearby_ranges_in_caller_order() {
 }
 
 #[test]
+fn reader_writes_raw_and_deflate_batches_into_one_packed_buffer() {
+    let raw_guid = guid("packed-raw");
+    let compressed_guid = guid("packed-deflate");
+    let raw = b"raw payload for direct output".to_vec();
+    let compressed = b"compressed payload for direct output".repeat(8);
+    let mut writer = ContainerWriter::new();
+    writer.add(raw_guid, raw.clone()).unwrap();
+    writer
+        .add_deflate(compressed_guid, compressed.clone())
+        .unwrap();
+    let reader = ContainerReader::new(writer.finish().unwrap()).unwrap();
+    let requests = [
+        RangeRequest::new(raw_guid, 2, 9),
+        RangeRequest::new(compressed_guid, 4, 13),
+        RangeRequest::new(raw_guid, 0, 5),
+        RangeRequest::new(compressed_guid, 30, 17),
+    ];
+    let expected = reader
+        .read_ranges(&requests, RangeBatchPolicy::default())
+        .unwrap();
+    let total_len = expected.iter().map(Vec::len).sum();
+    let mut packed = vec![0; total_len];
+    reader
+        .read_ranges_into(&requests, RangeBatchPolicy::default(), &mut packed)
+        .unwrap();
+    let mut cursor = 0;
+    for range in expected {
+        let end = cursor + range.len();
+        assert_eq!(&packed[cursor..end], range);
+        cursor = end;
+    }
+    assert_eq!(cursor, packed.len());
+
+    let mut wrong_len = vec![0xA5; packed.len() - 1];
+    assert_eq!(
+        reader.read_ranges_into(&requests, RangeBatchPolicy::default(), &mut wrong_len),
+        Err(ContainerError::LengthMismatch)
+    );
+    assert!(wrong_len.iter().all(|byte| *byte == 0xA5));
+}
+
+#[test]
+fn reader_writes_block_deflate_batch_with_one_decode_per_touched_block() {
+    struct CountingBlockBackend(AtomicUsize);
+
+    impl crate::block::BlockDecodeBackend for CountingBlockBackend {
+        fn decode_block(
+            &self,
+            request: crate::block::BlockDecodeRequest<'_>,
+            output: &mut [u8],
+        ) -> Result<crate::block::BlockDecodeReport, ContainerError> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            crate::block::BlockDecodeBackend::decode_block(
+                &crate::block::CpuBlockDecodeBackend,
+                request,
+                output,
+            )
+        }
+    }
+
+    let first_id = guid("packed-block-first");
+    let second_id = guid("packed-block-second");
+    let first = b"first block payload".repeat(512);
+    let second = b"second block payload".repeat(512);
+    let inputs = [
+        ChunkInput {
+            guid: first_id,
+            size: first.len() as u64,
+            alignment: 1,
+            dependencies: vec![],
+            priority: 0,
+        },
+        ChunkInput {
+            guid: second_id,
+            size: second.len() as u64,
+            alignment: 1,
+            dependencies: vec![],
+            priority: 0,
+        },
+    ];
+    let policy = ChunkPolicy {
+        max_chunk_size: 256 * 1024,
+        chunk_alignment: 4096,
+        max_chunks: 1,
+    };
+    let plan = ChunkPlanner::new(policy).plan(inputs).unwrap();
+    let mut writer = ContainerWriter::new();
+    writer.add_aligned(first_id, first.clone(), 1).unwrap();
+    writer.add_aligned(second_id, second.clone(), 1).unwrap();
+    let bytes = writer
+        .finish_with_chunk_compression(&plan, policy.chunk_alignment, Codec::BlockDeflate)
+        .unwrap();
+    let backend = Arc::new(CountingBlockBackend(AtomicUsize::new(0)));
+    let reader = ContainerReader::new_with_block_decode_backend(bytes, backend.clone()).unwrap();
+    backend.0.store(0, Ordering::Relaxed);
+
+    let requests = [
+        RangeRequest::new(first_id, 11, 37),
+        RangeRequest::new(first_id, 19, 41),
+        RangeRequest::new(second_id, 23, 29),
+    ];
+    let mut packed = vec![0; requests.iter().map(|request| request.len as usize).sum()];
+    reader
+        .read_ranges_into(&requests, RangeBatchPolicy::default(), &mut packed)
+        .unwrap();
+
+    assert_eq!(&packed[..37], &first[11..48],);
+    assert_eq!(&packed[37..78], &first[19..60],);
+    assert_eq!(&packed[78..], &second[23..52],);
+    assert_eq!(backend.0.load(Ordering::Relaxed), 1);
+}
+
+#[test]
 fn reader_batches_duplicate_requests_without_reordering_results() {
     let bytes = build(&[("duplicate", b"duplicate payload")]);
     let (source, requests) = TrackingRangeSource::new(bytes);
@@ -1355,7 +1469,7 @@ fn reader_batching_propagates_source_failure_without_partial_success() {
         fail_reads: Arc::clone(&fail_reads),
     };
     let reader = ContainerReader::from_range_source(Arc::new(source)).unwrap();
-    fail_reads.store(true, std::sync::atomic::Ordering::Relaxed);
+    fail_reads.store(true, Ordering::Relaxed);
 
     assert!(matches!(
         reader.read_ranges(
