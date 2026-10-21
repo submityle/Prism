@@ -99,6 +99,14 @@ impl DesktopDocumentSession {
         Ok(request)
     }
 
+    /// Retries the exact retained save bytes, revision and durable base after a
+    /// failed or cancelled save. Current UI edits are not recaptured.
+    pub fn retry_save(&mut self) -> Result<IoRequestId, DocumentError> {
+        let request = self.adapter.retry_save()?;
+        self.last_request = Some(request);
+        Ok(request)
+    }
+
     /// Requests cancellation while preserving the pending terminal event and
     /// save reconciliation rules.
     #[must_use]

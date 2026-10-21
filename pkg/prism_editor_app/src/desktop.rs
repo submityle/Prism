@@ -794,11 +794,31 @@ impl<R: DesktopRenderer> DesktopHost<R> {
         if self
             .document
             .as_ref()
-            .is_some_and(|d| d.is_busy() || d.reconciliation_required())
+            .is_some_and(DesktopDocumentSession::is_busy)
         {
             self.input_result(Err(DesktopUiError::Panel(
-                "Resolve scene I/O before panel file commands".into(),
+                "Scene document I/O is already pending".into(),
             )));
+            return;
+        }
+        if self
+            .document
+            .as_ref()
+            .is_some_and(DesktopDocumentSession::reconciliation_required)
+        {
+            if !save {
+                self.input_result(Err(DesktopUiError::Panel(
+                    "Retry the retained scene save before opening another document".into(),
+                )));
+                return;
+            }
+            let document = self
+                .document
+                .as_mut()
+                .expect("reconciliation requires a scene document session");
+            let (result, pending) = document_request_result(document.retry_save());
+            self.input_result(result);
+            self.pending.set(DesktopPendingSource::Document, pending);
             return;
         }
         match self.ui.panel_document_command(save) {

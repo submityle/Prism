@@ -1152,6 +1152,19 @@ fn native_document_cancellation_is_idempotent_until_terminal_poll() {
     assert!(session.reconciliation_required());
     assert!(ui.controller().is_dirty());
     assert_eq!(session.cancel(), DesktopDocumentCancelOutcome::Idle);
+
+    let retry_id = session.retry_save().unwrap();
+    assert_eq!(session.last_request(), Some(retry_id));
+    assert!(session.is_busy());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while session.is_busy() {
+        assert!(Instant::now() < deadline, "native retry save deadline");
+        let _ = session.poll(&mut context, &mut ui, &mut scene).unwrap();
+        thread::yield_now();
+    }
+    assert!(!session.reconciliation_required());
+    assert!(!ui.controller().is_dirty());
+    assert!(temp.file().exists());
     workers_finished(&provider);
 }
 

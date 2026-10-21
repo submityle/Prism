@@ -141,3 +141,17 @@ rg -n -i --glob '*.rs' '\b(TODO|FIXME|todo!|unimplemented!|placeholder)\b' pkg/p
 - `git diff --check`（本次 4 个 Rust 文件）：通过。
 - `cargo fmt --manifest-path pkg/prism_editor_app/Cargo.toml -- --check`：通过。
 - `cargo check --manifest-path pkg/prism_editor_app/Cargo.toml --features desktop --lib`：未完成；等待共享 build lock 后从依赖重建开始，链接 `proc-macro2`、`quote`、`libm`、`objc2` 等 build script 时磁盘仅剩约 1.1 GiB 并报 `No space left on device`，尚未编译到 `prism_editor_app`。该结果不计为编译通过，也没有产生本次 Editor 源码的编译错误证据。
+
+## 2026-10-21 后续实现闭环：桌面宿主可恢复 scene save reconciliation fence
+
+Escape 文档取消闭环暴露出下一项独立缺口：失败或取消的 scene save 会正确进入 reconciliation-required，但桌面宿主此前在该状态下同时拒绝 Save/Open 和活动面板文件命令，且 `DesktopDocumentSession` 没有公开底层已有的 identical retry。因此一次失败或取消会把原生会话永久锁在只能阻止关闭、不能恢复的状态。
+
+现在：
+
+- `DesktopDocumentSession::retry_save` 公开精确重投入口，只重用失败/取消时保留的 bytes、model revision 和 durable base，不重新捕获当前 UI/model。
+- scene document busy 仍拒绝新的文件命令；reconciliation-required 时，Ctrl/Cmd+S 优先重试被围栏的 scene save，即使当前活动 panel 另有文件绑定也不会绕过 scene fence。
+- reconciliation-required 时 Ctrl/Cmd+O 明确拒绝，要求先完成 retained save；不会把 dirty live model 静默替换成磁盘状态。
+- retry 提交失败时 fence 与 retained snapshot 保持不变，可再次显式重试；成功终态仍通过原有 snapshot guard 决定是否标记 clean。
+- 原生文档测试现覆盖“取消 -> 正常终态 -> reconciliation-required -> identical retry -> durable save -> clean/解除 fence”的完整恢复链。
+
+本次格式和静态 diff 验证与上一闭环使用同一组限定命令；编译/测试仍受当前磁盘空间耗尽阻塞，不将其记录为通过。
