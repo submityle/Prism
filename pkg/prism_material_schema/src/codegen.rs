@@ -235,6 +235,31 @@ pub fn emit_cpu_surface_contract(schema: &SurfaceSchema) -> String {
         o,
         "pub const CPU_GOLDEN_WORD_COUNT: u32 = {golden_word_count};"
     );
+    o.push_str("\n/// Borrow typed CPU surface components in schema directory order.\n");
+    o.push_str("/// Field renames and type/arity changes fail at the consuming call site.\n");
+    o.push_str("#[macro_export]\nmacro_rules! cpu_surface_components {\n");
+    o.push_str("    ($surface:ident) => {{\n");
+    let _ = writeln!(
+        o,
+        "        let components: [&[f32]; {}] = [",
+        schema.response_fields().len()
+    );
+    for (_, field) in schema.response_fields() {
+        match field.ty {
+            FieldType::F32 | FieldType::F16 => {
+                let _ = writeln!(
+                    o,
+                    "            core::slice::from_ref(&$surface.{}),",
+                    field.surface_field()
+                );
+            }
+            FieldType::Vec4f => {
+                let _ = writeln!(o, "            &$surface.{},", field.surface_field());
+            }
+            FieldType::Pad => unreachable!("response_fields excludes padding"),
+        }
+    }
+    o.push_str("        ];\n        components\n    }};\n}\n");
     o
 }
 
@@ -337,34 +362,32 @@ pub fn emit_specialization_layout(schema: &SurfaceSchema) -> String {
     o.push_str("#[derive(Clone, Copy, Debug, Eq, PartialEq)]\n");
     o.push_str("pub struct SpecializationId(u64);\n\n");
     o.push_str("impl SpecializationId {\n");
+    o.push_str("    /// Reject out-of-range components instead of silently truncating them.\n");
     o.push_str("    #[must_use]\n");
-    o.push_str(
-        "    pub const fn new(illumination: u32, lobe_mask: u32, render_class: u32) -> Self {\n",
+    o.push_str("    pub const fn try_new(illumination: u32, lobe_mask: u32, render_class: u32) -> Option<Self> {\n");
+    for (name, range) in [
+        ("illumination", layout.illumination),
+        ("lobe_mask", layout.lobe_mask),
+        ("render_class", layout.render_class),
+    ] {
+        if range.bits < 32 {
+            let _ = writeln!(
+                o,
+                "        if {name} > 0x{:X} {{\n            return None;\n        }}",
+                bit_mask(range.bits)
+            );
+        }
+    }
+    let _ = writeln!(
+        o,
+        "        Some(Self(\n            ((illumination as u64) << {})\n                | ((lobe_mask as u64) << {})\n                | ((render_class as u64) << {}),\n        ))\n    }}\n",
+        layout.illumination.shift, layout.lobe_mask.shift, layout.render_class.shift
     );
-    o.push_str("        Self(pack_specialization_id(\n");
-    o.push_str("            illumination,\n            lobe_mask,\n            render_class,\n        ))\n    }\n\n");
     o.push_str("    #[must_use]\n    pub const fn raw(self) -> u64 {\n        self.0\n    }\n\n");
-    o.push_str("    #[must_use]\n    pub const fn parts(self) -> SpecializationParts {\n        unpack_specialization_id(self.0)\n    }\n\n");
-    o.push_str("    #[must_use]\n    pub const fn from_raw(value: u64) -> Option<Self> {\n");
-    o.push_str("        if value & SPECIALIZATION_RESERVED_MASK == 0 {\n            Some(Self(value))\n        } else {\n            None\n        }\n    }\n\n");
-    o.push_str("    #[must_use]\n    pub const fn has_reserved_bits(self) -> bool {\n");
-    o.push_str("        self.0 & SPECIALIZATION_RESERVED_MASK != 0\n    }\n");
-    o.push_str("}\n\n");
+    o.push_str("    #[must_use]\n    pub const fn parts(self) -> SpecializationParts {\n");
     let _ = writeln!(
         o,
-        "pub const fn pack_specialization_id(illumination: u32, lobe_mask: u32, render_class: u32) -> u64 {{\n    ((illumination as u64 & 0x{:X}) << {})\n        | ((lobe_mask as u64 & 0x{:X}) << {})\n        | ((render_class as u64 & 0x{:X}) << {})\n}}\n",
-        bit_mask(layout.illumination.bits),
-        layout.illumination.shift,
-        bit_mask(layout.lobe_mask.bits),
-        layout.lobe_mask.shift,
-        bit_mask(layout.render_class.bits),
-        layout.render_class.shift
-    );
-    o.push_str("#[must_use]\n");
-    o.push_str("pub const fn unpack_specialization_id(value: u64) -> SpecializationParts {\n");
-    let _ = writeln!(
-        o,
-        "    SpecializationParts {{\n        illumination: ((value >> {}) & 0x{:X}) as u32,\n        lobe_mask: ((value >> {}) & 0x{:X}) as u32,\n        render_class: ((value >> {}) & 0x{:X}) as u32,\n    }}\n}}\n",
+        "        SpecializationParts {{\n            illumination: ((self.0 >> {}) & 0x{:X}) as u32,\n            lobe_mask: ((self.0 >> {}) & 0x{:X}) as u32,\n            render_class: ((self.0 >> {}) & 0x{:X}) as u32,\n        }}\n    }}\n",
         layout.illumination.shift,
         bit_mask(layout.illumination.bits),
         layout.lobe_mask.shift,
@@ -372,6 +395,10 @@ pub fn emit_specialization_layout(schema: &SurfaceSchema) -> String {
         layout.render_class.shift,
         bit_mask(layout.render_class.bits)
     );
+    o.push_str("    /// Reserved, undeclared and above-storage bits are all invalid.\n");
+    o.push_str("    #[must_use]\n    pub const fn from_raw(value: u64) -> Option<Self> {\n");
+    o.push_str("        let valid = SPECIALIZATION_ILLUMINATION_MASK\n            | SPECIALIZATION_LOBE_MASK_MASK\n            | SPECIALIZATION_RENDER_CLASS_MASK;\n");
+    o.push_str("        if value & !valid == 0 {\n            Some(Self(value))\n        } else {\n            None\n        }\n    }\n}\n\n");
     o
 }
 
@@ -482,7 +509,7 @@ pub fn emit_wesl_unpack(schema: &SurfaceSchema) -> String {
     );
     o.push_str("//! visibility, shading_resolve, ssr_repack) decode identically.\n");
     o.push('\n');
-    o.push_str("import prism_render_scene::shaders::material::PrismSurfaceParameters;\n");
+    o.push_str("import prism_render_material::shaders::material::PrismSurfaceParameters;\n");
     o.push('\n');
 
     // --- lobe bit constants ----------------------------------------------
@@ -1602,6 +1629,166 @@ mod tests {
     use crate::surface_schema;
 
     #[test]
+    fn generated_packing_executes_reordered_sparse_and_narrow_layouts() {
+        use crate::{BitRange, SpecializationSchema};
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
+        let mut schema = surface_schema();
+        let layouts = [
+            schema.specialization.clone(),
+            SpecializationSchema {
+                storage_bits: 64,
+                illumination: BitRange { shift: 56, bits: 8 },
+                lobe_mask: BitRange { shift: 0, bits: 32 },
+                render_class: BitRange { shift: 40, bits: 8 },
+                reserved: BitRange { shift: 32, bits: 8 },
+            },
+            SpecializationSchema {
+                storage_bits: 56,
+                illumination: BitRange { shift: 40, bits: 4 },
+                lobe_mask: BitRange { shift: 4, bits: 32 },
+                render_class: BitRange { shift: 0, bits: 4 },
+                reserved: BitRange {
+                    shift: 44,
+                    bits: 12,
+                },
+            },
+            SpecializationSchema {
+                storage_bits: 64,
+                illumination: BitRange {
+                    shift: 32,
+                    bits: 32,
+                },
+                lobe_mask: BitRange { shift: 0, bits: 20 },
+                render_class: BitRange { shift: 20, bits: 8 },
+                reserved: BitRange { shift: 28, bits: 4 },
+            },
+        ];
+        let mut source = String::new();
+        for (index, layout) in layouts.into_iter().enumerate() {
+            schema.specialization = layout;
+            schema.validate().unwrap();
+            let _ = writeln!(source, "mod layout_{index} {{");
+            source.push_str(&emit_specialization_layout(&schema));
+            source.push_str("}\n");
+        }
+        source.push_str(
+            r#"
+macro_rules! check {
+    ($module:ident) => {{
+        use $module::{SpecializationId, SPECIALIZATION_LAYOUT as L};
+        let axes = [(L.illumination_shift, L.illumination_bits),
+                    (L.lobe_mask_shift, L.lobe_mask_bits),
+                    (L.render_class_shift, L.render_class_bits)];
+        let mut maximum = [0; 3];
+        let mut valid = 0u64;
+        for (axis, &(shift, width)) in axes.iter().enumerate() {
+            maximum[axis] = ((1u64 << width) - 1) as u32;
+            for bit in 0..width {
+                let mut input = [0; 3];
+                input[axis] = 1u32 << bit;
+                let id = SpecializationId::try_new(input[0], input[1], input[2]).unwrap();
+                assert_eq!(id.raw(), 1u64 << (shift + bit));
+                valid |= id.raw();
+                let parts = id.parts();
+                assert_eq!([parts.illumination, parts.lobe_mask, parts.render_class], input);
+            }
+            if width < 32 {
+                let mut input = [0; 3];
+                input[axis] = 1u32 << width;
+                assert_eq!(SpecializationId::try_new(input[0], input[1], input[2]), None);
+            }
+        }
+        let max = SpecializationId::try_new(maximum[0], maximum[1], maximum[2]).unwrap();
+        assert_eq!(max.raw(), valid);
+        assert_eq!(SpecializationId::from_raw(valid), Some(max));
+        for bit in 0..64 {
+            let raw = 1u64 << bit;
+            assert_eq!(SpecializationId::from_raw(raw).is_some(), raw & valid != 0);
+        }
+    }};
+}
+fn main() {
+    check!(layout_0);
+    check!(layout_1);
+    check!(layout_2);
+    check!(layout_3);
+}
+"#,
+        );
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "prism-material-packing-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&path).unwrap();
+        struct Probe(std::path::PathBuf);
+        impl Drop for Probe {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(self.0.join("probe"));
+                let _ = std::fs::remove_dir(&self.0);
+            }
+        }
+        let probe = Probe(path);
+        let mut compiler =
+            Command::new(std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into()))
+                .args([
+                    "--crate-name",
+                    "prism_material_packing_probe",
+                    "--edition=2024",
+                    "-C",
+                    "debuginfo=0",
+                    "-o",
+                ])
+                .arg(probe.0.join("probe"))
+                .arg("-")
+                .stdin(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+        compiler
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(source.as_bytes())
+            .unwrap();
+        let compilation = compiler.wait_with_output().unwrap();
+        assert!(
+            compilation.status.success(),
+            "{}",
+            String::from_utf8_lossy(&compilation.stderr)
+        );
+        let run = Command::new(probe.0.join("probe")).output().unwrap();
+        assert!(
+            run.status.success(),
+            "{}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+    }
+
+    #[test]
+    fn classification_markers_must_be_unique_and_ordered() {
+        let schema = surface_schema();
+        let begin = "// BEGIN SCHEMA-GENERATED MATERIAL METADATA";
+        let end = "// END SCHEMA-GENERATED MATERIAL METADATA";
+        for template in [
+            begin.to_string(),
+            format!("{begin}\n{begin}\n{end}"),
+            format!("{begin}\n{end}\n{end}"),
+            format!("{end}\n{begin}"),
+        ] {
+            assert!(
+                std::panic::catch_unwind(|| emit_material_classification(&schema, &template))
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
     fn float_literal_always_has_a_point() {
         assert_eq!(float_literal(1.0), "1.0");
         assert_eq!(float_literal(0.0), "0.0");
@@ -1658,7 +1845,7 @@ mod tests {
             "const PRISM_LOBE_WORDS_SUBSURFACE: u32 = 16u;",
             "const PRISM_LOBE_WORDS_TRANSMISSION: u32 = 16u;",
             "        cursor += PRISM_LOBE_WORDS_TRANSMISSION;",
-            "import prism_render_scene::shaders::material::PrismSurfaceParameters;",
+            "import prism_render_material::shaders::material::PrismSurfaceParameters;",
         ] {
             assert!(wesl.contains(needle), "generated WESL missing `{needle}`");
         }

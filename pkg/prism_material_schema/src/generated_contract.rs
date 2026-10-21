@@ -45,12 +45,19 @@ pub const SPECIALIZATION_RESERVED_MASK: u64 = 0xFFFF000000000000;
 pub struct SpecializationId(u64);
 
 impl SpecializationId {
+    /// Reject out-of-range components instead of silently truncating them.
     #[must_use]
-    pub const fn new(illumination: u32, lobe_mask: u32, render_class: u32) -> Self {
-        Self(pack_specialization_id(
-            illumination,
-            lobe_mask,
-            render_class,
+    pub const fn try_new(illumination: u32, lobe_mask: u32, render_class: u32) -> Option<Self> {
+        if illumination > 0xFF {
+            return None;
+        }
+        if render_class > 0xFF {
+            return None;
+        }
+        Some(Self(
+            ((illumination as u64) << 0)
+                | ((lobe_mask as u64) << 8)
+                | ((render_class as u64) << 40),
         ))
     }
 
@@ -61,36 +68,24 @@ impl SpecializationId {
 
     #[must_use]
     pub const fn parts(self) -> SpecializationParts {
-        unpack_specialization_id(self.0)
+        SpecializationParts {
+            illumination: ((self.0 >> 0) & 0xFF) as u32,
+            lobe_mask: ((self.0 >> 8) & 0xFFFFFFFF) as u32,
+            render_class: ((self.0 >> 40) & 0xFF) as u32,
+        }
     }
 
+    /// Reserved, undeclared and above-storage bits are all invalid.
     #[must_use]
     pub const fn from_raw(value: u64) -> Option<Self> {
-        if value & SPECIALIZATION_RESERVED_MASK == 0 {
+        let valid = SPECIALIZATION_ILLUMINATION_MASK
+            | SPECIALIZATION_LOBE_MASK_MASK
+            | SPECIALIZATION_RENDER_CLASS_MASK;
+        if value & !valid == 0 {
             Some(Self(value))
         } else {
             None
         }
-    }
-
-    #[must_use]
-    pub const fn has_reserved_bits(self) -> bool {
-        self.0 & SPECIALIZATION_RESERVED_MASK != 0
-    }
-}
-
-pub const fn pack_specialization_id(illumination: u32, lobe_mask: u32, render_class: u32) -> u64 {
-    ((illumination as u64 & 0xFF) << 0)
-        | ((lobe_mask as u64 & 0xFFFFFFFF) << 8)
-        | ((render_class as u64 & 0xFF) << 40)
-}
-
-#[must_use]
-pub const fn unpack_specialization_id(value: u64) -> SpecializationParts {
-    SpecializationParts {
-        illumination: ((value >> 0) & 0xFF) as u32,
-        lobe_mask: ((value >> 8) & 0xFFFFFFFF) as u32,
-        render_class: ((value >> 40) & 0xFF) as u32,
     }
 }
 
@@ -603,3 +598,67 @@ pub const CPU_SAMPLE_FIELD_COUNT: usize = CPU_SAMPLE_FIELD_INDICES.len();
 pub const CPU_GOLDEN_FIELD_COUNT: usize = CPU_GOLDEN_FIELD_INDICES.len();
 pub const CPU_SAMPLE_WORD_COUNT: u32 = 80;
 pub const CPU_GOLDEN_WORD_COUNT: u32 = 77;
+
+/// Borrow typed CPU surface components in schema directory order.
+/// Field renames and type/arity changes fail at the consuming call site.
+#[macro_export]
+macro_rules! cpu_surface_components {
+    ($surface:ident) => {{
+        let components: [&[f32]; 53] = [
+            &$surface.base_color,
+            core::slice::from_ref(&$surface.base_metalness),
+            core::slice::from_ref(&$surface.specular_roughness),
+            core::slice::from_ref(&$surface.specular_weight),
+            core::slice::from_ref(&$surface.ambient_occlusion),
+            core::slice::from_ref(&$surface.normal_scale),
+            core::slice::from_ref(&$surface.alpha_cutoff),
+            core::slice::from_ref(&$surface.base_weight),
+            core::slice::from_ref(&$surface.base_diffuse_roughness),
+            &$surface.specular_color,
+            core::slice::from_ref(&$surface.specular_ior),
+            core::slice::from_ref(&$surface.thin_walled),
+            core::slice::from_ref(&$surface.geometry_opacity),
+            &$surface.emission_color,
+            core::slice::from_ref(&$surface.emission_luminance),
+            core::slice::from_ref(&$surface.coat_weight),
+            core::slice::from_ref(&$surface.coat_roughness),
+            core::slice::from_ref(&$surface.coat_ior),
+            &$surface.coat_color,
+            core::slice::from_ref(&$surface.coat_roughness_anisotropy),
+            core::slice::from_ref(&$surface.coat_darkening),
+            core::slice::from_ref(&$surface.anisotropy),
+            core::slice::from_ref(&$surface.anisotropy_rotation),
+            core::slice::from_ref(&$surface.fuzz_weight),
+            core::slice::from_ref(&$surface.fuzz_roughness),
+            &$surface.fuzz_color,
+            core::slice::from_ref(&$surface.subsurface_weight),
+            core::slice::from_ref(&$surface.subsurface_radius),
+            &$surface.subsurface_color,
+            &$surface.subsurface_radius_scale,
+            core::slice::from_ref(&$surface.subsurface_scatter_anisotropy),
+            core::slice::from_ref(&$surface.transmission_weight),
+            core::slice::from_ref(&$surface.thickness),
+            core::slice::from_ref(&$surface.index_of_refraction),
+            core::slice::from_ref(&$surface.transmission_dispersion_scale),
+            &$surface.transmission_color,
+            &$surface.transmission_scatter,
+            core::slice::from_ref(&$surface.transmission_scatter_anisotropy),
+            core::slice::from_ref(&$surface.transmission_dispersion_abbe_number),
+            core::slice::from_ref(&$surface.thin_film_weight),
+            core::slice::from_ref(&$surface.thin_film_thickness),
+            core::slice::from_ref(&$surface.thin_film_ior),
+            core::slice::from_ref(&$surface.npr_face_softness),
+            core::slice::from_ref(&$surface.npr_stylized_ramp_softness),
+            core::slice::from_ref(&$surface.npr_stylized_specular_scale),
+            core::slice::from_ref(&$surface.npr_stylized_rim_scale),
+            core::slice::from_ref(&$surface.glint_weight),
+            core::slice::from_ref(&$surface.glint_roughness),
+            core::slice::from_ref(&$surface.glint_density),
+            core::slice::from_ref(&$surface.glint_bin_half_width),
+            core::slice::from_ref(&$surface.measured_weight),
+            core::slice::from_ref(&$surface.measured_phi_d),
+            core::slice::from_ref(&$surface.measured_scale),
+        ];
+        components
+    }};
+}

@@ -36,6 +36,30 @@ mod texture_sample;
 mod texture_upsample;
 mod validation;
 
+/// Canonical production WESL sources owned by the material ABI crate.
+///
+/// The render integration registers these bytes with its asset system, but the
+/// material crate remains the only source of truth. Keeping the source and
+/// bytes available here also lets CPU/GPU parity tests consume exactly the
+/// production shader instead of maintaining a copied fixture.
+pub mod shaders {
+    /// Source for the material header, texture record, and surface ABI.
+    pub const MATERIAL_SHADER_SOURCE: &str = include_str!("shaders/material.wesl");
+    /// Source for bindless material texture sampling.
+    pub const MATERIAL_SAMPLE_SHADER_SOURCE: &str = include_str!("shaders/material_sample.wesl");
+    /// Source for material virtual-texture page resolution.
+    pub const MATERIAL_VIRTUAL_TEXTURE_SHADER_SOURCE: &str =
+        include_str!("shaders/material_virtual_texture.wesl");
+
+    /// Embedded bytes for the material shader source.
+    pub const MATERIAL_SHADER_BYTES: &[u8] = include_bytes!("shaders/material.wesl");
+    /// Embedded bytes for the material sample shader source.
+    pub const MATERIAL_SAMPLE_SHADER_BYTES: &[u8] = include_bytes!("shaders/material_sample.wesl");
+    /// Embedded bytes for the material virtual-texture shader source.
+    pub const MATERIAL_VIRTUAL_TEXTURE_SHADER_BYTES: &[u8] =
+        include_bytes!("shaders/material_virtual_texture.wesl");
+}
+
 pub use authoring::{FACE_SHADOW_SDF_SEMANTIC, ILLUMINATION_MASK_SEMANTIC, MEASURED_BRDF_SEMANTIC};
 pub use bake::{
     bake_layer_stack, sanitize_weight, ConstantMask, LayerParams, LayerStack, LayerWeights,

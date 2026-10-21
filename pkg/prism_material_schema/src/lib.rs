@@ -76,7 +76,6 @@ pub struct SurfaceSchema {
     pub abi_version: u32,
     /// Bit-level specialization identity layout used by bake-time products.
     /// This is metadata for code generation, not a runtime header field.
-    #[serde(default)]
     pub specialization: SpecializationSchema,
     /// The always-present über-BSDF core record.
     pub core: Record,
@@ -111,32 +110,15 @@ pub struct SurfaceSchema {
 #[serde(deny_unknown_fields)]
 pub struct SpecializationSchema {
     /// Width of the serialized identity.
-    #[serde(default = "default_specialization_storage_bits")]
     pub storage_bits: u8,
     /// Illumination axis bit range.
-    #[serde(default = "default_illumination_bits")]
     pub illumination: BitRange,
     /// Live surface-lobe mask bit range.
-    #[serde(default = "default_lobe_mask_bits")]
     pub lobe_mask: BitRange,
     /// Raster/blend class bit range.
-    #[serde(default = "default_render_class_bits")]
     pub render_class: BitRange,
     /// Reserved high bits.
-    #[serde(default = "default_reserved_bits")]
     pub reserved: BitRange,
-}
-
-impl Default for SpecializationSchema {
-    fn default() -> Self {
-        Self {
-            storage_bits: default_specialization_storage_bits(),
-            illumination: default_illumination_bits(),
-            lobe_mask: default_lobe_mask_bits(),
-            render_class: default_render_class_bits(),
-            reserved: default_reserved_bits(),
-        }
-    }
 }
 
 /// A half-open bit range `[shift, shift + bits)`.
@@ -147,29 +129,6 @@ pub struct BitRange {
     pub shift: u8,
     /// Number of bits occupied by this range.
     pub bits: u8,
-}
-
-const fn default_specialization_storage_bits() -> u8 {
-    64
-}
-
-const fn default_illumination_bits() -> BitRange {
-    BitRange { shift: 0, bits: 8 }
-}
-
-const fn default_lobe_mask_bits() -> BitRange {
-    BitRange { shift: 8, bits: 32 }
-}
-
-const fn default_render_class_bits() -> BitRange {
-    BitRange { shift: 40, bits: 8 }
-}
-
-const fn default_reserved_bits() -> BitRange {
-    BitRange {
-        shift: 48,
-        bits: 16,
-    }
 }
 
 /// A runtime dynamic parameter channel (§17.1).
@@ -1385,6 +1344,51 @@ mod tests {
     }
 
     #[test]
+    fn specialization_has_no_implicit_layout_fallback() {
+        let (prefix, rest) = SURFACE_SCHEMA_TOML
+            .split_once("[specialization]\n")
+            .unwrap();
+        let (_, suffix) = rest.split_once("\n[core]").unwrap();
+        let missing = format!("{prefix}\n[core]{suffix}");
+        assert!(SurfaceSchema::parse(&missing).is_err());
+        for declaration in [
+            "storage_bits = 64\n",
+            "illumination = { shift = 0, bits = 8 }\n",
+            "lobe_mask = { shift = 8, bits = 32 }\n",
+            "render_class = { shift = 40, bits = 8 }\n",
+            "reserved = { shift = 48, bits = 16 }\n",
+        ] {
+            assert!(SURFACE_SCHEMA_TOML.contains(declaration));
+            let incomplete = SURFACE_SCHEMA_TOML.replacen(declaration, "", 1);
+            assert!(SurfaceSchema::parse(&incomplete).is_err(), "{declaration}");
+        }
+    }
+
+    #[test]
+    fn specialization_rejects_invalid_storage_ranges_and_overlaps() {
+        let original = surface_schema().specialization;
+        for width in [0, 65] {
+            let mut layout = original.clone();
+            layout.storage_bits = width;
+            assert!(validate_specialization(&layout).is_err());
+        }
+        for range in [
+            BitRange { shift: 0, bits: 0 },
+            BitRange { shift: 63, bits: 2 },
+        ] {
+            let mut layout = original.clone();
+            layout.reserved = range;
+            assert!(validate_specialization(&layout).is_err());
+        }
+        let mut layout = original;
+        layout.render_class.shift = layout.lobe_mask.shift;
+        assert!(matches!(
+            validate_specialization(&layout),
+            Err(SchemaError::InvalidSpecializationLayout(message)) if message.contains("overlaps")
+        ));
+    }
+
+    #[test]
     fn specialization_components_are_bounded_by_generated_u32_parts() {
         let mut schema = surface_schema();
         schema.specialization.illumination.bits = 33;
@@ -1553,7 +1557,7 @@ default = 0.0
 valid = "0.0..=1.0"
 "#;
         assert!(matches!(
-            SurfaceSchema::parse(bad),
+            SurfaceSchema::parse(&with_specialization(bad)),
             Err(SchemaError::OverlappingFields { .. })
         ));
     }
@@ -1574,13 +1578,25 @@ default = 0.0
 valid = "0.0..=1.0"
 "#;
         assert!(matches!(
-            SurfaceSchema::parse(bad),
+            SurfaceSchema::parse(&with_specialization(bad)),
             Err(SchemaError::IncompleteTiling { .. })
         ));
     }
 
+    fn with_specialization(source: &str) -> String {
+        let (_, rest) = SURFACE_SCHEMA_TOML
+            .split_once("[specialization]\n")
+            .unwrap();
+        let (declaration, _) = rest.split_once("\n[core]").unwrap();
+        source.replacen(
+            "[core]",
+            &format!("[specialization]\n{declaration}\n[core]"),
+            1,
+        )
+    }
+
     fn schema_with_records(records: &str) -> String {
-        format!(
+        with_specialization(&format!(
             r#"
 schema_version = 1
 abi_version = 5
@@ -1595,7 +1611,7 @@ default = 0.0
 valid = "0.0..=1.0"
 {records}
 "#
-        )
+        ))
     }
 
     #[test]

@@ -17,15 +17,17 @@
 //! ```text
 //! cargo run -p prism_material_schema --bin prism-material-codegen -- write
 //! cargo run -p prism_material_schema --bin prism-material-codegen -- write-rust
+//! cargo run -p prism_material_schema --bin prism-material-codegen -- write-contract
 //! cargo run -p prism_material_schema --bin prism-material-codegen -- check
 //! ```
 //!
-//! `write` rewrites both files from the schema. `check` regenerates in memory
-//! and exits non-zero (listing the stale files) if either committed file drifts
+//! `write` updates changed products from the schema. `check` regenerates in memory
+//! and exits non-zero (listing the stale files) if any committed file drifts
 //! from the schema — the hook a CI job and the `codegen_freshness` tests use.
 //! `write-rust` rewrites only the Rust product, which is useful when the
 //! material schema changes are intentionally scoped away from the render-scene
 //! shader tree.
+//! `write-contract` updates only the schema crate's generated CPU contract.
 
 #![expect(
     clippy::print_stdout,
@@ -58,11 +60,14 @@ fn workspace_root() -> PathBuf {
 }
 
 /// Emit every product from the current committed schema.
-fn products() -> Vec<Product> {
+fn products(root: &std::path::Path) -> std::io::Result<Vec<Product>> {
     let schema = surface_schema();
-    let classification_template =
-        include_str!("../../../prism_render_scene/src/shaders/material_classification.wesl");
-    vec![
+    // Preserve the current algorithm on disk, including concurrent runtime edits.
+    // A compiled-in template could overwrite them when an existing binary runs.
+    let classification_template = std::fs::read_to_string(
+        root.join("pkg/prism_render_scene/src/shaders/material_classification.wesl"),
+    )?;
+    Ok(vec![
         Product {
             relative_path: "pkg/prism_render_scene/src/shaders/material_unpack.wesl",
             contents: emit_wesl_unpack(&schema),
@@ -77,32 +82,41 @@ fn products() -> Vec<Product> {
         },
         Product {
             relative_path: "pkg/prism_render_scene/src/shaders/material_classification.wesl",
-            contents: emit_material_classification(&schema, classification_template),
+            contents: emit_material_classification(&schema, &classification_template),
         },
-    ]
-}
-
-fn rust_product() -> Product {
-    products()
-        .into_iter()
-        .find(|product| product.relative_path == "pkg/prism_render_material/src/surface_layout.rs")
-        .expect("Rust layout product must exist")
+    ])
 }
 
 fn main() -> ExitCode {
     let mode = std::env::args().nth(1).unwrap_or_default();
     let root = workspace_root();
-    let products = products();
+    let products = match products(&root) {
+        Ok(products) => products,
+        Err(error) => {
+            eprintln!("error: failed to read classification template: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
 
     match mode.as_str() {
-        "write" | "write-rust" => {
-            let selected = if mode == "write-rust" {
-                vec![rust_product()]
-            } else {
-                products
-            };
-            for p in &selected {
+        "write" | "write-rust" | "write-contract" => {
+            for p in &products {
+                let selected = match mode.as_str() {
+                    "write-rust" => {
+                        p.relative_path == "pkg/prism_render_material/src/surface_layout.rs"
+                    }
+                    "write-contract" => {
+                        p.relative_path == "pkg/prism_material_schema/src/generated_contract.rs"
+                    }
+                    _ => true,
+                };
+                if !selected {
+                    continue;
+                }
                 let path = root.join(p.relative_path);
+                if std::fs::read_to_string(&path).is_ok_and(|current| current == p.contents) {
+                    continue;
+                }
                 if let Err(e) = std::fs::write(&path, &p.contents) {
                     eprintln!("error: failed to write {}: {e}", path.display());
                     return ExitCode::FAILURE;
@@ -136,7 +150,7 @@ fn main() -> ExitCode {
             }
         }
         other => {
-            eprintln!("usage: prism-material-codegen <write|write-rust|check>");
+            eprintln!("usage: prism-material-codegen <write|write-rust|write-contract|check>");
             if !other.is_empty() {
                 eprintln!("unknown mode: {other}");
             }

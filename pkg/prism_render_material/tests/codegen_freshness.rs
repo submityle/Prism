@@ -76,8 +76,7 @@ fn committed_classification_metadata_matches_generator() {
 #[test]
 fn generated_specialization_id_round_trips_schema_axes() {
     use prism_material_schema::generated_contract::{
-        pack_specialization_id, SpecializationId, SPECIALIZATION_LAYOUT,
-        SPECIALIZATION_RESERVED_MASK,
+        SpecializationId, SPECIALIZATION_LAYOUT, SPECIALIZATION_RESERVED_MASK,
     };
 
     let schema = surface_schema();
@@ -101,10 +100,12 @@ fn generated_specialization_id_round_trips_schema_axes() {
     let illumination = 0xA5;
     let lobe_mask = prism_render_material::LobeMask::all().bits();
     let render_class = 0x5A;
-    let id = SpecializationId::new(illumination, lobe_mask, render_class);
+    let id = SpecializationId::try_new(illumination, lobe_mask, render_class).unwrap();
     assert_eq!(
         id.raw(),
-        pack_specialization_id(illumination, lobe_mask, render_class)
+        u64::from(illumination) << schema.specialization.illumination.shift
+            | u64::from(lobe_mask) << schema.specialization.lobe_mask.shift
+            | u64::from(render_class) << schema.specialization.render_class.shift
     );
     assert_eq!(
         id.parts(),
@@ -119,7 +120,89 @@ fn generated_specialization_id_round_trips_schema_axes() {
         SpecializationId::from_raw(id.raw() | SPECIALIZATION_RESERVED_MASK),
         None
     );
-    assert!(!id.has_reserved_bits());
+    assert_eq!(id.raw() & SPECIALIZATION_RESERVED_MASK, 0);
+}
+
+#[test]
+fn specialization_checks_every_bit_and_component_boundary() {
+    use prism_material_schema::generated_contract::{SpecializationId, SpecializationParts};
+
+    let layout = surface_schema().specialization;
+    let axes = [layout.illumination, layout.lobe_mask, layout.render_class];
+    let mut maximum = [0; 3];
+    for (axis, range) in axes.iter().enumerate() {
+        maximum[axis] = ((1u64 << range.bits) - 1) as u32;
+        for bit in 0..range.bits {
+            let mut parts = [0; 3];
+            parts[axis] = 1u32 << bit;
+            let id = SpecializationId::try_new(parts[0], parts[1], parts[2]).unwrap();
+            assert_eq!(id.raw(), 1u64 << (range.shift + bit));
+            assert_eq!(SpecializationId::from_raw(id.raw()), Some(id));
+            assert_eq!(
+                id.parts(),
+                SpecializationParts {
+                    illumination: parts[0],
+                    lobe_mask: parts[1],
+                    render_class: parts[2],
+                }
+            );
+        }
+        if range.bits < 32 {
+            let mut parts = [0; 3];
+            parts[axis] = 1u32 << range.bits;
+            assert_eq!(
+                SpecializationId::try_new(parts[0], parts[1], parts[2]),
+                None
+            );
+            parts[axis] = u32::MAX;
+            assert_eq!(
+                SpecializationId::try_new(parts[0], parts[1], parts[2]),
+                None
+            );
+        }
+    }
+    let id = SpecializationId::try_new(maximum[0], maximum[1], maximum[2]).unwrap();
+    assert_eq!(
+        id.parts(),
+        SpecializationParts {
+            illumination: maximum[0],
+            lobe_mask: maximum[1],
+            render_class: maximum[2],
+        }
+    );
+    for bit in 0..64 {
+        let expected_valid = axes.iter().any(|range| {
+            bit >= range.shift && u16::from(bit) < u16::from(range.shift) + u16::from(range.bits)
+        });
+        assert_eq!(
+            SpecializationId::from_raw(1u64 << bit).is_some(),
+            expected_valid
+        );
+    }
+}
+
+#[test]
+fn classification_regeneration_preserves_execution_algorithm_and_tracks_schema_mutations() {
+    let mut schema = surface_schema();
+    schema.specialization.illumination.bits = 7;
+    schema.specialization.reserved.bits = 15;
+    schema.validate().unwrap();
+    // Simulate an algorithm edit made after the generator binary was compiled.
+    let template = format!("{COMMITTED_CLASSIFICATION}\n// current execution algorithm revision\n");
+    let fresh = emit_material_classification(&schema, &template);
+    let split = |source: &str| {
+        let (prefix, rest) = source
+            .split_once("// BEGIN SCHEMA-GENERATED MATERIAL METADATA")
+            .unwrap();
+        let (_, suffix) = rest
+            .split_once("// END SCHEMA-GENERATED MATERIAL METADATA")
+            .unwrap();
+        (prefix.to_string(), suffix.to_string())
+    };
+    assert_eq!(split(&fresh), split(&template));
+    assert!(fresh.contains("PRISM_SCHEMA_SPECIALIZATION_ILLUMINATION_BITS: u32 = 7u;"));
+    assert!(fresh.contains("PRISM_SCHEMA_SPECIALIZATION_RESERVED_BITS: u32 = 15u;"));
+    assert_eq!(emit_material_classification(&schema, &fresh), fresh);
 }
 
 #[test]

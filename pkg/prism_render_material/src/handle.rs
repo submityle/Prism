@@ -17,7 +17,13 @@ pub struct MaterialHandleAllocator {
 impl MaterialHandleAllocator {
     pub fn new(max_materials: u32) -> Self {
         Self {
-            inner: SceneHandleAllocator::new(max_materials),
+            // Scene slot zero is reserved; material capacity counts only live
+            // materials and therefore excludes that placeholder slot.
+            inner: SceneHandleAllocator::new(
+                max_materials
+                    .checked_add(1)
+                    .expect("material capacity exceeds scene handle slot space"),
+            ),
         }
     }
 
@@ -25,7 +31,7 @@ impl MaterialHandleAllocator {
         self.inner
             .allocate()
             .map_err(|error| MaterialCapacityError {
-                max_materials: error.max_slots,
+                max_materials: error.max_slots.saturating_sub(1),
             })
     }
 
@@ -64,13 +70,20 @@ mod tests {
 
     #[test]
     fn allocation_stops_at_capacity_and_reports_limit() {
-        // Slot zero is a reserved placeholder, so a capacity of two leaves room
-        // for exactly one user allocation before the pool is exhausted.
-        let mut allocator = MaterialHandleAllocator::new(2);
+        let mut allocator = MaterialHandleAllocator::new(1);
         let first = allocator.allocate().unwrap();
         assert!(allocator.validate(first));
         let overflow = allocator.allocate();
-        assert_eq!(overflow, Err(MaterialCapacityError { max_materials: 2 }));
+        assert_eq!(overflow, Err(MaterialCapacityError { max_materials: 1 }));
+    }
+
+    #[test]
+    fn zero_capacity_keeps_only_the_reserved_slot() {
+        let mut allocator = MaterialHandleAllocator::new(0);
+        assert_eq!(
+            allocator.allocate(),
+            Err(MaterialCapacityError { max_materials: 0 })
+        );
     }
 
     #[test]

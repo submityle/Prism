@@ -102,9 +102,7 @@ fn schema_surface_fields() -> BTreeMap<String, &'static str> {
 #[test]
 fn rust_and_wesl_surface_mirrors_match_in_order_and_type() {
     let rust = rust_fields(include_str!("../src/record.rs"));
-    let wesl = wesl_fields(include_str!(
-        "../../prism_render_scene/src/shaders/material.wesl"
-    ));
+    let wesl = wesl_fields(prism_render_material::shaders::MATERIAL_SHADER_SOURCE);
     assert!(!rust.is_empty());
     assert_eq!(
         rust.len(),

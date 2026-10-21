@@ -81,74 +81,14 @@ fn authored() -> GpuSurfaceParameters {
     }
 }
 
-/// Map a schema `(lobe_id, field_name)` to the authored component values. Core
-/// fields pass `lobe = None`. This is the human-audited bridge the S1 stage
-/// requires; S3 deletes it when the golden mirror is schema-generated.
+/// Resolve a schema identity through generated typed bindings, with no second
+/// hand-maintained field map between the CPU oracle and the runtime surface.
 fn authored_components(lobe: Option<&str>, field: &str, p: &GpuSurfaceParameters) -> Vec<f32> {
-    match (lobe, field) {
-        (None, "base_color") => p.base_color.to_vec(),
-        (None, "base_metalness") => vec![p.base_metalness],
-        (None, "specular_roughness") => vec![p.specular_roughness],
-        (None, "specular_weight") => vec![p.specular_weight],
-        (None, "specular_color") => p.specular_color.to_vec(),
-        (None, "specular_ior") => vec![p.specular_ior],
-        (None, "geometry_thin_walled") => vec![p.thin_walled],
-        (None, "geometry_opacity") => vec![p.geometry_opacity],
-        (None, "ambient_occlusion") => vec![p.ambient_occlusion],
-        (None, "normal_scale") => vec![p.normal_scale],
-        (None, "alpha_cutoff") => vec![p.alpha_cutoff],
-        (None, "base_weight") => vec![p.base_weight],
-        (None, "base_diffuse_roughness") => vec![p.base_diffuse_roughness],
-        (Some("emission"), "emission_color") => p.emission_color.to_vec(),
-        (Some("emission"), "emission_luminance") => vec![p.emission_luminance],
-        (Some("clearcoat"), "coat_weight") => vec![p.coat_weight],
-        (Some("clearcoat"), "coat_roughness") => vec![p.coat_roughness],
-        (Some("clearcoat"), "coat_ior") => vec![p.coat_ior],
-        (Some("clearcoat"), "coat_color") => p.coat_color.to_vec(),
-        (Some("clearcoat"), "coat_roughness_anisotropy") => vec![p.coat_roughness_anisotropy],
-        (Some("clearcoat"), "coat_darkening") => vec![p.coat_darkening],
-        (Some("anisotropy"), "specular_roughness_anisotropy") => vec![p.anisotropy],
-        (Some("anisotropy"), "anisotropy_rotation") => vec![p.anisotropy_rotation],
-        (Some("sheen"), "fuzz_weight") => vec![p.fuzz_weight],
-        (Some("sheen"), "fuzz_roughness") => vec![p.fuzz_roughness],
-        (Some("sheen"), "fuzz_color") => p.fuzz_color.to_vec(),
-        (Some("subsurface"), "subsurface_weight") => vec![p.subsurface_weight],
-        (Some("subsurface"), "subsurface_color") => p.subsurface_color.to_vec(),
-        (Some("subsurface"), "subsurface_radius") => vec![p.subsurface_radius],
-        (Some("subsurface"), "subsurface_radius_scale") => p.subsurface_radius_scale.to_vec(),
-        (Some("subsurface"), "subsurface_scatter_anisotropy") => {
-            vec![p.subsurface_scatter_anisotropy]
-        }
-        (Some("transmission"), "transmission_weight") => vec![p.transmission_weight],
-        (Some("transmission"), "transmission_depth") => vec![p.thickness],
-        (Some("transmission"), "index_of_refraction") => vec![p.index_of_refraction],
-        (Some("transmission"), "transmission_dispersion_scale") => {
-            vec![p.transmission_dispersion_scale]
-        }
-        (Some("transmission"), "transmission_color") => p.transmission_color.to_vec(),
-        (Some("transmission"), "transmission_scatter") => p.transmission_scatter.to_vec(),
-        (Some("transmission"), "transmission_scatter_anisotropy") => {
-            vec![p.transmission_scatter_anisotropy]
-        }
-        (Some("transmission"), "transmission_dispersion_abbe_number") => {
-            vec![p.transmission_dispersion_abbe_number]
-        }
-        (Some("thin_film"), "thin_film_weight") => vec![p.thin_film_weight],
-        (Some("thin_film"), "thin_film_thickness") => vec![p.thin_film_thickness],
-        (Some("thin_film"), "thin_film_ior") => vec![p.thin_film_ior],
-        (Some("npr_face"), "softness") => vec![p.npr_face_softness],
-        (Some("npr_face"), "ramp_softness") => vec![p.npr_stylized_ramp_softness],
-        (Some("npr_face"), "specular_scale") => vec![p.npr_stylized_specular_scale],
-        (Some("npr_face"), "rim_scale") => vec![p.npr_stylized_rim_scale],
-        (Some("glint"), "glint_weight") => vec![p.glint_weight],
-        (Some("glint"), "glint_roughness") => vec![p.glint_roughness],
-        (Some("glint"), "glint_density") => vec![p.glint_density],
-        (Some("glint"), "glint_bin_half_width") => vec![p.glint_bin_half_width],
-        (Some("measured_brdf"), "measured_weight") => vec![p.measured_weight],
-        (Some("measured_brdf"), "measured_phi_d") => vec![p.measured_phi_d],
-        (Some("measured_brdf"), "measured_scale") => vec![p.measured_scale],
-        other => panic!("schema field {other:?} has no authored binding"),
-    }
+    let index = prism_material_schema::generated_contract::CPU_SURFACE_FIELDS
+        .iter()
+        .position(|entry| entry.lobe == lobe && entry.name == field)
+        .expect("schema field must have a generated CPU binding");
+    prism_material_schema::cpu_surface_components!(p)[index].to_vec()
 }
 
 fn schema() -> SurfaceSchema {
@@ -490,6 +430,68 @@ fn schema_defaults_match_neutral_surface() {
                 lobe.id,
                 field.name
             );
+        }
+    }
+}
+
+#[test]
+fn generated_cpu_sample_and_golden_bindings_match_runtime_packing_for_every_lobe_subset() {
+    use prism_material_schema::generated_contract::{
+        CPU_GOLDEN_FIELD_INDICES, CPU_SAMPLE_FIELD_INDICES, CPU_SURFACE_FIELDS,
+    };
+
+    let schema = schema();
+    for parameters in [GpuSurfaceParameters::default(), authored()] {
+        let components = prism_material_schema::cpu_surface_components!(parameters);
+        assert_eq!(components.len(), CPU_SURFACE_FIELDS.len());
+        for (field, actual) in CPU_SURFACE_FIELDS.iter().zip(components) {
+            assert_eq!(actual.len(), field.words as usize, "{} arity", field.name);
+        }
+        for subset in 0..(1u32 << LobeMask::COUNT) {
+            let mask = SURFACE_LOBES
+                .iter()
+                .enumerate()
+                .fold(0, |mask, (index, lobe)| {
+                    mask | if subset & (1 << index) != 0 {
+                        lobe.mask_bits
+                    } else {
+                        0
+                    }
+                });
+            let words = SurfaceParameterBlock::from_full(&parameters, LobeMask(mask)).pack();
+            let placements = schema.placements(mask);
+            for indices in [
+                CPU_SAMPLE_FIELD_INDICES.as_slice(),
+                CPU_GOLDEN_FIELD_INDICES.as_slice(),
+            ] {
+                for &index in indices {
+                    let field = &CPU_SURFACE_FIELDS[index];
+                    if let Some(placement) = placements.iter().find(|placement| {
+                        placement.lobe.as_deref() == field.lobe && placement.name == field.name
+                    }) {
+                        let actual =
+                            &words[placement.word_offset as usize..][..field.words as usize];
+                        let expected = components[index]
+                            .iter()
+                            .map(|value| value.to_bits())
+                            .collect::<Vec<_>>();
+                        assert_eq!(
+                            actual, expected,
+                            "mask {mask:#x}, {:?}.{}",
+                            field.lobe, field.name
+                        );
+                    } else {
+                        assert!(field.lobe.is_some(), "core fields cannot disappear");
+                        let neutral = GpuSurfaceParameters::default();
+                        let defaults = prism_material_schema::cpu_surface_components!(neutral);
+                        assert_eq!(
+                            defaults[index], field.default,
+                            "inactive {} default",
+                            field.name
+                        );
+                    }
+                }
+            }
         }
     }
 }

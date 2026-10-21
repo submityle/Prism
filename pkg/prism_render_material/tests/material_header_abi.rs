@@ -16,6 +16,7 @@
 //! matches `size_of::<GpuMaterialHeader>()`. Editing either side without the
 //! other fails the build.
 
+use std::borrow::Cow;
 use std::mem::size_of;
 use std::path::Path;
 
@@ -106,6 +107,20 @@ const MIRRORS: [(&str, &str); 6] = [
     ("material_classification.wesl", "MaterialHeader"),
 ];
 
+fn mirror_source(file: &str) -> Cow<'static, str> {
+    if file == "material.wesl" {
+        return Cow::Borrowed(prism_render_material::shaders::MATERIAL_SHADER_SOURCE);
+    }
+
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../prism_render_scene/src/shaders")
+        .join(file);
+    Cow::Owned(
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", path.display())),
+    )
+}
+
 #[test]
 fn every_wesl_material_header_mirrors_the_rust_struct_exactly() {
     let rust = rust_fields(include_str!("../src/record.rs"));
@@ -119,10 +134,8 @@ fn every_wesl_material_header_mirrors_the_rust_struct_exactly() {
         assert_eq!(ty, "u32", "header field {name} must be a u32 word");
     }
 
-    let shaders = Path::new(env!("CARGO_MANIFEST_DIR")).join("../prism_render_scene/src/shaders");
     for (file, struct_name) in MIRRORS {
-        let source = std::fs::read_to_string(shaders.join(file))
-            .unwrap_or_else(|error| panic!("read {file}: {error}"));
+        let source = mirror_source(file);
         let mirror = wesl_fields(&source, struct_name);
         assert_eq!(
             mirror, rust,
@@ -156,10 +169,8 @@ fn dynamic_channel_header_words_follow_schema_order() {
         );
     }
 
-    let shaders = Path::new(env!("CARGO_MANIFEST_DIR")).join("../prism_render_scene/src/shaders");
     for (file, struct_name) in MIRRORS {
-        let source = std::fs::read_to_string(shaders.join(file))
-            .unwrap_or_else(|error| panic!("read {file}: {error}"));
+        let source = mirror_source(file);
         let mirror = wesl_fields(&source, struct_name);
         let dynamic = mirror
             .iter()

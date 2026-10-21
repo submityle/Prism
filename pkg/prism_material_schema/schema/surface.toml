@@ -10,12 +10,21 @@
 # `material_unpack` twin and Rust `surface_layout` facts are emitted from this
 # file by `prism-material-codegen`, and `codegen_freshness` fails on drift.
 
-schema_version = 2
+schema_version = 3
 # Tracks `MATERIAL_ABI_VERSION`. v5 introduced the expanded OpenPBR clearcoat
 # block; v6 adds the eight-word material texture row with optional VT metadata.
 # VT sampling is not implied by this ABI metadata: the material resolve consumer
 # and streaming-resource bindings remain a separate implementation step.
 abi_version = 8
+
+# Bake-time specialization identity layout. This is metadata only: the
+# current runtime carries execution-table bindings in the material header.
+[specialization]
+storage_bits = 64
+illumination = { shift = 0, bits = 8 }
+lobe_mask = { shift = 8, bits = 32 }
+render_class = { shift = 40, bits = 8 }
+reserved = { shift = 48, bits = 16 }
 
 # ---------------------------------------------------------------------------
 # Core: the always-present OpenPBR-anchored base every lit/stylized/unlit
@@ -29,7 +38,7 @@ name = "base_color"
 type = "vec4f"
 bit_region = "KHR"
 pack_slot = 0
-consumed_by = ["unpack", "classify", "sample", "golden", "lit", "npr"]
+consumed_by = ["unpack", "sample", "golden", "lit", "npr"]
 responses = { lit = { state = "mapped", semantic = "base albedo controls the principled direct response", test = "pkg/prism_render_shading/src/lighting.rs::white_furnace_stays_bounded_across_roughness_and_metalness" }, npr = { state = "mapped", semantic = "base color modulates the tested stylized direct response", test = "pkg/prism_render_shading/src/stylized.rs::stylized_specular_adds_a_bounded_hot_spot" }, unlit = { state = "intentionally_unmapped", reason = "The Unlit contract does not claim decode-only field evidence for this field." } }
 # `OpenPBR` `base_color` default `(0.8, 0.8, 0.8)`; the alpha is Prism's own
 # coverage channel (opaque = 1).
@@ -43,7 +52,7 @@ name = "base_metalness"
 type = "f32"
 bit_region = "KHR"
 pack_slot = 4
-consumed_by = ["unpack", "classify", "sample", "golden", "lit"]
+consumed_by = ["unpack", "sample", "golden", "lit"]
 responses = { lit = { state = "mapped", semantic = "metalness selects the conductor/base energy branch", test = "pkg/prism_render_shading/src/lighting.rs::white_furnace_stays_bounded_across_roughness_and_metalness" }, npr = { state = "intentionally_unmapped", reason = "The NPR adapter does not interpret this field in the tested response path." }, unlit = { state = "intentionally_unmapped", reason = "The Unlit contract does not claim decode-only field evidence for this field." } }
 default = 0.0
 valid = "0.0..=1.0"
@@ -55,7 +64,7 @@ name = "specular_roughness"
 type = "f32"
 bit_region = "KHR"
 pack_slot = 5
-consumed_by = ["unpack", "classify", "sample", "golden", "lit", "npr"]
+consumed_by = ["unpack", "sample", "golden", "lit", "npr"]
 responses = { lit = { state = "mapped", semantic = "roughness controls the principled GGX width", test = "pkg/prism_render_shading/src/lighting.rs::white_furnace_stays_bounded_across_roughness_and_metalness" }, npr = { state = "mapped", semantic = "roughness controls the tested stylized highlight width", test = "pkg/prism_render_shading/src/stylized.rs::stylized_specular_adds_a_bounded_hot_spot" }, unlit = { state = "intentionally_unmapped", reason = "The Unlit contract does not claim decode-only field evidence for this field." } }
 # `OpenPBR` `specular_roughness` default `0.3`.
 default = 0.3
@@ -106,7 +115,7 @@ name = "alpha_cutoff"
 type = "f32"
 bit_region = "KHR"
 pack_slot = 9
-consumed_by = ["unpack", "classify", "sample"]
+consumed_by = ["unpack", "sample"]
 responses = { lit = { state = "intentionally_unmapped", reason = "The Lit adapter does not interpret this field in the tested response path." }, npr = { state = "intentionally_unmapped", reason = "The NPR adapter does not interpret this field in the tested response path." }, unlit = { state = "intentionally_unmapped", reason = "The Unlit contract does not claim decode-only field evidence for this field." } }
 default = 0.5
 valid = "0.0..=1.0"
@@ -197,7 +206,7 @@ name = "geometry_opacity"
 type = "f32"
 bit_region = "KHR"
 pack_slot = 18
-consumed_by = ["unpack", "classify", "sample"]
+consumed_by = ["unpack", "sample"]
 responses = { lit = { state = "intentionally_unmapped", reason = "The Lit adapter does not interpret this field in the tested response path." }, npr = { state = "intentionally_unmapped", reason = "The NPR adapter does not interpret this field in the tested response path." }, unlit = { state = "intentionally_unmapped", reason = "The Unlit contract does not claim decode-only field evidence for this field." } }
 # OpenPBR `geometry_opacity` in [0, 1]: the coverage of the surface, multiplied
 # into the alpha the blend/mask path reads. The default 1.0 is the exact
@@ -241,7 +250,7 @@ name = "emission_color"
 type = "vec4f"
 bit_region = "KHR"
 pack_slot = 0
-consumed_by = ["unpack", "classify", "sample", "golden"]
+consumed_by = ["unpack", "sample", "golden"]
 responses = { lit = { state = "intentionally_unmapped", reason = "The Lit adapter does not interpret this field in the tested response path." }, npr = { state = "intentionally_unmapped", reason = "The NPR adapter does not interpret this field in the tested response path." }, unlit = { state = "intentionally_unmapped", reason = "The Unlit contract does not claim decode-only field evidence for this field." } }
 # `OpenPBR` `emission_color` default `(1, 1, 1)`; with the specification's
 # `emission_luminance == 0` default the emitted radiance is exactly zero, so the
@@ -312,8 +321,7 @@ name = "coat_weight"
 type = "f32"
 bit_region = "KHR"
 pack_slot = 0
-spec_subfield = "closure_mask"
-consumed_by = ["unpack", "classify", "sample", "golden", "lit"]
+consumed_by = ["unpack", "sample", "golden", "lit"]
 responses = { lit = { state = "mapped", semantic = "clearcoat parameters shape the coupled coat lobe", test = "pkg/prism_render_shading/src/clearcoat.rs::clearcoat_is_finite_and_non_negative_across_parameters" }, npr = { state = "intentionally_unmapped", reason = "The NPR adapter does not interpret this field in the tested response path." }, unlit = { state = "intentionally_unmapped", reason = "The Unlit contract does not claim decode-only field evidence for this field." } }
 default = 0.0
 valid = "0.0..=1.0"
@@ -467,8 +475,7 @@ name = "specular_roughness_anisotropy"
 type = "f32"
 bit_region = "KHR"
 pack_slot = 0
-spec_subfield = "closure_mask"
-consumed_by = ["unpack", "classify", "sample", "golden", "lit"]
+consumed_by = ["unpack", "sample", "golden", "lit"]
 responses = { lit = { state = "mapped", semantic = "anisotropy parameters stretch and rotate the conductor lobe", test = "pkg/prism_render_shading/src/lighting.rs::positive_anisotropy_stretches_the_tangent_lobe" }, npr = { state = "intentionally_unmapped", reason = "The NPR adapter does not interpret this field in the tested response path." }, unlit = { state = "intentionally_unmapped", reason = "The Unlit contract does not claim decode-only field evidence for this field." } }
 # The `OpenPBR` identifier is `specular_roughness_anisotropy`; Prism's decoded fat
 # struct keeps the historical short name `anisotropy` (the elongation direction
@@ -530,8 +537,7 @@ name = "fuzz_weight"
 type = "f32"
 bit_region = "KHR"
 pack_slot = 0
-spec_subfield = "closure_mask"
-consumed_by = ["unpack", "classify", "sample", "golden"]
+consumed_by = ["unpack", "sample", "golden"]
 responses = { lit = { state = "intentionally_unmapped", reason = "The Lit adapter does not interpret this field in the tested response path." }, npr = { state = "intentionally_unmapped", reason = "The NPR adapter does not interpret this field in the tested response path." }, unlit = { state = "intentionally_unmapped", reason = "The Unlit contract does not claim decode-only field evidence for this field." } }
 default = 0.0
 valid = "0.0..=1.0"
@@ -604,8 +610,7 @@ name = "subsurface_weight"
 type = "f32"
 bit_region = "KHR"
 pack_slot = 0
-spec_subfield = "closure_mask"
-consumed_by = ["unpack", "classify", "sample", "golden"]
+consumed_by = ["unpack", "sample", "golden"]
 responses = { lit = { state = "intentionally_unmapped", reason = "The Lit adapter does not interpret this field in the tested response path." }, npr = { state = "intentionally_unmapped", reason = "The NPR adapter does not interpret this field in the tested response path." }, unlit = { state = "intentionally_unmapped", reason = "The Unlit contract does not claim decode-only field evidence for this field." } }
 default = 0.0
 valid = "0.0..=1.0"
@@ -732,8 +737,7 @@ name = "transmission_weight"
 type = "f32"
 bit_region = "KHR"
 pack_slot = 0
-spec_subfield = "closure_mask"
-consumed_by = ["unpack", "classify", "sample", "golden", "lit"]
+consumed_by = ["unpack", "sample", "golden", "lit"]
 responses = { lit = { state = "mapped", semantic = "transmission parameters control slab transport", test = "pkg/prism_render_shading/src/lighting.rs::transmission_carries_light_through_the_slab" }, npr = { state = "intentionally_unmapped", reason = "The NPR adapter does not interpret this field in the tested response path." }, unlit = { state = "intentionally_unmapped", reason = "The Unlit contract does not claim decode-only field evidence for this field." } }
 default = 0.0
 valid = "0.0..=1.0"
@@ -880,8 +884,7 @@ name = "thin_film_weight"
 type = "f32"
 bit_region = "KHR"
 pack_slot = 0
-spec_subfield = "closure_mask"
-consumed_by = ["unpack", "classify", "sample", "golden", "lit"]
+consumed_by = ["unpack", "sample", "golden", "lit"]
 responses = { lit = { state = "mapped", semantic = "thin-film parameters control bounded iridescent Fresnel response", test = "pkg/prism_render_shading/src/gi/material/thin_film.rs::iridescent_fresnel_nonzero_thickness_tints_and_stays_bounded" }, npr = { state = "intentionally_unmapped", reason = "The NPR adapter does not interpret this field in the tested response path." }, unlit = { state = "intentionally_unmapped", reason = "The Unlit contract does not claim decode-only field evidence for this field." } }
 default = 0.0
 valid = "0.0..=1.0"
@@ -946,8 +949,7 @@ surface_field = "npr_face_softness"
 type = "f32"
 bit_region = "PRISM"
 pack_slot = 0
-spec_subfield = "closure_mask"
-consumed_by = ["unpack", "classify", "sample", "golden", "npr"]
+consumed_by = ["unpack", "sample", "golden", "npr"]
 responses = { lit = { state = "intentionally_unmapped", reason = "The Lit adapter does not interpret this field in the tested response path." }, npr = { state = "mapped", semantic = "the material-local face-shadow terminator reads this softness value", test = "pkg/prism_render_shading/src/resolve.rs::per_material_stylized_lobe_changes_npr_response" }, unlit = { state = "intentionally_unmapped", reason = "The Unlit contract does not claim decode-only field evidence for this field." } }
 default = 0.1
 valid = "0.0..=1.0"
@@ -960,7 +962,6 @@ surface_field = "npr_stylized_ramp_softness"
 type = "f32"
 bit_region = "PRISM"
 pack_slot = 1
-spec_subfield = "closure_mask"
 consumed_by = ["unpack", "sample", "golden", "npr"]
 responses = { lit = { state = "intentionally_unmapped", reason = "The Lit adapter does not interpret the stylized response modifier." }, npr = { state = "mapped", semantic = "the material-local stylized ramp modifier scales the default NPR band transition", test = "pkg/prism_render_shading/src/resolve.rs::per_material_stylized_lobe_changes_npr_response" }, unlit = { state = "intentionally_unmapped", reason = "The Unlit contract does not evaluate stylized response modifiers." } }
 default = 1.0
@@ -974,7 +975,6 @@ surface_field = "npr_stylized_specular_scale"
 type = "f32"
 bit_region = "PRISM"
 pack_slot = 2
-spec_subfield = "closure_mask"
 consumed_by = ["unpack", "sample", "golden", "npr"]
 responses = { lit = { state = "intentionally_unmapped", reason = "The Lit adapter does not interpret the stylized response modifier." }, npr = { state = "mapped", semantic = "the material-local stylized specular modifier scales the default NPR highlight", test = "pkg/prism_render_shading/src/resolve.rs::per_material_stylized_lobe_changes_npr_response" }, unlit = { state = "intentionally_unmapped", reason = "The Unlit contract does not evaluate stylized response modifiers." } }
 default = 1.0
@@ -988,7 +988,6 @@ surface_field = "npr_stylized_rim_scale"
 type = "f32"
 bit_region = "PRISM"
 pack_slot = 3
-spec_subfield = "closure_mask"
 consumed_by = ["unpack", "sample", "golden", "npr"]
 responses = { lit = { state = "intentionally_unmapped", reason = "The Lit adapter does not interpret the stylized response modifier." }, npr = { state = "mapped", semantic = "the material-local stylized rim modifier scales the default NPR edge response", test = "pkg/prism_render_shading/src/resolve.rs::per_material_stylized_lobe_changes_npr_response" }, unlit = { state = "intentionally_unmapped", reason = "The Unlit contract does not evaluate stylized response modifiers." } }
 default = 1.0
@@ -1022,8 +1021,7 @@ name = "glint_weight"
 type = "f32"
 bit_region = "PRISM"
 pack_slot = 0
-spec_subfield = "closure_mask"
-consumed_by = ["unpack", "classify", "sample", "golden", "lit"]
+consumed_by = ["unpack", "sample", "golden", "lit"]
 responses = { lit = { state = "mapped", semantic = "glint parameters control deterministic discrete microfacet response", test = "pkg/prism_render_shading/src/lighting.rs::glint_is_deterministic_and_decorrelates_in_space_and_direction" }, npr = { state = "intentionally_unmapped", reason = "The NPR adapter does not interpret this field in the tested response path." }, unlit = { state = "intentionally_unmapped", reason = "The Unlit contract does not claim decode-only field evidence for this field." } }
 default = 0.0
 valid = "0.0..=1.0"
@@ -1108,8 +1106,7 @@ name = "measured_weight"
 type = "f32"
 bit_region = "PRISM"
 pack_slot = 0
-spec_subfield = "closure_mask"
-consumed_by = ["unpack", "classify", "sample", "golden"]
+consumed_by = ["unpack", "sample", "golden"]
 responses = { lit = { state = "intentionally_unmapped", reason = "The Lit adapter does not interpret this field in the tested response path." }, npr = { state = "intentionally_unmapped", reason = "The NPR adapter does not interpret this field in the tested response path." }, unlit = { state = "intentionally_unmapped", reason = "The Unlit contract does not claim decode-only field evidence for this field." } }
 default = 0.0
 valid = "0.0..=1.0"
