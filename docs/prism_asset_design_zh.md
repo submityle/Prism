@@ -875,6 +875,18 @@ NVMe ──(批量队列, DirectStorage 形态)──▶ 显存暂存 ──(GPU
 
 ### 11.3 与渲染驻留的边界
 
+**2026-10-22 材质 VT 源布局与驻留事务增量**：`MaterialVtSourceLayout`
+现在只按 mip 数分配元数据，以 checked `u64` 表示完整源偏移/长度；resident
+源不再为描述页地址而物化整幅 CPU 纹理或逐页表。`MaterialVtSourceSnapshot`
+组合该布局与不可变字节，继续严格校验 payload 长度并提供借用行视图。
+`MaterialRegistry::update_texture_residency` 在写入前校验整批 handle generation、
+精确 authored revision、完整 expected texture row 和重复目标，只允许修改四个 VT
+驻留字段；任一冲突整批不写。成功不克隆 material record、不改变 authored revision、
+dynamic channels 或 execution binding，每个材质只标脏一次，epoch 每批只增加一次。
+`cargo test -j1 --locked -p prism_render_material` 的实际日志
+`/private/tmp/prism-asset-resident-evidence.2FUzTT/material-full.log` 记录 975 项通过、
+0 失败、0 忽略（含布局专项 8 项与驻留事务 5 项）；这不是完整 VT 生产链验收。
+
 `prism_asset` 负责「字节到达 + 层级决策 + 解压」，**GPU 资源对象的创建/销毁**归渲染侧（`prism_render_*`）：流送管理器发「层级 N 的字节已就绪」事件，渲染侧据此建/换 `wgpu` 纹理视图。两者经句柄 + 事件解耦，`prism_asset` 不依赖任何渲染 crate（保持 L5→L4 单向）。
 
 **2026-10-15 渲染侧窄切片已交付**：`prism_render_app::render_asset` 新增

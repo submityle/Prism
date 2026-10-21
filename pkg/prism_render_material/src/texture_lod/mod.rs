@@ -49,7 +49,7 @@ pub use aniso::{anisotropic_taps, AnisoTaps, MAX_ANISO_TAPS};
 pub use material_vt::{
     MaterialVtError, MaterialVtFormat, MaterialVtMipMetadata, MaterialVtPage,
     MaterialVtPageKeyIter, MaterialVtPageMetadata, MaterialVtPageRow, MaterialVtPageRows,
-    MaterialVtRow, MaterialVtSourceDescriptor, MaterialVtSourceSnapshot,
+    MaterialVtRow, MaterialVtSourceDescriptor, MaterialVtSourceLayout, MaterialVtSourceSnapshot,
 };
 pub use material_vt_atlas::{
     build_material_vt_atlas_tile, MaterialVtAtlasConfig, MaterialVtAtlasTile,

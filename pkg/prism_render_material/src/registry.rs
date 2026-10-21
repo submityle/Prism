@@ -17,8 +17,28 @@ pub struct MaterialSnapshot {
 pub enum MaterialRegistryError {
     CapacityExceeded,
     InvalidHandle(GenerationalHandle),
-    StaleRevision { current: u32, incoming: u32 },
+    StaleRevision {
+        current: u32,
+        incoming: u32,
+    },
     InvalidExecutionBinding,
+    InvalidTextureResidencyUpdate {
+        handle: GenerationalHandle,
+        texture_index: usize,
+    },
+}
+
+/// A compare-and-update patch for one texture's runtime residency metadata.
+/// `expected` must match the entire current texture row. `replacement` may only
+/// change its four virtual-texture fields, never the authored slot identity,
+/// semantic or sampler. This also guards against stale same-revision residency.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MaterialTextureResidencyUpdate {
+    pub handle: GenerationalHandle,
+    pub expected_revision: u32,
+    pub texture_index: usize,
+    pub expected: GpuMaterialTexture,
+    pub replacement: GpuMaterialTexture,
 }
 
 #[derive(Clone)]
@@ -114,6 +134,85 @@ impl MaterialRegistry {
             .map(|slot| &slot.record)
             .filter(|record| record.handle == handle)
     }
+
+    /// Atomically update texture residency without republishing authored data.
+    ///
+    /// Every handle, exact authored revision and expected texture row is checked
+    /// before any mutation. Missing textures, duplicate targets, stale rows and
+    /// attempts to change slot/generation/semantic/sampler reject the whole batch
+    /// with `InvalidTextureResidencyUpdate`. No material record is cloned.
+    ///
+    /// Returns the number of changed material rows. Changed rows are marked
+    /// dirty and the epoch advances once per nonempty transaction; authored
+    /// revisions (including `u32::MAX`), execution bindings and dynamic channels
+    /// are untouched. Empty/unchanged batches do not write any registry state.
+    pub fn update_texture_residency(
+        &mut self,
+        updates: &[MaterialTextureResidencyUpdate],
+    ) -> Result<u32, MaterialRegistryError> {
+        let mut targets = BTreeSet::new();
+        let mut changed_rows = BTreeSet::new();
+        for update in updates {
+            if !self.allocator.validate(update.handle) {
+                return Err(MaterialRegistryError::InvalidHandle(update.handle));
+            }
+            let record = self
+                .get(update.handle)
+                .ok_or(MaterialRegistryError::InvalidHandle(update.handle))?;
+            if record.revision != update.expected_revision {
+                return Err(MaterialRegistryError::StaleRevision {
+                    current: record.revision,
+                    incoming: update.expected_revision,
+                });
+            }
+            let expected = update.expected;
+            let replacement = update.replacement;
+            if !targets.insert((update.handle.index, update.texture_index))
+                || record.textures.get(update.texture_index) != Some(&expected)
+                || (
+                    expected.index,
+                    expected.generation,
+                    expected.semantic,
+                    expected.sampler_index,
+                ) != (
+                    replacement.index,
+                    replacement.generation,
+                    replacement.semantic,
+                    replacement.sampler_index,
+                )
+            {
+                return Err(MaterialRegistryError::InvalidTextureResidencyUpdate {
+                    handle: update.handle,
+                    texture_index: update.texture_index,
+                });
+            }
+            if expected != replacement {
+                changed_rows.insert(update.handle.index);
+            }
+        }
+        if changed_rows.is_empty() {
+            return Ok(0);
+        }
+        // The exclusive borrow keeps the fully preflighted rows valid through
+        // commit. Only the four residency words are ever assigned.
+        for update in updates {
+            if update.expected == update.replacement {
+                continue;
+            }
+            let slot = self.slots[update.handle.index as usize]
+                .as_mut()
+                .expect("preflighted texture residency handle");
+            let texture = &mut slot.record.textures[update.texture_index];
+            texture.virtual_texture_id = update.replacement.virtual_texture_id;
+            texture.virtual_texture_width = update.replacement.virtual_texture_width;
+            texture.virtual_texture_height = update.replacement.virtual_texture_height;
+            texture.virtual_texture_page_size = update.replacement.virtual_texture_page_size;
+        }
+        let count = changed_rows.len() as u32;
+        self.dirty.extend(changed_rows);
+        self.epoch += 1;
+        Ok(count)
+    }
     pub fn retire(
         &mut self,
         handle: GenerationalHandle,
@@ -155,7 +254,8 @@ impl MaterialRegistry {
     }
     /// Set a material's runtime dynamic channels (§17.1).
     ///
-    /// This is the *only* mutation that does not go through [`Self::publish`]: a
+    /// Like texture residency and execution bindings, this runtime mutation
+    /// does not go through [`Self::publish`]: a
     /// wetness/snow/damage/dissolve change is not a new bake, so it must not bump
     /// the revision (which would invalidate the visibility buffer's generation
     /// check) or the compiled permutation — it only rewrites the four dynamic
@@ -415,6 +515,300 @@ mod tests {
             surface: GpuSurfaceParameters::default(),
             textures: Vec::new(),
         }
+    }
+
+    fn texture_record(handle: GenerationalHandle, revision: u32) -> MaterialRecord {
+        let mut record = record(handle, revision);
+        record.textures = vec![
+            GpuMaterialTexture::non_virtual(7, 3, 11, 13),
+            GpuMaterialTexture::non_virtual(8, 4, 17, 19),
+        ];
+        record
+    }
+
+    fn residency_update(
+        record: &MaterialRecord,
+        texture_index: usize,
+    ) -> MaterialTextureResidencyUpdate {
+        let expected = record.textures[texture_index];
+        MaterialTextureResidencyUpdate {
+            handle: record.handle,
+            expected_revision: record.revision,
+            texture_index,
+            expected,
+            replacement: GpuMaterialTexture {
+                virtual_texture_id: 23,
+                virtual_texture_width: 256,
+                virtual_texture_height: 128,
+                virtual_texture_page_size: 64,
+                ..expected
+            },
+        }
+    }
+
+    #[test]
+    fn texture_residency_at_revision_max_preserves_authored_data_and_storage() {
+        let mut registry = MaterialRegistry::new(4);
+        let handle = registry.allocate().unwrap();
+        let mut expected = texture_record(handle, u32::MAX);
+        registry.publish(expected.clone()).unwrap();
+        let channels = DynamicChannels {
+            wetness: 0.5,
+            ..DynamicChannels::NONE
+        };
+        registry.set_dynamic_channels(handle, channels).unwrap();
+        registry.take_dirty();
+        let before = registry.snapshot();
+        let textures_ptr = registry.get(handle).unwrap().textures.as_ptr();
+        let update = residency_update(&expected, 0);
+        assert_eq!(registry.update_texture_residency(&[update]), Ok(1));
+        expected.textures[0] = update.replacement;
+        assert_eq!(registry.get(handle), Some(&expected));
+        assert_eq!(
+            registry.get(handle).unwrap().textures.as_ptr(),
+            textures_ptr
+        );
+        assert_eq!(
+            registry.slots[handle.index as usize]
+                .as_ref()
+                .unwrap()
+                .revision,
+            u32::MAX
+        );
+        assert_eq!(registry.dynamic_channels_at(handle.index), channels);
+        assert_eq!(
+            registry.generation_at(handle.index),
+            Some(handle.generation)
+        );
+        assert_eq!(
+            registry.snapshot(),
+            MaterialSnapshot {
+                epoch: before.epoch + 1,
+                ..before
+            }
+        );
+        assert_eq!(registry.take_dirty(), vec![handle.index]);
+
+        // Revocation must remain possible without an authored revision left.
+        let revoke = MaterialTextureResidencyUpdate {
+            expected: update.replacement,
+            replacement: update.expected,
+            ..update
+        };
+        assert_eq!(registry.update_texture_residency(&[revoke]), Ok(1));
+        expected.textures[0] = update.expected;
+        assert_eq!(registry.get(handle), Some(&expected));
+        assert_eq!(registry.dynamic_channels_at(handle.index), channels);
+        assert_eq!(registry.take_dirty(), vec![handle.index]);
+    }
+
+    #[test]
+    fn texture_residency_empty_and_unchanged_batches_are_noops() {
+        let mut registry = MaterialRegistry::new(4);
+        let handle = registry.allocate().unwrap();
+        let record = texture_record(handle, 5);
+        let update = residency_update(&record, 0);
+        registry.publish(record.clone()).unwrap();
+        registry.take_dirty();
+        let before = registry.snapshot();
+        let noop = MaterialTextureResidencyUpdate {
+            replacement: update.expected,
+            ..update
+        };
+        for _ in 0..2 {
+            assert_eq!(registry.update_texture_residency(&[]), Ok(0));
+            assert_eq!(registry.update_texture_residency(&[noop]), Ok(0));
+            assert_eq!(registry.snapshot(), before);
+            assert_eq!(registry.get(handle), Some(&record));
+            assert!(registry.take_dirty().is_empty());
+        }
+        // A no-op may not consume an already pending dirty row either.
+        registry.mark_all_dirty();
+        let before = registry.snapshot();
+        assert_eq!(registry.update_texture_residency(&[noop]), Ok(0));
+        assert_eq!(registry.snapshot(), before);
+        assert_eq!(registry.take_dirty(), vec![0, handle.index]);
+    }
+
+    #[test]
+    fn texture_residency_batch_preflight_rolls_back_every_row_and_runtime_state() {
+        let mut registry = MaterialRegistry::new(4);
+        let first = registry.allocate().unwrap();
+        let second = registry.allocate().unwrap();
+        let first_record = texture_record(first, 5);
+        let second_record = texture_record(second, 7);
+        let valid = residency_update(&first_record, 0);
+        let last = residency_update(&second_record, 0);
+        registry.publish(first_record.clone()).unwrap();
+        registry.publish(second_record.clone()).unwrap();
+        let channels = DynamicChannels {
+            snow: 0.5,
+            ..DynamicChannels::NONE
+        };
+        registry.set_dynamic_channels(first, channels).unwrap();
+        registry.set_dynamic_channels(second, channels).unwrap();
+        registry.take_dirty();
+        let before = registry.snapshot();
+        let invalid_texture =
+            |texture_index| MaterialRegistryError::InvalidTextureResidencyUpdate {
+                handle: second,
+                texture_index,
+            };
+        let stale = second.with_generation(second.generation + 1);
+        let mut rejected = vec![
+            (
+                MaterialTextureResidencyUpdate {
+                    handle: stale,
+                    ..last
+                },
+                MaterialRegistryError::InvalidHandle(stale),
+            ),
+            (
+                MaterialTextureResidencyUpdate {
+                    expected_revision: 6,
+                    ..last
+                },
+                MaterialRegistryError::StaleRevision {
+                    current: 7,
+                    incoming: 6,
+                },
+            ),
+            (
+                MaterialTextureResidencyUpdate {
+                    expected_revision: 8,
+                    ..last
+                },
+                MaterialRegistryError::StaleRevision {
+                    current: 7,
+                    incoming: 8,
+                },
+            ),
+            (
+                MaterialTextureResidencyUpdate {
+                    texture_index: usize::MAX,
+                    ..last
+                },
+                invalid_texture(usize::MAX),
+            ),
+            (
+                MaterialTextureResidencyUpdate {
+                    expected: last.replacement,
+                    ..last
+                },
+                invalid_texture(0),
+            ),
+            (
+                valid,
+                MaterialRegistryError::InvalidTextureResidencyUpdate {
+                    handle: first,
+                    texture_index: 0,
+                },
+            ),
+        ];
+        // Each authored identity word is independently protected.
+        for word in 0..4 {
+            let mut replacement = last.replacement;
+            match word {
+                0 => replacement.index += 1,
+                1 => replacement.generation += 1,
+                2 => replacement.semantic += 1,
+                _ => replacement.sampler_index += 1,
+            }
+            rejected.push((
+                MaterialTextureResidencyUpdate {
+                    replacement,
+                    ..last
+                },
+                invalid_texture(0),
+            ));
+        }
+        for (invalid, error) in rejected {
+            assert_eq!(
+                registry.update_texture_residency(&[valid, invalid]),
+                Err(error)
+            );
+            assert_eq!(registry.get(first), Some(&first_record));
+            assert_eq!(registry.get(second), Some(&second_record));
+            assert_eq!(registry.dynamic_channels_at(first.index), channels);
+            assert_eq!(registry.dynamic_channels_at(second.index), channels);
+            assert_eq!(registry.snapshot(), before);
+            assert!(registry.take_dirty().is_empty());
+        }
+        // Preserve pending dirtiness on rejection, not only an empty dirty set.
+        registry.mark_all_dirty();
+        let before = registry.snapshot();
+        assert!(registry.update_texture_residency(&[valid, valid]).is_err());
+        assert_eq!(registry.snapshot(), before);
+        assert_eq!(registry.take_dirty(), vec![0, first.index, second.index]);
+    }
+
+    #[test]
+    fn texture_residency_rejects_unpublished_retired_and_reused_handles() {
+        let mut registry = MaterialRegistry::new(1);
+        let handle = registry.allocate().unwrap();
+        let record = texture_record(handle, 5);
+        let update = residency_update(&record, 0);
+        assert_eq!(
+            registry.update_texture_residency(&[update]),
+            Err(MaterialRegistryError::InvalidHandle(handle))
+        );
+        registry.publish(record).unwrap();
+        registry.retire(handle, GpuCompletionValue(1)).unwrap();
+        assert_eq!(
+            registry.update_texture_residency(&[update]),
+            Err(MaterialRegistryError::InvalidHandle(handle))
+        );
+        registry.reclaim_completed(GpuCompletionValue(1));
+        let replacement = registry.allocate().unwrap();
+        assert_eq!(replacement.index, handle.index);
+        assert_ne!(replacement.generation, handle.generation);
+        let record = texture_record(replacement, 5);
+        registry.publish(record.clone()).unwrap();
+        registry.take_dirty();
+        let before = registry.snapshot();
+        assert_eq!(
+            registry.update_texture_residency(&[update]),
+            Err(MaterialRegistryError::InvalidHandle(handle))
+        );
+        assert_eq!(registry.get(replacement), Some(&record));
+        assert_eq!(registry.snapshot(), before);
+        assert!(registry.take_dirty().is_empty());
+    }
+
+    #[test]
+    fn texture_residency_counts_materials_once_and_rejects_same_revision_stale_rows() {
+        let mut registry = MaterialRegistry::new(4);
+        let first = registry.allocate().unwrap();
+        let second = registry.allocate().unwrap();
+        let first_record = texture_record(first, 5);
+        let second_record = texture_record(second, 7);
+        let updates = [
+            residency_update(&first_record, 0),
+            residency_update(&first_record, 1),
+            residency_update(&second_record, 0),
+        ];
+        registry.publish(first_record).unwrap();
+        registry.publish(second_record).unwrap();
+        registry.take_dirty();
+        let before = registry.snapshot();
+        assert_eq!(registry.update_texture_residency(&updates), Ok(2));
+        assert_eq!(registry.snapshot().epoch, before.epoch + 1);
+        assert_eq!(registry.take_dirty(), vec![first.index, second.index]);
+        let before = registry.snapshot();
+        // This is not an idempotent retry: its expected old residency is stale.
+        assert_eq!(
+            registry.update_texture_residency(&updates),
+            Err(MaterialRegistryError::InvalidTextureResidencyUpdate {
+                handle: first,
+                texture_index: 0
+            })
+        );
+        assert_eq!(registry.snapshot(), before);
+        assert_eq!(
+            registry.get(first).unwrap().textures[0],
+            updates[0].replacement
+        );
+        assert!(registry.take_dirty().is_empty());
     }
 
     #[test]

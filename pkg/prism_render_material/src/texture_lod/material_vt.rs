@@ -1,9 +1,10 @@
 //! Immutable CPU source and page extraction for material virtual textures.
 //!
 //! This module is deliberately a source contract, not a renderer. A
-//! [`MaterialVtSourceSnapshot`] owns one immutable byte snapshot containing a
-//! complete mip chain. It derives deterministic mip metadata and exposes each
-//! virtual page as row views into that snapshot. No texels are generated,
+//! [`MaterialVtSourceLayout`] describes a complete mip chain without allocating
+//! texel bytes. A [`MaterialVtSourceSnapshot`] pairs that layout with one
+//! immutable byte snapshot and exposes each virtual page as row views into
+//! that snapshot. No texels are generated,
 //! padded, decoded, or uploaded here; a backend can turn the rows into an
 //! atlas upload after applying its own gutter/encoding policy.
 //!
@@ -358,33 +359,29 @@ pub struct MaterialVtRow {
     pub page_count: u64,
 }
 
-/// Immutable material VT source snapshot and its deterministic extraction
-/// metadata.
+/// Backend-neutral material VT source layout without any texel payload.
 ///
-/// Cloning a snapshot clones the `Arc` handle, not mutable access to its bytes.
-/// All [`MaterialVtPage`] views borrow the snapshot for the duration of the
-/// view, so a producer may safely retain a page view only while retaining the
-/// source snapshot as well.
-#[derive(Clone, Debug)]
-pub struct MaterialVtSourceSnapshot {
+/// Construction allocates only one metadata entry per mip, never a byte buffer
+/// or a table per page. Byte offsets remain `u64` so a layout can describe a
+/// source larger than the process address space.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MaterialVtSourceLayout {
     descriptor: MaterialVtSourceDescriptor,
-    bytes: Arc<[u8]>,
     mips: Vec<MaterialVtMipMetadata>,
     total_pages: u64,
+    byte_len: u64,
 }
 
-impl MaterialVtSourceSnapshot {
-    /// Validates an immutable, complete mip-chain payload and builds its
-    /// deterministic metadata.
-    pub fn new(
-        descriptor: MaterialVtSourceDescriptor,
-        bytes: impl Into<Arc<[u8]>>,
-    ) -> Result<Self, MaterialVtError> {
-        let bytes = bytes.into();
+impl MaterialVtSourceLayout {
+    /// Builds deterministic metadata for a complete mip chain without
+    /// allocating or accessing source texels.
+    pub fn new(descriptor: MaterialVtSourceDescriptor) -> Result<Self, MaterialVtError> {
         let bpp = u64::from(descriptor.format.bytes_per_texel());
         let mut offset = 0u64;
         let mut total_pages = 0u64;
-        let mut mips = Vec::with_capacity(usize::from(descriptor.mip_count));
+        let mut mips = Vec::new();
+        mips.try_reserve_exact(usize::from(descriptor.mip_count))
+            .map_err(|_| MaterialVtError::AllocationFailed)?;
 
         for mip in 0..u32::from(descriptor.mip_count) {
             let width = mip_dimension(descriptor.width, mip);
@@ -417,7 +414,8 @@ impl MaterialVtSourceSnapshot {
                 height,
                 pages_x,
                 pages_y,
-                row_pitch_bytes: u32::try_from(row_pitch).expect("descriptor validates row pitch"),
+                row_pitch_bytes: u32::try_from(row_pitch)
+                    .map_err(|_| MaterialVtError::RowPitchOverflow { mip: mip as u8 })?,
                 layer_stride_bytes: layer_stride,
                 level_stride_bytes: level_stride,
                 offset_bytes: offset,
@@ -425,20 +423,11 @@ impl MaterialVtSourceSnapshot {
             offset = end;
         }
 
-        let actual =
-            u64::try_from(bytes.len()).map_err(|_| MaterialVtError::PayloadSizeOverflow)?;
-        if actual != offset {
-            return Err(MaterialVtError::PayloadLengthMismatch {
-                expected: offset,
-                actual,
-            });
-        }
-
         Ok(Self {
             descriptor,
-            bytes,
             mips,
             total_pages,
+            byte_len: offset,
         })
     }
 
@@ -448,10 +437,10 @@ impl MaterialVtSourceSnapshot {
         self.descriptor
     }
 
-    /// The immutable source bytes, in the descriptor's mip-major layout.
+    /// Exact source byte length of the complete mip-major layout.
     #[must_use]
-    pub fn bytes(&self) -> &[u8] {
-        &self.bytes
+    pub const fn byte_len(&self) -> u64 {
+        self.byte_len
     }
 
     /// Deterministic mip metadata, ordered from finest to coarsest.
@@ -561,13 +550,22 @@ impl MaterialVtSourceSnapshot {
         let row_bytes = u64::from(extent_width)
             .checked_mul(bpp)
             .ok_or(MaterialVtError::PageOffsetOverflow)?;
+        let layer_bytes = u64::from(key.layer)
+            .checked_mul(mip.layer_stride_bytes)
+            .ok_or(MaterialVtError::PageOffsetOverflow)?;
+        let row_offset = u64::from(origin_y)
+            .checked_mul(u64::from(mip.row_pitch_bytes))
+            .ok_or(MaterialVtError::PageOffsetOverflow)?;
+        let column_offset = u64::from(origin_x)
+            .checked_mul(bpp)
+            .ok_or(MaterialVtError::PageOffsetOverflow)?;
         let layer_offset = mip
             .offset_bytes
-            .checked_add(u64::from(key.layer) * mip.layer_stride_bytes)
+            .checked_add(layer_bytes)
             .ok_or(MaterialVtError::PageOffsetOverflow)?;
         let first_row = layer_offset
-            .checked_add(u64::from(origin_y) * u64::from(mip.row_pitch_bytes))
-            .and_then(|v| v.checked_add(u64::from(origin_x) * bpp))
+            .checked_add(row_offset)
+            .and_then(|v| v.checked_add(column_offset))
             .ok_or(MaterialVtError::PageOffsetOverflow)?;
         let extracted_byte_len = row_bytes
             .checked_mul(u64::from(extent_height))
@@ -587,36 +585,6 @@ impl MaterialVtSourceSnapshot {
             row_count: extent_height,
             extracted_byte_len,
         })
-    }
-
-    /// Borrows one page's source rows. The returned view cannot outlive `self`.
-    pub fn page(&self, key: TexturePageKey) -> Result<MaterialVtPage<'_>, MaterialVtError> {
-        let metadata = self.page_metadata(key)?;
-        let start = usize::try_from(metadata.first_row_offset_bytes)
-            .map_err(|_| MaterialVtError::PayloadSizeOverflow)?;
-        let row_pitch = usize::try_from(metadata.source_row_pitch_bytes)
-            .map_err(|_| MaterialVtError::PayloadSizeOverflow)?;
-        let rows = usize::try_from(metadata.row_count)
-            .map_err(|_| MaterialVtError::PayloadSizeOverflow)?;
-        let last_row = rows
-            .checked_sub(1)
-            .ok_or(MaterialVtError::PageOffsetOverflow)?;
-        let end = start
-            .checked_add(
-                last_row
-                    .checked_mul(row_pitch)
-                    .ok_or(MaterialVtError::PageOffsetOverflow)?,
-            )
-            .and_then(|v| v.checked_add(usize::try_from(metadata.row_bytes).ok()?))
-            .ok_or(MaterialVtError::PageOffsetOverflow)?;
-        let source = self
-            .bytes
-            .get(start..end)
-            .ok_or(MaterialVtError::PayloadLengthMismatch {
-                expected: end as u64,
-                actual: self.bytes.len() as u64,
-            })?;
-        Ok(MaterialVtPage { metadata, source })
     }
 
     fn validate_key(&self, key: TexturePageKey) -> Result<&MaterialVtMipMetadata, MaterialVtError> {
@@ -651,10 +619,156 @@ impl MaterialVtSourceSnapshot {
     }
 }
 
-/// Deterministic page-key iterator for a source snapshot.
+/// Immutable material VT source snapshot and its deterministic extraction
+/// metadata.
+///
+/// Cloning a snapshot clones the `Arc` handle, not mutable access to its bytes.
+/// All [`MaterialVtPage`] views borrow the snapshot for the duration of the
+/// view, so a producer may safely retain a page view only while retaining the
+/// source snapshot as well.
+#[derive(Clone, Debug)]
+pub struct MaterialVtSourceSnapshot {
+    layout: MaterialVtSourceLayout,
+    bytes: Arc<[u8]>,
+}
+
+impl MaterialVtSourceSnapshot {
+    /// Validates an immutable, complete mip-chain payload and builds its
+    /// deterministic metadata.
+    pub fn new(
+        descriptor: MaterialVtSourceDescriptor,
+        bytes: impl Into<Arc<[u8]>>,
+    ) -> Result<Self, MaterialVtError> {
+        let layout = MaterialVtSourceLayout::new(descriptor)?;
+        let bytes = bytes.into();
+        let actual =
+            u64::try_from(bytes.len()).map_err(|_| MaterialVtError::PayloadSizeOverflow)?;
+        if actual != layout.byte_len() {
+            return Err(MaterialVtError::PayloadLengthMismatch {
+                expected: layout.byte_len(),
+                actual,
+            });
+        }
+        Ok(Self { layout, bytes })
+    }
+
+    /// The metadata-only layout shared by all addressing operations.
+    #[must_use]
+    pub const fn layout(&self) -> &MaterialVtSourceLayout {
+        &self.layout
+    }
+
+    /// Source descriptor shared by all page keys and row metadata.
+    #[must_use]
+    pub const fn descriptor(&self) -> MaterialVtSourceDescriptor {
+        self.layout.descriptor()
+    }
+
+    /// The immutable source bytes, in the descriptor's mip-major layout.
+    #[must_use]
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// Exact source byte length of the complete mip-major layout.
+    #[must_use]
+    pub const fn byte_len(&self) -> u64 {
+        self.layout.byte_len()
+    }
+
+    /// Deterministic mip metadata, ordered from finest to coarsest.
+    #[must_use]
+    pub fn mips(&self) -> &[MaterialVtMipMetadata] {
+        self.layout.mips()
+    }
+
+    /// Number of virtual pages across all mips and layers.
+    #[must_use]
+    pub const fn page_count(&self) -> u64 {
+        self.layout.page_count()
+    }
+
+    /// The same LOD/page geometry used by material `texture_lod` requests.
+    #[must_use]
+    pub fn virtual_texture(&self) -> VirtualTexture {
+        self.layout.virtual_texture()
+    }
+
+    /// Creates the ABI row and retains the source-side format/count metadata.
+    #[must_use]
+    pub fn texture_row(
+        &self,
+        bindless_index: u32,
+        generation: u32,
+        semantic: u32,
+        sampler_index: u32,
+    ) -> MaterialVtRow {
+        self.layout
+            .texture_row(bindless_index, generation, semantic, sampler_index)
+    }
+
+    /// Converts a texture-LOD request into a checked shared page key.
+    pub fn key_for_request(
+        &self,
+        layer: u16,
+        request: PageRequest,
+    ) -> Result<TexturePageKey, MaterialVtError> {
+        self.layout.key_for_request(layer, request)
+    }
+
+    /// Returns deterministic page keys in mip, layer, X, then Y order.
+    pub fn page_keys(&self) -> MaterialVtPageKeyIter<'_> {
+        self.layout.page_keys()
+    }
+
+    /// Returns deterministic page metadata in page-key order.
+    pub fn page_metadata_iter(&self) -> impl Iterator<Item = MaterialVtPageMetadata> + '_ {
+        self.layout.page_metadata_iter()
+    }
+
+    /// Extracts metadata for one page without copying its bytes.
+    pub fn page_metadata(
+        &self,
+        key: TexturePageKey,
+    ) -> Result<MaterialVtPageMetadata, MaterialVtError> {
+        self.layout.page_metadata(key)
+    }
+
+    /// Borrows one page's source rows. The returned view cannot outlive `self`.
+    pub fn page(&self, key: TexturePageKey) -> Result<MaterialVtPage<'_>, MaterialVtError> {
+        let metadata = self.layout.page_metadata(key)?;
+        let start = usize::try_from(metadata.first_row_offset_bytes)
+            .map_err(|_| MaterialVtError::PayloadSizeOverflow)?;
+        let row_pitch = usize::try_from(metadata.source_row_pitch_bytes)
+            .map_err(|_| MaterialVtError::PayloadSizeOverflow)?;
+        let rows = usize::try_from(metadata.row_count)
+            .map_err(|_| MaterialVtError::PayloadSizeOverflow)?;
+        let last_row = rows
+            .checked_sub(1)
+            .ok_or(MaterialVtError::PageOffsetOverflow)?;
+        let end = start
+            .checked_add(
+                last_row
+                    .checked_mul(row_pitch)
+                    .ok_or(MaterialVtError::PageOffsetOverflow)?,
+            )
+            .and_then(|v| v.checked_add(usize::try_from(metadata.row_bytes).ok()?))
+            .ok_or(MaterialVtError::PageOffsetOverflow)?;
+        let source = self
+            .bytes
+            .get(start..end)
+            .ok_or(MaterialVtError::PayloadLengthMismatch {
+                expected: end as u64,
+                actual: self.bytes.len() as u64,
+            })?;
+        Ok(MaterialVtPage { metadata, source })
+    }
+}
+
+/// Deterministic page-key iterator borrowing only a source layout.
 #[derive(Clone, Debug)]
 pub struct MaterialVtPageKeyIter<'a> {
-    source: &'a MaterialVtSourceSnapshot,
+    source: &'a MaterialVtSourceLayout,
     mip: usize,
     layer: u16,
     x: u32,
@@ -662,7 +776,7 @@ pub struct MaterialVtPageKeyIter<'a> {
 }
 
 impl<'a> MaterialVtPageKeyIter<'a> {
-    fn new(source: &'a MaterialVtSourceSnapshot) -> Self {
+    fn new(source: &'a MaterialVtSourceLayout) -> Self {
         Self {
             source,
             mip: 0,
@@ -703,7 +817,7 @@ impl Iterator for MaterialVtPageKeyIter<'_> {
     }
 }
 
-/// Failure while validating a source snapshot or addressing a page.
+/// Failure while validating a source layout/snapshot or addressing a page.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MaterialVtError {
     /// Base width or height was zero.
@@ -736,6 +850,8 @@ pub enum MaterialVtError {
     PayloadSizeOverflow,
     /// Total virtual page arithmetic overflowed.
     PageCountOverflow,
+    /// Reserving storage for the mip metadata failed.
+    AllocationFailed,
     /// The immutable payload length did not match the descriptor's exact layout.
     PayloadLengthMismatch { expected: u64, actual: u64 },
     /// A page key belongs to another source identity.
@@ -778,6 +894,9 @@ impl fmt::Display for MaterialVtError {
             }
             Self::PayloadSizeOverflow => formatter.write_str("material VT payload size overflows"),
             Self::PageCountOverflow => formatter.write_str("material VT page count overflows"),
+            Self::AllocationFailed => {
+                formatter.write_str("material VT mip metadata allocation failed")
+            }
             Self::PayloadLengthMismatch { expected, actual } => write!(
                 formatter,
                 "material VT payload length mismatch: expected {expected}, got {actual}"

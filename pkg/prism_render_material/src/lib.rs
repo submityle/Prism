@@ -51,8 +51,7 @@ pub mod shaders {
     pub const MATERIAL_VIRTUAL_TEXTURE_SHADER_SOURCE: &str =
         include_str!("shaders/material_virtual_texture.wesl");
     /// Schema-generated word-heap surface decoder.
-    pub const MATERIAL_UNPACK_SHADER_SOURCE: &str =
-        include_str!("shaders/material_unpack.wesl");
+    pub const MATERIAL_UNPACK_SHADER_SOURCE: &str = include_str!("shaders/material_unpack.wesl");
     /// Schema-generated material classification compute shader.
     pub const MATERIAL_CLASSIFICATION_SHADER_SOURCE: &str =
         include_str!("shaders/material_classification.wesl");
@@ -65,8 +64,7 @@ pub mod shaders {
     pub const MATERIAL_VIRTUAL_TEXTURE_SHADER_BYTES: &[u8] =
         include_bytes!("shaders/material_virtual_texture.wesl");
     /// Embedded bytes for the schema-generated word-heap decoder.
-    pub const MATERIAL_UNPACK_SHADER_BYTES: &[u8] =
-        include_bytes!("shaders/material_unpack.wesl");
+    pub const MATERIAL_UNPACK_SHADER_BYTES: &[u8] = include_bytes!("shaders/material_unpack.wesl");
     /// Embedded bytes for the schema-generated classification shader.
     pub const MATERIAL_CLASSIFICATION_SHADER_BYTES: &[u8] =
         include_bytes!("shaders/material_classification.wesl");
@@ -117,7 +115,9 @@ pub use record::{
     FALLBACK_MATERIAL_HANDLE, ILLUMINATION_BLEND_SENTINEL, ILLUMINATION_BLEND_UNORM_MAX,
     NO_VIRTUAL_TEXTURE, PORTABLE_TEXTURE_ATLAS,
 };
-pub use registry::{MaterialRegistry, MaterialRegistryError, MaterialSnapshot};
+pub use registry::{
+    MaterialRegistry, MaterialRegistryError, MaterialSnapshot, MaterialTextureResidencyUpdate,
+};
 pub use render_state::{
     material_pipeline_state, pipeline_state_for_material, MaterialBlendMode, MaterialCullMode,
     MaterialDepthTest, MaterialPipelineState, MaterialRenderPhase, MaterialRenderTarget,
@@ -206,8 +206,9 @@ pub use texture_lod::{
     MaterialVtAtlasConfig, MaterialVtAtlasTile, MaterialVtAtlasUploadError, MaterialVtError,
     MaterialVtFormat, MaterialVtMipMetadata, MaterialVtPage, MaterialVtPageKeyIter,
     MaterialVtPageMetadata, MaterialVtPageRow, MaterialVtPageRows, MaterialVtRow,
-    MaterialVtSourceDescriptor, MaterialVtSourceSnapshot, PageRequest, RayCone, RayDifferential,
-    TriangleLodConstant, TrilinearMip, VirtualTexture, MAX_ANISO_TAPS, MIN_COS_INCIDENCE,
+    MaterialVtSourceDescriptor, MaterialVtSourceLayout, MaterialVtSourceSnapshot, PageRequest,
+    RayCone, RayDifferential, TriangleLodConstant, TrilinearMip, VirtualTexture, MAX_ANISO_TAPS,
+    MIN_COS_INCIDENCE,
 };
 pub use texture_mipgen::{
     alpha_test_coverage, apply_alpha_scale, box_downsample, gaussian_downsample,
