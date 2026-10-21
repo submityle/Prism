@@ -10,6 +10,7 @@ mod builtins;
 mod catalog;
 mod compile;
 mod device;
+mod frame;
 mod history;
 mod payload;
 mod pcm;
@@ -38,6 +39,7 @@ pub use builtins::{
 pub use catalog::{CatalogError, FeatureCatalog, RequirementKind, ServiceProvider};
 pub use compile::*;
 pub use device::*;
+pub use frame::{RenderFabricFrame, RenderFabricFrameError};
 pub use history::*;
 pub use payload::*;
 pub use pcm::*;

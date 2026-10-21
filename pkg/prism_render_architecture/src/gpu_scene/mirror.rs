@@ -168,16 +168,22 @@ impl CpuRenderScene {
     }
 
     pub fn live_handles(&self) -> Vec<SceneHandle> {
-        self.slots
-            .iter()
-            .enumerate()
-            .filter_map(|(index, slot)| {
-                slot.record.map(|_| SceneHandle {
-                    index: index as u32,
-                    generation: slot.generation,
-                })
+        self.live_records().map(|(handle, _)| handle).collect()
+    }
+
+    /// Iterates authoritative live rows without allocating a handle snapshot.
+    pub fn live_records(&self) -> impl Iterator<Item = (SceneHandle, &InstanceRecord)> {
+        self.slots.iter().enumerate().filter_map(|(index, slot)| {
+            slot.record.as_ref().map(|record| {
+                (
+                    SceneHandle {
+                        index: index as u32,
+                        generation: slot.generation,
+                    },
+                    record,
+                )
             })
-            .collect()
+        })
     }
 
     fn apply_operation(
