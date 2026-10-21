@@ -14,6 +14,10 @@ use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 use core::cmp::Ordering;
 
+mod spatial_index;
+
+pub use spatial_index::ManifestSpatialIndex;
+
 /// Maximum number of canonical Data Layers represented by a cell manifest.
 ///
 /// The mask is deliberately fixed-width so admission stays allocation-free
@@ -739,6 +743,135 @@ impl StreamScheduler {
         })
     }
 
+    /// Produces the same plan as [`Self::try_plan`] while obtaining load
+    /// candidates from a prebuilt hierarchical manifest index.
+    ///
+    /// The index is an acceleration structure, not a second source of truth:
+    /// resident revisions, layer admission, hysteresis, byte budgets, and
+    /// action ordering remain identical to the linear planner. Build one index
+    /// for an immutable manifest snapshot and replace it when that snapshot
+    /// changes.
+    pub fn try_plan_indexed(
+        &mut self,
+        demands: &[DemandSource],
+        index: &ManifestSpatialIndex,
+        budget: StreamBudget,
+    ) -> StreamPlan {
+        self.frame = self.frame.saturating_add(1);
+        let mut trace = VmTrace::new();
+        trace.push(VmInstruction::BeginFrame(self.frame));
+        for demand in demands {
+            trace.push(VmInstruction::Demand(demand.center));
+        }
+
+        let mut requests = BTreeMap::<SectorId, StreamRequest>::new();
+        let mut stale_sectors = BTreeSet::new();
+        for demand in demands {
+            let radius = u64::from(demand.load_radius).max(u64::from(demand.unload_radius) + 1);
+            for manifest in index.query_sector_cube(demand.center, radius) {
+                if demand.center.level != manifest.sector.level
+                    || !manifest.data_layers.is_subset_of(demand.data_layers)
+                {
+                    continue;
+                }
+                let distance = demand.center.distance(manifest.sector);
+                let requested_kind = if distance <= u64::from(demand.load_radius) {
+                    StreamKind::Required
+                } else if demand.predicted == Some(manifest.sector) {
+                    StreamKind::Prefetch
+                } else {
+                    continue;
+                };
+                if requested_kind == StreamKind::Prefetch
+                    && distance > u64::from(demand.unload_radius) + 1
+                {
+                    continue;
+                }
+                let stale = self
+                    .resident
+                    .get(&manifest.sector)
+                    .copied()
+                    .filter(|state| state.is_stale(manifest))
+                    .is_some();
+                if stale {
+                    stale_sectors.insert(manifest.sector);
+                }
+                let score = demand.priority.saturating_add(
+                    demand
+                        .load_radius
+                        .saturating_sub(distance.min(u64::from(u16::MAX)) as u16),
+                );
+                let request = StreamRequest {
+                    sector: manifest.sector,
+                    io_bytes: manifest.io_bytes,
+                    priority: StreamPriority(score),
+                    distance,
+                    kind: requested_kind,
+                };
+                if requests
+                    .get(&manifest.sector)
+                    .is_none_or(|current| request_order(&request, current) == Ordering::Less)
+                {
+                    requests.insert(manifest.sector, request);
+                }
+            }
+        }
+
+        let mut actions = Vec::new();
+        let mut candidates: Vec<StreamRequest> = requests
+            .values()
+            .copied()
+            .filter(|request| {
+                !self.contains(request.sector) || stale_sectors.contains(&request.sector)
+            })
+            .collect();
+        candidates.sort_by(request_order);
+        let mut admitted_bytes = 0_u64;
+        for request in candidates {
+            if actions.len() >= budget.max_actions
+                || admitted_bytes.saturating_add(request.io_bytes) > budget.io_bytes
+            {
+                break;
+            }
+            self.resident.insert(request.sector, ResidentState::Loading);
+            admitted_bytes = admitted_bytes.saturating_add(request.io_bytes);
+            trace.push(VmInstruction::Admit(request.sector));
+            actions.push(if request.kind == StreamKind::Required {
+                StreamAction::Load(request)
+            } else {
+                StreamAction::Prefetch(request)
+            });
+        }
+
+        let mut evictions: Vec<SectorId> = self
+            .resident
+            .keys()
+            .copied()
+            .filter(|sector| {
+                let manifest = index.get(*sector);
+                !within_unload(*sector, manifest, demands)
+            })
+            .collect();
+        evictions.sort_unstable();
+        for sector in evictions {
+            if actions.len() >= budget.max_actions {
+                break;
+            }
+            self.resident.remove(&sector);
+            trace.push(VmInstruction::Evict(sector));
+            actions.push(StreamAction::Unload(sector));
+        }
+        trace.push(VmInstruction::EndFrame {
+            frame: self.frame,
+            admitted_bytes,
+        });
+        StreamPlan {
+            actions,
+            admitted_bytes,
+            trace,
+        }
+    }
+
     /// Produces a deterministic plan, panicking on invalid duplicate input.
     ///
     /// New callers that receive external or dynamically assembled manifests
@@ -931,6 +1064,65 @@ mod tests {
                 layer: DataLayerId::new(MAX_DATA_LAYERS)
             })
         );
+    }
+
+    #[test]
+    fn indexed_planner_matches_linear_planner_and_preserves_hysteresis() {
+        let bounds = AabbI64::new(GlobalPos::new(0, 0, 0), GlobalPos::new(1, 1, 1)).unwrap();
+        let manifests = [
+            CellManifest {
+                sector: SectorId::new(0, -2, 0, 0),
+                bounds,
+                scene_key: 1,
+                content_version: 1,
+                derived_hash: 2,
+                io_bytes: 10,
+                data_layers: DataLayerMask::EMPTY,
+            },
+            CellManifest {
+                sector: SectorId::new(0, 0, 0, 0),
+                bounds,
+                scene_key: 2,
+                content_version: 1,
+                derived_hash: 3,
+                io_bytes: 11,
+                data_layers: DataLayerMask::EMPTY,
+            },
+            CellManifest {
+                sector: SectorId::new(0, 2, 0, 0),
+                bounds,
+                scene_key: 3,
+                content_version: 1,
+                derived_hash: 4,
+                io_bytes: 12,
+                data_layers: DataLayerMask::EMPTY,
+            },
+        ];
+        let demand = DemandSource::new(SectorId::new(0, 0, 0, 0), 1, 2, 7)
+            .unwrap()
+            .with_prediction(SectorId::new(0, 2, 0, 0));
+        let budget = StreamBudget {
+            io_bytes: 64,
+            max_actions: 8,
+        };
+        let index = ManifestSpatialIndex::build(&manifests).unwrap();
+        let mut linear = StreamScheduler::new();
+        let mut indexed = StreamScheduler::new();
+        let linear_plan = linear.try_plan(&[demand], &manifests, budget).unwrap();
+        let indexed_plan = indexed.try_plan_indexed(&[demand], &index, budget);
+        assert_eq!(indexed_plan.actions, linear_plan.actions);
+        assert_eq!(indexed_plan.admitted_bytes, linear_plan.admitted_bytes);
+        assert_eq!(indexed_plan.trace, linear_plan.trace);
+
+        let outside = DemandSource::new(SectorId::new(0, 10, 0, 0), 0, 0, 7).unwrap();
+        let linear_eviction = linear.try_plan(&[outside], &manifests, budget).unwrap();
+        let indexed_eviction = indexed.try_plan_indexed(&[outside], &index, budget);
+        assert_eq!(indexed_eviction.actions, linear_eviction.actions);
+        assert_eq!(
+            indexed_eviction.admitted_bytes,
+            linear_eviction.admitted_bytes
+        );
+        assert_eq!(indexed_eviction.trace, linear_eviction.trace);
     }
 
     #[test]
