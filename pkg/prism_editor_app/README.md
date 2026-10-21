@@ -98,8 +98,10 @@ preserving the concrete Rust model roots throughout publication and history.
 history limits also apply. Duplicate field targets are rejected.
 
 An active gesture fences selection, other model commands, document encoding,
-save/load submission and native close. Native press also fences pending document
-I/O and Inspector drafts. External hosts must cancel with `gesture_cancel` (or
+save/load submission, active-panel file commands and native close. Failed scene
+file requests do not leave the native event loop in pending-I/O polling. Native
+press also fences pending document I/O and Inspector drafts. External hosts must
+cancel with `gesture_cancel` (or
 `gizmo_cancel` with the same controller) before suspension, document replacement
 or dropping a scene, and must serialize document installation with input. Direct
 scene/camera/transform replacement is rejected during capture. The native host

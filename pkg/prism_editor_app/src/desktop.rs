@@ -743,6 +743,10 @@ impl<R: DesktopRenderer> DesktopHost<R> {
     }
 
     fn document_command(&mut self, save: bool) {
+        if let Err(error) = ensure_file_command_idle(self.renderer.gesture_active()) {
+            self.input_result(Err(error));
+            return;
+        }
         if self
             .document
             .as_ref()
@@ -768,12 +772,13 @@ impl<R: DesktopRenderer> DesktopHost<R> {
             return;
         };
         let result = if save {
-            document.save(&mut self.ui).map(|_| true)
+            document.save(&mut self.ui)
         } else {
-            document.load(&self.ui).map(|_| true)
+            document.load(&self.ui)
         };
+        let (result, pending) = document_request_result(result);
         self.input_result(result);
-        self.pending = true;
+        self.pending |= pending;
     }
 
     fn sync_text_input(&mut self) {
@@ -803,6 +808,22 @@ impl<R: DesktopRenderer> DesktopHost<R> {
             );
         }
         self.ime_rect = if self.ime_enabled { rect } else { None };
+    }
+}
+
+fn ensure_file_command_idle(renderer_gesture_active: bool) -> Result<(), DesktopUiError> {
+    if renderer_gesture_active {
+        return Err(DesktopUiError::Panel(
+            "Commit or cancel the active editor interaction before file commands".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn document_request_result<E>(result: Result<impl Sized, E>) -> (Result<bool, E>, bool) {
+    match result {
+        Ok(_) => (Ok(true), true),
+        Err(error) => (Err(error), false),
     }
 }
 
@@ -1525,6 +1546,28 @@ mod tests {
             ModifiersState::CONTROL | ModifiersState::ALT,
             false
         ));
+    }
+
+    #[test]
+    fn rejected_document_request_does_not_schedule_polling() {
+        let (result, pending) = document_request_result(Err::<u64, _>("rejected"));
+
+        assert_eq!(result, Err("rejected"));
+        assert!(!pending);
+    }
+
+    #[test]
+    fn accepted_document_request_schedules_polling() {
+        let (result, pending) = document_request_result::<&str>(Ok(7_u64));
+
+        assert_eq!(result, Ok(true));
+        assert!(pending);
+    }
+
+    #[test]
+    fn active_viewport_gesture_blocks_panel_and_scene_file_commands() {
+        assert!(ensure_file_command_idle(true).is_err());
+        assert!(ensure_file_command_idle(false).is_ok());
     }
 
     #[test]
