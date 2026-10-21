@@ -19,7 +19,7 @@
 //! thin grouping layer over the crate's own union-find
 //! ([`IslandBuilder`](crate::island::IslandBuilder)).
 
-use crate::island::{IslandBuilder, IslandId};
+use crate::island::{index_buckets::IndexBuckets, IslandBuilder};
 use crate::joint::ragdoll::RagdollConstraint;
 use crate::joint::Joint;
 use crate::solver::xpbd::contact_constraint::ContactConstraint;
@@ -33,12 +33,12 @@ use crate::state::view::BodySolverView;
 /// the partition is deterministic.
 #[derive(Clone, Debug, Default)]
 pub struct SolveIslands {
-    contact_indices: Vec<Vec<usize>>,
-    joint_indices: Vec<Vec<usize>>,
-    ragdoll_indices: Vec<Vec<usize>>,
+    contact_indices: IndexBuckets,
+    joint_indices: IndexBuckets,
+    ragdoll_indices: IndexBuckets,
     /// Sorted, de-duplicated dynamic body slots per island. Used by the sleep
     /// bookkeeping to test and update every dynamic member of an island.
-    member_slots: Vec<Vec<usize>>,
+    member_slots: IndexBuckets,
 }
 
 impl SolveIslands {
@@ -100,58 +100,29 @@ impl SolveIslands {
             }
         }
 
-        let set = builder.build();
-        // Compact map from raw IslandId to a dense bucket index. Only islands
-        // that actually own a constraint or joint get a bucket.
-        let mut bucket_of: Vec<Option<usize>> = vec![None; set.island_count()];
-        let mut contact_indices: Vec<Vec<usize>> = Vec::new();
-        let mut joint_indices: Vec<Vec<usize>> = Vec::new();
-        let mut ragdoll_indices: Vec<Vec<usize>> = Vec::new();
-        let mut member_slots: Vec<Vec<usize>> = Vec::new();
-
-        let mut bucket_for = |island: IslandId,
-                              contacts: &mut Vec<Vec<usize>>,
-                              jts: &mut Vec<Vec<usize>>,
-                              rags: &mut Vec<Vec<usize>>,
-                              members: &mut Vec<Vec<usize>>|
-         -> usize {
-            let raw = island.0 as usize;
-            match bucket_of[raw] {
-                Some(b) => b,
-                None => {
-                    let b = contacts.len();
-                    bucket_of[raw] = Some(b);
-                    contacts.push(Vec::new());
-                    jts.push(Vec::new());
-                    rags.push(Vec::new());
-                    members.push(Vec::new());
-                    b
-                }
+        // Address roots directly: materializing an IslandSet here used to
+        // allocate member lists for every body, including free/static bodies
+        // that never participate in this solve. Dense buckets retain the
+        // original first-contact, then joint, then ragdoll appearance order.
+        let mut bucket_of = vec![usize::MAX; slot_count];
+        let mut counts: Vec<[usize; 4]> = Vec::new();
+        let mut count_constraint = |root: usize, kind: usize| {
+            if bucket_of[root] == usize::MAX {
+                bucket_of[root] = counts.len();
+                counts.push([0; 4]);
             }
+            counts[bucket_of[root]][kind] += 1;
         };
-
-        for (index, constraint) in constraints.iter().enumerate() {
+        // Establish ordering and counts in one scan, without per-constraint
+        // temporary storage.
+        for constraint in constraints {
             let Some(dynamic_slot) = dynamic_slot_of(view, constraint.slot_a, constraint.slot_b)
             else {
                 continue;
             };
-            let bucket = bucket_for(
-                set.island_of(dynamic_slot),
-                &mut contact_indices,
-                &mut joint_indices,
-                &mut ragdoll_indices,
-                &mut member_slots,
-            );
-            contact_indices[bucket].push(index);
-            push_dynamic_members(
-                view,
-                constraint.slot_a,
-                constraint.slot_b,
-                &mut member_slots[bucket],
-            );
+            count_constraint(builder.find(dynamic_slot), 0);
         }
-
-        for (index, joint) in joints.iter().enumerate() {
+        for joint in joints {
             let (slot_a, slot_b) = joint_slots(joint);
             if slot_a >= slot_count || slot_b >= slot_count {
                 continue;
@@ -159,18 +130,9 @@ impl SolveIslands {
             let Some(dynamic_slot) = dynamic_slot_of(view, slot_a, slot_b) else {
                 continue;
             };
-            let bucket = bucket_for(
-                set.island_of(dynamic_slot),
-                &mut contact_indices,
-                &mut joint_indices,
-                &mut ragdoll_indices,
-                &mut member_slots,
-            );
-            joint_indices[bucket].push(index);
-            push_dynamic_members(view, slot_a, slot_b, &mut member_slots[bucket]);
+            count_constraint(builder.find(dynamic_slot), 1);
         }
-
-        for (index, ragdoll) in ragdolls.iter().enumerate() {
+        for ragdoll in ragdolls {
             let slot_a = ragdoll.body_a.index() as usize;
             let slot_b = ragdoll.body_b.index() as usize;
             if slot_a >= slot_count || slot_b >= slot_count {
@@ -179,22 +141,68 @@ impl SolveIslands {
             let Some(dynamic_slot) = dynamic_slot_of(view, slot_a, slot_b) else {
                 continue;
             };
-            let bucket = bucket_for(
-                set.island_of(dynamic_slot),
-                &mut contact_indices,
-                &mut joint_indices,
-                &mut ragdoll_indices,
-                &mut member_slots,
-            );
-            ragdoll_indices[bucket].push(index);
-            push_dynamic_members(view, slot_a, slot_b, &mut member_slots[bucket]);
+            count_constraint(builder.find(dynamic_slot), 2);
         }
-
-        for members in &mut member_slots {
-            members.sort_unstable();
-            members.dedup();
+        // Resolve each live dynamic slot once. Ascending slot traversal gives
+        // sorted, unique members without sorting duplicated contact endpoints.
+        let mut body_bucket = vec![usize::MAX; slot_count];
+        for (slot, bucket) in body_bucket.iter_mut().enumerate() {
+            if view.is_dynamic(slot) {
+                *bucket = bucket_of[builder.find(slot)];
+                if *bucket != usize::MAX {
+                    counts[*bucket][3] += 1;
+                }
+            }
         }
-
+        let bucket_for_pair = |a: usize, b: usize| {
+            let first = body_bucket.get(a).copied().unwrap_or(usize::MAX);
+            if first != usize::MAX {
+                first
+            } else {
+                body_bucket.get(b).copied().unwrap_or(usize::MAX)
+            }
+        };
+        // Counting and filling use identical stable scans. The four packed
+        // lists each own just offsets + indices, independent of island count.
+        let mut contact_indices = IndexBuckets::with_counts(counts.iter().map(|c| c[0]));
+        let mut joint_indices = IndexBuckets::with_counts(counts.iter().map(|c| c[1]));
+        let mut ragdoll_indices = IndexBuckets::with_counts(counts.iter().map(|c| c[2]));
+        let mut member_slots = IndexBuckets::with_counts(counts.iter().map(|c| c[3]));
+        counts.fill([0; 4]);
+        for (index, constraint) in constraints.iter().enumerate() {
+            let bucket = bucket_for_pair(constraint.slot_a, constraint.slot_b);
+            if bucket != usize::MAX {
+                contact_indices.set(bucket, counts[bucket][0], index);
+                counts[bucket][0] += 1;
+            }
+        }
+        for (index, joint) in joints.iter().enumerate() {
+            let (a, b) = joint_slots(joint);
+            if a < slot_count && b < slot_count {
+                let bucket = bucket_for_pair(a, b);
+                if bucket != usize::MAX {
+                    joint_indices.set(bucket, counts[bucket][1], index);
+                    counts[bucket][1] += 1;
+                }
+            }
+        }
+        for (index, ragdoll) in ragdolls.iter().enumerate() {
+            let a = ragdoll.body_a.index() as usize;
+            let b = ragdoll.body_b.index() as usize;
+            if a < slot_count && b < slot_count {
+                let bucket = bucket_for_pair(a, b);
+                if bucket != usize::MAX {
+                    ragdoll_indices.set(bucket, counts[bucket][2], index);
+                    counts[bucket][2] += 1;
+                }
+            }
+        }
+        for (slot, bucket) in body_bucket.into_iter().enumerate() {
+            if bucket != usize::MAX {
+                member_slots.set(bucket, counts[bucket][3], slot);
+                counts[bucket][3] += 1;
+            }
+        }
         SolveIslands {
             contact_indices,
             joint_indices,
@@ -220,7 +228,7 @@ impl SolveIslands {
     /// Returns an empty slice when `island` is out of range.
     #[must_use]
     pub fn contacts(&self, island: usize) -> &[usize] {
-        self.contact_indices.get(island).map_or(&[], Vec::as_slice)
+        self.contact_indices.get(island)
     }
 
     /// Returns the active-joint indices belonging to `island`.
@@ -228,13 +236,13 @@ impl SolveIslands {
     /// Returns an empty slice when `island` is out of range.
     #[must_use]
     pub fn joints(&self, island: usize) -> &[usize] {
-        self.joint_indices.get(island).map_or(&[], Vec::as_slice)
+        self.joint_indices.get(island)
     }
 
     /// Returns the ragdoll Swing-Twist constraint indices belonging to `island`.
     #[must_use]
     pub fn ragdolls(&self, island: usize) -> &[usize] {
-        self.ragdoll_indices.get(island).map_or(&[], Vec::as_slice)
+        self.ragdoll_indices.get(island)
     }
 
     /// Returns the sorted dynamic body slots belonging to `island`.
@@ -244,7 +252,7 @@ impl SolveIslands {
     /// solve and cannot sleep.
     #[must_use]
     pub fn members(&self, island: usize) -> &[usize] {
-        self.member_slots.get(island).map_or(&[], Vec::as_slice)
+        self.member_slots.get(island)
     }
 }
 
@@ -265,24 +273,6 @@ fn dynamic_slot_of(view: &BodySolverView<'_>, slot_a: usize, slot_b: usize) -> O
         Some(slot_b)
     } else {
         None
-    }
-}
-
-/// Pushes whichever of `slot_a`/`slot_b` are dynamic bodies into `members`.
-///
-/// Duplicates are tolerated here; the caller de-duplicates each island's member
-/// list once after all constraints and joints have been filed.
-fn push_dynamic_members(
-    view: &BodySolverView<'_>,
-    slot_a: usize,
-    slot_b: usize,
-    members: &mut Vec<usize>,
-) {
-    if view.is_dynamic(slot_a) {
-        members.push(slot_a);
-    }
-    if view.is_dynamic(slot_b) {
-        members.push(slot_b);
     }
 }
 

@@ -446,7 +446,7 @@ MPM 已通过 `MpmBinding -> MpmRuntime -> MpmParticleSnapshot` 接入同一固�
 | M1 | XPBD 刚体 MVP + 球/盒/胶囊 + 接触摩擦 + 子步 | 能堆箱子稳定 | ✅ 完成 |
 | M2 | 关节族 + 空间查询 + 事件/Observer | 可做门/车/机关 | ✅ 完成 |
 | M2.5 | 异步流水线 + 状态哈希（联机地基） | 插值无抖动 | ✅ 完成 |
-| M3 | Island 并行 + 睡眠 + warm-start + rotational conservative-advancement CCD：shape-cast + 位姿回绕 | 万级刚体 60fps | 🟡 内核路径已有；可复现基准已输出 P50/P95/P99 和尾部超预算计数，但验收仍未通过：当前 Apple Silicon/aarch64、8 Rayon worker、`dt=1/60`、4 substeps 的独立 10,000 刚体场景，全醒模式 P50 58.580 ms / P95 79.203 ms / P99 175.736 ms，睡眠模式 P50 25.507 ms / P95 27.918 ms / P99 34.024 ms，均超过 16.667 ms 稳定帧预算；尚无匹配硬件矩阵，也不由算法存在推导与 UE/Chaos 整体对等 |
+| M3 | Island 并行 + 睡眠 + warm-start + rotational conservative-advancement CCD：shape-cast + 位姿回绕 | 万级刚体 60fps | 🟡 内核路径已有；packed 分岛、bounded scratch 批处理及 inline contact points 已降低分配和帧耗时。同配置独立 10,000 刚体基准全醒 P50/P95/P99 为 33.177/36.921/43.830 ms，睡眠为 22.235/23.049/25.118 ms，仍全部超过 16.667 ms 稳定帧预算；对照条件与边界见下文，尚无匹配硬件矩阵，不由算法存在推导与 UE/Chaos 整体对等 |
 | M4 | 布料 / 软体 / 绳索（统一约束复用） | 交互式布料 | ✅ 完成 |
 | M4.5 | 离线烘焙 + Golden replay CI | 缓存回放 demo | 🟡 bounded Offline/Playback、完整内存快照、可变帧长刚体显示插值播放器和软体轨迹磁盘 CRC 已有；全世界磁盘资产、Bake/热重载/流式集成、实时单向交互及完整场景验收仍缺，见 §16 |
 | M5 | GPU 后端（流体/大布料/破碎） | 十万粒子 | 🟡 kernel 与独立 parity 测试已实现；MPM 已有统一 runtime、ECS 粒子 snapshot 与 CPU copy 原生渲染桥，其他求解器跨层回写、广泛真机覆盖和性能证据仍缺失 |
@@ -466,6 +466,42 @@ MPM 已通过 `MpmBinding -> MpmRuntime -> MpmParticleSnapshot` 接入同一固�
 > 实现现状补充（截至编码推进）：
 > - CCD 已从纯线性 shape-cast 升级为 rotational conservative-advancement（线性+角向守恒上界，支持纯自转触发与 position+orientation 两段回绕）。
 > - 布料-刚体双向耦合原语已落地（`CouplingBody` / `resolve_two_way_coupling`：逆质量加权接触分配 + 反作用冲量累积），并有 WGSL 孪生与真机 parity（`prism_physics_gpu::cloth::coupling`、`prism_volumetric_gpu`）。核心 pipeline glue 也已落地：`PhysicsWorld::resolve_cloth_coupling` 会从刚体 collider 构造 bounded proxy，执行耦合并把线性/可选角向反作用写回刚体；`prism_physics_core` 的 rigid-coupling 回归测试通过。软体粒子状态的核心所有权与固定步接线也已补齐：`PhysicsWorld::soft_bodies` 通过 `SoftBodyHandle` / `SoftBodyStorage` 持有项目无关的 `SoftBody`，`XpbdSolver` 在每个固定 substep 按确定性槽位顺序执行“软体预测/投影 → proxy gather → two-way coupling → reaction writeback → 粒子速度恢复”。
+
+### 22.1 M3 分岛性能与分配回归（2026-10-22）
+
+分岛成员和 contact/joint/ragdoll 索引改为连续 offsets + indices，不为每个小岛
+各分配一个 Vec；求解只为实际参与约束的动态体建立成员表。相邻小岛按
+128 个成员/约束工作单元合批，超大连通分量不拆分，共用的 static/kinematic
+分隔体在一批中只复制一次。每个 contact 的最多 4 个工作点 inline 存放，scratch
+clone 不再逐 contact 分配。岛顺序、岛内约束顺序和动态体写回顺序不变。
+
+同机前后配对 release 基准：macOS/aarch64、8 Rayon worker、`parallel` feature、
+island parallel 开启、intra-island coloring 关闭、`dt=0.016666668`、4 substeps，
+`independent_field_100x100`（10,000 dynamic + 1 static），warmup 120、samples 180；
+setup 和验证不计时，延迟为 nearest-rank 毫秒。
+
+| 状态 | 版本 | P50 | P95 | P99 | 超过 16.667 ms |
+|---|---|---|---|---|---|
+| 全醒，末帧 10,000 awake | 优化前 | 66.069 | 84.221 | 220.775 | 180/180 |
+| 全醒，末帧 10,000 awake | 优化后 | 33.177 | 36.921 | 43.830 | 180/180 |
+| 睡眠，末帧 0 awake | 优化前 | 26.126 | 26.876 | 29.500 | 180/180 |
+| 睡眠，末帧 0 awake | 优化后 | 22.235 | 23.049 | 25.118 | 180/180 |
+
+优化前为 `1ad8444519d42f8409bc6bc3b03f090dd25a1445`，优化后在隔离的 core/geometry
+源码工作区运行，该日志的 CPU 型号和 git revision 元数据为 unavailable；相关五个
+实现文件与主工作区比对一致，但不能将其表述为精确提交、全 workspace 或其他硬件结果。
+当前 checkout 的复现入口如下（结果受设备、构建版本及并行负载影响）：
+
+```sh
+PRISM_BENCH_WARMUP=120 PRISM_BENCH_SAMPLES=180 CARGO_PROFILE_RELEASE_DEBUG=0 CARGO_INCREMENTAL=0 cargo bench --offline -j 1 -p prism_physics_core --bench scale_10k --features parallel
+```
+
+`island_allocation` 回归的线程局部 System allocator 计数：64/8192 个独立分量的
+`IslandBuilder::build` 分配为 9/16 次，`SolveIslands::build` 为 15/22 次；4096 个
+contact 工作集只分配 1 个外层 buffer，逐 contact clone 为 0 次；4096 小岛的串行
+scratch 批路径为 1224 次，断言要求小于岛数的一半。该计数不含 Rayon worker TLS，
+不代表全帧零分配。位一致回归覆盖共享 static/运动 kinematic、交错槽位、重力覆盖、
+ragdoll、关节反力、睡眠及大岛边界，并比较单岛参考/批处理/4 worker 路径。
 
 ### 22.x 世界级软体所有权与固定 substep 接线
 
@@ -1322,7 +1358,7 @@ GPU compact/reorder、生产 CCD/BVH consumer 或 CPU/GPU parity 已完成。
 
 | 包 / 测试选择 | 结果 | 验证范围 |
 |---|---|---|
-| `prism_physics_core --features parallel --lib --tests` | 2756 单元 + 333 集成通过 | core 全量默认测试目标及 parallel 路径；含接管、多 attachment 逐叶策略、非零 COM / 完整惯量、碰撞排除、旋转根位姿 CCD、定时回放、bounded-PD、装配图/施力原子事务、多装配体断裂结算与失败重试回归 |
+| `prism_physics_core --features parallel --lib --tests` | 2760 单元 + 339 集成通过 | core 全量默认测试目标及 parallel 路径（45 个集成测试目标）；含 packed 分岛/批处理位一致与分配回归、接管独立衰减和物理阻尼不等价的原子拒绝回归、多 attachment 逐叶策略、非零 COM / 完整惯量、碰撞排除、旋转根位姿 CCD、定时回放、bounded-PD、装配图/施力原子事务、多装配体断裂结算与失败重试回归；不包含此后新增的内部装配应力实现 |
 | `prism_physics_ecs --lib --tests`，`PRISM_REQUIRE_GPU=1` | 16 单元 + 108 集成通过 | 固定步生命周期、接管回滚/退休、多碰撞体所有权及编辑/移除/重试、装配、布偶、MPM 与 6 项真实 GPU field runtime 测试 |
 | `prism_physics_gpu --lib field::`，`PRISM_REQUIRE_GPU=1` | 24 通过 | GPU 场采样、批次/预算/设备身份、workspace 复用、初始化及提交/读回错误作用域和失败后恢复；不是全包 GPU parity 验收 |
 

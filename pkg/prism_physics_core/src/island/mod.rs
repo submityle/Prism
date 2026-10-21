@@ -8,6 +8,10 @@
 //! This is a standard disjoint-set data structure and is not derived from
 //! Unreal Engine source.
 
+pub(crate) mod index_buckets;
+
+use index_buckets::IndexBuckets;
+
 /// Identifies a single island within an [`IslandSet`].
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct IslandId(pub u32);
@@ -95,7 +99,7 @@ impl IslandBuilder {
     pub fn build(&mut self) -> IslandSet {
         let count = self.parent.len();
         let mut island_of: Vec<IslandId> = Vec::with_capacity(count);
-        let mut members: Vec<Vec<usize>> = Vec::new();
+        let mut counts: Vec<usize> = Vec::new();
         let mut root_to_island: Vec<Option<u32>> = vec![None; count];
 
         for i in 0..count {
@@ -103,14 +107,22 @@ impl IslandBuilder {
             let island = match root_to_island[root] {
                 Some(id) => id,
                 None => {
-                    let id = members.len() as u32;
+                    let id = counts.len() as u32;
                     root_to_island[root] = Some(id);
-                    members.push(Vec::new());
+                    counts.push(0);
                     id
                 }
             };
             island_of.push(IslandId(island));
-            members[island as usize].push(i);
+            counts[island as usize] += 1;
+        }
+
+        let mut members = IndexBuckets::with_counts(counts.iter().copied());
+        counts.fill(0);
+        for (slot, island) in island_of.iter().enumerate() {
+            let bucket = island.0 as usize;
+            members.set(bucket, counts[bucket], slot);
+            counts[bucket] += 1;
         }
 
         IslandSet { island_of, members }
@@ -121,7 +133,7 @@ impl IslandBuilder {
 #[derive(Clone, Debug, Default)]
 pub struct IslandSet {
     island_of: Vec<IslandId>,
-    members: Vec<Vec<usize>>,
+    members: IndexBuckets,
 }
 
 impl IslandSet {
@@ -146,9 +158,7 @@ impl IslandSet {
     /// Returns an empty slice if the island id is out of range.
     #[must_use]
     pub fn members(&self, island: IslandId) -> &[usize] {
-        self.members
-            .get(island.0 as usize)
-            .map_or(&[], Vec::as_slice)
+        self.members.get(island.0 as usize)
     }
 
     /// Returns the total number of elements across all islands.

@@ -2,8 +2,8 @@
 //!
 //! Islands are connected components of dynamic bodies; two islands never share
 //! a dynamic body, so their constraint solves are independent. This module
-//! turns that independence into thread-level parallelism: each active island is
-//! copied into an owned [`IslandScratch`] with its body columns and locally
+//! turns that independence into thread-level parallelism: consecutive small
+//! active islands share an owned [`IslandScratch`] with their body columns and locally
 //! re-indexed constraints, the scratches are solved in parallel with rayon, and
 //! the results are scattered back into the global solver view.
 //!
@@ -44,7 +44,7 @@ use crate::state::view::BodySolverView;
 use glam::{Quat, Vec3};
 use rayon::prelude::*;
 
-/// An owned copy of a single island's solver state.
+/// An owned copy of one or more independent islands' solver state.
 ///
 /// Every column mirrors the matching [`BodySolverView`] slice but is indexed by
 /// a *local* slot: local slot `l` maps to global slot `slots[l]`. Contacts and
@@ -86,32 +86,39 @@ struct IslandScratch {
 }
 
 impl IslandScratch {
-    /// Copies one island out of the global view into an owned scratch.
+    /// Copies a bounded batch out of the global view into an owned scratch.
+    /// Island-local order is retained; shared static/kinematic separators are
+    /// copied only once. No dynamic body belongs to more than one island.
     fn gather(
         view: &BodySolverView<'_>,
         islands: &SolveIslands,
-        island: usize,
+        batch: &[usize],
         constraints: &[ContactConstraint],
         joints: &[(JointHandle, &mut Joint)],
         ragdolls: &[RagdollConstraint],
     ) -> IslandScratch {
-        // Union of every global slot the island's constraints and joints touch,
+        let contact_count = batch.iter().map(|&i| islands.contacts(i).len()).sum();
+        let joint_count = batch.iter().map(|&i| islands.joints(i).len()).sum();
+        let ragdoll_count = batch.iter().map(|&i| islands.ragdolls(i).len()).sum();
+        // Union of every global slot the batch's constraints and joints touch,
         // including static separators (contacts/joints may reference statics).
-        let mut slots: Vec<usize> = Vec::new();
-        for &ci in islands.contacts(island) {
-            let c = &constraints[ci];
-            slots.push(c.slot_a);
-            slots.push(c.slot_b);
-        }
-        for &ji in islands.joints(island) {
-            let (_, j) = &joints[ji];
-            slots.push(j.anchor_a.body.index() as usize);
-            slots.push(j.anchor_b.body.index() as usize);
-        }
-        for &ri in islands.ragdolls(island) {
-            let r = &ragdolls[ri];
-            slots.push(r.body_a.index() as usize);
-            slots.push(r.body_b.index() as usize);
+        let mut slots = Vec::with_capacity(2 * (contact_count + joint_count + ragdoll_count));
+        for &island in batch {
+            for &ci in islands.contacts(island) {
+                let c = &constraints[ci];
+                slots.push(c.slot_a);
+                slots.push(c.slot_b);
+            }
+            for &ji in islands.joints(island) {
+                let (_, j) = &joints[ji];
+                slots.push(j.anchor_a.body.index() as usize);
+                slots.push(j.anchor_b.body.index() as usize);
+            }
+            for &ri in islands.ragdolls(island) {
+                let r = &ragdolls[ri];
+                slots.push(r.body_a.index() as usize);
+                slots.push(r.body_b.index() as usize);
+            }
         }
         slots.sort_unstable();
         slots.dedup();
@@ -136,11 +143,11 @@ impl IslandScratch {
             sleep_timers: Vec::with_capacity(n),
             active: Vec::with_capacity(n),
             slots,
-            contacts: Vec::new(),
-            joints: Vec::new(),
-            joint_handles: Vec::new(),
-            joint_indices: Vec::new(),
-            ragdolls: Vec::new(),
+            contacts: Vec::with_capacity(contact_count),
+            joints: Vec::with_capacity(joint_count),
+            joint_handles: Vec::with_capacity(joint_count),
+            joint_indices: Vec::with_capacity(joint_count),
+            ragdolls: Vec::with_capacity(ragdoll_count),
         };
         for &g in &scratch.slots {
             scratch.positions.push(view.positions[g]);
@@ -162,36 +169,39 @@ impl IslandScratch {
             scratch.active.push(view.active[g]);
         }
 
-        // Re-index the island's contacts onto local slots.
-        for &ci in islands.contacts(island) {
-            let mut c = constraints[ci].clone();
-            c.slot_a = scratch.local_of(c.slot_a);
-            c.slot_b = scratch.local_of(c.slot_b);
-            scratch.contacts.push(c);
-        }
-        // Re-index the island's joints onto local slots. The joint solver reads
-        // only the handle index (never the generation), so preserving the
-        // original generation while rewriting the index is sufficient.
-        for &ji in islands.joints(island) {
-            let (handle, source) = &joints[ji];
-            let mut j = **source;
-            let la = scratch.local_of(j.anchor_a.body.index() as usize);
-            let lb = scratch.local_of(j.anchor_b.body.index() as usize);
-            j.anchor_a.body = BodyHandle::new(la as u32, j.anchor_a.body.generation());
-            j.anchor_b.body = BodyHandle::new(lb as u32, j.anchor_b.body.generation());
-            j.gear_state.remap_bodies(j.anchor_a.body, j.anchor_b.body);
-            j.revolute_state.remap_bodies(j.anchor_a.body, j.anchor_b.body);
-            scratch.joints.push(j);
-            scratch.joint_handles.push(*handle);
-            scratch.joint_indices.push(ji);
-        }
-        for &ri in islands.ragdolls(island) {
-            let mut r = ragdolls[ri];
-            let la = scratch.local_of(r.body_a.index() as usize);
-            let lb = scratch.local_of(r.body_b.index() as usize);
-            r.body_a = BodyHandle::new(la as u32, r.body_a.generation());
-            r.body_b = BodyHandle::new(lb as u32, r.body_b.generation());
-            scratch.ragdolls.push(r);
+        for &island in batch {
+            // Re-index each island's contacts onto local slots.
+            for &ci in islands.contacts(island) {
+                let mut c = constraints[ci].clone();
+                c.slot_a = scratch.local_of(c.slot_a);
+                c.slot_b = scratch.local_of(c.slot_b);
+                scratch.contacts.push(c);
+            }
+            // Re-index the island's joints onto local slots. The joint solver reads
+            // only the handle index (never the generation), so preserving the
+            // original generation while rewriting the index is sufficient.
+            for &ji in islands.joints(island) {
+                let (handle, source) = &joints[ji];
+                let mut j = **source;
+                let la = scratch.local_of(j.anchor_a.body.index() as usize);
+                let lb = scratch.local_of(j.anchor_b.body.index() as usize);
+                j.anchor_a.body = BodyHandle::new(la as u32, j.anchor_a.body.generation());
+                j.anchor_b.body = BodyHandle::new(lb as u32, j.anchor_b.body.generation());
+                j.gear_state.remap_bodies(j.anchor_a.body, j.anchor_b.body);
+                j.revolute_state
+                    .remap_bodies(j.anchor_a.body, j.anchor_b.body);
+                scratch.joints.push(j);
+                scratch.joint_handles.push(*handle);
+                scratch.joint_indices.push(ji);
+            }
+            for &ri in islands.ragdolls(island) {
+                let mut r = ragdolls[ri];
+                let la = scratch.local_of(r.body_a.index() as usize);
+                let lb = scratch.local_of(r.body_b.index() as usize);
+                r.body_a = BodyHandle::new(la as u32, r.body_a.generation());
+                r.body_b = BodyHandle::new(lb as u32, r.body_b.generation());
+                scratch.ragdolls.push(r);
+            }
         }
         scratch
     }
@@ -369,11 +379,37 @@ impl IslandScratch {
     }
 }
 
+/// Bound the cost of small scratch allocations without splitting a connected
+/// component or changing any body's constraint order. Large islands retain a
+/// dedicated scratch and their existing intra-island colouring policy.
+fn scratch_batches(islands: &SolveIslands, active: &[usize]) -> Vec<std::ops::Range<usize>> {
+    const TARGET_WORK: usize = 128;
+    let mut batches = Vec::new();
+    let mut start = 0;
+    let mut work = 0_usize;
+    for (index, &island) in active.iter().enumerate() {
+        let weight = islands.members(island).len()
+            + islands.contacts(island).len()
+            + islands.joints(island).len()
+            + islands.ragdolls(island).len();
+        if index > start && work.saturating_add(weight) > TARGET_WORK {
+            batches.push(start..index);
+            start = index;
+            work = 0;
+        }
+        work = work.saturating_add(weight);
+    }
+    if start < active.len() {
+        batches.push(start..active.len());
+    }
+    batches
+}
+
 /// Solves the active islands in parallel and recovers the free bodies.
 ///
 /// `active` is the list of island indices that still have an awake body (the
 /// output of [`classify_and_wake`](super::sleep_solve::classify_and_wake)).
-/// Each active island is gathered into an owned scratch, the scratches are
+/// Consecutive small active islands share an owned scratch, the scratches are
 /// solved concurrently (or serially when `use_threads` is `false`), and their
 /// dynamic results are scattered back. Free awake dynamic bodies that belong to
 /// no active island are then recovered globally with the same formula the
@@ -393,9 +429,11 @@ pub fn solve_islands_parallel(
     h: f32,
     use_threads: bool,
 ) -> JointLoadAccumulator {
-    let mut scratches: Vec<IslandScratch> = active
-        .iter()
-        .map(|&island| IslandScratch::gather(view, islands, island, constraints, joints, ragdolls))
+    let mut scratches: Vec<IslandScratch> = scratch_batches(islands, active)
+        .into_iter()
+        .map(|range| {
+            IslandScratch::gather(view, islands, &active[range], constraints, joints, ragdolls)
+        })
         .collect();
 
     // `scratches` is built in stable active-island order. Collect the local
@@ -438,6 +476,10 @@ pub fn solve_islands_parallel(
     }
     loads
 }
+
+#[cfg(test)]
+#[path = "parallel_solve/batch_tests.rs"]
+mod batch_tests;
 
 #[cfg(test)]
 mod tests {
@@ -502,7 +544,7 @@ mod tests {
         let b_island = (0..islands.island_count())
             .find(|&i| islands.members(i) == [2usize, 3])
             .expect("island B present");
-        let scratch = IslandScratch::gather(&view, &islands, b_island, &constraints, &[], &[]);
+        let scratch = IslandScratch::gather(&view, &islands, &[b_island], &constraints, &[], &[]);
         assert_eq!(scratch.slots, vec![2, 3]);
         assert_eq!(scratch.contacts.len(), 1);
         // The single contact must now address local slots 0 and 1.
@@ -672,7 +714,10 @@ mod tests {
         loads.loads().expect("finite measured reactions")
     }
 
-    fn assert_reaction_bits_equal(expected: &[SolverJointLoad], actual: &[SolverJointLoad]) {
+    pub(super) fn assert_reaction_bits_equal(
+        expected: &[SolverJointLoad],
+        actual: &[SolverJointLoad],
+    ) {
         assert_eq!(expected.len(), actual.len());
         for (expected, actual) in expected.iter().zip(actual) {
             assert_eq!(expected.joint, actual.joint, "joint handle remapping");

@@ -24,6 +24,7 @@ use super::config::XpbdConfig;
 use super::rigid::{
     apply_position_impulse, generalized_inverse_mass, inv_inertia_world, inv_mass_world,
 };
+use crate::collide::contact::MAX_MANIFOLD_POINTS;
 use crate::collide::ContactManifold;
 use crate::collider::PhysicsMaterial;
 use crate::state::view::BodySolverView;
@@ -34,7 +35,7 @@ use glam::{Mat3, Vec3};
 const SOLVE_EPS: f32 = 1.0e-9;
 
 /// Per-point working state for a single contact within a constraint.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 struct PointState {
     /// Contact anchor on body `a`, expressed in body `a`'s local frame.
     anchor_a_local: Vec3,
@@ -60,8 +61,10 @@ pub struct ContactConstraint {
     pub friction: f32,
     /// Combined restitution coefficient for the pair.
     pub restitution: f32,
-    /// Per-point working state, one entry per manifold point.
-    points: Vec<PointState>,
+    /// Inline working state; cloning scratch contacts never allocates.
+    points: [PointState; MAX_MANIFOLD_POINTS],
+    /// Only this prefix of the inline buffer contains manifold points.
+    point_count: usize,
 }
 
 impl ContactConstraint {
@@ -105,21 +108,21 @@ impl ContactConstraint {
             let inv_q_a = q_a.inverse();
             let inv_q_b = q_b.inverse();
 
-            let mut points = Vec::with_capacity(manifold.len());
-            for contact in manifold.points() {
+            let mut points = [PointState::default(); MAX_MANIFOLD_POINTS];
+            for (point, contact) in points.iter_mut().zip(manifold.points()) {
                 let r_a = contact.point_a - view.positions[slot_a];
                 let r_b = contact.point_b - view.positions[slot_b];
                 let vel_a = point_velocity(view, slot_a, r_a);
                 let vel_b = point_velocity(view, slot_b, r_b);
                 let normal_velocity_pre = (vel_a - vel_b).dot(normal);
-                points.push(PointState {
+                *point = PointState {
                     anchor_a_local: inv_q_a * r_a,
                     anchor_b_local: inv_q_b * r_b,
                     normal_velocity_pre,
                     normal_lambda: 0.0,
-                });
+                };
             }
-            if points.is_empty() {
+            if manifold.is_empty() {
                 continue;
             }
             out.push(ContactConstraint {
@@ -129,6 +132,7 @@ impl ContactConstraint {
                 friction: material.friction,
                 restitution: material.restitution,
                 points,
+                point_count: manifold.len(),
             });
         }
         out
@@ -138,13 +142,15 @@ impl ContactConstraint {
     /// index is out of range.
     #[must_use]
     pub fn normal_lambda(&self, index: usize) -> f32 {
-        self.points.get(index).map_or(0.0, |p| p.normal_lambda)
+        self.points[..self.point_count]
+            .get(index)
+            .map_or(0.0, |p| p.normal_lambda)
     }
 
     /// Returns the pre-solve relative normal velocity of point `index`.
     #[must_use]
     pub fn normal_velocity_pre(&self, index: usize) -> f32 {
-        self.points
+        self.points[..self.point_count]
             .get(index)
             .map_or(0.0, |p| p.normal_velocity_pre)
     }
@@ -153,7 +159,7 @@ impl ContactConstraint {
     /// the current orientations in `view`.
     #[must_use]
     pub fn anchors(&self, view: &BodySolverView<'_>, index: usize) -> (Vec3, Vec3) {
-        let p = self.points[index];
+        let p = self.points[..self.point_count][index];
         (
             view.orientations[self.slot_a] * p.anchor_a_local,
             view.orientations[self.slot_b] * p.anchor_b_local,
@@ -163,7 +169,7 @@ impl ContactConstraint {
     /// Returns the number of contact points in this constraint.
     #[must_use]
     pub fn point_count(&self) -> usize {
-        self.points.len()
+        self.point_count
     }
 }
 
@@ -193,7 +199,7 @@ pub(crate) fn solve_constraint_positions(
     let slot_b = constraint.slot_b;
     let normal = constraint.normal;
     let friction = constraint.friction;
-    for index in 0..constraint.points.len() {
+    for index in 0..constraint.point_count {
         solve_point(
             view,
             constraint,
@@ -483,6 +489,39 @@ mod tests {
             inv_mass: 1.0,
             inv_inertia: Vec3::ONE,
         })
+    }
+
+    #[test]
+    fn inline_point_prefix_preserves_all_manifold_sizes_and_checked_access() {
+        for count in 0..=MAX_MANIFOLD_POINTS {
+            let mut bodies = BodyStorage::new();
+            let a = bodies.insert(unit_dynamic(Vec3::ZERO));
+            let b = bodies.insert(unit_dynamic(Vec3::Y));
+            let mut manifold = ContactManifold::new(a, b, Vec3::Y);
+            for i in 0..count {
+                let anchor_a = Vec3::new(i as f32 * 0.1, 0.6, 0.0);
+                assert!(manifold.push(ContactPoint::new(anchor_a, anchor_a - Vec3::Y * 0.2, 0.2)));
+            }
+            let view = bodies.solver_view_mut();
+            let constraints = ContactConstraint::build(&view, &[manifold]);
+            if count == 0 {
+                assert!(constraints.is_empty());
+                continue;
+            }
+            let constraint = constraints[0].clone();
+            assert_eq!(constraint.point_count(), count);
+            for (i, point) in manifold.points().iter().enumerate() {
+                let (r_a, r_b) = constraint.anchors(&view, i);
+                assert_eq!(r_a, point.point_a - view.positions[a.index() as usize]);
+                assert_eq!(r_b, point.point_b - view.positions[b.index() as usize]);
+                assert_eq!(constraint.normal_lambda(i), 0.0);
+                assert_eq!(constraint.normal_velocity_pre(i), 0.0);
+            }
+            for invalid in [count, MAX_MANIFOLD_POINTS, usize::MAX] {
+                assert_eq!(constraint.normal_lambda(invalid), 0.0);
+                assert_eq!(constraint.normal_velocity_pre(invalid), 0.0);
+            }
+        }
     }
 
     #[test]
