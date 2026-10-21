@@ -20,7 +20,7 @@ struct Particle {
     radius: f32,
     alive: u32,
     particle_id: u32,
-    pad: u32,
+    emitter_id: u32,
 };
 struct ForceEntry {
     kind: u32,
@@ -74,6 +74,9 @@ const FORCE_SPRING: u32 = 11u;
 fn finite1(v: f32) -> bool {
     return (bitcast<u32>(v) & 0x7f800000u) != 0x7f800000u;
 }
+fn is_finite3(v: vec3<f32>) -> bool {
+    return finite1(v.x) && finite1(v.y) && finite1(v.z);
+}
 fn safe_normalize(v: vec3<f32>) -> vec3<f32> {
     let l2 = dot(v, v);
     if (!finite1(l2) || l2 <= EPS * EPS) { return vec3<f32>(0.0); }
@@ -89,12 +92,23 @@ fn falloff(kind: u32, ratio: f32) -> f32 {
     if (kind == 3u) { return 1.0 / (1.0 + t * t); }
     return 1.0;
 }
-fn softened_toward(pos: vec3<f32>, target_pos: vec3<f32>, soft: f32) -> vec4<f32> {
-    let delta = target_pos - pos;
+fn point_force(pos: vec3<f32>, attractor: vec3<f32>, strength: f32, radius: f32, softening: f32, shape: u32) -> vec3<f32> {
+    if (!is_finite3(pos) || !is_finite3(attractor) || !finite1(strength) || !finite1(radius)) {
+        return vec3<f32>(0.0);
+    }
+    let delta = attractor - pos;
     let d2 = dot(delta, delta);
-    let dist = sqrt(max(d2, 0.0));
-    let s = max(soft, 0.0);
-    return vec4<f32>(delta * inverseSqrt(max(d2 + s * s + EPS * EPS, EPS * EPS)), dist);
+    let dist = sqrt(d2);
+    if (!finite1(dist) || (radius > EPS && dist > radius)) { return vec3<f32>(0.0); }
+    var soft = 0.0;
+    if (finite1(softening)) { soft = max(softening, 0.0); }
+    let dir = delta * (1.0 / sqrt(d2 + soft * soft + EPS * EPS));
+    var ratio = 0.0;
+    if (radius > EPS) { ratio = dist / radius; }
+    return dir * (strength * falloff(shape, ratio));
+}
+fn noise_lerp(a: f32, b: f32, t: f32) -> f32 {
+    return a + (b - a) * t;
 }
 fn hash3(p: vec3<i32>, seed: u32) -> f32 {
     var h = seed ^ 0x9e3779b9u;
@@ -108,6 +122,7 @@ fn hash3(p: vec3<i32>, seed: u32) -> f32 {
     return f32(h >> 8u) / 8388608.0 - 1.0;
 }
 fn noise(p: vec3<f32>, seed: u32) -> f32 {
+    if (!is_finite3(p)) { return 0.0; }
     let cell = vec3<i32>(floor(p));
     let f = fract(p);
     let u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
@@ -115,81 +130,107 @@ fn noise(p: vec3<f32>, seed: u32) -> f32 {
     let n010 = hash3(cell + vec3<i32>(0,1,0), seed); let n110 = hash3(cell + vec3<i32>(1,1,0), seed);
     let n001 = hash3(cell + vec3<i32>(0,0,1), seed); let n101 = hash3(cell + vec3<i32>(1,0,1), seed);
     let n011 = hash3(cell + vec3<i32>(0,1,1), seed); let n111 = hash3(cell + vec3<i32>(1,1,1), seed);
-    let x00 = mix(n000, n100, u.x); let x10 = mix(n010, n110, u.x);
-    let x01 = mix(n001, n101, u.x); let x11 = mix(n011, n111, u.x);
-    return mix(mix(x00, x10, u.y), mix(x01, x11, u.y), u.z);
-}
-fn noise3(p: vec3<f32>, seed: u32) -> vec3<f32> {
-    return vec3<f32>(noise(p, seed), noise(p + vec3<f32>(19.1, 7.7, 3.4), seed ^ 0x68bc21ebu), noise(p + vec3<f32>(5.2, 17.3, 11.8), seed ^ 0x02e5be93u));
+    let x00 = noise_lerp(n000, n100, u.x); let x10 = noise_lerp(n010, n110, u.x);
+    let x01 = noise_lerp(n001, n101, u.x); let x11 = noise_lerp(n011, n111, u.x);
+    return noise_lerp(noise_lerp(x00, x10, u.y), noise_lerp(x01, x11, u.y), u.z);
 }
 fn force_value(f: ForceEntry, pos: vec3<f32>, vel: vec3<f32>) -> vec3<f32> {
     let d0 = f.data[0]; let d1 = f.data[1]; let d2 = f.data[2];
-    if (f.kind == FORCE_GRAVITY) { return d0.xyz; }
-    if (f.kind == FORCE_LINEAR_DRAG) { return -vel * min(max(d0.x, 0.0), 1.0 / max(d0.y, EPS)); }
-    if (f.kind == FORCE_QUADRATIC_DRAG) { return -vel * length(vel) * max(d0.x, 0.0); }
-    if (f.kind == FORCE_WIND) { return (d0.xyz - vel) * d0.w; }
+    if (f.kind == FORCE_GRAVITY) { return finite3(d0.xyz); }
+    if (f.kind == FORCE_LINEAR_DRAG) {
+        if (!finite1(d0.x) || d0.x <= 0.0 || !finite1(d0.y) || d0.y <= 0.0) { return vec3<f32>(0.0); }
+        return vel * (-min(d0.x, 1.0 / d0.y));
+    }
+    if (f.kind == FORCE_QUADRATIC_DRAG) {
+        let speed = length(vel);
+        if (!finite1(d0.x) || d0.x <= 0.0 || speed <= EPS) { return vec3<f32>(0.0); }
+        return vel * (-d0.x * speed);
+    }
+    if (f.kind == FORCE_WIND) {
+        if (!finite1(d0.w) || d0.w <= 0.0) { return vec3<f32>(0.0); }
+        return (finite3(d0.xyz) - vel) * d0.w;
+    }
     if (f.kind == FORCE_VORTEX) {
+        if (!is_finite3(d0.xyz) || !is_finite3(d1.xyz) || !finite1(d1.w)) { return vec3<f32>(0.0); }
         let axis = safe_normalize(d1.xyz); let offset = pos - d0.xyz;
         let radial = offset - axis * dot(offset, axis);
         let r2 = dot(radial, radial);
         if (r2 <= EPS*EPS) { return vec3<f32>(0.0); }
         return cross(axis, radial) * (d1.w / r2);
     }
-    if (f.kind == FORCE_POINT || f.kind == FORCE_RADIAL || f.kind == FORCE_WELL) {
+    if (f.kind == FORCE_POINT || f.kind == FORCE_RADIAL) {
+        let strength = select(d1.x, -d1.x, f.kind == FORCE_RADIAL);
+        return point_force(pos, d0.xyz, strength, d1.y, d1.z, f.falloff);
+    }
+    if (f.kind == FORCE_WELL) {
+        if (!is_finite3(d0.xyz) || !finite1(d1.x)) { return vec3<f32>(0.0); }
         let toward = d0.xyz - pos;
-        let radial_target = select(toward, -toward, f.kind == FORCE_RADIAL);
-        let dist = length(radial_target);
-        if (f.kind == FORCE_WELL) { return safe_normalize(toward) * (d1.x / max(dot(toward,toward) + d1.y*d1.y + EPS*EPS, EPS)); }
-        let softened = radial_target * inverseSqrt(max(dot(radial_target,radial_target) + max(d1.z, 0.0) * max(d1.z, 0.0) + EPS*EPS, EPS*EPS));
-        let radius = d1.y;
-        if (radius > EPS && dist > radius) { return vec3<f32>(0.0); }
-        let shape = select(1.0, falloff(f.falloff, select(0.0, dist / max(radius, EPS), radius > EPS)), radius > EPS);
-        if (f.kind == FORCE_RADIAL) { return softened * d1.x * shape; }
-        return softened * d1.x * shape;
+        var soft = 0.0;
+        if (finite1(d1.y)) { soft = max(d1.y, 0.0); }
+        return safe_normalize(toward) * (d1.x / (dot(toward, toward) + soft * soft + EPS * EPS));
     }
     if (f.kind == FORCE_LINE) {
+        if (!is_finite3(d0.xyz) || !is_finite3(d1.xyz)) { return vec3<f32>(0.0); }
         let axis = safe_normalize(d1.xyz);
+        if (dot(axis, axis) <= EPS * EPS) {
+            return point_force(pos, d0.xyz, d2.x, d2.y, d2.z, f.falloff);
+        }
         let off = pos - d0.xyz;
-        let nearest = select(d0.xyz, d0.xyz + axis * dot(off, axis), dot(axis,axis) > EPS*EPS);
-        let to = nearest - pos; let dist = length(to);
-        if (d2.y > EPS && dist > d2.y) { return vec3<f32>(0.0); }
-        let softened = to * inverseSqrt(max(dot(to,to) + d2.z*d2.z + EPS*EPS, EPS*EPS));
-        return softened * d2.x * select(1.0, falloff(f.falloff, dist / max(d2.y, EPS)), d2.y > EPS);
+        let nearest = d0.xyz + axis * dot(off, axis);
+        return point_force(pos, nearest, d2.x, d2.y, d2.z, f.falloff);
     }
     if (f.kind == FORCE_ORBITAL) {
+        if (!is_finite3(d0.xyz) || !is_finite3(d1.xyz) || !is_finite3(d2.xyz)) { return vec3<f32>(0.0); }
         let axis = safe_normalize(d1.xyz); let offset = pos - d0.xyz;
+        if (dot(axis, axis) <= EPS * EPS) { return vec3<f32>(0.0); }
         let radial = offset - axis * dot(offset,axis); let dist = length(radial);
         if (dist <= EPS) { return vec3<f32>(0.0); }
-        let tangent = safe_normalize(cross(axis, radial));
-        let radial_unit = radial / dist;
-        return tangent * d2.y - radial_unit * ((dist - max(d2.x,0.0)) * max(d2.z,0.0));
+        let radial_unit = safe_normalize(radial);
+        let tangent = safe_normalize(cross(axis, radial_unit));
+        return tangent * d2.y + radial_unit * (-max(d2.z, 0.0) * (dist - max(d2.x, 0.0)));
     }
     if (f.kind == FORCE_TURBULENCE) {
-        let eps = select(1.0e-3,d1.z,d1.z>0.0); let p = pos * d0.x; let seed = bitcast<u32>(d1.x);
-        var result=vec3<f32>(0.0); var frequency=1.0; var amplitude=1.0;
-        for (var octave=0u; octave<u32(max(d1.y,0.0)); octave+=1u) {
-            let q=p*frequency; let s=seed+octave*0x01000193u;
+        if (!is_finite3(d0.xyz) || !finite1(d0.w)) { return vec3<f32>(0.0); }
+        let eps = select(1.0e-3,d1.z,finite1(d1.z) && d1.z>0.0); let seed = bitcast<u32>(d1.x);
+        let inv = 1.0 / (2.0 * eps);
+        var result=vec3<f32>(0.0); var frequency=d0.x; var amplitude=d0.y;
+        for (var octave=0u; octave<bitcast<u32>(d1.y); octave+=1u) {
+            let q=pos*frequency; let s=seed+octave*0x01000193u;
+            // Preserve zero * amplitude too: an overflowing amplitude invalidates
+            // the whole entry, rather than retaining only its earlier octaves.
+            var curl = vec3<f32>(0.0);
+            if (is_finite3(q)) {
             let dx=vec3<f32>(eps,0.0,0.0); let dy=vec3<f32>(0.0,eps,0.0); let dz=vec3<f32>(0.0,0.0,eps);
             let s1=s; let s2=s+0x10000001u; let s3=s+0x20000002u;
-            let p3dy=(noise(q+dy,s3)-noise(q-dy,s3))/(2.0*eps); let p2dz=(noise(q+dz,s2)-noise(q-dz,s2))/(2.0*eps);
-            let p1dz=(noise(q+dz,s1)-noise(q-dz,s1))/(2.0*eps); let p3dx=(noise(q+dx,s3)-noise(q-dx,s3))/(2.0*eps);
-            let p2dx=(noise(q+dx,s2)-noise(q-dx,s2))/(2.0*eps); let p1dy=(noise(q+dy,s1)-noise(q-dy,s1))/(2.0*eps);
-            result+=vec3<f32>(p3dy-p2dz,p1dz-p3dx,p2dx-p1dy)*(d0.y*amplitude);
+            let p3dy=(noise(q+dy,s3)-noise(q-dy,s3))*inv; let p2dz=(noise(q+dz,s2)-noise(q-dz,s2))*inv;
+            let p1dz=(noise(q+dz,s1)-noise(q-dz,s1))*inv; let p3dx=(noise(q+dx,s3)-noise(q-dx,s3))*inv;
+            let p2dx=(noise(q+dx,s2)-noise(q-dx,s2))*inv; let p1dy=(noise(q+dy,s1)-noise(q-dy,s1))*inv;
+            curl=vec3<f32>(p3dy-p2dz,p1dz-p3dx,p2dx-p1dy);
+            }
+            result+=curl*amplitude;
             frequency*=d0.z; amplitude*=d0.w;
         }
         return result;
     }
-    if (f.kind == FORCE_SPRING) { return (d0.xyz - pos) * d1.x - vel * d1.y; }
+    if (f.kind == FORCE_SPRING) {
+        if (!is_finite3(d0.xyz) || !finite1(d1.x) || !finite1(d1.y)) { return vec3<f32>(0.0); }
+        return (d0.xyz - pos) * max(d1.x, 0.0) + vel * (-max(d1.y, 0.0));
+    }
     return vec3<f32>(0.0);
 }
 fn acceleration(pos: vec3<f32>, vel: vec3<f32>) -> vec3<f32> {
+    if (!is_finite3(pos) || !is_finite3(vel)) { return vec3<f32>(0.0); }
     var sum = vec3<f32>(0.0);
     for (var i = 0u; i < params.force_count; i += 1u) {
         let f = forces[i];
-        if (f.enabled == 0u || !finite1(f.gate_weight.w) || f.gate_weight.w <= 0.0 || !finite1(f.gate_radius)) { continue; }
-        let gate_dist = length(pos - f.gate_weight.xyz);
-        if (f.gate_radius > EPS && gate_dist > f.gate_radius) { continue; }
-        sum += force_value(f, pos, vel) * f.gate_weight.w;
+        if (f.enabled == 0u || !finite1(f.gate_weight.w) || f.gate_weight.w <= 0.0) { continue; }
+        if (f.gate_radius > EPS) {
+            if (!finite1(f.gate_radius) || !is_finite3(f.gate_weight.xyz)) { continue; }
+            let delta = pos - f.gate_weight.xyz;
+            if (dot(delta, delta) > f.gate_radius * f.gate_radius) { continue; }
+        }
+        let contribution = force_value(f, pos, vel) * f.gate_weight.w;
+        if (is_finite3(contribution)) { sum += contribution; }
     }
     return finite3(sum);
 }

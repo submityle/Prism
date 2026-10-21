@@ -83,6 +83,8 @@ pub struct GpuParticle {
     pub alive: bool,
     /// Stable particle identifier.
     pub particle_id: u32,
+    /// Stable packed emitter identity for the GPU route table.
+    pub emitter_id: u32,
 }
 
 impl GpuParticle {
@@ -94,6 +96,7 @@ impl GpuParticle {
         lifetime: f32,
         radius: f32,
         particle_id: u32,
+        emitter_id: u32,
     ) -> Self {
         Self {
             position,
@@ -103,6 +106,7 @@ impl GpuParticle {
             radius,
             alive: true,
             particle_id,
+            emitter_id,
         }
     }
 
@@ -117,6 +121,7 @@ impl GpuParticle {
             radius: 0.0,
             alive: false,
             particle_id,
+            emitter_id: u32::MAX,
         }
     }
 }
@@ -847,7 +852,7 @@ impl GpuSimulationStage {
         self.compact_events
     }
     /// Releases all resources owned by the stage.
-    pub fn destroy(&self, device: &impl RenderDevice) {
+    pub fn destroy<D: RenderDevice + ?Sized>(&self, device: &D) {
         for buffer in [
             self.params,
             self.particles,
@@ -1030,7 +1035,7 @@ fn force_data(force: Force) -> (u32, u32, [[f32; 4]; 5]) {
                 frequency_multiplier,
                 amplitude_multiplier,
             ];
-            data[1] = [f32::from_bits(seed), octaves as f32, epsilon, 0.0];
+            data[1] = [f32::from_bits(seed), f32::from_bits(octaves), epsilon, 0.0];
         }
         Force::SpringDamper {
             anchor,
@@ -1134,6 +1139,7 @@ fn encode_particle(dst: &mut [u8], particle: GpuParticle) {
     put_f32(dst, 32, particle.radius);
     put_u32(dst, 36, u32::from(particle.alive));
     put_u32(dst, 40, particle.particle_id);
+    put_u32(dst, 44, particle.emitter_id);
 }
 
 fn decode_particles(bytes: &[u8]) -> Vec<GpuParticle> {
@@ -1147,6 +1153,7 @@ fn decode_particles(bytes: &[u8]) -> Vec<GpuParticle> {
             radius: f32_at(chunk, 32),
             alive: u32_at(&chunk[36..]) != 0,
             particle_id: u32_at(&chunk[40..]),
+            emitter_id: u32_at(&chunk[44..]),
         })
         .collect()
 }
