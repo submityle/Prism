@@ -18,6 +18,7 @@ prism_asset_container = { path = "../prism_asset_container", optional = true }
 prism_world_terrain = { path = "../prism_world_terrain", optional = true, default-features = false, features = ["scatter"] }
 prism_tasks = { path = "../prism_tasks", optional = true, default-features = false, features = ["std"] }
 prism_world_gpu = { path = "../prism_world_gpu", optional = true, default-features = false }
+prism_ecs = { path = "../prism_ecs", optional = true, default-features = false }
 wgpu = { version = "30", default-features = false, features = ["wgsl", "metal", "vulkan", "dx12"], optional = true }
 
 [features]
@@ -36,6 +37,8 @@ proxy_host = ["std", "dep:prism_world_gpu"]
 # Real wgpu-backed proxy lifecycle; keeps the authoritative scene host borrowed
 # and enables only the explicit GPU frame-boundary methods in the adapter.
 gpu_proxy = ["proxy_host", "dep:wgpu", "prism_world_gpu/gpu"]
+# ECS request/result components plus a real GPU dispatch/readback bridge.
+sdf_ecs_gpu = ["gpu_proxy", "dep:prism_ecs"]
 
 [[bench]]
 name = "threaded_archive"

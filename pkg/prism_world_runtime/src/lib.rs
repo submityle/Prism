@@ -63,6 +63,13 @@ pub use sdf_clipmap_upload::{
     WorldSdfClipmapUploadError, WorldSdfClipmapUploadStats, WorldSdfGpuClipmap,
     WorldSdfGpuClipmapError,
 };
+#[cfg(feature = "sdf_ecs_gpu")]
+mod sdf_ecs_gpu;
+#[cfg(feature = "sdf_ecs_gpu")]
+pub use sdf_ecs_gpu::{
+    WorldSdfEcsGpuBridge, WorldSdfEcsGpuConfig, WorldSdfEcsGpuError, WorldSdfEcsGpuPolicy,
+    WorldSdfEcsRequest, WorldSdfEcsSample, WorldSdfEcsSampleReport, WorldSdfEcsSampleValue,
+};
 mod data_layers;
 pub use data_layers::{
     DataLayerConfigError, DataLayerId, DataLayerState, LayeredCellFrameCoordinator,
