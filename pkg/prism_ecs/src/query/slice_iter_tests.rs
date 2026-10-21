@@ -1,6 +1,8 @@
 //! Behavioural tests for `QueryState::simd_iter` / `simd_iter_mut` (design §7).
 
+use alloc::vec;
 use alloc::vec::Vec;
+use std::sync::{Arc, Mutex};
 
 use crate::component::{Component, StorageType};
 use crate::query::{Changed, With};
@@ -67,6 +69,42 @@ fn slice_size_of_one_is_row_by_row() {
 }
 
 #[test]
+fn maximum_slice_size_covers_multiple_physical_chunks_without_overflow() {
+    let mut world = World::new();
+    let first = world.spawn(Value(0.0));
+    let location = world.entities().location(first).unwrap();
+    let rows_per_chunk = world
+        .archetypes()
+        .get(location.archetype_id)
+        .unwrap()
+        .table()
+        .rows_per_chunk();
+    let count = rows_per_chunk * 2 + 3;
+    for i in 1..count {
+        world.spawn(Value(i as f32));
+    }
+
+    let state = world.query::<&Value>();
+    let lengths = state
+        .simd_iter::<{ usize::MAX }>(&world)
+        .map(|slice| slice.len())
+        .collect::<Vec<_>>();
+    assert_eq!(lengths, [rows_per_chunk, rows_per_chunk, 3]);
+
+    let state = world.query::<&mut Value>();
+    for slice in state.simd_iter_mut::<{ usize::MAX }>(&mut world) {
+        for value in slice {
+            value.0 += 1.0;
+        }
+    }
+    let state = world.query::<&Value>();
+    for (index, value) in state.iter(&world).enumerate() {
+        assert_eq!(value.0, (index + 1) as f32);
+    }
+    assert_eq!(state.iter(&world).count(), count);
+}
+
+#[test]
 fn mutable_slices_write_through_and_stamp_change_detection() {
     let mut world = World::new();
     for i in 0..7 {
@@ -96,6 +134,89 @@ fn mutable_slices_write_through_and_stamp_change_detection() {
         changed.iter(&world).count() >= 1,
         "writes must be visible to change detection"
     );
+}
+
+#[test]
+fn mutable_slice_publishes_one_chunk_revision_per_yield_not_per_row() {
+    let mut world = World::new();
+    let mut first = None;
+    for i in 0..10 {
+        let entity = world.spawn(Value(i as f32));
+        first.get_or_insert(entity);
+    }
+    let location = world.entities().location(first.unwrap()).unwrap();
+    let component = world.components().id_of::<Value>().unwrap();
+    let revision = |world: &World| {
+        let table = world
+            .archetypes()
+            .get(location.archetype_id)
+            .unwrap()
+            .table();
+        assert_eq!(table.chunk_count(), 1);
+        table.column(component).unwrap().chunk_revision(0)
+    };
+    let before = revision(&world);
+    let query = world.query::<&mut Value>();
+    // Four disjoint slices share one physical chunk. Even without a payload
+    // write, every exposed mutable range must invalidate its chunk once.
+    assert_eq!(query.simd_iter_mut::<3>(&mut world).count(), 4);
+    assert_eq!(revision(&world), before + 4);
+    // A second run at the same tick must still invalidate cache revisions.
+    assert_eq!(query.simd_iter_mut::<10>(&mut world).count(), 1);
+    assert_eq!(revision(&world), before + 5);
+    assert_eq!(world.query::<&Value>().simd_iter::<3>(&world).count(), 4);
+    assert_eq!(revision(&world), before + 5);
+}
+
+#[test]
+fn mutable_slice_observer_and_reaction_cover_only_slices_that_were_taken() {
+    let mut world = World::new();
+    for i in 0..10 {
+        world.spawn(Value(i as f32));
+    }
+
+    let observed = Arc::new(Mutex::new(Vec::<Vec<crate::entity::Entity>>::new()));
+    let observed_copy = Arc::clone(&observed);
+    world.observe_changed::<Value, _>(move |context| {
+        observed_copy
+            .lock()
+            .unwrap()
+            .push(context.changed().to_vec());
+    });
+    let reacted = Arc::new(Mutex::new(Vec::<Vec<crate::entity::Entity>>::new()));
+    let reacted_copy = Arc::clone(&reacted);
+    let source = world.reaction_source::<Value>();
+    world.add_reaction(&[source], move |world| {
+        reacted_copy
+            .lock()
+            .unwrap()
+            .push(world.reaction_changes(source).to_vec());
+    });
+
+    let last = world.change_tick();
+    world.set_last_change_tick(last);
+    let this = world.increment_change_tick();
+    let state = world.query::<(crate::entity::Entity, &mut Value)>();
+    let mut slices = state.simd_iter_mut::<3>(&mut world);
+    let first = slices.next().expect("first slice is present");
+    let first_entities = first.0.to_vec();
+    drop(first);
+    drop(slices);
+
+    let changed = world
+        .query_filtered::<crate::entity::Entity, Changed<Value>>()
+        .iter_with_ticks(&world, last, this)
+        .collect::<Vec<_>>();
+    assert_eq!(changed, first_entities);
+    assert_eq!(world.flush_changed_observers(), 2);
+    assert_eq!(world.flush_reactions(), 0);
+    assert_eq!(*observed.lock().unwrap(), vec![first_entities.clone()]);
+    assert_eq!(*reacted.lock().unwrap(), vec![first_entities]);
+
+    assert_eq!(world.flush_changed_observers(), 0);
+    assert_eq!(world.flush_reactions(), 0);
+    assert_eq!(observed.lock().unwrap().len(), 1);
+    assert_eq!(reacted.lock().unwrap().len(), 1);
 }
 
 #[test]

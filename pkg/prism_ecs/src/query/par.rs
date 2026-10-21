@@ -406,12 +406,14 @@ unsafe fn run_chunk_batch<D, Func>(
     let mut start = batch.start;
     while start < batch.end {
         let end = (start + rows_per_chunk).min(batch.end);
+        let changes = world.change_tracker.column_slice_changes();
         // SAFETY: `start <= end <= batch.end <= archetype.len()` and
         // `batch.archetype` satisfies `D::matches` (both caller contract), so
         // every term's column exists and `[start, end)` lies inside one block;
         // the batch's rows are task-exclusive, so each `&mut [T]` is unique and
         // the per-chunk version stamps never race.
-        let slice = unsafe { D::column_slice(data_state, archetype, start, end, this_run) };
+        let slice =
+            unsafe { D::column_slice(data_state, archetype, start, end, changes, this_run) };
         func(slice);
         start = end;
     }

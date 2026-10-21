@@ -48,10 +48,11 @@
 //! rejects a term set that writes the same component twice (or `&mut A` with
 //! `&A`).
 //!
-//! Enabled by the `multi_thread` feature.
+//! Used by both sequential `simd_iter_mut` and, with `multi_thread`, `par_chunks`.
 
 use crate::archetype::Archetype;
 use crate::change::Tick;
+pub use crate::change_index::ColumnSliceChanges;
 use crate::component::{Component, StorageType};
 use crate::entity::Entity;
 use crate::query::fetch::QueryData;
@@ -73,7 +74,13 @@ use crate::query::filter::{Or, QueryFilter, With, Without};
 ///   form a unique `&mut [T]` over that range (the driver guarantees the range
 ///   is a task-exclusive run of rows) and must stamp the change ticks of every
 ///   row it hands out so change detection stays sound once the per-row `Mut`
-///   wrapper is gone.
+///   wrapper is gone. Before exposing mutable storage, it must also publish
+///   each touched chunk's change summary and record every handed-out entity
+///   for each mutable component through [`ColumnSliceChanges::record_entities`].
+///   Otherwise dirty queries, changed observers and reaction sources could miss
+///   writes. Read-only terms must not publish changes. A callback that panics
+///   still leaves the entire already-exposed mutable range marked changed;
+///   slices that have not been yielded must not be marked.
 pub unsafe trait ColumnSliceData: QueryData {
     /// The typed slice yielded for one chunk-aligned batch, borrowing the world
     /// for `'w`.
@@ -87,6 +94,10 @@ pub unsafe trait ColumnSliceData: QueryData {
     ///
     /// # Safety
     /// * `start <= end <= archetype.len()`.
+    /// * A nonempty range lies entirely within one physical table chunk; column
+    ///   blocks are separate allocations and must never be joined into a slice.
+    /// * `state`, `archetype` and `changes` belong to the same live world, and
+    ///   the archetype satisfies this term's [`QueryData::matches`] predicate.
     /// * The caller holds the access `self`'s terms require over rows
     ///   `[start, end)` for the slice's lifetime, and no other task touches
     ///   those rows (the driver's chunk-aligned, disjoint partition).
@@ -97,6 +108,7 @@ pub unsafe trait ColumnSliceData: QueryData {
         archetype: &'w Archetype,
         start: usize,
         end: usize,
+        changes: ColumnSliceChanges<'_>,
         this_run: Tick,
     ) -> Self::Slice<'w>;
 }
@@ -120,6 +132,7 @@ unsafe impl<T: Component> ColumnSliceData for &T {
         archetype: &'w Archetype,
         start: usize,
         end: usize,
+        _changes: ColumnSliceChanges<'_>,
         _this_run: Tick,
     ) -> Self::Slice<'w> {
         let col = archetype
@@ -155,6 +168,7 @@ unsafe impl<T: Component> ColumnSliceData for &mut T {
         archetype: &'w Archetype,
         start: usize,
         end: usize,
+        changes: ColumnSliceChanges<'_>,
         this_run: Tick,
     ) -> Self::Slice<'w> {
         let col = archetype
@@ -163,19 +177,23 @@ unsafe impl<T: Component> ColumnSliceData for &mut T {
             .expect("matched archetype must contain the queried table column");
         // Conservatively mark the whole handed-out range changed: once a bare
         // `&mut [T]` is exposed we cannot know which rows the kernel writes, so
-        // the fine per-row tick and the coarse per-chunk version are both
-        // stamped with `this_run`.
+        // the fine per-row ticks and the coarse chunk version are stamped with
+        // `this_run`. Publish the chunk only once: every nonempty range is
+        // contained in one physical chunk, even for small sequential slices.
         for row in start..end {
             // SAFETY: `row < end <= len`; the range is task-exclusive, so this
-            // unique access to the row's changed-tick cell does not alias. The
-            // chunk-version cell is only written with `this_run`, upholding its
-            // monotone upper-bound invariant, and no sibling task writes any row
-            // of this chunk.
+            // unique access to the row's changed-tick cell does not alias.
             unsafe {
                 *col.changed_tick_ptr(row) = this_run;
-                (&*col.chunk_changed_ptr(row)).record(this_run);
             }
         }
+        if start < end {
+            // SAFETY: `start < end <= len`, and the caller holds unique access
+            // to this row. Only a shared atomic method touches its live chunk
+            // cell; it records the same tick as every row in this slice.
+            unsafe { (&*col.chunk_changed_ptr(start)).record(this_run) };
+        }
+        changes.record_entities(*state, &archetype.table().entities()[start..end], this_run);
         // SAFETY: `T` is this column's type; `start <= end <= len`; the caller
         // holds unique access to the range for the slice's lifetime.
         unsafe { col.as_mut_slice_range::<T>(start, end) }
@@ -194,6 +212,7 @@ unsafe impl ColumnSliceData for Entity {
         archetype: &'w Archetype,
         start: usize,
         end: usize,
+        _changes: ColumnSliceChanges<'_>,
         _this_run: Tick,
     ) -> Self::Slice<'w> {
         // `start <= end <= len` (caller contract) keeps this index in-bounds.
@@ -221,12 +240,13 @@ macro_rules! impl_column_slice_data_tuple {
                 archetype: &'w Archetype,
                 start: usize,
                 end: usize,
+                changes: ColumnSliceChanges<'_>,
                 this_run: Tick,
             ) -> Self::Slice<'w> {
                 let ($($T,)+) = state;
                 // SAFETY: forwarded — same range/archetype for every element;
                 // distinct components so the `&mut` slices do not alias.
-                unsafe { ($($T::column_slice($T, archetype, start, end, this_run),)+) }
+                unsafe { ($($T::column_slice($T, archetype, start, end, changes, this_run),)+) }
             }
         }
     };

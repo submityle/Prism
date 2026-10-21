@@ -42,7 +42,7 @@ pub use iter::QueryIter;
 pub use many::{QueryManyIter, QueryManyMatchedIter};
 #[cfg(feature = "simd")]
 pub use simd::{active, add_assign, axpy_assign, scale_assign, sum, Backend};
-pub use slice::{ArchetypalFilter, ColumnSliceData};
+pub use slice::{ArchetypalFilter, ColumnSliceChanges, ColumnSliceData};
 pub use slice_iter::QuerySliceIter;
 pub use state::{QueryEntityError, QuerySingleError, QueryState};
 

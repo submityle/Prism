@@ -119,8 +119,12 @@ impl<'w, 's, D: ColumnSliceData, F: ArchetypalFilter> Iterator for QuerySliceIte
                 // blocks would be non-contiguous (design §5.3).
                 let rows_per_chunk = archetype.table().rows_per_chunk().max(1);
                 let chunk_end = (start / rows_per_chunk + 1) * rows_per_chunk;
-                let end = (start + self.chunk).min(self.row_len).min(chunk_end);
+                let end = start
+                    .saturating_add(self.chunk)
+                    .min(self.row_len)
+                    .min(chunk_end);
                 self.row = end;
+                let changes = world.change_tracker.column_slice_changes();
                 // SAFETY: `start <= end <= archetype.len()`; the caller holds the
                 // access these terms require over those rows for `'w` (read-only
                 // entry point) or exclusively (mutable entry point), and the
@@ -128,7 +132,14 @@ impl<'w, 's, D: ColumnSliceData, F: ArchetypalFilter> Iterator for QuerySliceIte
                 // `[start, end)` lies inside one block, so the column slice is
                 // contiguous.
                 return Some(unsafe {
-                    D::column_slice(self.data_state, archetype, start, end, self.this_run)
+                    D::column_slice(
+                        self.data_state,
+                        archetype,
+                        start,
+                        end,
+                        changes,
+                        self.this_run,
+                    )
                 });
             }
 

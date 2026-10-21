@@ -139,6 +139,16 @@ pub struct ChangeRecorder {
     component: ComponentId,
 }
 
+/// Borrowed change-index context passed to custom column-slice implementations.
+///
+/// The borrow ties recording to the live world/tracker for the duration of one
+/// slice callback. Unlike the internal [`ChangeRecorder`], this context cannot
+/// outlive the world through a raw pointer.
+#[derive(Clone, Copy)]
+pub struct ColumnSliceChanges<'a> {
+    tracker: &'a ChangeTracker,
+}
+
 /// Complete write identity for one component/entity pair.
 #[derive(Clone, Copy)]
 pub(crate) struct ChangeRecord {
@@ -160,6 +170,16 @@ impl ChangeRecorder {
             component: self.component,
             entity,
         }
+    }
+}
+
+impl ColumnSliceChanges<'_> {
+    /// Record every entity in one typed slice as changed for `component`.
+    ///
+    /// Empty slices are no-ops. The tracker takes one lock for the whole batch,
+    /// while retaining per-entity revision and bounded-log semantics.
+    pub fn record_entities(&self, component: ComponentId, entities: &[Entity], tick: Tick) {
+        self.tracker.record_batch(component, entities, tick);
     }
 }
 
@@ -195,6 +215,11 @@ impl ChangeTracker {
     #[inline]
     pub(crate) fn recorder(&self, component: ComponentId) -> ChangeRecorder {
         ChangeRecorder::new(self as *const Self, component)
+    }
+
+    #[inline]
+    pub(crate) fn column_slice_changes(&self) -> ColumnSliceChanges<'_> {
+        ColumnSliceChanges { tracker: self }
     }
 
     /// O(1) snapshot of all indexed writes and resets, independent of ticks and
@@ -299,9 +324,40 @@ impl ChangeTracker {
     #[inline]
     pub(crate) fn record(&self, component: ComponentId, entity: Entity, tick: Tick) {
         let mut state = self.state.lock();
+        Self::record_locked(&mut state, component, entity, tick);
+    }
+
+    pub(crate) fn record_batch(&self, component: ComponentId, entities: &[Entity], tick: Tick) {
+        if entities.is_empty() {
+            return;
+        }
+        let mut state = self.state.lock();
+        // Subscription state cannot change while this guard is held. Inactive
+        // columns need no per-entity index work, and active batches need only
+        // one component lookup/check rather than one for every row.
         if Self::ensure_log(&mut state, component).active == 0 {
             return;
         }
+        for &entity in entities {
+            Self::record_active_locked(&mut state, component, entity, tick);
+        }
+    }
+
+    fn record_locked(state: &mut TrackerState, component: ComponentId, entity: Entity, tick: Tick) {
+        if Self::ensure_log(state, component).active == 0 {
+            return;
+        }
+        Self::record_active_locked(state, component, entity, tick);
+    }
+
+    // The caller holds the tracker lock and has ensured an active component
+    // log. Both single-row and batch recording share all retention semantics.
+    fn record_active_locked(
+        state: &mut TrackerState,
+        component: ComponentId,
+        entity: Entity,
+        tick: Tick,
+    ) {
         // Count every append, including another write in the same tick batch.
         state.revision = state.revision.saturating_add(1);
         let component_index = component.index() as usize;
@@ -483,6 +539,7 @@ impl ChangeTracker {
 #[cfg(test)]
 mod revision_tests {
     use super::*;
+    use alloc::vec;
 
     fn entity(index: u32) -> Entity {
         Entity::from_bits((1_u64 << 32) | u64::from(index)).unwrap()
@@ -497,6 +554,135 @@ mod revision_tests {
         assert_eq!(tracker.revision(), None);
         tracker.reset();
         assert_eq!(tracker.revision(), None);
+    }
+
+    #[test]
+    fn batch_recording_matches_one_by_one_recording_and_empty_batches_are_noops() {
+        let component = ComponentId::new(0);
+        let tick = Tick::new(7);
+        let entities = [entity(1), entity(2), entity(3), entity(4)];
+
+        let one_by_one = ChangeTracker::new();
+        let mut serial_cursor = one_by_one.activate(component);
+        for &changed_entity in &entities {
+            one_by_one.record(component, changed_entity, tick);
+        }
+
+        let batched = ChangeTracker::new();
+        let mut batch_cursor = batched.activate(component);
+        let changes = batched.column_slice_changes();
+        changes.record_entities(component, &[], tick);
+        assert_eq!(batched.revision(), Some(0));
+        changes.record_entities(component, &entities, tick);
+
+        let mut serial_out = Vec::new();
+        let mut batch_out = Vec::new();
+        let serial_stats = one_by_one.collect(
+            component,
+            &mut serial_cursor,
+            Tick::ZERO,
+            tick,
+            &mut serial_out,
+        );
+        let batch_stats = batched.collect(
+            component,
+            &mut batch_cursor,
+            Tick::ZERO,
+            tick,
+            &mut batch_out,
+        );
+
+        assert_eq!(batch_out, serial_out);
+        assert_eq!(batch_stats, serial_stats);
+        assert_eq!(batched.take_dirty_components(), vec![component]);
+        assert!(batched.take_dirty_components().is_empty());
+    }
+
+    #[test]
+    fn inactive_batch_recording_retains_no_events_or_dirty_revision() {
+        let tracker = ChangeTracker::new();
+        let component = ComponentId::new(0);
+        let entities = [entity(1), entity(2), entity(3)];
+        tracker.record_batch(component, &entities, Tick::new(1));
+        assert_eq!(tracker.revision(), Some(0));
+        assert!(tracker.take_dirty_components().is_empty());
+
+        let mut cursor = tracker.activate(component);
+        let mut out = Vec::new();
+        let stats = tracker.collect(component, &mut cursor, Tick::ZERO, Tick::new(1), &mut out);
+        assert_eq!(stats, ChangeIndexStats::default());
+        assert!(out.is_empty());
+
+        tracker.record_batch(component, &entities, Tick::new(2));
+        assert_eq!(tracker.revision(), Some(entities.len() as u64));
+        tracker.deactivate(component);
+        tracker.record_batch(component, &entities, Tick::new(3));
+        assert_eq!(tracker.revision(), Some(entities.len() as u64));
+        let state = tracker.state.lock();
+        let log = state.logs[component.index() as usize].as_ref().unwrap();
+        assert_eq!(log.event_count, 0);
+        assert!(log.batches.is_empty());
+    }
+
+    #[test]
+    fn batched_overflow_matches_single_row_gaps_and_next_tick_recovery() {
+        let component = ComponentId::new(0);
+        let tick = Tick::new(1);
+        let entities = (0..MAX_RETAINED_EVENTS as u32 + 3)
+            .map(entity)
+            .collect::<Vec<_>>();
+        let one_by_one = ChangeTracker::new();
+        let mut serial_cursor = one_by_one.activate(component);
+        for &changed_entity in &entities {
+            one_by_one.record(component, changed_entity, tick);
+        }
+        let batched = ChangeTracker::new();
+        let mut batch_cursor = batched.activate(component);
+        batched.record_batch(component, &entities, tick);
+        assert_eq!(batched.revision(), one_by_one.revision());
+
+        let mut serial_out = Vec::new();
+        let mut batch_out = Vec::new();
+        let serial_stats = one_by_one.collect(
+            component,
+            &mut serial_cursor,
+            Tick::ZERO,
+            tick,
+            &mut serial_out,
+        );
+        let batch_stats = batched.collect(
+            component,
+            &mut batch_cursor,
+            Tick::ZERO,
+            tick,
+            &mut batch_out,
+        );
+        assert_eq!(batch_stats, serial_stats);
+        assert!(batch_stats.gap);
+        assert_eq!(batch_out, serial_out);
+        assert!(batch_out.is_empty());
+
+        // Activation during an overflow tick must still see a later dropped
+        // batch as a gap, not mistake it for an unchanged component.
+        let mut late_cursor = batched.activate(component);
+        batched.record_batch(component, &entities[..3], tick);
+        assert!(
+            batched
+                .collect(
+                    component,
+                    &mut late_cursor,
+                    Tick::ZERO,
+                    tick,
+                    &mut batch_out,
+                )
+                .gap
+        );
+
+        let next_tick = Tick::new(2);
+        batched.record_batch(component, &entities[..3], next_tick);
+        let stats = batched.collect(component, &mut late_cursor, tick, next_tick, &mut batch_out);
+        assert!(!stats.gap);
+        assert_eq!(batch_out, entities[..3]);
     }
 
     #[test]
