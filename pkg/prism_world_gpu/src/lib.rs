@@ -65,7 +65,8 @@ pub use resident::{GpuResidentError, GpuResidentVisibility};
 #[cfg(feature = "gpu")]
 pub use sdf::{
     GpuSdfError, GpuSdfEvaluation, GpuSdfLookup, GpuSdfQuery, GpuSdfQueryResult, GpuSdfTelemetry,
-    GPU_SDF_ABI_VERSION, GPU_SDF_VERSION,
+    GpuSdfToroidalLookup, GPU_SDF_ABI_VERSION, GPU_SDF_TOROIDAL_ABI_VERSION,
+    GPU_SDF_TOROIDAL_VERSION, GPU_SDF_VERSION,
 };
 
 #[cfg(feature = "gpu")]

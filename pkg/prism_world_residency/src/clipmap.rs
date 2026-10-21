@@ -440,6 +440,20 @@ impl SdfToroidalClipmap {
         })
     }
 
+    /// Fallibly clones the compact planning state for transactional adapters.
+    pub fn try_clone(&self) -> Result<Self, SdfClipmapError> {
+        let mut bounds = Vec::new();
+        bounds
+            .try_reserve_exact(self.bounds.len())
+            .map_err(|_| SdfClipmapError::CapacityOverflow)?;
+        bounds.extend_from_slice(&self.bounds);
+        Ok(Self {
+            config: self.config,
+            center: self.center,
+            bounds,
+        })
+    }
+
     /// Creates a planner and returns the complete initial entering set.
     pub fn with_center(
         config: SdfClipmapConfig,

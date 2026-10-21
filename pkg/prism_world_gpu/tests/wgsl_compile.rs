@@ -279,6 +279,57 @@ fn sdf_lookup_uses_sorted_integer_key_and_packed_sample_abi() {
     }
 }
 
+#[cfg(feature = "gpu")]
+#[test]
+fn sdf_toroidal_lookup_uses_direct_integer_slots_and_packed_sample_abi() {
+    let source = include_str!("../src/shaders/sdf_toroidal_lookup.wgsl");
+    let module = wgpu::naga::front::wgsl::parse_str(source).unwrap_or_else(|error| {
+        panic!(
+            "SDF toroidal lookup parse: {}",
+            error.emit_to_string(source)
+        )
+    });
+    wgpu::naga::valid::Validator::new(
+        wgpu::naga::valid::ValidationFlags::all(),
+        wgpu::naga::valid::Capabilities::empty(),
+    )
+    .validate(&module)
+    .unwrap_or_else(|error| panic!("SDF toroidal lookup validation: {error}"));
+    assert_eq!(module.entry_points.len(), 1);
+    assert_eq!(module.entry_points[0].name, "main");
+    assert_eq!(module.entry_points[0].workgroup_size, [64, 1, 1]);
+
+    let load = wgpu::naga::StorageAccess::LOAD;
+    let store = load | wgpu::naga::StorageAccess::STORE;
+    let mut bindings = std::collections::BTreeMap::new();
+    for (_, variable) in module.global_variables.iter() {
+        if let Some(binding) = variable.binding {
+            assert_eq!(binding.group, 0);
+            assert!(bindings.insert(binding.binding, variable).is_none());
+        }
+    }
+    assert_eq!(bindings.len(), 6);
+    assert_eq!(bindings[&0].space, wgpu::naga::AddressSpace::Uniform);
+    for binding in 1..=5 {
+        assert_eq!(
+            bindings[&binding].space,
+            wgpu::naga::AddressSpace::Storage {
+                access: if binding == 5 { store } else { load },
+            }
+        );
+    }
+    match module.types[bindings[&0].ty].inner {
+        wgpu::naga::TypeInner::Struct { span, .. } => assert_eq!(span, 16),
+        _ => panic!("SDF toroidal params must be a 16-byte uniform struct"),
+    }
+    for binding in 1..=2 {
+        match module.types[bindings[&binding].ty].inner {
+            wgpu::naga::TypeInner::Array { stride, .. } => assert_eq!(stride, 16),
+            _ => panic!("SDF toroidal key/meta bindings must use 16-byte records"),
+        }
+    }
+}
+
 #[cfg(feature = "terrain_scatter")]
 #[test]
 fn placement_deletion_uses_the_independent_56_byte_key_abi() {

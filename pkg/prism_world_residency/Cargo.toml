@@ -17,3 +17,7 @@ harness = false
 [[bench]]
 name = "scatter_brush_index"
 harness = false
+
+[[bench]]
+name = "sdf_clipmap"
+harness = false
