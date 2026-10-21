@@ -101,6 +101,17 @@ impl XpbdSolver {
 
     /// Advances the world by a single sub-step of duration `h`.
     fn substep(&self, world: &mut PhysicsWorld, h: f32) {
+        self.substep_with_contact_generator(world, h, None);
+    }
+
+    fn substep_with_contact_generator(
+        &self,
+        world: &mut PhysicsWorld,
+        h: f32,
+        mut generate_external_contacts: Option<
+            &mut dyn FnMut(&PhysicsWorld, &mut Vec<crate::collide::ContactManifold>),
+        >,
+    ) {
         world.breakable_joints.begin_substep();
         let _ = world.prepare_external_substep(h);
         let _ = world.step_articulations_substep(h);
@@ -121,7 +132,10 @@ impl XpbdSolver {
         // Phase 2: detect contacts at the predicted poses. This needs an
         // immutable borrow of the whole world, so it must run outside the
         // mutable solver view scopes.
-        let manifolds = detect_contacts(world);
+        let mut manifolds = detect_contacts(world);
+        if let Some(generate) = generate_external_contacts.as_deref_mut() {
+            generate(world, &mut manifolds);
+        }
 
         // Phase 3: resolve positions, recover velocities, resolve velocities.
         {
@@ -243,6 +257,40 @@ impl Solver for XpbdSolver {
 
     fn name(&self) -> &str {
         "xpbd"
+    }
+}
+
+impl XpbdSolver {
+    /// Advances the world while appending caller-owned contact manifolds after
+    /// the built-in broad/narrow phase on every predicted substep.
+    ///
+    /// The generator sees predicted body poses, before XPBD solves this
+    /// substep, and may append contacts against representations not registered
+    /// as ordinary colliders (for example a shared world SDF). Every emitted
+    /// handle must identify a live body in `world`; static world geometry must
+    /// use a live static body rather than
+    /// [`crate::state::handle::BodyHandle::INVALID`]. Manifolds
+    /// must follow the solver witness/normal convention and the generator must
+    /// enforce its own query/work/memory budgets. Existing [`Solver::step`]
+    /// behavior is unchanged and does not call this hook.
+    pub fn step_with_contact_generator(
+        &self,
+        world: &mut PhysicsWorld,
+        dt: f32,
+        substeps: u32,
+        mut generate_external_contacts: impl FnMut(
+            &PhysicsWorld,
+            &mut Vec<crate::collide::ContactManifold>,
+        ),
+    ) {
+        let n = substeps.max(1);
+        let h = dt / n as f32;
+        if !h.is_finite() || h <= 0.0 {
+            return;
+        }
+        for _ in 0..n {
+            self.substep_with_contact_generator(world, h, Some(&mut generate_external_contacts));
+        }
     }
 }
 

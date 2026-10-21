@@ -89,6 +89,7 @@ impl SdfPhysicsSnapshot {
 mod tests {
     use super::*;
     use prism_physics_core::collide::ContactPoint;
+    use prism_physics_core::{BodyDesc, PhysicsWorld, XpbdSolver};
     use prism_world_residency::{BrickCoord, SparseSdfBrickGrid};
 
     fn plane_snapshot(origin: [i64; 3], sample_offset: i16) -> SdfPhysicsSnapshot {
@@ -263,5 +264,45 @@ mod tests {
             ),
             Err(SdfBridgeError::InvalidContactData)
         ));
+    }
+
+    #[test]
+    fn xpbd_substeps_consume_sdf_manifolds_and_resolve_sphere_penetration() {
+        let snapshot = plane_snapshot([0; 3], 0);
+        let mut physics = PhysicsWorld::with_gravity(Vec3::ZERO);
+        let world_body = physics.spawn(BodyDesc::static_at(Vec3::ZERO));
+        let center = Vec3::new(0.05, 0.05, 0.05);
+        let sphere_body = physics.spawn(BodyDesc::dynamic_at(center));
+        let solver = XpbdSolver::new();
+        let mut generated = 0;
+
+        solver.step_with_contact_generator(&mut physics, 1.0 / 60.0, 2, |world, manifolds| {
+            generated += 1;
+            let position = world
+                .bodies
+                .position(sphere_body)
+                .expect("dynamic sphere remains live");
+            let position_mm = [
+                (f64::from(position.x) * 1_000.0).round() as i64,
+                (f64::from(position.y) * 1_000.0).round() as i64,
+                (f64::from(position.z) * 1_000.0).round() as i64,
+            ];
+            if let SdfQueryResult::Value(Some(contact)) = snapshot
+                .sphere_contact_manifold(world_body, sphere_body, position_mm, [0; 3], 100, 0)
+                .expect("SDF narrow phase")
+            {
+                manifolds.push(contact);
+            }
+        });
+
+        assert_eq!(generated, 2, "generator runs once per predicted substep");
+        let solved = physics
+            .bodies
+            .position(sphere_body)
+            .expect("dynamic sphere remains live");
+        assert!(
+            solved.x >= 0.149,
+            "SDF contact must push sphere outward: {solved:?}"
+        );
     }
 }

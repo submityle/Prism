@@ -292,6 +292,8 @@ SDF cell 已增加正式 PSDC v1 派生缓存编解码器：完整 sector/brick 
 
 2026-10-21 World SDF physics bridge 新增 sphere 窄相 manifold 生成：使用连续距离梯度、正向外法线和固定八角点查询，保留缺数据 `Unknown`，支持相切零穿透并在负 signed-distance 内部样本保持外向法线。`cargo test -j 1 -p prism_world_physics_bridge --lib --offline`（独立 target）16 项通过，覆盖法线/witness ABI、大世界原点、相切、内部穿透、分离、缺失数据及非法半径。接缝只产生可供调用方收集的单点 ContactManifold，尚未接入 physics broad phase、接触生命周期或 solver tick；严格 Clippy 因数据盘空间不足未能启动，不能视作通过。详细语义和误差边界见 `prism_world_physics_sdf_runtime_zh.md`。
 
+2026-10-21 SDF manifold 已接入 XPBD 外部 contact generator hook：在每个预测 substep、位置约束求解前，调用方可依据当前预测 pose 将 world-SDF 接触追加到既有接触批次；原 `Solver::step` 不启用该 hook。真实 SDF sphere manifold→两次 XPBD substep→动态球体推出穿透区域的专项回归通过；physics bridge 全库 17 项、`prism_world_runtime` 默认库 183 项和 `prism_world_gpu --features gpu` 库 123 项亦通过（均离线、独立 target）。这证明 SDF 窄相接入 XPBD 求解器的 CPU 路径，不证明相机 clipmap 到物理世界的生产调度、连续接触持久化/摩擦、renderer/GI/nav 消费或 GPU 物理路径已完成；当前 core crate 仍有既有 missing-docs 告警，未把严格 Clippy 标记为通过。
+
 本轮 scene/world streaming 切片的定向验证：`rustfmt --edition 2024 --check pkg/prism_world_stream/src/lib.rs pkg/prism_world_runtime/src/lib.rs`，以及 `cargo test --offline -p prism_world_stream -p prism_world_runtime --lib --no-fail-fast`；结果为 `prism_world_stream` 5 项、`prism_world_runtime` 79 项通过。新增回归覆盖 manifest revision 触发 replacement、成功提交新 cell，以及坏 header 后旧 resident 状态可重试。工作树的全量 `cargo fmt --all -- --check` 仍会报告其他并行改动文件，本轮没有格式化或修改这些非目标包。
 
 通过：
