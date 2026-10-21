@@ -18,6 +18,9 @@ struct ActorModel {
     label: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Reflect, Component)]
+struct EditorMarker(u32);
+
 fn registry() -> TypeRegistry {
     let mut registry = TypeRegistry::new();
     registry.register::<ActorModel>();
@@ -216,5 +219,45 @@ fn capture_rejects_ecs_outliner_cycles() {
     assert!(matches!(
         bridge.capture_controller(&world, &source, ControllerLimits::default()),
         Err(prism_editor_app::EditorEcsDocumentError::HierarchyCycle)
+    ));
+}
+
+#[test]
+fn capture_rejects_reflected_component_addition_instead_of_silently_dropping_it() {
+    let source = authored_document();
+    let mut world = World::new();
+    world.register_reflect_component::<ActorModel>();
+    world.register_reflect_component::<EditorMarker>();
+    let bridge = EditorEcsDocumentBridge::materialize(&mut world, &source).unwrap();
+    let actor = bridge
+        .entity_for_object(&SelectionItem::entity(0x1234))
+        .unwrap();
+    world.insert(actor, EditorMarker(7));
+
+    assert!(matches!(
+        bridge.capture_controller(&world, &source, ControllerLimits::default()),
+        Err(prism_editor_app::EditorEcsDocumentError::UnexpectedReflectedComponents {
+            item,
+            type_paths,
+        }) if item == SelectionItem::entity(0x1234)
+            && type_paths == vec![std::any::type_name::<EditorMarker>().to_string()]
+    ));
+}
+
+#[test]
+fn capture_rejects_removal_of_the_prismdoc_root_component() {
+    let source = authored_document();
+    let mut world = World::new();
+    world.register_reflect_component::<ActorModel>();
+    let bridge = EditorEcsDocumentBridge::materialize(&mut world, &source).unwrap();
+    let actor = bridge
+        .entity_for_object(&SelectionItem::entity(0x1234))
+        .unwrap();
+    assert!(world.remove::<ActorModel>(actor));
+
+    assert!(matches!(
+        bridge.capture_controller(&world, &source, ControllerLimits::default()),
+        Err(prism_editor_app::EditorEcsDocumentError::MissingComponent { item, .. })
+            if item == SelectionItem::entity(0x1234)
     ));
 }

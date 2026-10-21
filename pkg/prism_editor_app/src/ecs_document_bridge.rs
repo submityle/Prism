@@ -14,7 +14,10 @@ use alloc::{
 };
 use core::fmt;
 
-use prism_ecs::{entity::Entity, hierarchy::ChildOf, relation::Relation, world::World};
+use prism_ecs::{
+    entity::Entity, hierarchy::ChildOf, partition::persistence::entity_component_ids,
+    relation::Relation, world::World,
+};
 use prism_editor_core::SelectionItem;
 use prism_editor_panels::{OutlinerId, OutlinerNode};
 use prism_reflect::{StableTypeId, TypeRegistry};
@@ -52,6 +55,15 @@ pub enum EditorEcsDocumentError {
         item: SelectionItem,
         /// Concrete reflected type path.
         type_path: String,
+    },
+    /// The current PRISMDOC object format stores one reflected root model per
+    /// editor identity; additional reflected components cannot be serialized
+    /// without an explicit document schema and must not be silently dropped.
+    UnexpectedReflectedComponents {
+        /// Stable editor identity of the model.
+        item: SelectionItem,
+        /// Reflected component type paths not represented by the document root.
+        type_paths: Vec<String>,
     },
     /// ECS rejected a reflected component insertion after preflight.
     InsertRejected {
@@ -114,6 +126,11 @@ impl fmt::Display for EditorEcsDocumentError {
             Self::MissingComponent { item, type_path } => {
                 write!(f, "ECS entity for {item:?} has no component {type_path}")
             }
+            Self::UnexpectedReflectedComponents { item, type_paths } => write!(
+                f,
+                "ECS entity for {item:?} has reflected components outside its PRISMDOC root: {}",
+                type_paths.join(", ")
+            ),
             Self::InsertRejected { item, type_path } => {
                 write!(f, "ECS rejected component {type_path} for {item:?}")
             }
@@ -319,9 +336,33 @@ impl EditorEcsDocumentBridge {
             let value = world.get_reflect(entity, type_id).ok_or_else(|| {
                 EditorEcsDocumentError::MissingComponent {
                     item: item.clone(),
-                    type_path,
+                    type_path: type_path.clone(),
                 }
             })?;
+            // Walk this entity's actual membership, not the world's entire
+            // reflection registry: capture cost stays proportional to the
+            // components on authored entities rather than registered types.
+            let component_ids = entity_component_ids(world, entity)
+                .ok_or(EditorEcsDocumentError::StaleEntity(entity))?;
+            let unexpected: Vec<_> = component_ids
+                .into_iter()
+                .filter_map(|component_id| {
+                    let stable = world.reflect_stable_id(component_id)?;
+                    (stable != type_id).then(|| {
+                        world
+                            .components()
+                            .info(component_id)
+                            .map(|info| info.name().to_string())
+                            .unwrap_or_else(|| "<unknown reflected component>".to_string())
+                    })
+                })
+                .collect();
+            if !unexpected.is_empty() {
+                return Err(EditorEcsDocumentError::UnexpectedReflectedComponents {
+                    item: item.clone(),
+                    type_paths: unexpected,
+                });
+            }
             captured.register_object(
                 item.clone(),
                 value.reflect_clone(),
