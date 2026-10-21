@@ -223,12 +223,16 @@ impl DesktopFrameGraphPanel {
 impl DesktopPanel for DesktopFrameGraphPanel {
     fn build(&mut self) -> Result<DesktopPanelView, String> {
         let view = self.controller.build();
-        let mut result = DesktopPanelView {
+        let result = DesktopPanelView {
             element: view.element().clone(),
             bindings: view.bindings().map(|(k, t)| (k.to_owned(), t)).collect(),
         };
         #[cfg(feature = "runtime-preview")]
-        self.decorate_preview(&view, &mut result);
+        let result = {
+            let mut result = result;
+            self.decorate_preview(&view, &mut result);
+            result
+        };
         self.view = Some(view);
         Ok(result)
     }
@@ -274,13 +278,11 @@ impl DesktopPanel for DesktopFrameGraphPanel {
         if result.is_err() {
             self.failed = true;
         }
-        let result = result.map(|changed| {
+        result.inspect(|&changed| {
             if changed {
                 self.refresh_bound_view();
             }
-            changed
-        });
-        result
+        })
     }
     fn next_wake(&self) -> Option<Instant> {
         #[cfg(feature = "runtime-preview")]
