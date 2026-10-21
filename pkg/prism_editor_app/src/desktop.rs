@@ -1801,12 +1801,11 @@ mod tests {
 
     #[test]
     fn missing_scene_document_storage_is_reported() {
-        assert_eq!(
-            require_scene_document(None).err(),
-            Some(DesktopUiError::Panel(
-                "No scene document storage is configured".into()
-            ))
-        );
+        assert!(matches!(
+            require_scene_document(None),
+            Err(DesktopUiError::Panel(message))
+                if message == "No scene document storage is configured"
+        ));
     }
 
     #[test]
