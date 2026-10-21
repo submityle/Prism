@@ -34,12 +34,16 @@ impl HeightSampler for Flat {
 }
 
 fn context() -> GpuContext {
-    let context = GpuContext::try_headless_with_limits(wgpu::Limits {
+    context_with_limits(wgpu::Limits {
         max_storage_buffers_per_shader_stage: 8,
         ..wgpu::Limits::downlevel_defaults()
     })
-    .expect("physical placement deletion device acquisition failed")
-    .expect("physical GPU required; no silent skip");
+}
+
+fn context_with_limits(limits: wgpu::Limits) -> GpuContext {
+    let context = GpuContext::try_headless_with_limits(limits)
+        .expect("physical placement deletion device acquisition failed")
+        .expect("physical GPU required; no silent skip");
     let evidence = context.evidence();
     assert!(matches!(
         evidence.device_type.as_str(),
@@ -219,24 +223,83 @@ fn submit_read(
     n: usize,
     c: HeightfieldPlacementConfig,
 ) -> Vec<HeightfieldPlacementKey> {
-    let output = staging(context, (16 + 64 * n + 4 * n) as u64);
-    let mut encoder = context.device().create_command_encoder(&Default::default());
-    gpu.encode(&mut encoder).unwrap();
-    encoder.copy_buffer_to_buffer(gpu.indirect_args(), 0, &output, 0, 16);
-    encoder.copy_buffer_to_buffer(gpu.records(), 0, &output, 16, 64 * n as u64);
-    encoder.copy_buffer_to_buffer(
-        gpu.compact_indices(),
-        0,
-        &output,
-        16 + 64 * n as u64,
-        4 * n as u64,
+    let mut results = Vec::new();
+    for native_snapshot in [false, true] {
+        // Keep the cloned handles alive through submission and readback.
+        let snapshot = gpu.registration_snapshot().unwrap();
+        let output = staging(context, (16 + 64 * n + 4 * n) as u64);
+        let mut encoder = context.device().create_command_encoder(&Default::default());
+        if native_snapshot {
+            let mut stages = vec![&snapshot.upstream.reset];
+            if let Some(active) = &snapshot.upstream.active {
+                stages.extend([
+                    &active.source,
+                    &active.project,
+                    &active.field,
+                    &active.finalize,
+                ]);
+            }
+            for stage in stages {
+                let mut pass = encoder.begin_compute_pass(&Default::default());
+                pass.set_pipeline(stage.pipeline());
+                pass.set_bind_group(0, stage.bind_group(), &[]);
+                let [x, y, z] = stage.dispatch();
+                pass.dispatch_workgroups(x, y, z);
+            }
+            encoder.copy_buffer_to_buffer(
+                snapshot.upstream.indirect.buffer(),
+                0,
+                snapshot.indirect.buffer(),
+                0,
+                16,
+            );
+            for stage in
+                std::iter::once(&snapshot.clear_instance_count).chain(snapshot.active.as_ref())
+            {
+                let mut pass = encoder.begin_compute_pass(&Default::default());
+                pass.set_pipeline(stage.pipeline());
+                pass.set_bind_group(0, stage.bind_group(), &[]);
+                let [x, y, z] = stage.dispatch();
+                pass.dispatch_workgroups(x, y, z);
+            }
+        } else {
+            gpu.encode(&mut encoder).unwrap();
+        }
+        encoder.copy_buffer_to_buffer(snapshot.indirect.buffer(), 0, &output, 0, 16);
+        encoder.copy_buffer_to_buffer(
+            snapshot.upstream.records.buffer(),
+            0,
+            &output,
+            16,
+            64 * n as u64,
+        );
+        encoder.copy_buffer_to_buffer(
+            snapshot.compact.buffer(),
+            0,
+            &output,
+            16 + 64 * n as u64,
+            4 * n as u64,
+        );
+        context.queue().submit([encoder.finish()]);
+        let bytes = read(context, &output);
+        let all = words(&bytes);
+        assert_eq!(all[0], 3);
+        assert_eq!(&all[2..4], &[0, 0]);
+        results.push(keys_from_compact(&bytes, n, c));
+    }
+    assert_eq!(results[0].len(), results[1].len());
+    assert_eq!(
+        results[0]
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>(),
+        results[1]
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>(),
+        "native snapshot stages must match direct encoding",
     );
-    context.queue().submit([encoder.finish()]);
-    let bytes = read(context, &output);
-    let all = words(&bytes);
-    assert_eq!(all[0], 3);
-    assert_eq!(&all[2..4], &[0, 0]);
-    keys_from_compact(&bytes, n, c)
+    results.remove(0)
 }
 
 fn deletion_set(
@@ -280,13 +343,22 @@ fn deletion_budget(n: usize, d: usize) -> GpuHeightfieldPlacementDeletionWorkBud
 
 #[test]
 fn physical_gpu_filters_exact_full_placement_keys_and_preserves_upstream_records() {
-    let context = context();
-    let c = config();
+    // Force a padded 2D dispatch without allocating millions of candidates.
+    let context = context_with_limits(wgpu::Limits {
+        max_compute_workgroups_per_dimension: 2,
+        max_storage_buffers_per_shader_stage: 8,
+        ..wgpu::Limits::downlevel_defaults()
+    });
+    let c = HeightfieldPlacementConfig {
+        grid_spacing_mm: 250,
+        ..config()
+    };
     let r = region();
     let f = field();
     let s = surface();
     let selection = filters();
     let (placement_budget, cpu_budget, n) = budgets(c, r, &f);
+    assert!((129..=256).contains(&n), "exercise a padded 2x2 dispatch");
     let cpu = scatter_on_heightfield(c, r, &f, &s, selection, cpu_budget).unwrap();
     assert!(cpu.points.len() > 2);
     let deletion_key = cpu.points[0].key;
@@ -325,6 +397,7 @@ fn physical_gpu_filters_exact_full_placement_keys_and_preserves_upstream_records
         },
     )
     .unwrap();
+    let mut previous_snapshot = None;
     for (deletions, expected_removed) in [
         (&one_deleted, 1usize),
         (&empty, 0usize),
@@ -345,6 +418,54 @@ fn physical_gpu_filters_exact_full_placement_keys_and_preserves_upstream_records
             },
         )
         .unwrap();
+        let snapshot = gpu.registration_snapshot().unwrap();
+        assert_eq!(snapshot.request.candidate_count, n as u32);
+        assert_eq!(snapshot.request.candidate_count, gpu.candidate_count());
+        assert_eq!(snapshot.request.key_count, deletions.keys().len() as u32);
+        assert_eq!(snapshot.request.workgroups, [2, 2]);
+        assert_eq!(
+            snapshot.upstream.candidate_count,
+            snapshot.request.candidate_count
+        );
+        assert_eq!(snapshot.clear_instance_count.dispatch(), [1, 1, 1]);
+        assert_eq!(snapshot.active.as_ref().unwrap().dispatch(), [2, 2, 1]);
+        assert_eq!(
+            snapshot.upstream.active.as_ref().unwrap().source.dispatch(),
+            snapshot.active.as_ref().unwrap().dispatch()
+        );
+        assert_eq!(snapshot.params.bytes(), 128);
+        assert_eq!(snapshot.keys.bytes(), 56 * n as u64);
+        assert_eq!(snapshot.compact.bytes(), 4 * n as u64);
+        assert_eq!(snapshot.indirect.bytes(), 16);
+        for buffer in [
+            &snapshot.params,
+            &snapshot.keys,
+            &snapshot.compact,
+            &snapshot.indirect,
+        ] {
+            assert_eq!(buffer.bytes(), buffer.buffer().size());
+        }
+        assert_eq!(snapshot.compact.buffer(), gpu.compact_indices());
+        assert_eq!(snapshot.indirect.buffer(), gpu.indirect_args());
+        assert_eq!(
+            snapshot.upstream.compact.buffer(),
+            gpu.upstream_compact_indices()
+        );
+        assert_eq!(snapshot.upstream.records.buffer(), gpu.records());
+        assert_eq!(snapshot.upstream.samples.buffer(), gpu.surface_samples());
+        assert_eq!(snapshot.upstream.attributes.buffer(), gpu.attributes());
+        assert_ne!(
+            snapshot.compact.buffer(),
+            snapshot.upstream.compact.buffer()
+        );
+        assert_ne!(
+            snapshot.indirect.buffer(),
+            snapshot.upstream.indirect.buffer()
+        );
+        if let Some((generation, metadata)) = previous_snapshot {
+            assert_eq!(snapshot.upstream.request_generation, generation + 1);
+            assert_ne!(snapshot.request.key_count, metadata);
+        }
         let actual = submit_read(&context, &gpu, n, c);
         let expected: Vec<_> = cpu
             .points
@@ -363,6 +484,10 @@ fn physical_gpu_filters_exact_full_placement_keys_and_preserves_upstream_records
                 .collect::<std::collections::BTreeSet<_>>(),
         );
         assert_eq!(gpu.cache_key().unwrap().deletions, *deletions);
+        previous_snapshot = Some((
+            snapshot.upstream.request_generation,
+            snapshot.request.key_count,
+        ));
     }
 }
 
@@ -384,6 +509,10 @@ fn admission_is_atomic_and_encode_requires_an_uploaded_request() {
         gpu.encode(&mut encoder),
         Err(GpuHeightfieldPlacementDeletionError::RequestNotUploaded)
     );
+    assert!(matches!(
+        gpu.registration_snapshot(),
+        Err(GpuHeightfieldPlacementDeletionError::RequestNotUploaded)
+    ));
 
     let valid = deletion_set(vec![cpu.points[0].key], n);
     gpu.write_request(
@@ -400,6 +529,14 @@ fn admission_is_atomic_and_encode_requires_an_uploaded_request() {
     let before = submit_read(&context, &gpu, n, c);
     let before_cache = gpu.cache_key().cloned();
     let before_stats = gpu.upload_stats();
+    let before_snapshot = gpu.registration_snapshot().unwrap();
+    assert_eq!(before_snapshot.request.key_count, 1);
+    assert_eq!(before_snapshot.keys.bytes(), 56);
+    assert_eq!(before_stats.uniform_bytes, before_snapshot.params.bytes());
+    assert_eq!(
+        before_stats.key_bytes,
+        56 * u64::from(before_snapshot.request.key_count)
+    );
 
     let too_many = deletion_set(vec![cpu.points[0].key, cpu.points[1].key], n);
     let cases = [
@@ -475,8 +612,44 @@ fn admission_is_atomic_and_encode_requires_an_uploaded_request() {
         );
         assert_eq!(gpu.cache_key(), before_cache.as_ref());
         assert_eq!(gpu.upload_stats(), before_stats);
+        let snapshot = gpu.registration_snapshot().unwrap();
+        assert_eq!(snapshot.request, before_snapshot.request);
+        assert_eq!(
+            snapshot.upstream.request_generation,
+            before_snapshot.upstream.request_generation
+        );
+        assert_eq!(snapshot.params.buffer(), before_snapshot.params.buffer());
+        assert_eq!(snapshot.keys.buffer(), before_snapshot.keys.buffer());
+        assert_eq!(
+            snapshot.clear_instance_count.pipeline(),
+            before_snapshot.clear_instance_count.pipeline()
+        );
+        assert_eq!(
+            snapshot.clear_instance_count.bind_group(),
+            before_snapshot.clear_instance_count.bind_group()
+        );
         assert_eq!(submit_read(&context, &gpu, n, c), before);
     }
+    gpu.write_request(
+        c,
+        r,
+        &f,
+        &s,
+        selection,
+        placement_budget,
+        &valid,
+        deletion_budget(n, 1),
+    )
+    .unwrap();
+    let repeated = gpu.registration_snapshot().unwrap();
+    assert_eq!(repeated.request, before_snapshot.request);
+    assert_eq!(
+        repeated.upstream.request_generation,
+        before_snapshot.upstream.request_generation + 1
+    );
+    assert_eq!(gpu.upload_stats().uniform_bytes, 0);
+    assert_eq!(gpu.upload_stats().key_bytes, 0);
+    assert_eq!(submit_read(&context, &gpu, n, c), before);
 }
 
 #[test]
@@ -524,5 +697,32 @@ fn constructor_enforces_scratch_budget_and_zero_capacity_is_valid() {
     assert_eq!(zero.candidate_count(), 0);
     assert_eq!(zero.deletions(), Some(&empty));
     assert_eq!(zero_budget.max_output_points, 0);
+    let snapshot = zero.registration_snapshot().unwrap();
+    assert_eq!(snapshot.request.candidate_count, 0);
+    assert_eq!(snapshot.request.key_count, 0);
+    assert_eq!(snapshot.request.workgroups, [0, 0]);
+    assert_eq!(snapshot.upstream.candidate_count, 0);
+    assert!(snapshot.upstream.active.is_none());
+    assert!(snapshot.active.is_none());
+    assert_eq!(snapshot.upstream.reset.dispatch(), [1, 1, 1]);
+    assert_eq!(snapshot.clear_instance_count.dispatch(), [1, 1, 1]);
+    assert_eq!(
+        [
+            snapshot.params.bytes(),
+            snapshot.keys.bytes(),
+            snapshot.compact.bytes(),
+            snapshot.indirect.bytes()
+        ],
+        [128, 56, 4, 16]
+    );
+    for buffer in [
+        &snapshot.params,
+        &snapshot.keys,
+        &snapshot.compact,
+        &snapshot.indirect,
+    ] {
+        assert_eq!(buffer.bytes(), buffer.buffer().size());
+    }
+    assert_eq!(zero.deletion_buffer_bytes(), 128 + 56 + 4 + 16);
     let _ = submit_read(&context, &zero, 0, c);
 }

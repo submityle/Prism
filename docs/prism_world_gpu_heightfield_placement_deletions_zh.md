@@ -1,6 +1,6 @@
 # GPU 高度场 placement 完整键删除
 
-验收日期：2026-10-16。本文件记录 `prism_world_gpu` 中独立的
+首次验收日期：2026-10-16；最新复验：2026-10-22。本文件记录 `prism_world_gpu` 中独立的
 `heightfield placement deletion` GPU 切片，不表示整个 World 系统或产品运行时已经完成。
 
 ## 独立交付提交
@@ -13,6 +13,7 @@
 - `231a9643b`：同步 placement/deletion 验收文档。
 - `07fdaac3f`：补齐 admission、零容量和失败事务原子性测试。
 - `47ff0cecb`：记录此前的 placement deletion 复验结果。
+- `0b93f55ca`：RenderGraph deletion copy、count reset、filter 与 draw lowering。
 
 本文件只记录本切片的实现与验收边界；不把这些提交扩展解释为其他 World 模块或整个
 产品运行时的完成证明。
@@ -143,3 +144,63 @@ barrier，但无法反射或强制 bind group 内具体 buffer。因此调用方
 `cargo test -p prism_world_gpu --features gpu --test wgsl_compile --offline` 通过（7/7），
 相关 Rust 文件 `rustfmt --check` 与切片 `git diff --check` 通过。GPU feature 编译成功；
 验证包含 Null RHI RenderGraph 录制测试，不包含物理 GPU 执行或端到端 renderer 性能测试。
+
+## 2026-10-22 ABI、物理别名与 native snapshot 加固
+
+本次在已有 lowering 上补齐以下可执行校验，错误在创建图资源之前返回：
+
+- 上游 11 个 buffer 与 deletion 4 个 buffer 的最小 ABI 大小；包括 192-byte source uniform、
+  128-byte project/field/deletion uniform、每候选 64-byte records/samples、16-byte attributes、
+  4-byte compact，以及完整的 `56 * max(key_count, 1)` 删除键存储。
+- 上游 reset 与 deletion count reset 必须各为 `[1, 1, 1]`，避免重复 workgroup 写入竞争。
+- `PlacementDeletionRequest` 提供与已上传 uniform 一致的候选数、键数及二维 workgroup 元数据。
+  deletion dispatch 必须覆盖候选数、Z 为 1、XY 与元数据相同，且整个含尾部 lane 的矩形不超过
+  `2^32` 次调用，防止索引回绕；乘法也做溢出检查。
+- 当前固定 indirect ABI 只写 record 0，因此 draw offset 必须为 0；对齐但指向其他 record
+  的 offset 同样被拒绝。
+- 以物理 `BufferId` 检查同 stream 和跨 stream 别名：任何涉及写入的重名 allocation 被拒绝。
+  只读共享必须具有相同物理大小与导入状态，并在图中复用同一 handle，避免隐式重复导入。
+  固定每 stream 最多 15 个绑定，检查复杂度为 `O(S log S)`，不扫描 GPU 内容。
+
+`GpuHeightfieldPlacementDeletions::registration_snapshot()` 返回完整上游 snapshot、deletion 的
+四个 native buffer、请求元数据、singleton count-reset pipeline/bind group，以及非空请求的
+filter stage。元数据直接取自 `write_request` 的同一份已上传请求；snapshot 和直接 `encode`
+共用 generation、候选数和 draw args 校验。reset pipeline/bind group 在构造时建立，不在每次
+snapshot 时创建；snapshot 仅克隆 native handle，不分配或复制 GPU buffer。
+
+snapshot 的执行顺序为 upstream reset/active stages → copy indirect 16 bytes → count-reset
+compute → optional filter。零候选请求没有 active stage，但仍执行 reset/copy/count-reset。
+直接 `encode` 保留 `clear_buffer` 路径；两条路径均通过 GPU readback 与 CPU 完整键结果对拍。
+
+snapshot 不冻结队列内存，也不替代资源管理：调用方必须在向同一 producer 写入下一请求前提交
+当前请求的所有命令，只在同一 device 上注册 handle，并保留 snapshot/注册直至 GPU 使用完成。
+raw RHI 调用方必须保证 `PlacementDeletionRequest` 对应 bind group 的实际 uniform 内容。
+bridge 不能反射 opaque bind group，也不能识别同一 native buffer 被注册为不同 `BufferId`
+的情况；不能将本次元数据/别名校验解释为对任意调用方资源来源的认证。
+
+### 本次验证结果
+
+```bash
+cargo test -p prism_world_runtime --lib --offline -j 2
+cargo test -p prism_world_gpu --features gpu --lib --offline -j 2
+cargo test -p prism_world_gpu --features terrain_scatter --lib --offline -j 2
+cargo test -p prism_world_gpu --features terrain_scatter --test wgsl_compile --offline -j 2
+WGPU_BACKEND=metal PRISM_REQUIRE_GPU=1 cargo test -p prism_world_gpu --features terrain_scatter --test heightfield_placement_deletion --offline -j 2 -- --nocapture --test-threads=1
+```
+
+结果分别为 runtime 183/183、GPU feature lib 132/132、terrain feature lib 148/148、WGSL 11/11、
+Metal 实卡 3/3。新增 bridge 回归覆盖全部 15 个 buffer 的欠容量、完整键容量、dispatch
+覆盖/stride/Z/回绕边界、固定 draw offset、重复 reset、同 stream/跨 stream 的 writable 别名矩阵
+和只读共享导入。实卡为 Apple M2 `IntegratedGpu`，严格禁止无 adapter 或软件 fallback 静默通过。
+本次沙盒内获取 Metal adapter 失败后，获准在沙盒外执行并通过；实卡测试将 dispatch 上限约束为
+2，实际运行带无效尾部 lane 的 `[2, 2, 1]`，分别编码 native snapshot 链和直接链，再与 CPU
+对拍精确删除、空删除集、全量删除及空请求。相关 Rust 文件定向 rustfmt 与 `git diff --check` 通过。
+
+`cargo clippy -p prism_world_gpu --features terrain_scatter --lib --offline --no-deps -j 2 -- -D warnings`
+未通过：已有 project/field/finalize 辅助函数的 3 条参数过多告警、`gpu.rs` 的 2 条大错误枚举告警，
+以及 `planet_placement.rs` 的 1 条冗余转换告警。未修改这些其他路径，也未通过关闭 lint 掩盖结果。
+本次新增 alias error 的大枚举告警已通过缩小错误布局消除。
+
+这些结果证明 native compute 链和图声明/录制分别通过，并不证明真实 RHI RenderGraph 的
+注册、GPU submit、draw bind group 与 retirement 整条链已集成；scene/ECS、产品 renderer、
+持久化消费和性能/画质 benchmark 仍不在本切片交付范围内。

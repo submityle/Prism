@@ -39,8 +39,8 @@ pub struct GpuHeightfieldPlacementWorkBudget {
 /// and must retain that registration through every lookup that uses its ID.
 #[derive(Clone)]
 pub struct GpuHeightfieldPlacementBufferSnapshot {
-    buffer: wgpu::Buffer,
-    bytes: u64,
+    pub(super) buffer: wgpu::Buffer,
+    pub(super) bytes: u64,
 }
 
 impl GpuHeightfieldPlacementBufferSnapshot {
@@ -60,9 +60,9 @@ impl GpuHeightfieldPlacementBufferSnapshot {
 /// One native compute stage ready for persistent same-device registration.
 #[derive(Clone)]
 pub struct GpuHeightfieldPlacementStageSnapshot {
-    pipeline: wgpu::ComputePipeline,
-    bind_group: wgpu::BindGroup,
-    dispatch: [u32; 3],
+    pub(super) pipeline: wgpu::ComputePipeline,
+    pub(super) bind_group: wgpu::BindGroup,
+    pub(super) dispatch: [u32; 3],
 }
 
 impl GpuHeightfieldPlacementStageSnapshot {
@@ -106,6 +106,11 @@ pub struct GpuHeightfieldPlacementActiveStagesSnapshot {
 /// stages are present only when `candidate_count != 0`. Handles remain stable
 /// for the lifetime of the placement object; request generation changes after
 /// every successful upload, including structurally identical uploads.
+///
+/// Cloning native handles does not freeze queue contents. Submit all work for
+/// this request before uploading another request to the same producer. Register
+/// only on the same device, and retain handles and registrations after submission
+/// until the GPU has completed every command that uses them.
 #[derive(Clone)]
 pub struct GpuHeightfieldPlacementRegistrationSnapshot {
     /// Monotonic successful request upload generation.

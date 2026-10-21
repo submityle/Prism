@@ -15,6 +15,11 @@ use prism_world_terrain::{
 };
 
 use crate::gpu::{buffer_binding, storage_entry, uniform_entry};
+use crate::heightfield_placement::{
+    GpuHeightfieldPlacementBufferSnapshot, GpuHeightfieldPlacementRegistrationSnapshot,
+    GpuHeightfieldPlacementStageSnapshot,
+};
+use crate::placement_render_bridge::PlacementDeletionRequest;
 use crate::scatter::{check, dispatch};
 use crate::{GpuContext, GpuHeightfieldPlacement, GpuHeightfieldPlacementError};
 use wgpu::util::{BufferInitDescriptor, DeviceExt};
@@ -57,6 +62,37 @@ pub struct GpuHeightfieldPlacementDeletionUploadStats {
     pub key_bytes: u64,
 }
 
+/// Complete native resources and work for one uploaded deletion request.
+///
+/// Execute `upstream` first, copy its four indirect words to `indirect`, then
+/// execute `clear_instance_count` and, when present, `active`. Empty requests
+/// still require the upstream reset, indirect copy, and count clear.
+///
+/// This clones native handles, not GPU memory, and does not freeze queue
+/// contents. Do not upload another request to this producer before submitting
+/// all commands using this snapshot: uploads reuse its uniform and key buffers.
+/// Register these handles only with an RHI on the same device. Retain the
+/// snapshot and its registrations after submission until every GPU use completes.
+#[derive(Clone)]
+pub struct GpuHeightfieldPlacementDeletionRegistrationSnapshot {
+    /// Placement snapshot validated against the deletion upload generation.
+    pub upstream: GpuHeightfieldPlacementRegistrationSnapshot,
+    /// Counts and dispatch dimensions from the uploaded deletion uniform.
+    pub request: PlacementDeletionRequest,
+    /// The 128-byte deletion uniform bound by the filter stage.
+    pub params: GpuHeightfieldPlacementBufferSnapshot,
+    /// Complete allocated canonical-key storage, including the empty sentinel.
+    pub keys: GpuHeightfieldPlacementBufferSnapshot,
+    /// Filtered compact output consumed by the raster stage.
+    pub compact: GpuHeightfieldPlacementBufferSnapshot,
+    /// Four indirect draw words, distinct from the upstream allocation.
+    pub indirect: GpuHeightfieldPlacementBufferSnapshot,
+    /// Clears only indirect word 1; always dispatched as `[1, 1, 1]`.
+    pub clear_instance_count: GpuHeightfieldPlacementStageSnapshot,
+    /// Full-key filter; absent only when the uploaded candidate count is zero.
+    pub active: Option<GpuHeightfieldPlacementStageSnapshot>,
+}
+
 /// Complete structural cache dependency for a filtered placement stream.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GpuHeightfieldPlacementDeletionCacheKey {
@@ -92,7 +128,7 @@ impl std::fmt::Display for GpuHeightfieldPlacementDeletionError {
             Self::Placement(error) => write!(f, "GPU heightfield placement: {error}"),
             Self::DeviceMismatch => f.write_str("placement belongs to a different logical device"),
             Self::RequestNotUploaded => {
-                f.write_str("upload a placement deletion request before encoding")
+                f.write_str("upload a placement deletion request before encoding or snapshotting")
             }
             Self::UpstreamChanged => {
                 f.write_str("placement upstream no longer matches the deletion request")
@@ -174,6 +210,8 @@ pub struct GpuHeightfieldPlacementDeletions {
     indirect: wgpu::Buffer,
     pipeline: wgpu::ComputePipeline,
     bind_group: wgpu::BindGroup,
+    reset_pipeline: wgpu::ComputePipeline,
+    reset_bind_group: wgpu::BindGroup,
     key_scratch: Vec<[u32; 14]>,
     request: Option<Request>,
     upload_stats: GpuHeightfieldPlacementDeletionUploadStats,
@@ -283,6 +321,35 @@ impl GpuHeightfieldPlacementDeletions {
                 buffer_binding(6, &indirect),
             ],
         });
+        let reset_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("heightfield placement deletion count reset layout"),
+            entries: &[storage_entry(0, false)],
+        });
+        let reset_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("heightfield placement deletion count reset pipeline layout"),
+                bind_group_layouts: &[Some(&reset_layout)],
+                immediate_size: 0,
+            });
+        let reset_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("heightfield placement deletion count reset shader"),
+            source: wgpu::ShaderSource::Wgsl(
+                include_str!("shaders/placement_indirect_count_reset.wgsl").into(),
+            ),
+        });
+        let reset_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("heightfield placement deletion count reset compute"),
+            layout: Some(&reset_pipeline_layout),
+            module: &reset_shader,
+            entry_point: Some("placement_indirect_count_reset_main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let reset_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("heightfield placement deletion count reset bindings"),
+            layout: &reset_layout,
+            entries: &[buffer_binding(0, &indirect)],
+        });
         Ok(Self {
             placement,
             queue: ctx.queue().clone(),
@@ -296,6 +363,8 @@ impl GpuHeightfieldPlacementDeletions {
             indirect,
             pipeline,
             bind_group,
+            reset_pipeline,
+            reset_bind_group,
             key_scratch,
             request: None,
             upload_stats: Default::default(),
@@ -446,16 +515,7 @@ impl GpuHeightfieldPlacementDeletions {
         &self,
         encoder: &mut wgpu::CommandEncoder,
     ) -> Result<(), GpuHeightfieldPlacementDeletionError> {
-        let request = self
-            .request
-            .as_ref()
-            .ok_or(GpuHeightfieldPlacementDeletionError::RequestNotUploaded)?;
-        if request.upstream_generation != self.placement.request_generation()
-            || request.words[0] != self.placement.candidate_count()
-            || request.key.draw_args != self.placement.draw_args()
-        {
-            return Err(GpuHeightfieldPlacementDeletionError::UpstreamChanged);
-        }
+        let request = self.uploaded_request()?;
         self.placement.encode(encoder)?;
         encoder.copy_buffer_to_buffer(self.placement.indirect_args(), 0, &self.indirect, 0, 16);
         encoder.clear_buffer(&self.indirect, 4, Some(4));
@@ -469,6 +529,61 @@ impl GpuHeightfieldPlacementDeletions {
             pass.dispatch_workgroups(request.groups[0], request.groups[1], 1);
         }
         Ok(())
+    }
+
+    fn uploaded_request(&self) -> Result<&Request, GpuHeightfieldPlacementDeletionError> {
+        let request = self
+            .request
+            .as_ref()
+            .ok_or(GpuHeightfieldPlacementDeletionError::RequestNotUploaded)?;
+        if request.upstream_generation != self.placement.request_generation()
+            || request.words[0] != self.placement.candidate_count()
+            || request.key.draw_args != self.placement.draw_args()
+        {
+            return Err(GpuHeightfieldPlacementDeletionError::UpstreamChanged);
+        }
+        Ok(request)
+    }
+
+    /// Clones native handles and metadata from the same validated upload as
+    /// [`Self::encode`], without registering IDs or allocating GPU memory.
+    ///
+    /// Handles do not freeze queue contents. Submit this request before another
+    /// upload; use same-device registration and retain it through GPU completion.
+    /// See [`GpuHeightfieldPlacementDeletionRegistrationSnapshot`] for ordering.
+    pub fn registration_snapshot(
+        &self,
+    ) -> Result<
+        GpuHeightfieldPlacementDeletionRegistrationSnapshot,
+        GpuHeightfieldPlacementDeletionError,
+    > {
+        let request = self.uploaded_request()?;
+        let buffer = |value: &wgpu::Buffer, bytes| GpuHeightfieldPlacementBufferSnapshot {
+            buffer: value.clone(),
+            bytes,
+        };
+        Ok(GpuHeightfieldPlacementDeletionRegistrationSnapshot {
+            upstream: self.placement.registration_snapshot()?,
+            request: PlacementDeletionRequest {
+                candidate_count: request.words[0],
+                key_count: request.words[1],
+                workgroups: [request.words[2], request.words[3]],
+            },
+            params: buffer(&self.params, PARAM_BYTES),
+            keys: buffer(&self.keys, KEY_BYTES * self.max_keys.max(1) as u64),
+            compact: buffer(&self.compact, 4 * self.placement.capacity().max(1) as u64),
+            indirect: buffer(&self.indirect, 16),
+            clear_instance_count: GpuHeightfieldPlacementStageSnapshot {
+                pipeline: self.reset_pipeline.clone(),
+                bind_group: self.reset_bind_group.clone(),
+                dispatch: [1, 1, 1],
+            },
+            active: (request.words[0] != 0).then(|| GpuHeightfieldPlacementStageSnapshot {
+                pipeline: self.pipeline.clone(),
+                bind_group: self.bind_group.clone(),
+                dispatch: [request.groups[0], request.groups[1], 1],
+            }),
+        })
     }
 
     pub fn records(&self) -> &wgpu::Buffer {

@@ -25,9 +25,10 @@ pub use contract::{
 pub use density::{density_dither_visible, DensityPolicy, DensityPolicyError};
 pub use packing::{ClusterSoa, ProxySoa, SoaBufferPack};
 pub use placement_render_bridge::{
-    build_placement_render_graph, PlacementComputeStage, PlacementDeletionWork, PlacementDrawStage,
-    PlacementImportedBuffer, PlacementRenderBridgeError, PlacementRenderStream,
-    PlacementRenderWork, PlacementSceneTarget, PLACEMENT_INDIRECT_COUNT_RESET_WGSL,
+    build_placement_render_graph, PlacementComputeStage, PlacementDeletionRequest,
+    PlacementDeletionWork, PlacementDrawStage, PlacementImportedBuffer, PlacementRenderBridgeError,
+    PlacementRenderStream, PlacementRenderWork, PlacementSceneTarget,
+    PLACEMENT_INDIRECT_COUNT_RESET_WGSL,
 };
 pub use registry::{PreparedSectorUpdate, ProxyHandle, ProxyRegistry, ProxyRegistryError};
 pub use world_placement_graph::{
@@ -143,9 +144,10 @@ pub use planet_placement_deletion::{
 #[cfg(feature = "terrain_scatter")]
 pub use heightfield_placement_deletion::{
     GpuHeightfieldPlacementDeletionCacheKey, GpuHeightfieldPlacementDeletionCapacity,
-    GpuHeightfieldPlacementDeletionError, GpuHeightfieldPlacementDeletionUploadStats,
-    GpuHeightfieldPlacementDeletionWorkBudget, GpuHeightfieldPlacementDeletions,
-    GPU_HEIGHTFIELD_PLACEMENT_DELETION_KEY_ABI_VERSION, GPU_HEIGHTFIELD_PLACEMENT_DELETION_VERSION,
+    GpuHeightfieldPlacementDeletionError, GpuHeightfieldPlacementDeletionRegistrationSnapshot,
+    GpuHeightfieldPlacementDeletionUploadStats, GpuHeightfieldPlacementDeletionWorkBudget,
+    GpuHeightfieldPlacementDeletions, GPU_HEIGHTFIELD_PLACEMENT_DELETION_KEY_ABI_VERSION,
+    GPU_HEIGHTFIELD_PLACEMENT_DELETION_VERSION,
 };
 
 #[cfg(test)]

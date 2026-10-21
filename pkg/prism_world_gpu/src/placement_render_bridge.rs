@@ -7,10 +7,11 @@
 //! retired here.
 
 use core::fmt;
+use std::collections::BTreeMap;
 use std::vec::Vec;
 
 use prism_render_driver::{
-    BindGroupId, BufferUsages, ComputePipelineId, Extent3d, RenderPipelineId,
+    BindGroupId, BufferId, BufferUsages, ComputePipelineId, Extent3d, RenderPipelineId,
 };
 use prism_render_graph::{
     BufferDesc, BufferHandle, CompileError, ExecuteContext, ImportedBuffer, ImportedTexture,
@@ -91,6 +92,10 @@ pub struct PlacementRenderWork {
 /// outputs.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PlacementDeletionWork {
+    /// Metadata from the same uploaded uniform bound by `stage`. Native
+    /// producers expose this in their registration snapshot. Like the opaque
+    /// bind group, raw RHI callers must not substitute unrelated contents.
+    pub request: PlacementDeletionRequest,
     /// Deletion request parameters.
     pub params: PlacementImportedBuffer,
     /// Sorted canonical full-key deletion set.
@@ -104,6 +109,18 @@ pub struct PlacementDeletionWork {
     pub clear_instance_count: PlacementComputeStage,
     /// Registered deletion compute pipeline and bind group.
     pub stage: PlacementComputeStage,
+}
+
+/// Shader-visible dimensions of one uploaded full-key deletion request.
+/// These correspond to uniform words 0..4, not to allocated capacities.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PlacementDeletionRequest {
+    /// Logical candidate slots, equal to the upstream stream count.
+    pub candidate_count: u32,
+    /// Canonical uploaded deletion keys, excluding unused allocated slots.
+    pub key_count: u32,
+    /// Uniform X stride and Y extent used to flatten the 64-lane dispatch.
+    pub workgroups: [u32; 2],
 }
 
 /// Complete physical resource/pipeline binding for one placement stream.
@@ -192,6 +209,32 @@ pub enum PlacementRenderBridgeError {
         /// Invalid byte offset.
         offset: u64,
     },
+    /// Placement kernels initialize only the first indirect record.
+    UnsupportedIndirectOffset {
+        stream: PlacementStream,
+        offset: u64,
+    },
+    /// Shader work dimensions disagree with the uploaded request or its bounds.
+    InvalidDeletionRequest { stream: PlacementStream },
+    /// The singleton reset kernel must not race itself in multiple workgroups.
+    InvalidResetDispatch {
+        stream: PlacementStream,
+        stage: &'static str,
+        dispatch: [u32; 3],
+    },
+    /// A physical allocation is used under multiple names and at least one
+    /// usage writes it. Includes aliases between different streams.
+    AliasedBuffer {
+        stream: PlacementStream,
+        resource: &'static str,
+        other_stream: Box<PlacementStream>,
+        other_resource: &'static str,
+    },
+    /// Shared read-only imports must agree on physical extent and entry state.
+    ConflictingBufferImport {
+        stream: PlacementStream,
+        resource: &'static str,
+    },
     /// Candidate count and candidate-dependent work disagree.
     CandidateWorkMismatch {
         /// Stream owning the inconsistent binding.
@@ -233,6 +276,16 @@ impl fmt::Display for PlacementRenderBridgeError {
                 f,
                 "placement indirect offset {offset} is not four-byte aligned for {stream:?}"
             ),
+            Self::UnsupportedIndirectOffset { stream, offset } => write!(f,
+                "placement indirect offset {offset} must be zero for the fixed ABI in {stream:?}"),
+            Self::InvalidDeletionRequest { stream } => write!(f,
+                "placement deletion request dimensions or dispatch are inconsistent for {stream:?}"),
+            Self::InvalidResetDispatch { stream, stage, dispatch } => write!(f,
+                "placement {stage} dispatch {dispatch:?} must be [1, 1, 1] for {stream:?}"),
+            Self::AliasedBuffer { stream, resource, other_stream, other_resource } => write!(f,
+                "placement {resource} in {stream:?} aliases writable usage {other_resource} in {other_stream:?}"),
+            Self::ConflictingBufferImport { stream, resource } => write!(f,
+                "placement shared buffer {resource} has inconsistent import metadata in {stream:?}"),
             Self::CandidateWorkMismatch {
                 stream,
                 work_present,
@@ -271,10 +324,6 @@ pub fn build_placement_render_graph(
     scene: PlacementSceneTarget,
     streams: &[PlacementRenderStream],
 ) -> Result<RenderGraph, PlacementRenderBridgeError> {
-    let mut graph = RenderGraph::new(extent);
-    let mut scene_handle =
-        graph.try_import_texture("world placement scene", scene.descriptor, scene.imported)?;
-
     let mut ordered = streams.to_vec();
     ordered.sort_unstable_by_key(|item| (item.stream.cell, item.stream.revision));
     for pair in ordered.windows(2) {
@@ -285,9 +334,17 @@ pub fn build_placement_render_graph(
         }
     }
 
+    for item in &ordered {
+        validate_stream(item)?;
+    }
+    validate_physical_buffers(&ordered)?;
+    let mut graph = RenderGraph::new(extent);
+    let mut scene_handle =
+        graph.try_import_texture("world placement scene", scene.descriptor, scene.imported)?;
+    let mut imported_buffers = BTreeMap::new();
+
     for item in ordered {
-        validate_stream(&item)?;
-        let handles = import_stream(&mut graph, &item)?;
+        let handles = import_stream(&mut graph, &mut imported_buffers, &item)?;
 
         let (indirect, status) = add_reset_pass(
             &mut graph,
@@ -354,7 +411,7 @@ pub fn build_placement_render_graph(
         )?;
 
         let (draw_compact, draw_indirect) = if let Some(deletion) = work.deletion {
-            let deletion_handles = import_deletion(&mut graph, deletion)?;
+            let deletion_handles = import_deletion(&mut graph, &mut imported_buffers, deletion)?;
             let copied_indirect = add_deletion_args_copy(
                 &mut graph,
                 indirect,
@@ -369,9 +426,7 @@ pub fn build_placement_render_graph(
             )?;
             let (filtered_compact, filtered_indirect) = add_deletion_pass(
                 &mut graph,
-                records,
-                compact,
-                indirect,
+                [records, compact, indirect],
                 reset_indirect,
                 deletion_handles,
                 deletion.stage,
@@ -385,8 +440,6 @@ pub fn build_placement_render_graph(
         let draw_records = records;
         let draw_samples = samples;
         let draw_attributes = attributes;
-        let draw_compact = draw_compact;
-        let draw_indirect = draw_indirect;
         let draw_stage = work.draw;
         let previous_scene = scene_handle;
         let mut next_scene = previous_scene;
@@ -439,15 +492,11 @@ struct DeletionHandles {
 
 fn import_deletion(
     graph: &mut RenderGraph,
+    imported: &mut BTreeMap<BufferId, BufferHandle>,
     work: PlacementDeletionWork,
 ) -> Result<DeletionHandles, CompileError> {
-    let import = |name: &'static str, value: PlacementImportedBuffer, graph: &mut RenderGraph| {
-        graph.try_import_buffer(
-            name,
-            BufferDesc::new(value.bytes, BufferUsages::NONE),
-            value.imported,
-        )
-    };
+    let mut import =
+        |name, value, graph: &mut RenderGraph| import_buffer(graph, imported, name, value);
     Ok(DeletionHandles {
         params: import("world placement deletion params", work.params, graph)?,
         keys: import("world placement deletion keys", work.keys, graph)?,
@@ -479,9 +528,7 @@ fn add_deletion_args_copy(
 
 fn add_deletion_pass(
     graph: &mut RenderGraph,
-    records: BufferHandle,
-    upstream_compact: BufferHandle,
-    upstream_indirect: BufferHandle,
+    [records, upstream_compact, upstream_indirect]: [BufferHandle; 3],
     copied_indirect: BufferHandle,
     deletion: DeletionHandles,
     stage: PlacementComputeStage,
@@ -525,15 +572,11 @@ fn add_deletion_count_reset(
 
 fn import_stream(
     graph: &mut RenderGraph,
+    imported: &mut BTreeMap<BufferId, BufferHandle>,
     item: &PlacementRenderStream,
 ) -> Result<StreamHandles, CompileError> {
-    let import = |name: &'static str, value: PlacementImportedBuffer, graph: &mut RenderGraph| {
-        graph.try_import_buffer(
-            name,
-            BufferDesc::new(value.bytes, BufferUsages::NONE),
-            value.imported,
-        )
-    };
+    let mut import =
+        |name, value, graph: &mut RenderGraph| import_buffer(graph, imported, name, value);
     Ok(StreamHandles {
         source_params: import("world placement source params", item.source_params, graph)?,
         project_params: import("world placement project params", item.project_params, graph)?,
@@ -695,6 +738,127 @@ fn record_compute(commands: &mut ExecuteContext<'_>, stage: PlacementComputeStag
         .dispatch(stage.dispatch[0], stage.dispatch[1], stage.dispatch[2]);
 }
 
+fn import_buffer(
+    graph: &mut RenderGraph,
+    imported: &mut BTreeMap<BufferId, BufferHandle>,
+    name: &'static str,
+    value: PlacementImportedBuffer,
+) -> Result<BufferHandle, CompileError> {
+    if let Some(handle) = imported.get(&value.imported.buffer) {
+        return Ok(*handle);
+    }
+    let handle = graph.try_import_buffer(
+        name,
+        BufferDesc::new(value.bytes, BufferUsages::NONE),
+        value.imported,
+    )?;
+    imported.insert(value.imported.buffer, handle);
+    Ok(handle)
+}
+
+/// Reject hidden physical hazards before creating any logical graph resources.
+/// A shared immutable resource gets one logical identity; writable resources
+/// must have unique physical identities across the entire frame. O(S log S)
+/// for S streams (each has a fixed maximum of fifteen bindings).
+fn validate_physical_buffers(
+    streams: &[PlacementRenderStream],
+) -> Result<(), PlacementRenderBridgeError> {
+    let mut seen = BTreeMap::new();
+    for item in streams {
+        let mut check = |resource, binding: PlacementImportedBuffer, writable| {
+            if let Some(&(other_stream, other_resource, other_binding, other_writable)) =
+                seen.get(&binding.imported.buffer)
+            {
+                if writable || other_writable {
+                    return Err(PlacementRenderBridgeError::AliasedBuffer {
+                        stream: item.stream,
+                        resource,
+                        other_stream: Box::new(other_stream),
+                        other_resource,
+                    });
+                }
+                if binding != other_binding {
+                    return Err(PlacementRenderBridgeError::ConflictingBufferImport {
+                        stream: item.stream,
+                        resource,
+                    });
+                }
+            } else {
+                seen.insert(
+                    binding.imported.buffer,
+                    (item.stream, resource, binding, writable),
+                );
+            }
+            Ok(())
+        };
+        for (name, buffer, writable) in [
+            ("source_params", item.source_params, false),
+            ("project_params", item.project_params, false),
+            ("field_params", item.field_params, false),
+            ("records", item.records, true),
+            ("samples", item.samples, true),
+            ("attributes", item.attributes, true),
+            ("compact", item.compact, true),
+            ("indirect", item.indirect, true),
+            ("status", item.status, true),
+            ("heights", item.heights, false),
+            ("brushes", item.brushes, false),
+        ] {
+            check(name, buffer, writable)?;
+        }
+        if let Some(deletion) = item.work.and_then(|work| work.deletion) {
+            for (name, buffer, writable) in [
+                ("deletion_params", deletion.params, false),
+                ("deletion_keys", deletion.keys, false),
+                ("deletion_compact", deletion.compact, true),
+                ("deletion_indirect", deletion.indirect, true),
+            ] {
+                check(name, buffer, writable)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_size(
+    item: &PlacementRenderStream,
+    resource: &'static str,
+    binding: PlacementImportedBuffer,
+    minimum: u64,
+) -> Result<(), PlacementRenderBridgeError> {
+    if binding.bytes < minimum {
+        return Err(PlacementRenderBridgeError::InvalidBufferSize {
+            stream: item.stream,
+            resource,
+            bytes: binding.bytes,
+            minimum,
+        });
+    }
+    Ok(())
+}
+
+fn validate_reset(
+    item: &PlacementRenderStream,
+    stage: &'static str,
+    dispatch: [u32; 3],
+) -> Result<(), PlacementRenderBridgeError> {
+    if dispatch.contains(&0) {
+        return Err(PlacementRenderBridgeError::ZeroDispatch {
+            stream: item.stream,
+            stage,
+            dispatch,
+        });
+    }
+    if dispatch != [1, 1, 1] {
+        return Err(PlacementRenderBridgeError::InvalidResetDispatch {
+            stream: item.stream,
+            stage,
+            dispatch,
+        });
+    }
+    Ok(())
+}
+
 fn validate_stream(item: &PlacementRenderStream) -> Result<(), PlacementRenderBridgeError> {
     let buffers = [
         ("source_params", item.source_params),
@@ -723,13 +887,23 @@ fn validate_stream(item: &PlacementRenderStream) -> Result<(), PlacementRenderBr
             work_present: item.work.is_some(),
         });
     }
-    if item.reset.dispatch.contains(&0) {
-        return Err(PlacementRenderBridgeError::ZeroDispatch {
-            stream: item.stream,
-            stage: "reset",
-            dispatch: item.reset.dispatch,
-        });
+    let slots = u64::from(item.stream.candidate_count.max(1));
+    for (resource, binding, minimum) in [
+        ("source_params", item.source_params, 192),
+        ("project_params", item.project_params, 128),
+        ("field_params", item.field_params, 128),
+        ("records", item.records, slots * 64),
+        ("samples", item.samples, slots * 64),
+        ("attributes", item.attributes, slots * 16),
+        ("compact", item.compact, slots * 4),
+        ("indirect", item.indirect, 16),
+        ("status", item.status, 4),
+        ("heights", item.heights, 4),
+        ("brushes", item.brushes, 64),
+    ] {
+        validate_size(item, resource, binding, minimum)?;
     }
+    validate_reset(item, "reset", item.reset.dispatch)?;
     let Some(work) = item.work else {
         return Ok(());
     };
@@ -763,34 +937,22 @@ fn validate_stream(item: &PlacementRenderStream) -> Result<(), PlacementRenderBr
         }
         let candidate_bytes = u64::from(item.stream.candidate_count) * 4;
         for (resource, binding, minimum) in [
-            (
-                "records",
-                item.records,
-                u64::from(item.stream.candidate_count) * 64,
-            ),
-            ("compact", item.compact, candidate_bytes),
-            ("indirect", item.indirect, 16),
             ("deletion_params", deletion.params, 128),
-            ("deletion_keys", deletion.keys, 56),
+            (
+                "deletion_keys",
+                deletion.keys,
+                56 * u64::from(deletion.request.key_count.max(1)),
+            ),
             ("deletion_compact", deletion.compact, candidate_bytes),
             ("deletion_indirect", deletion.indirect, 16),
         ] {
-            if binding.bytes < minimum {
-                return Err(PlacementRenderBridgeError::InvalidBufferSize {
-                    stream: item.stream,
-                    resource,
-                    bytes: binding.bytes,
-                    minimum,
-                });
-            }
+            validate_size(item, resource, binding, minimum)?;
         }
-        if deletion.clear_instance_count.dispatch.contains(&0) {
-            return Err(PlacementRenderBridgeError::ZeroDispatch {
-                stream: item.stream,
-                stage: "deletion_count_reset",
-                dispatch: deletion.clear_instance_count.dispatch,
-            });
-        }
+        validate_reset(
+            item,
+            "deletion_count_reset",
+            deletion.clear_instance_count.dispatch,
+        )?;
         if deletion.stage.dispatch.contains(&0) {
             return Err(PlacementRenderBridgeError::ZeroDispatch {
                 stream: item.stream,
@@ -798,9 +960,30 @@ fn validate_stream(item: &PlacementRenderStream) -> Result<(), PlacementRenderBr
                 dispatch: deletion.stage.dispatch,
             });
         }
+        let [x, y, z] = deletion.stage.dispatch;
+        let invocations = u64::from(x)
+            .checked_mul(u64::from(y))
+            .and_then(|n| n.checked_mul(64));
+        if deletion.request.candidate_count != item.stream.candidate_count
+            || deletion.request.workgroups != [x, y]
+            || z != 1
+            || invocations.is_none_or(|n| {
+                n < u64::from(item.stream.candidate_count) || n > u64::from(u32::MAX) + 1
+            })
+        {
+            return Err(PlacementRenderBridgeError::InvalidDeletionRequest {
+                stream: item.stream,
+            });
+        }
     }
     if work.draw.indirect_offset % 4 != 0 {
         return Err(PlacementRenderBridgeError::MisalignedIndirectOffset {
+            stream: item.stream,
+            offset: work.draw.indirect_offset,
+        });
+    }
+    if work.draw.indirect_offset != 0 {
+        return Err(PlacementRenderBridgeError::UnsupportedIndirectOffset {
             stream: item.stream,
             offset: work.draw.indirect_offset,
         });
@@ -869,13 +1052,13 @@ mod tests {
         };
         PlacementRenderStream {
             stream: stream(),
-            source_params: imported_buffer(device, 64),
-            project_params: imported_buffer(device, 64),
-            field_params: imported_buffer(device, 64),
-            records: imported_buffer(device, 64),
-            samples: imported_buffer(device, 64),
-            attributes: imported_buffer(device, 16),
-            compact: imported_buffer(device, 16),
+            source_params: imported_buffer(device, 192),
+            project_params: imported_buffer(device, 128),
+            field_params: imported_buffer(device, 128),
+            records: imported_buffer(device, 64 * 32),
+            samples: imported_buffer(device, 64 * 32),
+            attributes: imported_buffer(device, 16 * 32),
+            compact: imported_buffer(device, 4 * 32),
             indirect: imported_buffer(device, 16),
             status: imported_buffer(device, 4),
             heights: imported_buffer(device, 16),
@@ -914,12 +1097,17 @@ mod tests {
         };
         item.work.as_mut().unwrap().draw.indirect_offset = 0;
         item.work.as_mut().unwrap().deletion = Some(PlacementDeletionWork {
+            request: PlacementDeletionRequest {
+                candidate_count: item.stream.candidate_count,
+                key_count: 1,
+                workgroups: [1, 1],
+            },
             params: imported_buffer(device, 128),
             keys: imported_buffer(device, 56),
             compact: imported_buffer(device, 128),
             indirect: imported_buffer(device, 16),
             clear_instance_count: stage(7, [1, 1, 1]),
-            stage: stage(8, [8, 1, 1]),
+            stage: stage(8, [1, 1, 1]),
         });
         item
     }
@@ -1057,7 +1245,7 @@ mod tests {
                 size: 16,
             }]
         );
-        for (index, expected_dispatch) in [(6, 1), (7, 8)] {
+        for (index, expected_dispatch) in [(6, 1), (7, 1)] {
             let Pass::Compute { commands, .. } = &passes[index] else {
                 panic!("deletion preparation/filter pass must be compute");
             };
@@ -1176,5 +1364,326 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(labels[0].contains("level: 0, x: 1"));
         assert!(labels[6].contains("level: 0, x: 2"));
+    }
+
+    fn binding_mut<'a>(
+        item: &'a mut PlacementRenderStream,
+        name: &str,
+    ) -> &'a mut PlacementImportedBuffer {
+        match name {
+            "source_params" => &mut item.source_params,
+            "project_params" => &mut item.project_params,
+            "field_params" => &mut item.field_params,
+            "records" => &mut item.records,
+            "samples" => &mut item.samples,
+            "attributes" => &mut item.attributes,
+            "compact" => &mut item.compact,
+            "indirect" => &mut item.indirect,
+            "status" => &mut item.status,
+            "heights" => &mut item.heights,
+            "brushes" => &mut item.brushes,
+            name => {
+                let deletion = item.work.as_mut().unwrap().deletion.as_mut().unwrap();
+                match name {
+                    "deletion_params" => &mut deletion.params,
+                    "deletion_keys" => &mut deletion.keys,
+                    "deletion_compact" => &mut deletion.compact,
+                    "deletion_indirect" => &mut deletion.indirect,
+                    _ => panic!("unknown binding: {name}"),
+                }
+            }
+        }
+    }
+
+    const BUFFER_NAMES: [&str; 15] = [
+        "source_params",
+        "project_params",
+        "field_params",
+        "records",
+        "samples",
+        "attributes",
+        "compact",
+        "indirect",
+        "status",
+        "heights",
+        "brushes",
+        "deletion_params",
+        "deletion_keys",
+        "deletion_compact",
+        "deletion_indirect",
+    ];
+    const WRITABLE_NAMES: [&str; 8] = [
+        "records",
+        "samples",
+        "attributes",
+        "compact",
+        "indirect",
+        "status",
+        "deletion_compact",
+        "deletion_indirect",
+    ];
+
+    #[test]
+    fn rejects_every_shader_buffer_below_its_abi_minimum() {
+        let device = device();
+        let minimums = [
+            192,
+            128,
+            128,
+            32 * 64,
+            32 * 64,
+            32 * 16,
+            32 * 4,
+            16,
+            4,
+            4,
+            64,
+            128,
+            56,
+            32 * 4,
+            16,
+        ];
+        for (name, minimum) in BUFFER_NAMES.into_iter().zip(minimums) {
+            let mut item = with_deletion(&device);
+            binding_mut(&mut item, name).bytes = minimum - 1;
+            assert!(
+                matches!(
+                    validate_stream(&item),
+                    Err(PlacementRenderBridgeError::InvalidBufferSize {resource, minimum: actual, ..})
+                        if resource == name && actual == minimum
+                ),
+                "{name} must require {minimum} bytes"
+            );
+        }
+    }
+
+    #[test]
+    fn deletion_keys_require_the_complete_uploaded_set() {
+        let device = device();
+        for key_count in [0, 1, 2, u32::MAX] {
+            let mut item = with_deletion(&device);
+            item.work
+                .as_mut()
+                .unwrap()
+                .deletion
+                .as_mut()
+                .unwrap()
+                .request
+                .key_count = key_count;
+            let required = 56 * u64::from(key_count.max(1));
+            binding_mut(&mut item, "deletion_keys").bytes = required;
+            validate_stream(&item).expect("exact key extent");
+            binding_mut(&mut item, "deletion_keys").bytes -= 1;
+            assert!(
+                matches!(validate_stream(&item), Err(PlacementRenderBridgeError::InvalidBufferSize { resource: "deletion_keys", minimum, .. }) if minimum == required)
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_incomplete_repeated_mismatched_or_wrapping_deletion_dispatch() {
+        let device = device();
+        for (candidate_count, dispatch, workgroups) in [
+            (128, [1, 1, 1], [1, 1]),
+            (32, [1, 1, 2], [1, 1]),
+            (32, [2, 2, 1], [1, 2]),
+            (32, [2, 2, 1], [2, 1]),
+            (32, [65536, 1025, 1], [65536, 1025]),
+            (32, [u32::MAX, u32::MAX, 1], [u32::MAX, u32::MAX]),
+        ] {
+            let mut item = with_deletion(&device);
+            item.stream.candidate_count = candidate_count;
+            for (name, stride) in [
+                ("records", 64),
+                ("samples", 64),
+                ("attributes", 16),
+                ("compact", 4),
+                ("deletion_compact", 4),
+            ] {
+                binding_mut(&mut item, name).bytes = u64::from(candidate_count) * stride;
+            }
+            let deletion = item.work.as_mut().unwrap().deletion.as_mut().unwrap();
+            deletion.request.candidate_count = candidate_count;
+            deletion.request.workgroups = workgroups;
+            deletion.stage.dispatch = dispatch;
+            assert!(
+                matches!(
+                    validate_stream(&item),
+                    Err(PlacementRenderBridgeError::InvalidDeletionRequest { .. })
+                ),
+                "N={candidate_count}, dispatch={dispatch:?}, uniform groups={workgroups:?}"
+            );
+        }
+        let mut item = with_deletion(&device);
+        item.work
+            .as_mut()
+            .unwrap()
+            .deletion
+            .as_mut()
+            .unwrap()
+            .request
+            .candidate_count += 1;
+        assert!(matches!(
+            validate_stream(&item),
+            Err(PlacementRenderBridgeError::InvalidDeletionRequest { .. })
+        ));
+    }
+
+    #[test]
+    fn accepts_covered_2d_dispatch_and_exact_u32_index_boundary() {
+        let device = device();
+        for (count, groups) in [
+            (32, [1, 1]),
+            (128, [1, 2]),
+            (129, [2, 2]),
+            (u32::MAX, [65536, 1024]),
+        ] {
+            let mut item = with_deletion(&device);
+            item.stream.candidate_count = count;
+            for (name, stride) in [
+                ("records", 64),
+                ("samples", 64),
+                ("attributes", 16),
+                ("compact", 4),
+                ("deletion_compact", 4),
+            ] {
+                // Validation-only boundary: no giant physical allocation.
+                binding_mut(&mut item, name).bytes = u64::from(count) * stride;
+            }
+            let deletion = item.work.as_mut().unwrap().deletion.as_mut().unwrap();
+            deletion.request.candidate_count = count;
+            deletion.request.workgroups = groups;
+            deletion.stage.dispatch = [groups[0], groups[1], 1];
+            validate_stream(&item).expect("covered non-wrapping dispatch");
+        }
+    }
+
+    #[test]
+    fn rejects_nonzero_indirect_record_even_when_aligned_and_in_bounds() {
+        let device = device();
+        for deletion_enabled in [false, true] {
+            let mut item = if deletion_enabled {
+                with_deletion(&device)
+            } else {
+                item(&device)
+            };
+            if deletion_enabled {
+                binding_mut(&mut item, "deletion_indirect").bytes = 32;
+            } else {
+                item.indirect.bytes = 32;
+            }
+            item.work.as_mut().unwrap().draw.indirect_offset = 16;
+            assert!(matches!(
+                validate_stream(&item),
+                Err(PlacementRenderBridgeError::UnsupportedIndirectOffset { offset: 16, .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn rejects_duplicate_reset_workgroups() {
+        let device = device();
+        let mut item = with_deletion(&device);
+        item.reset.dispatch = [1, 1, 2];
+        assert!(matches!(
+            validate_stream(&item),
+            Err(PlacementRenderBridgeError::InvalidResetDispatch { stage: "reset", .. })
+        ));
+        item.reset.dispatch = [1, 1, 1];
+        item.work
+            .as_mut()
+            .unwrap()
+            .deletion
+            .as_mut()
+            .unwrap()
+            .clear_instance_count
+            .dispatch = [2, 1, 1];
+        assert!(matches!(
+            validate_stream(&item),
+            Err(PlacementRenderBridgeError::InvalidResetDispatch {
+                stage: "deletion_count_reset",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn rejects_all_writable_alias_pairs_within_and_between_streams() {
+        let device = device();
+        let base = with_deletion(&device);
+        let mut distinct = with_deletion(&device);
+        distinct.stream.cell = prism_world_stream::SectorId::new(1, 1, 0, 0);
+        for writable in WRITABLE_NAMES {
+            for other in BUFFER_NAMES {
+                for across_streams in [false, true] {
+                    if !across_streams && writable == other {
+                        continue;
+                    }
+                    let mut first = base;
+                    let mut second = distinct;
+                    let source = if across_streams {
+                        binding_mut(&mut second, other).imported
+                    } else {
+                        binding_mut(&mut first, other).imported
+                    };
+                    binding_mut(&mut first, writable).imported = source;
+                    let streams = if across_streams {
+                        vec![first, second]
+                    } else {
+                        vec![first]
+                    };
+                    assert!(
+                        matches!(
+                            build_placement_render_graph(
+                                Extent3d::new_2d(4, 4),
+                                scene(&device),
+                                &streams
+                            ),
+                            Err(PlacementRenderBridgeError::AliasedBuffer { .. })
+                        ),
+                        "writable={writable}, other={other}, across_streams={across_streams}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn shares_immutable_imports_but_rejects_inconsistent_metadata() {
+        let device = device();
+        let first = with_deletion(&device);
+        let mut second = with_deletion(&device);
+        second.stream.cell = prism_world_stream::SectorId::new(1, 1, 0, 0);
+        second.heights = first.heights;
+        second.brushes = first.brushes;
+        second
+            .work
+            .as_mut()
+            .unwrap()
+            .deletion
+            .as_mut()
+            .unwrap()
+            .keys = first.work.unwrap().deletion.unwrap().keys;
+        let graph =
+            build_placement_render_graph(Extent3d::new_2d(4, 4), scene(&device), &[first, second])
+                .expect("shared read-only buffers");
+        let recorded = graph.record(&device).expect("shared imports record");
+        assert_eq!(recorded.commands().passes.len(), 18);
+        recorded.release(&device);
+        second.heights.bytes += 4;
+        assert!(matches!(
+            build_placement_render_graph(Extent3d::new_2d(4, 4), scene(&device), &[first, second]),
+            Err(PlacementRenderBridgeError::ConflictingBufferImport {
+                resource: "heights",
+                ..
+            })
+        ));
+
+        let mut graph = RenderGraph::new(Extent3d::new_2d(4, 4));
+        let mut imported = BTreeMap::new();
+        let a = import_buffer(&mut graph, &mut imported, "first", first.heights).unwrap();
+        let b = import_buffer(&mut graph, &mut imported, "shared", first.heights).unwrap();
+        assert_eq!(a, b);
+        assert_eq!(imported.len(), 1);
     }
 }
