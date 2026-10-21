@@ -883,6 +883,14 @@ fn cancel_native_interactions<R: DesktopRenderer>(
     }
 }
 
+fn should_cancel_native_interactions_on_escape(
+    panel_pointer_active: bool,
+    renderer_gesture_active: bool,
+    box_selection_active: bool,
+) -> bool {
+    panel_pointer_active || renderer_gesture_active || box_selection_active
+}
+
 struct DocumentWake {
     proxy: EventLoopProxy<DesktopWake>,
 }
@@ -1223,11 +1231,18 @@ impl<R: DesktopRenderer> ApplicationHandler<DesktopWake> for DesktopHost<R> {
                 if self.composing {
                     return;
                 }
-                if self.renderer.gesture_active()
-                    && event.logical_key == Key::Named(NamedKey::Escape)
+                if event.logical_key == Key::Named(NamedKey::Escape)
+                    && should_cancel_native_interactions_on_escape(
+                        self.ui.panel_pointer_active(),
+                        self.renderer.gesture_active(),
+                        self.drag_start.is_some(),
+                    )
                 {
-                    let result = self.renderer.gesture_cancel(&mut self.ui);
-                    self.drag_start = None;
+                    let result = cancel_native_interactions(
+                        &mut self.ui,
+                        &mut self.renderer,
+                        &mut self.drag_start,
+                    );
                     self.input_result(result);
                     return;
                 }
@@ -1667,6 +1682,22 @@ mod tests {
         );
         assert_eq!(renderer.cancel_count, 1);
         assert_eq!(drag_start, None);
+    }
+
+    #[test]
+    fn escape_cancels_each_native_interaction_source() {
+        assert!(should_cancel_native_interactions_on_escape(
+            true, false, false
+        ));
+        assert!(should_cancel_native_interactions_on_escape(
+            false, true, false
+        ));
+        assert!(should_cancel_native_interactions_on_escape(
+            false, false, true
+        ));
+        assert!(!should_cancel_native_interactions_on_escape(
+            false, false, false
+        ));
     }
 
     #[test]

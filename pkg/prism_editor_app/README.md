@@ -76,12 +76,14 @@ policy and world/local conversion through the adapter.
 W/E/R select translation/rotation/scale. Pressing an axis captures input before
 point/box selection, movement previews the selected meshes, and release commits
 one real multi-object command. Escape, focus loss, resize, suspend and device loss
-restore all drag-start matrices. Axis geometry is shared between hit testing and
-the retained GPU overlay; logical input and physical output use the viewport's
-scale. Translation uses calibrated world units per pixel, rotation one degree
-per pixel, and scale one percent per pixel. Default snapping is 0.1 world units,
-15 degrees and 10 percent; hosts can configure it with `set_gizmo_tool`. The three
-tools currently share line handles, not rotation rings or plane handles.
+cancel panel capture, viewport gestures and pending box selection; transform
+gestures also restore all drag-start matrices. Axis geometry is shared between
+hit testing and the retained GPU overlay; logical input and physical output use
+the viewport's scale. Translation uses calibrated world units per pixel,
+rotation one degree per pixel, and scale one percent per pixel. Default snapping
+is 0.1 world units, 15 degrees and 10 percent; hosts can configure it with
+`set_gizmo_tool`. The three tools currently share line handles, not rotation
+rings or plane handles.
 
 The default `GizmoFrame::project` projects world axes to 72 logical pixels and
 hides the handles outside/behind the camera or when an axis projects to zero
