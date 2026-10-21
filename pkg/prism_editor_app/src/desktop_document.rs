@@ -118,7 +118,7 @@ impl DesktopDocumentSession {
                 let prepared = receipt
                     .prepare(&self.catalog, self.controller_limits)
                     .map_err(document_error)?;
-                renderer.prepare_document(prepared.controller())?;
+                prepare_renderer_document(renderer, prepared.controller())?;
                 if let Err(error) = prepared.install_ui(&mut self.adapter, ui, &self.catalog) {
                     renderer.discard_document();
                     return Err(document_error(error));
@@ -139,6 +139,95 @@ impl DesktopDocumentSession {
     }
 }
 
+fn prepare_renderer_document<R: DesktopRenderer>(
+    renderer: &mut R,
+    controller: &crate::EditorController,
+) -> Result<(), DesktopError> {
+    if let Err(error) = renderer.prepare_document(controller) {
+        renderer.discard_document();
+        return Err(error);
+    }
+    Ok(())
+}
+
 fn document_error(error: DocumentError) -> DesktopError {
     DesktopError::Document(error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{DesktopGpu, DesktopViewportBounds, DesktopWork};
+    use prism_editor_ui::SelectionMode;
+
+    #[derive(Default)]
+    struct RejectingRenderer {
+        candidate: bool,
+        prepare_count: u32,
+        discard_count: u32,
+    }
+
+    impl DesktopRenderer for RejectingRenderer {
+        fn initialize(&mut self, _gpu: &DesktopGpu) -> Result<(), DesktopError> {
+            Ok(())
+        }
+
+        fn encode(
+            &mut self,
+            _gpu: &DesktopGpu,
+            _ui: &mut EditorDesktopUi,
+            _encoder: &mut wgpu::CommandEncoder,
+            _target: &wgpu::TextureView,
+            _bounds: DesktopViewportBounds,
+        ) -> Result<(), DesktopError> {
+            Ok(())
+        }
+
+        fn pointer(
+            &mut self,
+            _gpu: &DesktopGpu,
+            _ui: &mut EditorDesktopUi,
+            _position: [f32; 2],
+            _mode: SelectionMode,
+        ) -> Result<bool, DesktopError> {
+            Ok(false)
+        }
+
+        fn poll(
+            &mut self,
+            _gpu: &DesktopGpu,
+            _ui: &mut EditorDesktopUi,
+        ) -> Result<DesktopWork, DesktopError> {
+            Ok(DesktopWork::default())
+        }
+
+        fn prepare_document(
+            &mut self,
+            _controller: &crate::EditorController,
+        ) -> Result<(), DesktopError> {
+            self.prepare_count += 1;
+            self.candidate = true;
+            Err(DesktopError::Renderer("document scene rejected".into()))
+        }
+
+        fn discard_document(&mut self) {
+            self.discard_count += 1;
+            self.candidate = false;
+        }
+
+        fn suspend(&mut self) {}
+    }
+
+    #[test]
+    fn rejected_renderer_candidate_is_discarded_before_load_returns() {
+        let mut renderer = RejectingRenderer::default();
+
+        assert_eq!(
+            prepare_renderer_document(&mut renderer, &crate::EditorController::new()),
+            Err(DesktopError::Renderer("document scene rejected".into()))
+        );
+        assert_eq!(renderer.prepare_count, 1);
+        assert_eq!(renderer.discard_count, 1);
+        assert!(!renderer.candidate);
+    }
 }
