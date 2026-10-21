@@ -281,7 +281,8 @@ fn aabb_intersects(left: AabbI64, right: AabbI64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::DataLayerMask;
+    use crate::{DataLayerMask, GlobalPos};
+    use alloc::vec;
 
     fn manifest(level: u8, x: i64, y: i64, z: i64) -> CellManifest {
         CellManifest {

@@ -19,6 +19,9 @@ use prism_world_stream::{
     StreamAction, StreamBudget,
 };
 
+/// Default bounded storage reserved for validated prefetched cell bytes.
+pub const DEFAULT_PREFETCH_CACHE_BYTES: u64 = 64 * 1024 * 1024;
+
 mod routed_io;
 pub use routed_io::RoutedCellIo;
 mod decoded_scene_host;
@@ -791,8 +794,10 @@ fn validate_header(manifest: CellManifest, bytes: &[u8]) -> Result<&[u8], Header
 /// The operation that caused a trace entry.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TraceOp {
-    /// A required or prefetched load was admitted.
+    /// A required load was admitted.
     Load,
+    /// A prefetched payload was admitted without scene instantiation.
+    Prefetch,
     /// A resident cell revision replacement was admitted.
     Reload,
     /// A loaded cell was evicted.
@@ -844,6 +849,13 @@ pub enum TraceEvent {
     /// A cell was committed to the host.
     Loaded {
         /// Frame number that admitted the load.
+        frame: u64,
+        /// Cell identity.
+        sector: SectorId,
+    },
+    /// A prefetched payload was validated and retained without entering the scene host.
+    Prefetched {
+        /// Frame number that admitted the prefetch.
         frame: u64,
         /// Cell identity.
         sector: SectorId,
@@ -924,6 +936,7 @@ impl Trace {
                 }
                 TraceEvent::LoadSubmitted { frame, .. }
                 | TraceEvent::Loaded { frame, .. }
+                | TraceEvent::Prefetched { frame, .. }
                 | TraceEvent::Evicted { frame, .. }
                 | TraceEvent::Failed { frame, .. } => {
                     if open != Some(*frame) && !finished.contains(frame) {
@@ -1010,7 +1023,13 @@ struct PendingLoad {
     manifest: CellManifest,
     previous: Option<CellManifest>,
     operation: TraceOp,
+    prefetch: bool,
     cancel_requested: bool,
+}
+
+struct CachedCell {
+    manifest: CellManifest,
+    bytes: Vec<u8>,
 }
 
 /// Coordinates stream policy, bounded IO, manifest validation, and scene host calls.
@@ -1021,6 +1040,9 @@ pub struct CellFrameCoordinator<I: CellIo> {
     pending: BTreeMap<RequestId, PendingLoad>,
     trace: Trace,
     frame: u64,
+    prefetch_cache: BTreeMap<SectorId, CachedCell>,
+    prefetch_cache_bytes: u64,
+    prefetch_cache_limit: u64,
 }
 
 /// Synchronous compatibility coordinator over a [`ChunkProvider`].
@@ -1048,6 +1070,14 @@ impl<P: ChunkProvider> CellFrameCoordinator<IoRuntime<P>> {
 impl<I: CellIo> CellFrameCoordinator<I> {
     /// Creates a coordinator using an explicitly selected IO backend.
     pub fn with_io(io: I) -> Self {
+        Self::with_io_and_prefetch_cache(io, DEFAULT_PREFETCH_CACHE_BYTES)
+    }
+
+    /// Creates a coordinator with an explicit bounded prefetch cache.
+    ///
+    /// A zero limit disables retention while preserving prefetch validation;
+    /// prefetched bytes are then discarded after the provider completes.
+    pub fn with_io_and_prefetch_cache(io: I, prefetch_cache_limit: u64) -> Self {
         Self {
             io,
             stream: prism_world_stream::StreamScheduler::new(),
@@ -1055,7 +1085,22 @@ impl<I: CellIo> CellFrameCoordinator<I> {
             pending: BTreeMap::new(),
             trace: Trace::new(),
             frame: 0,
+            prefetch_cache: BTreeMap::new(),
+            prefetch_cache_bytes: 0,
+            prefetch_cache_limit,
         }
+    }
+
+    /// Returns the bytes currently retained by the prefetch cache.
+    #[must_use]
+    pub const fn prefetch_cache_bytes(&self) -> u64 {
+        self.prefetch_cache_bytes
+    }
+
+    /// Returns the configured prefetch cache limit.
+    #[must_use]
+    pub const fn prefetch_cache_limit(&self) -> u64 {
+        self.prefetch_cache_limit
     }
 
     /// Plans a frame, submits load actions, and applies evictions to `host`.
@@ -1085,63 +1130,24 @@ impl<I: CellIo> CellFrameCoordinator<I> {
         };
         for action in plan.actions {
             match action {
-                StreamAction::Load(request) | StreamAction::Prefetch(request) => {
+                StreamAction::Load(request) => {
                     let manifest = manifests
                         .iter()
                         .find(|manifest| manifest.sector == request.sector)
                         .expect("stream request must refer to a validated manifest");
-                    let previous = self.known_loaded.get(&request.sector).copied();
-                    let operation = if previous.is_some_and(|old| {
-                        old.scene_key != manifest.scene_key
-                            || old.content_version != manifest.content_version
-                            || old.derived_hash != manifest.derived_hash
-                            || old.data_layers != manifest.data_layers
-                    }) {
-                        TraceOp::Reload
-                    } else {
-                        TraceOp::Load
-                    };
-                    let previous = (operation == TraceOp::Reload).then_some(previous).flatten();
-                    let io_request = CellReadRequest::new(*manifest, u32::from(request.priority.0));
-                    match self.io.submit(io_request) {
-                        Ok(request_id) => {
-                            self.pending.insert(
-                                request_id,
-                                PendingLoad {
-                                    frame,
-                                    manifest: *manifest,
-                                    previous,
-                                    operation,
-                                    cancel_requested: false,
-                                },
-                            );
-                            self.trace.push(TraceEvent::LoadSubmitted {
-                                frame,
-                                sector: request.sector,
-                                request_id,
-                            });
-                            report.submitted += 1;
-                        }
-                        Err(error) => {
-                            self.restore_stream_state(request.sector, previous);
-                            let stage = match &error {
-                                SubmitError::Backpressure { .. } => FailureStage::Backpressure,
-                                _ => FailureStage::Provider,
-                            };
-                            self.record_failure(
-                                frame,
-                                request.sector,
-                                operation,
-                                stage,
-                                &error.to_string(),
-                            );
-                            report.failed += 1;
-                        }
-                    }
+                    self.submit_stream_request(frame, request, *manifest, false, host, &mut report);
+                }
+                StreamAction::Prefetch(request) => {
+                    let manifest = manifests
+                        .iter()
+                        .find(|manifest| manifest.sector == request.sector)
+                        .expect("stream request must refer to a validated manifest");
+                    self.submit_stream_request(frame, request, *manifest, true, host, &mut report);
                 }
                 StreamAction::Unload(sector) => {
                     if host.evict_cell(sector).is_ok() {
                         self.known_loaded.remove(&sector);
+                        let _ = self.remove_prefetch_cache(sector);
                         self.trace.push(TraceEvent::Evicted { frame, sector });
                     } else {
                         if let Some(manifest) = self.known_loaded.get(&sector).copied() {
@@ -1205,6 +1211,133 @@ impl<I: CellIo> CellFrameCoordinator<I> {
         }
     }
 
+    fn remove_prefetch_cache(&mut self, sector: SectorId) -> Option<CachedCell> {
+        let cached = self.prefetch_cache.remove(&sector)?;
+        self.prefetch_cache_bytes = self
+            .prefetch_cache_bytes
+            .saturating_sub(cached.bytes.len() as u64);
+        Some(cached)
+    }
+
+    fn retain_prefetch(&mut self, manifest: CellManifest, bytes: Vec<u8>) {
+        let size = bytes.len() as u64;
+        let _ = self.remove_prefetch_cache(manifest.sector);
+        if size == 0 || size > self.prefetch_cache_limit {
+            return;
+        }
+        while self.prefetch_cache_bytes.saturating_add(size) > self.prefetch_cache_limit {
+            let Some(sector) = self.prefetch_cache.keys().next().copied() else {
+                return;
+            };
+            let _ = self.remove_prefetch_cache(sector);
+        }
+        self.prefetch_cache_bytes = self.prefetch_cache_bytes.saturating_add(size);
+        self.prefetch_cache
+            .insert(manifest.sector, CachedCell { manifest, bytes });
+    }
+
+    fn submit_stream_request<H: SceneHost>(
+        &mut self,
+        frame: u64,
+        request: prism_world_stream::StreamRequest,
+        manifest: CellManifest,
+        prefetch: bool,
+        host: &mut H,
+        report: &mut FrameReport,
+    ) {
+        let previous_loaded = self.known_loaded.get(&request.sector).copied();
+        let revision_changed = previous_loaded.is_some_and(|old| {
+            old.scene_key != manifest.scene_key
+                || old.content_version != manifest.content_version
+                || old.derived_hash != manifest.derived_hash
+                || old.data_layers != manifest.data_layers
+        });
+        let operation = if prefetch {
+            TraceOp::Prefetch
+        } else if revision_changed {
+            TraceOp::Reload
+        } else {
+            TraceOp::Load
+        };
+        let previous = (prefetch || operation == TraceOp::Reload)
+            .then_some(previous_loaded)
+            .flatten();
+
+        if let Some(cached) = self.prefetch_cache.get(&request.sector) {
+            if cached.manifest != manifest {
+                let _ = self.remove_prefetch_cache(request.sector);
+            } else if prefetch {
+                self.stream.mark_prefetched_manifest(manifest);
+                return;
+            } else if let Some(cached) = self.remove_prefetch_cache(request.sector) {
+                match validate_header(manifest, &cached.bytes) {
+                    Ok(payload) => match host.load_cell(&manifest, payload) {
+                        Ok(()) => {
+                            self.known_loaded.insert(manifest.sector, manifest);
+                            self.stream.mark_resident_manifest(manifest);
+                            self.trace.push(TraceEvent::Loaded {
+                                frame,
+                                sector: manifest.sector,
+                            });
+                        }
+                        Err(error) => {
+                            let stage = host.load_failure_stage(&error);
+                            let message = host.load_failure_message(&error);
+                            self.retain_prefetch(cached.manifest, cached.bytes);
+                            self.restore_stream_state(request.sector, previous);
+                            self.record_failure(frame, request.sector, operation, stage, &message);
+                            report.failed += 1;
+                        }
+                    },
+                    Err(error) => {
+                        self.restore_stream_state(request.sector, previous);
+                        self.record_failure(
+                            frame,
+                            request.sector,
+                            operation,
+                            FailureStage::ManifestHeader,
+                            &error.to_string(),
+                        );
+                        report.failed += 1;
+                    }
+                }
+                return;
+            }
+        }
+
+        let io_request = CellReadRequest::new(manifest, u32::from(request.priority.0));
+        match self.io.submit(io_request) {
+            Ok(request_id) => {
+                self.pending.insert(
+                    request_id,
+                    PendingLoad {
+                        frame,
+                        manifest,
+                        previous,
+                        operation,
+                        prefetch,
+                        cancel_requested: false,
+                    },
+                );
+                self.trace.push(TraceEvent::LoadSubmitted {
+                    frame,
+                    sector: request.sector,
+                    request_id,
+                });
+                report.submitted += 1;
+            }
+            Err(error) => {
+                self.restore_stream_state(request.sector, previous);
+                let stage = match &error {
+                    SubmitError::Backpressure { .. } => FailureStage::Backpressure,
+                    _ => FailureStage::Provider,
+                };
+                self.record_failure(frame, request.sector, operation, stage, &error.to_string());
+                report.failed += 1;
+            }
+        }
+    }
+
     fn apply_completion<H: SceneHost>(&mut self, completion: IoCompletion<I::Error>, host: &mut H)
     where
         I::Error: fmt::Debug,
@@ -1232,39 +1365,62 @@ impl<I: CellIo> CellFrameCoordinator<I> {
                 }
                 let previous = pending.previous;
                 let operation = pending.operation;
-                match validate_header(pending.manifest, &bytes) {
-                    Ok(payload) => match host.load_cell(&pending.manifest, payload) {
-                        Ok(()) => {
-                            self.known_loaded
-                                .insert(pending.manifest.sector, pending.manifest);
-                            self.stream.mark_resident_manifest(pending.manifest);
-                            self.trace.push(TraceEvent::Loaded {
+                if pending.prefetch {
+                    match validate_header(pending.manifest, &bytes) {
+                        Ok(_) => {
+                            self.retain_prefetch(pending.manifest, bytes);
+                            self.stream.mark_prefetched_manifest(pending.manifest);
+                            self.trace.push(TraceEvent::Prefetched {
                                 frame: pending.frame,
                                 sector: pending.manifest.sector,
                             });
                         }
                         Err(error) => {
-                            let stage = host.load_failure_stage(&error);
-                            let message = host.load_failure_message(&error);
                             self.restore_stream_state(pending.manifest.sector, previous);
                             self.record_failure(
                                 pending.frame,
                                 pending.manifest.sector,
                                 operation,
-                                stage,
-                                &message,
+                                FailureStage::ManifestHeader,
+                                &error.to_string(),
                             );
                         }
-                    },
-                    Err(error) => {
-                        self.restore_stream_state(pending.manifest.sector, previous);
-                        self.record_failure(
-                            pending.frame,
-                            pending.manifest.sector,
-                            operation,
-                            FailureStage::ManifestHeader,
-                            &error.to_string(),
-                        );
+                    }
+                } else {
+                    match validate_header(pending.manifest, &bytes) {
+                        Ok(payload) => match host.load_cell(&pending.manifest, payload) {
+                            Ok(()) => {
+                                self.known_loaded
+                                    .insert(pending.manifest.sector, pending.manifest);
+                                self.stream.mark_resident_manifest(pending.manifest);
+                                self.trace.push(TraceEvent::Loaded {
+                                    frame: pending.frame,
+                                    sector: pending.manifest.sector,
+                                });
+                            }
+                            Err(error) => {
+                                let stage = host.load_failure_stage(&error);
+                                let message = host.load_failure_message(&error);
+                                self.restore_stream_state(pending.manifest.sector, previous);
+                                self.record_failure(
+                                    pending.frame,
+                                    pending.manifest.sector,
+                                    operation,
+                                    stage,
+                                    &message,
+                                );
+                            }
+                        },
+                        Err(error) => {
+                            self.restore_stream_state(pending.manifest.sector, previous);
+                            self.record_failure(
+                                pending.frame,
+                                pending.manifest.sector,
+                                operation,
+                                FailureStage::ManifestHeader,
+                                &error.to_string(),
+                            );
+                        }
                     }
                 }
             }
@@ -1365,6 +1521,7 @@ impl<I: CellIo> CellFrameCoordinator<I> {
             self.stream.mark_unloaded(sector);
         }
         for cell in loaded {
+            let _ = self.remove_prefetch_cache(cell.manifest.sector);
             self.known_loaded
                 .insert(cell.manifest.sector, cell.manifest);
             self.stream.mark_resident_manifest(cell.manifest);
@@ -1418,6 +1575,7 @@ fn validate_loaded_cells(loaded: &[LoadedCell]) -> Result<(), FramePlanError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::sync::Arc;
     use alloc::vec;
     use core::sync::atomic::{AtomicUsize, Ordering};
     use prism_world_stream::{AabbI64, DataLayerMask, GlobalPos};
@@ -1443,7 +1601,7 @@ mod tests {
 
     struct MemoryProvider {
         bytes: BTreeMap<SectorId, Vec<u8>>,
-        calls: AtomicUsize,
+        calls: Arc<AtomicUsize>,
     }
 
     impl CellProvider for MemoryProvider {
@@ -1497,7 +1655,7 @@ mod tests {
         WorldFrameCoordinator::new(
             MemoryProvider {
                 bytes: bytes_by_sector,
-                calls: AtomicUsize::new(0),
+                calls: Arc::new(AtomicUsize::new(0)),
             },
             capacity,
         )
@@ -1597,6 +1755,66 @@ mod tests {
     }
 
     #[test]
+    fn prefetch_validates_and_promotes_from_bounded_cache_without_scene_load() {
+        let manifest = CellManifest {
+            io_bytes: (CELL_HEADER_SIZE + b"prefetched".len()) as u64,
+            ..manifest(1, 17, 1, 9)
+        };
+        let payload = bytes(manifest, b"prefetched");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut bytes_by_sector = BTreeMap::new();
+        bytes_by_sector.insert(manifest.sector, payload);
+        let provider = MemoryProvider {
+            bytes: bytes_by_sector,
+            calls: Arc::clone(&calls),
+        };
+        let mut coordinator = CellFrameCoordinator::with_io_and_prefetch_cache(
+            IoRuntime::new(provider, 1).expect("runtime config"),
+            1024,
+        );
+        let mut host = Host::default();
+        let center = SectorId::new(0, 0, 0, 0);
+        let demand = DemandSource::new(center, 0, 2, 10)
+            .expect("demand")
+            .with_prediction(manifest.sector);
+        let budget = StreamBudget {
+            io_bytes: 64,
+            max_actions: 1,
+        };
+
+        let prefetch = coordinator
+            .try_plan_frame(&[demand], &[manifest], &[], budget, &mut host)
+            .expect("prefetch plan");
+        assert_eq!(prefetch.submitted, 1);
+        assert!(coordinator.poll_io(&mut host));
+        assert!(host.loaded.is_empty());
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert_eq!(coordinator.prefetch_cache_bytes(), manifest.io_bytes);
+        assert!(coordinator.trace().as_slice().iter().any(|event| matches!(
+            event,
+            TraceEvent::Prefetched { sector, .. } if *sector == manifest.sector
+        )));
+
+        let repeated = coordinator
+            .try_plan_frame(&[demand], &[manifest], &[], budget, &mut host)
+            .expect("cached prefetch plan");
+        assert_eq!(repeated.actions, 0);
+        assert_eq!(repeated.submitted, 0);
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+
+        let required = DemandSource::new(manifest.sector, 0, 1, 10).expect("demand");
+        let promotion = coordinator
+            .try_plan_frame(&[required], &[manifest], &[], budget, &mut host)
+            .expect("promotion plan");
+        assert_eq!(promotion.submitted, 0);
+        assert_eq!(promotion.failed, 0);
+        assert!(host.loaded.contains(&manifest.sector));
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert_eq!(coordinator.prefetch_cache_bytes(), 0);
+        assert_eq!(coordinator.in_flight(), 0);
+    }
+
+    #[test]
     fn changed_manifest_reloads_existing_cell_and_keeps_old_state_on_failure() {
         let old = manifest(0, 7, 1, 9);
         let updated = manifest(0, 7, 2, 10);
@@ -1604,7 +1822,7 @@ mod tests {
         bytes_by_sector.insert(updated.sector, bytes(updated, b"new"));
         let provider = MemoryProvider {
             bytes: bytes_by_sector,
-            calls: AtomicUsize::new(0),
+            calls: Arc::new(AtomicUsize::new(0)),
         };
         let mut coordinator = WorldFrameCoordinator::new(provider, 1).expect("runtime config");
         let mut host = Host::default();
@@ -1636,7 +1854,7 @@ mod tests {
         bytes_by_sector.insert(broken.sector, bytes(updated, b"stale-header"));
         let provider = MemoryProvider {
             bytes: bytes_by_sector,
-            calls: AtomicUsize::new(0),
+            calls: Arc::new(AtomicUsize::new(0)),
         };
         let mut failing = WorldFrameCoordinator::new(provider, 1).expect("runtime config");
         let mut failing_host = Host::default();
@@ -1689,7 +1907,7 @@ mod tests {
         bytes_by_sector.insert(expected.sector, bytes(wrong, b"opaque"));
         let provider = MemoryProvider {
             bytes: bytes_by_sector,
-            calls: AtomicUsize::new(0),
+            calls: Arc::new(AtomicUsize::new(0)),
         };
         let mut coordinator = WorldFrameCoordinator::new(provider, 1).expect("runtime config");
         let mut host = Host::default();
@@ -1726,7 +1944,7 @@ mod tests {
         let mut coordinator = WorldFrameCoordinator::new(
             MemoryProvider {
                 bytes: bytes_by_sector,
-                calls: AtomicUsize::new(0),
+                calls: Arc::new(AtomicUsize::new(0)),
             },
             1,
         )

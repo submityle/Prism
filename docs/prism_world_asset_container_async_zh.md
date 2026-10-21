@@ -33,6 +33,16 @@ let mut coordinator = CellFrameCoordinator::with_io(io);
 - poll 无终态时注册 waker；worker 完成后在锁外唤醒。adapter 不把 payload 复制到
   第二个完成队列，终态记录持有的声明字节配额直到调用方消费。
 
+## Prefetch 与 Required promotion
+
+`CellFrameCoordinator` 不再把 `StreamAction::Prefetch` 当成场景加载：它先完成
+同样的 header/checksum/route 校验，再把完整、受字节上限约束的 cell bytes 放入
+独立 bounded prefetch cache，不调用 `SceneHost::load_cell`。同一 manifest 的重复
+prefetch 在 scheduler 的 `Prefetched` 状态下不重复提交 IO；该 cell 进入 Required
+后从 cache 直接经过 header 校验并 promotion 到 `SceneHost`，随后释放缓存字节。
+缓存淘汰按确定性 sector 顺序在超出上限时发生；取消、读取失败、header 失败和
+eviction 会恢复原有 resident 状态。
+
 ## 验证
 
 ```text
@@ -41,9 +51,14 @@ cargo test --offline -p prism_world_runtime \
   --features asset_container,tasks --lib
 ```
 
-当前验证结果：定向 adapter **7 passed**；runtime `asset_container,tasks` 全部
-**143 passed**。覆盖 bounded count/bytes、waker、NamedThreads IO lane、队列取消、
-派发后取消、provider error identity 和 live priority ordering。
+此前验证结果：定向 adapter **7 passed**；runtime `asset_container,tasks` 全部
+**143 passed**。本次 Prefetch 状态改造后的默认 runtime 全部 **109 passed**，新增
+prefetch/promotion 回归 **1 passed**；`asset_container,tasks` 重跑当前被工作树中
+其他 agent 对 `prism_asset::read_for_type_async` 的未同步调用阻断（缺少新的
+`RangeAssemblyCancellation` 参数），不是本切片代码错误。新增覆盖 bounded
+count/bytes、waker、NamedThreads IO lane、队列取消、派发后取消、provider error
+identity、live priority ordering，以及 prefetch 不触发 scene load、重复 prefetch
+不重复 IO、Required promotion 复用 cache。
 
 ## 明确边界
 

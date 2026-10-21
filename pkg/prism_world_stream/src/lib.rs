@@ -555,6 +555,7 @@ pub fn validate_manifests(manifests: &[CellManifest]) -> Result<(), ManifestVali
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ResidentState {
     Loading,
+    Prefetched(CellManifest),
     Resident(Option<CellManifest>),
 }
 
@@ -562,7 +563,7 @@ impl ResidentState {
     fn is_stale(self, manifest: CellManifest) -> bool {
         matches!(
             self,
-            Self::Resident(Some(previous))
+            Self::Prefetched(previous) | Self::Resident(Some(previous))
                 if previous.content_version != manifest.content_version
                     || previous.derived_hash != manifest.derived_hash
                     || previous.scene_key != manifest.scene_key
@@ -597,6 +598,13 @@ impl StreamScheduler {
     pub fn mark_resident_manifest(&mut self, manifest: CellManifest) {
         self.resident
             .insert(manifest.sector, ResidentState::Resident(Some(manifest)));
+    }
+
+    /// Marks a validated prefetch as available without making the cell scene
+    /// resident. A later required request promotes it through the runtime host.
+    pub fn mark_prefetched_manifest(&mut self, manifest: CellManifest) {
+        self.resident
+            .insert(manifest.sector, ResidentState::Prefetched(manifest));
     }
 
     /// Marks a sector as no longer resident.
@@ -695,7 +703,13 @@ impl StreamScheduler {
         let mut candidates: Vec<StreamRequest> = requests
             .values()
             .copied()
-            .filter(|r| !self.contains(r.sector) || stale_sectors.contains(&r.sector))
+            .filter(|r| {
+                self.resident.get(&r.sector).is_none_or(|state| {
+                    stale_sectors.contains(&r.sector)
+                        || (r.kind == StreamKind::Required
+                            && matches!(state, ResidentState::Prefetched(_)))
+                })
+            })
             .collect();
         candidates.sort_by(request_order);
         let mut admitted_bytes: u64 = 0;
@@ -822,7 +836,11 @@ impl StreamScheduler {
             .values()
             .copied()
             .filter(|request| {
-                !self.contains(request.sector) || stale_sectors.contains(&request.sector)
+                self.resident.get(&request.sector).is_none_or(|state| {
+                    stale_sectors.contains(&request.sector)
+                        || (request.kind == StreamKind::Required
+                            && matches!(state, ResidentState::Prefetched(_)))
+                })
             })
             .collect();
         candidates.sort_by(request_order);
