@@ -5,7 +5,7 @@ use alloc::vec::Vec;
 use std::sync::{Arc, Mutex};
 
 use crate::component::{Component, StorageType};
-use crate::query::{Changed, With};
+use crate::query::{Changed, ColumnSliceData, QueryData, With};
 use crate::world::World;
 
 /// Table-backed value used as the slice payload.
@@ -166,6 +166,75 @@ fn mutable_slice_publishes_one_chunk_revision_per_yield_not_per_row() {
     assert_eq!(revision(&world), before + 5);
     assert_eq!(world.query::<&Value>().simd_iter::<3>(&world).count(), 4);
     assert_eq!(revision(&world), before + 5);
+}
+
+#[test]
+fn empty_column_slice_ranges_are_completely_inert() {
+    let mut world = World::new();
+    let first = world.spawn(Value(0.0));
+    let first_location = world.entities().location(first).unwrap();
+    let rows_per_chunk = world
+        .archetypes()
+        .get(first_location.archetype_id)
+        .unwrap()
+        .table()
+        .rows_per_chunk()
+        .max(1);
+    let count = rows_per_chunk * 2 + 1;
+    for index in 1..count {
+        world.spawn(Value(index as f32));
+    }
+
+    let baseline = world.change_tick();
+    world.set_last_change_tick(baseline);
+    let this_run = world.increment_change_tick();
+    let observed = Arc::new(Mutex::new(0usize));
+    let observed_copy = Arc::clone(&observed);
+    world.observe_changed::<Value, _>(move |_| {
+        *observed_copy.lock().unwrap() += 1;
+    });
+
+    let component = world.components().id_of::<Value>().unwrap();
+    let state = <&mut Value as QueryData>::init_state(world.components_mut());
+    let archetype = world.archetypes().get(first_location.archetype_id).unwrap();
+    let table = archetype.table();
+    let revisions_before: Vec<_> = (0..table.chunk_count())
+        .map(|chunk| table.column(component).unwrap().chunk_revision(chunk))
+        .collect();
+    let ticks_before: Vec<_> = table
+        .entities()
+        .iter()
+        .map(|&entity| world.get_ticks::<Value>(entity).unwrap())
+        .collect();
+
+    for (start, end) in [(0, 0), (rows_per_chunk, rows_per_chunk), (count, count)] {
+        let changes = world.change_tracker.column_slice_changes();
+        // SAFETY: each range is empty and lies within the matched table.
+        let slice = unsafe {
+            <&mut Value as ColumnSliceData>::column_slice(
+                &state, archetype, start, end, changes, this_run,
+            )
+        };
+        assert!(slice.is_empty());
+    }
+
+    let revisions_after: Vec<_> = (0..table.chunk_count())
+        .map(|chunk| table.column(component).unwrap().chunk_revision(chunk))
+        .collect();
+    let ticks_after: Vec<_> = table
+        .entities()
+        .iter()
+        .map(|&entity| world.get_ticks::<Value>(entity).unwrap())
+        .collect();
+    assert_eq!(revisions_after, revisions_before);
+    assert_eq!(ticks_after, ticks_before);
+    let changed = world
+        .query_filtered::<crate::entity::Entity, Changed<Value>>()
+        .iter_with_ticks(&world, baseline, this_run)
+        .count();
+    assert_eq!(changed, 0);
+    assert_eq!(world.flush_changed_observers(), 0);
+    assert_eq!(*observed.lock().unwrap(), 0);
 }
 
 #[test]

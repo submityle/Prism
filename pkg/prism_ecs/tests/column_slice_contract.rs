@@ -21,6 +21,12 @@ struct Write {
 #[derive(Component)]
 struct Marker;
 
+#[derive(Component)]
+struct Write2 {
+    value: u32,
+    _padding: [u64; 256],
+}
+
 type Tuple = (Entity, &'static Read, &'static mut Write);
 
 /// An external query term with exactly the built-in tuple's access and layout.
@@ -354,6 +360,49 @@ fn sequential_tuple_panic_reports_the_entire_yielded_slice_before_any_retry() {
     assert_eq!(handed_out.len(), 3);
     assert_values(&world, &entities, modified);
     assert_barriers(&mut world, last, this, &handed_out);
+}
+
+#[test]
+fn two_mutable_columns_preserve_entity_and_payload_alignment() {
+    let mut world = World::new();
+    let entities: Vec<_> = (0..17)
+        .map(|index| {
+            world.spawn((
+                Write {
+                    value: index,
+                    _padding: [0; 256],
+                },
+                Write2 {
+                    value: index + 1000,
+                    _padding: [0; 256],
+                },
+            ))
+        })
+        .collect();
+    let last = world.change_tick();
+    world.set_last_change_tick(last);
+    let this = world.increment_change_tick();
+    let query = world.query::<(Entity, &'static mut Write, &'static mut Write2)>();
+    let mut handed_out = Vec::new();
+    for (ids, writes, writes2) in query.simd_iter_mut::<3>(&mut world) {
+        assert_eq!(ids.len(), writes.len());
+        assert_eq!(ids.len(), writes2.len());
+        for ((&entity, write), write2) in ids.iter().zip(writes.iter()).zip(writes2.iter()) {
+            let ordinal = entities
+                .iter()
+                .position(|&candidate| candidate == entity)
+                .unwrap();
+            assert_eq!(write.value, ordinal as u32);
+            assert_eq!(write2.value, ordinal as u32 + 1000);
+        }
+        handed_out.extend_from_slice(ids);
+    }
+    assert_eq!(ordered(handed_out), ordered(entities.clone()));
+    assert_eq!(
+        changed::<Write>(&mut world, last, this),
+        ordered(entities.clone())
+    );
+    assert_eq!(changed::<Write2>(&mut world, last, this), ordered(entities));
 }
 
 #[cfg(feature = "multi_thread")]

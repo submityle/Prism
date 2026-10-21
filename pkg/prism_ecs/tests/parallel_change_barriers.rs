@@ -471,6 +471,63 @@ fn parallel_chunk_panic_reports_stamped_slices_and_recovers() {
 }
 
 #[test]
+fn one_multi_chunk_task_does_not_stamp_chunks_after_a_callback_panic() {
+    let mut world = World::new();
+    let mut entities = Vec::new();
+    let first = world.spawn(TableValue {
+        ordinal: 0,
+        value: 0,
+        _padding: [0; 256],
+    });
+    entities.push(first);
+    let location = world.entities().location(first).unwrap();
+    let rows_per_chunk = world
+        .archetypes()
+        .get(location.archetype_id)
+        .unwrap()
+        .table()
+        .rows_per_chunk()
+        .max(1);
+    let count = rows_per_chunk * 3;
+    for ordinal in 1..count {
+        entities.push(world.spawn(TableValue {
+            ordinal,
+            value: ordinal as u32,
+            _padding: [0; 256],
+        }));
+    }
+    let query = world.query::<&TableValue>();
+    let baseline = world.change_tick();
+    let _ = query.dirty_chunks_with_stats(&world, baseline, baseline);
+    let (last, this) = advance(&mut world);
+    let pool = TaskPool::with_threads(4);
+    let panic_ordinal = rows_per_chunk;
+
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let state = world.query::<&mut TableValue>();
+        state.par_chunks_mut(&mut world, &pool, rows_per_chunk * 3, |slice| {
+            assert!(slice.len() <= rows_per_chunk);
+            for value in slice {
+                if value.ordinal == panic_ordinal {
+                    panic!("panic before the later physical chunk is yielded");
+                }
+                value.value += 1;
+            }
+        });
+    }));
+    assert!(result.is_err());
+
+    let changed_entities = changed::<TableValue>(&mut world, last, this);
+    let expected: Vec<_> = (0..rows_per_chunk * 2)
+        .map(|ordinal| entities[ordinal])
+        .collect();
+    assert_eq!(changed_entities, expected);
+    let dirty = query.dirty_chunks(&world, last, this);
+    assert_eq!(dirty.len(), 2);
+    assert!(dirty.iter().all(|window| window.start < rows_per_chunk * 2));
+}
+
+#[test]
 fn public_tick_wrap_window_reaches_changed_and_dirty_chunk_oracles() {
     let (mut world, entities) = seed(6);
     let query = world.query::<&mut TableValue>();
