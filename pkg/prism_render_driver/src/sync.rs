@@ -577,18 +577,27 @@ pub fn merge_read_buffer_states(a: BufferState, b: BufferState) -> Option<Buffer
     })
 }
 
-/// Merges two *read-only* texture states that share a layout and queue into
-/// their union. Returns `None` if either writes, their layouts differ, or they
-/// run on different queues — any of which forces a real transition.
+/// Merges two *read-only* texture states on the same queue into their union.
+/// Layouts must match, except sampled shader reads and read-only depth/stencil
+/// attachment reads can share `DepthStencilReadOnly`. Returns `None` for writes,
+/// different queues, or unrelated incompatible layouts.
 #[must_use]
 pub fn merge_read_texture_states(a: TextureState, b: TextureState) -> Option<TextureState> {
-    if a.is_write() || b.is_write() || a.layout != b.layout || (a.queue as u8) != (b.queue as u8) {
+    if a.is_write() || b.is_write() || (a.queue as u8) != (b.queue as u8) {
         return None;
     }
+    let layout = match (a.layout, b.layout) {
+        (left, right) if left == right => left,
+        (TextureLayout::ShaderReadOnly, TextureLayout::DepthStencilReadOnly)
+        | (TextureLayout::DepthStencilReadOnly, TextureLayout::ShaderReadOnly) => {
+            TextureLayout::DepthStencilReadOnly
+        }
+        _ => return None,
+    };
     Some(TextureState {
         stages: a.stages.union(b.stages),
         accesses: a.accesses.union(b.accesses),
-        layout: a.layout,
+        layout,
         queue: a.queue,
     })
 }
@@ -661,12 +670,67 @@ mod tests {
     }
 
     #[test]
-    fn merge_texture_reads_requires_same_layout() {
+    fn merge_texture_reads_with_same_layout() {
         let a = TextureState::shader_read(PipelineStages::VERTEX_SHADER);
         let b = TextureState::shader_read(PipelineStages::FRAGMENT_SHADER);
-        assert!(merge_read_texture_states(a, b).is_some());
-        // Different layout -> no merge.
-        assert!(merge_read_texture_states(a, TextureState::depth_read()).is_none());
+        assert_eq!(
+            merge_read_texture_states(a, b),
+            Some(TextureState {
+                stages: a.stages.union(b.stages),
+                ..a
+            })
+        );
+    }
+
+    #[test]
+    fn merge_sampled_and_read_only_depth_in_both_orders() {
+        let sampled = TextureState::shader_read(PipelineStages::FRAGMENT_SHADER);
+        let depth = TextureState::depth_read();
+        let expected = TextureState {
+            stages: sampled.stages.union(depth.stages),
+            accesses: Accesses::SHADER_READ.union(Accesses::DEPTH_STENCIL_READ),
+            layout: TextureLayout::DepthStencilReadOnly,
+            queue: QueueKind::Graphics,
+        };
+        for (a, b) in [(sampled, depth), (depth, sampled)] {
+            assert_eq!(merge_read_texture_states(a, b), Some(expected));
+        }
+    }
+
+    #[test]
+    fn merge_texture_reads_rejects_writes_queue_mismatch_and_incompatible_layouts() {
+        let sampled = TextureState::shader_read(PipelineStages::FRAGMENT_SHADER);
+        let depth = TextureState::depth_read();
+        for (a, b) in [
+            (sampled, TextureState::depth_write()),
+            (
+                sampled,
+                TextureState::storage_write(PipelineStages::FRAGMENT_SHADER),
+            ),
+            // Even the compatible layout pair must reject a write access.
+            (
+                sampled,
+                TextureState {
+                    accesses: depth.accesses.union(Accesses::DEPTH_STENCIL_WRITE),
+                    ..depth
+                },
+            ),
+            (sampled, depth.on_queue(QueueKind::Compute)),
+            (sampled, sampled.on_queue(QueueKind::Compute)),
+            (sampled, TextureState::copy_src()),
+            (depth, TextureState::copy_src()),
+            (
+                depth,
+                TextureState::new(
+                    PipelineStages::FRAGMENT_SHADER,
+                    Accesses::SHADER_READ,
+                    TextureLayout::General,
+                ),
+            ),
+        ] {
+            assert_eq!(merge_read_texture_states(a, b), None);
+            assert_eq!(merge_read_texture_states(b, a), None);
+        }
     }
 
     #[test]
