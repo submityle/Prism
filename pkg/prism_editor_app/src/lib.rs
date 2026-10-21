@@ -53,6 +53,7 @@ mod scene_mesh;
 mod scene_project;
 #[cfg(feature = "desktop")]
 mod scene_session;
+mod world_session;
 
 pub use controller::{
     ControllerError, ControllerFieldEdit, ControllerLimits, ControllerOutcome, EditorController,
@@ -104,6 +105,10 @@ pub use scene_mesh::{editor_scene_mesh_catalog, editor_scene_mesh_registry, Edit
 pub use scene_project::{SceneProject, SceneProjectConfig, SceneProjectError, SceneProjectOpen};
 #[cfg(feature = "desktop")]
 pub use scene_session::{EditorSceneSession, EditorSceneSyncWork};
+pub use world_session::{
+    WorldProjectSession, WorldProjectSessionFailure, WorldProjectSessionLimits,
+    WorldProjectSessionWork, MAX_WORLD_SESSION_WORK_PER_POLL,
+};
 
 impl Resource for EditorApplication {}
 
