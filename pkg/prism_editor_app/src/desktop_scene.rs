@@ -423,6 +423,25 @@ impl DesktopScene {
         let candidate = adapter.build(controller)?;
         validate_matrix(&candidate.camera)?;
         validate_objects(&candidate.objects)?;
+        for object in &candidate.objects {
+            // Reject identity drift before publication; a late pick must not be
+            // the first place that discovers a scene/document mismatch.
+            controller
+                .history_lengths(&object.selection)
+                .map_err(renderer_error)?;
+            if let Some(node) = object.outliner {
+                let matches = controller
+                    .outliner()
+                    .node(node)
+                    .and_then(|row| row.selection())
+                    == Some(&object.selection);
+                if !matches {
+                    return Err(message(
+                        "scene object Outliner identity does not match its document selection",
+                    ));
+                }
+            }
+        }
         self.scene
             .generation()
             .checked_add(1)
@@ -1611,7 +1630,7 @@ mod tests {
             }),
         })
         .expect("adapter scene");
-        let controller = EditorController::new();
+        let controller = controller(&[object.clone()]);
 
         DesktopRenderer::prepare_document(&mut scene, &controller).expect("stage candidate");
         assert!(
@@ -1641,6 +1660,44 @@ mod tests {
         assert!(DesktopRenderer::prepare_document(&mut scene, &controller).is_err());
         assert!(scene.objects().is_empty());
         DesktopRenderer::discard_document(&mut scene);
+        assert!(scene.objects().is_empty());
+    }
+
+    #[test]
+    fn document_adapter_rejects_unbound_selection_before_publication() {
+        let object = objects().pop().expect("test object");
+        let mut scene = DesktopScene::new_with_document_adapter(StaticSceneAdapter {
+            document: Some(DesktopSceneDocument {
+                objects: vec![object],
+                camera: SCENE_ID_IDENTITY_MATRIX,
+                depth: SceneIdDepth::Forward,
+            }),
+        })
+        .expect("adapter scene");
+
+        assert!(DesktopRenderer::prepare_document(&mut scene, &EditorController::new()).is_err());
+        assert!(scene.objects().is_empty());
+    }
+
+    #[test]
+    fn document_adapter_rejects_mismatched_outliner_before_publication() {
+        let mut object = objects().pop().expect("test object");
+        let mapped = object.selection.clone();
+        object.outliner = Some(OutlinerId::from_raw(999));
+        let mut scene = DesktopScene::new_with_document_adapter(StaticSceneAdapter {
+            document: Some(DesktopSceneDocument {
+                objects: vec![object],
+                camera: SCENE_ID_IDENTITY_MATRIX,
+                depth: SceneIdDepth::Forward,
+            }),
+        })
+        .expect("adapter scene");
+        let mut controller = EditorController::new();
+        controller
+            .register_object(mapped, Box::new(1u32), TypeRegistry::new())
+            .expect("register object");
+
+        assert!(DesktopRenderer::prepare_document(&mut scene, &controller).is_err());
         assert!(scene.objects().is_empty());
     }
 
