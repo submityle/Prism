@@ -423,3 +423,18 @@ Clippy `-D warnings` 通过（依赖 render graph 的既有 unused-import warnin
 验证：`CARGO_TARGET_DIR=/private/tmp/prism-world-physics-bridge-sphere-batch-target-20261021 cargo test -p prism_world_physics_bridge --lib --offline`，23 passed；`rustfmt --edition 2024` 与指定文件 `git diff --check` 通过。首次编译发现并修复新模块对未声明 `alloc` crate 的误用。依赖 `prism_physics_core` 当前在此工作树会产生既有 lint 警告；bridge 新增字段缺文档告警已补齐，本条测试结果不代表严格 Clippy 通过。
 
 本适配器只支持球心位于刚体原点的球体，且 core 暴露的 mass properties 无法区分“静态”与其他零逆质量 body，调用方须传入正确的静态 SDF body。它证明批量 SDF narrow-phase manifold 能经已有 XPBD contact-generator hook 推动动态球体；尚未接入 ECS 自动注册、broad phase、一般 collider shape、持久接触/摩擦、生产 tick/clipmap 调度，也未覆盖 GPU physics。这是 M7 的一段 CPU 消费链路，不等于 M7 多消费者或 World 系统整体完成。
+
+## 2026-10-21 runtime 与 GPU feature 回归复验
+
+在 HEAD `de3139e3badd` 及当前共享工作树状态下，使用 `CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0`
+降低临时构建产物体积，离线重跑：
+
+| 命令 | 结果 | 证据边界 |
+|---|---:|---|
+| `CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 cargo test -p prism_world_runtime --lib --offline` | 183 passed | runtime lib 测试；非 workspace 全量验证 |
+| `CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 cargo test -p prism_world_gpu --features gpu --lib --offline` | 123 passed | GPU feature 编译与 lib 测试；不代表本轮实卡 shader 运行 |
+
+此前报告的 `LayeredCellManifest` 缺少 `admitted_layers` 在当前源码中不可复现：
+`pkg/prism_world_runtime/src/data_layers.rs` 暴露 `layers()`，相关 runtime/GPU 路径没有
+`admitted_layers` 引用，且本次两条测试均成功编译并通过。该复验没有修改 World runtime/GPU 源文件；
+结果适用于本次共享工作树快照，不构成干净 checkout 或 GPU 硬件验收。
