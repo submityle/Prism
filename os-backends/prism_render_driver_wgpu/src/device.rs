@@ -660,6 +660,26 @@ impl WgpuDevice {
         self.inner.release_texture_view(id);
     }
 
+    /// Registers the exact host render pipeline without creating a shader,
+    /// layout or replacement pipeline. The provenance, table-local ID and
+    /// lifetime obligations of [`Self::register_buffer`] apply. Each import
+    /// owns an independent entry; native validation still checks compatibility
+    /// with the render attachments, vertex bindings and pipeline layout.
+    #[must_use = "release the registration when its table-local ID is no longer used"]
+    pub fn register_render_pipeline(
+        &self,
+        pipeline: &wgpu::RenderPipeline,
+    ) -> rhi::RenderPipelineId {
+        convert::convert_id(lock(&self.inner.render_pipelines).insert(pipeline.clone()))
+    }
+
+    /// Releases only this render-pipeline registration, not host clones or
+    /// already encoded work. The stale-ID and completion contract of
+    /// [`Self::release_buffer`] applies; release is not GPU retirement.
+    pub fn release_render_pipeline(&self, id: rhi::RenderPipelineId) {
+        lock(&self.inner.render_pipelines).remove(convert::convert_id(id));
+    }
+
     /// Registers the exact host compute pipeline, without creating a shader,
     /// pipeline layout or replacement pipeline. The same-device, table-local
     /// ID and lifetime obligations of [`Self::register_buffer`] apply. Pipeline
@@ -1637,6 +1657,9 @@ mod tests {
         let _: fn(&WgpuDevice, &wgpu::TextureView) -> rhi::TextureViewId =
             WgpuDevice::register_texture_view;
         let _: fn(&WgpuDevice, rhi::TextureViewId) = WgpuDevice::release_texture_view;
+        let _: fn(&WgpuDevice, &wgpu::RenderPipeline) -> rhi::RenderPipelineId =
+            WgpuDevice::register_render_pipeline;
+        let _: fn(&WgpuDevice, rhi::RenderPipelineId) = WgpuDevice::release_render_pipeline;
         let _: fn(&WgpuDevice, &wgpu::ComputePipeline) -> rhi::ComputePipelineId =
             WgpuDevice::register_compute_pipeline;
         let _: fn(&WgpuDevice, rhi::ComputePipelineId) = WgpuDevice::release_compute_pipeline;

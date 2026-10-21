@@ -24,7 +24,7 @@ use std::sync::Arc;
 
 use bevy_ecs::{resource::Resource, world::World};
 use bevy_render::{
-    render_resource::{BindGroup, Buffer, ComputePipeline, Texture, TextureView},
+    render_resource::{BindGroup, Buffer, ComputePipeline, RenderPipeline, Texture, TextureView},
     renderer::{RenderAdapter, RenderDevice, RenderQueue},
 };
 use prism_render_driver::{self as rhi, RenderDevice as _};
@@ -144,6 +144,23 @@ impl SceneRhi {
             device: Arc::clone(&self.device),
             id,
             view: view.clone(),
+        }
+    }
+
+    /// Registers the exact Bevy render pipeline without recompilation or layout
+    /// reconstruction. The provenance and table-local lifetime obligations of
+    /// [`Self::import_buffer`] apply. Attachments, vertex formats and bind-group
+    /// compatibility remain subject to the original device's validation.
+    #[must_use]
+    pub fn import_render_pipeline(
+        &self,
+        pipeline: &RenderPipeline,
+    ) -> SceneRhiImportedRenderPipeline {
+        let id = self.device.register_render_pipeline(pipeline.deref());
+        SceneRhiImportedRenderPipeline {
+            device: Arc::clone(&self.device),
+            id,
+            pipeline: pipeline.clone(),
         }
     }
 
@@ -267,6 +284,44 @@ impl SceneRhiImportedBuffer {
 impl Drop for SceneRhiImportedBuffer {
     fn drop(&mut self) {
         self.device.release_buffer(self.id);
+    }
+}
+
+/// Move-only registration of an exact host render pipeline. The lease retains
+/// its original device/table through replacement; native handle clones alone
+/// do not retain the table entry. Drop releases only this registration, never
+/// submits, waits or proves completion. Retain through the last ID lookup and
+/// keep reusable frame resources until actual host-confirmed GPU completion.
+#[must_use = "retain the lease while its RHI pipeline ID is needed"]
+pub struct SceneRhiImportedRenderPipeline {
+    device: Arc<WgpuDevice>,
+    id: rhi::RenderPipelineId,
+    pipeline: RenderPipeline,
+}
+
+impl SceneRhiImportedRenderPipeline {
+    /// ID local to this lease's original table, not Bevy's RenderPipelineId.
+    #[must_use]
+    pub fn id(&self) -> rhi::RenderPipelineId {
+        self.id
+    }
+
+    /// Original table retained independently of the current SceneRhi resource.
+    #[must_use]
+    pub fn device(&self) -> &Arc<WgpuDevice> {
+        &self.device
+    }
+
+    /// Exact Bevy handle; cloning it does not retain the table registration.
+    #[must_use]
+    pub fn pipeline(&self) -> &RenderPipeline {
+        &self.pipeline
+    }
+}
+
+impl Drop for SceneRhiImportedRenderPipeline {
+    fn drop(&mut self) {
+        self.device.release_render_pipeline(self.id);
     }
 }
 
@@ -574,8 +629,147 @@ mod tests {
         send_sync::<SceneRhiImportedBuffer>();
         send_sync::<SceneRhiTexture>();
         send_sync::<SceneRhiTextureView>();
+        send_sync::<SceneRhiImportedRenderPipeline>();
         send_sync::<SceneRhiImportedComputePipeline>();
         send_sync::<SceneRhiImportedBindGroup>();
+    }
+
+    #[test]
+    fn imported_render_pipeline_preserves_identity_generations_and_native_drawing() {
+        let Some(host) = host_or_skip() else { return };
+        let bridge = host.bridge();
+        let native = host.device.wgpu_device();
+        let shader = native.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("scene-rhi-imported-render-shader"),
+            source: wgpu::ShaderSource::Wgsl(
+                "@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+                     let p = array<vec2f, 3>(vec2f(-1., -1.), vec2f(3., -1.), vec2f(-1., 3.));
+                     return vec4f(p[i], 0., 1.);
+                 }
+                 @fragment fn fs() -> @location(0) vec4f { return vec4f(0., 1., 0., 1.); }"
+                    .into(),
+            ),
+        });
+        let pipeline = native.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("scene-rhi-imported-render-pipeline"),
+            layout: None,
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            primitive: Default::default(),
+            depth_stencil: None,
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        let bevy_pipeline = RenderPipeline::from(pipeline.clone());
+        let imported = bridge.import_render_pipeline(&bevy_pipeline);
+        let duplicate = bridge.import_render_pipeline(&bevy_pipeline);
+        let device = Arc::clone(imported.device());
+        let old = imported.id();
+        assert_eq!(imported.pipeline().id(), bevy_pipeline.id());
+        assert_eq!(device.wgpu_render_pipeline(old), pipeline);
+        assert_ne!(old, duplicate.id());
+        drop(imported);
+        assert!(catch_unwind(AssertUnwindSafe(|| device.wgpu_render_pipeline(old))).is_err());
+        let replacement = bridge.import_render_pipeline(&bevy_pipeline);
+        assert_eq!(old.index(), replacement.id().index());
+        assert_ne!(old, replacement.id());
+        device.release_render_pipeline(old);
+        assert_eq!(device.wgpu_render_pipeline(replacement.id()), pipeline);
+        assert_eq!(device.wgpu_render_pipeline(duplicate.id()), pipeline);
+
+        let texture = native.create_texture(&wgpu::TextureDescriptor {
+            label: Some("scene-rhi-imported-render-target"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&Default::default());
+        let staging = native.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("scene-rhi-imported-render-readback"),
+            size: 256,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = native.create_command_encoder(&Default::default());
+        {
+            let table_pipeline = device.wgpu_render_pipeline(replacement.id());
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::RED),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                ..Default::default()
+            });
+            pass.set_pipeline(&table_pipeline);
+            pass.draw(0..3, 0..1);
+        }
+        let released = replacement.id();
+        drop((replacement, duplicate, bridge));
+        assert!(catch_unwind(AssertUnwindSafe(|| device.wgpu_render_pipeline(released))).is_err());
+        // Both an already encoded draw and the original native pipeline remain
+        // valid after table retirement. Neither requires a second compilation.
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                ..Default::default()
+            });
+            pass.set_pipeline(&pipeline);
+            pass.draw(0..3, 0..1);
+        }
+        encoder.copy_texture_to_buffer(
+            texture.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &staging,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(256),
+                    rows_per_image: Some(1),
+                },
+            },
+            wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+        );
+        host.queue.submit([encoder.finish()]);
+        assert_eq!(&mapped_bytes(&host, &staging)[..4], &[0, 255, 0, 255]);
     }
 
     #[test]
