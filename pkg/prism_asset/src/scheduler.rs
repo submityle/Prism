@@ -13,8 +13,9 @@
 //! before one atomic commit. Loader ranges use bounded batches on the existing
 //! I/O pool, concatenated in declaration order; preemptive cancellation is outside this slice. Live priority cells order queued I/O and CPU work,
 //! including wakeups and dependencies; ticket
-//! cancellation stops that caller from waiting. Ordinary shared loads continue;
-//! reload cancellation also prevents publication of its staged revision.
+//! cancellation stops that caller from waiting. Ordinary shared loads continue
+//! while another consumer remains; the last consumer cancels at stage boundaries.
+//! Reload cancellation also prevents publication of its staged revision.
 
 use crate::loader_exec::{AssetLoaders, FullLoadOutput};
 use crate::server::{
@@ -22,12 +23,15 @@ use crate::server::{
     AsyncReloadPlan, SoftLoadError,
 };
 use crate::source::AssetSources;
+use crate::streaming::RangeAssemblyCancellation;
 use crate::{Asset, AssetPath, AssetServer, AssetTypeId, SoftHandle, UntypedHandle};
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::sync::{Arc, Weak};
+use alloc::vec::Vec;
 use core::future::Future;
 use core::pin::Pin;
+use core::sync::atomic::{AtomicBool, Ordering};
 use core::task::{Context, Poll, Waker};
 use prism_tasks::{Priority, PriorityCell, TaskPool};
 use std::sync::Mutex;
@@ -102,6 +106,13 @@ pub enum SoftBatchError {
         /// Resolved root path.
         path: AssetPath,
     },
+    /// A previous request is cancelled and still draining owned work.
+    Cancelling {
+        /// First input referring to the draining request.
+        index: usize,
+        /// Resolved root path. Retry after its worker has finished cleanup.
+        path: AssetPath,
+    },
     /// All new roots cannot fit; duplicates do not consume new slots.
     AtCapacity {
         /// New execution slots required by the batch.
@@ -129,6 +140,12 @@ impl core::fmt::Display for SoftBatchError {
                 f,
                 "soft batch reference {index} conflicts with in-flight type: {path}"
             ),
+            Self::Cancelling { index, path } => {
+                write!(
+                    f,
+                    "soft batch reference {index} is still cancelling: {path}"
+                )
+            }
             Self::AtCapacity {
                 required,
                 available,
@@ -224,6 +241,11 @@ pub enum LoadFailure {
 /// A root request could not be admitted to the bounded scheduler.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ScheduleError {
+    /// A cancelled same-path worker must finish cleanup before retry.
+    Cancelling {
+        /// Path of the draining request.
+        path: AssetPath,
+    },
     /// The configured maximum number of unique requests is already in flight.
     AtCapacity {
         /// Maximum number of concurrently executing assembly flights.
@@ -241,6 +263,7 @@ pub enum ScheduleError {
 impl core::fmt::Display for ScheduleError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::Cancelling { path } => write!(f, "asset load is still cancelling: {path}"),
             Self::AtCapacity { limit } => {
                 write!(f, "asset load scheduler is at capacity ({limit})")
             }
@@ -258,6 +281,88 @@ struct Flight {
     notification: Mutex<FlightNotification>,
     priority: FlightPriority,
     requested_type: Option<AssetTypeId>,
+    cancellation: RangeAssemblyCancellation,
+    lifecycle: Mutex<FlightLifecycle>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FlightPhase {
+    Active,
+    Cancelling,
+    Committing,
+    Finished,
+}
+
+struct FlightLifecycle {
+    consumers: usize,
+    phase: FlightPhase,
+    worker_waker: Option<Waker>,
+}
+
+impl Default for FlightLifecycle {
+    fn default() -> Self {
+        Self {
+            consumers: 0,
+            phase: FlightPhase::Active,
+            worker_waker: None,
+        }
+    }
+}
+
+// The scheduler and the instrumented concurrency tests use these exact
+// transitions. Callers hold the lifecycle mutex and dispose of returned
+// wakers only after unlocking; arbitrary Wake/Drop code must not reenter it.
+impl FlightLifecycle {
+    fn accepts_consumer(&self) -> bool {
+        self.phase != FlightPhase::Cancelling
+    }
+
+    fn attach_consumer(&mut self) -> bool {
+        if !self.accepts_consumer() {
+            return false;
+        }
+        self.consumers += 1;
+        true
+    }
+
+    fn detach_consumer(&mut self) -> (bool, Option<Waker>) {
+        assert!(self.consumers > 0, "flight consumer count underflow");
+        self.consumers -= 1;
+        if self.consumers == 0 && self.phase == FlightPhase::Active {
+            self.phase = FlightPhase::Cancelling;
+            (true, self.worker_waker.take())
+        } else {
+            (false, None)
+        }
+    }
+
+    fn register_worker(&mut self, candidate: Waker) -> (bool, Option<Waker>) {
+        if self.phase == FlightPhase::Cancelling {
+            return (true, Some(candidate));
+        }
+        if self
+            .worker_waker
+            .as_ref()
+            .is_some_and(|old| old.will_wake(&candidate))
+        {
+            (false, Some(candidate))
+        } else {
+            (false, self.worker_waker.replace(candidate))
+        }
+    }
+
+    fn begin_commit(&mut self) -> bool {
+        if self.phase != FlightPhase::Active {
+            return false;
+        }
+        self.phase = FlightPhase::Committing;
+        true
+    }
+
+    fn finish(&mut self) -> Option<Waker> {
+        self.phase = FlightPhase::Finished;
+        self.worker_waker.take()
+    }
 }
 
 struct FlightNotification {
@@ -266,14 +371,65 @@ struct FlightNotification {
 }
 
 impl Flight {
+    fn attach_consumer(&self) -> bool {
+        self.lifecycle
+            .lock()
+            .expect("flight lifecycle poisoned")
+            .attach_consumer()
+    }
+
+    fn detach_consumer(&self) {
+        let wake = {
+            let mut lifecycle = self.lifecycle.lock().expect("flight lifecycle poisoned");
+            let (cancel, wake) = lifecycle.detach_consumer();
+            if cancel {
+                self.cancellation.cancel();
+            }
+            wake
+        };
+        if let Some(waker) = wake {
+            waker.wake();
+        }
+    }
+
+    /// Register under the same lock as last-consumer cancellation. There is
+    /// one assembly worker per flight; range reads retain their drain behavior.
+    fn poll_cancelled(&self, cx: &Context<'_>) -> bool {
+        let candidate = cx.waker().clone();
+        let (cancelled, retired) = self
+            .lifecycle
+            .lock()
+            .expect("flight lifecycle poisoned")
+            .register_worker(candidate);
+        drop(retired);
+        cancelled
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancellation.is_cancelled()
+    }
+
+    /// Linearize publication against the last consumer leaving. No server call
+    /// or user payload destruction may run while this mutex is held. Once the
+    /// transition wins, detaching consumers cannot abandon a partial commit.
+    fn begin_commit(&self) -> bool {
+        self.lifecycle
+            .lock()
+            .expect("flight lifecycle poisoned")
+            .begin_commit()
+    }
+
     /// Publish the result while the scheduler state lock is held, then return
     /// registered wakers for notification after that lock has been released.
     fn complete(&self, result: ScheduleOutcome) -> Vec<Waker> {
+        let mut lifecycle = self.lifecycle.lock().expect("flight lifecycle poisoned");
+        let worker = lifecycle.finish();
         let mut notification = self.notification.lock().expect("load flight poisoned");
         notification.result = Some(result);
         core::mem::take(&mut notification.waiters)
             .into_iter()
             .map(|(_, waker)| waker)
+            .chain(worker)
             .collect()
     }
 
@@ -284,6 +440,10 @@ impl Flight {
     }
 
     fn poll(&self, token: &Arc<()>, cx: &Context<'_>) -> Poll<ScheduleOutcome> {
+        // RawWaker clone/drop may execute arbitrary code. Retain unused and
+        // replaced wakers outside the guard, including the ready fast path.
+        let mut candidate = Some(cx.waker().clone());
+        let mut retired = None;
         let mut notification = self.notification.lock().expect("load flight poisoned");
         if let Some(result) = notification.result.clone() {
             return Poll::Ready(result);
@@ -294,26 +454,29 @@ impl Flight {
             .find(|(waiter, _)| Arc::ptr_eq(waiter, token))
         {
             if !waker.will_wake(cx.waker()) {
-                *waker = cx.waker().clone();
+                retired = Some(core::mem::replace(waker, candidate.take().unwrap()));
             }
         } else {
             notification
                 .waiters
-                .push((Arc::clone(token), cx.waker().clone()));
+                .push((Arc::clone(token), candidate.take().unwrap()));
         }
-        // Recheck after registering to close completion-vs-registration race.
-        if let Some(result) = notification.result.clone() {
-            Poll::Ready(result)
-        } else {
-            Poll::Pending
-        }
+        // Completion uses this same mutex, so registration cannot miss it.
+        drop(notification);
+        drop(retired);
+        Poll::Pending
     }
 
     fn unregister(&self, token: &Arc<()>) {
-        let mut notification = self.notification.lock().expect("load flight poisoned");
-        notification
-            .waiters
-            .retain(|(waiter, _)| !Arc::ptr_eq(waiter, token));
+        let retired = {
+            let mut notification = self.notification.lock().expect("load flight poisoned");
+            let index = notification
+                .waiters
+                .iter()
+                .position(|(waiter, _)| Arc::ptr_eq(waiter, token));
+            index.map(|index| notification.waiters.remove(index))
+        };
+        drop(retired);
     }
 
     #[cfg(test)]
@@ -375,14 +538,15 @@ impl SchedulerState {
 
 struct ReloadRequest {
     plan: Result<AsyncReloadPlan, LoadFailure>,
-    cancellation: Arc<Mutex<Cancellation>>,
 }
 
 struct AdmissionWaiter {
     token: Arc<()>,
     priority: FlightPriority,
     seq: u64,
-    waker: Waker,
+    // Grant transfers the notification out; it never clones user code while
+    // holding the scheduler mutex. The granted reservation remains in place.
+    waker: Option<Waker>,
     granted: bool,
 }
 
@@ -446,6 +610,8 @@ impl ReloadReadFlight {
     }
 
     fn poll(&self, token: &Arc<()>, cx: &Context<'_>) -> Poll<Result<Arc<[u8]>, String>> {
+        let mut candidate = Some(cx.waker().clone());
+        let mut retired = None;
         let mut notification = self
             .notification
             .lock()
@@ -459,28 +625,31 @@ impl ReloadReadFlight {
             .find(|(waiter, _)| Arc::ptr_eq(waiter, token))
         {
             if !waker.will_wake(cx.waker()) {
-                *waker = cx.waker().clone();
+                retired = Some(core::mem::replace(waker, candidate.take().unwrap()));
             }
         } else {
             notification
                 .waiters
-                .push((Arc::clone(token), cx.waker().clone()));
+                .push((Arc::clone(token), candidate.take().unwrap()));
         }
-        if let Some(result) = notification.result.clone() {
-            Poll::Ready(result)
-        } else {
-            Poll::Pending
-        }
+        drop(notification);
+        drop(retired);
+        Poll::Pending
     }
 
     fn unregister(&self, token: &Arc<()>) {
-        let mut notification = self
-            .notification
-            .lock()
-            .expect("reload read flight poisoned");
-        notification
-            .waiters
-            .retain(|(waiter, _)| !Arc::ptr_eq(waiter, token));
+        let retired = {
+            let mut notification = self
+                .notification
+                .lock()
+                .expect("reload read flight poisoned");
+            let index = notification
+                .waiters
+                .iter()
+                .position(|(waiter, _)| Arc::ptr_eq(waiter, token));
+            index.map(|index| notification.waiters.remove(index))
+        };
+        drop(retired);
     }
 
     fn wake_all(wakers: Vec<Waker>) {
@@ -669,7 +838,37 @@ impl LoadScheduler {
         let requested_type = AssetTypeId::of::<A>();
         let (tickets, starts) = {
             let mut state = self.state.lock().expect("load scheduler poisoned");
+            // Pin all existing lifecycles in path order through validation and
+            // attachment. Last-consumer cancellation cannot interleave with a
+            // partially admitted batch; refusal must not promote or join work.
+            let existing: BTreeMap<_, _> = unique
+                .iter()
+                .filter_map(|path| {
+                    state
+                        .in_flight
+                        .get(&FlightKey::Load(path.clone()))
+                        .map(|flight| (path.clone(), Arc::clone(flight)))
+                })
+                .collect();
+            let mut lifecycles: BTreeMap<_, _> = existing
+                .iter()
+                .map(|(path, flight)| {
+                    (
+                        path.clone(),
+                        flight.lifecycle.lock().expect("flight lifecycle poisoned"),
+                    )
+                })
+                .collect();
             for (index, path) in paths.iter().enumerate() {
+                if lifecycles
+                    .get(path)
+                    .is_some_and(|lifecycle| !lifecycle.accepts_consumer())
+                {
+                    return Err(SoftBatchError::Cancelling {
+                        index,
+                        path: path.clone(),
+                    });
+                }
                 if let Some(existing) = state.in_flight.get(&FlightKey::Load(path.clone()))
                     && existing.requested_type != Some(requested_type)
                 {
@@ -702,6 +901,12 @@ impl LoadScheduler {
             // Keep first occurrence order for equal-priority FIFO dispatch.
             let mut tickets = Vec::with_capacity(paths.len());
             for path in paths {
+                let already_attached = if let Some(lifecycle) = lifecycles.get_mut(&path) {
+                    assert!(lifecycle.attach_consumer());
+                    true
+                } else {
+                    false
+                };
                 let key = FlightKey::Load(path);
                 let flight = if let Some(existing) = state.in_flight.get(&key) {
                     existing.priority.boost_to(priority);
@@ -714,13 +919,19 @@ impl LoadScheduler {
                         }),
                         priority: FlightPriority::new(priority),
                         requested_type: Some(requested_type),
+                        cancellation: RangeAssemblyCancellation::new(),
+                        lifecycle: Mutex::new(FlightLifecycle::default()),
                     });
                     state.in_flight.insert(key.clone(), Arc::clone(&flight));
                     state.running.insert(key.clone(), Arc::clone(&flight));
                     starts.push((key, Arc::clone(&flight)));
                     flight
                 };
-                tickets.push(LoadTicket::new(flight));
+                tickets.push(if already_attached {
+                    LoadTicket::new_attached(flight)
+                } else {
+                    LoadTicket::new(flight)
+                });
             }
             (tickets, starts)
         };
@@ -820,6 +1031,13 @@ impl LoadScheduler {
         let (flight, start_now) = {
             let mut state = self.state.lock().expect("load scheduler poisoned");
             if let Some(existing) = state.in_flight.get(&key) {
+                let mut lifecycle = existing
+                    .lifecycle
+                    .lock()
+                    .expect("flight lifecycle poisoned");
+                if !lifecycle.accepts_consumer() {
+                    return Err(ScheduleError::Cancelling { path });
+                }
                 if let (Some(existing_type), Some(requested_type)) =
                     (existing.requested_type, requested_type)
                     && existing_type != requested_type
@@ -831,19 +1049,15 @@ impl LoadScheduler {
                         }),
                         priority: FlightPriority::new(priority),
                         requested_type: Some(requested_type),
+                        cancellation: RangeAssemblyCancellation::new(),
+                        lifecycle: Mutex::new(FlightLifecycle::default()),
                     });
                     conflict.complete(Err(LoadFailure::AssemblyFailed(format!(
                         "same asset path requested with conflicting types: {path}"
                     ))));
-                    return Ok(LoadTicket {
-                        flight: conflict,
-                        waiter_token: Arc::new(()),
-                        cancellation: Arc::new(Mutex::new(Cancellation {
-                            cancelled: false,
-                            waker: None,
-                        })),
-                    });
+                    return Ok(LoadTicket::new(conflict));
                 }
+                assert!(lifecycle.attach_consumer());
                 existing.priority.boost_to(priority);
                 (Arc::clone(existing), false)
             } else {
@@ -863,6 +1077,11 @@ impl LoadScheduler {
                     }),
                     priority: FlightPriority::new(priority),
                     requested_type,
+                    cancellation: RangeAssemblyCancellation::new(),
+                    lifecycle: Mutex::new(FlightLifecycle {
+                        consumers: 1,
+                        ..FlightLifecycle::default()
+                    }),
                 });
                 if reload {
                     // Admission order, not worker priority or polling order,
@@ -872,13 +1091,9 @@ impl LoadScheduler {
                         .server
                         .prepare_async_reload(path.clone(), requested_type)
                         .map_err(LoadFailure::AssemblyFailed);
-                    state.reload_requests.insert(
-                        key.clone(),
-                        ReloadRequest {
-                            plan,
-                            cancellation: Arc::clone(&cancellation),
-                        },
-                    );
+                    state
+                        .reload_requests
+                        .insert(key.clone(), ReloadRequest { plan });
                 }
                 state.in_flight.insert(key.clone(), Arc::clone(&flight));
                 if can_start {
@@ -897,15 +1112,16 @@ impl LoadScheduler {
             }
         };
 
-        if start_now {
-            self.spawn_flight(key, flight.clone(), priority, ancestors, reload);
-        }
-
-        Ok(LoadTicket {
+        let ticket = LoadTicket {
             flight,
             waiter_token: Arc::new(()),
             cancellation,
-        })
+            detached: AtomicBool::new(false),
+        };
+        if start_now {
+            self.spawn_flight(key, ticket.flight.clone(), priority, ancestors, reload);
+        }
+        Ok(ticket)
     }
 
     /// Number of admitted unique requests not yet completed, including
@@ -953,7 +1169,6 @@ impl LoadScheduler {
             let path = match &key {
                 FlightKey::Load(path) | FlightKey::Reload { path, .. } => path.clone(),
             };
-            let panic_server = Arc::clone(&server);
             let worker_scheduler = scheduler.clone();
             let worker_path = path.clone();
             let worker_flight = Arc::clone(&flight);
@@ -982,12 +1197,7 @@ impl LoadScheduler {
             .await
             {
                 Ok(outcome) => outcome,
-                Err(()) => {
-                    if !reload {
-                        panic_server.fail_async_load_path(&path, "async load worker panicked");
-                    }
-                    Err(LoadFailure::WorkerPanicked)
-                }
+                Err(()) => Err(LoadFailure::WorkerPanicked),
             };
             scheduler.finish_flight(key, flight, outcome);
         });
@@ -1045,7 +1255,7 @@ impl LoadScheduler {
         parent_path: &AssetPath,
         parent_flight: &Arc<Flight>,
         dependency_path: &AssetPath,
-        ticket: LoadTicket,
+        mut ticket: LoadTicket,
     ) -> ScheduleOutcome {
         let parent = FlightKey::Load(parent_path.clone());
         let dependency = FlightKey::Load(dependency_path.clone());
@@ -1099,7 +1309,14 @@ impl LoadScheduler {
                 None
             }
         };
-        ticket.await
+        core::future::poll_fn(|cx| {
+            if parent_flight.poll_cancelled(cx) {
+                Poll::Ready(Err(LoadFailure::Cancelled))
+            } else {
+                Pin::new(&mut ticket).poll(cx)
+            }
+        })
+        .await
     }
 
     fn admit_queued_locked(&self, state: &mut SchedulerState) -> Vec<QueuedFlight> {
@@ -1255,6 +1472,7 @@ impl LoadScheduler {
                             type_id,
                             &pool,
                             priority,
+                            RangeAssemblyCancellation::new(),
                         )
                         .await
                         .map(Arc::<[u8]>::from);
@@ -1304,9 +1522,35 @@ impl LoadScheduler {
             };
             let waiter = &mut state.admission_waiters[index];
             waiter.granted = true;
-            wakers.push(waiter.waker.clone());
+            wakers.push(
+                waiter
+                    .waker
+                    .take()
+                    .expect("ungranted admission needs a waker"),
+            );
         }
         wakers
+    }
+}
+
+/// Keep the exact reservation alive until panic cleanup finishes. A path-only
+/// weak lookup can miss a dropped plan or accidentally target a later retry.
+struct PreparedLoadGuard {
+    server: Arc<AssetServer>,
+    path: AssetPath,
+    handle: UntypedHandle,
+    armed: bool,
+}
+
+impl Drop for PreparedLoadGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.server.fail_async_load_if_loading(
+                self.handle.id(),
+                &self.path,
+                "async load exited before publication",
+            );
+        }
     }
 }
 
@@ -1319,6 +1563,9 @@ async fn execute_async_load(
     priority: Priority,
     mut ancestors: BTreeSet<AssetPath>,
 ) -> ScheduleOutcome {
+    if flight.is_cancelled() {
+        return Err(LoadFailure::Cancelled);
+    }
     let requested_path = path.clone();
     let source_path = path.clone().without_label();
     let requested_label = path.has_label();
@@ -1335,6 +1582,9 @@ async fn execute_async_load(
             )));
         }
         scheduler.release_execution_slot(&FlightKey::Load(requested_path.clone()), &flight);
+        if flight.is_cancelled() {
+            return Err(LoadFailure::Cancelled);
+        }
         let source_ticket = match scheduler.schedule_with_ancestors(
             source_path.clone(),
             flight.priority.effective_priority(),
@@ -1347,6 +1597,9 @@ async fn execute_async_load(
         let source_result = scheduler
             .wait_for_dependency(&requested_path, &flight, &source_path, source_ticket)
             .await;
+        if !flight.begin_commit() {
+            return Err(LoadFailure::Cancelled);
+        }
         return match source_result {
             Ok(handle) if server.is_loaded(handle.id()) => {
                 let handle = server.load_untyped(requested_path.clone()).ok_or_else(|| {
@@ -1364,6 +1617,7 @@ async fn execute_async_load(
             Ok(_) => Err(LoadFailure::AssemblyFailed(format!(
                 "source asset failed to load: {source_path}"
             ))),
+            Err(LoadFailure::Cancelled) => Err(LoadFailure::Cancelled),
             Err(error) => Err(LoadFailure::AssemblyFailed(format!(
                 "source asset {source_path} failed: {error:?}"
             ))),
@@ -1385,7 +1639,17 @@ async fn execute_async_load(
         }
         AsyncLoadPreparation::New(plan) => plan,
     };
+    let mut prepared = PreparedLoadGuard {
+        server: Arc::clone(&server),
+        path: plan.path.clone(),
+        handle: plan.handle.clone(),
+        armed: true,
+    };
     let bytes = if scheduler.io_pool.is_single_threaded() {
+        if flight.is_cancelled() {
+            server.fail_async_load(&plan, "asset load cancelled");
+            return Err(LoadFailure::Cancelled);
+        }
         read_bytes_inline(&plan)
     } else {
         let read_sources = plan.sources.clone();
@@ -1394,6 +1658,7 @@ async fn execute_async_load(
         let read_type_id = plan.type_id;
         let pool = scheduler.io_pool.clone();
         let priority = flight.priority.priority_cell();
+        let cancellation = flight.cancellation.clone();
         scheduler
             .io_pool
             .spawn_future_with_priority(flight.priority.priority_cell(), async move {
@@ -1404,6 +1669,7 @@ async fn execute_async_load(
                     read_type_id,
                     &pool,
                     priority,
+                    cancellation,
                 )
                 .await
             })
@@ -1413,9 +1679,16 @@ async fn execute_async_load(
         Ok(bytes) => bytes,
         Err(error) => {
             server.fail_async_load(&plan, &error);
+            if flight.is_cancelled() {
+                return Err(LoadFailure::Cancelled);
+            }
             return Err(LoadFailure::AssemblyFailed(error));
         }
     };
+    if flight.is_cancelled() {
+        server.fail_async_load(&plan, "asset load cancelled");
+        return Err(LoadFailure::Cancelled);
+    }
     let output = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         plan.loaders
             .load_for_type(&plan.path, plan.type_id, &bytes)
@@ -1432,6 +1705,10 @@ async fn execute_async_load(
             return Err(LoadFailure::AssemblyFailed(error));
         }
     };
+    if flight.is_cancelled() {
+        server.fail_async_load(&plan, "asset load cancelled");
+        return Err(LoadFailure::Cancelled);
+    }
     for dependency in &output.primary.dependencies {
         if ancestors.contains(&dependency.path) {
             let error = format!("dependency cycle at {}", dependency.path);
@@ -1449,6 +1726,10 @@ async fn execute_async_load(
     let has_dependencies = !output.primary.dependencies.is_empty();
     let mut dependencies = Vec::with_capacity(output.primary.dependencies.len());
     for dependency in &output.primary.dependencies {
+        if flight.is_cancelled() {
+            server.fail_async_load(&plan, "asset load cancelled");
+            return Err(LoadFailure::Cancelled);
+        }
         let ticket = match scheduler.schedule_typed_with_ancestors(
             dependency.path.clone(),
             flight.priority.effective_priority(),
@@ -1473,6 +1754,10 @@ async fn execute_async_load(
                 let error = format!("dependency {} failed to load", dependency_path);
                 server.fail_async_load(&plan, &error);
                 return Err(LoadFailure::AssemblyFailed(error));
+            }
+            Err(LoadFailure::Cancelled) => {
+                server.fail_async_load(&plan, "asset load cancelled");
+                return Err(LoadFailure::Cancelled);
             }
             Err(error) => {
                 let error = format!("dependency {} failed: {error:?}", dependency_path);
@@ -1504,6 +1789,10 @@ async fn execute_async_load(
         }
         let mut resolved = Vec::with_capacity(requests.len());
         for dependency in requests {
+            if flight.is_cancelled() {
+                server.fail_async_load(&plan, "asset load cancelled");
+                return Err(LoadFailure::Cancelled);
+            }
             if label_ancestors.contains(&dependency.path) {
                 let error = format!("dependency cycle at {}", dependency.path);
                 server.fail_async_load(&plan, &error);
@@ -1534,6 +1823,10 @@ async fn execute_async_load(
                     server.fail_async_load(&plan, &error);
                     return Err(LoadFailure::AssemblyFailed(error));
                 }
+                Err(LoadFailure::Cancelled) => {
+                    server.fail_async_load(&plan, "asset load cancelled");
+                    return Err(LoadFailure::Cancelled);
+                }
                 Err(error) => {
                     let error = format!("dependency {} failed: {error:?}", dependency_path);
                     server.fail_async_load(&plan, &error);
@@ -1544,17 +1837,27 @@ async fn execute_async_load(
         labeled_dependencies.push(resolved);
     }
     if has_dependencies || has_labeled_dependencies {
-        scheduler
+        if let Err(error) = scheduler
             .acquire_execution_slot(
                 FlightKey::Load(requested_path.clone()),
                 Arc::clone(&flight),
                 priority,
             )
-            .await;
+            .await
+        {
+            server.fail_async_load(&plan, "asset load cancelled");
+            return Err(error);
+        }
     }
-    server
+    if !flight.begin_commit() {
+        server.fail_async_load(&plan, "asset load cancelled");
+        return Err(LoadFailure::Cancelled);
+    }
+    let outcome = server
         .commit_async_load(*plan, output, dependencies, labeled_dependencies)
-        .map_err(LoadFailure::AssemblyFailed)
+        .map_err(LoadFailure::AssemblyFailed);
+    prepared.armed = false;
+    outcome
 }
 
 async fn execute_async_reload(
@@ -1563,15 +1866,10 @@ async fn execute_async_reload(
     request: ReloadRequest,
     flight: Arc<Flight>,
 ) -> ScheduleOutcome {
-    let plan = request.plan?;
-    if request
-        .cancellation
-        .lock()
-        .expect("ticket waker poisoned")
-        .cancelled
-    {
+    if flight.is_cancelled() {
         return Err(LoadFailure::Cancelled);
     }
+    let plan = request.plan?;
     let output = decode_reload_source(
         &scheduler,
         plan.source_revision,
@@ -1579,11 +1877,10 @@ async fn execute_async_reload(
         &plan.loaders,
         &plan.path,
         plan.type_id,
-        &flight.priority,
+        &flight,
         true,
     )
-    .await
-    .map_err(LoadFailure::AssemblyFailed)?;
+    .await?;
     let mut decoded = BTreeMap::new();
     let mut pending = VecDeque::new();
     decoded.insert(plan.path.clone(), (plan.type_id, output));
@@ -1610,12 +1907,7 @@ async fn execute_async_reload(
                     "async reload dependency closure exceeds the bounded candidate limit".into(),
                 ));
             }
-            if request
-                .cancellation
-                .lock()
-                .expect("ticket waker poisoned")
-                .cancelled
-            {
+            if flight.is_cancelled() {
                 return Err(LoadFailure::Cancelled);
             }
             let dependency_type = if dependency.path.has_label() {
@@ -1646,11 +1938,10 @@ async fn execute_async_reload(
                 &plan.loaders,
                 &source_path,
                 dependency_type,
-                &flight.priority,
+                &flight,
                 false,
             )
-            .await
-            .map_err(LoadFailure::AssemblyFailed)?;
+            .await?;
             if output.primary.type_id != dependency_type {
                 return Err(LoadFailure::AssemblyFailed(format!(
                     "loader produced an unexpected asset type for {source_path}"
@@ -1670,10 +1961,10 @@ async fn execute_async_reload(
             })
             .collect(),
     };
-    // Serialize cancellation with publication: a cancel that wins this lock
-    // leaves the complete resident revision untouched, even after blocking I/O.
-    let cancellation = request.cancellation.lock().expect("ticket waker poisoned");
-    if cancellation.cancelled {
+    // Unique reload flights use the same last-consumer/commit linearization
+    // as ordinary loads. Never hold a ticket or lifecycle mutex across server
+    // publication: retired payloads may synchronously reenter ticket.cancel().
+    if !flight.begin_commit() {
         return Err(LoadFailure::Cancelled);
     }
     match server.commit_async_reload(plan, candidate) {
@@ -1694,9 +1985,12 @@ async fn decode_reload_source(
     loaders: &AssetLoaders,
     path: &AssetPath,
     type_id: AssetTypeId,
-    priority: &FlightPriority,
+    flight: &Flight,
     fresh: bool,
-) -> Result<FullLoadOutput, String> {
+) -> Result<FullLoadOutput, LoadFailure> {
+    if flight.is_cancelled() {
+        return Err(LoadFailure::Cancelled);
+    }
     let bytes = scheduler
         .reload_read(
             source_revision,
@@ -1704,19 +1998,31 @@ async fn decode_reload_source(
             loaders,
             path,
             type_id,
-            priority,
+            &flight.priority,
             fresh,
         )
-        .await?;
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        .await
+        .map_err(LoadFailure::AssemblyFailed)?;
+    // Dependency reads may be shared by independent reloads; drain the read
+    // without cancelling another revision's consumer, then skip local decode.
+    if flight.is_cancelled() {
+        return Err(LoadFailure::Cancelled);
+    }
+    let output = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         loaders
             .load_for_type(path, type_id, &bytes)
             .map_err(|error| error.to_string())
     })) {
         Ok(Ok(output)) => Ok(output),
-        Ok(Err(error)) => Err(error),
-        Err(_) => Err("asset source or loader panicked".to_string()),
+        Ok(Err(error)) => Err(LoadFailure::AssemblyFailed(error)),
+        Err(_) => Err(LoadFailure::AssemblyFailed(
+            "asset source or loader panicked".to_string(),
+        )),
+    };
+    if flight.is_cancelled() {
+        return Err(LoadFailure::Cancelled);
     }
+    output
 }
 
 struct PanicBoundary<F> {
@@ -1757,10 +2063,17 @@ struct ExecutionSlotFuture {
 }
 
 impl Future for ExecutionSlotFuture {
-    type Output = ();
+    type Output = Result<(), LoadFailure>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
+        // Register the cancellation wake before parking, without holding the
+        // scheduler mutex: both clone and retiring a worker waker can reenter.
+        if this.flight.poll_cancelled(cx) {
+            return Poll::Ready(Err(LoadFailure::Cancelled));
+        }
+        let mut candidate = Some(cx.waker().clone());
+        let mut retired = None;
         let (result, wakers) = {
             let mut state = this
                 .scheduler
@@ -1774,11 +2087,11 @@ impl Future for ExecutionSlotFuture {
 
             if own_index.is_some_and(|index| state.admission_waiters[index].granted) {
                 let index = own_index.expect("granted waiter must have an index");
-                state.admission_waiters.remove(index);
+                retired = state.admission_waiters.remove(index).waker;
                 state
                     .running
                     .insert(this.key.clone(), Arc::clone(&this.flight));
-                (Poll::Ready(()), Vec::new())
+                (Poll::Ready(Ok(())), Vec::new())
             } else if own_index.is_none()
                 && state.running.len() < this.scheduler.limit
                 && state.queued.is_empty()
@@ -1787,12 +2100,16 @@ impl Future for ExecutionSlotFuture {
                 state
                     .running
                     .insert(this.key.clone(), Arc::clone(&this.flight));
-                (Poll::Ready(()), Vec::new())
+                (Poll::Ready(Ok(())), Vec::new())
             } else {
                 if let Some(index) = own_index {
                     let waiter = &mut state.admission_waiters[index];
-                    if !waiter.waker.will_wake(cx.waker()) {
-                        waiter.waker = cx.waker().clone();
+                    if !waiter
+                        .waker
+                        .as_ref()
+                        .is_some_and(|waker| waker.will_wake(cx.waker()))
+                    {
+                        retired = core::mem::replace(&mut waiter.waker, candidate.take());
                     }
                 } else {
                     let seq = state.next_admission_seq;
@@ -1801,7 +2118,7 @@ impl Future for ExecutionSlotFuture {
                         token: Arc::clone(&this.token),
                         priority: this.flight.priority.clone(),
                         seq,
-                        waker: cx.waker().clone(),
+                        waker: candidate.take(),
                         granted: false,
                     });
                 }
@@ -1821,16 +2138,18 @@ impl Future for ExecutionSlotFuture {
                         .iter()
                         .position(|waiter| Arc::ptr_eq(&waiter.token, &this.token))
                         .expect("granted waiter must have an index");
-                    state.admission_waiters.remove(index);
+                    let granted = state.admission_waiters.remove(index);
+                    debug_assert!(granted.waker.is_none());
                     state
                         .running
                         .insert(this.key.clone(), Arc::clone(&this.flight));
-                    (Poll::Ready(()), wakers)
+                    (Poll::Ready(Ok(())), wakers)
                 } else {
                     (Poll::Pending, wakers)
                 }
             }
         };
+        drop(retired);
         Flight::wake_all(wakers);
         result
     }
@@ -1838,29 +2157,26 @@ impl Future for ExecutionSlotFuture {
 
 impl Drop for ExecutionSlotFuture {
     fn drop(&mut self) {
-        let (wakers, queued) = {
+        let (wakers, queued, retired) = {
             let mut state = self
                 .scheduler
                 .state
                 .lock()
                 .expect("load scheduler poisoned");
-            let was_granted = state
+            let retired = state
                 .admission_waiters
                 .iter()
                 .position(|waiter| Arc::ptr_eq(&waiter.token, &self.token))
-                .map(|index| {
-                    let waiter = state.admission_waiters.remove(index);
-                    waiter.granted
-                })
-                .unwrap_or(false);
-            if was_granted {
+                .map(|index| state.admission_waiters.remove(index));
+            if retired.as_ref().is_some_and(|waiter| waiter.granted) {
                 let queued = self.scheduler.admit_queued_locked(&mut state);
                 let wakers = self.scheduler.grant_admission_locked(&mut state);
-                (wakers, queued)
+                (wakers, queued, retired)
             } else {
-                (Vec::new(), Vec::new())
+                (Vec::new(), Vec::new(), retired)
             }
         };
+        drop(retired);
         for queued in queued {
             self.scheduler.spawn_flight(
                 queued.key,
@@ -1891,10 +2207,18 @@ async fn read_loader_bytes_async(
     requested: AssetTypeId,
     pool: &TaskPool,
     priority: Arc<PriorityCell>,
+    cancellation: RangeAssemblyCancellation,
 ) -> Result<Vec<u8>, String> {
-    PanicBoundary::new(loaders.read_for_type_async(sources, path, requested, pool, priority))
-        .await
-        .unwrap_or_else(|()| Err("asset source or loader panicked".to_string()))
+    PanicBoundary::new(loaders.read_for_type_async(
+        sources,
+        path,
+        requested,
+        pool,
+        priority,
+        &cancellation,
+    ))
+    .await
+    .unwrap_or_else(|()| Err("asset source or loader panicked".to_string()))
 }
 
 fn read_bytes_for_plan(
@@ -1911,6 +2235,7 @@ pub struct LoadTicket {
     flight: Arc<Flight>,
     waiter_token: Arc<()>,
     cancellation: Arc<Mutex<Cancellation>>,
+    detached: AtomicBool,
 }
 
 struct Cancellation {
@@ -1920,6 +2245,11 @@ struct Cancellation {
 
 impl LoadTicket {
     fn new(flight: Arc<Flight>) -> Self {
+        assert!(flight.attach_consumer(), "cannot join a draining flight");
+        Self::new_attached(flight)
+    }
+
+    fn new_attached(flight: Arc<Flight>) -> Self {
         Self {
             flight,
             waiter_token: Arc::new(()),
@@ -1927,6 +2257,7 @@ impl LoadTicket {
                 cancelled: false,
                 waker: None,
             })),
+            detached: AtomicBool::new(false),
         }
     }
 
@@ -1946,9 +2277,11 @@ impl LoadTicket {
         self.flight.priority.effective_priority()
     }
 
-    /// Stop waiting for this request. Shared ordinary loads continue. For a
-    /// reload, cancellation before commit also discards the staged revision;
-    /// synchronous reads/decoders already running are not interrupted.
+    /// Stop waiting for this request. Other consumers of shared loads continue.
+    /// The last cancel or ticket drop before the flight's commit gate discards
+    /// its candidate; after that gate publication may complete. Synchronous
+    /// reads/decoders already running are not interrupted. Reload reads shared
+    /// with another revision drain before local cancellation is observed.
     pub fn cancel(&self) {
         let waker = self
             .cancellation
@@ -1956,6 +2289,7 @@ impl LoadTicket {
             .expect("ticket waker poisoned")
             .cancel();
         self.flight.unregister(&self.waiter_token);
+        self.detach();
         if let Some(waker) = waker {
             waker.wake();
         }
@@ -1975,21 +2309,48 @@ impl Future for LoadTicket {
     type Output = ScheduleOutcome;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let mut cancellation = self.cancellation.lock().expect("ticket waker poisoned");
-        if cancellation.cancelled {
+        // Never hold the ticket lock while polling a flight: replacing a
+        // flight waker may reenter cancel(). A cancellation racing registration
+        // is resolved by the second check below, before returning Pending.
+        let mut candidate = Some(cx.waker().clone());
+        let (cancelled, retired) = {
+            let mut cancellation = self.cancellation.lock().expect("ticket waker poisoned");
+            let retired = if !cancellation.cancelled
+                && !cancellation
+                    .waker
+                    .as_ref()
+                    .is_some_and(|waker| waker.will_wake(cx.waker()))
+            {
+                core::mem::replace(&mut cancellation.waker, candidate.take())
+            } else {
+                None
+            };
+            (cancellation.cancelled, retired)
+        };
+        drop(retired);
+        if cancelled {
+            self.flight.unregister(&self.waiter_token);
+            self.detach();
             return Poll::Ready(Err(LoadFailure::Cancelled));
         }
-        cancellation.waker = Some(cx.waker().clone());
         let result = self.flight.poll(&self.waiter_token, cx);
-        if cancellation.cancelled {
-            cancellation.waker = None;
+        let (cancelled, retired) = {
+            let mut cancellation = self.cancellation.lock().expect("ticket waker poisoned");
+            let retired = if cancellation.cancelled || result.is_ready() {
+                cancellation.waker.take()
+            } else {
+                None
+            };
+            (cancellation.cancelled, retired)
+        };
+        drop(retired);
+        if cancelled || result.is_ready() {
             self.flight.unregister(&self.waiter_token);
+            self.detach();
+        }
+        if cancelled {
             Poll::Ready(Err(LoadFailure::Cancelled))
         } else {
-            if result.is_ready() {
-                cancellation.waker = None;
-                self.flight.unregister(&self.waiter_token);
-            }
             result
         }
     }
@@ -1998,6 +2359,15 @@ impl Future for LoadTicket {
 impl Drop for LoadTicket {
     fn drop(&mut self) {
         self.flight.unregister(&self.waiter_token);
+        self.detach();
+    }
+}
+
+impl LoadTicket {
+    fn detach(&self) {
+        if !self.detached.swap(true, Ordering::AcqRel) {
+            self.flight.detach_consumer();
+        }
     }
 }
 
@@ -2015,6 +2385,18 @@ mod priority_tests;
 #[cfg(test)]
 #[path = "scheduler_range_tests.rs"]
 mod range_tests;
+
+#[cfg(test)]
+#[path = "scheduler_cancellation_tests.rs"]
+mod scheduler_cancellation_tests;
+
+#[cfg(test)]
+#[path = "scheduler_loom_tests.rs"]
+mod loom_tests;
+
+#[cfg(test)]
+#[path = "scheduler_notification_tests.rs"]
+mod notification_tests;
 
 #[cfg(test)]
 mod tests {
@@ -2739,6 +3121,8 @@ mod tests {
             }),
             priority: FlightPriority::new(Priority::Normal),
             requested_type: None,
+            cancellation: RangeAssemblyCancellation::new(),
+            lifecycle: Mutex::new(FlightLifecycle::default()),
         });
         {
             let mut state = scheduler.state.lock().unwrap();
@@ -3067,6 +3451,8 @@ mod tests {
             }),
             priority: FlightPriority::new(Priority::Normal),
             requested_type: None,
+            cancellation: RangeAssemblyCancellation::new(),
+            lifecycle: Mutex::new(FlightLifecycle::default()),
         });
         Flight::wake_all(flight.complete(Err(LoadFailure::NoLoader)));
 
@@ -3077,7 +3463,9 @@ mod tests {
                 cancelled: false,
                 waker: None,
             })),
+            detached: AtomicBool::new(false),
         };
+        ticket.flight.attach_consumer();
         let waker = Waker::from(Arc::new(CountWake(Arc::new(AtomicUsize::new(0)))));
         let mut cx = Context::from_waker(&waker);
         assert_eq!(
@@ -3112,6 +3500,8 @@ mod tests {
             }),
             priority: FlightPriority::new(priority),
             requested_type: None,
+            cancellation: RangeAssemblyCancellation::new(),
+            lifecycle: Mutex::new(FlightLifecycle::default()),
         })
     }
 
@@ -3226,6 +3616,8 @@ mod tests {
             }),
             priority: FlightPriority::new(Priority::Normal),
             requested_type: None,
+            cancellation: RangeAssemblyCancellation::new(),
+            lifecycle: Mutex::new(FlightLifecycle::default()),
         });
         let mut ticket = LoadTicket {
             flight: Arc::clone(&flight),
@@ -3234,7 +3626,9 @@ mod tests {
                 cancelled: false,
                 waker: None,
             })),
+            detached: AtomicBool::new(false),
         };
+        flight.attach_consumer();
         let wakes = Arc::new(AtomicUsize::new(0));
         let waker = Waker::from(Arc::new(CountWake(Arc::clone(&wakes))));
         let mut cx = Context::from_waker(&waker);
@@ -3260,6 +3654,8 @@ mod tests {
             }),
             priority: FlightPriority::new(Priority::Normal),
             requested_type: None,
+            cancellation: RangeAssemblyCancellation::new(),
+            lifecycle: Mutex::new(FlightLifecycle::default()),
         });
         let mut ticket = LoadTicket {
             flight: Arc::clone(&flight),
@@ -3268,7 +3664,9 @@ mod tests {
                 cancelled: false,
                 waker: None,
             })),
+            detached: AtomicBool::new(false),
         };
+        flight.attach_consumer();
         let waker = Waker::from(Arc::new(CountWake(Arc::new(AtomicUsize::new(0)))));
         let mut cx = Context::from_waker(&waker);
         assert!(Pin::new(&mut ticket).poll(&mut cx).is_pending());
@@ -3287,6 +3685,8 @@ mod tests {
             }),
             priority: FlightPriority::new(Priority::Normal),
             requested_type: None,
+            cancellation: RangeAssemblyCancellation::new(),
+            lifecycle: Mutex::new(FlightLifecycle::default()),
         });
         let mut ticket = LoadTicket {
             flight: Arc::clone(&flight),
@@ -3295,7 +3695,9 @@ mod tests {
                 cancelled: false,
                 waker: None,
             })),
+            detached: AtomicBool::new(false),
         };
+        flight.attach_consumer();
         let first_waker = Waker::from(Arc::new(CountWake(Arc::new(AtomicUsize::new(0)))));
         let second_waker = Waker::from(Arc::new(CountWake(Arc::new(AtomicUsize::new(0)))));
         let mut first_cx = Context::from_waker(&first_waker);
@@ -3334,9 +3736,17 @@ mod tests {
 
         drop(first);
         assert_eq!(flight.waiter_count(), 1);
+        assert!(
+            !flight.is_cancelled(),
+            "one remaining joiner keeps the flight alive"
+        );
         release.store(true, Ordering::Release);
         assert!(scheduler.cpu_pool.block_on(duplicate).is_ok());
         assert_eq!(flight.waiter_count(), 0);
+        assert!(
+            !flight.is_cancelled(),
+            "detaching the final completed consumer cannot cancel successful work"
+        );
     }
 
     struct WideReloadLoader;

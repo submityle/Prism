@@ -14,6 +14,9 @@ prism_tasks = { path = "../prism_tasks", optional = true }
 notify-debouncer-full = { version = "0.7.0", default-features = false, optional = true }
 rustix = { version = "1.1.5", features = ["fs"], optional = true }
 
+[dev-dependencies]
+loom = "0.7.2"
+
 [features]
 default = ["std"]
 # `ecs` bridges this crate's identity and storage into the ECS: it implements

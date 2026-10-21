@@ -29,8 +29,13 @@ use crate::type_id::AssetTypeId;
 use crate::{Asset, UntypedHandle};
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
+use alloc::vec::Vec;
 use core::any::Any;
 use core::fmt;
+
+#[cfg(test)]
+#[path = "stores_deferred_tests.rs"]
+mod stores_deferred_tests;
 
 /// Why a type-erased store operation could not be routed.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -88,8 +93,34 @@ pub trait ErasedAssetStore: Any + Send + Sync {
         value: Box<dyn Any + Send>,
     ) -> Result<bool, StoreError>;
 
+    /// Like `fulfill_erased`, but moves displaced or rejected values into
+    /// `retired` instead of destroying them. The caller must drain that queue
+    /// only after releasing locks protecting publication.
+    fn fulfill_erased_deferred(
+        &mut self,
+        id: UntypedAssetId,
+        value: Box<dyn Any + Send>,
+        retired: &mut Vec<Box<dyn Any + Send>>,
+    ) -> Result<bool, StoreError>;
+
+    /// Checks the concrete value type and slot liveness without mutation.
+    /// Publication can preflight a complete batch under one external lock.
+    fn validate_fulfill_erased(
+        &self,
+        id: UntypedAssetId,
+        value: &(dyn Any + Send),
+    ) -> Result<bool, StoreError>;
+
     /// Marks a reserved slot failed. Returns whether the id was live.
     fn fail_erased(&mut self, id: UntypedAssetId, error: AssetErrorId) -> bool;
+
+    /// Marks a slot failed without destroying its previous ready payload.
+    fn fail_erased_deferred(
+        &mut self,
+        id: UntypedAssetId,
+        error: AssetErrorId,
+        retired: &mut Vec<Box<dyn Any + Send>>,
+    ) -> bool;
 
     /// The load state of `id` within this arena ([`LoadState::NotLoaded`] if the
     /// id does not belong to this arena's type or is stale).
@@ -101,13 +132,25 @@ pub trait ErasedAssetStore: Any + Send + Sync {
     /// Reclaims slots whose last strong handle has dropped. Returns the count.
     fn remove_unused(&mut self) -> usize;
 
+    /// Removes abandoned slots but queues ready values for lock-free disposal.
+    fn remove_unused_deferred(&mut self, retired: &mut Vec<Box<dyn Any + Send>>) -> usize;
+
     /// Advances the arena's grace frame and reclaims slots past their grace
     /// window. Returns the count reclaimed this call.
     fn collect_releases(&mut self) -> usize;
 
+    /// Advances retention and grace age, queuing reclaimed ready values.
+    fn collect_releases_deferred(&mut self, retired: &mut Vec<Box<dyn Any + Send>>) -> usize;
+
     /// Reclaims newly abandoned slots without advancing retention or grace
     /// age; used by same-frame server fixpoint passes.
     fn collect_releases_without_advancing(&mut self) -> usize;
+
+    /// Queues reclaimed ready values without advancing retention or grace age.
+    fn collect_releases_without_advancing_deferred(
+        &mut self,
+        retired: &mut Vec<Box<dyn Any + Send>>,
+    ) -> usize;
 
     /// The number of live slots.
     fn len(&self) -> usize;
@@ -145,20 +188,75 @@ impl<A: Asset> ErasedAssetStore for Assets<A> {
         id: UntypedAssetId,
         value: Box<dyn Any + Send>,
     ) -> Result<bool, StoreError> {
-        let typed_id: AssetId<A> = id.typed::<A>().ok_or(StoreError::TypeMismatch {
+        self.fulfill_erased_deferred(id, value, &mut Vec::new())
+    }
+
+    fn fulfill_erased_deferred(
+        &mut self,
+        id: UntypedAssetId,
+        value: Box<dyn Any + Send>,
+        retired: &mut Vec<Box<dyn Any + Send>>,
+    ) -> Result<bool, StoreError> {
+        let mismatch = StoreError::TypeMismatch {
             expected: AssetTypeId::of::<A>(),
-        })?;
-        let v = value
-            .downcast::<A>()
-            .map_err(|_| StoreError::TypeMismatch {
-                expected: AssetTypeId::of::<A>(),
-            })?;
-        Ok(self.fulfill(typed_id, *v))
+        };
+        let Some(typed_id) = id.typed::<A>() else {
+            retired.push(value);
+            return Err(mismatch);
+        };
+        let value = match value.downcast::<A>() {
+            Ok(value) => value,
+            Err(value) => {
+                retired.push(value);
+                return Err(mismatch);
+            }
+        };
+        match self.replace_payload(typed_id, *value) {
+            Ok(previous) => {
+                if let Some(previous) = previous {
+                    retired.push(Box::new(previous));
+                }
+                Ok(true)
+            }
+            Err(value) => {
+                retired.push(Box::new(value));
+                Ok(false)
+            }
+        }
+    }
+
+    fn validate_fulfill_erased(
+        &self,
+        id: UntypedAssetId,
+        value: &(dyn Any + Send),
+    ) -> Result<bool, StoreError> {
+        let typed =
+            id.typed::<A>()
+                .filter(|_| value.is::<A>())
+                .ok_or(StoreError::TypeMismatch {
+                    expected: AssetTypeId::of::<A>(),
+                })?;
+        Ok(self.contains(typed))
     }
 
     fn fail_erased(&mut self, id: UntypedAssetId, error: AssetErrorId) -> bool {
+        self.fail_erased_deferred(id, error, &mut Vec::new())
+    }
+
+    fn fail_erased_deferred(
+        &mut self,
+        id: UntypedAssetId,
+        error: AssetErrorId,
+        retired: &mut Vec<Box<dyn Any + Send>>,
+    ) -> bool {
         match id.typed::<A>() {
-            Some(typed_id) => self.fail(typed_id, error),
+            Some(typed_id) => {
+                let (live, previous) = self.fail_payload(typed_id, error);
+                if let Some(previous) = previous {
+                    retired.push(Box::new(previous));
+                }
+                live
+            }
             None => false,
         }
     }
@@ -181,12 +279,28 @@ impl<A: Asset> ErasedAssetStore for Assets<A> {
         Assets::<A>::remove_unused(self)
     }
 
+    fn remove_unused_deferred(&mut self, retired: &mut Vec<Box<dyn Any + Send>>) -> usize {
+        self.remove_unused_with(&mut |value| retired.push(Box::new(value)))
+    }
+
     fn collect_releases(&mut self) -> usize {
         Assets::<A>::collect_releases(self)
     }
 
+    fn collect_releases_deferred(&mut self, retired: &mut Vec<Box<dyn Any + Send>>) -> usize {
+        self.collect_retained_with(&mut |value| retired.push(Box::new(value)))
+            .reclaimed
+    }
+
     fn collect_releases_without_advancing(&mut self) -> usize {
         Assets::<A>::collect_releases_without_advancing(self)
+    }
+
+    fn collect_releases_without_advancing_deferred(
+        &mut self,
+        retired: &mut Vec<Box<dyn Any + Send>>,
+    ) -> usize {
+        self.collect_releases_without_advancing_with(&mut |value| retired.push(Box::new(value)))
     }
 
     fn len(&self) -> usize {
@@ -384,6 +498,53 @@ impl AssetStores {
             .fulfill_erased(id, value)
     }
 
+    /// Fulfills a slot while deferring all displaced and rejected payload
+    /// destruction to the caller's `retired` queue, including routing errors.
+    ///
+    /// # Errors
+    /// Returns the same routing/type errors as [`Self::fulfill_erased`].
+    pub fn fulfill_erased_deferred(
+        &mut self,
+        id: UntypedAssetId,
+        value: Box<dyn Any + Send>,
+        retired: &mut Vec<Box<dyn Any + Send>>,
+    ) -> Result<bool, StoreError> {
+        match self.stores.get_mut(&id.type_id()) {
+            Some(store) => store.fulfill_erased_deferred(id, value, retired),
+            None => {
+                retired.push(value);
+                Err(StoreError::UnknownType(id.type_id()))
+            }
+        }
+    }
+
+    /// Validates a concrete boxed value and slot before publishing a batch.
+    ///
+    /// # Errors
+    /// Returns the same routing/type errors as [`Self::fulfill_erased`].
+    pub fn validate_fulfill_erased(
+        &self,
+        id: UntypedAssetId,
+        value: &(dyn Any + Send),
+    ) -> Result<bool, StoreError> {
+        self.stores
+            .get(&id.type_id())
+            .ok_or(StoreError::UnknownType(id.type_id()))?
+            .validate_fulfill_erased(id, value)
+    }
+
+    /// Fails a slot, moving any ready payload to `retired` for later disposal.
+    pub fn fail_erased_deferred(
+        &mut self,
+        id: UntypedAssetId,
+        error: AssetErrorId,
+        retired: &mut Vec<Box<dyn Any + Send>>,
+    ) -> bool {
+        self.stores
+            .get_mut(&id.type_id())
+            .is_some_and(|store| store.fail_erased_deferred(id, error, retired))
+    }
+
     /// Marks a reserved slot failed, routed by the id's embedded type. Returns
     /// whether the id was live; `false` also if its arena is unregistered.
     pub fn fail_erased(&mut self, id: UntypedAssetId, error: AssetErrorId) -> bool {
@@ -417,10 +578,28 @@ impl AssetStores {
         self.stores.values_mut().map(|s| s.remove_unused()).sum()
     }
 
+    /// Removes abandoned slots while preserving all reclaimed ready values
+    /// until the caller drops `retired` outside its publication lock.
+    pub fn remove_unused_deferred(&mut self, retired: &mut Vec<Box<dyn Any + Send>>) -> usize {
+        self.stores
+            .values_mut()
+            .map(|store| store.remove_unused_deferred(retired))
+            .sum()
+    }
+
     /// Advances every arena's grace frame and reclaims expired slots. Returns
     /// the total count reclaimed this call.
     pub fn collect_releases(&mut self) -> usize {
         self.stores.values_mut().map(|s| s.collect_releases()).sum()
+    }
+
+    /// Advances every arena once and queues reclaimed ready values. Slot and
+    /// event bookkeeping is complete before any queued payload is destroyed.
+    pub fn collect_releases_deferred(&mut self, retired: &mut Vec<Box<dyn Any + Send>>) -> usize {
+        self.stores
+            .values_mut()
+            .map(|store| store.collect_releases_deferred(retired))
+            .sum()
     }
 
     /// Reclaims newly abandoned slots without advancing any arena's per-frame
@@ -429,6 +608,17 @@ impl AssetStores {
         self.stores
             .values_mut()
             .map(|s| s.collect_releases_without_advancing())
+            .sum()
+    }
+
+    /// Same-frame fixpoint pass that queues values without advancing age.
+    pub fn collect_releases_without_advancing_deferred(
+        &mut self,
+        retired: &mut Vec<Box<dyn Any + Send>>,
+    ) -> usize {
+        self.stores
+            .values_mut()
+            .map(|store| store.collect_releases_without_advancing_deferred(retired))
             .sum()
     }
 

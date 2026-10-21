@@ -374,7 +374,12 @@ pub trait ErasedAssetLoader: Send + Sync {
     ///
     /// # Errors
     /// Any [`LoadError`] from the underlying typed loader.
-    fn load_erased(&self, path: &AssetPath, bytes: &[u8]) -> Result<FullLoadOutput, LoadError>;
+    fn load_erased(
+        &self,
+        path: &AssetPath,
+        bytes: &[u8],
+        retired: Option<&mut Vec<Box<dyn Any + Send>>>,
+    ) -> Result<FullLoadOutput, LoadError>;
 }
 
 impl<L: AssetLoader> ErasedAssetLoader for L {
@@ -386,9 +391,36 @@ impl<L: AssetLoader> ErasedAssetLoader for L {
         <L as AssetLoader>::read_plan(self, path, metadata)
     }
 
-    fn load_erased(&self, path: &AssetPath, bytes: &[u8]) -> Result<FullLoadOutput, LoadError> {
+    fn load_erased(
+        &self,
+        path: &AssetPath,
+        bytes: &[u8],
+        retired: Option<&mut Vec<Box<dyn Any + Send>>>,
+    ) -> Result<FullLoadOutput, LoadError> {
         let mut ctx = LoadContext::new(path);
-        let value = self.load(bytes, &mut ctx)?;
+        let value = if let Some(retired) = retired {
+            // The context outlives the unwind boundary. Framework-owned labeled
+            // values must survive decoder errors and panics until the caller
+            // releases its publication lock. Plugin-owned locals remain the
+            // plugin's responsibility.
+            let decoded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                self.load(bytes, &mut ctx)
+            }));
+            match decoded {
+                Ok(Ok(value)) => value,
+                failure => {
+                    let (_, labeled) = ctx.into_parts();
+                    retired.extend(labeled.into_iter().map(|asset| asset.value));
+                    match failure {
+                        Ok(Err(error)) => return Err(error),
+                        Err(panic) => std::panic::resume_unwind(panic),
+                        Ok(Ok(_)) => unreachable!("successful decode handled above"),
+                    }
+                }
+            }
+        } else {
+            self.load(bytes, &mut ctx)?
+        };
         let type_id = AssetTypeId::of::<L::Asset>();
         // Drain the context's accumulated declarations. The primary's declared
         // dependencies ride on the primary erased asset; labeled sub-assets are
@@ -439,6 +471,18 @@ impl AssetLoaders {
         (id, conflicts)
     }
 
+    // Typed registration cannot produce a dishonest tag or store factory.
+    // Server regressions replace only the erased implementation, retaining
+    // normal selection, reading, reservation, and publication paths.
+    #[cfg(all(test, panic = "unwind"))]
+    pub(crate) fn replace_erased_for_test(
+        &mut self,
+        id: LoaderId,
+        loader: Arc<dyn ErasedAssetLoader>,
+    ) {
+        self.loaders[id.index() as usize] = loader;
+    }
+
     /// Registers an alias suffix (`jpeg → jpg`) on the policy.
     pub fn add_alias(&mut self, alias: &str, canonical: &str) {
         self.policy.add_alias(alias, canonical);
@@ -465,7 +509,7 @@ impl AssetLoaders {
             .policy
             .resolve_untyped(path)
             .ok_or_else(|| LoadError::Unsupported(alloc::format!("no loader for {path}")))?;
-        self.run(id, path, bytes)
+        self.run(id, path, bytes, None)
     }
 
     /// Resolves and runs the loader for `path` restricted to loaders producing
@@ -487,7 +531,27 @@ impl AssetLoaders {
                     "no loader for {path} producing {requested:?}"
                 ))
             })?;
-        self.run(id, path, bytes)
+        self.run(id, path, bytes, None)
+    }
+
+    /// Synchronous server decoding, retaining context outputs on failure until
+    /// the server's outer guard has released its mutex.
+    pub(crate) fn load_for_type_deferred(
+        &self,
+        path: &AssetPath,
+        requested: AssetTypeId,
+        bytes: &[u8],
+        retired: &mut Vec<Box<dyn Any + Send>>,
+    ) -> Result<FullLoadOutput, LoadError> {
+        let id = self
+            .policy
+            .resolve_for_type(path, requested)
+            .ok_or_else(|| {
+                LoadError::Unsupported(alloc::format!(
+                    "no loader for {path} producing {requested:?}"
+                ))
+            })?;
+        self.run(id, path, bytes, Some(retired))
     }
 
     /// Reads the validated loader input for a typed request through
@@ -506,6 +570,8 @@ impl AssetLoaders {
 
     /// Called on the scheduler's I/O pool. Preparation and legacy whole-read
     /// fallback remain on I/O workers; only range joins yield asynchronously.
+    /// Cancellation is checked at each synchronous boundary; an already-running
+    /// preparation or fallback read finishes, but its result is discarded.
     pub(crate) async fn read_for_type_async(
         &self,
         sources: &AssetSources,
@@ -513,17 +579,28 @@ impl AssetLoaders {
         requested: AssetTypeId,
         pool: &prism_tasks::TaskPool,
         priority: Arc<prism_tasks::PriorityCell>,
+        cancellation: &RangeAssemblyCancellation,
     ) -> Result<Vec<u8>, String> {
-        let (source, plan, whole) = self.prepare_read(sources, path, requested)?;
-        let assembled = assemble_ranges_resolved_async(
-            &source,
-            &plan,
-            pool,
-            priority,
-            &RangeAssemblyCancellation::new(),
-        )
-        .await;
-        Self::finish_read(sources, path, whole, assembled)
+        if cancellation.is_cancelled() {
+            return Err(RangeAssemblyError::Cancelled.to_string());
+        }
+        let prepared = self.prepare_read(sources, path, requested);
+        if cancellation.is_cancelled() {
+            return Err(RangeAssemblyError::Cancelled.to_string());
+        }
+        let (source, plan, whole) = prepared?;
+        let assembled =
+            assemble_ranges_resolved_async(&source, &plan, pool, priority, cancellation).await;
+        // Both NotFound and empty whole-file results may trigger blocking VFS
+        // fallback in finish_read. Do not enter it after cancellation wins.
+        if cancellation.is_cancelled() {
+            return Err(RangeAssemblyError::Cancelled.to_string());
+        }
+        let finished = Self::finish_read(sources, path, whole, assembled);
+        if cancellation.is_cancelled() {
+            return Err(RangeAssemblyError::Cancelled.to_string());
+        }
+        finished
     }
 
     fn prepare_read(
@@ -606,20 +683,36 @@ impl AssetLoaders {
         id: LoaderId,
         path: &AssetPath,
         bytes: &[u8],
+        mut retired: Option<&mut Vec<Box<dyn Any + Send>>>,
     ) -> Result<FullLoadOutput, LoadError> {
         let loader = self
             .loaders
             .get(id.index() as usize)
             .ok_or_else(|| LoadError::Other("loader id out of range".to_string()))?;
-        let output = loader.load_erased(path, bytes)?;
+        let output = loader.load_erased(path, bytes, retired.as_deref_mut())?;
         // Invariant: a loader's declared product type must match the type it
         // actually boxed. A mismatch means the typed/erased layers disagree and
         // the server would mis-route the value into the wrong arena.
-        debug_assert_eq!(
-            output.primary.type_id,
-            loader.produced_type(),
-            "loader produced a value of a different type than it declared"
-        );
+        #[cfg(debug_assertions)]
+        {
+            // The output outlives the assertion's unwind scope. In particular,
+            // an erased implementation's produced_type callback can panic as
+            // well as return a dishonest tag. The synchronous caller still
+            // owns its mutex until its outer guard drains retired values.
+            let checked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                debug_assert_eq!(
+                    output.primary.type_id,
+                    loader.produced_type(),
+                    "loader produced a value of a different type than it declared"
+                );
+            }));
+            if let Err(payload) = checked {
+                if let Some(retired) = retired {
+                    retired.push(Box::new(output));
+                }
+                std::panic::resume_unwind(payload);
+            }
+        }
         Ok(output)
     }
 

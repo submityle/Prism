@@ -321,8 +321,15 @@ impl<A: Asset> Assets<A> {
     /// [`AssetEvent::Modified`] when it already held a ready value (a reload).
     /// Returns `false` if `id` is stale.
     pub fn fulfill(&mut self, id: AssetId<A>, value: A) -> bool {
+        self.replace_payload(id, value).is_ok()
+    }
+
+    /// Replaces a value without running its destructor. A stale id returns
+    /// the incoming value unchanged, so callers can also dispose of rejected
+    /// input after releasing their own synchronization guards.
+    pub(crate) fn replace_payload(&mut self, id: AssetId<A>, value: A) -> Result<Option<A>, A> {
         let Some(slot_index) = self.resolve(id.index()) else {
-            return false;
+            return Err(value);
         };
         self.retention
             .remove(id, RetainRemovalReason::PayloadChanged);
@@ -331,13 +338,16 @@ impl<A: Asset> Assets<A> {
             .as_mut()
             .expect("resolved slot is occupied");
         let was_ready = matches!(entry.payload, Payload::Ready(_));
-        entry.payload = Payload::Ready(value);
+        let previous = core::mem::replace(&mut entry.payload, Payload::Ready(value));
         self.events.push(if was_ready {
             AssetEvent::Modified { id }
         } else {
             AssetEvent::Added { id }
         });
-        true
+        Ok(match previous {
+            Payload::Ready(value) => Some(value),
+            Payload::Pending | Payload::Failed(_) => None,
+        })
     }
 
     /// Marks a previously [`reserve`](Assets::reserve)d (or present) slot as
@@ -346,8 +356,17 @@ impl<A: Asset> Assets<A> {
     /// valid) so the failure is observable until the handle drops or the slot
     /// is removed. Returns `false` if `id` is stale.
     pub fn fail(&mut self, id: AssetId<A>, error: AssetErrorId) -> bool {
+        self.fail_payload(id, error).0
+    }
+
+    /// Marks a slot failed, returning its old value for deferred destruction.
+    pub(crate) fn fail_payload(
+        &mut self,
+        id: AssetId<A>,
+        error: AssetErrorId,
+    ) -> (bool, Option<A>) {
         let Some(slot_index) = self.resolve(id.index()) else {
-            return false;
+            return (false, None);
         };
         self.retention
             .remove(id, RetainRemovalReason::PayloadChanged);
@@ -355,9 +374,15 @@ impl<A: Asset> Assets<A> {
             .entry
             .as_mut()
             .expect("resolved slot is occupied");
-        entry.payload = Payload::Failed(error);
+        let previous = core::mem::replace(&mut entry.payload, Payload::Failed(error));
         self.events.push(AssetEvent::Failed { id, error });
-        true
+        (
+            true,
+            match previous {
+                Payload::Ready(value) => Some(value),
+                Payload::Pending | Payload::Failed(_) => None,
+            },
+        )
     }
 
     /// Returns a shared reference to the asset `id` points at, or `None` if the
@@ -446,6 +471,12 @@ impl<A: Asset> Assets<A> {
     /// enqueuing an [`AssetEvent::Removed`] for each, and returns how many were
     /// reclaimed.
     pub fn remove_unused(&mut self) -> usize {
+        self.remove_unused_with(&mut drop)
+    }
+
+    /// Removes abandoned slots, handing ready values to the caller only after
+    /// slot generation, free-list and event bookkeeping have been updated.
+    pub(crate) fn remove_unused_with(&mut self, retire: &mut impl FnMut(A)) -> usize {
         let mut reclaimed = 0;
         for index in 0..self.slots.len() {
             let abandoned = self.slots[index]
@@ -456,11 +487,14 @@ impl<A: Asset> Assets<A> {
                 let generation = self.slots[index].generation;
                 let slot_index = u32::try_from(index).expect("slot index fits u32");
                 let asset_index = AssetIndex::from_parts(slot_index, generation);
-                if self.take_slot(index).is_some() {
+                if let Some(payload) = self.take_slot(index) {
                     self.events.push(AssetEvent::Removed {
                         id: AssetId::new(asset_index),
                     });
                     reclaimed += 1;
+                    if let Payload::Ready(value) = payload {
+                        retire(value);
+                    }
                 }
             }
         }
@@ -488,7 +522,14 @@ impl<A: Asset> Assets<A> {
     /// Reclaims newly abandoned slots during a same-frame server fixpoint
     /// without advancing retention or grace-frame age a second time.
     pub(crate) fn collect_releases_without_advancing(&mut self) -> usize {
-        self.collect_abandoned_without_advancing()
+        self.collect_releases_without_advancing_with(&mut drop)
+    }
+
+    pub(crate) fn collect_releases_without_advancing_with(
+        &mut self,
+        retire: &mut impl FnMut(A),
+    ) -> usize {
+        self.collect_abandoned_at_current_frame(retire)
     }
 
     /// Advances retention and normal reclamation together, returning diagnostics.
@@ -500,6 +541,10 @@ impl<A: Asset> Assets<A> {
     /// `Unused` is emitted on first observed cache-only ownership, never faked as
     /// `Removed`; the normal grace window is measured from that first observation.
     pub fn collect_retained(&mut self) -> RetainCollection {
+        self.collect_retained_with(&mut drop)
+    }
+
+    pub(crate) fn collect_retained_with(&mut self, retire: &mut impl FnMut(A)) -> RetainCollection {
         let frame = self.frame.wrapping_add(1);
         let slots = &mut self.slots;
         let events = &mut self.events;
@@ -518,23 +563,15 @@ impl<A: Asset> Assets<A> {
                 }
             }
         });
-        let reclaimed = self.collect_abandoned();
+        self.frame = frame;
+        let reclaimed = self.collect_abandoned_at_current_frame(retire);
         RetainCollection {
             reclaimed,
             removals,
         }
     }
 
-    fn collect_abandoned(&mut self) -> usize {
-        self.frame = self.frame.wrapping_add(1);
-        self.collect_abandoned_at_current_frame()
-    }
-
-    fn collect_abandoned_without_advancing(&mut self) -> usize {
-        self.collect_abandoned_at_current_frame()
-    }
-
-    fn collect_abandoned_at_current_frame(&mut self) -> usize {
+    fn collect_abandoned_at_current_frame(&mut self, retire: &mut impl FnMut(A)) -> usize {
         let current = self.release.dropped_count();
         if current == self.seen_dropped && !self.has_pending_grace {
             // Nothing abandoned since last time and nothing mid-grace: the
@@ -542,6 +579,10 @@ impl<A: Asset> Assets<A> {
             return 0;
         }
         self.seen_dropped = current;
+        // A user destructor may unwind from `retire`. Keep the rescan signal
+        // armed until the entire scan succeeds, including younger grace slots
+        // already visited and abandoned slots not reached before the panic.
+        self.has_pending_grace = true;
 
         let mut reclaimed = 0;
         let mut pending_grace = false;
@@ -575,9 +616,12 @@ impl<A: Asset> Assets<A> {
                 continue;
             }
             if matured {
-                if self.take_slot(index).is_some() {
+                if let Some(payload) = self.take_slot(index) {
                     self.events.push(AssetEvent::Removed { id });
                     reclaimed += 1;
+                    if let Payload::Ready(value) = payload {
+                        retire(value);
+                    }
                 }
             } else {
                 pending_grace = true;
@@ -705,3 +749,7 @@ mod fallback_tests;
 #[cfg(test)]
 #[path = "../text/unit/retain_cache.rs"]
 mod retain_cache_tests;
+
+#[cfg(test)]
+#[path = "storage_drop_tests.rs"]
+mod storage_drop_tests;

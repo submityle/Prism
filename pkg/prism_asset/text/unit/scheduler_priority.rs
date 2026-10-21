@@ -74,6 +74,8 @@ fn flight(priority: Priority) -> Arc<Flight> {
         }),
         priority: FlightPriority::new(priority),
         requested_type: None,
+        cancellation: RangeAssemblyCancellation::new(),
+        lifecycle: Mutex::new(FlightLifecycle::default()),
     })
 }
 
@@ -330,7 +332,8 @@ fn parent_promotion_reorders_its_already_queued_dependency() {
     let unrelated = scheduler
         .schedule("u.value", LoadPriority::Streaming)
         .unwrap();
-    LoadTicket::new(parent.clone()).reprioritize(LoadPriority::Immediate);
+    let parent_ticket = LoadTicket::new(parent.clone());
+    parent_ticket.reprioritize(LoadPriority::Immediate);
     {
         let state = scheduler.state.lock().unwrap();
         let child = state
@@ -342,6 +345,7 @@ fn parent_promotion_reorders_its_already_queued_dependency() {
     let result = cpu.block_on(assembly);
     assert!(result.is_ok());
     scheduler.finish_flight(key, parent, result);
+    drop(parent_ticket);
     cpu.block_on(unrelated).unwrap();
     assert_eq!(*decoded.lock().unwrap(), b"pcu");
 }
