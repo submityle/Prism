@@ -16,6 +16,7 @@
 use alloc::sync::Arc;
 use core::fmt;
 use core::num::NonZeroU64;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use prism_render_driver as rhi;
@@ -140,6 +141,40 @@ struct StoredTexture {
 /// A short alias for the backend's per-kind slot maps.
 type Map<K, V> = Mutex<rhi::GenerationalSlotMap<K, V>>;
 
+/// CPU-only, generation-local loss state. A host notifier must not retain the
+/// native device (including when stored inside that device's loss callback).
+#[derive(Default)]
+struct DeviceLossState {
+    lost: AtomicBool,
+    reason: Mutex<Option<DeviceLostReason>>,
+}
+
+impl DeviceLossState {
+    fn notify(&self, reason: DeviceLostReason) {
+        let mut recorded = lock(&self.reason);
+        // Serialize competing reporters and publish only the first reason.
+        // Draining it must not let a duplicate notification publish it again.
+        if !self.lost.swap(true, Ordering::AcqRel) {
+            *recorded = Some(reason);
+        }
+    }
+
+    fn notifier(
+        self: &Arc<Self>,
+    ) -> impl Fn(DeviceLostReason) + Clone + Send + Sync + 'static + use<> {
+        let state = Arc::clone(self);
+        move |reason| state.notify(reason)
+    }
+
+    fn is_lost(&self) -> bool {
+        self.lost.load(Ordering::Acquire)
+    }
+
+    fn take_reason(&self) -> Option<DeviceLostReason> {
+        lock(&self.reason).take()
+    }
+}
+
 /// The shared, reference-counted state behind a [`WgpuDevice`] and its queue.
 ///
 /// Holds the wgpu device, the reported capabilities, and one locked slot map
@@ -173,10 +208,9 @@ pub(crate) struct DeviceInner {
     render_pipelines: Map<RenderPipelineMarker, wgpu::RenderPipeline>,
     /// Live compute pipelines.
     compute_pipelines: Map<ComputePipelineMarker, wgpu::ComputePipeline>,
-    /// The most recent device loss reported by wgpu, recorded by the callback
-    /// installed in [`DeviceInner::install_device_lost_callback`] and drained
-    /// by [`WgpuDevice::take_device_lost`]. `None` until the device is lost.
-    device_lost: Mutex<Option<DeviceLostReason>>,
+    /// Shared by the owned callback and explicit host notifications. Draining
+    /// the first reason never revives this device generation's readbacks.
+    loss: Arc<DeviceLossState>,
 }
 
 /// Locks a mutex, treating poisoning (a panic in another thread while the lock
@@ -245,7 +279,7 @@ impl DeviceInner {
             pipeline_layouts: Mutex::new(rhi::GenerationalSlotMap::new()),
             render_pipelines: Mutex::new(rhi::GenerationalSlotMap::new()),
             compute_pipelines: Mutex::new(rhi::GenerationalSlotMap::new()),
-            device_lost: Mutex::new(None),
+            loss: Arc::new(DeviceLossState::default()),
         }
     }
 
@@ -261,18 +295,13 @@ impl DeviceInner {
     /// uncaptured-error handler is left alone so genuine validation errors keep
     /// surfacing as they did before.
     ///
-    /// The callback observes the loss through a weak reference: the closure is
-    /// owned by the wgpu device stored in `self`, so capturing a strong
-    /// reference would keep this state — and the device — alive forever. If no
-    /// [`WgpuDevice`] handle is still alive when the loss fires, nobody can
-    /// observe it and the reason is dropped.
+    /// The callback retains only CPU loss state, not `DeviceInner` or a native
+    /// handle, so it cannot keep the device alive through a reference cycle.
     fn install_device_lost_callback(self: &Arc<Self>) {
-        let inner = Arc::downgrade(self);
+        let notify = self.loss.notifier();
         self.device
             .set_device_lost_callback(move |reason, _message| {
-                if let Some(inner) = inner.upgrade() {
-                    *lock(&inner.device_lost) = Some(map_device_lost(reason));
-                }
+                notify(map_device_lost(reason));
             });
     }
 
@@ -283,6 +312,18 @@ impl DeviceInner {
             .expect("stale BufferId in command stream")
             .buffer
             .clone()
+    }
+
+    /// Readback admission must reject retired IDs instead of using the
+    /// command-replay resolver, whose contract deliberately panics on stale IDs.
+    pub(crate) fn try_resolve_buffer(&self, id: rhi::BufferId) -> Option<wgpu::Buffer> {
+        lock(&self.buffers)
+            .get(convert::convert_id(id))
+            .map(|stored| stored.buffer.clone())
+    }
+
+    pub(crate) fn is_lost(&self) -> bool {
+        self.loss.is_lost()
     }
 
     /// Resolves a texture id to a cloned wgpu handle, panicking on a stale id.
@@ -426,8 +467,10 @@ impl WgpuDevice {
     /// the returned pair releases its handles; it does not call native
     /// `Device::destroy` or submit work. The host owns device-loss handling and
     /// recovery: retire old work and create a fresh bridge/resource table for
-    /// the replacement device. [`RenderDevice::take_device_lost`] is not fed
-    /// by a callback on this path; the host must observe its own callback.
+    /// the replacement device. This path installs no callback: the host must
+    /// forward loss through [`Self::device_loss_notifier`] so readbacks and
+    /// [`RenderDevice::take_device_lost`] observe it. Forward to each adoption
+    /// separately; their loss states, like their resource tables, are distinct.
     #[must_use]
     pub fn adopt(
         adapter: wgpu::Adapter,
@@ -462,6 +505,32 @@ impl WgpuDevice {
     #[must_use]
     pub(crate) fn inner(&self) -> Arc<DeviceInner> {
         Arc::clone(&self.inner)
+    }
+
+    /// Returns a cloneable, thread-safe notification function for this device
+    /// generation. Call it with an RHI loss reason from the host's existing
+    /// loss callback, or before a host-controlled device teardown. Available
+    /// on both owned and adopted devices; obtaining it does not change any
+    /// native callback. It retains only CPU state and may outlive the bridge.
+    ///
+    /// The first notification permanently rejects new/pending readbacks with
+    /// `DeviceLost` and publishes one reason to
+    /// [`RenderDevice::take_device_lost`]. Repeated notifications, including
+    /// after the reason is drained, do not republish or reset that state.
+    /// Already-consumed tickets remain `Consumed`. Recovery needs a fresh
+    /// bridge/device generation, not a reset of this notification function.
+    ///
+    /// This is a notification contract, not an exclusive native-device lease:
+    /// it does not cancel a native call already in flight or synchronize an
+    /// arbitrary external `destroy`. The host must stop/drain concurrent work
+    /// before teardown. Readback checks before/after native operations narrow
+    /// but cannot eliminate check-to-call races. Forwarding only from a native
+    /// loss callback also leaves the interval before callback delivery ungated.
+    #[must_use]
+    pub fn device_loss_notifier(
+        &self,
+    ) -> impl Fn(DeviceLostReason) + Clone + Send + Sync + 'static + use<> {
+        self.inner.loss.notifier()
     }
 
     /// Borrows the underlying wgpu device, e.g. to configure a surface.
@@ -940,7 +1009,7 @@ impl RenderDevice for WgpuDevice {
     }
 
     fn take_device_lost(&self) -> Option<DeviceLostReason> {
-        lock(&self.inner.device_lost).take()
+        self.inner.loss.take_reason()
     }
 
     fn create_buffer(&self, descriptor: &rhi::BufferDescriptor) -> rhi::BufferId {
@@ -1339,6 +1408,53 @@ impl OwnedBinding {
 mod tests {
     use super::*;
     use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    #[test]
+    fn async_readback_loss_notifier_is_cpu_only_sticky_and_cloneable() {
+        let state = Arc::new(DeviceLossState::default());
+        let weak = Arc::downgrade(&state);
+        let notify = state.notifier();
+        let duplicate = notify.clone();
+        assert!(!state.is_lost());
+        assert_eq!(state.take_reason(), None);
+        notify(DeviceLostReason::Destroyed);
+        assert!(state.is_lost());
+        assert_eq!(state.take_reason(), Some(DeviceLostReason::Destroyed));
+        duplicate(DeviceLostReason::Unknown);
+        assert!(state.is_lost());
+        assert_eq!(state.take_reason(), None, "duplicates must not republish");
+        // The notifier owns only this CPU state; no adapter/device is needed,
+        // and it remains callable after its original owner goes away.
+        drop(state);
+        notify(DeviceLostReason::Unknown);
+        assert!(weak.upgrade().is_some());
+        drop(notify);
+        drop(duplicate);
+        assert!(weak.upgrade().is_none());
+    }
+
+    #[test]
+    fn async_readback_loss_notifier_concurrent_reporters_publish_once() {
+        let state = Arc::new(DeviceLossState::default());
+        let notify = state.notifier();
+        let duplicate = notify.clone();
+        std::thread::scope(|scope| {
+            scope.spawn(move || notify(DeviceLostReason::Unknown));
+            scope.spawn(move || duplicate(DeviceLostReason::Destroyed));
+        });
+        assert!(state.is_lost());
+        assert!(matches!(
+            state.take_reason(),
+            Some(DeviceLostReason::Unknown | DeviceLostReason::Destroyed)
+        ));
+        state.notify(DeviceLostReason::Unknown);
+        assert_eq!(state.take_reason(), None);
+        assert!(state.is_lost());
+        assert!(
+            !DeviceLossState::default().is_lost(),
+            "new generations start healthy"
+        );
+    }
 
     fn import_device_or_skip() -> Option<(WgpuDevice, crate::WgpuQueue)> {
         match crate::WgpuInstance::new().request_default_hardware_device() {

@@ -28,6 +28,8 @@ use crate::sampler::SamplerDescriptor;
 use crate::shader::ShaderModuleDescriptor;
 use crate::texture::{Extent3d, TextureDescriptor, TextureViewDescriptor};
 use alloc::vec::Vec;
+use alloc::boxed::Box;
+use crate::{BufferReadback, BufferReadbackError, BufferReadbackRange};
 
 /// The byte layout of a linear image buffer used for texture uploads.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -164,4 +166,18 @@ pub trait RenderQueue {
     fn write_texture(&self, destination: TextureWrite, data: &[u8], layout: ImageDataLayout);
     /// Submits finished command buffers for execution in order.
     fn submit(&self, command_buffers: &[CommandBuffer]);
+
+    /// Captures buffer ranges after preceding uploads/submissions and before
+    /// subsequent queue work. The backend validates the entire request and its
+    /// staging byte budget before allocation, then submits a copy without
+    /// waiting. Readback completion does not require any future submissions.
+    /// Unsupported backends report a capability error, never synthetic bytes.
+    fn request_buffer_readback(
+        &self,
+        ranges: &[BufferReadbackRange],
+        max_bytes: u64,
+    ) -> Result<Box<dyn BufferReadback>, BufferReadbackError> {
+        let _ = (ranges, max_bytes);
+        Err(BufferReadbackError::Unsupported)
+    }
 }

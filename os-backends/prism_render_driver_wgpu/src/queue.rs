@@ -18,10 +18,14 @@ use crate::convert;
 use crate::device::DeviceInner;
 use alloc::sync::Arc;
 
+#[path = "readback.rs"]
+mod readback;
+
 /// A wgpu-backed [`rhi::RenderQueue`].
 ///
 /// Shares the device's resource tables so submitted command buffers resolve
 /// their ids against the exact objects the device created.
+#[derive(Clone)]
 pub struct WgpuQueue {
     /// The underlying wgpu queue.
     queue: wgpu::Queue,
@@ -458,6 +462,14 @@ impl WgpuQueue {
 }
 
 impl RenderQueue for WgpuQueue {
+    fn request_buffer_readback(
+        &self,
+        ranges: &[rhi::BufferReadbackRange],
+        max_bytes: u64,
+    ) -> Result<Box<dyn rhi::BufferReadback>, rhi::BufferReadbackError> {
+        readback::request(self, ranges, max_bytes)
+    }
+
     fn write_buffer(&self, buffer: rhi::BufferId, offset: u64, data: &[u8]) {
         let buf = self.inner.resolve_buffer(buffer);
         self.queue.write_buffer(&buf, offset, data);
