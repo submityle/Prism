@@ -44,6 +44,7 @@ mod desktop_images;
 mod desktop_scene;
 mod desktop_ui;
 mod document;
+mod ecs_document_bridge;
 mod lifecycle;
 
 pub use controller::{
@@ -81,6 +82,7 @@ pub use document::{
     DocumentLimits, DocumentLoadReceipt, DocumentSaveReceipt, DocumentSchemaCatalog,
     PreparedDocumentLoad,
 };
+pub use ecs_document_bridge::{EditorEcsDocumentBridge, EditorEcsDocumentError};
 
 pub use backend::{
     GpuSurfaceError, GpuSurfaceErrorKind, GpuSurfaceLifecycle, PixelSize, PixelSizeError,

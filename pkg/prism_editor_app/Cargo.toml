@@ -22,7 +22,7 @@ prism_editor_timeline = { path = "../prism_editor_timeline" }
 prism_editor_graph = { path = "../prism_editor_graph" }
 prism_asset = { path = "../prism_asset" }
 prism_app = { path = "../prism_app", default-features = false, features = ["std"] }
-prism_ecs = { path = "../prism_ecs", default-features = false, features = ["std"] }
+prism_ecs = { path = "../prism_ecs", default-features = false, features = ["std", "reflect"] }
 prism_reflect = { path = "../prism_reflect" }
 prism_math = { path = "../prism_math", optional = true }
 prism_ui = { path = "../prism_ui" }
