@@ -475,7 +475,7 @@ fn independent_reduced_decay_rejects_atomically_with_or_without_a_motor() {
 }
 
 #[test]
-fn reduced_decay_scales_accelerated_velocity_independently_of_mass_and_inertia() {
+fn reduced_viscous_damping_uses_physical_mass_and_reports_implicit_acceleration() {
     for hinge in [false, true] {
         for effective_mass in [2.0f32, 7.0] {
             for h in [0.01f32, 0.04] {
@@ -515,12 +515,14 @@ fn reduced_decay_scales_accelerated_velocity_independently_of_mass_and_inertia()
                         for _ in 0..4 {
                             let report = tree.step(h);
                             assert!(!report.degraded);
+                            let next_speed = effective_mass * (speed + h * acceleration)
+                                / (effective_mass + h * damping);
                             near(
                                 f64::from(report.joint_accelerations[0]),
-                                f64::from(acceleration),
+                                f64::from((next_speed - speed) / h),
                                 1.0e-5,
                             );
-                            speed = (speed + h * acceleration) / (1.0 + h * damping);
+                            speed = next_speed;
                             position += h * speed;
                             near(f64::from(tree.velocities()[0]), f64::from(speed), 1.0e-6);
                             near(f64::from(tree.positions()[0]), f64::from(position), 1.0e-6);

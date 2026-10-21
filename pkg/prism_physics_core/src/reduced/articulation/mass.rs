@@ -241,6 +241,18 @@ impl ArticulationImpulseSolver {
     }
 
     pub(crate) fn new(model: &Articulation) -> Self {
+        Self::new_with_implicit_damping(model, 0.0)
+    }
+
+    /// Builds the integration operator `M + dt * C`, where `C` is the
+    /// diagonal joint-space viscous damping matrix. Contact and arbitrary
+    /// impulse queries continue to use [`Self::new`] and therefore see the
+    /// physical mass matrix `M`, including armature but excluding damping.
+    pub(super) fn new_for_integration(model: &Articulation, dt: Real) -> Self {
+        Self::new_with_implicit_damping(model, dt)
+    }
+
+    fn new_with_implicit_damping(model: &Articulation, dt: Real) -> Self {
         let n = model.link_count();
         let transforms: Vec<_> = (0..n).map(|i| model.xup(i)).collect();
         let axes: Vec<_> = (0..n).map(|i| model.joint_axes(i)).collect();
@@ -264,7 +276,7 @@ impl ArticulationImpulseSolver {
                         d[row][col] += axes[i].cols[row][k] * u[i][k][col];
                     }
                 }
-                d[row][row] += model.links[i].joint.armature;
+                d[row][row] += model.links[i].joint.armature + dt * model.links[i].joint.damping;
             }
             inverse_d[i] = invert_small(d, count);
             reduced[i] = mat6_sub(&inertia[i], &outer_from_cols(&u[i], inverse_d[i], count));

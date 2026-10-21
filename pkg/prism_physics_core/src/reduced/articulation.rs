@@ -646,9 +646,11 @@ pub struct ArticulationJoint {
     pub limits: JointLimits,
     /// Optional bounded servo.
     pub motor: Option<JointMotor>,
-    /// Mass-independent generalized-velocity decay rate in inverse seconds.
-    /// Integration uses `qd_next = (qd + dt * qdd) / (1 + dt * damping)`;
-    /// this is not a physical viscous torque/force coefficient.
+    /// Physical viscous coefficient in joint space.
+    ///
+    /// Revolute and spherical axes use N*m*s/rad; prismatic axes use N*s/m.
+    /// Integration solves `(M + dt * C) * qdd = tau - bias - C * qd`, so high
+    /// damping remains stable without changing contact or impulse inverse mass.
     pub damping: Real,
     /// Reflected motor/gear inertia added in joint space.
     pub armature: Real,
@@ -705,9 +707,9 @@ impl ArticulationJoint {
         self
     }
 
-    /// Sets the implicit generalized-velocity decay rate (inverse seconds).
-    /// This scales the accelerated joint velocity, not the floating-base
-    /// velocity, and is distinct from motor feedback damping.
+    /// Sets the physical joint-space viscous coefficient.
+    ///
+    /// This passive damping is distinct from motor feedback damping.
     #[must_use]
     pub const fn with_damping(mut self, damping: Real) -> Self {
         self.damping = damping;
@@ -957,6 +959,9 @@ fn validate_link(
     {
         return Err(ArticulationBuildError::InvalidJointParameters { link });
     }
+    if joint.kind == ArticulationJointKind::Fixed && joint.damping != 0.0 {
+        return Err(ArticulationBuildError::InvalidJointParameters { link });
+    }
     match joint.kind {
         ArticulationJointKind::Revolute { axis } | ArticulationJointKind::Prismatic { axis } => {
             if !axis.is_finite()
@@ -1174,12 +1179,9 @@ impl Articulation {
                 broken_joint: Some(link),
             };
         }
-        let dynamics = self.compute_dynamics();
+        let dynamics = self.compute_dynamics(dt);
         for i in 0..self.q.len() {
-            let link = dynamics.dof_link[i];
-            let damping = self.links[link].joint.damping.max(0.0);
-            let denominator = 1.0 + dt * damping;
-            self.qd[i] = (self.qd[i] + dt * dynamics.qdd[i]) / denominator;
+            self.qd[i] += dt * dynamics.qdd[i];
         }
         for link in 0..self.links.len() {
             let offset = self.dof_offsets[link];
@@ -1650,9 +1652,9 @@ impl Articulation {
         Kinematics { velocities, axes }
     }
 
-    fn compute_dynamics(&self) -> DynamicsResult {
+    fn compute_dynamics(&self, dt: Real) -> DynamicsResult {
         let kin = self.kinematics();
-        let solver = ArticulationImpulseSolver::new(self);
+        let solver = ArticulationImpulseSolver::new_for_integration(self, dt);
         let n = self.links.len();
         let mut forces = Vec::with_capacity(n);
         let mut c = Vec::with_capacity(n);
@@ -1670,7 +1672,12 @@ impl Articulation {
                 vec6_add(external.as_array(), gravity.as_array()),
                 bias,
             )));
-            torques.push(self.joint_torque(i).to_array());
+            let mut torque = self.joint_torque(i);
+            let damping = self.links[i].joint.damping;
+            if damping != 0.0 {
+                torque -= self.joint_velocities(i) * damping;
+            }
+            torques.push(torque.to_array());
         }
         let velocity = if self.base_mode == ArticulationBase::Floating {
             self.base_velocity.as_array()
@@ -1688,12 +1695,6 @@ impl Articulation {
         DynamicsResult {
             qdd: response.generalized_velocity_change,
             base_acceleration: response.base_velocity_change,
-            dof_link: self
-                .links
-                .iter()
-                .enumerate()
-                .flat_map(|(link, l)| std::iter::repeat_n(link, l.joint.kind.dofs()))
-                .collect(),
         }
     }
 
@@ -1822,7 +1823,6 @@ struct Kinematics {
 struct DynamicsResult {
     qdd: Vec<Real>,
     base_acceleration: SpatialMotion,
-    dof_link: Vec<usize>,
 }
 
 /// Result of one ABA step.
