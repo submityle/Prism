@@ -1,12 +1,14 @@
 # Prism Physics 次世代物理引擎设计方案
 
-> 面向 Prism（Bevy fork）的数据导向、统一求解、多后端物理引擎设计。
+> 面向 Prism 的数据导向、统一求解、多后端物理引擎设计。
 > 借鉴 UE5 Chaos、Unity DOTS Physics / Havok、PhysX 5、Jolt、Avian、Rapier，取长补短。
 > 本文档为设计规格，不含任何 AI/ML 内容，采用纯经典数值物理路线。
 
-- 版本: v0.3（编码推进中：M0–M8 内核已落地，GPU 后端已上真机验证）
-- 适用引擎: Prism / Bevy ECS 生态
-- 关键依赖: bevy_ecs（并行 ECS）、bevy_math（glam SIMD）、bevy_tasks（任务系统）、wgpu（GPU 后端）
+- 版本: v0.4（编码推进中：CPU 核心与 ECS 固定步链路已落地，GPU MPM runtime 已有独立固定步切片）
+- 适用引擎: Prism 自有 ECS / 无 ECS 消费方
+- 关键依赖: Prism 自有 prism_ecs / prism_math（ECS 适配层）与 wgpu（可选 GPU 后端）；物理 crate 不依赖 Bevy
+
+> 状态口径：本文把“算法/内核存在”“跨层生产接线”“真机验证”“性能验收”分开记录。GPU kernel 或测试文件存在，不等于整个物理系统已经完成；没有真实适配器时，GPU parity 只能记录为 skipped。
 
 ---
 
@@ -26,8 +28,8 @@
 13. 高级几何与鲁棒性
 14. 时间操控与网络
 15. 可编程性：约束 DSL 与热重载
-16. 离线模式（架构级预留）
-17. Bevy 集成层 API
+16. 离线模式（运行时切片与资产管线边界）
+17. Prism ECS/App 集成层 API
 18. 确定性与联机
 19. 质量与可信度基础设施
 20. 能力全景（分级）
@@ -47,7 +49,7 @@
 
 对标商用旗舰引擎，取长补短，确立四条铁律：
 
-- 数据导向 (DOD)：物理状态即 ECS 组件，热数据 SoA 布局，天然对齐 Bevy 并行调度与 SIMD。
+- 数据导向 (DOD)：物理状态通过 Prism ECS 组件与 core world 映射，热数据采用 SoA 布局，并行调度由 Prism App/任务策略负责。
 - 统一求解器：刚体/关节/软体/布料/流体使用同一套 XPBD 内核作为主干，而非分裂成多个互不兼容的子系统。这是相对 PhysX(TGS)、Rapier(Impulse) 的关键差异化点，也是全物态耦合的结构性前提。
 - 确定性可选：提供 f32 高性能路径 + 定点/软浮点确定性路径，服务联机同步与回放。二者编译期切换，零运行时代价。
 - 易用性即 API：默认"零配置能跑"，进阶用户可逐层下钻替换。
@@ -58,11 +60,11 @@
 |---|---|---|
 | 求解器 | 统一 XPBD + 子步 | 稳定、刚性高、跨物态统一，代差优势 |
 | 内存 | SoA + ECS 组件 | 并行/SIMD 天然对齐 |
-| 并行 | Island 分岛 + bevy_tasks | 高并行度、确定性可控 |
-| GPU | wgpu compute 可选后端 | 与 Bevy 渲染同后端，跨平台 |
+| 并行 | Island 分岛 + Prism 任务策略 | 高并行度、确定性可控 |
+| GPU | wgpu compute 可选后端 | 与 Prism 渲染后端共享 wgpu 能力，跨平台 |
 | 碰撞 | GJK/EPA + SDF + 凸分解 | 覆盖凸/凹/任意网格 |
 | 联机 | 定点 + 快照回滚 | 对齐 Unity DOTS 卖点 |
-| API | 默认零配置，分层下钻 | 对齐 Bevy modular/易用 |
+| API | 默认零配置，分层下钻 | 对齐 Prism ECS modular/易用 |
 
 ---
 
@@ -70,7 +72,7 @@
 
 ```
 Layer 5  作者层 Authoring   (Prefab/编辑器/热重载)
-Layer 4  Bevy 集成层        (Plugin/Component/System, RigidBody/Collider/Joint/事件/Query)
+Layer 4  Prism ECS/App 集成层 (Plugin/Component/System, RigidBody/Collider/Joint/事件/Query)
 Layer 3  仿真管线 Pipeline   (Broad->Narrow->Solve->Integrate, Island/睡眠/子步/CCD)
 Layer 2  核心内核 Kernel     (统一 XPBD + 多求解器插槽, Contact/Joint/Soft/Cloth/Fluid 约束)
 Layer 1  几何 & 加速结构     (BVH, GJK/EPA, SDF, 凸分解)
@@ -79,7 +81,7 @@ Layer 0  后端抽象 Backend    (CPU-SIMD / GPU-Compute)
 
 - 跨语言/后端边界只在 Layer 0 与 Layer 2，其余层稳定。
 - no_std 友好，wasm 可跑（关闭 GPU/多线程时降级到单线程 SIMD）。
-- Layer 0–2 组成"引擎无关内核"，不依赖 bevy_ecs，可被服务器逻辑/其他引擎复用。
+- Layer 0–2 组成“引擎无关内核”，不依赖 Prism ECS，可被服务器逻辑或其他宿主复用。
 
 ---
 
@@ -95,7 +97,7 @@ Layer 0  后端抽象 Backend    (CPU-SIMD / GPU-Compute)
 ### 3.2 约束原语
 可组合、可插件扩展的 trait Constraint：
 - 接触约束（非穿透 + 摩擦，含 compliance 软硬度）
-- 固定(焊接)/距离/球/铰链/棱柱/马达 关节（齿轮关节为规划项）；关节可选断裂阈值（见 §24）。球关节 swing-twist 锥限/扭限、关节柔韧与伺服 drive 见 §26；强铰接链可选降阶坐标求解见 §27
+- 固定(焊接)/距离/球/铰链/棱柱/马达关节；齿轮关节尚未实现。关节可选断裂阈值（见 §24）。球关节 swing-twist 锥限/扭限、关节柔韧与伺服 drive 见 §26；强铰接链可选降阶坐标求解见 §27
 - 体积保持（软体）、弯曲/拉伸（布料）
 - 密度约束（PBF 流体）
 
@@ -152,7 +154,7 @@ Layer 0  后端抽象 Backend    (CPU-SIMD / GPU-Compute)
 - Island 分岛：并查集把相互接触/关节连接的物体分组，岛间完全并行求解。并行度的核心来源。
 - 睡眠 (Sleeping)：低速物体进入休眠，从活跃集移除，CPU 归零。唤醒靠接触/关节传播。
 - 确定性调度：岛内约束排序稳定化，保证同输入同输出（联机必需）。
-- 分阶段并行：Broad/Narrow/Solve 各自用 bevy_tasks 的 ComputeTaskPool 切片并行，接触对生成用无锁并发容器收集。
+- 分阶段并行：Broad/Narrow/Solve 由 Prism 任务策略切片并行；接触对必须按稳定键归并，不能把并行实现本身当作确定性证据。
 
 单帧管线：
 ```
@@ -164,7 +166,7 @@ Layer 0  后端抽象 Backend    (CPU-SIMD / GPU-Compute)
 
 ## 7. 后端抽象与 GPU（Layer 0）
 
-- CPU 后端：SoA + glam SIMD（SSE/AVX/NEON），Island 级 rayon/bevy_tasks 并行。目标：万级动态刚体 60fps。
+- CPU 后端：SoA + SIMD，Island 级并行。目标：万级动态刚体 60fps；该目标仍需匹配硬件与内容的基准证据，不能由单元测试替代。
 - GPU 后端（可选 feature）：基于 wgpu compute shader，把粒子/约束批量投影搬上 GPU，服务大规模布料/流体/破碎（十万~百万粒子）、GPU broad-phase（spatial hashing）+ GPU XPBD 投影。
 - 后端 trait 化：
 
@@ -214,7 +216,7 @@ CPU/GPU 可运行时切换、可混合（刚体走 CPU、流体走 GPU）。
 不止"把某步搬 GPU"，而是状态常驻 GPU、CPU 只发指令：
 - 物理状态、BVH、接触对全程留在显存，帧间不回传。
 - Indirect dispatch：接触/约束数量在 GPU 上决定并自驱动派发，避免 CPU 回读同步点。
-- 与 Bevy wgpu 渲染管线共享缓冲，物理结果直供 GPU skinning / 粒子渲染，零拷贝。
+- 与 Prism 渲染管线共享缓冲，物理结果直供 GPU skinning/粒子渲染的零拷贝路径仍属于跨层接线工作。
 - CPU<->GPU 仅在需要查询/事件时按需回读（异步、双缓冲）。
 
 ---
@@ -224,7 +226,7 @@ CPU/GPU 可运行时切换、可混合（刚体走 CPU、流体走 GPU）。
 - 物理在独立固定步长线程运行，渲染帧对最近两个物理状态做插值/外推（消除抖动）。
 - 三重缓冲状态，读写无锁。
 - 游戏逻辑通过命令队列写入（施力、改属性），下一子步统一应用，保证确定性。
-- 与 Bevy 的 FixedUpdate 调度对齐，但允许物理频率独立于渲染帧率。
+- 与 Prism App 的 FixedUpdate 调度对齐，但允许物理频率独立于渲染帧率。
 
 ---
 
@@ -248,7 +250,7 @@ CPU/GPU 可运行时切换、可混合（刚体走 CPU、流体走 GPU）。
 
 - 约束编译器 / DSL：用户声明式定义自定义约束（如"保持这两点夹角在 30–60 度且软度 0.1"），编译到 CPU/GPU 内核，无需手写求解代码。
 - 物理参数热重载：材料、重力、约束参数运行时改即生效，编辑器滑块实时调参。
-- 可视化调试进阶：接触力箭头、约束应力热力图、Island 着色、求解器收敛曲线、GPU 占用火焰图，接入 Bevy 诊断与 egui/UI。
+- 可视化调试进阶：接触力箭头、约束应力热力图、Island 着色、求解器收敛曲线、GPU 占用火焰图；诊断 UI 适配 Prism 编辑器/诊断契约，当前不视为物理 core 已完成。
 
 ---
 
@@ -297,7 +299,7 @@ iterations，可再消费 `Offline::iterations`，当前 PhysicsBackend 合约�
 ③ 缓存组件与资源（Layer 4）仍属于后续资产集成：
 - PhysicsCache { handle, mode: Record | Playback | Passthrough }
 - Bakeable（标记该实体参与烘焙）
-- 资源 Handle<PhysicsCacheAsset>（走 Bevy Asset 系统，可热重载/流式）
+- 资源 Handle<PhysicsCacheAsset>（走 Prism 资产系统；热重载/流式加载仍未完成）
 
 ④ Headless 运行路径：PrismPhysicsPlugin 预留 .headless() 构造，不注册 Debug/渲染同步 System，允许脱离窗口在 CI/服务器/CLI 跑批量仿真并落盘缓存。与确定性 feature 天然协同。
 
@@ -313,7 +315,7 @@ iterations，可再消费 `Offline::iterations`，当前 PhysicsBackend 合约�
 
 ---
 
-## 17. Bevy 集成层 API（Layer 4）
+## 17. Prism ECS/App 集成层 API（Layer 4）
 
 ### 17.1 默认极简（新手 5 行能跑）
 ```rust
@@ -326,7 +328,7 @@ commands.spawn((
 ));
 ```
 
-### 17.2 组件设计（全部 ECS 原生，可 reflect/序列化）
+### 17.2 组件设计（Prism ECS 原生，可序列化）
 - RigidBody { Dynamic | Kinematic | Static }
 - Collider（内部指向共享几何资源 Handle<ColliderShape>）
 - Mass / CenterOfMass / Inertia（可自动从 Collider 计算，也可覆盖）
@@ -336,14 +338,14 @@ commands.spawn((
 - CollisionLayers { memberships, filters }
 
 ### 17.3 事件与查询
-- CollisionStarted / CollisionEnded / TriggerEvent（Bevy Event/Observer）
+- CollisionStarted / CollisionEnded / TriggerEvent（Prism ECS event/observer）
 - SpatialQuery：raycast / shapecast / overlap / point_project，作为 ECS SystemParam 直接注入。
-- Observer 驱动：接触即触发 observer，符合 Bevy 最新 event 架构。
+- Observer 驱动：接触即触发 observer，遵循 Prism ECS 生命周期与事件契约。
 
 ### 17.4 易用性加分项
 - 单位自解释（SI），gravity 默认 -9.81。
 - Debug 可视化插件：碰撞体线框、接触点、约束、休眠状态、Island 着色。
-- 诊断面板接入 Bevy Diagnostics：步耗时、活跃刚体数、接触对数、岛数。
+- 诊断面板接入 Prism Diagnostics：步耗时、活跃刚体数、接触对数、岛数。
 
 ---
 
@@ -404,17 +406,14 @@ Tier C (地基, 做到最好):
 ## 21. Crate 拆分与落地形态
 
 ```
-crates/
-  bevy_prism_core        // Layer 0-2: 无 Bevy 依赖的纯物理内核（可独立发布/复用）
-  bevy_prism_geometry    // Layer 1: 几何、BVH、GJK/EPA、SDF
-  bevy_prism_backend_cpu // CPU SIMD 后端
-  bevy_prism_backend_gpu // wgpu compute 后端 (feature)
-  bevy_prism_cache       // 离线缓存格式 + 烘焙器 + 回放器（预留，先占位）
-  bevy_prism             // Layer 4-5: Bevy 插件、组件、System、事件、查询
-  bevy_prism_debug       // 可视化 & 诊断
+pkg/
+  prism_physics_core     // Layer 0-3: 无 ECS 宿主依赖的物理内核
+  prism_physics_geometry // Layer 1: 几何、BVH、GJK/EPA、SDF
+  prism_physics_gpu      // wgpu compute 后端与 resident runtime
+  prism_physics_ecs      // Prism ECS/App 固定步同步桥
 ```
 
-内核 bevy_prism_core 不依赖 bevy_ecs（纯数据 + trait），保证可被其他引擎/服务器逻辑复用；Bevy 层只做同步桥接。这与 Rapier 的"引擎无关内核 + bevy_rapier 胶水"哲学一致，但内核选用统一 XPBD 而非脉冲法，形成差异化。
+prism_physics_core 不依赖 Prism ECS（纯数据 + trait），保证可被服务器逻辑或其他宿主复用；prism_physics_ecs 只做同步桥接。当前真实 ECS 固定步顺序为 `Sync -> Step -> Writeback`，GPU MPM runtime 尚未接入该链路。
 
 ---
 
@@ -429,17 +428,17 @@ crates/
 | M3 | Island 并行 + 睡眠 + warm-start + CCD（已升级为 rotational conservative-advancement：shape-cast + 位姿回绕，对齐 UE/Chaos） | 万级刚体 60fps | ✅ 完成 |
 | M4 | 布料 / 软体 / 绳索（统一约束复用） | 交互式布料 | ✅ 完成 |
 | M4.5 | 离线烘焙 + Golden replay CI | 缓存回放 demo | ✅ 完成 |
-| M5 | GPU 后端（流体/大布料/破碎） | 十万粒子 | ✅ 完成（prism_physics_gpu / prism_volumetric_gpu，每个核均为 CPU golden + WGSL 孪生 + 真机 GPU parity） |
-| M5.5 | MPM（沙/雪/泥）+ FLIP/APIC 流体 + 表面重建 | 溃坝/沙堆 demo | ✅ 完成 |
+| M5 | GPU 后端（流体/大布料/破碎） | 十万粒子 | 🟡 kernel 与独立 parity 测试已实现；统一 runtime/跨层回写仍在推进，真机结果按适配器可用性记录 |
+| M5.5 | MPM（沙/雪/泥）+ FLIP/APIC 流体 + 表面重建 | 溃坝/沙堆 demo | 🟡 CPU/GPU MPM stage 与 resident runtime 已实现；ECS/渲染接线和场景性能验收未完成 |
 | M7 | VBD / 降阶软体 + 自适应 LOD | 巨型软体实时 | ✅ 完成 |
 | M8 | 约束 DSL + 参数热重载 | 编辑器实时调参 | ✅ 完成 |
-| M9 | GPU-Driven 持久化管线 + 实时 Voronoi 破碎 | 零拷贝 + 动态裂纹 | 🟡 CPU 破碎核心完成；GPU 持久化管线随 M5 一并落地 |
-| M10 | 动态装配：力累加器/施力 API + 通用可断关节 + 装配图/复合体合并·拆分 + 吸附几何原语 + GrabDrive | 实时搭建 200+ 零件载具 60fps、焊点可断、抓取不穿墙 | ⬜ 规划（§24.12） |
-| M11 | 力场子系统 + GPU 采样 + 风扇/推进器/浮力部件 + 断裂连锁 | 自建载具可驾驶/飞行、受击解体 | ⬜ 规划（§24.12） |
-| M12 | 刚体/多体气动：各向异性阻力面元 + 翼面升力/失速 + 推进反扭矩 + 浮力（空气/水）+ 空间风场/滑流/地面效应 + 附加质量 | 自建飞行器可滑翔/配平飞行、气球浮空、水上载具 | ⬜ 规划（§25.15） |
-| M13 | 角色布偶：球关节 swing-twist 椭圆锥限/扭限 + 软限位 + 关节摩擦 + 位姿伺服 drive + RagdollBuilder | 人形布偶命中反应自然、不穿模不软面条、受击可配主动驱动 | ⬜ 规划（§26.11） |
-| M14 | 降阶坐标铰接：Featherstone ABA O(n) 正向动力学 + 广义坐标限位/马达 + 与 XPBD 接触耦合 | 长机械臂/角色强铰接链极大质量比零漂移、少子步稳定 | ⬜ 规划（§27.9） |
-| M15 | 布料拓扑撕裂：顶点分裂 + 裂纹前沿 + 穿刺 + 各向异性织物 + 渲染网格缝合 + GPU 拓扑变更 | 旗帜被弹片撕开真实裂口、刀划布、撕裂口参与自碰撞 | ⬜ 规划（§28.10） |
+| M9 | GPU-Driven 持久化管线 + 实时 Voronoi 破碎 | 零拷贝 + 动态裂纹 | 🟡 CPU 破碎和部分 GPU stage 已有；动态拓扑、生产持久化调度与渲染回写未完成 |
+| M10 | 动态装配：力累加器/施力 API + 通用可断关节 + 装配图/复合体合并·拆分 + 吸附几何原语 + GrabDrive | 实时搭建 200+ 零件载具 60fps、焊点可断、抓取不穿墙 | 🟡 core 装配/施力切片已有；ECS/资产/演示场景/性能验收未完成 |
+| M11 | 力场子系统 + GPU 采样 + 风扇/推进器/浮力部件 + 断裂连锁 | 自建载具可驾驶/飞行、受击解体 | 🟡 core field 与 GPU 采样已有；功能部件和断裂连锁跨层验收未完成 |
+| M12 | 刚体/多体气动：各向异性阻力面元 + 翼面升力/失速 + 推进反扭矩 + 浮力（空气/水）+ 空间风场/滑流/地面效应 + 附加质量 | 自建飞行器可滑翔/配平飞行、气球浮空、水上载具 | 🟡 aero core 切片已有；完整刚体气动模型、ECS/GPU 接线和 Demo 未完成 |
+| M13 | 角色布偶：球关节 swing-twist 椭圆锥限/扭限 + 软限位 + 关节摩擦 + 位姿伺服 drive + RagdollBuilder | 人形布偶命中反应自然、不穿模不软面条、受击可配主动驱动 | 🟡 最大坐标关节与部分 motor/限位已有；高阶布偶能力和群体验收未完成 |
+| M14 | 降阶坐标铰接：Featherstone ABA O(n) 正向动力学 + 广义坐标限位/马达 + 与 XPBD 接触耦合 | 长机械臂/角色强铰接链极大质量比零漂移、少子步稳定 | 🟡 articulation core/固定步输入已有；完整接触耦合、退化、GPU 多链和性能验收未完成 |
+| M15 | 布料拓扑撕裂：顶点分裂 + 裂纹前沿 + 穿刺 + 各向异性织物 + 渲染网格缝合 + GPU 拓扑变更 | 旗帜被弹片撕开真实裂口、刀划布、撕裂口参与自碰撞 | 🟡 边级与部分拓扑 core 已有；渲染缝合、GPU 重排、CCD/BVH 更新和完整验收未完成 |
 
 关键预留原则：Tier S/A 的功能现在只在 trait Solver、DriveMode、序列化、后端抽象四个扩展点"留好插槽"，M0/M1 不实现，避免过度设计拖慢主线。
 
@@ -612,7 +611,7 @@ Field
 
 ### 24.10 易用性分层
 
-- **5 行能跑**（概念 API，Bevy 层）：
+- **概念 API（尚未作为 M10 生产验收）**：
 
 ```rust
 // 把两个刚体焊成一个复合体
@@ -792,7 +791,7 @@ sample(p) -> Vec3                  // 稀疏网格 / 解析叠加，供面元查
 
 ### 25.13 易用性分层
 
-- **5 行能跑**（概念 API，Bevy 层）：
+- **概念 API（尚未作为 M12 生产验收）**：
 
 ```rust
 // 给刚体挂一片机翼 + 一个风扇即可飞
@@ -1080,7 +1079,7 @@ state: q（广义位置）、q̇（广义速度）
 
 ### 27.8 性能与预算
 
-- 每链 O(n)、链节数据紧凑数组（cache 友好）；island 内多条独立链并行（bevy_tasks）。
+- 每链 O(n)、链节数据紧凑数组（cache 友好）；多条独立链并行策略仍需按 Prism 任务调度与稳定归并验证。
 - 关节空间小矩阵求逆用固定尺寸（1/3 维）展开，无堆分配；SoA 存 spatial 量。
 - GPU：每链一个线程/工作组（链内串行、链间并行），适合大量同构链（如一群角色）；给 CPU golden + parity 预留。
 
@@ -1129,7 +1128,7 @@ state: q（广义位置）、q̇（广义速度）
 
 ### 28.2 现状（已落地，勿重做）
 
-- 边级断裂：`tear_flags`/`apply_tearing`（张应变超 `break_strain` 即移除边，列序确定性、保留存活边相对序以稳定图着色）；`tear_flag` 为 CPU/GPU 共享标量核。
+- 边级断裂：`tear_flags`/`apply_tearing`（张应变超 `break_strain` 即移除边，列序确定性、保留存活边相对序以稳定图着色）；`tear_flag` 为 CPU/GPU 共享标量核。拓扑级撕裂另以三角膜应力（正交各向异性本构、面积聚合的最大主应力）驱动，避免把约束断裂阈值误当作网格裂纹判据。
 - `TearReport{inspected, over_threshold, max_strain}`；`TearingParams` 带 `sanitized()`（NaN/负阈→不撕）。
 - 塑性蠕变（rest-length 永久拉长）在 `soft::damage::plasticity`。
 - **局限**：只删约束、**不改网格拓扑** → 渲染网格仍相连、不生成裂口边界；相邻弯曲/面积/tether 约束未同步；无裂纹方向控制与穿刺；GPU 侧只删标记、无拓扑重排。
@@ -1202,7 +1201,7 @@ state: q（广义位置）、q̇（广义速度）
 
 ### 28.12 易用性 + 里程碑 M15
 
-- 一个开关升级：`TearingParams{ break_strain, topological: true, anisotropy, max_front_steps }`；预设旗帜/帐篷/衣物/皮肉韧性。
+- 一个开关升级：`TopologyTearingConfig{ break_stress, material, propagation_ratio, max_initiation_edges, max_front_steps, max_split_vertices, anisotropy_gain }`；预设旗帜/帐篷/衣物/皮肉韧性。边级 `TearingParams::break_strain` 仍属于 XPBD 约束损伤，两者不共享错误的量纲。
 - 调试可视化：前沿高亮、主应力方向、裂口边界、每帧撕裂步数看板。
 - M15 阶段：① 顶点分裂 + 裂口边界 + 约束同步（验收：拉扯撕开真实口子、渲染可见）；② 裂纹前沿 + 各向异性 + 穿刺（验收：刀划布沿纹路裂、弹片穿旗）；③ 自碰撞/CCD 更新 + 渲染缝合 + GPU 拓扑变更 parity（验收：撕裂口不自穿、GPU/CPU 哈希一致）。
 
@@ -1260,4 +1259,4 @@ state: q（广义位置）、q̇（广义速度）
 
 ---
 
-*本文档为 Prism Physics 设计规格 v0.6，不含 AI/ML 内容；M0–M8 内核与 GPU 后端已进入编码，并以 CPU golden + 真机 GPU parity 双重验证；§24 动态装配（M10/M11）、§25 刚体/多体气动（M12）、§26 关节锥限与布偶（M13）、§27 降阶坐标铰接（M14）、§28 布料拓扑撕裂（M15）为深化设计规划项。布料边级撕裂与塑性（`soft::damage`）已落地，§28 为其拓扑级深化。v0.6 深化：§26 人形解剖锥角预设、主动↔被动布偶混合与命中反应、分层 LOD 预算；§27 关节空间阻尼 / 反射惯性（armature）/ 闭环与奇异处理、降阶 vs 最大坐标对拍；§28 离散应力场（O'Brien & Hodgins）驱动裂纹、撕裂美术与渐进表现、撕裂 LOD 与性能预算。*
+*本文档为 Prism Physics 设计规格 v0.7，不含 AI/ML 内容。已验证存在：CPU core 固定步、Prism ECS 的 `Sync -> Step -> Writeback` 刚体/软体桥、离线 driver 运行时切片、磁盘 cache 校验切片、MPM CPU/GPU stage 与独立 resident runtime、M10–M12 的部分 core 原语、M14 articulation core，以及 M15 拓扑撕裂的版本化 render/collision update 原语。未完成：M5/M5.5 的 ECS/渲染接线与真机 GPU 验证，M9–M12 的完整跨层生产链和 demo，M13 的完整布偶限位/群体验收，M14 的接触耦合/退化/GPU 多链验收，M15 的实际渲染/GPU 重排/CCD-BVH 生产接线，以及性能目标的匹配硬件 P50/P95/P99 证据。当前主机无 wgpu adapter，因此 resident GPU parity 只能记录为 skipped，不能写成通过。*

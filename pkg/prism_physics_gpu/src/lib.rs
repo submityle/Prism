@@ -51,6 +51,7 @@ pub mod cloth;
 pub mod collider;
 pub mod contacts;
 pub mod context;
+pub mod field;
 pub mod fluid;
 pub mod fracture;
 pub mod grid;
@@ -60,6 +61,7 @@ pub mod mpm;
 pub mod narrowphase;
 pub mod radix;
 pub mod rigid;
+pub mod runtime;
 pub mod scan;
 pub mod vbd;
 pub mod xpbd;
@@ -190,6 +192,10 @@ pub use rigid::{
     RackPinionJoint, RevoluteDriveJoint, RevoluteJoint, RevoluteMotorJoint, RevoluteServoJoint,
     RigidBodyState, RigidContact, RigidContactColouring, RigidError, SphericalJoint,
     SwingTwistJoint, TgsContactConfig, UniversalJoint, MAX_JOINT_BATCHES,
+};
+pub use runtime::{
+    MpmAdvanceReport, MpmBackend, MpmBackendPolicy, MpmFallbackReason, MpmRuntime,
+    MpmRuntimeConfig, MpmRuntimeError,
 };
 pub use scan::{cpu_compact, cpu_exclusive_scan, GpuScan};
 pub use vbd::{build_vbd_prep, cpu_vbd, GpuSpring, GpuVbd, VbdPrep};
