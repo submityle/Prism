@@ -104,3 +104,11 @@ no-default-features lib check 通过；沙盒外 Apple M2/Metal
 同 device 跨线程 error scope 隔离。上文 136/158/7 等是初版历史计数，不是本轮结果。
 原 `admitted_layers` 编译错误未复现，本次不改 runtime；复现命令、基准口径及产品
 未覆盖边界见删除文档的“本轮最终验证”。本轮不宣称整个 World 系统完成。
+
+同日继续补验：RHI 实卡 **14/14**，新增/补强无 CPU 等待的非空→空→恢复→复用
+双间接计数/完整键/像素快照，以及同 table、同 cell/revision/初始 cache key 的独立
+producer 交错提交隔离；runtime **183/183**、GPU feature **139/139** 再次通过。
+纯提交 `764aeb7da` 的 tracked-tree 独立源码构建尝试在 workspace 解析阶段被
+`prism_render_scene` 请求不存在的 `prism_render_material/bevy` feature 阻断，
+尚未进入 World 编译，故不宣称 clean-HEAD 验收通过。未修改其他模块；复现命令和
+证据范围见删除文档的“无等待空请求恢复与 producer 隔离补验”。

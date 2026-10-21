@@ -362,8 +362,15 @@ struct Observation {
     pixels: Vec<u8>,
 }
 
+struct QueuedObservation {
+    output: wgpu::Buffer,
+    pixels: wgpu::Buffer,
+    capacity: usize,
+    config: HeightfieldPlacementConfig,
+}
+
 #[allow(clippy::too_many_arguments)]
-fn observe(
+fn queue_observation(
     context: &GpuContext,
     config: HeightfieldPlacementConfig,
     capacity: usize,
@@ -371,7 +378,7 @@ fn observe(
     records: &wgpu::Buffer,
     compact: &wgpu::Buffer,
     texture: &wgpu::Texture,
-) -> Observation {
+) -> QueuedObservation {
     let output = staging(context, (16 + 64 * capacity + 4 * capacity) as u64);
     let pixels = staging(context, u64::from(ROW_BYTES * SIDE));
     let mut encoder = context.device().create_command_encoder(&Default::default());
@@ -406,7 +413,18 @@ fn observe(
         },
     );
     context.queue().submit([encoder.finish()]);
-    let bytes = read(context, &output);
+    QueuedObservation {
+        output,
+        pixels,
+        capacity,
+        config,
+    }
+}
+
+fn read_observation(context: &GpuContext, queued: &QueuedObservation) -> Observation {
+    let capacity = queued.capacity;
+    let config = queued.config;
+    let bytes = read(context, &queued.output);
     let all = words(&bytes);
     let args: [u32; 4] = all[..4].try_into().unwrap();
     assert_eq!(args[0], 3);
@@ -440,8 +458,26 @@ fn observe(
     Observation {
         args,
         keys,
-        pixels: read(context, &pixels),
+        pixels: read(context, &queued.pixels),
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn observe(
+    context: &GpuContext,
+    config: HeightfieldPlacementConfig,
+    capacity: usize,
+    indirect: &wgpu::Buffer,
+    records: &wgpu::Buffer,
+    compact: &wgpu::Buffer,
+    texture: &wgpu::Texture,
+) -> Observation {
+    read_observation(
+        context,
+        &queue_observation(
+            context, config, capacity, indirect, records, compact, texture,
+        ),
+    )
 }
 
 fn observe_registered_deletions(
@@ -560,19 +596,29 @@ fn physical_rhi_nonempty_to_empty_deletion_resets_both_indirect_counts() {
         .register_deletions(fixture.deletions(&context))
         .unwrap();
     let draw = pipeline(&bridge);
-    for (revision, region) in [fixture.region, empty_region, fixture.region]
+    let targets: Vec<_> = (0..4).map(|_| scene(&bridge)).collect();
+    let mut observations = Vec::new();
+    let mut upstream_counts = Vec::new();
+    let mut tokens = Vec::new();
+    for (revision, region) in [fixture.region, empty_region, fixture.region, fixture.region]
         .into_iter()
         .enumerate()
     {
         fixture.write_deletions(&mut gpu, region, &deletions);
-        let target = scene(&bridge);
+        let target = &targets[revision];
         let snapshot = gpu.producer().registration_snapshot().unwrap();
-        let mut frame = bridge.begin_frame(&target).unwrap();
+        let mut frame = bridge.begin_frame(target).unwrap();
         frame
             .add_deletions(&gpu, CELL, revision as u64, &draw)
             .unwrap();
-        let token = frame.record().unwrap().submit();
-        let actual = observe(
+        let recorded = frame.record().unwrap();
+        assert_eq!(
+            recorded.reused_upstream_count(),
+            usize::from(revision == 3),
+            "an empty request revokes residency; restored work rebuilds before reuse"
+        );
+        tokens.push(recorded.submit());
+        observations.push(queue_observation(
             &context,
             fixture.config,
             fixture.budgets(fixture.region).2,
@@ -580,26 +626,34 @@ fn physical_rhi_nonempty_to_empty_deletion_resets_both_indirect_counts() {
             snapshot.upstream.records.buffer(),
             snapshot.compact.buffer(),
             &target.native_texture(),
-        );
+        ));
+        let upstream = staging(&context, 16);
+        let mut encoder = context.device().create_command_encoder(&Default::default());
+        encoder.copy_buffer_to_buffer(snapshot.upstream.indirect.buffer(), 0, &upstream, 0, 16);
+        context.queue().submit([encoder.finish()]);
+        upstream_counts.push(upstream);
+        // Snapshot copies are ordered before the next producer rewrite, but
+        // there is no map, blocking poll, wait or drain between submissions.
+        // begin_frame may still nonblockingly poll and retire completed work.
+    }
+    for (revision, (queued, upstream)) in observations.iter().zip(&upstream_counts).enumerate() {
+        let actual = read_observation(&context, queued);
         let expected = if revision == 1 {
             BTreeSet::new()
         } else {
             expected_nonempty.clone()
         };
-        assert_eq!(actual.args[1] as usize, expected.len());
-        assert_eq!(actual.keys, expected);
+        assert_eq!(actual.args[1] as usize, expected.len(), "frame {revision}");
+        assert_eq!(actual.keys, expected, "frame {revision}");
         assert_pixels(&actual, &expected);
-        let upstream = staging(&context, 16);
-        let mut encoder = context.device().create_command_encoder(&Default::default());
-        encoder.copy_buffer_to_buffer(snapshot.upstream.indirect.buffer(), 0, &upstream, 0, 16);
-        context.queue().submit([encoder.finish()]);
         assert_eq!(
-            words(&read(&context, &upstream)),
-            vec![3, expected.len() as u32, 0, 0]
+            words(&read(&context, upstream)),
+            vec![3, expected.len() as u32, 0, 0],
+            "upstream frame {revision}"
         );
-        bridge.wait(&token).unwrap();
-        assert!(token.is_complete());
     }
+    bridge.wait(tokens.last().unwrap()).unwrap();
+    assert!(tokens.iter().all(|token| token.is_complete()));
     assert_eq!(bridge.pending_count(), 0);
 }
 
@@ -1042,6 +1096,85 @@ fn physical_rhi_deletion_upstream_residency_requires_submit_and_reuses_same_queu
             assert_eq!(actual.args[1] as usize, expected.len());
             assert_eq!(&actual.keys, expected);
         }
+    }
+    bridge.wait(tokens.last().unwrap()).unwrap();
+    assert!(tokens.iter().all(|token| token.is_complete()));
+    assert_eq!(bridge.pending_count(), 0);
+}
+
+#[test]
+fn physical_rhi_same_cell_revision_and_recipe_keep_producer_residency_isolated() {
+    let context = context();
+    let mut bridge = bridge(&context);
+    let fixture = Fixture::new();
+    let cpu = fixture.cpu_keys();
+    let keys: Vec<_> = cpu.iter().copied().collect();
+    assert_eq!(keys.len(), 9);
+    let requests = [
+        deletion_set(vec![keys[0]]),
+        deletion_set(vec![keys[0]]),
+        deletion_set(vec![keys[1], keys[2]]),
+        deletion_set(vec![keys[3], keys[4], keys[5]]),
+    ];
+    let mut producers = [
+        bridge
+            .register_deletions(fixture.deletions(&context))
+            .unwrap(),
+        bridge
+            .register_deletions(fixture.deletions(&context))
+            .unwrap(),
+    ];
+    for producer in &mut producers {
+        fixture.write_deletions(producer, fixture.region, &requests[0]);
+    }
+    assert_eq!(
+        producers[0].producer().cache_key(),
+        producers[1].producer().cache_key(),
+        "distinct native buffers deliberately have identical initial recipes"
+    );
+    let draw = pipeline(&bridge);
+    let targets: Vec<_> = (0..4).map(|_| scene(&bridge)).collect();
+    let mut observations = Vec::new();
+    let mut tokens = Vec::new();
+    for (index, (request, target)) in requests.iter().zip(&targets).enumerate() {
+        let producer = &mut producers[index % 2];
+        if index >= 2 {
+            fixture.write_deletions(producer, fixture.region, request);
+        }
+        let mut frame = bridge.begin_frame(target).unwrap();
+        // Cell and revision are intentionally identical in all four frames.
+        // Only each producer's own successful native submission is proof.
+        frame.add_deletions(producer, CELL, 7, &draw).unwrap();
+        let recorded = frame.record().unwrap();
+        assert_eq!(
+            recorded.reused_upstream_count(),
+            usize::from(index >= 2),
+            "frame {index}: neither another producer's cold submit nor its rewrite owns this proof"
+        );
+        tokens.push(recorded.submit());
+        let snapshot = producer.producer().registration_snapshot().unwrap();
+        observations.push(queue_observation(
+            &context,
+            fixture.config,
+            fixture.budgets(fixture.region).2,
+            snapshot.indirect.buffer(),
+            snapshot.upstream.records.buffer(),
+            snapshot.compact.buffer(),
+            &target.native_texture(),
+        ));
+        // No CPU synchronization; copies preserve each actual frame's keys
+        // before the producer's following warm deletion-only update.
+    }
+    for (index, (queued, request)) in observations.iter().zip(&requests).enumerate() {
+        let expected: BTreeSet<_> = cpu
+            .iter()
+            .copied()
+            .filter(|key| !request.is_deleted(*key))
+            .collect();
+        let actual = read_observation(&context, queued);
+        assert_eq!(actual.args[1] as usize, expected.len(), "frame {index}");
+        assert_eq!(actual.keys, expected, "frame {index}");
+        assert_pixels(&actual, &expected);
     }
     bridge.wait(tokens.last().unwrap()).unwrap();
     assert!(tokens.iter().all(|token| token.is_complete()));

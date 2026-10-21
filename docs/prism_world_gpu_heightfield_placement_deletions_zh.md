@@ -444,3 +444,44 @@ WGPU_BACKEND=metal PRISM_REQUIRE_GPU=1 cargo test -p prism_world_gpu --features 
 ```bash
 cargo clippy -p prism_world_gpu --features placement_rhi --bench placement_rhi_reuse --test placement_rhi --offline --no-deps -j 1 -- -D warnings -A clippy::too_many_arguments -A clippy::result_large_err -A clippy::useless_conversion
 ```
+
+### 无等待空请求恢复与 producer 隔离补验
+
+2026-10-22 继续仅补强本切片测试，不改 runtime 或产品 renderer：
+
+- `physical_rhi_nonempty_to_empty_deletion_resets_both_indirect_counts` 现在连续提交
+  非空、空、恢复非空、再次非空四帧，中途不做 CPU map/阻塞 poll/wait/drain；
+  `begin_frame` 自身的非阻塞 poll/退休仍照常执行。每帧按原生
+  queue 顺序复制真实 compact/records/indirect、upstream indirect 和独立 scene texture，
+  全部提交后再读取快照；逐帧核对完整 CPU survivor key、像素和两个间接计数。
+  驻留命中数必须是 `0, 0, 0, 1`，证明空请求撤销旧证明，恢复必须重建，随后才能复用。
+- 新增 `physical_rhi_same_cell_revision_and_recipe_keep_producer_residency_isolated`：
+  同一 RHI table 注册两个独立 producer，初始完整 cache key 相同，四帧的 cell/revision
+  也相同。按 A、B、A、B 交错无 CPU 等待提交，首次各自重建，随后各自修改删除集合并
+  复用；命中数必须是 `0, 0, 1, 1`。每个实际输出分别快照并核对完整键、计数和像素，
+  不用最终共享 buffer 代替历史帧，也不回放绘制。
+
+沙盒外 Apple M2 / Metal / IntegratedGpu 的完整 `placement_rhi` 测试现为 **14/14**，
+0 failed、0 ignored；runtime lib **183/183**、GPU feature lib **139/139** 再次通过。
+测试文件定向 rustfmt、diff whitespace 和沿用上节三类既有 lint 放行的 Clippy 通过，
+不把该结果说成严格 Clippy 已清零。实卡命令沿用上节；本轮定向 Clippy 命令为：
+
+```bash
+CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 cargo clippy -p prism_world_gpu --features placement_rhi --test placement_rhi --offline --no-deps -j 1 -- -D warnings -A clippy::too_many_arguments -A clippy::result_large_err -A clippy::useless_conversion
+```
+
+另外导出纯提交 `764aeb7da` 的完整 tracked tree 到临时目录，尝试独立源码编译：
+
+```bash
+CARGO_TARGET_DIR=/Users/wangkailong/Documents/GitHub/Prism/target CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 cargo test -p prism_world_gpu --features placement_rhi --test placement_rhi --no-run --offline -j 1
+```
+
+该快照未混入 dirty 源文件；构建缓存仍共用，不能称为全新缓存验收。命令在编译 World
+之前的 workspace dependency resolution 阶段失败：`prism_render_scene` 请求
+`prism_render_material` 的 `bevy` feature，而该提交的后者没有该 feature。
+因此 clean-HEAD 独立交付验收仍未通过，不能由共享工作树的绿色测试替代。本轮不修改
+这两个其他模块；检查后已删除临时导出目录，可从该提交重新生成。
+
+验证结束后定向 `cargo clean -p prism_world_gpu` 删除该包 44 个构建文件、35.6 MiB；
+不清理共享 target 根目录或其他包。另已删除约 229 MiB 的本轮临时源码快照，未删除
+用户源文件或其他 agent 文件；上述生成物均可重建。
