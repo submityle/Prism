@@ -75,7 +75,9 @@ pub(crate) fn raycast_shape(
         // [`dispatch`](crate::query::dispatch) layer resolves the handle and
         // routes them to [`crate::query::mesh`]; this analytic leaf is never
         // called for them. The arm exists only to keep the match exhaustive.
-        ColliderShape::ConvexHull { .. } | ColliderShape::TriangleMesh { .. } => None,
+        ColliderShape::ConvexHull { .. }
+        | ColliderShape::TriangleMesh { .. }
+        | ColliderShape::Compound { .. } => None,
     }
 }
 

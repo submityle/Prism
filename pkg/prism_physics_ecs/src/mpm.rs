@@ -5,12 +5,16 @@
 //! module owns the ECS lifecycle and exposes the backend-independent particle
 //! output while [`prism_physics_gpu::MpmRuntime`] owns CPU/GPU execution.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use prism_app::EngineClocks;
 use prism_ecs::prelude::*;
 use prism_physics_core::mpm::MpmSolver;
-use prism_physics_core::reconstruct::{triangulate, ScalarField, SurfaceMesh};
+use prism_physics_core::reconstruct::{
+    triangulate_bounded, FieldBudget, FieldBuildError, ScalarField, SurfaceBudget,
+    SurfaceBuildError, SurfaceMesh,
+};
 use prism_physics_gpu::{
     MpmBackend, MpmBackendPolicy, MpmFallbackReason, MpmRuntime, MpmRuntimeConfig, MpmRuntimeError,
 };
@@ -93,6 +97,12 @@ pub struct MpmSurfaceConfig {
     pub max_field_nodes: usize,
     /// Maximum cells marched per reconstruction.
     pub max_cells: usize,
+    /// Maximum particle/grid-node kernel evaluations.
+    pub max_sample_visits: usize,
+    /// Maximum generated unique surface vertices.
+    pub max_surface_vertices: usize,
+    /// Maximum generated surface triangles.
+    pub max_surface_triangles: usize,
 }
 
 impl Default for MpmSurfaceConfig {
@@ -104,6 +114,9 @@ impl Default for MpmSurfaceConfig {
             padding_cells: 1,
             max_field_nodes: 2_000_000,
             max_cells: 300_000,
+            max_sample_visits: 64_000_000,
+            max_surface_vertices: 1_000_000,
+            max_surface_triangles: 2_000_000,
         }
     }
 }
@@ -117,47 +130,9 @@ impl MpmSurfaceConfig {
             && self.iso.is_finite()
             && self.max_field_nodes >= 8
             && self.max_cells > 0
-    }
-
-    fn within_budget(self, positions: &[glam::Vec3]) -> bool {
-        if positions.is_empty() {
-            return true;
-        }
-        let mut lo = positions[0];
-        let mut hi = positions[0];
-        for &position in &positions[1..] {
-            lo = lo.min(position);
-            hi = hi.max(position);
-        }
-        let padding = self.radius + self.padding_cells as f32 * self.dx;
-        if !padding.is_finite() {
-            return false;
-        }
-        let span = hi - lo + glam::Vec3::splat(2.0 * padding);
-        if !span.is_finite() || span.min_element() < 0.0 {
-            return false;
-        }
-        let mut nodes = [0usize; 3];
-        for (axis, extent) in [span.x, span.y, span.z].into_iter().enumerate() {
-            let Some(count) = ((extent / self.dx).ceil() as usize).checked_add(1) else {
-                return false;
-            };
-            nodes[axis] = count.max(2);
-        }
-        let Some(node_count) = nodes[0]
-            .checked_mul(nodes[1])
-            .and_then(|n| n.checked_mul(nodes[2]))
-        else {
-            return false;
-        };
-        let Some(cell_count) = nodes[0]
-            .saturating_sub(1)
-            .checked_mul(nodes[1].saturating_sub(1))
-            .and_then(|n| n.checked_mul(nodes[2].saturating_sub(1)))
-        else {
-            return false;
-        };
-        node_count <= self.max_field_nodes && cell_count <= self.max_cells
+            && self.max_sample_visits > 0
+            && self.max_surface_vertices > 0
+            && self.max_surface_triangles > 0
     }
 }
 
@@ -167,48 +142,56 @@ impl MpmSurfaceConfig {
 /// exactly once for every successfully published fixed-step snapshot.
 #[derive(Component, Clone, Debug, PartialEq)]
 pub struct MpmParticleSnapshot {
-    /// Monotonic snapshot sequence for this ECS entity, wrapping only at the
-    /// representable `u64` boundary.
+    /// Runtime generation, unique within the owning runtime resource.
+    pub epoch: u64,
+    /// Monotonic snapshot sequence within this runtime generation.
     pub version: u64,
     /// Fixed-step tick that produced this snapshot.
     pub tick: u64,
     /// World-space particle positions.
-    pub positions: Vec<glam::Vec3>,
+    pub positions: Arc<[glam::Vec3]>,
     /// World-space particle velocities.
-    pub velocities: Vec<glam::Vec3>,
+    pub velocities: Arc<[glam::Vec3]>,
     /// APIC affine velocity matrices.
-    pub affine: Vec<glam::Mat3>,
+    pub affine: Arc<[glam::Mat3]>,
     /// Particle deformation gradients.
-    pub deformation: Vec<glam::Mat3>,
+    pub deformation: Arc<[glam::Mat3]>,
     /// Snow plastic determinant per particle.
-    pub plastic_det: Vec<f32>,
+    pub plastic_det: Arc<[f32]>,
 }
 
 /// Versioned renderer-independent isosurface generated from one MPM snapshot.
 #[derive(Component, Clone, Debug, PartialEq)]
 pub struct MpmSurfaceSnapshot {
+    /// Runtime generation shared with the source particle snapshot.
+    pub epoch: u64,
+    /// Mesh publication sequence within the generation. Configuration-only
+    /// edits can advance this without advancing the source particle version.
+    pub revision: u64,
     /// Source particle snapshot version.
     pub version: u64,
     /// Fixed-step tick shared with the source particle snapshot.
     pub tick: u64,
     /// Reconstructed world-space triangle mesh.
-    pub mesh: SurfaceMesh,
+    pub mesh: Arc<SurfaceMesh>,
 }
 
 impl MpmParticleSnapshot {
     fn from_step(
+        epoch: u64,
         version: u64,
         tick: u64,
         particles: prism_physics_gpu::mpm::StepParticles,
     ) -> Self {
         Self {
+            epoch,
             version,
             tick,
-            positions: particles.positions,
-            velocities: particles.velocities,
-            affine: particles.affine,
-            deformation: particles.deformation,
-            plastic_det: particles.plastic_det,
+            positions: particles.positions.into(),
+            velocities: particles.velocities.into(),
+            affine: particles.affine.into(),
+            deformation: particles.deformation.into(),
+            plastic_det: particles.plastic_det.into(),
         }
     }
 
@@ -252,12 +235,16 @@ pub enum MpmIssue {
     Snapshot(MpmRuntimeError),
     /// Surface reconstruction settings contain invalid values.
     InvalidSurfaceConfig,
-    /// The requested surface grid exceeds its authored resource budget.
+    /// Field sampling, cell work or surface output exceeds an authored ceiling.
     SurfaceBudgetExceeded,
+    /// The allocator refused the bounded field, mesh or edge-cache allocation.
+    SurfaceAllocationFailed,
     /// Surface reconstruction produced invalid mesh data.
     InvalidSurface,
     /// A snapshot was non-finite or had inconsistent columns.
     InvalidSnapshot,
+    /// A generation or publication sequence exhausted its representable range.
+    SequenceExhausted,
 }
 
 /// One diagnostic emitted by the latest fixed-step MPM tick.
@@ -288,12 +275,17 @@ pub struct MpmDiagnostics {
 }
 
 struct RuntimeEntry {
+    epoch: u64,
+    authored_tick: Tick,
     runtime: MpmRuntime,
     authored: MpmSolver,
     authored_backend: MpmBackendPolicy,
     authored_step_budget: usize,
     latest: Option<MpmParticleSnapshot>,
     publish_pending: bool,
+    surface_config: Option<MpmSurfaceConfig>,
+    surface_pending: bool,
+    surface_revision: u64,
 }
 
 /// ECS-owned MPM runtimes and their latest portable snapshots.
@@ -303,6 +295,7 @@ struct RuntimeEntry {
 #[derive(Resource, Default)]
 pub struct MpmRuntimeResource {
     entries: BTreeMap<Entity, RuntimeEntry>,
+    last_epoch: u64,
 }
 
 impl MpmRuntimeResource {
@@ -324,6 +317,7 @@ impl MpmRuntimeResource {
     #[must_use]
     pub fn info(&self, entity: Entity) -> Option<MpmRuntimeInfo> {
         self.entries.get(&entity).map(|entry| MpmRuntimeInfo {
+            epoch: entry.epoch,
             authority: authority(entry.runtime.backend()),
             fallback: entry.runtime.fallback_reason(),
             fixed_tick: entry.runtime.fixed_tick(),
@@ -353,6 +347,8 @@ impl MpmRuntimeResource {
 /// Read-only runtime state exposed without exposing backend handles.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MpmRuntimeInfo {
+    /// Runtime generation, changed whenever authoring replaces the simulation.
+    pub epoch: u64,
     /// Current authority.
     pub authority: MpmAuthority,
     /// Initialization fallback, if the requested policy preferred GPU.
@@ -427,37 +423,100 @@ fn issue(diagnostics: &mut MpmDiagnostics, entity: Option<Entity>, issue: MpmIss
     diagnostics.issues.push(MpmDiagnostic { entity, issue });
 }
 
+#[derive(Resource, Default)]
+struct RemovedAuthoring(BTreeSet<Entity>);
+
+pub(crate) fn init(world: &mut World) {
+    if !world.contains_resource::<RemovedAuthoring>() {
+        world.init_resource::<RemovedAuthoring>();
+        world.observe::<MpmBinding, _>(LifecycleEvent::Remove, |ctx| {
+            ctx.world
+                .resource_mut::<RemovedAuthoring>()
+                .0
+                .insert(ctx.entity);
+        });
+    }
+}
+
 pub(crate) fn sync(world: &mut World) {
     let mut runtimes = world.remove_resource::<MpmRuntimeResource>().unwrap();
     let mut diagnostics = world.remove_resource::<MpmDiagnostics>().unwrap();
-    diagnostics.tick = diagnostics.tick.wrapping_add(1);
     diagnostics.simulated_dt = 0.0;
     diagnostics.steps = 0;
     diagnostics.issues.clear();
+    let Some(tick) = diagnostics.tick.checked_add(1) else {
+        let entities: Vec<_> = runtimes.entries.keys().copied().collect();
+        runtimes.entries.clear();
+        issue(&mut diagnostics, None, MpmIssue::SequenceExhausted);
+        world.insert_resource(runtimes);
+        world.insert_resource(diagnostics);
+        for entity in entities {
+            world.remove::<MpmParticleSnapshot>(entity);
+            world.remove::<MpmSurfaceSnapshot>(entity);
+        }
+        return;
+    };
+    diagnostics.tick = tick;
+    let removed = std::mem::take(&mut world.resource_mut::<RemovedAuthoring>().0);
+    let mut clear_particles = BTreeSet::new();
+    let mut clear_surfaces = BTreeSet::new();
 
     let live: BTreeMap<_, _> = world
-        .query::<(Entity, &MpmBinding)>()
+        .query::<(Entity, Ref<MpmBinding>)>()
         .iter(world)
-        .map(|(entity, binding)| (entity, binding.clone()))
+        .map(|(entity, binding)| (entity, (binding.changed_tick(), binding.surface)))
         .collect();
 
     let stale: Vec<_> = runtimes
         .entries
         .keys()
         .copied()
-        .filter(|entity| !live.contains_key(entity))
+        .filter(|entity| removed.contains(entity) || !live.contains_key(entity))
         .collect();
     for entity in stale {
         runtimes.remove(entity);
-        world.remove::<MpmParticleSnapshot>(entity);
-        world.remove::<MpmSurfaceSnapshot>(entity);
+        clear_particles.insert(entity);
+        clear_surfaces.insert(entity);
     }
 
-    for (entity, binding) in live {
+    for (entity, (authored_tick, surface)) in live {
+        // Configuration cleanup is independent of successful simulation work.
+        // A rejected step must never keep a disabled or incompatible surface.
+        if surface.is_none_or(|config| !config.valid()) {
+            clear_surfaces.insert(entity);
+        }
+        if surface.is_some_and(|config| !config.valid()) {
+            issue(
+                &mut diagnostics,
+                Some(entity),
+                MpmIssue::InvalidSurfaceConfig,
+            );
+        }
+        if let Some(entry) = runtimes.entries.get_mut(&entity) {
+            if entry.surface_config != surface {
+                clear_surfaces.insert(entity);
+                entry.surface_config = surface;
+                entry.surface_pending = true;
+            }
+            entry.authored_tick.check_tick(world.change_tick());
+            if entry.authored_tick == authored_tick {
+                if let Some(reason) = entry.runtime.fallback_reason() {
+                    issue(
+                        &mut diagnostics,
+                        Some(entity),
+                        MpmIssue::BackendFallback(reason),
+                    );
+                }
+                continue;
+            }
+        }
+        // Only authoring changes copy/compare the potentially large initial
+        // particle/grid state. Unchanged fixed ticks are O(entity count).
+        let binding = world.get::<MpmBinding>(entity).unwrap().clone();
         if !valid_solver(&binding.solver) || binding.max_steps_per_advance == 0 {
             runtimes.remove(entity);
-            world.remove::<MpmParticleSnapshot>(entity);
-            world.remove::<MpmSurfaceSnapshot>(entity);
+            clear_particles.insert(entity);
+            clear_surfaces.insert(entity);
             issue(&mut diagnostics, Some(entity), MpmIssue::InvalidAuthoring);
             continue;
         }
@@ -468,7 +527,8 @@ pub(crate) fn sync(world: &mut World) {
                 || entry.authored_step_budget != binding.max_steps_per_advance
         });
         if !rebuild {
-            if let Some(entry) = runtimes.entries.get(&entity) {
+            if let Some(entry) = runtimes.entries.get_mut(&entity) {
+                entry.authored_tick = authored_tick;
                 if let Some(reason) = entry.runtime.fallback_reason() {
                     issue(
                         &mut diagnostics,
@@ -484,8 +544,18 @@ pub(crate) fn sync(world: &mut World) {
             backend: binding.backend,
             max_steps_per_advance: binding.max_steps_per_advance,
         };
+        // An old generation's output is invalid even if initializing or
+        // stepping its replacement fails.
+        clear_particles.insert(entity);
+        clear_surfaces.insert(entity);
+        let Some(epoch) = runtimes.last_epoch.checked_add(1) else {
+            runtimes.remove(entity);
+            issue(&mut diagnostics, Some(entity), MpmIssue::SequenceExhausted);
+            continue;
+        };
         match MpmRuntime::new(binding.solver.clone(), config) {
             Ok(runtime) => {
+                runtimes.last_epoch = epoch;
                 if let Some(reason) = runtime.fallback_reason() {
                     issue(
                         &mut diagnostics,
@@ -496,19 +566,22 @@ pub(crate) fn sync(world: &mut World) {
                 runtimes.entries.insert(
                     entity,
                     RuntimeEntry {
+                        epoch,
+                        authored_tick,
                         runtime,
                         authored: binding.solver,
                         authored_backend: binding.backend,
                         authored_step_budget: binding.max_steps_per_advance,
                         latest: None,
                         publish_pending: false,
+                        surface_config: binding.surface,
+                        surface_pending: true,
+                        surface_revision: 0,
                     },
                 );
             }
             Err(error) => {
                 runtimes.remove(entity);
-                world.remove::<MpmParticleSnapshot>(entity);
-                world.remove::<MpmSurfaceSnapshot>(entity);
                 issue(&mut diagnostics, Some(entity), MpmIssue::RuntimeInit(error));
             }
         }
@@ -516,6 +589,14 @@ pub(crate) fn sync(world: &mut World) {
 
     world.insert_resource(runtimes);
     world.insert_resource(diagnostics);
+    // Structural observers must see the reconciled public resources, not a
+    // temporarily missing runtime/diagnostic resource during exclusive work.
+    for entity in clear_particles {
+        world.remove::<MpmParticleSnapshot>(entity);
+    }
+    for entity in clear_surfaces {
+        world.remove::<MpmSurfaceSnapshot>(entity);
+    }
 }
 
 pub(crate) fn step(world: &mut World) {
@@ -563,6 +644,8 @@ pub(crate) fn writeback(world: &mut World) {
     let mut runtimes = world.remove_resource::<MpmRuntimeResource>().unwrap();
     let mut diagnostics = world.remove_resource::<MpmDiagnostics>().unwrap();
     let mut outputs = Vec::new();
+    let mut particles = Vec::new();
+    let mut surfaces = BTreeMap::new();
     let mut entities: Vec<_> = runtimes.entries.keys().copied().collect();
     entities.sort();
     for entity in entities {
@@ -570,81 +653,148 @@ pub(crate) fn writeback(world: &mut World) {
             .entries
             .get_mut(&entity)
             .expect("sorted runtime entity must remain present");
-        if !std::mem::take(&mut entry.publish_pending) {
-            continue;
-        }
-        let version = entry
-            .latest
-            .as_ref()
-            .map_or(1, |snapshot| snapshot.version.wrapping_add(1));
-        let snapshot = match entry.runtime.snapshot() {
-            Ok(particles) => MpmParticleSnapshot::from_step(version, tick, particles),
-            Err(error) => {
-                issue(&mut diagnostics, Some(entity), MpmIssue::Snapshot(error));
+        if std::mem::take(&mut entry.publish_pending) {
+            let Some(version) = entry
+                .latest
+                .as_ref()
+                .map_or(Some(1), |snapshot| snapshot.version.checked_add(1))
+            else {
+                issue(&mut diagnostics, Some(entity), MpmIssue::SequenceExhausted);
+                continue;
+            };
+            let snapshot = match entry.runtime.snapshot() {
+                Ok(particles) => {
+                    MpmParticleSnapshot::from_step(entry.epoch, version, tick, particles)
+                }
+                Err(error) => {
+                    issue(&mut diagnostics, Some(entity), MpmIssue::Snapshot(error));
+                    continue;
+                }
+            };
+            if !snapshot.valid() {
+                issue(&mut diagnostics, Some(entity), MpmIssue::InvalidSnapshot);
                 continue;
             }
-        };
-        if !snapshot.valid() {
-            issue(&mut diagnostics, Some(entity), MpmIssue::InvalidSnapshot);
-            continue;
+            // Each column is shared between runtime inspection, ECS and render
+            // extraction; cloning a snapshot never duplicates its large arrays.
+            entry.latest = Some(snapshot.clone());
+            particles.push((entity, snapshot));
+            entry.surface_pending = true;
         }
-        entry.latest = Some(snapshot.clone());
-        outputs.push((entity, snapshot));
+        if std::mem::take(&mut entry.surface_pending) {
+            if let Some(snapshot) = entry.latest.as_ref() {
+                outputs.push((entity, snapshot.clone(), entry.surface_config));
+            }
+        }
     }
-    for (entity, snapshot) in outputs {
+    for (entity, snapshot, config) in outputs {
         if world.get::<MpmBinding>(entity).is_some() {
-            world.insert(entity, (snapshot.clone(),));
-            let config = world
-                .get::<MpmBinding>(entity)
-                .and_then(|binding| binding.surface);
             let Some(config) = config else {
-                world.remove::<MpmSurfaceSnapshot>(entity);
+                surfaces.insert(entity, None);
                 continue;
             };
             if !config.valid() {
-                world.remove::<MpmSurfaceSnapshot>(entity);
-                issue(
-                    &mut diagnostics,
-                    Some(entity),
-                    MpmIssue::InvalidSurfaceConfig,
-                );
+                surfaces.insert(entity, None);
                 continue;
             }
-            if !config.within_budget(&snapshot.positions) {
-                world.remove::<MpmSurfaceSnapshot>(entity);
-                issue(
-                    &mut diagnostics,
-                    Some(entity),
-                    MpmIssue::SurfaceBudgetExceeded,
-                );
-                continue;
-            }
-            let field = ScalarField::from_particles(
+            let field = match ScalarField::from_particles_bounded(
                 &snapshot.positions,
                 config.radius,
                 config.dx,
                 config.padding_cells,
-            );
-            let mesh = triangulate(&field, config.iso);
+                FieldBudget {
+                    max_nodes: config.max_field_nodes,
+                    max_cells: config.max_cells,
+                    max_sample_visits: config.max_sample_visits,
+                },
+            ) {
+                Ok(field) => field,
+                Err(error) => {
+                    surfaces.insert(entity, None);
+                    issue(&mut diagnostics, Some(entity), surface_field_issue(error));
+                    continue;
+                }
+            };
+            let mesh = match triangulate_bounded(
+                &field,
+                config.iso,
+                SurfaceBudget {
+                    max_cells: config.max_cells,
+                    max_vertices: config.max_surface_vertices,
+                    max_triangles: config.max_surface_triangles,
+                },
+            ) {
+                Ok(mesh) => mesh,
+                Err(error) => {
+                    surfaces.insert(entity, None);
+                    issue(&mut diagnostics, Some(entity), surface_mesh_issue(error));
+                    continue;
+                }
+            };
             let valid_mesh = mesh.indices_are_valid()
                 && mesh.normals.len() == mesh.positions.len()
                 && mesh.positions.iter().all(|v| v.is_finite())
                 && mesh.normals.iter().all(|v| v.is_finite());
             if !valid_mesh {
-                world.remove::<MpmSurfaceSnapshot>(entity);
+                surfaces.insert(entity, None);
                 issue(&mut diagnostics, Some(entity), MpmIssue::InvalidSurface);
                 continue;
             }
-            world.insert(
+            let entry = runtimes.entries.get_mut(&entity).unwrap();
+            let Some(revision) = entry.surface_revision.checked_add(1) else {
+                surfaces.insert(entity, None);
+                issue(&mut diagnostics, Some(entity), MpmIssue::SequenceExhausted);
+                continue;
+            };
+            entry.surface_revision = revision;
+            surfaces.insert(
                 entity,
-                (MpmSurfaceSnapshot {
+                Some(MpmSurfaceSnapshot {
+                    epoch: snapshot.epoch,
+                    revision,
                     version: snapshot.version,
                     tick: snapshot.tick,
-                    mesh,
-                },),
+                    mesh: Arc::new(mesh),
+                }),
             );
         }
     }
     world.insert_resource(runtimes);
     world.insert_resource(diagnostics);
+    // Publication is a separate commit phase: insertion/removal can invoke
+    // user observers, which must be able to inspect the committed resources.
+    for (entity, snapshot) in particles {
+        if world.get::<MpmBinding>(entity).is_some() {
+            world.insert(entity, (snapshot,));
+        }
+    }
+    for (entity, surface) in surfaces {
+        if world.get::<MpmBinding>(entity).is_some() {
+            if let Some(surface) = surface {
+                world.insert(entity, (surface,));
+                continue;
+            }
+        }
+        world.remove::<MpmSurfaceSnapshot>(entity);
+    }
+}
+
+fn surface_field_issue(error: FieldBuildError) -> MpmIssue {
+    match error {
+        FieldBuildError::InvalidInput | FieldBuildError::GridOverflow => MpmIssue::InvalidSurface,
+        FieldBuildError::NodeBudgetExceeded
+        | FieldBuildError::CellBudgetExceeded
+        | FieldBuildError::SampleBudgetExceeded => MpmIssue::SurfaceBudgetExceeded,
+        FieldBuildError::AllocationFailed => MpmIssue::SurfaceAllocationFailed,
+    }
+}
+
+fn surface_mesh_issue(error: SurfaceBuildError) -> MpmIssue {
+    match error {
+        SurfaceBuildError::InvalidField => MpmIssue::InvalidSurface,
+        SurfaceBuildError::CellBudgetExceeded
+        | SurfaceBuildError::VertexBudgetExceeded
+        | SurfaceBuildError::TriangleBudgetExceeded => MpmIssue::SurfaceBudgetExceeded,
+        SurfaceBuildError::AllocationFailed => MpmIssue::SurfaceAllocationFailed,
+    }
 }

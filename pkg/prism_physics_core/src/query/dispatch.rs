@@ -50,6 +50,19 @@ pub(crate) fn raycast_shape_in(
     shapes: &ShapeRegistry,
 ) -> Option<RayShapeHit> {
     match *shape {
+        ColliderShape::Compound { compound, .. } => shapes
+            .compound(compound)?
+            .children()
+            .iter()
+            .filter_map(|child| {
+                raycast_shape_in(
+                    shapes.get(child.collider)?,
+                    &pose.mul(&child.local_pose),
+                    ray,
+                    shapes,
+                )
+            })
+            .min_by(|a, b| a.time_of_impact.total_cmp(&b.time_of_impact)),
         ColliderShape::ConvexHull { mesh: handle, .. } => {
             let data = shapes.convex_mesh(handle)?;
             mesh::raycast_convex(data, pose, ray)
@@ -76,6 +89,20 @@ pub(crate) fn spherecast_shape_in(
     shapes: &ShapeRegistry,
 ) -> Option<RayShapeHit> {
     match *shape {
+        ColliderShape::Compound { compound, .. } => shapes
+            .compound(compound)?
+            .children()
+            .iter()
+            .filter_map(|child| {
+                spherecast_shape_in(
+                    shapes.get(child.collider)?,
+                    &pose.mul(&child.local_pose),
+                    ray,
+                    radius,
+                    shapes,
+                )
+            })
+            .min_by(|a, b| a.time_of_impact.total_cmp(&b.time_of_impact)),
         ColliderShape::TriangleMesh { mesh: handle, .. } => {
             let data = shapes.tri_mesh(handle)?;
             mesh::spherecast_trimesh(data.mesh(), pose, ray, radius)
@@ -113,6 +140,40 @@ pub(crate) fn shapecast_shape_in(
     motion: Vec3,
     shapes: &ShapeRegistry,
 ) -> Option<RayShapeHit> {
+    if let ColliderShape::Compound { compound, .. } = *mover {
+        return shapes
+            .compound(compound)?
+            .children()
+            .iter()
+            .filter_map(|child| {
+                shapecast_shape_in(
+                    shapes.get(child.collider)?,
+                    &mover_pose.mul(&child.local_pose),
+                    target,
+                    target_pose,
+                    motion,
+                    shapes,
+                )
+            })
+            .min_by(|a, b| a.time_of_impact.total_cmp(&b.time_of_impact));
+    }
+    if let ColliderShape::Compound { compound, .. } = *target {
+        return shapes
+            .compound(compound)?
+            .children()
+            .iter()
+            .filter_map(|child| {
+                shapecast_shape_in(
+                    mover,
+                    mover_pose,
+                    shapes.get(child.collider)?,
+                    &target_pose.mul(&child.local_pose),
+                    motion,
+                    shapes,
+                )
+            })
+            .min_by(|a, b| a.time_of_impact.total_cmp(&b.time_of_impact));
+    }
     crate::query::convex_sweep::shapecast_shape(
         mover,
         mover_pose,
@@ -137,6 +198,30 @@ pub(crate) fn project_point_shape_in(
     shapes: &ShapeRegistry,
 ) -> ShapeProjection {
     match *shape {
+        ColliderShape::Compound { compound, .. } => {
+            let Some(data) = shapes.compound(compound) else {
+                return degenerate_projection(point);
+            };
+            let mut nearest_outside: Option<ShapeProjection> = None;
+            let mut nearest_inside: Option<ShapeProjection> = None;
+            for child in data.children() {
+                let Some(shape) = shapes.get(child.collider) else {
+                    continue;
+                };
+                let projection =
+                    project_point_shape_in(shape, &pose.mul(&child.local_pose), point, shapes);
+                if projection.is_inside {
+                    if nearest_inside.is_none_or(|best| projection.distance < best.distance) {
+                        nearest_inside = Some(projection);
+                    }
+                } else if nearest_outside.is_none_or(|best| projection.distance < best.distance) {
+                    nearest_outside = Some(projection);
+                }
+            }
+            nearest_inside
+                .or(nearest_outside)
+                .unwrap_or_else(|| degenerate_projection(point))
+        }
         ColliderShape::ConvexHull { mesh: handle, .. } => shapes
             .convex_mesh(handle)
             .map(|data| mesh::project_convex(data, pose, point))
@@ -157,5 +242,41 @@ fn degenerate_projection(point: Vec3) -> ShapeProjection {
         normal: Vec3::Y,
         distance: 0.0,
         is_inside: false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::collider::CompoundChild;
+
+    #[test]
+    fn compound_projection_uses_a_containing_leaf_for_union_boundary() {
+        let mut shapes = ShapeRegistry::new();
+        let large = shapes.insert(ColliderShape::Sphere { radius: 1.0 });
+        let overlapping = shapes.insert(ColliderShape::Sphere { radius: 0.5 });
+        let compound = shapes
+            .insert_compound(&[
+                CompoundChild {
+                    collider: large,
+                    local_pose: Isometry::IDENTITY,
+                },
+                CompoundChild {
+                    collider: overlapping,
+                    local_pose: Isometry::from_translation(Vec3::new(0.9, 0.0, 0.0)),
+                },
+            ])
+            .expect("valid compound");
+        let shape = *shapes.get(compound).expect("compound shape");
+
+        let projection = project_point_shape_in(
+            &shape,
+            &Isometry::IDENTITY,
+            Vec3::new(-0.1, 0.0, 0.0),
+            &shapes,
+        );
+        assert!(projection.is_inside);
+        assert!((projection.distance - 0.9).abs() < 1.0e-6);
+        assert!((projection.point - Vec3::new(-1.0, 0.0, 0.0)).length() < 1.0e-6);
     }
 }

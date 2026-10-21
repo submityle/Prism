@@ -34,10 +34,12 @@
 //! Position Based Dynamics* (2020). This file contains no Unreal Engine source
 //! or derived code.
 
+mod articulation_contact;
 #[cfg(feature = "parallel")]
 pub mod color_solve;
 pub mod config;
 pub mod contact_constraint;
+pub mod gear;
 pub mod graph_color;
 pub mod integrate;
 pub mod island_solve;
@@ -52,8 +54,10 @@ pub use config::XpbdConfig;
 pub use contact_constraint::ContactConstraint;
 pub use island_solve::SolveIslands;
 
+use crate::dynamics::assembly::JointLoadAccumulator;
+use crate::dynamics::field::{FieldBatchError, FieldBatchSampler};
 use crate::joint::ragdoll::{RagdollBinding, RagdollConstraint};
-use crate::joint::Joint;
+use crate::joint::{Joint, JointHandle};
 use crate::pipeline::detect_contacts;
 use crate::solver::Solver;
 use crate::world::PhysicsWorld;
@@ -65,6 +69,17 @@ pub struct XpbdSolver {
     pub config: XpbdConfig,
     /// Live ragdoll Swing-Twist constraints solved alongside ordinary joints.
     ragdolls: Vec<RagdollConstraint>,
+}
+
+/// External field sampling failed before the next substep mutated the world.
+/// Earlier completed substeps remain committed and are reported explicitly.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FieldStepError<E> {
+    InvalidTimeStep,
+    Sampling {
+        completed_substeps: u32,
+        source: FieldBatchError<E>,
+    },
 }
 
 impl XpbdSolver {
@@ -108,19 +123,34 @@ impl XpbdSolver {
         &self,
         world: &mut PhysicsWorld,
         h: f32,
+        generate_external_contacts: Option<
+            &mut dyn FnMut(&PhysicsWorld, &mut Vec<crate::collide::ContactManifold>),
+        >,
+    ) {
+        let _ = world.prepare_external_substep(h);
+        self.solve_prepared_substep(world, h, generate_external_contacts);
+    }
+
+    fn solve_prepared_substep(
+        &self,
+        world: &mut PhysicsWorld,
+        h: f32,
         mut generate_external_contacts: Option<
             &mut dyn FnMut(&PhysicsWorld, &mut Vec<crate::collide::ContactManifold>),
         >,
     ) {
         world.breakable_joints.begin_substep();
-        let _ = world.prepare_external_substep(h);
         let _ = world.step_articulations_substep(h);
         let gravity = world.config.gravity;
 
         // Phase 1: predict poses forward under gravity and damping.
+        let mut joint_loads = JointLoadAccumulator::new();
         {
             let mut view = world.bodies.solver_view_mut();
+            gear::begin_substep(&view, &mut world.joints);
+            joint_constraint::begin_revolute_substep(&view, &mut world.joints, h);
             integrate::predict(&mut view, gravity, h);
+            joint_constraint::observe_revolute_joints(&view, &mut world.joints);
         }
 
         // Phase 1.5: continuous collision detection. Sweep opt-in fast movers
@@ -147,7 +177,9 @@ impl XpbdSolver {
             let mut view = bodies.solver_view_mut();
             let mut constraints = ContactConstraint::build(&view, &manifolds);
             // Collect the active joints once so they can be indexed per island.
-            let active: Vec<&Joint> = joints.active_joints().collect();
+            let mut active_entries: Vec<(JointHandle, &mut Joint)> =
+                joints.active_entries_mut().collect();
+            let active: Vec<&Joint> = active_entries.iter().map(|(_, joint)| &**joint).collect();
             // Partition the constraints/joints into independent islands. Solving
             // islands one after another is numerically identical to a single
             // global Gauss-Seidel pass because islands touch disjoint dynamic
@@ -165,17 +197,20 @@ impl XpbdSolver {
             // identical because islands touch disjoint dynamic bodies.
             #[cfg(feature = "parallel")]
             let solved_in_parallel = if self.config.parallel_islands {
-                parallel_solve::solve_islands_parallel(
+                let parallel_loads = parallel_solve::solve_islands_parallel(
                     &mut view,
                     &islands,
                     &active_islands,
                     &constraints,
-                    &active,
+                    &mut active_entries,
                     &self.ragdolls,
                     &self.config,
                     h,
                     true,
                 );
+                joint_loads
+                    .merge(&parallel_loads)
+                    .expect("all XPBD islands in one sub-step share the same finite dt");
                 true
             } else {
                 false
@@ -188,7 +223,14 @@ impl XpbdSolver {
                 for _ in 0..iterations {
                     for &island in &active_islands {
                         for &joint_index in islands.joints(island) {
-                            joint_constraint::solve_joint(&mut view, active[joint_index], h);
+                            let (handle, joint) = &mut active_entries[joint_index];
+                            joint_constraint::solve_joint_with_load(
+                                &mut view,
+                                *handle,
+                                joint,
+                                h,
+                                &mut joint_loads,
+                            );
                         }
                         for &ragdoll_index in islands.ragdolls(island) {
                             joint_constraint::solve_ragdoll(
@@ -234,12 +276,30 @@ impl XpbdSolver {
             sleep_solve::update_after_solve(&mut view, &islands, &active_islands, &sleep_config, h);
         }
 
+        // Recover rigid velocities before coupling reduced-coordinate trees:
+        // no later pose-to-velocity recovery may overwrite these impulses.
+        articulation_contact::solve(world, &self.config, h);
+
         // World-owned soft bodies share the same fixed substep boundary. Their
         // internal projection runs first, then the opt-in driver gathers rigid
         // proxies, performs two-way coupling, writes reactions back to rigid
         // bodies, and finally recovers particle velocities.
         world.step_soft_bodies_substep(h);
-        let _ = world.resolve_breakable_joints(h);
+        {
+            let view = world.bodies.solver_view_mut();
+            gear::finish_substep(&view, &mut world.joints);
+            joint_constraint::finish_revolute_substep(&view, &mut world.joints);
+        }
+        // Joint reaction loads are committed only after every position
+        // iteration has completed. The world filters ordinary (unbreakable)
+        // joints, evaluates policies, disables failures, and updates the
+        // corresponding assembly topology atomically at this fixed boundary.
+        let loads = joint_loads
+            .loads()
+            .expect("XPBD joint projections must produce finite fixed-step loads");
+        world
+            .submit_joint_loads(h, &loads)
+            .expect("XPBD reports only live joints with the current sub-step dt");
     }
 }
 
@@ -247,7 +307,7 @@ impl Solver for XpbdSolver {
     fn step(&mut self, world: &mut PhysicsWorld, dt: f32, substeps: u32) {
         let n = substeps.max(1);
         let h = dt / n as f32;
-        if h <= 0.0 {
+        if !h.is_finite() || h <= 0.0 {
             return;
         }
         for _ in 0..n {
@@ -261,6 +321,30 @@ impl Solver for XpbdSolver {
 }
 
 impl XpbdSolver {
+    /// Advances XPBD with one external analytic-field batch on every substep,
+    /// before prediction, contacts, articulation coupling, and force consumption.
+    /// There is no duplicate CPU field pass and no implicit CPU fallback.
+    pub fn step_with_field_sampler<S: FieldBatchSampler + ?Sized>(
+        &self,
+        world: &mut PhysicsWorld,
+        dt: f32,
+        substeps: u32,
+        sampler: &mut S,
+    ) -> Result<(), FieldStepError<S::Error>> {
+        let n = substeps.max(1);
+        let h = dt / n as f32;
+        if !h.is_finite() || h <= 0.0 {
+            return Err(FieldStepError::InvalidTimeStep);
+        }
+        for completed_substeps in 0..n {
+            world
+                .prepare_external_substep_with(h, sampler)
+                .map_err(|source| FieldStepError::Sampling { completed_substeps, source })?;
+            self.solve_prepared_substep(world, h, None);
+        }
+        Ok(())
+    }
+
     /// Advances the world while appending caller-owned contact manifolds after
     /// the built-in broad/narrow phase on every predicted substep.
     ///

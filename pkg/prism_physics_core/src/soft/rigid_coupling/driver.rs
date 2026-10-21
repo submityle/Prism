@@ -44,11 +44,11 @@
 use glam::Vec3;
 
 use crate::math::scalar::Real;
-use crate::soft::resolve_two_way_coupling;
+use crate::soft::{couple_particle_against_body, CouplingContribution};
 use crate::world::PhysicsWorld;
 
 use super::proxy::{
-    body_collider_from_shape_in, collider_anchor, collider_overlaps, proxy_inverse_mass, Aabb,
+    body_colliders_from_shape_in, collider_overlaps, proxy_inverse_mass, Aabb, CouplingProxyError,
     RigidProxy,
 };
 
@@ -60,6 +60,9 @@ pub use crate::soft::CouplingBody;
 pub struct CouplingReport {
     /// Number of rigid proxies that participated in the pass (after culling).
     pub proxy_count: usize,
+    /// Bodies rejected atomically because a leaf has no analytic soft proxy.
+    /// Inspect [`gather_rigid_proxies_with_diagnostics`] for handles/reasons.
+    pub unsupported_count: usize,
     /// Number of *movable* proxies whose reaction impulse was written back onto
     /// a rigid body.
     pub applied_count: usize,
@@ -78,7 +81,22 @@ pub struct CouplingReport {
 /// mass so they never move.
 #[must_use]
 pub fn gather_rigid_proxies(world: &PhysicsWorld, soft_aabb: &Aabb) -> Vec<RigidProxy> {
+    gather_rigid_proxies_with_diagnostics(world, soft_aabb).0
+}
+
+/// Gather exact analytic leaves and explicit whole-body conversion failures.
+/// A failed compound contributes no partial geometry. Proxies for each parent
+/// are contiguous and in deterministic flattened child order.
+#[must_use]
+pub fn gather_rigid_proxies_with_diagnostics(
+    world: &PhysicsWorld,
+    soft_aabb: &Aabb,
+) -> (
+    Vec<RigidProxy>,
+    Vec<(crate::state::handle::BodyHandle, CouplingProxyError)>,
+) {
     let mut proxies = Vec::new();
+    let mut unsupported = Vec::new();
     for slot in 0..world.bodies.slot_count() {
         let Some(handle) = world.bodies.handle_at_slot(slot) else {
             continue;
@@ -91,26 +109,92 @@ pub fn gather_rigid_proxies(world: &PhysicsWorld, soft_aabb: &Aabb) -> Vec<Rigid
         };
         let position = world.bodies.position(handle).unwrap_or_default();
         let orientation = world.bodies.orientation(handle).unwrap_or_default();
-        let Some(collider) =
-            body_collider_from_shape_in(shape, position, orientation, &world.shapes)
-        else {
-            continue;
-        };
-        if !collider_overlaps(collider, soft_aabb) {
-            continue;
-        }
+        let colliders =
+            match body_colliders_from_shape_in(shape, position, orientation, &world.shapes) {
+                Ok(colliders) => colliders,
+                Err(reason) => {
+                    unsupported.push((handle, reason));
+                    continue;
+                }
+            };
         let kind = world.bodies.kind(handle).unwrap_or_default();
         let inv_mass = world
             .bodies
             .mass_properties(handle)
             .map_or(0.0, |m| m.inv_mass);
         let proxy_inv_mass = proxy_inverse_mass(kind, inv_mass);
-        proxies.push(RigidProxy {
-            handle,
-            body: CouplingBody::new(collider, proxy_inv_mass),
-        });
+        for collider in colliders {
+            if collider_overlaps(collider, soft_aabb) {
+                proxies.push(RigidProxy {
+                    handle,
+                    center_of_mass: position,
+                    body: CouplingBody::new(collider, proxy_inv_mass),
+                });
+            }
+        }
     }
-    proxies
+    (proxies, unsupported)
+}
+
+/// A contact retained for the angular/friction bridges. Every field comes
+/// from exactly the pre-parent particle state used by the normal pass.
+pub(super) struct NormalContact {
+    pub proxy: usize,
+    pub particle: usize,
+    pub position: Vec3,
+    pub point: Vec3,
+    pub contribution: CouplingContribution,
+}
+
+/// Jacobi within a parent, sequential across parents (the single-leaf legacy
+/// order). Siblings share the root inverse mass and cannot independently move.
+pub(super) fn resolve_proxy_contacts(
+    proxies: &[RigidProxy],
+    positions: &mut [Vec3],
+    inverse_masses: &[Real],
+    dt: Real,
+) -> (Vec<NormalContact>, Vec<CouplingContribution>) {
+    let count = positions.len().min(inverse_masses.len());
+    let mut contacts = Vec::new();
+    let mut reactions = vec![CouplingContribution::ZERO; proxies.len()];
+    let mut begin = 0;
+    while begin < proxies.len() {
+        let mut end = begin + 1;
+        while end < proxies.len() && proxies[end].handle == proxies[begin].handle {
+            end += 1;
+        }
+        let mut deltas = vec![Vec3::ZERO; count];
+        for index in begin..end {
+            let proxy = &proxies[index];
+            for i in 0..count {
+                let contribution = couple_particle_against_body(
+                    positions[i],
+                    inverse_masses[i],
+                    proxy.body.collider,
+                    proxy.body.inverse_mass,
+                    dt,
+                );
+                if contribution == CouplingContribution::ZERO {
+                    continue;
+                }
+                deltas[i] += contribution.particle_delta;
+                reactions[index].body_delta += contribution.body_delta;
+                reactions[index].impulse += contribution.impulse;
+                contacts.push(NormalContact {
+                    proxy: index,
+                    particle: i,
+                    position: positions[i],
+                    point: proxy.body.collider.project(positions[i]),
+                    contribution,
+                });
+            }
+        }
+        for (p, delta) in positions.iter_mut().zip(deltas) {
+            *p += delta;
+        }
+        begin = end;
+    }
+    (contacts, reactions)
 }
 
 /// Runs one substep of two-way cloth↔rigid coupling and writes the rigid
@@ -140,60 +224,40 @@ pub fn couple_cloth_to_rigid(
     let Some(soft_aabb) = Aabb::of_points(positions) else {
         return CouplingReport::default();
     };
-    let proxies = gather_rigid_proxies(world, &soft_aabb);
-    if proxies.is_empty() {
-        return CouplingReport::default();
-    }
-
-    // Snapshot the pre-pass anchors so the write-back can translate each body
-    // by exactly the displacement the Jacobi pass applied to its proxy.
-    let mut coupling_bodies: Vec<CouplingBody> = proxies.iter().map(|p| p.body).collect();
-    let anchors_before: Vec<Vec3> = coupling_bodies
-        .iter()
-        .map(|b| collider_anchor(b.collider))
-        .collect();
-
-    resolve_two_way_coupling(positions, inverse_masses, &mut coupling_bodies, dt);
-
+    let (proxies, unsupported) = gather_rigid_proxies_with_diagnostics(world, &soft_aabb);
+    let (_, reactions) = resolve_proxy_contacts(&proxies, positions, inverse_masses, dt);
     let mut report = CouplingReport {
         proxy_count: proxies.len(),
+        unsupported_count: unsupported.len(),
         ..CouplingReport::default()
     };
-
-    for (idx, (proxy, body)) in proxies.iter().zip(coupling_bodies.iter_mut()).enumerate() {
-        if body.inverse_mass > 0.0 {
-            // Linear reaction: a Newton impulse maps to a velocity delta by the
-            // inverse mass. This matches the kernel, where the proxy's rigid
-            // translation equals `reaction_impulse * inverse_mass * dt`.
-            let velocity_delta = body.reaction_impulse * body.inverse_mass;
+    let mut begin = 0;
+    while begin < proxies.len() {
+        let proxy = &proxies[begin];
+        let mut end = begin + 1;
+        while end < proxies.len() && proxies[end].handle == proxy.handle {
+            end += 1;
+        }
+        if proxy.body.inverse_mass > 0.0 {
+            let mut impulse = Vec3::ZERO;
+            let mut translation = Vec3::ZERO;
+            for reaction in &reactions[begin..end] {
+                impulse += reaction.impulse;
+                translation += reaction.body_delta;
+            }
             if let Some(v0) = world.bodies.linear_velocity(proxy.handle) {
                 world
                     .bodies
-                    .set_linear_velocity(proxy.handle, v0 + velocity_delta);
+                    .set_linear_velocity(proxy.handle, v0 + impulse * proxy.body.inverse_mass);
             }
-            // Translate the body by exactly the displacement the pass applied to
-            // the proxy collider (its anchor delta), keeping the rigid body and
-            // its proxy consistent.
-            let translation = collider_anchor(body.collider) - anchors_before[idx];
             if let Some(p0) = world.bodies.position(proxy.handle) {
                 world.bodies.set_position(proxy.handle, p0 + translation);
             }
             report.applied_count += 1;
-            report.applied_impulse += body.reaction_impulse;
-
-            // Angular response is intentionally not applied here: this
-            // linear driver reduces every particle contact on a body to a
-            // single net linear impulse and discards the per-contact arms, so
-            // there is no honest torque at this site. The opt-in per-contact
-            // angular bridge in `super::angular`
-            // ([`super::couple_cloth_to_rigid_angular`]) re-derives the arms
-            // from the pre-pass contacts and writes `Σ arm × impulse` onto the
-            // body's angular velocity; it layers on top of this linear pass so
-            // the linear path here stays bit-identical.
+            report.applied_impulse += impulse;
         }
-        body.clear_reaction();
+        begin = end;
     }
-
     report
 }
 

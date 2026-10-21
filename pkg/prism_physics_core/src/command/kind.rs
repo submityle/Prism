@@ -35,6 +35,21 @@ pub enum PhysicsCommand {
         /// Angular impulse vector in world space.
         impulse: Vec3,
     },
+    /// Accumulate a world-space force at a world-space point for the next
+    /// dynamics sub-step.
+    ApplyForce {
+        body: BodyHandle,
+        force: Vec3,
+        point: Vec3,
+    },
+    /// Accumulate a world-space torque for the next dynamics sub-step.
+    ApplyTorque { body: BodyHandle, torque: Vec3 },
+    /// Apply a world-space impulse at a world-space point immediately.
+    ApplyImpulse {
+        body: BodyHandle,
+        impulse: Vec3,
+        point: Vec3,
+    },
     /// Overwrite the body's linear velocity.
     SetLinearVelocity {
         /// Body whose linear velocity is set.
@@ -72,6 +87,9 @@ impl PhysicsCommand {
         match *self {
             PhysicsCommand::ApplyLinearImpulse { body, .. }
             | PhysicsCommand::ApplyAngularImpulse { body, .. }
+            | PhysicsCommand::ApplyForce { body, .. }
+            | PhysicsCommand::ApplyTorque { body, .. }
+            | PhysicsCommand::ApplyImpulse { body, .. }
             | PhysicsCommand::SetLinearVelocity { body, .. }
             | PhysicsCommand::SetAngularVelocity { body, .. }
             | PhysicsCommand::SetPosition { body, .. }
@@ -107,6 +125,15 @@ impl PhysicsCommand {
                     .bodies
                     .set_angular_velocity(body, w + impulse * mass.inv_inertia)
             }
+            PhysicsCommand::ApplyForce { body, force, point } => {
+                world.apply_force(body, force, point)
+            }
+            PhysicsCommand::ApplyTorque { body, torque } => world.apply_torque(body, torque),
+            PhysicsCommand::ApplyImpulse {
+                body,
+                impulse,
+                point,
+            } => world.apply_impulse(body, impulse, point),
             PhysicsCommand::SetLinearVelocity { body, velocity } => {
                 world.bodies.set_linear_velocity(body, velocity)
             }

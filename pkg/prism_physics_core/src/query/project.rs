@@ -54,9 +54,9 @@ pub(crate) fn project_point_shape(
         // the registry-aware [`dispatch`](crate::query::dispatch) layer via
         // [`crate::query::mesh`]. This analytic leaf never sees them; the arm
         // returns a degenerate witness purely to keep the match exhaustive.
-        ColliderShape::ConvexHull { .. } | ColliderShape::TriangleMesh { .. } => {
-            (local, Vec3::Y, false)
-        }
+        ColliderShape::ConvexHull { .. }
+        | ColliderShape::TriangleMesh { .. }
+        | ColliderShape::Compound { .. } => (local, Vec3::Y, false),
     };
     let surface = pose.transform_point(surface_local);
     let normal = pose.transform_vector(normal_local).normalize_or_zero();

@@ -22,6 +22,10 @@ pub struct XpbdConfig {
     /// well (the "small steps" regime), so the default is `1`. Raising it
     /// stiffens contacts at the cost of more work per sub-step.
     pub position_iterations: u32,
+    /// Projected contact sweeps for reduced-coordinate trees and rigid bodies.
+    /// The factorization is shared by every contact on a tree in a substep.
+    /// At least one sweep runs; the default is eight.
+    pub articulation_contact_iterations: u32,
     /// Contact compliance (inverse stiffness) in metres per newton.
     ///
     /// `0.0` makes contacts perfectly rigid; small positive values soften them.
@@ -74,6 +78,7 @@ impl Default for XpbdConfig {
     fn default() -> Self {
         XpbdConfig {
             position_iterations: Self::DEFAULT_POSITION_ITERATIONS,
+            articulation_contact_iterations: 8,
             contact_compliance: 0.0,
             restitution_threshold: Self::DEFAULT_RESTITUTION_THRESHOLD,
             parallel_islands: true,

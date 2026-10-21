@@ -28,7 +28,9 @@
 
 use super::config::XpbdConfig;
 use super::contact_constraint::ContactConstraint;
-use super::rigid::{apply_velocity_impulse, generalized_inverse_mass, inv_inertia_world};
+use super::rigid::{
+    apply_velocity_impulse, generalized_inverse_mass, inv_inertia_world, inv_mass_world,
+};
 use crate::state::view::BodySolverView;
 use glam::{Mat3, Vec3};
 
@@ -162,8 +164,8 @@ fn apply_restitution(
     slot_a: usize,
     slot_b: usize,
     normal: Vec3,
-    inv_mass_a: f32,
-    inv_mass_b: f32,
+    inv_mass_a: Mat3,
+    inv_mass_b: Mat3,
     inertia_a: Mat3,
     inertia_b: Mat3,
     r_a: Vec3,
@@ -212,8 +214,8 @@ fn apply_dynamic_friction(
     view: &mut BodySolverView<'_>,
     slot_a: usize,
     slot_b: usize,
-    inv_mass_a: f32,
-    inv_mass_b: f32,
+    inv_mass_a: Mat3,
+    inv_mass_b: Mat3,
     inertia_a: Mat3,
     inertia_b: Mat3,
     r_a: Vec3,
@@ -263,8 +265,8 @@ fn apply_pair(
     view: &mut BodySolverView<'_>,
     slot_a: usize,
     slot_b: usize,
-    inv_mass_a: f32,
-    inv_mass_b: f32,
+    inv_mass_a: Mat3,
+    inv_mass_b: Mat3,
     inertia_a: Mat3,
     inertia_b: Mat3,
     r_a: Vec3,
@@ -295,11 +297,11 @@ fn point_velocity(view: &BodySolverView<'_>, slot: usize, r: Vec3) -> Vec3 {
 
 /// Returns the effective inverse mass of `slot`, or `0` for non-dynamic bodies.
 #[must_use]
-fn inv_mass(view: &BodySolverView<'_>, slot: usize) -> f32 {
+fn inv_mass(view: &BodySolverView<'_>, slot: usize) -> Mat3 {
     if view.is_dynamic(slot) {
-        view.mass_props[slot].inv_mass
+        inv_mass_world(view.mass_props[slot].inv_mass, view.orientations[slot])
     } else {
-        0.0
+        Mat3::ZERO
     }
 }
 

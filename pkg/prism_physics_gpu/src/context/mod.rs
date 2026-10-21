@@ -10,6 +10,7 @@
 //! Provenance: standard `wgpu` initialisation; no Unreal Engine source or
 //! derived code.
 
+use std::sync::Arc;
 use wgpu::{
     Adapter, BackendOptions, Backends, Device, DeviceDescriptor, Instance, InstanceDescriptor,
     InstanceFlags, PollType, Queue, RequestAdapterOptions,
@@ -26,6 +27,8 @@ pub fn block_on<F: Future>(future: F) -> F::Output {
 
 /// The long-lived `wgpu` handles shared by every compute kernel in this crate.
 pub struct GpuContext {
+    /// Host ownership identity, independent of backend instance-local IDs.
+    identity: Arc<()>,
     /// The `wgpu` instance the adapter was requested from.
     instance: Instance,
     /// The physical adapter backing [`GpuContext::device`].
@@ -57,6 +60,7 @@ impl GpuContext {
         }))
         .ok()?;
         Some(GpuContext {
+            identity: Arc::new(()),
             instance,
             adapter,
             device,
@@ -68,6 +72,12 @@ impl GpuContext {
     #[must_use]
     pub fn device(&self) -> &Device {
         &self.device
+    }
+
+    /// Identifies this logical device even across independent wgpu instances.
+    /// Retaining the token prevents address reuse while a consumer holds it.
+    pub(crate) fn device_identity(&self) -> &Arc<()> {
+        &self.identity
     }
 
     /// Returns the submission queue.

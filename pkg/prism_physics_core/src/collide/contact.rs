@@ -70,6 +70,15 @@ pub struct ContactManifold {
     pub body_b: BodyHandle,
     /// Unit contact normal pointing from body `a` toward body `b`.
     pub normal: Vec3,
+    /// Flattened compound leaf indices, or `None` on a non-compound side.
+    /// Together with the ordered body handles these distinguish child patches
+    /// for contact caches, including repeated instances of one collider handle.
+    /// Indices stay stable for the lifetime of the immutable compound.
+    pub child_indices: [Option<u32>; 2],
+    /// Per-leaf overrides resolved by registry-aware narrow phase. `None`
+    /// inherits the body's current material / exclusion-group membership.
+    pub leaf_materials: [Option<crate::collider::PhysicsMaterial>; 2],
+    pub leaf_self_collision: [Option<bool>; 2],
     /// Inline contact points; only the first `count` entries are valid.
     points: [ContactPoint; MAX_MANIFOLD_POINTS],
     /// Number of valid entries in `points`.
@@ -86,6 +95,9 @@ impl ContactManifold {
             body_a,
             body_b,
             normal,
+            child_indices: [None, None],
+            leaf_materials: [None, None],
+            leaf_self_collision: [None, None],
             points: [ContactPoint::new(Vec3::ZERO, Vec3::ZERO, 0.0); MAX_MANIFOLD_POINTS],
             count: 0,
         }

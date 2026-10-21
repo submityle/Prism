@@ -47,7 +47,7 @@ pub fn predict(view: &mut BodySolverView<'_>, gravity: Vec3, h: f32) {
         let mut linear = view.linear_velocities[i];
         let mut angular = view.angular_velocities[i];
 
-        linear += gravity * h;
+        linear += view.gravity_overrides[i].unwrap_or(gravity) * h;
         let lin_factor = 1.0 / (1.0 + view.linear_damping[i] * h);
         let ang_factor = 1.0 / (1.0 + view.angular_damping[i] * h);
         linear *= lin_factor;

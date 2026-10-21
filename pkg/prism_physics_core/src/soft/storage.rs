@@ -8,7 +8,7 @@
 use super::body::SoftBody;
 
 /// A generational handle into [`SoftBodyStorage`].
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 #[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
 pub struct SoftBodyHandle {
     index: u32,

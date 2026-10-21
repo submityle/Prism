@@ -55,11 +55,10 @@
 use glam::{Mat3, Quat, Vec3};
 
 use crate::math::scalar::Real;
-use crate::soft::{couple_particle_against_body, CouplingContribution};
 use crate::world::PhysicsWorld;
 
-use super::driver::{couple_cloth_to_rigid, gather_rigid_proxies};
-use super::proxy::{collider_anchor, Aabb};
+use super::driver::{couple_cloth_to_rigid, gather_rigid_proxies, resolve_proxy_contacts};
+use super::proxy::Aabb;
 
 /// Below this squared magnitude a net angular impulse is treated as zero and no
 /// `Δω` is written, so numerical dust from a near-symmetric load does not jitter
@@ -75,6 +74,8 @@ const ANGULAR_IMPULSE_EPS_SQ: Real = 1e-18;
 pub struct AngularCouplingReport {
     /// Number of rigid proxies that participated in the pass (after culling).
     pub proxy_count: usize,
+    /// Bodies with a leaf unsupported by the analytic soft bridge.
+    pub unsupported_count: usize,
     /// Number of bodies whose angular velocity was written back (non-zero net
     /// torque and a non-zero inverse inertia).
     pub applied_count: usize,
@@ -142,9 +143,6 @@ pub fn couple_cloth_to_rigid_angular(
     // as they were *before* the linear kernel corrected the particles and
     // translated the bodies.
     let proxies = gather_rigid_proxies(world, &soft_aabb);
-    if proxies.is_empty() {
-        return AngularCouplingReport::default();
-    }
     let originals: Vec<Vec3> = positions.to_vec();
 
     // Run the untouched linear bridge: particle corrections, body translation,
@@ -153,56 +151,39 @@ pub fn couple_cloth_to_rigid_angular(
 
     let mut report = AngularCouplingReport {
         proxy_count: proxies.len(),
+        unsupported_count: linear.unsupported_count,
         applied_linear_impulse: linear.applied_impulse,
         ..AngularCouplingReport::default()
     };
 
-    let count = originals.len().min(inverse_masses.len());
-    for proxy in &proxies {
-        let w_body = proxy.body.inverse_mass;
-        if w_body <= 0.0 {
-            // Immovable proxy: the linear bridge never translated it and it has
-            // no finite inertia to spin, so there is no angular write-back.
+    let mut replay = originals;
+    let (contacts, _) = resolve_proxy_contacts(&proxies, &mut replay, inverse_masses, dt);
+    let mut torques = vec![Vec3::ZERO; proxies.len()];
+    for contact in contacts {
+        let proxy = &proxies[contact.proxy];
+        torques[contact.proxy] +=
+            (contact.point - proxy.center_of_mass).cross(contact.contribution.impulse);
+    }
+    let mut begin = 0;
+    while begin < proxies.len() {
+        let proxy = &proxies[begin];
+        let mut end = begin + 1;
+        while end < proxies.len() && proxies[end].handle == proxy.handle {
+            end += 1;
+        }
+        let angular_impulse: Vec3 = torques[begin..end].iter().copied().sum();
+        begin = end;
+        if proxy.body.inverse_mass <= 0.0
+            || angular_impulse.length_squared() <= ANGULAR_IMPULSE_EPS_SQ
+        {
             continue;
         }
         let Some(mass) = world.bodies.mass_properties(proxy.handle) else {
             continue;
         };
         if mass.inv_inertia == Vec3::ZERO {
-            // Infinite rotational inertia (or an explicitly non-rotatable body):
-            // no torque can change its spin.
             continue;
         }
-
-        // Center of mass is the body position, recovered from the proxy's
-        // pre-pass collider anchor so the arms use the pre-pass pose.
-        let com = collider_anchor(proxy.body.collider);
-        let mut angular_impulse = Vec3::ZERO;
-        for i in 0..count {
-            // Re-evaluate the pre-pass contact to recover the contact point and
-            // the reaction impulse the net linear reduction discarded.
-            let contribution = couple_particle_against_body(
-                originals[i],
-                inverse_masses[i],
-                proxy.body.collider,
-                w_body,
-                dt,
-            );
-            if contribution == CouplingContribution::ZERO {
-                continue;
-            }
-            // Contact point on the proxy surface and its lever arm about the COM.
-            let contact = proxy.body.collider.project(originals[i]);
-            let arm = contact - com;
-            angular_impulse += arm.cross(contribution.impulse);
-        }
-
-        if angular_impulse.length_squared() <= ANGULAR_IMPULSE_EPS_SQ {
-            // Near-symmetric load: the per-contact torques cancel, so leave the
-            // spin untouched instead of writing numerical dust.
-            continue;
-        }
-
         let orientation = world.bodies.orientation(proxy.handle).unwrap_or_default();
         let delta_omega =
             world_inverse_inertia_apply(orientation, mass.inv_inertia, angular_impulse);
@@ -214,7 +195,6 @@ pub fn couple_cloth_to_rigid_angular(
         report.applied_count += 1;
         report.applied_angular_impulse += angular_impulse;
     }
-
     report
 }
 

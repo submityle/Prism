@@ -7,7 +7,7 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [dependencies]
-glam = { version = "0.33.2", default-features = false }
+glam = { version = "0.33.2", default-features = false, features = ["f64"] }
 prism_physics_geometry = { path = "../prism_physics_geometry" }
 serde = { version = "1", default-features = false, features = [
   "derive",

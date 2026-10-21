@@ -17,15 +17,33 @@
 
 pub mod anchor;
 pub mod desc;
+pub mod drive;
+pub mod gear;
 pub mod kind;
 pub mod motor;
+pub mod ragdoll;
+pub mod revolute;
+pub mod swing_twist;
 
 pub use anchor::JointAnchor;
 pub use desc::JointDesc;
+pub use drive::{ActuationBlend, AngularFriction, PoseDrive, SoftLimit};
+pub use gear::GearJointState;
 pub use kind::{
-    DistanceJoint, FixedJoint, JointKind, PrismaticJoint, RevoluteJoint, SphericalJoint,
+    DistanceJoint, FixedJoint, GearJoint, GearJointError, JointKind, PrismaticJoint, RevoluteJoint,
+    SphericalJoint,
 };
 pub use motor::{AngleLimit, LinearLimit, Motor, MotorTarget};
+pub use revolute::RevoluteJointState;
+pub use ragdoll::{
+    HumanoidPart, HumanoidPreset, MassRatioPolicy, MassRatioWarning, RagdollBuildError,
+    RagdollBuilder, RagdollDefinition, RagdollDiagnostics, RagdollLink, RagdollPart, RagdollPartId,
+    SelfCollisionFilter, SelfCollisionPolicy,
+};
+pub use swing_twist::{
+    AngularJointInput, AngularJointResponse, JointFriction, SwingTwistConfig,
+    SwingTwistConfigError, SwingTwistJoint, SwingTwistMeasurement,
+};
 
 /// A stable, generational reference to a joint stored in a [`JointStorage`].
 ///
@@ -81,6 +99,13 @@ pub struct Joint {
     pub kind: JointKind,
     /// Whether the joint is solved this step.
     pub enabled: bool,
+    /// World-owned continuous angular history and substep XPBD multiplier.
+    /// Cloned by full snapshots; never shared with another joint or solver.
+    #[cfg_attr(feature = "serialize", serde(default))]
+    pub(crate) gear_state: GearJointState,
+    /// Continuous hinge history, including while disabled or unrestricted.
+    #[cfg_attr(feature = "serialize", serde(default))]
+    pub(crate) revolute_state: RevoluteJointState,
 }
 
 impl Joint {
@@ -92,7 +117,54 @@ impl Joint {
             anchor_b: desc.anchor_b,
             kind: desc.kind,
             enabled: desc.enabled,
+            gear_state: GearJointState::default(),
+            revolute_state: RevoluteJointState::default(),
         }
+    }
+
+    /// Continuous shaft coordinates, including all completed revolutions.
+    #[must_use]
+    pub fn gear_state(&self) -> &GearJointState {
+        &self.gear_state
+    }
+
+    /// Rebases the continuous coordinates on the next observation. Use after
+    /// teleporting a shaft by an ambiguous (>= pi) angular displacement.
+    pub fn reset_gear_state(&mut self) {
+        self.gear_state = GearJointState::default();
+    }
+
+    /// Last observed continuous hinge coordinate and its world-owned history.
+    /// Limits and position motors use this unwrapped coordinate, not modulo tau.
+    #[must_use]
+    pub fn revolute_state(&self) -> &RevoluteJointState {
+        &self.revolute_state
+    }
+
+    /// Binds the current pose to an explicit continuous coordinate in radians.
+    /// Pass endpoint A/B **body world orientations**, not anchor orientations.
+    /// Use for reduced-coordinate handoff or after an ambiguous teleport.
+    /// The supplied coordinate defines the branch/zero at this pose; no wrap
+    /// or limit clamp is applied. Nonfinite coordinates, non-hinges, invalid
+    /// frames/axes and undefined twist return false without changing history.
+    #[must_use]
+    pub fn set_revolute_coordinate(&mut self, angle: f64, body_orientations: [glam::Quat; 2]) -> bool {
+        let JointKind::Revolute(params) = self.kind else {
+            return false;
+        };
+        self.revolute_state.seed(
+            angle,
+            params.axis,
+            self.anchor_a,
+            self.anchor_b,
+            body_orientations,
+        )
+    }
+
+    /// Rebase to the principal twist on the next observation. This deliberately
+    /// discards completed turns; ordinary enabling/retuning must not call it.
+    pub fn reset_revolute_state(&mut self) {
+        self.revolute_state = RevoluteJointState::default();
     }
 }
 
@@ -214,6 +286,40 @@ impl JointStorage {
             .iter()
             .enumerate()
             .filter(|(i, joint)| self.active[*i] && joint.enabled)
+            .map(|(_, joint)| joint)
+    }
+
+    /// Iterates over every live, enabled joint together with its generational
+    /// handle. Solvers that need to report measured constraint loads must use
+    /// this rather than reconstructing handles from slot indices: a recycled
+    /// slot has a different generation and must never receive an old load.
+    pub fn active_entries(&self) -> impl Iterator<Item = (JointHandle, &Joint)> {
+        self.joints
+            .iter()
+            .enumerate()
+            .filter(move |(i, joint)| self.active[*i] && joint.enabled)
+            .map(move |(i, joint)| (JointHandle::new(i as u32, self.generations[i]), joint))
+    }
+
+    /// Mutable active entries, including world-owned constraint history.
+    pub fn active_entries_mut(&mut self) -> impl Iterator<Item = (JointHandle, &mut Joint)> {
+        let active = &self.active;
+        let generations = &self.generations;
+        self.joints
+            .iter_mut()
+            .enumerate()
+            .filter(move |(i, joint)| active[*i] && joint.enabled)
+            .map(move |(i, joint)| (JointHandle::new(i as u32, generations[i]), joint))
+    }
+
+    /// Visits live joints even when disabled, so a temporarily disengaged gear
+    /// can retain the shaft winding numbers until it is re-engaged.
+    pub(crate) fn live_joints_mut(&mut self) -> impl Iterator<Item = &mut Joint> {
+        let active = &self.active;
+        self.joints
+            .iter_mut()
+            .enumerate()
+            .filter(move |(i, _)| active[*i])
             .map(|(_, joint)| joint)
     }
 }

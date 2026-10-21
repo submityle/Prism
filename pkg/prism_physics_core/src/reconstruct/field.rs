@@ -34,6 +34,40 @@ pub struct ScalarField {
     values: Vec<Real>,
 }
 
+/// Allocation and sampling-work ceilings for a particle density field.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FieldBudget {
+    /// Maximum allocated scalar nodes.
+    pub max_nodes: usize,
+    /// Maximum cells available to the subsequent extraction pass.
+    pub max_cells: usize,
+    /// Maximum particle/node kernel evaluations, including zero-weight visits.
+    pub max_sample_visits: usize,
+}
+
+/// A rejected field build never allocates a partial scalar grid.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FieldBuildError {
+    /// Non-finite particles, invalid spacing/support, or unrepresentable bounds.
+    InvalidInput,
+    /// Grid dimensions or their products cannot be represented.
+    GridOverflow,
+    /// The padded grid exceeds the node ceiling.
+    NodeBudgetExceeded,
+    /// The padded grid exceeds the cell ceiling.
+    CellBudgetExceeded,
+    /// The clipped particle stencils exceed the sampling-work ceiling.
+    SampleBudgetExceeded,
+    /// The allocator refused the bounded grid allocation.
+    AllocationFailed,
+}
+
+struct ParticleLayout {
+    nodes: [usize; 3],
+    origin: Vec3,
+    count: usize,
+}
+
 /// The compactly-supported blobby kernel `(1 − q²)³` for `q ∈ [0, 1]`, and `0`
 /// beyond. `q` is the distance normalised by the support radius. Uses only
 /// multiplication (no disallowed transcendental calls).
@@ -145,14 +179,43 @@ impl ScalarField {
         dx: Real,
         padding_cells: usize,
     ) -> ScalarField {
-        if positions.is_empty()
-            || !radius.is_finite()
+        Self::from_particles_bounded(
+            positions,
+            radius,
+            dx,
+            padding_cells,
+            FieldBudget {
+                max_nodes: usize::MAX,
+                max_cells: usize::MAX,
+                max_sample_visits: usize::MAX,
+            },
+        )
+        .unwrap_or_default()
+    }
+
+    /// Builds a density field after checking its exact padded dimensions and
+    /// clipped sampling work, before allocating any grid storage. Empty inputs
+    /// produce an empty field even with zero budgets. An error publishes no
+    /// partial field. Budgets count logical elements, not allocator metadata.
+    pub fn from_particles_bounded(
+        positions: &[Vec3],
+        radius: Real,
+        dx: Real,
+        padding_cells: usize,
+        budget: FieldBudget,
+    ) -> Result<ScalarField, FieldBuildError> {
+        if !radius.is_finite()
             || radius <= 0.0
+            || !radius.recip().is_finite()
             || !dx.is_finite()
             || dx <= 0.0
+            || dx * 0.5 == 0.0
             || positions.iter().any(|position| !position.is_finite())
         {
-            return ScalarField::default();
+            return Err(FieldBuildError::InvalidInput);
+        }
+        if positions.is_empty() {
+            return Ok(ScalarField::default());
         }
         let mut lo = positions[0];
         let mut hi = positions[0];
@@ -162,57 +225,85 @@ impl ScalarField {
         }
         let pad = radius + padding_cells as Real * dx;
         if !pad.is_finite() {
-            return ScalarField::default();
+            return Err(FieldBuildError::InvalidInput);
         }
         let lo = lo - Vec3::splat(pad);
         let hi = hi + Vec3::splat(pad);
         let span = hi - lo;
-        if !span.is_finite() || span.min_element() < 0.0 {
-            return ScalarField::default();
+        if !lo.is_finite() || !hi.is_finite() || !span.is_finite() || span.min_element() < 0.0 {
+            return Err(FieldBuildError::InvalidInput);
         }
-        let Some(nx) = axis_nodes(span.x, dx) else {
-            return ScalarField::default();
-        };
-        let Some(ny) = axis_nodes(span.y, dx) else {
-            return ScalarField::default();
-        };
-        let Some(nz) = axis_nodes(span.z, dx) else {
-            return ScalarField::default();
-        };
-        let mut field = ScalarField::zeros(nx.max(2), ny.max(2), nz.max(2), dx, lo);
-        if field.is_empty() {
-            return field;
+        let mut nodes = [0; 3];
+        for (axis, extent) in [span.x, span.y, span.z].into_iter().enumerate() {
+            nodes[axis] = axis_nodes(extent, dx)
+                .ok_or(FieldBuildError::GridOverflow)?
+                .max(2);
         }
-        let inv_r = 1.0 / radius;
-        let reach = (radius / dx).ceil() as i64 + 1;
+        let count = nodes[0]
+            .checked_mul(nodes[1])
+            .and_then(|n| n.checked_mul(nodes[2]))
+            .ok_or(FieldBuildError::GridOverflow)?;
+        let cells = (nodes[0] - 1)
+            .checked_mul(nodes[1] - 1)
+            .and_then(|n| n.checked_mul(nodes[2] - 1))
+            .ok_or(FieldBuildError::GridOverflow)?;
+        if count > budget.max_nodes {
+            return Err(FieldBuildError::NodeBudgetExceeded);
+        }
+        if cells > budget.max_cells {
+            return Err(FieldBuildError::CellBudgetExceeded);
+        }
+        let layout = ParticleLayout {
+            nodes,
+            origin: lo,
+            count,
+        };
+        let mut visits = 0usize;
         for &p in positions {
-            let rel = (p - lo) / dx;
-            let ci = rel.x.floor() as i64;
-            let cj = rel.y.floor() as i64;
-            let ck = rel.z.floor() as i64;
-            for k in (ck - reach)..=(ck + reach) {
-                if k < 0 || k as usize >= field.nz {
-                    continue;
-                }
-                for j in (cj - reach)..=(cj + reach) {
-                    if j < 0 || j as usize >= field.ny {
-                        continue;
-                    }
-                    for i in (ci - reach)..=(ci + reach) {
-                        if i < 0 || i as usize >= field.nx {
-                            continue;
-                        }
-                        let node = field.node_position(i as usize, j as usize, k as usize);
+            let ranges = particle_ranges(p, &layout, dx, radius)?;
+            let work = ranges
+                .iter()
+                .try_fold(1usize, |work, &(start, end)| {
+                    work.checked_mul(end - start + 1)
+                })
+                .ok_or(FieldBuildError::SampleBudgetExceeded)?;
+            visits = visits
+                .checked_add(work)
+                .ok_or(FieldBuildError::SampleBudgetExceeded)?;
+            if visits > budget.max_sample_visits {
+                return Err(FieldBuildError::SampleBudgetExceeded);
+            }
+        }
+        let mut values = Vec::new();
+        values
+            .try_reserve_exact(layout.count)
+            .map_err(|_| FieldBuildError::AllocationFailed)?;
+        values.resize(layout.count, 0.0);
+        let mut field = ScalarField {
+            nx: nodes[0],
+            ny: nodes[1],
+            nz: nodes[2],
+            dx,
+            origin: lo,
+            values,
+        };
+        let inv_r = radius.recip();
+        for &p in positions {
+            let [xr, yr, zr] = particle_ranges(p, &layout, dx, radius)?;
+            for k in zr.0..=zr.1 {
+                for j in yr.0..=yr.1 {
+                    for i in xr.0..=xr.1 {
+                        let node = field.node_position(i, j, k);
                         let q = (node - p).length() * inv_r;
                         let w = kernel(q);
                         if w > 0.0 {
-                            field.add_value(i as usize, j as usize, k as usize, w);
+                            field.add_value(i, j, k, w);
                         }
                     }
                 }
             }
         }
-        field
+        Ok(field)
     }
 
     /// Trilinearly samples the field at world position `p` (clamped to the
@@ -262,6 +353,29 @@ impl ScalarField {
     }
 }
 
+fn particle_ranges(
+    point: Vec3,
+    layout: &ParticleLayout,
+    dx: Real,
+    radius: Real,
+) -> Result<[(usize, usize); 3], FieldBuildError> {
+    let relative = (point - layout.origin) / dx;
+    let reach = (radius / dx).ceil() as f64 + 1.0;
+    if !relative.is_finite() || !reach.is_finite() {
+        return Err(FieldBuildError::InvalidInput);
+    }
+    let mut ranges = [(0, 0); 3];
+    for (axis, coordinate) in [relative.x, relative.y, relative.z].into_iter().enumerate() {
+        let center = coordinate.floor() as f64;
+        let last = (layout.nodes[axis] - 1) as f64;
+        ranges[axis] = (
+            (center - reach).clamp(0.0, last) as usize,
+            (center + reach).clamp(0.0, last) as usize,
+        );
+    }
+    Ok(ranges)
+}
+
 #[inline]
 fn axis_nodes(extent: Real, dx: Real) -> Option<usize> {
     let cells = (extent / dx).ceil();
@@ -275,6 +389,112 @@ fn axis_nodes(extent: Real, dx: Real) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounded_grid_checks_exact_counts_and_preserves_reference_values() {
+        let points = [Vec3::ZERO, Vec3::new(0.1, 0.0, 0.0)];
+        let reference = ScalarField::from_particles(&points, 0.2, 0.1, 1);
+        let nodes = reference.nx() * reference.ny() * reference.nz();
+        let cells = (reference.nx() - 1) * (reference.ny() - 1) * (reference.nz() - 1);
+        let layout = ParticleLayout {
+            nodes: [reference.nx(), reference.ny(), reference.nz()],
+            origin: reference.origin(),
+            count: nodes,
+        };
+        let visits: usize = points
+            .iter()
+            .map(|&point| {
+                particle_ranges(point, &layout, 0.1, 0.2)
+                    .unwrap()
+                    .iter()
+                    .map(|&(start, end)| end - start + 1)
+                    .product::<usize>()
+            })
+            .sum();
+        let budget = FieldBudget {
+            max_nodes: nodes,
+            max_cells: cells,
+            max_sample_visits: visits,
+        };
+        assert_eq!(
+            ScalarField::from_particles_bounded(&points, 0.2, 0.1, 1, budget),
+            Ok(reference)
+        );
+        assert_eq!(
+            ScalarField::from_particles_bounded(
+                &points,
+                0.2,
+                0.1,
+                1,
+                FieldBudget {
+                    max_nodes: nodes - 1,
+                    ..budget
+                }
+            ),
+            Err(FieldBuildError::NodeBudgetExceeded),
+        );
+        assert_eq!(
+            ScalarField::from_particles_bounded(
+                &points,
+                0.2,
+                0.1,
+                1,
+                FieldBudget {
+                    max_cells: cells - 1,
+                    ..budget
+                }
+            ),
+            Err(FieldBuildError::CellBudgetExceeded),
+        );
+        assert_eq!(
+            ScalarField::from_particles_bounded(
+                &points,
+                0.2,
+                0.1,
+                1,
+                FieldBudget {
+                    max_sample_visits: visits - 1,
+                    ..budget
+                }
+            ),
+            Err(FieldBuildError::SampleBudgetExceeded),
+        );
+    }
+
+    #[test]
+    fn duplicate_particles_are_charged_for_each_sampling_stencil() {
+        let budget = FieldBudget {
+            max_nodes: 10_000,
+            max_cells: 10_000,
+            max_sample_visits: 1_000,
+        };
+        assert!(ScalarField::from_particles_bounded(&[Vec3::ZERO], 0.2, 0.1, 1, budget).is_ok());
+        assert_eq!(
+            ScalarField::from_particles_bounded(&[Vec3::ZERO; 10], 0.2, 0.1, 1, budget),
+            Err(FieldBuildError::SampleBudgetExceeded),
+        );
+    }
+
+    #[test]
+    fn bounded_field_rejects_extreme_inputs_and_accepts_empty_zero_budget() {
+        let budget = FieldBudget {
+            max_nodes: 0,
+            max_cells: 0,
+            max_sample_visits: 0,
+        };
+        assert!(
+            ScalarField::from_particles_bounded(&[], 0.2, 0.1, 1, budget)
+                .unwrap()
+                .is_empty()
+        );
+        for (point, radius, dx) in [
+            (Vec3::splat(Real::MAX), Real::MAX, 0.1),
+            (Vec3::ZERO, 0.2, Real::from_bits(1)),
+            (Vec3::NAN, 0.2, 0.1),
+        ] {
+            assert!(ScalarField::from_particles_bounded(&[point], radius, dx, 1, budget).is_err());
+        }
+    }
 
     #[test]
     fn empty_particles_gives_empty_field() {

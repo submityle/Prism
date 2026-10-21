@@ -20,6 +20,9 @@
 //! * [`ColliderShape::Cuboid`] → [`BodyCollider::Obb`] at the body's world pose
 //!   (center = position, orientation = body orientation, matching half-extents),
 //!   so a box prop collides against cloth via its true oriented-box faces.
+//! * [`ColliderShape::Compound`] → multiple real leaf proxies through
+//!   [`body_colliders_from_shape_in`]. Single-proxy converters deliberately
+//!   return `None` rather than fill the union's concave gaps.
 //!
 //! # Provenance
 //!
@@ -43,9 +46,67 @@ use crate::state::handle::BodyHandle;
 pub struct RigidProxy {
     /// The rigid body this proxy represents.
     pub handle: BodyHandle,
+    /// Root body's pre-pass world COM, not the child collider's center.
+    pub center_of_mass: Vec3,
     /// The coupling body (collider + inverse mass + reaction accumulator) the
     /// two-way pass operates on.
     pub body: CouplingBody,
+}
+
+/// Why a collision leaf cannot be represented by this analytic soft bridge.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CouplingProxyError {
+    /// Collider or backing geometry is absent from the registry.
+    InvalidGeometry,
+    /// A zero-thickness triangle surface needs swept particles/contact thickness,
+    /// neither of which is supplied to the penetration-only normal bridge.
+    TriangleSurface,
+    /// The bounded analytic proxy cannot store all convex face planes.
+    ConvexPlaneCapacity,
+}
+
+/// Converts the entire leaf collection, with composed world transforms.
+/// Failure is atomic: unsupported leaves are reported, never silently dropped.
+/// The normal bridge supports precisely the same solid primitives/convex hulls
+/// as before; compounds do not introduce a hull/AABB approximation.
+pub fn body_colliders_from_shape_in(
+    shape: &ColliderShape,
+    position: Vec3,
+    orientation: Quat,
+    shapes: &ShapeRegistry,
+) -> Result<Vec<BodyCollider>, CouplingProxyError> {
+    use crate::math::transform::Isometry;
+    if let ColliderShape::Compound { compound, .. } = *shape {
+        let root = Isometry::new(position, orientation);
+        let mut proxies = Vec::new();
+        for child in shapes
+            .compound(compound)
+            .ok_or(CouplingProxyError::InvalidGeometry)?
+            .children()
+        {
+            let pose = root.mul(&child.local_pose);
+            let shape = shapes
+                .get(child.collider)
+                .ok_or(CouplingProxyError::InvalidGeometry)?;
+            proxies.extend(body_colliders_from_shape_in(
+                shape,
+                pose.translation,
+                pose.rotation,
+                shapes,
+            )?);
+        }
+        return Ok(proxies);
+    }
+    let error = match *shape {
+        ColliderShape::TriangleMesh { .. } => CouplingProxyError::TriangleSurface,
+        ColliderShape::ConvexHull { mesh, .. } if shapes.convex_mesh(mesh).is_some() => {
+            CouplingProxyError::ConvexPlaneCapacity
+        }
+        _ => CouplingProxyError::InvalidGeometry,
+    };
+    body_collider_from_shape_in(shape, position, orientation, shapes)
+        .map(|p| vec![p])
+        .ok_or(error)
 }
 
 /// Builds the soft-side [`BodyCollider`] for a rigid [`ColliderShape`] at the
@@ -100,6 +161,8 @@ pub fn body_collider_from_shape(
         // registry-aware [`body_collider_from_shape_in`]; this function handles
         // the analytic (self-describing) shapes only.
         ColliderShape::ConvexHull { .. } | ColliderShape::TriangleMesh { .. } => None,
+        // A compound is a potentially concave union, not one convex proxy.
+        ColliderShape::Compound { .. } => None,
     }
 }
 
@@ -122,6 +185,9 @@ pub fn body_collider_from_shape(
 /// * [`ColliderShape::TriangleMesh`] → [`None`]: a triangle mesh is immovable
 ///   scene geometry with no analytic (bounded, `Copy`) convex proxy, so it is
 ///   skipped exactly like any other shape without a proxy.
+/// * [`ColliderShape::Compound`] → [`None`]: even with its registry available,
+///   a potentially concave union cannot be represented by one convex proxy.
+///   Use [`body_colliders_from_shape_in`] to expand the real leaves.
 ///
 /// Returns [`None`] when the shape has no coupling proxy or when the referenced
 /// mesh handle is not present in `shapes`.
@@ -168,6 +234,8 @@ pub fn body_collider_from_shape_in(
         // A triangle mesh is static scene geometry with no bounded analytic
         // proxy; it is skipped, matching the "no proxy -> None" contract.
         ColliderShape::TriangleMesh { .. } => None,
+        // Reject rather than fill the union's gaps with a hull or an AABB.
+        ColliderShape::Compound { .. } => None,
     }
 }
 
@@ -323,6 +391,31 @@ pub fn collider_overlaps(collider: BodyCollider, soft_aabb: &Aabb) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compound_is_explicitly_rejected_by_both_single_proxy_converters() {
+        use crate::collider::CompoundChild;
+        use crate::math::transform::Isometry;
+
+        let mut shapes = ShapeRegistry::new();
+        let sphere = shapes.insert(ColliderShape::Sphere { radius: 0.5 });
+        let children = [-2.0, 2.0].map(|x| CompoundChild {
+            collider: sphere,
+            local_pose: Isometry::new(Vec3::new(x, 0.0, 0.0), Quat::IDENTITY),
+        });
+        let handle = shapes.insert_compound(&children).expect("valid union");
+        let shape = shapes.get(handle).expect("registered compound");
+        let position = Vec3::new(1.0, 2.0, 3.0);
+        let rotation = Quat::from_rotation_y(0.7);
+
+        // Registry access must not silently turn two disjoint spheres into a
+        // solid box/hull spanning the empty space between them.
+        assert_eq!(body_collider_from_shape(shape, position, rotation), None);
+        assert_eq!(
+            body_collider_from_shape_in(shape, position, rotation, &shapes),
+            None
+        );
+    }
 
     #[test]
     fn sphere_shape_maps_to_sphere_at_position() {

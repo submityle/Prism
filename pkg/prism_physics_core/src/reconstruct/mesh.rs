@@ -64,8 +64,9 @@ impl SurfaceMesh {
         if !self.indices.len().is_multiple_of(3) {
             return false;
         }
-        let n = self.positions.len() as u32;
-        self.indices.iter().all(|&i| i < n)
+        self.indices
+            .iter()
+            .all(|&i| (i as usize) < self.positions.len())
     }
 }
 

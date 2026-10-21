@@ -21,7 +21,9 @@
 //! Engine source or derived code.
 
 use super::config::XpbdConfig;
-use super::rigid::{apply_position_impulse, generalized_inverse_mass, inv_inertia_world};
+use super::rigid::{
+    apply_position_impulse, generalized_inverse_mass, inv_inertia_world, inv_mass_world,
+};
 use crate::collide::ContactManifold;
 use crate::collider::PhysicsMaterial;
 use crate::state::view::BodySolverView;
@@ -93,7 +95,10 @@ impl ContactConstraint {
                 continue;
             }
 
-            let material = PhysicsMaterial::combine(view.materials[slot_a], view.materials[slot_b]);
+            let material = PhysicsMaterial::combine(
+                manifold.leaf_materials[0].unwrap_or(view.materials[slot_a]),
+                manifold.leaf_materials[1].unwrap_or(view.materials[slot_b]),
+            );
             let normal = manifold.normal;
             let q_a = view.orientations[slot_a];
             let q_b = view.orientations[slot_b];
@@ -257,7 +262,10 @@ fn solve_point(
     index: usize,
     alpha_tilde: f32,
 ) {
-    let (inv_mass_a, inv_mass_b) = (inv_mass(view, slot_a), inv_mass(view, slot_b));
+    let (inv_mass_a, inv_mass_b) = (
+        inv_mass_world_for(view, slot_a),
+        inv_mass_world_for(view, slot_b),
+    );
     let (inertia_a, inertia_b) = (inertia_world(view, slot_a), inertia_world(view, slot_b));
 
     let anchor_a_local = constraint.points[index].anchor_a_local;
@@ -347,8 +355,8 @@ fn apply_static_friction(
     }
     let tangent = tangential / magnitude;
 
-    let w_a = generalized_inverse_mass(inv_mass(view, slot_a), inertia_a, r_a, tangent);
-    let w_b = generalized_inverse_mass(inv_mass(view, slot_b), inertia_b, r_b, tangent);
+    let w_a = generalized_inverse_mass(inv_mass_world_for(view, slot_a), inertia_a, r_a, tangent);
+    let w_b = generalized_inverse_mass(inv_mass_world_for(view, slot_b), inertia_b, r_b, tangent);
     let w_sum = w_a + w_b;
     if w_sum <= SOLVE_EPS {
         return;
@@ -383,7 +391,7 @@ fn apply_pair(
     impulse: Vec3,
 ) {
     if view.is_dynamic(slot_a) {
-        let inv_mass_a = view.mass_props[slot_a].inv_mass;
+        let inv_mass_a = inv_mass_world_for(view, slot_a);
         let mut x = view.positions[slot_a];
         let mut q = view.orientations[slot_a];
         apply_position_impulse(&mut x, &mut q, inv_mass_a, inertia_a, r_a, impulse);
@@ -391,7 +399,7 @@ fn apply_pair(
         view.orientations[slot_a] = q;
     }
     if view.is_dynamic(slot_b) {
-        let inv_mass_b = view.mass_props[slot_b].inv_mass;
+        let inv_mass_b = inv_mass_world_for(view, slot_b);
         let mut x = view.positions[slot_b];
         let mut q = view.orientations[slot_b];
         apply_position_impulse(&mut x, &mut q, inv_mass_b, inertia_b, r_b, -impulse);
@@ -408,11 +416,11 @@ fn point_velocity(view: &BodySolverView<'_>, slot: usize, r: Vec3) -> Vec3 {
 
 /// Returns the effective inverse mass of `slot`, or `0` for non-dynamic bodies.
 #[must_use]
-fn inv_mass(view: &BodySolverView<'_>, slot: usize) -> f32 {
+fn inv_mass_world_for(view: &BodySolverView<'_>, slot: usize) -> Mat3 {
     if view.is_dynamic(slot) {
-        view.mass_props[slot].inv_mass
+        inv_mass_world(view.mass_props[slot].inv_mass, view.orientations[slot])
     } else {
-        0.0
+        Mat3::ZERO
     }
 }
 
@@ -431,8 +439,44 @@ fn inertia_world(view: &BodySolverView<'_>, slot: usize) -> Mat3 {
 mod tests {
     use super::*;
     use crate::collide::{ContactManifold, ContactPoint};
-    use crate::state::body::{BodyDesc, MassProperties};
+    use crate::state::body::{BodyDesc, MassProperties, SolverMassProperties};
     use crate::state::storage::BodyStorage;
+    use glam::Quat;
+
+    const EPS: f32 = 1.0e-6;
+
+    fn assert_scalar_close(actual: f32, expected: f32) {
+        assert!(
+            (actual - expected).abs() < EPS,
+            "actual {actual}, expected {expected}"
+        );
+    }
+
+    fn assert_vector_close(actual: Vec3, expected: Vec3) {
+        assert!(
+            (actual - expected).abs().max_element() < EPS,
+            "actual {actual:?}, expected {expected:?}"
+        );
+    }
+
+    fn assert_orientation_close(actual: Quat, expected: Quat) {
+        for (actual, expected) in actual.to_array().into_iter().zip(expected.to_array()) {
+            assert_scalar_close(actual, expected);
+        }
+    }
+
+    // Zero lever arms isolate translational response. The positive overlap is
+    // 0.2, with the normal pointing from a to b as required by the solver.
+    fn centered_pair(normal: Vec3) -> (BodyStorage, ContactManifold) {
+        let mut storage = BodyStorage::new();
+        let ha =
+            storage.insert(unit_dynamic(normal * 0.2).with_material(PhysicsMaterial::FRICTIONLESS));
+        let hb =
+            storage.insert(unit_dynamic(Vec3::ZERO).with_material(PhysicsMaterial::FRICTIONLESS));
+        let mut manifold = ContactManifold::new(ha, hb, normal);
+        manifold.push(ContactPoint::new(normal * 0.2, Vec3::ZERO, 0.2));
+        (storage, manifold)
+    }
 
     fn unit_dynamic(pos: Vec3) -> BodyDesc {
         BodyDesc::dynamic_at(pos).with_mass_properties(MassProperties {
@@ -505,5 +549,252 @@ mod tests {
         // Static ground unmoved; dynamic body lifted back to the surface.
         assert_eq!(view.positions[0], Vec3::ZERO);
         assert!((view.positions[1].y - 0.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn anisotropic_solver_mass_changes_contact_projection() {
+        let effective = SolverMassProperties {
+            inv_mass: Vec3::new(0.1, 1.0, 0.25),
+            inv_inertia: Vec3::ONE,
+        };
+        for q in [
+            Quat::IDENTITY,
+            Quat::from_rotation_z(core::f32::consts::FRAC_PI_4),
+        ] {
+            for normal in [Vec3::X, Vec3::Y, Vec3::Z, (Vec3::X + Vec3::Y).normalize()] {
+                for alpha in [0.0, 0.25] {
+                    let (mut storage, manifold) = centered_pair(normal);
+                    assert!(storage.set_orientation(manifold.body_a, q));
+                    assert!(storage.set_solver_mass_properties(manifold.body_a, effective));
+                    // Only a is modified: otherwise equal weighting can mask a
+                    // bad effective-mass implementation in a rigid projection.
+                    let response = q * (effective.inv_mass * (q.conjugate() * normal));
+                    let w_a = normal.dot(response);
+                    let lambda = 0.2 / (w_a + 1.0 + alpha);
+                    let h = 0.016;
+                    let config = XpbdConfig {
+                        contact_compliance: alpha * h * h,
+                        ..XpbdConfig::default()
+                    };
+                    let mut view = storage.solver_view_mut();
+                    let mut constraints = ContactConstraint::build(&view, &[manifold]);
+                    solve_positions(&mut view, &mut constraints, &config, h);
+                    assert_scalar_close(constraints[0].normal_lambda(0), lambda);
+                    assert_vector_close(view.positions[0], normal * 0.2 - response * lambda);
+                    assert_vector_close(view.positions[1], normal * lambda);
+                    assert_orientation_close(view.orientations[0], q);
+                    assert_orientation_close(view.orientations[1], Quat::IDENTITY);
+                    let residual = (view.positions[0] - view.positions[1]).dot(normal);
+                    assert_scalar_close(residual, alpha * lambda);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn anisotropic_equal_pair_keeps_rigid_projection_but_changes_lambda() {
+        for normal in [Vec3::X, Vec3::Y, Vec3::Z] {
+            for diagonal in [Vec3::ONE, Vec3::new(0.1, 1.0, 0.25)] {
+                let (mut storage, manifold) = centered_pair(normal);
+                let effective = SolverMassProperties {
+                    inv_mass: diagonal,
+                    inv_inertia: Vec3::ONE,
+                };
+                assert!(storage.set_solver_mass_properties(manifold.body_a, effective));
+                assert!(storage.set_solver_mass_properties(manifold.body_b, effective));
+                let mut view = storage.solver_view_mut();
+                let mut constraints = ContactConstraint::build(&view, &[manifold]);
+                solve_positions(&mut view, &mut constraints, &XpbdConfig::default(), 0.016);
+                // w_a == w_b: each moves 0.1, even when both become heavier.
+                assert_vector_close(view.positions[0], normal * 0.1);
+                assert_vector_close(view.positions[1], normal * 0.1);
+                assert_scalar_close(
+                    constraints[0].normal_lambda(0),
+                    0.2 / (2.0 * normal.dot(diagonal * normal)),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn anisotropic_tangent_mass_controls_friction_sharing_and_coulomb_gate() {
+        let diagonal = Vec3::new(0.1, 1.0, 0.5);
+        for q in [
+            Quat::IDENTITY,
+            Quat::from_rotation_y(core::f32::consts::FRAC_PI_2),
+        ] {
+            for tangent in [Vec3::X, Vec3::Z] {
+                for drift in [0.02, 0.07] {
+                    let (mut storage, manifold) = centered_pair(Vec3::Y);
+                    let material = PhysicsMaterial::new(0.5, 0.0);
+                    assert!(storage.set_material(manifold.body_a, material));
+                    assert!(storage.set_material(manifold.body_b, material));
+                    assert!(storage.set_orientation(manifold.body_a, q));
+                    assert!(storage.set_prev_orientation(manifold.body_a, q));
+                    assert!(
+                        storage.set_prev_position(manifold.body_a, Vec3::Y * 0.2 - tangent * drift)
+                    );
+                    assert!(storage.set_solver_mass_properties(
+                        manifold.body_a,
+                        SolverMassProperties {
+                            inv_mass: diagonal,
+                            inv_inertia: Vec3::ONE
+                        },
+                    ));
+                    let response = q * (diagonal * (q.conjugate() * tangent));
+                    let lambda_t = drift / (1.0 + tangent.dot(response));
+                    let holds = lambda_t < 0.5 * 0.1;
+                    // At drift 0.07, w_t=1.1 slips but w_t=1.5 sticks.
+                    let correction = if holds { lambda_t } else { 0.0 };
+                    let mut view = storage.solver_view_mut();
+                    let mut constraints = ContactConstraint::build(&view, &[manifold]);
+                    solve_positions(&mut view, &mut constraints, &XpbdConfig::default(), 0.016);
+                    assert_scalar_close(constraints[0].normal_lambda(0), 0.1);
+                    assert_vector_close(view.positions[0], Vec3::Y * 0.1 - response * correction);
+                    assert_vector_close(view.positions[1], Vec3::Y * 0.1 + tangent * correction);
+                    let remaining_drift = (view.positions[0] - view.prev_positions[0])
+                        - (view.positions[1] - view.prev_positions[1]);
+                    assert_scalar_close(
+                        remaining_drift.dot(tangent),
+                        if holds { 0.0 } else { drift },
+                    );
+                    assert_orientation_close(view.orientations[0], q);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn anisotropic_static_body_ignores_nonzero_solver_mass_on_either_side() {
+        for static_first in [false, true] {
+            let mut storage = BodyStorage::new();
+            let q = Quat::from_rotation_z(core::f32::consts::FRAC_PI_2);
+            let ground = storage.insert(BodyDesc::static_at(Vec3::ZERO));
+            let dynamic = storage
+                .insert(unit_dynamic(-Vec3::Y * 0.2).with_material(PhysicsMaterial::FRICTIONLESS));
+            assert!(storage.set_orientation(dynamic, q));
+            let effective = SolverMassProperties {
+                inv_mass: Vec3::new(0.1, 1.0, 0.25),
+                inv_inertia: Vec3::new(2.0, 3.0, 4.0),
+            };
+            // Deliberately nonzero properties must not make a static body
+            // contribute to either the denominator or the applied correction.
+            assert!(storage.set_solver_mass_properties(ground, effective));
+            assert!(storage.set_solver_mass_properties(dynamic, effective));
+            let mut manifold = if static_first {
+                ContactManifold::new(ground, dynamic, Vec3::Y)
+            } else {
+                ContactManifold::new(dynamic, ground, -Vec3::Y)
+            };
+            let ground_point = Vec3::X;
+            let dynamic_point = ground_point - Vec3::Y * 0.2;
+            let (a, b) = if static_first {
+                (ground_point, dynamic_point)
+            } else {
+                (dynamic_point, ground_point)
+            };
+            manifold.push(ContactPoint::new(a, b, 0.2));
+            let mut view = storage.solver_view_mut();
+            let mut constraints = ContactConstraint::build(&view, &[manifold]);
+            solve_positions(&mut view, &mut constraints, &XpbdConfig::default(), 0.016);
+            // Dynamic arm X adds I^-1_zz=4; world M^-1_yy=0.1.
+            let lambda = 0.2 / (0.1 + 4.0);
+            assert_scalar_close(constraints[0].normal_lambda(0), lambda);
+            assert_vector_close(view.positions[0], Vec3::ZERO);
+            assert_orientation_close(view.orientations[0], Quat::IDENTITY);
+            assert_vector_close(view.positions[1], Vec3::Y * (-0.2 + 0.1 * lambda));
+            let rotation = Quat::from_xyzw(0.0, 0.0, 0.5 * 4.0 * lambda, 1.0).normalize();
+            assert_orientation_close(view.orientations[1], rotation * q);
+        }
+    }
+
+    #[test]
+    fn anisotropic_rotated_inertia_controls_off_center_contact_projection() {
+        let mass = SolverMassProperties {
+            inv_mass: Vec3::new(0.25, 0.5, 1.0),
+            inv_inertia: Vec3::new(2.0, 3.0, 5.0),
+        };
+        for q in [
+            Quat::IDENTITY,
+            Quat::from_rotation_x(core::f32::consts::FRAC_PI_2),
+            Quat::from_rotation_y(core::f32::consts::FRAC_PI_4),
+        ] {
+            let mut storage = BodyStorage::new();
+            let dynamic = storage
+                .insert(unit_dynamic(Vec3::ZERO).with_material(PhysicsMaterial::FRICTIONLESS));
+            let ground = storage.insert(BodyDesc::static_at(Vec3::X));
+            assert!(storage.set_orientation(dynamic, q));
+            assert!(storage.set_solver_mass_properties(dynamic, mass));
+            let mut manifold = ContactManifold::new(dynamic, ground, Vec3::Y);
+            manifold.push(ContactPoint::new(Vec3::X + Vec3::Y * 0.2, Vec3::X, 0.2));
+            // r x n = Z. Compute expectations in body coordinates, independent
+            // of the production world-tensor/generalized-mass helpers.
+            let linear = q * (mass.inv_mass * (q.conjugate() * Vec3::Y));
+            let angular = q * (mass.inv_inertia * (q.conjugate() * Vec3::Z));
+            let lambda = 0.2 / (Vec3::Y.dot(linear) + Vec3::Z.dot(angular));
+            let dphi = -angular * lambda;
+            let rotation =
+                Quat::from_xyzw(0.5 * dphi.x, 0.5 * dphi.y, 0.5 * dphi.z, 1.0).normalize();
+            let mut view = storage.solver_view_mut();
+            let mut constraints = ContactConstraint::build(&view, &[manifold]);
+            solve_positions(&mut view, &mut constraints, &XpbdConfig::default(), 0.016);
+            assert_scalar_close(constraints[0].normal_lambda(0), lambda);
+            assert_vector_close(view.positions[0], -linear * lambda);
+            assert_orientation_close(view.orientations[0], rotation * q);
+            assert_vector_close(view.positions[1], Vec3::X);
+            assert_orientation_close(view.orientations[1], Quat::IDENTITY);
+        }
+    }
+
+    #[test]
+    fn isotropic_solver_mass_reduces_to_scalar_contact_solution() {
+        let normal = (Vec3::X + Vec3::Y).normalize();
+        let tangent = Vec3::Z;
+        let q = Quat::from_rotation_y(0.7) * Quat::from_rotation_x(0.4);
+        let (inv_a, inv_b) = (0.4, 0.8);
+        for override_mass in [false, true] {
+            for alpha in [0.0, 0.25] {
+                let mut storage = BodyStorage::new();
+                let mut a = unit_dynamic(normal * 0.2);
+                a.orientation = q;
+                a.mass_properties.inv_mass = inv_a;
+                let mut b = unit_dynamic(Vec3::ZERO);
+                b.orientation = q;
+                b.mass_properties.inv_mass = inv_b;
+                let ha = storage.insert(a);
+                let hb = storage.insert(b);
+                assert!(storage.set_prev_position(ha, a.position - tangent * 0.02));
+                if override_mass {
+                    for (body, inv_mass) in [(ha, inv_a), (hb, inv_b)] {
+                        assert!(storage.set_solver_mass_properties(
+                            body,
+                            SolverMassProperties {
+                                inv_mass: Vec3::splat(inv_mass),
+                                inv_inertia: Vec3::ONE,
+                            }
+                        ));
+                    }
+                }
+                let mut manifold = ContactManifold::new(ha, hb, normal);
+                manifold.push(ContactPoint::new(a.position, b.position, 0.2));
+                let h = 0.016;
+                let config = XpbdConfig {
+                    contact_compliance: alpha * h * h,
+                    ..XpbdConfig::default()
+                };
+                let lambda_n = 0.2 / (inv_a + inv_b + alpha);
+                let lambda_t = 0.02 / (inv_a + inv_b);
+                assert!(lambda_t < 0.5 * lambda_n);
+                let correction = normal * lambda_n + tangent * lambda_t;
+                let mut view = storage.solver_view_mut();
+                let mut constraints = ContactConstraint::build(&view, &[manifold]);
+                solve_positions(&mut view, &mut constraints, &config, h);
+                assert_scalar_close(constraints[0].normal_lambda(0), lambda_n);
+                assert_vector_close(view.positions[0], a.position - correction * inv_a);
+                assert_vector_close(view.positions[1], b.position + correction * inv_b);
+                assert_orientation_close(view.orientations[0], q);
+                assert_orientation_close(view.orientations[1], q);
+            }
+        }
     }
 }

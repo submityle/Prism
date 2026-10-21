@@ -535,10 +535,21 @@ pub(crate) fn step(world: &mut World) {
     let mut solver = world.remove_resource::<PhysicsSolver>().unwrap();
     let mut diagnostics = world.remove_resource::<PhysicsDiagnostics>().unwrap();
     let mut bindings = world.remove_resource::<PhysicsBindings>().unwrap();
+    let mut field_runtime = world.remove_resource::<FieldRuntimeResource>();
     let n = physics.config.default_substeps;
+    let h = dt / n.max(1) as f32;
+    let mut field_diagnostics = FieldRuntimeDiagnostics {
+        tick: diagnostics.tick,
+        gpu_authority: field_runtime.is_some(),
+        requested_substeps: n,
+        ..Default::default()
+    };
+    diagnostics.simulated_dt = 0.0;
     let config = solver.0.config;
     let valid = dt.is_finite()
         && dt > 0.0
+        && h.is_finite()
+        && h > 0.0
         && (1..=8).contains(&n)
         && physics.config.gravity.is_finite()
         && config.position_iterations > 0
@@ -565,8 +576,25 @@ pub(crate) fn step(world: &mut World) {
     }
     let mut events = contacts(&mut physics, &mut bindings, diagnostics.tick);
     if valid {
-        let h = dt / n as f32;
         for _ in 0..n {
+            // The GPU/core contract rejects a field batch before advancing
+            // this substep. Preserve caller-queued forces but roll back this
+            // attempt's persistent ECS wrench and its wake side effects. Take
+            // the checkpoint per substep so an earlier committed prefix stays
+            // intact. The CPU path does not allocate this checkpoint.
+            let checkpoint = field_runtime.as_ref().map(|_| {
+                let sleep_states: Vec<_> = forces
+                    .iter()
+                    .filter_map(|(handle, _)| {
+                        Some((
+                            handle.index() as usize,
+                            physics.bodies.is_sleeping(*handle)?,
+                            physics.bodies.sleep_timer(*handle)?,
+                        ))
+                    })
+                    .collect();
+                (physics.external_forces.clone(), sleep_states)
+            });
             for &(handle, force) in &forces {
                 if let Some(position) = physics.bodies.position(handle) {
                     if force.force != Vec3::ZERO {
@@ -577,16 +605,58 @@ pub(crate) fn step(world: &mut World) {
                     }
                 }
             }
-            solver.0.step(&mut physics, h, 1);
+            if let Some(runtime) = &mut field_runtime {
+                if let Err(error) =
+                    solver
+                        .0
+                        .step_with_field_sampler(&mut physics, h, 1, &mut runtime.0)
+                {
+                    let (pending_forces, sleep_states) = checkpoint.unwrap();
+                    physics.external_forces = pending_forces;
+                    // Core rejects before changing body state or membership;
+                    // only the bridge's apply_force/apply_torque calls woke
+                    // these slots and reset their timers during this attempt.
+                    let view = physics.bodies.solver_view_mut();
+                    for (slot, sleeping, timer) in sleep_states {
+                        view.sleeping[slot] = sleeping;
+                        view.sleep_timers[slot] = timer;
+                    }
+                    let error = match error {
+                        field_runtime::FieldStepError::Sampling {
+                            completed_substeps,
+                            source,
+                        } => field_runtime::FieldStepError::Sampling {
+                            completed_substeps: field_diagnostics.completed_substeps
+                                + completed_substeps,
+                            source,
+                        },
+                        error => error,
+                    };
+                    field_diagnostics.error = Some(error);
+                    issue(&mut diagnostics, None, PhysicsIssue::FieldSamplingFailed);
+                    break;
+                }
+            } else {
+                solver.0.step(&mut physics, h, 1);
+            }
+            field_diagnostics.completed_substeps += 1;
             events.extend(contacts(&mut physics, &mut bindings, diagnostics.tick));
         }
-        diagnostics.simulated_dt = dt;
+        diagnostics.simulated_dt = if field_diagnostics.completed_substeps == n {
+            dt
+        } else {
+            h * field_diagnostics.completed_substeps as f32
+        };
     } else {
         issue(&mut diagnostics, None, PhysicsIssue::InvalidConfiguration);
     }
     world.insert_resource(physics);
     world.insert_resource(solver);
     world.insert_resource(diagnostics);
+    world.insert_resource(field_diagnostics);
+    if let Some(runtime) = field_runtime {
+        world.insert_resource(runtime);
+    }
     world
         .resource_mut::<Events<PhysicsContactEvent>>()
         .send_batch(events);

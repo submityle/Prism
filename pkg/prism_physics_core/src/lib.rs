@@ -33,11 +33,13 @@
 // in `alloc` makes those canonical paths resolvable from this std crate.
 extern crate alloc;
 
+pub mod aero;
 pub mod backend;
 pub mod cache;
 pub mod ccd;
 pub mod collide;
 pub mod collider;
+pub mod collision_filter;
 pub mod command;
 pub mod config;
 pub mod driver;
@@ -64,6 +66,12 @@ pub mod vbd;
 pub mod world;
 
 // Curated, prelude-style re-exports of the most commonly used public types.
+pub use aero::{
+    compute_aero_wrench, AddedMass, AeroBodyConfig, AeroBodyState, AeroForceSink, AeroModel,
+    AeroSurface, AeroWrench, BuoyancyVolume, ControlSurface, Downwash, FlowField, FlowJet,
+    FluidKind, FluidPlane, GroundEffect, GroundEffectScale, Gust, LiftCurve, MagnusParams,
+    Slipstream, Thruster, Turbulence, WindField, WindSample,
+};
 pub use backend::{CpuBackend, PhysicsBackend};
 pub use cache::{
     trajectory_hash, BakeConfig, Baker, CacheTrack, FrameRecord, GoldenDigest, PhysicsCache,
@@ -75,6 +83,10 @@ pub use collide::{
 };
 pub use collider::material::PhysicsMaterial;
 pub use collider::{ColliderHandle, ColliderShape, ShapeRegistry};
+pub use collision_filter::{
+    CollisionExclusionError, CollisionExclusionGroupId, CollisionExclusionMembership,
+    CollisionExclusions,
+};
 pub use command::{CommandQueue, PhysicsCommand};
 pub use config::WorldConfig;
 pub use driver::fixed_step::{AdvanceReport, FixedStepPipeline};
@@ -103,8 +115,9 @@ pub use fracture::{
 };
 pub use island::{islands_from_pairs, IslandBuilder, IslandId, IslandSet};
 pub use joint::{
-    AngleLimit, DistanceJoint, FixedJoint, Joint, JointAnchor, JointDesc, JointHandle, JointKind,
-    JointStorage, LinearLimit, Motor, MotorTarget, PrismaticJoint, RevoluteJoint, SphericalJoint,
+    AngleLimit, DistanceJoint, FixedJoint, GearJoint, GearJointError, GearJointState, Joint,
+    JointAnchor, JointDesc, JointHandle, JointKind, JointStorage, LinearLimit, Motor, MotorTarget,
+    PrismaticJoint, RevoluteJoint, SphericalJoint,
 };
 pub use lod::{LodConfig, SpatialController, TemporalController};
 pub use math::scalar::{approx_eq, Real, EPSILON, PI, TAU};
@@ -129,7 +142,6 @@ pub use snapshot::pose::{lerp_pose, BodyPose};
 pub use snapshot::StateSnapshot;
 pub use soft::aero::{
     apply_aero_forces, apply_aero_to_columns, triangle_aero_force, turbulence_offset, AeroParams,
-    WindField,
 };
 pub use soft::body::SoftBody;
 pub use soft::build::{Cloth, ClothGrid, Rope, RopeGrid, SoftBox, SoftBoxGrid};
@@ -167,8 +179,12 @@ pub use soft::solver::{
     SelfCollisionParams, SoftContacts, SoftSolver, SoftSolverConfig, VirtualSelfCollisionParams,
 };
 pub use soft::storage::{SoftBodyHandle, SoftBodyStorage};
+pub use soft::topology::{
+    TearableMesh, TopologyEdge, TopologyMeshError, TopologyTearEvent, TopologyTearEventKind,
+    TopologyTearingConfig,
+};
 pub use solver::{IntegrateOnlySolver, Solver, SolverRegistry, XpbdConfig, XpbdSolver};
-pub use state::body::{BodyDesc, BodyKind, MassProperties};
+pub use state::body::{BodyDesc, BodyKind, MassProperties, SolverMassProperties};
 pub use state::handle::BodyHandle;
 pub use state::storage::BodyStorage;
 pub use state::view::BodySolverView;
@@ -176,4 +192,7 @@ pub use vbd::{
     outer, SpringContribution, SpringElement, SpringSet, VbdBody, VbdConfig, VbdSolver,
     VertexSystem,
 };
-pub use world::PhysicsWorld;
+pub use world::{
+    AeroApplyReport, AeroBodyRegistration, AeroBodySample, AeroRegistrationError, AeroStepReport,
+    PhysicsWorld,
+};

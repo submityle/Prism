@@ -28,7 +28,9 @@
 
 pub(crate) mod convex_sweep;
 pub(crate) mod dispatch;
+mod leaves;
 pub(crate) mod mesh;
+pub use leaves::{ColliderLeaf, LeafHit, LeafProjection};
 pub(crate) mod multi;
 pub(crate) mod overlap;
 pub(crate) mod project;

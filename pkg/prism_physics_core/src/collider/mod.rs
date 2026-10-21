@@ -20,6 +20,9 @@ pub use convex_mesh::{ConvexMeshData, ConvexMeshHandle, ConvexProjection, Convex
 pub mod tri_mesh;
 
 pub use tri_mesh::{TriMeshData, TriMeshHandle};
+pub mod compound;
+
+pub use compound::{CompoundChild, CompoundColliderData, CompoundColliderError, CompoundHandle};
 pub mod hull;
 
 pub use hull::convex_hull;
@@ -631,6 +634,21 @@ pub struct ColliderHandle(pub u32);
 #[derive(Clone, Copy, PartialEq, Debug)]
 #[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
 pub enum ColliderShape {
+    /// A union of independently colliding, rigidly transformed children.
+    /// Build through [`ShapeRegistry::insert_compound`]; never support-map this
+    /// union as one convex shape. Its inline bounds are broad-phase only.
+    Compound {
+        /// Handle into the registry's immutable compound arena.
+        compound: CompoundHandle,
+        /// Cached local-space broad-phase minimum.
+        local_aabb_min: Vec3,
+        /// Cached local-space broad-phase maximum.
+        local_aabb_max: Vec3,
+        /// Sum of child unit-density masses (overlap is counted per child).
+        unit_density_mass: f32,
+        /// Diagonal inertia about the compound origin, including child offsets.
+        unit_density_inertia: Vec3,
+    },
     /// A solid sphere.
     Sphere {
         /// Sphere radius.
@@ -735,6 +753,11 @@ impl ColliderShape {
                 local_aabb_min,
                 local_aabb_max,
                 ..
+            }
+            | ColliderShape::Compound {
+                local_aabb_min,
+                local_aabb_max,
+                ..
             } => (local_aabb_min, local_aabb_max),
         }
     }
@@ -803,6 +826,11 @@ impl ColliderShape {
                 unit_density_mass,
                 unit_density_inertia,
                 ..
+            }
+            | ColliderShape::Compound {
+                unit_density_mass,
+                unit_density_inertia,
+                ..
             } => {
                 if unit_density_mass <= 0.0 || density <= 0.0 {
                     return MassProperties::zero();
@@ -834,6 +862,7 @@ pub struct ShapeRegistry {
     shapes: Vec<ColliderShape>,
     convex_meshes: Vec<ConvexMeshData>,
     tri_meshes: Vec<TriMeshData>,
+    compounds: Vec<CompoundColliderData>,
 }
 
 impl ShapeRegistry {

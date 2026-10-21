@@ -25,7 +25,8 @@ pub const MIN_KEYFRAME_INTERVAL: u32 = 1;
 ///
 /// The first frame and every keyframe-interval-th frame are stored as a full
 /// [`FrameRecord::Key`] snapshot; all other frames store only the particles
-/// that moved since the previous frame as a [`FrameRecord::Delta`].
+/// that moved since the previous frame as a [`FrameRecord::Delta`]. Additional
+/// keyframes are emitted if an integer difference cannot fit in `i32`.
 #[derive(Clone, PartialEq, Debug)]
 #[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
 pub enum FrameRecord {
@@ -47,17 +48,17 @@ pub enum FrameRecord {
 #[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
 pub struct CacheTrack {
     /// Number of particles in every frame of this track.
-    particle_count: u32,
+    pub(super) particle_count: u32,
     /// Distance (in frames) between successive keyframes. Always at least
     /// [`MIN_KEYFRAME_INTERVAL`].
-    keyframe_interval: u32,
+    pub(super) keyframe_interval: u32,
     /// The recorded frames in capture order.
-    frames: Vec<FrameRecord>,
+    pub(super) frames: Vec<FrameRecord>,
     /// The most recently pushed quantized snapshot, used to diff the next
     /// frame. Not serialized: it is a build-time scratch value that is empty on
     /// a freshly loaded track.
     #[cfg_attr(feature = "serialize", serde(skip))]
-    last_quantized: Vec<[i32; 3]>,
+    pub(super) last_quantized: Vec<[i32; 3]>,
 }
 
 impl CacheTrack {
@@ -114,7 +115,8 @@ impl CacheTrack {
     /// entries; a mismatched length is rejected (the frame is not recorded) and
     /// `false` is returned.
     pub fn push_frame(&mut self, quantized: &[[i32; 3]]) -> bool {
-        if quantized.len() as u32 != self.particle_count {
+        if quantized.len() != self.particle_count as usize || self.frames.len() >= u32::MAX as usize
+        {
             return false;
         }
         let index = self.frames.len() as u32;
@@ -122,13 +124,21 @@ impl CacheTrack {
             self.frames.push(FrameRecord::Key(quantized.to_vec()));
         } else {
             let mut deltas: Vec<(u32, [i32; 3])> = Vec::new();
+            let mut overflow = false;
             for (i, (&cur, &prev)) in quantized.iter().zip(self.last_quantized.iter()).enumerate() {
-                let d = [cur[0] - prev[0], cur[1] - prev[1], cur[2] - prev[2]];
+                let Some(d) = checked_difference(cur, prev) else {
+                    overflow = true;
+                    break;
+                };
                 if d != [0, 0, 0] {
                     deltas.push((i as u32, d));
                 }
             }
-            self.frames.push(FrameRecord::Delta(deltas));
+            self.frames.push(if overflow {
+                FrameRecord::Key(quantized.to_vec())
+            } else {
+                FrameRecord::Delta(deltas)
+            });
         }
         self.last_quantized.clear();
         self.last_quantized.extend_from_slice(quantized);
@@ -149,7 +159,7 @@ impl CacheTrack {
     /// pushed for that frame.
     #[must_use]
     pub fn reconstruct(&self, frame: u32) -> Option<Vec<[i32; 3]>> {
-        if frame >= self.frame_count() {
+        if frame >= self.frame_count() || self.keyframe_interval == 0 {
             return None;
         }
         let key = self.keyframe_at_or_before(frame);
@@ -159,21 +169,43 @@ impl CacheTrack {
             // track was constructed inconsistently and cannot be reconstructed.
             FrameRecord::Delta(_) => return None,
         };
+        if state.len() != self.particle_count as usize {
+            return None;
+        }
         for f in (key + 1)..=frame {
             match self.frames.get(f as usize)? {
-                FrameRecord::Key(positions) => state.clone_from(positions),
+                FrameRecord::Key(positions) => {
+                    if positions.len() != self.particle_count as usize {
+                        return None;
+                    }
+                    state.clone_from(positions);
+                }
                 FrameRecord::Delta(deltas) => {
                     for &(i, d) in deltas {
                         let slot = state.get_mut(i as usize)?;
-                        slot[0] += d[0];
-                        slot[1] += d[1];
-                        slot[2] += d[2];
+                        *slot = checked_sum(*slot, d)?;
                     }
                 }
             }
         }
         Some(state)
     }
+}
+
+pub(super) fn checked_difference(cur: [i32; 3], prev: [i32; 3]) -> Option<[i32; 3]> {
+    Some([
+        cur[0].checked_sub(prev[0])?,
+        cur[1].checked_sub(prev[1])?,
+        cur[2].checked_sub(prev[2])?,
+    ])
+}
+
+pub(super) fn checked_sum(position: [i32; 3], delta: [i32; 3]) -> Option<[i32; 3]> {
+    Some([
+        position[0].checked_add(delta[0])?,
+        position[1].checked_add(delta[1])?,
+        position[2].checked_add(delta[2])?,
+    ])
 }
 
 /// Reports the number of raw `i32` components a naive (per-frame full) encoding

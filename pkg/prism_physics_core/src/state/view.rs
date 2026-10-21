@@ -2,7 +2,7 @@
 //!
 //! [`BodySolverView`] hands a solver mutable access to the hot per-body columns
 //! (pose, previous pose, and velocities) alongside immutable descriptive
-//! columns (mass, kind, collider, material, occupancy). All slices are indexed
+//! columns (effective mass, kind, collider, material, occupancy). All slices are indexed
 //! by the same slot index, so a solver can visit body `i` by reading position
 //! `positions[i]`, mass `mass_props[i]`, and so on.
 //!
@@ -11,7 +11,7 @@
 //! and borrows the storage for its lifetime.
 
 use crate::collider::{ColliderHandle, PhysicsMaterial};
-use crate::state::body::{BodyKind, MassProperties};
+use crate::state::body::{BodyKind, SolverMassProperties};
 use glam::{Quat, Vec3};
 
 /// A mutable Structure-of-Arrays view over the columns a position-based solver
@@ -32,8 +32,12 @@ pub struct BodySolverView<'a> {
     pub linear_velocities: &'a mut [Vec3],
     /// Current angular velocities (world-space axis-angle rate).
     pub angular_velocities: &'a mut [Vec3],
-    /// Inverse mass and inverse principal inertia per body.
-    pub mass_props: &'a [MassProperties],
+    /// Persistent world-space gravity overrides. `None` follows world gravity.
+    pub gravity_overrides: &'a [Option<Vec3>],
+    /// Solver-effective inverse mass and inverse principal inertia per body.
+    /// This is normally the authored value, but may include per-substep
+    /// corrections such as implicit aerodynamic added mass.
+    pub mass_props: &'a [SolverMassProperties],
     /// Simulation category per body.
     pub kinds: &'a [BodyKind],
     /// Optional collider handle per body.

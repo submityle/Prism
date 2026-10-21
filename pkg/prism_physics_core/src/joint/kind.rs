@@ -21,6 +21,8 @@
 use crate::joint::motor::{AngleLimit, LinearLimit, Motor};
 use glam::Vec3;
 
+pub use super::gear::{GearJoint, GearJointError};
+
 /// A rigid weld between two bodies: the anchor points coincide and the
 /// reference frames stay aligned. No relative motion is permitted.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -212,6 +214,8 @@ pub enum JointKind {
     Revolute(RevoluteJoint),
     /// A slider joint (see [`PrismaticJoint`]).
     Prismatic(PrismaticJoint),
+    /// A continuous, signed angular transmission (see [`GearJoint`]).
+    Gear(GearJoint),
 }
 
 impl JointKind {
@@ -224,6 +228,7 @@ impl JointKind {
             JointKind::Spherical(j) => j.compliance,
             JointKind::Revolute(j) => j.compliance,
             JointKind::Prismatic(j) => j.compliance,
+            JointKind::Gear(j) => j.compliance,
         }
     }
 }

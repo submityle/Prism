@@ -54,6 +54,7 @@ pub fn sweep_radius(shape: &ColliderShape) -> Option<f32> {
         // lives behind the arena and a triangle mesh is never a mover; both are
         // resolved (or rejected) by `sweep_radius_in`.
         ColliderShape::Plane { .. }
+        | ColliderShape::Compound { .. }
         | ColliderShape::ConvexHull { .. }
         | ColliderShape::TriangleMesh { .. } => None,
     }
@@ -70,6 +71,16 @@ pub fn sweep_radius(shape: &ColliderShape) -> Option<f32> {
 #[must_use]
 pub fn sweep_radius_in(shape: &ColliderShape, shapes: &ShapeRegistry) -> Option<f32> {
     match *shape {
+        // Minimum feature radius gates CCD; it is not a collision proxy.
+        // A mesh leaf has no inscribed solid but still needs CCD as a moving
+        // assembly member, so use the positive floor for that case.
+        ColliderShape::Compound { compound, .. } => shapes
+            .compound(compound)?
+            .children()
+            .iter()
+            .filter_map(|child| shapes.get(child.collider))
+            .map(|shape| sweep_radius_in(shape, shapes).unwrap_or(MIN_CORE_RADIUS))
+            .reduce(f32::min),
         ColliderShape::ConvexHull { mesh, .. } => Some(
             shapes
                 .convex_mesh(mesh)?

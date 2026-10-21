@@ -23,6 +23,8 @@
 pub mod buffer;
 pub mod hash;
 pub mod pose;
+pub mod world;
+pub mod world_hash;
 
 use crate::state::handle::BodyHandle;
 use crate::world::PhysicsWorld;
@@ -51,6 +53,8 @@ pub struct StateSnapshot {
     /// Angular velocity of the body in each slot (used for hashing).
     angular_velocities: Vec<Vec3>,
 }
+
+pub use world::{FullStateSnapshot, SnapshotRing};
 
 impl StateSnapshot {
     /// Creates an empty snapshot with no slots.

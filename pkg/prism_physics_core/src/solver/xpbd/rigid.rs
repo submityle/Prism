@@ -29,6 +29,18 @@ pub fn inv_inertia_world(inv_inertia: Vec3, q: Quat) -> Mat3 {
     scaled * r.transpose()
 }
 
+/// Builds the world-space inverse translational mass tensor for a body.
+#[must_use]
+pub fn inv_mass_world(inv_mass: Vec3, q: Quat) -> Mat3 {
+    let r = Mat3::from_quat(q);
+    let scaled = Mat3::from_cols(
+        r.x_axis * inv_mass.x,
+        r.y_axis * inv_mass.y,
+        r.z_axis * inv_mass.z,
+    );
+    scaled * r.transpose()
+}
+
 /// Returns the generalized inverse mass of a body for a unit `direction`
 /// applied at world lever arm `r` (offset from the center of mass).
 ///
@@ -36,13 +48,13 @@ pub fn inv_inertia_world(inv_inertia: Vec3, q: Quat) -> Mat3 {
 /// effective inverse mass seen by a constraint acting along `direction`.
 #[must_use]
 pub fn generalized_inverse_mass(
-    inv_mass: f32,
+    inv_mass_world: Mat3,
     inv_inertia_world: Mat3,
     r: Vec3,
     direction: Vec3,
 ) -> f32 {
     let rn = r.cross(direction);
-    inv_mass + rn.dot(inv_inertia_world * rn)
+    direction.dot(inv_mass_world * direction) + rn.dot(inv_inertia_world * rn)
 }
 
 /// Applies a positional impulse `p` (an unnormalized correction vector) to a
@@ -54,12 +66,12 @@ pub fn generalized_inverse_mass(
 pub fn apply_position_impulse(
     position: &mut Vec3,
     orientation: &mut Quat,
-    inv_mass: f32,
+    inv_mass_world: Mat3,
     inv_inertia_world: Mat3,
     r: Vec3,
     p: Vec3,
 ) {
-    *position += inv_mass * p;
+    *position += inv_mass_world * p;
     let dphi = inv_inertia_world * r.cross(p);
     apply_angular_delta(orientation, dphi);
 }
@@ -69,12 +81,12 @@ pub fn apply_position_impulse(
 pub fn apply_velocity_impulse(
     linear_velocity: &mut Vec3,
     angular_velocity: &mut Vec3,
-    inv_mass: f32,
+    inv_mass_world: Mat3,
     inv_inertia_world: Mat3,
     r: Vec3,
     p: Vec3,
 ) {
-    *linear_velocity += inv_mass * p;
+    *linear_velocity += inv_mass_world * p;
     *angular_velocity += inv_inertia_world * r.cross(p);
 }
 
@@ -117,7 +129,12 @@ mod tests {
     #[test]
     fn generalized_inverse_mass_reduces_to_inv_mass_at_zero_arm() {
         let m = inv_inertia_world(Vec3::ONE, Quat::IDENTITY);
-        let w = generalized_inverse_mass(0.5, m, Vec3::ZERO, Vec3::Y);
+        let w = generalized_inverse_mass(
+            Mat3::from_diagonal(Vec3::splat(0.5)),
+            m,
+            Vec3::ZERO,
+            Vec3::Y,
+        );
         assert!((w - 0.5).abs() < 1e-6);
     }
 
@@ -126,7 +143,14 @@ mod tests {
         let mut x = Vec3::ZERO;
         let mut q = Quat::IDENTITY;
         let m = inv_inertia_world(Vec3::ZERO, q); // infinite inertia: no rotation
-        apply_position_impulse(&mut x, &mut q, 2.0, m, Vec3::ZERO, Vec3::new(1.0, 0.0, 0.0));
+        apply_position_impulse(
+            &mut x,
+            &mut q,
+            Mat3::from_diagonal(Vec3::splat(2.0)),
+            m,
+            Vec3::ZERO,
+            Vec3::new(1.0, 0.0, 0.0),
+        );
         assert!((x - Vec3::new(2.0, 0.0, 0.0)).length() < 1e-6);
         assert!((q.length() - 1.0).abs() < 1e-6);
     }
@@ -137,7 +161,14 @@ mod tests {
         let mut w = Vec3::ZERO;
         let m = inv_inertia_world(Vec3::ONE, Quat::IDENTITY);
         // Impulse along +x at lever arm +z produces angular velocity about y.
-        apply_velocity_impulse(&mut v, &mut w, 1.0, m, Vec3::Z, Vec3::X);
+        apply_velocity_impulse(
+            &mut v,
+            &mut w,
+            Mat3::from_diagonal(Vec3::ONE),
+            m,
+            Vec3::Z,
+            Vec3::X,
+        );
         assert!(w.y.abs() > 1e-6);
     }
 }

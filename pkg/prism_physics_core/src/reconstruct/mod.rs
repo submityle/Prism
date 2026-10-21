@@ -27,6 +27,6 @@ pub mod marching_cubes;
 pub mod mesh;
 pub mod tables;
 
-pub use field::ScalarField;
-pub use marching_cubes::triangulate;
+pub use field::{FieldBudget, FieldBuildError, ScalarField};
+pub use marching_cubes::{triangulate, triangulate_bounded, SurfaceBudget, SurfaceBuildError};
 pub use mesh::SurfaceMesh;

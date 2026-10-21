@@ -95,7 +95,7 @@ pub struct RayHit {
 /// accepted only when the entry does not exceed the exit and lies within
 /// `ray.t_max`.
 #[must_use]
-fn slab_enter(ray: &Ray, aabb: &Aabb) -> Option<f32> {
+pub(crate) fn slab_enter(ray: &Ray, aabb: &Aabb) -> Option<f32> {
     let inv = Vec3::ONE / ray.dir;
     let t0 = (aabb.min - ray.origin) * inv;
     let t1 = (aabb.max - ray.origin) * inv;

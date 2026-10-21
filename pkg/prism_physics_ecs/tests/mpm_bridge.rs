@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use prism_app::{App, TimeUpdateStrategy};
@@ -91,6 +92,7 @@ fn mpm_surface_reconstruction_tracks_source_version_and_clears_when_disabled() {
                 padding_cells: 1,
                 max_field_nodes: 100_000,
                 max_cells: 20_000,
+                ..MpmSurfaceConfig::default()
             }),
         ));
 
@@ -150,6 +152,87 @@ fn mpm_binding_removal_and_despawn_release_runtime_and_snapshot() {
     assert!(!runtimes.contains(removed));
     assert!(!runtimes.contains(despawned));
     assert!(app.world().get::<MpmParticleSnapshot>(removed).is_none());
+}
+
+#[test]
+fn every_surface_work_output_budget_clears_stale_mesh_and_recovers_without_advancing_particles() {
+    for (name, rejected) in [
+        (
+            "sampling",
+            MpmSurfaceConfig {
+                max_sample_visits: 1,
+                ..MpmSurfaceConfig::default()
+            },
+        ),
+        (
+            "vertices",
+            MpmSurfaceConfig {
+                max_surface_vertices: 1,
+                ..MpmSurfaceConfig::default()
+            },
+        ),
+        (
+            "triangles",
+            MpmSurfaceConfig {
+                max_surface_triangles: 1,
+                ..MpmSurfaceConfig::default()
+            },
+        ),
+    ] {
+        let mut app = app();
+        let entity =
+            app.world_mut()
+                .spawn((MpmBinding::cpu(solver())
+                    .with_surface_reconstruction(MpmSurfaceConfig::default()),));
+        app.update();
+        let original = app
+            .world()
+            .get::<MpmSurfaceSnapshot>(entity)
+            .unwrap()
+            .clone();
+        let particle_version = app
+            .world()
+            .get::<MpmParticleSnapshot>(entity)
+            .unwrap()
+            .version;
+        app.set_fixed_timestep(Duration::from_millis(2))
+            .set_time_update_strategy(TimeUpdateStrategy::ManualDelta(Duration::from_millis(2)));
+        app.world_mut()
+            .get_mut::<MpmBinding>(entity)
+            .unwrap()
+            .surface = Some(rejected);
+        app.update();
+        assert!(
+            app.world().get::<MpmSurfaceSnapshot>(entity).is_none(),
+            "{name}"
+        );
+        assert_eq!(
+            app.world()
+                .get::<MpmParticleSnapshot>(entity)
+                .unwrap()
+                .version,
+            particle_version
+        );
+        assert!(
+            app.world()
+                .resource::<MpmDiagnostics>()
+                .issues
+                .iter()
+                .any(|diagnostic| diagnostic.entity == Some(entity)
+                    && diagnostic.issue == MpmIssue::SurfaceBudgetExceeded),
+            "{name}"
+        );
+        app.world_mut()
+            .get_mut::<MpmBinding>(entity)
+            .unwrap()
+            .surface = Some(MpmSurfaceConfig::default());
+        app.update();
+        let restored = app.world().get::<MpmSurfaceSnapshot>(entity).unwrap();
+        assert_eq!(restored.version, original.version, "{name}");
+        assert_eq!(restored.epoch, original.epoch, "{name}");
+        assert!(restored.revision > original.revision, "{name}");
+        assert_eq!(restored.mesh, original.mesh, "{name}");
+    }
 }
 
 #[test]
@@ -324,5 +407,216 @@ fn preferred_gpu_reports_actual_authority_or_explicit_fallback() {
                     && diagnostic.issue
                         == MpmIssue::BackendFallback(MpmFallbackReason::GpuUnavailable)));
         }
+    }
+}
+
+#[test]
+fn snapshot_storage_is_shared_and_runtime_epochs_survive_removal() {
+    let mut app = app();
+    let entity = app.world_mut().spawn((MpmBinding::cpu(solver()),));
+    app.update();
+    let first = app
+        .world()
+        .get::<MpmParticleSnapshot>(entity)
+        .unwrap()
+        .clone();
+    let inspected = app
+        .world()
+        .resource::<MpmRuntimeResource>()
+        .snapshot(entity)
+        .unwrap();
+    assert_ne!(first.epoch, 0);
+    assert!(Arc::ptr_eq(&first.positions, &inspected.positions));
+    assert!(Arc::ptr_eq(&first.velocities, &inspected.velocities));
+    assert!(Arc::ptr_eq(&first.affine, &inspected.affine));
+    assert!(Arc::ptr_eq(&first.deformation, &inspected.deformation));
+    assert!(Arc::ptr_eq(&first.plastic_det, &inspected.plastic_det));
+    app.update();
+    assert_eq!(
+        app.world()
+            .get::<MpmParticleSnapshot>(entity)
+            .unwrap()
+            .epoch,
+        first.epoch
+    );
+    app.world_mut()
+        .resource_mut::<MpmRuntimeResource>()
+        .remove(entity);
+    app.update();
+    let recreated = app.world().get::<MpmParticleSnapshot>(entity).unwrap();
+    assert!(recreated.epoch > first.epoch);
+    assert_eq!(recreated.version, 1);
+    assert!(first.positions[0].is_finite());
+}
+
+#[test]
+fn rebuilding_a_runtime_clears_old_generation_even_when_new_step_is_rejected() {
+    let mut app = app();
+    let entity = app.world_mut().spawn((
+        MpmBinding::cpu(solver()).with_surface_reconstruction(MpmSurfaceConfig::default()),
+    ));
+    app.update();
+    let epoch = app
+        .world()
+        .get::<MpmParticleSnapshot>(entity)
+        .unwrap()
+        .epoch;
+    assert!(app.world().get::<MpmSurfaceSnapshot>(entity).is_some());
+    app.world_mut()
+        .get_mut::<MpmBinding>(entity)
+        .unwrap()
+        .solver
+        .config
+        .dt = 0.002;
+    app.update();
+    assert!(app.world().get::<MpmParticleSnapshot>(entity).is_none());
+    assert!(app.world().get::<MpmSurfaceSnapshot>(entity).is_none());
+    let runtime = app
+        .world()
+        .resource::<MpmRuntimeResource>()
+        .info(entity)
+        .unwrap();
+    assert!(runtime.epoch > epoch);
+    assert_eq!(runtime.fixed_tick, 0);
+    assert_eq!(runtime.snapshot_version, 0);
+}
+
+#[test]
+fn surface_config_edits_publish_or_clear_without_a_successful_simulation_step() {
+    let mut app = app();
+    let entity = app.world_mut().spawn((
+        MpmBinding::cpu(solver()).with_surface_reconstruction(MpmSurfaceConfig::default()),
+    ));
+    app.update();
+    let first = app
+        .world()
+        .get::<MpmSurfaceSnapshot>(entity)
+        .unwrap()
+        .clone();
+    assert!(Arc::ptr_eq(
+        &first.mesh,
+        &app.world().get::<MpmSurfaceSnapshot>(entity).unwrap().mesh
+    ));
+    // Only the engine clock changes. The live solver cannot advance at this dt.
+    app.set_fixed_timestep(Duration::from_millis(2))
+        .set_time_update_strategy(TimeUpdateStrategy::ManualDelta(Duration::from_millis(2)));
+    app.world_mut()
+        .get_mut::<MpmBinding>(entity)
+        .unwrap()
+        .surface
+        .as_mut()
+        .unwrap()
+        .radius = 0.15;
+    app.update();
+    let changed = app.world().get::<MpmSurfaceSnapshot>(entity).unwrap();
+    assert_eq!(changed.epoch, first.epoch);
+    assert_eq!(changed.version, first.version);
+    assert_eq!(changed.tick, first.tick);
+    assert!(changed.revision > first.revision);
+    assert!(!Arc::ptr_eq(&changed.mesh, &first.mesh));
+    app.world_mut()
+        .get_mut::<MpmBinding>(entity)
+        .unwrap()
+        .surface = None;
+    app.update();
+    assert!(app.world().get::<MpmSurfaceSnapshot>(entity).is_none());
+    app.world_mut()
+        .get_mut::<MpmBinding>(entity)
+        .unwrap()
+        .surface = Some(MpmSurfaceConfig {
+        dx: f32::NAN,
+        ..MpmSurfaceConfig::default()
+    });
+    app.update();
+    assert!(app.world().get::<MpmSurfaceSnapshot>(entity).is_none());
+    assert!(app
+        .world()
+        .resource::<MpmDiagnostics>()
+        .issues
+        .iter()
+        .any(|d| d.issue == MpmIssue::InvalidSurfaceConfig));
+    assert_eq!(
+        app.world()
+            .get::<MpmParticleSnapshot>(entity)
+            .unwrap()
+            .version,
+        first.version
+    );
+}
+
+#[test]
+fn surface_budget_edits_clear_the_old_mesh_even_if_fixed_step_is_rejected() {
+    let mut app = app();
+    let entity = app.world_mut().spawn((
+        MpmBinding::cpu(solver()).with_surface_reconstruction(MpmSurfaceConfig::default()),
+    ));
+    app.update();
+    assert!(app.world().get::<MpmSurfaceSnapshot>(entity).is_some());
+    app.set_fixed_timestep(Duration::from_millis(2))
+        .set_time_update_strategy(TimeUpdateStrategy::ManualDelta(Duration::from_millis(2)));
+    app.world_mut()
+        .get_mut::<MpmBinding>(entity)
+        .unwrap()
+        .surface = Some(MpmSurfaceConfig {
+        max_field_nodes: 8,
+        max_cells: 1,
+        ..MpmSurfaceConfig::default()
+    });
+    app.update();
+    assert!(app.world().get::<MpmSurfaceSnapshot>(entity).is_none());
+    assert!(app
+        .world()
+        .resource::<MpmDiagnostics>()
+        .issues
+        .iter()
+        .any(|d| d.issue == MpmIssue::SurfaceBudgetExceeded));
+}
+
+#[test]
+fn remove_readd_equal_authoring_starts_a_new_runtime_lifetime() {
+    let mut app = app();
+    let binding =
+        MpmBinding::cpu(solver()).with_surface_reconstruction(MpmSurfaceConfig::default());
+    let entity = app.world_mut().spawn((binding.clone(),));
+    app.update();
+    app.update();
+    let previous = app
+        .world()
+        .get::<MpmParticleSnapshot>(entity)
+        .unwrap()
+        .clone();
+    assert_eq!(previous.version, 2);
+    app.world_mut().remove::<MpmBinding>(entity);
+    app.world_mut().insert(entity, (binding,));
+    app.update();
+    let current = app.world().get::<MpmParticleSnapshot>(entity).unwrap();
+    assert!(current.epoch > previous.epoch);
+    assert_eq!(current.version, 1);
+    assert!(current.positions[0].y > previous.positions[0].y);
+    let surface = app.world().get::<MpmSurfaceSnapshot>(entity).unwrap();
+    assert_eq!(surface.epoch, current.epoch);
+    assert_eq!(surface.revision, 1);
+}
+
+#[test]
+fn exhausted_fixed_tick_retires_outputs_without_wrapping_or_stepping() {
+    let mut app = app();
+    let entity = app.world_mut().spawn((
+        MpmBinding::cpu(solver()).with_surface_reconstruction(MpmSurfaceConfig::default()),
+    ));
+    app.update();
+    app.world_mut().resource_mut::<MpmDiagnostics>().tick = u64::MAX;
+    for _ in 0..2 {
+        app.update();
+        assert!(app.world().get::<MpmParticleSnapshot>(entity).is_none());
+        assert!(app.world().get::<MpmSurfaceSnapshot>(entity).is_none());
+        assert!(app.world().resource::<MpmRuntimeResource>().is_empty());
+        let diagnostics = app.world().resource::<MpmDiagnostics>();
+        assert_eq!(diagnostics.tick, u64::MAX);
+        assert_eq!(diagnostics.steps, 0);
+        assert!(diagnostics
+            .issues
+            .iter()
+            .any(|d| d.issue == MpmIssue::SequenceExhausted));
     }
 }

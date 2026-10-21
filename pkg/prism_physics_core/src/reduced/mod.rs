@@ -24,11 +24,21 @@
 //! numerical-methods and computer-graphics literature (Pentland & Williams
 //! 1989; Golub & Van Loan).
 
+pub mod articulation;
 pub mod config;
 pub mod integrate;
 pub mod modes;
 pub mod subspace;
 
+pub use articulation::{
+    Articulation, ArticulationBase, ArticulationBuildError, ArticulationBuilder,
+    ArticulationColliderDesc, ArticulationColliderError, ArticulationColliderId,
+    ArticulationColliderSet, ArticulationDegradation, ArticulationDegradationEvent,
+    ArticulationHandle, ArticulationJoint, ArticulationJointKind, ArticulationLink,
+    ArticulationStepReport, ArticulationStorage, ArticulationWorldStepReport,
+    ContactImpulseResponse, DegradationReason, JointLimits, JointMotor, LinkContactImpulse,
+    SpatialForce, SpatialInertia, SpatialMotion, SpatialTransform,
+};
 pub use config::ReducedConfig;
 pub use integrate::ReducedState;
 pub use modes::{SymmetricEigen, SymmetricMatrix};

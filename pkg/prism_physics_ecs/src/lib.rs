@@ -1,8 +1,13 @@
 //! Native, renderer-independent fixed-step physics. See the crate README for
 //! ownership, coordinate-space, lifecycle and external-world mutation contracts.
 
+pub mod articulation;
+pub mod assembly;
+pub mod field;
+pub mod field_runtime;
 mod m15_bridge;
 mod mpm;
+pub mod ragdoll;
 mod sync;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -16,6 +21,15 @@ use prism_physics_core::{
 };
 use prism_transform::Transform;
 
+pub use assembly::{
+    AssemblyBody, AssemblyDiagnostic, AssemblyDiagnostics, AssemblyIssue, AssemblyRequestQueue,
+    AssemblyRequestResult,
+};
+pub use field::{
+    AeroBuoyancyComponent, AeroDiagnostic, AeroDiagnostics, AeroFunctionalComponents, AeroIssue,
+    AeroSource, AeroSurfaceComponent, AeroThrusterComponent, FieldBindings, ForceField,
+};
+pub use field_runtime::{FieldRuntimeDiagnostics, FieldRuntimeResource};
 pub use m15_bridge::{
     M15TopologyAdapter, M15TopologyAdapterError, M15TopologyBridge, M15TopologyBridgeError,
     M15TopologyBridgePlugin, M15TopologyDiagnostics,
@@ -23,6 +37,10 @@ pub use m15_bridge::{
 pub use mpm::{
     MpmAuthority, MpmBinding, MpmDiagnostic, MpmDiagnostics, MpmIssue, MpmParticleSnapshot,
     MpmRuntimeInfo, MpmRuntimeResource, MpmSurfaceConfig, MpmSurfaceSnapshot,
+};
+pub use ragdoll::{
+    EcsRagdoll, EcsRagdollBindings, EcsRagdollDiagnostic, EcsRagdollDiagnostics,
+    EcsRagdollIssue,
 };
 pub use prism_physics_gpu::{MpmBackendPolicy, MpmFallbackReason, MpmRuntimeError};
 
@@ -198,8 +216,9 @@ struct SoftBinding {
     authored: SoftBody,
 }
 
-/// Bidirectional generational identity. Never treat a body slot index as identity.
-/// Maps are reconciled at the next fixed tick, not immediately on ECS mutation.
+/// Generational identity for synchronizer-owned bodies and explicit assembly
+/// aliases. Never treat a body slot index as identity. Maps are reconciled at
+/// the next fixed tick, not immediately on ECS mutation.
 #[derive(Resource, Default)]
 pub struct PhysicsBindings {
     bodies: BTreeMap<Entity, BodyBinding>,
@@ -209,18 +228,30 @@ pub struct PhysicsBindings {
     soft_entities: BTreeMap<(u32, u32), Entity>,
     aero: BTreeMap<Entity, (BodyHandle, AeroBodyConfig)>,
     trigger_roles: BTreeMap<(u64, u64), (BodyHandle, BodyHandle)>,
+    assembly_bodies: BTreeMap<Entity, BodyHandle>,
+    assembly_entities: BTreeMap<(u32, u32), Entity>,
 }
 
 impl PhysicsBindings {
-    /// Current body handle, including its generation.
+    /// Current body handle, including its generation. During an assembly merge,
+    /// every member entity resolves to the shared proxy handle.
     pub fn body(&self, entity: Entity) -> Option<BodyHandle> {
-        self.bodies.get(&entity).map(|b| b.handle)
+        self.bodies
+            .get(&entity)
+            .map(|b| b.handle)
+            .or_else(|| self.assembly_bodies.get(&entity).copied())
     }
-    /// Entity identity for a current managed body, never a retired/reused slot.
+    /// Entity identity for a current body. For a shared assembly proxy, this is
+    /// the deterministic canonical member (the minimum generational Entity).
     pub fn entity(&self, body: BodyHandle) -> Option<Entity> {
         self.entities
             .get(&(body.index(), body.generation()))
             .copied()
+            .or_else(|| {
+                self.assembly_entities
+                    .get(&(body.index(), body.generation()))
+                    .copied()
+            })
     }
     /// Current soft-body handle.
     pub fn soft_body(&self, entity: Entity) -> Option<SoftBodyHandle> {
@@ -295,6 +326,9 @@ pub enum PhysicsIssue {
     RemovalRefused,
     /// Invalid fixed dt/substep count or XPBD settings; simulation did not advance.
     InvalidConfiguration,
+    /// Explicit GPU field sampling failed; earlier substeps remain committed.
+    /// See [`FieldRuntimeDiagnostics`] for the source and completed count.
+    FieldSamplingFailed,
     /// Native hierarchy propagation rejected the graph; globals were not written.
     TransformPropagation,
 }
@@ -313,7 +347,8 @@ pub struct PhysicsDiagnostic {
 pub struct PhysicsDiagnostics {
     /// Number of attempted fixed ticks.
     pub tick: u64,
-    /// Accepted simulated time on the latest tick (zero on invalid settings).
+    /// Accepted time on the latest tick, including only completed substeps on
+    /// field sampling failure (zero on invalid settings).
     pub simulated_dt: f32,
     /// Diagnostics from the most recent fixed tick.
     pub issues: Vec<PhysicsDiagnostic>,
@@ -330,12 +365,16 @@ struct RemovalSignals {
 /// Sync; consume completed output after Writeback or in FixedPostUpdate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, SystemSet)]
 pub enum PhysicsSystems {
+    /// Reconcile ownership that must precede ordinary body authoring sync.
+    PreSync,
     /// Reconcile authored state and lifecycle.
     Sync,
     /// Advance XPBD and sample contact transitions.
     Step,
     /// Write simulated poses/velocities and propagate native world transforms.
     Writeback,
+    /// Publish compound ownership transitions after ordinary body writeback.
+    PostWriteback,
 }
 
 /// Installs a native headless fixed-step bridge. Preinserted resources survive.
@@ -348,11 +387,16 @@ impl Plugin for PrismPhysicsPlugin {
             .init_resource::<PhysicsSolver>()
             .init_resource::<PhysicsBindings>()
             .init_resource::<PhysicsDiagnostics>()
+            .init_resource::<AssemblyRequestQueue>()
+            .init_resource::<AssemblyDiagnostics>()
+            .init_resource::<FieldBindings>()
+            .init_resource::<FieldRuntimeDiagnostics>()
             .init_resource::<MpmRuntimeResource>()
             .init_resource::<MpmDiagnostics>()
             .init_resource::<RemovalSignals>()
             .add_event::<PhysicsContactEvent>();
         let world = app.world_mut();
+        mpm::init(world);
         prism_transform::ecs::install(world);
         world.observe::<RigidBody, _>(LifecycleEvent::Remove, |ctx| {
             ctx.world
@@ -381,14 +425,31 @@ impl Plugin for PrismPhysicsPlugin {
         app.add_systems(
             FixedUpdate,
             (
-                sync::reconcile.in_set(PhysicsSystems::Sync),
-                mpm::sync.in_set(PhysicsSystems::Sync),
-                sync::step.in_set(PhysicsSystems::Step),
-                mpm::step.in_set(PhysicsSystems::Step),
-                sync::writeback.in_set(PhysicsSystems::Writeback),
-                mpm::writeback.in_set(PhysicsSystems::Writeback),
+                (
+                    sync::reconcile,
+                    assembly::process,
+                    ragdoll::reconcile,
+                    field::reconcile,
+                    mpm::sync,
+                )
+                    .chain()
+                    .in_set(PhysicsSystems::Sync)
+                    .before(PhysicsSystems::Step)
+                    .before(PhysicsSystems::Writeback),
+                (sync::step, mpm::step)
+                    .chain()
+                    .in_set(PhysicsSystems::Step)
+                    .after(PhysicsSystems::Sync)
+                    .before(PhysicsSystems::Writeback),
+                (sync::writeback, mpm::writeback)
+                    .chain()
+                    .in_set(PhysicsSystems::Writeback)
+                    .after(PhysicsSystems::Sync)
+                    .after(PhysicsSystems::Step),
             )
-                .chain(),
+                .chain()
+                .after(PhysicsSystems::PreSync)
+                .before(PhysicsSystems::PostWriteback),
         );
     }
 }

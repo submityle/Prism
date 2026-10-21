@@ -7,7 +7,7 @@
 //! is reused.
 
 use crate::collider::{ColliderHandle, PhysicsMaterial};
-use crate::state::body::{BodyDesc, BodyKind, MassProperties};
+use crate::state::body::{BodyDesc, BodyKind, MassProperties, SolverMassProperties};
 use crate::state::handle::BodyHandle;
 use crate::state::view::BodySolverView;
 use glam::{Quat, Vec3};
@@ -25,7 +25,12 @@ pub struct BodyStorage {
     prev_orientations: Vec<Quat>,
     linear_velocities: Vec<Vec3>,
     angular_velocities: Vec<Vec3>,
+    gravity_overrides: Vec<Option<Vec3>>,
     mass_props: Vec<MassProperties>,
+    /// Per-substep effective properties consumed by XPBD. The authored
+    /// properties above remain immutable simulation input; this cache is
+    /// refreshed by the world adapter for effects such as added mass.
+    solver_mass_props: Vec<SolverMassProperties>,
     kinds: Vec<BodyKind>,
     colliders: Vec<Option<ColliderHandle>>,
     materials: Vec<PhysicsMaterial>,
@@ -59,7 +64,9 @@ impl BodyStorage {
             prev_orientations: Vec::with_capacity(capacity),
             linear_velocities: Vec::with_capacity(capacity),
             angular_velocities: Vec::with_capacity(capacity),
+            gravity_overrides: Vec::with_capacity(capacity),
             mass_props: Vec::with_capacity(capacity),
+            solver_mass_props: Vec::with_capacity(capacity),
             kinds: Vec::with_capacity(capacity),
             colliders: Vec::with_capacity(capacity),
             materials: Vec::with_capacity(capacity),
@@ -90,7 +97,9 @@ impl BodyStorage {
             self.prev_orientations[i] = desc.orientation;
             self.linear_velocities[i] = desc.linear_velocity;
             self.angular_velocities[i] = desc.angular_velocity;
+            self.gravity_overrides[i] = None;
             self.mass_props[i] = desc.mass_properties;
+            self.solver_mass_props[i] = desc.mass_properties.into();
             self.kinds[i] = desc.kind;
             self.colliders[i] = desc.collider;
             self.materials[i] = desc.material;
@@ -110,7 +119,9 @@ impl BodyStorage {
             self.prev_orientations.push(desc.orientation);
             self.linear_velocities.push(desc.linear_velocity);
             self.angular_velocities.push(desc.angular_velocity);
+            self.gravity_overrides.push(None);
             self.mass_props.push(desc.mass_properties);
+            self.solver_mass_props.push(desc.mass_properties.into());
             self.kinds.push(desc.kind);
             self.colliders.push(desc.collider);
             self.materials.push(desc.material);
@@ -137,6 +148,7 @@ impl BodyStorage {
         }
         let i = handle.index() as usize;
         self.active[i] = false;
+        self.gravity_overrides[i] = None;
         self.generations[i] = self.generations[i].wrapping_add(1);
         self.free_list.push(handle.index());
         self.live -= 1;
@@ -230,11 +242,63 @@ impl BodyStorage {
         }
     }
 
+    /// Returns the body's world-space gravity policy. `Some(None)` follows
+    /// world gravity; `Some(Some(g))` uses the finite acceleration `g` instead.
+    /// An invalid or stale handle returns the outer `None`.
+    #[must_use]
+    pub fn gravity_override(&self, handle: BodyHandle) -> Option<Option<Vec3>> {
+        self.contains(handle)
+            .then(|| self.gravity_overrides[handle.index() as usize])
+    }
+
+    /// Sets a persistent world-space gravity acceleration, or clears it with
+    /// `None` to follow world gravity. Invalid handles and non-finite vectors
+    /// are rejected without changing any state. A changed policy wakes the
+    /// body and resets its sleep timer; an unchanged policy is a no-op.
+    pub fn set_gravity_override(&mut self, handle: BodyHandle, value: Option<Vec3>) -> bool {
+        if !self.contains(handle) || value.is_some_and(|gravity| !gravity.is_finite()) {
+            return false;
+        }
+        let i = handle.index() as usize;
+        if self.gravity_overrides[i] != value {
+            self.gravity_overrides[i] = value;
+            self.sleeping[i] = false;
+            self.sleep_timer[i] = 0.0;
+        }
+        true
+    }
+
     /// Returns the mass properties, or `None` if the handle is invalid.
     #[must_use]
     pub fn mass_properties(&self, handle: BodyHandle) -> Option<MassProperties> {
         self.contains(handle)
             .then(|| self.mass_props[handle.index() as usize])
+    }
+
+    /// Overrides the solver-only effective mass properties for one live body.
+    /// Authored mass properties are left unchanged.
+    pub fn set_solver_mass_properties(
+        &mut self,
+        handle: BodyHandle,
+        properties: SolverMassProperties,
+    ) -> bool {
+        if self.contains(handle) {
+            self.solver_mass_props[handle.index() as usize] = properties;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Restores every solver slot to its authored mass properties.
+    pub fn reset_solver_mass_properties(&mut self) {
+        for (solver, authored) in self
+            .solver_mass_props
+            .iter_mut()
+            .zip(self.mass_props.iter().copied().map(Into::into))
+        {
+            *solver = authored;
+        }
     }
 
     /// Returns the body kind, or `None` if the handle is invalid.
@@ -340,7 +404,8 @@ impl BodyStorage {
             prev_orientations: &mut self.prev_orientations,
             linear_velocities: &mut self.linear_velocities,
             angular_velocities: &mut self.angular_velocities,
-            mass_props: &self.mass_props,
+            gravity_overrides: &self.gravity_overrides,
+            mass_props: &self.solver_mass_props,
             kinds: &self.kinds,
             colliders: &self.colliders,
             materials: &self.materials,
@@ -510,7 +575,9 @@ impl BodyStorage {
             && self.prev_orientations.len() == n
             && self.linear_velocities.len() == n
             && self.angular_velocities.len() == n
+            && self.gravity_overrides.len() == n
             && self.mass_props.len() == n
+            && self.solver_mass_props.len() == n
             && self.kinds.len() == n
             && self.colliders.len() == n
             && self.materials.len() == n

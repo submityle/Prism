@@ -26,6 +26,33 @@ use crate::reconstruct::field::ScalarField;
 use crate::reconstruct::mesh::SurfaceMesh;
 use crate::reconstruct::tables::{CUBE_CORNERS, CUBE_TETRAHEDRA, TET_EDGES, TET_TRIANGLES};
 
+/// Logical work/storage ceilings for one extraction. Allocator metadata and
+/// spare vector/hash-table capacity are additional, bounded implementation costs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SurfaceBudget {
+    /// Maximum grid cells visited, including cells with no surface crossing.
+    pub max_cells: usize,
+    /// Maximum unique vertices (and edge-cache entries).
+    pub max_vertices: usize,
+    /// Maximum emitted triangles, each with three `u32` indices.
+    pub max_triangles: usize,
+}
+
+/// A failed extraction returns no partial mesh.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SurfaceBuildError {
+    /// The isovalue, field values or reconstructed geometry are non-finite.
+    InvalidField,
+    /// The cell product cannot be represented, or exceeds the work ceiling.
+    CellBudgetExceeded,
+    /// Unique vertices exceed the ceiling or the `u32` index space.
+    VertexBudgetExceeded,
+    /// Triangles exceed the ceiling or the addressable index buffer length.
+    TriangleBudgetExceeded,
+    /// A vector or edge-cache allocation failed.
+    AllocationFailed,
+}
+
 /// Extracts the iso-surface of `field` at the level `iso` as an indexed
 /// triangle mesh.
 ///
@@ -35,25 +62,64 @@ use crate::reconstruct::tables::{CUBE_CORNERS, CUBE_TETRAHEDRA, TET_EDGES, TET_T
 /// from the (outward) field gradient. An empty field yields an empty mesh.
 #[must_use]
 pub fn triangulate(field: &ScalarField, iso: Real) -> SurfaceMesh {
+    triangulate_bounded(
+        field,
+        iso,
+        SurfaceBudget {
+            max_cells: usize::MAX,
+            max_vertices: u32::MAX as usize,
+            max_triangles: usize::MAX / 3,
+        },
+    )
+    .unwrap_or_default()
+}
+
+/// Extracts a complete surface within explicit work and output budgets.
+///
+/// Cell work is checked before iteration; vertex/triangle limits and fallible
+/// allocations are checked before appending. Budget rejection never publishes a
+/// truncated or open mesh. Node identities use `usize`, independent of the mesh
+/// index width, so large grids cannot alias edges through a narrowing cast.
+pub fn triangulate_bounded(
+    field: &ScalarField,
+    iso: Real,
+    budget: SurfaceBudget,
+) -> Result<SurfaceMesh, SurfaceBuildError> {
+    if !iso.is_finite() {
+        return Err(SurfaceBuildError::InvalidField);
+    }
     let mut mesh = SurfaceMesh::new();
     if field.is_empty() || field.nx() < 2 || field.ny() < 2 || field.nz() < 2 {
-        return mesh;
+        return Ok(mesh);
+    }
+    let cells = (field.nx() - 1)
+        .checked_mul(field.ny() - 1)
+        .and_then(|n| n.checked_mul(field.nz() - 1))
+        .ok_or(SurfaceBuildError::CellBudgetExceeded)?;
+    if cells > budget.max_cells {
+        return Err(SurfaceBuildError::CellBudgetExceeded);
+    }
+    if !field
+        .node_position(field.nx() - 1, field.ny() - 1, field.nz() - 1)
+        .is_finite()
+    {
+        return Err(SurfaceBuildError::InvalidField);
     }
 
     // Maps an edge (ordered pair of global node linear indices) to the emitted
     // vertex index, so shared edges reuse one vertex and the mesh stays
     // watertight.
-    let mut vertex_cache: HashMap<(u32, u32), u32> = HashMap::new();
+    let mut vertex_cache: HashMap<(usize, usize), u32> = HashMap::new();
 
     for k in 0..field.nz() - 1 {
         for j in 0..field.ny() - 1 {
             for i in 0..field.nx() - 1 {
-                march_cell(field, iso, (i, j, k), &mut vertex_cache, &mut mesh);
+                march_cell(field, iso, (i, j, k), &mut vertex_cache, &mut mesh, budget)?;
             }
         }
     }
 
-    mesh
+    Ok(mesh)
 }
 
 /// The global node coordinate of corner `corner` of cell `(i, j, k)`.
@@ -72,18 +138,30 @@ fn march_cell(
     field: &ScalarField,
     iso: Real,
     cell: (usize, usize, usize),
-    cache: &mut HashMap<(u32, u32), u32>,
+    cache: &mut HashMap<(usize, usize), u32>,
     mesh: &mut SurfaceMesh,
-) {
+    budget: SurfaceBudget,
+) -> Result<(), SurfaceBuildError> {
+    let mut cube_nodes = [(0, 0, 0); 8];
+    let mut cube_values = [0.0; 8];
+    for corner in 0..8 {
+        let node = corner_node(cell, corner);
+        let value = field.value(node.0, node.1, node.2);
+        if !value.is_finite() {
+            return Err(SurfaceBuildError::InvalidField);
+        }
+        cube_nodes[corner] = node;
+        cube_values[corner] = value;
+    }
     for tet in &CUBE_TETRAHEDRA {
         // The four global nodes and field values of this tetrahedron.
         let mut nodes = [(0usize, 0usize, 0usize); 4];
         let mut vals = [0.0 as Real; 4];
         let mut mask = 0u8;
         for (local, &corner) in tet.iter().enumerate() {
-            let n = corner_node(cell, corner);
+            let n = cube_nodes[corner];
             nodes[local] = n;
-            let v = field.value(n.0, n.1, n.2);
+            let v = cube_values[corner];
             vals[local] = v;
             if v > iso {
                 mask |= 1 << local;
@@ -93,18 +171,27 @@ fn march_cell(
         let tris = &TET_TRIANGLES[mask as usize];
         let mut t = 0;
         while t < tris.len() && tris[t] >= 0 {
+            if mesh.indices.len() / 3 >= budget.max_triangles
+                || mesh.indices.len().checked_add(3).is_none()
+            {
+                return Err(SurfaceBuildError::TriangleBudgetExceeded);
+            }
+            mesh.indices
+                .try_reserve(3)
+                .map_err(|_| SurfaceBuildError::AllocationFailed)?;
             let e0 = tris[t] as usize;
             let e1 = tris[t + 1] as usize;
             let e2 = tris[t + 2] as usize;
-            let i0 = edge_vertex(field, iso, &nodes, &vals, e0, cache, mesh);
-            let i1 = edge_vertex(field, iso, &nodes, &vals, e1, cache, mesh);
-            let i2 = edge_vertex(field, iso, &nodes, &vals, e2, cache, mesh);
+            let i0 = edge_vertex(field, iso, &nodes, &vals, e0, cache, mesh, budget)?;
+            let i1 = edge_vertex(field, iso, &nodes, &vals, e1, cache, mesh, budget)?;
+            let i2 = edge_vertex(field, iso, &nodes, &vals, e2, cache, mesh, budget)?;
             mesh.indices.push(i0);
             mesh.indices.push(i1);
             mesh.indices.push(i2);
             t += 3;
         }
     }
+    Ok(())
 }
 
 /// Returns the deduplicated mesh vertex index for the crossing on tetrahedron
@@ -115,24 +202,34 @@ fn edge_vertex(
     nodes: &[(usize, usize, usize); 4],
     vals: &[Real; 4],
     edge: usize,
-    cache: &mut HashMap<(u32, u32), u32>,
+    cache: &mut HashMap<(usize, usize), u32>,
     mesh: &mut SurfaceMesh,
-) -> u32 {
+    budget: SurfaceBudget,
+) -> Result<u32, SurfaceBuildError> {
     let a = TET_EDGES[edge][0];
     let b = TET_EDGES[edge][1];
     let na = nodes[a];
     let nb = nodes[b];
-    let ga = field.node_idx(na.0, na.1, na.2) as u32;
-    let gb = field.node_idx(nb.0, nb.1, nb.2) as u32;
+    let ga = field.node_idx(na.0, na.1, na.2);
+    let gb = field.node_idx(nb.0, nb.1, nb.2);
     let key = if ga <= gb { (ga, gb) } else { (gb, ga) };
 
     if let Some(&idx) = cache.get(&key) {
-        return idx;
+        return Ok(idx);
     }
+
+    if mesh.positions.len() >= budget.max_vertices {
+        return Err(SurfaceBuildError::VertexBudgetExceeded);
+    }
+    let idx =
+        u32::try_from(mesh.positions.len()).map_err(|_| SurfaceBuildError::VertexBudgetExceeded)?;
 
     let va = vals[a];
     let vb = vals[b];
     let denom = vb - va;
+    if !denom.is_finite() {
+        return Err(SurfaceBuildError::InvalidField);
+    }
     // Guard against a degenerate (zero-length) crossing; fall back to the edge
     // midpoint when both endpoints share the iso value.
     let t = if denom.abs() > Real::EPSILON {
@@ -149,21 +246,34 @@ fn edge_vertex(
     // negated gradient points outward. Fall back to a stable up-vector when the
     // gradient is degenerate.
     let grad = field.gradient(position);
+    if !position.is_finite() || !grad.is_finite() {
+        return Err(SurfaceBuildError::InvalidField);
+    }
     let normal = {
         let n = -grad;
-        let len = n.length();
-        if len > Real::EPSILON {
-            n / len
+        // Scale before normalization so a finite large gradient cannot overflow
+        // its squared length and silently produce a zero normal.
+        let scale = n.abs().max_element();
+        if scale > Real::EPSILON {
+            (n / scale).normalize()
         } else {
             Vec3::Y
         }
     };
 
-    let idx = mesh.positions.len() as u32;
+    mesh.positions
+        .try_reserve(1)
+        .map_err(|_| SurfaceBuildError::AllocationFailed)?;
+    mesh.normals
+        .try_reserve(1)
+        .map_err(|_| SurfaceBuildError::AllocationFailed)?;
+    cache
+        .try_reserve(1)
+        .map_err(|_| SurfaceBuildError::AllocationFailed)?;
     mesh.positions.push(position);
     mesh.normals.push(normal);
     cache.insert(key, idx);
-    idx
+    Ok(idx)
 }
 
 #[cfg(test)]
@@ -183,6 +293,75 @@ mod tests {
             }
         }
         f
+    }
+
+    #[test]
+    fn bounded_surface_exact_limits_match_and_each_lower_limit_rejects() {
+        let field = sphere_field(Vec3::ZERO, 0.6, 0.2, 11, Vec3::splat(-1.0));
+        let reference = triangulate(&field, 0.0);
+        assert!(!reference.is_empty());
+        let budget = SurfaceBudget {
+            max_cells: 1_000,
+            max_vertices: reference.vertex_count(),
+            max_triangles: reference.triangle_count(),
+        };
+        assert_eq!(triangulate_bounded(&field, 0.0, budget), Ok(reference));
+        assert_eq!(
+            triangulate_bounded(
+                &field,
+                0.0,
+                SurfaceBudget {
+                    max_cells: 999,
+                    ..budget
+                }
+            ),
+            Err(SurfaceBuildError::CellBudgetExceeded)
+        );
+        assert_eq!(
+            triangulate_bounded(
+                &field,
+                0.0,
+                SurfaceBudget {
+                    max_vertices: budget.max_vertices - 1,
+                    ..budget
+                }
+            ),
+            Err(SurfaceBuildError::VertexBudgetExceeded)
+        );
+        assert_eq!(
+            triangulate_bounded(
+                &field,
+                0.0,
+                SurfaceBudget {
+                    max_triangles: budget.max_triangles - 1,
+                    ..budget
+                }
+            ),
+            Err(SurfaceBuildError::TriangleBudgetExceeded)
+        );
+    }
+
+    #[test]
+    fn bounded_surface_empty_and_non_finite_inputs_are_explicit() {
+        let budget = SurfaceBudget {
+            max_cells: 1,
+            max_vertices: 0,
+            max_triangles: 0,
+        };
+        assert!(triangulate_bounded(&ScalarField::default(), 0.0, budget)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            triangulate_bounded(&ScalarField::default(), Real::NAN, budget),
+            Err(SurfaceBuildError::InvalidField)
+        );
+        let mut field = ScalarField::zeros(2, 2, 2, 0.1, Vec3::ZERO);
+        // An all-outside cell still has to validate every field value.
+        field.add_value(1, 1, 1, Real::NAN);
+        assert_eq!(
+            triangulate_bounded(&field, 0.1, budget),
+            Err(SurfaceBuildError::InvalidField)
+        );
     }
 
     /// Counts how many triangles reference each undirected edge.

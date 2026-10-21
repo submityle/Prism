@@ -40,6 +40,29 @@ pub struct MassProperties {
     pub inv_inertia: Vec3,
 }
 
+/// Solver-only effective inverse mass and inverse principal inertia.
+///
+/// The authored rigid-body contract keeps a scalar inverse mass for ordinary
+/// force/integration APIs. XPBD may additionally need an anisotropic
+/// translational response, for example from aerodynamic added mass, so its
+/// hot solver view uses this separate value type.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct SolverMassProperties {
+    /// Body-space inverse mass along each translational axis.
+    pub inv_mass: Vec3,
+    /// Body-space inverse principal inertia along each rotational axis.
+    pub inv_inertia: Vec3,
+}
+
+impl From<MassProperties> for SolverMassProperties {
+    fn from(properties: MassProperties) -> Self {
+        Self {
+            inv_mass: Vec3::splat(properties.inv_mass),
+            inv_inertia: properties.inv_inertia,
+        }
+    }
+}
+
 impl MassProperties {
     /// Returns all-zero mass properties, representing an immovable body with
     /// infinite mass and inertia (suitable for static and kinematic bodies).

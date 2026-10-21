@@ -28,8 +28,9 @@
 //! standard collision-detection engineering (see Ericson, *Real-Time Collision
 //! Detection*). This file contains no Unreal Engine source or derived code.
 
-use crate::collide::{generate_contact_in, ContactManifold};
+use crate::collide::{generate_contacts_in, ContactManifold};
 use crate::collider::{ColliderShape, ShapeRegistry};
+use crate::collision_filter::CollisionExclusions;
 use crate::math::transform::Isometry;
 use crate::state::body::BodyKind;
 use crate::state::handle::BodyHandle;
@@ -77,8 +78,21 @@ pub fn detect_contacts(world: &PhysicsWorld) -> Vec<ContactManifold> {
     }
 
     let mut manifolds = Vec::new();
-    broad_phase_finite(&bodies, &finite, &world.shapes, &mut manifolds);
-    pair_finite_with_planes(&bodies, &finite, &planes, &world.shapes, &mut manifolds);
+    broad_phase_finite(
+        &bodies,
+        &finite,
+        &world.shapes,
+        world.collision_exclusions(),
+        &mut manifolds,
+    );
+    pair_finite_with_planes(
+        &bodies,
+        &finite,
+        &planes,
+        &world.shapes,
+        world.collision_exclusions(),
+        &mut manifolds,
+    );
     manifolds
 }
 
@@ -113,6 +127,7 @@ fn broad_phase_finite(
     bodies: &[PosedBody<'_>],
     finite: &[usize],
     shapes: &ShapeRegistry,
+    exclusions: &CollisionExclusions,
     manifolds: &mut Vec<ContactManifold>,
 ) {
     if finite.len() < 2 {
@@ -128,7 +143,7 @@ fn broad_phase_finite(
         if !bodies[a].is_dynamic() && !bodies[b].is_dynamic() {
             continue;
         }
-        push_contact(&bodies[a], &bodies[b], shapes, manifolds);
+        push_contact(&bodies[a], &bodies[b], shapes, exclusions, manifolds);
     }
 }
 
@@ -138,6 +153,7 @@ fn pair_finite_with_planes(
     finite: &[usize],
     planes: &[usize],
     shapes: &ShapeRegistry,
+    exclusions: &CollisionExclusions,
     manifolds: &mut Vec<ContactManifold>,
 ) {
     for &p in planes {
@@ -145,7 +161,7 @@ fn pair_finite_with_planes(
             if !bodies[p].is_dynamic() && !bodies[f].is_dynamic() {
                 continue;
             }
-            push_contact(&bodies[p], &bodies[f], shapes, manifolds);
+            push_contact(&bodies[p], &bodies[f], shapes, exclusions, manifolds);
         }
     }
 }
@@ -155,9 +171,21 @@ fn push_contact(
     a: &PosedBody<'_>,
     b: &PosedBody<'_>,
     shapes: &ShapeRegistry,
+    exclusions: &CollisionExclusions,
     manifolds: &mut Vec<ContactManifold>,
 ) {
-    if let Some(manifold) = generate_contact_in(a.shape, &a.pose, b.shape, &b.pose, shapes) {
+    if a.handle == b.handle {
+        return;
+    }
+    for manifold in generate_contacts_in(a.shape, &a.pose, b.shape, &b.pose, shapes) {
+        if !exclusions.allows_leaf_pair(
+            a.handle,
+            b.handle,
+            manifold.leaf_self_collision[0],
+            manifold.leaf_self_collision[1],
+        ) {
+            continue;
+        }
         manifolds.push(manifold.with_bodies(a.handle, b.handle));
     }
 }

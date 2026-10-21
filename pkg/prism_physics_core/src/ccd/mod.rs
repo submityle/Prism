@@ -39,6 +39,7 @@
 //! here on top of this workspace's own support maps and geometry queries.
 
 pub mod config;
+mod leaf_sweep;
 mod shape_sweep;
 pub mod support;
 pub mod sweep;

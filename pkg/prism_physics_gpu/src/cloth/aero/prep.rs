@@ -18,7 +18,7 @@
 use alloc::vec::Vec;
 
 use glam::Vec3;
-use prism_physics_core::{turbulence_offset, AeroParams, WindField};
+use prism_physics_core::soft::aero::{turbulence_offset, AeroParams, WindField};
 
 use super::{ClothAeroParams, ClothAeroTriangle, Real};
 

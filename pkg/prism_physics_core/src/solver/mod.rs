@@ -27,6 +27,144 @@ pub trait Solver {
     fn name(&self) -> &str;
 }
 
+/// Hard work bounds for an explicitly configured offline frame.
+pub const MAX_OFFLINE_SOLVER_SUBSTEPS: u32 = 256;
+/// Hard bound on position-projection sweeps per offline substep.
+pub const MAX_OFFLINE_SOLVER_ITERATIONS: u32 = 1_024;
+
+/// Per-frame overrides; these never change a solver's realtime defaults.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OfflineStepConfig {
+    /// Exact number of substeps for the frame (not multiplied by backend defaults).
+    pub substeps: u32,
+    /// Position-projection iterations within each substep.
+    pub iterations: u32,
+}
+
+impl OfflineStepConfig {
+    /// Rejects invalid or unbounded work before touching simulation state.
+    pub fn validate(self) -> Result<(), OfflineStepError> {
+        if !(1..=MAX_OFFLINE_SOLVER_SUBSTEPS).contains(&self.substeps) {
+            return Err(OfflineStepError::InvalidSubsteps {
+                requested: self.substeps,
+            });
+        }
+        if !(1..=MAX_OFFLINE_SOLVER_ITERATIONS).contains(&self.iterations) {
+            return Err(OfflineStepError::InvalidIterations {
+                requested: self.iterations,
+            });
+        }
+        Ok(())
+    }
+
+    /// Also validates the duration of a real offline simulation step.
+    pub fn validate_step(self, dt: f32) -> Result<(), OfflineStepError> {
+        self.validate()?;
+        if !dt.is_finite() || dt <= 0.0 {
+            return Err(OfflineStepError::InvalidTimeStep);
+        }
+        Ok(())
+    }
+}
+
+/// An offline request was rejected without advancing the world.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OfflineStepError {
+    /// Substeps must be within `1..=MAX_OFFLINE_SOLVER_SUBSTEPS`.
+    InvalidSubsteps {
+        /// Rejected substep count.
+        requested: u32,
+    },
+    /// Iterations must be within `1..=MAX_OFFLINE_SOLVER_ITERATIONS`.
+    InvalidIterations {
+        /// Rejected iteration count.
+        requested: u32,
+    },
+    /// This solver cannot perform iterative constraint projection.
+    UnsupportedSolver,
+    /// Offline frame duration must be finite and strictly positive.
+    InvalidTimeStep,
+}
+
+/// Explicit offline capability for CPU solvers.
+///
+/// There is deliberately no default implementation: a solver must either
+/// consume every requested parameter or reject the request before mutation.
+pub trait OfflineSolver: Solver {
+    /// Advances exactly one offline frame, leaving realtime settings intact.
+    fn step_offline(
+        &mut self,
+        world: &mut PhysicsWorld,
+        dt: f32,
+        config: OfflineStepConfig,
+    ) -> Result<(), OfflineStepError>;
+}
+
+impl OfflineSolver for XpbdSolver {
+    fn step_offline(
+        &mut self,
+        world: &mut PhysicsWorld,
+        dt: f32,
+        config: OfflineStepConfig,
+    ) -> Result<(), OfflineStepError> {
+        config.validate_step(dt)?;
+        let realtime_iterations = self.config.position_iterations;
+        let realtime_articulation_iterations = self.config.articulation_contact_iterations;
+        let soft_iterations: Vec<_> = world
+            .soft_bodies
+            .handles()
+            .map(|handle| {
+                (
+                    handle,
+                    world.soft_bodies.get(handle).unwrap().config.iterations,
+                )
+            })
+            .collect();
+        let overrides = OfflineOverrides {
+            solver: self,
+            world,
+            realtime_iterations,
+            realtime_articulation_iterations,
+            soft_iterations,
+        };
+        overrides.solver.config.position_iterations = config.iterations;
+        overrides.solver.config.articulation_contact_iterations = config.iterations;
+        for &(handle, _) in &overrides.soft_iterations {
+            overrides
+                .world
+                .soft_bodies
+                .get_mut(handle)
+                .unwrap()
+                .config
+                .iterations = config.iterations;
+        }
+        overrides.solver.step(overrides.world, dt, config.substeps);
+        Ok(())
+    }
+}
+
+// Restores authoring even when a solver panic is caught by the host. The world
+// itself is not transactional on panic; only rejected requests are atomic.
+struct OfflineOverrides<'a> {
+    solver: &'a mut XpbdSolver,
+    world: &'a mut PhysicsWorld,
+    realtime_iterations: u32,
+    realtime_articulation_iterations: u32,
+    soft_iterations: Vec<(crate::soft::SoftBodyHandle, u32)>,
+}
+
+impl Drop for OfflineOverrides<'_> {
+    fn drop(&mut self) {
+        self.solver.config.position_iterations = self.realtime_iterations;
+        self.solver.config.articulation_contact_iterations = self.realtime_articulation_iterations;
+        for &(handle, iterations) in &self.soft_iterations {
+            if let Some(body) = self.world.soft_bodies.get_mut(handle) {
+                body.config.iterations = iterations;
+            }
+        }
+    }
+}
+
 /// Reference solver that only integrates free-body motion.
 ///
 /// It divides `dt` into `substeps` equal slices and applies the semi-implicit
@@ -47,6 +185,20 @@ impl Solver for IntegrateOnlySolver {
 
     fn name(&self) -> &str {
         "integrate-only"
+    }
+}
+
+impl OfflineSolver for IntegrateOnlySolver {
+    fn step_offline(
+        &mut self,
+        _world: &mut PhysicsWorld,
+        dt: f32,
+        config: OfflineStepConfig,
+    ) -> Result<(), OfflineStepError> {
+        config.validate_step(dt)?;
+        // Free-body integration has no iterative constraints. Accepting an
+        // iteration setting here would silently misrepresent the requested solve.
+        Err(OfflineStepError::UnsupportedSolver)
     }
 }
 

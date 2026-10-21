@@ -18,6 +18,7 @@
 //! Static and kinematic bodies are not integrated. None of this is derived from
 //! Unreal Engine source; it is the standard textbook rigid-body integration.
 
+use super::force::ForceAccumulator;
 use crate::state::storage::BodyStorage;
 use glam::{Quat, Vec3};
 
@@ -26,14 +27,26 @@ use glam::{Quat, Vec3};
 pub struct Integrator;
 
 impl Integrator {
-    /// Advances all dynamic bodies in `bodies` by `dt` seconds under `gravity`.
+    /// Advances all dynamic bodies in `bodies` by `dt` seconds under `gravity`,
+    /// unless a body has its own persistent gravity override.
     ///
     /// Static and kinematic bodies are left untouched. This is the free method
     /// entry point; [`Integrator::integrate`] on an instance forwards here.
     pub fn integrate(bodies: &mut BodyStorage, gravity: Vec3, dt: f32) {
-        bodies.for_each_dynamic_mut(|pos, ori, linv, angv, _mass, lin_damp, ang_damp| {
+        let view = bodies.solver_view_mut();
+        for i in 0..view.slot_count() {
+            if !view.is_dynamic(i) {
+                continue;
+            }
+            let body_gravity = view.gravity_overrides[i].unwrap_or(gravity);
+            let pos = &mut view.positions[i];
+            let ori = &mut view.orientations[i];
+            let linv = &mut view.linear_velocities[i];
+            let angv = &mut view.angular_velocities[i];
+            let lin_damp = view.linear_damping[i];
+            let ang_damp = view.angular_damping[i];
             // Semi-implicit Euler: update velocities first.
-            *linv += gravity * dt;
+            *linv += body_gravity * dt;
 
             // Exponential-style damping that is unconditionally stable.
             let lin_factor = 1.0 / (1.0 + lin_damp * dt);
@@ -57,7 +70,21 @@ impl Integrator {
                 q[3] + d[3] * half_dt,
             );
             *ori = normalize_or_identity(integrated);
-        });
+        }
+    }
+
+    /// Consumes one deterministic external-force batch and then advances the
+    /// free-body state.  Constraint solvers should call the same force
+    /// consumption step immediately before their own prediction phase.
+    pub fn integrate_with_forces(
+        bodies: &mut BodyStorage,
+        forces: &mut ForceAccumulator,
+        gravity: Vec3,
+        dt: f32,
+    ) -> usize {
+        let applied = forces.consume(bodies, dt);
+        Self::integrate(bodies, gravity, dt);
+        applied
     }
 }
 
@@ -103,5 +130,20 @@ mod tests {
         // Orientation must remain a unit quaternion and have actually rotated.
         assert!((q.length() - 1.0).abs() < 1e-4);
         assert!(q.angle_between(Quat::IDENTITY) > 0.5);
+    }
+
+    #[test]
+    fn force_batch_is_consumed_before_free_integration() {
+        let mut bodies = BodyStorage::new();
+        let body = bodies.insert(BodyDesc::dynamic_at(Vec3::ZERO));
+        let mut forces = ForceAccumulator::new();
+        forces.accumulate_force(body, Vec3::X * 2.0).unwrap();
+        assert_eq!(
+            Integrator::integrate_with_forces(&mut bodies, &mut forces, Vec3::ZERO, 0.5),
+            1
+        );
+        assert!((bodies.linear_velocity(body).unwrap().x - 1.0).abs() < 1e-6);
+        assert!((bodies.position(body).unwrap().x - 0.5).abs() < 1e-6);
+        assert!(forces.is_empty());
     }
 }

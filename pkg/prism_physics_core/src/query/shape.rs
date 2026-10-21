@@ -75,7 +75,9 @@ pub(crate) fn spherecast_shape(
         // sphere sweeps to [`crate::query::mesh`] (triangle mesh) or the CCD
         // conservative-advancement path (convex hull). This analytic leaf never
         // sees them; the arm keeps the match exhaustive.
-        ColliderShape::ConvexHull { .. } | ColliderShape::TriangleMesh { .. } => None,
+        ColliderShape::ConvexHull { .. }
+        | ColliderShape::TriangleMesh { .. }
+        | ColliderShape::Compound { .. } => None,
     }
 }
 

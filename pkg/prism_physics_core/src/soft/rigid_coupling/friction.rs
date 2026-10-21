@@ -78,14 +78,15 @@
 use glam::Vec3;
 
 use crate::math::scalar::Real;
-use crate::soft::{couple_particle_against_body, CouplingContribution};
+#[cfg(test)]
+use crate::soft::couple_particle_against_body;
 use crate::world::PhysicsWorld;
 
 use super::angular::{
     couple_cloth_to_rigid_angular, world_inverse_inertia_apply, AngularCouplingReport,
 };
-use super::driver::{couple_cloth_to_rigid, gather_rigid_proxies};
-use super::proxy::{collider_anchor, Aabb};
+use super::driver::{couple_cloth_to_rigid, gather_rigid_proxies, resolve_proxy_contacts};
+use super::proxy::Aabb;
 
 /// Normal reaction magnitudes at or below this are treated as no contact, so a
 /// grazing/degenerate contact cannot seed a friction cone.
@@ -178,6 +179,7 @@ pub fn couple_cloth_to_rigid_friction(
         let linear = couple_cloth_to_rigid(world, positions, inverse_masses, dt);
         AngularCouplingReport {
             proxy_count: linear.proxy_count,
+            unsupported_count: linear.unsupported_count,
             applied_linear_impulse: linear.applied_impulse,
             ..AngularCouplingReport::default()
         }
@@ -211,13 +213,17 @@ pub fn couple_cloth_to_rigid_friction(
     // pass is order-independent across particles.
     let mut particle_delta = vec![Vec3::ZERO; positions.len()];
 
-    for proxy in &proxies {
+    let mut replay = originals;
+    let (contacts, _) = resolve_proxy_contacts(&proxies, &mut replay, inverse_masses, dt);
+    let mut begin = 0;
+    while begin < proxies.len() {
+        let proxy = &proxies[begin];
+        let mut end = begin + 1;
+        while end < proxies.len() && proxies[end].handle == proxy.handle {
+            end += 1;
+        }
         let w_body = proxy.body.inverse_mass;
-        let collider = proxy.body.collider;
-        // Center of mass and the proxy's post-pass velocity: friction acts on
-        // the relative velocity at the contact, so the body's contact-point
-        // velocity uses the velocity it has after the normal passes.
-        let com = collider_anchor(collider);
+        let com = proxy.center_of_mass;
         let v_body = world
             .bodies
             .linear_velocity(proxy.handle)
@@ -227,29 +233,29 @@ pub fn couple_cloth_to_rigid_friction(
             .angular_velocity(proxy.handle)
             .unwrap_or(Vec3::ZERO);
         let orientation = world.bodies.orientation(proxy.handle).unwrap_or_default();
-        let inv_inertia = world
-            .bodies
-            .mass_properties(proxy.handle)
-            .map_or(Vec3::ZERO, |m| m.inv_inertia);
-
+        let inv_inertia = if w_body > 0.0 {
+            world
+                .bodies
+                .mass_properties(proxy.handle)
+                .map_or(Vec3::ZERO, |m| m.inv_inertia)
+        } else {
+            Vec3::ZERO
+        };
         let mut body_friction_impulse = Vec3::ZERO;
         let mut body_friction_torque = Vec3::ZERO;
-
-        for i in 0..count {
+        for record in contacts
+            .iter()
+            .filter(|c| c.proxy >= begin && c.proxy < end && c.particle < count)
+        {
+            let i = record.particle;
             let w_particle = inverse_masses[i].max(0.0);
-            // Re-evaluate the pre-pass contact to recover the normal reaction
-            // the kernel reduced away, and the contact point / normal.
-            let contribution =
-                couple_particle_against_body(originals[i], inverse_masses[i], collider, w_body, dt);
-            if contribution == CouplingContribution::ZERO {
-                continue;
-            }
+            let contribution = record.contribution;
             let jn_mag = contribution.impulse.length();
             if jn_mag <= NORMAL_IMPULSE_EPS {
                 continue;
             }
-            let contact = collider.project(originals[i]);
-            let correction = contact - originals[i];
+            let contact = record.point;
+            let correction = contact - record.position;
             if correction.length_squared() <= CORRECTION_EPS_SQ {
                 continue;
             }
@@ -300,6 +306,8 @@ pub fn couple_cloth_to_rigid_friction(
             body_friction_torque += arm.cross(jt_vec);
             report.friction_contacts += 1;
         }
+
+        begin = end;
 
         // Write the net friction reaction back onto the body: a linear velocity
         // delta from the tangential impulse and an angular delta from its lever

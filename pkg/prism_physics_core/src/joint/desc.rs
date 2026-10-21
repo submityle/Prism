@@ -11,7 +11,7 @@
 
 use crate::joint::anchor::JointAnchor;
 use crate::joint::kind::{
-    DistanceJoint, FixedJoint, JointKind, PrismaticJoint, RevoluteJoint, SphericalJoint,
+    DistanceJoint, FixedJoint, GearJoint, JointKind, PrismaticJoint, RevoluteJoint, SphericalJoint,
 };
 use crate::state::handle::BodyHandle;
 use glam::Vec3;
@@ -104,6 +104,14 @@ impl JointDesc {
         joint: PrismaticJoint,
     ) -> JointDesc {
         JointDesc::new(anchor_a, anchor_b, JointKind::Prismatic(joint))
+    }
+
+    /// Couples the two shaft angles without constraining translation or swing.
+    /// Mount the shafts separately (for example with revolute joints).
+    /// Invalid gear parameters or non-unit anchor frames are skipped by XPBD.
+    #[must_use]
+    pub const fn gear(anchor_a: JointAnchor, anchor_b: JointAnchor, joint: GearJoint) -> JointDesc {
+        JointDesc::new(anchor_a, anchor_b, JointKind::Gear(joint))
     }
 }
 

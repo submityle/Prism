@@ -3,26 +3,39 @@
 //! A [`PhysicsBackend`] owns whatever resources are needed to step a
 //! [`PhysicsWorld`] and exposes a single per-frame [`PhysicsBackend::step`]
 //! entry point. M0 ships one real reference backend, [`CpuBackend`], which runs
-//! a boxed [`Solver`] for a fixed number of sub-steps on the CPU.
+//! a boxed [`crate::solver::Solver`] for a fixed number of sub-steps on the CPU.
 
-use crate::solver::{IntegrateOnlySolver, Solver};
+use crate::solver::{IntegrateOnlySolver, OfflineSolver};
+pub use crate::solver::{OfflineStepConfig, OfflineStepError};
 use crate::world::PhysicsWorld;
 
 /// A pluggable engine execution backend.
 ///
 /// This abstracts *where and how* stepping runs (CPU today; other targets in
-/// later milestones) from *what* stepping does (the [`Solver`]).
+/// later milestones) from *what* stepping does (the [`crate::solver::Solver`]).
 pub trait PhysicsBackend {
     /// Advances `world` by `dt` seconds.
     fn step(&mut self, world: &mut PhysicsWorld, dt: f32);
+
+    /// Advances one offline frame using the exact requested solver parameters.
+    ///
+    /// Implementations must consume both settings or return an error before
+    /// mutating the world. Offline overrides must not leak into realtime steps.
+    /// This required method intentionally has no silent fallback to `step`.
+    fn step_offline(
+        &mut self,
+        world: &mut PhysicsWorld,
+        dt: f32,
+        config: OfflineStepConfig,
+    ) -> Result<(), OfflineStepError>;
 
     /// Returns a short, stable name identifying the backend.
     fn name(&self) -> &str;
 }
 
-/// Reference CPU backend that drives a boxed [`Solver`].
+/// Reference CPU backend that drives a boxed [`OfflineSolver`].
 pub struct CpuBackend {
-    solver: Box<dyn Solver>,
+    solver: Box<dyn OfflineSolver>,
     substeps: u32,
 }
 
@@ -33,7 +46,7 @@ impl CpuBackend {
     /// Creates a backend that runs `solver` with `substeps` sub-steps per
     /// frame. `substeps` is clamped to at least `1`.
     #[must_use]
-    pub fn new(solver: Box<dyn Solver>, substeps: u32) -> CpuBackend {
+    pub fn new(solver: Box<dyn OfflineSolver>, substeps: u32) -> CpuBackend {
         CpuBackend {
             solver,
             substeps: substeps.max(1),
@@ -57,6 +70,16 @@ impl CpuBackend {
 impl PhysicsBackend for CpuBackend {
     fn step(&mut self, world: &mut PhysicsWorld, dt: f32) {
         self.solver.step(world, dt, self.substeps);
+    }
+
+    fn step_offline(
+        &mut self,
+        world: &mut PhysicsWorld,
+        dt: f32,
+        config: OfflineStepConfig,
+    ) -> Result<(), OfflineStepError> {
+        config.validate_step(dt)?;
+        self.solver.step_offline(world, dt, config)
     }
 
     fn name(&self) -> &str {

@@ -34,7 +34,7 @@
 use super::contact_constraint::{self, ContactConstraint};
 use super::graph_color::ConstraintColoring;
 use crate::collider::PhysicsMaterial;
-use crate::state::body::{BodyKind, MassProperties};
+use crate::state::body::{BodyKind, SolverMassProperties};
 use crate::state::view::BodySolverView;
 use glam::{Quat, Vec3};
 use rayon::prelude::*;
@@ -46,7 +46,8 @@ struct BodySnapshot {
     orientation: Quat,
     prev_position: Vec3,
     prev_orientation: Quat,
-    mass: MassProperties,
+    gravity_override: Option<Vec3>,
+    mass: SolverMassProperties,
     kind: BodyKind,
     material: PhysicsMaterial,
     is_sensor: bool,
@@ -95,6 +96,7 @@ fn lift(
         orientation: view.orientations[slot],
         prev_position: view.prev_positions[slot],
         prev_orientation: view.prev_orientations[slot],
+        gravity_override: view.gravity_overrides[slot],
         mass: view.mass_props[slot],
         kind: view.kinds[slot],
         material: view.materials[slot],
@@ -145,6 +147,7 @@ fn solve_isolated(work: IsolatedContact, alpha_tilde: f32) -> SolvedContact {
     let linear_damping = [0.0f32; 2];
     let angular_damping = [0.0f32; 2];
     let active = [a.active, b.active];
+    let gravity_overrides = [a.gravity_override, b.gravity_override];
 
     let mut view = BodySolverView {
         positions: &mut positions,
@@ -153,6 +156,7 @@ fn solve_isolated(work: IsolatedContact, alpha_tilde: f32) -> SolvedContact {
         prev_orientations: &mut prev_orientations,
         linear_velocities: &mut linear_velocities,
         angular_velocities: &mut angular_velocities,
+        gravity_overrides: &gravity_overrides,
         mass_props: &mass_props,
         kinds: &kinds,
         colliders: &colliders,

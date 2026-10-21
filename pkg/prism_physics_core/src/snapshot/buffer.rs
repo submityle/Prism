@@ -43,8 +43,8 @@ pub struct TripleBuffer<T> {
 impl<T: Clone> TripleBuffer<T> {
     /// Creates a buffer whose three slots are initialized to clones of `seed`.
     ///
-    /// No slot is considered published yet: the seed values are placeholders
-    /// the producer overwrites before publishing.
+    /// No slot is considered published yet: the seed values are initialization
+    /// copies that the producer overwrites before publishing.
     #[must_use]
     pub fn new(seed: T) -> TripleBuffer<T> {
         TripleBuffer {

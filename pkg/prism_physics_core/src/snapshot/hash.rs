@@ -20,6 +20,8 @@
 
 use crate::snapshot::StateSnapshot;
 
+pub use crate::snapshot::world_hash::{hash_world, WorldHash, WorldHashError};
+
 /// FNV-1a 64-bit offset basis.
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 /// FNV-1a 64-bit prime.
@@ -27,8 +29,8 @@ const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
 /// A 64-bit deterministic digest of a [`StateSnapshot`].
 ///
-/// Two snapshots hash to the same [`StateHash`] iff their per-slot occupancy,
-/// generations, poses, and velocities have identical bit patterns.
+/// Identical per-slot occupancy, generations, poses and velocity bits always
+/// hash equally. As with any finite digest, unequal snapshots can collide.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 #[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
 pub struct StateHash(pub u64);
@@ -95,9 +97,8 @@ fn hash_slot(snapshot: &StateSnapshot, slot: usize) -> u64 {
 
 /// Computes the whole-snapshot [`StateHash`].
 ///
-/// The slot count is mixed in first so that two snapshots with a different
-/// number of slots cannot collide by coincidence, then every slot's per-slot
-/// digest is folded in slot order.
+/// The slot count is mixed in first, then every slot's digest in slot order.
+/// This hashes only render state. Use [`hash_world`] for complete-world checks.
 #[must_use]
 pub fn hash_state(snapshot: &StateSnapshot) -> StateHash {
     let mut h = Fnv1a::new();

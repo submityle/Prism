@@ -15,6 +15,9 @@
 //!   per-frame deltas.
 //! - [`PhysicsCache`] bundles the frame step, quantizer, and per-body tracks
 //!   into a shippable offline asset.
+//! - [`CacheReader`] and [`PhysicsCache::write_to`] provide a bounded, versioned
+//!   disk format with indexed, checksummed frame streaming (soft caches only,
+//!   not full-world snapshots).
 //! - [`Baker`] runs the M4 soft solver forward and records a [`PhysicsCache`].
 //! - [`Player`] samples a cache at a running playback time with linear
 //!   interpolation and no solving.
@@ -30,6 +33,7 @@
 
 pub mod asset;
 pub mod bake;
+pub mod disk;
 pub mod golden;
 pub mod playback;
 pub mod quantize;
@@ -37,6 +41,7 @@ pub mod track;
 
 pub use asset::PhysicsCache;
 pub use bake::{BakeConfig, Baker};
+pub use disk::{CacheLimits, CacheMetadata, CacheReader, CacheTrackInfo, CACHE_FORMAT_VERSION};
 pub use golden::{trajectory_hash, verify, GoldenDigest};
 pub use playback::{PlaybackConfig, Player};
 pub use quantize::{PositionQuantizer, DEFAULT_STEP};

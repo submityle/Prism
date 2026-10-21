@@ -3,8 +3,8 @@
 //! This module implements [`generate_contact`], the narrow-phase dispatch that
 //! turns an ordered pair of posed
 //! [`ColliderShape`](crate::collider::ColliderShape)s into an optional
-//! [`ContactManifold`]. Every supported shape pair is genuinely computed: there
-//! are no stubs, and each pair either produces a manifold following the frozen
+//! [`ContactManifold`]. Every supported shape pair is genuinely computed, and
+//! each pair either produces a manifold following the frozen
 //! [`contact`](super::contact) conventions (unit normal from `a` toward `b`,
 //! non-negative penetration, and the witness identity
 //! `point_a == point_b + penetration * normal`) or returns `None` when the
@@ -146,10 +146,21 @@ pub fn generate_contact(
         // [`ShapeRegistry`] arena, which this registry-free entry point cannot
         // resolve; their genuine contacts are produced by the registry-aware
         // [`generate_contact_in`]. These explicit arms only make the match
-        // exhaustive and are not stubbed-out pairs.
+        // exhaustive; registry-backed geometry is handled by the entry point
+        // that receives a ShapeRegistry.
         (ColliderShape::Plane { .. }, ColliderShape::Plane { .. })
-        | (ColliderShape::ConvexHull { .. } | ColliderShape::TriangleMesh { .. }, _)
-        | (_, ColliderShape::ConvexHull { .. } | ColliderShape::TriangleMesh { .. }) => None,
+        | (
+            ColliderShape::ConvexHull { .. }
+            | ColliderShape::TriangleMesh { .. }
+            | ColliderShape::Compound { .. },
+            _,
+        )
+        | (
+            _,
+            ColliderShape::ConvexHull { .. }
+            | ColliderShape::TriangleMesh { .. }
+            | ColliderShape::Compound { .. },
+        ) => None,
     }
 }
 
@@ -158,7 +169,13 @@ pub fn generate_contact(
 /// The normal is negated and each contact's witness points are swapped, which
 /// preserves the `point_a == point_b + penetration * normal` identity.
 fn flipped(manifold: ContactManifold) -> ContactManifold {
-    let mut out = ContactManifold::new(manifold.body_a, manifold.body_b, -manifold.normal);
+    let mut out = ContactManifold::new(manifold.body_b, manifold.body_a, -manifold.normal);
+    out.child_indices = [manifold.child_indices[1], manifold.child_indices[0]];
+    out.leaf_materials = [manifold.leaf_materials[1], manifold.leaf_materials[0]];
+    out.leaf_self_collision = [
+        manifold.leaf_self_collision[1],
+        manifold.leaf_self_collision[0],
+    ];
     for point in manifold.points() {
         out.push(ContactPoint::new(
             point.point_b,
@@ -960,6 +977,24 @@ pub fn generate_contact_in(
     pose_b: &Isometry,
     shapes: &ShapeRegistry,
 ) -> Option<ContactManifold> {
+    // The compatibility API returns one real child manifold, never a merged
+    // patch with incompatible normals. Simulation uses generate_contacts_in
+    // below to retain *all* child contacts.
+    if matches!(shape_a, ColliderShape::Compound { .. })
+        || matches!(shape_b, ColliderShape::Compound { .. })
+    {
+        return generate_contacts_in(shape_a, pose_a, shape_b, pose_b, shapes)
+            .into_iter()
+            .max_by(|a, b| {
+                let depth = |m: &ContactManifold| {
+                    m.points()
+                        .iter()
+                        .map(|p| p.penetration)
+                        .fold(0.0_f32, f32::max)
+                };
+                depth(a).total_cmp(&depth(b))
+            });
+    }
     match (shape_a, shape_b) {
         (
             ColliderShape::ConvexHull { mesh: ma, .. },
@@ -996,7 +1031,7 @@ pub fn generate_contact_in(
             convex_vs_primitive(convex, pose_b, shape_a, pose_a).map(flipped)
         }
         // Two static triangle meshes do not generate contacts (PhysX/Chaos
-        // convention); honest `None`, not a stub.
+        // convention); an empty result is the defined static-mesh policy.
         (ColliderShape::TriangleMesh { .. }, ColliderShape::TriangleMesh { .. }) => None,
         (ColliderShape::TriangleMesh { mesh, .. }, ColliderShape::Plane { normal, offset }) => {
             let tri = shapes.tri_mesh(*mesh)?;
@@ -1015,9 +1050,78 @@ pub fn generate_contact_in(
             trimesh_vs_primitive(tri, pose_b, shape_a, pose_a).map(flipped)
         }
         // No mesh collider is involved: the analytic dispatch handles it in full
-        // (genuine computation, not a stub).
+        // (the analytic dispatch performs the complete calculation).
         _ => generate_contact(shape_a, pose_a, shape_b, pose_b),
     }
+}
+
+/// Returns every leaf-pair contact manifold for a posed shape pair.
+///
+/// A compound is an exact union of its transformed collision children, not a
+/// convex support map. Different children may have unrelated contact normals,
+/// so their manifolds are retained separately. Body handles remain INVALID;
+/// callers stamp the owning rigid-body pair, not the leaf collider handles.
+#[must_use]
+pub fn generate_contacts_in(
+    shape_a: &ColliderShape,
+    pose_a: &Isometry,
+    shape_b: &ColliderShape,
+    pose_b: &Isometry,
+    shapes: &ShapeRegistry,
+) -> Vec<ContactManifold> {
+    if let ColliderShape::Compound { compound, .. } = *shape_a {
+        let Some(data) = shapes.compound(compound) else {
+            return Vec::new();
+        };
+        let mut contacts = Vec::new();
+        for (index, child) in data.children().iter().enumerate() {
+            let Some(shape) = shapes.get(child.collider) else {
+                continue;
+            };
+            let mut child_contacts = generate_contacts_in(
+                shape,
+                &pose_a.mul(&child.local_pose),
+                shape_b,
+                pose_b,
+                shapes,
+            );
+            for manifold in &mut child_contacts {
+                manifold.child_indices[0] = Some(index as u32);
+                manifold.leaf_materials[0] = data.policies()[index].material;
+                manifold.leaf_self_collision[0] = data.policies()[index].self_collision;
+            }
+            contacts.extend(child_contacts);
+        }
+        return contacts;
+    }
+    if let ColliderShape::Compound { compound, .. } = *shape_b {
+        let Some(data) = shapes.compound(compound) else {
+            return Vec::new();
+        };
+        let mut contacts = Vec::new();
+        for (index, child) in data.children().iter().enumerate() {
+            let Some(shape) = shapes.get(child.collider) else {
+                continue;
+            };
+            let mut child_contacts = generate_contacts_in(
+                shape_a,
+                pose_a,
+                shape,
+                &pose_b.mul(&child.local_pose),
+                shapes,
+            );
+            for manifold in &mut child_contacts {
+                manifold.child_indices[1] = Some(index as u32);
+                manifold.leaf_materials[1] = data.policies()[index].material;
+                manifold.leaf_self_collision[1] = data.policies()[index].self_collision;
+            }
+            contacts.extend(child_contacts);
+        }
+        return contacts;
+    }
+    generate_contact_in(shape_a, pose_a, shape_b, pose_b, shapes)
+        .into_iter()
+        .collect()
 }
 
 /// A world-space support map for an analytic primitive used in GJK/EPA.

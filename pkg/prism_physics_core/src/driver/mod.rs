@@ -2,7 +2,7 @@
 //!
 //! [`SimulationDriver`] keeps the existing realtime entry point intact while
 //! adding two stateful, bounded modes. Offline mode calls the selected backend
-//! for a fixed number of substeps per frame and records [`StateSnapshot`]s.
+//! with explicit substep/iteration parameters and records [`FullStateSnapshot`]s.
 //! Playback mode applies those snapshots one frame at a time without invoking
 //! the solver. The driver cache is intentionally separate from
 //! [`crate::cache::PhysicsCache`], which stores deformable particle tracks and
@@ -12,20 +12,20 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
-use crate::backend::PhysicsBackend;
-use crate::snapshot::StateSnapshot;
+use crate::backend::{OfflineStepConfig, OfflineStepError, PhysicsBackend};
+use crate::snapshot::FullStateSnapshot;
 use crate::world::PhysicsWorld;
 
 pub mod fixed_step;
 
 /// Version of the driver-owned snapshot cache format.
-pub const DRIVER_CACHE_VERSION: u32 = 1;
+pub const DRIVER_CACHE_VERSION: u32 = 2;
 
 /// Hard upper bound for frames retained by one driver cache.
 pub const MAX_DRIVER_CACHE_FRAMES: u32 = 16_384;
 
-/// Hard upper bound for backend calls made by one offline frame.
-pub const MAX_OFFLINE_SUBSTEPS: u32 = 256;
+/// Hard upper bound for solver substeps within one offline frame.
+pub const MAX_OFFLINE_SUBSTEPS: u32 = crate::solver::MAX_OFFLINE_SOLVER_SUBSTEPS;
 
 /// Hard upper bound for the number of caches registered with one driver.
 pub const MAX_REGISTERED_CACHES: usize = 64;
@@ -43,12 +43,11 @@ pub enum DriveMode {
     Realtime,
     /// Run one bounded offline frame per drive call.
     Offline {
-        /// Sub-steps per offline frame. Values above
-        /// [`MAX_OFFLINE_SUBSTEPS`] are clamped.
+        /// Sub-steps per offline frame, clamped to `1..=MAX_OFFLINE_SUBSTEPS`.
         substeps: u32,
-        /// Solver iterations reserved for backends that expose this setting.
-        /// The current [`PhysicsBackend`] contract receives only `dt`, so this
-        /// value is retained as part of the stable mode configuration.
+        /// Position-projection iterations per substep, applied to rigid and
+        /// world-owned soft constraints by the CPU XPBD solver. Zero or values
+        /// above [`crate::solver::MAX_OFFLINE_SOLVER_ITERATIONS`] are rejected.
         iterations: u32,
         /// Total number of offline frames to execute and retain. Values above
         /// [`MAX_DRIVER_CACHE_FRAMES`] are clamped.
@@ -59,12 +58,13 @@ pub enum DriveMode {
 }
 
 /// A single versioned frame in a driver playback cache.
-#[derive(Clone, Debug, PartialEq)]
-#[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Clone, Debug)]
 pub struct CacheFrame {
     version: u32,
     index: u32,
-    snapshot: StateSnapshot,
+    snapshot: FullStateSnapshot,
+    dt: f32,
+    config: OfflineStepConfig,
 }
 
 impl CacheFrame {
@@ -82,14 +82,28 @@ impl CacheFrame {
 
     /// Returns the immutable world snapshot stored in this frame.
     #[must_use]
-    pub fn snapshot(&self) -> &StateSnapshot {
+    pub fn snapshot(&self) -> &FullStateSnapshot {
         &self.snapshot
+    }
+
+    /// Returns the frame duration passed to the backend when recording.
+    #[must_use]
+    pub fn dt(&self) -> f32 {
+        self.dt
+    }
+
+    /// Returns the effective (bounded) per-frame solver overrides.
+    #[must_use]
+    pub fn config(&self) -> OfflineStepConfig {
+        self.config
     }
 }
 
 /// A bounded, versioned sequence of full-world driver snapshots.
-#[derive(Clone, Debug, PartialEq)]
-#[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
+///
+/// This is an in-memory replay cache, not a serialized render-pose transport.
+/// Each frame owns a complete world, including topology and pending queues.
+#[derive(Clone, Debug)]
 pub struct DriverCache {
     version: u32,
     max_frames: u32,
@@ -147,7 +161,12 @@ impl DriverCache {
         self.frames.get(index as usize)
     }
 
-    fn push(&mut self, snapshot: StateSnapshot) -> Option<u32> {
+    fn push(
+        &mut self,
+        snapshot: FullStateSnapshot,
+        dt: f32,
+        config: OfflineStepConfig,
+    ) -> Option<u32> {
         if self.frame_count() >= self.max_frames {
             return None;
         }
@@ -156,6 +175,8 @@ impl DriverCache {
             version: self.version,
             index,
             snapshot,
+            dt,
+            config,
         });
         Some(index)
     }
@@ -189,6 +210,12 @@ pub enum DriveOutcome {
         /// Effective bounded target frame count.
         total_frames: u32,
     },
+    /// The offline configuration or solver capability was rejected without
+    /// advancing the world or recording a frame.
+    OfflineRejected {
+        /// Exact validation/capability error reported by the backend.
+        error: OfflineStepError,
+    },
     /// One playback frame was applied to the world.
     PlaybackFrame {
         /// Zero-based index of the applied frame.
@@ -206,17 +233,10 @@ pub enum DriveOutcome {
         /// Missing cache handle.
         handle: CacheHandle,
     },
-    /// A cache frame cannot be applied to the current world layout.
+    /// A cache frame has inconsistent version or frame metadata.
     CacheMismatch {
         /// Frame that failed validation/application.
         frame: u32,
-    },
-    /// Retained for source compatibility with the original dispatch enum.
-    /// Current Offline and Playback branches never return this variant.
-    #[deprecated(note = "Offline and Playback are implemented; this is legacy compatibility only")]
-    Unsupported {
-        /// Human-readable reason retained for old callers.
-        reason: &'static str,
     },
 }
 
@@ -230,7 +250,6 @@ struct DriverState {
 
 #[derive(Clone, Debug)]
 struct OfflineState {
-    substeps: u32,
     target_frames: u32,
     cache: DriverCache,
 }
@@ -307,17 +326,22 @@ impl SimulationDriver {
     /// Returns a clone of the cache recorded by the current Offline run.
     #[must_use]
     pub fn recorded_cache(&self) -> Option<DriverCache> {
-        self.state
-            .borrow()
-            .offline
-            .as_ref()
-            .map(|offline| offline.cache.clone())
+        let state = self.state.borrow();
+        if state.last_mode != Some(self.mode) || !matches!(self.mode, DriveMode::Offline { .. }) {
+            return None;
+        }
+        state.offline.as_ref().map(|offline| offline.cache.clone())
     }
 
     /// Returns the current playback cursor, or zero for a non-playback mode.
     #[must_use]
     pub fn playback_frame(&self) -> u32 {
-        self.state.borrow().playback_frame
+        let state = self.state.borrow();
+        if state.last_mode == Some(self.mode) && matches!(self.mode, DriveMode::Playback(_)) {
+            state.playback_frame
+        } else {
+            0
+        }
     }
 
     /// Advances the simulation by one bounded frame using `backend`, honouring
@@ -344,13 +368,12 @@ impl SimulationDriver {
             }
             DriveMode::Offline {
                 substeps,
-                iterations: _,
+                iterations,
                 target_frames,
             } => {
                 let bounded_substeps = substeps.clamp(1, MAX_OFFLINE_SUBSTEPS);
                 let bounded_target = target_frames.min(MAX_DRIVER_CACHE_FRAMES);
                 let offline = state.offline.get_or_insert_with(|| OfflineState {
-                    substeps: bounded_substeps,
                     target_frames: bounded_target,
                     cache: DriverCache::new(bounded_target),
                 });
@@ -361,14 +384,21 @@ impl SimulationDriver {
                     };
                 }
 
-                let sub_dt = dt / bounded_substeps as f32;
-                for _ in 0..bounded_substeps {
-                    backend.step(world, sub_dt);
+                let config = OfflineStepConfig {
+                    substeps: bounded_substeps,
+                    iterations,
+                };
+                if let Err(error) = config
+                    .validate_step(dt)
+                    .and_then(|()| backend.step_offline(world, dt, config))
+                {
+                    return DriveOutcome::OfflineRejected { error };
                 }
-                debug_assert_eq!(offline.substeps, bounded_substeps);
+                let snapshot =
+                    FullStateSnapshot::capture(offline.cache.frame_count() as u64, world);
                 let frame = offline
                     .cache
-                    .push(StateSnapshot::capture(world))
+                    .push(snapshot, dt, config)
                     .expect("offline cache capacity matches bounded target");
                 DriveOutcome::OfflineFrame {
                     frame,
@@ -388,10 +418,11 @@ impl SimulationDriver {
                     };
                     if cached_frame.version() != DRIVER_CACHE_VERSION
                         || cached_frame.index() != frame
-                        || !apply_snapshot(world, cached_frame.snapshot())
+                        || cached_frame.snapshot().frame() != u64::from(frame)
                     {
                         return DriveOutcome::CacheMismatch { frame };
                     }
+                    cached_frame.snapshot().restore_into(world);
                     cache.frame_count()
                 };
                 state.playback_frame = state.playback_frame.saturating_add(1);
@@ -410,51 +441,11 @@ impl Default for SimulationDriver {
     }
 }
 
-fn apply_snapshot(world: &mut PhysicsWorld, snapshot: &StateSnapshot) -> bool {
-    for slot in 0..snapshot.slot_count() {
-        let occupied = snapshot.slot_occupied(slot);
-        let Some(handle) = world.bodies.handle_at_slot(slot) else {
-            if occupied {
-                return false;
-            }
-            continue;
-        };
-        if !occupied || snapshot.generation_at_slot(slot) != Some(handle.generation()) {
-            return false;
-        }
-        if snapshot.pose_at_slot(slot).is_none() {
-            return false;
-        }
-    }
-    if !(snapshot.slot_count()..world.bodies.slot_count())
-        .all(|slot| world.bodies.handle_at_slot(slot).is_none())
-    {
-        return false;
-    }
-
-    for slot in 0..snapshot.slot_count() {
-        let Some(handle) = world.bodies.handle_at_slot(slot) else {
-            continue;
-        };
-        let Some(pose) = snapshot.pose_at_slot(slot) else {
-            return false;
-        };
-        world.bodies.set_position(handle, pose.position);
-        world.bodies.set_orientation(handle, pose.orientation);
-        world
-            .bodies
-            .set_linear_velocity(handle, snapshot.linear_velocity_at_slot(slot));
-        world
-            .bodies
-            .set_angular_velocity(handle, snapshot.angular_velocity_at_slot(slot));
-    }
-    true
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::backend::CpuBackend;
+    use crate::solver::XpbdSolver;
     use crate::state::body::BodyDesc;
     use glam::Vec3;
 
@@ -466,7 +457,7 @@ mod tests {
     impl CountingBackend {
         fn new() -> Self {
             Self {
-                inner: CpuBackend::with_defaults(),
+                inner: CpuBackend::new(Box::new(XpbdSolver::new()), 4),
                 calls: 0,
             }
         }
@@ -476,6 +467,17 @@ mod tests {
         fn step(&mut self, world: &mut PhysicsWorld, dt: f32) {
             self.calls += 1;
             self.inner.step(world, dt);
+        }
+
+        fn step_offline(
+            &mut self,
+            world: &mut PhysicsWorld,
+            dt: f32,
+            config: OfflineStepConfig,
+        ) -> Result<(), OfflineStepError> {
+            self.inner.step_offline(world, dt, config)?;
+            self.calls += 1;
+            Ok(())
         }
 
         fn name(&self) -> &str {
@@ -503,7 +505,7 @@ mod tests {
     }
 
     #[test]
-    fn offline_is_bounded_records_frames_and_calls_substeps() {
+    fn offline_is_bounded_and_records_one_backend_frame_per_call() {
         let (mut world, h) = falling_world();
         let mut backend = CountingBackend::new();
         let driver = SimulationDriver::new(DriveMode::Offline {
@@ -526,14 +528,14 @@ mod tests {
                 total_frames: 2
             }
         ));
-        assert_eq!(backend.calls, 6);
+        assert_eq!(backend.calls, 2);
         assert!(world.bodies.position(h).unwrap().y < 0.0);
         assert_eq!(driver.recorded_cache().unwrap().frame_count(), 2);
         assert!(matches!(
             driver.drive(&mut backend, &mut world, 0.1),
             DriveOutcome::Complete { frames: 2 }
         ));
-        assert_eq!(backend.calls, 6);
+        assert_eq!(backend.calls, 2);
     }
 
     #[test]
@@ -542,7 +544,7 @@ mod tests {
         let mut backend = CountingBackend::new();
         let driver = SimulationDriver::new(DriveMode::Offline {
             substeps: u32::MAX,
-            iterations: u32::MAX,
+            iterations: 1,
             target_frames: u32::MAX,
         });
         let outcome = driver.drive(&mut backend, &mut world, 0.01);
@@ -553,7 +555,7 @@ mod tests {
                 total_frames: MAX_DRIVER_CACHE_FRAMES
             }
         ));
-        assert_eq!(backend.calls, MAX_OFFLINE_SUBSTEPS);
+        assert_eq!(backend.calls, 1);
     }
 
     #[test]
@@ -576,6 +578,7 @@ mod tests {
             .frame(1)
             .expect("second frame")
             .snapshot()
+            .render()
             .pose(h)
             .expect("source body in snapshot")
             .position;
@@ -634,7 +637,7 @@ mod tests {
     }
 
     #[test]
-    fn playback_mismatch_is_atomic() {
+    fn playback_invalid_metadata_is_atomic() {
         let (mut source, _) = falling_world();
         let mut offline_backend = CountingBackend::new();
         let offline = SimulationDriver::new(DriveMode::Offline {
@@ -646,7 +649,8 @@ mod tests {
             offline.drive(&mut offline_backend, &mut source, 0.1),
             DriveOutcome::OfflineFrame { .. }
         ));
-        let cache = offline.recorded_cache().expect("offline cache");
+        let mut cache = offline.recorded_cache().expect("offline cache");
+        cache.frames[0].index = 1;
 
         let (mut world, first) = falling_world();
         world.spawn(BodyDesc::dynamic_at(Vec3::new(10.0, 0.0, 0.0)));

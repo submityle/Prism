@@ -80,7 +80,7 @@ Layer 0  后端抽象 Backend    (CPU-SIMD / GPU-Compute)
 ```
 
 - 跨语言/后端边界只在 Layer 0 与 Layer 2，其余层稳定。
-- no_std 友好，wasm 可跑（关闭 GPU/多线程时降级到单线程 SIMD）。
+- 可移植性目标：no_std 友好，wasm 可跑（关闭 GPU/多线程时降级到单线程 SIMD）。当前 core 仍为 std crate，不能将此目标当作已验证能力。
 - Layer 0–2 组成“引擎无关内核”，不依赖 Prism ECS，可被服务器逻辑或其他宿主复用。
 
 ---
@@ -264,9 +264,9 @@ driver 切片。该切片不是完整的资产管线或编辑器功能，而是�
   `substeps` 与 `iterations`，并把结果记录为 `FullStateSnapshot`；帧数、子步数和
   迭代数都有硬上限，达到目标后返回 `Complete`，不会继续求解。
 - `Playback(CacheHandle)` 支持注册 bounded、versioned 的 `DriverCache`，每次
-  `drive` 只应用下一帧快照，不调用 backend；world 的 slot/generation 不匹配时
-  返回 `CacheMismatch`，不会静默写入错误实体。
-- 原有 Realtime `drive(backend, world, dt) -> DriveOutcome::Stepped` API 保持兼容。
+  `drive` 原子恢复下一帧完整 world，不调用 backend；目标 world 的 slot/generation
+  一并恢复，不要求与回放前相同。缓存帧版本不匹配时返回 `CacheMismatch`。
+- `Realtime` 每次 `drive(backend, world, dt)` 执行单次 backend step，并返回 `DriveOutcome::Stepped`。
 - 既有 `PhysicsCache`/`Player` 继续负责软体粒子轨迹的量化、插值和回放；driver
   cache 使用完整 world snapshot（`DRIVER_CACHE_VERSION = 2`），包含软体、拓扑、场、铰接和装配状态，避免把刚体状态错误地塞进软体 track 格式。
 
@@ -357,6 +357,11 @@ commands.spawn((
 
 ## 18. 确定性与联机
 
+当前状态：core 使用 f32 / glam，没有 `deterministic` feature 或定点/软浮点求解路径。
+完整内存快照和同构建 world hash 已有；world hash 按 Debug schema 生成，并分配与世界
+规模相关的临时内存，不是稳定磁盘/网络编码或每帧热路径方案。以下是尚需实现、跨平台
+验证的设计要求，不能用固定遍历顺序或单机 replay 测试代替位一致性验收。
+
 - feature deterministic：软浮点或定点数学，稳定排序，跨平台位一致。
 - 快照/回滚 API 供 rollback netcode（GGPO 风格）使用。
 - 与高性能 f32 路径二选一，编译期切换，零运行时代价。
@@ -444,10 +449,10 @@ MPM 已通过 `MpmBinding -> MpmRuntime -> MpmParticleSnapshot` 接入同一固�
 | M8 | 约束 DSL + 参数热重载 | 编辑器实时调参 | ✅ 完成 |
 | M9 | GPU-Driven 持久化管线 + 实时 Voronoi 破碎 | 零拷贝 + 动态裂纹 | 🟡 CPU 破碎和部分 GPU stage 已有；动态拓扑、生产持久化调度与 GPU resident 零拷贝渲染回写未完成，已有 CPU copy MPM 渲染桥不等于本项验收 |
 | M10 | 动态装配：力累加器/施力 API + 通用可断关节 + 装配图/复合体合并·拆分 + 吸附几何原语 + GrabDrive | 实时搭建 200+ 零件载具 60fps、焊点可断、抓取不穿墙 | 🟡 core 装配/施力与 ECS 显式 assembly 请求、合并拆分及 generational entity/body 重映射已有；抓取/snap 交互闭环、自动接入普通 `RigidBody` authoring、Demo 和目标性能验收未完成 |
-| M11 | 力场子系统 + GPU 采样 + 风扇/推进器/浮力部件 + 断裂连锁 | 自建载具可驾驶/飞行、受击解体 | 🟡 core field/GPU sampler 与 ECS ForceField、AeroSurface/Thruster/Buoyancy 生命周期桥已有；GPU sampler 尚未驱动 PhysicsWorld/XPBD，破坏连锁、跨层场景和目标性能验收未完成 |
-| M12 | 刚体/多体气动：各向异性阻力面元 + 翼面升力/失速 + 推进反扭矩 + 浮力（空气/水）+ 空间风场/滑流/地面效应 + 附加质量 | 自建飞行器可滑翔/配平飞行、气球浮空、水上载具 | 🟡 升阻/失速、推进反扭矩、浮力、附加质量、Magnus 与风场/wake 等 core 原语、ECS `RigidBodyAero` 生命周期桥及固定步推进器路径已有；完整场景模型、GPU 采样、独立 ECS 部件族、Demo 和跨层性能验收未完成 |
+| M11 | 力场子系统 + GPU 采样 + 风扇/推进器/浮力部件 + 断裂连锁 | 自建载具可驾驶/飞行、受击解体 | 🟡 core field/GPU sampler、XPBD 每子步 provider 与 ECS 显式 GPU runtime、ForceField、AeroSurface/Thruster/Buoyancy 生命周期桥已有；GPU 采样同步回读后仍由 CPU XPBD 求解，不是零拷贝；破坏连锁、跨层场景和目标性能验收未完成 |
+| M12 | 刚体/多体气动：各向异性阻力面元 + 翼面升力/失速 + 推进反扭矩 + 浮力（空气/水）+ 空间风场/滑流/地面效应 + 附加质量 | 自建飞行器可滑翔/配平飞行、气球浮空、水上载具 | 🟡 升阻/失速、推进反扭矩、浮力、附加质量、Magnus 与风场/wake 等 core 原语、ECS `RigidBodyAero` 与独立气动部件生命周期桥及固定步推进器路径已有；完整场景模型、气动空间风场 GPU 采样、Demo 和跨层性能验收未完成 |
 | M13 | 角色布偶：球关节 swing-twist 椭圆锥限/扭限 + 软限位 + 关节摩擦 + 位姿伺服 drive + RagdollBuilder | 人形布偶命中反应自然、不穿模不软面条、受击可配主动驱动 | 🟡 core 原语、按关节 humanoid preset，以及 `EcsRagdoll` 的稳定 part-ID authoring、generational body 映射、固定步约束接线与生命周期回归已有；骨骼/角色资产转换、完整碰撞场景、GPU 群体和性能验收未完成 |
-| M14 | 降阶坐标铰接：Featherstone ABA O(n) 正向动力学 + 广义坐标限位/马达 + 与 XPBD 接触耦合 | 长机械臂/角色强铰接链极大质量比零漂移、少子步稳定 | 🟡 core、ECS 生命周期/输入/snapshot、XPBD 自动混合接触及断裂后的最大坐标/ECS 实体接管均已有实现；接管支持非零 COM/完整惯量的主轴转换，仍拒绝重力不匹配、多 collider attachment 与部分存活关节参数；GPU 多链、完整场景和目标性能验收未完成 |
+| M14 | 降阶坐标铰接：Featherstone ABA O(n) 正向动力学 + 广义坐标限位/马达 + 与 XPBD 接触耦合 | 长机械臂/角色强铰接链极大质量比零漂移、少子步稳定 | 🟡 core、ECS 生命周期/输入/snapshot、XPBD 自动混合接触及断裂后的最大坐标/ECS 实体接管均已有实现；接管支持非零 COM/完整惯量、有限值重力覆盖及多 collider attachment 的逐叶策略和来源映射，部分存活关节参数仍拒绝；GPU 多链、完整场景和目标性能验收未完成 |
 | M15 | 布料拓扑撕裂：顶点分裂 + 裂纹前沿 + 穿刺 + 各向异性织物 + 渲染网格缝合 + GPU 拓扑变更 | 旗帜被弹片撕开真实裂口、刀划布、撕裂口参与自碰撞 | 🟡 版本化 topology payload、core 原子 consumer、ECS 生命周期/重试桥、render-app 原生 Mesh 转换及 Assets/SceneRegistry/draw queue 提交已有；GPU 重排、CCD/BVH 生产 consumer、CPU/GPU parity 和完整场景验收未完成 |
 
 关键预留原则：Tier S/A 的功能现在只在 trait Solver、DriveMode、序列化、后端抽象四个扩展点"留好插槽"，M0/M1 不实现，避免过度设计拖慢主线。
@@ -676,7 +681,7 @@ commands.entity(crate_entity).insert(GrabDrive::to(hand_pose).soft());
 ### 25.2 现状与差距
 
 - ✅ 已有：软体/布料逐面气动（`soft::aero`）；刚体 `aero` 的面元升阻、`LiftCurve` 攻角/平滑失速、操纵面、推进反扭矩、空气/水浮力、附加质量与 Magnus 原语；解析 `WindField`、阵风/湍流、`Slipstream`/`Downwash` wake 和地面效应原语。ECS `RigidBodyAero(AeroBodyConfig)` 在固定 Sync 阶段注册、替换、移除，core 在 XPBD 子步评估，并先汇集活动推进器 wake 再计算各刚体受力。
-- 仍待完整接线与验收：GPU 空间风场采样、资产/编辑器调参、复杂飞行/水上场景的模型校准、跨层回归、Demo 与性能数据。ECS 已有 `AeroFunctionalComponents` 聚合组件持有 surfaces/thrusters/buoyancy，不等于每种部件各自拥有独立 ECS 组件与编辑器 authoring；不能把上述已有 CPU 原语和聚合组件生命周期整体列为缺失，也不能由原语存在推导完整气动生产链已经完成。
+- 仍待完整接线与验收：气动 GPU 空间风场采样、资产/编辑器调参、复杂飞行/水上场景的模型校准、跨层回归、Demo 与性能数据。ECS 已有 `AeroFunctionalComponents` 聚合组件，以及独立 `AeroSurfaceComponent` / `AeroThrusterComponent` / `AeroBuoyancyComponent`，通过显式 generational target 绑定普通刚体；支持编辑、移除、重定向与失效清理。不等于编辑器 authoring、GPU 风场消费或完整气动生产链已经完成。
 - `linear_damping` / `angular_damping`（`dynamics/integrator.rs`）仍只是速度阻尼，**非真实气动**。下文为分层设计与验收规格；设计名 `AeroCurve` / `WindField3D` 不等于当前同名公共 API，现有入口以 `aero` 导出为准。
 
 ### 25.3 保真度分层（三档 LOD，可逐体选择）
@@ -1044,7 +1049,9 @@ ECS `EcsRagdoll` 以稳定 part ID 映射到调用方已有的 `RigidBody` 实�
 - ✅ 已有：XPBD 固定步通过 `articulation_contact` 对普通刚体和注册的铰接 collider 做混合 broad/narrow phase，并将接触与限位响应耦合进铰接广义速度；固定顺序、回放确定性和限位接触有回归覆盖。
 - ✅ 已有：断裂后 core 原子生成最大坐标 body、存活关节与 collider；ECS 将同一 generational body handle 物化为独立实体并接入普通刚体同步、固定步输入/求解/回写和 snapshot。失败保留降阶运行态并重试；生命周期测试覆盖输入、移除、失效、generation 复用和重建清理。
 - 已有：handoff 把非零 COM 与完整对称惯量转换为 COM/右手主轴 body frame，并迁移速度、collider 和关节锚点；几何先只读验证、再提交，避免克隆整个 world/shape registry。ECS 物理实体使用 COM frame，独立 authored 子实体保留原 link frame，不能将同一 Transform 同时解释为两种坐标系。
-- 未完成：gravity mismatch、多 collider attachment、存活关节 motor/damping/armature 与部分限位策略仍采用原子拒绝；不以无声丢弃参数冒充无损接管。GPU 多链、完整场景及匹配硬件目标性能验收仍未完成。
+- 已有：有限值重力通过持久的 per-body override 接管，不随后续 world gravity 修改而丢失；非有限值重力仍被拒绝。
+- 已有：同一 link/base 的多个 collider attachment 会预验证并合并为真实 compound leaves；逐叶保留 material/self-collision，`body_child_range` 将扁平叶索引映射回原始 attachment。普通/混合接触、软体耦合、CCD 和 leaf-aware queries 消费该策略，而不是用聚合凸包填平几何间隙；超预算或非法几何在提交前拒绝。
+- 未完成：存活关节 motor/damping/armature 与部分限位策略仍采用原子拒绝；不以无声丢弃参数冒充无损接管。GPU 多链、完整场景及匹配硬件目标性能验收仍未完成。
 - 适用面：长链 + 极大质量比 + 需精确可控（机械臂末端、角色操纵）时降阶坐标显著优于最大坐标。
 
 ### 27.3 模型：铰接拓扑
@@ -1287,18 +1294,16 @@ GPU compact/reorder、生产 CCD/BVH consumer 或 CPU/GPU parity 已完成。
 
 ---
 
-## 当前验证记录（2026-10-21）
+## 当前验证记录（2026-10-22）
 
 本规格 v0.7 不含 AI/ML 内容。已实现的内核与跨层桥以各节“现状”及 §22 路线图为准；不能把设计 API、测试文件存在或历史测试数当作当前完整系统的验收证据。
 
-本轮定向验证（`--offline`，独立 target，debug 信息与 incremental 关闭）：
+本轮提交前验证（`--offline -j 1`，debug 信息与 incremental 关闭）：
 
 | 包 / 测试选择 | 结果 | 验证范围 |
 |---|---|---|
-| `prism_physics_core --features parallel --test articulation_handoff` | 15 通过 | 断裂原子接管、连续铰链角及超主值范围限位等回归 |
-| 同包 `--test articulation_handoff_inertia` | 1 通过 | 非零 COM / 完整惯量的物理 frame 转换 |
-| 同包 `--test collision_exclusions` | 13 通过 | 代际碰撞排除及相关生命周期 |
-| 同包 `--test compound_assembly_geometry` | 7 通过 | 复合几何与装配路径 |
-| `prism_physics_ecs --lib articulation::handoff::tests` | 3 通过 | 接管退休的原子回滚、空成员与局部写集提交 |
+| `prism_physics_core --features parallel --lib --tests` | 2728 单元 + 258 集成通过 | core 全量默认测试目标及 parallel 路径；含接管、多 attachment 逐叶策略、非零 COM / 完整惯量、碰撞排除、旋转根位姿 CCD 回归 |
+| `prism_physics_ecs --lib --tests`，`PRISM_REQUIRE_GPU=1` | 16 单元 + 108 集成通过 | 固定步生命周期、接管回滚/退休、多碰撞体所有权及编辑/移除/重试、装配、布偶、MPM 与 6 项真实 GPU field runtime 测试 |
+| `prism_physics_gpu --lib field::`，`PRISM_REQUIRE_GPU=1` | 24 通过 | GPU 场采样、批次/预算/设备身份、workspace 复用、初始化及提交/读回错误作用域和失败后恢复；不是全包 GPU parity 验收 |
 
-上述测试不证明完整 workspace、GPU parity、真机画面或目标性能通过。匹配硬件 P50/P95/P99、广泛 GPU 覆盖与完整场景仍须分别验收。接管的非零 COM / 完整惯量已实现；剩余拒绝策略以 §27.2 为准，不再笼统列为“不支持任意质量属性”。
+上述测试不证明完整 workspace、全求解器 GPU parity、真机画面或目标性能通过。匹配硬件 P50/P95/P99、广泛 GPU 覆盖与完整场景仍须分别验收。接管的非零 COM / 完整惯量已实现；剩余拒绝策略以 §27.2 为准，不再笼统列为“不支持任意质量属性”。

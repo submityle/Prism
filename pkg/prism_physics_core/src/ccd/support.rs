@@ -104,6 +104,7 @@ impl CcdSupport<'static> {
             // none can be produced from the shape alone. See `from_shape_in`
             // for the convex-hull path.
             ColliderShape::Plane { .. }
+            | ColliderShape::Compound { .. }
             | ColliderShape::TriangleMesh { .. }
             | ColliderShape::ConvexHull { .. } => None,
         }
@@ -135,7 +136,7 @@ impl<'a> CcdSupport<'a> {
                     rotation,
                 })
             }
-            ColliderShape::TriangleMesh { .. } => None,
+            ColliderShape::TriangleMesh { .. } | ColliderShape::Compound { .. } => None,
             _ => CcdSupport::from_shape(shape, position, rotation),
         }
     }

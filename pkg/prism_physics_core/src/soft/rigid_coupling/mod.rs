@@ -20,7 +20,7 @@
 //! * [`angular`] — an opt-in per-contact driver
 //!   ([`couple_cloth_to_rigid_angular`]) that layers a real analytic torque
 //!   (`Σ arm × impulse` mapped through the body's world inverse inertia) on top
-//!   of the linear bridge, replacing the old `TODO(angular)` stub. It is gated
+//!   of the linear bridge. It is gated
 //!   on [`ClothRigidCouplingConfig::angular`] and off by default, so the linear
 //!   bridge stays bit-identical.
 //!
@@ -39,9 +39,13 @@ pub use angular::{
     couple_cloth_to_rigid_angular, world_inverse_inertia_apply, AngularCouplingReport,
 };
 pub use config::ClothRigidCouplingConfig;
-pub use driver::{couple_cloth_to_rigid, gather_rigid_proxies, CouplingReport};
+pub use driver::{
+    couple_cloth_to_rigid, gather_rigid_proxies, gather_rigid_proxies_with_diagnostics,
+    CouplingReport,
+};
 pub use friction::{couple_cloth_to_rigid_friction, FrictionCouplingReport};
 pub use proxy::{
-    body_collider_from_shape, collider_anchor, collider_overlaps, collider_world_aabb,
-    convex_proxy_from_cuboid, proxy_inverse_mass, Aabb, RigidProxy,
+    body_collider_from_shape, body_colliders_from_shape_in, collider_anchor, collider_overlaps,
+    collider_world_aabb, convex_proxy_from_cuboid, proxy_inverse_mass, Aabb, CouplingProxyError,
+    RigidProxy,
 };
