@@ -1903,12 +1903,11 @@ mod tests {
                 if resources.as_slice() == gbuffer.as_slice() {
                     gbuffer_clears += 1;
                     for (index, attachment) in raster.colors.iter().enumerate() {
-                        let clear = if index == 3 || index == 4 {
-                            Color::TRANSPARENT
-                        } else {
-                            Color::BLACK
-                        };
-                        assert_eq!(attachment.load, LoadOp::Clear(clear));
+                        assert_eq!(
+                            attachment.load,
+                            LoadOp::Clear(Color::TRANSPARENT),
+                            "all six GBuffer planes must be initialized to zero; only normal alpha carries coverage"
+                        );
                     }
                     let attachment = raster.depth.unwrap();
                     assert_eq!(attachment.resource, depth);
@@ -1917,7 +1916,11 @@ mod tests {
                     assert_eq!(attachment.depth_store, StoreOp::Store);
                 } else {
                     hdr_clears += 1;
-                    assert_eq!(raster.colors[0].load, LoadOp::Clear(Color::BLACK));
+                    assert_eq!(
+                        raster.colors[0].load,
+                        LoadOp::Clear(Color::TRANSPARENT),
+                        "no-lighting HDR initialization must match the production zero clear"
+                    );
                     assert!(
                         raster.depth.is_none(),
                         "HDR clear must not clear shared depth twice"
