@@ -78,9 +78,11 @@ impl Error for ReflectSettingsError {}
 /// docs, categories, ranges, defaults, and read-only attributes are mapped
 /// into canonical definitions. Scalar defaults support bool, signed/unsigned
 /// integers fitting `i64`, `f32`, `f64`, and `String`. Explicit settings may
-/// also be homogeneous `Vec<T>` or `[T; N]` values with scalar elements; `Vec`
-/// values are bounded by [`MAX_REFLECT_SETTING_ARRAY_LEN`]. Other types fail
-/// closed.
+/// also be recursively homogeneous `Vec<T>` or `[T; N]` values. Every dynamic
+/// collection is bounded by [`MAX_REFLECT_SETTING_ARRAY_LEN`]. Empty
+/// collections are accepted only when their immediate element type is a
+/// supported scalar; nested empty collections fail closed because reflected
+/// type names are not parsed to guess child schemas. Other types fail closed.
 pub fn derive_settings_registry<T>(
     namespace: &str,
     owner: &str,
@@ -168,6 +170,7 @@ where
                     list.len(),
                     info.item_type_name(),
                     None,
+                    0,
                     name,
                     descriptor.type_name(),
                 )?;
@@ -185,6 +188,7 @@ where
                     array.len(),
                     info.item_type_name(),
                     Some(info.capacity()),
+                    0,
                     name,
                     descriptor.type_name(),
                 )?;
@@ -219,7 +223,7 @@ where
                             field: name.to_owned(),
                         })?;
                 }
-                if value.value_type() != rust_default.value_type() {
+                if !shape.matches(&value) {
                     return Err(ReflectSettingsError::MetadataTypeMismatch {
                         field: name.to_owned(),
                     });
@@ -257,6 +261,11 @@ fn from_attribute(value: &AttributeValue) -> Option<Value> {
         AttributeValue::UInt(value) => i64::try_from(*value).ok().map(Value::Int),
         AttributeValue::Float(value) => Some(Value::Float(*value)),
         AttributeValue::Text(value) => Some(Value::String(value.clone())),
+        AttributeValue::Array(values) => values
+            .iter()
+            .map(from_attribute)
+            .collect::<Option<Vec<_>>>()
+            .map(Value::Array),
         _ => None,
     }
 }
@@ -316,13 +325,17 @@ fn from_reflect_sequence<'a, I>(
     len: usize,
     item_type_name: &'static str,
     fixed_len: Option<usize>,
+    depth: usize,
     field: &str,
     type_name: &str,
 ) -> Result<(Value, ValueShape), ReflectSettingsError>
 where
     I: IntoIterator<Item = &'a dyn Reflect>,
 {
-    if len > MAX_REFLECT_SETTING_ARRAY_LEN || fixed_len.is_some_and(|expected| expected != len) {
+    if depth > prism_settings::MAX_VALUE_SHAPE_DEPTH
+        || len > MAX_REFLECT_SETTING_ARRAY_LEN
+        || fixed_len.is_some_and(|expected| expected != len)
+    {
         return Err(ReflectSettingsError::UnsupportedValue {
             field: field.to_owned(),
             type_name: type_name.to_owned(),
@@ -332,36 +345,90 @@ where
     let mut values = Vec::with_capacity(len);
     let mut element_type = None;
     for item in items {
-        let value =
-            from_reflect_scalar(item).ok_or_else(|| ReflectSettingsError::UnsupportedValue {
-                field: field.to_owned(),
-                type_name: type_name.to_owned(),
-            })?;
-        if let Some(expected) = element_type {
-            if expected != value.value_type() {
+        let (value, item_shape) = from_reflect_value(item, depth + 1, field, type_name)?;
+        if let Some(expected) = &element_type {
+            if *expected != item_shape {
                 return Err(ReflectSettingsError::UnsupportedValue {
                     field: field.to_owned(),
                     type_name: type_name.to_owned(),
                 });
             }
         } else {
-            element_type = Some(value.value_type());
+            element_type = Some(item_shape);
         }
         values.push(value);
     }
 
-    let element_type = element_type
-        .or_else(|| scalar_value_type_from_name(item_type_name))
+    let element_shape = element_type
+        .or_else(|| scalar_value_type_from_name(item_type_name).map(ValueShape::scalar))
         .ok_or_else(|| ReflectSettingsError::UnsupportedValue {
             field: field.to_owned(),
             type_name: type_name.to_owned(),
         })?;
-    let element_shape = ValueShape::scalar(element_type);
     let shape = match fixed_len {
         Some(length) => ValueShape::fixed_array(element_shape, length),
         None => ValueShape::bounded_array(element_shape, MAX_REFLECT_SETTING_ARRAY_LEN),
     };
     Ok((Value::Array(values), shape))
+}
+
+fn from_reflect_value(
+    value: &dyn Reflect,
+    depth: usize,
+    field: &str,
+    field_type_name: &str,
+) -> Result<(Value, ValueShape), ReflectSettingsError> {
+    if depth > prism_settings::MAX_VALUE_SHAPE_DEPTH {
+        return Err(ReflectSettingsError::UnsupportedValue {
+            field: field.to_owned(),
+            type_name: field_type_name.to_owned(),
+        });
+    }
+    match value.reflect_ref() {
+        ReflectRef::List(list) => {
+            let TypeInfo::List(info) = value.type_info() else {
+                return Err(ReflectSettingsError::UnsupportedValue {
+                    field: field.to_owned(),
+                    type_name: field_type_name.to_owned(),
+                });
+            };
+            from_reflect_sequence(
+                list.iter_reflect(),
+                list.len(),
+                info.item_type_name(),
+                None,
+                depth,
+                field,
+                field_type_name,
+            )
+        }
+        ReflectRef::Array(array) => {
+            let TypeInfo::Array(info) = value.type_info() else {
+                return Err(ReflectSettingsError::UnsupportedValue {
+                    field: field.to_owned(),
+                    type_name: field_type_name.to_owned(),
+                });
+            };
+            from_reflect_sequence(
+                array.iter_reflect(),
+                array.len(),
+                info.item_type_name(),
+                Some(info.capacity()),
+                depth,
+                field,
+                field_type_name,
+            )
+        }
+        _ => {
+            let scalar = from_reflect_scalar(value).ok_or_else(|| {
+                ReflectSettingsError::UnsupportedValue {
+                    field: field.to_owned(),
+                    type_name: field_type_name.to_owned(),
+                }
+            })?;
+            Ok((scalar.clone(), ValueShape::scalar(scalar.value_type())))
+        }
+    }
 }
 
 fn scalar_value_type_from_name(type_name: &str) -> Option<prism_settings::ValueType> {
@@ -545,5 +612,84 @@ mod tests {
                 Value::Array(vec![Value::Float(1.0), Value::Int(2)])
             )
             .is_err());
+    }
+
+    #[test]
+    fn nested_reflected_collections_preserve_recursive_shape_and_fail_closed_when_empty() {
+        #[derive(Reflect)]
+        struct NestedSettings {
+            #[reflect(setting)]
+            matrix: Vec<Vec<i32>>,
+            #[reflect(setting)]
+            fixed: [[i32; 2]; 2],
+        }
+
+        impl Default for NestedSettings {
+            fn default() -> Self {
+                Self {
+                    matrix: vec![vec![1, 2], vec![3, 4]],
+                    fixed: [[5, 6], [7, 8]],
+                }
+            }
+        }
+
+        let schema = derive_settings_registry::<NestedSettings>("nested", "prism_app").unwrap();
+        let (matrix_id, matrix) = schema.get(&"nested.matrix".into()).unwrap();
+        assert!(matches!(
+            &matrix.shape,
+            ValueShape::Array { element, .. }
+                if matches!(**element, ValueShape::Array { .. })
+        ));
+        let candidate = Value::Array(vec![
+            Value::Array(vec![Value::Int(10)]),
+            Value::Array(vec![Value::Int(11)]),
+        ]);
+        assert_eq!(
+            schema.validate_value(matrix_id, candidate.clone()).unwrap(),
+            candidate
+        );
+        assert!(schema
+            .validate_value(
+                matrix_id,
+                Value::Array(vec![
+                    Value::Array(vec![Value::Int(1)]),
+                    Value::Array(vec![Value::Bool(true)])
+                ]),
+            )
+            .is_err());
+
+        let (fixed_id, fixed) = schema.get(&"nested.fixed".into()).unwrap();
+        assert!(matches!(fixed.shape, ValueShape::Array { .. }));
+        assert!(schema
+            .validate_value(
+                fixed_id,
+                Value::Array(vec![Value::Array(vec![Value::Int(1)])])
+            )
+            .is_err());
+
+        #[derive(Reflect, Default)]
+        struct EmptyNested {
+            #[reflect(setting)]
+            matrix: Vec<Vec<i32>>,
+        }
+        assert!(matches!(
+            derive_settings_registry::<EmptyNested>("nested", "prism_app"),
+            Err(ReflectSettingsError::UnsupportedValue { field, .. }) if field == "matrix"
+        ));
+    }
+
+    #[test]
+    fn recursive_array_attribute_values_convert_without_losing_shape() {
+        let attribute = AttributeValue::array(vec![
+            AttributeValue::array(vec![AttributeValue::Int(1), AttributeValue::Int(2)]),
+            AttributeValue::array(vec![AttributeValue::Int(3)]),
+        ]);
+        assert_eq!(
+            from_attribute(&attribute),
+            Some(Value::Array(vec![
+                Value::Array(vec![Value::Int(1), Value::Int(2)]),
+                Value::Array(vec![Value::Int(3)]),
+            ]))
+        );
     }
 }

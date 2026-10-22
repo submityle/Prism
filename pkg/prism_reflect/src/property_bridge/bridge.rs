@@ -321,6 +321,7 @@ fn assign_scalar(slot: &mut dyn Reflect, value: &AttributeValue) -> Result<(), S
         }
         AttributeValue::Int(i) => assign_int(any, *i),
         AttributeValue::UInt(u) => assign_uint(any, *u),
+        AttributeValue::Array(_) => Err("scalar value".to_string()),
     }
 }
 
@@ -389,6 +390,7 @@ fn scalar_kind(value: &AttributeValue) -> &'static str {
         AttributeValue::UInt(_) => "unsigned integer scalar",
         AttributeValue::Float(_) => "float scalar",
         AttributeValue::Text(_) => "text scalar",
+        AttributeValue::Array(_) => "array value",
     }
 }
 

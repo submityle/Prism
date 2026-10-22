@@ -65,6 +65,25 @@ pub enum AttributeValue {
     Float(f64),
     /// A text attribute.
     Text(String),
+    /// A recursively typed array attribute, used for collection defaults.
+    Array(Vec<AttributeValue>),
+}
+
+impl AttributeValue {
+    /// Creates an array metadata value.
+    #[must_use]
+    pub fn array(values: impl Into<Vec<Self>>) -> Self {
+        Self::Array(values.into())
+    }
+
+    /// Returns the array elements when this value is an array.
+    #[must_use]
+    pub fn as_array(&self) -> Option<&[Self]> {
+        match self {
+            Self::Array(values) => Some(values),
+            _ => None,
+        }
+    }
 }
 
 /// Metadata describing a single field of a reflected type.

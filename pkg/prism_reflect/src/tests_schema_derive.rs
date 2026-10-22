@@ -8,7 +8,7 @@
 //! against the metadata queried back through the registry after
 //! `register::<T>()` (no manual `register_type_data` call).
 
-use crate::schema::{AttributeValue, TypeMetadata};
+use crate::schema::{AttributeValue, FieldMetadata, TypeMetadata};
 use crate::{Reflect, TypeRegistry};
 use alloc::string::String;
 use core::any::type_name;
@@ -161,6 +161,22 @@ fn only_annotated_fields_are_recorded() {
     // attached and the registration carries none.
     let registration = registry.get_with_name(type_name::<Mixed>()).unwrap();
     assert!(registration.data::<TypeMetadata>().is_none());
+}
+
+#[test]
+fn field_metadata_supports_recursive_array_defaults() {
+    let default = AttributeValue::array(vec![
+        AttributeValue::Int(2),
+        AttributeValue::array(vec![AttributeValue::Text("nested".to_owned())]),
+    ]);
+    let metadata =
+        TypeMetadata::new().with_field(FieldMetadata::new("values").with_default(default.clone()));
+
+    assert_eq!(
+        metadata.field("values").unwrap().default_value(),
+        Some(&default)
+    );
+    assert_eq!(default.as_array().unwrap().len(), 2);
 }
 
 #[derive(Reflect, Default)]
