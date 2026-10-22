@@ -66,6 +66,26 @@ pub enum ProxyRegistryError {
         /// Repeated identity within the insertion.
         proxy_id: u32,
     },
+    /// A world residency identity is already mapped to a different proxy.
+    ResidencyBindingConflict {
+        /// Existing sector.
+        existing_sector: SectorId,
+        /// Existing proxy identity.
+        existing_proxy_id: u32,
+        /// Requested sector.
+        requested_sector: SectorId,
+        /// Requested proxy identity.
+        requested_proxy_id: u32,
+    },
+    /// Requested residency binding does not name a live proxy in its sector.
+    ResidencyProxyUnavailable {
+        /// World residency identity.
+        residency_id: u64,
+        /// Requested sector.
+        sector: SectorId,
+        /// Requested proxy identity.
+        proxy_id: u32,
+    },
     /// Proxy floating-point fields violate the CPU/GPU contract.
     InvalidProxy {
         /// Identity of the rejected proxy.
@@ -108,6 +128,8 @@ impl fmt::Display for ProxyRegistryError {
             Self::DuplicateProxyId { proxy_id } => {
                 write!(f, "duplicate sector proxy ID {proxy_id}")
             }
+            Self::ResidencyBindingConflict { existing_sector, existing_proxy_id, requested_sector, requested_proxy_id } => write!(f, "residency proxy binding conflict: {existing_sector:?}/{existing_proxy_id} vs {requested_sector:?}/{requested_proxy_id}"),
+            Self::ResidencyProxyUnavailable { residency_id, sector, proxy_id } => write!(f, "proxy {proxy_id} for residency {residency_id} is unavailable in {sector:?}"),
             Self::InvalidProxy { proxy_id } => write!(f, "invalid proxy values for ID {proxy_id}"),
             Self::InvalidHandle { handle } => write!(f, "invalid proxy handle {handle:?}"),
             Self::ProxyIdChanged { expected, actual } => {
@@ -168,6 +190,7 @@ pub struct ProxyRegistry {
     free: Vec<u32>,
     dirty: Vec<bool>,
     sectors: BTreeMap<SectorId, Vec<ProxyHandle>>,
+    residency_proxies: BTreeMap<u64, (SectorId, u32)>,
     sector_capacity: usize,
     pending_uploads: bool,
 }
@@ -276,6 +299,7 @@ impl ProxyRegistry {
             free,
             dirty,
             sectors: BTreeMap::new(),
+            residency_proxies: BTreeMap::new(),
             sector_capacity,
             pending_uploads: false,
         })
@@ -354,7 +378,7 @@ impl ProxyRegistry {
     pub fn prepare_sector_update(
         &mut self,
         sector: SectorId,
-        proxies: Vec<ProxyInstance>,
+        mut proxies: Vec<ProxyInstance>,
     ) -> Result<PreparedSectorUpdate<'_>, ProxyRegistryError> {
         let old_handles = self.sectors.get(&sector);
         let existed = old_handles.is_some();
@@ -394,6 +418,31 @@ impl ProxyRegistry {
         ids.sort_unstable();
         if let Some(pair) = ids.windows(2).find(|pair| pair[0] == pair[1]) {
             return Err(ProxyRegistryError::DuplicateProxyId { proxy_id: pair[0] });
+        }
+
+        // A sector replacement must preserve each bound residency's committed
+        // proxy visibility state. Fail before host publication if the new
+        // generation drops a bound proxy identity.
+        for (&residency_id, &(bound_sector, proxy_id)) in &self.residency_proxies {
+            if bound_sector != sector {
+                continue;
+            }
+            let Some(replacement) = proxies.iter_mut().find(|proxy| proxy.proxy_id == proxy_id)
+            else {
+                return Err(ProxyRegistryError::ResidencyProxyUnavailable {
+                    residency_id,
+                    sector,
+                    proxy_id,
+                });
+            };
+            let previously_visible = self
+                .proxy_for_residency(residency_id)
+                .is_some_and(|(_, current)| current.flags & crate::PROXY_FLAG_DISABLED == 0);
+            if previously_visible {
+                replacement.flags &= !crate::PROXY_FLAG_DISABLED;
+            } else {
+                replacement.flags |= crate::PROXY_FLAG_DISABLED;
+            }
         }
 
         let mut handles = reserved(proxies.len())?;
@@ -491,6 +540,59 @@ impl ProxyRegistry {
         self.sectors.get(&sector).map(Vec::as_slice)
     }
 
+    /// Binds a stable world residency identity to a per-sector proxy content ID.
+    ///
+    /// The mapping survives same-sector generation replacement and resolves to
+    /// a fresh handle on demand. Removing the sector retires its bindings.
+    pub fn bind_residency_proxy(
+        &mut self,
+        residency_id: u64,
+        sector: SectorId,
+        proxy_id: u32,
+    ) -> Result<(), ProxyRegistryError> {
+        let exists = self.sector_handles(sector).is_some_and(|handles| {
+            handles.iter().any(|&handle| {
+                self.get(handle)
+                    .is_some_and(|proxy| proxy.proxy_id == proxy_id)
+            })
+        });
+        if !exists {
+            return Err(ProxyRegistryError::ResidencyProxyUnavailable {
+                residency_id,
+                sector,
+                proxy_id,
+            });
+        }
+        if let Some(&(existing_sector, existing_proxy_id)) =
+            self.residency_proxies.get(&residency_id)
+        {
+            if (existing_sector, existing_proxy_id) != (sector, proxy_id) {
+                return Err(ProxyRegistryError::ResidencyBindingConflict {
+                    existing_sector,
+                    existing_proxy_id,
+                    requested_sector: sector,
+                    requested_proxy_id: proxy_id,
+                });
+            }
+            return Ok(());
+        }
+        self.residency_proxies
+            .insert(residency_id, (sector, proxy_id));
+        Ok(())
+    }
+
+    /// Resolves a residency identity to its current proxy handle and record.
+    #[must_use]
+    pub fn proxy_for_residency(&self, residency_id: u64) -> Option<(ProxyHandle, &ProxyInstance)> {
+        let &(sector, proxy_id) = self.residency_proxies.get(&residency_id)?;
+        let handles = self.sector_handles(sector)?;
+        handles.iter().find_map(|&handle| {
+            self.get(handle)
+                .filter(|proxy| proxy.proxy_id == proxy_id)
+                .map(|proxy| (handle, proxy))
+        })
+    }
+
     /// Returns the live dense prefix; indices are not stable identities.
     #[must_use]
     pub fn proxies(&self) -> &[ProxyInstance] {
@@ -533,6 +635,8 @@ impl ProxyRegistry {
         let Some(handles) = self.sectors.remove(&sector) else {
             return false;
         };
+        self.residency_proxies
+            .retain(|_, (bound_sector, _)| *bound_sector != sector);
         self.remove_handles(handles);
         true
     }

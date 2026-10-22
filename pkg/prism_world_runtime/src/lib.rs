@@ -139,6 +139,8 @@ mod priority_cell_io;
 mod proxy_cell_host;
 #[cfg(all(feature = "reactor", unix))]
 mod reactor_cell_io;
+#[cfg(feature = "residency_proxy_host")]
+mod residency_proxy_host;
 #[cfg(feature = "std")]
 mod scheduled_io;
 #[cfg(feature = "tasks")]
@@ -158,6 +160,8 @@ mod priority_cell_io_tests;
 mod proxy_cell_host_tests;
 #[cfg(all(test, feature = "reactor", unix))]
 mod reactor_cell_io_tests;
+#[cfg(all(test, feature = "residency_proxy_host"))]
+mod residency_proxy_host_tests;
 #[cfg(all(test, feature = "std"))]
 mod scheduled_io_tests;
 #[cfg(all(test, feature = "tasks"))]
@@ -185,6 +189,8 @@ pub use priority_cell_io::{PrioritizedCellIo, PriorityCellIo};
 pub use proxy_cell_host::{CellProxyDecoder, ProxyCellHost, ProxyCellHostError};
 #[cfg(all(feature = "reactor", unix))]
 pub use reactor_cell_io::ReactorCellIo;
+#[cfg(feature = "residency_proxy_host")]
+pub use residency_proxy_host::{ResidencyProxySceneHost, ResidencyProxySceneHostError};
 #[cfg(feature = "std")]
 pub use scheduled_io::ScheduledCellIo;
 #[cfg(feature = "tasks")]

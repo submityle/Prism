@@ -36,6 +36,8 @@ tasks = ["std", "dep:prism_tasks", "prism_world_io/tasks"]
 reactor = ["tasks", "prism_world_io/reactor"]
 # Derived CPU proxy ownership; does not enable wgpu or create a GPU device.
 proxy_host = ["std", "dep:prism_world_gpu"]
+# Residency transitions against the typed ECS world host and the derived proxy registry.
+residency_proxy_host = ["proxy_host", "prism_world/scene_host"]
 # Real wgpu-backed proxy lifecycle; keeps the authoritative scene host borrowed
 # and enables only the explicit GPU frame-boundary methods in the adapter.
 gpu_proxy = ["proxy_host", "dep:wgpu", "prism_world_gpu/gpu"]

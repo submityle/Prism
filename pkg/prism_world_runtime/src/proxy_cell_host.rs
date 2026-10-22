@@ -116,6 +116,21 @@ impl<'a, H: SceneHost, D: CellProxyDecoder> ProxyCellHost<'a, H, D> {
     pub fn registry(&self) -> &ProxyRegistry {
         self.registry
     }
+
+    /// Binds a world residency identity to a stable per-sector proxy id.
+    ///
+    /// Proxy ids are scoped to a sector; dense slots and handles are resolved
+    /// afresh after reload, so same-sector generation replacement is safe.
+    pub fn bind_residency_proxy(
+        &mut self,
+        residency_id: u64,
+        sector: SectorId,
+        proxy_id: u32,
+    ) -> Result<(), ProxyCellHostError<D::Error, H::Error>> {
+        self.registry
+            .bind_residency_proxy(residency_id, sector, proxy_id)
+            .map_err(ProxyCellHostError::Registry)
+    }
 }
 
 impl<H: SceneHost, D: CellProxyDecoder> SceneHost for ProxyCellHost<'_, H, D> {

@@ -10,6 +10,44 @@ fn proxy(id: u32) -> ProxyInstance {
     ProxyInstance::new(id, 7, [id as f32, -2.0, 3.0], 0.5, 1.0, 100.0)
 }
 
+#[test]
+fn residency_proxy_binding_survives_sector_replacement_and_is_removed_with_sector() {
+    let sector = sector(44);
+    let mut registry = ProxyRegistry::new(4).unwrap();
+    let mut original_proxy = proxy(7);
+    original_proxy.flags = crate::PROXY_FLAG_DISABLED;
+    let original = registry.insert_sector(sector, &[original_proxy]).unwrap()[0];
+    registry.bind_residency_proxy(9001, sector, 7).unwrap();
+    assert_eq!(
+        registry.proxy_for_residency(9001),
+        Some((original, &original_proxy))
+    );
+
+    let mut replacement = proxy(7);
+    replacement.position[0] = 12.0;
+    let prepared = registry
+        .prepare_sector_update(sector, vec![replacement])
+        .unwrap();
+    prepared.commit();
+
+    let (current, current_proxy) = registry.proxy_for_residency(9001).unwrap();
+    assert_ne!(
+        current, original,
+        "replacement must publish a new generation"
+    );
+    assert_eq!(
+        current_proxy.flags & crate::PROXY_FLAG_DISABLED,
+        crate::PROXY_FLAG_DISABLED,
+        "same-sector reload must preserve the residency's committed visibility state"
+    );
+    replacement.flags = crate::PROXY_FLAG_DISABLED;
+    assert_eq!(current_proxy, &replacement);
+    assert!(registry.get(original).is_none());
+
+    assert!(registry.remove_sector(sector));
+    assert_eq!(registry.proxy_for_residency(9001), None);
+}
+
 #[derive(Debug, PartialEq)]
 struct Snapshot {
     // Arc<()> value equality does not distinguish instances; compare addresses.
