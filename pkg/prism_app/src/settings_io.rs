@@ -5,7 +5,7 @@
 //! include filesystem I/O.
 
 use prism_settings::Snapshot;
-use prism_settings_io::{CandidateSnapshot, SnapshotController};
+use prism_settings_io::{resolved_snapshot_digest, CandidateSnapshot, SnapshotController};
 #[cfg(test)]
 use std::{
     fs,
@@ -98,8 +98,24 @@ impl SnapshotController for SettingsRuntimeController<'_> {
         Ok(())
     }
 
-    fn restore_generation(&mut self, _generation: u64, _hash: u64) -> Result<(), String> {
-        Err("settings startup recovery requires rebuilding authoritative sources before journal recovery".to_owned())
+    fn restore_generation(&mut self, generation: u64, hash: u64) -> Result<(), String> {
+        let rebuilt = self
+            .runtime
+            .rebuild_snapshot_at(generation)
+            .map_err(|errors| {
+                format!("authoritative settings sources did not resolve: {errors:?}")
+            })?;
+        let actual = resolved_snapshot_digest(self.runtime.registry(), &rebuilt);
+        if actual != hash {
+            return Err(format!(
+                "authoritative settings snapshot digest mismatch: expected {hash:016x}, got {actual:016x}"
+            ));
+        }
+        self.runtime
+            .publish_rebuilt_snapshot(rebuilt)
+            .map_err(|error| {
+                format!("authoritative settings snapshot publication failed: {error:?}")
+            })
     }
 }
 
@@ -119,9 +135,10 @@ mod tests {
         Constraints, Domain, LayerKind, RegistryBuilder, SettingDef, TrustLevel, Value,
     };
     use prism_settings_io::{
-        load_with_backup, ApplyOp, ApplyPlan, CandidateBuilder, CompensateOutcome, EffectState,
-        FileSettingsPersistence, OpAction, OpOutcome, Reversibility, SettingsApplier,
-        SettingsDocument, SettingsTransaction, SettingsTransactionSpec, SourceSpec, TxMode,
+        load_with_backup, resolved_snapshot_digest, ApplyOp, ApplyPlan, CandidateBuilder,
+        CompensateOutcome, EffectState, FileSettingsPersistence, OpAction, OpOutcome,
+        Reversibility, SettingsApplier, SettingsDocument, SettingsTransaction,
+        SettingsTransactionSpec, SourceSpec, TxMode,
     };
 
     struct TestTempDir(PathBuf);
@@ -198,7 +215,38 @@ mod tests {
     fn startup_recovery_refuses_to_invent_authoritative_source_state() {
         let mut runtime = SettingsRuntime::new(registry(), Domain::Runtime).unwrap();
         let mut controller = SettingsRuntimeController::new(&mut runtime);
-        assert!(controller.restore_generation(0, 0).is_err());
+        assert!(controller.restore_generation(4, 0).is_err());
+        assert_eq!(controller.runtime().generation(), 0);
+    }
+
+    #[test]
+    fn startup_recovery_rebuilds_only_from_matching_authoritative_sources() {
+        let registry = registry();
+        let mut runtime = SettingsRuntime::new(registry.clone(), Domain::Runtime).unwrap();
+        let id = registry.id(&"render.scale".into()).unwrap();
+        runtime.set(
+            LayerKind::User,
+            TrustLevel::User,
+            "user-file",
+            "render.scale",
+            Value::Float(0.75),
+        );
+        runtime.resolve().unwrap();
+        let authoritative = runtime.rebuild_snapshot_at(7).unwrap();
+        let digest = resolved_snapshot_digest(&registry, &authoritative);
+
+        let mut controller = SettingsRuntimeController::new(&mut runtime);
+        controller.restore_generation(7, digest).unwrap();
+        assert_eq!(controller.runtime().generation(), 7);
+        assert_eq!(controller.runtime().snapshot().generation(), 7);
+        assert_eq!(
+            controller.runtime().snapshot().get(id),
+            Some(&Value::Float(0.75))
+        );
+
+        let before = controller.runtime().checkpoint();
+        assert!(controller.restore_generation(8, digest ^ 1).is_err());
+        assert_eq!(controller.runtime().checkpoint(), before);
     }
 
     struct FailingScaleApplier;

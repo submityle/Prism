@@ -26,10 +26,10 @@ pub use migration::{
     MigrationReport, ValueConverter,
 };
 pub use pipeline::{
-    recover_settings_transaction, CandidateBuilder, CandidateError, CandidateSnapshot,
-    FileSettingsPersistence, PipelineError, PipelineOutcome, SettingsPersistence,
-    SettingsTransaction, SettingsTransactionSpec, SettingsWatcher, SnapshotController, SourceSpec,
-    WatchPoll,
+    recover_settings_transaction, resolved_snapshot_digest, CandidateBuilder, CandidateError,
+    CandidateSnapshot, FileSettingsPersistence, PipelineError, PipelineOutcome,
+    SettingsPersistence, SettingsTransaction, SettingsTransactionSpec, SettingsWatcher,
+    SnapshotController, SourceSpec, WatchPoll,
 };
 pub use store::{load_with_backup, write_atomic, write_atomic_rotating, LoadOutcome, StoreError};
 pub use transaction::{

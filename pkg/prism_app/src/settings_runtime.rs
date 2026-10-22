@@ -128,6 +128,33 @@ impl SettingsRuntime {
         Ok(())
     }
 
+    /// Resolves the currently installed authoritative sources at a durable
+    /// generation without publishing a partial result.
+    pub fn rebuild_snapshot_at(&self, generation: u64) -> Result<Snapshot, Vec<SettingsError>> {
+        let sources = self.sources.values().cloned().collect::<Vec<_>>();
+        Resolver::new(&self.registry).resolve(self.domain, &sources, generation)
+    }
+
+    /// Publishes a snapshot rebuilt from this runtime's current sources after
+    /// verifying its domain, generation, values, and provenance.
+    pub fn publish_rebuilt_snapshot(
+        &mut self,
+        snapshot: Snapshot,
+    ) -> Result<(), SettingsRuntimeError> {
+        if snapshot.domain() != self.domain {
+            return Err(SettingsRuntimeError::CandidateMismatch);
+        }
+        let rebuilt = self
+            .rebuild_snapshot_at(snapshot.generation())
+            .map_err(SettingsRuntimeError::Resolve)?;
+        if !same_effective_snapshot(&rebuilt, &snapshot) {
+            return Err(SettingsRuntimeError::CandidateMismatch);
+        }
+        self.generation = snapshot.generation();
+        self.snapshot = rebuilt;
+        Ok(())
+    }
+
     /// Adds or replaces one source candidate.
     pub fn set(
         &mut self,
@@ -181,6 +208,23 @@ impl SettingsRuntime {
             source: prepared_source,
             snapshot: resolved,
         })
+    }
+
+    /// Prepares an I/O candidate source after confirming its resolved values
+    /// and provenance still match the candidate produced by that pipeline.
+    pub fn prepare_candidate_source(
+        &self,
+        source: LayerSource,
+        candidate: &Snapshot,
+    ) -> Result<PreparedSettingsUpdate, SettingsRuntimeError> {
+        if candidate.domain() != self.domain {
+            return Err(SettingsRuntimeError::CandidateMismatch);
+        }
+        let prepared = self.prepare_source_update(source)?;
+        if !same_effective_snapshot(&prepared.snapshot, candidate) {
+            return Err(SettingsRuntimeError::CandidateMismatch);
+        }
+        Ok(prepared)
     }
 
     /// Commits a prepared update if its base generation is still current.

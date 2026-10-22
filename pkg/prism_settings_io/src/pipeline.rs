@@ -269,7 +269,7 @@ impl<'a> CandidateBuilder<'a> {
             .resolve(self.domain, &sources, generation)
             .map_err(CandidateError::Resolve)?;
         let document_digest = document_digest(&document)?;
-        let snapshot_digest = snapshot_digest(self.registry, &snapshot);
+        let snapshot_digest = resolved_snapshot_digest(self.registry, &snapshot);
         Ok(CandidateSnapshot {
             document,
             source,
@@ -1016,7 +1016,10 @@ fn digest_bytes(bytes: &[u8]) -> Result<u64, CodecError> {
     ))
 }
 
-fn snapshot_digest(registry: &SettingsRegistry, snapshot: &Snapshot) -> u64 {
+/// Returns the stable digest used by transaction journals to verify an
+/// authoritative resolved settings snapshot. The snapshot generation is
+/// intentionally excluded; values and their schema keys define the state.
+pub fn resolved_snapshot_digest(registry: &SettingsRegistry, snapshot: &Snapshot) -> u64 {
     let mut hasher = Sha256::new();
     for (index, definition) in registry.defs().iter().enumerate() {
         hasher.update(definition.key.as_str().as_bytes());
