@@ -6,8 +6,8 @@
 
 use prism_reflect::{
     schema::{AttributeValue, TypeMetadata},
-    Enum, GetTypeRegistration, Map, Reflect, ReflectRef, Struct, TypeInfo, Typed, VariantKind,
-    VariantType,
+    Enum, GetTypeRegistration, Map, Reflect, ReflectRef, Struct, TupleStruct, TypeInfo, Typed,
+    VariantKind, VariantType,
 };
 use prism_settings::{
     canonical_value_cmp, Constraints, CrossRule, Domain, DomainMask, OverrideScope,
@@ -93,12 +93,12 @@ impl Error for ReflectSettingsError {}
 /// docs, categories, ranges, defaults, and read-only attributes are mapped
 /// into canonical definitions. Scalar defaults support bool, signed/unsigned
 /// integers fitting `i64`, `f32`, `f64`, and `String`. Explicit settings may
-/// also be recursively homogeneous `Vec<T>` or `[T; N]` values, named
-/// reflected structs, and string-keyed homogeneous maps. Every dynamic
-/// collection is bounded by [`MAX_REFLECT_SETTING_COLLECTION_LEN`]. Empty
-/// collections are accepted only when reflected type metadata identifies a
-/// supported scalar value type; nested empty collections fail closed because
-/// type-name strings are not parsed to guess child schemas. Other types fail
+/// also be recursively homogeneous `Vec<T>` or `[T; N]` values, named and
+/// positional reflected structs, string-keyed homogeneous maps, and sets. Every
+/// dynamic collection is bounded by [`MAX_REFLECT_SETTING_COLLECTION_LEN`].
+/// Empty collections are accepted when static reflected type information can
+/// derive a supported child schema; otherwise derivation fails closed rather
+/// than parsing type-name strings to guess child schemas. Other types fail
 /// closed.
 pub fn derive_settings_registry<T>(
     namespace: &str,
@@ -193,6 +193,15 @@ where
                     });
                 };
                 from_reflect_struct(fields, info, 0, name, descriptor.type_name())?
+            }
+            ReflectRef::TupleStruct(fields) => {
+                let TypeInfo::TupleStruct(info) = reflected.type_info() else {
+                    return Err(ReflectSettingsError::UnsupportedValue {
+                        field: name.to_owned(),
+                        type_name: descriptor.type_name().to_owned(),
+                    });
+                };
+                from_reflect_tuple_struct(fields, info, 0, name, descriptor.type_name())?
             }
             ReflectRef::Map(map) => {
                 let TypeInfo::Map(info) = reflected.type_info() else {
@@ -740,6 +749,52 @@ fn from_reflect_struct(
     ))
 }
 
+fn from_reflect_tuple_struct(
+    fields: &dyn TupleStruct,
+    info: &prism_reflect::TupleStructInfo,
+    depth: usize,
+    field: &str,
+    type_name: &str,
+) -> Result<Derived, ReflectSettingsError> {
+    if depth > prism_settings::MAX_VALUE_SHAPE_DEPTH
+        || info.field_count() > MAX_REFLECT_SETTING_COLLECTION_LEN
+        || fields.field_count() != info.field_count()
+    {
+        return Err(ReflectSettingsError::UnsupportedValue {
+            field: field.to_owned(),
+            type_name: type_name.to_owned(),
+        });
+    }
+    let mut values = BTreeMap::new();
+    let mut shapes = BTreeMap::new();
+    let mut enum_options = Vec::new();
+    let mut enum_payloads = Vec::new();
+    let mut enum_schemas = Vec::new();
+    for descriptor in info.fields() {
+        let reflected_value = fields.field(descriptor.index()).ok_or_else(|| {
+            ReflectSettingsError::MissingDefaultField {
+                type_name: type_name.to_owned(),
+                field: descriptor.index().to_string(),
+            }
+        })?;
+        let (value, shape, options, payloads, schemas) =
+            from_reflect_value(reflected_value, depth + 1, field, type_name)?;
+        merge_enum_options(&mut enum_options, options, field, type_name)?;
+        merge_payload_schemas(&mut enum_payloads, payloads, field, type_name)?;
+        merge_enum_schemas(&mut enum_schemas, schemas, field, type_name)?;
+        let key = descriptor.index().to_string();
+        values.insert(key.clone(), value);
+        shapes.insert(key, shape);
+    }
+    Ok((
+        Value::Table(values),
+        ValueShape::table(shapes),
+        enum_options,
+        enum_payloads,
+        enum_schemas,
+    ))
+}
+
 fn from_reflect_map(
     map: &dyn Map,
     key_type_name: &str,
@@ -859,6 +914,15 @@ fn from_reflect_value(
                 });
             };
             from_reflect_struct(fields, info, depth, field, field_type_name)
+        }
+        ReflectRef::TupleStruct(fields) => {
+            let TypeInfo::TupleStruct(info) = value.type_info() else {
+                return Err(ReflectSettingsError::UnsupportedValue {
+                    field: field.to_owned(),
+                    type_name: field_type_name.to_owned(),
+                });
+            };
+            from_reflect_tuple_struct(fields, info, depth, field, field_type_name)
         }
         ReflectRef::Map(map) => {
             let TypeInfo::Map(info) = value.type_info() else {
@@ -1230,11 +1294,24 @@ fn shape_from_type_info(
             Ok((ValueShape::table(fields), options, payloads, schemas))
         }
         TypeInfo::TupleStruct(tuple_info) => {
-            let _ = tuple_info;
-            Err(ReflectSettingsError::UnsupportedValue {
-                field: field.to_owned(),
-                type_name: owner_type.to_owned(),
-            })
+            let mut fields = BTreeMap::new();
+            let mut options = Vec::new();
+            let mut payloads = Vec::new();
+            let mut schemas = Vec::new();
+            for descriptor in tuple_info.fields() {
+                let (shape, child_options, child_payloads, child_schemas) = shape_from_type_info(
+                    descriptor.type_info(),
+                    descriptor.type_name(),
+                    depth + 1,
+                    field,
+                    owner_type,
+                )?;
+                fields.insert(descriptor.index().to_string(), shape);
+                merge_enum_options(&mut options, child_options, field, owner_type)?;
+                merge_payload_schemas(&mut payloads, child_payloads, field, owner_type)?;
+                merge_enum_schemas(&mut schemas, child_schemas, field, owner_type)?;
+            }
+            Ok((ValueShape::table(fields), options, payloads, schemas))
         }
         TypeInfo::Map(map)
             if map.key_type_name() == "alloc::string::String"
@@ -1355,6 +1432,89 @@ mod tests {
     use super::*;
     use prism_reflect::Reflect;
     use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+
+    #[derive(Reflect, Default)]
+    struct TupleLeaf {
+        enabled: bool,
+        values: Vec<i32>,
+    }
+
+    #[derive(Reflect, Default)]
+    struct TupleSetting(TupleLeaf, [u8; 2]);
+
+    #[derive(Reflect, Default)]
+    struct TupleRoot {
+        #[reflect(setting)]
+        tuple: TupleSetting,
+    }
+
+    #[test]
+    fn derives_tuple_structs_as_fixed_tables_using_static_child_schemas() {
+        let schema = derive_settings_registry::<TupleRoot>("tuple", "prism_app").unwrap();
+        let (id, definition) = schema.get(&"tuple.tuple".into()).unwrap();
+        let Value::Table(default) = &definition.default else {
+            panic!("tuple struct defaults should use canonical positional tables");
+        };
+        assert_eq!(default.len(), 2);
+        let Value::Table(leaf) = &default["0"] else {
+            panic!("nested tuple struct should also use a positional table");
+        };
+        assert_eq!(leaf["enabled"], Value::Bool(false));
+        assert_eq!(leaf["values"], Value::Array(Vec::new()));
+        assert_eq!(
+            default["1"],
+            Value::Array(vec![Value::Int(0), Value::Int(0)])
+        );
+
+        let candidate = Value::Table(BTreeMap::from([
+            (
+                "0".to_owned(),
+                Value::Table(BTreeMap::from([
+                    ("enabled".to_owned(), Value::Bool(true)),
+                    (
+                        "values".to_owned(),
+                        Value::Array(vec![Value::Int(4), Value::Int(9)]),
+                    ),
+                ])),
+            ),
+            (
+                "1".to_owned(),
+                Value::Array(vec![Value::Int(1), Value::Int(2)]),
+            ),
+        ]));
+        assert_eq!(
+            schema.validate_value(id, candidate.clone()).unwrap(),
+            candidate
+        );
+
+        let malformed = Value::Table(BTreeMap::from([(
+            "0".to_owned(),
+            Value::Table(BTreeMap::from([("enabled".to_owned(), Value::Bool(true))])),
+        )]));
+        assert!(schema.validate_value(id, malformed).is_err());
+
+        let extra_position = Value::Table(BTreeMap::from([
+            ("0".to_owned(), default["0"].clone()),
+            ("1".to_owned(), default["1"].clone()),
+            ("2".to_owned(), Value::Bool(false)),
+        ]));
+        assert!(schema.validate_value(id, extra_position).is_err());
+
+        let wrong_position_type = Value::Table(BTreeMap::from([
+            (
+                "0".to_owned(),
+                Value::Table(BTreeMap::from([
+                    ("enabled".to_owned(), Value::Bool(true)),
+                    (
+                        "values".to_owned(),
+                        Value::Array(vec![Value::String("bad".into())]),
+                    ),
+                ])),
+            ),
+            ("1".to_owned(), default["1"].clone()),
+        ]));
+        assert!(schema.validate_value(id, wrong_position_type).is_err());
+    }
 
     #[derive(Reflect, Default)]
     struct RenderConfig {
