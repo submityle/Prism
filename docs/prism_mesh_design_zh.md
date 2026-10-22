@@ -877,7 +877,7 @@ RayTracing 场景提取按 geometry slot 查询 shading 表时，必须同时验
 
 `virtual_geometry::gpu::VirtualGeometryGpuPublication` 将已校验 CLST 资产投影为稳定页表、Cluster descriptor 与逐视图 draw-list ABI。逻辑页按资产排序键固定寻址；驻留页要求 generation 匹配、有效物理页编号和非空字节范围，拒绝物理槽别名；Cluster descriptor 绑定全局材质句柄及 generation。cut 转换使用 node→descriptor 与 descriptor→page 的直接索引，校验所选逻辑页身份与 residency，并拒绝重复 Cluster、错误资产、缺失节点和缺页。ABI records 均为固定布局 `Pod`，提供 storage-buffer byte view。
 
-`cargo test -p prism_render_architecture virtual_geometry::gpu --lib -- --nocapture` 在独立 `/private/tmp/prism-mesh-gpu-abi-target` 下通过 5 项定向测试，覆盖 ABI 内容、stale generation、cut page identity、物理页 sentinel/别名、resident gating。该证据只证明设备无关 publication ABI 的构建与校验；publication 尚未接入 RenderApp GPU page storage/page table、RenderScene Opaque Cluster phase、CLST vertex-pulling shader 或 visibility/shading 消费，不能据此宣称生产 GPU draw、fallback 连续性或产品画质已完成。独立 target 已在本轮验证后清理。
+`cargo test -p prism_render_architecture virtual_geometry::gpu --lib -- --nocapture` 在独立 `/private/tmp/prism-mesh-gpu-abi-target` 下通过 5 项定向测试，覆盖 ABI 内容、stale generation、cut page identity、物理页 sentinel/别名、resident gating。该证据只证明设备无关 publication ABI 的构建与校验；RenderApp 现已增加对应 GPU page storage/page table 的资源类型及增量写入 API，但尚无生产系统调用它们，也尚未接入 RenderScene Opaque Cluster phase、CLST vertex-pulling shader 或 visibility/shading 消费，不能据此宣称生产 GPU draw、fallback 连续性或产品画质已完成。独立 target 已在本轮验证后清理。
 
 ### 19.10 CLST 运行时资产发布身份
 
@@ -900,6 +900,12 @@ CLST stream 另提供 `resident_page_words(key)`，以借用形式返回驻留�
 `VirtualGeometryGpuPublication::apply_resident_page` 现在先完成 generation、逻辑页、反向物理槽索引一致性和物理槽别名校验，全部通过后才同时更新 page-table row 与反向索引；别名失败不会移除旧映射或留下半更新状态。`VirtualGeometryPublicationCoordinator` 的回归测试覆盖 resident budget 为 1 时 page A 驻留 slot 0、page B 触发 A 驱逐并复用 slot 0，确认 delta 先清空旧 page row、再发布新 page row，Cluster table bytes 保持不变。
 
 2026-10-23 在独立 `/private/tmp/prism-mesh-publication-target`（`CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0`）下运行 `cargo test -p prism_render_architecture virtual_geometry:: --lib -- --nocapture`，虚拟几何模块 108 项测试全部通过；该证据覆盖设备无关 publication/stream/cut/ABI 契约，不证明 RenderApp GPU page pool、RenderScene Cluster draw 或真实场景画质闭环。验证后已清理独立 target。
+
+### 19.14 RenderApp GPU publication store 与逐视图 draw record
+
+`VirtualGeometryGpuPublicationStore` 已由 RenderApp 启动时初始化，提供每资产固定页存储、逻辑页表与不可变 Cluster table 的 GPU buffer 创建、增量 reconcile、generation 校验、逐页写入和安全 retire API；写入顺序先排队页字节，再排队页表行。`build_geometry_draw_phase` 已具备以可见性快照、Scene/Geometry generation 与 revision、LOD 驻留状态和 CLST publication identity 构造确定性 typed draw records 的能力，并对整阶段采用 fail-closed 校验。
+
+这些组件目前尚未形成生产调用链：没有系统从 RenderScene registry 注册资产并驱动 store reconcile，当前可见性生产者没有生成 Cluster cut/page request，draw-phase builder 没有生产调用方，Opaque 主 pass 未绑定 publication buffers，CLST vertex-pulling shader 仍只用于 GPU 契约验证。`cargo test -p prism_render_scene --features legacy-bevy --lib geometry::draw_records::tests -- --nocapture` 首次编译发现测试遗漏 `AssetId` 导入，已修正；重跑正在等待共享 Cargo target 锁释放，故测试结果尚未确认。不得将这些 API 和 CPU records 描述为虚拟几何生产渲染闭环。
 
 ## 20. 易维护性与演进规则
 

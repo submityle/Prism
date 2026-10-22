@@ -37,6 +37,7 @@ pub mod lod;
 pub mod page_request;
 pub mod page_table;
 pub mod pipeline;
+pub mod publication;
 pub mod raster_gradients;
 pub mod raster_path;
 pub mod resident_cut;
@@ -71,6 +72,11 @@ pub use lod::{select_lod, LodLevel, LodProjection, LodSelection};
 pub use page_request::PageRequestBatch;
 pub use page_table::{GeometryPageTable, PageEntry, PageResidency};
 pub use pipeline::{ClusterDecision, ClusterRequest, ViewCullContext};
+pub use publication::{
+    VirtualGeometryPageEviction, VirtualGeometryPageTableUpdate, VirtualGeometryPageUpload,
+    VirtualGeometryPublicationCoordinator, VirtualGeometryPublicationCoordinatorError,
+    VirtualGeometryPublicationDelta,
+};
 pub use raster_gradients::TriangleGradients;
 pub use raster_path::{select_raster_path, ClusterRasterStats, RasterCapability};
 pub use resident_cut::{CutRegionResolution, ResidentCut, ResidentCutError, ResidentCutResolver};

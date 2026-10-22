@@ -101,11 +101,17 @@ pub trait SceneHost {
     /// Removes a cell scene after its persistence handoff is complete.
     fn unload_cell(&mut self, sector: SectorId) -> Result<(), Self::Error>;
 
-    /// Promotes one stable item into its interactive representation.
-    fn promote(&mut self, id: u64) -> Result<(), Self::Error>;
-
-    /// Demotes one stable item into its lower-cost representation.
-    fn demote(&mut self, id: u64) -> Result<(), Self::Error>;
+    /// Applies the requested representation transition for one stable item.
+    ///
+    /// The full source and destination tiers are passed through so direct
+    /// transitions (including proxy-to-interactive) cannot be mistaken for a
+    /// generic promotion or demotion by the representation owner.
+    fn transition_residency(
+        &mut self,
+        id: u64,
+        from: prism_world_residency::ResidencyState,
+        to: prism_world_residency::ResidencyState,
+    ) -> Result<(), Self::Error>;
 }
 
 /// Failure while applying a generated plan to a scene host.
@@ -317,11 +323,10 @@ pub(crate) fn apply_plan_to<H: SceneHost>(
     }
     for action in &plan.residency.actions {
         match action {
-            prism_world_residency::ResidencyAction::Promote { id, .. } => {
-                host.promote(*id).map_err(ApplyError::Host)?;
-            }
-            prism_world_residency::ResidencyAction::Demote { id, .. } => {
-                host.demote(*id).map_err(ApplyError::Host)?;
+            prism_world_residency::ResidencyAction::Promote { id, from, to, .. }
+            | prism_world_residency::ResidencyAction::Demote { id, from, to } => {
+                host.transition_residency(*id, *from, *to)
+                    .map_err(ApplyError::Host)?;
             }
             prism_world_residency::ResidencyAction::Keep { .. } => {}
         }
@@ -473,13 +478,18 @@ mod tests {
                 Ok(())
             }
 
-            fn promote(&mut self, id: u64) -> Result<(), Self::Error> {
-                self.calls.push(1_000 + id);
-                Ok(())
-            }
-
-            fn demote(&mut self, id: u64) -> Result<(), Self::Error> {
-                self.calls.push(2_000 + id);
+            fn transition_residency(
+                &mut self,
+                id: u64,
+                from: ResidencyState,
+                to: ResidencyState,
+            ) -> Result<(), Self::Error> {
+                self.calls.push(
+                    1_000
+                        + id
+                        + u64::from(from.tier().detail_rank()) * 10
+                        + u64::from(to.tier().detail_rank()),
+                );
                 Ok(())
             }
         }

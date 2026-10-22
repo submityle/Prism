@@ -5,6 +5,7 @@
 //! deliberately explicit about bytes and silent about GPU completion.
 
 use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use prism_asset::{
@@ -14,6 +15,23 @@ use prism_asset::{
 use prism_ecs::prelude::Resource;
 use prism_tasks::Priority;
 
+/// Identity survives moves and cannot alias another live source or upload target.
+#[derive(Clone, Debug)]
+pub(super) struct StreamGeneration(Arc<()>);
+
+impl Default for StreamGeneration {
+    fn default() -> Self {
+        Self(Arc::new(()))
+    }
+}
+
+impl PartialEq for StreamGeneration {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+impl Eq for StreamGeneration {}
+
 /// A CPU-side fixed-page streaming source suitable for main-world callers.
 ///
 /// The source owns the mounted asset table and the CPU residency authority.
@@ -21,6 +39,8 @@ use prism_tasks::Priority;
 /// completed.
 #[derive(Resource)]
 pub struct FixedPageStreamingSource {
+    generation: StreamGeneration,
+    extracted_target: Option<StreamGeneration>,
     sources: AssetSources,
     residency: PageResidency,
     feedback: FeedbackDemandQueue,
@@ -43,15 +63,13 @@ pub struct FixedPageSlotKey {
     pub page_index: u64,
 }
 
-/// Compatibility name for callers that prefer to describe this value as a
-/// manager rather than a source.
-pub type FixedPageStreamingManager = FixedPageStreamingSource;
-
 impl FixedPageStreamingSource {
     /// Creates a streaming source from an owned source table and residency.
     #[must_use]
     pub fn new(sources: AssetSources, residency: PageResidency) -> Self {
         Self {
+            generation: StreamGeneration::default(),
+            extracted_target: None,
             sources,
             residency,
             feedback: FeedbackDemandQueue::new(0, 0),
@@ -72,6 +90,8 @@ impl FixedPageStreamingSource {
         feedback: FeedbackDemandQueue,
     ) -> Self {
         Self {
+            generation: StreamGeneration::default(),
+            extracted_target: None,
             sources,
             residency,
             feedback,
@@ -89,6 +109,10 @@ impl FixedPageStreamingSource {
     #[must_use]
     pub fn sources(&self) -> &AssetSources {
         &self.sources
+    }
+
+    pub(super) fn generation(&self) -> StreamGeneration {
+        self.generation.clone()
     }
 
     /// Returns the CPU residency authority.
@@ -201,6 +225,18 @@ impl FixedPageStreamingSource {
     /// tracking table drops evicted records so long-running sessions do not
     /// accumulate historical page IDs.
     pub fn extract_to_render(&mut self, queue: &mut FixedPageRenderQueue) -> usize {
+        if queue.source_generation.as_ref() != Some(&self.generation) {
+            // Previous-source payloads and releases must never target reused IDs.
+            queue.pages.clear();
+            queue.releases.clear();
+            queue.source_generation = Some(self.generation.clone());
+            self.extracted.clear();
+        }
+        if self.extracted_target.as_ref() != Some(&queue.upload_generation) {
+            // A rebuilt GPU pool needs every resident page, without another read.
+            self.extracted.clear();
+            self.extracted_target = Some(queue.upload_generation.clone());
+        }
         let mut extracted = 0;
         let residents = self.residency.eviction_candidates();
         let resident_ids = residents.iter().copied().collect::<BTreeSet<_>>();
@@ -293,6 +329,9 @@ pub struct FixedPageRenderPayload {
 pub struct FixedPageRenderQueue {
     pages: VecDeque<FixedPageRenderPayload>,
     releases: VecDeque<FixedPageReleasePayload>,
+    pub(super) source_generation: Option<StreamGeneration>,
+    upload_generation: StreamGeneration,
+    gpu_initialized: bool,
 }
 
 /// An extracted page that left CPU residency and must be retired on the GPU.
@@ -307,6 +346,15 @@ pub struct FixedPageReleasePayload {
 }
 
 impl FixedPageRenderQueue {
+    pub(super) fn initialize_gpu(&mut self) {
+        if self.gpu_initialized {
+            self.upload_generation = StreamGeneration::default();
+            self.pages.clear();
+            self.releases.clear();
+        }
+        self.gpu_initialized = true;
+    }
+
     /// Creates an empty render-side queue.
     #[must_use]
     pub fn new() -> Self {

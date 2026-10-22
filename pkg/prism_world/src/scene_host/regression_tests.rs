@@ -799,7 +799,13 @@ fn dropping_host_preserves_world_owned_cells_and_bindings_for_takeover() {
     assert_eq!(replacement.loaded_cell_count(), 1);
     assert_eq!(replacement.loaded_cell(sector).unwrap().root, Some(root));
     assert_eq!(replacement.residency_binding(41).unwrap().sector, sector);
-    SceneHost::demote(&mut replacement, 41).unwrap();
+    SceneHost::transition_residency(
+        &mut replacement,
+        41,
+        ResidencyState::TierA,
+        ResidencyState::TierC,
+    )
+    .unwrap();
     assert_eq!(replacement.world().get::<Marker>(root), Some(&Marker(3)));
     SceneHost::unload_cell(&mut replacement, sector).unwrap();
     assert_eq!(replacement.world().entity_count(), 0);
@@ -856,7 +862,12 @@ fn successful_plan_does_not_leave_eviction_exemptions() {
     let plan = runtime.tick(&[], &[], &[record], 2, budget());
     runtime.apply_scene_plan(&plan, &mut host).unwrap();
     assert_eq!(
-        SceneHost::demote(&mut host, 41),
+        SceneHost::transition_residency(
+            &mut host,
+            41,
+            ResidencyState::TierA,
+            ResidencyState::TierC,
+        ),
         Err(SceneEcsHostError::ResidencyNotBound(41))
     );
     let next = runtime.tick(&[], &[], &[record], 3, budget());
@@ -875,7 +886,10 @@ fn successful_plan_does_not_leave_eviction_exemptions() {
         budget(),
     );
     runtime.apply_scene_plan(&plan, &mut host).unwrap();
-    assert_eq!(host.provider().events, alloc::vec![(2, 41, root)]);
+    assert_eq!(
+        host.provider().events,
+        alloc::vec![(ResidencyState::TierC, 41, root)]
+    );
 }
 
 #[test]
@@ -919,14 +933,14 @@ fn eviction_does_not_skip_surviving_cells_or_provider_errors() {
         3,
         budget(),
     );
-    host.provider_mut().fail_dematerialize = true;
+    host.provider_mut().fail_transition = true;
     assert_eq!(
         runtime.apply_scene_plan(&plan, &mut host),
         Err(ApplyError::Host(SceneEcsHostError::Provider(())))
     );
     assert!(!host.world().contains(removed_root));
     assert_eq!(host.world().get::<Marker>(surviving_root), Some(&Marker(7)));
-    host.provider_mut().fail_dematerialize = false;
+    host.provider_mut().fail_transition = false;
     let next = runtime.tick(
         &demands,
         &[],
@@ -935,7 +949,10 @@ fn eviction_does_not_skip_surviving_cells_or_provider_errors() {
         budget(),
     );
     runtime.apply_scene_plan(&next, &mut host).unwrap();
-    assert_eq!(host.provider().events, alloc::vec![(2, 42, surviving_root)]);
+    assert_eq!(
+        host.provider().events,
+        alloc::vec![(ResidencyState::TierC, 42, surviving_root)]
+    );
     assert_eq!(host.world().get::<Marker>(surviving_root), Some(&Marker(3)));
 }
 
@@ -1077,10 +1094,19 @@ fn provider_handoff_preserves_state_without_unloading_or_overwriting_cells() {
     let mut runtime = make_runtime();
     let mut host = SceneEcsHost::new(&mut world, Provider::default());
     let root = load_bound_cell(&mut runtime, &mut host, sector, 41);
-    SceneHost::promote(&mut host, 41).unwrap();
+    SceneHost::transition_residency(
+        &mut host,
+        41,
+        ResidencyState::TierC,
+        ResidencyState::TierA,
+    )
+    .unwrap();
     let provider = host.into_provider();
     let mut replacement = SceneEcsHost::new(&mut world, provider);
-    assert_eq!(replacement.provider().events, alloc::vec![(1, 41, root)]);
+    assert_eq!(
+        replacement.provider().events,
+        alloc::vec![(ResidencyState::TierA, 41, root)]
+    );
     assert_eq!(SceneHost::load_cell(&mut replacement, sector), Ok(()));
     assert_ne!(replacement.loaded_cell(sector).unwrap().root, Some(root));
     assert_eq!(replacement.shutdown(), 1);

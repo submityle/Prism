@@ -52,6 +52,55 @@ fn request_load_extract_copies_owned_bytes_and_revision() {
 }
 
 #[test]
+fn rebuilt_upload_target_replays_residents_without_another_read() {
+    let mut streaming = streaming(8);
+    streaming
+        .request_page("memory://payload.bin", 0, Priority::Normal, 1)
+        .unwrap();
+    assert_eq!(streaming.pump_io(1).loaded, 1);
+    let mut queue = FixedPageRenderQueue::new();
+    streaming.extract_to_render(&mut queue);
+    // Initial startup preserves payloads extracted before GPU construction.
+    queue.initialize_gpu();
+    let first = queue.pop().unwrap();
+    assert_eq!(streaming.extract_to_render(&mut queue), 0);
+    queue.initialize_gpu();
+    assert_eq!(streaming.extract_to_render(&mut queue), 1);
+    assert_eq!(queue.pop().unwrap(), first);
+    assert_eq!(streaming.pump_io(1).attempted, 0);
+    assert_eq!(streaming.extract_to_render(&mut queue), 0);
+}
+
+#[test]
+fn independent_same_revision_source_discards_old_uploads_and_releases() {
+    let mut first = streaming(8);
+    let page = first
+        .request_page("memory://payload.bin", 0, Priority::Normal, 1)
+        .unwrap();
+    first.pump_io(1);
+    let mut queue = FixedPageRenderQueue::new();
+    first.extract_to_render(&mut queue);
+    first.residency_mut().evict(page).unwrap();
+    first.extract_to_render(&mut queue);
+    let old_generation = queue.source_generation.clone();
+    let mut second = streaming(8);
+    assert_eq!(first.sources().revision(), second.sources().revision());
+    let reused = second
+        .request_page("memory://payload.bin", 1, Priority::Normal, 1)
+        .unwrap();
+    assert_eq!(page, reused);
+    second.pump_io(1);
+    second.extract_to_render(&mut queue);
+    assert_ne!(queue.source_generation, old_generation);
+    assert!(queue.pop_release().is_none());
+    let payload = queue.pop().unwrap();
+    assert_eq!(payload.page, reused);
+    assert_eq!(payload.slot.page_index, 1);
+    assert_eq!(payload.bytes, b"efgh");
+    assert!(queue.is_empty());
+}
+
+#[test]
 fn extraction_tracking_drops_evicted_page_ids() {
     let mut streaming = streaming(4);
     let page = streaming

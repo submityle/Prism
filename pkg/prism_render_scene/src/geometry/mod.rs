@@ -2,6 +2,7 @@ mod bindings;
 mod buffers;
 mod consumer;
 mod draw_range;
+mod draw_records;
 mod mesh_adapter;
 mod representation;
 pub(crate) mod rows;
@@ -14,6 +15,9 @@ mod systems;
 mod virtual_runtime;
 
 pub use bindings::GeometryBindGroup;
+pub use draw_records::{
+    build_geometry_draw_phase, GeometryDrawPhase, GeometryDrawPhaseError, GeometryDrawRecord,
+};
 pub use runtime::RenderGeometryRegistry;
 
 pub(crate) use consumer::{select_render_mesh, select_render_mesh_asset};
@@ -30,8 +34,9 @@ pub use representation::{
     resolve_geometry_representation, GeometryRepresentation, GeometryRepresentationIdentity,
     GeometryRepresentationRejection, GeometryRepresentationSelection,
     GeometryRepresentationSelections, ResolvedGeometryRepresentation,
-    GEOMETRY_REPRESENTATION_CONTRACT_VERSION,
+    VirtualGeometryRepresentationIdentity, GEOMETRY_REPRESENTATION_CONTRACT_VERSION,
 };
+
 pub use shading_buffers::RenderShadingGeometryBuffers;
 pub use shading_registry::{RenderShadingGeometryEntry, RenderShadingGeometryRegistry};
 pub use virtual_runtime::{
@@ -43,7 +48,6 @@ pub use virtual_runtime::{
 pub(crate) use bindings::prepare_geometry_bind_group;
 pub(crate) use buffers::RenderGeometryBuffers;
 pub(crate) use representation::visibility_lod_selection;
-
 pub(crate) use shading_systems::{
     extract_shading_geometry, sync_shading_geometry_registry, upload_shading_geometry_buffers,
     ShadingGeometryStaging,

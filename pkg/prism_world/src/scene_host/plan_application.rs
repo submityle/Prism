@@ -103,18 +103,16 @@ impl<P: SceneEcsProvider> SceneHost for DurablePlanApplication<'_, '_, '_, P> {
         Ok(())
     }
 
-    fn promote(&mut self, id: u64) -> Result<(), Self::Error> {
+    fn transition_residency(
+        &mut self,
+        id: u64,
+        from: prism_world_residency::ResidencyState,
+        to: prism_world_residency::ResidencyState,
+    ) -> Result<(), Self::Error> {
         if self.was_evicted(id) {
             return Ok(());
         }
-        SceneHost::promote(self.host, id)
-    }
-
-    fn demote(&mut self, id: u64) -> Result<(), Self::Error> {
-        if self.was_evicted(id) {
-            return Ok(());
-        }
-        SceneHost::demote(self.host, id)
+        SceneHost::transition_residency(self.host, id, from, to)
     }
 }
 
@@ -162,17 +160,15 @@ impl<P: SceneEcsProvider> SceneHost for PlanApplication<'_, '_, P> {
         Ok(())
     }
 
-    fn promote(&mut self, id: u64) -> Result<(), Self::Error> {
+    fn transition_residency(
+        &mut self,
+        id: u64,
+        from: prism_world_residency::ResidencyState,
+        to: prism_world_residency::ResidencyState,
+    ) -> Result<(), Self::Error> {
         if self.was_evicted(id) {
             return Ok(());
         }
-        SceneHost::promote(self.host, id)
-    }
-
-    fn demote(&mut self, id: u64) -> Result<(), Self::Error> {
-        if self.was_evicted(id) {
-            return Ok(());
-        }
-        SceneHost::demote(self.host, id)
+        SceneHost::transition_residency(self.host, id, from, to)
     }
 }

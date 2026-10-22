@@ -46,9 +46,9 @@ pub type RenderShadingGeometry = prism_render_shading::ShadingGeometry;
 pub type ShadingGeometryBuildError = prism_render_shading::ShadingGeometryBuildError;
 
 pub use prism_render_shading::{
-    build_shading_geometry, SHADING_GEOMETRY_FLAG_ACTIVE,
-    SHADING_GEOMETRY_FLAG_INVALID, SHADING_GEOMETRY_FLAG_MISSING_NORMAL,
-    SHADING_GEOMETRY_FLAG_MISSING_TANGENT, SHADING_GEOMETRY_FLAG_MISSING_UV,
+    build_shading_geometry, SHADING_GEOMETRY_FLAG_ACTIVE, SHADING_GEOMETRY_FLAG_INVALID,
+    SHADING_GEOMETRY_FLAG_MISSING_NORMAL, SHADING_GEOMETRY_FLAG_MISSING_TANGENT,
+    SHADING_GEOMETRY_FLAG_MISSING_UV,
 };
 
 #[cfg(test)]

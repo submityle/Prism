@@ -18,6 +18,8 @@
 
 mod context;
 mod extract;
+#[cfg(feature = "fixed-page-feedback")]
+mod page_feedback;
 mod page_pool;
 mod page_residency_bridge;
 #[cfg(feature = "resident-page-streaming")]
@@ -27,6 +29,7 @@ mod page_streaming_stage;
 mod prepare;
 mod stage;
 mod table;
+mod virtual_geometry_gpu;
 
 #[cfg(test)]
 mod page_pool_tests;
@@ -41,6 +44,11 @@ use prism_render_driver::{RenderDevice, RenderQueue};
 
 pub use context::{GpuPrepareBudget, PrepareCancellation, PrepareContext, PrepareContextError};
 pub use extract::{extract_assets, ExtractedAssets};
+#[cfg(feature = "fixed-page-feedback")]
+pub use page_feedback::{
+    register_fixed_page_feedback, FixedPageFeedback, FixedPageFeedbackConfig,
+    FixedPageFeedbackError, FixedPageFeedbackGpu, FixedPageFeedbackSample, FixedPageQuery,
+};
 pub use page_pool::{
     FixedPageDeferredRelease, FixedPageDeferredReplacement, FixedPagePool, FixedPagePoolDescriptor,
     FixedPagePoolEvent, FixedPageReclaimEvent, FixedPageUpload, PageAllocation, PagePoolError,
@@ -53,7 +61,7 @@ pub use page_resident::{
 };
 pub use page_streaming::{
     FixedPageBytesUploader, FixedPageIoReport, FixedPageReleasePayload, FixedPageRenderPayload,
-    FixedPageRenderQueue, FixedPageSlotKey, FixedPageStreamingManager, FixedPageStreamingSource,
+    FixedPageRenderQueue, FixedPageSlotKey, FixedPageStreamingSource,
 };
 pub use page_streaming_stage::{
     register_fixed_page_streaming, FixedPageStreamingConfig, FixedPageStreamingGpu,
@@ -68,6 +76,9 @@ pub(crate) use stage::{
 };
 pub use stage::{prepare_assets, register_render_assets, AssetSyncStats};
 pub use table::RenderAssets;
+pub use virtual_geometry_gpu::{
+    VirtualGeometryGpuBuffers, VirtualGeometryGpuPublicationStore, VirtualGeometryGpuStoreError,
+};
 
 /// An asset the renderer keeps a separate GPU form of.
 ///

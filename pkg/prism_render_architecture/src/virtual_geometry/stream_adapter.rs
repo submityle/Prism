@@ -220,6 +220,15 @@ impl VirtualGeometryPageStream {
         self.manager.entries()
     }
 
+    /// Borrows one resident page's physical slot and packed words without
+    /// allocating a residency snapshot. Call this for keys in
+    /// [`ReconcileReport::streamed_in`] to stage only pages admitted this pass.
+    #[must_use]
+    pub fn resident_page_words(&self, key: GeometryPageKey) -> Option<(u32, &[u32])> {
+        let slot = self.manager.slot_of(key)?;
+        Some((slot, self.manager.storage().slot_words(slot)?))
+    }
+
     /// Exports the physical page storage for GPU page-storage upload/parity.
     #[must_use]
     pub const fn storage(&self) -> &PageStorage {
@@ -377,10 +386,15 @@ mod tests {
         let report = stream.reconcile(&requests, 1);
         assert_eq!(report.streamed_in, vec![key]);
         assert_eq!(stream.resident_count(), 1);
-        let slot = stream.entries()[0].1;
-        let words = stream.storage().slot_words(slot).expect("resident words");
+        let (slot, words) = stream
+            .resident_page_words(key)
+            .expect("newly streamed page has resident words");
+        assert_eq!(slot, stream.entries()[0].1);
         assert_eq!(words[0], u32::from_le_bytes(*b"CLST"));
         assert!(words[1..].iter().any(|word| *word != 0));
+        assert!(stream
+            .resident_page_words(GeometryPageKey::new(4, 99))
+            .is_none());
     }
 
     #[test]

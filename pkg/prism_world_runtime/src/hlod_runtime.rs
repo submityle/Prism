@@ -9,7 +9,7 @@ use alloc::vec::Vec;
 use core::fmt;
 
 use prism_world_residency::{
-    HlodBakeOutput, HlodCluster, HlodError, HlodRepresentation, LodTransition,
+    HlodBakeOutput, HlodCluster, HlodError, HlodProxyArtifact, HlodRepresentation, LodTransition,
 };
 
 /// Revision of the runtime HLOD selection contract.
@@ -128,6 +128,16 @@ pub enum HlodRuntimeError {
         /// Missing cluster identity.
         cluster_id: u64,
     },
+    /// An artifact refers to a representation that is not part of the catalog.
+    ArtifactRepresentationMissing {
+        /// Stable artifact identity with the invalid reference.
+        representation_id: u64,
+    },
+    /// An artifact identity was inserted more than once.
+    DuplicateArtifact {
+        /// Stable artifact identity that was already present.
+        representation_id: u64,
+    },
     /// A request named a cluster that is not in the catalog.
     UnknownCluster {
         /// Stable identity absent from the catalog.
@@ -170,6 +180,13 @@ impl fmt::Display for HlodRuntimeError {
                 f,
                 "HLOD representation {representation_id} refers to missing cluster {cluster_id}"
             ),
+            Self::ArtifactRepresentationMissing { representation_id } => write!(
+                f,
+                "HLOD artifact refers to missing representation {representation_id}"
+            ),
+            Self::DuplicateArtifact { representation_id } => {
+                write!(f, "duplicate HLOD artifact {representation_id}")
+            }
             Self::UnknownCluster { cluster_id } => write!(f, "unknown HLOD cluster {cluster_id}"),
             Self::DuplicateRequest { cluster_id } => {
                 write!(f, "duplicate HLOD request {cluster_id}")
@@ -194,6 +211,7 @@ pub struct HlodRuntime {
     budget: HlodSelectionBudget,
     clusters: BTreeMap<u64, HlodCluster>,
     representations: BTreeMap<u64, HlodRepresentation>,
+    artifacts: BTreeMap<u64, HlodProxyArtifact>,
     active_levels: BTreeMap<u64, usize>,
 }
 
@@ -204,6 +222,7 @@ impl HlodRuntime {
             budget,
             clusters: BTreeMap::new(),
             representations: BTreeMap::new(),
+            artifacts: BTreeMap::new(),
             active_levels: BTreeMap::new(),
         }
     }
@@ -249,6 +268,7 @@ impl HlodRuntime {
 
         let mut next_clusters = self.clusters.clone();
         let mut next_representations = self.representations.clone();
+        let mut next_artifacts = self.artifacts.clone();
         for cluster in bake.clusters() {
             if next_clusters.contains_key(&cluster.id()) {
                 return Err(HlodRuntimeError::DuplicateCluster {
@@ -271,8 +291,19 @@ impl HlodRuntime {
             }
             next_representations.insert(representation.id(), *representation);
         }
+        for artifact in bake.artifacts() {
+            let representation_id = artifact.representation_id();
+            if next_artifacts.contains_key(&representation_id) {
+                return Err(HlodRuntimeError::DuplicateArtifact { representation_id });
+            }
+            if !next_representations.contains_key(&representation_id) {
+                return Err(HlodRuntimeError::ArtifactRepresentationMissing { representation_id });
+            }
+            next_artifacts.insert(representation_id, artifact.clone());
+        }
         self.clusters = next_clusters;
         self.representations = next_representations;
+        self.artifacts = next_artifacts;
         Ok(())
     }
 
@@ -282,6 +313,12 @@ impl HlodRuntime {
         self.representations.get(&asset_key)
     }
 
+    /// Returns the concrete baked proxy artifact for a selected asset key.
+    #[must_use]
+    pub fn artifact(&self, asset_key: u64) -> Option<&HlodProxyArtifact> {
+        self.artifacts.get(&asset_key)
+    }
+
     /// Removes a cluster and any remembered hysteresis state.
     pub fn remove(&mut self, cluster_id: u64) -> Option<HlodCluster> {
         self.active_levels.remove(&cluster_id);
@@ -289,6 +326,9 @@ impl HlodRuntime {
         if removed.is_some() {
             self.representations
                 .retain(|_, representation| representation.cluster_id() != cluster_id);
+            self.artifacts.retain(|representation_id, _| {
+                self.representations.contains_key(representation_id)
+            });
         }
         removed
     }
@@ -541,6 +581,13 @@ mod tests {
         assert_eq!(plan.selections()[0].asset_key, expected_asset_key);
         assert_eq!(
             runtime
+                .artifact(plan.selections()[0].asset_key)
+                .unwrap()
+                .representation_id(),
+            expected_asset_key
+        );
+        assert_eq!(
+            runtime
                 .representation(plan.selections()[0].asset_key)
                 .unwrap()
                 .cluster_id(),
@@ -549,7 +596,7 @@ mod tests {
     }
 
     #[test]
-    fn bake_insert_is_atomic_on_duplicate_representation() {
+    fn bake_insert_is_atomic_on_duplicate_catalog_identity() {
         let bake = bake_hlod(
             HlodBakeConfig::new(1, 1, 1, 1, 9, HlodBakeBudget::new(1, 1, 1, 4096)),
             &[HlodProxyRecord {
@@ -576,5 +623,35 @@ mod tests {
             runtime.representation(representation.id()),
             Some(&representation)
         );
+        assert_eq!(
+            runtime
+                .artifact(representation.id())
+                .map(HlodProxyArtifact::representation_id),
+            Some(representation.id())
+        );
+    }
+
+    #[test]
+    fn removing_baked_cluster_removes_its_representation_and_artifact() {
+        let bake = bake_hlod(
+            HlodBakeConfig::new(1, 1, 1, 1, 9, HlodBakeBudget::new(1, 1, 1, 4096)),
+            &[HlodProxyRecord {
+                id: 1,
+                center: [0.0; 3],
+                radius: 1.0,
+                source_hash: 1,
+            }],
+        )
+        .unwrap();
+        let representation = *bake.representations().first().unwrap();
+        let cluster_id = representation.cluster_id();
+        let mut runtime = HlodRuntime::new(
+            HlodSelectionBudget::new(2, 1, core::mem::size_of::<HlodSelection>()).unwrap(),
+        );
+        runtime.insert_bake(bake).unwrap();
+
+        assert!(runtime.remove(cluster_id).is_some());
+        assert!(runtime.representation(representation.id()).is_none());
+        assert!(runtime.artifact(representation.id()).is_none());
     }
 }

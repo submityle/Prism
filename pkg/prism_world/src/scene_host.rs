@@ -85,31 +85,20 @@ pub trait SceneEcsProvider {
         previous_instance: &SceneInstance,
     ) -> Result<SceneSpawn, Self::Error>;
 
-    /// Materializes a bound target using its resolved typed ECS entity.
+    /// Transitions a bound target between typed scene representations.
     ///
-    /// This callback is explicit because the provider owns the scene template
-    /// and component construction policy that the generic world facade cannot
-    /// infer.
-    fn materialize(
+    /// The provider receives both tiers because it owns the representation
+    /// schema and must distinguish direct transitions such as proxy to
+    /// interactive from transitions through the streamed tier.
+    fn transition_residency(
         &mut self,
         world: &mut World,
         residency_id: u64,
         sector: SectorId,
         local: LocalEntityId,
         entity: Entity,
-    ) -> Result<(), Self::Error>;
-
-    /// Dematerializes a bound target using its resolved typed ECS entity.
-    ///
-    /// `prism_scene` currently exposes no generic inverse operation, so this
-    /// callback is the provider-owned, verifiable dematerialization boundary.
-    fn dematerialize(
-        &mut self,
-        world: &mut World,
-        residency_id: u64,
-        sector: SectorId,
-        local: LocalEntityId,
-        entity: Entity,
+        from: prism_world_residency::ResidencyState,
+        to: prism_world_residency::ResidencyState,
     ) -> Result<(), Self::Error>;
 
     /// Returns the world object IDs owned by this cell. Scene IDs and world
@@ -913,28 +902,22 @@ impl<P: SceneEcsProvider> crate::SceneHost for SceneEcsHost<'_, P> {
         self.unload_cell(sector)
     }
 
-    fn promote(&mut self, residency_id: u64) -> Result<(), Self::Error> {
+    fn transition_residency(
+        &mut self,
+        residency_id: u64,
+        from: prism_world_residency::ResidencyState,
+        to: prism_world_residency::ResidencyState,
+    ) -> Result<(), Self::Error> {
         let (binding, entity) = self.target(residency_id)?;
         self.provider
-            .materialize(
+            .transition_residency(
                 self.world,
                 residency_id,
                 binding.sector,
                 binding.local,
                 entity,
-            )
-            .map_err(SceneEcsHostError::Provider)
-    }
-
-    fn demote(&mut self, residency_id: u64) -> Result<(), Self::Error> {
-        let (binding, entity) = self.target(residency_id)?;
-        self.provider
-            .dematerialize(
-                self.world,
-                residency_id,
-                binding.sector,
-                binding.local,
-                entity,
+                from,
+                to,
             )
             .map_err(SceneEcsHostError::Provider)
     }
@@ -971,8 +954,8 @@ mod tests {
 
     #[derive(Default)]
     pub(super) struct Provider {
-        pub(super) events: Vec<(u8, u64, Entity)>,
-        pub(super) fail_dematerialize: bool,
+        pub(super) events: Vec<(prism_world_residency::ResidencyState, u64, Entity)>,
+        pub(super) fail_transition: bool,
         pub(super) fail_replay: bool,
         pub(super) stage_attempts: usize,
         pub(super) fail_stage_on: Option<usize>,
@@ -1071,32 +1054,25 @@ mod tests {
             Ok(spawn)
         }
 
-        fn materialize(
+        fn transition_residency(
             &mut self,
             world: &mut World,
             residency_id: u64,
             _sector: SectorId,
             _local: LocalEntityId,
             entity: Entity,
+            _from: prism_world_residency::ResidencyState,
+            to: prism_world_residency::ResidencyState,
         ) -> Result<(), Self::Error> {
-            world.get_mut::<Marker>(entity).ok_or(())?.0 = 9;
-            self.events.push((1, residency_id, entity));
-            Ok(())
-        }
-
-        fn dematerialize(
-            &mut self,
-            world: &mut World,
-            residency_id: u64,
-            _sector: SectorId,
-            _local: LocalEntityId,
-            entity: Entity,
-        ) -> Result<(), Self::Error> {
-            if self.fail_dematerialize {
+            if self.fail_transition {
                 return Err(());
             }
-            world.get_mut::<Marker>(entity).ok_or(())?.0 = 3;
-            self.events.push((2, residency_id, entity));
+            world.get_mut::<Marker>(entity).ok_or(())?.0 = match to {
+                prism_world_residency::ResidencyState::TierA => 9,
+                prism_world_residency::ResidencyState::TierB => 6,
+                prism_world_residency::ResidencyState::TierC => 3,
+            };
+            self.events.push((to, residency_id, entity));
             Ok(())
         }
 
@@ -1199,13 +1175,25 @@ mod tests {
         )
         .unwrap();
 
-        crate::SceneHost::promote(&mut host, 41).unwrap();
+        crate::SceneHost::transition_residency(
+            &mut host,
+            41,
+            prism_world_residency::ResidencyState::TierC,
+            prism_world_residency::ResidencyState::TierA,
+        )
+        .unwrap();
         assert_eq!(host.world().get::<Marker>(root), Some(&Marker(9)));
-        crate::SceneHost::demote(&mut host, 41).unwrap();
+        crate::SceneHost::transition_residency(
+            &mut host,
+            41,
+            prism_world_residency::ResidencyState::TierA,
+            prism_world_residency::ResidencyState::TierC,
+        )
+        .unwrap();
         assert_eq!(host.world().get::<Marker>(root), Some(&Marker(3)));
         assert_eq!(host.provider().events.len(), 2);
-        assert_eq!(host.provider().events[0].0, 1);
-        assert_eq!(host.provider().events[1].0, 2);
+        assert_eq!(host.provider().events[0].0, prism_world_residency::ResidencyState::TierA);
+        assert_eq!(host.provider().events[1].0, prism_world_residency::ResidencyState::TierC);
     }
 
     #[test]
@@ -1214,7 +1202,12 @@ mod tests {
         let sector = SectorId::new(0, 0, 0, 0);
         let mut host = host(&mut world);
         assert_eq!(
-            crate::SceneHost::promote(&mut host, 9),
+            crate::SceneHost::transition_residency(
+                &mut host,
+                9,
+                prism_world_residency::ResidencyState::TierC,
+                prism_world_residency::ResidencyState::TierA,
+            ),
             Err(SceneEcsHostError::ResidencyNotBound(9))
         );
         crate::SceneHost::load_cell(&mut host, sector).unwrap();

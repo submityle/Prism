@@ -399,7 +399,7 @@ dematerialize(instance):  // A → C/B,退离
 
 远景不能逐实例绘制。Prism 只有**一套簇（cluster）模型**，按尺度分两级、共用同一套不变量：**对象内部的三角簇**（虚拟几何，§25.1，`vgeo` 档位，达成单网格像素级细节）与**跨对象的聚合簇**（HLOD 远景代理，本节，把整片远景聚成代理）。本节在 §10.1 把两级共用的不变量**定义一次**，再落地跨对象聚合尺度；对象内部的 meshlet / 簇 DAG / GPU 软光栅细节见 §25.1，不在此重复，二者正交叠加而非两套平行系统。
 
-residency crate 驱动 scene §11.4 的「簇声明 + 切换契约」，代理资产由渲染侧离线烘焙，本 crate 只持引用、维护成员归属、按阈值发切换信号（职责单向，借 UE HLOD / Decima tile 代理形态）。
+`prism_world_residency` 驱动 scene §11.4 的「簇声明 + 切换契约」，并提供 engine-neutral 的确定性 HLOD 烘焙产物：每个 representation 具有稳定身份、AABB proxy geometry、material 参数与 artifact hash；`prism_world_runtime` 负责把完整 bake catalog 原子接入并按阈值发切换信号。资产容器、GPU buffer、renderer submission、Scene/ECS 物化仍由下游负责（职责单向，借 UE HLOD / Decima tile 代理形态）。
 
 ### 10.1 簇模型不变量（两级尺度共用，只在此定义）
 
@@ -412,7 +412,7 @@ residency crate 驱动 scene §11.4 的「簇声明 + 切换契约」，代理�
 
 - **成簇**：烘焙期把一片 Tier C proxy 按固定空间网格 + 稳定排序聚成跨对象聚合簇（成簇不变量见 §10.1，scene §11.4）。
 - **分层**：每簇多级代理（近 → 中 → 远）对应 HLOD 层级，每级一个代理资产（合并网格 / impostor 公告板 / 体素化壳），按屏幕空间误差阈值切换。
-- **声明内容**：`{ 代理资产 SoftHandle, 各级切换阈值, 成员 PersistentId 列, 簇包围盒 }`，进 cell manifest 的 `proxy_summary`，使**远景不加载 cell 内容也能画出代理**（manifest 常驻，§6.2）。
+- **声明与产物**：`{ 代理资产稳定 key, 各级切换阈值, 成员 PersistentId 列, 簇包围盒 }` 加上确定性 `{ AABB proxy mesh, material key/参数, geometry/material/artifact hash }`。声明可进 cell manifest 的 `proxy_summary`，使**远景不加载 cell 内容也能选择代理**（manifest 常驻，§6.2）；真正的资产容器驻留、GPU 上传和绘制由下游提交层完成。
 
 ### 10.3 连续切换（禁 pop）
 
@@ -430,7 +430,11 @@ residency crate 驱动 scene §11.4 的「簇声明 + 切换契约」，代理�
 
 `pkg/prism_world_runtime/src/hlod_runtime.rs` 已实现有界的 `HlodRuntime`：按稳定 cluster id 排序 distance request、调用 `prism_world_residency::HlodCluster` 选择 representation，并返回切换 transition；活动 level 仅在整批 plan 成功后提交。规划器在排序后以相邻项检查重复请求，并用按请求数预留的临时 `Vec` 收集选择及待提交 level，避免为这两项工作另建 `BTreeSet`/`BTreeMap`；复杂度仍包含请求排序与 catalog/active-level 的有序树查找，不能描述成线性总成本。正确性回归覆盖确定性顺序、迟滞、重复输入及失败不提交状态。`pkg/prism_world_runtime/benches/hlod_plan.rs` 提供 release 稳态量具，覆盖 16/64/256/1,024 个 catalog/request；2026-10-22 Apple Silicon 共享主机一次诊断的 p50 为 23.95/26.06/30.34/109.83 ns/request，p95 为 51.40/26.39/30.92/110.79，p99 为 71.38/27.78/32.23/112.98。该量具无墙钟门槛，单机结果受系统负载影响，不构成受控基线或优化收益证明；仍缺 allocation/work-count 指标、受控 A/B 与代表性请求分布。
 
-`prism_world_residency::bake_hlod` 现在已提供确定性的 engine-neutral HLOD 声明烘焙：它规范化 source proxy 输入，生成稳定 hash、cluster/representation 元数据，并在非有限值、重复 ID、生成冲突及数量/字节预算超限时 fail-closed。`HlodRuntime` 消费这些声明并规划距离驱动的层级切换；但当前仍不生成代理几何/材质，不计算完整屏幕空间误差，不接 scene residency、proxy asset streaming 或 renderer dither/fade，也不实现 §10.4 的物化穿透。因此它仍不等同于本章定义的完整 HLOD 产品链路。能力门禁将这一边界显式拆成 `WorldPartitionCapability::HlodSelection`（已支持）与 `WorldPartitionCapability::HierarchicalLod`（仍不支持）；后者必须等代理资产生成、资产/驻留、渲染提交和物化穿透形成真实集成并完成验收后才能放行。
+### 10.7 当前 HLOD bake artifact 与 runtime catalog 边界
+
+`prism_world_residency::bake_hlod` 已把稳定排序后的 proxy bounds 烘焙为具体的八顶点/三十六索引 AABB proxy mesh，并为每个 representation 生成有限的 bounds、稳定 material key/参数以及 geometry/material/artifact hash；输入、数量、字节预算和数值有效性在分配/发布前检查，失败不返回部分 output。`HlodBakeOutput::artifacts()` 与 `HlodRuntime::insert_bake()` 形成从 bake 到 runtime catalog 的确定性接口，catalog 插入按 cluster/representation/artifact 一次性提交，并可按选中的 asset key 取回 artifact；重复身份或不一致引用不会污染旧 catalog。该产物是 engine-neutral 的可消费代理，不是最终 renderer meshlet/材质系统：尚未替代资产包/流送、GPU buffer residency、Scene/ECS 单体 materialization、产品 renderer graph、跨后端画面和受控帧时验收。
+
+当前 HLOD 已能烘焙并 catalog 确定性的 AABB 代理几何与材质参数，但仍未实现完整屏幕空间误差驱动、scene residency/proxy asset streaming、renderer dither/fade，也不实现 §10.4 的单体物化穿透。因此它仍不等同于本章定义的完整 HLOD 产品链路。能力门禁将这一边界显式拆成 `WorldPartitionCapability::HlodSelection`（已支持）与 `WorldPartitionCapability::HierarchicalLod`（仍不支持）；后者必须等资产/驻留、产品渲染提交、屏幕空间切换和物化穿透形成真实集成并完成验收后才能放行。
 
 ---
 

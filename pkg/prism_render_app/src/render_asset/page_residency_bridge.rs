@@ -21,6 +21,8 @@ use super::{GpuPrepareBudget, PrepareCancellation, PrepareContext};
 /// Errors raised while connecting a resident CPU page to the GPU pool.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PageResidencyBridgeError {
+    /// The active runtime does not own this GPU pool.
+    DeviceMismatch,
     /// The CPU page is not currently resident or its bytes were discarded.
     PageNotResident(PageId),
     /// The CPU and GPU pools use different fixed page sizes.
@@ -29,8 +31,9 @@ pub enum PageResidencyBridgeError {
     Pool(PagePoolError),
     /// No GPU allocation is tracked for the requested CPU page.
     UnknownPage(PageId),
-    /// An older source revision arrived after a newer revision occupied its
-    /// stable logical slot.
+    /// A CPU identity already belongs to another logical slot.
+    PageSlotConflict(PageId),
+    /// An older upload or mismatched release revision targeted a published slot.
     StaleRevision {
         /// The revision currently published for the slot.
         current: u64,
@@ -89,6 +92,19 @@ impl FixedPageResidencyBridge {
     #[must_use]
     pub fn allocation(&self, page: PageId) -> Option<PageAllocation> {
         self.allocations.get(&page).copied()
+    }
+
+    /// Returns a committed allocation only when its source revision matches.
+    /// Retiring allocations are deliberately absent from this view.
+    #[must_use]
+    pub fn allocation_for_slot(
+        &self,
+        slot: &FixedPageSlotKey,
+        revision: u64,
+    ) -> Option<PageAllocation> {
+        (self.slot_revisions.get(slot).copied() == Some(revision))
+            .then(|| self.slot_allocations.get(slot).copied())
+            .flatten()
     }
 
     /// Uploads one already-resident CPU page, replacing its prior GPU range
@@ -258,6 +274,9 @@ impl FixedPageResidencyBridge {
         reclaim_after: GpuCompletionValue,
         queue: &dyn RenderQueue,
     ) -> Result<FixedPagePoolEvent, PageResidencyBridgeError> {
+        if self.allocations.contains_key(&page) && self.page_slots.get(&page) != Some(slot) {
+            return Err(PageResidencyBridgeError::PageSlotConflict(page));
+        }
         if let Some(current) = self.slot_revisions.get(slot).copied()
             && revision < current
         {
@@ -332,6 +351,36 @@ impl FixedPageResidencyBridge {
             .map_err(PageResidencyBridgeError::Pool)
     }
 
+    /// Retires the entire previous source before any identities can be reused.
+    pub(super) fn release_all_deferred(
+        &mut self,
+        reclaim_after: GpuCompletionValue,
+    ) -> Result<(), PageResidencyBridgeError> {
+        while let Some((slot, &allocation)) = self.slot_allocations.first_key_value() {
+            let slot = slot.clone();
+            let revision = self.slot_revisions[&slot];
+            self.pool
+                .begin_release(allocation, revision)
+                .map_err(PageResidencyBridgeError::Pool)?
+                .commit_deferred(reclaim_after)
+                .map_err(PageResidencyBridgeError::Pool)?;
+            self.slot_allocations.remove(&slot);
+            self.slot_revisions.remove(&slot);
+            self.allocations.retain(|_, current| *current != allocation);
+            self.page_slots.retain(|_, current| *current != slot);
+        }
+        while let Some((&page, &allocation)) = self.allocations.first_key_value() {
+            self.pool
+                .begin_release(allocation, 0)
+                .map_err(PageResidencyBridgeError::Pool)?
+                .commit_deferred(reclaim_after)
+                .map_err(PageResidencyBridgeError::Pool)?;
+            self.allocations.remove(&page);
+            self.page_slots.remove(&page);
+        }
+        Ok(())
+    }
+
     /// Releases the GPU range for a page after the caller's fence/consumer
     /// safety point. CPU residency is not changed by this operation.
     pub fn release_page(
@@ -369,6 +418,15 @@ impl FixedPageResidencyBridge {
         revision: u64,
         reclaim_after: GpuCompletionValue,
     ) -> Result<(), PageResidencyBridgeError> {
+        if let Some(slot) = self.page_slots.get(&page) {
+            let current = self.slot_revisions[slot];
+            if revision != current {
+                return Err(PageResidencyBridgeError::StaleRevision {
+                    current,
+                    incoming: revision,
+                });
+            }
+        }
         let allocation = self
             .allocations
             .get(&page)
@@ -387,6 +445,22 @@ impl FixedPageResidencyBridge {
             }
         }
         Ok(())
+    }
+
+    /// Releases only the exact extracted identity; CPU page IDs may be reused
+    /// when the main-world source is replaced. Stale releases cannot retire a
+    /// replacement in a different logical slot or source revision.
+    pub fn release_page_for_slot_deferred(
+        &mut self,
+        slot: &FixedPageSlotKey,
+        page: PageId,
+        revision: u64,
+        reclaim_after: GpuCompletionValue,
+    ) -> Result<(), PageResidencyBridgeError> {
+        if self.page_slots.get(&page) != Some(slot) {
+            return Err(PageResidencyBridgeError::UnknownPage(page));
+        }
+        self.release_page_deferred(page, revision, reclaim_after)
     }
 
     /// Destroys the backing buffer. Call this from the owning render asset's
