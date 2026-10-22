@@ -155,6 +155,24 @@ fn u256_set_bit(value: ptr<function, U256>, bit_index: u32) {
     (*value).limb[limb_index] = (*value).limb[limb_index] | (1u << (bit_index & 31u));
 }
 
+fn u256_bit_length(value: U256) -> u32 {
+    for (var cursor = 8u; cursor > 0u; cursor -= 1u) {
+        let limb = value.limb[cursor - 1u];
+        if (limb != 0u) { return (cursor - 1u) * 32u + 32u - countLeadingZeros(limb); }
+    }
+    return 0u;
+}
+
+fn u256_shr_one(value: U256) -> U256 {
+    var out = u256_zero();
+    for (var cursor = 8u; cursor > 0u; cursor -= 1u) {
+        let index = cursor - 1u;
+        out.limb[index] = value.limb[index] >> 1u;
+        if (index < 7u) { out.limb[index] = out.limb[index] | (value.limb[index + 1u] << 31u); }
+    }
+    return out;
+}
+
 // Shift left by count. count may be >= 256; all shifted-out nonzero bits are reported.
 fn u256_shl(value: U256, count: u32) -> U256Carry {
     var out = u256_zero();
@@ -189,18 +207,20 @@ fn u256_div_rem(numerator: U256, denominator: U256) -> U256DivRem {
     if (u256_is_zero(denominator)) {
         return U256DivRem(quotient, remainder, true);
     }
-    for (var cursor = 256u; cursor > 0u; cursor -= 1u) {
+    let numerator_bits = u256_bit_length(numerator);
+    let denominator_bits = u256_bit_length(denominator);
+    if (numerator_bits < denominator_bits) { return U256DivRem(quotient, numerator, false); }
+    let shift = numerator_bits - denominator_bits;
+    var shifted_divisor = u256_shl(denominator, shift);
+    if (shifted_divisor.overflow) { return U256DivRem(u256_zero(), u256_zero(), false); }
+    remainder = numerator;
+    for (var cursor = shift + 1u; cursor > 0u; cursor -= 1u) {
         let bit_index = cursor - 1u;
-        let shifted = u256_shl(remainder, 1u);
-        remainder = shifted.value;
-        remainder.limb[0] = remainder.limb[0] | u256_bit(numerator, bit_index);
-        if (shifted.overflow) {
-            return U256DivRem(u256_zero(), u256_zero(), false);
-        }
-        if (u256_cmp(remainder, denominator) >= 0) {
-            remainder = u256_sub(remainder, denominator).value;
+        if (u256_cmp(remainder, shifted_divisor.value) >= 0) {
+            remainder = u256_sub(remainder, shifted_divisor.value).value;
             u256_set_bit(&quotient, bit_index);
         }
+        shifted_divisor.value = u256_shr_one(shifted_divisor.value);
     }
     return U256DivRem(quotient, remainder, false);
 }
