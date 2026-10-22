@@ -9,7 +9,6 @@ use core::any::Any;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
-use prism_render_architecture::frame_graph::ResourceLifetime;
 use prism_render_architecture::render_fabric::{
     AccessKind, CapabilitySet, DeviceFabric, FeatureCatalog, FeatureDefinition, FeatureId,
     FeatureKind, FeatureVariant, FrameResourceBinding, FrozenRoots, GraphLimits, PassKey,
@@ -20,12 +19,16 @@ use prism_render_architecture::render_fabric::{
 use prism_render_driver as rhi;
 use prism_render_driver_null::{NullAdapter, NullDevice, NullInstance, NullQueue, NullSurface};
 use prism_render_graph::{
-    BufferDesc, CompileError, ImportedBuffer, Lifetime, PassFlags, RenderGraph, TextureDesc,
+    frame_graph::ResourceLifetime, BufferDesc, CompileError, ImportedBuffer, Lifetime, PassFlags,
+    RenderGraph, TextureDesc,
 };
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use rhi::{FrameSync, Instance, RenderDevice, RenderQueue};
 
 use crate::{FrameSubmission, RenderRuntime, SubmissionError};
+
+#[path = "retirement_tests/submission_state.rs"]
+mod submission_state_tests;
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
@@ -170,6 +173,7 @@ struct QueueProgress {
     idle_waits: usize,
     confirm_waits: bool,
     confirm_idle: bool,
+    before_submit: Option<Callback>,
 }
 
 struct QueueControl(Mutex<QueueProgress>);
@@ -185,6 +189,7 @@ impl QueueControl {
             idle_waits: 0,
             confirm_waits: true,
             confirm_idle: true,
+            before_submit: None,
         }))
     }
 
@@ -253,6 +258,10 @@ impl RenderQueue for DelayedQueue {
     }
 
     fn submit(&self, commands: &[rhi::CommandBuffer]) {
+        let before_submit = lock(&self.control.0).before_submit.take();
+        if let Some(probe) = before_submit {
+            probe();
+        }
         self.inner.submit(commands);
         let mut progress = lock(&self.control.0);
         progress.submitted += 1;
@@ -490,6 +499,7 @@ fn fabric_compile_prepare_and_runtime_submission_share_one_frozen_selection() {
             domain: Some(RenderDomain::Surface),
             requires_services: ServiceSet::EMPTY,
             variants,
+            pass_alternatives: &[],
         }]
         .into_boxed_slice(),
     );

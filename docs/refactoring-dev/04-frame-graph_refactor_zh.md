@@ -8,13 +8,7 @@
 
 ### 1.1 统一 frame graph 编译器
 
-`pkg/prism_render_architecture/src/frame_graph/mod.rs` 现在只是兼容导出：
-
-```rust
-pub use prism_render_graph::frame_graph::*;
-```
-
-因此 `prism_render_architecture::frame_graph` 不再维护独立的 builder/types/compiler/schedule 实现。实际声明与编译类型位于 `pkg/prism_render_graph/src/frame_graph/`，统一推导内核位于 `pkg/prism_render_graph/src/compile/` 和 `pkg/prism_render_graph/src/graph.rs`。
+`prism_render_architecture::frame_graph` 兼容 re-export 已删除；frame graph 的唯一定义与公共入口是 `prism_render_graph::frame_graph`。声明类型位于 `pkg/prism_render_graph/src/frame_graph/`，统一推导内核位于 `pkg/prism_render_graph/src/compile/` 和 `pkg/prism_render_graph/src/graph.rs`。Architecture、Scene、World、Editor 与 Profiler 的调用方应直接依赖并导入此唯一真源。
 
 当前声明式类型的枚举数量为：
 
@@ -106,7 +100,7 @@ response planes + coverage ──▶ response_composition ──▶ HDR
 ## 5. 当前架构约束
 
 1. 仓库内只保留 `prism_render_graph` 的一套 schedule/barrier/lifetime/alias 推导内核。
-2. `prism_render_architecture::frame_graph` 作为兼容导出存在，源码事实以 `prism_render_graph` 为准。
+2. 不保留 `prism_render_architecture::frame_graph` 旧路径；所有调用直接使用 `prism_render_graph::frame_graph`。
 3. shading graph 的 pass 数量、执行顺序和 runtime 校验从同一个 `GpuFrameGraphBuilder` 读取；不得维护第二份固定数字。
 4. post declaration、executor binding 和 plugin registration 必须保持一一对应；production inventory 必须覆盖 23 个模块。
 5. `response_composition` 必须常驻，并固定在 `water_surface_raster` 之后、post chain 之前。
@@ -119,7 +113,7 @@ response planes + coverage ──▶ response_composition ──▶ HDR
 | 契约 | 证据 |
 |---|---|
 | 统一 graph 的 pass、资源、SSA version、hazard、schedule、barrier、alias、lifetime | `pkg/prism_render_graph/src/compile/`、`pkg/prism_render_graph/src/graph.rs`、`pkg/prism_render_graph/text/unit/compiler.rs`、`pkg/prism_render_graph/text/unit/graph.rs` |
-| compatibility frame_graph 导出与底层契约 | `pkg/prism_render_architecture/src/frame_graph/mod.rs`、`pkg/prism_render_architecture/src/frame_graph/tests.rs` |
+| 唯一 frame_graph 公共契约 | `pkg/prism_render_graph/src/frame_graph/` 与 `pkg/prism_render_graph/text/unit/compiler.rs` |
 | shading graph 单一 pass-count source、主链顺序、资源 barrier | `pkg/prism_render_scene/src/shading/graph.rs` 中 `declared_pass_count_matches_runtime_assertion` |
 | composition 固定位置、imported planes、HDR barrier | `pkg/prism_render_scene/text/unit/shading/composition_graph.rs` 中 `composition_is_resident_and_follows_water_response_producer` |
 | composition production recorder 与 GPU 回归 | `shading/composition.rs::response_composition_pass` 使用共享 `SceneFabric` / `RenderFabricFrame`，经 `fabric_runtime::prepare_with_templates` 的 active-pass compile、真实 imports、prepare 与 encode 交给宿主；`text/integration/resident_composition_gpu.rs` 与生产入口共用 recorder。acceptance 的 `CompositionFabric` 仅封装同一 scene selection 构造器，不是第二份生产 ECS catalog。2026-10-22 修订后的 harness 已 strict 3/3，局部待复跑缺口已关闭，不证明共享 Scene/Fabric/TAA 全帧闭环 |
@@ -182,3 +176,8 @@ response planes + coverage ──▶ response_composition ──▶ HDR
 RenderGraph 全 package 的 unit 122/122、doc 1 passed / 1 ignored 已于 2026-10-22 验证；material package unit 888/integration 79 与修订后的 resident composition strict 3/3 待复跑缺口也已关闭，不外推为其他 integration 或 GPU 门禁通过。仍未验证：全 31 pass 在真实 Scene imports、barrier、record/submit 上的完整运行；Hair/Decal 的真实 pipeline、bind group、draw/dispatch recorder 与 visibility/geometry consumer；Volume 的完整 schedule completion-gated retirement（resize/disable/missing-input 的局部生命周期已由 strict GPU 覆盖）；Particle 接入统一 SceneFabric runtime；TAA 与统一全场景 runtime/recorder 的集成（局部 completion-gated history GPU 已通过 19/19）；完整 32 gate 端到端运行（gate 23 仍 partial）及旧入口删除前护栏、S2/S4/S5 历史先后顺序；第二 physical adapter；以及全帧图像 parity、资源峰值、吞吐和 P50/P95/P99 性能数据。库内历史 1909 项、RenderFabric 200 项及局部 composition/runtime/TAA/Volumetrics/Particle 通过都不等于生产闭环完成。
 
 **2026-10-22 indirect command bounds 补记**：RenderGraph 的 `ExecuteContext` 现在在加入 driver command 前按 graph-declared `BufferDesc.size` 校验 `draw_indirect`、indexed draw、multi-draw 的末条记录范围，以及 indirect dispatch。参数 record 大小由 `prism_render_driver` 的公开 `DRAW_INDIRECT_ARGS_SIZE`（16B）、`DRAW_INDEXED_INDIRECT_ARGS_SIZE`（20B）、`DISPATCH_INDIRECT_ARGS_SIZE`（12B）ABI 常量统一提供（ABI 常量与单测已提交 `9e4131964`）。范围乘加采用 checked arithmetic，越界、溢出、偏移未对齐或 multi-draw stride 不合法会标记 pass recording error；闭包返回后统一拒绝，闭包继续追加的命令也不会编码或提交。单条与多条 draw、dispatch 的精确末尾和 overrun、sticky error、未对齐偏移、非法 stride，以及 multi-draw 溢出均有回归覆盖；定向 `indirect_` 筛选 **6/6**，RenderGraph 默认配置 unit **127/127**，`parallel` feature unit **131/131** 均在当前源码实跑通过，doc **1 passed / 1 ignored**。该范围依据 imported/virtual buffer 的图声明尺寸；外部 owner 必须保证声明尺寸与真实 allocation 相符。以上只关闭命令参数 bounds contract，不证明 31-pass 全帧执行或 GPU 图像 parity。
+
+**2026-10-23 VSM resolve 死字段清理（源码切片）**：`ViewResolveVsmPageTable` 的 `slot_count` 副本没有消费者，且其 `dead_code` 豁免明确指向不存在的 “later slice”。当前移除此 resolve/bridge 间冗余字段与示例占位代码；page-table 自身的 `slot_count` 仍保留用于分配、上传及尺寸校验。本切片 `rustfmt --check` 与 `git diff --check` 通过；未运行 Cargo/GPU，故不把它记作类型检查或运行验收，也不改变 31-pass / SceneFabric 全帧未闭合结论。
+
+
+**2026-10-23 Frame Graph 旧入口删除与 runtime 复验**：移除 `prism_render_architecture::frame_graph` 模块及其重复 compiler 测试，runtime 与 Scene composition 测试改为直接引用 `prism_render_graph::frame_graph::ResourceLifetime`。当前 Rust/TOML 搜索未发现 architecture 旧路径消费者；Frame Graph 定义和公开入口只保留在 `prism_render_graph`。随后 `cargo test -p prism_render_runtime --lib retirement_tests --jobs 1 --config profile.test.debug=0 -- --test-threads=1` 实际运行 **28 passed / 0 failed / 20 filtered out**，覆盖 runtime retirement 与 submission-state 回归。该测试关闭这次 API 迁移的 runtime 定向回归缺口，不代表 render-graph 全 package 或全场景闭环重跑。

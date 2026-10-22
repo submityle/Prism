@@ -21,7 +21,7 @@
 
 | 被排除的东西 | 本篇的处置 |
 |---|---|
-| 第三个图编译器 | **不新增**。排序、barrier、别名、生命周期全部复用 `prism_render_graph`；`prism_render_architecture::frame_graph` 仅兼容 re-export（04 §1.1） |
+| 第三个图编译器 | **不新增**。排序、barrier、别名、生命周期全部复用 `prism_render_graph::frame_graph`；Architecture 不再提供旧路径 re-export（04 §1.1） |
 | 通用节点图求值器 | **不新增**。响应组合仍由 `ShadingPlan` 的单一 sum type 表达（02 §0）；本篇不引入 Blend/Layer 节点 |
 | `RenderProgram` / `RenderPlan` | **不新增**。响应身份由 `ProgramRef::{Builtin, Registered}` 表达，内建值是 `BuiltinProgram::{Lit, Npr, Unlit}`，组合归 `ShadingPlan`（02 §0），不引入第三个并列类型 |
 | 新的契约 crate | **不新增**。见 §2.2 裁决 |
@@ -221,7 +221,7 @@ pkg/prism_render_scene/src/water/{surface_node,surface_pipeline,surface_shading}
 
 | 已存在（复用） | 位置 |
 |---|---|
-| 资源身份 / 访问种类 / 队列 / 生命周期 | `prism_render_architecture::frame_graph`（`ResourceId`、`AccessKind`、`QueueClass`、`ResourceLifetime`，04 §1.1） |
+| 资源身份 / 访问种类 / 队列 / 生命周期 | `prism_render_graph::frame_graph`（`ResourceId`、`AccessKind`、`QueueClass`、`ResourceLifetime`，04 §1.1） |
 | 设备能力集与协商 | `prism_render_architecture::backend::capability`（`Capability`、`CapabilitySet`、`WEBGPU_BASELINE`） |
 | 材质扩展能力与协商 | `prism_material_pcm`（`Capability`、`CapabilitySet`、`requires_caps`、`negotiate`、`is_lossless`） |
 | 响应身份 | `ProgramRef::{Builtin, Registered}` 与 `BuiltinProgram::{Lit, Npr, Unlit}`（`pkg/prism_render_material/src/shading_plan.rs:21-25,56-75`）；Custom 通过注册程序表达 |
@@ -957,7 +957,7 @@ pub struct ValuePayload {
 | `CouplingPlan` / `WaterSprayBurst` / `SprayPublishStats` | `water/coupling.rs:68`、`water/spray_bridge.rs:50`、`:81` |
 | 水体的 Extract / Prepare / Queue | `water/pipeline.rs`、`water/gpu/` |
 | 粒子的 CPU 侧纯函数与能力分类 | `pkg/prism_render_architecture/src/particle/` |
-| 帧图的资源访问与队列依赖模型 | `prism_render_graph`；architecture 兼容 re-export（04 §1.1） |
+| 帧图的资源访问与队列依赖模型 | `prism_render_graph::frame_graph`（唯一公开入口；04 §1.1） |
 | `PermutationSpace` / `PermutationKey` / `PermutationSelector` | `shader_package/permutation.rs` |
 | 逐像素区域响应选择（**二值选择**） | `MaterialFeatureFlags::REGION_ILLUMINATION`（§3.6） |
 | 水体三级反射回退（`SSR → RT → Probe`，**像素级**） | `water/shading/mod.rs:31-43`（§4.2） |
@@ -1221,7 +1221,7 @@ particle spray ──?──────▶ water foam
 
 ### 代码
 
-- 帧图类型（`ResourceId` / `AccessKind` / `AccessKind::writes` / `ResourceAccess` / `PassDescriptor` / `Barrier` / `ResourceVersion` / `QueueClass` / `ResourceLifetime`）：`pkg/prism_render_graph/src/frame_graph/types.rs:8-139`；`pkg/prism_render_architecture/src/frame_graph/mod.rs` 仅兼容 re-export，不再有 architecture 自有 `types.rs`。
+- 帧图类型（`ResourceId` / `AccessKind` / `AccessKind::writes` / `ResourceAccess` / `PassDescriptor` / `Barrier` / `ResourceVersion` / `QueueClass` / `ResourceLifetime`）：`pkg/prism_render_graph/src/frame_graph/types.rs:8-139`；`prism_render_architecture` 不再暴露旧 frame-graph 路径。
 - 持久场景与增量：`pkg/prism_render_architecture/src/gpu_scene/mod.rs:73`（`InstanceRecord`）、`:84-104`（`SceneChangeKind` / `SceneChange` / `SceneChangeJournal`）
 - 设备能力：`pkg/prism_render_architecture/src/backend/capability.rs:32`（`Capability`）、`:77`（`CapabilitySet`）、`:87`（`WEBGPU_BASELINE`）
 - 命名坑：`pkg/prism_render_architecture/src/diagnostics/registry.rs:46`（`FeatureRegistry`，**已被占用**）、`diagnostics/mod.rs:47`（re-export）、`pkg/prism_app/src/capability.rs:249`（`QualityTier`，**是宿主档不是画质档**）
