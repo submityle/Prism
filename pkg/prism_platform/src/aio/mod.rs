@@ -40,9 +40,11 @@
 use core::fmt;
 use core::time::Duration;
 #[cfg(not(windows))]
-use std::os::fd::RawFd;
+/// Native file-descriptor type accepted by the async-I/O facade.
+pub type RawFd = std::os::fd::RawFd;
 #[cfg(windows)]
-type RawFd = i32;
+/// CRT file-descriptor type accepted by the async-I/O facade.
+pub type RawFd = i32;
 
 // Only Apple is wired to the real backend: `posix.rs` implements the Darwin
 // `aiocb`/`sigevent` ABI, which differs from FreeBSD/NetBSD/DragonFly. Rather
@@ -328,6 +330,60 @@ impl AioQueue {
     #[must_use]
     pub fn pending(&self) -> usize {
         self.inner.pending()
+    }
+}
+
+/// Synchronize a caller-owned platform file descriptor without taking
+/// ownership of it. The descriptor must remain open for the duration of this
+/// call. On Windows, `RawFd` is a CRT descriptor and is resolved to its OS
+/// handle before cloning it for the standard-library sync operation.
+#[expect(
+    unsafe_code,
+    reason = "borrow and duplicate the caller-owned native descriptor"
+)]
+pub fn sync_fd(fd: RawFd) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::fd::BorrowedFd;
+
+        if fd < 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "negative file descriptor",
+            ));
+        }
+        // SAFETY: the caller promises the descriptor remains open; ownership
+        // is immediately duplicated before it is wrapped in `File`.
+        let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
+        let owned = borrowed.try_clone_to_owned()?;
+        std::fs::File::from(owned).sync_all()
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::BorrowedHandle;
+
+        if fd < 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "negative CRT file descriptor",
+            ));
+        }
+        unsafe extern "C" {
+            fn _get_osfhandle(fd: i32) -> isize;
+        }
+        // SAFETY: `_get_osfhandle` only consults the CRT descriptor table.
+        let raw = unsafe { _get_osfhandle(fd) };
+        if raw == -1 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: the caller promises that this CRT descriptor remains open
+        // while we borrow the handle; the clone below owns a duplicate.
+        let borrowed =
+            unsafe { BorrowedHandle::borrow_raw(raw as std::os::windows::io::RawHandle) };
+        let owned = borrowed.try_clone_to_owned()?;
+        // The `File` owns only the duplicated handle, not the caller's handle.
+        std::fs::File::from(owned).sync_all()
     }
 }
 

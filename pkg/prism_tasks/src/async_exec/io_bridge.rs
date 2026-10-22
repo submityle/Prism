@@ -61,14 +61,12 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use core::task::{Context, Poll, Waker};
 use core::time::Duration;
 use std::collections::{HashMap, HashSet};
-use std::fs::File;
 use std::io::ErrorKind;
-use std::os::fd::{BorrowedFd, RawFd};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::Mutex;
 use std::thread::{self, JoinHandle};
 
-use prism_platform::aio::{AioError, AioQueue, IoPriority, ReadOp, WriteOp};
+use prism_platform::aio::{AioError, AioQueue, IoPriority, RawFd, ReadOp, WriteOp};
 
 /// How long the reactor blocks in a single reap before looping back to pick up
 /// newly submitted or back-pressured requests. Bounds the latency with which a
@@ -120,12 +118,6 @@ impl SyncError {
         }
     }
 
-    fn invalid_fd() -> Self {
-        Self {
-            kind: ErrorKind::InvalidInput,
-            raw_os_error: None,
-        }
-    }
 }
 
 impl fmt::Display for SyncError {
@@ -817,24 +809,7 @@ fn reactor_loop(mut queue: Option<AioQueue>, rx: Receiver<Submission>) {
 
 /// Execute a durability barrier without taking ownership of the caller's fd.
 fn sync_fd(fd: RawFd) -> Result<usize> {
-    if fd < 0 {
-        return Err(IoError::Sync(SyncError::invalid_fd()));
-    }
-
-    #[expect(
-        unsafe_code,
-        reason = "borrow the caller-owned fd long enough to duplicate it for File::sync_all"
-    )]
-    // SAFETY: the public reactor contract requires `fd` to remain an open,
-    // valid descriptor until this future resolves. The borrowed descriptor is
-    // immediately duplicated, so the caller's descriptor is never owned or
-    // closed by the temporary `File`.
-    let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
-    let owned = borrowed
-        .try_clone_to_owned()
-        .map_err(|error| map_sync_error(&error))?;
-    File::from(owned)
-        .sync_all()
+    prism_platform::aio::sync_fd(fd)
         .map(|_| 0)
         .map_err(|error| map_sync_error(&error))
 }
@@ -847,5 +822,5 @@ fn map_sync_error(error: &std::io::Error) -> IoError {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;
