@@ -220,10 +220,22 @@ impl FloatingOrigin {
     /// origin tracks the camera; because the origin only moves when the camera
     /// crosses a cell boundary, the cell size itself provides the recenter
     /// hysteresis and avoids per-frame thrash.
+    ///
+    /// # Panics
+    /// Panics if `pos` is non-finite, outside the `i64` cell domain, or cannot
+    /// be represented by a canonical `f32` local offset. Use
+    /// [`try_recenter_to`](Self::try_recenter_to) for checked input.
     pub fn recenter_to(&mut self, pos: WorldPos) -> (GridCell, LocalPos) {
-        let (cell, local) = self.quantize(pos);
+        self.try_recenter_to(pos)
+            .expect("world position cannot be represented by the floating-origin grid")
+    }
+
+    /// Checked form of [`recenter_to`](Self::recenter_to). On failure, leaves
+    /// the active origin unchanged.
+    pub fn try_recenter_to(&mut self, pos: WorldPos) -> Option<(GridCell, LocalPos)> {
+        let (cell, local) = self.try_quantize(pos)?;
         self.origin = cell;
-        (cell, local)
+        Some((cell, local))
     }
 
     /// Splits an absolute [`WorldPos`] into its coarse [`GridCell`] and fine
@@ -233,13 +245,18 @@ impl FloatingOrigin {
     /// each axis. Pairs with [`world_position`](Self::world_position) as an
     /// exact round-trip within the cell size.
     pub fn quantize(&self, pos: WorldPos) -> (GridCell, LocalPos) {
-        let (cx, lx) = self.split_axis(pos.x);
-        let (cy, ly) = self.split_axis(pos.y);
-        let (cz, lz) = self.split_axis(pos.z);
-        (
-            GridCell::new(cx, cy, cz),
-            LocalPos::new(lx as f32, ly as f32, lz as f32),
-        )
+        self.try_quantize(pos)
+            .expect("world position cannot be represented by the floating-origin grid")
+    }
+
+    /// Checked form of [`quantize`](Self::quantize). Returns `None` for
+    /// non-finite coordinates, coordinates outside the `i64` cell domain, or
+    /// local offsets that cannot be represented canonically as `f32`.
+    pub fn try_quantize(&self, pos: WorldPos) -> Option<(GridCell, LocalPos)> {
+        let (cx, lx) = self.split_axis(pos.x)?;
+        let (cy, ly) = self.split_axis(pos.y)?;
+        let (cz, lz) = self.split_axis(pos.z)?;
+        Some((GridCell::new(cx, cy, cz), LocalPos::new(lx, ly, lz)))
     }
 
     /// Reconstructs the absolute double-precision [`WorldPos`] from a cell and
@@ -321,33 +338,45 @@ impl FloatingOrigin {
     /// Floor-divides `value` by the cell size into `(cell_index, local)` with
     /// `local` in `[0, cell_size)`, using exact integer floor (no `std` float
     /// intrinsics) so the split is deterministic and `no_std`-clean.
-    fn split_axis(&self, value: f64) -> (i64, f64) {
+    fn split_axis(&self, value: f64) -> Option<(i64, f32)> {
         let q = value / self.cell_size;
+        // `i64::MAX as f64` rounds up to 2^63, so use the exclusive upper
+        // bound explicitly before the float-to-int cast.
+        const I64_UPPER_EXCLUSIVE: f64 = 9_223_372_036_854_775_808.0;
+        if !q.is_finite() || q < i64::MIN as f64 || q >= I64_UPPER_EXCLUSIVE {
+            return None;
+        }
         // Truncating cast rounds toward zero; adjust downward for negatives so
-        // this is a true floor. Saturating-cast semantics keep extreme inputs
-        // well-defined.
+        // this is a true floor.
         let mut cell = q as i64;
         if (cell as f64) > q {
-            cell -= 1;
+            cell = cell.checked_sub(1)?;
         }
         let local = value - cell as f64 * self.cell_size;
-        (cell, local)
+        if !local.is_finite() || local < 0.0 || local >= self.cell_size {
+            return None;
+        }
+        let mut local = local as f32;
+        if !local.is_finite() || local < 0.0 {
+            return None;
+        }
+        // Rounding the f64 remainder to f32 can land exactly on the next cell
+        // boundary. Canonicalize that representable rounding instead of
+        // returning an out-of-range local coordinate.
+        if local as f64 >= self.cell_size {
+            cell = cell.checked_add(1)?;
+            local = 0.0;
+        }
+        Some((cell, local))
     }
 
     /// Normalises one axis: folds a local offset back into `[0, cell_size)` and
     /// carries the whole-cell part into the integer index. Returns `None` if
     /// either the carry or the canonical local value is unrepresentable.
     fn carry_axis(&self, cell: i64, local: f32) -> Option<(i64, f32)> {
-        let (dcell, rem) = self.split_axis(local as f64);
-        if !rem.is_finite() || rem < 0.0 || rem >= self.cell_size {
-            return None;
-        }
+        let (dcell, rem) = self.split_axis(local as f64)?;
         let cell = (cell as i128).checked_add(dcell as i128)?;
         let cell = i64::try_from(cell).ok()?;
-        let rem = rem as f32;
-        if !rem.is_finite() || rem < 0.0 || rem as f64 >= self.cell_size {
-            return None;
-        }
         Some((cell, rem))
     }
 }
@@ -367,6 +396,37 @@ mod tests {
         assert!((back.x - pos.x).abs() < 1.0e-3);
         assert!((back.y - pos.y).abs() < 1.0e-3);
         assert!((back.z - pos.z).abs() < 1.0e-3);
+    }
+
+    #[test]
+    fn try_quantize_rejects_non_finite_and_out_of_domain_positions() {
+        let grid = FloatingOrigin::new(1.0);
+        assert!(grid
+            .try_quantize(WorldPos::new(f64::NAN, 0.0, 0.0))
+            .is_none());
+        assert!(grid
+            .try_quantize(WorldPos::new(f64::INFINITY, 0.0, 0.0))
+            .is_none());
+        assert!(grid
+            .try_quantize(WorldPos::new(f64::MAX, 0.0, 0.0))
+            .is_none());
+        assert!(grid
+            .try_quantize(WorldPos::new(f64::MIN, 0.0, 0.0))
+            .is_none());
+
+        let tiny_cells = FloatingOrigin::new(f64::MIN_POSITIVE);
+        assert!(tiny_cells
+            .try_quantize(WorldPos::new(1.0, 0.0, 0.0))
+            .is_none());
+    }
+
+    #[test]
+    fn try_recenter_to_preserves_origin_when_position_is_not_representable() {
+        let mut grid = FloatingOrigin::new(1.0).with_origin(GridCell::new(4, 5, 6));
+        assert!(grid
+            .try_recenter_to(WorldPos::new(f64::INFINITY, 0.0, 0.0))
+            .is_none());
+        assert_eq!(grid.origin(), GridCell::new(4, 5, 6));
     }
 
     #[test]
