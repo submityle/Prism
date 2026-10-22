@@ -21,6 +21,11 @@ pub enum WorldPartitionCapability {
     TraceReplay,
     /// Runtime data-layer activation and filtering.
     DataLayers,
+    /// Runtime selection and transition planning for already-derived HLOD clusters.
+    ///
+    /// This does not include proxy baking, asset streaming, scene residency, or
+    /// renderer submission; those remain part of the broader HLOD capability.
+    HlodSelection,
     /// Hierarchical distant proxies and HLOD generation/selection.
     HierarchicalLod,
     /// One-file-per-actor authoring and merge semantics.
@@ -50,6 +55,7 @@ impl WorldPartitionCapability {
                 | Self::CellEviction
                 | Self::TraceReplay
                 | Self::DataLayers
+                | Self::HlodSelection
                 | Self::CrossCellReferences
         )
     }
@@ -111,6 +117,7 @@ mod tests {
             WorldPartitionCapability::CellEviction,
             WorldPartitionCapability::TraceReplay,
             WorldPartitionCapability::DataLayers,
+            WorldPartitionCapability::HlodSelection,
             WorldPartitionCapability::CrossCellReferences,
         ] {
             assert!(capability.is_supported());
@@ -128,6 +135,19 @@ mod tests {
         assert_eq!(
             error,
             WorldPartitionCapabilityError::Unsupported { capability }
+        );
+    }
+
+    #[test]
+    fn hlod_selection_does_not_admit_full_hlod() {
+        assert!(WorldPartitionCapability::HlodSelection.is_supported());
+        assert_eq!(WorldPartitionCapability::HlodSelection.require(), Ok(()));
+        assert!(!WorldPartitionCapability::HierarchicalLod.is_supported());
+        assert_eq!(
+            WorldPartitionCapability::HierarchicalLod.require(),
+            Err(WorldPartitionCapabilityError::Unsupported {
+                capability: WorldPartitionCapability::HierarchicalLod,
+            })
         );
     }
 }

@@ -430,7 +430,7 @@ residency crate 驱动 scene §11.4 的「簇声明 + 切换契约」，代理�
 
 `pkg/prism_world_runtime/src/hlod_runtime.rs` 已实现有界的 `HlodRuntime`：按稳定 cluster id 排序 distance request、调用 `prism_world_residency::HlodCluster` 选择 representation，并返回切换 transition；活动 level 仅在整批 plan 成功后提交。规划器在排序后以相邻项检查重复请求，并用按请求数预留的临时 `Vec` 收集选择及待提交 level，避免为这两项工作另建 `BTreeSet`/`BTreeMap`；复杂度仍包含请求排序与 catalog/active-level 的有序树查找，不能描述成线性总成本。正确性回归覆盖确定性顺序、迟滞、重复输入及失败不提交状态。`pkg/prism_world_runtime/benches/hlod_plan.rs` 提供 release 稳态量具，覆盖 16/64/256/1,024 个 catalog/request；2026-10-22 Apple Silicon 共享主机一次诊断的 p50 为 23.95/26.06/30.34/109.83 ns/request，p95 为 51.40/26.39/30.92/110.79，p99 为 71.38/27.78/32.23/112.98。该量具无墙钟门槛，单机结果受系统负载影响，不构成受控基线或优化收益证明；仍缺 allocation/work-count 指标、受控 A/B 与代表性请求分布。
 
-此 runtime 仅消费已生成的 `HlodCluster` 声明并规划距离驱动的层级切换；不生成/烘焙代理、不计算屏幕空间误差、不接 scene residency、proxy asset streaming 或 renderer dither/fade，也不实现 §10.4 的物化穿透。因此它不等同于本章定义的完整 HLOD 产品链路，`WorldPartitionCapability::HierarchicalLod` 仍应保持不支持，直到这些边界有真实集成与验收。
+此 runtime 仅消费已生成的 `HlodCluster` 声明并规划距离驱动的层级切换；不生成/烘焙代理、不计算屏幕空间误差、不接 scene residency、proxy asset streaming 或 renderer dither/fade，也不实现 §10.4 的物化穿透。因此它不等同于本章定义的完整 HLOD 产品链路。能力门禁将这一边界显式拆成 `WorldPartitionCapability::HlodSelection`（已支持）与 `WorldPartitionCapability::HierarchicalLod`（仍不支持）；后者必须等代理生成、资产/驻留、渲染提交和物化穿透形成真实集成并完成验收后才能放行。
 
 ---
 
