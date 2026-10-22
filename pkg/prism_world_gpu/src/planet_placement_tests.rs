@@ -43,7 +43,11 @@ fn config() -> PlanetPlacementConfig {
 
 #[test]
 fn shader_uses_the_complete_limb_abi() {
-    let source = format!("{}\n{}", include_str!("shaders/planet_placement_u256.wgsl"), include_str!("shaders/planet_placement.wgsl"));
+    let source = format!(
+        "{}\n{}",
+        include_str!("shaders/planet_placement_u256.wgsl"),
+        include_str!("shaders/planet_placement.wgsl")
+    );
     let module = wgpu::naga::front::wgsl::parse_str(&source).expect("planet shader parses");
     wgpu::naga::valid::Validator::new(
         wgpu::naga::valid::ValidationFlags::all(),
@@ -192,12 +196,12 @@ fn capacity_math_is_checked_and_covers_all_bindings() {
         ..wgpu::Limits::downlevel_defaults()
     };
     assert!(validate_capacity(4, 81, u64::MAX, &limits).is_ok());
-    assert_eq!(validate_capacity(0, 0, 316, &limits), Ok(316));
+    assert_eq!(validate_capacity(0, 0, 352, &limits), Ok(352));
     assert_eq!(
         validate_capacity(1, 1, 300, &limits),
         Err(GpuPlanetPlacementError::Gpu(
             GpuScatterError::BufferBudgetExceeded {
-                required: 316,
+                required: 352,
                 limit: 300,
             }
         ))

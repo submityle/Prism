@@ -13,7 +13,8 @@ use wgpu::util::{BufferInitDescriptor, DeviceExt};
 use crate::gpu::{buffer_binding, storage_entry, uniform_entry};
 use crate::scatter::{check, dispatch};
 use crate::{
-    GpuContext, GpuPlanetPlacement, GpuPlanetPlacementError, GpuPlanetPlacementWorkBudget,
+    GpuContext, GpuPlanetPlacement, GpuPlanetPlacementError,
+    GpuPlanetPlacementRegistrationSnapshot, GpuPlanetPlacementWorkBudget,
 };
 
 const PARAM_BYTES: u64 = 64;
@@ -54,6 +55,86 @@ pub struct GpuPlanetPlacementDeletionWorkBudget {
 pub struct GpuPlanetPlacementDeletionUploadStats {
     pub uniform_bytes: u64,
     pub key_bytes: u64,
+}
+
+/// One native planetary-deletion buffer and its logical RHI import size.
+///
+/// Cloning this value clones a handle only; it does not allocate or copy GPU
+/// memory. The importing bridge must use the producer's original device.
+#[derive(Clone)]
+pub struct GpuPlanetPlacementDeletionBufferSnapshot {
+    buffer: wgpu::Buffer,
+    bytes: u64,
+}
+
+impl GpuPlanetPlacementDeletionBufferSnapshot {
+    /// Native buffer owned by the deletion producer.
+    #[must_use]
+    pub fn buffer(&self) -> &wgpu::Buffer {
+        &self.buffer
+    }
+
+    /// Exact logical byte size for graph import and binding validation.
+    #[must_use]
+    pub const fn bytes(&self) -> u64 {
+        self.bytes
+    }
+}
+
+/// Planetary full-key deletion compute pipeline, bindings, and dispatch.
+#[derive(Clone)]
+pub struct GpuPlanetPlacementDeletionStageSnapshot {
+    pipeline: wgpu::ComputePipeline,
+    bind_group: wgpu::BindGroup,
+    dispatch: [u32; 3],
+}
+
+impl GpuPlanetPlacementDeletionStageSnapshot {
+    /// Native deletion pipeline.
+    #[must_use]
+    pub fn pipeline(&self) -> &wgpu::ComputePipeline {
+        &self.pipeline
+    }
+
+    /// Native deletion bind group compatible with `pipeline`.
+    #[must_use]
+    pub fn bind_group(&self) -> &wgpu::BindGroup {
+        &self.bind_group
+    }
+
+    /// Dispatch dimensions for the uploaded request.
+    #[must_use]
+    pub const fn dispatch(&self) -> [u32; 3] {
+        self.dispatch
+    }
+}
+
+/// Complete native registration surface for one planetary deletion request.
+///
+/// `upstream` contains the six placement buffers/stages. `stage` is absent
+/// exactly when the request has no candidate slots; callers must still reset
+/// the deletion indirect instance count after copying the upstream arguments.
+/// This snapshot neither submits work nor retains resources through completion.
+#[derive(Clone)]
+pub struct GpuPlanetPlacementDeletionRegistrationSnapshot {
+    /// Generation of the exact placement request consumed by deletion.
+    pub request_generation: u64,
+    /// Logical candidate slots to filter.
+    pub candidate_count: u32,
+    /// Number of sorted full keys uploaded for this request.
+    pub key_count: u32,
+    /// Complete upstream placement registration surface.
+    pub upstream: GpuPlanetPlacementRegistrationSnapshot,
+    /// Request uniform buffer.
+    pub params: GpuPlanetPlacementDeletionBufferSnapshot,
+    /// Allocated full-key storage buffer; only `key_count * 48` bytes are live.
+    pub keys: GpuPlanetPlacementDeletionBufferSnapshot,
+    /// Filtered compact source-slot output.
+    pub compact: GpuPlanetPlacementDeletionBufferSnapshot,
+    /// Filtered four-word indirect arguments.
+    pub indirect: GpuPlanetPlacementDeletionBufferSnapshot,
+    /// Full-key deletion stage; absent for an empty candidate stream.
+    pub stage: Option<GpuPlanetPlacementDeletionStageSnapshot>,
 }
 
 /// Complete structural cache dependency for filtered planetary placement.
@@ -417,6 +498,51 @@ impl GpuPlanetPlacementDeletions {
         Ok(())
     }
 
+    /// Clones the complete planetary placement/deletion RHI registration
+    /// surface for the current request without submitting or copying buffers.
+    ///
+    /// The caller must register every buffer and compute stage on this
+    /// producer's original device, declare all accesses to its render graph,
+    /// preserve the signed-i128 upstream record ABI, and retain registrations
+    /// until submitted work completes. The snapshot does not itself provide
+    /// those lifecycle guarantees.
+    pub fn registration_snapshot(
+        &self,
+    ) -> Result<GpuPlanetPlacementDeletionRegistrationSnapshot, GpuPlanetPlacementDeletionError>
+    {
+        let request = self
+            .request
+            .as_ref()
+            .ok_or(GpuPlanetPlacementDeletionError::RequestNotUploaded)?;
+        if request.upstream_generation != self.placement.request_generation()
+            || request.words[0] != self.placement.candidate_count()
+            || request.key.draw_args != self.placement.draw_args()
+        {
+            return Err(GpuPlanetPlacementDeletionError::UpstreamChanged);
+        }
+        let upstream = self.placement.registration_snapshot()?;
+        let buffer = |buffer: &wgpu::Buffer, bytes| GpuPlanetPlacementDeletionBufferSnapshot {
+            buffer: buffer.clone(),
+            bytes,
+        };
+        let stage = (request.words[0] != 0).then(|| GpuPlanetPlacementDeletionStageSnapshot {
+            pipeline: self.pipeline.clone(),
+            bind_group: self.bind_group.clone(),
+            dispatch: [request.groups[0], request.groups[1], 1],
+        });
+        Ok(GpuPlanetPlacementDeletionRegistrationSnapshot {
+            request_generation: request.upstream_generation,
+            candidate_count: request.words[0],
+            key_count: request.words[1],
+            upstream,
+            params: buffer(&self.params, PARAM_BYTES),
+            keys: buffer(&self.keys, KEY_BYTES * self.max_keys.max(1) as u64),
+            compact: buffer(&self.compact, 4 * self.placement.capacity().max(1) as u64),
+            indirect: buffer(&self.indirect, 16),
+            stage,
+        })
+    }
+
     pub fn records(&self) -> &wgpu::Buffer {
         self.placement.records()
     }
@@ -449,6 +575,11 @@ impl GpuPlanetPlacementDeletions {
     }
     pub fn upload_stats(&self) -> GpuPlanetPlacementDeletionUploadStats {
         self.upload_stats
+    }
+
+    #[cfg(feature = "placement_rhi")]
+    pub(super) fn device_identity(&self) -> &std::sync::Arc<()> {
+        self.placement.device_identity()
     }
 }
 
