@@ -1603,6 +1603,110 @@ mod tests {
     }
 
     #[test]
+    fn planetary_finer_tiles_close_to_coarse_edges_on_all_faces() {
+        use crate::{HeightfieldLodSeamPlan, LodSeamLimits};
+
+        let config = PlanetMeshConfig::new(1_000_000, [0, 0, 1_000_000], 100.0).unwrap();
+        let seam_limits = LodSeamLimits {
+            max_segments: 8,
+            max_vertices: 128,
+            max_indices: 1024,
+            max_bytes: 16_384,
+        };
+        for face in CubeFace::ALL {
+            for edge in TileEdge::ALL {
+                let coarse_tile = TileKey::new(face, 2, 1, 1).unwrap();
+                let coarse_neighbor = coarse_tile.neighbor(edge);
+                let fine_tiles: Vec<_> = coarse_tile
+                    .children()
+                    .unwrap()
+                    .into_iter()
+                    .filter(|child| {
+                        let boundary_child = match edge {
+                            TileEdge::West => child.x() % 2 == 0,
+                            TileEdge::East => child.x() % 2 == 1,
+                            TileEdge::South => child.y() % 2 == 0,
+                            TileEdge::North => child.y() % 2 == 1,
+                        };
+                        boundary_child
+                    })
+                    .collect();
+                assert_eq!(fine_tiles.len(), 2, "{face:?} {edge:?}");
+
+                let mut resident = alloc::vec![coarse_neighbor, fine_tiles[0], fine_tiles[1]];
+                resident.sort_unstable();
+                let coarse_field = field(coarse_neighbor, 0);
+                let coarse_mesh =
+                    PlanetHeightfieldMesh::build(&coarse_field, config, LIMITS).unwrap();
+                for fine_tile in fine_tiles {
+                    let fine_field = field(fine_tile, 0);
+                    let plan = HeightfieldLodSeamPlan::build_strict_for_residency(
+                        fine_tile,
+                        8,
+                        &resident,
+                        seam_limits,
+                    )
+                    .unwrap();
+                    let transition = plan
+                        .transitions()
+                        .iter()
+                        .find(|transition| transition.neighbor() == coarse_neighbor)
+                        .unwrap_or_else(|| panic!("missing coarse transition: {face:?} {edge:?}"));
+                    let mut fine_mesh =
+                        PlanetHeightfieldMesh::build(&fine_field, config, LIMITS).unwrap();
+                    fine_mesh.apply_lod_seam_plan(&plan, 16_384).unwrap();
+                    fine_mesh.apply_lod_morph(&fine_field, &plan, 1.0).unwrap();
+
+                    let same_level_neighbor = fine_tile.neighbor(transition.edge());
+                    let neighbor_half = match transition.neighbor_edge() {
+                        TileEdge::West | TileEdge::East => same_level_neighbor.y() % 2,
+                        TileEdge::South | TileEdge::North => same_level_neighbor.x() % 2,
+                    };
+                    for fine_parameter in 0..=8_u32 {
+                        let local_half_parameter = f64::from(fine_parameter) * 0.5;
+                        let coarse_parameter = if transition.reversed() {
+                            f64::from(neighbor_half * 4) + 4.0 - local_half_parameter
+                        } else {
+                            f64::from(neighbor_half * 4) + local_half_parameter
+                        };
+                        let lower = coarse_parameter.floor() as u32;
+                        let upper = coarse_parameter.ceil() as u32;
+                        let fraction = coarse_parameter - f64::from(lower);
+                        let coarse_grid = |parameter| match transition.neighbor_edge() {
+                            TileEdge::West => [0, parameter],
+                            TileEdge::East => [8, parameter],
+                            TileEdge::South => [parameter, 0],
+                            TileEdge::North => [parameter, 8],
+                        };
+                        let coarse_a = coarse_grid(lower);
+                        let coarse_b = coarse_grid(upper);
+                        let coarse_position =
+                            |[x, y]: [u32; 2]| coarse_mesh.positions()[(y * 9 + x) as usize];
+                        let expected = core::array::from_fn::<_, 3, _>(|axis| {
+                            (f64::from(coarse_position(coarse_a)[axis])
+                                + (f64::from(coarse_position(coarse_b)[axis])
+                                    - f64::from(coarse_position(coarse_a)[axis]))
+                                    * fraction) as f32
+                        });
+                        let fine_grid = match transition.edge() {
+                            TileEdge::West => [0, fine_parameter],
+                            TileEdge::East => [8, fine_parameter],
+                            TileEdge::South => [fine_parameter, 0],
+                            TileEdge::North => [fine_parameter, 8],
+                        };
+                        let actual =
+                            fine_mesh.positions()[(fine_grid[1] * 9 + fine_grid[0]) as usize];
+                        assert_eq!(
+                            actual, expected,
+                            "{face:?} {edge:?} {fine_tile:?} t={fine_parameter}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn level_thirty_earth_patch_retains_submillimetre_detail() {
         let tile = TileKey::new(CubeFace::PositiveZ, 30, 1 << 29, 1 << 29).unwrap();
         let config = PlanetMeshConfig::new(6_371_000_000, [0, 0, 6_371_000_000], 0.001).unwrap();
