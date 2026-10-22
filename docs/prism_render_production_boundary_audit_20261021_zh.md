@@ -1,5 +1,7 @@
 # Prism 渲染生产路径边界审计与删除清单
 
+> **状态校正（2026-10-23）**：本文主体是 2026-10-21 的历史快照，以下依赖计数与部分实现描述需按本注更新。`pkg/prism_render_scene/Cargo.toml` 已将旧 Bevy 依赖改为 optional，并集中在显式 `legacy-bevy` feature（`default = []`）；同时移除了不存在的 `prism_render_material/bevy` feature 请求。当前工作树 `cargo check --offline --locked -p prism_render_scene` 通过，证明默认 feature 的依赖闭包可编译。**这不证明旧 Bevy adapter 已迁移，也不证明 `legacy-bevy` 可编译或 GPU/整帧验收通过。** 此外，当前 `DrawDecision` 已只有 `Draw`/`Skip`，未就绪管线走 skip，不再有文中所述 PSO placeholder 选择；Spine 白色 stand-in 仍作为显式 legacy constructor 存在，但 native production plugin 使用 `MeshPipelines::surface_encode`。原始迁移目标和真实 fallback 风险仍须分别按当前源码复核，不能把本注视为全渲染系统完成声明。
+
 审计日期：2026-10-21（Asia/Shanghai）
 审计目标：审计渲染生产路径中的 `bevy_*` 依赖、`TODO`、`placeholder`、`stand-in` 与静默 fallback，并给出可执行的删除顺序。
 本轮约束：只修改审计报告；不修改核心实现、不删除源码、不调整 manifest。
