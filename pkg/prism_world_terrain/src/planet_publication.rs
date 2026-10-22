@@ -10,9 +10,9 @@ use alloc::vec::Vec;
 use core::fmt;
 
 use crate::{
-    validate_planet_heightfield_edge, BakeError, BakeLimits, GridChange, HeightfieldTile,
-    PlanetHeightfieldBoundaryError, PlanetHeightfieldMesh, PlanetHeightfieldNormalNeighborhood,
-    PlanetMeshConfig, TileEdge, TileKey,
+    validate_planet_heightfield_edge, validate_planet_heightfield_lod_edge, BakeError, BakeLimits,
+    GridChange, HeightfieldTile, PlanetHeightfieldBoundaryError, PlanetHeightfieldMesh,
+    PlanetHeightfieldNormalNeighborhood, PlanetMeshConfig, TileEdge, TileKey,
 };
 
 /// Revision of the atomic planetary mesh publication contract.
@@ -718,6 +718,75 @@ fn validate_affected_boundaries(
             used = next;
         }
     }
+    for entry in &transaction.replacements {
+        let tile = entry.tile();
+        for edge in TileEdge::ALL {
+            let (same_level, neighbor_edge) = tile.neighbor_with_edge(edge);
+            if source_for(current, transaction, same_level).is_none() {
+                if let Some(coarse_tile) = same_level.parent() {
+                    if let Some(coarse) = source_for(current, transaction, coarse_tile) {
+                        validate_lod_boundary_budget(
+                            &entry.source,
+                            edge,
+                            coarse,
+                            &mut used,
+                            max_comparisons,
+                        )?;
+                    }
+                }
+            }
+            if let Ok(children) = same_level.children() {
+                for child in children
+                    .into_iter()
+                    .filter(|child| tile_child_touches_edge(*child, neighbor_edge))
+                {
+                    if transaction
+                        .replacements
+                        .binary_search_by_key(&child, |replacement| replacement.tile())
+                        .is_ok()
+                    {
+                        continue;
+                    }
+                    let Some(fine) = source_for(current, transaction, child) else {
+                        continue;
+                    };
+                    validate_lod_boundary_budget(
+                        fine,
+                        neighbor_edge,
+                        &entry.source,
+                        &mut used,
+                        max_comparisons,
+                    )?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_lod_boundary_budget(
+    fine: &HeightfieldTile,
+    edge: TileEdge,
+    coarse: &HeightfieldTile,
+    used: &mut u64,
+    limit: u64,
+) -> Result<(), PlanetMeshPublicationError> {
+    let side = fine.spec().samples_per_edge();
+    let comparisons = u64::from(side / 2 + 1);
+    let next = used
+        .checked_add(comparisons)
+        .ok_or(PlanetMeshPublicationError::AllocationFailed)?;
+    if next > limit {
+        return Err(PlanetMeshPublicationError::Boundary(
+            PlanetHeightfieldBoundaryError::ComparisonBudgetExceeded {
+                required: next,
+                limit,
+            },
+        ));
+    }
+    validate_planet_heightfield_lod_edge(fine, edge, coarse, comparisons)
+        .map_err(PlanetMeshPublicationError::Boundary)?;
+    *used = next;
     Ok(())
 }
 
@@ -782,12 +851,45 @@ mod tests {
         }
     }
 
+    struct FineEdgeMismatch {
+        tile: TileKey,
+    }
+
+    impl HeightSampler for FineEdgeMismatch {
+        type Error = Infallible;
+
+        fn sample_height(&self, sample: HeightSample) -> Result<HeightSampleValue, Self::Error> {
+            let mismatch =
+                sample.tile() == self.tile && sample.u_q16() == 0 && sample.v_q16() == 32_768;
+            Ok(HeightSampleValue::from_millimetres(if mismatch {
+                8
+            } else {
+                7
+            }))
+        }
+    }
+
     fn source(tile: TileKey, height: i64) -> Arc<HeightfieldTile> {
         Arc::new(
             HeightfieldTile::bake(
                 tile,
                 HeightfieldSpec::new(5, 1).unwrap(),
                 &Constant(height),
+                BakeLimits {
+                    max_samples: 25,
+                    max_bytes: 50,
+                },
+            )
+            .unwrap(),
+        )
+    }
+
+    fn source_with_lod_edge_mismatch(tile: TileKey) -> Arc<HeightfieldTile> {
+        Arc::new(
+            HeightfieldTile::bake(
+                tile,
+                HeightfieldSpec::new(5, 1).unwrap(),
+                &FineEdgeMismatch { tile },
                 BakeLimits {
                     max_samples: 25,
                     max_bytes: 50,
@@ -873,6 +975,136 @@ mod tests {
         let receipt = publication.commit(transaction).unwrap();
         assert_eq!(receipt.published_tiles, 2);
         assert_eq!(publication.generation(), 1);
+    }
+
+    #[test]
+    fn fine_and_coarse_tiles_publish_when_lod_samples_match() {
+        let coarse = TileKey::new(CubeFace::PositiveZ, 2, 1, 1).unwrap();
+        let fine_parent = coarse.neighbor(TileEdge::East);
+        let fine_edge = coarse.neighbor_with_edge(TileEdge::East).1;
+        let fine_tiles: Vec<_> = fine_parent
+            .children()
+            .unwrap()
+            .into_iter()
+            .filter(|child| child.x() % 2 == 0)
+            .collect();
+        assert_eq!(fine_tiles.len(), 2);
+        let mut resident = alloc::vec![coarse, fine_tiles[0], fine_tiles[1]];
+        resident.sort_unstable();
+
+        let mut publication = PlanetMeshPublication::new(limits());
+        let mut transaction = publication.begin();
+        transaction
+            .stage_build(
+                source(coarse, 7),
+                config(),
+                BakeLimits {
+                    max_samples: 25,
+                    max_bytes: 4096,
+                },
+                PlanetHeightfieldNormalNeighborhood::empty(),
+            )
+            .unwrap();
+        for fine in fine_tiles {
+            let plan = HeightfieldLodSeamPlan::build_strict_for_residency(
+                fine,
+                4,
+                &resident,
+                LodSeamLimits {
+                    max_segments: 4,
+                    max_vertices: 32,
+                    max_indices: 96,
+                    max_bytes: 4096,
+                },
+            )
+            .unwrap();
+            assert!(plan.transitions().iter().any(|transition| {
+                transition.edge() == fine_edge && transition.neighbor() == coarse
+            }));
+            transaction
+                .stage_build_with_lod_seam_plan(
+                    source(fine, 7),
+                    config(),
+                    BakeLimits {
+                        max_samples: 25,
+                        max_bytes: 4096,
+                    },
+                    PlanetHeightfieldNormalNeighborhood::empty(),
+                    &plan,
+                    4096,
+                )
+                .unwrap();
+        }
+        let receipt = publication.commit(transaction).unwrap();
+        assert_eq!(receipt.published_tiles, 3);
+    }
+
+    #[test]
+    fn fine_coarse_height_mismatch_rejects_atomic_publication() {
+        let coarse = TileKey::new(CubeFace::PositiveZ, 2, 1, 1).unwrap();
+        let fine_parent = coarse.neighbor(TileEdge::East);
+        let fine_tiles: Vec<_> = fine_parent
+            .children()
+            .unwrap()
+            .into_iter()
+            .filter(|child| child.x() % 2 == 0)
+            .collect();
+        let mut resident = alloc::vec![coarse, fine_tiles[0], fine_tiles[1]];
+        resident.sort_unstable();
+
+        let mut publication = PlanetMeshPublication::new(limits());
+        let mut transaction = publication.begin();
+        transaction
+            .stage_build(
+                source(coarse, 7),
+                config(),
+                BakeLimits {
+                    max_samples: 25,
+                    max_bytes: 4096,
+                },
+                PlanetHeightfieldNormalNeighborhood::empty(),
+            )
+            .unwrap();
+        for (index, fine) in fine_tiles.into_iter().enumerate() {
+            let plan = HeightfieldLodSeamPlan::build_strict_for_residency(
+                fine,
+                4,
+                &resident,
+                LodSeamLimits {
+                    max_segments: 4,
+                    max_vertices: 32,
+                    max_indices: 96,
+                    max_bytes: 4096,
+                },
+            )
+            .unwrap();
+            let source = if index == 0 {
+                source_with_lod_edge_mismatch(fine)
+            } else {
+                source(fine, 7)
+            };
+            transaction
+                .stage_build_with_lod_seam_plan(
+                    source,
+                    config(),
+                    BakeLimits {
+                        max_samples: 25,
+                        max_bytes: 4096,
+                    },
+                    PlanetHeightfieldNormalNeighborhood::empty(),
+                    &plan,
+                    4096,
+                )
+                .unwrap();
+        }
+        assert!(matches!(
+            publication.commit(transaction),
+            Err(PlanetMeshPublicationError::Boundary(
+                PlanetHeightfieldBoundaryError::HeightMismatch { .. }
+            ))
+        ));
+        assert_eq!(publication.generation(), 0);
+        assert!(publication.meshes().is_empty());
     }
 
     #[test]

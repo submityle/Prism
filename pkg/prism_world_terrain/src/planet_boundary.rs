@@ -32,6 +32,11 @@ pub enum PlanetHeightfieldBoundaryError {
         /// Right decoded height in millimetres.
         right_mm: i128,
     },
+    /// A 2:1 LOD edge uses a sample count that cannot map exact midpoints.
+    InvalidLodResolution {
+        /// Edge sample count on both tiles.
+        samples: u32,
+    },
 }
 
 impl fmt::Display for PlanetHeightfieldBoundaryError {
@@ -54,6 +59,10 @@ impl fmt::Display for PlanetHeightfieldBoundaryError {
             } => write!(
                 f,
                 "heightfield edge sample {index} differs: {left_mm} vs {right_mm} mm"
+            ),
+            Self::InvalidLodResolution { samples } => write!(
+                f,
+                "2:1 heightfield LOD edge requires an odd sample count, got {samples}"
             ),
         }
     }
@@ -118,6 +127,73 @@ pub fn validate_planet_heightfield_edge(
     Ok(())
 }
 
+/// Validates coincident decoded heights where a fine tile meets a 2:1 coarse tile.
+///
+/// Only the fine edge's even-indexed samples coincide with coarse samples and
+/// are compared. Child-half and cube-face orientation are derived from integer
+/// tile adjacency; no floating-point position comparisons are used. The full
+/// comparison count is admitted before reading either edge.
+pub fn validate_planet_heightfield_lod_edge(
+    fine: &HeightfieldTile,
+    edge: TileEdge,
+    coarse: &HeightfieldTile,
+    max_comparisons: u64,
+) -> Result<(), PlanetHeightfieldBoundaryError> {
+    let side = fine.spec().samples_per_edge();
+    if side != coarse.spec().samples_per_edge() {
+        return Err(PlanetHeightfieldBoundaryError::ResolutionMismatch {
+            left: side,
+            right: coarse.spec().samples_per_edge(),
+        });
+    }
+    let segments = side.saturating_sub(1);
+    if segments < 2 || !segments.is_multiple_of(2) {
+        return Err(PlanetHeightfieldBoundaryError::InvalidLodResolution { samples: side });
+    }
+    let (same_level_neighbor, coarse_edge, _) = fine
+        .tile()
+        .neighbor_edge_index(edge, side, 0)
+        .ok_or(PlanetHeightfieldBoundaryError::TileMismatch)?;
+    if same_level_neighbor.parent() != Some(coarse.tile()) {
+        return Err(PlanetHeightfieldBoundaryError::TileMismatch);
+    }
+    let required = u64::from(segments / 2 + 1);
+    if required > max_comparisons {
+        return Err(PlanetHeightfieldBoundaryError::ComparisonBudgetExceeded {
+            required,
+            limit: max_comparisons,
+        });
+    }
+    let child_half = match coarse_edge {
+        TileEdge::West | TileEdge::East => same_level_neighbor.y() % 2,
+        TileEdge::South | TileEdge::North => same_level_neighbor.x() % 2,
+    };
+    for fine_index in (0..=segments).step_by(2) {
+        let (mapped_neighbor, mapped_edge, mapped_index) = fine
+            .tile()
+            .neighbor_edge_index(edge, side, fine_index)
+            .ok_or(PlanetHeightfieldBoundaryError::TileMismatch)?;
+        if mapped_neighbor != same_level_neighbor || mapped_edge != coarse_edge {
+            return Err(PlanetHeightfieldBoundaryError::TileMismatch);
+        }
+        let coarse_index = child_half * (segments / 2) + mapped_index / 2;
+        let fine_mm = fine
+            .height_mm(edge_coordinate(edge, side, fine_index))
+            .ok_or(PlanetHeightfieldBoundaryError::TileMismatch)?;
+        let coarse_mm = coarse
+            .height_mm(edge_coordinate(coarse_edge, side, coarse_index))
+            .ok_or(PlanetHeightfieldBoundaryError::TileMismatch)?;
+        if fine_mm != coarse_mm {
+            return Err(PlanetHeightfieldBoundaryError::HeightMismatch {
+                index: fine_index,
+                left_mm: fine_mm,
+                right_mm: coarse_mm,
+            });
+        }
+    }
+    Ok(())
+}
+
 fn edge_coordinate(edge: TileEdge, side: u32, index: u32) -> [u32; 2] {
     match edge {
         TileEdge::West => [0, index],
@@ -129,6 +205,7 @@ fn edge_coordinate(edge: TileEdge, side: u32, index: u32) -> [u32; 2] {
 
 #[cfg(test)]
 mod tests {
+    use alloc::vec::Vec;
     use core::convert::Infallible;
 
     use super::*;
@@ -157,6 +234,76 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    struct LodEdgeOracle {
+        coarse: TileKey,
+        coarse_edge: TileEdge,
+        fine: TileKey,
+        fine_edge: TileEdge,
+        side: u32,
+    }
+
+    impl HeightSampler for LodEdgeOracle {
+        type Error = Infallible;
+
+        fn sample_height(&self, sample: HeightSample) -> Result<HeightSampleValue, Self::Error> {
+            let node = |value: u16| {
+                ((u64::from(value) * u64::from(self.side - 1) + 32_767) / 65_535) as u32
+            };
+            let edge_index = |edge: TileEdge| match edge {
+                TileEdge::West | TileEdge::East => node(sample.v_q16()),
+                TileEdge::South | TileEdge::North => node(sample.u_q16()),
+            };
+            let on_edge = |edge: TileEdge| match edge {
+                TileEdge::West => sample.u_q16() == 0,
+                TileEdge::East => sample.u_q16() == u16::MAX,
+                TileEdge::South => sample.v_q16() == 0,
+                TileEdge::North => sample.v_q16() == u16::MAX,
+            };
+            let coarse_value = |index: u32| 1_000 + i64::from(index) * 37;
+
+            if sample.tile() == self.coarse && on_edge(self.coarse_edge) {
+                return Ok(HeightSampleValue::from_millimetres(coarse_value(
+                    edge_index(self.coarse_edge),
+                )));
+            }
+            if sample.tile() == self.fine && on_edge(self.fine_edge) {
+                let fine_index = edge_index(self.fine_edge);
+                if fine_index % 2 == 0 {
+                    let (same_level, coarse_edge, mapped_index) = self
+                        .fine
+                        .neighbor_edge_index(self.fine_edge, self.side, fine_index)
+                        .expect("oracle boundary mapping");
+                    let child_half = match coarse_edge {
+                        TileEdge::West | TileEdge::East => same_level.y() % 2,
+                        TileEdge::South | TileEdge::North => same_level.x() % 2,
+                    };
+                    return Ok(HeightSampleValue::from_millimetres(coarse_value(
+                        child_half * ((self.side - 1) / 2) + mapped_index / 2,
+                    )));
+                }
+            }
+            Ok(HeightSampleValue::from_millimetres(
+                i64::from(sample.u_q16() / 4_096) + i64::from(sample.v_q16() / 4_096),
+            ))
+        }
+    }
+
+    fn lod_edge_tiles(coarse: TileKey, edge: TileEdge) -> (TileKey, TileEdge, TileKey) {
+        let (fine_parent, fine_edge) = coarse.neighbor_with_edge(edge);
+        let fine = fine_parent
+            .children()
+            .unwrap()
+            .into_iter()
+            .find(|child| match fine_edge {
+                TileEdge::West => child.x() % 2 == 0,
+                TileEdge::East => child.x() % 2 == 1,
+                TileEdge::South => child.y() % 2 == 0,
+                TileEdge::North => child.y() % 2 == 1,
+            })
+            .unwrap();
+        (fine, fine_edge, fine_parent)
     }
 
     #[test]
@@ -196,6 +343,117 @@ mod tests {
         let wrong = tile(TileKey::root(CubeFace::PositiveZ), 17);
         assert_eq!(
             validate_planet_heightfield_edge(&left, TileEdge::East, &wrong, 5),
+            Err(PlanetHeightfieldBoundaryError::TileMismatch)
+        );
+    }
+
+    #[test]
+    fn lod_edges_validate_coincident_samples_across_faces_and_child_halves() {
+        for face in CubeFace::ALL {
+            for edge in TileEdge::ALL {
+                let coarse = TileKey::new(face, 2, 1, 1).unwrap();
+                let fine_parent = coarse.neighbor(edge);
+                let fine_edge = coarse.neighbor_with_edge(edge).1;
+                let children: Vec<_> = fine_parent
+                    .children()
+                    .unwrap()
+                    .into_iter()
+                    .filter(|child| match fine_edge {
+                        TileEdge::West => child.x() % 2 == 0,
+                        TileEdge::East => child.x() % 2 == 1,
+                        TileEdge::South => child.y() % 2 == 0,
+                        TileEdge::North => child.y() % 2 == 1,
+                    })
+                    .collect();
+                assert_eq!(children.len(), 2, "{face:?} {edge:?}");
+                let coarse_field = tile(coarse, 7);
+                for child in children {
+                    assert_eq!(child.neighbor(fine_edge).parent(), Some(coarse));
+                    let fine_field = tile(child, 7);
+                    validate_planet_heightfield_lod_edge(&fine_field, fine_edge, &coarse_field, 3)
+                        .unwrap_or_else(|error| panic!("{face:?} {edge:?} {child:?}: {error:?}"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn lod_edges_match_nonconstant_oracle_with_reversed_cross_face_mapping() {
+        let mut checked_reversed_cross_face = false;
+        for face in CubeFace::ALL {
+            for edge in TileEdge::ALL {
+                let (x, y) = match edge {
+                    TileEdge::West => (0, 1),
+                    TileEdge::East => (3, 1),
+                    TileEdge::South => (1, 0),
+                    TileEdge::North => (1, 3),
+                };
+                let coarse = TileKey::new(face, 2, x, y).unwrap();
+                let (fine, fine_edge, _) = lod_edge_tiles(coarse, edge);
+                let coarse_edge = fine.neighbor_edge_index(fine_edge, 5, 0).unwrap().1;
+                let coarse_field = HeightfieldTile::bake(
+                    coarse,
+                    HeightfieldSpec::new(5, 1).unwrap(),
+                    &LodEdgeOracle {
+                        coarse,
+                        coarse_edge,
+                        fine,
+                        fine_edge,
+                        side: 5,
+                    },
+                    BakeLimits {
+                        max_samples: 25,
+                        max_bytes: 50,
+                    },
+                )
+                .unwrap();
+                let fine_field = HeightfieldTile::bake(
+                    fine,
+                    HeightfieldSpec::new(5, 1).unwrap(),
+                    &LodEdgeOracle {
+                        coarse,
+                        coarse_edge,
+                        fine,
+                        fine_edge,
+                        side: 5,
+                    },
+                    BakeLimits {
+                        max_samples: 25,
+                        max_bytes: 50,
+                    },
+                )
+                .unwrap();
+                validate_planet_heightfield_lod_edge(&fine_field, fine_edge, &coarse_field, 3)
+                    .unwrap_or_else(|error| panic!("{face:?} {edge:?}: {error:?}"));
+                if coarse.face() != fine.face()
+                    && fine.neighbor_edge_index(fine_edge, 5, 0).unwrap().2 != 0
+                {
+                    checked_reversed_cross_face = true;
+                }
+            }
+        }
+        assert!(checked_reversed_cross_face);
+    }
+
+    #[test]
+    fn lod_edge_mismatch_and_budget_fail_closed() {
+        let coarse = TileKey::new(CubeFace::PositiveZ, 2, 1, 1).unwrap();
+        let fine = coarse.children().unwrap()[3];
+        let coarse_field = tile(coarse, 0);
+        let fine_field = tile(fine, 1);
+        assert_eq!(
+            validate_planet_heightfield_lod_edge(&fine_field, TileEdge::West, &coarse_field, 2),
+            Err(PlanetHeightfieldBoundaryError::ComparisonBudgetExceeded {
+                required: 3,
+                limit: 2,
+            })
+        );
+        assert!(matches!(
+            validate_planet_heightfield_lod_edge(&fine_field, TileEdge::West, &coarse_field, 3),
+            Err(PlanetHeightfieldBoundaryError::HeightMismatch { .. })
+        ));
+        assert_eq!(
+            validate_planet_heightfield_lod_edge(&fine_field, TileEdge::North, &coarse_field, 3),
             Err(PlanetHeightfieldBoundaryError::TileMismatch)
         );
     }
