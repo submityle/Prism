@@ -8,7 +8,9 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::fmt;
 
-use prism_world_residency::{HlodCluster, HlodError, LodTransition};
+use prism_world_residency::{
+    HlodBakeOutput, HlodCluster, HlodError, HlodRepresentation, LodTransition,
+};
 
 /// Revision of the runtime HLOD selection contract.
 pub const HLOD_RUNTIME_SELECTION_VERSION: u32 = 1;
@@ -114,6 +116,18 @@ pub enum HlodRuntimeError {
         /// Stable identity that was already present.
         cluster_id: u64,
     },
+    /// A representation identity was inserted more than once.
+    DuplicateRepresentation {
+        /// Stable identity that was already present.
+        representation_id: u64,
+    },
+    /// A representation refers to a cluster that is not part of the catalog.
+    RepresentationClusterMissing {
+        /// Stable representation identity with the invalid reference.
+        representation_id: u64,
+        /// Missing cluster identity.
+        cluster_id: u64,
+    },
     /// A request named a cluster that is not in the catalog.
     UnknownCluster {
         /// Stable identity absent from the catalog.
@@ -146,6 +160,16 @@ impl fmt::Display for HlodRuntimeError {
             Self::DuplicateCluster { cluster_id } => {
                 write!(f, "duplicate HLOD cluster {cluster_id}")
             }
+            Self::DuplicateRepresentation { representation_id } => {
+                write!(f, "duplicate HLOD representation {representation_id}")
+            }
+            Self::RepresentationClusterMissing {
+                representation_id,
+                cluster_id,
+            } => write!(
+                f,
+                "HLOD representation {representation_id} refers to missing cluster {cluster_id}"
+            ),
             Self::UnknownCluster { cluster_id } => write!(f, "unknown HLOD cluster {cluster_id}"),
             Self::DuplicateRequest { cluster_id } => {
                 write!(f, "duplicate HLOD request {cluster_id}")
@@ -169,6 +193,7 @@ impl From<HlodError> for HlodRuntimeError {
 pub struct HlodRuntime {
     budget: HlodSelectionBudget,
     clusters: BTreeMap<u64, HlodCluster>,
+    representations: BTreeMap<u64, HlodRepresentation>,
     active_levels: BTreeMap<u64, usize>,
 }
 
@@ -178,6 +203,7 @@ impl HlodRuntime {
         Self {
             budget,
             clusters: BTreeMap::new(),
+            representations: BTreeMap::new(),
             active_levels: BTreeMap::new(),
         }
     }
@@ -204,10 +230,67 @@ impl HlodRuntime {
         Ok(())
     }
 
+    /// Inserts a complete deterministic bake atomically.
+    ///
+    /// The bake's cluster and representation identities are validated against
+    /// the existing catalog before any state is committed. This keeps a
+    /// failed reload from leaving a partially visible HLOD catalog.
+    pub fn insert_bake(&mut self, bake: HlodBakeOutput) -> Result<(), HlodRuntimeError> {
+        let required_clusters = self
+            .clusters
+            .len()
+            .checked_add(bake.clusters().len())
+            .ok_or(HlodRuntimeError::ArithmeticOverflow)?;
+        if required_clusters > self.budget.max_clusters {
+            return Err(HlodRuntimeError::ClusterCapacityExceeded {
+                limit: self.budget.max_clusters,
+            });
+        }
+
+        let mut next_clusters = self.clusters.clone();
+        let mut next_representations = self.representations.clone();
+        for cluster in bake.clusters() {
+            if next_clusters.contains_key(&cluster.id()) {
+                return Err(HlodRuntimeError::DuplicateCluster {
+                    cluster_id: cluster.id(),
+                });
+            }
+            next_clusters.insert(cluster.id(), cluster.clone());
+        }
+        for representation in bake.representations() {
+            if next_representations.contains_key(&representation.id()) {
+                return Err(HlodRuntimeError::DuplicateRepresentation {
+                    representation_id: representation.id(),
+                });
+            }
+            if !next_clusters.contains_key(&representation.cluster_id()) {
+                return Err(HlodRuntimeError::RepresentationClusterMissing {
+                    representation_id: representation.id(),
+                    cluster_id: representation.cluster_id(),
+                });
+            }
+            next_representations.insert(representation.id(), *representation);
+        }
+        self.clusters = next_clusters;
+        self.representations = next_representations;
+        Ok(())
+    }
+
+    /// Returns a baked representation descriptor by its selected asset key.
+    #[must_use]
+    pub fn representation(&self, asset_key: u64) -> Option<&HlodRepresentation> {
+        self.representations.get(&asset_key)
+    }
+
     /// Removes a cluster and any remembered hysteresis state.
     pub fn remove(&mut self, cluster_id: u64) -> Option<HlodCluster> {
         self.active_levels.remove(&cluster_id);
-        self.clusters.remove(&cluster_id)
+        let removed = self.clusters.remove(&cluster_id);
+        if removed.is_some() {
+            self.representations
+                .retain(|_, representation| representation.cluster_id() != cluster_id);
+        }
+        removed
     }
 
     /// Returns the current active level, if the cluster has been selected.
@@ -298,7 +381,9 @@ impl HlodRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use prism_world_residency::HlodLevel;
+    use prism_world_residency::{
+        bake_hlod, HlodBakeBudget, HlodBakeConfig, HlodLevel, HlodProxyRecord,
+    };
 
     fn budget() -> HlodSelectionBudget {
         HlodSelectionBudget::new(2, 2, 2 * core::mem::size_of::<HlodSelection>()).unwrap()
@@ -415,6 +500,81 @@ mod tests {
                 ])
                 .unwrap_err(),
             HlodRuntimeError::DuplicateRequest { cluster_id: 1 }
+        );
+    }
+
+    #[test]
+    fn baked_catalog_is_inserted_and_representation_is_queryable() {
+        let bake = bake_hlod(
+            HlodBakeConfig::new(2, 2, 100, 10, 77, HlodBakeBudget::new(4, 2, 4, 4 * 1024)),
+            &[
+                HlodProxyRecord {
+                    id: 2,
+                    center: [2.0, 0.0, 0.0],
+                    radius: 1.0,
+                    source_hash: 20,
+                },
+                HlodProxyRecord {
+                    id: 1,
+                    center: [0.0, 0.0, 0.0],
+                    radius: 1.0,
+                    source_hash: 10,
+                },
+            ],
+        )
+        .unwrap();
+        let expected_asset_key = bake.representations()[0].id();
+        let mut runtime = HlodRuntime::new(
+            HlodSelectionBudget::new(2, 1, core::mem::size_of::<HlodSelection>()).unwrap(),
+        );
+        runtime.insert_bake(bake).unwrap();
+        let cluster_id = runtime
+            .representation(expected_asset_key)
+            .unwrap()
+            .cluster_id();
+        let plan = runtime
+            .plan(&[HlodDistanceRequest {
+                cluster_id,
+                distance: 0,
+            }])
+            .unwrap();
+        assert_eq!(plan.selections()[0].asset_key, expected_asset_key);
+        assert_eq!(
+            runtime
+                .representation(plan.selections()[0].asset_key)
+                .unwrap()
+                .cluster_id(),
+            cluster_id
+        );
+    }
+
+    #[test]
+    fn bake_insert_is_atomic_on_duplicate_representation() {
+        let bake = bake_hlod(
+            HlodBakeConfig::new(1, 1, 1, 1, 9, HlodBakeBudget::new(1, 1, 1, 4096)),
+            &[HlodProxyRecord {
+                id: 1,
+                center: [0.0; 3],
+                radius: 1.0,
+                source_hash: 1,
+            }],
+        )
+        .unwrap();
+        let representation = *bake.representations().first().unwrap();
+        let mut runtime = HlodRuntime::new(
+            HlodSelectionBudget::new(2, 1, core::mem::size_of::<HlodSelection>()).unwrap(),
+        );
+        runtime.insert_bake(bake.clone()).unwrap();
+        let error = runtime.insert_bake(bake).unwrap_err();
+        assert_eq!(
+            error,
+            HlodRuntimeError::DuplicateCluster {
+                cluster_id: representation.cluster_id(),
+            }
+        );
+        assert_eq!(
+            runtime.representation(representation.id()),
+            Some(&representation)
         );
     }
 }
