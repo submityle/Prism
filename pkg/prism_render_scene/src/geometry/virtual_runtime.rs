@@ -12,7 +12,7 @@ use std::sync::Arc;
 use bevy_ecs::prelude::Resource;
 use prism_render_architecture::virtual_geometry::{
     GeometryPageKey, VirtualGeometryAsset, VirtualGeometryAssetError, VirtualGeometryClusterRecord,
-    VirtualGeometryPageRecord,
+    VirtualGeometryPageRecord, VirtualGeometryPageStream,
 };
 use thiserror::Error;
 
@@ -216,6 +216,17 @@ impl VirtualGeometryRuntimeRegistry {
         candidate: VirtualGeometryAsset,
         content_revision: VirtualGeometryContentRevision,
     ) -> Result<VirtualGeometryAssetHandle, VirtualGeometryRegistryError> {
+        self.register_shared(Arc::new(candidate), content_revision)
+    }
+
+    /// Validates and registers an immutable shared asset without copying its
+    /// page payloads. The same allocation can be retained by page-streaming
+    /// sources while this registry owns the live publication.
+    pub fn register_shared(
+        &mut self,
+        candidate: Arc<VirtualGeometryAsset>,
+        content_revision: VirtualGeometryContentRevision,
+    ) -> Result<VirtualGeometryAssetHandle, VirtualGeometryRegistryError> {
         candidate
             .validate()
             .map_err(VirtualGeometryRegistryError::InvalidAsset)?;
@@ -240,6 +251,16 @@ impl VirtualGeometryRuntimeRegistry {
         &mut self,
         current: &VirtualGeometryAssetHandle,
         candidate: VirtualGeometryAsset,
+        content_revision: VirtualGeometryContentRevision,
+    ) -> Result<VirtualGeometryAssetHandle, VirtualGeometryRegistryError> {
+        self.replace_shared(current, Arc::new(candidate), content_revision)
+    }
+
+    /// Atomically replaces a publication using a shared immutable candidate.
+    pub fn replace_shared(
+        &mut self,
+        current: &VirtualGeometryAssetHandle,
+        candidate: Arc<VirtualGeometryAsset>,
         content_revision: VirtualGeometryContentRevision,
     ) -> Result<VirtualGeometryAssetHandle, VirtualGeometryRegistryError> {
         self.validate_asset_handle(current)?;
@@ -277,6 +298,17 @@ impl VirtualGeometryRuntimeRegistry {
         self.assets.get(&asset_id).map(|published| {
             self.handle(asset_id, published.generation, published.content_revision)
         })
+    }
+
+    /// Returns the exact immutable asset allocation held by a live handle.
+    /// Existing streams may retain this `Arc` across a later replacement; all
+    /// publication of their results must still validate the handle generation.
+    pub fn asset_shared(
+        &self,
+        handle: &VirtualGeometryAssetHandle,
+    ) -> Result<Arc<VirtualGeometryAsset>, VirtualGeometryRegistryError> {
+        self.validate_asset_handle(handle)
+            .map(|published| Arc::clone(&published.asset))
     }
 
     /// Resolves a page key to a handle tied to the supplied live generation.
@@ -440,7 +472,7 @@ impl VirtualGeometryRuntimeRegistry {
 }
 
 fn prepare_publication(
-    candidate: VirtualGeometryAsset,
+    candidate: Arc<VirtualGeometryAsset>,
     content_revision: VirtualGeometryContentRevision,
     generation: VirtualGeometryGeneration,
 ) -> PublishedAsset {
@@ -453,7 +485,7 @@ fn prepare_publication(
     PublishedAsset {
         generation,
         content_revision,
-        asset: Arc::new(candidate),
+        asset: candidate,
         page_indices,
     }
 }
@@ -546,6 +578,52 @@ mod tests {
         let descriptor = registry.cluster_descriptor(&cluster).unwrap();
         assert_eq!(descriptor.page, key);
         assert_eq!(descriptor.vertex_count, 3);
+    }
+
+    #[test]
+    fn shared_registration_and_lookup_preserve_immutable_asset_allocation() {
+        let mut registry = VirtualGeometryRuntimeRegistry::new();
+        let shared = Arc::new(asset(19, 7));
+        let handle = registry
+            .register_shared(Arc::clone(&shared), revision(7))
+            .expect("shared asset registration");
+
+        let resolved = registry
+            .asset_shared(&handle)
+            .expect("live generation resolves shared asset");
+        assert!(Arc::ptr_eq(&shared, &resolved));
+        assert_eq!(Arc::strong_count(&shared), 3);
+    }
+
+    #[test]
+    fn replacement_rejects_old_stream_identity_while_stream_retains_source_bytes() {
+        let mut registry = VirtualGeometryRuntimeRegistry::new();
+        let old_source = Arc::new(asset(20, 8));
+        let old_handle = registry
+            .register_shared(Arc::clone(&old_source), revision(8))
+            .expect("initial shared registration");
+        let stream = VirtualGeometryPageStream::from_shared_asset(
+            registry.asset_shared(&old_handle).expect("live old source"),
+            2,
+            2,
+        )
+        .expect("stream shares validated asset");
+
+        let replacement = Arc::new(asset(20, 9));
+        let new_handle = registry
+            .replace_shared(&old_handle, Arc::clone(&replacement), revision(9))
+            .expect("atomic shared replacement");
+
+        assert_eq!(Arc::strong_count(&old_source), 2);
+        assert!(matches!(
+            registry.page_descriptor_by_key(&old_handle, GeometryPageKey::new(20, 0)),
+            Err(VirtualGeometryRegistryError::StaleHandle)
+        ));
+        assert!(Arc::ptr_eq(
+            &replacement,
+            &registry.asset_shared(&new_handle).expect("new generation")
+        ));
+        assert_eq!(stream.resident_count(), 0);
     }
 
     #[test]

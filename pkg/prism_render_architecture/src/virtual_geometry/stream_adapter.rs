@@ -1,6 +1,7 @@
 //! Adapter from [`VirtualGeometryAsset`] pages to the shared page streamer.
 
 use alloc::collections::BTreeMap;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use crate::compression::gdeflate::{gdeflate_decompress, GDeflateError};
@@ -16,19 +17,23 @@ use super::GeometryPageKey;
 /// A virtual-geometry page source that retains stored pages and decodes only
 /// when the residency manager admits a page.
 struct AssetPageSource {
-    pages: BTreeMap<GeometryPageKey, VirtualGeometryPage>,
-    clusters: Vec<super::asset::VirtualGeometryClusterRecord>,
+    asset: Arc<VirtualGeometryAsset>,
     page_words: u32,
     errors: BTreeMap<GeometryPageKey, VirtualGeometryStreamingError>,
 }
 
 impl PageSource<GeometryPageKey> for AssetPageSource {
     fn load(&mut self, key: GeometryPageKey) -> Vec<u32> {
-        let Some(page) = self.pages.get(&key) else {
+        let Ok(page_index) = self
+            .asset
+            .pages
+            .binary_search_by_key(&key, |page| page.record.key)
+        else {
             self.errors
                 .insert(key, VirtualGeometryStreamingError::MissingPage(key));
             return Vec::new();
         };
+        let page = &self.asset.pages[page_index];
         let decoded = match decode_page_payload(page) {
             Ok(decoded) => decoded,
             Err(error) => {
@@ -60,7 +65,7 @@ impl PageSource<GeometryPageKey> for AssetPageSource {
             );
             return Vec::new();
         };
-        let Some(clusters) = self.clusters.get(cluster_start..cluster_end) else {
+        let Some(clusters) = self.asset.clusters.get(cluster_start..cluster_end) else {
             self.errors.insert(
                 key,
                 VirtualGeometryStreamingError::InvalidAsset(
@@ -156,10 +161,21 @@ pub struct VirtualGeometryPageStream {
 }
 
 impl VirtualGeometryPageStream {
-    /// Creates a stream from a validated asset. Stored page payloads are
-    /// decompressed and their cluster payloads validated only when admitted.
+    /// Creates a stream from an owned asset. Stored page payloads remain in
+    /// the asset allocation and are decoded only when admitted.
     pub fn from_asset(
         asset: VirtualGeometryAsset,
+        physical_capacity: u32,
+        resident_budget: usize,
+    ) -> Result<Self, VirtualGeometryStreamingError> {
+        Self::from_shared_asset(Arc::new(asset), physical_capacity, resident_budget)
+    }
+
+    /// Creates a stream sharing the immutable asset allocation with its
+    /// publisher. This avoids duplicating every stored page and descriptor
+    /// while allowing an in-flight stream to retain the exact source revision.
+    pub fn from_shared_asset(
+        asset: Arc<VirtualGeometryAsset>,
         physical_capacity: u32,
         resident_budget: usize,
     ) -> Result<Self, VirtualGeometryStreamingError> {
@@ -169,17 +185,11 @@ impl VirtualGeometryPageStream {
                 asset.header.page_size,
             ));
         }
-        let pages = asset
-            .pages
-            .into_iter()
-            .map(|page| (page.record.key, page))
-            .collect();
         let page_words = asset.header.page_size / 4;
         Ok(Self {
             manager: PageStreamManager::new(physical_capacity, page_words, resident_budget),
             source: AssetPageSource {
-                pages,
-                clusters: asset.clusters,
+                asset,
                 page_words,
                 errors: BTreeMap::new(),
             },
@@ -291,6 +301,7 @@ impl From<VirtualGeometryAssetError> for VirtualGeometryStreamingError {
 
 #[cfg(test)]
 mod tests {
+    use alloc::sync::Arc;
     use alloc::vec;
 
     use super::*;
@@ -357,7 +368,10 @@ mod tests {
     #[test]
     fn adapter_feeds_shared_storage_with_word_padding() {
         let key = GeometryPageKey::new(4, 0);
-        let mut stream = VirtualGeometryPageStream::from_asset(asset(), 2, 2).expect("valid asset");
+        let shared = Arc::new(asset());
+        let mut stream = VirtualGeometryPageStream::from_shared_asset(Arc::clone(&shared), 2, 2)
+            .expect("valid shared asset");
+        assert!(Arc::ptr_eq(&shared, &stream.source.asset));
         let mut requests = RequestBatch::new();
         requests.record(key, 5.0);
         let report = stream.reconcile(&requests, 1);
