@@ -432,7 +432,9 @@ impl PlanetPlacementRenderGraphPlan {
 
     /// Lowers the upstream placement and full-key deletion stages, including
     /// the upstream-indirect copy/reset and deletion output hazards.
-    fn lower_deletions(
+    /// Lowers the upstream placement and full-key deletion stages, including
+    /// the upstream-indirect copy/reset and deletion output hazards.
+    pub fn lower_deletions(
         snapshot: &GpuPlanetPlacementDeletionRegistrationSnapshot,
     ) -> Result<Self, PlanetPlacementRhiError> {
         let mut graph = GpuFrameGraphBuilder::default();

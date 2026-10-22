@@ -37,7 +37,10 @@ visibility/mesh decoder，也没有跨 sector 生命周期管理。producer snap
 -- --nocapture --test-threads=1` 为 14/14 通过，覆盖的是 planar RHI bridge；planetary bridge
 的离线 focused unit 为 4/4，覆盖完整 record stride、graph imported-byte metadata、placement/
 deletion 共用 in-flight 上限及 failed-drain 双队列 lease 保活。当前 planetary bridge 尚无实卡
-专项测试，故不能把 planar 的 14/14 推广为 planetary 产品 GPU 验收。
+专项测试；随后新增的严格 Apple M2/Metal `planet_placement_rhi` integration 为 2/2 通过，实测
+placement 和完整键 deletion command submission、indirect count、编译图保留的 pass 数及完成后
+lease retirement。它仍不是产品 renderer 的 planetary draw/画质验收，不能把 planar 的 14/14
+当作 planetary consumer 的证据。
 
 可重复的离线命令：
 
