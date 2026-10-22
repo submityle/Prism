@@ -20,6 +20,8 @@ use prism_camera::{
     derive_view, publish_view, CameraError, CameraIntent, CameraPose, ViewData, ViewHandle,
     ViewHistory,
 };
+#[cfg(feature = "cutscene")]
+use prism_ecs::event::{Event, Events};
 use prism_ecs::prelude::{
     Bundle, Component, Entity, IntoSystemConfigs, Query, Res, ResMut, Resource, SystemSet,
 };
@@ -45,11 +47,72 @@ pub enum CameraSystemSet {
     Control,
     /// Resolves body, aim, controllers, noise, and impulses into output poses.
     Rig,
+    /// Applies fixed-tick authored camera tracks and publishes crossed events.
+    #[cfg(feature = "cutscene")]
+    Cutscene,
     /// Derives immutable views and publishes them to the view registry.
     Publication,
     /// Computes editor-facing composition guides from published view snapshots.
     #[cfg(feature = "composition_aid")]
     Composition,
+}
+
+#[cfg(feature = "cutscene")]
+/// One authored track occurrence published from a camera playback instance.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CameraTrackEvent {
+    /// Generational camera entity that owns this playback instance.
+    pub camera: Entity,
+    /// Playback generation; changes on explicit seek/restart.
+    pub playback_epoch: u64,
+    /// Authored keyframe tick, unique within one validated track.
+    pub tick: u64,
+    /// Application-defined event payload key.
+    pub event_key: u64,
+}
+
+#[cfg(feature = "cutscene")]
+impl Event for CameraTrackEvent {}
+
+#[cfg(feature = "cutscene")]
+/// Per-entity, fixed-tick validated track playback state.
+#[derive(Clone, Debug, Component)]
+pub struct CameraTrackPlayerComponent {
+    /// Immutable validated track sampled by this playback instance.
+    pub track: prism_camera::ValidatedCameraTrack,
+    /// Current authored fixed tick. Callers advance it only while playing.
+    pub tick: u64,
+    /// Stable generation used to distinguish replayed event occurrences.
+    pub playback_epoch: u64,
+    /// Whether the component currently drives the owning camera pose.
+    pub playing: bool,
+    cursor: prism_camera::CameraTrackEventCursor,
+    occurrences: Vec<prism_camera::CameraTrackEventOccurrence>,
+}
+
+#[cfg(feature = "cutscene")]
+impl CameraTrackPlayerComponent {
+    /// Creates a player at an initial tick without dispatching earlier events.
+    #[must_use]
+    pub fn new(track: prism_camera::ValidatedCameraTrack, tick: u64) -> Self {
+        Self {
+            track,
+            tick,
+            playback_epoch: 0,
+            playing: true,
+            cursor: prism_camera::CameraTrackEventCursor::default(),
+            occurrences: Vec::new(),
+        }
+    }
+
+    /// Seeks without replaying the interval between the previous and new tick.
+    /// The next update establishes a new baseline under a fresh event identity.
+    pub fn seek(&mut self, tick: u64) {
+        self.tick = tick;
+        self.playback_epoch = self.playback_epoch.wrapping_add(1);
+        self.cursor = prism_camera::CameraTrackEventCursor::default();
+        self.occurrences.clear();
+    }
 }
 
 #[cfg(feature = "composition_aid")]
@@ -1252,6 +1315,8 @@ impl CameraPlugin {
 
 impl Plugin for CameraPlugin {
     fn build(&self, app: &mut App) {
+        #[cfg(feature = "cutscene")]
+        app.add_event::<CameraTrackEvent>();
         app.insert_resource(CameraFrame::new(self.target_size))
             .init_resource::<CameraViewRegistry>()
             .init_resource::<PublishedViews>()
@@ -1311,6 +1376,14 @@ impl Plugin for CameraPlugin {
             )
                 .chain(),
         );
+        #[cfg(feature = "cutscene")]
+        app.add_systems(
+            PostUpdate,
+            apply_camera_tracks
+                .in_set(CameraSystemSet::Cutscene)
+                .after(CameraSystemSet::Rig)
+                .before(CameraSystemSet::Publication),
+        );
         #[cfg(feature = "composition_aid")]
         app.add_systems(
             PostUpdate,
@@ -1321,11 +1394,183 @@ impl Plugin for CameraPlugin {
     }
 }
 
+#[cfg(feature = "cutscene")]
+fn apply_camera_tracks(
+    mut players: Query<(
+        Entity,
+        &mut CameraTrackPlayerComponent,
+        &mut CameraPoseComponent,
+    )>,
+    mut events: ResMut<Events<CameraTrackEvent>>,
+) {
+    for (entity, mut player, mut pose) in players.iter_mut() {
+        if !player.playing {
+            continue;
+        }
+        let fallback = prism_camera::CameraTrackSample {
+            pose: pose.0,
+            focal_length_mm: 50.0,
+            exposure: prism_camera::Exposure::default(),
+            event_key: None,
+            active: true,
+            handoff_to_previous: false,
+        };
+        let sample = player.track.sample_state(player.tick, fallback);
+        if sample.active && !sample.handoff_to_previous {
+            pose.0 = sample.pose;
+        }
+        let tick = player.tick;
+        let playback_epoch = player.playback_epoch;
+        let CameraTrackPlayerComponent {
+            track,
+            cursor,
+            occurrences,
+            ..
+        } = &mut *player;
+        if cursor.advance(track, tick, occurrences).is_ok() {
+            for occurrence in occurrences.drain(..) {
+                events.send(CameraTrackEvent {
+                    camera: entity,
+                    playback_epoch,
+                    tick: occurrence.tick,
+                    event_key: occurrence.event_key,
+                });
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use prism_app::App;
     use prism_camera::{CameraErrorCode, ViewKind};
+    #[cfg(feature = "cutscene")]
+    use prism_ecs::event::EventCursor;
+
+    #[cfg(feature = "cutscene")]
+    fn validated_track() -> prism_camera::ValidatedCameraTrack {
+        let mut track = prism_camera::CameraTrack::default();
+        for (tick, event_key) in [(2, 7), (4, 7), (6, 9)] {
+            assert!(track.push(prism_camera::CameraKeyframe {
+                tick,
+                pose: CameraPose::default(),
+                focal_length_mm: 50.0,
+                exposure: prism_camera::Exposure::default(),
+                event_key,
+            }));
+        }
+        track.into_validated().unwrap()
+    }
+
+    #[cfg(feature = "cutscene")]
+    #[test]
+    fn camera_track_player_publishes_each_crossed_keyframe_occurrence_once() {
+        let mut app = App::new();
+        app.add_plugins(CameraPlugin::default());
+        let camera = app.world_mut().spawn(CameraBundle::default());
+        app.world_mut().insert(
+            camera,
+            CameraTrackPlayerComponent::new(validated_track(), 0),
+        );
+        let mut cursor = EventCursor::<CameraTrackEvent>::default();
+
+        app.update();
+        {
+            let mut player = app
+                .world_mut()
+                .get_mut::<CameraTrackPlayerComponent>(camera)
+                .unwrap();
+            player.tick = 5;
+        }
+        app.update();
+        let occurrences: Vec<_> = cursor
+            .read(app.world().resource::<Events<CameraTrackEvent>>())
+            .copied()
+            .collect();
+        assert_eq!(
+            occurrences,
+            [
+                CameraTrackEvent {
+                    camera,
+                    playback_epoch: 0,
+                    tick: 2,
+                    event_key: 7
+                },
+                CameraTrackEvent {
+                    camera,
+                    playback_epoch: 0,
+                    tick: 4,
+                    event_key: 7
+                },
+            ]
+        );
+
+        app.update();
+        assert_eq!(
+            cursor
+                .read(app.world().resource::<Events<CameraTrackEvent>>())
+                .count(),
+            0
+        );
+        app.world_mut()
+            .get_mut::<CameraTrackPlayerComponent>(camera)
+            .unwrap()
+            .tick = 6;
+        app.update();
+        assert_eq!(
+            cursor
+                .read(app.world().resource::<Events<CameraTrackEvent>>())
+                .copied()
+                .collect::<Vec<_>>(),
+            [CameraTrackEvent {
+                camera,
+                playback_epoch: 0,
+                tick: 6,
+                event_key: 9
+            }]
+        );
+    }
+
+    #[cfg(feature = "cutscene")]
+    #[test]
+    fn camera_track_seek_rebaselines_and_paused_players_do_not_emit() {
+        let mut app = App::new();
+        app.add_plugins(CameraPlugin::default());
+        let camera = app.world_mut().spawn(CameraBundle::default());
+        app.world_mut().insert(
+            camera,
+            CameraTrackPlayerComponent::new(validated_track(), 0),
+        );
+        let mut cursor = EventCursor::<CameraTrackEvent>::default();
+        app.update();
+        app.world_mut()
+            .get_mut::<CameraTrackPlayerComponent>(camera)
+            .unwrap()
+            .seek(5);
+        app.update();
+        assert_eq!(
+            cursor
+                .read(app.world().resource::<Events<CameraTrackEvent>>())
+                .count(),
+            0
+        );
+        {
+            let mut player = app
+                .world_mut()
+                .get_mut::<CameraTrackPlayerComponent>(camera)
+                .unwrap();
+            player.playing = false;
+            player.tick = 6;
+        }
+        app.update();
+        assert_eq!(
+            cursor
+                .read(app.world().resource::<Events<CameraTrackEvent>>())
+                .count(),
+            0
+        );
+    }
 
     #[test]
     fn performance_budget_sheds_after_sustained_overrun_and_recovers_with_hysteresis() {

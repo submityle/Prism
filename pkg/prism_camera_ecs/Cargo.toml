@@ -23,6 +23,7 @@ rig = ["dep:prism_camera_rig", "prism_camera_rig/rig", "prism_camera_rig/determi
 parallel = ["dep:prism_tasks", "prism_app/multi_thread"]
 composition_aid = ["prism_camera/composition_aid"]
 view_lod = ["prism_camera/view_lod"]
+cutscene = ["prism_camera/cutscene"]
 
 [[bench]]
 name = "multiview_contracts"

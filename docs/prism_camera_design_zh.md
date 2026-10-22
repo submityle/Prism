@@ -1286,6 +1286,10 @@ renderer 接线期间，`CameraIntent`/`ViewData` 的每视图可见性元数据
 
 ### 28.2 焦点追踪与自动对焦（`autofocus`）
 
+2026-10-23 cutscene 消费链补充：`prism_camera_ecs/cutscene` 将已验证轨迹播放器接到 Rig 后、view publication 前。播放器应用当前姿态，并通过 `CameraTrackEventCursor` 收集 `(last_tick, tick]` 内带关键帧 tick 的 occurrence；复杂度 O(log n + k)，事件缓冲在播放器组件内复用。`Events<CameraTrackEvent>` 由 `CameraPlugin` 注册，事件身份包含 generational camera entity、playback epoch、keyframe tick 和 payload key；相同 payload 的不同关键帧作为独立发生。暂停不推进，`seek` 增加 epoch 并重建游标基线，不补发跳过区间；应用通过标准 `EventCursor` 消费，事件遵循 ECS 双缓冲保留期。该队列没有 ack、处理失败重试或跨进程持久化，因此 exactly-once 仅描述单实例 occurrence 身份与游标产出，不声称事务式副作用交付。验证：`CARGO_PROFILE_TEST_DEBUG=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 cargo test -p prism_camera_ecs --no-default-features --features cutscene --lib --offline` 通过 9 项；相机核心 cutscene 专项测试通过 29 项。
+
+`CameraTrack::into_validated` 在载入边界检查版本、非空/有界关键帧、严格递增 tick、有限姿态/焦距/曝光，然后消费原始轨迹生成不可变 `ValidatedCameraTrack`；fixed-tick 热路径不重复 O(keyframe 数) 全量校验，单帧采样为二分查找 O(log n) 加常量插值。时间切线按相邻 tick 间距归一并限制焦距段内过冲。轨迹结束按 `CutsceneEndPolicy::{Hold,BlendToPrevious,Deactivate}` 处理，采样状态显式返回 `active` 与 `handoff_to_previous`。无效资产在载入时拒绝，调用方保持当前 VCam；事件 dispatch 及可靠消费由前述 ECS 播放链提供。
+
 焦点源只能是锁定实体、屏幕中心射线命中或固定距离三者之一；采样距离先限幅到 `[near+epsilon, focus_max]`，再用独立的拉焦半衰期平滑。focus breathing 只改变投影 FOV 的校正项，不修改物理焦距真值；无命中保持上一焦距并输出 `FocusLost`。
 
 ### 28.3 相机碰撞体与穿帮消隐（`occlusion_fade`）

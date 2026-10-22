@@ -308,6 +308,16 @@ pub enum CameraTrackEventError {
     TickReversed { previous: u64, requested: u64 },
 }
 
+/// One authored event occurrence crossed by a track playback cursor.
+#[cfg(feature = "cutscene")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CameraTrackEventOccurrence {
+    /// Authored fixed tick of this occurrence; distinct keyframes may share a payload key.
+    pub tick: u64,
+    /// Application-defined event payload key.
+    pub event_key: u64,
+}
+
 #[cfg(feature = "cutscene")]
 impl CameraTrackEventCursor {
     /// Returns the last committed tick, or `None` before the first advance.
@@ -324,7 +334,7 @@ impl CameraTrackEventCursor {
         &mut self,
         track: &ValidatedCameraTrack,
         tick: u64,
-        output: &mut Vec<u64>,
+        output: &mut Vec<CameraTrackEventOccurrence>,
     ) -> Result<(), CameraTrackEventError> {
         if let Some(previous) = self.last_tick {
             if tick < previous {
@@ -361,7 +371,12 @@ impl ValidatedCameraTrack {
     /// Appends events in `(from_tick, through_tick]` without rescanning the
     /// prefix. The output buffer is cleared first and retains its capacity.
     /// Complexity is `O(log N + K)` for `N` keyframes and `K` crossed events.
-    fn append_event_keys(&self, from_tick: u64, through_tick: u64, output: &mut Vec<u64>) {
+    fn append_event_keys(
+        &self,
+        from_tick: u64,
+        through_tick: u64,
+        output: &mut Vec<CameraTrackEventOccurrence>,
+    ) {
         output.clear();
         if through_tick <= from_tick {
             return;
@@ -374,11 +389,12 @@ impl ValidatedCameraTrack {
             .track
             .keyframes
             .partition_point(|frame| frame.tick <= through_tick);
-        output.extend(
-            self.track.keyframes[first..end]
-                .iter()
-                .map(|frame| frame.event_key),
-        );
+        output.extend(self.track.keyframes[first..end].iter().map(|frame| {
+            CameraTrackEventOccurrence {
+                tick: frame.tick,
+                event_key: frame.event_key,
+            }
+        }));
     }
 }
 
@@ -1362,13 +1378,31 @@ mod tests {
         cursor.advance(&track, 1, &mut output).unwrap();
         assert!(output.is_empty());
         cursor.advance(&track, 5, &mut output).unwrap();
-        assert_eq!(output, [20, 50]);
+        assert_eq!(
+            output,
+            [
+                CameraTrackEventOccurrence {
+                    tick: 2,
+                    event_key: 20,
+                },
+                CameraTrackEventOccurrence {
+                    tick: 5,
+                    event_key: 50,
+                },
+            ]
+        );
         let capacity = output.capacity();
         cursor.advance(&track, 5, &mut output).unwrap();
         assert!(output.is_empty());
         assert!(output.capacity() >= capacity);
         cursor.advance(&track, 12, &mut output).unwrap();
-        assert_eq!(output, [90]);
+        assert_eq!(
+            output,
+            [CameraTrackEventOccurrence {
+                tick: 9,
+                event_key: 90,
+            }]
+        );
     }
 
     #[cfg(feature = "cutscene")]
