@@ -10,8 +10,8 @@ use prism_reflect::{
     VariantType,
 };
 use prism_settings::{
-    canonical_value_cmp, Constraints, RegistryBuilder, SettingDef, SettingsError, SettingsRegistry,
-    Value, ValueShape,
+    canonical_value_cmp, Constraints, Domain, DomainMask, OverrideScope, PrecedenceProfile,
+    RegistryBuilder, Scope, SettingDef, SettingsError, SettingsRegistry, Value, ValueShape,
 };
 use std::{collections::BTreeMap, error::Error, fmt};
 
@@ -304,6 +304,14 @@ where
         definition.enum_payloads = enum_payloads;
         definition.enum_schemas = enum_schemas;
         if let Some(meta) = meta {
+            if let Some(AttributeValue::Text(display_name)) = meta.custom("rename") {
+                if display_name.trim().is_empty() {
+                    return Err(ReflectSettingsError::MetadataTypeMismatch {
+                        field: name.to_owned(),
+                    });
+                }
+                definition.display_name = Some(display_name.clone());
+            }
             definition.description = meta.docs().map(str::to_owned);
             definition.category = meta.category().map(str::to_owned);
             definition.flags.read_only = meta.is_readonly();
@@ -325,6 +333,113 @@ where
                         })
                     }
                 };
+            }
+            if let Some(value) = meta.custom("scope") {
+                definition.scope = match value {
+                    AttributeValue::Text(value) => match value.as_str() {
+                        "machine" => Scope::Machine,
+                        "user" => Scope::User,
+                        "project" => Scope::Project,
+                        _ => {
+                            return Err(ReflectSettingsError::MetadataTypeMismatch {
+                                field: name.to_owned(),
+                            })
+                        }
+                    },
+                    _ => {
+                        return Err(ReflectSettingsError::MetadataTypeMismatch {
+                            field: name.to_owned(),
+                        })
+                    }
+                };
+            }
+            if let Some(value) = meta.custom("override_scope") {
+                definition.override_scope = match value {
+                    AttributeValue::Text(value) => match value.as_str() {
+                        "global" => OverrideScope::Global,
+                        "machine" => OverrideScope::Machine,
+                        "project" => OverrideScope::Project,
+                        "resource" => OverrideScope::Resource,
+                        "language" => OverrideScope::Language,
+                        _ => {
+                            return Err(ReflectSettingsError::MetadataTypeMismatch {
+                                field: name.to_owned(),
+                            })
+                        }
+                    },
+                    _ => {
+                        return Err(ReflectSettingsError::MetadataTypeMismatch {
+                            field: name.to_owned(),
+                        })
+                    }
+                };
+            }
+            if let Some(value) = meta.custom("precedence") {
+                definition.precedence = match value {
+                    AttributeValue::Text(value) => match value.as_str() {
+                        "user_choice_wins" => PrecedenceProfile::UserChoiceWins,
+                        "server_wins" => PrecedenceProfile::ServerWins,
+                        "device_scoped" => PrecedenceProfile::DeviceScoped,
+                        "locked" => PrecedenceProfile::Locked,
+                        _ => {
+                            return Err(ReflectSettingsError::MetadataTypeMismatch {
+                                field: name.to_owned(),
+                            })
+                        }
+                    },
+                    _ => {
+                        return Err(ReflectSettingsError::MetadataTypeMismatch {
+                            field: name.to_owned(),
+                        })
+                    }
+                };
+            }
+            if let Some(value) = meta.custom("domains") {
+                let AttributeValue::Text(value) = value else {
+                    return Err(ReflectSettingsError::MetadataTypeMismatch {
+                        field: name.to_owned(),
+                    });
+                };
+                let mut domains = DomainMask::NONE;
+                let mut found = false;
+                for domain in value.split(',').map(str::trim) {
+                    let bit = match domain {
+                        "runtime" => DomainMask::RUNTIME,
+                        "editor" => DomainMask::EDITOR,
+                        "system" => DomainMask::SYSTEM,
+                        "build" => DomainMask::BUILD,
+                        _ => {
+                            return Err(ReflectSettingsError::MetadataTypeMismatch {
+                                field: name.to_owned(),
+                            })
+                        }
+                    };
+                    domains = domains.union(bit);
+                    found = true;
+                }
+                if !found {
+                    return Err(ReflectSettingsError::MetadataTypeMismatch {
+                        field: name.to_owned(),
+                    });
+                }
+                definition.domains = domains;
+            }
+            for (key, slot) in [
+                (
+                    "project_overridable",
+                    &mut definition.flags.project_overridable,
+                ),
+                ("bootstrap", &mut definition.flags.bootstrap),
+                ("execution_class", &mut definition.flags.execution_class),
+            ] {
+                if let Some(value) = meta.custom(key) {
+                    let AttributeValue::Bool(value) = value else {
+                        return Err(ReflectSettingsError::MetadataTypeMismatch {
+                            field: name.to_owned(),
+                        });
+                    };
+                    *slot = *value;
+                }
             }
         }
         builder.register(definition);
@@ -1145,7 +1260,7 @@ mod tests {
     #[derive(Reflect, Default)]
     struct RenderConfig {
         /// Resolution multiplier.
-        #[reflect(setting, range(0.25..=2.0), default = 1.0, category = "Quality")]
+        #[reflect(setting, rename = "Resolution Scale", range(0.25..=2.0), default = 1.0, category = "Quality")]
         scale: f32,
         #[reflect(setting, default = 60, readonly)]
         max_fps: u32,
@@ -1161,6 +1276,8 @@ mod tests {
         assert_eq!(schema.len(), 2);
         let (_, scale) = schema.get(&"render.scale".into()).unwrap();
         assert_eq!(scale.default, Value::Float(1.0));
+        assert_eq!(scale.display_name.as_deref(), Some("Resolution Scale"));
+        assert_eq!(scale.key.as_str(), "render.scale");
         assert_eq!(scale.constraints.min, Some(0.25));
         assert_eq!(scale.constraints.max, Some(2.0));
         assert_eq!(scale.description.as_deref(), Some("Resolution multiplier."));
@@ -1602,5 +1719,49 @@ mod tests {
         let schema = derive_settings_registry::<RequiredSetting>("required", "prism_app").unwrap();
         let (_, definition) = schema.get(&"required.value".into()).unwrap();
         assert!(definition.flags.required);
+    }
+
+    #[test]
+    fn derives_settings_source_visibility_and_resolver_policies() {
+        #[derive(Reflect, Default)]
+        struct PolicySetting {
+            #[reflect(
+                setting,
+                scope = "machine",
+                override_scope = "project",
+                precedence = "locked",
+                domains = "editor, build",
+                project_overridable = false,
+                bootstrap,
+                execution_class = true
+            )]
+            value: bool,
+        }
+
+        let schema = derive_settings_registry::<PolicySetting>("policy", "prism_app").unwrap();
+        let (_, definition) = schema.get(&"policy.value".into()).unwrap();
+        assert_eq!(definition.scope, Scope::Machine);
+        assert_eq!(definition.override_scope, OverrideScope::Project);
+        assert_eq!(definition.precedence, PrecedenceProfile::Locked);
+        assert!(definition.domains.contains(Domain::Editor));
+        assert!(definition.domains.contains(Domain::Build));
+        assert!(!definition.domains.contains(Domain::Runtime));
+        assert!(!definition.flags.project_overridable);
+        assert!(definition.flags.bootstrap);
+        assert!(definition.flags.execution_class);
+    }
+
+    #[test]
+    fn rejects_unknown_settings_policy_values() {
+        #[derive(Reflect, Default)]
+        struct InvalidPolicy {
+            #[reflect(setting, precedence = "sometimes")]
+            value: bool,
+        }
+
+        assert!(matches!(
+            derive_settings_registry::<InvalidPolicy>("invalid", "prism_app"),
+            Err(ReflectSettingsError::MetadataTypeMismatch { field }) if field == "value"
+        ));
     }
 }

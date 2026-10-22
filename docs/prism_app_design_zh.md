@@ -512,16 +512,16 @@ App 子应用流水线（§9 / §24.3）的三方契约：
 
 App 配置分层（§14）与 cvar（§24.6）的读写/校验**委托 `prism_reflect`**：
 
-- 目标是让 cvar/配置字段的默认值、范围策略与兼容迁移具有类型化 schema；当前实现边界见下文，字段改名兼容通过版本 migration 完成，不把未支持的 `clamp`/`rename` reflect 属性当作已实现能力。
+- 目标是让 cvar/配置字段的默认值、范围策略与兼容迁移具有类型化 schema；当前实现边界见下文。字段持久化 key 的改名兼容通过版本 migration 完成；`rename` reflect 属性仅提供展示名，不改变 key、lookup 或迁移身份。
 - 命令行/文件/运行时的级联覆盖由 canonical `prism_settings` schema/resolver 负责校验；Reflect 负责显式字段到 schema 的启动期派生，不承担通用反序列化。
 
-当前实现状态：旧 `reflect_config` / `CvarSpec` bridge 已删除。canonical settings schema 与 opt-in `derive_settings_registry<T>` 已支持 scalar、unit/data enum、递归数组/table/string-key map/Set、docs/category、range、readonly、required、`on_violation`，以及 type-qualified enum stable-name codec/migration/remap。空嵌套集合无法可靠推导元素 schema 时 fail-closed，这是受支持形状边界，不是 metadata 默认值未实现。完整 reflected type/字段策略映射仍未实现。`settings-io` 已接入 watcher/candidate/journal/recovery 和 App-owned Preview transaction；自动到期需要宿主安装 `SettingsTransactionServices`，同步 backend/appliers 可能阻塞帧，异步/调度化策略尚未闭环。端到端 Preview/direct 故障注入仍缺。Windows all-features compile 已通过，但跨平台运行时/发行 CI matrix 尚未验收；默认 `no_std + alloc` 路径不依赖 reflect/I/O features。
+当前实现状态：旧 `reflect_config` / `CvarSpec` bridge 已删除。canonical settings schema 与 opt-in `derive_settings_registry<T>` 已支持 scalar、unit/data enum、递归数组/table/string-key map/Set、docs/category、展示名 `rename`、range、readonly、required、`on_violation`、`scope`、`override_scope`、`precedence`、`domains`、`project_overridable`、`bootstrap`、`execution_class`，以及 type-qualified enum stable-name codec/migration/remap。`rename` 只写入独立的 `display_name`，不会更改稳定持久化 key、lookup 或 migration identity。策略属性值采用小写稳定 token：`scope` 为 `machine`、`user`、`project` 之一；`override_scope` 为 `global`、`machine`、`project`、`resource`、`language` 之一；`precedence` 为 `user_choice_wins`、`server_wins`、`device_scoped`、`locked` 之一；`domains` 为逗号分隔的 `runtime`、`editor`、`system`、`build` 子集，未知或空 token 在 schema 派生时拒绝。空嵌套集合无法可靠推导元素 schema 时 fail-closed，这是受支持形状边界，不是 metadata 默认值未实现。尚未形成通用映射的包括复杂 `Constraints`（如字符串长度/数组长度/枚举白名单）、aliases 与 cross-setting rules；它们需要显式静态 schema/migration API，而非从字段值猜测。`settings-io` 已接入 watcher/candidate/journal/recovery 和 App-owned Preview transaction；自动到期需要宿主安装 `SettingsTransactionServices`，同步 backend/appliers 可能阻塞帧，异步/调度化策略尚未闭环。端到端 Preview/direct 故障注入仍缺。Windows all-features compile 已通过，但跨平台运行时/发行 CI matrix 尚未验收；默认 `no_std + alloc` 路径不依赖 reflect/I/O features。
 
 截至 2026-10-23 的补充：canonical schema 支持有界递归数组、fixed table、string-keyed map 与 Set shape（最大嵌套深度 32）；反射派生支持递归 `Vec<T>` / `[T; N]`、named struct、`HashMap` / `BTreeMap` string-key map、`HashSet` / `BTreeSet`、unit/data enum payload 与递归数组 metadata 默认值。TOML registry codec 和 migration 解码支持递归数组/table/map/enum payload 中的稳定 enum 名称与 type identity，watcher candidate 以 canonical schema 校验最终值。数组、map、Set 与 enum payload 叶子约束递归校验类型、有限浮点、enum allow-list 与 numeric min/max Clamp/Reject；fixed table 校验精确字段集。空嵌套集合无法从值本身可靠推导递归 shape 时 fail-closed；这是输入/shape 支持边界，不代表 metadata 默认值未实现。完整字段策略映射仍不支持。
 
 后续增量（2026-10-23）：named struct 与 string-keyed homogeneous map 已进入 Reflect 派生实现，非字符串 map key 拒绝；`HashMap` 默认值规范化为按键排序的 canonical table。TOML codec 与 migration decode 支持 fixed table/map 内嵌 unit-enum、data-enum payload 和 typed enum identity round-trip。Reflect Set 映射为排序且去重的 canonical value，required 缺省校验与 `on_violation` 字段属性已接入。以上新增切片已有专项测试；完整字段策略映射、端到端故障注入和发行门禁仍未覆盖。
 
-状态更正（2026-10-23）：本节旧“嵌套集合 metadata 默认值未完成”“Set 未完成”和“带数据 enum 未完成”描述均已过时；递归 metadata 默认值、Set 与 typed data-enum schema/codec/migration/remap 已实现。空嵌套集合无法可靠推导 schema 时 fail-closed，属于支持形状边界。剩余机制缺口是完整 reflected type/字段策略映射、异步 applier、端到端故障注入和发行门禁。专项测试数见 §22，不再保留过期的 `283` 数字。
+状态更正（2026-10-23）：本节旧“嵌套集合 metadata 默认值未完成”“Set 未完成”和“带数据 enum 未完成”描述均已过时；递归 metadata 默认值、Set、typed data-enum schema/codec/migration/remap 已实现；`rename` 作为独立展示名已支持，不改变稳定 key。空嵌套集合无法可靠推导 schema 时 fail-closed，属于支持形状边界。剩余机制缺口是完整 reflected type/字段策略映射、异步 applier、端到端故障注入和发行门禁。专项测试数见 §22，不再保留过期的 `283` 数字。
 
 ### 25.4 多世界各持独立 time 时间域
 

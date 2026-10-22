@@ -19,6 +19,10 @@
 //!   [`schema::clamp`](prism_reflect::schema::clamp).
 //! - `on_violation = "clamp"` or `on_violation = "reject"` — settings range
 //!   behavior consumed by Prism's reflected settings registry.
+//! - `scope`, `override_scope`, `precedence`, and comma-separated `domains` —
+//!   canonical settings source and visibility policies.
+//! - `project_overridable`, `bootstrap`, and `execution_class` — settings
+//!   resolver flags (boolean, bare or `= bool`).
 //! - `default = <lit>` — default-value attribute.
 //! - `readonly` / `hidden` / `required` / `setting` — boolean flags (bare or
 //!   `= bool`). `setting` explicitly opts a field into settings-schema
@@ -284,6 +288,23 @@ fn parse_field_reflect(attr: &syn::Attribute, fm: &mut FieldMeta) -> syn::Result
             }
             fm.custom
                 .push(("on_violation".to_owned(), AttrLit::Text(text.value())));
+        } else if path.is_ident("scope")
+            || path.is_ident("override_scope")
+            || path.is_ident("precedence")
+            || path.is_ident("domains")
+        {
+            let text: syn::LitStr = meta.value()?.parse()?;
+            fm.custom.push((
+                path.get_ident().unwrap().to_string(),
+                AttrLit::Text(text.value()),
+            ));
+        } else if path.is_ident("project_overridable")
+            || path.is_ident("bootstrap")
+            || path.is_ident("execution_class")
+        {
+            let value = parse_flag(&meta)?;
+            fm.custom
+                .push((path.get_ident().unwrap().to_string(), AttrLit::Bool(value)));
         } else if path.is_ident("clamp") || path.is_ident("range") {
             let content;
             syn::parenthesized!(content in meta.input);

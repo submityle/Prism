@@ -743,6 +743,9 @@ pub struct SettingDef {
     pub key: SettingKey,
     /// Owning namespace prefix, such as `render` or `plugin.example`.
     pub namespace: String,
+    /// Optional human-facing label. This never participates in persistence,
+    /// lookup, migration, or deterministic identity.
+    pub display_name: Option<String>,
     /// Human-readable description inherited from schema documentation.
     pub description: Option<String>,
     /// Optional presentation category for inspectors and console tooling.
@@ -790,6 +793,7 @@ impl SettingDef {
         Self {
             key: key.clone(),
             namespace: namespace.into(),
+            display_name: None,
             description: None,
             category: None,
             default,
