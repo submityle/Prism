@@ -85,12 +85,8 @@ pub trait SceneHost {
     /// Loads the authoritative cell scene for a required or prefetched sector.
     fn load_cell(&mut self, sector: SectorId) -> Result<(), Self::Error>;
 
-    /// Atomically reloads a set of already-loaded sectors.
-    ///
-    /// The default implementation reports that it did not handle the batch.
-    /// The world facade then falls back to ordered single-cell loads. Hosts
-    /// that can stage multiple cells should override this method with an
-    /// all-or-nothing ownership publication.
+    /// Atomically reloads a set of already-loaded sectors. Returns `false`
+    /// when a multi-sector batch is unsupported; callers must fail closed.
     fn reload_cells_atomic(&mut self, sectors: &[SectorId]) -> Result<bool, Self::Error> {
         match sectors {
             [] => Ok(true),
@@ -117,6 +113,8 @@ pub trait SceneHost {
 pub enum ApplyError<E> {
     /// The host rejected an operation.
     Host(E),
+    /// A host cannot atomically apply a contiguous multi-cell reload batch.
+    AtomicReloadUnsupported,
 }
 
 /// Failure while converting and appending a simulation result.
@@ -308,9 +306,7 @@ pub(crate) fn apply_plan_to<H: SceneHost>(
                     .reload_cells_atomic(&sectors)
                     .map_err(ApplyError::Host)?
                 {
-                    for sector in sectors {
-                        host.load_cell(sector).map_err(ApplyError::Host)?;
-                    }
+                    return Err(ApplyError::AtomicReloadUnsupported);
                 }
             }
             StreamAction::Unload(sector) => {
@@ -459,6 +455,13 @@ mod tests {
 
         impl SceneHost for Host {
             type Error = ();
+
+            fn reload_cells_atomic(&mut self, sectors: &[SectorId]) -> Result<bool, Self::Error> {
+                for sector in sectors {
+                    self.calls.push(sector.x as u64);
+                }
+                Ok(true)
+            }
 
             fn load_cell(&mut self, sector: SectorId) -> Result<(), Self::Error> {
                 self.calls.push(sector.x as u64);

@@ -56,16 +56,6 @@ impl WorldRuntime {
             },
         )
     }
-
-    /// Compatibility alias for [`Self::apply_scene_plan_durable`].
-    pub fn apply_scene_plan_durable_atomic<P: SceneEcsProvider>(
-        &mut self,
-        plan: &WorldFramePlan,
-        host: &mut SceneEcsHost<'_, P>,
-        journal: &mut FileJournal,
-    ) -> Result<(), ApplyError<SceneEcsHostError<P::Error>>> {
-        self.apply_scene_plan_durable(plan, host, journal)
-    }
 }
 
 struct DurablePlanApplication<'host, 'world, 'journal, P> {

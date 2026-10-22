@@ -4,8 +4,11 @@
 //! plan columns. It provides ownership and rollback for a nested scene tree while
 //! leaving bake/materializer integration to a later pipeline.
 
+use alloc::boxed::Box;
+use alloc::vec;
 use alloc::vec::Vec;
 
+use crate::instance::SceneInstance;
 use crate::instantiate::{
     despawn_instance, spawn_typed_plan, InstantiateError, SceneAttachError, SceneSpawn,
     TypedSpawnPlan,
@@ -21,6 +24,18 @@ pub trait NestedSceneProvider {
     fn template(&self, guid: StableGuid) -> Option<&SceneTemplate>;
     /// Creates a fresh typed constructor set for one child instance.
     fn typed_plan(&self, guid: StableGuid) -> Result<TypedSpawnPlan, NestedProviderError>;
+
+    /// Replays provider-owned component overrides from a previous live node
+    /// onto a staged replacement node. This callback is invoked only when the
+    /// old and new nodes have the same template identity. It must not mutate
+    /// the previous instance; on error the replacement tree is discarded.
+    fn replay_instance_overrides(
+        &self,
+        world: &mut World,
+        template: StableGuid,
+        previous: &SceneInstance,
+        replacement: &SceneSpawn,
+    ) -> Result<(), NestedProviderError>;
 }
 
 /// Provider failure while preparing a child instance.
@@ -59,6 +74,16 @@ pub struct SceneTreeSpawn {
     pub children: Vec<SceneTreeChild>,
 }
 
+/// Failed atomic tree replacement. The previous live tree remains owned and
+/// is returned so the caller can retry or explicitly tear it down.
+#[derive(Debug)]
+pub struct NestedReplaceError {
+    /// Reason the candidate generation was rejected.
+    pub cause: NestedInstantiateError,
+    /// Still-live prior generation.
+    pub previous: Box<SceneTreeSpawn>,
+}
+
 /// One nested child and the parent local slot it occupies.
 #[derive(Debug)]
 pub struct SceneTreeChild {
@@ -86,6 +111,13 @@ impl SceneTreeSpawn {
 pub enum NestedInstantiateError {
     /// A descriptor failed its semantic validation.
     InvalidTemplate(crate::template::TemplateError),
+    /// The prior live root does not belong to the template being replaced.
+    TemplateIdentityMismatch {
+        /// Template recorded by the existing live tree.
+        previous: Option<StableGuid>,
+        /// Template selected for the replacement.
+        replacement: StableGuid,
+    },
     /// The provider has no descriptor for a slot.
     MissingTemplate(StableGuid),
     /// The provider could not create a typed constructor set.
@@ -137,7 +169,72 @@ pub fn spawn_nested_typed<P: NestedSceneProvider>(
         0,
         &mut active,
         &mut count,
+        None,
     )
+}
+
+/// Rebuilds a live nested tree beside the old tree, then swaps ownership only
+/// after every replacement node and typed override replay succeeds. The world
+/// is exclusively borrowed throughout, so no observer can resolve a partial
+/// generation through this API. On failure, the old tree remains live and the
+/// completed staged replacement is destroyed.
+pub fn replace_nested_typed<P: NestedSceneProvider>(
+    world: &mut World,
+    previous: SceneTreeSpawn,
+    template: &SceneTemplate,
+    root_plan: TypedSpawnPlan,
+    provider: &P,
+    limits: NestedSpawnLimits,
+) -> Result<SceneTreeSpawn, NestedReplaceError> {
+    let old_guid = previous
+        .root
+        .root
+        .and_then(|root| world.get::<SceneInstance>(root))
+        .map(|instance| instance.template);
+    if old_guid != Some(template.guid) {
+        return Err(NestedReplaceError {
+            cause: NestedInstantiateError::TemplateIdentityMismatch {
+                previous: old_guid,
+                replacement: template.guid,
+            },
+            previous: Box::new(previous),
+        });
+    }
+    if let Err(error) = template.validate() {
+        return Err(NestedReplaceError {
+            cause: NestedInstantiateError::InvalidTemplate(error),
+            previous: Box::new(previous),
+        });
+    }
+    if limits.max_instances == 0 {
+        return Err(NestedReplaceError {
+            cause: NestedInstantiateError::InstanceLimit,
+            previous: Box::new(previous),
+        });
+    }
+    let mut active = vec![template.guid];
+    let mut count = 0;
+    let replacement = match spawn_tree(
+        world,
+        template,
+        root_plan,
+        provider,
+        limits,
+        0,
+        &mut active,
+        &mut count,
+        Some(&previous),
+    ) {
+        Ok(replacement) => replacement,
+        Err(cause) => {
+            return Err(NestedReplaceError {
+                cause,
+                previous: Box::new(previous),
+            })
+        }
+    };
+    previous.despawn_tree(world);
+    Ok(replacement)
 }
 
 fn spawn_tree<P: NestedSceneProvider>(
@@ -149,6 +246,7 @@ fn spawn_tree<P: NestedSceneProvider>(
     depth: usize,
     active: &mut Vec<StableGuid>,
     count: &mut usize,
+    previous: Option<&SceneTreeSpawn>,
 ) -> Result<SceneTreeSpawn, NestedInstantiateError> {
     if *count >= limits.max_instances {
         return Err(NestedInstantiateError::InstanceLimit);
@@ -163,6 +261,26 @@ fn spawn_tree<P: NestedSceneProvider>(
     ) {
         despawn_instance(world, &spawn);
         return Err(NestedInstantiateError::Attach(error));
+    }
+    if let Some(previous) = previous.filter(|old| old.root.root.is_some())
+        && let Some(old_root) = previous.root.root
+        && let Some(old_instance) = world.get::<SceneInstance>(old_root).cloned()
+        && old_instance.template == template.guid
+    {
+        if let Err(error) =
+            provider.replay_instance_overrides(world, template.guid, &old_instance, &spawn)
+        {
+            despawn_instance(world, &spawn);
+            return Err(NestedInstantiateError::Provider(error));
+        }
+        if let Some(mut new_instance) = world.get_mut::<SceneInstance>(spawn.root.unwrap()) {
+            new_instance.overrides = old_instance.overrides.clone();
+            new_instance.persistent = old_instance.persistent;
+            new_instance.tier = old_instance.tier;
+        } else {
+            despawn_instance(world, &spawn);
+            return Err(NestedInstantiateError::MissingAttachmentEntity);
+        }
     }
     let mut children: Vec<SceneTreeChild> = Vec::new();
     for slot in template.nested.iter().copied() {
@@ -208,6 +326,11 @@ fn spawn_tree<P: NestedSceneProvider>(
             }
         };
         active.push(slot.template);
+        let previous_child = previous.and_then(|old| {
+            old.children
+                .iter()
+                .find(|child| child.slot_root == slot.root && child.template == slot.template)
+        });
         let child = spawn_tree(
             world,
             child_template,
@@ -217,6 +340,7 @@ fn spawn_tree<P: NestedSceneProvider>(
             depth + 1,
             active,
             count,
+            previous_child.map(|child| &child.tree),
         );
         active.pop();
         let child = match child {
@@ -265,4 +389,240 @@ fn spawn_tree<P: NestedSceneProvider>(
         root: spawn,
         children,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::identity::{LocalEntityId, PersistentId};
+    use crate::overrides::{ArchetypeSignature, ComponentTypeId, OverrideValue, PropertyOverride};
+    use crate::path::FieldPath;
+    use crate::plan::{ArchetypeGroup, InstantiationPlan};
+    use crate::residency::ResidencyTier;
+    use crate::template::NestedSlot;
+    use alloc::boxed::Box;
+    use alloc::collections::BTreeMap;
+    use alloc::vec;
+    use prism_ecs::component::Component;
+
+    #[derive(Debug, PartialEq)]
+    struct Marker(u32);
+    impl Component for Marker {}
+
+    fn guid(value: u128) -> StableGuid {
+        StableGuid::from_u128(value)
+    }
+
+    fn plan(count: u32, hierarchy: &[(u32, u32)]) -> InstantiationPlan {
+        InstantiationPlan {
+            entity_count: count,
+            groups: if count == 0 {
+                Box::new([])
+            } else {
+                vec![ArchetypeGroup::new(
+                    ArchetypeSignature::default(),
+                    (0..count)
+                        .map(LocalEntityId::new)
+                        .collect::<Vec<_>>()
+                        .into_boxed_slice(),
+                    Box::new([]),
+                )]
+                .into_boxed_slice()
+            },
+            entity_valued_fields: Box::new([]),
+            hierarchy: hierarchy
+                .iter()
+                .map(|&(child, parent)| (LocalEntityId::new(child), LocalEntityId::new(parent)))
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+            reserved_local_base: LocalEntityId::RESERVED_BASE,
+        }
+    }
+
+    fn descriptor(id: u128, children: &[(u32, u128)]) -> SceneTemplate {
+        let count = children
+            .iter()
+            .map(|(slot, _)| slot + 1)
+            .max()
+            .unwrap_or(1)
+            .max(2);
+        let hierarchy = children
+            .iter()
+            .map(|(slot, _)| (*slot, 0))
+            .chain(
+                (1..count)
+                    .filter(|local| !children.iter().any(|(slot, _)| slot == local))
+                    .map(|local| (local, 0)),
+            )
+            .collect::<Vec<_>>();
+        let mut template = SceneTemplate::new(guid(id), plan(count, &hierarchy));
+        template.nested = children
+            .iter()
+            .map(|(slot, child)| NestedSlot::new(LocalEntityId::new(*slot), guid(*child)))
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        let mut deps = children
+            .iter()
+            .map(|(_, child)| guid(*child))
+            .collect::<Vec<_>>();
+        deps.sort_unstable();
+        deps.dedup();
+        template.deps = deps.into_boxed_slice();
+        template.validate().unwrap();
+        template
+    }
+
+    #[derive(Default)]
+    struct Provider {
+        templates: BTreeMap<StableGuid, SceneTemplate>,
+        fail_replay_for: Option<StableGuid>,
+    }
+
+    impl NestedSceneProvider for Provider {
+        fn template(&self, guid: StableGuid) -> Option<&SceneTemplate> {
+            self.templates.get(&guid)
+        }
+        fn typed_plan(&self, guid: StableGuid) -> Result<TypedSpawnPlan, NestedProviderError> {
+            let mut plan = TypedSpawnPlan::new().with_bundle(LocalEntityId::new(0), Marker(1));
+            if self
+                .templates
+                .get(&guid)
+                .is_some_and(|template| template.entity_count() > 1)
+            {
+                plan = plan.with_bundle(LocalEntityId::new(1), Marker(1));
+            }
+            Ok(plan)
+        }
+        fn replay_instance_overrides(
+            &self,
+            world: &mut World,
+            template: StableGuid,
+            _previous: &SceneInstance,
+            replacement: &SceneSpawn,
+        ) -> Result<(), NestedProviderError> {
+            if self.fail_replay_for == Some(template) {
+                return Err(NestedProviderError::Unavailable);
+            }
+            let root = replacement.root.ok_or(NestedProviderError::Unavailable)?;
+            let mut marker = world
+                .get_mut::<Marker>(root)
+                .ok_or(NestedProviderError::Unavailable)?;
+            marker.0 = 2;
+            Ok(())
+        }
+    }
+
+    fn provider() -> Provider {
+        Provider {
+            templates: BTreeMap::from([
+                (guid(1), descriptor(1, &[(1, 2)])),
+                (guid(2), descriptor(2, &[])),
+            ]),
+            ..Provider::default()
+        }
+    }
+
+    fn typed_root_plan() -> TypedSpawnPlan {
+        TypedSpawnPlan::new()
+            .with_bundle(LocalEntityId::new(0), Marker(1))
+            .with_bundle(LocalEntityId::new(1), Marker(1))
+    }
+
+    #[test]
+    fn replacement_stages_complete_tree_preserves_metadata_and_retires_old_tree() {
+        let provider = provider();
+        let template = provider.template(guid(1)).unwrap();
+        let mut world = World::new();
+        let previous = spawn_nested_typed(
+            &mut world,
+            template,
+            typed_root_plan(),
+            &provider,
+            NestedSpawnLimits::default(),
+        )
+        .unwrap();
+        let old_root = previous.root.root.unwrap();
+        let old_child = previous.children[0].tree.root.root.unwrap();
+        {
+            let mut instance = world.get_mut::<SceneInstance>(old_root).unwrap();
+            instance.persistent = Some(PersistentId::from_u128(0xabc));
+            instance.tier = ResidencyTier::Proxy;
+            instance.overrides_mut().set_property(PropertyOverride::new(
+                LocalEntityId::new(0),
+                ComponentTypeId::from_raw(0xdef),
+                FieldPath::parse("value").unwrap(),
+                OverrideValue::I64(7),
+            ));
+        }
+        let replacement = replace_nested_typed(
+            &mut world,
+            previous,
+            template,
+            typed_root_plan(),
+            &provider,
+            NestedSpawnLimits::default(),
+        )
+        .unwrap();
+        let new_root = replacement.root.root.unwrap();
+        let new_child = replacement.children[0].tree.root.root.unwrap();
+        assert_ne!(old_root, new_root);
+        assert_ne!(old_child, new_child);
+        assert!(!world.contains(old_root));
+        assert!(!world.contains(old_child));
+        assert_eq!(world.get::<Marker>(new_root).unwrap().0, 2);
+        assert_eq!(world.get::<Marker>(new_child).unwrap().0, 2);
+        let instance = world.get::<SceneInstance>(new_root).unwrap();
+        assert_eq!(instance.persistent, Some(PersistentId::from_u128(0xabc)));
+        assert_eq!(instance.tier, ResidencyTier::Proxy);
+        assert_eq!(instance.overrides().unwrap().properties().len(), 1);
+        assert_eq!(world.entity_count(), 4);
+    }
+
+    #[test]
+    fn replacement_replay_failure_keeps_old_tree_and_returns_ownership() {
+        let provider = provider();
+        let template = provider.template(guid(1)).unwrap().clone();
+        let mut world = World::new();
+        let previous = spawn_nested_typed(
+            &mut world,
+            &template,
+            typed_root_plan(),
+            &provider,
+            NestedSpawnLimits::default(),
+        )
+        .unwrap();
+        let old_root = previous.root.root.unwrap();
+        let old_child = previous.children[0].tree.root.root.unwrap();
+        let failing = Provider {
+            templates: provider.templates.clone(),
+            fail_replay_for: Some(guid(2)),
+        };
+        let error = replace_nested_typed(
+            &mut world,
+            previous,
+            &template,
+            typed_root_plan(),
+            &failing,
+            NestedSpawnLimits::default(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.cause,
+            NestedInstantiateError::Provider(NestedProviderError::Unavailable)
+        );
+        assert!(world.contains(old_root));
+        assert!(world.contains(old_child));
+        assert_eq!(world.entity_count(), 4);
+        let retry = replace_nested_typed(
+            &mut world,
+            *error.previous,
+            &template,
+            typed_root_plan(),
+            &provider,
+            NestedSpawnLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(world.entity_count(), 4);
+        assert!(world.contains(retry.root.root.unwrap()));
+    }
 }

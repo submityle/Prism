@@ -905,6 +905,10 @@ impl<P: SceneEcsProvider> crate::SceneHost for SceneEcsHost<'_, P> {
         self.load_cell(sector)
     }
 
+    fn reload_cells_atomic(&mut self, sectors: &[SectorId]) -> Result<bool, Self::Error> {
+        self.reload_cells_atomic(sectors).map(|()| true)
+    }
+
     fn unload_cell(&mut self, sector: SectorId) -> Result<(), Self::Error> {
         self.unload_cell(sector)
     }

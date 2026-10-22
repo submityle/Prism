@@ -111,8 +111,8 @@ pub use materialize::{
 };
 #[cfg(feature = "materialize")]
 pub use nested_runtime::{
-    spawn_nested_typed, NestedInstantiateError, NestedProviderError, NestedSceneProvider,
-    NestedSpawnLimits, SceneTreeChild, SceneTreeSpawn,
+    replace_nested_typed, spawn_nested_typed, NestedInstantiateError, NestedProviderError,
+    NestedReplaceError, NestedSceneProvider, NestedSpawnLimits, SceneTreeChild, SceneTreeSpawn,
 };
 #[cfg(feature = "materialize")]
 pub use override_replay::{
