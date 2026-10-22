@@ -144,7 +144,9 @@ pub use residency::{ResidencyPlan, ResidencyTier};
 #[cfg(feature = "materialize")]
 pub use runtime::{spawn_scene, spawn_scene_with_registry, SceneSpawnError};
 pub use schema::{SchemaMigration, SchemaMigrationError, SchemaMigrationRegistry};
-pub use streaming::{ResidencyAction, ResidencyBudget, ResidencyRequest, ResidencyScheduler};
+pub use streaming::{
+    ResidencyAction, ResidencyBudget, ResidencyCommitError, ResidencyRequest, ResidencyScheduler,
+};
 pub use template::{NestedSlot, SceneTemplate, TemplateError};
 pub use template_codec::{
     decode_template, encode_template, TemplateCodecError, TemplateDecodeLimits,
@@ -197,7 +199,8 @@ pub mod prelude {
     #[cfg(feature = "materialize")]
     pub use crate::runtime::{spawn_scene, spawn_scene_with_registry, SceneSpawnError};
     pub use crate::streaming::{
-        ResidencyAction, ResidencyBudget, ResidencyRequest, ResidencyScheduler,
+        ResidencyAction, ResidencyBudget, ResidencyCommitError, ResidencyRequest,
+        ResidencyScheduler,
     };
     pub use crate::template::{NestedSlot, SceneTemplate, TemplateError};
     pub use crate::template_codec::{

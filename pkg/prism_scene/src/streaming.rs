@@ -6,7 +6,7 @@
 //! this decision plane separate prevents a GPU backend from becoming the scene
 //! model's source of truth.
 
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 
 use crate::identity::PersistentId;
@@ -60,6 +60,22 @@ pub struct ResidencyAction {
     pub bytes: usize,
 }
 
+/// Why a residency action batch could not be committed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResidencyCommitError {
+    /// Two actions in one batch target the same stable instance identity.
+    DuplicateInstance(PersistentId),
+    /// The action's source tier is no longer the scheduler's committed tier.
+    StaleSource {
+        /// Stable instance identity.
+        instance: PersistentId,
+        /// Tier recorded by the admitted action.
+        expected: ResidencyTier,
+        /// Tier currently committed by the scheduler.
+        actual: ResidencyTier,
+    },
+}
+
 /// Persistent residency state and deterministic frame scheduler.
 #[derive(Clone, Debug, Default)]
 pub struct ResidencyScheduler {
@@ -83,9 +99,32 @@ impl ResidencyScheduler {
             .unwrap_or(ResidencyTier::Proxy)
     }
 
-    /// Commits an admitted action after its world-side operation succeeds.
-    pub fn commit(&mut self, action: ResidencyAction) {
-        self.current.insert(action.instance, action.to);
+    /// Validates and commits successful world-side operations atomically.
+    /// Duplicate IDs or stale source tiers reject the entire batch without
+    /// changing scheduler state. The caller must invoke this only after every
+    /// corresponding representation transition has succeeded.
+    pub fn commit_batch(
+        &mut self,
+        actions: &[ResidencyAction],
+    ) -> Result<(), ResidencyCommitError> {
+        let mut seen = BTreeSet::new();
+        for action in actions {
+            if !seen.insert(action.instance) {
+                return Err(ResidencyCommitError::DuplicateInstance(action.instance));
+            }
+            let actual = self.current(action.instance);
+            if actual != action.from {
+                return Err(ResidencyCommitError::StaleSource {
+                    instance: action.instance,
+                    expected: action.from,
+                    actual,
+                });
+            }
+        }
+        for action in actions {
+            self.current.insert(action.instance, action.to);
+        }
+        Ok(())
     }
 
     /// Selects transitions that fit the frame budget.
@@ -179,7 +218,48 @@ mod tests {
             entities: 2,
             bytes: 8,
         };
-        scheduler.commit(action);
+        scheduler.commit_batch(&[action]).unwrap();
         assert_eq!(scheduler.current(id(7)), ResidencyTier::Streamed);
+    }
+
+    #[test]
+    fn batch_commit_rejects_stale_or_duplicate_actions_without_partial_state() {
+        let mut scheduler = ResidencyScheduler::new();
+        let first = ResidencyAction {
+            instance: id(1),
+            from: ResidencyTier::Proxy,
+            to: ResidencyTier::Streamed,
+            entities: 1,
+            bytes: 4,
+        };
+        let stale = ResidencyAction {
+            instance: id(2),
+            from: ResidencyTier::Interactive,
+            to: ResidencyTier::Proxy,
+            entities: 1,
+            bytes: 4,
+        };
+        assert_eq!(
+            scheduler.commit_batch(&[first, stale]),
+            Err(ResidencyCommitError::StaleSource {
+                instance: id(2),
+                expected: ResidencyTier::Interactive,
+                actual: ResidencyTier::Proxy,
+            })
+        );
+        assert_eq!(scheduler.current(id(1)), ResidencyTier::Proxy);
+
+        let duplicate = ResidencyAction {
+            to: ResidencyTier::Interactive,
+            ..first
+        };
+        assert_eq!(
+            scheduler.commit_batch(&[first, duplicate]),
+            Err(ResidencyCommitError::DuplicateInstance(id(1)))
+        );
+        assert_eq!(scheduler.current(id(1)), ResidencyTier::Proxy);
+
+        scheduler.commit_batch(&[first]).unwrap();
+        assert_eq!(scheduler.current(id(1)), ResidencyTier::Streamed);
     }
 }
