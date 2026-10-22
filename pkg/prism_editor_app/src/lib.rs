@@ -94,7 +94,9 @@ pub use document::{
     DocumentLimits, DocumentLoadReceipt, DocumentSaveReceipt, DocumentSchemaCatalog,
     PreparedDocumentLoad,
 };
-pub use ecs_document_bridge::{EditorEcsDocumentBridge, EditorEcsDocumentError};
+pub use ecs_document_bridge::{
+    EditorEcsDocumentBridge, EditorEcsDocumentError, EditorEcsStructureSync,
+};
 
 pub use backend::{
     GpuSurfaceError, GpuSurfaceErrorKind, GpuSurfaceLifecycle, PixelSize, PixelSizeError,
