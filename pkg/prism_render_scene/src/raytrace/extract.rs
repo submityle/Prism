@@ -87,6 +87,7 @@ struct SceneAccelerationSourceRevision {
     scene_epoch: u64,
     live_count: usize,
     geometry_revisions: Vec<(u32, u32, u32)>,
+    lod_payload_revisions: Vec<(u32, u32, u32, u32)>,
 }
 
 /// Per-build accounting for representation decisions made by RT extraction.
@@ -177,6 +178,10 @@ impl RenderWorldAcceleration {
     pub(crate) fn acceleration_revision(&self) -> u64 {
         self.revision
     }
+
+    pub(crate) fn selection_revision(&self) -> u64 {
+        self.selection_revision
+    }
 }
 
 fn semantic_selection_signature(
@@ -258,6 +263,7 @@ fn scene_signature(
             .entries_for_upload()
             .map(|entry| (entry.handle.index, entry.handle.generation, entry.revision))
             .collect(),
+        lod_payload_revisions: registry.lod_payload_revisions_for_signature().collect(),
     }
 }
 
@@ -902,6 +908,19 @@ mod tests {
         let mut replacement = RenderShadingGeometryRegistry::default();
         replacement.upsert(GenerationalHandle::new(7, 2), 1, unit_quad());
         assert_ne!(baseline, scene_signature(&mirror, &replacement));
+    }
+
+    #[test]
+    fn signature_changes_when_lod_payload_changes_without_base_revision_change() {
+        let mirror = scene_with(&[(1, 7, [0.0; 3])]);
+        let handle = GenerationalHandle::new(7, 1);
+        let mut registry = registry_with(&[(7, unit_quad())]);
+        assert!(registry.upsert_lod(handle, 1, 1, 1, unit_quad()));
+        let baseline = scene_signature(&mirror, &registry);
+
+        assert!(registry.upsert_lod(handle, 1, 1, 2, unit_quad()));
+        assert_eq!(registry.get(handle.index).unwrap().revision, 1);
+        assert_ne!(baseline, scene_signature(&mirror, &registry));
     }
 
     #[test]

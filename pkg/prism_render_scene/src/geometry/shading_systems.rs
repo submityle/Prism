@@ -13,7 +13,7 @@ use std::collections::{HashMap, HashSet};
 
 use bevy_asset::{AssetEvent, AssetId, Assets};
 use bevy_ecs::{message::MessageReader, prelude::*};
-use bevy_mesh::{Mesh, Mesh3d};
+use bevy_mesh::Mesh;
 use bevy_render::{
     renderer::{RenderDevice, RenderQueue},
     Extract,
@@ -25,7 +25,7 @@ use super::{
     shading_buffers::RenderShadingGeometryBuffers,
     shading_registry::RenderShadingGeometryRegistry,
 };
-use crate::{extract::PrismGpuSceneEntity, scene::RenderGpuScene};
+use crate::{extract::ExtractedSceneInstance, scene::RenderGpuScene};
 
 /// One asset's staged surface table plus a monotonic revision. The revision
 /// lets the render world detect a rebuilt table even when the handle index is
@@ -67,12 +67,16 @@ impl ShadingGeometryStaging {
 /// this frame while its CPU attributes are still reachable in the main world.
 pub(crate) fn extract_shading_geometry(
     meshes: Extract<Res<Assets<Mesh>>>,
-    instances: Extract<Query<&Mesh3d, With<PrismGpuSceneEntity>>>,
+    instances: Extract<Query<&ExtractedSceneInstance>>,
     mut events: Extract<MessageReader<AssetEvent<Mesh>>>,
     mut staging: ResMut<ShadingGeometryStaging>,
     mut built: Local<HashSet<AssetId<Mesh>>>,
 ) {
-    let referenced: HashSet<AssetId<Mesh>> = instances.iter().map(|mesh| mesh.0.id()).collect();
+    let mut referenced: HashSet<AssetId<Mesh>> = HashSet::new();
+    for instance in &instances {
+        referenced.insert(instance.mesh.0.id());
+        referenced.extend(instance.lod_meshes.iter().map(|(asset, _)| *asset));
+    }
 
     // Meshes whose contents changed this frame must be rebuilt even when the
     // asset id is unchanged; unloaded meshes are dropped from the cache.
@@ -115,17 +119,33 @@ pub(crate) fn extract_shading_geometry(
 pub(crate) fn sync_shading_geometry_registry(
     scene: Res<RenderGpuScene>,
     staging: Res<ShadingGeometryStaging>,
+    geometry: Res<super::runtime::RenderGeometryRegistry>,
     mut registry: ResMut<RenderShadingGeometryRegistry>,
     mut buffers: ResMut<RenderShadingGeometryBuffers>,
 ) {
     let mut live: HashSet<u32> = HashSet::new();
+    let mut live_lods: HashSet<(u32, u32)> = HashSet::new();
     for (asset, handle) in scene.geometry_assets() {
         live.insert(handle.index);
+        let revision = geometry.record(handle).map_or(1, |record| record.revision);
         if let Some(table) = staging.get(asset) {
-            registry.upsert(handle, table.revision, table.geometry.clone());
+            registry.upsert(handle, revision, table.geometry.clone());
+        }
+        for (level, lod_asset, _) in scene.geometry_lod_assets(handle) {
+            live_lods.insert((handle.index, level));
+            if let Some(table) = staging.get(lod_asset) {
+                registry.upsert_lod(
+                    handle,
+                    level,
+                    revision,
+                    table.revision,
+                    table.geometry.clone(),
+                );
+            }
         }
     }
     registry.retain_live(|index| live.contains(&index));
+    registry.retain_live_lods(|index, level| live_lods.contains(&(index, level)));
 
     if registry.take_dirty() {
         buffers.rebuild(&registry);

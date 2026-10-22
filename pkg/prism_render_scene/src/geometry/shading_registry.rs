@@ -24,6 +24,8 @@ pub struct RenderShadingGeometryEntry {
 #[derive(Resource, Debug, Default)]
 pub struct RenderShadingGeometryRegistry {
     entries: BTreeMap<u32, RenderShadingGeometryEntry>,
+    lod_entries: BTreeMap<(u32, u32), RenderShadingGeometryEntry>,
+    lod_payload_revisions: BTreeMap<(u32, u32), u32>,
     dirty: bool,
 }
 
@@ -45,6 +47,42 @@ impl RenderShadingGeometryRegistry {
             return false;
         }
         self.entries.insert(handle.index, entry);
+        self.lod_entries
+            .retain(|(index, _), _| *index != handle.index);
+        self.lod_payload_revisions
+            .retain(|(index, _), _| *index != handle.index);
+        self.dirty = true;
+        true
+    }
+
+    /// Inserts or replaces one resident LOD surface table for a geometry.
+    /// LOD tables are kept separate from the base upload table because the
+    /// compute shading ABI has one header row per geometry generation, while
+    /// ray consumers need CPU triangles for the exact selected representation.
+    pub fn upsert_lod(
+        &mut self,
+        handle: GenerationalHandle,
+        level: u32,
+        revision: u32,
+        payload_revision: u32,
+        geometry: RenderShadingGeometry,
+    ) -> bool {
+        if level == 0 || payload_revision == 0 {
+            return false;
+        }
+        let key = (handle.index, level);
+        let entry = RenderShadingGeometryEntry {
+            handle,
+            revision,
+            geometry,
+        };
+        if self.lod_entries.get(&key) == Some(&entry)
+            && self.lod_payload_revisions.get(&key) == Some(&payload_revision)
+        {
+            return false;
+        }
+        self.lod_entries.insert(key, entry);
+        self.lod_payload_revisions.insert(key, payload_revision);
         self.dirty = true;
         true
     }
@@ -52,7 +90,12 @@ impl RenderShadingGeometryRegistry {
     /// Removes a geometry slot, e.g. when its asset is unloaded.
     pub fn remove(&mut self, index: u32) -> Option<RenderShadingGeometryEntry> {
         let removed = self.entries.remove(&index);
-        if removed.is_some() {
+        let lod_count_before = self.lod_entries.len();
+        self.lod_entries
+            .retain(|(lod_index, _), _| *lod_index != index);
+        self.lod_payload_revisions
+            .retain(|(lod_index, _), _| *lod_index != index);
+        if removed.is_some() || self.lod_entries.len() != lod_count_before {
             self.dirty = true;
         }
         removed
@@ -61,6 +104,42 @@ impl RenderShadingGeometryRegistry {
     /// Returns the entry stored at a sparse slot, if any.
     pub fn get(&self, index: u32) -> Option<&RenderShadingGeometryEntry> {
         self.entries.get(&index)
+    }
+
+    /// Returns a resident LOD surface table for the exact generation.
+    pub fn lod(
+        &self,
+        handle: GenerationalHandle,
+        level: u32,
+    ) -> Option<&RenderShadingGeometryEntry> {
+        self.lod_entries
+            .get(&(handle.index, level))
+            .filter(|entry| entry.handle == handle)
+    }
+
+    /// Returns the content revision of one resident LOD surface table.
+    #[must_use]
+    pub fn lod_payload_revision(&self, handle: GenerationalHandle, level: u32) -> Option<u32> {
+        self.lod_entries
+            .get(&(handle.index, level))
+            .filter(|entry| entry.handle == handle)
+            .and_then(|_| {
+                self.lod_payload_revisions
+                    .get(&(handle.index, level))
+                    .copied()
+            })
+    }
+
+    /// Stable source identities for acceleration-cache invalidation.
+    pub(crate) fn lod_payload_revisions_for_signature(
+        &self,
+    ) -> impl Iterator<Item = (u32, u32, u32, u32)> + '_ {
+        self.lod_payload_revisions
+            .iter()
+            .filter_map(|(&(index, level), &payload_revision)| {
+                let entry = self.lod_entries.get(&(index, level))?;
+                Some((index, entry.handle.generation, level, payload_revision))
+            })
     }
 
     /// Number of resident geometries.
@@ -92,9 +171,24 @@ impl RenderShadingGeometryRegistry {
     /// e.g. after a geometry asset is retired. Dirties the registry when it
     /// actually removes something so buffers repack exactly once.
     pub fn retain_live(&mut self, is_live: impl Fn(u32) -> bool) {
-        let before = self.entries.len();
+        let before = self.entries.len() + self.lod_entries.len();
         self.entries.retain(|index, _| is_live(*index));
-        if self.entries.len() != before {
+        self.lod_entries.retain(|(index, _), _| is_live(*index));
+        self.lod_payload_revisions
+            .retain(|(index, _), _| is_live(*index));
+        if self.entries.len() + self.lod_entries.len() != before {
+            self.dirty = true;
+        }
+    }
+
+    /// Retains only the LOD keys still published by the scene mirror.
+    pub fn retain_live_lods(&mut self, is_live: impl Fn(u32, u32) -> bool) {
+        let before = self.lod_entries.len();
+        self.lod_entries
+            .retain(|(index, level), _| is_live(*index, *level));
+        self.lod_payload_revisions
+            .retain(|(index, level), _| is_live(*index, *level));
+        if self.lod_entries.len() != before {
             self.dirty = true;
         }
     }
@@ -165,5 +259,23 @@ mod tests {
         assert_eq!(indices, vec![3, 7]);
         assert!(registry.remove(3).is_some());
         assert_eq!(registry.len(), 1);
+    }
+
+    #[test]
+    fn lod_payload_revision_is_generation_scoped_and_removal_dirties_registry() {
+        let mut registry = RenderShadingGeometryRegistry::default();
+        let handle = GenerationalHandle::new(5, 2);
+        assert!(registry.upsert(handle, 9, geometry(0.0)));
+        assert!(registry.upsert_lod(handle, 1, 9, 3, geometry(1.0)));
+        assert_eq!(registry.lod_payload_revision(handle, 1), Some(3));
+        assert!(registry.take_dirty());
+
+        assert!(registry.upsert_lod(handle, 1, 9, 4, geometry(1.0)));
+        assert_eq!(registry.lod_payload_revision(handle, 1), Some(4));
+        assert!(registry.take_dirty());
+
+        assert!(registry.remove(handle.index).is_some());
+        assert!(registry.is_dirty());
+        assert_eq!(registry.lod_payload_revision(handle, 1), None);
     }
 }
