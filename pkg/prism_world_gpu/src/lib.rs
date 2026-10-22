@@ -133,6 +133,9 @@ pub mod planet_placement_rhi;
 #[cfg(feature = "placement_rhi")]
 pub mod planet_placement_draw;
 
+#[cfg(feature = "planet_terrain_rhi")]
+pub mod planet_terrain_rhi;
+
 #[cfg(all(test, feature = "terrain_scatter"))]
 #[path = "planet_placement_fixed_math.rs"]
 mod planet_placement_fixed_math;

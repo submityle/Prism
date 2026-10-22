@@ -11,6 +11,7 @@ default = []
 gpu = ["dep:bytemuck", "dep:futures-lite", "dep:wgpu", "dep:prism_world_residency"]
 terrain_scatter = ["gpu", "dep:prism_world_terrain"]
 placement_rhi = ["terrain_scatter", "dep:prism_render_driver_wgpu", "wgpu/std"]
+planet_terrain_rhi = ["gpu", "dep:prism_world_terrain", "prism_world_terrain/mesh"]
 
 [dependencies]
 prism_world_stream = { path = "../prism_world_stream", default-features = false }
