@@ -1322,7 +1322,7 @@ renderer 接线期间，`CameraIntent`/`ViewData` 的每视图可见性元数据
 
 当前已验证的是相机计算/发布预算和历史复用；渲染侧仍需消费 `PublishedCameraLod`，将 `resolution_scale` 应用到实际离屏目标尺寸，并将 `history_frames` 接入时域资源保留策略。验证命令：`cargo test -p prism_camera_ecs --features view_lod --lib --offline`。
 
-2026-10-23 LOD extent 规则验证增量：新增 `surface_view_render_extent` 纯函数，统一定义输出尺寸按有限 `[0,1]` 比例 `ceil(output × scale)`、每轴至少 1 像素以及非法 scale 回退 1.0 的确定性规则，并为满分辨率、半分辨率、极小比例和非法输入增加单测。该 helper 尚未接入 target 分配：当前相机附件仍是输出 viewport 尺寸，避免在不可缩放的 transfer-copy 合成存在时产生源/目的范围不匹配。完成 LOD 仍需把缩放尺寸接入目标缓存，并增加保持 scene-linear HDR、限定 viewport/scissor、Load 保留目标外像素的 raster 上采样合成。`history_frames` 仍未接入 TAA 资源生命周期。
+2026-10-23 LOD extent 规则验证增量：新增 `surface_view_render_extent` 纯函数，统一定义输出尺寸按有限 `[0,1]` 比例 `ceil(output × scale)`、每轴至少 1 像素以及非法 scale 回退 1.0 的确定性规则，并为满分辨率、半分辨率、极小比例和非法输入增加单测。验证命令 `CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 cargo test -p prism_render_app --lib surface_view_targets::tests::surface_view_extent_uses_stable_ceil_and_safe_scale_fallback --offline`：1 passed。该结果只验证纯尺寸策略，不验证 target 分配或图像采样。helper 尚未接入 target 分配：当前相机附件仍是输出 viewport 尺寸，避免在不可缩放的 transfer-copy 合成存在时产生源/目的范围不匹配。完成 LOD 仍需把缩放尺寸接入目标缓存，并增加保持 scene-linear HDR、限定 viewport/scissor、Load 保留目标外像素的 raster 上采样合成。`history_frames` 仍未接入 TAA 资源生命周期。
 
 ### 28.10 构图辅助与安全框（`composition_aid`）
 
