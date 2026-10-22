@@ -1281,4 +1281,83 @@ mod tests {
         assert!(!manager.is_expired(Instant::now()));
         assert_eq!(compensations.load(Ordering::SeqCst), 1);
     }
+
+    #[test]
+    fn app_expiry_persists_recovery_required_after_compensation_failure() {
+        let registry = registry();
+        let directory = TempDir::new();
+        let tx_id = "app-expiry-recovery";
+        let journal_path = directory.0.join(format!("{tx_id}.journal"));
+        let compensations = Arc::new(AtomicUsize::new(0));
+        let mut app = App::new();
+        app.install_settings_runtime(registry.clone(), Domain::Runtime)
+            .unwrap();
+
+        let mut manager = app
+            .world_mut()
+            .remove_resource::<SettingsTransactionManager>()
+            .unwrap();
+        let mut runtime = app
+            .world_mut()
+            .remove_resource::<SettingsRuntime>()
+            .unwrap();
+        let mut persistence = NoopPersistence;
+        let mut begin_applier = CompensationFailureApplier {
+            compensations: compensations.clone(),
+        };
+        let mut begin_appliers: Vec<&mut dyn SettingsApplier> = vec![&mut begin_applier];
+        assert_eq!(
+            manager
+                .begin(
+                    tx_id,
+                    transaction_with_plan(
+                        &registry,
+                        &directory,
+                        tx_id,
+                        0.75,
+                        reversible_display_plan(),
+                    ),
+                    Duration::ZERO,
+                    &mut runtime,
+                    &mut persistence,
+                    &mut begin_appliers,
+                )
+                .unwrap(),
+            PipelineOutcome::PendingConfirmation
+        );
+        app.insert_resource(manager);
+        app.insert_resource(runtime);
+        app.insert_resource(SettingsTransactionServices::new(
+            NoopPersistence,
+            vec![Box::new(CompensationFailureApplier {
+                compensations: compensations.clone(),
+            })],
+        ));
+
+        app.update();
+        assert!(matches!(
+            app.world()
+                .resource::<SettingsTransactionManager>()
+                .status(),
+            SettingsTransactionStatus::RecoveryRequired { tx_id: id, .. } if id == tx_id
+        ));
+        assert_eq!(compensations.load(Ordering::SeqCst), 1);
+
+        let journal = prism_settings_io::inspect_journal(&journal_path).unwrap();
+        let recovered = prism_settings_io::reconstruct_transaction(&journal.records).unwrap();
+        assert_eq!(recovered.ended, Some(TxOutcome::RecoveryRequired));
+        assert!(journal.records.iter().any(|record| matches!(
+            record.event,
+            prism_settings_io::JournalEvent::CompensateFailed { op_index: 0, .. }
+        )));
+
+        app.update();
+        assert_eq!(compensations.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            app.world()
+                .resource::<SettingsTransactionManager>()
+                .status(),
+            SettingsTransactionStatus::RecoveryRequired { tx_id: id, .. } if id == tx_id
+        ));
+    }
 }
