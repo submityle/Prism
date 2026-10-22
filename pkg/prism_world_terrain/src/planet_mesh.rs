@@ -139,6 +139,26 @@ pub struct PlanetHeightfieldMesh {
     normals: Vec<[f32; 3]>,
     uvs: Vec<[f32; 2]>,
     indices: Vec<u32>,
+    lod_seams_applied: bool,
+}
+
+fn planet_mesh_edge_index(edge: TileEdge) -> usize {
+    match edge {
+        TileEdge::West => 0,
+        TileEdge::East => 1,
+        TileEdge::South => 2,
+        TileEdge::North => 3,
+    }
+}
+
+fn planet_mesh_edges_opposite(a: TileEdge, b: TileEdge) -> bool {
+    matches!(
+        (a, b),
+        (TileEdge::West, TileEdge::East)
+            | (TileEdge::East, TileEdge::West)
+            | (TileEdge::South, TileEdge::North)
+            | (TileEdge::North, TileEdge::South)
+    )
 }
 
 impl PlanetHeightfieldMesh {
@@ -204,6 +224,7 @@ impl PlanetHeightfieldMesh {
             normals: reserve(count)?,
             uvs: reserve(count)?,
             indices: reserve(indices)?,
+            lod_seams_applied: false,
         };
         for y in 0..side {
             for x in 0..side {
@@ -294,6 +315,178 @@ impl PlanetHeightfieldMesh {
     /// Outward triangle indices.
     pub fn indices(&self) -> &[u32] {
         &self.indices
+    }
+
+    /// Replaces planetary edge quads with resident-derived 2:1 seam strips.
+    /// Transition indices reuse this mesh's projected grid vertices, preserving
+    /// the origin-relative precision and avoiding duplicate attribute storage.
+    /// The complete index stream is staged under `max_bytes` and swapped only
+    /// after all topology and index checks succeed.
+    ///
+    /// As with the planar consumer, up to two opposite coarse edges are
+    /// supported; adjacent corner fans are rejected until their planetary
+    /// triangulation contract is implemented. Clear the plan before replacing
+    /// it.
+    pub fn apply_lod_seam_plan(
+        &mut self,
+        plan: &crate::HeightfieldLodSeamPlan,
+        max_bytes: usize,
+    ) -> Result<(), BakeError<Infallible>> {
+        if self.lod_seams_applied || plan.tile() != self.tile {
+            return Err(BakeError::InvalidGeometry);
+        }
+        let side = self.spec.samples_per_edge();
+        let segments = side - 1;
+        if plan.segments() != segments {
+            return Err(BakeError::InvalidGeometry);
+        }
+        let transitions = plan.transitions();
+        if transitions.len() > 2
+            || (transitions.len() == 2
+                && !planet_mesh_edges_opposite(transitions[0].edge(), transitions[1].edge()))
+        {
+            return Err(BakeError::InvalidGeometry);
+        }
+        let mut coarse_edges = [false; 4];
+        for transition in transitions {
+            let slot = planet_mesh_edge_index(transition.edge());
+            if coarse_edges[slot] {
+                return Err(BakeError::InvalidGeometry);
+            }
+            coarse_edges[slot] = true;
+        }
+        if transitions.is_empty() {
+            return Ok(());
+        }
+        let base_indices = usize::try_from(segments)
+            .ok()
+            .and_then(|n| n.checked_mul(n))
+            .and_then(|n| n.checked_mul(6))
+            .ok_or(BakeError::SizeOverflow)?;
+        if self.indices.len() != base_indices {
+            return Err(BakeError::InvalidGeometry);
+        }
+        let removed = transitions
+            .len()
+            .checked_mul(segments as usize)
+            .and_then(|n| n.checked_mul(6))
+            .ok_or(BakeError::SizeOverflow)?;
+        let added = transitions
+            .iter()
+            .try_fold(0usize, |total, edge| {
+                total.checked_add(edge.indices().len())
+            })
+            .ok_or(BakeError::SizeOverflow)?;
+        let next_len = base_indices
+            .checked_sub(removed)
+            .and_then(|n| n.checked_add(added))
+            .ok_or(BakeError::SizeOverflow)?;
+        let bytes = self
+            .positions
+            .len()
+            .checked_mul(32)
+            .and_then(|n| {
+                next_len
+                    .checked_mul(core::mem::size_of::<u32>())
+                    .and_then(|i| n.checked_add(i))
+            })
+            .ok_or(BakeError::SizeOverflow)?;
+        if bytes > max_bytes {
+            return Err(BakeError::BudgetExceeded);
+        }
+        let mut indices = Vec::new();
+        indices
+            .try_reserve_exact(next_len)
+            .map_err(|_| BakeError::AllocationFailed)?;
+        for y in 0..segments {
+            for x in 0..segments {
+                let replaced = (coarse_edges[0] && x == 0)
+                    || (coarse_edges[1] && x + 1 == segments)
+                    || (coarse_edges[2] && y == 0)
+                    || (coarse_edges[3] && y + 1 == segments);
+                if !replaced {
+                    let first = ((y * segments + x) * 6) as usize;
+                    indices.extend_from_slice(&self.indices[first..first + 6]);
+                }
+            }
+        }
+        for transition in transitions {
+            for local_triangle in transition.indices().chunks_exact(3) {
+                let mut triangle = [0u32; 3];
+                for (slot, &local_index) in local_triangle.iter().enumerate() {
+                    let grid = transition
+                        .vertices()
+                        .get(local_index as usize)
+                        .ok_or(BakeError::InvalidGeometry)?
+                        .grid;
+                    triangle[slot] = grid[1]
+                        .checked_mul(side)
+                        .and_then(|row| row.checked_add(grid[0]))
+                        .ok_or(BakeError::SizeOverflow)?;
+                    if triangle[slot] as usize >= self.positions.len() {
+                        return Err(BakeError::InvalidGeometry);
+                    }
+                }
+                let [a, b, c] = triangle.map(|index| self.positions[index as usize].map(f64::from));
+                let normal = cross(subtract(b, a), subtract(c, a));
+                let origin = self.config.origin_mm.map(|value| value as f64 * 0.001);
+                let outward = (0..3)
+                    .map(|axis| normal[axis] * ((a[axis] + b[axis] + c[axis]) / 3.0 + origin[axis]))
+                    .sum::<f64>();
+                if !outward.is_finite() || outward == 0.0 {
+                    return Err(BakeError::InvalidGeometry);
+                }
+                if outward > 0.0 {
+                    indices.extend_from_slice(&triangle);
+                } else {
+                    indices.extend_from_slice(&[triangle[0], triangle[2], triangle[1]]);
+                }
+            }
+        }
+        if indices.len() != next_len {
+            return Err(BakeError::InvalidGeometry);
+        }
+        self.indices = indices;
+        self.lod_seams_applied = true;
+        Ok(())
+    }
+
+    /// Restores regular cube-sphere grid triangles before applying another plan.
+    pub fn clear_lod_seam_plan(&mut self, max_bytes: usize) -> Result<(), BakeError<Infallible>> {
+        if !self.lod_seams_applied {
+            return Ok(());
+        }
+        let side = self.spec.samples_per_edge();
+        let segments = side - 1;
+        let count = usize::try_from(segments)
+            .ok()
+            .and_then(|n| n.checked_mul(n))
+            .and_then(|n| n.checked_mul(6))
+            .ok_or(BakeError::SizeOverflow)?;
+        let bytes = self
+            .positions
+            .len()
+            .checked_mul(32)
+            .and_then(|n| count.checked_mul(4).and_then(|i| n.checked_add(i)))
+            .ok_or(BakeError::SizeOverflow)?;
+        if bytes > max_bytes {
+            return Err(BakeError::BudgetExceeded);
+        }
+        let mut indices = Vec::new();
+        indices
+            .try_reserve_exact(count)
+            .map_err(|_| BakeError::AllocationFailed)?;
+        for y in 0..segments {
+            for x in 0..segments {
+                let a = y * side + x;
+                let b = a + 1;
+                let c = a + side;
+                indices.extend_from_slice(&[a, b, c, b, c + 1, c]);
+            }
+        }
+        self.indices = indices;
+        self.lod_seams_applied = false;
+        Ok(())
     }
     /// Integer-origin placement contract.
     pub const fn config(&self) -> PlanetMeshConfig {
@@ -677,6 +870,55 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn planetary_mesh_consumes_and_resets_coarse_lod_seams() {
+        use crate::{HeightfieldLodSeamPlan, LodSeamLimits};
+
+        let tile = TileKey::new(CubeFace::PositiveZ, 3, 3, 2).unwrap();
+        let coarse = tile.neighbor(TileEdge::East).parent().unwrap();
+        let plan = HeightfieldLodSeamPlan::build_strict_for_residency(
+            tile,
+            8,
+            &[coarse],
+            LodSeamLimits {
+                max_segments: 8,
+                max_vertices: 128,
+                max_indices: 1024,
+                max_bytes: 16_384,
+            },
+        )
+        .unwrap();
+        let config = PlanetMeshConfig::new(1_000_000, [0; 3], 1.0).unwrap();
+        let mut mesh = PlanetHeightfieldMesh::build(&field(tile, 0), config, LIMITS).unwrap();
+        let base = mesh.indices().to_vec();
+        let original_len = base.len();
+        assert_eq!(
+            mesh.apply_lod_seam_plan(&plan, 1),
+            Err(BakeError::BudgetExceeded)
+        );
+        assert_eq!(mesh.indices(), base);
+        mesh.apply_lod_seam_plan(&plan, 16_384).unwrap();
+        assert_eq!(mesh.indices().len(), original_len - 8 * 6 + 4 * 9);
+        assert!(mesh
+            .indices()
+            .iter()
+            .all(|&i| (i as usize) < mesh.positions().len()));
+        for tri in mesh.indices().chunks_exact(3) {
+            let [a, b, c] =
+                [tri[0], tri[1], tri[2]].map(|i| mesh.positions()[i as usize].map(f64::from));
+            assert!(
+                cross(subtract(b, a), subtract(c, a))
+                    .iter()
+                    .zip(a)
+                    .map(|(n, p)| n * p)
+                    .sum::<f64>()
+                    > 0.0
+            );
+        }
+        mesh.clear_lod_seam_plan(16_384).unwrap();
+        assert_eq!(mesh.indices(), base);
     }
 
     #[test]
