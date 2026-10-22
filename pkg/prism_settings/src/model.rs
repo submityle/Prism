@@ -714,7 +714,8 @@ pub struct Constraints {
     pub max_string_bytes: Option<usize>,
     /// Maximum element count enforced at every array depth.
     pub max_array_len: Option<usize>,
-    /// Permitted enum identities; empty means unrestricted.
+    /// Permitted enum identities; empty means unrestricted. The list is an
+    /// allow-list subset of the declared enum options.
     pub enum_values: &'static [EnumId],
 }
 /// Cross-setting rule evaluated on effective values.

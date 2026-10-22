@@ -1122,6 +1122,7 @@ OFPA 每对象文件化（§15、world §11.1）让多人并行编辑同一世�
 **M5 CPU cell proxy reload seam**：feature `proxy_host` 下的 `ProxyCellHost` 允许同 sector 重新加载：proxy generation 先在 registry 中 prepare，authoritative host 成功后才 commit；prepare/host 失败时 registry 保留旧 generation。此 seam 仍不执行 scheduler action，也不负责 proxy ⇄ ECS 表示转换。
 **M5 ECS transition contract**：`SceneHost::transition_residency` 与 `SceneEcsProvider::transition_residency` 传递完整 `(from, to)` 状态，不再把 `ResidencyAction` 压扁成无状态的 promote/demote；因此 provider 可以区分 Tier C→A、Tier C→B、Tier B→A 及其逆向/直达路径。该 contract 不伪造 provider-owned ECS 组件迁移已完成。
 **M5 execution/result commit contract**：`WorldRuntime::apply_plan_with_records` 在任何 stream/host 工作前验证 residency action 与 caller records 的唯一性及 source state；每个 transition 只有在 host 成功后才更新 caller record 的 committed tier 和 transition frame。后续 transition 失败时保留已成功前缀，未把 provider side effects 宣称为可回滚的全批事务。
+`apply_scene_plan_with_records` 与 `apply_scene_plan_durable_with_records` 已把同一语义接到 `SceneEcsHost` 的普通/日志持久化执行路径；因此真实 typed provider transition 成功后，caller records 才会前进。
 
 **2026-10-23 M4 runtime bridge 验证**：`cargo test -p prism_asset_container --offline` → **88 unit + 30 integration 测试全绿**（含 v2/v3 manifest wire compatibility fixture）；`cargo test -p prism_world_runtime --features scene_templates --lib scene_template_provider --offline` → **3 tests 全绿**；`cargo test -p prism_asset_build_cli --test scene_runtime_roundtrip --offline` → **1 test 全绿**；`cargo test -p prism_asset_build_core --offline` → **全套测试与 doctest 全绿**。端到端测试覆盖保存 PRSA → CLI editable cook/DDC/CAS → package/manifest v4 → mmap container reader → runtime loader，并检查冷/热 package payload 一致。未运行全 workspace 测试、性能基准或 mmap scene 零拷贝测试。
 
@@ -1138,3 +1139,5 @@ OFPA 每对象文件化（§15、world §11.1）让多人并行编辑同一世�
 **2026-10-23 M5 CPU cell proxy reload 验证**：`cargo test -p prism_world_runtime --features proxy_host --lib proxy_cell_host_tests --offline` → **21 项通过**；覆盖 same-sector 成功 replacement、host failure 保留旧 proxy generation，以及 coordinator、解码、容量和 panic 边界。该验证只证明 `ProxyCellHost`/`ProxyRegistry` seam，不证明 scheduler action 的通用 ECS/proxy 执行器、ECS 物化/反物化或百万规模性能。
 
 **2026-10-23 M5 residency execution/result commit 验证**：`CARGO_INCREMENTAL=0 RUSTFLAGS='-C debuginfo=0' cargo test --target-dir /private/tmp/prism-world-transition-target -j 2 -p prism_world --features scene_host --lib --offline` → **37 项通过**；覆盖 transition contract、records 回写、stale preflight 在 stream/host 前 fail-closed，以及后续 host failure 时保留成功前缀。未运行全 workspace 测试或性能基准。
+
+**2026-10-23 M5 SceneEcsHost records bridge 验证**：`CARGO_INCREMENTAL=0 RUSTFLAGS='-C debuginfo=0' cargo test --target-dir /private/tmp/prism-world-scene-apply-target -j 2 -p prism_world --features scene_host --lib scene_host:: --offline` → **31 项通过**；覆盖 `SceneEcsHost` 普通 scene plan 的编译与回归路径，含持久化 wrapper 的现有测试。

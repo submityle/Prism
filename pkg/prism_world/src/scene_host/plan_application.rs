@@ -5,6 +5,7 @@ use alloc::vec::Vec;
 
 use super::{ResidencyBinding, SceneEcsHost, SceneEcsHostError, SceneEcsProvider, SectorId};
 use crate::{apply_plan_to, ApplyError, SceneHost, WorldFramePlan, WorldRuntime};
+use prism_world_residency::ResidencyRecord;
 use prism_world_persist::FileJournal;
 
 impl WorldRuntime {
@@ -28,6 +29,28 @@ impl WorldRuntime {
                 evicted: BTreeMap::new(),
             },
         )
+    }
+
+    /// Applies a durable scene plan and writes successful residency results
+    /// into caller-owned records. Persistence handoff and residency result
+    /// commit follow the same fail-fast prefix semantics as the non-durable
+    /// records entry point.
+    pub fn apply_scene_plan_durable_with_records<P: SceneEcsProvider>(
+        &mut self,
+        plan: &WorldFramePlan,
+        records: &mut [ResidencyRecord],
+        frame: u64,
+        host: &mut SceneEcsHost<'_, P>,
+        journal: &mut FileJournal,
+    ) -> Result<(), ApplyError<SceneEcsHostError<P::Error>>> {
+        let record_indices = crate::validate_residency_application(plan, records)?;
+        let mut application = DurablePlanApplication {
+            host,
+            journal,
+            evicted: BTreeMap::new(),
+        };
+        apply_stream_plan_with_host(plan, &mut application)?;
+        commit_scene_residency(plan, record_indices, records, frame, &mut application)
     }
 
     /// Applies a frame plan through the scene/ECS ownership boundary.
@@ -56,6 +79,63 @@ impl WorldRuntime {
             },
         )
     }
+
+    /// Applies a scene plan and writes each successful residency transition
+    /// into the caller-owned committed records. Stream/cell behavior matches
+    /// [`Self::apply_scene_plan`]; provider failures retain the successful
+    /// transition prefix and do not advance later records.
+    pub fn apply_scene_plan_with_records<P: SceneEcsProvider>(
+        &mut self,
+        plan: &WorldFramePlan,
+        records: &mut [ResidencyRecord],
+        frame: u64,
+        host: &mut SceneEcsHost<'_, P>,
+    ) -> Result<(), ApplyError<SceneEcsHostError<P::Error>>> {
+        let Self { persist, .. } = self;
+        let record_indices = crate::validate_residency_application(plan, records)?;
+        let mut application = PlanApplication {
+            host,
+            log: persist,
+            evicted: BTreeMap::new(),
+        };
+        apply_stream_plan_with_host(plan, &mut application)?;
+        commit_scene_residency(plan, record_indices, records, frame, &mut application)
+    }
+}
+
+fn apply_stream_plan_with_host<H: SceneHost>(
+    plan: &WorldFramePlan,
+    host: &mut H,
+) -> Result<(), ApplyError<H::Error>> {
+    let stream_only = WorldFramePlan {
+        stream: plan.stream.clone(),
+        residency: prism_world_residency::ResidencyPlan {
+            actions: Vec::new(),
+            budget: plan.residency.budget,
+        },
+    };
+    apply_plan_to(&stream_only, host)
+}
+
+fn commit_scene_residency<P: SceneHost>(
+    plan: &WorldFramePlan,
+    record_indices: Vec<usize>,
+    records: &mut [ResidencyRecord],
+    frame: u64,
+    host: &mut P,
+) -> Result<(), ApplyError<P::Error>> {
+    for (action, record_index) in plan.residency.actions.iter().zip(record_indices) {
+        let (id, from, to) = match *action {
+            prism_world_residency::ResidencyAction::Promote { id, from, to, .. }
+            | prism_world_residency::ResidencyAction::Demote { id, from, to } => (id, from, to),
+            prism_world_residency::ResidencyAction::Keep { .. } => continue,
+        };
+        host.transition_residency(id, from, to)
+            .map_err(ApplyError::Host)?;
+        records[record_index].state = to;
+        records[record_index].last_transition_frame = Some(frame);
+    }
+    Ok(())
 }
 
 struct DurablePlanApplication<'host, 'world, 'journal, P> {

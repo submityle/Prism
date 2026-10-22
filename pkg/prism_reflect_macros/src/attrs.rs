@@ -26,6 +26,8 @@
 //! - `max_string_bytes` and `max_array_len` — canonical value size limits.
 //! - `aliases = "old.key,older.key"` — deprecated persisted keys that resolve
 //!   to the canonical setting key.
+//! - `enum_values = "StableVariant,OtherVariant"` — an explicit enum
+//!   allow-list resolved against the reflected stable option names.
 //! - `default = <lit>` — default-value attribute.
 //! - `readonly` / `hidden` / `required` / `setting` — boolean flags (bare or
 //!   `= bool`). `setting` explicitly opts a field into settings-schema
@@ -296,6 +298,7 @@ fn parse_field_reflect(attr: &syn::Attribute, fm: &mut FieldMeta) -> syn::Result
             || path.is_ident("precedence")
             || path.is_ident("domains")
             || path.is_ident("aliases")
+            || path.is_ident("enum_values")
         {
             let text: syn::LitStr = meta.value()?.parse()?;
             fm.custom.push((

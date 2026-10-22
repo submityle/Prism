@@ -521,12 +521,12 @@ fn validate_def(def: &SettingDef, errors: &mut Vec<SettingsError>) {
         if !option_names.insert(option.stable_name.as_str()) {
             errors.push(invalid("enum option stable names must be unique"));
         }
-        if !def.constraints.enum_values.is_empty()
-            && !def.constraints.enum_values.contains(&option.id)
-        {
-            errors.push(invalid(
-                "enum option conflicts with the enum_values constraint",
-            ));
+    }
+    if !def.constraints.enum_values.is_empty() {
+        for id in def.constraints.enum_values {
+            if !option_ids.contains(id) {
+                errors.push(invalid("enum_values references an unknown enum option"));
+            }
         }
     }
     let mut payload_ids = BTreeSet::new();

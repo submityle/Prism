@@ -443,6 +443,39 @@ where
                 }
                 definition.aliases = aliases.into_iter().map(SettingKey::from).collect();
             }
+            if let Some(value) = meta.custom("enum_values") {
+                let AttributeValue::Text(value) = value else {
+                    return Err(ReflectSettingsError::MetadataTypeMismatch {
+                        field: name.to_owned(),
+                    });
+                };
+                let names = value.split(',').map(str::trim).collect::<Vec<_>>();
+                if names.is_empty() || names.iter().any(|name| name.is_empty()) {
+                    return Err(ReflectSettingsError::MetadataTypeMismatch {
+                        field: name.to_owned(),
+                    });
+                }
+                let mut ids = Vec::with_capacity(names.len());
+                for stable_name in names {
+                    let Some(option) = definition
+                        .enum_options
+                        .iter()
+                        .find(|option| option.stable_name == stable_name)
+                    else {
+                        return Err(ReflectSettingsError::MetadataTypeMismatch {
+                            field: name.to_owned(),
+                        });
+                    };
+                    if ids.contains(&option.id) {
+                        return Err(ReflectSettingsError::MetadataTypeMismatch {
+                            field: name.to_owned(),
+                        });
+                    }
+                    ids.push(option.id);
+                }
+                ids.sort_unstable();
+                definition.constraints.enum_values = Box::leak(ids.into_boxed_slice());
+            }
             for (key, slot) in [
                 (
                     "project_overridable",
@@ -1436,6 +1469,50 @@ mod tests {
             .unwrap();
         assert_eq!(definition.default, Value::Enum(high.id));
         assert_eq!(high.id, prism_settings::EnumId::from_stable_name("High"));
+    }
+
+    #[test]
+    fn derives_enum_allow_list_and_rejects_unknown_or_duplicate_options() {
+        #[derive(Reflect, Default)]
+        enum Quality {
+            Low,
+            #[default]
+            High,
+        }
+
+        #[derive(Reflect, Default)]
+        struct GraphicsSettings {
+            #[reflect(setting, enum_values = "High")]
+            quality: Quality,
+        }
+
+        let schema = derive_settings_registry::<GraphicsSettings>("graphics", "prism_app").unwrap();
+        let (id, definition) = schema.get(&"graphics.quality".into()).unwrap();
+        let high = prism_settings::EnumId::from_stable_name("High");
+        let low = prism_settings::EnumId::from_stable_name("Low");
+        assert_eq!(definition.constraints.enum_values, &[high]);
+        assert!(schema.validate_value(id, Value::Enum(high)).is_ok());
+        assert!(schema.validate_value(id, Value::Enum(low)).is_err());
+
+        #[derive(Reflect, Default)]
+        struct UnknownOption {
+            #[reflect(setting, enum_values = "Missing")]
+            quality: Quality,
+        }
+        assert!(matches!(
+            derive_settings_registry::<UnknownOption>("invalid", "prism_app"),
+            Err(ReflectSettingsError::MetadataTypeMismatch { field }) if field == "quality"
+        ));
+
+        #[derive(Reflect, Default)]
+        struct DuplicateOption {
+            #[reflect(setting, enum_values = "High,High")]
+            quality: Quality,
+        }
+        assert!(matches!(
+            derive_settings_registry::<DuplicateOption>("invalid", "prism_app"),
+            Err(ReflectSettingsError::MetadataTypeMismatch { field }) if field == "quality"
+        ));
     }
 
     #[test]
