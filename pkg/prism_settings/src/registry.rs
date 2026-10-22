@@ -719,6 +719,13 @@ fn validate_shape(
             if values.len() > *max_len {
                 return Err(SettingsError::TooLong { key: key.clone() });
             }
+            if def
+                .constraints
+                .max_array_len
+                .is_some_and(|max| values.len() > max)
+            {
+                return Err(SettingsError::TooLong { key: key.clone() });
+            }
             for value in values {
                 validate_shape(def, key, element, value)?;
             }
@@ -816,6 +823,7 @@ mod recursive_leaf_validation_tests {
         );
         clamp.constraints.min = Some(0.0);
         clamp.constraints.max = Some(1.0);
+        clamp.constraints.max_array_len = Some(1);
         clamp.on_violation = crate::ViolationPolicy::Clamp;
         clamp.shape = crate::ValueShape::array(
             crate::ValueShape::array(crate::ValueShape::scalar(ValueType::Float), 1, 4),
@@ -848,5 +856,15 @@ mod recursive_leaf_validation_tests {
                 .unwrap(),
             Value::Array(vec![Value::Array(vec![Value::Float(1.0)])]),
         );
+        assert!(matches!(
+            registry.validate_value(
+                float_id,
+                Value::Array(vec![Value::Array(vec![
+                    Value::Float(0.25),
+                    Value::Float(0.75),
+                ])]),
+            ),
+            Err(SettingsError::TooLong { .. })
+        ));
     }
 }

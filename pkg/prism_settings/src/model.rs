@@ -518,13 +518,13 @@ pub struct DefFlags {
 /// Scalar and collection limits validated by the core.
 #[derive(Clone, Copy, Debug, PartialEq, Default)]
 pub struct Constraints {
-    /// Inclusive numeric lower bound.
+    /// Inclusive lower bound for numeric scalar values and homogeneous array leaves.
     pub min: Option<f64>,
-    /// Inclusive numeric upper bound.
+    /// Inclusive upper bound for numeric scalar values and homogeneous array leaves.
     pub max: Option<f64>,
     /// Maximum UTF-8 byte length (M0 avoids a regex engine dependency).
     pub max_string_bytes: Option<usize>,
-    /// Maximum array element count.
+    /// Maximum element count enforced at every array depth.
     pub max_array_len: Option<usize>,
     /// Permitted enum identities; empty means unrestricted.
     pub enum_values: &'static [EnumId],
@@ -570,7 +570,7 @@ pub struct SettingDef {
     pub shape: ValueShape,
     /// Validation limits.
     pub constraints: Constraints,
-    /// Violation behavior for scalar bounds.
+    /// Violation behavior for numeric bounds, including numeric array leaves.
     pub on_violation: ViolationPolicy,
     /// Domains where the key is visible.
     pub domains: DomainMask,
