@@ -433,7 +433,7 @@ impl PlanetHeightfieldMesh {
                 let outward = (0..3)
                     .map(|axis| normal[axis] * ((a[axis] + b[axis] + c[axis]) / 3.0 + origin[axis]))
                     .sum::<f64>();
-                if !outward.is_finite() || outward == 0.0 {
+                if !outward.is_finite() {
                     return Err(BakeError::InvalidGeometry);
                 }
                 if outward > 0.0 {
@@ -820,6 +820,17 @@ mod tests {
             Ok(HeightSampleValue::from_millimetres(height))
         }
     }
+
+    struct Ramp;
+    impl HeightSampler for Ramp {
+        type Error = Infallible;
+
+        fn sample_height(&self, sample: HeightSample) -> Result<HeightSampleValue, Self::Error> {
+            let u = i64::from(sample.u_q16());
+            let v = i64::from(sample.v_q16());
+            Ok(HeightSampleValue::from_millimetres((u * 7 + v * 11) / 4096))
+        }
+    }
     const LIMITS: BakeLimits = BakeLimits {
         max_samples: 1024,
         max_bytes: 100_000,
@@ -919,6 +930,111 @@ mod tests {
         }
         mesh.clear_lod_seam_plan(16_384).unwrap();
         assert_eq!(mesh.indices(), base);
+    }
+
+    #[test]
+    fn planetary_seams_preserve_winding_on_every_face_and_edge() {
+        use crate::{HeightfieldLodSeamPlan, LodSeamCoverage, LodSeamLimits, LodSeamNeighbor};
+
+        let config = PlanetMeshConfig::new(1_000_000, [0; 3], 1.0).unwrap();
+        let seam_limits = LodSeamLimits {
+            max_segments: 8,
+            max_vertices: 128,
+            max_indices: 1024,
+            max_bytes: 16_384,
+        };
+        for face in CubeFace::ALL {
+            let tile = TileKey::new(face, 3, 3, 3).unwrap();
+            let field =
+                HeightfieldTile::bake(tile, HeightfieldSpec::new(9, 1).unwrap(), &Ramp, LIMITS)
+                    .unwrap();
+            for edge in TileEdge::ALL {
+                let coarse = tile.neighbor(edge).parent().unwrap();
+                let plan = HeightfieldLodSeamPlan::build_strict(
+                    tile,
+                    8,
+                    &[LodSeamNeighbor::with_boundary(
+                        edge,
+                        coarse,
+                        8,
+                        LodSeamCoverage::full(8),
+                    )],
+                    seam_limits,
+                )
+                .unwrap();
+                let mut mesh = PlanetHeightfieldMesh::build(&field, config, LIMITS).unwrap();
+                for transition in plan.transitions() {
+                    for tri in transition.indices().chunks_exact(3) {
+                        let points = [tri[0], tri[1], tri[2]].map(|i| {
+                            let g = transition.vertices()[i as usize].grid;
+                            mesh.positions()[(g[1] * 9 + g[0]) as usize].map(f64::from)
+                        });
+                        let n = cross(
+                            subtract(points[1], points[0]),
+                            subtract(points[2], points[0]),
+                        );
+                        let radial = core::array::from_fn::<_, 3, _>(|axis| {
+                            (points[0][axis] + points[1][axis] + points[2][axis]) / 3.0
+                                + config.origin_mm()[axis] as f64 * 0.001
+                        });
+                        let d = n.iter().zip(radial).map(|(a, b)| a * b).sum::<f64>();
+                        assert!(d != 0.0, "degenerate: {face:?} {edge:?} {tri:?} {points:?}");
+                    }
+                }
+                assert_eq!(plan.transitions().len(), 1, "{face:?} {edge:?}");
+                mesh.apply_lod_seam_plan(&plan, 16_384)
+                    .unwrap_or_else(|error| panic!("{face:?} {edge:?}: {error:?}"));
+                for tri in mesh.indices().chunks_exact(3) {
+                    let [a, b, c] = [tri[0], tri[1], tri[2]]
+                        .map(|i| mesh.positions()[i as usize].map(f64::from));
+                    assert!(
+                        cross(subtract(b, a), subtract(c, a))
+                            .iter()
+                            .zip(a)
+                            .map(|(n, p)| n * p)
+                            .sum::<f64>()
+                            > 0.0,
+                        "inward seam triangle on {face:?} {edge:?}"
+                    );
+                }
+            }
+            let east = tile.neighbor(TileEdge::East).parent().unwrap();
+            let west = tile.neighbor(TileEdge::West).parent().unwrap();
+            let plan = HeightfieldLodSeamPlan::build_strict(
+                tile,
+                8,
+                &[
+                    LodSeamNeighbor::with_boundary(
+                        TileEdge::West,
+                        west,
+                        8,
+                        LodSeamCoverage::full(8),
+                    ),
+                    LodSeamNeighbor::with_boundary(
+                        TileEdge::East,
+                        east,
+                        8,
+                        LodSeamCoverage::full(8),
+                    ),
+                ],
+                seam_limits,
+            )
+            .unwrap();
+            let mut mesh = PlanetHeightfieldMesh::build(&field, config, LIMITS).unwrap();
+            mesh.apply_lod_seam_plan(&plan, 16_384).unwrap();
+            for tri in mesh.indices().chunks_exact(3) {
+                let [a, b, c] =
+                    [tri[0], tri[1], tri[2]].map(|i| mesh.positions()[i as usize].map(f64::from));
+                assert!(
+                    cross(subtract(b, a), subtract(c, a))
+                        .iter()
+                        .zip(a)
+                        .map(|(n, p)| n * p)
+                        .sum::<f64>()
+                        > 0.0
+                );
+            }
+        }
     }
 
     #[test]
