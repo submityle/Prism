@@ -23,6 +23,7 @@
 //!   canonical settings source and visibility policies.
 //! - `project_overridable`, `bootstrap`, and `execution_class` — settings
 //!   resolver flags (boolean, bare or `= bool`).
+//! - `max_string_bytes` and `max_array_len` — canonical value size limits.
 //! - `default = <lit>` — default-value attribute.
 //! - `readonly` / `hidden` / `required` / `setting` — boolean flags (bare or
 //!   `= bool`). `setting` explicitly opts a field into settings-schema
@@ -305,6 +306,11 @@ fn parse_field_reflect(attr: &syn::Attribute, fm: &mut FieldMeta) -> syn::Result
             let value = parse_flag(&meta)?;
             fm.custom
                 .push((path.get_ident().unwrap().to_string(), AttrLit::Bool(value)));
+        } else if path.is_ident("max_string_bytes") || path.is_ident("max_array_len") {
+            let value: syn::LitInt = meta.value()?.parse()?;
+            let value = value.base10_parse::<u64>()?;
+            fm.custom
+                .push((path.get_ident().unwrap().to_string(), AttrLit::UInt(value)));
         } else if path.is_ident("clamp") || path.is_ident("range") {
             let content;
             syn::parenthesized!(content in meta.input);

@@ -441,6 +441,26 @@ where
                     *slot = *value;
                 }
             }
+            for (key, slot) in [
+                (
+                    "max_string_bytes",
+                    &mut definition.constraints.max_string_bytes,
+                ),
+                ("max_array_len", &mut definition.constraints.max_array_len),
+            ] {
+                if let Some(value) = meta.custom(key) {
+                    let AttributeValue::UInt(value) = value else {
+                        return Err(ReflectSettingsError::MetadataTypeMismatch {
+                            field: name.to_owned(),
+                        });
+                    };
+                    *slot = Some(usize::try_from(*value).map_err(|_| {
+                        ReflectSettingsError::MetadataTypeMismatch {
+                            field: name.to_owned(),
+                        }
+                    })?);
+                }
+            }
         }
         builder.register(definition);
     }
@@ -1763,5 +1783,36 @@ mod tests {
             derive_settings_registry::<InvalidPolicy>("invalid", "prism_app"),
             Err(ReflectSettingsError::MetadataTypeMismatch { field }) if field == "value"
         ));
+    }
+
+    #[test]
+    fn derives_string_and_collection_size_constraints() {
+        #[derive(Reflect, Default)]
+        struct BoundedSettings {
+            #[reflect(setting, max_string_bytes = 24)]
+            label: String,
+            #[reflect(setting, max_array_len = 3)]
+            samples: Vec<i32>,
+        }
+
+        let schema = derive_settings_registry::<BoundedSettings>("bounded", "prism_app").unwrap();
+        let (label_id, label) = schema.get(&"bounded.label".into()).unwrap();
+        assert_eq!(label.constraints.max_string_bytes, Some(24));
+        assert!(schema
+            .validate_value(label_id, Value::String("x".repeat(25)))
+            .is_err());
+        let (samples_id, samples) = schema.get(&"bounded.samples".into()).unwrap();
+        assert_eq!(samples.constraints.max_array_len, Some(3));
+        assert!(schema
+            .validate_value(
+                samples_id,
+                Value::Array(vec![
+                    Value::Int(1),
+                    Value::Int(2),
+                    Value::Int(3),
+                    Value::Int(4)
+                ])
+            )
+            .is_err());
     }
 }
