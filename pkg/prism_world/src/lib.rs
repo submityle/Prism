@@ -35,7 +35,7 @@ use prism_world_sim::{simulation_delta_to_transaction, SimulationDelta, Simulati
 #[cfg(feature = "scene_host")]
 pub use scene_host::{
     CellPersistenceState, ResidencyBinding, SceneEcsHost, SceneEcsHostConfigError,
-    SceneEcsHostError, SceneEcsProvider,
+    SceneEcsHostError, SceneEcsProvider, SceneResidencyTransition,
 };
 
 /// Per-frame budgets for the two hot policy paths.
@@ -114,6 +114,45 @@ pub trait SceneHost {
         from: ResidencyState,
         to: ResidencyState,
     ) -> Result<(), Self::Error>;
+
+    /// Applies a batch in action order and reports the successful prefix.
+    ///
+    /// Hosts with provider-owned batch operations may override this method.
+    /// The default keeps the same semantics by invoking the single-item
+    /// operation repeatedly.
+    fn transition_residency_batch(
+        &mut self,
+        transitions: &[ResidencyTransition],
+    ) -> Result<(), ResidencyBatchError<Self::Error>> {
+        for (completed, transition) in transitions.iter().enumerate() {
+            if let Err(error) =
+                self.transition_residency(transition.id, transition.from, transition.to)
+            {
+                return Err(ResidencyBatchError { completed, error });
+            }
+        }
+        Ok(())
+    }
+}
+
+/// One stable representation transition passed to a host batch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ResidencyTransition {
+    /// Stable residency identity.
+    pub id: u64,
+    /// Committed source state.
+    pub from: ResidencyState,
+    /// Requested destination state.
+    pub to: ResidencyState,
+}
+
+/// Failure from a residency batch, including its committed success prefix.
+#[derive(Debug, Eq, PartialEq)]
+pub struct ResidencyBatchError<E> {
+    /// Number of leading transitions that completed successfully.
+    pub completed: usize,
+    /// First failed host/provider error.
+    pub error: E,
 }
 
 /// Failure while applying a generated plan to a scene host.
@@ -250,24 +289,13 @@ impl WorldRuntime {
     ) -> Result<(), ApplyError<H::Error>> {
         let record_indices = validate_residency_application(plan, records)?;
         apply_stream_plan_to(plan, host)?;
-        for (action, record_index) in plan
-            .residency
-            .actions
-            .iter()
-            .zip(record_indices)
-        {
-            let (id, from, to) = match *action {
-                ResidencyAction::Promote { id, from, to, .. }
-                | ResidencyAction::Demote { id, from, to } => (id, from, to),
-                ResidencyAction::Keep { .. } => continue,
-            };
-            host.transition_residency(id, from, to)
-                .map_err(ApplyError::Host)?;
-            let record = &mut records[record_index];
-            record.state = to;
-            record.last_transition_frame = Some(frame);
-        }
-        Ok(())
+        apply_residency_with_records(
+            &plan.residency.actions,
+            record_indices,
+            records,
+            frame,
+            host,
+        )
     }
 
     /// Commits an IO completion without mutating scene truth.
@@ -343,16 +371,57 @@ pub(crate) fn apply_plan_to<H: SceneHost>(
     host: &mut H,
 ) -> Result<(), ApplyError<H::Error>> {
     apply_stream_plan_to(plan, host)?;
-    for action in &plan.residency.actions {
+    let transitions: Vec<_> = plan
+        .residency
+        .actions
+        .iter()
+        .filter_map(|action| match *action {
+            ResidencyAction::Promote { id, from, to, .. }
+            | ResidencyAction::Demote { id, from, to } => {
+                Some(ResidencyTransition { id, from, to })
+            }
+            ResidencyAction::Keep { .. } => None,
+        })
+        .collect();
+    host.transition_residency_batch(&transitions)
+        .map_err(|error| ApplyError::Host(error.error))?;
+    Ok(())
+}
+
+pub(crate) fn apply_residency_with_records<H: SceneHost>(
+    actions: &[ResidencyAction],
+    record_indices: Vec<usize>,
+    records: &mut [ResidencyRecord],
+    frame: u64,
+    host: &mut H,
+) -> Result<(), ApplyError<H::Error>> {
+    let mut transitions = Vec::with_capacity(actions.len());
+    let mut record_states = Vec::with_capacity(actions.len());
+    for (action, record_index) in actions.iter().zip(record_indices) {
         let (ResidencyAction::Promote { id, from, to, .. }
         | ResidencyAction::Demote { id, from, to }) = *action
         else {
             continue;
         };
-        host.transition_residency(id, from, to)
-            .map_err(ApplyError::Host)?;
+        transitions.push(ResidencyTransition { id, from, to });
+        record_states.push((record_index, to));
     }
-    Ok(())
+    let commit = |count: usize, records: &mut [ResidencyRecord]| {
+        for &(record_index, state) in record_states.iter().take(count) {
+            records[record_index].state = state;
+            records[record_index].last_transition_frame = Some(frame);
+        }
+    };
+    match host.transition_residency_batch(&transitions) {
+        Ok(()) => {
+            commit(transitions.len(), records);
+            Ok(())
+        }
+        Err(error) => {
+            commit(error.completed.min(transitions.len()), records);
+            Err(ApplyError::Host(error.error))
+        }
+    }
 }
 
 pub(crate) fn apply_stream_plan_to<H: SceneHost>(
@@ -419,9 +488,7 @@ fn validate_residency_application<E>(
         };
         let record = records[record_index];
         let expected = match *action {
-            ResidencyAction::Promote { from, .. } | ResidencyAction::Demote { from, .. } => {
-                from
-            }
+            ResidencyAction::Promote { from, .. } | ResidencyAction::Demote { from, .. } => from,
             ResidencyAction::Keep { state, .. } => state,
         };
         if record.state != expected {
@@ -600,14 +667,7 @@ mod tests {
         let mut world = WorldRuntime::new(ResidencyScheduler::new(policy));
         let sector = SectorId::new(0, 0, 0, 0);
         let bounds = AabbI64::new(GlobalPos::new(0, 0, 0), GlobalPos::new(1, 1, 1)).unwrap();
-        let mut records = alloc::vec![ResidencyRecord::new(
-            7,
-            ResidencyState::TierC,
-            0,
-            1,
-            1,
-            1,
-        )];
+        let mut records = alloc::vec![ResidencyRecord::new(7, ResidencyState::TierC, 0, 1, 1, 1,)];
         let plan = world.tick(
             &[DemandSource::new(sector, 0, 1, 10).unwrap()],
             &[CellManifest {
@@ -685,14 +745,7 @@ mod tests {
                 materialization: MaterializationBudget::new(1, 1),
             },
         );
-        let mut records = alloc::vec![ResidencyRecord::new(
-            7,
-            ResidencyState::TierA,
-            0,
-            1,
-            1,
-            1,
-        )];
+        let mut records = alloc::vec![ResidencyRecord::new(7, ResidencyState::TierA, 0, 1, 1, 1,)];
         let mut host = Host { calls: 0 };
         assert_eq!(
             world.apply_plan_with_records(&plan, &mut records, 2, &mut host),

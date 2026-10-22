@@ -11,6 +11,7 @@
 //! - an unbound or unloaded residency target is rejected instead of silently
 //!   mutating an unrelated ECS entity.
 
+use crate::{ResidencyBatchError, ResidencyTransition};
 use alloc::collections::BTreeSet;
 use alloc::string::ToString;
 use alloc::vec::Vec;
@@ -47,6 +48,23 @@ pub struct CellPersistenceState {
     pub object: WorldPersistentId,
     /// State reconstructed from the append-only world log.
     pub state: ObjectState,
+}
+
+/// Fully resolved scene target passed to a provider residency batch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SceneResidencyTransition {
+    /// Stable world residency identity.
+    pub residency_id: u64,
+    /// Cell owning the target.
+    pub sector: SectorId,
+    /// Template-local target identity.
+    pub local: LocalEntityId,
+    /// Current ECS entity for the target.
+    pub entity: Entity,
+    /// Committed source tier.
+    pub from: prism_world_residency::ResidencyState,
+    /// Requested destination tier.
+    pub to: prism_world_residency::ResidencyState,
 }
 
 /// Typed scene/ECS operations required by the world host.
@@ -100,6 +118,30 @@ pub trait SceneEcsProvider {
         from: prism_world_residency::ResidencyState,
         to: prism_world_residency::ResidencyState,
     ) -> Result<(), Self::Error>;
+
+    /// Applies resolved transitions in order and reports the successful prefix.
+    /// Providers with a real batch materialization path may override this; the
+    /// default preserves the single-transition contract.
+    fn transition_residency_batch(
+        &mut self,
+        world: &mut World,
+        transitions: &[SceneResidencyTransition],
+    ) -> Result<(), (usize, Self::Error)> {
+        for (completed, transition) in transitions.iter().enumerate() {
+            if let Err(error) = self.transition_residency(
+                world,
+                transition.residency_id,
+                transition.sector,
+                transition.local,
+                transition.entity,
+                transition.from,
+                transition.to,
+            ) {
+                return Err((completed, error));
+            }
+        }
+        Ok(())
+    }
 
     /// Returns the world object IDs owned by this cell. Scene IDs and world
     /// persistence IDs are separate domains; providers make the mapping
@@ -921,6 +963,35 @@ impl<P: SceneEcsProvider> crate::SceneHost for SceneEcsHost<'_, P> {
             )
             .map_err(SceneEcsHostError::Provider)
     }
+
+    fn transition_residency_batch(
+        &mut self,
+        transitions: &[ResidencyTransition],
+    ) -> Result<(), ResidencyBatchError<Self::Error>> {
+        let mut resolved = Vec::with_capacity(transitions.len());
+        for transition in transitions {
+            let (binding, entity) =
+                self.target(transition.id)
+                    .map_err(|error| ResidencyBatchError {
+                        completed: 0,
+                        error,
+                    })?;
+            resolved.push(SceneResidencyTransition {
+                residency_id: transition.id,
+                sector: binding.sector,
+                local: binding.local,
+                entity,
+                from: transition.from,
+                to: transition.to,
+            });
+        }
+        self.provider
+            .transition_residency_batch(self.world, &resolved)
+            .map_err(|(completed, error)| ResidencyBatchError {
+                completed,
+                error: SceneEcsHostError::Provider(error),
+            })
+    }
 }
 
 #[cfg(test)]
@@ -1192,8 +1263,14 @@ mod tests {
         .unwrap();
         assert_eq!(host.world().get::<Marker>(root), Some(&Marker(3)));
         assert_eq!(host.provider().events.len(), 2);
-        assert_eq!(host.provider().events[0].0, prism_world_residency::ResidencyState::TierA);
-        assert_eq!(host.provider().events[1].0, prism_world_residency::ResidencyState::TierC);
+        assert_eq!(
+            host.provider().events[0].0,
+            prism_world_residency::ResidencyState::TierA
+        );
+        assert_eq!(
+            host.provider().events[1].0,
+            prism_world_residency::ResidencyState::TierC
+        );
     }
 
     #[test]

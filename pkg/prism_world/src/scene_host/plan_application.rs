@@ -5,10 +5,11 @@ use alloc::vec::Vec;
 
 use super::{ResidencyBinding, SceneEcsHost, SceneEcsHostError, SceneEcsProvider, SectorId};
 use crate::{
-    apply_plan_to, apply_stream_plan_to, ApplyError, SceneHost, WorldFramePlan, WorldRuntime,
+    apply_plan_to, apply_residency_with_records, apply_stream_plan_to, ApplyError, SceneHost,
+    WorldFramePlan, WorldRuntime,
 };
-use prism_world_residency::ResidencyRecord;
 use prism_world_persist::FileJournal;
+use prism_world_residency::ResidencyRecord;
 
 impl WorldRuntime {
     /// Applies a frame plan while requiring each scene eviction batch to be
@@ -119,18 +120,13 @@ fn commit_scene_residency<P: SceneHost>(
     frame: u64,
     host: &mut P,
 ) -> Result<(), ApplyError<P::Error>> {
-    for (action, record_index) in plan.residency.actions.iter().zip(record_indices) {
-        let (id, from, to) = match *action {
-            prism_world_residency::ResidencyAction::Promote { id, from, to, .. }
-            | prism_world_residency::ResidencyAction::Demote { id, from, to } => (id, from, to),
-            prism_world_residency::ResidencyAction::Keep { .. } => continue,
-        };
-        host.transition_residency(id, from, to)
-            .map_err(ApplyError::Host)?;
-        records[record_index].state = to;
-        records[record_index].last_transition_frame = Some(frame);
-    }
-    Ok(())
+    apply_residency_with_records(
+        &plan.residency.actions,
+        record_indices,
+        records,
+        frame,
+        host,
+    )
 }
 
 struct DurablePlanApplication<'host, 'world, 'journal, P> {
