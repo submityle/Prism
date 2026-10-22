@@ -552,3 +552,22 @@ Apple M2 / Metal / IntegratedGpu 提供真实 adapter，**14 passed、0 failed�
 阶段失败；它们没有执行测试逻辑，不计为 GPU 回归失败或通过。沙盒外重跑后全套实卡
 测试通过。随后 `cargo clean -p prism_world_gpu --dry-run` 精确显示 13 个文件、26.5 MiB，
 并已按包清除；其他 package、共享 target 根目录和 agent 文件未动。
+
+### 行星 placement 实卡 parity 复验
+
+同日使用正确的 `terrain_scatter` feature（测试文件自身带该 feature gate）在沙盒外
+执行：
+
+```bash
+WGPU_BACKEND=metal PRISM_REQUIRE_GPU=1 CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 cargo test -p prism_world_gpu --features terrain_scatter --test planet_placement_gpu --offline -j 1 -- --nocapture --test-threads=1
+```
+
+Apple M2 / Metal / IntegratedGpu 真实 adapter 下 **2 passed、0 failed、0 ignored**，
+覆盖平坦 tile 全候选 dispatch，以及非零高度和阈值的 CPU 语义 parity。此前误用仅有
+`gpu` feature 的命令实际为 0 tests，已明确排除，不计为验证。
+
+行星 placement deletion 的同样实卡命令随后两次未能启动：沙盒外审批服务在创建进程
+前断流并返回 overloaded，命令没有执行，不能计为通过或失败。该删除专项仍需在审批
+服务恢复后使用 `--features terrain_scatter --test planet_placement_deletion` 重跑；
+本轮未修改其实现。`cargo clean -p prism_world_gpu --dry-run` 随后显示 0 files，说明
+本轮构建产物已被共享构建生命周期清理；未执行全局 target 清理。
