@@ -188,11 +188,16 @@ impl FloatingOriginPrecisionAudit {
         let origin = grid.origin();
         let mut audited = Vec::with_capacity(samples.len());
         for &(cell, local) in samples {
-            let (dx, dy, dz) = cell.offset_from(origin);
+            // `GridCell` axes are i64, so subtract in i128: the mathematical
+            // distance between i64::MIN and i64::MAX is not representable in
+            // an i64 and must not saturate before this audit reports it.
+            let dx = cell.x as i128 - origin.x as i128;
+            let dy = cell.y as i128 - origin.y as i128;
+            let dz = cell.z as i128 - origin.z as i128;
             let cell_delta_max = dx
                 .unsigned_abs()
                 .max(dy.unsigned_abs())
-                .max(dz.unsigned_abs());
+                .max(dz.unsigned_abs()) as u64;
             let rebased = grid.rebase(cell, local);
             let rebased_magnitude_m = max3_abs(rebased.x, rebased.y, rebased.z);
             let resolution_m = ulp_f32(rebased_magnitude_m);
@@ -480,6 +485,16 @@ mod tests {
         assert_eq!(audit.max_sample_cell_delta(), 4000);
         assert!(audit.worst_sample_resolution_m() > 0.001);
         assert!(!audit.all_samples_meet_target());
+    }
+
+    #[test]
+    fn sample_distance_covers_the_full_i64_cell_domain() {
+        let origin = GridCell::new(i64::MIN, 0, 0);
+        let grid = FloatingOrigin::new(1.0).with_origin(origin);
+        let samples = [(GridCell::new(i64::MAX, 0, 0), LocalPos::default())];
+        let audit = FloatingOriginPrecisionAudit::from_origin_with_samples(&grid, 0.001, &samples);
+        assert_eq!(audit.samples()[0].cell_delta_max, u64::MAX);
+        assert_eq!(audit.samples()[0].rebased_magnitude_m, u64::MAX as f32);
     }
 
     #[test]

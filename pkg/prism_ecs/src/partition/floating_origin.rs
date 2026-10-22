@@ -89,12 +89,19 @@ impl GridCell {
         Self { x, y, z }
     }
 
-    /// The signed cell delta `self - other`, per axis.
+    /// The signed cell delta `self - other`, per axis, saturating when the
+    /// mathematical difference is outside the `i64` range.
     ///
     /// Used when rebasing: the delta is small near the active origin, so
-    /// multiplying it by the cell size stays representable in `f32`.
+    /// multiplying it by the cell size stays representable in `f32`. Callers
+    /// that need the full distance across the entire `i64` domain should use a
+    /// wider intermediate (as [`FloatingOrigin::rebase`] does).
     pub const fn offset_from(self, other: Self) -> (i64, i64, i64) {
-        (self.x - other.x, self.y - other.y, self.z - other.z)
+        (
+            self.x.saturating_sub(other.x),
+            self.y.saturating_sub(other.y),
+            self.z.saturating_sub(other.z),
+        )
     }
 }
 
@@ -250,13 +257,17 @@ impl FloatingOrigin {
     ///
     /// The result is `(cell - origin) * cell_size + local`. Near the active
     /// origin the cell delta is tiny, so the `f32` output keeps full precision
-    /// — this is exactly what eliminates far-from-origin jitter.
+    /// — this is exactly what eliminates far-from-origin jitter. The delta is
+    /// computed in `i128`, so opposite ends of the `i64` cell range cannot
+    /// overflow or wrap before conversion to the output coordinate.
     pub fn rebase(&self, cell: GridCell, local: LocalPos) -> LocalPos {
-        let (dx, dy, dz) = cell.offset_from(self.origin);
+        let dx = (cell.x as i128 - self.origin.x as i128) as f64;
+        let dy = (cell.y as i128 - self.origin.y as i128) as f64;
+        let dz = (cell.z as i128 - self.origin.z as i128) as f64;
         LocalPos::new(
-            (dx as f64 * self.cell_size + local.x as f64) as f32,
-            (dy as f64 * self.cell_size + local.y as f64) as f32,
-            (dz as f64 * self.cell_size + local.z as f64) as f32,
+            (dx * self.cell_size + local.x as f64) as f32,
+            (dy * self.cell_size + local.y as f64) as f32,
+            (dz * self.cell_size + local.z as f64) as f32,
         )
     }
 
@@ -310,10 +321,12 @@ impl FloatingOrigin {
     }
 
     /// Normalises one axis: folds a local offset back into `[0, cell_size)` and
-    /// carries the whole-cell part into the integer index.
+    /// carries the whole-cell part into the integer index. If the carry would
+    /// exceed the representable cell domain, the index saturates at its bound
+    /// rather than wrapping.
     fn carry_axis(&self, cell: i64, local: f32) -> (i64, f32) {
         let (dcell, rem) = self.split_axis(local as f64);
-        (cell + dcell, rem as f32)
+        (cell.saturating_add(dcell), rem as f32)
     }
 }
 
@@ -419,6 +432,22 @@ mod tests {
     }
 
     #[test]
+    fn normalize_saturates_cell_carry_at_domain_bounds() {
+        let grid = FloatingOrigin::new(100.0);
+        let (high_cell, high_local) = grid.normalize(
+            GridCell::new(i64::MAX, 0, 0),
+            LocalPos::new(100.0, 0.0, 0.0),
+        );
+        assert_eq!(high_cell.x, i64::MAX);
+        assert!(high_local.x.abs() < 1.0e-3);
+
+        let (low_cell, low_local) =
+            grid.normalize(GridCell::new(i64::MIN, 0, 0), LocalPos::new(-1.0, 0.0, 0.0));
+        assert_eq!(low_cell.x, i64::MIN);
+        assert!((low_local.x - 99.0).abs() < 1.0e-3);
+    }
+
+    #[test]
     fn recenter_moves_origin() {
         let mut grid = FloatingOrigin::new(256.0);
         assert_eq!(grid.origin(), GridCell::ORIGIN);
@@ -431,6 +460,27 @@ mod tests {
         let a = GridCell::new(10, 5, -3);
         let b = GridCell::new(4, 7, -3);
         assert_eq!(a.offset_from(b), (6, -2, 0));
+    }
+
+    #[test]
+    fn offset_from_saturates_when_the_signed_delta_is_unrepresentable() {
+        let high = GridCell::new(i64::MAX, i64::MIN, 0);
+        let low = GridCell::new(i64::MIN, i64::MAX, 0);
+        assert_eq!(high.offset_from(low), (i64::MAX, i64::MIN, 0));
+        assert_eq!(low.offset_from(high), (i64::MIN, i64::MAX, 0));
+    }
+
+    #[test]
+    fn rebase_preserves_direction_across_the_full_cell_index_range() {
+        let origin = GridCell::new(i64::MIN, i64::MAX, 0);
+        let grid = FloatingOrigin::new(1.0).with_origin(origin);
+        let rebased = grid.rebase(GridCell::new(i64::MAX, i64::MIN, 0), LocalPos::default());
+        let full_delta = (i64::MAX as i128 - i64::MIN as i128) as f64 as f32;
+        assert_eq!(rebased.x, full_delta);
+        assert_eq!(rebased.y, -full_delta);
+        assert!(rebased.x.is_finite());
+        assert!(rebased.x > 0.0);
+        assert!(rebased.y < 0.0);
     }
 
     #[test]
