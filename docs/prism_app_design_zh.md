@@ -513,7 +513,7 @@ App 配置分层（§14）与 cvar（§24.6）的读写/校验**委托 `prism_re
 - cvar/配置字段的范围钳制、默认值、改名兼容走 `prism_reflect` 的 `#[reflect(...)]` 元数据（`clamp`/`default`/`rename`）。
 - 命令行/文件/运行时的级联覆盖经 reflect 类型化反序列化，非法输入按安全边界（reflect §24.8）拒绝而非崩溃。
 
-当前实现状态：旧 `reflect_config` / `CvarSpec` bridge 已删除。设置 schema、默认值、约束和来源元数据由 `prism_settings::SettingDef` / `SettingsRegistry` 持有；`prism_reflect` 到 canonical schema 的派生桥尚未接入，属于设置系统 M1 的未闭合项。`prism_settings_io` 已实现 watcher、候选解析、事务/journal、原子持久化及恢复，但当前 `prism_app` 的 Cargo feature/依赖和运行时 API 中没有 settings-IO 事务适配器，也没有 `SnapshotController` 与 `SettingsRuntime` 来源/快照状态的原子桥接；因此 IO crate 的独立测试通过不等于 App 文件设置热重载、确认和回滚已验收。该适配器须保留 App 默认 `no_std + alloc` 路径，并覆盖候选拒绝、持久化失败、预览确认/超时回滚及进程恢复。
+当前实现状态：旧 `reflect_config` / `CvarSpec` bridge 已删除。设置 schema、默认值、约束和来源元数据由 `prism_settings::SettingDef` / `SettingsRegistry` 持有；`prism_reflect` 到 canonical schema 的派生桥尚未接入，属于设置系统 M1 的未闭合项。`prism_settings_io` 已实现 watcher、候选解析、事务/journal、原子持久化及恢复，但当前 `prism_app` 的 Cargo feature/依赖和运行时 API 中没有 settings-IO 事务适配器；`SettingsRuntime` 现有 source/generation checkpoint、schema/domain 校验恢复，以及带 base-generation compare-and-swap 的 `PreparedSettingsUpdate`，可原子提交来源与重新解析后的快照，并拒绝过期候选。这些原语尚未与 `SnapshotController` 事务执行路径原子桥接。因此 IO crate 的独立测试通过不等于 App 文件设置热重载、确认和回滚已验收。该适配器须保留 App 默认 `no_std + alloc` 路径，并覆盖候选拒绝、持久化失败、预览确认/超时回滚及进程恢复。
 
 ### 25.4 多世界各持独立 time 时间域
 
