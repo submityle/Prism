@@ -199,9 +199,11 @@ impl SettingsTransactionManager {
 
     /// Returns the most recent automatic expiry failure, if any.
     ///
-    /// A failure does not discard the preview or its rollback checkpoint; the
-    /// frame-boundary system retries on subsequent frames. Host diagnostics can
-    /// inspect this field and install/fix the required lifecycle services.
+    /// Missing services do not discard the preview or its rollback checkpoint;
+    /// the frame-boundary system checks again on subsequent frames. A pipeline
+    /// rollback failure transitions the manager to `RecoveryRequired` and is
+    /// not retried automatically. Host diagnostics can inspect this field and
+    /// install/fix the required lifecycle services or begin explicit recovery.
     pub fn expiry_error(&self) -> Option<&str> {
         self.expiry_error.as_deref()
     }
