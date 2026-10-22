@@ -130,6 +130,7 @@ struct DirtyChunkCandidates {
     chunks: Vec<usize>,
     chunk_index: Option<HashSet<usize>>,
     journal_events: usize,
+    unordered: bool,
 }
 
 impl DirtyChunkCandidates {
@@ -144,6 +145,21 @@ impl DirtyChunkCandidates {
                 self.chunks.push(chunk);
             }
             return;
+        }
+
+        if !self.unordered {
+            match self.chunks.last().copied() {
+                Some(last) if chunk == last => return,
+                Some(last) if chunk > last => {
+                    self.chunks.push(chunk);
+                    return;
+                }
+                Some(_) => self.unordered = true,
+                None => {
+                    self.chunks.push(chunk);
+                    return;
+                }
+            }
         }
 
         if self.chunks.contains(&chunk) {
@@ -408,10 +424,13 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
             };
             let rpc = table.rows_per_chunk();
             let len = table.len();
-            // Only unique chunks reach this sort. Hash-set iteration is not
-            // observable; the published output remains deterministic.
+            // Journal events that arrive in ascending chunk order already
+            // form the final unique output. Sort only when interleaved writes
+            // or sparse/journal overlap made the candidate stream unordered.
             let mut chunks = candidate.chunks;
-            chunks.sort_unstable();
+            if candidate.unordered {
+                chunks.sort_unstable();
+            }
             for chunk in chunks {
                 report.stats.merged_candidates += 1;
                 if !F::filter_chunk(filter_fetch, chunk) {
@@ -777,5 +796,37 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
             self.acknowledge_dirty_cursors(world.change_tick());
         }
         report
+    }
+}
+
+#[cfg(test)]
+mod candidate_tests {
+    use super::DirtyChunkCandidates;
+
+    #[test]
+    fn ascending_candidates_stay_ordered_and_do_not_promote_to_hash_set() {
+        let mut candidates = DirtyChunkCandidates::default();
+        for chunk in 0..4096 {
+            candidates.insert_chunk(chunk);
+        }
+        candidates.insert_chunk(4095);
+
+        assert!(!candidates.unordered);
+        assert!(candidates.chunk_index.is_none());
+        assert_eq!(candidates.chunks, (0..4096).collect::<alloc::vec::Vec<_>>());
+    }
+
+    #[test]
+    fn unordered_candidates_deduplicate_inline_and_after_promotion() {
+        let mut candidates = DirtyChunkCandidates::default();
+        for chunk in [5, 2, 5, 9, 1, 8, 3, 7, 6, 4, 2] {
+            candidates.insert_chunk(chunk);
+        }
+
+        assert!(candidates.unordered);
+        assert!(candidates.chunk_index.is_some());
+        let mut chunks = candidates.chunks;
+        chunks.sort_unstable();
+        assert_eq!(chunks, (1..=9).collect::<alloc::vec::Vec<_>>());
     }
 }
