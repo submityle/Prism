@@ -199,7 +199,8 @@ struct RepackParams {
 // and expand it, returning the neutral surface if the declared range overruns.
 fn load_surface_parameters(word_offset: u32, lobe_mask: u32) -> PrismSurfaceParameters {
     let n = min(prism_packed_word_count(lobe_mask), 40u);
-    if word_offset + n > arrayLength(&material_parameters) {
+    let heap_words = arrayLength(&material_parameters);
+    if word_offset > heap_words || n > heap_words - word_offset {
         return prism_neutral_surface();
     }
     var words: array<u32, 40>;
@@ -363,7 +364,9 @@ fn repack_sample(ids: vec4<u32>, metadata: vec4<u32>) -> RepackSample {
         return out;
     }
     let parameter_words = min(prism_packed_word_count(material_header.lobe_mask), 40u);
-    if material_header.parameter_offset + parameter_words > arrayLength(&material_parameters) {
+    let parameter_heap_words = arrayLength(&material_parameters);
+    if material_header.parameter_offset > parameter_heap_words
+        || parameter_words > parameter_heap_words - material_header.parameter_offset {
         return out;
     }
     let parameters = load_surface_parameters(material_header.parameter_offset, material_header.lobe_mask);
@@ -372,9 +375,10 @@ fn repack_sample(ids: vec4<u32>, metadata: vec4<u32>) -> RepackSample {
     let recon = reconstruct_geometry(ids, metadata);
     if recon.valid {
         let uv = recon.geometry.uv;
-        let tex_end = material_header.texture_offset + material_header.texture_count;
         let tex_physical = arrayLength(&material_textures);
-        for (var i = material_header.texture_offset; i < tex_end && i < tex_physical; i = i + 1u) {
+        for (var i = material_header.texture_offset;
+            i < tex_physical && i - material_header.texture_offset < material_header.texture_count;
+            i = i + 1u) {
             let record = material_textures[i];
             if record.semantic == SEMANTIC_METALLIC_ROUGHNESS
                 || record.semantic == SEMANTIC_NORMAL {

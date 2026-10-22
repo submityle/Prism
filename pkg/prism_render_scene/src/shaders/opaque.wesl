@@ -50,6 +50,12 @@ struct MaterialTexture {
     virtual_texture_height: u32,
     virtual_texture_page_size: u32,
 }
+struct OpaqueDebugMetadata {
+    abi_version: u32, view_index: u32, view_generation: u32, scene_index: u32,
+    scene_generation: u32, lod_level: u32, cluster_index: u32,
+    cluster_generation: u32, cluster_valid: u32, flags: u32,
+    reserved_0: u32, reserved_1: u32,
+}
 
 @group(2) @binding(0) var<storage, read> scene_instances: array<GpuSceneInstance>;
 @group(2) @binding(1) var<storage, read> scene_current_transforms: array<GpuSceneTransform>;
@@ -58,13 +64,15 @@ struct MaterialTexture {
 @group(3) @binding(0) var<storage, read> material_headers: array<MaterialHeader>;
 @group(3) @binding(1) var<storage, read> material_parameters: array<u32>;
 @group(3) @binding(2) var<storage, read> material_textures: array<MaterialTexture>;
+@group(4) @binding(0) var<storage, read> opaque_debug_metadata: array<OpaqueDebugMetadata>;
 
 // Gather a material's variable-length packed block out of the shared u32 heap and
 // expand it to a full surface. A declared range that overruns the bound heap
 // decodes to the neutral surface, so callers never index out of bounds.
 fn load_surface_parameters(word_offset: u32, lobe_mask: u32) -> PrismSurfaceParameters {
     let n = min(prism_packed_word_count(lobe_mask), 40u);
-    if word_offset + n > arrayLength(&material_parameters) {
+    let heap_words = arrayLength(&material_parameters);
+    if word_offset > heap_words || n > heap_words - word_offset {
         return prism_neutral_surface();
     }
     var words: array<u32, 40>;
@@ -164,6 +172,19 @@ fn vertex(vertex: Vertex) -> VertexOutput {
             && material_header.is_active != 0u
             && material_header.generation == instance.material_generation,
     );
+    var debug_metadata = OpaqueDebugMetadata(0u, 0u, 0u, 0u, 0u, 0xffffffffu,
+        0xffffffffu, 0u, 0u, 0u, 0u, 0u);
+    var debug_metadata_valid = false;
+    @if(PRISM_DEBUG_VIEW_6 || PRISM_DEBUG_VIEW_7 || PRISM_DEBUG_VIEW_8 || PRISM_DEBUG_VIEW_9 || PRISM_DEBUG_VIEW_10) {
+        let debug_metadata_in_bounds = scene_index < arrayLength(&opaque_debug_metadata);
+        let debug_metadata_index = select(0u, scene_index, debug_metadata_in_bounds);
+        debug_metadata = opaque_debug_metadata[debug_metadata_index];
+        debug_metadata_valid = debug_metadata_in_bounds
+            && debug_metadata.abi_version == 1u
+            && debug_metadata.view_generation != 0u
+            && debug_metadata.scene_index == scene_index
+            && debug_metadata.scene_generation == instance.generation;
+    }
     let id_color = vec3<f32>(
         f32((safe_scene_index * 97u) & 255u),
         f32((safe_scene_index * 57u) & 255u),
@@ -178,6 +199,42 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     } @else if(PRISM_DEBUG_VIEW_5) {
         // World-normal visualization does not depend on material parameters.
         out.debug_color = vec3<f32>(0.0);
+    } @else if(PRISM_DEBUG_VIEW_6) {
+        let lod = debug_metadata.lod_level & 255u;
+        out.debug_color = select(
+            vec3<f32>(1.0, 0.0, 1.0),
+            vec3<f32>(f32(lod * 97u & 255u) / 255.0, f32(lod * 57u & 255u) / 255.0, f32(lod * 17u & 255u) / 255.0),
+            debug_metadata_valid && debug_metadata.lod_level != 0xffffffffu,
+        );
+    } @else if(PRISM_DEBUG_VIEW_7) {
+        out.debug_color = select(vec3<f32>(1.0, 0.0, 1.0), id_color, debug_metadata_valid);
+    } @else if(PRISM_DEBUG_VIEW_8) {
+        // Opaque mesh work currently carries geometry/LOD identity, not the
+        // virtual-cluster identity. Never substitute geometry identity here.
+        out.debug_color = select(vec3<f32>(1.0, 0.0, 1.0), vec3<f32>(0.0),
+            debug_metadata_valid && debug_metadata.cluster_valid == 1u
+                && debug_metadata.cluster_index != 0xffffffffu
+                && debug_metadata.cluster_generation != 0u);
+        if debug_metadata_valid && debug_metadata.cluster_valid == 1u
+            && debug_metadata.cluster_index != 0xffffffffu
+            && debug_metadata.cluster_generation != 0u {
+            let cluster = debug_metadata.cluster_index;
+            out.debug_color = vec3<f32>(f32((cluster * 97u) & 255u),
+                f32((cluster * 57u) & 255u), f32((cluster * 17u) & 255u)) / 255.0;
+        }
+    } @else if(PRISM_DEBUG_VIEW_9) {
+        let requested_cut = debug_metadata.reserved_0;
+        let cut = requested_cut & 255u;
+        let base = vec3<f32>(f32((cut * 97u) & 255u),
+            f32((cut * 57u) & 255u), f32((cut * 17u) & 255u)) / 255.0;
+        out.debug_color = select(vec3<f32>(1.0, 0.0, 1.0), base, debug_metadata_valid);
+        if debug_metadata_valid && (debug_metadata.flags & 4u) != 0u {
+            out.debug_color = mix(base, vec3<f32>(1.0, 0.8, 0.0), 0.65);
+        }
+    } @else if(PRISM_DEBUG_VIEW_10) {
+        out.debug_color = select(vec3<f32>(1.0, 0.0, 1.0),
+            select(vec3<f32>(1.0, 0.1, 0.05), vec3<f32>(0.1, 0.9, 0.2),
+                (debug_metadata.flags & 2u) != 0u), debug_metadata_valid);
     } @else {
         let header = material_headers[out.material_index];
         out.debug_color = load_surface_parameters(header.parameter_offset, header.lobe_mask).base_color.rgb;
@@ -203,7 +260,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
             return vec4<f32>(1.0, 0.0, 1.0, 1.0);
         }
     }
-    @if(PRISM_DEBUG_VIEW_1 || PRISM_DEBUG_VIEW_2 || PRISM_DEBUG_VIEW_3 || PRISM_DEBUG_VIEW_4) {
+    @if(PRISM_DEBUG_VIEW_1 || PRISM_DEBUG_VIEW_2 || PRISM_DEBUG_VIEW_3 || PRISM_DEBUG_VIEW_4 || PRISM_DEBUG_VIEW_6 || PRISM_DEBUG_VIEW_7 || PRISM_DEBUG_VIEW_8 || PRISM_DEBUG_VIEW_9 || PRISM_DEBUG_VIEW_10) {
         return vec4<f32>(in.debug_color, 1.0);
     }
     // Honest fallback shading. The real lighting lives in the GPU shading resolve

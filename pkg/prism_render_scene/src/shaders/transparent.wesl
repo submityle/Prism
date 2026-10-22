@@ -86,7 +86,8 @@ struct MaterialTexture {
 // and expand it, returning the neutral surface if the declared range overruns.
 fn load_surface_parameters(word_offset: u32, lobe_mask: u32) -> PrismSurfaceParameters {
     let n = min(prism_packed_word_count(lobe_mask), 40u);
-    if word_offset + n > arrayLength(&material_parameters) {
+    let heap_words = arrayLength(&material_parameters);
+    if word_offset > heap_words || n > heap_words - word_offset {
         return prism_neutral_surface();
     }
     var words: array<u32, 40>;

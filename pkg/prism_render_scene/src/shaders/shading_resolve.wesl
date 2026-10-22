@@ -403,7 +403,8 @@ struct MotionMatrices {
 // and expand it, returning the neutral surface if the declared range overruns.
 fn load_surface_parameters(word_offset: u32, lobe_mask: u32) -> PrismSurfaceParameters {
     let n = min(prism_packed_word_count(lobe_mask), 40u);
-    if word_offset + n > arrayLength(&material_parameters) {
+    let heap_words = arrayLength(&material_parameters);
+    if word_offset > heap_words || n > heap_words - word_offset {
         return prism_neutral_surface();
     }
     var words: array<u32, 40>;
@@ -1859,9 +1860,10 @@ fn face_shadow_disabled() -> FaceShadow {
 // material texture table is declared — the same reason the face-SDF scan above
 // does.
 fn measured_table_slot_of(tex_offset: u32, tex_count: u32) -> u32 {
-    let tex_end = tex_offset + tex_count;
     let tex_physical = arrayLength(&material_textures);
-    for (var i = tex_offset; i < tex_end && i < tex_physical; i = i + 1u) {
+    for (var i = tex_offset;
+        i < tex_physical && i - tex_offset < tex_count;
+        i = i + 1u) {
         let record = material_textures[i];
         if record.semantic == SEMANTIC_MEASURED_BRDF {
             if material_texture_record_is_valid(record) {
@@ -1878,9 +1880,10 @@ fn measured_table_slot_of(tex_offset: u32, tex_count: u32) -> u32 {
 // so a mis-authored material never darkens the face. Mirrors the resolve
 // texture-fold loop's bounds (logical count + physical table length).
 fn face_shadow_sample_sdf(tex_offset: u32, tex_count: u32, uv: vec2<f32>) -> f32 {
-    let tex_end = tex_offset + tex_count;
     let tex_physical = arrayLength(&material_textures);
-    for (var i = tex_offset; i < tex_end && i < tex_physical; i = i + 1u) {
+    for (var i = tex_offset;
+        i < tex_physical && i - tex_offset < tex_count;
+        i = i + 1u) {
         let record = material_textures[i];
         if record.semantic == SEMANTIC_FACE_SDF {
             // The face-shadow SDF is an authored *mask*, not a filtered albedo:
@@ -2589,6 +2592,11 @@ fn evaluate_response_arm(
     arm.evaluated = evaluated;
     arm.indirect_diffuse = response_indirect_diffuse;
     arm.reflection = response_reflection;
+    // SurfaceSample is the dynamically evaluated BSDF/radiance sample, not
+    // PrismSurfaceParameters: it has no geometry_opacity member. Builtin
+    // response alpha carries the authored geometry opacity independently of
+    // radiance; base alpha and dissolve coverage belong to raster coverage.
+    // The dissolve arm of apply_dynamic_channels only adds an emission rim.
     arm.output = ResponseOutput(array<f32, 16>(
         evaluated.direct.x,
         evaluated.direct.y,
@@ -2829,7 +2837,9 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
         return;
     }
     let parameter_words = min(prism_packed_word_count(material_header.lobe_mask), 40u);
-    if material_header.parameter_offset + parameter_words > arrayLength(&material_parameters) {
+    let parameter_heap_words = arrayLength(&material_parameters);
+    if material_header.parameter_offset > parameter_heap_words
+        || parameter_words > parameter_heap_words - material_header.parameter_offset {
         return;
     }
     let parameters = load_surface_parameters(material_header.parameter_offset, material_header.lobe_mask);
@@ -2849,9 +2859,10 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     var normal_forward_x_tangent = vec3<f32>(0.0, 0.0, 1.0);
     var normal_forward_y_tangent = vec3<f32>(0.0, 0.0, 1.0);
     var normal_footprint_valid = false;
-    let tex_end = material_header.texture_offset + material_header.texture_count;
     let tex_physical = arrayLength(&material_textures);
-    for (var i = material_header.texture_offset; i < tex_end && i < tex_physical; i = i + 1u) {
+    for (var i = material_header.texture_offset;
+        i < tex_physical && i - material_header.texture_offset < material_header.texture_count;
+        i = i + 1u) {
         let record = material_textures[i];
         // Per-record mip: the footprint is shared (one pixel), the texel count
         // is not, so each map converts the same UV gradients with its own size.
@@ -2946,22 +2957,6 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     surface.glint_footprint_area = abs(
         uv_gradients[0].x * uv_gradients[1].y - uv_gradients[0].y * uv_gradients[1].x,
     );
-    // Runtime dynamic channels (§17.1): the four header words are the material's
-    // live wetness / snow / damage / dissolve state, remapped analytically onto
-    // the frozen über fields *before* any light or ambient term is evaluated, so
-    // every consumer (direct, IBL, ambient) sees the same modulated surface.
-    // All-zero is a bit-for-bit identity, and the bypass branch is per material,
-    // not per pixel.
-    surface = apply_dynamic_channels(
-        surface,
-        vec4<f32>(
-            bitcast<f32>(material_header.dynamic_wetness),
-            bitcast<f32>(material_header.dynamic_snow),
-            bitcast<f32>(material_header.dynamic_damage),
-            bitcast<f32>(material_header.dynamic_dissolve),
-        ),
-        geometry.uv,
-    );
     // `geometry_coat_tangent` is a shade-time input, so the coat inherits the
     // base frame tangent by default.
     surface.coat_tangent = vec3<f32>(0.0);
@@ -2975,6 +2970,9 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     surface.thickness = parameters.thickness;
     surface.anisotropy = parameters.anisotropy;
     surface.anisotropy_rotation = parameters.anisotropy_rotation;
+    // The lobe sampler replaces this authored-mixture sentinel later. Keep the
+    // complete surface valid for the earlier indirect-response copy as well.
+    surface.glint_state = -1.0;
 
     var frame: ShadingFrame;
     // The interpolated tangent basis reused by both normal maps.
@@ -3005,6 +3003,20 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     } else {
         surface.coat_normal = vec3<f32>(0.0);
     }
+    // Runtime dynamic channels (§17.1): apply the live state to the complete
+    // frozen über surface before any indirect, direct, or response consumer.
+    // In particular, this must follow authored sheen initialization so wetness
+    // and snow modulation are preserved for every lighting path.
+    surface = apply_dynamic_channels(
+        surface,
+        vec4<f32>(
+            bitcast<f32>(material_header.dynamic_wetness),
+            bitcast<f32>(material_header.dynamic_snow),
+            bitcast<f32>(material_header.dynamic_damage),
+            bitcast<f32>(material_header.dynamic_dissolve),
+        ),
+        geometry.uv,
+    );
     frame.view = brdf_normalize_or(params.view_position.xyz - geometry.position, geometry.normal);
     frame.tangent = geometry.tangent;
     frame.bitangent = geometry.bitangent;
