@@ -155,6 +155,24 @@ impl AuthorityAoi {
         self.grid.len()
     }
 
+    /// Return the current viewers of an indexed entity in deterministic
+    /// ascending peer-id order.
+    #[must_use]
+    pub fn viewers(&self, entity_id: u32) -> Vec<u64> {
+        self.peers
+            .iter()
+            .filter_map(|(&peer_id, peer)| peer.visible.contains(&entity_id).then_some(peer_id))
+            .collect()
+    }
+
+    /// Return a peer's current AOI subscription revision.
+    pub fn peer_revision(&self, peer_id: u64) -> Result<u64, AuthorityAoiError> {
+        self.peers
+            .get(&peer_id)
+            .map(|peer| peer.revision)
+            .ok_or(AuthorityAoiError::UnknownPeer)
+    }
+
     /// Admit a peer and return its initial bounded visible set.
     pub fn admit_peer(
         &mut self,

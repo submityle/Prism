@@ -33,8 +33,10 @@ const AOI_EVENT_MAGIC: u8 = 0xa1;
 const AOI_EVENT_VERSION: u8 = 1;
 const AOI_EVENT_HEADER_LEN: usize = 2 + 8 + 8 + 4 + 4 + 4;
 const AOI_REPLICATION_MAGIC: u8 = 0xa2;
-const AOI_REPLICATION_VERSION: u8 = 1;
-const AOI_REPLICATION_HEADER_LEN: usize = 2 + 8 + 8 + 4 + 4;
+const AOI_REPLICATION_VERSION_V1: u8 = 1;
+const AOI_REPLICATION_VERSION: u8 = 2;
+const AOI_REPLICATION_V1_HEADER_LEN: usize = 2 + 8 + 8 + 4 + 4;
+const AOI_REPLICATION_HEADER_LEN: usize = AOI_REPLICATION_V1_HEADER_LEN + 4;
 
 /// A peer-specific projection of an entity from the shared authority world.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -54,6 +56,8 @@ pub struct AuthorityAoiReplicationPayload {
     pub revision: u64,
     /// Full snapshots for newly visible entities.
     pub entered: Vec<EntitySnapshotPayload>,
+    /// Latest provider-produced states for entities that remain visible.
+    pub updated: Vec<EntitySnapshotPayload>,
     /// Entity ids to despawn from this peer's replica.
     pub left: Vec<u32>,
 }
@@ -173,16 +177,20 @@ impl core::fmt::Display for MultiPeerAuthorityError {
     }
 }
 
-/// Encode a provider-produced snapshot/despawn update for reliable delivery.
+/// Encode provider-produced AOI snapshots, state updates, and despawns for
+/// reliable delivery. Version 2 adds a distinct `updated` collection; the
+/// decoder continues to accept version 1 payloads.
 pub fn encode_authority_aoi_replication_payload(
     payload: &AuthorityAoiReplicationPayload,
 ) -> Result<Vec<u8>, MultiPeerAuthorityError> {
     let entered = u32::try_from(payload.entered.len())
         .map_err(|_| MultiPeerAuthorityError::EventCountOverflow)?;
+    let updated = u32::try_from(payload.updated.len())
+        .map_err(|_| MultiPeerAuthorityError::EventCountOverflow)?;
     let left = u32::try_from(payload.left.len())
         .map_err(|_| MultiPeerAuthorityError::EventCountOverflow)?;
     let mut capacity = AOI_REPLICATION_HEADER_LEN;
-    for snapshot in &payload.entered {
+    for snapshot in payload.entered.iter().chain(payload.updated.iter()) {
         let len = u32::try_from(snapshot.bytes.len())
             .map_err(|_| MultiPeerAuthorityError::EventCountOverflow)?;
         capacity = capacity
@@ -206,7 +214,8 @@ pub fn encode_authority_aoi_replication_payload(
     bytes.extend_from_slice(&payload.revision.to_le_bytes());
     bytes.extend_from_slice(&entered.to_le_bytes());
     bytes.extend_from_slice(&left.to_le_bytes());
-    for snapshot in &payload.entered {
+    bytes.extend_from_slice(&updated.to_le_bytes());
+    for snapshot in payload.entered.iter().chain(payload.updated.iter()) {
         let len = u32::try_from(snapshot.bytes.len())
             .map_err(|_| MultiPeerAuthorityError::EventCountOverflow)?;
         bytes.extend_from_slice(&snapshot.entity_id.to_le_bytes());
@@ -219,8 +228,9 @@ pub fn encode_authority_aoi_replication_payload(
     Ok(bytes)
 }
 
-/// Decode a provider-produced AOI replication payload under explicit entity
-/// count and byte limits.
+/// Decode a provider-produced AOI replication payload under explicit aggregate
+/// entity-operation and byte limits. `max_entities` bounds the sum of enter,
+/// update, and leave entries in one payload.
 pub fn decode_authority_aoi_replication_payload(
     bytes: &[u8],
     max_entities: usize,
@@ -229,44 +239,67 @@ pub fn decode_authority_aoi_replication_payload(
     if bytes.len() > max_payload_bytes {
         return Err(AuthorityAoiEventError::BoundExceeded);
     }
-    if bytes.len() < AOI_REPLICATION_HEADER_LEN
-        || bytes[0] != AOI_REPLICATION_MAGIC
-        || bytes[1] != AOI_REPLICATION_VERSION
-    {
+    if bytes.len() < AOI_REPLICATION_V1_HEADER_LEN || bytes[0] != AOI_REPLICATION_MAGIC {
         return Err(AuthorityAoiEventError::Malformed);
     }
+    let version = bytes[1];
+    let (header_len, updated) = match version {
+        AOI_REPLICATION_VERSION_V1 => (AOI_REPLICATION_V1_HEADER_LEN, 0usize),
+        AOI_REPLICATION_VERSION => {
+            if bytes.len() < AOI_REPLICATION_HEADER_LEN {
+                return Err(AuthorityAoiEventError::Malformed);
+            }
+            (
+                AOI_REPLICATION_HEADER_LEN,
+                u32::from_le_bytes(bytes[26..30].try_into().unwrap()) as usize,
+            )
+        }
+        _ => return Err(AuthorityAoiEventError::Malformed),
+    };
     let peer_id = u64::from_le_bytes(bytes[2..10].try_into().unwrap());
     let revision = u64::from_le_bytes(bytes[10..18].try_into().unwrap());
     let entered = u32::from_le_bytes(bytes[18..22].try_into().unwrap()) as usize;
     let left = u32::from_le_bytes(bytes[22..26].try_into().unwrap()) as usize;
-    if entered > max_entities || left > max_entities {
+    let entity_operations = entered
+        .checked_add(updated)
+        .and_then(|count| count.checked_add(left))
+        .ok_or(AuthorityAoiEventError::Malformed)?;
+    if entity_operations > max_entities {
         return Err(AuthorityAoiEventError::BoundExceeded);
     }
     let minimum_body = entered
         .checked_mul(8)
+        .and_then(|size| size.checked_add(updated.checked_mul(8)?))
         .and_then(|size| size.checked_add(left.checked_mul(size_of::<u32>())?))
         .ok_or(AuthorityAoiEventError::Malformed)?;
-    if minimum_body > bytes.len() - AOI_REPLICATION_HEADER_LEN {
+    if minimum_body > bytes.len() - header_len {
         return Err(AuthorityAoiEventError::Malformed);
     }
-    let mut offset = AOI_REPLICATION_HEADER_LEN;
-    let mut snapshots = Vec::with_capacity(entered);
-    for _ in 0..entered {
-        if bytes.len().saturating_sub(offset) < 8 {
-            return Err(AuthorityAoiEventError::Malformed);
-        }
-        let entity_id = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
-        let len = u32::from_le_bytes(bytes[offset + 4..offset + 8].try_into().unwrap()) as usize;
-        offset += 8;
-        if bytes.len().saturating_sub(offset) < len {
-            return Err(AuthorityAoiEventError::Malformed);
-        }
-        snapshots.push(EntitySnapshotPayload {
-            entity_id,
-            bytes: bytes[offset..offset + len].to_vec(),
-        });
-        offset += len;
-    }
+    let mut offset = header_len;
+    let mut read_snapshots =
+        |count: usize| -> Result<Vec<EntitySnapshotPayload>, AuthorityAoiEventError> {
+            let mut snapshots = Vec::with_capacity(count);
+            for _ in 0..count {
+                if bytes.len().saturating_sub(offset) < 8 {
+                    return Err(AuthorityAoiEventError::Malformed);
+                }
+                let entity_id = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
+                let len =
+                    u32::from_le_bytes(bytes[offset + 4..offset + 8].try_into().unwrap()) as usize;
+                offset += 8;
+                if bytes.len().saturating_sub(offset) < len {
+                    return Err(AuthorityAoiEventError::Malformed);
+                }
+                snapshots.push(EntitySnapshotPayload {
+                    entity_id,
+                    bytes: bytes[offset..offset + len].to_vec(),
+                });
+                offset += len;
+            }
+            Ok(snapshots)
+        };
+    let snapshots = read_snapshots(entered)?;
+    let updates = read_snapshots(updated)?;
     let left_bytes = left
         .checked_mul(4)
         .ok_or(AuthorityAoiEventError::Malformed)?;
@@ -284,6 +317,7 @@ pub fn decode_authority_aoi_replication_payload(
         peer_id,
         revision,
         entered: snapshots,
+        updated: updates,
         left: despawns,
     })
 }
@@ -418,9 +452,15 @@ pub fn decode_authority_aoi_event(
 
 struct PeerAuthority<S: ServerStrategy> {
     server: ServerReplication<S>,
-    pending_aoi_events: VecDeque<AuthorityAoiDelta>,
+    pending_aoi_events: VecDeque<PendingAoiEvent>,
     last_aoi_send_error: Option<MuxSendError>,
     last_provider_error: Option<AuthorityReplicationProviderError>,
+}
+
+#[derive(Clone, Debug)]
+enum PendingAoiEvent {
+    Delta(AuthorityAoiDelta),
+    EntityUpdate { entity_id: u32, revision: u64 },
 }
 
 /// A bounded authority coordinator for multiple authenticated peers.
@@ -506,7 +546,8 @@ impl<S: ServerStrategy> MultiPeerAuthority<S> {
             last_aoi_send_error: None,
             last_provider_error: None,
         };
-        peer.pending_aoi_events.push_back(delta.clone());
+        peer.pending_aoi_events
+            .push_back(PendingAoiEvent::Delta(delta.clone()));
         self.peers.insert(peer_id, peer);
         self.flush_aoi_events(peer_id);
         Ok(delta)
@@ -678,6 +719,34 @@ impl<S: ServerStrategy> MultiPeerAuthority<S> {
         Ok(deltas.pop().expect("one peer refresh produces one delta"))
     }
 
+    /// Publish the latest provider state for an entity to its current viewers.
+    /// Viewer selection is deterministic, and each peer's update is retained
+    /// in the same bounded FIFO as AOI enter/leave edges.
+    pub fn publish_entity_update(
+        &mut self,
+        entity_id: u32,
+    ) -> Result<Vec<PeerId>, MultiPeerAuthorityError> {
+        let viewers = self.aoi.viewers(entity_id);
+        for &peer_id in &viewers {
+            self.ensure_capacity_for_peer(peer_id)?;
+        }
+        for &peer_id in &viewers {
+            let revision = self.aoi.peer_revision(peer_id)?;
+            self.peers
+                .get_mut(&peer_id)
+                .ok_or(MultiPeerAuthorityError::UnknownPeer { peer_id })?
+                .pending_aoi_events
+                .push_back(PendingAoiEvent::EntityUpdate {
+                    entity_id,
+                    revision,
+                });
+        }
+        for &peer_id in &viewers {
+            self.flush_aoi_events(peer_id);
+        }
+        Ok(viewers)
+    }
+
     fn ensure_capacity_for_peer(&self, peer_id: PeerId) -> Result<(), MultiPeerAuthorityError> {
         let peer = self
             .peers
@@ -707,7 +776,8 @@ impl<S: ServerStrategy> MultiPeerAuthority<S> {
                     .ok_or(MultiPeerAuthorityError::UnknownPeer {
                         peer_id: delta.peer_id,
                     })?;
-            peer.pending_aoi_events.push_back(delta.clone());
+            peer.pending_aoi_events
+                .push_back(PendingAoiEvent::Delta(delta.clone()));
         }
         for delta in &deltas {
             self.flush_aoi_events(delta.peer_id);
@@ -717,7 +787,7 @@ impl<S: ServerStrategy> MultiPeerAuthority<S> {
 
     fn flush_aoi_events(&mut self, peer_id: PeerId) {
         loop {
-            let Some(delta) = self
+            let Some(event) = self
                 .peers
                 .get(&peer_id)
                 .and_then(|peer| peer.pending_aoi_events.front())
@@ -725,11 +795,19 @@ impl<S: ServerStrategy> MultiPeerAuthority<S> {
             else {
                 return;
             };
+            let (revision, entered_ids, updated_id, left) = match event {
+                PendingAoiEvent::Delta(delta) => (delta.revision, delta.entered, None, delta.left),
+                PendingAoiEvent::EntityUpdate {
+                    entity_id,
+                    revision,
+                } => (revision, Vec::new(), Some(entity_id), Vec::new()),
+            };
             let mut payload = AuthorityAoiReplicationPayload {
-                peer_id: delta.peer_id,
-                revision: delta.revision,
-                entered: Vec::with_capacity(delta.entered.len()),
-                left: delta.left.clone(),
+                peer_id,
+                revision,
+                entered: Vec::with_capacity(entered_ids.len()),
+                updated: Vec::with_capacity(usize::from(updated_id.is_some())),
+                left,
             };
             let mut encoded_len = AOI_REPLICATION_HEADER_LEN
                 .checked_add(
@@ -750,11 +828,8 @@ impl<S: ServerStrategy> MultiPeerAuthority<S> {
                 return;
             }
             let mut provider_failed = None;
-            for &entity_id in &delta.entered {
-                match self
-                    .provider
-                    .snapshot_entity(delta.peer_id, entity_id, delta.revision)
-                {
+            for entity_id in entered_ids {
+                match self.provider.snapshot_entity(peer_id, entity_id, revision) {
                     Ok(bytes) => {
                         let next_len = encoded_len
                             .checked_add(8)
@@ -780,6 +855,38 @@ impl<S: ServerStrategy> MultiPeerAuthority<S> {
                     Err(error) => {
                         provider_failed = Some(error);
                         break;
+                    }
+                }
+            }
+            if let Some(entity_id) = updated_id {
+                match self.provider.snapshot_entity(peer_id, entity_id, revision) {
+                    Ok(bytes) => {
+                        let next_len = encoded_len
+                            .checked_add(8)
+                            .and_then(|length| length.checked_add(bytes.len()));
+                        if next_len.is_none_or(|length| {
+                            length > self.config.max_aoi_payload_bytes
+                                || u32::try_from(bytes.len()).is_err()
+                        }) {
+                            let actual = next_len.unwrap_or(usize::MAX);
+                            if let Some(peer) = self.peers.get_mut(&peer_id) {
+                                peer.last_aoi_send_error = Some(MuxSendError::TooLarge {
+                                    len: actual,
+                                    max: self.config.max_aoi_payload_bytes,
+                                });
+                            }
+                            return;
+                        }
+                        encoded_len = next_len.expect("length checked above");
+                        payload
+                            .updated
+                            .push(EntitySnapshotPayload { entity_id, bytes });
+                    }
+                    Err(error) => {
+                        if let Some(peer) = self.peers.get_mut(&peer_id) {
+                            peer.last_provider_error = Some(error);
+                        }
+                        return;
                     }
                 }
             }

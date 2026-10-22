@@ -105,27 +105,63 @@ fn replication_payload_round_trips_and_enforces_total_wire_bounds() {
                 bytes: Vec::new(),
             },
         ],
+        updated: vec![EntitySnapshotPayload {
+            entity_id: 15,
+            bytes: vec![7, 8],
+        }],
         left: vec![4, 5],
     };
     let encoded = encode_authority_aoi_replication_payload(&payload).unwrap();
     assert_eq!(
-        decode_authority_aoi_replication_payload(&encoded, 2, encoded.len()).unwrap(),
+        decode_authority_aoi_replication_payload(&encoded, 5, encoded.len()).unwrap(),
         payload
     );
     assert_eq!(
-        decode_authority_aoi_replication_payload(&encoded, 2, encoded.len() - 1),
+        decode_authority_aoi_replication_payload(&encoded, 5, encoded.len() - 1),
         Err(AuthorityAoiEventError::BoundExceeded)
     );
     assert_eq!(
         decode_authority_aoi_replication_payload(&encoded, 1, encoded.len()),
         Err(AuthorityAoiEventError::BoundExceeded)
     );
+    assert_eq!(
+        decode_authority_aoi_replication_payload(&encoded, 4, encoded.len()),
+        Err(AuthorityAoiEventError::BoundExceeded),
+        "the entity limit applies to aggregate enter + update + leave operations",
+    );
     let mut trailing = encoded;
     trailing.push(0);
     assert_eq!(
-        decode_authority_aoi_replication_payload(&trailing, 2, trailing.len()),
+        decode_authority_aoi_replication_payload(&trailing, 5, trailing.len()),
         Err(AuthorityAoiEventError::Malformed)
     );
+}
+
+#[test]
+fn replication_decoder_preserves_compatibility_with_v1_payloads() {
+    // Version 1 wire layout: magic/version, peer, revision, entered/left
+    // counts, followed by entered snapshots and leave ids (no update count).
+    let mut v1 = vec![0xa2, 1];
+    v1.extend_from_slice(&7u64.to_le_bytes());
+    v1.extend_from_slice(&9u64.to_le_bytes());
+    v1.extend_from_slice(&1u32.to_le_bytes());
+    v1.extend_from_slice(&1u32.to_le_bytes());
+    v1.extend_from_slice(&11u32.to_le_bytes());
+    v1.extend_from_slice(&2u32.to_le_bytes());
+    v1.extend_from_slice(&[3, 4]);
+    v1.extend_from_slice(&12u32.to_le_bytes());
+    let decoded = decode_authority_aoi_replication_payload(&v1, 4, 128).unwrap();
+    assert_eq!(decoded.peer_id, 7);
+    assert_eq!(decoded.revision, 9);
+    assert_eq!(
+        decoded.entered,
+        vec![EntitySnapshotPayload {
+            entity_id: 11,
+            bytes: vec![3, 4]
+        }]
+    );
+    assert!(decoded.updated.is_empty());
+    assert_eq!(decoded.left, vec![12]);
 }
 
 fn secure_pair() -> (
@@ -234,6 +270,162 @@ fn multi_peer_aoi_enter_snapshots_and_leave_despawns_are_delivered_from_shared_p
         clients[1].1.recv_event().is_none(),
         "other peer retains its view"
     );
+}
+
+#[test]
+fn visible_entity_updates_are_sent_only_to_current_viewers_and_stop_after_leave() {
+    let world = Arc::new(Mutex::new(BTreeMap::new()));
+    world.lock().unwrap().insert(7, entity_blob(7, 42));
+    let mut authority = MultiPeerAuthority::new(config(), SharedWorld(Arc::clone(&world))).unwrap();
+    authority.upsert_entity(7, (0.0, 0.0)).unwrap();
+    let mut clients = Vec::new();
+    for peer_id in [10, 20] {
+        let (client_transport, server_transport) = secure_pair();
+        clients.push((
+            peer_id,
+            Replication::new(schema(), 8, &seed(), AddClient, Box::new(client_transport)).unwrap(),
+        ));
+        authority
+            .admit_peer(
+                peer_id,
+                (0.0, 0.0),
+                5.0,
+                schema(),
+                8,
+                &seed(),
+                AddAuthority,
+                Box::new(server_transport),
+            )
+            .unwrap();
+    }
+    exchange(&mut authority, &mut clients, 20);
+    for (_, client) in &mut clients {
+        let initial = decode_authority_aoi_replication_payload(
+            &client.recv_event().expect("initial enter snapshot"),
+            8,
+            1024,
+        )
+        .unwrap();
+        assert_eq!(initial.entered[0].bytes, entity_blob(7, 42));
+    }
+
+    let left = authority.update_peer_view(20, (100.0, 0.0), 5.0).unwrap();
+    assert_eq!(left.left, vec![7]);
+    exchange(&mut authority, &mut clients, 20);
+    let leave = decode_authority_aoi_replication_payload(
+        &clients[1].1.recv_event().expect("leave despawn"),
+        8,
+        1024,
+    )
+    .unwrap();
+    assert_eq!(leave.left, vec![7]);
+
+    world.lock().unwrap().insert(7, entity_blob(7, 99));
+    assert_eq!(authority.publish_entity_update(7).unwrap(), vec![10]);
+    exchange(&mut authority, &mut clients, 20);
+    let update = decode_authority_aoi_replication_payload(
+        &clients[0].1.recv_event().expect("visible state update"),
+        8,
+        1024,
+    )
+    .unwrap();
+    assert!(update.entered.is_empty());
+    assert_eq!(
+        update.updated,
+        vec![EntitySnapshotPayload {
+            entity_id: 7,
+            bytes: entity_blob(7, 99)
+        }]
+    );
+    assert!(
+        clients[1].1.recv_event().is_none(),
+        "peer outside AOI gets no state update"
+    );
+
+    world.lock().unwrap().insert(7, entity_blob(7, 123));
+    assert_eq!(authority.publish_entity_update(7).unwrap(), vec![10]);
+    exchange(&mut authority, &mut clients, 20);
+    let latest = decode_authority_aoi_replication_payload(
+        &clients[0].1.recv_event().expect("subsequent state update"),
+        8,
+        1024,
+    )
+    .unwrap();
+    assert_eq!(latest.updated[0].bytes, entity_blob(7, 123));
+    assert!(clients[1].1.recv_event().is_none());
+}
+
+#[test]
+fn update_retry_is_bounded_and_preserves_enter_update_leave_order() {
+    let world = Arc::new(Mutex::new(BTreeMap::new()));
+    let mut bounded = config();
+    bounded.max_pending_aoi_events_per_peer = 3;
+    let mut authority = MultiPeerAuthority::new(bounded, SharedWorld(Arc::clone(&world))).unwrap();
+    let (client_transport, server_transport) = secure_pair();
+    let client =
+        Replication::new(schema(), 8, &seed(), AddClient, Box::new(client_transport)).unwrap();
+    authority.upsert_entity(4, (0.0, 0.0)).unwrap();
+    authority
+        .admit_peer(
+            1,
+            (0.0, 0.0),
+            5.0,
+            schema(),
+            8,
+            &seed(),
+            AddAuthority,
+            Box::new(server_transport),
+        )
+        .unwrap();
+    // Before the secure handshake, enter blocks the queue. An update is retained
+    // behind it; provider failure must not drop or reorder either event.
+    assert_eq!(authority.publish_entity_update(4).unwrap(), vec![1]);
+    assert_eq!(authority.pending_aoi_events(1), Some(2));
+    assert_eq!(
+        authority.take_provider_error(1),
+        Some(AuthorityReplicationProviderError::EntityUnavailable)
+    );
+    authority.update_peer_view(1, (100.0, 0.0), 5.0).unwrap();
+    assert_eq!(authority.pending_aoi_events(1), Some(3));
+    assert_eq!(authority.publish_entity_update(4), Ok(Vec::new()));
+    assert_eq!(
+        authority.pending_aoi_events(1),
+        Some(3),
+        "queue remains bounded at configured capacity"
+    );
+    assert_eq!(
+        authority.update_peer_view(1, (0.0, 0.0), 5.0),
+        Err(MultiPeerAuthorityError::PendingQueueFull { peer_id: 1 }),
+        "a full retry queue rejects later AOI mutations before revision advances",
+    );
+
+    world.lock().unwrap().insert(4, entity_blob(4, 77));
+    let mut clients = vec![(1, client)];
+    exchange(&mut authority, &mut clients, 24);
+    // Enter and update stay ordered ahead of the leave; both project the latest
+    // state because provider sampling occurs when each queued event is flushed.
+    let first = decode_authority_aoi_replication_payload(
+        &clients[0].1.recv_event().expect("enter retry"),
+        8,
+        1024,
+    )
+    .unwrap();
+    assert_eq!(first.entered[0].bytes, entity_blob(4, 77));
+    let second = decode_authority_aoi_replication_payload(
+        &clients[0].1.recv_event().expect("update retry"),
+        8,
+        1024,
+    )
+    .unwrap();
+    assert_eq!(second.updated[0].bytes, entity_blob(4, 77));
+    let third = decode_authority_aoi_replication_payload(
+        &clients[0].1.recv_event().expect("ordered leave"),
+        8,
+        1024,
+    )
+    .unwrap();
+    assert_eq!(third.left, vec![4]);
+    assert_eq!(authority.pending_aoi_events(1), Some(0));
 }
 
 #[test]
