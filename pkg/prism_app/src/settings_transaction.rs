@@ -525,9 +525,10 @@ mod tests {
     use crate::App;
     use prism_settings::{Domain, LayerKind, RegistryBuilder, SettingDef, TrustLevel, Value};
     use prism_settings_io::{
-        ApplyOp, ApplyPlan, CandidateBuilder, CandidateSnapshot, CompensateOutcome, EffectState,
-        OpAction, OpOutcome, Reversibility, SettingsApplier, SettingsDocument,
-        SettingsTransactionSpec, SourceSpec, TxMode,
+        load_with_backup, ApplyOp, ApplyPlan, CandidateBuilder, CandidateSnapshot,
+        CompensateOutcome, EffectState, FileSettingsPersistence, OpAction, OpOutcome,
+        Reversibility, SettingsApplier, SettingsDocument, SettingsTransactionSpec, SourceSpec,
+        TxMode,
     };
     use std::{
         fs,
@@ -795,6 +796,33 @@ mod tests {
         compensations: Arc<AtomicUsize>,
     }
 
+    struct ApplyFailureApplier;
+
+    impl SettingsApplier for ApplyFailureApplier {
+        fn group(&self) -> &str {
+            "Display"
+        }
+
+        fn order(&self) -> i32 {
+            0
+        }
+
+        fn apply_op(&mut self, _op: &ApplyOp) -> OpOutcome {
+            OpOutcome::Failed {
+                error: "injected apply failure".to_owned(),
+                effect_handle: None,
+            }
+        }
+
+        fn probe(&self, _op: &ApplyOp) -> EffectState {
+            EffectState::Unknown
+        }
+
+        fn compensate(&mut self, _op: &ApplyOp) -> CompensateOutcome {
+            CompensateOutcome::Done { verified: true }
+        }
+    }
+
     impl SettingsApplier for CompensationFailureApplier {
         fn group(&self) -> &str {
             "Display"
@@ -911,6 +939,72 @@ mod tests {
         ));
         assert_eq!(manager.status(), &SettingsTransactionStatus::Idle);
         assert_eq!(runtime.snapshot(), &before);
+    }
+
+    #[test]
+    fn manager_direct_apply_failure_restores_file_runtime_and_journal() {
+        let registry = registry();
+        let directory = TempDir::new();
+        let settings_path = directory.0.join("settings.toml");
+        let backup_path = directory.0.join("settings.bak");
+        let tx_id = "manager-direct-rollback";
+        let journal_path = directory.0.join(format!("{tx_id}.journal"));
+        let mut old_document = SettingsDocument::new(1);
+        old_document.insert("render.scale", Value::Float(0.5));
+        prism_settings_io::write_atomic(&settings_path, &old_document, Some(&backup_path)).unwrap();
+
+        let mut manager = SettingsTransactionManager::new();
+        let mut runtime = runtime(&registry);
+        let before = runtime.checkpoint();
+        let mut persistence = FileSettingsPersistence::new(&settings_path, Some(&backup_path), 2);
+        let mut applier = ApplyFailureApplier;
+        let mut appliers: Vec<&mut dyn SettingsApplier> = vec![&mut applier];
+        let candidate = transaction_with_plan(
+            &registry,
+            &directory,
+            tx_id,
+            0.75,
+            reversible_display_plan(),
+        )
+        .candidate()
+        .clone();
+        let tx = IoTransaction::new(SettingsTransactionSpec {
+            tx_id: tx_id.to_owned(),
+            journal_path: journal_path.clone(),
+            mode: TxMode::Direct,
+            before_hash: 0,
+            before_snapshot: runtime.snapshot().clone(),
+            candidate,
+            plan: reversible_display_plan(),
+            snapshot_gen: 0,
+            last_confirmed: None,
+        });
+
+        assert_eq!(
+            manager
+                .begin(
+                    tx_id,
+                    tx,
+                    Duration::from_secs(30),
+                    &mut runtime,
+                    &mut persistence,
+                    &mut appliers,
+                )
+                .unwrap(),
+            PipelineOutcome::RolledBack
+        );
+        assert_eq!(manager.status(), &SettingsTransactionStatus::Idle);
+        assert_eq!(runtime.checkpoint(), before);
+        let restored = load_with_backup(&settings_path, Some(&backup_path), Some(&registry))
+            .unwrap()
+            .document;
+        assert_eq!(
+            restored.candidates().get(&"render.scale".into()),
+            Some(&Value::Float(0.5))
+        );
+        let journal = prism_settings_io::inspect_journal(&journal_path).unwrap();
+        let recovered = prism_settings_io::reconstruct_transaction(&journal.records).unwrap();
+        assert_eq!(recovered.ended, Some(TxOutcome::RolledBack));
     }
 
     #[test]
