@@ -102,17 +102,24 @@ pub struct CutCluster {
 /// A cluster LOD hierarchy: a node array plus the indices of its coarsest
 /// (root) nodes. One physical asset may expose several roots when it is
 /// partitioned into independent regions.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ClusterHierarchy {
     nodes: Vec<ClusterNode>,
     roots: Vec<u32>,
+    well_formed: bool,
 }
 
 impl ClusterHierarchy {
     /// Wraps a node array and its root indices.
     #[must_use]
     pub fn new(nodes: Vec<ClusterNode>, roots: Vec<u32>) -> Self {
-        Self { nodes, roots }
+        let mut hierarchy = Self {
+            nodes,
+            roots,
+            well_formed: false,
+        };
+        hierarchy.well_formed = hierarchy.validate_structure();
+        hierarchy
     }
 
     /// The backing node array.
@@ -127,12 +134,17 @@ impl ClusterHierarchy {
         &self.roots
     }
 
-    /// Checks structural integrity: every root and every declared child range
-    /// stays inside the node array. Returns `false` on the first violation so a
-    /// malformed hierarchy is rejected before it can drive a traversal off the
-    /// end of the array.
+    /// Returns whether construction-time structural validation succeeded.
+    ///
+    /// Validation checks every root and child range and rejects cycles. It runs
+    /// once in [`Self::new`], not per frame; cut selection therefore does not
+    /// scan or allocate for the complete asset before applying view culling.
     #[must_use]
     pub fn is_well_formed(&self) -> bool {
+        self.well_formed
+    }
+
+    fn validate_structure(&self) -> bool {
         let len = self.nodes.len();
         let Ok(len) = u32::try_from(len) else {
             // More nodes than a u32 index can address; treat as malformed.
@@ -246,41 +258,50 @@ impl ClusterHierarchy {
             return cut;
         }
         let budget = target_error_pixels.max(0.0);
-        let mut stack: Vec<u32> = self.roots.clone();
-        while let Some(index) = stack.pop() {
-            let node = self.nodes[index as usize];
-            if !frustum.intersects_bounds(&node.bounds) {
-                // The node's bounds enclose every child, so nothing visible
-                // hides in this subtree: prune it wholesale.
-                continue;
-            }
-            if node.is_leaf()
-                || fits_budget(
-                    node.self_error,
-                    &node.bounds,
-                    view_origin,
-                    projection,
-                    budget,
-                )
-            {
-                // Coarsest acceptable simplification (or the finest available
-                // at a leaf): draw it and stop refining this branch.
-                if let Some((table, frame)) = streaming.as_mut() {
-                    let priority = coverage_priority(&node.bounds, view_origin, projection);
-                    table.request(node.page, priority, *frame);
+        let mut stack = Vec::new();
+        for &root in self.roots.iter().rev() {
+            stack.push(root);
+            while let Some(index) = stack.pop() {
+                let node = self.nodes[index as usize];
+                if !frustum.intersects_bounds(&node.bounds) {
+                    // The node's bounds enclose every child, so nothing visible
+                    // hides in this subtree: prune it wholesale.
+                    continue;
                 }
-                cut.push(CutCluster {
-                    node: index,
-                    page: node.page,
-                });
-                continue;
-            }
-            let first = node.first_child;
-            for offset in 0..node.child_count {
-                stack.push(first + offset);
+                if node.is_leaf()
+                    || fits_budget(
+                        node.self_error,
+                        &node.bounds,
+                        view_origin,
+                        projection,
+                        budget,
+                    )
+                {
+                    // Coarsest acceptable simplification (or the finest available
+                    // at a leaf): draw it and stop refining this branch.
+                    if let Some((table, frame)) = streaming.as_mut() {
+                        let priority = coverage_priority(&node.bounds, view_origin, projection);
+                        table.request(node.page, priority, *frame);
+                    }
+                    cut.push(CutCluster {
+                        node: index,
+                        page: node.page,
+                    });
+                    continue;
+                }
+                let first = node.first_child;
+                for offset in 0..node.child_count {
+                    stack.push(first + offset);
+                }
             }
         }
         cut
+    }
+}
+
+impl Default for ClusterHierarchy {
+    fn default() -> Self {
+        Self::new(Vec::new(), Vec::new())
     }
 }
 

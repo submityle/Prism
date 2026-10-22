@@ -801,6 +801,10 @@ Source(FBX/USD/glTF) → Scene Source IR → Mesh IR
 
 该次运行与其他编译/测试并发，尾部耗时包含系统争用，不能作为隔离环境性能门禁或版本间加速结论；选择计时明确为 64 次，不是单次调用。这组数字只证明当前资产构建、真实属性网格简化与 CPU LOD 选择的测量结果。真实 GPU 测试证明 GPU 路径执行正确，但本轮不产生 100 万 Cluster/1080p/4K 完整场景的 GPU timestamp、峰值 VRAM、上传带宽、缺页、功耗或帧时间数据，因此不据此宣称达到上表预算。
 
+### 18.2 2026-10-22 百万 Cluster CPU 计划基准
+
+`prism_render_architecture/benches/mesh_cluster_scale.rs` 通过公开的 `plan_frame` 路径生成 1,000,000 个独立叶 Cluster/root、对应 raster stats 和按 64 Cluster 合并的页请求；固定种子分布使 127,320 个 Cluster 进入视锥、872,680 个被剔除。Apple M2、Metal 环境执行 2 次预热与 20 次采样：CPU `plan_frame` P50 为 12.986 ms、P95 为 18.908 ms、P99 为 19.220 ms；输出 127,320 个 cut/bin 项和 15,625 个页请求。该基准包含 fixture 构造在计时外，计时涵盖 cut、视锥剔除、请求合并与 raster bin 计划，不提交 GPU 工作。此结果揭示百万独立 root 的 CPU 计划尾延迟仍偏高，不构成完整游戏场景帧时或 GPU 性能达标证据；后续 CPU 优化须保持相同确定性输入和输出计数，并分别报告单视图/多视图与不同可见率。
+
 ## 19. 诊断、测试与验证
 
 ### 19.1 必备诊断
@@ -1093,7 +1097,7 @@ pub struct DeformationBudget { pub vertices_per_frame: u32, pub blas_refits_per_
 | 蒙皮 GPU twin | `prism_math_gpu --test skinning_parity` 在 Apple M2/Metal 上实际运行 4 项并通过 | 无适配器且强制 GPU 时直接失败，不记录为 parity 通过 |
 | 强制真实 GPU 探测 | 沙盒内因没有适配器而按预期失败；沙盒外检测到 Metal 适配器并执行 GPU 工作 | 无适配器的结果只记录环境缺失，不计为 GPU 通过 |
 | 设备丢失与预算超限 | page pool、asset residency 状态机测试通过 | 延迟释放、驱逐、重上传，禁止悬挂句柄与 OOM |
-| CPU 性能样本 | §18.1 记录 8192 三角形/391 Cluster/4 页与属性网格 `[2048,1024,512]` 实际简化，24 样本 P50/P95/P99 | 并发负载样本；选择计时为 ×64，不外推为完整场景 GPU 性能 |
+| CPU 性能样本 | §18.1 记录 8192 三角形/391 Cluster/4 页与属性网格 `[2048,1024,512]` 实际简化，24 样本 P50/P95/P99；§18.2 记录百万独立 Cluster 计划路径、确定性输出计数及 20 样本 P50/P95/P99 | 百万 Cluster 基准为 CPU-only 的合成森林场景，P50 12.986 ms、P95 18.908 ms、P99 19.220 ms；不可外推为完整场景 GPU 性能或达标声明 |
 | 完整场景性能门槛 | §18 固定场景、计时字段和 P50/P95/P99 协议 | 只有 GPU timestamp、VRAM、上传、缺页与功耗捕获齐全时才判定预算 |
 
 ## 26. 最终验收矩阵：标准与本轮证据
