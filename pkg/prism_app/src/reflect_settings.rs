@@ -10,9 +10,9 @@ use prism_reflect::{
     VariantType,
 };
 use prism_settings::{
-    canonical_value_cmp, Constraints, Domain, DomainMask, OverrideScope, PrecedenceProfile,
-    RegistryBuilder, Scope, SettingDef, SettingKey, SettingsError, SettingsRegistry, Value,
-    ValueShape,
+    canonical_value_cmp, Constraints, CrossRule, Domain, DomainMask, OverrideScope,
+    PrecedenceProfile, RegistryBuilder, Scope, SettingDef, SettingKey, SettingsError,
+    SettingsRegistry, Value, ValueShape,
 };
 use std::{collections::BTreeMap, error::Error, fmt};
 
@@ -475,6 +475,33 @@ where
                 }
                 ids.sort_unstable();
                 definition.constraints.enum_values = Box::leak(ids.into_boxed_slice());
+            }
+            for (attribute, when) in [
+                ("requires", true),
+                ("requires_when_false", false),
+                ("conflicts", true),
+                ("conflicts_when_false", false),
+            ] {
+                if let Some(value) = meta.custom(attribute) {
+                    let AttributeValue::Text(key) = value else {
+                        return Err(ReflectSettingsError::MetadataTypeMismatch {
+                            field: name.to_owned(),
+                        });
+                    };
+                    let key = key.trim();
+                    if key.is_empty() {
+                        return Err(ReflectSettingsError::MetadataTypeMismatch {
+                            field: name.to_owned(),
+                        });
+                    }
+                    let key = SettingKey::from(key);
+                    let rule = if attribute.starts_with("requires") {
+                        CrossRule::Requires { key, when }
+                    } else {
+                        CrossRule::Conflicts { key, when }
+                    };
+                    definition.cross_rules.push(rule);
+                }
             }
             for (key, slot) in [
                 (
@@ -1359,6 +1386,62 @@ mod tests {
         assert!(fps.flags.read_only);
         assert!(schema.get(&"render.cache".into()).is_none());
         assert!(schema.get(&"render.internal".into()).is_none());
+    }
+
+    #[test]
+    fn derives_explicit_cross_setting_boolean_rules() {
+        #[derive(Reflect, Default)]
+        struct CrossRuleSettings {
+            #[reflect(setting, requires = "cross_rule_settings.enabled")]
+            dependent: bool,
+            #[reflect(setting, conflicts_when_false = "cross_rule_settings.dependent")]
+            enabled: bool,
+        }
+
+        let schema =
+            derive_settings_registry::<CrossRuleSettings>("cross_rule_settings", "prism_app")
+                .unwrap();
+        let (_, dependent) = schema.get(&"cross_rule_settings.dependent".into()).unwrap();
+        assert_eq!(
+            dependent.cross_rules,
+            vec![CrossRule::Requires {
+                key: SettingKey::from("cross_rule_settings.enabled"),
+                when: true,
+            }]
+        );
+        let (_, enabled) = schema.get(&"cross_rule_settings.enabled".into()).unwrap();
+        assert_eq!(
+            enabled.cross_rules,
+            vec![CrossRule::Conflicts {
+                key: SettingKey::from("cross_rule_settings.dependent"),
+                when: false,
+            }]
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_reflected_cross_setting_rules() {
+        #[derive(Reflect, Default)]
+        struct UnknownReference {
+            #[reflect(setting, requires = "missing.setting")]
+            enabled: bool,
+        }
+        assert!(matches!(
+            derive_settings_registry::<UnknownReference>("unknown", "prism_app"),
+            Err(ReflectSettingsError::InvalidSchema(_))
+        ));
+
+        #[derive(Reflect, Default)]
+        struct NonBooleanReference {
+            #[reflect(setting, requires = "non_boolean.count")]
+            enabled: bool,
+            #[reflect(setting)]
+            count: u32,
+        }
+        assert!(matches!(
+            derive_settings_registry::<NonBooleanReference>("non_boolean", "prism_app"),
+            Err(ReflectSettingsError::InvalidSchema(_))
+        ));
     }
 
     #[test]
