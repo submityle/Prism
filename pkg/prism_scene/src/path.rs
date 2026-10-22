@@ -13,7 +13,7 @@ use alloc::vec::Vec;
 use core::fmt;
 
 /// One step of a [`FieldPath`].
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum FieldSegment {
     /// A named struct field.
     Name(Box<str>),
@@ -40,7 +40,7 @@ impl FieldSegment {
 /// Paths are the unique key (alongside the target entity and component type) by
 /// which a [`PropertyOverride`](crate::overrides::PropertyOverride) is stored and
 /// deduplicated.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FieldPath {
     segments: Vec<FieldSegment>,
 }

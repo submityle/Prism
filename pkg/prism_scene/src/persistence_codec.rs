@@ -1,7 +1,7 @@
 //! Deterministic, bounded binary codec for scene-instance persistence.
 //!
 //! This wire format is separate from the world transaction log: it stores one
-//! scene snapshot, while prism_world_persist stores ordered world deltas.
+//! scene snapshot, while `prism_world_persist` stores ordered world deltas.
 
 use crate::identity::{LocalEntityId, PersistentId};
 use crate::overrides::{ArchetypeSignature, ComponentTypeId, OverrideValue, StructuralOp};
@@ -501,8 +501,10 @@ mod tests {
             ),
             Err(PersistenceCodecError::Truncated)
         );
-        let mut limits = PersistenceDecodeLimits::default();
-        limits.max_bytes = encoded.len() - 1;
+        let limits = PersistenceDecodeLimits {
+            max_bytes: encoded.len() - 1,
+            ..PersistenceDecodeLimits::default()
+        };
         assert_eq!(
             decode_persistence(&encoded, limits),
             Err(PersistenceCodecError::ResourceLimit("snapshot bytes"))

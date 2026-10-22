@@ -63,6 +63,7 @@ pub const SCENE_TEMPLATE_SCHEMA: u32 = 2;
 pub mod audio;
 pub mod cost;
 pub mod identity;
+pub mod identity_migration;
 pub mod instance;
 pub mod instantiate;
 pub mod layers;
@@ -96,6 +97,10 @@ pub mod template_codec;
 pub use audio::AudioSourceNode;
 pub use cost::ScenePlanCost;
 pub use identity::{LocalEntityId, NameTable, PersistentId, PersistentIdBuilder};
+pub use identity_migration::{
+    FieldIdentityMigration, FieldIdentityMigrationError, LocalEntityMigration,
+    LocalEntityMigrationError,
+};
 pub use instance::SceneInstance;
 pub use instantiate::{
     despawn_instance, spawn_plan, spawn_typed_plan, InstantiateError, SceneAttachError, SceneSpawn,
