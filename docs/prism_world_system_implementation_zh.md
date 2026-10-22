@@ -466,3 +466,5 @@ ABI 闭环边界：现有 80-byte record 以 3 个 f32 word 承载位置，内�
 同轮重测 `planetary_placement_frame_preserves_millimetre_local_offsets_at_planet_scale` 仍失败：Apple M2/Metal X 轴 GPU local 为 256 mm，独立 CPU oracle 为 -0.4807677269 mm。故 U256 原语对拍并未证明 production Q84 placement；Q84/WGSL 生产接线、整数 record ABI 与消费者迁移、端到端毫米精度、性能基准仍未完成。sandbox 默认 adapter 无 Metal，专项 GPU 命令通过宿主环境执行。编译曾因磁盘不足而清理专用 `/private/tmp/prism-target-planet`（释放约 1.1 GiB），共享 `target` 未清理。
 
 后续对 standalone WGSL U256 除法做了确定性循环上界优化：先定位为原语固定执行 256 位恢复循环，将实现改为按 numerator/denominator bit length 对齐减法，迭代恰为可能的商位数；Q84 方向投影商不超过约 85 位。Metal 首轮对拍捕获到跨 limb 右移进位方向写反，修复后 Apple M2/Metal U256 对拍与 reference suite 为 14/14 passed。该上界分析不是生产候选 shader benchmark，也未接入 placement；frame-local 精度、整数输出 ABI 与产品接线未改变。
+
+2026-10-22 对优化后的除法新增多 limb divisor/high-limb quotient GPU 向量：Apple M2/Metal 对拍及完整 reference suite 14/14 passed，补强了非单 limb 除数路径的实卡证据；仍不是行星生产候选路径或其吞吐基准。

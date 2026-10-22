@@ -104,7 +104,9 @@ fn u256_limb_arithmetic_matches_rust_reference_on_metal() {
         0x0000_0001,
         0,
     ]);
-    let b = U256([0x1357_9bdf, 0, 0, 0, 0, 0, 0, 0]);
+    // Keep the product below 256 bits while exercising a multi-limb divisor
+    // and a quotient whose upper limbs are nonzero.
+    let b = U256([0x1357_9bdf, 1, 0, 0, 0, 0, 0, 0]);
     let mut input = vec![0u32; 16];
     input[..8].copy_from_slice(&a.0);
     input[8..].copy_from_slice(&b.0);
