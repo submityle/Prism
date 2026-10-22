@@ -4,6 +4,7 @@
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 
+use prism_camera::{ClearMode, RenderTarget};
 use prism_camera_ecs::PublishedViews;
 use prism_ecs::prelude::{Entity, LifecycleEvent, ObserverContext, Resource, World};
 use prism_ecs::world::WorldId;
@@ -17,6 +18,10 @@ use crate::visibility::{PrismCamera, PrismFrustum, ViewFlags};
 pub struct SurfaceView {
     /// Main-world identity, including the entity generation.
     pub camera: Entity,
+    /// Stable destination identity from the published camera intent.
+    pub target: RenderTarget,
+    /// Target clear behavior from the published camera intent.
+    pub clear: ClearMode,
     /// Camera composition order; ties are resolved by generational entity.
     pub order: i32,
     /// The camera's supplied matrix, without applying its pose a second time.
@@ -188,6 +193,8 @@ pub fn extract_surface_views(main: &mut World, render: &mut World) {
             entity,
             SurfaceView {
                 camera: entity,
+                target: RenderTarget::PrimaryWindow,
+                clear: ClearMode::ColorAndDepth,
                 order: 0,
                 clip_from_world,
                 previous_clip_from_world: old.map_or(clip_from_world, |old| old.clip_from_world),
@@ -265,6 +272,8 @@ fn extract_published_surface_views(main: &World, render: &mut World, published: 
             published_view.entity,
             SurfaceView {
                 camera: published_view.entity,
+                target: view.target,
+                clear: view.clear,
                 order: view.order,
                 clip_from_world: matrix,
                 previous_clip_from_world: prior.map_or(matrix, |old| old.clip_from_world),
@@ -405,6 +414,32 @@ mod tests {
             .unwrap()
     }
 
+    #[test]
+    fn published_target_and_clear_are_copied_to_surface_view() {
+        use prism_app::{App, Plugin};
+        use prism_camera::{CameraIntent, ClearMode, RenderTarget, Viewport};
+        use prism_camera_ecs::{CameraBundle, CameraIntentComponent, CameraPlugin};
+
+        let mut app = App::new();
+        app.add_plugins(CameraPlugin::new([640, 360]));
+        let entity = app.world_mut().spawn(CameraBundle {
+            intent: CameraIntentComponent(CameraIntent {
+                target: RenderTarget::Texture(0xCAFE),
+                clear: ClearMode::DepthOnly,
+                viewport: Viewport::FULL,
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        app.update();
+
+        let mut render = World::new();
+        extract_surface_views(app.world_mut(), &mut render);
+        let extracted = view(&render, entity);
+        assert_eq!(extracted.target, RenderTarget::Texture(0xCAFE));
+        assert_eq!(extracted.clear, ClearMode::DepthOnly);
+    }
+
     fn assert_reset(render: &World, entity: Entity) {
         let view = view(render, entity);
         assert!(!view.history_valid);
@@ -443,6 +478,8 @@ mod tests {
         let tick = main.change_tick();
         extract_surface_views(&mut main, &mut render);
         assert_reset(&render, entity);
+        assert_eq!(view(&render, entity).target, RenderTarget::PrimaryWindow);
+        assert_eq!(view(&render, entity).clear, ClearMode::ColorAndDepth);
         assert_eq!(
             view(&render, entity).clip_from_world,
             columns(camera_matrix(5.0))
