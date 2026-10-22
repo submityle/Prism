@@ -631,7 +631,9 @@ pub fn convert_logical_key(logical_key_code: &Key) -> bevy_input::keyboard::Key 
         Key::Named(NamedKey::F33) => bevy_input::keyboard::Key::F33,
         Key::Named(NamedKey::F34) => bevy_input::keyboard::Key::F34,
         Key::Named(NamedKey::F35) => bevy_input::keyboard::Key::F35,
-        _ => todo!(),
+        // `NamedKey` is non-exhaustive. Preserve forward compatibility without
+        // panicking when winit adds a value that this Bevy version does not know.
+        _ => bevy_input::keyboard::Key::Unidentified(bevy_input::keyboard::NativeKey::Unidentified),
     }
 }
 
