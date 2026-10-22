@@ -5,6 +5,8 @@ use prism_ecs::archetype::COLUMN_CHANGE_LOG_CAPACITY;
 use prism_ecs::component::StorageType;
 use prism_ecs::prelude::*;
 use std::collections::BTreeMap;
+use std::hint::black_box;
+use std::time::{Duration, Instant};
 
 #[derive(Component, Clone, Copy)]
 struct Value(u32);
@@ -272,6 +274,47 @@ fn high_cardinality_query_observer_reaction_has_exact_batches_and_idle_work() {
         assert_eq!(idle.stats.journal_records_scanned, 0);
         assert_eq!(idle.stats.candidate_archetype_checks, 0);
         assert_eq!(idle.stats.summaries_tested, 0);
+    }
+}
+
+/// Diagnostic scaling curve for the sparse Reaction path. The dirty subgraph
+/// stays at two derived nodes while unrelated clean incoming edges grow. Run
+/// with `cargo test -p prism_ecs --release --test reaction_scale_recovery \
+/// -- --ignored --nocapture sparse_reaction_high_indegree_curve`.
+#[test]
+#[ignore = "diagnostic release-mode timing; no machine-independent threshold"]
+fn sparse_reaction_high_indegree_curve() {
+    const SAMPLES: usize = 9;
+    const ITERATIONS: usize = 2_000;
+    const WARMUP: usize = 200;
+
+    for indegree in [1, 128, 4_096] {
+        let mut graph = ReactionGraph::<()>::new();
+        let sources: Vec<_> = (0..indegree).map(|_| graph.add_source()).collect();
+        let derived = graph.add_derived(&sources, |_| {});
+        let tail = graph.add_derived(&[derived], |_| {});
+        let trigger = sources[indegree / 2];
+
+        for _ in 0..WARMUP {
+            graph.mark_dirty(trigger);
+            assert_eq!(graph.flush(&mut ()), 2);
+        }
+
+        let mut samples = Vec::with_capacity(SAMPLES);
+        for _ in 0..SAMPLES {
+            let start = Instant::now();
+            for _ in 0..ITERATIONS {
+                graph.mark_dirty(black_box(trigger));
+                assert_eq!(graph.flush(&mut ()), 2);
+                black_box(tail);
+            }
+            samples.push(start.elapsed() / ITERATIONS as u32);
+        }
+        samples.sort_unstable();
+        let median: Duration = samples[SAMPLES / 2];
+        eprintln!(
+            "sparse_reaction_high_indegree indegree={indegree} dirty_nodes=3 iterations={ITERATIONS} samples={SAMPLES} median={median:?}"
+        );
     }
 }
 
