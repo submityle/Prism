@@ -26,7 +26,8 @@ pub use migration::{
     MigrationReport, ValueConverter,
 };
 pub use pipeline::{
-    recover_settings_transaction, resolved_snapshot_digest, CandidateBuilder, CandidateError,
+    recover_settings_transaction, recover_settings_transaction_with_source_rebuild,
+    resolved_snapshot_digest, AuthoritativeSourceRebuilder, CandidateBuilder, CandidateError,
     CandidateSnapshot, FileSettingsPersistence, PipelineError, PipelineOutcome,
     SettingsPersistence, SettingsTransaction, SettingsTransactionSpec, SettingsWatcher,
     SnapshotController, SourceSpec, WatchPoll,

@@ -4,7 +4,7 @@
 //! Enabled only by `settings-io`; default and `no_std + alloc` builds do not
 //! include filesystem I/O.
 
-use prism_settings::Snapshot;
+use prism_settings::{LayerSource, Snapshot};
 use prism_settings_io::{resolved_snapshot_digest, CandidateSnapshot, SnapshotController};
 #[cfg(test)]
 use std::{
@@ -57,6 +57,29 @@ impl<'a> SettingsRuntimeController<'a> {
     /// Borrows the adapted runtime.
     pub fn runtime(&self) -> &SettingsRuntime {
         self.runtime
+    }
+
+    /// Replaces the runtime's sources with a host-rebuilt authoritative set,
+    /// verifying it against the journal's target generation and digest.
+    pub fn install_authoritative_sources(
+        &mut self,
+        sources: Vec<LayerSource>,
+        generation: u64,
+        hash: u64,
+    ) -> Result<(), String> {
+        let snapshot = self
+            .runtime
+            .resolve_authoritative_sources(&sources, generation)
+            .map_err(|error| format!("authoritative settings source rebuild failed: {error:?}"))?;
+        let actual = resolved_snapshot_digest(self.runtime.registry(), &snapshot);
+        if actual != hash {
+            return Err(format!(
+                "authoritative settings snapshot digest mismatch: expected {hash:016x}, got {actual:016x}"
+            ));
+        }
+        self.runtime
+            .publish_authoritative_sources(sources, snapshot)
+            .map_err(|error| format!("authoritative settings source publication failed: {error:?}"))
     }
 }
 
@@ -117,6 +140,15 @@ impl SnapshotController for SettingsRuntimeController<'_> {
                 format!("authoritative settings snapshot publication failed: {error:?}")
             })
     }
+
+    fn install_authoritative_sources(
+        &mut self,
+        sources: Vec<LayerSource>,
+        generation: u64,
+        hash: u64,
+    ) -> Result<(), String> {
+        SettingsRuntimeController::install_authoritative_sources(self, sources, generation, hash)
+    }
 }
 
 fn same_snapshot_values_and_sources(left: &Snapshot, right: &Snapshot) -> bool {
@@ -132,13 +164,14 @@ fn same_snapshot_values_and_sources(left: &Snapshot, right: &Snapshot) -> bool {
 mod tests {
     use super::*;
     use prism_settings::{
-        Constraints, Domain, LayerKind, RegistryBuilder, SettingDef, TrustLevel, Value,
+        Constraints, Domain, LayerKind, RegistryBuilder, Resolver, SettingDef, TrustLevel, Value,
     };
     use prism_settings_io::{
-        load_with_backup, resolved_snapshot_digest, ApplyOp, ApplyPlan, CandidateBuilder,
-        CompensateOutcome, EffectState, FileSettingsPersistence, OpAction, OpOutcome,
-        Reversibility, SettingsApplier, SettingsDocument, SettingsTransaction,
-        SettingsTransactionSpec, SourceSpec, TxMode,
+        load_with_backup, recover_settings_transaction_with_source_rebuild,
+        resolved_snapshot_digest, ApplyOp, ApplyPlan, AuthoritativeSourceRebuilder,
+        CandidateBuilder, CompensateOutcome, EffectState, FileSettingsPersistence, Journal,
+        JournalEvent, OpAction, OpOutcome, Reversibility, SettingsApplier, SettingsDocument,
+        SettingsPersistence, SettingsTransaction, SettingsTransactionSpec, SourceSpec, TxMode,
     };
 
     struct TestTempDir(PathBuf);
@@ -186,6 +219,30 @@ mod tests {
         CandidateBuilder::new(registry, Domain::Runtime, source)
             .build(document, &[], 1, false)
             .unwrap()
+    }
+
+    struct StaticSourceRebuilder(Vec<LayerSource>);
+
+    impl AuthoritativeSourceRebuilder for StaticSourceRebuilder {
+        fn load_authoritative_sources(
+            &mut self,
+            _generation: u64,
+            _hash: u64,
+        ) -> Result<Vec<LayerSource>, String> {
+            Ok(self.0.clone())
+        }
+    }
+
+    struct NoopPersistence;
+
+    impl SettingsPersistence for NoopPersistence {
+        fn persist(
+            &mut self,
+            _document: &SettingsDocument,
+            _generation: u64,
+        ) -> Result<u64, String> {
+            Ok(0)
+        }
     }
 
     #[test]
@@ -249,6 +306,73 @@ mod tests {
         assert_eq!(controller.runtime().checkpoint(), before);
     }
 
+    #[test]
+    fn process_recovery_installs_host_loaded_sources_before_finishing_commit() {
+        let registry = registry();
+        let mut runtime = SettingsRuntime::new(registry.clone(), Domain::Runtime).unwrap();
+        let mut before_source = LayerSource::new(LayerKind::User, TrustLevel::User, "user-file");
+        before_source.set("render.scale", Value::Float(0.5));
+        runtime.replace_source(before_source).unwrap();
+        runtime.resolve().unwrap();
+        let before_hash = resolved_snapshot_digest(&registry, runtime.snapshot());
+
+        let mut after_source = LayerSource::new(LayerKind::User, TrustLevel::User, "user-file");
+        after_source.set("render.scale", Value::Float(0.75));
+        let after_snapshot = Resolver::new(&registry)
+            .resolve(Domain::Runtime, std::slice::from_ref(&after_source), 2)
+            .unwrap();
+        let after_hash = resolved_snapshot_digest(&registry, &after_snapshot);
+
+        let directory = TestTempDir::new();
+        let journal_path = directory.path().join("settings.journal");
+        let mut journal = Journal::open(&journal_path, "restart-commit").unwrap();
+        for event in [
+            JournalEvent::TxBegin {
+                mode: TxMode::Direct,
+                hash_before: before_hash,
+                hash_after: after_hash,
+                plan_digest: 0,
+                op_count: 0,
+                snapshot_gen: runtime.generation(),
+                last_confirmed: None,
+            },
+            JournalEvent::SnapshotCommitted { snapshot_gen: 2 },
+            JournalEvent::PersistBegin {
+                generation: 2,
+                manifest_hash: 99,
+            },
+            JournalEvent::PersistEnd {
+                generation: 2,
+                manifest_hash: 99,
+            },
+        ] {
+            journal.append(event).unwrap();
+        }
+
+        let mut rebuilder = StaticSourceRebuilder(vec![after_source.clone()]);
+        let mut snapshots = SettingsRuntimeController::new(&mut runtime);
+        let mut persistence = NoopPersistence;
+        let mut appliers: Vec<&mut dyn SettingsApplier> = Vec::new();
+        assert_eq!(
+            recover_settings_transaction_with_source_rebuild(
+                &journal_path,
+                &mut snapshots,
+                &mut rebuilder,
+                &mut persistence,
+                &mut appliers,
+            )
+            .unwrap(),
+            Some(prism_settings_io::PipelineOutcome::Committed)
+        );
+        let id = registry.id(&"render.scale".into()).unwrap();
+        assert_eq!(runtime.snapshot().generation(), 2);
+        assert_eq!(runtime.snapshot().get(id), Some(&Value::Float(0.75)));
+        assert_eq!(
+            runtime.source(LayerKind::User, "user-file"),
+            Some(&after_source)
+        );
+    }
+
     struct FailingScaleApplier;
 
     impl SettingsApplier for FailingScaleApplier {
@@ -289,8 +413,7 @@ mod tests {
             .unwrap();
 
         let mut runtime = SettingsRuntime::new(registry.clone(), Domain::Runtime).unwrap();
-        let mut previous_source =
-            prism_settings::LayerSource::new(LayerKind::User, TrustLevel::User, "user-file");
+        let mut previous_source = LayerSource::new(LayerKind::User, TrustLevel::User, "user-file");
         previous_source.set("render.scale", Value::Float(0.5));
         runtime.replace_source(previous_source.clone()).unwrap();
         let before_snapshot = runtime.snapshot().clone();

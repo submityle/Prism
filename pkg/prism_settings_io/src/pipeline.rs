@@ -8,9 +8,10 @@
 //! `watch -> candidate -> snapshot transaction -> journaled effects`.
 
 use crate::{
-    load_with_backup, rollback_open_transaction, run_preview_transaction, run_transaction,
-    ApplyPlan, CodecError, Journal, JournalError, JournalEvent, MigrationChain, MigrationError,
-    SettingsDocument, StoreError, TransactionError, TransactionRunOutcome, TxMode, TxOutcome,
+    inspect_journal, load_with_backup, rollback_open_transaction, run_preview_transaction,
+    run_transaction, ApplyPlan, CodecError, Journal, JournalError, JournalEvent, MigrationChain,
+    MigrationError, SettingsDocument, StoreError, TransactionError, TransactionRunOutcome, TxMode,
+    TxOutcome,
 };
 use prism_settings::{
     Domain, LayerKind, LayerSource, Resolver, SettingId, SettingsError, SettingsRegistry, Snapshot,
@@ -392,6 +393,30 @@ pub trait SnapshotController {
     fn install_snapshot(&mut self, snapshot: Snapshot) -> Result<(), String>;
     /// Restores a durable generation during process-start recovery.
     fn restore_generation(&mut self, generation: u64, hash: u64) -> Result<(), String>;
+    /// Atomically installs host-rebuilt authoritative sources and their
+    /// verified resolved snapshot. The default fails closed for hosts that do
+    /// not support process-start source reconstruction.
+    fn install_authoritative_sources(
+        &mut self,
+        _sources: Vec<LayerSource>,
+        _generation: u64,
+        _hash: u64,
+    ) -> Result<(), String> {
+        Err("authoritative source installation is not supported".to_owned())
+    }
+}
+
+/// Loads the authoritative source table after durable file recovery and before
+/// journal effects are reconciled.
+pub trait AuthoritativeSourceRebuilder {
+    /// Loads all authoritative sources for the requested durable generation.
+    /// The caller resolves them and verifies the requested snapshot digest
+    /// before publishing them to the runtime.
+    fn load_authoritative_sources(
+        &mut self,
+        generation: u64,
+        hash: u64,
+    ) -> Result<Vec<LayerSource>, String>;
 }
 
 /// Result of the complete settings transaction pipeline.
@@ -693,6 +718,12 @@ pub fn recover_settings_transaction(
     appliers: &mut [&mut dyn crate::SettingsApplier],
 ) -> Result<Option<PipelineOutcome>, PipelineError> {
     let path = journal_path.as_ref();
+    let inspection = inspect_journal(path)?;
+    if inspection.records.is_empty() && inspection.invalid_tail {
+        return Err(PipelineError::InvalidState(
+            "settings journal contains no valid records".to_owned(),
+        ));
+    }
     let recovery = crate::recover_journal(path)?;
     let Some(first) = recovery.records.first() else {
         return Ok(None);
@@ -704,6 +735,111 @@ pub fn recover_settings_transaction(
         persistence
             .recover_after_restart()
             .map_err(PipelineError::Persistence)?;
+    }
+    let mut journal = Journal::open(path, first.tx_id.clone())?;
+    let mut recovery = ControllerRestore { snapshots };
+    let outcome = crate::recover_open_transaction(&mut journal, &mut recovery, appliers)?;
+    if outcome != TransactionRunOutcome::RecoveryRequired {
+        persistence.finalize().map_err(PipelineError::Persistence)?;
+    }
+    Ok(Some(map_outcome(outcome)))
+}
+
+/// Recovers a transaction with an explicit authoritative-source rebuild step.
+///
+/// This is the process-start entry point for hosts whose source table is
+/// loaded from files, platform policy, or another durable authority. It first
+/// restores any durable file preimage, then invokes `rebuilder`, and only then
+/// allows journal effect recovery to run.
+pub fn recover_settings_transaction_with_source_rebuild(
+    journal_path: impl AsRef<Path>,
+    snapshots: &mut dyn SnapshotController,
+    rebuilder: &mut dyn AuthoritativeSourceRebuilder,
+    persistence: &mut dyn SettingsPersistence,
+    appliers: &mut [&mut dyn crate::SettingsApplier],
+) -> Result<Option<PipelineOutcome>, PipelineError> {
+    let path = journal_path.as_ref();
+    let inspection = inspect_journal(path)?;
+    if inspection.records.is_empty() {
+        return if inspection.invalid_tail {
+            Err(PipelineError::InvalidState(
+                "settings journal contains no valid records".to_owned(),
+            ))
+        } else {
+            Ok(None)
+        };
+    }
+    let recovery = crate::recover_journal(path)?;
+    let Some(first) = recovery.records.first() else {
+        return Ok(None);
+    };
+    let tx = crate::reconstruct_transaction(&recovery.records)?;
+    if tx.ended.is_none() || tx.ended == Some(crate::TxOutcome::PendingConfirmation) {
+        let Some(crate::JournalEvent::TxBegin {
+            snapshot_gen: before_generation,
+            hash_before,
+            hash_after,
+            ..
+        }) = tx.begin.as_ref()
+        else {
+            return Err(PipelineError::InvalidState(
+                "open settings journal has no TxBegin".to_owned(),
+            ));
+        };
+        let restoring_preimage =
+            tx.persistence_in_flight || (tx.persisted && !tx.all_operations_applied());
+        if restoring_preimage {
+            persistence
+                .recover_after_restart()
+                .map_err(PipelineError::Persistence)?;
+        }
+        let (generation, hash) = if restoring_preimage {
+            (*before_generation, *hash_before)
+        } else {
+            match tx.recovery_decision() {
+                crate::TxRecoveryDecision::Commit | crate::TxRecoveryDecision::NeedsRestart => {
+                    let generation = recovery
+                        .records
+                        .iter()
+                        .find_map(|record| match &record.event {
+                            crate::JournalEvent::SnapshotCommitted { snapshot_gen } => {
+                                Some(*snapshot_gen)
+                            }
+                            _ => None,
+                        })
+                        .ok_or_else(|| {
+                            PipelineError::InvalidState(
+                                "forward recovery has no candidate snapshot generation".to_owned(),
+                            )
+                        })?;
+                    (generation, *hash_after)
+                }
+                crate::TxRecoveryDecision::RecoveryRequired if tx.persisted => {
+                    let generation = recovery
+                        .records
+                        .iter()
+                        .find_map(|record| match &record.event {
+                            crate::JournalEvent::SnapshotCommitted { snapshot_gen } => {
+                                Some(*snapshot_gen)
+                            }
+                            _ => None,
+                        })
+                        .ok_or_else(|| {
+                            PipelineError::InvalidState(
+                                "forward recovery has no candidate snapshot generation".to_owned(),
+                            )
+                        })?;
+                    (generation, *hash_after)
+                }
+                _ => (*before_generation, *hash_before),
+            }
+        };
+        let sources = rebuilder
+            .load_authoritative_sources(generation, hash)
+            .map_err(PipelineError::Snapshot)?;
+        snapshots
+            .install_authoritative_sources(sources, generation, hash)
+            .map_err(PipelineError::Snapshot)?;
     }
     let mut journal = Journal::open(path, first.tx_id.clone())?;
     let mut recovery = ControllerRestore { snapshots };
@@ -1114,7 +1250,11 @@ mod tests {
     use prism_settings::{
         Constraints, LayerKind, RegistryBuilder, SettingDef, SettingKey, TrustLevel, Value,
     };
-    use std::{cell::Cell, fs::OpenOptions, io::Write};
+    use std::{
+        cell::{Cell, RefCell},
+        fs::OpenOptions,
+        io::Write,
+    };
     use tempfile::tempdir;
 
     fn registry() -> SettingsRegistry {
@@ -1253,6 +1393,62 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct RecoverySnapshots {
+        restored_generations: RefCell<Vec<(u64, u64)>>,
+        installed_sources: RefCell<Vec<(u64, u64)>>,
+    }
+
+    impl SnapshotController for RecoverySnapshots {
+        fn install_snapshot(&mut self, _snapshot: Snapshot) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn restore_generation(&mut self, generation: u64, hash: u64) -> Result<(), String> {
+            self.restored_generations
+                .borrow_mut()
+                .push((generation, hash));
+            Ok(())
+        }
+
+        fn install_authoritative_sources(
+            &mut self,
+            _sources: Vec<LayerSource>,
+            generation: u64,
+            hash: u64,
+        ) -> Result<(), String> {
+            self.installed_sources.borrow_mut().push((generation, hash));
+            Ok(())
+        }
+    }
+
+    struct RecordingRebuilder {
+        requests: RefCell<Vec<(u64, u64)>>,
+        fail: bool,
+    }
+
+    impl AuthoritativeSourceRebuilder for RecordingRebuilder {
+        fn load_authoritative_sources(
+            &mut self,
+            generation: u64,
+            hash: u64,
+        ) -> Result<Vec<LayerSource>, String> {
+            self.requests.borrow_mut().push((generation, hash));
+            if self.fail {
+                Err("injected source rebuild failure".to_owned())
+            } else {
+                Ok(Vec::new())
+            }
+        }
+    }
+
+    fn append_recovery_prefix(path: &Path, events: impl IntoIterator<Item = JournalEvent>) {
+        let mut journal = Journal::open(path, "source-rebuild-recovery").unwrap();
+        for event in events {
+            journal.append(event).unwrap();
+        }
+    }
+
     struct MemoryApplier {
         applied: Cell<u32>,
         compensated: Cell<u32>,
@@ -1359,6 +1555,268 @@ mod tests {
             input_digest: 1,
             effect_handle: None,
         }
+    }
+
+    fn recovery_begin(mode: TxMode, op_count: u16, hash_after: u64) -> JournalEvent {
+        JournalEvent::TxBegin {
+            mode,
+            hash_before: 10,
+            hash_after,
+            plan_digest: 20,
+            op_count,
+            snapshot_gen: 1,
+            last_confirmed: None,
+        }
+    }
+
+    #[test]
+    fn source_rebuild_recovery_selects_candidate_state_for_durable_commit() {
+        let directory = tempdir().unwrap();
+        let journal_path = directory.path().join("settings.journal");
+        let hash_after = 30;
+        append_recovery_prefix(
+            &journal_path,
+            [
+                recovery_begin(TxMode::Direct, 0, hash_after),
+                JournalEvent::SnapshotCommitted { snapshot_gen: 2 },
+                JournalEvent::PersistBegin {
+                    generation: 2,
+                    manifest_hash: 40,
+                },
+                JournalEvent::PersistEnd {
+                    generation: 2,
+                    manifest_hash: 40,
+                },
+            ],
+        );
+        let mut snapshots = RecoverySnapshots::default();
+        let mut rebuilder = RecordingRebuilder {
+            requests: RefCell::default(),
+            fail: false,
+        };
+        let mut persistence = NoopPersistence;
+        let mut appliers: Vec<&mut dyn SettingsApplier> = Vec::new();
+
+        assert_eq!(
+            recover_settings_transaction_with_source_rebuild(
+                &journal_path,
+                &mut snapshots,
+                &mut rebuilder,
+                &mut persistence,
+                &mut appliers,
+            )
+            .unwrap(),
+            Some(PipelineOutcome::Committed)
+        );
+        assert_eq!(*rebuilder.requests.borrow(), vec![(2, hash_after)]);
+        assert_eq!(*snapshots.installed_sources.borrow(), vec![(2, hash_after)]);
+    }
+
+    #[test]
+    fn source_rebuild_recovery_restores_file_preimage_before_loading_sources() {
+        struct FileCheckingRebuilder {
+            path: PathBuf,
+            expected: Vec<u8>,
+            requests: Vec<(u64, u64)>,
+        }
+        impl AuthoritativeSourceRebuilder for FileCheckingRebuilder {
+            fn load_authoritative_sources(
+                &mut self,
+                generation: u64,
+                hash: u64,
+            ) -> Result<Vec<LayerSource>, String> {
+                assert_eq!(fs::read(&self.path).unwrap(), self.expected);
+                self.requests.push((generation, hash));
+                Ok(Vec::new())
+            }
+        }
+
+        let candidate = CandidateBuilder::new(
+            &registry(),
+            Domain::Runtime,
+            SourceSpec::new(LayerKind::User, TrustLevel::User, "user-file"),
+        )
+        .build(document(70), &[], 2, false)
+        .unwrap();
+        let directory = tempdir().unwrap();
+        let settings_path = directory.path().join("settings.toml");
+        let backup_path = directory.path().join("settings.bak");
+        let before_bytes = document(50).encode().unwrap().into_bytes();
+        crate::write_atomic(&settings_path, &document(50), Some(&backup_path)).unwrap();
+        let mut persistence = FileSettingsPersistence::new(&settings_path, Some(&backup_path), 1);
+        persistence
+            .persist(&candidate.document, candidate.generation)
+            .unwrap();
+
+        let journal_path = directory.path().join("settings.journal");
+        append_recovery_prefix(
+            &journal_path,
+            [
+                recovery_begin(TxMode::Direct, 1, candidate.snapshot_digest),
+                JournalEvent::SnapshotCommitted {
+                    snapshot_gen: candidate.generation,
+                },
+                JournalEvent::PersistBegin {
+                    generation: candidate.generation,
+                    manifest_hash: candidate.document_digest,
+                },
+            ],
+        );
+        let mut snapshots = RecoverySnapshots::default();
+        let mut rebuilder = FileCheckingRebuilder {
+            path: settings_path.clone(),
+            expected: before_bytes.clone(),
+            requests: Vec::new(),
+        };
+        let mut applier = MemoryApplier {
+            applied: Cell::new(0),
+            compensated: Cell::new(0),
+        };
+        let mut appliers: Vec<&mut dyn SettingsApplier> = vec![&mut applier];
+
+        assert_eq!(
+            recover_settings_transaction_with_source_rebuild(
+                &journal_path,
+                &mut snapshots,
+                &mut rebuilder,
+                &mut persistence,
+                &mut appliers,
+            )
+            .unwrap(),
+            Some(PipelineOutcome::RecoveryRequired)
+        );
+        assert_eq!(rebuilder.requests, vec![(1, 10)]);
+        assert_eq!(fs::read(settings_path).unwrap(), before_bytes);
+        assert_eq!(*snapshots.installed_sources.borrow(), vec![(1, 10)]);
+        assert_eq!(applier.applied.get(), 0);
+    }
+
+    #[test]
+    fn failed_source_rebuild_does_not_enter_effect_recovery() {
+        let directory = tempdir().unwrap();
+        let journal_path = directory.path().join("settings.journal");
+        let op = apply_op();
+        append_recovery_prefix(
+            &journal_path,
+            [
+                recovery_begin(TxMode::Preview, 1, 30),
+                JournalEvent::SnapshotCommitted { snapshot_gen: 2 },
+                JournalEvent::OpBegin { op },
+            ],
+        );
+        let mut snapshots = RecoverySnapshots::default();
+        let mut rebuilder = RecordingRebuilder {
+            requests: RefCell::default(),
+            fail: true,
+        };
+        let mut persistence = NoopPersistence;
+        let mut applier = MemoryApplier {
+            applied: Cell::new(0),
+            compensated: Cell::new(0),
+        };
+        let mut appliers: Vec<&mut dyn SettingsApplier> = vec![&mut applier];
+
+        assert!(matches!(
+            recover_settings_transaction_with_source_rebuild(
+                &journal_path,
+                &mut snapshots,
+                &mut rebuilder,
+                &mut persistence,
+                &mut appliers,
+            ),
+            Err(PipelineError::Snapshot(_))
+        ));
+        assert_eq!(applier.applied.get(), 0);
+        assert!(snapshots.installed_sources.borrow().is_empty());
+        let recovered = crate::recover_journal(&journal_path).unwrap();
+        assert!(crate::reconstruct_transaction(&recovered.records)
+            .unwrap()
+            .ended
+            .is_none());
+    }
+
+    #[test]
+    fn source_rebuild_recovery_rolls_back_interrupted_pending_preview() {
+        let directory = tempdir().unwrap();
+        let journal_path = directory.path().join("settings.journal");
+        append_recovery_prefix(
+            &journal_path,
+            [
+                recovery_begin(TxMode::Preview, 0, 30),
+                JournalEvent::SnapshotCommitted { snapshot_gen: 2 },
+                JournalEvent::TxEnd {
+                    outcome: TxOutcome::PendingConfirmation,
+                },
+            ],
+        );
+        let mut snapshots = RecoverySnapshots::default();
+        let mut rebuilder = RecordingRebuilder {
+            requests: RefCell::default(),
+            fail: false,
+        };
+        let mut persistence = NoopPersistence;
+        let mut appliers: Vec<&mut dyn SettingsApplier> = Vec::new();
+
+        assert_eq!(
+            recover_settings_transaction_with_source_rebuild(
+                &journal_path,
+                &mut snapshots,
+                &mut rebuilder,
+                &mut persistence,
+                &mut appliers,
+            )
+            .unwrap(),
+            Some(PipelineOutcome::RolledBack)
+        );
+        assert_eq!(*rebuilder.requests.borrow(), vec![(1, 10)]);
+        assert_eq!(*snapshots.installed_sources.borrow(), vec![(1, 10)]);
+    }
+
+    #[test]
+    fn source_rebuild_recovery_skips_terminal_journal_and_fails_closed_on_empty_corruption() {
+        let directory = tempdir().unwrap();
+        let terminal_path = directory.path().join("terminal.journal");
+        append_recovery_prefix(
+            &terminal_path,
+            [
+                recovery_begin(TxMode::Preview, 0, 30),
+                JournalEvent::TxEnd {
+                    outcome: TxOutcome::Committed,
+                },
+            ],
+        );
+        let mut snapshots = RecoverySnapshots::default();
+        let mut rebuilder = RecordingRebuilder {
+            requests: RefCell::default(),
+            fail: false,
+        };
+        let mut persistence = NoopPersistence;
+        let mut appliers: Vec<&mut dyn SettingsApplier> = Vec::new();
+        assert_eq!(
+            recover_settings_transaction_with_source_rebuild(
+                &terminal_path,
+                &mut snapshots,
+                &mut rebuilder,
+                &mut persistence,
+                &mut appliers,
+            )
+            .unwrap(),
+            Some(PipelineOutcome::Committed)
+        );
+        assert!(rebuilder.requests.borrow().is_empty());
+
+        let corrupt_path = directory.path().join("corrupt.journal");
+        fs::write(&corrupt_path, b"not a journal record\n").unwrap();
+        assert!(recover_settings_transaction_with_source_rebuild(
+            &corrupt_path,
+            &mut snapshots,
+            &mut rebuilder,
+            &mut persistence,
+            &mut appliers,
+        )
+        .is_err());
+        assert_eq!(fs::read(&corrupt_path).unwrap(), b"not a journal record\n");
+        assert!(rebuilder.requests.borrow().is_empty());
     }
 
     #[test]
