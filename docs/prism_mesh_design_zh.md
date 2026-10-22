@@ -728,7 +728,9 @@ atlas caster-depth 与 shading resolve 绑定已经由 `prism_render_scene::shad
 
 运行时绑定由 `MeshDerivedArtifact` 传递制品 key、kind、schema 和 `source_revision`。统一选择器校验 schema 非零且 `source_revision` 与当前几何 revision 完全一致；过期制品返回 `StaleDerivedArtifact`，不允许交给碰撞/导航/SDF/OMM 消费者。`prism_asset_build_core::mesh_derived_binding::bind_mesh_derived_artifact` 从同一已提交 Manifest 中解析 source 与 derived asset，验证描述符是 shared、kind/schema 符合消费者协议且 derived descriptor 直接依赖 source key，再将 Manifest revision 有界转换为运行时 revision；缺项、协议不匹配、缺依赖和 revision 溢出均结构化拒绝。此桥接建立了已发布制品到运行时身份的可信绑定入口；物理 shape 消费此绑定并执行新旧版本原子替换仍由物理场景层接入。
 
-物理三角网格现通过 `TriMeshData::from_mesh_asset(&prism_mesh::Mesh)` 接收规范 Mesh IR：先要求 `TriangleList`，再执行 Mesh 完整验证，并要求 `Vertex_Position: Float32x3`，从原始索引（或非索引顺序）构建物理 BVH。该适配器显式拒绝错误 Mesh、缺少位置、位置格式不支持、非三角形拓扑及空几何；它不从渲染 LOD、形变缓存或虚拟 Cluster 猜测碰撞输入。`prism_physics_core/tests/mesh_asset_adapter.rs` 覆盖有效三角形保真、缺失 canonical position 和不支持拓扑，定向集成测试 3 项通过，`cargo check -p prism_physics_core --lib` 通过。物理产物因此有稳定的独立生命周期；带 Artifact DAG key/kind/schema 的资产发布和运行时 stale-revision 替换策略仍须由资产构建/场景物理绑定层接入后，才可计为端到端派生产物闭环。
+物理三角网格通过 `TriMeshData::from_mesh_asset(&prism_mesh::Mesh)` 接收规范 Mesh IR：先要求 `TriangleList`，再执行 Mesh 完整验证，并要求 `Vertex_Position: Float32x3`，从原始索引（或非索引顺序）构建物理 BVH。该适配器显式拒绝错误 Mesh、缺少位置、位置格式不支持、非三角形拓扑及空几何；它不从渲染 LOD、形变缓存或虚拟 Cluster 猜测碰撞输入。`prism_physics_core/tests/mesh_asset_adapter.rs` 覆盖有效三角形保真、缺失 canonical position 和不支持拓扑，定向集成测试 3 项通过，`cargo check -p prism_physics_core --lib` 通过。
+
+已发布派生制品的绑定与运行时替换由 `prism_asset_build_core::mesh_derived_binding` 和 `prism_physics_ecs::install_published_collision_mesh` 接通：Manifest/CAS、source-key 依赖、artifact kind/schema、revision 与 Collision Mesh v2 payload 均在构造候选 BVH 前校验；候选成功后才原子替换 Collider，坏载荷和旧 revision 保留原 shape，相同 artifact 重放幂等。现有端到端定向测试曾有 3 项通过；新增的“新 Collider 拒绝落后于 RevisionStore 的已提交 Manifest”用例尚未验证。RayTracing、导航、SDF 等其余派生消费者不由 Physics 碰撞闭环代表，分别按各自消费契约和验收证据判断。
 
 ## 16. 压缩与带宽
 
@@ -845,11 +847,15 @@ Source(FBX/USD/glTF) → Scene Source IR → Mesh IR
 
 ### 19.5 2026-10-22 补充复核
 
-当前工作树原样执行 `cargo test -p prism_mesh --lib --tests`：34 项库单测、14 项集成测试全部通过。该结果只确认 `prism_mesh` 数据模型、变形参考实现及其集成契约；不覆盖资产构建、RenderApp、RenderScene、真实 GPU、产品级图像回归或完整场景性能门槛。尝试执行 `cargo test -p prism_render_app mesh:: --lib -- --nocapture` 时，因编译产物写满磁盘（`No space left on device`）而未进入测试阶段，因此本次不记作 RenderApp 通过或失败。对应构建产物已清理；其余 Mesh 验收仍以 §26 的逐项证据为准。
+2026-10-22 Mesh 核心回归通过：`cargo test -p prism_mesh --lib --tests` 为 36 项库单测、16 项集成测试全部通过；新增 65,536 个材质分区规模测试，约束重叠校验维持排序扫描路径，并验证排序后错误仍报告原始分区索引。测试在独立 `/private/tmp/prism-mesh-target` 下运行。该结果只确认 `prism_mesh` 数据模型、变形参考实现及其集成契约；不覆盖资产构建、RenderApp、RenderScene、真实 GPU、产品级图像回归或完整场景性能门槛。此前主 target 磁盘不足导致的 RenderApp 测试未进入测试阶段，不记作通过或失败；构建产物已清理，后续验收仍以 §26 的逐项证据为准。
 
 ### 19.6 2026-10-22 RayTracing 几何身份复核
 
 RayTracing 场景提取按 geometry slot 查询 shading 表时，必须同时验证 `GeometryHandle` 的 generation 与非零 revision，不能仅凭可复用的 slot index 绑定新几何。场景重建签名同时包含每个 shading entry 的 index、generation 与 revision，保证 slot 复用触发重建。`cargo test -p prism_render_scene --features legacy-bevy --lib stale_geometry_generation_never_binds_reused_registry_slot -- --nocapture` 通过 1 项定向测试；该测试只覆盖 stale generation fail-closed，不证明 RayTracing 与逐视图 raster LOD 选择一致，不证明完整 RT GPU 消费或画质。
+
+### 19.7 2026-10-22 Manifest 派生碰撞网格闭环
+
+`prism_physics_ecs::install_published_collision_mesh` 只接受已提交且 revision 与 RevisionStore 当前发布记录完全一致的 Manifest；质量门验证 CAS 内容后，再通过 `mesh_derived_binding` 校验 source-key 依赖、artifact kind/schema 与绑定 revision。Collision Mesh v2 载荷采用有界、定长 little-endian 编码，拒绝空/超预算/非有限/越界输入；通过 Mesh consumer contract 后才构造物理 BVH，并以一次 `Collider.shape` 替换作为可见提交点。旧 revision 和同 revision 不同 artifact 被拒绝，相同 artifact 重放为幂等操作。2026-10-22 使用独立 `/private/tmp/prism-physics-target` 执行 `cargo test -p prism_physics_ecs --test mesh_published_collision`：4 项测试全部通过，覆盖真实发布 CAS 安装、坏 payload 保持旧 shape、新 Collider 拒绝落后 revision、版本替换与旧 revision 拒绝；这不代表整个 Physics crate 或其他 Derived 消费者已完成。
 
 ## 20. 易维护性与演进规则
 
@@ -1108,15 +1114,15 @@ pub struct DeformationBudget { pub vertices_per_frame: u32, pub blas_refits_per_
 
 | 维度 | 产品级验收标准 | 本轮证据与结论 |
 |---|---|---|
-| 数据模型 | 属性/拓扑/索引/子网格/包围体/哈希有正反单测；格式矩阵覆盖 RHI 变体 | `prism_mesh` 34 项库单测与 14 项集成测试通过；该维度形成契约证据 |
+| 数据模型 | 属性/拓扑/索引/子网格/包围体/哈希有正反单测；格式矩阵覆盖 RHI 变体 | `prism_mesh` 36 项库单测与 16 项集成测试通过，含 65,536 材质分区规模和稳定重叠错误索引回归；该维度形成契约证据 |
 | 布局与标准路径 | 同属性集产生确定布局，上传字节与 draw 布局一致 | CPU 契约与 Metal 标准/半精度分流 8×8 像素测试通过；不等同于全档位 Golden 图集 |
 | 虚拟几何 | 固定 Cluster、CLST v3、QEM LOD、CPU 计划、页 ABI、LOD/cull/raster GPU twin 一致 | `prism_asset_build_core --lib` 136 项、`virtual_geometry_lod` 定向 12 项通过；属性感知简化保留精确源顶点与全部 typed 属性；原始 CLST v3 vertex-pulling render pass 已通过颜色读回，整页 IO 一致不再被误写成属性 shader 着色证据，但仍不替代完整场景 Golden 图 |
 | 形变 | Skin/Morph、缓存、预算与深度/阴影/速度/RT 消费一致 | 批量 Morph/LBS/修正的 CPU/GPU 对照（含 50,000 顶点）与 16×16 current/previous 直接绘制通过；数学蒙皮 parity 4 项通过。全部引擎 pass/RT 消费接线和跨档位 Golden 图不由这些独立测试证明 |
-| 多消费者绑定 | 主视图、深度、阴影、Motion Vector、RT、Collision、Derived Geometry 使用统一身份、revision 和明确回退 | `geometry::consumer` 对 `MeshDerivedArtifact.source_revision` 与绑定 revision 做 fail-closed 相等校验，并覆盖 stale-revision 拒绝；`prism_asset_build_core::mesh_derived_binding` 从已提交 Manifest 验证 source-key 依赖、kind/schema、存储类别并绑定 revision；`prism_render_app::mesh::consumer` 与场景 draw 维持已有选择契约。Mesh IR → physics BVH 有独立适配测试；物理 shape 消费该 Manifest 绑定并原子替换仍未端到端验证。RayTracing 提取现已拒绝 geometry slot generation 不匹配或 revision 为零的记录，并将 generation 纳入重建签名；启用 `legacy-bevy` 的 stale-slot 定向测试通过。RayTracing 仍使用 shading registry 的基础几何，尚未证明与逐视图栅格 LOD 表示一致；形变历史、RT 与其他 Derived 制品也未由此测试矩阵证明 |
+| 多消费者绑定 | 主视图、深度、阴影、Motion Vector、RT、Collision、Derived Geometry 使用统一身份、revision 和明确回退 | `geometry::consumer` 对 `MeshDerivedArtifact.source_revision` 与绑定 revision 做 fail-closed 相等校验，并覆盖 stale-revision 拒绝；`prism_asset_build_core::mesh_derived_binding` 从已提交 Manifest 验证 source-key 依赖、kind/schema、存储类别并绑定 revision。Physics 现通过 `install_published_collision_mesh` 验证已提交 Manifest/CAS、版本化 Collision Mesh v2 载荷和 revision，并在候选完成验证与 BVH cook 后原子替换 shape；独立 target 下 4 项定向集成测试通过。RayTracing 提取拒绝 geometry slot generation 不匹配或 revision 为零的记录，并将 generation 纳入重建签名；stale-slot 定向测试通过。RayTracing 仍使用 shading registry 的基础几何，尚未证明与逐视图栅格 LOD 表示一致；形变历史、其他 Derived 制品也未由此测试矩阵证明 |
 | 光追派生 | OMM 与派生几何使用版本化资产契约；无 RT 能力时选择光栅路径 | OMM 强制 GPU parity 通过；不把它扩张为完整 RT 场景画质结论 |
 | 带宽与性能 | §18 固定场景输出 P50/P95/P99、GPU timestamp、VRAM、上传、缺页与功耗字段 | 已记录 CPU 构建/LOD P50/P95/P99；完整场景 GPU 字段无本轮 artifact，因此预算表保持回归门槛而非达标声明 |
 | 维护性 | 扩展点遵守 §20.2，schema/ABI 显式版本化，错误类型稳定 | CLST v3/v2 兼容、稳定格式标签、缓存失效、精确 framing 与类型化错误由代码和测试锁定 |
-| 诊断 | 每条降级可解释，诊断字段可导出 | 通用 `GpuSceneDebugView` 与状态机诊断作为现有入口；opaque GpuScene Debug View 已增加 World Normal 模式，复用实例变换后的顶点法线，缺失/退化法线显示洋红色；WESL 全特化矩阵通过。尚无真实运行时捕获物，因此不将它计为图像回归证据；Cluster/LOD/Cut/page residency 可视化仍未接入 |
+| 诊断 | 每条降级可解释，诊断字段可导出 | 通用 `GpuSceneDebugView` 与状态机诊断作为现有入口；opaque Debug View 已有 World Normal 模式。当前工作树新增 per-view metadata buffer/bind group、LOD 与 Selection Identity shader 模式，并为不可验证条目使用洋红色；metadata 准备仅在这两种调试模式启用时运行，避免常规帧的 CPU 分配与上传。opaque draw command 代码覆盖 direct、indirect 及 HZB late stream。局部 rustfmt 与 diff 检查通过；以单线程、关闭开发调试符号执行 `cargo check -p prism_render_scene --features legacy-bevy --lib` 时，先被 `prism_render_architecture/src/reference_pt/clearcoat.rs` 调用不存在的 `CoatLayer::coat_ior/weight` 阻断，未到达 Mesh crate/WESL 特化，因此本轮仍无 Debug View 编译证据或真实运行时捕获物，不计为图像回归证据。Cluster identity、cut 和 page residency 的真实可视化尚未接入；LOD 元数据也尚未经过编译与运行时验证 |
 
 ## 27. 结论
 

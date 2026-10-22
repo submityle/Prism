@@ -1,5 +1,6 @@
 //! Static mesh submeshes: material ownership plus an index interval.
 
+use alloc::vec::Vec;
 use core::ops::Range;
 
 use prism_render_driver::PrimitiveTopology;
@@ -104,18 +105,7 @@ pub fn validate_submeshes(
         submesh.validate(index_count, topology)?;
     }
 
-    for (first_index, first) in submeshes.iter().enumerate() {
-        for (second_index, second) in submeshes.iter().enumerate().skip(first_index + 1) {
-            if ranges_overlap(&first.index_range, &second.index_range) {
-                return Err(MeshError::SubMeshIndexRangesOverlap {
-                    first: first_index,
-                    second: second_index,
-                });
-            }
-        }
-    }
-
-    Ok(())
+    validate_non_overlapping_ranges(submeshes)
 }
 
 /// Validates a complete submesh table against topology and mesh-facing limits.
@@ -129,18 +119,72 @@ pub fn validate_submeshes_with_limits(
         submesh.validate_with_limits(index_count, topology, limits)?;
     }
 
-    for (first_index, first) in submeshes.iter().enumerate() {
-        for (second_index, second) in submeshes.iter().enumerate().skip(first_index + 1) {
-            if ranges_overlap(&first.index_range, &second.index_range) {
-                return Err(MeshError::SubMeshIndexRangesOverlap {
-                    first: first_index,
-                    second: second_index,
-                });
-            }
+    validate_non_overlapping_ranges(submeshes)
+}
+
+/// Checks disjointness in O(n log n) instead of comparing every pair. Imported
+/// meshes can contain thousands of material partitions, so quadratic validation
+/// would turn otherwise linear asset admission into an avoidable CPU spike.
+fn validate_non_overlapping_ranges(submeshes: &[SubMesh]) -> Result<(), MeshError> {
+    let mut ordered: Vec<(u32, u32, usize)> = submeshes
+        .iter()
+        .enumerate()
+        .map(|(index, submesh)| (submesh.index_range.start, submesh.index_range.end, index))
+        .collect();
+    ordered.sort_unstable();
+
+    let mut active: Option<(u32, usize)> = None;
+    for (start, end, index) in ordered {
+        if let Some((active_end, active_index)) = active
+            && start < active_end
+        {
+            return Err(MeshError::SubMeshIndexRangesOverlap {
+                first: active_index.min(index),
+                second: active_index.max(index),
+            });
+        }
+        if active.is_none_or(|(active_end, _)| end > active_end) {
+            active = Some((end, index));
         }
     }
-
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::vec;
+    use core::ops::Range;
+
+    use prism_render_driver::PrimitiveTopology;
+
+    use super::{validate_submeshes, SubMesh};
+    use crate::error::MeshError;
+
+    #[test]
+    fn large_partition_tables_validate_without_pairwise_scanning() {
+        let partitions: Vec<_> = (0..65_536_u32)
+            .map(|index| SubMesh::new((index % u16::MAX as u32) as u16, index * 3..index * 3 + 3))
+            .collect();
+        assert_eq!(
+            validate_submeshes(&partitions, 65_536 * 3, PrimitiveTopology::TriangleList),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn overlap_reports_original_partition_indices_after_sorting() {
+        let partitions = vec![
+            SubMesh::new(0, Range { start: 6, end: 12 }),
+            SubMesh::new(1, Range { start: 0, end: 9 }),
+        ];
+        assert_eq!(
+            validate_submeshes(&partitions, 12, PrimitiveTopology::TriangleList),
+            Err(MeshError::SubMeshIndexRangesOverlap {
+                first: 0,
+                second: 1,
+            })
+        );
+    }
 }
 
 fn validate_range(
@@ -168,8 +212,4 @@ fn cluster_range_error(start: u32, end: u32, cluster_count: u32) -> MeshError {
         end,
         cluster_count,
     }
-}
-
-fn ranges_overlap(first: &Range<u32>, second: &Range<u32>) -> bool {
-    first.start < second.end && second.start < first.end
 }

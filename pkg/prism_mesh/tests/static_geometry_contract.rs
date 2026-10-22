@@ -1,6 +1,8 @@
 #![allow(dead_code)]
 #![allow(missing_docs)]
 
+extern crate alloc;
+
 #[path = "../src/error.rs"]
 mod error;
 #[path = "../src/limits.rs"]
