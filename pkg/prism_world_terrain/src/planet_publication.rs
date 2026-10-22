@@ -96,6 +96,27 @@ impl PlanetMeshPublicationTransaction {
         self.stage_prebuilt(source, mesh)
     }
 
+    /// Stages a planetary mesh with a validated resident-derived LOD seam plan.
+    ///
+    /// Commit additionally verifies that every coarse neighbor referenced by
+    /// the plan remains resident in the final atomic snapshot.
+    pub fn stage_build_with_lod_seam_plan(
+        &mut self,
+        source: Arc<HeightfieldTile>,
+        config: PlanetMeshConfig,
+        limits: BakeLimits,
+        neighborhood: PlanetHeightfieldNormalNeighborhood<'_>,
+        plan: &crate::HeightfieldLodSeamPlan,
+        max_mesh_bytes: usize,
+    ) -> Result<(), PlanetMeshPublicationError> {
+        let mut mesh =
+            PlanetHeightfieldMesh::build_with_neighborhood(&source, config, limits, neighborhood)
+                .map_err(PlanetMeshPublicationError::Build)?;
+        mesh.apply_lod_seam_plan(plan, max_mesh_bytes)
+            .map_err(PlanetMeshPublicationError::Build)?;
+        self.stage_prebuilt(source, mesh)
+    }
+
     fn stage_prebuilt(
         &mut self,
         source: Arc<HeightfieldTile>,
@@ -267,6 +288,7 @@ impl PlanetMeshPublication {
             });
         }
         validate_replacements(&transaction)?;
+        validate_resident_seam_neighbors(&self.meshes, &transaction)?;
         validate_affected_boundaries(
             &self.meshes,
             &transaction,
@@ -347,6 +369,13 @@ pub enum PlanetMeshPublicationError {
     },
     /// Affected neighboring source edges are not identical.
     Boundary(PlanetHeightfieldBoundaryError),
+    /// A published seam references a coarse tile absent from the final snapshot.
+    MissingSeamNeighbor {
+        /// Tile that owns the transition strip.
+        tile: TileKey,
+        /// Coarse neighbor required by the transition strip.
+        neighbor: TileKey,
+    },
     /// The publication generation cannot advance further.
     GenerationExhausted,
     /// A bounded staging or commit allocation failed.
@@ -390,6 +419,10 @@ impl fmt::Display for PlanetMeshPublicationError {
             Self::Boundary(error) => {
                 write!(formatter, "planet mesh boundary validation failed: {error}")
             }
+            Self::MissingSeamNeighbor { tile, neighbor } => write!(
+                formatter,
+                "planet mesh {tile:?} has a seam requiring non-resident neighbor {neighbor:?}"
+            ),
             Self::GenerationExhausted => {
                 formatter.write_str("planet mesh publication generation exhausted")
             }
@@ -494,6 +527,65 @@ fn validate_replacements(
     for entry in &transaction.replacements {
         if entry.tile() != entry.source.tile() || entry.mesh.revision() != entry.source.revision() {
             return Err(PlanetMeshPublicationError::InvalidReplacement { tile: entry.tile() });
+        }
+    }
+    Ok(())
+}
+
+fn validate_resident_seam_neighbors(
+    current: &[PublishedPlanetHeightfieldMesh],
+    transaction: &PlanetMeshPublicationTransaction,
+) -> Result<(), PlanetMeshPublicationError> {
+    let mut current_index = 0usize;
+    let mut replacement_index = 0usize;
+    while current_index < current.len() || replacement_index < transaction.replacements.len() {
+        let current_tile = current
+            .get(current_index)
+            .map(PublishedPlanetHeightfieldMesh::tile);
+        let replacement_tile = transaction
+            .replacements
+            .get(replacement_index)
+            .map(PublishedPlanetHeightfieldMesh::tile);
+        let tile = match (current_tile, replacement_tile) {
+            (Some(a), Some(b)) => a.min(b),
+            (Some(tile), None) | (None, Some(tile)) => tile,
+            (None, None) => break,
+        };
+        let entry = if replacement_tile == Some(tile) {
+            let entry = &transaction.replacements[replacement_index];
+            replacement_index += 1;
+            if current_tile == Some(tile) {
+                current_index += 1;
+            }
+            Some(entry)
+        } else {
+            let entry = &current[current_index];
+            current_index += 1;
+            Some(entry)
+        };
+        if transaction.removals.binary_search(&tile).is_ok() {
+            continue;
+        }
+        if let Some(entry) = entry {
+            for neighbor in entry.mesh.lod_seam_neighbors().into_iter().flatten() {
+                let removed = transaction.removals.binary_search(&neighbor).is_ok();
+                let replaced = transaction
+                    .replacements
+                    .binary_search_by_key(&neighbor, |replacement| replacement.tile())
+                    .is_ok();
+                let resident = if removed {
+                    false
+                } else if replaced {
+                    true
+                } else {
+                    current
+                        .binary_search_by_key(&neighbor, |resident| resident.tile())
+                        .is_ok()
+                };
+                if !resident {
+                    return Err(PlanetMeshPublicationError::MissingSeamNeighbor { tile, neighbor });
+                }
+            }
         }
     }
     Ok(())
@@ -608,7 +700,8 @@ mod tests {
     use core::convert::Infallible;
 
     use crate::{
-        CubeFace, DirtyRegion, HeightSample, HeightSampleValue, HeightSampler, HeightfieldSpec,
+        CubeFace, DirtyRegion, HeightSample, HeightSampleValue, HeightSampler,
+        HeightfieldLodSeamPlan, HeightfieldSpec, LodSeamCoverage, LodSeamLimits, LodSeamNeighbor,
     };
 
     struct Constant(i64);
@@ -645,6 +738,161 @@ mod tests {
 
     fn config() -> PlanetMeshConfig {
         PlanetMeshConfig::new(6_371_000_000, [0; 3], 10_000.0).unwrap()
+    }
+
+    fn seam_plan(tile: TileKey) -> (TileKey, HeightfieldLodSeamPlan) {
+        let neighbor = tile.neighbor(TileEdge::East).parent().unwrap();
+        let plan = HeightfieldLodSeamPlan::build_strict(
+            tile,
+            4,
+            &[LodSeamNeighbor::with_boundary(
+                TileEdge::East,
+                neighbor,
+                4,
+                LodSeamCoverage::full(4),
+            )],
+            LodSeamLimits {
+                max_segments: 4,
+                max_vertices: 32,
+                max_indices: 96,
+                max_bytes: 4096,
+            },
+        )
+        .unwrap();
+        (neighbor, plan)
+    }
+
+    fn stage_seamed_tile(
+        transaction: &mut PlanetMeshPublicationTransaction,
+        tile: TileKey,
+        plan: &HeightfieldLodSeamPlan,
+    ) {
+        transaction
+            .stage_build_with_lod_seam_plan(
+                source(tile, 7),
+                config(),
+                BakeLimits {
+                    max_samples: 25,
+                    max_bytes: 4096,
+                },
+                PlanetHeightfieldNormalNeighborhood::empty(),
+                plan,
+                4096,
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn seam_and_coarse_neighbor_publish_in_one_transaction() {
+        let tile = TileKey::new(CubeFace::PositiveZ, 3, 3, 3).unwrap();
+        let (neighbor, plan) = seam_plan(tile);
+        let mut publication = PlanetMeshPublication::new(limits());
+        let mut transaction = publication.begin();
+        stage_seamed_tile(&mut transaction, tile, &plan);
+        transaction
+            .stage_build(
+                source(neighbor, 7),
+                config(),
+                BakeLimits {
+                    max_samples: 25,
+                    max_bytes: 4096,
+                },
+                PlanetHeightfieldNormalNeighborhood::empty(),
+            )
+            .unwrap();
+
+        let receipt = publication.commit(transaction).unwrap();
+        assert_eq!(receipt.published_tiles, 2);
+        assert_eq!(publication.generation(), 1);
+    }
+
+    #[test]
+    fn missing_seam_neighbor_rejects_commit_without_changing_snapshot() {
+        let tile = TileKey::new(CubeFace::PositiveZ, 3, 3, 3).unwrap();
+        let (neighbor, plan) = seam_plan(tile);
+        let mut publication = PlanetMeshPublication::new(limits());
+        let mut transaction = publication.begin();
+        stage_seamed_tile(&mut transaction, tile, &plan);
+
+        assert_eq!(
+            publication.commit(transaction),
+            Err(PlanetMeshPublicationError::MissingSeamNeighbor { tile, neighbor })
+        );
+        assert_eq!(publication.generation(), 0);
+        assert!(publication.meshes().is_empty());
+    }
+
+    #[test]
+    fn removing_seam_neighbor_requires_removing_or_replacing_owner_seam() {
+        let tile = TileKey::new(CubeFace::PositiveZ, 3, 3, 3).unwrap();
+        let (neighbor, plan) = seam_plan(tile);
+        let mut publication = PlanetMeshPublication::new(limits());
+        let mut initial = publication.begin();
+        stage_seamed_tile(&mut initial, tile, &plan);
+        initial
+            .stage_build(
+                source(neighbor, 7),
+                config(),
+                BakeLimits {
+                    max_samples: 25,
+                    max_bytes: 4096,
+                },
+                PlanetHeightfieldNormalNeighborhood::empty(),
+            )
+            .unwrap();
+        publication.commit(initial).unwrap();
+
+        let mut remove_neighbor = publication.begin();
+        remove_neighbor.stage_remove(neighbor).unwrap();
+        let snapshot = publication.clone();
+        assert_eq!(
+            publication.commit(remove_neighbor),
+            Err(PlanetMeshPublicationError::MissingSeamNeighbor { tile, neighbor })
+        );
+        assert_eq!(publication, snapshot);
+
+        let mut remove_both = publication.begin();
+        remove_both.stage_remove(tile).unwrap();
+        remove_both.stage_remove(neighbor).unwrap();
+        let receipt = publication.commit(remove_both).unwrap();
+        assert_eq!(receipt.published_tiles, 0);
+    }
+
+    #[test]
+    fn replacing_resident_seam_neighbor_keeps_seam_publication_valid() {
+        let tile = TileKey::new(CubeFace::PositiveZ, 3, 3, 3).unwrap();
+        let (neighbor, plan) = seam_plan(tile);
+        let mut publication = PlanetMeshPublication::new(limits());
+        let mut initial = publication.begin();
+        stage_seamed_tile(&mut initial, tile, &plan);
+        initial
+            .stage_build(
+                source(neighbor, 7),
+                config(),
+                BakeLimits {
+                    max_samples: 25,
+                    max_bytes: 4096,
+                },
+                PlanetHeightfieldNormalNeighborhood::empty(),
+            )
+            .unwrap();
+        publication.commit(initial).unwrap();
+
+        let mut replacement = publication.begin();
+        replacement
+            .stage_build(
+                source(neighbor, 7),
+                config(),
+                BakeLimits {
+                    max_samples: 25,
+                    max_bytes: 4096,
+                },
+                PlanetHeightfieldNormalNeighborhood::empty(),
+            )
+            .unwrap();
+        let receipt = publication.commit(replacement).unwrap();
+        assert_eq!(receipt.replaced_tiles, 1);
+        assert_eq!(publication.generation(), 2);
     }
 
     #[test]

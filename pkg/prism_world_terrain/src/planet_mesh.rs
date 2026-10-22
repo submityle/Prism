@@ -140,6 +140,7 @@ pub struct PlanetHeightfieldMesh {
     uvs: Vec<[f32; 2]>,
     indices: Vec<u32>,
     lod_seams_applied: bool,
+    lod_seam_neighbors: [Option<TileKey>; 4],
 }
 
 fn planet_mesh_edge_index(edge: TileEdge) -> usize {
@@ -225,6 +226,7 @@ impl PlanetHeightfieldMesh {
             uvs: reserve(count)?,
             indices: reserve(indices)?,
             lod_seams_applied: false,
+            lod_seam_neighbors: [None; 4],
         };
         for y in 0..side {
             for x in 0..side {
@@ -315,6 +317,10 @@ impl PlanetHeightfieldMesh {
     /// Outward triangle indices.
     pub fn indices(&self) -> &[u32] {
         &self.indices
+    }
+
+    pub(crate) const fn lod_seam_neighbors(&self) -> [Option<TileKey>; 4] {
+        self.lod_seam_neighbors
     }
 
     /// Replaces planetary edge quads with resident-derived 2:1 seam strips.
@@ -448,6 +454,10 @@ impl PlanetHeightfieldMesh {
         }
         self.indices = indices;
         self.lod_seams_applied = true;
+        for transition in transitions {
+            self.lod_seam_neighbors[planet_mesh_edge_index(transition.edge())] =
+                Some(transition.neighbor());
+        }
         Ok(())
     }
 
@@ -486,6 +496,7 @@ impl PlanetHeightfieldMesh {
         }
         self.indices = indices;
         self.lod_seams_applied = false;
+        self.lod_seam_neighbors = [None; 4];
         Ok(())
     }
     /// Integer-origin placement contract.
