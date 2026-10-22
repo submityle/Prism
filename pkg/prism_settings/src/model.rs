@@ -6,6 +6,13 @@ use core::fmt;
 /// from a non-empty default value.
 pub const DEFAULT_MAX_ARRAY_LEN: usize = 4096;
 
+/// Maximum number of nested array shapes accepted by a settings schema.
+///
+/// This bounds validation stack use for schemas assembled from untrusted or
+/// generated metadata while remaining far beyond practical configuration
+/// nesting requirements.
+pub const MAX_VALUE_SHAPE_DEPTH: usize = 32;
+
 /// Stable, dot-separated persisted key (for example `audio.master_volume`).
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SettingKey(String);
@@ -224,13 +231,20 @@ impl ValueShape {
     /// Returns whether this shape is supported and internally consistent.
     #[must_use]
     pub fn is_valid(&self) -> bool {
+        self.is_valid_at_depth(0)
+    }
+
+    fn is_valid_at_depth(&self, depth: usize) -> bool {
+        if depth > MAX_VALUE_SHAPE_DEPTH {
+            return false;
+        }
         match self {
             Self::Scalar(value_type) => !matches!(value_type, ValueType::Array | ValueType::Table),
             Self::Array {
                 element,
                 min_len,
                 max_len,
-            } => min_len <= max_len && element.is_valid(),
+            } => min_len <= max_len && element.is_valid_at_depth(depth + 1),
         }
     }
 
@@ -238,6 +252,13 @@ impl ValueShape {
     /// range or enum-option constraints.
     #[must_use]
     pub fn matches(&self, value: &Value) -> bool {
+        self.matches_at_depth(value, 0)
+    }
+
+    fn matches_at_depth(&self, value: &Value, depth: usize) -> bool {
+        if depth > MAX_VALUE_SHAPE_DEPTH {
+            return false;
+        }
         match self {
             Self::Scalar(value_type) => value.value_type() == *value_type,
             Self::Array {
@@ -245,12 +266,30 @@ impl ValueShape {
                 min_len,
                 max_len,
             } => match value {
-                Value::Array(values) if (*min_len..=*max_len).contains(&values.len()) => {
-                    values.iter().all(|value| element.matches(value))
-                }
+                Value::Array(values) if (*min_len..=*max_len).contains(&values.len()) => values
+                    .iter()
+                    .all(|value| element.matches_at_depth(value, depth + 1)),
                 _ => false,
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod value_shape_tests {
+    use super::*;
+
+    #[test]
+    fn nested_shapes_are_bounded_and_match_fails_closed_past_the_limit() {
+        let mut shape = ValueShape::scalar(ValueType::Int);
+        let mut value = Value::Int(1);
+        for _ in 0..=MAX_VALUE_SHAPE_DEPTH {
+            shape = ValueShape::bounded_array(shape, 1);
+            value = Value::Array(vec![value]);
+        }
+
+        assert!(!shape.is_valid());
+        assert!(!shape.matches(&value));
     }
 }
 

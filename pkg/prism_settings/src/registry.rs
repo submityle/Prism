@@ -539,6 +539,13 @@ fn validate_def(def: &SettingDef, errors: &mut Vec<SettingsError>) {
 
 fn validate_value(def: &SettingDef, value: Value) -> Result<Value, SettingsError> {
     let key = def.key.clone();
+    if !def.shape.is_valid() {
+        return Err(SettingsError::InvalidDefinition {
+            key,
+            reason: String::from("value shape is unsupported or exceeds the maximum nesting depth"),
+        });
+    }
+    let key = def.key.clone();
     let mut value = value;
     validate_shape(&key, &def.shape, &value)?;
     if let Value::Float(v) = value {
