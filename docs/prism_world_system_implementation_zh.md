@@ -221,8 +221,8 @@ release两组完整记录共864次dispatch逐全键/位置对CPU，10k/100k候�
 ### M5：持久化
 
 - `prism_world_persist`：`PersistentId`、规范化 `OverrideDelta`、append-only log、确定性 LWW CRDT、snapshot/timeline、undo/redo、little-endian codec/checksum。
-- `std` feature 提供 `FileJournal` 和 `SnapshotStore`：版本头、长度/序号/payload/checksum、批量 append、`flush + sync_all`、重启恢复、损坏/截断尾部裁剪、乱序/重复拒绝、同目录临时文件原子替换和父目录同步。
-- `FileJournal::open` 在读取、初始化或恢复之前取得独占 OS 文件锁，并保持到句柄销毁；第二个句柄明确返回 `Locked`，不支持绕过锁写入或替换锁定路径。写入、flush 或 sync 的 I/O 失败会 poison 当前句柄，即使尾部回滚成功也必须销毁并重开；回滚失败同时保留原始错误和回滚错误。故障注入走同一生产 writer，覆盖 seek/短写/flush/sync 和 truncate/seek/flush/sync 回滚失败。失败后内存 log 保持旧视图，但回滚失败且磁盘已有完整记录时，重开允许恢复这些记录；batch 不是崩溃原子事务。
+- `std` feature 提供 `FileJournal` 和 `SnapshotStore`：journal v2 使用事务记录 + checksummed commit marker 表达批次，限制每批最多 65,536 笔事务和 64 MiB 事务记录；恢复仅发布完整 committed batch，截断或校验失败回退到当前批次起点。v1 journal 明确拒绝，需旧运行时导出有效事务并写入新 v2 文件后迁移；新版本不静默混读/追加。
+- `FileJournal::open` 在读取、初始化或恢复之前取得独占 OS 文件锁，并保持到句柄销毁；第二个句柄明确返回 `Locked`，不支持绕过锁写入或替换锁定路径。写入、flush 或 sync 的 I/O 失败会 poison 当前句柄，即使尾部回滚成功也必须销毁并重开；回滚失败同时保留原始错误和回滚错误。错误返回并不证明未提交：若 commit 已完整落盘，重开可见整批；checksum 用于意外损坏检测，不是认证机制，掉电语义仍依赖文件系统和设备。故障注入走同一生产 writer，覆盖 seek/短写/flush/sync 和回滚失败；batch 边界逐字节截断测试保证恢复得到整批或无批。
 - 本轮 macOS 验证：`cargo test -j 1 -p prism_world_persist --features std --quiet` 的 18 项测试、真实子进程锁回归 2 项，以及 `cargo check -j 1 -p prism_world_persist --no-default-features` 通过。锁内读测试复用持锁文件句柄并恢复游标；跨进程回归证明父进程持锁时子进程得到 `Locked`，释放后可重开并读取已提交前缀，且文件字节不变。尚未提供 Windows 实机验证。
 - 相关提交：`4d0fbfebe`；Scene/ECS 接缝提交：`34656b305`；GPU workspace 集成：`c94d5cf13`。
 
@@ -391,7 +391,7 @@ Clippy `-D warnings` 通过（依赖 render graph 的既有 unused-import warnin
 
 以下项目仍需要独立硬件或端到端证据，不能用 policy primitive 冒充完成：
 
-行星 GPU 几何专项补充：非零高度 `planet_placement_gpu` 以独立 f64 投影 oracle 检查三轴位置误差不超过 2,048 mm、法线分量误差不超过 2e-6；该回归曾捕获负 i64 原点经 i128 符号扩展解码时的巨大投影误差，shader 现按实际 i64 双 limb 解码。容差是 shader f32 行星半径输出的明确误差界，不代表 CPU i64 几何坐标逐位 parity。当前 GPU record 中的位置仍是绝对世界坐标编码成 f32，并非设计 §5.2 所要求的 sector-local f32；仓库尚无行星 placement 的生产 renderer consumer，因此此 shader 记录只能作为候选/删除数据 primitive，不能作为已可直接用于产品渲染的局部位置接口。后续必须先定义稳定局部坐标框架与相对投影，再接入 renderer graph 并验收换 sector 连续性。该证据补充下方 M4 实卡语义 parity，不改变行星端到端产品链路未完成的状态。
+行星 GPU 几何专项补充（早期 f32 ABI 历史）：旧非零高度 `planet_placement_gpu` 曾用独立 f64 投影 oracle 检查三轴误差不超过 2,048 mm、法线分量误差不超过 2e-6，并捕获负 i64 原点解码错误。旧 f32 世界坐标 record 已由后续 116-byte signed-i128 frame-local record 取代；当前规定矩阵的 frame-local 精度实测 ≤1 mm，见下方 2026-10-23 复验。仍无行星 placement 的完整产品 renderer consumer，因此数据 primitive 不能冒充产品渲染接口；换 sector 连续性及 renderer graph 产品接线仍待验收。
 
 - M4 散布：行星/曲率/数据层/跨散布层规则、风与交互、逐键并发删除协议、索引增量编辑、蓝噪声目标、产品 proxy renderer 接线及大规模产品散布性能验收；`GpuPlanetPlacement` 已交付固定容量的 source/projection/finalize kernel、signed-i128 上传 ABI、compact/indirect 输出、Naga/device-free 回归，并新增逐候选 identity/rank/height numerator/accepted/invalid 语义 parity 回归。2026-10-22 Apple M2/Metal/IntegratedGpu 实卡 `planet_placement_gpu` 2/2 通过，覆盖平坦 tile 全候选 dispatch、非零高度与阈值 CPU 语义 parity；`planet_placement_deletion` 1/1 实卡通过，覆盖完整 planetary key 删除并保留其他 cell。以上不证明 CPU i64 几何坐标逐位 parity，也没有 scene/ECS decoder 或完整行星产品链路。二维贴地 placement 已有 reset compute、原生 registration snapshot、backend-neutral RenderGraph lowering、Null RHI 命令记录及 Apple M2/Metal 真实 GPU 回归；2026-10-22 可选 `placement_rhi` 进一步交付同设备/table 的持久注册 RAII lease、限定 shader ABI 的 draw pipeline/bind group 与 scene target、真实 RenderGraph record/encode/submit、有界 completion retirement、空删除复位及 submit/wait panic 恢复，Apple M2/Metal 严格集成 14/14，详见 `prism_world_gpu_heightfield_placement_deletions_zh.md`。仍未接入 `prism_render_scene` 产品 mesh/material/unified visibility、scene/ECS decoder 或持久删除的自动消费；有限单 color draw 不替代产品 renderer，没有新增产品性能/画质验收。已有内容中立有界 CPU/GPU 源散布、CPU/GPU 作者密度/种类场及各自可选刷子空间/有序索引、真实heightfield的CPU/GPU高度/离地带/坡度精确稳定过滤、独立身份的CPU二维精确贴地放置及其PPLD完整键持久删除、CPU/GPU二维贴地放置 kernel、CPU源/作者场/地形及GPU完整键删除与CPU持久文件恢复、独立 resident 密度 coverage/dither 与真实消费测试，不等于完整产品散布链路。
 - M3：应用 schema 的完整零解析 mmap、GPU 直传和产品级吞吐仍未闭环；v2 `ContainerReader::from_mmap_file` 已直接使用 mmap 目录/table 索引，并有 `asset_container_mmap` feature 下贯穿 manifest/overlay/World cell provider 的 CPU 测试，但仍完整扫描并验证容器，provider 仍组装完整 cell `Vec<u8>`。共享动态优先级已接入但不提供抢占或跨队列无饥饿保证。任务池 Future/共享取消、固定 worker 及宿主原生 reactor → pollable coordinator → manifest/payload → `SceneHost` 已有真实文件端到端证据，同步兼容路径仍独立保留。离线缓存文件基准记录于 `prism_world_async_runtime_zh.md` 与 `prism_world_native_io_zh.md`，不能代替冷盘、资产包或产品负载验收。
@@ -443,44 +443,44 @@ Clippy `-D warnings` 通过（依赖 render graph 的既有 unused-import warnin
 `admitted_layers` 引用，且本次两条测试均成功编译并通过。该复验没有修改 World runtime/GPU 源文件；
 结果适用于本次共享工作树快照，不构成干净 checkout 或 GPU 硬件验收。
 
-## 2026-10-22 Planet placement frame-local 精度调查（未完成）
+## 2026-10-22 Planet placement frame-local 精度调查（历史问题，已由后续实现修复）
 
-新增的 `write_request_in_frame` 原型将 `origin_mm - output_origin_mm` 在 CPU 侧精确计算为 i128，避免两个行星尺度 i64 原点先转浮点再相减；但 Apple M2/Metal 的专项 GPU 回归仍观测到 256 mm 局部位置误差（要求 ≤1 mm），因此原型未达到精度验收、未提交，不可作为已交付 sector-local GPU 坐标契约。此前仅绝对语义的既有 planetary placement 实卡测试通过，不覆盖此 frame-local 精度。
+当时新增的 `write_request_in_frame` 原型将 `origin_mm - output_origin_mm` 在 CPU 侧精确计算为 i128，但旧 shader 仍观测到约 256 mm 局部误差（要求 ≤1 mm），故当时未通过精度验收。旧 f32/double-single ABI 和以下调查仅为历史过程；后续已采用 U256 定点投影与 signed-i128 frame-local record，当前实卡结果见本节后续 Q37..Q84 记录及 2026-10-23 复验。
 
-调查发现当前 `wgpu-hal` Metal shader 编译使用默认 `MTLCompileOptions`，其 fast-math 默认开启；TwoSum/FMA double-single 依赖的误差恢复可能被浮点重结合破坏。临时 GPU 字段探针曾观察到相关 double-single 低分量读回为零；探针已撤除，正式 80-byte record ABI 已恢复。Metal 专项重跑命令为 `CARGO_TARGET_DIR=/private/tmp/prism-target-planet cargo test -p prism_world_gpu --features terrain_scatter --test planet_placement_gpu planetary_placement_frame_preserves_millimetre_local_offsets_at_planet_scale --offline -- --nocapture`，结果失败（X 轴偏差 256 mm）。
+旧实现调查曾怀疑 Metal fast-math 破坏 TwoSum/FMA double-single 误差恢复；相关探针已撤除，旧 80-byte f32 record 后来被 116-byte signed-i128 local record 取代。历史 Metal 命令 `CARGO_TARGET_DIR=/private/tmp/prism-target-planet cargo test -p prism_world_gpu --features terrain_scatter --test planet_placement_gpu planetary_placement_frame_preserves_millimetre_local_offsets_at_planet_scale --offline -- --nocapture` 曾失败（X 轴偏差约256 mm），后续生产算法修复后的当前复验则通过。
 
-后续方向是对 cube-sphere 有理 cell-center 方向和 radial 投影使用有明确溢出证明的多 limb 定点整数算法，并确保输出编码本身不再次丢失毫米精度；需覆盖最大 tile level、合法高度/offset 范围、正负 frame/origin、六面边界和真实 Metal 对照，完成性能基准后才能更新为完成状态。当前算法设计建议尚未实现或测量，World planetary 产品链路仍未验收。
+这一段的多 limb 定点算法、输出 ABI 和指定输入矩阵后来已实现并有 Apple M2/Metal 对照；planetary 产品链路仍因性能预算与 renderer 接线未通过而保持未完成。
 
-2026-10-22 后续复核：`planet_placement_fixed_math.rs` 的独立 Rust reference 已补最大 tile level 六面角点及最大采样边界、全宽整数平方根边界、u128 对抗值除法/乘法对照和正负半毫米 ties-away-from-zero 回归，`rustc --edition=2024 --test ...` 为 9 passed。隔离 target 曾因磁盘压力清理两次，本轮最后清理释放 1.3 GiB；没有清理其他 target。Apple M2/Metal 的行星 placement integration test 全文件为 2 passed、1 failed：全 tile dispatch 与非零高度/阈值 parity 通过，frame-local 测试仍测得 X 轴 256 mm（要求 ≤1 mm）。故 reference-only 测试通过不改变精度失败结论；GPU 多 limb twin、实机精度、性能验收及 planetary 产品 renderer 接线均未完成。
+2026-10-22 后续复核（旧 shader 结果）：`planet_placement_fixed_math.rs` 独立 Rust reference 的首批 9 项通过；当时旧 production GPU frame-local 仍失败约256 mm。以下记录了从 reference 到 U256 GPU 原语及生产算法替换的历史过程；其精度状态已被后续 17/17 实卡验证取代。性能及 planetary 产品 renderer 接线仍需分别验收。
 
-同日临时 Metal 读回进一步发现两类问题：一处 `df_i128` 负数 two's-complement 转幅值把逐级进位写成独立 `if`，可能在进位已终止后错误修改更高 limb（曾观测 Z 记录约 `-2^96`）；现已改为严格嵌套进位。修复后 Z 异常消失，但 X 仍为 256 mm；另一个临时探针显示 Metal 输出的 `normal_df[0].lo` 为 0，符合 fast-math 破坏误差恢复的风险。探针已全部清除，保留 record ABI。剩余失败不应归因于单纯输出 f32 量化，必须修复 double-single/Metal 数值路径或改用经证明的定点 GPU 几何，并重跑实机回归。
+同日临时 Metal 读回（旧 double-single/f32 shader）曾发现 `df_i128` 负数 two's-complement 转幅值进位错误及疑似 fast-math 影响误差恢复；旧探针已清除，旧 shader/ABI 已由后续整数路径取代。本段故障不是当前精度状态。
 
-frame-local 回归 oracle 已增强为独立 f64 cube-sphere 投影，不再仅用 CPU 最终 i64 坐标减自身作为期望值。Apple M2/Metal 复测中 X 轴 oracle 为约 `-0.481 mm`，GPU 仍为 `256 mm`，故误差约 `256.481 mm`，确认不是 CPU 坐标取整的 ≤0.5 mm 影响。
+frame-local 回归 oracle 已增强为独立 f64 cube-sphere 投影，不再仅用 CPU 最终 i64 坐标减自身作为期望值。历史旧 shader 的 M2/Metal 复测中 X 轴 oracle 约为 `-0.481 mm`、GPU 为 `256 mm`，误差约 `256.481 mm`；后续生产定点 shader 已修复该失败。
 
-精度路径审查补充：不能将方向降为 Q48/Q16 后声称满足全配置 1 mm。半径上限为 `2^52 mm`，Q48 单个方向 ULP 已对应 16 mm 径向位移；Q16 误差更大。Rust Q70 参考保留为高精度 oracle，并已加入 `terrain_scatter` lib 的测试编译（仅 `cfg(test)`）；WGSL limb twin 尚未实现。GPU 输出仍为局部 `f32` position word，故 frame-local 精度仍失败；需要先定稿不会丢精度的整数输出 ABI，再实现并实测 GPU 算法与候选规模性能。随后发现 Rust reference 接入 crate 后会对一个未使用的 WGSL 原语字符串产生 dead-code warning，已删除该占位字符串。针对 reference 的 crate 测试 9 项通过；之后重编译因隔离 target 将可用磁盘耗尽而失败（`No space left on device`），专项 target 已再次清理。
+精度路径审查补充（历史记录，后续生产 shader 已更新，见下方 2026-10-22 自适应 Q 记录及 2026-10-23 当前源码复验）：不能将方向降为 Q48/Q16 后声称满足全配置 1 mm。半径上限为 `2^52 mm`，Q48 单个方向 ULP 已对应 16 mm 径向位移；Q16 误差更大。Rust Q70 参考保留为高精度 oracle，并已加入 `terrain_scatter` lib 的测试编译（仅 `cfg(test)`）；当时 WGSL limb twin 尚未实现。GPU 输出仍为局部 `f32` position word，故当时 frame-local 精度仍失败；后续已完成整数输出 ABI 和生产 GPU 算法，实卡证据见下方。随后发现 Rust reference 接入 crate 后会对一个未使用的 WGSL 原语字符串产生 dead-code warning，已删除该占位字符串。针对 reference 的 crate 测试 9 项通过；之后重编译因隔离 target 将可用磁盘耗尽而失败（`No space left on device`），专项 target 已再次清理。
 
-2026-10-22 精度算法推进：先发现简单 Q64 cube 坐标量化加 u128 sqrt 在最大合法正 offset 的用例中与 Q70 reference 差 2 mm；已移除该算法。当前方向路径改为 Q84：直接从精确整数 cell-center 分子建立 cube 向量，以 U256 计算 `sqrt(Q << 168)` 与方向商，避免先截断 U/V 的误差累积。全尺度确定性矩阵覆盖 tile level 0/1/8/15/22/30、样本边 2/3/13/257/65535/u32::MAX、六面及 tile/cell 首中末组合、radius 1/2^31/2^52、offset i64 两端、quarter-mm radial 余数和最大正 height-scale；在该受限最大 radius/offset 范围内，Q84 对 Q70 reference 的最终整毫米差均 ≤1 mm。额外发现最大解码高度可把 radial 提升至约 2^78 mm，Q70 此时不再是合适 oracle；已新增 Q96 方向 reference 验证最大四角高度、最大正 scale、最大 radius+offset 的极端径向组合，Q84 对 Q96 输出差 ≤1 mm。crate feature 下 reference 13/13 passed（约25秒）；之后因磁盘不足，新增 U256 shader validator 测试尚未运行，专用 target 已清理。此为有限对抗矩阵，不是所有离散输入形式证明或 GPU/Metal 验收；生产 WGSL 尚未移植 Q84 路径，frame-local 实测仍失败约256.481 mm。
+2026-10-22 精度算法推进（历史阶段状态）：先发现简单 Q64 cube 坐标量化加 u128 sqrt 在最大合法正 offset 的用例中与 Q70 reference 差 2 mm；已移除该算法。随后方向路径改为 Q84，从精确整数 cell-center 分子建立 cube 向量并使用 U256 计算平方根与方向商。确定性矩阵覆盖 tile level 0/1/8/15/22/30、样本边 2/3/13/257/65535/u32::MAX、六面及 tile/cell 首中末组合、radius 1/2^31/2^52、offset i64 两端、quarter-mm radial 余数和最大正 height-scale；另用 Q96 reference 覆盖极端高度。该阶段 reference 13/13 通过，但 production shader 当时尚未接入且 frame-local 仍失败；此旧状态已被下方生产 U256/adaptive-Q 实现和 M2 实卡复验取代，不代表当前实现。
 
-ABI 闭环边界：现有 80-byte record 以 3 个 f32 word 承载位置，内部定点无法防止写回时再次丢毫米精度。任意 i64 全局位置相减可达 ±(2^64−1)，有符号 i64 local 也不够；整数 record 需每轴至少 65-bit signed local（可用 i128 limbs）或有证明的拆分格式，并同步版本化修改 planet deletion 读取、GPU/RHI consumers、测试 offset 及文档。目前改造未实现，frame-local Metal 仍约 256.481 mm 失败，不能宣称完成。
+历史 ABI 闭环问题：当时 80-byte record 的 f32 position 无法保留毫米级局部精度；后续已改为 116-byte record，每轴 signed-i128 local 毫米，并同步更新 deletion identity-prefix 消费。当前 ABI 语义通过指定测试矩阵，但产品 RHI/renderer decoder 尚未证明完整接线，且新增 record 带来每候选资源与计算开销。
 
 2026-10-22 后续专项验证：修复 `planet_placement_u256_gpu.rs` 的 raw-string delimiter，移除未使用 helper，并让 arithmetic parity 向量的乘法结果落在 U256 范围内。另修正 Q70/Q84 frame-origin 单测从 limb 0 截断而造成的错误 oracle，改为完整 signed-magnitude 转 i128。Apple M2/Metal 实测 U256 add/sub/mul/div-rem/isqrt/shift 与 Rust reference 对拍通过；`cargo test -p prism_world_gpu --features terrain_scatter --test planet_placement_u256_gpu --offline -- --nocapture` 为 14 passed。`cargo test -p prism_world_runtime --lib --offline` 为 183 passed；`cargo test -p prism_world_gpu --features gpu --lib --offline` 为 139 passed。
 
-同轮重测 `planetary_placement_frame_preserves_millimetre_local_offsets_at_planet_scale` 仍失败：Apple M2/Metal X 轴 GPU local 为 256 mm，独立 CPU oracle 为 -0.4807677269 mm。故 U256 原语对拍并未证明 production Q84 placement；Q84/WGSL 生产接线、整数 record ABI 与消费者迁移、端到端毫米精度、性能基准仍未完成。sandbox 默认 adapter 无 Metal，专项 GPU 命令通过宿主环境执行。编译曾因磁盘不足而清理专用 `/private/tmp/prism-target-planet`（释放约 1.1 GiB），共享 `target` 未清理。
+历史结果：U256 原语对拍时 production placement 仍用旧实现，frame-local 测得 X=256 mm、独立 oracle 约 -0.481 mm；之后生产 shader、record ABI 与 deletion consumer 已完成更新，不能继续引用该失败代表当前状态。
 
-后续对 standalone WGSL U256 除法做了确定性循环上界优化：先定位为原语固定执行 256 位恢复循环，将实现改为按 numerator/denominator bit length 对齐减法，迭代恰为可能的商位数；Q84 方向投影商不超过约 85 位。Metal 首轮对拍捕获到跨 limb 右移进位方向写反，修复后 Apple M2/Metal U256 对拍与 reference suite 为 14/14 passed。该上界分析不是生产候选 shader benchmark，也未接入 placement；frame-local 精度、整数输出 ABI 与产品接线未改变。
+后续 standalone WGSL U256 除法采用按 numerator/denominator bit length 收紧循环上界的版本，Metal 对拍通过；该 primitive 的优化不等同生产候选吞吐结论。production placement 后续另行接入 U256/adaptive-Q shader，此处当时状态为历史记录。
 
 2026-10-22 对优化后的除法新增多 limb divisor/high-limb quotient GPU 向量：Apple M2/Metal 对拍及完整 reference suite 14/14 passed，补强了非单 limb 除数路径的实卡证据；仍不是行星生产候选路径或其吞吐基准。
 
-同日新增 `u256_isqrt_scaled(value, 168)`，在不物化超过 256 位的 `value << 168` 的前提下逐 radix-4 pair 恢复平方根；该原语用于下一步 Q84 方向归一化，Apple M2/Metal 对拍 Rust `isqrt_scaled` reference 通过，完整专项 14/14 passed。当前测试向量只覆盖该输入样本的缩放根；生产 cube-sphere 全配置方向 kernel 仍未建立，尚不能据此验收 placement 精度。
+同日新增 `u256_isqrt_scaled(value, 168)`，在不物化超过 256 位的 `value << 168` 的前提下逐 radix-4 pair 恢复平方根；当时测试只覆盖原语向量，production cube-sphere 全配置 kernel 尚未建立，后续生产接线及实卡覆盖见下方记录。
 
-后续将整数 cube 向量的 Q84 归一化、signed limb 解码及 quarter-mm radial 到整毫米 ties-away-from-zero 投影加入同一实卡 parity kernel。Metal 对拍采用 [3,4,12] 方向和 12,345 quarter-mm 半径，逐 limb 与 Rust reference 比较，完整 reference/GPU 算术套件 14/14 passed。位移与余数提取使用最多 8-limb 操作，不做逐 bit 清零/移位循环。当前仍未接入生产 placement shader、真实高度/radius/frame-origin 端到端算法或版本化 record ABI；本测试只证明所测算术片段。
-同轮补充负方向向量 [-3,4,-12] 与负 quarter-mm radial 的 M2/Metal 对拍，符号/幅值与 Rust Q84 reference 一致；完整测试仍为 14/14 passed。生产 placement 路径仍为未提交的 double-single/f32 原型，并非整数 ABI。
+后续将整数 cube 向量的 Q84 归一化、signed limb 解码及 quarter-mm radial 到整毫米 ties-away-from-zero 投影加入实卡 parity kernel；当时 14/14 只证明 standalone 原语。随后这些算术迁入生产 placement shader，并由下方行星 placement GPU 实卡回归验证。
+同轮补充负方向向量 [-3,4,-12] 与负 quarter-mm radial 的 M2/Metal 对拍，符号/幅值与 Rust Q84 reference 一致；完整测试仍为 14/14 passed。当时该 primitive 尚未接入 production placement，随后由下方 U256/adaptive-Q 实现取代。
 
 2026-10-22 生产行星 placement 改为 U256 Q84 cube-sphere 整数方向、quarter-mm radial ties-away-from-zero 投影和 116-byte record ABI；xyz 为 signed-i128 frame-local 毫米，identity 前六 word 保持不变，deletion shader 仍按 identity 前缀比较。Apple M2/Metal planet_placement_gpu 3/3 passed，包含此前失败的 frame-local case（≤1 mm）、非零高度/阈值 parity 与全 tile dispatch；planet deletion 1/1 passed；U256/reference/六面方向实卡 suite 14/14 passed。此验收覆盖当前指定合法合同与 fixtures，不是所有数学输入的形式证明。
 
-ABI/性能边界仍需继续审计：新 record 每候选增加 36 bytes，容量预算/编译检查已更新；Q84 每候选包含 3 次 U256 乘法平方、scaled isqrt、3 次除法和投影乘法，目前尚无大候选数 GPU timestamp/submit-wait benchmark。产品 RHI consumer 当前是否已有真实 decode/renderer 接线仍未证明；不得把当前 GPU kernel parity 描述为 planetary renderer 产品链路完成。
+ABI/性能边界仍需继续审计：新 record 每候选增加 36 bytes，容量预算/编译检查已更新；原始固定 Q84 路径有高整数吞吐成本，之后改为 adaptive Q37..Q84 并测得 62,500 候选 submit+wait P50 约29 ms，仍未达到16.7 ms。产品 RHI consumer 是否有完整 decode/renderer 接线仍未证明；GPU kernel parity 不代表 planetary renderer 产品链路完成。
 
-2026-10-22 行星 placement 实机性能基准补测：新增 `cargo bench -p prism_world_gpu --features terrain_scatter --bench planet_placement --offline`，Apple M2/Metal IntegratedGpu、release、warmup 8 + 64 samples；请求准备/height upload 与最终 indirect readback 不计入计时，分别记录 encode 和 submit+wait 的主机墙钟 P50/P95/P99。256 / 4,096 / 62,500 candidates 的逻辑 buffer 分别为 1,079,512 / 1,540,312 / 8,548,792 bytes；submit+wait 分别为 5,129/6,453/6,724 µs、5,549/7,536/9,853 µs、48,705/57,239/67,684 µs。encode P50 分别为 9.167/9.125/9.167 µs；62,500 档 encode P99 为 157.792 µs，存在显著尾部。实际 indirect count 与候选数一致。此为该主机/driver/fixture 的 submit+wait 墙钟，不是 GPU timestamp；结果显示 Q84 当前不满足 62.5k 候选的实时帧内预算，需要性能优化后重测，不能视为产品级吞吐验收。
+2026-10-22 固定 Q84 行星 placement 实机性能基准（历史基线，之后由 adaptive-Q 基准改进）：Apple M2/Metal IntegratedGpu、release、warmup 8 + 64 samples；256 / 4,096 / 62,500 candidates submit+wait 分别为 5,129/6,453/6,724 µs、5,549/7,536/9,853 µs、48,705/57,239/67,684 µs。计时是该主机/fixture 的 submit+wait 墙钟，不是 GPU timestamp；62.5k 超预算，后续 adaptive-Q 将 P50 降至约29 ms，但仍未满足16.7 ms。
 
 同轮修正 `GpuPlanetPlacement::new` 的逻辑资源注释：record 116 bytes + compact index 4 bytes，故候选项合计 120 bytes；再加高度样本、params/status/indirect 后为 `120*max(capacity,1)+16*max(samples,1)+216`。
 
