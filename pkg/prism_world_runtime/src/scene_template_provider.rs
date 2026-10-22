@@ -26,6 +26,17 @@ pub struct SceneTemplateInvalidation {
     pub reloadable: bool,
 }
 
+/// Result of committing one template asset batch and admitting resident reloads.
+/// The invalidation closure is retained so other live owners, such as nested
+/// scene trees, can consume the exact same dependency update.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SceneTemplateApplyOutcome {
+    /// Deterministic transitive invalidation closure produced by the cache.
+    pub invalidations: Vec<SceneTemplateInvalidation>,
+    /// Resident sectors admitted for budgeted reload, in stable order.
+    pub reload_sectors: Vec<crate::SectorId>,
+}
+
 /// An asset event batch violated atomic event/snapshot pairing.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SceneTemplateBatchError {

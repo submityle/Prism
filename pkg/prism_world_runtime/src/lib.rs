@@ -94,8 +94,8 @@ pub use prism_world_stream::{DataLayerMask, DataLayerMaskError, MAX_DATA_LAYERS}
 mod scene_template_provider;
 #[cfg(feature = "scene_templates")]
 pub use scene_template_provider::{
-    load_scene_template, SceneTemplateBatchError, SceneTemplateCache, SceneTemplateInvalidation,
-    SceneTemplateLoadError,
+    load_scene_template, SceneTemplateApplyOutcome, SceneTemplateBatchError, SceneTemplateCache,
+    SceneTemplateInvalidation, SceneTemplateLoadError,
 };
 #[cfg(feature = "placement")]
 mod placement_persist;
@@ -1628,9 +1628,13 @@ impl<I: CellIo> CellFrameCoordinator<I> {
         &mut self,
         cache: &mut SceneTemplateCache,
         assets: &mut prism_asset::Assets<prism_scene::SceneTemplate>,
-    ) -> Result<Vec<SectorId>, SceneTemplateBatchError> {
+    ) -> Result<SceneTemplateApplyOutcome, SceneTemplateBatchError> {
         let invalidations = cache.apply_assets(assets)?;
-        Ok(self.schedule_template_invalidations(&invalidations))
+        let reload_sectors = self.schedule_template_invalidations(&invalidations);
+        Ok(SceneTemplateApplyOutcome {
+            invalidations,
+            reload_sectors,
+        })
     }
 
     fn sync_loaded(&mut self, loaded: &[LoadedCell]) {
@@ -2104,12 +2108,14 @@ mod tests {
 
         assets.insert(prism_scene::SceneTemplate::empty(guid));
 
-        assert_eq!(
-            coordinator
-                .apply_scene_template_assets(&mut cache, &mut assets)
-                .unwrap(),
-            vec![resident.sector]
-        );
+        let outcome = coordinator
+            .apply_scene_template_assets(&mut cache, &mut assets)
+            .unwrap();
+        assert_eq!(outcome.reload_sectors, vec![resident.sector]);
+        assert_eq!(outcome.invalidations.len(), 1);
+        assert_eq!(outcome.invalidations[0].changed, guid);
+        assert_eq!(outcome.invalidations[0].dependent, guid);
+        assert!(outcome.invalidations[0].reloadable);
         assert!(cache.get(guid).is_some());
     }
 
