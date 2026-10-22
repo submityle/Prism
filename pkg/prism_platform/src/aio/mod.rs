@@ -385,6 +385,15 @@ pub fn sync_fd(fd: RawFd) -> std::io::Result<()> {
         // The `File` owns only the duplicated handle, not the caller's handle.
         std::fs::File::from(owned).sync_all()
     }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = fd;
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "file descriptor synchronization is unsupported on this platform",
+        ))
+    }
 }
 
 #[cfg(test)]
