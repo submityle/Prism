@@ -119,6 +119,7 @@ struct PendingPreview {
 pub struct SettingsTransactionManager {
     status: SettingsTransactionStatus,
     pending: Option<PendingPreview>,
+    expiry_error: Option<String>,
 }
 
 impl Resource for SettingsTransactionManager {}
@@ -187,12 +188,22 @@ impl SettingsTransactionManager {
         Self {
             status: SettingsTransactionStatus::Idle,
             pending: None,
+            expiry_error: None,
         }
     }
 
     /// Returns the current externally observable lifecycle status.
     pub fn status(&self) -> &SettingsTransactionStatus {
         &self.status
+    }
+
+    /// Returns the most recent automatic expiry failure, if any.
+    ///
+    /// A failure does not discard the preview or its rollback checkpoint; the
+    /// frame-boundary system retries on subsequent frames. Host diagnostics can
+    /// inspect this field and install/fix the required lifecycle services.
+    pub fn expiry_error(&self) -> Option<&str> {
+        self.expiry_error.as_deref()
     }
 
     /// Returns whether the retained Preview deadline has elapsed.
@@ -234,6 +245,7 @@ impl SettingsTransactionManager {
         let checkpoint = controller.take_checkpoint().unwrap_or(fallback_checkpoint);
         match result {
             Ok(PipelineOutcome::PendingConfirmation) => {
+                self.expiry_error = None;
                 self.status = SettingsTransactionStatus::PreviewPending {
                     tx_id: tx_id.clone(),
                     deadline,
@@ -357,6 +369,7 @@ impl SettingsTransactionManager {
             Ok(PipelineOutcome::RolledBack) => {
                 self.pending = None;
                 self.status = SettingsTransactionStatus::Idle;
+                self.expiry_error = None;
                 Ok(PipelineOutcome::RolledBack)
             }
             Ok(
@@ -396,6 +409,7 @@ impl SettingsTransactionManager {
             Ok(PipelineOutcome::Committed) => {
                 self.pending = None;
                 self.status = SettingsTransactionStatus::Idle;
+                self.expiry_error = None;
                 Ok(PipelineOutcome::Committed)
             }
             Ok(
@@ -437,15 +451,26 @@ pub fn expire_settings_transaction_system(
     mut runtime: ResMut<SettingsRuntime>,
     services: Option<Res<SettingsTransactionServices>>,
 ) {
-    let Some(services) = services else {
-        return;
-    };
     let now = Instant::now();
     if !manager.is_expired(now) {
         return;
     }
+    let Some(services) = services else {
+        manager.expiry_error =
+            Some("expired settings preview is waiting for SettingsTransactionServices".to_owned());
+        return;
+    };
     services.with_mut(|persistence, appliers| {
-        let _ = manager.expire(now, &mut runtime, persistence, appliers);
+        match manager.expire(now, &mut runtime, persistence, appliers) {
+            Ok(Some(PipelineOutcome::RolledBack)) => manager.expiry_error = None,
+            Ok(Some(outcome)) => {
+                manager.expiry_error = Some(format!(
+                    "automatic settings preview expiry returned unexpected outcome: {outcome:?}"
+                ));
+            }
+            Ok(None) => manager.expiry_error = None,
+            Err(error) => manager.expiry_error = Some(error.to_string()),
+        }
     });
 }
 
@@ -765,5 +790,55 @@ mod tests {
                 .status(),
             &SettingsTransactionStatus::Idle
         );
+    }
+
+    #[test]
+    fn expired_preview_reports_missing_services_and_retries_after_install() {
+        let registry = registry();
+        let directory = TempDir::new();
+        let mut app = App::new();
+        app.install_settings_runtime(registry.clone(), Domain::Runtime)
+            .unwrap();
+        let mut persistence = NoopPersistence;
+        let mut begin_appliers = appliers();
+        let mut manager = app
+            .world_mut()
+            .remove_resource::<SettingsTransactionManager>()
+            .unwrap();
+        let mut runtime = app
+            .world_mut()
+            .remove_resource::<SettingsRuntime>()
+            .unwrap();
+        manager
+            .begin(
+                "delayed-services",
+                transaction(&registry, &directory, "delayed-services", 0.75),
+                Duration::ZERO,
+                &mut runtime,
+                &mut persistence,
+                &mut begin_appliers,
+            )
+            .unwrap();
+        app.insert_resource(manager);
+        app.insert_resource(runtime);
+
+        app.update();
+        let manager = app.world().resource::<SettingsTransactionManager>();
+        assert!(matches!(
+            manager.status(),
+            SettingsTransactionStatus::PreviewPending { .. }
+        ));
+        assert!(manager
+            .expiry_error()
+            .is_some_and(|error| error.contains("SettingsTransactionServices")));
+
+        app.insert_resource(SettingsTransactionServices::new(
+            NoopPersistence,
+            Vec::new(),
+        ));
+        app.update();
+        let manager = app.world().resource::<SettingsTransactionManager>();
+        assert_eq!(manager.status(), &SettingsTransactionStatus::Idle);
+        assert_eq!(manager.expiry_error(), None);
     }
 }
