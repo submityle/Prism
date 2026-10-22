@@ -31,6 +31,7 @@ pub mod bins;
 pub mod cluster_payload;
 pub mod cull;
 pub mod frame;
+pub mod gpu;
 pub mod hierarchy;
 pub mod lod;
 pub mod page_request;
@@ -59,6 +60,12 @@ pub use cluster_payload::{
 };
 pub use cull::{cluster_cull, CullVerdict, Frustum, OcclusionProbe, Plane};
 pub use frame::{plan_frame, FrameView, GeometryFramePlan, RasterConfig};
+pub use gpu::{
+    VirtualGeometryGpuCluster, VirtualGeometryGpuDrawItem, VirtualGeometryGpuPage,
+    VirtualGeometryGpuPublication, VirtualGeometryGpuPublicationError,
+    VirtualGeometryMaterialBinding, VirtualGeometryPhysicalPage, VirtualGeometryViewDrawList,
+    NON_RESIDENT_PHYSICAL_PAGE, VIRTUAL_GEOMETRY_GPU_ABI_VERSION,
+};
 pub use hierarchy::{coverage_priority, ClusterHierarchy, ClusterNode, CutCluster};
 pub use lod::{select_lod, LodLevel, LodProjection, LodSelection};
 pub use page_request::PageRequestBatch;

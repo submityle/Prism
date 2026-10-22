@@ -25,6 +25,7 @@ use crate::{
         sync_shading_geometry_registry, upload_geometry_buffers, upload_shading_geometry_buffers,
         GeometryBindGroup, RenderGeometryBuffers, RenderGeometryRegistry,
         RenderShadingGeometryBuffers, RenderShadingGeometryRegistry, ShadingGeometryStaging,
+        VirtualGeometryRuntimeRegistry,
     },
     scene::RenderGpuScene,
 };
@@ -90,6 +91,7 @@ impl Plugin for PrismGpuScenePlugin {
             .init_resource::<GpuSceneParityDiagnostics>()
             .init_resource::<GpuSceneUploadSettings>()
             .init_resource::<RenderGeometryRegistry>()
+            .init_resource::<VirtualGeometryRuntimeRegistry>()
             .init_resource::<RenderShadingGeometryRegistry>()
             .init_resource::<ShadingGeometryStaging>()
             .init_resource::<crate::extract::lifecycle::ExtractionClock>()

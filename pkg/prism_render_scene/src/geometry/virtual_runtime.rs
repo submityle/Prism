@@ -9,6 +9,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use bevy_ecs::prelude::Resource;
 use prism_render_architecture::virtual_geometry::{
     GeometryPageKey, VirtualGeometryAsset, VirtualGeometryAssetError, VirtualGeometryClusterRecord,
     VirtualGeometryPageRecord,
@@ -185,6 +186,7 @@ struct PublishedAsset {
 /// All candidate validation and index construction happens before publishing a
 /// replacement. The final map insertion is the publication point; callers
 /// holding prior handles are rejected after that point.
+#[derive(Resource)]
 pub struct VirtualGeometryRuntimeRegistry {
     identity: Arc<RegistryIdentity>,
     next_generation: u64,
