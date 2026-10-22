@@ -135,6 +135,46 @@ impl SettingsRuntime {
         Resolver::new(&self.registry).resolve(self.domain, &sources, generation)
     }
 
+    /// Resolves a supplied authoritative source set without mutating runtime
+    /// state. Source identity collisions are rejected instead of overwritten.
+    pub fn resolve_authoritative_sources(
+        &self,
+        sources: &[LayerSource],
+        generation: u64,
+    ) -> Result<Snapshot, SettingsRuntimeError> {
+        let mut indexed = BTreeMap::new();
+        for source in sources {
+            let identity = (source.layer, source.source_id.clone());
+            if indexed.insert(identity, source.clone()).is_some() {
+                return Err(SettingsRuntimeError::CandidateMismatch);
+            }
+        }
+        let source_values = indexed.values().cloned().collect::<Vec<_>>();
+        Resolver::new(&self.registry)
+            .resolve(self.domain, &source_values, generation)
+            .map_err(SettingsRuntimeError::Resolve)
+    }
+
+    /// Atomically installs an authoritative source set and its previously
+    /// resolved snapshot after rechecking the source/snapshot correspondence.
+    pub fn publish_authoritative_sources(
+        &mut self,
+        sources: Vec<LayerSource>,
+        snapshot: Snapshot,
+    ) -> Result<(), SettingsRuntimeError> {
+        let rebuilt = self.resolve_authoritative_sources(&sources, snapshot.generation())?;
+        if !same_effective_snapshot(&rebuilt, &snapshot) {
+            return Err(SettingsRuntimeError::CandidateMismatch);
+        }
+        self.sources = sources
+            .into_iter()
+            .map(|source| ((source.layer, source.source_id.clone()), source))
+            .collect();
+        self.generation = rebuilt.generation();
+        self.snapshot = rebuilt;
+        Ok(())
+    }
+
     /// Publishes a snapshot rebuilt from this runtime's current sources after
     /// verifying its domain, generation, values, and provenance.
     pub fn publish_rebuilt_snapshot(

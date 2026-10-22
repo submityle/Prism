@@ -71,6 +71,9 @@ pub struct SubApp {
     /// installed. [`set_extract`](SubApp::set_extract) replaces the list;
     /// [`add_extract`](SubApp::add_extract) appends to it.
     extracts: Vec<ExtractFn>,
+    /// Derived-snapshot steps, run after every normal extract regardless of
+    /// plugin registration order, and before any sub-app schedule.
+    extract_finalizers: Vec<ExtractFn>,
     #[cfg(feature = "std")]
     frame_budget_started: Option<std::time::Instant>,
 }
@@ -91,17 +94,19 @@ impl SubApp {
             world,
             phase_order: PhaseOrder::default(),
             extracts: Vec::new(),
+            extract_finalizers: Vec::new(),
             #[cfg(feature = "std")]
             frame_budget_started: None,
         }
     }
 
-    /// Set this sub-app's one-way [`ExtractFn`], replacing any previous ones.
+    /// Replace this sub-app's complete extraction, including finalizers.
     pub fn set_extract<F>(&mut self, extract: F) -> &mut Self
     where
         F: FnMut(&mut World, &mut World) + Send + Sync + 'static,
     {
         self.extracts.clear();
+        self.extract_finalizers.clear();
         self.extracts.push(Box::new(extract));
         self
     }
@@ -119,10 +124,24 @@ impl SubApp {
         self
     }
 
+    /// Append a derived-snapshot step after all normal extraction.
+    ///
+    /// Normal steps added later still execute before this step. Finalizers run
+    /// in registration order and must not publish new upstream data consumed by
+    /// an earlier finalizer. Use this boundary to derive resources from the
+    /// final extraction snapshot, without depending on plugin install order.
+    pub fn add_extract_finalizer<F>(&mut self, extract: F) -> &mut Self
+    where
+        F: FnMut(&mut World, &mut World) + Send + Sync + 'static,
+    {
+        self.extract_finalizers.push(Box::new(extract));
+        self
+    }
+
     /// Whether this sub-app has at least one extract step installed.
     #[must_use]
     pub fn has_extract(&self) -> bool {
-        !self.extracts.is_empty()
+        !self.extracts.is_empty() || !self.extract_finalizers.is_empty()
     }
 
     /// Run this sub-app's extract steps (in order) against `main_world`.
@@ -132,6 +151,9 @@ impl SubApp {
     pub fn run_extract(&mut self, main_world: &mut World) {
         for extract in &mut self.extracts {
             extract(main_world, &mut self.world);
+        }
+        for finalize in &mut self.extract_finalizers {
+            finalize(main_world, &mut self.world);
         }
     }
 

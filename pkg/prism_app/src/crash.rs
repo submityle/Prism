@@ -7,7 +7,7 @@
 //! force. This module captures that context as a cheap [`CrashSnapshot`] and
 //! pairs it with the panic payload / location / [`Backtrace`] into a rendered
 //! [`CrashReport`] (design §24.7 "崩溃转储:panic hook 收集堆栈、最近日志、World
-//! 摘要、cvar 快照").
+//! 摘要、canonical settings 快照").
 //!
 //! # The snapshot / hook split
 //!
@@ -306,7 +306,7 @@ impl CrashReporter {
 }
 
 /// Best-effort decode of a panic payload to text (`&str` / `String` payloads;
-/// otherwise a placeholder).
+/// otherwise a stable non-string marker).
 fn panic_message(info: &PanicHookInfo<'_>) -> String {
     let payload = info.payload();
     if let Some(s) = payload.downcast_ref::<&str>() {

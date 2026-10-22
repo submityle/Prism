@@ -14,19 +14,21 @@
 >
 > 本文是设计与实施规格；文中“已落地”只指明确列出的代码与验证证据，未完成里程碑不得按目标描述推断为已实施；不含任何 AI/ML 内容。
 
-- 版本: v1.6（v1.5 明确未发布 API 全量替换；v1.6 落地首个 I/O/迁移垂直切片）
+- 版本: v1.8（v1.5 明确未发布 API 全量替换；v1.6 落地 I/O/迁移垂直切片；v1.7 收口 watcher/候选快照/事务/journal/预览闭环；v1.8 收口持久化回滚与 journal 重建校验）
 - 基线: `main@e248f12ec`（写作时）
-- 状态: 实施中；`prism_settings` 核心 crate 与 `prism_app` canonical runtime 接入已实现并通过当前定向测试，但 M0 整体门禁仍未全部通过（M0.5 属性/模型评审、完整性能复测和文档构建仍待完成）；M0.5–M5 必须逐阶段完成后才算系统交付；完成度以代码、测试、运行行为与质量门禁共同证明
+- 状态: `prism_settings_io` 的本地生产 I/O 垂直切片已闭环并通过定向测试；`prism_settings` 核心 crate 与 `prism_app` canonical runtime 接入保持独立验收。direct/preview、watcher/candidate、持久化回滚镜像、journal 重建与进程重启恢复均属于本地闭环；编辑器、远程同步、平台原生通知适配和 M0.5–M5 的更大范围门禁不在本次交付声明内。完成度仍以代码、测试、运行行为与质量门禁共同证明
 - 适用: 运行时 / 编辑器 / 机器级 / 构建管线
 - 关键依赖: `prism_reflect`（元数据/版本/迁移/校验）、`prism_platform`（目录/文件/监视）、`prism_ui_reactive`、`prism_ui_i18n`、`prism_ui_form`、`prism_app`（应用集成；不承载旧设置 API 兼容层）
 - 明确约束: 核心 `no_std + alloc`；文件 I/O 需 `std`；**不依赖任何 `bevy_*` crate**
 
 **v1.4 变更摘要**
 
+- Watcher 变更确认与候选构建分离：未确认候选会在后续 poll 重建/重试；调用方须在事务达到明确处置结果后调用 `acknowledge`，且只有文件摘要仍匹配时才会确认，避免失败事务或过期候选吞掉文件变更。
+
 - 新增 §9.2.6 操作级 journal：`ApplyOp`、每 op 状态/补偿账本/`effect_handle`、恢复决策树与崩溃示例。
 - §9.2.5 applier 契约改为 `apply_op/probe/compensate` 操作级接口。
 - 全量替换未发布的 `prism_app::settings/cvar` API；不提供旧类型别名、行为兼容 facade 或旧文本格式承诺。
-- 当前实现：`pkg/prism_settings` 已提供 no_std + alloc 的 Value/Def/Registry/Resolver/Snapshot/Inspect/Diff 核心；`pkg/prism_app` 通过 `SettingsRuntime` 持有 registry、分层 source 和已解析 snapshot，`App::new` 安装平台档位 schema/source，崩溃快照读取 canonical snapshot；旧 `settings.rs`、`cvar.rs`、`reflect_config.rs`、`hot_reload.rs` 及其公开入口已移除。`pkg/prism_settings_io` 已提供版本化 TOML、未知键保留、Rename/Drop/Convert 迁移、原子写、备份轮转、主文件/备份恢复，以及带 checksum/fsync/尾部截断修复和 Unknown 在途重建的操作级 journal。事务执行已有原型和单元测试，但尚无完整恢复执行器、阶段持久化协调与预览确认流程，不能视为 §9.2 已交付。M0.5 目前只有 12 键矩阵测试，完整属性测试与模型评审尚未完成；10k 定义、9 层解析基准本轮未重跑。
+- 当前实现：`pkg/prism_settings` 已提供 no_std + alloc 的 Value/Def/Registry/Resolver/Snapshot/Inspect/Diff 核心；`pkg/prism_app` 通过 `SettingsRuntime` 持有 registry、分层 source 和已解析 snapshot，`App::new` 安装平台档位 schema/source，崩溃快照读取 canonical snapshot；旧 `settings.rs`、`cvar.rs`、`reflect_config.rs`、`hot_reload.rs` 及其公开入口已移除。`pkg/prism_settings_io` 已提供版本化 TOML、未知键保留、Rename/Drop/Convert 全链原子迁移、原子写、备份轮转、主文件/备份恢复；`SettingsWatcher` 按内容摘要检测变化，执行 load/backup recovery/migration，`CandidateBuilder` 将已知候选解析为不可变 `Snapshot`，`SettingsTransaction` 以 `TxBegin → SnapshotCommitted → PersistBegin/End → op journal → TxEnd` 收口 direct/preview 两种路径。`run_preview_transaction`、`confirm_preview`、`rollback_preview` 和 `recover_settings_transaction` 已覆盖确认、拒绝、截断尾部、未知在途操作、补偿失败、幂等重放、持久化失败回滚和不可逆 `NeedsRestart`；`PersistBegin` 后缺失 `PersistEnd` 会进入 `RecoveryRequired`，不得误判为普通回滚；journal 只保存摘要/句柄，不保存设置值或密钥。该 I/O 垂直切片不是 prototype；编辑器、远程同步、平台原生通知适配和更大范围 M0.5–M5 门禁仍按各自范围验收。
 - §9.2.3 明确 fsync 边界；§9.2.4 补 `CompensationUnknown`；不变量 19–20、§21 崩溃注入矩阵、§22 M3 验收同步。
 - v1.3 的四点修复保留。
 
@@ -126,9 +128,9 @@
 
 ## 2. 现状与差距
 
-### 2.1 现有设置内核
+### 2.1 历史设置内核（已移除）
 
-`pkg/prism_app/src/settings.rs`（约 619 行）：
+以下是重构前的基线，不是当前工作树中的可用 API；`pkg/prism_app/src/settings.rs` 已删除：
 
 - `SettingsLayer` 五层：`EngineDefault → PlatformTier → User → CommandLine → Runtime`，`Ord` 即优先级。
 - `SettingValue`：`Bool / Int / Float / Str`；`parse` 按 `true/false → i64 → f64 → str` 推断。
@@ -136,9 +138,9 @@
 - `SettingChanged = SettingChange` 事件；`App` 有 `init_settings` / `insert_setting` / `clear_setting` / `apply_cli_overrides` / `setting*` 辅助。
 - `Settings` **不随 `App::new` 安装**，是 opt-in。
 
-### 2.2 现有 cvar 层
+### 2.2 历史 cvar 层（已移除）
 
-`pkg/prism_app/src/cvar.rs`（约 2117 行）：
+以下是重构前的基线，不是当前工作树中的可用 API；`pkg/prism_app/src/cvar.rs` 已删除：
 
 - `CvarCategory` 九类：Render / Audio / Network / Input / Physics / Debug / Gameplay / System / General。
 - `CvarFlags`：`CHEAT=1<<0`、`READ_ONLY=1<<1`、`ARCHIVE=1<<2`、`NOTIFY=1<<3`。
@@ -151,7 +153,7 @@
 
 ### 2.3 现有派生层
 
-- `reflect_config.rs` 与 `hot_reload.rs` 的旧应用层桥接已删除；reflect schema bridge、watcher→候选 snapshot→transaction 的 canonical 接线属于后续 M1/M3 工作。
+- `reflect_config.rs` 与 `hot_reload.rs` 的旧应用层桥接已删除；`prism_settings_io` 已提供 watcher→候选 snapshot→transaction 的 canonical 接线。reflect schema bridge、平台原生通知适配和 `prism_app` 生命周期接入属于调用方边界，不由本 crate 复制第二套路径。
 - `pkg/prism_app/src/platform_tier.rs`：五个键 `render.present`、`pacing.frame_limit_fps`、`pipeline.pipelined_rendering`、`loop.power_aware_variable_step`、`lifecycle.suspend_resume`，写入 canonical `Platform` source。
 - `prism_app` features：`default std`；`multi_thread` / `partition` / `pipelined` / `pipelined-tasks` / `determinism` / `winit` / `reflect` / `trace` / `module-reload` / `diagnostic`。
 
@@ -184,7 +186,7 @@
 
 ### 2.6 未发布 API 的替换策略
 
-当前 `prism_app::settings` 与 `cvar` 尚未发布，因此直接删除旧公开类型与入口，不维护兼容 facade、旧事件适配器或旧控制台语义。该删除已完成；`prism_settings` 是 schema、解析、source precedence、snapshot 与诊断的唯一内核，`prism_app::SettingsRuntime` 只负责应用生命周期集成。持久化/控制台/热重载仍须通过 canonical IO/transaction 路径接入。所有仓内调用方与测试在同一变更中迁移，禁止仅为让旧测试通过而保留旧 API。
+当前 `prism_app::settings` 与 `cvar` 尚未发布，因此直接删除旧公开类型与入口，不维护兼容 facade、旧事件适配器或旧控制台语义。该删除已完成；`prism_settings` 是 schema、解析、source precedence、snapshot 与诊断的唯一内核，`prism_app::SettingsRuntime` 只负责应用生命周期集成。文件加载、候选快照、事务、journal 恢复和预览确认统一走 `prism_settings_io` 的 canonical 路径。所有仓内调用方与测试在同一变更中迁移，禁止仅为让旧测试通过而保留旧 API。
 
 持久化文件的 schema 迁移与 Rust API 兼容是两件事：已发行文件格式仍按 §11 迁移；旧的内存 API、未发行文本配置格式和旧调用路径不构成兼容承诺。若未来确有外部数据导入需求，只能增加一次性、默认关闭的导入工具，不将其重新变成运行时 API。
 
@@ -408,6 +410,7 @@ pub enum Value {
 ```
 
 - 枚举：`EnumId` 是 intern 后的整数，但**落盘用稳定字符串**；改名/合并走 `EnumRemap`。
+- Rust 当前 schema 用 `EnumOption { stable_name, id }` 保存名字到 runtime ID 的闭合映射；`EnumId::from_stable_name` 以稳定 UTF-8 名称派生 FNV-1a ID，冻结 registry 时检查空名、错配、重复名和 ID 冲突。`SettingsDocument::bind_registry` 将 schema 映射绑定到候选文档，TOML 编码写稳定名称；registry-aware 正常解码支持名称和旧 numeric ID，并拒绝未知选项。Watcher 的升级路径先 schema-free 解码并将 schema 外的候选保留为原始 TOML，执行迁移后再按当前 registry 重新分类校验；迁移转换可从稳定名称恢复 canonical ID。公开的 `EnumRemap` 迁移算子（`MigrationOperation` 的转换适配器）支持稳定名称改名和多旧项合并为一新项，未映射值保持原身份并由目标 registry 校验，类型错误 fail-closed；具体映射仍由各 schema 版本提供。`prism_settings_io` enum codec/migration/watcher 单测 48 项通过（2026-10-23）。
 - 浮点：统一用 `f64` 解析，按 def 的 `ty` 收窄；`NaN/Inf` 拒绝。
 - 表：键排序，保证序列化/hash 确定；表内字段也要有 schema 或允许自由键（需显式声明）。
 - Bytes：仅用于持久化/网络；UI 不直接编辑。
@@ -736,7 +739,7 @@ pub enum TxPhase {
 3. 等待确认：确认 → Persist → Finalize；超时/拒绝 → 补偿 + 回滚快照，**不落盘**。
 4. 确认后持久化失败 → 补偿 + 回滚快照，报 `not_persisted`，不得假装已保存。
 
-- 崩溃恢复：启动读 journal；`Prepared` 未提交 → 丢弃；`StateCommitted` 未持久化 → 按模式恢复；`Persisted` 未完成 apply → 只重跑**幂等** applier；非幂等/不可逆 → `RecoveryRequired` 或 `NeedsRestart`，交 doctor/用户决策。
+- 崩溃恢复：启动读 journal；未提交快照 → 丢弃；已提交但未完成的事务由 `recover_settings_transaction` 按操作账本探测，在可证明安全时逆序补偿并恢复旧 generation。`PersistBegin` 无 `PersistEnd` 时，文件 persistence 的 durable recovery image 先恢复事务前主文件；若外部副作用仍不确定则进入 `RecoveryRequired`，不得误判为普通回滚。非幂等/不可逆或探测结果未知 → `RecoveryRequired` 或 `Degraded`，交 doctor/用户决策。直接重放只允许通过 `run_transaction` 的幂等检查继续，不允许无条件重复副作用。
 - journal 记阶段 + 操作级事件（见 §9.2.6），不记全量值/密钥；有界、轮转；fsync 在 TxBegin/OpBegin/OpApplied/补偿边界。
 - 多文件持久化用 `manifest.json`（generation + 文件 hash）；恢复选完整 generation；单文件仍是 temp+rename。
 
@@ -830,6 +833,7 @@ pub struct ApplyOp {
 - `OpApplied/OpFailed` 后 fsync；失败也落盘，才能区分“未执行”与“执行失败”。
 - 每 op 强同步（settings apply 是低频路径）；若基准显示不可接受，优化 op 合并/批量提交，不放宽“先写 `OpBegin` 再调用”的顺序。
 - journal 写入/fsync 失败：立即停止，不调用下一个 op，进入 `RecoveryRequired`；不得继续产生副作用。
+- 持久化写入失败：若 persistence 实现能恢复最近一次写入前的镜像，则恢复持久化镜像与内存快照并写 `TxEnd(RolledBack)`；`PersistBegin` 已落盘但 `PersistEnd` 缺失，或镜像/快照/journal 任一恢复边界失败，必须写 `RecoveryRequired`（若终态也无法落盘则保留未决 journal），不得假装已保存。
 - 补偿本身也是操作：`CompensateBegin → Compensated/CompensateFailed`，带 `verified`；不得假设“调用 rollback 就成功”。
 - journal 不记全量值/密钥；`effect_handle` 是回滚句柄（旧模式、备份路径、设备 id），可为空。
 - 活动事务全量记录；`TxEnd` 后压缩为摘要 + 最近 N 条，轮转有界。
@@ -1980,7 +1984,7 @@ gameplay → ui → editor → io → core
 - `docs/prism_gameplay_design_zh.md` §51（`prism_gameplay_settings` 规划）
 - `docs/prism_editor_framework_design_zh.md` §4.1（Document/Layer）、§4.2（Command/Transaction/Undo）、§5（Shell）、§17（crate 矩阵）
 - `docs/prism_editor_remote_design_zh.md`（编辑器远程协议）
-- `pkg/prism_app/src/settings.rs`、`cvar.rs`、`reflect_config.rs`、`platform_tier.rs`、`hot_reload.rs`
+- `pkg/prism_app/src/settings_runtime.rs`、`platform_tier.rs`（canonical runtime 与平台 source）；旧 `settings.rs`、`cvar.rs`、`reflect_config.rs`、`hot_reload.rs` 仅作为历史迁移对象，不再是当前实现入口
 - `pkg/prism_reflect/src/schema/`（metadata/version/migration/validate/clamp）
 - `pkg/prism_platform/src/fs/`（dirs/file/dir/watch）
 - `pkg/prism_ui_dock/src/workspace_store.rs`

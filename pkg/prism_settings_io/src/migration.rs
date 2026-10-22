@@ -133,27 +133,34 @@ impl MigrationChain {
         &self,
         document: &mut SettingsDocument,
     ) -> Result<MigrationReport, MigrationError> {
-        if document.schema_version() > self.current_version {
-            return Err(MigrationError::FutureVersion {
-                document: document.schema_version(),
-                current: self.current_version,
-            });
-        }
-
-        let mut report = MigrationReport::default();
-        while document.schema_version() < self.current_version {
-            let from = document.schema_version();
-            let step = self
-                .steps
-                .get(&from)
-                .ok_or(MigrationError::MissingStep { from, to: from + 1 })?;
-            for operation in &step.operations {
-                apply_operation(document, operation, from, &mut report)?;
+        let original = document.clone();
+        let result = (|| {
+            if document.schema_version() > self.current_version {
+                return Err(MigrationError::FutureVersion {
+                    document: document.schema_version(),
+                    current: self.current_version,
+                });
             }
-            document.set_schema_version(from + 1);
-            report.applied_steps += 1;
+
+            let mut report = MigrationReport::default();
+            while document.schema_version() < self.current_version {
+                let from = document.schema_version();
+                let step = self
+                    .steps
+                    .get(&from)
+                    .ok_or(MigrationError::MissingStep { from, to: from + 1 })?;
+                for operation in &step.operations {
+                    apply_operation(document, operation, from, &mut report)?;
+                }
+                document.set_schema_version(from + 1);
+                report.applied_steps += 1;
+            }
+            Ok(report)
+        })();
+        if result.is_err() {
+            *document = original;
         }
-        Ok(report)
+        result
     }
 }
 
@@ -399,5 +406,31 @@ mod tests {
         ));
         assert!(document.contains_key("old.key"));
         assert_eq!(document.schema_version(), 1);
+    }
+
+    #[test]
+    fn migration_failure_restores_the_entire_document_chain() {
+        let mut document = SettingsDocument::new(0);
+        document.insert("old.key", Value::Int(7));
+        document.preserve_unknown("future.key", toml::Value::String("kept".to_owned()));
+        let original = document.clone();
+        let mut chain = MigrationChain::new(2);
+        chain
+            .add_step(0, [MigrationOperation::rename("old.key", "new.key")])
+            .unwrap();
+        chain
+            .add_step(
+                1,
+                [MigrationOperation::convert("new.key", |_value| {
+                    Err("injected conversion failure".to_owned())
+                })],
+            )
+            .unwrap();
+
+        assert!(matches!(
+            chain.migrate(&mut document),
+            Err(MigrationError::Conversion { version: 1, .. })
+        ));
+        assert_eq!(document, original);
     }
 }

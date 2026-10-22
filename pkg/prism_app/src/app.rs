@@ -421,6 +421,25 @@ impl App {
         self
     }
 
+    /// Append a finalizer run after all normal extract steps and before the
+    /// labeled sub-app updates. Later normal extracts still run first.
+    ///
+    /// # Panics
+    ///
+    /// Panics if no sub-app is registered under `label`.
+    pub fn add_extract_finalizer<F>(&mut self, label: impl SubAppLabel, extract: F) -> &mut Self
+    where
+        F: FnMut(&mut World, &mut World) + Send + Sync + 'static,
+    {
+        let desc = format!("{label:?}");
+        let sub_app = self
+            .sub_apps
+            .get_mut(label)
+            .unwrap_or_else(|| panic!("add_extract_finalizer: no sub-app registered under {desc}"));
+        sub_app.add_extract_finalizer(extract);
+        self
+    }
+
     // ---- time -------------------------------------------------------------
 
     /// Set how the frame loop advances the real clock each frame (design §8).

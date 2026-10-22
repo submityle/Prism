@@ -12,6 +12,7 @@ prism_ecs = { path = "../prism_ecs", default-features = false }
 prism_time = { path = "../prism_time", default-features = false }
 prism_platform = { path = "../prism_platform", default-features = false }
 prism_settings = { path = "../prism_settings", default-features = false }
+prism_settings_io = { path = "../prism_settings_io", optional = true }
 hashbrown = { version = "0.15", default-features = false, features = ["default-hasher", "inline-more"] }
 libm = "0.2"
 libloading = { version = "0.8.9", optional = true }
@@ -28,6 +29,9 @@ prism_reflect = { path = "../prism_reflect", default-features = false, features 
 # process environment access, pacing, diagnostics, and the server runner.
 default = ["std"]
 std = ["prism_ecs/std", "prism_time/std", "prism_platform/std"]
+# Canonical file-backed settings transactions. Kept opt-in so the App's
+# default/no_std dependency graph does not pull in filesystem or serde I/O.
+settings-io = ["std", "dep:prism_settings_io"]
 
 # §8.2 / §20: dispatch each phase schedule's conflict-free system waves across a
 # `prism_tasks` work-stealing pool (stage-internal parallelism). Pulls in

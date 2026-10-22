@@ -246,7 +246,8 @@ impl FramePacer {
         self.limit
     }
 
-    /// Change the limit at runtime (e.g. a cvar flipping the frame cap). The
+    /// Change the limit at runtime (for example, after a settings transaction
+    /// changes the frame cap). The
     /// cadence is reset so the new rate takes effect cleanly on the next frame.
     pub fn set_limit(&mut self, limit: FrameLimit) {
         self.limit = limit;

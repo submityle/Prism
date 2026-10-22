@@ -1836,6 +1836,67 @@ fn main_runs_before_secondary_and_extract_before_sub_update() {
     );
 }
 
+/// Finalizers observe all ordinary extraction, even callbacks registered later.
+#[test]
+fn extract_finalizers_see_late_extracts_before_sub_update() {
+    let mut app = App::new();
+    let mut render = SubApp::new();
+    render.world.insert_resource(Counter::default());
+    render
+        .world
+        .resource_mut::<prism_ecs::schedule::Schedules>()
+        .insert(Update, prism_ecs::schedule::Schedule::new());
+    render
+        .world
+        .resource_mut::<prism_ecs::schedule::Schedules>()
+        .get_mut(Update)
+        .unwrap()
+        .add_systems(|mut counter: ResMut<Counter>| {
+            assert_eq!(counter.0, 42);
+            counter.0 += 1;
+        });
+    app.insert_sub_app(RenderApp, render);
+    app.add_extract_finalizer(RenderApp, |_, sub| {
+        assert_eq!(sub.resource::<Counter>().0, 21);
+        sub.resource_mut::<Counter>().0 *= 2;
+    });
+    app.add_extract(RenderApp, |_, sub| {
+        sub.resource_mut::<Counter>().0 = 21;
+    });
+    for _ in 0..2 {
+        app.update();
+        assert_eq!(
+            app.get_sub_app(RenderApp)
+                .unwrap()
+                .world
+                .resource::<Counter>()
+                .0,
+            43
+        );
+    }
+}
+
+#[test]
+fn extract_finalizer_only_is_extraction_and_set_extract_replaces_it() {
+    let mut sub = SubApp::new();
+    sub.world.insert_resource(Counter::default());
+    sub.add_extract_finalizer(|_, sub| sub.resource_mut::<Counter>().0 += 1);
+    sub.add_extract_finalizer(|_, sub| sub.resource_mut::<Counter>().0 *= 3);
+    assert!(sub.has_extract());
+    let mut main = prism_ecs::world::World::new();
+    sub.run_extract(&mut main);
+    assert_eq!(sub.world.resource::<Counter>().0, 3);
+    sub.set_extract(|_, sub| sub.resource_mut::<Counter>().0 = 7);
+    sub.run_extract(&mut main);
+    assert_eq!(sub.world.resource::<Counter>().0, 7);
+}
+
+#[test]
+#[should_panic(expected = "add_extract_finalizer: no sub-app registered under")]
+fn extract_finalizer_requires_registered_sub_app() {
+    App::new().add_extract_finalizer(RenderApp, |_, _| {});
+}
+
 /// A secondary sub-app without an extract fn still updates (extract is optional).
 #[test]
 fn secondary_without_extract_still_updates() {
