@@ -261,6 +261,7 @@ pub(crate) fn execute_frame<I>(
     stats.execution_trace.assert_input_parity(&record, &inputs);
     stats.surface_view_error = None;
     stats.surface_view_output_rejections.clear();
+    stats.surface_view_target_rejections.clear();
     let camera_error = if let Some(error) = cameras.error() {
         Some(crate::stats::SurfaceViewExecutionError::QueuePreparation(
             error,
@@ -330,11 +331,15 @@ pub(crate) fn execute_frame<I>(
         },
     );
     let mut desired = Vec::new();
+    let primary = requests.primary_window();
     for (output, viewport) in outputs {
         if viewport.is_empty() {
             continue;
         }
         for camera in cameras.iter() {
+            if !camera_target_matches_output(camera.surface.target, output, primary) {
+                continue;
+            }
             if surface_view_fits(&camera.surface, viewport) {
                 let [_, _, width, height] = camera.surface.viewport;
                 desired.push(SurfaceViewTargetKey::new(
@@ -352,6 +357,27 @@ pub(crate) fn execute_frame<I>(
                     },
                 );
             }
+        }
+    }
+    for camera in cameras.iter() {
+        let routed = match camera.surface.target {
+            prism_camera::RenderTarget::PrimaryWindow => {
+                primary.is_some() || requests.render_outputs().is_none()
+            }
+            prism_camera::RenderTarget::Window(id) => requests
+                .render_outputs()
+                .is_some_and(|outputs| outputs.iter().any(|(window, _)| window.0 == id)),
+            prism_camera::RenderTarget::Texture(id) => {
+                requests.render_outputs().is_none() && id == 0
+            }
+        };
+        if !routed {
+            stats
+                .surface_view_target_rejections
+                .push(crate::stats::SurfaceViewTargetRejection {
+                    camera: camera.camera(),
+                    target: camera.surface.target,
+                });
         }
     }
     if let Err(error) = camera_targets
@@ -489,6 +515,14 @@ pub(crate) fn execute_frame<I>(
     let view_inputs: Vec<_> = cameras
         .iter()
         .filter_map(|camera| {
+            let target_matches = match camera.surface.target {
+                prism_camera::RenderTarget::PrimaryWindow => true,
+                prism_camera::RenderTarget::Window(_) => false,
+                prism_camera::RenderTarget::Texture(id) => id == 0,
+            };
+            if !target_matches {
+                return None;
+            }
             let [_, _, width, height] = camera.surface.viewport;
             let key = SurfaceViewTargetKey::new(
                 camera.camera(),
@@ -615,6 +649,25 @@ pub(crate) fn execute_frame<I>(
     }
 }
 
+fn camera_target_matches_output(
+    target: prism_camera::RenderTarget,
+    output: crate::surface_view_targets::SurfaceViewOutput,
+    primary: Option<crate::WindowId>,
+) -> bool {
+    use crate::surface_view_targets::SurfaceViewOutput;
+
+    match target {
+        prism_camera::RenderTarget::PrimaryWindow => match output {
+            SurfaceViewOutput::Window(id) => Some(id) == primary,
+            SurfaceViewOutput::Offscreen(_) => primary.is_none(),
+        },
+        prism_camera::RenderTarget::Window(id) => {
+            output == SurfaceViewOutput::Window(crate::WindowId(id))
+        }
+        prism_camera::RenderTarget::Texture(id) => output == SurfaceViewOutput::Offscreen(id),
+    }
+}
+
 /// Output-local rejection only; never clamp or reinterpret a camera's matrix/rect.
 pub(crate) fn surface_view_fits(view: &crate::SurfaceView, output: crate::RenderViewport) -> bool {
     let [x, y, width, height] = view.viewport;
@@ -651,6 +704,39 @@ mod tests {
     use prism_ecs::prelude::Entity;
     use prism_render_driver::Extent3d;
     use prism_render_driver_null::NullInstance;
+
+    #[test]
+    fn camera_targets_route_only_to_their_stable_output_identity() {
+        use crate::surface_view_targets::SurfaceViewOutput;
+        use prism_camera::RenderTarget as CameraTarget;
+
+        let primary = Some(crate::WindowId(7));
+        assert!(camera_target_matches_output(
+            CameraTarget::PrimaryWindow,
+            SurfaceViewOutput::Window(crate::WindowId(7)),
+            primary,
+        ));
+        assert!(!camera_target_matches_output(
+            CameraTarget::PrimaryWindow,
+            SurfaceViewOutput::Window(crate::WindowId(3)),
+            primary,
+        ));
+        assert!(camera_target_matches_output(
+            CameraTarget::Window(3),
+            SurfaceViewOutput::Window(crate::WindowId(3)),
+            primary,
+        ));
+        assert!(camera_target_matches_output(
+            CameraTarget::Texture(42),
+            SurfaceViewOutput::Offscreen(42),
+            primary,
+        ));
+        assert!(!camera_target_matches_output(
+            CameraTarget::Texture(42),
+            SurfaceViewOutput::Offscreen(0),
+            primary,
+        ));
+    }
 
     #[test]
     fn offscreen_surface_view_seal_identity_mismatch_is_diagnostic_not_panic() {

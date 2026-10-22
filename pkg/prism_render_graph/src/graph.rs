@@ -238,6 +238,77 @@ impl RenderGraph {
         self.swapchain
     }
 
+    /// Observes this graph without keeping a cancelled graph alive.
+    ///
+    /// The graph, then its prepared/recorded allocation owner, holds the strong
+    /// reference. Cancellation or compile/record failure drops it naturally.
+    /// Recording alone never marks submission. Manual submitters must call
+    /// [`GraphAllocations::mark_submitted`] after actual submit returns, and keep
+    /// the allocations alive for as long as any commands may still be submitted.
+    /// A weak observer should upgrade only briefly to check `is_submitted()`;
+    /// retaining an upgraded strong reference also keeps the token alive.
+    #[must_use]
+    pub fn submission_token(&self) -> Weak<GraphSubmissionToken> {
+        Arc::downgrade(&self.submission_guard.0)
+    }
+
+    /// Resolves a texture's declared base-mip extent against this graph's swapchain.
+    ///
+    /// Works before compilation or GPU allocation, including for imported textures.
+    /// Imports use their declared description; this does not query the backend or
+    /// account for a default view selecting a smaller mip. Every declared SSA
+    /// version of a texture has the same extent. Returns `None` for an out-of-range
+    /// resource index or a version that has not been declared.
+    ///
+    /// The handle must belong to this graph: handles encode only index/version,
+    /// so a coincidentally valid handle from another graph cannot be distinguished.
+    #[must_use]
+    pub fn texture_extent(&self, handle: TextureHandle) -> Option<Extent3d> {
+        let texture = self.textures.get(handle.resource().get() as usize)?;
+        if handle.version() > texture.version {
+            return None;
+        }
+        Some(texture.desc.size.resolve(self.swapchain))
+    }
+
+    /// Pins an external owner through declaration, recording and GPU retirement.
+    ///
+    /// Use this for imported resources, pipelines, layouts or other external
+    /// objects whose lifetime must cover the graph's commands. Each call takes
+    /// one strong reference, without deduplication or inferred resource usage;
+    /// culling does not remove pins. The owner must itself prevent destruction
+    /// of the relevant resources while a strong reference exists. Retention
+    /// cannot prevent explicit destruction through a different handle.
+    ///
+    /// Dropping a declaration/prepared graph or failing compilation releases
+    /// the pins automatically. The graph keeps them during realization, then
+    /// transfers them to the recording cleanup guard before callbacks run.
+    /// Device-creation/callback unwinding also releases the pins, after
+    /// graph-owned resources and remaining callback/blackboard captures.
+    /// Successful sequential or parallel recording transfers them into the
+    /// returned [`GraphAllocations`], including via [`RecordedGraph::into_parts`].
+    /// The caller must explicitly [`release`](GraphAllocations::release) that
+    /// owner after actual GPU completion, or after discarding every copy of
+    /// unsubmitted commands. Dropping a recorded packet/allocations instead
+    /// deliberately leaks pins rather than risking premature destruction.
+    /// [`GraphAllocations::release_transients`] does not release these pins.
+    ///
+    /// This API does not submit, wait, install a completion callback, or assume
+    /// that a queue callback covers work that has not yet been submitted.
+    pub fn retain_external_owner(&mut self, owner: Arc<dyn Any + Send + Sync>) {
+        self.external_owners.push(owner);
+    }
+
+    /// Number of strongly retained external owners on this declaration graph.
+    ///
+    /// This diagnostic is useful for proving that imported resources remain
+    /// pinned independently for each output graph. The graph does not dedupe
+    /// owners: the count is the number of explicit retention calls.
+    #[must_use]
+    pub fn external_owner_count(&self) -> usize {
+        self.external_owners.len()
+    }
+
     /// Borrows the frame blackboard.
     #[must_use]
     pub fn blackboard(&self) -> &Blackboard {

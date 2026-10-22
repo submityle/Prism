@@ -92,6 +92,7 @@ impl<I: Instance + 'static> Clone for WindowRequest<I> {
 /// Handles are retained until a synchronized extraction retires their surfaces.
 pub struct WindowRenderRequests<I: Instance + 'static> {
     enabled: bool,
+    primary: Option<WindowId>,
     windows: BTreeMap<WindowId, WindowRequest<I>>,
 }
 
@@ -99,6 +100,7 @@ impl<I: Instance + 'static> Default for WindowRenderRequests<I> {
     fn default() -> Self {
         Self {
             enabled: false,
+            primary: None,
             windows: BTreeMap::new(),
         }
     }
@@ -108,6 +110,7 @@ impl<I: Instance + 'static> Clone for WindowRenderRequests<I> {
     fn clone(&self) -> Self {
         Self {
             enabled: self.enabled,
+            primary: self.primary,
             windows: self.windows.clone(),
         }
     }
@@ -139,6 +142,9 @@ impl<I: Instance + 'static> WindowRenderRequests<I> {
         F: Fn(&RenderRuntime<I>) -> Result<I::Surface, SurfaceError> + Send + Sync + 'static,
     {
         self.enabled = true;
+        if self.primary.is_none() {
+            self.primary = Some(id);
+        }
         self.windows.insert(
             id,
             WindowRequest {
@@ -172,7 +178,27 @@ impl<I: Instance + 'static> WindowRenderRequests<I> {
 
     /// Remove a window. The render side releases it after GPU completion.
     pub fn remove(&mut self, id: WindowId) -> bool {
-        self.windows.remove(&id).is_some()
+        let removed = self.windows.remove(&id).is_some();
+        if removed && self.primary == Some(id) {
+            self.primary = self.windows.keys().next().copied();
+        }
+        removed
+    }
+
+    /// The primary output used by cameras targeting `PrimaryWindow`.
+    #[must_use]
+    pub fn primary_window(&self) -> Option<WindowId> {
+        self.primary.filter(|id| self.windows.contains_key(id))
+    }
+
+    /// Select the output used by cameras targeting `PrimaryWindow`.
+    /// Returns false when the id is not currently attached.
+    pub fn set_primary_window(&mut self, id: WindowId) -> bool {
+        if !self.windows.contains_key(&id) {
+            return false;
+        }
+        self.primary = Some(id);
+        true
     }
 
     /// Whether this id already has an owned window recipe.
@@ -203,6 +229,7 @@ impl<I: Instance + 'static> WindowRenderRequests<I> {
     pub fn use_offscreen(&mut self) {
         self.enabled = false;
         self.windows.clear();
+        self.primary = None;
     }
 }
 
@@ -701,6 +728,7 @@ impl<I: Instance + 'static> WindowRenderTargets<I> {
                 trace,
                 particle,
                 context.as_mut(),
+                requests.primary_window() == Some(id),
                 receipt.first_submission.is_none(),
                 stats,
             );
@@ -737,6 +765,7 @@ impl<I: Instance + 'static> WindowRenderTargets<I> {
         trace: Option<TraceGraphRecorder>,
         particle: Option<&crate::particle::ParticleGpuState>,
         mut context: Option<&mut SurfaceViewDriveContext<'_, I>>,
+        is_primary: bool,
         frame_work: bool,
         stats: &mut RenderFrameStats,
     ) -> Result<Option<u64>, WindowRenderFailure>
@@ -924,6 +953,14 @@ impl<I: Instance + 'static> WindowRenderTargets<I> {
                 return Err(WindowRenderError::Graph("stale surface view queues".into()).into());
             }
             for camera in context.cameras.iter() {
+                let routed = match camera.surface.target {
+                    prism_camera::RenderTarget::PrimaryWindow => is_primary,
+                    prism_camera::RenderTarget::Window(window) => window == id.0,
+                    prism_camera::RenderTarget::Texture(_) => false,
+                };
+                if !routed {
+                    continue;
+                }
                 if !crate::systems::surface_view_fits(&camera.surface, request.viewport) {
                     continue;
                 }

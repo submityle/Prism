@@ -33,6 +33,8 @@ pub struct RenderFrameStats {
     /// Cameras excluded from individual outputs because their rect does not fit.
     /// A rejected camera does not discard other cameras or explicit queues.
     pub surface_view_output_rejections: Vec<SurfaceViewOutputRejection>,
+    /// Active camera targets with no matching configured output this frame.
+    pub surface_view_target_rejections: Vec<SurfaceViewTargetRejection>,
     /// Frames skipped because the extracted viewport was empty.
     pub frames_skipped: u64,
     /// The total number of passes declared across every recorded frame.
@@ -119,6 +121,15 @@ pub struct SurfaceViewOutputRejection {
     pub output_viewport: RenderViewport,
 }
 
+/// Camera whose stable target could not be resolved to a configured output.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SurfaceViewTargetRejection {
+    /// Full camera identity, including generation.
+    pub camera: Entity,
+    /// Requested engine-neutral destination.
+    pub target: prism_camera::RenderTarget,
+}
+
 /// Legacy aggregate diagnostic retained for visibility producers with no views.
 ///
 /// Multiple cameras are supported. Inspect [`SurfaceViewQueues`](crate::SurfaceViewQueues)
@@ -138,6 +149,7 @@ impl Default for RenderFrameStats {
             view_queue_rejection: None,
             surface_view_error: None,
             surface_view_output_rejections: Vec::new(),
+            surface_view_target_rejections: Vec::new(),
             frames_skipped: 0,
             passes_declared: 0,
             draws_queued: 0,
