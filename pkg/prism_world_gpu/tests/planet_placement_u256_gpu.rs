@@ -75,6 +75,25 @@ fn main() {
     let shifted = u256_shl(a, 84u);
     store_u256(52u, shifted.value); output_words[60] = select(0u, 1u, shifted.overflow);
     store_u256(61u, u256_isqrt_scaled(a, 168u));
+    store_u256(69u, u256_isqrt_scaled(b, 168u));
+    var maximum = u256_zero();
+    for (var limb = 0u; limb < 8u; limb += 1u) { maximum.limb[limb] = 0xffffffffu; }
+    store_u256(77u, u256_isqrt_scaled(maximum, 168u));
+    let cube = array<I256, 3>(
+        i256_from_i64_words(vec2<u32>(3u, 0u)),
+        i256_from_i64_words(vec2<u32>(4u, 0u)),
+        i256_from_i64_words(vec2<u32>(12u, 0u)));
+    let direction = cube_direction_q84(cube);
+    for (var axis = 0u; axis < 3u; axis += 1u) {
+        store_u256(85u + axis * 9u, direction[axis].magnitude);
+        output_words[85u + axis * 9u + 8u] = select(0u, 1u, direction[axis].negative);
+    }
+    let radial = i256_from_i128_words(vec4<u32>(12345u, 0u, 0u, 0u));
+    for (var axis = 0u; axis < 3u; axis += 1u) {
+        let projected = project_q84_to_mm(direction[axis], radial);
+        store_u256(112u + axis * 9u, projected.magnitude);
+        output_words[120u + axis * 9u] = select(0u, 1u, projected.negative);
+    }
 }
 "#,
     );
@@ -120,7 +139,7 @@ fn u256_limb_arithmetic_matches_rust_reference_on_metal() {
         });
     let output_buffer = context.device().create_buffer(&wgpu::BufferDescriptor {
         label: Some("planet U256 arithmetic output"),
-        size: 69 * 4,
+        size: 148 * 4,
         usage: wgpu::BufferUsages::STORAGE
             | wgpu::BufferUsages::COPY_SRC
             | wgpu::BufferUsages::COPY_DST,
@@ -209,11 +228,11 @@ fn u256_limb_arithmetic_matches_rust_reference_on_metal() {
     }
     let readback = context.device().create_buffer(&wgpu::BufferDescriptor {
         label: Some("planet U256 arithmetic readback"),
-        size: 69 * 4,
+        size: 148 * 4,
         usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
         mapped_at_creation: false,
     });
-    encoder.copy_buffer_to_buffer(&output_buffer, 0, &readback, 0, 69 * 4);
+    encoder.copy_buffer_to_buffer(&output_buffer, 0, &readback, 0, 148 * 4);
     context.queue().submit(Some(encoder.finish()));
     context.wait();
     let output = read(&context, &readback);
@@ -243,4 +262,59 @@ fn u256_limb_arithmetic_matches_rust_reference_on_metal() {
     }
     let scaled_root = fixed_math::isqrt_scaled(a, 168).unwrap();
     assert_eq!(read_u256(&output, 61), scaled_root);
+    let scaled_root = fixed_math::isqrt_scaled(b, 168).unwrap();
+    assert_eq!(read_u256(&output, 69), scaled_root);
+    let scaled_root = fixed_math::isqrt_scaled(U256([u32::MAX; 8]), 168).unwrap();
+    assert_eq!(read_u256(&output, 77), scaled_root);
+    let direction = q84_direction_reference([3, 4, 12]);
+    for axis in 0..3 {
+        let offset = 85 + axis * 9;
+        assert_eq!(read_u256(&output, offset), direction[axis].magnitude);
+        assert_eq!(
+            read_word(&output, offset + 8),
+            u32::from(direction[axis].negative)
+        );
+        let normal_magnitude = direction[axis].magnitude.0;
+        let normal_magnitude = u128::from(normal_magnitude[0])
+            | (u128::from(normal_magnitude[1]) << 32)
+            | (u128::from(normal_magnitude[2]) << 64)
+            | (u128::from(normal_magnitude[3]) << 96);
+        let signed_normal = if direction[axis].negative {
+            -(normal_magnitude as i128)
+        } else {
+            normal_magnitude as i128
+        };
+        let expected = fixed_math::project_quarter_mm_q84(signed_normal, 12_345).unwrap();
+        let offset = 112 + axis * 9;
+        assert_eq!(read_u256(&output, offset), expected.magnitude);
+        assert_eq!(
+            read_word(&output, 120 + axis * 9),
+            u32::from(expected.negative)
+        );
+    }
+}
+
+fn q84_direction_reference(cube: [i64; 3]) -> [fixed_math::I256; 3] {
+    let mut norm_squared = U256::ZERO;
+    for component in cube {
+        let magnitude = U256::from_u64(component.unsigned_abs());
+        norm_squared = norm_squared
+            .checked_add(magnitude.checked_mul(magnitude).unwrap())
+            .unwrap();
+    }
+    let length = fixed_math::isqrt_scaled(norm_squared, 168).unwrap();
+    std::array::from_fn(|axis| {
+        let component = cube[axis];
+        let numerator = U256::from_u64(component.unsigned_abs())
+            .checked_shl(168)
+            .unwrap();
+        let (mut magnitude, remainder) = numerator.div_rem(length).unwrap();
+        if remainder >= length.checked_sub(remainder).unwrap() {
+            magnitude = magnitude.checked_add(U256::ONE).unwrap();
+        }
+        fixed_math::I256 {
+            negative: component < 0 && !magnitude.is_zero(),
+            magnitude,
+        }
+    })
 }

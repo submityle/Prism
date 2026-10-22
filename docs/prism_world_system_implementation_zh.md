@@ -470,3 +470,5 @@ ABI 闭环边界：现有 80-byte record 以 3 个 f32 word 承载位置，内�
 2026-10-22 对优化后的除法新增多 limb divisor/high-limb quotient GPU 向量：Apple M2/Metal 对拍及完整 reference suite 14/14 passed，补强了非单 limb 除数路径的实卡证据；仍不是行星生产候选路径或其吞吐基准。
 
 同日新增 `u256_isqrt_scaled(value, 168)`，在不物化超过 256 位的 `value << 168` 的前提下逐 radix-4 pair 恢复平方根；该原语用于下一步 Q84 方向归一化，Apple M2/Metal 对拍 Rust `isqrt_scaled` reference 通过，完整专项 14/14 passed。当前测试向量只覆盖该输入样本的缩放根；生产 cube-sphere 全配置方向 kernel 仍未建立，尚不能据此验收 placement 精度。
+
+后续将整数 cube 向量的 Q84 归一化、signed limb 解码及 quarter-mm radial 到整毫米 ties-away-from-zero 投影加入同一实卡 parity kernel。Metal 对拍采用 [3,4,12] 方向和 12,345 quarter-mm 半径，逐 limb 与 Rust reference 比较，完整 reference/GPU 算术套件 14/14 passed。位移与余数提取使用最多 8-limb 操作，不做逐 bit 清零/移位循环。当前仍未接入生产 placement shader、真实高度/radius/frame-origin 端到端算法或版本化 record ABI；本测试只证明所测算术片段。

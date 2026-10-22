@@ -35,6 +35,11 @@ struct U256DivRem {
     division_by_zero: bool,
 };
 
+struct I256 {
+    negative: bool,
+    magnitude: U256,
+};
+
 fn u256_zero() -> U256 {
     return U256(array<u32, 8>(0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u));
 }
@@ -173,6 +178,35 @@ fn u256_shr_one(value: U256) -> U256 {
     return out;
 }
 
+fn u256_shr(value: U256, count: u32) -> U256 {
+    var result = u256_zero();
+    if (count >= 256u) { return result; }
+    let word_shift = count >> 5u;
+    let bit_shift = count & 31u;
+    for (var destination = 0u; destination < 8u; destination += 1u) {
+        let source = destination + word_shift;
+        if (source < 8u) {
+            result.limb[destination] = value.limb[source] >> bit_shift;
+            if (bit_shift != 0u && source + 1u < 8u) {
+                result.limb[destination] = result.limb[destination] | (value.limb[source + 1u] << (32u - bit_shift));
+            }
+        }
+    }
+    return result;
+}
+
+fn u256_low_bits(value: U256, count: u32) -> U256 {
+    if (count >= 256u) { return value; }
+    var result = u256_zero();
+    let full_limbs = count >> 5u;
+    let remaining_bits = count & 31u;
+    for (var limb = 0u; limb < full_limbs; limb += 1u) {
+        result.limb[limb] = value.limb[limb];
+    }
+    if (remaining_bits != 0u) { result.limb[full_limbs] = value.limb[full_limbs] & ((1u << remaining_bits) - 1u); }
+    return result;
+}
+
 // Shift left by count. count may be >= 256; all shifted-out nonzero bits are reported.
 fn u256_shl(value: U256, count: u32) -> U256Carry {
     var out = u256_zero();
@@ -283,4 +317,104 @@ fn u256_isqrt_scaled(value: U256, shift: u32) -> U256 {
         }
     }
     return root;
+}
+
+// Normalize integer cube numerators to signed Q84. For the planetary input
+// bound |cube[i]| < 2^62, sum(cube[i]^2) < 3*2^124; sqrt(sum << 168) < 2^147,
+// and each shifted component < 2^230. Every operation therefore fits U256.
+fn i256_canonical(value: I256) -> I256 {
+    return I256(value.negative && !u256_is_zero(value.magnitude), value.magnitude);
+}
+
+fn u256_add_checked(a: U256, b: U256) -> U256 {
+    return u256_add(a, b).value;
+}
+
+fn u256_sub_checked(a: U256, b: U256) -> U256 {
+    return u256_sub(a, b).value;
+}
+
+fn i256_from_i64_words(value: vec2<u32>) -> I256 {
+    let negative = (value.y & 0x80000000u) != 0u;
+    var limbs = value;
+    if (negative) {
+        limbs = ~limbs;
+        limbs.x += 1u;
+        if (limbs.x == 0u) { limbs.y += 1u; }
+    }
+    var magnitude = u256_zero();
+    magnitude.limb[0] = limbs.x;
+    magnitude.limb[1] = limbs.y;
+    return i256_canonical(I256(negative, magnitude));
+}
+
+fn i256_from_i128_words(value: vec4<u32>) -> I256 {
+    let negative = (value.w & 0x80000000u) != 0u;
+    var limbs = value;
+    if (negative) {
+        limbs = ~limbs;
+        limbs.x += 1u;
+        if (limbs.x == 0u) {
+            limbs.y += 1u;
+            if (limbs.y == 0u) {
+                limbs.z += 1u;
+                if (limbs.z == 0u) { limbs.w += 1u; }
+            }
+        }
+    }
+    var magnitude = u256_zero();
+    magnitude.limb[0] = limbs.x;
+    magnitude.limb[1] = limbs.y;
+    magnitude.limb[2] = limbs.z;
+    magnitude.limb[3] = limbs.w;
+    return i256_canonical(I256(negative, magnitude));
+}
+
+fn i256_add(a: I256, b: I256) -> I256 {
+    if (a.negative == b.negative) {
+        return i256_canonical(I256(a.negative, u256_add_checked(a.magnitude, b.magnitude)));
+    }
+    if (u256_cmp(a.magnitude, b.magnitude) >= 0) {
+        return i256_canonical(I256(a.negative, u256_sub_checked(a.magnitude, b.magnitude)));
+    }
+    return i256_canonical(I256(b.negative, u256_sub_checked(b.magnitude, a.magnitude)));
+}
+
+fn project_q84_to_mm(normal: I256, radial_quarters_mm: I256) -> I256 {
+    let product = u256_mul(normal.magnitude, radial_quarters_mm.magnitude).value;
+    let quotient = u256_shr(product, 86u);
+    let remainder = u256_low_bits(product, 86u);
+    var rounded = quotient;
+    let half = u256_from_u32(1u);
+    let half_shifted = u256_shl(half, 85u).value;
+    if (u256_cmp(remainder, half_shifted) >= 0) {
+        rounded = u256_add_checked(rounded, u256_from_u32(1u));
+    }
+    return i256_canonical(I256(normal.negative != radial_quarters_mm.negative, rounded));
+}
+
+fn cube_direction_q84(cube: array<I256, 3>) -> array<I256, 3> {
+    var norm_squared = u256_zero();
+    for (var axis = 0u; axis < 3u; axis += 1u) {
+        let square = u256_mul(cube[axis].magnitude, cube[axis].magnitude);
+        norm_squared = u256_add_checked(norm_squared, square.value);
+    }
+    let length_q84 = u256_isqrt_scaled(norm_squared, 168u);
+    var result: array<I256, 3>;
+    for (var axis = 0u; axis < 3u; axis += 1u) {
+        let numerator = u256_shl(cube[axis].magnitude, 168u).value;
+        let division = u256_div_rem(numerator, length_q84);
+        var magnitude = division.quotient;
+        if (division.remainder.limb[0] != 0u || division.remainder.limb[1] != 0u
+            || division.remainder.limb[2] != 0u || division.remainder.limb[3] != 0u
+            || division.remainder.limb[4] != 0u || division.remainder.limb[5] != 0u
+            || division.remainder.limb[6] != 0u || division.remainder.limb[7] != 0u) {
+            let complement = u256_sub_checked(length_q84, division.remainder);
+            if (u256_cmp(division.remainder, complement) >= 0) {
+                magnitude = u256_add_checked(magnitude, u256_from_u32(1u));
+            }
+        }
+        result[axis] = i256_canonical(I256(cube[axis].negative, magnitude));
+    }
+    return result;
 }
