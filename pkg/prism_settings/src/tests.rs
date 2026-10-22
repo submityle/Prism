@@ -1,5 +1,13 @@
 use crate::*;
-use alloc::{format, vec, vec::Vec};
+use alloc::{collections::BTreeMap, format, vec, vec::Vec};
+
+fn enum_def(default: Value) -> (SettingDef, EnumOption, EnumOption) {
+    let plain = EnumOption::from_stable_name("render::Mode::Plain");
+    let configured = EnumOption::from_stable_name("render::Mode::Configured");
+    let mut def = SettingDef::new("render.mode", "render", default);
+    def.enum_options = vec![plain.clone(), configured.clone()];
+    (def, plain, configured)
+}
 
 fn registry(defs: Vec<SettingDef>) -> SettingsRegistry {
     let mut b = RegistryBuilder::new();
@@ -99,6 +107,166 @@ fn stable_enum_options_reject_mismatched_and_duplicate_identities() {
     let errors = builder.finish().unwrap_err();
     assert!(errors.iter().any(|error| matches!(error, SettingsError::InvalidDefinition { reason, .. } if reason.contains("does not match"))));
     assert!(errors.iter().any(|error| matches!(error, SettingsError::InvalidDefinition { reason, .. } if reason.contains("collide"))));
+}
+
+#[test]
+fn enum_payloads_preserve_unit_options_and_validate_tuple_and_struct_shapes() {
+    let (mut def, plain, configured) = enum_def(Value::Enum(EnumId(0)));
+    def.default = Value::Enum(plain.id);
+    def.enum_payloads = vec![EnumOptionPayload {
+        id: configured.id,
+        shape: EnumPayloadShape::Tuple(vec![
+            ValueShape::scalar(ValueType::Int),
+            ValueShape::scalar(ValueType::Bool),
+        ]),
+    }];
+    let schema = registry(vec![def]);
+    let id = schema.id(&"render.mode".into()).unwrap();
+
+    assert_eq!(
+        schema.validate_value(id, Value::Enum(plain.id)),
+        Ok(Value::Enum(plain.id))
+    );
+    let tuple = Value::EnumPayload {
+        id: configured.id,
+        payload: EnumPayload::Tuple(vec![Value::Int(4), Value::Bool(true)]),
+    };
+    assert_eq!(schema.validate_value(id, tuple.clone()), Ok(tuple));
+
+    let struct_option = EnumOption::from_stable_name("render::Mode::Structured");
+    let mut struct_def = SettingDef::new(
+        "render.structured_mode",
+        "render",
+        Value::EnumPayload {
+            id: struct_option.id,
+            payload: EnumPayload::Struct(BTreeMap::from([
+                ("label".into(), Value::String("fast".into())),
+                ("quality".into(), Value::Int(3)),
+            ])),
+        },
+    );
+    struct_def.enum_options = vec![struct_option.clone()];
+    struct_def.enum_payloads = vec![EnumOptionPayload {
+        id: struct_option.id,
+        shape: EnumPayloadShape::Struct(BTreeMap::from([
+            ("label".into(), ValueShape::scalar(ValueType::String)),
+            ("quality".into(), ValueShape::scalar(ValueType::Int)),
+        ])),
+    }];
+    let schema = registry(vec![struct_def]);
+    let id = schema.id(&"render.structured_mode".into()).unwrap();
+    assert!(
+        schema.def(id).unwrap().default
+            == schema
+                .validate_value(id, schema.def(id).unwrap().default.clone())
+                .unwrap()
+    );
+}
+
+#[test]
+fn enum_payload_rejects_unknown_variants_wrong_shapes_and_invalid_defaults() {
+    let (mut def, plain, configured) = enum_def(Value::Enum(EnumId(0)));
+    def.default = Value::Enum(plain.id);
+    def.enum_payloads = vec![EnumOptionPayload {
+        id: configured.id,
+        shape: EnumPayloadShape::Tuple(vec![ValueShape::scalar(ValueType::Int)]),
+    }];
+    let schema = registry(vec![def]);
+    let id = schema.id(&"render.mode".into()).unwrap();
+    assert!(matches!(
+        schema.validate_value(
+            id,
+            Value::EnumPayload {
+                id: EnumId::from_stable_name("render::Mode::Missing"),
+                payload: EnumPayload::Tuple(vec![Value::Int(1)]),
+            }
+        ),
+        Err(SettingsError::InvalidEnum { .. })
+    ));
+    assert!(schema
+        .validate_value(
+            id,
+            Value::EnumPayload {
+                id: configured.id,
+                payload: EnumPayload::Tuple(vec![Value::Bool(true)]),
+            }
+        )
+        .is_err());
+    assert!(schema
+        .validate_value(
+            id,
+            Value::EnumPayload {
+                id: configured.id,
+                payload: EnumPayload::Struct(BTreeMap::new()),
+            }
+        )
+        .is_err());
+
+    let mut invalid = SettingDef::new(
+        "render.invalid_mode",
+        "render",
+        Value::EnumPayload {
+            id: configured.id,
+            payload: EnumPayload::Tuple(vec![Value::Bool(true)]),
+        },
+    );
+    invalid.enum_options = vec![configured.clone()];
+    invalid.enum_payloads = vec![EnumOptionPayload {
+        id: configured.id,
+        shape: EnumPayloadShape::Tuple(vec![ValueShape::scalar(ValueType::Int)]),
+    }];
+    let mut builder = RegistryBuilder::new();
+    builder.namespace("render", "test-owner").unwrap();
+    builder.register(invalid);
+    assert!(builder.finish().is_err());
+}
+
+#[test]
+fn nested_enum_payloads_are_validated_recursively() {
+    let inner = EnumOption::from_stable_name("render::Filter::Radius");
+    let outer = EnumOption::from_stable_name("render::Mode::Filtered");
+    let default = Value::EnumPayload {
+        id: outer.id,
+        payload: EnumPayload::Struct(BTreeMap::from([(
+            "filter".into(),
+            Value::EnumPayload {
+                id: inner.id,
+                payload: EnumPayload::Tuple(vec![Value::Int(2)]),
+            },
+        )])),
+    };
+    let mut def = SettingDef::new("render.nested_mode", "render", default);
+    def.enum_options = vec![outer.clone(), inner.clone()];
+    def.enum_payloads = vec![
+        EnumOptionPayload {
+            id: outer.id,
+            shape: EnumPayloadShape::Struct(BTreeMap::from([(
+                "filter".into(),
+                ValueShape::scalar(ValueType::Enum),
+            )])),
+        },
+        EnumOptionPayload {
+            id: inner.id,
+            shape: EnumPayloadShape::Tuple(vec![ValueShape::scalar(ValueType::Int)]),
+        },
+    ];
+    let schema = registry(vec![def]);
+    let id = schema.id(&"render.nested_mode".into()).unwrap();
+    assert!(schema
+        .validate_value(id, schema.def(id).unwrap().default.clone())
+        .is_ok());
+    assert!(schema
+        .validate_value(
+            id,
+            Value::EnumPayload {
+                id: outer.id,
+                payload: EnumPayload::Struct(BTreeMap::from([(
+                    "filter".into(),
+                    Value::Enum(inner.id),
+                )])),
+            }
+        )
+        .is_err());
 }
 
 #[test]
@@ -334,6 +502,77 @@ fn constraints_clamp_reject_nonfinite_and_enforce_cross_rules() {
     )];
     assert!(
         matches!(Resolver::new(&reg).resolve(Domain::Runtime, &sources, 1), Err(errors) if errors.iter().any(|e| matches!(e, SettingsError::CrossConstraint { .. })))
+    );
+}
+
+#[test]
+fn recursive_array_shapes_validate_element_type_and_length() {
+    let mut array = SettingDef::new(
+        "render.samples",
+        "render",
+        Value::Array(vec![Value::Int(2), Value::Int(4)]),
+    );
+    array.set_shape(ValueShape::array(ValueShape::scalar(ValueType::Int), 1, 3));
+    let reg = registry(vec![array]);
+    let id = reg.id(&"render.samples".into()).unwrap();
+
+    assert_eq!(
+        reg.validate_value(id, Value::Array(vec![Value::Int(9)]))
+            .unwrap(),
+        Value::Array(vec![Value::Int(9)])
+    );
+    assert!(matches!(
+        reg.validate_value(id, Value::Array(vec![Value::Int(1), Value::Bool(true)])),
+        Err(SettingsError::TypeMismatch { .. })
+    ));
+    assert!(matches!(
+        reg.validate_value(id, Value::Array(Vec::new())),
+        Err(SettingsError::TooShort { .. })
+    ));
+    assert!(matches!(
+        reg.validate_value(
+            id,
+            Value::Array(vec![
+                Value::Int(1),
+                Value::Int(2),
+                Value::Int(3),
+                Value::Int(4)
+            ])
+        ),
+        Err(SettingsError::TooLong { .. })
+    ));
+}
+
+#[test]
+fn array_shape_rejects_invalid_schema_and_infers_nested_defaults() {
+    let mut invalid = SettingDef::new(
+        "render.samples",
+        "render",
+        Value::Array(vec![Value::Int(1)]),
+    );
+    invalid.set_shape(ValueShape::array(ValueShape::scalar(ValueType::Int), 3, 2));
+    let mut builder = RegistryBuilder::new();
+    builder.namespace("render", "test-owner").unwrap();
+    builder.register(invalid);
+    assert!(matches!(
+        builder.finish(),
+        Err(errors) if errors.iter().any(|error| matches!(error, SettingsError::InvalidDefinition { reason, .. } if reason.contains("inverted array bounds")))
+    ));
+
+    let definition = SettingDef::new(
+        "render.matrix_row",
+        "render",
+        Value::Array(vec![Value::Array(vec![
+            Value::Float(1.0),
+            Value::Float(0.0),
+        ])]),
+    );
+    assert_eq!(
+        definition.shape,
+        ValueShape::bounded_array(
+            ValueShape::bounded_array(ValueShape::scalar(ValueType::Float), DEFAULT_MAX_ARRAY_LEN,),
+            DEFAULT_MAX_ARRAY_LEN,
+        )
     );
 }
 

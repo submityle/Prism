@@ -73,6 +73,44 @@ impl EnumId {
     }
 }
 
+/// Stable identity of an enum type, independent of its declaration order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct EnumTypeId(pub u32);
+
+impl EnumTypeId {
+    /// Derives a deterministic runtime ID from a stable enum type name.
+    pub fn from_stable_name(name: &str) -> Self {
+        let mut hash = 0x811c_9dc5u32;
+        for byte in name.as_bytes() {
+            hash ^= u32::from(*byte);
+            hash = hash.wrapping_mul(0x0100_0193);
+        }
+        Self(hash)
+    }
+}
+
+/// Stable schema for one enum type and all of its variants.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EnumSchema {
+    /// Stable enum type identity.
+    pub id: EnumTypeId,
+    /// Stable persisted enum type name.
+    pub stable_name: String,
+    /// All variants in declaration-independent stable order.
+    pub variants: Vec<EnumVariantSchema>,
+}
+
+/// Stable schema for one enum variant.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EnumVariantSchema {
+    /// Runtime variant identity.
+    pub id: EnumId,
+    /// Stable persisted variant name.
+    pub stable_name: String,
+    /// Payload shape for tuple/struct variants; `None` means unit.
+    pub payload: Option<EnumPayloadShape>,
+}
+
 /// A stable, user-facing name paired with its deterministic runtime enum ID.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EnumOption {
@@ -89,6 +127,33 @@ impl EnumOption {
         let id = EnumId::from_stable_name(&stable_name);
         Self { id, stable_name }
     }
+}
+
+/// Recursive schema for the payload of one non-unit enum option.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EnumPayloadShape {
+    /// Positional tuple fields, validated in declaration order.
+    Tuple(Vec<ValueShape>),
+    /// Named struct fields, requiring exactly the declared keys.
+    Struct(BTreeMap<String, ValueShape>),
+}
+
+/// Payload schema associated with a stable enum option identity.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EnumOptionPayload {
+    /// Stable option identity. Must also appear in `SettingDef::enum_options`.
+    pub id: EnumId,
+    /// Payload layout required by this option.
+    pub shape: EnumPayloadShape,
+}
+
+/// Runtime payload data for a non-unit enum option.
+#[derive(Clone, Debug, PartialEq)]
+pub enum EnumPayload {
+    /// Positional tuple fields.
+    Tuple(Vec<Value>),
+    /// Named struct fields.
+    Struct(BTreeMap<String, Value>),
 }
 /// Stable identity for byte payloads carried by a [`Value`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -111,6 +176,29 @@ pub enum Value {
     String(String),
     /// Registry-local enum identity.
     Enum(EnumId),
+    /// Type-qualified enum identity.
+    EnumTyped {
+        /// Enum type identity.
+        enum_type: EnumTypeId,
+        /// Variant identity.
+        id: EnumId,
+    },
+    /// Registry-local enum identity and its tuple or struct payload.
+    EnumPayload {
+        /// Stable enum option identity.
+        id: EnumId,
+        /// Variant payload.
+        payload: crate::EnumPayload,
+    },
+    /// Type-qualified enum identity and payload.
+    EnumPayloadTyped {
+        /// Enum type identity.
+        enum_type: EnumTypeId,
+        /// Variant identity.
+        id: EnumId,
+        /// Variant payload.
+        payload: crate::EnumPayload,
+    },
     /// Ordered sequence.
     Array(Vec<Value>),
     /// Key-sorted structured value.
@@ -154,6 +242,8 @@ pub enum ValueType {
 pub enum ValueShape {
     /// A scalar leaf. `Array` and `Table` are not valid scalar leaves.
     Scalar(ValueType),
+    /// A type-qualified enum leaf.
+    Enum(EnumTypeId),
     /// A homogeneous, recursively shaped array with inclusive length bounds.
     Array {
         /// Shape required for every element.
@@ -258,6 +348,9 @@ impl ValueShape {
                 .map(|(key, value)| Some((key.clone(), Self::from_value(value)?)))
                 .collect::<Option<BTreeMap<_, _>>>()
                 .map(Self::Table),
+            Value::EnumTyped { enum_type, .. } | Value::EnumPayloadTyped { enum_type, .. } => {
+                Some(Self::Enum(*enum_type))
+            }
             _ => Some(Self::scalar(value.value_type())),
         }
     }
@@ -267,6 +360,7 @@ impl ValueShape {
     pub const fn value_type(&self) -> ValueType {
         match self {
             Self::Scalar(value_type) => *value_type,
+            Self::Enum(_) => ValueType::Enum,
             Self::Array { .. } => ValueType::Array,
             Self::Table(_) | Self::Map { .. } => ValueType::Table,
             Self::Set { .. } => ValueType::Array,
@@ -285,6 +379,7 @@ impl ValueShape {
         }
         match self {
             Self::Scalar(value_type) => !matches!(value_type, ValueType::Array | ValueType::Table),
+            Self::Enum(_) => true,
             Self::Array {
                 element,
                 min_len,
@@ -311,6 +406,12 @@ impl ValueShape {
         }
         match self {
             Self::Scalar(value_type) => value.value_type() == *value_type,
+            Self::Enum(enum_type) => matches!(
+                value,
+                Value::EnumTyped { enum_type: actual, .. }
+                    | Value::EnumPayloadTyped { enum_type: actual, .. }
+                    if actual == enum_type
+            ),
             Self::Array {
                 element,
                 min_len,
@@ -384,6 +485,9 @@ impl Value {
             Self::Float(_) => ValueType::Float,
             Self::String(_) => ValueType::String,
             Self::Enum(_) => ValueType::Enum,
+            Self::EnumTyped { .. } => ValueType::Enum,
+            Self::EnumPayload { .. } => ValueType::Enum,
+            Self::EnumPayloadTyped { .. } => ValueType::Enum,
             Self::Array(_) => ValueType::Array,
             Self::Table(_) => ValueType::Table,
             Self::Bytes(_) => ValueType::Bytes,
@@ -647,6 +751,11 @@ pub struct SettingDef {
     pub default: Value,
     /// Named stable options when the value type is `Enum`.
     pub enum_options: Vec<EnumOption>,
+    /// Tuple/struct payload schemas for non-unit enum options. Options omitted
+    /// here remain unit variants, preserving the original enum API.
+    pub enum_payloads: Vec<EnumOptionPayload>,
+    /// Type-qualified enum catalogs used by typed enum values.
+    pub enum_schemas: Vec<EnumSchema>,
     /// Value variant required by the schema.
     pub ty: ValueType,
     /// Recursive value shape, including homogeneous array element and length
@@ -685,6 +794,8 @@ impl SettingDef {
             category: None,
             default,
             enum_options: Vec::new(),
+            enum_payloads: Vec::new(),
+            enum_schemas: Vec::new(),
             ty,
             shape,
             constraints: Constraints::default(),

@@ -419,7 +419,8 @@ mod required_setting_tests {
 
     #[test]
     fn required_setting_rejects_engine_default_but_accepts_a_source_value() {
-        let mut definition = SettingDef::new("render.device", "render", Value::String("auto".into()));
+        let mut definition =
+            SettingDef::new("render.device", "render", Value::String("auto".into()));
         definition.flags.required = true;
         let mut builder = RegistryBuilder::new();
         builder.namespace("render", "test").unwrap();
