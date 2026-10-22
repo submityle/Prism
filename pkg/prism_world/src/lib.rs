@@ -15,10 +15,12 @@ extern crate std;
 #[cfg(feature = "scene_host")]
 pub mod scene_host;
 
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 use prism_world_persist::{AppendOnlyLog, LogError, Transaction};
 use prism_world_residency::{
-    MaterializationBudget, ResidencyPlan, ResidencyRecord, ResidencyScheduler,
+    MaterializationBudget, ResidencyAction, ResidencyPlan, ResidencyRecord, ResidencyScheduler,
+    ResidencyState,
 };
 use prism_world_stream::{
     validate_manifests, CellManifest, DemandSource, ManifestSpatialIndex, ManifestValidationError,
@@ -109,8 +111,8 @@ pub trait SceneHost {
     fn transition_residency(
         &mut self,
         id: u64,
-        from: prism_world_residency::ResidencyState,
-        to: prism_world_residency::ResidencyState,
+        from: ResidencyState,
+        to: ResidencyState,
     ) -> Result<(), Self::Error>;
 }
 
@@ -121,6 +123,21 @@ pub enum ApplyError<E> {
     Host(E),
     /// A host cannot atomically apply a contiguous multi-cell reload batch.
     AtomicReloadUnsupported,
+    /// A residency action listed the same stable identity more than once.
+    DuplicateResidencyAction(u64),
+    /// The caller supplied duplicate committed records for one identity.
+    DuplicateResidencyRecord(u64),
+    /// A residency action referenced no supplied committed record.
+    ResidencyRecordNotFound(u64),
+    /// A residency action was planned from a stale committed state.
+    ResidencySourceMismatch {
+        /// Stable identity carried by the action.
+        id: u64,
+        /// State captured when the action was planned.
+        expected: ResidencyState,
+        /// State currently present in the mutable record set.
+        actual: ResidencyState,
+    },
 }
 
 /// Failure while converting and appending a simulation result.
@@ -214,6 +231,45 @@ impl WorldRuntime {
         apply_plan_to(plan, host)
     }
 
+    /// Applies a plan and commits successful residency transitions to the
+    /// caller's authoritative records.
+    ///
+    /// All residency action identities and source states are validated before
+    /// any stream or host operation starts. After that preflight, stream work
+    /// and residency work retain the normal deterministic order. Each record
+    /// is updated only after its host transition succeeds; if a later host
+    /// operation fails, already completed prefix transitions and their record
+    /// updates remain committed. Provider-owned ECS/GPU side effects are not
+    /// rolled back by this method.
+    pub fn apply_plan_with_records<H: SceneHost>(
+        &mut self,
+        plan: &WorldFramePlan,
+        records: &mut [ResidencyRecord],
+        frame: u64,
+        host: &mut H,
+    ) -> Result<(), ApplyError<H::Error>> {
+        let record_indices = validate_residency_application(plan, records)?;
+        apply_stream_plan_to(plan, host)?;
+        for (action, record_index) in plan
+            .residency
+            .actions
+            .iter()
+            .zip(record_indices)
+        {
+            let (id, from, to) = match *action {
+                ResidencyAction::Promote { id, from, to, .. }
+                | ResidencyAction::Demote { id, from, to } => (id, from, to),
+                ResidencyAction::Keep { .. } => continue,
+            };
+            host.transition_residency(id, from, to)
+                .map_err(ApplyError::Host)?;
+            let record = &mut records[record_index];
+            record.state = to;
+            record.last_transition_frame = Some(frame);
+        }
+        Ok(())
+    }
+
     /// Commits an IO completion without mutating scene truth.
     pub fn mark_resident(&mut self, sector: SectorId) {
         self.stream.mark_resident(sector);
@@ -286,6 +342,23 @@ pub(crate) fn apply_plan_to<H: SceneHost>(
     plan: &WorldFramePlan,
     host: &mut H,
 ) -> Result<(), ApplyError<H::Error>> {
+    apply_stream_plan_to(plan, host)?;
+    for action in &plan.residency.actions {
+        let (ResidencyAction::Promote { id, from, to, .. }
+        | ResidencyAction::Demote { id, from, to }) = *action
+        else {
+            continue;
+        };
+        host.transition_residency(id, from, to)
+            .map_err(ApplyError::Host)?;
+    }
+    Ok(())
+}
+
+fn apply_stream_plan_to<H: SceneHost>(
+    plan: &WorldFramePlan,
+    host: &mut H,
+) -> Result<(), ApplyError<H::Error>> {
     let mut stream_index = 0;
     while stream_index < plan.stream.actions.len() {
         let action = &plan.stream.actions[stream_index];
@@ -321,17 +394,46 @@ pub(crate) fn apply_plan_to<H: SceneHost>(
             }
         }
     }
-    for action in &plan.residency.actions {
-        match action {
-            prism_world_residency::ResidencyAction::Promote { id, from, to, .. }
-            | prism_world_residency::ResidencyAction::Demote { id, from, to } => {
-                host.transition_residency(*id, *from, *to)
-                    .map_err(ApplyError::Host)?;
-            }
-            prism_world_residency::ResidencyAction::Keep { .. } => {}
+    Ok(())
+}
+
+fn validate_residency_application<E>(
+    plan: &WorldFramePlan,
+    records: &[ResidencyRecord],
+) -> Result<Vec<usize>, ApplyError<E>> {
+    let mut indices = BTreeMap::new();
+    for (index, record) in records.iter().enumerate() {
+        if indices.insert(record.id, index).is_some() {
+            return Err(ApplyError::DuplicateResidencyRecord(record.id));
         }
     }
-    Ok(())
+    let mut seen = BTreeSet::new();
+    let mut action_indices = Vec::with_capacity(plan.residency.actions.len());
+    for action in &plan.residency.actions {
+        let id = action.id();
+        if !seen.insert(id) {
+            return Err(ApplyError::DuplicateResidencyAction(id));
+        }
+        let Some(&record_index) = indices.get(&id) else {
+            return Err(ApplyError::ResidencyRecordNotFound(id));
+        };
+        let record = records[record_index];
+        let expected = match *action {
+            ResidencyAction::Promote { from, .. } | ResidencyAction::Demote { from, .. } => {
+                from
+            }
+            ResidencyAction::Keep { state, .. } => state,
+        };
+        if record.state != expected {
+            return Err(ApplyError::ResidencySourceMismatch {
+                id,
+                expected,
+                actual: record.state,
+            });
+        }
+        action_indices.push(record_index);
+    }
+    Ok(action_indices)
 }
 
 #[cfg(test)]
@@ -498,6 +600,14 @@ mod tests {
         let mut world = WorldRuntime::new(ResidencyScheduler::new(policy));
         let sector = SectorId::new(0, 0, 0, 0);
         let bounds = AabbI64::new(GlobalPos::new(0, 0, 0), GlobalPos::new(1, 1, 1)).unwrap();
+        let mut records = alloc::vec![ResidencyRecord::new(
+            7,
+            ResidencyState::TierC,
+            0,
+            1,
+            1,
+            1,
+        )];
         let plan = world.tick(
             &[DemandSource::new(sector, 0, 1, 10).unwrap()],
             &[CellManifest {
@@ -509,7 +619,7 @@ mod tests {
                 io_bytes: 1,
                 data_layers: prism_world_stream::DataLayerMask::EMPTY,
             }],
-            &[ResidencyRecord::new(7, ResidencyState::TierC, 0, 1, 1, 1)],
+            &records,
             1,
             WorldBudget {
                 stream: StreamBudget {
@@ -522,8 +632,141 @@ mod tests {
         let mut host = Host {
             calls: alloc::vec::Vec::new(),
         };
-        world.apply_plan(&plan, &mut host).unwrap();
-        assert_eq!(host.calls, alloc::vec![0, 1_007]);
+        world
+            .apply_plan_with_records(&plan, &mut records, 1, &mut host)
+            .unwrap();
+        assert_eq!(host.calls, alloc::vec![0, 1_009]);
+        assert_eq!(records[0].state, ResidencyState::TierA);
+        assert_eq!(records[0].last_transition_frame, Some(1));
+    }
+
+    #[test]
+    fn residency_record_preflight_rejects_stale_action_before_stream_or_host_work() {
+        struct Host {
+            calls: u32,
+        }
+
+        impl SceneHost for Host {
+            type Error = ();
+
+            fn load_cell(&mut self, _sector: SectorId) -> Result<(), Self::Error> {
+                self.calls += 1;
+                Ok(())
+            }
+
+            fn unload_cell(&mut self, _sector: SectorId) -> Result<(), Self::Error> {
+                self.calls += 1;
+                Ok(())
+            }
+
+            fn transition_residency(
+                &mut self,
+                _id: u64,
+                _from: ResidencyState,
+                _to: ResidencyState,
+            ) -> Result<(), Self::Error> {
+                self.calls += 1;
+                Ok(())
+            }
+        }
+
+        let policy = ResidencyPolicy::new(1, 2, 3, 4, 0).unwrap();
+        let mut world = WorldRuntime::new(ResidencyScheduler::new(policy));
+        let plan = world.tick(
+            &[],
+            &[],
+            &[ResidencyRecord::new(7, ResidencyState::TierC, 0, 1, 1, 1)],
+            1,
+            WorldBudget {
+                stream: StreamBudget {
+                    io_bytes: 0,
+                    max_actions: 0,
+                },
+                materialization: MaterializationBudget::new(1, 1),
+            },
+        );
+        let mut records = alloc::vec![ResidencyRecord::new(
+            7,
+            ResidencyState::TierA,
+            0,
+            1,
+            1,
+            1,
+        )];
+        let mut host = Host { calls: 0 };
+        assert_eq!(
+            world.apply_plan_with_records(&plan, &mut records, 2, &mut host),
+            Err(ApplyError::ResidencySourceMismatch {
+                id: 7,
+                expected: ResidencyState::TierC,
+                actual: ResidencyState::TierA,
+            })
+        );
+        assert_eq!(host.calls, 0);
+        assert_eq!(world.stream_frame(), 1);
+    }
+
+    #[test]
+    fn residency_record_commit_keeps_successful_prefix_when_later_host_transition_fails() {
+        struct Host {
+            calls: Vec<u64>,
+        }
+
+        impl SceneHost for Host {
+            type Error = ();
+
+            fn load_cell(&mut self, _sector: SectorId) -> Result<(), Self::Error> {
+                Ok(())
+            }
+
+            fn unload_cell(&mut self, _sector: SectorId) -> Result<(), Self::Error> {
+                Ok(())
+            }
+
+            fn transition_residency(
+                &mut self,
+                id: u64,
+                _from: ResidencyState,
+                _to: ResidencyState,
+            ) -> Result<(), Self::Error> {
+                self.calls.push(id);
+                if id == 9 {
+                    Err(())
+                } else {
+                    Ok(())
+                }
+            }
+        }
+
+        let policy = ResidencyPolicy::new(1, 2, 3, 4, 0).unwrap();
+        let mut world = WorldRuntime::new(ResidencyScheduler::new(policy));
+        let mut records = alloc::vec![
+            ResidencyRecord::new(7, ResidencyState::TierC, 0, 10, 1, 1),
+            ResidencyRecord::new(9, ResidencyState::TierC, 0, 9, 1, 1),
+        ];
+        let plan = world.tick(
+            &[],
+            &[],
+            &records,
+            1,
+            WorldBudget {
+                stream: StreamBudget {
+                    io_bytes: 0,
+                    max_actions: 0,
+                },
+                materialization: MaterializationBudget::new(2, 2),
+            },
+        );
+        let mut host = Host { calls: Vec::new() };
+        assert_eq!(
+            world.apply_plan_with_records(&plan, &mut records, 1, &mut host),
+            Err(ApplyError::Host(()))
+        );
+        assert_eq!(host.calls, alloc::vec![7, 9]);
+        assert_eq!(records[0].state, ResidencyState::TierA);
+        assert_eq!(records[0].last_transition_frame, Some(1));
+        assert_eq!(records[1].state, ResidencyState::TierC);
+        assert_eq!(records[1].last_transition_frame, None);
     }
 
     #[cfg(feature = "simulation")]
