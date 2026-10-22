@@ -65,6 +65,12 @@ pub struct MeshDerivedArtifact {
     pub kind: u128,
     /// Explicit artifact schema.
     pub schema: u32,
+    /// Geometry revision from which this artifact was cooked.
+    ///
+    /// This must equal [`MeshConsumerBinding::revision`]. A mismatch means the
+    /// cooked product is stale even when its key and schema are individually
+    /// valid; consumers must not silently combine it with another revision.
+    pub source_revision: u32,
 }
 
 /// All representations that belong to one geometry revision.
@@ -124,6 +130,8 @@ pub enum MeshConsumerBindingError {
     MissingDerivedArtifact,
     /// An artifact schema of zero cannot be interpreted.
     InvalidDerivedSchema,
+    /// The derived product was cooked from a different geometry revision.
+    StaleDerivedArtifact,
 }
 
 impl MeshConsumerBinding {
@@ -134,11 +142,6 @@ impl MeshConsumerBinding {
         }
         if self.revision == 0 {
             return Err(MeshConsumerBindingError::InvalidRevision);
-        }
-        if let Some(artifact) = self.derived {
-            if artifact.schema == 0 {
-                return Err(MeshConsumerBindingError::InvalidDerivedSchema);
-            }
         }
         Ok(())
     }
@@ -165,6 +168,12 @@ impl MeshConsumerBinding {
                 let artifact = self
                     .derived
                     .ok_or(MeshConsumerBindingError::MissingDerivedArtifact)?;
+                if artifact.schema == 0 {
+                    return Err(MeshConsumerBindingError::InvalidDerivedSchema);
+                }
+                if artifact.source_revision != self.revision {
+                    return Err(MeshConsumerBindingError::StaleDerivedArtifact);
+                }
                 if matches!(self.current, MeshRepresentation::VirtualCluster { .. }) {
                     return Err(MeshConsumerBindingError::VirtualClusterForDerivedConsumer);
                 }
@@ -237,6 +246,7 @@ mod tests {
                 key: [5; 32],
                 kind: 11,
                 schema: 1,
+                source_revision: 7,
             }),
         }
     }
@@ -291,6 +301,20 @@ mod tests {
             invalid.select(MeshConsumer::DerivedGeometry),
             Err(MeshConsumerBindingError::InvalidDerivedSchema)
         );
+    }
+
+    #[test]
+    fn derived_artifact_from_another_geometry_revision_is_rejected() {
+        let mut stale = binding(true, true);
+        stale.derived = Some(MeshDerivedArtifact {
+            source_revision: stale.revision - 1,
+            ..stale.derived.unwrap()
+        });
+        assert_eq!(
+            stale.select(MeshConsumer::Collision),
+            Err(MeshConsumerBindingError::StaleDerivedArtifact)
+        );
+        assert!(stale.select(MeshConsumer::MainView).is_ok());
     }
 
     #[test]

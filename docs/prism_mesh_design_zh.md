@@ -649,7 +649,7 @@ Mesh 表示不能由主视图、深度、阴影、速度、光追和派生几何
 - `MainView`、`Depth`、`Shadow`、`RayTracing` 共享同一个 current representation；不能在某个 pass 中私自换成另一份 Mesh。
 - `MotionVector` 始终返回 current/previous 成对表示；首帧、跳帧或 teleport 时 previous 等同 current 且 `history_valid=false`，由速度 pass 输出零速度。
 - 虚拟几何页未驻留时，渲染消费者只绑定 `fallback`，并将 `used_fallback=true` 传递给诊断；不得返回空 draw 或未校验页。
-- `Collision` 与 `DerivedGeometry` 不直接消费虚拟 Cluster；它们必须消费 `MeshDerivedArtifact { key, kind, schema }`，用制品身份和 schema 防止碰撞、SDF、导航、OMM 等派生数据错配。
+- `Collision` 与 `DerivedGeometry` 不直接消费虚拟 Cluster；它们必须消费 `MeshDerivedArtifact { key, kind, schema, source_revision }`。统一绑定入口验证制品 schema 有效且 `source_revision == MeshConsumerBinding::revision`，拒绝跨几何 revision 混用。
 - 新增消费者只能扩展 `MeshConsumer` 与对应选择测试；GPU 后端不得复制一套独立的 Mesh 选择逻辑。
 
 ### 13.2 Bevy 场景适配与 LOD 资产生命周期（已实现）
@@ -726,7 +726,7 @@ atlas caster-depth 与 shading resolve 绑定已经由 `prism_render_scene::shad
 
 规则：所有派生几何在 `prism_asset_build_core` 的 Artifact DAG 中显式表达依赖（资产构建文档 §12.2），不以“渲染时临时转换”替代构建。
 
-运行时绑定由 `MeshDerivedArtifact` 传递制品 key、kind 和 schema。绑定校验失败时返回结构化错误，不允许把当前渲染 LOD、虚拟 Cluster 或过期 revision 当作碰撞/导航/SDF/OMM 输入；这保证派生消费者与渲染消费者共享几何 revision，但保持各自产物的精度和生命周期。
+运行时绑定由 `MeshDerivedArtifact` 传递制品 key、kind、schema 和 `source_revision`。统一选择器校验 schema 非零且 `source_revision` 与当前几何 revision 完全一致；过期制品返回 `StaleDerivedArtifact`，不允许交给碰撞/导航/SDF/OMM 消费者。此校验阻断 stale binding，但 artifact 发布端如何从同一构建 revision 产生可信 `source_revision`、以及新旧制品与物理 shape 的原子替换仍未端到端接入。
 
 物理三角网格现通过 `TriMeshData::from_mesh_asset(&prism_mesh::Mesh)` 接收规范 Mesh IR：先要求 `TriangleList`，再执行 Mesh 完整验证，并要求 `Vertex_Position: Float32x3`，从原始索引（或非索引顺序）构建物理 BVH。该适配器显式拒绝错误 Mesh、缺少位置、位置格式不支持、非三角形拓扑及空几何；它不从渲染 LOD、形变缓存或虚拟 Cluster 猜测碰撞输入。`prism_physics_core/tests/mesh_asset_adapter.rs` 覆盖有效三角形保真、缺失 canonical position 和不支持拓扑，定向集成测试 3 项通过，`cargo check -p prism_physics_core --lib` 通过。物理产物因此有稳定的独立生命周期；带 Artifact DAG key/kind/schema 的资产发布和运行时 stale-revision 替换策略仍须由资产构建/场景物理绑定层接入后，才可计为端到端派生产物闭环。
 
@@ -1108,7 +1108,7 @@ pub struct DeformationBudget { pub vertices_per_frame: u32, pub blas_refits_per_
 | 布局与标准路径 | 同属性集产生确定布局，上传字节与 draw 布局一致 | CPU 契约与 Metal 标准/半精度分流 8×8 像素测试通过；不等同于全档位 Golden 图集 |
 | 虚拟几何 | 固定 Cluster、CLST v3、QEM LOD、CPU 计划、页 ABI、LOD/cull/raster GPU twin 一致 | `prism_asset_build_core --lib` 136 项、`virtual_geometry_lod` 定向 12 项通过；属性感知简化保留精确源顶点与全部 typed 属性；原始 CLST v3 vertex-pulling render pass 已通过颜色读回，整页 IO 一致不再被误写成属性 shader 着色证据，但仍不替代完整场景 Golden 图 |
 | 形变 | Skin/Morph、缓存、预算与深度/阴影/速度/RT 消费一致 | 批量 Morph/LBS/修正的 CPU/GPU 对照（含 50,000 顶点）与 16×16 current/previous 直接绘制通过；数学蒙皮 parity 4 项通过。全部引擎 pass/RT 消费接线和跨档位 Golden 图不由这些独立测试证明 |
-| 多消费者绑定 | 主视图、深度、阴影、Motion Vector、RT、Collision、Derived Geometry 使用统一身份与明确回退 | `geometry::consumer`、`prism_render_app::mesh::consumer` 与 `prism_render_scene::geometry::consumer` 契约测试；场景侧实际主视图、Visibility、透明、阴影和 VSM draw 在取 allocator slice 前统一校验 `MainView`/`Shadow`。Collision 已有 canonical Mesh IR → physics BVH 的验证适配器（3 项定向集成测试通过），但 Artifact DAG 发布、绑定和 revision 替换尚非端到端闭环；形变历史、RT 与其他 Derived 制品仍按各自输入协议选择，不得伪装为静态场景 draw 已覆盖 |
+| 多消费者绑定 | 主视图、深度、阴影、Motion Vector、RT、Collision、Derived Geometry 使用统一身份、revision 和明确回退 | `geometry::consumer` 对 `MeshDerivedArtifact.source_revision` 与绑定 revision 做 fail-closed 相等校验，并覆盖 stale-revision 拒绝；`prism_render_app::mesh::consumer`、场景主视图/Visibility/透明/阴影/VSM draw 维持已有选择契约。Collision 已有 canonical Mesh IR → physics BVH 的验证适配器（3 项定向集成测试通过），但 Artifact DAG 发布端尚未生成并绑定可信 source revision，物理 shape 原子替换仍未端到端验证；形变历史、RT 与其他 Derived 制品也未由该测试矩阵证明 |
 | 光追派生 | OMM 与派生几何使用版本化资产契约；无 RT 能力时选择光栅路径 | OMM 强制 GPU parity 通过；不把它扩张为完整 RT 场景画质结论 |
 | 带宽与性能 | §18 固定场景输出 P50/P95/P99、GPU timestamp、VRAM、上传、缺页与功耗字段 | 已记录 CPU 构建/LOD P50/P95/P99；完整场景 GPU 字段无本轮 artifact，因此预算表保持回归门槛而非达标声明 |
 | 维护性 | 扩展点遵守 §20.2，schema/ABI 显式版本化，错误类型稳定 | CLST v3/v2 兼容、稳定格式标签、缓存失效、精确 framing 与类型化错误由代码和测试锁定 |

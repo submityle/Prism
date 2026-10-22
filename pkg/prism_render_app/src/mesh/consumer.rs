@@ -309,6 +309,7 @@ mod tests {
             key: [7; 32],
             kind: 3,
             schema: 1,
+            source_revision: 1,
         });
         let (source, selection) = binding.select(MeshConsumer::Collision, true).unwrap();
         assert!(matches!(selection, MeshConsumerSelection::Derived { .. }));
