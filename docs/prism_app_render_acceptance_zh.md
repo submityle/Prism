@@ -1,6 +1,6 @@
 # Prism App / RenderApp 本机验收记录
 
-更新时间：2026-10-16。本文只记录当前工作树在本机可复现的 App 与 RenderApp 证据；不把设计目标、被跳过的硬件测试或单机样本扩展成跨平台结论。`prism_replication`、`prism_asset` 不在本次修改范围内。
+更新时间：2026-10-23。本文汇总有明确日期/命令的本机 App 与 RenderApp 验收证据；旧 GPU/benchmark 结果仍是其记录时的样本，不代表本次全部重跑。不把设计目标、被跳过的硬件测试或单机样本扩展成跨平台结论。`prism_replication`、`prism_asset` 不在本次 GPU 验收范围内。
 
 ## 当前已覆盖
 
@@ -94,6 +94,8 @@ retained consumer/readback、12-byte compact layout 和 buffer release。
 ## 本机命令与结果
 
 ### App 单元/集成测试
+
+以下为既有验收记录中的结果快照（不是 2026-10-23 本轮重跑）：
 
 ```text
 CARGO_TARGET_DIR=/private/tmp/prism-app-acceptance \
@@ -201,6 +203,18 @@ benchmark 支持通过 `PRISM_PIPELINE_MAX_FRAME_P99_NS` 与
 `performance_thresholds_passed=true`。这些门槛是本次验收配置，不是跨机器或生产统一标准。
 
 ## 尚未闭环的缺口
+
+### Windows compile gate 与平台运行时边界（2026-10-23）
+
+当前 checkout 包含 `e64f3be18`（跨平台 async-I/O descriptor facade）及后续修复；本次在 Windows MSVC target 成功完成 all-features 编译检查：
+
+```text
+CARGO_TARGET_DIR=/private/tmp/prism-app-windows-audit \
+CARGO_BUILD_JOBS=1 \
+cargo check --locked -p prism_app --all-features --target x86_64-pc-windows-msvc
+```
+
+结果：`Finished dev profile`，退出码 `0`。因此 Windows all-features **编译门禁已通过**，不再将此前 `std::os::fd` 或 unsafe lint 失败作为当前状态。该结果只证明交叉目标编译，不证明 Windows 运行时正确。仍缺 Windows 原生窗口/文件 I/O/生命周期与恢复运行时演练、Windows GPU adapter/呈现路径验收，以及覆盖 Windows/macOS/Linux 的 CI feature/target matrix；这些应独立列为平台运行时/集成验收缺口。
 
 ### GPU 证据边界
 
