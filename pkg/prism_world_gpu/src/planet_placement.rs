@@ -2,8 +2,9 @@
 //!
 //! This module owns a GPU candidate stream and does not submit or implicitly
 //! wait for work. The CPU validates the complete request and uploads immutable
-//! height samples as signed i128 limbs. The shader uses core WGSL `f32` only
-//! for sphere projection and rendered positions; exact recipe inputs stay intact.
+//! height samples as signed i128 limbs. The shader uses integer cube-sphere
+//! projection at a radial-dependent Q precision (Q37..Q84), then stores exact
+//! signed-i128 frame-local millimetres; f32 is limited to the normal output.
 
 use prism_world_terrain::{
     estimate_planet_placement_work, HeightfieldTile, PlanetPlacementConfig, PlanetPlacementError,

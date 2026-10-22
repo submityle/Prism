@@ -83,14 +83,14 @@ fn main() {
         i256_from_i64_words(vec2<u32>(3u, 0u)),
         i256_from_i64_words(vec2<u32>(4u, 0u)),
         i256_from_i64_words(vec2<u32>(12u, 0u)));
-    let direction = cube_direction_q84(cube);
+    let direction = cube_direction_q(cube, 84u);
     for (var axis = 0u; axis < 3u; axis += 1u) {
         store_u256(85u + axis * 9u, direction[axis].magnitude);
         output_words[85u + axis * 9u + 8u] = select(0u, 1u, direction[axis].negative);
     }
     let radial = i256_from_i128_words(vec4<u32>(12345u, 0u, 0u, 0u));
     for (var axis = 0u; axis < 3u; axis += 1u) {
-        let projected = project_q84_to_mm(direction[axis], radial);
+        let projected = project_q_to_mm(direction[axis], radial, 84u);
         store_u256(112u + axis * 9u, projected.magnitude);
         output_words[120u + axis * 9u] = select(0u, 1u, projected.negative);
     }
@@ -98,16 +98,16 @@ fn main() {
         i256_from_i64_words(vec2<u32>(0xfffffffdu, 0xffffffffu)),
         i256_from_i64_words(vec2<u32>(4u, 0u)),
         i256_from_i64_words(vec2<u32>(0xfffffff4u, 0xffffffffu)));
-    let signed_direction = cube_direction_q84(signed_cube);
+    let signed_direction = cube_direction_q(signed_cube, 84u);
     let negative_radial = i256_from_i128_words(vec4<u32>(0xffffcfc7u, 0xffffffffu, 0xffffffffu, 0xffffffffu));
     for (var axis = 0u; axis < 3u; axis += 1u) {
-        let projected = project_q84_to_mm(signed_direction[axis], negative_radial);
+        let projected = project_q_to_mm(signed_direction[axis], negative_radial, 84u);
         store_u256(139u + axis * 9u, projected.magnitude);
         output_words[147u + axis * 9u] = select(0u, 1u, projected.negative);
     }
     for (var face = 0u; face < 6u; face += 1u) {
         let cube_num = cube_numerators_for_cell(face, vec2<u32>(7u, 11u), vec2<u32>(5u, 9u), 16u, 4u);
-        let direction_num = cube_direction_q84(cube_num);
+        let direction_num = cube_direction_q(cube_num, 84u);
         for (var axis = 0u; axis < 3u; axis += 1u) {
             let base = 166u + (face * 3u + axis) * 9u;
             store_u256(base, direction_num[axis].magnitude);

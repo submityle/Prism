@@ -1,6 +1,9 @@
 //! Strict physical-GPU regression for the planetary placement producer.
 #![cfg(feature = "terrain_scatter")]
 
+#[path = "../src/planet_placement_fixed_math.rs"]
+mod fixed_math;
+
 use std::{convert::Infallible, sync::Arc, time::Duration};
 
 use prism_world_gpu::{GpuContext, GpuPlanetPlacement, GpuPlanetPlacementWorkBudget};
@@ -415,4 +418,103 @@ fn planetary_placement_frame_preserves_millimetre_local_offsets_at_planet_scale(
             "axis {axis}: GPU local {actual_local} mm, CPU local {expected_local} mm"
         );
     }
+}
+
+#[test]
+fn planetary_placement_adaptive_precision_covers_extreme_radial_inputs() {
+    let context = context();
+    let tile_key = TileKey::root(CubeFace::PositiveZ);
+    let spec = HeightfieldSpec::new(3, i64::MAX).unwrap();
+    let tile = Arc::new(
+        prism_world_terrain::HeightfieldTile::from_encoded_samples(
+            tile_key,
+            spec,
+            0,
+            [i16::MAX; 9],
+            BakeLimits {
+                max_samples: 9,
+                max_bytes: 18,
+            },
+        )
+        .unwrap(),
+    );
+    let config = PlanetPlacementConfig {
+        seed: 91,
+        version: 7,
+        salt: 113,
+        radius_mm: 1_i64 << 52,
+        origin_mm: [0; 3],
+        vertical_offset_mm: i64::MAX,
+        acceptance_threshold: u16::MAX,
+    };
+    let region = PlanetPlacementRegion::new(tile_key, [0, 0], [1, 1]).unwrap();
+    let mut placement = GpuPlanetPlacement::new(&context, 1, 9, 3, u64::MAX).unwrap();
+    placement
+        .write_request(
+            config,
+            region,
+            &tile,
+            GpuPlanetPlacementWorkBudget {
+                max_candidate_evaluations: 1,
+                max_sample_reads: 4,
+            },
+        )
+        .unwrap();
+    let records = context.device().create_buffer(&wgpu::BufferDescriptor {
+        label: Some("planet placement adaptive precision extreme readback"),
+        size: 116,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut encoder = context
+        .device()
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("planet placement adaptive precision extreme encoder"),
+        });
+    placement.encode(&mut encoder).unwrap();
+    placement
+        .encode_records_readback(&mut encoder, &records)
+        .unwrap();
+    context.queue().submit(Some(encoder.finish()));
+    context.wait();
+    let bytes = read(&context, &records);
+
+    let height_numerator = 4_i128 * i128::from(i16::MAX) * i128::from(i64::MAX);
+    let radial_numerator = (i128::from(config.radius_mm) + i128::from(config.vertical_offset_mm))
+        * 4
+        + height_numerator;
+    let normal = fixed_math::cell_center_direction_q96(4, 0, [0, 0], [0, 0], 3).unwrap();
+    for axis in 0..3 {
+        let expected = fixed_math::project_quarter_mm_q96(normal[axis], radial_numerator).unwrap();
+        let expected_magnitude = u128::from(expected.magnitude.0[0])
+            | (u128::from(expected.magnitude.0[1]) << 32)
+            | (u128::from(expected.magnitude.0[2]) << 64)
+            | (u128::from(expected.magnitude.0[3]) << 96);
+        assert_eq!(
+            expected.magnitude.0[4..],
+            [0; 4],
+            "Q96 oracle result must fit the local i128 ABI"
+        );
+        let expected_signed = i128::try_from(expected_magnitude).unwrap();
+        let expected_signed = if expected.negative {
+            -expected_signed
+        } else {
+            expected_signed
+        };
+        let actual = i128_word(&bytes, 24 + axis * 16);
+        assert!(
+            (actual - expected_signed).abs() <= 1,
+            "extreme radial axis {axis}: GPU {actual}, Q96 oracle {expected_signed}"
+        );
+        let normal_f64 = normal[axis] as f64 / 2_f64.powi(96);
+        let actual_normal = f64::from(f32_word(&bytes, 72 + axis * 4));
+        assert!((actual_normal - normal_f64).abs() <= 2.0e-6);
+    }
+    assert_eq!(word(&bytes, 84), 1);
+    assert_eq!(word(&bytes, 108), 0);
+    assert_eq!(word(&bytes, 112), 0);
+    assert_eq!(
+        &bytes[92..108],
+        bytemuck::cast_slice::<u32, u8>(&i128_words(height_numerator))
+    );
 }

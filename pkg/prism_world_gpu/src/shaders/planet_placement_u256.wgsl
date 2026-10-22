@@ -319,9 +319,10 @@ fn u256_isqrt_scaled(value: U256, shift: u32) -> U256 {
     return root;
 }
 
-// Normalize integer cube numerators to signed Q84. For the planetary input
-// bound |cube[i]| < 2^62, sum(cube[i]^2) < 3*2^124; sqrt(sum << 168) < 2^147,
-// and each shifted component < 2^230. Every operation therefore fits U256.
+// Normalize integer cube numerators to signed Qprecision_bits. For planetary
+// inputs |cube[i]| < 2^62 and precision_bits <= 84; sum(cube[i]^2) < 3*2^124,
+// sqrt(sum << 168) < 2^147, and each shifted component < 2^230. Lower adaptive
+// precision only reduces shifts and result bit widths. Every operation fits U256.
 fn i256_canonical(value: I256) -> I256 {
     return I256(value.negative && !u256_is_zero(value.magnitude), value.magnitude);
 }
@@ -380,36 +381,38 @@ fn i256_add(a: I256, b: I256) -> I256 {
     return i256_canonical(I256(b.negative, u256_sub_checked(b.magnitude, a.magnitude)));
 }
 
-fn project_q84_to_mm(normal: I256, radial_quarters_mm: I256) -> I256 {
+fn project_q_to_mm(normal: I256, radial_quarters_mm: I256, precision_bits: u32) -> I256 {
     let product = u256_mul(normal.magnitude, radial_quarters_mm.magnitude).value;
-    let quotient = u256_shr(product, 86u);
-    let remainder = u256_low_bits(product, 86u);
+    let scale_bits = precision_bits + 2u;
+    let quotient = u256_shr(product, scale_bits);
+    let remainder = u256_low_bits(product, scale_bits);
     var rounded = quotient;
     let half = u256_from_u32(1u);
-    let half_shifted = u256_shl(half, 85u).value;
+    let half_shifted = u256_shl(half, scale_bits - 1u).value;
     if (u256_cmp(remainder, half_shifted) >= 0) {
         rounded = u256_add_checked(rounded, u256_from_u32(1u));
     }
     return i256_canonical(I256(normal.negative != radial_quarters_mm.negative, rounded));
 }
 
-fn cube_direction_q84(cube: array<I256, 3>) -> array<I256, 3> {
+fn cube_direction_q(cube: array<I256, 3>, precision_bits: u32) -> array<I256, 3> {
     var norm_squared = u256_zero();
     for (var axis = 0u; axis < 3u; axis += 1u) {
         let square = u256_mul(cube[axis].magnitude, cube[axis].magnitude);
         norm_squared = u256_add_checked(norm_squared, square.value);
     }
-    let length_q84 = u256_isqrt_scaled(norm_squared, 168u);
+    let doubled_precision = precision_bits * 2u;
+    let length_q = u256_isqrt_scaled(norm_squared, doubled_precision);
     var result: array<I256, 3>;
     for (var axis = 0u; axis < 3u; axis += 1u) {
-        let numerator = u256_shl(cube[axis].magnitude, 168u).value;
-        let division = u256_div_rem(numerator, length_q84);
+        let numerator = u256_shl(cube[axis].magnitude, doubled_precision).value;
+        let division = u256_div_rem(numerator, length_q);
         var magnitude = division.quotient;
         if (division.remainder.limb[0] != 0u || division.remainder.limb[1] != 0u
             || division.remainder.limb[2] != 0u || division.remainder.limb[3] != 0u
             || division.remainder.limb[4] != 0u || division.remainder.limb[5] != 0u
             || division.remainder.limb[6] != 0u || division.remainder.limb[7] != 0u) {
-            let complement = u256_sub_checked(length_q84, division.remainder);
+            let complement = u256_sub_checked(length_q, division.remainder);
             if (u256_cmp(division.remainder, complement) >= 0) {
                 magnitude = u256_add_checked(magnitude, u256_from_u32(1u));
             }

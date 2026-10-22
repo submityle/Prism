@@ -482,4 +482,8 @@ ABI/性能边界仍需继续审计：新 record 每候选增加 36 bytes，容�
 
 同轮修正 `GpuPlanetPlacement::new` 的逻辑资源注释：record 116 bytes + compact index 4 bytes，故候选项合计 120 bytes；再加高度样本、params/status/indirect 后为 `120*max(capacity,1)+16*max(samples,1)+216`。
 
-2026-10-22 Q84 shader 乘法热点试验：尝试按操作数有效 limb 缩短 U256 schoolbook 乘法，以及改为逐行 carry 累加；两种版本的 reference/Metal 算术套件均为 14/14 passed，但 Apple M2/Metal 62,500 候选 submit+wait P50 分别约 49.1 ms 与 52.9 ms，未优于基线 48.7 ms，且小档尾延迟波动明显。两种未经证明有收益的实现均已撤销，生产 shader 保持基线算法。该结果确认单纯乘法循环改写不足以闭合吞吐缺口；需要重新拆解 Q84 主路径成本并以同设备、同样本的稳定对照验证，当前性能缺口仍在。
+2026-10-22 Q84 shader 乘法热点试验：尝试按操作数有效 limb 缩短 U256 schoolbook 乘法，以及改为逐行 carry 累加；两种版本的 reference/Metal 算术套件均为 14/14 passed，但 Apple M2/Metal 62,500 候选 submit+wait P50 分别约 49.1 ms 与 52.9 ms，未优于基线 48.7 ms，且小档尾延迟波动明显。两种未经证明有收益的实现均已撤销，生产 shader 保持基线算法。该结果确认单纯乘法循环改写不足以闭合吞吐缺口。
+
+2026-10-22 行星投影自适应 Q 精度：生产 kernel 由固定 Q84 改为按 quarter-mm radial numerator 的 bit length 选择 Q precision，范围 Q37..Q84；Q37 下限对最大合法行星半径仍留有数十位方向精度，radial 增大时逐步提高精度，极端高度/offset 自动回退至 Q84。signed-i128 输出 ABI、ties-away-from-zero、identity/deletion 前缀不变。Apple M2/Metal `planet_placement_gpu` 4 个设备测试通过，含 frame-local ≤1 mm、非零高度/rank parity、全 tile dispatch 和 `radius=2^52 mm + vertical_offset=i64::MAX + height_scale=i64::MAX` 的极端 radial；该新增用例以独立 Q96 整数方向/投影 reference 对照位置 ≤1 mm。该文件还包含 13 个 CPU fixed-math tests，integration 二进制总计 17/17 passed。U256 实卡/reference suite 14/14、GPU feature lib 139/139、runtime lib 183/183 passed。
+
+同一 Apple M2/Metal release 基准（warmup 8 + 64 samples、排除 upload/readback）对比：固定 Q84 基线 62,500 candidates submit+wait P50/P95/P99=48,705/57,239/67,684 µs；自适应 Q37..Q84 为 29,095/35,624/41,718 µs，P50 改善约 40%。256 candidates 为 2,632/3,035/3,155 µs，4,096 为 3,837/4,438/4,622 µs。仍未达到 16.7 ms 的 62.5k 单帧预算；计时是 host submit+wait，不是 GPU timestamp，未证明其他 adapter 性能。自适应选择有整数位宽依据且有限极端组合已实卡对拍，但完整合法输入空间形式证明、多厂商验证、产品 renderer consumer 和产品规模 QoS 仍未完成。

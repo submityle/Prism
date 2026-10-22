@@ -216,12 +216,13 @@ fn finite(value: f32) -> bool {
     return value == value && abs(value) < 3.402823466e+38;
 }
 
-fn i256_to_f32_q84(value: I256) -> f32 {
+fn i256_to_f32_q(value: I256, precision_bits: u32) -> f32 {
     let m = value.magnitude.limb;
-    let result = f32(m[0]) * 5.421010862427522e-26
-        + f32(m[1]) * 2.220446049250313e-16
-        + f32(m[2]) * 9.5367431640625e-7
-        + f32(m[3]) * 4096.0;
+    let q_bits = f32(precision_bits);
+    let result = f32(m[0]) * exp2(-q_bits)
+        + f32(m[1]) * exp2(32.0 - q_bits)
+        + f32(m[2]) * exp2(64.0 - q_bits)
+        + f32(m[3]) * exp2(96.0 - q_bits);
     return select(result, -result, value.negative);
 }
 
@@ -279,8 +280,6 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let sample_side = word(2u);
     let cells = sample_side - 1u;
     let cube = cube_numerators_for_cell(word(3u), vec2<u32>(word(5u), word(6u)), vec2<u32>(cell_u, cell_v), cells, word(4u));
-    let normal_q84 = cube_direction_q84(cube);
-    let normal = vec3<f32>(i256_to_f32_q84(normal_q84[0]), i256_to_f32_q84(normal_q84[1]), i256_to_f32_q84(normal_q84[2]));
     let row = cell_v * sample_side;
     let h0 = heights[row + cell_u];
     let h1 = heights[row + cell_u + 1u];
@@ -290,6 +289,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let radial_base = vec4<u32>(word(20u), word(21u), word(22u), word(23u));
     let radial_numerator = add128(radial_base, height_numerator);
     let radial_q4 = i256_from_i128_words(radial_numerator);
+    let radial_bits = u256_bit_length(radial_q4.magnitude);
+    // Bound Q precision from the maximum radial magnitude so the worst-case
+    // component quantization contributes < 1/16 mm; retain Q84 at extremes.
+    let precision_bits = min(84u, max(37u, radial_bits + 4u));
+    let normal_q = cube_direction_q(cube, precision_bits);
+    let normal = vec3<f32>(i256_to_f32_q(normal_q[0], precision_bits), i256_to_f32_q(normal_q[1], precision_bits), i256_to_f32_q(normal_q[2], precision_bits));
     let origins = array<vec4<u32>, 3>(
         vec4<u32>(word(24u), word(25u), word(26u), word(27u)),
         vec4<u32>(word(28u), word(29u), word(30u), word(31u)),
@@ -297,7 +302,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     var positions: array<vec4<u32>, 3>;
     var projection_invalid = radial_numerator.w >= 0x80000000u || all(radial_numerator == vec4<u32>(0u));
     for (var axis = 0u; axis < 3u; axis += 1u) {
-        let projected = project_q84_to_mm(normal_q84[axis], radial_q4);
+        let projected = project_q_to_mm(normal_q[axis], radial_q4, precision_bits);
         let local = i256_add(projected, i256_from_i128_words(origins[axis]));
         positions[axis] = i256_to_twos_complement_i128(local);
         projection_invalid = projection_invalid || !i256_fits_i128(local);
