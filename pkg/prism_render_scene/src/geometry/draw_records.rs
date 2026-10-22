@@ -6,11 +6,15 @@
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
+use bevy_ecs::prelude::{Res, ResMut, Resource};
 
 use prism_render_architecture::{
+    abi::GenerationalHandle,
     gpu_scene::{CpuRenderScene, SceneHandle},
     virtual_geometry::{
-        CutCluster, GeometryPageKey, VirtualGeometryGpuDrawItem, VirtualGeometryGpuPublication,
+        ClstAssetIdentity, ClstClusterDescriptor, CutCluster, GeometryDrawBatch,
+        GeometryDrawBatchError, GeometryDrawBatchHeader, GeometryPageKey,
+        VirtualGeometryGpuDrawItem, VirtualGeometryGpuPublication, GEOMETRY_DRAW_TRANSPORT_VERSION,
     },
 };
 
@@ -68,6 +72,223 @@ pub struct GeometryDrawPhase {
     view: SceneHandle,
     selection_revision: u64,
     records: Vec<GeometryDrawRecord>,
+}
+
+/// CPU mirror of generation-bound virtual-geometry publications available to
+/// the scene draw planner. The render backend owns the eventual GPU buffers;
+/// this resource keeps the scene-side validation input explicit and immutable
+/// for one planning pass.
+#[derive(Resource, Clone, Debug, Default)]
+pub struct VirtualGeometryDrawPublications {
+    publications: BTreeMap<u32, VirtualGeometryGpuPublication>,
+}
+
+impl VirtualGeometryDrawPublications {
+    /// Replaces one asset publication atomically.
+    pub fn replace(&mut self, publication: VirtualGeometryGpuPublication) {
+        self.publications
+            .insert(publication.asset_id(), publication);
+    }
+
+    /// Removes a retired asset publication.
+    pub fn retire(&mut self, asset_id: u32) -> Option<VirtualGeometryGpuPublication> {
+        self.publications.remove(&asset_id)
+    }
+
+    /// Returns the current publication for one asset.
+    #[must_use]
+    pub fn get(&self, asset_id: u32) -> Option<&VirtualGeometryGpuPublication> {
+        self.publications.get(&asset_id)
+    }
+}
+
+/// Complete per-view geometry planning output produced after visibility.
+#[derive(Resource, Clone, Debug, Default)]
+pub struct GeometryDrawPhases {
+    revision: u64,
+    phases: BTreeMap<SceneHandle, GeometryDrawPhase>,
+    rejections: Vec<(SceneHandle, GeometryDrawPhaseError)>,
+}
+
+impl GeometryDrawPhases {
+    /// Visibility revision consumed by this snapshot.
+    #[must_use]
+    pub const fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// Returns the planned phase for one exact view.
+    #[must_use]
+    pub fn get(&self, view: SceneHandle) -> Option<&GeometryDrawPhase> {
+        self.phases.get(&view)
+    }
+
+    /// Returns all rejected views from the last planning pass.
+    #[must_use]
+    pub fn rejections(&self) -> &[(SceneHandle, GeometryDrawPhaseError)] {
+        &self.rejections
+    }
+
+    /// Builds a versioned, device-independent CLST batch for one exact view.
+    /// The caller supplies the owning frame revision; no ECS entity or GPU
+    /// resource identity is synthesized at this boundary.
+    pub fn build_clst_batch(
+        &self,
+        view: SceneHandle,
+        frame_revision: u64,
+        publications: &VirtualGeometryDrawPublications,
+    ) -> Result<GeometryDrawBatch, GeometryDrawBatchBuildError> {
+        if frame_revision == 0 {
+            return Err(GeometryDrawBatchBuildError::InvalidFrameRevision);
+        }
+        let phase = self
+            .get(view)
+            .ok_or(GeometryDrawBatchBuildError::ViewUnavailable(view))?;
+        if phase.selection_revision == 0 || phase.selection_revision != self.revision {
+            return Err(GeometryDrawBatchBuildError::StalePhase {
+                phase_revision: phase.selection_revision,
+                available_revision: self.revision,
+            });
+        }
+        let mut records = Vec::new();
+        for record in &phase.records {
+            let GeometryDrawRecord::Cluster {
+                scene,
+                geometry,
+                geometry_revision,
+                selection_revision,
+                publication,
+                page,
+                item,
+            } = *record
+            else {
+                continue;
+            };
+            let live = publications.get(publication.asset_id).ok_or(
+                GeometryDrawBatchBuildError::PublicationUnavailable(publication.asset_id),
+            )?;
+            if live.generation() != publication.generation
+                || live.content_revision() != publication.content_revision
+                || item.asset_id != publication.asset_id
+                || item.scene_index != scene.index
+                || item.scene_generation != scene.generation
+                || (u64::from(item.publication_generation[0])
+                    | (u64::from(item.publication_generation[1]) << 32))
+                    != publication.generation
+            {
+                return Err(GeometryDrawBatchBuildError::PublicationMismatch(scene));
+            }
+            let cluster = *live.clusters().get(item.cluster_index as usize).ok_or(
+                GeometryDrawBatchBuildError::ClusterUnavailable {
+                    scene,
+                    cluster_index: item.cluster_index,
+                },
+            )?;
+            let actual_page = *live.page_keys().get(cluster.page_index as usize).ok_or(
+                GeometryDrawBatchBuildError::ClusterUnavailable {
+                    scene,
+                    cluster_index: item.cluster_index,
+                },
+            )?;
+            if actual_page != page
+                || actual_page.asset != publication.asset_id
+                || !live
+                    .page(cluster.page_index)
+                    .is_some_and(|row| row.is_resident())
+                || cluster.material_index != item.material_index
+                || cluster.material_generation != item.material_generation
+            {
+                return Err(GeometryDrawBatchBuildError::ClusterUnavailable {
+                    scene,
+                    cluster_index: item.cluster_index,
+                });
+            }
+            records.push(
+                prism_render_architecture::virtual_geometry::GeometryDrawRecord {
+                    view,
+                    scene,
+                    geometry,
+                    geometry_revision: u64::from(geometry_revision),
+                    selection_revision,
+                    asset: ClstAssetIdentity {
+                        asset_id: publication.asset_id,
+                        content_revision: publication.content_revision,
+                        publication_generation: publication.generation,
+                    },
+                    page,
+                    cluster: ClstClusterDescriptor {
+                        cluster_index: item.cluster_index,
+                        node_index: cluster.node_index,
+                        payload_offset: cluster.payload_offset,
+                        payload_size: cluster.payload_size,
+                        vertex_count: cluster.vertex_count,
+                        triangle_count: cluster.triangle_count,
+                    },
+                    material: GenerationalHandle::new(
+                        item.material_index,
+                        item.material_generation,
+                    ),
+                },
+            );
+        }
+        GeometryDrawBatch::new(
+            GeometryDrawBatchHeader {
+                version: GEOMETRY_DRAW_TRANSPORT_VERSION,
+                frame_revision,
+                snapshot_revision: phase.selection_revision,
+            },
+            records,
+        )
+        .map_err(GeometryDrawBatchBuildError::InvalidBatch)
+    }
+}
+
+/// Failure while explicitly translating scene draw phases into CLST transport.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GeometryDrawBatchBuildError {
+    InvalidFrameRevision,
+    ViewUnavailable(SceneHandle),
+    StalePhase {
+        phase_revision: u64,
+        available_revision: u64,
+    },
+    PublicationUnavailable(u32),
+    PublicationMismatch(SceneHandle),
+    ClusterUnavailable {
+        scene: SceneHandle,
+        cluster_index: u32,
+    },
+    InvalidBatch(GeometryDrawBatchError),
+}
+
+/// Builds and publishes the scene-side geometry phase for every visibility
+/// view. The complete phase is discarded on one stale item, so queue consumers
+/// can never draw a mixture of revisions.
+pub(crate) fn build_geometry_draw_phases(
+    selections: Res<GeometryRepresentationSelections>,
+    scene: Res<super::super::scene::RenderGpuScene>,
+    geometries: Res<RenderGeometryRegistry>,
+    publications: Res<VirtualGeometryDrawPublications>,
+    mut output: ResMut<GeometryDrawPhases>,
+) {
+    output.revision = selections.revision();
+    output.phases.clear();
+    output.rejections.clear();
+    for (view, _) in selections.iter() {
+        match build_geometry_draw_phase(
+            view,
+            selections.revision(),
+            &selections,
+            scene.mirror(),
+            &geometries,
+            &publications,
+        ) {
+            Ok(phase) => {
+                output.phases.insert(view, phase);
+            }
+            Err(error) => output.rejections.push((view, error)),
+        }
+    }
 }
 
 impl GeometryDrawPhase {
@@ -137,7 +358,7 @@ pub fn build_geometry_draw_phase(
     selections: &GeometryRepresentationSelections,
     scene: &CpuRenderScene,
     geometries: &RenderGeometryRegistry,
-    virtual_publications: &BTreeMap<u32, &VirtualGeometryGpuPublication>,
+    virtual_publications: &VirtualGeometryDrawPublications,
 ) -> Result<GeometryDrawPhase, GeometryDrawPhaseError> {
     if selections.revision() != selection_revision {
         return Err(GeometryDrawPhaseError::SnapshotRevisionMismatch {
@@ -232,13 +453,12 @@ pub fn build_geometry_draw_phase(
                         reason: GeometryRepresentationRejection::VirtualGeometryIdentityMissing,
                     });
                 };
-                let publication = virtual_publications
-                    .get(&identity.asset_id)
-                    .copied()
-                    .ok_or(GeometryDrawPhaseError::VirtualPublicationUnavailable {
+                let publication = virtual_publications.get(identity.asset_id).ok_or(
+                    GeometryDrawPhaseError::VirtualPublicationUnavailable {
                         scene: scene_handle,
                         asset_id: identity.asset_id,
-                    })?;
+                    },
+                )?;
                 if publication.generation() != identity.generation
                     || publication.content_revision() != identity.content_revision
                 {
@@ -254,12 +474,6 @@ pub fn build_geometry_draw_phase(
                         scene: scene_handle,
                         node,
                     })?;
-                let page = publication.page(descriptor.page_index).ok_or(
-                    GeometryDrawPhaseError::ClusterUnavailable {
-                        scene: scene_handle,
-                        node,
-                    },
-                )?;
                 let page_key = publication
                     .page_keys()
                     .get(descriptor.page_index as usize)
@@ -268,37 +482,53 @@ pub fn build_geometry_draw_phase(
                         scene: scene_handle,
                         node,
                     })?;
-                if !page.is_resident() {
+                if !publication
+                    .page(descriptor.page_index)
+                    .is_some_and(|page| page.is_resident())
+                {
                     return Err(GeometryDrawPhaseError::ClusterUnavailable {
                         scene: scene_handle,
                         node,
                     });
                 }
-                let cut = [CutCluster {
+                // Direct consumers that construct a selection without the
+                // visibility producer still get an exact single-node cut.
+                let fallback_cut = [CutCluster {
                     node,
                     page: page_key,
                 }];
-                let list = publication.draw_list(scene_handle, &cut).map_err(|_| {
+                let cut = selections
+                    .cluster_cut(view, scene_handle)
+                    .unwrap_or(&fallback_cut);
+                if cut.is_empty() || !cut.iter().any(|cluster| cluster.node == node) {
+                    return Err(GeometryDrawPhaseError::ClusterUnavailable {
+                        scene: scene_handle,
+                        node,
+                    });
+                }
+                let list = publication.draw_list(scene_handle, cut).map_err(|_| {
                     GeometryDrawPhaseError::ClusterUnavailable {
                         scene: scene_handle,
                         node,
                     }
                 })?;
-                let item = list.items().first().copied().ok_or(
-                    GeometryDrawPhaseError::ClusterUnavailable {
+                if list.items().len() != cut.len() {
+                    return Err(GeometryDrawPhaseError::ClusterUnavailable {
                         scene: scene_handle,
                         node,
-                    },
-                )?;
-                records.push(GeometryDrawRecord::Cluster {
-                    scene: scene_handle,
-                    geometry: instance.geometry,
-                    geometry_revision: record.revision,
-                    selection_revision,
-                    publication: identity,
-                    page: page_key,
-                    item,
-                });
+                    });
+                }
+                for (cluster, item) in cut.iter().zip(list.items().iter().copied()) {
+                    records.push(GeometryDrawRecord::Cluster {
+                        scene: scene_handle,
+                        geometry: instance.geometry,
+                        geometry_revision: record.revision,
+                        selection_revision,
+                        publication: identity,
+                        page: cluster.page,
+                        item,
+                    });
+                }
             }
             GeometryRepresentation::ConservativeRayTracing => {
                 return Err(GeometryDrawPhaseError::SelectionRejected {
@@ -318,7 +548,7 @@ pub fn build_geometry_draw_phase(
 
 #[cfg(test)]
 mod tests {
-    use alloc::{collections::BTreeMap, vec};
+    use alloc::vec;
 
     use bevy_asset::{uuid::Uuid, AssetId};
     use bevy_mesh::Mesh;
@@ -326,14 +556,14 @@ mod tests {
         abi::GenerationalHandle,
         geometry::{GeometryLodRecord, GeometryRecord},
         gpu_scene::{
-            CpuRenderScene, InstanceRecord, SceneBounds, SceneOperation, SceneTransform,
-            SceneTransactionBuilder,
+            CpuRenderScene, InstanceRecord, SceneBounds, SceneOperation, SceneTransactionBuilder,
+            SceneTransform,
         },
         virtual_geometry::{
             ClusterNode, GeometryPageKey, VirtualGeometryAsset, VirtualGeometryAssetHeader,
-            VirtualGeometryClusterRecord, VirtualGeometryCompression, VirtualGeometryGpuPublication,
-            VirtualGeometryMaterialBinding, VirtualGeometryPage, VirtualGeometryPageRecord,
-            VirtualGeometryPhysicalPage, VIRTUAL_GEOMETRY_ASSET_SCHEMA,
+            VirtualGeometryClusterRecord, VirtualGeometryCompression,
+            VirtualGeometryGpuPublication, VirtualGeometryMaterialBinding, VirtualGeometryPage,
+            VirtualGeometryPageRecord, VirtualGeometryPhysicalPage, VIRTUAL_GEOMETRY_ASSET_SCHEMA,
         },
     };
 
@@ -494,7 +724,7 @@ mod tests {
             &selections,
             &scene(),
             &geometry_registry(),
-            &BTreeMap::new(),
+            &VirtualGeometryDrawPublications::default(),
         )
         .expect("resident selections produce a phase");
         assert_eq!(phase.records().len(), 2);
@@ -515,7 +745,7 @@ mod tests {
             &selections,
             &scene(),
             &geometry_registry(),
-            &BTreeMap::new(),
+            &VirtualGeometryDrawPublications::default(),
         )
         .expect_err("an unavailable exact level must reject the phase");
         assert_eq!(
@@ -562,8 +792,8 @@ mod tests {
             0,
             identity,
         );
-        let mut publications = BTreeMap::new();
-        publications.insert(55, &publication);
+        let mut publications = VirtualGeometryDrawPublications::default();
+        publications.replace(publication.clone());
         let phase = build_geometry_draw_phase(
             VIEW,
             31,
@@ -576,13 +806,39 @@ mod tests {
         assert!(matches!(
             phase.records()[0],
             GeometryDrawRecord::Cluster {
-                publication: VirtualGeometryRepresentationIdentity {
-                    generation: 19,
-                    ..
-                },
+                publication: VirtualGeometryRepresentationIdentity { generation: 19, .. },
                 ..
             }
         ));
+
+        let mut phases = GeometryDrawPhases::default();
+        phases.revision = 31;
+        phases.phases.insert(VIEW, phase.clone());
+        let batch = phases
+            .build_clst_batch(VIEW, 44, &publications)
+            .expect("exact scene data translates to a shared CLST batch");
+        assert_eq!(batch.header().frame_revision, 44);
+        assert_eq!(batch.header().snapshot_revision, 31);
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch.records()[0].material, MATERIAL);
+        assert_eq!(batch.records()[0].cluster.node_index, 0);
+
+        let replacement = VirtualGeometryGpuPublication::build(
+            &virtual_asset(),
+            [2; 32],
+            20,
+            &[],
+            &[VirtualGeometryMaterialBinding {
+                material_slot: 0,
+                material: MATERIAL,
+            }],
+        )
+        .expect("retired generation replacement is valid");
+        publications.replace(replacement);
+        assert_eq!(
+            phases.build_clst_batch(VIEW, 44, &publications),
+            Err(GeometryDrawBatchBuildError::PublicationMismatch(SCENE_A))
+        );
 
         let stale = GeometryRepresentationSelection::virtual_cluster(
             selection.identity,
@@ -608,6 +864,76 @@ mod tests {
     }
 
     #[test]
+    fn cluster_phase_emits_every_cluster_in_the_selected_cut() {
+        let mut asset = virtual_asset();
+        let second_node = ClusterNode::leaf(asset.nodes[0].bounds, 0.0, asset.pages[0].record.key);
+        asset.nodes.push(second_node);
+        asset.roots.push(1);
+        asset.pages[0].record.cluster_count = 2;
+        let mut second_cluster = asset.clusters[0];
+        second_cluster.node_index = 1;
+        asset.clusters.push(second_cluster);
+        let page = asset.pages[0].record.key;
+        let publication = VirtualGeometryGpuPublication::build(
+            &asset,
+            [2; 32],
+            19,
+            &[VirtualGeometryPhysicalPage {
+                key: page,
+                physical_page: 3,
+                byte_offset: 3072,
+                byte_len: 4,
+                generation: 19,
+            }],
+            &[VirtualGeometryMaterialBinding {
+                material_slot: 0,
+                material: MATERIAL,
+            }],
+        )
+        .expect("two-node publication is valid");
+        let identity = VirtualGeometryRepresentationIdentity {
+            asset_id: 55,
+            generation: 19,
+            content_revision: [2; 32],
+        };
+        let selection = GeometryRepresentationSelection::virtual_cluster(
+            GeometryRepresentationIdentity {
+                scene: SCENE_A,
+                geometry: GEOMETRY,
+                geometry_revision: 12,
+                selection_revision: 31,
+                view: Some(VIEW),
+            },
+            0,
+            identity,
+        );
+        let mut selections = selections([(SCENE_A, selection)]);
+        selections.insert_cluster_selection(
+            VIEW,
+            SCENE_A,
+            selection,
+            vec![CutCluster { node: 0, page }, CutCluster { node: 1, page }],
+            vec![(page, 1.0)],
+        );
+        let mut publications = VirtualGeometryDrawPublications::default();
+        publications.replace(publication);
+        let phase = build_geometry_draw_phase(
+            VIEW,
+            31,
+            &selections,
+            &scene(),
+            &geometry_registry(),
+            &publications,
+        )
+        .expect("complete resident cut produces all records");
+        assert_eq!(phase.records().len(), 2);
+        assert!(phase.records().iter().all(|record| matches!(
+            record,
+            GeometryDrawRecord::Cluster { page: selected_page, .. } if *selected_page == page
+        )));
+    }
+
+    #[test]
     fn stale_snapshot_revision_fails_before_reading_draw_inputs() {
         let selections = selections([(SCENE_A, lod_selection(SCENE_A, 0))]);
         assert_eq!(
@@ -617,7 +943,7 @@ mod tests {
                 &selections,
                 &scene(),
                 &geometry_registry(),
-                &BTreeMap::new(),
+                &VirtualGeometryDrawPublications::default(),
             ),
             Err(GeometryDrawPhaseError::SnapshotRevisionMismatch {
                 expected: 32,
