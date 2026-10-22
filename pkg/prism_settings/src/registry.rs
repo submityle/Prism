@@ -730,6 +730,55 @@ fn validate_shape(
                 validate_shape(def, key, element, value)?;
             }
         }
+        crate::ValueShape::Table(fields) => {
+            let Value::Table(values) = value else {
+                return Err(SettingsError::TypeMismatch {
+                    key: key.clone(),
+                    expected: ValueType::Table,
+                    actual: value.value_type(),
+                });
+            };
+            if values.len() != fields.len()
+                || fields.keys().any(|field| !values.contains_key(field))
+            {
+                return Err(SettingsError::InvalidDefinition {
+                    key: key.clone(),
+                    reason: String::from("table keys do not match the declared schema"),
+                });
+            }
+            for (field, shape) in fields {
+                let Some(value) = values.get_mut(field) else {
+                    return Err(SettingsError::InvalidDefinition {
+                        key: key.clone(),
+                        reason: String::from("table is missing a declared field"),
+                    });
+                };
+                validate_shape(def, key, shape, value)?;
+            }
+        }
+        crate::ValueShape::Map {
+            value: value_shape,
+            max_len,
+        } => {
+            let Value::Table(values) = value else {
+                return Err(SettingsError::TypeMismatch {
+                    key: key.clone(),
+                    expected: ValueType::Table,
+                    actual: value.value_type(),
+                });
+            };
+            if values.len() > *max_len
+                || def
+                    .constraints
+                    .max_array_len
+                    .is_some_and(|max| values.len() > max)
+            {
+                return Err(SettingsError::TooLong { key: key.clone() });
+            }
+            for value in values.values_mut() {
+                validate_shape(def, key, value_shape, value)?;
+            }
+        }
     }
     Ok(())
 }
@@ -738,19 +787,26 @@ fn shape_numeric_leaf_type(shape: &crate::ValueShape) -> Option<ValueType> {
     match shape {
         crate::ValueShape::Scalar(ValueType::Int | ValueType::Float) => Some(shape.value_type()),
         crate::ValueShape::Scalar(_) => None,
-        crate::ValueShape::Array { element, .. } => shape_numeric_leaf_type(element),
+        crate::ValueShape::Array { element, .. }
+        | crate::ValueShape::Map { value: element, .. } => shape_numeric_leaf_type(element),
+        crate::ValueShape::Table(_) => None,
     }
 }
 
 fn shape_contains_type(shape: &crate::ValueShape, expected: ValueType) -> bool {
     match shape {
         crate::ValueShape::Scalar(actual) => *actual == expected,
-        crate::ValueShape::Array { element, .. } => shape_contains_type(element, expected),
+        crate::ValueShape::Array { element, .. }
+        | crate::ValueShape::Map { value: element, .. } => shape_contains_type(element, expected),
+        crate::ValueShape::Table(fields) => fields
+            .values()
+            .any(|shape| shape_contains_type(shape, expected)),
     }
 }
 
 #[cfg(test)]
 mod recursive_leaf_validation_tests {
+    use alloc::vec;
     use super::*;
     use crate::EnumOption;
 

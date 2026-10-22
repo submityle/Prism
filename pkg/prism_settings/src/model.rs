@@ -146,11 +146,10 @@ pub enum ValueType {
 
 /// Recursive schema shape for a setting value.
 ///
-/// Scalar leaves carry their canonical [`ValueType`]. Arrays are homogeneous
-/// and always bounded by an inclusive minimum and maximum length. Table
-/// schemas are intentionally not represented yet; a table-valued definition
-/// must therefore fail closed during registry validation instead of accepting
-/// an unvalidated arbitrary tree.
+/// Scalar leaves carry their canonical [`ValueType`]. Arrays and dynamic maps
+/// are homogeneous and bounded. Fixed tables describe an exact set of named
+/// fields, which makes reflected structs and persisted table values fail
+/// closed on missing or unexpected keys.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ValueShape {
     /// A scalar leaf. `Array` and `Table` are not valid scalar leaves.
@@ -162,6 +161,15 @@ pub enum ValueShape {
         /// Inclusive minimum element count.
         min_len: usize,
         /// Inclusive maximum element count.
+        max_len: usize,
+    },
+    /// A fixed set of named fields with recursively validated shapes.
+    Table(BTreeMap<String, ValueShape>),
+    /// A string-keyed map with a homogeneous value shape and bounded entries.
+    Map {
+        /// Shape required for every map value.
+        value: Box<ValueShape>,
+        /// Maximum number of entries.
         max_len: usize,
     },
 }
@@ -195,6 +203,21 @@ impl ValueShape {
         Self::array(element, len, len)
     }
 
+    /// Creates a fixed table whose keys and value shapes are declared by schema.
+    #[must_use]
+    pub fn table(fields: BTreeMap<String, ValueShape>) -> Self {
+        Self::Table(fields)
+    }
+
+    /// Creates a string-keyed map with homogeneous bounded values.
+    #[must_use]
+    pub fn map(value: Self, max_len: usize) -> Self {
+        Self::Map {
+            value: Box::new(value),
+            max_len,
+        }
+    }
+
     /// Infers a conservative exact shape from a non-container value tree.
     ///
     /// An empty array has no element type and therefore returns `None`; its
@@ -214,7 +237,11 @@ impl ValueShape {
                 }
                 Some(Self::bounded_array(element, DEFAULT_MAX_ARRAY_LEN))
             }
-            Value::Table(_) => None,
+            Value::Table(values) => values
+                .iter()
+                .map(|(key, value)| Some((key.clone(), Self::from_value(value)?)))
+                .collect::<Option<BTreeMap<_, _>>>()
+                .map(Self::Table),
             _ => Some(Self::scalar(value.value_type())),
         }
     }
@@ -225,6 +252,7 @@ impl ValueShape {
         match self {
             Self::Scalar(value_type) => *value_type,
             Self::Array { .. } => ValueType::Array,
+            Self::Table(_) | Self::Map { .. } => ValueType::Table,
         }
     }
 
@@ -245,6 +273,10 @@ impl ValueShape {
                 min_len,
                 max_len,
             } => min_len <= max_len && element.is_valid_at_depth(depth + 1),
+            Self::Table(fields) => fields
+                .values()
+                .all(|shape| shape.is_valid_at_depth(depth + 1)),
+            Self::Map { value, .. } => value.is_valid_at_depth(depth + 1),
         }
     }
 
@@ -271,12 +303,32 @@ impl ValueShape {
                     .all(|value| element.matches_at_depth(value, depth + 1)),
                 _ => false,
             },
+            Self::Table(fields) => match value {
+                Value::Table(values) if values.len() == fields.len() => {
+                    fields.iter().all(|(key, shape)| {
+                        values
+                            .get(key)
+                            .is_some_and(|value| shape.matches_at_depth(value, depth + 1))
+                    })
+                }
+                _ => false,
+            },
+            Self::Map {
+                value: shape,
+                max_len,
+            } => match value {
+                Value::Table(values) if values.len() <= *max_len => values
+                    .values()
+                    .all(|value| shape.matches_at_depth(value, depth + 1)),
+                _ => false,
+            },
         }
     }
 }
 
 #[cfg(test)]
 mod value_shape_tests {
+    use alloc::vec;
     use super::*;
 
     #[test]

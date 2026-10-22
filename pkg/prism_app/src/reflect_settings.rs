@@ -6,14 +6,14 @@
 
 use prism_reflect::{
     schema::{AttributeValue, TypeMetadata},
-    GetTypeRegistration, Reflect, ReflectRef, TypeInfo, Typed, VariantKind,
+    GetTypeRegistration, Map, Reflect, ReflectRef, Struct, TypeInfo, Typed, VariantKind,
 };
 use prism_settings::{
     Constraints, RegistryBuilder, SettingDef, SettingsError, SettingsRegistry, Value, ValueShape,
 };
-use std::{error::Error, fmt};
+use std::{collections::BTreeMap, error::Error, fmt};
 
-const MAX_REFLECT_SETTING_ARRAY_LEN: usize = 1024;
+const MAX_REFLECT_SETTING_COLLECTION_LEN: usize = 1024;
 
 /// Failure while deriving a canonical settings registry.
 #[derive(Debug)]
@@ -24,7 +24,7 @@ pub enum ReflectSettingsError {
     /// A default instance did not expose a field present in static type info.
     MissingDefaultField {
         /// Fully-qualified reflected type name.
-        type_name: &'static str,
+        type_name: String,
         /// Missing field name.
         field: String,
     },
@@ -78,11 +78,13 @@ impl Error for ReflectSettingsError {}
 /// docs, categories, ranges, defaults, and read-only attributes are mapped
 /// into canonical definitions. Scalar defaults support bool, signed/unsigned
 /// integers fitting `i64`, `f32`, `f64`, and `String`. Explicit settings may
-/// also be recursively homogeneous `Vec<T>` or `[T; N]` values. Every dynamic
-/// collection is bounded by [`MAX_REFLECT_SETTING_ARRAY_LEN`]. Empty
-/// collections are accepted only when their immediate element type is a
-/// supported scalar; nested empty collections fail closed because reflected
-/// type names are not parsed to guess child schemas. Other types fail closed.
+/// also be recursively homogeneous `Vec<T>` or `[T; N]` values, named
+/// reflected structs, and string-keyed homogeneous maps. Every dynamic
+/// collection is bounded by [`MAX_REFLECT_SETTING_COLLECTION_LEN`]. Empty
+/// collections are accepted only when reflected type metadata identifies a
+/// supported scalar value type; nested empty collections fail closed because
+/// type-name strings are not parsed to guess child schemas. Other types fail
+/// closed.
 pub fn derive_settings_registry<T>(
     namespace: &str,
     owner: &str,
@@ -119,7 +121,7 @@ where
             fields
                 .field(name)
                 .ok_or_else(|| ReflectSettingsError::MissingDefaultField {
-                    type_name: default.type_name(),
+                    type_name: default.type_name().to_owned(),
                     field: name.to_owned(),
                 })?;
         let (rust_default, shape, enum_options) = match reflected.reflect_ref() {
@@ -193,6 +195,31 @@ where
                     descriptor.type_name(),
                 )?;
                 (value, shape, enum_options)
+            }
+            ReflectRef::Struct(fields) => {
+                let TypeInfo::Struct(info) = reflected.type_info() else {
+                    return Err(ReflectSettingsError::UnsupportedValue {
+                        field: name.to_owned(),
+                        type_name: descriptor.type_name().to_owned(),
+                    });
+                };
+                from_reflect_struct(fields, info, 0, name, descriptor.type_name())?
+            }
+            ReflectRef::Map(map) => {
+                let TypeInfo::Map(info) = reflected.type_info() else {
+                    return Err(ReflectSettingsError::UnsupportedValue {
+                        field: name.to_owned(),
+                        type_name: descriptor.type_name().to_owned(),
+                    });
+                };
+                from_reflect_map(
+                    map,
+                    info.key_type_name(),
+                    info.value_type_name(),
+                    0,
+                    name,
+                    descriptor.type_name(),
+                )?
             }
             _ => {
                 let value = from_reflect_scalar(reflected).ok_or_else(|| {
@@ -342,7 +369,7 @@ where
     I: IntoIterator<Item = &'a dyn Reflect>,
 {
     if depth > prism_settings::MAX_VALUE_SHAPE_DEPTH
-        || len > MAX_REFLECT_SETTING_ARRAY_LEN
+        || len > MAX_REFLECT_SETTING_COLLECTION_LEN
         || fixed_len.is_some_and(|expected| expected != len)
     {
         return Err(ReflectSettingsError::UnsupportedValue {
@@ -387,9 +414,121 @@ where
         })?;
     let shape = match fixed_len {
         Some(length) => ValueShape::fixed_array(element_shape, length),
-        None => ValueShape::bounded_array(element_shape, MAX_REFLECT_SETTING_ARRAY_LEN),
+        None => ValueShape::bounded_array(element_shape, MAX_REFLECT_SETTING_COLLECTION_LEN),
     };
     Ok((Value::Array(values), shape, enum_options))
+}
+
+fn from_reflect_struct(
+    fields: &dyn Struct,
+    info: &prism_reflect::StructInfo,
+    depth: usize,
+    field: &str,
+    type_name: &str,
+) -> Result<(Value, ValueShape, Vec<prism_settings::EnumOption>), ReflectSettingsError> {
+    if depth > prism_settings::MAX_VALUE_SHAPE_DEPTH
+        || info.field_count() > MAX_REFLECT_SETTING_COLLECTION_LEN
+    {
+        return Err(ReflectSettingsError::UnsupportedValue {
+            field: field.to_owned(),
+            type_name: type_name.to_owned(),
+        });
+    }
+    let mut values = BTreeMap::new();
+    let mut shapes = BTreeMap::new();
+    let mut enum_options = Vec::new();
+    for descriptor in info.fields() {
+        let reflected_value = fields.field(descriptor.name()).ok_or_else(|| {
+            ReflectSettingsError::MissingDefaultField {
+                type_name: type_name.to_owned(),
+                field: descriptor.name().to_owned(),
+            }
+        })?;
+        let (value, shape, options) =
+            from_reflect_value(reflected_value, depth + 1, field, type_name)?;
+        if !options.is_empty() {
+            if !enum_options.is_empty() && enum_options != options {
+                return Err(ReflectSettingsError::UnsupportedValue {
+                    field: field.to_owned(),
+                    type_name: type_name.to_owned(),
+                });
+            }
+            enum_options = options;
+        }
+        values.insert(descriptor.name().to_owned(), value);
+        shapes.insert(descriptor.name().to_owned(), shape);
+    }
+    Ok((
+        Value::Table(values),
+        ValueShape::table(shapes),
+        enum_options,
+    ))
+}
+
+fn from_reflect_map(
+    map: &dyn Map,
+    key_type_name: &str,
+    value_type_name: &str,
+    depth: usize,
+    field: &str,
+    type_name: &str,
+) -> Result<(Value, ValueShape, Vec<prism_settings::EnumOption>), ReflectSettingsError> {
+    if depth > prism_settings::MAX_VALUE_SHAPE_DEPTH
+        || map.len() > MAX_REFLECT_SETTING_COLLECTION_LEN
+        || !matches!(
+            key_type_name,
+            "alloc::string::String" | "std::string::String"
+        )
+    {
+        return Err(ReflectSettingsError::UnsupportedValue {
+            field: field.to_owned(),
+            type_name: type_name.to_owned(),
+        });
+    }
+    let mut values = BTreeMap::new();
+    let mut value_shape = None;
+    let mut enum_options = Vec::new();
+    for (key, reflected_value) in map.iter_reflect() {
+        let Some(Value::String(key)) = from_reflect_scalar(key) else {
+            return Err(ReflectSettingsError::UnsupportedValue {
+                field: field.to_owned(),
+                type_name: type_name.to_owned(),
+            });
+        };
+        let (value, shape, options) =
+            from_reflect_value(reflected_value, depth + 1, field, type_name)?;
+        if let Some(expected) = &value_shape {
+            if *expected != shape {
+                return Err(ReflectSettingsError::UnsupportedValue {
+                    field: field.to_owned(),
+                    type_name: type_name.to_owned(),
+                });
+            }
+        } else {
+            value_shape = Some(shape);
+        }
+        if !options.is_empty() {
+            if !enum_options.is_empty() && enum_options != options {
+                return Err(ReflectSettingsError::UnsupportedValue {
+                    field: field.to_owned(),
+                    type_name: type_name.to_owned(),
+                });
+            }
+            enum_options = options;
+        }
+        values.insert(key, value);
+    }
+    let value_shape = value_shape
+        .or_else(|| scalar_value_type_from_name(value_type_name).map(ValueShape::scalar))
+        .ok_or_else(|| ReflectSettingsError::UnsupportedValue {
+            field: field.to_owned(),
+            type_name: type_name.to_owned(),
+        })?;
+    Ok((
+        Value::Table(values),
+        ValueShape::map(value_shape, MAX_REFLECT_SETTING_COLLECTION_LEN),
+        enum_options,
+    ))
 }
 
 fn from_reflect_value(
@@ -434,6 +573,31 @@ fn from_reflect_value(
                 array.len(),
                 info.item_type_name(),
                 Some(info.capacity()),
+                depth,
+                field,
+                field_type_name,
+            )
+        }
+        ReflectRef::Struct(fields) => {
+            let TypeInfo::Struct(info) = value.type_info() else {
+                return Err(ReflectSettingsError::UnsupportedValue {
+                    field: field.to_owned(),
+                    type_name: field_type_name.to_owned(),
+                });
+            };
+            from_reflect_struct(fields, info, depth, field, field_type_name)
+        }
+        ReflectRef::Map(map) => {
+            let TypeInfo::Map(info) = value.type_info() else {
+                return Err(ReflectSettingsError::UnsupportedValue {
+                    field: field.to_owned(),
+                    type_name: field_type_name.to_owned(),
+                });
+            };
+            from_reflect_map(
+                map,
+                info.key_type_name(),
+                info.value_type_name(),
                 depth,
                 field,
                 field_type_name,
@@ -505,6 +669,7 @@ fn scalar_value_type_from_name(type_name: &str) -> Option<prism_settings::ValueT
 mod tests {
     use super::*;
     use prism_reflect::Reflect;
+    use std::collections::{BTreeMap, HashMap};
 
     #[derive(Reflect, Default)]
     struct RenderConfig {
@@ -632,7 +797,7 @@ mod tests {
             recent.shape,
             ValueShape::Array {
                 min_len: 0,
-                max_len: MAX_REFLECT_SETTING_ARRAY_LEN,
+                max_len: MAX_REFLECT_SETTING_COLLECTION_LEN,
                 ..
             }
         ));
@@ -652,7 +817,7 @@ mod tests {
         assert!(matches!(
             schema.validate_value(
                 recent_id,
-                Value::Array(vec![Value::Int(0); MAX_REFLECT_SETTING_ARRAY_LEN + 1])
+                Value::Array(vec![Value::Int(0); MAX_REFLECT_SETTING_COLLECTION_LEN + 1])
             ),
             Err(SettingsError::TooLong { .. })
         ));
@@ -798,5 +963,99 @@ mod tests {
                 Value::Array(vec![Value::Int(3)]),
             ]))
         );
+    }
+
+    #[test]
+    fn derives_named_structs_and_string_keyed_maps_with_stable_table_values() {
+        #[derive(Reflect, Default)]
+        struct Color {
+            red: u8,
+            green: u8,
+        }
+
+        #[derive(Reflect)]
+        struct MapSettings {
+            #[reflect(setting)]
+            color: Color,
+            #[reflect(setting)]
+            ordered: BTreeMap<String, i32>,
+            #[reflect(setting)]
+            hashed: HashMap<String, f32>,
+        }
+
+        impl Default for MapSettings {
+            fn default() -> Self {
+                Self {
+                    color: Color { red: 10, green: 20 },
+                    ordered: BTreeMap::from([("zeta".to_owned(), 2), ("alpha".to_owned(), 1)]),
+                    hashed: HashMap::from([("gpu".to_owned(), 1.5)]),
+                }
+            }
+        }
+
+        let schema = derive_settings_registry::<MapSettings>("maps", "prism_app").unwrap();
+
+        let (color_id, color) = schema.get(&"maps.color".into()).unwrap();
+        assert_eq!(
+            color.default,
+            Value::Table(BTreeMap::from([
+                ("green".to_owned(), Value::Int(20)),
+                ("red".to_owned(), Value::Int(10)),
+            ]))
+        );
+        assert!(matches!(color.shape, ValueShape::Table(_)));
+        assert!(schema
+            .validate_value(
+                color_id,
+                Value::Table(BTreeMap::from([
+                    ("red".to_owned(), Value::Int(1)),
+                    ("green".to_owned(), Value::Int(2)),
+                ])),
+            )
+            .is_ok());
+
+        let (ordered_id, ordered) = schema.get(&"maps.ordered".into()).unwrap();
+        assert!(matches!(ordered.shape, ValueShape::Map { .. }));
+        assert!(schema
+            .validate_value(
+                ordered_id,
+                Value::Table(BTreeMap::from([
+                    ("alpha".to_owned(), Value::Int(3)),
+                    ("beta".to_owned(), Value::Int(4)),
+                ])),
+            )
+            .is_ok());
+
+        let (hashed_id, hashed) = schema.get(&"maps.hashed".into()).unwrap();
+        assert!(matches!(hashed.shape, ValueShape::Map { .. }));
+        assert!(schema
+            .validate_value(
+                hashed_id,
+                Value::Table(BTreeMap::from([("gpu".to_owned(), Value::Float(2.0))])),
+            )
+            .is_ok());
+    }
+
+    #[test]
+    fn map_derivation_rejects_non_string_keys_and_non_homogeneous_values() {
+        #[derive(Reflect, Default)]
+        struct NonStringKey {
+            #[reflect(setting)]
+            values: BTreeMap<i32, i32>,
+        }
+        assert!(matches!(
+            derive_settings_registry::<NonStringKey>("maps", "prism_app"),
+            Err(ReflectSettingsError::UnsupportedValue { field, .. }) if field == "values"
+        ));
+
+        #[derive(Reflect, Default)]
+        struct EmptyNestedMap {
+            #[reflect(setting)]
+            values: BTreeMap<String, Vec<i32>>,
+        }
+        assert!(matches!(
+            derive_settings_registry::<EmptyNestedMap>("maps", "prism_app"),
+            Err(ReflectSettingsError::UnsupportedValue { field, .. }) if field == "values"
+        ));
     }
 }
