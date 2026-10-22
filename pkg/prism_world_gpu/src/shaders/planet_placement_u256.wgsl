@@ -418,3 +418,38 @@ fn cube_direction_q84(cube: array<I256, 3>) -> array<I256, 3> {
     }
     return result;
 }
+
+// Exact doubled cell-centre numerators for the cube-sphere map. The common
+// denominator cells * 2^level cancels during normalization. Valid inputs are
+// constrained by the placement contract: level <= 30, cells < 2^32, cell < cells.
+fn cell_axis_numerator_q84_input(tile: u32, cell: u32, cells: u32, level: u32) -> I256 {
+    let tile_product = u256_mul(u256_from_u32(cells), u256_from_u32(tile)).value;
+    let global_twice_base = u256_shl(tile_product, 1u).value;
+    let cell_twice_plus_one = u256_add(
+        u256_shl(u256_from_u32(cell), 1u).value,
+        u256_from_u32(1u),
+    ).value;
+    let global_twice = u256_add_checked(global_twice_base, cell_twice_plus_one);
+    let face_tiles = u256_shl(u256_from_u32(1u), level).value;
+    let denominator = u256_mul(u256_from_u32(cells), face_tiles).value;
+    if (u256_cmp(global_twice, denominator) >= 0) {
+        return I256(false, u256_sub_checked(global_twice, denominator));
+    }
+    return I256(true, u256_sub_checked(denominator, global_twice));
+}
+
+fn cube_numerators_for_cell(face: u32, tile_xy: vec2<u32>, cell_xy: vec2<u32>, cells: u32, level: u32) -> array<I256, 3> {
+    let u = cell_axis_numerator_q84_input(tile_xy.x, cell_xy.x, cells, level);
+    let v = cell_axis_numerator_q84_input(tile_xy.y, cell_xy.y, cells, level);
+    let d = u256_mul(u256_from_u32(cells), u256_shl(u256_from_u32(1u), level).value).value;
+    let positive_d = I256(false, d);
+    let negative_d = I256(true, d);
+    switch face {
+        case 0u: { return array<I256, 3>(positive_d, v, I256(!u.negative, u.magnitude)); }
+        case 1u: { return array<I256, 3>(negative_d, v, u); }
+        case 2u: { return array<I256, 3>(u, positive_d, I256(!v.negative, v.magnitude)); }
+        case 3u: { return array<I256, 3>(u, negative_d, v); }
+        case 4u: { return array<I256, 3>(u, v, positive_d); }
+        default: { return array<I256, 3>(I256(!u.negative, u.magnitude), v, negative_d); }
+    }
+}

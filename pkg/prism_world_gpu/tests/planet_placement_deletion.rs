@@ -141,7 +141,7 @@ fn deletes_one_complete_planetary_key_and_preserves_other_cells() {
     )
     .unwrap();
 
-    let record_bytes = n * 80;
+    let record_bytes = n * 116;
     let compact_offset = 16usize;
     let records_offset = compact_offset + n * 4;
     let staging = context.device().create_buffer(&wgpu::BufferDescriptor {
@@ -174,7 +174,7 @@ fn deletes_one_complete_planetary_key_and_preserves_other_cells() {
     assert_eq!(word(4), 3, "one complete key must be removed");
     for index in 0..3usize {
         let source_slot = word(compact_offset + index * 4) as usize;
-        let record = records_offset + source_slot * 80;
+        let record = records_offset + source_slot * 116;
         assert_ne!([word(record + 16), word(record + 20)], [0, 0]);
     }
 }

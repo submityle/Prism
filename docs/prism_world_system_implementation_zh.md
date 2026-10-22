@@ -473,3 +473,7 @@ ABI 闭环边界：现有 80-byte record 以 3 个 f32 word 承载位置，内�
 
 后续将整数 cube 向量的 Q84 归一化、signed limb 解码及 quarter-mm radial 到整毫米 ties-away-from-zero 投影加入同一实卡 parity kernel。Metal 对拍采用 [3,4,12] 方向和 12,345 quarter-mm 半径，逐 limb 与 Rust reference 比较，完整 reference/GPU 算术套件 14/14 passed。位移与余数提取使用最多 8-limb 操作，不做逐 bit 清零/移位循环。当前仍未接入生产 placement shader、真实高度/radius/frame-origin 端到端算法或版本化 record ABI；本测试只证明所测算术片段。
 同轮补充负方向向量 [-3,4,-12] 与负 quarter-mm radial 的 M2/Metal 对拍，符号/幅值与 Rust Q84 reference 一致；完整测试仍为 14/14 passed。生产 placement 路径仍为未提交的 double-single/f32 原型，并非整数 ABI。
+
+2026-10-22 生产行星 placement 改为 U256 Q84 cube-sphere 整数方向、quarter-mm radial ties-away-from-zero 投影和 116-byte record ABI；xyz 为 signed-i128 frame-local 毫米，identity 前六 word 保持不变，deletion shader 仍按 identity 前缀比较。Apple M2/Metal planet_placement_gpu 3/3 passed，包含此前失败的 frame-local case（≤1 mm）、非零高度/阈值 parity 与全 tile dispatch；planet deletion 1/1 passed；U256/reference/六面方向实卡 suite 14/14 passed。此验收覆盖当前指定合法合同与 fixtures，不是所有数学输入的形式证明。
+
+ABI/性能边界仍需继续审计：新 record 每候选增加 36 bytes，容量预算/编译检查已更新；Q84 每候选包含 3 次 U256 乘法平方、scaled isqrt、3 次除法和投影乘法，目前尚无大候选数 GPU timestamp/submit-wait benchmark。产品 RHI consumer 当前是否已有真实 decode/renderer 接线仍未证明；不得把当前 GPU kernel parity 描述为 planetary renderer 产品链路完成。

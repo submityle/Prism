@@ -43,8 +43,8 @@ fn config() -> PlanetPlacementConfig {
 
 #[test]
 fn shader_uses_the_complete_limb_abi() {
-    let source = include_str!("shaders/planet_placement.wgsl");
-    let module = wgpu::naga::front::wgsl::parse_str(source).expect("planet shader parses");
+    let source = format!("{}\n{}", include_str!("shaders/planet_placement_u256.wgsl"), include_str!("shaders/planet_placement.wgsl"));
+    let module = wgpu::naga::front::wgsl::parse_str(&source).expect("planet shader parses");
     wgpu::naga::valid::Validator::new(
         wgpu::naga::valid::ValidationFlags::all(),
         wgpu::naga::valid::Capabilities::empty(),
@@ -56,8 +56,30 @@ fn shader_uses_the_complete_limb_abi() {
     assert_eq!(module.entry_points[1].workgroup_size, [1, 1, 1]);
     assert!(source.contains("array<vec4<u32>, 12>"));
     assert!(source.contains("array<vec4<u32>>"));
-    assert!(source.contains("array<u32, 20>"));
+    assert!(source.contains("array<u32, 29>"));
     assert!(source.contains("array<atomic<u32>>"));
+}
+
+#[test]
+fn u256_shader_arithmetic_validates_as_core_wgsl() {
+    let source = include_str!("shaders/planet_placement_u256.wgsl");
+    let module = wgpu::naga::front::wgsl::parse_str(source).expect("U256 shader parses");
+    wgpu::naga::valid::Validator::new(
+        wgpu::naga::valid::ValidationFlags::all(),
+        wgpu::naga::valid::Capabilities::empty(),
+    )
+    .validate(&module)
+    .expect("U256 shader uses core capabilities");
+}
+
+#[test]
+fn u256_shader_has_fixed_width_arithmetic_contract() {
+    let source = include_str!("shaders/planet_placement_u256.wgsl");
+    assert!(source.contains("array<u32, 8>"));
+    assert!(source.contains("fn u256_mul("));
+    assert!(source.contains("fn u256_div_rem("));
+    assert!(source.contains("fn u256_isqrt("));
+    assert!(source.contains("fn u256_shl("));
 }
 
 #[test]
@@ -68,6 +90,7 @@ fn preflight_rejects_sample_budget_without_partial_request() {
         config(),
         region,
         &source,
+        [0; 3],
         GpuPlanetPlacementWorkBudget {
             max_candidate_evaluations: 4,
             max_sample_reads: 15,
@@ -93,6 +116,7 @@ fn preflight_rejects_empty_or_invalid_regions_before_dispatch() {
         config(),
         empty,
         &source,
+        [0; 3],
         GpuPlanetPlacementWorkBudget {
             max_candidate_evaluations: 0,
             max_sample_reads: 0,
@@ -112,6 +136,7 @@ fn preflight_rejects_empty_or_invalid_regions_before_dispatch() {
         invalid,
         one,
         &source,
+        [0; 3],
         GpuPlanetPlacementWorkBudget {
             max_candidate_evaluations: 1,
             max_sample_reads: 4,
@@ -137,6 +162,7 @@ fn preflight_packs_extreme_radial_base_without_loss() {
         extreme,
         region,
         &source,
+        [0; 3],
         GpuPlanetPlacementWorkBudget {
             max_candidate_evaluations: 1,
             max_sample_reads: 4,

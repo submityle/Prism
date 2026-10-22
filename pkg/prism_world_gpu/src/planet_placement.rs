@@ -16,7 +16,7 @@ use crate::scatter::{check, dispatch};
 use crate::{GpuContext, GpuScatterError};
 
 const PARAM_BYTES: u64 = 192;
-const RECORD_BYTES: u64 = 80;
+const RECORD_BYTES: u64 = 116;
 const _: () = assert!(prism_world_terrain::PLANET_PLACEMENT_VERSION == 1);
 
 /// Bounded GPU work for one planetary placement request.
@@ -93,6 +93,9 @@ pub struct GpuPlanetPlacementRegistrationSnapshot {
     pub request_generation: u64,
     /// Number of source candidates represented by the request.
     pub candidate_count: u32,
+    /// Exact world-space origin subtracted before the shader stores local f32
+    /// positions, in millimetres.
+    pub output_origin_mm: [i64; 3],
     /// Uniform request parameters.
     pub params: GpuPlanetPlacementBufferSnapshot,
     /// Candidate-aligned output records.
@@ -137,6 +140,8 @@ pub struct GpuPlanetPlacementCacheKey {
     pub config: PlanetPlacementConfig,
     /// Owned tile and cell region.
     pub region: PlanetPlacementRegion,
+    /// Stable world-space frame origin used for local f32 output.
+    pub output_origin_mm: [i64; 3],
     /// Heightfield revision and samples used by the request.
     pub tile: std::sync::Arc<HeightfieldTile>,
 }
@@ -193,12 +198,9 @@ impl From<GpuScatterError> for GpuPlanetPlacementError {
 
 /// GPU planetary placement stream with CPU-compatible full-key threshold ranks.
 ///
-/// Geometry is approximate f32 world millimetres, NOT CPU i64 position parity.
-/// Each 80-byte record contains tile face/level/x/y (0..4), cell u/v (4..6),
-/// position f32 bits (6..9), outward normal f32 bits (9..12), acceptance (12),
-/// rank u16 in u32 (13), exact signed i128 bilinear height numerator (14..18,
-/// low limb first, denominator four), invalid marker (18), and reserved zero
-/// (19). Geometry is not integer parity.
+/// Exact signed-i128 frame-local position record. The 116-byte ABI contains
+/// identity (0..6), xyz signed-i128 millimetres (6..18), f32 normal (18..21),
+/// acceptance/rank (21..23), height numerator (23..27), invalid (27), reserved (28).
 /// Identity is the tile/cell plus version/seed/salt in the full cache key.
 /// Compact order is unspecified; only indirect[1] entries are live.
 /// Invalid radial distance or coordinate in any threshold survivor invalidates
@@ -236,7 +238,7 @@ struct Request {
 
 impl GpuPlanetPlacement {
     /// Creates all fixed resources after complete device and byte-budget checks.
-    /// Logical bytes: `84*max(capacity,1)+16*max(samples,1)+216`.
+    /// Logical bytes: `120*max(capacity,1)+16*max(samples,1)+216`.
     /// Separate reusable host scratch and retained Arc snapshots are excluded.
     pub fn new(
         ctx: &GpuContext,
@@ -310,7 +312,13 @@ impl GpuPlanetPlacement {
         });
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("planet placement shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/planet_placement.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(
+                concat!(
+                    include_str!("shaders/planet_placement_u256.wgsl"),
+                    include_str!("shaders/planet_placement.wgsl")
+                )
+                .into(),
+            ),
         });
         let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("planet placement compute"),
@@ -371,10 +379,25 @@ impl GpuPlanetPlacement {
         tile: &std::sync::Arc<HeightfieldTile>,
         budget: GpuPlanetPlacementWorkBudget,
     ) -> Result<(), GpuPlanetPlacementError> {
+        self.write_request_in_frame(config, region, tile, [0; 3], budget)
+    }
+
+    /// Uploads a request whose record positions are relative to an exact i64
+    /// world-space frame origin. The shader subtracts this origin before
+    /// rounding to f32, retaining local precision at planetary coordinates.
+    pub fn write_request_in_frame(
+        &mut self,
+        config: PlanetPlacementConfig,
+        region: PlanetPlacementRegion,
+        tile: &std::sync::Arc<HeightfieldTile>,
+        output_origin_mm: [i64; 3],
+        budget: GpuPlanetPlacementWorkBudget,
+    ) -> Result<(), GpuPlanetPlacementError> {
         let next = prepare(
             config,
             region,
             tile,
+            output_origin_mm,
             budget,
             self.capacity,
             self.max_surface_samples,
@@ -447,6 +470,7 @@ impl GpuPlanetPlacement {
         Ok(GpuPlanetPlacementRegistrationSnapshot {
             request_generation: self.request_generation,
             candidate_count: request.candidate_count,
+            output_origin_mm: request.key.output_origin_mm,
             params: buffer(&self.params, PARAM_BYTES),
             records: buffer(&self.records, RECORD_BYTES * slots),
             heights: buffer(&self.heights, 16 * self.max_surface_samples.max(1) as u64),
@@ -488,7 +512,7 @@ impl GpuPlanetPlacement {
         Ok(())
     }
 
-    /// Candidate-aligned 80-byte records; acceptance gates geometry consumption.
+    /// Candidate-aligned 116-byte records with exact signed-i128 local-mm positions.
     pub fn records(&self) -> &wgpu::Buffer {
         &self.records
     }
@@ -528,7 +552,7 @@ impl GpuPlanetPlacement {
 
     /// Copies the candidate-aligned records to a caller-owned readback buffer.
     ///
-    /// The required size is 80 * candidate_count() bytes. This is a
+    /// The required size is 116 * candidate_count() bytes. This is a
     /// diagnostic/parity path; production consumers should use the storage
     /// buffer directly and compact/indirect output without readback.
     pub fn encode_records_readback(
@@ -598,6 +622,7 @@ impl GpuPlanetPlacement {
             config,
             region,
             tile,
+            [0; 3],
             budget,
             self.capacity,
             self.max_surface_samples,
@@ -671,6 +696,7 @@ fn prepare(
     config: PlanetPlacementConfig,
     region: PlanetPlacementRegion,
     tile: &std::sync::Arc<HeightfieldTile>,
+    output_origin_mm: [i64; 3],
     budget: GpuPlanetPlacementWorkBudget,
     capacity: usize,
     max_surface_samples: usize,
@@ -734,8 +760,14 @@ fn prepare(
         .and_then(|value| value.checked_mul(4))
         .ok_or(PlanetPlacementError::ArithmeticOverflow)?;
     words[20..24].copy_from_slice(&i128_words(radial_base));
-    for (axis, origin) in config.origin_mm.into_iter().enumerate() {
-        words[24 + 4 * axis..28 + 4 * axis].copy_from_slice(&i128_words(i128::from(origin)));
+    for axis in 0..3 {
+        // Subtract integer origins before shader conversion. Converting two
+        // planetary-scale i64 values and subtracting them in floating point
+        // needlessly exposes cancellation error in the local-frame path.
+        let relative_origin = i128::from(config.origin_mm[axis])
+            .checked_sub(i128::from(output_origin_mm[axis]))
+            .ok_or(PlanetPlacementError::ArithmeticOverflow)?;
+        words[24 + 4 * axis..28 + 4 * axis].copy_from_slice(&i128_words(relative_origin));
     }
     Ok(Request {
         words,
@@ -744,6 +776,7 @@ fn prepare(
         key: GpuPlanetPlacementCacheKey {
             config,
             region,
+            output_origin_mm,
             tile: tile.clone(),
         },
     })

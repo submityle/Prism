@@ -105,6 +105,15 @@ fn main() {
         store_u256(139u + axis * 9u, projected.magnitude);
         output_words[147u + axis * 9u] = select(0u, 1u, projected.negative);
     }
+    for (var face = 0u; face < 6u; face += 1u) {
+        let cube_num = cube_numerators_for_cell(face, vec2<u32>(7u, 11u), vec2<u32>(5u, 9u), 16u, 4u);
+        let direction_num = cube_direction_q84(cube_num);
+        for (var axis = 0u; axis < 3u; axis += 1u) {
+            let base = 166u + (face * 3u + axis) * 9u;
+            store_u256(base, direction_num[axis].magnitude);
+            output_words[base + 8u] = select(0u, 1u, direction_num[axis].negative);
+        }
+    }
 }
 "#,
     );
@@ -150,7 +159,7 @@ fn u256_limb_arithmetic_matches_rust_reference_on_metal() {
         });
     let output_buffer = context.device().create_buffer(&wgpu::BufferDescriptor {
         label: Some("planet U256 arithmetic output"),
-        size: 175 * 4,
+        size: 328 * 4,
         usage: wgpu::BufferUsages::STORAGE
             | wgpu::BufferUsages::COPY_SRC
             | wgpu::BufferUsages::COPY_DST,
@@ -239,11 +248,11 @@ fn u256_limb_arithmetic_matches_rust_reference_on_metal() {
     }
     let readback = context.device().create_buffer(&wgpu::BufferDescriptor {
         label: Some("planet U256 arithmetic readback"),
-        size: 175 * 4,
+        size: 328 * 4,
         usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
         mapped_at_creation: false,
     });
-    encoder.copy_buffer_to_buffer(&output_buffer, 0, &readback, 0, 175 * 4);
+    encoder.copy_buffer_to_buffer(&output_buffer, 0, &readback, 0, 328 * 4);
     context.queue().submit(Some(encoder.finish()));
     context.wait();
     let output = read(&context, &readback);
@@ -314,6 +323,19 @@ fn u256_limb_arithmetic_matches_rust_reference_on_metal() {
             read_word(&output, 147 + axis * 9),
             u32::from(expected.negative)
         );
+    }
+    for face in 0..6u32 {
+        let direction =
+            fixed_math::cell_center_direction_q84(face, 4, [7, 11], [5, 9], 17).unwrap();
+        for axis in 0..3 {
+            let base = 166 + (face as usize * 3 + axis) * 9;
+            let value = direction[axis];
+            assert_eq!(
+                read_u256(&output, base),
+                U256::from_u128(value.unsigned_abs())
+            );
+            assert_eq!(read_word(&output, base + 8), u32::from(value < 0));
+        }
     }
 }
 
