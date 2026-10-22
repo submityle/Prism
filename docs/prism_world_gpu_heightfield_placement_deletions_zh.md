@@ -507,3 +507,16 @@ CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 cargo test -p prism_world_gpu --fe
 所有者完成相应依赖修复交付，或用户明确扩展修改范围后，才能继续独立交付验收。
 约 229 MiB 的本轮临时导出源码随后清理，可从上述完整 commit 重新导出；共享 target
 和其他 agent 文件保持不动。
+
+### 共享磁盘空间下的后续回归尝试
+
+2026-10-22 在最新工作树对 runtime 回归成功：
+`cargo test -p prism_world_runtime --lib --offline -j 1 --quiet` 为 183/183。
+随后 GPU feature 命令
+`cargo test -p prism_world_gpu --features gpu --lib --offline -j 1 --quiet`
+未完成，rustc 在写 `target/debug/deps/.../lib.rmeta` 时报告
+`No space left on device`；这是共享文件系统容量错误，不是 Rust 源码诊断，故本次
+不能给 GPU feature 路径新增通过证据。失败时文件系统仅余 117 MiB，`target` 可见
+占用约 166 MiB。由于进程列表检查被系统权限拒绝，无法确认其他 agent 是否仍在
+使用共享构建目录；未执行可能干扰并行构建的 `cargo clean`，也未触碰其文件。
+释放空间并确认无人使用后，应重跑 GPU feature 测试，再按包清理本任务构建产物。
