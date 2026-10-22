@@ -376,6 +376,48 @@ fn durable_atomic_multi_cell_reload_replays_one_snapshot_before_publication() {
 }
 
 #[test]
+fn durable_scene_plan_groups_contiguous_reload_actions_into_one_batch() {
+    let first = SectorId::new(0, 35, 0, 0);
+    let second = SectorId::new(0, 36, 0, 0);
+    let mut world = World::new();
+    let mut runtime = make_runtime();
+    let mut host = SceneEcsHost::new(&mut world, Provider::default());
+    for sector in [first, second] {
+        SceneHost::load_cell(&mut host, sector).unwrap();
+        runtime.mark_resident_manifest(manifest(sector));
+    }
+    let revision = |sector| CellManifest {
+        content_version: 2,
+        derived_hash: 3,
+        ..manifest(sector)
+    };
+    let plan = runtime.tick(
+        &[
+            DemandSource::new(first, 0, 1, 10).unwrap(),
+            DemandSource::new(second, 0, 1, 10).unwrap(),
+        ],
+        &[revision(first), revision(second)],
+        &[],
+        2,
+        budget(),
+    );
+    assert_eq!(plan.stream.actions.len(), 2);
+    assert!(plan
+        .stream
+        .actions
+        .iter()
+        .all(|action| matches!(action, StreamAction::Reload(_))));
+
+    let path = JournalPath::new();
+    let mut journal = FileJournal::open(&path.0).unwrap();
+    runtime
+        .apply_scene_plan_durable_atomic(&plan, &mut host, &mut journal)
+        .unwrap();
+    assert_eq!(host.provider().stage_attempts, 2);
+    assert_eq!(host.loaded_cell_count(), 2);
+}
+
+#[test]
 fn durable_scene_reload_replays_latest_cell_state_before_publishing() {
     let path = JournalPath::new();
     let sector = SectorId::new(0, 4, 1, 2);

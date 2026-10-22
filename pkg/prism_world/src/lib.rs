@@ -15,6 +15,7 @@ extern crate std;
 #[cfg(feature = "scene_host")]
 pub mod scene_host;
 
+use alloc::vec::Vec;
 use prism_world_persist::{AppendOnlyLog, LogError, Transaction};
 use prism_world_residency::{
     MaterializationBudget, ResidencyPlan, ResidencyRecord, ResidencyScheduler,
@@ -83,6 +84,23 @@ pub trait SceneHost {
 
     /// Loads the authoritative cell scene for a required or prefetched sector.
     fn load_cell(&mut self, sector: SectorId) -> Result<(), Self::Error>;
+
+    /// Atomically reloads a set of already-loaded sectors.
+    ///
+    /// The default implementation reports that it did not handle the batch.
+    /// The world facade then falls back to ordered single-cell loads. Hosts
+    /// that can stage multiple cells should override this method with an
+    /// all-or-nothing ownership publication.
+    fn reload_cells_atomic(&mut self, sectors: &[SectorId]) -> Result<bool, Self::Error> {
+        match sectors {
+            [] => Ok(true),
+            [sector] => {
+                self.load_cell(*sector)?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
 
     /// Removes a cell scene after its persistence handoff is complete.
     fn unload_cell(&mut self, sector: SectorId) -> Result<(), Self::Error>;
@@ -264,15 +282,40 @@ pub(crate) fn apply_plan_to<H: SceneHost>(
     plan: &WorldFramePlan,
     host: &mut H,
 ) -> Result<(), ApplyError<H::Error>> {
-    for action in &plan.stream.actions {
+    let mut stream_index = 0;
+    while stream_index < plan.stream.actions.len() {
+        let action = &plan.stream.actions[stream_index];
         match action {
-            StreamAction::Load(request)
-            | StreamAction::Reload(request)
-            | StreamAction::Prefetch(request) => {
+            StreamAction::Load(request) | StreamAction::Prefetch(request) => {
                 host.load_cell(request.sector).map_err(ApplyError::Host)?;
+                stream_index += 1;
+            }
+            StreamAction::Reload(_) => {
+                let start = stream_index;
+                while stream_index < plan.stream.actions.len()
+                    && matches!(plan.stream.actions[stream_index], StreamAction::Reload(_))
+                {
+                    stream_index += 1;
+                }
+                let sectors: Vec<_> = plan.stream.actions[start..stream_index]
+                    .iter()
+                    .filter_map(|action| match action {
+                        StreamAction::Reload(request) => Some(request.sector),
+                        _ => None,
+                    })
+                    .collect();
+                if !host
+                    .reload_cells_atomic(&sectors)
+                    .map_err(ApplyError::Host)?
+                {
+                    for sector in sectors {
+                        host.load_cell(sector).map_err(ApplyError::Host)?;
+                    }
+                }
             }
             StreamAction::Unload(sector) => {
                 host.unload_cell(*sector).map_err(ApplyError::Host)?;
+                stream_index += 1;
             }
         }
     }
