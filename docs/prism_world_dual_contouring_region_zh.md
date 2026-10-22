@@ -16,7 +16,9 @@
 - `max_bytes` 包含区域 cell-vertex map、position/normal 和 index payload；不包含分配器元数据。
 - `InvalidRegion` 表示空区间；`RegionOutOfBounds` 表示超出 `dimensions - 1` 的 cell 域。
 - 所有预算和拓扑检查在结果发布前完成；失败不返回部分 mesh。
-- 区域内部仍拒绝 checkerboard face、缺失 cell vertex、退化面和 f32 精度损失。
+- 区域内部仍拒绝 checkerboard face、同符号角点图的多不连通分量、缺失 cell vertex、
+  退化面和 f32 精度损失。单个 cell 只有一个 QEF 顶点，无法忠实表达多个不连通的
+  等值面组件，因此该输入明确 fail-closed。
 
 ## 复杂度与边界
 

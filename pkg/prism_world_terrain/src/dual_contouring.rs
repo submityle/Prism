@@ -162,6 +162,8 @@ pub enum DualContouringError {
     AllocationFailed,
     /// An alternating-sign cell face has unresolved topology.
     AmbiguousTopology,
+    /// A cell contains more than one disconnected component of one sign.
+    DisconnectedTopology,
     /// A crossing cell has no usable gradient or finite QEF solution.
     DegenerateCell,
     /// Local coordinates exceed the supported exact integer range.
@@ -287,6 +289,9 @@ impl DualContouringMesh {
                     let v = cell_values(grid, [x, y, z]);
                     if has_ambiguous_face(&v) {
                         return Err(DualContouringError::AmbiguousTopology);
+                    }
+                    if has_disconnected_sign_component(&v) {
+                        return Err(DualContouringError::DisconnectedTopology);
                     }
                 }
             }
@@ -579,6 +584,47 @@ fn has_ambiguous_face(v: &[i32; 8]) -> bool {
             && (v[f[1]] < 0) == (v[f[3]] < 0)
             && (v[f[0]] < 0) != (v[f[1]] < 0)
     })
+}
+fn has_disconnected_sign_component(v: &[i32; 8]) -> bool {
+    for sign in [false, true] {
+        let mut visited = [false; 8];
+        let mut components = 0usize;
+        for start in 0..8 {
+            if visited[start] || (v[start] < 0) != sign {
+                continue;
+            }
+            components += 1;
+            if components > 1 {
+                return true;
+            }
+            let mut stack = [0usize; 8];
+            let mut len = 1usize;
+            stack[0] = start;
+            visited[start] = true;
+            while len != 0 {
+                len -= 1;
+                let node = stack[len];
+                for edge in EDGES {
+                    let next = if edge[0] == node {
+                        Some(edge[1])
+                    } else if edge[1] == node {
+                        Some(edge[0])
+                    } else {
+                        None
+                    };
+                    let Some(next) = next else {
+                        continue;
+                    };
+                    if !visited[next] && (v[next] < 0) == sign {
+                        visited[next] = true;
+                        stack[len] = next;
+                        len += 1;
+                    }
+                }
+            }
+        }
+    }
+    false
 }
 fn incident_cells(axis: usize, p: [u32; 3]) -> [[u32; 3]; 4] {
     match axis {
@@ -935,6 +981,48 @@ mod tests {
                 }
             ),
             Err(DualContouringError::AmbiguousTopology)
+        );
+    }
+
+    #[test]
+    fn disconnected_corner_components_are_rejected_before_qef_output() {
+        let spec = SdfSpec::new([2, 2, 2], 2, 1).unwrap();
+        struct OppositeCorners(SdfSpec);
+        impl SdfField for OppositeCorners {
+            type Error = Infallible;
+            fn spec(&self) -> SdfSpec {
+                self.0
+            }
+            fn sample_q16(&self, p: [u32; 3]) -> Result<i32, Self::Error> {
+                Ok(if (p == [0, 0, 0]) || (p == [1, 1, 1]) {
+                    -1
+                } else {
+                    1
+                })
+            }
+        }
+        let g = SdfGrid::bake(
+            &OppositeCorners(spec),
+            VolumeBakeLimits {
+                max_dimensions: [2; 3],
+                max_samples: 8,
+                max_bytes: 32,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            DualContouringMesh::build(
+                &g,
+                geom(),
+                DualContouringLimits {
+                    max_cells: 1,
+                    max_work_units: 64,
+                    max_vertices: 8,
+                    max_triangles: 12,
+                    max_bytes: 4096,
+                },
+            ),
+            Err(DualContouringError::DisconnectedTopology)
         );
     }
 
