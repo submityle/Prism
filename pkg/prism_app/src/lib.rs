@@ -258,7 +258,11 @@ pub mod rollback_replay;
 pub mod run_mode;
 pub mod runner;
 pub mod schedule;
+#[cfg(feature = "settings-io")]
+pub mod settings_io;
 pub mod settings_runtime;
+#[cfg(feature = "settings-io")]
+pub mod settings_transaction;
 pub mod state;
 pub mod sub_app;
 pub mod sub_app_label;
@@ -330,6 +334,11 @@ pub use schedule::{
 pub use settings_runtime::{
     PreparedSettingsUpdate, SettingsRuntime, SettingsRuntimeCheckpoint, SettingsRuntimeError,
 };
+#[cfg(feature = "settings-io")]
+pub use settings_transaction::{
+    SettingsTransactionManager, SettingsTransactionManagerError, SettingsTransactionServices,
+    SettingsTransactionStatus,
+};
 pub use state::{
     ComputeDepth, ComputedStates, OnTransition, StateScoped, StateTransitionSet, SubStates,
 };
@@ -395,8 +404,15 @@ pub mod prelude {
         ExitConfirmation, First, Last, PostStartup, PostUpdate, PreStartup, PreUpdate, Shutdown,
         Startup, StateTransition, Update,
     };
+    #[cfg(feature = "settings-io")]
+    pub use crate::settings_io::SettingsRuntimeController;
     pub use crate::settings_runtime::{
         PreparedSettingsUpdate, SettingsRuntime, SettingsRuntimeCheckpoint, SettingsRuntimeError,
+    };
+    #[cfg(feature = "settings-io")]
+    pub use crate::settings_transaction::{
+        SettingsTransactionManager, SettingsTransactionManagerError, SettingsTransactionServices,
+        SettingsTransactionStatus,
     };
     pub use crate::state::{
         ComputeDepth, ComputedStates, OnTransition, StateScoped, StateTransitionSet, SubStates,

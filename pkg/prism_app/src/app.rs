@@ -134,6 +134,14 @@ impl App {
         app.sub_apps.main.world.insert_resource(run_mode);
         app.install_detected_settings_runtime()
             .expect("the built-in platform settings schema must be valid");
+        #[cfg(feature = "settings-io")]
+        {
+            app.insert_resource(crate::settings_transaction::SettingsTransactionManager::default());
+            app.add_systems(
+                Last,
+                crate::settings_transaction::expire_settings_transaction_system,
+            );
+        }
         // Parallel phase execution (design §8.2, `multi_thread`): install a
         // private work-stealing pool so each schedule's conflict-free system
         // waves run across worker threads. `set_task_pool` shares one instead.
