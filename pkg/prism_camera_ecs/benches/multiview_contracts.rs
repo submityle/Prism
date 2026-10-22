@@ -22,17 +22,21 @@ use std::path::Path;
 use std::time::Instant;
 
 use prism_app::App;
-use prism_camera::{CameraIntent, RenderTarget, ViewHandle, Viewport};
+use prism_camera::{
+    derive_view, CameraIntent, CameraPose, RenderTarget, ViewHandle, ViewHistory, Viewport,
+};
 use prism_camera_ecs::{
     CameraBundle, CameraDiagnostics, CameraIntentComponent, CameraPlugin, CameraViewRegistry,
     PublishedViews,
 };
+use prism_tasks::TaskPool;
 
 const VIEW_COUNTS: [usize; 4] = [1, 8, 16, 64];
 const TARGET_SIZE: [u32; 2] = [4096, 2048];
 const DEFAULT_WARMUP_FRAMES: usize = 64;
 const DEFAULT_SAMPLES: usize = 128;
 const DEFAULT_FRAMES_PER_SAMPLE: usize = 4;
+const DERIVE_ITERATIONS_PER_SAMPLE: usize = 128;
 
 #[derive(Clone, Copy, Debug)]
 struct Config {
@@ -52,6 +56,15 @@ struct Measurement {
     registry_views: usize,
     handles_stable: bool,
     order_stable: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct DeriveMeasurement {
+    view_count: usize,
+    mode: &'static str,
+    p50_ns_per_batch: u128,
+    p95_ns_per_batch: u128,
+    p99_ns_per_batch: u128,
 }
 
 fn env_usize(name: &str, default: usize) -> usize {
@@ -204,6 +217,67 @@ fn measure(view_count: usize, config: Config) -> Measurement {
     }
 }
 
+fn measure_derive(view_count: usize, parallel: bool, config: Config) -> DeriveMeasurement {
+    let mut inputs = Vec::with_capacity(view_count);
+    let mut histories = vec![ViewHistory::default(); view_count];
+    for index in 0..view_count {
+        let mut intent = CameraIntent::default();
+        intent.target = target_for(index);
+        intent.viewport = Viewport::from_pixels(
+            [index as u32 * (TARGET_SIZE[0] / view_count as u32), 0],
+            [TARGET_SIZE[0] / view_count as u32, TARGET_SIZE[1]],
+        );
+        inputs.push((intent, CameraPose::default()));
+    }
+    let pool = (parallel && view_count >= 8).then(TaskPool::new);
+
+    for iteration in 0..config.warmup_frames {
+        derive_batch(&inputs, &mut histories, pool.as_ref(), iteration as u64);
+    }
+
+    let mut samples = Vec::with_capacity(config.samples);
+    for sample in 0..config.samples {
+        let start = Instant::now();
+        for iteration in 0..DERIVE_ITERATIONS_PER_SAMPLE {
+            derive_batch(
+                &inputs,
+                &mut histories,
+                pool.as_ref(),
+                (config.warmup_frames + sample * DERIVE_ITERATIONS_PER_SAMPLE + iteration) as u64,
+            );
+        }
+        samples.push(start.elapsed().as_nanos() / DERIVE_ITERATIONS_PER_SAMPLE as u128);
+    }
+
+    DeriveMeasurement {
+        view_count,
+        mode: if pool.is_some() { "parallel" } else { "serial" },
+        p50_ns_per_batch: percentile(&mut samples, 50, 100),
+        p95_ns_per_batch: percentile(&mut samples, 95, 100),
+        p99_ns_per_batch: percentile(&mut samples, 99, 100),
+    }
+}
+
+fn derive_batch(
+    inputs: &[(CameraIntent, CameraPose)],
+    histories: &mut [ViewHistory],
+    pool: Option<&TaskPool>,
+    frame: u64,
+) {
+    if let Some(pool) = pool {
+        pool.par_iter_mut(histories)
+            .with_min_len(4)
+            .enumerate_for_each(|index, history| {
+                let (intent, pose) = inputs[index];
+                black_box(derive_view(intent, pose, frame, TARGET_SIZE, history).unwrap());
+            });
+    } else {
+        for ((intent, pose), history) in inputs.iter().zip(histories) {
+            black_box(derive_view(*intent, *pose, frame, TARGET_SIZE, history).unwrap());
+        }
+    }
+}
+
 fn diagnostic_probe() -> usize {
     let mut app = App::new();
     app.add_plugins(CameraPlugin::new(TARGET_SIZE));
@@ -220,6 +294,19 @@ fn diagnostic_probe() -> usize {
 
 fn main() {
     let config = config();
+    let derive_measurements = [
+        measure_derive(1, false, config),
+        measure_derive(16, false, config),
+        measure_derive(16, true, config),
+        measure_derive(64, false, config),
+        measure_derive(64, true, config),
+        measure_derive(256, false, config),
+        measure_derive(256, true, config),
+        measure_derive(1024, false, config),
+        measure_derive(1024, true, config),
+        measure_derive(4096, false, config),
+        measure_derive(4096, true, config),
+    ];
     let measurements: Vec<_> = VIEW_COUNTS
         .into_iter()
         .map(|view_count| measure(view_count, config))
@@ -232,6 +319,17 @@ fn main() {
     println!("  samples         : {}", config.samples);
     println!("  frames/sample   : {}", config.frames_per_sample);
     println!("  diagnostic probe: {diagnostic_errors} invalid viewport error");
+    println!("derive_mode,view_count,p50_ns/batch,p95_ns/batch,p99_ns/batch");
+    for row in derive_measurements {
+        println!(
+            "{},{},{},{},{}",
+            row.mode,
+            row.view_count,
+            row.p50_ns_per_batch,
+            row.p95_ns_per_batch,
+            row.p99_ns_per_batch
+        );
+    }
     println!("views,p50_ns/frame,p95_ns/frame,p99_ns/frame,active,diagnostics,registry,handles_stable,order_stable");
     for row in &measurements {
         println!(
