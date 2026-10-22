@@ -6,7 +6,7 @@
 
 #![cfg(feature = "settings-io")]
 
-use std::sync::Mutex;
+use std::sync::{Mutex, TryLockError};
 use std::time::{Duration, Instant};
 
 use prism_ecs::resource::Resource;
@@ -156,14 +156,18 @@ impl SettingsTransactionServices {
         }
     }
 
-    fn with_mut<R>(
+    /// Runs a lifecycle operation only when the service lock is immediately
+    /// available. Frame-boundary systems use this to avoid waiting behind a
+    /// host operation that is already performing synchronous I/O or effects.
+    fn try_with_mut<R>(
         &self,
         f: impl FnOnce(&mut dyn SettingsPersistence, &mut [&mut dyn SettingsApplier]) -> R,
-    ) -> R {
-        let mut inner = self
-            .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+    ) -> Option<R> {
+        let mut inner = match self.inner.try_lock() {
+            Ok(inner) => inner,
+            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(TryLockError::WouldBlock) => return None,
+        };
         let SettingsTransactionServicesInner {
             persistence,
             appliers,
@@ -172,7 +176,7 @@ impl SettingsTransactionServices {
             .iter_mut()
             .map(|applier| applier.as_mut() as &mut dyn SettingsApplier)
             .collect::<Vec<_>>();
-        f(persistence.as_mut(), &mut applier_refs)
+        Some(f(persistence.as_mut(), &mut applier_refs))
     }
 }
 
@@ -497,7 +501,7 @@ pub fn expire_settings_transaction_system(
             Some("expired settings preview is waiting for SettingsTransactionServices".to_owned());
         return;
     };
-    services.with_mut(|persistence, appliers| {
+    let Some(()) = services.try_with_mut(|persistence, appliers| {
         match manager.expire(now, &mut runtime, persistence, appliers) {
             Ok(Some(PipelineOutcome::RolledBack)) => manager.expiry_error = None,
             Ok(Some(outcome)) => {
@@ -508,7 +512,11 @@ pub fn expire_settings_transaction_system(
             Ok(None) => manager.expiry_error = None,
             Err(error) => manager.expiry_error = Some(error.to_string()),
         }
-    });
+    }) else {
+        manager.expiry_error =
+            Some("expired settings preview is waiting for transaction services".to_owned());
+        return;
+    };
 }
 
 #[cfg(test)]
@@ -549,6 +557,17 @@ mod tests {
     }
 
     struct NoopPersistence;
+
+    #[test]
+    fn frame_service_try_lock_never_waits_for_an_active_operation() {
+        let services = SettingsTransactionServices::new(NoopPersistence, Vec::new());
+        let guard = services.inner.lock().unwrap();
+        assert!(services
+            .try_with_mut(|_, _| panic!("contended callback must not run"))
+            .is_none());
+        drop(guard);
+        assert!(services.try_with_mut(|_, _| ()).is_some());
+    }
 
     impl SettingsPersistence for NoopPersistence {
         fn persist(
