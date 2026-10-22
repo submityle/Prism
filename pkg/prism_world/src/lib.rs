@@ -355,7 +355,7 @@ pub(crate) fn apply_plan_to<H: SceneHost>(
     Ok(())
 }
 
-fn apply_stream_plan_to<H: SceneHost>(
+pub(crate) fn apply_stream_plan_to<H: SceneHost>(
     plan: &WorldFramePlan,
     host: &mut H,
 ) -> Result<(), ApplyError<H::Error>> {

@@ -4,7 +4,9 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 use super::{ResidencyBinding, SceneEcsHost, SceneEcsHostError, SceneEcsProvider, SectorId};
-use crate::{apply_plan_to, ApplyError, SceneHost, WorldFramePlan, WorldRuntime};
+use crate::{
+    apply_plan_to, apply_stream_plan_to, ApplyError, SceneHost, WorldFramePlan, WorldRuntime,
+};
 use prism_world_residency::ResidencyRecord;
 use prism_world_persist::FileJournal;
 
@@ -107,14 +109,7 @@ fn apply_stream_plan_with_host<H: SceneHost>(
     plan: &WorldFramePlan,
     host: &mut H,
 ) -> Result<(), ApplyError<H::Error>> {
-    let stream_only = WorldFramePlan {
-        stream: plan.stream.clone(),
-        residency: prism_world_residency::ResidencyPlan {
-            actions: Vec::new(),
-            budget: plan.residency.budget,
-        },
-    };
-    apply_plan_to(&stream_only, host)
+    apply_stream_plan_to(plan, host)
 }
 
 fn commit_scene_residency<P: SceneHost>(
