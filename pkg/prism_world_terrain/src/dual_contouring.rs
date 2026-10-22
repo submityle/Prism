@@ -766,10 +766,15 @@ mod tests {
             }
         }
         edges.sort_unstable();
+        assert_eq!(edges.len() % 2, 0, "closed manifold has no unpaired edge");
         assert!(
             edges.chunks_exact(2).all(|pair| pair[0] == pair[1]),
             "every sphere edge has exactly two incident triangles"
         );
+        let unique_edges = edges.len() / 2;
+        let euler = mesh.positions().len() as isize - unique_edges as isize
+            + mesh.indices().len() as isize / 3;
+        assert_eq!(euler, 2, "a closed sphere has Euler characteristic two");
     }
 
     #[test]
