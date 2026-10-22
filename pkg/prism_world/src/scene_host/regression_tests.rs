@@ -411,7 +411,7 @@ fn durable_scene_plan_groups_contiguous_reload_actions_into_one_batch() {
     let path = JournalPath::new();
     let mut journal = FileJournal::open(&path.0).unwrap();
     runtime
-        .apply_scene_plan_durable_atomic(&plan, &mut host, &mut journal)
+        .apply_scene_plan_durable(&plan, &mut host, &mut journal)
         .unwrap();
     assert_eq!(host.provider().stage_attempts, 2);
     assert_eq!(host.loaded_cell_count(), 2);
@@ -453,7 +453,7 @@ fn durable_scene_plan_batch_failure_keeps_every_old_cell_authoritative() {
     let path = JournalPath::new();
     let mut journal = FileJournal::open(&path.0).unwrap();
     assert!(runtime
-        .apply_scene_plan_durable_atomic(&plan, &mut host, &mut journal)
+        .apply_scene_plan_durable(&plan, &mut host, &mut journal)
         .is_err());
 
     assert_eq!(host.provider().stage_attempts, 2);
