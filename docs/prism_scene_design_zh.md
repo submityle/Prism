@@ -141,7 +141,7 @@ quality tier（运行时）示例：实例化预算（每帧物化上限）、�
          │               (作者只编辑 scene;level = 顶层 scene + 嵌套实例节点)
          ▼
 烘焙期 ───────────────────────────────────────────────
-  prism_scene_bake       scene 图 → 扁平化「实例化计划」+ 预合成纯属性 override
+  prism_scene_bake       （目标）scene 作者数据 → 扁平化「实例化计划」+ 预合成纯属性 override；当前实现边界见 §27
          │               + 空间切片 + 常驻档位标注(interactive/streamed/proxy)
          ▼
 运行态 ───────────────────────────────────────────────
@@ -162,7 +162,7 @@ quality tier（运行时）示例：实例化预算（每帧物化上限）、�
 模块职责：
 
 - **`prism_scene`（本文核心 crate）**：模板/实例/override 的运行期数据结构与 API、实例化引擎、热重载、确定性重放。`no_std + alloc`，`forbid(unsafe_code)`。
-- **`prism_scene_bake`（配套 crate，`std`）**：离线把 scene 作者图编译为 `InstantiationPlan` + 预合成 override + 空间切片 + 档位标注，产出 `.scene.prism`/`.prefab.prism` 资产包。对标 Godot `PackedScene`、UE Level 打包。
+- **`prism_scene_bake`（目标，配套 `std` crate）**：完整目标为离线把 scene 作者图编译为 `InstantiationPlan` + 预合成 override + 空间切片 + 档位标注，产出 `.scene.prism`/`.prefab.prism` 资产包。当前仅实现显式 canonical component rows → SoA/template/PRST bytes 的有限切片，缺项见 §27；对标 Godot `PackedScene`、UE Level 打包是设计参考，不代表功能等价。
 - **边界清晰**：本 crate 不定义组件语义（只搬运 reflect 可见数据）、不做文件 IO（经 `prism_asset` + VFS）、不做格式解码、不做大世界空间索引/流送调度（归世界系统基座，本 crate 只被其调用）。
 
 ---
@@ -186,7 +186,7 @@ Override（覆盖,稀疏 delta,挂在 Instance 上)
 ### 5.1 Template（模板）
 
 ```rust
-/// 一个 scene 资产的运行期常驻表示；由 prism_scene_bake 产出、prism_asset 加载。
+/// 一个 scene 资产的运行期常驻表示；目标由 prism_scene_bake 产出、prism_asset 加载（当前链路未完成，见 §27）。
 pub struct SceneTemplate {
     guid: StableGuid,                 // 复用 prism_asset 身份,随文件走
     plan: InstantiationPlan,          // 扁平化实例化计划(§8)
@@ -468,7 +468,7 @@ pub struct NestedSlot {
 ### 10.3 编辑态/运行态分离
 
 - **编辑态**：`.scene.prism`/`.prefab.prism`，含完整 override 集 + 具名表 + 可重导入源记录，供编辑器热改。
-- **运行态**：发行打包时经 `prism_scene_bake` 产出预合成、剥离编辑元数据的紧凑计划（可进 `prism_asset` 的 `.ucas` 容器），冷加载 mmap 即用。
+- **运行态目标**：发行打包时经完整 `prism_scene_bake` 产出预合成、剥离编辑元数据的紧凑计划（可进 `prism_asset` 的 `.ucas` 容器），冷加载 mmap 即用。该 cooker/package/mmap 链路目前未完成；当前 bake 切片边界见 §27。
 - **文本旁视图**：复用 `prism_asset` 的文本旁视图做 diff（二进制主体不可逐行 diff 的缓解，§23）。
 
 ### 10.4 后缀
@@ -805,7 +805,7 @@ use prism_scene::prelude::*;   // spawn / despawn / variant / local! / Scene
 | crate | 职责 | std |
 |---|---|---|
 | `prism_scene` | 运行时：模型/身份/覆盖/实例化/常驻/流送接缝/热重载/确定性/持久化语义 | `no_std + alloc` 核 |
-| `prism_scene_bake` | 离线：模板编译（反射 → 稳定列 schema + 预排 archetype + 预合成 override + 依赖闭包） | `std`（工具链） |
+| `prism_scene_bake` | 目标：离线模板编译（反射 → 稳定列 schema + 预排 archetype + 预合成 override + 依赖闭包）；当前仅显式 canonical rows → SoA/template/PRST bytes，见 §27 | `std`（工具链） |
 
 世界系统拆为另文的 `prism_world_stream` / `prism_world_residency` / `prism_world_persist`，本 crate 只定与其接缝的契约（§12.2、§15.3），不实现它们。
 
@@ -861,8 +861,9 @@ prism_scene/
 
 ### 21.3 版本化与迁移
 
-- **schema 版本**：每模板带 schema version；字段用稳定 id（非名字）编码，改名不破二进制。
-- **字段迁移映射**：升版提供「旧字段 id → 新字段 id / 转换函数」表，读旧包与旧存档时转译；无映射字段软降级丢弃并诊断。
+- **两个版本空间**：PRST wire version 只描述二进制布局；`SceneTemplate::schema` / runtime manifest schema 描述内容语义。两者必须分别校验，不得因 wire 格式升级而隐式改变内容 schema。
+- **已实现的迁移核**：PRST wire v1 可读为内容 schema 1；当前 writer 输出 wire v2，并显式写内容 schema。runtime loader 校验路由 schema 与 payload schema 一致，再用有界、只向前的 `SchemaMigrationRegistry` 逐步迁移到当前 schema；应用可注入语义迁移注册表，每步结果都重新跑模板不变量校验。内置 1→2 仅为字段布局不变时的身份迁移。
+- **语义迁移责任**：组件列是 opaque bytes，核心 crate 不猜测字段含义。组件字段增删/改型、字段 id 映射、`LocalEntityId` 重排和旧存档迁移，必须由拥有相应 schema 的应用/工具注册相邻版本转换；缺步骤、回退版本、超预算或迁移后校验失败均显式报错，不静默丢字段。字段稳定 ID 与诊断型可选字段丢弃仍需反射/schema 层接入。
 - **LocalEntityId 重排迁移**：模板内实体增删导致 id 重排时，烘焙产出「旧 id → 新 id」映射，使旧 override/旧存档 delta 仍能定位（§13.2、§15.4）。
 - **包格式版本**：序列化容器带 magic + version，拒绝不兼容大版本并给出清晰诊断，不静默误读。
 
@@ -892,9 +893,9 @@ prism_scene/
 | M1 | **功能完成** | `InstantiationPlan` 列布局、`materialize_plan_with_limits`、安全 decoder、预算预检、FieldSlot remap、失败回滚、`ScenePlanCost` | 列块/并行/archetype 优化由 `prism_ecs` 与 bake/任务层接入；本 crate 已固定其安全输入输出契约 |
 | M2 | **功能完成** | `OverrideSet` 去重、层叠确定性、plan-aware 组件状态校验，以及 registry 驱动的 Add/RemoveEntity、Add/RemoveComponent 与属性原子 replay | decoder 的具体 schema 由应用注册；不对 opaque bytes 做 Rust 类型猜测 |
 | M3 | **M3a 功能完成** | 有界递归 typed 嵌套、环检测、反向 teardown、失败回滚；`SceneReloadPlan` 提供 persistent-id-first 的模板 diff、孤儿诊断与 override 重建 | live world 的增量替换由世界/编辑器层消费 reload plan；本 crate 不持有资产监听或空间索引 |
-| M4 | **codec contract 完成** | version-1 plan/template/manifest codec、magic/version、资源预算、严格 wire 校验、依赖闭包元数据和确定性 round-trip | 单文件资产包、CAS、mmap 和 source bake 属于 `prism_asset` / `prism_asset_build` |
+| M4 | **部分完成：codec + saved-source cook/publish + runtime owned-load bridge** | version-1 plan、version-2 template（兼容读取 PRST v1）与 scene-manifest codec；显式 canonical rows → archetype SoA/PRST；CLI 接入 DAG/DDC/CAS/manifest；MANIFEST v4 kind 与 v2/v3 兼容；runtime 有界读取、kind/schema/GUID/依赖校验及有界 schema migration | 编辑器/反射 source admission、组件语义迁移注册、PRST 列零拷贝 mmap、完整作者态导入仍未完成；当前 bridge 解码为 owned columns，不能宣称冷加载零解析或 mmap 零拷贝 |
 | M5 | **调度 contract 完成** | `ResidencyTier` / `ResidencyPlan`、按 PersistentId 稳定排序的实体/字节预算 admission、可提交 action | proxy⇄ECS 执行器、additive 空间接缝和百万规模基准属于世界系统 |
-| M6 | **数据 contract 完成** | `PersistentEntityMap`、override delta capture、persistent-id-first reload、结构/属性孤儿诊断和确定性 best-effort plan | 外部存档编码、schema migration 与跨平台 replay harness 属于 persist/determinism 上层 |
+| M6 | **数据 contract + 通用迁移执行核完成，端到端仍未完成** | `PersistentEntityMap`、override delta capture、persistent-id-first reload、结构/属性孤儿诊断、确定性 best-effort plan；PRST v1→v2 wire/content schema 分离及有界迁移注册/执行核 | 组件语义/字段 ID 与 LocalEntityId 映射迁移注册、外部存档编码、跨平台 replay harness 和目标平台一致性验证仍属于上层 |
 
 ---
 
@@ -1087,6 +1088,8 @@ OFPA 每对象文件化（§15、world §11.1）让多人并行编辑同一世�
 
 **`pkg/prism_scene` 的 crate-local runtime contract 已完成并由测试覆盖**（`no_std + alloc`，`#![forbid(unsafe_code)]`，依赖 `prism_asset` + `prism_ecs`，不依赖任何 `bevy_*`）：
 
+**`pkg/prism_scene_bake` 是有限 source-bake compiler**（std 工具 crate，不依赖 Bevy）：PRSA v1 codec 接受调用方提供的稳定组件 ID、固定 canonical row 宽度及显式实体引用偏移；按 archetype signature 与 local ID 确定性分组，校验 dense local、引用、层级、名称和实体/列/元数据资源预算，生成 `SceneTemplate` 或当前 PRST v2 bytes。asset-build CLI 的 `EditableSceneCooker` 已注册该格式，能将保存的 PRSA editable payload 经标准 cook DAG/DDC/CAS/manifest 流程产出 PRST artifact。runtime bridge 通过 `prism_world_runtime` 的 `scene_templates` feature，从 runtime manifest 路由 kind/schema，再经挂载的 container overlay（可使用 mmap container reader）读取有界 payload，解码后核对模板 GUID 与硬/可选依赖闭包；PRST 仍解码到 owned columns，并非列零拷贝。通用迁移执行核和 v1→v2 身份迁移已实现，但仍不解析编辑器/反射对象、不提供组件语义转换；CLI cooker 有独立单测，完整链路验证见下方记录。
+
 | 模块 | 覆盖章节 | 内容 |
 |---|---|---|
 | `identity` | §6 | `LocalEntityId`（基段 / 保留段）、`NameTable`（`BTreeMap`，确定性迭代序）、`PersistentId`（FNV-1a-128 确定性派生）、`PersistentIdBuilder` |
@@ -1097,7 +1100,8 @@ OFPA 每对象文件化（§15、world §11.1）让多人并行编辑同一世�
 | `plan` | §8.1 | `InstantiationPlan`（bake→runtime 契约）、`ArchetypeGroup`、`Column`（`Arc<[u8]>` COW 共享 SoA blob）、`FieldSlot`、`PlanError` + `validate()` 结构化校验；每个 group 强制 signature 与 payload columns 一一对应且按 canonical component 顺序排列 |
 | `overrides` | §7 | `ComponentTypeId`、`OverrideValue`（序列化态）、`PropertyOverride`、`StructuralOp`、`ArchetypeSignature`、`OverrideSet`（唯一键 `(target, component, path)` 去重、后写覆盖前写、实体/组件删除孤儿回收）；`validate_for_template(entity_count)` / `validate_for_template_with_hierarchy` / `validate_for_plan(&InstantiationPlan)` / `OverrideError` 对属性 target、连续 reserved local、顺序父链、层级悬空、RemoveEntity、Add/RemoveComponent 目标及重复操作做无 panic 结构校验；plan 入口按 base/新增 archetype signature 维护组件状态，拒绝对已存在组件 Add 或对不存在组件 Remove |
 | `remap` | §6.1 | `RemapTable`（基段 + 保留段两段稠密映射，O(1) 查、拒绝间隙） |
-| `template` | §5.1、§9、§21 | `SceneTemplate`（含 `plan: InstantiationPlan` + `tiers: ResidencyPlan`）、`NestedSlot`（嵌套实例槽）、显式 `validate()` 与 fallible `try_new`/`try_empty` 资产发布入口；`template_codec` 提供 PRST v1 确定性编码/解码、严格资源限额与解码后完整校验 |
+| `template` | §5.1、§9、§21 | `SceneTemplate`（含内容 schema、`plan: InstantiationPlan` + `tiers: ResidencyPlan`）、`NestedSlot`（嵌套实例槽）、显式 `validate()` 与 fallible `try_new`/`try_empty` 资产发布入口；`template_codec` 写 PRST v2、兼容读 v1，并执行严格资源限额与解码后完整校验 |
+| `schema` | §21.3、M6 | `SchemaMigrationRegistry` 对有效模板执行有界、只向前的逐步 schema 转换；runtime loader 可注入应用注册表；内置 v1→v2 身份迁移，不解释 opaque component bytes |
 | `instantiate` | §8.2、§21.2 | `spawn_plan`/`spawn_typed_plan`/`despawn_instance`；批量预留、确定性 remap、rooted `LocalEntityId(0)` 层级校验、`ChildOf` 重连、typed Bundle/受限 `SpawnContext` constructor（仅当前 owner 可 materialize、拒绝动态环）、返回错误时回收实例自有实体、base/reserved 实体回收、防止外部子实体级联删除，以及经过 root/stale 校验的 `SceneSpawn::attach_instance` anchor 接线 |
 | `materialize` | §8.1、§8.2 M1 | `MaterializerRegistry` 按 `ComponentTypeId` 确定性注册安全 decoder；逐列校验 row layout/长度，逐 slot 校验 bounds/重复项/目标 local，解码后通过 `World::insert_reflect` 写入 reserved entity；完整 decode 阶段失败会回收本次实体，禁止静默丢 payload；`MaterializeLimits` 在 reservation/decode 前 checked 约束 entity/column/row/blob 预算 |
 | `property_apply` | §7、§8.2 M1 | 独立提供 `World::get_reflect_mut` + reflect path 的精确类型标量/字符串应用，并标记 ECS changed；同一 component 的批量 replay 先 clone/预演后一次提交，保证后项失败不留下部分写入；opaque `Bytes` 与数值强制转换明确返回类型错误，结构操作走 registry replay。 |
@@ -1109,4 +1113,6 @@ OFPA 每对象文件化（§15、world §11.1）让多人并行编辑同一世�
 
 验证：`cargo test -p prism_scene --offline -- --test-threads=1` → **135 unit + 1 doctest 全绿**；`cargo check -p prism_scene --offline --no-default-features` 通过；目标 crate `pkg/prism_scene` `cargo clippy --offline --all-targets --no-deps -- -D warnings` 通过。plan/template/manifest codec 覆盖严格截断、稀疏大计数、尾随字节、magic/version、wire 资源预算、unsorted/duplicate signature、column/signature 不一致和 entity count mismatch；override validator/replay 覆盖连续 reserved local、层级悬空、组件孤儿、结构事务与跨层结构冲突；materialize 覆盖多行列物化、FieldSlot remap、缺注册和 decoder 失败回滚；persistence/reload 覆盖 persistent-id remap 与孤儿诊断；runtime 覆盖 registry 结构 + 属性事务。
 
-**职责边界与不变量**：`OverrideSet::validate_for_plan` 使用完整 `InstantiationPlan` 维护 base/新增 archetype 的组件状态机；同一组件的合法逆操作按顺序生效，重复或非法状态转移被拒绝。`compose_layers` 报告跨层结构冲突并保留确定性首个操作，调用方必须把诊断视为组合结果的一部分。`property_apply` 只接受精确反射类型，结构 payload 必须由应用注册 typed decoder；本 crate 不 reinterpret opaque bytes、不捕获 decoder/constructor panic，也不回滚 ECS observer、changed tick 或外部副作用。`encode_plan`/`decode_plan`、`encode_template`/`decode_template` 和 `SceneManifest` 固定 PRST/PMNF v1 的确定性 wire contract；文件封装、source import、CAS/mmap、schema migration、空间索引、proxy⇄ECS 执行和 GPU 上传由上层 crate 实现并消费这些数据，不在 `prism_scene` 内复制一份平行真相源。reload diff 已避免逐实体扫描 archetype groups：构建一次 local 索引，对重复 group 配对缓存比较结果；变化仍按整 archetype group 保守标记（列 ABI 未声明通用行宽，当前无法对任意 opaque payload 做安全逐行 diff），因此大型单组的局部属性变化仍可能标记整组实体。跨整树的增量 ECS reload 应在提供行级版本/变更元数据和回滚安全边界后实施；当前 reload plan 本身不是 live-world 原子 apply。
+**职责边界与不变量**：`OverrideSet::validate_for_plan` 使用完整 `InstantiationPlan` 维护 base/新增 archetype 的组件状态机；同一组件的合法逆操作按顺序生效，重复或非法状态转移被拒绝。`compose_layers` 报告跨层结构冲突并保留确定性首个操作，调用方必须把诊断视为组合结果的一部分。`property_apply` 只接受精确反射类型，结构 payload 必须由应用注册 typed decoder；本 crate 不 reinterpret opaque bytes、不捕获 decoder/constructor panic，也不回滚 ECS observer、changed tick 或外部副作用。plan codec 固定 PRSP v1；template codec 写 PRST v2 并兼容读取 v1（v1 隐含 content schema 1），PMNF 容器固定其独立 wire version。schema registry 对有效模板做有界、向前迁移，但内置 1→2 不转换 payload；具体字段/组件语义转换仍须 schema owner 注册，不能宣称完整迁移能力。PRSA source payload 已接入 CLI DAG/CAS/manifest，但只覆盖显式 canonical row 输入，不提供 editor/reflect authoring import。MANIFEST v4 增加 artifact kind 路由字段，仍兼容读取 v2/v3（旧版本 kind 默认为 0）；runtime scene bridge 可从已发布 package 读取 owned template，但 PRST 列零拷贝 mmap 未实现。空间索引、proxy⇄ECS 执行和 GPU 上传仍由上层 crate 实现并消费这些数据，不在 `prism_scene` 内复制一份平行真相源。reload diff 已避免逐实体扫描 archetype groups：构建一次 local 索引，对重复 group 配对缓存比较结果；变化仍按整 archetype group 保守标记（列 ABI 未声明通用行宽，当前无法对任意 opaque payload 做安全逐行 diff），因此大型单组的局部属性变化仍可能标记整组实体。跨整树的增量 ECS reload 应在提供行级版本/变更元数据和回滚安全边界后实施；当前 reload plan 本身不是 live-world 原子 apply。
+
+**2026-10-23 M4 runtime bridge 验证**：`cargo test -p prism_asset_container --offline` → **88 unit + 30 integration 测试全绿**（含 v2/v3 manifest wire compatibility fixture）；`cargo test -p prism_world_runtime --features scene_templates --lib scene_template_provider --offline` → **3 tests 全绿**；`cargo test -p prism_asset_build_cli --test scene_runtime_roundtrip --offline` → **1 test 全绿**；`cargo test -p prism_asset_build_core --offline` → **全套测试与 doctest 全绿**。端到端测试覆盖保存 PRSA → CLI editable cook/DDC/CAS → package/manifest v4 → mmap container reader → runtime loader，并检查冷/热 package payload 一致。未运行全 workspace 测试、性能基准或 mmap scene 零拷贝测试。

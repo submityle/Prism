@@ -3,6 +3,7 @@
 //! The codec is deliberately independent of any asset container. A container may
 //! store these bytes under the template's stable GUID; decoding remains bounded,
 //! deterministic, and validates the complete descriptor before publication.
+//! The PRST wire version is independent of the template's content schema.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -15,7 +16,7 @@ use crate::residency::{ResidencyPlan, ResidencyTier};
 use crate::template::{NestedSlot, SceneTemplate, TemplateError};
 
 const MAGIC: &[u8; 4] = b"PRST";
-const VERSION: u16 = 1;
+const VERSION: u16 = 2;
 
 /// Bounds applied while decoding an untrusted baked template.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -74,7 +75,7 @@ pub enum TemplateCodecError {
     InvalidTemplate(TemplateError),
 }
 
-/// Encodes a validated template in the stable version-1 binary format.
+/// Encodes a validated template in the stable version-2 binary format.
 pub fn encode_template(template: &SceneTemplate) -> Result<Vec<u8>, TemplateCodecError> {
     template
         .validate()
@@ -84,6 +85,7 @@ pub fn encode_template(template: &SceneTemplate) -> Result<Vec<u8>, TemplateCode
     writer.bytes(MAGIC);
     writer.u16(VERSION);
     writer.guid(template.guid);
+    writer.u32(template.schema);
     writer.u32(checked_len(plan.len(), "plan bytes")?);
     writer.bytes(&plan);
     writer.u32(checked_len(template.names.len(), "names")?);
@@ -112,7 +114,7 @@ pub fn encode_template(template: &SceneTemplate) -> Result<Vec<u8>, TemplateCode
     Ok(writer.0)
 }
 
-/// Decodes and validates a template from the stable version-1 binary format.
+/// Decodes and validates version-1 or version-2 template wire data.
 pub fn decode_template(
     bytes: &[u8],
     limits: TemplateDecodeLimits,
@@ -125,10 +127,11 @@ pub fn decode_template(
         return Err(TemplateCodecError::BadMagic);
     }
     let version = reader.u16()?;
-    if version != VERSION {
+    if version != 1 && version != VERSION {
         return Err(TemplateCodecError::UnsupportedVersion(version));
     }
     let guid = reader.guid()?;
+    let schema = if version == 1 { 1 } else { reader.u32()? };
     let plan_len = reader.count("plan bytes", limits.max_plan_bytes)?;
     let plan_bytes = reader.take(plan_len)?;
     let plan = decode_plan(plan_bytes, limits.plan).map_err(TemplateCodecError::InvalidPlan)?;
@@ -174,6 +177,7 @@ pub fn decode_template(
     }
     let template = SceneTemplate {
         guid,
+        schema,
         plan,
         names,
         nested: nested.into_boxed_slice(),
@@ -343,10 +347,10 @@ mod tests {
             Err(TemplateCodecError::BadMagic)
         );
         let mut bad_version = encoded;
-        bad_version[4..6].copy_from_slice(&2u16.to_le_bytes());
+        bad_version[4..6].copy_from_slice(&3u16.to_le_bytes());
         assert_eq!(
             decode_template(&bad_version, TemplateDecodeLimits::default()),
-            Err(TemplateCodecError::UnsupportedVersion(2))
+            Err(TemplateCodecError::UnsupportedVersion(3))
         );
     }
 
@@ -358,11 +362,29 @@ mod tests {
         let _ = value;
         let mut invalid = encoded;
         // Replace the nested root while preserving the wire shape.
-        let root_offset = 4 + 2 + 16 + 4 + encode_plan(&template().plan).unwrap().len() + 4 + 4 + 4;
+        let root_offset =
+            4 + 2 + 16 + 4 + 4 + encode_plan(&template().plan).unwrap().len() + 4 + 4 + 4;
         invalid[root_offset..root_offset + 4].copy_from_slice(&1u32.to_le_bytes());
         assert!(matches!(
             decode_template(&invalid, TemplateDecodeLimits::default()),
             Err(TemplateCodecError::InvalidTemplate(_))
         ));
+    }
+
+    #[test]
+    fn decodes_legacy_wire_v1_as_content_schema_v1() {
+        let current = encode_template(&template()).unwrap();
+        let mut legacy = current[..22].to_vec();
+        legacy[4..6].copy_from_slice(&1u16.to_le_bytes());
+        legacy.extend_from_slice(&current[26..]);
+        let decoded = decode_template(&legacy, TemplateDecodeLimits::default()).unwrap();
+        assert_eq!(decoded.schema, 1);
+        assert_eq!(
+            crate::SchemaMigrationRegistry::default()
+                .migrate(decoded, crate::SCENE_TEMPLATE_SCHEMA)
+                .unwrap()
+                .schema,
+            crate::SCENE_TEMPLATE_SCHEMA
+        );
     }
 }

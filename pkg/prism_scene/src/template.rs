@@ -15,6 +15,7 @@ use crate::identity::{LocalEntityId, NameTable};
 use crate::overrides::{OverrideError, OverrideSet};
 use crate::plan::{InstantiationPlan, PlanError};
 use crate::residency::{ResidencyPlan, ResidencyTier};
+use crate::SCENE_TEMPLATE_SCHEMA;
 
 /// A nested instance slot inside a template (design §9.1).
 ///
@@ -35,6 +36,8 @@ pub struct NestedSlot {
 pub enum TemplateError {
     /// The template or a dependency used the reserved nil GUID.
     NilGuid,
+    /// The content schema zero value is reserved and cannot be published.
+    InvalidSchema,
     /// The flattened instantiation plan is invalid.
     InvalidPlan(PlanError),
     /// A name was empty or targeted a non-base local entity.
@@ -84,6 +87,8 @@ impl NestedSlot {
 pub struct SceneTemplate {
     /// The template's stable asset identity (design §6 `StableGuid`).
     pub guid: StableGuid,
+    /// Semantic content schema, distinct from the PRST wire version.
+    pub schema: u32,
     /// The flattened instantiation plan (design §5.1, §8.1).
     pub plan: InstantiationPlan,
     /// Template-local `name -> LocalEntityId` table.
@@ -103,6 +108,7 @@ impl SceneTemplate {
     pub fn new(guid: StableGuid, plan: InstantiationPlan) -> Self {
         Self {
             guid,
+            schema: SCENE_TEMPLATE_SCHEMA,
             plan,
             names: NameTable::new(),
             nested: Box::new([]),
@@ -195,6 +201,9 @@ impl SceneTemplate {
     pub fn validate(&self) -> Result<(), TemplateError> {
         if self.guid.is_nil() {
             return Err(TemplateError::NilGuid);
+        }
+        if self.schema == 0 {
+            return Err(TemplateError::InvalidSchema);
         }
         self.plan.validate().map_err(TemplateError::InvalidPlan)?;
         for (name, local) in self.names.iter() {

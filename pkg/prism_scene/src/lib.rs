@@ -51,6 +51,15 @@
 
 extern crate alloc;
 
+/// Runtime asset kind for compiled scene templates.
+pub const SCENE_TEMPLATE_KIND: u128 = 0x5052_4953_4d5f_5343_454e_455f_544d_5031;
+/// Current content schema for a scene template.
+///
+/// This is intentionally separate from the PRST wire version. Wire version 1
+/// remains readable as content schema 1; the current publisher emits wire
+/// version 2 with this schema field present.
+pub const SCENE_TEMPLATE_SCHEMA: u32 = 2;
+
 pub mod audio;
 pub mod cost;
 pub mod identity;
@@ -78,6 +87,7 @@ pub mod remap;
 pub mod residency;
 #[cfg(feature = "materialize")]
 pub mod runtime;
+pub mod schema;
 pub mod streaming;
 pub mod template;
 pub mod template_codec;
@@ -132,6 +142,7 @@ pub use remap::RemapTable;
 pub use residency::{ResidencyPlan, ResidencyTier};
 #[cfg(feature = "materialize")]
 pub use runtime::{spawn_scene, spawn_scene_with_registry, SceneSpawnError};
+pub use schema::{SchemaMigration, SchemaMigrationError, SchemaMigrationRegistry};
 pub use streaming::{ResidencyAction, ResidencyBudget, ResidencyRequest, ResidencyScheduler};
 pub use template::{NestedSlot, SceneTemplate, TemplateError};
 pub use template_codec::{

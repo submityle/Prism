@@ -74,7 +74,7 @@ impl SceneManifest {
         let payload = encode_template(template).map_err(ManifestError::Template)?;
         Ok(Self {
             guid: template.guid,
-            schema: 1,
+            schema: template.schema,
             dependencies: template.deps.clone(),
             payload,
         })
@@ -85,8 +85,8 @@ impl SceneManifest {
         limits: TemplateDecodeLimits,
     ) -> Result<SceneTemplate, ManifestError> {
         let template = decode_template(&self.payload, limits).map_err(ManifestError::Template)?;
-        if self.schema != 1 {
-            return Err(ManifestError::UnsupportedVersion(self.schema as u16));
+        if self.schema != template.schema {
+            return Err(ManifestError::MetadataMismatch("schema"));
         }
         if template.guid != self.guid {
             return Err(ManifestError::MetadataMismatch("guid"));
@@ -100,9 +100,6 @@ impl SceneManifest {
 
 /// Encodes a manifest with strict lengths and deterministic dependency order.
 pub fn encode_manifest(manifest: &SceneManifest) -> Result<Vec<u8>, ManifestError> {
-    if manifest.schema != 1 {
-        return Err(ManifestError::UnsupportedVersion(manifest.schema as u16));
-    }
     if manifest
         .dependencies
         .windows(2)
@@ -181,6 +178,9 @@ pub fn decode_manifest(
         dependencies: deps.into_boxed_slice(),
         payload,
     };
+    if manifest.schema == 0 {
+        return Err(ManifestError::MetadataMismatch("schema"));
+    }
     manifest.to_template(limits.template)?;
     Ok(manifest)
 }
