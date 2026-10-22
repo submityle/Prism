@@ -243,10 +243,21 @@ fn diff_templates(old: &SceneTemplate, new: &SceneTemplate) -> TemplateDelta {
     let added_entities = new_locals.difference(&old_locals).copied().collect();
     let removed_entities = old_locals.difference(&new_locals).copied().collect();
 
-    let mut changed = BTreeSet::new();
-    for local in old_locals.intersection(&new_locals) {
-        if group_for(old, *local) != group_for(new, *local) {
-            changed.insert(*local);
+    let old_groups = local_groups(old);
+    let new_groups = local_groups(new);
+    let mut compared_pairs = BTreeMap::new();
+    let mut changed = Vec::new();
+    for &local in old_locals.intersection(&new_locals) {
+        let old_group = old_groups[&local];
+        let new_group = new_groups[&local];
+        let pair = (old_group, new_group);
+        let same_payload = *compared_pairs.entry(pair).or_insert_with(|| {
+            let old_group = &old.plan.groups[old_group];
+            let new_group = &new.plan.groups[new_group];
+            old_group == new_group
+        });
+        if !same_payload {
+            changed.push(local);
         }
     }
 
@@ -267,7 +278,7 @@ fn diff_templates(old: &SceneTemplate, new: &SceneTemplate) -> TemplateDelta {
     TemplateDelta {
         added_entities,
         removed_entities,
-        changed_entities: changed.into_iter().collect(),
+        changed_entities: changed,
         hierarchy_changes,
     }
 }
@@ -278,12 +289,20 @@ fn plan_locals(template: &SceneTemplate) -> BTreeSet<LocalEntityId> {
         .collect()
 }
 
-fn group_for(template: &SceneTemplate, local: LocalEntityId) -> Option<&crate::ArchetypeGroup> {
+fn local_groups(template: &SceneTemplate) -> BTreeMap<LocalEntityId, usize> {
     template
         .plan
         .groups
         .iter()
-        .find(|group| group.locals.contains(&local))
+        .enumerate()
+        .flat_map(|(group, descriptor)| {
+            descriptor
+                .locals
+                .iter()
+                .copied()
+                .map(move |local| (local, group))
+        })
+        .collect()
 }
 
 fn parents(template: &SceneTemplate) -> BTreeMap<LocalEntityId, LocalEntityId> {
@@ -452,5 +471,56 @@ mod tests {
         let plan = plan_reload(&old, &new, &snapshot, &new_map).unwrap();
         assert_eq!(plan.overrides.properties()[0].target, LocalEntityId::new(1));
         assert!(plan.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn diff_marks_entities_in_changed_groups() {
+        let old = template(3, 4);
+        let mut new = template(4, 4);
+        new.plan.groups[0].columns[0] =
+            crate::Column::new(ComponentTypeId::from_raw(1), vec![9; 4]);
+
+        let plan = plan_reload(
+            &old,
+            &new,
+            &SceneInstancePersistence {
+                template: old.guid,
+                instance: None,
+                properties: Vec::new(),
+                structural: Vec::new(),
+            },
+            &PersistentEntityMap::for_template(&old),
+        )
+        .unwrap();
+        assert_eq!(
+            plan.delta.changed_entities,
+            (0..4).map(LocalEntityId::new).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn diff_detects_signature_changes_even_when_local_ids_are_stable() {
+        let old = template(5, 2);
+        let mut new = template(6, 2);
+        new.plan.groups[0].signature = ArchetypeSignature::new(vec![ComponentTypeId::from_raw(2)]);
+        new.plan.groups[0].columns[0] =
+            crate::Column::new(ComponentTypeId::from_raw(2), vec![1; 2]);
+
+        let plan = plan_reload(
+            &old,
+            &new,
+            &SceneInstancePersistence {
+                template: old.guid,
+                instance: None,
+                properties: Vec::new(),
+                structural: Vec::new(),
+            },
+            &PersistentEntityMap::for_template(&old),
+        )
+        .unwrap();
+        assert_eq!(
+            plan.delta.changed_entities,
+            vec![LocalEntityId::new(0), LocalEntityId::new(1)]
+        );
     }
 }
