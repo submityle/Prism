@@ -16,16 +16,23 @@ use crate::GpuContext;
 /// Explicit vertex ABI: eight little-endian `f32` words (position, normal, UV).
 pub const PLANET_TERRAIN_VERTEX_STRIDE: u64 = 32;
 
-/// Hard limits for the resident GPU mesh cache. Buffers are per tile and their
-/// exact ABI payload bytes count toward `max_buffer_bytes`.
+/// Hard limits for the resident GPU mesh cache and atomic update overlap.
+/// Buffers are per tile and their exact ABI payload bytes count toward both
+/// applicable byte budgets.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PlanetTerrainRhiLimits {
     /// Maximum resident tiles.
     pub max_tiles: usize,
     /// Maximum number of native GPU buffers (two per resident tile).
     pub max_buffers: usize,
+    /// Maximum cache-owned GPU buffers while an atomic update is staged.
+    pub max_transaction_buffers: usize,
     /// Maximum total vertex and index buffer bytes.
     pub max_buffer_bytes: u64,
+    /// Maximum cache-owned GPU bytes while an atomic snapshot or delta is
+    /// staged. This includes the old resident buffers plus all replacement or
+    /// added buffers that must coexist before the cache can commit.
+    pub max_transaction_buffer_bytes: u64,
 }
 
 /// Logical cache accounting, useful for admission decisions and tests.
@@ -62,6 +69,15 @@ pub enum PlanetTerrainRhiError {
     ConflictingDelta,
     /// Tile or byte budget would be exceeded.
     BudgetExceeded { tiles: usize, bytes: u64 },
+    /// Atomic replacement would exceed the configured temporary GPU peak.
+    TransactionBudgetExceeded {
+        resident_bytes: u64,
+        staged_bytes: u64,
+        byte_limit: u64,
+        resident_buffers: usize,
+        staged_buffers: usize,
+        buffer_limit: usize,
+    },
     /// Buffer size exceeds the selected device's maximum buffer size.
     DeviceBufferLimit { bytes: u64, limit: u64 },
     /// A checked byte-size or indexed-draw conversion overflowed.
@@ -100,6 +116,17 @@ impl std::fmt::Display for PlanetTerrainRhiError {
             Self::BudgetExceeded { tiles, bytes } => write!(
                 f,
                 "planet terrain cache needs {tiles} tiles and {bytes} bytes"
+            ),
+            Self::TransactionBudgetExceeded {
+                resident_bytes,
+                staged_bytes,
+                byte_limit,
+                resident_buffers,
+                staged_buffers,
+                buffer_limit,
+            } => write!(
+                f,
+                "planet terrain update peak is {resident_bytes} resident + {staged_bytes} staged bytes (limit {byte_limit}) and {resident_buffers} resident + {staged_buffers} staged buffers (limit {buffer_limit})"
             ),
             Self::DeviceBufferLimit { bytes, limit } => write!(
                 f,
@@ -184,6 +211,7 @@ impl PlanetTerrainRhiCache {
         }
         let bytes = total_bytes(&staged)?;
         self.check_budget(staged.len(), bytes, &staged)?;
+        self.check_transaction_budget(staged.len(), bytes)?;
         let next = self.upload_all(staged)?;
         self.tiles = next;
         self.buffer_bytes = bytes;
@@ -335,6 +363,23 @@ impl PlanetTerrainRhiCache {
                 bytes: final_bytes,
             });
         }
+        let (staged_tiles, staged_bytes) =
+            operations
+                .iter()
+                .try_fold((0_usize, 0_u64), |(tiles, bytes), (_, tile)| {
+                    let Some(tile) = tile.as_ref() else {
+                        return Ok((tiles, bytes));
+                    };
+                    Ok((
+                        tiles
+                            .checked_add(1)
+                            .ok_or(PlanetTerrainRhiError::SizeOverflow)?,
+                        bytes
+                            .checked_add(tile.bytes)
+                            .ok_or(PlanetTerrainRhiError::SizeOverflow)?,
+                    ))
+                })?;
+        self.check_transaction_budget(staged_tiles, staged_bytes)?;
         let device_limit = self.device.limits().max_buffer_size;
         if let Some(tile) = operations
             .iter()
@@ -480,6 +525,41 @@ impl PlanetTerrainRhiCache {
             return Err(PlanetTerrainRhiError::DeviceBufferLimit {
                 bytes: tile.bytes,
                 limit,
+            });
+        }
+        Ok(())
+    }
+
+    fn check_transaction_budget(
+        &self,
+        staged_tiles: usize,
+        staged_bytes: u64,
+    ) -> Result<(), PlanetTerrainRhiError> {
+        let peak_bytes = self
+            .buffer_bytes
+            .checked_add(staged_bytes)
+            .ok_or(PlanetTerrainRhiError::SizeOverflow)?;
+        let resident_buffers = self
+            .tiles
+            .len()
+            .checked_mul(2)
+            .ok_or(PlanetTerrainRhiError::SizeOverflow)?;
+        let staged_buffers = staged_tiles
+            .checked_mul(2)
+            .ok_or(PlanetTerrainRhiError::SizeOverflow)?;
+        let peak_buffers = resident_buffers
+            .checked_add(staged_buffers)
+            .ok_or(PlanetTerrainRhiError::SizeOverflow)?;
+        if peak_bytes > self.limits.max_transaction_buffer_bytes
+            || peak_buffers > self.limits.max_transaction_buffers
+        {
+            return Err(PlanetTerrainRhiError::TransactionBudgetExceeded {
+                resident_bytes: self.buffer_bytes,
+                staged_bytes,
+                byte_limit: self.limits.max_transaction_buffer_bytes,
+                resident_buffers,
+                staged_buffers,
+                buffer_limit: self.limits.max_transaction_buffers,
             });
         }
         Ok(())

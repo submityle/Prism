@@ -50,7 +50,9 @@ fn limits(max_tiles: usize, max_buffer_bytes: u64) -> PlanetTerrainRhiLimits {
     PlanetTerrainRhiLimits {
         max_tiles,
         max_buffers: max_tiles * 2,
+        max_transaction_buffers: max_tiles * 4,
         max_buffer_bytes,
+        max_transaction_buffer_bytes: max_buffer_bytes.saturating_mul(2),
     }
 }
 
@@ -80,6 +82,57 @@ fn full_snapshot_delta_budget_failure_and_device_identity_are_atomic() {
     let mut cache = PlanetTerrainRhiCache::new(&gpu, limits(1, 4096));
     let first = cache.apply_snapshot(&gpu, &publication).unwrap();
     assert_eq!((first.generation, first.tiles), (1, 1));
+
+    let mut tight_cache = PlanetTerrainRhiCache::new(
+        &gpu,
+        PlanetTerrainRhiLimits {
+            max_tiles: 1,
+            max_buffers: 2,
+            max_transaction_buffers: 2,
+            max_buffer_bytes: first.buffer_bytes,
+            max_transaction_buffer_bytes: first.buffer_bytes,
+        },
+    );
+    let tight_before = tight_cache.apply_snapshot(&gpu, &publication).unwrap();
+    let mut replacement_publication = publication.clone();
+    let mut replacement = replacement_publication.begin();
+    replacement
+        .stage_build(
+            source(tile_a, 1),
+            PlanetMeshConfig::new(6_371_000_000, [0; 3], 10_000.0).unwrap(),
+            BakeLimits {
+                max_samples: 9,
+                max_bytes: 4096,
+            },
+            prism_world_terrain::PlanetHeightfieldNormalNeighborhood::empty(),
+        )
+        .unwrap();
+    let (_, replacement_delta) = replacement_publication
+        .commit_with_delta(replacement)
+        .unwrap();
+    assert!(matches!(
+        tight_cache.apply_delta(&gpu, &replacement_publication, &replacement_delta),
+        Err(PlanetTerrainRhiError::TransactionBudgetExceeded {
+            resident_bytes,
+            staged_bytes,
+            byte_limit,
+            resident_buffers,
+            staged_buffers,
+            buffer_limit,
+        }) if resident_bytes == first.buffer_bytes
+            && staged_bytes == first.buffer_bytes
+            && byte_limit == first.buffer_bytes
+            && resident_buffers == 2
+            && staged_buffers == 2
+            && buffer_limit == 2
+    ));
+    assert_eq!(tight_cache.stats(), tight_before);
+    assert!(matches!(
+        tight_cache.apply_snapshot(&gpu, &replacement_publication),
+        Err(PlanetTerrainRhiError::TransactionBudgetExceeded { .. })
+    ));
+    assert_eq!(tight_cache.stats(), tight_before);
+
     assert!(matches!(
         cache.apply_delta(&gpu, &publication, &first_delta),
         Err(PlanetTerrainRhiError::Generation {
