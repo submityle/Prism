@@ -1,0 +1,230 @@
+// Standalone, integer-only unsigned 256-bit arithmetic for WGSL.
+//
+// Representation: limb[0] is least significant; value = sum(limb[i] * 2^(32*i)).
+// No floating-point values, atomics, or bindings are used. This file is deliberately
+// not included by a production shader.
+//
+// Bounds and contracts:
+// - add/sub/mul/shift return the low 256 bits and report discarded carry/borrow/bits.
+// - mul performs full 8x8 schoolbook multiplication. Each 32x32 partial product is
+//   decomposed into two u32 words; carry propagation is explicit.
+// - div_rem accepts any nonzero divisor and returns quotient/remainder. For its
+//   planetary use, numerator width is <=230 bits and divisor width <=147 bits, so
+//   the per-step remainder shift cannot overflow U256. Callers must enforce these
+//   bounds; an overflow result is not a valid quotient/remainder pair.
+// - isqrt returns floor(sqrt(value)); its restoring algorithm uses 128 radix-4 steps.
+// - Fixed loop bounds are independent of the operand values. No operation traps.
+
+struct U256 {
+    limb: array<u32, 8>,
+};
+
+struct U256Carry {
+    value: U256,
+    overflow: bool,
+};
+
+struct U256Borrow {
+    value: U256,
+    underflow: bool,
+};
+
+struct U256DivRem {
+    quotient: U256,
+    remainder: U256,
+    division_by_zero: bool,
+};
+
+fn u256_zero() -> U256 {
+    return U256(array<u32, 8>(0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u));
+}
+
+fn u256_from_u32(value: u32) -> U256 {
+    return U256(array<u32, 8>(value, 0u, 0u, 0u, 0u, 0u, 0u, 0u));
+}
+
+fn u256_is_zero(value: U256) -> bool {
+    var any_set = false;
+    for (var i = 0u; i < 8u; i += 1u) {
+        any_set = any_set || value.limb[i] != 0u;
+    }
+    return !any_set;
+}
+
+// Returns -1, 0, +1 for a < b, a == b, a > b respectively.
+fn u256_cmp(a: U256, b: U256) -> i32 {
+    for (var i = 8u; i > 0u; i -= 1u) {
+        let index = i - 1u;
+        if (a.limb[index] < b.limb[index]) { return -1; }
+        if (a.limb[index] > b.limb[index]) { return 1; }
+    }
+    return 0;
+}
+
+fn u256_add(a: U256, b: U256) -> U256Carry {
+    var out = u256_zero();
+    var carry = 0u;
+    for (var i = 0u; i < 8u; i += 1u) {
+        let first = a.limb[i] + b.limb[i];
+        let carry_first = first < a.limb[i];
+        let second = first + carry;
+        let carry_second = second < first;
+        out.limb[i] = second;
+        carry = select(0u, 1u, carry_first || carry_second);
+    }
+    return U256Carry(out, carry != 0u);
+}
+
+// Subtraction is modulo 2^256; underflow reports a < b.
+fn u256_sub(a: U256, b: U256) -> U256Borrow {
+    var out = u256_zero();
+    var borrow = 0u;
+    for (var i = 0u; i < 8u; i += 1u) {
+        let first = a.limb[i] - b.limb[i];
+        let borrow_first = a.limb[i] < b.limb[i];
+        let second = first - borrow;
+        let borrow_second = first < borrow;
+        out.limb[i] = second;
+        borrow = select(0u, 1u, borrow_first || borrow_second);
+    }
+    return U256Borrow(out, borrow != 0u);
+}
+
+// Exact 32x32 -> (high, low), using only WGSL u32 arithmetic.
+fn u256_mul_word(a: u32, b: u32) -> vec2<u32> {
+    let a0 = a & 65535u;
+    let a1 = a >> 16u;
+    let b0 = b & 65535u;
+    let b1 = b >> 16u;
+    let t0 = a0 * b0;
+    let w0 = t0 & 65535u;
+    let k0 = t0 >> 16u;
+    let t1 = a1 * b0 + k0;
+    let w1 = t1 & 65535u;
+    let k1 = t1 >> 16u;
+    let t2 = a0 * b1 + w1;
+    let high = a1 * b1 + k1 + (t2 >> 16u);
+    let low = (t2 << 16u) | w0;
+    return vec2<u32>(high, low);
+}
+
+fn u256_add_word_at(value: ptr<function, U256>, index: u32, word: u32) -> bool {
+    var carry = word;
+    var i = index;
+    loop {
+        if (carry == 0u) { return false; }
+        if (i >= 8u) { return true; }
+        let old = (*value).limb[i];
+        let sum = old + carry;
+        (*value).limb[i] = sum;
+        carry = select(0u, 1u, sum < old);
+        i += 1u;
+    }
+    return false;
+}
+
+// Full schoolbook product, retaining low 256 bits and reporting any high bits.
+fn u256_mul(a: U256, b: U256) -> U256Carry {
+    var out = u256_zero();
+    var overflow = false;
+    for (var i = 0u; i < 8u; i += 1u) {
+        for (var j = 0u; j < 8u; j += 1u) {
+            let product = u256_mul_word(a.limb[i], b.limb[j]);
+            let index = i + j;
+            if (index < 8u) {
+                overflow = u256_add_word_at(&out, index, product.y) || overflow;
+            } else {
+                overflow = overflow || product.y != 0u;
+            }
+            if (index + 1u < 8u) {
+                overflow = u256_add_word_at(&out, index + 1u, product.x) || overflow;
+            } else {
+                overflow = overflow || product.x != 0u;
+            }
+        }
+    }
+    return U256Carry(out, overflow);
+}
+
+fn u256_bit(value: U256, bit_index: u32) -> u32 {
+    return (value.limb[bit_index >> 5u] >> (bit_index & 31u)) & 1u;
+}
+
+fn u256_set_bit(value: ptr<function, U256>, bit_index: u32) {
+    let limb_index = bit_index >> 5u;
+    (*value).limb[limb_index] = (*value).limb[limb_index] | (1u << (bit_index & 31u));
+}
+
+// Shift left by count. count may be >= 256; all shifted-out nonzero bits are reported.
+fn u256_shl(value: U256, count: u32) -> U256Carry {
+    var out = u256_zero();
+    if (count >= 256u) {
+        return U256Carry(out, !u256_is_zero(value));
+    }
+    let word_shift = count >> 5u;
+    let bit_shift = count & 31u;
+    var overflow = false;
+    for (var i = 0u; i < 8u; i += 1u) {
+        let destination = i + word_shift;
+        if (destination < 8u) {
+            out.limb[destination] = out.limb[destination] | (value.limb[i] << bit_shift);
+        } else {
+            overflow = overflow || value.limb[i] != 0u;
+        }
+        if (bit_shift != 0u) {
+            let upper = value.limb[i] >> (32u - bit_shift);
+            if (destination + 1u < 8u) {
+                out.limb[destination + 1u] = out.limb[destination + 1u] | upper;
+            } else {
+                overflow = overflow || upper != 0u;
+            }
+        }
+    }
+    return U256Carry(out, overflow);
+}
+
+fn u256_div_rem(numerator: U256, denominator: U256) -> U256DivRem {
+    var quotient = u256_zero();
+    var remainder = u256_zero();
+    if (u256_is_zero(denominator)) {
+        return U256DivRem(quotient, remainder, true);
+    }
+    for (var cursor = 256u; cursor > 0u; cursor -= 1u) {
+        let bit_index = cursor - 1u;
+        let shifted = u256_shl(remainder, 1u);
+        remainder = shifted.value;
+        remainder.limb[0] = remainder.limb[0] | u256_bit(numerator, bit_index);
+        if (shifted.overflow) {
+            return U256DivRem(u256_zero(), u256_zero(), false);
+        }
+        if (u256_cmp(remainder, denominator) >= 0) {
+            remainder = u256_sub(remainder, denominator).value;
+            u256_set_bit(&quotient, bit_index);
+        }
+    }
+    return U256DivRem(quotient, remainder, false);
+}
+
+// Restoring radix-4 square root, returning floor(sqrt(value)).
+fn u256_isqrt(value: U256) -> U256 {
+    var root = u256_zero();
+    var remainder = u256_zero();
+    for (var cursor = 128u; cursor > 0u; cursor -= 1u) {
+        let pair_index = cursor - 1u;
+        let shifted_rem = u256_shl(remainder, 2u);
+        remainder = shifted_rem.value;
+        let pair = (u256_bit(value, pair_index * 2u + 1u) << 1u) | u256_bit(value, pair_index * 2u);
+        remainder.limb[0] = remainder.limb[0] | pair;
+
+        let shifted_root = u256_shl(root, 1u);
+        root = shifted_root.value;
+        let trial_shift = u256_shl(root, 1u);
+        var trial = trial_shift.value;
+        trial.limb[0] = trial.limb[0] | 1u;
+        if (u256_cmp(remainder, trial) >= 0) {
+            remainder = u256_sub(remainder, trial).value;
+            root = u256_add(root, u256_from_u32(1u)).value;
+        }
+    }
+    return root;
+}
