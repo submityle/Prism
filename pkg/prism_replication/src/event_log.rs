@@ -130,6 +130,8 @@ pub trait EventLogBackend {
     type Error;
 
     /// Append one payload, deduplicating an already-seen idempotency key.
+    /// Reuse succeeds only when the payload is byte-identical; a different
+    /// payload for the same retained key is an explicit conflict.
     fn append(
         &mut self,
         idempotency_key: u128,
@@ -177,6 +179,11 @@ pub enum EventLogError {
         /// Maximum number of entries retained by the backend.
         limit: usize,
     },
+    /// An idempotency key was reused for a different payload.
+    IdempotencyConflict {
+        /// Key already assigned to another payload.
+        key: u128,
+    },
     /// An opaque payload exceeds the configured bound.
     PayloadTooLarge {
         /// Supplied payload length.
@@ -214,6 +221,12 @@ pub enum EventLogError {
 impl fmt::Display for EventLogError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::IdempotencyConflict { key } => {
+                write!(
+                    formatter,
+                    "event log idempotency key {key} conflicts with its payload"
+                )
+            }
             Self::CapacityExceeded { limit } => {
                 write!(formatter, "event log capacity {limit} is full")
             }
@@ -298,6 +311,17 @@ impl MemoryEventLogBackend {
         payload: &[u8],
     ) -> Result<EventLogAppend, EventLogError> {
         if let Some(sequence) = self.keys.get(&idempotency_key).copied() {
+            let index = usize::try_from(sequence.saturating_sub(self.base_sequence))
+                .map_err(|_| EventLogError::SequenceExhausted)?;
+            let existing = self
+                .entries
+                .get(index)
+                .ok_or(EventLogError::SequenceExhausted)?;
+            if existing.payload != payload {
+                return Err(EventLogError::IdempotencyConflict {
+                    key: idempotency_key,
+                });
+            }
             return Ok(EventLogAppend {
                 next_cursor: EventLogCursor::new(sequence.saturating_add(1)),
                 inserted: false,
@@ -1534,11 +1558,15 @@ mod tests {
             }
         );
         assert_eq!(
-            backend.append(7, b"different duplicate").unwrap(),
-            EventLogAppend {
+            backend.append(7, b"one"),
+            Ok(EventLogAppend {
                 next_cursor: EventLogCursor::new(1),
                 inserted: false,
-            }
+            })
+        );
+        assert_eq!(
+            backend.append(7, b"different duplicate"),
+            Err(EventLogError::IdempotencyConflict { key: 7 })
         );
         backend.append(8, b"two").unwrap();
         let first = backend.replay(EventLogCursor::default(), 1).unwrap();
@@ -1551,11 +1579,39 @@ mod tests {
         assert_eq!(backend.sync(), Ok(()));
     }
 
+    #[cfg(feature = "std")]
+    #[test]
+    fn file_backend_rejects_conflicting_idempotent_append_without_mutating_log() {
+        let fixture = FileFixture::new();
+        let path = fixture.path();
+        let mut backend = FileEventLogBackend::open(&path, 4, 64).unwrap();
+        assert!(backend.append(42, b"authoritative event").unwrap().inserted);
+        backend.sync().unwrap();
+        let bytes_before = std::fs::read(&path).unwrap();
+        assert_eq!(
+            backend.append(42, b"different event"),
+            Err(FileEventLogError::Contract(
+                EventLogError::IdempotencyConflict { key: 42 }
+            ))
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), bytes_before);
+        assert_eq!(backend.cursor(), EventLogCursor::new(1));
+        drop(backend);
+
+        let reopened = FileEventLogBackend::open(&path, 4, 64).unwrap();
+        let replay = reopened.replay(EventLogCursor::default(), 4).unwrap();
+        assert_eq!(replay.entries().len(), 1);
+        assert_eq!(replay.entries()[0].payload, b"authoritative event");
+    }
+
     #[test]
     fn replay_event_log_round_trips_typed_records_and_rejects_bounds() {
         let mut log = ReplayEventLog::new(MemoryEventLogBackend::new(1, 64), 64);
         log.append(11, record(4, b"payload")).unwrap();
-        assert!(!log.append(11, record(9, b"different")).unwrap().inserted);
+        assert_eq!(
+            log.append(11, record(9, b"different")),
+            Err(EventLogError::IdempotencyConflict { key: 11 })
+        );
         let batch = log.replay(EventLogCursor::default(), 1).unwrap();
         assert_eq!(batch.records().len(), 1);
         assert_eq!(batch.records()[0].idempotency_key, 11);
