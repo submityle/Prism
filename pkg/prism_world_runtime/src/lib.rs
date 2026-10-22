@@ -90,6 +90,13 @@ pub use data_layers::{
     LayeredSceneHost, RuntimeDataLayers,
 };
 pub use prism_world_stream::{DataLayerMask, DataLayerMaskError, MAX_DATA_LAYERS};
+#[cfg(feature = "scene_templates")]
+mod scene_template_provider;
+#[cfg(feature = "scene_templates")]
+pub use scene_template_provider::{
+    load_scene_template, SceneTemplateBatchError, SceneTemplateCache, SceneTemplateInvalidation,
+    SceneTemplateLoadError,
+};
 #[cfg(feature = "placement")]
 mod placement_persist;
 #[cfg(feature = "placement")]
@@ -1175,14 +1182,45 @@ impl<I: CellIo> CellFrameCoordinator<I> {
                         .iter()
                         .find(|manifest| manifest.sector == request.sector)
                         .expect("stream request must refer to a validated manifest");
-                    self.submit_stream_request(frame, request, *manifest, false, host, &mut report);
+                    self.submit_stream_request(
+                        frame,
+                        request,
+                        *manifest,
+                        false,
+                        false,
+                        host,
+                        &mut report,
+                    );
+                }
+                StreamAction::Reload(request) => {
+                    let manifest = manifests
+                        .iter()
+                        .find(|manifest| manifest.sector == request.sector)
+                        .expect("stream request must refer to a validated manifest");
+                    self.submit_stream_request(
+                        frame,
+                        request,
+                        *manifest,
+                        false,
+                        true,
+                        host,
+                        &mut report,
+                    );
                 }
                 StreamAction::Prefetch(request) => {
                     let manifest = manifests
                         .iter()
                         .find(|manifest| manifest.sector == request.sector)
                         .expect("stream request must refer to a validated manifest");
-                    self.submit_stream_request(frame, request, *manifest, true, host, &mut report);
+                    self.submit_stream_request(
+                        frame,
+                        request,
+                        *manifest,
+                        true,
+                        false,
+                        host,
+                        &mut report,
+                    );
                 }
                 StreamAction::Unload(sector) => {
                     if host.evict_cell(sector).is_ok() {
@@ -1282,6 +1320,7 @@ impl<I: CellIo> CellFrameCoordinator<I> {
         request: prism_world_stream::StreamRequest,
         manifest: CellManifest,
         prefetch: bool,
+        explicit_reload: bool,
         host: &mut H,
         report: &mut FrameReport,
     ) {
@@ -1294,7 +1333,7 @@ impl<I: CellIo> CellFrameCoordinator<I> {
         });
         let operation = if prefetch {
             TraceOp::Prefetch
-        } else if revision_changed {
+        } else if explicit_reload || revision_changed {
             TraceOp::Reload
         } else {
             TraceOp::Load
@@ -1304,7 +1343,7 @@ impl<I: CellIo> CellFrameCoordinator<I> {
             .flatten();
 
         if let Some(cached) = self.prefetch_cache.get(&request.sector) {
-            if cached.manifest != manifest {
+            if explicit_reload || cached.manifest != manifest {
                 let _ = self.remove_prefetch_cache(request.sector);
             } else if prefetch {
                 self.stream.mark_prefetched_manifest(manifest);
@@ -1548,6 +1587,39 @@ impl<I: CellIo> CellFrameCoordinator<I> {
         self.io.in_flight()
     }
 
+    /// Schedules a budgeted reload for a resident sector after external content
+    /// dependency invalidation. The existing resident revision remains the
+    /// rollback target until the replacement is committed.
+    pub fn request_reload(&mut self, sector: SectorId) -> bool {
+        self.known_loaded.contains_key(&sector) && self.stream.request_reload(sector)
+    }
+
+    /// Converts scene-template dependency invalidations into budgeted reload
+    /// requests for currently resident cells whose scene key is the invalidated
+    /// template GUID. Returned sectors are unique and sorted.
+    #[cfg(feature = "scene_templates")]
+    pub fn schedule_template_invalidations(
+        &mut self,
+        invalidations: &[SceneTemplateInvalidation],
+    ) -> Vec<SectorId> {
+        let affected: BTreeSet<_> = invalidations
+            .iter()
+            .filter(|event| event.reloadable)
+            .map(|event| event.dependent.to_u128())
+            .collect();
+        let sectors: Vec<_> = self
+            .known_loaded
+            .iter()
+            .filter_map(|(&sector, manifest)| {
+                affected.contains(&manifest.scene_key).then_some(sector)
+            })
+            .collect();
+        for &sector in &sectors {
+            self.stream.request_reload(sector);
+        }
+        sectors
+    }
+
     fn sync_loaded(&mut self, loaded: &[LoadedCell]) {
         let current: BTreeSet<_> = loaded.iter().map(|cell| cell.manifest.sector).collect();
         let stale: Vec<_> = self
@@ -1564,13 +1636,15 @@ impl<I: CellIo> CellFrameCoordinator<I> {
             let _ = self.remove_prefetch_cache(cell.manifest.sector);
             self.known_loaded
                 .insert(cell.manifest.sector, cell.manifest);
-            self.stream.mark_resident_manifest(cell.manifest);
+            // This is an observation of host state, not a replacement commit;
+            // retain any explicit invalidation awaiting successful reload.
+            self.stream.restore_resident_manifest(cell.manifest);
         }
     }
 
     fn restore_stream_state(&mut self, sector: SectorId, previous: Option<CellManifest>) {
         match previous {
-            Some(manifest) => self.stream.mark_resident_manifest(manifest),
+            Some(manifest) => self.stream.restore_resident_manifest(manifest),
             None => self.stream.mark_unloaded(sector),
         }
     }
@@ -1665,6 +1739,7 @@ mod tests {
         loaded: Vec<SectorId>,
         evicted: Vec<SectorId>,
         payloads: Vec<Vec<u8>>,
+        fail_loads: usize,
     }
 
     impl SceneHost for Host {
@@ -1677,6 +1752,10 @@ mod tests {
         ) -> Result<(), Self::Error> {
             self.loaded.push(manifest.sector);
             self.payloads.push(payload.to_vec());
+            if self.fail_loads > 0 {
+                self.fail_loads -= 1;
+                return Err(());
+            }
             Ok(())
         }
 
@@ -1929,6 +2008,159 @@ mod tests {
             &mut failing_host,
         );
         assert_eq!(retry.submitted, 1);
+    }
+
+    #[cfg(feature = "scene_templates")]
+    #[test]
+    fn template_dependency_invalidation_enters_budgeted_reload_commit_path() {
+        let resident = manifest(0, 0x5151, 1, 9);
+        let provider = MemoryProvider {
+            bytes: BTreeMap::from([(resident.sector, bytes(resident, b"replacement"))]),
+            calls: Arc::new(AtomicUsize::new(0)),
+        };
+        let mut coordinator = WorldFrameCoordinator::new(provider, 1).expect("runtime config");
+        let mut host = Host::default();
+        let loaded = [LoadedCell::new(resident)];
+        coordinator.sync_loaded(&loaded);
+
+        let invalidation = SceneTemplateInvalidation {
+            changed: prism_asset::StableGuid::from_u128(resident.scene_key),
+            dependent: prism_asset::StableGuid::from_u128(resident.scene_key),
+            reloadable: true,
+        };
+        let scheduled = coordinator.schedule_template_invalidations(&[invalidation]);
+        assert_eq!(scheduled, vec![resident.sector]);
+        let report = coordinator.plan_frame(
+            &[DemandSource::new(resident.sector, 0, 1, 10).unwrap()],
+            &[resident],
+            &loaded,
+            StreamBudget {
+                io_bytes: 1,
+                max_actions: 1,
+            },
+            &mut host,
+        );
+        assert_eq!(report.submitted, 1);
+        assert!(coordinator.poll_io(&mut host));
+        assert_eq!(host.loaded, vec![resident.sector]);
+        let next = coordinator.plan_frame(
+            &[DemandSource::new(resident.sector, 0, 1, 10).unwrap()],
+            &[resident],
+            &loaded,
+            StreamBudget {
+                io_bytes: 1,
+                max_actions: 1,
+            },
+            &mut host,
+        );
+        assert_eq!(next.actions, 0);
+    }
+
+    #[cfg(feature = "scene_templates")]
+    #[test]
+    fn explicit_same_revision_reload_failure_preserves_resident_and_retries_as_reload() {
+        let resident = manifest(0, 0x5252, 1, 9);
+        let provider = MemoryProvider {
+            bytes: BTreeMap::from([(resident.sector, bytes(resident, b"replacement"))]),
+            calls: Arc::new(AtomicUsize::new(0)),
+        };
+        let mut coordinator = WorldFrameCoordinator::new(provider, 1).expect("runtime config");
+        let mut host = Host {
+            fail_loads: 1,
+            ..Host::default()
+        };
+        let loaded = [LoadedCell::new(resident)];
+        coordinator.sync_loaded(&loaded);
+
+        let invalidation = SceneTemplateInvalidation {
+            changed: prism_asset::StableGuid::from_u128(resident.scene_key),
+            dependent: prism_asset::StableGuid::from_u128(resident.scene_key),
+            reloadable: true,
+        };
+        assert_eq!(
+            coordinator.schedule_template_invalidations(&[invalidation]),
+            vec![resident.sector]
+        );
+        let demand = DemandSource::new(resident.sector, 0, 1, 10).expect("demand");
+        let budget = StreamBudget {
+            io_bytes: 1,
+            max_actions: 1,
+        };
+
+        let first = coordinator.plan_frame(&[demand], &[resident], &loaded, budget, &mut host);
+        assert_eq!(first.submitted, 1);
+        assert!(coordinator.poll_io(&mut host));
+        assert!(coordinator.trace().as_slice().iter().any(|event| matches!(
+            event,
+            TraceEvent::Failed {
+                sector,
+                operation: TraceOp::Reload,
+                stage: FailureStage::LoadHost,
+                ..
+            } if *sector == resident.sector
+        )));
+
+        let retry = coordinator.plan_frame(&[demand], &[resident], &loaded, budget, &mut host);
+        assert_eq!(retry.submitted, 1);
+        assert!(coordinator.trace().as_slice().iter().any(|event| matches!(
+            event,
+            TraceEvent::LoadSubmitted { frame, sector, .. }
+                if *frame == retry.frame && *sector == resident.sector
+        )));
+        assert_eq!(
+            coordinator.known_loaded.get(&resident.sector),
+            Some(&resident)
+        );
+        assert!(coordinator.poll_io(&mut host));
+        assert_eq!(host.loaded, vec![resident.sector, resident.sector]);
+        assert!(coordinator.trace().as_slice().iter().any(|event| matches!(
+            event,
+            TraceEvent::Loaded { frame, sector }
+                if *frame == retry.frame && *sector == resident.sector
+        )));
+    }
+
+    #[cfg(feature = "scene_templates")]
+    #[test]
+    fn explicit_reload_discards_matching_prefetch_cache_and_reads_fresh_payload() {
+        let resident = manifest(0, 0x5353, 1, 9);
+        let prefetched = bytes(resident, b"stale-prefetch");
+        let fresh = bytes(resident, b"fresh-reload");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider = MemoryProvider {
+            bytes: BTreeMap::from([(resident.sector, fresh)]),
+            calls: calls.clone(),
+        };
+        let mut coordinator = WorldFrameCoordinator::new(provider, 1).expect("runtime config");
+        let mut host = Host::default();
+        let loaded = [LoadedCell::new(resident)];
+        coordinator.sync_loaded(&loaded);
+        coordinator.retain_prefetch(resident, prefetched);
+
+        let invalidation = SceneTemplateInvalidation {
+            changed: prism_asset::StableGuid::from_u128(resident.scene_key),
+            dependent: prism_asset::StableGuid::from_u128(resident.scene_key),
+            reloadable: true,
+        };
+        assert_eq!(
+            coordinator.schedule_template_invalidations(&[invalidation]),
+            vec![resident.sector]
+        );
+        let report = coordinator.plan_frame(
+            &[DemandSource::new(resident.sector, 0, 1, 10).expect("demand")],
+            &[resident],
+            &loaded,
+            StreamBudget {
+                io_bytes: 1,
+                max_actions: 1,
+            },
+            &mut host,
+        );
+        assert_eq!(report.submitted, 1);
+        assert_eq!(coordinator.prefetch_cache_bytes(), 0);
+        assert!(coordinator.poll_io(&mut host));
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert_eq!(host.payloads, vec![b"fresh-reload".to_vec()]);
     }
 
     #[test]
