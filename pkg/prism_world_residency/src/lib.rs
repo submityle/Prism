@@ -17,6 +17,7 @@ extern crate alloc;
 
 mod clipmap;
 mod hlod;
+mod hlod_bake;
 mod pcg;
 mod qos;
 mod residency;
@@ -31,7 +32,11 @@ pub use clipmap::{
     ClipmapAxis, CpuSdfClipmap, SdfClipmapConfig, SdfClipmapError, SdfClipmapUpdate,
     SdfToroidalClipmap,
 };
-pub use hlod::{HlodCluster, HlodError, HlodLevel, LodTransition};
+pub use hlod::{HlodCluster, HlodError, HlodLevel, HlodRepresentation, LodTransition};
+pub use hlod_bake::{
+    bake_hlod, HlodBakeBudget, HlodBakeConfig, HlodBakeError, HlodBakeOutput, HlodBudgetKind,
+    HlodProxyRecord,
+};
 pub use pcg::{
     derive_cache_key, pcg_hash_u32, DependencySet, DerivedCacheKey, DirtySector, NodeId, NodeInput,
     NodeKind, Pcg32, PcgEvaluation, PcgGraph, PcgGraphError, PcgNode, SectorCoord,

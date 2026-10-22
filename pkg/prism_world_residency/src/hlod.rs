@@ -17,6 +17,71 @@ pub struct HlodLevel {
     pub transition_width: u32,
 }
 
+/// Engine-neutral declaration for one baked HLOD representation.
+///
+/// This is metadata only. It does not contain mesh payload, a renderer
+/// resource handle, or an asset-streaming request. The `id` is the stable key
+/// that an external producer may use when materializing the representation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HlodRepresentation {
+    id: u64,
+    cluster_id: u64,
+    level: u32,
+    source_hash: u64,
+    member_count: u32,
+    estimated_declaration_bytes: u64,
+}
+
+impl HlodRepresentation {
+    pub(crate) const fn new(
+        id: u64,
+        cluster_id: u64,
+        level: u32,
+        source_hash: u64,
+        member_count: u32,
+        estimated_declaration_bytes: u64,
+    ) -> Self {
+        Self {
+            id,
+            cluster_id,
+            level,
+            source_hash,
+            member_count,
+            estimated_declaration_bytes,
+        }
+    }
+
+    /// Returns the stable representation identity.
+    pub const fn id(self) -> u64 {
+        self.id
+    }
+
+    /// Returns the owning cluster identity.
+    pub const fn cluster_id(self) -> u64 {
+        self.cluster_id
+    }
+
+    /// Returns the zero-based HLOD level.
+    pub const fn level(self) -> u32 {
+        self.level
+    }
+
+    /// Returns the stable hash of the source proxy group.
+    pub const fn source_hash(self) -> u64 {
+        self.source_hash
+    }
+
+    /// Returns the number of source proxies represented by this declaration.
+    pub const fn member_count(self) -> u32 {
+        self.member_count
+    }
+
+    /// Returns the estimated bytes occupied by this metadata declaration.
+    pub const fn estimated_declaration_bytes(self) -> u64 {
+        self.estimated_declaration_bytes
+    }
+}
+
 /// Invalid HLOD declaration data.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HlodError {
