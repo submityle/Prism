@@ -376,6 +376,61 @@ fn durable_atomic_multi_cell_reload_replays_one_snapshot_before_publication() {
 }
 
 #[test]
+fn durable_atomic_multi_cell_replay_failure_keeps_all_old_cells_authoritative() {
+    let first = SectorId::new(0, 33, 0, 0);
+    let second = SectorId::new(0, 34, 0, 0);
+    let object = WorldPersistentId(0x3334);
+    let mut world = World::new();
+    let mut host = SceneEcsHost::new(
+        &mut world,
+        Provider {
+            persistent_object: Some(object),
+            ..Provider::default()
+        },
+    );
+    for sector in [first, second] {
+        SceneHost::load_cell(&mut host, sector).unwrap();
+    }
+    let old_roots = [
+        host.loaded_cell(first).unwrap().root.unwrap(),
+        host.loaded_cell(second).unwrap().root.unwrap(),
+    ];
+    let delta = OverrideDelta::single(FieldId(1), OverrideValue::Integer(55)).unwrap();
+    let inverse = OverrideDelta::single(FieldId(1), OverrideValue::Integer(7)).unwrap();
+    let transaction = Transaction::new(
+        TransactionId(0x3334),
+        ActorId(1),
+        LogicalClock(1),
+        0,
+        object,
+        delta,
+        inverse,
+    )
+    .unwrap();
+    let mut log = AppendOnlyLog::new();
+    log.append(transaction).unwrap();
+    host.provider_mut().fail_replay = true;
+
+    assert_eq!(
+        host.reload_cells_atomic_with_persistence(&[second, first], &log),
+        Err(SceneEcsHostError::Provider(()))
+    );
+
+    assert_eq!(
+        [
+            host.loaded_cell(first).unwrap().root.unwrap(),
+            host.loaded_cell(second).unwrap().root.unwrap(),
+        ],
+        old_roots
+    );
+    assert!(old_roots
+        .into_iter()
+        .all(|root| host.world().contains(root)));
+    assert_eq!(host.loaded_cell_count(), 2);
+    assert_eq!(host.world().entity_count(), 2);
+}
+
+#[test]
 fn durable_scene_plan_groups_contiguous_reload_actions_into_one_batch() {
     let first = SectorId::new(0, 35, 0, 0);
     let second = SectorId::new(0, 36, 0, 0);
