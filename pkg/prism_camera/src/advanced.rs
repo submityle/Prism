@@ -157,6 +157,12 @@ impl CameraTrack {
         Ok(())
     }
 
+    /// Validates once and freezes the track for allocation-free fixed-tick sampling.
+    pub fn into_validated(self) -> Result<ValidatedCameraTrack, CameraTrackValidationError> {
+        self.validate()?;
+        Ok(ValidatedCameraTrack { track: self })
+    }
+
     pub fn push(&mut self, keyframe: CameraKeyframe) -> bool {
         if self.keyframes.len() >= Self::MAX_KEYFRAMES
             || self
@@ -277,6 +283,26 @@ impl CameraTrack {
             active: true,
             handoff_to_previous: false,
         }
+    }
+}
+
+/// Immutable, prevalidated camera animation ready for runtime sampling.
+#[cfg(feature = "cutscene")]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ValidatedCameraTrack {
+    track: CameraTrack,
+}
+
+#[cfg(feature = "cutscene")]
+impl ValidatedCameraTrack {
+    /// Samples the validated track without repeating its O(keyframe-count) validation.
+    pub fn sample_state(&self, tick: u64, fallback: CameraTrackSample) -> CameraTrackSample {
+        self.track.sample_state(tick, fallback)
+    }
+
+    /// Returns the number of immutable keyframes in this track.
+    pub fn keyframe_count(&self) -> usize {
+        self.track.keyframes.len()
     }
 }
 

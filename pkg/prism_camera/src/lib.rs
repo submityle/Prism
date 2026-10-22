@@ -35,7 +35,7 @@ pub use advanced::Shutter;
 #[cfg(feature = "cutscene")]
 pub use advanced::{
     CameraKeyframe, CameraTrack, CameraTrackSample, CameraTrackValidationCode,
-    CameraTrackValidationError, CutsceneEndPolicy,
+    CameraTrackValidationError, CutsceneEndPolicy, ValidatedCameraTrack,
 };
 #[cfg(feature = "occlusion_fade")]
 pub use advanced::{CameraOcclusionIntent, OcclusionSample};

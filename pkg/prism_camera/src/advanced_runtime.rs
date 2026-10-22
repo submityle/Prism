@@ -214,7 +214,6 @@ impl RuntimeDegradation {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TrackRuntimeStatus {
     Sampled,
-    EmptyTrackFallback,
     HandoffToPrevious,
     Deactivated,
     InvalidSampleUsedFallback,
@@ -223,7 +222,7 @@ pub enum TrackRuntimeStatus {
 #[cfg(feature = "cutscene")]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TrackRuntimeInput<'a> {
-    pub track: &'a CameraTrack,
+    pub track: &'a crate::ValidatedCameraTrack,
     pub fallback: CameraTrackSample,
 }
 
@@ -590,12 +589,6 @@ impl AdvancedRuntime {
                 TrackRuntimeResult {
                     sample: track.fallback,
                     status: TrackRuntimeStatus::InvalidSampleUsedFallback,
-                }
-            } else if track.track.keyframes.is_empty() {
-                degradation.add(RuntimeDegradation::TRACK_FALLBACK);
-                TrackRuntimeResult {
-                    sample,
-                    status: TrackRuntimeStatus::EmptyTrackFallback,
                 }
             } else if sample.handoff_to_previous {
                 degradation.add(RuntimeDegradation::TRACK_FALLBACK);
@@ -1016,7 +1009,7 @@ mod tests {
 
     #[cfg(feature = "cutscene")]
     #[test]
-    fn invalid_track_sample_uses_valid_fallback() {
+    fn non_finite_track_keyframe_is_rejected_before_runtime() {
         use crate::{CameraTrack, Exposure};
         use prism_math::{DQuat, DVec3};
 
@@ -1044,21 +1037,29 @@ mod tests {
             exposure: invalid.exposure,
             event_key: 1,
         });
-        let mut runtime = AdvancedRuntime::new(AdvancedRuntimeConfig::default()).unwrap();
-        let output = runtime
-            .step(
-                FixedTick::new(0, 0, runtime.config().fixed_delta_seconds),
-                AdvancedRuntimeInput {
-                    track: Some(TrackRuntimeInput {
-                        track: &track,
-                        fallback,
-                    }),
-                    ..AdvancedRuntimeInput::default()
-                },
-            )
-            .unwrap();
-        assert_eq!(output.track.unwrap().sample, fallback);
-        assert!(output.degradation.is_degraded());
+        assert_eq!(
+            track.into_validated().unwrap_err().code,
+            crate::CameraTrackValidationCode::NonFinitePose
+        );
+        assert!(fallback.active);
+    }
+
+    #[cfg(feature = "cutscene")]
+    #[test]
+    fn unsupported_track_version_is_rejected_before_runtime() {
+        let mut track = CameraTrack::default();
+        track.asset_version = CameraTrack::CURRENT_ASSET_VERSION + 1;
+        track.keyframes.push(crate::CameraKeyframe {
+            tick: 0,
+            pose: CameraPose::default(),
+            focal_length_mm: 50.0,
+            exposure: crate::Exposure::default(),
+            event_key: 9,
+        });
+        assert_eq!(
+            track.into_validated().unwrap_err().code,
+            crate::CameraTrackValidationCode::UnsupportedVersion
+        );
     }
 
     #[cfg(all(
@@ -1091,6 +1092,7 @@ mod tests {
             exposure: fallback.exposure,
             event_key: 7,
         }));
+        let track = track.into_validated().unwrap();
 
         let occlusion = [
             OcclusionSample {

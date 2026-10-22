@@ -1213,6 +1213,13 @@ pub mod prelude {
 
 ---
 
+### 26.4 本轮验证补充（2026-10-22）
+
+- `cargo test -p prism_camera --all-features --lib --offline`：47 passed、0 failed，覆盖高级相机数学、运行时和 view batch 单测。
+- `cargo test -p prism_camera --no-default-features --features cutscene --lib --offline`：25 passed、0 failed，确认 cutscene 在不依赖默认 feature 时可构建和运行。
+- `PRISM_REQUIRE_GPU=1 cargo test -p prism_camera_gpu --test rhi_gpu --offline -- --nocapture`：跨沙盒真实设备 1 passed、0 failed，验证真实 RHI 上传、WGSL consumer 编译执行和回读字段。该测试不验证完整 renderer frame 或视觉效果。
+- 本轮相机代码与文档变更经定向 `rustfmt`、`git diff --check`；仓库全量格式检查仍受其他脏文件影响，未作为本轮相机验收门禁。
+
 ## 27. 责任闭合、风险处置与验收状态
 
 ### 27.1 当前实现与本文规格的关系
@@ -1256,7 +1263,7 @@ pub mod prelude {
 
 ### 28.1 相机动画片段与过场（`cutscene`）
 
-`prism_asset` 保存版本化轨迹：时间、DAffine3、焦距、曝光、PostStack 权重和事件键。运行时以只读 VCam 播放，时间由固定 tick 驱动，曲线采样使用确定性 Hermite；轨迹结束按 `CutsceneEndPolicy::{Hold,BlendToPrevious,Deactivate}` 处理，采样状态显式返回 `active` 与 `handoff_to_previous`，不会把结束状态隐式当作 Hold。资产校验失败时拒绝播放并保持当前 VCam，事件按帧号去重。
+`CameraTrack::into_validated` 在载入边界检查版本、非空/有界关键帧、严格递增 tick、有限姿态/焦距/曝光，然后消费原始轨迹生成不可变 `ValidatedCameraTrack`；fixed-tick 热路径不重复 O(keyframe 数) 全量校验，单帧采样为二分查找 O(log n) 加常量插值。时间切线按相邻 tick 间距归一并限制焦距段内过冲。轨迹结束按 `CutsceneEndPolicy::{Hold,BlendToPrevious,Deactivate}` 处理，采样状态显式返回 `active` 与 `handoff_to_previous`。无效资产在载入时拒绝，调用方保持当前 VCam；事件键只作为采样值返回，事件去重/消费由上层时间线负责，当前相机核心不伪称已提供去重派发。
 
 ### 28.2 焦点追踪与自动对焦（`autofocus`）
 
