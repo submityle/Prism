@@ -190,6 +190,31 @@ impl World {
         next
     }
 
+    /// Advance the world clock across `ticks` idle ticks with bounded
+    /// maintenance passes.
+    ///
+    /// Use this only when no systems or component/resource writes occurred in
+    /// the skipped ticks. Empty ticks do not create change-index events. The
+    /// stored change stamps are clamped at the same maximum interval used by
+    /// normal tick maintenance, preserving behavior even when the advance
+    /// spans more than one tick-age horizon. The number of maintenance passes
+    /// is bounded by the `u32` tick range and does not scale with `ticks`.
+    ///
+    /// `ticks == 0` is a no-op. For a nonzero advance, the returned tick is the
+    /// new current tick and all stored component stamps and the last-run
+    /// baseline are maintained against it.
+    #[inline]
+    pub fn advance_change_tick_by(&mut self, ticks: u32) -> Tick {
+        let mut remaining = ticks;
+        while remaining != 0 {
+            let step = remaining.min(Tick::CHECK_TICK_THRESHOLD);
+            self.change_tick = Tick::new(self.change_tick.get().wrapping_add(step));
+            self.check_change_ticks();
+            remaining -= step;
+        }
+        self.change_tick
+    }
+
     /// The baseline `last_run` tick used by one-shot reads.
     #[inline]
     pub fn last_change_tick(&self) -> Tick {
@@ -2750,6 +2775,31 @@ mod tests {
         assert_eq!(ticks.added.age_since(w.change_tick()), Tick::MAX_CHANGE_AGE);
         assert_eq!(
             ticks.changed.age_since(w.change_tick()),
+            Tick::MAX_CHANGE_AGE
+        );
+    }
+
+    #[test]
+    fn idle_tick_batch_advance_preserves_clock_and_tick_maintenance() {
+        use crate::change::Tick;
+        let mut w = World::new();
+        let entity = w.spawn(Position(1.0, 1.0));
+        w.set_last_change_tick(Tick::new(1));
+
+        assert_eq!(w.advance_change_tick_by(0), Tick::new(1));
+        assert_eq!(
+            w.get_ticks::<Position>(entity).unwrap().changed,
+            Tick::new(1)
+        );
+
+        let advance = Tick::CHECK_TICK_THRESHOLD * 7 + 17;
+        let expected = Tick::new(1_u32.wrapping_add(advance));
+        assert_eq!(w.advance_change_tick_by(advance), expected);
+        let ticks = w.get_ticks::<Position>(entity).unwrap();
+        assert_eq!(ticks.added.age_since(expected), Tick::MAX_CHANGE_AGE);
+        assert_eq!(ticks.changed.age_since(expected), Tick::MAX_CHANGE_AGE);
+        assert_eq!(
+            w.last_change_tick().age_since(expected),
             Tick::MAX_CHANGE_AGE
         );
     }
