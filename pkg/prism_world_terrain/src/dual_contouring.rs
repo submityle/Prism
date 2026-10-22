@@ -53,6 +53,38 @@ pub struct DualContouringGeometry {
     max_error_mm: f64,
 }
 
+/// Half-open cell-coordinate region extracted by [`DualContouringMesh::build_region`].
+///
+/// The region describes cells, not samples. The extractor reads the corresponding
+/// one-sample halo at `end` and emits only faces whose four incident cells are
+/// inside this region. Consequently region boundaries stay open and never receive
+/// invented caps.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DualContouringCellRegion {
+    min: [u32; 3],
+    end: [u32; 3],
+}
+
+impl DualContouringCellRegion {
+    /// Creates a non-empty half-open cell region.
+    pub fn new(min: [u32; 3], end: [u32; 3]) -> Result<Self, DualContouringError> {
+        if min.iter().zip(end).any(|(min, end)| *min >= end) {
+            return Err(DualContouringError::InvalidRegion);
+        }
+        Ok(Self { min, end })
+    }
+
+    /// Inclusive lower cell coordinate.
+    pub const fn min(self) -> [u32; 3] {
+        self.min
+    }
+
+    /// Exclusive upper cell coordinate.
+    pub const fn end(self) -> [u32; 3] {
+        self.end
+    }
+}
+
 impl DualContouringGeometry {
     /// Creates a positive-spacing grid embedding and bounded local-float policy.
     pub fn new(
@@ -110,6 +142,10 @@ pub struct DualContouringStats {
 pub enum DualContouringError {
     /// Invalid spacing or precision budget.
     InvalidGeometry,
+    /// The requested cell region is empty.
+    InvalidRegion,
+    /// The requested cell region does not fit inside the grid's cell domain.
+    RegionOutOfBounds,
     /// A count or byte calculation overflowed.
     SizeOverflow,
     /// Cell, vertex, triangle, or byte budget exceeded.
@@ -162,7 +198,77 @@ impl DualContouringMesh {
             });
         }
         let cd = [dims[0] - 1, dims[1] - 1, dims[2] - 1];
-        let cells = product(cd)?;
+        Self::build_cell_region(
+            grid,
+            DualContouringCellRegion {
+                min: [0; 3],
+                end: cd,
+            },
+            geometry,
+            limits,
+        )
+    }
+
+    /// Extracts only a half-open cell region without copying the source grid.
+    ///
+    /// The region must fit in the grid's cell domain, which is one smaller than
+    /// the sample dimensions on every axis. A one-sample halo is read as needed
+    /// for cell corners, while boundary-crossing primal edges are omitted. This
+    /// makes the result suitable for bounded dirty-brick re-extraction; callers
+    /// can replace the matching region in a larger mesh or keep the open boundary
+    /// for a neighboring region to provide.
+    pub fn build_region(
+        grid: &SdfGrid,
+        region: DualContouringCellRegion,
+        geometry: DualContouringGeometry,
+        limits: DualContouringLimits,
+    ) -> Result<Self, DualContouringError> {
+        let dims = grid.spec().dimensions();
+        let cell_dims = dims.map(|d| d.saturating_sub(1));
+        if dims.contains(&1) {
+            return Err(DualContouringError::RegionOutOfBounds);
+        }
+        if region
+            .end
+            .iter()
+            .zip(cell_dims)
+            .any(|(end, dim)| *end > dim)
+        {
+            return Err(DualContouringError::RegionOutOfBounds);
+        }
+        Self::build_cell_region(grid, region, geometry, limits)
+    }
+
+    fn build_cell_region(
+        grid: &SdfGrid,
+        region: DualContouringCellRegion,
+        geometry: DualContouringGeometry,
+        limits: DualContouringLimits,
+    ) -> Result<Self, DualContouringError> {
+        let dims = grid.spec().dimensions();
+        let cell_dims = dims.map(|d| d - 1);
+        if region
+            .min
+            .iter()
+            .zip(region.end)
+            .any(|(min, end)| *min >= end)
+        {
+            return Err(DualContouringError::InvalidRegion);
+        }
+        if region
+            .end
+            .iter()
+            .zip(cell_dims)
+            .any(|(end, dim)| *end > dim)
+        {
+            return Err(DualContouringError::RegionOutOfBounds);
+        }
+        let region_dims = [
+            region.end[0] - region.min[0],
+            region.end[1] - region.min[1],
+            region.end[2] - region.min[2],
+        ];
+        let cells = product(region_dims)?;
         if cells > limits.max_cells {
             return Err(DualContouringError::CellLimit);
         }
@@ -175,9 +281,9 @@ impl DualContouringMesh {
 
         // Validate ambiguous faces before creating any output. The finite field
         // is immutable, so the subsequent deterministic passes see same values.
-        for z in 0..cd[2] {
-            for y in 0..cd[1] {
-                for x in 0..cd[0] {
+        for z in region.min[2]..region.end[2] {
+            for y in region.min[1]..region.end[1] {
+                for x in region.min[0]..region.end[0] {
                     let v = cell_values(grid, [x, y, z]);
                     if has_ambiguous_face(&v) {
                         return Err(DualContouringError::AmbiguousTopology);
@@ -187,9 +293,9 @@ impl DualContouringMesh {
         }
 
         let mut active = 0usize;
-        for z in 0..cd[2] {
-            for y in 0..cd[1] {
-                for x in 0..cd[0] {
+        for z in region.min[2]..region.end[2] {
+            for y in region.min[1]..region.end[1] {
+                for x in region.min[0]..region.end[0] {
                     let v = cell_values(grid, [x, y, z]);
                     if !v.iter().all(|v| *v < 0) && !v.iter().all(|v| *v >= 0) {
                         active = active
@@ -204,10 +310,10 @@ impl DualContouringMesh {
         }
         let mut triangle_count = 0usize;
         for axis in 0..3 {
-            let ranges = [dims[0], dims[1], dims[2]];
-            for z in 0..ranges[2] {
-                for y in 0..ranges[1] {
-                    for x in 0..ranges[0] {
+            let ranges = [region.end[0] + 1, region.end[1] + 1, region.end[2] + 1];
+            for z in region.min[2]..ranges[2] {
+                for y in region.min[1]..ranges[1] {
+                    for x in region.min[0]..ranges[0] {
                         let a = [x, y, z];
                         if a[axis] + 1 >= dims[axis] {
                             continue;
@@ -218,10 +324,7 @@ impl DualContouringMesh {
                             continue;
                         }
                         let around = incident_cells(axis, a);
-                        if around
-                            .iter()
-                            .any(|c| c.iter().zip(cd).any(|(v, d)| *v >= d))
-                        {
+                        if !incident_cells_in_region(&around, region) {
                             continue;
                         }
                         triangle_count = triangle_count
@@ -237,7 +340,8 @@ impl DualContouringMesh {
         // Both primal-edge passes iterate the complete sample lattice for
         // each axis (including skipped boundary slots); charge those visits,
         // plus the three cell passes and final triangle validation.
-        let samples = product(dims)?;
+        let sample_dims = [region_dims[0] + 1, region_dims[1] + 1, region_dims[2] + 1];
+        let samples = product(sample_dims)?;
         let work_units = cells
             .checked_mul(3)
             .and_then(|n| samples.checked_mul(6).and_then(|e| n.checked_add(e)))
@@ -263,16 +367,16 @@ impl DualContouringMesh {
         cell_vertex.resize(cells, MISSING);
         let mut positions = reserve::<[f32; 3]>(active)?;
         let mut normals = reserve::<[f32; 3]>(active)?;
-        for z in 0..cd[2] {
-            for y in 0..cd[1] {
-                for x in 0..cd[0] {
+        for z in region.min[2]..region.end[2] {
+            for y in region.min[1]..region.end[1] {
+                for x in region.min[0]..region.end[0] {
                     let p = [x, y, z];
                     let values = cell_values(grid, p);
                     if values.iter().all(|v| *v < 0) || values.iter().all(|v| *v >= 0) {
                         continue;
                     }
                     let (vertex, normal) = solve_cell(p, values, geometry)?;
-                    cell_vertex[cell_index(p, cd)] = positions.len() as u32;
+                    cell_vertex[cell_index_in_region(p, region)] = positions.len() as u32;
                     positions.push(vertex);
                     normals.push(normal);
                 }
@@ -287,10 +391,10 @@ impl DualContouringMesh {
         // Each interior primal edge emits one quad (two triangles). Boundary
         // edges intentionally remain open; this API does not invent a cap.
         for axis in 0..3 {
-            let ranges = [dims[0], dims[1], dims[2]];
-            for z in 0..ranges[2] {
-                for y in 0..ranges[1] {
-                    for x in 0..ranges[0] {
+            let ranges = [region.end[0] + 1, region.end[1] + 1, region.end[2] + 1];
+            for z in region.min[2]..ranges[2] {
+                for y in region.min[1]..ranges[1] {
+                    for x in region.min[0]..ranges[0] {
                         let a = [x, y, z];
                         if a[axis] + 1 >= dims[axis] {
                             continue;
@@ -303,13 +407,10 @@ impl DualContouringMesh {
                             continue;
                         }
                         let around = incident_cells(axis, a);
-                        if around
-                            .iter()
-                            .any(|c| c.iter().zip(cd).any(|(v, d)| *v >= d))
-                        {
+                        if !incident_cells_in_region(&around, region) {
                             continue;
                         }
-                        let quad = around.map(|c| cell_vertex[cell_index(c, cd)]);
+                        let quad = around.map(|c| cell_vertex[cell_index_in_region(c, region)]);
                         if quad.contains(&MISSING) {
                             return Err(DualContouringError::DegenerateCell);
                         }
@@ -443,6 +544,28 @@ fn product(d: [u32; 3]) -> Result<usize, DualContouringError> {
 }
 fn cell_index(p: [u32; 3], d: [u32; 3]) -> usize {
     p[0] as usize + d[0] as usize * (p[1] as usize + d[1] as usize * p[2] as usize)
+}
+fn cell_index_in_region(p: [u32; 3], region: DualContouringCellRegion) -> usize {
+    cell_index(
+        [
+            p[0] - region.min[0],
+            p[1] - region.min[1],
+            p[2] - region.min[2],
+        ],
+        [
+            region.end[0] - region.min[0],
+            region.end[1] - region.min[1],
+            region.end[2] - region.min[2],
+        ],
+    )
+}
+fn incident_cells_in_region(cells: &[[u32; 3]; 4], region: DualContouringCellRegion) -> bool {
+    cells.iter().all(|cell| {
+        cell.iter()
+            .zip(region.min)
+            .zip(region.end)
+            .all(|((value, min), end)| *value >= min && *value < end)
+    })
 }
 fn raw(g: &SdfGrid, p: [u32; 3]) -> i32 {
     g.sample_q16(p).expect("validated grid coordinate")
@@ -869,6 +992,53 @@ mod tests {
         let a = DualContouringMesh::build(&g, geom(), limits()).unwrap();
         let b = DualContouringMesh::build(&g, geom(), limits()).unwrap();
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn region_extraction_uses_global_coordinates_and_leaves_open_boundaries() {
+        let g = grid(0);
+        let full = DualContouringMesh::build(&g, geom(), limits()).unwrap();
+        let region = DualContouringCellRegion::new([0, 0, 0], [8, 4, 8]).unwrap();
+        let partial = DualContouringMesh::build_region(&g, region, geom(), limits()).unwrap();
+
+        assert!(!partial.indices().is_empty());
+        assert_eq!(partial.revision(), g.revision());
+        assert!(partial
+            .positions()
+            .iter()
+            .all(|p| { (p[0] - 4.0).abs() < 1.0e-5 && p[1] >= 0.0 && p[1] <= 4.0 && p[2] >= 0.0 }));
+        assert!(partial.positions().len() < full.positions().len());
+
+        let mut edges = Vec::new();
+        for triangle in partial.indices().chunks_exact(3) {
+            for (a, b) in [
+                (triangle[0], triangle[1]),
+                (triangle[1], triangle[2]),
+                (triangle[2], triangle[0]),
+            ] {
+                edges.push((a.min(b), a.max(b)));
+            }
+        }
+        edges.sort_unstable();
+        let has_boundary_edge = edges.iter().enumerate().any(|(index, edge)| {
+            (index == 0 || edges[index - 1] != *edge)
+                && (index + 1 == edges.len() || edges[index + 1] != *edge)
+        });
+        assert!(has_boundary_edge);
+    }
+
+    #[test]
+    fn region_rejects_empty_or_out_of_bounds_cell_ranges() {
+        assert_eq!(
+            DualContouringCellRegion::new([1, 0, 0], [1, 2, 2]),
+            Err(DualContouringError::InvalidRegion)
+        );
+        let g = grid(1);
+        let region = DualContouringCellRegion::new([0, 0, 0], [9, 1, 1]).unwrap();
+        assert_eq!(
+            DualContouringMesh::build_region(&g, region, geom(), limits()),
+            Err(DualContouringError::RegionOutOfBounds)
+        );
     }
 
     #[cfg(feature = "mesh")]
