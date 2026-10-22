@@ -12,6 +12,7 @@ use alloc::vec::Vec;
 
 use prism_render_driver::{ComputeCommand, CopyCommand, RenderCommand};
 
+use crate::binding::TextureBindGroup;
 use crate::builder::ExecuteContext;
 use crate::pass::{BoxedExecute, PassKind};
 use crate::resource::{BufferResource, TextureResource};
@@ -43,11 +44,13 @@ pub(crate) fn record_pass(
     kind: PassKind,
     textures: &[TextureResource],
     buffers: &[BufferResource],
+    texture_bind_groups: &[TextureBindGroup],
 ) -> PassCommands {
-    let mut ctx = ExecuteContext::new(textures, buffers, kind);
+    let mut ctx = ExecuteContext::new(textures, buffers, texture_bind_groups, kind);
     if let Some(execute) = execute {
         execute(&mut ctx);
     }
+    ctx.assert_recording_valid();
     match kind {
         PassKind::Raster => PassCommands::Render(ctx.take_render_commands()),
         PassKind::Compute => PassCommands::Compute(ctx.take_compute_commands()),

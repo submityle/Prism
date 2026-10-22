@@ -241,7 +241,11 @@ fn derive_attachments(
                     } else {
                         acc.input_version
                     };
-                    let load = if writes && acc.input_version == 0 {
+                    let load = if writes && acc.color_load.is_some() {
+                        acc.color_load.expect("explicit load checked above")
+                    } else if let Some(clear) = acc.color_clear.filter(|_| writes) {
+                        LoadOp::Clear(clear)
+                    } else if writes && acc.input_version == 0 {
                         LoadOp::Clear(Color::BLACK)
                     } else {
                         LoadOp::Load
@@ -268,7 +272,9 @@ fn derive_attachments(
                     // reversed-Z；深度约定全仓一致（近 1 远 0，测试 GREATER，清 0）").
                     // Clearing to 1.0 (the GL/D3D far plane) would clear to *near*
                     // under reversed-Z, so nothing would pass the test.
-                    let depth_load = if writes && acc.input_version == 0 {
+                    let depth_load = if writes && acc.depth_load.is_some() {
+                        acc.depth_load.expect("explicit depth load checked above")
+                    } else if writes && acc.input_version == 0 {
                         DepthLoadOp::Clear(0.0)
                     } else {
                         DepthLoadOp::Load

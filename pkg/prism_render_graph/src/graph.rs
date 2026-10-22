@@ -15,21 +15,29 @@
 
 use alloc::boxed::Box;
 use alloc::string::String;
+use alloc::sync::{Arc, Weak};
 use alloc::vec;
 use alloc::vec::Vec;
+use core::any::Any;
+use core::fmt;
+use core::mem::ManuallyDrop;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use prism_render_driver::{
-    BufferId, BufferUsages, ColorAttachment, CommandBuffer, CommandEncoder, DepthOperations,
+    BindGroupDescriptor, BindGroupEntry, BindGroupId, BindGroupLayoutId, BindingResource, BufferId,
+    BufferUsages, ColorAttachment, CommandBuffer, CommandEncoder, DepthOperations,
     DepthStencilAttachment, Extent3d, RenderDevice, RenderPassDescriptor, RenderQueue,
-    TextureDimension, TextureUsages, TextureViewDescriptor, TextureViewDimension,
+    TextureDimension, TextureId, TextureUsages, TextureViewDescriptor, TextureViewDimension,
+    TextureViewId,
 };
 
+use crate::binding::TextureBindGroup;
 use crate::blackboard::Blackboard;
 use crate::builder::{ExecuteContext, PassBuilder};
 use crate::capacity::GraphLimits;
 use crate::compile;
 use crate::desc::{BufferDesc, TextureDesc};
-use crate::handle::{BufferHandle, ResourceIndex, TextureHandle};
+use crate::handle::{BufferHandle, ResourceIndex, TextureBindGroupHandle, TextureHandle};
 use crate::pass::{BoxedExecute, PassFlags, PassKind, PassNode, ThreadBound};
 use crate::plan::{CompileError, ExecutionPlan, RasterAttachments};
 use crate::record::{self, PassCommands};
@@ -54,27 +62,98 @@ pub struct PreparedGraph {
     plan: ExecutionPlan,
 }
 
+/// Submission state for one graph, independent of GPU completion/retirement.
+///
+/// Keep only a [`Weak`] obtained from [`RenderGraph::submission_token`] when
+/// tracking outstanding declarations: a live, unsubmitted token blocks writes
+/// to resources those commands will read. Once submitted, subsequent writes on
+/// the same ordered queue need not wait for GPU completion. This is not a lock:
+/// callers must still serialize resource updates with graph declaration and
+/// submission, and must not replay old commands after updating their resources.
+#[derive(Debug, Default)]
+pub struct GraphSubmissionToken {
+    submitted: AtomicBool,
+}
+
+impl GraphSubmissionToken {
+    /// Whether actual queue submission returned and the allocation owner was
+    /// marked. This is monotonic and does **not** imply GPU completion.
+    #[must_use]
+    pub fn is_submitted(&self) -> bool {
+        self.submitted.load(Ordering::Acquire)
+    }
+}
+
+// Unlike external-owner pins, this CPU-only guard must drop normally even when
+// a recorded packet is abandoned without explicit GPU-allocation retirement.
+#[derive(Debug, Default)]
+struct GraphSubmissionGuard(Arc<GraphSubmissionToken>);
+
 /// The move-only owner of physical allocations created by one graph recording.
 ///
-/// Imported resources are never included. Indices retain the texture/buffer
-/// namespaces of the compiled plan, including synchronization metadata.
+/// Imported texture/buffer IDs are never included, but frame-local bind groups
+/// referencing them and explicitly retained external owners are owned here.
+/// Indices retain the texture/buffer namespaces of the compiled plan, including
+/// synchronization metadata.
 ///
 /// # Lifetime contract
 ///
 /// Keep this owner until every submission using its resources has completed,
 /// then call [`Self::release`] on the creating device. For a cancelled frame,
 /// first discard all commands that could still reference these allocations.
-/// Dropping this data-only owner does **not** destroy GPU resources: it cannot
-/// observe external submission/completion, and an early destroy would invalidate
-/// in-flight commands. Omitting explicit release leaks until device teardown.
-#[derive(Debug, Default)]
+/// Dropping this owner does **not** destroy GPU resources or release external
+/// owner pins: it cannot observe external submission/completion, and an early
+/// destroy would invalidate in-flight commands. Omitting explicit release leaks
+/// allocations and pinned strong references; device teardown alone does not
+/// recover those references. The CPU submission guard is not leaked: dropping
+/// this owner expires its weak submission token. Discard every command copy
+/// before abandoning an unsubmitted owner; commands alone do not hold the guard.
+#[derive(Default)]
 #[must_use = "retain until GPU completion, then explicitly release on the creating device"]
 pub struct GraphAllocations {
+    texture_bind_groups: Vec<(TextureBindGroupHandle, BindGroupId)>,
     textures: Vec<(ResourceIndex, Lifetime, RealizedTexture)>,
     buffers: Vec<(ResourceIndex, Lifetime, BufferId)>,
+    // Match the explicit-release GPU allocation contract: dropping a recorded
+    // owner cannot safely run arbitrary imported-resource destructors either.
+    external_owners: ManuallyDrop<Vec<Arc<dyn Any + Send + Sync>>>,
+    submission_guard: Option<GraphSubmissionGuard>,
+}
+
+impl fmt::Debug for GraphAllocations {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GraphAllocations")
+            .field("texture_bind_groups", &self.texture_bind_groups)
+            .field("textures", &self.textures)
+            .field("buffers", &self.buffers)
+            .field("external_owner_count", &self.external_owners.len())
+            .field("submission_guard", &self.submission_guard)
+            .finish()
+    }
 }
 
 impl GraphAllocations {
+    /// Marks this graph submitted, only after actual queue submission returns.
+    ///
+    /// Idempotent; never call during recording, before submitting, or merely
+    /// because a completion callback was registered. This permits later resource
+    /// writes only under the submitting queue's ordering; it neither establishes
+    /// GPU completion nor releases external owners. Default/empty owners with no
+    /// associated graph have no token to mark.
+    pub fn mark_submitted(&self) {
+        if let Some(guard) = &self.submission_guard {
+            guard.0.submitted.store(true, Ordering::Release);
+        }
+    }
+
+    /// Frame-local bind groups, including groups referencing imported/history
+    /// textures. Layouts and imported views remain externally owned.
+    #[must_use]
+    pub fn texture_bind_groups(&self) -> &[(TextureBindGroupHandle, BindGroupId)] {
+        &self.texture_bind_groups
+    }
+
     /// Graph-created textures and default views, keyed by virtual texture index.
     #[must_use]
     pub fn textures(&self) -> &[(ResourceIndex, Lifetime, RealizedTexture)] {
@@ -87,10 +166,24 @@ impl GraphAllocations {
         &self.buffers
     }
 
-    /// Whether every graph-created allocation has been released or transferred.
+    /// The number of explicitly retained strong references to external owners.
+    ///
+    /// Repeated retention of the same owner counts once per call. Pins survive
+    /// [`Self::release_transients`] and are relinquished by [`Self::release`].
+    #[must_use]
+    pub fn external_owner_count(&self) -> usize {
+        self.external_owners.len()
+    }
+
+    /// Whether no graph-created allocations or external owner pins remain.
+    /// Submission tracking alone does not count as a physical allocation; keep
+    /// even an empty owner while its commands may still be submitted.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.textures.is_empty() && self.buffers.is_empty()
+        self.texture_bind_groups.is_empty()
+            && self.textures.is_empty()
+            && self.buffers.is_empty()
+            && self.external_owners.is_empty()
     }
 
     /// Releases completed frame-local allocations, retaining persistent ones.
@@ -98,8 +191,14 @@ impl GraphAllocations {
     /// The caller must establish completion on the actual submitting queue and
     /// use the creating device. Persistent allocations remain owned here so a
     /// history owner can reimport them in later frames and eventually release
-    /// them. This method does not submit, wait, or infer completion.
+    /// them. External owner pins are conservatively retained alongside history
+    /// until [`Self::release`], even if no graph-created allocations remain.
+    /// This method does not submit, wait, or infer completion.
     pub fn release_transients<D: RenderDevice>(&mut self, device: &D) {
+        // All graph bind groups are frame-local, even those binding history.
+        for (_, bind_group) in self.texture_bind_groups.drain(..) {
+            device.destroy_bind_group(bind_group);
+        }
         self.textures.retain(|(_, lifetime, realized)| {
             if *lifetime != Lifetime::Transient {
                 return true;
@@ -122,8 +221,14 @@ impl GraphAllocations {
     /// Call only on the creating device after all GPU users have completed (or
     /// after discarding an unsubmitted frame). Use [`Self::release_transients`]
     /// instead when persistent history must outlive this frame. Imported
-    /// resources are never destroyed. Views are destroyed before their textures.
+    /// resource IDs are never directly destroyed by the graph. Bind groups are
+    /// destroyed before any views, and views before their textures. External
+    /// owner pins are dropped last, after all graph-owned resources, and their
+    /// final destructors may destroy imported resources.
     pub fn release<D: RenderDevice>(self, device: &D) {
+        for (_, bind_group) in self.texture_bind_groups {
+            device.destroy_bind_group(bind_group);
+        }
         for (_, _, realized) in &self.textures {
             device.destroy_texture_view(realized.default_view);
         }
@@ -133,6 +238,41 @@ impl GraphAllocations {
         for (_, _, buffer) in self.buffers {
             device.destroy_buffer(buffer);
         }
+        drop(ManuallyDrop::into_inner(self.external_owners));
+    }
+}
+
+/// Owns allocations only while recording, when no submission can reference them.
+/// Unlike the returned allocation owner, this guard can release on unwinding
+/// without guessing GPU completion. It stays on the recording caller's thread.
+struct RecordingAllocations<'device, D: RenderDevice> {
+    device: &'device D,
+    allocations: GraphAllocations,
+    // Track the texture immediately, before its default-view creation can panic.
+    pending_texture: Option<(TextureId, Option<TextureViewId>)>,
+}
+
+impl<D: RenderDevice> RecordingAllocations<'_, D> {
+    fn into_allocations(mut self) -> GraphAllocations {
+        debug_assert!(self.pending_texture.is_none());
+        core::mem::take(&mut self.allocations)
+    }
+}
+
+impl<D: RenderDevice> Drop for RecordingAllocations<'_, D> {
+    fn drop(&mut self) {
+        // Realization creates every texture/view before any bind groups.
+        // A pending texture can therefore never coexist with a live group.
+        debug_assert!(
+            self.pending_texture.is_none() || self.allocations.texture_bind_groups.is_empty()
+        );
+        if let Some((texture, view)) = self.pending_texture.take() {
+            if let Some(view) = view {
+                self.device.destroy_texture_view(view);
+            }
+            self.device.destroy_texture(texture);
+        }
+        core::mem::take(&mut self.allocations).release(self.device);
     }
 }
 
@@ -168,7 +308,7 @@ impl RecordedGraph {
         &self.plan
     }
 
-    /// Physical graph-owned resources retained by this packet.
+    /// Physical graph-owned resources and external owner pins in this packet.
     #[must_use]
     pub fn allocations(&self) -> &GraphAllocations {
         &self.allocations
@@ -178,6 +318,8 @@ impl RecordedGraph {
     ///
     /// Native encoding/submission may consume `commands`; keep `allocations`
     /// alive in the pending/submitted batch until its real completion signal.
+    /// External owner pins move with `allocations`, not `commands` or `plan`;
+    /// dropping those two values does not release the pins.
     #[must_use]
     pub fn into_parts(self) -> (CommandBuffer, ExecutionPlan, GraphAllocations) {
         (self.commands, self.plan, self.allocations)
@@ -198,18 +340,24 @@ impl RecordedGraph {
 ///
 /// Owns the frame's virtual-resource tables, declared passes, and the shared
 /// [`Blackboard`]. Build it per frame, declare passes, then [`compile`] or
-/// [`execute`]. The graph is `unsafe`-free and holds no GPU objects until
-/// execution realizes them through the [`RenderDevice`] trait.
+/// [`execute`]. The graph is `unsafe`-free and creates no GPU objects until
+/// recording realizes them through the [`RenderDevice`] trait; imports and
+/// explicitly retained external owners may already hold resident objects.
 ///
 /// [`compile`]: RenderGraph::compile
 /// [`execute`]: RenderGraph::execute
 pub struct RenderGraph {
     textures: Vec<TextureResource>,
     buffers: Vec<BufferResource>,
+    texture_bind_groups: Vec<TextureBindGroup>,
     passes: Vec<PassNode>,
     blackboard: Blackboard,
     swapchain: Extent3d,
     limits: GraphLimits,
+    // After captures so cancelling an unrecorded graph drops callback/blackboard
+    // captures before releasing external objects those captures may reference.
+    external_owners: Vec<Arc<dyn Any + Send + Sync>>,
+    submission_guard: GraphSubmissionGuard,
 }
 
 impl RenderGraph {
@@ -225,10 +373,13 @@ impl RenderGraph {
         Self {
             textures: Vec::new(),
             buffers: Vec::new(),
+            texture_bind_groups: Vec::new(),
             passes: Vec::new(),
             blackboard: Blackboard::new(),
             swapchain,
             limits,
+            external_owners: Vec::new(),
+            submission_guard: GraphSubmissionGuard::default(),
         }
     }
 
@@ -324,6 +475,76 @@ impl RenderGraph {
     #[must_use]
     pub fn pass_count(&self) -> usize {
         self.passes.len()
+    }
+
+    /// Declares a frame-local bind group over graph textures' default views.
+    ///
+    /// This stores CPU metadata only: no driver allocation occurs until record,
+    /// when views are resolved and groups are created on the calling thread,
+    /// before any sequential or parallel execute callback. The returned handle
+    /// can be cloned and resolved with [`ExecuteContext::texture_bind_group`].
+    /// The caller owns `layout` and must keep it valid through group retirement.
+    ///
+    /// This is NOT a resource access declaration: each pass must still call
+    /// [`PassBuilder::read_texture`] (or the appropriate write/access helper).
+    /// No usage, dependency, barrier or texture liveness is inferred here. If
+    /// any entry's texture is unused after pass culling, this group is not
+    /// created and resolving it during execution panics. Otherwise the group is
+    /// realized even if no surviving callback resolves it. Texture versions do
+    /// not snapshot contents; explicit pass accesses determine ordering.
+    ///
+    /// All groups are owned by [`GraphAllocations`] until explicit completion-
+    /// time release, including groups binding imported or persistent textures.
+    /// Cancelling a declaration/prepared graph allocates no driver objects;
+    /// cancel an unsubmitted recorded graph with [`RecordedGraph::release`].
+    ///
+    /// # Panics
+    /// Panics on an invalid texture index/version, duplicate binding slots, or
+    /// exhaustion of the configured resource/entry limits (`resources` groups,
+    /// `accesses_per_pass` entries per group). Texture handles must originate
+    /// from this graph, just as for pass access declarations.
+    #[must_use]
+    pub fn create_texture_bind_group(
+        &mut self,
+        layout: BindGroupLayoutId,
+        entries: Vec<(u32, TextureHandle)>,
+        label: Option<String>,
+    ) -> TextureBindGroupHandle {
+        let index = GraphLimits::next_id(
+            "texture bind groups",
+            self.texture_bind_groups.len(),
+            self.limits.resources,
+        )
+        .expect("graph texture bind group capacity precondition");
+        GraphLimits::check_count(
+            "texture bind group entries",
+            entries.len(),
+            self.limits.accesses_per_pass,
+        )
+        .expect("graph texture bind group entry capacity precondition");
+        for (position, &(binding, handle)) in entries.iter().enumerate() {
+            assert!(
+                entries[..position].iter().all(|(slot, _)| *slot != binding),
+                "duplicate texture bind group binding slot"
+            );
+            let resource = self
+                .textures
+                .get(handle.resource().get() as usize)
+                .expect("invalid texture bind group texture index");
+            assert!(
+                handle.version() <= resource.version,
+                "invalid texture bind group texture version"
+            );
+        }
+        let handle = TextureBindGroupHandle::new(index);
+        self.texture_bind_groups.push(TextureBindGroup {
+            handle: handle.clone(),
+            layout,
+            entries,
+            label,
+            realized: None,
+        });
+        handle
     }
 
     /// Imports an externally-owned texture (swapchain image, resident asset).
@@ -717,7 +938,6 @@ impl RenderGraph {
         limits: GraphLimits,
         inputs: Option<&[Vec<Input>]>,
     ) -> Result<ExecutionPlan, CompileError> {
-        use crate::access::{BufferUse, TextureUse};
         use crate::frame_graph::{AccessInput, AccessKind, PassId, QueueClass, ResourceLifetime};
         use crate::resource::{BufferResource, Lifetime, TextureResource};
         use prism_render_driver::{BufferUsages, SubresourceRange, TextureFormat, TextureUsages};
@@ -742,6 +962,9 @@ impl RenderGraph {
                 }
             }
         }
+        // Classify once while validating IDs instead of rescanning every
+        // access for each resource (O(resources + accesses), not O(R * A)).
+        let mut resource_classes = vec![(false, false); resources.len()];
         for (pass_index, pass) in passes.iter().enumerate() {
             GraphLimits::check_count("accesses", pass.accesses.len(), limits.accesses_per_pass)?;
             for access in &pass.accesses {
@@ -751,12 +974,34 @@ impl RenderGraph {
                         resource: access.resource,
                     });
                 }
+                let (texture, depth) = &mut resource_classes[access.resource.0 as usize];
+                *texture |= access.kind.requires_texture();
+                *depth |= matches!(
+                    access.kind,
+                    AccessKind::DepthAttachment | AccessKind::DepthAttachmentRead
+                );
             }
             for &dependency in &pass.depends_on {
                 if dependency.0 as usize >= passes.len() || dependency.0 as usize == pass_index {
                     return Err(CompileError::InvalidDependency {
                         pass: PassId(pass_index as u32),
                         dependency,
+                    });
+                }
+            }
+        }
+
+        // Reject incompatible uses in original declaration order, independent
+        // of dependency scheduling and the texture/buffer namespace split.
+        for (pass_index, pass) in passes.iter().enumerate() {
+            for access in &pass.accesses {
+                if resource_classes[access.resource.0 as usize].0
+                    && access.kind.texture_use().is_none()
+                {
+                    return Err(CompileError::InvalidAccess {
+                        pass: PassId(pass_index as u32),
+                        resource: access.resource,
+                        kind: access.kind,
                     });
                 }
             }
@@ -839,29 +1084,13 @@ impl RenderGraph {
         let mut texture_count = 0u32;
         let mut buffer_count = 0u32;
         for (index, resource) in resources.iter().enumerate() {
-            let uses_texture = passes.iter().any(|pass| {
-                pass.accesses.iter().any(|access| {
-                    access.resource.0 as usize == index
-                        && matches!(
-                            access.kind,
-                            AccessKind::SampledRead
-                                | AccessKind::ColorAttachment
-                                | AccessKind::DepthAttachment
-                        )
-                })
-            });
+            let (uses_texture, depth) = resource_classes[index];
             let lifetime = match resource.lifetime {
                 ResourceLifetime::Transient => Lifetime::Transient,
                 ResourceLifetime::Imported => Lifetime::Imported,
                 ResourceLifetime::Persistent => Lifetime::Persistent,
             };
             if uses_texture {
-                let depth = passes.iter().any(|pass| {
-                    pass.accesses.iter().any(|access| {
-                        access.resource.0 as usize == index
-                            && access.kind == AccessKind::DepthAttachment
-                    })
-                });
                 let desc = if depth {
                     TextureDesc::depth(TextureFormat::Depth32Float)
                 } else {
@@ -914,12 +1143,11 @@ impl RenderGraph {
                 QueueClass::Transfer => PassKind::Transfer,
                 QueueClass::Compute => PassKind::Compute,
                 QueueClass::Graphics => {
-                    if pass.accesses.iter().any(|access| {
-                        matches!(
-                            access.kind,
-                            AccessKind::ColorAttachment | AccessKind::DepthAttachment
-                        )
-                    }) {
+                    if pass
+                        .accesses
+                        .iter()
+                        .any(|access| access.kind.is_attachment())
+                    {
                         PassKind::Raster
                     } else {
                         PassKind::Compute
@@ -960,17 +1188,13 @@ impl RenderGraph {
                             };
                         let next = match handles[index] {
                             Handle::Texture(handle) => {
-                                let usage = match access.kind {
-                                    AccessKind::SampledRead => TextureUse::Sampled,
-                                    AccessKind::StorageRead | AccessKind::IndirectRead => {
-                                        TextureUse::StorageRead
-                                    }
-                                    AccessKind::StorageWrite => TextureUse::StorageWrite,
-                                    AccessKind::ColorAttachment => TextureUse::ColorAttachment,
-                                    AccessKind::DepthAttachment => TextureUse::DepthAttachment,
-                                    AccessKind::TransferRead => TextureUse::CopySrc,
-                                    AccessKind::TransferWrite => TextureUse::CopyDst,
-                                };
+                                let usage = access.kind.texture_use().ok_or(
+                                    CompileError::InvalidAccess {
+                                        pass: PassId(original_index as u32),
+                                        resource: access.resource,
+                                        kind: access.kind,
+                                    },
+                                )?;
                                 let handle = TextureHandle::new(
                                     handle.resource(),
                                     input.unwrap_or(handle.version()),
@@ -982,20 +1206,13 @@ impl RenderGraph {
                                 )?)
                             }
                             Handle::Buffer(handle) => {
-                                let usage = match access.kind {
-                                    AccessKind::SampledRead | AccessKind::StorageRead => {
-                                        BufferUse::StorageRead
-                                    }
-                                    AccessKind::StorageWrite => BufferUse::StorageWrite,
-                                    AccessKind::IndirectRead => BufferUse::Indirect,
-                                    AccessKind::TransferRead => BufferUse::CopySrc,
-                                    AccessKind::TransferWrite => BufferUse::CopyDst,
-                                    AccessKind::ColorAttachment | AccessKind::DepthAttachment => {
-                                        unreachable!(
-                                            "attachment declarations are lowered as textures"
-                                        )
-                                    }
-                                };
+                                let usage = access.kind.buffer_use().ok_or(
+                                    CompileError::InvalidAccess {
+                                        pass: PassId(original_index as u32),
+                                        resource: access.resource,
+                                        kind: access.kind,
+                                    },
+                                )?;
                                 let handle = BufferHandle::new(
                                     handle.resource(),
                                     input.unwrap_or(handle.version()),
@@ -1067,6 +1284,9 @@ impl RenderGraph {
     /// On [`CompileError`], no allocation or execute callback has occurred.
     /// Resource creation and callbacks are otherwise infallible trait calls;
     /// their panics are not converted into a recoverable compilation error.
+    /// Unwinding releases graph-created, unsubmitted allocations, including a
+    /// texture whose default-view creation panicked. Retained external owner
+    /// pins are released after graph-owned allocations on recording unwind.
     /// Keep the returned owner until actual GPU completion, then release its
     /// allocations on the creating device.
     pub fn record<D: RenderDevice>(self, device: &D) -> Result<RecordedGraph, CompileError> {
@@ -1121,6 +1341,7 @@ impl RenderGraph {
     ) -> Result<RecordedGraph, CompileError> {
         let recorded = self.prepare()?.record_sequential(device);
         queue.submit(core::slice::from_ref(recorded.commands()));
+        recorded.allocations().mark_submitted();
         Ok(recorded)
     }
 
@@ -1131,7 +1352,13 @@ impl RenderGraph {
             let kind = self.passes[pidx].kind;
             // Take the move-only closure before the shared borrows below.
             let exec = self.passes[pidx].execute.take();
-            let recorded = record::record_pass(exec, kind, &self.textures, &self.buffers);
+            let recorded = record::record_pass(
+                exec,
+                kind,
+                &self.textures,
+                &self.buffers,
+                &self.texture_bind_groups,
+            );
             self.encode_recorded(&mut encoder, plan, pos, pidx, recorded);
         }
 
@@ -1151,6 +1378,7 @@ impl RenderGraph {
     ) -> Result<RecordedGraph, CompileError> {
         let recorded = self.prepare()?.record_parallel(device);
         queue.submit(core::slice::from_ref(recorded.commands()));
+        recorded.allocations().mark_submitted();
         Ok(recorded)
     }
 
@@ -1170,7 +1398,12 @@ impl RenderGraph {
             });
         }
 
-        let recorded = parallel::record(&mut units, &self.textures, &self.buffers);
+        let recorded = parallel::record(
+            &mut units,
+            &self.textures,
+            &self.buffers,
+            &self.texture_bind_groups,
+        );
 
         let mut encoder = CommandEncoder::new();
         for (pos, pidx, commands) in recorded {
@@ -1218,10 +1451,28 @@ impl RenderGraph {
 
     /// Creates the driver objects backing every used, not-yet-realized
     /// transient or persistent resource. Imported resources are already
-    /// realized at import and are skipped. Returns ownership of exactly the
-    /// allocations created here, including persistent history resources.
-    fn realize<D: RenderDevice>(&mut self, plan: &ExecutionPlan, device: &D) -> GraphAllocations {
-        let mut allocations = GraphAllocations::default();
+    /// realized at import and are skipped. Guards exactly the allocations
+    /// created here, including persistent history, until recording succeeds.
+    fn realize<'device, D: RenderDevice>(
+        &mut self,
+        plan: &ExecutionPlan,
+        device: &'device D,
+    ) -> RecordingAllocations<'device, D> {
+        let mut allocations = RecordingAllocations {
+            device,
+            // Reserve ownership slots before creating any driver objects, so
+            // registering a returned buffer ID cannot allocate or unwind.
+            allocations: GraphAllocations {
+                texture_bind_groups: Vec::with_capacity(self.texture_bind_groups.len()),
+                textures: Vec::with_capacity(self.textures.len()),
+                buffers: Vec::with_capacity(self.buffers.len()),
+                external_owners: ManuallyDrop::new(Vec::new()),
+                // Keep the token continuously alive across realization and
+                // graph/callback teardown; only the returned owner survives.
+                submission_guard: Some(GraphSubmissionGuard(Arc::clone(&self.submission_guard.0))),
+            },
+            pending_texture: None,
+        };
         for i in 0..self.textures.len() {
             if !plan.used_textures[i] || self.textures[i].realized.is_some() {
                 continue;
@@ -1230,20 +1481,23 @@ impl RenderGraph {
                 .desc
                 .lower(self.swapchain, self.textures[i].inferred_usage);
             let texture = device.create_texture(&descriptor);
+            allocations.pending_texture = Some((texture, None));
             let view = device.create_texture_view(
                 texture,
                 &default_view_descriptor(self.textures[i].desc.dimension),
             );
+            allocations.pending_texture = Some((texture, Some(view)));
             let realized = RealizedTexture {
                 texture,
                 default_view: view,
             };
             self.textures[i].realized = Some(realized);
-            allocations.textures.push((
+            allocations.allocations.textures.push((
                 ResourceIndex(i as u32),
                 self.textures[i].lifetime,
                 realized,
             ));
+            allocations.pending_texture = None;
         }
         for i in 0..self.buffers.len() {
             if !plan.used_buffers[i] || self.buffers[i].realized.is_some() {
@@ -1252,9 +1506,47 @@ impl RenderGraph {
             let descriptor = self.buffers[i].desc.lower(self.buffers[i].inferred_usage);
             let buffer = device.create_buffer(&descriptor);
             self.buffers[i].realized = Some(buffer);
+            allocations.allocations.buffers.push((
+                ResourceIndex(i as u32),
+                self.buffers[i].lifetime,
+                buffer,
+            ));
+        }
+        // Only this serial realization stage touches the device. Workers see
+        // the frozen table, and no bind group implicitly keeps textures alive.
+        for group in &mut self.texture_bind_groups {
+            if group
+                .entries
+                .iter()
+                .any(|(_, texture)| !plan.used_textures[texture.resource().get() as usize])
+            {
+                continue;
+            }
+            let descriptor = BindGroupDescriptor {
+                label: group.label.clone(),
+                layout: Some(group.layout),
+                entries: group
+                    .entries
+                    .iter()
+                    .map(|&(binding, texture)| BindGroupEntry {
+                        binding,
+                        resource: BindingResource::TextureView(
+                            self.textures[texture.resource().get() as usize]
+                                .realized
+                                .expect("used texture must be realized before binding")
+                                .default_view,
+                        ),
+                    })
+                    .collect(),
+            };
+            // Clone before creation: the ownership push below cannot allocate.
+            let handle = group.handle.clone();
+            let bind_group = device.create_bind_group(&descriptor);
             allocations
-                .buffers
-                .push((ResourceIndex(i as u32), self.buffers[i].lifetime, buffer));
+                .allocations
+                .texture_bind_groups
+                .push((handle, bind_group));
+            group.realized = Some(bind_group);
         }
         allocations
     }
@@ -1295,7 +1587,9 @@ impl RenderGraph {
                 .default_view;
             descriptor.depth_stencil_attachment = Some(DepthStencilAttachment {
                 view,
-                depth: Some(DepthOperations {
+                // No operations means read-only depth in the driver/wgpu;
+                // even Load/Store would declare a writable attachment.
+                depth: depth.writes.then_some(DepthOperations {
                     load: depth.depth_load,
                     store: depth.depth_store,
                 }),
@@ -1317,7 +1611,8 @@ impl PreparedGraph {
     ///
     /// No device or queue is sent to recording workers. Imported resources must
     /// belong to this device, and must outlive all submissions that use them.
-    /// The caller retains responsibility for external completion and retirement.
+    /// Explicitly retained external owners move into the allocation owner;
+    /// the caller still establishes actual completion before releasing it.
     ///
     /// Resource sizes use the graph's compiled swapchain extent. Recording
     /// cannot change it; resize requires preparing a new graph so the frozen
@@ -1349,16 +1644,27 @@ impl PreparedGraph {
     }
 
     fn record_with<D: RenderDevice>(
-        mut self,
+        self,
         device: &D,
         record_commands: fn(&mut RenderGraph, &ExecutionPlan) -> CommandBuffer,
     ) -> RecordedGraph {
-        let allocations = self.graph.realize(&self.plan, device);
-        let commands = record_commands(&mut self.graph, &self.plan);
+        // Declare before `graph`: on callback unwind, remaining graph captures
+        // must drop before this guard releases external owners they may use.
+        let mut allocations;
+        let PreparedGraph { mut graph, plan } = self;
+        allocations = graph.realize(&plan, device);
+        // Realization errors leave pins in `graph`, which drops them last after
+        // its captures. Move them only now, while the recording guard is armed.
+        allocations.allocations.external_owners =
+            ManuallyDrop::new(core::mem::take(&mut graph.external_owners));
+        let commands = record_commands(&mut graph, &plan);
+        // Dropping unexecuted, culled captures may also panic. Do it before
+        // handing off allocations, while the unsubmitted cleanup guard is armed.
+        drop(graph);
         RecordedGraph {
             commands,
-            plan: self.plan,
-            allocations,
+            plan,
+            allocations: allocations.into_allocations(),
         }
     }
 }
@@ -1375,3 +1681,7 @@ fn default_view_descriptor(dimension: TextureDimension) -> TextureViewDescriptor
         ..TextureViewDescriptor::default()
     }
 }
+
+#[cfg(test)]
+#[path = "../text/unit/external_owners.rs"]
+mod external_owner_tests;

@@ -6,13 +6,13 @@ use alloc::vec::Vec;
 use prism_ecs::prelude::Resource;
 use prism_ecs::world::World;
 use prism_render_driver::{
-    BufferId, BufferState, BufferUsages, Color, TextureFormat, TextureId, TextureState,
-    TextureUsages, TextureViewId,
+    BufferId, BufferState, BufferUsages, Color, DepthLoadOp, TextureFormat, TextureId,
+    TextureState, TextureUsages, TextureViewId,
 };
 use prism_render_gpudriven::{CompiledGraphGpuGraphImport, CompiledGraphGpuResourceSlot};
 use prism_render_graph::{
-    BufferDesc, BufferHandle, ImportedBuffer, ImportedTexture, PassFlags, RenderGraph, TextureDesc,
-    TextureHandle,
+    BufferDesc, BufferHandle, ImportedBuffer, ImportedTexture, LogicalResource, PassFlags,
+    RenderGraph, TextureDesc, TextureHandle,
 };
 
 use crate::display_transform_gpu::{DisplayTransformGpuError, OffscreenDisplayTransform};
@@ -23,6 +23,7 @@ use crate::particle::{EmberGpuAssetRegistry, ParticleGpuState};
 use crate::queue::{PhaseItem, RenderQueues};
 use crate::sets::RenderPhase;
 use crate::target::RenderTarget;
+use prism_camera::ClearMode;
 
 mod surface_views;
 pub(crate) use surface_views::{
@@ -382,6 +383,7 @@ fn target_graph_output_with_trace_and_particles_and_external_views(
         lighting,
         trace,
         particle,
+        ClearMode::ColorAndDepth,
         external_views,
     );
     graph.blackboard_mut().set(appended.stages);
@@ -538,6 +540,71 @@ struct TargetGraphAppend {
     stages: FrameGraphStages,
 }
 
+fn sampled_texture_handles(
+    item: &PhaseItem,
+    phase: RenderPhase,
+    item_index: usize,
+    queues: &RenderQueues,
+    functions: &DrawFunctions,
+    imports: &BTreeMap<TextureViewId, TextureHandle>,
+) -> Vec<TextureHandle> {
+    let mut handles = Vec::new();
+    for binding in item
+        .bind_groups(functions)
+        .iter()
+        .chain(queues.dynamic_bind_groups(phase, item_index).iter())
+    {
+        for view in &binding.sampled_textures {
+            let handle = *imports.get(view).unwrap_or_else(|| {
+                panic!(
+                    "render bind group {:?} samples TextureViewId {:?} without a FrameGraphTextureImports entry",
+                    binding.bind_group,
+                    view
+                )
+            });
+            if !handles.contains(&handle) {
+                handles.push(handle);
+            }
+        }
+    }
+    handles
+}
+
+fn retain_queue_binding_owners(
+    graph: &mut RenderGraph,
+    queues: &RenderQueues,
+    functions: &DrawFunctions,
+) {
+    for phase in RenderPhase::ORDER {
+        for (item_index, item) in queues.phase(phase).iter().enumerate() {
+            for binding in item
+                .bind_groups(functions)
+                .iter()
+                .chain(queues.dynamic_bind_groups(phase, item_index).iter())
+            {
+                for owner in &binding.external_owners {
+                    graph.retain_external_owner(owner.clone());
+                }
+            }
+        }
+    }
+}
+
+fn clear_color_or_write(
+    builder: &mut prism_render_graph::PassBuilder<'_>,
+    handle: TextureHandle,
+    clear: ClearMode,
+    value: Color,
+) -> TextureHandle {
+    match clear {
+        ClearMode::ColorAndDepth => builder.clear_color_attachment(handle, value),
+        ClearMode::DepthOnly | ClearMode::None => {
+            builder.color_attachment_load(handle, prism_render_driver::LoadOp::Load)
+        }
+        ClearMode::Inherit => unreachable!("clear mode is resolved before graph building"),
+    }
+}
+
 /// Appends one target without creating a second graph or reimporting shared buffers.
 fn append_target_graph(
     graph: &mut RenderGraph,
@@ -549,11 +616,13 @@ fn append_target_graph(
     lighting: Option<LightingGpuPass>,
     trace: Option<TraceGraphRecorder>,
     particle: Option<&ParticleGpuState>,
+    clear: ClearMode,
     external_views: &FrameGraphTextureImports,
 ) -> TargetGraphAppend {
     // Persistent camera queues carry physical IDs and owners, NEVER handles
     // from a previous output graph. Resolve on a local copy before splitting.
     let mut local_queues = queues.clone();
+    retain_queue_binding_owners(graph, &local_queues, functions);
     local_queues.resolve_external_indirect(|external| {
         graph.retain_external_owner(external.owner.clone());
         crate::queue::IndirectArgs {
@@ -847,15 +916,23 @@ fn append_target_graph(
             "prism-render-app-clear-gbuffer",
             PassFlags::SIDE_EFFECT,
             |builder| {
-                position_x = builder.color_attachment(position_x);
-                position_y = builder.color_attachment(position_y);
-                position_z = builder.color_attachment(position_z);
+                position_x = clear_color_or_write(builder, position_x, clear, Color::TRANSPARENT);
+                position_y = clear_color_or_write(builder, position_y, clear, Color::TRANSPARENT);
+                position_z = clear_color_or_write(builder, position_z, clear, Color::TRANSPARENT);
                 // Alpha is surface coverage, not an opaque background. Clear
                 // explicitly rather than relying on the generic color policy.
-                normal = builder.clear_color_attachment(normal, Color::TRANSPARENT);
-                albedo = builder.clear_color_attachment(albedo, Color::TRANSPARENT);
-                surface_id = builder.color_attachment(surface_id);
-                depth = builder.depth_attachment(depth);
+                normal = clear_color_or_write(builder, normal, clear, Color::TRANSPARENT);
+                albedo = clear_color_or_write(builder, albedo, clear, Color::TRANSPARENT);
+                surface_id = clear_color_or_write(builder, surface_id, clear, Color::TRANSPARENT);
+                depth = match clear {
+                    ClearMode::ColorAndDepth | ClearMode::DepthOnly => {
+                        builder.depth_attachment(depth)
+                    }
+                    ClearMode::None => builder.depth_attachment_load(depth, DepthLoadOp::Load),
+                    ClearMode::Inherit => {
+                        unreachable!("clear mode is resolved before graph building")
+                    }
+                };
                 |_ctx| {}
             },
         );
@@ -865,7 +942,7 @@ fn append_target_graph(
             "prism-render-app-clear-color",
             PassFlags::SIDE_EFFECT,
             |builder| {
-                color = builder.color_attachment(color);
+                color = clear_color_or_write(builder, color, clear, Color::TRANSPARENT);
                 |_ctx| {}
             },
         );
@@ -881,7 +958,16 @@ fn append_target_graph(
         let mut indirect_reads = Vec::new();
         let mut uniform_reads = Vec::new();
         let mut storage_reads = Vec::new();
+        let mut sampled_texture_reads = Vec::new();
         for (item_index, item) in queues.phase(phase).iter().enumerate() {
+            sampled_texture_reads.extend(sampled_texture_handles(
+                item,
+                phase,
+                item_index,
+                queues,
+                functions,
+                external_texture_handles,
+            ));
             for buffer in &item.vertices {
                 if let Some(handle) = buffers.handles.get(buffer) {
                     vertex_reads.push(*handle);
@@ -941,6 +1027,9 @@ fn append_target_graph(
                 }
                 for handle in &storage_reads {
                     let _ = builder.read_storage_buffer(*handle);
+                }
+                for handle in &sampled_texture_reads {
+                    let _ = builder.read_texture(*handle);
                 }
                 let queues = queues.clone();
                 let functions = functions.clone();
@@ -1024,7 +1113,16 @@ fn append_target_graph(
             let mut indirect_reads = Vec::new();
             let mut uniform_reads = Vec::new();
             let mut storage_reads = Vec::new();
+            let mut sampled_texture_reads = Vec::new();
             for (item_index, item) in queues.phase(phase).iter().enumerate() {
+                sampled_texture_reads.extend(sampled_texture_handles(
+                    item,
+                    phase,
+                    item_index,
+                    queues,
+                    functions,
+                    external_texture_handles,
+                ));
                 for buffer in &item.vertices {
                     if let Some(handle) = buffers.handles.get(buffer) {
                         vertex_reads.push(*handle);
@@ -1083,6 +1181,9 @@ fn append_target_graph(
                     }
                     for handle in &storage_reads {
                         let _ = builder.read_storage_buffer(*handle);
+                    }
+                    for handle in &sampled_texture_reads {
+                        let _ = builder.read_texture(*handle);
                     }
                     let queues = queues.clone();
                     let functions = functions.clone();
@@ -1278,7 +1379,16 @@ fn append_target_graph(
         let mut indirect_reads = Vec::new();
         let mut uniform_reads = Vec::new();
         let mut storage_reads = Vec::new();
+        let mut sampled_texture_reads = Vec::new();
         for (item_index, item) in queues.phase(phase).iter().enumerate() {
+            sampled_texture_reads.extend(sampled_texture_handles(
+                item,
+                phase,
+                item_index,
+                queues,
+                functions,
+                external_texture_handles,
+            ));
             for buffer in &item.vertices {
                 if let Some(handle) = buffers.handles.get(buffer) {
                     vertex_reads.push(*handle);
@@ -1337,6 +1447,9 @@ fn append_target_graph(
                 }
                 for handle in &storage_reads {
                     let _ = builder.read_storage_buffer(*handle);
+                }
+                for handle in &sampled_texture_reads {
+                    let _ = builder.read_texture(*handle);
                 }
                 let queues = queues.clone();
                 let functions = functions.clone();
@@ -1682,6 +1795,8 @@ mod tests {
                 buffer: BufferId::from_parts(30, 1),
                 access: RenderBindGroupBufferAccess::Uniform,
             }],
+            sampled_textures: Vec::new(),
+            external_owners: Vec::new(),
         }
     }
 
@@ -2066,6 +2181,153 @@ mod tests {
 
         device.destroy_texture_view(external_view);
         device.destroy_texture(external_texture);
+        target.destroy(&device);
+    }
+
+    #[test]
+    fn render_bind_group_sampled_texture_is_a_frame_graph_read() {
+        let device = null_device();
+        let target = RenderTarget::new(&device, Extent3d::new_2d(16, 8));
+        let texture = device.create_texture(&TextureDescriptor::new_2d(
+            Extent3d::new_2d(4, 4),
+            TextureFormat::Rgba8Unorm,
+            TextureUsages::TEXTURE_BINDING,
+        ));
+        let view = device.create_texture_view(texture, &TextureViewDescriptor::default());
+        let mut imports = FrameGraphTextureImports::default();
+        imports.set(FrameGraphTextureImport {
+            texture,
+            view,
+            desc: TextureDesc::color(TextureFormat::Rgba8Unorm)
+                .with_size(prism_render_graph::SizeClass::absolute_2d(4, 4))
+                .with_usage(TextureUsages::TEXTURE_BINDING),
+            entry_state: TextureState::initial(),
+            exit_state: TextureState::initial(),
+            mip_levels: 1,
+            array_layers: 1,
+        });
+        let mut binding =
+            attachment_test_binding(canonical::SURFACE_MATERIAL, canonical::SURFACE_GROUP);
+        binding.sampled_textures.push(view);
+        let mut queues = RenderQueues::new();
+        queues.push_with_bind_groups(
+            RenderPhase::Opaque,
+            attachment_test_item(canonical::MESH),
+            vec![binding],
+        );
+        let (graph, _, handles) = target_graph_output_with_trace_and_particles_and_external_views(
+            &target,
+            &queues,
+            &canonical::registry(),
+            None,
+            None,
+            None,
+            &imports,
+        );
+        let plan = graph.compile().expect("sampled imported view compiles");
+        let resource = handles[&view].resource();
+        let surface_pass = plan
+            .attachments
+            .iter()
+            .position(|attachments| {
+                attachments.as_ref().is_some_and(|raster| {
+                    raster.colors.len() == 6 && raster.colors[0].load == LoadOp::Load
+                })
+            })
+            .expect("surface draw pass exists");
+        assert!(
+            plan.barriers[surface_pass].iter().any(|barrier| {
+                matches!(barrier, prism_render_graph::GraphBarrier::Texture(texture_barrier)
+                if texture_barrier.texture == resource
+                    && texture_barrier.after == TextureState::shader_read(
+                        prism_render_driver::PipelineStages::FRAGMENT_SHADER
+                    ))
+            }),
+            "surface pass must transition the imported view to sampled-read state"
+        );
+        device.destroy_texture_view(view);
+        device.destroy_texture(texture);
+        target.destroy(&device);
+    }
+
+    #[test]
+    fn render_bind_group_sampled_texture_without_import_is_rejected() {
+        let device = null_device();
+        let target = RenderTarget::new(&device, Extent3d::new_2d(16, 8));
+        let missing_view = TextureViewId::from_parts(900, 1);
+        let mut binding =
+            attachment_test_binding(canonical::SURFACE_MATERIAL, canonical::SURFACE_GROUP);
+        binding.sampled_textures.push(missing_view);
+        let mut queues = RenderQueues::new();
+        queues.push_with_bind_groups(
+            RenderPhase::Opaque,
+            attachment_test_item(canonical::MESH),
+            vec![binding],
+        );
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            target_graph_output_with_trace_and_particles_and_external_views(
+                &target,
+                &queues,
+                &canonical::registry(),
+                None,
+                None,
+                None,
+                &FrameGraphTextureImports::default(),
+            )
+        }));
+        assert!(
+            result.is_err(),
+            "missing sampled-view imports must fail closed"
+        );
+        target.destroy(&device);
+    }
+
+    #[test]
+    fn render_bind_group_external_owner_is_retained_by_each_output_graph() {
+        let device = null_device();
+        let target = RenderTarget::new(&device, Extent3d::new_2d(16, 8));
+        let owner: alloc::sync::Arc<dyn core::any::Any + Send + Sync> =
+            alloc::sync::Arc::new(17_u32);
+        let weak_owner = alloc::sync::Arc::downgrade(&owner);
+        let mut binding =
+            attachment_test_binding(canonical::SURFACE_MATERIAL, canonical::SURFACE_GROUP);
+        binding.external_owners.push(owner.clone());
+        let draw = canonical::MESH;
+        let mut queues = RenderQueues::new();
+        queues.push_with_bind_groups(
+            RenderPhase::Opaque,
+            attachment_test_item(draw),
+            vec![binding],
+        );
+
+        let (first, _, _) = target_graph_output_with_trace_and_particles_and_external_views(
+            &target,
+            &queues,
+            &canonical::registry(),
+            None,
+            None,
+            None,
+            &FrameGraphTextureImports::default(),
+        );
+        let (second, _, _) = target_graph_output_with_trace_and_particles_and_external_views(
+            &target,
+            &queues,
+            &canonical::registry(),
+            None,
+            None,
+            None,
+            &FrameGraphTextureImports::default(),
+        );
+
+        assert_eq!(first.external_owner_count(), 1);
+        assert_eq!(second.external_owner_count(), 1);
+        drop(queues);
+        drop(owner);
+        assert!(weak_owner.upgrade().is_some());
+        drop(first);
+        assert!(weak_owner.upgrade().is_some());
+        drop(second);
+        assert!(weak_owner.upgrade().is_none());
         target.destroy(&device);
     }
 }

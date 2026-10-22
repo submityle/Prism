@@ -1,11 +1,13 @@
 use super::*;
-use crate::draw::DrawFunctions;
-use crate::queue::RenderQueues;
+use crate::draw::{DrawFunctions, RenderBindGroupBinding};
+use crate::queue::{PhaseItem, RenderQueues};
 use crate::target::RenderTarget;
 use prism_ecs::prelude::Entity;
+use prism_render_architecture::gpu_scene::{GeometryHandle, SceneHandle, SceneMaterialHandle};
 use prism_render_driver::{
-    CopyCommand, DepthLoadOp, DeviceDescriptor, Extent3d, Instance, LoadOp, Pass, RenderCommand,
-    RenderDevice, RequestAdapterOptions, ScissorRect, Viewport,
+    BindGroupId, CopyCommand, DepthLoadOp, DeviceDescriptor, Extent3d, Instance, LoadOp, Pass,
+    RenderCommand, RenderDevice, RenderPipelineId, RequestAdapterOptions, ScissorRect,
+    TextureDescriptor, TextureFormat, TextureUsages, TextureViewDescriptor, Viewport,
 };
 use prism_render_driver_null::NullInstance;
 
@@ -24,6 +26,234 @@ fn camera(index: u32) -> Entity {
     Entity::from_bits((1_u64 << 32) | u64::from(index)).expect("valid test entity")
 }
 
+fn sampled_queue(view: TextureViewId) -> (RenderQueues, DrawFunctions) {
+    let mut functions = DrawFunctions::default();
+    let draw = functions.register_with_bind_groups(
+        |_, _| {},
+        vec![RenderBindGroupBinding {
+            identity: crate::draw::BindGroupBindingId(1),
+            index: 0,
+            bind_group: BindGroupId::from_parts(2, 1),
+            dynamic_offsets: Vec::new(),
+            buffers: Vec::new(),
+            sampled_textures: vec![view],
+            external_owners: Vec::new(),
+        }],
+    );
+    let mut queues = RenderQueues::new();
+    queues.push(
+        RenderPhase::Opaque,
+        PhaseItem {
+            pipeline: RenderPipelineId::from_parts(3, 1),
+            draw,
+            geometry: GeometryHandle::new(0, 1),
+            vertices: Vec::new(),
+            vertex_sizes: Vec::new(),
+            indices: None,
+            index_size: None,
+            first: 0,
+            count: 3,
+            base_vertex: 0,
+            indirect: None,
+            lod_level: 0,
+            material: SceneMaterialHandle::new(0, 1),
+            scene: SceneHandle::new(0, 1),
+            order: 0,
+        },
+    );
+    (queues, functions)
+}
+
+fn surface_view_input<'a>(
+    target: &'a RenderTarget,
+    queues: &'a RenderQueues,
+) -> SurfaceViewGraphInput<'a> {
+    SurfaceViewGraphInput {
+        camera: camera(1),
+        order: 0,
+        clear: ClearMode::ColorAndDepth,
+        viewport: [0, 0, 8, 8],
+        target,
+        queues,
+        lighting: None,
+    }
+}
+
+#[test]
+fn surface_graph_rejects_missing_sampled_texture_import_without_panicking() {
+    let device = device();
+    let output = RenderTarget::new(&device, Extent3d::new_2d(16, 8));
+    let local = RenderTarget::new(&device, Extent3d::new_2d(8, 8));
+    let missing_view = TextureViewId::from_parts(900, 1);
+    let (queues, functions) = sampled_queue(missing_view);
+    let views = [surface_view_input(&local, &queues)];
+
+    let result = prepare_surface_view_graph(
+        &output,
+        &queues,
+        &functions,
+        None,
+        None,
+        &views,
+        &FrameGraphTextureImports::default(),
+    );
+    match result {
+        Err(SurfaceViewGraphError::MissingExternalTextureImport(actual)) => {
+            assert_eq!(actual, missing_view);
+        }
+        _ => panic!("expected missing-import error"),
+    }
+
+    local.destroy(&device);
+    output.destroy(&device);
+}
+
+#[test]
+fn surface_graph_resolves_sampled_texture_import_before_target_append() {
+    let device = device();
+    let output = RenderTarget::new(&device, Extent3d::new_2d(16, 8));
+    let local = RenderTarget::new(&device, Extent3d::new_2d(8, 8));
+    let texture = device.create_texture(&TextureDescriptor::new_2d(
+        Extent3d::new_2d(4, 4),
+        TextureFormat::Rgba8Unorm,
+        TextureUsages::TEXTURE_BINDING,
+    ));
+    let view = device.create_texture_view(texture, &TextureViewDescriptor::default());
+    let mut imports = FrameGraphTextureImports::default();
+    imports.set(FrameGraphTextureImport {
+        texture,
+        view,
+        desc: TextureDesc::color(TextureFormat::Rgba8Unorm)
+            .with_size(prism_render_graph::SizeClass::absolute_2d(4, 4))
+            .with_usage(TextureUsages::TEXTURE_BINDING),
+        entry_state: TextureState::initial(),
+        exit_state: TextureState::initial(),
+        mip_levels: 1,
+        array_layers: 1,
+    });
+    let (queues, functions) = sampled_queue(view);
+    let views = [surface_view_input(&local, &queues)];
+
+    let prepared =
+        prepare_surface_view_graph(&output, &queues, &functions, None, None, &views, &imports)
+            .expect("published sampled texture import is resolved during target construction");
+    assert!(prepared.textures.contains_key(&view));
+    assert!(prepared.graph.compile().is_ok());
+
+    device.destroy_texture_view(view);
+    device.destroy_texture(texture);
+    local.destroy(&device);
+    output.destroy(&device);
+}
+
+#[test]
+fn surface_graph_resolves_per_camera_clear_loads_in_stable_composition_order() {
+    let device = device();
+    let output = RenderTarget::new(&device, Extent3d::new_2d(16, 8));
+    let first = RenderTarget::new(&device, Extent3d::new_2d(8, 8));
+    let second = RenderTarget::new(&device, Extent3d::new_2d(8, 8));
+    let third = RenderTarget::new(&device, Extent3d::new_2d(8, 8));
+    let queues = RenderQueues::new();
+    let functions = DrawFunctions::default();
+    let views = [
+        SurfaceViewGraphInput {
+            camera: camera(3),
+            order: 2,
+            clear: ClearMode::None,
+            viewport: [0, 0, 8, 8],
+            target: &third,
+            queues: &queues,
+            lighting: None,
+        },
+        SurfaceViewGraphInput {
+            camera: camera(1),
+            order: -1,
+            clear: ClearMode::Inherit,
+            viewport: [0, 0, 8, 8],
+            target: &first,
+            queues: &queues,
+            lighting: None,
+        },
+        SurfaceViewGraphInput {
+            camera: camera(2),
+            order: 0,
+            clear: ClearMode::DepthOnly,
+            viewport: [0, 0, 8, 8],
+            target: &second,
+            queues: &queues,
+            lighting: None,
+        },
+    ];
+
+    let prepared = prepare_surface_view_graph(
+        &output,
+        &queues,
+        &functions,
+        None,
+        None,
+        &views,
+        &FrameGraphTextureImports::default(),
+    )
+    .expect("all clear modes form a valid graph");
+    let plan = prepared.graph.compile().expect("clear graph compiles");
+    let loads = |resource| {
+        plan.attachments
+            .iter()
+            .flatten()
+            .find_map(|attachments| {
+                let color = attachments
+                    .colors
+                    .iter()
+                    .find(|attachment| attachment.resource == resource)
+                    .map(|attachment| attachment.load);
+                let depth = attachments
+                    .depth
+                    .filter(|attachment| attachment.resource == resource)
+                    .map(|attachment| attachment.depth_load);
+                color
+                    .map(|load| (Some(load), None))
+                    .or_else(|| depth.map(|load| (None, Some(load))))
+            })
+            .expect("target attachment is used by a pass")
+    };
+    let first_color = prepared
+        .textures
+        .get(&first.view())
+        .expect("first camera target was imported");
+    let first_depth = prepared
+        .textures
+        .get(&first.depth_view())
+        .expect("first camera depth was imported");
+    let second_color = prepared.textures.get(&second.view()).unwrap();
+    let second_depth = prepared.textures.get(&second.depth_view()).unwrap();
+    let third_color = prepared.textures.get(&third.view()).unwrap();
+    let third_depth = prepared.textures.get(&third.depth_view()).unwrap();
+
+    assert_eq!(
+        loads(first_color.resource()),
+        (Some(LoadOp::Clear(Color::TRANSPARENT)), None)
+    );
+    assert_eq!(
+        loads(first_depth.resource()),
+        (None, Some(DepthLoadOp::Clear(0.0)))
+    );
+    assert_eq!(loads(second_color.resource()), (Some(LoadOp::Load), None));
+    assert_eq!(
+        loads(second_depth.resource()),
+        (None, Some(DepthLoadOp::Clear(0.0)))
+    );
+    assert_eq!(loads(third_color.resource()), (Some(LoadOp::Load), None));
+    assert_eq!(
+        loads(third_depth.resource()),
+        (None, Some(DepthLoadOp::Load))
+    );
+
+    third.destroy(&device);
+    second.destroy(&device);
+    first.destroy(&device);
+    output.destroy(&device);
+}
+
 #[test]
 fn surface_graph_rejects_duplicate_camera_before_declaring_any_target_graph() {
     let device = device();
@@ -36,6 +266,7 @@ fn surface_graph_rejects_duplicate_camera_before_declaring_any_target_graph() {
         SurfaceViewGraphInput {
             camera: camera(7),
             order: 0,
+            clear: ClearMode::Inherit,
             viewport: [0, 0, 8, 8],
             target: &first,
             queues: &queues,
@@ -44,6 +275,7 @@ fn surface_graph_rejects_duplicate_camera_before_declaring_any_target_graph() {
         SurfaceViewGraphInput {
             camera: camera(7),
             order: 0,
+            clear: ClearMode::None,
             viewport: [8, 0, 8, 8],
             target: &second,
             queues: &queues,
@@ -79,6 +311,7 @@ fn surface_graph_rejects_a_camera_rect_outside_the_output() {
     let views = [SurfaceViewGraphInput {
         camera: camera(9),
         order: 0,
+        clear: ClearMode::ColorAndDepth,
         viewport: [9, 0, 8, 8],
         target: &local,
         queues: &queues,
@@ -133,6 +366,7 @@ fn surface_graph_defers_sorted_camera_copies_and_keeps_targets_local() {
         SurfaceViewGraphInput {
             camera: camera(9),
             order: -2,
+            clear: ClearMode::Inherit,
             viewport: [7, 4, 6, 4],
             target: &second,
             queues: &queues,
@@ -141,6 +375,7 @@ fn surface_graph_defers_sorted_camera_copies_and_keeps_targets_local() {
         SurfaceViewGraphInput {
             camera: camera(7),
             order: 3,
+            clear: ClearMode::DepthOnly,
             viewport: [3, 2, 8, 6],
             target: &first,
             queues: &queues,
@@ -369,6 +604,7 @@ fn surface_graph_native_particles_use_local_depth_and_precede_each_camera_copy()
         .map(|((camera, viewport), target)| SurfaceViewGraphInput {
             camera: *camera,
             order: 0,
+            clear: ClearMode::Inherit,
             viewport: *viewport,
             target,
             queues: &queues,

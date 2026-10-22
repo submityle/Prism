@@ -6,21 +6,25 @@
 //! to the *execute* closure after compilation: it resolves virtual handles to
 //! realized driver ids and accumulates the pass's draw/dispatch commands.
 
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::num::NonZeroU64;
 use core::ops::Range;
 
 use prism_render_driver::{
-    BindGroupId, BufferId, Color, ComputeCommand, ComputePipelineId, CopyCommand, Extent3d,
-    IndexBufferBinding, IndexFormat, RenderCommand, RenderPipelineId, ScissorRect,
-    SubresourceRange, TextureId, TextureViewId, Viewport,
+    BindGroupId, BufferId, Color, ComputeCommand, ComputePipelineId, CopyCommand, DepthLoadOp,
+    Extent3d, IndexBufferBinding, IndexFormat, LoadOp, RenderCommand, RenderPipelineId,
+    ScissorRect, SubresourceRange, TextureId, TextureViewId, Viewport, DISPATCH_INDIRECT_ARGS_SIZE,
+    DRAW_INDEXED_INDIRECT_ARGS_SIZE, DRAW_INDIRECT_ARGS_SIZE,
 };
 
 use crate::access::{full_range, BufferUse, TextureUse};
+use crate::binding::TextureBindGroup;
 use crate::blackboard::Blackboard;
 use crate::capacity::GraphLimits;
 use crate::desc::{BufferDesc, TextureDesc};
-use crate::handle::{BufferHandle, ResourceIndex, TextureHandle};
+use crate::handle::{BufferHandle, ResourceIndex, TextureBindGroupHandle, TextureHandle};
 use crate::pass::{BufferAccessRecord, PassKind, TextureAccessRecord};
 use crate::plan::CompileError;
 use crate::resource::{BufferResource, Lifetime, TextureResource};
@@ -294,6 +298,9 @@ impl<'g> PassBuilder<'g> {
                 output_version: output,
                 usage,
                 range,
+                color_clear: None,
+                color_load: None,
+                depth_load: None,
             });
             Ok(TextureHandle::new(handle.resource(), output))
         } else {
@@ -304,6 +311,9 @@ impl<'g> PassBuilder<'g> {
                 output_version: 0,
                 usage,
                 range,
+                color_clear: None,
+                color_load: None,
+                depth_load: None,
             });
             Ok(handle)
         }
@@ -322,6 +332,13 @@ impl<'g> PassBuilder<'g> {
         self.use_texture(handle, TextureUse::Sampled)
     }
 
+    /// Explicitly declares sampled texture reads, including textures referenced
+    /// by a graph-owned bind group. Equivalent to [`Self::sample`]; bind-group
+    /// declaration or resolution alone never records this access.
+    pub fn read_texture(&mut self, handle: TextureHandle) -> TextureHandle {
+        self.sample(handle)
+    }
+
     /// Reads a texture as a read-only storage image.
     pub fn read_storage_texture(&mut self, handle: TextureHandle) -> TextureHandle {
         self.use_texture(handle, TextureUse::StorageRead)
@@ -337,14 +354,63 @@ impl<'g> PassBuilder<'g> {
         self.use_texture(handle, TextureUse::ColorAttachment)
     }
 
+    /// Writes a color attachment after clearing it to `clear`, even when the
+    /// input version already contains data. Other attachments in this pass
+    /// retain their own SSA-derived load policy.
+    ///
+    /// # Panics
+    /// Shares the handle and admission preconditions of [`Self::access_texture`].
+    pub fn clear_color_attachment(&mut self, handle: TextureHandle, clear: Color) -> TextureHandle {
+        self.try_clear_color_attachment(handle, clear)
+            .expect("graph attachment admission precondition; use try_clear_color_attachment for dynamic input")
+    }
+
+    /// Checked explicit attachment clear. Failed admission leaves the access
+    /// table, resource version, and inferred usage unchanged.
+    pub fn try_clear_color_attachment(
+        &mut self,
+        handle: TextureHandle,
+        clear: Color,
+    ) -> Result<TextureHandle, CompileError> {
+        let access = self.tex_accesses.len();
+        let output = self.try_access_texture(handle, TextureUse::ColorAttachment, full_range())?;
+        self.tex_accesses[access].color_clear = Some(clear);
+        Ok(output)
+    }
+
+    /// Writes a color attachment while preserving or clearing its previous value.
+    pub fn color_attachment_load(&mut self, handle: TextureHandle, load: LoadOp) -> TextureHandle {
+        let access = self.tex_accesses.len();
+        let output = self.access_texture(handle, TextureUse::ColorAttachment, full_range());
+        self.tex_accesses[access].color_load = Some(load);
+        output
+    }
+
     /// Declares a texture as a written depth attachment (mints a new version).
     pub fn depth_attachment(&mut self, handle: TextureHandle) -> TextureHandle {
         self.use_texture(handle, TextureUse::DepthAttachment)
     }
 
+    /// Writes a depth attachment with an explicit load operation.
+    pub fn depth_attachment_load(
+        &mut self,
+        handle: TextureHandle,
+        load: DepthLoadOp,
+    ) -> TextureHandle {
+        let access = self.tex_accesses.len();
+        let output = self.access_texture(handle, TextureUse::DepthAttachment, full_range());
+        self.tex_accesses[access].depth_load = Some(load);
+        output
+    }
+
     /// Declares a read-only depth attachment (depth test, no writes).
     pub fn read_depth_attachment(&mut self, handle: TextureHandle) -> TextureHandle {
-        self.use_texture(handle, TextureUse::DepthAttachmentRead)
+        self.use_texture(
+            handle,
+            crate::frame_graph::AccessKind::DepthAttachmentRead
+                .texture_use()
+                .expect("depth attachment is a texture use"),
+        )
     }
 
     /// Reads a texture as a transfer source.
@@ -430,7 +496,12 @@ impl<'g> PassBuilder<'g> {
 
     /// Reads a buffer as a uniform buffer.
     pub fn read_uniform(&mut self, handle: BufferHandle) -> BufferHandle {
-        self.use_buffer(handle, BufferUse::Uniform)
+        self.use_buffer(
+            handle,
+            crate::frame_graph::AccessKind::UniformRead
+                .buffer_use()
+                .expect("uniform is a buffer use"),
+        )
     }
 
     /// Reads a buffer as a read-only storage buffer.
@@ -445,7 +516,12 @@ impl<'g> PassBuilder<'g> {
 
     /// Reads a buffer as an index buffer.
     pub fn read_index(&mut self, handle: BufferHandle) -> BufferHandle {
-        self.use_buffer(handle, BufferUse::Index)
+        self.use_buffer(
+            handle,
+            crate::frame_graph::AccessKind::IndexRead
+                .buffer_use()
+                .expect("index is a buffer use"),
+        )
     }
 
     /// Reads a buffer as a vertex buffer.
@@ -497,25 +573,30 @@ impl<'g> PassBuilder<'g> {
 pub struct ExecuteContext<'e> {
     textures: &'e [TextureResource],
     buffers: &'e [BufferResource],
+    texture_bind_groups: &'e [TextureBindGroup],
     kind: PassKind,
     render_commands: Vec<RenderCommand>,
     compute_commands: Vec<ComputeCommand>,
     copy_commands: Vec<CopyCommand>,
+    recording_error: Option<String>,
 }
 
 impl<'e> ExecuteContext<'e> {
     pub(crate) fn new(
         textures: &'e [TextureResource],
         buffers: &'e [BufferResource],
+        texture_bind_groups: &'e [TextureBindGroup],
         kind: PassKind,
     ) -> Self {
         Self {
             textures,
             buffers,
+            texture_bind_groups,
             kind,
             render_commands: Vec::new(),
             compute_commands: Vec::new(),
             copy_commands: Vec::new(),
+            recording_error: None,
         }
     }
 
@@ -548,6 +629,27 @@ impl<'e> ExecuteContext<'e> {
             .realized
             .expect("texture accessed by a surviving pass must be realized")
             .default_view
+    }
+
+    /// Resolves a graph-owned texture bind group, without device access.
+    ///
+    /// The table is immutable and shared by sequential/parallel recording.
+    /// Binding a group does not declare texture reads or writes; the pass must
+    /// explicitly declare all accesses in its setup closure.
+    ///
+    /// # Panics
+    /// Panics if the handle belongs to another graph, or any entry texture was
+    /// unused after culling and the group therefore was not realized.
+    #[must_use]
+    pub fn texture_bind_group(&self, handle: TextureBindGroupHandle) -> BindGroupId {
+        let group = self
+            .texture_bind_groups
+            .get(handle.index as usize)
+            .filter(|group| group.handle.same_declaration(&handle))
+            .expect("texture bind group handle belongs to another graph");
+        group
+            .realized
+            .expect("texture bind group entries must be accessed by surviving passes")
     }
 
     /// Resolves a buffer handle to its realized driver buffer.
@@ -585,28 +687,39 @@ impl<'e> ExecuteContext<'e> {
         self
     }
 
-    /// Binds a vertex buffer at `slot`.
-    pub fn set_vertex_buffer(&mut self, slot: u32, buffer: BufferId, offset: u64) -> &mut Self {
+    /// Binds a vertex buffer at `slot`, with an optional exact byte length.
+    /// Use a length for suballocations; `None` binds the native buffer's tail.
+    pub fn set_vertex_buffer(
+        &mut self,
+        slot: u32,
+        buffer: BufferId,
+        offset: u64,
+        size: Option<NonZeroU64>,
+    ) -> &mut Self {
         self.render_commands.push(RenderCommand::SetVertexBuffer {
             slot,
             buffer,
             offset,
+            size,
         });
         self
     }
 
-    /// Binds the index buffer.
+    /// Binds the index buffer, with an optional exact byte length.
+    /// Use a length for suballocations; `None` binds the native buffer's tail.
     pub fn set_index_buffer(
         &mut self,
         buffer: BufferId,
         format: IndexFormat,
         offset: u64,
+        size: Option<NonZeroU64>,
     ) -> &mut Self {
         self.render_commands
             .push(RenderCommand::SetIndexBuffer(IndexBufferBinding {
                 buffer,
                 format,
                 offset,
+                size,
             }));
         self
     }
@@ -673,7 +786,23 @@ impl<'e> ExecuteContext<'e> {
     // handle for it.
 
     /// Records an indirect (non-indexed) draw from a declared argument buffer.
+    ///
+    /// # Panics
+    /// The pass recording is rejected after its execute callback returns if the
+    /// offset is unaligned, the declared buffer range is too short, or its
+    /// handle does not belong to this graph. The callback may continue recording,
+    /// but none of its commands will be encoded or submitted.
     pub fn draw_indirect(&mut self, args: BufferHandle, offset: u64) -> &mut Self {
+        if !self.validate_indirect_range(
+            args,
+            offset,
+            1,
+            0,
+            u64::from(DRAW_INDIRECT_ARGS_SIZE),
+            "draw_indirect",
+        ) {
+            return self;
+        }
         let buffer = self.buffer(args);
         self.render_commands
             .push(RenderCommand::DrawIndirect { buffer, offset });
@@ -686,7 +815,22 @@ impl<'e> ExecuteContext<'e> {
     /// [`DRAW_INDEXED_INDIRECT_ARGS_SIZE`](prism_render_driver::DRAW_INDEXED_INDIRECT_ARGS_SIZE)-byte
     /// record; letting a compute pass author its `instance_count` is what makes
     /// the draw GPU-driven.
+    ///
+    /// # Panics
+    /// The pass recording is rejected after its execute callback returns if the
+    /// offset is unaligned, the declared buffer range is too short, or its
+    /// handle does not belong to this graph.
     pub fn draw_indexed_indirect(&mut self, args: BufferHandle, offset: u64) -> &mut Self {
+        if !self.validate_indirect_range(
+            args,
+            offset,
+            1,
+            0,
+            u64::from(DRAW_INDEXED_INDIRECT_ARGS_SIZE),
+            "draw_indexed_indirect",
+        ) {
+            return self;
+        }
         let buffer = self.buffer(args);
         self.render_commands
             .push(RenderCommand::DrawIndexedIndirect { buffer, offset });
@@ -699,6 +843,11 @@ impl<'e> ExecuteContext<'e> {
     /// `stride` is the byte distance between consecutive records. This is the
     /// multi-draw primitive that collapses many GPU-authored draws into one
     /// command.
+    ///
+    /// # Panics
+    /// The pass recording is rejected after its execute callback returns if the
+    /// offset is unaligned, the checked range exceeds the declared buffer, the
+    /// stride is not the packed indexed-record size, or the handle is invalid.
     pub fn multi_draw_indirect(
         &mut self,
         args: BufferHandle,
@@ -706,6 +855,16 @@ impl<'e> ExecuteContext<'e> {
         count: u32,
         stride: u32,
     ) -> &mut Self {
+        if !self.validate_indirect_range(
+            args,
+            offset,
+            count,
+            u64::from(stride),
+            u64::from(DRAW_INDEXED_INDIRECT_ARGS_SIZE),
+            "multi_draw_indirect",
+        ) {
+            return self;
+        }
         let buffer = self.buffer(args);
         self.render_commands.push(RenderCommand::MultiDrawIndirect {
             buffer,
@@ -758,7 +917,22 @@ impl<'e> ExecuteContext<'e> {
     }
 
     /// Dispatches with workgroup counts sourced from a declared argument buffer.
+    ///
+    /// # Panics
+    /// The pass recording is rejected after its execute callback returns if the
+    /// offset is unaligned, the declared buffer range is too short, or its
+    /// handle does not belong to this graph.
     pub fn dispatch_indirect(&mut self, args: BufferHandle, offset: u64) -> &mut Self {
+        if !self.validate_indirect_range(
+            args,
+            offset,
+            1,
+            0,
+            u64::from(DISPATCH_INDIRECT_ARGS_SIZE),
+            "dispatch_indirect",
+        ) {
+            return self;
+        }
         let buffer = self.buffer(args);
         self.compute_commands
             .push(ComputeCommand::DispatchIndirect { buffer, offset });
@@ -885,6 +1059,88 @@ impl<'e> ExecuteContext<'e> {
     pub(crate) fn take_copy_commands(&mut self) -> Vec<CopyCommand> {
         core::mem::take(&mut self.copy_commands)
     }
+
+    pub(crate) fn assert_recording_valid(&self) {
+        if let Some(error) = &self.recording_error {
+            panic!("RenderGraph pass recording rejected: {error}");
+        }
+    }
+
+    /// Checks an indirect argument range against the graph-declared buffer size.
+    /// Invalid arguments poison the pass record, which is rejected after the
+    /// callback returns and before command encoding or queue submission.
+    fn validate_indirect_range(
+        &mut self,
+        handle: BufferHandle,
+        offset: u64,
+        count: u32,
+        stride: u64,
+        record_size: u64,
+        operation: &str,
+    ) -> bool {
+        // Preserve the first failure and avoid doing further work for commands
+        // that cannot be emitted because this pass is already poisoned.
+        if self.recording_error.is_some() {
+            return false;
+        }
+        let Some(resource) = self.buffers.get(handle.resource().get() as usize) else {
+            self.recording_error =
+                Some("indirect argument handle does not belong to this graph".into());
+            return false;
+        };
+        let buffer_size = resource.desc.size;
+        let failure = if !offset.is_multiple_of(4) {
+            Some(format!(
+                "{operation} argument offset must be 4-byte aligned: offset={offset}"
+            ))
+        } else if offset > buffer_size {
+            Some(format!(
+                "{operation} argument offset exceeds graph buffer '{}': offset={offset}, buffer_size={buffer_size}",
+                resource.name,
+            ))
+        } else {
+            None
+        };
+        if let Some(error) = failure {
+            self.recording_error = Some(error);
+            return false;
+        }
+        if operation == "multi_draw_indirect" {
+            if stride != record_size {
+                self.recording_error = Some(format!(
+                    "multi_draw_indirect requires tightly packed {record_size}-byte records, got stride {stride}"
+                ));
+                return false;
+            }
+        }
+        let bytes = if count == 0 {
+            0
+        } else {
+            u64::from(count - 1)
+                .checked_mul(stride)
+                .and_then(|prefix| prefix.checked_add(record_size))
+                .unwrap_or_else(|| {
+                    self.recording_error =
+                        Some(format!("{operation} argument range arithmetic overflow"));
+                    0
+                })
+        };
+        if self.recording_error.is_some() {
+            return false;
+        }
+        let Some(end) = offset.checked_add(bytes) else {
+            self.recording_error = Some(format!("{operation} argument end offset overflow"));
+            return false;
+        };
+        if end > buffer_size {
+            self.recording_error = Some(format!(
+                "{operation} arguments exceed graph buffer '{}': offset={offset}, count={count}, stride={stride}, record_size={record_size}, required_end={end}, buffer_size={buffer_size}",
+                resource.name,
+            ));
+            return false;
+        }
+        true
+    }
 }
 
 #[cfg(test)]
@@ -898,7 +1154,7 @@ mod tests {
         let group = BindGroupId::from_parts(4, 5);
         let payload: Vec<u8> = (0..20).collect();
         let allocation = payload.as_ptr();
-        let mut context = ExecuteContext::new(&[], &[], PassKind::Compute);
+        let mut context = ExecuteContext::new(&[], &[], &[], PassKind::Compute);
         context
             .set_compute_pipeline(pipeline)
             .set_compute_bind_group(0, group, Vec::new())
@@ -935,7 +1191,7 @@ mod tests {
 
     #[test]
     fn compute_without_push_constants_keeps_existing_command_stream() {
-        let mut context = ExecuteContext::new(&[], &[], PassKind::Compute);
+        let mut context = ExecuteContext::new(&[], &[], &[], PassKind::Compute);
         context.dispatch(1, 1, 1);
         assert_eq!(
             context.take_compute_commands(),

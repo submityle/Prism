@@ -17,6 +17,7 @@
 //!
 //! [`CommandBuffer`]: prism_render_driver::CommandBuffer
 
+use crate::binding::TextureBindGroup;
 use alloc::vec::Vec;
 use std::thread;
 
@@ -47,6 +48,7 @@ pub(crate) fn record(
     units: &mut [RecordUnit],
     textures: &[TextureResource],
     buffers: &[BufferResource],
+    texture_bind_groups: &[TextureBindGroup],
 ) -> Vec<(usize, usize, PassCommands)> {
     let total = units.len();
     if total == 0 {
@@ -68,7 +70,9 @@ pub(crate) fn record(
             let take = chunk_size.min(rest.len());
             let (chunk, tail) = rest.split_at_mut(take);
             rest = tail;
-            handles.push(scope.spawn(move || record_chunk(chunk, textures, buffers)));
+            handles.push(
+                scope.spawn(move || record_chunk(chunk, textures, buffers, texture_bind_groups)),
+            );
         }
         for handle in handles {
             match handle.join() {
@@ -92,12 +96,14 @@ fn record_chunk(
     chunk: &mut [RecordUnit],
     textures: &[TextureResource],
     buffers: &[BufferResource],
+    texture_bind_groups: &[TextureBindGroup],
 ) -> Vec<(usize, usize, PassCommands)> {
     chunk
         .iter_mut()
         .map(|unit| {
             let execute = unit.execute.take();
-            let commands = record::record_pass(execute, unit.kind, textures, buffers);
+            let commands =
+                record::record_pass(execute, unit.kind, textures, buffers, texture_bind_groups);
             (unit.pos, unit.pidx, commands)
         })
         .collect()

@@ -9,6 +9,7 @@ use prism_ecs::prelude::Entity;
 pub(crate) struct SurfaceViewGraphInput<'a> {
     pub camera: Entity,
     pub order: i32,
+    pub clear: ClearMode,
     pub viewport: [u32; 4],
     pub target: &'a RenderTarget,
     pub queues: &'a RenderQueues,
@@ -21,6 +22,7 @@ pub(crate) enum SurfaceViewGraphError {
     DuplicateCamera(Entity),
     InvalidViewport(Entity),
     AliasedTarget(TextureId),
+    MissingExternalTextureImport(TextureViewId),
     MissingCompositeBinding(Option<Entity>),
     InconsistentLighting(Option<Entity>),
 }
@@ -155,6 +157,8 @@ pub(crate) fn prepare_surface_view_graph(
     reserve_target(output, &mut targets)?;
     let mut first_lighting = lighting;
     validate_lighting(None, lighting, &mut first_lighting)?;
+    let mut inherited_clear = ClearMode::ColorAndDepth;
+    let mut resolved_clears = Vec::with_capacity(ordered.len());
     for view in &ordered {
         if !identities.insert((view.camera.index(), view.camera.generation())) {
             return Err(SurfaceViewGraphError::DuplicateCamera(view.camera));
@@ -172,8 +176,19 @@ pub(crate) fn prepare_surface_view_graph(
         {
             return Err(SurfaceViewGraphError::InvalidViewport(view.camera));
         }
+        let clear = match view.clear {
+            ClearMode::Inherit => inherited_clear,
+            explicit => explicit,
+        };
+        inherited_clear = ClearMode::None;
         reserve_target(view.target, &mut targets)?;
         validate_lighting(Some(view.camera), view.lighting, &mut first_lighting)?;
+        resolved_clears.push((view.camera, clear));
+    }
+
+    validate_sampled_texture_imports(manual, functions, external_views)?;
+    for view in &ordered {
+        validate_sampled_texture_imports(view.queues, functions, external_views)?;
     }
 
     let mut graph = RenderGraph::new(output.viewport().extent());
@@ -183,7 +198,6 @@ pub(crate) fn prepare_surface_view_graph(
         buffers.reserve_target(view.queues, functions, view.lighting, None);
     }
     let mut textures = BTreeMap::new();
-    let no_external_views = FrameGraphTextureImports::default();
     let mut used_lighting = lighting.is_some();
     // A camera-only lighting plan must see its trace on that first camera,
     // rather than consuming the trace in an unrelated unlit manual target.
@@ -202,13 +216,15 @@ pub(crate) fn prepare_surface_view_graph(
         lighting,
         manual_trace,
         None,
-        &no_external_views,
+        ClearMode::ColorAndDepth,
+        external_views,
     );
     let color = appended.color;
     let depth = appended.depth;
     let mut stages = SurfaceViewGraphStages::new(appended.stages);
     let mut camera_outputs = Vec::with_capacity(ordered.len());
-    for view in ordered {
+    for (view, (resolved_camera, clear)) in ordered.into_iter().zip(resolved_clears) {
+        debug_assert_eq!(view.camera, resolved_camera);
         let (view_lighting, view_trace) = match view.lighting {
             Some(mut pass) if used_lighting => {
                 pass.run_gi = false;
@@ -230,7 +246,8 @@ pub(crate) fn prepare_surface_view_graph(
             view_lighting,
             view_trace,
             None,
-            &no_external_views,
+            clear,
+            external_views,
         );
         // Delay composition until the camera's own particles have sampled its
         // own scene depth. Output placement is not the local raster viewport.
@@ -245,9 +262,6 @@ pub(crate) fn prepare_surface_view_graph(
         stages.push(view.camera, appended.stages);
     }
     textures.insert(output.view(), color);
-    // Import arbitrary owner views only after all builtins, so a later camera
-    // target cannot accidentally be imported twice by an earlier owner list.
-    import_external_views(&mut graph, &mut textures, external_views);
     stages.present_source = color;
     stages.assert_contract();
     // Do not put aggregated composite counts into the single-target receipt.
@@ -422,27 +436,27 @@ fn validate_lighting(
     Ok(())
 }
 
-fn import_external_views(
-    graph: &mut RenderGraph,
-    textures: &mut BTreeMap<TextureViewId, TextureHandle>,
+fn validate_sampled_texture_imports(
+    queues: &RenderQueues,
+    functions: &DrawFunctions,
     external: &FrameGraphTextureImports,
-) {
-    for (index, import) in external.iter().enumerate() {
-        textures.entry(import.view).or_insert_with(|| {
-            graph.import_texture(
-                format!("prism-render-app-external-view-{index}"),
-                import.desc.clone(),
-                ImportedTexture {
-                    texture: import.texture,
-                    default_view: import.view,
-                    entry_state: import.entry_state,
-                    exit_state: import.exit_state,
-                    mip_levels: import.mip_levels.max(1),
-                    array_layers: import.array_layers.max(1),
-                },
-            )
-        });
+) -> Result<(), SurfaceViewGraphError> {
+    for phase in RenderPhase::ORDER {
+        for (index, item) in queues.phase(phase).iter().enumerate() {
+            for binding in item
+                .bind_groups(functions)
+                .iter()
+                .chain(queues.dynamic_bind_groups(phase, index).iter())
+            {
+                for &view in &binding.sampled_textures {
+                    if !external.iter().any(|import| import.view == view) {
+                        return Err(SurfaceViewGraphError::MissingExternalTextureImport(view));
+                    }
+                }
+            }
+        }
     }
+    Ok(())
 }
 
 #[cfg(test)]

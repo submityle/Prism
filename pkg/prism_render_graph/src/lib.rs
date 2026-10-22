@@ -71,6 +71,7 @@ pub mod plan;
 pub mod resource;
 pub mod systems;
 
+mod binding;
 mod record;
 
 #[cfg(feature = "parallel")]
@@ -80,9 +81,12 @@ pub use access::{full_range, BufferUse, TextureUse};
 pub use blackboard::Blackboard;
 pub use builder::{ExecuteContext, PassBuilder};
 pub use desc::{BufferDesc, SizeClass, TextureDesc};
-pub use graph::{ExecuteFn, GraphAllocations, PreparedGraph, RecordedGraph, RenderGraph};
+pub use graph::{
+    ExecuteFn, GraphAllocations, GraphSubmissionToken, PreparedGraph, RecordedGraph, RenderGraph,
+};
 pub use handle::{
-    BufferHandle, BufferMarker, ResourceHandle, ResourceIndex, TextureHandle, TextureMarker,
+    BufferHandle, BufferMarker, ResourceHandle, ResourceIndex, TextureBindGroupHandle,
+    TextureHandle, TextureMarker,
 };
 pub use pass::{
     BufferAccessRecord, PassFlags, PassKind, PassNode, TextureAccessRecord, ThreadBound,
@@ -107,3 +111,7 @@ mod compiler_tests;
 #[cfg(test)]
 #[path = "../text/unit/recording.rs"]
 mod recording_tests;
+
+#[cfg(test)]
+#[path = "../text/unit/texture_bind_groups.rs"]
+mod texture_bind_group_tests;

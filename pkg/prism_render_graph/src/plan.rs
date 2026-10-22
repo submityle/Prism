@@ -112,6 +112,15 @@ pub enum CompileError {
         /// Invalid resource.
         resource: crate::frame_graph::ResourceId,
     },
+    /// A declaration mixes texture-only and buffer-only uses of one resource.
+    InvalidAccess {
+        /// Declaring pass.
+        pass: crate::frame_graph::PassId,
+        /// Resource with incompatible access classes.
+        resource: crate::frame_graph::ResourceId,
+        /// Access that cannot be lowered to the inferred resource type.
+        kind: crate::frame_graph::AccessKind,
+    },
     /// An explicit dependency is out of range or refers to the pass itself.
     InvalidDependency {
         /// Declaring pass.

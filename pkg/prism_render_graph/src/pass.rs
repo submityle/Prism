@@ -12,7 +12,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 
-use prism_render_driver::SubresourceRange;
+use prism_render_driver::{Color, DepthLoadOp, SubresourceRange};
 
 use crate::access::{BufferUse, TextureUse};
 use crate::builder::ExecuteContext;
@@ -178,7 +178,7 @@ impl fmt::Debug for PassFlags {
 /// which may be newer than `input_version + 1` for a stale input handle.
 /// The `range` scopes the access to specific mips/layers for subresource-exact
 /// barriers.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub struct TextureAccessRecord {
     /// The virtual texture touched.
     pub resource: ResourceIndex,
@@ -192,6 +192,12 @@ pub struct TextureAccessRecord {
     pub usage: TextureUse,
     /// The subresource range touched.
     pub range: SubresourceRange,
+    /// Explicit color clear for this write; `None` derives load from SSA.
+    pub color_clear: Option<Color>,
+    /// Explicit color attachment load; overrides the default inferred from SSA.
+    pub color_load: Option<prism_render_driver::LoadOp>,
+    /// Explicit depth attachment load; overrides the default reversed-Z clear.
+    pub depth_load: Option<DepthLoadOp>,
 }
 
 /// One recorded buffer access by a pass.

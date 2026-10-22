@@ -13,6 +13,7 @@
 //! produced `v`" falls straight out of the handle values with no extra
 //! bookkeeping.
 
+use alloc::sync::Arc;
 use core::fmt;
 use core::marker::PhantomData;
 
@@ -104,3 +105,28 @@ impl<K> fmt::Debug for ResourceHandle<K> {
 pub type TextureHandle = ResourceHandle<TextureMarker>;
 /// An SSA-versioned handle to a virtual buffer.
 pub type BufferHandle = ResourceHandle<BufferMarker>;
+
+/// An opaque reference to a frame-local, graph-owned texture bind group.
+///
+/// Clone this handle to share the same immutable binding between passes. It is
+/// valid only in the graph that declared it; identity is checked at resolution
+/// so an unrelated graph's same-index declaration cannot alias it. Cloning or
+/// dropping this CPU handle neither allocates nor destroys a GPU bind group.
+#[derive(Clone, Debug)]
+pub struct TextureBindGroupHandle {
+    pub(crate) index: u32,
+    identity: Arc<()>,
+}
+
+impl TextureBindGroupHandle {
+    pub(crate) fn new(index: u32) -> Self {
+        Self {
+            index,
+            identity: Arc::new(()),
+        }
+    }
+
+    pub(crate) fn same_declaration(&self, other: &Self) -> bool {
+        self.index == other.index && Arc::ptr_eq(&self.identity, &other.identity)
+    }
+}
