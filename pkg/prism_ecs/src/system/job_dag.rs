@@ -176,24 +176,8 @@ impl<'env> JobDag<'env> {
     where
         F: FnOnce() + Send + 'env,
     {
-        const HASH_SET_THRESHOLD: usize = 16;
         let len = self.nodes.len();
-        let mut edges: Vec<usize> = Vec::with_capacity(deps.len());
-        let mut seen: Option<HashSet<usize>> =
-            (deps.len() >= HASH_SET_THRESHOLD).then(|| HashSet::with_capacity(deps.len()));
-        for &d in deps {
-            assert!(
-                d.0 < len,
-                "JobDag::add_after: dependency {} is not a node of this graph (len {len})",
-                d.0
-            );
-            let unique = seen
-                .as_mut()
-                .map_or_else(|| !edges.contains(&d.0), |seen| seen.insert(d.0));
-            if unique {
-                edges.push(d.0);
-            }
-        }
+        let edges = Self::unique_dependencies(deps, len);
         self.push(edges, f)
     }
 
@@ -217,6 +201,49 @@ impl<'env> JobDag<'env> {
         if !deps.contains(&before.0) {
             deps.push(before.0);
         }
+    }
+
+    /// Validate and deduplicate predecessor ids while preserving their first-seen
+    /// order. Keep the small-list path allocation-free apart from the returned
+    /// edge vector; a hash table only pays off once linear membership checks become
+    /// more expensive than its allocation and hashing overhead.
+    #[inline]
+    pub(super) fn unique_dependencies(deps: &[JobId], node_count: usize) -> Vec<usize> {
+        Self::unique_dependencies_with_threshold(deps, node_count, 32)
+    }
+
+    pub(super) fn unique_dependencies_with_threshold(
+        deps: &[JobId],
+        node_count: usize,
+        hash_set_threshold: usize,
+    ) -> Vec<usize> {
+        let mut edges = Vec::with_capacity(deps.len());
+        let mut seen: Option<HashSet<usize>> = None;
+        for &dependency in deps {
+            assert!(
+                dependency.0 < node_count,
+                "JobDag::add_after: dependency {} is not a node of this graph (len {node_count})",
+                dependency.0
+            );
+            if seen.is_none() && edges.len() >= hash_set_threshold {
+                // Reserve for the complete input: once the unique prefix is
+                // large enough to justify hashing, the remaining fan-in is
+                // usually large too, and avoiding rehashes matters more than
+                // the small amount of slack for duplicate-heavy inputs.
+                let mut set = HashSet::with_capacity(deps.len());
+                set.extend(edges.iter().copied());
+                seen = Some(set);
+            }
+            let unique = if let Some(set) = &mut seen {
+                set.insert(dependency.0)
+            } else {
+                !edges.contains(&dependency.0)
+            };
+            if unique {
+                edges.push(dependency.0);
+            }
+        }
+        edges
     }
 
     /// Shared node-insertion path.

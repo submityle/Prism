@@ -12,11 +12,13 @@
 
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
+use std::println;
 use std::sync::Mutex;
+use std::time::Instant;
 
 use prism_tasks::TaskPool;
 
-use crate::system::job_dag::JobDag;
+use crate::system::job_dag::{JobDag, JobId};
 use crate::system::job_graph::{ComputeTaskPool, JobGraph};
 use crate::system::{IntoSystem, System};
 use crate::world::World;
@@ -231,6 +233,116 @@ fn wide_duplicate_deps_collapse_without_losing_edges() {
     });
     dag.dispatch(&pool);
     assert_eq!(count.load(Ordering::Relaxed), 1);
+}
+
+/// Diagnostic microbenchmark for the adaptive predecessor de-duplication
+/// strategy. Run in release mode with `--ignored --nocapture`; results are
+/// machine-specific and intentionally do not impose a timing threshold.
+#[test]
+#[ignore = "release-mode diagnostic; no machine-independent threshold"]
+fn benchmark_job_dag_dependency_dedup() {
+    const SAMPLES: usize = 5;
+    const TARGET_DEPENDENCY_VISITS: usize = 250_000;
+
+    fn linear(deps: &[JobId]) -> Vec<usize> {
+        let mut unique = Vec::with_capacity(deps.len());
+        for dependency in deps {
+            let index = dependency.index();
+            if !unique.contains(&index) {
+                unique.push(index);
+            }
+        }
+        unique
+    }
+
+    fn hash_set(deps: &[JobId]) -> Vec<usize> {
+        let mut unique = Vec::with_capacity(deps.len());
+        let mut seen = hashbrown::HashSet::with_capacity(deps.len());
+        for dependency in deps {
+            let index = dependency.index();
+            if seen.insert(index) {
+                unique.push(index);
+            }
+        }
+        unique
+    }
+
+    fn median_ns_per_call(mut samples: Vec<u128>, iterations: usize) -> u128 {
+        samples.sort_unstable();
+        samples[samples.len() / 2] / iterations as u128
+    }
+
+    for fan_in in [8usize, 16, 32, 64, 128, 256, 512] {
+        let iterations = (TARGET_DEPENDENCY_VISITS / fan_in).max(500);
+        for duplicate_every in [1usize, 4, 16] {
+            let unique_count = fan_in.div_ceil(duplicate_every).max(1);
+            let mut graph = JobDag::with_capacity(unique_count + 1);
+            let roots: Vec<_> = (0..unique_count).map(|_| graph.add(|| {})).collect();
+            let deps: Vec<_> = (0..fan_in)
+                .map(|index| roots[index % unique_count])
+                .collect();
+            let expected = linear(&deps);
+            let actual = JobDag::unique_dependencies(&deps, unique_count);
+            assert_eq!(actual, expected);
+            assert_eq!(hash_set(&deps), expected);
+
+            let mut linear_samples = Vec::with_capacity(SAMPLES);
+            let mut hash_samples = Vec::with_capacity(SAMPLES);
+            let mut threshold_16_samples = Vec::with_capacity(SAMPLES);
+            let mut threshold_32_samples = Vec::with_capacity(SAMPLES);
+            let mut threshold_64_samples = Vec::with_capacity(SAMPLES);
+            for sample in 0..SAMPLES {
+                // Alternate measurement order to reduce systematic warm-cache
+                // and frequency-scaling bias between the two strategies.
+                for order in [sample % 5] {
+                    let measure = |strategy: usize| {
+                        let start = Instant::now();
+                        for _ in 0..iterations {
+                            let result = match strategy {
+                                0 => linear(&deps),
+                                1 => hash_set(&deps),
+                                2 => JobDag::unique_dependencies_with_threshold(
+                                    &deps,
+                                    unique_count,
+                                    16,
+                                ),
+                                3 => JobDag::unique_dependencies_with_threshold(
+                                    &deps,
+                                    unique_count,
+                                    32,
+                                ),
+                                _ => JobDag::unique_dependencies_with_threshold(
+                                    &deps,
+                                    unique_count,
+                                    64,
+                                ),
+                            };
+                            core::hint::black_box(result);
+                        }
+                        start.elapsed().as_nanos()
+                    };
+                    let mut results = [0; 5];
+                    for offset in 0..5 {
+                        let strategy = (order + offset) % 5;
+                        results[strategy] = measure(strategy);
+                    }
+                    linear_samples.push(results[0]);
+                    hash_samples.push(results[1]);
+                    threshold_16_samples.push(results[2]);
+                    threshold_32_samples.push(results[3]);
+                    threshold_64_samples.push(results[4]);
+                }
+            }
+            println!(
+                "job_dag_dedup fan_in={fan_in} unique={unique_count} linear_median_ns={} hash_median_ns={} threshold16_median_ns={} threshold32_median_ns={} threshold64_median_ns={}",
+                median_ns_per_call(linear_samples, iterations),
+                median_ns_per_call(hash_samples, iterations),
+                median_ns_per_call(threshold_16_samples, iterations),
+                median_ns_per_call(threshold_32_samples, iterations),
+                median_ns_per_call(threshold_64_samples, iterations),
+            );
+        }
+    }
 }
 
 /// A dependency cycle (via `order`) is detected up front and panics instead of
