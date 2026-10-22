@@ -5,36 +5,38 @@ edition = "2024"
 description = "ECS and GPU integration for Prism's retained GPU scene"
 license = "MIT OR Apache-2.0"
 publish = false
+autotests = false
 
 [dependencies]
 thiserror = "2.0"
 prism_render_graph = { path = "../prism_render_graph" }
-bevy_app = { path = "../../crates/bevy_app", version = "0.20.0-dev" }
-bevy_asset = { path = "../../crates/bevy_asset", version = "0.20.0-dev" }
-bevy_ecs = { path = "../../crates/bevy_ecs", version = "0.20.0-dev" }
-bevy_derive = { path = "../../crates/bevy_derive", version = "0.20.0-dev" }
-bevy_math = { path = "../../crates/bevy_math", version = "0.20.0-dev" }
-bevy_material = { path = "../../crates/bevy_material", version = "0.20.0-dev" }
-bevy_image = { path = "../../crates/bevy_image", version = "0.20.0-dev" }
-bevy_light = { path = "../../crates/bevy_light", version = "0.20.0-dev" }
-bevy_mesh = { path = "../../crates/bevy_mesh", version = "0.20.0-dev" }
-bevy_camera = { path = "../../crates/bevy_camera", version = "0.20.0-dev" }
-bevy_color = { path = "../../crates/bevy_color", version = "0.20.0-dev" }
-bevy_core_pipeline = { path = "../../crates/bevy_core_pipeline", version = "0.20.0-dev" }
-bevy_log = { path = "../../crates/bevy_log", version = "0.20.0-dev" }
-bevy_pbr = { path = "../../crates/bevy_pbr", version = "0.20.0-dev" }
-bevy_platform = { path = "../../crates/bevy_platform", version = "0.20.0-dev" }
-bevy_render = { path = "../../crates/bevy_render", version = "0.20.0-dev" }
-bevy_transform = { path = "../../crates/bevy_transform", version = "0.20.0-dev" }
-bevy_shader = { path = "../../crates/bevy_shader", version = "0.20.0-dev" }
+bevy_app = { path = "../../crates/bevy_app", version = "0.20.0-dev", optional = true }
+bevy_asset = { path = "../../crates/bevy_asset", version = "0.20.0-dev", optional = true }
+bevy_ecs = { path = "../../crates/bevy_ecs", version = "0.20.0-dev", optional = true }
+bevy_math = { path = "../../crates/bevy_math", version = "0.20.0-dev", optional = true }
+bevy_material = { path = "../../crates/bevy_material", version = "0.20.0-dev", optional = true }
+bevy_image = { path = "../../crates/bevy_image", version = "0.20.0-dev", optional = true }
+bevy_mesh = { path = "../../crates/bevy_mesh", version = "0.20.0-dev", optional = true }
+bevy_camera = { path = "../../crates/bevy_camera", version = "0.20.0-dev", optional = true }
+bevy_color = { path = "../../crates/bevy_color", version = "0.20.0-dev", optional = true }
+bevy_core_pipeline = { path = "../../crates/bevy_core_pipeline", version = "0.20.0-dev", optional = true }
+bevy_derive = { path = "../../crates/bevy_derive", version = "0.20.0-dev", optional = true }
+bevy_log = { path = "../../crates/bevy_log", version = "0.20.0-dev", optional = true }
+bevy_pbr = { path = "../../crates/bevy_pbr", version = "0.20.0-dev", optional = true }
+bevy_platform = { path = "../../crates/bevy_platform", version = "0.20.0-dev", optional = true }
+bevy_render = { path = "../../crates/bevy_render", version = "0.20.0-dev", optional = true }
+bevy_transform = { path = "../../crates/bevy_transform", version = "0.20.0-dev", optional = true }
+bevy_shader = { path = "../../crates/bevy_shader", version = "0.20.0-dev", optional = true }
 wgpu-types = { version = "30", default-features = false }
 bytemuck = { version = "1.5", features = ["derive", "must_cast"] }
 prism_render_architecture = { path = "../prism_render_architecture" }
+prism_particle_render = { path = "../prism_particle_render" }
 prism_app = { path = "../prism_app" }
 prism_ecs = { path = "../prism_ecs" }
 prism_mesh = { path = "../prism_mesh" }
-prism_render_material = { path = "../prism_render_material", features = ["bevy"] }
+prism_render_material = { path = "../prism_render_material" }
 prism_render_shading = { path = "../prism_render_shading" }
+prism_math = { path = "../prism_math" }
 # P2-j: the material-classification pass takes its live class count from the
 # shading-class table, which is derived from the PCM catalogue.
 prism_material_pcm = { path = "../prism_material_pcm" }
@@ -45,8 +47,33 @@ prism_render_visibility = { path = "../prism_render_visibility" }
 prism_render_driver = { path = "../prism_render_driver", features = ["std"] }
 prism_render_driver_wgpu = { path = "../../os-backends/prism_render_driver_wgpu" }
 
+[features]
+default = []
+# The retained renderer adapter is still sourced from the old Bevy render
+# world. It is isolated behind an explicit feature so the shipped Prism scene
+# and particle contracts have a Bevy-free dependency closure.
+legacy-bevy = [
+    "dep:bevy_app",
+    "dep:bevy_asset",
+    "dep:bevy_ecs",
+    "dep:bevy_math",
+    "dep:bevy_material",
+    "dep:bevy_image",
+    "dep:bevy_mesh",
+    "dep:bevy_camera",
+    "dep:bevy_color",
+    "dep:bevy_core_pipeline",
+    "dep:bevy_derive",
+    "dep:bevy_log",
+    "dep:bevy_pbr",
+    "dep:bevy_platform",
+    "dep:bevy_render",
+    "dep:bevy_transform",
+    "dep:bevy_shader",
+]
+
 [dev-dependencies]
-bevy_tasks = { path = "../../crates/bevy_tasks", version = "0.20.0-dev" }
+prism_math = { path = "../prism_math" }
 # Real-device GPU parity tests bind the water compute kernels on the same
 # `wgpu` 30 the render world uses; feature-unified with `bevy_render`.
 wgpu = { version = "30", default-features = false, features = ["wgsl", "metal"] }
@@ -60,15 +87,72 @@ workspace = true
 [[test]]
 name = "resident_composition_gpu"
 path = "text/integration/resident_composition_gpu.rs"
+required-features = ["legacy-bevy"]
 
 [[test]]
 name = "material_classification_gpu"
 path = "text/integration/material_classification_gpu.rs"
+required-features = ["legacy-bevy"]
 
 [[test]]
 name = "brdf_channels_gpu"
 path = "text/integration/brdf_channels_gpu.rs"
+required-features = ["legacy-bevy"]
+
+[[test]]
+name = "sky_multiscatter_budget_gpu"
+path = "text/integration/sky_multiscatter_budget_gpu.rs"
+required-features = ["legacy-bevy"]
 
 [[test]]
 name = "specular_aa_image_gpu"
 path = "text/integration/specular_aa_image_gpu.rs"
+required-features = ["legacy-bevy"]
+
+# Keep every retained-renderer acceptance target discoverable after isolating
+# the adapter behind a feature. `autotests = false` must not silently drop the
+# tests in tests/ from workspace validation.
+[[test]]
+name = "reference_pt_material_resolve_gpu"
+path = "tests/reference_pt_material_resolve_gpu.rs"
+required-features = ["legacy-bevy"]
+
+[[test]]
+name = "material_virtual_texture_wesl"
+path = "tests/material_virtual_texture_wesl.rs"
+required-features = ["legacy-bevy"]
+
+[[test]]
+name = "material_vt_gpu_parity"
+path = "tests/material_vt_gpu_parity.rs"
+required-features = ["legacy-bevy"]
+
+[[test]]
+name = "texture_lod_wesl"
+path = "tests/texture_lod_wesl.rs"
+required-features = ["legacy-bevy"]
+
+[[test]]
+name = "response_composition_gpu"
+path = "tests/response_composition_gpu.rs"
+required-features = ["legacy-bevy"]
+
+[[test]]
+name = "water_hybrid_golden"
+path = "tests/water_hybrid_golden.rs"
+required-features = ["legacy-bevy"]
+
+[[test]]
+name = "water_hybrid_gpu"
+path = "tests/water_hybrid_gpu.rs"
+required-features = ["legacy-bevy"]
+
+[[test]]
+name = "cross_adapter_acceptance"
+path = "tests/cross_adapter_acceptance.rs"
+required-features = ["legacy-bevy"]
+
+[[test]]
+name = "fabric_domain_gpu"
+path = "tests/fabric_domain_gpu.rs"
+required-features = ["legacy-bevy"]
