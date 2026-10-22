@@ -571,3 +571,14 @@ Apple M2 / Metal / IntegratedGpu 真实 adapter 下 **2 passed、0 failed、0 ig
 服务恢复后使用 `--features terrain_scatter --test planet_placement_deletion` 重跑；
 本轮未修改其实现。`cargo clean -p prism_world_gpu --dry-run` 随后显示 0 files，说明
 本轮构建产物已被共享构建生命周期清理；未执行全局 target 清理。
+
+随后在审批服务可用时，按正确 `terrain_scatter` feature 完成待测的行星完整键删除
+Metal 实卡验证：
+
+```bash
+WGPU_BACKEND=metal PRISM_REQUIRE_GPU=1 CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 cargo test -p prism_world_gpu --features terrain_scatter --test planet_placement_deletion --offline -j 1 -- --nocapture --test-threads=1
+```
+
+Apple M2 / Metal / IntegratedGpu **1 passed、0 failed、0 ignored**；测试删除一个完整
+planetary key 并确认其他 cell 保持不变。随后 `cargo clean -p prism_world_gpu --dry-run`
+报告仅该包 13 个文件、22.8 MiB，并按包清理；没有清理共享 target 的其他内容。
