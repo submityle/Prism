@@ -262,11 +262,26 @@ impl FloatingOrigin {
     /// Reconstructs the absolute double-precision [`WorldPos`] from a cell and
     /// its local offset. Inverse of [`quantize`](Self::quantize).
     pub fn world_position(&self, cell: GridCell, local: LocalPos) -> WorldPos {
-        WorldPos::new(
+        self.try_world_position(cell, local)
+            .expect("floating-origin world position overflows f64 or contains a non-finite local")
+    }
+
+    /// Checked form of [`world_position`](Self::world_position). Returns `None`
+    /// when the reconstructed absolute coordinate cannot be represented as a
+    /// finite `f64`, or when the local input contains NaN/infinity.
+    pub fn try_world_position(&self, cell: GridCell, local: LocalPos) -> Option<WorldPos> {
+        if !local.x.is_finite() || !local.y.is_finite() || !local.z.is_finite() {
+            return None;
+        }
+        let position = WorldPos::new(
             cell.x as f64 * self.cell_size + local.x as f64,
             cell.y as f64 * self.cell_size + local.y as f64,
             cell.z as f64 * self.cell_size + local.z as f64,
-        )
+        );
+        position.x.is_finite().then_some(position)?;
+        position.y.is_finite().then_some(position)?;
+        position.z.is_finite().then_some(position)?;
+        Some(position)
     }
 
     /// Rebases an entity at `(cell, local)` into the active origin's local
@@ -427,6 +442,16 @@ mod tests {
             .try_recenter_to(WorldPos::new(f64::INFINITY, 0.0, 0.0))
             .is_none());
         assert_eq!(grid.origin(), GridCell::new(4, 5, 6));
+    }
+
+    #[test]
+    fn try_world_position_rejects_absolute_f64_overflow() {
+        let grid = FloatingOrigin::new(f64::MAX);
+        let cell = GridCell::new(i64::MAX, 0, 0);
+        assert!(grid.try_world_position(cell, LocalPos::default()).is_none());
+        assert!(grid
+            .try_world_position(GridCell::ORIGIN, LocalPos::new(f32::NAN, 0.0, 0.0))
+            .is_none());
     }
 
     #[test]
