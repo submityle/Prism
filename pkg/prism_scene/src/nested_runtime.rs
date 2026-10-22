@@ -874,7 +874,9 @@ mod tests {
         let old_roots = [root.root.root.unwrap(), other.root.root.unwrap()];
         let failing = Provider {
             templates: provider.templates.clone(),
-            fail_replay_for: Some(guid(2)),
+            // The first candidate (template 1 plus its child) stages fully;
+            // fail only while staging the second top-level candidate.
+            fail_replay_for: Some(guid(3)),
         };
 
         let error = reload_invalidated_nested_trees(
