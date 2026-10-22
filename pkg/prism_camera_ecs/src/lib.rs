@@ -1434,6 +1434,7 @@ impl Plugin for CameraPlugin {
                 .after(CameraSystemSet::Rig)
                 .before(CameraSystemSet::Publication),
         );
+        #[cfg(feature = "cutscene")]
         app.add_systems(
             PostUpdate,
             publish_camera_render_params.after(CameraSystemSet::Publication),
