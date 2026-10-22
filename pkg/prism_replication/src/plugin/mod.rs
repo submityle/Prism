@@ -37,6 +37,7 @@ use crate::transport::Transport;
 
 #[cfg(feature = "determinism")]
 mod audit;
+mod authority_ecs;
 mod client;
 mod durable;
 mod ecs;
@@ -52,6 +53,10 @@ pub use crate::security::{
     ClientHello, SecureTransport, SecurityDirection, SecurityError, ServerAccept, SessionNonce,
     SessionSecurityProvider,
 };
+pub use authority_ecs::{
+    AuthorityCommandDecision, AuthorityWorldExecutorConfigError, AuthorityWorldExecutorPlugin,
+    AuthorityWorldExecutorStats, AuthorityWorldExecutorStatus,
+};
 pub use client::{
     AuthorityUpdate, EcsReplicationStrategy, NetworkRollbackSimulation, Replication,
     ReplicationPlugin, ReplicationStrategy,
@@ -63,8 +68,8 @@ pub use multi_server::{
     encode_authority_aoi_event, encode_authority_aoi_replication_payload, AuthorityAoiEventError,
     AuthorityAoiReplicationPayload, AuthorityReplicationProvider,
     AuthorityReplicationProviderError, EntitySnapshotPayload, InboundAuthorityCommand,
-    MultiPeerAuthority, MultiPeerAuthorityConfig, MultiPeerAuthorityError, MultiPeerServerPlugin,
-    PeerId,
+    LeasedAuthorityCommand, MultiPeerAuthority, MultiPeerAuthorityConfig, MultiPeerAuthorityError,
+    MultiPeerServerPlugin, PeerId,
 };
 pub use server::{
     ExternalCommandModeError, ReplicationServerPlugin, ServerReplication, ServerStrategy,

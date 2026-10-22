@@ -427,6 +427,87 @@ fn inbound_commands_are_extracted_fairly_without_advancing_peer_records() {
 }
 
 #[test]
+fn leased_commands_remain_queued_until_acknowledged_and_retry_in_fifo_order() {
+    let world = Arc::new(Mutex::new(BTreeMap::new()));
+    let mut authority = MultiPeerAuthority::new(config(), SharedWorld(world)).unwrap();
+    let mut clients = Vec::new();
+    for peer_id in [20, 10] {
+        let (client_transport, server_transport) = secure_pair();
+        clients.push((
+            peer_id,
+            Replication::new(schema(), 8, &seed(), AddClient, Box::new(client_transport)).unwrap(),
+        ));
+        authority
+            .admit_peer(
+                peer_id,
+                (0.0, 0.0),
+                5.0,
+                schema(),
+                8,
+                &seed(),
+                AddAuthority,
+                Box::new(server_transport),
+            )
+            .unwrap();
+    }
+
+    for _ in 0..20 {
+        for (_, client) in &mut clients {
+            client.pump();
+        }
+        authority.lease_inbound_commands(0).unwrap();
+    }
+    assert!(clients
+        .iter()
+        .all(|(_, client)| client.negotiated().is_some()));
+
+    clients[0].1.try_send_rpc(b"20-a").unwrap();
+    clients[0].1.try_send_rpc(b"20-b").unwrap();
+    clients[1].1.try_send_rpc(b"10-a").unwrap();
+    for _ in 0..20 {
+        for (_, client) in &mut clients {
+            client.pump();
+        }
+        authority.lease_inbound_commands(0).unwrap();
+    }
+
+    let leased = authority.lease_inbound_commands(2).unwrap();
+    assert_eq!(
+        leased
+            .iter()
+            .map(|command| (command.peer_id, command.payload.as_slice()))
+            .collect::<Vec<_>>(),
+        vec![(10, &b"10-a"[..]), (20, &b"20-a"[..])]
+    );
+    assert!(authority.lease_inbound_commands(8).unwrap().is_empty());
+
+    let mut stale = leased[0].clone();
+    stale.command_id = stale.command_id.wrapping_add(1);
+    assert!(matches!(
+        authority.acknowledge_inbound_command(&stale),
+        Err(MultiPeerAuthorityError::InvalidCommandLease { peer_id: 10, .. })
+    ));
+    authority.release_inbound_command(&leased[1]).unwrap();
+    let retried = authority.lease_inbound_commands(1).unwrap();
+    assert_eq!(retried.len(), 1);
+    assert_eq!(retried[0].peer_id, leased[1].peer_id);
+    assert_eq!(retried[0].payload, leased[1].payload);
+    assert_ne!(retried[0].command_id, leased[1].command_id);
+
+    authority.acknowledge_inbound_command(&leased[0]).unwrap();
+    assert!(matches!(
+        authority.acknowledge_inbound_command(&leased[1]),
+        Err(MultiPeerAuthorityError::InvalidCommandLease { peer_id: 20, .. })
+    ));
+    authority.acknowledge_inbound_command(&retried[0]).unwrap();
+    let next = authority.lease_inbound_commands(1).unwrap();
+    assert_eq!(next[0].peer_id, 20);
+    assert_eq!(next[0].payload, b"20-b");
+    authority.acknowledge_inbound_command(&next[0]).unwrap();
+    assert!(authority.lease_inbound_commands(8).unwrap().is_empty());
+}
+
+#[test]
 fn external_command_handoff_preflights_every_peer_before_polling_any_peer() {
     let world = Arc::new(Mutex::new(BTreeMap::new()));
     let mut authority = MultiPeerAuthority::new(config(), SharedWorld(world)).unwrap();

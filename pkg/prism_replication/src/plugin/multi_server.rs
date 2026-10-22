@@ -59,6 +59,18 @@ pub struct InboundAuthorityCommand {
     pub payload: Vec<u8>,
 }
 
+/// A reliable command temporarily reserved for an external authority consumer.
+/// The command remains in its peer's FIFO until acknowledged.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LeasedAuthorityCommand {
+    /// Stable identity of the peer that submitted the command.
+    pub peer_id: PeerId,
+    /// Connection-local identity used to acknowledge or release this lease.
+    pub command_id: u128,
+    /// Command payload after RPC framing has been removed.
+    pub payload: Vec<u8>,
+}
+
 /// One peer's AOI update with real entity snapshots and lifecycle removals.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AuthorityAoiReplicationPayload {
@@ -168,6 +180,15 @@ pub enum MultiPeerAuthorityError {
         /// The state that makes the transition unsafe.
         reason: ExternalCommandModeError,
     },
+    /// The requested command lease is stale or is not the peer's current head.
+    InvalidCommandLease {
+        /// Peer that owns the command lease.
+        peer_id: PeerId,
+        /// Connection-local command identity supplied by the consumer.
+        command_id: u128,
+    },
+    /// The authority exhausted its never-reused command lease identity space.
+    CommandLeaseIdExhausted,
 }
 
 impl core::fmt::Display for MultiPeerAuthorityError {
@@ -197,6 +218,16 @@ impl core::fmt::Display for MultiPeerAuthorityError {
                     formatter,
                     "peer {peer_id} cannot enter external command mode: {reason:?}"
                 )
+            }
+            Self::InvalidCommandLease {
+                peer_id,
+                command_id,
+            } => write!(
+                formatter,
+                "command lease {command_id} is not active for peer {peer_id}"
+            ),
+            Self::CommandLeaseIdExhausted => {
+                formatter.write_str("authority command lease identity space exhausted")
             }
         }
     }
@@ -477,6 +508,7 @@ pub fn decode_authority_aoi_event(
 
 struct PeerAuthority<S: ServerStrategy> {
     server: ServerReplication<S>,
+    leased_command: Option<(u128, u64)>,
     pending_aoi_events: VecDeque<PendingAoiEvent>,
     last_aoi_send_error: Option<MuxSendError>,
     last_provider_error: Option<AuthorityReplicationProviderError>,
@@ -502,6 +534,7 @@ pub struct MultiPeerAuthority<S: ServerStrategy> {
     peers: BTreeMap<PeerId, PeerAuthority<S>>,
     provider: Box<dyn AuthorityReplicationProvider>,
     command_cursor: Option<PeerId>,
+    next_command_lease_id: Option<u128>,
 }
 
 impl<S: ServerStrategy> Resource for MultiPeerAuthority<S> {}
@@ -525,6 +558,7 @@ impl<S: ServerStrategy> MultiPeerAuthority<S> {
             peers: BTreeMap::new(),
             provider: Box::new(provider),
             command_cursor: None,
+            next_command_lease_id: Some(0),
         })
     }
 
@@ -569,6 +603,7 @@ impl<S: ServerStrategy> MultiPeerAuthority<S> {
         let delta = self.aoi.admit_peer(peer_id, center, radius)?;
         let mut peer = PeerAuthority {
             server,
+            leased_command: None,
             pending_aoi_events: VecDeque::new(),
             last_aoi_send_error: None,
             last_provider_error: None,
@@ -765,6 +800,136 @@ impl<S: ServerStrategy> MultiPeerAuthority<S> {
             }
         }
         Ok(commands)
+    }
+
+    /// Poll peer transports and lease up to `limit` commands without removing
+    /// them from the reliable queues. A connection may have only one outstanding
+    /// lease, so its FIFO head cannot be bypassed. Consumers must acknowledge a
+    /// lease only after committing its World mutation, or release it to retry.
+    /// Leases remain bounded by the admitted peer count and each peer's bounded
+    /// receive queue.
+    pub fn lease_inbound_commands(
+        &mut self,
+        limit: usize,
+    ) -> Result<Vec<LeasedAuthorityCommand>, MultiPeerAuthorityError> {
+        self.poll_inbound_commands(0)?;
+        if limit == 0 || self.peers.is_empty() {
+            return Ok(Vec::new());
+        }
+        let peer_ids: Vec<PeerId> = self.peers.keys().copied().collect();
+        let start = self
+            .command_cursor
+            .and_then(|cursor| peer_ids.iter().position(|peer_id| *peer_id == cursor))
+            .map_or(0, |index| (index + 1) % peer_ids.len());
+        let mut commands = Vec::new();
+        let mut next_index = start;
+        while commands.len() < limit {
+            let mut found = false;
+            for offset in 0..peer_ids.len() {
+                let index = (next_index + offset) % peer_ids.len();
+                let peer_id = peer_ids[index];
+                let Some(peer) = self.peers.get_mut(&peer_id) else {
+                    continue;
+                };
+                if peer.leased_command.is_some() {
+                    continue;
+                }
+                let Some((server_command_id, payload)) = peer.server.lease_inbound_command() else {
+                    continue;
+                };
+                let Some(command_id) = self.next_command_lease_id else {
+                    peer.server.release_inbound_command(server_command_id);
+                    return Err(MultiPeerAuthorityError::CommandLeaseIdExhausted);
+                };
+                self.next_command_lease_id = command_id.checked_add(1);
+                peer.leased_command = Some((command_id, server_command_id));
+                {
+                    commands.push(LeasedAuthorityCommand {
+                        peer_id,
+                        command_id,
+                        payload,
+                    });
+                    self.command_cursor = Some(peer_id);
+                    next_index = (index + 1) % peer_ids.len();
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                break;
+            }
+        }
+        Ok(commands)
+    }
+
+    /// Acknowledge a leased command after its authoritative World mutation has
+    /// committed. A stale or out-of-order lease is rejected without dequeuing.
+    pub fn acknowledge_inbound_command(
+        &mut self,
+        command: &LeasedAuthorityCommand,
+    ) -> Result<(), MultiPeerAuthorityError> {
+        let peer =
+            self.peers
+                .get_mut(&command.peer_id)
+                .ok_or(MultiPeerAuthorityError::UnknownPeer {
+                    peer_id: command.peer_id,
+                })?;
+        let Some((lease_id, server_command_id)) = peer.leased_command else {
+            return Err(MultiPeerAuthorityError::InvalidCommandLease {
+                peer_id: command.peer_id,
+                command_id: command.command_id,
+            });
+        };
+        if lease_id != command.command_id {
+            return Err(MultiPeerAuthorityError::InvalidCommandLease {
+                peer_id: command.peer_id,
+                command_id: command.command_id,
+            });
+        }
+        if peer.server.acknowledge_inbound_command(server_command_id) {
+            peer.leased_command = None;
+            Ok(())
+        } else {
+            Err(MultiPeerAuthorityError::InvalidCommandLease {
+                peer_id: command.peer_id,
+                command_id: command.command_id,
+            })
+        }
+    }
+
+    /// Release a leased command without consuming it, allowing the next
+    /// executor pass to retry the same reliable FIFO head.
+    pub fn release_inbound_command(
+        &mut self,
+        command: &LeasedAuthorityCommand,
+    ) -> Result<(), MultiPeerAuthorityError> {
+        let peer =
+            self.peers
+                .get_mut(&command.peer_id)
+                .ok_or(MultiPeerAuthorityError::UnknownPeer {
+                    peer_id: command.peer_id,
+                })?;
+        let Some((lease_id, server_command_id)) = peer.leased_command else {
+            return Err(MultiPeerAuthorityError::InvalidCommandLease {
+                peer_id: command.peer_id,
+                command_id: command.command_id,
+            });
+        };
+        if lease_id != command.command_id {
+            return Err(MultiPeerAuthorityError::InvalidCommandLease {
+                peer_id: command.peer_id,
+                command_id: command.command_id,
+            });
+        }
+        if peer.server.release_inbound_command(server_command_id) {
+            peer.leased_command = None;
+            Ok(())
+        } else {
+            Err(MultiPeerAuthorityError::InvalidCommandLease {
+                peer_id: command.peer_id,
+                command_id: command.command_id,
+            })
+        }
     }
 
     /// Index or move an entity and dispatch all resulting enter/leave updates.

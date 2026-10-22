@@ -57,7 +57,9 @@ pub struct ServerReplication<S: ServerStrategy> {
     config: ReplicationConfig,
     connection: ConnectionState,
     next_rpc_id: u64,
-    pending_commands: VecDeque<Vec<u8>>,
+    pending_commands: VecDeque<QueuedInboundCommand>,
+    next_inbound_command_id: u64,
+    leased_inbound_command: Option<u64>,
     external_command_consumer: bool,
     journal: Option<Box<dyn AuthorityJournal>>,
     next_journal_sequence: u64,
@@ -80,6 +82,11 @@ pub struct ServerReplication<S: ServerStrategy> {
     rejected: u64,
     last_protocol_error: Option<ProtocolError>,
     last_send_error: Option<MuxSendError>,
+}
+
+struct QueuedInboundCommand {
+    id: u64,
+    payload: Vec<u8>,
 }
 
 impl<S: ServerStrategy> Resource for ServerReplication<S> {}
@@ -142,6 +149,8 @@ impl<S: ServerStrategy> ServerReplication<S> {
             connection,
             next_rpc_id: 0,
             pending_commands: VecDeque::new(),
+            next_inbound_command_id: 0,
+            leased_inbound_command: None,
             external_command_consumer: false,
             journal: None,
             next_journal_sequence: 1,
@@ -267,7 +276,8 @@ impl<S: ServerStrategy> ServerReplication<S> {
         }
 
         let mut advanced = 0;
-        while let Some(bytes) = self.pending_commands.front() {
+        while let Some(queued) = self.pending_commands.front() {
+            let bytes = &queued.payload;
             if self.mux.is_backpressured(NetChannel::EventsReliable) {
                 self.last_send_error =
                     Some(MuxSendError::Backpressured(NetChannel::EventsReliable));
@@ -376,9 +386,48 @@ impl<S: ServerStrategy> ServerReplication<S> {
     /// Remove the oldest decoded RPC payload in externally managed command mode.
     #[must_use]
     pub fn take_inbound_command(&mut self) -> Option<Vec<u8>> {
-        self.external_command_consumer
-            .then(|| self.pending_commands.pop_front())
-            .flatten()
+        if !self.external_command_consumer || self.leased_inbound_command.is_some() {
+            return None;
+        }
+        self.pending_commands
+            .pop_front()
+            .map(|command| command.payload)
+    }
+
+    /// Lease the oldest decoded RPC payload without removing it from the
+    /// reliable command queue. At most one command per connection may be
+    /// leased; the next command remains blocked until the lease is acknowledged
+    /// or released.
+    pub(crate) fn lease_inbound_command(&mut self) -> Option<(u64, Vec<u8>)> {
+        if !self.external_command_consumer || self.leased_inbound_command.is_some() {
+            return None;
+        }
+        let command = self.pending_commands.front()?;
+        self.leased_inbound_command = Some(command.id);
+        Some((command.id, command.payload.clone()))
+    }
+
+    /// Remove a previously leased head command after its consumer commits it.
+    pub(crate) fn acknowledge_inbound_command(&mut self, command_id: u64) -> bool {
+        if self.leased_inbound_command != Some(command_id)
+            || self.pending_commands.front().map(|command| command.id) != Some(command_id)
+        {
+            return false;
+        }
+        self.pending_commands.pop_front();
+        self.leased_inbound_command = None;
+        true
+    }
+
+    /// Return a lease to the queue without consuming its reliable command.
+    pub(crate) fn release_inbound_command(&mut self, command_id: u64) -> bool {
+        if self.leased_inbound_command != Some(command_id)
+            || self.pending_commands.front().map(|command| command.id) != Some(command_id)
+        {
+            return false;
+        }
+        self.leased_inbound_command = None;
+        true
     }
 
     fn poll_network(&mut self) -> bool {
@@ -450,7 +499,12 @@ impl<S: ServerStrategy> ServerReplication<S> {
                         );
                         break;
                     }
-                    self.pending_commands.push_back(payload.to_vec());
+                    let id = self.next_inbound_command_id;
+                    self.next_inbound_command_id = self.next_inbound_command_id.wrapping_add(1);
+                    self.pending_commands.push_back(QueuedInboundCommand {
+                        id,
+                        payload: payload.to_vec(),
+                    });
                 }
                 RpcEnvelope::Accept(_) | RpcEnvelope::Reject(_) => {
                     self.reject(ProtocolError::UnexpectedHandshake, true);
