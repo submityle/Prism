@@ -77,6 +77,8 @@ pub struct PlanetMeshPublicationReceipt {
 pub struct PlanetMeshPublicationDelta {
     generation: u64,
     lineage: Arc<()>,
+    base_state: Arc<()>,
+    target_state: Arc<()>,
     changed_tiles: Vec<TileKey>,
     removed_tiles: Vec<TileKey>,
 }
@@ -93,6 +95,18 @@ impl PlanetMeshPublicationDelta {
     #[must_use]
     pub fn lineage_token(&self) -> &Arc<()> {
         &self.lineage
+    }
+
+    /// Opaque identity of the exact publication state this delta consumes.
+    #[must_use]
+    pub fn base_state_token(&self) -> &Arc<()> {
+        &self.base_state
+    }
+
+    /// Opaque identity of the exact publication state this delta produces.
+    #[must_use]
+    pub fn target_state_token(&self) -> &Arc<()> {
+        &self.target_state
     }
 
     /// Added or replaced tile identities in stable order.
@@ -233,6 +247,7 @@ pub struct PlanetMeshPublication {
     limits: PlanetMeshPublicationLimits,
     generation: u64,
     lineage: Arc<()>,
+    state: Arc<()>,
     meshes: Vec<PublishedPlanetHeightfieldMesh>,
 }
 
@@ -243,6 +258,7 @@ impl PlanetMeshPublication {
             limits,
             generation: 0,
             lineage: Arc::new(()),
+            state: Arc::new(()),
             meshes: Vec::new(),
         }
     }
@@ -261,6 +277,12 @@ impl PlanetMeshPublication {
     #[must_use]
     pub fn lineage_token(&self) -> &Arc<()> {
         &self.lineage
+    }
+
+    /// Opaque identity for this exact committed snapshot state.
+    #[must_use]
+    pub fn state_token(&self) -> &Arc<()> {
+        &self.state
     }
 
     /// Returns all published tiles in stable `TileKey` order.
@@ -369,6 +391,7 @@ impl PlanetMeshPublication {
             self.limits.max_neighbor_comparisons,
         )?;
 
+        let next_state = Arc::new(());
         let delta = if collect_delta {
             let removed_count = transaction
                 .removals
@@ -394,6 +417,8 @@ impl PlanetMeshPublication {
             PlanetMeshPublicationDelta {
                 generation: next_generation,
                 lineage: Arc::clone(&self.lineage),
+                base_state: Arc::clone(&self.state),
+                target_state: Arc::clone(&next_state),
                 changed_tiles,
                 removed_tiles,
             }
@@ -401,6 +426,8 @@ impl PlanetMeshPublication {
             PlanetMeshPublicationDelta {
                 generation: next_generation,
                 lineage: Arc::clone(&self.lineage),
+                base_state: Arc::clone(&self.state),
+                target_state: Arc::clone(&next_state),
                 ..Default::default()
             }
         };
@@ -411,6 +438,7 @@ impl PlanetMeshPublication {
         merge_snapshot(&self.meshes, &transaction, &mut next);
         self.meshes = next;
         self.generation = next_generation;
+        self.state = next_state;
         let receipt = PlanetMeshPublicationReceipt {
             generation: next_generation,
             published_tiles: final_count,
@@ -1638,6 +1666,38 @@ mod tests {
         assert_eq!(delta.changed_tiles(), &[first_tile, second_tile]);
         assert!(delta.removed_tiles().is_empty());
         assert_eq!(publication.meshes().len(), 2);
+    }
+
+    #[test]
+    fn cloned_publication_deltas_authenticate_exact_base_and_target_states() {
+        let mut publication = PlanetMeshPublication::new(limits());
+        let mut fork = publication.clone();
+        let shared_base = Arc::clone(publication.state_token());
+        assert!(Arc::ptr_eq(publication.state_token(), fork.state_token()));
+        assert!(Arc::ptr_eq(
+            publication.lineage_token(),
+            fork.lineage_token()
+        ));
+
+        let (_, delta) = publication.commit_with_delta(publication.begin()).unwrap();
+        assert!(Arc::ptr_eq(delta.base_state_token(), &shared_base));
+        assert!(Arc::ptr_eq(
+            delta.target_state_token(),
+            publication.state_token()
+        ));
+        assert!(!Arc::ptr_eq(publication.state_token(), &shared_base));
+        assert!(Arc::ptr_eq(fork.state_token(), &shared_base));
+
+        let (_, fork_delta) = fork.commit_with_delta(fork.begin()).unwrap();
+        assert!(Arc::ptr_eq(fork_delta.base_state_token(), &shared_base));
+        assert!(Arc::ptr_eq(
+            fork_delta.target_state_token(),
+            fork.state_token()
+        ));
+        assert!(!Arc::ptr_eq(
+            fork_delta.target_state_token(),
+            delta.target_state_token()
+        ));
     }
 
     #[test]

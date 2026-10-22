@@ -48,6 +48,10 @@ pub enum PlanetTerrainRhiError {
     Generation { expected: u64, actual: u64 },
     /// Delta was produced by a different publication lineage than the cache.
     ForeignLineage,
+    /// Delta does not consume the exact snapshot currently held by this cache.
+    StaleBase,
+    /// Delta target is not the exact publication snapshot supplied with it.
+    TargetStateMismatch,
     /// Caller supplied a different logical GPU device.
     ForeignDevice,
     /// Invalid or duplicate mesh/tile references in supplied data.
@@ -76,6 +80,12 @@ impl std::fmt::Display for PlanetTerrainRhiError {
             ),
             Self::ForeignLineage => {
                 f.write_str("planet terrain delta belongs to another publication lineage")
+            }
+            Self::StaleBase => {
+                f.write_str("planet terrain delta does not consume the cached snapshot state")
+            }
+            Self::TargetStateMismatch => {
+                f.write_str("planet terrain delta target differs from the supplied snapshot")
             }
             Self::ForeignDevice => {
                 f.write_str("planet terrain cache belongs to another GPU device")
@@ -135,6 +145,7 @@ pub struct PlanetTerrainRhiCache {
     limits: PlanetTerrainRhiLimits,
     generation: Option<u64>,
     lineage: Option<Arc<()>>,
+    state: Option<Arc<()>>,
     tiles: Vec<GpuTile>,
     buffer_bytes: u64,
 }
@@ -149,6 +160,7 @@ impl PlanetTerrainRhiCache {
             limits,
             generation: None,
             lineage: None,
+            state: None,
             tiles: Vec::new(),
             buffer_bytes: 0,
         }
@@ -177,6 +189,7 @@ impl PlanetTerrainRhiCache {
         self.buffer_bytes = bytes;
         self.generation = Some(publication.generation());
         self.lineage = Some(Arc::clone(publication.lineage_token()));
+        self.state = Some(Arc::clone(publication.state_token()));
         Ok(self.stats())
     }
 
@@ -211,6 +224,15 @@ impl PlanetTerrainRhiCache {
             || !Arc::ptr_eq(lineage, delta.lineage_token())
         {
             return Err(PlanetTerrainRhiError::ForeignLineage);
+        }
+        let Some(state) = self.state.as_ref() else {
+            return Err(PlanetTerrainRhiError::SnapshotRequired);
+        };
+        if !Arc::ptr_eq(state, delta.base_state_token()) {
+            return Err(PlanetTerrainRhiError::StaleBase);
+        }
+        if !Arc::ptr_eq(publication.state_token(), delta.target_state_token()) {
+            return Err(PlanetTerrainRhiError::TargetStateMismatch);
         }
         let mut cached_keys = Vec::new();
         cached_keys
@@ -399,6 +421,7 @@ impl PlanetTerrainRhiCache {
         self.tiles = next;
         self.buffer_bytes = final_bytes;
         self.generation = Some(delta.generation());
+        self.state = Some(Arc::clone(delta.target_state_token()));
         Ok(self.stats())
     }
 
