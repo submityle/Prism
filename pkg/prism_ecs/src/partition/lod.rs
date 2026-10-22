@@ -301,6 +301,13 @@ impl LodSchedule {
     /// [`ClampToLast`](OutOfRange::ClampToLast), or `None` under
     /// [`Dormant`](OutOfRange::Dormant).
     pub fn level_for(&self, distance_sq: f32) -> Option<LodLevel> {
+        // A non-finite or negative squared distance is not a valid spatial
+        // sample. Fail closed even when the configured out-of-range policy is
+        // ClampToLast; otherwise NaN would fall through every comparison and
+        // silently keep the entity in the simulation.
+        if !distance_sq.is_finite() || distance_sq < 0.0 {
+            return None;
+        }
         for (i, b) in self.bands.iter().enumerate() {
             if distance_sq <= b.max_distance_sq {
                 return Some(LodLevel(i as u8));
@@ -418,6 +425,15 @@ mod tests {
         assert_eq!(s.level_for(2_499.0), Some(LodLevel(1)));
         assert_eq!(s.level_for(2_501.0), Some(LodLevel(2)));
         assert_eq!(s.level_for(40_000.0), Some(LodLevel(2)));
+    }
+
+    #[test]
+    fn invalid_distance_fails_closed_even_when_clamping_out_of_range() {
+        let s = LodSchedule::from_sorted_pairs(&[(100.0, 1), (2_500.0, 4)]);
+
+        assert_eq!(s.level_for(f32::NAN), None);
+        assert_eq!(s.level_for(f32::INFINITY), None);
+        assert_eq!(s.level_for(-1.0), None);
     }
 
     #[test]
