@@ -19,6 +19,7 @@ prism_editor_shell = { path = "../prism_editor_shell" }
 prism_editor_dock = { path = "../prism_editor_dock" }
 prism_editor_viewport = { path = "../prism_editor_viewport" }
 prism_editor_timeline = { path = "../prism_editor_timeline" }
+prism_editor_graph = { path = "../prism_editor_graph" }
 prism_editor_profiler = { path = "../prism_editor_profiler" }
 prism_editor_world = { path = "../prism_editor_world" }
 prism_asset = { path = "../prism_asset" }
@@ -26,6 +27,11 @@ prism_ecs = { path = "../prism_ecs" }
 prism_reflect = { path = "../prism_reflect" }
 
 [dev-dependencies]
+prism_editor_profiler = { path = "../prism_editor_profiler", features = ["render-graph"] }
+prism_render_architecture = { path = "../prism_render_architecture" }
+prism_render_graph = { path = "../prism_render_graph" }
+prism_render_driver = { path = "../prism_render_driver" }
+prism_render_driver_wgpu = { path = "../../os-backends/prism_render_driver_wgpu" }
 prism_ui_render_backend = { path = "../prism_ui_render_backend" }
 png = "0.18.1"
 futures-lite = "2"
@@ -33,7 +39,8 @@ wgpu = { version = "30", default-features = false, features = ["wgsl", "metal"] 
 
 [features]
 default = []
-gpu-tests = []
+gpu-tests = ["frame-graph-preview"]
+frame-graph-preview = ["prism_editor_profiler/runtime-preview"]
 profiler-gpu-tests = ["prism_editor_profiler/gpu"]
 
 [[test]]

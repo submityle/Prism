@@ -22,6 +22,8 @@ prism_editor_timeline = { path = "../prism_editor_timeline" }
 prism_editor_graph = { path = "../prism_editor_graph" }
 prism_asset = { path = "../prism_asset" }
 prism_app = { path = "../prism_app", default-features = false, features = ["std"] }
+prism_camera_ecs = { path = "../prism_camera_ecs", default-features = false, features = ["composition_aid"], optional = true }
+prism_camera = { path = "../prism_camera", default-features = false, features = ["composition_aid"], optional = true }
 prism_ecs = { path = "../prism_ecs", default-features = false, features = ["std", "reflect"] }
 prism_reflect = { path = "../prism_reflect" }
 prism_math = { path = "../prism_math", optional = true }
@@ -34,7 +36,7 @@ futures-lite = { version = "2", optional = true }
 
 [features]
 default = []
-desktop = ["dep:winit", "dep:wgpu", "dep:futures-lite", "dep:prism_math", "prism_ui_render_backend/gpu"]
+desktop = ["dep:winit", "dep:wgpu", "dep:futures-lite", "dep:prism_math", "dep:prism_camera_ecs", "dep:prism_camera", "prism_ui_render_backend/gpu"]
 runtime-preview = ["desktop", "prism_editor_ui/frame-graph-preview", "prism_editor_profiler/runtime-preview"]
 
 [dev-dependencies]
