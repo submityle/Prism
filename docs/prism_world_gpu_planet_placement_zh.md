@@ -16,10 +16,11 @@ dispatch。完整键删除 producer 的 `registration_snapshot()` 另暴露上�
 params/keys、过滤 compact/indirect 与非空删除 stage；empty request 仍要求 consumer reset 删除后的
 indirect count。两个 snapshot 只 clone 同设备 native handles，本身不提交工作或持有完成期资源 lease。
 
-截至 2026-10-23，`placement_rhi` feature 的 RHI bridge 仍只接 planar heightfield placement/deletion；
-尚无 planetary RenderGraph lowering、planetary RHI 注册/submit/completion retirement、signed-i128
-frame-local record draw decoder 或产品 draw consumer。不得把 planar 64-byte record draw binding
-复用于行星 ABI，也不得将 producer snapshot 视为 RHI 接线完成。跨 sector 生命周期管理仍未闭环。
+截至 2026-10-23，新增 `planet_placement_rhi` bridge：它完成同设备 registration、placement 与
+完整键 deletion 的 snapshot 消费、backend-neutral RenderGraph hazard lowering，以及 queue completion
+前的 snapshot 保活/retirement。它把 signed-i128 frame-local record 当作 opaque storage，不做错误的
+planar 64-byte decode。该 bridge 仍不是 `prism_render_scene` 的产品 draw consumer；没有 material/
+visibility/mesh decoder，也没有跨 sector 生命周期管理。producer snapshot 本身仍不等于产品渲染接线。
 
 2026-10-23 当前工作树验证记录：Apple M2 / Metal / IntegratedGpu 的 planetary placement
 测试 17/17、U256/reference 实卡测试 14/14、完整键 deletion 实卡测试 1/1 通过；离线
@@ -33,9 +34,10 @@ frame-local record draw decoder 或产品 draw consumer。不得把 planar 64-by
 
 同日 `cargo check -p prism_world_gpu --features placement_rhi --offline` 编译成功；获准 Metal
 宿主运行 `cargo test -p prism_world_gpu --features placement_rhi --test placement_rhi --offline
--- --nocapture --test-threads=1` 为 14/14 通过，覆盖的是 planar RHI bridge，不是 planetary
-consumer。当前 feature check 对 planetary deletion `device_identity` getter 有一条 dead-code
-warning；consumer 集成后应复验无 warning。
+-- --nocapture --test-threads=1` 为 14/14 通过，覆盖的是 planar RHI bridge；planetary bridge
+的离线 focused unit 为 4/4，覆盖完整 record stride、graph imported-byte metadata、placement/
+deletion 共用 in-flight 上限及 failed-drain 双队列 lease 保活。当前 planetary bridge 尚无实卡
+专项测试，故不能把 planar 的 14/14 推广为 planetary 产品 GPU 验收。
 
 可重复的离线命令：
 
@@ -58,6 +60,6 @@ cargo test -p prism_world_gpu --features terrain_scatter \
   --test planet_placement_deletion --offline -- --nocapture --test-threads=1
 ```
 
-仍未闭环的范围：行星 placement/deletion 的 RHI 注册与 retirement、RenderGraph hazard/lowering、
-signed-i128 record 的生产绘制 consumer、`prism_render_scene` mesh/material/visibility 接入、
+仍未闭环的范围：signed-i128 record 的生产绘制 consumer、`prism_render_scene` mesh/material/
+visibility 接入、
 跨 sector 连续性、混合 LOD 行星 mesh stitching、真实场景画质/帧时，以及多厂商硬件验收。
