@@ -255,6 +255,101 @@ fn surface_graph_resolves_per_camera_clear_loads_in_stable_composition_order() {
 }
 
 #[test]
+fn physical_gpu_camera_clear_modes_preserve_or_clear_private_hdr_attachments() {
+    use prism_render_architecture::particle::half_float_f16::f32_to_f16_bits;
+    use prism_render_driver::{ImageDataLayout, RenderQueue, TextureWrite};
+    use prism_render_driver_wgpu::{require_hardware_gpu, HardwareDeviceError, WgpuInstance};
+
+    let (device, queue) = match WgpuInstance::new().request_default_hardware_device() {
+        Ok(pair) => pair,
+        Err(HardwareDeviceError::NoAdapter) => {
+            assert!(
+                !require_hardware_gpu(),
+                "PRISM_REQUIRE_GPU=1 but no physical GPU adapter was found"
+            );
+            eprintln!("SKIPPED camera clear readback: no adapter");
+            return;
+        }
+        Err(HardwareDeviceError::NonHardware(evidence)) => {
+            assert!(
+                !require_hardware_gpu(),
+                "PRISM_REQUIRE_GPU=1 requires a physical GPU; observed {evidence}"
+            );
+            eprintln!("SKIPPED camera clear readback: non-hardware adapter: {evidence}");
+            return;
+        }
+        Err(HardwareDeviceError::Device(error)) => {
+            panic!("physical GPU device creation failed: {error}")
+        }
+    };
+    let extent = Extent3d::new_2d(2, 2);
+    let output = RenderTarget::new(&device, extent);
+    let local = RenderTarget::new(&device, extent);
+    let input_pixel = [0.5_f32, 0.25, 0.75, 1.0].map(f32_to_f16_bits);
+    let input_texel = input_pixel
+        .into_iter()
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>();
+    let input: Vec<_> = input_texel.repeat((extent.width * extent.height) as usize);
+
+    for (mode, expected) in [
+        (ClearMode::None, [0.5_f32, 0.25, 0.75, 1.0]),
+        (ClearMode::DepthOnly, [0.5_f32, 0.25, 0.75, 1.0]),
+        (ClearMode::ColorAndDepth, [0.0_f32; 4]),
+    ] {
+        queue.write_texture(
+            TextureWrite {
+                texture: local.texture(),
+                mip_level: 0,
+                origin: [0, 0, 0],
+                size: extent,
+            },
+            &input,
+            ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(extent.width * 8),
+                rows_per_image: Some(extent.height),
+            },
+        );
+        let queues = RenderQueues::new();
+        let functions = DrawFunctions::default();
+        let views = [SurfaceViewGraphInput {
+            camera: camera(1),
+            order: 0,
+            clear: mode,
+            viewport: [0, 0, extent.width, extent.height],
+            target: &local,
+            queues: &queues,
+            lighting: None,
+        }];
+        let prepared = prepare_surface_view_graph(
+            &output,
+            &queues,
+            &functions,
+            None,
+            None,
+            &views,
+            &FrameGraphTextureImports::default(),
+        )
+        .expect("physical camera clear graph is valid");
+        let (graph, _) = finalize_surface_view_graph(prepared, None, None, &BTreeMap::new(), 0)
+            .expect("camera output composition graph is valid");
+        let recorded = graph
+            .execute(&device, &queue)
+            .expect("camera clear graph executes");
+        let pixels = queue.read_texture_rgba16f(output.texture(), extent.width, extent.height);
+        assert!(
+            pixels.iter().all(|pixel| *pixel == expected),
+            "mode={mode:?}: {pixels:?}"
+        );
+        recorded.release(&device);
+    }
+
+    local.destroy(&device);
+    output.destroy(&device);
+}
+
+#[test]
 fn surface_graph_rejects_duplicate_camera_before_declaring_any_target_graph() {
     let device = device();
     let output = RenderTarget::new(&device, Extent3d::new_2d(16, 8));
