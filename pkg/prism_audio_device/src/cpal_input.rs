@@ -1128,6 +1128,27 @@ mod tests {
     }
 
     #[test]
+    fn zero_recovery_budget_still_allows_exactly_one_attempt() {
+        let mut control = super::InputControl {
+            recovery: InputRecovery::new(0),
+            wants_running: true,
+        };
+        control.recovery.failed();
+
+        assert!(control
+            .attempt(|running| {
+                assert!(running);
+                Err::<(), _>(crate::DeviceError::BuildStream("injected".into()))
+            })
+            .is_err());
+        assert_eq!(control.recovery.attempts(), 1);
+        assert_eq!(control.recovery.state(), crate::DeviceState::Failed);
+        assert!(control
+            .attempt::<()>(|_| panic!("zero-budget recovery must be terminal"))
+            .is_err());
+    }
+
+    #[test]
     fn event_log_records_sequences_and_explicit_overflow() {
         let log = super::CaptureEventLog::new(2);
         let first = log.record(1, CaptureEvent::Started);
