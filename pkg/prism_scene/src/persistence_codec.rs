@@ -485,6 +485,32 @@ mod tests {
             snapshot
         );
     }
+
+    #[test]
+    fn empty_snapshot_matches_canonical_little_endian_wire_vector() {
+        let snapshot = SceneInstancePersistence {
+            template: StableGuid::from_u128(0x1716_1514_1312_1110_0f0e_0d0c_0b0a_0908),
+            instance: None,
+            properties: Vec::new(),
+            structural: Vec::new(),
+        };
+        let expected = [
+            b'P', b'R', b'S', b'I', // magic
+            1, 0, // wire version
+            8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, // GUID LE
+            0,  // no instance id
+            0, 0, 0, 0, // no property rows
+            0, 0, 0, 0, // no structural operations
+        ];
+
+        let encoded = encode_persistence(&snapshot).unwrap();
+        assert_eq!(encoded, expected);
+        assert_eq!(
+            decode_persistence(&expected, PersistenceDecodeLimits::default()).unwrap(),
+            snapshot
+        );
+    }
+
     #[test]
     fn persistence_codec_rejects_truncation_and_budget_overrun() {
         let snapshot = SceneInstancePersistence {
