@@ -150,6 +150,7 @@ impl<F: Clone> Prediction<F> {
         Ok(revision)
     }
 
+    #[cfg(feature = "app")]
     pub(crate) fn cancel_last_prediction(&mut self) {
         if self.pending.pop().is_some() {
             self.store.truncate_after(self.predicted());

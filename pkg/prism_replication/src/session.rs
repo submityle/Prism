@@ -253,6 +253,7 @@ impl<F: Clone> ClientSession<F> {
         Ok(self.prediction.predict(input, simulate)?)
     }
 
+    #[cfg(feature = "app")]
     pub(crate) fn cancel_last_prediction(&mut self) {
         self.prediction.cancel_last_prediction();
     }
