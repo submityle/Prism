@@ -97,6 +97,10 @@ fn word(bytes: &[u8], offset: usize) -> u32 {
     u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
 }
 
+fn f32_word(bytes: &[u8], offset: usize) -> f32 {
+    f32::from_bits(word(bytes, offset))
+}
+
 fn i128_words(value: i128) -> [u32; 4] {
     let value = value as u128;
     [
@@ -287,6 +291,36 @@ fn planetary_placement_records_match_cpu_semantics_for_nonzero_heights_and_thres
             + at(cell[0] as usize + 1, cell[1] as usize + 1);
         let expected_rank = planet_placement_rank(key);
         let expected_keep = expected_rank <= config.acceptance_threshold;
+
+        // Independent f64 projection oracle. The shader intentionally emits
+        // f32 positions, so compare with a radius-scaled millimetre error bound
+        // rather than claiming bitwise parity with the CPU i64 output.
+        let side_cells = f64::from(tile.spec().samples_per_edge() - 1);
+        let u = -1.0 + 2.0 * (f64::from(cell[0]) + 0.5) / side_cells;
+        let v = -1.0 + 2.0 * (f64::from(cell[1]) + 0.5) / side_cells;
+        let length = libm::sqrt(u * u + v * v + 1.0);
+        let normal = [u / length, v / length, 1.0 / length];
+        let radial = (config.radius_mm + config.vertical_offset_mm) as f64 + numerator as f64 / 4.0;
+        let expected_position = [
+            config.origin_mm[0] as f64 + normal[0] * radial,
+            config.origin_mm[1] as f64 + normal[1] * radial,
+            config.origin_mm[2] as f64 + normal[2] * radial,
+        ];
+        let position_tolerance_mm = 2_048.0;
+        for axis in 0..3 {
+            let actual_position = f64::from(f32_word(&bytes, base + 24 + axis * 4));
+            assert!(
+                (actual_position - expected_position[axis]).abs() <= position_tolerance_mm,
+                "cell {cell:?} position axis {axis}: GPU {actual_position}, oracle {}, tolerance {position_tolerance_mm} mm",
+                expected_position[axis]
+            );
+            let actual_normal = f64::from(f32_word(&bytes, base + 36 + axis * 4));
+            assert!(
+                (actual_normal - normal[axis]).abs() <= 2.0e-6,
+                "cell {cell:?} normal axis {axis}: GPU {actual_normal}, oracle {}",
+                normal[axis]
+            );
+        }
         assert_eq!(word(&bytes, base + 16), cell[0]);
         assert_eq!(word(&bytes, base + 20), cell[1]);
         assert_eq!(word(&bytes, base + 48), u32::from(expected_keep));
