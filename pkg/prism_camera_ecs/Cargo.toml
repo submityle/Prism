@@ -22,6 +22,7 @@ director = ["dep:prism_camera_rig", "prism_camera_rig/director", "prism_camera_r
 rig = ["dep:prism_camera_rig", "prism_camera_rig/rig", "prism_camera_rig/determinism"]
 parallel = ["dep:prism_tasks", "prism_app/multi_thread"]
 composition_aid = ["prism_camera/composition_aid"]
+view_lod = ["prism_camera/view_lod"]
 
 [[bench]]
 name = "multiview_contracts"

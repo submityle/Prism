@@ -8,11 +8,7 @@
 ))]
 use alloc::vec::Vec;
 
-#[cfg(any(
-    feature = "cutscene",
-    feature = "lookahead_stream",
-    feature = "view_lod"
-))]
+#[cfg(any(feature = "cutscene", feature = "lookahead_stream"))]
 use prism_math::DVec3;
 #[cfg(any(feature = "virtual_production", feature = "composition_aid"))]
 use prism_math::Vec2;
@@ -23,7 +19,7 @@ use crate::CameraPose;
 use crate::Exposure;
 #[cfg(feature = "physical_lens")]
 use crate::Lens;
-#[cfg(feature = "post")]
+#[cfg(all(feature = "cutscene", feature = "post"))]
 use crate::PostStack;
 #[cfg(feature = "determinism")]
 use crate::ViewData;

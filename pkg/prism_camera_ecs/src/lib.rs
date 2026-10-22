@@ -84,6 +84,105 @@ impl PublishedCompositionGizmos {
     }
 }
 
+#[cfg(feature = "view_lod")]
+/// Optional per-camera update and resolution budget.
+#[derive(Clone, Copy, Debug, PartialEq, Component)]
+pub struct CameraLodComponent(pub prism_camera::ViewLod);
+
+#[cfg(feature = "view_lod")]
+/// Published result of the camera-side LOD scheduler.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CameraLodStatus {
+    /// ECS entity that owns the camera view.
+    pub entity: Entity,
+    /// Whether the camera was derived this frame instead of reusing history.
+    pub updated: bool,
+    /// Resolution scale requested by the camera policy.
+    pub resolution_scale: f32,
+    /// Number of history frames the downstream temporal consumer should retain.
+    pub history_frames: u32,
+}
+
+#[cfg(feature = "view_lod")]
+/// Per-frame LOD decisions in published-view order.
+#[derive(Debug, Default, Resource)]
+pub struct PublishedCameraLod {
+    entries: Vec<CameraLodStatus>,
+}
+
+#[cfg(feature = "view_lod")]
+impl PublishedCameraLod {
+    /// Iterates the current frame's deterministic LOD decisions.
+    pub fn iter(&self) -> impl Iterator<Item = &CameraLodStatus> {
+        self.entries.iter()
+    }
+}
+
+#[cfg(feature = "view_lod")]
+#[derive(Clone, Copy, Debug)]
+struct CameraLodState {
+    entity: Entity,
+    last_update_frame: u64,
+    last_view: PublishedView,
+    last_intent: CameraIntent,
+    last_policy: prism_camera::ViewLod,
+    last_target_size: [u32; 2],
+}
+
+#[cfg(feature = "view_lod")]
+#[derive(Debug, Default, Resource)]
+struct CameraLodRuntime {
+    states: Vec<CameraLodState>,
+    active_entities: Vec<Entity>,
+}
+
+#[cfg(feature = "view_lod")]
+impl CameraLodRuntime {
+    fn state(&self, entity: Entity) -> Option<CameraLodState> {
+        self.states
+            .binary_search_by_key(&entity, |state| state.entity)
+            .ok()
+            .map(|index| self.states[index])
+    }
+
+    fn record(
+        &mut self,
+        entity: Entity,
+        frame: u64,
+        view: PublishedView,
+        intent: CameraIntent,
+        policy: prism_camera::ViewLod,
+        target_size: [u32; 2],
+    ) {
+        match self
+            .states
+            .binary_search_by_key(&entity, |state| state.entity)
+        {
+            Ok(index) => {
+                self.states[index] = CameraLodState {
+                    entity,
+                    last_update_frame: frame,
+                    last_view: view,
+                    last_intent: intent,
+                    last_policy: policy,
+                    last_target_size: target_size,
+                }
+            }
+            Err(index) => self.states.insert(
+                index,
+                CameraLodState {
+                    entity,
+                    last_update_frame: frame,
+                    last_view: view,
+                    last_intent: intent,
+                    last_policy: policy,
+                    last_target_size: target_size,
+                },
+            ),
+        }
+    }
+}
+
 #[cfg(feature = "rig")]
 /// Optional physics/query provider used by camera rigs.
 #[derive(Default, Resource)]
@@ -277,6 +376,8 @@ pub struct CameraFrame {
     pub target_size: [u32; 2],
     /// Variable-step duration used by Director, Rig, and controller systems.
     pub dt_seconds: f32,
+    /// Nominal frame rate used by frame-budgeted camera policies such as LOD.
+    pub frame_rate_hz: f32,
 }
 
 /// Workload policy for view derivation.
@@ -324,6 +425,7 @@ impl Default for CameraFrame {
             frame: 0,
             target_size: [1, 1],
             dt_seconds: 1.0 / 60.0,
+            frame_rate_hz: 60.0,
         }
     }
 }
@@ -336,6 +438,7 @@ impl CameraFrame {
             frame: 0,
             target_size,
             dt_seconds: 1.0 / 60.0,
+            frame_rate_hz: 60.0,
         }
     }
 }
@@ -348,6 +451,16 @@ impl CameraFrame {
             self.dt_seconds.max(0.0)
         } else {
             1.0 / 60.0
+        }
+    }
+
+    /// Returns a finite positive rate for frame-budgeted camera policies.
+    #[must_use]
+    pub fn effective_frame_rate(self) -> f32 {
+        if self.frame_rate_hz.is_finite() && self.frame_rate_hz > 0.0 {
+            self.frame_rate_hz.clamp(1.0, 1_000.0)
+        } else {
+            60.0
         }
     }
 }
@@ -861,20 +974,71 @@ pub(crate) fn publish_camera_views(
     mut scratch: ResMut<CameraDeriveScratch>,
     #[cfg(feature = "parallel")] derive_policy: Res<CameraDerivePolicy>,
     #[cfg(feature = "parallel")] task_pool: Option<Res<TaskPoolResource>>,
+    #[cfg(feature = "view_lod")] lods: Query<Option<&CameraLodComponent>>,
+    #[cfg(feature = "view_lod")] mut lod_runtime: ResMut<CameraLodRuntime>,
+    #[cfg(feature = "view_lod")] mut published_lod: ResMut<PublishedCameraLod>,
 ) {
     registry.begin_frame();
     published.clear();
     diagnostics.clear();
     scratch.inputs.clear();
+    #[cfg(feature = "view_lod")]
+    published_lod.entries.clear();
 
     let frame_number = frame.frame;
     let target_size = frame.target_size;
+    #[cfg(feature = "view_lod")]
+    let frame_rate = frame.effective_frame_rate();
+    #[cfg(feature = "view_lod")]
+    lod_runtime.active_entities.clear();
     for (entity, intent, pose, mut history) in cameras.iter_mut() {
         if !intent.0.active {
             history.0.clear();
             registry.remove(entity);
             published.remove(entity);
+            #[cfg(feature = "view_lod")]
+            lod_runtime.states.retain(|state| state.entity != entity);
             continue;
+        }
+        #[cfg(feature = "view_lod")]
+        lod_runtime.active_entities.push(entity);
+        #[cfg(feature = "view_lod")]
+        if let Some(lod) = lods.get(entity).ok().flatten() {
+            let protected = matches!(
+                intent.0.kind,
+                prism_camera::ViewKind::Main
+                    | prism_camera::ViewKind::StereoEye
+                    | prism_camera::ViewKind::Reflection
+            );
+            if let Some(state) = lod_runtime.state(entity) {
+                if !protected
+                    && state.last_intent == intent.0
+                    && state.last_policy == lod.0
+                    && state.last_target_size == target_size
+                    && !lod
+                        .0
+                        .should_update(frame_number, state.last_update_frame, frame_rate)
+                {
+                    let mut reused = state.last_view;
+                    if registry
+                        .publish(entity, &mut reused.data, intent.0.importance)
+                        .is_ok()
+                    {
+                        published.push(reused);
+                        published.remember_valid(reused);
+                        published_lod.entries.push(CameraLodStatus {
+                            entity,
+                            updated: false,
+                            resolution_scale: lod.0.resolution_scale(),
+                            history_frames: lod.0.effective_history_frames(),
+                        });
+                        continue;
+                    }
+                    lod_runtime
+                        .states
+                        .retain(|candidate| candidate.entity != entity);
+                }
+            }
         }
         scratch.inputs.push(CameraDeriveInput {
             entity,
@@ -973,6 +1137,16 @@ pub(crate) fn publish_camera_views(
                     let view = PublishedView { entity, data };
                     published.remember_valid(view);
                     published.push(view);
+                    #[cfg(feature = "view_lod")]
+                    if let Some(lod) = lods.get(entity).ok().flatten() {
+                        lod_runtime.record(entity, frame_number, view, intent, lod.0, target_size);
+                        published_lod.entries.push(CameraLodStatus {
+                            entity,
+                            updated: true,
+                            resolution_scale: lod.0.resolution_scale(),
+                            history_frames: lod.0.effective_history_frames(),
+                        });
+                    }
                 }
             }
             Err(error) => {
@@ -1005,11 +1179,27 @@ pub(crate) fn publish_camera_views(
     }
     registry.finish_frame();
     published.sort_deterministically();
+    #[cfg(not(feature = "view_lod"))]
     published.last_valid.retain(|previous| {
         inputs
             .binary_search_by_key(&previous.entity, |input| input.entity)
             .is_ok()
     });
+    #[cfg(feature = "view_lod")]
+    {
+        lod_runtime.active_entities.sort_unstable();
+        let CameraLodRuntime {
+            states,
+            active_entities,
+        } = &mut *lod_runtime;
+        states.retain(|state| active_entities.binary_search(&state.entity).is_ok());
+        published
+            .last_valid
+            .retain(|previous| active_entities.binary_search(&previous.entity).is_ok());
+        published_lod
+            .entries
+            .sort_unstable_by_key(|entry| entry.entity);
+    }
     budget.finish_frame(input_count);
     frame.frame = frame.frame.wrapping_add(1);
 }
@@ -1070,6 +1260,9 @@ impl Plugin for CameraPlugin {
             .init_resource::<CameraDeriveScratch>();
         #[cfg(feature = "composition_aid")]
         app.init_resource::<PublishedCompositionGizmos>();
+        #[cfg(feature = "view_lod")]
+        app.init_resource::<CameraLodRuntime>()
+            .init_resource::<PublishedCameraLod>();
         #[cfg(feature = "parallel")]
         app.init_resource::<CameraDerivePolicy>();
         #[cfg(feature = "rig")]
@@ -1164,6 +1357,7 @@ mod tests {
         assert_eq!(CameraPerformanceBudget::stage_budget_ns(16), 100_000);
     }
 
+    #[cfg(feature = "parallel")]
     #[test]
     fn derive_policy_keeps_small_camera_batches_on_the_publication_thread() {
         let policy = CameraDerivePolicy::default();
@@ -1423,6 +1617,103 @@ mod tests {
         assert_eq!(second.len(), 1);
         assert!(second.iter().next().unwrap().data.history_valid);
         assert_eq!(second.iter().next().unwrap().data.handle, first_handle);
+    }
+
+    #[cfg(feature = "view_lod")]
+    #[test]
+    fn view_lod_reuses_non_primary_views_and_keeps_primary_views_live() {
+        let mut app = App::new();
+        app.add_plugins(CameraPlugin::new([1920, 1080]));
+        let mut capture = CameraBundle::default();
+        capture.intent.0.kind = ViewKind::SceneCapture;
+        let capture_entity = app.world_mut().spawn((
+            capture,
+            CameraLodComponent(prism_camera::ViewLod {
+                max_update_hz: 30.0,
+                min_resolution_scale: 0.5,
+                history_frames: 4,
+            }),
+        ));
+        let main_entity = app.world_mut().spawn((
+            CameraBundle::default(),
+            CameraLodComponent(prism_camera::ViewLod {
+                max_update_hz: 1.0,
+                min_resolution_scale: 0.75,
+                history_frames: 2,
+            }),
+        ));
+
+        app.update();
+        let first_capture = app
+            .world()
+            .resource::<PublishedViews>()
+            .iter()
+            .find(|view| view.entity == capture_entity)
+            .expect("scene capture is published")
+            .data;
+        let first_lod = app
+            .world()
+            .resource::<PublishedCameraLod>()
+            .iter()
+            .find(|entry| entry.entity == capture_entity)
+            .copied()
+            .expect("scene capture has a lod decision");
+        assert!(first_lod.updated);
+        assert_eq!(first_lod.resolution_scale, 0.5);
+        assert_eq!(first_lod.history_frames, 4);
+
+        app.world_mut()
+            .get_mut::<CameraPoseComponent>(capture_entity)
+            .unwrap()
+            .0
+            .position
+            .x = 10.0;
+        app.update();
+        let second_capture = app
+            .world()
+            .resource::<PublishedViews>()
+            .iter()
+            .find(|view| view.entity == capture_entity)
+            .expect("scene capture remains published")
+            .data;
+        let second_lod = app
+            .world()
+            .resource::<PublishedCameraLod>()
+            .iter()
+            .find(|entry| entry.entity == capture_entity)
+            .copied()
+            .expect("scene capture has a reused lod decision");
+        assert!(!second_lod.updated);
+        assert_eq!(
+            second_capture.view_from_world,
+            first_capture.view_from_world
+        );
+        assert!(app
+            .world()
+            .resource::<PublishedCameraLod>()
+            .iter()
+            .find(|entry| entry.entity == main_entity)
+            .is_some_and(|entry| entry.updated));
+
+        app.update();
+        let third_lod = app
+            .world()
+            .resource::<PublishedCameraLod>()
+            .iter()
+            .find(|entry| entry.entity == capture_entity)
+            .copied()
+            .expect("scene capture has a scheduled update");
+        assert!(third_lod.updated);
+        assert_ne!(
+            app.world()
+                .resource::<PublishedViews>()
+                .iter()
+                .find(|view| view.entity == capture_entity)
+                .unwrap()
+                .data
+                .view_from_world,
+            first_capture.view_from_world
+        );
     }
 
     #[test]
