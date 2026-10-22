@@ -66,6 +66,18 @@ fn register_row(controller: &mut EditorController, id: u128, object: u128, paren
         .expect("register explicit mesh Outliner identity");
 }
 
+fn mesh_object(object: u128, row: u128, mesh: EditorSceneMesh) -> ControllerObject {
+    let item = SelectionItem::entity(object);
+    let mut row = OutlinerNode::new(OutlinerId::from_raw(row), None, "Mesh");
+    row.set_selection(item.clone());
+    ControllerObject {
+        item,
+        row,
+        root: Box::new(mesh),
+        registry: editor_scene_mesh_registry(),
+    }
+}
+
 fn document(mesh: EditorSceneMesh) -> EditorController {
     let mut controller = EditorController::new();
     register_mesh(&mut controller, OBJECT, mesh);
@@ -629,7 +641,145 @@ fn profile_budget_admits_borrowed_lengths_and_blocks_create_and_bootstrap_overfl
 
 #[test]
 fn aggregate_budget_rejection_precedes_geometry_access_and_preserves_all_live_objects() {
-    const BUDGET: usize = 64 * 1024 * 1024;
+    for structural in [false, true] {
+        const BUDGET: usize = 64 * 1024 * 1024;
+        let reported_len = Arc::new(AtomicUsize::new(3));
+        let reads = Arc::new(AtomicUsize::new(0));
+        let clones = Arc::new(AtomicUsize::new(0));
+        let mut root = DynamicStruct::new();
+        root.set_represented_type_name(type_name::<EditorSceneMesh>());
+        root.insert(
+            "positions",
+            BudgetPositions {
+                values: triangle().positions,
+                reported_len: reported_len.clone(),
+                reads: reads.clone(),
+                clones: clones.clone(),
+            },
+        );
+        root.insert("indices", vec![0_u32, 1, 2]);
+        root.insert("matrix", SCENE_ID_IDENTITY_MATRIX);
+        root.insert("visible", true);
+        let mut controller = EditorController::new();
+        controller
+            .register_object(
+                SelectionItem::entity(OBJECT),
+                Box::new(root),
+                editor_scene_mesh_registry(),
+            )
+            .unwrap();
+        register_mesh(&mut controller, OBJECT + 1, triangle());
+        let original = round_trip(&controller);
+        let mut session = EditorSceneSession::new(&mut controller).unwrap();
+        let before = session.work();
+        let status = session.scene().status();
+        let uploads = upload_counts(&session);
+        let entities: Vec<_> = [OBJECT, OBJECT + 1]
+            .map(|id| {
+                session
+                    .bridge()
+                    .entity_for_object(&SelectionItem::entity(id))
+                    .unwrap()
+            })
+            .into_iter()
+            .collect();
+        let pointers = |session: &EditorSceneSession| {
+            entities
+                .iter()
+                .map(|entity| {
+                    let mesh = session.world().get::<EditorSceneMesh>(*entity).unwrap();
+                    (mesh.positions.as_ptr(), mesh.indices.as_ptr())
+                })
+                .chain(
+                    session
+                        .scene()
+                        .objects()
+                        .iter()
+                        .map(|object| (object.positions.as_ptr(), object.indices.as_ptr())),
+                )
+                .collect::<Vec<_>>()
+        };
+        let geometry = pointers(&session);
+        let prepared = controller
+            .prepare_edits(
+                [
+                    (OBJECT, "positions[0][0]", ActionValue::float(0.125)),
+                    (OBJECT + 1, "matrix[3][0]", ActionValue::float(0.25)),
+                    (OBJECT + 1, "visible", ActionValue::bool(false)),
+                ]
+                .into_iter()
+                .map(|(id, path, value)| ControllerFieldEdit {
+                    item: SelectionItem::entity(id),
+                    path: FieldPath::parse(path).unwrap(),
+                    value,
+                })
+                .collect(),
+            )
+            .unwrap();
+        controller.commit_edits(prepared).unwrap();
+        if structural {
+            // Registration changes shape without advancing model_revision, and
+            // forces complete-document preflight rather than the field delta path.
+            register_row(&mut controller, ROW, OBJECT, None);
+        }
+        // Individually legal (BUDGET - 4 bytes), but together with the untouched
+        // 48-byte sibling exceeds the document limit. Make element access fatal.
+        reported_len.store((BUDGET - 12) / 12, Ordering::Relaxed);
+        reads.store(0, Ordering::Relaxed);
+        clones.store(0, Ordering::Relaxed);
+        for _ in 0..2 {
+            let error = session.synchronize(&controller).unwrap_err();
+            assert!(error.to_string().contains("64 MiB"), "{error}");
+            assert_eq!(reads.load(Ordering::Relaxed), 0);
+            assert_eq!(clones.load(Ordering::Relaxed), 0);
+            assert_eq!(session.work(), before);
+            let rejected = session.scene().status();
+            assert_eq!(rejected.scene_generation, status.scene_generation);
+            assert_eq!(rejected.target, status.target);
+            assert_eq!(rejected.identity_allocations, status.identity_allocations);
+            assert_eq!(upload_counts(&session), uploads);
+            assert_eq!(pointers(&session), geometry);
+            for (id, entity) in [OBJECT, OBJECT + 1].into_iter().zip(&entities) {
+                assert_eq!(
+                    session
+                        .bridge()
+                        .entity_for_object(&SelectionItem::entity(id)),
+                    Some(*entity)
+                );
+                assert_mesh(&session, &original, id, &triangle());
+            }
+        }
+
+        // A rejected sync must not consume the journal or publish the sibling's
+        // matrix/visibility. Restoring the length permits retry of the entire batch.
+        reported_len.store(3, Ordering::Relaxed);
+        assert!(session.synchronize(&controller).unwrap());
+        let mut changed = triangle();
+        changed.positions[0][0] = 0.125;
+        let mut sibling = triangle();
+        sibling.matrix[3][0] = 0.25;
+        sibling.visible = false;
+        assert_mesh(&session, &controller, OBJECT, &changed);
+        assert_mesh(&session, &controller, OBJECT + 1, &sibling);
+        assert_eq!(
+            session.work().document_rebuilds,
+            before.document_rebuilds + u64::from(structural)
+        );
+        assert_eq!(
+            session.work().geometry_replacements,
+            before.geometry_replacements + 1
+        );
+        controller.execute(EditorAction::Undo).unwrap();
+        assert!(session.synchronize(&controller).unwrap());
+        for id in [OBJECT, OBJECT + 1] {
+            assert_mesh(&session, &controller, id, &triangle());
+        }
+        assert!(!session.synchronize(&controller).unwrap());
+    }
+}
+
+#[test]
+fn unchanged_dynamic_geometry_is_not_decoded_again_on_shape_changes_or_idle() {
     let reported_len = Arc::new(AtomicUsize::new(3));
     let reads = Arc::new(AtomicUsize::new(0));
     let clones = Arc::new(AtomicUsize::new(0));
@@ -639,7 +789,7 @@ fn aggregate_budget_rejection_precedes_geometry_access_and_preserves_all_live_ob
         "positions",
         BudgetPositions {
             values: triangle().positions,
-            reported_len: reported_len.clone(),
+            reported_len,
             reads: reads.clone(),
             clones: clones.clone(),
         },
@@ -655,117 +805,128 @@ fn aggregate_budget_rejection_precedes_geometry_access_and_preserves_all_live_ob
             editor_scene_mesh_registry(),
         )
         .unwrap();
-    register_mesh(&mut controller, OBJECT + 1, triangle());
-    let original = round_trip(&controller);
     let mut session = EditorSceneSession::new(&mut controller).unwrap();
-    let before = session.work();
-    let status = session.scene().status();
-    let uploads = upload_counts(&session);
-    let entities: Vec<_> = [OBJECT, OBJECT + 1]
-        .map(|id| {
-            session
-                .bridge()
-                .entity_for_object(&SelectionItem::entity(id))
-                .unwrap()
-        })
-        .into_iter()
-        .collect();
-    let pointers = |session: &EditorSceneSession| {
-        entities
-            .iter()
-            .map(|entity| {
-                let mesh = session.world().get::<EditorSceneMesh>(*entity).unwrap();
-                (mesh.positions.as_ptr(), mesh.indices.as_ptr())
-            })
-            .chain(
-                session
-                    .scene()
-                    .objects()
-                    .iter()
-                    .map(|object| (object.positions.as_ptr(), object.indices.as_ptr())),
-            )
-            .collect::<Vec<_>>()
-    };
-    let geometry = pointers(&session);
-    let prepared = controller
-        .prepare_edits(
-            [
-                (OBJECT, "positions[0][0]", ActionValue::float(0.125)),
-                (OBJECT + 1, "matrix[3][0]", ActionValue::float(0.25)),
-                (OBJECT + 1, "visible", ActionValue::bool(false)),
-            ]
-            .into_iter()
-            .map(|(id, path, value)| ControllerFieldEdit {
-                item: SelectionItem::entity(id),
-                path: FieldPath::parse(path).unwrap(),
-                value,
-            })
-            .collect(),
-        )
+    let entity = session
+        .bridge()
+        .entity_for_object(&SelectionItem::entity(OBJECT))
         .unwrap();
-    controller.commit_edits(prepared).unwrap();
-    // Individually legal (BUDGET - 4 bytes), but together with the untouched
-    // 48-byte sibling exceeds the document limit. Make element access fatal.
-    reported_len.store((BUDGET - 12) / 12, Ordering::Relaxed);
+    let pointers = {
+        let mesh = session.world().get::<EditorSceneMesh>(entity).unwrap();
+        (mesh.positions.as_ptr(), mesh.indices.as_ptr())
+    };
+    register_row(&mut controller, ROW, OBJECT, None);
     reads.store(0, Ordering::Relaxed);
     clones.store(0, Ordering::Relaxed);
-    for _ in 0..2 {
-        let error = session.synchronize(&controller).unwrap_err();
-        assert!(error.to_string().contains("64 MiB"), "{error}");
-        assert_eq!(reads.load(Ordering::Relaxed), 0);
-        assert_eq!(clones.load(Ordering::Relaxed), 0);
-        assert_eq!(session.work(), before);
-        let rejected = session.scene().status();
-        assert_eq!(rejected.scene_generation, status.scene_generation);
-        assert_eq!(rejected.target, status.target);
-        assert_eq!(rejected.identity_allocations, status.identity_allocations);
-        assert_eq!(upload_counts(&session), uploads);
-        assert_eq!(pointers(&session), geometry);
-        for (id, entity) in [OBJECT, OBJECT + 1].into_iter().zip(&entities) {
-            assert_eq!(
-                session
-                    .bridge()
-                    .entity_for_object(&SelectionItem::entity(id)),
-                Some(*entity)
-            );
-            assert_mesh(&session, &original, id, &triangle());
-        }
-    }
-
-    // A rejected sync must not consume the journal or publish the sibling's
-    // matrix/visibility. Restoring the length permits retry of the entire batch.
-    reported_len.store(3, Ordering::Relaxed);
     assert!(session.synchronize(&controller).unwrap());
-    let mut changed = triangle();
-    changed.positions[0][0] = 0.125;
-    let mut sibling = triangle();
-    sibling.matrix[3][0] = 0.25;
-    sibling.visible = false;
-    assert_mesh(&session, &controller, OBJECT, &changed);
-    assert_mesh(&session, &controller, OBJECT + 1, &sibling);
-    assert_eq!(session.work().document_rebuilds, before.document_rebuilds);
+    // One borrowed validation plus one equality scan, not a third scan to
+    // allocate/convert an unchanged EditorSceneMesh via FromReflect.
+    assert_eq!(reads.load(Ordering::Relaxed), 6);
+    assert_eq!(clones.load(Ordering::Relaxed), 0);
+    assert_eq!(session.work().geometry_replacements, 0);
     assert_eq!(
-        session.work().geometry_replacements,
-        before.geometry_replacements + 1
+        session
+            .bridge()
+            .entity_for_object(&SelectionItem::entity(OBJECT)),
+        Some(entity)
     );
-    controller.execute(EditorAction::Undo).unwrap();
-    assert!(session.synchronize(&controller).unwrap());
-    for id in [OBJECT, OBJECT + 1] {
-        assert_mesh(&session, &controller, id, &triangle());
+    let mesh = session.world().get::<EditorSceneMesh>(entity).unwrap();
+    assert_eq!((mesh.positions.as_ptr(), mesh.indices.as_ptr()), pointers);
+    let before = session.work();
+    reads.store(0, Ordering::Relaxed);
+    for _ in 0..100 {
+        assert!(!session.synchronize(&controller).unwrap());
     }
+    assert_eq!(reads.load(Ordering::Relaxed), 0);
+    assert_eq!(clones.load(Ordering::Relaxed), 0);
+    assert_eq!(session.work(), before);
+}
+
+#[test]
+fn invalid_structural_mesh_preflight_preserves_world_scene_and_retry() {
+    let mut controller = unvalidated_document(triangle());
+    let mut session = EditorSceneSession::new(&mut controller).unwrap();
+    let world = session.world().id();
+    let entity = session
+        .bridge()
+        .entity_for_object(&SelectionItem::entity(OBJECT))
+        .unwrap();
+    let work = session.work();
+    let generation = session.scene().status().scene_generation;
+    edit(
+        &mut controller,
+        OBJECT,
+        "indices[0]",
+        ActionValue::unsigned(999),
+    );
+    edit(&mut controller, OBJECT, "visible", ActionValue::bool(false));
+    register_mesh(&mut controller, OBJECT + 1, triangle());
+    register_row(&mut controller, ROW + 1, OBJECT + 1, None);
+    for _ in 0..2 {
+        assert!(session.synchronize(&controller).is_err());
+        assert_eq!(session.world().id(), world);
+        assert_eq!(
+            session
+                .bridge()
+                .entity_for_object(&SelectionItem::entity(OBJECT)),
+            Some(entity)
+        );
+        assert_eq!(
+            session
+                .bridge()
+                .entity_for_object(&SelectionItem::entity(OBJECT + 1)),
+            None
+        );
+        assert_eq!(session.work(), work);
+        assert_eq!(session.scene().status().scene_generation, generation);
+        assert_eq!(
+            session.world().get::<EditorSceneMesh>(entity),
+            Some(&triangle())
+        );
+        assert_eq!(session.scene().objects().len(), 1);
+        assert!(session.scene().objects()[0].visible);
+    }
+    edit(
+        &mut controller,
+        OBJECT,
+        "indices[0]",
+        ActionValue::unsigned(0),
+    );
+    assert!(session.synchronize(&controller).unwrap());
+    let mut expected = triangle();
+    expected.visible = false;
+    assert_mesh(&session, &controller, OBJECT, &expected);
+    assert_mesh(&session, &controller, OBJECT + 1, &triangle());
+    assert_eq!(session.world().id(), world);
+    assert_eq!(
+        session
+            .bridge()
+            .entity_for_object(&SelectionItem::entity(OBJECT)),
+        Some(entity)
+    );
     assert!(!session.synchronize(&controller).unwrap());
 }
 
 #[test]
-fn structural_registration_rebuilds_even_at_model_revision_zero() {
+fn structural_registration_retains_world_and_entity_even_at_model_revision_zero() {
     let mut controller = EditorController::new();
     let mut session = EditorSceneSession::new(&mut controller).unwrap();
+    let world = session.world().id();
     register_mesh(&mut controller, OBJECT, triangle());
     assert_eq!(controller.model_revision(), 0);
     assert!(session.synchronize(&controller).unwrap());
     assert_mesh(&session, &controller, OBJECT, &triangle());
     assert_eq!(session.scene().objects()[0].outliner, None);
     assert_eq!(session.work().document_rebuilds, 2);
+    let original_entity = session
+        .bridge()
+        .entity_for_object(&SelectionItem::entity(OBJECT))
+        .unwrap();
+    let positions = session
+        .world()
+        .get::<EditorSceneMesh>(original_entity)
+        .unwrap()
+        .positions
+        .as_ptr();
 
     register_row(&mut controller, ROW, OBJECT, None);
     assert_eq!(controller.model_revision(), 0);
@@ -774,6 +935,17 @@ fn structural_registration_rebuilds_even_at_model_revision_zero() {
         .bridge()
         .entity_for_object(&SelectionItem::entity(OBJECT))
         .unwrap();
+    assert_eq!(session.world().id(), world);
+    assert_eq!(entity, original_entity);
+    assert_eq!(
+        session
+            .world()
+            .get::<EditorSceneMesh>(entity)
+            .unwrap()
+            .positions
+            .as_ptr(),
+        positions
+    );
     assert_eq!(
         session
             .bridge()
@@ -786,6 +958,196 @@ fn structural_registration_rebuilds_even_at_model_revision_zero() {
     );
     assert_eq!(session.work().document_rebuilds, 3);
     assert!(!session.synchronize(&controller).unwrap());
+}
+
+#[test]
+fn structural_commands_publish_coalesced_properties_and_geometry_without_replacing_survivors() {
+    for dynamic in [false, true] {
+        for properties_first in [false, true] {
+            let mut controller = document(triangle());
+            if dynamic {
+                controller = round_trip(&controller);
+            }
+            let mut session = EditorSceneSession::new(&mut controller).unwrap();
+            let world = session.world().id();
+            let item = SelectionItem::entity(OBJECT);
+            let survivor = session.bridge().entity_for_object(&item).unwrap();
+            let mesh = session.world().get::<EditorSceneMesh>(survivor).unwrap();
+            let pointers = (mesh.positions.as_ptr(), mesh.indices.as_ptr());
+            let before = session.work();
+            let properties = |controller: &mut EditorController| {
+                edit(controller, OBJECT, "matrix[3][0]", ActionValue::float(0.25));
+                edit(controller, OBJECT, "visible", ActionValue::bool(false));
+            };
+            if properties_first {
+                properties(&mut controller);
+            }
+            let mut added = triangle();
+            added.positions[1][0] = 0.75;
+            added.matrix[3][1] = -0.25;
+            controller
+                .create_objects(vec![mesh_object(OBJECT + 1, ROW + 1, added.clone())])
+                .unwrap();
+            if !properties_first {
+                properties(&mut controller);
+            }
+            assert!(session.synchronize(&controller).unwrap());
+            let created = session
+                .bridge()
+                .entity_for_object(&SelectionItem::entity(OBJECT + 1))
+                .unwrap();
+            let mut expected = triangle();
+            expected.matrix[3][0] = 0.25;
+            expected.visible = false;
+            assert_mesh(&session, &controller, OBJECT, &expected);
+            assert_mesh(&session, &controller, OBJECT + 1, &added);
+            assert_eq!(session.world().id(), world);
+            assert_eq!(session.bridge().entity_for_object(&item), Some(survivor));
+            let mesh = session.world().get::<EditorSceneMesh>(survivor).unwrap();
+            assert_eq!((mesh.positions.as_ptr(), mesh.indices.as_ptr()), pointers);
+            assert_eq!(
+                session.work().geometry_replacements,
+                before.geometry_replacements
+            );
+            assert_eq!(session.work().matrix_updates, before.matrix_updates + 1);
+            assert_eq!(
+                session.work().visibility_updates,
+                before.visibility_updates + 1
+            );
+
+            // A geometry edit followed by delete loses the delta journal. It
+            // must still reach ECS and descriptors in that very same sync.
+            edit(
+                &mut controller,
+                OBJECT,
+                "positions[0][0]",
+                ActionValue::float(0.125),
+            );
+            edit(
+                &mut controller,
+                OBJECT,
+                "matrix[3][1]",
+                ActionValue::float(0.5),
+            );
+            edit(&mut controller, OBJECT, "visible", ActionValue::bool(true));
+            controller
+                .delete_objects(&[SelectionItem::entity(OBJECT + 1)])
+                .unwrap();
+            expected.positions[0][0] = 0.125;
+            expected.matrix[3][1] = 0.5;
+            expected.visible = true;
+            assert!(session.synchronize(&controller).unwrap());
+            assert_mesh(&session, &controller, OBJECT, &expected);
+            assert!(!session.world().contains(created));
+            assert_eq!(
+                session.work().geometry_replacements,
+                before.geometry_replacements + 1
+            );
+            let mesh = session.world().get::<EditorSceneMesh>(survivor).unwrap();
+            let stable_geometry = (mesh.positions.as_ptr(), mesh.indices.as_ptr());
+            let mut restored = None;
+            for action in [EditorAction::Undo, EditorAction::Redo, EditorAction::Undo] {
+                controller.execute(action).unwrap();
+                assert!(session.synchronize(&controller).unwrap());
+                assert_eq!(session.world().id(), world);
+                assert_eq!(session.bridge().entity_for_object(&item), Some(survivor));
+                assert_mesh(&session, &controller, OBJECT, &expected);
+                let mesh = session.world().get::<EditorSceneMesh>(survivor).unwrap();
+                assert_eq!(
+                    (mesh.positions.as_ptr(), mesh.indices.as_ptr()),
+                    stable_geometry
+                );
+                if let Some(entity) = session
+                    .bridge()
+                    .entity_for_object(&SelectionItem::entity(OBJECT + 1))
+                {
+                    assert_ne!(
+                        entity, created,
+                        "undo must allocate a fresh generational entity"
+                    );
+                    if let Some(previous) = restored {
+                        assert_ne!(entity, previous);
+                        assert!(!session.world().contains(previous));
+                    }
+                    restored = Some(entity);
+                    assert_mesh(&session, &controller, OBJECT + 1, &added);
+                }
+                let stable = session.work();
+                let generation = session.scene().status().scene_generation;
+                assert!(!session.synchronize(&controller).unwrap());
+                assert_eq!(session.work(), stable);
+                assert_eq!(session.scene().status().scene_generation, generation);
+            }
+        }
+    }
+}
+
+#[test]
+fn reparent_undo_redo_updates_production_relations_without_replacing_models() {
+    let mut controller = document(triangle());
+    register_mesh(&mut controller, OBJECT + 1, triangle());
+    register_row(&mut controller, ROW + 1, OBJECT + 1, None);
+    let mut session = EditorSceneSession::new(&mut controller).unwrap();
+    let world = session.world().id();
+    let parent = session
+        .bridge()
+        .entity_for_object(&SelectionItem::entity(OBJECT))
+        .unwrap();
+    let child = session
+        .bridge()
+        .entity_for_object(&SelectionItem::entity(OBJECT + 1))
+        .unwrap();
+    let positions = session
+        .world()
+        .get::<EditorSceneMesh>(child)
+        .unwrap()
+        .positions
+        .as_ptr();
+    edit(
+        &mut controller,
+        OBJECT + 1,
+        "visible",
+        ActionValue::bool(false),
+    );
+    controller
+        .reparent_rows(
+            &[OutlinerId::from_raw(ROW + 1)],
+            Some(OutlinerId::from_raw(ROW)),
+        )
+        .unwrap();
+    for (action, expected_parent) in [
+        (None, Some(parent)),
+        (Some(EditorAction::Undo), None),
+        (Some(EditorAction::Redo), Some(parent)),
+    ] {
+        if let Some(action) = action {
+            controller.execute(action).unwrap();
+        }
+        assert!(session.synchronize(&controller).unwrap());
+        assert_eq!(session.world().id(), world);
+        assert_eq!(
+            session
+                .bridge()
+                .entity_for_object(&SelectionItem::entity(OBJECT + 1)),
+            Some(child)
+        );
+        assert_eq!(
+            session.world().relation_targets::<ChildOf>(child),
+            expected_parent.as_slice()
+        );
+        let mut expected = triangle();
+        expected.visible = false;
+        assert_mesh(&session, &controller, OBJECT + 1, &expected);
+        assert_eq!(
+            session
+                .world()
+                .get::<EditorSceneMesh>(child)
+                .unwrap()
+                .positions
+                .as_ptr(),
+            positions
+        );
+    }
 }
 
 #[test]
@@ -802,11 +1164,16 @@ fn foreign_controller_with_identical_revisions_and_shape_rebuilds_by_identity() 
     assert_eq!(original.model_revision(), foreign.model_revision());
     assert_eq!(original.shape_revision(), foreign.shape_revision());
     let mut session = EditorSceneSession::new(&mut original).unwrap();
+    let original_world = session.world().id();
     assert!(session.synchronize(&foreign).unwrap());
+    let foreign_world = session.world().id();
+    assert_ne!(foreign_world, original_world);
     assert_mesh(&session, &foreign, OBJECT, &other_mesh);
     assert_eq!(session.work().document_rebuilds, 2);
     assert!(!session.synchronize(&foreign).unwrap());
     assert!(session.synchronize(&original).unwrap());
+    assert_ne!(session.world().id(), foreign_world);
+    assert_ne!(session.world().id(), original_world);
     assert_mesh(&session, &original, OBJECT, &triangle());
     assert_eq!(session.work().document_rebuilds, 3);
 }
@@ -1441,6 +1808,7 @@ fn gpu_structural_batch_create_and_middle_delete_undo_redo_remap_survivor_draw_k
     let mut controller = EditorController::new();
     install_scene_authoring_commands(&mut controller).unwrap();
     let mut session = EditorSceneSession::new(&mut controller).unwrap();
+    let world = session.world().id();
     let mut ui = EditorDesktopUi::new(controller).unwrap();
     session.initialize(&gpu).unwrap();
     let output = session_output(&gpu, "scene-session structural survivor proof");
@@ -1505,10 +1873,32 @@ fn gpu_structural_batch_create_and_middle_delete_undo_redo_remap_survivor_draw_k
         (EditorAction::Undo, vec![]), // Undo the original atomic three-object create.
         (EditorAction::Redo, vec![OBJECT, OBJECT + 1, OBJECT + 2]),
     ] {
+        let retained: Vec<_> = expected
+            .iter()
+            .filter_map(|id| {
+                let item = SelectionItem::entity(*id);
+                let entity = session.bridge().entity_for_object(&item)?;
+                let mesh = session.world().get::<EditorSceneMesh>(entity).unwrap();
+                Some((item, entity, mesh.positions.as_ptr(), mesh.indices.as_ptr()))
+            })
+            .collect();
         let before = session.scene().status();
         let rebuilds = session.work().document_rebuilds;
         assert!(ui.execute(action).unwrap().model_changed);
         render_session(&mut session, &gpu, &mut ui, &output);
+        assert_eq!(
+            session.world().id(),
+            world,
+            "encode must retain the document World"
+        );
+        for (item, entity, positions, indices) in retained {
+            assert_eq!(session.bridge().entity_for_object(&item), Some(entity));
+            let mesh = session.world().get::<EditorSceneMesh>(entity).unwrap();
+            assert_eq!(
+                (mesh.positions.as_ptr(), mesh.indices.as_ptr()),
+                (positions, indices)
+            );
+        }
         let count = expected.len() as u64;
         let bytes = expected
             .iter()

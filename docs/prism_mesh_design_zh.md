@@ -5,7 +5,7 @@
 > 目标读者：渲染、资产工具链、平台、动画/物理与性能工程人员
 > 本文依据：当前仓库代码、CPU 单测、RenderApp 真实 GPU 像素读回、蒙皮/虚拟几何/GDeflate/OMM GPU twin 与 Mesh CPU 基准；预算表与设备实测严格分栏，不用预算或 Null/CPU 回退替代真实 GPU 结论
 > 关联文档：`prism_rendering_architecture_zh.md`（全局渲染架构）、`prism_asset_design_zh.md`（资产内核）、`prism_asset_build_design_zh.md`（构建/烘焙）、`prism_material_pipeline_refactor_zh.md`（材质与着色 ABI）、`prism_scene_design_zh.md`（场景与实例）、`prism_aaa_advanced_features_zh.md`（AAA 特性总表）
-> 最后更新：2026-10-15
+> 最后更新：2026-10-22
 
 ## 0. 阅读地图与本文责任范围
 
@@ -836,6 +836,10 @@ Source(FBX/USD/glTF) → Scene Source IR → Mesh IR
 | 页请求洪峰 | 固定容量合并，溢出走预算降级 |
 | 设备丢失 | 几何重建，场景语义不变 |
 | 极端缩放（1e-5 / 1e5） | 包围体与误差不溢出 |
+
+### 19.5 2026-10-22 补充复核
+
+当前工作树原样执行 `cargo test -p prism_mesh --lib --tests`：34 项库单测、14 项集成测试全部通过。该结果只确认 `prism_mesh` 数据模型、变形参考实现及其集成契约；不覆盖资产构建、RenderApp、RenderScene、真实 GPU、产品级图像回归或完整场景性能门槛。尝试执行 `cargo test -p prism_render_app mesh:: --lib -- --nocapture` 时，因编译产物写满磁盘（`No space left on device`）而未进入测试阶段，因此本次不记作 RenderApp 通过或失败。对应构建产物已清理；其余 Mesh 验收仍以 §26 的逐项证据为准。
 
 ## 20. 易维护性与演进规则
 

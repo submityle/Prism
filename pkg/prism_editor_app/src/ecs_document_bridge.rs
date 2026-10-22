@@ -15,8 +15,11 @@ use alloc::{
 use core::fmt;
 
 use prism_ecs::{
-    entity::Entity, hierarchy::ChildOf, partition::persistence::entity_component_ids,
-    relation::Relation, world::World,
+    entity::Entity,
+    hierarchy::ChildOf,
+    partition::persistence::entity_component_ids,
+    relation::Relation,
+    world::{World, WorldId},
 };
 use prism_editor_core::SelectionItem;
 use prism_editor_panels::{OutlinerId, OutlinerNode};
@@ -24,9 +27,15 @@ use prism_reflect::{StableTypeId, TypeRegistry};
 
 use crate::{ControllerError, ControllerLimits, EditorController};
 
+mod lifecycle;
+
+pub use lifecycle::EditorEcsStructureSync;
+
 /// Failure while projecting or capturing one editor document through ECS.
 #[derive(Debug)]
 pub enum EditorEcsDocumentError {
+    /// Generational entity handles belong to a different World.
+    WorldMismatch,
     /// An edit gesture is active, so the model is not a stable snapshot.
     Busy,
     /// The destination World has no reflected component registration for a model type.
@@ -81,6 +90,14 @@ pub enum EditorEcsDocumentError {
     },
     /// The ECS `ChildOf` graph contains a cycle and cannot form an Outliner tree.
     HierarchyCycle,
+    /// Deleting an authored entity would delete an entity outside the removal
+    /// set or violate a host relation's target-deletion policy.
+    DeletionConflict {
+        /// Entity the authoring document removed.
+        target: Entity,
+        /// Entity whose incoming relation prevents safe removal.
+        source: Entity,
+    },
     /// The reconstructed controller rejected a model or Outliner snapshot.
     Controller(ControllerError),
 }
@@ -88,6 +105,7 @@ pub enum EditorEcsDocumentError {
 impl fmt::Display for EditorEcsDocumentError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::WorldMismatch => f.write_str("ECS document bridge belongs to a different World"),
             Self::Busy => f.write_str("cannot bridge an active editor document edit"),
             Self::UnregisteredComponent(path) => {
                 write!(f, "ECS reflected component is not registered: {path}")
@@ -138,6 +156,10 @@ impl fmt::Display for EditorEcsDocumentError {
                 write!(f, "ECS rejected Outliner edge {child:?} -> {parent:?}")
             }
             Self::HierarchyCycle => f.write_str("ECS Outliner hierarchy contains a cycle"),
+            Self::DeletionConflict { target, source } => write!(
+                f,
+                "removing authored entity {target:?} conflicts with incoming relation from {source:?}"
+            ),
             Self::Controller(error) => error.fmt(f),
         }
     }
@@ -159,6 +181,7 @@ impl From<ControllerError> for EditorEcsDocumentError {
 /// `DocumentCodec` encoding; it never mutates the source controller or its
 /// undo/redo history.
 pub struct EditorEcsDocumentBridge {
+    world_id: WorldId,
     objects: BTreeMap<SelectionItem, Entity>,
     rows: BTreeMap<OutlinerId, Entity>,
     row_ids: BTreeMap<Entity, OutlinerId>,
@@ -172,6 +195,8 @@ impl EditorEcsDocumentBridge {
     /// first entity is allocated. If insertion or hierarchy linking fails, all
     /// entities allocated by this call are despawned. Lifecycle hooks and
     /// observer side effects triggered during that cleanup cannot be undone.
+    /// A hook replacing World aborts further insertions and cleanup: old entity
+    /// handles must never be used against the replacement World.
     pub fn materialize(
         world: &mut World,
         controller: &EditorController,
@@ -222,6 +247,7 @@ impl EditorEcsDocumentBridge {
         }
 
         let mut bridge = Self {
+            world_id: world.id(),
             objects: BTreeMap::new(),
             rows: BTreeMap::new(),
             row_ids: BTreeMap::new(),
@@ -247,14 +273,39 @@ impl EditorEcsDocumentBridge {
 
         for (item, root) in models {
             let entity = bridge.objects[&item];
-            if !world.insert_reflect(entity, &*root) {
+            let inserted = world.insert_reflect(entity, &*root);
+            if world.id() != bridge.world_id {
+                return Err(EditorEcsDocumentError::WorldMismatch);
+            }
+            if !inserted {
                 let type_path = model_types[&item].0.clone();
                 bridge.rollback(world);
                 return Err(EditorEcsDocumentError::InsertRejected { item, type_path });
             }
         }
 
+        // Reflected insertions invoke host hooks. Check their resulting World,
+        // not just the pre-insertion registration and identity bindings.
+        for (item, (type_path, _)) in &model_types {
+            if let Err(error) =
+                lifecycle::validate_model(world, bridge.objects[item], item, type_path)
+            {
+                bridge.rollback(world);
+                return Err(error);
+            }
+        }
+        for &entity in bridge.rows.values() {
+            if !world.contains(entity) {
+                bridge.rollback(world);
+                return Err(EditorEcsDocumentError::StaleEntity(entity));
+            }
+        }
+
         if has_hierarchy {
+            if let Err(error) = lifecycle::validate_child_of_policy(world) {
+                bridge.rollback(world);
+                return Err(error);
+            }
             world.register_child_of();
             for row in controller.document_outliner_nodes() {
                 let Some(parent_id) = row.parent() else {
@@ -303,16 +354,26 @@ impl EditorEcsDocumentBridge {
         source: &EditorController,
         limits: ControllerLimits,
     ) -> Result<EditorController, EditorEcsDocumentError> {
+        if world.id() != self.world_id {
+            return Err(EditorEcsDocumentError::WorldMismatch);
+        }
         if source.has_active_edit() {
             return Err(EditorEcsDocumentError::Busy);
         }
         let object_ids_match = source
             .document_objects()
             .all(|(item, _, _)| self.objects.contains_key(item));
-        let row_ids_match = source
-            .document_outliner_nodes()
-            .iter()
-            .all(|row| self.rows.contains_key(&row.id()));
+        let object_entities: alloc::collections::BTreeSet<_> =
+            self.objects.values().copied().collect();
+        let row_ids_match = source.document_outliner_nodes().iter().all(|row| {
+            let Some(entity) = self.rows.get(&row.id()) else {
+                return false;
+            };
+            match row.selection() {
+                Some(item) => self.objects.get(item) == Some(entity),
+                None => !object_entities.contains(entity),
+            }
+        });
         if source.document_objects().len() != self.objects.len()
             || source.document_outliner_nodes().len() != self.rows.len()
             || !object_ids_match
@@ -416,7 +477,15 @@ impl EditorEcsDocumentBridge {
     /// Despawns all still-live bridge entities in reverse creation order.
     /// Returns the number of bridge-owned entities that were live on entry,
     /// including entities removed by a relation's cascade policy.
+    /// A different World is never mutated and returns zero.
+    /// If a teardown hook replaces World, remaining old handles are abandoned;
+    /// the returned entry count is not a count of completed despawn calls.
+    /// Unlike structural synchronization, teardown does not preflight foreign
+    /// incoming relations; the host must ensure its cleanup policies are safe.
     pub fn despawn(self, world: &mut World) -> usize {
+        if world.id() != self.world_id {
+            return 0;
+        }
         let live_owned = self
             .owned
             .iter()
@@ -424,13 +493,22 @@ impl EditorEcsDocumentBridge {
             .count();
         for entity in self.owned.into_iter().rev() {
             world.despawn(entity);
+            if world.id() != self.world_id {
+                break;
+            }
         }
         live_owned
     }
 
     fn rollback(&mut self, world: &mut World) {
+        if world.id() != self.world_id {
+            return;
+        }
         for entity in self.owned.drain(..).rev() {
             world.despawn(entity);
+            if world.id() != self.world_id {
+                break;
+            }
         }
         self.objects.clear();
         self.rows.clear();

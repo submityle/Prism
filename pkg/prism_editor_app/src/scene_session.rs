@@ -26,7 +26,8 @@ use crate::{
 /// Actual synchronization work, excluding UI-only revisions and idle polls.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct EditorSceneSyncWork {
-    /// Complete document projections installed (initial load included).
+    /// Complete scene documents installed (initial load included). Same-owner
+    /// structure changes restage the scene but retain the ECS World.
     pub document_rebuilds: u64,
     /// Changed objects published into ECS and scene.
     pub objects_synchronized: u64,
@@ -157,20 +158,21 @@ impl EditorSceneSession {
         if controller.has_active_edit() || self.scene.gesture_active() {
             return Ok(false);
         }
-        if !Arc::ptr_eq(&self.projection.owner, &controller.document_identity())
-            || self.projection.shape_revision != controller.shape_revision()
-        {
+        if !Arc::ptr_eq(&self.projection.owner, &controller.document_identity()) {
             self.prepare_document(controller)?;
             self.commit_document();
             return Ok(true);
+        }
+        if self.projection.shape_revision != controller.shape_revision() {
+            return self.synchronize_structure(controller);
         }
         if self.projection.model_revision == controller.model_revision() {
             return Ok(false);
         }
         let Some(changes) = controller.changed_fields_since(self.projection.model_revision) else {
-            self.prepare_document(controller)?;
-            self.commit_document();
-            return Ok(true);
+            // A structural command may have cleared the bounded field journal.
+            // Losing delta history must not replace this document's live World.
+            return self.synchronize_structure(controller);
         };
 
         // Reject the final aggregate before decoding or cloning any geometry.
@@ -240,7 +242,7 @@ impl EditorSceneSession {
                     .scene
                     .object(id)
                     .ok_or_else(|| error("missing scene mesh descriptor"))?;
-                replacements.push(descriptor(item, &mesh, old.outliner)?);
+                replacements.push(descriptor(item, mesh.clone(), old.outliner)?);
                 ecs_updates.push((entity, MeshUpdate::Mesh(mesh)));
             }
         }
@@ -281,6 +283,140 @@ impl EditorSceneSession {
             .work
             .visibility_updates
             .saturating_add(visibility.len() as u64);
+        Ok(true)
+    }
+
+    fn synchronize_structure(
+        &mut self,
+        controller: &EditorController,
+    ) -> Result<bool, DesktopError> {
+        // Structural commands clear the field journal. Inspect the complete
+        // final document so property edits on either side of a command publish
+        // in the same transaction. Admit all lengths before touching elements.
+        let geometry_bytes = document_geometry_bytes(
+            controller
+                .document_objects()
+                .map(|(item, root, _)| (item, root)),
+        )?;
+        let mut rows = BTreeMap::new();
+        for row in controller.document_outliner_nodes() {
+            if let Some(item) = row.selection()
+                && rows.insert(item, row.id()).is_some()
+            {
+                return Err(error("scene object has multiple Outliner identities"));
+            }
+        }
+        let object_count = controller.document_objects().len();
+        let mut objects = Vec::with_capacity(object_count);
+        let mut updates = Vec::new();
+        let mut geometry_updates = 0u64;
+        let mut matrix_updates = 0u64;
+        let mut visibility_updates = 0u64;
+        for (item, root, _) in controller.document_objects() {
+            editor_scene_mesh_validate(root)?;
+            let id = scene_identity(item)?;
+            let outliner = rows.get(item).copied();
+            match (
+                self.projection.bridge.entity_for_object(item),
+                self.scene.object(id),
+            ) {
+                (Some(entity), Some(old)) => {
+                    if self
+                        .projection
+                        .world
+                        .get::<EditorSceneMesh>(entity)
+                        .is_none()
+                    {
+                        return Err(error("missing scene mesh ECS component"));
+                    }
+                    // Compare with the published authoring projection, not the
+                    // runtime model: unchanged authored fields must not clobber
+                    // runtime values. No whole-model decode of unchanged data.
+                    let matrix = editor_scene_mesh_matrix(root)?;
+                    let visible = mesh_visibility(root)?;
+                    let matrix_change = (matrix != old.model).then_some(matrix);
+                    let visible_change = (visible != old.visible).then_some(visible);
+                    let geometry = if geometry_matches(root, old) {
+                        let mut object = old.clone();
+                        object.outliner = outliner;
+                        object.model = matrix;
+                        object.visible = visible;
+                        objects.push(object);
+                        None
+                    } else {
+                        let mesh = decode_mesh(root)?;
+                        objects.push(descriptor(item, mesh.clone(), outliner)?);
+                        geometry_updates += 1;
+                        Some(mesh)
+                    };
+                    if geometry.is_none() {
+                        matrix_updates += u64::from(matrix_change.is_some());
+                        visibility_updates += u64::from(visible_change.is_some());
+                    }
+                    if geometry.is_some() || matrix_change.is_some() || visible_change.is_some() {
+                        updates.push((entity, geometry, matrix_change, visible_change));
+                    }
+                }
+                (None, None) => objects.push(descriptor(item, decode_mesh(root)?, outliner)?),
+                _ => return Err(error("inconsistent scene mesh identity mapping")),
+            }
+        }
+        // All fallible scene validation, including descriptor bindings and
+        // generation limits, precedes mutation of the retained World/bridge.
+        self.scene.stage_document(
+            controller,
+            DesktopSceneDocument {
+                objects,
+                camera: self.camera,
+                depth: self.depth,
+            },
+        )?;
+        if let Err(cause) = self
+            .projection
+            .bridge
+            .synchronize_structure(&mut self.projection.world, controller)
+        {
+            self.scene.discard_document();
+            return Err(DesktopError::Renderer(cause.to_string()));
+        }
+        for (entity, geometry, matrix, visible) in updates {
+            // The private World exposes no host insertion hooks; the bridge
+            // preserves prevalidated survivors and their runtime components.
+            let mut mesh = self
+                .projection
+                .world
+                .get_mut::<EditorSceneMesh>(entity)
+                .expect("scene session owns prevalidated live ECS entities");
+            if let Some(geometry) = geometry {
+                mesh.positions = geometry.positions;
+                mesh.indices = geometry.indices;
+            }
+            if let Some(matrix) = matrix {
+                mesh.matrix = matrix;
+            }
+            if let Some(visible) = visible {
+                mesh.visible = visible;
+            }
+        }
+        self.scene.commit_document();
+        self.projection.shape_revision = controller.shape_revision();
+        self.projection.model_revision = controller.model_revision();
+        self.projection.object_count = object_count;
+        self.projection.geometry_bytes = geometry_bytes;
+        self.work.document_rebuilds = self.work.document_rebuilds.saturating_add(1);
+        self.work.objects_synchronized = self
+            .work
+            .objects_synchronized
+            .saturating_add(object_count as u64);
+        self.work.geometry_replacements = self
+            .work
+            .geometry_replacements
+            .saturating_add(geometry_updates);
+        self.work.matrix_updates = self.work.matrix_updates.saturating_add(matrix_updates);
+        self.work.visibility_updates = self
+            .work
+            .visibility_updates
+            .saturating_add(visibility_updates);
         Ok(true)
     }
 }
@@ -370,7 +506,7 @@ fn build_projection(
     let mut objects = Vec::with_capacity(controller.document_objects().len());
     for (item, root, _) in controller.document_objects() {
         let mesh = decode_mesh(root)?;
-        objects.push(descriptor(item, &mesh, rows.get(item).copied())?);
+        objects.push(descriptor(item, mesh, rows.get(item).copied())?);
     }
     // Fresh World isolates failed preparation and component lifecycle effects
     // from the currently published document projection.
@@ -420,19 +556,66 @@ fn decode_mesh(root: &dyn Reflect) -> Result<EditorSceneMesh, DesktopError> {
 
 fn descriptor(
     item: &SelectionItem,
-    mesh: &EditorSceneMesh,
+    mesh: EditorSceneMesh,
     outliner: Option<prism_editor_panels::OutlinerId>,
 ) -> Result<DesktopSceneObject, DesktopError> {
     Ok(DesktopSceneObject {
         id: scene_identity(item)?,
         selection: item.clone(),
         outliner,
-        positions: mesh.positions.clone(),
-        indices: mesh.indices.clone(),
+        positions: mesh.positions,
+        indices: mesh.indices,
         model: mesh.matrix,
         visible: mesh.visible,
         sort_key: 0,
     })
+}
+
+// Mesh validation has already checked the schema and every element. Compare
+// borrowed geometry to the published descriptor without FromReflect allocating
+// temporary vectors for unchanged typed or codec-decoded dynamic roots.
+fn geometry_matches(root: &dyn Reflect, old: &DesktopSceneObject) -> bool {
+    if let Some(mesh) = root.downcast_ref::<EditorSceneMesh>() {
+        return mesh.positions == old.positions && mesh.indices == old.indices;
+    }
+    let ReflectRef::Struct(fields) = root.reflect_ref() else {
+        return false;
+    };
+    fields
+        .field("positions")
+        .is_some_and(|value| geometry_value_matches(value, &old.positions))
+        && fields
+            .field("indices")
+            .is_some_and(|value| geometry_value_matches(value, &old.indices))
+}
+
+fn geometry_value_matches(value: &dyn Reflect, old: &dyn Reflect) -> bool {
+    match (value.reflect_ref(), old.reflect_ref()) {
+        (ReflectRef::List(value), ReflectRef::List(old)) => {
+            value.len() == old.len()
+                && (0..value.len()).all(|i| match (value.get(i), old.get(i)) {
+                    (Some(value), Some(old)) => geometry_value_matches(value, old),
+                    _ => false,
+                })
+        }
+        (ReflectRef::Array(value), ReflectRef::Array(old)) => {
+            value.len() == old.len()
+                && (0..value.len()).all(|i| match (value.get(i), old.get(i)) {
+                    (Some(value), Some(old)) => geometry_value_matches(value, old),
+                    _ => false,
+                })
+        }
+        _ => {
+            value
+                .downcast_ref::<f32>()
+                .zip(old.downcast_ref::<f32>())
+                .is_some_and(|(value, old)| value == old)
+                || value
+                    .downcast_ref::<u32>()
+                    .zip(old.downcast_ref::<u32>())
+                    .is_some_and(|(value, old)| value == old)
+        }
+    }
 }
 
 fn error(message: &str) -> DesktopError {
@@ -563,7 +746,232 @@ impl DesktopRenderer for EditorSceneSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use prism_ecs::prelude::{ChildOf, Component};
+    use prism_editor_panels::{OutlinerId, OutlinerNode};
     use prism_reflect::DynamicStruct;
+
+    #[derive(Component, Debug, PartialEq)]
+    struct RuntimeOnly(u32);
+
+    fn mesh() -> EditorSceneMesh {
+        EditorSceneMesh {
+            positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            indices: vec![0, 1, 2],
+            matrix: SCENE_ID_IDENTITY_MATRIX,
+            visible: true,
+        }
+    }
+
+    fn register(controller: &mut EditorController, id: u128) {
+        controller
+            .register_object(
+                SelectionItem::entity(id),
+                Box::new(mesh()),
+                crate::editor_scene_mesh_registry(),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn structural_publication_preserves_runtime_components_and_unauthored_model_values() {
+        let mut controller = EditorController::new();
+        register(&mut controller, 1);
+        let mut session = EditorSceneSession::new(&mut controller).unwrap();
+        let world = session.world().id();
+        let entity = session
+            .bridge()
+            .entity_for_object(&SelectionItem::entity(1))
+            .unwrap();
+        session.projection.world.insert(entity, RuntimeOnly(91));
+        let mut runtime = mesh();
+        runtime.matrix[3][2] = 0.75;
+        runtime.visible = false;
+        runtime.positions[0][1] = 0.25;
+        *session
+            .projection
+            .world
+            .get_mut::<EditorSceneMesh>(entity)
+            .unwrap() = runtime.clone();
+        let geometry = session
+            .world()
+            .get::<EditorSceneMesh>(entity)
+            .unwrap()
+            .positions
+            .as_ptr();
+        controller
+            .register_outliner_node(OutlinerNode::new(OutlinerId::from_raw(10), None, "Group"))
+            .unwrap();
+        assert!(session.synchronize(&controller).unwrap());
+        assert_eq!(session.world().id(), world);
+        assert_eq!(
+            session
+                .bridge()
+                .entity_for_object(&SelectionItem::entity(1)),
+            Some(entity)
+        );
+        assert_eq!(
+            session.world().get::<RuntimeOnly>(entity),
+            Some(&RuntimeOnly(91))
+        );
+        assert_eq!(
+            session.world().get::<EditorSceneMesh>(entity),
+            Some(&runtime)
+        );
+        assert_eq!(
+            session
+                .world()
+                .get::<EditorSceneMesh>(entity)
+                .unwrap()
+                .positions
+                .as_ptr(),
+            geometry
+        );
+
+        let edit = controller
+            .prepare_edits(vec![crate::ControllerFieldEdit {
+                item: SelectionItem::entity(1),
+                path: prism_editor_reflect::FieldPath::parse("positions[1][0]").unwrap(),
+                value: prism_editor_ui::ActionValue::float(0.5),
+            }])
+            .unwrap();
+        controller.commit_edits(edit).unwrap();
+        controller
+            .register_outliner_node(OutlinerNode::new(
+                OutlinerId::from_raw(11),
+                None,
+                "Another group",
+            ))
+            .unwrap();
+        assert!(session.synchronize(&controller).unwrap());
+        runtime.positions = mesh().positions;
+        runtime.positions[1][0] = 0.5;
+        assert_eq!(
+            session.world().get::<EditorSceneMesh>(entity),
+            Some(&runtime)
+        );
+        assert_eq!(
+            session.world().get::<RuntimeOnly>(entity),
+            Some(&RuntimeOnly(91))
+        );
+        assert_eq!(session.world().id(), world);
+        assert!(!session.synchronize(&controller).unwrap());
+    }
+
+    #[test]
+    fn bridge_rejection_discards_staged_scene_and_does_not_publish_properties_or_revisions() {
+        let mut controller = EditorController::new();
+        register(&mut controller, 1);
+        register(&mut controller, 2);
+        let mut session = EditorSceneSession::new(&mut controller).unwrap();
+        let survivor = session
+            .bridge()
+            .entity_for_object(&SelectionItem::entity(1))
+            .unwrap();
+        let removed = session
+            .bridge()
+            .entity_for_object(&SelectionItem::entity(2))
+            .unwrap();
+        let foreign = session.projection.world.spawn(());
+        session.projection.world.register_child_of();
+        session
+            .projection
+            .world
+            .add_relation::<ChildOf>(foreign, removed);
+        let world = session.world().id();
+        let work = session.work();
+        let generation = session.scene().status().scene_generation;
+        let shape = session.projection.shape_revision;
+        let model = session.projection.model_revision;
+        let edit = controller
+            .prepare_edits(vec![crate::ControllerFieldEdit {
+                item: SelectionItem::entity(1),
+                path: prism_editor_reflect::FieldPath::parse("visible").unwrap(),
+                value: prism_editor_ui::ActionValue::bool(false),
+            }])
+            .unwrap();
+        controller.commit_edits(edit).unwrap();
+        register(&mut controller, 3);
+        controller
+            .delete_objects(&[SelectionItem::entity(2)])
+            .unwrap();
+        for _ in 0..2 {
+            assert!(session.synchronize(&controller).is_err());
+            assert_eq!(session.world().id(), world);
+            assert_eq!(session.work(), work);
+            assert_eq!(session.projection.shape_revision, shape);
+            assert_eq!(session.projection.model_revision, model);
+            assert_eq!(
+                session
+                    .bridge()
+                    .entity_for_object(&SelectionItem::entity(3)),
+                None
+            );
+            assert!(session.world().contains(removed));
+            assert!(session.world().contains(foreign));
+            assert_eq!(
+                session.world().get::<EditorSceneMesh>(survivor),
+                Some(&mesh())
+            );
+            assert_eq!(session.scene().status().scene_generation, generation);
+            assert_eq!(session.scene().objects().len(), 2);
+            assert!(session
+                .scene()
+                .objects()
+                .iter()
+                .all(|object| object.visible));
+        }
+        // A leaked candidate would publish object 3 and the hidden survivor.
+        // DesktopScene reloads its generation even on an empty explicit commit,
+        // so check descriptor contents, not the generation of that host action.
+        session.scene.commit_document();
+        assert!(session
+            .scene()
+            .objects()
+            .iter()
+            .all(|object| object.visible));
+        assert!(session
+            .scene()
+            .objects()
+            .iter()
+            .any(|object| object.selection == SelectionItem::entity(2)));
+        assert!(!session
+            .scene()
+            .objects()
+            .iter()
+            .any(|object| object.selection == SelectionItem::entity(3)));
+        session
+            .projection
+            .world
+            .remove_relation::<ChildOf>(foreign, removed);
+        assert!(session.synchronize(&controller).unwrap());
+        assert_eq!(session.world().id(), world);
+        assert_eq!(
+            session
+                .bridge()
+                .entity_for_object(&SelectionItem::entity(1)),
+            Some(survivor)
+        );
+        assert!(
+            !session
+                .world()
+                .get::<EditorSceneMesh>(survivor)
+                .unwrap()
+                .visible
+        );
+        assert!(!session.world().contains(removed));
+        assert!(session.world().contains(foreign));
+        assert_eq!(session.scene().objects().len(), 2);
+        assert_eq!(
+            session
+                .scene()
+                .objects()
+                .iter()
+                .filter(|object| !object.visible)
+                .count(),
+            1
+        );
+        assert!(!session.synchronize(&controller).unwrap());
+    }
 
     #[test]
     fn visibility_access_does_not_require_geometry_or_matrix() {
