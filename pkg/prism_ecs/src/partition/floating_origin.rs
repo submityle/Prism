@@ -297,11 +297,25 @@ impl FloatingOrigin {
     /// Physics integrates in local space, so a fast entity's `local` can grow
     /// past a cell boundary; calling this keeps the `f32` offset small and its
     /// precision high without changing the entity's absolute world position.
+    ///
+    /// # Panics
+    /// Panics if the required cell index is outside the representable `i64`
+    /// range. Use [`try_normalize`](Self::try_normalize) when that boundary is
+    /// reachable and should be handled without panicking.
     pub fn normalize(&self, cell: GridCell, local: LocalPos) -> (GridCell, LocalPos) {
-        let (cx, lx) = self.carry_axis(cell.x, local.x);
-        let (cy, ly) = self.carry_axis(cell.y, local.y);
-        let (cz, lz) = self.carry_axis(cell.z, local.z);
-        (GridCell::new(cx, cy, cz), LocalPos::new(lx, ly, lz))
+        self.try_normalize(cell, local)
+            .expect("floating-origin normalization exceeds the i64 cell domain")
+    }
+
+    /// Checked form of [`normalize`](Self::normalize). Returns `None` rather
+    /// than changing world position when normalization would exceed the `i64`
+    /// cell domain or the local offset cannot be represented as a canonical
+    /// cell-relative value.
+    pub fn try_normalize(&self, cell: GridCell, local: LocalPos) -> Option<(GridCell, LocalPos)> {
+        let (cx, lx) = self.carry_axis(cell.x, local.x)?;
+        let (cy, ly) = self.carry_axis(cell.y, local.y)?;
+        let (cz, lz) = self.carry_axis(cell.z, local.z)?;
+        Some((GridCell::new(cx, cy, cz), LocalPos::new(lx, ly, lz)))
     }
 
     /// Floor-divides `value` by the cell size into `(cell_index, local)` with
@@ -321,12 +335,20 @@ impl FloatingOrigin {
     }
 
     /// Normalises one axis: folds a local offset back into `[0, cell_size)` and
-    /// carries the whole-cell part into the integer index. If the carry would
-    /// exceed the representable cell domain, the index saturates at its bound
-    /// rather than wrapping.
-    fn carry_axis(&self, cell: i64, local: f32) -> (i64, f32) {
+    /// carries the whole-cell part into the integer index. Returns `None` if
+    /// either the carry or the canonical local value is unrepresentable.
+    fn carry_axis(&self, cell: i64, local: f32) -> Option<(i64, f32)> {
         let (dcell, rem) = self.split_axis(local as f64);
-        (cell.saturating_add(dcell), rem as f32)
+        if !rem.is_finite() || rem < 0.0 || rem >= self.cell_size {
+            return None;
+        }
+        let cell = (cell as i128).checked_add(dcell as i128)?;
+        let cell = i64::try_from(cell).ok()?;
+        let rem = rem as f32;
+        if !rem.is_finite() || rem < 0.0 || rem as f64 >= self.cell_size {
+            return None;
+        }
+        Some((cell, rem))
     }
 }
 
@@ -432,19 +454,24 @@ mod tests {
     }
 
     #[test]
-    fn normalize_saturates_cell_carry_at_domain_bounds() {
+    fn normalize_rejects_cell_carry_outside_domain_without_losing_position() {
         let grid = FloatingOrigin::new(100.0);
-        let (high_cell, high_local) = grid.normalize(
-            GridCell::new(i64::MAX, 0, 0),
-            LocalPos::new(100.0, 0.0, 0.0),
-        );
-        assert_eq!(high_cell.x, i64::MAX);
-        assert!(high_local.x.abs() < 1.0e-3);
+        assert!(grid
+            .try_normalize(
+                GridCell::new(i64::MAX, 0, 0),
+                LocalPos::new(100.0, 0.0, 0.0),
+            )
+            .is_none());
 
-        let (low_cell, low_local) =
-            grid.normalize(GridCell::new(i64::MIN, 0, 0), LocalPos::new(-1.0, 0.0, 0.0));
-        assert_eq!(low_cell.x, i64::MIN);
-        assert!((low_local.x - 99.0).abs() < 1.0e-3);
+        assert!(grid
+            .try_normalize(GridCell::new(i64::MIN, 0, 0), LocalPos::new(-1.0, 0.0, 0.0))
+            .is_none());
+
+        let (cell, local) = grid
+            .try_normalize(GridCell::new(i64::MAX, 0, 0), LocalPos::new(99.0, 0.0, 0.0))
+            .unwrap();
+        assert_eq!(cell.x, i64::MAX);
+        assert!((local.x - 99.0).abs() < 1.0e-3);
     }
 
     #[test]
