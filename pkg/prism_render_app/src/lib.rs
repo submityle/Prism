@@ -60,13 +60,17 @@
 
 extern crate alloc;
 
+#[cfg(feature = "baked-image")]
+mod baked_image;
 mod bin_queue;
 mod config;
 mod device_loss;
 pub mod display_transform_gpu;
 mod draw;
 mod ecs_columns;
+mod fabric_frame;
 mod feature_mapping;
+mod forward_lit;
 mod frame;
 mod image;
 mod intent;
@@ -75,14 +79,19 @@ mod lighting;
 mod lighting_gpu;
 pub mod lighting_scene;
 pub mod lighting_trace_gpu;
+#[cfg(feature = "physics")]
+mod m15_topology_surface;
 mod material;
 mod mesh;
 mod mesh_draw;
 mod mesh_pipeline;
 mod mesh_pipelines;
 mod mesh_source;
+mod native_geometry_gpu;
 mod native_scene_gpu;
 mod particle;
+#[cfg(feature = "physics")]
+mod physics_surface;
 mod pipeline_cache;
 mod pipeline_pass;
 mod plugin;
@@ -99,6 +108,9 @@ mod scene;
 mod sets;
 mod startup;
 mod stats;
+pub mod surface_view_frame;
+pub mod surface_view_targets;
+pub mod surface_views;
 mod sync_world;
 mod systems;
 mod target;
@@ -108,12 +120,18 @@ mod view_driver;
 mod view_query;
 mod views;
 pub mod visibility;
+mod visibility_bridge;
 
 #[cfg(test)]
 mod image_tests;
 #[cfg(test)]
 mod tests;
 
+#[cfg(feature = "baked-image")]
+pub use baked_image::{
+    BakedImage, BakedImageBindError, BakedImageConfig, BakedImageConfigError, BakedImageError,
+    BakedImageFrame, BakedImagePlugin, BakedImageRuntime, BakedImageState,
+};
 pub use bin_queue::{bin_indirect_args, BinQueueOutcome};
 pub use config::RenderAppConfig;
 pub use device_loss::{DeviceLossSignal, DeviceRecoveryStatus};
@@ -125,11 +143,17 @@ pub use ecs_columns::{
     register_gpu_column, EcsColumnDiscoveryStats, EcsColumnUploadError, EcsColumnUploadStats,
     EcsResidentColumns, GpuColumnAppExt, GpuColumnSyncReport, ResidentEcsColumn,
 };
+pub use fabric_frame::{
+    ExtractedRenderFabricFrame, NativeFabricFrameAdmissionError, NativeFabricFrameError,
+};
 pub use feature_mapping::{
     FeatureMappingCache, FeatureMappingCacheStats, FeatureMappingError, FeaturePassBinding,
     FeaturePassSet, FeatureSelectionMapper,
 };
-pub use frame::{RENDER_DEPTH_FORMAT, RENDER_TARGET_FORMAT};
+pub use frame::{
+    extract_frame_graph_texture_imports, FrameGraphTextureImport, FrameGraphTextureImports,
+    RENDER_DEPTH_FORMAT, RENDER_TARGET_FORMAT,
+};
 pub use image::GpuImage;
 pub use intent::{RenderIntent, RenderViewport};
 pub use label::{Render, RenderApp, RenderStartup};
@@ -143,6 +167,21 @@ pub use lighting_gpu::LightingGpuPrepareError;
 pub use lighting_scene::{LightingLightScene, LightingSceneExtractError, NativeLights};
 pub use lighting_trace_gpu::{
     LightingTraceState, TracePreparationError, TracePreparationStatus, MAX_HOST_TRACE_RAYS,
+};
+#[cfg(feature = "physics")]
+pub use m15_topology_surface::{
+    M15NativeMeshAdapter, M15TopologyMeshBatch, M15TopologyMeshMailbox, PreparedTopologyMesh,
+};
+pub use material::virtual_texture::{
+    plan_residency, NativeMaterialVt, NativeVtBinding, NativeVtConfig, NativeVtError,
+    NativeVtFeedbackOrigin, NativeVtGpuConfig, NativeVtPlan, NativeVtPlanIssue, NativeVtPlanStats,
+    NativeVtPublish, NativeVtRejectedSource, NativeVtResidency, NativeVtScheduleReport,
+    NativeVtScheduler, NativeVtSource, NativeVtSourceRequest, NativeVtSources, NativeVtSubmitError,
+    NativeVtUnmetDemand, NativeVtUploadDriver, MAX_NATIVE_VT_FEEDBACK,
+};
+#[cfg(feature = "resident-page-streaming")]
+pub use material::virtual_texture::{
+    NativeVtResidentError, NativeVtResidentLimits, NativeVtResidentPlugin, NativeVtResidentUploader,
 };
 pub use material::{
     BindlessSlot, FallbackTextures, MaterialBindingLayout, MaterialParameterBuffers,
@@ -161,18 +200,38 @@ pub use mesh_pipelines::{
     MeshPipelines, ResidentResponseModule, ResponseModuleCache, ResponseModuleCacheError,
     ResponseModuleSpec, SpineMeshPipeline,
 };
+pub use native_geometry_gpu::{
+    extract_geometry_projection, extract_native_geometry, prepare_native_geometry_gpu,
+    ExtractedNativeGeometry, NativeGeometryExtractionError, NativeGeometryGpuRow,
+    NativeGeometryGpuState, NativeGeometryGpuUploadError, NativeGeometryGpuUploadReport,
+};
 pub use native_scene_gpu::{
     extract_native_scene, prepare_native_scene_gpu, ExtractedNativeScene, NativeSceneGpuRow,
     NativeSceneGpuState, NativeSceneGpuUploadError, NativeSceneGpuUploadReport,
 };
+pub use particle::gameplay_feedback;
 pub use particle::{
-    extract_ember_render_assets, EmberCompiledGraphAssets, EmberExternalGpuResources,
-    EmberGpuAssetRegistry, EmberGpuAssetRegistryError, EmberGpuPrepareError,
-    EmberGraphCompileBudget, EmberGraphCompileError, EmberGraphCompilePhase,
+    extract_ember_render_assets, extract_particle_simulation_inputs, EmberCompiledGraphAssets,
+    EmberExternalGpuResources, EmberGpuAssetRegistry, EmberGpuAssetRegistryError,
+    EmberGpuPrepareError, EmberGraphCompileBudget, EmberGraphCompileError, EmberGraphCompilePhase,
     EmberGraphCompileRequestError, EmberGraphCompileStatus, EmberGraphCompileTicket,
     EmberGraphSource, EmberGraphStageModule, EmberPrepareErrorKind, EmberPrepareOutcome,
     EmberPrepareStatus, EmberRenderAsset, EmberRenderAssets, ExtractedEmberExternalGpuResources,
-    ExtractedEmberRenderAssets, ParticleGpuState, ParticleUploadStatus,
+    ExtractedEmberRenderAssets, ExtractedParticleViews, ParticleGpuSimulationInputs,
+    ParticleGpuState, ParticleGraphOutputLease, ParticleUploadStatus, ParticleViewBudget,
+    ParticleViewError, PreparedParticleFabricFrame,
+};
+#[cfg(feature = "physics-resident")]
+pub use physics_surface::resident::{
+    register_resident_draws, resident_mesh_class, PhysicsResidentSurface,
+    PhysicsResidentSurfaceBinding, PhysicsResidentSurfacePlugin, PhysicsResidentSurfaceRuntime,
+    ResidentDrawRequest, ResidentSurfaceDrawFunctions, ResidentSurfaceHost, ResidentSurfaceImports,
+    ResidentSurfaceLease, ResidentSurfaceRejection,
+};
+#[cfg(feature = "physics")]
+pub use physics_surface::{
+    M15TopologySurfacePlugin, PhysicsSurface, PhysicsSurfaceBinding, PhysicsSurfacePlugin,
+    PhysicsSurfaceRuntime,
 };
 pub use pipeline_cache::{
     cold_key_from_pipeline_key, hash_vertex_layouts, pso_device_fingerprint,
@@ -223,7 +282,15 @@ pub use sets::{
     configure_render_graph_sets, configure_render_sets, RenderGraphSet, RenderPhase, RenderSystems,
 };
 pub use startup::{init_gpu_resource, GpuResourceAppExt, RenderStartupState};
-pub use stats::RenderFrameStats;
+pub use stats::{RenderFrameStats, ViewQueueAdmissionRejection};
+pub use surface_view_frame::{
+    SurfaceViewQueue, SurfaceViewQueueError, SurfaceViewQueueRejection,
+    SurfaceViewQueueRejectionReason, SurfaceViewQueues,
+};
+pub use surface_views::{
+    extract_surface_views, ExtractedSurfaceViews, SurfaceView, SurfaceViewExtractError,
+    SurfaceViewRejection,
+};
 pub use sync_world::{tag_extracted_entities, MainEntity, MainEntityHashSet};
 pub use target::RenderTarget;
 pub use texture_cache::{GpuTexture, TextureCache, TextureKey};
@@ -234,6 +301,10 @@ pub use transforms::{
 pub use view_driver::{for_each_view, with_current_view};
 pub use view_query::{CurrentView, ViewQuery, ViewQueryState};
 pub use views::{RenderView, RenderViews};
+pub use visibility_bridge::{
+    extract_visibility_views, ExtractedVisibilityView, ExtractedVisibilityViews,
+    VisibilityViewRejection, VisibilityViewRejectionReason,
+};
 
 /// Commonly used exports: the plugin, its labels, and the resources that cross
 /// the main-world/render-world boundary.
@@ -277,13 +348,15 @@ pub mod prelude {
         NativeSceneGpuUploadReport,
     };
     pub use crate::particle::{
-        EmberCompiledGraphAssets, EmberExternalGpuResources, EmberGpuAssetRegistry,
-        EmberGpuAssetRegistryError, EmberGpuPrepareError, EmberGraphCompileBudget,
-        EmberGraphCompileError, EmberGraphCompilePhase, EmberGraphCompileRequestError,
-        EmberGraphCompileStatus, EmberGraphCompileTicket, EmberGraphSource, EmberGraphStageModule,
-        EmberPrepareErrorKind, EmberPrepareOutcome, EmberPrepareStatus, EmberRenderAsset,
-        EmberRenderAssets, ExtractedEmberExternalGpuResources, ExtractedEmberRenderAssets,
-        ParticleGpuState, ParticleUploadStatus,
+        extract_particle_simulation_inputs, EmberCompiledGraphAssets, EmberExternalGpuResources,
+        EmberGpuAssetRegistry, EmberGpuAssetRegistryError, EmberGpuPrepareError,
+        EmberGraphCompileBudget, EmberGraphCompileError, EmberGraphCompilePhase,
+        EmberGraphCompileRequestError, EmberGraphCompileStatus, EmberGraphCompileTicket,
+        EmberGraphSource, EmberGraphStageModule, EmberPrepareErrorKind, EmberPrepareOutcome,
+        EmberPrepareStatus, EmberRenderAsset, EmberRenderAssets,
+        ExtractedEmberExternalGpuResources, ExtractedEmberRenderAssets, ExtractedParticleViews,
+        ParticleGpuSimulationInputs, ParticleGpuState, ParticleUploadStatus, ParticleViewBudget,
+        ParticleViewError, PreparedParticleFabricFrame,
     };
     pub use crate::pipeline_cache::{
         cold_key_from_pipeline_key, hash_vertex_layouts, pso_device_fingerprint,
@@ -331,13 +404,29 @@ pub mod prelude {
         RenderSystems,
     };
     pub use crate::startup::{init_gpu_resource, GpuResourceAppExt, RenderStartupState};
-    pub use crate::stats::RenderFrameStats;
+    pub use crate::stats::{RenderFrameStats, ViewQueueAdmissionRejection};
+    pub use crate::surface_view_frame::{
+        SurfaceViewQueue, SurfaceViewQueueError, SurfaceViewQueueRejection,
+        SurfaceViewQueueRejectionReason, SurfaceViewQueues,
+    };
+    pub use crate::surface_views::{
+        ExtractedSurfaceViews, SurfaceView, SurfaceViewExtractError, SurfaceViewRejection,
+    };
     pub use crate::sync_world::{tag_extracted_entities, MainEntity, MainEntityHashSet};
     pub use crate::target::RenderTarget;
     pub use crate::texture_cache::{GpuTexture, TextureCache, TextureKey};
     pub use crate::view_driver::{for_each_view, with_current_view};
     pub use crate::view_query::{CurrentView, ViewQuery, ViewQueryState};
     pub use crate::views::{RenderView, RenderViews};
+    pub use crate::visibility_bridge::{
+        ExtractedVisibilityView, ExtractedVisibilityViews, VisibilityViewRejection,
+        VisibilityViewRejectionReason,
+    };
+    #[cfg(feature = "baked-image")]
+    pub use crate::{
+        BakedImage, BakedImageBindError, BakedImageConfig, BakedImageConfigError, BakedImageError,
+        BakedImageFrame, BakedImagePlugin, BakedImageRuntime, BakedImageState,
+    };
     #[cfg(feature = "resident-page-streaming")]
     pub use crate::{
         ResidentPageAllocation, ResidentPageError, ResidentPagePool, ResidentPagePublication,

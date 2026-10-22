@@ -19,6 +19,7 @@ use prism_app::presentation::{
 use prism_app::{App, Plugin};
 use prism_ecs::prelude::Resource;
 use prism_ecs::world::World;
+use prism_render_architecture::lighting::contract::LightingPlan;
 use prism_render_architecture::lighting::ocio::OcioConfig;
 use prism_render_driver::{
     CompositeAlphaMode, FrameSync, Instance, PresentMode, RenderDevice, Surface, SurfaceConfig,
@@ -29,8 +30,9 @@ pub use prism_window::WindowId;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
 use crate::display_transform_gpu::DisplayTransformGpu;
-use crate::lighting_gpu::LightingGpuPass;
+use crate::lighting_gpu::{LightingGpuPass, LightingGpuState};
 use crate::lighting_trace_gpu::TraceGraphRecorder;
+use crate::surface_view_targets::{SurfaceViewOutput, SurfaceViewTargetKey, SurfaceViewTargets};
 use crate::{
     DrawFunctions, RenderApp, RenderFrameStats, RenderQueues, RenderTarget, RenderViewport,
 };
@@ -183,6 +185,20 @@ impl<I: Instance + 'static> WindowRenderRequests<I> {
         self.windows.keys().copied()
     }
 
+    /// Complete visible, nonempty window outputs, in stable id order.
+    /// `None` selects offscreen rendering; `Some([])` submits no windows.
+    pub fn render_outputs(&self) -> Option<Vec<(WindowId, RenderViewport)>> {
+        self.enabled.then(|| {
+            self.windows
+                .iter()
+                .filter_map(|(&id, request)| {
+                    (request.visible && !request.viewport.is_empty())
+                        .then_some((id, request.viewport))
+                })
+                .collect()
+        })
+    }
+
     /// Retire all windows and explicitly restore the original offscreen path.
     pub fn use_offscreen(&mut self) {
         self.enabled = false;
@@ -219,6 +235,62 @@ pub enum WindowFrameStatus {
     },
     /// A failure scoped to this window.
     Failed(WindowRenderError),
+}
+
+/// Exact result of one window-drive invocation.
+///
+/// The submission comes directly from `execute_tracked`; it is never inferred
+/// from a runtime-wide counter. It is retained even when platform presentation
+/// fails after GPU submission.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct WindowDriveReceipt {
+    pub(crate) handled: bool,
+    pub(crate) first_submission: Option<u64>,
+}
+
+/// Per-frame camera inputs. The caller reconciles the union of all outputs
+/// before driving; this host never reconciles one window in isolation.
+pub(crate) struct SurfaceViewDriveContext<'a, I: Instance + 'static> {
+    pub(crate) cameras: &'a crate::SurfaceViewQueues,
+    pub(crate) targets: &'a mut SurfaceViewTargets<I::Device>,
+    pub(crate) frame_index: u64,
+    pub(crate) texture_imports: &'a crate::frame::FrameGraphTextureImports,
+    pub(crate) ember: Option<&'a crate::particle::EmberGpuAssetRegistry>,
+    pub(crate) ember_external: &'a crate::particle::ExtractedEmberExternalGpuResources,
+}
+
+/// Record the completion fence for camera targets after a graph has submitted.
+///
+/// Submission is already known at this point, so bookkeeping failure must not
+/// turn it into a panic or erase the caller's submission receipt. A subsequent
+/// reconciliation can retry normal target ownership handling after the
+/// diagnostic has been reported.
+fn seal_surface_view_submission_bookkeeping<I>(
+    runtime: &RenderRuntime<I>,
+    targets: &mut SurfaceViewTargets<I::Device>,
+    stats: &mut RenderFrameStats,
+) where
+    I: Instance + 'static,
+    I::Device: Send + Sync + 'static,
+    I::Queue: FrameSync,
+{
+    if let Err(error) = targets.seal_submissions(runtime) {
+        stats.surface_view_error = Some(crate::stats::SurfaceViewExecutionError::Target(error));
+    }
+}
+
+struct WindowRenderFailure {
+    error: WindowRenderError,
+    submission: Option<u64>,
+}
+
+impl From<WindowRenderError> for WindowRenderFailure {
+    fn from(error: WindowRenderError) -> Self {
+        Self {
+            error,
+            submission: None,
+        }
+    }
 }
 
 struct WindowGpu<I: Instance + 'static> {
@@ -372,11 +444,35 @@ impl<I: Instance + 'static> WindowRenderTargets<I> {
     /// suspension). Failure retains every resource for a later safe retry.
     pub fn release(&mut self, runtime: &RenderRuntime<I>) -> bool
     where
+        I::Device: Send + Sync + 'static,
         I::Queue: FrameSync,
     {
-        if !self.windows.is_empty() && !runtime.wait_idle() {
+        self.release_with_lighting(runtime, None)
+    }
+
+    /// Shutdown with target-aware dependent eviction. Keep lighting alive until
+    /// this succeeds. A replacement queue never proves old-device completion.
+    pub(crate) fn release_with_lighting(
+        &mut self,
+        runtime: &RenderRuntime<I>,
+        lighting: Option<&LightingGpuState<I>>,
+    ) -> bool
+    where
+        I::Device: Send + Sync + 'static,
+        I::Queue: FrameSync,
+    {
+        let device = runtime.device_handle();
+        let current = |gpu: &WindowGpu<I>| {
+            gpu.device_generation == runtime.device_generation()
+                && Arc::ptr_eq(&gpu.target.device, &device)
+        };
+        if self
+            .windows
+            .values()
+            .any(|gpu| !current(gpu) && !gpu.lifetime.safe())
+            || (self.windows.values().any(&current) && !runtime.wait_idle())
+        {
             for (&id, gpu) in &self.windows {
-                gpu.lifetime.destroy_allowed.store(false, Ordering::Release);
                 self.status.insert(
                     id,
                     WindowFrameStatus::Failed(WindowRenderError::CompletionUnconfirmed),
@@ -385,8 +481,12 @@ impl<I: Instance + 'static> WindowRenderTargets<I> {
             return false;
         }
         for gpu in self.windows.values() {
-            gpu.lifetime.destroy_allowed.store(true, Ordering::Release);
-            gpu.lifetime.mark_idle();
+            if current(gpu) {
+                gpu.lifetime.mark_idle();
+            }
+            if !evict_window_target(gpu, lighting) {
+                return false;
+            }
         }
         for (&id, gpu) in &self.windows {
             self.bridge.unregister(PresentationTarget {
@@ -406,10 +506,101 @@ impl<I: Instance + 'static> WindowRenderTargets<I> {
         overrides: &WindowRenderQueues,
         queues: &RenderQueues,
         functions: &DrawFunctions,
-        lighting: Option<LightingGpuPass>,
+        lighting_context: Option<(&LightingGpuState<I>, &LightingPlan)>,
         trace: Option<TraceGraphRecorder>,
         stats: &mut RenderFrameStats,
-    ) -> bool
+    ) -> WindowDriveReceipt
+    where
+        I::Device: Send + Sync + 'static,
+        I::Queue: FrameSync,
+    {
+        self.drive_with_particles(
+            runtime,
+            requests,
+            overrides,
+            queues,
+            functions,
+            lighting_context,
+            trace,
+            None,
+            stats,
+        )
+    }
+
+    pub(crate) fn drive_with_particles(
+        &mut self,
+        runtime: &RenderRuntime<I>,
+        requests: &WindowRenderRequests<I>,
+        overrides: &WindowRenderQueues,
+        queues: &RenderQueues,
+        functions: &DrawFunctions,
+        lighting_context: Option<(&LightingGpuState<I>, &LightingPlan)>,
+        trace: Option<TraceGraphRecorder>,
+        particle: Option<&crate::particle::ParticleGpuState>,
+        stats: &mut RenderFrameStats,
+    ) -> WindowDriveReceipt
+    where
+        I::Device: Send + Sync + 'static,
+        I::Queue: FrameSync,
+    {
+        self.drive_internal(
+            runtime,
+            requests,
+            overrides,
+            queues,
+            functions,
+            lighting_context,
+            trace,
+            particle,
+            None,
+            stats,
+        )
+    }
+
+    pub(crate) fn drive_with_surface_views(
+        &mut self,
+        runtime: &RenderRuntime<I>,
+        requests: &WindowRenderRequests<I>,
+        overrides: &WindowRenderQueues,
+        queues: &RenderQueues,
+        functions: &DrawFunctions,
+        lighting_context: Option<(&LightingGpuState<I>, &LightingPlan)>,
+        trace: Option<TraceGraphRecorder>,
+        particle: Option<&crate::particle::ParticleGpuState>,
+        context: SurfaceViewDriveContext<'_, I>,
+        stats: &mut RenderFrameStats,
+    ) -> WindowDriveReceipt
+    where
+        I::Device: Send + Sync + 'static,
+        I::Queue: FrameSync,
+    {
+        self.drive_internal(
+            runtime,
+            requests,
+            overrides,
+            queues,
+            functions,
+            lighting_context,
+            trace,
+            particle,
+            Some(context),
+            stats,
+        )
+    }
+
+    fn drive_internal(
+        &mut self,
+        runtime: &RenderRuntime<I>,
+        requests: &WindowRenderRequests<I>,
+        overrides: &WindowRenderQueues,
+        queues: &RenderQueues,
+        functions: &DrawFunctions,
+        lighting_context: Option<(&LightingGpuState<I>, &LightingPlan)>,
+        trace: Option<TraceGraphRecorder>,
+        particle: Option<&crate::particle::ParticleGpuState>,
+        mut context: Option<SurfaceViewDriveContext<'_, I>>,
+        stats: &mut RenderFrameStats,
+    ) -> WindowDriveReceipt
     where
         I::Device: Send + Sync + 'static,
         I::Queue: FrameSync,
@@ -421,13 +612,24 @@ impl<I: Instance + 'static> WindowRenderTargets<I> {
                 let keep = requests.enabled
                     && requests.windows.get(&id).is_some_and(|request| {
                         gpu.device_generation == runtime.device_generation()
+                            && Arc::ptr_eq(&gpu.target.device, &runtime.device_handle())
                             && Arc::ptr_eq(&gpu.factory, &request.factory)
                     });
                 (!keep).then_some(id)
             })
             .collect();
         if !obsolete.is_empty() {
-            if !runtime.wait_idle() {
+            let device = runtime.device_handle();
+            let current = |gpu: &WindowGpu<I>| {
+                gpu.device_generation == runtime.device_generation()
+                    && Arc::ptr_eq(&gpu.target.device, &device)
+            };
+            let confirmed = !obsolete.iter().any(|id| {
+                let gpu = &self.windows[id];
+                !current(gpu) && !gpu.lifetime.safe()
+            }) && (!obsolete.iter().any(|id| current(&self.windows[id]))
+                || runtime.wait_idle());
+            if !confirmed {
                 for id in obsolete {
                     self.status.insert(
                         id,
@@ -435,14 +637,31 @@ impl<I: Instance + 'static> WindowRenderTargets<I> {
                     );
                 }
                 stats.frames_failed += 1;
-                return true;
+                return WindowDriveReceipt {
+                    handled: true,
+                    first_submission: None,
+                };
+            }
+            // Preflight every dependency before releasing any target owner.
+            for id in &obsolete {
+                let gpu = &self.windows[id];
+                if !evict_window_target(gpu, lighting_context.map(|(state, _)| state)) {
+                    self.status.insert(
+                        *id,
+                        WindowFrameStatus::Failed(WindowRenderError::Graph(
+                            "target dependency eviction failed".into(),
+                        )),
+                    );
+                    stats.frames_failed += 1;
+                    return WindowDriveReceipt {
+                        handled: true,
+                        first_submission: None,
+                    };
+                }
             }
             for id in obsolete {
                 if let Some(gpu) = self.windows.remove(&id) {
-                    let replaced = gpu.device_generation != runtime.device_generation();
-                    if replaced {
-                        gpu.lifetime.destroy_allowed.store(false, Ordering::Release);
-                    } else {
+                    if current(&gpu) {
                         gpu.lifetime.mark_idle();
                     }
                     self.bridge.unregister(PresentationTarget {
@@ -455,8 +674,12 @@ impl<I: Instance + 'static> WindowRenderTargets<I> {
         self.status
             .retain(|id, _| requests.windows.contains_key(id));
         if !requests.enabled {
-            return false;
+            return WindowDriveReceipt::default();
         }
+        let mut receipt = WindowDriveReceipt {
+            handled: true,
+            first_submission: None,
+        };
         for (&id, request) in &requests.windows {
             stats.last_viewport = request.viewport;
             if let Some(gpu) = self.windows.get(&id) {
@@ -474,24 +697,33 @@ impl<I: Instance + 'static> WindowRenderTargets<I> {
                 runtime,
                 overrides.0.get(&id).unwrap_or(queues),
                 functions,
-                lighting,
+                lighting_context,
                 trace,
+                particle,
+                context.as_mut(),
+                receipt.first_submission.is_none(),
                 stats,
             );
             let status = match result {
-                Ok(Some(submission)) => WindowFrameStatus::Presented { submission },
+                Ok(Some(submission)) => {
+                    receipt.first_submission.get_or_insert(submission);
+                    WindowFrameStatus::Presented { submission }
+                }
                 Ok(None) => {
                     stats.frames_skipped += 1;
                     WindowFrameStatus::Skipped
                 }
-                Err(error) => {
+                Err(failure) => {
+                    if let Some(submission) = failure.submission {
+                        receipt.first_submission.get_or_insert(submission);
+                    }
                     stats.frames_failed += 1;
-                    WindowFrameStatus::Failed(error)
+                    WindowFrameStatus::Failed(failure.error)
                 }
             };
             self.status.insert(id, status);
         }
-        true
+        receipt
     }
 
     fn drive_window(
@@ -501,10 +733,13 @@ impl<I: Instance + 'static> WindowRenderTargets<I> {
         runtime: &RenderRuntime<I>,
         queues: &RenderQueues,
         functions: &DrawFunctions,
-        lighting: Option<LightingGpuPass>,
+        lighting_context: Option<(&LightingGpuState<I>, &LightingPlan)>,
         trace: Option<TraceGraphRecorder>,
+        particle: Option<&crate::particle::ParticleGpuState>,
+        mut context: Option<&mut SurfaceViewDriveContext<'_, I>>,
+        frame_work: bool,
         stats: &mut RenderFrameStats,
-    ) -> Result<Option<u64>, WindowRenderError>
+    ) -> Result<Option<u64>, WindowRenderFailure>
     where
         I::Device: Send + Sync + 'static,
         I::Queue: FrameSync,
@@ -515,7 +750,12 @@ impl<I: Instance + 'static> WindowRenderTargets<I> {
         let rebuild = self.windows.get(&id).is_some_and(|gpu| gpu.lost);
         if rebuild {
             if !runtime.wait_idle() {
-                return Err(WindowRenderError::CompletionUnconfirmed);
+                return Err(WindowRenderError::CompletionUnconfirmed.into());
+            }
+            if !evict_window_target(&self.windows[&id], lighting_context.map(|(state, _)| state)) {
+                return Err(
+                    WindowRenderError::Graph("target dependency eviction failed".into()).into(),
+                );
             }
             if let Some(gpu) = self.windows.remove(&id) {
                 gpu.lifetime.mark_idle();
@@ -583,13 +823,19 @@ impl<I: Instance + 'static> WindowRenderTargets<I> {
         let config = negotiate(&gpu.surface, request).map_err(WindowRenderError::Surface)?;
         if gpu.config != config || gpu.needs_reconfigure {
             if !runtime.wait_idle() {
-                return Err(WindowRenderError::CompletionUnconfirmed);
+                return Err(WindowRenderError::CompletionUnconfirmed.into());
             }
             if let Err(error) = gpu.surface.configure(&config) {
                 gpu.lost = error == SurfaceError::Lost;
-                return Err(WindowRenderError::Surface(error));
+                return Err(WindowRenderError::Surface(error).into());
             }
             if gpu.target.viewport() != request.viewport || gpu.config.format != config.format {
+                if !evict_window_target(gpu, lighting_context.map(|(state, _)| state)) {
+                    return Err(WindowRenderError::Graph(
+                        "target dependency eviction failed".into(),
+                    )
+                    .into());
+                }
                 gpu.lifetime.mark_idle();
                 let lifetime = WindowLifetime::new();
                 let device = runtime.device_handle();
@@ -630,9 +876,14 @@ impl<I: Instance + 'static> WindowRenderTargets<I> {
             Err(error) => {
                 gpu.needs_reconfigure = error == SurfaceError::Outdated;
                 gpu.lost = error == SurfaceError::Lost;
-                return Err(WindowRenderError::Surface(error));
+                return Err(WindowRenderError::Surface(error).into());
             }
         };
+        // A suboptimal frame is still valid for this present. Reconfigure on
+        // the next drive, before its next acquire, rather than dropping work.
+        if gpu.surface.is_suboptimal(&frame) {
+            gpu.needs_reconfigure = true;
+        }
         let lease = SurfaceLease {
             surface: &gpu.surface,
             frame: Some(frame),
@@ -642,15 +893,110 @@ impl<I: Instance + 'static> WindowRenderTargets<I> {
             .image(lease.frame.as_ref().expect("acquired frame"));
         if image.size != request.viewport.extent() || image.format != gpu.config.format {
             gpu.needs_reconfigure = true;
-            return Err(WindowRenderError::Surface(SurfaceError::Outdated));
+            return Err(WindowRenderError::Surface(SurfaceError::Outdated).into());
         }
-        let (mut graph, color) = crate::frame::target_graph_output_with_trace(
+        let mut lighting = if let Some((lighting_gpu, plan)) = lighting_context {
+            Some(
+                lighting_gpu
+                    .pass_for_target(plan, &gpu.target, runtime)
+                    .ok_or_else(|| {
+                        WindowRenderError::Graph(
+                            "lighting plan has no target-aware composite binding".into(),
+                        )
+                    })?,
+            )
+        } else {
+            None
+        };
+        if !frame_work {
+            if let Some(pass) = lighting.as_mut() {
+                pass.run_gi = false;
+            }
+        }
+        let mut inputs = Vec::new();
+        if let Some(context) = context.as_deref() {
+            if !context.cameras.is_ready()
+                || context.cameras.frame_index != context.frame_index
+                || context.cameras.device_generation != runtime.device_generation()
+            {
+                stats.surface_view_error =
+                    Some(crate::stats::SurfaceViewExecutionError::StaleQueues);
+                return Err(WindowRenderError::Graph("stale surface view queues".into()).into());
+            }
+            for camera in context.cameras.iter() {
+                if !crate::systems::surface_view_fits(&camera.surface, request.viewport) {
+                    continue;
+                }
+                let [_, _, width, height] = camera.surface.viewport;
+                let key = SurfaceViewTargetKey::new(
+                    camera.camera(),
+                    SurfaceViewOutput::Window(id),
+                    RenderViewport::new(width, height),
+                );
+                let target = context.targets.get(runtime, key).ok_or_else(|| {
+                    WindowRenderError::Graph(format!(
+                        "missing reconciled surface view target: {key:?}"
+                    ))
+                })?;
+                let mut lighting = lighting_context
+                    .and_then(|(state, plan)| state.pass_for_target(plan, target, runtime));
+                if !frame_work {
+                    if let Some(pass) = lighting.as_mut() {
+                        pass.run_gi = false;
+                    }
+                }
+                inputs.push(crate::frame::SurfaceViewGraphInput {
+                    camera: camera.camera(),
+                    order: camera.surface.order,
+                    viewport: camera.surface.viewport,
+                    target,
+                    queues: &camera.queues,
+                    lighting,
+                });
+            }
+        }
+        let empty_imports = crate::frame::FrameGraphTextureImports::default();
+        let prepared = crate::frame::prepare_surface_view_graph(
             &gpu.target,
             queues,
             functions,
             lighting,
-            trace,
-        );
+            if frame_work { trace } else { None },
+            &inputs,
+            context
+                .as_deref()
+                .map_or(&empty_imports, |context| context.texture_imports),
+        )
+        .map_err(|error| {
+            stats.surface_view_error =
+                Some(crate::stats::SurfaceViewExecutionError::GraphAdmission);
+            WindowRenderError::Graph(format!("surface graph admission: {error:?}"))
+        })?;
+        let draws = queues.len() as u64
+            + inputs
+                .iter()
+                .map(|input| input.queues.len() as u64)
+                .sum::<u64>();
+        drop(inputs);
+        let empty_external = BTreeMap::new();
+        let (mut graph, color) = crate::frame::finalize_surface_view_graph(
+            prepared,
+            // Every output draws its cameras. Particle bridge reuse is guarded
+            // by actual submission, independently of frame-wide Ember/trace.
+            particle,
+            if frame_work {
+                context.as_deref().and_then(|context| context.ember)
+            } else {
+                None
+            },
+            context.as_deref().map_or(&empty_external, |context| {
+                context.ember_external.graph_imports()
+            }),
+            context.as_deref().map_or(0, |context| context.frame_index),
+        )
+        .map_err(|error| {
+            WindowRenderError::Graph(format!("surface graph finalization: {error:?}"))
+        })?;
         let transformed = gpu
             .display_transform
             .append(&mut graph, runtime.queue(), &OcioConfig::srgb(), color)
@@ -664,23 +1010,45 @@ impl<I: Instance + 'static> WindowRenderTargets<I> {
         stages.present_passes = 1;
         stages.assert_contract();
         graph.blackboard_mut().set(stages);
-        stats.execution_trace.graph = Some(stages);
+        let mut surface_stages = graph
+            .blackboard()
+            .get::<crate::frame::SurfaceViewGraphStages>()
+            .expect("surface graph publishes its aggregate receipt")
+            .clone();
+        surface_stages.present_source = transformed;
+        surface_stages.present_passes = 1;
+        surface_stages.assert_contract();
+        graph.blackboard_mut().set(surface_stages.clone());
         let passes = graph.pass_count() as u64;
+        let particle_output = particle.and_then(|particle| particle.graph_output_lease(&graph));
         gpu.lifetime.in_flight.fetch_add(1, Ordering::AcqRel);
         let submission = match runtime.execute_tracked(graph) {
             Ok(submission) => submission,
             Err(error) => {
                 gpu.lifetime.in_flight.fetch_sub(1, Ordering::AcqRel);
-                return Err(WindowRenderError::Graph(format!("{error:?}")));
+                return Err(WindowRenderError::Graph(format!("{error:?}")).into());
             }
         };
+        if let Some(output) = particle_output {
+            // execute_tracked marks the token only after queue.submit succeeds.
+            // Confirm before present (which may fail after successful submit).
+            let confirmed = output.confirm_submitted();
+            debug_assert!(confirmed);
+        }
+        // Seal immediately after known submission, before presentation can fail.
+        // A pre-submit admission failure leaves frame-wide work available to
+        // the next window; a present failure does not replay it.
+        if let Some(context) = context.as_deref_mut() {
+            seal_surface_view_submission_bookkeeping(runtime, context.targets, stats);
+        }
+        stats.execution_trace.graph = Some(stages);
+        stats.execution_trace.surface_graph = Some(surface_stages.clone());
         stats.frames_submitted += 1;
         stats.passes_declared += passes;
-        stats.draws_recorded += queues.len() as u64;
-        if let Some(lighting) = lighting {
-            stats.lighting_gpu_passes_recorded += lighting.pass_count();
-        }
-        stats.trace_gpu_dispatches_recorded += u64::from(trace.is_some());
+        stats.draws_recorded += draws;
+        stats.lighting_gpu_passes_recorded += u64::from(surface_stages.lighting_dispatches);
+        stats.trace_gpu_dispatches_recorded += u64::from(surface_stages.trace_dispatches);
+        stats.ember_compute_passes_recorded += u64::from(surface_stages.ember_compute_passes);
         let target = PresentationTarget {
             id: id.0,
             generation: gpu.generation,
@@ -696,10 +1064,25 @@ impl<I: Instance + 'static> WindowRenderTargets<I> {
             gpu.needs_reconfigure = error == SurfaceError::Outdated;
             gpu.lost = error == SurfaceError::Lost;
             // Submission already succeeded; only the presentation failed.
-            return Err(WindowRenderError::Surface(error));
+            return Err(WindowRenderFailure {
+                error: WindowRenderError::Surface(error),
+                submission: Some(submission),
+            });
         }
         Ok(Some(submission))
     }
+}
+
+fn evict_window_target<I: Instance + 'static>(
+    gpu: &WindowGpu<I>,
+    lighting: Option<&LightingGpuState<I>>,
+) -> bool
+where
+    I::Device: Send + Sync + 'static,
+{
+    lighting.is_none_or(|lighting| {
+        lighting.evict_target(&gpu.target, &gpu.target.device, gpu.device_generation)
+    })
 }
 
 fn negotiate<I: Instance>(

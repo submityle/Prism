@@ -17,6 +17,8 @@ use crate::visibility::{PrismCamera, PrismFrustum, ViewFlags};
 pub struct SurfaceView {
     /// Main-world identity, including the entity generation.
     pub camera: Entity,
+    /// Camera composition order; ties are resolved by generational entity.
+    pub order: i32,
     /// The camera's supplied matrix, without applying its pose a second time.
     pub clip_from_world: [[f32; 4]; 4],
     /// Last extraction's matrix when history is valid; otherwise current.
@@ -186,6 +188,7 @@ pub fn extract_surface_views(main: &mut World, render: &mut World) {
             entity,
             SurfaceView {
                 camera: entity,
+                order: 0,
                 clip_from_world,
                 previous_clip_from_world: old.map_or(clip_from_world, |old| old.clip_from_world),
                 viewport: camera.viewport,
@@ -262,6 +265,7 @@ fn extract_published_surface_views(main: &World, render: &mut World, published: 
             published_view.entity,
             SurfaceView {
                 camera: published_view.entity,
+                order: view.order,
                 clip_from_world: matrix,
                 previous_clip_from_world: prior.map_or(matrix, |old| old.clip_from_world),
                 viewport: [

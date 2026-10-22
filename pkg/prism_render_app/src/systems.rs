@@ -24,13 +24,14 @@ use crate::target::RenderTarget;
 /// extracted scene record and lighting journal to the same frame that the
 /// graph or presentation driver consumes, making a stale cross-frame input
 /// observable without adding a control switch.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct FrameExecutionTrace {
     pub frame_index: u64,
     pub journal_snapshot: JournalSnapshot,
     pub visibility_work_items: u64,
     pub gi_candidates: u64,
     pub graph: Option<frame::FrameGraphStages>,
+    pub surface_graph: Option<frame::SurfaceViewGraphStages>,
     pub outcome: FrameExecutionOutcome,
 }
 
@@ -42,6 +43,7 @@ impl Default for FrameExecutionTrace {
             visibility_work_items: 0,
             gi_candidates: 0,
             graph: None,
+            surface_graph: None,
             outcome: FrameExecutionOutcome::NotRun,
         }
     }
@@ -68,11 +70,13 @@ pub(crate) struct OffscreenFrameTargets<'w> {
 pub(crate) struct FrameExecutionResources<'w> {
     trace_gpu: ResMut<'w, crate::lighting_trace_gpu::LightingTraceState>,
     stats: ResMut<'w, RenderFrameStats>,
+    fabric_frame: Option<Res<'w, crate::ExtractedRenderFabricFrame>>,
     particle: Option<Res<'w, crate::particle::ParticleGpuState>>,
     particle_status: Res<'w, crate::particle::ParticleUploadStatus>,
     ember: Res<'w, crate::particle::EmberGpuAssetRegistry>,
     ember_external: Res<'w, crate::particle::ExtractedEmberExternalGpuResources>,
     ember_status: Res<'w, crate::particle::EmberPrepareStatus>,
+    frame_texture_imports: Res<'w, crate::frame::FrameGraphTextureImports>,
 }
 
 impl FrameExecutionTrace {
@@ -91,6 +95,7 @@ impl FrameExecutionTrace {
             .map(|batch| batch.len() as u64)
             .sum();
         self.graph = None;
+        self.surface_graph = None;
         self.outcome = FrameExecutionOutcome::NotRun;
     }
 
@@ -180,8 +185,12 @@ where
 /// per-frame state (the queue stage fills it from this frame's visible set), so
 /// leaving it populated would make the next frame draw the previous frame's
 /// items again — and forever.
-pub(crate) fn clear_queues(mut queues: ResMut<crate::RenderQueues>) {
+pub(crate) fn clear_queues(
+    mut queues: ResMut<crate::RenderQueues>,
+    mut cameras: ResMut<crate::SurfaceViewQueues>,
+) {
     queues.clear();
+    cameras.clear();
 }
 
 /// Drains completed asynchronous pipeline compiles before the queue stage
@@ -215,7 +224,11 @@ pub(crate) fn pump_pipeline_compiles<I>(
 /// nothing is recorded and the frame is counted as skipped.
 pub(crate) fn execute_frame<I>(
     record: Res<RenderRecord>,
-    queues: Res<crate::RenderQueues>,
+    (queues, cameras, mut camera_targets): (
+        Res<crate::RenderQueues>,
+        Res<crate::SurfaceViewQueues>,
+        ResMut<crate::surface_view_targets::SurfaceViewTargets<I::Device>>,
+    ),
     functions: Res<crate::DrawFunctions>,
     runtime: Res<RenderRuntimeResource<I>>,
     plan: Res<LightingPlanState>,
@@ -235,15 +248,41 @@ pub(crate) fn execute_frame<I>(
 {
     let mut trace_gpu = execution.trace_gpu;
     let mut stats = execution.stats;
+    let fabric_frame = execution.fabric_frame;
     let particle = execution.particle;
     let particle_status = execution.particle_status;
     let ember = execution.ember;
     let ember_external = execution.ember_external;
     let ember_status = execution.ember_status;
+    let frame_texture_imports = execution.frame_texture_imports;
     stats
         .execution_trace
         .begin(&record, queues.len() as u64, &inputs);
     stats.execution_trace.assert_input_parity(&record, &inputs);
+    stats.surface_view_error = None;
+    stats.surface_view_output_rejections.clear();
+    let camera_error = if let Some(error) = cameras.error() {
+        Some(crate::stats::SurfaceViewExecutionError::QueuePreparation(
+            error,
+        ))
+    } else if !cameras.is_ready()
+        || cameras.frame_index != record.frame_index
+        || cameras.device_generation != runtime.runtime().device_generation()
+    {
+        Some(crate::stats::SurfaceViewExecutionError::StaleQueues)
+    } else {
+        None
+    };
+    if let Some(error) = camera_error {
+        stats.surface_view_error = Some(error);
+        stats.frames_failed += 1;
+        stats.execution_trace.outcome = FrameExecutionOutcome::Failed;
+        return;
+    }
+    stats.fabric_frame_error =
+        crate::fabric_frame::admit_render_fabric_frame(fabric_frame.as_deref(), record.frame_index)
+            .err();
+    stats.lighting_input_error = None;
     stats.lighting_upload_error = None;
     stats.ember_graphs_updated = stats
         .ember_graphs_updated
@@ -256,6 +295,11 @@ pub(crate) fn execute_frame<I>(
         .saturating_add(u64::from(ember_status.initial_failures));
     stats.ember_prepare_error = ember_status.error_kind;
     stats.ember_prepare_outcome = ember_status.outcome;
+    if stats.fabric_frame_error.is_some() {
+        stats.frames_failed = stats.frames_failed.saturating_add(1);
+        stats.execution_trace.outcome = FrameExecutionOutcome::Failed;
+        return;
+    }
     if particle_status.error.is_some() {
         stats.frames_failed = stats.frames_failed.saturating_add(1);
         stats.execution_trace.outcome = FrameExecutionOutcome::Failed;
@@ -275,6 +319,56 @@ pub(crate) fn execute_frame<I>(
         return;
     }
     let runtime = runtime.runtime();
+    use crate::surface_view_targets::{SurfaceViewOutput, SurfaceViewTargetKey};
+    let outputs: Vec<_> = requests.render_outputs().map_or_else(
+        || vec![(SurfaceViewOutput::Offscreen(0), record.viewport)],
+        |outputs| {
+            outputs
+                .into_iter()
+                .map(|(id, viewport)| (SurfaceViewOutput::Window(id), viewport))
+                .collect()
+        },
+    );
+    let mut desired = Vec::new();
+    for (output, viewport) in outputs {
+        if viewport.is_empty() {
+            continue;
+        }
+        for camera in cameras.iter() {
+            if surface_view_fits(&camera.surface, viewport) {
+                let [_, _, width, height] = camera.surface.viewport;
+                desired.push(SurfaceViewTargetKey::new(
+                    camera.camera(),
+                    output,
+                    crate::RenderViewport::new(width, height),
+                ));
+            } else {
+                stats.surface_view_output_rejections.push(
+                    crate::stats::SurfaceViewOutputRejection {
+                        camera: camera.camera(),
+                        output,
+                        viewport: camera.surface.viewport,
+                        output_viewport: viewport,
+                    },
+                );
+            }
+        }
+    }
+    if let Err(error) = camera_targets
+        .collect_retired(|target, device, generation| {
+            lighting_gpu.evict_target(target, device, generation)
+        })
+        .and_then(|_| {
+            camera_targets.reconcile(runtime, &desired, |target, device, generation| {
+                lighting_gpu.evict_target(target, device, generation)
+            })
+        })
+    {
+        stats.surface_view_error = Some(crate::stats::SurfaceViewExecutionError::Target(error));
+        stats.frames_failed += 1;
+        stats.execution_trace.outcome = FrameExecutionOutcome::Failed;
+        return;
+    }
     if let Err(error) = lighting_gpu.prepare(&plan.plan, &inputs, record.frame_index, runtime) {
         stats.lighting_upload_error = Some(error);
         stats.frames_failed = stats.frames_failed.saturating_add(1);
@@ -309,7 +403,7 @@ pub(crate) fn execute_frame<I>(
     let submitted_before = stats.frames_submitted;
     let skipped_before = stats.frames_skipped;
     let failed_before = stats.frames_failed;
-    let window_receipt = windows.drive_with_particles(
+    let window_receipt = windows.drive_with_surface_views(
         runtime,
         &requests,
         &overrides,
@@ -317,7 +411,15 @@ pub(crate) fn execute_frame<I>(
         &functions,
         Some((&*lighting_gpu, &plan.plan)),
         trace,
-        particle.as_ref().map(|particle| particle.stage()),
+        particle.as_ref().map(|value| &**value),
+        crate::presentation::SurfaceViewDriveContext {
+            cameras: &cameras,
+            targets: &mut camera_targets,
+            frame_index: record.frame_index,
+            texture_imports: &frame_texture_imports,
+            ember: Some(&ember),
+            ember_external: &ember_external,
+        },
         &mut stats,
     );
     if window_receipt.handled {
@@ -351,6 +453,11 @@ pub(crate) fn execute_frame<I>(
             return;
         }
         offscreen.output.invalidate();
+        lighting_gpu.evict_target(
+            &offscreen.target,
+            &runtime.device_handle(),
+            runtime.device_generation(),
+        );
         offscreen.target.resize(runtime.device(), viewport);
     }
 
@@ -379,20 +486,66 @@ pub(crate) fn execute_frame<I>(
         return;
     }
     let lighting_pass = lighting_gpu.pass_for_target(&plan.plan, &offscreen.target, runtime);
-    let mut graph = match frame::target_graph_with_display_transform_and_trace_particles_and_ember(
+    let view_inputs: Vec<_> = cameras
+        .iter()
+        .filter_map(|camera| {
+            let [_, _, width, height] = camera.surface.viewport;
+            let key = SurfaceViewTargetKey::new(
+                camera.camera(),
+                SurfaceViewOutput::Offscreen(0),
+                crate::RenderViewport::new(width, height),
+            );
+            let target = camera_targets.get(runtime, key)?;
+            Some(frame::SurfaceViewGraphInput {
+                camera: camera.camera(),
+                order: camera.surface.order,
+                viewport: camera.surface.viewport,
+                target,
+                queues: &camera.queues,
+                lighting: lighting_gpu.pass_for_target(&plan.plan, target, runtime),
+            })
+        })
+        .collect();
+    let prepared = match frame::prepare_surface_view_graph(
         &offscreen.target,
         &queues,
         &functions,
         lighting_pass,
         trace,
-        particle.as_ref().map(|particle| particle.stage()),
+        &view_inputs,
+        &frame_texture_imports,
+    ) {
+        Ok(prepared) => prepared,
+        Err(_) => {
+            stats.surface_view_error =
+                Some(crate::stats::SurfaceViewExecutionError::GraphAdmission);
+            stats.frames_failed += 1;
+            stats.execution_trace.outcome = FrameExecutionOutcome::Failed;
+            return;
+        }
+    };
+    let graph = frame::finalize_surface_view_graph(
+        prepared,
+        particle.as_ref().map(|value| &**value),
         Some(&ember),
         ember_external.graph_imports(),
-        &Default::default(),
         record.frame_index,
-        &offscreen.display,
-        runtime.queue(),
-    ) {
+    )
+    .and_then(|(mut graph, source)| {
+        let output = offscreen
+            .display
+            .append(&mut graph, runtime.queue(), source)?;
+        let mut stages = graph
+            .blackboard()
+            .get::<frame::SurfaceViewGraphStages>()
+            .expect("surface graph publishes aggregate stages")
+            .clone();
+        stages.present_source = output;
+        stages.assert_contract();
+        graph.blackboard_mut().set(stages);
+        Ok(graph)
+    });
+    let graph = match graph {
         Ok(graph) => graph,
         Err(_) => {
             stats.frames_failed += 1;
@@ -400,29 +553,32 @@ pub(crate) fn execute_frame<I>(
             return;
         }
     };
-    if particle
-        .as_ref()
-        .is_some_and(|particle| particle.append_emitter_renderers(&mut graph).is_err())
-    {
-        stats.frames_failed += 1;
-        stats.execution_trace.outcome = FrameExecutionOutcome::Failed;
-        return;
-    }
-    let stages = *graph
+    let single_stages = *graph
         .blackboard()
         .get::<frame::FrameGraphStages>()
         .expect("the host frame graph must publish its stage receipt");
+    let stages = graph
+        .blackboard()
+        .get::<frame::SurfaceViewGraphStages>()
+        .expect("surface graph publishes aggregate stages")
+        .clone();
     stages.assert_contract();
     assert_eq!(
         stages.gi_recipes,
         u32::from(lighting_pass.is_some_and(|pass| pass.run_gi)),
         "GI graph admission must match the selected lighting pass"
     );
-    stats.execution_trace.graph = Some(stages);
+    stats.execution_trace.graph = Some(single_stages);
+    stats.execution_trace.surface_graph = Some(stages.clone());
     let passes = graph.pass_count() as u64;
-    let draws = queues.len() as u64;
+    let draws = queues.len() as u64
+        + view_inputs
+            .iter()
+            .map(|view| view.queues.len() as u64)
+            .sum::<u64>();
     match runtime.execute_tracked(graph) {
         Ok(submission) => {
+            seal_surface_view_submission_bookkeeping(runtime, &mut camera_targets, &mut stats);
             if let Some(submission) =
                 lighting_submission_domain(runtime.device_generation()).submission(submission)
             {
@@ -444,8 +600,8 @@ pub(crate) fn execute_frame<I>(
             stats.frames_submitted += 1;
             stats.passes_declared += passes;
             stats.draws_recorded += draws;
-            stats.lighting_gpu_passes_recorded += lighting_pass.map_or(0, |pass| pass.pass_count());
-            stats.trace_gpu_dispatches_recorded += u64::from(trace.is_some());
+            stats.lighting_gpu_passes_recorded += u64::from(stages.lighting_dispatches);
+            stats.trace_gpu_dispatches_recorded += u64::from(stages.trace_dispatches);
             stats.ember_compute_passes_recorded += u64::from(stages.ember_compute_passes);
         }
         Err(_) => {
@@ -456,5 +612,78 @@ pub(crate) fn execute_frame<I>(
             stats.frames_failed += 1;
             stats.execution_trace.outcome = FrameExecutionOutcome::Failed;
         }
+    }
+}
+
+/// Output-local rejection only; never clamp or reinterpret a camera's matrix/rect.
+pub(crate) fn surface_view_fits(view: &crate::SurfaceView, output: crate::RenderViewport) -> bool {
+    let [x, y, width, height] = view.viewport;
+    width != 0
+        && height != 0
+        && x.checked_add(width).is_some_and(|end| end <= output.width)
+        && y.checked_add(height)
+            .is_some_and(|end| end <= output.height)
+}
+
+/// Record camera-target completion after a successful offscreen submission.
+///
+/// A bookkeeping failure cannot undo the submission, so it is a diagnostic
+/// rather than a panic or a failed-frame rewrite. The next reconciliation can
+/// retry normal ownership handling.
+fn seal_surface_view_submission_bookkeeping<I>(
+    runtime: &prism_render_runtime::RenderRuntime<I>,
+    targets: &mut crate::surface_view_targets::SurfaceViewTargets<I::Device>,
+    stats: &mut RenderFrameStats,
+) where
+    I: Instance + 'static,
+    I::Device: Send + Sync + 'static,
+    I::Queue: FrameSync,
+{
+    if let Err(error) = targets.seal_submissions(runtime) {
+        stats.surface_view_error = Some(crate::stats::SurfaceViewExecutionError::Target(error));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use prism_ecs::prelude::Entity;
+    use prism_render_driver::Extent3d;
+    use prism_render_driver_null::NullInstance;
+
+    #[test]
+    fn offscreen_surface_view_seal_identity_mismatch_is_diagnostic_not_panic() {
+        let extent = Extent3d::new_2d(16, 16);
+        let runtime = prism_render_runtime::RenderRuntime::<NullInstance>::headless(
+            NullInstance::new(),
+            extent,
+        )
+        .expect("null runtime");
+        let other = prism_render_runtime::RenderRuntime::<NullInstance>::headless(
+            NullInstance::new(),
+            extent,
+        )
+        .expect("independent null runtime");
+        let view = crate::surface_view_targets::SurfaceViewTargetKey::new(
+            Entity::from_bits((1_u64 << 32) | 1).expect("valid entity"),
+            crate::surface_view_targets::SurfaceViewOutput::Offscreen(1),
+            crate::RenderViewport::from_extent(extent),
+        );
+        let mut targets = crate::surface_view_targets::SurfaceViewTargets::default();
+        targets
+            .reconcile(&other, &[view], |_, _, _| true)
+            .expect("target allocation");
+        let mut stats = RenderFrameStats::default();
+
+        seal_surface_view_submission_bookkeeping(&runtime, &mut targets, &mut stats);
+
+        assert_eq!(
+            stats.surface_view_error,
+            Some(crate::stats::SurfaceViewExecutionError::Target(
+                crate::surface_view_targets::SurfaceViewTargetError::DeviceMismatch,
+            )),
+        );
+        assert_eq!(stats.frames_failed, 0, "submission state is not rewritten");
     }
 }

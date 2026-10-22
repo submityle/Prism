@@ -152,14 +152,56 @@ fn planet_mesh_edge_index(edge: TileEdge) -> usize {
     }
 }
 
-fn planet_mesh_edges_opposite(a: TileEdge, b: TileEdge) -> bool {
-    matches!(
-        (a, b),
-        (TileEdge::West, TileEdge::East)
-            | (TileEdge::East, TileEdge::West)
-            | (TileEdge::South, TileEdge::North)
-            | (TileEdge::North, TileEdge::South)
-    )
+fn planet_transition_skipped_segments(edge: TileEdge, coarse_edges: [bool; 4]) -> (bool, bool) {
+    match edge {
+        TileEdge::West => (coarse_edges[2], coarse_edges[3]),
+        TileEdge::East => (coarse_edges[2], coarse_edges[3]),
+        TileEdge::South => (coarse_edges[0], coarse_edges[1]),
+        TileEdge::North => (coarse_edges[0], coarse_edges[1]),
+    }
+}
+
+fn offset_grid(value: u32, offset: i64, limit: u32) -> Result<u32, BakeError<Infallible>> {
+    let result = i64::from(value)
+        .checked_add(offset)
+        .and_then(|coordinate| u32::try_from(coordinate).ok())
+        .filter(|&coordinate| coordinate <= limit)
+        .ok_or(BakeError::InvalidGeometry)?;
+    Ok(result)
+}
+
+fn append_planet_outward_triangle(
+    indices: &mut Vec<u32>,
+    positions: &[[f32; 3]],
+    origin_mm: [i64; 3],
+    triangle: [u32; 3],
+) -> Result<(), BakeError<Infallible>> {
+    let a = positions
+        .get(triangle[0] as usize)
+        .ok_or(BakeError::InvalidGeometry)?
+        .map(f64::from);
+    let b = positions
+        .get(triangle[1] as usize)
+        .ok_or(BakeError::InvalidGeometry)?
+        .map(f64::from);
+    let c = positions
+        .get(triangle[2] as usize)
+        .ok_or(BakeError::InvalidGeometry)?
+        .map(f64::from);
+    let normal = cross(subtract(b, a), subtract(c, a));
+    let origin = origin_mm.map(|value| value as f64 * 0.001);
+    let outward = (0..3)
+        .map(|axis| normal[axis] * ((a[axis] + b[axis] + c[axis]) / 3.0 + origin[axis]))
+        .sum::<f64>();
+    if !outward.is_finite() || outward == 0.0 {
+        return Err(BakeError::InvalidGeometry);
+    }
+    if outward > 0.0 {
+        indices.extend_from_slice(&triangle);
+    } else {
+        indices.extend_from_slice(&[triangle[0], triangle[2], triangle[1]]);
+    }
+    Ok(())
 }
 
 impl PlanetHeightfieldMesh {
@@ -329,10 +371,9 @@ impl PlanetHeightfieldMesh {
     /// The complete index stream is staged under `max_bytes` and swapped only
     /// after all topology and index checks succeed.
     ///
-    /// As with the planar consumer, up to two opposite coarse edges are
-    /// supported; adjacent corner fans are rejected until their planetary
-    /// triangulation contract is implemented. Clear the plan before replacing
-    /// it.
+    /// Up to two coarse edges are supported. Opposite strips remain separate;
+    /// adjacent strips omit their overlapping endpoint segments and share one
+    /// six-vertex corner fan. Clear the plan before replacing it.
     pub fn apply_lod_seam_plan(
         &mut self,
         plan: &crate::HeightfieldLodSeamPlan,
@@ -347,10 +388,7 @@ impl PlanetHeightfieldMesh {
             return Err(BakeError::InvalidGeometry);
         }
         let transitions = plan.transitions();
-        if transitions.len() > 2
-            || (transitions.len() == 2
-                && !planet_mesh_edges_opposite(transitions[0].edge(), transitions[1].edge()))
-        {
+        if transitions.len() > 2 {
             return Err(BakeError::InvalidGeometry);
         }
         let mut coarse_edges = [false; 4];
@@ -372,16 +410,44 @@ impl PlanetHeightfieldMesh {
         if self.indices.len() != base_indices {
             return Err(BakeError::InvalidGeometry);
         }
-        let removed = transitions
+        let corner_fans = [
+            coarse_edges[0] && coarse_edges[2],
+            coarse_edges[1] && coarse_edges[2],
+            coarse_edges[0] && coarse_edges[3],
+            coarse_edges[1] && coarse_edges[3],
+        ];
+        let corner_count = corner_fans.iter().filter(|&&fan| fan).count();
+        let removed_quads = transitions
             .len()
             .checked_mul(segments as usize)
-            .and_then(|n| n.checked_mul(6))
+            .and_then(|n| n.checked_sub(corner_count))
             .ok_or(BakeError::SizeOverflow)?;
-        let added = transitions
-            .iter()
-            .try_fold(0usize, |total, edge| {
-                total.checked_add(edge.indices().len())
-            })
+        let removed = removed_quads
+            .checked_mul(6)
+            .ok_or(BakeError::SizeOverflow)?;
+        let mut added = 0usize;
+        for transition in transitions {
+            let (skip_start, skip_end) =
+                planet_transition_skipped_segments(transition.edge(), coarse_edges);
+            if !transition.indices().len().is_multiple_of(9) {
+                return Err(BakeError::InvalidGeometry);
+            }
+            let skipped = skip_start as usize + skip_end as usize;
+            let transition_indices = transition
+                .indices()
+                .len()
+                .checked_sub(skipped.checked_mul(9).ok_or(BakeError::SizeOverflow)?)
+                .ok_or(BakeError::InvalidGeometry)?;
+            added = added
+                .checked_add(transition_indices)
+                .ok_or(BakeError::SizeOverflow)?;
+        }
+        added = added
+            .checked_add(
+                corner_count
+                    .checked_mul(12)
+                    .ok_or(BakeError::SizeOverflow)?,
+            )
             .ok_or(BakeError::SizeOverflow)?;
         let next_len = base_indices
             .checked_sub(removed)
@@ -417,36 +483,85 @@ impl PlanetHeightfieldMesh {
             }
         }
         for transition in transitions {
-            for local_triangle in transition.indices().chunks_exact(3) {
-                let mut triangle = [0u32; 3];
-                for (slot, &local_index) in local_triangle.iter().enumerate() {
-                    let grid = transition
-                        .vertices()
-                        .get(local_index as usize)
-                        .ok_or(BakeError::InvalidGeometry)?
-                        .grid;
-                    triangle[slot] = grid[1]
+            let (skip_start, skip_end) =
+                planet_transition_skipped_segments(transition.edge(), coarse_edges);
+            for (segment, segment_indices) in transition.indices().chunks_exact(9).enumerate() {
+                if (skip_start && segment == 0)
+                    || (skip_end && segment + 1 == transition.indices().len() / 9)
+                {
+                    continue;
+                }
+                for local_triangle in segment_indices.chunks_exact(3) {
+                    let mut triangle = [0u32; 3];
+                    for (slot, &local_index) in local_triangle.iter().enumerate() {
+                        let grid = transition
+                            .vertices()
+                            .get(local_index as usize)
+                            .ok_or(BakeError::InvalidGeometry)?
+                            .grid;
+                        triangle[slot] = grid[1]
+                            .checked_mul(side)
+                            .and_then(|row| row.checked_add(grid[0]))
+                            .ok_or(BakeError::SizeOverflow)?;
+                        if triangle[slot] as usize >= self.positions.len() {
+                            return Err(BakeError::InvalidGeometry);
+                        }
+                    }
+                    append_planet_outward_triangle(
+                        &mut indices,
+                        &self.positions,
+                        self.config.origin_mm,
+                        triangle,
+                    )?;
+                }
+            }
+        }
+        let limit = segments;
+        let corner_coordinates = [
+            (0, 0, 1_i64, 1_i64),
+            (limit, 0, -1, 1),
+            (0, limit, 1, -1),
+            (limit, limit, -1, -1),
+        ];
+        for (corner_index, &(x, y, dx, dy)) in corner_coordinates.iter().enumerate() {
+            if !corner_fans[corner_index] {
+                continue;
+            }
+            let corner = [x, y];
+            let top_outer = [offset_grid(x, dx * 2, segments)?, y];
+            let top_inner_far = [
+                offset_grid(x, dx * 2, segments)?,
+                offset_grid(y, dy, segments)?,
+            ];
+            let top_inner_near = [offset_grid(x, dx, segments)?, offset_grid(y, dy, segments)?];
+            let side_inner_far = [
+                offset_grid(x, dx, segments)?,
+                offset_grid(y, dy * 2, segments)?,
+            ];
+            let side_outer = [x, offset_grid(y, dy * 2, segments)?];
+            let patch = [
+                [corner, top_outer, top_inner_far],
+                [corner, top_inner_far, top_inner_near],
+                [corner, top_inner_near, side_inner_far],
+                [corner, side_inner_far, side_outer],
+            ];
+            for triangle in patch {
+                let mut vertex_indices = [0u32; 3];
+                for (slot, grid) in triangle.into_iter().enumerate() {
+                    vertex_indices[slot] = grid[1]
                         .checked_mul(side)
                         .and_then(|row| row.checked_add(grid[0]))
                         .ok_or(BakeError::SizeOverflow)?;
-                    if triangle[slot] as usize >= self.positions.len() {
+                    if vertex_indices[slot] as usize >= self.positions.len() {
                         return Err(BakeError::InvalidGeometry);
                     }
                 }
-                let [a, b, c] = triangle.map(|index| self.positions[index as usize].map(f64::from));
-                let normal = cross(subtract(b, a), subtract(c, a));
-                let origin = self.config.origin_mm.map(|value| value as f64 * 0.001);
-                let outward = (0..3)
-                    .map(|axis| normal[axis] * ((a[axis] + b[axis] + c[axis]) / 3.0 + origin[axis]))
-                    .sum::<f64>();
-                if !outward.is_finite() {
-                    return Err(BakeError::InvalidGeometry);
-                }
-                if outward > 0.0 {
-                    indices.extend_from_slice(&triangle);
-                } else {
-                    indices.extend_from_slice(&[triangle[0], triangle[2], triangle[1]]);
-                }
+                append_planet_outward_triangle(
+                    &mut indices,
+                    &self.positions,
+                    self.config.origin_mm,
+                    vertex_indices,
+                )?;
             }
         }
         if indices.len() != next_len {
@@ -1043,6 +1158,89 @@ mod tests {
                         .map(|(n, p)| n * p)
                         .sum::<f64>()
                         > 0.0
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn planetary_corner_fans_are_manifold_and_outward_on_all_faces() {
+        use crate::{HeightfieldLodSeamPlan, LodSeamCoverage, LodSeamLimits, LodSeamNeighbor};
+
+        let config = PlanetMeshConfig::new(1_000_000, [0; 3], 1.0).unwrap();
+        let seam_limits = LodSeamLimits {
+            max_segments: 8,
+            max_vertices: 128,
+            max_indices: 1024,
+            max_bytes: 16_384,
+        };
+        let corners = [
+            (TileEdge::West, TileEdge::South),
+            (TileEdge::East, TileEdge::South),
+            (TileEdge::West, TileEdge::North),
+            (TileEdge::East, TileEdge::North),
+        ];
+        for face in CubeFace::ALL {
+            let tile = TileKey::new(face, 3, 3, 3).unwrap();
+            let field =
+                HeightfieldTile::bake(tile, HeightfieldSpec::new(9, 1).unwrap(), &Ramp, LIMITS)
+                    .unwrap();
+            for (first_edge, second_edge) in corners {
+                let neighbors = [first_edge, second_edge].map(|edge| {
+                    LodSeamNeighbor::with_boundary(
+                        edge,
+                        tile.neighbor(edge).parent().unwrap(),
+                        8,
+                        LodSeamCoverage::full(8),
+                    )
+                });
+                let plan =
+                    HeightfieldLodSeamPlan::build_strict(tile, 8, &neighbors, seam_limits).unwrap();
+                let mut mesh = PlanetHeightfieldMesh::build(&field, config, LIMITS).unwrap();
+                let base = mesh.clone();
+                assert_eq!(
+                    mesh.apply_lod_seam_plan(&plan, 1),
+                    Err(BakeError::BudgetExceeded)
+                );
+                assert_eq!(mesh, base, "budget mutation on {face:?} {corners:?}");
+                mesh.apply_lod_seam_plan(&plan, 16_384)
+                    .unwrap_or_else(|error| {
+                        panic!("{face:?} {first_edge:?}+{second_edge:?}: {error:?}")
+                    });
+
+                let mut edge_counts = Vec::new();
+                for triangle in mesh.indices().chunks_exact(3) {
+                    let [a, b, c] = [triangle[0], triangle[1], triangle[2]]
+                        .map(|index| mesh.positions()[index as usize].map(f64::from));
+                    assert!(
+                        cross(subtract(b, a), subtract(c, a))
+                            .iter()
+                            .zip(a)
+                            .map(|(normal, position)| normal * position)
+                            .sum::<f64>()
+                            > 0.0,
+                        "inward corner triangle on {face:?} {first_edge:?}+{second_edge:?}"
+                    );
+                    for (start, end) in [
+                        (triangle[0], triangle[1]),
+                        (triangle[1], triangle[2]),
+                        (triangle[2], triangle[0]),
+                    ] {
+                        edge_counts.push((start.min(end), start.max(end)));
+                    }
+                }
+                edge_counts.sort_unstable();
+                let mut boundary_edges = 0;
+                for edge_group in edge_counts.chunk_by(|left, right| left == right) {
+                    assert!(
+                        edge_group.len() <= 2,
+                        "non-manifold edge on {face:?} {first_edge:?}+{second_edge:?}"
+                    );
+                    boundary_edges += usize::from(edge_group.len() == 1);
+                }
+                assert_eq!(
+                    boundary_edges, 24,
+                    "unexpected open boundary on {face:?} {first_edge:?}+{second_edge:?}"
                 );
             }
         }

@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use prism_app::{App, First, Last, Plugin, SubApp};
+use prism_ecs::prelude::{Res, ResMut};
 use prism_ecs::schedule::{IntoSystemConfigs, Schedule, Schedules};
 use prism_ecs::world::World;
 use prism_render_driver::{FrameSync, Instance};
@@ -13,6 +14,9 @@ use crate::config::RenderAppConfig;
 use crate::device_loss::{DeviceLossSignal, DeviceRecoveryStatus};
 use crate::intent::RenderIntent;
 use crate::label::{Render, RenderApp, RenderStartup};
+use crate::material::virtual_texture::{
+    NativeMaterialVt, NativeVtScheduler, NativeVtSources, NativeVtUploadDriver,
+};
 use crate::material::{
     sync_material_buffers, MaterialParameterBuffers, MaterialUploadStats, RenderMaterials,
 };
@@ -23,7 +27,7 @@ use crate::pipeline_cache::{
     pso_device_fingerprint, PipelineCachePersistenceConfig, PipelineCachePersistenceError,
     PipelineCachePersistenceStatus,
 };
-use crate::queue::RenderQueues;
+use crate::queue::{CanonicalMaterialBindings, RenderQueues};
 use crate::queue_stage::fill_queues;
 use crate::record::RenderRecord;
 use crate::runtime_resource::RenderRuntimeResource;
@@ -271,6 +275,119 @@ where
     persist_pso_cache_after_idle::<I>(world, idle);
 }
 
+/// Observe loss before recovery's first-frame early return, not just when it
+/// eventually replaces particle state or the Ember registry. Close both build
+/// gates and invalidate published particle leases before either can be dropped.
+/// Poll the runtime's cached notification; workers must never consume the
+/// backend's loss notification themselves.
+pub(crate) fn abandon_lost_ember_device<I>(world: &mut World)
+where
+    I: Instance + Send + Sync + 'static,
+    I::Adapter: Send + Sync + 'static,
+    I::Device: Send + Sync + 'static,
+    I::Queue: Send + Sync + FrameSync + 'static,
+    I::Surface: Send + Sync + 'static,
+{
+    let lost = world
+        .get_resource::<RenderRuntimeResource<I>>()
+        .is_some_and(|runtime| runtime.runtime().device_lost().is_some());
+    if lost {
+        if let Some(builds) = world.get_resource::<crate::particle::ParticleGpuBuildQueue>() {
+            builds.abandon_device();
+        }
+        if let Some(state) = world.get_resource::<crate::particle::ParticleGpuState>() {
+            state.abandon();
+        }
+        if let Some(registry) = world.get_resource::<crate::particle::EmberGpuAssetRegistry>() {
+            registry.abandon_materialization_device();
+        }
+    }
+}
+
+/// Standalone legacy systems may omit VT entirely. The production plugin always
+/// installs its config and all three VT resources: partial removal must never
+/// silently enable uploads or queue stale virtual rows.
+pub(crate) fn native_vt_resources_ready(
+    required: bool,
+    scheduler: Option<&NativeVtScheduler>,
+    has_owner: bool,
+    has_sources: bool,
+) -> bool {
+    match scheduler {
+        Some(scheduler) => has_owner && has_sources && scheduler.is_ready(),
+        None => !required && !has_owner && !has_sources,
+    }
+}
+
+/// Publish/revoke VT rows before material-buffer sync. Do not retain a binding:
+/// consumers must acquire a creator-device lease for their actual submission.
+pub(crate) fn prepare_native_vt<I>(
+    runtime: Res<RenderRuntimeResource<I>>,
+    mut materials: ResMut<RenderMaterials>,
+    mut stats: ResMut<MaterialUploadStats>,
+    mut scheduler: Option<ResMut<NativeVtScheduler>>,
+    mut owner: Option<ResMut<NativeMaterialVt<I::Device>>>,
+    sources: Option<Res<NativeVtSources>>,
+    mut uploader: Option<ResMut<NativeVtUploadDriver<I>>>,
+) where
+    I: Instance + Send + Sync + 'static,
+    I::Adapter: Send + Sync + 'static,
+    I::Device: Send + Sync + 'static,
+    I::Queue: Send + Sync + FrameSync + 'static,
+    I::Surface: Send + Sync + 'static,
+{
+    stats.native_vt_ready = false;
+    stats.native_vt_errors.clear();
+    stats.native_vt_missing_resources = scheduler.is_none() || owner.is_none() || sources.is_none();
+    let (Some(scheduler), Some(owner), Some(sources)) =
+        (scheduler.as_mut(), owner.as_mut(), sources.as_ref())
+    else {
+        if let Some(scheduler) = scheduler.as_mut() {
+            scheduler.invalidate();
+        }
+        if let Some(owner) = owner.as_mut() {
+            owner.cancel();
+        }
+        return;
+    };
+    // The not-ready Queue gate cannot reach its usual completion barrier.
+    // In particular wgpu callbacks need host progress before the first atlas
+    // can publish. Only drain an existing upload; quiet frames do not wait.
+    // A failed wait is not completion: publication still checks its callback.
+    if owner.has_pending_upload() && runtime.runtime().device_lost().is_none() {
+        let _ = runtime.runtime().wait_idle();
+    }
+    let report = match uploader.as_mut() {
+        Some(uploader) => scheduler.prepare_with_uploader(
+            runtime.runtime(),
+            owner,
+            sources,
+            &mut materials,
+            |runtime, owner, sources, heap, residency| {
+                uploader.stage(runtime, owner, sources, heap, residency)
+            },
+        ),
+        None => scheduler.prepare(runtime.runtime(), owner, sources, &mut materials),
+    };
+    stats.native_vt_ready = report.ready;
+    stats.native_vt_errors = report.errors;
+}
+
+fn drive_render_schedule_with_ember_loss_guard<I>(world: &mut World)
+where
+    I: Instance + Send + Sync + 'static,
+    I::Adapter: Send + Sync + 'static,
+    I::Device: Send + Sync + 'static,
+    I::Queue: Send + Sync + FrameSync + 'static,
+    I::Surface: Send + Sync + 'static,
+{
+    abandon_lost_ember_device::<I>(world);
+    drive_render_schedule::<I>(world);
+    // Also cover a loss first reported by startup, preparation or submission.
+    // Recovery alone is not loss: a healthy replacement registry must stay open.
+    abandon_lost_ember_device::<I>(world);
+}
+
 impl<I> Plugin for PrismRenderPlugin<I>
 where
     I: Instance + Send + Sync + 'static,
@@ -281,6 +398,7 @@ where
 {
     fn build(&self, app: &mut App) {
         let config = self.config;
+        app.init_resource::<crate::particle::ParticleViewBudget>();
         let mut runtime = RenderRuntime::with_frames_in_flight(
             self.take_instance(),
             config.extent,
@@ -301,10 +419,10 @@ where
 
         // The GPU state the render world owns for the app's lifetime.
         let target = RenderTarget::new(runtime.device(), config.extent);
-        // The production forward-lit provider owns a device-rebuild recipe,
+        // The production surface-encode provider owns a device-rebuild recipe,
         // so its shader and pipeline layouts are recreated by the recovery
         // boundary when this device is replaced.
-        let mesh_pipelines = MeshPipelines::forward_lit(runtime.device());
+        let mesh_pipelines = MeshPipelines::surface_encode(runtime.device());
         // The material ABI buffers are created against the device too, so they are
         // built here as well.
         let material_buffers = MaterialParameterBuffers::new(
@@ -314,6 +432,10 @@ where
             config.material_texture_rows,
             prism_render_driver::BufferUsages::NONE,
         );
+        let native_vt = NativeMaterialVt::new(&runtime, config.material_virtual_texture)
+            .unwrap_or_else(|error| {
+                panic!("PrismRenderPlugin: native material VT setup failed: {error}")
+            });
         // Cold material permutations compile on a worker that owns a shareable
         // device handle; the specializer's cache serves the full-lobe fallback
         // until the exact PSO arrives.
@@ -338,6 +460,9 @@ where
             .insert_resource(crate::ExtractedLightingInputs::default());
         render
             .world
+            .insert_resource(crate::ExtractedVisibilityViews::default());
+        render
+            .world
             .insert_resource(crate::lighting_trace_gpu::LightingTraceState::default());
         let lighting_plan = crate::LightingPlanState::from_config(config);
         let lighting_debug = crate::lighting::LightingDebugViewState::from_plan(&lighting_plan);
@@ -345,8 +470,22 @@ where
         render.world.insert_resource(lighting_debug);
         render.world.insert_resource(lighting_gpu);
         render.world.insert_resource(RenderViews::new());
+        render
+            .world
+            .insert_resource(crate::surface_views::ExtractedSurfaceViews::default());
+        render
+            .world
+            .init_resource::<crate::particle::ExtractedParticleViews>();
+        render.world.insert_resource(
+            *app.world()
+                .resource::<crate::particle::ParticleViewBudget>(),
+        );
         render.world.insert_resource(TextureCache::new());
         render.world.insert_resource(RenderQueues::new());
+        render.world.init_resource::<crate::SurfaceViewQueues>();
+        render
+            .world
+            .init_resource::<crate::surface_view_targets::SurfaceViewTargets<I::Device>>();
         render
             .world
             .insert_resource(crate::draw::canonical::registry());
@@ -366,13 +505,28 @@ where
         render
             .world
             .insert_resource(crate::ExtractedNativeScene::default());
+        render
+            .world
+            .insert_resource(crate::NativeGeometryGpuState::new());
+        render
+            .world
+            .insert_resource(crate::ExtractedNativeGeometry::default());
         // The material ABI: the render world's registry plus the header/parameter
         // buffers built from it (sized for the scene's material budget).
         render
             .world
             .insert_resource(RenderMaterials::new(config.material_capacity));
         render.world.insert_resource(material_buffers);
+        render
+            .world
+            .insert_resource(CanonicalMaterialBindings::new(config.material_capacity));
         render.world.insert_resource(MaterialUploadStats::default());
+        render.world.insert_resource(native_vt);
+        render.world.insert_resource(NativeVtScheduler::default());
+        render.world.insert_resource(NativeVtSources::default());
+        render
+            .world
+            .insert_resource(crate::material::NativeVtSourceStatus::default());
         render
             .world
             .insert_resource(crate::RenderTransforms::default());
@@ -396,10 +550,22 @@ where
             .insert_resource(crate::particle::ParticleUploadStatus::default());
         render
             .world
+            .insert_resource(crate::particle::ParticleGpuSimulationInputs::default());
+        render
+            .world
+            .insert_resource(crate::particle::PreparedParticleFabricFrame::default());
+        render
+            .world
+            .init_resource::<crate::ExtractedRenderFabricFrame>();
+        render
+            .world
             .insert_resource(crate::particle::EmberPrepareStatus::default());
         render
             .world
             .insert_resource(crate::particle::EmberGpuAssetRegistry::default());
+        render
+            .world
+            .insert_resource(crate::frame::FrameGraphTextureImports::default());
         render.world.insert_resource(device_loss.clone());
 
         // The render schedule, plus the `Last` phase that runs it each frame.
@@ -435,6 +601,8 @@ where
             schedule.add_systems(
                 crate::transforms::prepare_transform_resources::<I>.in_set(RenderSystems::Extract),
             );
+            schedule
+                .add_systems(crate::extract_native_geometry::<I>.in_set(RenderSystems::Extract));
             // Materialize the view family before the record stage consumes it.
             schedule.add_systems(build_view_family.in_set(RenderSystems::CreateViews));
             schedule.add_systems(
@@ -445,17 +613,28 @@ where
                     .chain()
                     .in_set(RenderSystems::PrepareViews),
             );
-            // The visible set becomes this frame's queue before anything records.
-            // Materials register/retire → the ABI buffers, before anything binds them.
-            schedule
-                .add_systems(sync_material_buffers::<I>.in_set(RenderSystems::PrepareResources));
+            // Queue validates the active ABI header against the extracted
+            // registry revision. Publish material rows before that validation,
+            // not in PrepareResources (which runs after Queue).
+            schedule.add_systems(
+                (prepare_native_vt::<I>, sync_material_buffers::<I>)
+                    .chain()
+                    .in_set(RenderSystems::PrepareAssets),
+            );
             schedule.add_systems(
                 crate::prepare_native_scene_gpu::<I>.in_set(RenderSystems::PrepareResources),
+            );
+            schedule.add_systems(
+                crate::prepare_native_geometry_gpu::<I>.in_set(RenderSystems::PrepareResources),
             );
             schedule
                 .add_systems(pump_pipeline_compiles::<I>.in_set(RenderSystems::PrepareResources));
             schedule.add_systems(
-                crate::particle::prepare_particle_snapshot::<I>
+                (
+                    crate::particle::prepare_particle_snapshot::<I>,
+                    crate::fabric_frame::finalize_render_fabric_frame,
+                )
+                    .chain()
                     .in_set(RenderSystems::PrepareResources),
             );
             schedule.add_systems(
@@ -470,7 +649,7 @@ where
             .resource_mut::<Schedules>()
             .get_mut(Last)
             .expect("the Last schedule was just inserted")
-            .add_systems(drive_render_schedule::<I>);
+            .add_systems(drive_render_schedule_with_ember_loss_guard::<I>);
 
         app.insert_sub_app(RenderApp, render);
 
@@ -490,25 +669,54 @@ where
         // record, then one step per render-asset family), and replacing it here
         // would drop a family registered by another plugin.
         app.insert_resource(RenderIntent::from_extent(config.extent));
-        app.insert_resource(crate::LightingSceneInputs {
-            stats: config.lighting_scene_stats,
-            journal: prism_render_architecture::lighting::contract::ChangeJournal::new(),
-            gi_candidates: Vec::new(),
-            surfaces: vec![crate::lighting::LightingSurfaceInput::default()],
-        });
+        app.insert_resource(crate::LightingSceneInputs::with_stats(
+            config.lighting_scene_stats,
+        ));
+        if app
+            .world()
+            .get_resource::<prism_particle_app::ParticleSimulationConfig>()
+            .is_none()
+        {
+            let mut simulation = prism_particle_app::ParticleSimulationConfig::default();
+            simulation.capacity = config.particle_capacity;
+            app.insert_resource(simulation);
+        }
+        prism_particle_app::install_particle_simulation_inputs(app);
         app.add_extract(RenderApp, extract_render_record);
         app.add_extract(RenderApp, |main, secondary| {
             prism_particle_app::extract_particle_snapshot(main, secondary);
         });
+        app.add_extract(RenderApp, crate::particle::extract_particle_fabric_frame);
         app.init_resource::<crate::particle::EmberRenderAssets>();
         app.init_resource::<crate::particle::EmberCompiledGraphAssets>();
         app.init_resource::<crate::particle::EmberExternalGpuResources>();
+        app.init_resource::<crate::frame::FrameGraphTextureImports>();
         app.add_extract(RenderApp, crate::particle::extract_ember_render_assets);
+        app.add_extract(
+            RenderApp,
+            crate::particle::extract_particle_simulation_inputs,
+        );
         app.add_extract(
             RenderApp,
             crate::particle::extract_ember_external_gpu_resources,
         );
+        app.add_extract(RenderApp, crate::frame::extract_frame_graph_texture_imports);
         app.add_extract(RenderApp, crate::lighting::extract_lighting_inputs);
+        app.add_extract(RenderApp, crate::surface_views::extract_surface_views);
+        app.add_extract(RenderApp, |main, render| {
+            if let Some(budget) = main
+                .get_resource::<crate::particle::ParticleViewBudget>()
+                .copied()
+            {
+                render.insert_resource(budget);
+            }
+            crate::particle::extract_particle_views(main, render);
+        });
+        app.add_extract(RenderApp, crate::fabric_frame::extract_render_fabric_frame);
+        app.add_extract(
+            RenderApp,
+            crate::visibility_bridge::extract_visibility_views,
+        );
         app.add_extract(RenderApp, crate::extract_native_scene::<I>);
         app.init_resource::<crate::PublishedTransforms>();
         app.add_systems(Last, crate::transforms::publish_transforms);
@@ -520,6 +728,7 @@ where
         // Images reach the GPU through the same render-asset boundary; material
         // providers can bind them without installing a second mesh pipeline.
         crate::render_asset::register_render_assets::<I, crate::GpuImage>(app);
+        app.add_extract_finalizer(RenderApp, crate::material::extract_native_vt_sources);
         crate::presentation::install::<I>(app);
     }
 
@@ -538,6 +747,7 @@ where
         let Some(render) = app.sub_app_mut(RenderApp) else {
             return;
         };
+        abandon_lost_ember_device::<I>(&mut render.world);
         crate::presentation::shutdown::<I>(&mut render.world);
         // A partially rebuilt target may still name the previous generation.
         // Never wait on or destroy resources through a lost/replaced device.
@@ -546,6 +756,18 @@ where
             .world
             .get_resource::<RenderRuntimeResource<I>>()
             .is_some_and(|runtime| runtime.runtime().device_lost().is_some());
+        if let Some(builds) = render
+            .world
+            .remove_resource::<crate::particle::ParticleGpuBuildQueue>()
+        {
+            // Disconnect the receiver even on healthy shutdown. A queued or
+            // later unsent result owns its cleanup; only loss suppresses calls
+            // to the old backend through the shared construction gate.
+            if device_lost {
+                builds.abandon_device();
+            }
+            drop(builds);
+        }
         let idle = if recovering || device_lost {
             false
         } else {
@@ -556,6 +778,20 @@ where
                 .get_resource::<RenderRuntimeResource<I>>()
                 .is_some_and(|runtime| runtime.runtime().wait_idle())
         };
+        if !idle || recovering || device_lost {
+            if let Some(owner) = render.world.get_resource::<NativeMaterialVt<I::Device>>() {
+                owner.abandon_device();
+            }
+        }
+        // Healthy shutdown must drain uploads before dropping their owner.
+        // Pending callbacks/consumer leases retain their creator-device slice;
+        // cancellation alone is not GPU completion.
+        render.world.remove_resource::<NativeVtScheduler>();
+        render.world.remove_resource::<NativeVtUploadDriver<I>>();
+        render
+            .world
+            .remove_resource::<NativeMaterialVt<I::Device>>();
+        render.world.remove_resource::<NativeVtSources>();
         if let Some(display) = render
             .world
             .get_resource::<crate::display_transform_gpu::OffscreenDisplayTransform>()
@@ -581,11 +817,23 @@ where
             render.world.insert_resource(specializer);
         }
         if idle && !recovering && !device_lost {
+            if let Some(mut bindings) = render.world.remove_resource::<CanonicalMaterialBindings>()
+            {
+                let runtime = render.world.resource::<RenderRuntimeResource<I>>();
+                bindings.destroy(runtime.runtime().device());
+            }
             if let Some(mut native_scene) =
                 render.world.remove_resource::<crate::NativeSceneGpuState>()
             {
                 let runtime = render.world.resource::<RenderRuntimeResource<I>>();
                 native_scene.destroy(runtime.runtime().device());
+            }
+            if let Some(mut native_geometry) = render
+                .world
+                .remove_resource::<crate::NativeGeometryGpuState>()
+            {
+                let runtime = render.world.resource::<RenderRuntimeResource<I>>();
+                native_geometry.destroy(runtime.runtime().device());
             }
             if let Some(ember) = render
                 .world
@@ -609,6 +857,12 @@ where
                 .remove_resource::<crate::particle::EmberPrepareStatus>();
             render
                 .world
+                .remove_resource::<crate::particle::PreparedParticleFabricFrame>();
+            render
+                .world
+                .remove_resource::<crate::ExtractedRenderFabricFrame>();
+            render
+                .world
                 .remove_resource::<crate::particle::ExtractedEmberRenderAssets>();
             render
                 .world
@@ -620,19 +874,34 @@ where
                 target.destroy(runtime.runtime().device());
             }
         } else {
+            render.world.remove_resource::<CanonicalMaterialBindings>();
             render.world.remove_resource::<crate::NativeSceneGpuState>();
             render
                 .world
-                .remove_resource::<crate::particle::EmberGpuAssetRegistry>();
+                .remove_resource::<crate::NativeGeometryGpuState>();
             render
                 .world
-                .remove_resource::<crate::particle::ParticleGpuState>();
+                .remove_resource::<crate::particle::EmberGpuAssetRegistry>();
+            if let Some(state) = render
+                .world
+                .remove_resource::<crate::particle::ParticleGpuState>()
+            {
+                state.abandon();
+                // Retire CPU/core ownership without destroying lost handles.
+                state.destroy();
+            }
             render
                 .world
                 .remove_resource::<crate::particle::ParticleUploadStatus>();
             render
                 .world
                 .remove_resource::<crate::particle::EmberPrepareStatus>();
+            render
+                .world
+                .remove_resource::<crate::particle::PreparedParticleFabricFrame>();
+            render
+                .world
+                .remove_resource::<crate::ExtractedRenderFabricFrame>();
             render
                 .world
                 .remove_resource::<crate::particle::ExtractedEmberRenderAssets>();
@@ -646,6 +915,10 @@ where
         true
     }
 }
+
+#[cfg(test)]
+#[path = "plugin/native_vt_integration_tests.rs"]
+mod native_vt_integration_tests;
 
 #[cfg(test)]
 mod tests {
@@ -673,7 +946,68 @@ mod tests {
     }
 
     #[test]
-    fn plugin_installs_forward_lit_as_the_default_mesh_provider() {
+    fn plugin_initializes_particle_views_and_default_budget() {
+        let mut app = App::new();
+        app.add_plugins(PrismRenderPlugin::new(NullInstance::new()));
+
+        let expected = crate::ParticleViewBudget::default();
+        assert_eq!(
+            *app.world().resource::<crate::ParticleViewBudget>(),
+            expected
+        );
+        let render = app.get_sub_app(RenderApp).expect("render sub-app");
+        assert_eq!(
+            *render.world.resource::<crate::ParticleViewBudget>(),
+            expected
+        );
+        assert!(render
+            .world
+            .resource::<crate::ExtractedParticleViews>()
+            .is_empty());
+    }
+
+    #[test]
+    fn plugin_preserves_configured_particle_view_budget() {
+        let mut app = App::new();
+        let budget = crate::ParticleViewBudget {
+            max_views: 3,
+            max_retired_renderers: 5,
+            max_work_items: 4096,
+        };
+        app.insert_resource(budget);
+        app.add_plugins(PrismRenderPlugin::new(NullInstance::new()));
+
+        assert_eq!(*app.world().resource::<crate::ParticleViewBudget>(), budget);
+        let render = app.get_sub_app(RenderApp).expect("render sub-app");
+        assert_eq!(
+            *render.world.resource::<crate::ParticleViewBudget>(),
+            budget
+        );
+    }
+
+    #[test]
+    fn healthy_shutdown_removes_particle_build_queue() {
+        let mut app = App::new();
+        app.add_plugins(PrismRenderPlugin::new(NullInstance::new()));
+        assert!(app
+            .get_sub_app(RenderApp)
+            .unwrap()
+            .world
+            .get_resource::<crate::particle::ParticleGpuBuildQueue>()
+            .is_some());
+
+        PrismRenderPlugin::new(NullInstance::new()).shutdown(&mut app);
+
+        assert!(app
+            .get_sub_app(RenderApp)
+            .unwrap()
+            .world
+            .get_resource::<crate::particle::ParticleGpuBuildQueue>()
+            .is_none());
+    }
+
+    #[test]
+    fn plugin_installs_surface_encode_as_the_default_mesh_provider() {
         let mut app = App::new();
         app.add_plugins(PrismRenderPlugin::new(NullInstance::new()));
 
@@ -700,15 +1034,14 @@ mod tests {
                 .targets,
             vec![
                 Some(ColorTargetState::opaque(
-                    crate::target::POSITION_GBUFFER_FORMAT
+                    crate::target::POSITION_X_GBUFFER_FORMAT
                 )),
                 Some(ColorTargetState::opaque(crate::target::GBUFFER_FORMAT)),
-                Some(ColorTargetState::opaque(crate::target::GBUFFER_FORMAT)),
+                Some(ColorTargetState::opaque(
+                    crate::target::ALBEDO_GBUFFER_FORMAT
+                )),
                 Some(ColorTargetState::opaque(
                     crate::target::SURFACE_ID_GBUFFER_FORMAT
-                )),
-                Some(ColorTargetState::opaque(
-                    crate::target::COVERAGE_GBUFFER_FORMAT
                 )),
             ]
         );
