@@ -24,7 +24,7 @@ use crate::multiplex::MuxSendError;
 use crate::session::SessionError;
 use crate::transport::Transport;
 
-use super::{ReplicationConfig, ServerReplication, ServerStrategy};
+use super::{ExternalCommandModeError, ReplicationConfig, ServerReplication, ServerStrategy};
 
 /// The stable identity used by the authority peer table and AOI events.
 pub type PeerId = u64;
@@ -45,6 +45,18 @@ pub struct EntitySnapshotPayload {
     pub entity_id: u32,
     /// Provider-serialized entity state. The provider owns the schema/version.
     pub bytes: Vec<u8>,
+}
+
+/// One decoded reliable command removed from a peer connection for a shared
+/// authority executor. Ordering within a peer is preserved; across peers the
+/// coordinator emits a deterministic round-robin order for the currently
+/// queued commands.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InboundAuthorityCommand {
+    /// Stable identity of the peer that submitted the command.
+    pub peer_id: PeerId,
+    /// Command payload after RPC framing has been removed.
+    pub payload: Vec<u8>,
 }
 
 /// One peer's AOI update with real entity snapshots and lifecycle removals.
@@ -149,6 +161,13 @@ pub enum MultiPeerAuthorityError {
         /// Configured encoded payload bound.
         max: usize,
     },
+    /// A peer cannot transfer command ownership from its record authority.
+    ExternalCommandMode {
+        /// Peer whose authority state prevents the transition.
+        peer_id: PeerId,
+        /// The state that makes the transition unsafe.
+        reason: ExternalCommandModeError,
+    },
 }
 
 impl core::fmt::Display for MultiPeerAuthorityError {
@@ -173,6 +192,12 @@ impl core::fmt::Display for MultiPeerAuthorityError {
                 formatter,
                 "AOI payload length {actual} exceeds configured maximum {max}"
             ),
+            Self::ExternalCommandMode { peer_id, reason } => {
+                write!(
+                    formatter,
+                    "peer {peer_id} cannot enter external command mode: {reason:?}"
+                )
+            }
         }
     }
 }
@@ -476,6 +501,7 @@ pub struct MultiPeerAuthority<S: ServerStrategy> {
     aoi: AuthorityAoi,
     peers: BTreeMap<PeerId, PeerAuthority<S>>,
     provider: Box<dyn AuthorityReplicationProvider>,
+    command_cursor: Option<PeerId>,
 }
 
 impl<S: ServerStrategy> Resource for MultiPeerAuthority<S> {}
@@ -498,6 +524,7 @@ impl<S: ServerStrategy> MultiPeerAuthority<S> {
             config,
             peers: BTreeMap::new(),
             provider: Box::new(provider),
+            command_cursor: None,
         })
     }
 
@@ -670,6 +697,74 @@ impl<S: ServerStrategy> MultiPeerAuthority<S> {
             }
         }
         applied
+    }
+
+    /// Poll all peer transports without applying their commands to per-peer
+    /// `Record` state, then remove up to `limit` commands in bounded
+    /// round-robin order. The first call permanently selects external command
+    /// consumption for each connection. Commands retain each peer's reliable
+    /// FIFO order; cross-peer order is a local scheduling policy, not a claim
+    /// of cross-machine deterministic arrival ordering.
+    ///
+    /// # Errors
+    /// Returns [`MultiPeerAuthorityError::ExternalCommandMode`] without changing
+    /// any peer mode if a record journal is installed or record authority has
+    /// already advanced for any admitted peer.
+    pub fn poll_inbound_commands(
+        &mut self,
+        limit: usize,
+    ) -> Result<Vec<InboundAuthorityCommand>, MultiPeerAuthorityError> {
+        let peer_ids: Vec<PeerId> = self.peers.keys().copied().collect();
+        for &peer_id in &peer_ids {
+            if let Some(peer) = self.peers.get(&peer_id) {
+                peer.server
+                    .validate_external_command_mode()
+                    .map_err(|reason| MultiPeerAuthorityError::ExternalCommandMode {
+                        peer_id,
+                        reason,
+                    })?;
+            }
+        }
+        for &peer_id in &peer_ids {
+            self.flush_aoi_events(peer_id);
+            if let Some(peer) = self.peers.get_mut(&peer_id) {
+                peer.server
+                    .poll_inbound_commands()
+                    .expect("all peer modes were validated before mutation");
+            }
+        }
+        if limit == 0 || peer_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let start = self
+            .command_cursor
+            .and_then(|cursor| peer_ids.iter().position(|peer_id| *peer_id == cursor))
+            .map_or(0, |index| (index + 1) % peer_ids.len());
+        let mut commands = Vec::new();
+        let mut next_index = start;
+        while commands.len() < limit {
+            let mut found = false;
+            for offset in 0..peer_ids.len() {
+                let index = (next_index + offset) % peer_ids.len();
+                let peer_id = peer_ids[index];
+                let command = self
+                    .peers
+                    .get_mut(&peer_id)
+                    .and_then(|peer| peer.server.take_inbound_command());
+                if let Some(payload) = command {
+                    commands.push(InboundAuthorityCommand { peer_id, payload });
+                    self.command_cursor = Some(peer_id);
+                    next_index = (index + 1) % peer_ids.len();
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                break;
+            }
+        }
+        Ok(commands)
     }
 
     /// Index or move an entity and dispatch all resulting enter/leave updates.

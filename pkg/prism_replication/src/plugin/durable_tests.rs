@@ -337,6 +337,18 @@ fn append_replay_and_sync_failures_retry_the_exact_candidate_once() {
 }
 
 #[test]
+fn durable_authority_refuses_external_command_handoff() {
+    let log = FaultLog::new(32);
+    let (_peer, mut server, _, _) = connected(&log);
+
+    assert_eq!(
+        server.poll_inbound_commands(),
+        Err(ExternalCommandModeError::DurableJournalInstalled)
+    );
+    assert!(!server.external_command_consumer);
+}
+
+#[test]
 fn ambiguous_io_then_mtu_refusal_never_discards_the_candidate() {
     for failure in 0..4 {
         let log = FaultLog::new(32);

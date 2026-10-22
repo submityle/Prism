@@ -62,10 +62,13 @@ pub use multi_server::{
     decode_authority_aoi_event, decode_authority_aoi_replication_payload,
     encode_authority_aoi_event, encode_authority_aoi_replication_payload, AuthorityAoiEventError,
     AuthorityAoiReplicationPayload, AuthorityReplicationProvider,
-    AuthorityReplicationProviderError, EntitySnapshotPayload, MultiPeerAuthority,
-    MultiPeerAuthorityConfig, MultiPeerAuthorityError, MultiPeerServerPlugin, PeerId,
+    AuthorityReplicationProviderError, EntitySnapshotPayload, InboundAuthorityCommand,
+    MultiPeerAuthority, MultiPeerAuthorityConfig, MultiPeerAuthorityError, MultiPeerServerPlugin,
+    PeerId,
 };
-pub use server::{ReplicationServerPlugin, ServerReplication, ServerStrategy};
+pub use server::{
+    ExternalCommandModeError, ReplicationServerPlugin, ServerReplication, ServerStrategy,
+};
 
 /// The retransmit floor (in frames) both plugins use for their channel.
 pub(crate) const DEFAULT_MIN_RTO: u32 = 2;

@@ -38,6 +38,17 @@ pub trait ServerStrategy: Send + Sync + 'static {
     fn apply(&self, record: &mut Record, command: Self::Command);
 }
 
+/// Why a peer cannot switch from its record authority to external command
+/// consumption.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExternalCommandModeError {
+    /// Record journal durability does not cover an external ECS world/outbox.
+    DurableJournalInstalled,
+    /// The record authority has already advanced and cannot be handed off
+    /// atomically to another state owner.
+    RecordAuthorityAlreadyAdvanced,
+}
+
 /// The app-facing authority resource: a [`ServerSession`] plus its channel.
 pub struct ServerReplication<S: ServerStrategy> {
     session: ServerSession,
@@ -47,6 +58,7 @@ pub struct ServerReplication<S: ServerStrategy> {
     connection: ConnectionState,
     next_rpc_id: u64,
     pending_commands: VecDeque<Vec<u8>>,
+    external_command_consumer: bool,
     journal: Option<Box<dyn AuthorityJournal>>,
     next_journal_sequence: u64,
     prepared: Option<PreparedCommit>,
@@ -130,6 +142,7 @@ impl<S: ServerStrategy> ServerReplication<S> {
             connection,
             next_rpc_id: 0,
             pending_commands: VecDeque::new(),
+            external_command_consumer: false,
             journal: None,
             next_journal_sequence: 1,
             prepared: None,
@@ -224,9 +237,11 @@ impl<S: ServerStrategy> ServerReplication<S> {
         self.next_journal_sequence = restored.next_sequence;
     }
 
-    /// One frame: tick the channel, decode + apply every inbound command, and
-    /// broadcast the framed authoritative delta back to the peer. Returns how many
-    /// commands advanced authority this frame. A rejected command is stored for
+    /// In record-authority mode, tick the channel, decode + apply inbound commands,
+    /// and broadcast framed deltas. Returns how many commands advanced authority
+    /// this frame. After [`poll_inbound_commands`](Self::poll_inbound_commands)
+    /// selects external mode, this only services transport and auxiliary lanes and
+    /// returns zero. A rejected record-mode command is stored for
     /// [`take_last_error`](Self::take_last_error) and stops the drain rather than
     /// unwinding the frame loop.
     ///
@@ -242,22 +257,12 @@ impl<S: ServerStrategy> ServerReplication<S> {
     /// in [`rejected`](Self::rejected) rather than applied.
     pub fn pump(&mut self) -> usize {
         self.last_error = None;
-        self.mux.tick();
-        if self.mux.security_state() == crate::transport::TransportSecurity::Rejected
-            || self.mux.take_security_error().is_some()
-        {
-            self.reject(ProtocolError::SecurityFailure, false);
+        if !self.poll_network() {
             return 0;
         }
-        if matches!(self.connection, ConnectionState::Rejected(_)) {
-            return 0;
-        }
-        self.drain_control();
-        if !matches!(self.connection, ConnectionState::Established(_)) {
-            return 0;
-        }
-        self.drain_auxiliary_channels();
-        if !matches!(self.connection, ConnectionState::Established(_)) {
+        if self.external_command_consumer {
+            #[cfg(feature = "determinism")]
+            self.flush_frame_hashes();
             return 0;
         }
 
@@ -339,6 +344,63 @@ impl<S: ServerStrategy> ServerReplication<S> {
         #[cfg(feature = "determinism")]
         self.flush_frame_hashes();
         advanced
+    }
+
+    /// Poll this connection and move it into externally managed command mode.
+    /// Commands are then removed only by [`take_inbound_command`](Self::take_inbound_command);
+    /// `pump` continues servicing transport and auxiliary lanes but never applies
+    /// these commands to the per-peer `Record`. This mode is one-way for the
+    /// lifetime of the connection so an application cannot accidentally split
+    /// authority between the ECS world and the record strategy.
+    pub fn poll_inbound_commands(&mut self) -> Result<usize, ExternalCommandModeError> {
+        self.validate_external_command_mode()?;
+        self.external_command_consumer = true;
+        self.last_error = None;
+        if self.poll_network() {
+            Ok(self.pending_commands.len())
+        } else {
+            Ok(0)
+        }
+    }
+
+    pub(crate) fn validate_external_command_mode(&self) -> Result<(), ExternalCommandModeError> {
+        if self.journal.is_some() {
+            return Err(ExternalCommandModeError::DurableJournalInstalled);
+        }
+        if !self.external_command_consumer && (self.applied != 0 || self.prepared.is_some()) {
+            return Err(ExternalCommandModeError::RecordAuthorityAlreadyAdvanced);
+        }
+        Ok(())
+    }
+
+    /// Remove the oldest decoded RPC payload in externally managed command mode.
+    #[must_use]
+    pub fn take_inbound_command(&mut self) -> Option<Vec<u8>> {
+        self.external_command_consumer
+            .then(|| self.pending_commands.pop_front())
+            .flatten()
+    }
+
+    fn poll_network(&mut self) -> bool {
+        self.mux.tick();
+        if self.mux.security_state() == crate::transport::TransportSecurity::Rejected
+            || self.mux.take_security_error().is_some()
+        {
+            self.reject(ProtocolError::SecurityFailure, false);
+            return false;
+        }
+        if matches!(self.connection, ConnectionState::Rejected(_)) {
+            return false;
+        }
+        self.drain_control();
+        if !matches!(self.connection, ConnectionState::Established(_)) {
+            return false;
+        }
+        self.drain_auxiliary_channels();
+        if !matches!(self.connection, ConnectionState::Established(_)) {
+            return false;
+        }
+        true
     }
 
     fn drain_control(&mut self) {
@@ -921,6 +983,25 @@ mod tests {
             )
             .unwrap(),
         )
+    }
+
+    #[test]
+    fn external_command_mode_refuses_handoff_after_record_authority_advances() {
+        let (mut client, mut server) = memory_pair(
+            ReplicationConfig::for_capacity(8),
+            ReplicationConfig::for_capacity(8),
+        );
+        drive(&mut client, &mut server);
+        client.try_send_rpc(&5i64.to_le_bytes()).unwrap();
+        for _ in 0..8 {
+            client.pump();
+            server.pump();
+        }
+        assert_eq!(server.applied(), 1);
+        assert_eq!(
+            server.poll_inbound_commands(),
+            Err(ExternalCommandModeError::RecordAuthorityAlreadyAdvanced)
+        );
     }
 
     /// Exercise the actual app scheduling seam, with the same assertions for

@@ -1,6 +1,7 @@
 use super::*;
 
 use crate::delta::{encode_snapshot, FieldKind, FieldValue, Record};
+use crate::event_log::{MemoryEventLogBackend, ReplayEventLog};
 use crate::plugin::{Replication, ReplicationStrategy};
 use crate::security::test_support::Provider;
 use crate::transport::memory::InMemoryTransport;
@@ -353,6 +354,123 @@ fn visible_entity_updates_are_sent_only_to_current_viewers_and_stop_after_leave(
     .unwrap();
     assert_eq!(latest.updated[0].bytes, entity_blob(7, 123));
     assert!(clients[1].1.recv_event().is_none());
+}
+
+#[test]
+fn inbound_commands_are_extracted_fairly_without_advancing_peer_records() {
+    let world = Arc::new(Mutex::new(BTreeMap::new()));
+    let mut authority = MultiPeerAuthority::new(config(), SharedWorld(world)).unwrap();
+    let mut clients = Vec::new();
+    for peer_id in [20, 10] {
+        let (client_transport, server_transport) = secure_pair();
+        clients.push((
+            peer_id,
+            Replication::new(schema(), 8, &seed(), AddClient, Box::new(client_transport)).unwrap(),
+        ));
+        authority
+            .admit_peer(
+                peer_id,
+                (0.0, 0.0),
+                5.0,
+                schema(),
+                8,
+                &seed(),
+                AddAuthority,
+                Box::new(server_transport),
+            )
+            .unwrap();
+    }
+
+    for _ in 0..20 {
+        for (_, client) in &mut clients {
+            client.pump();
+        }
+        authority.poll_inbound_commands(0).unwrap();
+    }
+    assert!(clients
+        .iter()
+        .all(|(_, client)| client.negotiated().is_some()));
+
+    let client_20 = &mut clients[0].1;
+    client_20.try_send_rpc(b"20-a").unwrap();
+    client_20.try_send_rpc(b"20-b").unwrap();
+    clients[1].1.try_send_rpc(b"10-a").unwrap();
+
+    let mut drained = Vec::new();
+    for _ in 0..20 {
+        for (_, client) in &mut clients {
+            client.pump();
+        }
+        drained.extend(authority.poll_inbound_commands(1).unwrap());
+    }
+    assert_eq!(
+        drained,
+        vec![
+            InboundAuthorityCommand {
+                peer_id: 10,
+                payload: b"10-a".to_vec(),
+            },
+            InboundAuthorityCommand {
+                peer_id: 20,
+                payload: b"20-a".to_vec(),
+            },
+            InboundAuthorityCommand {
+                peer_id: 20,
+                payload: b"20-b".to_vec(),
+            },
+        ]
+    );
+    assert!(authority.peer_ids().into_iter().all(|peer_id| {
+        authority.peer(peer_id).unwrap().applied() == 0
+            && authority.peer(peer_id).unwrap().revision() == Some(0)
+    }));
+}
+
+#[test]
+fn external_command_handoff_preflights_every_peer_before_polling_any_peer() {
+    let world = Arc::new(Mutex::new(BTreeMap::new()));
+    let mut authority = MultiPeerAuthority::new(config(), SharedWorld(world)).unwrap();
+    let (_client_10, server_10) = secure_pair();
+    authority
+        .admit_peer(
+            10,
+            (0.0, 0.0),
+            5.0,
+            schema(),
+            8,
+            &seed(),
+            AddAuthority,
+            Box::new(server_10),
+        )
+        .unwrap();
+
+    let (_client_20, server_20) = secure_pair();
+    let durable_server = ServerReplication::new_durable(
+        schema(),
+        8,
+        &seed(),
+        AddAuthority,
+        Box::new(server_20),
+        ReplayEventLog::new(MemoryEventLogBackend::new(8, 16_384), 16_384),
+    )
+    .unwrap();
+    authority
+        .admit_server(20, (0.0, 0.0), 5.0, durable_server)
+        .unwrap();
+
+    let pending_before = [10, 20].map(|peer_id| authority.pending_aoi_events(peer_id));
+    assert!(matches!(
+        authority.poll_inbound_commands(8),
+        Err(MultiPeerAuthorityError::ExternalCommandMode {
+            peer_id: 20,
+            reason: ExternalCommandModeError::DurableJournalInstalled,
+        })
+    ));
+    assert_eq!(
+        [10, 20].map(|peer_id| authority.pending_aoi_events(peer_id)),
+        pending_before
+    );
+    assert!(authority.peer(10).unwrap().negotiated().is_none());
 }
 
 #[test]
