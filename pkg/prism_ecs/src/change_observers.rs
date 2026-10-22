@@ -80,6 +80,7 @@ trait ChangeObserver: Send + Sync {
         last_run: Tick,
         this_run: Tick,
         out: &mut Vec<Entity>,
+        #[cfg(test)] tick_checks: &mut usize,
     ) -> crate::change_index::ChangeIndexStats;
     /// Invoke the user callback.
     fn fire(&mut self, ctx: &mut ChangeContext<'_>);
@@ -108,6 +109,7 @@ where
         last_run: Tick,
         this_run: Tick,
         out: &mut Vec<Entity>,
+        #[cfg(test)] tick_checks: &mut usize,
     ) -> crate::change_index::ChangeIndexStats {
         let mut stats =
             world
@@ -128,6 +130,10 @@ where
                     if let Some(set) = world.sparse_sets().get(self.component) {
                         stats.gap_sparse_entities_checked = set.entities().len();
                         for &entity in set.entities() {
+                            #[cfg(test)]
+                            {
+                                *tick_checks += 1;
+                            }
                             if set
                                 .component_ticks(entity)
                                 .is_some_and(|ticks| ticks.is_changed(last_run, this_run))
@@ -154,6 +160,10 @@ where
                             // Read its packed tick column directly instead of
                             // looking up the entity and table again per row.
                             for (row, &entity) in entities.iter().enumerate() {
+                                #[cfg(test)]
+                                {
+                                    *tick_checks += 1;
+                                }
                                 if column.component_ticks(row).is_changed(last_run, this_run) {
                                     out.push(entity);
                                 }
@@ -164,12 +174,24 @@ where
                 Some(StorageType::Shared) | None => {}
             }
         } else {
+            // Repeated writes are raw log events, not separate tick checks.
+            // Hash membership is never used for delivery order; only the U
+            // unique candidates are sorted below, after O(W) coalescing.
+            let mut seen = hashbrown::HashSet::new();
             out.retain(|&entity| {
+                if !seen.insert(entity) {
+                    return false;
+                }
+                #[cfg(test)]
+                {
+                    *tick_checks += 1;
+                }
                 world
                     .get_ticks::<T>(entity)
                     .is_some_and(|ticks| ticks.is_changed(last_run, this_run))
             });
         }
+        out.sort_unstable_by_key(|entity| (entity.index(), entity.generation()));
         stats
     }
 
@@ -186,7 +208,51 @@ struct ChangeSlot {
     last_run: Tick,
     observer: Box<dyn ChangeObserver>,
     cursor: crate::change_index::ChangeCursor,
+    /// A non-reused collection-phase identity certifying the cursor's opaque
+    /// loss revision. Together with component, epoch and append position this
+    /// proves cursor compatibility without exposing ChangeCursor internals.
+    /// New registrations and restored slots must first collect independently.
+    cursor_cohort: Option<u64>,
     pending: Vec<Entity>,
+}
+
+/// Fresh candidates only: pending/retry state is never shared or re-filtered.
+struct SharedCollection {
+    cursor: crate::change_index::ChangeCursor,
+    entities: Vec<Entity>,
+}
+
+impl ChangeSlot {
+    fn collect_fresh(&mut self, world: &mut World, this_run: Tick) -> SharedCollection {
+        let mut entities = Vec::new();
+        #[cfg(test)]
+        let mut tick_checks = 0;
+        let _stats = self.observer.collect(
+            world,
+            &mut self.cursor,
+            self.last_run,
+            this_run,
+            &mut entities,
+            #[cfg(test)]
+            &mut tick_checks,
+        );
+        #[cfg(test)]
+        {
+            let stats = &mut world.change_observers.stats;
+            stats.collections += 1;
+            stats.log_batches += _stats.batches;
+            stats.log_events += _stats.events;
+            stats.gap_archetypes_scanned += _stats.gap_archetypes_scanned;
+            stats.gap_rows_checked += _stats.gap_rows_checked;
+            stats.gap_sparse_entities_checked += _stats.gap_sparse_entities_checked;
+            stats.retain_tick_lookup_upper_bound += _stats.events;
+            stats.tick_checks += tick_checks;
+        }
+        SharedCollection {
+            cursor: self.cursor,
+            entities,
+        }
+    }
 }
 
 struct ChangeEntry {
@@ -204,15 +270,18 @@ struct FlushStats {
     revision_checks: usize,
     slot_visits: usize,
     collections: usize,
+    collection_cache_hits: usize,
     candidate_slots: usize,
     log_batches: usize,
     log_events: usize,
     gap_archetypes_scanned: usize,
     gap_rows_checked: usize,
     gap_sparse_entities_checked: usize,
-    /// Auditable upper bound: current collection calls `get_ticks` once per
-    /// event passed through the retain filter; derived from indexed events.
+    /// Raw-event upper bound for non-gap tick lookups, retained for diagnostics.
     retain_tick_lookup_upper_bound: usize,
+    /// Actual tick lookup/check sites executed, including gap recovery. Not
+    /// inferred from events, output size, or the number of subscribers.
+    tick_checks: usize,
     idle_fast_path: bool,
 }
 
@@ -246,6 +315,8 @@ pub(crate) struct ChangeObservers {
     restore_generation: u64,
     restore_tick: Tick,
     restore_cursor: crate::change_index::ChangeCursor,
+    /// Never wraps: exhaustion permanently disables collection sharing.
+    collection_cohort: Option<u64>,
     /// Published before callbacks, valid only after a fully successful delivery.
     /// Registration/removal/restore and unwind invalidate it. Callback writes
     /// are newer than this snapshot and therefore cannot be acknowledged here.
@@ -273,6 +344,7 @@ impl Default for ChangeObservers {
             restore_generation: 0,
             restore_tick: Tick::ZERO,
             restore_cursor: crate::change_index::ChangeCursor::default(),
+            collection_cohort: Some(0),
             clean_revision: None,
             idle_baseline: None,
             #[cfg(test)]
@@ -341,14 +413,99 @@ impl ChangeObservers {
             self.active_by_component.iter().map(Vec::len).sum::<usize>(),
             self.active
         );
-        let mut candidates = self.pending_indices.clone();
+        // The common one-to-three dirty-component case stays entirely on the
+        // stack (including merge cursors). Allocate source metadata only when
+        // the batch is wide enough to need the heap merge.
+        let mut small_sources: [&[usize]; 4] = [&[]; 4];
+        let mut small_len = 0;
+        let mut large_sources: Option<Vec<&[usize]>> = None;
+        if !self.pending_indices.is_empty() {
+            small_sources[small_len] = self.pending_indices.as_slice();
+            small_len += 1;
+        }
         for component in dirty_components {
             if let Some(indices) = self.active_by_component.get(component.index() as usize) {
-                candidates.extend_from_slice(indices);
+                if !indices.is_empty() {
+                    if let Some(sources) = &mut large_sources {
+                        sources.push(indices.as_slice());
+                    } else if small_len < small_sources.len() {
+                        small_sources[small_len] = indices.as_slice();
+                        small_len += 1;
+                    } else {
+                        let mut sources = small_sources[..small_len].to_vec();
+                        sources.push(indices.as_slice());
+                        large_sources = Some(sources);
+                    }
+                }
             }
         }
-        candidates.sort_unstable_by_key(|&index| self.slots[index].registration_order);
-        candidates.dedup();
+        let candidate_capacity = if let Some(sources) = &large_sources {
+            sources.iter().map(|source| source.len()).sum()
+        } else {
+            small_sources[..small_len]
+                .iter()
+                .map(|source| source.len())
+                .sum()
+        };
+        let mut candidates = Vec::with_capacity(candidate_capacity);
+        if let Some(sources) = large_sources {
+            // For many simultaneously dirty components, merge the already
+            // ordered lists in O(C log S) rather than sorting all C candidates.
+            let mut cursors = alloc::vec![0; sources.len()];
+            let mut heap = BinaryHeap::with_capacity(sources.len());
+            for (source_index, source) in sources.iter().enumerate() {
+                if let Some(&index) = source.first() {
+                    heap.push(Reverse((
+                        self.slots[index].registration_order,
+                        source_index,
+                        index,
+                    )));
+                }
+            }
+            let mut previous = None;
+            while let Some(Reverse((_, source_index, index))) = heap.pop() {
+                if previous != Some(index) {
+                    candidates.push(index);
+                    previous = Some(index);
+                }
+                cursors[source_index] += 1;
+                if let Some(&next) = sources[source_index].get(cursors[source_index]) {
+                    heap.push(Reverse((
+                        self.slots[next].registration_order,
+                        source_index,
+                        next,
+                    )));
+                }
+            }
+        } else {
+            // Most flushes touch one component. Keep that common case free of
+            // heap operations; with at most four sorted sources this is
+            // linear in candidate count under a fixed source bound.
+            let mut cursors = [0; 4];
+            let mut previous = None;
+            loop {
+                let mut next_source = None;
+                let mut next_order = u64::MAX;
+                for (source_index, source) in small_sources[..small_len].iter().enumerate() {
+                    let cursor = cursors[source_index];
+                    if let Some(&index) = source.get(cursor) {
+                        let order = self.slots[index].registration_order;
+                        if order < next_order {
+                            next_order = order;
+                            next_source = Some((source_index, index));
+                        }
+                    }
+                }
+                let Some((source_index, index)) = next_source else {
+                    break;
+                };
+                cursors[source_index] += 1;
+                if previous != Some(index) {
+                    candidates.push(index);
+                    previous = Some(index);
+                }
+            }
+        }
         candidates
     }
 
@@ -516,6 +673,7 @@ impl ChangeObservers {
                 slot.pending.clear();
                 slot.last_run = baseline;
                 slot.cursor = cursor;
+                slot.cursor_cohort = None;
             }
         }
     }
@@ -654,6 +812,18 @@ impl World {
         };
         let this_run = flush.world.change_tick();
         let mut fired = 0;
+        flush.world.change_observers.collection_cohort = flush
+            .world
+            .change_observers
+            .collection_cohort
+            .and_then(|cohort| cohort.checked_add(1));
+        let collection_cohort = flush.world.change_observers.collection_cohort;
+        // No user code or tracker mutation runs during this phase. Successful
+        // collections of one component therefore observe the same opaque loss
+        // revision. Each slot still advances its own full cursor. Cache keys
+        // also include the effective window, epoch and append position: equal
+        // ticks alone cannot prove equal registration/loss boundaries.
+        let mut shared = BTreeMap::new();
         for &index in &candidates {
             #[cfg(test)]
             {
@@ -675,52 +845,53 @@ impl World {
             {
                 slot.last_run = tick;
             }
-            #[cfg(test)]
-            {
-                guard.world.change_observers.stats.collections += 1;
-            }
             // A previous flush may have left an undelivered batch here after a
             // callback panic. Collect only the new window into a separate
             // buffer so retry state is never re-filtered against a later
             // `last_run` and accidentally discarded.
-            let mut fresh = Vec::new();
-            let _collect_stats = slot.observer.collect(
-                guard.world,
-                &mut slot.cursor,
-                slot.last_run,
-                this_run,
-                &mut fresh,
-            );
-            #[cfg(test)]
-            {
-                guard.world.change_observers.stats.log_batches += _collect_stats.batches;
-                guard.world.change_observers.stats.log_events += _collect_stats.events;
-                guard.world.change_observers.stats.gap_archetypes_scanned +=
-                    _collect_stats.gap_archetypes_scanned;
-                guard.world.change_observers.stats.gap_rows_checked +=
-                    _collect_stats.gap_rows_checked;
-                guard
-                    .world
-                    .change_observers
-                    .stats
-                    .gap_sparse_entities_checked += _collect_stats.gap_sparse_entities_checked;
-                guard
-                    .world
-                    .change_observers
-                    .stats
-                    .retain_tick_lookup_upper_bound += _collect_stats.events;
+            let key = collection_cohort.and(slot.cursor_cohort).map(|cohort| {
+                (
+                    slot.observer.component_id(),
+                    slot.last_run.get(),
+                    cohort,
+                    slot.cursor.epoch,
+                    slot.cursor.next_batch,
+                )
+            });
+            let unshared;
+            let fresh: &SharedCollection = if let Some(key) = key {
+                use alloc::collections::btree_map::Entry;
+                match shared.entry(key) {
+                    Entry::Occupied(entry) => {
+                        #[cfg(test)]
+                        {
+                            guard.world.change_observers.stats.collection_cache_hits += 1;
+                        }
+                        entry.into_mut()
+                    }
+                    Entry::Vacant(entry) => entry.insert(slot.collect_fresh(guard.world, this_run)),
+                }
+            } else {
+                unshared = slot.collect_fresh(guard.world, this_run);
+                &unshared
+            };
+            slot.cursor = fresh.cursor;
+            slot.cursor_cohort = collection_cohort;
+            if slot.pending.is_empty() {
+                slot.pending.extend_from_slice(&fresh.entities);
+            } else if !fresh.entities.is_empty() {
+                slot.pending.extend_from_slice(&fresh.entities);
+                slot.pending
+                    .sort_unstable_by_key(|entity| (entity.index(), entity.generation()));
+                slot.pending.dedup();
             }
-            fresh.sort_unstable_by_key(|entity| (entity.index(), entity.generation()));
-            fresh.dedup();
-            slot.pending.extend(fresh);
-            slot.pending
-                .sort_unstable_by_key(|entity| (entity.index(), entity.generation()));
-            slot.pending.dedup();
             if !slot.pending.is_empty() {
                 guard.world.change_observers.mark_pending(index);
             }
             slot.last_run = this_run;
         }
+        // Never retain a cache across callbacks, restore, or World replacement.
+        drop(shared);
         flush.world.change_observers.idle_baseline = None;
         // Publish only the pre-callback revision. Mutations of the registry in
         // callbacks invalidate it; writes change the tracker revision. Unwind
@@ -801,6 +972,7 @@ impl Drop for ChangeSlotGuard<'_> {
                         .wrapping_sub(1),
                 );
                 slot.cursor = self.world.change_observers.restore_cursor;
+                slot.cursor_cohort = None;
             }
             self.world.change_observers.put_back(self.index, slot);
         }
