@@ -6,7 +6,7 @@
 
 #![cfg(feature = "settings-io")]
 
-use std::sync::{Mutex, TryLockError};
+use std::sync::{Arc, Mutex, TryLockError};
 use std::time::{Duration, Instant};
 
 use prism_ecs::resource::Resource;
@@ -136,7 +136,7 @@ struct SettingsTransactionServicesInner {
 /// expiry system can perform a rollback at a frame boundary without requiring
 /// every caller to manually pass those providers back into the manager.
 pub struct SettingsTransactionServices {
-    inner: Mutex<SettingsTransactionServicesInner>,
+    inner: Arc<Mutex<SettingsTransactionServicesInner>>,
 }
 
 impl Resource for SettingsTransactionServices {}
@@ -149,10 +149,10 @@ impl SettingsTransactionServices {
         appliers: Vec<Box<dyn SettingsApplier + Send>>,
     ) -> Self {
         Self {
-            inner: Mutex::new(SettingsTransactionServicesInner {
+            inner: Arc::new(Mutex::new(SettingsTransactionServicesInner {
                 persistence: Box::new(persistence),
                 appliers,
-            }),
+            })),
         }
     }
 
@@ -532,7 +532,11 @@ mod tests {
     use std::{
         fs,
         path::PathBuf,
-        sync::atomic::{AtomicU64, AtomicUsize, Ordering},
+        sync::{
+            atomic::{AtomicU64, AtomicUsize, Ordering},
+            mpsc,
+        },
+        thread,
     };
 
     struct TempDir(PathBuf);
@@ -567,6 +571,70 @@ mod tests {
             .is_none());
         drop(guard);
         assert!(services.try_with_mut(|_, _| ()).is_some());
+    }
+
+    #[test]
+    fn frame_expiry_retries_after_transaction_services_lock_contention() {
+        let registry = registry();
+        let directory = TempDir::new();
+        let mut app = App::new();
+        app.install_settings_runtime(registry.clone(), Domain::Runtime)
+            .unwrap();
+
+        let mut persistence = NoopPersistence;
+        let mut begin_appliers = appliers();
+        let mut manager = app
+            .world_mut()
+            .remove_resource::<SettingsTransactionManager>()
+            .unwrap();
+        let mut runtime = app
+            .world_mut()
+            .remove_resource::<SettingsRuntime>()
+            .unwrap();
+        manager
+            .begin(
+                "lock-contention",
+                transaction(&registry, &directory, "lock-contention", 0.75),
+                Duration::ZERO,
+                &mut runtime,
+                &mut persistence,
+                &mut begin_appliers,
+            )
+            .unwrap();
+        app.insert_resource(manager);
+        app.insert_resource(runtime);
+
+        let services = SettingsTransactionServices::new(NoopPersistence, Vec::new());
+        let shared_lock = Arc::clone(&services.inner);
+        app.insert_resource(services);
+        let (locked_tx, locked_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let holder = thread::spawn(move || {
+            let _guard = shared_lock.lock().unwrap();
+            locked_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        });
+        locked_rx.recv().unwrap();
+
+        app.update();
+        let manager = app.world().resource::<SettingsTransactionManager>();
+        assert!(matches!(
+            manager.status(),
+            SettingsTransactionStatus::PreviewPending { .. }
+        ));
+        assert!(manager
+            .expiry_error()
+            .is_some_and(|error| error.contains("waiting for transaction services")));
+
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+        app.update();
+        assert_eq!(
+            app.world()
+                .resource::<SettingsTransactionManager>()
+                .status(),
+            &SettingsTransactionStatus::Idle
+        );
     }
 
     impl SettingsPersistence for NoopPersistence {
@@ -632,8 +700,8 @@ mod tests {
     }
 
     struct CountingApplier {
-        applied: std::sync::Arc<AtomicUsize>,
-        compensated: std::sync::Arc<AtomicUsize>,
+        applied: Arc<AtomicUsize>,
+        compensated: Arc<AtomicUsize>,
     }
 
     impl SettingsApplier for CountingApplier {
@@ -724,7 +792,7 @@ mod tests {
     }
 
     struct CompensationFailureApplier {
-        compensations: std::sync::Arc<AtomicUsize>,
+        compensations: Arc<AtomicUsize>,
     }
 
     impl SettingsApplier for CompensationFailureApplier {
@@ -963,8 +1031,8 @@ mod tests {
             rollbacks: 0,
             finalizations: 0,
         };
-        let applied = std::sync::Arc::new(AtomicUsize::new(0));
-        let compensated = std::sync::Arc::new(AtomicUsize::new(0));
+        let applied = Arc::new(AtomicUsize::new(0));
+        let compensated = Arc::new(AtomicUsize::new(0));
         let mut applier = CountingApplier {
             applied: applied.clone(),
             compensated: compensated.clone(),
@@ -1168,7 +1236,7 @@ mod tests {
         let mut manager = SettingsTransactionManager::new();
         let mut runtime = runtime(&registry);
         let mut persistence = NoopPersistence;
-        let compensations = std::sync::Arc::new(AtomicUsize::new(0));
+        let compensations = Arc::new(AtomicUsize::new(0));
         let mut applier = CompensationFailureApplier {
             compensations: compensations.clone(),
         };
