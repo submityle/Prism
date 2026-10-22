@@ -98,7 +98,7 @@ fn affine_from_scene_transform(transform: &SceneTransform) -> Affine3 {
 }
 
 /// Folds the scene epoch, live count and every resident geometry's
-/// `(index, revision)` into one signature.
+/// `(index, generation, revision)` into one signature.
 ///
 /// The mirror bumps `scene_epoch` on any instance create / destroy / transform
 /// / geometry change and the registry bumps a per-entry `revision` on any
@@ -108,8 +108,9 @@ fn scene_signature(scene: &CpuRenderScene, registry: &RenderShadingGeometryRegis
     let mut signature = scene.scene_epoch();
     signature = signature.rotate_left(1) ^ u64::from(scene.live_count());
     for entry in registry.entries_for_upload() {
-        let word = (u64::from(entry.handle.index) << 32) | u64::from(entry.revision);
-        signature = signature.rotate_left(1) ^ word;
+        signature = signature.rotate_left(1) ^ u64::from(entry.handle.index);
+        signature = signature.rotate_left(1) ^ u64::from(entry.handle.generation);
+        signature = signature.rotate_left(1) ^ u64::from(entry.revision);
     }
     signature
 }
@@ -144,6 +145,12 @@ pub(crate) fn collect_scene_acceleration(
             // uploaded yet; skip until the registry catches up next frame.
             continue;
         };
+        // Scene slots are reusable. An index hit alone may resolve the
+        // replacement geometry after the original handle has retired; reject
+        // that stale reference instead of building a BLAS from unrelated data.
+        if entry.handle != record.geometry || entry.revision == 0 {
+            continue;
+        }
 
         let blas = *blas_slots.entry(geometry_index).or_insert_with(|| {
             let slot = geometries.len();
@@ -244,6 +251,19 @@ mod tests {
         mirror
     }
 
+    fn scene_with_geometry_handle(geometry: GeometryHandle) -> CpuRenderScene {
+        let mut mirror = CpuRenderScene::default();
+        let mut record = InstanceRecord::default();
+        record.geometry = geometry;
+        let mut builder = SceneTransactionBuilder::new(1, 1);
+        builder.push(SceneOperation::Create {
+            handle: SceneHandle::new(1, 1),
+            record,
+        });
+        mirror.apply(&builder.finish());
+        mirror
+    }
+
     fn registry_with(geometries: &[(u32, RenderShadingGeometry)]) -> RenderShadingGeometryRegistry {
         let mut registry = RenderShadingGeometryRegistry::default();
         for (index, geometry) in geometries.iter().cloned() {
@@ -329,6 +349,19 @@ mod tests {
     }
 
     #[test]
+    fn stale_geometry_generation_never_binds_reused_registry_slot() {
+        let stale_handle = GeometryHandle::new(7, 1);
+        let replacement_handle = GeometryHandle::new(7, 2);
+        let mirror = scene_with_geometry_handle(stale_handle);
+        let mut registry = RenderShadingGeometryRegistry::default();
+        registry.upsert(replacement_handle, 1, unit_quad());
+
+        let acceleration = collect_scene_acceleration(&mirror, &registry);
+        assert_eq!(acceleration.blas_count(), 0);
+        assert_eq!(acceleration.instance_count(), 0);
+    }
+
+    #[test]
     fn empty_scene_yields_empty_structure() {
         let mirror = CpuRenderScene::default();
         let registry = RenderShadingGeometryRegistry::default();
@@ -354,6 +387,17 @@ mod tests {
         let grown = scene_with(&[(1, 7, [0.0, 0.0, 0.0]), (2, 7, [4.0, 0.0, 0.0])]);
         let grown_registry = registry_with(&[(7, unit_quad())]);
         assert_ne!(baseline, scene_signature(&grown, &grown_registry));
+    }
+
+    #[test]
+    fn signature_changes_when_a_geometry_slot_is_reused() {
+        let mirror = scene_with(&[(1, 7, [0.0, 0.0, 0.0])]);
+        let original = registry_with(&[(7, unit_quad())]);
+        let baseline = scene_signature(&mirror, &original);
+
+        let mut replacement = RenderShadingGeometryRegistry::default();
+        replacement.upsert(GenerationalHandle::new(7, 2), 1, unit_quad());
+        assert_ne!(baseline, scene_signature(&mirror, &replacement));
     }
 
     #[test]

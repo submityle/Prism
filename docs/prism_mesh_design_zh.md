@@ -847,6 +847,10 @@ Source(FBX/USD/glTF) → Scene Source IR → Mesh IR
 
 当前工作树原样执行 `cargo test -p prism_mesh --lib --tests`：34 项库单测、14 项集成测试全部通过。该结果只确认 `prism_mesh` 数据模型、变形参考实现及其集成契约；不覆盖资产构建、RenderApp、RenderScene、真实 GPU、产品级图像回归或完整场景性能门槛。尝试执行 `cargo test -p prism_render_app mesh:: --lib -- --nocapture` 时，因编译产物写满磁盘（`No space left on device`）而未进入测试阶段，因此本次不记作 RenderApp 通过或失败。对应构建产物已清理；其余 Mesh 验收仍以 §26 的逐项证据为准。
 
+### 19.6 2026-10-22 RayTracing 几何身份复核
+
+RayTracing 场景提取按 geometry slot 查询 shading 表时，必须同时验证 `GeometryHandle` 的 generation 与非零 revision，不能仅凭可复用的 slot index 绑定新几何。场景重建签名同时包含每个 shading entry 的 index、generation 与 revision，保证 slot 复用触发重建。`cargo test -p prism_render_scene --features legacy-bevy --lib stale_geometry_generation_never_binds_reused_registry_slot -- --nocapture` 通过 1 项定向测试；该测试只覆盖 stale generation fail-closed，不证明 RayTracing 与逐视图 raster LOD 选择一致，不证明完整 RT GPU 消费或画质。
+
 ## 20. 易维护性与演进规则
 
 ### 20.1 稳定契约
@@ -1108,7 +1112,7 @@ pub struct DeformationBudget { pub vertices_per_frame: u32, pub blas_refits_per_
 | 布局与标准路径 | 同属性集产生确定布局，上传字节与 draw 布局一致 | CPU 契约与 Metal 标准/半精度分流 8×8 像素测试通过；不等同于全档位 Golden 图集 |
 | 虚拟几何 | 固定 Cluster、CLST v3、QEM LOD、CPU 计划、页 ABI、LOD/cull/raster GPU twin 一致 | `prism_asset_build_core --lib` 136 项、`virtual_geometry_lod` 定向 12 项通过；属性感知简化保留精确源顶点与全部 typed 属性；原始 CLST v3 vertex-pulling render pass 已通过颜色读回，整页 IO 一致不再被误写成属性 shader 着色证据，但仍不替代完整场景 Golden 图 |
 | 形变 | Skin/Morph、缓存、预算与深度/阴影/速度/RT 消费一致 | 批量 Morph/LBS/修正的 CPU/GPU 对照（含 50,000 顶点）与 16×16 current/previous 直接绘制通过；数学蒙皮 parity 4 项通过。全部引擎 pass/RT 消费接线和跨档位 Golden 图不由这些独立测试证明 |
-| 多消费者绑定 | 主视图、深度、阴影、Motion Vector、RT、Collision、Derived Geometry 使用统一身份、revision 和明确回退 | `geometry::consumer` 对 `MeshDerivedArtifact.source_revision` 与绑定 revision 做 fail-closed 相等校验，并覆盖 stale-revision 拒绝；`prism_asset_build_core::mesh_derived_binding` 从已提交 Manifest 验证 source-key 依赖、kind/schema、存储类别并绑定 revision；`prism_render_app::mesh::consumer` 与场景 draw 维持已有选择契约。Mesh IR → physics BVH 有独立适配测试；物理 shape 消费该 Manifest 绑定并原子替换仍未端到端验证，形变历史、RT 与其他 Derived 制品也未由此测试矩阵证明 |
+| 多消费者绑定 | 主视图、深度、阴影、Motion Vector、RT、Collision、Derived Geometry 使用统一身份、revision 和明确回退 | `geometry::consumer` 对 `MeshDerivedArtifact.source_revision` 与绑定 revision 做 fail-closed 相等校验，并覆盖 stale-revision 拒绝；`prism_asset_build_core::mesh_derived_binding` 从已提交 Manifest 验证 source-key 依赖、kind/schema、存储类别并绑定 revision；`prism_render_app::mesh::consumer` 与场景 draw 维持已有选择契约。Mesh IR → physics BVH 有独立适配测试；物理 shape 消费该 Manifest 绑定并原子替换仍未端到端验证。RayTracing 提取现已拒绝 geometry slot generation 不匹配或 revision 为零的记录，并将 generation 纳入重建签名；启用 `legacy-bevy` 的 stale-slot 定向测试通过。RayTracing 仍使用 shading registry 的基础几何，尚未证明与逐视图栅格 LOD 表示一致；形变历史、RT 与其他 Derived 制品也未由此测试矩阵证明 |
 | 光追派生 | OMM 与派生几何使用版本化资产契约；无 RT 能力时选择光栅路径 | OMM 强制 GPU parity 通过；不把它扩张为完整 RT 场景画质结论 |
 | 带宽与性能 | §18 固定场景输出 P50/P95/P99、GPU timestamp、VRAM、上传、缺页与功耗字段 | 已记录 CPU 构建/LOD P50/P95/P99；完整场景 GPU 字段无本轮 artifact，因此预算表保持回归门槛而非达标声明 |
 | 维护性 | 扩展点遵守 §20.2，schema/ABI 显式版本化，错误类型稳定 | CLST v3/v2 兼容、稳定格式标签、缓存失效、精确 framing 与类型化错误由代码和测试锁定 |
