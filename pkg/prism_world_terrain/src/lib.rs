@@ -12,6 +12,7 @@ extern crate alloc;
 mod bake;
 mod coordinates;
 mod cube_sphere;
+mod dual_contouring;
 mod height;
 mod heightfield_surface;
 #[cfg(test)]
@@ -52,6 +53,10 @@ pub use coordinates::{
 };
 pub use cube_sphere::{
     direction_to_face_uv, face_uv_to_direction, CubeFace, CubeSphereError, FaceUv, UnitDirection,
+};
+pub use dual_contouring::{
+    DualContouringError, DualContouringGeometry, DualContouringLimits, DualContouringMesh,
+    DualContouringStats,
 };
 pub use height::{DeterministicHeightSampler, HeightSample, HeightSampleValue, HeightSampler};
 pub use heightfield_surface::{
