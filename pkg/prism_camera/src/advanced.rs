@@ -687,10 +687,19 @@ pub struct CompositionAidResult {
 #[cfg(feature = "composition_aid")]
 impl CompositionGuide {
     pub fn compute(self, view: &ViewData) -> CompositionAidResult {
-        let mut result = CompositionAidResult {
-            gizmos: Vec::with_capacity(6),
-            error_count: 0,
-        };
+        let mut gizmos = Vec::with_capacity(8);
+        let error_count = self.compute_into(view, &mut gizmos);
+        CompositionAidResult {
+            gizmos,
+            error_count,
+        }
+    }
+
+    /// Writes normalized guide lines into caller-owned storage and returns the
+    /// number of invalid-view conditions. Reusing the vector avoids steady-
+    /// state allocations in ECS/editor frame pipelines.
+    pub fn compute_into(self, view: &ViewData, gizmos: &mut Vec<CompositionGizmo>) -> u32 {
+        gizmos.clear();
         let safe = |value: f32, fallback: f32| {
             if value.is_finite() {
                 value.clamp(0.0, 1.0)
@@ -699,22 +708,22 @@ impl CompositionGuide {
             }
         };
         if self.thirds {
-            result.gizmos.push(CompositionGizmo {
+            gizmos.push(CompositionGizmo {
                 kind: CompositionGizmoKind::ThirdsVertical,
                 a: Vec2::new(1.0 / 3.0, 0.0),
                 b: Vec2::new(1.0 / 3.0, 1.0),
             });
-            result.gizmos.push(CompositionGizmo {
+            gizmos.push(CompositionGizmo {
                 kind: CompositionGizmoKind::ThirdsVertical,
                 a: Vec2::new(2.0 / 3.0, 0.0),
                 b: Vec2::new(2.0 / 3.0, 1.0),
             });
-            result.gizmos.push(CompositionGizmo {
+            gizmos.push(CompositionGizmo {
                 kind: CompositionGizmoKind::ThirdsHorizontal,
                 a: Vec2::new(0.0, 1.0 / 3.0),
                 b: Vec2::new(1.0, 1.0 / 3.0),
             });
-            result.gizmos.push(CompositionGizmo {
+            gizmos.push(CompositionGizmo {
                 kind: CompositionGizmoKind::ThirdsHorizontal,
                 a: Vec2::new(0.0, 2.0 / 3.0),
                 b: Vec2::new(1.0, 2.0 / 3.0),
@@ -722,12 +731,12 @@ impl CompositionGuide {
         }
         if self.golden_ratio {
             let phi = 0.618_033_95;
-            result.gizmos.push(CompositionGizmo {
+            gizmos.push(CompositionGizmo {
                 kind: CompositionGizmoKind::GoldenVertical,
                 a: Vec2::new(phi, 0.0),
                 b: Vec2::new(phi, 1.0),
             });
-            result.gizmos.push(CompositionGizmo {
+            gizmos.push(CompositionGizmo {
                 kind: CompositionGizmoKind::GoldenHorizontal,
                 a: Vec2::new(0.0, phi),
                 b: Vec2::new(1.0, phi),
@@ -738,17 +747,17 @@ impl CompositionGuide {
             (CompositionGizmoKind::ActionSafe, self.action_safe),
         ] {
             let inset = (1.0 - safe(value, 0.9)) * 0.5;
-            result.gizmos.push(CompositionGizmo {
+            gizmos.push(CompositionGizmo {
                 kind,
                 a: Vec2::new(inset, inset),
                 b: Vec2::new(1.0 - inset, 1.0 - inset),
             });
         }
         if view.viewport_px.size[0] == 0 || view.viewport_px.size[1] == 0 {
-            result.error_count = 1;
-            result.gizmos.clear();
+            gizmos.clear();
+            return 1;
         }
-        result
+        0
     }
 }
 

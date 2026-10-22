@@ -47,6 +47,41 @@ pub enum CameraSystemSet {
     Rig,
     /// Derives immutable views and publishes them to the view registry.
     Publication,
+    /// Computes editor-facing composition guides from published view snapshots.
+    #[cfg(feature = "composition_aid")]
+    Composition,
+}
+
+#[cfg(feature = "composition_aid")]
+/// Optional per-camera composition-guide configuration.
+#[derive(Clone, Copy, Debug, PartialEq, Component)]
+pub struct CompositionGuideComponent(pub prism_camera::CompositionGuide);
+
+#[cfg(feature = "composition_aid")]
+/// One entity-owned collection of normalized, jitter-independent guide lines.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CameraCompositionGizmos {
+    /// Camera entity that owns the guide configuration.
+    pub entity: Entity,
+    /// Guide lines in normalized viewport coordinates.
+    pub gizmos: Vec<prism_camera::CompositionGizmo>,
+    /// Number of invalid-view or conversion conditions encountered.
+    pub error_count: u32,
+}
+
+#[cfg(feature = "composition_aid")]
+/// Immutable composition-gizmo output produced after view publication.
+#[derive(Debug, Default, Resource)]
+pub struct PublishedCompositionGizmos {
+    entries: Vec<CameraCompositionGizmos>,
+}
+
+#[cfg(feature = "composition_aid")]
+impl PublishedCompositionGizmos {
+    /// Iterates outputs in the same deterministic `(order, entity)` order as published views.
+    pub fn iter(&self) -> impl Iterator<Item = &CameraCompositionGizmos> {
+        self.entries.iter()
+    }
 }
 
 #[cfg(feature = "rig")]
@@ -979,6 +1014,32 @@ pub(crate) fn publish_camera_views(
     frame.frame = frame.frame.wrapping_add(1);
 }
 
+#[cfg(feature = "composition_aid")]
+fn publish_composition_gizmos(
+    published: Res<PublishedViews>,
+    guides: Query<&CompositionGuideComponent>,
+    mut output: ResMut<PublishedCompositionGizmos>,
+) {
+    let mut output_index = 0;
+    for view in published.iter() {
+        let Ok(guide) = guides.get(view.entity) else {
+            continue;
+        };
+        if output_index == output.entries.len() {
+            output.entries.push(CameraCompositionGizmos {
+                entity: view.entity,
+                gizmos: Vec::with_capacity(8),
+                error_count: 0,
+            });
+        }
+        let entry = &mut output.entries[output_index];
+        entry.entity = view.entity;
+        entry.error_count = guide.0.compute_into(&view.data, &mut entry.gizmos);
+        output_index += 1;
+    }
+    output.entries.truncate(output_index);
+}
+
 /// Installs camera resources and the PostUpdate publication system.
 #[derive(Clone, Copy, Debug)]
 pub struct CameraPlugin {
@@ -1007,6 +1068,8 @@ impl Plugin for CameraPlugin {
             .init_resource::<CameraDiagnostics>()
             .init_resource::<CameraPerformanceBudget>()
             .init_resource::<CameraDeriveScratch>();
+        #[cfg(feature = "composition_aid")]
+        app.init_resource::<PublishedCompositionGizmos>();
         #[cfg(feature = "parallel")]
         app.init_resource::<CameraDerivePolicy>();
         #[cfg(feature = "rig")]
@@ -1054,6 +1117,13 @@ impl Plugin for CameraPlugin {
                 publish_camera_views.in_set(CameraSystemSet::Publication),
             )
                 .chain(),
+        );
+        #[cfg(feature = "composition_aid")]
+        app.add_systems(
+            PostUpdate,
+            publish_composition_gizmos
+                .in_set(CameraSystemSet::Composition)
+                .after(CameraSystemSet::Publication),
         );
     }
 }
@@ -1384,6 +1454,56 @@ mod tests {
             .resource::<CameraDiagnostics>()
             .errors()
             .is_empty());
+    }
+
+    #[cfg(feature = "composition_aid")]
+    #[test]
+    fn composition_guides_follow_published_view_and_clear_when_camera_is_inactive() {
+        let mut app = App::new();
+        app.add_plugins(CameraPlugin::new([1280, 720]));
+        let intent = CameraBundle::default();
+        let entity = app.world_mut().spawn((
+            intent,
+            CompositionGuideComponent(prism_camera::CompositionGuide {
+                thirds: true,
+                golden_ratio: false,
+                title_safe: 0.9,
+                action_safe: 0.8,
+            }),
+        ));
+
+        app.update();
+
+        let output = app.world().resource::<PublishedCompositionGizmos>();
+        let entry = output.iter().next().expect("guide output is published");
+        assert_eq!(entry.entity, entity);
+        assert_eq!(entry.gizmos.len(), 6);
+        assert_eq!(entry.error_count, 0);
+        let gizmo_buffer = entry.gizmos.as_ptr();
+        let gizmo_capacity = entry.gizmos.capacity();
+
+        app.update();
+        let entry = app
+            .world()
+            .resource::<PublishedCompositionGizmos>()
+            .iter()
+            .next()
+            .expect("guide output remains published");
+        assert_eq!(entry.gizmos.as_ptr(), gizmo_buffer);
+        assert_eq!(entry.gizmos.capacity(), gizmo_capacity);
+
+        app.world_mut()
+            .get_mut::<CameraIntentComponent>(entity)
+            .unwrap()
+            .0
+            .active = false;
+        app.update();
+        assert!(app
+            .world()
+            .resource::<PublishedCompositionGizmos>()
+            .iter()
+            .next()
+            .is_none());
     }
 
     #[test]

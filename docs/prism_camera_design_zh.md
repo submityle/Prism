@@ -1224,9 +1224,9 @@ pub mod prelude {
 
 ### 27.1 当前实现与本文规格的关系
 
-本节是 2026-10-22 的实现快照，不把声明式契约等同于完整产品接线：`cutscene` 的 PostStack 权重合成/事件消费，快门快照到渲染器 DoF 与运动模糊节点的绑定，视图批次到实际共享可见集消费，LOD 到实际 view 更新/分辨率资源调度，lookahead 到资产流送队列，composition gizmo 到 editor 绘制，以及 edge history 到时域 resolve/局部锐化，必须以对应消费者的集成测试为准；`prism_camera` 当前只提供相机侧数据与计算契约。下方 §28 为可验证的相机侧能力定义，不代表上述跨 crate 消费者已全部接通。
+本节是 2026-10-22 的实现快照，不把声明式契约等同于完整产品接线：`cutscene` 的 PostStack 权重合成/事件消费，快门快照到渲染器 DoF 与运动模糊节点的绑定，视图批次到实际共享可见集消费，LOD 到实际 view 更新/分辨率资源调度，lookahead 到资产流送队列，composition gizmo 到 editor 绘制，以及 edge history 到时域 resolve/局部锐化，必须以对应消费者的集成测试为准。构图辅助已由 `prism_camera` 数学结果接到 `prism_camera_ecs` 的 `PostUpdate` 帧输出，并通过 ECS 测试验证；编辑器将该帧输出转换为实际 gizmo 绘制的链路仍未由本 crate 验证。下方 §28 为可验证的相机侧能力定义，不代表所有跨 crate 消费者已接通。
 
-`pkg/prism_camera` 已提供 `CameraIntent`、`CameraPose`、`Projection`、`ViewData`、`ViewHistory`、viewport、reversed-Z/无限远投影、oblique/SubView、5/6 面 frustum、Halton/Sobol jitter、Filmback/Lens/Exposure、PostStack、viewport/world picking、StereoPair/late-latch、相对渲染原点拆分、GPU View ABI、`ViewRegistry` 发布桥接和 fixed-tick `AdvancedRuntime`；advanced 契约提供 CameraTrack、自动对焦、快门、foveation、批量 key、LOD、构图、确定性 digest、ExternalPoseValidator、OcclusionFadeState、LookaheadPredictor 和 HistoryStabilizer。`pkg/prism_camera_rig` 已提供 `VirtualCamera`、`CameraBrain`、稳定优先级选择、位姿混合、Body/Aim、`SceneQuery`/`TargetQuery` 批量弹簧臂、半衰期阻尼、Fly/Orbit/Pan 控制器、确定性梯度噪声、ImpulseBuffer、输入归一化和 ViewUpdateScheduler；`pkg/prism_camera_ecs` 已提供实体组件、统一帧时钟、稳定句柄映射、诊断资源、SceneQuery/TargetQuery 注入和 `PostUpdate` 发布系统；`pkg/prism_camera_gpu` 已提供有界 ViewBufferRing、增量上传、清零、提交/取消/回收、stale token/schema 校验，以及通过 `RenderDevice`/`RenderQueue` 写入真实 RHI buffer 的 `RhiViewBuffer`/`RhiUploadBackend` 和可供 WGSL backend 验证的 ViewRecord consumer。
+`pkg/prism_camera` 已提供 `CameraIntent`、`CameraPose`、`Projection`、`ViewData`、`ViewHistory`、viewport、reversed-Z/无限远投影、oblique/SubView、5/6 面 frustum、Halton/Sobol jitter、Filmback/Lens/Exposure、PostStack、viewport/world picking、StereoPair/late-latch、相对渲染原点拆分、GPU View ABI、`ViewRegistry` 发布桥接和 fixed-tick `AdvancedRuntime`；advanced 契约提供 CameraTrack、自动对焦、快门、foveation、批量 key、LOD、构图、确定性 digest、ExternalPoseValidator、OcclusionFadeState、LookaheadPredictor 和 HistoryStabilizer。`pkg/prism_camera_rig` 已提供 `VirtualCamera`、`CameraBrain`、稳定优先级选择、位姿混合、Body/Aim、`SceneQuery`/`TargetQuery` 批量弹簧臂、半衰期阻尼、Fly/Orbit/Pan 控制器、确定性梯度噪声、ImpulseBuffer、输入归一化和 ViewUpdateScheduler；`pkg/prism_camera_ecs` 已提供实体组件、统一帧时钟、稳定句柄映射、诊断资源、SceneQuery/TargetQuery 注入、`PostUpdate` 发布系统，以及可选 `composition_aid` 构图输出系统；`pkg/prism_camera_gpu` 已提供有界 ViewBufferRing、增量上传、清零、提交/取消/回收、stale token/schema 校验，以及通过 `RenderDevice`/`RenderQueue` 写入真实 RHI buffer 的 `RhiViewBuffer`/`RhiUploadBackend` 和可供 WGSL backend 验证的 ViewRecord consumer。
 
 实现采用四层所有权：相机 crate 只计算不可变视图快照，rig crate 只生成位姿结果，ECS adapter 只负责生命周期和发布，GPU crate 只负责 ABI 消费侧的有界上传计划；渲染资源、物理求交和 Transform 存储继续由各自 crate 持有。四个相机 crate 均禁止 unsafe；核心数学、rig 和 GPU ring 路径保持 `no_std + alloc`，ECS adapter 使用应用/ECS crate。已核验提交包括 `cfb34909f`（ECS 发布链）、`bf53ef12b`（裁剪配置测试修正）、`6dd2e3929`（ABI/ECS 加固）、`e4cf94581`（GPU consumer）、`e522e7c57`（fixed-tick advanced runtime）、`b6fc25e72`（Body/Aim 高级 Rig）、`a2cf97f5d`（workspace/ECS/query 接线）、`31e767af7`（最小 feature 编译修复）和 `a24de026a`（RHI GPU View ABI 真实设备验证）。
 
@@ -1297,9 +1297,11 @@ pub mod prelude {
 
 每个次要视图声明最大更新频率、最小分辨率和历史保持帧数。跳帧期间保留上一 ViewData，必要时只外推相对位姿；主视图、XR 双眼和反射关键视图禁止跳帧。预算调度按重要度、屏幕面积和最近更新时间排序，资源不足时先降低离屏分辨率再降低更新频率。
 
-### 28.10 构图辅助与安全框（`composition_aid`，editor）
+### 28.10 构图辅助与安全框（`composition_aid`）
 
-三分法、黄金比、中心十字、标题/动作安全框、焦平面和 Composer zone 都作为只读 gizmo 从 ViewData 计算；编辑器关闭时不进入运行时包。gizmo 使用去抖矩阵，避免随 TAA jitter 抖动；坐标转换失败时隐藏该 gizmo 并保留错误计数。
+三分法、黄金比、标题/动作安全框作为只读、归一化视口坐标线段从 `ViewData` 计算；`CompositionGuide::compute_into` 支持调用方复用输出缓冲，至多写出 8 条线段，viewport 为零时清空输出并返回错误计数。`prism_camera_ecs/composition_aid` feature 将配置组件和 `PublishedCompositionGizmos` 输出接入 `PostUpdate`，只为当帧已发布且携带 guide 配置的相机生成数据；inactive 或离开 published 集合的相机不会遗留旧帧 gizmo。无效更新是否保留上帧 view 由 `PublishedViews` 的 retain-last-valid 策略决定，构图系统只消费该帧实际发布的快照。输出遵循 published view 的稳定 `(order, entity)` 顺序。ECS 缓冲按索引复用，稳态相机数不变时不重分配 entry/line 缓冲；guide 变化只覆盖缓冲内容。
+
+该 feature 是可选构图数据能力，不会自动接入编辑器 UI，也不应描述为“编辑器关闭时不进入运行时包”：是否编入由应用的 Cargo feature 选择决定。渲染器/编辑器消费者负责把归一化线段映射到各自视口像素并绘制；目前已验证相机数学到 ECS 帧输出，不把编辑器面板绘制或视觉效果宣称为已验收。验证命令：`cargo test -p prism_camera_ecs --features composition_aid --lib --offline`；测试覆盖视图发布、inactive 清空和重复帧缓冲复用。
 
 ---
 
