@@ -5,6 +5,15 @@
 
 ## 已交付范围
 
+2026-10-23 增补 planar `HeightfieldMesh::apply_lod_seam_plan` 的相邻 coarse-edge
+corner fan consumer：允许四边任意子集的 coarser neighbor，不再仅接受最多两条且互为对边。
+相邻 transition strips 在角端各省略一个 coarse segment，并用四三角 fan 覆盖共享角部；四角
+及四边同时 coarse 均经过网格面积、非退化、边流形和总覆盖面积检查。为适配任意边方向，
+transition 与 fan 三角形都按 X/Z 格坐标的有向面积规范为原 mesh 的 +Y winding，零面积
+fail-closed。输出索引仍复用 mesh 原顶点，先按完整新索引流预算并 staging，再一次性替换；
+预算/拓扑失败保持旧索引。fan 增量按每个相邻 coarse corner 12 个 index 精确计入预算，
+整体工作与临时空间均为 O(S² + T)，其中 S 为 segments、T 为输入 transition indices。
+
 `HeightfieldLodSeamPlan::build` 接收一个 `TileKey`、偶数幂的细网格边分段数、无序邻接
 声明、morph alpha 和显式预算，验证后输出稳定的四边 seam mode 以及每个 coarse-neighbor
 边的 transition strip。
@@ -63,3 +72,8 @@ plan；所有 index 都检查在 vertex 范围内，未发布部分拓扑。
 间曲率 seam、heightfield mesh/renderer graph 自动接线或 runtime LOD 调度。它提供的是平面
 heightfield 的可复用 2:1 CPU topology/morph contract；上层 renderer 必须显式消费 transition
 strip、morph 记录和高度快照，不能把本 contract 当作完整产品绘制路径。
+
+2026-10-23 本次新增回归：`cargo test -p prism_world_terrain --features mesh --lib --offline`
+151 项通过，覆盖四种相邻角组合及四边全 coarse、完整覆盖面积、无退化/非流形边、统一
+winding 与预算失败原子性；`cargo check -p prism_world_terrain --no-default-features --offline`
+通过。此为 CPU terrain crate 验证，不证明 GPU/RHI 或产品 renderer 接线。

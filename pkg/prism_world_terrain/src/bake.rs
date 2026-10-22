@@ -387,14 +387,26 @@ fn index(side: u32, x: u32, z: u32) -> usize {
     (u64::from(z) * u64::from(side) + u64::from(x)) as usize
 }
 
-fn mesh_edges_are_opposite(a: TileEdge, b: TileEdge) -> bool {
-    matches!(
-        (a, b),
-        (TileEdge::West, TileEdge::East)
-            | (TileEdge::East, TileEdge::West)
-            | (TileEdge::South, TileEdge::North)
-            | (TileEdge::North, TileEdge::South)
-    )
+fn heightfield_transition_skipped_segments(
+    edge: TileEdge,
+    coarse_edges: [bool; 4],
+) -> (bool, bool) {
+    match edge {
+        TileEdge::West | TileEdge::East => (coarse_edges[2], coarse_edges[3]),
+        TileEdge::South | TileEdge::North => (coarse_edges[0], coarse_edges[1]),
+    }
+}
+
+fn heightfield_offset_grid(
+    value: u32,
+    offset: i64,
+    limit: u32,
+) -> Result<u32, BakeError<core::convert::Infallible>> {
+    i64::from(value)
+        .checked_add(offset)
+        .and_then(|coordinate| u32::try_from(coordinate).ok())
+        .filter(|&coordinate| coordinate <= limit)
+        .ok_or(BakeError::InvalidGeometry)
 }
 
 /// Indexed local heightfield geometry with in-place one-ring normal updates.
@@ -610,11 +622,11 @@ impl HeightfieldMesh {
     /// index stream and swaps it only after validation and budget admission.
     ///
     /// The plan must target this tile and use `samples_per_edge - 1` segments.
-    /// At most two coarse edges may be applied, and when there are two they
-    /// must be opposite; adjacent coarse edges share a corner quad and require
-    /// an explicit corner fan before they can be consumed. A mesh
-    /// accepts one active seam plan at a time; call [`Self::clear_lod_seam_plan`] to
-    /// restore the base topology before applying a new LOD configuration.
+    /// Any subset of the four coarse edges may be applied. Adjacent edges are
+    /// joined by deterministic corner fans so their transition strips neither
+    /// overlap nor leave a hole. A mesh accepts one active seam plan at a time;
+    /// call [`Self::clear_lod_seam_plan`] to restore the base topology before
+    /// applying a new LOD configuration.
     pub fn apply_lod_seam_plan(
         &mut self,
         plan: &crate::HeightfieldLodSeamPlan,
@@ -645,13 +657,6 @@ impl HeightfieldMesh {
             }
             coarse_edges[index] = true;
         }
-        if transitions.len() > 2
-            || (transitions.len() == 2
-                && !mesh_edges_are_opposite(transitions[0].edge(), transitions[1].edge()))
-        {
-            return Err(BakeError::InvalidGeometry);
-        }
-
         let vertex_count = self.positions.len();
         let base_indices = usize::try_from(segments)
             .ok()
@@ -661,9 +666,17 @@ impl HeightfieldMesh {
         if self.indices.len() != base_indices {
             return Err(BakeError::InvalidGeometry);
         }
+        let corner_fans = [
+            coarse_edges[0] && coarse_edges[2],
+            coarse_edges[1] && coarse_edges[2],
+            coarse_edges[0] && coarse_edges[3],
+            coarse_edges[1] && coarse_edges[3],
+        ];
+        let corner_count = corner_fans.iter().filter(|&&fan| fan).count();
         let replaced_quads = transitions
             .len()
             .checked_mul(segments as usize)
+            .and_then(|count| count.checked_sub(corner_count))
             .ok_or(BakeError::SizeOverflow)?;
         let removed_indices = replaced_quads
             .checked_mul(6)
@@ -671,9 +684,17 @@ impl HeightfieldMesh {
         let added_indices = transitions
             .iter()
             .try_fold(0usize, |total, transition| {
-                total.checked_add(transition.indices().len())
+                let (skip_start, skip_end) =
+                    heightfield_transition_skipped_segments(transition.edge(), coarse_edges);
+                if !transition.indices().len().is_multiple_of(9) {
+                    return None;
+                }
+                let skipped_indices =
+                    (usize::from(skip_start) + usize::from(skip_end)).checked_mul(9)?;
+                total.checked_add(transition.indices().len().checked_sub(skipped_indices)?)
             })
-            .ok_or(BakeError::SizeOverflow)?;
+            .and_then(|count| count.checked_add(corner_count.checked_mul(12)?))
+            .ok_or(BakeError::InvalidGeometry)?;
         let next_len = base_indices
             .checked_sub(removed_indices)
             .and_then(|n| n.checked_add(added_indices))
@@ -707,16 +728,98 @@ impl HeightfieldMesh {
             }
         }
         for transition in transitions {
-            for &index in transition.indices() {
-                let grid = transition.vertices()[index as usize].grid;
-                let vertex = grid[1]
-                    .checked_mul(side)
-                    .and_then(|row| row.checked_add(grid[0]))
-                    .ok_or(BakeError::SizeOverflow)?;
-                if vertex as usize >= vertex_count {
+            let (skip_start, skip_end) =
+                heightfield_transition_skipped_segments(transition.edge(), coarse_edges);
+            for (segment, segment_indices) in transition.indices().chunks_exact(9).enumerate() {
+                if (skip_start && segment == 0)
+                    || (skip_end && segment + 1 == transition.indices().len() / 9)
+                {
+                    continue;
+                }
+                for triangle in segment_indices.chunks_exact(3) {
+                    let mapped = [triangle[0], triangle[1], triangle[2]].map(|index| {
+                        let grid = transition.vertices().get(index as usize)?.grid;
+                        let vertex = grid[1].checked_mul(side)?.checked_add(grid[0])?;
+                        ((vertex as usize) < vertex_count).then_some(vertex)
+                    });
+                    let [Some(a), Some(b), Some(c)] = mapped else {
+                        return Err(BakeError::InvalidGeometry);
+                    };
+                    let point = |vertex: u32| [i64::from(vertex % side), i64::from(vertex / side)];
+                    let [pa, pb, pc] = [a, b, c].map(point);
+                    let ab = [pb[0] - pa[0], pb[1] - pa[1]];
+                    let ac = [pc[0] - pa[0], pc[1] - pa[1]];
+                    let area = ab[0] * ac[1] - ab[1] * ac[0];
+                    if area == 0 {
+                        return Err(BakeError::InvalidGeometry);
+                    }
+                    if area < 0 {
+                        next_indices.extend_from_slice(&[a, b, c]);
+                    } else {
+                        next_indices.extend_from_slice(&[a, c, b]);
+                    }
+                }
+            }
+        }
+        let corner_coordinates = [
+            (0, 0, 1_i64, 1_i64),
+            (segments, 0, -1, 1),
+            (0, segments, 1, -1),
+            (segments, segments, -1, -1),
+        ];
+        for (corner_index, &(x, z, dx, dz)) in corner_coordinates.iter().enumerate() {
+            if !corner_fans[corner_index] {
+                continue;
+            }
+            let corner = [x, z];
+            let top_outer = [heightfield_offset_grid(x, dx * 2, segments)?, z];
+            let top_inner_far = [
+                heightfield_offset_grid(x, dx * 2, segments)?,
+                heightfield_offset_grid(z, dz, segments)?,
+            ];
+            let top_inner_near = [
+                heightfield_offset_grid(x, dx, segments)?,
+                heightfield_offset_grid(z, dz, segments)?,
+            ];
+            let side_inner_far = [
+                heightfield_offset_grid(x, dx, segments)?,
+                heightfield_offset_grid(z, dz * 2, segments)?,
+            ];
+            let side_outer = [x, heightfield_offset_grid(z, dz * 2, segments)?];
+            let patch = [
+                [corner, top_outer, top_inner_far],
+                [corner, top_inner_far, top_inner_near],
+                [corner, top_inner_near, side_inner_far],
+                [corner, side_inner_far, side_outer],
+            ];
+            for triangle in patch {
+                let vertices = triangle.map(|[grid_x, grid_z]| {
+                    grid_z
+                        .checked_mul(side)
+                        .and_then(|row| row.checked_add(grid_x))
+                });
+                let [Some(a), Some(b), Some(c)] = vertices else {
+                    return Err(BakeError::SizeOverflow);
+                };
+                if [a, b, c]
+                    .iter()
+                    .any(|&vertex| vertex as usize >= vertex_count)
+                {
                     return Err(BakeError::InvalidGeometry);
                 }
-                next_indices.push(vertex);
+                let point = |vertex: u32| [i64::from(vertex % side), i64::from(vertex / side)];
+                let [pa, pb, pc] = [a, b, c].map(point);
+                let ab = [pb[0] - pa[0], pb[1] - pa[1]];
+                let ac = [pc[0] - pa[0], pc[1] - pa[1]];
+                let area = ab[0] * ac[1] - ab[1] * ac[0];
+                if area == 0 {
+                    return Err(BakeError::InvalidGeometry);
+                }
+                if area < 0 {
+                    next_indices.extend_from_slice(&[a, b, c]);
+                } else {
+                    next_indices.extend_from_slice(&[a, c, b]);
+                }
             }
         }
         if next_indices.len() != next_len {
@@ -1121,6 +1224,98 @@ mod tests {
             Err(BakeError::BudgetExceeded)
         );
         assert_eq!(mesh.indices(), original);
+    }
+
+    #[test]
+    fn lod_seam_corner_fans_cover_adjacent_coarse_edges_without_cracks() {
+        use crate::{
+            CubeFace, HeightfieldLodSeamPlan, LodSeamCoverage, LodSeamLimits, LodSeamNeighbor,
+            TileEdge,
+        };
+
+        let tile = TileKey::new(CubeFace::PositiveZ, 3, 3, 2).unwrap();
+        let seam_limits = LodSeamLimits {
+            max_segments: 8,
+            max_vertices: 128,
+            max_indices: 1024,
+            max_bytes: 16_384,
+        };
+        let corner_pairs = [
+            (TileEdge::West, TileEdge::South),
+            (TileEdge::East, TileEdge::South),
+            (TileEdge::West, TileEdge::North),
+            (TileEdge::East, TileEdge::North),
+        ];
+        let mut configurations = Vec::new();
+        for (first, second) in corner_pairs {
+            configurations.push(vec![first, second]);
+        }
+        configurations.push(TileEdge::ALL.to_vec());
+
+        for edges in configurations {
+            let neighbors: Vec<_> = edges
+                .iter()
+                .map(|&edge| {
+                    LodSeamNeighbor::with_boundary(
+                        edge,
+                        tile.neighbor(edge).parent().unwrap(),
+                        8,
+                        LodSeamCoverage::full(8),
+                    )
+                })
+                .collect();
+            let plan =
+                HeightfieldLodSeamPlan::build_strict(tile, 8, &neighbors, seam_limits).unwrap();
+            let mut mesh = HeightfieldMesh::build(&field_at(tile), [8.0, 8.0], LIMITS).unwrap();
+            let original = mesh.clone();
+            assert_eq!(
+                mesh.apply_lod_seam_plan(&plan, 1),
+                Err(BakeError::BudgetExceeded)
+            );
+            assert_eq!(
+                mesh.indices(),
+                original.indices(),
+                "budget mutation for {edges:?}"
+            );
+            mesh.apply_lod_seam_plan(&plan, 16_384).unwrap();
+
+            let mut signed_area = 0_i64;
+            let mut edge_counts = Vec::new();
+            for triangle in mesh.indices().chunks_exact(3) {
+                let points = [triangle[0], triangle[1], triangle[2]].map(|index| {
+                    let index = i64::from(index);
+                    [index % 9, index / 9]
+                });
+                let ab = [points[1][0] - points[0][0], points[1][1] - points[0][1]];
+                let ac = [points[2][0] - points[0][0], points[2][1] - points[0][1]];
+                let area = ab[0] * ac[1] - ab[1] * ac[0];
+                assert_ne!(area, 0, "degenerate triangle for {edges:?}");
+                assert!(
+                    area < 0,
+                    "heightfield triangle winding flipped for {edges:?}: {triangle:?} => {points:?} area={area}"
+                );
+                signed_area += area;
+                for (start, end) in [
+                    (triangle[0], triangle[1]),
+                    (triangle[1], triangle[2]),
+                    (triangle[2], triangle[0]),
+                ] {
+                    edge_counts.push((start.min(end), start.max(end)));
+                }
+            }
+            assert_eq!(signed_area, -2 * 8 * 8, "hole/overlap for {edges:?}");
+            edge_counts.sort_unstable();
+            let mut boundary_edges = 0;
+            for group in edge_counts.chunk_by(|left, right| left == right) {
+                assert!(group.len() <= 2, "non-manifold edge for {edges:?}");
+                boundary_edges += usize::from(group.len() == 1);
+            }
+            assert_eq!(
+                boundary_edges,
+                4 * 8 - edges.len() * 4,
+                "unexpected boundary segmentation for {edges:?}"
+            );
+        }
     }
 
     #[test]
