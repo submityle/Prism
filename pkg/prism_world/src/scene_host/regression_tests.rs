@@ -785,6 +785,50 @@ fn runtime_tick_unload_and_demote_apply_successfully() {
 }
 
 #[test]
+fn scene_plan_with_records_commits_provider_transition_after_scene_stream_work() {
+    let mut world = World::new();
+    let sector = SectorId::new(0, 0, 0, 0);
+    let mut runtime = make_runtime();
+    let mut host = SceneEcsHost::new(&mut world, Provider::default());
+    let root = load_bound_cell(&mut runtime, &mut host, sector, 41);
+    let mut records = alloc::vec![ResidencyRecord::new(
+        41,
+        ResidencyState::TierC,
+        0,
+        1,
+        1,
+        1,
+    )];
+    let plan = runtime.tick(
+        &[DemandSource::new(sector, 0, 1, 10).unwrap()],
+        &[manifest(sector)],
+        &records,
+        2,
+        budget(),
+    );
+    assert!(plan.stream.actions.is_empty());
+    assert!(matches!(
+        plan.residency.actions.as_slice(),
+        [ResidencyAction::Promote {
+            id: 41,
+            from: ResidencyState::TierC,
+            to: ResidencyState::TierA,
+            ..
+        }]
+    ));
+    runtime
+        .apply_scene_plan_with_records(&plan, &mut records, 2, &mut host)
+        .unwrap();
+    assert_eq!(records[0].state, ResidencyState::TierA);
+    assert_eq!(records[0].last_transition_frame, Some(2));
+    assert_eq!(host.world().get::<Marker>(root), Some(&Marker(9)));
+    assert_eq!(
+        host.provider().events,
+        alloc::vec![(ResidencyState::TierA, 41, root)]
+    );
+}
+
+#[test]
 fn dropping_host_preserves_world_owned_cells_and_bindings_for_takeover() {
     let mut world = World::new();
     let sector = SectorId::new(0, 0, 0, 0);
