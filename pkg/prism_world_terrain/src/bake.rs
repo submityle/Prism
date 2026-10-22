@@ -410,6 +410,7 @@ pub struct HeightfieldMesh {
     uvs: Vec<[f32; 2]>,
     indices: Vec<u32>,
     lod_seams_applied: bool,
+    lod_seam_edges: [bool; 4],
 }
 
 impl PartialEq for HeightfieldMesh {
@@ -422,6 +423,7 @@ impl PartialEq for HeightfieldMesh {
             && self.normals == other.normals
             && self.uvs == other.uvs
             && self.indices == other.indices
+            && self.lod_seam_edges == other.lod_seam_edges
     }
 }
 
@@ -471,6 +473,7 @@ impl HeightfieldMesh {
             uvs: allocate(vertices)?,
             indices: allocate(indices)?,
             lod_seams_applied: false,
+            lod_seam_edges: [false; 4],
         };
         for z in 0..side {
             for x in 0..side {
@@ -597,6 +600,7 @@ impl HeightfieldMesh {
         }
         self.indices = indices;
         self.lod_seams_applied = false;
+        self.lod_seam_edges = [false; 4];
         Ok(())
     }
 
@@ -720,6 +724,128 @@ impl HeightfieldMesh {
         }
         self.indices = next_indices;
         self.lod_seams_applied = true;
+        self.lod_seam_edges = coarse_edges;
+        Ok(())
+    }
+
+    /// Applies a continuous 2:1 LOD morph to the fine-only boundary samples.
+    ///
+    /// `alpha` is evaluated from the current screen-space LOD decision: zero
+    /// restores the baked fine surface and one places every omitted odd edge
+    /// sample on its containing coarse edge segment. The operation reuses mesh
+    /// storage, validates the field/plan/topology before mutation, and updates
+    /// only boundary positions plus the one-sample normal ring. Call again
+    /// after a field rebake to restore the current morph from the new field.
+    pub fn apply_lod_morph(
+        &mut self,
+        field: &HeightfieldTile,
+        plan: &crate::HeightfieldLodSeamPlan,
+        alpha: f32,
+    ) -> Result<(), BakeError<core::convert::Infallible>> {
+        if !alpha.is_finite()
+            || !(0.0..=1.0).contains(&alpha)
+            || !self.lod_seams_applied
+            || self.tile != plan.tile()
+            || self.tile != field.tile
+            || self.cache_id != field.cache_id
+            || self.revision != field.revision
+            || self.spec != field.spec
+            || plan.segments() + 1 != self.spec.samples_per_edge()
+        {
+            return Err(BakeError::InvalidGeometry);
+        }
+        let mut plan_edges = [false; 4];
+        for transition in plan.transitions() {
+            let edge_index = match transition.edge() {
+                TileEdge::West => 0,
+                TileEdge::East => 1,
+                TileEdge::South => 2,
+                TileEdge::North => 3,
+            };
+            if plan_edges[edge_index] {
+                return Err(BakeError::InvalidGeometry);
+            }
+            plan_edges[edge_index] = true;
+        }
+        if plan_edges != self.lod_seam_edges {
+            return Err(BakeError::InvalidGeometry);
+        }
+
+        // Preflight all values first so the following writes cannot fail.
+        for transition in plan.transitions() {
+            for morph in transition.morph_vertices() {
+                let source = morph.source;
+                let a = morph.target_a;
+                let b = morph.target_b;
+                if [source, a, b].into_iter().any(|point| {
+                    point[0] >= self.spec.samples_per_edge()
+                        || point[1] >= self.spec.samples_per_edge()
+                }) {
+                    return Err(BakeError::InvalidGeometry);
+                }
+                let source_height = f64::from(height_metres(field, source[0], source[1]));
+                let target_a = f64::from(height_metres(field, a[0], a[1]));
+                let target_b = f64::from(height_metres(field, b[0], b[1]));
+                let height = (source_height
+                    + (0.5 * (target_a + target_b) - source_height) * f64::from(alpha))
+                    as f32;
+                if !height.is_finite() {
+                    return Err(BakeError::InvalidGeometry);
+                }
+            }
+        }
+
+        let side = self.spec.samples_per_edge();
+        for transition in plan.transitions() {
+            for morph in transition.morph_vertices() {
+                let [x, z] = morph.source;
+                let source_height = f64::from(height_metres(field, x, z));
+                let target_a =
+                    f64::from(height_metres(field, morph.target_a[0], morph.target_a[1]));
+                let target_b =
+                    f64::from(height_metres(field, morph.target_b[0], morph.target_b[1]));
+                let height = source_height
+                    + (0.5 * (target_a + target_b) - source_height) * f64::from(alpha);
+                self.positions[index(side, x, z)][1] = height as f32;
+            }
+        }
+        for transition in plan.transitions() {
+            for morph in transition.morph_vertices() {
+                let [x, z] = morph.source;
+                let (min_x, max_x, min_z, max_z) = match transition.edge() {
+                    TileEdge::West => (0, 1, z.saturating_sub(1), (z + 1).min(side - 1)),
+                    TileEdge::East => (
+                        side - 2,
+                        side - 1,
+                        z.saturating_sub(1),
+                        (z + 1).min(side - 1),
+                    ),
+                    TileEdge::South => (x.saturating_sub(1), (x + 1).min(side - 1), 0, 1),
+                    TileEdge::North => (
+                        x.saturating_sub(1),
+                        (x + 1).min(side - 1),
+                        side - 2,
+                        side - 1,
+                    ),
+                };
+                for normal_z in min_z..=max_z {
+                    for normal_x in min_x..=max_x {
+                        let vertex = index(side, normal_x, normal_z);
+                        self.normals[vertex] = if alpha == 0.0 {
+                            normal(field, self.size_metres, normal_x, normal_z)
+                        } else {
+                            normal_from_positions(
+                                &self.positions,
+                                side,
+                                self.size_metres,
+                                normal_x,
+                                normal_z,
+                            )
+                        };
+                    }
+                }
+            }
+        }
         Ok(())
     }
     /// Last consumed tile-cache revision.
@@ -800,10 +926,36 @@ fn normal(field: &HeightfieldTile, size: [f32; 2], x: u32, z: u32) -> [f32; 3] {
     ]
 }
 
+fn normal_from_positions(
+    positions: &[[f32; 3]],
+    side: u32,
+    size: [f32; 2],
+    x: u32,
+    z: u32,
+) -> [f32; 3] {
+    let left = x.saturating_sub(1);
+    let right = (x + 1).min(side - 1);
+    let back = z.saturating_sub(1);
+    let front = (z + 1).min(side - 1);
+    let dx = (f64::from(positions[index(side, right, z)][1])
+        - f64::from(positions[index(side, left, z)][1]))
+        / (f64::from(size[0]) * f64::from(right - left) / f64::from(side - 1));
+    let dz = (f64::from(positions[index(side, x, front)][1])
+        - f64::from(positions[index(side, x, back)][1]))
+        / (f64::from(size[1]) * f64::from(front - back) / f64::from(side - 1));
+    let length = libm::sqrt(dx * dx + 1.0 + dz * dz);
+    [
+        (-dx / length) as f32,
+        (1.0 / length) as f32,
+        (-dz / length) as f32,
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use alloc::vec;
+    use core::convert::Infallible;
 
     struct MisreportedSamples {
         samples: alloc::vec::IntoIter<i16>,
@@ -828,6 +980,7 @@ mod tests {
         }
     }
     use crate::{CubeFace, HeightSampleValue};
+    use crate::{HeightfieldLodSeamPlan, LodSeamLimits};
     use core::cell::Cell;
 
     const LIMITS: BakeLimits = BakeLimits {
@@ -968,6 +1121,71 @@ mod tests {
             Err(BakeError::BudgetExceeded)
         );
         assert_eq!(mesh.indices(), original);
+    }
+
+    #[test]
+    fn lod_seam_morph_moves_only_odd_boundary_samples_and_restores_fine_surface() {
+        struct Curved;
+        impl HeightSampler for Curved {
+            type Error = Infallible;
+
+            fn sample_height(
+                &self,
+                sample: HeightSample,
+            ) -> Result<HeightSampleValue, Self::Error> {
+                let u = i64::from(sample.u_q16());
+                Ok(HeightSampleValue::from_millimetres((u * u) / 32_768))
+            }
+        }
+
+        let tile = TileKey::new(CubeFace::PositiveZ, 3, 3, 2).unwrap();
+        let field =
+            HeightfieldTile::bake(tile, HeightfieldSpec::new(9, 10).unwrap(), &Curved, LIMITS)
+                .unwrap();
+        let coarse = tile.neighbor(TileEdge::East).parent().unwrap();
+        let plan = HeightfieldLodSeamPlan::build_strict_for_residency(
+            tile,
+            8,
+            &[coarse],
+            LodSeamLimits {
+                max_segments: 8,
+                max_vertices: 128,
+                max_indices: 1024,
+                max_bytes: 16_384,
+            },
+        )
+        .unwrap();
+        let mut mesh = HeightfieldMesh::build(&field, [8.0, 8.0], LIMITS).unwrap();
+        let base = mesh.clone();
+        mesh.apply_lod_seam_plan(&plan, 16_384).unwrap();
+        mesh.apply_lod_morph(&field, &plan, 0.0).unwrap();
+        assert_eq!(mesh.positions(), base.positions());
+        assert_eq!(mesh.normals(), base.normals());
+
+        mesh.apply_lod_morph(&field, &plan, 1.0).unwrap();
+        for morph in plan.transitions()[0].morph_vertices() {
+            let source = mesh.positions()[index(9, morph.source[0], morph.source[1])][1];
+            let target_a = height_metres(&field, morph.target_a[0], morph.target_a[1]);
+            let target_b = height_metres(&field, morph.target_b[0], morph.target_b[1]);
+            assert_eq!(source, 0.5 * (target_a + target_b));
+        }
+        for z in 0..9 {
+            for x in 0..8 {
+                if x != 8 {
+                    assert_eq!(
+                        mesh.positions()[index(9, x, z)],
+                        base.positions()[index(9, x, z)]
+                    );
+                }
+            }
+        }
+        mesh.apply_lod_morph(&field, &plan, 0.0).unwrap();
+        assert_eq!(mesh.positions(), base.positions());
+        assert_eq!(mesh.normals(), base.normals());
+        assert_eq!(
+            mesh.apply_lod_morph(&field, &plan, f32::NAN),
+            Err(BakeError::InvalidGeometry)
+        );
     }
 
     #[test]
