@@ -212,6 +212,10 @@ impl Surface for WgpuSurface {
         }
     }
 
+    fn is_suboptimal(&self, frame: &Self::Frame) -> bool {
+        frame.is_suboptimal()
+    }
+
     fn discard(&self, frame: Self::Frame) {
         // Release the registered image ids; dropping the `SurfaceTexture`
         // without presenting discards the frame at the platform level.

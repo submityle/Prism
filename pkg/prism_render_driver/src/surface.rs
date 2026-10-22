@@ -160,6 +160,15 @@ pub trait Surface {
     /// Returns a [`SurfaceError`] describing why no frame was available.
     fn acquire(&self) -> Result<Self::Frame, SurfaceError>;
 
+    /// Whether an acquired frame came from a suboptimal swapchain.
+    ///
+    /// The frame remains valid and may still be presented. Drivers should
+    /// schedule surface reconfiguration before acquiring the next frame.
+    /// Backends that do not expose this signal may keep the default.
+    fn is_suboptimal(&self, _frame: &Self::Frame) -> bool {
+        false
+    }
+
     /// The RHI image backing `frame`, registered into the surface's device.
     fn image(&self, frame: &Self::Frame) -> SurfaceImage;
 

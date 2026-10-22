@@ -236,6 +236,7 @@ fn surface_configure_acquire_present_cycle() {
     assert_eq!(surface.size(), Extent3d::new_2d(1280, 720));
 
     let frame = surface.acquire().expect("frame");
+    assert!(!surface.is_suboptimal(&frame));
     let image = surface.image(&frame);
     assert_eq!(image.format, TextureFormat::Rgba8Unorm);
     assert_eq!(image.size, Extent3d::new_2d(1280, 720));
