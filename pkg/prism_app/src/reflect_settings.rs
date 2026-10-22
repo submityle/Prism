@@ -6,7 +6,7 @@
 
 use prism_reflect::{
     schema::{AttributeValue, TypeMetadata},
-    GetTypeRegistration, Reflect, ReflectRef, TypeInfo, Typed,
+    GetTypeRegistration, Reflect, ReflectRef, TypeInfo, Typed, VariantKind,
 };
 use prism_settings::{
     Constraints, RegistryBuilder, SettingDef, SettingsError, SettingsRegistry, Value,
@@ -115,18 +115,64 @@ where
                     type_name: default.type_name(),
                     field: name.to_owned(),
                 })?;
-        let rust_default =
-            from_reflect(reflected).ok_or_else(|| ReflectSettingsError::UnsupportedValue {
-                field: name.to_owned(),
-                type_name: descriptor.type_name().to_owned(),
-            })?;
+        let (rust_default, enum_options) = match reflected.reflect_ref() {
+            ReflectRef::Enum(active) => {
+                let TypeInfo::Enum(enum_info) = reflected.type_info() else {
+                    return Err(ReflectSettingsError::UnsupportedValue {
+                        field: name.to_owned(),
+                        type_name: descriptor.type_name().to_owned(),
+                    });
+                };
+                if enum_info
+                    .variants()
+                    .iter()
+                    .any(|variant| !matches!(variant.kind(), VariantKind::Unit))
+                {
+                    return Err(ReflectSettingsError::UnsupportedValue {
+                        field: name.to_owned(),
+                        type_name: descriptor.type_name().to_owned(),
+                    });
+                }
+                let enum_options = enum_info
+                    .variants()
+                    .iter()
+                    .map(|variant| prism_settings::EnumOption::from_stable_name(variant.name()))
+                    .collect::<Vec<_>>();
+                let default = enum_options
+                    .iter()
+                    .find(|option| option.stable_name == active.variant_name())
+                    .ok_or_else(|| ReflectSettingsError::UnsupportedValue {
+                        field: name.to_owned(),
+                        type_name: descriptor.type_name().to_owned(),
+                    })?;
+                (Value::Enum(default.id), enum_options)
+            }
+            _ => (
+                from_reflect(reflected).ok_or_else(|| ReflectSettingsError::UnsupportedValue {
+                    field: name.to_owned(),
+                    type_name: descriptor.type_name().to_owned(),
+                })?,
+                Vec::new(),
+            ),
+        };
         let value = match meta.and_then(|meta| meta.default_value()) {
             Some(value) => {
-                let value = from_attribute(value).ok_or_else(|| {
+                let mut value = from_attribute(value).ok_or_else(|| {
                     ReflectSettingsError::MetadataTypeMismatch {
                         field: name.to_owned(),
                     }
                 })?;
+                if !enum_options.is_empty()
+                    && let Value::String(variant_name) = &value
+                {
+                    value = enum_options
+                        .iter()
+                        .find(|option| option.stable_name == *variant_name)
+                        .map(|option| Value::Enum(option.id))
+                        .ok_or_else(|| ReflectSettingsError::MetadataTypeMismatch {
+                            field: name.to_owned(),
+                        })?;
+                }
                 if value.value_type() != rust_default.value_type() {
                     return Err(ReflectSettingsError::MetadataTypeMismatch {
                         field: name.to_owned(),
@@ -137,6 +183,7 @@ where
             None => rust_default,
         };
         let mut definition = SettingDef::new(format!("{namespace}.{name}"), namespace, value);
+        definition.enum_options = enum_options;
         if let Some(meta) = meta {
             definition.description = meta.docs().map(str::to_owned);
             definition.category = meta.category().map(str::to_owned);
@@ -300,5 +347,34 @@ mod tests {
         }
         let empty = derive_settings_registry::<NoSettings>("empty", "prism_app").unwrap();
         assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn derives_unit_enum_variants_by_stable_name_not_ordinal() {
+        #[derive(Reflect, Default)]
+        enum Quality {
+            Low,
+            #[default]
+            Medium,
+            High,
+        }
+
+        #[derive(Reflect, Default)]
+        struct GraphicsSettings {
+            #[reflect(setting, default = "High")]
+            quality: Quality,
+        }
+
+        let schema = derive_settings_registry::<GraphicsSettings>("graphics", "prism_app").unwrap();
+        let (_, definition) = schema.get(&"graphics.quality".into()).unwrap();
+        assert_eq!(definition.ty, prism_settings::ValueType::Enum);
+        assert_eq!(definition.enum_options.len(), 3);
+        let high = definition
+            .enum_options
+            .iter()
+            .find(|option| option.stable_name == "High")
+            .unwrap();
+        assert_eq!(definition.default, Value::Enum(high.id));
+        assert_eq!(high.id, prism_settings::EnumId::from_stable_name("High"));
     }
 }

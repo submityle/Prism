@@ -39,9 +39,46 @@ pub struct SettingId(pub u32);
 /// Registry-local namespace identifier.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct NamespaceId(pub u32);
-/// Stable registry-local enum identifier; persistent codecs should store a stable string instead.
+/// Stable registry-local enum identifier derived from an enum option's name.
+///
+/// Persistent codecs resolve this ID to the option's stable string name using
+/// the setting schema; the numeric ID is never a persisted ordinal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct EnumId(pub u32);
+
+impl EnumId {
+    /// Derives a deterministic runtime ID from a stable enum/variant key.
+    ///
+    /// IDs use FNV-1a over UTF-8 bytes and are independent of declaration
+    /// order, process hash seeds, and platform endianness. Callers must reject
+    /// collisions among the options registered for one setting.
+    pub fn from_stable_name(name: &str) -> Self {
+        let mut hash = 0x811c_9dc5u32;
+        for byte in name.as_bytes() {
+            hash ^= u32::from(*byte);
+            hash = hash.wrapping_mul(0x0100_0193);
+        }
+        Self(hash)
+    }
+}
+
+/// A stable, user-facing name paired with its deterministic runtime enum ID.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EnumOption {
+    /// Runtime identity used in [`Value::Enum`].
+    pub id: EnumId,
+    /// Stable persisted name; never a declaration ordinal.
+    pub stable_name: String,
+}
+
+impl EnumOption {
+    /// Derives an option ID from its fully-qualified stable name.
+    pub fn from_stable_name(stable_name: impl Into<String>) -> Self {
+        let stable_name = stable_name.into();
+        let id = EnumId::from_stable_name(&stable_name);
+        Self { id, stable_name }
+    }
+}
 /// Stable identity for byte payloads carried by a [`Value`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BytesRef(pub u64);
@@ -364,6 +401,8 @@ pub struct SettingDef {
     pub category: Option<String>,
     /// Default value.
     pub default: Value,
+    /// Named stable options when the value type is `Enum`.
+    pub enum_options: Vec<EnumOption>,
     /// Value variant required by the schema.
     pub ty: ValueType,
     /// Validation limits.
@@ -397,6 +436,7 @@ impl SettingDef {
             description: None,
             category: None,
             default,
+            enum_options: Vec::new(),
             ty,
             constraints: Constraints::default(),
             on_violation: ViolationPolicy::Reject,

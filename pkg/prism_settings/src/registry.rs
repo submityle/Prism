@@ -3,7 +3,7 @@ use crate::{
     CrossRule, Domain, EnumId, LayerKind, SettingDef, SettingId, SettingKey, Value, ValueType,
 };
 use alloc::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     string::{String, ToString},
     vec::Vec,
 };
@@ -476,9 +476,35 @@ fn validate_def(def: &SettingDef, errors: &mut Vec<SettingsError>) {
     if !def.constraints.enum_values.is_empty() && def.ty != ValueType::Enum {
         errors.push(invalid("enum_values require Enum type"));
     }
+    if !def.enum_options.is_empty() && def.ty != ValueType::Enum {
+        errors.push(invalid("enum_options require Enum type"));
+    }
+    let mut option_ids = BTreeSet::new();
+    let mut option_names = BTreeSet::new();
+    for option in &def.enum_options {
+        if option.stable_name.is_empty() {
+            errors.push(invalid("enum option stable names must not be empty"));
+        }
+        if option.id != EnumId::from_stable_name(&option.stable_name) {
+            errors.push(invalid("enum option ID does not match its stable name"));
+        }
+        if !option_ids.insert(option.id) {
+            errors.push(invalid("enum option IDs collide"));
+        }
+        if !option_names.insert(option.stable_name.as_str()) {
+            errors.push(invalid("enum option stable names must be unique"));
+        }
+        if !def.constraints.enum_values.is_empty()
+            && !def.constraints.enum_values.contains(&option.id)
+        {
+            errors.push(invalid(
+                "enum option conflicts with the enum_values constraint",
+            ));
+        }
+    }
     if let Value::Enum(e) = def.default
-        && !def.constraints.enum_values.is_empty()
-        && !def.constraints.enum_values.contains(&e)
+        && ((!def.constraints.enum_values.is_empty() && !def.constraints.enum_values.contains(&e))
+            || (!def.enum_options.is_empty() && !option_ids.contains(&e)))
     {
         errors.push(invalid("default enum is not allowed"));
     }
@@ -558,8 +584,10 @@ fn validate_value(def: &SettingDef, value: Value) -> Result<Value, SettingsError
             return Err(SettingsError::TooLong { key })
         }
         Value::Enum(e)
-            if !def.constraints.enum_values.is_empty()
-                && !def.constraints.enum_values.contains(e) =>
+            if (!def.constraints.enum_values.is_empty()
+                && !def.constraints.enum_values.contains(e))
+                || (!def.enum_options.is_empty()
+                    && !def.enum_options.iter().any(|option| option.id == *e)) =>
         {
             return Err(SettingsError::InvalidEnum { key, value: *e })
         }

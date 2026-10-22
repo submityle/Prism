@@ -243,11 +243,12 @@ impl<'a> CandidateBuilder<'a> {
     /// the core resolver.
     pub fn build(
         &self,
-        document: SettingsDocument,
+        mut document: SettingsDocument,
         base_sources: &[LayerSource],
         generation: u64,
         recovered_from_backup: bool,
     ) -> Result<CandidateSnapshot, CandidateError> {
+        document.bind_registry(self.registry);
         let mut source = LayerSource::new(
             self.source.layer,
             self.source.trust,

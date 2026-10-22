@@ -1,6 +1,6 @@
 //! The versioned TOML document model and codec.
 
-use prism_settings::{SettingKey, SettingsRegistry, Value};
+use prism_settings::{EnumOption, SettingKey, SettingsRegistry, Value};
 use std::{collections::BTreeMap, error::Error, fmt};
 
 const SCHEMA_KEY: &str = "prism_schema";
@@ -18,6 +18,7 @@ pub struct SettingsDocument {
     schema_version: u32,
     candidates: BTreeMap<SettingKey, Value>,
     unknown: BTreeMap<String, toml::Value>,
+    enum_options: BTreeMap<SettingKey, Vec<EnumOption>>,
 }
 
 impl SettingsDocument {
@@ -27,6 +28,7 @@ impl SettingsDocument {
             schema_version,
             candidates: BTreeMap::new(),
             unknown: BTreeMap::new(),
+            enum_options: BTreeMap::new(),
         }
     }
 
@@ -57,7 +59,27 @@ impl SettingsDocument {
     pub fn insert(&mut self, key: impl Into<SettingKey>, value: Value) {
         let key = key.into();
         self.unknown.remove(key.as_str());
+        if !matches!(value, Value::Enum(_)) {
+            self.enum_options.remove(&key);
+        }
         self.candidates.insert(key, value);
+    }
+
+    /// Associates registered stable enum names with candidate enum identities.
+    ///
+    /// This is a schema-time operation. It clones only the enum option tables
+    /// needed to encode enum candidates later; it adds no per-frame work.
+    pub fn bind_registry(&mut self, registry: &SettingsRegistry) {
+        self.enum_options.clear();
+        for key in self.candidates.keys() {
+            let Some((_, definition)) = registry.get(key) else {
+                continue;
+            };
+            if !definition.enum_options.is_empty() {
+                self.enum_options
+                    .insert(key.clone(), definition.enum_options.clone());
+            }
+        }
     }
 
     /// Preserves an unknown TOML key/value pair.
@@ -66,17 +88,28 @@ impl SettingsDocument {
     pub fn preserve_unknown(&mut self, key: impl Into<String>, value: toml::Value) {
         let key = key.into();
         self.candidates.remove(&SettingKey::new(key.clone()));
+        self.enum_options.remove(&SettingKey::new(key.clone()));
         self.unknown.insert(key, value);
     }
 
     /// Encodes this document as canonical TOML.
+    ///
+    /// Enum candidates require a registry binding from [`Self::bind_registry`]
+    /// so the codec can persist stable option names rather than runtime IDs.
     pub fn encode(&self) -> Result<String, CodecError> {
         let mut values = toml::Table::new();
         for (key, value) in &self.candidates {
             if self.unknown.contains_key(key.as_str()) {
                 return Err(CodecError::DuplicateKey(key.as_str().to_owned()));
             }
-            values.insert(key.as_str().to_owned(), encode_value(value, key.as_str())?);
+            values.insert(
+                key.as_str().to_owned(),
+                encode_value(
+                    value,
+                    key.as_str(),
+                    self.enum_options.get(key).map(Vec::as_slice),
+                )?,
+            );
         }
         for (key, value) in &self.unknown {
             if self.candidates.contains_key(&SettingKey::new(key.clone())) {
@@ -128,7 +161,10 @@ impl SettingsDocument {
         let mut document = Self::new(schema_version);
         for (key, raw) in values {
             let known = registry.and_then(|registry| registry.get(&SettingKey::new(key.clone())));
-            match decode_value(raw, key) {
+            let enum_options = known
+                .map(|(_, definition)| definition.enum_options.as_slice())
+                .filter(|options| !options.is_empty());
+            match decode_value(raw, key, enum_options) {
                 Ok(value) if known.is_some() || registry.is_none() => {
                     if let Some((id, _)) = known
                         && let Some(registry) = registry
@@ -141,6 +177,14 @@ impl SettingsDocument {
                             })?;
                     }
                     document.insert(key.clone(), value);
+                    if let Some((_, definition)) = known
+                        && !definition.enum_options.is_empty()
+                    {
+                        document.enum_options.insert(
+                            SettingKey::new(key.clone()),
+                            definition.enum_options.clone(),
+                        );
+                    }
                 }
                 Ok(_) => document.preserve_unknown(key.clone(), raw.clone()),
                 Err(_) if known.is_none() => document.preserve_unknown(key.clone(), raw.clone()),
@@ -157,7 +201,9 @@ impl SettingsDocument {
 
     /// Removes and returns a candidate, if one exists.
     pub(crate) fn remove_candidate(&mut self, key: &str) -> Option<Value> {
-        self.candidates.remove(&SettingKey::new(key.to_owned()))
+        let key = SettingKey::new(key.to_owned());
+        self.enum_options.remove(&key);
+        self.candidates.remove(&key)
     }
 
     /// Removes and returns a preserved TOML value, if one exists.
@@ -241,7 +287,11 @@ impl fmt::Display for CodecError {
 
 impl Error for CodecError {}
 
-fn encode_value(value: &Value, key: &str) -> Result<toml::Value, CodecError> {
+fn encode_value(
+    value: &Value,
+    key: &str,
+    enum_options: Option<&[EnumOption]>,
+) -> Result<toml::Value, CodecError> {
     let invalid = |reason: String| CodecError::InvalidValue {
         key: key.to_owned(),
         reason,
@@ -252,20 +302,26 @@ fn encode_value(value: &Value, key: &str) -> Result<toml::Value, CodecError> {
         Value::Float(value) if value.is_finite() => Ok(toml::Value::Float(*value)),
         Value::Float(_) => Err(invalid("non-finite floats cannot be persisted".to_owned())),
         Value::String(value) => Ok(toml::Value::String(value.clone())),
-        Value::Enum(value) => Ok(tagged("enum", toml::Value::Integer(i64::from(value.0)))),
+        Value::Enum(value) => {
+            let stable_name = enum_options
+                .and_then(|options| options.iter().find(|option| option.id == *value))
+                .map(|option| option.stable_name.clone())
+                .ok_or_else(|| invalid("enum value has no registered stable name".to_owned()))?;
+            Ok(tagged("enum", toml::Value::String(stable_name)))
+        }
         // TOML integers are signed; decimal strings preserve the full u64 domain.
         Value::Bytes(value) => Ok(tagged("bytes", toml::Value::String(value.0.to_string()))),
         Value::Secret(value) => Ok(tagged("secret", toml::Value::String(value.0.to_string()))),
         Value::Array(values) => values
             .iter()
             .enumerate()
-            .map(|(index, value)| encode_value(value, &format!("{key}[{index}]")))
+            .map(|(index, value)| encode_value(value, &format!("{key}[{index}]"), None))
             .collect::<Result<Vec<_>, _>>()
             .map(toml::Value::Array),
         Value::Table(values) => values
             .iter()
             .map(|(child_key, value)| {
-                encode_value(value, &format!("{key}.{child_key}"))
+                encode_value(value, &format!("{key}.{child_key}"), None)
                     .map(|value| (child_key.clone(), value))
             })
             .collect::<Result<toml::Table, _>>()
@@ -281,7 +337,11 @@ fn tagged(kind: &str, value: toml::Value) -> toml::Value {
     toml::Value::Table(table)
 }
 
-fn decode_value(value: &toml::Value, key: &str) -> Result<Value, String> {
+fn decode_value(
+    value: &toml::Value,
+    key: &str,
+    enum_options: Option<&[EnumOption]>,
+) -> Result<Value, String> {
     match value {
         toml::Value::Boolean(value) => Ok(Value::Bool(*value)),
         toml::Value::Integer(value) => Ok(Value::Int(*value)),
@@ -289,7 +349,7 @@ fn decode_value(value: &toml::Value, key: &str) -> Result<Value, String> {
         toml::Value::String(value) => Ok(Value::String(value.clone())),
         toml::Value::Array(values) => values
             .iter()
-            .map(|value| decode_value(value, key))
+            .map(|value| decode_value(value, key, None))
             .collect::<Result<Vec<_>, _>>()
             .map(Value::Array),
         toml::Value::Table(values) => {
@@ -298,9 +358,23 @@ fn decode_value(value: &toml::Value, key: &str) -> Result<Value, String> {
                     .get("value")
                     .ok_or_else(|| format!("tagged `{kind}` value is missing"))?;
                 return match kind {
-                    "enum" => {
-                        decode_u32(raw, key).map(|value| Value::Enum(prism_settings::EnumId(value)))
-                    }
+                    "enum" => match raw {
+                        toml::Value::String(name) => enum_options
+                            .and_then(|options| {
+                                options.iter().find(|option| option.stable_name == *name)
+                            })
+                            .map(|option| Value::Enum(option.id))
+                            .ok_or_else(|| format!("unknown stable enum name for `{key}`")),
+                        toml::Value::Integer(_) => enum_options
+                            .and_then(|options| {
+                                decode_u32(raw, key).ok().and_then(|raw_id| {
+                                    options.iter().find(|option| option.id.0 == raw_id)
+                                })
+                            })
+                            .map(|option| Value::Enum(option.id))
+                            .ok_or_else(|| format!("unknown legacy enum ID for `{key}`")),
+                        _ => Err(format!("tagged enum value for `{key}` must be a string")),
+                    },
                     "bytes" => decode_u64(raw, key)
                         .map(|value| Value::Bytes(prism_settings::BytesRef(value))),
                     "secret" => decode_u64(raw, key)
@@ -310,7 +384,9 @@ fn decode_value(value: &toml::Value, key: &str) -> Result<Value, String> {
             }
             values
                 .iter()
-                .map(|(key, value)| decode_value(value, key).map(|value| (key.clone(), value)))
+                .map(|(key, value)| {
+                    decode_value(value, key, None).map(|value| (key.clone(), value))
+                })
                 .collect::<Result<BTreeMap<_, _>, _>>()
                 .map(Value::Table)
         }
@@ -340,7 +416,7 @@ fn decode_u64(value: &toml::Value, key: &str) -> Result<u64, String> {
 }
 
 pub(crate) fn decode_value_for_migration(value: &toml::Value, key: &str) -> Option<Value> {
-    decode_value(value, key).ok()
+    decode_value(value, key, None).ok()
 }
 
 #[cfg(test)]
@@ -403,5 +479,43 @@ mod tests {
         let decoded = SettingsDocument::decode(&encoded).unwrap();
         assert_eq!(decoded, document);
         assert!(encoded.contains("18446744073709551615"));
+    }
+
+    #[test]
+    fn enums_persist_by_stable_name_and_decode_legacy_ids() {
+        let low = EnumOption::from_stable_name("Low");
+        let high = EnumOption::from_stable_name("High");
+        let mut definition = SettingDef::new("render.quality", "render", Value::Enum(low.id));
+        definition.enum_options = vec![low.clone(), high.clone()];
+        let mut builder = RegistryBuilder::new();
+        builder.namespace("render", "test").unwrap();
+        builder.register(definition);
+        let registry = builder.finish().unwrap();
+
+        let mut document = SettingsDocument::new(1);
+        document.insert("render.quality", Value::Enum(high.id));
+        document.bind_registry(&registry);
+        let encoded = document.encode().unwrap();
+        assert!(encoded.contains("value = \"High\""));
+        assert!(!encoded.contains(&high.id.0.to_string()));
+
+        let decoded = SettingsDocument::decode_with_registry(&encoded, Some(&registry)).unwrap();
+        assert_eq!(decoded, document);
+
+        let legacy = format!(
+            "prism_schema = 1\n[values.\"render.quality\"]\n__prism_value = \"enum\"\nvalue = {}\n",
+            high.id.0
+        );
+        let migrated = SettingsDocument::decode_with_registry(&legacy, Some(&registry)).unwrap();
+        assert_eq!(
+            migrated
+                .candidates()
+                .get(&SettingKey::from("render.quality")),
+            Some(&Value::Enum(high.id))
+        );
+        assert!(migrated.encode().unwrap().contains("value = \"High\""));
+
+        let unknown = "prism_schema = 1\n[values.\"render.quality\"]\n__prism_value = \"enum\"\nvalue = \"Ultra\"\n";
+        assert!(SettingsDocument::decode_with_registry(unknown, Some(&registry)).is_err());
     }
 }

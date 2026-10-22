@@ -58,6 +58,50 @@ fn dense_ids_and_registry_order_do_not_depend_on_registration_order() {
 }
 
 #[test]
+fn stable_enum_options_are_order_independent_and_closed() {
+    let low = EnumOption::from_stable_name("graphics::Quality::Low");
+    let high = EnumOption::from_stable_name("graphics::Quality::High");
+    assert_eq!(low.id, EnumId::from_stable_name("graphics::Quality::Low"));
+    assert_ne!(low.id, high.id);
+
+    let mut def = SettingDef::new("render.quality", "render", Value::Enum(low.id));
+    def.enum_options = vec![high.clone(), low.clone()];
+    let schema = registry(vec![def]);
+    let (id, definition) = schema.get(&"render.quality".into()).unwrap();
+    assert_eq!(definition.enum_options, vec![high, low.clone()]);
+    assert_eq!(
+        schema.validate_value(id, Value::Enum(low.id)),
+        Ok(Value::Enum(low.id))
+    );
+    assert!(matches!(
+        schema.validate_value(
+            id,
+            Value::Enum(EnumId::from_stable_name("graphics::Quality::Ultra"))
+        ),
+        Err(SettingsError::InvalidEnum { .. })
+    ));
+}
+
+#[test]
+fn stable_enum_options_reject_mismatched_and_duplicate_identities() {
+    let mut def = SettingDef::new("render.quality", "render", Value::Enum(EnumId(1)));
+    def.enum_options = vec![
+        EnumOption {
+            id: EnumId(1),
+            stable_name: "graphics::Quality::Low".into(),
+        },
+        EnumOption::from_stable_name("graphics::Quality::Low"),
+        EnumOption::from_stable_name("graphics::Quality::Low"),
+    ];
+    let mut builder = RegistryBuilder::new();
+    builder.namespace("render", "test-owner").unwrap();
+    builder.register(def);
+    let errors = builder.finish().unwrap_err();
+    assert!(errors.iter().any(|error| matches!(error, SettingsError::InvalidDefinition { reason, .. } if reason.contains("does not match"))));
+    assert!(errors.iter().any(|error| matches!(error, SettingsError::InvalidDefinition { reason, .. } if reason.contains("collide"))));
+}
+
+#[test]
 fn validation_reports_alias_namespace_and_default_errors() {
     let mut b = RegistryBuilder::new();
     b.namespace("audio", "owner").unwrap();
