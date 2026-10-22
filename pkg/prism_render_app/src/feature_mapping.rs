@@ -196,13 +196,6 @@ impl FeatureMappingCache {
         self.entries.clear();
     }
 
-    /// Compatibility alias for callers that used the cache as a plain
-    /// clearable container. New recovery code should call [`Self::invalidate`]
-    /// so the device/module lifecycle is explicit at the call site.
-    pub fn clear(&mut self) {
-        self.invalidate();
-    }
-
     /// Number of resident semantic mappings.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -665,6 +658,9 @@ fn access_tag(access: AccessKind) -> u8 {
         AccessKind::IndirectRead => 5,
         AccessKind::TransferRead => 6,
         AccessKind::TransferWrite => 7,
+        AccessKind::UniformRead => 8,
+        AccessKind::IndexRead => 9,
+        AccessKind::DepthAttachmentRead => 10,
     }
 }
 
@@ -724,6 +720,26 @@ mod tests {
     const FEATURE: FeatureId = FeatureId(0x9000);
     const VARIANT: VariantId = VariantId(0x9001);
 
+    #[test]
+    fn resource_access_tags_are_distinct_and_stable() {
+        let accesses = [
+            AccessKind::SampledRead,
+            AccessKind::StorageRead,
+            AccessKind::StorageWrite,
+            AccessKind::ColorAttachment,
+            AccessKind::DepthAttachment,
+            AccessKind::IndirectRead,
+            AccessKind::TransferRead,
+            AccessKind::TransferWrite,
+            AccessKind::UniformRead,
+            AccessKind::IndexRead,
+            AccessKind::DepthAttachmentRead,
+        ];
+        for (expected, access) in accesses.into_iter().enumerate() {
+            assert_eq!(usize::from(access_tag(access)), expected);
+        }
+    }
+
     fn static_ref<T>(value: T) -> &'static T {
         Box::leak(Box::new(value))
     }
@@ -760,6 +776,7 @@ mod tests {
             domain: None,
             requires_services: ServiceSet::EMPTY,
             variants: static_ref([variant]),
+            pass_alternatives: &[],
         });
         let definitions = static_ref([*definition]);
         let catalog = FeatureCatalog::new(definitions, &[]).unwrap();
@@ -899,6 +916,7 @@ mod tests {
                 kind: FeatureKind::Response,
                 domain: None,
                 requires_services: ServiceSet::EMPTY,
+                pass_alternatives: &[],
                 variants: static_ref([FeatureVariant {
                     id: VARIANT,
                     rank: 0,
