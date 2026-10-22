@@ -1320,9 +1320,9 @@ renderer 接线期间，`CameraIntent`/`ViewData` 的每视图可见性元数据
 
 每个次要视图声明最大更新频率、最小分辨率和历史保持帧数。`prism_camera_ecs/view_lod` 已将这一策略接入真实发布路径：跳帧期间保留上一 `ViewData` 和稳定 view handle，并发布 `updated=false`、`resolution_scale`、`history_frames`；到期后重新派生并发布 `updated=true`。主视图、XR 双眼和反射关键视图禁止跳帧。ECS 层按实体稳定排序、复用状态容器，不在跳帧路径重新运行投影、历史矩阵或注册操作；帧率取应用可写的 `CameraFrame.frame_rate_hz` nominal rate（默认 60 Hz），非法值回退 60 Hz。相机意图、LOD 策略或目标尺寸改变时立即使缓存失效并重新派生。
 
-当前已验证的是相机计算/发布预算和历史复用；渲染侧仍需消费 `PublishedCameraLod`，将 `resolution_scale` 应用到实际离屏目标尺寸，并将 `history_frames` 接入时域资源保留策略。验证命令：`cargo test -p prism_camera_ecs --features view_lod --lib --offline`。
+当前已验证的是相机计算/发布预算、历史复用，以及 `resolution_scale` 从渲染快照进入缩放附件分配和 HDR raster 上采样的代码路径；`history_frames` 仍未进入 TAA 历史资源保留策略。ECS 发布覆盖由 `cargo test -p prism_camera_ecs --features view_lod --lib --offline` 验证；缩放附件、上采样图计划和资源生命周期以本节后续 2026-10-23 增量为准。
 
-2026-10-23 LOD extent 规则验证增量：新增 `surface_view_render_extent` 纯函数，统一定义输出尺寸按有限 `[0,1]` 比例 `ceil(output × scale)`、每轴至少 1 像素以及非法 scale 回退 1.0 的确定性规则，并为满分辨率、半分辨率、极小比例和非法输入增加单测。验证命令 `CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 cargo test -p prism_render_app --lib surface_view_targets::tests::surface_view_extent_uses_stable_ceil_and_safe_scale_fallback --offline`：1 passed。该结果只验证纯尺寸策略，不验证 target 分配或图像采样。helper 尚未接入 target 分配：当前相机附件仍是输出 viewport 尺寸，避免在不可缩放的 transfer-copy 合成存在时产生源/目的范围不匹配。完成 LOD 仍需把缩放尺寸接入目标缓存，并增加保持 scene-linear HDR、限定 viewport/scissor、Load 保留目标外像素的 raster 上采样合成。`history_frames` 仍未接入 TAA 资源生命周期。
+2026-10-23 LOD extent 规则验证增量（历史快照）：新增 `surface_view_render_extent` 纯函数，统一定义输出尺寸按有限 `[0,1]` 比例 `ceil(output × scale)`、每轴至少 1 像素以及非法 scale 回退 1.0 的确定性规则，并为满分辨率、半分辨率、极小比例和非法输入增加单测。该时点 helper 尚未接入 target 分配；下一条更新及提交 `84b94f8f2` 已完成接线，历史文字不代表当前代码状态。`history_frames` 仍未接入 TAA 资源生命周期。
 
 2026-10-23 LOD 渲染闭环增量：`surface_view_render_extent` 已接入窗口与离屏目标的实际 target key，缩放后的 scene-linear HDR 私有附件通过 raster upscale pass 写入输出；上采样使用手动四点 `textureLoad`，不依赖 `Rgba16Float` 线性过滤能力，输出 attachment 使用 `Load`，并以相机 viewport 设置 viewport/scissor，保证矩形外像素不被覆盖。upscaler 与 target 绑定同一设备代际，只有完成回调/`wait_idle` 和依赖驱逐成功后才显式销毁；`quarantined_upscaler_waits_for_its_generation_completion_before_destroy` 通过。`surface_views` 定向测试 28 项通过，RenderApp `cargo check --lib --offline` 通过。该切片已提交为 `84b94f8f2`。
 
