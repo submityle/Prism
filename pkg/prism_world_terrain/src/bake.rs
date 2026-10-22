@@ -608,7 +608,7 @@ impl HeightfieldMesh {
     /// The plan must target this tile and use `samples_per_edge - 1` segments.
     /// At most two coarse edges may be applied, and when there are two they
     /// must be opposite; adjacent coarse edges share a corner quad and require
-    /// a corner fan contract that this mesh ABI does not yet define. A mesh
+    /// an explicit corner fan before they can be consumed. A mesh
     /// accepts one active seam plan at a time; call [`Self::clear_lod_seam_plan`] to
     /// restore the base topology before applying a new LOD configuration.
     pub fn apply_lod_seam_plan(
@@ -628,13 +628,6 @@ impl HeightfieldMesh {
         if transitions.is_empty() {
             return Ok(());
         }
-        if transitions.len() > 2
-            || (transitions.len() == 2
-                && !mesh_edges_are_opposite(transitions[0].edge(), transitions[1].edge()))
-        {
-            return Err(BakeError::InvalidGeometry);
-        }
-
         let mut coarse_edges = [false; 4];
         for transition in transitions {
             let index = match transition.edge() {
@@ -647,6 +640,12 @@ impl HeightfieldMesh {
                 return Err(BakeError::InvalidGeometry);
             }
             coarse_edges[index] = true;
+        }
+        if transitions.len() > 2
+            || (transitions.len() == 2
+                && !mesh_edges_are_opposite(transitions[0].edge(), transitions[1].edge()))
+        {
+            return Err(BakeError::InvalidGeometry);
         }
 
         let vertex_count = self.positions.len();
@@ -899,7 +898,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(plan.transitions().len(), 1);
-        let mut mesh = HeightfieldMesh::build(&field_at(tile), [8.0, 8.0], LIMITS).unwrap();
+        let mut changed_field = field_at(tile);
+        let mut mesh = HeightfieldMesh::build(&changed_field, [8.0, 8.0], LIMITS).unwrap();
         let original_indices = mesh.indices().len();
         mesh.apply_lod_seam_plan(&plan, 16_384).unwrap();
         assert_eq!(mesh.indices().len(), original_indices - 8 * 6 + 4 * 9);
@@ -928,6 +928,19 @@ mod tests {
         mesh.apply_lod_seam_plan(&next_plan, 16_384).unwrap();
         assert_eq!(mesh.indices().len(), original_indices - 8 * 6 + 4 * 9);
         assert!(mesh.indices().iter().all(|&index| (index as usize) < 81));
+        let changed = changed_field
+            .rebake(
+                DirtyRegion::new(tile, 30_000, 30_000, 34_000, 34_000).unwrap(),
+                &plane(2_000),
+                LIMITS,
+            )
+            .unwrap();
+        mesh.update(&changed_field, changed).unwrap();
+        let mut rebuilt = HeightfieldMesh::build(&changed_field, [8.0, 8.0], LIMITS).unwrap();
+        rebuilt.apply_lod_seam_plan(&next_plan, 16_384).unwrap();
+        assert_eq!(mesh.positions(), rebuilt.positions());
+        assert_eq!(mesh.normals(), rebuilt.normals());
+        assert_eq!(mesh.indices(), rebuilt.indices());
     }
 
     #[test]
