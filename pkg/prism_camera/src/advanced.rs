@@ -368,6 +368,13 @@ impl ValidatedCameraTrack {
         self.track.keyframes.len()
     }
 
+    /// Returns the immutable authored post stack used by this track, when present.
+    #[cfg(feature = "post")]
+    #[must_use]
+    pub fn post_stack(&self) -> Option<&PostStack> {
+        self.track.post_stack.as_ref()
+    }
+
     /// Appends events in `(from_tick, through_tick]` without rescanning the
     /// prefix. The output buffer is cleared first and retains its capacity.
     /// Complexity is `O(log N + K)` for `N` keyframes and `K` crossed events.

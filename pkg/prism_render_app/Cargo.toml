@@ -52,6 +52,7 @@ resident-page-streaming = ["dep:prism_render_driver_wgpu", "dep:wgpu", "dep:futu
 # Connect the App's real OS windows to the same presentation driver.
 winit = ["prism_app/winit", "dep:prism_window_winit"]
 view-lod = ["prism_camera_ecs/view_lod"]
+camera-cutscene = ["prism_camera_ecs/cutscene"]
 
 [dev-dependencies]
 # The headless reference backend: drives the extract + render path in CI with

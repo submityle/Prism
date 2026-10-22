@@ -7,6 +7,8 @@ use alloc::sync::Arc;
 use prism_camera::{ClearMode, RenderTarget};
 #[cfg(feature = "view-lod")]
 use prism_camera_ecs::PublishedCameraLod;
+#[cfg(feature = "camera-cutscene")]
+use prism_camera_ecs::PublishedCameraRenderParamsSet;
 use prism_camera_ecs::PublishedViews;
 use prism_ecs::prelude::{Entity, LifecycleEvent, ObserverContext, Resource, World};
 use prism_ecs::world::WorldId;
@@ -83,6 +85,8 @@ pub struct SurfaceViewRejection {
 #[derive(Resource, Default, Debug)]
 pub struct ExtractedSurfaceViews {
     views: BTreeMap<Entity, SurfaceView>,
+    #[cfg(feature = "camera-cutscene")]
+    render_params: BTreeMap<Entity, prism_camera_ecs::PublishedCameraRenderParams>,
     rejections: Vec<SurfaceViewRejection>,
     incarnations: BTreeMap<Entity, Arc<()>>,
     source: Option<WorldId>,
@@ -92,6 +96,15 @@ impl ExtractedSurfaceViews {
     /// Find an accepted view by its main-world camera entity.
     pub fn get(&self, camera: Entity) -> Option<&SurfaceView> {
         self.views.get(&camera)
+    }
+
+    /// Returns cinematic parameters paired with the exact generational view entity.
+    #[cfg(feature = "camera-cutscene")]
+    pub fn render_params(
+        &self,
+        camera: Entity,
+    ) -> Option<&prism_camera_ecs::PublishedCameraRenderParams> {
+        self.render_params.get(&camera)
     }
 
     /// Accepted views in deterministic entity order.
@@ -235,6 +248,13 @@ fn extract_published_surface_views(main: &World, render: &mut World, published: 
         .flat_map(PublishedCameraLod::iter)
         .map(|lod| (lod.entity, (lod.resolution_scale, lod.history_frames)))
         .collect();
+    #[cfg(feature = "camera-cutscene")]
+    let render_params_by_entity: BTreeMap<_, _> = main
+        .get_resource::<PublishedCameraRenderParamsSet>()
+        .into_iter()
+        .flat_map(PublishedCameraRenderParamsSet::iter)
+        .map(|params| (params.entity, params.clone()))
+        .collect();
     for published_view in published.iter() {
         let view = published_view.data;
         // Native scene transforms are absolute-world values. Match the
@@ -312,6 +332,12 @@ fn extract_published_surface_views(main: &World, render: &mut World, published: 
                 history_frames,
             },
         );
+        #[cfg(feature = "camera-cutscene")]
+        if let Some(params) = render_params_by_entity.get(&published_view.entity) {
+            extracted
+                .render_params
+                .insert(published_view.entity, params.clone());
+        }
     }
     render.insert_resource(extracted);
 }
@@ -465,6 +491,46 @@ mod tests {
         assert_eq!(extracted.clear, ClearMode::DepthOnly);
         assert_eq!(extracted.resolution_scale, 1.0);
         assert_eq!(extracted.history_frames, 0);
+    }
+
+    #[cfg(feature = "camera-cutscene")]
+    #[test]
+    fn cutscene_params_are_extracted_by_full_camera_entity() {
+        use prism_app::{App, Plugin};
+        use prism_camera::{CameraKeyframe, CameraTrack, Exposure};
+        use prism_camera_ecs::{
+            CameraBundle, CameraPlugin, CameraTrackPlayerComponent, PublishedCameraRenderParamsSet,
+        };
+
+        let mut app = App::new();
+        app.add_plugins(CameraPlugin::new([640, 360]));
+        let camera = app.world_mut().spawn(CameraBundle::default());
+        let unrelated = app.world_mut().spawn(CameraBundle::default());
+        let mut track = CameraTrack::default();
+        assert!(track.push(CameraKeyframe {
+            tick: 0,
+            pose: prism_camera::CameraPose::default(),
+            focal_length_mm: 40.0,
+            exposure: Exposure::ManualEv100 { ev100: 2.0 },
+            event_key: 0,
+        }));
+        let player = CameraTrackPlayerComponent::new(track.into_validated().unwrap(), 0);
+        app.world_mut().insert(camera, player);
+        app.update();
+
+        let expected = app
+            .world()
+            .resource::<PublishedCameraRenderParamsSet>()
+            .get(camera)
+            .unwrap()
+            .clone();
+        let mut render = World::new();
+        extract_surface_views(app.world_mut(), &mut render);
+        let extracted = render.resource::<ExtractedSurfaceViews>();
+        assert_eq!(extracted.render_params(camera), Some(&expected));
+        assert!(extracted.render_params(unrelated).is_none());
+        assert!(extracted.get(camera).is_some());
+        assert!(extracted.get(unrelated).is_some());
     }
 
     #[cfg(feature = "view-lod")]

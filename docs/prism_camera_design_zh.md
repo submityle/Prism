@@ -1284,9 +1284,9 @@ renderer 接线期间，`CameraIntent`/`ViewData` 的每视图可见性元数据
 
 ### 28.1 相机动画片段与过场（`cutscene`）
 
-`CameraTrack::into_validated` 在载入边界检查版本、非空/有界关键帧、严格递增 tick、有限姿态/焦距/曝光，然后消费原始轨迹生成不可变 `ValidatedCameraTrack`；fixed-tick 热路径不重复 O(keyframe 数) 全量校验，单帧采样为二分查找 O(log n) 加常量插值。时间切线按相邻 tick 间距归一并限制焦距段内过冲。轨迹结束按 `CutsceneEndPolicy::{Hold,BlendToPrevious,Deactivate}` 处理，采样状态显式返回 `active` 与 `handoff_to_previous`。无效资产在载入时拒绝，调用方保持当前 VCam。事件由 `CameraTrackEventCursor` 按 `(last_tick, tick]` 通过二分定位输出 occurrence，复杂度 O(log n + k)，ECS 播放器复用缓冲；prism_camera_ecs/cutscene 在 Rig 后、view publication 前应用位姿并发布带 entity generation、playback epoch、关键帧 tick 和 payload key 的 `CameraTrackEvent`。暂停不推进，seek 新建 epoch 并重置基线，同 payload 的不同关键帧独立派发。ECS `Events` 可由 `EventCursor` 消费，但没有 ack/重试/持久化，因此 exactly-once 仅指 occurrence 身份与游标产出。焦距、曝光和 PostStack 到逐视图 renderer 的消费仍未接入。
+`CameraTrack::into_validated` 在载入边界检查版本、非空/有界关键帧、严格递增 tick、有限姿态/焦距/曝光，然后消费原始轨迹生成不可变 `ValidatedCameraTrack`；fixed-tick 热路径不重复 O(keyframe 数) 全量校验，单帧采样为二分查找 O(log n) 加常量插值。时间切线按相邻 tick 间距归一并限制焦距段内过冲。轨迹结束按 `CutsceneEndPolicy::{Hold,BlendToPrevious,Deactivate}` 处理，采样状态显式返回 `active` 与 `handoff_to_previous`。无效资产在载入时拒绝，调用方保持当前 VCam。事件由 `CameraTrackEventCursor` 按 `(last_tick, tick]` 通过二分定位输出 occurrence，复杂度 O(log n + k)，ECS 播放器复用缓冲；`prism_camera_ecs/cutscene` 在 Rig 后、view publication 前应用位姿并发布带 entity generation、playback epoch、关键帧 tick 和 payload key 的 `CameraTrackEvent`。暂停不推进，seek 新建 epoch 并重置基线，同 payload 的不同关键帧独立派发。ECS `Events` 可由 `EventCursor` 消费，但没有 ack/重试/持久化，因此 exactly-once 仅指 occurrence 身份与游标产出。焦距、曝光、PostStack 与可选快门在 `PublishedCameraRenderParamsSet` 中按完整 generational entity 发布；renderer extraction 将快照写入独立、按实体索引的参数表，保持常用 `SurfaceView: Copy` 轻量布局。renderer 的逐视图参数提取已接通，但这些参数仍未被实际 DoF、运动模糊、曝光适应或 PostStack pass 消费，故不构成电影效果端到端完成。
 
-验证：`CARGO_PROFILE_TEST_DEBUG=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 cargo test -p prism_camera_ecs --no-default-features --features cutscene --lib --offline` 通过 9 项；默认 Rig/Director 组合下相同命令去掉 `--no-default-features` 后通过 15 项；相机核心 cutscene 专项测试通过 29 项。
+验证：`CARGO_PROFILE_TEST_DEBUG=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 cargo test -p prism_camera_ecs --no-default-features --features cutscene --lib --offline` 当前通过 10 项；本切片新增快门角度与帧率同时非法时的状态、光圈回退及曝光时间回归测试。renderer `cargo check -p prism_render_app --features camera-cutscene --lib --offline` 通过，`cargo test -p prism_render_app --features camera-cutscene --lib surface_views --offline` 通过 29 项，其中包含 full-entity 参数抽取配对测试。
 
 ### 28.2 焦点追踪与自动对焦（`autofocus`）
 
@@ -1298,7 +1298,7 @@ renderer 接线期间，`CameraIntent`/`ViewData` 的每视图可见性元数据
 
 ### 28.4 可变光圈/快门与运动模糊一致性（`shutter`）
 
-快门角转换为曝光时间 `shutter_s = shutter_angle / (360 * fps)`；运动模糊消费的帧内速度比例为 `clamp(shutter_angle, 0, 360) / 360`（180° 对应 0.5），不再乘一次 fps，因为输入速度已经是每帧位移。`ShutterSnapshot::motion_blur_exposure_fraction()` 对手工构造的非有限值返回 0，并将有限值限制到 `[0, 1]`。曝光模型、DoF 光圈和运动模糊速度应来自同一个快门快照。fps 为零或非有限时曝光秒数回退固定 1/60 s 并记录 `InvalidFrameRate`，避免除零和跨帧漂移。此处实现和验证的是相机侧单位明确的快照；快照到渲染 pass 的跨 ECS 提取与逐视图参数消费仍需由集成路径和测试证明。
+快门角转换为曝光时间 `shutter_s = shutter_angle / (360 * fps)`；运动模糊消费的帧内速度比例为 `clamp(shutter_angle, 0, 360) / 360`（180° 对应 0.5），不再乘一次 fps，因为输入速度已经是每帧位移。`ShutterSnapshot::motion_blur_exposure_fraction()` 对手工构造的非有限值返回 0，并将有限值限制到 `[0, 1]`。曝光模型、DoF 光圈和运动模糊速度应来自同一个快门快照。fps 为零或非有限时曝光秒数回退固定 1/60 s 并记录 `InvalidFrameRate`，避免除零和跨帧漂移。ECS 发布端使用 `CameraFrame` 的有效帧率构造快照，renderer extraction 已按完整实体将其与焦距、曝光和 PostStack 一同发布；实际曝光、景深及运动模糊 pass 尚未读取该参数表，因此当前完成边界是单位一致的逐视图数据传递，不是最终画面效果。
 
 ### 28.5 多视图共享剔除与几何复用（`view_batch`）
 

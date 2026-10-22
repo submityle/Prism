@@ -86,6 +86,10 @@ pub struct CameraTrackPlayerComponent {
     pub playback_epoch: u64,
     /// Whether the component currently drives the owning camera pose.
     pub playing: bool,
+    /// Latest deterministic lens/exposure result sampled by the Cutscene set.
+    pub sample: prism_camera::CameraTrackSample,
+    /// Optional shutter intent consumed by the next immutable render snapshot.
+    pub shutter: Option<prism_camera::Shutter>,
     cursor: prism_camera::CameraTrackEventCursor,
     occurrences: Vec<prism_camera::CameraTrackEventOccurrence>,
 }
@@ -95,11 +99,22 @@ impl CameraTrackPlayerComponent {
     /// Creates a player at an initial tick without dispatching earlier events.
     #[must_use]
     pub fn new(track: prism_camera::ValidatedCameraTrack, tick: u64) -> Self {
+        let fallback = prism_camera::CameraTrackSample {
+            pose: CameraPose::default(),
+            focal_length_mm: 50.0,
+            exposure: prism_camera::Exposure::default(),
+            event_key: None,
+            active: true,
+            handoff_to_previous: false,
+        };
+        let sample = track.sample_state(tick, fallback);
         Self {
             track,
             tick,
             playback_epoch: 0,
             playing: true,
+            sample,
+            shutter: None,
             cursor: prism_camera::CameraTrackEventCursor::default(),
             occurrences: Vec::new(),
         }
@@ -641,6 +656,40 @@ pub struct PublishedView {
 pub struct PublishedViews {
     views: Vec<PublishedView>,
     last_valid: Vec<PublishedView>,
+}
+
+/// Optional per-view cinematic parameters sampled before camera publication.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PublishedCameraRenderParams {
+    /// Generational camera entity owning these parameters.
+    pub entity: Entity,
+    /// Physical focal length in millimetres; `None` keeps the camera lens intent.
+    pub focal_length_mm: Option<f32>,
+    /// Authored exposure result; `None` keeps the camera intent exposure.
+    pub exposure: Option<prism_camera::Exposure>,
+    /// Sanitized shutter result for consistent exposure and motion-blur units.
+    #[cfg(feature = "cutscene")]
+    pub shutter: Option<prism_camera::ShutterSnapshot>,
+    /// Normalized authored post stack; `None` selects the renderer default stack.
+    pub post_stack: Option<prism_camera::PostStack>,
+}
+
+/// Same-frame immutable camera render parameters, sorted by `(order, entity)`.
+#[derive(Debug, Default, Resource)]
+pub struct PublishedCameraRenderParamsSet {
+    entries: Vec<PublishedCameraRenderParams>,
+}
+
+impl PublishedCameraRenderParamsSet {
+    /// Iterates per-camera parameters in deterministic publication order.
+    pub fn iter(&self) -> impl Iterator<Item = &PublishedCameraRenderParams> {
+        self.entries.iter()
+    }
+
+    /// Finds a parameter snapshot by full generational camera entity.
+    pub fn get(&self, entity: Entity) -> Option<&PublishedCameraRenderParams> {
+        self.entries.iter().find(|entry| entry.entity == entity)
+    }
 }
 
 impl PublishedViews {
@@ -1320,6 +1369,7 @@ impl Plugin for CameraPlugin {
         app.insert_resource(CameraFrame::new(self.target_size))
             .init_resource::<CameraViewRegistry>()
             .init_resource::<PublishedViews>()
+            .init_resource::<PublishedCameraRenderParamsSet>()
             .init_resource::<CameraDiagnostics>()
             .init_resource::<CameraPerformanceBudget>()
             .init_resource::<CameraDeriveScratch>();
@@ -1384,6 +1434,10 @@ impl Plugin for CameraPlugin {
                 .after(CameraSystemSet::Rig)
                 .before(CameraSystemSet::Publication),
         );
+        app.add_systems(
+            PostUpdate,
+            publish_camera_render_params.after(CameraSystemSet::Publication),
+        );
         #[cfg(feature = "composition_aid")]
         app.add_systems(
             PostUpdate,
@@ -1416,6 +1470,7 @@ fn apply_camera_tracks(
             handoff_to_previous: false,
         };
         let sample = player.track.sample_state(player.tick, fallback);
+        player.sample = sample;
         if sample.active && !sample.handoff_to_previous {
             pose.0 = sample.pose;
         }
@@ -1437,6 +1492,71 @@ fn apply_camera_tracks(
                 });
             }
         }
+    }
+}
+
+#[cfg(feature = "cutscene")]
+fn publish_camera_render_params(
+    players: Query<(Entity, &CameraTrackPlayerComponent)>,
+    published: Res<PublishedViews>,
+    frame: Res<CameraFrame>,
+    mut output: ResMut<PublishedCameraRenderParamsSet>,
+) {
+    output.entries.clear();
+    for view in published.iter() {
+        let Ok((_, player)) = players.get(view.entity) else {
+            continue;
+        };
+        if !player.playing {
+            continue;
+        }
+        let sample = player.sample;
+        if !sample.active || sample.handoff_to_previous {
+            continue;
+        }
+        let post_stack = player.track.post_stack().cloned();
+        let shutter = player.shutter.map(|intent| {
+            let valid_angle = intent.shutter_angle_deg.is_finite();
+            let valid_fps = intent.fps.is_finite() && intent.fps > 0.0;
+            let safe = prism_camera::Shutter {
+                shutter_angle_deg: if valid_angle {
+                    intent.shutter_angle_deg.clamp(0.0, 360.0)
+                } else {
+                    prism_camera::Shutter::default().shutter_angle_deg
+                },
+                fps: frame.effective_frame_rate(),
+                aperture_f_stop: if intent.aperture_f_stop.is_finite()
+                    && intent.aperture_f_stop > 0.0
+                {
+                    intent.aperture_f_stop
+                } else {
+                    prism_camera::Shutter::default().aperture_f_stop
+                },
+            };
+            let status = match (valid_fps, valid_angle) {
+                (true, true) => prism_camera::ShutterRuntimeStatus::Applied,
+                (false, true) => prism_camera::ShutterRuntimeStatus::InvalidFrameRate,
+                (true, false) => prism_camera::ShutterRuntimeStatus::InvalidAngle,
+                (false, false) => prism_camera::ShutterRuntimeStatus::InvalidFrameRateAndAngle,
+            };
+            prism_camera::ShutterSnapshot {
+                shutter_angle_deg: safe.shutter_angle_deg,
+                fps: safe.fps,
+                exposure_seconds: safe.exposure_seconds(),
+                exposure: safe.physical_exposure(100.0),
+                aperture_f_stop: safe.aperture_f_stop,
+                motion_blur_exposure_fraction: safe.shutter_angle_deg / 360.0,
+                status,
+            }
+        });
+        output.entries.push(PublishedCameraRenderParams {
+            entity: view.entity,
+            focal_length_mm: Some(sample.focal_length_mm),
+            exposure: Some(sample.exposure),
+            #[cfg(feature = "cutscene")]
+            shutter,
+            post_stack,
+        });
     }
 }
 
@@ -2092,4 +2212,93 @@ mod tests {
             1
         );
     }
+}
+
+#[cfg(feature = "cutscene")]
+#[test]
+fn cutscene_lens_exposure_post_stack_and_shutter_publish_with_the_view() {
+    let mut app = App::new();
+    app.add_plugins(CameraPlugin::new([64, 64]));
+    let camera = app.world_mut().spawn(CameraBundle::default());
+    let mut track = prism_camera::CameraTrack::default();
+    let mut stack = prism_camera::PostStack::default();
+    stack.push(prism_camera::PostNode::Vignette(0.2)).unwrap();
+    stack.normalize().unwrap();
+    track.post_stack = Some(stack.clone());
+    assert!(track.push(prism_camera::CameraKeyframe {
+        tick: 0,
+        pose: CameraPose::default(),
+        focal_length_mm: 35.0,
+        exposure: prism_camera::Exposure::ManualEv100 { ev100: 1.5 },
+        event_key: 0,
+    }));
+    let mut player = CameraTrackPlayerComponent::new(track.into_validated().unwrap(), 0);
+    player.shutter = Some(prism_camera::Shutter {
+        shutter_angle_deg: 180.0,
+        fps: 30.0,
+        aperture_f_stop: 4.0,
+    });
+    app.world_mut().insert(camera, player);
+    app.update();
+
+    let params = app
+        .world()
+        .resource::<PublishedCameraRenderParamsSet>()
+        .get(camera)
+        .expect("active published camera has a cinematic parameter snapshot");
+    assert_eq!(params.focal_length_mm, Some(35.0));
+    assert_eq!(
+        params.exposure,
+        Some(prism_camera::Exposure::ManualEv100 { ev100: 1.5 })
+    );
+    assert_eq!(params.post_stack.as_ref(), Some(&stack));
+    let shutter = params
+        .shutter
+        .expect("shutter is converted for the render adapter");
+    assert_eq!(
+        shutter.fps, 60.0,
+        "render tick uses the authoritative frame rate"
+    );
+    assert_eq!(shutter.motion_blur_exposure_fraction(), 0.5);
+    assert!((shutter.exposure_seconds - 1.0 / 120.0).abs() < 1.0e-7);
+}
+
+#[cfg(feature = "cutscene")]
+#[test]
+fn cutscene_shutter_snapshot_reports_invalid_authored_rate_and_sanitizes_aperture() {
+    let mut app = App::new();
+    app.add_plugins(CameraPlugin::new([64, 64]));
+    let camera = app.world_mut().spawn(CameraBundle::default());
+    let mut track = prism_camera::CameraTrack::default();
+    assert!(track.push(prism_camera::CameraKeyframe {
+        tick: 0,
+        pose: CameraPose::default(),
+        focal_length_mm: 50.0,
+        exposure: prism_camera::Exposure::default(),
+        event_key: 0,
+    }));
+    let mut player = CameraTrackPlayerComponent::new(track.into_validated().unwrap(), 0);
+    player.shutter = Some(prism_camera::Shutter {
+        shutter_angle_deg: f32::NAN,
+        fps: 0.0,
+        aperture_f_stop: f32::NAN,
+    });
+    app.world_mut().insert(camera, player);
+    app.update();
+
+    let shutter = app
+        .world()
+        .resource::<PublishedCameraRenderParamsSet>()
+        .get(camera)
+        .unwrap()
+        .shutter
+        .unwrap();
+    assert_eq!(
+        shutter.status,
+        prism_camera::ShutterRuntimeStatus::InvalidFrameRateAndAngle
+    );
+    assert_eq!(shutter.shutter_angle_deg, 180.0);
+    assert_eq!(shutter.fps, 60.0);
+    assert_eq!(shutter.aperture_f_stop, 2.8);
+    assert_eq!(shutter.exposure_seconds, 1.0 / 120.0);
 }

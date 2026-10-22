@@ -61,6 +61,8 @@ pub use advanced_runtime::{
     AdvancedRuntimeInput, AdvancedRuntimeLimits, AdvancedRuntimeOutput, CapacityField, FixedTick,
     RuntimeDegradation,
 };
+#[cfg(feature = "shutter")]
+pub use advanced_runtime::{ShutterRuntimeStatus, ShutterSnapshot};
 pub use error::{CameraError, CameraErrorCode};
 pub use frustum::{extract_frustum, Frustum, HalfSpace};
 pub use gpu::{
