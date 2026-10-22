@@ -544,3 +544,11 @@ CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 cargo test -p prism_world_gpu --fe
 13 个文件、8.0 MiB，实际按包清理同样移除这 13 个文件；未清理其他 package 或共享
 target 根目录。GPU feature 路径不再因本轮磁盘问题待测；独立 clean-HEAD workspace
 feature 冲突和整个 World 产品接线等边界仍保持未完成。
+
+同日另以 `WGPU_BACKEND=metal PRISM_REQUIRE_GPU=1` 在沙盒外运行
+`cargo test -p prism_world_gpu --features placement_rhi --test placement_rhi --offline -j 1 -- --nocapture --test-threads=1`：
+Apple M2 / Metal / IntegratedGpu 提供真实 adapter，**14 passed、0 failed、0 ignored**。
+沙盒内先行运行的同一测试虽成功编译，但因该环境没有可用 adapter，14 项均在设备获取
+阶段失败；它们没有执行测试逻辑，不计为 GPU 回归失败或通过。沙盒外重跑后全套实卡
+测试通过。随后 `cargo clean -p prism_world_gpu --dry-run` 精确显示 13 个文件、26.5 MiB，
+并已按包清除；其他 package、共享 target 根目录和 agent 文件未动。
