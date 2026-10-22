@@ -1324,6 +1324,10 @@ renderer 接线期间，`CameraIntent`/`ViewData` 的每视图可见性元数据
 
 2026-10-23 LOD extent 规则验证增量：新增 `surface_view_render_extent` 纯函数，统一定义输出尺寸按有限 `[0,1]` 比例 `ceil(output × scale)`、每轴至少 1 像素以及非法 scale 回退 1.0 的确定性规则，并为满分辨率、半分辨率、极小比例和非法输入增加单测。验证命令 `CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 cargo test -p prism_render_app --lib surface_view_targets::tests::surface_view_extent_uses_stable_ceil_and_safe_scale_fallback --offline`：1 passed。该结果只验证纯尺寸策略，不验证 target 分配或图像采样。helper 尚未接入 target 分配：当前相机附件仍是输出 viewport 尺寸，避免在不可缩放的 transfer-copy 合成存在时产生源/目的范围不匹配。完成 LOD 仍需把缩放尺寸接入目标缓存，并增加保持 scene-linear HDR、限定 viewport/scissor、Load 保留目标外像素的 raster 上采样合成。`history_frames` 仍未接入 TAA 资源生命周期。
 
+2026-10-23 LOD 渲染闭环增量：`surface_view_render_extent` 已接入窗口与离屏目标的实际 target key，缩放后的 scene-linear HDR 私有附件通过 raster upscale pass 写入输出；上采样使用手动四点 `textureLoad`，不依赖 `Rgba16Float` 线性过滤能力，输出 attachment 使用 `Load`，并以相机 viewport 设置 viewport/scissor，保证矩形外像素不被覆盖。upscaler 与 target 绑定同一设备代际，只有完成回调/`wait_idle` 和依赖驱逐成功后才显式销毁；`quarantined_upscaler_waits_for_its_generation_completion_before_destroy` 通过。`surface_views` 定向测试 28 项通过，RenderApp `cargo check --lib --offline` 通过。该切片已提交为 `84b94f8f2`。
+
+本切片尚未宣称物理 GPU 视觉完成：当前环境在 `WgpuInstance` 中未发现可用物理 adapter，因而没有真实设备的缩放像素 readback 证据；Null backend 只验证图计划和资源生命周期。`history_frames` 到 TAA 历史资源保留，以及任意纹理目标 owner/输出生命周期，仍需对应消费者接线和集成验收。
+
 ### 28.10 构图辅助与安全框（`composition_aid`）
 
 三分法、黄金比、标题/动作安全框作为只读、归一化视口坐标线段从 `ViewData` 计算；`CompositionGuide::compute_into` 支持调用方复用输出缓冲，至多写出 8 条线段，viewport 为零时清空输出并返回错误计数。`prism_camera_ecs/composition_aid` feature 将配置组件和 `PublishedCompositionGizmos` 输出接入 `PostUpdate`，只为当帧已发布且携带 guide 配置的相机生成数据；inactive 或离开 published 集合的相机不会遗留旧帧 gizmo。无效更新是否保留上帧 view 由 `PublishedViews` 的 retain-last-valid 策略决定，构图系统只消费该帧实际发布的快照。输出遵循 published view 的稳定 `(order, entity)` 顺序。ECS 缓冲按索引复用，稳态相机数不变时不重分配 entry/line 缓冲；guide 变化只覆盖缓冲内容。
