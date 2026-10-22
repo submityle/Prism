@@ -229,15 +229,16 @@ fn prism_look_at_rh(eye: vec3<f32>, focus: vec3<f32>, up: vec3<f32>) -> mat4x4<f
 /// [`Quat`](crate::Quat) operators and methods: `prism_quat_mul` is the
 /// Hamilton product (`a * b` = apply `b` then `a`, matching `impl Mul for Quat`
 /// and the scalar backend), `prism_quat_conj` negates the vector part,
-/// `prism_quat_inverse` equals the conjugate for the unit quaternions this API
-/// targets, and `prism_quat_normalize` rescales to unit length.
+/// `prism_quat_inverse` computes the true inverse for any non-zero quaternion
+/// (and therefore equals the conjugate for unit quaternions), while
+/// `prism_quat_normalize` rescales to unit length.
 /// `prism_quat_op(op, a, b)` dispatches `mul`/`conj`/`inverse`/`normalize` for a
 /// batched kernel (the second operand is ignored by the unary ops). This is the
 /// GPU side of animation blending, IK, and physics-frame quaternion math; the
 /// dual-quaternion skinning fragment ([`WGSL_DUAL_QUAT_SKIN`]) reuses
 /// `prism_quat_mul`/`prism_quat_conj` from here so the product lives in exactly
-/// one place. Mul/normalize are float arithmetic (fast-math tolerance);
-/// conjugate/inverse are exact sign flips.
+/// one place. Mul/normalize/inverse are float arithmetic (fast-math
+/// tolerance); conjugate is an exact sign flip.
 pub const WGSL_QUAT_ALG: &str = "\
 fn prism_quat_mul(a: vec4<f32>, b: vec4<f32>) -> vec4<f32> {\n\
     return vec4<f32>(\n\
@@ -253,12 +254,44 @@ fn prism_quat_conj(q: vec4<f32>) -> vec4<f32> {\n\
 }\n\
 \n\
 fn prism_quat_inverse(q: vec4<f32>) -> vec4<f32> {\n\
-    return prism_quat_conj(q);\n\
+    // Match `Quat::inverse`: scale before forming the squared length so tiny\n\
+    // and large, otherwise invertible quaternions do not underflow/overflow\n\
+    // in the intermediate dot product.\n\
+    let m = max(max(abs(q.x), abs(q.y)), max(abs(q.z), abs(q.w)));\n\
+    let m_bits = bitcast<u32>(m);\n\
+    let m_is_finite = (m_bits & 0x7f800000u) != 0x7f800000u;\n\
+    if (m > 0.0 && m_is_finite) {\n\
+        let x = q.x / m;\n\
+        let y = q.y / m;\n\
+        let z = q.z / m;\n\
+        let w = q.w / m;\n\
+        let inv_scaled_len_sq = 1.0 / (x * x + y * y + z * z + w * w);\n\
+        return vec4<f32>(\n\
+            (-x * inv_scaled_len_sq) / m,\n\
+            (-y * inv_scaled_len_sq) / m,\n\
+            (-z * inv_scaled_len_sq) / m,\n\
+            (w * inv_scaled_len_sq) / m\n\
+        );\n\
+    }\n\
+    let inv_len_sq = 1.0 / dot(q, q);\n\
+    return vec4<f32>(-q.x * inv_len_sq, -q.y * inv_len_sq, -q.z * inv_len_sq, q.w * inv_len_sq);\n\
 }\n\
 \n\
 fn prism_quat_normalize(q: vec4<f32>) -> vec4<f32> {\n\
-    let inv = 1.0 / sqrt(dot(q, q));\n\
-    return q * inv;\n\
+    let len = sqrt(dot(q, q));\n\
+    let len_bits = bitcast<u32>(len);\n\
+    let len_is_finite = (len_bits & 0x7f800000u) != 0x7f800000u;\n\
+    if (len_is_finite && len > 0.0) {\n\
+        return q / len;\n\
+    }\n\
+    let m = max(max(abs(q.x), abs(q.y)), max(abs(q.z), abs(q.w)));\n\
+    let m_bits = bitcast<u32>(m);\n\
+    let m_is_finite = (m_bits & 0x7f800000u) != 0x7f800000u;\n\
+    if (m > 0.0 && m_is_finite) {\n\
+        let scaled = q / m;\n\
+        return scaled / sqrt(dot(scaled, scaled));\n\
+    }\n\
+    return q / len;\n\
 }\n\
 \n\
 fn prism_quat_op(op: u32, a: vec4<f32>, b: vec4<f32>) -> vec4<f32> {\n\

@@ -5,9 +5,11 @@
 //! the single-sourced
 //! [`WGSL_QUAT_ALG`](prism_math::shader_mirror::WGSL_QUAT_ALG) fragment.
 //!
-//! The conjugate and inverse are exact sign flips (compared strictly); the
-//! Hamilton product and normalization are float arithmetic and agree within a
-//! small absolute+relative epsilon (Metal fast-math). It skips gracefully when
+//! The conjugate is an exact sign flip. Inverse uses the true quaternion
+//! inverse for arbitrary non-zero inputs and therefore only equals conjugate
+//! for unit quaternions. The Hamilton product and normalization are float
+//! arithmetic and agree within a small absolute+relative epsilon (Metal
+//! fast-math). It skips gracefully when
 //! no adapter is available so it still passes on a device-less CI image while
 //! running the full dispatch on a real `GPU`.
 
@@ -41,15 +43,17 @@ fn close_slice(gpu: [f32; 4], cpu: [f32; 4]) -> bool {
     })
 }
 
-/// A spread of quaternions: identity, a rotation, a general unit quat, a
-/// non-unit quat (for normalize), and an axis-angle-ish quat.
-fn quats() -> [Quat; 5] {
+/// A spread of quaternions: identity, rotations, non-unit values, and scales
+/// that exercise the stable inverse path without overflowing its result.
+fn quats() -> [Quat; 7] {
     [
         Quat::from_xyzw(0.0, 0.0, 0.0, 1.0),
         Quat::from_xyzw(0.5, 0.5, 0.5, 0.5),
         Quat::from_xyzw(-0.2, 0.4, -0.6, 0.8),
         Quat::from_xyzw(1.0, 2.0, 3.0, 4.0),
         Quat::from_xyzw(0.0, FRAC_1_SQRT_2, 0.0, FRAC_1_SQRT_2),
+        Quat::from_xyzw(1.0e-20, -2.0e-20, 3.0e-20, 4.0e-20),
+        Quat::from_xyzw(1.0e20, -2.0e20, 3.0e20, 4.0e20),
     ]
 }
 
@@ -97,10 +101,21 @@ fn quat_conjugate_inverse_match_cpu() {
     assert_eq!(conj.len(), qs.len());
     assert_eq!(inv.len(), qs.len());
     for (i, q) in qs.iter().enumerate() {
-        // Conjugate/inverse are exact sign flips: strict equality.
+        // Conjugate is an exact sign flip; inverse follows the CPU's true
+        // inverse semantics for arbitrary non-zero quaternions.
         assert_eq!(conj[i], q.conjugate().to_array(), "conj[{i}]");
-        assert_eq!(inv[i], q.inverse().to_array(), "inv[{i}]");
-        assert_eq!(conj[i], inv[i], "conj == inv[{i}]");
+        let inverse = q.inverse().to_array();
+        assert!(
+            close_slice(inv[i], inverse),
+            "inv[{i}] gpu={:?} cpu={inverse:?}",
+            inv[i]
+        );
+        if q.length_squared() == 1.0 {
+            assert!(
+                close_slice(conj[i], inv[i]),
+                "unit conjugate == inverse[{i}]"
+            );
+        }
     }
 }
 

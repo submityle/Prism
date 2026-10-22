@@ -1,5 +1,9 @@
 # Prism Math 顶级次世代 AAA 级 SIMD 数学内核设计方案
 
+> **GPU quaternion 数值边界修正（2026-10-23）**：`WGSL_QUAT_ALG::prism_quat_inverse` 与 CPU `Quat::inverse` 对齐，对有限、非零 quaternion 计算真实逆元；以最大分量缩放避免模长平方中间溢出/下溢。`prism_quat_normalize` 同步采用 CPU 的稳定缩放回退，避免极大/极小向量归一化溢出/下溢。`conjugate` 仍为精确符号翻转；`inverse == conjugate` 仅在单位 quaternion 时成立。GPU parity 对 inverse/normalize 使用 fast-math 容差，回归输入包括一般非单位值及 `1e-20`/`1e20` 量级；零与非有限输入不属于此处 GPU parity 的承诺范围。此前“逆=共轭”“共轭/逆精确符号翻转”及其真机全绿记录不适用于任意非单位 quaternion；修复后的验证结果以本次记录为准。
+
+> **本次验证结果（2026-10-23）**：Apple M2 / Metal，`PRISM_MATH_GPU_REQUIRED=1 PRISM_MATH_GPU_DIAGNOSTICS=1 cargo test --offline --locked -p prism_math_gpu --tests` 全套通过，包含 50 项库测试及所有 integration tests（0 failed、严格 GPU gate，无 adapter 跳过）；quaternion algebra 定向测试 4/4，WGSL parse integration tests 2/2。使用独立 `/private/tmp/prism-math-gpu-strict-20261023` target，debug info/incremental disabled；已在验证后清理该 target。该结果证明此 crate 当前测试集在本机 Metal 上通过，不代表其他 GPU 后端或整个 Prism GPU 系统完成。
+
 > 面向 Prism（脱离 Bevy 后的独立引擎）的 **向量 / 矩阵 / 四元数 / 仿射变换 / 几何原语 / 曲线插值 / 颜色 / 随机 / 噪声 + 三精度路径（f32 / f64 大世界 / fixed 定点确定性）** 数学门面设计。它是 `bevy_math`（及其底层 glam）的自研替代，是**所有其他 Prism crate 共同依赖的 L0 最底层地基**——ECS 存什么、transform 怎么传播、物理怎么积分、渲染怎么投影，最终都落到这里的数、这里的运算、这里的精度与确定性约定上。
 > 借形态不抄码。借鉴：
 > - **门面形态 + SIMD 封装**：glam（`Vec3`/`Vec3A`/`Mat4`/`Quat`/`Affine3A`，SSE/NEON/WASM 后端 + 标量回退）
