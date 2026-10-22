@@ -181,9 +181,11 @@ fn a_reused_buffer_keeps_capacity_for_a_later_growth() {
     let (device, queue) = null_device();
     let id = AssetId::new(prism_asset::AssetIndex::from_parts(0, 1));
     let first = RenderMesh::prepare(&quad(6, false), id, &device, &queue, None).expect("prepares");
+    assert_eq!(first.buffers.vertex_sizes, vec![6 * 12]);
     let smaller = RenderMesh::prepare(&quad(3, false), id, &device, &queue, Some(&first))
         .expect("smaller mesh reuses");
     assert_eq!(smaller.buffers.vertices, first.buffers.vertices);
+    assert_eq!(smaller.buffers.vertex_sizes, vec![3 * 12]);
     assert_eq!(smaller.vertex_capacity, first.vertex_capacity);
     assert_eq!(smaller.vertex_capacity, vec![6 * 12]);
 
