@@ -77,6 +77,11 @@ harness = false
 required-features = ["terrain_scatter"]
 
 [[bench]]
+name = "planet_placement"
+harness = false
+required-features = ["terrain_scatter"]
+
+[[bench]]
 name = "placement_rhi_reuse"
 harness = false
 required-features = ["placement_rhi"]

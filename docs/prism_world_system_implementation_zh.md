@@ -477,3 +477,7 @@ ABI 闭环边界：现有 80-byte record 以 3 个 f32 word 承载位置，内�
 2026-10-22 生产行星 placement 改为 U256 Q84 cube-sphere 整数方向、quarter-mm radial ties-away-from-zero 投影和 116-byte record ABI；xyz 为 signed-i128 frame-local 毫米，identity 前六 word 保持不变，deletion shader 仍按 identity 前缀比较。Apple M2/Metal planet_placement_gpu 3/3 passed，包含此前失败的 frame-local case（≤1 mm）、非零高度/阈值 parity 与全 tile dispatch；planet deletion 1/1 passed；U256/reference/六面方向实卡 suite 14/14 passed。此验收覆盖当前指定合法合同与 fixtures，不是所有数学输入的形式证明。
 
 ABI/性能边界仍需继续审计：新 record 每候选增加 36 bytes，容量预算/编译检查已更新；Q84 每候选包含 3 次 U256 乘法平方、scaled isqrt、3 次除法和投影乘法，目前尚无大候选数 GPU timestamp/submit-wait benchmark。产品 RHI consumer 当前是否已有真实 decode/renderer 接线仍未证明；不得把当前 GPU kernel parity 描述为 planetary renderer 产品链路完成。
+
+2026-10-22 行星 placement 实机性能基准补测：新增 `cargo bench -p prism_world_gpu --features terrain_scatter --bench planet_placement --offline`，Apple M2/Metal IntegratedGpu、release、warmup 8 + 64 samples；请求准备/height upload 与最终 indirect readback 不计入计时，分别记录 encode 和 submit+wait 的主机墙钟 P50/P95/P99。256 / 4,096 / 62,500 candidates 的逻辑 buffer 分别为 1,079,512 / 1,540,312 / 8,548,792 bytes；submit+wait 分别为 5,129/6,453/6,724 µs、5,549/7,536/9,853 µs、48,705/57,239/67,684 µs。encode P50 分别为 9.167/9.125/9.167 µs；62,500 档 encode P99 为 157.792 µs，存在显著尾部。实际 indirect count 与候选数一致。此为该主机/driver/fixture 的 submit+wait 墙钟，不是 GPU timestamp；结果显示 Q84 当前不满足 62.5k 候选的实时帧内预算，需要性能优化后重测，不能视为产品级吞吐验收。
+
+同轮修正 `GpuPlanetPlacement::new` 的逻辑资源注释：record 116 bytes + compact index 4 bytes，故候选项合计 120 bytes；再加高度样本、params/status/indirect 后为 `120*max(capacity,1)+16*max(samples,1)+216`。
