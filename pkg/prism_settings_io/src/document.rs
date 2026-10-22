@@ -705,6 +705,96 @@ mod tests {
     }
 
     #[test]
+    fn nested_table_and_map_enum_values_roundtrip_and_migrate_by_stable_name() {
+        let low = EnumOption::from_stable_name("Low");
+        let high = EnumOption::from_stable_name("High");
+        let nested_shape = ValueShape::table(BTreeMap::from([(
+            "quality".to_owned(),
+            ValueShape::scalar(ValueType::Enum),
+        )]));
+        let mut table_definition = SettingDef::new(
+            "render.profile",
+            "render",
+            Value::Table(BTreeMap::from([(
+                "quality".to_owned(),
+                Value::Enum(low.id),
+            )])),
+        )
+        .with_shape(nested_shape);
+        table_definition.enum_options = vec![low.clone(), high.clone()];
+
+        let mut map_definition = SettingDef::new(
+            "render.quality_by_device",
+            "render",
+            Value::Table(BTreeMap::from([("gpu".to_owned(), Value::Enum(low.id))])),
+        )
+        .with_shape(ValueShape::map(ValueShape::scalar(ValueType::Enum), 8));
+        map_definition.enum_options = vec![low.clone(), high.clone()];
+
+        let mut builder = RegistryBuilder::new();
+        builder.namespace("render", "test").unwrap();
+        builder.register(table_definition);
+        builder.register(map_definition);
+        let registry = builder.finish().unwrap();
+
+        let mut document = SettingsDocument::new(1);
+        document.insert(
+            "render.profile",
+            Value::Table(BTreeMap::from([(
+                "quality".to_owned(),
+                Value::Enum(high.id),
+            )])),
+        );
+        document.insert(
+            "render.quality_by_device",
+            Value::Table(BTreeMap::from([
+                ("cpu".to_owned(), Value::Enum(low.id)),
+                ("gpu".to_owned(), Value::Enum(high.id)),
+            ])),
+        );
+        document.bind_registry(&registry);
+
+        let encoded = document.encode().unwrap();
+        assert!(encoded.contains("value = \"High\""));
+        let decoded = SettingsDocument::decode_with_registry(&encoded, Some(&registry)).unwrap();
+        assert_eq!(decoded, document);
+
+        let migration_input: toml::Value = toml::from_str(&encoded).unwrap();
+        let decoded_table = decode_value_for_migration(
+            migration_input
+                .get("values")
+                .and_then(toml::Value::as_table)
+                .and_then(|values| values.get("render.profile"))
+                .unwrap(),
+            "render.profile",
+        )
+        .unwrap();
+        assert_eq!(
+            decoded_table,
+            Value::Table(BTreeMap::from([(
+                "quality".to_owned(),
+                Value::Enum(high.id)
+            )]))
+        );
+        let decoded_map = decode_value_for_migration(
+            migration_input
+                .get("values")
+                .and_then(toml::Value::as_table)
+                .and_then(|values| values.get("render.quality_by_device"))
+                .unwrap(),
+            "render.quality_by_device",
+        )
+        .unwrap();
+        assert_eq!(
+            decoded_map,
+            Value::Table(BTreeMap::from([
+                ("cpu".to_owned(), Value::Enum(low.id)),
+                ("gpu".to_owned(), Value::Enum(high.id)),
+            ]))
+        );
+    }
+
+    #[test]
     fn stable_enum_values_can_be_converted_during_schema_migration() {
         let old_option = EnumOption::from_stable_name("render::Quality::High");
         let new_option = EnumOption::from_stable_name("render::Quality::Ultra");

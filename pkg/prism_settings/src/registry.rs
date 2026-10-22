@@ -16,6 +16,8 @@ pub enum SettingsError {
     DuplicateKey(SettingKey),
     /// Input source named a key absent from the frozen schema.
     UnknownKey(SettingKey),
+    /// A required setting had no accepted non-default source value.
+    MissingRequiredSetting(SettingKey),
     /// Invalid key syntax or length.
     InvalidKey(SettingKey),
     /// Namespace is missing or does not own the key prefix.
@@ -138,6 +140,9 @@ impl fmt::Display for SettingsError {
         match self {
             Self::DuplicateKey(k) => write!(f, "duplicate setting key or alias: {k}"),
             Self::UnknownKey(k) => write!(f, "unknown setting key: {k}"),
+            Self::MissingRequiredSetting(k) => {
+                write!(f, "required setting `{k}` has no accepted source value")
+            }
             Self::InvalidKey(k) => write!(f, "invalid setting key: {k}"),
             Self::NamespaceOwnership { key, namespace } => {
                 write!(f, "namespace `{namespace}` does not own `{key}`")
@@ -779,8 +784,76 @@ fn validate_shape(
                 validate_shape(def, key, value_shape, value)?;
             }
         }
+        crate::ValueShape::Set { element, max_len } => {
+            let Value::Array(values) = value else {
+                return Err(SettingsError::TypeMismatch {
+                    key: key.clone(),
+                    expected: ValueType::Array,
+                    actual: value.value_type(),
+                });
+            };
+            if values.len() > *max_len {
+                return Err(SettingsError::TooLong { key: key.clone() });
+            }
+            for value in values.iter_mut() {
+                validate_shape(def, key, element, value)?;
+            }
+            values.sort_by(canonical_value_cmp);
+            if values.windows(2).any(|pair| pair[0] == pair[1]) {
+                return Err(SettingsError::InvalidDefinition {
+                    key: key.clone(),
+                    reason: String::from("set values must be unique"),
+                });
+            }
+        }
     }
     Ok(())
+}
+
+/// Total, version-independent order for canonical setting values.
+///
+/// This is used only to normalize set values. It deliberately compares the
+/// actual value tree (including float bit-order semantics), never Debug or
+/// locale-dependent text.
+pub fn canonical_value_cmp(left: &Value, right: &Value) -> core::cmp::Ordering {
+    use core::cmp::Ordering;
+    let rank = |value: &Value| match value {
+        Value::Bool(_) => 0,
+        Value::Int(_) => 1,
+        Value::Float(_) => 2,
+        Value::String(_) => 3,
+        Value::Enum(_) => 4,
+        Value::Array(_) => 5,
+        Value::Table(_) => 6,
+        Value::Bytes(_) => 7,
+        Value::Secret(_) => 8,
+    };
+    match rank(left).cmp(&rank(right)) {
+        Ordering::Equal => match (left, right) {
+            (Value::Bool(a), Value::Bool(b)) => a.cmp(b),
+            (Value::Int(a), Value::Int(b)) => a.cmp(b),
+            (Value::Float(a), Value::Float(b)) => a.total_cmp(b),
+            (Value::String(a), Value::String(b)) => a.cmp(b),
+            (Value::Enum(a), Value::Enum(b)) => a.cmp(b),
+            (Value::Array(a), Value::Array(b)) => a
+                .iter()
+                .map(|value| value)
+                .zip(b)
+                .map(|(a, b)| canonical_value_cmp(a, b))
+                .find(|ordering| *ordering != Ordering::Equal)
+                .unwrap_or_else(|| a.len().cmp(&b.len())),
+            (Value::Table(a), Value::Table(b)) => a
+                .iter()
+                .zip(b)
+                .map(|((ak, av), (bk, bv))| ak.cmp(bk).then_with(|| canonical_value_cmp(av, bv)))
+                .find(|ordering| *ordering != Ordering::Equal)
+                .unwrap_or_else(|| a.len().cmp(&b.len())),
+            (Value::Bytes(a), Value::Bytes(b)) => a.cmp(b),
+            (Value::Secret(a), Value::Secret(b)) => a.cmp(b),
+            _ => Ordering::Equal,
+        },
+        ordering => ordering,
+    }
 }
 
 fn shape_numeric_leaf_type(shape: &crate::ValueShape) -> Option<ValueType> {
@@ -788,7 +861,8 @@ fn shape_numeric_leaf_type(shape: &crate::ValueShape) -> Option<ValueType> {
         crate::ValueShape::Scalar(ValueType::Int | ValueType::Float) => Some(shape.value_type()),
         crate::ValueShape::Scalar(_) => None,
         crate::ValueShape::Array { element, .. }
-        | crate::ValueShape::Map { value: element, .. } => shape_numeric_leaf_type(element),
+        | crate::ValueShape::Map { value: element, .. }
+        | crate::ValueShape::Set { element, .. } => shape_numeric_leaf_type(element),
         crate::ValueShape::Table(_) => None,
     }
 }
@@ -801,14 +875,37 @@ fn shape_contains_type(shape: &crate::ValueShape, expected: ValueType) -> bool {
         crate::ValueShape::Table(fields) => fields
             .values()
             .any(|shape| shape_contains_type(shape, expected)),
+        crate::ValueShape::Set { element, .. } => shape_contains_type(element, expected),
     }
 }
 
 #[cfg(test)]
 mod recursive_leaf_validation_tests {
-    use alloc::vec;
     use super::*;
     use crate::EnumOption;
+    use alloc::vec;
+
+    #[test]
+    fn set_values_use_stable_total_order_and_reject_duplicates() {
+        let mut definition = SettingDef::new("render.members", "render", Value::Array(vec![]));
+        definition.set_shape(crate::ValueShape::set(
+            crate::ValueShape::scalar(ValueType::Int),
+            8,
+        ));
+        let mut builder = crate::RegistryBuilder::new();
+        builder.namespace("render", "test").unwrap();
+        builder.register(definition);
+        let registry = builder.finish().unwrap();
+        let id = registry.id(&"render.members".into()).unwrap();
+        assert_eq!(
+            registry.validate_value(id, Value::Array(vec![Value::Int(7), Value::Int(-2)])),
+            Ok(Value::Array(vec![Value::Int(-2), Value::Int(7)]))
+        );
+        assert!(matches!(
+            registry.validate_value(id, Value::Array(vec![Value::Int(3), Value::Int(3)])),
+            Err(SettingsError::InvalidDefinition { reason, .. }) if reason.contains("unique")
+        ));
+    }
 
     #[test]
     fn nested_float_and_enum_leaves_obey_scalar_validation() {

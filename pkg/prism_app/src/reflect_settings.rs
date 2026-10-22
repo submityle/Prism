@@ -9,7 +9,8 @@ use prism_reflect::{
     GetTypeRegistration, Map, Reflect, ReflectRef, Struct, TypeInfo, Typed, VariantKind,
 };
 use prism_settings::{
-    Constraints, RegistryBuilder, SettingDef, SettingsError, SettingsRegistry, Value, ValueShape,
+    canonical_value_cmp, Constraints, RegistryBuilder, SettingDef, SettingsError, SettingsRegistry,
+    Value, ValueShape,
 };
 use std::{collections::BTreeMap, error::Error, fmt};
 
@@ -221,6 +222,53 @@ where
                     descriptor.type_name(),
                 )?
             }
+            ReflectRef::Set(set) => {
+                let TypeInfo::Set(info) = reflected.type_info() else {
+                    return Err(ReflectSettingsError::UnsupportedValue {
+                        field: name.to_owned(),
+                        type_name: descriptor.type_name().to_owned(),
+                    });
+                };
+                let mut values = set
+                    .iter_reflect()
+                    .map(|value| from_reflect_value(value, 1, name, descriptor.type_name()))
+                    .collect::<Result<Vec<_>, _>>()?;
+                values.sort_by(|left, right| canonical_value_cmp(&left.0, &right.0));
+                if values.len() > MAX_REFLECT_SETTING_COLLECTION_LEN
+                    || values.windows(2).any(|pair| pair[0].0 == pair[1].0)
+                {
+                    return Err(ReflectSettingsError::UnsupportedValue {
+                        field: name.to_owned(),
+                        type_name: descriptor.type_name().to_owned(),
+                    });
+                }
+                let element_shape = values
+                    .first()
+                    .map(|item| item.1.clone())
+                    .or_else(|| {
+                        scalar_value_type_from_name(info.value_type_name()).map(ValueShape::scalar)
+                    })
+                    .ok_or_else(|| ReflectSettingsError::UnsupportedValue {
+                        field: name.to_owned(),
+                        type_name: descriptor.type_name().to_owned(),
+                    })?;
+                if values.iter().any(|item| item.1 != element_shape) {
+                    return Err(ReflectSettingsError::UnsupportedValue {
+                        field: name.to_owned(),
+                        type_name: descriptor.type_name().to_owned(),
+                    });
+                }
+                let options = values
+                    .iter()
+                    .find(|item| !item.2.is_empty())
+                    .map(|item| item.2.clone())
+                    .unwrap_or_default();
+                (
+                    Value::Array(values.into_iter().map(|item| item.0).collect()),
+                    ValueShape::set(element_shape, MAX_REFLECT_SETTING_COLLECTION_LEN),
+                    options,
+                )
+            }
             _ => {
                 let value = from_reflect_scalar(reflected).ok_or_else(|| {
                     ReflectSettingsError::UnsupportedValue {
@@ -260,11 +308,23 @@ where
             definition.description = meta.docs().map(str::to_owned);
             definition.category = meta.category().map(str::to_owned);
             definition.flags.read_only = meta.is_readonly();
+            definition.flags.required = meta.is_required();
             if let Some((min, max)) = meta.range() {
                 definition.constraints = Constraints {
                     min: Some(min),
                     max: Some(max),
                     ..Constraints::default()
+                };
+            }
+            if let Some(AttributeValue::Text(policy)) = meta.custom("on_violation") {
+                definition.on_violation = match policy.as_str() {
+                    "clamp" => prism_settings::ViolationPolicy::Clamp,
+                    "reject" => prism_settings::ViolationPolicy::Reject,
+                    _ => {
+                        return Err(ReflectSettingsError::MetadataTypeMismatch {
+                            field: name.to_owned(),
+                        })
+                    }
                 };
             }
         }
@@ -669,7 +729,7 @@ fn scalar_value_type_from_name(type_name: &str) -> Option<prism_settings::ValueT
 mod tests {
     use super::*;
     use prism_reflect::Reflect;
-    use std::collections::{BTreeMap, HashMap};
+    use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
     #[derive(Reflect, Default)]
     struct RenderConfig {
@@ -1057,5 +1117,48 @@ mod tests {
             derive_settings_registry::<EmptyNestedMap>("maps", "prism_app"),
             Err(ReflectSettingsError::UnsupportedValue { field, .. }) if field == "values"
         ));
+    }
+
+    #[test]
+    fn derives_sets_with_value_order_not_hash_iteration_or_debug_text() {
+        #[derive(Reflect)]
+        struct SetSettings {
+            #[reflect(setting)]
+            ordered: BTreeSet<i32>,
+            #[reflect(setting)]
+            hashed: HashSet<String>,
+        }
+        impl Default for SetSettings {
+            fn default() -> Self {
+                Self {
+                    ordered: [9, 2, 4].into_iter().collect(),
+                    hashed: ["z".to_owned(), "a".to_owned()].into_iter().collect(),
+                }
+            }
+        }
+        let schema = derive_settings_registry::<SetSettings>("sets", "prism_app").unwrap();
+        let (_, ordered) = schema.get(&"sets.ordered".into()).unwrap();
+        assert_eq!(
+            ordered.default,
+            Value::Array(vec![Value::Int(2), Value::Int(4), Value::Int(9)])
+        );
+        assert!(matches!(ordered.shape, ValueShape::Set { .. }));
+        let (_, hashed) = schema.get(&"sets.hashed".into()).unwrap();
+        assert_eq!(
+            hashed.default,
+            Value::Array(vec![Value::String("a".into()), Value::String("z".into())])
+        );
+    }
+
+    #[test]
+    fn derives_required_flag_from_reflect_metadata() {
+        #[derive(Reflect, Default)]
+        struct RequiredSetting {
+            #[reflect(setting, required)]
+            value: i32,
+        }
+        let schema = derive_settings_registry::<RequiredSetting>("required", "prism_app").unwrap();
+        let (_, definition) = schema.get(&"required.value".into()).unwrap();
+        assert!(definition.flags.required);
     }
 }

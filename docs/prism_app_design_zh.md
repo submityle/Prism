@@ -519,6 +519,10 @@ App 配置分层（§14）与 cvar（§24.6）的读写/校验**委托 `prism_re
 
 截至 2026-10-23 的补充（覆盖本节前文相反的集合状态描述）：canonical schema 支持有界递归数组、fixed table 与 string-keyed map shape（最大嵌套深度 32）；反射派生支持递归 `Vec<T>` / `[T; N]`、named struct、`HashMap` / `BTreeMap` string-key map、unit-enum 叶子与数组 metadata 默认值。TOML registry codec 和 migration 解码支持递归数组/table/map 中的稳定 enum 名称，watcher candidate 仍以 canonical schema 校验最终值。数组与 map 叶子约束递归校验类型、有限浮点、enum allow-list 与 numeric min/max Clamp/Reject；fixed table 校验精确字段集。空嵌套集合缺少可观测子元素时不能安全推导其递归 shape，当前 fail-closed；带数据 enum、Reflect Set、嵌套集合 metadata 默认值和完整字段策略映射等仍不支持，不应视为完整 reflected type 映射。
 
+后续增量（2026-10-23）：named struct 与 string-keyed homogeneous map 已进入 Reflect 派生实现，非字符串 map key 拒绝；`HashMap` 默认值会规范化为按键排序的 canonical table。TOML codec 与 migration decode 已增加 fixed table/map 内嵌 unit-enum 的稳定名称 round-trip 测试。该进展不覆盖带数据 enum、Reflect Set 或嵌套集合 metadata 默认值。
+
+状态更正（2026-10-23，本轮源码更新）：上段及 22 节中“Reflect Set 未完成”的旧描述已过时。当前 `ValueShape::Set`、Reflect `HashSet`/`BTreeSet` 派生、canonical value-tree 排序和唯一性校验、`required` resolver 拒绝均已加入代码；app 全量单测此前首跑发现 Set 非空默认值测试构造错误，修复后需重跑确认。`on_violation` 仍只读取 custom metadata，其可声明 API 与 Clamp/Reject 行为尚无专项验收。Preview 确认持久化失败的回滚状态测试亦发现测试 persistence 未实现 rollback 能力，fixture 已补齐，尚待重跑。故本段记为“实现已进入、验收未完成”，不等于这些新能力已整体完成。
+
 ### 25.4 多世界各持独立 time 时间域
 
 App 多世界（§24.9）与 ECS 多 World（ECS §16）协同时，每个 World 持**独立时间上下文**（time §24.8）：主世界、编辑器预览世界、服务器子应用世界互不干扰（一个暂停不冻结另一个），经子应用隔离。

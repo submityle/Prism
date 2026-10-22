@@ -253,6 +253,9 @@ impl<'a> Resolver<'a> {
                     source_id: source.source_id.clone(),
                 }));
             } else {
+                if def.flags.required {
+                    errors.push(SettingsError::MissingRequiredSetting(def.key.clone()));
+                }
                 values.push(Some(def.default.clone()));
                 resolved_sources.push(Some(ValueSource {
                     layer: LayerKind::EngineDefault,

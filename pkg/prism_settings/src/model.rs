@@ -172,6 +172,13 @@ pub enum ValueShape {
         /// Maximum number of entries.
         max_len: usize,
     },
+    /// A bounded set stored as a canonically sorted array with unique values.
+    Set {
+        /// Shape required for every set member.
+        element: Box<ValueShape>,
+        /// Maximum number of members.
+        max_len: usize,
+    },
 }
 
 impl ValueShape {
@@ -218,6 +225,15 @@ impl ValueShape {
         }
     }
 
+    /// Creates a bounded set shape. The serialized value is a sorted array.
+    #[must_use]
+    pub fn set(element: Self, max_len: usize) -> Self {
+        Self::Set {
+            element: Box::new(element),
+            max_len,
+        }
+    }
+
     /// Infers a conservative exact shape from a non-container value tree.
     ///
     /// An empty array has no element type and therefore returns `None`; its
@@ -253,6 +269,7 @@ impl ValueShape {
             Self::Scalar(value_type) => *value_type,
             Self::Array { .. } => ValueType::Array,
             Self::Table(_) | Self::Map { .. } => ValueType::Table,
+            Self::Set { .. } => ValueType::Array,
         }
     }
 
@@ -277,6 +294,7 @@ impl ValueShape {
                 .values()
                 .all(|shape| shape.is_valid_at_depth(depth + 1)),
             Self::Map { value, .. } => value.is_valid_at_depth(depth + 1),
+            Self::Set { element, .. } => element.is_valid_at_depth(depth + 1),
         }
     }
 
@@ -322,14 +340,26 @@ impl ValueShape {
                     .all(|value| shape.matches_at_depth(value, depth + 1)),
                 _ => false,
             },
+            Self::Set {
+                element: shape,
+                max_len,
+            } => match value {
+                Value::Array(values) if values.len() <= *max_len => {
+                    values.windows(2).all(|pair| pair[0] != pair[1])
+                        && values
+                            .iter()
+                            .all(|value| shape.matches_at_depth(value, depth + 1))
+                }
+                _ => false,
+            },
         }
     }
 }
 
 #[cfg(test)]
 mod value_shape_tests {
-    use alloc::vec;
     use super::*;
+    use alloc::vec;
 
     #[test]
     fn nested_shapes_are_bounded_and_match_fails_closed_past_the_limit() {
@@ -565,6 +595,8 @@ pub struct DefFlags {
     pub read_only: bool,
     /// Project scope may override the setting.
     pub project_overridable: bool,
+    /// A non-default value must be supplied by at least one accepted source.
+    pub required: bool,
 }
 
 /// Scalar and collection limits validated by the core.

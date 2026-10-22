@@ -398,6 +398,21 @@ impl SettingsTransactionManager {
                 Err(SettingsTransactionManagerError::UnexpectedOutcome(outcome))
             }
             Err(error) => {
+                if self
+                    .pending
+                    .as_ref()
+                    .is_some_and(|pending| pending.tx_id == tx_id)
+                    && self
+                        .pending
+                        .as_ref()
+                        .and_then(|pending| pending.transaction.terminal_outcome().ok().flatten())
+                        == Some(TxOutcome::RolledBack)
+                {
+                    self.pending = None;
+                    self.status = SettingsTransactionStatus::Idle;
+                    self.expiry_error = None;
+                    return Err(SettingsTransactionManagerError::Pipeline(error));
+                }
                 self.status = SettingsTransactionStatus::RecoveryRequired {
                     tx_id: tx_id.to_owned(),
                     reason: error.to_string(),
@@ -438,6 +453,21 @@ impl SettingsTransactionManager {
                 Err(SettingsTransactionManagerError::UnexpectedOutcome(outcome))
             }
             Err(error) => {
+                if self
+                    .pending
+                    .as_ref()
+                    .is_some_and(|pending| pending.tx_id == tx_id)
+                    && self
+                        .pending
+                        .as_ref()
+                        .and_then(|pending| pending.transaction.terminal_outcome().ok().flatten())
+                        == Some(TxOutcome::RolledBack)
+                {
+                    self.pending = None;
+                    self.status = SettingsTransactionStatus::Idle;
+                    self.expiry_error = None;
+                    return Err(SettingsTransactionManagerError::Pipeline(error));
+                }
                 self.status = SettingsTransactionStatus::RecoveryRequired {
                     tx_id: tx_id.to_owned(),
                     reason: error.to_string(),
@@ -547,6 +577,70 @@ mod tests {
 
         fn rollback(&mut self) -> Result<(), String> {
             Ok(())
+        }
+    }
+
+    struct FailOncePersistence {
+        fail_next: bool,
+        attempts: usize,
+        rollbacks: usize,
+        finalizations: usize,
+    }
+
+    impl SettingsPersistence for FailOncePersistence {
+        fn persist(
+            &mut self,
+            _document: &SettingsDocument,
+            generation: u64,
+        ) -> Result<u64, String> {
+            self.attempts += 1;
+            if std::mem::take(&mut self.fail_next) {
+                Err("injected one-shot persistence failure".to_owned())
+            } else {
+                Ok(generation)
+            }
+        }
+
+        fn rollback(&mut self) -> Result<(), String> {
+            self.rollbacks += 1;
+            Ok(())
+        }
+
+        fn finalize(&mut self) -> Result<(), String> {
+            self.finalizations += 1;
+            Ok(())
+        }
+    }
+
+    struct CountingApplier {
+        applied: std::sync::Arc<AtomicUsize>,
+        compensated: std::sync::Arc<AtomicUsize>,
+    }
+
+    impl SettingsApplier for CountingApplier {
+        fn group(&self) -> &str {
+            "Display"
+        }
+
+        fn order(&self) -> i32 {
+            0
+        }
+
+        fn apply_op(&mut self, _op: &ApplyOp) -> OpOutcome {
+            self.applied.fetch_add(1, Ordering::SeqCst);
+            OpOutcome::Applied {
+                effect_handle: Some("display-handle".to_owned()),
+                result_digest: 1,
+            }
+        }
+
+        fn probe(&self, _op: &ApplyOp) -> EffectState {
+            EffectState::Unknown
+        }
+
+        fn compensate(&mut self, _op: &ApplyOp) -> CompensateOutcome {
+            self.compensated.fetch_add(1, Ordering::SeqCst);
+            CompensateOutcome::Done { verified: true }
         }
     }
 
@@ -835,6 +929,85 @@ mod tests {
             PipelineOutcome::Committed
         );
         assert_eq!(manager.status(), &SettingsTransactionStatus::Idle);
+    }
+
+    #[test]
+    fn failed_preview_confirmation_that_rolls_back_clears_manager_state() {
+        let registry = registry();
+        let directory = TempDir::new();
+        let mut manager = SettingsTransactionManager::new();
+        let mut runtime = runtime(&registry);
+        let before = runtime.snapshot().clone();
+        let mut persistence = FailOncePersistence {
+            fail_next: true,
+            attempts: 0,
+            rollbacks: 0,
+            finalizations: 0,
+        };
+        let applied = std::sync::Arc::new(AtomicUsize::new(0));
+        let compensated = std::sync::Arc::new(AtomicUsize::new(0));
+        let mut applier = CountingApplier {
+            applied: applied.clone(),
+            compensated: compensated.clone(),
+        };
+        let mut appliers: Vec<&mut dyn SettingsApplier> = vec![&mut applier];
+        let tx = IoTransaction::new(SettingsTransactionSpec {
+            tx_id: "confirm-persist-failure".to_owned(),
+            journal_path: directory.0.join("confirm-persist-failure.journal"),
+            mode: TxMode::Preview,
+            before_hash: 0,
+            before_snapshot: before.clone(),
+            candidate: candidate(&registry, 0.75),
+            plan: reversible_display_plan(),
+            snapshot_gen: 0,
+            last_confirmed: None,
+        });
+
+        assert_eq!(
+            manager
+                .begin(
+                    "confirm-persist-failure",
+                    tx,
+                    Duration::from_secs(30),
+                    &mut runtime,
+                    &mut persistence,
+                    &mut appliers,
+                )
+                .unwrap(),
+            PipelineOutcome::PendingConfirmation
+        );
+        assert_eq!(applied.load(Ordering::SeqCst), 1);
+        assert_ne!(runtime.snapshot(), &before);
+
+        assert!(matches!(
+            manager.confirm(
+                "confirm-persist-failure",
+                &mut runtime,
+                &mut persistence,
+                &mut appliers,
+            ),
+            Err(SettingsTransactionManagerError::Pipeline(_))
+        ));
+        assert_eq!(manager.status(), &SettingsTransactionStatus::Idle);
+        assert_eq!(runtime.snapshot(), &before);
+        assert_eq!(applied.load(Ordering::SeqCst), 1);
+        assert_eq!(compensated.load(Ordering::SeqCst), 1);
+        assert_eq!(persistence.attempts, 1);
+        assert_eq!(persistence.rollbacks, 1);
+        assert_eq!(persistence.finalizations, 1);
+
+        assert!(matches!(
+            manager.confirm(
+                "confirm-persist-failure",
+                &mut runtime,
+                &mut persistence,
+                &mut appliers,
+            ),
+            Err(SettingsTransactionManagerError::NoPendingPreview)
+        ));
+        assert_eq!(applied.load(Ordering::SeqCst), 1);
+        assert_eq!(compensated.load(Ordering::SeqCst), 1);
+        assert_eq!(persistence.attempts, 1);
     }
 
     #[test]

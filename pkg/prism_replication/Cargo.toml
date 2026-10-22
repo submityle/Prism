@@ -15,11 +15,12 @@ prism_reflect = { path = "../prism_reflect", optional = true }
 prism_scene = { path = "../prism_scene", default-features = false, optional = true }
 prism_world = { path = "../prism_world", optional = true }
 ring = { version = "0.17.14", optional = true }
+getrandom = { version = "0.4", optional = true }
 
 [features]
 default = []
 # `std`-only pieces: the shared in-memory transport and the `prism_app` seam.
-std = []
+std = ["dep:getrandom"]
 # The `prism_app` integration (§25.2): a `ReplicationPlugin` that drives a client
 # session from the app's frame loop. Pulls in `prism_app` (std).
 app = ["std", "dep:prism_app", "prism_app/determinism", "dep:prism_ecs"]
