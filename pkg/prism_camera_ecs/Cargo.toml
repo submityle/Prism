@@ -8,17 +8,19 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [dependencies]
-prism_app = { path = "../prism_app" }
+prism_app = { path = "../prism_app", default-features = false, features = ["std"] }
 prism_camera = { path = "../prism_camera" }
 prism_ecs = { path = "../prism_ecs" }
 prism_math = { path = "../prism_math" }
 prism_render_architecture = { path = "../prism_render_architecture" }
 prism_camera_rig = { path = "../prism_camera_rig", default-features = false, optional = true }
+prism_tasks = { path = "../prism_tasks", optional = true }
 
 [features]
-default = ["director", "rig"]
+default = ["director", "rig", "parallel"]
 director = ["dep:prism_camera_rig", "prism_camera_rig/director", "prism_camera_rig/determinism"]
 rig = ["dep:prism_camera_rig", "prism_camera_rig/rig", "prism_camera_rig/determinism"]
+parallel = ["dep:prism_tasks", "prism_app/multi_thread"]
 
 [[bench]]
 name = "multiview_contracts"

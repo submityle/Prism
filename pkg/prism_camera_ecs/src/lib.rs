@@ -13,6 +13,8 @@ extern crate alloc;
 #[cfg(feature = "rig")]
 use alloc::boxed::Box;
 use alloc::vec::Vec;
+#[cfg(feature = "parallel")]
+use prism_app::TaskPoolResource;
 use prism_app::{App, EngineClocks, Plugin, PostUpdate};
 use prism_camera::{
     derive_view, publish_view, CameraError, CameraIntent, CameraPose, ViewData, ViewHandle,
@@ -466,6 +468,141 @@ pub struct CameraDiagnostics {
     errors: Vec<CameraViewError>,
 }
 
+/// Rolling camera-stage cost monitor with hysteretic non-primary rig shedding.
+/// The sample ring is fixed-size so observing a frame never grows storage.
+#[derive(Clone, Debug, Resource)]
+pub struct CameraPerformanceBudget {
+    samples_ns: [u64; Self::SAMPLE_CAPACITY],
+    sample_count: usize,
+    next_sample: usize,
+    over_budget_frames: u32,
+    under_budget_frames: u32,
+    degraded: bool,
+    last_p99_ns: u64,
+    last_view_count: usize,
+    frame_started: std::time::Instant,
+}
+
+impl CameraPerformanceBudget {
+    const SAMPLE_CAPACITY: usize = 64;
+    const SHED_AFTER_FRAMES: u32 = 3;
+    const RECOVER_AFTER_FRAMES: u32 = 120;
+    // These guard the complete ECS camera stage; pure derive_view latency has
+    // separate microbenchmark targets and is not observable from this system.
+
+    /// Whether non-primary camera rigs are currently suppressed.
+    #[must_use]
+    pub const fn is_degraded(&self) -> bool {
+        self.degraded
+    }
+
+    /// Rolling P99 camera-stage duration in nanoseconds.
+    #[must_use]
+    pub const fn p99_ns(&self) -> u64 {
+        self.last_p99_ns
+    }
+
+    /// Active camera count from the latest completed frame.
+    #[must_use]
+    pub const fn view_count(&self) -> usize {
+        self.last_view_count
+    }
+
+    fn stage_budget_ns(view_count: usize) -> u64 {
+        match view_count {
+            0 => u64::MAX,
+            1 => 50_000,
+            2..=16 => 50_000 + ((view_count - 1) as u64 * 50_000).div_ceil(15),
+            count => (100_000_u64.saturating_mul(count as u64)).div_ceil(16),
+        }
+    }
+
+    fn observe(&mut self, elapsed_ns: u64, view_count: usize) {
+        if view_count != self.last_view_count {
+            self.samples_ns.fill(0);
+            self.sample_count = 0;
+            self.next_sample = 0;
+            self.over_budget_frames = 0;
+            self.under_budget_frames = 0;
+        }
+        self.samples_ns[self.next_sample] = elapsed_ns;
+        self.next_sample = (self.next_sample + 1) % Self::SAMPLE_CAPACITY;
+        self.sample_count = (self.sample_count + 1).min(Self::SAMPLE_CAPACITY);
+        self.last_view_count = view_count;
+
+        let mut ordered = self.samples_ns;
+        ordered[..self.sample_count].sort_unstable();
+        let p99_index = ((self.sample_count - 1) * 99).div_ceil(100);
+        self.last_p99_ns = ordered[p99_index];
+        let over_budget = self.last_p99_ns > Self::stage_budget_ns(view_count);
+        if over_budget {
+            self.over_budget_frames = self.over_budget_frames.saturating_add(1);
+            self.under_budget_frames = 0;
+            if self.over_budget_frames >= Self::SHED_AFTER_FRAMES {
+                self.degraded = true;
+            }
+        } else {
+            self.under_budget_frames = self.under_budget_frames.saturating_add(1);
+            self.over_budget_frames = 0;
+            if self.under_budget_frames >= Self::RECOVER_AFTER_FRAMES {
+                self.degraded = false;
+            }
+        }
+    }
+
+    fn begin_frame(&mut self) {
+        self.frame_started = std::time::Instant::now();
+    }
+
+    fn finish_frame(&mut self, view_count: usize) {
+        self.observe(
+            self.frame_started
+                .elapsed()
+                .as_nanos()
+                .min(u64::MAX as u128) as u64,
+            view_count,
+        );
+    }
+}
+
+impl Default for CameraPerformanceBudget {
+    fn default() -> Self {
+        Self {
+            samples_ns: [0; Self::SAMPLE_CAPACITY],
+            sample_count: 0,
+            next_sample: 0,
+            over_budget_frames: 0,
+            under_budget_frames: 0,
+            degraded: false,
+            last_p99_ns: 0,
+            last_view_count: 0,
+            frame_started: std::time::Instant::now(),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct CameraDeriveInput {
+    entity: Entity,
+    intent: CameraIntent,
+    pose: CameraPose,
+    history: ViewHistory,
+}
+
+struct CameraDeriveOutput {
+    entity: Entity,
+    intent: CameraIntent,
+    history: ViewHistory,
+    result: Result<ViewData, CameraError>,
+}
+
+/// Reused input/output storage for the camera publication hot path.
+#[derive(Default, Resource)]
+struct CameraDeriveScratch {
+    inputs: Vec<CameraDeriveInput>,
+    outputs: Vec<Option<CameraDeriveOutput>>,
+}
+
 impl CameraDiagnostics {
     /// Returns all derivation errors reported during the latest publication.
     #[must_use]
@@ -549,8 +686,13 @@ pub fn apply_camera_controls(
 /// Resolves the pure body/aim path and applies optional deterministic camera
 /// noise and one-shot impulse data before publication.
 pub fn apply_camera_rigs(
-    mut cameras: Query<(&mut CameraPoseComponent, &mut CameraRigComponent)>,
+    mut cameras: Query<(
+        &CameraIntentComponent,
+        &mut CameraPoseComponent,
+        &mut CameraRigComponent,
+    )>,
     frame: Res<CameraFrame>,
+    budget: Res<CameraPerformanceBudget>,
     scene_query: Option<Res<CameraSceneQueryResource>>,
     target_query: Option<Res<CameraTargetQueryResource>>,
 ) {
@@ -567,7 +709,12 @@ pub fn apply_camera_rigs(
             .as_deref()
             .map(|query| query as &dyn rig::TargetQuery)
     });
-    for (mut pose, mut rig_state) in cameras.iter_mut() {
+    for (intent, mut pose, mut rig_state) in cameras.iter_mut() {
+        if budget.is_degraded()
+            && intent.0.kind != prism_render_architecture::view_family::ViewKind::Main
+        {
+            continue;
+        }
         let dt = if rig_state.dt_seconds.is_finite() {
             rig_state.dt_seconds.max(0.0)
         } else {
@@ -613,14 +760,19 @@ pub fn apply_camera_rigs(
 
 /// Captures the engine clock before director, controller, and rig systems run.
 /// Every camera stage in one PostUpdate therefore observes the same delta.
-pub fn prepare_camera_frame(mut frame: ResMut<CameraFrame>, clocks: Option<Res<EngineClocks>>) {
+pub fn prepare_camera_frame(
+    mut frame: ResMut<CameraFrame>,
+    mut budget: ResMut<CameraPerformanceBudget>,
+    clocks: Option<Res<EngineClocks>>,
+) {
+    budget.begin_frame();
     if let Some(clocks) = clocks {
         frame.dt_seconds = clocks.delta_secs();
     }
 }
 
 /// Derives and publishes every camera entity for the current frame.
-pub fn publish_camera_views(
+pub(crate) fn publish_camera_views(
     mut cameras: Query<(
         Entity,
         &CameraIntentComponent,
@@ -631,11 +783,14 @@ pub fn publish_camera_views(
     mut registry: ResMut<CameraViewRegistry>,
     mut published: ResMut<PublishedViews>,
     mut diagnostics: ResMut<CameraDiagnostics>,
+    mut budget: ResMut<CameraPerformanceBudget>,
+    mut scratch: ResMut<CameraDeriveScratch>,
+    #[cfg(feature = "parallel")] task_pool: Option<Res<TaskPoolResource>>,
 ) {
     registry.begin_frame();
     published.clear();
     diagnostics.clear();
-    let mut active_entities = Vec::new();
+    scratch.inputs.clear();
 
     let frame_number = frame.frame;
     let target_size = frame.target_size;
@@ -646,13 +801,96 @@ pub fn publish_camera_views(
             published.remove(entity);
             continue;
         }
-        active_entities.push(entity);
+        scratch.inputs.push(CameraDeriveInput {
+            entity,
+            intent: intent.0,
+            pose: pose.0,
+            history: history.0,
+        });
+    }
+    scratch.inputs.sort_unstable_by_key(|input| input.entity);
+    let input_count = scratch.inputs.len();
+    scratch.outputs.resize_with(input_count, || None);
+    for output in &mut scratch.outputs[..input_count] {
+        *output = None;
+    }
+    let CameraDeriveScratch { inputs, outputs } = &mut *scratch;
 
-        match derive_view(intent.0, pose.0, frame_number, target_size, &mut history.0) {
+    #[cfg(feature = "parallel")]
+    if let Some(task_pool) = task_pool.filter(|_| input_count >= 8) {
+        task_pool
+            .0
+            .par_iter_mut(&mut outputs[..input_count])
+            .with_min_len(4)
+            .enumerate_for_each(|index, output| {
+                let input = inputs[index];
+                let mut history = input.history;
+                let result = derive_view(
+                    input.intent,
+                    input.pose,
+                    frame_number,
+                    target_size,
+                    &mut history,
+                );
+                *output = Some(CameraDeriveOutput {
+                    entity: input.entity,
+                    intent: input.intent,
+                    history,
+                    result,
+                });
+            });
+    } else {
+        for (input, output) in inputs.iter().zip(outputs.iter_mut()) {
+            let mut history = input.history;
+            let result = derive_view(
+                input.intent,
+                input.pose,
+                frame_number,
+                target_size,
+                &mut history,
+            );
+            *output = Some(CameraDeriveOutput {
+                entity: input.entity,
+                intent: input.intent,
+                history,
+                result,
+            });
+        }
+    }
+    #[cfg(not(feature = "parallel"))]
+    for (input, output) in inputs.iter().zip(outputs.iter_mut()) {
+        let mut history = input.history;
+        let result = derive_view(
+            input.intent,
+            input.pose,
+            frame_number,
+            target_size,
+            &mut history,
+        );
+        *output = Some(CameraDeriveOutput {
+            entity: input.entity,
+            intent: input.intent,
+            history,
+            result,
+        });
+    }
+    for output in &mut outputs[..input_count] {
+        let CameraDeriveOutput {
+            entity,
+            intent,
+            mut history,
+            result,
+        } = output.take().expect("every camera derive slot is filled");
+        if let Ok((_, _, _, mut history_component)) = cameras.get_mut(entity) {
+            history_component.0 = history;
+        }
+        match result {
             Ok(mut data) => {
-                if let Err(error) = registry.publish(entity, &mut data, intent.0.importance) {
+                if let Err(error) = registry.publish(entity, &mut data, intent.importance) {
                     diagnostics.push(CameraViewError { entity, error });
-                    history.0.clear();
+                    if let Ok((_, _, _, mut history_component)) = cameras.get_mut(entity) {
+                        history_component.0.clear();
+                    }
                     registry.remove(entity);
                 } else {
                     let view = PublishedView { entity, data };
@@ -665,17 +903,23 @@ pub fn publish_camera_views(
                 if let Some(mut previous) = published.previous(entity) {
                     previous.data.status = prism_camera::ViewStatus::Invalid(error.code);
                     if registry
-                        .publish(entity, &mut previous.data, intent.0.importance)
+                        .publish(entity, &mut previous.data, intent.importance)
                         .is_ok()
                     {
                         published.push(previous);
                     } else {
-                        history.0.clear();
+                        history.clear();
+                        if let Ok((_, _, _, mut history_component)) = cameras.get_mut(entity) {
+                            history_component.0.clear();
+                        }
                         registry.remove(entity);
                         published.remove(entity);
                     }
                 } else {
-                    history.0.clear();
+                    history.clear();
+                    if let Ok((_, _, _, mut history_component)) = cameras.get_mut(entity) {
+                        history_component.0.clear();
+                    }
                     registry.remove(entity);
                     published.remove(entity);
                 }
@@ -684,9 +928,12 @@ pub fn publish_camera_views(
     }
     registry.finish_frame();
     published.sort_deterministically();
-    published
-        .last_valid
-        .retain(|previous| active_entities.contains(&previous.entity));
+    published.last_valid.retain(|previous| {
+        inputs
+            .binary_search_by_key(&previous.entity, |input| input.entity)
+            .is_ok()
+    });
+    budget.finish_frame(input_count);
     frame.frame = frame.frame.wrapping_add(1);
 }
 
@@ -715,7 +962,9 @@ impl Plugin for CameraPlugin {
         app.insert_resource(CameraFrame::new(self.target_size))
             .init_resource::<CameraViewRegistry>()
             .init_resource::<PublishedViews>()
-            .init_resource::<CameraDiagnostics>();
+            .init_resource::<CameraDiagnostics>()
+            .init_resource::<CameraPerformanceBudget>()
+            .init_resource::<CameraDeriveScratch>();
         #[cfg(feature = "rig")]
         app.init_resource::<CameraSceneQueryResource>()
             .init_resource::<CameraTargetQueryResource>();
@@ -770,6 +1019,95 @@ mod tests {
     use super::*;
     use prism_app::App;
     use prism_camera::{CameraErrorCode, ViewKind};
+
+    #[test]
+    fn performance_budget_sheds_after_sustained_overrun_and_recovers_with_hysteresis() {
+        let mut budget = CameraPerformanceBudget::default();
+        for _ in 0..CameraPerformanceBudget::SHED_AFTER_FRAMES {
+            budget.observe(101_000, 16);
+        }
+        assert!(budget.is_degraded());
+        assert_eq!(budget.p99_ns(), 101_000);
+
+        // First age out the over-budget samples from the P99 window.
+        while budget.p99_ns() > 90_000 {
+            budget.observe(90_000, 16);
+        }
+        for _ in 0..(CameraPerformanceBudget::RECOVER_AFTER_FRAMES - 2) {
+            budget.observe(90_000, 16);
+        }
+        assert!(budget.is_degraded());
+        budget.observe(90_000, 16);
+        assert!(!budget.is_degraded());
+    }
+
+    #[test]
+    fn performance_budget_keeps_single_view_and_tolerates_short_spikes() {
+        let mut budget = CameraPerformanceBudget::default();
+        budget.observe(100_000, 1);
+        budget.observe(1_000, 1);
+        assert!(!budget.is_degraded());
+        assert_eq!(CameraPerformanceBudget::stage_budget_ns(16), 100_000);
+    }
+
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn parallel_and_serial_publication_produce_identical_stable_views() {
+        let mut parallel_app = App::new();
+        parallel_app.add_plugins(CameraPlugin::new([1920, 1080]));
+        assert!(parallel_app.task_pool().is_some());
+        let mut serial_app = App::new();
+        serial_app.add_plugins(CameraPlugin::new([1920, 1080]));
+        assert!(serial_app
+            .world_mut()
+            .remove_resource::<TaskPoolResource>()
+            .is_some());
+
+        for index in 0..16 {
+            let mut intent = CameraIntent {
+                order: ((index * 7) % 16) as i32,
+                ..Default::default()
+            };
+            intent.target = match index % 3 {
+                0 => prism_camera::RenderTarget::PrimaryWindow,
+                1 => prism_camera::RenderTarget::Window((index / 3 + 1) as u64),
+                _ => prism_camera::RenderTarget::Texture((index / 3 + 1) as u64),
+            };
+            let pose = CameraPoseComponent(CameraPose {
+                position: DVec3::new(index as f64 * 0.25, 1.0, -2.0),
+                ..Default::default()
+            });
+            parallel_app.world_mut().spawn(CameraBundle {
+                intent: CameraIntentComponent(intent),
+                pose,
+                ..Default::default()
+            });
+            serial_app.world_mut().spawn(CameraBundle {
+                intent: CameraIntentComponent(intent),
+                pose,
+                ..Default::default()
+            });
+        }
+
+        for _ in 0..3 {
+            parallel_app.update();
+            serial_app.update();
+            let parallel_views: Vec<_> = parallel_app
+                .world()
+                .resource::<PublishedViews>()
+                .iter()
+                .map(|view| (view.data.order, view.data.target, view.data.world_position))
+                .collect();
+            let serial_views: Vec<_> = serial_app
+                .world()
+                .resource::<PublishedViews>()
+                .iter()
+                .map(|view| (view.data.order, view.data.target, view.data.world_position))
+                .collect();
+            assert_eq!(parallel_views, serial_views);
+            assert_eq!(parallel_views.len(), 16);
+        }
+    }
 
     #[cfg(any(feature = "director", feature = "rig"))]
     use prism_math::{DQuat, DVec3, Vec3};

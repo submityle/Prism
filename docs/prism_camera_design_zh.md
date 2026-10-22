@@ -1180,7 +1180,7 @@ pub mod prelude {
 
 ### 26.1 验收基线
 
-- 单视图派生预算：桌面 release 构建 P95 ≤ 2 µs；16 视图并行 P95 ≤ 10 µs；P99 超预算时自动关闭非主视图 rig 和诊断轨迹，不改变主视图数学结果。
+- 单视图纯派生预算：桌面 release 构建 P95 ≤ 2 µs；16 视图并行纯派生 P95 ≤ 10 µs，必须用独立派生批次基准验收。运行时另以固定 64 样本窗口监控完整 ECS 相机阶段 P99，单视图阶段预算为 50 µs、16 视图为 100 µs，视图数 2–16 之间线性插值、16 以上按视图数线性扩展；连续 3 帧超预算后抑制非 Main 视图 Rig，连续 120 帧恢复预算内后解除抑制。视图数量变化时清空旧窗口，避免混算不同负载。此降级不改变 Main 视图数学派生。ECS 诊断是结构化错误列表，不维护逐帧诊断轨迹，因此不声称关闭错误诊断。
 - 静止相机：稳定矩阵零重算、零 View UBO 上传；jitter 仅更新 jittered 字段。
 - jitter：1000 帧像素均值绝对值 ≤ `1e-3`；切镜或 teleport 后第一帧 `history_valid=false`，第二帧恢复。
 - 曝光：Sunny-16 得到 `EV100=15±0.01`；自动曝光适应使用指数时间常数，不能因 GPU 回读延迟产生未定义跳变。
@@ -1201,6 +1201,13 @@ pub mod prelude {
 - `cargo bench -p prism_camera_rig --bench camera_contracts -- --iterations 1`：当前默认配置独立验证得到 `derive_view=2499.721 ns/op`、`camera_brain_update=204.008 ns/op`、`impulse_apply_6dof=537.496 ns/op`、`view_lod_scheduler=32.450 ns/op`；同次 ECS 多视图基准得到 1/8/16/64 view 的 P50/P95/P99 分别为 `58989/85625/86135`、`66000/75375/75958`、`80041/84864/85135`、`259781/276000/290781 ns/frame`。这些是当前机器的可复现实测，不替代跨硬件预算结论。
 - `PRISM_REQUIRE_GPU=1 CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 CARGO_TARGET_DIR=/private/tmp/prism-camera-gpu-host cargo test -p prism_camera_gpu --test rhi_gpu --offline -- --nocapture`：真实 RHI/wgpu 设备 `1 passed、0 failed`；测试创建实际 RHI buffer，经 `RenderQueue::write_buffer` 上传 ViewBufferRing 计划，WGSL consumer 回读五组矩阵列、双精度原点拆分的 hi/lo、曝光/schema/flags/view_index、jitter、viewport 和六个 frustum 平面，最终 readback 与 CPU 预期逐项相等。
 - `prism_math_gpu` 的投影 parity 仍作为投影数学的独立 GPU 证据；它与上述相机 View ABI/RHI 测试互补，不再替代相机 backend 验收。未设置 `PRISM_REQUIRE_GPU=1` 时无 adapter 的环境会显式跳过；本次跨沙盒强制设备运行已成功，因此本次相机 RHI GPU 验收不是跳过结果。
+
+### 26.3 本轮并行发布与性能核验（2026-10-22）
+
+- `prism_camera_ecs` 默认启用 `parallel` feature；该 feature 显式启用 `prism_app/multi_thread`，并通过 App 的共享 TaskPool 执行至少 8 个视图的派生任务。输入按 Entity 稳定排序，任务只写各自输出槽，历史、registry、诊断和发布在主线程按稳定顺序归并；少于 8 个视图或没有 TaskPool 时走串行路径。scratch 输入/输出复用容量，降低稳态分配。
+- `CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 cargo test -p prism_camera_ecs --lib --offline`：12 passed、0 failed，包含串行/并行 16 视图三帧输出一致性、预算迟滞，以及 ECS 发布、历史、Rig、Director 用例。滚动 P99 必须先淘汰窗口内超预算样本，再累计恢复迟滞。
+- `CARGO_PROFILE_BENCH_DEBUG=0 CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 PRISM_CAMERA_BENCH_WARMUP=64 PRISM_CAMERA_BENCH_SAMPLES=128 PRISM_CAMERA_BENCH_FRAMES_PER_SAMPLE=4 cargo bench -p prism_camera_ecs --bench multiview_contracts --offline`：release ECS 整帧更新路径的 1/8/16/64 视图 P50/P95/P99 分别为 `22458/31531/34458`、`28979/38323/41770`、`33156/51802/59541`、`58739/85333/110625 ns/frame`；active/registry 数、稳定句柄、排序断言均通过。8/16/64 视图走并行派生分支；该数据包括 ECS 调度、资源访问、排序和发布开销，**不是**纯派生延迟，不能用于宣称 2 µs/10 µs 派生门槛达标。纯派生 1/16 视图 release P95/P99 尚未由独立批次基准给出，因此两个纯派生门槛仍待该专用测量验收。
+- 本轮第一次 `cargo clean` 因正在使用的增量目录而未完成；后确认 Cargo 锁释放后重试清理成功。release 构建/基准产生约 9.2 GiB `target` 文件，最终清理移除 26,755 个文件、11.1 GiB（含之前已有构建文件），释放空间供工作区其他验证继续使用。
 
 ---
 
