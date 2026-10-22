@@ -697,6 +697,29 @@ mod tests {
         assert_eq!(graph.dirty_count(), 0);
     }
 
+    #[test]
+    fn adding_dependency_between_dirty_nodes_updates_ordering_once() {
+        let mut graph = ReactionGraph::<Recorder>::new();
+        let first_source = graph.add_source();
+        let second_source = graph.add_source();
+        let derived = graph.add_derived(&[second_source], |ctx| ctx.order.push(1));
+        let tail = graph.add_derived(&[derived], |ctx| ctx.order.push(2));
+
+        graph.mark_dirty(second_source);
+        graph.mark_dirty(first_source);
+        assert_eq!(graph.nodes[derived.index()].dirty_indegree, 1);
+        graph.add_dependency(derived, first_source);
+        assert_dirty_pending_invariant(&graph);
+        assert_eq!(graph.nodes[derived.index()].dirty_indegree, 2);
+        assert_eq!(graph.nodes[tail.index()].dirty_indegree, 1);
+
+        let mut context = Recorder::default();
+        assert_eq!(graph.flush(&mut context), 2);
+        assert_eq!(context.order, alloc::vec![1, 2]);
+        assert_eq!(graph.dirty_count(), 0);
+        assert_dirty_pending_invariant(&graph);
+    }
+
     #[cfg(feature = "std")]
     #[test]
     fn invalid_dependencies_leave_the_existing_graph_unchanged() {
