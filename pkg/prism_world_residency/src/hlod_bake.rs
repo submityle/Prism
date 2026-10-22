@@ -1,12 +1,25 @@
 use alloc::collections::BTreeSet;
-use alloc::vec::Vec;
+use alloc::{vec, vec::Vec};
 use core::fmt;
 
-use crate::hlod::{HlodCluster, HlodLevel, HlodRepresentation};
+use crate::hlod::{
+    HlodBounds, HlodCluster, HlodLevel, HlodMaterialParams, HlodProxyArtifact, HlodProxyGeometry,
+    HlodProxyMaterial, HlodProxyVertex, HlodRepresentation,
+};
 
 const CLUSTER_BASE_BYTES: u64 = 32;
 const MEMBER_BYTES: u64 = 8;
 const REPRESENTATION_BYTES: u64 = 48;
+const PROXY_VERTEX_COUNT: usize = 8;
+const PROXY_INDEX_COUNT: usize = 36;
+const PROXY_VERTEX_BYTES: u64 = 32;
+const PROXY_INDEX_BYTES: u64 = 4;
+const PROXY_BOUNDS_BYTES: u64 = 28;
+const PROXY_GEOMETRY_HASH_BYTES: u64 = 8;
+const PROXY_MATERIAL_KEY_BYTES: u64 = 8;
+const PROXY_MATERIAL_PARAMS_BYTES: u64 = 24;
+const PROXY_MATERIAL_HASH_BYTES: u64 = 8;
+const PROXY_ARTIFACT_HEADER_BYTES: u64 = 24;
 
 /// Engine-neutral source record consumed by the HLOD declaration baker.
 ///
@@ -35,7 +48,7 @@ pub struct HlodBakeBudget {
     pub max_clusters: u32,
     /// Maximum number of output representations.
     pub max_representations: u32,
-    /// Maximum estimated bytes for the output declarations.
+    /// Maximum estimated bytes for declarations and proxy artifacts together.
     pub max_declaration_bytes: u64,
 }
 
@@ -131,6 +144,11 @@ pub enum HlodBakeError {
     GeneratedIdCollision(u64),
     /// A checked size calculation overflowed.
     SizeOverflow,
+    /// Source bounds cannot be represented by finite `f32` proxy geometry.
+    ProxyGeometryOverflow {
+        /// Stable index of the cluster whose bounds overflowed.
+        cluster_index: u32,
+    },
 }
 
 /// Count category reported by [`HlodBakeError::CountBudgetExceeded`].
@@ -164,19 +182,25 @@ impl fmt::Display for HlodBakeError {
                 "HLOD declaration byte budget exceeded: required {required}, limit {limit}"
             ),
             Self::GeneratedIdCollision(id) => write!(f, "generated HLOD ID collision {id}"),
-            Self::SizeOverflow => f.write_str("HLOD declaration size overflow"),
+            Self::SizeOverflow => f.write_str("HLOD baked output size overflow"),
+            Self::ProxyGeometryOverflow { cluster_index } => write!(
+                f,
+                "HLOD proxy geometry for cluster {cluster_index} cannot be represented finitely"
+            ),
         }
     }
 }
 
-/// Baked, engine-neutral HLOD declarations.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// Baked, engine-neutral HLOD declarations and concrete proxy artifacts.
+#[derive(Clone, Debug, PartialEq)]
 pub struct HlodBakeOutput {
     input_hash: u64,
     declaration_hash: u64,
-    estimated_declaration_bytes: u64,
+    artifact_hash: u64,
+    estimated_output_bytes: u64,
     clusters: Vec<HlodCluster>,
     representations: Vec<HlodRepresentation>,
+    artifacts: Vec<HlodProxyArtifact>,
 }
 
 impl HlodBakeOutput {
@@ -190,9 +214,14 @@ impl HlodBakeOutput {
         self.declaration_hash
     }
 
-    /// Returns the estimated bytes occupied by the declarations.
+    /// Returns the estimated bytes occupied by declarations and artifacts.
     pub const fn estimated_declaration_bytes(&self) -> u64 {
-        self.estimated_declaration_bytes
+        self.estimated_output_bytes
+    }
+
+    /// Returns the stable hash of all concrete proxy artifacts.
+    pub const fn artifact_hash(&self) -> u64 {
+        self.artifact_hash
     }
 
     /// Returns generated clusters in stable cluster order.
@@ -204,15 +233,20 @@ impl HlodBakeOutput {
     pub fn representations(&self) -> &[HlodRepresentation] {
         &self.representations
     }
+
+    /// Returns artifacts in the same stable order as [`Self::representations`].
+    pub fn artifacts(&self) -> &[HlodProxyArtifact] {
+        &self.artifacts
+    }
 }
 
 /// Bakes deterministic cluster and representation declarations.
 ///
 /// Records are copied and sorted by `(id, source_hash, center bits, radius
 /// bits)`, so caller iteration order cannot affect the result. Clusters are
-/// contiguous chunks of that canonical order. The function intentionally stops
-/// at declarations: renderer submission, proxy geometry generation, asset
-/// residency, and streaming remain explicit downstream contracts.
+/// contiguous chunks of that canonical order. Each representation receives a
+/// deterministic AABB proxy mesh and material payload. Renderer submission,
+/// asset residency, and streaming remain explicit downstream contracts.
 pub fn bake_hlod(
     config: HlodBakeConfig,
     input: &[HlodProxyRecord],
@@ -257,9 +291,11 @@ pub fn bake_hlod(
         return Ok(HlodBakeOutput {
             input_hash,
             declaration_hash: hash64(config.identity_seed ^ input_hash ^ 0x484c_4f44),
-            estimated_declaration_bytes: 0,
+            artifact_hash: hash64(config.identity_seed ^ input_hash ^ 0x5052_4f58),
+            estimated_output_bytes: 0,
             clusters: Vec::new(),
             representations: Vec::new(),
+            artifacts: Vec::new(),
         });
     }
 
@@ -278,15 +314,20 @@ pub fn bake_hlod(
         config.budget.max_representations,
     )?;
     let declaration_bytes = declaration_bytes(records.len(), cluster_count, representation_count)?;
-    if declaration_bytes > config.budget.max_declaration_bytes {
+    let artifact_bytes = artifact_bytes(representation_count)?;
+    let output_bytes = declaration_bytes
+        .checked_add(artifact_bytes)
+        .ok_or(HlodBakeError::SizeOverflow)?;
+    if output_bytes > config.budget.max_declaration_bytes {
         return Err(HlodBakeError::DeclarationBytesBudgetExceeded {
-            required: declaration_bytes,
+            required: output_bytes,
             limit: config.budget.max_declaration_bytes,
         });
     }
 
     let mut clusters = Vec::with_capacity(cluster_count);
     let mut representations = Vec::with_capacity(representation_count);
+    let mut artifacts = Vec::with_capacity(representation_count);
     let mut generated_ids = BTreeSet::new();
     for (cluster_index, group) in records
         .chunks(config.proxies_per_cluster as usize)
@@ -301,6 +342,10 @@ pub fn bake_hlod(
                 ^ source_hash,
         );
         insert_generated_id(&mut generated_ids, cluster_id)?;
+        let bounds = cluster_bounds(group).ok_or(HlodBakeError::ProxyGeometryOverflow {
+            cluster_index: cluster_index as u32,
+        })?;
+        let geometry = build_proxy_geometry(bounds, config.identity_seed ^ cluster_id);
 
         let mut levels = Vec::with_capacity(config.levels as usize);
         for level in 0..config.levels {
@@ -326,6 +371,14 @@ pub fn bake_hlod(
                 group.len() as u32,
                 REPRESENTATION_BYTES,
             ));
+            let material = build_proxy_material(config.identity_seed, source_hash, level);
+            let artifact_hash = hash_artifact(representation_id, &geometry, material);
+            artifacts.push(HlodProxyArtifact::new(
+                representation_id,
+                geometry.clone(),
+                material,
+                artifact_hash,
+            ));
         }
         clusters.push(
             HlodCluster::new(cluster_id, members, levels)
@@ -334,12 +387,15 @@ pub fn bake_hlod(
     }
 
     let declaration_hash = hash_declarations(config.identity_seed, &clusters, &representations);
+    let artifact_hash = hash_artifacts(config.identity_seed, &artifacts);
     Ok(HlodBakeOutput {
         input_hash,
         declaration_hash,
-        estimated_declaration_bytes: declaration_bytes,
+        artifact_hash,
+        estimated_output_bytes: output_bytes,
         clusters,
         representations,
+        artifacts,
     })
 }
 
@@ -386,6 +442,206 @@ fn declaration_bytes(
         .checked_add(cluster_bytes)
         .and_then(|bytes| bytes.checked_add(representation_bytes))
         .ok_or(HlodBakeError::SizeOverflow)
+}
+
+fn artifact_bytes(representation_count: usize) -> Result<u64, HlodBakeError> {
+    let vertex_bytes = (PROXY_VERTEX_COUNT as u64)
+        .checked_mul(PROXY_VERTEX_BYTES)
+        .ok_or(HlodBakeError::SizeOverflow)?;
+    let index_bytes = (PROXY_INDEX_COUNT as u64)
+        .checked_mul(PROXY_INDEX_BYTES)
+        .ok_or(HlodBakeError::SizeOverflow)?;
+    let per_artifact = PROXY_BOUNDS_BYTES
+        .checked_add(vertex_bytes)
+        .and_then(|bytes| bytes.checked_add(index_bytes))
+        .and_then(|bytes| bytes.checked_add(PROXY_GEOMETRY_HASH_BYTES))
+        .and_then(|bytes| bytes.checked_add(PROXY_MATERIAL_KEY_BYTES))
+        .and_then(|bytes| bytes.checked_add(PROXY_MATERIAL_PARAMS_BYTES))
+        .and_then(|bytes| bytes.checked_add(PROXY_MATERIAL_HASH_BYTES))
+        .and_then(|bytes| bytes.checked_add(PROXY_ARTIFACT_HEADER_BYTES))
+        .ok_or(HlodBakeError::SizeOverflow)?;
+    (representation_count as u64)
+        .checked_mul(per_artifact)
+        .ok_or(HlodBakeError::SizeOverflow)
+}
+
+fn cluster_bounds(group: &[HlodProxyRecord]) -> Option<HlodBounds> {
+    let mut min = [f64::INFINITY; 3];
+    let mut max = [f64::NEG_INFINITY; 3];
+    for record in group {
+        let radius = f64::from(record.radius);
+        for axis in 0..3 {
+            let center = f64::from(record.center[axis]);
+            let lower = center - radius;
+            let upper = center + radius;
+            if !lower.is_finite() || !upper.is_finite() {
+                return None;
+            }
+            min[axis] = min[axis].min(lower);
+            max[axis] = max[axis].max(upper);
+        }
+    }
+
+    let center = [
+        min[0] * 0.5 + max[0] * 0.5,
+        min[1] * 0.5 + max[1] * 0.5,
+        min[2] * 0.5 + max[2] * 0.5,
+    ];
+    let radius = (max[0] - min[0]) * 0.5 + (max[1] - min[1]) * 0.5 + (max[2] - min[2]) * 0.5;
+    let min = [min[0] as f32, min[1] as f32, min[2] as f32];
+    let max = [max[0] as f32, max[1] as f32, max[2] as f32];
+    let center = [center[0] as f32, center[1] as f32, center[2] as f32];
+    let radius = radius as f32;
+    if !min.iter().all(|value| value.is_finite())
+        || !max.iter().all(|value| value.is_finite())
+        || !center.iter().all(|value| value.is_finite())
+        || !radius.is_finite()
+    {
+        return None;
+    }
+    Some(HlodBounds::new(min, max, center, radius))
+}
+
+fn build_proxy_geometry(bounds: HlodBounds, seed: u64) -> HlodProxyGeometry {
+    const CORNER_NORMAL: f32 = 0.577_350_26;
+    let min = bounds.min;
+    let max = bounds.max;
+    let vertices = vec![
+        HlodProxyVertex {
+            position: [min[0], min[1], min[2]],
+            normal: [-CORNER_NORMAL, -CORNER_NORMAL, -CORNER_NORMAL],
+            uv: [0.0, 0.0],
+        },
+        HlodProxyVertex {
+            position: [max[0], min[1], min[2]],
+            normal: [CORNER_NORMAL, -CORNER_NORMAL, -CORNER_NORMAL],
+            uv: [1.0, 0.0],
+        },
+        HlodProxyVertex {
+            position: [max[0], max[1], min[2]],
+            normal: [CORNER_NORMAL, CORNER_NORMAL, -CORNER_NORMAL],
+            uv: [1.0, 1.0],
+        },
+        HlodProxyVertex {
+            position: [min[0], max[1], min[2]],
+            normal: [-CORNER_NORMAL, CORNER_NORMAL, -CORNER_NORMAL],
+            uv: [0.0, 1.0],
+        },
+        HlodProxyVertex {
+            position: [min[0], min[1], max[2]],
+            normal: [-CORNER_NORMAL, -CORNER_NORMAL, CORNER_NORMAL],
+            uv: [0.0, 0.0],
+        },
+        HlodProxyVertex {
+            position: [max[0], min[1], max[2]],
+            normal: [CORNER_NORMAL, -CORNER_NORMAL, CORNER_NORMAL],
+            uv: [1.0, 0.0],
+        },
+        HlodProxyVertex {
+            position: [max[0], max[1], max[2]],
+            normal: [CORNER_NORMAL, CORNER_NORMAL, CORNER_NORMAL],
+            uv: [1.0, 1.0],
+        },
+        HlodProxyVertex {
+            position: [min[0], max[1], max[2]],
+            normal: [-CORNER_NORMAL, CORNER_NORMAL, CORNER_NORMAL],
+            uv: [0.0, 1.0],
+        },
+    ];
+    let indices = vec![
+        0, 2, 1, 0, 3, 2, // -Z
+        4, 5, 6, 4, 6, 7, // +Z
+        0, 4, 7, 0, 7, 3, // -X
+        1, 2, 6, 1, 6, 5, // +X
+        0, 1, 5, 0, 5, 4, // -Y
+        3, 7, 6, 3, 6, 2, // +Y
+    ];
+    let hash = hash_geometry(seed, &bounds, &vertices, &indices);
+    HlodProxyGeometry::new(bounds, vertices, indices, hash)
+}
+
+fn build_proxy_material(seed: u64, source_hash: u64, level: u32) -> HlodProxyMaterial {
+    let material_key = hash64(
+        seed ^ source_hash.rotate_left(13) ^ u64::from(level).wrapping_mul(0xd6e8_feb8_6659_fd93),
+    );
+    let sample = |shift: u32| -> f32 { ((material_key.rotate_left(shift) & 0xff) as f32) / 255.0 };
+    let params = HlodMaterialParams {
+        base_color: [
+            0.15 + 0.70 * sample(0),
+            0.15 + 0.70 * sample(8),
+            0.15 + 0.70 * sample(16),
+            1.0,
+        ],
+        roughness: 0.25 + 0.70 * sample(24),
+        metallic: 0.05 + 0.35 * sample(32),
+    };
+    let hash = hash_material(material_key, params);
+    HlodProxyMaterial::new(material_key, params, hash)
+}
+
+fn hash_geometry(
+    seed: u64,
+    bounds: &HlodBounds,
+    vertices: &[HlodProxyVertex],
+    indices: &[u32],
+) -> u64 {
+    let mut hash = seed;
+    for value in bounds
+        .min
+        .into_iter()
+        .chain(bounds.max)
+        .chain(bounds.center)
+    {
+        hash = hash64(hash ^ u64::from(value.to_bits()));
+    }
+    hash = hash_f32(hash, bounds.radius);
+    for vertex in vertices {
+        for value in vertex.position {
+            hash = hash_f32(hash, value);
+        }
+        for value in vertex.normal {
+            hash = hash_f32(hash, value);
+        }
+        for value in vertex.uv {
+            hash = hash_f32(hash, value);
+        }
+    }
+    for index in indices {
+        hash = hash64(hash ^ u64::from(*index));
+    }
+    hash
+}
+
+fn hash_material(material_key: u64, params: HlodMaterialParams) -> u64 {
+    let mut hash = hash64(material_key);
+    for value in params.base_color {
+        hash = hash_f32(hash, value);
+    }
+    hash = hash_f32(hash, params.roughness);
+    hash_f32(hash, params.metallic)
+}
+
+fn hash_f32(hash: u64, value: f32) -> u64 {
+    hash64(hash ^ u64::from(value.to_bits()))
+}
+
+fn hash_artifact(
+    representation_id: u64,
+    geometry: &HlodProxyGeometry,
+    material: HlodProxyMaterial,
+) -> u64 {
+    hash64(representation_id ^ geometry.hash().rotate_left(17) ^ material.hash().rotate_left(31))
+}
+
+fn hash_artifacts(seed: u64, artifacts: &[HlodProxyArtifact]) -> u64 {
+    let mut hash = seed ^ 0x5052_4f58;
+    for artifact in artifacts {
+        hash = hash64(hash ^ artifact.representation_id());
+        hash = hash64(hash ^ artifact.geometry().hash());
+        hash = hash64(hash ^ artifact.material().hash());
+        hash = hash64(hash ^ artifact.hash());
+    }
+    hash
 }
 
 fn insert_generated_id(ids: &mut BTreeSet<u64>, id: u64) -> Result<(), HlodBakeError> {
@@ -466,9 +722,60 @@ mod tests {
         assert_eq!(first, second);
         assert_eq!(first.clusters().len(), 2);
         assert_eq!(first.representations().len(), 6);
+        assert_eq!(first.artifacts().len(), 6);
         assert_eq!(first.clusters()[0].members(), &[1, 2]);
         assert_ne!(first.input_hash(), 0);
         assert_ne!(first.declaration_hash(), 0);
+        assert_ne!(first.artifact_hash(), 0);
+        for (first_artifact, second_artifact) in first.artifacts().iter().zip(second.artifacts()) {
+            assert_eq!(
+                first_artifact.geometry().hash(),
+                second_artifact.geometry().hash()
+            );
+            assert_eq!(
+                first_artifact.material().hash(),
+                second_artifact.material().hash()
+            );
+            assert_eq!(first_artifact.hash(), second_artifact.hash());
+        }
+    }
+
+    #[test]
+    fn proxy_geometry_has_valid_triangle_indices_and_finite_bounds() {
+        let output = bake_hlod(config(), &[proxy(3), proxy(1), proxy(2)]).unwrap();
+        for artifact in output.artifacts() {
+            let geometry = artifact.geometry();
+            assert_eq!(geometry.vertices().len(), PROXY_VERTEX_COUNT);
+            assert_eq!(geometry.indices().len(), PROXY_INDEX_COUNT);
+            assert_eq!(geometry.indices().len() % 3, 0);
+            assert!(geometry
+                .indices()
+                .iter()
+                .all(|index| (*index as usize) < geometry.vertices().len()));
+            assert!(geometry
+                .vertices()
+                .iter()
+                .flat_map(|vertex| vertex.position)
+                .all(|value| value.is_finite()));
+            assert!(geometry.bounds().min.iter().all(|value| value.is_finite()));
+            assert!(geometry.bounds().max.iter().all(|value| value.is_finite()));
+            assert!(geometry
+                .bounds()
+                .center
+                .iter()
+                .all(|value| value.is_finite()));
+            assert!(geometry.bounds().radius.is_finite());
+            let material = artifact.material();
+            assert!(material
+                .params()
+                .base_color
+                .iter()
+                .all(|value| value.is_finite()));
+            assert!(material.params().roughness.is_finite());
+            assert!(material.params().metallic.is_finite());
+            assert!((0.0..=1.0).contains(&material.params().roughness));
+            assert!((0.0..=1.0).contains(&material.params().metallic));
+        }
     }
 
     #[test]
@@ -503,6 +810,18 @@ mod tests {
             bake_hlod(config(), &[invalid]),
             Err(HlodBakeError::NonFiniteProxy { id: 5 })
         );
+        invalid = proxy(7);
+        invalid.radius = f32::INFINITY;
+        assert_eq!(
+            bake_hlod(config(), &[invalid]),
+            Err(HlodBakeError::NonFiniteProxy { id: 7 })
+        );
+        invalid = proxy(6);
+        invalid.radius = -1.0;
+        assert_eq!(
+            bake_hlod(config(), &[invalid]),
+            Err(HlodBakeError::NegativeRadius { id: 6 })
+        );
     }
 
     #[test]
@@ -512,6 +831,8 @@ mod tests {
         assert_eq!(first, second);
         assert!(first.clusters().is_empty());
         assert!(first.representations().is_empty());
+        assert!(first.artifacts().is_empty());
         assert_eq!(first.estimated_declaration_bytes(), 0);
+        assert_eq!(first.artifact_hash(), second.artifact_hash());
     }
 }

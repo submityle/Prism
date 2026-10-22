@@ -32,7 +32,10 @@ pub use clipmap::{
     ClipmapAxis, CpuSdfClipmap, SdfClipmapConfig, SdfClipmapError, SdfClipmapUpdate,
     SdfToroidalClipmap,
 };
-pub use hlod::{HlodCluster, HlodError, HlodLevel, HlodRepresentation, LodTransition};
+pub use hlod::{
+    HlodBounds, HlodCluster, HlodError, HlodLevel, HlodMaterialParams, HlodProxyArtifact,
+    HlodProxyGeometry, HlodProxyMaterial, HlodProxyVertex, HlodRepresentation, LodTransition,
+};
 pub use hlod_bake::{
     bake_hlod, HlodBakeBudget, HlodBakeConfig, HlodBakeError, HlodBakeOutput, HlodBudgetKind,
     HlodProxyRecord,

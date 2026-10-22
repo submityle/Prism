@@ -82,6 +82,175 @@ impl HlodRepresentation {
     }
 }
 
+/// Axis-aligned bounds of a baked proxy artifact.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HlodBounds {
+    /// Minimum corner of the bounds in source world units.
+    pub min: [f32; 3],
+    /// Maximum corner of the bounds in source world units.
+    pub max: [f32; 3],
+    /// Center of the bounds in source world units.
+    pub center: [f32; 3],
+    /// Conservative scalar radius of the bounds.
+    pub radius: f32,
+}
+
+impl HlodBounds {
+    pub(crate) const fn new(min: [f32; 3], max: [f32; 3], center: [f32; 3], radius: f32) -> Self {
+        Self {
+            min,
+            max,
+            center,
+            radius,
+        }
+    }
+}
+
+/// One engine-neutral vertex in a baked proxy mesh.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HlodProxyVertex {
+    /// Position in source world units.
+    pub position: [f32; 3],
+    /// Unit or corner normal used by a downstream material adapter.
+    pub normal: [f32; 3],
+    /// Deterministic normalized UV coordinates.
+    pub uv: [f32; 2],
+}
+
+/// Concrete, engine-neutral proxy geometry for one representation.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HlodProxyGeometry {
+    bounds: HlodBounds,
+    vertices: Vec<HlodProxyVertex>,
+    indices: Vec<u32>,
+    hash: u64,
+}
+
+impl HlodProxyGeometry {
+    pub(crate) fn new(
+        bounds: HlodBounds,
+        vertices: Vec<HlodProxyVertex>,
+        indices: Vec<u32>,
+        hash: u64,
+    ) -> Self {
+        Self {
+            bounds,
+            vertices,
+            indices,
+            hash,
+        }
+    }
+
+    /// Returns the conservative source and mesh bounds.
+    pub const fn bounds(&self) -> &HlodBounds {
+        &self.bounds
+    }
+
+    /// Returns vertices in stable corner order.
+    pub fn vertices(&self) -> &[HlodProxyVertex] {
+        &self.vertices
+    }
+
+    /// Returns triangle-list indices in stable winding order.
+    pub fn indices(&self) -> &[u32] {
+        &self.indices
+    }
+
+    /// Returns the stable hash of bounds, vertices, and indices.
+    pub const fn hash(&self) -> u64 {
+        self.hash
+    }
+}
+
+/// Engine-neutral material parameters for a baked proxy.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HlodMaterialParams {
+    /// Linear base color and opacity.
+    pub base_color: [f32; 4],
+    /// Scalar roughness in the inclusive range `[0, 1]`.
+    pub roughness: f32,
+    /// Scalar metallic weight in the inclusive range `[0, 1]`.
+    pub metallic: f32,
+}
+
+/// Concrete, engine-neutral material payload for one representation.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HlodProxyMaterial {
+    material_key: u64,
+    params: HlodMaterialParams,
+    hash: u64,
+}
+
+impl HlodProxyMaterial {
+    pub(crate) const fn new(material_key: u64, params: HlodMaterialParams, hash: u64) -> Self {
+        Self {
+            material_key,
+            params,
+            hash,
+        }
+    }
+
+    /// Returns the stable material key for downstream material lookup.
+    pub const fn material_key(self) -> u64 {
+        self.material_key
+    }
+
+    /// Returns the material parameters without an engine-specific handle.
+    pub const fn params(self) -> HlodMaterialParams {
+        self.params
+    }
+
+    /// Returns the stable hash of the material key and parameters.
+    pub const fn hash(self) -> u64 {
+        self.hash
+    }
+}
+
+/// Complete geometry/material artifact for one baked HLOD representation.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HlodProxyArtifact {
+    representation_id: u64,
+    geometry: HlodProxyGeometry,
+    material: HlodProxyMaterial,
+    hash: u64,
+}
+
+impl HlodProxyArtifact {
+    pub(crate) const fn new(
+        representation_id: u64,
+        geometry: HlodProxyGeometry,
+        material: HlodProxyMaterial,
+        hash: u64,
+    ) -> Self {
+        Self {
+            representation_id,
+            geometry,
+            material,
+            hash,
+        }
+    }
+
+    /// Returns the representation identity associated with this artifact.
+    pub const fn representation_id(&self) -> u64 {
+        self.representation_id
+    }
+
+    /// Returns the concrete proxy geometry.
+    pub const fn geometry(&self) -> &HlodProxyGeometry {
+        &self.geometry
+    }
+
+    /// Returns the concrete proxy material.
+    pub const fn material(&self) -> HlodProxyMaterial {
+        self.material
+    }
+
+    /// Returns the stable hash of representation, geometry, and material.
+    pub const fn hash(&self) -> u64 {
+        self.hash
+    }
+}
+
 /// Invalid HLOD declaration data.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HlodError {
