@@ -200,7 +200,8 @@ pub fn bake_scene(source: &SceneSource, limits: BakeLimits) -> Result<SceneTempl
     let mut column_bytes = 0usize;
     let mut name_bytes = 0usize;
     let mut reference_slots = 0usize;
-    let mut groups: BTreeMap<Vec<ComponentTypeId>, Vec<&SourceEntity>> = BTreeMap::new();
+    let mut groups: BTreeMap<Vec<ComponentTypeId>, Vec<(LocalEntityId, Vec<&SourceComponent>)>> =
+        BTreeMap::new();
     let mut names = NameTable::new();
     let mut tiers = ResidencyPlan::new();
     let mut hierarchy = Vec::new();
@@ -225,6 +226,7 @@ pub fn bake_scene(source: &SceneSource, limits: BakeLimits) -> Result<SceneTempl
         }
 
         let mut component_ids = Vec::new();
+        let mut component_rows = Vec::with_capacity(entity.components.len());
         let mut seen = BTreeSet::new();
         for component in &entity.components {
             if !seen.insert(component.component) {
@@ -280,9 +282,15 @@ pub fn bake_scene(source: &SceneSource, limits: BakeLimits) -> Result<SceneTempl
                 return Err(BakeError::LimitExceeded("column bytes"));
             }
             component_ids.push(component.component);
+            component_rows.push(component);
         }
-        component_ids.sort_unstable();
-        groups.entry(component_ids).or_default().push(entity);
+        let mut ordered: Vec<_> = component_ids.into_iter().zip(component_rows).collect();
+        ordered.sort_unstable_by_key(|(component, _)| *component);
+        let (component_ids, component_rows): (Vec<_>, Vec<_>) = ordered.into_iter().unzip();
+        groups
+            .entry(component_ids)
+            .or_default()
+            .push((entity.local, component_rows));
     }
 
     let mut archetype_groups = Vec::new();
@@ -290,11 +298,11 @@ pub fn bake_scene(source: &SceneSource, limits: BakeLimits) -> Result<SceneTempl
     for (group_index, (signature_ids, mut group_entities)) in groups.into_iter().enumerate() {
         let group_index =
             u32::try_from(group_index).map_err(|_| BakeError::LimitExceeded("archetype groups"))?;
-        group_entities.sort_unstable_by_key(|entity| entity.local);
+        group_entities.sort_unstable_by_key(|(local, _)| *local);
         let signature = ArchetypeSignature::new(signature_ids.clone());
         let locals = group_entities
             .iter()
-            .map(|entity| entity.local)
+            .map(|(local, _)| *local)
             .collect::<Vec<_>>()
             .into_boxed_slice();
         let mut columns = Vec::new();
@@ -309,16 +317,15 @@ pub fn bake_scene(source: &SceneSource, limits: BakeLimits) -> Result<SceneTempl
             let mut blob = Vec::new();
             blob.try_reserve_exact(group_bytes)
                 .map_err(|_| BakeError::LimitExceeded("column allocation"))?;
-            for (row_index, entity) in group_entities.iter().enumerate() {
-                let row = entity
-                    .components
-                    .iter()
-                    .find(|row| row.component == component_id)
-                    .expect("signature was built from the entity rows");
+            for (row_index, (local, component_rows)) in group_entities.iter().enumerate() {
+                let row = component_rows
+                    .get(column_index as usize)
+                    .expect("ordered component rows match the archetype signature");
+                debug_assert_eq!(row.component, component_id);
                 blob.extend_from_slice(&row.row);
                 for &byte_offset in &schema.entity_reference_offsets {
                     entity_valued_fields.push(FieldSlot {
-                        local: entity.local,
+                        local: *local,
                         group: group_index,
                         column: column_index,
                         byte_offset,

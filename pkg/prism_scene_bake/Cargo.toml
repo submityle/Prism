@@ -1,0 +1,18 @@
+[package]
+name = "prism_scene_bake"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96.0"
+description = "Deterministic authoring-data compiler for Prism scene templates"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+prism_asset = { path = "../prism_asset", default-features = false }
+prism_scene = { path = "../prism_scene", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+prism_scene = { path = "../prism_scene" }
+
+[lints]
+workspace = true
