@@ -863,6 +863,12 @@ RayTracing 场景提取按 geometry slot 查询 shading 表时，必须同时验
 
 逐视图 RT 选择可引用独立 LOD surface payload；因此 BLAS/TLAS 源签名必须覆盖每个驻留 LOD 的 geometry generation、level 和 payload revision，不能只覆盖 base geometry revision。`RenderShadingGeometryRegistry` 现为 LOD surface table 保留独立 payload revision，资产 staging 内容变化会推进该 revision；LOD 替换、清理和 generation 移除均更新 registry dirty 状态。`raytrace::extract::tests::signature_changes_when_lod_payload_changes_without_base_revision_change` 与 `geometry::shading_registry::tests::lod_payload_revision_is_generation_scoped_and_removal_dirties_registry` 在独立 target 下分别通过。该修复证明缓存身份失效正确，不证明 RT hit 被生产着色消费，也不构成虚拟几何 draw 或画质验收。
 
+### 19.9 2026-10-23 虚拟几何缺页祖先选择契约
+
+`virtual_geometry::ResidentCutResolver` 为不可变 `ClusterHierarchy` 构建一次反向父边索引，并可跨视图/帧重复解析 cut；每次解析检查输入 cut 和相关祖先链，不重复扫描全层级重建索引。resident cut 保留输入区域顺序，以最近的 resident ancestor 替换缺页节点；共享子 DAG 上距离相同的候选按节点索引确定性选择，多个区域解析到同一祖先时只产生一个 draw 项，同时逐区域保留解析结果。错误节点、陈旧 page identity、重复节点、父子重叠 cut、畸形 hierarchy 与跨 asset 祖先均拒绝；不存在驻留祖先的区域显式返回 unresolved。`cargo test -p prism_render_architecture --lib virtual_geometry::resident_cut -- --nocapture` 使用独立 `/private/tmp/prism-mesh-resident-cut-target` 通过 6 项测试。
+
+该契约只证明输出项驻留且唯一及确定性祖先选择，不证明 cut 覆盖完整、边界无裂缝或 fallback 视觉误差合格；当前 hierarchy/cut ABI 没有足够的区域覆盖/过渡元数据来证明这些属性。它也尚未接入 RenderScene 的资产注册、页驻留、GPU 上传和 cluster draw，因此不是生产虚拟几何渲染闭环。
+
 ## 20. 易维护性与演进规则
 
 ### 20.1 稳定契约
@@ -1041,7 +1047,7 @@ pub struct DeformationBudget { pub vertices_per_frame: u32, pub blas_refits_per_
 | 分流与字节打包 | `prism_mesh::streams`、`RenderMesh` | `pkg/prism_render_app/src/mesh/tests.rs` | 超过设备流/属性预算时选择单流 profile 或拒绝不兼容内容 |
 | 几何表与 LOD 驻留 | `prism_render_architecture::geometry` | geometry table tests | 请求 LOD 未驻留时选择已驻留祖先或 fallback |
 | Bevy 场景 Mesh/LOD 接入 | `PrismGpuSceneLodSet`、`RenderGpuScene`、`RenderGeometryRegistry`、`geometry::consumer` | `CARGO_BUILD_JOBS=1 cargo check -p prism_render_scene --lib`；场景适配器/生命周期/geometry 单测 | base 与独立 LOD asset 稳定绑定；LOD 回收不破坏 base；冲突绑定拒绝并记录诊断；所有场景 draw fail-closed |
-| 虚拟几何决策层 | `virtual_geometry::{hierarchy,lod,cull,frame}` | module tests + GPU parity suites | 以 `GeometryFramePlan` 统一 cut、bins 与 page requests |
+| 虚拟几何决策层 | `virtual_geometry::{hierarchy,lod,cull,frame,resident_cut}` | module tests + GPU parity suites；缺页选择由 `ResidentCutResolver` 定向测试 | 以 `GeometryFramePlan` 统一 cut、bins 与 page requests；缓存反向层级索引，缺页时解析驻留祖先并显式报告 unresolved；尚未接入生产 draw |
 | 属性感知静态 LOD | `virtual_geometry_lod`、`mesh_decimation::vertex_preserving` | LOD/拓扑/typed gather/BVH/量化测试及 attributed-grid 基准 | 精确 source remap，策略可注册；拓扑阻止简化时报告实际数量；不合法策略或误差拒绝构建 |
 | 多消费者 Mesh 绑定 | `geometry::consumer`、`mesh::consumer`、`render_scene::geometry::consumer` | architecture geometry tests + `cargo test -p prism_render_app mesh:: --lib` + 场景适配器单测 | 主视图/Visibility/透明/阴影/VSM 在实际 draw 前统一经过 contract；Motion 使用 current/previous；缺页使用显式 fallback；派生消费者要求版本化 artifact |
 | 虚拟几何 GPU twin | `prism_virtual_geometry_gpu` | `cargo test -p prism_virtual_geometry_gpu` | 适配器缺少所需特性时回退 CPU/标准网格路径 |
@@ -1122,7 +1128,7 @@ pub struct DeformationBudget { pub vertices_per_frame: u32, pub blas_refits_per_
 |---|---|---|
 | 数据模型 | 属性/拓扑/索引/子网格/包围体/哈希有正反单测；格式矩阵覆盖 RHI 变体 | `prism_mesh` 37 项库单测与 16 项集成测试通过，含 65,536 材质分区规模和稳定重叠错误索引回归；该维度形成契约证据 |
 | 布局与标准路径 | 同属性集产生确定布局，上传字节与 draw 布局一致 | CPU 契约与 Metal 标准/半精度分流 8×8 像素测试通过；不等同于全档位 Golden 图集 |
-| 虚拟几何 | 固定 Cluster、CLST v3、QEM LOD、CPU 计划、页 ABI、LOD/cull/raster GPU twin 一致 | `prism_asset_build_core --lib` 136 项、`virtual_geometry_lod` 定向 12 项通过；属性感知简化保留精确源顶点与全部 typed 属性；原始 CLST v3 vertex-pulling render pass 已通过颜色读回，整页 IO 一致不再被误写成属性 shader 着色证据，但仍不替代完整场景 Golden 图 |
+| 虚拟几何 | 固定 Cluster、CLST v3、QEM LOD、CPU 计划、页 ABI、LOD/cull/raster GPU twin 一致 | `prism_asset_build_core --lib` 136 项、`virtual_geometry_lod` 定向 12 项通过；属性感知简化保留精确源顶点与全部 typed 属性；原始 CLST v3 vertex-pulling render pass 已通过颜色读回；新增 `ResidentCutResolver` 缓存反向父边索引，并通过 6 项测试覆盖驻留命中、最近祖先、无祖先、混合区域、非法/重叠 cut 与共享 DAG。上述 GPU twin/颜色读回和 CPU fallback 合约仍不替代 RenderScene 生产虚拟几何接线及完整场景 Golden 图，也未证明全 cut 覆盖或无裂缝 fallback |
 | 形变 | Skin/Morph、缓存、预算与深度/阴影/速度/RT 消费一致 | 批量 Morph/LBS/修正的 CPU/GPU 对照（含 50,000 顶点）与 16×16 current/previous 直接绘制通过；数学蒙皮 parity 4 项通过。全部引擎 pass/RT 消费接线和跨档位 Golden 图不由这些独立测试证明 |
 | 多消费者绑定 | 主视图、深度、阴影、Motion Vector、RT、Collision、Derived Geometry 使用统一身份、revision 和明确回退 | `geometry::consumer` 对 `MeshDerivedArtifact.source_revision` 与绑定 revision 做 fail-closed 相等校验，并覆盖 stale-revision 拒绝；`prism_asset_build_core::mesh_derived_binding` 从已提交 Manifest 验证 source-key 依赖、kind/schema、存储类别并绑定 revision。Physics 现通过 `install_published_collision_mesh` 验证已提交 Manifest/CAS、版本化 Collision Mesh v2 载荷和 revision，并在候选完成验证与 BVH cook 后原子替换 shape；独立 target 下 4 项定向集成测试通过。RayTracing 已构建 per-view acceleration、按语义 selection signature 复用 SAH，并在 RT 表示缺失或 view/scene/geometry generation、revision 不匹配时 fail-closed；提取/身份选择定向测试 14 项通过，LOD payload revision 也纳入 acceleration 源签名并有缓存失效回归。新增 `raytrace_probe_pass` 已进入 Core3d 调度，并通过统一 visibility snapshot 将 retained view 映射到 generational view handle；RenderScene legacy-bevy lib 检查通过。该 pass 目前只对每个启用视图发出一条中心射线，命中 buffer 没有阴影/着色下游读取，故只证明 per-view GPU dispatch 接线，不构成 RT 画质消费闭环。形变历史、其他 Derived 制品也未由此测试矩阵证明 |
 | 光追派生 | OMM 与派生几何使用版本化资产契约；无 RT 能力时选择光栅路径 | OMM 强制 GPU parity 通过；不把它扩张为完整 RT 场景画质结论 |

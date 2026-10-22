@@ -38,6 +38,7 @@ pub mod page_table;
 pub mod pipeline;
 pub mod raster_gradients;
 pub mod raster_path;
+pub mod resident_cut;
 pub mod software_raster;
 pub mod stream_adapter;
 pub mod streaming;
@@ -65,6 +66,7 @@ pub use page_table::{GeometryPageTable, PageEntry, PageResidency};
 pub use pipeline::{ClusterDecision, ClusterRequest, ViewCullContext};
 pub use raster_gradients::TriangleGradients;
 pub use raster_path::{select_raster_path, ClusterRasterStats, RasterCapability};
+pub use resident_cut::{CutRegionResolution, ResidentCut, ResidentCutError, ResidentCutResolver};
 pub use software_raster::{
     cluster_of, encode_depth, pack_cluster_triangle, pack_vis, project_vertex, rasterize_cluster,
     rasterize_triangle, triangle_of, vis_depth, vis_payload, ScreenVertex, VisBuffer,
