@@ -94,6 +94,17 @@ fn main() {
         store_u256(112u + axis * 9u, projected.magnitude);
         output_words[120u + axis * 9u] = select(0u, 1u, projected.negative);
     }
+    let signed_cube = array<I256, 3>(
+        i256_from_i64_words(vec2<u32>(0xfffffffdu, 0xffffffffu)),
+        i256_from_i64_words(vec2<u32>(4u, 0u)),
+        i256_from_i64_words(vec2<u32>(0xfffffff4u, 0xffffffffu)));
+    let signed_direction = cube_direction_q84(signed_cube);
+    let negative_radial = i256_from_i128_words(vec4<u32>(0xffffcfc7u, 0xffffffffu, 0xffffffffu, 0xffffffffu));
+    for (var axis = 0u; axis < 3u; axis += 1u) {
+        let projected = project_q84_to_mm(signed_direction[axis], negative_radial);
+        store_u256(139u + axis * 9u, projected.magnitude);
+        output_words[147u + axis * 9u] = select(0u, 1u, projected.negative);
+    }
 }
 "#,
     );
@@ -139,7 +150,7 @@ fn u256_limb_arithmetic_matches_rust_reference_on_metal() {
         });
     let output_buffer = context.device().create_buffer(&wgpu::BufferDescriptor {
         label: Some("planet U256 arithmetic output"),
-        size: 148 * 4,
+        size: 175 * 4,
         usage: wgpu::BufferUsages::STORAGE
             | wgpu::BufferUsages::COPY_SRC
             | wgpu::BufferUsages::COPY_DST,
@@ -228,11 +239,11 @@ fn u256_limb_arithmetic_matches_rust_reference_on_metal() {
     }
     let readback = context.device().create_buffer(&wgpu::BufferDescriptor {
         label: Some("planet U256 arithmetic readback"),
-        size: 148 * 4,
+        size: 175 * 4,
         usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
         mapped_at_creation: false,
     });
-    encoder.copy_buffer_to_buffer(&output_buffer, 0, &readback, 0, 148 * 4);
+    encoder.copy_buffer_to_buffer(&output_buffer, 0, &readback, 0, 175 * 4);
     context.queue().submit(Some(encoder.finish()));
     context.wait();
     let output = read(&context, &readback);
@@ -291,6 +302,31 @@ fn u256_limb_arithmetic_matches_rust_reference_on_metal() {
             read_word(&output, 120 + axis * 9),
             u32::from(expected.negative)
         );
+    }
+    let signed_cube = [-3_i64, 4, -12];
+    let signed_direction = q84_direction_reference(signed_cube);
+    for axis in 0..3 {
+        let normal = signed_magnitude_i128(signed_direction[axis]);
+        let expected = fixed_math::project_quarter_mm_q84(normal, -12_345).unwrap();
+        let offset = 139 + axis * 9;
+        assert_eq!(read_u256(&output, offset), expected.magnitude);
+        assert_eq!(
+            read_word(&output, 147 + axis * 9),
+            u32::from(expected.negative)
+        );
+    }
+}
+
+fn signed_magnitude_i128(value: fixed_math::I256) -> i128 {
+    let limbs = value.magnitude.0;
+    let magnitude = u128::from(limbs[0])
+        | (u128::from(limbs[1]) << 32)
+        | (u128::from(limbs[2]) << 64)
+        | (u128::from(limbs[3]) << 96);
+    if value.negative {
+        -(magnitude as i128)
+    } else {
+        magnitude as i128
     }
 }
 
