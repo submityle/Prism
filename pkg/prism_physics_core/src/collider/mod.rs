@@ -19,7 +19,7 @@ pub mod convex_mesh;
 pub use convex_mesh::{ConvexMeshData, ConvexMeshHandle, ConvexProjection, ConvexRayHit};
 pub mod tri_mesh;
 
-pub use tri_mesh::{TriMeshData, TriMeshHandle};
+pub use tri_mesh::{TriMeshAssetError, TriMeshData, TriMeshHandle};
 pub mod compound;
 
 pub use compound::{CompoundChild, CompoundColliderData, CompoundColliderError, CompoundHandle};

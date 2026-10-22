@@ -49,7 +49,24 @@
 
 use crate::state::body::MassProperties;
 use glam::{Mat3, Vec3};
+use prism_mesh::{Mesh, MeshError, POSITION_ATTRIBUTE};
 use prism_physics_geometry::TriangleMesh;
+use prism_render_driver::PrimitiveTopology;
+
+/// Failure while adapting an authored runtime mesh to a collision triangle mesh.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TriMeshAssetError {
+    /// The source mesh failed its own structural and finite-value validation.
+    InvalidSource(MeshError),
+    /// The source did not contain the canonical position semantic.
+    MissingPositions,
+    /// Collision cooking currently requires canonical `Float32x3` positions.
+    UnsupportedPositionFormat,
+    /// Collision cooking requires independent triangles, not strips or lines.
+    UnsupportedTopology(PrimitiveTopology),
+    /// The source contains no complete triangle geometry.
+    EmptyGeometry,
+}
 
 /// A handle into a triangle-mesh arena.
 ///
@@ -77,6 +94,51 @@ pub struct TriMeshData {
 }
 
 impl TriMeshData {
+    /// Builds collision data from a validated canonical runtime mesh.
+    ///
+    /// This deliberately consumes the authored CPU mesh, never a render LOD or
+    /// virtual-geometry cluster, so collision precision and lifetime are
+    /// independent from render residency. Only the position semantic and
+    /// triangle topology participate; visual attributes and material partition
+    /// metadata do not alter collision surfaces.
+    pub fn from_mesh_asset(mesh: &Mesh) -> Result<Self, TriMeshAssetError> {
+        if mesh.primitive_topology() != PrimitiveTopology::TriangleList {
+            return Err(TriMeshAssetError::UnsupportedTopology(
+                mesh.primitive_topology(),
+            ));
+        }
+        mesh.validate().map_err(TriMeshAssetError::InvalidSource)?;
+        let positions = mesh
+            .attributes()
+            .find(|(attribute, _)| attribute.name == POSITION_ATTRIBUTE)
+            .ok_or(TriMeshAssetError::MissingPositions)?
+            .1
+            .as_positions()
+            .ok_or(TriMeshAssetError::UnsupportedPositionFormat)?;
+        let vertices = positions
+            .iter()
+            .map(|position| Vec3::new(position[0], position[1], position[2]))
+            .collect::<Vec<_>>();
+        let indices = match mesh.indices() {
+            Some(indices) => indices.to_u32(),
+            None => (0..u32::try_from(vertices.len()).map_err(|_| {
+                TriMeshAssetError::InvalidSource(MeshError::CountExceedsU32 {
+                    kind: "vertex",
+                    found: vertices.len(),
+                })
+            })?)
+                .collect(),
+        };
+        if indices.is_empty() {
+            return Err(TriMeshAssetError::EmptyGeometry);
+        }
+        let triangles = indices
+            .chunks_exact(3)
+            .map(|triangle| [triangle[0], triangle[1], triangle[2]])
+            .collect();
+        Ok(Self::new(vertices, triangles))
+    }
+
     /// Builds mesh data from a vertex buffer and triangle index triples.
     ///
     /// The vertices and indices are handed to
@@ -228,6 +290,62 @@ fn compute_unit_density_mass(mesh: &TriangleMesh) -> (f32, Vec3) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use prism_mesh::{MeshVertexAttribute, VertexAttributeValues};
+    use prism_render_driver::VertexFormat;
+
+    fn authored_mesh(topology: PrimitiveTopology) -> Mesh {
+        let mut mesh = Mesh::new(topology);
+        mesh.insert_attribute(
+            MeshVertexAttribute::new(POSITION_ATTRIBUTE, VertexFormat::Float32x3, 0),
+            VertexAttributeValues::Float32x3(vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+            ]),
+        )
+        .unwrap();
+        mesh
+    }
+
+    #[test]
+    fn mesh_asset_adapter_preserves_authored_triangle_geometry() {
+        let mesh = authored_mesh(PrimitiveTopology::TriangleList);
+        let collision = TriMeshData::from_mesh_asset(&mesh).unwrap();
+        assert_eq!(collision.mesh().triangle_count(), 1);
+        assert_eq!(
+            collision.mesh().triangle(0),
+            Some([
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+            ])
+        );
+    }
+
+    #[test]
+    fn mesh_asset_adapter_rejects_non_triangle_topology() {
+        let mesh = authored_mesh(PrimitiveTopology::LineList);
+        assert!(matches!(
+            TriMeshData::from_mesh_asset(&mesh),
+            Err(TriMeshAssetError::UnsupportedTopology(
+                PrimitiveTopology::LineList
+            ))
+        ));
+    }
+
+    #[test]
+    fn mesh_asset_adapter_requires_position_semantic() {
+        let mut mesh = Mesh::new(PrimitiveTopology::TriangleList);
+        mesh.insert_attribute(
+            MeshVertexAttribute::new("Other", VertexFormat::Float32x3, 0),
+            VertexAttributeValues::Float32x3(vec![[0.0, 0.0, 0.0]; 3]),
+        )
+        .unwrap();
+        assert!(matches!(
+            TriMeshData::from_mesh_asset(&mesh),
+            Err(TriMeshAssetError::MissingPositions)
+        ));
+    }
 
     /// Builds the 8 corners and 12 triangles of an axis-aligned cube centred at
     /// the origin with the given half-extent, wound counter-clockwise (outward).

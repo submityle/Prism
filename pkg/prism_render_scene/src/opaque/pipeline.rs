@@ -9,14 +9,18 @@ use bevy_shader::Shader;
 
 use crate::{buffers::GpuSceneBindGroup, MaterialBindGroup};
 
+#[repr(u32)]
 #[derive(Resource, Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub enum GpuSceneDebugView {
     #[default]
-    Shaded,
-    InstanceId,
-    GeometryId,
-    MaterialId,
-    Motion,
+    Shaded = 0,
+    InstanceId = 1,
+    GeometryId = 2,
+    MaterialId = 3,
+    Motion = 4,
+    /// Visualizes the transformed vertex normal when the mesh provides normals.
+    /// Missing or degenerate normals are rendered magenta by the shader.
+    WorldNormal = 5,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -69,7 +73,7 @@ impl SpecializedMeshPipeline for GpuSceneOpaquePipeline {
         if key.has_uvs {
             shader_defs.push("VERTEX_UVS".into());
         }
-        for debug_view in 1..=GpuSceneDebugView::Motion as u32 {
+        for debug_view in 1..=GpuSceneDebugView::WorldNormal as u32 {
             shader_defs.push(bevy_shader::ShaderDefVal::Bool(
                 format!("PRISM_DEBUG_VIEW_{debug_view}").into(),
                 key.debug as u32 == debug_view,
@@ -185,7 +189,7 @@ mod tests {
         let lobe_sampling = &lobe_sampling[lobe_sampling
             .find("const LS_SEED_SALT")
             .expect("lobe_sampling.wesl must define LS_SEED_SALT")..];
-        let unpack = include_str!("../shaders/material_unpack.wesl");
+        let unpack = prism_render_material::shaders::MATERIAL_UNPACK_SHADER_SOURCE;
         let unpack = &unpack[unpack
             .find("const PRISM_LOBE_EMISSION")
             .expect("material_unpack.wesl must define PRISM_LOBE_EMISSION")..];
@@ -228,11 +232,11 @@ fn decompress_vertex_position(
             ),
         );
         for compressed in [false, true] {
-            for debug_view in 0..=GpuSceneDebugView::Motion as u32 {
+            for debug_view in 0..=GpuSceneDebugView::WorldNormal as u32 {
                 for normals in [false, true] {
                     for uvs in [false, true] {
                         let mut defs = Vec::new();
-                        for candidate in 1..=GpuSceneDebugView::Motion as u32 {
+                        for candidate in 1..=GpuSceneDebugView::WorldNormal as u32 {
                             defs.push(ShaderDefVal::Bool(
                                 format!("PRISM_DEBUG_VIEW_{candidate}").into(),
                                 debug_view == candidate,

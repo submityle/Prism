@@ -142,10 +142,11 @@ fn vertex(vertex: Vertex) -> VertexOutput {
             world_from_local[2].xyz,
         );
         let transformed_normal = inverse_transpose_3x3(linear_world_from_local) * vertex.normal;
+        let normal_length_squared = dot(transformed_normal, transformed_normal);
         out.world_normal = select(
-            vec3<f32>(0.0, 1.0, 0.0),
-            normalize(transformed_normal),
-            dot(transformed_normal, transformed_normal) > 1.0e-12,
+            vec3<f32>(0.0),
+            transformed_normal * inverseSqrt(max(normal_length_squared, 1.0e-12)),
+            normal_length_squared > 1.0e-12,
         );
     } @else {
         out.world_normal = vec3<f32>(0.0, 1.0, 0.0);
@@ -174,6 +175,9 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     @else if(PRISM_DEBUG_VIEW_4) {
         let previous = affine3_to_square(scene_previous_transforms[safe_scene_index].world_from_local);
         out.debug_color = abs((world_from_local[3] - previous[3]).xyz);
+    } @else if(PRISM_DEBUG_VIEW_5) {
+        // World-normal visualization does not depend on material parameters.
+        out.debug_color = vec3<f32>(0.0);
     } @else {
         let header = material_headers[out.material_index];
         out.debug_color = load_surface_parameters(header.parameter_offset, header.lobe_mask).base_color.rgb;
@@ -184,6 +188,21 @@ fn vertex(vertex: Vertex) -> VertexOutput {
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     if in.valid == 0u { discard; }
+    @if(PRISM_DEBUG_VIEW_5) {
+        @if(VERTEX_NORMALS) {
+            let normal_length_squared = dot(in.world_normal, in.world_normal);
+            let normal = in.world_normal * inverseSqrt(max(normal_length_squared, 1.0e-12));
+            let encoded = normal * 0.5 + vec3<f32>(0.5);
+            return select(
+                vec4<f32>(1.0, 0.0, 1.0, 1.0),
+                vec4<f32>(encoded, 1.0),
+                normal_length_squared > 1.0e-12,
+            );
+        } @else {
+            // Missing mesh normals are data absence, not a synthetic up-vector.
+            return vec4<f32>(1.0, 0.0, 1.0, 1.0);
+        }
+    }
     @if(PRISM_DEBUG_VIEW_1 || PRISM_DEBUG_VIEW_2 || PRISM_DEBUG_VIEW_3 || PRISM_DEBUG_VIEW_4) {
         return vec4<f32>(in.debug_color, 1.0);
     }

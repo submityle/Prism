@@ -728,6 +728,8 @@ atlas caster-depth 与 shading resolve 绑定已经由 `prism_render_scene::shad
 
 运行时绑定由 `MeshDerivedArtifact` 传递制品 key、kind 和 schema。绑定校验失败时返回结构化错误，不允许把当前渲染 LOD、虚拟 Cluster 或过期 revision 当作碰撞/导航/SDF/OMM 输入；这保证派生消费者与渲染消费者共享几何 revision，但保持各自产物的精度和生命周期。
 
+物理三角网格现通过 `TriMeshData::from_mesh_asset(&prism_mesh::Mesh)` 接收规范 Mesh IR：先要求 `TriangleList`，再执行 Mesh 完整验证，并要求 `Vertex_Position: Float32x3`，从原始索引（或非索引顺序）构建物理 BVH。该适配器显式拒绝错误 Mesh、缺少位置、位置格式不支持、非三角形拓扑及空几何；它不从渲染 LOD、形变缓存或虚拟 Cluster 猜测碰撞输入。`prism_physics_core/tests/mesh_asset_adapter.rs` 覆盖有效三角形保真、缺失 canonical position 和不支持拓扑，定向集成测试 3 项通过，`cargo check -p prism_physics_core --lib` 通过。物理产物因此有稳定的独立生命周期；带 Artifact DAG key/kind/schema 的资产发布和运行时 stale-revision 替换策略仍须由资产构建/场景物理绑定层接入后，才可计为端到端派生产物闭环。
+
 ## 16. 压缩与带宽
 
 - **页压缩**：虚拟几何页存储时压缩（zstd/GDeflate 形态）；解压可 CPU 或 GPU 直通（`prism_gdeflate_gpu` 的既有范式：并行去交错在 GPU，串行 inflate 在 CPU，或反之，以实测为准）。
@@ -1102,11 +1104,11 @@ pub struct DeformationBudget { pub vertices_per_frame: u32, pub blas_refits_per_
 | 布局与标准路径 | 同属性集产生确定布局，上传字节与 draw 布局一致 | CPU 契约与 Metal 标准/半精度分流 8×8 像素测试通过；不等同于全档位 Golden 图集 |
 | 虚拟几何 | 固定 Cluster、CLST v3、QEM LOD、CPU 计划、页 ABI、LOD/cull/raster GPU twin 一致 | `prism_asset_build_core --lib` 136 项、`virtual_geometry_lod` 定向 12 项通过；属性感知简化保留精确源顶点与全部 typed 属性；原始 CLST v3 vertex-pulling render pass 已通过颜色读回，整页 IO 一致不再被误写成属性 shader 着色证据，但仍不替代完整场景 Golden 图 |
 | 形变 | Skin/Morph、缓存、预算与深度/阴影/速度/RT 消费一致 | 批量 Morph/LBS/修正的 CPU/GPU 对照（含 50,000 顶点）与 16×16 current/previous 直接绘制通过；数学蒙皮 parity 4 项通过。全部引擎 pass/RT 消费接线和跨档位 Golden 图不由这些独立测试证明 |
-| 多消费者绑定 | 主视图、深度、阴影、Motion Vector、RT、Collision、Derived Geometry 使用统一身份与明确回退 | `geometry::consumer`、`prism_render_app::mesh::consumer` 与 `prism_render_scene::geometry::consumer` 契约测试；场景侧实际主视图、Visibility、透明、阴影和 VSM draw 在取 allocator slice 前统一校验 `MainView`/`Shadow`。形变历史、RT/Collision/Derived 的具体制品仍按各自输入协议选择，不得伪装为静态场景 draw 已覆盖 |
+| 多消费者绑定 | 主视图、深度、阴影、Motion Vector、RT、Collision、Derived Geometry 使用统一身份与明确回退 | `geometry::consumer`、`prism_render_app::mesh::consumer` 与 `prism_render_scene::geometry::consumer` 契约测试；场景侧实际主视图、Visibility、透明、阴影和 VSM draw 在取 allocator slice 前统一校验 `MainView`/`Shadow`。Collision 已有 canonical Mesh IR → physics BVH 的验证适配器（3 项定向集成测试通过），但 Artifact DAG 发布、绑定和 revision 替换尚非端到端闭环；形变历史、RT 与其他 Derived 制品仍按各自输入协议选择，不得伪装为静态场景 draw 已覆盖 |
 | 光追派生 | OMM 与派生几何使用版本化资产契约；无 RT 能力时选择光栅路径 | OMM 强制 GPU parity 通过；不把它扩张为完整 RT 场景画质结论 |
 | 带宽与性能 | §18 固定场景输出 P50/P95/P99、GPU timestamp、VRAM、上传、缺页与功耗字段 | 已记录 CPU 构建/LOD P50/P95/P99；完整场景 GPU 字段无本轮 artifact，因此预算表保持回归门槛而非达标声明 |
 | 维护性 | 扩展点遵守 §20.2，schema/ABI 显式版本化，错误类型稳定 | CLST v3/v2 兼容、稳定格式标签、缓存失效、精确 framing 与类型化错误由代码和测试锁定 |
-| 诊断 | 每条降级可解释，诊断字段可导出 | 通用 `GpuSceneDebugView` 与状态机诊断作为现有入口；Mesh 专用视图只有产生实际捕获物时才计入图像证据 |
+| 诊断 | 每条降级可解释，诊断字段可导出 | 通用 `GpuSceneDebugView` 与状态机诊断作为现有入口；opaque GpuScene Debug View 已增加 World Normal 模式，复用实例变换后的顶点法线，缺失/退化法线显示洋红色；WESL 全特化矩阵通过。尚无真实运行时捕获物，因此不将它计为图像回归证据；Cluster/LOD/Cut/page residency 可视化仍未接入 |
 
 ## 27. 结论
 
