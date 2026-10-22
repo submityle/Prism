@@ -4,7 +4,7 @@
 //! scene truth, proxy decoding, GPU submission, and renderer graph ownership
 //! remain with their respective callers.
 
-use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::fmt;
 
@@ -237,11 +237,14 @@ impl HlodRuntime {
                 limit: self.budget.max_output_bytes,
             });
         }
-        let mut ordered = requests.to_vec();
+        let mut ordered = Vec::new();
+        ordered
+            .try_reserve_exact(requests.len())
+            .map_err(|_| HlodRuntimeError::AllocationFailed)?;
+        ordered.extend_from_slice(requests);
         ordered.sort_unstable_by_key(|request| request.cluster_id);
-        let mut seen = BTreeSet::new();
-        for request in &ordered {
-            if !seen.insert(request.cluster_id) {
+        for (index, request) in ordered.iter().enumerate() {
+            if index != 0 && ordered[index - 1].cluster_id == request.cluster_id {
                 return Err(HlodRuntimeError::DuplicateRequest {
                     cluster_id: request.cluster_id,
                 });
@@ -257,7 +260,10 @@ impl HlodRuntime {
         selections
             .try_reserve_exact(ordered.len())
             .map_err(|_| HlodRuntimeError::AllocationFailed)?;
-        let mut next_levels = BTreeMap::new();
+        let mut next_levels = Vec::new();
+        next_levels
+            .try_reserve_exact(ordered.len())
+            .map_err(|_| HlodRuntimeError::AllocationFailed)?;
         for request in ordered {
             let cluster = self
                 .clusters
@@ -279,10 +285,12 @@ impl HlodRuntime {
                 asset_key,
                 transition,
             });
-            next_levels.insert(request.cluster_id, level);
+            next_levels.push((request.cluster_id, level));
         }
 
-        self.active_levels.extend(next_levels);
+        for (cluster_id, level) in next_levels {
+            self.active_levels.insert(cluster_id, level);
+        }
         Ok(HlodSelectionPlan { selections })
     }
 }

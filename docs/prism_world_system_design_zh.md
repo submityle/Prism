@@ -426,6 +426,12 @@ residency crate 驱动 scene §11.4 的「簇声明 + 切换契约」，代理�
 
 跨对象聚合簇的代理遵循 §10.1 的派生缓存不变量：丢失可按簇成员的 scene 内容重烘，永不作真相被编辑，编辑经物化后的 Tier A 实例回写 override delta → 标脏该簇 → 异步重烘代理（§16）。
 
+### 10.6 当前 runtime HLOD 选择器边界
+
+`pkg/prism_world_runtime/src/hlod_runtime.rs` 已实现有界的 `HlodRuntime`：按稳定 cluster id 排序 distance request、调用 `prism_world_residency::HlodCluster` 选择 representation，并返回切换 transition；活动 level 仅在整批 plan 成功后提交。规划器在排序后以相邻项检查重复请求，并用按请求数预留的临时 `Vec` 收集选择及待提交 level，避免为这两项工作另建 `BTreeSet`/`BTreeMap`；复杂度仍包含请求排序与 catalog/active-level 的有序树查找，不能描述成线性总成本。定向验证覆盖确定性顺序、迟滞、重复输入及失败不提交状态；这不是墙钟性能基准。
+
+此 runtime 仅消费已生成的 `HlodCluster` 声明并规划距离驱动的层级切换；不生成/烘焙代理、不计算屏幕空间误差、不接 scene residency、proxy asset streaming 或 renderer dither/fade，也不实现 §10.4 的物化穿透。因此它不等同于本章定义的完整 HLOD 产品链路，`WorldPartitionCapability::HierarchicalLod` 仍应保持不支持，直到这些边界有真实集成与验收。
+
 ---
 
 ## 11. prism_world_persist：事务日志 / CRDT / 时间轴 / 存档
