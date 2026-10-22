@@ -207,7 +207,7 @@ fn selection_snapshot_is_current(
     selections: &BTreeMap<GenerationalHandle, GeometryRepresentationSelection>,
 ) -> bool {
     selections.iter().all(|(scene_handle, selection)| {
-        let Some((generation, Some(record))) = scene.record_at(scene_handle.index) else {
+        let Some((generation, Some(record))) = scene.row_at(scene_handle.index) else {
             return false;
         };
         selection.version == crate::geometry::GEOMETRY_REPRESENTATION_CONTRACT_VERSION
@@ -348,7 +348,7 @@ pub(crate) fn collect_scene_acceleration_with_representations(
 
     let capacity = scene.capacity();
     for index in 0..capacity as u32 {
-        let Some((generation, Some(record))) = scene.record_at(index) else {
+        let Some((generation, Some(record))) = scene.row_at(index) else {
             continue;
         };
         let scene_handle = GenerationalHandle { index, generation };
@@ -612,7 +612,7 @@ mod tests {
     ) -> SceneAcceleration {
         let selections = (0..scene.capacity() as u32)
             .filter_map(|index| {
-                let (generation, record) = scene.record_at(index)?;
+                let (generation, record) = scene.row_at(index)?;
                 let record = record.as_ref()?;
                 let handle = GenerationalHandle::new(index, generation);
                 Some((

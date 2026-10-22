@@ -321,14 +321,6 @@ impl CpuRenderScene {
         Some((slot.generation, slot.record.as_ref()))
     }
 
-    /// Returns the immutable generation and optional record stored at `index`.
-    ///
-    /// This compatibility spelling remains available to existing retained-scene
-    /// readers; new upload code should use [`Self::row_at`].
-    pub fn record_at(&self, index: u32) -> Option<(u32, Option<&InstanceRecord>)> {
-        self.row_at(index)
-    }
-
     fn validate_slot(&self, handle: SceneHandle) -> Result<&CpuSceneSlot, SceneApplyError> {
         let slot = &self.slots[handle.index as usize];
         if slot.generation != handle.generation {
