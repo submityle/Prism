@@ -196,6 +196,48 @@ fn a_reused_buffer_keeps_capacity_for_a_later_growth() {
     assert_eq!(device.live_resource_count(), 1);
 }
 
+#[test]
+fn a_reused_index_buffer_binds_only_the_current_index_upload() {
+    let (device, queue) = null_device();
+    let id = AssetId::new(prism_asset::AssetIndex::from_parts(1, 1));
+    let indexed_mesh = |indices| {
+        Mesh::new(PrimitiveTopology::TriangleList)
+            .with_attribute(
+                POSITION,
+                VertexAttributeValues::Float32x3(vec![
+                    [0.0, 0.0, 0.0],
+                    [1.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0],
+                    [1.0, 1.0, 0.0],
+                ]),
+            )
+            .expect("positions fit")
+            .indexed(Indices::Uint16(indices))
+    };
+
+    let first = RenderMesh::prepare(
+        &indexed_mesh(vec![0, 1, 2, 2, 3, 0]),
+        id,
+        &device,
+        &queue,
+        None,
+    )
+    .expect("initial indexed mesh prepares");
+    assert_eq!(first.buffers.index_size, Some(6 * 2));
+    let smaller = RenderMesh::prepare(
+        &indexed_mesh(vec![0, 1, 2]),
+        id,
+        &device,
+        &queue,
+        Some(&first),
+    )
+    .expect("smaller index stream reuses its allocation");
+    assert_eq!(smaller.buffers.indices, first.buffers.indices);
+    assert_eq!(smaller.buffers.index_size, Some(3 * 2));
+    assert_eq!(smaller.index_capacity, first.index_capacity);
+    assert_eq!(device.live_resource_count(), 2);
+}
+
 /// A mesh that outgrows its buffer, or stops being indexed, releases what it no
 /// longer uses — the ownership rule the trait documents.
 #[test]
