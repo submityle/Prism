@@ -1132,3 +1132,5 @@ OFPA 每对象文件化（§15、world §11.1）让多人并行编辑同一世�
 **2026-10-23 selective nested-tree reload 验证**：`CARGO_INCREMENTAL=0 RUSTFLAGS='-C debuginfo=0' cargo test --target-dir /private/tmp/prism-nested-index-target -j 1 -p prism_world_runtime --features scene_templates --lib scene_template_provider::tests::registry_indexes_roots_and_leaves_unmatched_tree_handles_stable` → **1 项通过**；确认仅匹配 root-template 的树替换、无关 tree handle 保持稳定。
 
 **2026-10-23 M5 scheduler commit 验证**：`CARGO_INCREMENTAL=0 RUSTFLAGS='-C debuginfo=0' cargo test --target-dir /private/tmp/prism-scene-residency-target -j 1 -p prism_scene --no-default-features streaming::tests` → **3 项通过**；`cargo check --target-dir /private/tmp/prism-scene-residency-target -j 1 -p prism_scene --no-default-features` 通过。覆盖预算排序、单批成功、重复 identity 和 stale source fail-closed。
+
+**2026-10-23 M5 CPU cell proxy reload 验证**：`cargo test -p prism_world_runtime --features proxy_host --lib proxy_cell_host_tests --offline` → **21 项通过**；覆盖 same-sector 成功 replacement、host failure 保留旧 proxy generation，以及 coordinator、解码、容量和 panic 边界。该验证只证明 `ProxyCellHost`/`ProxyRegistry` seam，不证明 scheduler action 的通用 ECS/proxy 执行器、ECS 物化/反物化或百万规模性能。
