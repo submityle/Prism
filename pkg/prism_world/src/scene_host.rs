@@ -1274,6 +1274,46 @@ mod tests {
     }
 
     #[test]
+    fn residency_batch_resolves_all_targets_before_provider_work() {
+        let mut world = World::new();
+        let sector = SectorId::new(0, 0, 0, 0);
+        let mut host = host(&mut world);
+        crate::SceneHost::load_cell(&mut host, sector).unwrap();
+        host.bind_residency(
+            41,
+            ResidencyBinding {
+                sector,
+                local: LocalEntityId::new(0),
+            },
+        )
+        .unwrap();
+
+        let transitions = [
+            ResidencyTransition {
+                id: 41,
+                from: prism_world_residency::ResidencyState::TierC,
+                to: prism_world_residency::ResidencyState::TierA,
+            },
+            ResidencyTransition {
+                id: 99,
+                from: prism_world_residency::ResidencyState::TierC,
+                to: prism_world_residency::ResidencyState::TierA,
+            },
+        ];
+        let result = crate::SceneHost::transition_residency_batch(&mut host, &transitions);
+        assert_eq!(
+            result,
+            Err(ResidencyBatchError {
+                completed: 0,
+                error: SceneEcsHostError::ResidencyNotBound(99),
+            })
+        );
+        assert!(host.provider().events.is_empty());
+        let root = host.loaded_cell(sector).unwrap().root.unwrap();
+        assert_eq!(host.world().get::<Marker>(root), Some(&Marker(7)));
+    }
+
+    #[test]
     fn invalid_targets_are_rejected_and_unload_clears_bindings() {
         let mut world = World::new();
         let sector = SectorId::new(0, 0, 0, 0);
