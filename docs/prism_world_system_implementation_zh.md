@@ -256,6 +256,8 @@ release两组完整记录共864次dispatch逐全键/位置对CPU，10k/100k候�
 
 ### M6-M8：地形、仿真与网络边界
 
+2026-10-23 状态更正与复验：当前 planar `HeightfieldMesh::apply_lod_seam_plan` 已支持四边任意 coarse-edge 子集及相邻边 corner fan；紧随其后的“相邻 coarse-edge corner fan 不支持”旧记录已过期，以本条及 `prism_world_terrain_lod_seam_zh.md` 为准。Apple M2/Metal `cargo test -p prism_world_gpu --features gpu --test terrain_draw --offline -- --nocapture --test-threads=1` 为 2 passed：新增 81 顶点/360 索引 corner-fan indexed raster，完整 64² RGBA8 读回均验证覆盖、法线和 alpha。当前 checkout `cargo test -p prism_world_runtime --lib --offline` 为 187 passed，`cargo test -p prism_world_gpu --features gpu --lib --offline` 为 139 passed；`LayeredCellManifest::admitted_layers` 先前报告的 feature 编译错误在当前 checkout 未复现。此处验证不等于 terrain renderer graph/Scene-ECS 产品接线或完整 World 验收。
+
 - `prism_world_terrain`：cube-sphere 六面映射、四叉树 tile/跨面邻接、连续 screen-space LOD/morph、i64/Q32.32 局部坐标误差界、确定性高度采样和小端体素布局。
 - M6 纵切已补齐：`TerrainStreamAdapter` 将 `TileKey` 映射为稳定 `SectorId`，计算保守行星毫米 AABB，生成稳定 `CellManifest`/derived hash，并可直接交给 `StreamScheduler`；12 项 terrain 测试、fmt/check/clippy 通过。
 - M6 可执行 heightfield kernel：全量烘焙为带正毫米比例的 signed i16 高度，超范围明确失败；`BakeLimits` 在采样和分配前限制数量/载荷字节，分配失败可返回错误。局部脏区按网格 floor/ceil 保守覆盖，先完成 scratch 采样再提交；失败不改变高度或 revision。`GridChange` 是单个稳定 cache owner 的有序 token，不是跨缓存的全局身份。

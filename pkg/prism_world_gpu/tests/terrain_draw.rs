@@ -6,7 +6,8 @@
 use prism_world_gpu::gpu::GpuContext;
 use prism_world_terrain::{
     BakeLimits, CubeFace, DirtyRegion, HeightSample, HeightSampleValue, HeightSampler,
-    HeightfieldMesh, HeightfieldSpec, HeightfieldTile, TileKey,
+    HeightfieldLodSeamPlan, HeightfieldMesh, HeightfieldSpec, HeightfieldTile, LodSeamCoverage,
+    LodSeamLimits, LodSeamNeighbor, TileEdge, TileKey,
 };
 use wgpu::util::DeviceExt;
 
@@ -312,4 +313,56 @@ fn native_terrain_draw_and_local_vertex_upload_change_only_the_patch() {
         quantile(99)
     );
     eprintln!("[terrain_draw] vertices=81 indices=384 full_upload={} patch_upload={uploaded} rgba_readback={}", vertices.len(), raised.len());
+}
+
+#[test]
+fn adjacent_coarse_lod_corner_fan_rasterizes_with_backface_culling() {
+    let tile = TileKey::new(CubeFace::PositiveZ, 3, 3, 2).unwrap();
+    let field = HeightfieldTile::bake(
+        tile,
+        HeightfieldSpec::new(9, 1).unwrap(),
+        &ConstantHeight(0),
+        LIMITS,
+    )
+    .unwrap();
+    let limits = LodSeamLimits {
+        max_segments: 8,
+        max_vertices: 128,
+        max_indices: 1024,
+        max_bytes: 16_384,
+    };
+    let neighbors = [TileEdge::East, TileEdge::South].map(|edge| {
+        LodSeamNeighbor::with_boundary(
+            edge,
+            tile.neighbor(edge).parent().unwrap(),
+            8,
+            LodSeamCoverage::full(8),
+        )
+    });
+    let plan = HeightfieldLodSeamPlan::build_strict(tile, 8, &neighbors, limits).unwrap();
+    let mut geometry = HeightfieldMesh::build(&field, [2.0, 2.0], LIMITS).unwrap();
+    geometry.apply_lod_seam_plan(&plan, 16_384).unwrap();
+    assert_eq!(geometry.indices().len(), 360);
+    let native = geometry.into_mesh().unwrap();
+    let draw = TerrainDraw::new(
+        &native.vertex_buffer_data(),
+        &native.indices().unwrap().to_bytes(),
+        native.indices().unwrap().len() as u32,
+    );
+    let rgba = draw.draw();
+    for (pixel_index, pixel) in rgba.chunks_exact(4).enumerate() {
+        assert_eq!(
+            pixel[0], 64,
+            "unculled terrain coverage at pixel {pixel_index}"
+        );
+        assert_eq!(pixel[1], 128, "terrain normal at pixel {pixel_index}");
+        assert_eq!(pixel[3], 255, "terrain alpha at pixel {pixel_index}");
+    }
+    eprintln!(
+        "[terrain_lod_corner_gpu] adapter={:?} vertices={} indices={} rgba_readback={}",
+        draw.context.evidence(),
+        native.vertex_count(),
+        native.indices().unwrap().len(),
+        rgba.len()
+    );
 }
