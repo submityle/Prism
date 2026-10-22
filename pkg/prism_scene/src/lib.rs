@@ -78,6 +78,7 @@ pub mod overrides;
 pub mod partition;
 pub mod path;
 pub mod persistence;
+pub mod persistence_codec;
 pub mod plan;
 pub mod plan_codec;
 #[cfg(feature = "materialize")]
@@ -130,6 +131,9 @@ pub use path::{FieldPath, FieldSegment};
 pub use persistence::{
     EntityBinding, PersistedPropertyOverride, PersistenceCapture, PersistenceDiagnostic,
     PersistenceError, PersistentEntityMap, PersistentOverrideSet, SceneInstancePersistence,
+};
+pub use persistence_codec::{
+    decode_persistence, encode_persistence, PersistenceCodecError, PersistenceDecodeLimits,
 };
 pub use plan::{ArchetypeGroup, Column, FieldSlot, InstantiationPlan, PlanError};
 pub use plan_codec::{decode_plan, encode_plan, PlanCodecError, PlanDecodeLimits};
@@ -187,6 +191,9 @@ pub mod prelude {
     pub use crate::persistence::{
         EntityBinding, PersistedPropertyOverride, PersistenceCapture, PersistenceDiagnostic,
         PersistenceError, PersistentEntityMap, PersistentOverrideSet, SceneInstancePersistence,
+    };
+    pub use crate::persistence_codec::{
+        decode_persistence, encode_persistence, PersistenceCodecError, PersistenceDecodeLimits,
     };
     pub use crate::plan::{ArchetypeGroup, Column, FieldSlot, InstantiationPlan, PlanError};
     pub use crate::plan_codec::{decode_plan, encode_plan, PlanCodecError, PlanDecodeLimits};
