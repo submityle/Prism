@@ -300,13 +300,18 @@ impl PlanetHeightfieldMesh {
     /// supplied neighbor must already contain the matching shared edge; a
     /// mismatch fails before any mesh state changes. Neighbor meshes affected
     /// by the shared edge must be updated by their owner as a separate tile
-    /// operation.
+    /// operation. An active LOD seam/morph must be returned to alpha zero and
+    /// cleared before applying a heightfield change, so the incremental update
+    /// never mixes morphed and newly projected vertices.
     pub fn update(
         &mut self,
         field: &HeightfieldTile,
         change: crate::GridChange,
         neighborhood: PlanetHeightfieldNormalNeighborhood<'_>,
     ) -> Result<crate::SampleBounds, BakeError<Infallible>> {
+        if self.lod_seams_applied {
+            return Err(BakeError::InvalidGeometry);
+        }
         if !change.matches(field, self.cache_id, self.revision)
             || self.tile != field.tile()
             || self.spec != field.spec()
@@ -574,6 +579,226 @@ impl PlanetHeightfieldMesh {
                 Some(transition.neighbor());
         }
         Ok(())
+    }
+
+    /// Applies the continuous 2:1 morph targets carried by a resident seam plan.
+    ///
+    /// Odd fine-edge vertices move along the local 3D chord toward the midpoint
+    /// of their two coarse interface endpoints. The operation updates only
+    /// those boundary positions and the adjacent normal stencil; it allocates
+    /// no mesh buffers. All identities, neighbor edges, coordinates, positions
+    /// and normals are preflighted before the first write.
+    pub fn apply_lod_morph(
+        &mut self,
+        field: &HeightfieldTile,
+        plan: &crate::HeightfieldLodSeamPlan,
+        alpha: f32,
+    ) -> Result<(), BakeError<Infallible>> {
+        if !alpha.is_finite()
+            || !(0.0..=1.0).contains(&alpha)
+            || !self.lod_seams_applied
+            || plan.tile() != self.tile
+            || field.tile() != self.tile
+            || field.cache_id() != self.cache_id
+            || field.revision() != self.revision
+            || field.spec() != self.spec
+            || plan.segments().checked_add(1) != Some(self.spec.samples_per_edge())
+        {
+            return Err(BakeError::InvalidGeometry);
+        }
+        let mut plan_neighbors = [None; 4];
+        for transition in plan.transitions() {
+            let edge = planet_mesh_edge_index(transition.edge());
+            if plan_neighbors[edge]
+                .replace(transition.neighbor())
+                .is_some()
+            {
+                return Err(BakeError::InvalidGeometry);
+            }
+        }
+        if plan_neighbors != self.lod_seam_neighbors {
+            return Err(BakeError::InvalidGeometry);
+        }
+        let side = self.spec.samples_per_edge();
+        for transition in plan.transitions() {
+            for morph in transition.morph_vertices() {
+                for [x, y] in [morph.source, morph.target_a, morph.target_b] {
+                    if x >= side || y >= side {
+                        return Err(BakeError::InvalidGeometry);
+                    }
+                }
+                let position = self.planet_morphed_position(field, plan, morph.source, alpha)?;
+                if position.iter().any(|coordinate| !coordinate.is_finite()) {
+                    return Err(BakeError::InvalidGeometry);
+                }
+            }
+        }
+        for transition in plan.transitions() {
+            for morph in transition.morph_vertices() {
+                let [x, y] = morph.source;
+                for normal_y in y.saturating_sub(1)..=(y + 1).min(side - 1) {
+                    for normal_x in x.saturating_sub(1)..=(x + 1).min(side - 1) {
+                        let _ =
+                            self.planet_morphed_normal(field, plan, [normal_x, normal_y], alpha)?;
+                    }
+                }
+            }
+        }
+
+        for transition in plan.transitions() {
+            for morph in transition.morph_vertices() {
+                let position = self.planet_morphed_position(field, plan, morph.source, alpha)?;
+                let index = (morph.source[1] * side + morph.source[0]) as usize;
+                self.positions[index] = position;
+            }
+        }
+        for transition in plan.transitions() {
+            for morph in transition.morph_vertices() {
+                let [x, y] = morph.source;
+                for normal_y in y.saturating_sub(1)..=(y + 1).min(side - 1) {
+                    for normal_x in x.saturating_sub(1)..=(x + 1).min(side - 1) {
+                        let normal = self.planet_normal_from_positions([normal_x, normal_y])?;
+                        let index = (normal_y * side + normal_x) as usize;
+                        self.normals[index] = normal;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn planet_morphed_position(
+        &self,
+        field: &HeightfieldTile,
+        plan: &crate::HeightfieldLodSeamPlan,
+        grid: [u32; 2],
+        alpha: f32,
+    ) -> Result<[f32; 3], BakeError<Infallible>> {
+        let side = self.spec.samples_per_edge();
+        let index = (grid[1] * side + grid[0]) as usize;
+        if self.positions.get(index).is_none() {
+            return Err(BakeError::InvalidGeometry);
+        }
+        for transition in plan.transitions() {
+            let parameter = match transition.edge() {
+                TileEdge::West if grid[0] == 0 => Some(grid[1]),
+                TileEdge::East if grid[0] + 1 == side => Some(grid[1]),
+                TileEdge::South if grid[1] == 0 => Some(grid[0]),
+                TileEdge::North if grid[1] + 1 == side => Some(grid[0]),
+                _ => None,
+            };
+            let Some(parameter) = parameter.filter(|parameter| parameter % 2 == 1) else {
+                continue;
+            };
+            let morph = transition
+                .morph_vertices()
+                .get((parameter / 2) as usize)
+                .ok_or(BakeError::InvalidGeometry)?;
+            if morph.source != grid {
+                return Err(BakeError::InvalidGeometry);
+            }
+            let a_index = (morph.target_a[1] * side + morph.target_a[0]) as usize;
+            let b_index = (morph.target_b[1] * side + morph.target_b[0]) as usize;
+            let a = self
+                .positions
+                .get(a_index)
+                .ok_or(BakeError::InvalidGeometry)?;
+            let b = self
+                .positions
+                .get(b_index)
+                .ok_or(BakeError::InvalidGeometry)?;
+            let source = project_position(field, self.config, grid[0], grid[1])?.0;
+            let source = source.map(f64::from);
+            let a = a.map(f64::from);
+            let b = b.map(f64::from);
+            let alpha = f64::from(alpha);
+            return Ok(core::array::from_fn(|axis| {
+                (source[axis] + ((a[axis] + b[axis]) * 0.5 - source[axis]) * alpha) as f32
+            }));
+        }
+        Ok(self.positions[index])
+    }
+
+    fn planet_morphed_normal(
+        &self,
+        field: &HeightfieldTile,
+        plan: &crate::HeightfieldLodSeamPlan,
+        grid: [u32; 2],
+        alpha: f32,
+    ) -> Result<[f32; 3], BakeError<Infallible>> {
+        let side = self.spec.samples_per_edge();
+        let [x, y] = grid;
+        let left = self.planet_morphed_position(field, plan, [x.saturating_sub(1), y], alpha)?;
+        let right = self.planet_morphed_position(field, plan, [(x + 1).min(side - 1), y], alpha)?;
+        let down = self.planet_morphed_position(field, plan, [x, y.saturating_sub(1)], alpha)?;
+        let up = self.planet_morphed_position(field, plan, [x, (y + 1).min(side - 1)], alpha)?;
+        let mut normal = cross(
+            subtract(right.map(f64::from), left.map(f64::from)),
+            subtract(up.map(f64::from), down.map(f64::from)),
+        );
+        let length = libm::sqrt(normal.iter().map(|value| value * value).sum());
+        if !length.is_finite() || length <= 0.0 {
+            return Err(BakeError::InvalidGeometry);
+        }
+        normal.iter_mut().for_each(|value| *value /= length);
+        let position = self
+            .planet_morphed_position(field, plan, grid, alpha)?
+            .map(f64::from);
+        let origin = self.config.origin_mm.map(|value| value as f64 * 0.001);
+        let outward = (0..3)
+            .map(|axis| normal[axis] * (position[axis] + origin[axis]))
+            .sum::<f64>();
+        if !outward.is_finite() || outward == 0.0 {
+            return Err(BakeError::InvalidGeometry);
+        }
+        if outward < 0.0 {
+            normal.iter_mut().for_each(|value| *value = -*value);
+        }
+        let result = normal.map(|value| value as f32);
+        if result.iter().any(|value| !value.is_finite()) {
+            return Err(BakeError::InvalidGeometry);
+        }
+        Ok(result)
+    }
+
+    fn planet_normal_from_positions(
+        &self,
+        grid: [u32; 2],
+    ) -> Result<[f32; 3], BakeError<Infallible>> {
+        let side = self.spec.samples_per_edge();
+        let [x, y] = grid;
+        let position = |x: u32, y: u32| self.positions[(y * side + x) as usize].map(f64::from);
+        let mut normal = cross(
+            subtract(
+                position((x + 1).min(side - 1), y),
+                position(x.saturating_sub(1), y),
+            ),
+            subtract(
+                position(x, (y + 1).min(side - 1)),
+                position(x, y.saturating_sub(1)),
+            ),
+        );
+        let length = libm::sqrt(normal.iter().map(|value| value * value).sum());
+        if !length.is_finite() || length <= 0.0 {
+            return Err(BakeError::InvalidGeometry);
+        }
+        normal.iter_mut().for_each(|value| *value /= length);
+        let position = position(x, y);
+        let origin = self.config.origin_mm.map(|value| value as f64 * 0.001);
+        let outward = (0..3)
+            .map(|axis| normal[axis] * (position[axis] + origin[axis]))
+            .sum::<f64>();
+        if !outward.is_finite() || outward == 0.0 {
+            return Err(BakeError::InvalidGeometry);
+        }
+        if outward < 0.0 {
+            normal.iter_mut().for_each(|value| *value = -*value);
+        }
+        let result = normal.map(|value| value as f32);
+        if result.iter().any(|value| !value.is_finite()) {
+            return Err(BakeError::InvalidGeometry);
+        }
+        Ok(result)
     }
 
     /// Restores regular cube-sphere grid triangles before applying another plan.
@@ -849,28 +1074,7 @@ fn project_vertex(
     x: u32,
     y: u32,
 ) -> Result<ProjectedPlanetVertex, BakeError<Infallible>> {
-    let absolute = point(field, config.radius_mm, x, y)?;
-    let mut position = [0.0; 3];
-    let radial_mm = (i128::from(config.radius_mm)
-        + field.height_mm([x, y]).ok_or(BakeError::InvalidGeometry)?) as f64;
-    let mut error_bound_mm: f64 = 0.0;
-    for axis in 0..3 {
-        let local_mm = absolute[axis] - config.origin_mm[axis] as f64;
-        position[axis] = (local_mm * 0.001) as f32;
-        // A deliberately conservative operation-count bound covers rational
-        // UV, normalization, radius/height and subtraction.
-        let arithmetic = 128.0
-            * f64::EPSILON
-            * (absolute[axis].abs()
-                + (config.origin_mm[axis] as f64).abs()
-                + radial_mm.abs()
-                + 1.0);
-        let error = (f64::from(position[axis]) * 1000.0 - local_mm).abs() + arithmetic;
-        if !position[axis].is_finite() || error > config.max_error_mm {
-            return Err(BakeError::InvalidGeometry);
-        }
-        error_bound_mm = error_bound_mm.max(error);
-    }
+    let (position, error_bound_mm) = project_position(field, config, x, y)?;
     let left = derivative_point(field, config.radius_mm, neighborhood, TileEdge::West, x, y)?
         .unwrap_or(point(field, config.radius_mm, x.saturating_sub(1), y)?);
     let right = derivative_point(field, config.radius_mm, neighborhood, TileEdge::East, x, y)?
@@ -899,6 +1103,37 @@ fn project_vertex(
         normal: normal.map(|v| (v / length) as f32),
         error_bound_mm,
     })
+}
+
+fn project_position(
+    field: &HeightfieldTile,
+    config: PlanetMeshConfig,
+    x: u32,
+    y: u32,
+) -> Result<([f32; 3], f64), BakeError<Infallible>> {
+    let absolute = point(field, config.radius_mm, x, y)?;
+    let mut position = [0.0; 3];
+    let radial_mm = (i128::from(config.radius_mm)
+        + field.height_mm([x, y]).ok_or(BakeError::InvalidGeometry)?) as f64;
+    let mut error_bound_mm: f64 = 0.0;
+    for axis in 0..3 {
+        let local_mm = absolute[axis] - config.origin_mm[axis] as f64;
+        position[axis] = (local_mm * 0.001) as f32;
+        // A deliberately conservative operation-count bound covers rational
+        // UV, normalization, radius/height and subtraction.
+        let arithmetic = 128.0
+            * f64::EPSILON
+            * (absolute[axis].abs()
+                + (config.origin_mm[axis] as f64).abs()
+                + radial_mm.abs()
+                + 1.0);
+        let error = (f64::from(position[axis]) * 1000.0 - local_mm).abs() + arithmetic;
+        if !position[axis].is_finite() || error > config.max_error_mm {
+            return Err(BakeError::InvalidGeometry);
+        }
+        error_bound_mm = error_bound_mm.max(error);
+    }
+    Ok((position, error_bound_mm))
 }
 
 fn face_coordinate(tile: TileKey, side: u32, x: u32, y: u32) -> [f64; 2] {
@@ -1283,6 +1518,91 @@ mod tests {
     }
 
     #[test]
+    fn planetary_lod_morph_tracks_chord_midpoints_on_every_face_and_edge() {
+        use crate::{HeightfieldLodSeamPlan, LodSeamCoverage, LodSeamLimits, LodSeamNeighbor};
+
+        let config = PlanetMeshConfig::new(1_000_000, [0, 0, 1_000_000], 1.0).unwrap();
+        let seam_limits = LodSeamLimits {
+            max_segments: 8,
+            max_vertices: 128,
+            max_indices: 1024,
+            max_bytes: 16_384,
+        };
+        for face in CubeFace::ALL {
+            let tile = TileKey::new(face, 3, 3, 3).unwrap();
+            let field =
+                HeightfieldTile::bake(tile, HeightfieldSpec::new(9, 1).unwrap(), &Ramp, LIMITS)
+                    .unwrap();
+            for edge in TileEdge::ALL {
+                let neighbor = tile.neighbor(edge).parent().unwrap();
+                let plan = HeightfieldLodSeamPlan::build_strict(
+                    tile,
+                    8,
+                    &[LodSeamNeighbor::with_boundary(
+                        edge,
+                        neighbor,
+                        8,
+                        LodSeamCoverage::full(8),
+                    )],
+                    seam_limits,
+                )
+                .unwrap();
+                let mut mesh = PlanetHeightfieldMesh::build(&field, config, LIMITS).unwrap();
+                mesh.apply_lod_seam_plan(&plan, 16_384).unwrap();
+                let fine_positions = mesh.positions().to_vec();
+                mesh.apply_lod_morph(&field, &plan, 0.5)
+                    .unwrap_or_else(|error| panic!("{face:?} {edge:?}: {error:?}"));
+                for morph in plan.transitions()[0].morph_vertices() {
+                    let source = (morph.source[1] * 9 + morph.source[0]) as usize;
+                    let a = (morph.target_a[1] * 9 + morph.target_a[0]) as usize;
+                    let b = (morph.target_b[1] * 9 + morph.target_b[0]) as usize;
+                    let expected = core::array::from_fn::<_, 3, _>(|axis| {
+                        (f64::from(fine_positions[source][axis])
+                            + ((f64::from(fine_positions[a][axis])
+                                + f64::from(fine_positions[b][axis]))
+                                * 0.5
+                                - f64::from(fine_positions[source][axis]))
+                                * 0.5) as f32
+                    });
+                    assert_eq!(mesh.positions()[source], expected, "{face:?} {edge:?}");
+                }
+                mesh.apply_lod_morph(&field, &plan, 1.0)
+                    .unwrap_or_else(|error| panic!("{face:?} {edge:?}: {error:?}"));
+                for morph in plan.transitions()[0].morph_vertices() {
+                    let source = (morph.source[1] * 9 + morph.source[0]) as usize;
+                    let a = (morph.target_a[1] * 9 + morph.target_a[0]) as usize;
+                    let b = (morph.target_b[1] * 9 + morph.target_b[0]) as usize;
+                    let expected = core::array::from_fn::<_, 3, _>(|axis| {
+                        (fine_positions[a][axis] + fine_positions[b][axis]) * 0.5
+                    });
+                    assert_eq!(mesh.positions()[source], expected, "{face:?} {edge:?}");
+                }
+                for (position, normal) in mesh.positions().iter().zip(mesh.normals()) {
+                    assert!(normal.iter().all(|component| component.is_finite()));
+                    assert!(
+                        (normal.iter().map(|value| value * value).sum::<f32>() - 1.0).abs() < 1e-5
+                    );
+                    let absolute = core::array::from_fn::<_, 3, _>(|axis| {
+                        position[axis] + config.origin_mm()[axis] as f32 * 0.001
+                    });
+                    assert!(
+                        absolute.iter().zip(normal).map(|(p, n)| p * n).sum::<f32>() > 0.0,
+                        "inward morph normal on {face:?} {edge:?}"
+                    );
+                }
+                mesh.apply_lod_morph(&field, &plan, 0.0).unwrap();
+                assert_eq!(mesh.positions(), fine_positions);
+                let before_invalid = mesh.clone();
+                assert_eq!(
+                    mesh.apply_lod_morph(&field, &plan, f32::NAN),
+                    Err(BakeError::InvalidGeometry)
+                );
+                assert_eq!(mesh, before_invalid);
+            }
+        }
+    }
+
+    #[test]
     fn level_thirty_earth_patch_retains_submillimetre_detail() {
         let tile = TileKey::new(CubeFace::PositiveZ, 30, 1 << 29, 1 << 29).unwrap();
         let config = PlanetMeshConfig::new(6_371_000_000, [0, 0, 6_371_000_000], 0.001).unwrap();
@@ -1392,6 +1712,52 @@ mod tests {
         assert_eq!(incremental.uvs(), full.uvs());
         assert_eq!(incremental.indices(), full.indices());
         assert_eq!(incremental.revision(), field.revision());
+    }
+
+    #[test]
+    fn incremental_projection_rejects_active_lod_seam_without_mutation() {
+        use crate::{HeightfieldLodSeamPlan, LodSeamCoverage, LodSeamLimits, LodSeamNeighbor};
+
+        let tile = TileKey::new(CubeFace::PositiveZ, 3, 3, 3).unwrap();
+        let mut field =
+            HeightfieldTile::bake(tile, HeightfieldSpec::new(9, 1).unwrap(), &Ramp, LIMITS)
+                .unwrap();
+        let config = PlanetMeshConfig::new(1_000_000, [0, 0, 1_000_000], 1.0).unwrap();
+        let mut mesh = PlanetHeightfieldMesh::build(&field, config, LIMITS).unwrap();
+        let edge = TileEdge::East;
+        let plan = HeightfieldLodSeamPlan::build_strict(
+            tile,
+            8,
+            &[LodSeamNeighbor::with_boundary(
+                edge,
+                tile.neighbor(edge).parent().unwrap(),
+                8,
+                LodSeamCoverage::full(8),
+            )],
+            LodSeamLimits {
+                max_segments: 8,
+                max_vertices: 128,
+                max_indices: 1024,
+                max_bytes: 16_384,
+            },
+        )
+        .unwrap();
+        mesh.apply_lod_seam_plan(&plan, 16_384).unwrap();
+        mesh.apply_lod_morph(&field, &plan, 0.5).unwrap();
+        let before = mesh.clone();
+        let change = field
+            .rebake(
+                crate::DirtyRegion::new(tile, 32_768, 32_768, 32_768, 32_768).unwrap(),
+                &Ramp,
+                LIMITS,
+            )
+            .unwrap();
+
+        assert_eq!(
+            mesh.update(&field, change, PlanetHeightfieldNormalNeighborhood::empty()),
+            Err(BakeError::InvalidGeometry)
+        );
+        assert_eq!(mesh, before);
     }
 
     #[test]

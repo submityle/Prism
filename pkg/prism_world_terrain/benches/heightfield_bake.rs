@@ -5,8 +5,9 @@ use std::time::{Duration, Instant};
 
 use prism_world_terrain::{
     BakeLimits, CubeFace, DirtyRegion, HeightSample, HeightSampleValue, HeightSampler,
-    HeightfieldMesh, HeightfieldSpec, HeightfieldTile, PlanetHeightfieldMesh, PlanetMeshConfig,
-    SdfField, SdfGrid, SdfSpec, TileKey, VolumeBakeLimits, VolumeRegion,
+    HeightfieldLodSeamPlan, HeightfieldMesh, HeightfieldSpec, HeightfieldTile, LodSeamCoverage,
+    LodSeamLimits, LodSeamNeighbor, PlanetHeightfieldMesh, PlanetMeshConfig, SdfField, SdfGrid,
+    SdfSpec, TileEdge, TileKey, VolumeBakeLimits, VolumeRegion,
 };
 
 struct Plane(i64);
@@ -109,6 +110,61 @@ fn main() {
         report("height_local_rebake", local_bakes);
         report("mesh_local_update", updates);
         report("planet_mesh_build", planets);
+
+        let tile = TileKey::new(CubeFace::PositiveY, 3, 3, 3).unwrap();
+        let field = HeightfieldTile::bake(tile, spec, black_box(&Plane(0)), limits).unwrap();
+        let segments = side - 1;
+        let coarse = tile.neighbor(TileEdge::East).parent().unwrap();
+        let seam_plan = HeightfieldLodSeamPlan::build_strict(
+            tile,
+            segments,
+            &[LodSeamNeighbor::with_boundary(
+                TileEdge::East,
+                coarse,
+                segments,
+                LodSeamCoverage::full(segments),
+            )],
+            LodSeamLimits {
+                max_segments: segments,
+                max_vertices: segments as usize * 2 + 2,
+                max_indices: segments as usize * 9,
+                max_bytes: segments as usize * 64,
+            },
+        )
+        .unwrap();
+        let seam_budget = payload * 2;
+        let mut planar_morph = HeightfieldMesh::build(&field, [128.0, 128.0], limits).unwrap();
+        planar_morph
+            .apply_lod_seam_plan(&seam_plan, seam_budget)
+            .unwrap();
+        let config = PlanetMeshConfig::new(6_371_000_000, [0, 6_371_000_000, 0], 2_000.0).unwrap();
+        let mut planet_morph = PlanetHeightfieldMesh::build(&field, config, limits).unwrap();
+        planet_morph
+            .apply_lod_seam_plan(&seam_plan, seam_budget)
+            .unwrap();
+        let mut planar_morph_times = Vec::with_capacity(RUNS);
+        let mut planet_morph_times = Vec::with_capacity(RUNS);
+        for iteration in 0..WARMUP + RUNS {
+            let alpha = [0.25, 0.5, 0.75, 1.0, 0.0][iteration % 5];
+            let start = Instant::now();
+            planar_morph
+                .apply_lod_morph(black_box(&field), black_box(&seam_plan), black_box(alpha))
+                .unwrap();
+            let planar_time = start.elapsed();
+            let start = Instant::now();
+            planet_morph
+                .apply_lod_morph(black_box(&field), black_box(&seam_plan), black_box(alpha))
+                .unwrap();
+            let planet_time = start.elapsed();
+            black_box((&planar_morph, &planet_morph));
+            if iteration >= WARMUP {
+                planar_morph_times.push(planar_time);
+                planet_morph_times.push(planet_time);
+            }
+        }
+        println!("lod_morph side={side} seam_edges=1 boundary_samples={} extra_mesh_allocations=0 warmup={WARMUP}", segments / 2);
+        report("planar_lod_morph", planar_morph_times);
+        report("planet_lod_morph", planet_morph_times);
     }
     for side in [33_u32, 65] {
         let count = (side as usize).pow(3);
