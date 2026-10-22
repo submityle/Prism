@@ -298,7 +298,7 @@ fn planetary_placement_records_match_cpu_semantics_for_nonzero_heights_and_thres
         let side_cells = f64::from(tile.spec().samples_per_edge() - 1);
         let u = -1.0 + 2.0 * (f64::from(cell[0]) + 0.5) / side_cells;
         let v = -1.0 + 2.0 * (f64::from(cell[1]) + 0.5) / side_cells;
-        let length = libm::sqrt(u * u + v * v + 1.0);
+        let length = (u * u + v * v + 1.0).sqrt();
         let normal = [u / length, v / length, 1.0 / length];
         let radial = (config.radius_mm + config.vertical_offset_mm) as f64 + numerator as f64 / 4.0;
         let expected_position = [

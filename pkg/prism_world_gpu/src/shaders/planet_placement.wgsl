@@ -93,6 +93,21 @@ fn signed_i128_f32(value: vec4<u32>) -> f32 {
     return select(result, -result, negative);
 }
 
+// World origins are authored as i64 and widened to i128 only for a shared
+// upload ABI. Decode the actual two-limb domain directly so small negative
+// origins do not pass through high sign-extension limbs during float conversion.
+fn signed_i64_f32(value: vec2<u32>) -> f32 {
+    let negative = (value.y & 0x80000000u) != 0u;
+    var limbs = value;
+    if (negative) {
+        limbs = ~limbs;
+        limbs.x = limbs.x + 1u;
+        if (limbs.x == 0u) { limbs.y = limbs.y + 1u; }
+    }
+    let result = f32(limbs.x) + f32(limbs.y) * 4294967296.0;
+    return select(result, -result, negative);
+}
+
 fn finite(value: f32) -> bool {
     return value == value && abs(value) < 3.402823466e+38;
 }
@@ -136,9 +151,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let radial_numerator = add128(radial_base, height_numerator);
     let radial = signed_i128_f32(radial_numerator) * 0.25;
     let origin = vec3<f32>(
-        signed_i128_f32(vec4<u32>(word(24u), word(25u), word(26u), word(27u))),
-        signed_i128_f32(vec4<u32>(word(28u), word(29u), word(30u), word(31u))),
-        signed_i128_f32(vec4<u32>(word(32u), word(33u), word(34u), word(35u))));
+        signed_i64_f32(vec2<u32>(word(24u), word(25u))),
+        signed_i64_f32(vec2<u32>(word(28u), word(29u))),
+        signed_i64_f32(vec2<u32>(word(32u), word(33u))));
     let position = origin + normal * radial;
     let invalid = !finite(normal.x) || !finite(normal.y) || !finite(normal.z)
         || !finite(height) || !finite(radial) || radial <= 0.0
