@@ -33,3 +33,7 @@ prism_render_driver_wgpu = { path = "../../os-backends/prism_render_driver_wgpu"
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "mesh_cluster_scale"
+harness = false
