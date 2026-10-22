@@ -201,7 +201,8 @@ impl LodSchedule {
     ///
     /// # Contract
     /// Panics unless `bands` is non-empty, sorted by ascending
-    /// `max_distance_sq`, and every `tick_period` is `>= 1`.
+    /// `max_distance_sq`, contains at most 256 bands, and every `tick_period`
+    /// is `>= 1`.
     pub fn new(bands: Vec<LodBand>) -> Self {
         Self::with_out_of_range(bands, OutOfRange::ClampToLast)
     }
@@ -211,9 +212,15 @@ impl LodSchedule {
     ///
     /// # Contract
     /// Panics unless `bands` is non-empty, sorted by ascending
-    /// `max_distance_sq`, and every `tick_period` is `>= 1`.
+    /// `max_distance_sq`, contains at most 256 bands, and every `tick_period`
+    /// is `>= 1`.
     pub fn with_out_of_range(bands: Vec<LodBand>, beyond_last: OutOfRange) -> Self {
         assert!(!bands.is_empty(), "LodSchedule needs at least one band");
+        assert!(
+            bands.len() <= u8::MAX as usize + 1,
+            "LodSchedule supports at most 256 bands, got {}",
+            bands.len()
+        );
         let mut prev = f32::NEG_INFINITY;
         for (i, b) in bands.iter().enumerate() {
             assert!(
@@ -339,7 +346,9 @@ impl LodSchedule {
     #[inline]
     pub fn should_tick_phased(&self, level: LodLevel, frame: u64, phase: u64) -> bool {
         let period = self.tick_period(level) as u64;
-        frame.wrapping_add(phase).is_multiple_of(period)
+        // Reduce each operand before adding: both residues are < u32::MAX, so
+        // their sum fits in u64 even when `frame + phase` would overflow.
+        (frame % period + phase % period).is_multiple_of(period)
     }
 
     /// Full per-entity evaluation: selects the band for `distance_sq` and
@@ -499,6 +508,16 @@ mod tests {
     }
 
     #[test]
+    fn phased_cadence_is_correct_at_frame_counter_overflow() {
+        let s = LodSchedule::from_sorted_pairs(&[(100.0, 3)]);
+
+        // u64::MAX is divisible by 3; adding phase 1 mathematically yields
+        // residue 1. Wrapping the addition first would incorrectly produce 0.
+        assert!(!s.should_tick_phased(LodLevel(0), u64::MAX, 1));
+        assert!(s.should_tick_phased(LodLevel(0), u64::MAX, 3));
+    }
+
+    #[test]
     fn evaluate_combines_level_and_cadence() {
         let s = sched();
         // Distance 900 (= 30 m) -> band 1, period 4.
@@ -619,6 +638,17 @@ mod tests {
     }
 
     #[test]
+    fn maximum_band_count_preserves_last_level_index() {
+        let bands = (1..=u8::MAX as usize + 1)
+            .map(|distance| LodBand::new(distance as f32, 1))
+            .collect();
+        let schedule = LodSchedule::new(bands);
+
+        assert_eq!(schedule.band_count(), 256);
+        assert_eq!(schedule.level_for(256.0), Some(LodLevel(u8::MAX)));
+    }
+
+    #[test]
     fn with_quality_builder_matches_field() {
         let b = LodBand::new(100.0, 2).quality(LodQuality(5));
         assert_eq!(b.quality, LodQuality(5));
@@ -643,5 +673,14 @@ mod tests {
     #[should_panic]
     fn empty_schedule_panics() {
         let _ = LodSchedule::new(Vec::new());
+    }
+
+    #[test]
+    #[should_panic(expected = "supports at most 256 bands")]
+    fn too_many_bands_panic_instead_of_wrapping_level_indices() {
+        let bands = (1..=u8::MAX as usize + 2)
+            .map(|distance| LodBand::new(distance as f32, 1))
+            .collect();
+        let _ = LodSchedule::new(bands);
     }
 }
