@@ -223,23 +223,47 @@ fn proxy_capacity_is_rejected_before_host_load() {
 }
 
 #[test]
-fn duplicate_sector_preserves_original_handles_without_host_load() {
+fn same_sector_reload_replaces_proxy_generation_only_after_host_success() {
     let m = manifest(0);
     let mut host = Host::default();
     let mut registry = ProxyRegistry::new(2).unwrap();
     let handle = registry.insert_sector(m.sector, &[proxy(99)]).unwrap()[0];
     {
         let mut adapter = ProxyCellHost::new(&mut host, &mut registry, decode);
-        assert!(matches!(
-            adapter.load_cell(&m, b"opaque"),
-            Err(ProxyCellHostError::Registry(ProxyRegistryError::SectorAlreadyExists { sector }))
-                if sector == m.sector
-        ));
+        adapter.load_cell(&m, b"opaque").unwrap();
+        let handles = adapter.registry().sector_handles(m.sector).unwrap();
+        assert_eq!(handles.len(), 1);
+        assert_ne!(handles[0], handle);
+        assert_eq!(adapter.registry().get(handles[0]), Some(&proxy(7)));
     }
-    assert_eq!(registry.sector_handles(m.sector), Some(&[handle][..]));
-    assert_eq!(registry.get(handle), Some(&proxy(99)));
+    assert!(registry.get(handle).is_none());
     assert_eq!(registry.len(), 1);
-    assert!(host.loads.is_empty());
+    assert_eq!(host.loads.len(), 1);
+}
+
+#[test]
+fn same_sector_reload_host_failure_preserves_original_proxy_generation() {
+    let m = manifest(0);
+    let mut host = Host {
+        load: Behavior::Reject,
+        ..Host::default()
+    };
+    let mut registry = ProxyRegistry::new(2).unwrap();
+    let handle = registry.insert_sector(m.sector, &[proxy(99)]).unwrap()[0];
+    let dense_slot = registry.dense_slot(handle);
+    let pending_uploads = registry.has_pending_uploads();
+    {
+        let mut adapter = ProxyCellHost::new(&mut host, &mut registry, decode);
+        assert!(matches!(
+            adapter.load_cell(&m, b"replacement"),
+            Err(ProxyCellHostError::Host(TestError("load rejected")))
+        ));
+        assert_eq!(adapter.registry().sector_handles(m.sector), Some(&[handle][..]));
+        assert_eq!(adapter.registry().get(handle), Some(&proxy(99)));
+        assert_eq!(adapter.registry().dense_slot(handle), dense_slot);
+        assert_eq!(adapter.registry().has_pending_uploads(), pending_uploads);
+    }
+    assert_eq!(host.loads.len(), 1);
 }
 
 #[test]
@@ -391,17 +415,13 @@ fn empty_sector_is_owned_until_successful_eviction() {
         let mut adapter = ProxyCellHost::new(&mut host, &mut registry, decoder);
         adapter.load_cell(&m, b"empty").unwrap();
         assert_eq!(adapter.registry().sector_handles(m.sector), Some(&[][..]));
-        assert!(matches!(
-            adapter.load_cell(&m, b"duplicate"),
-            Err(ProxyCellHostError::Registry(
-                ProxyRegistryError::SectorAlreadyExists { .. }
-            ))
-        ));
+        adapter.load_cell(&m, b"replacement").unwrap();
+        assert_eq!(adapter.registry().sector_handles(m.sector), Some(&[][..]));
         adapter.evict_cell(m.sector).unwrap();
         assert!(adapter.registry().sector_handles(m.sector).is_none());
         assert!(!adapter.registry().has_pending_uploads());
     }
-    assert_eq!(host.loads.len(), 1);
+    assert_eq!(host.loads.len(), 2);
     assert_eq!(host.evictions, vec![m.sector]);
 }
 

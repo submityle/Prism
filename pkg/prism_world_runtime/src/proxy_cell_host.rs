@@ -77,12 +77,12 @@ where
 
 /// Borrows an authoritative scene host and its derived CPU proxy registry.
 ///
-/// Loading decodes and registers the sector before calling `host.load_cell`, so
-/// invalid proxies, exhausted capacity, and existing sectors never reach that
-/// method. A private guard removes the newly inserted sector if the host returns
-/// an error or its panic unwinds. Success keeps the proxies. Eviction calls the
-/// host first and removes proxies only on success; an error or panic leaves the
-/// registry untouched.
+/// Loading decodes and prepares an insertion or same-sector replacement before
+/// calling `host.load_cell`. Invalid proxies and exhausted capacity never reach
+/// the host. The prepared update changes no registry state until the host accepts
+/// the authoritative cell; a host error or unwind therefore preserves the prior
+/// sector generation. Eviction calls the host first and removes proxies only on
+/// success; an error or panic leaves the registry untouched.
 ///
 /// This is **not** an atomic transaction over the authoritative host. The
 /// [`SceneHost`] contract does not promise failure atomicity: host errors and
@@ -126,18 +126,14 @@ impl<H: SceneHost, D: CellProxyDecoder> SceneHost for ProxyCellHost<'_, H, D> {
             .decoder
             .decode(manifest, payload)
             .map_err(ProxyCellHostError::Decoder)?;
-        self.registry
-            .insert_sector(manifest.sector, &proxies)
+        let pending = self
+            .registry
+            .prepare_sector_update(manifest.sector, proxies)
             .map_err(ProxyCellHostError::Registry)?;
-        let mut pending = PendingSector {
-            registry: &mut *self.registry,
-            sector: manifest.sector,
-            committed: false,
-        };
         self.host
             .load_cell(manifest, payload)
             .map_err(ProxyCellHostError::Host)?;
-        pending.committed = true;
+        pending.commit();
         Ok(())
     }
 
@@ -147,19 +143,5 @@ impl<H: SceneHost, D: CellProxyDecoder> SceneHost for ProxyCellHost<'_, H, D> {
             .map_err(ProxyCellHostError::Host)?;
         self.registry.remove_sector(sector);
         Ok(())
-    }
-}
-
-struct PendingSector<'a> {
-    registry: &'a mut ProxyRegistry,
-    sector: SectorId,
-    committed: bool,
-}
-
-impl Drop for PendingSector<'_> {
-    fn drop(&mut self) {
-        if !self.committed {
-            self.registry.remove_sector(self.sector);
-        }
     }
 }
