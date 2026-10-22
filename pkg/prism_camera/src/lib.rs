@@ -23,31 +23,38 @@ mod projection;
 mod stereo;
 mod target;
 mod view;
+#[cfg(feature = "view_batch")]
+mod view_batch;
 
 #[cfg(feature = "determinism")]
 pub use advanced::CameraDeterminismDigest;
-#[cfg(feature = "composition_aid")]
-pub use advanced::CompositionGuide;
-#[cfg(feature = "lookahead_stream")]
-pub use advanced::LookaheadPredictor;
 #[cfg(feature = "occlusion_fade")]
 pub use advanced::OcclusionFadeState;
 #[cfg(feature = "shutter")]
 pub use advanced::Shutter;
-#[cfg(feature = "view_batch")]
-pub use advanced::ViewBatchKey;
-#[cfg(feature = "view_lod")]
-pub use advanced::ViewLod;
 #[cfg(feature = "cutscene")]
-pub use advanced::{CameraKeyframe, CameraTrack, CameraTrackSample, CutsceneEndPolicy};
+pub use advanced::{
+    CameraKeyframe, CameraTrack, CameraTrackSample, CameraTrackValidationCode,
+    CameraTrackValidationError, CutsceneEndPolicy,
+};
 #[cfg(feature = "occlusion_fade")]
 pub use advanced::{CameraOcclusionIntent, OcclusionSample};
+#[cfg(feature = "composition_aid")]
+pub use advanced::{
+    CompositionAidResult, CompositionGizmo, CompositionGizmoKind, CompositionGuide,
+};
 #[cfg(feature = "virtual_production")]
-pub use advanced::{ExternalPoseError, ExternalPoseSample, ExternalPoseValidator, FoveationHint};
+pub use advanced::{
+    ExternalPoseError, ExternalPoseResult, ExternalPoseSample, ExternalPoseValidator, FoveationHint,
+};
 #[cfg(feature = "autofocus")]
 pub use advanced::{FocusSource, FocusTracker};
 #[cfg(feature = "edge_stabilize")]
 pub use advanced::{HistoryRejectReason, HistoryStabilizer};
+#[cfg(feature = "lookahead_stream")]
+pub use advanced::{LookaheadPredictor, StreamingContribution};
+#[cfg(feature = "view_lod")]
+pub use advanced::{ViewLod, ViewLodCandidate, ViewLodDecision, ViewLodScheduler};
 pub use advanced_runtime::{
     AdvancedRuntime, AdvancedRuntimeConfig, AdvancedRuntimeConfigError, AdvancedRuntimeError,
     AdvancedRuntimeInput, AdvancedRuntimeLimits, AdvancedRuntimeOutput, CapacityField, FixedTick,
@@ -84,6 +91,13 @@ pub use stereo::{Eye, LateLatchPose, StereoConfig, StereoPair};
 pub use target::{ClearMode, RenderTarget, Viewport, ViewportRect};
 pub use view::{
     derive_view, publish_view, CameraIntent, CameraPose, ViewData, ViewHistory, ViewStatus,
+};
+#[cfg(feature = "view_batch")]
+pub use view_batch::{
+    CoarseFrustumStatus, ViewBatch, ViewBatchCache, ViewBatchCacheStamp, ViewBatchCacheStatus,
+    ViewBatchCapacityField, ViewBatchCollection, ViewBatchCollectionStatus, ViewBatchCollector,
+    ViewBatchConfigError, ViewBatchError, ViewBatchKey, ViewBatchLimits, ViewBatchMember,
+    MAX_VIEW_BATCH_GROUPS, MAX_VIEW_BATCH_MEMBERS_PER_GROUP, MAX_VIEW_BATCH_VIEWS,
 };
 
 /// Public types commonly needed by camera authors.

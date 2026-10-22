@@ -10,8 +10,6 @@ use alloc::vec::Vec;
 #[cfg(not(any(feature = "cutscene", feature = "occlusion_fade")))]
 use core::marker::PhantomData;
 
-#[cfg(feature = "lookahead_stream")]
-use crate::LookaheadPredictor;
 #[cfg(feature = "shutter")]
 use crate::Shutter;
 #[cfg(feature = "view_lod")]
@@ -24,6 +22,8 @@ use crate::{CameraPose, CameraTrack, CameraTrackSample};
 use crate::{FocusSource, FocusTracker};
 #[cfg(feature = "edge_stabilize")]
 use crate::{HistoryRejectReason, HistoryStabilizer};
+#[cfg(feature = "lookahead_stream")]
+use crate::{LookaheadPredictor, StreamingContribution};
 #[cfg(feature = "lookahead_stream")]
 use prism_math::DVec3;
 
@@ -238,6 +238,7 @@ pub struct TrackRuntimeResult {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FocusRuntimeStatus {
     Updated,
+    FocusLost,
     SourceUnavailable,
     InvalidSource,
     InvalidState,
@@ -254,9 +255,9 @@ pub struct FocusRuntimeResult {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ShutterRuntimeStatus {
     Applied,
-    FallbackFps,
-    FallbackAngle,
-    FallbackFpsAndAngle,
+    InvalidFrameRate,
+    InvalidAngle,
+    InvalidFrameRateAndAngle,
 }
 
 #[cfg(feature = "shutter")]
@@ -265,6 +266,9 @@ pub struct ShutterSnapshot {
     pub shutter_angle_deg: f32,
     pub fps: f32,
     pub exposure_seconds: f32,
+    pub exposure: crate::Exposure,
+    pub aperture_f_stop: f32,
+    pub motion_blur_shutter_angle_deg: f32,
     pub status: ShutterRuntimeStatus,
 }
 
@@ -289,9 +293,12 @@ pub struct LodRuntimeResult {
 #[cfg(feature = "lookahead_stream")]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LookaheadInput {
+    pub current_position: DVec3,
     pub position: DVec3,
     pub velocity: DVec3,
     pub acceleration: DVec3,
+    pub base_importance: f32,
+    pub target_valid: bool,
 }
 
 #[cfg(feature = "lookahead_stream")]
@@ -310,6 +317,7 @@ pub struct LookaheadRuntimeResult {
     pub samples: Vec<DVec3>,
     pub status: LookaheadRuntimeStatus,
     pub dropped_samples: usize,
+    pub contribution: StreamingContribution,
 }
 
 #[cfg(feature = "occlusion_fade")]
@@ -343,6 +351,9 @@ pub enum HistoryRuntimeStatus {
 pub struct HistoryRuntimeResult {
     pub weight: f32,
     pub status: HistoryRuntimeStatus,
+    pub acceptance_rate: f32,
+    pub dropped_count: u32,
+    pub sharpen_strength: f32,
 }
 
 /// Inputs for all optional stages.  `Default` leaves every stage disabled.
@@ -615,7 +626,7 @@ impl AdvancedRuntime {
                     .update(source, self.config.near_clip_m, tick.delta_seconds);
             let status = if source_unavailable {
                 degradation.add(RuntimeDegradation::FOCUS_UNAVAILABLE);
-                FocusRuntimeStatus::SourceUnavailable
+                FocusRuntimeStatus::FocusLost
             } else if !updated {
                 degradation.add(RuntimeDegradation::FOCUS_UNAVAILABLE);
                 FocusRuntimeStatus::InvalidSource
@@ -639,6 +650,8 @@ impl AdvancedRuntime {
         let shutter_result = input.shutter.map(|shutter| {
             let valid_fps = shutter.fps.is_finite() && shutter.fps > 0.0;
             let valid_angle = shutter.shutter_angle_deg.is_finite();
+            let valid_aperture =
+                shutter.aperture_f_stop.is_finite() && shutter.aperture_f_stop > 0.0;
             let safe = Shutter {
                 shutter_angle_deg: if valid_angle {
                     shutter.shutter_angle_deg.clamp(0.0, 360.0)
@@ -650,20 +663,28 @@ impl AdvancedRuntime {
                 } else {
                     Shutter::default().fps
                 },
+                aperture_f_stop: if valid_aperture {
+                    shutter.aperture_f_stop
+                } else {
+                    Shutter::default().aperture_f_stop
+                },
             };
             let status = match (valid_fps, valid_angle) {
                 (true, true) => ShutterRuntimeStatus::Applied,
-                (false, true) => ShutterRuntimeStatus::FallbackFps,
-                (true, false) => ShutterRuntimeStatus::FallbackAngle,
-                (false, false) => ShutterRuntimeStatus::FallbackFpsAndAngle,
+                (false, true) => ShutterRuntimeStatus::InvalidFrameRate,
+                (true, false) => ShutterRuntimeStatus::InvalidAngle,
+                (false, false) => ShutterRuntimeStatus::InvalidFrameRateAndAngle,
             };
-            if status != ShutterRuntimeStatus::Applied {
+            if status != ShutterRuntimeStatus::Applied || !valid_aperture {
                 degradation.add(RuntimeDegradation::SHUTTER_SANITIZED);
             }
             ShutterSnapshot {
                 shutter_angle_deg: safe.shutter_angle_deg,
                 fps: safe.fps,
                 exposure_seconds: safe.exposure_seconds(),
+                exposure: safe.physical_exposure(100.0),
+                aperture_f_stop: safe.aperture_f_stop,
+                motion_blur_shutter_angle_deg: safe.shutter_angle_deg,
                 status,
             }
         });
@@ -725,6 +746,11 @@ impl AdvancedRuntime {
                     samples: Vec::new(),
                     status: LookaheadRuntimeStatus::Disabled,
                     dropped_samples: 0,
+                    contribution: StreamingContribution {
+                        importance: 0.0,
+                        distance_m: 0.0,
+                        sample_count: 0,
+                    },
                 };
             }
             if !lookahead.position.is_finite()
@@ -736,6 +762,11 @@ impl AdvancedRuntime {
                     samples: Vec::with_capacity(capacity),
                     status: LookaheadRuntimeStatus::InvalidInput,
                     dropped_samples: 0,
+                    contribution: StreamingContribution {
+                        importance: 0.0,
+                        distance_m: 0.0,
+                        sample_count: 0,
+                    },
                 };
             }
             let defaults = LookaheadPredictor::default();
@@ -766,6 +797,12 @@ impl AdvancedRuntime {
             if dropped_samples != 0 {
                 samples.truncate(capacity);
             }
+            let contribution = predictor.contribution(
+                &samples,
+                lookahead.current_position,
+                lookahead.base_importance,
+                lookahead.target_valid,
+            );
             if sanitized || dropped_samples != 0 {
                 degradation.add(RuntimeDegradation::LOOKAHEAD_DROPPED);
             }
@@ -779,6 +816,7 @@ impl AdvancedRuntime {
                     LookaheadRuntimeStatus::Predicted
                 },
                 dropped_samples,
+                contribution,
             }
         });
 
@@ -861,7 +899,18 @@ impl AdvancedRuntime {
             if sanitized {
                 degradation.add(RuntimeDegradation::HISTORY_REJECTED);
             }
-            HistoryRuntimeResult { weight, status }
+            let acceptance_rate = if matches!(status, HistoryRuntimeStatus::Accepted) {
+                1.0
+            } else {
+                0.0
+            };
+            HistoryRuntimeResult {
+                weight,
+                status,
+                acceptance_rate,
+                dropped_count: u32::from(!matches!(status, HistoryRuntimeStatus::Accepted)),
+                sharpen_strength: stabilizer.sharpen_strength(),
+            }
         });
 
         self.last_tick = Some(tick.index);
@@ -1075,6 +1124,7 @@ mod tests {
             .with_shutter(Shutter {
                 shutter_angle_deg: 180.0,
                 fps: f32::NAN,
+                aperture_f_stop: 2.8,
             })
             .with_lod(ViewLod {
                 max_update_hz: 30.0,
@@ -1082,9 +1132,12 @@ mod tests {
                 history_frames: 2,
             })
             .with_lookahead(LookaheadInput {
+                current_position: DVec3::ZERO,
                 position: DVec3::ZERO,
                 velocity: DVec3::X,
                 acceleration: DVec3::ZERO,
+                base_importance: 1.0,
+                target_valid: true,
             })
             .with_occlusion_samples(&occlusion)
             .with_history(HistoryInput {
@@ -1098,7 +1151,7 @@ mod tests {
         assert_eq!(output.focus.unwrap().status, FocusRuntimeStatus::Updated);
         assert_eq!(
             output.shutter.unwrap().status,
-            ShutterRuntimeStatus::FallbackFps
+            ShutterRuntimeStatus::InvalidFrameRate
         );
         assert!(output.lod.unwrap().update);
         let lookahead = output.lookahead.unwrap();

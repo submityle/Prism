@@ -1,25 +1,34 @@
 #[cfg(any(
     feature = "cutscene",
     feature = "occlusion_fade",
-    feature = "lookahead_stream"
+    feature = "lookahead_stream",
+    feature = "composition_aid",
+    feature = "view_lod",
+    feature = "edge_stabilize"
 ))]
 use alloc::vec::Vec;
 
-#[cfg(feature = "lookahead_stream")]
+#[cfg(any(
+    feature = "cutscene",
+    feature = "lookahead_stream",
+    feature = "view_lod"
+))]
 use prism_math::DVec3;
-#[cfg(feature = "virtual_production")]
+#[cfg(any(feature = "virtual_production", feature = "composition_aid"))]
 use prism_math::Vec2;
 
 #[cfg(any(feature = "cutscene", feature = "virtual_production"))]
 use crate::CameraPose;
-#[cfg(feature = "cutscene")]
+#[cfg(any(feature = "cutscene", feature = "shutter"))]
 use crate::Exposure;
 #[cfg(feature = "physical_lens")]
 use crate::Lens;
-#[cfg(any(feature = "view_batch", feature = "determinism"))]
+#[cfg(feature = "post")]
+use crate::PostStack;
+#[cfg(feature = "determinism")]
 use crate::ViewData;
-#[cfg(feature = "view_batch")]
-use crate::{RenderTarget, ViewKind};
+#[cfg(feature = "view_lod")]
+use crate::ViewKind;
 
 #[cfg(feature = "cutscene")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -47,10 +56,44 @@ pub struct CameraKeyframe {
 }
 
 #[cfg(feature = "cutscene")]
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CameraTrackValidationError {
+    pub code: CameraTrackValidationCode,
+    pub index: usize,
+}
+
+#[cfg(feature = "cutscene")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CameraTrackValidationCode {
+    UnsupportedVersion,
+    Empty,
+    NonFinitePose,
+    NonFiniteLens,
+    NonFiniteExposure,
+    NonMonotonicTick,
+}
+
+#[cfg(feature = "cutscene")]
+#[derive(Clone, Debug, PartialEq)]
 pub struct CameraTrack {
+    pub asset_version: u32,
     pub keyframes: Vec<CameraKeyframe>,
     pub end_policy: CutsceneEndPolicy,
+    #[cfg(feature = "post")]
+    pub post_stack: Option<PostStack>,
+}
+
+#[cfg(feature = "cutscene")]
+impl Default for CameraTrack {
+    fn default() -> Self {
+        Self {
+            asset_version: Self::CURRENT_ASSET_VERSION,
+            keyframes: Vec::new(),
+            end_policy: CutsceneEndPolicy::default(),
+            #[cfg(feature = "post")]
+            post_stack: None,
+        }
+    }
 }
 
 #[cfg(feature = "cutscene")]
@@ -66,7 +109,53 @@ pub struct CameraTrackSample {
 
 #[cfg(feature = "cutscene")]
 impl CameraTrack {
+    pub const CURRENT_ASSET_VERSION: u32 = 1;
     pub const MAX_KEYFRAMES: usize = 4096;
+
+    pub fn validate(&self) -> Result<(), CameraTrackValidationError> {
+        if self.asset_version != Self::CURRENT_ASSET_VERSION {
+            return Err(CameraTrackValidationError {
+                code: CameraTrackValidationCode::UnsupportedVersion,
+                index: 0,
+            });
+        }
+        if self.keyframes.is_empty() {
+            return Err(CameraTrackValidationError {
+                code: CameraTrackValidationCode::Empty,
+                index: 0,
+            });
+        }
+        for (index, keyframe) in self.keyframes.iter().enumerate() {
+            if !keyframe.pose.position.is_finite()
+                || !keyframe.pose.rotation.is_finite()
+                || !keyframe.pose.world_origin.is_finite()
+            {
+                return Err(CameraTrackValidationError {
+                    code: CameraTrackValidationCode::NonFinitePose,
+                    index,
+                });
+            }
+            if !keyframe.focal_length_mm.is_finite() || keyframe.focal_length_mm <= 0.0 {
+                return Err(CameraTrackValidationError {
+                    code: CameraTrackValidationCode::NonFiniteLens,
+                    index,
+                });
+            }
+            if !keyframe.exposure.ev100().is_finite() {
+                return Err(CameraTrackValidationError {
+                    code: CameraTrackValidationCode::NonFiniteExposure,
+                    index,
+                });
+            }
+            if index != 0 && self.keyframes[index - 1].tick >= keyframe.tick {
+                return Err(CameraTrackValidationError {
+                    code: CameraTrackValidationCode::NonMonotonicTick,
+                    index,
+                });
+            }
+        }
+        Ok(())
+    }
 
     pub fn push(&mut self, keyframe: CameraKeyframe) -> bool {
         if self.keyframes.len() >= Self::MAX_KEYFRAMES
@@ -82,36 +171,18 @@ impl CameraTrack {
     }
 
     pub fn sample(&self, tick: u64, fallback: CameraPose) -> (CameraPose, Option<u64>) {
-        let Some(first) = self.keyframes.first().copied() else {
-            return (fallback, None);
-        };
-        if tick <= first.tick {
-            return (first.pose, Some(first.event_key));
-        }
-        let Some(last) = self.keyframes.last().copied() else {
-            return (fallback, None);
-        };
-        if tick >= last.tick {
-            return match self.end_policy {
-                CutsceneEndPolicy::Hold => (last.pose, Some(last.event_key)),
-                CutsceneEndPolicy::BlendToPrevious | CutsceneEndPolicy::Deactivate => {
-                    (fallback, None)
-                }
-            };
-        }
-        let index = self.keyframes.partition_point(|frame| frame.tick <= tick);
-        let a = self.keyframes[index - 1];
-        let b = self.keyframes[index];
-        let linear_t = (tick - a.tick) as f64 / (b.tick - a.tick) as f64;
-        let t = linear_t * linear_t * (3.0 - 2.0 * linear_t);
-        (
-            CameraPose {
-                position: a.pose.position.lerp(b.pose.position, t),
-                rotation: a.pose.rotation.slerp(b.pose.rotation, t),
-                world_origin: a.pose.world_origin.lerp(b.pose.world_origin, t),
+        let sample = self.sample_state(
+            tick,
+            CameraTrackSample {
+                pose: fallback,
+                focal_length_mm: 50.0,
+                exposure: Exposure::default(),
+                event_key: None,
+                active: true,
+                handoff_to_previous: false,
             },
-            Some(if t < 0.5 { a.event_key } else { b.event_key }),
-        )
+        );
+        (sample.pose, sample.event_key)
     }
 
     pub fn sample_state(&self, tick: u64, fallback: CameraTrackSample) -> CameraTrackSample {
@@ -154,21 +225,79 @@ impl CameraTrack {
         let index = self.keyframes.partition_point(|frame| frame.tick <= tick);
         let a = self.keyframes[index - 1];
         let b = self.keyframes[index];
-        let linear_t = (tick - a.tick) as f32 / (b.tick - a.tick) as f32;
-        let t = linear_t * linear_t * (3.0 - 2.0 * linear_t);
+        let segment_ticks = (b.tick - a.tick) as f64;
+        let linear_t = (tick - a.tick) as f64 / segment_ticks;
+        let t = linear_t.clamp(0.0, 1.0);
+        let previous = self.keyframes.get(index.saturating_sub(2)).unwrap_or(&a);
+        let next = self.keyframes.get(index + 1).unwrap_or(&b);
+        let tangent_a_scale = segment_ticks / (b.tick - previous.tick) as f64;
+        let tangent_b_scale = segment_ticks / (next.tick - a.tick) as f64;
+        let position = hermite_dvec3(
+            a.pose.position,
+            b.pose.position,
+            (b.pose.position - previous.pose.position) * tangent_a_scale,
+            (next.pose.position - a.pose.position) * tangent_b_scale,
+            t,
+        );
+        let origin = hermite_dvec3(
+            a.pose.world_origin,
+            b.pose.world_origin,
+            (b.pose.world_origin - previous.pose.world_origin) * tangent_a_scale,
+            (next.pose.world_origin - a.pose.world_origin) * tangent_b_scale,
+            t,
+        );
+        let tangent_a_focal =
+            (b.focal_length_mm - previous.focal_length_mm) * tangent_a_scale as f32;
+        let tangent_b_focal = (next.focal_length_mm - a.focal_length_mm) * tangent_b_scale as f32;
+        let focal_length_mm = hermite_scalar(
+            a.focal_length_mm,
+            b.focal_length_mm,
+            tangent_a_focal,
+            tangent_b_focal,
+            t as f32,
+        )
+        .clamp(
+            a.focal_length_mm.min(b.focal_length_mm),
+            a.focal_length_mm.max(b.focal_length_mm),
+        )
+        .max(1.0e-4);
         CameraTrackSample {
             pose: CameraPose {
-                position: a.pose.position.lerp(b.pose.position, t as f64),
-                rotation: a.pose.rotation.slerp(b.pose.rotation, t as f64),
-                world_origin: a.pose.world_origin.lerp(b.pose.world_origin, t as f64),
+                position,
+                rotation: a.pose.rotation.slerp(b.pose.rotation, t),
+                world_origin: origin,
             },
-            focal_length_mm: a.focal_length_mm + (b.focal_length_mm - a.focal_length_mm) * t,
-            exposure: lerp_exposure(a.exposure, b.exposure, t),
-            event_key: Some(if t < 0.5 { a.event_key } else { b.event_key }),
+            focal_length_mm,
+            exposure: lerp_exposure(a.exposure, b.exposure, t as f32),
+            event_key: Some(if linear_t < 0.5 {
+                a.event_key
+            } else {
+                b.event_key
+            }),
             active: true,
             handoff_to_previous: false,
         }
     }
+}
+
+#[cfg(feature = "cutscene")]
+fn hermite_scalar(p0: f32, p1: f32, m0: f32, m1: f32, t: f32) -> f32 {
+    let t2 = t * t;
+    let t3 = t2 * t;
+    (2.0 * t3 - 3.0 * t2 + 1.0) * p0
+        + (t3 - 2.0 * t2 + t) * m0
+        + (-2.0 * t3 + 3.0 * t2) * p1
+        + (t3 - t2) * m1
+}
+
+#[cfg(feature = "cutscene")]
+fn hermite_dvec3(p0: DVec3, p1: DVec3, m0: DVec3, m1: DVec3, t: f64) -> DVec3 {
+    let t2 = t * t;
+    let t3 = t2 * t;
+    p0 * (2.0 * t3 - 3.0 * t2 + 1.0)
+        + m0 * (t3 - 2.0 * t2 + t)
+        + p1 * (-2.0 * t3 + 3.0 * t2)
+        + m1 * (t3 - t2)
 }
 
 #[cfg(feature = "cutscene")]
@@ -192,6 +321,8 @@ pub struct FocusTracker {
     pub focus_distance_m: f32,
     pub max_distance_m: f32,
     pub half_life_s: f32,
+    /// Focal-length correction coefficient used for focus breathing.
+    pub breathing_scale: f32,
 }
 
 #[cfg(feature = "autofocus")]
@@ -201,6 +332,7 @@ impl Default for FocusTracker {
             focus_distance_m: 3.0,
             max_distance_m: 1000.0,
             half_life_s: 0.08,
+            breathing_scale: 0.0,
         }
     }
 }
@@ -224,6 +356,22 @@ impl FocusTracker {
             .min(self.max_distance_m.max(near + 1.0e-4));
         self.focus_distance_m = smooth_scalar(self.focus_distance_m, target, self.half_life_s, dt);
         true
+    }
+
+    pub fn breathing_focal_length(self, base_focal_length_mm: f32) -> f32 {
+        let base = if base_focal_length_mm.is_finite() {
+            base_focal_length_mm.max(1.0e-4)
+        } else {
+            1.0
+        };
+        let scale = if self.breathing_scale.is_finite() {
+            self.breathing_scale
+        } else {
+            0.0
+        };
+        let reference = 3.0_f32;
+        (base * (1.0 + scale * (1.0 / self.focus_distance_m.max(1.0e-4) - 1.0 / reference)))
+            .max(1.0e-4)
     }
 }
 
@@ -256,6 +404,7 @@ fn smooth_scalar(current: f32, target: f32, half_life: f32, dt: f32) -> f32 {
 pub struct Shutter {
     pub shutter_angle_deg: f32,
     pub fps: f32,
+    pub aperture_f_stop: f32,
 }
 
 #[cfg(feature = "shutter")]
@@ -264,6 +413,7 @@ impl Default for Shutter {
         Self {
             shutter_angle_deg: 180.0,
             fps: 60.0,
+            aperture_f_stop: 2.8,
         }
     }
 }
@@ -275,6 +425,22 @@ impl Shutter {
             self.shutter_angle_deg.clamp(0.0, 360.0) / (360.0 * self.fps)
         } else {
             1.0 / 60.0
+        }
+    }
+
+    pub fn physical_exposure(self, iso: f32) -> Exposure {
+        Exposure::Physical {
+            f_stop: if self.aperture_f_stop.is_finite() {
+                self.aperture_f_stop.max(1.0e-4)
+            } else {
+                Self::default().aperture_f_stop
+            },
+            shutter_s: self.exposure_seconds(),
+            iso: if iso.is_finite() {
+                iso.max(1.0e-4)
+            } else {
+                100.0
+            },
         }
     }
 }
@@ -296,31 +462,6 @@ impl Default for FoveationHint {
             inner_radius: 0.25,
             outer_radius: 0.75,
             peripheral_scale: 0.5,
-        }
-    }
-}
-
-#[cfg(feature = "view_batch")]
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct ViewBatchKey {
-    pub target: RenderTarget,
-    pub kind: ViewKind,
-    pub origin_bits: [u64; 3],
-    pub policy_hash: u64,
-}
-
-#[cfg(feature = "view_batch")]
-impl ViewBatchKey {
-    pub fn from_view(view: &ViewData, policy_hash: u64) -> Self {
-        Self {
-            target: view.target,
-            kind: view.kind,
-            origin_bits: [
-                view.world_origin.x.to_bits(),
-                view.world_origin.y.to_bits(),
-                view.world_origin.z.to_bits(),
-            ],
-            policy_hash,
         }
     }
 }
@@ -377,6 +518,111 @@ impl ViewLod {
     }
 }
 
+#[cfg(feature = "view_lod")]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ViewLodCandidate {
+    pub key: u64,
+    pub kind: ViewKind,
+    pub importance: f32,
+    pub screen_area: f32,
+    pub last_update_frame: u64,
+    pub lod: ViewLod,
+}
+
+#[cfg(feature = "view_lod")]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ViewLodDecision {
+    pub key: u64,
+    pub update: bool,
+    pub resolution_scale: f32,
+    pub history_frames: u32,
+    pub protected: bool,
+}
+
+#[cfg(feature = "view_lod")]
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ViewLodScheduler {
+    pub max_updates: usize,
+}
+
+#[cfg(feature = "view_lod")]
+impl ViewLodScheduler {
+    pub const MAX_VIEWS: usize = 256;
+
+    pub fn schedule(
+        &self,
+        candidates: &[ViewLodCandidate],
+        frame: u64,
+        frame_rate: f32,
+    ) -> Vec<ViewLodDecision> {
+        let mut ranked: Vec<(usize, f32, u64)> = candidates
+            .iter()
+            .enumerate()
+            .take(Self::MAX_VIEWS)
+            .map(|(index, candidate)| {
+                let due =
+                    candidate
+                        .lod
+                        .should_update(frame, candidate.last_update_frame, frame_rate);
+                let importance = if candidate.importance.is_finite() {
+                    candidate.importance.max(0.0)
+                } else {
+                    0.0
+                };
+                let area = if candidate.screen_area.is_finite() {
+                    candidate.screen_area.clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                (
+                    index,
+                    if due { importance * 2.0 + area } else { -1.0 },
+                    candidate.key,
+                )
+            })
+            .collect();
+        ranked.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(core::cmp::Ordering::Equal)
+                .then_with(|| a.2.cmp(&b.2))
+        });
+        let mut selected = [false; Self::MAX_VIEWS];
+        let mut updates = 0usize;
+        let max_updates = if self.max_updates == 0 {
+            candidates.len().min(Self::MAX_VIEWS)
+        } else {
+            self.max_updates.min(Self::MAX_VIEWS)
+        };
+        for (index, score, _) in ranked {
+            let protected = matches!(
+                candidates[index].kind,
+                ViewKind::Main | ViewKind::StereoEye | ViewKind::Reflection
+            );
+            if protected || (score >= 0.0 && updates < max_updates) {
+                selected[index] = true;
+                if !protected {
+                    updates += 1;
+                }
+            }
+        }
+        candidates
+            .iter()
+            .enumerate()
+            .take(Self::MAX_VIEWS)
+            .map(|(index, candidate)| ViewLodDecision {
+                key: candidate.key,
+                update: selected[index],
+                resolution_scale: candidate.lod.resolution_scale(),
+                history_frames: candidate.lod.effective_history_frames(),
+                protected: matches!(
+                    candidate.kind,
+                    ViewKind::Main | ViewKind::StereoEye | ViewKind::Reflection
+                ),
+            })
+            .collect()
+    }
+}
+
 #[cfg(feature = "composition_aid")]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CompositionGuide {
@@ -384,6 +630,100 @@ pub struct CompositionGuide {
     pub golden_ratio: bool,
     pub title_safe: f32,
     pub action_safe: f32,
+}
+
+#[cfg(feature = "composition_aid")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CompositionGizmoKind {
+    ThirdsVertical,
+    ThirdsHorizontal,
+    GoldenVertical,
+    GoldenHorizontal,
+    TitleSafe,
+    ActionSafe,
+}
+
+#[cfg(feature = "composition_aid")]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CompositionGizmo {
+    pub kind: CompositionGizmoKind,
+    pub a: Vec2,
+    pub b: Vec2,
+}
+
+#[cfg(feature = "composition_aid")]
+#[derive(Clone, Debug, PartialEq)]
+pub struct CompositionAidResult {
+    pub gizmos: Vec<CompositionGizmo>,
+    pub error_count: u32,
+}
+
+#[cfg(feature = "composition_aid")]
+impl CompositionGuide {
+    pub fn compute(self, view: &ViewData) -> CompositionAidResult {
+        let mut result = CompositionAidResult {
+            gizmos: Vec::with_capacity(6),
+            error_count: 0,
+        };
+        let safe = |value: f32, fallback: f32| {
+            if value.is_finite() {
+                value.clamp(0.0, 1.0)
+            } else {
+                fallback
+            }
+        };
+        if self.thirds {
+            result.gizmos.push(CompositionGizmo {
+                kind: CompositionGizmoKind::ThirdsVertical,
+                a: Vec2::new(1.0 / 3.0, 0.0),
+                b: Vec2::new(1.0 / 3.0, 1.0),
+            });
+            result.gizmos.push(CompositionGizmo {
+                kind: CompositionGizmoKind::ThirdsVertical,
+                a: Vec2::new(2.0 / 3.0, 0.0),
+                b: Vec2::new(2.0 / 3.0, 1.0),
+            });
+            result.gizmos.push(CompositionGizmo {
+                kind: CompositionGizmoKind::ThirdsHorizontal,
+                a: Vec2::new(0.0, 1.0 / 3.0),
+                b: Vec2::new(1.0, 1.0 / 3.0),
+            });
+            result.gizmos.push(CompositionGizmo {
+                kind: CompositionGizmoKind::ThirdsHorizontal,
+                a: Vec2::new(0.0, 2.0 / 3.0),
+                b: Vec2::new(1.0, 2.0 / 3.0),
+            });
+        }
+        if self.golden_ratio {
+            let phi = 0.618_033_95;
+            result.gizmos.push(CompositionGizmo {
+                kind: CompositionGizmoKind::GoldenVertical,
+                a: Vec2::new(phi, 0.0),
+                b: Vec2::new(phi, 1.0),
+            });
+            result.gizmos.push(CompositionGizmo {
+                kind: CompositionGizmoKind::GoldenHorizontal,
+                a: Vec2::new(0.0, phi),
+                b: Vec2::new(1.0, phi),
+            });
+        }
+        for (kind, value) in [
+            (CompositionGizmoKind::TitleSafe, self.title_safe),
+            (CompositionGizmoKind::ActionSafe, self.action_safe),
+        ] {
+            let inset = (1.0 - safe(value, 0.9)) * 0.5;
+            result.gizmos.push(CompositionGizmo {
+                kind,
+                a: Vec2::new(inset, inset),
+                b: Vec2::new(1.0 - inset, 1.0 - inset),
+            });
+        }
+        if view.viewport_px.size[0] == 0 || view.viewport_px.size[1] == 0 {
+            result.error_count = 1;
+            result.gizmos.clear();
+        }
+        result
+    }
 }
 
 #[cfg(feature = "virtual_production")]
@@ -394,6 +734,14 @@ pub enum ExternalPoseError {
     CalibrationMismatch,
     TranslationJump,
     RotationJump,
+}
+
+#[cfg(feature = "virtual_production")]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ExternalPoseResult {
+    pub pose: CameraPose,
+    pub accepted: bool,
+    pub error: Option<ExternalPoseError>,
 }
 
 #[cfg(feature = "virtual_production")]
@@ -460,6 +808,21 @@ impl ExternalPoseValidator {
         }
         self.last = Some(sample);
         Ok(sample.pose)
+    }
+
+    pub fn accept_or_last(&mut self, sample: ExternalPoseSample) -> ExternalPoseResult {
+        match self.accept(sample) {
+            Ok(pose) => ExternalPoseResult {
+                pose,
+                accepted: true,
+                error: None,
+            },
+            Err(error) => ExternalPoseResult {
+                pose: self.last.map(|value| value.pose).unwrap_or_default(),
+                accepted: false,
+                error: Some(error),
+            },
+        }
     }
 }
 
@@ -552,6 +915,14 @@ pub struct LookaheadPredictor {
 }
 
 #[cfg(feature = "lookahead_stream")]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StreamingContribution {
+    pub importance: f32,
+    pub distance_m: f32,
+    pub sample_count: u16,
+}
+
+#[cfg(feature = "lookahead_stream")]
 impl Default for LookaheadPredictor {
     fn default() -> Self {
         Self {
@@ -585,6 +956,44 @@ impl LookaheadPredictor {
         }
         result
     }
+
+    pub fn contribution(
+        &self,
+        points: &[DVec3],
+        current_position: DVec3,
+        base_importance: f32,
+        target_valid: bool,
+    ) -> StreamingContribution {
+        if !target_valid || !current_position.is_finite() {
+            return StreamingContribution {
+                importance: 0.0,
+                distance_m: 0.0,
+                sample_count: 0,
+            };
+        }
+        let mut total = 0.0_f32;
+        let mut distance = 0.0_f64;
+        for point in points.iter().take(Self::MAX_SAMPLES) {
+            if !point.is_finite() {
+                continue;
+            }
+            let d = (*point - current_position).length();
+            if d.is_finite() {
+                distance = distance.max(d);
+                total += 1.0 / (1.0 + d as f32);
+            }
+        }
+        let base = if base_importance.is_finite() {
+            base_importance.max(0.0)
+        } else {
+            0.0
+        };
+        StreamingContribution {
+            importance: (base * total).clamp(0.0, 1.0e6),
+            distance_m: distance as f32,
+            sample_count: points.len().min(Self::MAX_SAMPLES) as u16,
+        }
+    }
 }
 
 #[cfg(feature = "lookahead_stream")]
@@ -611,6 +1020,7 @@ pub struct HistoryStabilizer {
     pub max_linear_velocity: f32,
     pub max_angular_velocity: f32,
     pub clamp_weight: f32,
+    pub sharpen_strength: f32,
 }
 
 #[cfg(feature = "edge_stabilize")]
@@ -620,6 +1030,7 @@ impl Default for HistoryStabilizer {
             max_linear_velocity: 50.0,
             max_angular_velocity: 8.0,
             clamp_weight: 0.9,
+            sharpen_strength: 0.0,
         }
     }
 }
@@ -645,6 +1056,38 @@ impl HistoryStabilizer {
             return Err(HistoryRejectReason::AngularVelocity);
         }
         Ok(self.clamp_weight.clamp(0.0, 1.0))
+    }
+
+    pub fn evaluate_batch(self, samples: &[(bool, f32, f32)]) -> (Vec<f32>, u32, u32, f32) {
+        let mut weights = Vec::with_capacity(samples.len());
+        let mut accepted = 0_u32;
+        let mut rejected = 0_u32;
+        for &(valid, linear, angular) in samples {
+            match self.history_weight(valid, linear, angular) {
+                Ok(weight) => {
+                    accepted = accepted.saturating_add(1);
+                    weights.push(weight);
+                }
+                Err(_) => {
+                    rejected = rejected.saturating_add(1);
+                    weights.push(0.0);
+                }
+            }
+        }
+        let acceptance = if samples.is_empty() {
+            0.0
+        } else {
+            accepted as f32 / samples.len() as f32
+        };
+        (weights, accepted, rejected, acceptance)
+    }
+
+    pub fn sharpen_strength(self) -> f32 {
+        if self.sharpen_strength.is_finite() {
+            self.sharpen_strength.clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
     }
 }
 
@@ -738,6 +1181,25 @@ mod tests {
             ..base
         }));
         assert!((track.sample(15, CameraPose::default()).0.position.x - 5.0).abs() < 1.0e-6);
+        let sampled = track.sample_state(
+            15,
+            CameraTrackSample {
+                pose: CameraPose::default(),
+                focal_length_mm: 35.0,
+                exposure: Exposure::default(),
+                event_key: None,
+                active: true,
+                handoff_to_previous: false,
+            },
+        );
+        assert!((sampled.focal_length_mm - 50.0).abs() < 1.0e-6);
+        assert_eq!(sampled.event_key, Some(1));
+        assert_eq!(track.validate(), Ok(()));
+        track.asset_version += 1;
+        assert_eq!(
+            track.validate().unwrap_err().code,
+            CameraTrackValidationCode::UnsupportedVersion
+        );
     }
 
     #[cfg(feature = "cutscene")]
@@ -824,6 +1286,16 @@ mod tests {
             }),
             Err(ExternalPoseError::TranslationJump)
         );
+        let rejected = validator.accept_or_last(ExternalPoseSample {
+            timestamp_s: 2.0,
+            pose: CameraPose {
+                position: DVec3::new(4.0, 0.0, 0.0),
+                ..sample.pose
+            },
+            ..sample
+        });
+        assert!(!rejected.accepted);
+        assert_eq!(rejected.pose, sample.pose);
     }
 
     #[cfg(feature = "occlusion_fade")]
@@ -913,5 +1385,38 @@ mod tests {
         assert!(policy.should_update(2, 10, 60.0));
         assert_eq!(policy.resolution_scale(), 1.0);
         assert_eq!(policy.effective_history_frames(), 0);
+    }
+
+    #[cfg(feature = "composition_aid")]
+    #[test]
+    fn composition_guides_are_normalized_and_hide_for_zero_viewport() {
+        let guide = CompositionGuide {
+            thirds: true,
+            golden_ratio: true,
+            title_safe: f32::NAN,
+            action_safe: 0.8,
+        };
+        let mut history = ViewHistory::default();
+        let valid = derive_view(
+            CameraIntent::default(),
+            CameraPose::default(),
+            0,
+            [100, 50],
+            &mut history,
+        )
+        .unwrap();
+        let result = guide.compute(&valid);
+        assert_eq!(result.gizmos.len(), 8);
+        assert!(result.gizmos.iter().all(|gizmo| {
+            gizmo.a.x.is_finite()
+                && gizmo.a.y.is_finite()
+                && gizmo.b.x.is_finite()
+                && gizmo.b.y.is_finite()
+        }));
+        let mut zero = valid;
+        zero.viewport_px.size = [0, 0];
+        let result = guide.compute(&zero);
+        assert!(result.gizmos.is_empty());
+        assert_eq!(result.error_count, 1);
     }
 }
