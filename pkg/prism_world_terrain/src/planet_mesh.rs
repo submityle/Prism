@@ -1209,7 +1209,22 @@ mod tests {
                     });
 
                 let mut edge_counts = Vec::new();
+                let mut doubled_grid_area = 0i64;
+                let mut used_grid_vertices = [false; 81];
+                for &index in mesh.indices() {
+                    used_grid_vertices[index as usize] = true;
+                }
                 for triangle in mesh.indices().chunks_exact(3) {
+                    let grid = [triangle[0], triangle[1], triangle[2]].map(|index| {
+                        let index = i64::from(index);
+                        [index % 9, index / 9]
+                    });
+                    let ab = [grid[1][0] - grid[0][0], grid[1][1] - grid[0][1]];
+                    let ac = [grid[2][0] - grid[0][0], grid[2][1] - grid[0][1]];
+                    let area = ab[0] * ac[1] - ab[1] * ac[0];
+                    assert_ne!(area, 0, "degenerate grid triangle on {face:?}");
+                    doubled_grid_area += area.abs();
+
                     let [a, b, c] = [triangle[0], triangle[1], triangle[2]]
                         .map(|index| mesh.positions()[index as usize].map(f64::from));
                     assert!(
@@ -1226,9 +1241,30 @@ mod tests {
                         (triangle[1], triangle[2]),
                         (triangle[2], triangle[0]),
                     ] {
+                        let start_grid = [i64::from(start % 9), i64::from(start / 9)];
+                        let end_grid = [i64::from(end % 9), i64::from(end / 9)];
+                        let edge = [end_grid[0] - start_grid[0], end_grid[1] - start_grid[1]];
+                        let edge_len_squared = edge[0] * edge[0] + edge[1] * edge[1];
+                        for candidate in 0..81i64 {
+                            if !used_grid_vertices[candidate as usize] {
+                                continue;
+                            }
+                            let point = [candidate % 9, candidate / 9];
+                            let relative = [point[0] - start_grid[0], point[1] - start_grid[1]];
+                            let cross = edge[0] * relative[1] - edge[1] * relative[0];
+                            let along = edge[0] * relative[0] + edge[1] * relative[1];
+                            assert!(
+                                cross != 0 || along <= 0 || along >= edge_len_squared,
+                                "T-junction at {point:?} on edge {start_grid:?}->{end_grid:?}, triangle {grid:?}, {face:?} {first_edge:?}+{second_edge:?}"
+                            );
+                        }
                         edge_counts.push((start.min(end), start.max(end)));
                     }
                 }
+                assert_eq!(
+                    doubled_grid_area, 2 * 8 * 8,
+                    "corner fan overlaps or leaves a grid-space hole on {face:?} {first_edge:?}+{second_edge:?}"
+                );
                 edge_counts.sort_unstable();
                 let mut boundary_edges = 0;
                 for edge_group in edge_counts.chunk_by(|left, right| left == right) {
