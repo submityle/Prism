@@ -1230,6 +1230,60 @@ fn hash_value(hasher: &mut Sha256, value: &Value) {
             hasher.update([5]);
             hasher.update(value.0.to_le_bytes());
         }
+        Value::EnumTyped { enum_type, id } => {
+            hasher.update([11]);
+            hasher.update(enum_type.0.to_le_bytes());
+            hasher.update(id.0.to_le_bytes());
+        }
+        Value::EnumPayload { id, payload } => {
+            hasher.update([10]);
+            hasher.update(id.0.to_le_bytes());
+            match payload {
+                prism_settings::EnumPayload::Tuple(values) => {
+                    hasher.update([0]);
+                    hasher.update((values.len() as u64).to_le_bytes());
+                    for value in values {
+                        hash_value(hasher, value);
+                    }
+                }
+                prism_settings::EnumPayload::Struct(values) => {
+                    hasher.update([1]);
+                    hasher.update((values.len() as u64).to_le_bytes());
+                    for (key, value) in values {
+                        hasher.update((key.len() as u64).to_le_bytes());
+                        hasher.update(key.as_bytes());
+                        hash_value(hasher, value);
+                    }
+                }
+            }
+        }
+        Value::EnumPayloadTyped {
+            enum_type,
+            id,
+            payload,
+        } => {
+            hasher.update([12]);
+            hasher.update(enum_type.0.to_le_bytes());
+            hasher.update(id.0.to_le_bytes());
+            match payload {
+                prism_settings::EnumPayload::Tuple(values) => {
+                    hasher.update([0]);
+                    hasher.update((values.len() as u64).to_le_bytes());
+                    for value in values {
+                        hash_value(hasher, value);
+                    }
+                }
+                prism_settings::EnumPayload::Struct(values) => {
+                    hasher.update([1]);
+                    hasher.update((values.len() as u64).to_le_bytes());
+                    for (key, value) in values {
+                        hasher.update((key.len() as u64).to_le_bytes());
+                        hasher.update(key.as_bytes());
+                        hash_value(hasher, value);
+                    }
+                }
+            }
+        }
         Value::Array(values) => {
             hasher.update([6]);
             hasher.update((values.len() as u64).to_le_bytes());
@@ -1290,6 +1344,7 @@ mod tests {
     };
     use std::{
         cell::{Cell, RefCell},
+        collections::BTreeMap,
         fs::OpenOptions,
         io::Write,
     };
@@ -1401,6 +1456,81 @@ mod tests {
             watcher.poll(&[]),
             Err(PipelineError::Candidate(_))
         ));
+    }
+
+    #[test]
+    fn resolved_snapshot_digest_covers_enum_payload_shape_and_contents() {
+        use prism_settings::{
+            EnumOptionPayload, EnumPayload, EnumPayloadShape, ValueShape, ValueType,
+        };
+        let option = prism_settings::EnumOption::from_stable_name("render::Mode::Configured");
+        let make_registry = |shape: EnumPayloadShape, default_payload: EnumPayload| {
+            let mut definition = SettingDef::new(
+                "render.mode",
+                "render",
+                Value::EnumPayload {
+                    id: option.id,
+                    payload: default_payload,
+                },
+            );
+            definition.enum_options = vec![option.clone()];
+            definition.enum_payloads = vec![EnumOptionPayload {
+                id: option.id,
+                shape,
+            }];
+            let mut builder = RegistryBuilder::new();
+            builder.namespace("render", "digest-test").unwrap();
+            builder.register(definition);
+            builder.finish().unwrap()
+        };
+        let resolve = |registry: &SettingsRegistry, value| {
+            let mut source =
+                LayerSource::new(LayerKind::User, TrustLevel::User, "payload-digest-test");
+            source.set("render.mode", value);
+            Resolver::new(&registry)
+                .resolve(Domain::Runtime, &[source], 1)
+                .unwrap()
+        };
+        let tuple_registry = make_registry(
+            EnumPayloadShape::Tuple(vec![ValueShape::scalar(ValueType::Int)]),
+            EnumPayload::Tuple(vec![Value::Int(1)]),
+        );
+        let first = resolve(
+            &tuple_registry,
+            Value::EnumPayload {
+                id: option.id,
+                payload: EnumPayload::Tuple(vec![Value::Int(1)]),
+            },
+        );
+        let changed = resolve(
+            &tuple_registry,
+            Value::EnumPayload {
+                id: option.id,
+                payload: EnumPayload::Tuple(vec![Value::Int(2)]),
+            },
+        );
+        let struct_registry = make_registry(
+            EnumPayloadShape::Struct(BTreeMap::from([(
+                "value".to_owned(),
+                ValueShape::scalar(ValueType::Int),
+            )])),
+            EnumPayload::Struct(BTreeMap::from([("value".to_owned(), Value::Int(1))])),
+        );
+        let changed_shape = resolve(
+            &struct_registry,
+            Value::EnumPayload {
+                id: option.id,
+                payload: EnumPayload::Struct(BTreeMap::from([("value".to_owned(), Value::Int(1))])),
+            },
+        );
+        assert_ne!(
+            resolved_snapshot_digest(&tuple_registry, &first),
+            resolved_snapshot_digest(&tuple_registry, &changed)
+        );
+        assert_ne!(
+            resolved_snapshot_digest(&tuple_registry, &first),
+            resolved_snapshot_digest(&struct_registry, &changed_shape)
+        );
     }
 
     #[test]

@@ -6,7 +6,8 @@
 
 use prism_reflect::{
     schema::{AttributeValue, TypeMetadata},
-    GetTypeRegistration, Map, Reflect, ReflectRef, Struct, TypeInfo, Typed, VariantKind,
+    Enum, GetTypeRegistration, Map, Reflect, ReflectRef, Struct, TypeInfo, Typed, VariantKind,
+    VariantType,
 };
 use prism_settings::{
     canonical_value_cmp, Constraints, RegistryBuilder, SettingDef, SettingsError, SettingsRegistry,
@@ -15,6 +16,18 @@ use prism_settings::{
 use std::{collections::BTreeMap, error::Error, fmt};
 
 const MAX_REFLECT_SETTING_COLLECTION_LEN: usize = 1024;
+
+type EnumOption = prism_settings::EnumOption;
+type EnumPayloadSchema = prism_settings::EnumOptionPayload;
+type EnumSchema = prism_settings::EnumSchema;
+type EnumVariantSchema = prism_settings::EnumVariantSchema;
+type Derived = (
+    Value,
+    ValueShape,
+    Vec<EnumOption>,
+    Vec<EnumPayloadSchema>,
+    Vec<EnumSchema>,
+);
 
 /// Failure while deriving a canonical settings registry.
 #[derive(Debug)]
@@ -125,7 +138,9 @@ where
                     type_name: default.type_name().to_owned(),
                     field: name.to_owned(),
                 })?;
-        let (rust_default, shape, enum_options) = match reflected.reflect_ref() {
+        let (rust_default, shape, enum_options, enum_payloads, enum_schemas) = match reflected
+            .reflect_ref()
+        {
             ReflectRef::Enum(active) => {
                 let TypeInfo::Enum(enum_info) = reflected.type_info() else {
                     return Err(ReflectSettingsError::UnsupportedValue {
@@ -133,33 +148,7 @@ where
                         type_name: descriptor.type_name().to_owned(),
                     });
                 };
-                if enum_info
-                    .variants()
-                    .iter()
-                    .any(|variant| !matches!(variant.kind(), VariantKind::Unit))
-                {
-                    return Err(ReflectSettingsError::UnsupportedValue {
-                        field: name.to_owned(),
-                        type_name: descriptor.type_name().to_owned(),
-                    });
-                }
-                let enum_options = enum_info
-                    .variants()
-                    .iter()
-                    .map(|variant| prism_settings::EnumOption::from_stable_name(variant.name()))
-                    .collect::<Vec<_>>();
-                let default = enum_options
-                    .iter()
-                    .find(|option| option.stable_name == active.variant_name())
-                    .ok_or_else(|| ReflectSettingsError::UnsupportedValue {
-                        field: name.to_owned(),
-                        type_name: descriptor.type_name().to_owned(),
-                    })?;
-                (
-                    Value::Enum(default.id),
-                    ValueShape::scalar(prism_settings::ValueType::Enum),
-                    enum_options,
-                )
+                from_reflect_enum(active, enum_info, 0, name, descriptor.type_name())?
             }
             ReflectRef::List(list) => {
                 let TypeInfo::List(info) = reflected.type_info() else {
@@ -168,7 +157,7 @@ where
                         type_name: descriptor.type_name().to_owned(),
                     });
                 };
-                let (value, shape, enum_options) = from_reflect_sequence(
+                from_reflect_sequence(
                     list.iter_reflect(),
                     list.len(),
                     info.item_type_name(),
@@ -176,8 +165,7 @@ where
                     0,
                     name,
                     descriptor.type_name(),
-                )?;
-                (value, shape, enum_options)
+                )?
             }
             ReflectRef::Array(array) => {
                 let TypeInfo::Array(info) = reflected.type_info() else {
@@ -186,7 +174,7 @@ where
                         type_name: descriptor.type_name().to_owned(),
                     });
                 };
-                let (value, shape, enum_options) = from_reflect_sequence(
+                from_reflect_sequence(
                     array.iter_reflect(),
                     array.len(),
                     info.item_type_name(),
@@ -194,8 +182,7 @@ where
                     0,
                     name,
                     descriptor.type_name(),
-                )?;
-                (value, shape, enum_options)
+                )?
             }
             ReflectRef::Struct(fields) => {
                 let TypeInfo::Struct(info) = reflected.type_info() else {
@@ -263,10 +250,20 @@ where
                     .find(|item| !item.2.is_empty())
                     .map(|item| item.2.clone())
                     .unwrap_or_default();
+                let payloads = values
+                    .iter()
+                    .flat_map(|item| item.3.clone())
+                    .collect::<Vec<_>>();
+                let schemas = values
+                    .iter()
+                    .flat_map(|item| item.4.clone())
+                    .collect::<Vec<_>>();
                 (
                     Value::Array(values.into_iter().map(|item| item.0).collect()),
                     ValueShape::set(element_shape, MAX_REFLECT_SETTING_COLLECTION_LEN),
                     options,
+                    payloads,
+                    schemas,
                 )
             }
             _ => {
@@ -277,7 +274,7 @@ where
                     }
                 })?;
                 let shape = ValueShape::scalar(value.value_type());
-                (value, shape, Vec::new())
+                (value, shape, Vec::new(), Vec::new(), Vec::new())
             }
         };
         let value = match meta.and_then(|meta| meta.default_value()) {
@@ -304,6 +301,8 @@ where
         let mut definition = SettingDef::new(format!("{namespace}.{name}"), namespace, value);
         definition.set_shape(shape);
         definition.enum_options = enum_options;
+        definition.enum_payloads = enum_payloads;
+        definition.enum_schemas = enum_schemas;
         if let Some(meta) = meta {
             definition.description = meta.docs().map(str::to_owned);
             definition.category = meta.category().map(str::to_owned);
@@ -424,7 +423,7 @@ fn from_reflect_sequence<'a, I>(
     depth: usize,
     field: &str,
     type_name: &str,
-) -> Result<(Value, ValueShape, Vec<prism_settings::EnumOption>), ReflectSettingsError>
+) -> Result<Derived, ReflectSettingsError>
 where
     I: IntoIterator<Item = &'a dyn Reflect>,
 {
@@ -441,8 +440,10 @@ where
     let mut values = Vec::with_capacity(len);
     let mut element_type = None;
     let mut enum_options = Vec::new();
+    let mut enum_payloads = Vec::new();
+    let mut enum_schemas = Vec::new();
     for item in items {
-        let (value, item_shape, item_enum_options) =
+        let (value, item_shape, item_enum_options, item_payloads, item_schemas) =
             from_reflect_value(item, depth + 1, field, type_name)?;
         if let Some(expected) = &element_type {
             if *expected != item_shape {
@@ -455,14 +456,10 @@ where
             element_type = Some(item_shape);
         }
         if !item_enum_options.is_empty() {
-            if !enum_options.is_empty() && enum_options != item_enum_options {
-                return Err(ReflectSettingsError::UnsupportedValue {
-                    field: field.to_owned(),
-                    type_name: type_name.to_owned(),
-                });
-            }
-            enum_options = item_enum_options;
+            merge_enum_options(&mut enum_options, item_enum_options, field, type_name)?;
         }
+        merge_payload_schemas(&mut enum_payloads, item_payloads, field, type_name)?;
+        merge_enum_schemas(&mut enum_schemas, item_schemas, field, type_name)?;
         values.push(value);
     }
 
@@ -476,7 +473,13 @@ where
         Some(length) => ValueShape::fixed_array(element_shape, length),
         None => ValueShape::bounded_array(element_shape, MAX_REFLECT_SETTING_COLLECTION_LEN),
     };
-    Ok((Value::Array(values), shape, enum_options))
+    Ok((
+        Value::Array(values),
+        shape,
+        enum_options,
+        enum_payloads,
+        enum_schemas,
+    ))
 }
 
 fn from_reflect_struct(
@@ -485,7 +488,7 @@ fn from_reflect_struct(
     depth: usize,
     field: &str,
     type_name: &str,
-) -> Result<(Value, ValueShape, Vec<prism_settings::EnumOption>), ReflectSettingsError> {
+) -> Result<Derived, ReflectSettingsError> {
     if depth > prism_settings::MAX_VALUE_SHAPE_DEPTH
         || info.field_count() > MAX_REFLECT_SETTING_COLLECTION_LEN
     {
@@ -497,6 +500,8 @@ fn from_reflect_struct(
     let mut values = BTreeMap::new();
     let mut shapes = BTreeMap::new();
     let mut enum_options = Vec::new();
+    let mut enum_payloads = Vec::new();
+    let mut enum_schemas = Vec::new();
     for descriptor in info.fields() {
         let reflected_value = fields.field(descriptor.name()).ok_or_else(|| {
             ReflectSettingsError::MissingDefaultField {
@@ -504,17 +509,11 @@ fn from_reflect_struct(
                 field: descriptor.name().to_owned(),
             }
         })?;
-        let (value, shape, options) =
+        let (value, shape, options, payloads, schemas) =
             from_reflect_value(reflected_value, depth + 1, field, type_name)?;
-        if !options.is_empty() {
-            if !enum_options.is_empty() && enum_options != options {
-                return Err(ReflectSettingsError::UnsupportedValue {
-                    field: field.to_owned(),
-                    type_name: type_name.to_owned(),
-                });
-            }
-            enum_options = options;
-        }
+        merge_enum_options(&mut enum_options, options, field, type_name)?;
+        merge_payload_schemas(&mut enum_payloads, payloads, field, type_name)?;
+        merge_enum_schemas(&mut enum_schemas, schemas, field, type_name)?;
         values.insert(descriptor.name().to_owned(), value);
         shapes.insert(descriptor.name().to_owned(), shape);
     }
@@ -522,6 +521,8 @@ fn from_reflect_struct(
         Value::Table(values),
         ValueShape::table(shapes),
         enum_options,
+        enum_payloads,
+        enum_schemas,
     ))
 }
 
@@ -532,7 +533,7 @@ fn from_reflect_map(
     depth: usize,
     field: &str,
     type_name: &str,
-) -> Result<(Value, ValueShape, Vec<prism_settings::EnumOption>), ReflectSettingsError> {
+) -> Result<Derived, ReflectSettingsError> {
     if depth > prism_settings::MAX_VALUE_SHAPE_DEPTH
         || map.len() > MAX_REFLECT_SETTING_COLLECTION_LEN
         || !matches!(
@@ -548,6 +549,8 @@ fn from_reflect_map(
     let mut values = BTreeMap::new();
     let mut value_shape = None;
     let mut enum_options = Vec::new();
+    let mut enum_payloads = Vec::new();
+    let mut enum_schemas = Vec::new();
     for (key, reflected_value) in map.iter_reflect() {
         let Some(Value::String(key)) = from_reflect_scalar(key) else {
             return Err(ReflectSettingsError::UnsupportedValue {
@@ -555,7 +558,7 @@ fn from_reflect_map(
                 type_name: type_name.to_owned(),
             });
         };
-        let (value, shape, options) =
+        let (value, shape, options, payloads, schemas) =
             from_reflect_value(reflected_value, depth + 1, field, type_name)?;
         if let Some(expected) = &value_shape {
             if *expected != shape {
@@ -567,15 +570,9 @@ fn from_reflect_map(
         } else {
             value_shape = Some(shape);
         }
-        if !options.is_empty() {
-            if !enum_options.is_empty() && enum_options != options {
-                return Err(ReflectSettingsError::UnsupportedValue {
-                    field: field.to_owned(),
-                    type_name: type_name.to_owned(),
-                });
-            }
-            enum_options = options;
-        }
+        merge_enum_options(&mut enum_options, options, field, type_name)?;
+        merge_payload_schemas(&mut enum_payloads, payloads, field, type_name)?;
+        merge_enum_schemas(&mut enum_schemas, schemas, field, type_name)?;
         values.insert(key, value);
     }
     let value_shape = value_shape
@@ -588,6 +585,8 @@ fn from_reflect_map(
         Value::Table(values),
         ValueShape::map(value_shape, MAX_REFLECT_SETTING_COLLECTION_LEN),
         enum_options,
+        enum_payloads,
+        enum_schemas,
     ))
 }
 
@@ -596,7 +595,7 @@ fn from_reflect_value(
     depth: usize,
     field: &str,
     field_type_name: &str,
-) -> Result<(Value, ValueShape, Vec<prism_settings::EnumOption>), ReflectSettingsError> {
+) -> Result<Derived, ReflectSettingsError> {
     if depth > prism_settings::MAX_VALUE_SHAPE_DEPTH {
         return Err(ReflectSettingsError::UnsupportedValue {
             field: field.to_owned(),
@@ -670,33 +669,7 @@ fn from_reflect_value(
                     type_name: field_type_name.to_owned(),
                 });
             };
-            if enum_info
-                .variants()
-                .iter()
-                .any(|variant| !matches!(variant.kind(), VariantKind::Unit))
-            {
-                return Err(ReflectSettingsError::UnsupportedValue {
-                    field: field.to_owned(),
-                    type_name: field_type_name.to_owned(),
-                });
-            }
-            let enum_options = enum_info
-                .variants()
-                .iter()
-                .map(|variant| prism_settings::EnumOption::from_stable_name(variant.name()))
-                .collect::<Vec<_>>();
-            let option = enum_options
-                .iter()
-                .find(|option| option.stable_name == active.variant_name())
-                .ok_or_else(|| ReflectSettingsError::UnsupportedValue {
-                    field: field.to_owned(),
-                    type_name: field_type_name.to_owned(),
-                })?;
-            Ok((
-                Value::Enum(option.id),
-                ValueShape::scalar(prism_settings::ValueType::Enum),
-                enum_options,
-            ))
+            from_reflect_enum(active, enum_info, depth, field, field_type_name)
         }
         _ => {
             let scalar = from_reflect_scalar(value).ok_or_else(|| {
@@ -709,9 +682,447 @@ fn from_reflect_value(
                 scalar.clone(),
                 ValueShape::scalar(scalar.value_type()),
                 Vec::new(),
+                Vec::new(),
+                Vec::new(),
             ))
         }
     }
+}
+
+fn from_reflect_enum(
+    active: &dyn Enum,
+    info: &prism_reflect::EnumInfo,
+    depth: usize,
+    field: &str,
+    type_name: &str,
+) -> Result<Derived, ReflectSettingsError> {
+    if depth > prism_settings::MAX_VALUE_SHAPE_DEPTH {
+        return Err(ReflectSettingsError::UnsupportedValue {
+            field: field.to_owned(),
+            type_name: type_name.to_owned(),
+        });
+    }
+    if info
+        .variants()
+        .iter()
+        .all(|variant| matches!(variant.kind(), VariantKind::Unit))
+    {
+        let options = info
+            .variants()
+            .iter()
+            .map(|variant| EnumOption::from_stable_name(variant.name()))
+            .collect::<Vec<_>>();
+        let option = options
+            .iter()
+            .find(|option| option.stable_name == active.variant_name())
+            .ok_or_else(|| ReflectSettingsError::UnsupportedValue {
+                field: field.to_owned(),
+                type_name: type_name.to_owned(),
+            })?;
+        return Ok((
+            Value::Enum(option.id),
+            ValueShape::scalar(prism_settings::ValueType::Enum),
+            options,
+            Vec::new(),
+            Vec::new(),
+        ));
+    }
+    let (all_options, payloads, schemas) = enum_schema(info, depth, field, type_name)?;
+    let enum_type = prism_settings::EnumTypeId::from_stable_name(info.type_name());
+    let active_option =
+        EnumOption::from_stable_name(&typed_variant_name(info, active.variant_name()));
+    let value = match active.variant_type() {
+        VariantType::Unit => Value::EnumTyped {
+            enum_type,
+            id: active_option.id,
+        },
+        VariantType::Tuple => Value::EnumPayloadTyped {
+            enum_type,
+            id: active_option.id,
+            payload: prism_settings::EnumPayload::Tuple(
+                (0..active.field_count())
+                    .map(|index| {
+                        active
+                            .field_at(index)
+                            .ok_or_else(|| ReflectSettingsError::UnsupportedValue {
+                                field: field.to_owned(),
+                                type_name: type_name.to_owned(),
+                            })
+                            .and_then(|child| {
+                                from_reflect_value(child, depth + 1, field, type_name)
+                                    .map(|item| item.0)
+                            })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            ),
+        },
+        VariantType::Struct => {
+            let VariantKind::Struct(fields) = info
+                .variant(active.variant_name())
+                .ok_or_else(|| ReflectSettingsError::UnsupportedValue {
+                    field: field.to_owned(),
+                    type_name: type_name.to_owned(),
+                })?
+                .kind()
+            else {
+                return Err(ReflectSettingsError::UnsupportedValue {
+                    field: field.to_owned(),
+                    type_name: type_name.to_owned(),
+                });
+            };
+            let mut values = BTreeMap::new();
+            for descriptor in fields {
+                let child = active.field(descriptor.name()).ok_or_else(|| {
+                    ReflectSettingsError::UnsupportedValue {
+                        field: field.to_owned(),
+                        type_name: type_name.to_owned(),
+                    }
+                })?;
+                values.insert(
+                    descriptor.name().to_owned(),
+                    from_reflect_value(child, depth + 1, field, type_name)?.0,
+                );
+            }
+            Value::EnumPayloadTyped {
+                enum_type,
+                id: active_option.id,
+                payload: prism_settings::EnumPayload::Struct(values),
+            }
+        }
+        _ => {
+            return Err(ReflectSettingsError::UnsupportedValue {
+                field: field.to_owned(),
+                type_name: type_name.to_owned(),
+            });
+        }
+    };
+    Ok((
+        value,
+        ValueShape::Enum(enum_type),
+        all_options,
+        payloads,
+        schemas,
+    ))
+}
+
+fn enum_schema(
+    info: &prism_reflect::EnumInfo,
+    depth: usize,
+    field: &str,
+    type_name: &str,
+) -> Result<(Vec<EnumOption>, Vec<EnumPayloadSchema>, Vec<EnumSchema>), ReflectSettingsError> {
+    let mut options = info
+        .variants()
+        .iter()
+        .map(|variant| EnumOption::from_stable_name(&typed_variant_name(info, variant.name())))
+        .collect::<Vec<_>>();
+    let mut payloads = Vec::new();
+    let mut schemas = Vec::new();
+    for variant in info.variants() {
+        match variant.kind() {
+            VariantKind::Unit => {}
+            VariantKind::Tuple(fields) => {
+                let mut shapes = Vec::with_capacity(fields.len());
+                for descriptor in fields {
+                    let (shape, nested_options, nested_payloads, nested_schemas) =
+                        shape_from_type_info(
+                            descriptor.type_info(),
+                            descriptor.type_name(),
+                            depth + 1,
+                            field,
+                            type_name,
+                        )?;
+                    shapes.push(shape);
+                    merge_enum_options(&mut options, nested_options, field, type_name)?;
+                    merge_payload_schemas(&mut payloads, nested_payloads, field, type_name)?;
+                    merge_enum_schemas(&mut schemas, nested_schemas, field, type_name)?;
+                }
+                payloads.push(EnumPayloadSchema {
+                    id: EnumOption::from_stable_name(&typed_variant_name(info, variant.name())).id,
+                    shape: prism_settings::EnumPayloadShape::Tuple(shapes),
+                });
+            }
+            VariantKind::Struct(fields) => {
+                let mut shapes = BTreeMap::new();
+                for descriptor in fields {
+                    let (shape, nested_options, nested_payloads, nested_schemas) =
+                        shape_from_type_info(
+                            descriptor.type_info(),
+                            descriptor.type_name(),
+                            depth + 1,
+                            field,
+                            type_name,
+                        )?;
+                    shapes.insert(descriptor.name().to_owned(), shape);
+                    merge_enum_options(&mut options, nested_options, field, type_name)?;
+                    merge_payload_schemas(&mut payloads, nested_payloads, field, type_name)?;
+                    merge_enum_schemas(&mut schemas, nested_schemas, field, type_name)?;
+                }
+                payloads.push(EnumPayloadSchema {
+                    id: EnumOption::from_stable_name(&typed_variant_name(info, variant.name())).id,
+                    shape: prism_settings::EnumPayloadShape::Struct(shapes),
+                });
+            }
+            _ => {
+                return Err(ReflectSettingsError::UnsupportedValue {
+                    field: field.to_owned(),
+                    type_name: type_name.to_owned(),
+                });
+            }
+        }
+    }
+    schemas.push(EnumSchema {
+        id: prism_settings::EnumTypeId::from_stable_name(info.type_name()),
+        stable_name: info.type_name().to_owned(),
+        variants: info
+            .variants()
+            .iter()
+            .map(|variant| EnumVariantSchema {
+                id: EnumOption::from_stable_name(&typed_variant_name(info, variant.name())).id,
+                stable_name: typed_variant_name(info, variant.name()),
+                payload: payloads
+                    .iter()
+                    .find(|payload| {
+                        payload.id
+                            == EnumOption::from_stable_name(&typed_variant_name(
+                                info,
+                                variant.name(),
+                            ))
+                            .id
+                    })
+                    .map(|payload| payload.shape.clone()),
+            })
+            .collect(),
+    });
+    Ok((options, payloads, schemas))
+}
+
+fn typed_variant_name(info: &prism_reflect::EnumInfo, variant: &str) -> String {
+    format!("{}::{}", info.type_name(), variant)
+}
+
+fn shape_from_type_info(
+    info: Option<&'static TypeInfo>,
+    type_name: &'static str,
+    depth: usize,
+    field: &str,
+    owner_type: &str,
+) -> Result<
+    (
+        ValueShape,
+        Vec<EnumOption>,
+        Vec<EnumPayloadSchema>,
+        Vec<EnumSchema>,
+    ),
+    ReflectSettingsError,
+> {
+    if depth > prism_settings::MAX_VALUE_SHAPE_DEPTH {
+        return Err(ReflectSettingsError::UnsupportedValue {
+            field: field.to_owned(),
+            type_name: owner_type.to_owned(),
+        });
+    }
+    let Some(info) = info else {
+        return scalar_value_type_from_name(type_name)
+            .map(|ty| (ValueShape::scalar(ty), Vec::new(), Vec::new(), Vec::new()))
+            .ok_or_else(|| ReflectSettingsError::UnsupportedValue {
+                field: field.to_owned(),
+                type_name: owner_type.to_owned(),
+            });
+    };
+    match info {
+        TypeInfo::Value(_) => scalar_value_type_from_name(type_name)
+            .map(|ty| (ValueShape::scalar(ty), Vec::new(), Vec::new(), Vec::new()))
+            .ok_or_else(|| ReflectSettingsError::UnsupportedValue {
+                field: field.to_owned(),
+                type_name: owner_type.to_owned(),
+            }),
+        TypeInfo::Enum(enum_info) => {
+            if enum_info
+                .variants()
+                .iter()
+                .all(|variant| matches!(variant.kind(), VariantKind::Unit))
+            {
+                let options = enum_info
+                    .variants()
+                    .iter()
+                    .map(|variant| EnumOption::from_stable_name(variant.name()))
+                    .collect::<Vec<_>>();
+                return Ok((
+                    ValueShape::scalar(prism_settings::ValueType::Enum),
+                    options,
+                    Vec::new(),
+                    Vec::new(),
+                ));
+            }
+            let (options, payloads, schemas) = enum_schema(enum_info, depth, field, owner_type)?;
+            Ok((
+                ValueShape::Enum(prism_settings::EnumTypeId::from_stable_name(
+                    enum_info.type_name(),
+                )),
+                options,
+                payloads,
+                schemas,
+            ))
+        }
+        TypeInfo::List(list) => {
+            let (element, options, payloads, schemas) = shape_from_type_info(
+                list.item_type_info(),
+                list.item_type_name(),
+                depth + 1,
+                field,
+                owner_type,
+            )?;
+            Ok((
+                ValueShape::bounded_array(element, MAX_REFLECT_SETTING_COLLECTION_LEN),
+                options,
+                payloads,
+                schemas,
+            ))
+        }
+        TypeInfo::Array(array) => {
+            let (element, options, payloads, schemas) = shape_from_type_info(
+                array.item_type_info(),
+                array.item_type_name(),
+                depth + 1,
+                field,
+                owner_type,
+            )?;
+            Ok((
+                ValueShape::fixed_array(element, array.capacity()),
+                options,
+                payloads,
+                schemas,
+            ))
+        }
+        TypeInfo::Struct(struct_info) => {
+            let mut fields = BTreeMap::new();
+            let mut options = Vec::new();
+            let mut payloads = Vec::new();
+            let mut schemas = Vec::new();
+            for descriptor in struct_info.fields() {
+                let (shape, child_options, child_payloads, child_schemas) = shape_from_type_info(
+                    descriptor.type_info(),
+                    descriptor.type_name(),
+                    depth + 1,
+                    field,
+                    owner_type,
+                )?;
+                fields.insert(descriptor.name().to_owned(), shape);
+                merge_enum_options(&mut options, child_options, field, owner_type)?;
+                merge_payload_schemas(&mut payloads, child_payloads, field, owner_type)?;
+                merge_enum_schemas(&mut schemas, child_schemas, field, owner_type)?;
+            }
+            Ok((ValueShape::table(fields), options, payloads, schemas))
+        }
+        TypeInfo::TupleStruct(tuple_info) => {
+            let _ = tuple_info;
+            Err(ReflectSettingsError::UnsupportedValue {
+                field: field.to_owned(),
+                type_name: owner_type.to_owned(),
+            })
+        }
+        TypeInfo::Map(map)
+            if map.key_type_name() == "alloc::string::String"
+                || map.key_type_name() == "std::string::String" =>
+        {
+            let (shape, options, payloads, schemas) = shape_from_type_info(
+                map.value_type_info(),
+                map.value_type_name(),
+                depth + 1,
+                field,
+                owner_type,
+            )?;
+            Ok((
+                ValueShape::map(shape, MAX_REFLECT_SETTING_COLLECTION_LEN),
+                options,
+                payloads,
+                schemas,
+            ))
+        }
+        TypeInfo::Set(set) => {
+            let (shape, options, payloads, schemas) = shape_from_type_info(
+                set.value_type_info(),
+                set.value_type_name(),
+                depth + 1,
+                field,
+                owner_type,
+            )?;
+            Ok((
+                ValueShape::set(shape, MAX_REFLECT_SETTING_COLLECTION_LEN),
+                options,
+                payloads,
+                schemas,
+            ))
+        }
+        _ => Err(ReflectSettingsError::UnsupportedValue {
+            field: field.to_owned(),
+            type_name: owner_type.to_owned(),
+        }),
+    }
+}
+
+fn merge_enum_options(
+    target: &mut Vec<EnumOption>,
+    incoming: Vec<EnumOption>,
+    field: &str,
+    type_name: &str,
+) -> Result<(), ReflectSettingsError> {
+    for option in incoming {
+        if let Some(existing) = target.iter().find(|existing| existing.id == option.id) {
+            if existing.stable_name != option.stable_name {
+                return Err(ReflectSettingsError::UnsupportedValue {
+                    field: field.to_owned(),
+                    type_name: type_name.to_owned(),
+                });
+            }
+        } else {
+            target.push(option);
+        }
+    }
+    Ok(())
+}
+
+fn merge_payload_schemas(
+    target: &mut Vec<EnumPayloadSchema>,
+    incoming: Vec<EnumPayloadSchema>,
+    field: &str,
+    type_name: &str,
+) -> Result<(), ReflectSettingsError> {
+    for schema in incoming {
+        if let Some(existing) = target.iter().find(|existing| existing.id == schema.id) {
+            if existing.shape != schema.shape {
+                return Err(ReflectSettingsError::UnsupportedValue {
+                    field: field.to_owned(),
+                    type_name: type_name.to_owned(),
+                });
+            }
+        } else {
+            target.push(schema);
+        }
+    }
+    Ok(())
+}
+
+fn merge_enum_schemas(
+    target: &mut Vec<EnumSchema>,
+    incoming: Vec<EnumSchema>,
+    field: &str,
+    type_name: &str,
+) -> Result<(), ReflectSettingsError> {
+    for schema in incoming {
+        if let Some(existing) = target.iter().find(|existing| existing.id == schema.id) {
+            if existing != &schema {
+                return Err(ReflectSettingsError::UnsupportedValue {
+                    field: field.to_owned(),
+                    type_name: type_name.to_owned(),
+                });
+            }
+        } else {
+            target.push(schema);
+        }
+    }
+    Ok(())
 }
 
 fn scalar_value_type_from_name(type_name: &str) -> Option<prism_settings::ValueType> {
@@ -792,7 +1203,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_metadata_type_mismatch_and_unsupported_fields() {
+    fn rejects_metadata_type_mismatch_and_supports_data_enums() {
         #[derive(Reflect, Default)]
         struct WrongDefault {
             #[reflect(setting, default = "bad")]
@@ -808,10 +1219,11 @@ mod tests {
             #[reflect(setting)]
             value: Option<u32>,
         }
-        assert!(matches!(
-            derive_settings_registry::<Unsupported>("test", "test"),
-            Err(ReflectSettingsError::UnsupportedValue { .. })
-        ));
+        let schema = derive_settings_registry::<Unsupported>("test", "test").unwrap();
+        let (_, definition) = schema.get(&"test.value".into()).unwrap();
+        assert_eq!(definition.ty, prism_settings::ValueType::Enum);
+        assert_eq!(definition.enum_schemas.len(), 1);
+        assert!(matches!(definition.default, Value::EnumTyped { .. }));
     }
 
     #[test]

@@ -118,9 +118,10 @@ macro_rules! impl_reflect_set {
         {
             fn type_info() -> &'static TypeInfo {
                 crate::cache::intern::<Self, _>(|| {
-                    TypeInfo::Set(SetInfo::new(
+                    TypeInfo::Set(SetInfo::with_value_type_info(
                         ::core::any::type_name::<Self>(),
                         ::core::any::type_name::<T>(),
+                        <T as Typed>::type_info,
                     ))
                 })
             }

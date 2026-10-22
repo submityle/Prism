@@ -115,10 +115,11 @@ impl<T: Reflect + Typed, const N: usize> Reflect for [T; N] {
 impl<T: Reflect + Typed, const N: usize> Typed for [T; N] {
     fn type_info() -> &'static TypeInfo {
         crate::cache::intern::<Self, _>(|| {
-            TypeInfo::Array(ArrayInfo::new(
+            TypeInfo::Array(ArrayInfo::with_item_type_info(
                 ::core::any::type_name::<Self>(),
                 ::core::any::type_name::<T>(),
                 N,
+                <T as Typed>::type_info,
             ))
         })
     }

@@ -270,6 +270,99 @@ fn nested_enum_payloads_are_validated_recursively() {
 }
 
 #[test]
+fn typed_enum_schemas_isolate_same_named_variants_and_validate_payloads_in_place() {
+    let first_type = EnumTypeId::from_stable_name("settings::First");
+    let second_type = EnumTypeId::from_stable_name("settings::Second");
+    let first_variant_name = "settings::First::Value";
+    let second_variant_name = "settings::Second::Value";
+    let first_variant = EnumVariantSchema {
+        id: EnumId::from_stable_name(first_variant_name),
+        stable_name: first_variant_name.into(),
+        payload: Some(EnumPayloadShape::Tuple(vec![ValueShape::scalar(
+            ValueType::Int,
+        )])),
+    };
+    let second_variant = EnumVariantSchema {
+        id: EnumId::from_stable_name(second_variant_name),
+        stable_name: second_variant_name.into(),
+        payload: None,
+    };
+    let mut def = SettingDef::new(
+        "render.typed_enums",
+        "render",
+        Value::Table(BTreeMap::from([
+            (
+                "first".into(),
+                Value::EnumPayloadTyped {
+                    enum_type: first_type,
+                    id: first_variant.id,
+                    payload: EnumPayload::Tuple(vec![Value::Int(7)]),
+                },
+            ),
+            (
+                "second".into(),
+                Value::EnumTyped {
+                    enum_type: second_type,
+                    id: second_variant.id,
+                },
+            ),
+        ])),
+    );
+    def.set_shape(ValueShape::table(BTreeMap::from([
+        ("first".into(), ValueShape::Enum(first_type)),
+        ("second".into(), ValueShape::Enum(second_type)),
+    ])));
+    def.enum_schemas = vec![
+        EnumSchema {
+            id: first_type,
+            stable_name: "settings::First".into(),
+            variants: vec![first_variant.clone()],
+        },
+        EnumSchema {
+            id: second_type,
+            stable_name: "settings::Second".into(),
+            variants: vec![second_variant.clone()],
+        },
+    ];
+    let schema = registry(vec![def]);
+    let setting_id = schema.id(&"render.typed_enums".into()).unwrap();
+    let default = schema.def(setting_id).unwrap().default.clone();
+    assert_eq!(
+        schema.validate_value(setting_id, default.clone()),
+        Ok(default.clone())
+    );
+
+    let Value::Table(mut swapped) = default else {
+        panic!("table default expected");
+    };
+    swapped.insert(
+        "first".into(),
+        Value::EnumTyped {
+            enum_type: second_type,
+            id: second_variant.id,
+        },
+    );
+    assert!(schema
+        .validate_value(setting_id, Value::Table(swapped))
+        .is_err());
+
+    let Value::Table(mut malformed) = schema.def(setting_id).unwrap().default.clone() else {
+        panic!("table default expected");
+    };
+    malformed.insert(
+        "first".into(),
+        Value::EnumPayloadTyped {
+            enum_type: first_type,
+            id: first_variant.id,
+            payload: EnumPayload::Tuple(vec![Value::Bool(true)]),
+        },
+    );
+    assert!(schema
+        .validate_value(setting_id, Value::Table(malformed))
+        .is_err());
+}
+
+#[test]
 fn validation_reports_alias_namespace_and_default_errors() {
     let mut b = RegistryBuilder::new();
     b.namespace("audio", "owner").unwrap();

@@ -128,9 +128,10 @@ impl<T: Reflect + Typed> Reflect for Vec<T> {
 impl<T: Reflect + Typed> Typed for Vec<T> {
     fn type_info() -> &'static TypeInfo {
         crate::cache::intern::<Self, _>(|| {
-            TypeInfo::List(ListInfo::new(
+            TypeInfo::List(ListInfo::with_item_type_info(
                 ::core::any::type_name::<Self>(),
                 ::core::any::type_name::<T>(),
+                <T as Typed>::type_info,
             ))
         })
     }

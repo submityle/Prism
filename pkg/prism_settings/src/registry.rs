@@ -546,10 +546,14 @@ fn validate_def(def: &SettingDef, errors: &mut Vec<SettingsError>) {
     let mut enum_schema_ids = BTreeSet::new();
     for schema in &def.enum_schemas {
         if schema.stable_name.is_empty() || !enum_schema_ids.insert(schema.id) {
-            errors.push(invalid("typed enum schemas must have unique non-empty identities"));
+            errors.push(invalid(
+                "typed enum schemas must have unique non-empty identities",
+            ));
         }
         if schema.id != crate::EnumTypeId::from_stable_name(&schema.stable_name) {
-            errors.push(invalid("typed enum schema ID does not match its stable name"));
+            errors.push(invalid(
+                "typed enum schema ID does not match its stable name",
+            ));
         }
         let mut variant_ids = BTreeSet::new();
         let mut variant_names = BTreeSet::new();
@@ -559,7 +563,9 @@ fn validate_def(def: &SettingDef, errors: &mut Vec<SettingsError>) {
                 || !variant_ids.insert(variant.id)
                 || !variant_names.insert(variant.stable_name.as_str())
             {
-                errors.push(invalid("typed enum variants must have unique valid identities"));
+                errors.push(invalid(
+                    "typed enum variants must have unique valid identities",
+                ));
             }
             if let Some(payload) = &variant.payload
                 && !enum_payload_shape_is_valid(payload, 0)
@@ -774,16 +780,26 @@ fn validate_shape_at_depth(
             }
         }
         crate::ValueShape::Enum(enum_type) => {
-            if let Value::EnumTyped { enum_type: actual, id }
-            | Value::EnumPayloadTyped { enum_type: actual, id, .. } = value
-            {
-                if actual != enum_type {
+            let identity = match value {
+                Value::EnumTyped {
+                    enum_type: actual,
+                    id,
+                }
+                | Value::EnumPayloadTyped {
+                    enum_type: actual,
+                    id,
+                    ..
+                } => Some((*actual, *id)),
+                _ => None,
+            };
+            if let Some((actual, id)) = identity {
+                if actual != *enum_type {
                     return Err(SettingsError::InvalidDefinition {
                         key: key.clone(),
                         reason: String::from("enum type does not match the declared shape"),
                     });
                 }
-                validate_typed_enum(def, key, *enum_type, *id, value, depth + 1)?;
+                validate_typed_enum(def, key, *enum_type, id, value, depth + 1)?;
             } else {
                 return Err(SettingsError::TypeMismatch {
                     key: key.clone(),
@@ -993,44 +1009,51 @@ fn validate_typed_enum(
     key: &SettingKey,
     enum_type: crate::EnumTypeId,
     id: EnumId,
-    value: &Value,
+    value: &mut Value,
     depth: usize,
 ) -> Result<(), SettingsError> {
-    let Some(schema) = def.enum_schemas.iter().find(|schema| schema.id == enum_type) else {
+    let Some(schema) = def
+        .enum_schemas
+        .iter()
+        .find(|schema| schema.id == enum_type)
+    else {
         return Err(SettingsError::InvalidDefinition {
             key: key.clone(),
             reason: String::from("typed enum schema is missing"),
         });
     };
     let Some(variant) = schema.variants.iter().find(|variant| variant.id == id) else {
-        return Err(SettingsError::InvalidEnum { key: key.clone(), value: id });
+        return Err(SettingsError::InvalidEnum {
+            key: key.clone(),
+            value: id,
+        });
     };
     match (&variant.payload, value) {
         (None, Value::EnumTyped { .. }) => Ok(()),
-        (Some(shape), Value::EnumPayloadTyped { payload, .. }) => {
-            match (shape, payload) {
-                (crate::EnumPayloadShape::Tuple(shapes), crate::EnumPayload::Tuple(values))
-                    if shapes.len() == values.len() => {
-                        for (shape, value) in shapes.iter().zip(values) {
-                            let mut value = value.clone();
-                            validate_shape_at_depth(def, key, shape, &mut value, depth + 1)?;
-                        }
-                        Ok(())
-                    }
-                (crate::EnumPayloadShape::Struct(shapes), crate::EnumPayload::Struct(values))
-                    if shapes.len() == values.len() && shapes.keys().all(|name| values.contains_key(name)) => {
-                        for (name, shape) in shapes {
-                            let mut value = values.get(name).expect("keys checked").clone();
-                            validate_shape_at_depth(def, key, shape, &mut value, depth + 1)?;
-                        }
-                        Ok(())
-                    }
-                _ => Err(SettingsError::InvalidDefinition {
-                    key: key.clone(),
-                    reason: String::from("typed enum payload shape does not match schema"),
-                }),
+        (Some(shape), Value::EnumPayloadTyped { payload, .. }) => match (shape, payload) {
+            (crate::EnumPayloadShape::Tuple(shapes), crate::EnumPayload::Tuple(values))
+                if shapes.len() == values.len() =>
+            {
+                for (shape, value) in shapes.iter().zip(values) {
+                    validate_shape_at_depth(def, key, shape, value, depth + 1)?;
+                }
+                Ok(())
             }
-        }
+            (crate::EnumPayloadShape::Struct(shapes), crate::EnumPayload::Struct(values))
+                if shapes.len() == values.len()
+                    && shapes.keys().all(|name| values.contains_key(name)) =>
+            {
+                for (name, shape) in shapes {
+                    let value = values.get_mut(name).expect("keys checked");
+                    validate_shape_at_depth(def, key, shape, value, depth + 1)?;
+                }
+                Ok(())
+            }
+            _ => Err(SettingsError::InvalidDefinition {
+                key: key.clone(),
+                reason: String::from("typed enum payload shape does not match schema"),
+            }),
+        },
         (None, Value::EnumPayloadTyped { .. }) | (Some(_), Value::EnumTyped { .. }) => {
             Err(SettingsError::InvalidDefinition {
                 key: key.clone(),
@@ -1072,13 +1095,50 @@ pub fn canonical_value_cmp(left: &Value, right: &Value) -> core::cmp::Ordering {
             (Value::Float(a), Value::Float(b)) => a.total_cmp(b),
             (Value::String(a), Value::String(b)) => a.cmp(b),
             (Value::Enum(a), Value::Enum(b)) => a.cmp(b),
-            (Value::EnumTyped { enum_type: a_type, id: a }, Value::EnumTyped { enum_type: b_type, id: b }) => a_type.cmp(b_type).then(a.cmp(b)),
-            (Value::EnumPayloadTyped { enum_type: a_type, id: a_id, payload: a }, Value::EnumPayloadTyped { enum_type: b_type, id: b_id, payload: b }) => a_type.cmp(b_type).then(a_id.cmp(b_id)).then_with(|| match (a, b) {
-                (crate::EnumPayload::Tuple(a), crate::EnumPayload::Tuple(b)) => a.iter().zip(b).map(|(a,b)| canonical_value_cmp(a,b)).find(|o| *o != Ordering::Equal).unwrap_or_else(|| a.len().cmp(&b.len())),
-                (crate::EnumPayload::Struct(a), crate::EnumPayload::Struct(b)) => a.iter().zip(b).map(|((ak,av),(bk,bv))| ak.cmp(bk).then_with(|| canonical_value_cmp(av,bv))).find(|o| *o != Ordering::Equal).unwrap_or_else(|| a.len().cmp(&b.len())),
-                (crate::EnumPayload::Tuple(_), crate::EnumPayload::Struct(_)) => Ordering::Less,
-                (crate::EnumPayload::Struct(_), crate::EnumPayload::Tuple(_)) => Ordering::Greater,
-            }),
+            (
+                Value::EnumTyped {
+                    enum_type: a_type,
+                    id: a,
+                },
+                Value::EnumTyped {
+                    enum_type: b_type,
+                    id: b,
+                },
+            ) => a_type.cmp(b_type).then(a.cmp(b)),
+            (
+                Value::EnumPayloadTyped {
+                    enum_type: a_type,
+                    id: a_id,
+                    payload: a,
+                },
+                Value::EnumPayloadTyped {
+                    enum_type: b_type,
+                    id: b_id,
+                    payload: b,
+                },
+            ) => a_type
+                .cmp(b_type)
+                .then(a_id.cmp(b_id))
+                .then_with(|| match (a, b) {
+                    (crate::EnumPayload::Tuple(a), crate::EnumPayload::Tuple(b)) => a
+                        .iter()
+                        .zip(b)
+                        .map(|(a, b)| canonical_value_cmp(a, b))
+                        .find(|o| *o != Ordering::Equal)
+                        .unwrap_or_else(|| a.len().cmp(&b.len())),
+                    (crate::EnumPayload::Struct(a), crate::EnumPayload::Struct(b)) => a
+                        .iter()
+                        .zip(b)
+                        .map(|((ak, av), (bk, bv))| {
+                            ak.cmp(bk).then_with(|| canonical_value_cmp(av, bv))
+                        })
+                        .find(|o| *o != Ordering::Equal)
+                        .unwrap_or_else(|| a.len().cmp(&b.len())),
+                    (crate::EnumPayload::Tuple(_), crate::EnumPayload::Struct(_)) => Ordering::Less,
+                    (crate::EnumPayload::Struct(_), crate::EnumPayload::Tuple(_)) => {
+                        Ordering::Greater
+                    }
+                }),
             (Value::Enum(_), Value::EnumPayload { .. }) => Ordering::Less,
             (Value::EnumPayload { .. }, Value::Enum(_)) => Ordering::Greater,
             (

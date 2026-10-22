@@ -154,10 +154,12 @@ macro_rules! impl_reflect_map {
         {
             fn type_info() -> &'static TypeInfo {
                 crate::cache::intern::<Self, _>(|| {
-                    TypeInfo::Map(MapInfo::new(
+                    TypeInfo::Map(MapInfo::with_type_info(
                         ::core::any::type_name::<Self>(),
                         ::core::any::type_name::<K>(),
                         ::core::any::type_name::<V>(),
+                        <K as Typed>::type_info,
+                        <V as Typed>::type_info,
                     ))
                 })
             }

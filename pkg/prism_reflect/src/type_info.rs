@@ -91,17 +91,46 @@ impl StructInfo {
 }
 
 /// A single named field within a [`StructInfo`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct NamedField {
     name: &'static str,
     type_name: &'static str,
+    type_info: Option<fn() -> &'static TypeInfo>,
 }
+
+impl PartialEq for NamedField {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name && self.type_name == other.type_name
+    }
+}
+
+impl Eq for NamedField {}
 
 impl NamedField {
     /// Build a named-field descriptor.
     #[must_use]
     pub fn new(name: &'static str, type_name: &'static str) -> Self {
-        Self { name, type_name }
+        Self {
+            name,
+            type_name,
+            type_info: None,
+        }
+    }
+
+    /// Build a named-field descriptor with a lazy accessor to its static type.
+    /// The function is stored but never called while the containing descriptor
+    /// is initialized, so recursive types cannot re-enter their `OnceLock`.
+    #[must_use]
+    pub fn with_type_info(
+        name: &'static str,
+        type_name: &'static str,
+        type_info: fn() -> &'static TypeInfo,
+    ) -> Self {
+        Self {
+            name,
+            type_name,
+            type_info: Some(type_info),
+        }
     }
 
     /// The field name.
@@ -114,6 +143,12 @@ impl NamedField {
     #[must_use]
     pub fn type_name(&self) -> &'static str {
         self.type_name
+    }
+
+    /// Return the static field type descriptor when one was supplied.
+    #[must_use]
+    pub fn type_info(&self) -> Option<&'static TypeInfo> {
+        self.type_info.map(|get| get())
     }
 }
 
@@ -157,17 +192,45 @@ impl TupleStructInfo {
 }
 
 /// A single positional field within a [`TupleStructInfo`] or tuple variant.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct UnnamedField {
     index: usize,
     type_name: &'static str,
+    type_info: Option<fn() -> &'static TypeInfo>,
 }
+
+impl PartialEq for UnnamedField {
+    fn eq(&self, other: &Self) -> bool {
+        self.index == other.index && self.type_name == other.type_name
+    }
+}
+
+impl Eq for UnnamedField {}
 
 impl UnnamedField {
     /// Build an unnamed-field descriptor.
     #[must_use]
     pub fn new(index: usize, type_name: &'static str) -> Self {
-        Self { index, type_name }
+        Self {
+            index,
+            type_name,
+            type_info: None,
+        }
+    }
+
+    /// Build a positional-field descriptor with a lazy static type accessor.
+    /// The accessor is not invoked during the containing `OnceLock` init.
+    #[must_use]
+    pub fn with_type_info(
+        index: usize,
+        type_name: &'static str,
+        type_info: fn() -> &'static TypeInfo,
+    ) -> Self {
+        Self {
+            index,
+            type_name,
+            type_info: Some(type_info),
+        }
     }
 
     /// The field's positional index.
@@ -180,6 +243,12 @@ impl UnnamedField {
     #[must_use]
     pub fn type_name(&self) -> &'static str {
         self.type_name
+    }
+
+    /// Return the static field type descriptor when one was supplied.
+    #[must_use]
+    pub fn type_info(&self) -> Option<&'static TypeInfo> {
+        self.type_info.map(|get| get())
     }
 }
 
@@ -288,11 +357,19 @@ pub enum VariantKind {
 }
 
 /// Descriptor for a growable, homogeneous list (`Vec<T>`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct ListInfo {
     type_name: &'static str,
     item_type_name: &'static str,
+    item_type_info: Option<fn() -> &'static TypeInfo>,
 }
+
+impl PartialEq for ListInfo {
+    fn eq(&self, other: &Self) -> bool {
+        self.type_name == other.type_name && self.item_type_name == other.item_type_name
+    }
+}
+impl Eq for ListInfo {}
 
 impl ListInfo {
     /// Build a list descriptor from the list type name and item type name.
@@ -301,7 +378,18 @@ impl ListInfo {
         Self {
             type_name,
             item_type_name,
+            item_type_info: None,
         }
+    }
+
+    /// Build a list descriptor with a lazy item type accessor.
+    #[must_use]
+    pub fn with_item_type_info(
+        type_name: &'static str,
+        item_type_name: &'static str,
+        item_type_info: fn() -> &'static TypeInfo,
+    ) -> Self {
+        Self { type_name, item_type_name, item_type_info: Some(item_type_info) }
     }
 
     /// The fully-qualified list type name.
@@ -315,15 +403,31 @@ impl ListInfo {
     pub fn item_type_name(&self) -> &'static str {
         self.item_type_name
     }
+
+    /// Return the static item type descriptor when available.
+    #[must_use]
+    pub fn item_type_info(&self) -> Option<&'static TypeInfo> {
+        self.item_type_info.map(|get| get())
+    }
 }
 
 /// Descriptor for a fixed-length array (`[T; N]`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct ArrayInfo {
     type_name: &'static str,
     item_type_name: &'static str,
     capacity: usize,
+    item_type_info: Option<fn() -> &'static TypeInfo>,
 }
+
+impl PartialEq for ArrayInfo {
+    fn eq(&self, other: &Self) -> bool {
+        self.type_name == other.type_name
+            && self.item_type_name == other.item_type_name
+            && self.capacity == other.capacity
+    }
+}
+impl Eq for ArrayInfo {}
 
 impl ArrayInfo {
     /// Build an array descriptor from the array/element type names and length.
@@ -333,7 +437,19 @@ impl ArrayInfo {
             type_name,
             item_type_name,
             capacity,
+            item_type_info: None,
         }
+    }
+
+    /// Build an array descriptor with a lazy item type accessor.
+    #[must_use]
+    pub fn with_item_type_info(
+        type_name: &'static str,
+        item_type_name: &'static str,
+        capacity: usize,
+        item_type_info: fn() -> &'static TypeInfo,
+    ) -> Self {
+        Self { type_name, item_type_name, capacity, item_type_info: Some(item_type_info) }
     }
 
     /// The fully-qualified array type name.
@@ -353,15 +469,32 @@ impl ArrayInfo {
     pub fn capacity(&self) -> usize {
         self.capacity
     }
+
+    /// Return the static item type descriptor when available.
+    #[must_use]
+    pub fn item_type_info(&self) -> Option<&'static TypeInfo> {
+        self.item_type_info.map(|get| get())
+    }
 }
 
 /// Descriptor for a key/value map (`HashMap`/`BTreeMap`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct MapInfo {
     type_name: &'static str,
     key_type_name: &'static str,
     value_type_name: &'static str,
+    key_type_info: Option<fn() -> &'static TypeInfo>,
+    value_type_info: Option<fn() -> &'static TypeInfo>,
 }
+
+impl PartialEq for MapInfo {
+    fn eq(&self, other: &Self) -> bool {
+        self.type_name == other.type_name
+            && self.key_type_name == other.key_type_name
+            && self.value_type_name == other.value_type_name
+    }
+}
+impl Eq for MapInfo {}
 
 impl MapInfo {
     /// Build a map descriptor from the map, key, and value type names.
@@ -375,7 +508,21 @@ impl MapInfo {
             type_name,
             key_type_name,
             value_type_name,
+            key_type_info: None,
+            value_type_info: None,
         }
+    }
+
+    /// Build a map descriptor with lazy key/value type accessors.
+    #[must_use]
+    pub fn with_type_info(
+        type_name: &'static str,
+        key_type_name: &'static str,
+        value_type_name: &'static str,
+        key_type_info: fn() -> &'static TypeInfo,
+        value_type_info: fn() -> &'static TypeInfo,
+    ) -> Self {
+        Self { type_name, key_type_name, value_type_name, key_type_info: Some(key_type_info), value_type_info: Some(value_type_info) }
     }
 
     /// The fully-qualified map type name.
@@ -395,23 +542,50 @@ impl MapInfo {
     pub fn value_type_name(&self) -> &'static str {
         self.value_type_name
     }
+
+    /// Return the static key type descriptor when available.
+    #[must_use]
+    pub fn key_type_info(&self) -> Option<&'static TypeInfo> {
+        self.key_type_info.map(|get| get())
+    }
+
+    /// Return the static value type descriptor when available.
+    #[must_use]
+    pub fn value_type_info(&self) -> Option<&'static TypeInfo> {
+        self.value_type_info.map(|get| get())
+    }
 }
 
 /// Descriptor for a unique-value set (`HashSet`/`BTreeSet`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct SetInfo {
     type_name: &'static str,
     value_type_name: &'static str,
+    value_type_info: Option<fn() -> &'static TypeInfo>,
 }
+
+impl PartialEq for SetInfo {
+    fn eq(&self, other: &Self) -> bool {
+        self.type_name == other.type_name && self.value_type_name == other.value_type_name
+    }
+}
+impl Eq for SetInfo {}
 
 impl SetInfo {
     /// Build a set descriptor from the set and value type names.
     #[must_use]
     pub fn new(type_name: &'static str, value_type_name: &'static str) -> Self {
-        Self {
-            type_name,
-            value_type_name,
-        }
+        Self { type_name, value_type_name, value_type_info: None }
+    }
+
+    /// Build a set descriptor with a lazy value type accessor.
+    #[must_use]
+    pub fn with_value_type_info(
+        type_name: &'static str,
+        value_type_name: &'static str,
+        value_type_info: fn() -> &'static TypeInfo,
+    ) -> Self {
+        Self { type_name, value_type_name, value_type_info: Some(value_type_info) }
     }
 
     /// The fully-qualified set type name.
@@ -424,6 +598,12 @@ impl SetInfo {
     #[must_use]
     pub fn value_type_name(&self) -> &'static str {
         self.value_type_name
+    }
+
+    /// Return the static value type descriptor when available.
+    #[must_use]
+    pub fn value_type_info(&self) -> Option<&'static TypeInfo> {
+        self.value_type_info.map(|get| get())
     }
 }
 

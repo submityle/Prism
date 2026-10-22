@@ -1,6 +1,6 @@
 //! The versioned TOML document model and codec.
 
-use prism_settings::{EnumOption, SettingKey, SettingsRegistry, Value};
+use prism_settings::{EnumOption, EnumSchema, SettingKey, SettingsRegistry, Value};
 use std::{collections::BTreeMap, error::Error, fmt};
 
 const SCHEMA_KEY: &str = "prism_schema";
@@ -19,6 +19,7 @@ pub struct SettingsDocument {
     candidates: BTreeMap<SettingKey, Value>,
     unknown: BTreeMap<String, toml::Value>,
     enum_options: BTreeMap<SettingKey, Vec<EnumOption>>,
+    enum_schemas: BTreeMap<SettingKey, Vec<EnumSchema>>,
 }
 
 impl SettingsDocument {
@@ -29,6 +30,7 @@ impl SettingsDocument {
             candidates: BTreeMap::new(),
             unknown: BTreeMap::new(),
             enum_options: BTreeMap::new(),
+            enum_schemas: BTreeMap::new(),
         }
     }
 
@@ -59,8 +61,15 @@ impl SettingsDocument {
     pub fn insert(&mut self, key: impl Into<SettingKey>, value: Value) {
         let key = key.into();
         self.unknown.remove(key.as_str());
-        if !matches!(value, Value::Enum(_)) {
+        if !matches!(
+            value,
+            Value::Enum(_)
+                | Value::EnumPayload { .. }
+                | Value::EnumTyped { .. }
+                | Value::EnumPayloadTyped { .. }
+        ) {
             self.enum_options.remove(&key);
+            self.enum_schemas.remove(&key);
         }
         self.candidates.insert(key, value);
     }
@@ -71,6 +80,7 @@ impl SettingsDocument {
     /// needed to encode enum candidates later; it adds no per-frame work.
     pub fn bind_registry(&mut self, registry: &SettingsRegistry) {
         self.enum_options.clear();
+        self.enum_schemas.clear();
         for key in self.candidates.keys() {
             let Some((_, definition)) = registry.get(key) else {
                 continue;
@@ -78,6 +88,10 @@ impl SettingsDocument {
             if !definition.enum_options.is_empty() {
                 self.enum_options
                     .insert(key.clone(), definition.enum_options.clone());
+            }
+            if !definition.enum_schemas.is_empty() {
+                self.enum_schemas
+                    .insert(key.clone(), definition.enum_schemas.clone());
             }
         }
     }
@@ -89,6 +103,7 @@ impl SettingsDocument {
         let key = key.into();
         self.candidates.remove(&SettingKey::new(key.clone()));
         self.enum_options.remove(&SettingKey::new(key.clone()));
+        self.enum_schemas.remove(&SettingKey::new(key.clone()));
         self.unknown.insert(key, value);
     }
 
@@ -108,6 +123,7 @@ impl SettingsDocument {
                     value,
                     key.as_str(),
                     self.enum_options.get(key).map(Vec::as_slice),
+                    self.enum_schemas.get(key).map(Vec::as_slice),
                 )?,
             );
         }
@@ -164,7 +180,10 @@ impl SettingsDocument {
             let enum_options = known
                 .map(|(_, definition)| definition.enum_options.as_slice())
                 .filter(|options| !options.is_empty());
-            match decode_value(raw, key, enum_options) {
+            let enum_schemas = known
+                .map(|(_, definition)| definition.enum_schemas.as_slice())
+                .filter(|schemas| !schemas.is_empty());
+            match decode_value(raw, key, enum_options, enum_schemas) {
                 Ok(value) if known.is_some() || registry.is_none() => {
                     if let Some((id, _)) = known
                         && let Some(registry) = registry
@@ -183,6 +202,14 @@ impl SettingsDocument {
                         document.enum_options.insert(
                             SettingKey::new(key.clone()),
                             definition.enum_options.clone(),
+                        );
+                    }
+                    if let Some((_, definition)) = known
+                        && !definition.enum_schemas.is_empty()
+                    {
+                        document.enum_schemas.insert(
+                            SettingKey::new(key.clone()),
+                            definition.enum_schemas.clone(),
                         );
                     }
                 }
@@ -226,11 +253,14 @@ impl SettingsDocument {
             };
             let options =
                 (!definition.enum_options.is_empty()).then_some(definition.enum_options.as_slice());
-            let value =
-                decode_value(&raw, &key, options).map_err(|reason| CodecError::InvalidValue {
+            let schemas =
+                (!definition.enum_schemas.is_empty()).then_some(definition.enum_schemas.as_slice());
+            let value = decode_value(&raw, &key, options, schemas).map_err(|reason| {
+                CodecError::InvalidValue {
                     key: key.clone(),
                     reason,
-                })?;
+                }
+            })?;
             registry
                 .validate_value(id, value.clone())
                 .map_err(|error| CodecError::InvalidKnownValue {
@@ -240,8 +270,14 @@ impl SettingsDocument {
             self.unknown.remove(&key);
             self.candidates.insert(SettingKey::new(key.clone()), value);
             if !definition.enum_options.is_empty() {
-                self.enum_options
-                    .insert(SettingKey::new(key), definition.enum_options.clone());
+                self.enum_options.insert(
+                    SettingKey::new(key.clone()),
+                    definition.enum_options.clone(),
+                );
+            }
+            if !definition.enum_schemas.is_empty() {
+                self.enum_schemas
+                    .insert(SettingKey::new(key), definition.enum_schemas.clone());
             }
         }
         Ok(())
@@ -271,9 +307,11 @@ impl SettingsDocument {
                 value,
                 key.as_str(),
                 self.enum_options.get(&key).map(Vec::as_slice),
+                self.enum_schemas.get(&key).map(Vec::as_slice),
             )?;
             self.candidates.remove(&key);
             self.enum_options.remove(&key);
+            self.enum_schemas.remove(&key);
             self.unknown.insert(key.to_string(), raw);
         }
         Ok(())
@@ -283,6 +321,7 @@ impl SettingsDocument {
     pub(crate) fn remove_candidate(&mut self, key: &str) -> Option<Value> {
         let key = SettingKey::new(key.to_owned());
         self.enum_options.remove(&key);
+        self.enum_schemas.remove(&key);
         self.candidates.remove(&key)
     }
 
@@ -371,6 +410,7 @@ fn encode_value(
     value: &Value,
     key: &str,
     enum_options: Option<&[EnumOption]>,
+    enum_schemas: Option<&[EnumSchema]>,
 ) -> Result<toml::Value, CodecError> {
     let invalid = |reason: String| CodecError::InvalidValue {
         key: key.to_owned(),
@@ -382,12 +422,105 @@ fn encode_value(
         Value::Float(value) if value.is_finite() => Ok(toml::Value::Float(*value)),
         Value::Float(_) => Err(invalid("non-finite floats cannot be persisted".to_owned())),
         Value::String(value) => Ok(toml::Value::String(value.clone())),
-        Value::Enum(value) => {
-            let stable_name = enum_options
-                .and_then(|options| options.iter().find(|option| option.id == *value))
-                .map(|option| option.stable_name.clone())
-                .ok_or_else(|| invalid("enum value has no registered stable name".to_owned()))?;
-            Ok(tagged("enum", toml::Value::String(stable_name)))
+        Value::Enum(value) => Ok(tagged(
+            "enum",
+            toml::Value::String(enum_stable_name(*value, enum_options, &invalid)?),
+        )),
+        Value::EnumPayload { id, payload } => {
+            let variant = enum_stable_name(*id, enum_options, &invalid)?;
+            let raw_payload = match payload {
+                prism_settings::EnumPayload::Tuple(values) => values
+                    .iter()
+                    .enumerate()
+                    .map(|(index, value)| {
+                        encode_value(
+                            value,
+                            &format!("{key}.payload[{index}]"),
+                            enum_options,
+                            enum_schemas,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+                    .map(toml::Value::Array)?,
+                prism_settings::EnumPayload::Struct(values) => values
+                    .iter()
+                    .map(|(field, value)| {
+                        encode_value(
+                            value,
+                            &format!("{key}.payload.{field}"),
+                            enum_options,
+                            enum_schemas,
+                        )
+                        .map(|value| (field.clone(), value))
+                    })
+                    .collect::<Result<toml::Table, _>>()
+                    .map(toml::Value::Table)?,
+            };
+            let mut tagged_value = toml::Table::new();
+            tagged_value.insert(
+                TAG_KEY.to_owned(),
+                toml::Value::String("enum_payload".to_owned()),
+            );
+            tagged_value.insert("variant".to_owned(), toml::Value::String(variant));
+            tagged_value.insert("payload".to_owned(), raw_payload);
+            Ok(toml::Value::Table(tagged_value))
+        }
+        Value::EnumTyped { enum_type, id } => {
+            let (type_name, variant_name) =
+                typed_enum_names(*enum_type, *id, enum_schemas, &invalid)?;
+            let mut tagged_value = toml::Table::new();
+            tagged_value.insert(
+                TAG_KEY.to_owned(),
+                toml::Value::String("enum_typed".to_owned()),
+            );
+            tagged_value.insert("enum_type".to_owned(), toml::Value::String(type_name));
+            tagged_value.insert("variant".to_owned(), toml::Value::String(variant_name));
+            Ok(toml::Value::Table(tagged_value))
+        }
+        Value::EnumPayloadTyped {
+            enum_type,
+            id,
+            payload,
+        } => {
+            let (type_name, variant_name) =
+                typed_enum_names(*enum_type, *id, enum_schemas, &invalid)?;
+            let raw_payload = match payload {
+                prism_settings::EnumPayload::Tuple(values) => values
+                    .iter()
+                    .enumerate()
+                    .map(|(index, value)| {
+                        encode_value(
+                            value,
+                            &format!("{key}.payload[{index}]"),
+                            enum_options,
+                            enum_schemas,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+                    .map(toml::Value::Array)?,
+                prism_settings::EnumPayload::Struct(values) => values
+                    .iter()
+                    .map(|(field, value)| {
+                        encode_value(
+                            value,
+                            &format!("{key}.payload.{field}"),
+                            enum_options,
+                            enum_schemas,
+                        )
+                        .map(|value| (field.clone(), value))
+                    })
+                    .collect::<Result<toml::Table, _>>()
+                    .map(toml::Value::Table)?,
+            };
+            let mut tagged_value = toml::Table::new();
+            tagged_value.insert(
+                TAG_KEY.to_owned(),
+                toml::Value::String("enum_typed_payload".to_owned()),
+            );
+            tagged_value.insert("enum_type".to_owned(), toml::Value::String(type_name));
+            tagged_value.insert("variant".to_owned(), toml::Value::String(variant_name));
+            tagged_value.insert("payload".to_owned(), raw_payload);
+            Ok(toml::Value::Table(tagged_value))
         }
         // TOML integers are signed; decimal strings preserve the full u64 domain.
         Value::Bytes(value) => Ok(tagged("bytes", toml::Value::String(value.0.to_string()))),
@@ -395,19 +528,59 @@ fn encode_value(
         Value::Array(values) => values
             .iter()
             .enumerate()
-            .map(|(index, value)| encode_value(value, &format!("{key}[{index}]"), enum_options))
+            .map(|(index, value)| {
+                encode_value(
+                    value,
+                    &format!("{key}[{index}]"),
+                    enum_options,
+                    enum_schemas,
+                )
+            })
             .collect::<Result<Vec<_>, _>>()
             .map(toml::Value::Array),
         Value::Table(values) => values
             .iter()
             .map(|(child_key, value)| {
-                encode_value(value, &format!("{key}.{child_key}"), enum_options)
-                    .map(|value| (child_key.clone(), value))
+                encode_value(
+                    value,
+                    &format!("{key}.{child_key}"),
+                    enum_options,
+                    enum_schemas,
+                )
+                .map(|value| (child_key.clone(), value))
             })
             .collect::<Result<toml::Table, _>>()
             .map(toml::Value::Table),
         _ => Err(invalid("unsupported settings value variant".to_owned())),
     }
+}
+
+fn typed_enum_names(
+    enum_type: prism_settings::EnumTypeId,
+    variant: prism_settings::EnumId,
+    schemas: Option<&[EnumSchema]>,
+    invalid: &impl Fn(String) -> CodecError,
+) -> Result<(String, String), CodecError> {
+    let schema = schemas
+        .and_then(|schemas| schemas.iter().find(|schema| schema.id == enum_type))
+        .ok_or_else(|| invalid("typed enum value has no registered enum schema".to_owned()))?;
+    let variant = schema
+        .variants
+        .iter()
+        .find(|candidate| candidate.id == variant)
+        .ok_or_else(|| invalid("typed enum value has no registered variant".to_owned()))?;
+    Ok((schema.stable_name.clone(), variant.stable_name.clone()))
+}
+
+fn enum_stable_name(
+    id: prism_settings::EnumId,
+    enum_options: Option<&[EnumOption]>,
+    invalid: &impl Fn(String) -> CodecError,
+) -> Result<String, CodecError> {
+    enum_options
+        .and_then(|options| options.iter().find(|option| option.id == id))
+        .map(|option| option.stable_name.clone())
+        .ok_or_else(|| invalid("enum value has no registered stable name".to_owned()))
 }
 
 fn tagged(kind: &str, value: toml::Value) -> toml::Value {
@@ -421,6 +594,7 @@ fn decode_value(
     value: &toml::Value,
     key: &str,
     enum_options: Option<&[EnumOption]>,
+    enum_schemas: Option<&[EnumSchema]>,
 ) -> Result<Value, String> {
     match value {
         toml::Value::Boolean(value) => Ok(Value::Bool(*value)),
@@ -429,11 +603,157 @@ fn decode_value(
         toml::Value::String(value) => Ok(Value::String(value.clone())),
         toml::Value::Array(values) => values
             .iter()
-            .map(|value| decode_value(value, key, enum_options))
+            .map(|value| decode_value(value, key, enum_options, enum_schemas))
             .collect::<Result<Vec<_>, _>>()
             .map(Value::Array),
         toml::Value::Table(values) => {
             if let Some(kind) = values.get(TAG_KEY).and_then(toml::Value::as_str) {
+                if kind == "enum_payload" {
+                    if values.len() != 3 {
+                        return Err(format!(
+                            "tagged enum payload for `{key}` has unexpected fields"
+                        ));
+                    }
+                    let variant = values
+                        .get("variant")
+                        .and_then(toml::Value::as_str)
+                        .ok_or_else(|| {
+                            format!("tagged enum payload for `{key}` is missing string variant")
+                        })?;
+                    let option = enum_options
+                        .and_then(|options| {
+                            options.iter().find(|option| option.stable_name == variant)
+                        })
+                        .ok_or_else(|| format!("unknown stable enum name for `{key}`"))?;
+                    let raw = values.get("payload").ok_or_else(|| {
+                        format!("tagged enum payload for `{key}` is missing payload")
+                    })?;
+                    let payload = match raw {
+                        toml::Value::Array(values) => prism_settings::EnumPayload::Tuple(
+                            values
+                                .iter()
+                                .enumerate()
+                                .map(|(index, value)| {
+                                    decode_value(
+                                        value,
+                                        &format!("{key}.payload[{index}]"),
+                                        enum_options,
+                                        enum_schemas,
+                                    )
+                                })
+                                .collect::<Result<Vec<_>, _>>()?,
+                        ),
+                        toml::Value::Table(values) => prism_settings::EnumPayload::Struct(
+                            values
+                                .iter()
+                                .map(|(field, value)| {
+                                    decode_value(
+                                        value,
+                                        &format!("{key}.payload.{field}"),
+                                        enum_options,
+                                        enum_schemas,
+                                    )
+                                    .map(|value| (field.clone(), value))
+                                })
+                                .collect::<Result<BTreeMap<_, _>, _>>()?,
+                        ),
+                        _ => {
+                            return Err(format!(
+                                "enum payload for `{key}` must be a tuple array or struct table"
+                            ))
+                        }
+                    };
+                    return Ok(Value::EnumPayload {
+                        id: option.id,
+                        payload,
+                    });
+                }
+                if kind == "enum_typed" || kind == "enum_typed_payload" {
+                    let expected = if kind == "enum_typed" { 3 } else { 4 };
+                    if values.len() != expected {
+                        return Err(format!(
+                            "tagged typed enum for `{key}` has unexpected fields"
+                        ));
+                    }
+                    let type_name = values
+                        .get("enum_type")
+                        .and_then(toml::Value::as_str)
+                        .ok_or_else(|| {
+                            format!("tagged typed enum for `{key}` is missing enum_type")
+                        })?;
+                    let variant_name = values
+                        .get("variant")
+                        .and_then(toml::Value::as_str)
+                        .ok_or_else(|| {
+                            format!("tagged typed enum for `{key}` is missing variant")
+                        })?;
+                    let schema = enum_schemas
+                        .and_then(|schemas| {
+                            schemas
+                                .iter()
+                                .find(|schema| schema.stable_name == type_name)
+                        })
+                        .ok_or_else(|| format!("unknown typed enum type for `{key}`"))?;
+                    let variant = schema
+                        .variants
+                        .iter()
+                        .find(|variant| variant.stable_name == variant_name)
+                        .ok_or_else(|| format!("unknown typed enum variant for `{key}`"))?;
+                    if kind == "enum_typed" {
+                        return Ok(Value::EnumTyped {
+                            enum_type: schema.id,
+                            id: variant.id,
+                        });
+                    }
+                    let raw = values.get("payload").ok_or_else(|| {
+                        format!("typed enum payload for `{key}` is missing payload")
+                    })?;
+                    let payload = match raw {
+                        toml::Value::Array(items) => prism_settings::EnumPayload::Tuple(
+                            items
+                                .iter()
+                                .enumerate()
+                                .map(|(index, item)| {
+                                    decode_value(
+                                        item,
+                                        &format!("{key}.payload[{index}]"),
+                                        enum_options,
+                                        enum_schemas,
+                                    )
+                                })
+                                .collect::<Result<Vec<_>, _>>()?,
+                        ),
+                        toml::Value::Table(fields) => prism_settings::EnumPayload::Struct(
+                            fields
+                                .iter()
+                                .map(|(field, item)| {
+                                    decode_value(
+                                        item,
+                                        &format!("{key}.payload.{field}"),
+                                        enum_options,
+                                        enum_schemas,
+                                    )
+                                    .map(|value| (field.clone(), value))
+                                })
+                                .collect::<Result<BTreeMap<_, _>, _>>()?,
+                        ),
+                        _ => {
+                            return Err(format!(
+                                "typed enum payload for `{key}` must be an array or table"
+                            ))
+                        }
+                    };
+                    return Ok(Value::EnumPayloadTyped {
+                        enum_type: schema.id,
+                        id: variant.id,
+                        payload,
+                    });
+                }
+                if values.len() != 2 {
+                    return Err(format!(
+                        "tagged `{kind}` value for `{key}` has unexpected fields"
+                    ));
+                }
                 let raw = values
                     .get("value")
                     .ok_or_else(|| format!("tagged `{kind}` value is missing"))?;
@@ -465,7 +785,8 @@ fn decode_value(
             values
                 .iter()
                 .map(|(key, value)| {
-                    decode_value(value, key, enum_options).map(|value| (key.clone(), value))
+                    decode_value(value, key, enum_options, enum_schemas)
+                        .map(|value| (key.clone(), value))
                 })
                 .collect::<Result<BTreeMap<_, _>, _>>()
                 .map(Value::Table)
@@ -519,6 +840,96 @@ pub(crate) fn decode_value_for_migration(value: &toml::Value, key: &str) -> Opti
                 _ => None,
             }
         }
+        toml::Value::Table(values)
+            if values.get(TAG_KEY).and_then(toml::Value::as_str) == Some("enum_payload") =>
+        {
+            if values.len() != 3 {
+                return None;
+            }
+            let id = match values.get("variant")? {
+                toml::Value::String(name) => prism_settings::EnumId::from_stable_name(name),
+                _ => return None,
+            };
+            let payload = match values.get("payload")? {
+                toml::Value::Array(items) => prism_settings::EnumPayload::Tuple(
+                    items
+                        .iter()
+                        .enumerate()
+                        .map(|(index, item)| {
+                            decode_value_for_migration(item, &format!("{key}.payload[{index}]"))
+                        })
+                        .collect::<Option<Vec<_>>>()?,
+                ),
+                toml::Value::Table(fields) => prism_settings::EnumPayload::Struct(
+                    fields
+                        .iter()
+                        .map(|(field, item)| {
+                            decode_value_for_migration(item, &format!("{key}.payload.{field}"))
+                                .map(|value| (field.clone(), value))
+                        })
+                        .collect::<Option<BTreeMap<_, _>>>()?,
+                ),
+                _ => return None,
+            };
+            Some(Value::EnumPayload { id, payload })
+        }
+        toml::Value::Table(values)
+            if values.get(TAG_KEY).and_then(toml::Value::as_str) == Some("enum_typed") =>
+        {
+            if values.len() != 3 {
+                return None;
+            }
+            let enum_type = match values.get("enum_type")? {
+                toml::Value::String(name) => prism_settings::EnumTypeId::from_stable_name(name),
+                _ => return None,
+            };
+            let id = match values.get("variant")? {
+                toml::Value::String(name) => prism_settings::EnumId::from_stable_name(name),
+                _ => return None,
+            };
+            Some(Value::EnumTyped { enum_type, id })
+        }
+        toml::Value::Table(values)
+            if values.get(TAG_KEY).and_then(toml::Value::as_str) == Some("enum_typed_payload") =>
+        {
+            if values.len() != 4 {
+                return None;
+            }
+            let enum_type = match values.get("enum_type")? {
+                toml::Value::String(name) => prism_settings::EnumTypeId::from_stable_name(name),
+                _ => return None,
+            };
+            let id = match values.get("variant")? {
+                toml::Value::String(name) => prism_settings::EnumId::from_stable_name(name),
+                _ => return None,
+            };
+            let payload = match values.get("payload")? {
+                toml::Value::Array(items) => prism_settings::EnumPayload::Tuple(
+                    items
+                        .iter()
+                        .enumerate()
+                        .map(|(index, item)| {
+                            decode_value_for_migration(item, &format!("{key}.payload[{index}]"))
+                        })
+                        .collect::<Option<Vec<_>>>()?,
+                ),
+                toml::Value::Table(fields) => prism_settings::EnumPayload::Struct(
+                    fields
+                        .iter()
+                        .map(|(field, item)| {
+                            decode_value_for_migration(item, &format!("{key}.payload.{field}"))
+                                .map(|value| (field.clone(), value))
+                        })
+                        .collect::<Option<BTreeMap<_, _>>>()?,
+                ),
+                _ => return None,
+            };
+            Some(Value::EnumPayloadTyped {
+                enum_type,
+                id,
+                payload,
+            })
+        }
         toml::Value::Table(values) => values
             .iter()
             .map(|(child_key, value)| {
@@ -527,7 +938,7 @@ pub(crate) fn decode_value_for_migration(value: &toml::Value, key: &str) -> Opti
             })
             .collect::<Option<BTreeMap<_, _>>>()
             .map(Value::Table),
-        _ => decode_value(value, key, None).ok(),
+        _ => decode_value(value, key, None, None).ok(),
     }
 }
 
@@ -658,6 +1069,86 @@ mod tests {
 
         let unknown = "prism_schema = 1\n[values.\"render.quality\"]\n__prism_value = \"enum\"\nvalue = \"Ultra\"\n";
         assert!(SettingsDocument::decode_with_registry(unknown, Some(&registry)).is_err());
+    }
+
+    #[test]
+    fn typed_enum_codec_roundtrips_type_identity_and_nested_payloads() {
+        use prism_settings::{EnumSchema, EnumVariantSchema};
+        let first_type = prism_settings::EnumTypeId::from_stable_name("settings::First");
+        let second_type = prism_settings::EnumTypeId::from_stable_name("settings::Second");
+        let first_variant_name = "settings::First::Value";
+        let second_variant_name = "settings::Second::Value";
+        let first_variant = EnumVariantSchema {
+            id: prism_settings::EnumId::from_stable_name(first_variant_name),
+            stable_name: first_variant_name.into(),
+            payload: Some(prism_settings::EnumPayloadShape::Tuple(vec![
+                ValueShape::scalar(ValueType::Int),
+            ])),
+        };
+        let second_variant = EnumVariantSchema {
+            id: prism_settings::EnumId::from_stable_name(second_variant_name),
+            stable_name: second_variant_name.into(),
+            payload: None,
+        };
+        let mut definition = SettingDef::new(
+            "render.typed",
+            "render",
+            Value::Table(BTreeMap::from([
+                (
+                    "first".into(),
+                    Value::EnumPayloadTyped {
+                        enum_type: first_type,
+                        id: first_variant.id,
+                        payload: prism_settings::EnumPayload::Tuple(vec![Value::Int(3)]),
+                    },
+                ),
+                (
+                    "second".into(),
+                    Value::EnumTyped {
+                        enum_type: second_type,
+                        id: second_variant.id,
+                    },
+                ),
+            ])),
+        );
+        definition.set_shape(ValueShape::table(BTreeMap::from([
+            ("first".into(), ValueShape::Enum(first_type)),
+            ("second".into(), ValueShape::Enum(second_type)),
+        ])));
+        definition.enum_schemas = vec![
+            EnumSchema {
+                id: first_type,
+                stable_name: "settings::First".into(),
+                variants: vec![first_variant],
+            },
+            EnumSchema {
+                id: second_type,
+                stable_name: "settings::Second".into(),
+                variants: vec![second_variant],
+            },
+        ];
+        let mut builder = RegistryBuilder::new();
+        builder.namespace("render", "test").unwrap();
+        builder.register(definition);
+        let registry = builder.finish().unwrap();
+
+        let mut document = SettingsDocument::new(1);
+        let value = registry
+            .def(registry.id(&"render.typed".into()).unwrap())
+            .unwrap()
+            .default
+            .clone();
+        document.insert("render.typed", value.clone());
+        document.bind_registry(&registry);
+        let encoded = document.encode().unwrap();
+        assert!(encoded.contains("enum_typed_payload"));
+        assert!(encoded.contains("settings::First"));
+        assert!(encoded.contains("settings::Second"));
+        let decoded = SettingsDocument::decode_with_registry(&encoded, Some(&registry)).unwrap();
+        assert_eq!(
+            decoded.candidates().get(&SettingKey::from("render.typed")),
+            Some(&value)
+        );
     }
 
     #[test]
@@ -840,5 +1331,90 @@ mod tests {
             .encode()
             .unwrap()
             .contains("value = \"render::Quality::Ultra\""));
+    }
+
+    #[test]
+    fn enum_payload_roundtrips_with_stable_variant_names_and_migrates_recursively() {
+        use prism_settings::{EnumOptionPayload, EnumPayload, EnumPayloadShape};
+        let plain = EnumOption::from_stable_name("render::Mode::Plain");
+        let configured = EnumOption::from_stable_name("render::Mode::Configured");
+        let nested = EnumOption::from_stable_name("render::Filter::Radius");
+        let default = Value::EnumPayload {
+            id: configured.id,
+            payload: EnumPayload::Struct(BTreeMap::from([
+                ("quality".to_owned(), Value::Enum(plain.id)),
+                (
+                    "filter".to_owned(),
+                    Value::EnumPayload {
+                        id: nested.id,
+                        payload: EnumPayload::Tuple(vec![Value::Int(4)]),
+                    },
+                ),
+            ])),
+        };
+        let mut definition = SettingDef::new("render.mode", "render", default.clone());
+        definition.enum_options = vec![plain.clone(), configured.clone(), nested.clone()];
+        definition.enum_payloads = vec![
+            EnumOptionPayload {
+                id: configured.id,
+                shape: EnumPayloadShape::Struct(BTreeMap::from([
+                    ("quality".to_owned(), ValueShape::scalar(ValueType::Enum)),
+                    ("filter".to_owned(), ValueShape::scalar(ValueType::Enum)),
+                ])),
+            },
+            EnumOptionPayload {
+                id: nested.id,
+                shape: EnumPayloadShape::Tuple(vec![ValueShape::scalar(ValueType::Int)]),
+            },
+        ];
+        let mut builder = RegistryBuilder::new();
+        builder.namespace("render", "test").unwrap();
+        builder.register(definition);
+        let registry = builder.finish().unwrap();
+
+        let mut document = SettingsDocument::new(1);
+        document.insert("render.mode", default.clone());
+        document.bind_registry(&registry);
+        let encoded = document.encode().unwrap();
+        assert!(encoded.contains("__prism_value = \"enum_payload\""));
+        assert!(encoded.contains("render::Mode::Configured"));
+        assert!(encoded.contains("render::Filter::Radius"));
+        assert!(!encoded.contains(&configured.id.0.to_string()));
+        let decoded = SettingsDocument::decode_with_registry(&encoded, Some(&registry)).unwrap();
+        assert_eq!(
+            decoded.candidates().get(&SettingKey::from("render.mode")),
+            Some(&default)
+        );
+
+        let root: toml::Value = toml::from_str(&encoded).unwrap();
+        let raw = root
+            .get("values")
+            .and_then(toml::Value::as_table)
+            .and_then(|values| values.get("render.mode"))
+            .unwrap();
+        assert_eq!(
+            decode_value_for_migration(raw, "render.mode"),
+            Some(default)
+        );
+    }
+
+    #[test]
+    fn enum_payload_codec_rejects_malformed_or_ambiguous_tags() {
+        let option = EnumOption::from_stable_name("render::Mode::Configured");
+        let mut definition = SettingDef::new("render.mode", "render", Value::Enum(option.id));
+        definition.enum_options = vec![option];
+        let mut builder = RegistryBuilder::new();
+        builder.namespace("render", "test").unwrap();
+        builder.register(definition);
+        let registry = builder.finish().unwrap();
+        for payload in [
+            "{ __prism_value = \"enum_payload\", variant = 4, payload = [] }",
+            "{ __prism_value = \"enum_payload\", variant = \"render::Mode::Configured\", payload = 1 }",
+            "{ __prism_value = \"enum_payload\", variant = \"render::Mode::Missing\", payload = [] }",
+            "{ __prism_value = \"enum_payload\", variant = \"render::Mode::Configured\", payload = [], extra = true }",
+        ] {
+            let input = format!("prism_schema = 1\nvalues = {{ \"render.mode\" = {payload} }}\n");
+            assert!(SettingsDocument::decode_with_registry(&input, Some(&registry)).is_err(), "accepted {payload}");
+        }
     }
 }
