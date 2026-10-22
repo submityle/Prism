@@ -24,8 +24,9 @@
 //! [`World::flush_changed_observers`] directly to control the cadence yourself.
 
 use alloc::boxed::Box;
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BinaryHeap};
 use alloc::vec::Vec;
+use core::cmp::Reverse;
 use core::marker::PhantomData;
 
 use crate::change::Tick;
@@ -564,6 +565,7 @@ impl World {
                 _marker: PhantomData,
             }),
             cursor,
+            cursor_cohort: None,
             pending: Vec::new(),
         });
         self.increment_change_tick();
@@ -825,3 +827,11 @@ impl Drop for ChangeFlush<'_> {
 #[cfg(test)]
 #[path = "change_observers_fast_path_tests.rs"]
 mod fast_path_tests;
+
+#[cfg(test)]
+#[path = "change_observers_shared_collection_tests.rs"]
+mod shared_collection_tests;
+
+#[cfg(test)]
+#[path = "change_observers_candidate_selection_tests.rs"]
+mod candidate_selection_tests;
