@@ -4,6 +4,8 @@
 
 本文只把已经存在源码、测试和提交记录的部分标为已交付；设计文档中的路线图、指标和效果目标仍然不能替代实现证据。
 
+2026-10-22 `prism_world_terrain::HeightfieldLodSeamPlan::build_strict_for_residency` 新增从严格排序且唯一的 resident `TileKey` 切片推导 strict 2:1 heightfield seam 邻接：同级、coarse parent、finer children、跨 cube-face neighbor edge/reversal 与 finer coverage 均从 tile topology 派生；不完整 finer pair、重复/歧义覆盖和无序输入 fail-closed。resident 输入由调用方复用有序快照；每个 owner edge 仅做固定数量的二分查找，邻居临时表预留上限为 8，额外工作 O(log N)、输出/临时空间 O(1)。`CARGO_TARGET_DIR=/private/tmp/prism-target-world-lod CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 cargo test -p prism_world_terrain --lib --offline resident_adapter` 为 2 passed，整 crate 同配置 `cargo test -p prism_world_terrain --lib --offline` 为 114 passed；指定文件 rustfmt check 与 `git diff --check` 通过。测试覆盖同级、coarse、finer、跨面、无序、歧义和不完整 finer coverage。此接口只生成 seam plan，不生成/绘制 terrain mesh，不管理 resident snapshot 生命周期，也不证明跨 LOD GPU/render graph 接线或产品性能；mixed-LOD 产品验收仍未完成。
+
 ## 本批交接与验证范围
 
 2026-10-15 按共享磁盘协调要求停止共享 target 构建；本批只整理 `prism_world_io`、`prism_world_terrain` 与本文，测试使用独立的 `/private/tmp` target，未清理或覆盖共享 target，未 push。

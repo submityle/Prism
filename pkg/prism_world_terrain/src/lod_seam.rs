@@ -345,6 +345,102 @@ impl HeightfieldLodSeamPlan {
         build_internal(tile, segments, neighbors, limits, true, 0.0)
     }
 
+    /// Builds a strict 2:1 seam plan directly from a sorted resident tile set.
+    ///
+    /// The resident list must be strictly increasing by TileKey and contain no
+    /// duplicates. For every owner edge this resolves one same-level neighbor,
+    /// its coarser parent, or both finer children. Cube-face edge orientation
+    /// and finer-child coverage are derived from tile adjacency. Partial finer
+    /// coverage fails closed because this transition ABI requires a complete
+    /// 2:1 pair.
+    pub fn build_strict_for_residency(
+        tile: TileKey,
+        segments: u32,
+        resident_tiles: &[TileKey],
+        limits: LodSeamLimits,
+    ) -> Result<Self, LodSeamError> {
+        if resident_tiles.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Err(LodSeamError::InvalidResidentTileOrder);
+        }
+        if segments < 2 || !segments.is_power_of_two() || !segments.is_multiple_of(2) {
+            return Err(LodSeamError::InvalidSegments);
+        }
+        let mut neighbors = Vec::new();
+        neighbors
+            .try_reserve_exact(8)
+            .map_err(|_| LodSeamError::AllocationFailed)?;
+        for edge in TileEdge::ALL {
+            let (same_level, neighbor_edge) = tile.neighbor_with_edge(edge);
+            let same = resident_tiles.binary_search(&same_level).is_ok();
+            let coarse_tile = same_level.parent();
+            let coarse =
+                coarse_tile.is_some_and(|neighbor| resident_tiles.binary_search(&neighbor).is_ok());
+            let (finer, reversed) = if let Ok(children) = same_level.children() {
+                let mut found = [None; 2];
+                let mut count = 0usize;
+                for child in children
+                    .into_iter()
+                    .filter(|child| child_touches_edge(*child, neighbor_edge))
+                {
+                    if resident_tiles.binary_search(&child).is_ok() {
+                        if count < found.len() {
+                            found[count] = Some(child);
+                        }
+                        count += 1;
+                    }
+                }
+                if count > 2 {
+                    return Err(LodSeamError::AmbiguousResidentNeighbors(edge));
+                }
+                (found, edge_reversed(tile, edge, neighbor_edge))
+            } else {
+                ([None, None], false)
+            };
+            let has_finer = finer.iter().any(Option::is_some);
+            let topology_count = usize::from(same) + usize::from(coarse) + usize::from(has_finer);
+            if topology_count > 1 {
+                return Err(LodSeamError::AmbiguousResidentNeighbors(edge));
+            }
+            if same {
+                neighbors.push(LodSeamNeighbor::with_boundary(
+                    edge,
+                    same_level,
+                    segments,
+                    LodSeamCoverage::full(segments),
+                ));
+            } else if coarse {
+                neighbors.push(LodSeamNeighbor::with_boundary(
+                    edge,
+                    coarse_tile.expect("coarse flag requires parent"),
+                    segments,
+                    LodSeamCoverage::full(segments),
+                ));
+            } else if has_finer {
+                let half = segments / 2;
+                for child in finer.into_iter().flatten() {
+                    let child_parameter = match neighbor_edge {
+                        TileEdge::West | TileEdge::East => child.y() & 1,
+                        TileEdge::South | TileEdge::North => child.x() & 1,
+                    };
+                    let owner_half = if reversed {
+                        1 - child_parameter
+                    } else {
+                        child_parameter
+                    };
+                    let coverage = if owner_half == 0 {
+                        LodSeamCoverage::new(0, half)
+                    } else {
+                        LodSeamCoverage::new(half, segments)
+                    };
+                    neighbors.push(LodSeamNeighbor::with_boundary(
+                        edge, child, segments, coverage,
+                    ));
+                }
+            }
+        }
+        Self::build_strict(tile, segments, &neighbors, limits)
+    }
+
     /// Owner tile.
     pub const fn tile(&self) -> TileKey {
         self.tile
@@ -439,6 +535,10 @@ impl HeightfieldLodSeamState {
 /// Seam validation, topology, or bounded-allocation failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LodSeamError {
+    /// Resident tile input is not strictly sorted and unique.
+    InvalidResidentTileOrder,
+    /// More than one LOD representation overlaps the same owner edge.
+    AmbiguousResidentNeighbors(TileEdge),
     /// The fine segment count is not an even power of two of at least two.
     InvalidSegments,
     /// The requested segment count exceeds the caller's limit.
@@ -980,6 +1080,8 @@ fn push_oriented_triangle(
 
 #[cfg(test)]
 mod tests {
+    use alloc::vec;
+
     use super::*;
     use crate::CubeFace;
 
@@ -1215,6 +1317,115 @@ mod tests {
                 limits(),
             ),
             Err(LodSeamError::MissingBoundaryMetadata(TileEdge::North))
+        );
+    }
+
+    #[test]
+    fn resident_adapter_derives_same_coarse_finer_and_face_crossing_neighbors() {
+        let owner = tile(4, 4, 4);
+        let same = owner.neighbor(TileEdge::South);
+        let same_plan =
+            HeightfieldLodSeamPlan::build_strict_for_residency(owner, 8, &[same, owner], limits())
+                .unwrap();
+        assert_eq!(
+            same_plan.modes()[edge_index(TileEdge::South)],
+            LodSeamEdgeMode::Same
+        );
+
+        let coarse_owner = tile(4, 4, 4);
+        let coarse = coarse_owner.neighbor(TileEdge::North).parent().unwrap();
+        let coarse_plan = HeightfieldLodSeamPlan::build_strict_for_residency(
+            coarse_owner,
+            8,
+            &[coarse],
+            limits(),
+        )
+        .unwrap();
+        assert_eq!(coarse_plan.morph_alpha(), 1.0);
+        assert!(coarse_plan
+            .transitions()
+            .iter()
+            .any(|transition| transition.neighbor() == coarse));
+
+        let fine_owner = tile(3, 2, 2);
+        let same_level = fine_owner.neighbor(TileEdge::West);
+        let children = same_level.children().unwrap();
+        let mut resident = vec![fine_owner, children[1], children[3]];
+        resident.sort_unstable();
+        let fine_plan =
+            HeightfieldLodSeamPlan::build_strict_for_residency(fine_owner, 8, &resident, limits())
+                .unwrap();
+        assert_eq!(
+            fine_plan.modes()[edge_index(TileEdge::West)],
+            LodSeamEdgeMode::Finer
+        );
+        assert_eq!(fine_plan.neighbor_metadata().len(), 2);
+        assert_eq!(
+            fine_plan.neighbor_metadata()[0].coverage(),
+            LodSeamCoverage::new(0, 4)
+        );
+        assert_eq!(
+            fine_plan.neighbor_metadata()[1].coverage(),
+            LodSeamCoverage::new(4, 8)
+        );
+
+        let face_owner = TileKey::new(CubeFace::PositiveX, 2, 0, 1).unwrap();
+        let across_face = face_owner.neighbor(TileEdge::West);
+        let face_plan = HeightfieldLodSeamPlan::build_strict_for_residency(
+            face_owner,
+            8,
+            &[face_owner, across_face],
+            limits(),
+        )
+        .unwrap();
+        let metadata = face_plan
+            .neighbor_metadata()
+            .iter()
+            .find(|metadata| metadata.owner_edge() == TileEdge::West)
+            .unwrap();
+        assert_eq!(metadata.neighbor(), across_face);
+        assert_eq!(
+            metadata.neighbor_edge(),
+            face_owner.neighbor_with_edge(TileEdge::West).1
+        );
+        assert_eq!(
+            metadata.reversed(),
+            edge_reversed(face_owner, TileEdge::West, metadata.neighbor_edge())
+        );
+    }
+
+    #[test]
+    fn resident_adapter_rejects_unsorted_ambiguous_and_incomplete_coverage() {
+        let owner = tile(4, 4, 4);
+        let adjacent = owner.neighbor(TileEdge::North);
+        assert_eq!(
+            HeightfieldLodSeamPlan::build_strict_for_residency(
+                owner,
+                8,
+                &[adjacent, owner],
+                limits(),
+            ),
+            Err(LodSeamError::InvalidResidentTileOrder)
+        );
+
+        let coarse = adjacent.parent().unwrap();
+        let mut ambiguous = vec![owner, adjacent, coarse];
+        ambiguous.sort_unstable();
+        assert_eq!(
+            HeightfieldLodSeamPlan::build_strict_for_residency(owner, 8, &ambiguous, limits()),
+            Err(LodSeamError::AmbiguousResidentNeighbors(TileEdge::North))
+        );
+
+        let finer_owner = tile(3, 2, 2);
+        let children = finer_owner.neighbor(TileEdge::West).children().unwrap();
+        assert_eq!(
+            HeightfieldLodSeamPlan::build_strict_for_residency(
+                finer_owner,
+                8,
+                &[finer_owner, children[1]],
+                limits(),
+            ),
+            Err(LodSeamError::IncompleteFinerCoverage(TileEdge::West))
         );
     }
 
