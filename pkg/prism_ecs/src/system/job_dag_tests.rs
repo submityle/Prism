@@ -213,6 +213,26 @@ fn duplicate_deps_collapse() {
     assert_eq!(count.load(Ordering::Relaxed), 1);
 }
 
+/// Wide fan-in uses the hash-backed duplicate filter without changing the
+/// single-dispatch semantics of the join node.
+#[test]
+fn wide_duplicate_deps_collapse_without_losing_edges() {
+    let pool = TaskPool::with_threads(4);
+    const LEAVES: usize = 64;
+    let count = AtomicUsize::new(0);
+    let mut dag = JobDag::with_capacity(LEAVES + 1);
+    let roots: Vec<_> = (0..LEAVES).map(|_| dag.add(|| {})).collect();
+    let mut deps = Vec::with_capacity(LEAVES * 3);
+    for &root in &roots {
+        deps.extend([root, root, root]);
+    }
+    dag.add_after(&deps, || {
+        count.fetch_add(1, Ordering::Relaxed);
+    });
+    dag.dispatch(&pool);
+    assert_eq!(count.load(Ordering::Relaxed), 1);
+}
+
 /// A dependency cycle (via `order`) is detected up front and panics instead of
 /// deadlocking.
 #[test]

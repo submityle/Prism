@@ -71,6 +71,7 @@ use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
+use hashbrown::HashSet;
 use std::sync::Mutex;
 
 use prism_tasks::{Scope, TaskPool};
@@ -175,15 +176,21 @@ impl<'env> JobDag<'env> {
     where
         F: FnOnce() + Send + 'env,
     {
+        const HASH_SET_THRESHOLD: usize = 16;
         let len = self.nodes.len();
         let mut edges: Vec<usize> = Vec::with_capacity(deps.len());
+        let mut seen: Option<HashSet<usize>> =
+            (deps.len() >= HASH_SET_THRESHOLD).then(|| HashSet::with_capacity(deps.len()));
         for &d in deps {
             assert!(
                 d.0 < len,
                 "JobDag::add_after: dependency {} is not a node of this graph (len {len})",
                 d.0
             );
-            if !edges.contains(&d.0) {
+            let unique = seen
+                .as_mut()
+                .map_or_else(|| !edges.contains(&d.0), |seen| seen.insert(d.0));
+            if unique {
                 edges.push(d.0);
             }
         }
