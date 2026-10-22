@@ -50,6 +50,8 @@ pub mod hash;
 pub mod import;
 /// Processor contracts and build-node declarations.
 pub mod job;
+/// Binds committed mesh-derived products to source keys and build revisions.
+pub mod mesh_derived_binding;
 /// Deterministic bridge from build manifests/CAS blobs to runtime containers.
 pub mod package;
 /// Deterministic diff and byte-accounting plans between build revisions.
