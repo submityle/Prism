@@ -30,6 +30,10 @@ std = []
 # onto a `prism_tasks` work-stealing pool. Pulls in `prism_tasks` and `std`.
 multi_thread = ["std", "dep:prism_tasks"]
 
+# Stackful-fiber-backed waits for the system-internal job graph (§8.3). This
+# composes with prism_tasks rather than introducing a second ECS-owned pool.
+fibers = ["multi_thread", "prism_tasks/fibers"]
+
 # Reflection bridge (design §16.5 / §24.3): register a component type so an
 # editor / scene loader / replication layer can read, overwrite, remove and
 # enumerate it *dynamically* by `StableTypeId`, without naming the Rust type.
