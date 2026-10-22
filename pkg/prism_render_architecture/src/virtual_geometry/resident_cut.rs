@@ -66,6 +66,11 @@ pub enum ResidentCutError {
     DuplicateNode { node: u32 },
     /// The cut selects both a node and its descendant.
     OverlappingCut { ancestor: u32, descendant: u32 },
+    /// Residency fallback produced both a resident ancestor and its descendant.
+    ///
+    /// The caller must reject this resolved cut and use a whole-asset fallback;
+    /// drawing both would overlap geometry and can double-shade or z-fight.
+    OverlappingFallback { ancestor: u32, descendant: u32 },
 }
 
 impl<'a> ResidentCutResolver<'a> {
@@ -171,6 +176,29 @@ impl<'a> ResidentCutResolver<'a> {
                 requested,
                 resident: resolved,
             });
+        }
+
+        // A fallback selected for one region can subsume a different region
+        // that was already resident at a finer level. Never publish that
+        // ancestor/descendant pair as a draw cut: the current asset contract
+        // does not carry per-region clipping masks that could make overlap
+        // harmless. The caller can then fail closed to a whole-asset mesh.
+        for &descendant in &emitted {
+            let mut visited = BTreeSet::new();
+            let mut queue = VecDeque::from([descendant]);
+            while let Some(node) = queue.pop_front() {
+                for &parent in &self.parents[node as usize] {
+                    if emitted.contains(&parent) {
+                        return Err(ResidentCutError::OverlappingFallback {
+                            ancestor: parent,
+                            descendant,
+                        });
+                    }
+                    if visited.insert(parent) {
+                        queue.push_back(parent);
+                    }
+                }
+            }
         }
         Ok(result)
     }
@@ -376,6 +404,30 @@ mod tests {
         assert_eq!(actual.clusters, vec![leaf(0, 0)]);
         assert_eq!(actual.regions[0].resident, Some(leaf(0, 0)));
         assert_eq!(actual.regions[1].resident, Some(leaf(0, 0)));
+    }
+
+    #[test]
+    fn mixed_resident_and_fallback_regions_reject_overlapping_output_cut() {
+        let h = hierarchy(
+            vec![
+                ClusterNode::interior(bounds(), 4.0, page(0), 1, 2),
+                ClusterNode::leaf(bounds(), 0.0, page(1)),
+                ClusterNode::leaf(bounds(), 0.0, page(2)),
+            ],
+            vec![0],
+        );
+        let result = ResidentCutResolver::new(&h)
+            .unwrap()
+            .resolve(&[leaf(1, 1), leaf(2, 2)], |key| {
+                key == page(0) || key == page(2)
+            });
+        assert_eq!(
+            result,
+            Err(ResidentCutError::OverlappingFallback {
+                ancestor: 0,
+                descendant: 2,
+            })
+        );
     }
 
     #[test]
