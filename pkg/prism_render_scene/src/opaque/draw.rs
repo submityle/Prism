@@ -23,8 +23,55 @@ pub(crate) type DrawGpuSceneOpaque = (
     SetMeshViewEmptyBindGroup<1>,
     SetGpuSceneBindGroup<2>,
     SetMaterialBindGroup<3>,
+    SetOpaqueDebugMetadataBindGroup<4>,
     super::indirect::DrawGpuSceneIndirectBin,
 );
+
+pub(crate) struct SetOpaqueDebugMetadataBindGroup<const I: usize>;
+
+impl<const I: usize> RenderCommand<Opaque3d> for SetOpaqueDebugMetadataBindGroup<I> {
+    type Param = (
+        SRes<super::debug_metadata::OpaqueDebugMetadataBuffers>,
+        SRes<crate::visibility::runtime::UnifiedVisibilityState>,
+        SRes<super::GpuSceneDebugView>,
+    );
+    type ViewQuery = &'static bevy_render::view::ExtractedView;
+    type ItemQuery = ();
+
+    fn render<'w>(
+        _: &Opaque3d,
+        view: ROQueryItem<'w, '_, Self::ViewQuery>,
+        _: Option<()>,
+        (metadata, visibility, debug_view): SystemParamItem<'w, '_, Self::Param>,
+        pass: &mut TrackedRenderPass<'w>,
+    ) -> RenderCommandResult {
+        if !matches!(
+            *debug_view,
+            debug if super::pipeline::uses_debug_metadata(debug)
+        ) {
+            return RenderCommandResult::Success;
+        }
+        let metadata = metadata.into_inner();
+        let visibility = visibility.into_inner();
+        let Some(handle) = visibility
+            .views
+            .iter()
+            .find(|record| {
+                visibility
+                    .retained_view(record.handle)
+                    .is_some_and(|retained| retained == view.retained_view_entity)
+            })
+            .map(|record| record.handle)
+        else {
+            return RenderCommandResult::Skip;
+        };
+        let Some(bind_group) = metadata.bind_group(handle) else {
+            return RenderCommandResult::Skip;
+        };
+        pass.set_bind_group(I, bind_group, &[]);
+        RenderCommandResult::Success
+    }
+}
 
 pub(crate) struct SetGpuSceneBindGroup<const I: usize>;
 

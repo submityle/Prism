@@ -310,8 +310,11 @@ fn dispatch_traverse(
     let params = GpuRayTraverseParams {
         ray_count,
         mode,
-        pad0: 0,
-        pad1: 0,
+        view_index: u32::MAX,
+        view_generation: 0,
+        selection_revision_low: 0,
+        selection_revision_high: 0,
+        pad: [0; 2],
     };
     let param_buf = device.create_buffer_init(&BufferInitDescriptor {
         label: Some("rt_params"),

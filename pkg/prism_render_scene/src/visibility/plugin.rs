@@ -62,6 +62,7 @@ impl Plugin for PrismVisibilityPlugin {
             .init_resource::<UnifiedVisibilityEnabled>()
             .init_resource::<UnifiedVisibilitySettings>()
             .init_resource::<UnifiedVisibilityState>()
+            .init_resource::<crate::geometry::GeometryRepresentationSelections>()
             .init_resource::<PrismVisibilityDiagnostics>()
             .init_resource::<VisibilityParityReadback>()
             .init_resource::<HzbLateCompactBindGroup>()
@@ -83,7 +84,9 @@ impl Plugin for PrismVisibilityPlugin {
             .add_systems(
                 Render,
                 (
-                    build_unified_visibility.in_set(RenderSystems::PrepareResources),
+                    build_unified_visibility
+                        .after(crate::fabric_frame::build_render_fabric_frame_system)
+                        .in_set(RenderSystems::PrepareResources),
                     upload_unified_visibility
                         .after(build_unified_visibility)
                         .in_set(RenderSystems::PrepareResourcesFlush),

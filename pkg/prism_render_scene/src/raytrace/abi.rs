@@ -165,11 +165,10 @@ pub(crate) const FOOTPRINT_RESULT_MIP_FLOOR_WORD: usize = 3;
 
 /// Host mirror of the traversal kernel's `RayTraverseParams` uniform.
 ///
-/// The four `u32` fields are exactly the `struct RayTraverseParams` in
-/// `shaders/ray_traverse.wesl` (`ray_count`, `mode`, `pad0`, `pad1`): a 16-byte
-/// block that satisfies the uniform-buffer 16-byte size/alignment rule with no
-/// implicit tail padding, so `bytemuck::bytes_of` yields the exact bytes the
-/// shader reads.
+/// Fields match `RayTraverseParams` in `shaders/tlas_traverse.wesl`. The full
+/// generational view identity and 64-bit snapshot revision travel with the
+/// uploaded traversal inputs, preventing downstream consumers from confusing
+/// slot reuse or stale selection output.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Pod, Zeroable, PartialEq)]
 pub(crate) struct GpuRayTraverseParams {
@@ -178,10 +177,16 @@ pub(crate) struct GpuRayTraverseParams {
     pub(crate) ray_count: u32,
     /// Traversal mode: [`RAYTRACE_MODE_CLOSEST`] or [`RAYTRACE_MODE_ANY`].
     pub(crate) mode: u32,
-    /// Padding word 0, pinning the uniform to the shader's 16-byte struct size.
-    pub(crate) pad0: u32,
-    /// Padding word 1, pinning the uniform to the shader's 16-byte struct size.
-    pub(crate) pad1: u32,
+    /// View slot, or `u32::MAX` for view-independent test dispatches.
+    pub(crate) view_index: u32,
+    /// View generation, paired with `view_index`.
+    pub(crate) view_generation: u32,
+    /// Low half of the selection snapshot revision.
+    pub(crate) selection_revision_low: u32,
+    /// High half of the selection snapshot revision.
+    pub(crate) selection_revision_high: u32,
+    /// Uniform-structure padding matching the WGSL 16-byte alignment.
+    pub(crate) pad: [u32; 2],
 }
 
 /// Host mirror of the footprint kernel's `FootprintParams` uniform.
@@ -279,22 +284,25 @@ mod tests {
     }
 
     #[test]
-    fn params_uniform_is_a_16_byte_block() {
-        // The shader's `RayTraverseParams` is four `u32`s; a `UNIFORM` buffer
-        // must be 16-byte aligned, and this exact-size block carries no tail
-        // padding so `bytes_of` matches the on-device read byte-for-byte.
-        assert_eq!(size_of::<GpuRayTraverseParams>(), 16);
+    fn params_uniform_carries_full_per_view_snapshot_identity() {
+        assert_eq!(size_of::<GpuRayTraverseParams>(), 32);
         assert_eq!(align_of::<GpuRayTraverseParams>(), 4);
         let params = GpuRayTraverseParams {
             ray_count: 7,
             mode: RAYTRACE_MODE_ANY,
-            pad0: 0,
-            pad1: 0,
+            view_index: u32::MAX,
+            view_generation: 0,
+            selection_revision_low: 0x89ab_cdef,
+            selection_revision_high: 0x0123_4567,
+            pad: [0; 2],
         };
         let bytes = bytemuck::bytes_of(&params);
-        assert_eq!(bytes.len(), 16);
+        assert_eq!(bytes.len(), 32);
         assert_eq!(&bytes[0..4], &7u32.to_le_bytes());
         assert_eq!(&bytes[4..8], &1u32.to_le_bytes());
+        assert_eq!(&bytes[8..12], &u32::MAX.to_le_bytes());
+        assert_eq!(&bytes[16..20], &0x89ab_cdefu32.to_le_bytes());
+        assert_eq!(&bytes[20..24], &0x0123_4567u32.to_le_bytes());
     }
 
     #[test]

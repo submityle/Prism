@@ -54,7 +54,7 @@ struct OpaqueDebugMetadata {
     abi_version: u32, view_index: u32, view_generation: u32, scene_index: u32,
     scene_generation: u32, lod_level: u32, cluster_index: u32,
     cluster_generation: u32, cluster_valid: u32, flags: u32,
-    reserved_0: u32, reserved_1: u32,
+    mode: u32, cut_level: u32,
 }
 
 @group(2) @binding(0) var<storage, read> scene_instances: array<GpuSceneInstance>;
@@ -175,6 +175,7 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     var debug_metadata = OpaqueDebugMetadata(0u, 0u, 0u, 0u, 0u, 0xffffffffu,
         0xffffffffu, 0u, 0u, 0u, 0u, 0u);
     var debug_metadata_valid = false;
+    var debug_lod_valid = false;
     @if(PRISM_DEBUG_VIEW_6 || PRISM_DEBUG_VIEW_7 || PRISM_DEBUG_VIEW_8 || PRISM_DEBUG_VIEW_9 || PRISM_DEBUG_VIEW_10) {
         let debug_metadata_in_bounds = scene_index < arrayLength(&opaque_debug_metadata);
         let debug_metadata_index = select(0u, scene_index, debug_metadata_in_bounds);
@@ -184,6 +185,9 @@ fn vertex(vertex: Vertex) -> VertexOutput {
             && debug_metadata.view_generation != 0u
             && debug_metadata.scene_index == scene_index
             && debug_metadata.scene_generation == instance.generation;
+        debug_lod_valid = debug_metadata_valid && (debug_metadata.flags & 1u) != 0u
+            && debug_metadata.mode == 1u
+            && debug_metadata.lod_level != 0xffffffffu;
     }
     let id_color = vec3<f32>(
         f32((safe_scene_index * 97u) & 255u),
@@ -204,10 +208,10 @@ fn vertex(vertex: Vertex) -> VertexOutput {
         out.debug_color = select(
             vec3<f32>(1.0, 0.0, 1.0),
             vec3<f32>(f32(lod * 97u & 255u) / 255.0, f32(lod * 57u & 255u) / 255.0, f32(lod * 17u & 255u) / 255.0),
-            debug_metadata_valid && debug_metadata.lod_level != 0xffffffffu,
+            debug_lod_valid,
         );
     } @else if(PRISM_DEBUG_VIEW_7) {
-        out.debug_color = select(vec3<f32>(1.0, 0.0, 1.0), id_color, debug_metadata_valid);
+        out.debug_color = select(vec3<f32>(1.0, 0.0, 1.0), id_color, debug_lod_valid);
     } @else if(PRISM_DEBUG_VIEW_8) {
         // Opaque mesh work currently carries geometry/LOD identity, not the
         // virtual-cluster identity. Never substitute geometry identity here.
@@ -223,18 +227,17 @@ fn vertex(vertex: Vertex) -> VertexOutput {
                 f32((cluster * 57u) & 255u), f32((cluster * 17u) & 255u)) / 255.0;
         }
     } @else if(PRISM_DEBUG_VIEW_9) {
-        let requested_cut = debug_metadata.reserved_0;
-        let cut = requested_cut & 255u;
+        let cut = debug_metadata.cut_level & 255u;
         let base = vec3<f32>(f32((cut * 97u) & 255u),
             f32((cut * 57u) & 255u), f32((cut * 17u) & 255u)) / 255.0;
-        out.debug_color = select(vec3<f32>(1.0, 0.0, 1.0), base, debug_metadata_valid);
-        if debug_metadata_valid && (debug_metadata.flags & 4u) != 0u {
-            out.debug_color = mix(base, vec3<f32>(1.0, 0.8, 0.0), 0.65);
-        }
+        let cut_valid = debug_lod_valid && (debug_metadata.flags & 8u) != 0u
+            && debug_metadata.cut_level != 0xffffffffu;
+        out.debug_color = select(vec3<f32>(1.0, 0.0, 1.0), base, cut_valid);
     } @else if(PRISM_DEBUG_VIEW_10) {
         out.debug_color = select(vec3<f32>(1.0, 0.0, 1.0),
             select(vec3<f32>(1.0, 0.1, 0.05), vec3<f32>(0.1, 0.9, 0.2),
-                (debug_metadata.flags & 2u) != 0u), debug_metadata_valid);
+                (debug_metadata.flags & 4u) != 0u),
+            debug_lod_valid && (debug_metadata.flags & 2u) != 0u);
     } @else {
         let header = material_headers[out.material_index];
         out.debug_color = load_surface_parameters(header.parameter_offset, header.lobe_mask).base_color.rgb;

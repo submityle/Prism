@@ -74,8 +74,11 @@ const POSITIVE_INF_BITS: u32 = 2139095040u;
 struct RayTraverseParams {
     ray_count: u32,
     mode: u32,
+    view_index: u32,
+    view_generation: u32,
+    selection_revision_low: u32,
+    selection_revision_high: u32,
     pad0: u32,
-    pad1: u32,
 }
 
 @group(0) @binding(0) var<storage, read> tlas_nodes: array<u32>;

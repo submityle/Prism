@@ -131,6 +131,10 @@ impl UnifiedVisibilityState {
         self.frame_index = self.frame_index.saturating_add(1);
     }
 
+    pub fn frame_revision(&self) -> u64 {
+        self.frame_index
+    }
+
     pub fn handle(&mut self, retained: RetainedViewEntity) -> GenerationalHandle {
         self.last_seen.insert(retained, self.frame_index);
         let handle = *self.handles.entry(retained).or_insert_with(|| {

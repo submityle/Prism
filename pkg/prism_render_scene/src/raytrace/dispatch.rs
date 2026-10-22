@@ -40,12 +40,14 @@ use super::abi::{
 use super::bind_groups::{
     bvh_bind_group, footprint_bind_group, tlas_bind_group, tlas_dispatch_bind_group,
 };
+use super::extract::RenderWorldAcceleration;
 use super::pipeline::RayTraversalPipelines;
 use super::resources::{
     decode_bvh_hits, decode_footprint_results, decode_tlas_hits, pack_footprints, pack_rays,
     BvhTraversalResources, FootprintRequest, FootprintResources, GpuFootprintResult, GpuRayHit,
-    GpuTlasHit, TlasDispatchResources, TlasTraversalResources,
+    GpuTlasHit, RayDispatchIdentity, TlasDispatchResources, TlasTraversalResources,
 };
+use prism_render_architecture::abi::GenerationalHandle;
 
 /// A reusable ray-traversal compute service bound to one render device.
 ///
@@ -95,7 +97,7 @@ impl GpuRayTraversal {
 
     /// Returns the nearest two-level hit for every ray, the device twin of
     /// `GpuTlasBuffers::closest_hit`.
-    pub(crate) fn tlas_closest_hits(
+    pub(super) fn tlas_closest_hits(
         &self,
         device: &RenderDevice,
         queue: &RenderQueue,
@@ -108,7 +110,7 @@ impl GpuRayTraversal {
 
     /// Returns `true` for every ray occluded within its interval across the
     /// `TLAS`, the device twin of `GpuTlasBuffers::any_hit`.
-    pub(crate) fn tlas_any_hits(
+    pub(super) fn tlas_any_hits(
         &self,
         device: &RenderDevice,
         queue: &RenderQueue,
@@ -133,7 +135,48 @@ impl GpuRayTraversal {
     ///
     /// An empty ray batch uploads valid (minimally sized) buffers and records no
     /// pass, so a consumer can bind the result unconditionally.
-    pub(crate) fn record_tlas_walk(
+    pub(crate) fn record_view_tlas_walk(
+        &self,
+        device: &RenderDevice,
+        encoder: &mut CommandEncoder,
+        acceleration: &RenderWorldAcceleration,
+        view: GenerationalHandle,
+        selection_revision: u64,
+        rays: &[Ray],
+        mode: u32,
+    ) -> Option<TlasDispatchResources> {
+        let selected = acceleration.acceleration_for_view(view, selection_revision)?;
+        let ray_count = rays.len() as u32;
+        let ray_words = pack_rays(rays);
+        let identity = RayDispatchIdentity {
+            view,
+            selection_revision,
+            acceleration_revision: acceleration.acceleration_revision(),
+        };
+        let resources = TlasDispatchResources::new_for_view(
+            device,
+            &selected.tlas,
+            &selected.pool,
+            &ray_words,
+            ray_count,
+            mode,
+            identity,
+        );
+        if ray_count > 0 {
+            let bind_group = tlas_dispatch_bind_group(device, &self.pipelines.tlas, &resources);
+            let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                label: Some("prism_rt_tlas_view_dispatch"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.pipelines.tlas);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.dispatch_workgroups(ray_count.div_ceil(RAYTRACE_WORKGROUP), 1, 1);
+        }
+        Some(resources)
+    }
+
+    #[cfg(test)]
+    pub(super) fn record_tlas_acceleration(
         &self,
         device: &RenderDevice,
         encoder: &mut CommandEncoder,

@@ -624,7 +624,7 @@ fn service_record_tlas_walk_matches_cpu_golden() {
     let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
         label: Some("prism_rt_record_tlas_walk_test"),
     });
-    let resources = service.record_tlas_walk(
+    let resources = service.record_tlas_acceleration(
         &device,
         &mut encoder,
         &scene.tlas_buffers,
@@ -721,7 +721,7 @@ fn service_record_tlas_walk_any_matches_cpu_golden() {
     let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
         label: Some("prism_rt_record_tlas_walk_any_test"),
     });
-    let resources = service.record_tlas_walk(
+    let resources = service.record_tlas_acceleration(
         &device,
         &mut encoder,
         &scene.tlas_buffers,

@@ -40,6 +40,7 @@ pub(crate) fn build_unified_visibility(
     materials: Res<RenderMaterialRegistry>,
     geometries: Res<crate::RenderGeometryRegistry>,
     mut state: ResMut<UnifiedVisibilityState>,
+    mut representation_selections: ResMut<crate::geometry::GeometryRepresentationSelections>,
     mut fabric_handles: Local<Vec<prism_render_architecture::gpu_scene::SceneHandle>>,
     mut buffers: ResMut<UnifiedVisibilityBuffers>,
     mut diagnostics: ResMut<PrismVisibilityDiagnostics>,
@@ -50,6 +51,8 @@ pub(crate) fn build_unified_visibility(
     state.frame = VisibilityFrame::default();
     state.draw_bins.clear();
     state.begin_frame();
+    let selection_revision = state.frame_revision();
+    representation_selections.begin_frame(selection_revision);
     *diagnostics = PrismVisibilityDiagnostics {
         buffer_version: buffers.version(),
         ..Default::default()
@@ -141,6 +144,28 @@ pub(crate) fn build_unified_visibility(
         diagnostics.overflows += u32::from(stats.overflowed);
         state.frame.push_view(handle, work, stats);
         let output = state.frame.views[&handle].visible_instances;
+        let work_range =
+            &state.frame.work_items[output.start as usize..(output.start + output.count) as usize];
+        for item in work_range {
+            let Some(geometry_record) = geometries.record(item.geometry) else {
+                continue;
+            };
+            let Some(lod) = geometry_record.resolve_lod(item.lod_or_cluster) else {
+                continue;
+            };
+            representation_selections.insert(
+                handle,
+                item.scene,
+                crate::geometry::visibility_lod_selection(
+                    item.geometry,
+                    geometry_record.revision,
+                    item.scene,
+                    handle,
+                    selection_revision,
+                    lod.level,
+                ),
+            );
+        }
         let candidates: Vec<_> = state.frame.work_items
             [output.start as usize..(output.start + output.count) as usize]
             .iter()

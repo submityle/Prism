@@ -14,6 +14,7 @@
 use bevy_render::render_resource::{Buffer, BufferDescriptor, BufferInitDescriptor, BufferUsages};
 use bevy_render::renderer::RenderDevice;
 
+use prism_render_architecture::abi::GenerationalHandle;
 use prism_render_architecture::ray_scene::{GpuBlasPool, GpuBvhBuffers, GpuTlasBuffers, Ray};
 
 use super::abi::{
@@ -56,6 +57,16 @@ pub(crate) struct GpuTlasHit {
     pub(crate) instance_id: u32,
     /// Packed-order index of the hit instance in the `TLAS` instance buffer.
     pub(crate) instance_index: u32,
+}
+
+/// Identity of the exact per-view acceleration snapshot consumed by one TLAS
+/// dispatch. Kept beside the uploaded buffers so downstream graph consumers
+/// can reject stale results without trusting a global scene revision.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct RayDispatchIdentity {
+    pub(crate) view: GenerationalHandle,
+    pub(crate) selection_revision: u64,
+    pub(crate) acceleration_revision: u64,
 }
 
 /// One ray-cone footprint request the `ray_footprint` kernel consumes, in the
@@ -231,12 +242,24 @@ fn hit_storage(device: &RenderDevice, label: &str, word_count: usize) -> (Buffer
 }
 
 /// Uploads a [`GpuRayTraverseParams`] `UNIFORM` buffer.
-fn traverse_params(device: &RenderDevice, ray_count: u32, mode: u32) -> Buffer {
+fn traverse_params(
+    device: &RenderDevice,
+    ray_count: u32,
+    mode: u32,
+    identity: Option<GenerationalHandle>,
+    selection_revision: u64,
+) -> Buffer {
+    let (view_index, view_generation) = identity
+        .map(|view| (view.index, view.generation))
+        .unwrap_or((u32::MAX, 0));
     let params = GpuRayTraverseParams {
         ray_count,
         mode,
-        pad0: 0,
-        pad1: 0,
+        view_index,
+        view_generation,
+        selection_revision_low: selection_revision as u32,
+        selection_revision_high: (selection_revision >> 32) as u32,
+        pad: [0; 2],
     };
     device.create_buffer_with_data(&BufferInitDescriptor {
         label: Some("rt_params"),
@@ -268,6 +291,7 @@ pub(crate) struct BvhTraversalResources {
 impl BvhTraversalResources {
     /// Uploads the packed `BVH`, the ray batch and the traversal parameters for
     /// a `mode` dispatch over `ray_count` rays.
+    #[cfg(test)]
     pub(crate) fn new(
         device: &RenderDevice,
         buffers: &GpuBvhBuffers,
@@ -282,7 +306,7 @@ impl BvhTraversalResources {
             triangles: storage_buffer(device, "rt_triangles", &buffers.triangles),
             rays: storage_buffer(device, "rt_rays", ray_words),
             hits,
-            params: traverse_params(device, ray_count, mode),
+            params: traverse_params(device, ray_count, mode, None, 0),
             stage,
             ray_count,
             hit_bytes,
@@ -337,7 +361,7 @@ impl TlasTraversalResources {
             pool_offsets: storage_buffer(device, "tlas_pool_offsets", &pool.offsets),
             rays: storage_buffer(device, "tlas_rays", ray_words),
             hits,
-            params: traverse_params(device, ray_count, mode),
+            params: traverse_params(device, ray_count, mode, None, 0),
             stage,
             ray_count,
             hit_bytes,
@@ -355,6 +379,9 @@ impl TlasTraversalResources {
 /// avoiding the per-frame map/poll stall the [`TlasTraversalResources`] readback
 /// path pays.
 pub(crate) struct TlasDispatchResources {
+    /// The per-view snapshot identity whose acceleration and selections were
+    /// consumed. `None` is reserved for test-only raw acceleration dispatches.
+    pub(crate) identity: Option<RayDispatchIdentity>,
     /// Packed top-level `TLAS` nodes bound read-only at `@binding(0)`.
     pub(crate) tlas_nodes: Buffer,
     /// Packed instance records bound read-only at `@binding(1)`.
@@ -381,6 +408,7 @@ impl TlasDispatchResources {
     /// Uploads the packed `TLAS`, the shared `BLAS` pool, the ray batch and the
     /// traversal parameters for a `mode` dispatch over `ray_count` rays, leaving
     /// the hit records in a GPU-resident buffer (no staging copy).
+    #[cfg(test)]
     pub(crate) fn new(
         device: &RenderDevice,
         tlas: &GpuTlasBuffers,
@@ -388,6 +416,38 @@ impl TlasDispatchResources {
         ray_words: &[u32],
         ray_count: u32,
         mode: u32,
+    ) -> Self {
+        Self::new_internal(device, tlas, pool, ray_words, ray_count, mode, None)
+    }
+
+    pub(crate) fn new_for_view(
+        device: &RenderDevice,
+        tlas: &GpuTlasBuffers,
+        pool: &GpuBlasPool,
+        ray_words: &[u32],
+        ray_count: u32,
+        mode: u32,
+        identity: RayDispatchIdentity,
+    ) -> Self {
+        Self::new_internal(
+            device,
+            tlas,
+            pool,
+            ray_words,
+            ray_count,
+            mode,
+            Some(identity),
+        )
+    }
+
+    fn new_internal(
+        device: &RenderDevice,
+        tlas: &GpuTlasBuffers,
+        pool: &GpuBlasPool,
+        ray_words: &[u32],
+        ray_count: u32,
+        mode: u32,
+        identity: Option<RayDispatchIdentity>,
     ) -> Self {
         let (hits, hit_bytes) = hit_storage(
             device,
@@ -402,7 +462,14 @@ impl TlasDispatchResources {
             pool_offsets: storage_buffer(device, "tlas_pool_offsets", &pool.offsets),
             rays: storage_buffer(device, "tlas_rays", ray_words),
             hits,
-            params: traverse_params(device, ray_count, mode),
+            params: traverse_params(
+                device,
+                ray_count,
+                mode,
+                identity.map(|identity| identity.view),
+                identity.map_or(0, |identity| identity.selection_revision),
+            ),
+            identity,
             ray_count,
             hit_bytes,
         }

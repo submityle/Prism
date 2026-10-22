@@ -21,6 +21,28 @@ pub enum GpuSceneDebugView {
     /// Visualizes the transformed vertex normal when the mesh provides normals.
     /// Missing or degenerate normals are rendered magenta by the shader.
     WorldNormal = 5,
+    /// Displays the selected per-view LOD; magenta means the selection cannot
+    /// be proven by the opaque metadata stream.
+    Lod = 6,
+    /// Encodes selected scene-slot identity with a validated selected LOD.
+    SelectionIdentity = 7,
+    /// Encodes a proven virtual-cluster identity; standard Mesh draws are unavailable.
+    ClusterIdentity = 8,
+    /// Shows magenta unless a virtual-geometry cut source is authoritative.
+    Cut = 9,
+    /// Shows magenta unless virtual page residency is authoritative.
+    PageResidency = 10,
+}
+
+pub(crate) const fn uses_debug_metadata(debug: GpuSceneDebugView) -> bool {
+    matches!(
+        debug,
+        GpuSceneDebugView::Lod
+            | GpuSceneDebugView::SelectionIdentity
+            | GpuSceneDebugView::ClusterIdentity
+            | GpuSceneDebugView::Cut
+            | GpuSceneDebugView::PageResidency
+    )
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -36,6 +58,7 @@ pub(crate) struct GpuSceneOpaquePipeline {
     mesh_pipeline: MeshPipeline,
     scene_layout: BindGroupLayoutDescriptor,
     material_layout: BindGroupLayoutDescriptor,
+    debug_metadata_layout: BindGroupLayoutDescriptor,
     shader: Handle<Shader>,
 }
 
@@ -48,12 +71,14 @@ pub(crate) fn init_opaque_pipeline(
     mesh_pipeline: Res<MeshPipeline>,
     scene_bindings: Res<GpuSceneBindGroup>,
     material_bindings: Res<MaterialBindGroup>,
+    debug_metadata: Res<super::debug_metadata::OpaqueDebugMetadataBuffers>,
     asset_server: Res<bevy_asset::AssetServer>,
 ) {
     commands.insert_resource(GpuSceneOpaquePipeline {
         mesh_pipeline: mesh_pipeline.clone(),
         scene_layout: scene_bindings.layout_descriptor.clone(),
         material_layout: material_bindings.layout_descriptor.clone(),
+        debug_metadata_layout: debug_metadata.layout_descriptor.clone(),
         shader: load_embedded_asset!(asset_server.as_ref(), "../shaders/opaque.wesl"),
     });
 }
@@ -73,7 +98,7 @@ impl SpecializedMeshPipeline for GpuSceneOpaquePipeline {
         if key.has_uvs {
             shader_defs.push("VERTEX_UVS".into());
         }
-        for debug_view in 1..=GpuSceneDebugView::WorldNormal as u32 {
+        for debug_view in 1..=GpuSceneDebugView::PageResidency as u32 {
             shader_defs.push(bevy_shader::ShaderDefVal::Bool(
                 format!("PRISM_DEBUG_VIEW_{debug_view}").into(),
                 key.debug as u32 == debug_view,
@@ -104,6 +129,7 @@ impl SpecializedMeshPipeline for GpuSceneOpaquePipeline {
                 view.empty_layout,
                 self.scene_layout.clone(),
                 self.material_layout.clone(),
+                self.debug_metadata_layout.clone(),
             ],
             immediate_size: 0,
             vertex: VertexState {
@@ -232,11 +258,11 @@ fn decompress_vertex_position(
             ),
         );
         for compressed in [false, true] {
-            for debug_view in 0..=GpuSceneDebugView::WorldNormal as u32 {
+            for debug_view in 0..=GpuSceneDebugView::PageResidency as u32 {
                 for normals in [false, true] {
                     for uvs in [false, true] {
                         let mut defs = Vec::new();
-                        for candidate in 1..=GpuSceneDebugView::WorldNormal as u32 {
+                        for candidate in 1..=GpuSceneDebugView::PageResidency as u32 {
                             defs.push(ShaderDefVal::Bool(
                                 format!("PRISM_DEBUG_VIEW_{candidate}").into(),
                                 debug_view == candidate,
