@@ -6,6 +6,7 @@
 //! scene materializer registry to produce typed constructors.
 
 use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -284,6 +285,11 @@ fn spawn_tree<P: NestedSceneProvider>(
         }
     }
     let mut children: Vec<SceneTreeChild> = Vec::new();
+    let previous_children: BTreeMap<_, _> = previous
+        .into_iter()
+        .flat_map(|tree| tree.children.iter())
+        .map(|child| ((child.slot_root, child.template), &child.tree))
+        .collect();
     for slot in template.nested.iter().copied() {
         if depth >= limits.max_depth {
             for child in children.into_iter().rev() {
@@ -327,11 +333,7 @@ fn spawn_tree<P: NestedSceneProvider>(
             }
         };
         active.push(slot.template);
-        let previous_child = previous.and_then(|old| {
-            old.children
-                .iter()
-                .find(|child| child.slot_root == slot.root && child.template == slot.template)
-        });
+        let previous_child = previous_children.get(&(slot.root, slot.template)).copied();
         let child = spawn_tree(
             world,
             child_template,
@@ -341,7 +343,7 @@ fn spawn_tree<P: NestedSceneProvider>(
             depth + 1,
             active,
             count,
-            previous_child.map(|child| &child.tree),
+            previous_child,
         );
         active.pop();
         let child = match child {

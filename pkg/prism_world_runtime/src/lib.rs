@@ -1620,6 +1620,19 @@ impl<I: CellIo> CellFrameCoordinator<I> {
         sectors
     }
 
+    /// Applies one scene-template event/snapshot batch to `cache`, then queues
+    /// budgeted reloads for its newly computed resident dependents. A rejected
+    /// cache batch leaves scheduler state unchanged.
+    #[cfg(feature = "scene_templates")]
+    pub fn apply_scene_template_assets(
+        &mut self,
+        cache: &mut SceneTemplateCache,
+        assets: &mut prism_asset::Assets<prism_scene::SceneTemplate>,
+    ) -> Result<Vec<SectorId>, SceneTemplateBatchError> {
+        let invalidations = cache.apply_assets(assets)?;
+        Ok(self.schedule_template_invalidations(&invalidations))
+    }
+
     fn sync_loaded(&mut self, loaded: &[LoadedCell]) {
         let current: BTreeSet<_> = loaded.iter().map(|cell| cell.manifest.sector).collect();
         let stale: Vec<_> = self
@@ -2054,6 +2067,50 @@ mod tests {
             &mut host,
         );
         assert_eq!(next.actions, 0);
+    }
+
+    #[cfg(feature = "scene_templates")]
+    #[test]
+    fn scene_template_asset_batch_api_atomically_queues_resident_reload() {
+        let guid = prism_asset::StableGuid::from_u128(0x5252);
+        let resident = manifest(0, guid.to_u128(), 1, 9);
+        let provider = MemoryProvider {
+            bytes: BTreeMap::from([(resident.sector, bytes(resident, b"replacement"))]),
+            calls: Arc::new(AtomicUsize::new(0)),
+        };
+        let mut coordinator = WorldFrameCoordinator::new(provider, 1).expect("runtime config");
+        coordinator.sync_loaded(&[LoadedCell::new(resident)]);
+        let mut cache = SceneTemplateCache::new();
+        let mut assets = prism_asset::Assets::new();
+        let mut invalid = prism_scene::SceneTemplate::empty(guid);
+        invalid.schema = 0;
+        assets.insert(invalid);
+        assert!(matches!(
+            coordinator.apply_scene_template_assets(&mut cache, &mut assets),
+            Err(SceneTemplateBatchError::InvalidSnapshot(_))
+        ));
+        let demand = DemandSource::new(resident.sector, 0, 1, 10).unwrap();
+        let unmodified = coordinator.plan_frame(
+            &[demand],
+            &[resident],
+            &[LoadedCell::new(resident)],
+            StreamBudget {
+                io_bytes: 1,
+                max_actions: 1,
+            },
+            &mut Host::default(),
+        );
+        assert_eq!(unmodified.submitted, 0);
+
+        assets.insert(prism_scene::SceneTemplate::empty(guid));
+
+        assert_eq!(
+            coordinator
+                .apply_scene_template_assets(&mut cache, &mut assets)
+                .unwrap(),
+            vec![resident.sector]
+        );
+        assert!(cache.get(guid).is_some());
     }
 
     #[cfg(feature = "scene_templates")]
