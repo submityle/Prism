@@ -8,7 +8,7 @@
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use crate::{DirtyRegion, HeightSample, HeightSampler, HeightfieldSpec, TileKey};
+use crate::{DirtyRegion, HeightSample, HeightSampler, HeightfieldSpec, TileEdge, TileKey};
 
 /// Hard limits checked before sampling or allocating derived payloads.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -387,6 +387,16 @@ fn index(side: u32, x: u32, z: u32) -> usize {
     (u64::from(z) * u64::from(side) + u64::from(x)) as usize
 }
 
+fn mesh_edges_are_opposite(a: TileEdge, b: TileEdge) -> bool {
+    matches!(
+        (a, b),
+        (TileEdge::West, TileEdge::East)
+            | (TileEdge::East, TileEdge::West)
+            | (TileEdge::South, TileEdge::North)
+            | (TileEdge::North, TileEdge::South)
+    )
+}
+
 /// Indexed local heightfield geometry with in-place one-ring normal updates.
 #[derive(Clone, Debug)]
 pub struct HeightfieldMesh {
@@ -399,6 +409,7 @@ pub struct HeightfieldMesh {
     normals: Vec<[f32; 3]>,
     uvs: Vec<[f32; 2]>,
     indices: Vec<u32>,
+    lod_seams_applied: bool,
 }
 
 impl PartialEq for HeightfieldMesh {
@@ -459,6 +470,7 @@ impl HeightfieldMesh {
             normals: allocate(vertices)?,
             uvs: allocate(vertices)?,
             indices: allocate(indices)?,
+            lod_seams_applied: false,
         };
         for z in 0..side {
             for x in 0..side {
@@ -536,6 +548,130 @@ impl HeightfieldMesh {
     /// CCW triangle indices.
     pub fn indices(&self) -> &[u32] {
         &self.indices
+    }
+
+    /// Replaces edge quads with the validated 2:1 coarse-neighbor strips in a
+    /// seam plan. Transition vertices reuse this mesh's grid vertices; no
+    /// duplicate vertex buffer is created. The operation stages the complete
+    /// index stream and swaps it only after validation and budget admission.
+    ///
+    /// The plan must target this tile and use `samples_per_edge - 1` segments.
+    /// At most two coarse edges may be applied, and when there are two they
+    /// must be opposite; adjacent coarse edges share a corner quad and require
+    /// a corner fan contract that this mesh ABI does not yet define. A mesh
+    /// accepts one seam plan for its lifetime; rebuild it to apply a new LOD
+    /// configuration.
+    pub fn apply_lod_seam_plan(
+        &mut self,
+        plan: &crate::HeightfieldLodSeamPlan,
+        max_bytes: usize,
+    ) -> Result<(), BakeError<core::convert::Infallible>> {
+        if self.lod_seams_applied || plan.tile() != self.tile {
+            return Err(BakeError::InvalidGeometry);
+        }
+        let side = self.spec.samples_per_edge();
+        let segments = side - 1;
+        if plan.segments() != segments {
+            return Err(BakeError::InvalidGeometry);
+        }
+        let transitions = plan.transitions();
+        if transitions.is_empty() {
+            return Ok(());
+        }
+        if transitions.len() > 2
+            || (transitions.len() == 2
+                && !mesh_edges_are_opposite(transitions[0].edge(), transitions[1].edge()))
+        {
+            return Err(BakeError::InvalidGeometry);
+        }
+
+        let mut coarse_edges = [false; 4];
+        for transition in transitions {
+            let index = match transition.edge() {
+                crate::TileEdge::West => 0,
+                crate::TileEdge::East => 1,
+                crate::TileEdge::South => 2,
+                crate::TileEdge::North => 3,
+            };
+            if coarse_edges[index] {
+                return Err(BakeError::InvalidGeometry);
+            }
+            coarse_edges[index] = true;
+        }
+
+        let vertex_count = self.positions.len();
+        let base_indices = usize::try_from(segments)
+            .ok()
+            .and_then(|n| n.checked_mul(n))
+            .and_then(|n| n.checked_mul(6))
+            .ok_or(BakeError::SizeOverflow)?;
+        if self.indices.len() != base_indices {
+            return Err(BakeError::InvalidGeometry);
+        }
+        let replaced_quads = transitions
+            .len()
+            .checked_mul(segments as usize)
+            .ok_or(BakeError::SizeOverflow)?;
+        let removed_indices = replaced_quads
+            .checked_mul(6)
+            .ok_or(BakeError::SizeOverflow)?;
+        let added_indices = transitions
+            .iter()
+            .try_fold(0usize, |total, transition| {
+                total.checked_add(transition.indices().len())
+            })
+            .ok_or(BakeError::SizeOverflow)?;
+        let next_len = base_indices
+            .checked_sub(removed_indices)
+            .and_then(|n| n.checked_add(added_indices))
+            .ok_or(BakeError::SizeOverflow)?;
+        let bytes = vertex_count
+            .checked_mul(32)
+            .and_then(|n| {
+                next_len
+                    .checked_mul(core::mem::size_of::<u32>())
+                    .and_then(|i| n.checked_add(i))
+            })
+            .ok_or(BakeError::SizeOverflow)?;
+        if bytes > max_bytes {
+            return Err(BakeError::BudgetExceeded);
+        }
+
+        let mut next_indices = Vec::new();
+        next_indices
+            .try_reserve_exact(next_len)
+            .map_err(|_| BakeError::AllocationFailed)?;
+        for y in 0..segments {
+            for x in 0..segments {
+                let removed = (coarse_edges[0] && x == 0)
+                    || (coarse_edges[1] && x + 1 == segments)
+                    || (coarse_edges[2] && y == 0)
+                    || (coarse_edges[3] && y + 1 == segments);
+                if !removed {
+                    let first = ((y * segments + x) * 6) as usize;
+                    next_indices.extend_from_slice(&self.indices[first..first + 6]);
+                }
+            }
+        }
+        for transition in transitions {
+            for &index in transition.indices() {
+                let grid = transition.vertices()[index as usize].grid;
+                let vertex = grid[1]
+                    .checked_mul(side)
+                    .and_then(|row| row.checked_add(grid[0]))
+                    .ok_or(BakeError::SizeOverflow)?;
+                if vertex as usize >= vertex_count {
+                    return Err(BakeError::InvalidGeometry);
+                }
+                next_indices.push(vertex);
+            }
+        }
+        if next_indices.len() != next_len {
+            return Err(BakeError::InvalidGeometry);
+        }
+        self.indices = next_indices;
+        self.lod_seams_applied = true;
+        Ok(())
     }
     /// Last consumed tile-cache revision.
     pub const fn revision(&self) -> u64 {
@@ -682,6 +818,73 @@ mod tests {
             LIMITS,
         )
         .unwrap()
+    }
+
+    fn field_at(tile: TileKey) -> HeightfieldTile {
+        HeightfieldTile::bake(
+            tile,
+            HeightfieldSpec::new(9, 10).unwrap(),
+            &plane(0),
+            LIMITS,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn lod_seam_plan_replaces_boundary_quads_transactionally() {
+        use crate::{CubeFace, HeightfieldLodSeamPlan, LodSeamLimits, TileEdge};
+
+        let tile = TileKey::new(CubeFace::PositiveZ, 3, 3, 2).unwrap();
+        let coarse = tile.neighbor(TileEdge::East).parent().unwrap();
+        let plan = HeightfieldLodSeamPlan::build_strict_for_residency(
+            tile,
+            8,
+            &[coarse],
+            LodSeamLimits {
+                max_segments: 8,
+                max_vertices: 128,
+                max_indices: 1024,
+                max_bytes: 16_384,
+            },
+        )
+        .unwrap();
+        assert_eq!(plan.transitions().len(), 1);
+        let mut mesh = HeightfieldMesh::build(&field_at(tile), [8.0, 8.0], LIMITS).unwrap();
+        let original_indices = mesh.indices().len();
+        mesh.apply_lod_seam_plan(&plan, 16_384).unwrap();
+        assert_eq!(mesh.indices().len(), original_indices - 8 * 6 + 4 * 9);
+        assert!(mesh.indices().iter().all(|&index| (index as usize) < 81));
+        assert_eq!(
+            mesh.apply_lod_seam_plan(&plan, 16_384),
+            Err(BakeError::InvalidGeometry)
+        );
+    }
+
+    #[test]
+    fn lod_seam_budget_failure_preserves_the_original_mesh() {
+        use crate::{CubeFace, HeightfieldLodSeamPlan, LodSeamLimits, TileEdge};
+
+        let tile = TileKey::new(CubeFace::PositiveZ, 3, 3, 2).unwrap();
+        let coarse = tile.neighbor(TileEdge::East).parent().unwrap();
+        let plan = HeightfieldLodSeamPlan::build_strict_for_residency(
+            tile,
+            8,
+            &[coarse],
+            LodSeamLimits {
+                max_segments: 8,
+                max_vertices: 128,
+                max_indices: 1024,
+                max_bytes: 16_384,
+            },
+        )
+        .unwrap();
+        let mut mesh = HeightfieldMesh::build(&field_at(tile), [8.0, 8.0], LIMITS).unwrap();
+        let original = mesh.indices().to_vec();
+        assert_eq!(
+            mesh.apply_lod_seam_plan(&plan, 1),
+            Err(BakeError::BudgetExceeded)
+        );
+        assert_eq!(mesh.indices(), original);
     }
 
     #[test]

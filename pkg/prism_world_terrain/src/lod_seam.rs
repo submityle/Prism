@@ -1154,6 +1154,46 @@ mod tests {
     }
 
     #[test]
+    fn transition_strip_matches_removed_edge_quad_boundary_and_winding() {
+        let owner = tile(4, 4, 4);
+        let neighbor = owner.neighbor(TileEdge::East).parent().unwrap();
+        let plan = HeightfieldLodSeamPlan::build(
+            owner,
+            8,
+            &[LodSeamNeighbor::new(TileEdge::East, neighbor)],
+            1.0,
+            limits(),
+        )
+        .unwrap();
+        let transition = &plan.transitions()[0];
+        let mut seam_vertices = alloc::collections::BTreeSet::new();
+        for triangle in transition.indices().chunks_exact(3) {
+            let a = transition.vertices()[triangle[0] as usize].grid;
+            let b = transition.vertices()[triangle[1] as usize].grid;
+            let c = transition.vertices()[triangle[2] as usize].grid;
+            let area = (i64::from(b[0]) - i64::from(a[0])) * (i64::from(c[1]) - i64::from(a[1]))
+                - (i64::from(b[1]) - i64::from(a[1])) * (i64::from(c[0]) - i64::from(a[0]));
+            assert!(
+                area < 0,
+                "transition triangle must face +Y: {a:?} {b:?} {c:?} area={area}"
+            );
+            for point in [a, b, c] {
+                if point[0] == 8 {
+                    seam_vertices.insert(point[1]);
+                }
+            }
+        }
+        assert_eq!(
+            seam_vertices.into_iter().collect::<alloc::vec::Vec<_>>(),
+            transition
+                .interface()
+                .iter()
+                .map(|point| point[1])
+                .collect::<alloc::vec::Vec<_>>()
+        );
+    }
+
+    #[test]
     fn finer_neighbor_is_valid_but_owner_does_not_duplicate_transition() {
         let owner = tile(3, 2, 2);
         let same_level = owner.neighbor(TileEdge::West);
