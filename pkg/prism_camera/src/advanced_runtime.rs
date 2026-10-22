@@ -267,8 +267,29 @@ pub struct ShutterSnapshot {
     pub exposure_seconds: f32,
     pub exposure: crate::Exposure,
     pub aperture_f_stop: f32,
-    pub motion_blur_shutter_angle_deg: f32,
+    /// Fraction of each frame represented by the open shutter, in `[0, 1]`.
+    /// This is the unit consumed by per-frame motion-vector reconstruction;
+    /// frame rate is already accounted for in `exposure_seconds` and must not
+    /// be applied to this fraction a second time.
+    pub motion_blur_exposure_fraction: f32,
     pub status: ShutterRuntimeStatus,
+}
+
+#[cfg(feature = "shutter")]
+impl ShutterSnapshot {
+    /// Returns the finite `[0, 1]` exposure fraction for motion blur.
+    ///
+    /// Runtime-produced snapshots already contain a sanitized fraction. The
+    /// clamp also keeps manually assembled snapshots safe at renderer adapter
+    /// boundaries; non-finite values disable shutter contribution.
+    #[must_use]
+    pub fn motion_blur_exposure_fraction(self) -> f32 {
+        if self.motion_blur_exposure_fraction.is_finite() {
+            self.motion_blur_exposure_fraction.clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
+    }
 }
 
 #[cfg(feature = "view_lod")]
@@ -677,7 +698,7 @@ impl AdvancedRuntime {
                 exposure_seconds: safe.exposure_seconds(),
                 exposure: safe.physical_exposure(100.0),
                 aperture_f_stop: safe.aperture_f_stop,
-                motion_blur_shutter_angle_deg: safe.shutter_angle_deg,
+                motion_blur_exposure_fraction: safe.shutter_angle_deg / 360.0,
                 status,
             }
         });
@@ -1007,6 +1028,61 @@ mod tests {
         assert_eq!(runtime.last_tick(), Some(10));
     }
 
+    #[cfg(feature = "shutter")]
+    #[test]
+    fn shutter_snapshot_uses_per_frame_fraction_independent_of_frame_rate() {
+        let mut runtime = AdvancedRuntime::new(AdvancedRuntimeConfig::default()).unwrap();
+        let dt = runtime.config().fixed_delta_seconds;
+        let first = runtime
+            .step(
+                FixedTick::new(0, 0, dt),
+                AdvancedRuntimeInput::empty().with_shutter(Shutter {
+                    shutter_angle_deg: 180.0,
+                    fps: 24.0,
+                    aperture_f_stop: 2.8,
+                }),
+            )
+            .unwrap()
+            .shutter
+            .unwrap();
+        let second = runtime
+            .step(
+                FixedTick::new(1, 1, dt),
+                AdvancedRuntimeInput::empty().with_shutter(Shutter {
+                    shutter_angle_deg: 180.0,
+                    fps: 120.0,
+                    aperture_f_stop: 2.8,
+                }),
+            )
+            .unwrap()
+            .shutter
+            .unwrap();
+
+        assert_eq!(first.motion_blur_exposure_fraction(), 0.5);
+        assert_eq!(second.motion_blur_exposure_fraction(), 0.5);
+        assert!((first.exposure_seconds - 1.0 / 48.0).abs() < 1.0e-6);
+        assert!((second.exposure_seconds - 1.0 / 240.0).abs() < 1.0e-6);
+    }
+
+    #[cfg(feature = "shutter")]
+    #[test]
+    fn shutter_snapshot_fraction_sanitizes_manual_values() {
+        let mut snapshot = ShutterSnapshot {
+            shutter_angle_deg: 180.0,
+            fps: 60.0,
+            exposure_seconds: 1.0 / 120.0,
+            exposure: crate::Exposure::default(),
+            aperture_f_stop: 2.8,
+            motion_blur_exposure_fraction: f32::NAN,
+            status: ShutterRuntimeStatus::Applied,
+        };
+        assert_eq!(snapshot.motion_blur_exposure_fraction(), 0.0);
+        snapshot.motion_blur_exposure_fraction = 2.0;
+        assert_eq!(snapshot.motion_blur_exposure_fraction(), 1.0);
+        snapshot.motion_blur_exposure_fraction = -0.25;
+        assert_eq!(snapshot.motion_blur_exposure_fraction(), 0.0);
+    }
+
     #[cfg(feature = "cutscene")]
     #[test]
     fn non_finite_track_keyframe_is_rejected_before_runtime() {
@@ -1151,10 +1227,9 @@ mod tests {
 
         assert_eq!(output.track.unwrap().status, TrackRuntimeStatus::Sampled);
         assert_eq!(output.focus.unwrap().status, FocusRuntimeStatus::Updated);
-        assert_eq!(
-            output.shutter.unwrap().status,
-            ShutterRuntimeStatus::InvalidFrameRate
-        );
+        let shutter = output.shutter.unwrap();
+        assert_eq!(shutter.status, ShutterRuntimeStatus::InvalidFrameRate);
+        assert_eq!(shutter.motion_blur_exposure_fraction(), 0.5);
         assert!(output.lod.unwrap().update);
         let lookahead = output.lookahead.unwrap();
         assert_eq!(lookahead.samples.len(), 2);

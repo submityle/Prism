@@ -1224,7 +1224,7 @@ pub mod prelude {
 
 ### 27.1 当前实现与本文规格的关系
 
-本节是 2026-10-22 的实现快照，不把声明式契约等同于完整产品接线：`cutscene` 的 PostStack 权重合成/事件消费，快门快照到渲染器 DoF 与运动模糊节点的绑定，视图批次到实际共享可见集消费，LOD 到实际分辨率资源分配，lookahead 到资产流送队列，composition gizmo 到 editor 绘制，以及 edge history 到时域 resolve/局部锐化，必须以对应消费者的集成测试为准。相机侧 LOD 已由 `prism_camera_ecs` 的 `view_lod` feature 接入真实 `PostUpdate` 发布路径，并通过 ECS 测试验证视图复用、关键视图保护和预算元数据输出；渲染侧据此分配实际分辨率资源的链路仍需对应集成测试。构图辅助已由 `prism_camera` 数学结果接到 `prism_camera_ecs` 的 `PostUpdate` 帧输出，并通过 ECS 测试验证；编辑器将该帧输出转换为实际 gizmo 绘制的链路仍未由本 crate 验证。下方 §28 为可验证的相机侧能力定义，不代表所有跨 crate 消费者已接通。
+本节是 2026-10-22 的实现快照，不把声明式契约等同于完整产品接线：`cutscene` 的 PostStack 权重合成/事件消费，快门快照到渲染器 DoF 与运动模糊节点的绑定，视图批次到实际共享可见集消费，LOD 到实际分辨率资源分配，lookahead 到资产流送队列，composition gizmo 到 editor 绘制，以及 edge history 到时域 resolve/局部锐化，必须以对应消费者的集成测试为准。相机侧 LOD 已由 `prism_camera_ecs` 的 `view_lod` feature 接入真实 `PostUpdate` 发布路径，并通过 ECS 测试验证视图复用、关键视图保护和预算元数据输出；渲染侧据此分配实际分辨率资源的链路仍需对应集成测试。构图辅助已由 `prism_camera` 数学结果接到 `prism_camera_ecs` 的 `PostUpdate` 帧输出，并通过 ECS 测试验证；编辑器将该帧输出转换为实际 gizmo 绘制的链路仍未由本 crate 验证。快门运行时现在将运动模糊所需的帧内曝光比例作为 `[0, 1]` 的显式值发布，避免渲染适配器把角度或帧率重复换算；该值尚未跨越当前 Prism ECS 到 legacy Bevy RenderApp 的集成边界，不能据此宣称运动模糊/景深已由相机驱动。2026-10-22 验证：四个相机 crate 的 all-features 库测试通过（`prism_camera` 49、`prism_camera_ecs` 15、`prism_camera_gpu` 6、`prism_camera_rig` 15）；`PRISM_REQUIRE_GPU=1 cargo test -p prism_camera_gpu --test rhi_gpu --offline -- --nocapture` 在沙盒外真实设备通过 1 项，证明 RHI view-buffer 上传及 WGSL consumer/readback，不覆盖快门到渲染器的接线。下方 §28 为可验证的相机侧能力定义，不代表所有跨 crate 消费者已接通。
 
 `pkg/prism_camera` 已提供 `CameraIntent`、`CameraPose`、`Projection`、`ViewData`、`ViewHistory`、viewport、reversed-Z/无限远投影、oblique/SubView、5/6 面 frustum、Halton/Sobol jitter、Filmback/Lens/Exposure、PostStack、viewport/world picking、StereoPair/late-latch、相对渲染原点拆分、GPU View ABI、`ViewRegistry` 发布桥接和 fixed-tick `AdvancedRuntime`；advanced 契约提供 CameraTrack、自动对焦、快门、foveation、批量 key、LOD、构图、确定性 digest、ExternalPoseValidator、OcclusionFadeState、LookaheadPredictor 和 HistoryStabilizer。`pkg/prism_camera_rig` 已提供 `VirtualCamera`、`CameraBrain`、稳定优先级选择、位姿混合、Body/Aim、`SceneQuery`/`TargetQuery` 批量弹簧臂、半衰期阻尼、Fly/Orbit/Pan 控制器、确定性梯度噪声、ImpulseBuffer、输入归一化和 ViewUpdateScheduler；`pkg/prism_camera_ecs` 已提供实体组件、统一帧时钟、稳定句柄映射、诊断资源、SceneQuery/TargetQuery 注入、`PostUpdate` 发布系统，以及可选 `composition_aid` 构图输出和 `view_lod` 更新预算系统；`pkg/prism_camera_gpu` 已提供有界 ViewBufferRing、增量上传、清零、提交/取消/回收、stale token/schema 校验，以及通过 `RenderDevice`/`RenderQueue` 写入真实 RHI buffer 的 `RhiViewBuffer`/`RhiUploadBackend` 和可供 WGSL backend 验证的 ViewRecord consumer。
 
@@ -1275,7 +1275,7 @@ pub mod prelude {
 
 ### 28.4 可变光圈/快门与运动模糊一致性（`shutter`）
 
-快门角转换为曝光时间 `shutter_s = shutter_angle / (360 * fps)`；曝光模型、DoF 光圈和运动模糊速度使用同一个快门快照。fps 为零或时间步无效时使用固定 1/60 s 并记录 `InvalidFrameRate`，避免除零和跨帧漂移。
+快门角转换为曝光时间 `shutter_s = shutter_angle / (360 * fps)`；运动模糊消费的帧内速度比例为 `clamp(shutter_angle, 0, 360) / 360`（180° 对应 0.5），不再乘一次 fps，因为输入速度已经是每帧位移。`ShutterSnapshot::motion_blur_exposure_fraction()` 对手工构造的非有限值返回 0，并将有限值限制到 `[0, 1]`。曝光模型、DoF 光圈和运动模糊速度应来自同一个快门快照。fps 为零或非有限时曝光秒数回退固定 1/60 s 并记录 `InvalidFrameRate`，避免除零和跨帧漂移。此处实现和验证的是相机侧单位明确的快照；快照到渲染 pass 的跨 ECS 提取与逐视图参数消费仍需由集成路径和测试证明。
 
 ### 28.5 多视图共享剔除与几何复用（`view_batch`）
 

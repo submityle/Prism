@@ -163,6 +163,22 @@ fn only_annotated_fields_are_recorded() {
     assert!(registration.data::<TypeMetadata>().is_none());
 }
 
+#[derive(Reflect, Default)]
+struct SettingsOptIn {
+    #[reflect(setting)]
+    enabled: bool,
+    plain: bool,
+}
+
+#[test]
+fn setting_opt_in_is_explicit_metadata() {
+    let mut registry = TypeRegistry::new();
+    registry.register::<SettingsOptIn>();
+    let meta = metadata_for::<SettingsOptIn>(&registry);
+    assert!(meta.field("enabled").unwrap().is_setting());
+    assert!(meta.field("plain").is_none());
+}
+
 // A tuple struct carries type-level docs but no per-field metadata.
 #[derive(Reflect, Default)]
 #[reflect(docs = "A 2D screen offset.")]

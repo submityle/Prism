@@ -358,6 +358,10 @@ pub struct SettingDef {
     pub key: SettingKey,
     /// Owning namespace prefix, such as `render` or `plugin.example`.
     pub namespace: String,
+    /// Human-readable description inherited from schema documentation.
+    pub description: Option<String>,
+    /// Optional presentation category for inspectors and console tooling.
+    pub category: Option<String>,
     /// Default value.
     pub default: Value,
     /// Value variant required by the schema.
@@ -390,6 +394,8 @@ impl SettingDef {
         Self {
             key: key.clone(),
             namespace: namespace.into(),
+            description: None,
+            category: None,
             default,
             ty,
             constraints: Constraints::default(),

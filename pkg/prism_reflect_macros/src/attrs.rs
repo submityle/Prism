@@ -18,7 +18,9 @@
 //!   [`schema::validate`](prism_reflect::schema::validate) and
 //!   [`schema::clamp`](prism_reflect::schema::clamp).
 //! - `default = <lit>` — default-value attribute.
-//! - `readonly` / `hidden` / `required` — boolean flags (bare or `= bool`).
+//! - `readonly` / `hidden` / `required` / `setting` — boolean flags (bare or
+//!   `= bool`). `setting` explicitly opts a field into settings-schema
+//!   derivation; reflection alone does not make a field a setting.
 //! - `skip` — stored as custom `"skip"` (serde/inspector skip hint).
 //!
 //! Supported type-level `#[reflect(...)]` keys: `docs = "..."`, plus any other
@@ -61,6 +63,7 @@ struct FieldMeta {
     category: Option<String>,
     readonly: bool,
     hidden: bool,
+    setting: bool,
     required: bool,
     skip: bool,
     range: Option<(f64, f64)>,
@@ -76,6 +79,7 @@ impl FieldMeta {
             && self.category.is_none()
             && !self.readonly
             && !self.hidden
+            && !self.setting
             && !self.required
             && !self.skip
             && self.range.is_none()
@@ -101,6 +105,9 @@ impl FieldMeta {
         }
         if self.hidden {
             ts = quote! { #ts.hidden(true) };
+        }
+        if self.setting {
+            ts = quote! { #ts.setting(true) };
         }
         if self.required {
             ts = quote! { #ts.required(true) };
@@ -263,6 +270,8 @@ fn parse_field_reflect(attr: &syn::Attribute, fm: &mut FieldMeta) -> syn::Result
             fm.readonly = parse_flag(&meta)?;
         } else if path.is_ident("hidden") {
             fm.hidden = parse_flag(&meta)?;
+        } else if path.is_ident("setting") {
+            fm.setting = parse_flag(&meta)?;
         } else if path.is_ident("required") {
             fm.required = parse_flag(&meta)?;
         } else if path.is_ident("clamp") || path.is_ident("range") {

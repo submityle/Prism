@@ -252,6 +252,8 @@ pub mod plugin;
 pub mod plugin_graph;
 pub mod plugin_group;
 pub mod presentation;
+#[cfg(feature = "reflect")]
+pub mod reflect_settings;
 pub mod rollback;
 #[cfg(feature = "determinism")]
 pub mod rollback_replay;
@@ -396,6 +398,8 @@ pub mod prelude {
     pub use crate::plugin::{Plugin, PluginDependency};
     pub use crate::plugin_graph::PluginGraphError;
     pub use crate::plugin_group::{PluginGroup, PluginGroupBuilder};
+    #[cfg(feature = "reflect")]
+    pub use crate::reflect_settings::{derive_settings_registry, ReflectSettingsError};
     pub use crate::run_mode::RunMode;
     #[cfg(feature = "std")]
     pub use crate::runner::{DedicatedServerRunner, ServerTickDiagnostics};

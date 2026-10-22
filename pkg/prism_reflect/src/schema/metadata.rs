@@ -78,6 +78,7 @@ pub struct FieldMetadata {
     category: Option<String>,
     readonly: bool,
     hidden: bool,
+    setting: bool,
     required: bool,
     range: Option<(f64, f64)>,
     default: Option<AttributeValue>,
@@ -119,6 +120,13 @@ impl FieldMetadata {
     #[must_use]
     pub fn hidden(mut self, hidden: bool) -> Self {
         self.hidden = hidden;
+        self
+    }
+
+    /// Mark (or clear) the field as eligible for settings-schema derivation.
+    #[must_use]
+    pub fn setting(mut self, setting: bool) -> Self {
+        self.setting = setting;
         self
     }
 
@@ -183,6 +191,12 @@ impl FieldMetadata {
     #[must_use]
     pub fn is_hidden(&self) -> bool {
         self.hidden
+    }
+
+    /// Whether the field opts into settings-schema derivation.
+    #[must_use]
+    pub fn is_setting(&self) -> bool {
+        self.setting
     }
 
     /// Whether the field is required by schema validation.
