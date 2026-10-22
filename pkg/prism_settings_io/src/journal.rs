@@ -211,6 +211,8 @@ pub enum TxOutcome {
     Degraded,
     /// State was restored and reversible effects were compensated.
     RolledBack,
+    /// An irreversible effect crossed its barrier and a restart is required.
+    NeedsRestart,
     /// Recovery could not establish a safe outcome.
     RecoveryRequired,
     /// A preview is awaiting confirmation.
@@ -223,6 +225,7 @@ impl TxOutcome {
             Self::Committed => "committed",
             Self::Degraded => "degraded",
             Self::RolledBack => "rolled_back",
+            Self::NeedsRestart => "needs_restart",
             Self::RecoveryRequired => "recovery_required",
             Self::PendingConfirmation => "pending_confirmation",
         }
@@ -233,6 +236,7 @@ impl TxOutcome {
             "committed" => Ok(Self::Committed),
             "degraded" => Ok(Self::Degraded),
             "rolled_back" => Ok(Self::RolledBack),
+            "needs_restart" => Ok(Self::NeedsRestart),
             "recovery_required" => Ok(Self::RecoveryRequired),
             "pending_confirmation" => Ok(Self::PendingConfirmation),
             other => Err(JournalError::InvalidField {
@@ -256,6 +260,11 @@ pub enum TxRecoveryDecision {
     RecoveryRequired,
     /// The transaction has a durable terminal event.
     Completed,
+    /// Persistence and every operation completed, but the final marker was
+    /// not written before the process stopped.
+    Commit,
+    /// A preview is durably installed and awaits confirmation or rollback.
+    PendingConfirmation,
 }
 
 /// A decoded, checksum-verified journal event.
@@ -526,6 +535,19 @@ pub struct JournalRecovery {
     pub valid_bytes: u64,
 }
 
+/// Read-only result of validating a journal without repairing its tail.
+#[derive(Clone, Debug, PartialEq)]
+pub struct JournalInspection {
+    /// Checksum-verified, sequence-contiguous record prefix.
+    pub records: Vec<JournalRecord>,
+    /// Whether the file contains an incomplete, malformed, or invalid tail.
+    pub invalid_tail: bool,
+    /// Byte offset at which the valid prefix ends.
+    pub valid_bytes: u64,
+    /// Total file size observed during inspection.
+    pub file_bytes: u64,
+}
+
 /// Errors raised by journal I/O, encoding, or recovery validation.
 #[derive(Debug)]
 pub enum JournalError {
@@ -594,6 +616,7 @@ pub struct Journal {
     tx_id: String,
     next_seq: u64,
     started: Instant,
+    poisoned: bool,
 }
 
 impl Journal {
@@ -634,6 +657,7 @@ impl Journal {
             tx_id,
             next_seq,
             started: Instant::now(),
+            poisoned: false,
         })
     }
 
@@ -644,6 +668,25 @@ impl Journal {
 
     /// Appends an event, flushes it, and fsyncs the journal before returning.
     pub fn append(&mut self, event: JournalEvent) -> Result<JournalRecord, JournalError> {
+        if self.poisoned {
+            return Err(JournalError::InvalidField {
+                field: "journal".to_owned(),
+                reason: "writer is poisoned after an uncertain append; reopen and recover"
+                    .to_owned(),
+            });
+        }
+        let current_len = self
+            .file
+            .metadata()
+            .map_err(|source| io_error(&self.path, source))?
+            .len();
+        if current_len > 16 * 1024 * 1024 {
+            self.poisoned = true;
+            return Err(JournalError::InvalidField {
+                field: "journal".to_owned(),
+                reason: "journal size limit exceeded; compaction is required".to_owned(),
+            });
+        }
         let record = JournalRecord {
             tx_id: self.tx_id.clone(),
             seq: self.next_seq,
@@ -651,15 +694,15 @@ impl Journal {
             event,
         };
         let line = encode_record(&record)?;
-        self.file
+        if let Err(source) = self
+            .file
             .write_all(line.as_bytes())
-            .map_err(|source| io_error(&self.path, source))?;
-        self.file
-            .flush()
-            .map_err(|source| io_error(&self.path, source))?;
-        self.file
-            .sync_all()
-            .map_err(|source| io_error(&self.path, source))?;
+            .and_then(|()| self.file.flush())
+            .and_then(|()| self.file.sync_all())
+        {
+            self.poisoned = true;
+            return Err(io_error(&self.path, source));
+        }
         self.next_seq = self.next_seq.saturating_add(1);
         Ok(record)
     }
@@ -727,6 +770,68 @@ pub fn recover_journal(path: impl AsRef<Path>) -> Result<JournalRecovery, Journa
     })
 }
 
+/// Reads and validates a journal without changing the file.
+///
+/// Unlike [`recover_journal`], this function never truncates an invalid tail.
+/// The same 16 MiB bound enforced by the writer is applied before allocating
+/// the input buffer, so inspection cannot be used to request an unbounded read.
+pub fn inspect_journal(path: impl AsRef<Path>) -> Result<JournalInspection, JournalError> {
+    const MAX_JOURNAL_BYTES: u64 = 16 * 1024 * 1024;
+    let path = path.as_ref();
+    let mut file = match fs::OpenOptions::new().read(true).open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(JournalInspection {
+                records: Vec::new(),
+                invalid_tail: false,
+                valid_bytes: 0,
+                file_bytes: 0,
+            });
+        }
+        Err(source) => return Err(io_error(path, source)),
+    };
+    let file_bytes = file
+        .metadata()
+        .map_err(|source| io_error(path, source))?
+        .len();
+    if file_bytes > MAX_JOURNAL_BYTES {
+        return Err(JournalError::InvalidField {
+            field: "journal".to_owned(),
+            reason: format!("size {file_bytes} exceeds inspection limit {MAX_JOURNAL_BYTES}"),
+        });
+    }
+    let mut bytes = Vec::with_capacity(file_bytes as usize);
+    file.read_to_end(&mut bytes)
+        .map_err(|source| io_error(path, source))?;
+    let mut records = Vec::new();
+    let mut valid_bytes = 0usize;
+    let mut expected_seq = 0u64;
+    let mut invalid_tail = false;
+    for segment in bytes.split_inclusive(|byte| *byte == b'\n') {
+        if !segment.ends_with(b"\n") || segment.len() == 1 {
+            invalid_tail = true;
+            break;
+        }
+        match decode_record(&segment[..segment.len() - 1]) {
+            Ok(record) if record.seq == expected_seq => {
+                expected_seq = expected_seq.saturating_add(1);
+                records.push(record);
+                valid_bytes += segment.len();
+            }
+            _ => {
+                invalid_tail = true;
+                break;
+            }
+        }
+    }
+    Ok(JournalInspection {
+        records,
+        invalid_tail,
+        valid_bytes: valid_bytes as u64,
+        file_bytes,
+    })
+}
+
 /// Reconstructs transaction and operation state from a verified journal prefix.
 pub fn reconstruct_transaction(records: &[JournalRecord]) -> Result<JournalTx, JournalError> {
     let first = records.first().ok_or_else(|| JournalError::InvalidField {
@@ -738,11 +843,13 @@ pub fn reconstruct_transaction(records: &[JournalRecord]) -> Result<JournalTx, J
         begin: None,
         snapshot_committed: false,
         persisted: false,
+        persistence_in_flight: false,
         ended: None,
         irreversible_barrier: None,
         operations: BTreeMap::new(),
     };
     let mut expected_seq = first.seq;
+    let mut persistence_begin = None;
     for record in records {
         if record.tx_id != tx.tx_id {
             return Err(JournalError::InvalidField {
@@ -758,33 +865,117 @@ pub fn reconstruct_transaction(records: &[JournalRecord]) -> Result<JournalTx, J
         }
         expected_seq = expected_seq.saturating_add(1);
         match &record.event {
-            JournalEvent::TxBegin { .. } => tx.begin = Some(record.event.clone()),
-            JournalEvent::SnapshotCommitted { .. } => tx.snapshot_committed = true,
-            JournalEvent::PersistEnd { .. } => tx.persisted = true,
+            JournalEvent::TxBegin { .. } => {
+                if tx.begin.is_some() {
+                    return Err(JournalError::InvalidField {
+                        field: "event".to_owned(),
+                        reason: "duplicate TxBegin".to_owned(),
+                    });
+                }
+                if record.seq != first.seq {
+                    return Err(JournalError::InvalidField {
+                        field: "event".to_owned(),
+                        reason: "TxBegin must be the first journal event".to_owned(),
+                    });
+                }
+                tx.begin = Some(record.event.clone());
+            }
+            JournalEvent::SnapshotCommitted { .. } => {
+                if tx.begin.is_none() {
+                    return Err(JournalError::InvalidField {
+                        field: "event".to_owned(),
+                        reason: "SnapshotCommitted precedes TxBegin".to_owned(),
+                    });
+                }
+                if tx.snapshot_committed {
+                    return Err(JournalError::InvalidField {
+                        field: "event".to_owned(),
+                        reason: "duplicate SnapshotCommitted".to_owned(),
+                    });
+                }
+                tx.snapshot_committed = true;
+            }
+            JournalEvent::PersistBegin {
+                generation,
+                manifest_hash,
+            } => {
+                if tx.begin.is_none() {
+                    return Err(JournalError::InvalidField {
+                        field: "event".to_owned(),
+                        reason: "PersistBegin precedes TxBegin".to_owned(),
+                    });
+                }
+                if persistence_begin.is_some() {
+                    return Err(JournalError::InvalidField {
+                        field: "persistence".to_owned(),
+                        reason: "overlapping PersistBegin".to_owned(),
+                    });
+                }
+                persistence_begin = Some((*generation, *manifest_hash));
+                tx.persistence_in_flight = true;
+            }
+            JournalEvent::PersistEnd {
+                generation,
+                manifest_hash,
+            } => {
+                let Some(expected) = persistence_begin.take() else {
+                    return Err(JournalError::InvalidField {
+                        field: "event".to_owned(),
+                        reason: "PersistEnd has no matching PersistBegin".to_owned(),
+                    });
+                };
+                if expected != (*generation, *manifest_hash) {
+                    return Err(JournalError::InvalidField {
+                        field: "persistence".to_owned(),
+                        reason: "PersistEnd does not match PersistBegin".to_owned(),
+                    });
+                }
+                tx.persisted = true;
+                tx.persistence_in_flight = false;
+            }
             JournalEvent::OpBegin { op } => {
-                tx.operations.insert(
-                    op.index,
-                    JournalOpState {
-                        op: op.clone(),
-                        state: ApplyOpState::Unknown,
-                        compensation: if op.reversibility == Reversibility::Reversible
-                            || op.reversibility == Reversibility::Compensable
-                        {
-                            CompensationState::NotStarted
-                        } else {
-                            CompensationState::NotNeeded
+                validate_operation_index(tx.begin.as_ref(), op.index)?;
+                if let Some(existing) = tx.operations.get_mut(&op.index) {
+                    if existing.op.id != op.id
+                        || existing.op.group != op.group
+                        || existing.op.key != op.key
+                        || existing.op.input_digest != op.input_digest
+                    {
+                        return Err(JournalError::InvalidField {
+                            field: "op".to_owned(),
+                            reason: format!("operation {} changed between attempts", op.index),
+                        });
+                    }
+                    existing.op.effect_handle = op.effect_handle.clone();
+                    existing.state = ApplyOpState::Unknown;
+                    existing.attempts = existing.attempts.saturating_add(1);
+                    existing.last_error = None;
+                } else {
+                    tx.operations.insert(
+                        op.index,
+                        JournalOpState {
+                            op: op.clone(),
+                            state: ApplyOpState::Unknown,
+                            compensation: if op.reversibility == Reversibility::Reversible
+                                || op.reversibility == Reversibility::Compensable
+                            {
+                                CompensationState::NotStarted
+                            } else {
+                                CompensationState::NotNeeded
+                            },
+                            attempts: 1,
+                            compensation_attempts: 0,
+                            last_error: None,
                         },
-                        attempts: 1,
-                        compensation_attempts: 0,
-                        last_error: None,
-                    },
-                );
+                    );
+                }
             }
             JournalEvent::OpApplied {
                 op_index,
                 effect_handle,
                 ..
             } => {
+                validate_operation_index(tx.begin.as_ref(), *op_index)?;
                 let state = tx.operation_mut(*op_index)?;
                 state.state = ApplyOpState::Applied;
                 state.op.effect_handle = effect_handle.clone();
@@ -794,6 +985,7 @@ pub fn reconstruct_transaction(records: &[JournalRecord]) -> Result<JournalTx, J
                 error,
                 effect_handle,
             } => {
+                validate_operation_index(tx.begin.as_ref(), *op_index)?;
                 let state = tx.operation_mut(*op_index)?;
                 state.state = ApplyOpState::Failed;
                 state.last_error = Some(error.clone());
@@ -802,27 +994,62 @@ pub fn reconstruct_transaction(records: &[JournalRecord]) -> Result<JournalTx, J
                 }
             }
             JournalEvent::IrreversibleBarrier { op_index } => {
+                validate_operation_index(tx.begin.as_ref(), *op_index)?;
                 tx.irreversible_barrier = Some(*op_index);
             }
             JournalEvent::CompensateBegin { op_index, .. } => {
+                validate_operation_index(tx.begin.as_ref(), *op_index)?;
                 let state = tx.operation_mut(*op_index)?;
                 state.compensation = CompensationState::Unknown;
                 state.compensation_attempts = state.compensation_attempts.saturating_add(1);
             }
-            JournalEvent::Compensated { op_index, .. } => {
+            JournalEvent::Compensated { op_index, verified } => {
+                validate_operation_index(tx.begin.as_ref(), *op_index)?;
                 let state = tx.operation_mut(*op_index)?;
-                state.compensation = CompensationState::Done;
+                state.compensation = if *verified {
+                    CompensationState::Done
+                } else {
+                    CompensationState::Unknown
+                };
             }
             JournalEvent::CompensateFailed { op_index, error } => {
+                validate_operation_index(tx.begin.as_ref(), *op_index)?;
                 let state = tx.operation_mut(*op_index)?;
                 state.compensation = CompensationState::Failed;
                 state.last_error = Some(error.clone());
             }
-            JournalEvent::TxEnd { outcome } => tx.ended = Some(*outcome),
-            JournalEvent::PersistBegin { .. } => {}
+            JournalEvent::TxEnd { outcome } => {
+                if tx.ended.is_some_and(|previous| {
+                    previous != TxOutcome::PendingConfirmation
+                        && !(previous == TxOutcome::RolledBack
+                            && *outcome == TxOutcome::RecoveryRequired)
+                }) {
+                    return Err(JournalError::InvalidField {
+                        field: "outcome".to_owned(),
+                        reason: "transaction already has a terminal outcome".to_owned(),
+                    });
+                }
+                tx.ended = Some(*outcome);
+            }
         }
     }
     Ok(tx)
+}
+
+fn validate_operation_index(begin: Option<&JournalEvent>, index: u16) -> Result<(), JournalError> {
+    let Some(JournalEvent::TxBegin { op_count, .. }) = begin else {
+        return Err(JournalError::InvalidField {
+            field: "event".to_owned(),
+            reason: "operation event precedes TxBegin".to_owned(),
+        });
+    };
+    if index >= *op_count {
+        return Err(JournalError::InvalidField {
+            field: "op_index".to_owned(),
+            reason: format!("operation {index} is outside declared range 0..{op_count}"),
+        });
+    }
+    Ok(())
 }
 
 /// Reconstructed transaction state used by recovery and doctor tooling.
@@ -836,6 +1063,8 @@ pub struct JournalTx {
     pub snapshot_committed: bool,
     /// Whether persistence completed.
     pub persisted: bool,
+    /// Whether a persistence operation started without a durable completion.
+    pub persistence_in_flight: bool,
     /// Terminal outcome, if present.
     pub ended: Option<TxOutcome>,
     /// Last irreversible barrier, if any.
@@ -847,11 +1076,17 @@ pub struct JournalTx {
 impl JournalTx {
     /// Returns the recovery decision implied by the durable prefix.
     pub fn recovery_decision(&self) -> TxRecoveryDecision {
+        if self.ended == Some(TxOutcome::PendingConfirmation) {
+            return TxRecoveryDecision::PendingConfirmation;
+        }
         if self.ended.is_some() {
             return TxRecoveryDecision::Completed;
         }
         if self.begin.is_none() || !self.snapshot_committed {
             return TxRecoveryDecision::Discard;
+        }
+        if self.persistence_in_flight {
+            return TxRecoveryDecision::RecoveryRequired;
         }
         if let Some(barrier) = self.irreversible_barrier
             && self
@@ -869,6 +1104,9 @@ impl JournalTx {
                 TxRecoveryDecision::RecoveryRequired
             };
         }
+        if self.persisted && self.all_operations_applied() {
+            return TxRecoveryDecision::Commit;
+        }
         if self.operations.values().any(|operation| {
             operation.state == ApplyOpState::Unknown
                 || operation.compensation == CompensationState::Unknown
@@ -877,6 +1115,19 @@ impl JournalTx {
             return TxRecoveryDecision::RecoveryRequired;
         }
         TxRecoveryDecision::Rollback
+    }
+
+    /// Returns whether the declared operation set completed successfully.
+    #[must_use]
+    pub fn all_operations_applied(&self) -> bool {
+        let Some(JournalEvent::TxBegin { op_count, .. }) = self.begin.as_ref() else {
+            return false;
+        };
+        self.operations.len() == usize::from(*op_count)
+            && self
+                .operations
+                .values()
+                .all(|operation| operation.state == ApplyOpState::Applied)
     }
 
     fn operation_mut(&mut self, index: u16) -> Result<&mut JournalOpState, JournalError> {
@@ -1184,6 +1435,64 @@ mod tests {
     }
 
     #[test]
+    fn checksum_corruption_discards_only_the_corrupt_tail_record() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("apply.journal");
+        let mut journal = Journal::open(&path, "tx-checksum").unwrap();
+        for index in 0..2 {
+            journal
+                .append(JournalEvent::OpBegin {
+                    op: op(index, Reversibility::Reversible, true),
+                })
+                .unwrap();
+        }
+        let mut bytes = std::fs::read(&path).unwrap();
+        let last = bytes
+            .iter()
+            .rposition(|byte| *byte == b'"')
+            .expect("checksum line has a quoted field");
+        bytes[last.saturating_sub(1)] ^= 1;
+        std::fs::write(&path, bytes).unwrap();
+        let recovery = recover_journal(&path).unwrap();
+        assert!(recovery.truncated_tail);
+        assert_eq!(recovery.records.len(), 1);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            recovery.valid_bytes
+        );
+    }
+
+    #[test]
+    fn inspection_reports_corrupt_tail_without_mutating_the_journal() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("inspect.journal");
+        let mut journal = Journal::open(&path, "tx-inspect").unwrap();
+        journal
+            .append(JournalEvent::TxBegin {
+                mode: TxMode::Direct,
+                hash_before: 1,
+                hash_after: 2,
+                plan_digest: 3,
+                op_count: 0,
+                snapshot_gen: 4,
+                last_confirmed: None,
+            })
+            .unwrap();
+        drop(journal);
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes.extend_from_slice(b"{truncated");
+        std::fs::write(&path, &bytes).unwrap();
+
+        let inspection = inspect_journal(&path).unwrap();
+
+        assert_eq!(inspection.records.len(), 1);
+        assert!(inspection.invalid_tail);
+        assert_eq!(inspection.file_bytes, bytes.len() as u64);
+        assert!(inspection.valid_bytes < inspection.file_bytes);
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    }
+
+    #[test]
     fn in_flight_apply_and_compensation_are_unknown() {
         let directory = tempdir().unwrap();
         let path = directory.path().join("apply.journal");
@@ -1232,6 +1541,69 @@ mod tests {
     }
 
     #[test]
+    fn reconstruction_rejects_duplicate_or_mismatched_persistence_markers() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("apply.journal");
+        let mut journal = Journal::open(&path, "tx-invalid-persist").unwrap();
+        for event in [
+            JournalEvent::TxBegin {
+                mode: TxMode::Direct,
+                hash_before: 1,
+                hash_after: 2,
+                plan_digest: 3,
+                op_count: 0,
+                snapshot_gen: 4,
+                last_confirmed: None,
+            },
+            JournalEvent::SnapshotCommitted { snapshot_gen: 5 },
+            JournalEvent::PersistBegin {
+                generation: 6,
+                manifest_hash: 7,
+            },
+            JournalEvent::PersistEnd {
+                generation: 6,
+                manifest_hash: 8,
+            },
+        ] {
+            journal.append(event).unwrap();
+        }
+        assert!(reconstruct_transaction(&recover_journal(&path).unwrap().records).is_err());
+
+        journal
+            .append(JournalEvent::PersistEnd {
+                generation: 6,
+                manifest_hash: 7,
+            })
+            .unwrap();
+        assert!(reconstruct_transaction(&recover_journal(&path).unwrap().records).is_err());
+    }
+
+    #[test]
+    fn reconstruction_rejects_out_of_range_operation_events() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("apply.journal");
+        let mut journal = Journal::open(&path, "tx-invalid-op").unwrap();
+        for event in [
+            JournalEvent::TxBegin {
+                mode: TxMode::Direct,
+                hash_before: 1,
+                hash_after: 2,
+                plan_digest: 3,
+                op_count: 1,
+                snapshot_gen: 4,
+                last_confirmed: None,
+            },
+            JournalEvent::SnapshotCommitted { snapshot_gen: 5 },
+            JournalEvent::OpBegin {
+                op: op(1, Reversibility::Reversible, true),
+            },
+        ] {
+            journal.append(event).unwrap();
+        }
+        assert!(reconstruct_transaction(&recover_journal(&path).unwrap().records).is_err());
+    }
+
+    #[test]
     fn irreversible_barrier_requires_restart_after_applied_op() {
         let directory = tempdir().unwrap();
         let path = directory.path().join("apply.journal");
@@ -1262,6 +1634,94 @@ mod tests {
         let recovery = recover_journal(&path).unwrap();
         let tx = reconstruct_transaction(&recovery.records).unwrap();
         assert_eq!(tx.recovery_decision(), TxRecoveryDecision::NeedsRestart);
+    }
+
+    #[test]
+    fn incomplete_persistence_is_recovery_required() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("apply.journal");
+        let mut journal = Journal::open(&path, "tx-persist-in-flight").unwrap();
+        journal
+            .append(JournalEvent::TxBegin {
+                mode: TxMode::Direct,
+                hash_before: 1,
+                hash_after: 2,
+                plan_digest: 3,
+                op_count: 0,
+                snapshot_gen: 4,
+                last_confirmed: None,
+            })
+            .unwrap();
+        journal
+            .append(JournalEvent::SnapshotCommitted { snapshot_gen: 5 })
+            .unwrap();
+        journal
+            .append(JournalEvent::PersistBegin {
+                generation: 5,
+                manifest_hash: 6,
+            })
+            .unwrap();
+        let tx = reconstruct_transaction(&recover_journal(&path).unwrap().records).unwrap();
+        assert!(tx.persistence_in_flight);
+        assert_eq!(tx.recovery_decision(), TxRecoveryDecision::RecoveryRequired);
+    }
+
+    #[test]
+    fn reconstruction_allows_direct_failure_before_all_planned_operations_begin() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("partial.journal");
+        let mut journal = Journal::open(&path, "tx-partial").unwrap();
+        journal
+            .append(JournalEvent::TxBegin {
+                mode: TxMode::Direct,
+                hash_before: 1,
+                hash_after: 2,
+                plan_digest: 3,
+                op_count: 2,
+                snapshot_gen: 4,
+                last_confirmed: None,
+            })
+            .unwrap();
+        journal
+            .append(JournalEvent::SnapshotCommitted { snapshot_gen: 5 })
+            .unwrap();
+        journal
+            .append(JournalEvent::PersistBegin {
+                generation: 6,
+                manifest_hash: 7,
+            })
+            .unwrap();
+        journal
+            .append(JournalEvent::PersistEnd {
+                generation: 6,
+                manifest_hash: 7,
+            })
+            .unwrap();
+        journal
+            .append(JournalEvent::OpBegin {
+                op: op(0, Reversibility::Reversible, true),
+            })
+            .unwrap();
+        journal
+            .append(JournalEvent::OpApplied {
+                op_index: 0,
+                effect_handle: None,
+                result_digest: 0,
+            })
+            .unwrap();
+        journal
+            .append(JournalEvent::OpBegin {
+                op: op(1, Reversibility::Reversible, true),
+            })
+            .unwrap();
+        journal
+            .append(JournalEvent::OpFailed {
+                op_index: 1,
+                error: "expected".into(),
+                effect_handle: None,
+            })
+            .unwrap();
+        assert!(reconstruct_transaction(&recover_journal(&path).unwrap().records).is_ok());
     }
 
     #[test]

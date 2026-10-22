@@ -1,8 +1,8 @@
 //! Operation-level transaction execution over the durable settings journal.
 
 use crate::{
-    reconstruct_transaction, recover_journal, ApplyOp, Journal, JournalError, JournalEvent,
-    Reversibility, TxMode, TxOutcome,
+    reconstruct_transaction, recover_journal, ApplyOp, ApplyOpState, Journal, JournalError,
+    JournalEvent, Reversibility, TxMode, TxOutcome,
 };
 use std::{error::Error, fmt};
 
@@ -148,6 +148,16 @@ pub trait SettingsApplier {
     fn compensate(&mut self, op: &ApplyOp) -> CompensateOutcome;
 }
 
+/// Restores the settings state represented by a durable generation.
+///
+/// The journal intentionally contains hashes and generation identities rather
+/// than setting values. A host supplies the durable snapshot lookup at this
+/// boundary during process-start recovery.
+pub trait SnapshotRecovery {
+    /// Restores the requested generation and verifies its hash.
+    fn restore(&mut self, generation: u64, hash: u64) -> Result<(), String>;
+}
+
 /// Errors raised while executing a journaled transaction.
 #[derive(Debug)]
 pub enum TransactionError {
@@ -200,8 +210,12 @@ pub enum TransactionRunOutcome {
     Degraded,
     /// Reversible effects were compensated.
     RolledBack,
+    /// An irreversible effect crossed its barrier and requires a restart.
+    NeedsRestart,
     /// Compensation or journal state is ambiguous.
     RecoveryRequired,
+    /// A reversible preview is installed and awaits confirmation.
+    PendingConfirmation,
 }
 
 /// Executes a validated plan and records every operation boundary.
@@ -210,9 +224,59 @@ pub fn run_transaction(
     plan: &ApplyPlan,
     appliers: &mut [&mut dyn SettingsApplier],
 ) -> Result<TransactionRunOutcome, TransactionError> {
-    validate_transaction(journal, plan)?;
-    let mut applied = Vec::new();
-    let mut degraded = false;
+    validate_transaction(journal, plan, TxMode::Direct)?;
+    let outcome = execute_operations(journal, plan, appliers)?;
+    if reconstruct_transaction(&recover_journal(journal.path())?.records)?
+        .ended
+        .is_some()
+    {
+        return Ok(outcome);
+    }
+    finish(journal, outcome)
+}
+
+/// Executes a reversible preview and leaves a durable pending-confirmation
+/// marker when every operation succeeds.
+pub fn run_preview_transaction(
+    journal: &mut Journal,
+    plan: &ApplyPlan,
+    appliers: &mut [&mut dyn SettingsApplier],
+) -> Result<TransactionRunOutcome, TransactionError> {
+    validate_transaction(journal, plan, TxMode::Preview)?;
+    let outcome = execute_operations(journal, plan, appliers)?;
+    if outcome == TransactionRunOutcome::Committed {
+        journal.append(JournalEvent::TxEnd {
+            outcome: TxOutcome::PendingConfirmation,
+        })?;
+        Ok(TransactionRunOutcome::PendingConfirmation)
+    } else if reconstruct_transaction(&recover_journal(journal.path())?.records)?
+        .ended
+        .is_some()
+    {
+        Ok(outcome)
+    } else {
+        finish(journal, outcome)
+    }
+}
+
+struct ExecutionState {
+    applied: Vec<ApplyOp>,
+    degraded: bool,
+    needs_restart: bool,
+}
+
+fn execute_operations(
+    journal: &mut Journal,
+    plan: &ApplyPlan,
+    appliers: &mut [&mut dyn SettingsApplier],
+) -> Result<TransactionRunOutcome, TransactionError> {
+    let mut state = ExecutionState {
+        applied: Vec::new(),
+        degraded: false,
+        needs_restart: false,
+    };
+    let durable = reconstruct_transaction(&recover_journal(journal.path())?.records)
+        .map_err(|error| TransactionError::InvalidTransaction(error.to_string()))?;
     for op in &plan.ops {
         let Some(applier) = appliers
             .iter_mut()
@@ -220,12 +284,66 @@ pub fn run_transaction(
         else {
             return Err(TransactionError::MissingApplier(op.group.clone()));
         };
+
+        if let Some(existing) = durable.operations.get(&op.index) {
+            if !same_operation_metadata(&existing.op, op) {
+                return Err(TransactionError::InvalidTransaction(format!(
+                    "journal operation {} does not match the supplied plan",
+                    op.index
+                )));
+            }
+            match existing.state {
+                ApplyOpState::Applied => {
+                    let mut applied = op.clone();
+                    applied.effect_handle = existing.op.effect_handle.clone();
+                    state.applied.push(applied);
+                    if matches!(op.reversibility, Reversibility::External) {
+                        state.degraded = true;
+                    }
+                    if op.reversibility == Reversibility::Irreversible {
+                        state.needs_restart = true;
+                    }
+                    continue;
+                }
+                ApplyOpState::Unknown => match applier.probe(op) {
+                    crate::EffectState::Applied => {
+                        journal.append(JournalEvent::OpApplied {
+                            op_index: op.index,
+                            effect_handle: existing.op.effect_handle.clone(),
+                            result_digest: 0,
+                        })?;
+                        let mut applied = op.clone();
+                        applied.effect_handle = existing.op.effect_handle.clone();
+                        state.applied.push(applied);
+                        if !op.idempotent {
+                            state.degraded = true;
+                        }
+                        continue;
+                    }
+                    crate::EffectState::NotApplied if op.idempotent => {
+                        // A durable OpBegin without an effect can be retried
+                        // only when the operation explicitly promises idempotence.
+                    }
+                    crate::EffectState::NotApplied => {
+                        return finish(journal, TransactionRunOutcome::RecoveryRequired);
+                    }
+                    crate::EffectState::Unknown => {
+                        return finish(journal, TransactionRunOutcome::RecoveryRequired);
+                    }
+                },
+                ApplyOpState::Failed if !op.idempotent => {
+                    return finish(journal, TransactionRunOutcome::RecoveryRequired);
+                }
+                ApplyOpState::Failed => {}
+                ApplyOpState::Pending => {}
+            }
+        }
+
         if op.reversibility == Reversibility::Irreversible {
             journal.append(JournalEvent::IrreversibleBarrier { op_index: op.index })?;
         }
         journal.append(JournalEvent::OpBegin { op: op.clone() })?;
-        let outcome = applier.apply_op(op);
-        match outcome {
+        match applier.apply_op(op) {
             OpOutcome::Applied {
                 effect_handle,
                 result_digest,
@@ -237,13 +355,14 @@ pub fn run_transaction(
                 }) {
                     return uncertain_after_effect(journal, error);
                 }
-                let mut applied_op = op.clone();
-                applied_op.effect_handle = effect_handle;
-                applied.push(applied_op);
-                if op.reversibility == Reversibility::Irreversible
-                    || op.reversibility == Reversibility::External
-                {
-                    degraded = true;
+                let mut applied = op.clone();
+                applied.effect_handle = effect_handle;
+                state.applied.push(applied);
+                if matches!(op.reversibility, Reversibility::External) {
+                    state.degraded = true;
+                }
+                if op.reversibility == Reversibility::Irreversible {
+                    state.needs_restart = true;
                 }
             }
             OpOutcome::Failed {
@@ -263,54 +382,59 @@ pub fn run_transaction(
                 {
                     let mut partial = op.clone();
                     partial.effect_handle = effect_handle;
-                    applied.push(partial);
+                    state.applied.push(partial);
                 }
-                // Once an irreversible operation is invoked, the transaction is
-                // forward-only even when the operation reports failure. External
-                // effects are outside our rollback authority as well.
                 if op.reversibility == Reversibility::Irreversible {
-                    return finish(journal, TransactionRunOutcome::Degraded);
+                    return Ok(TransactionRunOutcome::Degraded);
                 }
                 if op.reversibility == Reversibility::External {
-                    return finish(journal, TransactionRunOutcome::RecoveryRequired);
+                    return Ok(TransactionRunOutcome::RecoveryRequired);
                 }
-                if applied.iter().any(|applied| {
-                    applied.reversibility == Reversibility::Irreversible
-                        || applied.reversibility == Reversibility::External
+                if state.applied.iter().any(|applied| {
+                    matches!(
+                        applied.reversibility,
+                        Reversibility::Irreversible | Reversibility::External
+                    )
                 }) {
-                    return finish(journal, TransactionRunOutcome::Degraded);
+                    return Ok(TransactionRunOutcome::Degraded);
                 }
-                return compensate_applied(journal, appliers, applied);
+                return compensate_applied(journal, appliers, state.applied);
             }
-            OpOutcome::Deferred => {
+            OpOutcome::Deferred | OpOutcome::AlreadyAttempted => {
                 journal.append(JournalEvent::OpFailed {
                     op_index: op.index,
-                    error: "deferred operation is not supported by direct apply".to_owned(),
+                    error: "operation did not produce a direct effect".to_owned(),
                     effect_handle: None,
                 })?;
-                return Err(TransactionError::OperationNotApplied(op.index));
-            }
-            OpOutcome::AlreadyAttempted => {
-                journal.append(JournalEvent::OpFailed {
-                    op_index: op.index,
-                    error: "operation was already attempted".to_owned(),
-                    effect_handle: None,
-                })?;
-                return Err(TransactionError::OperationNotApplied(op.index));
+                return Ok(TransactionRunOutcome::RecoveryRequired);
             }
         }
     }
-    finish(
-        journal,
-        if degraded {
-            TransactionRunOutcome::Degraded
-        } else {
-            TransactionRunOutcome::Committed
-        },
-    )
+    Ok(if state.needs_restart {
+        TransactionRunOutcome::NeedsRestart
+    } else if state.degraded {
+        TransactionRunOutcome::Degraded
+    } else {
+        TransactionRunOutcome::Committed
+    })
 }
 
-fn validate_transaction(journal: &Journal, plan: &ApplyPlan) -> Result<(), TransactionError> {
+fn same_operation_metadata(left: &ApplyOp, right: &ApplyOp) -> bool {
+    left.index == right.index
+        && left.id == right.id
+        && left.group == right.group
+        && left.key == right.key
+        && left.action == right.action
+        && left.reversibility == right.reversibility
+        && left.idempotent == right.idempotent
+        && left.input_digest == right.input_digest
+}
+
+fn validate_transaction(
+    journal: &Journal,
+    plan: &ApplyPlan,
+    expected_mode: TxMode,
+) -> Result<(), TransactionError> {
     let records = recover_journal(journal.path())?.records;
     let tx = reconstruct_transaction(&records)
         .map_err(|error| TransactionError::InvalidTransaction(error.to_string()))?;
@@ -319,14 +443,32 @@ fn validate_transaction(journal: &Journal, plan: &ApplyPlan) -> Result<(), Trans
             "durable TxBegin is missing".to_owned(),
         ));
     };
-    if tx.ended.is_some() {
+    if tx
+        .ended
+        .is_some_and(|outcome| outcome != TxOutcome::PendingConfirmation)
+    {
         return Err(TransactionError::InvalidTransaction(
             "transaction already has a terminal outcome".to_owned(),
+        ));
+    }
+    if mode != expected_mode {
+        return Err(TransactionError::InvalidTransaction(
+            "transaction mode does not match the requested executor".to_owned(),
         ));
     }
     if !tx.snapshot_committed {
         return Err(TransactionError::InvalidTransaction(
             "snapshot has not been durably committed".to_owned(),
+        ));
+    }
+    if mode == TxMode::Direct && !tx.persisted {
+        return Err(TransactionError::InvalidTransaction(
+            "direct operations require a matching durable PersistEnd".to_owned(),
+        ));
+    }
+    if mode == TxMode::Direct && !tx.operations.is_empty() {
+        return Err(TransactionError::InvalidTransaction(
+            "direct operation recovery must use the journal recovery executor".to_owned(),
         ));
     }
     if usize::from(op_count) != plan.ops.len() {
@@ -406,6 +548,220 @@ fn compensate_applied(
     finish(journal, TransactionRunOutcome::RolledBack)
 }
 
+/// Rolls back an open transaction, including a preview waiting for confirmation.
+pub fn rollback_open_transaction(
+    journal: &mut Journal,
+    appliers: &mut [&mut dyn SettingsApplier],
+    snapshots: &mut dyn SnapshotRecovery,
+) -> Result<TransactionRunOutcome, TransactionError> {
+    let records = recover_journal(journal.path())?.records;
+    let tx = reconstruct_transaction(&records)
+        .map_err(|error| TransactionError::InvalidTransaction(error.to_string()))?;
+    if tx.ended == Some(TxOutcome::Committed)
+        || tx.ended == Some(TxOutcome::RolledBack)
+        || tx.ended == Some(TxOutcome::Degraded)
+        || tx.ended == Some(TxOutcome::NeedsRestart)
+        || tx.ended == Some(TxOutcome::RecoveryRequired)
+    {
+        return Err(TransactionError::InvalidTransaction(
+            "transaction is not an open preview".to_owned(),
+        ));
+    }
+    rollback_reconstructed(journal, &tx, appliers, snapshots)
+}
+
+/// Recovers an interrupted transaction from its durable prefix.
+pub fn recover_open_transaction(
+    journal: &mut Journal,
+    snapshots: &mut dyn SnapshotRecovery,
+    appliers: &mut [&mut dyn SettingsApplier],
+) -> Result<TransactionRunOutcome, TransactionError> {
+    let records = recover_journal(journal.path())?.records;
+    let tx = reconstruct_transaction(&records)
+        .map_err(|error| TransactionError::InvalidTransaction(error.to_string()))?;
+    if tx.persistence_in_flight {
+        if let Some(JournalEvent::TxBegin {
+            snapshot_gen,
+            hash_before,
+            ..
+        }) = tx.begin.as_ref()
+        {
+            snapshots
+                .restore(*snapshot_gen, *hash_before)
+                .map_err(TransactionError::InvalidTransaction)?;
+        }
+        return finish(journal, TransactionRunOutcome::RecoveryRequired);
+    }
+    match tx.recovery_decision() {
+        crate::TxRecoveryDecision::Completed => {
+            return Ok(match tx.ended {
+                Some(TxOutcome::Committed) => TransactionRunOutcome::Committed,
+                Some(TxOutcome::Degraded) => TransactionRunOutcome::Degraded,
+                Some(TxOutcome::RolledBack) => TransactionRunOutcome::RolledBack,
+                Some(TxOutcome::RecoveryRequired) => TransactionRunOutcome::RecoveryRequired,
+                Some(TxOutcome::NeedsRestart) => TransactionRunOutcome::NeedsRestart,
+                Some(TxOutcome::PendingConfirmation) | None => {
+                    TransactionRunOutcome::RecoveryRequired
+                }
+            });
+        }
+        crate::TxRecoveryDecision::Discard => {
+            return finish(journal, TransactionRunOutcome::RolledBack);
+        }
+        crate::TxRecoveryDecision::NeedsRestart => {
+            return finish(journal, TransactionRunOutcome::NeedsRestart);
+        }
+        crate::TxRecoveryDecision::Commit => {
+            return finish(journal, TransactionRunOutcome::Committed);
+        }
+        crate::TxRecoveryDecision::RecoveryRequired => {
+            return finish(journal, TransactionRunOutcome::RecoveryRequired);
+        }
+        crate::TxRecoveryDecision::PendingConfirmation | crate::TxRecoveryDecision::Rollback => {}
+    }
+
+    if let Some(barrier) = tx.irreversible_barrier {
+        let Some(operation) = tx.operations.get(&barrier) else {
+            return rollback_reconstructed(journal, &tx, appliers, snapshots);
+        };
+        let state = match operation.state {
+            ApplyOpState::Applied => crate::EffectState::Applied,
+            ApplyOpState::Unknown => appliers
+                .iter()
+                .find(|applier| applier.group() == operation.op.group)
+                .ok_or_else(|| TransactionError::MissingApplier(operation.op.group.clone()))?
+                .probe(&operation.op),
+            ApplyOpState::Failed | ApplyOpState::Pending => crate::EffectState::NotApplied,
+        };
+        match state {
+            crate::EffectState::Applied => {
+                journal.append(JournalEvent::OpApplied {
+                    op_index: barrier,
+                    effect_handle: operation.op.effect_handle.clone(),
+                    result_digest: 0,
+                })?;
+                return finish(journal, TransactionRunOutcome::NeedsRestart);
+            }
+            crate::EffectState::NotApplied => {
+                journal.append(JournalEvent::OpFailed {
+                    op_index: barrier,
+                    error: "recovery probe: effect not applied".to_owned(),
+                    effect_handle: None,
+                })?;
+                return finish(journal, TransactionRunOutcome::NeedsRestart);
+            }
+            crate::EffectState::Unknown => {
+                return finish(journal, TransactionRunOutcome::RecoveryRequired);
+            }
+        }
+    }
+
+    rollback_reconstructed(journal, &tx, appliers, snapshots)
+}
+
+fn rollback_reconstructed(
+    journal: &mut Journal,
+    tx: &crate::JournalTx,
+    appliers: &mut [&mut dyn SettingsApplier],
+    snapshots: &mut dyn SnapshotRecovery,
+) -> Result<TransactionRunOutcome, TransactionError> {
+    let mut operations: Vec<ApplyOp> = tx
+        .operations
+        .values()
+        .filter(|state| state.state == ApplyOpState::Applied)
+        .map(|state| state.op.clone())
+        .collect();
+    operations.sort_by_key(|op| std::cmp::Reverse(op.index));
+
+    for state in tx.operations.values() {
+        if state.compensation == crate::CompensationState::Unknown
+            || state.compensation == crate::CompensationState::Failed
+        {
+            return finish(journal, TransactionRunOutcome::RecoveryRequired);
+        }
+    }
+
+    for state in tx.operations.values() {
+        if state.state != ApplyOpState::Unknown {
+            continue;
+        }
+        let Some(applier) = appliers
+            .iter_mut()
+            .find(|applier| applier.group() == state.op.group)
+        else {
+            return Err(TransactionError::MissingApplier(state.op.group.clone()));
+        };
+        match applier.probe(&state.op) {
+            crate::EffectState::Applied => operations.push(state.op.clone()),
+            crate::EffectState::NotApplied => {}
+            crate::EffectState::Unknown
+                if state.op.idempotent
+                    && matches!(
+                        state.op.reversibility,
+                        Reversibility::Reversible | Reversibility::Compensable
+                    ) =>
+            {
+                operations.push(state.op.clone())
+            }
+            crate::EffectState::Unknown => {
+                return finish(journal, TransactionRunOutcome::RecoveryRequired);
+            }
+        }
+    }
+    operations.sort_by_key(|op| std::cmp::Reverse(op.index));
+    operations.dedup_by_key(|op| op.index);
+    for op in operations {
+        let Some(applier) = appliers
+            .iter_mut()
+            .find(|applier| applier.group() == op.group)
+        else {
+            return Err(TransactionError::MissingApplier(op.group.clone()));
+        };
+        journal.append(JournalEvent::CompensateBegin {
+            op_index: op.index,
+            reason: "journal recovery".to_owned(),
+        })?;
+        match applier.compensate(&op) {
+            CompensateOutcome::Done { verified } => {
+                journal.append(JournalEvent::Compensated {
+                    op_index: op.index,
+                    verified,
+                })?;
+                if !verified {
+                    return finish(journal, TransactionRunOutcome::RecoveryRequired);
+                }
+            }
+            CompensateOutcome::Failed { error } => {
+                journal.append(JournalEvent::CompensateFailed {
+                    op_index: op.index,
+                    error,
+                })?;
+                return finish(journal, TransactionRunOutcome::RecoveryRequired);
+            }
+            CompensateOutcome::Unsupported => {
+                journal.append(JournalEvent::CompensateFailed {
+                    op_index: op.index,
+                    error: "unsupported".to_owned(),
+                })?;
+                return finish(journal, TransactionRunOutcome::RecoveryRequired);
+            }
+        }
+    }
+
+    let Some(JournalEvent::TxBegin {
+        snapshot_gen,
+        hash_before,
+        ..
+    }) = tx.begin.as_ref()
+    else {
+        return finish(journal, TransactionRunOutcome::RolledBack);
+    };
+    snapshots
+        .restore(*snapshot_gen, *hash_before)
+        .map_err(TransactionError::InvalidTransaction)?;
+    finish(journal, TransactionRunOutcome::RolledBack)
+}
+
 fn finish(
     journal: &mut Journal,
     outcome: TransactionRunOutcome,
@@ -414,7 +770,9 @@ fn finish(
         TransactionRunOutcome::Committed => TxOutcome::Committed,
         TransactionRunOutcome::Degraded => TxOutcome::Degraded,
         TransactionRunOutcome::RolledBack => TxOutcome::RolledBack,
+        TransactionRunOutcome::NeedsRestart => TxOutcome::NeedsRestart,
         TransactionRunOutcome::RecoveryRequired => TxOutcome::RecoveryRequired,
+        TransactionRunOutcome::PendingConfirmation => TxOutcome::PendingConfirmation,
     };
     journal.append(JournalEvent::TxEnd {
         outcome: durable_outcome,
@@ -444,6 +802,7 @@ mod tests {
     struct MockApplier {
         fail_on: Option<u16>,
         verify_compensation: bool,
+        applied: Cell<u32>,
         compensated: Cell<u32>,
         compensation_order: RefCell<Vec<u16>>,
     }
@@ -458,6 +817,7 @@ mod tests {
         }
 
         fn apply_op(&mut self, op: &ApplyOp) -> OpOutcome {
+            self.applied.set(self.applied.get() + 1);
             if self.fail_on == Some(op.index) {
                 OpOutcome::Failed {
                     error: "mock failure".to_owned(),
@@ -513,6 +873,20 @@ mod tests {
         journal
             .append(JournalEvent::SnapshotCommitted { snapshot_gen: 5 })
             .unwrap();
+        if mode == TxMode::Direct {
+            journal
+                .append(JournalEvent::PersistBegin {
+                    generation: 6,
+                    manifest_hash: 7,
+                })
+                .unwrap();
+            journal
+                .append(JournalEvent::PersistEnd {
+                    generation: 6,
+                    manifest_hash: 7,
+                })
+                .unwrap();
+        }
     }
 
     #[test]
@@ -525,6 +899,7 @@ mod tests {
         let mut applier = MockApplier {
             fail_on: None,
             verify_compensation: true,
+            applied: Cell::new(0),
             compensated: Cell::new(0),
             compensation_order: RefCell::new(Vec::new()),
         };
@@ -542,6 +917,90 @@ mod tests {
     }
 
     #[test]
+    fn direct_execution_requires_persist_end_before_any_effect() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("apply.journal");
+        let mut journal = Journal::open(&path, "tx-direct-not-persisted").unwrap();
+        let plan = ApplyPlan::new(vec![op(0)]).unwrap();
+        journal
+            .append(JournalEvent::TxBegin {
+                mode: TxMode::Direct,
+                hash_before: 1,
+                hash_after: 2,
+                plan_digest: 3,
+                op_count: plan.ops.len() as u16,
+                snapshot_gen: 4,
+                last_confirmed: None,
+            })
+            .unwrap();
+        journal
+            .append(JournalEvent::SnapshotCommitted { snapshot_gen: 5 })
+            .unwrap();
+        let mut applier = MockApplier {
+            fail_on: None,
+            verify_compensation: true,
+            applied: Cell::new(0),
+            compensated: Cell::new(0),
+            compensation_order: RefCell::new(Vec::new()),
+        };
+        let mut appliers: Vec<&mut dyn SettingsApplier> = vec![&mut applier];
+
+        assert!(matches!(
+            run_transaction(&mut journal, &plan, &mut appliers),
+            Err(TransactionError::InvalidTransaction(_))
+        ));
+        assert_eq!(applier.applied.get(), 0);
+    }
+
+    #[test]
+    fn direct_execution_rejects_an_existing_operation_prefix() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("apply.journal");
+        let mut journal = Journal::open(&path, "tx-direct-prefix").unwrap();
+        let plan = ApplyPlan::new(vec![op(0)]).unwrap();
+        begin_transaction(&mut journal, TxMode::Direct, plan.ops.len());
+        journal
+            .append(JournalEvent::PersistBegin {
+                generation: 6,
+                manifest_hash: 7,
+            })
+            .unwrap();
+        journal
+            .append(JournalEvent::PersistEnd {
+                generation: 6,
+                manifest_hash: 7,
+            })
+            .unwrap();
+        journal
+            .append(JournalEvent::PersistBegin {
+                generation: 6,
+                manifest_hash: 7,
+            })
+            .unwrap();
+        journal
+            .append(JournalEvent::PersistEnd {
+                generation: 6,
+                manifest_hash: 7,
+            })
+            .unwrap();
+        journal.append(JournalEvent::OpBegin { op: op(0) }).unwrap();
+        let mut applier = MockApplier {
+            fail_on: None,
+            verify_compensation: true,
+            applied: Cell::new(0),
+            compensated: Cell::new(0),
+            compensation_order: RefCell::new(Vec::new()),
+        };
+        let mut appliers: Vec<&mut dyn SettingsApplier> = vec![&mut applier];
+
+        assert!(matches!(
+            run_transaction(&mut journal, &plan, &mut appliers),
+            Err(TransactionError::InvalidTransaction(_))
+        ));
+        assert_eq!(applier.applied.get(), 0);
+    }
+
+    #[test]
     fn failed_operation_compensates_in_reverse_order() {
         let directory = tempdir().unwrap();
         let path = directory.path().join("apply.journal");
@@ -551,6 +1010,7 @@ mod tests {
         let mut applier = MockApplier {
             fail_on: Some(2),
             verify_compensation: true,
+            applied: Cell::new(0),
             compensated: Cell::new(0),
             compensation_order: RefCell::new(Vec::new()),
         };
@@ -575,6 +1035,7 @@ mod tests {
         let mut applier = MockApplier {
             fail_on: Some(0),
             verify_compensation: true,
+            applied: Cell::new(0),
             compensated: Cell::new(0),
             compensation_order: RefCell::new(Vec::new()),
         };
@@ -604,6 +1065,7 @@ mod tests {
         let mut applier = MockApplier {
             fail_on: Some(1),
             verify_compensation: false,
+            applied: Cell::new(0),
             compensated: Cell::new(0),
             compensation_order: RefCell::new(Vec::new()),
         };
@@ -614,5 +1076,151 @@ mod tests {
             TransactionRunOutcome::RecoveryRequired
         );
         assert_eq!(applier.compensated.get(), 1);
+    }
+
+    #[test]
+    fn replay_skips_a_durably_applied_idempotent_operation() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("apply.journal");
+        let mut journal = Journal::open(&path, "tx-replay").unwrap();
+        let plan = ApplyPlan::new(vec![op(0)]).unwrap();
+        begin_transaction(&mut journal, TxMode::Direct, plan.ops.len());
+        journal
+            .append(JournalEvent::PersistBegin {
+                generation: 6,
+                manifest_hash: 7,
+            })
+            .unwrap();
+        journal
+            .append(JournalEvent::PersistEnd {
+                generation: 6,
+                manifest_hash: 7,
+            })
+            .unwrap();
+        journal.append(JournalEvent::OpBegin { op: op(0) }).unwrap();
+        journal
+            .append(JournalEvent::OpApplied {
+                op_index: 0,
+                effect_handle: Some("already-applied".to_owned()),
+                result_digest: 9,
+            })
+            .unwrap();
+
+        let mut applier = MockApplier {
+            fail_on: None,
+            verify_compensation: true,
+            applied: Cell::new(0),
+            compensated: Cell::new(0),
+            compensation_order: RefCell::new(Vec::new()),
+        };
+        let mut appliers: Vec<&mut dyn SettingsApplier> = vec![&mut applier];
+        let mut snapshots = RecoverySnapshots {
+            restored: Cell::new(0),
+        };
+        assert_eq!(
+            recover_open_transaction(&mut journal, &mut snapshots, &mut appliers).unwrap(),
+            TransactionRunOutcome::Committed
+        );
+        assert_eq!(applier.applied.get(), 0);
+    }
+
+    #[test]
+    fn non_idempotent_in_flight_operation_is_not_replayed() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("apply.journal");
+        let mut journal = Journal::open(&path, "tx-non-idempotent").unwrap();
+        let mut non_idempotent = op(0);
+        non_idempotent.idempotent = false;
+        let plan = ApplyPlan::new(vec![non_idempotent.clone()]).unwrap();
+        begin_transaction(&mut journal, TxMode::Direct, plan.ops.len());
+        journal
+            .append(JournalEvent::PersistBegin {
+                generation: 6,
+                manifest_hash: 7,
+            })
+            .unwrap();
+        journal
+            .append(JournalEvent::PersistEnd {
+                generation: 6,
+                manifest_hash: 7,
+            })
+            .unwrap();
+        journal
+            .append(JournalEvent::OpBegin { op: non_idempotent })
+            .unwrap();
+
+        let mut applier = MockApplier {
+            fail_on: None,
+            verify_compensation: true,
+            applied: Cell::new(0),
+            compensated: Cell::new(0),
+            compensation_order: RefCell::new(Vec::new()),
+        };
+        let mut appliers: Vec<&mut dyn SettingsApplier> = vec![&mut applier];
+        assert!(matches!(
+            run_transaction(&mut journal, &plan, &mut appliers),
+            Err(TransactionError::InvalidTransaction(_))
+        ));
+        assert_eq!(applier.applied.get(), 0);
+    }
+
+    struct RecoverySnapshots {
+        restored: Cell<u32>,
+    }
+
+    impl SnapshotRecovery for RecoverySnapshots {
+        fn restore(&mut self, _generation: u64, _hash: u64) -> Result<(), String> {
+            self.restored.set(self.restored.get() + 1);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn irreversible_recovery_returns_needs_restart() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("apply.journal");
+        let mut journal = Journal::open(&path, "tx-needs-restart").unwrap();
+        let mut irreversible = op(0);
+        irreversible.reversibility = Reversibility::Irreversible;
+        let plan = ApplyPlan::new(vec![irreversible.clone()]).unwrap();
+        begin_transaction(&mut journal, TxMode::Direct, plan.ops.len());
+        journal
+            .append(JournalEvent::IrreversibleBarrier { op_index: 0 })
+            .unwrap();
+        journal
+            .append(JournalEvent::OpBegin {
+                op: irreversible.clone(),
+            })
+            .unwrap();
+        journal
+            .append(JournalEvent::OpApplied {
+                op_index: 0,
+                effect_handle: Some("irreversible".to_owned()),
+                result_digest: 1,
+            })
+            .unwrap();
+
+        let mut snapshots = RecoverySnapshots {
+            restored: Cell::new(0),
+        };
+        let mut applier = MockApplier {
+            fail_on: None,
+            verify_compensation: true,
+            applied: Cell::new(0),
+            compensated: Cell::new(0),
+            compensation_order: RefCell::new(Vec::new()),
+        };
+        let mut appliers: Vec<&mut dyn SettingsApplier> = vec![&mut applier];
+        assert_eq!(
+            recover_open_transaction(&mut journal, &mut snapshots, &mut appliers).unwrap(),
+            TransactionRunOutcome::NeedsRestart
+        );
+        assert_eq!(snapshots.restored.get(), 0);
+        assert_eq!(
+            reconstruct_transaction(&recover_journal(&path).unwrap().records)
+                .unwrap()
+                .ended,
+            Some(TxOutcome::NeedsRestart)
+        );
     }
 }
