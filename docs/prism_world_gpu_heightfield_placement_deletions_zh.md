@@ -520,3 +520,10 @@ CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 cargo test -p prism_world_gpu --fe
 占用约 166 MiB。由于进程列表检查被系统权限拒绝，无法确认其他 agent 是否仍在
 使用共享构建目录；未执行可能干扰并行构建的 `cargo clean`，也未触碰其文件。
 释放空间并确认无人使用后，应重跑 GPU feature 测试，再按包清理本任务构建产物。
+
+同轮执行 `cargo clean -p prism_world_gpu --dry-run` 显示仅涉及该包的 2 个目录，
+随后按包清理成功（`Removed 2 directories`），没有清理 workspace 全局 target。清理后
+共享文件系统可用空间却由约 191 MiB 降至 138 MiB，说明并行共享盘仍有其他写入；
+`target` 汇总仍约 166 MiB。因进程枚举权限受限且容量继续下降，本轮未重试 GPU 编译，
+也未对 runtime 包做 cargo clean。runtime 183/183 是本轮实际测试结果；GPU feature
+仍待在空间和共享构建目录安全条件恢复后复验。
