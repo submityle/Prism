@@ -24,6 +24,20 @@ use prism_window::WindowId;
 
 use crate::{RenderTarget, RenderViewport};
 
+/// Convert an output rectangle to the local raster extent requested by a
+/// camera. Invalid scales fail open to full resolution; valid scales use
+/// ceiling so no output edge is undersampled by integer truncation.
+#[must_use]
+pub fn surface_view_render_extent(viewport: [u32; 4], resolution_scale: f32) -> RenderViewport {
+    let scale = if resolution_scale.is_finite() && (0.0..=1.0).contains(&resolution_scale) {
+        resolution_scale
+    } else {
+        1.0
+    };
+    let scaled = |extent: u32| ((f64::from(extent) * f64::from(scale)).ceil() as u32).max(1);
+    RenderViewport::new(scaled(viewport[2]), scaled(viewport[3]))
+}
+
 /// Independent output namespaces, so a camera can feed several resolutions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum SurfaceViewOutput {
@@ -488,6 +502,30 @@ mod tests {
     use prism_render_driver_null::{NullDevice, NullInstance};
 
     const RESOURCES_PER_TARGET: usize = 16;
+
+    #[test]
+    fn surface_view_extent_uses_stable_ceil_and_safe_scale_fallback() {
+        assert_eq!(
+            surface_view_render_extent([7, 5, 101, 55], 1.0),
+            RenderViewport::new(101, 55)
+        );
+        assert_eq!(
+            surface_view_render_extent([0, 0, 101, 55], 0.5),
+            RenderViewport::new(51, 28)
+        );
+        assert_eq!(
+            surface_view_render_extent([0, 0, 1, 3], 0.01),
+            RenderViewport::new(1, 1)
+        );
+        assert_eq!(
+            surface_view_render_extent([0, 0, 101, 55], f32::NAN),
+            RenderViewport::new(101, 55)
+        );
+        assert_eq!(
+            surface_view_render_extent([0, 0, 101, 55], 1.5),
+            RenderViewport::new(101, 55)
+        );
+    }
 
     fn device() -> Arc<NullDevice> {
         let instance = NullInstance::new();

@@ -1322,6 +1322,8 @@ renderer 接线期间，`CameraIntent`/`ViewData` 的每视图可见性元数据
 
 当前已验证的是相机计算/发布预算和历史复用；渲染侧仍需消费 `PublishedCameraLod`，将 `resolution_scale` 应用到实际离屏目标尺寸，并将 `history_frames` 接入时域资源保留策略。验证命令：`cargo test -p prism_camera_ecs --features view_lod --lib --offline`。
 
+2026-10-23 LOD extent 规则验证增量：新增 `surface_view_render_extent` 纯函数，统一定义输出尺寸按有限 `[0,1]` 比例 `ceil(output × scale)`、每轴至少 1 像素以及非法 scale 回退 1.0 的确定性规则，并为满分辨率、半分辨率、极小比例和非法输入增加单测。该 helper 尚未接入 target 分配：当前相机附件仍是输出 viewport 尺寸，避免在不可缩放的 transfer-copy 合成存在时产生源/目的范围不匹配。完成 LOD 仍需把缩放尺寸接入目标缓存，并增加保持 scene-linear HDR、限定 viewport/scissor、Load 保留目标外像素的 raster 上采样合成。`history_frames` 仍未接入 TAA 资源生命周期。
+
 ### 28.10 构图辅助与安全框（`composition_aid`）
 
 三分法、黄金比、标题/动作安全框作为只读、归一化视口坐标线段从 `ViewData` 计算；`CompositionGuide::compute_into` 支持调用方复用输出缓冲，至多写出 8 条线段，viewport 为零时清空输出并返回错误计数。`prism_camera_ecs/composition_aid` feature 将配置组件和 `PublishedCompositionGizmos` 输出接入 `PostUpdate`，只为当帧已发布且携带 guide 配置的相机生成数据；inactive 或离开 published 集合的相机不会遗留旧帧 gizmo。无效更新是否保留上帧 view 由 `PublishedViews` 的 retain-last-valid 策略决定，构图系统只消费该帧实际发布的快照。输出遵循 published view 的稳定 `(order, entity)` 顺序。ECS 缓冲按索引复用，稳态相机数不变时不重分配 entry/line 缓冲；guide 变化只覆盖缓冲内容。

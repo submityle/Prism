@@ -36,7 +36,7 @@ pub struct SurfaceView {
     pub history_epoch: u64,
     /// True only for a continuous camera incarnation without cut/epoch/rect reset.
     pub history_valid: bool,
-    /// Camera-side resolution budget; this is metadata and does not resize attachments.
+    /// Camera-side resolution budget; applied when attachments and composition are connected.
     pub resolution_scale: f32,
     /// Number of temporal history frames requested by the camera-side LOD policy.
     pub history_frames: u32,
