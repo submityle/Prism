@@ -333,6 +333,116 @@ fn real_udp_loss_retransmit_is_ordered_and_exactly_once() {
 }
 
 #[test]
+fn real_udp_multi_peer_three_clients_keep_reliable_channels_isolated() {
+    let endpoint = UdpMultiPeer::bind(
+        "127.0.0.1:0",
+        UdpMultiPeerConfig {
+            max_peers: 3,
+            max_queue_per_peer: 32,
+            max_total_queued: 96,
+            ..UdpMultiPeerConfig::default()
+        },
+    )
+    .expect("bind multi-peer UDP endpoint");
+    let endpoint_addr = endpoint.local_addr().expect("endpoint address");
+
+    let mut clients = Vec::with_capacity(3);
+    let mut client_addresses = Vec::with_capacity(3);
+    for _ in 0..3 {
+        let mut transport = UdpTransport::bind("127.0.0.1:0").expect("bind UDP client");
+        transport
+            .connect_to(endpoint_addr)
+            .expect("connect client to multi-peer endpoint");
+        client_addresses.push(transport.local_addr().expect("client address"));
+        clients.push(ReliableChannel::new(transport, 2, 8));
+    }
+
+    let mut server_channels = Vec::with_capacity(3);
+    let mut peer_ids = Vec::with_capacity(3);
+    for address in client_addresses {
+        let peer = endpoint.peer(address).expect("admit UDP client");
+        peer_ids.push(peer.id().as_u64());
+        server_channels.push(ReliableChannel::new(peer, 2, 8));
+    }
+    assert_eq!(peer_ids, vec![1, 2, 3], "peer admission is deterministic");
+
+    let client_messages = [b"client-0".as_slice(), b"client-1", b"client-2"];
+    for (channel, message) in clients.iter_mut().zip(client_messages) {
+        assert_eq!(channel.send(message), Some(0));
+    }
+
+    let mut server_received = vec![Vec::new(), Vec::new(), Vec::new()];
+    for tick in 1..=MAX_STEPS as u64 {
+        for channel in &mut clients {
+            channel.tick_at(tick);
+        }
+        endpoint.poll();
+        for (index, channel) in server_channels.iter_mut().enumerate() {
+            channel.tick_at(tick);
+            while let Some(message) = channel.recv() {
+                server_received[index].push(message);
+            }
+        }
+        if server_received.iter().all(|messages| messages.len() == 1)
+            && clients.iter().all(|channel| channel.unacked() == 0)
+        {
+            break;
+        }
+        thread::sleep(POLL_SLEEP);
+    }
+
+    assert_eq!(
+        server_received,
+        vec![
+            vec![b"client-0".to_vec()],
+            vec![b"client-1".to_vec()],
+            vec![b"client-2".to_vec()],
+        ],
+        "each reliable channel receives only its admitted peer's payload"
+    );
+
+    let server_messages = [b"server-0".as_slice(), b"server-1", b"server-2"];
+    for (channel, message) in server_channels.iter_mut().zip(server_messages) {
+        assert_eq!(channel.send(message), Some(0));
+    }
+
+    let mut client_received = vec![Vec::new(), Vec::new(), Vec::new()];
+    for tick in (MAX_STEPS as u64 + 1)..=(MAX_STEPS as u64 * 2) {
+        for channel in &mut server_channels {
+            channel.tick_at(tick);
+        }
+        endpoint.poll();
+        for (index, channel) in clients.iter_mut().enumerate() {
+            channel.tick_at(tick);
+            while let Some(message) = channel.recv() {
+                client_received[index].push(message);
+            }
+        }
+        if client_received.iter().all(|messages| messages.len() == 1)
+            && server_channels.iter().all(|channel| channel.unacked() == 0)
+        {
+            break;
+        }
+        thread::sleep(POLL_SLEEP);
+    }
+
+    assert_eq!(
+        client_received,
+        vec![
+            vec![b"server-0".to_vec()],
+            vec![b"server-1".to_vec()],
+            vec![b"server-2".to_vec()],
+        ],
+        "each client receives only its peer-specific reply"
+    );
+    assert_eq!(
+        endpoint.dropped(),
+        0,
+        "admitted multi-peer traffic is retained"
+    );
+}
+
+#[test]
 fn real_udp_peer_rebind_reconnects_after_old_socket_is_closed() {
     let endpoint = UdpMultiPeer::bind("127.0.0.1:0", UdpMultiPeerConfig::default())
         .expect("bind multi-peer UDP endpoint");
