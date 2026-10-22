@@ -6,23 +6,125 @@ use alloc::vec::Vec;
 use crate::compression::gdeflate::{gdeflate_decompress, GDeflateError};
 use crate::paging::{PageSource, PageStorage, PageStreamManager, ReconcileReport, RequestBatch};
 
-use super::asset::{VirtualGeometryAsset, VirtualGeometryAssetError, VirtualGeometryCompression};
+use super::asset::{
+    VirtualGeometryAsset, VirtualGeometryAssetError, VirtualGeometryCompression,
+    VirtualGeometryPage,
+};
 use super::cluster_payload::{decode_cluster_payload, ClusterPayloadError};
 use super::GeometryPageKey;
 
-/// A virtual-geometry page source that pads uncompressed asset bytes to words.
+/// A virtual-geometry page source that retains stored pages and decodes only
+/// when the residency manager admits a page.
 struct AssetPageSource {
-    pages: BTreeMap<GeometryPageKey, Vec<u8>>,
+    pages: BTreeMap<GeometryPageKey, VirtualGeometryPage>,
+    clusters: Vec<super::asset::VirtualGeometryClusterRecord>,
     page_words: u32,
+    errors: BTreeMap<GeometryPageKey, VirtualGeometryStreamingError>,
 }
 
 impl PageSource<GeometryPageKey> for AssetPageSource {
     fn load(&mut self, key: GeometryPageKey) -> Vec<u32> {
-        let mut words = vec![0; self.page_words as usize];
-        let Some(bytes) = self.pages.get(&key) else {
-            return words;
+        let Some(page) = self.pages.get(&key) else {
+            self.errors
+                .insert(key, VirtualGeometryStreamingError::MissingPage(key));
+            return Vec::new();
         };
-        for (index, chunk) in bytes.chunks(4).enumerate() {
+        let decoded = match decode_page_payload(page) {
+            Ok(decoded) => decoded,
+            Err(error) => {
+                self.errors.insert(key, error);
+                return Vec::new();
+            }
+        };
+        let actual = u32::try_from(decoded.len()).unwrap_or(u32::MAX);
+        if actual != page.record.uncompressed_size {
+            self.errors.insert(
+                key,
+                VirtualGeometryStreamingError::UncompressedSizeMismatch {
+                    key,
+                    expected: page.record.uncompressed_size,
+                    actual,
+                },
+            );
+            return Vec::new();
+        }
+
+        let cluster_start = page.record.cluster_start as usize;
+        let Some(cluster_end) = cluster_start.checked_add(page.record.cluster_count as usize)
+        else {
+            self.errors.insert(
+                key,
+                VirtualGeometryStreamingError::InvalidAsset(
+                    VirtualGeometryAssetError::InvalidValue("page cluster range"),
+                ),
+            );
+            return Vec::new();
+        };
+        let Some(clusters) = self.clusters.get(cluster_start..cluster_end) else {
+            self.errors.insert(
+                key,
+                VirtualGeometryStreamingError::InvalidAsset(
+                    VirtualGeometryAssetError::InvalidValue("page cluster range"),
+                ),
+            );
+            return Vec::new();
+        };
+        for (offset, cluster) in clusters.iter().enumerate() {
+            let cluster_index = page.record.cluster_start + offset as u32;
+            let payload_start = cluster.payload_offset as usize;
+            let Some(payload_end) = payload_start.checked_add(cluster.payload_size as usize) else {
+                self.errors.insert(
+                    key,
+                    VirtualGeometryStreamingError::InvalidClusterPayload {
+                        key,
+                        cluster: cluster_index,
+                        error: ClusterPayloadError::Truncated,
+                    },
+                );
+                return Vec::new();
+            };
+            let Some(payload) = decoded.get(payload_start..payload_end) else {
+                self.errors.insert(
+                    key,
+                    VirtualGeometryStreamingError::InvalidClusterPayload {
+                        key,
+                        cluster: cluster_index,
+                        error: ClusterPayloadError::Truncated,
+                    },
+                );
+                return Vec::new();
+            };
+            let decoded_cluster = match decode_cluster_payload(cluster.bounds, payload) {
+                Ok(decoded) => decoded,
+                Err(error) => {
+                    self.errors.insert(
+                        key,
+                        VirtualGeometryStreamingError::InvalidClusterPayload {
+                            key,
+                            cluster: cluster_index,
+                            error,
+                        },
+                    );
+                    return Vec::new();
+                }
+            };
+            if decoded_cluster.positions.len() != cluster.vertex_count as usize
+                || decoded_cluster.indices.len() / 3 != cluster.triangle_count as usize
+            {
+                self.errors.insert(
+                    key,
+                    VirtualGeometryStreamingError::InvalidClusterPayload {
+                        key,
+                        cluster: cluster_index,
+                        error: ClusterPayloadError::InvalidCounts,
+                    },
+                );
+                return Vec::new();
+            }
+        }
+
+        let mut words = vec![0; self.page_words as usize];
+        for (index, chunk) in decoded.chunks(4).enumerate() {
             if index >= words.len() {
                 break;
             }
@@ -31,6 +133,17 @@ impl PageSource<GeometryPageKey> for AssetPageSource {
             words[index] = u32::from_le_bytes(word);
         }
         words
+    }
+}
+
+fn decode_page_payload(
+    page: &VirtualGeometryPage,
+) -> Result<Vec<u8>, VirtualGeometryStreamingError> {
+    match page.record.compression {
+        VirtualGeometryCompression::None => Ok(page.payload.clone()),
+        VirtualGeometryCompression::GDeflate => {
+            gdeflate_decompress(&page.payload).map_err(VirtualGeometryStreamingError::Decompression)
+        }
     }
 }
 
@@ -43,8 +156,8 @@ pub struct VirtualGeometryPageStream {
 }
 
 impl VirtualGeometryPageStream {
-    /// Creates a stream from a validated asset and decodes stored page payloads
-    /// before exposing them to the word-storage ABI.
+    /// Creates a stream from a validated asset. Stored page payloads are
+    /// decompressed and their cluster payloads validated only when admitted.
     pub fn from_asset(
         asset: VirtualGeometryAsset,
         physical_capacity: u32,
@@ -56,67 +169,20 @@ impl VirtualGeometryPageStream {
                 asset.header.page_size,
             ));
         }
-        let mut pages = BTreeMap::new();
-        for page in asset.pages {
-            let decoded = match page.record.compression {
-                VirtualGeometryCompression::None => page.payload,
-                VirtualGeometryCompression::GDeflate => gdeflate_decompress(&page.payload)
-                    .map_err(VirtualGeometryStreamingError::Decompression)?,
-            };
-            let actual = u32::try_from(decoded.len()).unwrap_or(u32::MAX);
-            if actual != page.record.uncompressed_size {
-                return Err(VirtualGeometryStreamingError::UncompressedSizeMismatch {
-                    key: page.record.key,
-                    expected: page.record.uncompressed_size,
-                    actual,
-                });
-            }
-            let cluster_start = page.record.cluster_start as usize;
-            let cluster_end = cluster_start + page.record.cluster_count as usize;
-            for (cluster_index, cluster) in asset.clusters[cluster_start..cluster_end]
-                .iter()
-                .enumerate()
-            {
-                let payload_start = usize::try_from(cluster.payload_offset).unwrap_or(usize::MAX);
-                let payload_size = usize::try_from(cluster.payload_size).unwrap_or(usize::MAX);
-                let payload_end = payload_start.checked_add(payload_size).ok_or(
-                    VirtualGeometryStreamingError::InvalidClusterPayload {
-                        key: page.record.key,
-                        cluster: page.record.cluster_start + cluster_index as u32,
-                        error: ClusterPayloadError::Truncated,
-                    },
-                )?;
-                let payload = decoded.get(payload_start..payload_end).ok_or(
-                    VirtualGeometryStreamingError::InvalidClusterPayload {
-                        key: page.record.key,
-                        cluster: page.record.cluster_start + cluster_index as u32,
-                        error: ClusterPayloadError::Truncated,
-                    },
-                )?;
-                let decoded_cluster =
-                    decode_cluster_payload(cluster.bounds, payload).map_err(|error| {
-                        VirtualGeometryStreamingError::InvalidClusterPayload {
-                            key: page.record.key,
-                            cluster: page.record.cluster_start + cluster_index as u32,
-                            error,
-                        }
-                    })?;
-                if decoded_cluster.positions.len() != cluster.vertex_count as usize
-                    || decoded_cluster.indices.len() / 3 != cluster.triangle_count as usize
-                {
-                    return Err(VirtualGeometryStreamingError::InvalidClusterPayload {
-                        key: page.record.key,
-                        cluster: page.record.cluster_start + cluster_index as u32,
-                        error: ClusterPayloadError::InvalidCounts,
-                    });
-                }
-            }
-            pages.insert(page.record.key, decoded);
-        }
+        let pages = asset
+            .pages
+            .into_iter()
+            .map(|page| (page.record.key, page))
+            .collect();
         let page_words = asset.header.page_size / 4;
         Ok(Self {
             manager: PageStreamManager::new(physical_capacity, page_words, resident_budget),
-            source: AssetPageSource { pages, page_words },
+            source: AssetPageSource {
+                pages,
+                clusters: asset.clusters,
+                page_words,
+                errors: BTreeMap::new(),
+            },
         })
     }
 
@@ -127,6 +193,15 @@ impl VirtualGeometryPageStream {
         frame: u64,
     ) -> ReconcileReport<GeometryPageKey> {
         self.manager.reconcile(requests, frame, &mut self.source)
+    }
+
+    /// Returns and clears page decode errors produced by the most recent
+    /// reconciliation. A failed page remains requested and is never admitted;
+    /// callers can report the exact asset/page failure and choose a fallback.
+    pub fn take_source_errors(&mut self) -> Vec<(GeometryPageKey, VirtualGeometryStreamingError)> {
+        core::mem::take(&mut self.source.errors)
+            .into_iter()
+            .collect()
     }
 
     /// Exports the sorted page-to-slot table for GPU page-table upload.
@@ -153,6 +228,8 @@ impl VirtualGeometryPageStream {
 pub enum VirtualGeometryStreamingError {
     /// Asset validation failed.
     InvalidAsset(VirtualGeometryAssetError),
+    /// A request named a page absent from the registered asset.
+    MissingPage(GeometryPageKey),
     /// Physical storage uses 32-bit words, so page size must be word aligned.
     PageSizeNotWordAligned(u32),
     /// GDeflate decode failed before the page entered physical storage.
@@ -181,6 +258,7 @@ impl core::fmt::Display for VirtualGeometryStreamingError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::InvalidAsset(error) => write!(f, "invalid virtual-geometry asset: {error}"),
+            Self::MissingPage(key) => write!(f, "virtual-geometry page {key:?} is missing"),
             Self::PageSizeNotWordAligned(size) => write!(f, "page size {size} is not word aligned"),
             Self::Decompression(error) => {
                 write!(f, "virtual-geometry page decompression failed: {error:?}")
@@ -308,5 +386,35 @@ mod tests {
         let slot = stream.entries()[0].1;
         let words = stream.storage().slot_words(slot).expect("resident words");
         assert_eq!(words[0], u32::from_le_bytes(*b"CLST"));
+    }
+
+    #[test]
+    fn adapter_decodes_and_validates_only_when_page_is_admitted() {
+        let key = GeometryPageKey::new(4, 0);
+        let mut corrupted = asset();
+        corrupted.pages[0].payload[0] ^= 0xff;
+        let mut stream = VirtualGeometryPageStream::from_asset(corrupted, 2, 2)
+            .expect("page decode is deferred until admission");
+        assert_eq!(stream.resident_count(), 0);
+        assert!(stream.take_source_errors().is_empty());
+
+        let mut requests = RequestBatch::new();
+        requests.record(key, 5.0);
+        let report = stream.reconcile(&requests, 1);
+
+        assert!(report.streamed_in.is_empty());
+        assert_eq!(report.deferred, vec![key]);
+        assert_eq!(stream.resident_count(), 0);
+        assert_eq!(
+            stream.take_source_errors(),
+            vec![(
+                key,
+                VirtualGeometryStreamingError::InvalidClusterPayload {
+                    key,
+                    cluster: 0,
+                    error: ClusterPayloadError::InvalidHeader,
+                }
+            )]
+        );
     }
 }

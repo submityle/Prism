@@ -851,6 +851,10 @@ Source(FBX/USD/glTF) → Scene Source IR → Mesh IR
 
 2026-10-23 复核同步原语网格生成器的极端分辨率门禁。`generated_counts` 在任何分配和网格循环之前验证 u32 ABI 计数与总工作集；位置、法线、UV、索引的预测载荷超过 256 MiB 时以 `WorkingSetExceeded` 拒绝，容器预留失败以 `AllocationFailed` 返回。独立 `/private/tmp/prism-mesh-audit-target` 下 `cargo test -p prism_mesh --lib --tests` 的 37 项库单测和 16 项集成测试通过；测试覆盖顶点 ABI 溢出、索引 ABI 溢出及超工作集拒绝。该上限只约束同步内建 primitive helper，不限制经资产构建/流送管线处理的生产网格；不把此单 crate 结果外推为 RenderApp、完整 Mesh GPU 或场景性能验收。
 
+### 19.8 2026-10-23 CLST 页按需解码复核
+
+`VirtualGeometryPageStream::from_asset` 现在保留压缩页字节，只有 residency manager 实际准入页面时才解压；准入前会验证解压长度、该页每个 Cluster 的 CLST framing/属性/边界及顶点和三角形数量。缺页、解压失败、长度不符或 Cluster payload 损坏会通过 `take_source_errors()` 返回带页键/Cluster 索引的错误，坏页不进入物理驻留。独立 `/private/tmp/prism-mesh-stream-target`（`CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0`）下 `cargo test -p prism_render_architecture virtual_geometry::stream_adapter::tests --lib` 的 3 项定向测试通过，覆盖正常字节页、GDeflate 页与按需解码损坏拒绝。此改动降低非驻留压缩页的解压/解码工作和常驻解压副本，但仍从完整 `VirtualGeometryAsset` 接收所有压缩页字节；不等同于容器 range-read、GPU 页池接线或 RenderScene Cluster 生产绘制闭环。
+
 ### 19.6 2026-10-22 RayTracing 几何身份复核
 
 RayTracing 场景提取按 geometry slot 查询 shading 表时，必须同时验证 `GeometryHandle` 的 generation 与非零 revision，不能仅凭可复用的 slot index 绑定新几何。场景重建签名同时包含每个 shading entry 的 index、generation 与 revision，保证 slot 复用触发重建。`cargo test -p prism_render_scene --features legacy-bevy --lib stale_geometry_generation_never_binds_reused_registry_slot -- --nocapture` 通过 1 项定向测试；该测试只覆盖 stale generation fail-closed，不证明 RayTracing 与逐视图 raster LOD 选择一致，不证明完整 RT GPU 消费或画质。
