@@ -1,11 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use prism_app::{App, Plugin, PostUpdate};
+use prism_camera_ecs::{CameraSystemSet, PublishedViews};
 use prism_ecs::{
     entity::Entity,
     schedule::{IntoSystemConfigs, SystemSet, SystemSetId},
     world::World,
 };
+use prism_math::{Affine3, Frustum, Mat4, Plane, Vec3};
 use prism_render_architecture::gpu_scene::{InstanceRecord, SceneOperation, SceneTransaction};
 use prism_render_visibility::{cull_view, ViewFlags, VisibilityInput};
 use prism_transform::{
@@ -42,7 +44,9 @@ impl Plugin for PrismVisibilityPlugin {
         app.init_resource::<PrismRenderScene>().add_systems(
             PostUpdate,
             (
-                sync_scene.in_set(PrismVisibilitySystems::Sync),
+                sync_scene
+                    .in_set(PrismVisibilitySystems::Sync)
+                    .after(CameraSystemSet::Publication),
                 cull_views.in_set(PrismVisibilitySystems::Cull),
             )
                 .chain(),
@@ -161,11 +165,58 @@ pub fn sync_scene(world: &mut World) {
 /// Run real core culling per complete camera, retain only current LOD pairs,
 /// and write boolean changes in the main world. Call after [`sync_scene`].
 pub fn cull_views(world: &mut World) {
-    let mut query = world.query::<(Entity, &PrismCamera, &PrismFrustum, &GlobalTransform)>();
-    let cameras: BTreeMap<_, _> = query
-        .iter(world)
-        .map(|(entity, camera, frustum, global)| (entity, (*camera, *frustum, *global)))
-        .collect();
+    // Published camera snapshots are the canonical input when CameraPlugin is
+    // installed. The legacy native components remain an independent renderer
+    // input only for applications which do not install the camera runtime.
+    let cameras: BTreeMap<_, _> = if let Some(published) = world.get_resource::<PublishedViews>() {
+        published
+            .iter()
+            .filter_map(|published| {
+                let view = published.data;
+                let origin = view.world_origin.as_vec3();
+                let absolute_from_relative = Mat4::from_translation(-origin);
+                let clip_from_world = view.clip_from_world * absolute_from_relative;
+                let mut planes = [Plane::new(Vec3::ZERO, 1.0); 6];
+                for (index, half_space) in view.frustum.planes[..view.frustum.count as usize]
+                    .iter()
+                    .enumerate()
+                {
+                    planes[index] = Plane::new(
+                        half_space.normal,
+                        half_space.d - half_space.normal.dot(origin),
+                    );
+                }
+                let mut flags = ViewFlags::default();
+                if view.teleport || !view.history_valid {
+                    flags |= ViewFlags::CAMERA_CUT;
+                }
+                let camera = PrismCamera {
+                    clip_from_world,
+                    viewport: [
+                        view.viewport_px.origin[0],
+                        view.viewport_px.origin[1],
+                        view.viewport_px.size[0],
+                        view.viewport_px.size[1],
+                    ],
+                    lod_scale: view.lod_scale,
+                    layer_mask: view.layer_mask,
+                    flags,
+                    history_epoch: view.history_epoch,
+                };
+                let frustum = PrismFrustum(Frustum::from_planes(planes));
+                let mut world_from_view = view.world_from_view;
+                world_from_view.translation += origin;
+                let global = GlobalTransform(world_from_view);
+                Some((published.entity, (camera, frustum, global)))
+            })
+            .collect()
+    } else {
+        let mut query = world.query::<(Entity, &PrismCamera, &PrismFrustum, &GlobalTransform)>();
+        query
+            .iter(world)
+            .map(|(entity, camera, frustum, global)| (entity, (*camera, *frustum, *global)))
+            .collect()
+    };
     let mut scene = world
         .remove_resource::<PrismRenderScene>()
         .expect("visibility scene installed");
@@ -254,5 +305,151 @@ pub fn cull_views(world: &mut World) {
         if let Some(mut target) = world.get_mut::<PrismViewVisibility>(entity) {
             target.visible = visible;
         }
+    }
+}
+
+#[cfg(test)]
+mod camera_publication_tests {
+    use super::*;
+    use crate::visibility::{GeometryLod, GeometryLodChain};
+    use prism_app::App;
+    use prism_camera::{CameraIntent, CameraPose};
+    use prism_camera_ecs::{
+        CameraBundle, CameraIntentComponent, CameraPlugin, CameraPoseComponent, PublishedViews,
+    };
+    use prism_math::{Aabb3, Vec3};
+    use prism_render_architecture::abi::GenerationalHandle;
+    use prism_render_architecture::gpu_scene::{GeometryHandle, SceneMaterialHandle};
+    use prism_render_material::fallback_material_record;
+
+    fn handle(index: u32) -> GenerationalHandle {
+        GenerationalHandle::new(index, 1)
+    }
+
+    fn spawn_instance(app: &mut App, material: SceneMaterialHandle, layer: u32) -> Entity {
+        app.world_mut().spawn((
+            PrismRenderable {
+                geometry: handle(1),
+                material,
+                render_layers: layer,
+                flags: 0,
+            },
+            LocalBounds(Aabb3::from_center_half_extents(
+                Vec3::new(0.0, 0.0, -5.0),
+                Vec3::splat(0.5),
+            )),
+            GlobalTransform::IDENTITY,
+            PrismViewVisibility::default(),
+        ))
+    }
+
+    #[test]
+    fn camera_plugin_publication_drives_independent_visibility_views() {
+        let mut app = App::new();
+        app.add_plugins((CameraPlugin::new([640, 480]), PrismVisibilityPlugin));
+        {
+            let scene = app.world_mut().resource_mut::<PrismRenderScene>();
+            let geometry: GeometryHandle = handle(1);
+            let first_material: SceneMaterialHandle = handle(1);
+            let second_material: SceneMaterialHandle = handle(2);
+            scene.insert_geometry(GeometryLodChain {
+                geometry,
+                lods: vec![GeometryLod {
+                    level: 0,
+                    screen_error: 0.0,
+                    resident: true,
+                    fallback: true,
+                }],
+            });
+            scene.insert_material(fallback_material_record(first_material, 1));
+            scene.insert_material(fallback_material_record(second_material, 1));
+        }
+
+        let mut first_intent = CameraIntent::default();
+        first_intent.layer_mask = 1;
+        first_intent.lod_scale = 0.5;
+        let first_origin = prism_math::DVec3::new(10_000.0, 0.0, 0.0);
+        let first = app.world_mut().spawn(CameraBundle {
+            intent: CameraIntentComponent(first_intent),
+            pose: CameraPoseComponent(CameraPose {
+                position: first_origin,
+                world_origin: first_origin,
+                ..CameraPose::default()
+            }),
+            ..Default::default()
+        });
+        let mut second_intent = CameraIntent::default();
+        second_intent.layer_mask = 2;
+        second_intent.lod_scale = 2.0;
+        let second = app.world_mut().spawn(CameraBundle {
+            intent: CameraIntentComponent(second_intent),
+            pose: CameraPoseComponent(CameraPose::default()),
+            ..Default::default()
+        });
+        let first_instance = spawn_instance(&mut app, handle(1), 1);
+        let second_instance = spawn_instance(&mut app, handle(2), 2);
+        app.world_mut()
+            .get_mut::<LocalBounds>(first_instance)
+            .unwrap()
+            .0 = Aabb3::from_center_half_extents(Vec3::new(10_000.0, 0.0, -5.0), Vec3::splat(0.5));
+
+        app.update();
+
+        let (expected_matrix, expected_epoch) = {
+            let published = app.world().resource::<PublishedViews>();
+            assert_eq!(published.len(), 2);
+            let first_view = published.iter().find(|view| view.entity == first).unwrap();
+            let second_view = published.iter().find(|view| view.entity == second).unwrap();
+            assert_eq!(first_view.data.layer_mask, 1);
+            assert_eq!(second_view.data.layer_mask, 2);
+            assert_eq!(first_view.data.lod_scale, 0.5);
+            assert_eq!(second_view.data.lod_scale, 2.0);
+            let clip_from_absolute_world =
+                first_view.data.clip_from_world * Mat4::from_translation(-first_origin.as_vec3());
+
+            (
+                [
+                    clip_from_absolute_world.x_axis.to_array(),
+                    clip_from_absolute_world.y_axis.to_array(),
+                    clip_from_absolute_world.z_axis.to_array(),
+                    clip_from_absolute_world.w_axis.to_array(),
+                ],
+                first_view.data.history_epoch,
+            )
+        };
+
+        let mut render_world = World::new();
+        crate::surface_views::extract_surface_views(app.world_mut(), &mut render_world);
+        let surfaces = render_world.resource::<crate::surface_views::ExtractedSurfaceViews>();
+        let first_surface = surfaces.get(first).expect("published camera surface view");
+        let second_surface = surfaces.get(second).expect("second camera surface view");
+        assert_eq!(first_surface.viewport, [0, 0, 640, 480]);
+        assert_eq!(second_surface.viewport, [0, 0, 640, 480]);
+        assert_eq!(first_surface.history_epoch, expected_epoch);
+        assert_eq!(first_surface.clip_from_world, expected_matrix);
+
+        let scene = app.world().resource::<PrismRenderScene>();
+        let first_scene = scene.handle_for(first_instance).unwrap();
+        let second_scene = scene.handle_for(second_instance).unwrap();
+        let first_result = scene
+            .view_results()
+            .find(|(camera, _)| *camera == first)
+            .unwrap()
+            .1;
+        let second_result = scene
+            .view_results()
+            .find(|(camera, _)| *camera == second)
+            .unwrap()
+            .1;
+        assert_ne!(first_result.view.handle, second_result.view.handle);
+        assert_eq!(first_result.view.layer_mask, 1);
+        assert_eq!(second_result.view.layer_mask, 2);
+        assert_eq!(first_result.view.lod_scale, 0.5);
+        assert_eq!(second_result.view.lod_scale, 2.0);
+        assert_eq!(first_result.view.clip_from_world, expected_matrix);
+        assert_eq!(first_result.work.len(), 1);
+        assert_eq!(second_result.work.len(), 1);
+        assert_eq!(first_result.work[0].scene, first_scene);
+        assert_eq!(second_result.work[0].scene, second_scene);
     }
 }
