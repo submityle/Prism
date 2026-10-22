@@ -18,6 +18,27 @@ fn translated(x: f32) -> SceneTransform {
 }
 
 #[test]
+fn row_at_is_the_canonical_generation_and_tombstone_reader() {
+    let mut scene = CpuRenderScene::default();
+    assert_eq!(scene.row_at(0), None);
+
+    let mut create = SceneTransactionBuilder::new(1, 1);
+    create.push(SceneOperation::Create {
+        handle: handle(1),
+        record: InstanceRecord::default(),
+    });
+    assert!(scene.apply(&create.finish()).errors.is_empty());
+    let (generation, record) = scene.row_at(1).expect("created row");
+    assert_eq!(generation, 1);
+    assert_eq!(record, Some(&InstanceRecord::default()));
+
+    let mut destroy = SceneTransactionBuilder::new(2, 2);
+    destroy.push(SceneOperation::Destroy { handle: handle(1) });
+    assert!(scene.apply(&destroy.finish()).errors.is_empty());
+    assert_eq!(scene.row_at(1), Some((1, None)));
+}
+
+#[test]
 fn previous_transform_is_captured_once_per_frame() {
     let mut scene = CpuRenderScene::default();
     let mut create = SceneTransactionBuilder::new(1, 1);
