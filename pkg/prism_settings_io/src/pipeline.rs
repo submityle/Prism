@@ -1364,6 +1364,46 @@ mod tests {
     }
 
     #[test]
+    fn watcher_rejects_nested_array_values_that_violate_recursive_shape() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("settings.toml");
+        let mut builder = RegistryBuilder::new();
+        builder.namespace("render", "test").unwrap();
+        let definition = SettingDef::new(
+            "render.matrix",
+            "render",
+            Value::Array(vec![Value::Array(vec![Value::Float(1.0)])]),
+        )
+        .with_shape(prism_settings::ValueShape::bounded_array(
+            prism_settings::ValueShape::bounded_array(
+                prism_settings::ValueShape::scalar(prism_settings::ValueType::Float),
+                4,
+            ),
+            4,
+        ));
+        builder.register(definition);
+        let registry = builder.finish().unwrap();
+        let invalid = SettingsDocument::decode(
+            "prism_schema = 1\nvalues = { \"render.matrix\" = [[1.0, true]] }\n",
+        )
+        .unwrap();
+        crate::write_atomic(&path, &invalid, None::<&std::path::Path>).unwrap();
+
+        let mut watcher = SettingsWatcher::new(
+            &path,
+            None::<&std::path::Path>,
+            &registry,
+            MigrationChain::new(1),
+            Domain::Runtime,
+            SourceSpec::new(LayerKind::User, TrustLevel::User, "user-file"),
+        );
+        assert!(matches!(
+            watcher.poll(&[]),
+            Err(PipelineError::Candidate(_))
+        ));
+    }
+
+    #[test]
     fn watcher_migrates_removed_enum_options_before_current_schema_validation() {
         let directory = tempdir().unwrap();
         let path = directory.path().join("settings.toml");
