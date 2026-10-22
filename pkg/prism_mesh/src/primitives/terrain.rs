@@ -1,6 +1,4 @@
-use alloc::vec::Vec;
-
-use super::common::{build_mesh, positive, subdivisions};
+use super::common::{build_mesh, generated_counts, positive, reserve, subdivisions};
 use super::PrimitiveError;
 
 /// Builds a sampled XZ terrain patch with finite-difference normals.
@@ -17,7 +15,16 @@ pub fn terrain_patch(
     let depth = positive("depth", size[1])?;
     let x_segments = subdivisions("x", segments[0], 1)?;
     let z_segments = subdivisions("z", segments[1], 1)?;
-    let expected = ((x_segments + 1) * (z_segments + 1)) as usize;
+    let row = u64::from(x_segments) + 1;
+    let rows = u64::from(z_segments) + 1;
+    let (expected, index_count) = generated_counts(
+        row.checked_mul(rows)
+            .ok_or(PrimitiveError::CountOverflow { kind: "vertex" })?,
+        u64::from(x_segments)
+            .checked_mul(u64::from(z_segments))
+            .and_then(|count| count.checked_mul(6))
+            .ok_or(PrimitiveError::CountOverflow { kind: "index" })?,
+    )?;
     if heights.len() != expected {
         return Err(PrimitiveError::HeightCountMismatch {
             expected,
@@ -31,9 +38,9 @@ pub fn terrain_patch(
     let z_step = depth / z_segments as f32;
     let row = x_segments + 1;
     let sample = |x: u32, z: u32| heights[(z * row + x) as usize];
-    let mut positions = Vec::with_capacity(expected);
-    let mut normals = Vec::with_capacity(expected);
-    let mut uvs = Vec::with_capacity(expected);
+    let mut positions = reserve("vertex", expected)?;
+    let mut normals = reserve("vertex", expected)?;
+    let mut uvs = reserve("vertex", expected)?;
     for z in 0..=z_segments {
         let v = z as f32 / z_segments as f32;
         for x in 0..=x_segments {
@@ -65,7 +72,7 @@ pub fn terrain_patch(
             uvs.push([u, v]);
         }
     }
-    let mut indices = Vec::with_capacity((x_segments * z_segments * 6) as usize);
+    let mut indices = reserve("index", index_count)?;
     for z in 0..z_segments {
         for x in 0..x_segments {
             let a = z * row + x;

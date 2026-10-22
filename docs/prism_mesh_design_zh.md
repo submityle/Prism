@@ -847,7 +847,9 @@ Source(FBX/USD/glTF) → Scene Source IR → Mesh IR
 
 ### 19.5 2026-10-22 补充复核
 
-2026-10-22 Mesh 核心回归通过：`cargo test -p prism_mesh --lib --tests` 为 36 项库单测、16 项集成测试全部通过；新增 65,536 个材质分区规模测试，约束重叠校验维持排序扫描路径，并验证排序后错误仍报告原始分区索引。测试在独立 `/private/tmp/prism-mesh-target` 下运行。该结果只确认 `prism_mesh` 数据模型、变形参考实现及其集成契约；不覆盖资产构建、RenderApp、RenderScene、真实 GPU、产品级图像回归或完整场景性能门槛。此前主 target 磁盘不足导致的 RenderApp 测试未进入测试阶段，不记作通过或失败；构建产物已清理，后续验收仍以 §26 的逐项证据为准。
+2026-10-22 Mesh 核心回归通过：`cargo test -p prism_mesh --lib --tests` 为 37 项库单测、16 项集成测试全部通过；新增 65,536 个材质分区规模测试，约束重叠校验维持排序扫描路径，并验证排序后错误仍报告原始分区索引。测试在独立 target 下运行。该结果只确认 `prism_mesh` 数据模型、变形参考实现及其集成契约；不覆盖资产构建、RenderApp、RenderScene、真实 GPU、产品级图像回归或完整场景性能门槛。此前主 target 磁盘不足导致的 RenderApp 测试未进入测试阶段，不记作通过或失败；构建产物已清理，后续验收仍以 §26 的逐项证据为准。
+
+2026-10-23 复核同步原语网格生成器的极端分辨率门禁。`generated_counts` 在任何分配和网格循环之前验证 u32 ABI 计数与总工作集；位置、法线、UV、索引的预测载荷超过 256 MiB 时以 `WorkingSetExceeded` 拒绝，容器预留失败以 `AllocationFailed` 返回。独立 `/private/tmp/prism-mesh-audit-target` 下 `cargo test -p prism_mesh --lib --tests` 的 37 项库单测和 16 项集成测试通过；测试覆盖顶点 ABI 溢出、索引 ABI 溢出及超工作集拒绝。该上限只约束同步内建 primitive helper，不限制经资产构建/流送管线处理的生产网格；不把此单 crate 结果外推为 RenderApp、完整 Mesh GPU 或场景性能验收。
 
 ### 19.6 2026-10-22 RayTracing 几何身份复核
 
@@ -1114,7 +1116,7 @@ pub struct DeformationBudget { pub vertices_per_frame: u32, pub blas_refits_per_
 
 | 维度 | 产品级验收标准 | 本轮证据与结论 |
 |---|---|---|
-| 数据模型 | 属性/拓扑/索引/子网格/包围体/哈希有正反单测；格式矩阵覆盖 RHI 变体 | `prism_mesh` 36 项库单测与 16 项集成测试通过，含 65,536 材质分区规模和稳定重叠错误索引回归；该维度形成契约证据 |
+| 数据模型 | 属性/拓扑/索引/子网格/包围体/哈希有正反单测；格式矩阵覆盖 RHI 变体 | `prism_mesh` 37 项库单测与 16 项集成测试通过，含 65,536 材质分区规模和稳定重叠错误索引回归；该维度形成契约证据 |
 | 布局与标准路径 | 同属性集产生确定布局，上传字节与 draw 布局一致 | CPU 契约与 Metal 标准/半精度分流 8×8 像素测试通过；不等同于全档位 Golden 图集 |
 | 虚拟几何 | 固定 Cluster、CLST v3、QEM LOD、CPU 计划、页 ABI、LOD/cull/raster GPU twin 一致 | `prism_asset_build_core --lib` 136 项、`virtual_geometry_lod` 定向 12 项通过；属性感知简化保留精确源顶点与全部 typed 属性；原始 CLST v3 vertex-pulling render pass 已通过颜色读回，整页 IO 一致不再被误写成属性 shader 着色证据，但仍不替代完整场景 Golden 图 |
 | 形变 | Skin/Morph、缓存、预算与深度/阴影/速度/RT 消费一致 | 批量 Morph/LBS/修正的 CPU/GPU 对照（含 50,000 顶点）与 16×16 current/previous 直接绘制通过；数学蒙皮 parity 4 项通过。全部引擎 pass/RT 消费接线和跨档位 Golden 图不由这些独立测试证明 |

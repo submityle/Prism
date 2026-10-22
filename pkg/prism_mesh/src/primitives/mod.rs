@@ -32,6 +32,26 @@ pub enum PrimitiveError {
         /// Minimum accepted value.
         minimum: u32,
     },
+    /// Generated vertex/index counts exceed the Mesh ABI's u32 range.
+    CountOverflow {
+        /// `vertex` or `index`.
+        kind: &'static str,
+    },
+    /// The complete generated vertex/index payload exceeds the primitive
+    /// generator's bounded working-set budget.
+    WorkingSetExceeded {
+        /// Requested payload bytes.
+        requested: u64,
+        /// Maximum accepted payload bytes.
+        maximum: u64,
+    },
+    /// Output reservation failed before generation started.
+    AllocationFailed {
+        /// `vertex` or `index`.
+        kind: &'static str,
+        /// Requested element count.
+        elements: usize,
+    },
     /// The generated data could not satisfy the mesh contract.
     Mesh(crate::MeshError),
     /// Height sample count does not match the requested grid.
@@ -62,6 +82,16 @@ impl core::fmt::Display for PrimitiveError {
                 f,
                 "primitive subdivision {name} must be >= {minimum}, got {value}"
             ),
+            Self::CountOverflow { kind } => {
+                write!(f, "generated mesh {kind} count exceeds the u32 mesh ABI")
+            }
+            Self::WorkingSetExceeded { requested, maximum } => write!(
+                f,
+                "generated primitive needs {requested} bytes, exceeding the {maximum}-byte working-set limit"
+            ),
+            Self::AllocationFailed { kind, elements } => {
+                write!(f, "could not reserve {elements} generated mesh {kind} elements")
+            }
             Self::Mesh(error) => write!(f, "generated primitive violates mesh contract: {error}"),
             Self::HeightCountMismatch { expected, found } => {
                 write!(f, "terrain height count is {found}, expected {expected}")
@@ -146,6 +176,38 @@ mod tests {
         assert!(matches!(
             terrain_patch([1.0, 1.0], [1, 1], &[0.0]),
             Err(PrimitiveError::HeightCountMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn generators_reject_unrepresentable_counts_before_allocating_or_iterating() {
+        assert!(matches!(
+            plane([1.0, 1.0], [u32::MAX, 1]),
+            Err(PrimitiveError::CountOverflow { kind: "vertex" })
+        ));
+        assert!(matches!(
+            terrain_patch([1.0, 1.0], [u32::MAX, 1], &[]),
+            Err(PrimitiveError::CountOverflow { kind: "vertex" })
+        ));
+        assert!(matches!(
+            uv_sphere(1.0, u32::MAX, 2),
+            Err(PrimitiveError::CountOverflow { kind: "vertex" })
+        ));
+        assert!(matches!(
+            capsule(1.0, 0.0, u32::MAX, 1),
+            Err(PrimitiveError::CountOverflow { kind: "vertex" })
+        ));
+
+        // Counts can fit the vertex ABI while the six-index-per-cell expansion
+        // exceeds the index ABI; reject it before attempting a multi-gigabyte
+        // vertex allocation.
+        assert!(matches!(
+            plane([1.0, 1.0], [u32::MAX / 6 + 1, 1]),
+            Err(PrimitiveError::CountOverflow { kind: "index" })
+        ));
+        assert!(matches!(
+            plane([1.0, 1.0], [4096, 4096]),
+            Err(PrimitiveError::WorkingSetExceeded { .. })
         ));
     }
 }

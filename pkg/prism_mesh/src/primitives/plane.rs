@@ -1,6 +1,4 @@
-use alloc::vec::Vec;
-
-use super::common::{build_mesh, positive, subdivisions};
+use super::common::{build_mesh, generated_counts, positive, reserve, subdivisions};
 use super::PrimitiveError;
 
 /// Builds a centered XZ plane with +Y normals and tiled [0, 1] UVs.
@@ -10,9 +8,19 @@ pub fn plane(size: [f32; 2], segments: [u32; 2]) -> Result<crate::Mesh, Primitiv
     let depth = positive("depth", size[1])?;
     let x_segments = subdivisions("x", segments[0], 1)?;
     let z_segments = subdivisions("z", segments[1], 1)?;
-    let mut positions = Vec::with_capacity(((x_segments + 1) * (z_segments + 1)) as usize);
-    let mut normals = Vec::with_capacity(positions.capacity());
-    let mut uvs = Vec::with_capacity(positions.capacity());
+    let row = u64::from(x_segments) + 1;
+    let rows = u64::from(z_segments) + 1;
+    let (vertex_count, index_count) = generated_counts(
+        row.checked_mul(rows)
+            .ok_or(PrimitiveError::CountOverflow { kind: "vertex" })?,
+        u64::from(x_segments)
+            .checked_mul(u64::from(z_segments))
+            .and_then(|count| count.checked_mul(6))
+            .ok_or(PrimitiveError::CountOverflow { kind: "index" })?,
+    )?;
+    let mut positions = reserve("vertex", vertex_count)?;
+    let mut normals = reserve("vertex", vertex_count)?;
+    let mut uvs = reserve("vertex", vertex_count)?;
     for z in 0..=z_segments {
         let v = z as f32 / z_segments as f32;
         for x in 0..=x_segments {
@@ -22,7 +30,7 @@ pub fn plane(size: [f32; 2], segments: [u32; 2]) -> Result<crate::Mesh, Primitiv
             uvs.push([u, v]);
         }
     }
-    let mut indices = Vec::with_capacity((x_segments * z_segments * 6) as usize);
+    let mut indices = reserve("index", index_count)?;
     let row = x_segments + 1;
     for z in 0..z_segments {
         for x in 0..x_segments {

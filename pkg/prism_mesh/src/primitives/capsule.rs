@@ -1,6 +1,4 @@
-use alloc::vec::Vec;
-
-use super::common::{build_mesh, positive, subdivisions};
+use super::common::{build_mesh, generated_counts, positive, reserve, subdivisions};
 use super::PrimitiveError;
 
 /// Builds a Y-axis capsule from two hemispheres and a cylindrical section.
@@ -22,11 +20,24 @@ pub fn capsule(
     };
     let sectors = subdivisions("sectors", sectors, 3)?;
     let hemisphere_rings = subdivisions("hemisphere_rings", hemisphere_rings, 1)?;
-    let ring_count = hemisphere_rings * 2 + 2;
-    let stride = sectors + 1;
-    let mut positions = Vec::with_capacity((ring_count * stride) as usize);
-    let mut normals = Vec::with_capacity(positions.capacity());
-    let mut uvs = Vec::with_capacity(positions.capacity());
+    let ring_count = hemisphere_rings
+        .checked_mul(2)
+        .and_then(|count| count.checked_add(2))
+        .ok_or(PrimitiveError::CountOverflow { kind: "vertex" })?;
+    let stride = sectors
+        .checked_add(1)
+        .ok_or(PrimitiveError::CountOverflow { kind: "vertex" })?;
+    let vertices = u64::from(ring_count)
+        .checked_mul(u64::from(stride))
+        .ok_or(PrimitiveError::CountOverflow { kind: "vertex" })?;
+    let indices = u64::from(ring_count - 1)
+        .checked_mul(u64::from(sectors))
+        .and_then(|count| count.checked_mul(6))
+        .ok_or(PrimitiveError::CountOverflow { kind: "index" })?;
+    let (vertex_count, index_count) = generated_counts(vertices, indices)?;
+    let mut positions = reserve("vertex", vertex_count)?;
+    let mut normals = reserve("vertex", vertex_count)?;
+    let mut uvs = reserve("vertex", vertex_count)?;
     for ring in 0..ring_count {
         let (y, ring_radius, normal_y) = if ring <= hemisphere_rings {
             let angle = core::f32::consts::FRAC_PI_2 * ring as f32 / hemisphere_rings as f32;
@@ -61,7 +72,7 @@ pub fn capsule(
             uvs.push([u, v]);
         }
     }
-    let mut indices = Vec::with_capacity(((ring_count - 1) * sectors * 6) as usize);
+    let mut indices = reserve("index", index_count)?;
     for ring in 0..ring_count - 1 {
         for sector in 0..sectors {
             let a = ring * stride + sector;
