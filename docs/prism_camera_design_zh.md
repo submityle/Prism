@@ -1282,7 +1282,7 @@ renderer 接线期间，`CameraIntent`/`ViewData` 的每视图可见性元数据
 
 ### 28.1 相机动画片段与过场（`cutscene`）
 
-`CameraTrack::into_validated` 在载入边界检查版本、非空/有界关键帧、严格递增 tick、有限姿态/焦距/曝光，然后消费原始轨迹生成不可变 `ValidatedCameraTrack`；fixed-tick 热路径不重复 O(keyframe 数) 全量校验，单帧采样为二分查找 O(log n) 加常量插值。时间切线按相邻 tick 间距归一并限制焦距段内过冲。轨迹结束按 `CutsceneEndPolicy::{Hold,BlendToPrevious,Deactivate}` 处理，采样状态显式返回 `active` 与 `handoff_to_previous`。无效资产在载入时拒绝，调用方保持当前 VCam；事件键只作为采样值返回，事件去重/消费由上层时间线负责，当前相机核心不伪称已提供去重派发。
+`CameraTrack::into_validated` 在载入边界检查版本、非空/有界关键帧、严格递增 tick、有限姿态/焦距/曝光，然后消费原始轨迹生成不可变 `ValidatedCameraTrack`；fixed-tick 热路径不重复 O(keyframe 数) 全量校验，单帧采样为二分查找 O(log n) 加常量插值。时间切线按相邻 tick 间距归一并限制焦距段内过冲。轨迹结束按 `CutsceneEndPolicy::{Hold,BlendToPrevious,Deactivate}` 处理，采样状态显式返回 `active` 与 `handoff_to_previous`。无效资产在载入时拒绝，调用方保持当前 VCam。每个播放实例持有独立 `CameraTrackEventCursor`，按 `(last_tick, tick]` 通过二分定位并顺序输出跨越的事件键，复杂度 O(log n + k)，调用方复用输出缓冲；首次调用只建立时间基线，同 tick 不重复产出，倒退 tick 返回结构化错误且不修改游标与输出。游标保证单个播放实例按单调 tick 读取时不重复返回已提交区间，但进程内事件队列、ack/失败重试以及向应用事件总线投递仍由集成层负责，不能把游标单独视为事务式 exactly-once 派发。
 
 ### 28.2 焦点追踪与自动对焦（`autofocus`）
 

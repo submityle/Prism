@@ -289,6 +289,63 @@ pub struct ValidatedCameraTrack {
     track: CameraTrack,
 }
 
+/// Stateful, allocation-free event cursor for one validated camera track.
+///
+/// Keep one cursor per playing track instance. The cursor consumes authored
+/// keyframe events exactly once as fixed ticks advance, including when a
+/// caller skips over several keyframes in one update.
+#[cfg(feature = "cutscene")]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct CameraTrackEventCursor {
+    last_tick: Option<u64>,
+}
+
+/// Failure to advance an event cursor monotonically.
+#[cfg(feature = "cutscene")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CameraTrackEventError {
+    /// The requested tick precedes the cursor's last committed tick.
+    TickReversed { previous: u64, requested: u64 },
+}
+
+#[cfg(feature = "cutscene")]
+impl CameraTrackEventCursor {
+    /// Returns the last committed tick, or `None` before the first advance.
+    #[must_use]
+    pub const fn last_tick(self) -> Option<u64> {
+        self.last_tick
+    }
+
+    /// Advances through `(last_tick, tick]`, replacing `output` with crossed
+    /// event keys in authored order. The first call establishes a baseline and
+    /// emits no historical events. Equal ticks emit nothing; reversed ticks
+    /// leave both the cursor and output unchanged.
+    pub fn advance(
+        &mut self,
+        track: &ValidatedCameraTrack,
+        tick: u64,
+        output: &mut Vec<u64>,
+    ) -> Result<(), CameraTrackEventError> {
+        if let Some(previous) = self.last_tick {
+            if tick < previous {
+                return Err(CameraTrackEventError::TickReversed {
+                    previous,
+                    requested: tick,
+                });
+            }
+            if tick == previous {
+                output.clear();
+                return Ok(());
+            }
+            track.append_event_keys(previous, tick, output);
+        } else {
+            output.clear();
+        }
+        self.last_tick = Some(tick);
+        Ok(())
+    }
+}
+
 #[cfg(feature = "cutscene")]
 impl ValidatedCameraTrack {
     /// Samples the validated track without repeating its O(keyframe-count) validation.
@@ -299,6 +356,29 @@ impl ValidatedCameraTrack {
     /// Returns the number of immutable keyframes in this track.
     pub fn keyframe_count(&self) -> usize {
         self.track.keyframes.len()
+    }
+
+    /// Appends events in `(from_tick, through_tick]` without rescanning the
+    /// prefix. The output buffer is cleared first and retains its capacity.
+    /// Complexity is `O(log N + K)` for `N` keyframes and `K` crossed events.
+    fn append_event_keys(&self, from_tick: u64, through_tick: u64, output: &mut Vec<u64>) {
+        output.clear();
+        if through_tick <= from_tick {
+            return;
+        }
+        let first = self
+            .track
+            .keyframes
+            .partition_point(|frame| frame.tick <= from_tick);
+        let end = self
+            .track
+            .keyframes
+            .partition_point(|frame| frame.tick <= through_tick);
+        output.extend(
+            self.track.keyframes[first..end]
+                .iter()
+                .map(|frame| frame.event_key),
+        );
     }
 }
 
@@ -1182,6 +1262,8 @@ mod tests {
     use super::*;
     #[cfg(feature = "determinism")]
     use crate::{derive_view, CameraIntent, CameraPose, ViewHistory};
+    #[cfg(feature = "cutscene")]
+    use alloc::vec;
     #[cfg(any(
         feature = "cutscene",
         feature = "determinism",
@@ -1258,6 +1340,63 @@ mod tests {
         assert!(!track.sample_state(2, fallback).active);
         track.end_policy = CutsceneEndPolicy::BlendToPrevious;
         assert!(track.sample_state(2, fallback).handoff_to_previous);
+    }
+
+    #[cfg(feature = "cutscene")]
+    #[test]
+    fn event_cursor_consumes_crossed_keys_once_in_authored_order() {
+        let mut track = CameraTrack::default();
+        for (tick, event_key) in [(2, 20), (5, 50), (9, 90)] {
+            assert!(track.push(CameraKeyframe {
+                tick,
+                pose: CameraPose::default(),
+                focal_length_mm: 50.0,
+                exposure: Exposure::default(),
+                event_key,
+            }));
+        }
+        let track = track.into_validated().unwrap();
+        let mut cursor = CameraTrackEventCursor::default();
+        let mut output = vec![999];
+
+        cursor.advance(&track, 1, &mut output).unwrap();
+        assert!(output.is_empty());
+        cursor.advance(&track, 5, &mut output).unwrap();
+        assert_eq!(output, [20, 50]);
+        let capacity = output.capacity();
+        cursor.advance(&track, 5, &mut output).unwrap();
+        assert!(output.is_empty());
+        assert!(output.capacity() >= capacity);
+        cursor.advance(&track, 12, &mut output).unwrap();
+        assert_eq!(output, [90]);
+    }
+
+    #[cfg(feature = "cutscene")]
+    #[test]
+    fn event_cursor_rejects_reverse_time_without_mutating_state_or_output() {
+        let mut track = CameraTrack::default();
+        assert!(track.push(CameraKeyframe {
+            tick: 4,
+            pose: CameraPose::default(),
+            focal_length_mm: 50.0,
+            exposure: Exposure::default(),
+            event_key: 44,
+        }));
+        let track = track.into_validated().unwrap();
+        let mut cursor = CameraTrackEventCursor::default();
+        let mut output = Vec::new();
+        cursor.advance(&track, 8, &mut output).unwrap();
+        output.push(7);
+
+        assert_eq!(
+            cursor.advance(&track, 7, &mut output),
+            Err(CameraTrackEventError::TickReversed {
+                previous: 8,
+                requested: 7,
+            })
+        );
+        assert_eq!(cursor.last_tick(), Some(8));
+        assert_eq!(output, [7]);
     }
 
     #[cfg(feature = "determinism")]
