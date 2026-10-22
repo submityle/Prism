@@ -762,6 +762,36 @@ mod tests {
     }
 
     #[test]
+    fn derives_on_violation_policy_and_registry_applies_it() {
+        #[derive(Reflect, Default)]
+        struct PolicyConfig {
+            #[reflect(setting, range(0.0..=1.0), on_violation = "clamp")]
+            clamped: f32,
+            #[reflect(setting, range(0.0..=1.0), on_violation = "reject")]
+            rejected: f32,
+        }
+
+        let schema = derive_settings_registry::<PolicyConfig>("policy", "prism_app").unwrap();
+        let (clamped_id, clamped) = schema.get(&"policy.clamped".into()).unwrap();
+        let (rejected_id, rejected) = schema.get(&"policy.rejected".into()).unwrap();
+        assert_eq!(clamped.on_violation, prism_settings::ViolationPolicy::Clamp);
+        assert_eq!(
+            rejected.on_violation,
+            prism_settings::ViolationPolicy::Reject
+        );
+        assert_eq!(
+            schema
+                .validate_value(clamped_id, Value::Float(2.0))
+                .unwrap(),
+            Value::Float(1.0)
+        );
+        assert!(matches!(
+            schema.validate_value(rejected_id, Value::Float(2.0)),
+            Err(SettingsError::OutOfRange { .. })
+        ));
+    }
+
+    #[test]
     fn rejects_metadata_type_mismatch_and_unsupported_fields() {
         #[derive(Reflect, Default)]
         struct WrongDefault {

@@ -17,6 +17,8 @@
 //! - `range(min..=max)` / `clamp(min..=max)` — inclusive numeric range used by
 //!   [`schema::validate`](prism_reflect::schema::validate) and
 //!   [`schema::clamp`](prism_reflect::schema::clamp).
+//! - `on_violation = "clamp"` or `on_violation = "reject"` — settings range
+//!   behavior consumed by Prism's reflected settings registry.
 //! - `default = <lit>` — default-value attribute.
 //! - `readonly` / `hidden` / `required` / `setting` — boolean flags (bare or
 //!   `= bool`). `setting` explicitly opts a field into settings-schema
@@ -274,6 +276,14 @@ fn parse_field_reflect(attr: &syn::Attribute, fm: &mut FieldMeta) -> syn::Result
             fm.setting = parse_flag(&meta)?;
         } else if path.is_ident("required") {
             fm.required = parse_flag(&meta)?;
+        } else if path.is_ident("on_violation") {
+            let text: syn::LitStr = meta.value()?.parse()?;
+            match text.value().as_str() {
+                "clamp" | "reject" => {}
+                _ => return Err(meta.error("on_violation must be \"clamp\" or \"reject\"")),
+            }
+            fm.custom
+                .push(("on_violation".to_owned(), AttrLit::Text(text.value())));
         } else if path.is_ident("clamp") || path.is_ident("range") {
             let content;
             syn::parenthesized!(content in meta.input);
