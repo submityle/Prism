@@ -62,6 +62,8 @@ pub struct NestedSceneTreeRegistryError {
 #[derive(Default)]
 pub struct NestedSceneTreeRegistry {
     trees: BTreeMap<NestedSceneTreeId, prism_scene::SceneTreeSpawn>,
+    root_templates: BTreeMap<NestedSceneTreeId, StableGuid>,
+    trees_by_template: BTreeMap<StableGuid, BTreeSet<NestedSceneTreeId>>,
     next_id: u64,
     pending_invalidations: BTreeSet<StableGuid>,
 }
@@ -72,16 +74,28 @@ impl NestedSceneTreeRegistry {
     pub const fn new() -> Self {
         Self {
             trees: BTreeMap::new(),
+            root_templates: BTreeMap::new(),
+            trees_by_template: BTreeMap::new(),
             next_id: 0,
             pending_invalidations: BTreeSet::new(),
         }
     }
 
-    /// Registers ownership of a newly spawned live tree.
+    /// Registers ownership of a newly spawned live tree, deriving its root
+    /// template identity from the live ECS anchor for index consistency.
     pub fn register(
         &mut self,
+        world: &prism_ecs::world::World,
         tree: prism_scene::SceneTreeSpawn,
     ) -> Result<NestedSceneTreeId, prism_scene::SceneTreeSpawn> {
+        let root_template = tree
+            .root
+            .root
+            .and_then(|root| world.get::<prism_scene::SceneInstance>(root))
+            .map(|instance| instance.template);
+        let Some(root_template) = root_template else {
+            return Err(tree);
+        };
         let Some(next) = self.next_id.checked_add(1) else {
             return Err(tree);
         };
@@ -89,6 +103,12 @@ impl NestedSceneTreeRegistry {
         self.next_id = next;
         let previous = self.trees.insert(id, tree);
         debug_assert!(previous.is_none());
+        let previous = self.root_templates.insert(id, root_template);
+        debug_assert!(previous.is_none());
+        self.trees_by_template
+            .entry(root_template)
+            .or_default()
+            .insert(id);
         Ok(id)
     }
 
@@ -112,7 +132,16 @@ impl NestedSceneTreeRegistry {
 
     /// Removes ownership without despawning the tree.
     pub fn unregister(&mut self, id: NestedSceneTreeId) -> Option<prism_scene::SceneTreeSpawn> {
-        self.trees.remove(&id)
+        let tree = self.trees.remove(&id)?;
+        if let Some(guid) = self.root_templates.remove(&id)
+            && let Some(ids) = self.trees_by_template.get_mut(&guid)
+        {
+            ids.remove(&id);
+            if ids.is_empty() {
+                self.trees_by_template.remove(&guid);
+            }
+        }
+        Some(tree)
     }
 
     /// Despawns a registered tree and removes its ownership record.
@@ -164,7 +193,19 @@ impl NestedSceneTreeRegistry {
         if self.pending_invalidations.is_empty() || self.trees.is_empty() {
             return Ok(());
         }
-        let ids: Vec<_> = self.trees.keys().copied().collect();
+        let ids: Vec<_> = self
+            .pending_invalidations
+            .iter()
+            .filter_map(|guid| self.trees_by_template.get(guid))
+            .flat_map(|ids| ids.iter().copied())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        if ids.is_empty() {
+            // Retain the invalidation so an owner can retry after registering
+            // new live trees for the unavailable template.
+            return Ok(());
+        }
         let trees: Vec<_> = ids
             .iter()
             .map(|id| {
@@ -186,7 +227,13 @@ impl NestedSceneTreeRegistry {
                     let previous = self.trees.insert(id, tree);
                     debug_assert!(previous.is_none());
                 }
-                self.pending_invalidations.clear();
+                // A pending GUID with live registrations is acknowledged only
+                // after all matching trees committed successfully.
+                for guid in &invalidated {
+                    if self.trees_by_template.contains_key(guid) {
+                        self.pending_invalidations.remove(guid);
+                    }
+                }
                 Ok(())
             }
             Err(error) => {
@@ -799,7 +846,9 @@ mod tests {
         let (mut world, tree, provider) = live_tree(guid);
         let previous_root = tree.root.root.expect("fixture root");
         let mut registry = NestedSceneTreeRegistry::new();
-        let id = registry.register(tree).expect("registration id available");
+        let id = registry
+            .register(&world, tree)
+            .expect("registration id available");
         let outcome = SceneTemplateApplyOutcome {
             invalidations: vec![SceneTemplateInvalidation {
                 changed: guid,
@@ -837,6 +886,72 @@ mod tests {
         assert_eq!(registry.despawn(&mut world, id), Some(1));
         assert!(registry.is_empty());
         assert_eq!(world.entity_count(), 0);
+    }
+
+    #[test]
+    fn registry_indexes_roots_and_leaves_unmatched_tree_handles_stable() {
+        let changed = StableGuid::from_u128(0x8383);
+        let unrelated = StableGuid::from_u128(0x8484);
+        let mut changed_template = template(Vec::new());
+        changed_template.guid = changed;
+        let mut unrelated_template = template(Vec::new());
+        unrelated_template.guid = unrelated;
+        let provider = NestedProvider {
+            templates: BTreeMap::from([
+                (changed, changed_template.clone()),
+                (unrelated, unrelated_template.clone()),
+            ]),
+        };
+        let mut world = World::new();
+        let changed_tree = spawn_nested_typed(
+            &mut world,
+            &changed_template,
+            TypedSpawnPlan::new().with_bundle(LocalEntityId::new(0), RuntimeMarker),
+            &provider,
+            NestedSpawnLimits::default(),
+        )
+        .unwrap();
+        let unrelated_tree = spawn_nested_typed(
+            &mut world,
+            &unrelated_template,
+            TypedSpawnPlan::new().with_bundle(LocalEntityId::new(0), RuntimeMarker),
+            &provider,
+            NestedSpawnLimits::default(),
+        )
+        .unwrap();
+        let unrelated_root = unrelated_tree.root.root.unwrap();
+        let mut registry = NestedSceneTreeRegistry::new();
+        let changed_id = registry
+            .register(&world, changed_tree)
+            .expect("changed tree registration");
+        let unrelated_id = registry
+            .register(&world, unrelated_tree)
+            .expect("unrelated tree registration");
+        let outcome = SceneTemplateApplyOutcome {
+            invalidations: vec![SceneTemplateInvalidation {
+                changed,
+                dependent: changed,
+                reloadable: true,
+            }],
+            reload_sectors: Vec::new(),
+        };
+
+        registry
+            .apply(
+                &mut world,
+                &outcome,
+                &provider,
+                NestedSpawnLimits::default(),
+            )
+            .expect("matching registration reloads");
+
+        assert_eq!(
+            registry.get(unrelated_id).unwrap().root.root,
+            Some(unrelated_root)
+        );
+        assert!(world.contains(unrelated_root));
+        assert!(registry.get(changed_id).unwrap().root.root.is_some());
+        assert_eq!(registry.len(), 2);
     }
 
     #[test]
