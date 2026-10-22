@@ -161,8 +161,7 @@ impl VirtualGeometryAsset {
         if self.nodes.is_empty() || self.roots.is_empty() {
             return Err(VirtualGeometryAssetError::InvalidValue("hierarchy roots"));
         }
-        let hierarchy = super::ClusterHierarchy::new(self.nodes.clone(), self.roots.clone());
-        if !hierarchy.is_well_formed() {
+        if !super::hierarchy::ClusterHierarchy::validate_parts(&self.nodes, &self.roots) {
             return Err(VirtualGeometryAssetError::InvalidHierarchy);
         }
         let mut page_by_key = BTreeMap::new();

@@ -113,13 +113,12 @@ impl ClusterHierarchy {
     /// Wraps a node array and its root indices.
     #[must_use]
     pub fn new(nodes: Vec<ClusterNode>, roots: Vec<u32>) -> Self {
-        let mut hierarchy = Self {
+        let well_formed = Self::validate_parts(&nodes, &roots);
+        Self {
             nodes,
             roots,
-            well_formed: false,
-        };
-        hierarchy.well_formed = hierarchy.validate_structure();
-        hierarchy
+            well_formed,
+        }
     }
 
     /// The backing node array.
@@ -144,16 +143,20 @@ impl ClusterHierarchy {
         self.well_formed
     }
 
-    fn validate_structure(&self) -> bool {
-        let len = self.nodes.len();
+    /// Validates borrowed hierarchy tables without cloning their nodes.
+    ///
+    /// Asset admission uses this entry point so validating a large CLST asset
+    /// does not temporarily duplicate its complete hierarchy.
+    pub(super) fn validate_parts(nodes: &[ClusterNode], roots: &[u32]) -> bool {
+        let len = nodes.len();
         let Ok(len) = u32::try_from(len) else {
             // More nodes than a u32 index can address; treat as malformed.
             return false;
         };
-        if self.roots.iter().any(|&r| r >= len) {
+        if roots.iter().any(|&r| r >= len) {
             return false;
         }
-        if !self.nodes.iter().all(|node| {
+        if !nodes.iter().all(|node| {
             let Some(end) = node.first_child.checked_add(node.child_count) else {
                 return false;
             };
@@ -165,15 +168,15 @@ impl ClusterHierarchy {
         // A malformed cycle would make the cut walk revisit nodes forever. Use
         // iterative depth-first search so validation remains safe for deeply
         // nested assets without consuming the call stack.
-        let mut state = alloc::vec![0_u8; self.nodes.len()];
-        for start in 0..self.nodes.len() {
+        let mut state = alloc::vec![0_u8; nodes.len()];
+        for start in 0..nodes.len() {
             if state[start] != 0 {
                 continue;
             }
             state[start] = 1; // currently being visited
             let mut stack = alloc::vec![(start, 0_u32)];
             while let Some((index, next_child)) = stack.last_mut() {
-                let node = self.nodes[*index];
+                let node = nodes[*index];
                 if *next_child == node.child_count {
                     state[*index] = 2; // completely visited
                     stack.pop();
