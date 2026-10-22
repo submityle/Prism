@@ -327,7 +327,9 @@ pub use schedule::{
     ExitConfirmation, First, Last, PostStartup, PostUpdate, PreStartup, PreUpdate, Shutdown,
     Startup, StateTransition, Update,
 };
-pub use settings_runtime::SettingsRuntime;
+pub use settings_runtime::{
+    PreparedSettingsUpdate, SettingsRuntime, SettingsRuntimeCheckpoint, SettingsRuntimeError,
+};
 pub use state::{
     ComputeDepth, ComputedStates, OnTransition, StateScoped, StateTransitionSet, SubStates,
 };
@@ -393,7 +395,9 @@ pub mod prelude {
         ExitConfirmation, First, Last, PostStartup, PostUpdate, PreStartup, PreUpdate, Shutdown,
         Startup, StateTransition, Update,
     };
-    pub use crate::settings_runtime::SettingsRuntime;
+    pub use crate::settings_runtime::{
+        PreparedSettingsUpdate, SettingsRuntime, SettingsRuntimeCheckpoint, SettingsRuntimeError,
+    };
     pub use crate::state::{
         ComputeDepth, ComputedStates, OnTransition, StateScoped, StateTransitionSet, SubStates,
     };
