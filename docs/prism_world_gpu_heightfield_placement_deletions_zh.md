@@ -527,3 +527,20 @@ CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 cargo test -p prism_world_gpu --fe
 `target` 汇总仍约 166 MiB。因进程枚举权限受限且容量继续下降，本轮未重试 GPU 编译，
 也未对 runtime 包做 cargo clean。runtime 183/183 是本轮实际测试结果；GPU feature
 仍待在空间和共享构建目录安全条件恢复后复验。
+
+### 磁盘恢复后的 GPU feature 复验
+
+随后共享卷可用空间回升至约 1.8 GiB，故重新执行此前失败的 GPU feature 命令：
+
+```bash
+CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 cargo test -p prism_world_gpu --features gpu --lib --offline -j 1 --quiet
+```
+
+结果 **139 passed、0 failed、0 ignored**。结合本轮 runtime 命令
+`CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 cargo test -p prism_world_runtime --lib --offline -j 1 --quiet`
+的 **183 passed**，这两项共享工作树回归现均通过；它们不是干净提交树构建证据。
+之前报告的 `LayeredCellManifest.admitted_layers` 错误本轮没有复现，且未修改
+`data_layers.rs`。测试后 `cargo clean -p prism_world_gpu --dry-run` 精确报告
+13 个文件、8.0 MiB，实际按包清理同样移除这 13 个文件；未清理其他 package 或共享
+target 根目录。GPU feature 路径不再因本轮磁盘问题待测；独立 clean-HEAD workspace
+feature 冲突和整个 World 产品接线等边界仍保持未完成。
