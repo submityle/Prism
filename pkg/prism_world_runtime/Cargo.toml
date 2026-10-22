@@ -50,6 +50,11 @@ name = "scatter_deletions"
 harness = false
 required-features = ["std"]
 
+[[bench]]
+name = "hlod_plan"
+harness = false
+required-features = ["std"]
+
 [[example]]
 name = "placement_deletions"
 required-features = ["std", "placement"]
