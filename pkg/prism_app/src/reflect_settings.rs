@@ -9,9 +9,11 @@ use prism_reflect::{
     GetTypeRegistration, Reflect, ReflectRef, TypeInfo, Typed, VariantKind,
 };
 use prism_settings::{
-    Constraints, RegistryBuilder, SettingDef, SettingsError, SettingsRegistry, Value,
+    Constraints, RegistryBuilder, SettingDef, SettingsError, SettingsRegistry, Value, ValueShape,
 };
 use std::{error::Error, fmt};
+
+const MAX_REFLECT_SETTING_ARRAY_LEN: usize = 1024;
 
 /// Failure while deriving a canonical settings registry.
 #[derive(Debug)]
@@ -75,7 +77,10 @@ impl Error for ReflectSettingsError {}
 /// are excluded.
 /// docs, categories, ranges, defaults, and read-only attributes are mapped
 /// into canonical definitions. Scalar defaults support bool, signed/unsigned
-/// integers fitting `i64`, `f32`, `f64`, and `String`. Other types fail closed.
+/// integers fitting `i64`, `f32`, `f64`, and `String`. Explicit settings may
+/// also be homogeneous `Vec<T>` or `[T; N]` values with scalar elements; `Vec`
+/// values are bounded by [`MAX_REFLECT_SETTING_ARRAY_LEN`]. Other types fail
+/// closed.
 pub fn derive_settings_registry<T>(
     namespace: &str,
     owner: &str,
@@ -115,7 +120,7 @@ where
                     type_name: default.type_name(),
                     field: name.to_owned(),
                 })?;
-        let (rust_default, enum_options) = match reflected.reflect_ref() {
+        let (rust_default, shape, enum_options) = match reflected.reflect_ref() {
             ReflectRef::Enum(active) => {
                 let TypeInfo::Enum(enum_info) = reflected.type_info() else {
                     return Err(ReflectSettingsError::UnsupportedValue {
@@ -145,15 +150,56 @@ where
                         field: name.to_owned(),
                         type_name: descriptor.type_name().to_owned(),
                     })?;
-                (Value::Enum(default.id), enum_options)
+                (
+                    Value::Enum(default.id),
+                    ValueShape::scalar(prism_settings::ValueType::Enum),
+                    enum_options,
+                )
             }
-            _ => (
-                from_reflect(reflected).ok_or_else(|| ReflectSettingsError::UnsupportedValue {
-                    field: name.to_owned(),
-                    type_name: descriptor.type_name().to_owned(),
-                })?,
-                Vec::new(),
-            ),
+            ReflectRef::List(list) => {
+                let TypeInfo::List(info) = reflected.type_info() else {
+                    return Err(ReflectSettingsError::UnsupportedValue {
+                        field: name.to_owned(),
+                        type_name: descriptor.type_name().to_owned(),
+                    });
+                };
+                let (value, shape) = from_reflect_sequence(
+                    list.iter_reflect(),
+                    list.len(),
+                    info.item_type_name(),
+                    None,
+                    name,
+                    descriptor.type_name(),
+                )?;
+                (value, shape, Vec::new())
+            }
+            ReflectRef::Array(array) => {
+                let TypeInfo::Array(info) = reflected.type_info() else {
+                    return Err(ReflectSettingsError::UnsupportedValue {
+                        field: name.to_owned(),
+                        type_name: descriptor.type_name().to_owned(),
+                    });
+                };
+                let (value, shape) = from_reflect_sequence(
+                    array.iter_reflect(),
+                    array.len(),
+                    info.item_type_name(),
+                    Some(info.capacity()),
+                    name,
+                    descriptor.type_name(),
+                )?;
+                (value, shape, Vec::new())
+            }
+            _ => {
+                let value = from_reflect_scalar(reflected).ok_or_else(|| {
+                    ReflectSettingsError::UnsupportedValue {
+                        field: name.to_owned(),
+                        type_name: descriptor.type_name().to_owned(),
+                    }
+                })?;
+                let shape = ValueShape::scalar(value.value_type());
+                (value, shape, Vec::new())
+            }
         };
         let value = match meta.and_then(|meta| meta.default_value()) {
             Some(value) => {
@@ -183,6 +229,7 @@ where
             None => rust_default,
         };
         let mut definition = SettingDef::new(format!("{namespace}.{name}"), namespace, value);
+        definition.set_shape(shape);
         definition.enum_options = enum_options;
         if let Some(meta) = meta {
             definition.description = meta.docs().map(str::to_owned);
@@ -214,7 +261,7 @@ fn from_attribute(value: &AttributeValue) -> Option<Value> {
     }
 }
 
-fn from_reflect(value: &dyn Reflect) -> Option<Value> {
+fn from_reflect_scalar(value: &dyn Reflect) -> Option<Value> {
     let any = value.as_any();
     if let Some(value) = any.downcast_ref::<bool>() {
         return Some(Value::Bool(*value));
@@ -262,6 +309,70 @@ fn from_reflect(value: &dyn Reflect) -> Option<Value> {
         return Some(Value::Float(*value));
     }
     any.downcast_ref::<String>().cloned().map(Value::String)
+}
+
+fn from_reflect_sequence<'a, I>(
+    items: I,
+    len: usize,
+    item_type_name: &'static str,
+    fixed_len: Option<usize>,
+    field: &str,
+    type_name: &str,
+) -> Result<(Value, ValueShape), ReflectSettingsError>
+where
+    I: IntoIterator<Item = &'a dyn Reflect>,
+{
+    if len > MAX_REFLECT_SETTING_ARRAY_LEN || fixed_len.is_some_and(|expected| expected != len) {
+        return Err(ReflectSettingsError::UnsupportedValue {
+            field: field.to_owned(),
+            type_name: type_name.to_owned(),
+        });
+    }
+
+    let mut values = Vec::with_capacity(len);
+    let mut element_type = None;
+    for item in items {
+        let value =
+            from_reflect_scalar(item).ok_or_else(|| ReflectSettingsError::UnsupportedValue {
+                field: field.to_owned(),
+                type_name: type_name.to_owned(),
+            })?;
+        if let Some(expected) = element_type {
+            if expected != value.value_type() {
+                return Err(ReflectSettingsError::UnsupportedValue {
+                    field: field.to_owned(),
+                    type_name: type_name.to_owned(),
+                });
+            }
+        } else {
+            element_type = Some(value.value_type());
+        }
+        values.push(value);
+    }
+
+    let element_type = element_type
+        .or_else(|| scalar_value_type_from_name(item_type_name))
+        .ok_or_else(|| ReflectSettingsError::UnsupportedValue {
+            field: field.to_owned(),
+            type_name: type_name.to_owned(),
+        })?;
+    let element_shape = ValueShape::scalar(element_type);
+    let shape = match fixed_len {
+        Some(length) => ValueShape::fixed_array(element_shape, length),
+        None => ValueShape::bounded_array(element_shape, MAX_REFLECT_SETTING_ARRAY_LEN),
+    };
+    Ok((Value::Array(values), shape))
+}
+
+fn scalar_value_type_from_name(type_name: &str) -> Option<prism_settings::ValueType> {
+    match type_name {
+        "bool" => Some(prism_settings::ValueType::Bool),
+        "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8" | "u16" | "u32" | "u64" | "u128"
+        | "usize" => Some(prism_settings::ValueType::Int),
+        "f32" | "f64" => Some(prism_settings::ValueType::Float),
+        "alloc::string::String" | "std::string::String" => Some(prism_settings::ValueType::String),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -376,5 +487,63 @@ mod tests {
             .unwrap();
         assert_eq!(definition.default, Value::Enum(high.id));
         assert_eq!(high.id, prism_settings::EnumId::from_stable_name("High"));
+    }
+
+    #[test]
+    fn derives_bounded_vec_and_fixed_array_settings_with_registry_validation() {
+        #[derive(Reflect, Default)]
+        struct CollectionSettings {
+            #[reflect(setting)]
+            recent: Vec<i32>,
+            #[reflect(setting)]
+            offsets: [f32; 2],
+        }
+
+        let schema =
+            derive_settings_registry::<CollectionSettings>("collections", "prism_app").unwrap();
+        let (recent_id, recent) = schema.get(&"collections.recent".into()).unwrap();
+        assert!(matches!(
+            recent.shape,
+            ValueShape::Array {
+                min_len: 0,
+                max_len: MAX_REFLECT_SETTING_ARRAY_LEN,
+                ..
+            }
+        ));
+        assert_eq!(
+            schema
+                .validate_value(recent_id, Value::Array(vec![Value::Int(3), Value::Int(5)]))
+                .unwrap(),
+            Value::Array(vec![Value::Int(3), Value::Int(5)])
+        );
+        assert!(matches!(
+            schema.validate_value(
+                recent_id,
+                Value::Array(vec![Value::Int(3), Value::Bool(true)])
+            ),
+            Err(SettingsError::TypeMismatch { .. })
+        ));
+        assert!(matches!(
+            schema.validate_value(
+                recent_id,
+                Value::Array(vec![Value::Int(0); MAX_REFLECT_SETTING_ARRAY_LEN + 1])
+            ),
+            Err(SettingsError::TooLong { .. })
+        ));
+
+        let (offsets_id, offsets) = schema.get(&"collections.offsets".into()).unwrap();
+        assert_eq!(
+            offsets.shape,
+            ValueShape::fixed_array(ValueShape::scalar(prism_settings::ValueType::Float), 2)
+        );
+        assert!(schema
+            .validate_value(offsets_id, Value::Array(vec![Value::Float(1.0)]))
+            .is_err());
+        assert!(schema
+            .validate_value(
+                offsets_id,
+                Value::Array(vec![Value::Float(1.0), Value::Int(2)])
+            )
+            .is_err());
     }
 }

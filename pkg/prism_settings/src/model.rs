@@ -1,6 +1,10 @@
 //! Core identifiers, schema definitions, validation metadata, and values.
-use alloc::{collections::BTreeMap, string::String, vec::Vec};
+use alloc::{boxed::Box, collections::BTreeMap, string::String, vec::Vec};
 use core::fmt;
+
+/// Conservative default element cap for arrays whose definition is inferred
+/// from a non-empty default value.
+pub const DEFAULT_MAX_ARRAY_LEN: usize = 4096;
 
 /// Stable, dot-separated persisted key (for example `audio.master_volume`).
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -131,6 +135,123 @@ pub enum ValueType {
     Bytes,
     /// Secret reference.
     Secret,
+}
+
+/// Recursive schema shape for a setting value.
+///
+/// Scalar leaves carry their canonical [`ValueType`]. Arrays are homogeneous
+/// and always bounded by an inclusive minimum and maximum length. Table
+/// schemas are intentionally not represented yet; a table-valued definition
+/// must therefore fail closed during registry validation instead of accepting
+/// an unvalidated arbitrary tree.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ValueShape {
+    /// A scalar leaf. `Array` and `Table` are not valid scalar leaves.
+    Scalar(ValueType),
+    /// A homogeneous, recursively shaped array with inclusive length bounds.
+    Array {
+        /// Shape required for every element.
+        element: Box<ValueShape>,
+        /// Inclusive minimum element count.
+        min_len: usize,
+        /// Inclusive maximum element count.
+        max_len: usize,
+    },
+}
+
+impl ValueShape {
+    /// Creates a scalar shape.
+    #[must_use]
+    pub const fn scalar(value_type: ValueType) -> Self {
+        Self::Scalar(value_type)
+    }
+
+    /// Creates a bounded homogeneous array shape.
+    #[must_use]
+    pub fn array(element: Self, min_len: usize, max_len: usize) -> Self {
+        Self::Array {
+            element: Box::new(element),
+            min_len,
+            max_len,
+        }
+    }
+
+    /// Creates an array shape with no required elements and a finite maximum.
+    #[must_use]
+    pub fn bounded_array(element: Self, max_len: usize) -> Self {
+        Self::array(element, 0, max_len)
+    }
+
+    /// Creates an exact-length homogeneous array shape.
+    #[must_use]
+    pub fn fixed_array(element: Self, len: usize) -> Self {
+        Self::array(element, len, len)
+    }
+
+    /// Infers a conservative exact shape from a non-container value tree.
+    ///
+    /// An empty array has no element type and therefore returns `None`; its
+    /// schema must be declared explicitly with [`Self::array`].
+    #[must_use]
+    pub fn from_value(value: &Value) -> Option<Self> {
+        match value {
+            Value::Array(values) => {
+                let first = values.first()?;
+                let element = Self::from_value(first)?;
+                if values
+                    .iter()
+                    .skip(1)
+                    .any(|value| Self::from_value(value).as_ref() != Some(&element))
+                {
+                    return None;
+                }
+                Some(Self::bounded_array(element, DEFAULT_MAX_ARRAY_LEN))
+            }
+            Value::Table(_) => None,
+            _ => Some(Self::scalar(value.value_type())),
+        }
+    }
+
+    /// Returns the root [`ValueType`] represented by this shape.
+    #[must_use]
+    pub const fn value_type(&self) -> ValueType {
+        match self {
+            Self::Scalar(value_type) => *value_type,
+            Self::Array { .. } => ValueType::Array,
+        }
+    }
+
+    /// Returns whether this shape is supported and internally consistent.
+    #[must_use]
+    pub fn is_valid(&self) -> bool {
+        match self {
+            Self::Scalar(value_type) => !matches!(value_type, ValueType::Array | ValueType::Table),
+            Self::Array {
+                element,
+                min_len,
+                max_len,
+            } => min_len <= max_len && element.is_valid(),
+        }
+    }
+
+    /// Returns whether a value satisfies this shape without applying scalar
+    /// range or enum-option constraints.
+    #[must_use]
+    pub fn matches(&self, value: &Value) -> bool {
+        match self {
+            Self::Scalar(value_type) => value.value_type() == *value_type,
+            Self::Array {
+                element,
+                min_len,
+                max_len,
+            } => match value {
+                Value::Array(values) if (*min_len..=*max_len).contains(&values.len()) => {
+                    values.iter().all(|value| element.matches(value))
+                }
+                _ => false,
+            },
+        }
+    }
 }
 
 impl Value {
@@ -405,6 +526,9 @@ pub struct SettingDef {
     pub enum_options: Vec<EnumOption>,
     /// Value variant required by the schema.
     pub ty: ValueType,
+    /// Recursive value shape, including homogeneous array element and length
+    /// constraints. `ty` is retained as the inexpensive root discriminator.
+    pub shape: ValueShape,
     /// Validation limits.
     pub constraints: Constraints,
     /// Violation behavior for scalar bounds.
@@ -430,6 +554,7 @@ impl SettingDef {
     pub fn new(key: impl Into<SettingKey>, namespace: impl Into<String>, default: Value) -> Self {
         let key = key.into();
         let ty = default.value_type();
+        let shape = ValueShape::from_value(&default).unwrap_or_else(|| ValueShape::scalar(ty));
         Self {
             key: key.clone(),
             namespace: namespace.into(),
@@ -438,6 +563,7 @@ impl SettingDef {
             default,
             enum_options: Vec::new(),
             ty,
+            shape,
             constraints: Constraints::default(),
             on_violation: ViolationPolicy::Reject,
             domains: DomainMask::ALL,
@@ -452,5 +578,20 @@ impl SettingDef {
             cross_rules: Vec::new(),
             aliases: Vec::new(),
         }
+    }
+
+    /// Replaces this definition's recursive shape and synchronizes its root
+    /// [`ValueType`].
+    #[must_use]
+    pub fn with_shape(mut self, shape: ValueShape) -> Self {
+        self.set_shape(shape);
+        self
+    }
+
+    /// Replaces this definition's recursive shape and synchronizes its root
+    /// [`ValueType`].
+    pub fn set_shape(&mut self, shape: ValueShape) {
+        self.ty = shape.value_type();
+        self.shape = shape;
     }
 }

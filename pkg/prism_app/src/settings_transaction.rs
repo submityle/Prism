@@ -13,7 +13,7 @@ use prism_ecs::resource::Resource;
 use prism_ecs::system::{Res, ResMut};
 use prism_settings_io::{
     PipelineError, PipelineOutcome, SettingsApplier, SettingsPersistence,
-    SettingsTransaction as IoTransaction,
+    SettingsTransaction as IoTransaction, TxOutcome,
 };
 
 use crate::{
@@ -277,10 +277,15 @@ impl SettingsTransactionManager {
             }
             Ok(outcome) => Ok(outcome),
             Err(error) => {
-                self.status = SettingsTransactionStatus::RecoveryRequired {
-                    tx_id,
-                    reason: error.to_string(),
-                };
+                if transaction.terminal_outcome().ok() == Some(Some(TxOutcome::RolledBack)) {
+                    self.status = SettingsTransactionStatus::Idle;
+                    self.expiry_error = None;
+                } else {
+                    self.status = SettingsTransactionStatus::RecoveryRequired {
+                        tx_id,
+                        reason: error.to_string(),
+                    };
+                }
                 Err(SettingsTransactionManagerError::Pipeline(error))
             }
         }
@@ -529,6 +534,22 @@ mod tests {
         }
     }
 
+    struct PersistFailure;
+
+    impl SettingsPersistence for PersistFailure {
+        fn persist(
+            &mut self,
+            _document: &SettingsDocument,
+            _generation: u64,
+        ) -> Result<u64, String> {
+            Err("injected persistence failure".to_owned())
+        }
+
+        fn rollback(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
     fn registry() -> prism_settings::SettingsRegistry {
         let mut builder = RegistryBuilder::new();
         builder.namespace("render", "test").unwrap();
@@ -669,6 +690,46 @@ mod tests {
             )
             .unwrap_err();
         assert!(matches!(error, SettingsTransactionManagerError::Busy(_)));
+    }
+
+    #[test]
+    fn clean_direct_rollback_error_does_not_lock_manager_in_recovery() {
+        let registry = registry();
+        let directory = TempDir::new();
+        let mut manager = SettingsTransactionManager::new();
+        let mut runtime = runtime(&registry);
+        let before = runtime.snapshot().clone();
+        let before_snapshot = before.clone();
+        let transaction = IoTransaction::new(SettingsTransactionSpec {
+            tx_id: "direct-persist-failure".to_owned(),
+            journal_path: directory.0.join("direct-persist-failure.journal"),
+            mode: TxMode::Direct,
+            before_hash: 0,
+            before_snapshot,
+            candidate: candidate(&registry, 0.75),
+            plan: ApplyPlan::new(Vec::new()).unwrap(),
+            snapshot_gen: 0,
+            last_confirmed: None,
+        });
+        let mut persistence = PersistFailure;
+        let mut appliers = appliers();
+        let error = manager
+            .begin(
+                "direct-persist-failure",
+                transaction,
+                Duration::from_secs(30),
+                &mut runtime,
+                &mut persistence,
+                &mut appliers,
+            )
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            SettingsTransactionManagerError::Pipeline(_)
+        ));
+        assert_eq!(manager.status(), &SettingsTransactionStatus::Idle);
+        assert_eq!(runtime.snapshot(), &before);
     }
 
     #[test]

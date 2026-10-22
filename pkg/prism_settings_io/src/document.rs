@@ -518,7 +518,7 @@ pub(crate) fn decode_value_for_migration(value: &toml::Value, key: &str) -> Opti
 #[cfg(test)]
 mod tests {
     use super::*;
-    use prism_settings::{RegistryBuilder, SettingDef};
+    use prism_settings::{RegistryBuilder, SettingDef, ValueShape, ValueType};
 
     #[test]
     fn roundtrip_is_deterministic_and_preserves_nested_values() {
@@ -557,6 +557,35 @@ mod tests {
             Some(&registry),
         )
         .is_err());
+    }
+
+    #[test]
+    fn registry_codec_roundtrips_valid_arrays_and_rejects_invalid_elements() {
+        let mut builder = RegistryBuilder::new();
+        builder.namespace("render", "test").unwrap();
+        let definition = SettingDef::new(
+            "render.samples",
+            "render",
+            Value::Array(vec![Value::Int(1), Value::Int(2)]),
+        )
+        .with_shape(ValueShape::bounded_array(
+            ValueShape::scalar(ValueType::Int),
+            8,
+        ));
+        builder.register(definition);
+        let registry = builder.finish().unwrap();
+
+        let mut document = SettingsDocument::new(1);
+        document.insert(
+            "render.samples",
+            Value::Array(vec![Value::Int(3), Value::Int(5)]),
+        );
+        let encoded = document.encode().unwrap();
+        let decoded = SettingsDocument::decode_with_registry(&encoded, Some(&registry)).unwrap();
+        assert_eq!(decoded, document);
+
+        let invalid = "prism_schema = 1\nvalues = { \"render.samples\" = [3, true] }\n";
+        assert!(SettingsDocument::decode_with_registry(invalid, Some(&registry)).is_err());
     }
 
     #[test]

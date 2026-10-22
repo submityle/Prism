@@ -574,6 +574,31 @@ impl SettingsTransaction {
         &self.tx_id
     }
 
+    /// Returns the durable journal path owned by this transaction.
+    #[must_use]
+    pub fn journal_path(&self) -> &Path {
+        &self.journal_path
+    }
+
+    /// Reads a terminal outcome without repairing the journal.
+    ///
+    /// A terminal marker is only reported when the inspected journal has no
+    /// invalid tail. Callers use this to distinguish a clean rollback that
+    /// returned an operational error from an actually ambiguous transaction.
+    pub fn terminal_outcome(&self) -> Result<Option<TxOutcome>, PipelineError> {
+        let inspection = inspect_journal(&self.journal_path)?;
+        if inspection.invalid_tail {
+            return Ok(None);
+        }
+        Ok(inspection.records.iter().rev().find_map(|record| {
+            if let JournalEvent::TxEnd { outcome } = &record.event {
+                Some(*outcome)
+            } else {
+                None
+            }
+        }))
+    }
+
     /// Returns whether this transaction is direct or confirmation-gated.
     #[must_use]
     pub const fn mode(&self) -> TxMode {

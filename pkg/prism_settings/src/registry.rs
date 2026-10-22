@@ -69,6 +69,11 @@ pub enum SettingsError {
         /// Setting key.
         key: SettingKey,
     },
+    /// An array is shorter than the schema's minimum length.
+    TooShort {
+        /// Setting key.
+        key: SettingKey,
+    },
     /// Value set was sourced from a non-Trusted layer for an execution-class setting.
     UntrustedExecutionSetting {
         /// Protected setting key.
@@ -156,6 +161,9 @@ impl fmt::Display for SettingsError {
                 write!(f, "enum id {value:?} is not allowed for `{key}`")
             }
             Self::TooLong { key } => write!(f, "value exceeds configured length for `{key}`"),
+            Self::TooShort { key } => {
+                write!(f, "value is shorter than configured length for `{key}`")
+            }
             Self::UntrustedExecutionSetting { key, trust } => {
                 write!(f, "{trust:?} source cannot set execution-class key `{key}`")
             }
@@ -430,6 +438,18 @@ fn validate_def(def: &SettingDef, errors: &mut Vec<SettingsError>) {
             actual: def.default.value_type(),
         });
     }
+    if !def.shape.is_valid() {
+        errors.push(invalid(
+            "value shape is unsupported or has inverted array bounds",
+        ));
+    }
+    if def.shape.value_type() != def.ty {
+        errors.push(SettingsError::TypeMismatch {
+            key: def.key.clone(),
+            expected: def.ty,
+            actual: def.shape.value_type(),
+        });
+    }
     if def.constraints.min.is_some_and(|v| !v.is_finite())
         || def.constraints.max.is_some_and(|v| !v.is_finite())
         || def
@@ -520,6 +540,7 @@ fn validate_def(def: &SettingDef, errors: &mut Vec<SettingsError>) {
 fn validate_value(def: &SettingDef, value: Value) -> Result<Value, SettingsError> {
     let key = def.key.clone();
     let mut value = value;
+    validate_shape(&key, &def.shape, &value)?;
     if let Value::Float(v) = value {
         if !v.is_finite() {
             return Err(SettingsError::OutOfRange {
@@ -594,4 +615,45 @@ fn validate_value(def: &SettingDef, value: Value) -> Result<Value, SettingsError
         _ => {}
     }
     Ok(value)
+}
+
+fn validate_shape(
+    key: &SettingKey,
+    shape: &crate::ValueShape,
+    value: &Value,
+) -> Result<(), SettingsError> {
+    match shape {
+        crate::ValueShape::Scalar(expected) => {
+            if value.value_type() != *expected {
+                return Err(SettingsError::TypeMismatch {
+                    key: key.clone(),
+                    expected: *expected,
+                    actual: value.value_type(),
+                });
+            }
+        }
+        crate::ValueShape::Array {
+            element,
+            min_len,
+            max_len,
+        } => {
+            let Value::Array(values) = value else {
+                return Err(SettingsError::TypeMismatch {
+                    key: key.clone(),
+                    expected: ValueType::Array,
+                    actual: value.value_type(),
+                });
+            };
+            if values.len() < *min_len {
+                return Err(SettingsError::TooShort { key: key.clone() });
+            }
+            if values.len() > *max_len {
+                return Err(SettingsError::TooLong { key: key.clone() });
+            }
+            for value in values {
+                validate_shape(key, element, value)?;
+            }
+        }
+    }
+    Ok(())
 }
