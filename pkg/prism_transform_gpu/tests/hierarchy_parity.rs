@@ -8,7 +8,8 @@
 //! compiles WGSL under fast-math (FMA contraction / reassociation), so the twin
 //! is a *tolerance* round-trip, not a bit-exact one. The suite skips gracefully
 //! when no adapter is available so it still passes on a device-less CI image
-//! while running the full dispatch on a real `GPU`.
+//! while running the full dispatch on a real `GPU`. Set `PRISM_REQUIRE_GPU=1`
+//! to make adapter/device absence a hard failure during physical-GPU acceptance.
 
 use prism_math::{Quat, Vec3};
 use prism_transform::compute_hierarchy::{
@@ -29,6 +30,11 @@ fn with_gpu() -> Option<GpuContext> {
     match GpuContext::try_headless() {
         Some(ctx) => Some(ctx),
         None => {
+            assert_ne!(
+                std::env::var("PRISM_REQUIRE_GPU").as_deref(),
+                Ok("1"),
+                "PRISM_REQUIRE_GPU=1 but no usable GPU adapter/device was acquired"
+            );
             eprintln!("skipping: no usable GPU adapter on this host");
             None
         }
