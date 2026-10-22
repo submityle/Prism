@@ -550,6 +550,56 @@ impl HeightfieldMesh {
         &self.indices
     }
 
+    /// Removes active transition strips and restores the regular grid topology.
+    ///
+    /// The replacement index stream is fully allocated and budget-checked before
+    /// the current topology is changed. Vertex attributes and their allocations
+    /// are retained, so callers can apply a new seam plan without rebaking the
+    /// heightfield.
+    pub fn clear_lod_seam_plan(
+        &mut self,
+        max_bytes: usize,
+    ) -> Result<(), BakeError<core::convert::Infallible>> {
+        if !self.lod_seams_applied {
+            return Ok(());
+        }
+        let segments = self.spec.samples_per_edge() - 1;
+        let base_indices = usize::try_from(segments)
+            .ok()
+            .and_then(|n| n.checked_mul(n))
+            .and_then(|n| n.checked_mul(6))
+            .ok_or(BakeError::SizeOverflow)?;
+        let bytes = self
+            .positions
+            .len()
+            .checked_mul(32)
+            .and_then(|n| {
+                base_indices
+                    .checked_mul(core::mem::size_of::<u32>())
+                    .and_then(|indices| n.checked_add(indices))
+            })
+            .ok_or(BakeError::SizeOverflow)?;
+        if bytes > max_bytes {
+            return Err(BakeError::BudgetExceeded);
+        }
+        let mut indices = Vec::new();
+        indices
+            .try_reserve_exact(base_indices)
+            .map_err(|_| BakeError::AllocationFailed)?;
+        let side = self.spec.samples_per_edge();
+        for y in 0..segments {
+            for x in 0..segments {
+                let a = y * side + x;
+                let b = a + 1;
+                let c = a + side;
+                indices.extend_from_slice(&[a, c, b, b, c, c + 1]);
+            }
+        }
+        self.indices = indices;
+        self.lod_seams_applied = false;
+        Ok(())
+    }
+
     /// Replaces edge quads with the validated 2:1 coarse-neighbor strips in a
     /// seam plan. Transition vertices reuse this mesh's grid vertices; no
     /// duplicate vertex buffer is created. The operation stages the complete
@@ -559,8 +609,8 @@ impl HeightfieldMesh {
     /// At most two coarse edges may be applied, and when there are two they
     /// must be opposite; adjacent coarse edges share a corner quad and require
     /// a corner fan contract that this mesh ABI does not yet define. A mesh
-    /// accepts one seam plan for its lifetime; rebuild it to apply a new LOD
-    /// configuration.
+    /// accepts one active seam plan at a time; call [`Self::clear_lod_seam_plan`] to
+    /// restore the base topology before applying a new LOD configuration.
     pub fn apply_lod_seam_plan(
         &mut self,
         plan: &crate::HeightfieldLodSeamPlan,
@@ -858,6 +908,26 @@ mod tests {
             mesh.apply_lod_seam_plan(&plan, 16_384),
             Err(BakeError::InvalidGeometry)
         );
+        let south_coarse = tile.neighbor(TileEdge::South).parent().unwrap();
+        let next_plan = HeightfieldLodSeamPlan::build_strict_for_residency(
+            tile,
+            8,
+            &[south_coarse],
+            LodSeamLimits {
+                max_segments: 8,
+                max_vertices: 128,
+                max_indices: 1024,
+                max_bytes: 16_384,
+            },
+        )
+        .unwrap();
+        assert_eq!(mesh.clear_lod_seam_plan(1), Err(BakeError::BudgetExceeded));
+        assert_eq!(mesh.indices().len(), original_indices - 8 * 6 + 4 * 9);
+        mesh.clear_lod_seam_plan(16_384).unwrap();
+        assert_eq!(mesh.indices().len(), original_indices);
+        mesh.apply_lod_seam_plan(&next_plan, 16_384).unwrap();
+        assert_eq!(mesh.indices().len(), original_indices - 8 * 6 + 4 * 9);
+        assert!(mesh.indices().iter().all(|&index| (index as usize) < 81));
     }
 
     #[test]
