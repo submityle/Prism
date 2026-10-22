@@ -1230,6 +1230,8 @@ pub mod prelude {
 
 实现采用四层所有权：相机 crate 只计算不可变视图快照，rig crate 只生成位姿结果，ECS adapter 只负责生命周期和发布，GPU crate 只负责 ABI 消费侧的有界上传计划；渲染资源、物理求交和 Transform 存储继续由各自 crate 持有。四个相机 crate 均禁止 unsafe；核心数学、rig 和 GPU ring 路径保持 `no_std + alloc`，ECS adapter 使用应用/ECS crate。已核验提交包括 `cfb34909f`（ECS 发布链）、`bf53ef12b`（裁剪配置测试修正）、`6dd2e3929`（ABI/ECS 加固）、`e4cf94581`（GPU consumer）、`e522e7c57`（fixed-tick advanced runtime）、`b6fc25e72`（Body/Aim 高级 Rig）、`a2cf97f5d`（workspace/ECS/query 接线）、`31e767af7`（最小 feature 编译修复）和 `a24de026a`（RHI GPU View ABI 真实设备验证）。
 
+renderer 接线期间，`CameraIntent`/`ViewData` 的每视图可见性元数据为 `layer_mask`、`lod_scale`、`history_epoch`；`derive_view` 保留这些值并对非法 `lod_scale` 使用有限正数回退。`lod_scale` 表示几何 LOD 偏置，不是 `resolution_scale`。相应消费者接入前，这些字段只是稳定的 camera→renderer 数据契约，不记作渲染端到端完成；派生元数据的回归测试位于 `prism_camera::view`。
+
 本文中涉及的渲染后处理算法、物理后端、XR 设备驱动和具体渲染 backend 由对应所有者消费这些稳定契约；相机 ECS 内的 Director/Control/Rig/Publication 已提供可运行接线，它们不复制相机矩阵或历史真相。相机核心的交付验收以四个 crate 的 API、单元测试、feature check、ABI/upload plan 检查和可获得的 GPU parity 证据为准；跨模块能力沿同一契约接入，不改变相机数学与历史协议。
 
 ### 27.2 风险处置表

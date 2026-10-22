@@ -44,6 +44,12 @@ pub struct CameraIntent {
     pub lens: Option<Lens>,
     pub importance: ViewImportance,
     pub relative_rendering: bool,
+    /// Render-layer mask consumed by visibility culling.
+    pub layer_mask: u32,
+    /// Geometry LOD bias consumed by visibility culling; independent of view resolution.
+    pub lod_scale: f32,
+    /// Application-controlled temporal reset epoch.
+    pub history_epoch: u64,
 }
 
 impl Default for CameraIntent {
@@ -63,6 +69,9 @@ impl Default for CameraIntent {
             lens: None,
             importance: ViewKind::Main.default_importance(),
             relative_rendering: true,
+            layer_mask: u32::MAX,
+            lod_scale: 1.0,
+            history_epoch: 0,
         }
     }
 }
@@ -89,6 +98,9 @@ pub struct ViewData {
     pub frustum_reverse_z: bool,
     pub frustum_finite_far: bool,
     pub relative_rendering: bool,
+    pub layer_mask: u32,
+    pub lod_scale: f32,
+    pub history_epoch: u64,
     pub exposure: f32,
     pub viewport_px: ViewportRect,
     pub world_position: DVec3,
@@ -262,6 +274,13 @@ pub fn derive_view(
         frustum_reverse_z: projection.reverse_z(),
         frustum_finite_far: projection.far().is_some(),
         relative_rendering: intent.relative_rendering,
+        layer_mask: intent.layer_mask,
+        lod_scale: if intent.lod_scale.is_finite() {
+            intent.lod_scale.max(1.0e-4)
+        } else {
+            1.0
+        },
+        history_epoch: intent.history_epoch,
         exposure,
         viewport_px,
         world_position: pose.position,
@@ -351,6 +370,32 @@ mod tests {
             second.prev_clip_from_world,
             first.clip_from_world_unjittered
         );
+    }
+
+    #[test]
+    fn derived_view_preserves_visibility_metadata_for_renderer_consumers() {
+        let intent = CameraIntent {
+            layer_mask: 0x24,
+            lod_scale: 0.5,
+            history_epoch: 17,
+            ..CameraIntent::default()
+        };
+        let mut history = ViewHistory::default();
+        let view = derive_view(intent, CameraPose::default(), 3, [640, 480], &mut history).unwrap();
+        assert_eq!(view.layer_mask, 0x24);
+        assert_eq!(view.lod_scale, 0.5);
+        assert_eq!(view.history_epoch, 17);
+    }
+
+    #[test]
+    fn non_finite_geometry_lod_scale_uses_neutral_finite_bias() {
+        let intent = CameraIntent {
+            lod_scale: f32::NAN,
+            ..CameraIntent::default()
+        };
+        let mut history = ViewHistory::default();
+        let view = derive_view(intent, CameraPose::default(), 0, [64, 64], &mut history).unwrap();
+        assert_eq!(view.lod_scale, 1.0);
     }
 
     #[test]
