@@ -38,3 +38,16 @@ cargo run -p prism_runtime
 `cargo test -p prism_runtime` 中的 launcher 测试使用 null backend，并要求
 两个 frame 均完成抽取与提交，同时要求失败和跳过计数为零。硬件 GPU 验证不属于
 本切片；null backend 验证的是相同 Prism app/render/RHI 合同的无设备执行路径。
+
+## 当前工作树复核（2026-10-23）
+
+在当前工作树上，使用独立临时 target、单并发、关闭增量编译和调试信息执行：
+
+```text
+CARGO_TARGET_DIR=/private/tmp/prism-runtime-check-20261023 \
+CARGO_BUILD_JOBS=1 CARGO_PROFILE_DEV_DEBUG=0 \
+CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 \
+cargo test --offline --locked -p prism_runtime --lib
+```
+
+结果为 **1 passed / 0 failed**。此前 `prism_runtime` 的编译检查也以相同独立 target 通过；本次测试结束后已删除临时 target。该结果只证明 runtime 库测试与无设备 Gate A 入口可编译，不扩展为全 workspace、物理 GPU 或整帧生产渲染验收。
