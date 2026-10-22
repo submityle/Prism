@@ -68,6 +68,38 @@ pub struct PlanetMeshPublicationReceipt {
     pub mesh_bytes: usize,
 }
 
+/// Bounded tile identity changes produced by one successful publication.
+///
+/// Replacement identities include both newly added and rebuilt tiles. Removed
+/// identities include only tiles that were resident before the commit. The
+/// vectors are sorted by `TileKey`, matching the publication's canonical order.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct PlanetMeshPublicationDelta {
+    generation: u64,
+    changed_tiles: Vec<TileKey>,
+    removed_tiles: Vec<TileKey>,
+}
+
+impl PlanetMeshPublicationDelta {
+    /// Generation whose atomic snapshot this delta produces.
+    #[must_use]
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Added or replaced tile identities in stable order.
+    #[must_use]
+    pub fn changed_tiles(&self) -> &[TileKey] {
+        &self.changed_tiles
+    }
+
+    /// Previously resident tile identities removed by the commit.
+    #[must_use]
+    pub fn removed_tiles(&self) -> &[TileKey] {
+        &self.removed_tiles
+    }
+}
+
 /// Transaction-local staging area for one atomic publication.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PlanetMeshPublicationTransaction {
@@ -263,6 +295,32 @@ impl PlanetMeshPublication {
         &mut self,
         transaction: PlanetMeshPublicationTransaction,
     ) -> Result<PlanetMeshPublicationReceipt, PlanetMeshPublicationError> {
+        self.commit_inner(transaction, false)
+            .map(|(receipt, _)| receipt)
+    }
+
+    /// Validates and atomically commits a transaction while returning its
+    /// sorted changed/removed TileKey delta for incremental downstream
+    /// consumers. Delta storage is reserved before publication mutation; an
+    /// allocation failure leaves the prior snapshot and generation intact.
+    pub fn commit_with_delta(
+        &mut self,
+        transaction: PlanetMeshPublicationTransaction,
+    ) -> Result<
+        (PlanetMeshPublicationReceipt, PlanetMeshPublicationDelta),
+        PlanetMeshPublicationError,
+    > {
+        self.commit_inner(transaction, true)
+    }
+
+    fn commit_inner(
+        &mut self,
+        transaction: PlanetMeshPublicationTransaction,
+        collect_delta: bool,
+    ) -> Result<
+        (PlanetMeshPublicationReceipt, PlanetMeshPublicationDelta),
+        PlanetMeshPublicationError,
+    > {
         if transaction.base_generation != self.generation {
             return Err(PlanetMeshPublicationError::StaleTransaction {
                 expected: self.generation,
@@ -295,19 +353,54 @@ impl PlanetMeshPublication {
             self.limits.max_neighbor_comparisons,
         )?;
 
+        let delta = if collect_delta {
+            let removed_count = transaction
+                .removals
+                .iter()
+                .filter(|tile| self.mesh(**tile).is_some())
+                .count();
+            let mut changed_tiles = Vec::new();
+            changed_tiles
+                .try_reserve_exact(transaction.replacements.len())
+                .map_err(|_| PlanetMeshPublicationError::AllocationFailed)?;
+            changed_tiles.extend(transaction.replacements.iter().map(|entry| entry.tile()));
+            let mut removed_tiles = Vec::new();
+            removed_tiles
+                .try_reserve_exact(removed_count)
+                .map_err(|_| PlanetMeshPublicationError::AllocationFailed)?;
+            removed_tiles.extend(
+                transaction
+                    .removals
+                    .iter()
+                    .copied()
+                    .filter(|tile| self.mesh(*tile).is_some()),
+            );
+            PlanetMeshPublicationDelta {
+                generation: next_generation,
+                changed_tiles,
+                removed_tiles,
+            }
+        } else {
+            PlanetMeshPublicationDelta {
+                generation: next_generation,
+                ..Default::default()
+            }
+        };
+
         let mut next = Vec::new();
         next.try_reserve_exact(final_count)
             .map_err(|_| PlanetMeshPublicationError::AllocationFailed)?;
         merge_snapshot(&self.meshes, &transaction, &mut next);
         self.meshes = next;
         self.generation = next_generation;
-        Ok(PlanetMeshPublicationReceipt {
+        let receipt = PlanetMeshPublicationReceipt {
             generation: next_generation,
             published_tiles: final_count,
             replaced_tiles: transaction.replacements.len(),
             removed_tiles: transaction.removals.len(),
             mesh_bytes: final_bytes,
-        })
+        };
+        Ok((receipt, delta))
     }
 }
 
@@ -1472,5 +1565,131 @@ mod tests {
             publication.mesh(tile).unwrap().mesh().revision(),
             change.revision()
         );
+    }
+
+    #[test]
+    fn commit_with_delta_reports_new_and_replaced_tiles() {
+        let first_tile = TileKey::new(CubeFace::PositiveZ, 1, 0, 0).unwrap();
+        let second_tile = first_tile.neighbor(TileEdge::East);
+        let mut publication = PlanetMeshPublication::new(limits());
+
+        let mut initial = publication.begin();
+        initial
+            .stage_build(
+                source(first_tile, 1),
+                config(),
+                BakeLimits {
+                    max_samples: 25,
+                    max_bytes: 4096,
+                },
+                PlanetHeightfieldNormalNeighborhood::empty(),
+            )
+            .unwrap();
+        let (initial_receipt, initial_delta) = publication.commit_with_delta(initial).unwrap();
+        assert_eq!(initial_receipt.generation, 1);
+        assert_eq!(initial_delta.generation(), 1);
+        assert_eq!(initial_delta.changed_tiles(), &[first_tile]);
+        assert!(initial_delta.removed_tiles().is_empty());
+
+        let mut update = publication.begin();
+        update
+            .stage_build(
+                source(second_tile, 1),
+                config(),
+                BakeLimits {
+                    max_samples: 25,
+                    max_bytes: 4096,
+                },
+                PlanetHeightfieldNormalNeighborhood::empty(),
+            )
+            .unwrap();
+        update
+            .stage_build(
+                source(first_tile, 1),
+                config(),
+                BakeLimits {
+                    max_samples: 25,
+                    max_bytes: 4096,
+                },
+                PlanetHeightfieldNormalNeighborhood::empty(),
+            )
+            .unwrap();
+        let (receipt, delta) = publication.commit_with_delta(update).unwrap();
+        assert_eq!(receipt.generation, 2);
+        assert_eq!(delta.generation(), 2);
+        assert_eq!(delta.changed_tiles(), &[first_tile, second_tile]);
+        assert!(delta.removed_tiles().is_empty());
+        assert_eq!(publication.meshes().len(), 2);
+    }
+
+    #[test]
+    fn commit_with_delta_reports_only_resident_removals() {
+        let resident = TileKey::new(CubeFace::PositiveZ, 1, 0, 0).unwrap();
+        let absent = resident.neighbor(TileEdge::West);
+        let mut publication = PlanetMeshPublication::new(limits());
+        let mut initial = publication.begin();
+        initial
+            .stage_build(
+                source(resident, 1),
+                config(),
+                BakeLimits {
+                    max_samples: 25,
+                    max_bytes: 4096,
+                },
+                PlanetHeightfieldNormalNeighborhood::empty(),
+            )
+            .unwrap();
+        publication.commit(initial).unwrap();
+
+        let mut removal = publication.begin();
+        removal.stage_remove(absent).unwrap();
+        removal.stage_remove(resident).unwrap();
+        let (receipt, delta) = publication.commit_with_delta(removal).unwrap();
+        assert_eq!(receipt.generation, 2);
+        assert_eq!(receipt.removed_tiles, 2);
+        assert_eq!(delta.generation(), 2);
+        assert_eq!(delta.removed_tiles(), &[resident]);
+        assert!(delta.changed_tiles().is_empty());
+        assert!(publication.meshes().is_empty());
+    }
+
+    #[test]
+    fn failed_commit_with_delta_preserves_snapshot_and_generation() {
+        let left = TileKey::new(CubeFace::PositiveZ, 1, 0, 0).unwrap();
+        let right = left.neighbor(TileEdge::East);
+        let mut publication = PlanetMeshPublication::new(limits());
+        let mut initial = publication.begin();
+        initial
+            .stage_build(
+                source(left, 7),
+                config(),
+                BakeLimits {
+                    max_samples: 25,
+                    max_bytes: 4096,
+                },
+                PlanetHeightfieldNormalNeighborhood::empty(),
+            )
+            .unwrap();
+        publication.commit(initial).unwrap();
+        let snapshot = publication.clone();
+
+        let mut invalid = publication.begin();
+        invalid
+            .stage_build(
+                source(right, 8),
+                config(),
+                BakeLimits {
+                    max_samples: 25,
+                    max_bytes: 4096,
+                },
+                PlanetHeightfieldNormalNeighborhood::empty(),
+            )
+            .unwrap();
+        assert!(matches!(
+            publication.commit_with_delta(invalid),
+            Err(PlanetMeshPublicationError::Boundary(_))
+        ));
+        assert_eq!(publication, snapshot);
+        assert_eq!(publication.generation(), 1);
     }
 }

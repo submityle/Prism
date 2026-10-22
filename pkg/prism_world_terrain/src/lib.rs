@@ -88,9 +88,9 @@ pub use planet_placement_deletion::{
     PlanetPlacementDeletionError, PlanetPlacementDeletionSet, PLANET_PLACEMENT_DELETION_VERSION,
 };
 pub use planet_publication::{
-    PlanetMeshPublication, PlanetMeshPublicationError, PlanetMeshPublicationLimits,
-    PlanetMeshPublicationReceipt, PlanetMeshPublicationTransaction, PublishedPlanetHeightfieldMesh,
-    PLANET_MESH_PUBLICATION_VERSION,
+    PlanetMeshPublication, PlanetMeshPublicationDelta, PlanetMeshPublicationError,
+    PlanetMeshPublicationLimits, PlanetMeshPublicationReceipt, PlanetMeshPublicationTransaction,
+    PublishedPlanetHeightfieldMesh, PLANET_MESH_PUBLICATION_VERSION,
 };
 pub use rebake::{
     DirtyRegion, RebakeBudget, RebakeError, RebakePlan, RebakePlanner, RebakeRequest, RebakeTask,
