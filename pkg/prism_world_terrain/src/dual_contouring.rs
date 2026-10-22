@@ -402,6 +402,31 @@ impl DualContouringMesh {
     pub const fn revision(&self) -> u64 {
         self.revision
     }
+
+    /// Moves the extracted surface into a validated native Prism triangle mesh.
+    /// No UV chart is fabricated for an arbitrary volumetric surface.
+    #[cfg(feature = "mesh")]
+    pub fn into_mesh(self) -> Result<prism_mesh::Mesh, prism_mesh::MeshError> {
+        use prism_mesh::{Indices, Mesh, MeshVertexAttribute, VertexAttributeValues};
+        use prism_render_driver::{PrimitiveTopology, VertexFormat};
+
+        let mesh = Mesh::new(PrimitiveTopology::TriangleList)
+            .with_attribute(
+                MeshVertexAttribute::new(
+                    prism_mesh::POSITION_ATTRIBUTE,
+                    VertexFormat::Float32x3,
+                    0,
+                ),
+                VertexAttributeValues::Float32x3(self.positions),
+            )?
+            .with_attribute(
+                MeshVertexAttribute::new("Vertex_Normal", VertexFormat::Float32x3, 1),
+                VertexAttributeValues::Float32x3(self.normals),
+            )?
+            .indexed(Indices::Uint32(self.indices));
+        mesh.validate()?;
+        Ok(mesh)
+    }
 }
 
 fn reserve<T>(n: usize) -> Result<Vec<T>, DualContouringError> {
@@ -509,7 +534,7 @@ fn solve_cell(
                 } else {
                     q[others[1]]
                 });
-                sum += w * f64::from(v[di] - v[ci]) * scale;
+                sum += w * (f64::from(v[di]) - f64::from(v[ci])) * scale;
             }
             grad[axis] = sum / f64::from(geom.spacing_mm[axis]);
         }
@@ -552,7 +577,7 @@ fn solve_cell(
         normal[axis] = lo
             .iter()
             .zip(hi)
-            .map(|(&a, b)| f64::from(v[b] - v[a]))
+            .map(|(&a, b)| f64::from(v[b]) - f64::from(v[a]))
             .sum::<f64>()
             / 4.0
             / f64::from(geom.spacing_mm[axis]);
@@ -651,11 +676,18 @@ mod tests {
             let [x, y, z] = p.map(i64::from);
             Ok(match self.kind {
                 0 => (x - 4) as i32 * 65_536,
-                _ => {
+                1 => {
                     let dx = x - 4;
                     let dy = y - 4;
                     let dz = z - 4;
                     (dx * dx + dy * dy + dz * dz - 9) as i32 * 65_536
+                }
+                _ => {
+                    if x < 4 {
+                        i32::MIN
+                    } else {
+                        i32::MAX
+                    }
                 }
             })
         }
@@ -701,6 +733,18 @@ mod tests {
                 sub(c.map(f64::from), a.map(f64::from)),
             )[0] > 0.0
         }));
+    }
+
+    #[test]
+    fn extreme_signed_samples_do_not_overflow_gradient_differences() {
+        let mesh = DualContouringMesh::build(&grid(2), geom(), limits()).unwrap();
+        assert!(!mesh.indices().is_empty());
+        assert!(mesh.positions().iter().all(|p| p[0].is_finite()));
+        assert!(mesh
+            .normals()
+            .iter()
+            .all(|n| n.iter().all(|v| v.is_finite())));
+        assert!(mesh.normals().iter().all(|n| n[0] > 0.99));
     }
 
     #[test]
@@ -820,5 +864,17 @@ mod tests {
         let a = DualContouringMesh::build(&g, geom(), limits()).unwrap();
         let b = DualContouringMesh::build(&g, geom(), limits()).unwrap();
         assert_eq!(a, b);
+    }
+
+    #[cfg(feature = "mesh")]
+    #[test]
+    fn native_mesh_adapter_preserves_validated_surface_streams() {
+        let extracted = DualContouringMesh::build(&grid(1), geom(), limits()).unwrap();
+        let expected_vertices = extracted.positions().len();
+        let expected_indices = extracted.indices().len();
+        let mesh = extracted.into_mesh().unwrap();
+        mesh.validate().unwrap();
+        assert_eq!(mesh.vertex_count(), expected_vertices);
+        assert_eq!(mesh.indices().unwrap().len(), expected_indices);
     }
 }
