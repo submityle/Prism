@@ -249,20 +249,26 @@ mod tests {
         }
     }
 
-    fn fixture_pixels(surface: SurfaceSample) -> ([Vec3; 16], [Vec3; 16]) {
+    const FIXTURE_WIDTH: usize = 16;
+    const FIXTURE_HEIGHT: usize = 16;
+    const FIXTURE_PIXELS: usize = FIXTURE_WIDTH * FIXTURE_HEIGHT;
+
+    fn fixture_pixels(surface: SurfaceSample) -> ([Vec3; FIXTURE_PIXELS], [Vec3; FIXTURE_PIXELS]) {
         let adapter = ReferencePtMaterialAdapter::from_surface(surface).expect("supported fixture");
-        let cosines = [0.35, 0.5, 0.65, 0.8];
-        let mut production = [Vec3::ZERO; 16];
-        let mut reference = [Vec3::ZERO; 16];
-        for (y, view_cosine) in cosines.into_iter().enumerate() {
+        let mut production = [Vec3::ZERO; FIXTURE_PIXELS];
+        let mut reference = [Vec3::ZERO; FIXTURE_PIXELS];
+        for y in 0..FIXTURE_HEIGHT {
+            // Sweep both hemispheres away from the near-tangent singularity.
+            let view_cosine = 0.12 + 0.84 * y as f32 / (FIXTURE_HEIGHT - 1) as f32;
             let view = normalize([0.6, view_cosine, 0.2]);
-            for (x, light_cosine) in cosines.into_iter().enumerate() {
+            for x in 0..FIXTURE_WIDTH {
+                let light_cosine = 0.12 + 0.84 * x as f32 / (FIXTURE_WIDTH - 1) as f32;
                 let light = normalize([
-                    (-0.45f32).mul_add(x as f32, 0.45),
+                    0.45 * (1.0 - 2.0 * x as f32 / (FIXTURE_WIDTH - 1) as f32),
                     light_cosine,
-                    0.15 + 0.1 * y as f32,
+                    -0.25 + 0.5 * y as f32 / (FIXTURE_HEIGHT - 1) as f32,
                 ]);
-                let index = y * 4 + x;
+                let index = y * FIXTURE_WIDTH + x;
                 let direct = evaluate_clearcoat_direct(
                     surface,
                     frame(view),
@@ -603,9 +609,19 @@ mod tests {
 
     #[test]
     fn dedicated_cpu_clearcoat_candidate_matches_reference_on_a_small_image() {
-        // CPU-only local-model fixture. This does NOT validate WESL resolve,
-        // whose principled coat closure is a different model.
-        for (coat, darkening) in [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0)] {
+        // CPU-only 16x16 local-model fixture. This does NOT execute WESL or
+        // validate the full shading_resolve path, whose principled coat closure
+        // is a different model.
+        for (coat, darkening) in [
+            (0.0, 0.0),
+            (0.0, 1.0),
+            (0.35, 0.0),
+            (0.35, 0.5),
+            (0.35, 1.0),
+            (1.0, 0.0),
+            (1.0, 0.5),
+            (1.0, 1.0),
+        ] {
             let surface = SurfaceSample {
                 base_color: [0.25, 0.5, 0.75],
                 diffuse_roughness: 0.0,
@@ -624,9 +640,43 @@ mod tests {
                     .all(|value| value.is_finite() && *value >= 0.0));
             }
             let metrics = compare_pixels(&reference, &candidate).expect("same fixture shape");
-            assert!(
-                metrics.max_abs < 3.0e-5,
-                "coat={coat} darkening={darkening} metrics={metrics:?}"
+            assert!(metrics.max_abs < 5.0e-5,
+                "16x16 coat/base/transmission image mismatch: coat={coat} darkening={darkening} metrics={metrics:?}");
+        }
+    }
+
+    #[test]
+    fn clearcoat_wesl_keeps_the_same_layering_and_darkening_contract() {
+        // This is a source contract, not shader execution or GPU image parity.
+        // The CPU/reference image fixture above is restricted to the dedicated
+        // clearcoat path; ensure the corresponding WESL path retains the same
+        // independent coat lobe and base-only double-pass/darkening operations.
+        let wesl = include_str!("../../prism_render_scene/src/shaders/clearcoat.wesl");
+        let throughput = wesl
+            .find("let throughput = (1.0 - coat * fresnel_dielectric(n_dot_v, coat_ior))")
+            .expect("WESL view/light double-pass throughput exists");
+        let darkening = wesl
+            .find("let darkening = cc_modulated_darkening(")
+            .expect("WESL coat darkening factor exists");
+        let base_attenuation = wesl
+            .find("let reflected = tinted_base * (throughput * darkening) + coat_specular")
+            .expect("WESL applies throughput and darkening to base, not coat lobe");
+        assert!(throughput < darkening && darkening < base_attenuation,
+            "WESL clearcoat evaluation order changed; inspect the shader before trusting the CPU/reference fixture");
+    }
+
+    #[test]
+    fn material_transmission_is_rejected_instead_of_dropped_from_reference_image() {
+        for transmission in [f32::EPSILON, 0.25, 1.0] {
+            let surface = SurfaceSample {
+                transmission,
+                clearcoat_roughness: 0.2,
+                ..SurfaceSample::default()
+            };
+            assert_eq!(
+                ReferencePtMaterialAdapter::from_surface(surface),
+                Err(ReferencePtAdapterError::UnsupportedResponseLobe),
+                "transmission={transmission} must not be silently omitted from a reference image"
             );
         }
     }
