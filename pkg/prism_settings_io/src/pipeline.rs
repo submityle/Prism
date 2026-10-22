@@ -198,9 +198,21 @@ impl<'a> SettingsWatcher<'a> {
             return Ok(WatchPoll::Unchanged { observed_digest });
         }
 
-        let loaded = load_with_backup(&self.path, self.backup.as_deref(), Some(self.registry))?;
+        // Decode without the active registry so schema migrations can inspect
+        // old stable enum names before the current enum options are enforced.
+        let loaded = load_with_backup(
+            &self.path,
+            self.backup.as_deref(),
+            None::<&SettingsRegistry>,
+        )?;
         let mut document = loaded.document;
+        document
+            .preserve_unregistered(self.registry)
+            .map_err(CandidateError::Codec)?;
         let report = self.migration.migrate(&mut document)?;
+        document
+            .classify_with_registry(self.registry)
+            .map_err(CandidateError::Codec)?;
         self.next_generation = self
             .next_generation
             .checked_add(1)
@@ -1324,6 +1336,73 @@ mod tests {
             watcher.poll(&[]).unwrap(),
             WatchPoll::Unchanged { .. }
         ));
+    }
+
+    #[test]
+    fn watcher_migrates_removed_enum_options_before_current_schema_validation() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("settings.toml");
+        let old_option = prism_settings::EnumOption::from_stable_name("render::Quality::High");
+        let new_option = prism_settings::EnumOption::from_stable_name("render::Quality::Ultra");
+        let mut old_document = SettingsDocument::new(1);
+        let mut tagged = toml::Table::new();
+        tagged.insert(
+            "__prism_value".to_owned(),
+            toml::Value::String("enum".to_owned()),
+        );
+        tagged.insert(
+            "value".to_owned(),
+            toml::Value::String(old_option.stable_name.clone()),
+        );
+        old_document.preserve_unknown("render.quality", toml::Value::Table(tagged));
+        crate::write_atomic(&path, &old_document, None::<&Path>).unwrap();
+
+        let mut builder = RegistryBuilder::new();
+        builder.namespace("render", "test").unwrap();
+        let mut definition =
+            SettingDef::new("render.quality", "render", Value::Enum(new_option.id));
+        definition.enum_options = vec![new_option.clone()];
+        builder.register(definition);
+        let registry = builder.finish().unwrap();
+        let mut migration = MigrationChain::new(2);
+        migration
+            .add_step(
+                1,
+                [crate::MigrationOperation::convert(
+                    "render.quality",
+                    move |value| match value {
+                        Value::Enum(id) if id == old_option.id => Ok(Value::Enum(new_option.id)),
+                        other => Err(format!("unexpected value: {other:?}")),
+                    },
+                )],
+            )
+            .unwrap();
+        let mut watcher = SettingsWatcher::new(
+            &path,
+            None::<&Path>,
+            &registry,
+            migration,
+            Domain::Runtime,
+            SourceSpec::new(LayerKind::User, TrustLevel::User, "user-file"),
+        );
+
+        let WatchPoll::Changed {
+            candidate,
+            migrated_steps,
+            ..
+        } = watcher.poll(&[]).unwrap()
+        else {
+            panic!("first poll must produce a candidate")
+        };
+        assert_eq!(migrated_steps, 1);
+        assert_eq!(
+            candidate
+                .document
+                .candidates()
+                .get(&SettingKey::from("render.quality")),
+            Some(&Value::Enum(new_option.id))
+        );
+        assert!(!candidate.document.unknown().contains_key("render.quality"));
     }
 
     #[test]

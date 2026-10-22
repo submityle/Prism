@@ -199,6 +199,86 @@ impl SettingsDocument {
         Ok(document)
     }
 
+    /// Reclassifies preserved values after schema migrations have run.
+    ///
+    /// Known values must decode and validate against the active registry;
+    /// unresolved known values are errors instead of silently falling back to
+    /// defaults. Keys absent from the registry remain losslessly preserved.
+    pub(crate) fn classify_with_registry(
+        &mut self,
+        registry: &SettingsRegistry,
+    ) -> Result<(), CodecError> {
+        let known_keys: Vec<_> = self
+            .unknown
+            .keys()
+            .filter_map(|key| {
+                registry
+                    .get(&SettingKey::new(key.clone()))
+                    .map(|_| key.clone())
+            })
+            .collect();
+        for key in known_keys {
+            let Some(raw) = self.unknown.get(&key) else {
+                continue;
+            };
+            let Some((id, definition)) = registry.get(&SettingKey::new(key.clone())) else {
+                continue;
+            };
+            let options =
+                (!definition.enum_options.is_empty()).then_some(definition.enum_options.as_slice());
+            let value =
+                decode_value(&raw, &key, options).map_err(|reason| CodecError::InvalidValue {
+                    key: key.clone(),
+                    reason,
+                })?;
+            registry
+                .validate_value(id, value.clone())
+                .map_err(|error| CodecError::InvalidKnownValue {
+                    key: key.clone(),
+                    reason: error.to_string(),
+                })?;
+            self.unknown.remove(&key);
+            self.candidates.insert(SettingKey::new(key.clone()), value);
+            if !definition.enum_options.is_empty() {
+                self.enum_options
+                    .insert(SettingKey::new(key), definition.enum_options.clone());
+            }
+        }
+        Ok(())
+    }
+
+    /// Moves values for keys absent from the active schema into the lossless
+    /// unknown map after a schema-free migration decode.
+    pub(crate) fn preserve_unregistered(
+        &mut self,
+        registry: &SettingsRegistry,
+    ) -> Result<(), CodecError> {
+        let keys: Vec<_> = self
+            .candidates
+            .keys()
+            .filter(|key| registry.get(key).is_none())
+            .cloned()
+            .collect();
+        for key in keys {
+            let value = self
+                .candidates
+                .get(&key)
+                .ok_or_else(|| CodecError::InvalidValue {
+                    key: key.to_string(),
+                    reason: "candidate disappeared during schema classification".to_owned(),
+                })?;
+            let raw = encode_value(
+                value,
+                key.as_str(),
+                self.enum_options.get(&key).map(Vec::as_slice),
+            )?;
+            self.candidates.remove(&key);
+            self.enum_options.remove(&key);
+            self.unknown.insert(key.to_string(), raw);
+        }
+        Ok(())
+    }
+
     /// Removes and returns a candidate, if one exists.
     pub(crate) fn remove_candidate(&mut self, key: &str) -> Option<Value> {
         let key = SettingKey::new(key.to_owned());
