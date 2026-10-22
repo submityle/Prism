@@ -234,7 +234,7 @@ fn specular_aa_gpu_readback_matches_cpu_goldens() {
         geometric_specular_aa_roughness, screen_space_variance, toksvig_factor, toksvig_roughness,
         DEFAULT_KAPPA_MAX, DEFAULT_SIGMA2,
     };
-    use wgpu::util::BufferInitDescriptor;
+    use wgpu::util::{BufferInitDescriptor, DeviceExt};
     use wgpu::{
         BackendOptions, Backends, BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor,
         BindGroupLayoutEntry, BindingType, BufferBindingType, BufferDescriptor, BufferUsages,
