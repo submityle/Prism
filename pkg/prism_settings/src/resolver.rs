@@ -412,6 +412,37 @@ impl<'a> Resolver<'a> {
     }
 }
 
+#[cfg(test)]
+mod required_setting_tests {
+    use super::*;
+    use crate::{RegistryBuilder, SettingDef};
+
+    #[test]
+    fn required_setting_rejects_engine_default_but_accepts_a_source_value() {
+        let mut definition = SettingDef::new("render.device", "render", Value::String("auto".into()));
+        definition.flags.required = true;
+        let mut builder = RegistryBuilder::new();
+        builder.namespace("render", "test").unwrap();
+        builder.register(definition);
+        let registry = builder.finish().unwrap();
+
+        let missing = Resolver::new(&registry).resolve(Domain::Runtime, &[], 1);
+        assert!(matches!(
+            missing,
+            Err(errors) if errors.iter().any(|error| matches!(
+                error,
+                SettingsError::MissingRequiredSetting(key) if key.as_str() == "render.device"
+            ))
+        ));
+
+        let mut source = LayerSource::new(LayerKind::User, TrustLevel::User, "user");
+        source.set("render.device", Value::String("gpu".into()));
+        assert!(Resolver::new(&registry)
+            .resolve(Domain::Runtime, &[source], 2)
+            .is_ok());
+    }
+}
+
 fn source_rejection(def: &crate::SettingDef, source: &LayerSource) -> Option<SettingsError> {
     if source.layer == LayerKind::Mandatory && source.trust != TrustLevel::Trusted {
         return Some(SettingsError::UntrustedMandatory {
