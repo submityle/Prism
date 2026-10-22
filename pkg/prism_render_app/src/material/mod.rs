@@ -26,7 +26,6 @@ mod texture_heap_tests;
 mod tests;
 
 pub use binding::{FallbackTextures, MaterialBindingLayout, MaterialTextureSlots};
-#[cfg(test)]
 pub(crate) use buffers::{header_row_bytes, texture_row_bytes};
 pub use buffers::{MaterialParameterBuffers, MaterialSyncReport};
 pub use parameter_heap::ParameterHeap;
