@@ -40,6 +40,7 @@ mod audit;
 mod client;
 mod durable;
 mod ecs;
+mod multi_server;
 mod server;
 
 #[cfg(feature = "determinism")]
@@ -57,6 +58,13 @@ pub use client::{
 };
 pub use durable::{DurableLogOperation, DurableRecoveryError};
 pub use ecs::{EcsReplication, EcsReplicationError, EcsReplicationPlugin, NetworkRollbackDriver};
+pub use multi_server::{
+    decode_authority_aoi_event, decode_authority_aoi_replication_payload,
+    encode_authority_aoi_event, encode_authority_aoi_replication_payload, AuthorityAoiEventError,
+    AuthorityAoiReplicationPayload, AuthorityReplicationProvider,
+    AuthorityReplicationProviderError, EntitySnapshotPayload, MultiPeerAuthority,
+    MultiPeerAuthorityConfig, MultiPeerAuthorityError, MultiPeerServerPlugin, PeerId,
+};
 pub use server::{ReplicationServerPlugin, ServerReplication, ServerStrategy};
 
 /// The retransmit floor (in frames) both plugins use for their channel.
