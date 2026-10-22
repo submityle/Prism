@@ -24,6 +24,8 @@
 //! - `project_overridable`, `bootstrap`, and `execution_class` — settings
 //!   resolver flags (boolean, bare or `= bool`).
 //! - `max_string_bytes` and `max_array_len` — canonical value size limits.
+//! - `aliases = "old.key,older.key"` — deprecated persisted keys that resolve
+//!   to the canonical setting key.
 //! - `default = <lit>` — default-value attribute.
 //! - `readonly` / `hidden` / `required` / `setting` — boolean flags (bare or
 //!   `= bool`). `setting` explicitly opts a field into settings-schema
@@ -293,6 +295,7 @@ fn parse_field_reflect(attr: &syn::Attribute, fm: &mut FieldMeta) -> syn::Result
             || path.is_ident("override_scope")
             || path.is_ident("precedence")
             || path.is_ident("domains")
+            || path.is_ident("aliases")
         {
             let text: syn::LitStr = meta.value()?.parse()?;
             fm.custom.push((

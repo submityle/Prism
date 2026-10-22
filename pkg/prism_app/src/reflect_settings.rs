@@ -11,7 +11,8 @@ use prism_reflect::{
 };
 use prism_settings::{
     canonical_value_cmp, Constraints, Domain, DomainMask, OverrideScope, PrecedenceProfile,
-    RegistryBuilder, Scope, SettingDef, SettingsError, SettingsRegistry, Value, ValueShape,
+    RegistryBuilder, Scope, SettingDef, SettingKey, SettingsError, SettingsRegistry, Value,
+    ValueShape,
 };
 use std::{collections::BTreeMap, error::Error, fmt};
 
@@ -423,6 +424,24 @@ where
                     });
                 }
                 definition.domains = domains;
+            }
+            if let Some(value) = meta.custom("aliases") {
+                let AttributeValue::Text(value) = value else {
+                    return Err(ReflectSettingsError::MetadataTypeMismatch {
+                        field: name.to_owned(),
+                    });
+                };
+                let aliases = value
+                    .split(',')
+                    .map(str::trim)
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>();
+                if aliases.is_empty() || aliases.iter().any(String::is_empty) {
+                    return Err(ReflectSettingsError::MetadataTypeMismatch {
+                        field: name.to_owned(),
+                    });
+                }
+                definition.aliases = aliases.into_iter().map(SettingKey::from).collect();
             }
             for (key, slot) in [
                 (
@@ -1814,5 +1833,29 @@ mod tests {
                 ])
             )
             .is_err());
+    }
+
+    #[test]
+    fn derives_deprecated_key_aliases_and_rejects_empty_aliases() {
+        #[derive(Reflect, Default)]
+        struct RenamedSetting {
+            #[reflect(setting, aliases = "legacy.audio.volume,old.audio.volume")]
+            volume: f32,
+        }
+
+        let schema = derive_settings_registry::<RenamedSetting>("audio", "prism_app").unwrap();
+        let canonical = schema.id(&"audio.volume".into()).unwrap();
+        assert_eq!(schema.id(&"legacy.audio.volume".into()), Some(canonical));
+        assert_eq!(schema.id(&"old.audio.volume".into()), Some(canonical));
+
+        #[derive(Reflect, Default)]
+        struct EmptyAlias {
+            #[reflect(setting, aliases = "legacy.value,")]
+            value: bool,
+        }
+        assert!(matches!(
+            derive_settings_registry::<EmptyAlias>("invalid", "prism_app"),
+            Err(ReflectSettingsError::MetadataTypeMismatch { field }) if field == "value"
+        ));
     }
 }
