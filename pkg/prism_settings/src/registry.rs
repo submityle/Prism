@@ -460,7 +460,8 @@ fn validate_def(def: &SettingDef, errors: &mut Vec<SettingsError>) {
     {
         errors.push(invalid("numeric bounds must be finite and min <= max"));
     }
-    if def.ty == ValueType::Int {
+    let numeric_leaf_type = shape_numeric_leaf_type(&def.shape);
+    if numeric_leaf_type == Some(ValueType::Int) {
         let valid_integer_bound = |bound: f64| {
             bound >= i64::MIN as f64 && bound < i64::MAX as f64 && (bound as i64) as f64 == bound
         };
@@ -493,10 +494,11 @@ fn validate_def(def: &SettingDef, errors: &mut Vec<SettingsError>) {
     {
         errors.push(invalid("bootstrap values must be scalar"));
     }
-    if !def.constraints.enum_values.is_empty() && def.ty != ValueType::Enum {
+    let shape_has_enum = shape_contains_type(&def.shape, ValueType::Enum);
+    if !def.constraints.enum_values.is_empty() && !shape_has_enum {
         errors.push(invalid("enum_values require Enum type"));
     }
-    if !def.enum_options.is_empty() && def.ty != ValueType::Enum {
+    if !def.enum_options.is_empty() && !shape_has_enum {
         errors.push(invalid("enum_options require Enum type"));
     }
     let mut option_ids = BTreeSet::new();
@@ -545,9 +547,8 @@ fn validate_value(def: &SettingDef, value: Value) -> Result<Value, SettingsError
             reason: String::from("value shape is unsupported or exceeds the maximum nesting depth"),
         });
     }
-    let key = def.key.clone();
     let mut value = value;
-    validate_shape(&key, &def.shape, &value)?;
+    validate_shape(def, &key, &def.shape, &mut value)?;
     if let Value::Float(v) = value {
         if !v.is_finite() {
             return Err(SettingsError::OutOfRange {
@@ -625,9 +626,10 @@ fn validate_value(def: &SettingDef, value: Value) -> Result<Value, SettingsError
 }
 
 fn validate_shape(
+    def: &SettingDef,
     key: &SettingKey,
     shape: &crate::ValueShape,
-    value: &Value,
+    value: &mut Value,
 ) -> Result<(), SettingsError> {
     match shape {
         crate::ValueShape::Scalar(expected) => {
@@ -637,6 +639,66 @@ fn validate_shape(
                     expected: *expected,
                     actual: value.value_type(),
                 });
+            }
+            match value {
+                Value::Float(number) if !number.is_finite() => {
+                    return Err(SettingsError::OutOfRange {
+                        key: key.clone(),
+                        value: value.clone(),
+                    });
+                }
+                Value::Int(number) => {
+                    let minimum = def.constraints.min.map(|bound| bound as i64);
+                    let maximum = def.constraints.max.map(|bound| bound as i64);
+                    let out_of_range = minimum.is_some_and(|bound| *number < bound)
+                        || maximum.is_some_and(|bound| *number > bound);
+                    if out_of_range {
+                        if def.on_violation == crate::ViolationPolicy::Reject {
+                            return Err(SettingsError::OutOfRange {
+                                key: key.clone(),
+                                value: value.clone(),
+                            });
+                        }
+                        *number = (*number)
+                            .max(minimum.unwrap_or(i64::MIN))
+                            .min(maximum.unwrap_or(i64::MAX));
+                    }
+                }
+                Value::Float(number) => {
+                    let out_of_range = def.constraints.min.is_some_and(|bound| *number < bound)
+                        || def.constraints.max.is_some_and(|bound| *number > bound);
+                    if out_of_range {
+                        if def.on_violation == crate::ViolationPolicy::Reject {
+                            return Err(SettingsError::OutOfRange {
+                                key: key.clone(),
+                                value: value.clone(),
+                            });
+                        }
+                        *number = number
+                            .max(def.constraints.min.unwrap_or(f64::NEG_INFINITY))
+                            .min(def.constraints.max.unwrap_or(f64::INFINITY));
+                    }
+                }
+                Value::String(text)
+                    if def
+                        .constraints
+                        .max_string_bytes
+                        .is_some_and(|max| text.len() > max) =>
+                {
+                    return Err(SettingsError::TooLong { key: key.clone() });
+                }
+                Value::Enum(id)
+                    if (!def.constraints.enum_values.is_empty()
+                        && !def.constraints.enum_values.contains(id))
+                        || (!def.enum_options.is_empty()
+                            && !def.enum_options.iter().any(|option| option.id == *id)) =>
+                {
+                    return Err(SettingsError::InvalidEnum {
+                        key: key.clone(),
+                        value: *id,
+                    });
+                }
+                _ => {}
             }
         }
         crate::ValueShape::Array {
@@ -658,9 +720,133 @@ fn validate_shape(
                 return Err(SettingsError::TooLong { key: key.clone() });
             }
             for value in values {
-                validate_shape(key, element, value)?;
+                validate_shape(def, key, element, value)?;
             }
         }
     }
     Ok(())
+}
+
+fn shape_numeric_leaf_type(shape: &crate::ValueShape) -> Option<ValueType> {
+    match shape {
+        crate::ValueShape::Scalar(ValueType::Int | ValueType::Float) => Some(shape.value_type()),
+        crate::ValueShape::Scalar(_) => None,
+        crate::ValueShape::Array { element, .. } => shape_numeric_leaf_type(element),
+    }
+}
+
+fn shape_contains_type(shape: &crate::ValueShape, expected: ValueType) -> bool {
+    match shape {
+        crate::ValueShape::Scalar(actual) => *actual == expected,
+        crate::ValueShape::Array { element, .. } => shape_contains_type(element, expected),
+    }
+}
+
+#[cfg(test)]
+mod recursive_leaf_validation_tests {
+    use super::*;
+    use crate::EnumOption;
+
+    #[test]
+    fn nested_float_and_enum_leaves_obey_scalar_validation() {
+        let mut builder = RegistryBuilder::new();
+        builder.namespace("render", "test").unwrap();
+
+        let floats = SettingDef::new(
+            "render.weights",
+            "render",
+            Value::Array(vec![Value::Array(vec![Value::Float(0.5)])]),
+        );
+        builder.register(floats);
+
+        let low = EnumOption::from_stable_name("quality.low");
+        let high = EnumOption::from_stable_name("quality.high");
+        let mut enums = SettingDef::new(
+            "render.quality_history",
+            "render",
+            Value::Array(vec![Value::Enum(low.id)]),
+        );
+        enums.enum_options = vec![low.clone(), high.clone()];
+        builder.register(enums);
+        let registry = builder.finish().unwrap();
+
+        let floats_id = registry.id(&"render.weights".into()).unwrap();
+        assert!(matches!(
+            registry.validate_value(
+                floats_id,
+                Value::Array(vec![Value::Array(vec![Value::Float(f64::INFINITY)])]),
+            ),
+            Err(SettingsError::OutOfRange { .. })
+        ));
+
+        let enums_id = registry.id(&"render.quality_history".into()).unwrap();
+        assert!(registry
+            .validate_value(enums_id, Value::Array(vec![Value::Enum(high.id)]))
+            .is_ok());
+        assert!(matches!(
+            registry.validate_value(
+                enums_id,
+                Value::Array(vec![Value::Enum(EnumId::from_stable_name(
+                    "quality.unknown"
+                ))]),
+            ),
+            Err(SettingsError::InvalidEnum { .. })
+        ));
+    }
+
+    #[test]
+    fn nested_numeric_leaves_obey_reject_and_clamp_policies() {
+        let mut reject = SettingDef::new(
+            "render.int_history",
+            "render",
+            Value::Array(vec![Value::Array(vec![Value::Int(4)])]),
+        );
+        reject.constraints.min = Some(0.0);
+        reject.constraints.max = Some(10.0);
+        reject.shape = crate::ValueShape::array(
+            crate::ValueShape::array(crate::ValueShape::scalar(ValueType::Int), 1, 4),
+            1,
+            4,
+        );
+
+        let mut clamp = SettingDef::new(
+            "render.float_history",
+            "render",
+            Value::Array(vec![Value::Array(vec![Value::Float(0.5)])]),
+        );
+        clamp.constraints.min = Some(0.0);
+        clamp.constraints.max = Some(1.0);
+        clamp.on_violation = crate::ViolationPolicy::Clamp;
+        clamp.shape = crate::ValueShape::array(
+            crate::ValueShape::array(crate::ValueShape::scalar(ValueType::Float), 1, 4),
+            1,
+            4,
+        );
+
+        let mut builder = RegistryBuilder::new();
+        builder.namespace("render", "test-owner").unwrap();
+        builder.register(reject);
+        builder.register(clamp);
+        let registry = builder.finish().unwrap();
+
+        let int_id = registry.id(&"render.int_history".into()).unwrap();
+        assert!(matches!(
+            registry.validate_value(
+                int_id,
+                Value::Array(vec![Value::Array(vec![Value::Int(-1)])]),
+            ),
+            Err(SettingsError::OutOfRange { .. })
+        ));
+
+        let float_id = registry.id(&"render.float_history".into()).unwrap();
+        assert_eq!(
+            registry
+                .validate_value(
+                    float_id,
+                    Value::Array(vec![Value::Array(vec![Value::Float(2.0)])]),
+                )
+                .unwrap(),
+            Value::Array(vec![Value::Array(vec![Value::Float(1.0)])]),
+        );
+    }
 }

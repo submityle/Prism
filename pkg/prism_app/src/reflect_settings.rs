@@ -165,7 +165,7 @@ where
                         type_name: descriptor.type_name().to_owned(),
                     });
                 };
-                let (value, shape) = from_reflect_sequence(
+                let (value, shape, enum_options) = from_reflect_sequence(
                     list.iter_reflect(),
                     list.len(),
                     info.item_type_name(),
@@ -174,7 +174,7 @@ where
                     name,
                     descriptor.type_name(),
                 )?;
-                (value, shape, Vec::new())
+                (value, shape, enum_options)
             }
             ReflectRef::Array(array) => {
                 let TypeInfo::Array(info) = reflected.type_info() else {
@@ -183,7 +183,7 @@ where
                         type_name: descriptor.type_name().to_owned(),
                     });
                 };
-                let (value, shape) = from_reflect_sequence(
+                let (value, shape, enum_options) = from_reflect_sequence(
                     array.iter_reflect(),
                     array.len(),
                     info.item_type_name(),
@@ -192,7 +192,7 @@ where
                     name,
                     descriptor.type_name(),
                 )?;
-                (value, shape, Vec::new())
+                (value, shape, enum_options)
             }
             _ => {
                 let value = from_reflect_scalar(reflected).ok_or_else(|| {
@@ -212,17 +212,11 @@ where
                         field: name.to_owned(),
                     }
                 })?;
-                if !enum_options.is_empty()
-                    && let Value::String(variant_name) = &value
-                {
-                    value = enum_options
-                        .iter()
-                        .find(|option| option.stable_name == *variant_name)
-                        .map(|option| Value::Enum(option.id))
-                        .ok_or_else(|| ReflectSettingsError::MetadataTypeMismatch {
-                            field: name.to_owned(),
-                        })?;
-                }
+                value = resolve_enum_names(value, &enum_options).ok_or_else(|| {
+                    ReflectSettingsError::MetadataTypeMismatch {
+                        field: name.to_owned(),
+                    }
+                })?;
                 if !shape.matches(&value) {
                     return Err(ReflectSettingsError::MetadataTypeMismatch {
                         field: name.to_owned(),
@@ -267,6 +261,21 @@ fn from_attribute(value: &AttributeValue) -> Option<Value> {
             .collect::<Option<Vec<_>>>()
             .map(Value::Array),
         _ => None,
+    }
+}
+
+fn resolve_enum_names(value: Value, options: &[prism_settings::EnumOption]) -> Option<Value> {
+    match value {
+        Value::String(name) if !options.is_empty() => options
+            .iter()
+            .find(|option| option.stable_name == name)
+            .map(|option| Value::Enum(option.id)),
+        Value::Array(values) => values
+            .into_iter()
+            .map(|value| resolve_enum_names(value, options))
+            .collect::<Option<Vec<_>>>()
+            .map(Value::Array),
+        value => Some(value),
     }
 }
 
@@ -328,7 +337,7 @@ fn from_reflect_sequence<'a, I>(
     depth: usize,
     field: &str,
     type_name: &str,
-) -> Result<(Value, ValueShape), ReflectSettingsError>
+) -> Result<(Value, ValueShape, Vec<prism_settings::EnumOption>), ReflectSettingsError>
 where
     I: IntoIterator<Item = &'a dyn Reflect>,
 {
@@ -344,8 +353,10 @@ where
 
     let mut values = Vec::with_capacity(len);
     let mut element_type = None;
+    let mut enum_options = Vec::new();
     for item in items {
-        let (value, item_shape) = from_reflect_value(item, depth + 1, field, type_name)?;
+        let (value, item_shape, item_enum_options) =
+            from_reflect_value(item, depth + 1, field, type_name)?;
         if let Some(expected) = &element_type {
             if *expected != item_shape {
                 return Err(ReflectSettingsError::UnsupportedValue {
@@ -355,6 +366,15 @@ where
             }
         } else {
             element_type = Some(item_shape);
+        }
+        if !item_enum_options.is_empty() {
+            if !enum_options.is_empty() && enum_options != item_enum_options {
+                return Err(ReflectSettingsError::UnsupportedValue {
+                    field: field.to_owned(),
+                    type_name: type_name.to_owned(),
+                });
+            }
+            enum_options = item_enum_options;
         }
         values.push(value);
     }
@@ -369,7 +389,7 @@ where
         Some(length) => ValueShape::fixed_array(element_shape, length),
         None => ValueShape::bounded_array(element_shape, MAX_REFLECT_SETTING_ARRAY_LEN),
     };
-    Ok((Value::Array(values), shape))
+    Ok((Value::Array(values), shape, enum_options))
 }
 
 fn from_reflect_value(
@@ -377,7 +397,7 @@ fn from_reflect_value(
     depth: usize,
     field: &str,
     field_type_name: &str,
-) -> Result<(Value, ValueShape), ReflectSettingsError> {
+) -> Result<(Value, ValueShape, Vec<prism_settings::EnumOption>), ReflectSettingsError> {
     if depth > prism_settings::MAX_VALUE_SHAPE_DEPTH {
         return Err(ReflectSettingsError::UnsupportedValue {
             field: field.to_owned(),
@@ -419,6 +439,41 @@ fn from_reflect_value(
                 field_type_name,
             )
         }
+        ReflectRef::Enum(active) => {
+            let TypeInfo::Enum(enum_info) = value.type_info() else {
+                return Err(ReflectSettingsError::UnsupportedValue {
+                    field: field.to_owned(),
+                    type_name: field_type_name.to_owned(),
+                });
+            };
+            if enum_info
+                .variants()
+                .iter()
+                .any(|variant| !matches!(variant.kind(), VariantKind::Unit))
+            {
+                return Err(ReflectSettingsError::UnsupportedValue {
+                    field: field.to_owned(),
+                    type_name: field_type_name.to_owned(),
+                });
+            }
+            let enum_options = enum_info
+                .variants()
+                .iter()
+                .map(|variant| prism_settings::EnumOption::from_stable_name(variant.name()))
+                .collect::<Vec<_>>();
+            let option = enum_options
+                .iter()
+                .find(|option| option.stable_name == active.variant_name())
+                .ok_or_else(|| ReflectSettingsError::UnsupportedValue {
+                    field: field.to_owned(),
+                    type_name: field_type_name.to_owned(),
+                })?;
+            Ok((
+                Value::Enum(option.id),
+                ValueShape::scalar(prism_settings::ValueType::Enum),
+                enum_options,
+            ))
+        }
         _ => {
             let scalar = from_reflect_scalar(value).ok_or_else(|| {
                 ReflectSettingsError::UnsupportedValue {
@@ -426,7 +481,11 @@ fn from_reflect_value(
                     type_name: field_type_name.to_owned(),
                 }
             })?;
-            Ok((scalar.clone(), ValueShape::scalar(scalar.value_type())))
+            Ok((
+                scalar.clone(),
+                ValueShape::scalar(scalar.value_type()),
+                Vec::new(),
+            ))
         }
     }
 }
@@ -612,6 +671,54 @@ mod tests {
                 Value::Array(vec![Value::Float(1.0), Value::Int(2)])
             )
             .is_err());
+    }
+
+    #[test]
+    fn derives_nested_unit_enum_collections_with_stable_options() {
+        #[derive(Reflect, Default)]
+        enum Quality {
+            Low,
+            #[default]
+            Medium,
+            High,
+        }
+
+        #[derive(Reflect)]
+        struct GraphicsSettings {
+            #[reflect(setting)]
+            history: Vec<Vec<Quality>>,
+        }
+
+        impl Default for GraphicsSettings {
+            fn default() -> Self {
+                Self {
+                    history: vec![vec![Quality::High]],
+                }
+            }
+        }
+
+        let schema = derive_settings_registry::<GraphicsSettings>("graphics", "prism_app").unwrap();
+        let (id, definition) = schema.get(&"graphics.history".into()).unwrap();
+        assert_eq!(definition.enum_options.len(), 3);
+        assert!(matches!(
+            &definition.shape,
+            ValueShape::Array { element, .. }
+                if matches!(element.as_ref(), ValueShape::Array { element, .. }
+                    if element.as_ref() == &ValueShape::scalar(prism_settings::ValueType::Enum))
+        ));
+        assert_eq!(
+            schema
+                .validate_value(
+                    id,
+                    Value::Array(vec![Value::Array(vec![Value::Enum(
+                        prism_settings::EnumId::from_stable_name("High")
+                    )])]),
+                )
+                .unwrap(),
+            Value::Array(vec![Value::Array(vec![Value::Enum(
+                prism_settings::EnumId::from_stable_name("High")
+            )])]),
+        );
     }
 
     #[test]

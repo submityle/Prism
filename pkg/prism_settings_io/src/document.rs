@@ -395,13 +395,13 @@ fn encode_value(
         Value::Array(values) => values
             .iter()
             .enumerate()
-            .map(|(index, value)| encode_value(value, &format!("{key}[{index}]"), None))
+            .map(|(index, value)| encode_value(value, &format!("{key}[{index}]"), enum_options))
             .collect::<Result<Vec<_>, _>>()
             .map(toml::Value::Array),
         Value::Table(values) => values
             .iter()
             .map(|(child_key, value)| {
-                encode_value(value, &format!("{key}.{child_key}"), None)
+                encode_value(value, &format!("{key}.{child_key}"), enum_options)
                     .map(|value| (child_key.clone(), value))
             })
             .collect::<Result<toml::Table, _>>()
@@ -429,7 +429,7 @@ fn decode_value(
         toml::Value::String(value) => Ok(Value::String(value.clone())),
         toml::Value::Array(values) => values
             .iter()
-            .map(|value| decode_value(value, key, None))
+            .map(|value| decode_value(value, key, enum_options))
             .collect::<Result<Vec<_>, _>>()
             .map(Value::Array),
         toml::Value::Table(values) => {
@@ -465,7 +465,7 @@ fn decode_value(
             values
                 .iter()
                 .map(|(key, value)| {
-                    decode_value(value, key, None).map(|value| (key.clone(), value))
+                    decode_value(value, key, enum_options).map(|value| (key.clone(), value))
                 })
                 .collect::<Result<BTreeMap<_, _>, _>>()
                 .map(Value::Table)
@@ -499,20 +499,36 @@ pub(crate) fn decode_value_for_migration(value: &toml::Value, key: &str) -> Opti
     // Migrations run before the active registry is bound. Stable enum names
     // still carry enough identity to produce the same canonical runtime ID;
     // the destination registry will validate the converted value afterward.
-    if let toml::Value::Table(values) = value
-        && values.get(TAG_KEY).and_then(toml::Value::as_str) == Some("enum")
-    {
-        return match values.get("value")? {
-            toml::Value::String(name) => {
-                Some(Value::Enum(prism_settings::EnumId::from_stable_name(name)))
+    match value {
+        toml::Value::Array(values) => values
+            .iter()
+            .enumerate()
+            .map(|(index, value)| decode_value_for_migration(value, &format!("{key}[{index}]")))
+            .collect::<Option<Vec<_>>>()
+            .map(Value::Array),
+        toml::Value::Table(values)
+            if values.get(TAG_KEY).and_then(toml::Value::as_str) == Some("enum") =>
+        {
+            match values.get("value")? {
+                toml::Value::String(name) => {
+                    Some(Value::Enum(prism_settings::EnumId::from_stable_name(name)))
+                }
+                toml::Value::Integer(_) => decode_u32(values.get("value")?, key)
+                    .ok()
+                    .map(|id| Value::Enum(prism_settings::EnumId(id))),
+                _ => None,
             }
-            toml::Value::Integer(_) => decode_u32(values.get("value")?, key)
-                .ok()
-                .map(|id| Value::Enum(prism_settings::EnumId(id))),
-            _ => None,
-        };
+        }
+        toml::Value::Table(values) => values
+            .iter()
+            .map(|(child_key, value)| {
+                decode_value_for_migration(value, &format!("{key}.{child_key}"))
+                    .map(|value| (child_key.clone(), value))
+            })
+            .collect::<Option<BTreeMap<_, _>>>()
+            .map(Value::Table),
+        _ => decode_value(value, key, None).ok(),
     }
-    decode_value(value, key, None).ok()
 }
 
 #[cfg(test)]
@@ -642,6 +658,50 @@ mod tests {
 
         let unknown = "prism_schema = 1\n[values.\"render.quality\"]\n__prism_value = \"enum\"\nvalue = \"Ultra\"\n";
         assert!(SettingsDocument::decode_with_registry(unknown, Some(&registry)).is_err());
+    }
+
+    #[test]
+    fn nested_enum_arrays_persist_and_migrate_by_stable_name() {
+        let low = EnumOption::from_stable_name("Low");
+        let high = EnumOption::from_stable_name("High");
+        let mut definition = SettingDef::new(
+            "render.quality_history",
+            "render",
+            Value::Array(vec![Value::Array(vec![Value::Enum(low.id)])]),
+        )
+        .with_shape(ValueShape::bounded_array(
+            ValueShape::bounded_array(ValueShape::scalar(ValueType::Enum), 4),
+            4,
+        ));
+        definition.enum_options = vec![low.clone(), high.clone()];
+        let mut builder = RegistryBuilder::new();
+        builder.namespace("render", "test").unwrap();
+        builder.register(definition);
+        let registry = builder.finish().unwrap();
+
+        let mut document = SettingsDocument::new(1);
+        document.insert(
+            "render.quality_history",
+            Value::Array(vec![Value::Array(vec![Value::Enum(high.id)])]),
+        );
+        document.bind_registry(&registry);
+        let encoded = document.encode().unwrap();
+        assert!(encoded.contains("value = \"High\""));
+        let decoded = SettingsDocument::decode_with_registry(&encoded, Some(&registry)).unwrap();
+        assert_eq!(decoded, document);
+
+        let migrated = decode_value_for_migration(
+            &toml::Value::Array(vec![toml::Value::Array(vec![tagged(
+                "enum",
+                toml::Value::String("High".to_owned()),
+            )])]),
+            "render.quality_history",
+        )
+        .unwrap();
+        assert_eq!(
+            migrated,
+            Value::Array(vec![Value::Array(vec![Value::Enum(high.id)])])
+        );
     }
 
     #[test]
