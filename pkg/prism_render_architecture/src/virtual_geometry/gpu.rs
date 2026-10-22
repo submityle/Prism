@@ -128,6 +128,7 @@ pub struct VirtualGeometryGpuPublication {
     pages: Vec<VirtualGeometryGpuPage>,
     clusters: Vec<VirtualGeometryGpuCluster>,
     cluster_by_node: BTreeMap<u32, u32>,
+    physical_page_to_logical_page: BTreeMap<u32, u32>,
 }
 
 impl VirtualGeometryGpuPublication {
@@ -254,6 +255,16 @@ impl VirtualGeometryGpuPublication {
             pages,
             clusters,
             cluster_by_node,
+            physical_page_to_logical_page: physical_pages
+                .into_iter()
+                .map(|(physical_page, key)| {
+                    let page_index = page_indices
+                        .get(&key)
+                        .copied()
+                        .expect("resident page was validated against page indices");
+                    (physical_page, page_index)
+                })
+                .collect(),
         })
     }
 
@@ -303,6 +314,124 @@ impl VirtualGeometryGpuPublication {
     #[must_use]
     pub fn cluster_table_bytes(&self) -> &[u8] {
         bytemuck::cast_slice(&self.clusters)
+    }
+
+    /// Returns the logical page-table index for a sorted page key.
+    #[must_use]
+    pub fn page_index(&self, key: GeometryPageKey) -> Option<u32> {
+        self.page_keys
+            .binary_search(&key)
+            .ok()
+            .map(|index| index as u32)
+    }
+
+    /// Returns one page-table row by logical index.
+    #[must_use]
+    pub fn page(&self, page_index: u32) -> Option<VirtualGeometryGpuPage> {
+        self.pages.get(page_index as usize).copied()
+    }
+
+    /// Applies one completed physical-page admission without rebuilding the
+    /// page table or Cluster table. The returned value is the changed logical
+    /// page-table index, which lets a renderer upload one row instead of the
+    /// entire table.
+    pub fn apply_resident_page(
+        &mut self,
+        resident: VirtualGeometryPhysicalPage,
+    ) -> Result<u32, VirtualGeometryGpuPublicationError> {
+        if resident.generation != self.generation {
+            return Err(VirtualGeometryGpuPublicationError::PageGenerationMismatch {
+                key: resident.key,
+                expected: self.generation,
+                actual: resident.generation,
+            });
+        }
+        if resident.physical_page == NON_RESIDENT_PHYSICAL_PAGE {
+            return Err(VirtualGeometryGpuPublicationError::InvalidPhysicalPage(
+                resident.key,
+            ));
+        }
+        if resident.byte_len == 0 {
+            return Err(VirtualGeometryGpuPublicationError::EmptyResidentPage(
+                resident.key,
+            ));
+        }
+        let Some(page_index) = self.page_index(resident.key) else {
+            return Err(VirtualGeometryGpuPublicationError::UnknownPage(
+                resident.key,
+            ));
+        };
+
+        // Complete every fallible check before mutating either side of the
+        // bidirectional residency index.  In particular, an aliasing error
+        // must not remove the old mapping and leave the publication half
+        // updated.
+        let current_physical_page = self.pages[page_index as usize]
+            .is_resident()
+            .then(|| self.pages[page_index as usize].physical_page);
+        if let Some(current_physical_page) = current_physical_page {
+            if self
+                .physical_page_to_logical_page
+                .get(&current_physical_page)
+                .copied()
+                != Some(page_index)
+            {
+                return Err(
+                    VirtualGeometryGpuPublicationError::InconsistentPhysicalPageMapping {
+                        key: resident.key,
+                        physical_page: current_physical_page,
+                    },
+                );
+            }
+        }
+        if let Some(previous_page) = self
+            .physical_page_to_logical_page
+            .get(&resident.physical_page)
+            .copied()
+        {
+            if previous_page != page_index {
+                return Err(VirtualGeometryGpuPublicationError::DuplicatePhysicalPage(
+                    resident.physical_page,
+                ));
+            }
+        }
+
+        let row = &mut self.pages[page_index as usize];
+        if let Some(current_physical_page) = current_physical_page {
+            self.physical_page_to_logical_page
+                .remove(&current_physical_page);
+        }
+        row.generation = split_generation(self.generation);
+        row.physical_page = resident.physical_page;
+        row.flags = 1;
+        row.byte_offset = resident.byte_offset;
+        row.byte_len = resident.byte_len;
+        self.physical_page_to_logical_page
+            .insert(resident.physical_page, page_index);
+        Ok(page_index)
+    }
+
+    /// Removes one resident page and returns its former physical slot. The
+    /// page-table row becomes an explicit non-resident sentinel; Cluster
+    /// descriptors remain stable and can be reused after a later admission.
+    pub fn clear_resident_page(
+        &mut self,
+        key: GeometryPageKey,
+    ) -> Result<Option<u32>, VirtualGeometryGpuPublicationError> {
+        let Some(page_index) = self.page_index(key) else {
+            return Err(VirtualGeometryGpuPublicationError::UnknownPage(key));
+        };
+        let row = &mut self.pages[page_index as usize];
+        if !row.is_resident() {
+            return Ok(None);
+        }
+        let physical_page = row.physical_page;
+        row.physical_page = NON_RESIDENT_PHYSICAL_PAGE;
+        row.flags = 0;
+        row.byte_offset = 0;
+        row.byte_len = 0;
+        self.physical_page_to_logical_page.remove(&physical_page);
+        Ok(Some(physical_page))
     }
 
     /// Resolves a cut into a typed draw list for one scene instance.
@@ -434,6 +563,11 @@ pub enum VirtualGeometryGpuPublicationError {
     InvalidPhysicalPage(GeometryPageKey),
     /// Two logical pages alias the same physical allocation.
     DuplicatePhysicalPage(u32),
+    /// The page table and reverse physical-slot index disagree.
+    InconsistentPhysicalPageMapping {
+        key: GeometryPageKey,
+        physical_page: u32,
+    },
     /// Two bindings claim the same authored slot.
     DuplicateMaterialSlot,
     /// A cluster's authored material slot has no global mapping.
@@ -494,6 +628,10 @@ impl fmt::Display for VirtualGeometryGpuPublicationError {
                     "physical page {page} is aliased by multiple logical pages"
                 )
             }
+            Self::InconsistentPhysicalPageMapping { key, physical_page } => write!(
+                formatter,
+                "page {key:?} has physical page {physical_page} without a matching reverse mapping"
+            ),
             Self::DuplicateMaterialSlot => formatter.write_str("material slot is published twice"),
             Self::MaterialSlotUnbound { slot } => {
                 write!(formatter, "material slot {slot} has no global binding")
@@ -628,6 +766,24 @@ mod tests {
             byte_len: 4,
             generation,
         }
+    }
+
+    fn two_page_asset() -> VirtualGeometryAsset {
+        let mut asset = asset();
+        let key = GeometryPageKey::new(7, 1);
+        asset.pages.push(VirtualGeometryPage {
+            record: VirtualGeometryPageRecord {
+                key,
+                compression: VirtualGeometryCompression::None,
+                uncompressed_size: 4,
+                priority: 1,
+                cluster_start: 1,
+                cluster_count: 0,
+            },
+            payload: vec![5, 6, 7, 8],
+        });
+        asset.validate().expect("two-page fixture remains valid");
+        asset
     }
 
     #[test]
@@ -794,5 +950,40 @@ mod tests {
             error,
             VirtualGeometryGpuPublicationError::DuplicatePhysicalPage(3)
         ));
+    }
+
+    #[test]
+    fn resident_alias_rejection_is_atomic() {
+        let asset = two_page_asset();
+        let mut publication = VirtualGeometryGpuPublication::build(
+            &asset,
+            [0; 32],
+            3,
+            &[],
+            &[VirtualGeometryMaterialBinding {
+                material_slot: 0,
+                material: SceneMaterialHandle::new(1, 1),
+            }],
+        )
+        .expect("publication");
+        publication
+            .apply_resident_page(resident(3))
+            .expect("first page admission");
+        let before = publication.clone();
+        let error = publication
+            .apply_resident_page(VirtualGeometryPhysicalPage {
+                key: GeometryPageKey::new(7, 1),
+                physical_page: 3,
+                byte_offset: 128,
+                byte_len: 4,
+                generation: 3,
+            })
+            .expect_err("an occupied physical slot must be rejected");
+
+        assert_eq!(
+            error,
+            VirtualGeometryGpuPublicationError::DuplicatePhysicalPage(3)
+        );
+        assert_eq!(publication, before);
     }
 }

@@ -893,6 +893,14 @@ content revision 是受信任发布方提供的 artifact digest，注册表不�
 
 2026-10-23 独立 `/private/tmp/prism-mesh-shared-stream-target` 下 `cargo test -p prism_render_architecture virtual_geometry::stream_adapter::tests --lib -- --nocapture` 通过 3 项，`cargo test -p prism_render_scene --features legacy-bevy --lib geometry::virtual_runtime::tests --no-fail-fast` 通过 9 项；后者覆盖 Arc allocation identity、替换期间旧 backing 保活及旧 generation 拒绝。该改动仅消除 CPU source 的重复常驻副本并优化页索引，不提供容器 range-read、异步取消/优先级调度、GPU page pool 上传或 RenderScene Cluster draw 的证据；完整虚拟几何生产渲染闭环仍未完成。
 
+CLST stream 另提供 `resident_page_words(key)`，以借用形式返回驻留物理 slot 与该 slot 的完整对齐 words；调用方可对 `ReconcileReport::streamed_in` 做 O(newly-resident-pages) 的局部 staging，无需每帧分配/遍历全量 `(key, slot)` 快照或上传整个 CPU page pool。定向 stream adapter tests 仍为 3 项并覆盖新页可寻址与非驻留 key 返回 `None`。该接口只建立增量消费所需的数据出口；RenderApp 尚无把 CLST generation/slot 生命周期映射到 `FixedPagePool`、GPU 页表与 draw publication 的协调 Resource/System，因此不是 GPU residency 接线完成证据。
+
+### 19.13 CLST publication 事务原子性与物理槽复用复核
+
+`VirtualGeometryGpuPublication::apply_resident_page` 现在先完成 generation、逻辑页、反向物理槽索引一致性和物理槽别名校验，全部通过后才同时更新 page-table row 与反向索引；别名失败不会移除旧映射或留下半更新状态。`VirtualGeometryPublicationCoordinator` 的回归测试覆盖 resident budget 为 1 时 page A 驻留 slot 0、page B 触发 A 驱逐并复用 slot 0，确认 delta 先清空旧 page row、再发布新 page row，Cluster table bytes 保持不变。
+
+2026-10-23 在独立 `/private/tmp/prism-mesh-publication-target`（`CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0`）下运行 `cargo test -p prism_render_architecture virtual_geometry:: --lib -- --nocapture`，虚拟几何模块 108 项测试全部通过；该证据覆盖设备无关 publication/stream/cut/ABI 契约，不证明 RenderApp GPU page pool、RenderScene Cluster draw 或真实场景画质闭环。验证后已清理独立 target。
+
 ## 20. 易维护性与演进规则
 
 ### 20.1 稳定契约
