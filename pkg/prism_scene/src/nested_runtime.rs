@@ -205,10 +205,11 @@ pub fn replace_nested_typed<P: NestedSceneProvider>(
 }
 
 /// Reloads every live tree whose root template is in the invalidated GUID set.
-/// All replacements are staged before any old tree is retired. A failure
-/// destroys completed candidates and returns every old tree to the caller.
-/// The invalidation set should contain the cache's complete transitive
-/// `dependent` closure so a changed nested template reloads its live roots.
+/// All replacements are staged before any old tree is retired. `max_instances`
+/// bounds the total candidate instances across the batch. A failure destroys
+/// completed candidates and returns every old tree to the caller. The
+/// invalidation set should contain the cache's complete transitive `dependent`
+/// closure so a changed nested template reloads its live roots.
 pub fn reload_invalidated_nested_trees<P: NestedSceneProvider>(
     world: &mut World,
     trees: Vec<SceneTreeSpawn>,
@@ -222,6 +223,7 @@ pub fn reload_invalidated_nested_trees<P: NestedSceneProvider>(
     let invalidated: BTreeSet<_> = invalidated.iter().copied().collect();
     let mut previous = trees.into_iter();
     let mut staged: Vec<(SceneTreeSpawn, Option<SceneTreeSpawn>)> = Vec::new();
+    let mut staged_instances = 0usize;
     while let Some(tree) = previous.next() {
         let root_guid = tree
             .root
@@ -263,8 +265,16 @@ pub fn reload_invalidated_nested_trees<P: NestedSceneProvider>(
                 });
             }
         };
-        match stage_nested_replacement(world, &tree, template, plan, provider, limits) {
-            Ok(candidate) => staged.push((tree, Some(candidate))),
+        let remaining = limits.max_instances.saturating_sub(staged_instances);
+        let tree_limits = NestedSpawnLimits {
+            max_depth: limits.max_depth,
+            max_instances: remaining,
+        };
+        match stage_nested_replacement(world, &tree, template, plan, provider, tree_limits) {
+            Ok(candidate) => {
+                staged_instances = staged_instances.saturating_add(tree_instance_count(&candidate));
+                staged.push((tree, Some(candidate)));
+            }
             Err(error) => {
                 for (_, candidate) in staged.iter_mut().rev() {
                     if let Some(candidate) = candidate.take() {
@@ -292,6 +302,15 @@ pub fn reload_invalidated_nested_trees<P: NestedSceneProvider>(
         }
     }
     Ok(replacements)
+}
+
+fn tree_instance_count(tree: &SceneTreeSpawn) -> usize {
+    1usize.saturating_add(
+        tree.children
+            .iter()
+            .map(|child| tree_instance_count(&child.tree))
+            .fold(0usize, usize::saturating_add),
+    )
 }
 
 fn stage_nested_replacement<P: NestedSceneProvider>(
@@ -867,6 +886,55 @@ mod tests {
         )
         .unwrap_err();
 
+        assert_eq!(error.trees.len(), 2);
+        assert_eq!(
+            [
+                error.trees[0].root.root.unwrap(),
+                error.trees[1].root.root.unwrap(),
+            ],
+            old_roots
+        );
+        assert!(old_roots.iter().all(|root| world.contains(*root)));
+        assert_eq!(world.entity_count(), 6);
+    }
+
+    #[test]
+    fn invalidation_batch_enforces_one_instance_budget_across_all_candidates() {
+        let provider = provider();
+        let root_template = provider.template(guid(1)).unwrap().clone();
+        let other_template = provider.template(guid(3)).unwrap().clone();
+        let mut world = World::new();
+        let root = spawn_nested_typed(
+            &mut world,
+            &root_template,
+            typed_root_plan(),
+            &provider,
+            NestedSpawnLimits::default(),
+        )
+        .unwrap();
+        let other = spawn_nested_typed(
+            &mut world,
+            &other_template,
+            typed_root_plan(),
+            &provider,
+            NestedSpawnLimits::default(),
+        )
+        .unwrap();
+        let old_roots = [root.root.root.unwrap(), other.root.root.unwrap()];
+
+        let error = reload_invalidated_nested_trees(
+            &mut world,
+            vec![root, other],
+            &[guid(1), guid(3)],
+            &provider,
+            NestedSpawnLimits {
+                max_depth: 64,
+                max_instances: 2,
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error.cause, NestedInstantiateError::InstanceLimit);
         assert_eq!(error.trees.len(), 2);
         assert_eq!(
             [
