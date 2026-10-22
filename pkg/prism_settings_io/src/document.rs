@@ -416,6 +416,22 @@ fn decode_u64(value: &toml::Value, key: &str) -> Result<u64, String> {
 }
 
 pub(crate) fn decode_value_for_migration(value: &toml::Value, key: &str) -> Option<Value> {
+    // Migrations run before the active registry is bound. Stable enum names
+    // still carry enough identity to produce the same canonical runtime ID;
+    // the destination registry will validate the converted value afterward.
+    if let toml::Value::Table(values) = value
+        && values.get(TAG_KEY).and_then(toml::Value::as_str) == Some("enum")
+    {
+        return match values.get("value")? {
+            toml::Value::String(name) => {
+                Some(Value::Enum(prism_settings::EnumId::from_stable_name(name)))
+            }
+            toml::Value::Integer(_) => decode_u32(values.get("value")?, key)
+                .ok()
+                .map(|id| Value::Enum(prism_settings::EnumId(id))),
+            _ => None,
+        };
+    }
     decode_value(value, key, None).ok()
 }
 
@@ -517,5 +533,53 @@ mod tests {
 
         let unknown = "prism_schema = 1\n[values.\"render.quality\"]\n__prism_value = \"enum\"\nvalue = \"Ultra\"\n";
         assert!(SettingsDocument::decode_with_registry(unknown, Some(&registry)).is_err());
+    }
+
+    #[test]
+    fn stable_enum_values_can_be_converted_during_schema_migration() {
+        let old_option = EnumOption::from_stable_name("render::Quality::High");
+        let new_option = EnumOption::from_stable_name("render::Quality::Ultra");
+        let mut document = SettingsDocument::new(1);
+        document.preserve_unknown(
+            "render.quality",
+            tagged("enum", toml::Value::String(old_option.stable_name.clone())),
+        );
+
+        let mut chain = crate::MigrationChain::new(2);
+        chain
+            .add_step(
+                1,
+                [crate::MigrationOperation::convert(
+                    "render.quality",
+                    move |value| match value {
+                        Value::Enum(id) if id == old_option.id => Ok(Value::Enum(new_option.id)),
+                        other => Err(format!("unexpected value: {other:?}")),
+                    },
+                )],
+            )
+            .unwrap();
+
+        let report = chain.migrate(&mut document).unwrap();
+        assert_eq!(report.converted, 1);
+        assert_eq!(document.schema_version(), 2);
+        assert_eq!(
+            document
+                .candidates()
+                .get(&SettingKey::from("render.quality")),
+            Some(&Value::Enum(new_option.id))
+        );
+
+        let mut builder = RegistryBuilder::new();
+        builder.namespace("render", "test").unwrap();
+        let mut definition =
+            SettingDef::new("render.quality", "render", Value::Enum(new_option.id));
+        definition.enum_options = vec![new_option.clone()];
+        builder.register(definition);
+        let registry = builder.finish().unwrap();
+        document.bind_registry(&registry);
+        assert!(document
+            .encode()
+            .unwrap()
+            .contains("value = \"render::Quality::Ultra\""));
     }
 }
