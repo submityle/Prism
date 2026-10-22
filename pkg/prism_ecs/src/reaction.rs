@@ -40,12 +40,13 @@
 //! The graph never inspects `C`; it only guarantees *when* and *how often* each
 //! callback runs.
 //!
-//! A non-empty flush sorts only the `d` dirty node indices, then runs Kahn's
-//! ordering over their incident dependency edges. Its structural work is
-//! `O(d log d + e_d)`, where `e_d` counts adjacency entries inspected for dirty
-//! nodes; membership checks use the dirty bit plus a per-flush position, so
-//! they are O(1). A clean frame is O(1). Callbacks are `Send + Sync`, allowing
-//! an owning World to cross task lanes.
+//! Dirt propagation maintains each pending node's count of dirty dependencies.
+//! A non-empty flush sorts only the `d` dirty node indices, seeds Kahn ordering
+//! from those counts, and walks outgoing edges of dirty nodes; it never scans
+//! all incoming edges of a dirty node. Propagation plus ordering is
+//! `O(d log d + e_d)`, where `e_d` counts outgoing adjacency entries reached
+//! from the dirty subgraph. A clean frame is O(1). Callbacks are `Send + Sync`,
+//! allowing an owning World to cross task lanes.
 
 use alloc::boxed::Box;
 use alloc::collections::{BTreeSet, VecDeque};
@@ -82,6 +83,10 @@ struct Node<C> {
     dependents: Vec<usize>,
     /// Whether this node must be recomputed on the next [`ReactionGraph::flush`].
     dirty: bool,
+    /// Number of dependencies that are currently dirty. Maintained as dirt
+    /// propagates and nodes settle, so ordering never scans clean incoming
+    /// edges of a high-indegree dirty node.
+    dirty_indegree: usize,
     /// Position in the current flush's sorted dirty-node array. Meaningful
     /// only while `dirty` is true; the dirty bit is the membership marker.
     order_position: usize,
@@ -115,7 +120,7 @@ pub struct ReactionGraph<C> {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ReactionStats {
     pub(crate) ordering_nodes: usize,
-    /// Dependency/dependent adjacency entries inspected during sparse ordering.
+    /// Dirty-subgraph dependent adjacency entries inspected during ordering.
     pub(crate) ordering_edges: usize,
     pub(crate) executed_nodes: usize,
 }
@@ -177,6 +182,7 @@ impl<C> ReactionGraph<C> {
             deps: Vec::new(),
             dependents: Vec::new(),
             dirty: false,
+            dirty_indegree: 0,
             order_position: usize::MAX,
             recompute: None,
         });
@@ -202,6 +208,7 @@ impl<C> ReactionGraph<C> {
             deps: Vec::new(),
             dependents: Vec::new(),
             dirty: false,
+            dirty_indegree: 0,
             order_position: usize::MAX,
             recompute: Some(Box::new(recompute)),
         });
@@ -241,7 +248,11 @@ impl<C> ReactionGraph<C> {
         // Adding an edge after a source was dirtied must not lose the new
         // dependent merely because the source is already in the pending set.
         if self.nodes[dep].dirty {
-            self.mark_dirty(NodeId(node));
+            if self.nodes[node].dirty {
+                self.nodes[node].dirty_indegree += 1;
+            } else {
+                self.mark_dirty(NodeId(node));
+            }
         }
     }
 
@@ -278,6 +289,17 @@ impl<C> ReactionGraph<C> {
     /// "cost ∝ amount-of-change". An already-dirty node is never revisited,
     /// so converging dependency paths are traversed only once.
     pub fn mark_dirty(&mut self, node: NodeId) {
+        if self.nodes[node.0].dirty {
+            return;
+        }
+        // `node` may be explicitly dirtied while one or more upstream nodes
+        // are already pending. Count those edges once at the root; all
+        // subsequently dirtied nodes receive their count from propagation.
+        self.nodes[node.0].dirty_indegree = self.nodes[node.0]
+            .deps
+            .iter()
+            .filter(|&&dependency| self.nodes[dependency].dirty)
+            .count();
         let mut stack = Vec::new();
         stack.push(node.0);
         while let Some(i) = stack.pop() {
@@ -288,6 +310,7 @@ impl<C> ReactionGraph<C> {
             self.pending.push(i);
             for k in 0..self.nodes[i].dependents.len() {
                 let d = self.nodes[i].dependents[k];
+                self.nodes[d].dirty_indegree += 1;
                 if !self.nodes[d].dirty {
                     stack.push(d);
                 }
@@ -336,6 +359,13 @@ impl<C> ReactionGraph<C> {
                 }
             }
             self.nodes[i].dirty = false;
+            for k in 0..self.nodes[i].dependents.len() {
+                let dependent = self.nodes[i].dependents[k];
+                if self.nodes[dependent].dirty {
+                    debug_assert!(self.nodes[dependent].dirty_indegree > 0);
+                    self.nodes[dependent].dirty_indegree -= 1;
+                }
+            }
             self.pending.pop();
         }
         recomputed
@@ -354,19 +384,7 @@ impl<C> ReactionGraph<C> {
         let mut indegree = alloc::vec![0usize; count];
         for (position, &node) in affected.iter().enumerate() {
             self.nodes[node].order_position = position;
-        }
-        for (position, &node) in affected.iter().enumerate() {
-            for &dependency in &self.nodes[node].deps {
-                #[cfg(test)]
-                {
-                    self.stats.ordering_edges += 1;
-                }
-                if self.nodes[dependency].dirty {
-                    // A dirty dependency is in `affected`; positions were
-                    // published before this edge pass.
-                    indegree[position] += 1;
-                }
-            }
+            indegree[position] = self.nodes[node].dirty_indegree;
         }
         #[cfg(test)]
         {
@@ -427,6 +445,14 @@ mod tests {
         }
         for (index, node) in graph.nodes.iter().enumerate() {
             assert_eq!(node.dirty, pending[index], "node {index}");
+            assert_eq!(
+                node.dirty_indegree,
+                node.deps
+                    .iter()
+                    .filter(|&&dependency| graph.nodes[dependency].dirty)
+                    .count(),
+                "dirty indegree for node {index}"
+            );
         }
     }
 
@@ -525,6 +551,38 @@ mod tests {
         assert_eq!(recomputed, 1, "cost proportional to change: only d1 ran");
         assert_eq!(ctx.order, alloc::vec![1]);
         assert!(!g.is_dirty(d1), "flush clears dirty bits");
+    }
+
+    #[test]
+    fn sparse_flush_does_not_scan_clean_incoming_edges() {
+        const INDEGREE: usize = 4096;
+        let mut graph = ReactionGraph::<Recorder>::new();
+        let sources: Vec<_> = (0..INDEGREE).map(|_| graph.add_source()).collect();
+        let effect_calls = alloc::sync::Arc::new(core::sync::atomic::AtomicUsize::new(0));
+        let effect = {
+            let effect_calls = effect_calls.clone();
+            graph.add_derived(&sources, move |ctx| {
+                effect_calls.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                ctx.order.push(1);
+            })
+        };
+        let tail = graph.add_derived(&[effect], |ctx| ctx.order.push(2));
+
+        graph.mark_dirty(sources[INDEGREE / 2]);
+        assert_eq!(graph.nodes[effect.index()].dirty_indegree, 1);
+        assert_eq!(graph.nodes[tail.index()].dirty_indegree, 1);
+        assert_dirty_pending_invariant(&graph);
+
+        let mut context = Recorder::default();
+        assert_eq!(graph.flush(&mut context), 2);
+        assert_eq!(context.order, alloc::vec![1, 2]);
+        assert_eq!(effect_calls.load(core::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(graph.stats.ordering_nodes, 3);
+        assert_eq!(
+            graph.stats.ordering_edges, 2,
+            "only dirty outgoing edges participate in Kahn ordering"
+        );
+        assert_dirty_pending_invariant(&graph);
     }
 
     #[test]
