@@ -5,6 +5,8 @@ use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 
 use prism_camera::{ClearMode, RenderTarget};
+#[cfg(feature = "view-lod")]
+use prism_camera_ecs::PublishedCameraLod;
 use prism_camera_ecs::PublishedViews;
 use prism_ecs::prelude::{Entity, LifecycleEvent, ObserverContext, Resource, World};
 use prism_ecs::world::WorldId;
@@ -34,6 +36,10 @@ pub struct SurfaceView {
     pub history_epoch: u64,
     /// True only for a continuous camera incarnation without cut/epoch/rect reset.
     pub history_valid: bool,
+    /// Camera-side resolution budget; this is metadata and does not resize attachments.
+    pub resolution_scale: f32,
+    /// Number of temporal history frames requested by the camera-side LOD policy.
+    pub history_frames: u32,
 }
 
 /// Why a camera was omitted. Prerequisite errors precede value validation.
@@ -201,6 +207,8 @@ pub fn extract_surface_views(main: &mut World, render: &mut World) {
                 viewport: camera.viewport,
                 history_epoch: camera.history_epoch,
                 history_valid: old.is_some(),
+                resolution_scale: 1.0,
+                history_frames: 0,
             },
         );
         extracted.incarnations.insert(entity, incarnation);
@@ -220,6 +228,13 @@ fn extract_published_surface_views(main: &World, render: &mut World, published: 
         source,
         ..Default::default()
     };
+    #[cfg(feature = "view-lod")]
+    let lod_by_entity: BTreeMap<_, _> = main
+        .get_resource::<PublishedCameraLod>()
+        .into_iter()
+        .flat_map(PublishedCameraLod::iter)
+        .map(|lod| (lod.entity, (lod.resolution_scale, lod.history_frames)))
+        .collect();
     for published_view in published.iter() {
         let view = published_view.data;
         // Native scene transforms are absolute-world values. Match the
@@ -255,6 +270,14 @@ fn extract_published_surface_views(main: &World, render: &mut World, published: 
             });
             continue;
         }
+        #[cfg(feature = "view-lod")]
+        let (resolution_scale, history_frames) = lod_by_entity
+            .get(&published_view.entity)
+            .copied()
+            .filter(|(scale, _)| scale.is_finite() && (0.0..=1.0).contains(scale))
+            .unwrap_or((1.0, 0));
+        #[cfg(not(feature = "view-lod"))]
+        let (resolution_scale, history_frames) = (1.0, 0);
         let prior = previous.get(published_view.entity).filter(|old| {
             previous.source == source
                 && view.history_valid
@@ -285,6 +308,8 @@ fn extract_published_surface_views(main: &World, render: &mut World, published: 
                 ],
                 history_epoch: view.history_epoch,
                 history_valid: prior.is_some(),
+                resolution_scale,
+                history_frames,
             },
         );
     }
@@ -438,6 +463,38 @@ mod tests {
         let extracted = view(&render, entity);
         assert_eq!(extracted.target, RenderTarget::Texture(0xCAFE));
         assert_eq!(extracted.clear, ClearMode::DepthOnly);
+        assert_eq!(extracted.resolution_scale, 1.0);
+        assert_eq!(extracted.history_frames, 0);
+    }
+
+    #[cfg(feature = "view-lod")]
+    #[test]
+    fn published_lod_is_joined_by_exact_camera_entity() {
+        use prism_app::{App, Plugin};
+        use prism_camera_ecs::{CameraBundle, CameraLodComponent, CameraPlugin};
+
+        let mut app = App::new();
+        app.add_plugins(CameraPlugin::new([640, 360]));
+        let default_entity = app.world_mut().spawn(CameraBundle::default());
+        let lod_entity = app.world_mut().spawn((
+            CameraBundle::default(),
+            CameraLodComponent(prism_camera::ViewLod {
+                max_update_hz: 60.0,
+                min_resolution_scale: 0.375,
+                history_frames: 7,
+            }),
+        ));
+        app.update();
+
+        let mut render = World::new();
+        extract_surface_views(app.world_mut(), &mut render);
+        let views = render.resource::<ExtractedSurfaceViews>();
+        let default_view = views.get(default_entity).unwrap();
+        assert_eq!(default_view.resolution_scale, 1.0);
+        assert_eq!(default_view.history_frames, 0);
+        let lod_view = views.get(lod_entity).unwrap();
+        assert_eq!(lod_view.resolution_scale, 0.375);
+        assert_eq!(lod_view.history_frames, 7);
     }
 
     fn assert_reset(render: &World, entity: Entity) {

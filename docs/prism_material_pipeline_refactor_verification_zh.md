@@ -381,3 +381,18 @@ Material-VT GPU slice 新增单调设备放弃标记：已知 device loss、恢�
 - **生命周期必须按整份材质快照闭合，而不是只给 execution tables 做 COW。** `on_submitted_work_done` 不能保护已经录制但尚未提交的 graph；graph 必须 pin 实际绑定的不可变快照，覆盖 header、parameter heap、texture rows、execution tables 及对应 VT publication/lease。快照退休后，仅在最后 graph/提交 lease 释放且 GPU completion 可证时，才由原 device 所有者回收；普通更新不得 `wait_idle`，也不得覆写仍被读的版本。否则 draw 与 resolve 仍可能跨代读取。
 - 本轮定向镜像测试因共享构建过程中 `target/debug/deps` 创建临时目录时报 `No space left on device` 而未能运行；这不是断言失败。随后 `target` 已不存在，磁盘剩余约 3.7 GiB；因无法证明完整依赖重建在当前空间可完成，本轮不重启 Cargo build。`git diff --check` 对上述材质/render 文件通过。Native composite 资源接线、无停顿版本化生命周期和完整默认 draw parity 均仍未完成。
 - **续接状态**：之后工作区 `target` 被其他任务重新建立；本次观察到约 916 MiB 构建产物、磁盘可用约 1.9 GiB，且有多个活动 Cargo/rustc 进程使用共享与隔离 target。故本次不清理 `target`、不启动竞争构建；该环境状态不改变上条测试失败原因，也不构成测试通过证据。
+
+### 7.7 2026-10-23 Native 主链续审：CPU/Scene 增量不等于 Native GPU 执行
+
+本轮对当前 dirty 工作树的增量进行只读审计，确认 `prism_render_shading/src/resolve.rs` 的扩展主要增加 CPU resolve oracle、纹理输入折叠和 registered CPU response 测试；调用者仍需提供已采样纹理输入，因此它不承担 GPU texture/VT sampling，也未进入 `prism_render_app` 的 Native 调用链。`prism_render_scene` 的 resolve/composition 改动属于 Bevy GPU Scene 路径，同样不等于 Native composite 已消费材质执行表。上述工作可作为共享语义和 oracle 的基础，但不关闭 P0-material。
+
+当前 Native 断点明确位于 GBuffer 写出之后、composite 着色之前：`LIGHTING_COMPOSITE_WGSL` 从 GBuffer 读取 albedo 并计算简化 direct/GI；`NativeExecutionTableBuffers` 虽在 `PrepareAssets` 同步 plan/program rows，却未传入 `LightingGpuState::pass_for_target`、composite bind group 或 frame graph。故 Native GPU 上当前没有依据 surface id 读取 canonical header/parameter、校验并执行 `ShadingPlan`、采样通用材质纹理或执行 builtin/registered response 的生产路径。
+
+后续完整实现必须作为同一真实默认 mesh draw 闭环验收：
+
+1. frame graph 绑定同一代际的 header、parameter heap、execution plan/program、texture rows/heap 与 VT snapshot；immutable snapshot/graph lease 必须覆盖已录制未提交 graph，并保持至提交完成后由原 device owner 回收。普通材质更新不得依赖 `queue.wait_idle()`。
+2. composite 从 surface identity 读取并校验 canonical 材质数据及 plan/program/package/permutation、generation/revision 和 buffer 范围；缺失、过期、越界数据 fail-closed，不得静默退回简化 albedo-Lambert。
+3. 默认 Native 路径执行全部已声明的 builtin、registered、mask-blend 计划，并消费 authored texture、portable VT 和规范 `ResponseOutput` 通道；bindless 与 non-bindless 都须有定义且经过验证的纹理/fallback 行为。Scene evaluator 依赖 Bevy RenderApp，不能直接当成 Native host。
+4. 使用默认 Native mesh 的完整生产 graph 做 GPU readback，与相同材质、纹理、视图/光照输入的 CPU golden 逐像素对拍；覆盖无效/过期计划、VT 更新与双 slice lease、in-flight 更新、device recovery、resize。单独 shader/kernel、ABI bytes 或 CPU-only fixture 均不足以关闭此项。
+
+Native 接线的直接定位为 `pkg/prism_render_app/src/lighting_gpu.rs` 的 `LIGHTING_COMPOSITE_WGSL` / `composite_static_layout_descriptor` / `LightingGpuPass::create_composite_target_bind_group`，以及 `pkg/prism_render_app/src/presentation.rs` 的 pass 获取点和 `pkg/prism_render_app/src/frame.rs` 的图录制点。**环境记录**：本轮观察到 `target` 约 2.8 GiB、文件系统剩余约 586 MiB；系统拒绝进程清单查询，因此没有安全依据判断能否删除共享 target，也未启动会写入共享目录的 Cargo 验证。此记录不是代码失败或通过证据。

@@ -9,7 +9,10 @@ publish = false
 
 [dependencies]
 prism_app = { path = "../prism_app" }
+prism_camera = { path = "../prism_camera" }
+prism_camera_ecs = { path = "../prism_camera_ecs", default-features = false }
 prism_asset = { path = "../prism_asset", features = ["ecs"] }
+prism_asset_build_core = { path = "../prism_asset_build_core", features = ["ecs"], optional = true }
 # The material ABI is a dense `u32` array; the buffers upload it as bytes.
 bytemuck = { version = "1.5", features = ["derive", "must_cast"] }
 prism_ecs = { path = "../prism_ecs", features = ["gpu_resident"] }
@@ -18,8 +21,12 @@ prism_image = { path = "../prism_image" }
 prism_mesh = { path = "../prism_mesh" }
 prism_math = { path = "../prism_math" }
 prism_particle_app = { path = "../prism_particle_app" }
+prism_particle_render = { path = "../prism_particle_render" }
+prism_physics_ecs = { path = "../prism_physics_ecs", optional = true }
+prism_physics_gpu = { path = "../prism_physics_gpu", optional = true }
 prism_render_material = { path = "../prism_render_material" }
 prism_render_gpudriven = { path = "../prism_render_gpudriven" }
+prism_render_shading = { path = "../prism_render_shading" }
 prism_render_visibility = { path = "../prism_render_visibility" }
 prism_render_driver = { path = "../prism_render_driver", features = ["std"] }
 prism_render_graph = { path = "../prism_render_graph" }
@@ -37,9 +44,14 @@ prism_asset_container = { path = "../prism_asset_container", features = ["gpu"],
 
 [features]
 default = []
+physics = ["dep:prism_physics_ecs"]
+physics-resident = ["physics", "dep:prism_physics_gpu", "dep:prism_render_driver_wgpu"]
+baked-image = ["dep:prism_asset_build_core"]
+fixed-page-feedback = ["dep:prism_render_driver_wgpu", "dep:wgpu", "dep:futures-lite"]
 resident-page-streaming = ["dep:prism_render_driver_wgpu", "dep:wgpu", "dep:futures-lite", "dep:prism_gdeflate_gpu", "dep:prism_asset_container"]
 # Connect the App's real OS windows to the same presentation driver.
 winit = ["prism_app/winit", "dep:prism_window_winit"]
+view-lod = ["prism_camera_ecs/view_lod"]
 
 [dev-dependencies]
 # The headless reference backend: drives the extract + render path in CI with
@@ -47,6 +59,10 @@ winit = ["prism_app/winit", "dep:prism_window_winit"]
 prism_render_driver_null = { path = "../../os-backends/prism_render_driver_null" }
 # The shipped hardware backend, used by the GPU-gated readback test.
 prism_render_driver_wgpu = { path = "../../os-backends/prism_render_driver_wgpu" }
+
+[build-dependencies]
+# Link the shipping canonical material decoder once, not on the render thread.
+wesl = { version = "0.4.2", features = ["naga-ext"] }
 
 [lints]
 workspace = true
