@@ -376,6 +376,15 @@ pub enum PlanetMeshPublicationError {
         /// Coarse neighbor required by the transition strip.
         neighbor: TileKey,
     },
+    /// The staged seam topology does not match the final resident LOD set.
+    SeamTopologyMismatch {
+        /// Tile whose transition plan is stale or missing.
+        tile: TileKey,
+        /// Coarse neighbor required by final residency, if any.
+        expected: Option<TileKey>,
+        /// Coarse neighbor encoded in the staged mesh, if any.
+        actual: Option<TileKey>,
+    },
     /// The publication generation cannot advance further.
     GenerationExhausted,
     /// A bounded staging or commit allocation failed.
@@ -422,6 +431,14 @@ impl fmt::Display for PlanetMeshPublicationError {
             Self::MissingSeamNeighbor { tile, neighbor } => write!(
                 formatter,
                 "planet mesh {tile:?} has a seam requiring non-resident neighbor {neighbor:?}"
+            ),
+            Self::SeamTopologyMismatch {
+                tile,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "planet mesh {tile:?} seam topology does not match residency: expected {expected:?}, got {actual:?}"
             ),
             Self::GenerationExhausted => {
                 formatter.write_str("planet mesh publication generation exhausted")
@@ -536,59 +553,111 @@ fn validate_resident_seam_neighbors(
     current: &[PublishedPlanetHeightfieldMesh],
     transaction: &PlanetMeshPublicationTransaction,
 ) -> Result<(), PlanetMeshPublicationError> {
-    let mut current_index = 0usize;
-    let mut replacement_index = 0usize;
-    while current_index < current.len() || replacement_index < transaction.replacements.len() {
-        let current_tile = current
-            .get(current_index)
-            .map(PublishedPlanetHeightfieldMesh::tile);
-        let replacement_tile = transaction
-            .replacements
-            .get(replacement_index)
-            .map(PublishedPlanetHeightfieldMesh::tile);
-        let tile = match (current_tile, replacement_tile) {
-            (Some(a), Some(b)) => a.min(b),
-            (Some(tile), None) | (None, Some(tile)) => tile,
-            (None, None) => break,
-        };
-        let entry = if replacement_tile == Some(tile) {
-            let entry = &transaction.replacements[replacement_index];
-            replacement_index += 1;
-            if current_tile == Some(tile) {
-                current_index += 1;
-            }
-            Some(entry)
-        } else {
-            let entry = &current[current_index];
-            current_index += 1;
-            Some(entry)
-        };
-        if transaction.removals.binary_search(&tile).is_ok() {
-            continue;
-        }
-        if let Some(entry) = entry {
-            for neighbor in entry.mesh.lod_seam_neighbors().into_iter().flatten() {
-                let removed = transaction.removals.binary_search(&neighbor).is_ok();
-                let replaced = transaction
-                    .replacements
-                    .binary_search_by_key(&neighbor, |replacement| replacement.tile())
-                    .is_ok();
-                let resident = if removed {
-                    false
-                } else if replaced {
-                    true
-                } else {
-                    current
-                        .binary_search_by_key(&neighbor, |resident| resident.tile())
-                        .is_ok()
-                };
-                if !resident {
-                    return Err(PlanetMeshPublicationError::MissingSeamNeighbor { tile, neighbor });
+    for replacement in &transaction.replacements {
+        validate_changed_lod_neighborhood(replacement.tile(), current, transaction)?;
+    }
+    for &removed in &transaction.removals {
+        validate_changed_lod_neighborhood(removed, current, transaction)?;
+    }
+    Ok(())
+}
+
+fn validate_changed_lod_neighborhood(
+    changed: TileKey,
+    current: &[PublishedPlanetHeightfieldMesh],
+    transaction: &PlanetMeshPublicationTransaction,
+) -> Result<(), PlanetMeshPublicationError> {
+    validate_final_seam_topology(changed, current, transaction)?;
+    for edge in TileEdge::ALL {
+        let (same_level, facing_edge) = changed.neighbor_with_edge(edge);
+        validate_final_seam_topology(same_level, current, transaction)?;
+        if let Ok(children) = same_level.children() {
+            for child in children {
+                if tile_child_touches_edge(child, facing_edge) {
+                    validate_final_seam_topology(child, current, transaction)?;
                 }
             }
         }
     }
     Ok(())
+}
+
+fn validate_final_seam_topology(
+    tile: TileKey,
+    current: &[PublishedPlanetHeightfieldMesh],
+    transaction: &PlanetMeshPublicationTransaction,
+) -> Result<(), PlanetMeshPublicationError> {
+    if !final_contains_tile(current, transaction, tile) {
+        return Ok(());
+    }
+    let entry = match transaction
+        .replacements
+        .binary_search_by_key(&tile, |replacement| replacement.tile())
+    {
+        Ok(index) => &transaction.replacements[index],
+        Err(_) => match current.binary_search_by_key(&tile, |resident| resident.tile()) {
+            Ok(index) => &current[index],
+            Err(_) => return Err(PlanetMeshPublicationError::InvalidReplacement { tile }),
+        },
+    };
+    let seam_neighbors = entry.mesh.lod_seam_neighbors();
+    for edge in TileEdge::ALL {
+        let slot = match edge {
+            TileEdge::West => 0,
+            TileEdge::East => 1,
+            TileEdge::South => 2,
+            TileEdge::North => 3,
+        };
+        let (same_level, _) = tile.neighbor_with_edge(edge);
+        let same_level_resident = final_contains_tile(current, transaction, same_level);
+        let coarse = if same_level_resident {
+            None
+        } else {
+            same_level
+                .parent()
+                .filter(|parent| final_contains_tile(current, transaction, *parent))
+        };
+        if seam_neighbors[slot] != coarse {
+            if let Some(neighbor) = coarse.or(seam_neighbors[slot]) {
+                if !final_contains_tile(current, transaction, neighbor) {
+                    return Err(PlanetMeshPublicationError::MissingSeamNeighbor { tile, neighbor });
+                }
+            }
+            return Err(PlanetMeshPublicationError::SeamTopologyMismatch {
+                tile,
+                expected: coarse,
+                actual: seam_neighbors[slot],
+            });
+        }
+    }
+    Ok(())
+}
+
+fn tile_child_touches_edge(child: TileKey, edge: TileEdge) -> bool {
+    let Some(parent) = child.parent() else {
+        return false;
+    };
+    match edge {
+        TileEdge::West => child.x() == parent.x() * 2,
+        TileEdge::East => child.x() == parent.x() * 2 + 1,
+        TileEdge::South => child.y() == parent.y() * 2,
+        TileEdge::North => child.y() == parent.y() * 2 + 1,
+    }
+}
+
+fn final_contains_tile(
+    current: &[PublishedPlanetHeightfieldMesh],
+    transaction: &PlanetMeshPublicationTransaction,
+    tile: TileKey,
+) -> bool {
+    transaction.removals.binary_search(&tile).is_err()
+        && (transaction
+            .replacements
+            .binary_search_by_key(&tile, |replacement| replacement.tile())
+            .is_ok()
+            || current
+                .binary_search_by_key(&tile, |resident| resident.tile())
+                .is_ok())
 }
 
 fn source_for<'a>(
@@ -823,6 +892,47 @@ mod tests {
     }
 
     #[test]
+    fn resident_coarse_neighbor_requires_matching_seam_topology() {
+        let tile = TileKey::new(CubeFace::PositiveZ, 3, 3, 3).unwrap();
+        let (neighbor, _) = seam_plan(tile);
+        let mut publication = PlanetMeshPublication::new(limits());
+        let mut transaction = publication.begin();
+        transaction
+            .stage_build(
+                source(tile, 7),
+                config(),
+                BakeLimits {
+                    max_samples: 25,
+                    max_bytes: 4096,
+                },
+                PlanetHeightfieldNormalNeighborhood::empty(),
+            )
+            .unwrap();
+        transaction
+            .stage_build(
+                source(neighbor, 7),
+                config(),
+                BakeLimits {
+                    max_samples: 25,
+                    max_bytes: 4096,
+                },
+                PlanetHeightfieldNormalNeighborhood::empty(),
+            )
+            .unwrap();
+
+        assert_eq!(
+            publication.commit(transaction),
+            Err(PlanetMeshPublicationError::SeamTopologyMismatch {
+                tile,
+                expected: Some(neighbor),
+                actual: None,
+            })
+        );
+        assert_eq!(publication.generation(), 0);
+        assert!(publication.meshes().is_empty());
+    }
+
+    #[test]
     fn removing_seam_neighbor_requires_removing_or_replacing_owner_seam() {
         let tile = TileKey::new(CubeFace::PositiveZ, 3, 3, 3).unwrap();
         let (neighbor, plan) = seam_plan(tile);
@@ -851,10 +961,26 @@ mod tests {
         );
         assert_eq!(publication, snapshot);
 
-        let mut remove_both = publication.begin();
-        remove_both.stage_remove(tile).unwrap();
-        remove_both.stage_remove(neighbor).unwrap();
-        let receipt = publication.commit(remove_both).unwrap();
+        let mut clear_seam_and_remove = publication.begin();
+        clear_seam_and_remove.stage_remove(neighbor).unwrap();
+        clear_seam_and_remove
+            .stage_build(
+                source(tile, 7),
+                config(),
+                BakeLimits {
+                    max_samples: 25,
+                    max_bytes: 4096,
+                },
+                PlanetHeightfieldNormalNeighborhood::empty(),
+            )
+            .unwrap();
+        let receipt = publication.commit(clear_seam_and_remove).unwrap();
+        assert_eq!(receipt.published_tiles, 1);
+        assert_eq!(publication.generation(), 2);
+
+        let mut remove_owner = publication.begin();
+        remove_owner.stage_remove(tile).unwrap();
+        let receipt = publication.commit(remove_owner).unwrap();
         assert_eq!(receipt.published_tiles, 0);
     }
 
