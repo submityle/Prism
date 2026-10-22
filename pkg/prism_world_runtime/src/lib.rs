@@ -94,7 +94,8 @@ pub use prism_world_stream::{DataLayerMask, DataLayerMaskError, MAX_DATA_LAYERS}
 mod scene_template_provider;
 #[cfg(feature = "scene_templates")]
 pub use scene_template_provider::{
-    load_scene_template, SceneTemplateApplyOutcome, SceneTemplateBatchError, SceneTemplateCache,
+    load_scene_template, NestedSceneTreeId, NestedSceneTreeRegistry, NestedSceneTreeRegistryError,
+    SceneTemplateApplyOutcome, SceneTemplateBatchError, SceneTemplateCache,
     SceneTemplateInvalidation, SceneTemplateLoadError,
 };
 #[cfg(feature = "placement")]

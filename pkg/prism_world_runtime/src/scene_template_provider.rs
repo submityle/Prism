@@ -37,26 +37,167 @@ pub struct SceneTemplateApplyOutcome {
     pub reload_sectors: Vec<crate::SectorId>,
 }
 
-#[cfg(feature = "scene_templates")]
-impl SceneTemplateApplyOutcome {
-    /// Applies this committed invalidation batch to explicitly owned live
-    /// nested trees. The caller supplies ownership because the coordinator
-    /// cannot discover trees held by arbitrary application/provider state.
-    pub fn reload_nested_trees<P: prism_scene::NestedSceneProvider>(
-        &self,
+/// Stable key for a live nested tree owned by [`NestedSceneTreeRegistry`].
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct NestedSceneTreeId(u64);
+
+impl NestedSceneTreeId {
+    /// Returns the stable numeric value of this registration.
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+/// A registered-tree reload failed; ownership remains in the registry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NestedSceneTreeRegistryError {
+    /// Cause returned by nested-tree candidate staging.
+    pub cause: prism_scene::NestedInstantiateError,
+}
+
+/// Per-world ownership registry for live nested scene trees. Register every
+/// tree root generation with its owning application; committed template
+/// invalidations then update matching registrations as one staged batch.
+#[derive(Default)]
+pub struct NestedSceneTreeRegistry {
+    trees: BTreeMap<NestedSceneTreeId, prism_scene::SceneTreeSpawn>,
+    next_id: u64,
+    pending_invalidations: BTreeSet<StableGuid>,
+}
+
+impl NestedSceneTreeRegistry {
+    /// Creates an empty tree registry. IDs are stable for each registration.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            trees: BTreeMap::new(),
+            next_id: 0,
+            pending_invalidations: BTreeSet::new(),
+        }
+    }
+
+    /// Registers ownership of a newly spawned live tree.
+    pub fn register(
+        &mut self,
+        tree: prism_scene::SceneTreeSpawn,
+    ) -> Result<NestedSceneTreeId, prism_scene::SceneTreeSpawn> {
+        let Some(next) = self.next_id.checked_add(1) else {
+            return Err(tree);
+        };
+        let id = NestedSceneTreeId(self.next_id);
+        self.next_id = next;
+        let previous = self.trees.insert(id, tree);
+        debug_assert!(previous.is_none());
+        Ok(id)
+    }
+
+    /// Returns the number of registered live trees.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.trees.len()
+    }
+
+    /// Returns whether the registry owns no live trees.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.trees.is_empty()
+    }
+
+    /// Borrows a registered tree by stable ID.
+    #[must_use]
+    pub fn get(&self, id: NestedSceneTreeId) -> Option<&prism_scene::SceneTreeSpawn> {
+        self.trees.get(&id)
+    }
+
+    /// Removes ownership without despawning the tree.
+    pub fn unregister(&mut self, id: NestedSceneTreeId) -> Option<prism_scene::SceneTreeSpawn> {
+        self.trees.remove(&id)
+    }
+
+    /// Despawns a registered tree and removes its ownership record.
+    pub fn despawn(
+        &mut self,
         world: &mut prism_ecs::world::World,
-        trees: alloc::vec::Vec<prism_scene::SceneTreeSpawn>,
+        id: NestedSceneTreeId,
+    ) -> Option<usize> {
+        self.unregister(id).map(|tree| tree.despawn_tree(world))
+    }
+
+    /// Applies a committed template invalidation closure to all owned trees.
+    /// Failed batches restore each tree under its original ID and preserve the
+    /// complete invalidation set for [`Self::retry_pending`].
+    pub fn apply<P: prism_scene::NestedSceneProvider>(
+        &mut self,
+        world: &mut prism_ecs::world::World,
+        outcome: &SceneTemplateApplyOutcome,
         provider: &P,
         limits: prism_scene::NestedSpawnLimits,
-    ) -> Result<alloc::vec::Vec<prism_scene::SceneTreeSpawn>, prism_scene::NestedReloadBatchError>
-    {
-        let invalidated: alloc::vec::Vec<_> = self
-            .invalidations
+    ) -> Result<(), NestedSceneTreeRegistryError> {
+        self.pending_invalidations.extend(
+            outcome
+                .invalidations
+                .iter()
+                .filter(|event| event.reloadable)
+                .map(|event| event.dependent),
+        );
+        self.reload_pending(world, provider, limits)
+    }
+
+    /// Retries the previously failed invalidation closure without requiring a
+    /// duplicate asset event batch. Successful publication clears the queue.
+    pub fn retry_pending<P: prism_scene::NestedSceneProvider>(
+        &mut self,
+        world: &mut prism_ecs::world::World,
+        provider: &P,
+        limits: prism_scene::NestedSpawnLimits,
+    ) -> Result<(), NestedSceneTreeRegistryError> {
+        self.reload_pending(world, provider, limits)
+    }
+
+    fn reload_pending<P: prism_scene::NestedSceneProvider>(
+        &mut self,
+        world: &mut prism_ecs::world::World,
+        provider: &P,
+        limits: prism_scene::NestedSpawnLimits,
+    ) -> Result<(), NestedSceneTreeRegistryError> {
+        if self.pending_invalidations.is_empty() || self.trees.is_empty() {
+            return Ok(());
+        }
+        let ids: Vec<_> = self.trees.keys().copied().collect();
+        let trees: Vec<_> = ids
             .iter()
-            .filter(|event| event.reloadable)
-            .map(|event| event.dependent)
+            .map(|id| {
+                self.trees
+                    .remove(id)
+                    .expect("tree key collected from registry")
+            })
             .collect();
-        prism_scene::reload_invalidated_nested_trees(world, trees, &invalidated, provider, limits)
+        let invalidated: Vec<_> = self.pending_invalidations.iter().copied().collect();
+        match prism_scene::reload_invalidated_nested_trees(
+            world,
+            trees,
+            &invalidated,
+            provider,
+            limits,
+        ) {
+            Ok(replacements) => {
+                for (id, tree) in ids.into_iter().zip(replacements) {
+                    let previous = self.trees.insert(id, tree);
+                    debug_assert!(previous.is_none());
+                }
+                self.pending_invalidations.clear();
+                Ok(())
+            }
+            Err(error) => {
+                let prism_scene::NestedReloadBatchError { cause, trees } = error;
+                for (id, tree) in ids.into_iter().zip(trees) {
+                    let previous = self.trees.insert(id, tree);
+                    debug_assert!(previous.is_none());
+                }
+                Err(NestedSceneTreeRegistryError { cause })
+            }
+        }
     }
 }
 
@@ -527,15 +668,15 @@ mod tests {
     use alloc::vec::Vec;
     use prism_asset::{AssetDependency, AssetTypeId, Assets};
     use prism_asset_container::{ContainerReader, ContainerWriter, ManifestMetadata, OverlaySet};
+    use prism_ecs::component::Component;
+    use prism_ecs::world::World;
     use prism_scene::{
         encode_template, ArchetypeGroup, InstantiationPlan, ResidencyPlan, SceneTemplate,
     };
     use prism_scene::{
-        LocalEntityId, NestedProviderError, NestedSceneProvider, NestedSpawnLimits, SceneInstance,
-        SceneSpawn, SceneTreeSpawn, TypedSpawnPlan, spawn_nested_typed,
+        spawn_nested_typed, LocalEntityId, NestedProviderError, NestedSceneProvider,
+        NestedSpawnLimits, SceneInstance, SceneSpawn, SceneTreeSpawn, TypedSpawnPlan,
     };
-    use prism_ecs::component::Component;
-    use prism_ecs::world::World;
 
     #[derive(Debug)]
     struct RuntimeMarker;
@@ -653,10 +794,12 @@ mod tests {
     }
 
     #[test]
-    fn committed_template_outcome_reloads_explicit_nested_tree_ownership() {
-        let guid = StableGuid::from_u128(0x8181);
+    fn registered_nested_tree_retries_failed_invalidation_without_losing_ownership() {
+        let guid = StableGuid::from_u128(0x8282);
         let (mut world, tree, provider) = live_tree(guid);
         let previous_root = tree.root.root.expect("fixture root");
+        let mut registry = NestedSceneTreeRegistry::new();
+        let id = registry.register(tree).expect("registration id available");
         let outcome = SceneTemplateApplyOutcome {
             invalidations: vec![SceneTemplateInvalidation {
                 changed: guid,
@@ -665,21 +808,35 @@ mod tests {
             }],
             reload_sectors: Vec::new(),
         };
+        let unavailable = NestedProvider {
+            templates: BTreeMap::new(),
+        };
 
-        let trees = outcome
-            .reload_nested_trees(
+        assert_eq!(
+            registry.apply(
                 &mut world,
-                vec![tree],
-                &provider,
+                &outcome,
+                &unavailable,
                 NestedSpawnLimits::default(),
-            )
-            .expect("candidate tree publishes");
+            ),
+            Err(NestedSceneTreeRegistryError {
+                cause: prism_scene::NestedInstantiateError::MissingTemplate(guid),
+            })
+        );
+        assert_eq!(registry.len(), 1);
+        assert_eq!(registry.get(id).unwrap().root.root, Some(previous_root));
+        assert!(world.contains(previous_root));
 
-        assert_eq!(trees.len(), 1);
-        let current_root = trees[0].root.root.expect("replacement root");
+        registry
+            .retry_pending(&mut world, &provider, NestedSpawnLimits::default())
+            .expect("pending invalidation retries");
+        let current_root = registry.get(id).unwrap().root.root.unwrap();
         assert_ne!(current_root, previous_root);
         assert!(!world.contains(previous_root));
         assert!(world.contains(current_root));
+        assert_eq!(registry.despawn(&mut world, id), Some(1));
+        assert!(registry.is_empty());
+        assert_eq!(world.entity_count(), 0);
     }
 
     #[test]
