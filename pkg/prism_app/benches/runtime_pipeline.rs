@@ -74,12 +74,25 @@ struct PerformanceThresholds {
 
 impl PerformanceThresholds {
     fn from_environment() -> Option<Self> {
-        let max_frame_p99_ns = std::env::var("PRISM_PIPELINE_MAX_FRAME_P99_NS")
-            .ok()?
+        let max_frame_p99 = std::env::var("PRISM_PIPELINE_MAX_FRAME_P99_NS").ok();
+        let min_overlap = std::env::var("PRISM_PIPELINE_MIN_OVERLAP_RATIO").ok();
+        let required = std::env::var("PRISM_PIPELINE_REQUIRE_THRESHOLDS")
+            .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "yes"));
+        assert_eq!(
+            max_frame_p99.is_some(),
+            min_overlap.is_some(),
+            "configure both PRISM_PIPELINE_MAX_FRAME_P99_NS and PRISM_PIPELINE_MIN_OVERLAP_RATIO, or neither"
+        );
+        if required {
+            assert!(
+                max_frame_p99.is_some(),
+                "PRISM_PIPELINE_REQUIRE_THRESHOLDS is set but performance thresholds are missing"
+            );
+        }
+        let max_frame_p99_ns = max_frame_p99?
             .parse()
             .expect("PRISM_PIPELINE_MAX_FRAME_P99_NS must be an unsigned integer");
-        let min_overlap_ratio: f64 = std::env::var("PRISM_PIPELINE_MIN_OVERLAP_RATIO")
-            .ok()?
+        let min_overlap_ratio: f64 = min_overlap?
             .parse()
             .expect("PRISM_PIPELINE_MIN_OVERLAP_RATIO must be a finite float");
         assert!(
@@ -348,6 +361,6 @@ fn main() {
         );
         true
     });
-    println!("{{\"kind\":\"acceptance\",\"output_parity\":true,\"frame_sequence\":true,\"serial_overlap_ns\":{},\"dedicated_overlap_ns\":{},\"task_lane_overlap_ns\":{},\"overlap_is_observed\":{{\"dedicated\":{},\"task_lane\":{}}},\"performance_thresholds_configured\":{},\"performance_thresholds_passed\":{}}}",
-        serial.overlap.overlap.as_nanos(), dedicated.overlap.overlap.as_nanos(), tasks.overlap.overlap.as_nanos(), dedicated.overlap.overlap > Duration::ZERO, tasks.overlap.overlap > Duration::ZERO, thresholds.is_some(), thresholds_passed);
+    println!("{{\"kind\":\"acceptance\",\"output_parity\":true,\"frame_sequence\":true,\"serial_overlap_ns\":{},\"dedicated_overlap_ns\":{},\"task_lane_overlap_ns\":{},\"overlap_is_observed\":{{\"dedicated\":{},\"task_lane\":{}}},\"performance_thresholds_configured\":{},\"performance_thresholds_passed\":{},\"performance_gate_required\":{}}}",
+        serial.overlap.overlap.as_nanos(), dedicated.overlap.overlap.as_nanos(), tasks.overlap.overlap.as_nanos(), dedicated.overlap.overlap > Duration::ZERO, tasks.overlap.overlap > Duration::ZERO, thresholds.is_some(), thresholds_passed, std::env::var("PRISM_PIPELINE_REQUIRE_THRESHOLDS").is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "yes")));
 }

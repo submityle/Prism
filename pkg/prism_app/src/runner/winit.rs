@@ -533,4 +533,97 @@ mod tests {
         assert_eq!(resumed.len(), 2, "every resume re-delivers Resumed");
         assert_eq!(suspended.len(), 2, "every suspend delivers Suspended");
     }
+
+    #[derive(Clone, Default)]
+    struct BridgeAudit(std::sync::Arc<std::sync::Mutex<Vec<(bool, usize, usize)>>>);
+    impl prism_ecs::prelude::Resource for BridgeAudit {}
+
+    fn audit_render_bridge(
+        app: &mut App,
+        _backend: &WinitBackend,
+        windows: &[WindowId],
+        suspended: bool,
+    ) {
+        let rendered = app
+            .world()
+            .resource::<RenderCompletions>()
+            .0
+            .load(std::sync::atomic::Ordering::SeqCst);
+        app.world()
+            .resource::<BridgeAudit>()
+            .0
+            .lock()
+            .unwrap()
+            .push((suspended, windows.len(), rendered));
+    }
+
+    struct RenderCompletions(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+    impl prism_ecs::prelude::Resource for RenderCompletions {}
+
+    #[cfg(feature = "pipelined")]
+    #[test]
+    fn suspend_bridge_joins_render_lane_before_surface_release_and_resume_keeps_windows() {
+        use super::super::window_bridge::WindowRenderBridge;
+        use crate::{SubApp, Update};
+        use prism_ecs::schedule::{Schedule, Schedules};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let audit = BridgeAudit::default();
+        let completions = std::sync::Arc::new(AtomicUsize::new(0));
+        let mut app = App::new();
+        app.insert_resource(audit.clone());
+        app.insert_resource(RenderCompletions(completions.clone()));
+        let mut render = SubApp::new();
+        let render_completions = completions.clone();
+        let mut schedule = Schedule::new();
+        schedule.add_systems(move || {
+            render_completions.fetch_add(1, Ordering::SeqCst);
+        });
+        render
+            .world
+            .resource_mut::<Schedules>()
+            .insert(Update, schedule);
+        app.insert_sub_app("render", render);
+        app.enable_pipelined_rendering();
+
+        let mut backend = WinitBackend::new();
+        let mut host = WindowedHost {
+            app,
+            windows: Vec::new(),
+            open: vec![WindowId(41)],
+            started: true,
+            pacer: FramePacer::new(FrameLimit::Off),
+            first_frame_sent: false,
+            exit: Rc::new(Cell::new(None)),
+            suspend_resume: SuspendResumeAdapter,
+        };
+        host.app
+            .insert_resource(WindowRenderBridge(audit_render_bridge));
+
+        host.app.update();
+        host.lifecycle(SuspendEvent::suspended(prism_platform::now()), &mut backend);
+        assert_eq!(completions.load(Ordering::SeqCst), 1);
+        host.lifecycle(SuspendEvent::resumed(prism_platform::now()), &mut backend);
+        host.frame(&mut backend);
+
+        assert_eq!(
+            *audit.0.lock().unwrap(),
+            [(true, 1, 1), (false, 1, 1)],
+            "surface release/rebind callbacks must see joined render work and the still-managed window"
+        );
+        assert_eq!(
+            host.app
+                .world()
+                .resource::<prism_ecs::event::Events<Resumed>>()
+                .len(),
+            1
+        );
+        assert_eq!(
+            host.app
+                .world()
+                .resource::<prism_ecs::event::Events<Suspended>>()
+                .len(),
+            1
+        );
+    }
 }
