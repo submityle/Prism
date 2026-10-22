@@ -217,7 +217,11 @@ fn measure(view_count: usize, config: Config) -> Measurement {
     }
 }
 
-fn measure_derive(view_count: usize, parallel: bool, config: Config) -> DeriveMeasurement {
+fn measure_derive(
+    view_count: usize,
+    worker_count: Option<usize>,
+    config: Config,
+) -> DeriveMeasurement {
     let mut inputs = Vec::with_capacity(view_count);
     let mut histories = vec![ViewHistory::default(); view_count];
     for index in 0..view_count {
@@ -229,7 +233,7 @@ fn measure_derive(view_count: usize, parallel: bool, config: Config) -> DeriveMe
         );
         inputs.push((intent, CameraPose::default()));
     }
-    let pool = (parallel && view_count >= 8).then(TaskPool::new);
+    let pool = worker_count.map(TaskPool::with_threads);
 
     for iteration in 0..config.warmup_frames {
         derive_batch(&inputs, &mut histories, pool.as_ref(), iteration as u64);
@@ -251,7 +255,14 @@ fn measure_derive(view_count: usize, parallel: bool, config: Config) -> DeriveMe
 
     DeriveMeasurement {
         view_count,
-        mode: if pool.is_some() { "parallel" } else { "serial" },
+        mode: match worker_count {
+            None => "serial",
+            Some(1) => "parallel-1-worker",
+            Some(2) => "parallel-2-workers",
+            Some(4) => "parallel-4-workers",
+            Some(8) => "parallel-8-workers",
+            Some(_) => "parallel-custom-workers",
+        },
         p50_ns_per_batch: percentile(&mut samples, 50, 100),
         p95_ns_per_batch: percentile(&mut samples, 95, 100),
         p99_ns_per_batch: percentile(&mut samples, 99, 100),
@@ -295,17 +306,23 @@ fn diagnostic_probe() -> usize {
 fn main() {
     let config = config();
     let derive_measurements = [
-        measure_derive(1, false, config),
-        measure_derive(16, false, config),
-        measure_derive(16, true, config),
-        measure_derive(64, false, config),
-        measure_derive(64, true, config),
-        measure_derive(256, false, config),
-        measure_derive(256, true, config),
-        measure_derive(1024, false, config),
-        measure_derive(1024, true, config),
-        measure_derive(4096, false, config),
-        measure_derive(4096, true, config),
+        measure_derive(1, None, config),
+        measure_derive(16, None, config),
+        measure_derive(16, Some(1), config),
+        measure_derive(16, Some(2), config),
+        measure_derive(16, Some(4), config),
+        measure_derive(16, Some(8), config),
+        measure_derive(64, None, config),
+        measure_derive(64, Some(1), config),
+        measure_derive(64, Some(2), config),
+        measure_derive(64, Some(4), config),
+        measure_derive(64, Some(8), config),
+        measure_derive(256, None, config),
+        measure_derive(256, Some(4), config),
+        measure_derive(1024, None, config),
+        measure_derive(1024, Some(4), config),
+        measure_derive(4096, None, config),
+        measure_derive(4096, Some(4), config),
     ];
     let measurements: Vec<_> = VIEW_COUNTS
         .into_iter()

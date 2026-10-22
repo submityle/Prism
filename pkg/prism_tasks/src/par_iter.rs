@@ -278,14 +278,18 @@ impl<'p, 'd, T: Send> ParSliceMut<'p, 'd, T> {
         }
         let grain = self.grain();
         let body = &body;
-        let data = self.data;
+        let first_len = grain.min(self.data.len());
+        let (first, rest) = self.data.split_at_mut(first_len);
         self.pool.scope(|s| {
-            for chunk in data.chunks_mut(grain) {
+            for chunk in rest.chunks_mut(grain) {
                 s.spawn(move || {
                     for item in chunk {
                         body(item);
                     }
                 });
+            }
+            for item in first {
+                body(item);
             }
         });
     }
@@ -301,15 +305,19 @@ impl<'p, 'd, T: Send> ParSliceMut<'p, 'd, T> {
         }
         let grain = self.grain();
         let body = &body;
-        let data = self.data;
+        let first_len = grain.min(self.data.len());
+        let (first, rest) = self.data.split_at_mut(first_len);
         self.pool.scope(|s| {
-            for (chunk_index, chunk) in data.chunks_mut(grain).enumerate() {
-                let base = chunk_index * grain;
+            for (chunk_index, chunk) in rest.chunks_mut(grain).enumerate() {
+                let base = (chunk_index + 1) * grain;
                 s.spawn(move || {
                     for (offset, item) in chunk.iter_mut().enumerate() {
                         body(base + offset, item);
                     }
                 });
+            }
+            for (offset, item) in first.iter_mut().enumerate() {
+                body(offset, item);
             }
         });
     }

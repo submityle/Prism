@@ -244,6 +244,45 @@ pub struct CameraFrame {
     pub dt_seconds: f32,
 }
 
+/// Workload policy for view derivation.
+///
+/// A camera view is a small, fixed-cost job. Dispatching a handful of these
+/// jobs through a general work-stealing pool costs more than evaluating them
+/// on the publication thread, so the adapter only fans out a batch after the
+/// work is large enough to amortize the fork/join barrier. Applications with
+/// unusually expensive projection extensions may lower the thresholds by
+/// inserting this resource before [`CameraPlugin`] is built.
+#[cfg(feature = "parallel")]
+#[derive(Clone, Copy, Debug, PartialEq, Resource)]
+pub struct CameraDerivePolicy {
+    /// Minimum active-view count before pool dispatch is considered.
+    pub parallel_min_views: usize,
+    /// Minimum views assigned per worker before pool dispatch is considered.
+    pub min_views_per_worker: usize,
+}
+
+#[cfg(feature = "parallel")]
+impl Default for CameraDerivePolicy {
+    fn default() -> Self {
+        Self {
+            parallel_min_views: 1024,
+            min_views_per_worker: 64,
+        }
+    }
+}
+
+#[cfg(feature = "parallel")]
+impl CameraDerivePolicy {
+    fn allows_parallel(self, view_count: usize, worker_count: usize) -> bool {
+        let worker_count = worker_count.max(1);
+        let min_views = self
+            .parallel_min_views
+            .max(self.min_views_per_worker.saturating_mul(worker_count))
+            .max(1);
+        view_count >= min_views
+    }
+}
+
 impl Default for CameraFrame {
     fn default() -> Self {
         Self {
@@ -785,6 +824,7 @@ pub(crate) fn publish_camera_views(
     mut diagnostics: ResMut<CameraDiagnostics>,
     mut budget: ResMut<CameraPerformanceBudget>,
     mut scratch: ResMut<CameraDeriveScratch>,
+    #[cfg(feature = "parallel")] derive_policy: Res<CameraDerivePolicy>,
     #[cfg(feature = "parallel")] task_pool: Option<Res<TaskPoolResource>>,
 ) {
     registry.begin_frame();
@@ -817,7 +857,9 @@ pub(crate) fn publish_camera_views(
     let CameraDeriveScratch { inputs, outputs } = &mut *scratch;
 
     #[cfg(feature = "parallel")]
-    if let Some(task_pool) = task_pool.filter(|_| input_count >= 8) {
+    if let Some(task_pool) =
+        task_pool.filter(|pool| derive_policy.allows_parallel(input_count, pool.0.worker_count()))
+    {
         task_pool
             .0
             .par_iter_mut(&mut outputs[..input_count])
@@ -965,6 +1007,8 @@ impl Plugin for CameraPlugin {
             .init_resource::<CameraDiagnostics>()
             .init_resource::<CameraPerformanceBudget>()
             .init_resource::<CameraDeriveScratch>();
+        #[cfg(feature = "parallel")]
+        app.init_resource::<CameraDerivePolicy>();
         #[cfg(feature = "rig")]
         app.init_resource::<CameraSceneQueryResource>()
             .init_resource::<CameraTargetQueryResource>();
@@ -1048,6 +1092,21 @@ mod tests {
         budget.observe(1_000, 1);
         assert!(!budget.is_degraded());
         assert_eq!(CameraPerformanceBudget::stage_budget_ns(16), 100_000);
+    }
+
+    #[test]
+    fn derive_policy_keeps_small_camera_batches_on_the_publication_thread() {
+        let policy = CameraDerivePolicy::default();
+        assert!(!policy.allows_parallel(16, 8));
+        assert!(!policy.allows_parallel(1023, 8));
+        assert!(policy.allows_parallel(1024, 8));
+
+        let expensive_view_policy = CameraDerivePolicy {
+            parallel_min_views: 8,
+            min_views_per_worker: 2,
+        };
+        assert!(!expensive_view_policy.allows_parallel(7, 4));
+        assert!(expensive_view_policy.allows_parallel(8, 4));
     }
 
     #[cfg(feature = "parallel")]
