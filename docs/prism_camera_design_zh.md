@@ -1226,13 +1226,15 @@ pub mod prelude {
 
 #### 2026-10-23 当前续验（取代本节中较早的同日状态快照）
 
+2026-10-23 后续 cutscene 实现：prism_camera_ecs/cutscene 已把轨迹播放器接入 Rig 后、相机 view publication 前。播放器应用位姿，并把跨越关键帧事件写入 Events<CameraTrackEvent>；发生身份包含 generational camera Entity、playback epoch、关键帧 tick 和 payload key。暂停、seek、重复 tick 行为通过测试。核心 cutscene 29 项、ECS cutscene-only 9 项、默认 Rig/Director 组合 15 项均通过。此接线不包括 PostStack/焦距/曝光到 renderer 的消费，也没有 ack/失败重试或进程持久化。
+
 本节中下方带有旧测试计数、称 ClearMode 未接线或称窗口路由测试未完成的同日段落属于历史快照，均由本段替代；验收时以本段及后续更晚日期的证据为准。
 
 本次续验确认：相机逐视图 `ClearMode` 已从 `PublishedView` 快照传至 surface graph，并在相机私有颜色/GBuffer/深度附件上应用；清理共享最终输出不会覆盖先前相机的合成结果。相机按 `(order, entity.index, entity.generation)` 稳定排序后解析继承模式：首个 `Inherit` 解析为 `ColorAndDepth`，后续 `Inherit` 解析为 `None`；显式 `ColorAndDepth` 清理颜色和反向 Z 深度（深度值 `0.0`），`DepthOnly` 保留颜色并清理深度，`None` 保留两者。验证命令 `CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 cargo test -p prism_render_app --lib surface_views --offline`：28 passed；其中 `surface_graph_resolves_per_camera_clear_loads_in_stable_composition_order` 对编译后 attachment load plan 逐项断言继承、深度单独清理和不清理语义。RenderGraph 已扩展显式颜色 load/clear 与深度 load 操作，保持默认 SSA 推导和 reversed-Z 默认清零行为。新增物理 GPU readback 验收 `physical_gpu_camera_clear_modes_preserve_or_clear_private_hdr_attachments` 会预填私有 HDR 纹理，执行逐相机 surface/composition graph 并验证 `None`、`DepthOnly` 保留像素、`ColorAndDepth` 输出透明黑；该测试成功编译，但本次沙盒内与沙盒外强制设备运行均因 `WgpuInstance` 未发现物理 adapter 而失败，故没有真实 GPU 结果。
 
 RenderGraph 同期还包含 graph-owned texture bind group、外部 owner 保留和队列采样纹理依赖接线；本轮通过缺失 import 拒绝、已注册 sampled texture 图构建/编译以及 `surface_views` 回归测试验证其基本接线，尚未完成通用纹理目标 owner 注册/释放、Present/输出消费生命周期与真实设备帧读回。因此这不等于任意 `RenderTarget::Texture(id)` 功能闭环。旧的“ClearMode 尚未实现”和“路由定向测试未完成”文字是此前快照，不再代表当前状态：窗口路由与 Null 驱动生命周期测试已在 2026-10-23 续验中通过；本次 ClearMode 图计划验证也已通过。历史快照保留作审计记录，不作为现状判断。
 
-截至本次续验仍未端到端完成：LOD `resolution_scale` 到实际渲染资源尺寸/上采样和 `history_frames` 到历史资源保留；Cutscene 到 PostStack 的逐视图混合及事件消费；shutter snapshot 到 DoF/运动模糊 pass 参数；view batch 到跨视图共享可见集；lookahead 到流送优先队列；edge history 到时域 resolve/锐化；以及完整多相机真实 GPU frame/readback/视觉验收。这些缺口仍是整体设计完成的阻塞项，本文不将相机侧 API、图计划或 Null backend 结果表述为端到端完成。构图辅助的编辑器接线已有实际实现，见下方 §28.10；当前缺少的是其物理 GPU 视觉像素验收，不应再把“尚未接入编辑器 gizmo”列为实现缺口。
+截至本次续验仍未端到端完成：LOD `resolution_scale` 到实际渲染资源尺寸/上采样和 `history_frames` 到历史资源保留；Cutscene 到 PostStack 的逐视图混合；shutter snapshot 到 DoF/运动模糊 pass 参数；view batch 到跨视图共享可见集；lookahead 到资产流送优先队列；edge history 到时域 resolve/锐化；任意纹理目标 owner/Present 生命周期；以及完整多相机真实 GPU frame/readback/视觉验收。这些缺口仍是整体设计完成的阻塞项。Cutscene 事件已接入 ECS 事件队列，但无 ack/失败重试；本文不将相机侧 API、图计划或 Null backend 结果表述为端到端完成。构图辅助的编辑器接线已有实际实现，见下方 §28.10；当前缺少的是其物理 GPU 视觉像素验收。
 
 2026-10-23 后续 LOD 数据桥增量：`prism_render_app` 新增 `view-lod` feature 转发；开启时，surface extraction 将 `PublishedCameraLod` 按完整 ECS `Entity` 与 `PublishedViews` 配对，提取 `resolution_scale/history_frames`，缺失、非有限或越界 scale 回退为 `1.0/0`；未启用时同样发布安全默认值。该增量仅使预算元数据进入 renderer 的视图快照，**没有改变附件尺寸、更新时域资源保留、也没有实现上采样**。`CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 cargo check -p prism_render_app --features view-lod --lib --offline` 通过；`CARGO_PROFILE_TEST_DEBUG=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 cargo test -p prism_render_app --features view-lod --lib surface_views --offline`：29 passed。两条验证均在清理构建产物、磁盘空间恢复后完成。此项不能计为 LOD 渲染闭环；物理 GPU 缩放/上采样像素验收尚未进行。
 
@@ -1282,13 +1284,11 @@ renderer 接线期间，`CameraIntent`/`ViewData` 的每视图可见性元数据
 
 ### 28.1 相机动画片段与过场（`cutscene`）
 
-`CameraTrack::into_validated` 在载入边界检查版本、非空/有界关键帧、严格递增 tick、有限姿态/焦距/曝光，然后消费原始轨迹生成不可变 `ValidatedCameraTrack`；fixed-tick 热路径不重复 O(keyframe 数) 全量校验，单帧采样为二分查找 O(log n) 加常量插值。时间切线按相邻 tick 间距归一并限制焦距段内过冲。轨迹结束按 `CutsceneEndPolicy::{Hold,BlendToPrevious,Deactivate}` 处理，采样状态显式返回 `active` 与 `handoff_to_previous`。无效资产在载入时拒绝，调用方保持当前 VCam。每个播放实例持有独立 `CameraTrackEventCursor`，按 `(last_tick, tick]` 通过二分定位并顺序输出跨越的事件键，复杂度 O(log n + k)，调用方复用输出缓冲；首次调用只建立时间基线，同 tick 不重复产出，倒退 tick 返回结构化错误且不修改游标与输出。游标保证单个播放实例按单调 tick 读取时不重复返回已提交区间，但进程内事件队列、ack/失败重试以及向应用事件总线投递仍由集成层负责，不能把游标单独视为事务式 exactly-once 派发。
+`CameraTrack::into_validated` 在载入边界检查版本、非空/有界关键帧、严格递增 tick、有限姿态/焦距/曝光，然后消费原始轨迹生成不可变 `ValidatedCameraTrack`；fixed-tick 热路径不重复 O(keyframe 数) 全量校验，单帧采样为二分查找 O(log n) 加常量插值。时间切线按相邻 tick 间距归一并限制焦距段内过冲。轨迹结束按 `CutsceneEndPolicy::{Hold,BlendToPrevious,Deactivate}` 处理，采样状态显式返回 `active` 与 `handoff_to_previous`。无效资产在载入时拒绝，调用方保持当前 VCam。事件由 `CameraTrackEventCursor` 按 `(last_tick, tick]` 通过二分定位输出 occurrence，复杂度 O(log n + k)，ECS 播放器复用缓冲；prism_camera_ecs/cutscene 在 Rig 后、view publication 前应用位姿并发布带 entity generation、playback epoch、关键帧 tick 和 payload key 的 `CameraTrackEvent`。暂停不推进，seek 新建 epoch 并重置基线，同 payload 的不同关键帧独立派发。ECS `Events` 可由 `EventCursor` 消费，但没有 ack/重试/持久化，因此 exactly-once 仅指 occurrence 身份与游标产出。焦距、曝光和 PostStack 到逐视图 renderer 的消费仍未接入。
+
+验证：`CARGO_PROFILE_TEST_DEBUG=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 cargo test -p prism_camera_ecs --no-default-features --features cutscene --lib --offline` 通过 9 项；默认 Rig/Director 组合下相同命令去掉 `--no-default-features` 后通过 15 项；相机核心 cutscene 专项测试通过 29 项。
 
 ### 28.2 焦点追踪与自动对焦（`autofocus`）
-
-2026-10-23 cutscene 消费链补充：`prism_camera_ecs/cutscene` 将已验证轨迹播放器接到 Rig 后、view publication 前。播放器应用当前姿态，并通过 `CameraTrackEventCursor` 收集 `(last_tick, tick]` 内带关键帧 tick 的 occurrence；复杂度 O(log n + k)，事件缓冲在播放器组件内复用。`Events<CameraTrackEvent>` 由 `CameraPlugin` 注册，事件身份包含 generational camera entity、playback epoch、keyframe tick 和 payload key；相同 payload 的不同关键帧作为独立发生。暂停不推进，`seek` 增加 epoch 并重建游标基线，不补发跳过区间；应用通过标准 `EventCursor` 消费，事件遵循 ECS 双缓冲保留期。该队列没有 ack、处理失败重试或跨进程持久化，因此 exactly-once 仅描述单实例 occurrence 身份与游标产出，不声称事务式副作用交付。验证：`CARGO_PROFILE_TEST_DEBUG=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 cargo test -p prism_camera_ecs --no-default-features --features cutscene --lib --offline` 通过 9 项；相机核心 cutscene 专项测试通过 29 项。
-
-`CameraTrack::into_validated` 在载入边界检查版本、非空/有界关键帧、严格递增 tick、有限姿态/焦距/曝光，然后消费原始轨迹生成不可变 `ValidatedCameraTrack`；fixed-tick 热路径不重复 O(keyframe 数) 全量校验，单帧采样为二分查找 O(log n) 加常量插值。时间切线按相邻 tick 间距归一并限制焦距段内过冲。轨迹结束按 `CutsceneEndPolicy::{Hold,BlendToPrevious,Deactivate}` 处理，采样状态显式返回 `active` 与 `handoff_to_previous`。无效资产在载入时拒绝，调用方保持当前 VCam；事件 dispatch 及可靠消费由前述 ECS 播放链提供。
 
 焦点源只能是锁定实体、屏幕中心射线命中或固定距离三者之一；采样距离先限幅到 `[near+epsilon, focus_max]`，再用独立的拉焦半衰期平滑。focus breathing 只改变投影 FOV 的校正项，不修改物理焦距真值；无命中保持上一焦距并输出 `FocusLost`。
 
