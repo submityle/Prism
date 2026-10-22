@@ -177,6 +177,16 @@ impl TileKey {
         self.neighbor_with_edge(edge).0
     }
 
+    /// Returns the immediate coarser tile sharing an owner edge.
+    ///
+    /// This is intentionally derived from the owner's parent before crossing
+    /// the edge. Taking `self.neighbor(edge).parent()` is not equivalent: the
+    /// same-level neighbor's parent may be the owner tile's parent on the
+    /// wrong side of the boundary.
+    pub fn coarser_neighbor(self, edge: TileEdge) -> Option<Self> {
+        self.parent().map(|parent| parent.neighbor(edge))
+    }
+
     /// Returns the neighboring tile and the edge on that tile that faces this tile.
     pub fn neighbor_with_edge(self, edge: TileEdge) -> (Self, TileEdge) {
         let side = self.side_len();

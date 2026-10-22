@@ -349,10 +349,12 @@ impl HeightfieldLodSeamPlan {
     ///
     /// The resident list must be strictly increasing by TileKey and contain no
     /// duplicates. For every owner edge this resolves one same-level neighbor,
-    /// its coarser parent, or both finer children. Cube-face edge orientation
-    /// and finer-child coverage are derived from tile adjacency. Partial finer
-    /// coverage fails closed because this transition ABI requires a complete
-    /// 2:1 pair.
+    /// its immediate coarser edge-neighbor, or both immediate finer children.
+    /// Resident coarser edge-neighbors more than one level away are rejected
+    /// instead of being mistaken for an external boundary. Cube-face edge
+    /// orientation and finer-child coverage are derived from tile adjacency.
+    /// Partial finer coverage fails closed because this transition ABI requires
+    /// a complete 2:1 pair.
     pub fn build_strict_for_residency(
         tile: TileKey,
         segments: u32,
@@ -372,9 +374,6 @@ impl HeightfieldLodSeamPlan {
         for edge in TileEdge::ALL {
             let (same_level, neighbor_edge) = tile.neighbor_with_edge(edge);
             let same = resident_tiles.binary_search(&same_level).is_ok();
-            let coarse_tile = same_level.parent();
-            let coarse =
-                coarse_tile.is_some_and(|neighbor| resident_tiles.binary_search(&neighbor).is_ok());
             let (finer, reversed) = if let Ok(children) = same_level.children() {
                 let mut found = [None; 2];
                 let mut count = 0usize;
@@ -397,7 +396,31 @@ impl HeightfieldLodSeamPlan {
                 ([None, None], false)
             };
             let has_finer = finer.iter().any(Option::is_some);
-            let topology_count = usize::from(same) + usize::from(coarse) + usize::from(has_finer);
+            let mut coarse = None;
+            let mut distant_coarse = false;
+            let mut owner_ancestor = tile.parent();
+            while let Some(coarse_owner) = owner_ancestor {
+                let candidate = coarse_owner.neighbor(edge);
+                if resident_tiles.binary_search(&candidate).is_ok() {
+                    if coarse.is_some() || distant_coarse {
+                        return Err(LodSeamError::AmbiguousResidentNeighbors(edge));
+                    }
+                    if candidate.level().saturating_add(1) == tile.level() {
+                        coarse = Some(candidate);
+                    } else {
+                        distant_coarse = true;
+                    }
+                }
+                owner_ancestor = coarse_owner.parent();
+            }
+            if distant_coarse {
+                if same || has_finer || coarse.is_some() {
+                    return Err(LodSeamError::AmbiguousResidentNeighbors(edge));
+                }
+                return Err(LodSeamError::LodDeltaTooLarge(edge));
+            }
+            let topology_count =
+                usize::from(same) + usize::from(coarse.is_some()) + usize::from(has_finer);
             if topology_count > 1 {
                 return Err(LodSeamError::AmbiguousResidentNeighbors(edge));
             }
@@ -408,10 +431,10 @@ impl HeightfieldLodSeamPlan {
                     segments,
                     LodSeamCoverage::full(segments),
                 ));
-            } else if coarse {
+            } else if let Some(coarse_tile) = coarse {
                 neighbors.push(LodSeamNeighbor::with_boundary(
                     edge,
-                    coarse_tile.expect("coarse flag requires parent"),
+                    coarse_tile,
                     segments,
                     LodSeamCoverage::full(segments),
                 ));
@@ -883,7 +906,7 @@ fn validate_neighbor(
     match delta {
         0 if neighbor == same_level => Ok(LodSeamEdgeMode::Same),
         0 => Err(LodSeamError::NonAdjacent(edge)),
-        -1 if same_level.parent() == Some(neighbor) => Ok(LodSeamEdgeMode::Coarser),
+        -1 if tile.coarser_neighbor(edge) == Some(neighbor) => Ok(LodSeamEdgeMode::Coarser),
         1 if neighbor.parent() == Some(same_level)
             && child_touches_edge(neighbor, neighbor_edge) =>
         {
@@ -1098,6 +1121,10 @@ mod tests {
         TileKey::new(CubeFace::PositiveZ, level, x, y).unwrap()
     }
 
+    fn coarse_neighbor(tile: TileKey, edge: TileEdge) -> TileKey {
+        tile.parent().unwrap().neighbor(edge)
+    }
+
     #[test]
     fn same_level_and_boundary_edges_need_no_transition() {
         let owner = tile(3, 2, 2);
@@ -1124,7 +1151,7 @@ mod tests {
     #[test]
     fn coarser_neighbor_has_coarse_interface_and_valid_indices() {
         let owner = tile(4, 4, 4);
-        let coarse = owner.neighbor(TileEdge::North).parent().unwrap();
+        let coarse = coarse_neighbor(owner, TileEdge::North);
         let plan = HeightfieldLodSeamPlan::build(
             owner,
             8,
@@ -1156,7 +1183,7 @@ mod tests {
     #[test]
     fn transition_strip_matches_removed_edge_quad_boundary_and_winding() {
         let owner = tile(4, 4, 4);
-        let neighbor = owner.neighbor(TileEdge::East).parent().unwrap();
+        let neighbor = coarse_neighbor(owner, TileEdge::East);
         let plan = HeightfieldLodSeamPlan::build(
             owner,
             8,
@@ -1228,8 +1255,8 @@ mod tests {
     #[test]
     fn neighbor_order_does_not_change_the_plan() {
         let owner = tile(4, 4, 4);
-        let north = owner.neighbor(TileEdge::North).parent().unwrap();
-        let west = owner.neighbor(TileEdge::West).parent().unwrap();
+        let north = coarse_neighbor(owner, TileEdge::North);
+        let west = coarse_neighbor(owner, TileEdge::West);
         let a = HeightfieldLodSeamPlan::build(
             owner,
             16,
@@ -1296,7 +1323,7 @@ mod tests {
                 8,
                 &[LodSeamNeighbor::new(
                     TileEdge::East,
-                    owner.neighbor(TileEdge::East).parent().unwrap(),
+                    coarse_neighbor(owner, TileEdge::East),
                 )],
                 0.5,
                 tight,
@@ -1325,7 +1352,7 @@ mod tests {
     #[test]
     fn strict_plan_requires_fixed_resolution_and_derives_morph_alpha() {
         let owner = tile(4, 4, 4);
-        let coarse = owner.neighbor(TileEdge::North).parent().unwrap();
+        let coarse = coarse_neighbor(owner, TileEdge::North);
         let plan = HeightfieldLodSeamPlan::build_strict(
             owner,
             8,
@@ -1373,7 +1400,7 @@ mod tests {
         );
 
         let coarse_owner = tile(4, 4, 4);
-        let coarse = coarse_owner.neighbor(TileEdge::North).parent().unwrap();
+        let coarse = coarse_neighbor(coarse_owner, TileEdge::North);
         let coarse_plan = HeightfieldLodSeamPlan::build_strict_for_residency(
             coarse_owner,
             8,
@@ -1448,7 +1475,20 @@ mod tests {
             Err(LodSeamError::InvalidResidentTileOrder)
         );
 
-        let coarse = adjacent.parent().unwrap();
+        let distant_coarse = owner
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .neighbor(TileEdge::North);
+        let mut unbalanced = vec![owner, distant_coarse];
+        unbalanced.sort_unstable();
+        assert_eq!(
+            HeightfieldLodSeamPlan::build_strict_for_residency(owner, 8, &unbalanced, limits(),),
+            Err(LodSeamError::LodDeltaTooLarge(TileEdge::North))
+        );
+
+        let coarse = coarse_neighbor(owner, TileEdge::North);
         let mut ambiguous = vec![owner, adjacent, coarse];
         ambiguous.sort_unstable();
         assert_eq!(
@@ -1550,7 +1590,7 @@ mod tests {
     #[test]
     fn strict_state_replace_is_atomic_on_validation_or_budget_failure() {
         let owner = tile(4, 4, 4);
-        let coarse = owner.neighbor(TileEdge::North).parent().unwrap();
+        let coarse = coarse_neighbor(owner, TileEdge::North);
         let valid = [LodSeamNeighbor::with_boundary(
             TileEdge::North,
             coarse,

@@ -256,6 +256,17 @@ release两组完整记录共864次dispatch逐全键/位置对CPU，10k/100k候�
 
 ### M6-M8：地形、仿真与网络边界
 
+2026-10-23 cube-sphere coarser-edge 邻接校正：coarse neighbor 由 `fine.parent().neighbor(edge)`
+派生，而非 `fine.neighbor(edge).parent()`；后者在部分 tile 坐标上会返回覆盖 owner 的错误
+coarse tile，造成 planetary LOD transition/边界校验与真实邻瓦不一致。`TileKey::coarser_neighbor`
+成为统一规则，strict residency seam planner、planetary seam consumer、LOD height validator
+和 publication boundary admission 均已接入；resident planner 对祖先跨度 >2:1 的粗邻瓦明确拒绝。
+回归新增错误 coarse tile 拒绝、超跨度 fail-closed 与正确跨面映射 oracle；
+`cargo test -p prism_world_terrain --lib --offline` 149 passed、
+`cargo test -p prism_world_terrain --features mesh --lib --offline` 153 passed、
+`cargo check -p prism_world_terrain --no-default-features --offline` 通过；使用隔离
+target `/private/tmp/prism-world-lodbalance-20261023` 并关闭 debug info/incremental。
+
 2026-10-23 状态更正与复验：当前 planar `HeightfieldMesh::apply_lod_seam_plan` 已支持四边任意 coarse-edge 子集及相邻边 corner fan；紧随其后的“相邻 coarse-edge corner fan 不支持”旧记录已过期，以本条及 `prism_world_terrain_lod_seam_zh.md` 为准。Apple M2/Metal `cargo test -p prism_world_gpu --features gpu --test terrain_draw --offline -- --nocapture --test-threads=1` 为 2 passed：新增 81 顶点/360 索引 corner-fan indexed raster，完整 64² RGBA8 读回均验证覆盖、法线和 alpha。当前 checkout `cargo test -p prism_world_runtime --lib --offline` 为 187 passed，`cargo test -p prism_world_gpu --features gpu --lib --offline` 为 139 passed；`LayeredCellManifest::admitted_layers` 先前报告的 feature 编译错误在当前 checkout 未复现。此处验证不等于 terrain renderer graph/Scene-ECS 产品接线或完整 World 验收。
 
 2026-10-23 后续复验：当前工作树以独立临时 target 运行 `cargo test -p prism_world_runtime --lib --offline` 为 187 passed、`cargo test -p prism_world_gpu --features gpu --lib --offline` 为 141 passed。沙盒内 Planet terrain RHI 集成因 Metal adapter 不可见未能启动；在获准的宿主环境重跑 `cargo test -p prism_world_gpu --features planet_terrain_rhi --test planet_terrain_rhi --offline -- --nocapture --test-threads=1`，Apple M2/Metal IntegratedGpu 为 2 passed，覆盖真实 indexed raster 与 snapshot/delta 事务预算失败原子性。额外 `planet_terrain_rhi --lib` 定向测试在链接阶段因磁盘空间不足失败（`ld: write() failed, errno=28`），不是 Rust 诊断；RHI 集成目标已完成实际编译与执行。源码中无 `admitted_layers` 引用，`LayeredCellManifest` 的声明层集合通过 `layers()` 提供。临时 target 已清理；上述结果仅针对这些定向测试，不代表全 workspace 或 World M0-M8 端到端通过。

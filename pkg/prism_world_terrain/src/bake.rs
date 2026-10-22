@@ -1140,7 +1140,7 @@ mod tests {
         use crate::{CubeFace, HeightfieldLodSeamPlan, LodSeamLimits, TileEdge};
 
         let tile = TileKey::new(CubeFace::PositiveZ, 3, 3, 2).unwrap();
-        let coarse = tile.neighbor(TileEdge::East).parent().unwrap();
+        let coarse = tile.coarser_neighbor(TileEdge::East).unwrap();
         let plan = HeightfieldLodSeamPlan::build_strict_for_residency(
             tile,
             8,
@@ -1164,7 +1164,7 @@ mod tests {
             mesh.apply_lod_seam_plan(&plan, 16_384),
             Err(BakeError::InvalidGeometry)
         );
-        let south_coarse = tile.neighbor(TileEdge::South).parent().unwrap();
+        let south_coarse = tile.coarser_neighbor(TileEdge::South).unwrap();
         let next_plan = HeightfieldLodSeamPlan::build_strict_for_residency(
             tile,
             8,
@@ -1204,7 +1204,7 @@ mod tests {
         use crate::{CubeFace, HeightfieldLodSeamPlan, LodSeamLimits, TileEdge};
 
         let tile = TileKey::new(CubeFace::PositiveZ, 3, 3, 2).unwrap();
-        let coarse = tile.neighbor(TileEdge::East).parent().unwrap();
+        let coarse = tile.coarser_neighbor(TileEdge::East).unwrap();
         let plan = HeightfieldLodSeamPlan::build_strict_for_residency(
             tile,
             8,
@@ -1258,7 +1258,7 @@ mod tests {
                 .map(|&edge| {
                     LodSeamNeighbor::with_boundary(
                         edge,
-                        tile.neighbor(edge).parent().unwrap(),
+                        tile.coarser_neighbor(edge).unwrap(),
                         8,
                         LodSeamCoverage::full(8),
                     )
@@ -1337,7 +1337,7 @@ mod tests {
         let field =
             HeightfieldTile::bake(tile, HeightfieldSpec::new(9, 10).unwrap(), &Curved, LIMITS)
                 .unwrap();
-        let coarse = tile.neighbor(TileEdge::East).parent().unwrap();
+        let coarse = tile.coarser_neighbor(TileEdge::East).unwrap();
         let plan = HeightfieldLodSeamPlan::build_strict_for_residency(
             tile,
             8,

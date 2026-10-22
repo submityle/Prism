@@ -752,9 +752,8 @@ fn validate_final_seam_topology(
         let coarse = if same_level_resident {
             None
         } else {
-            same_level
-                .parent()
-                .filter(|parent| final_contains_tile(current, transaction, *parent))
+            tile.coarser_neighbor(edge)
+                .filter(|coarse| final_contains_tile(current, transaction, *coarse))
         };
         if seam_neighbors[slot] != coarse {
             if let Some(neighbor) = coarse.or(seam_neighbors[slot]) {
@@ -862,7 +861,7 @@ fn validate_affected_boundaries(
         for edge in TileEdge::ALL {
             let (same_level, neighbor_edge) = tile.neighbor_with_edge(edge);
             if source_for(current, transaction, same_level).is_none() {
-                if let Some(coarse_tile) = same_level.parent() {
+                if let Some(coarse_tile) = tile.coarser_neighbor(edge) {
                     if let Some(coarse) = source_for(current, transaction, coarse_tile) {
                         validate_lod_boundary_budget(
                             &entry.source,
@@ -1051,7 +1050,7 @@ mod tests {
     }
 
     fn seam_plan(tile: TileKey) -> (TileKey, HeightfieldLodSeamPlan) {
-        let neighbor = tile.neighbor(TileEdge::East).parent().unwrap();
+        let neighbor = tile.coarser_neighbor(TileEdge::East).unwrap();
         let plan = HeightfieldLodSeamPlan::build_strict(
             tile,
             4,

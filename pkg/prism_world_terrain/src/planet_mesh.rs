@@ -1249,7 +1249,7 @@ mod tests {
         use crate::{HeightfieldLodSeamPlan, LodSeamLimits};
 
         let tile = TileKey::new(CubeFace::PositiveZ, 3, 3, 2).unwrap();
-        let coarse = tile.neighbor(TileEdge::East).parent().unwrap();
+        let coarse = tile.coarser_neighbor(TileEdge::East).unwrap();
         let plan = HeightfieldLodSeamPlan::build_strict_for_residency(
             tile,
             8,
@@ -1310,7 +1310,7 @@ mod tests {
                 HeightfieldTile::bake(tile, HeightfieldSpec::new(9, 1).unwrap(), &Ramp, LIMITS)
                     .unwrap();
             for edge in TileEdge::ALL {
-                let coarse = tile.neighbor(edge).parent().unwrap();
+                let coarse = tile.coarser_neighbor(edge).unwrap();
                 let plan = HeightfieldLodSeamPlan::build_strict(
                     tile,
                     8,
@@ -1359,8 +1359,8 @@ mod tests {
                     );
                 }
             }
-            let east = tile.neighbor(TileEdge::East).parent().unwrap();
-            let west = tile.neighbor(TileEdge::West).parent().unwrap();
+            let east = tile.coarser_neighbor(TileEdge::East).unwrap();
+            let west = tile.coarser_neighbor(TileEdge::West).unwrap();
             let plan = HeightfieldLodSeamPlan::build_strict(
                 tile,
                 8,
@@ -1424,7 +1424,7 @@ mod tests {
                 let neighbors = [first_edge, second_edge].map(|edge| {
                     LodSeamNeighbor::with_boundary(
                         edge,
-                        tile.neighbor(edge).parent().unwrap(),
+                        tile.coarser_neighbor(edge).unwrap(),
                         8,
                         LodSeamCoverage::full(8),
                     )
@@ -1534,7 +1534,7 @@ mod tests {
                 HeightfieldTile::bake(tile, HeightfieldSpec::new(9, 1).unwrap(), &Ramp, LIMITS)
                     .unwrap();
             for edge in TileEdge::ALL {
-                let neighbor = tile.neighbor(edge).parent().unwrap();
+                let neighbor = tile.coarser_neighbor(edge).unwrap();
                 let plan = HeightfieldLodSeamPlan::build_strict(
                     tile,
                     8,
@@ -1834,7 +1834,7 @@ mod tests {
             8,
             &[LodSeamNeighbor::with_boundary(
                 edge,
-                tile.neighbor(edge).parent().unwrap(),
+                tile.coarser_neighbor(edge).unwrap(),
                 8,
                 LodSeamCoverage::full(8),
             )],

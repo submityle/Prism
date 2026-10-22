@@ -5,6 +5,18 @@
 
 ## 已交付范围
 
+2026-10-23 拓扑校正：coarser edge neighbor 必须从 fine owner 的 parent 沿相同 edge 跨越
+（`fine.parent().neighbor(edge)`）；直接取 `fine.neighbor(edge).parent()` 在特定 tile 奇偶
+下会错误指向 owner 覆盖区域内的 coarse tile。`TileKey::coarser_neighbor` 统一该映射，
+strict residency planner、planetary boundary validator、mesh consumer 与 publication
+均复用同一规则；平面/行星转接测试夹具同步改为真实邻瓦。resident planner 额外沿 owner
+祖先链用有界深度二分查找，发现跨度大于 2:1 的粗 resident 邻瓦就 fail-closed，
+不再把它当作未驻留边界。
+验证：no-default lib 149 passed、`mesh` feature lib 153 passed、no-default check
+通过；独立 target `/private/tmp/prism-world-lodbalance-20261023`（debug info/incremental
+关闭）。专项测试还直接证明错误的相邻 tile parent 会被拒绝，owner-parent 跨边得到的 coarse
+tile 通过高度映射校验。
+
 2026-10-23 增补 planar `HeightfieldMesh::apply_lod_seam_plan` 的相邻 coarse-edge
 corner fan consumer：允许四边任意子集的 coarser neighbor，不再仅接受最多两条且互为对边。
 相邻 transition strips 在角端各省略一个 coarse segment，并用四三角 fan 覆盖共享角部；四角

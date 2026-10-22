@@ -150,11 +150,16 @@ pub fn validate_planet_heightfield_lod_edge(
     if segments < 2 || !segments.is_multiple_of(2) {
         return Err(PlanetHeightfieldBoundaryError::InvalidLodResolution { samples: side });
     }
-    let (same_level_neighbor, coarse_edge, _) = fine
+    let (fine_neighbor, _, _) = fine
         .tile()
         .neighbor_edge_index(edge, side, 0)
         .ok_or(PlanetHeightfieldBoundaryError::TileMismatch)?;
-    if same_level_neighbor.parent() != Some(coarse.tile()) {
+    let fine_parent = fine
+        .tile()
+        .parent()
+        .ok_or(PlanetHeightfieldBoundaryError::TileMismatch)?;
+    let (expected_coarse, coarse_edge) = fine_parent.neighbor_with_edge(edge);
+    if expected_coarse != coarse.tile() {
         return Err(PlanetHeightfieldBoundaryError::TileMismatch);
     }
     let required = u64::from(segments / 2 + 1);
@@ -165,15 +170,15 @@ pub fn validate_planet_heightfield_lod_edge(
         });
     }
     let child_half = match coarse_edge {
-        TileEdge::West | TileEdge::East => same_level_neighbor.y() % 2,
-        TileEdge::South | TileEdge::North => same_level_neighbor.x() % 2,
+        TileEdge::West | TileEdge::East => fine_neighbor.y() % 2,
+        TileEdge::South | TileEdge::North => fine_neighbor.x() % 2,
     };
     for fine_index in (0..=segments).step_by(2) {
         let (mapped_neighbor, mapped_edge, mapped_index) = fine
             .tile()
             .neighbor_edge_index(edge, side, fine_index)
             .ok_or(PlanetHeightfieldBoundaryError::TileMismatch)?;
-        if mapped_neighbor != same_level_neighbor || mapped_edge != coarse_edge {
+        if mapped_neighbor != fine_neighbor || mapped_edge != coarse_edge {
             return Err(PlanetHeightfieldBoundaryError::TileMismatch);
         }
         let coarse_index = child_half * (segments / 2) + mapped_index / 2;
@@ -348,6 +353,25 @@ mod tests {
     }
 
     #[test]
+    fn coarser_neighbor_is_crossed_from_owner_parent_not_same_level_neighbor_parent() {
+        let owner = TileKey::new(CubeFace::PositiveZ, 4, 4, 4).unwrap();
+        let edge = TileEdge::North;
+        let same_level = owner.neighbor(edge);
+        let incorrect = same_level.parent().unwrap();
+        let correct = owner.coarser_neighbor(edge).unwrap();
+        assert_ne!(incorrect, correct);
+
+        let fine = tile(owner, 7);
+        let wrong_coarse = tile(incorrect, 7);
+        assert_eq!(
+            validate_planet_heightfield_lod_edge(&fine, edge, &wrong_coarse, u64::MAX),
+            Err(PlanetHeightfieldBoundaryError::TileMismatch)
+        );
+        let coarse = tile(correct, 7);
+        validate_planet_heightfield_lod_edge(&fine, edge, &coarse, u64::MAX).unwrap();
+    }
+
+    #[test]
     fn lod_edges_validate_coincident_samples_across_faces_and_child_halves() {
         for face in CubeFace::ALL {
             for edge in TileEdge::ALL {
@@ -368,7 +392,7 @@ mod tests {
                 assert_eq!(children.len(), 2, "{face:?} {edge:?}");
                 let coarse_field = tile(coarse, 7);
                 for child in children {
-                    assert_eq!(child.neighbor(fine_edge).parent(), Some(coarse));
+                    assert_eq!(child.coarser_neighbor(fine_edge), Some(coarse));
                     let fine_field = tile(child, 7);
                     validate_planet_heightfield_lod_edge(&fine_field, fine_edge, &coarse_field, 3)
                         .unwrap_or_else(|error| panic!("{face:?} {edge:?} {child:?}: {error:?}"));
@@ -389,8 +413,8 @@ mod tests {
                     TileEdge::North => (1, 3),
                 };
                 let coarse = TileKey::new(face, 2, x, y).unwrap();
-                let (fine, fine_edge, _) = lod_edge_tiles(coarse, edge);
-                let coarse_edge = fine.neighbor_edge_index(fine_edge, 5, 0).unwrap().1;
+                let (fine, fine_edge, fine_parent) = lod_edge_tiles(coarse, edge);
+                let coarse_edge = fine_parent.neighbor_with_edge(fine_edge).1;
                 let coarse_field = HeightfieldTile::bake(
                     coarse,
                     HeightfieldSpec::new(5, 1).unwrap(),
@@ -438,7 +462,8 @@ mod tests {
     #[test]
     fn lod_edge_mismatch_and_budget_fail_closed() {
         let coarse = TileKey::new(CubeFace::PositiveZ, 2, 1, 1).unwrap();
-        let fine = coarse.children().unwrap()[3];
+        let fine_parent = coarse.neighbor(TileEdge::East);
+        let fine = fine_parent.children().unwrap()[0];
         let coarse_field = tile(coarse, 0);
         let fine_field = tile(fine, 1);
         assert_eq!(
@@ -453,7 +478,7 @@ mod tests {
             Err(PlanetHeightfieldBoundaryError::HeightMismatch { .. })
         ));
         assert_eq!(
-            validate_planet_heightfield_lod_edge(&fine_field, TileEdge::North, &coarse_field, 3),
+            validate_planet_heightfield_lod_edge(&fine_field, TileEdge::East, &coarse_field, 3),
             Err(PlanetHeightfieldBoundaryError::TileMismatch)
         );
     }
