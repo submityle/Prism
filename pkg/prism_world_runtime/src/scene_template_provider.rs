@@ -37,6 +37,29 @@ pub struct SceneTemplateApplyOutcome {
     pub reload_sectors: Vec<crate::SectorId>,
 }
 
+#[cfg(feature = "scene_templates")]
+impl SceneTemplateApplyOutcome {
+    /// Applies this committed invalidation batch to explicitly owned live
+    /// nested trees. The caller supplies ownership because the coordinator
+    /// cannot discover trees held by arbitrary application/provider state.
+    pub fn reload_nested_trees<P: prism_scene::NestedSceneProvider>(
+        &self,
+        world: &mut prism_ecs::world::World,
+        trees: alloc::vec::Vec<prism_scene::SceneTreeSpawn>,
+        provider: &P,
+        limits: prism_scene::NestedSpawnLimits,
+    ) -> Result<alloc::vec::Vec<prism_scene::SceneTreeSpawn>, prism_scene::NestedReloadBatchError>
+    {
+        let invalidated: alloc::vec::Vec<_> = self
+            .invalidations
+            .iter()
+            .filter(|event| event.reloadable)
+            .map(|event| event.dependent)
+            .collect();
+        prism_scene::reload_invalidated_nested_trees(world, trees, &invalidated, provider, limits)
+    }
+}
+
 /// An asset event batch violated atomic event/snapshot pairing.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SceneTemplateBatchError {
@@ -507,6 +530,58 @@ mod tests {
     use prism_scene::{
         encode_template, ArchetypeGroup, InstantiationPlan, ResidencyPlan, SceneTemplate,
     };
+    use prism_scene::{
+        LocalEntityId, NestedProviderError, NestedSceneProvider, NestedSpawnLimits, SceneInstance,
+        SceneSpawn, SceneTreeSpawn, TypedSpawnPlan, spawn_nested_typed,
+    };
+    use prism_ecs::component::Component;
+    use prism_ecs::world::World;
+
+    #[derive(Debug)]
+    struct RuntimeMarker;
+    impl Component for RuntimeMarker {}
+
+    struct NestedProvider {
+        templates: BTreeMap<StableGuid, SceneTemplate>,
+    }
+
+    impl NestedSceneProvider for NestedProvider {
+        fn template(&self, guid: StableGuid) -> Option<&SceneTemplate> {
+            self.templates.get(&guid)
+        }
+
+        fn typed_plan(&self, _guid: StableGuid) -> Result<TypedSpawnPlan, NestedProviderError> {
+            Ok(TypedSpawnPlan::new().with_bundle(LocalEntityId::new(0), RuntimeMarker))
+        }
+
+        fn replay_instance_overrides(
+            &self,
+            _world: &mut World,
+            _template: StableGuid,
+            _previous: &SceneInstance,
+            _replacement: &SceneSpawn,
+        ) -> Result<(), NestedProviderError> {
+            Ok(())
+        }
+    }
+
+    fn live_tree(guid: StableGuid) -> (World, SceneTreeSpawn, NestedProvider) {
+        let mut template = template(Vec::new());
+        template.guid = guid;
+        let provider = NestedProvider {
+            templates: BTreeMap::from([(guid, template.clone())]),
+        };
+        let mut world = World::new();
+        let tree = spawn_nested_typed(
+            &mut world,
+            &template,
+            TypedSpawnPlan::new().with_bundle(LocalEntityId::new(0), RuntimeMarker),
+            &provider,
+            NestedSpawnLimits::default(),
+        )
+        .expect("fixture tree spawns");
+        (world, tree, provider)
+    }
 
     fn fixture(
         template: &SceneTemplate,
@@ -575,6 +650,36 @@ mod tests {
                 type_id: AssetTypeId::of::<SceneTemplate>(),
             }]
         );
+    }
+
+    #[test]
+    fn committed_template_outcome_reloads_explicit_nested_tree_ownership() {
+        let guid = StableGuid::from_u128(0x8181);
+        let (mut world, tree, provider) = live_tree(guid);
+        let previous_root = tree.root.root.expect("fixture root");
+        let outcome = SceneTemplateApplyOutcome {
+            invalidations: vec![SceneTemplateInvalidation {
+                changed: guid,
+                dependent: guid,
+                reloadable: true,
+            }],
+            reload_sectors: Vec::new(),
+        };
+
+        let trees = outcome
+            .reload_nested_trees(
+                &mut world,
+                vec![tree],
+                &provider,
+                NestedSpawnLimits::default(),
+            )
+            .expect("candidate tree publishes");
+
+        assert_eq!(trees.len(), 1);
+        let current_root = trees[0].root.root.expect("replacement root");
+        assert_ne!(current_root, previous_root);
+        assert!(!world.contains(previous_root));
+        assert!(world.contains(current_root));
     }
 
     #[test]

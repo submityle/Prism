@@ -28,7 +28,7 @@ default = ["std"]
 placement = ["dep:prism_world_terrain"]
 std = ["prism_world_io/std", "prism_world_persist/std"]
 asset_container = ["std", "dep:prism_asset", "dep:prism_asset_container"]
-scene_templates = ["asset_container", "dep:prism_scene"]
+scene_templates = ["asset_container", "dep:prism_scene", "dep:prism_ecs", "prism_scene/materialize"]
 # Uses the validated mmap-backed v2 container index in World cell providers.
 asset_container_mmap = ["asset_container", "prism_asset_container/mmap"]
 tasks = ["std", "dep:prism_tasks", "prism_world_io/tasks"]
