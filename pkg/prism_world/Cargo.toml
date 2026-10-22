@@ -17,8 +17,11 @@ prism_world_sim = { path = "../prism_world_sim", default-features = false, featu
 
 [features]
 default = []
-scene_host = ["dep:prism_asset", "dep:prism_ecs", "dep:prism_scene"]
+scene_host = ["dep:prism_asset", "dep:prism_ecs", "dep:prism_scene", "prism_world_persist/std"]
 simulation = ["dep:prism_world_sim"]
+
+[dev-dependencies]
+prism_reflect = { path = "../prism_reflect" }
 
 [[bench]]
 name = "world_tick"

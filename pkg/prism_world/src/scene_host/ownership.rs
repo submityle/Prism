@@ -13,6 +13,7 @@ use super::{
 #[derive(Default)]
 pub(super) struct SceneOwnership {
     pub(super) cells: BTreeMap<SectorId, SceneSpawn>,
+    pub(super) retired_cells: Vec<(SectorId, SceneSpawn)>,
     pub(super) bindings: BTreeMap<u64, ResidencyBinding>,
     pub(super) persistence_objects: BTreeMap<SectorId, Vec<PersistentId>>,
 }
@@ -40,6 +41,23 @@ impl<P: SceneEcsProvider> SceneEcsHost<'_, P> {
             .retain(|_, binding| binding.sector != sector);
     }
 
+    /// Retries teardown for old scene trees retained after a published reload.
+    ///
+    /// If an ECS despawn hook panics, the current and later tokens remain
+    /// world-owned and this method may be called again after fixing the hook.
+    /// Returns the number of successfully retired scenes.
+    pub fn retry_retired_cells(&mut self) -> usize {
+        let mut retired_count = 0;
+        loop {
+            let Some((_, spawn)) = self.ownership().retired_cells.last().cloned() else {
+                return retired_count;
+            };
+            despawn_instance(self.world, &spawn);
+            self.ownership_mut().retired_cells.pop();
+            retired_count += 1;
+        }
+    }
+
     /// Despawns all registered cell scenes and clears every residency binding.
     ///
     /// Returns the number of removed cell ownership tokens. This uses the same
@@ -54,6 +72,7 @@ impl<P: SceneEcsProvider> SceneEcsHost<'_, P> {
     /// runtime's streaming state separately. This does not perform IO, update
     /// residency records, or clean up provider-owned external resources.
     pub fn shutdown(&mut self) -> usize {
+        let retired = self.retry_retired_cells();
         let mut count = 0;
         while let Some((sector, spawn)) = self
             .ownership()
@@ -66,7 +85,7 @@ impl<P: SceneEcsProvider> SceneEcsHost<'_, P> {
         }
         // Clear bindings to absent cells only after the entire shutdown succeeds.
         self.ownership_mut().bindings.clear();
-        count
+        count + retired
     }
 
     /// Releases the world borrow and returns provider state for explicit handoff.

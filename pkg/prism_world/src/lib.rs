@@ -9,6 +9,8 @@
 #![warn(missing_docs)]
 
 extern crate alloc;
+#[cfg(test)]
+extern crate std;
 
 #[cfg(feature = "scene_host")]
 pub mod scene_host;
@@ -147,10 +149,10 @@ impl WorldRuntime {
 
     /// Plans a frame using a prebuilt hierarchical manifest index.
     ///
-    /// The index must represent the same immutable manifest snapshot expected
-    /// by the caller. The policy output and residency plan are otherwise the
-    /// same as [`Self::try_tick`], while load/prefetch candidate generation
-    /// avoids scanning every manifest for every demand source.
+    /// The index must represent the immutable manifest snapshot used by the
+    /// caller. The policy output and residency plan are otherwise the same as
+    /// the linear planner, while load/prefetch candidate generation avoids
+    /// scanning every manifest for every demand source.
     pub fn try_tick_indexed(
         &mut self,
         demands: &[DemandSource],
@@ -193,6 +195,23 @@ impl WorldRuntime {
     /// Commits an IO completion without mutating scene truth.
     pub fn mark_resident(&mut self, sector: SectorId) {
         self.stream.mark_resident(sector);
+    }
+
+    /// Marks a sector resident with the exact manifest revision committed by
+    /// its host, enabling later revision changes to be distinguished as reloads.
+    pub fn mark_resident_manifest(&mut self, manifest: CellManifest) {
+        self.stream.mark_resident_manifest(manifest);
+    }
+
+    /// Requests a budgeted reload while keeping the resident revision intact
+    /// until a future host transaction succeeds.
+    pub fn request_reload(&mut self, sector: SectorId) -> bool {
+        self.stream.request_reload(sector)
+    }
+
+    /// Restores the last committed resident revision after replacement failure.
+    pub fn restore_resident_manifest(&mut self, manifest: CellManifest) {
+        self.stream.restore_resident_manifest(manifest);
     }
 
     /// Commits an eviction completion.
@@ -247,7 +266,9 @@ pub(crate) fn apply_plan_to<H: SceneHost>(
 ) -> Result<(), ApplyError<H::Error>> {
     for action in &plan.stream.actions {
         match action {
-            StreamAction::Load(request) | StreamAction::Prefetch(request) => {
+            StreamAction::Load(request)
+            | StreamAction::Reload(request)
+            | StreamAction::Prefetch(request) => {
                 host.load_cell(request.sector).map_err(ApplyError::Host)?;
             }
             StreamAction::Unload(sector) => {

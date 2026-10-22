@@ -11,13 +11,15 @@
 //! - an unbound or unloaded residency target is rejected instead of silently
 //!   mutating an unrelated ECS entity.
 
+use alloc::collections::BTreeSet;
+use alloc::string::ToString;
 use alloc::vec::Vec;
 use prism_ecs::entity::Entity;
 use prism_ecs::world::World;
 use prism_scene::{despawn_instance, LocalEntityId, SceneInstance, SceneSpawn};
 use prism_world_persist::{
-    AppendOnlyLog, LogError, ObjectState, PersistentId as WorldPersistentId, Snapshot, Timeline,
-    TimelineError, Transaction, WorldState,
+    AppendOnlyLog, FileJournal, LogError, ObjectState, PersistentId as WorldPersistentId, Snapshot,
+    Timeline, TimelineError, Transaction, WorldState,
 };
 use prism_world_stream::SectorId;
 
@@ -61,6 +63,26 @@ pub trait SceneEcsProvider {
         &mut self,
         world: &mut World,
         sector: SectorId,
+    ) -> Result<SceneSpawn, Self::Error>;
+
+    /// Builds a staged replacement for an already-loaded cell.
+    ///
+    /// The provider must not mutate or destroy `previous`. It must build the
+    /// replacement from the current template, apply applicable instance
+    /// overrides to its ECS components, and return matching instance metadata.
+    /// The host applies typed persistence state separately through
+    /// `replay_cell_persistence`. The host preserves the old sparse override
+    /// set as the authoritative source of truth, but cannot apply it itself
+    /// because component decoders/registries are provider-specific. If staging
+    /// fails, the provider must clean up every entity and external resource
+    /// created during staging. The host validates the returned anchor and all
+    /// current residency bindings before publishing it.
+    fn stage_cell_reload(
+        &mut self,
+        world: &mut World,
+        sector: SectorId,
+        previous: &SceneSpawn,
+        previous_instance: &SceneInstance,
     ) -> Result<SceneSpawn, Self::Error>;
 
     /// Materializes a bound target using its resolved typed ECS entity.
@@ -141,12 +163,27 @@ pub enum SceneEcsHostConfigError {
 /// Runtime failure while applying a world operation to the scene/ECS host.
 #[derive(Debug, Eq, PartialEq)]
 pub enum SceneEcsHostError<E> {
+    /// A batch reload listed the same sector more than once.
+    DuplicateReloadSector,
     /// The provider rejected a typed operation.
     Provider(E),
     /// A provider returned a spawn without a live scene anchor.
     SceneNotAttached(SectorId),
     /// A load would replace an existing scene ownership token.
     CellAlreadyLoaded(SectorId),
+    /// A staged reload did not return a distinct, anchored replacement.
+    InvalidReloadReplacement(SectorId),
+    /// A staged replacement aliases one or more entities from the live scene.
+    AliasedReloadReplacement(SectorId),
+    /// A current residency binding could not be resolved in the staged scene.
+    ReloadBindingUnavailable {
+        /// World residency id whose target would be lost.
+        residency_id: u64,
+        /// Cell being reloaded.
+        sector: SectorId,
+        /// Template-local entity from the existing binding.
+        local: LocalEntityId,
+    },
     /// An unload or residency operation addressed a cell that is not loaded.
     CellNotLoaded(SectorId),
     /// A residency operation has no stable scene binding.
@@ -162,6 +199,8 @@ pub enum SceneEcsHostError<E> {
     },
     /// Persistence rejected the complete cell transaction batch.
     PersistenceAppend(LogError),
+    /// Durable journal rejected or failed the complete cell transaction batch.
+    DurableAppend(alloc::string::String),
     /// The world persistence log could not be replayed for a cell.
     PersistenceReplay(TimelineError),
 }
@@ -228,6 +267,12 @@ impl<'world, P: SceneEcsProvider> SceneEcsHost<'world, P> {
         self.ownership().cells.len()
     }
 
+    /// Returns the number of previously published scene trees awaiting teardown.
+    #[must_use]
+    pub fn retired_cell_count(&self) -> usize {
+        self.ownership().retired_cells.len()
+    }
+
     /// Returns the binding for a world residency id.
     #[must_use]
     pub fn residency_binding(&self, residency_id: u64) -> Option<ResidencyBinding> {
@@ -284,7 +329,7 @@ impl<'world, P: SceneEcsProvider> SceneEcsHost<'world, P> {
 
     fn load_cell(&mut self, sector: SectorId) -> Result<(), SceneEcsHostError<P::Error>> {
         if self.loaded_cell(sector).is_some() {
-            return Err(SceneEcsHostError::CellAlreadyLoaded(sector));
+            return self.reload_cell(sector);
         }
         let spawn = self
             .provider
@@ -301,13 +346,446 @@ impl<'world, P: SceneEcsProvider> SceneEcsHost<'world, P> {
         Ok(())
     }
 
+    /// Atomically publishes a provider-staged scene replacement.
+    ///
+    /// The prior cell remains registered and live until the staged scene has a
+    /// distinct attached root and resolves every current residency binding. On
+    /// any validation failure the staged scene is despawned and the old scene
+    /// remains authoritative. Despawn hooks for the old scene run only after
+    /// ownership has switched to the replacement.
+    pub fn reload_cell(&mut self, sector: SectorId) -> Result<(), SceneEcsHostError<P::Error>> {
+        self.reload_cell_with_state(sector, &[], None)
+    }
+
+    /// Stages and publishes several cell replacements as one ownership batch.
+    ///
+    /// Sectors are processed in sorted order, independent of caller order. A
+    /// duplicate sector is rejected before invoking the provider. All staged
+    /// replacements are validated before any ownership token changes; a
+    /// recoverable staging, validation, or persistence replay failure destroys
+    /// every completed staged scene and leaves all previous cells authoritative.
+    /// Replacement entities are required to be disjoint from all currently
+    /// owned and already staged cells. The batch guarantee covers the host's
+    /// ownership registry only: arbitrary provider side effects and ECS
+    /// observers are not rollbackable. Old-scene teardown happens after
+    /// publication; if a despawn hook panics, the remaining old tokens stay in
+    /// the world-owned retirement queue and can be retried with
+    /// [`Self::retry_retired_cells`]. A provider must clean up incomplete
+    /// staging work before returning an error.
+    pub fn reload_cells_atomic(
+        &mut self,
+        sectors: &[SectorId],
+    ) -> Result<(), SceneEcsHostError<P::Error>> {
+        let mut sectors = sectors.to_vec();
+        sectors.sort_unstable();
+        if sectors.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(SceneEcsHostError::DuplicateReloadSector);
+        }
+        if let Some(&sector) = sectors
+            .iter()
+            .find(|sector| !self.ownership().cells.contains_key(sector))
+        {
+            return Err(SceneEcsHostError::CellNotLoaded(sector));
+        }
+        if sectors.is_empty() {
+            return Ok(());
+        }
+
+        let mut protected_entities: BTreeSet<_> = self
+            .ownership()
+            .cells
+            .values()
+            .flat_map(|spawn| spawn.remap().entities().map(|(_, entity)| entity))
+            .collect();
+        let mut staged: Vec<(SectorId, SceneSpawn, SceneSpawn, ())> =
+            Vec::with_capacity(sectors.len());
+        for sector in sectors {
+            let previous = self
+                .ownership()
+                .cells
+                .get(&sector)
+                .cloned()
+                .expect("all target cells were validated");
+            let Some(old_root) = previous.root else {
+                self.cleanup_staged_reloads(&staged);
+                return Err(SceneEcsHostError::InvalidReloadReplacement(sector));
+            };
+            let Some(previous_instance) = self.world.get::<SceneInstance>(old_root).cloned() else {
+                self.cleanup_staged_reloads(&staged);
+                return Err(SceneEcsHostError::SceneNotAttached(sector));
+            };
+            let replacement = match self.provider.stage_cell_reload(
+                self.world,
+                sector,
+                &previous,
+                &previous_instance,
+            ) {
+                Ok(replacement) => replacement,
+                Err(error) => {
+                    self.cleanup_staged_reloads(&staged);
+                    return Err(SceneEcsHostError::Provider(error));
+                }
+            };
+
+            let replacement_entities: Vec<_> = replacement
+                .remap()
+                .entities()
+                .map(|(_, entity)| entity)
+                .collect();
+            let aliases_live_or_staged = replacement_entities
+                .iter()
+                .any(|candidate| protected_entities.contains(candidate));
+            if aliases_live_or_staged {
+                self.cleanup_staged_reloads(&staged);
+                return Err(SceneEcsHostError::AliasedReloadReplacement(sector));
+            }
+
+            let replacement_valid = replacement.root.is_some_and(|root| {
+                replacement.resolve(LocalEntityId::new(0)) == Some(root)
+                    && self.world.get::<SceneInstance>(root).is_some()
+                    && self.world.entities().contains(root)
+            }) && replacement.remap().entities().all(|(_, entity)| {
+                self.world.entities().contains(entity)
+                    && self
+                        .world
+                        .entities()
+                        .location(entity)
+                        .is_some_and(|location| !location.is_empty())
+            });
+            if !replacement_valid {
+                despawn_instance(self.world, &replacement);
+                self.cleanup_staged_reloads(&staged);
+                return Err(SceneEcsHostError::InvalidReloadReplacement(sector));
+            }
+            if let Some((&residency_id, binding)) =
+                self.ownership().bindings.iter().find(|(_, binding)| {
+                    binding.sector == sector && replacement.resolve(binding.local).is_none()
+                })
+            {
+                let error = SceneEcsHostError::ReloadBindingUnavailable {
+                    residency_id,
+                    sector,
+                    local: binding.local,
+                };
+                despawn_instance(self.world, &replacement);
+                self.cleanup_staged_reloads(&staged);
+                return Err(error);
+            }
+
+            let new_root = replacement.root.expect("replacement root was validated");
+            let Some(mut new_instance) = self.world.get_mut::<SceneInstance>(new_root) else {
+                despawn_instance(self.world, &replacement);
+                self.cleanup_staged_reloads(&staged);
+                return Err(SceneEcsHostError::InvalidReloadReplacement(sector));
+            };
+            new_instance.overrides = previous_instance.overrides.clone();
+            new_instance.persistent = previous_instance.persistent;
+            new_instance.tier = previous_instance.tier;
+            protected_entities.extend(replacement_entities);
+            staged.push((sector, previous, replacement, ()));
+        }
+
+        {
+            let ownership = self.ownership_mut();
+            for (sector, previous, replacement, _) in &staged {
+                ownership.cells.insert(*sector, replacement.clone());
+                ownership.retired_cells.push((*sector, previous.clone()));
+            }
+        }
+        self.retry_retired_cells();
+        Ok(())
+    }
+
+    /// Stages, replays durable cell state, and atomically publishes a group of
+    /// replacements against one authoritative persistence snapshot.
+    pub fn reload_cells_atomic_with_persistence(
+        &mut self,
+        sectors: &[SectorId],
+        log: &AppendOnlyLog,
+    ) -> Result<(), SceneEcsHostError<P::Error>> {
+        let mut sectors = sectors.to_vec();
+        sectors.sort_unstable();
+        if sectors.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(SceneEcsHostError::DuplicateReloadSector);
+        }
+        if let Some(&sector) = sectors
+            .iter()
+            .find(|sector| !self.ownership().cells.contains_key(sector))
+        {
+            return Err(SceneEcsHostError::CellNotLoaded(sector));
+        }
+        if sectors.is_empty() {
+            return Ok(());
+        }
+        let world_state = Timeline::replay(&Snapshot::new(0, WorldState::new()), log)
+            .map_err(SceneEcsHostError::PersistenceReplay)?;
+        let mut persistence = Vec::with_capacity(sectors.len());
+        for &sector in &sectors {
+            let objects = if let Some(objects) = self.ownership().persistence_objects.get(&sector) {
+                objects.clone()
+            } else {
+                self.provider
+                    .persistence_objects(sector)
+                    .map_err(SceneEcsHostError::Provider)?
+            };
+            let states = objects
+                .iter()
+                .map(|&object| CellPersistenceState {
+                    object,
+                    state: world_state.object(object).cloned().unwrap_or_default(),
+                })
+                .collect::<Vec<_>>();
+            persistence.push((sector, objects, states));
+        }
+
+        let mut staged: Vec<(SectorId, SceneSpawn, SceneSpawn, Vec<WorldPersistentId>)> =
+            Vec::with_capacity(sectors.len());
+        let mut protected_entities: BTreeSet<_> = self
+            .ownership()
+            .cells
+            .values()
+            .flat_map(|spawn| spawn.remap().entities().map(|(_, entity)| entity))
+            .collect();
+        for (sector, objects, states) in persistence {
+            let previous = self.ownership().cells[&sector].clone();
+            let Some(old_root) = previous.root else {
+                self.cleanup_staged_reloads(&staged);
+                return Err(SceneEcsHostError::InvalidReloadReplacement(sector));
+            };
+            let Some(previous_instance) = self.world.get::<SceneInstance>(old_root).cloned() else {
+                self.cleanup_staged_reloads(&staged);
+                return Err(SceneEcsHostError::SceneNotAttached(sector));
+            };
+            let replacement = match self.provider.stage_cell_reload(
+                self.world,
+                sector,
+                &previous,
+                &previous_instance,
+            ) {
+                Ok(replacement) => replacement,
+                Err(error) => {
+                    self.cleanup_staged_reloads(&staged);
+                    return Err(SceneEcsHostError::Provider(error));
+                }
+            };
+            let replacement_entities: Vec<_> = replacement
+                .remap()
+                .entities()
+                .map(|(_, entity)| entity)
+                .collect();
+            if replacement_entities
+                .iter()
+                .any(|entity| protected_entities.contains(entity))
+            {
+                self.cleanup_staged_reloads(&staged);
+                return Err(SceneEcsHostError::AliasedReloadReplacement(sector));
+            }
+            let valid = replacement.root.is_some_and(|root| {
+                replacement.resolve(LocalEntityId::new(0)) == Some(root)
+                    && self.world.get::<SceneInstance>(root).is_some()
+                    && self.world.entities().contains(root)
+            }) && replacement_entities.iter().all(|entity| {
+                self.world.entities().contains(*entity)
+                    && self
+                        .world
+                        .entities()
+                        .location(*entity)
+                        .is_some_and(|location| !location.is_empty())
+            });
+            if !valid {
+                despawn_instance(self.world, &replacement);
+                self.cleanup_staged_reloads(&staged);
+                return Err(SceneEcsHostError::InvalidReloadReplacement(sector));
+            }
+            if let Some((&residency_id, binding)) =
+                self.ownership().bindings.iter().find(|(_, binding)| {
+                    binding.sector == sector && replacement.resolve(binding.local).is_none()
+                })
+            {
+                let error = SceneEcsHostError::ReloadBindingUnavailable {
+                    residency_id,
+                    sector,
+                    local: binding.local,
+                };
+                despawn_instance(self.world, &replacement);
+                self.cleanup_staged_reloads(&staged);
+                return Err(error);
+            }
+            if let Err(error) = self
+                .provider
+                .replay_cell_persistence(self.world, sector, &states)
+            {
+                despawn_instance(self.world, &replacement);
+                self.cleanup_staged_reloads(&staged);
+                return Err(SceneEcsHostError::Provider(error));
+            }
+            let new_root = replacement.root.expect("replacement root was validated");
+            let Some(mut instance) = self.world.get_mut::<SceneInstance>(new_root) else {
+                despawn_instance(self.world, &replacement);
+                self.cleanup_staged_reloads(&staged);
+                return Err(SceneEcsHostError::InvalidReloadReplacement(sector));
+            };
+            instance.overrides = previous_instance.overrides.clone();
+            instance.persistent = previous_instance.persistent;
+            instance.tier = previous_instance.tier;
+            protected_entities.extend(replacement_entities);
+            staged.push((sector, previous, replacement, objects));
+        }
+
+        {
+            let ownership = self.ownership_mut();
+            for (sector, previous, replacement, objects) in &staged {
+                ownership.cells.insert(*sector, replacement.clone());
+                ownership
+                    .persistence_objects
+                    .insert(*sector, objects.clone());
+                ownership.retired_cells.push((*sector, previous.clone()));
+            }
+        }
+        self.retry_retired_cells();
+        Ok(())
+    }
+
+    fn cleanup_staged_reloads<T>(&mut self, staged: &[(SectorId, SceneSpawn, SceneSpawn, T)]) {
+        for (_, _, replacement, _) in staged.iter().rev() {
+            despawn_instance(self.world, replacement);
+        }
+    }
+
+    fn reload_cell_with_state(
+        &mut self,
+        sector: SectorId,
+        states: &[CellPersistenceState],
+        persistence_objects: Option<Vec<WorldPersistentId>>,
+    ) -> Result<(), SceneEcsHostError<P::Error>> {
+        let previous = self
+            .ownership()
+            .cells
+            .get(&sector)
+            .cloned()
+            .ok_or(SceneEcsHostError::CellNotLoaded(sector))?;
+        let old_root = previous
+            .root
+            .ok_or(SceneEcsHostError::InvalidReloadReplacement(sector))?;
+        let previous_instance = self
+            .world
+            .get::<SceneInstance>(old_root)
+            .cloned()
+            .ok_or(SceneEcsHostError::SceneNotAttached(sector))?;
+        let replacement = self
+            .provider
+            .stage_cell_reload(self.world, sector, &previous, &previous_instance)
+            .map_err(SceneEcsHostError::Provider)?;
+        let previous_entities: BTreeSet<_> = previous
+            .remap()
+            .entities()
+            .map(|(_, entity)| entity)
+            .collect();
+        let aliases_previous = replacement
+            .remap()
+            .entities()
+            .any(|(_, candidate)| previous_entities.contains(&candidate));
+        if aliases_previous {
+            // Do not run teardown on an aliased token: that could destroy part
+            // or all of the still-authoritative old scene. The provider owns
+            // cleanup for a contract-violating staging result.
+            return Err(SceneEcsHostError::AliasedReloadReplacement(sector));
+        }
+        let replacement_valid = replacement.root.is_some_and(|root| {
+            replacement.resolve(LocalEntityId::new(0)) == Some(root)
+                && self.world.get::<SceneInstance>(root).is_some()
+                && self.world.entities().contains(root)
+        }) && replacement.remap().entities().all(|(_, entity)| {
+            self.world.entities().contains(entity)
+                && self
+                    .world
+                    .entities()
+                    .location(entity)
+                    .is_some_and(|location| !location.is_empty())
+        });
+        if !replacement_valid {
+            despawn_instance(self.world, &replacement);
+            return Err(SceneEcsHostError::InvalidReloadReplacement(sector));
+        }
+        if let Some((&residency_id, binding)) =
+            self.ownership().bindings.iter().find(|(_, binding)| {
+                binding.sector == sector && replacement.resolve(binding.local).is_none()
+            })
+        {
+            let error = SceneEcsHostError::ReloadBindingUnavailable {
+                residency_id,
+                sector,
+                local: binding.local,
+            };
+            despawn_instance(self.world, &replacement);
+            return Err(error);
+        }
+
+        // Only invoke provider replay after proving the staged token is valid
+        // and disjoint from the live scene. The callback can then target the
+        // provider's staged entity map without risking writes to old entities.
+        if let Err(error) = self
+            .provider
+            .replay_cell_persistence(self.world, sector, states)
+        {
+            despawn_instance(self.world, &replacement);
+            return Err(SceneEcsHostError::Provider(error));
+        }
+
+        // Template replacement is allowed to rebuild the anchor, but instance
+        // state belongs to the live instance and must survive independently of
+        // provider policy. The provider may already have replayed typed payload
+        // changes; the host now reinstates the authoritative sparse delta and
+        // stable identity on the staged anchor before publishing it.
+        let new_root = replacement.root.expect("replacement root was validated");
+        let Some(mut new_instance) = self.world.get_mut::<SceneInstance>(new_root) else {
+            despawn_instance(self.world, &replacement);
+            return Err(SceneEcsHostError::InvalidReloadReplacement(sector));
+        };
+        new_instance.overrides = previous_instance.overrides.clone();
+        new_instance.persistent = previous_instance.persistent;
+        new_instance.tier = previous_instance.tier;
+        let ownership = self.ownership_mut();
+        ownership.cells.insert(sector, replacement);
+        ownership.retired_cells.push((sector, previous));
+        if let Some(objects) = persistence_objects {
+            ownership.persistence_objects.insert(sector, objects);
+        }
+        self.retry_retired_cells();
+        Ok(())
+    }
+
     fn load_cell_with_persistence(
         &mut self,
         sector: SectorId,
         log: &AppendOnlyLog,
     ) -> Result<(), SceneEcsHostError<P::Error>> {
         if self.loaded_cell(sector).is_some() {
-            return Err(SceneEcsHostError::CellAlreadyLoaded(sector));
+            let mut objects = self
+                .ownership()
+                .persistence_objects
+                .get(&sector)
+                .cloned()
+                .unwrap_or_default();
+            for object in self
+                .provider
+                .persistence_objects(sector)
+                .map_err(SceneEcsHostError::Provider)?
+            {
+                if !objects.contains(&object) {
+                    objects.push(object);
+                }
+            }
+            let world_state = Timeline::replay(&Snapshot::new(0, WorldState::new()), log)
+                .map_err(SceneEcsHostError::PersistenceReplay)?;
+            let states: Vec<_> = objects
+                .iter()
+                .map(|&object| CellPersistenceState {
+                    object,
+                    state: world_state.object(object).cloned().unwrap_or_default(),
+                })
+                .collect();
+            return self.reload_cell_with_state(sector, &states, Some(objects));
         }
         let mut objects = self
             .ownership()
@@ -391,6 +869,33 @@ impl<'world, P: SceneEcsProvider> SceneEcsHost<'world, P> {
         self.destroy_cell(sector, &spawn);
         Ok(())
     }
+
+    fn unload_cell_with_journal(
+        &mut self,
+        sector: SectorId,
+        journal: &mut FileJournal,
+    ) -> Result<(), SceneEcsHostError<P::Error>> {
+        let Some(spawn) = self.ownership().cells.get(&sector).cloned() else {
+            return Err(SceneEcsHostError::CellNotLoaded(sector));
+        };
+        let transactions = self
+            .provider
+            .capture_cell_persistence(self.world, sector, journal.cursor().next_sequence())
+            .map_err(SceneEcsHostError::Provider)?;
+        journal
+            .append_batch(&transactions)
+            .map_err(|error| SceneEcsHostError::DurableAppend(error.to_string()))?;
+        let ownership = self.ownership_mut();
+        let objects = ownership.persistence_objects.entry(sector).or_default();
+        for transaction in &transactions {
+            let object = transaction.object();
+            if !objects.contains(&object) {
+                objects.push(object);
+            }
+        }
+        self.destroy_cell(sector, &spawn);
+        Ok(())
+    }
 }
 
 impl<P: SceneEcsProvider> crate::SceneHost for SceneEcsHost<'_, P> {
@@ -439,9 +944,10 @@ mod tests {
     use alloc::vec::Vec;
     use prism_asset::StableGuid;
     use prism_ecs::component::Component;
+    use prism_reflect::Reflect;
     use prism_scene::{
-        spawn_typed_plan, ArchetypeGroup, ArchetypeSignature, InstantiationPlan, ResidencyTier,
-        TypedSpawnPlan,
+        replay_overrides, spawn_typed_plan, ArchetypeGroup, ArchetypeSignature, InstantiationPlan,
+        ResidencyTier, TypedSpawnPlan,
     };
     use prism_world_persist::{
         ActorId, FieldId, LogicalClock, OverrideDelta, OverrideValue, TransactionId,
@@ -452,11 +958,20 @@ mod tests {
 
     impl Component for Marker {}
 
+    #[derive(Clone, Debug, Reflect, PartialEq)]
+    pub(super) struct ReloadSettings {
+        pub(super) value: u64,
+    }
+
+    impl Component for ReloadSettings {}
+
     #[derive(Default)]
     pub(super) struct Provider {
         pub(super) events: Vec<(u8, u64, Entity)>,
         pub(super) fail_dematerialize: bool,
         pub(super) fail_replay: bool,
+        pub(super) stage_attempts: usize,
+        pub(super) fail_stage_on: Option<usize>,
         pub(super) persistent_object: Option<WorldPersistentId>,
         pub(super) cell_entity: Option<Entity>,
     }
@@ -484,7 +999,10 @@ mod tests {
             let spawn = spawn_typed_plan(
                 world,
                 &plan,
-                TypedSpawnPlan::new().with_bundle(LocalEntityId::new(0), Marker(7)),
+                TypedSpawnPlan::new().with_bundle(
+                    LocalEntityId::new(0),
+                    (Marker(7), ReloadSettings { value: 7 }),
+                ),
             )
             .map_err(|_| ())?;
             spawn
@@ -494,6 +1012,57 @@ mod tests {
                     ResidencyTier::Streamed,
                 )
                 .map_err(|_| ())?;
+            self.cell_entity = spawn.resolve(LocalEntityId::new(0));
+            Ok(spawn)
+        }
+
+        fn stage_cell_reload(
+            &mut self,
+            world: &mut World,
+            sector: SectorId,
+            _previous: &SceneSpawn,
+            previous_instance: &SceneInstance,
+        ) -> Result<SceneSpawn, Self::Error> {
+            self.stage_attempts += 1;
+            if self.fail_stage_on == Some(self.stage_attempts) {
+                return Err(());
+            }
+            world.register_reflect_component::<ReloadSettings>();
+            let plan = InstantiationPlan {
+                entity_count: 1,
+                groups: vec![ArchetypeGroup::new(
+                    ArchetypeSignature::default(),
+                    vec![LocalEntityId::new(0)].into_boxed_slice(),
+                    Box::new([]),
+                )]
+                .into_boxed_slice(),
+                entity_valued_fields: Box::new([]),
+                hierarchy: Box::new([]),
+                reserved_local_base: LocalEntityId::RESERVED_BASE,
+            };
+            let spawn = spawn_typed_plan(
+                world,
+                &plan,
+                TypedSpawnPlan::new().with_bundle(
+                    LocalEntityId::new(0),
+                    (Marker(70), ReloadSettings { value: 70 }),
+                ),
+            )
+            .map_err(|_| ())?;
+            spawn
+                .attach_instance(
+                    world,
+                    StableGuid::from_u128(sector.morton_hint() as u128 + 100),
+                    ResidencyTier::Streamed,
+                )
+                .map_err(|_| ())?;
+            if let Some(overrides) = previous_instance.overrides() {
+                if let Err(error) = replay_overrides(world, &spawn, overrides) {
+                    despawn_instance(world, &spawn);
+                    let _ = error;
+                    return Err(());
+                }
+            }
             self.cell_entity = spawn.resolve(LocalEntityId::new(0));
             Ok(spawn)
         }
