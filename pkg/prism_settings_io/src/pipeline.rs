@@ -517,6 +517,7 @@ impl From<TransactionError> for PipelineError {
 
 /// A fully prepared candidate transaction. The object is retained while a
 /// preview waits for confirmation.
+#[derive(Clone)]
 pub struct SettingsTransaction {
     tx_id: String,
     journal_path: PathBuf,

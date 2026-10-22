@@ -6,7 +6,11 @@
 
 #![cfg(feature = "settings-io")]
 
-use std::sync::{Arc, Mutex, TryLockError};
+use std::sync::{
+    mpsc::{self, Receiver, Sender, SyncSender, TryRecvError},
+    Arc, Mutex,
+};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use prism_ecs::resource::Resource;
@@ -32,6 +36,11 @@ pub enum SettingsTransactionStatus {
         tx_id: String,
         /// Monotonic confirmation deadline.
         deadline: Instant,
+    },
+    /// An expired Preview is being rolled back off the frame thread.
+    PreviewRollingBack {
+        /// Stable transaction identity.
+        tx_id: String,
     },
     /// A durable or runtime operation could not be proven complete.
     RecoveryRequired {
@@ -112,6 +121,41 @@ struct PendingPreview {
     deadline: Instant,
 }
 
+struct ExpiryWorker {
+    events: Mutex<Receiver<ExpiryWorkerEvent>>,
+    result: Mutex<Receiver<Result<PipelineOutcome, PipelineError>>>,
+}
+
+enum ExpiryWorkerEvent {
+    RestoreBefore {
+        acknowledge: SyncSender<Result<(), String>>,
+    },
+}
+
+struct DeferredSnapshotRestore {
+    events: Sender<ExpiryWorkerEvent>,
+}
+
+impl prism_settings_io::SnapshotController for DeferredSnapshotRestore {
+    fn install_snapshot(&mut self, _snapshot: prism_settings::Snapshot) -> Result<(), String> {
+        Err("background Preview rollback cannot install snapshots".to_owned())
+    }
+
+    fn restore_generation(&mut self, _generation: u64, _hash: u64) -> Result<(), String> {
+        Err("background Preview rollback cannot restore generations".to_owned())
+    }
+
+    fn restore_before(&mut self, _snapshot: &prism_settings::Snapshot) -> Result<(), String> {
+        let (acknowledge, acknowledged) = mpsc::sync_channel(1);
+        self.events
+            .send(ExpiryWorkerEvent::RestoreBefore { acknowledge })
+            .map_err(|_| "App dropped the Preview rollback restore request".to_owned())?;
+        acknowledged
+            .recv()
+            .map_err(|_| "App dropped the Preview rollback acknowledgement".to_owned())?
+    }
+}
+
 /// ECS resource owning the lifecycle state and at most one pending preview.
 ///
 /// Runtime, persistence, and appliers are deliberately borrowed per operation;
@@ -120,12 +164,13 @@ pub struct SettingsTransactionManager {
     status: SettingsTransactionStatus,
     pending: Option<PendingPreview>,
     expiry_error: Option<String>,
+    expiry_worker: Option<ExpiryWorker>,
 }
 
 impl Resource for SettingsTransactionManager {}
 
 struct SettingsTransactionServicesInner {
-    persistence: Box<dyn SettingsPersistence + Send>,
+    _persistence: Box<dyn SettingsPersistence + Send>,
     appliers: Vec<Box<dyn SettingsApplier + Send>>,
 }
 
@@ -150,33 +195,36 @@ impl SettingsTransactionServices {
     ) -> Self {
         Self {
             inner: Arc::new(Mutex::new(SettingsTransactionServicesInner {
-                persistence: Box::new(persistence),
+                _persistence: Box::new(persistence),
                 appliers,
             })),
         }
     }
 
-    /// Runs a lifecycle operation only when the service lock is immediately
-    /// available. Frame-boundary systems use this to avoid waiting behind a
-    /// host operation that is already performing synchronous I/O or effects.
-    fn try_with_mut<R>(
-        &self,
-        f: impl FnOnce(&mut dyn SettingsPersistence, &mut [&mut dyn SettingsApplier]) -> R,
-    ) -> Option<R> {
-        let mut inner = match self.inner.try_lock() {
-            Ok(inner) => inner,
-            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
-            Err(TryLockError::WouldBlock) => return None,
-        };
-        let SettingsTransactionServicesInner {
-            persistence,
-            appliers,
-        } = &mut *inner;
-        let mut applier_refs = appliers
-            .iter_mut()
-            .map(|applier| applier.as_mut() as &mut dyn SettingsApplier)
-            .collect::<Vec<_>>();
-        Some(f(persistence.as_mut(), &mut applier_refs))
+    fn spawn_preview_rollback(&self, transaction: IoTransaction) -> Result<ExpiryWorker, String> {
+        let services = Arc::clone(&self.inner);
+        let (event_tx, event_rx) = mpsc::channel();
+        let (result_tx, result_rx) = mpsc::channel();
+        thread::Builder::new()
+            .name("prism-settings-preview-rollback".to_owned())
+            .spawn(move || {
+                let mut inner = services
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let SettingsTransactionServicesInner { appliers, .. } = &mut *inner;
+                let mut applier_refs = appliers
+                    .iter_mut()
+                    .map(|applier| applier.as_mut() as &mut dyn SettingsApplier)
+                    .collect::<Vec<_>>();
+                let mut snapshots = DeferredSnapshotRestore { events: event_tx };
+                let result = transaction.rollback_preview(&mut snapshots, &mut applier_refs);
+                let _ = result_tx.send(result);
+            })
+            .map_err(|error| format!("failed to start Preview rollback worker: {error}"))?;
+        Ok(ExpiryWorker {
+            events: Mutex::new(event_rx),
+            result: Mutex::new(result_rx),
+        })
     }
 }
 
@@ -193,6 +241,7 @@ impl SettingsTransactionManager {
             status: SettingsTransactionStatus::Idle,
             pending: None,
             expiry_error: None,
+            expiry_worker: None,
         }
     }
 
@@ -219,6 +268,97 @@ impl SettingsTransactionManager {
             self.status,
             SettingsTransactionStatus::PreviewPending { deadline, .. } if now >= deadline
         )
+    }
+
+    fn schedule_expiry(&mut self, services: &SettingsTransactionServices) -> Result<(), String> {
+        let Some(pending) = self.pending.as_ref() else {
+            return Err("expired Preview has no retained transaction".to_owned());
+        };
+        if self.expiry_worker.is_some() {
+            return Ok(());
+        }
+        let tx_id = pending.tx_id.clone();
+        let worker = services.spawn_preview_rollback(pending.transaction.clone())?;
+        self.expiry_worker = Some(worker);
+        self.status = SettingsTransactionStatus::PreviewRollingBack { tx_id };
+        self.expiry_error = None;
+        Ok(())
+    }
+
+    /// Polls the off-thread rollback without waiting, restoring the App-owned
+    /// runtime only at the worker's explicit pre-finalization handshake.
+    fn poll_expiry_worker(&mut self, runtime: &mut SettingsRuntime) {
+        let Some(worker) = self.expiry_worker.as_ref() else {
+            return;
+        };
+        match worker
+            .events
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .try_recv()
+        {
+            Ok(ExpiryWorkerEvent::RestoreBefore { acknowledge }) => {
+                let restored = self
+                    .pending
+                    .as_ref()
+                    .ok_or_else(|| "Preview rollback checkpoint was lost".to_owned())
+                    .and_then(|pending| {
+                        runtime
+                            .restore_checkpoint(pending.checkpoint.clone())
+                            .map_err(|errors| format!("Preview runtime restore failed: {errors:?}"))
+                    });
+                if let Err(error) = &restored {
+                    self.expiry_error = Some(error.clone());
+                }
+                let _ = acknowledge.send(restored);
+            }
+            Err(TryRecvError::Empty | TryRecvError::Disconnected) => {}
+        }
+
+        let completion = match worker
+            .result
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .try_recv()
+        {
+            Ok(result) => Some(result),
+            Err(TryRecvError::Empty) => None,
+            Err(TryRecvError::Disconnected) => Some(Err(PipelineError::InvalidState(
+                "Preview rollback worker terminated without a result".to_owned(),
+            ))),
+        };
+        let Some(completion) = completion else {
+            return;
+        };
+        let tx_id = self
+            .pending
+            .as_ref()
+            .map(|pending| pending.tx_id.clone())
+            .unwrap_or_else(|| "unknown".to_owned());
+        self.expiry_worker = None;
+        match completion {
+            Ok(PipelineOutcome::RolledBack) => {
+                self.pending = None;
+                self.status = SettingsTransactionStatus::Idle;
+                self.expiry_error = None;
+            }
+            Ok(outcome) => {
+                let reason = format!("automatic Preview rollback returned {outcome:?}");
+                self.status = SettingsTransactionStatus::RecoveryRequired {
+                    tx_id,
+                    reason: reason.clone(),
+                };
+                self.expiry_error = Some(reason);
+            }
+            Err(error) => {
+                let reason = error.to_string();
+                self.status = SettingsTransactionStatus::RecoveryRequired {
+                    tx_id,
+                    reason: reason.clone(),
+                };
+                self.expiry_error = Some(reason);
+            }
+        }
     }
 
     /// Executes a transaction. A preview awaiting confirmation is retained
@@ -350,6 +490,12 @@ impl SettingsTransactionManager {
     }
 
     fn validate_id(&self, tx_id: &str) -> Result<(), SettingsTransactionManagerError> {
+        if matches!(
+            self.status,
+            SettingsTransactionStatus::PreviewRollingBack { .. }
+        ) {
+            return Err(SettingsTransactionManagerError::Busy(self.status.clone()));
+        }
         let Some(pending) = self.pending.as_ref() else {
             return Err(SettingsTransactionManagerError::NoPendingPreview);
         };
@@ -493,6 +639,7 @@ pub fn expire_settings_transaction_system(
     services: Option<Res<SettingsTransactionServices>>,
 ) {
     let now = Instant::now();
+    manager.poll_expiry_worker(&mut runtime);
     if !manager.is_expired(now) {
         return;
     }
@@ -501,22 +648,9 @@ pub fn expire_settings_transaction_system(
             Some("expired settings preview is waiting for SettingsTransactionServices".to_owned());
         return;
     };
-    let Some(()) = services.try_with_mut(|persistence, appliers| {
-        match manager.expire(now, &mut runtime, persistence, appliers) {
-            Ok(Some(PipelineOutcome::RolledBack)) => manager.expiry_error = None,
-            Ok(Some(outcome)) => {
-                manager.expiry_error = Some(format!(
-                    "automatic settings preview expiry returned unexpected outcome: {outcome:?}"
-                ));
-            }
-            Ok(None) => manager.expiry_error = None,
-            Err(error) => manager.expiry_error = Some(error.to_string()),
-        }
-    }) else {
-        manager.expiry_error =
-            Some("expired settings preview is waiting for transaction services".to_owned());
-        return;
-    };
+    if let Err(error) = manager.schedule_expiry(&services) {
+        manager.expiry_error = Some(error);
+    }
 }
 
 #[cfg(test)]
@@ -562,17 +696,6 @@ mod tests {
     }
 
     struct NoopPersistence;
-
-    #[test]
-    fn frame_service_try_lock_never_waits_for_an_active_operation() {
-        let services = SettingsTransactionServices::new(NoopPersistence, Vec::new());
-        let guard = services.inner.lock().unwrap();
-        assert!(services
-            .try_with_mut(|_, _| panic!("contended callback must not run"))
-            .is_none());
-        drop(guard);
-        assert!(services.try_with_mut(|_, _| ()).is_some());
-    }
 
     #[test]
     fn frame_expiry_retries_after_transaction_services_lock_contention() {
@@ -621,21 +744,14 @@ mod tests {
         let manager = app.world().resource::<SettingsTransactionManager>();
         assert!(matches!(
             manager.status(),
-            SettingsTransactionStatus::PreviewPending { .. }
+            SettingsTransactionStatus::PreviewRollingBack { .. }
         ));
-        assert!(manager
-            .expiry_error()
-            .is_some_and(|error| error.contains("waiting for transaction services")));
 
         release_tx.send(()).unwrap();
         holder.join().unwrap();
-        app.update();
-        assert_eq!(
-            app.world()
-                .resource::<SettingsTransactionManager>()
-                .status(),
-            &SettingsTransactionStatus::Idle
-        );
+        run_until(&mut app, |manager| {
+            matches!(manager.status(), SettingsTransactionStatus::Idle)
+        });
     }
 
     impl SettingsPersistence for NoopPersistence {
@@ -792,8 +908,47 @@ mod tests {
         Vec::new()
     }
 
+    fn run_until(app: &mut App, predicate: impl Fn(&SettingsTransactionManager) -> bool) {
+        for _ in 0..10_000 {
+            app.update();
+            if predicate(app.world().resource::<SettingsTransactionManager>()) {
+                return;
+            }
+            thread::yield_now();
+        }
+        panic!("settings transaction did not reach the expected state");
+    }
+
     struct CompensationFailureApplier {
         compensations: Arc<AtomicUsize>,
+    }
+
+    struct BlockingCompensationApplier {
+        entered: Sender<()>,
+        release: Arc<Mutex<Receiver<()>>>,
+    }
+
+    impl SettingsApplier for BlockingCompensationApplier {
+        fn group(&self) -> &str {
+            "Display"
+        }
+        fn order(&self) -> i32 {
+            0
+        }
+        fn apply_op(&mut self, _op: &ApplyOp) -> OpOutcome {
+            OpOutcome::Applied {
+                effect_handle: Some("display-handle".to_owned()),
+                result_digest: 1,
+            }
+        }
+        fn probe(&self, _op: &ApplyOp) -> EffectState {
+            EffectState::Unknown
+        }
+        fn compensate(&mut self, _op: &ApplyOp) -> CompensateOutcome {
+            let _ = self.entered.send(());
+            self.release.lock().unwrap().recv().unwrap();
+            CompensateOutcome::Done { verified: true }
+        }
     }
 
     struct ApplyFailureApplier;
@@ -1263,14 +1418,9 @@ mod tests {
             NoopPersistence,
             Vec::new(),
         ));
-        app.update();
-
-        assert_eq!(
-            app.world()
-                .resource::<SettingsTransactionManager>()
-                .status(),
-            &SettingsTransactionStatus::Idle
-        );
+        run_until(&mut app, |manager| {
+            matches!(manager.status(), SettingsTransactionStatus::Idle)
+        });
     }
 
     #[test]
@@ -1319,8 +1469,19 @@ mod tests {
         ));
         app.update();
         let manager = app.world().resource::<SettingsTransactionManager>();
-        assert_eq!(manager.status(), &SettingsTransactionStatus::Idle);
-        assert_eq!(manager.expiry_error(), None);
+        assert!(matches!(
+            manager.status(),
+            SettingsTransactionStatus::PreviewRollingBack { .. }
+        ));
+        run_until(&mut app, |manager| {
+            matches!(manager.status(), SettingsTransactionStatus::Idle)
+        });
+        assert_eq!(
+            app.world()
+                .resource::<SettingsTransactionManager>()
+                .expiry_error(),
+            None
+        );
     }
 
     #[test]
@@ -1428,7 +1589,12 @@ mod tests {
             })],
         ));
 
-        app.update();
+        run_until(&mut app, |manager| {
+            matches!(
+                manager.status(),
+                SettingsTransactionStatus::RecoveryRequired { .. }
+            )
+        });
         assert!(matches!(
             app.world()
                 .resource::<SettingsTransactionManager>()
@@ -1453,5 +1619,78 @@ mod tests {
                 .status(),
             SettingsTransactionStatus::RecoveryRequired { tx_id: id, .. } if id == tx_id
         ));
+    }
+
+    #[test]
+    fn blocked_expiry_compensation_does_not_block_app_frame() {
+        let registry = registry();
+        let directory = TempDir::new();
+        let tx_id = "blocked-app-expiry";
+        let journal_path = directory.0.join(format!("{tx_id}.journal"));
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let release_rx = Arc::new(Mutex::new(release_rx));
+        let mut app = App::new();
+        app.install_settings_runtime(registry.clone(), Domain::Runtime)
+            .unwrap();
+        let mut manager = app
+            .world_mut()
+            .remove_resource::<SettingsTransactionManager>()
+            .unwrap();
+        let mut runtime = app
+            .world_mut()
+            .remove_resource::<SettingsRuntime>()
+            .unwrap();
+        let mut persistence = NoopPersistence;
+        let mut begin_applier = CountingApplier {
+            applied: Arc::new(AtomicUsize::new(0)),
+            compensated: Arc::new(AtomicUsize::new(0)),
+        };
+        let mut begin_appliers: Vec<&mut dyn SettingsApplier> = vec![&mut begin_applier];
+        manager
+            .begin(
+                tx_id,
+                transaction_with_plan(
+                    &registry,
+                    &directory,
+                    tx_id,
+                    0.75,
+                    reversible_display_plan(),
+                ),
+                Duration::ZERO,
+                &mut runtime,
+                &mut persistence,
+                &mut begin_appliers,
+            )
+            .unwrap();
+        app.insert_resource(manager);
+        app.insert_resource(runtime);
+        app.insert_resource(SettingsTransactionServices::new(
+            NoopPersistence,
+            vec![Box::new(BlockingCompensationApplier {
+                entered: entered_tx,
+                release: Arc::clone(&release_rx),
+            })],
+        ));
+
+        // This must return even though the rollback worker will block in compensate.
+        app.update();
+        entered_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("worker did not enter compensation");
+        assert!(matches!(
+            app.world()
+                .resource::<SettingsTransactionManager>()
+                .status(),
+            SettingsTransactionStatus::PreviewRollingBack { .. }
+        ));
+        release_tx.send(()).unwrap();
+        run_until(&mut app, |manager| {
+            matches!(manager.status(), SettingsTransactionStatus::Idle)
+        });
+
+        let journal = prism_settings_io::inspect_journal(&journal_path).unwrap();
+        let recovered = prism_settings_io::reconstruct_transaction(&journal.records).unwrap();
+        assert_eq!(recovered.ended, Some(TxOutcome::RolledBack));
     }
 }
