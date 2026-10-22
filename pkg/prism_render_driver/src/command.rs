@@ -22,6 +22,14 @@ use core::ops::Range;
 /// [`RenderCommand::MultiDrawIndirect::stride`].
 pub const DRAW_INDEXED_INDIRECT_ARGS_SIZE: u32 = 20;
 
+/// The byte size of the WebGPU-compatible non-indexed indirect draw record
+/// (`vertex_count`, `instance_count`, `first_vertex`, `first_instance`).
+pub const DRAW_INDIRECT_ARGS_SIZE: u32 = 16;
+
+/// The byte size of the WebGPU-compatible indirect dispatch record
+/// (`workgroup_count_x`, `workgroup_count_y`, `workgroup_count_z`).
+pub const DISPATCH_INDIRECT_ARGS_SIZE: u32 = 12;
+
 /// What to do with an attachment's existing contents at the start of a pass.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum LoadOp {
@@ -693,5 +701,11 @@ mod tests {
         // Five 32-bit fields: index_count, instance_count, first_index,
         // base_vertex, first_instance.
         assert_eq!(DRAW_INDEXED_INDIRECT_ARGS_SIZE, 5 * 4);
+    }
+
+    #[test]
+    fn packed_indirect_draw_and_dispatch_record_sizes_match_webgpu_abi() {
+        assert_eq!(DRAW_INDIRECT_ARGS_SIZE, 4 * 4);
+        assert_eq!(DISPATCH_INDIRECT_ARGS_SIZE, 3 * 4);
     }
 }
