@@ -9,7 +9,7 @@
 
 use alloc::boxed::Box;
 
-use prism_asset::StableGuid;
+use prism_asset::{Asset, AssetDependency, AssetTypeId, StableGuid};
 
 use crate::identity::{LocalEntityId, NameTable};
 use crate::overrides::{OverrideError, OverrideSet};
@@ -100,6 +100,20 @@ pub struct SceneTemplate {
     /// The dependency closure (nested sub-templates and referenced assets), by
     /// identity.
     pub deps: Box<[StableGuid]>,
+}
+
+impl Asset for SceneTemplate {
+    const TYPE_NAME: &'static str = "prism_scene::SceneTemplate";
+
+    /// Scene-template dependencies are persistent soft references. Loading a
+    /// template must not implicitly keep another runtime slot alive; the
+    /// scene-template cache resolves these GUIDs in its own namespace.
+    fn visit_references(&self, visit: &mut dyn FnMut(AssetDependency)) {
+        let type_id = AssetTypeId::of::<Self>();
+        for &guid in self.deps.iter() {
+            visit(AssetDependency::Soft { guid, type_id });
+        }
+    }
 }
 
 impl SceneTemplate {

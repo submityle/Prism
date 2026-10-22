@@ -1,14 +1,276 @@
 //! Bounded loading of published scene templates through the runtime asset
 //! manifest and mounted container overlay.
 
+use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::sync::Arc;
+use alloc::vec;
+use alloc::vec::Vec;
 use core::fmt;
 
-use prism_asset::StableGuid;
+use prism_asset::{AssetEvent, AssetId, Assets, StableGuid};
 use prism_asset_container::{ManifestReadError, ManifestReader, OverlaySet, RuntimeManifest};
 use prism_scene::{
     decode_template, SceneTemplate, SchemaMigrationError, SchemaMigrationRegistry,
     TemplateCodecError, TemplateDecodeLimits, SCENE_TEMPLATE_KIND, SCENE_TEMPLATE_SCHEMA,
 };
+
+/// One scene-template identity invalidated by an asset event batch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SceneTemplateInvalidation {
+    /// The directly changed or removed template.
+    pub changed: StableGuid,
+    /// A cached transitive parent template whose dependency closure is stale.
+    /// Direct changes have dependent equal to changed.
+    pub dependent: StableGuid,
+    /// True when the dependent template remains available and can be reloaded.
+    pub reloadable: bool,
+}
+
+/// An asset event batch violated atomic event/snapshot pairing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SceneTemplateBatchError {
+    /// An added or modified asset has no snapshot in the batch.
+    MissingSnapshot(AssetId<SceneTemplate>),
+    /// The same generational asset id appears more than once in snapshots.
+    DuplicateSnapshot(AssetId<SceneTemplate>),
+    /// An added or modified slot contains an invalid scene-template snapshot.
+    InvalidSnapshot(AssetId<SceneTemplate>),
+}
+
+/// Shared runtime scene-template cache with deterministic reverse invalidation.
+#[derive(Clone, Default)]
+pub struct SceneTemplateCache {
+    templates: BTreeMap<StableGuid, Arc<SceneTemplate>>,
+    dependencies: BTreeMap<StableGuid, BTreeSet<StableGuid>>,
+    dependents: BTreeMap<StableGuid, BTreeSet<StableGuid>>,
+    asset_guids: BTreeMap<AssetId<SceneTemplate>, StableGuid>,
+    guid_assets: BTreeMap<StableGuid, BTreeSet<AssetId<SceneTemplate>>>,
+    retired_assets: BTreeSet<AssetId<SceneTemplate>>,
+}
+
+impl SceneTemplateCache {
+    /// Creates an empty cache.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Returns a cached template by stable identity.
+    #[must_use]
+    pub fn get(&self, guid: StableGuid) -> Option<&Arc<SceneTemplate>> {
+        self.templates.get(&guid)
+    }
+
+    /// Returns the number of currently cached templates.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.templates.len()
+    }
+
+    /// Whether this cache has no loaded templates.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.templates.is_empty()
+    }
+
+    /// Applies one atomic scene-asset event/snapshot batch.
+    /// Duplicate events collapse to one update, and generational asset ids
+    /// prevent stale events from mutating a reused slot's current template.
+    pub fn apply_asset_batch(
+        &mut self,
+        events: &[AssetEvent<SceneTemplate>],
+        snapshots: &[(AssetId<SceneTemplate>, SceneTemplate)],
+    ) -> Result<Vec<SceneTemplateInvalidation>, SceneTemplateBatchError> {
+        let mut snapshot_by_id = BTreeMap::new();
+        for (id, value) in snapshots {
+            if snapshot_by_id.insert(*id, value).is_some() {
+                return Err(SceneTemplateBatchError::DuplicateSnapshot(*id));
+            }
+        }
+        let mut additions = BTreeSet::new();
+        let mut updates = BTreeSet::new();
+        let mut removals = BTreeSet::new();
+        for event in events {
+            match event {
+                AssetEvent::Added { id } => {
+                    additions.insert(*id);
+                    updates.insert(*id);
+                    removals.remove(id);
+                    self.retired_assets.remove(id);
+                }
+                AssetEvent::Modified { id } => {
+                    updates.insert(*id);
+                    removals.remove(id);
+                }
+                AssetEvent::Removed { id } => {
+                    updates.remove(id);
+                    removals.insert(*id);
+                    self.retired_assets.insert(*id);
+                }
+                // Failed replacement loads preserve the cache's last-known-good
+                // value. Only a committed Removed event releases its identity.
+                AssetEvent::Failed { id, .. } => {
+                    additions.remove(id);
+                    updates.remove(id);
+                    removals.remove(id);
+                }
+                AssetEvent::Unused { .. } | AssetEvent::LoadedWithDependencies { .. } => {}
+            }
+        }
+
+        for id in &updates {
+            if !snapshot_by_id.contains_key(id) {
+                return Err(SceneTemplateBatchError::MissingSnapshot(*id));
+            }
+            let template = snapshot_by_id[id];
+            if template.guid == StableGuid::NIL || template.validate().is_err() {
+                return Err(SceneTemplateBatchError::InvalidSnapshot(*id));
+            }
+        }
+
+        let mut changed = BTreeMap::new();
+        for id in removals {
+            if let Some(guid) = self.remove_asset(id) {
+                changed.insert(guid, false);
+            }
+        }
+        for id in updates {
+            // Modified is meaningful only for a slot this cache already
+            // tracks. This prevents an old queued event from resurrecting a
+            // template after explicit cache removal or after slot reuse.
+            if !additions.contains(&id)
+                && !self.asset_guids.contains_key(&id)
+                && self.retired_assets.contains(&id)
+            {
+                continue;
+            }
+            let template = snapshot_by_id[&id];
+            if let Some(old_guid) = self.asset_guids.get(&id).copied() {
+                if old_guid != template.guid {
+                    if self.remove_asset(id).is_some() {
+                        changed.insert(old_guid, false);
+                    }
+                }
+            }
+            self.asset_guids.insert(id, template.guid);
+            self.guid_assets
+                .entry(template.guid)
+                .or_default()
+                .insert(id);
+            self.insert_template(Arc::new((*template).clone()));
+            changed.insert(template.guid, true);
+        }
+        Ok(self.propagate_invalidations(changed))
+    }
+
+    /// Atomically drains and applies the owning scene asset arena's events.
+    pub fn apply_assets(
+        &mut self,
+        assets: &mut Assets<SceneTemplate>,
+    ) -> Result<Vec<SceneTemplateInvalidation>, SceneTemplateBatchError> {
+        let (events, snapshots) = assets.drain_events_with_snapshots();
+        self.apply_asset_batch(&events, &snapshots)
+    }
+
+    /// Publishes a decoded template that did not originate from Assets.
+    pub fn insert(
+        &mut self,
+        template: SceneTemplate,
+    ) -> Result<Vec<SceneTemplateInvalidation>, SceneTemplateLoadError> {
+        template
+            .validate()
+            .map_err(|_| SceneTemplateLoadError::InvalidTemplate)?;
+        let guid = template.guid;
+        self.insert_template(Arc::new(template));
+        Ok(self.propagate_invalidations([(guid, true)].into_iter().collect()))
+    }
+
+    /// Removes a template and invalidates every cached transitive parent.
+    pub fn remove(&mut self, guid: StableGuid) -> Vec<SceneTemplateInvalidation> {
+        if let Some(ids) = self.guid_assets.remove(&guid) {
+            for id in ids {
+                self.asset_guids.remove(&id);
+                self.retired_assets.insert(id);
+            }
+        }
+        self.remove_guid(guid);
+        self.propagate_invalidations([(guid, false)].into_iter().collect())
+    }
+
+    fn insert_template(&mut self, template: Arc<SceneTemplate>) {
+        let guid = template.guid;
+        self.remove_edges(guid);
+        let deps: BTreeSet<_> = template.deps.iter().copied().collect();
+        for dependency in &deps {
+            self.dependents.entry(*dependency).or_default().insert(guid);
+        }
+        self.dependencies.insert(guid, deps);
+        self.templates.insert(guid, template);
+    }
+
+    fn remove_asset(&mut self, id: AssetId<SceneTemplate>) -> Option<StableGuid> {
+        let guid = self.asset_guids.remove(&id)?;
+        if let Some(owners) = self.guid_assets.get_mut(&guid) {
+            owners.remove(&id);
+            if owners.is_empty() {
+                self.guid_assets.remove(&guid);
+                self.remove_guid(guid);
+                return Some(guid);
+            }
+        }
+        None
+    }
+
+    fn remove_guid(&mut self, guid: StableGuid) {
+        self.templates.remove(&guid);
+        self.remove_edges(guid);
+    }
+
+    fn remove_edges(&mut self, guid: StableGuid) {
+        if let Some(deps) = self.dependencies.remove(&guid) {
+            for dependency in deps {
+                if let Some(parents) = self.dependents.get_mut(&dependency) {
+                    parents.remove(&guid);
+                    if parents.is_empty() {
+                        self.dependents.remove(&dependency);
+                    }
+                }
+            }
+        }
+    }
+
+    fn propagate_invalidations(
+        &self,
+        changed: BTreeMap<StableGuid, bool>,
+    ) -> Vec<SceneTemplateInvalidation> {
+        let mut output = Vec::new();
+        for (&guid, &reloadable) in &changed {
+            output.push(SceneTemplateInvalidation {
+                changed: guid,
+                dependent: guid,
+                reloadable,
+            });
+            let mut stack = vec![guid];
+            let mut seen = BTreeSet::from([guid]);
+            while let Some(current) = stack.pop() {
+                if let Some(parents) = self.dependents.get(&current) {
+                    for &parent in parents {
+                        if seen.insert(parent) {
+                            stack.push(parent);
+                            output.push(SceneTemplateInvalidation {
+                                changed: guid,
+                                dependent: parent,
+                                reloadable: self.templates.contains_key(&parent),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        output.sort_by_key(|entry| (entry.changed, entry.dependent));
+        output
+    }
+}
 
 /// Errors returned while resolving a published scene-template route.
 #[derive(Debug)]
@@ -59,6 +321,8 @@ pub enum SceneTemplateLoadError {
     /// The route dependency closure differs from the dependencies embedded in
     /// the validated scene template.
     DependencyMismatch,
+    /// A directly published runtime template failed structural validation.
+    InvalidTemplate,
 }
 
 impl fmt::Display for SceneTemplateLoadError {
@@ -96,6 +360,7 @@ impl fmt::Display for SceneTemplateLoadError {
             Self::DependencyMismatch => {
                 f.write_str("scene template dependencies disagree with runtime manifest routes")
             }
+            Self::InvalidTemplate => f.write_str("scene template failed runtime validation"),
         }
     }
 }
@@ -226,6 +491,7 @@ mod tests {
     use super::*;
     use alloc::vec;
     use alloc::vec::Vec;
+    use prism_asset::{AssetDependency, AssetTypeId, Assets};
     use prism_asset_container::{ContainerReader, ContainerWriter, ManifestMetadata, OverlaySet};
     use prism_scene::{
         encode_template, ArchetypeGroup, InstantiationPlan, ResidencyPlan, SceneTemplate,
@@ -281,6 +547,239 @@ mod tests {
             deps: deps.into_boxed_slice(),
             tiers: ResidencyPlan::new(),
         }
+    }
+
+    #[test]
+    fn scene_template_asset_reports_soft_guid_dependencies() {
+        let dependency = StableGuid::from_u128(0x7171);
+        let template = template(vec![dependency]);
+        let mut references = Vec::new();
+        prism_asset::Asset::visit_references(&template, &mut |reference| {
+            references.push(reference)
+        });
+        assert_eq!(
+            references,
+            vec![AssetDependency::Soft {
+                guid: dependency,
+                type_id: AssetTypeId::of::<SceneTemplate>(),
+            }]
+        );
+    }
+
+    #[test]
+    fn asset_event_batch_updates_cache_and_invalidates_transitive_parents() {
+        let leaf_guid = StableGuid::from_u128(0x101);
+        let middle_guid = StableGuid::from_u128(0x202);
+        let mut cache = SceneTemplateCache::new();
+        cache.insert(template(vec![middle_guid])).unwrap();
+        let root_guid = template(vec![middle_guid]).guid;
+        cache
+            .insert(SceneTemplate {
+                guid: middle_guid,
+                deps: vec![leaf_guid].into_boxed_slice(),
+                ..template(Vec::new())
+            })
+            .unwrap();
+        cache
+            .insert(SceneTemplate {
+                guid: leaf_guid,
+                ..template(Vec::new())
+            })
+            .unwrap();
+
+        let mut assets = Assets::new();
+        let handle = assets.insert(SceneTemplate {
+            guid: leaf_guid,
+            ..template(Vec::new())
+        });
+        let added = cache.apply_assets(&mut assets).unwrap();
+        assert!(added
+            .iter()
+            .any(|event| event.changed == leaf_guid && event.dependent == root_guid));
+        assert!(cache.get(leaf_guid).is_some());
+
+        assets.get_mut(handle.id()).unwrap().schema += 1;
+        let modified = cache.apply_assets(&mut assets).unwrap();
+        assert_eq!(modified.len(), 3);
+        assert!(modified
+            .iter()
+            .any(|event| event.changed == leaf_guid && event.dependent == middle_guid));
+        assert!(modified
+            .iter()
+            .any(|event| event.changed == leaf_guid && event.dependent == root_guid));
+
+        assert!(assets.remove(handle.id()).is_some());
+        let removed = cache.apply_assets(&mut assets).unwrap();
+        assert_eq!(cache.get(leaf_guid), None);
+        assert!(removed
+            .iter()
+            .any(|event| event.changed == leaf_guid && !event.reloadable));
+        assert!(cache.get(middle_guid).is_some());
+    }
+
+    #[test]
+    fn failed_asset_replacement_keeps_last_known_good_and_duplicate_guid_slots() {
+        let guid = StableGuid::from_u128(0x4141);
+        let template = SceneTemplate {
+            guid,
+            ..template(Vec::new())
+        };
+        let mut cache = SceneTemplateCache::new();
+        let mut assets = Assets::new();
+        let first = assets.insert(template.clone());
+        let second = assets.insert(template.clone());
+        cache.apply_assets(&mut assets).unwrap();
+        assert!(cache.get(guid).is_some());
+
+        let error = prism_asset::ErrorRegistry::new()
+            .record(prism_asset::AssetError::new("scene.prst", "reload failed"));
+        assert!(assets.fail(first.id(), error));
+        let invalidations = cache.apply_assets(&mut assets).unwrap();
+        assert!(invalidations.is_empty());
+        assert!(cache.get(guid).is_some());
+
+        assert!(assets.remove(first.id()).is_none());
+        let invalidations = cache.apply_assets(&mut assets).unwrap();
+        assert!(invalidations.is_empty());
+        assert!(cache.get(guid).is_some());
+        assert!(assets.contains(second.id()));
+    }
+
+    #[test]
+    fn explicit_remove_clears_slot_routes_and_missing_modified_snapshot_evicts_stale_data() {
+        let guid = StableGuid::from_u128(0x4242);
+        let mut cache = SceneTemplateCache::new();
+        let mut assets = Assets::new();
+        let handle = assets.insert(SceneTemplate {
+            guid,
+            ..template(Vec::new())
+        });
+        cache.apply_assets(&mut assets).unwrap();
+        assert!(cache.get(guid).is_some());
+
+        let invalidation = cache.remove(guid);
+        assert!(invalidation
+            .iter()
+            .any(|entry| entry.changed == guid && !entry.reloadable));
+        let event = AssetEvent::Modified { id: handle.id() };
+        let resurrected = cache
+            .apply_asset_batch(
+                &[event],
+                &[(
+                    handle.id(),
+                    SceneTemplate {
+                        guid,
+                        ..template(Vec::new())
+                    },
+                )],
+            )
+            .unwrap();
+        assert!(resurrected.is_empty());
+        assert!(cache.get(guid).is_none());
+
+        // A fresh Added event is an explicit re-publication.
+        cache
+            .apply_asset_batch(
+                &[AssetEvent::Added { id: handle.id() }],
+                &[(
+                    handle.id(),
+                    SceneTemplate {
+                        guid,
+                        ..template(Vec::new())
+                    },
+                )],
+            )
+            .unwrap();
+        assert!(cache.get(guid).is_some());
+        assert!(matches!(
+            cache.apply_asset_batch(&[AssetEvent::Modified { id: handle.id() }], &[]),
+            Err(SceneTemplateBatchError::MissingSnapshot(_))
+        ));
+        assert!(cache.get(guid).is_some());
+    }
+
+    #[test]
+    fn scene_template_cache_keeps_last_known_good_when_failure_follows_modified_event() {
+        let guid = StableGuid::from_u128(0x4243);
+        let mut assets = Assets::new();
+        let handle = assets.insert(SceneTemplate {
+            guid,
+            ..template(Vec::new())
+        });
+        let mut cache = SceneTemplateCache::new();
+        cache.apply_assets(&mut assets).unwrap();
+
+        assets.get_mut(handle.id()).unwrap().schema += 1;
+        let error = prism_asset::ErrorRegistry::new().record(prism_asset::AssetError::new(
+            "scene.prst",
+            "replacement failed",
+        ));
+        assert!(assets.fail(handle.id(), error));
+        assert!(cache.apply_assets(&mut assets).unwrap().is_empty());
+        assert_eq!(cache.get(guid).unwrap().schema, SCENE_TEMPLATE_SCHEMA);
+    }
+
+    #[test]
+    fn batch_rejects_missing_or_duplicate_event_snapshots_without_mutation() {
+        let guid = StableGuid::from_u128(0x4343);
+        let template = SceneTemplate {
+            guid,
+            ..template(Vec::new())
+        };
+        let mut cache = SceneTemplateCache::new();
+        let mut assets = Assets::new();
+        let handle = assets.insert(template.clone());
+        let events = assets.drain_events();
+        assert!(matches!(
+            cache.apply_asset_batch(&events, &[]),
+            Err(SceneTemplateBatchError::MissingSnapshot(_))
+        ));
+        assert!(cache.is_empty());
+
+        let snapshot = (handle.id(), template);
+        assert!(matches!(
+            cache.apply_asset_batch(&events, &[snapshot.clone(), snapshot]),
+            Err(SceneTemplateBatchError::DuplicateSnapshot(_))
+        ));
+        assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn batch_rejects_invalid_snapshot_before_committing_other_slots() {
+        let valid_guid = StableGuid::from_u128(0x4344);
+        let invalid_guid = StableGuid::from_u128(0x4345);
+        let mut cache = SceneTemplateCache::new();
+        let mut assets = Assets::new();
+        let valid = assets.insert(SceneTemplate {
+            guid: valid_guid,
+            ..template(Vec::new())
+        });
+        let invalid = assets.insert(SceneTemplate {
+            guid: invalid_guid,
+            ..template(Vec::new())
+        });
+        let events = assets.drain_events();
+        let mut invalid_snapshot = SceneTemplate {
+            guid: invalid_guid,
+            ..template(Vec::new())
+        };
+        invalid_snapshot.schema = 0;
+        let snapshots = [
+            (
+                valid.id(),
+                SceneTemplate {
+                    guid: valid_guid,
+                    ..template(Vec::new())
+                },
+            ),
+            (invalid.id(), invalid_snapshot),
+        ];
+
+        assert!(matches!(
+            cache.apply_asset_batch(&events, &snapshots),
+            Err(SceneTemplateBatchError::InvalidSnapshot(id)) if id == invalid.id()
+        ));
+        assert!(cache.is_empty(), "valid peer must not partially publish");
     }
 
     #[test]

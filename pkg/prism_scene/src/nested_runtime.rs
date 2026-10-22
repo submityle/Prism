@@ -1,8 +1,9 @@
 //! Bounded recursive runtime instantiation for typed nested scenes.
 //!
-//! This module deliberately accepts typed constructors rather than decoding opaque
-//! plan columns. It provides ownership and rollback for a nested scene tree while
-//! leaving bake/materializer integration to a later pipeline.
+//! This module deliberately accepts typed constructors rather than decoding
+//! opaque plan columns. It provides bounded nested-tree ownership, replacement,
+//! and rollback; callers that start from baked opaque columns must first use the
+//! scene materializer registry to produce typed constructors.
 
 use alloc::boxed::Box;
 use alloc::vec;
