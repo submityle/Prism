@@ -1588,12 +1588,12 @@ mod tests {
         assert!(backend.append(42, b"authoritative event").unwrap().inserted);
         backend.sync().unwrap();
         let bytes_before = std::fs::read(&path).unwrap();
-        assert_eq!(
+        assert!(matches!(
             backend.append(42, b"different event"),
             Err(FileEventLogError::Contract(
                 EventLogError::IdempotencyConflict { key: 42 }
             ))
-        );
+        ));
         assert_eq!(std::fs::read(&path).unwrap(), bytes_before);
         assert_eq!(backend.cursor(), EventLogCursor::new(1));
         drop(backend);
@@ -1608,10 +1608,12 @@ mod tests {
     fn replay_event_log_round_trips_typed_records_and_rejects_bounds() {
         let mut log = ReplayEventLog::new(MemoryEventLogBackend::new(1, 64), 64);
         log.append(11, record(4, b"payload")).unwrap();
-        assert_eq!(
+        assert!(matches!(
             log.append(11, record(9, b"different")),
-            Err(EventLogError::IdempotencyConflict { key: 11 })
-        );
+            Err(ReplayEventLogError::Backend(
+                EventLogError::IdempotencyConflict { key: 11 }
+            ))
+        ));
         let batch = log.replay(EventLogCursor::default(), 1).unwrap();
         assert_eq!(batch.records().len(), 1);
         assert_eq!(batch.records()[0].idempotency_key, 11);
