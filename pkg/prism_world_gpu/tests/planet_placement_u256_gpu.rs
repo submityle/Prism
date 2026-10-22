@@ -74,6 +74,7 @@ fn main() {
     store_u256(44u, u256_isqrt(a));
     let shifted = u256_shl(a, 84u);
     store_u256(52u, shifted.value); output_words[60] = select(0u, 1u, shifted.overflow);
+    store_u256(61u, u256_isqrt_scaled(a, 168u));
 }
 "#,
     );
@@ -119,7 +120,7 @@ fn u256_limb_arithmetic_matches_rust_reference_on_metal() {
         });
     let output_buffer = context.device().create_buffer(&wgpu::BufferDescriptor {
         label: Some("planet U256 arithmetic output"),
-        size: 61 * 4,
+        size: 69 * 4,
         usage: wgpu::BufferUsages::STORAGE
             | wgpu::BufferUsages::COPY_SRC
             | wgpu::BufferUsages::COPY_DST,
@@ -208,11 +209,11 @@ fn u256_limb_arithmetic_matches_rust_reference_on_metal() {
     }
     let readback = context.device().create_buffer(&wgpu::BufferDescriptor {
         label: Some("planet U256 arithmetic readback"),
-        size: 61 * 4,
+        size: 69 * 4,
         usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
         mapped_at_creation: false,
     });
-    encoder.copy_buffer_to_buffer(&output_buffer, 0, &readback, 0, 61 * 4);
+    encoder.copy_buffer_to_buffer(&output_buffer, 0, &readback, 0, 69 * 4);
     context.queue().submit(Some(encoder.finish()));
     context.wait();
     let output = read(&context, &readback);
@@ -240,4 +241,6 @@ fn u256_limb_arithmetic_matches_rust_reference_on_metal() {
         }
         Err(_) => assert_eq!(read_word(&output, 60), 1),
     }
+    let scaled_root = fixed_math::isqrt_scaled(a, 168).unwrap();
+    assert_eq!(read_u256(&output, 61), scaled_root);
 }

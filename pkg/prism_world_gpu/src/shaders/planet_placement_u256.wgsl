@@ -248,3 +248,39 @@ fn u256_isqrt(value: U256) -> U256 {
     }
     return root;
 }
+
+// Restoring square root of `value << shift` without materializing the shifted
+// radicand. `shift` must be even and the resulting root must fit U256. This is
+// used by Q84 cube-sphere normalization: Q < 2^126 and shift=168, so the
+// conceptual radicand is <2^294 while the root remains <2^147.
+fn u256_isqrt_scaled(value: U256, shift: u32) -> U256 {
+    let value_bits = u256_bit_length(value);
+    if (value_bits == 0u) { return u256_zero(); }
+    let total_bits = value_bits + shift;
+    let pair_count = (total_bits + 1u) / 2u;
+    var root = u256_zero();
+    var remainder = u256_zero();
+    for (var cursor = pair_count; cursor > 0u; cursor -= 1u) {
+        let pair_index = cursor - 1u;
+        let bit_low = pair_index * 2u;
+        var incoming = 0u;
+        if (bit_low >= shift) {
+            let source_low = bit_low - shift;
+            if (source_low < 256u) { incoming = u256_bit(value, source_low); }
+            if (source_low + 1u < 256u) { incoming = incoming | (u256_bit(value, source_low + 1u) << 1u); }
+        } else if (bit_low + 1u >= shift) {
+            let source = bit_low + 1u - shift;
+            if (source < 256u) { incoming = u256_bit(value, source) << 1u; }
+        }
+        remainder = u256_shl(remainder, 2u).value;
+        remainder.limb[0] = remainder.limb[0] | incoming;
+        root = u256_shl(root, 1u).value;
+        var trial = u256_shl(root, 1u).value;
+        trial.limb[0] = trial.limb[0] | 1u;
+        if (u256_cmp(remainder, trial) >= 0) {
+            remainder = u256_sub(remainder, trial).value;
+            root = u256_add(root, u256_from_u32(1u)).value;
+        }
+    }
+    return root;
+}

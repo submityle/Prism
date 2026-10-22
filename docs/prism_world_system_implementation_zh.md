@@ -468,3 +468,5 @@ ABI 闭环边界：现有 80-byte record 以 3 个 f32 word 承载位置，内�
 后续对 standalone WGSL U256 除法做了确定性循环上界优化：先定位为原语固定执行 256 位恢复循环，将实现改为按 numerator/denominator bit length 对齐减法，迭代恰为可能的商位数；Q84 方向投影商不超过约 85 位。Metal 首轮对拍捕获到跨 limb 右移进位方向写反，修复后 Apple M2/Metal U256 对拍与 reference suite 为 14/14 passed。该上界分析不是生产候选 shader benchmark，也未接入 placement；frame-local 精度、整数输出 ABI 与产品接线未改变。
 
 2026-10-22 对优化后的除法新增多 limb divisor/high-limb quotient GPU 向量：Apple M2/Metal 对拍及完整 reference suite 14/14 passed，补强了非单 limb 除数路径的实卡证据；仍不是行星生产候选路径或其吞吐基准。
+
+同日新增 `u256_isqrt_scaled(value, 168)`，在不物化超过 256 位的 `value << 168` 的前提下逐 radix-4 pair 恢复平方根；该原语用于下一步 Q84 方向归一化，Apple M2/Metal 对拍 Rust `isqrt_scaled` reference 通过，完整专项 14/14 passed。当前测试向量只覆盖该输入样本的缩放根；生产 cube-sphere 全配置方向 kernel 仍未建立，尚不能据此验收 placement 精度。

@@ -493,7 +493,7 @@ fn cell_center_direction_fixed(
 /// Restoring square root of `value << shift` without materializing the shifted
 /// radicand. The caller chooses an even `shift`; the running remainder and
 /// root fit U256 for the planetary direction bounds.
-fn isqrt_scaled(value: U256, shift: u32) -> Result<U256, MathError> {
+pub fn isqrt_scaled(value: U256, shift: u32) -> Result<U256, MathError> {
     if shift % 2 != 0 {
         return Err(MathError::InvalidInput);
     }
