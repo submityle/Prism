@@ -942,8 +942,29 @@ impl<I: Instance + 'static> WindowRenderTargets<I> {
                 pass.run_gi = false;
             }
         }
+        let empty_imports = crate::frame::FrameGraphTextureImports::default();
+        let imports = context
+            .as_deref()
+            .map(|context| context.texture_imports.clone())
+            .unwrap_or(empty_imports);
         let mut inputs = Vec::new();
-        if let Some(context) = context.as_deref() {
+        let needs_upscaler = context.as_deref().is_some_and(|context| {
+            context.cameras.iter().any(|camera| {
+                (match camera.surface.target {
+                    prism_camera::RenderTarget::PrimaryWindow => is_primary,
+                    prism_camera::RenderTarget::Window(window) => window == id.0,
+                    prism_camera::RenderTarget::Texture(_) => false,
+                }) && crate::systems::surface_view_fits(&camera.surface, request.viewport)
+            })
+        });
+        let upscaler = if needs_upscaler {
+            context
+                .as_deref_mut()
+                .and_then(|context| context.targets.ensure_upscaler(runtime))
+        } else {
+            None
+        };
+        if let Some(context) = context.as_deref_mut() {
             if !context.cameras.is_ready()
                 || context.cameras.frame_index != context.frame_index
                 || context.cameras.device_generation != runtime.device_generation()
@@ -964,16 +985,25 @@ impl<I: Instance + 'static> WindowRenderTargets<I> {
                 if !crate::systems::surface_view_fits(&camera.surface, request.viewport) {
                     continue;
                 }
-                let [_, _, width, height] = camera.surface.viewport;
+                let extent = crate::surface_view_targets::surface_view_render_extent(
+                    camera.surface.viewport,
+                    camera.surface.resolution_scale,
+                );
                 let key = SurfaceViewTargetKey::new(
                     camera.camera(),
                     SurfaceViewOutput::Window(id),
-                    RenderViewport::new(width, height),
+                    extent,
                 );
                 let target = context.targets.get(runtime, key).ok_or_else(|| {
                     WindowRenderError::Graph(format!(
                         "missing reconciled surface view target: {key:?}"
                     ))
+                })?;
+                let (upscale_pipeline, upscale_bindings) = upscaler.ok_or_else(|| {
+                    WindowRenderError::Graph(
+                        "camera HDR upscaler is unavailable for the active device generation"
+                            .into(),
+                    )
                 })?;
                 let mut lighting = lighting_context
                     .and_then(|(state, plan)| state.pass_for_target(plan, target, runtime));
@@ -985,14 +1015,16 @@ impl<I: Instance + 'static> WindowRenderTargets<I> {
                 inputs.push(crate::frame::SurfaceViewGraphInput {
                     camera: camera.camera(),
                     order: camera.surface.order,
+                    clear: camera.surface.clear,
                     viewport: camera.surface.viewport,
                     target,
                     queues: &camera.queues,
                     lighting,
+                    upscale_pipeline,
+                    upscale_bindings,
                 });
             }
         }
-        let empty_imports = crate::frame::FrameGraphTextureImports::default();
         let prepared = crate::frame::prepare_surface_view_graph(
             &gpu.target,
             queues,
@@ -1000,9 +1032,7 @@ impl<I: Instance + 'static> WindowRenderTargets<I> {
             lighting,
             if frame_work { trace } else { None },
             &inputs,
-            context
-                .as_deref()
-                .map_or(&empty_imports, |context| context.texture_imports),
+            &imports,
         )
         .map_err(|error| {
             stats.surface_view_error =

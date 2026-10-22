@@ -113,7 +113,87 @@ struct GenerationTargets<D: RenderDevice> {
     device: Arc<D>,
     generation: u64,
     targets: BTreeMap<SurfaceViewTargetKey, RenderTarget>,
+    upscaler: Option<SurfaceViewUpscaler<D>>,
     completion: Option<Arc<AtomicBool>>,
+}
+
+/// Device-generation-owned linear-HDR raster upscaler used by camera composition.
+pub(crate) struct SurfaceViewUpscaler<D: RenderDevice> {
+    device: Arc<D>,
+    shader: prism_render_driver::ShaderModuleId,
+    bindings: prism_render_driver::BindGroupLayoutId,
+    layout: prism_render_driver::PipelineLayoutId,
+    pipeline: prism_render_driver::RenderPipelineId,
+}
+
+impl<D: RenderDevice> SurfaceViewUpscaler<D> {
+    fn new(device: Arc<D>) -> Self {
+        use prism_render_driver::*;
+        let shader = device.create_shader_module(&ShaderModuleDescriptor::wgsl(include_str!(
+            "surface_view_upscale.wgsl"
+        )));
+        let bindings = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some("camera HDR upscale bindings".into()),
+            entries: vec![BindGroupLayoutEntry {
+                binding: 0,
+                visibility: ShaderStages::FRAGMENT,
+                ty: BindingType::Texture {
+                    sample_type: TextureSampleType::Float,
+                    view_dimension: TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            }],
+        });
+        let layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+            label: Some("camera HDR upscale layout".into()),
+            bind_group_layouts: vec![bindings],
+            push_constant_ranges: vec![],
+        });
+        let pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
+            label: Some("camera HDR upscale pipeline".into()),
+            layout: Some(layout),
+            vertex: VertexState {
+                module: shader,
+                entry_point: "vs_main".into(),
+                buffers: vec![],
+            },
+            primitive: PrimitiveState {
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: MultisampleState::default(),
+            fragment: Some(FragmentState {
+                module: shader,
+                entry_point: "fs_main".into(),
+                targets: vec![Some(ColorTargetState::opaque(crate::RENDER_TARGET_FORMAT))],
+            }),
+        });
+        Self {
+            device,
+            shader,
+            bindings,
+            layout,
+            pipeline,
+        }
+    }
+
+    pub(crate) fn pipeline(&self) -> prism_render_driver::RenderPipelineId {
+        self.pipeline
+    }
+    pub(crate) fn bindings(&self) -> prism_render_driver::BindGroupLayoutId {
+        self.bindings
+    }
+}
+
+impl<D: RenderDevice> SurfaceViewUpscaler<D> {
+    fn destroy(self) {
+        self.device.destroy_render_pipeline(self.pipeline);
+        self.device.destroy_pipeline_layout(self.layout);
+        self.device.destroy_bind_group_layout(self.bindings);
+        self.device.destroy_shader_module(self.shader);
+    }
 }
 
 impl<D: RenderDevice> GenerationTargets<D> {
@@ -192,6 +272,25 @@ impl<D: RenderDevice> SurfaceViewTargets<D> {
             .iter()
             .filter(move |owner| owner.belongs_to(&device, generation))
             .flat_map(|owner| owner.targets.iter().map(|(key, target)| (*key, target)))
+    }
+
+    pub(crate) fn ensure_upscaler<I: Instance<Device = D> + 'static>(
+        &mut self,
+        runtime: &RenderRuntime<I>,
+    ) -> Option<(
+        prism_render_driver::RenderPipelineId,
+        prism_render_driver::BindGroupLayoutId,
+    )> {
+        let device = runtime.device_handle();
+        let owner = self.active.as_mut()?;
+        if !owner.belongs_to(&device, runtime.device_generation()) {
+            return None;
+        }
+        if owner.upscaler.is_none() {
+            owner.upscaler = Some(SurfaceViewUpscaler::new(device));
+        }
+        let upscaler = owner.upscaler.as_ref().expect("upscaler created above");
+        Some((upscaler.pipeline(), upscaler.bindings()))
     }
 
     /// Reconcile **all** outputs once, before recording the frame. An omitted
@@ -294,7 +393,7 @@ impl<D: RenderDevice> SurfaceViewTargets<D> {
         let created = pending.targets.len();
         if !same_device {
             if let Some(previous) = self.active.take() {
-                if !previous.targets.is_empty() {
+                if !previous.targets.is_empty() || previous.upscaler.is_some() {
                     self.retired.push(previous);
                 }
             }
@@ -302,6 +401,7 @@ impl<D: RenderDevice> SurfaceViewTargets<D> {
                 device,
                 generation,
                 targets: BTreeMap::new(),
+                upscaler: None,
                 completion: None,
             });
         }
@@ -375,11 +475,11 @@ impl<D: RenderDevice> SurfaceViewTargets<D> {
         }
         let mut destroyed = 0;
         let mut ready = ready.into_iter();
-        self.retired.retain(|owner| {
+        self.retired.retain_mut(|owner| {
             if !ready.next().expect("readiness for each owner") {
                 return true;
             }
-            destroyed += destroy_targets(owner);
+            destroyed += destroy_generation(owner);
             false
         });
         Ok(destroyed)
@@ -424,7 +524,7 @@ impl<D: RenderDevice> SurfaceViewTargets<D> {
             .iter()
             .chain(self.retired.iter())
             .filter(matching)
-            .any(|owner| !owner.targets.is_empty());
+            .any(|owner| !owner.targets.is_empty() || owner.upscaler.is_some());
         if !has_targets {
             return Ok(0);
         }
@@ -445,13 +545,14 @@ impl<D: RenderDevice> SurfaceViewTargets<D> {
             .as_ref()
             .is_some_and(|owner| owner.belongs_to(device, generation))
         {
-            destroyed += destroy_targets(&self.active.take().unwrap());
+            let mut owner = self.active.take().unwrap();
+            destroyed += destroy_generation(&mut owner);
         }
-        self.retired.retain(|owner| {
+        self.retired.retain_mut(|owner| {
             if !owner.belongs_to(device, generation) {
                 return true;
             }
-            destroyed += destroy_targets(owner);
+            destroyed += destroy_generation(owner);
             false
         });
         Ok(destroyed)
@@ -478,6 +579,18 @@ fn destroy_targets<D: RenderDevice>(owner: &GenerationTargets<D>) -> usize {
         target.destroy(&*owner.device);
     }
     owner.targets.len()
+}
+
+/// Destroy a complete generation only after its completion barrier and target
+/// dependency eviction have succeeded. The upscaler has no drop destructor:
+/// unretired native objects intentionally remain owned by their device until
+/// device teardown, while explicit retirement destroys them here.
+fn destroy_generation<D: RenderDevice>(owner: &mut GenerationTargets<D>) -> usize {
+    let destroyed = destroy_targets(owner);
+    if let Some(upscaler) = owner.upscaler.take() {
+        upscaler.destroy();
+    }
+    destroyed
 }
 
 /// Only unpublished resources may be destroyed without a completion barrier.
@@ -849,6 +962,35 @@ mod tests {
             Ok(1)
         );
         assert_eq!(old_device.live_resource_count(), 0);
+    }
+
+    #[test]
+    fn quarantined_upscaler_waits_for_its_generation_completion_before_destroy() {
+        let old_device = device();
+        let new_device = device();
+        let mut cache = SurfaceViewTargets::default();
+        populate(&mut cache, &old_device, 3, &[]);
+        let generation = cache.active.as_mut().unwrap();
+        generation.upscaler = Some(SurfaceViewUpscaler::new(Arc::clone(&old_device)));
+        let completion = Arc::new(AtomicBool::new(false));
+        generation.completion = Some(Arc::clone(&completion));
+        assert_eq!(old_device.live_resource_count(), 4);
+
+        populate(&mut cache, &new_device, 4, &[]);
+        assert_eq!(cache.retired.len(), 1);
+        assert_eq!(
+            cache.collect_retired(|_, _, _| panic!("upscaler has no target eviction")),
+            Ok(0)
+        );
+        assert_eq!(old_device.live_resource_count(), 4);
+
+        completion.store(true, Ordering::Release);
+        assert_eq!(
+            cache.collect_retired(|_, _, _| panic!("upscaler has no target eviction")),
+            Ok(0)
+        );
+        assert_eq!(old_device.live_resource_count(), 0);
+        assert_eq!(new_device.live_resource_count(), 0);
     }
 
     #[test]

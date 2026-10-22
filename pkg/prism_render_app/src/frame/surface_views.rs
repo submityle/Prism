@@ -3,6 +3,7 @@
 use super::*;
 use alloc::collections::BTreeSet;
 use prism_ecs::prelude::Entity;
+use prism_render_driver::LoadOp;
 
 /// One camera's local attachments and its placement in the output.
 /// Queues retain their camera's frame-uniform slot and binding sidecars.
@@ -14,6 +15,8 @@ pub(crate) struct SurfaceViewGraphInput<'a> {
     pub target: &'a RenderTarget,
     pub queues: &'a RenderQueues,
     pub lighting: Option<LightingGpuPass>,
+    pub upscale_pipeline: prism_render_driver::RenderPipelineId,
+    pub upscale_bindings: prism_render_driver::BindGroupLayoutId,
 }
 
 /// Rejected before any camera is appended; no accepted draws are discarded.
@@ -44,6 +47,7 @@ pub(crate) struct SurfaceViewGraphStages {
     pub ember_compute_passes: u32,
     pub lighting_dispatches: u32,
     pub copy_passes: u32,
+    pub upscale_passes: u32,
     pub present_source: TextureHandle,
 }
 
@@ -63,6 +67,7 @@ impl SurfaceViewGraphStages {
             ember_compute_passes: 0,
             lighting_dispatches: manual.lighting_dispatches,
             copy_passes: 0,
+            upscale_passes: 0,
             present_source: manual.present_source,
         }
     }
@@ -75,7 +80,7 @@ impl SurfaceViewGraphStages {
         self.gi_recipes += stages.gi_recipes;
         self.composite_passes += stages.composite_passes;
         self.lighting_dispatches += stages.lighting_dispatches;
-        self.copy_passes += 1;
+        self.upscale_passes += 1;
         self.cameras.push((camera, stages));
     }
 
@@ -99,7 +104,8 @@ impl SurfaceViewGraphStages {
         assert!(self.candidate_build_dispatches <= self.gi_recipes);
         assert!(self.gi_recipes <= 1);
         assert!(self.composite_passes as usize <= self.cameras.len() + 1);
-        assert_eq!(self.copy_passes as usize, self.cameras.len());
+        assert_eq!(self.copy_passes, 0);
+        assert_eq!(self.upscale_passes as usize, self.cameras.len());
         assert_eq!(
             self.lighting_dispatches,
             self.gi_recipes + self.composite_passes
@@ -124,6 +130,9 @@ pub(crate) struct PreparedSurfaceViewGraph {
 struct PreparedCameraOutput {
     camera: Entity,
     viewport: [u32; 4],
+    source_extent: crate::RenderViewport,
+    upscale_pipeline: prism_render_driver::RenderPipelineId,
+    upscale_bindings: prism_render_driver::BindGroupLayoutId,
     color: TextureHandle,
     depth: TextureHandle,
     color_view: TextureViewId,
@@ -134,11 +143,18 @@ impl PreparedSurfaceViewGraph {
     pub(crate) fn stages(&self) -> &SurfaceViewGraphStages {
         &self.stages
     }
+
+    pub(crate) fn retain_external_owner(
+        &mut self,
+        owner: alloc::sync::Arc<dyn core::any::Any + Send + Sync>,
+    ) {
+        self.graph.retain_external_owner(owner);
+    }
 }
 
 /// Draw explicit queues over the whole output first, then overwrite camera rects
 /// in ascending `(camera.order, camera.index(), camera.generation())` order. Empty cameras still
-/// clear/composite and copy their entire local HDR image, including background.
+/// clear/composite and upscale their local HDR image, including background.
 /// Trace, candidate construction and GI run only for the first lit target.
 /// The caller supplies target-aware lighting bindings and owns all GPU lifetimes.
 pub(crate) fn prepare_surface_view_graph(
@@ -170,8 +186,6 @@ pub(crate) fn prepare_surface_view_graph(
                 .is_none_or(|end| end > output.viewport().width)
             || y.checked_add(height)
                 .is_none_or(|end| end > output.viewport().height)
-            || width != view.target.viewport().width
-            || height != view.target.viewport().height
             || view.target.format() != output.format()
         {
             return Err(SurfaceViewGraphError::InvalidViewport(view.camera));
@@ -254,6 +268,9 @@ pub(crate) fn prepare_surface_view_graph(
         camera_outputs.push(PreparedCameraOutput {
             camera: view.camera,
             viewport: view.viewport,
+            source_extent: view.target.viewport(),
+            upscale_pipeline: view.upscale_pipeline,
+            upscale_bindings: view.upscale_bindings,
             color: appended.color,
             depth: appended.depth,
             color_view: view.target.view(),
@@ -328,23 +345,39 @@ pub(crate) fn finalize_surface_view_graph(
         textures.insert(output.color_view, local_color);
         textures.insert(output.depth_view, local_depth);
         let [x, y, width, height] = output.viewport;
-        graph.add_transfer_pass(
-            "prism-surface-view-copy",
+        let binding = graph.create_texture_bind_group(
+            output.upscale_bindings,
+            vec![(0, local_color)],
+            Some("camera HDR upscale source".into()),
+        );
+        let pipeline = output.upscale_pipeline;
+        graph.add_raster_pass(
+            "prism-surface-view-upscale",
             PassFlags::SIDE_EFFECT,
             |builder| {
-                let source = builder.copy_src_texture(local_color);
-                color = builder.copy_dst_texture(color);
-                let destination = color;
+                builder.sample(local_color);
+                color = builder.color_attachment_load(color, LoadOp::Load);
+                let group = binding.clone();
                 move |context| {
-                    context.copy_texture_to_texture(
-                        source,
-                        0,
-                        [0, 0, 0],
-                        destination,
-                        0,
-                        [x, y, 0],
-                        prism_render_driver::Extent3d::new_2d(width, height),
-                    );
+                    let bind_group = context.texture_bind_group(group);
+                    context
+                        .set_render_pipeline(pipeline)
+                        .set_render_bind_group(0, bind_group, vec![])
+                        .set_viewport(prism_render_driver::Viewport {
+                            x: x as f32,
+                            y: y as f32,
+                            width: width as f32,
+                            height: height as f32,
+                            min_depth: 0.0,
+                            max_depth: 1.0,
+                        })
+                        .set_scissor(prism_render_driver::ScissorRect {
+                            x,
+                            y,
+                            width,
+                            height,
+                        })
+                        .draw(0..3, 0..1);
                 }
             },
         );

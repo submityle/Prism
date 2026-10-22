@@ -11,7 +11,10 @@ use crate::frame;
 use crate::intent::RenderIntent;
 use crate::label::Render;
 use crate::lighting::LightingPlanState;
-use crate::lighting_gpu::{lighting_submission_domain, LightingGpuState};
+use crate::lighting_gpu::{
+    lighting_submission_domain, LightingCompositeMaterialBuffers, LightingGpuState,
+};
+use crate::material::{MaterialParameterBuffers, NativeExecutionTableBuffers};
 use crate::record::RenderRecord;
 use crate::runtime_resource::RenderRuntimeResource;
 use crate::startup::ensure_render_startup;
@@ -77,6 +80,27 @@ pub(crate) struct FrameExecutionResources<'w> {
     ember_external: Res<'w, crate::particle::ExtractedEmberExternalGpuResources>,
     ember_status: Res<'w, crate::particle::EmberPrepareStatus>,
     frame_texture_imports: Res<'w, crate::frame::FrameGraphTextureImports>,
+    material_buffers: Res<'w, MaterialParameterBuffers>,
+    execution_buffers: Res<'w, NativeExecutionTableBuffers>,
+}
+
+fn composite_material_buffers(
+    materials: &MaterialParameterBuffers,
+    executions: &NativeExecutionTableBuffers,
+) -> Option<LightingCompositeMaterialBuffers> {
+    let snapshot = executions.snapshot()?;
+    Some(LightingCompositeMaterialBuffers {
+        headers: materials.headers(),
+        headers_size_bytes: u64::from(materials.header_capacity())
+            * core::mem::size_of::<prism_render_material::GpuMaterialHeader>() as u64,
+        parameters: materials.parameters(),
+        parameters_size_bytes: u64::from(materials.parameter_capacity_words()) * 4,
+        execution_plans: Some(snapshot.plan_buffer()),
+        execution_plans_size_bytes: snapshot.plan_rows().len() as u64
+            * (prism_render_material::EXECUTION_PLAN_ROW_WORDS * 4) as u64,
+        execution_programs: Some(snapshot.program_buffer()),
+        execution_programs_size_bytes: snapshot.program_rows().len() as u64 * 20,
+    })
 }
 
 impl FrameExecutionTrace {
@@ -341,12 +365,11 @@ pub(crate) fn execute_frame<I>(
                 continue;
             }
             if surface_view_fits(&camera.surface, viewport) {
-                let [_, _, width, height] = camera.surface.viewport;
-                desired.push(SurfaceViewTargetKey::new(
-                    camera.camera(),
-                    output,
-                    crate::RenderViewport::new(width, height),
-                ));
+                let extent = crate::surface_view_targets::surface_view_render_extent(
+                    camera.surface.viewport,
+                    camera.surface.resolution_scale,
+                );
+                desired.push(SurfaceViewTargetKey::new(camera.camera(), output, extent));
             } else {
                 stats.surface_view_output_rejections.push(
                     crate::stats::SurfaceViewOutputRejection {
@@ -512,6 +535,11 @@ pub(crate) fn execute_frame<I>(
         return;
     }
     let lighting_pass = lighting_gpu.pass_for_target(&plan.plan, &offscreen.target, runtime);
+    let upscaler = cameras
+        .iter()
+        .any(|camera| matches!(camera.surface.target, prism_camera::RenderTarget::PrimaryWindow | prism_camera::RenderTarget::Texture(0)) )
+        .then(|| camera_targets.ensure_upscaler(runtime))
+        .flatten();
     let view_inputs: Vec<_> = cameras
         .iter()
         .filter_map(|camera| {
@@ -523,20 +551,24 @@ pub(crate) fn execute_frame<I>(
             if !target_matches {
                 return None;
             }
-            let [_, _, width, height] = camera.surface.viewport;
-            let key = SurfaceViewTargetKey::new(
-                camera.camera(),
-                SurfaceViewOutput::Offscreen(0),
-                crate::RenderViewport::new(width, height),
+            let extent = crate::surface_view_targets::surface_view_render_extent(
+                camera.surface.viewport,
+                camera.surface.resolution_scale,
             );
+            let (upscale_pipeline, upscale_bindings) = upscaler?;
+            let key =
+                SurfaceViewTargetKey::new(camera.camera(), SurfaceViewOutput::Offscreen(0), extent);
             let target = camera_targets.get(runtime, key)?;
             Some(frame::SurfaceViewGraphInput {
                 camera: camera.camera(),
                 order: camera.surface.order,
+                clear: camera.surface.clear,
                 viewport: camera.surface.viewport,
                 target,
                 queues: &camera.queues,
                 lighting: lighting_gpu.pass_for_target(&plan.plan, target, runtime),
+                upscale_pipeline,
+                upscale_bindings,
             })
         })
         .collect();

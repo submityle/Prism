@@ -217,10 +217,13 @@ impl Output {
             .map(|(view, target)| SurfaceViewGraphInput {
                 camera: view.camera,
                 order: view.order,
+                clear: prism_camera::ClearMode::ColorAndDepth,
                 viewport: view.viewport,
                 target,
                 queues: &queues,
                 lighting: None,
+                upscale_pipeline: prism_render_driver::RenderPipelineId::from_parts(30, 1),
+                upscale_bindings: prism_render_driver::BindGroupLayoutId::from_parts(31, 1),
             })
             .collect();
         let prepared = prepare_surface_view_graph(
