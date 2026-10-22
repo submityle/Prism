@@ -440,3 +440,27 @@ Clippy `-D warnings` 通过（依赖 render graph 的既有 unused-import warnin
 `pkg/prism_world_runtime/src/data_layers.rs` 暴露 `layers()`，相关 runtime/GPU 路径没有
 `admitted_layers` 引用，且本次两条测试均成功编译并通过。该复验没有修改 World runtime/GPU 源文件；
 结果适用于本次共享工作树快照，不构成干净 checkout 或 GPU 硬件验收。
+
+## 2026-10-22 Planet placement frame-local 精度调查（未完成）
+
+新增的 `write_request_in_frame` 原型将 `origin_mm - output_origin_mm` 在 CPU 侧精确计算为 i128，避免两个行星尺度 i64 原点先转浮点再相减；但 Apple M2/Metal 的专项 GPU 回归仍观测到 256 mm 局部位置误差（要求 ≤1 mm），因此原型未达到精度验收、未提交，不可作为已交付 sector-local GPU 坐标契约。此前仅绝对语义的既有 planetary placement 实卡测试通过，不覆盖此 frame-local 精度。
+
+调查发现当前 `wgpu-hal` Metal shader 编译使用默认 `MTLCompileOptions`，其 fast-math 默认开启；TwoSum/FMA double-single 依赖的误差恢复可能被浮点重结合破坏。临时 GPU 字段探针曾观察到相关 double-single 低分量读回为零；探针已撤除，正式 80-byte record ABI 已恢复。Metal 专项重跑命令为 `CARGO_TARGET_DIR=/private/tmp/prism-target-planet cargo test -p prism_world_gpu --features terrain_scatter --test planet_placement_gpu planetary_placement_frame_preserves_millimetre_local_offsets_at_planet_scale --offline -- --nocapture`，结果失败（X 轴偏差 256 mm）。
+
+后续方向是对 cube-sphere 有理 cell-center 方向和 radial 投影使用有明确溢出证明的多 limb 定点整数算法，并确保输出编码本身不再次丢失毫米精度；需覆盖最大 tile level、合法高度/offset 范围、正负 frame/origin、六面边界和真实 Metal 对照，完成性能基准后才能更新为完成状态。当前算法设计建议尚未实现或测量，World planetary 产品链路仍未验收。
+
+2026-10-22 后续复核：`planet_placement_fixed_math.rs` 的独立 Rust reference 已补最大 tile level 六面角点及最大采样边界、全宽整数平方根边界、u128 对抗值除法/乘法对照和正负半毫米 ties-away-from-zero 回归，`rustc --edition=2024 --test ...` 为 9 passed。隔离 target 曾因磁盘压力清理两次，本轮最后清理释放 1.3 GiB；没有清理其他 target。Apple M2/Metal 的行星 placement integration test 全文件为 2 passed、1 failed：全 tile dispatch 与非零高度/阈值 parity 通过，frame-local 测试仍测得 X 轴 256 mm（要求 ≤1 mm）。故 reference-only 测试通过不改变精度失败结论；GPU 多 limb twin、实机精度、性能验收及 planetary 产品 renderer 接线均未完成。
+
+同日临时 Metal 读回进一步发现两类问题：一处 `df_i128` 负数 two's-complement 转幅值把逐级进位写成独立 `if`，可能在进位已终止后错误修改更高 limb（曾观测 Z 记录约 `-2^96`）；现已改为严格嵌套进位。修复后 Z 异常消失，但 X 仍为 256 mm；另一个临时探针显示 Metal 输出的 `normal_df[0].lo` 为 0，符合 fast-math 破坏误差恢复的风险。探针已全部清除，保留 record ABI。剩余失败不应归因于单纯输出 f32 量化，必须修复 double-single/Metal 数值路径或改用经证明的定点 GPU 几何，并重跑实机回归。
+
+frame-local 回归 oracle 已增强为独立 f64 cube-sphere 投影，不再仅用 CPU 最终 i64 坐标减自身作为期望值。Apple M2/Metal 复测中 X 轴 oracle 为约 `-0.481 mm`，GPU 仍为 `256 mm`，故误差约 `256.481 mm`，确认不是 CPU 坐标取整的 ≤0.5 mm 影响。
+
+精度路径审查补充：不能将方向降为 Q48/Q16 后声称满足全配置 1 mm。半径上限为 `2^52 mm`，Q48 单个方向 ULP 已对应 16 mm 径向位移；Q16 误差更大。Rust Q70 参考保留为高精度 oracle，并已加入 `terrain_scatter` lib 的测试编译（仅 `cfg(test)`）；WGSL limb twin 尚未实现。GPU 输出仍为局部 `f32` position word，故 frame-local 精度仍失败；需要先定稿不会丢精度的整数输出 ABI，再实现并实测 GPU 算法与候选规模性能。随后发现 Rust reference 接入 crate 后会对一个未使用的 WGSL 原语字符串产生 dead-code warning，已删除该占位字符串。针对 reference 的 crate 测试 9 项通过；之后重编译因隔离 target 将可用磁盘耗尽而失败（`No space left on device`），专项 target 已再次清理。
+
+2026-10-22 精度算法推进：先发现简单 Q64 cube 坐标量化加 u128 sqrt 在最大合法正 offset 的用例中与 Q70 reference 差 2 mm；已移除该算法。当前方向路径改为 Q84：直接从精确整数 cell-center 分子建立 cube 向量，以 U256 计算 `sqrt(Q << 168)` 与方向商，避免先截断 U/V 的误差累积。全尺度确定性矩阵覆盖 tile level 0/1/8/15/22/30、样本边 2/3/13/257/65535/u32::MAX、六面及 tile/cell 首中末组合、radius 1/2^31/2^52、offset i64 两端、quarter-mm radial 余数和最大正 height-scale；在该受限最大 radius/offset 范围内，Q84 对 Q70 reference 的最终整毫米差均 ≤1 mm。额外发现最大解码高度可把 radial 提升至约 2^78 mm，Q70 此时不再是合适 oracle；已新增 Q96 方向 reference 验证最大四角高度、最大正 scale、最大 radius+offset 的极端径向组合，Q84 对 Q96 输出差 ≤1 mm。crate feature 下 reference 13/13 passed（约25秒）；之后因磁盘不足，新增 U256 shader validator 测试尚未运行，专用 target 已清理。此为有限对抗矩阵，不是所有离散输入形式证明或 GPU/Metal 验收；生产 WGSL 尚未移植 Q84 路径，frame-local 实测仍失败约256.481 mm。
+
+ABI 闭环边界：现有 80-byte record 以 3 个 f32 word 承载位置，内部定点无法防止写回时再次丢毫米精度。任意 i64 全局位置相减可达 ±(2^64−1)，有符号 i64 local 也不够；整数 record 需每轴至少 65-bit signed local（可用 i128 limbs）或有证明的拆分格式，并同步版本化修改 planet deletion 读取、GPU/RHI consumers、测试 offset 及文档。目前改造未实现，frame-local Metal 仍约 256.481 mm 失败，不能宣称完成。
+
+2026-10-22 后续专项验证：修复 `planet_placement_u256_gpu.rs` 的 raw-string delimiter，移除未使用 helper，并让 arithmetic parity 向量的乘法结果落在 U256 范围内。另修正 Q70/Q84 frame-origin 单测从 limb 0 截断而造成的错误 oracle，改为完整 signed-magnitude 转 i128。Apple M2/Metal 实测 U256 add/sub/mul/div-rem/isqrt/shift 与 Rust reference 对拍通过；`cargo test -p prism_world_gpu --features terrain_scatter --test planet_placement_u256_gpu --offline -- --nocapture` 为 14 passed。`cargo test -p prism_world_runtime --lib --offline` 为 183 passed；`cargo test -p prism_world_gpu --features gpu --lib --offline` 为 139 passed。
+
+同轮重测 `planetary_placement_frame_preserves_millimetre_local_offsets_at_planet_scale` 仍失败：Apple M2/Metal X 轴 GPU local 为 256 mm，独立 CPU oracle 为 -0.4807677269 mm。故 U256 原语对拍并未证明 production Q84 placement；Q84/WGSL 生产接线、整数 record ABI 与消费者迁移、端到端毫米精度、性能基准仍未完成。sandbox 默认 adapter 无 Metal，专项 GPU 命令通过宿主环境执行。编译曾因磁盘不足而清理专用 `/private/tmp/prism-target-planet`（释放约 1.1 GiB），共享 `target` 未清理。
