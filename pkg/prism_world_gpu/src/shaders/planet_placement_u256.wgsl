@@ -132,8 +132,12 @@ fn u256_add_word_at(value: ptr<function, U256>, index: u32, word: u32) -> bool {
 fn u256_mul(a: U256, b: U256) -> U256Carry {
     var out = u256_zero();
     var overflow = false;
-    for (var i = 0u; i < 8u; i += 1u) {
-        for (var j = 0u; j < 8u; j += 1u) {
+    let a_bits = u256_bit_length(a);
+    let b_bits = u256_bit_length(b);
+    let a_limbs = (a_bits + 31u) / 32u;
+    let b_limbs = (b_bits + 31u) / 32u;
+    for (var i = 0u; i < a_limbs; i += 1u) {
+        for (var j = 0u; j < b_limbs; j += 1u) {
             let product = u256_mul_word(a.limb[i], b.limb[j]);
             let index = i + j;
             if (index < 8u) {
