@@ -482,13 +482,14 @@ mod tests {
     use crate::App;
     use prism_settings::{Domain, LayerKind, RegistryBuilder, SettingDef, TrustLevel, Value};
     use prism_settings_io::{
-        ApplyPlan, CandidateBuilder, CandidateSnapshot, SettingsDocument, SettingsTransactionSpec,
-        SourceSpec, TxMode,
+        ApplyOp, ApplyPlan, CandidateBuilder, CandidateSnapshot, CompensateOutcome, EffectState,
+        OpAction, OpOutcome, Reversibility, SettingsApplier, SettingsDocument,
+        SettingsTransactionSpec, SourceSpec, TxMode,
     };
     use std::{
         fs,
         path::PathBuf,
-        sync::atomic::{AtomicU64, Ordering},
+        sync::atomic::{AtomicU64, AtomicUsize, Ordering},
     };
 
     struct TempDir(PathBuf);
@@ -550,6 +551,22 @@ mod tests {
         id: &str,
         value: f64,
     ) -> IoTransaction {
+        transaction_with_plan(
+            registry,
+            directory,
+            id,
+            value,
+            ApplyPlan::new(Vec::new()).unwrap(),
+        )
+    }
+
+    fn transaction_with_plan(
+        registry: &prism_settings::SettingsRegistry,
+        directory: &TempDir,
+        id: &str,
+        value: f64,
+        plan: ApplyPlan,
+    ) -> IoTransaction {
         let before = SettingsRuntime::new(registry.clone(), Domain::Runtime).unwrap();
         IoTransaction::new(SettingsTransactionSpec {
             tx_id: id.to_owned(),
@@ -558,7 +575,7 @@ mod tests {
             before_hash: 0,
             before_snapshot: before.snapshot().clone(),
             candidate: candidate(registry, value),
-            plan: ApplyPlan::new(Vec::new()).unwrap(),
+            plan,
             snapshot_gen: 0,
             last_confirmed: None,
         })
@@ -570,6 +587,53 @@ mod tests {
 
     fn appliers() -> Vec<&'static mut dyn SettingsApplier> {
         Vec::new()
+    }
+
+    struct CompensationFailureApplier {
+        compensations: std::sync::Arc<AtomicUsize>,
+    }
+
+    impl SettingsApplier for CompensationFailureApplier {
+        fn group(&self) -> &str {
+            "Display"
+        }
+
+        fn order(&self) -> i32 {
+            0
+        }
+
+        fn apply_op(&mut self, _op: &ApplyOp) -> OpOutcome {
+            OpOutcome::Applied {
+                effect_handle: Some("display-handle".to_owned()),
+                result_digest: 1,
+            }
+        }
+
+        fn probe(&self, _op: &ApplyOp) -> EffectState {
+            EffectState::Unknown
+        }
+
+        fn compensate(&mut self, _op: &ApplyOp) -> CompensateOutcome {
+            self.compensations.fetch_add(1, Ordering::SeqCst);
+            CompensateOutcome::Failed {
+                error: "injected compensation failure".to_owned(),
+            }
+        }
+    }
+
+    fn reversible_display_plan() -> ApplyPlan {
+        ApplyPlan::new(vec![ApplyOp {
+            index: 0,
+            id: "display-mode".to_owned(),
+            group: "Display".to_owned(),
+            key: "render.scale".into(),
+            action: OpAction::Set,
+            reversibility: Reversibility::Reversible,
+            idempotent: true,
+            input_digest: 1,
+            effect_handle: None,
+        }])
+        .unwrap()
     }
 
     #[test]
@@ -842,5 +906,58 @@ mod tests {
         let manager = app.world().resource::<SettingsTransactionManager>();
         assert_eq!(manager.status(), &SettingsTransactionStatus::Idle);
         assert_eq!(manager.expiry_error(), None);
+    }
+
+    #[test]
+    fn failed_preview_expiry_retains_recovery_state_without_automatic_retry() {
+        let registry = registry();
+        let directory = TempDir::new();
+        let mut manager = SettingsTransactionManager::new();
+        let mut runtime = runtime(&registry);
+        let mut persistence = NoopPersistence;
+        let compensations = std::sync::Arc::new(AtomicUsize::new(0));
+        let mut applier = CompensationFailureApplier {
+            compensations: compensations.clone(),
+        };
+        let mut appliers: Vec<&mut dyn SettingsApplier> = vec![&mut applier];
+
+        assert_eq!(
+            manager
+                .begin(
+                    "failed-expiry",
+                    transaction_with_plan(
+                        &registry,
+                        &directory,
+                        "failed-expiry",
+                        0.75,
+                        reversible_display_plan(),
+                    ),
+                    Duration::ZERO,
+                    &mut runtime,
+                    &mut persistence,
+                    &mut appliers,
+                )
+                .unwrap(),
+            PipelineOutcome::PendingConfirmation
+        );
+
+        let error = manager
+            .expire(
+                Instant::now(),
+                &mut runtime,
+                &mut persistence,
+                &mut appliers,
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            SettingsTransactionManagerError::UnexpectedOutcome(_)
+        ));
+        assert!(matches!(
+            manager.status(),
+            SettingsTransactionStatus::RecoveryRequired { tx_id, .. } if tx_id == "failed-expiry"
+        ));
+        assert!(!manager.is_expired(Instant::now()));
+        assert_eq!(compensations.load(Ordering::SeqCst), 1);
     }
 }
