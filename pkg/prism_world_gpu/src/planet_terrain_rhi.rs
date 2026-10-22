@@ -46,6 +46,8 @@ pub enum PlanetTerrainRhiError {
     SnapshotRequired,
     /// Delta is stale, skipped a generation, or disagrees with its publication.
     Generation { expected: u64, actual: u64 },
+    /// Delta was produced by a different publication lineage than the cache.
+    ForeignLineage,
     /// Caller supplied a different logical GPU device.
     ForeignDevice,
     /// Invalid or duplicate mesh/tile references in supplied data.
@@ -72,6 +74,9 @@ impl std::fmt::Display for PlanetTerrainRhiError {
                 f,
                 "planet terrain generation mismatch: expected {expected}, got {actual}"
             ),
+            Self::ForeignLineage => {
+                f.write_str("planet terrain delta belongs to another publication lineage")
+            }
             Self::ForeignDevice => {
                 f.write_str("planet terrain cache belongs to another GPU device")
             }
@@ -129,6 +134,7 @@ pub struct PlanetTerrainRhiCache {
     identity: Arc<()>,
     limits: PlanetTerrainRhiLimits,
     generation: Option<u64>,
+    lineage: Option<Arc<()>>,
     tiles: Vec<GpuTile>,
     buffer_bytes: u64,
 }
@@ -142,6 +148,7 @@ impl PlanetTerrainRhiCache {
             identity: context.device_identity().clone(),
             limits,
             generation: None,
+            lineage: None,
             tiles: Vec::new(),
             buffer_bytes: 0,
         }
@@ -169,6 +176,7 @@ impl PlanetTerrainRhiCache {
         self.tiles = next;
         self.buffer_bytes = bytes;
         self.generation = Some(publication.generation());
+        self.lineage = Some(Arc::clone(publication.lineage_token()));
         Ok(self.stats())
     }
 
@@ -195,6 +203,14 @@ impl PlanetTerrainRhiCache {
                 expected,
                 actual: delta.generation(),
             });
+        }
+        let Some(lineage) = self.lineage.as_ref() else {
+            return Err(PlanetTerrainRhiError::SnapshotRequired);
+        };
+        if !Arc::ptr_eq(lineage, publication.lineage_token())
+            || !Arc::ptr_eq(lineage, delta.lineage_token())
+        {
+            return Err(PlanetTerrainRhiError::ForeignLineage);
         }
         let mut cached_keys = Vec::new();
         cached_keys

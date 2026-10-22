@@ -76,6 +76,7 @@ pub struct PlanetMeshPublicationReceipt {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct PlanetMeshPublicationDelta {
     generation: u64,
+    lineage: Arc<()>,
     changed_tiles: Vec<TileKey>,
     removed_tiles: Vec<TileKey>,
 }
@@ -85,6 +86,13 @@ impl PlanetMeshPublicationDelta {
     #[must_use]
     pub const fn generation(&self) -> u64 {
         self.generation
+    }
+
+    /// Opaque identity shared only by clones and deltas from the same
+    /// publication lineage. Consumers should compare it with `Arc::ptr_eq`.
+    #[must_use]
+    pub fn lineage_token(&self) -> &Arc<()> {
+        &self.lineage
     }
 
     /// Added or replaced tile identities in stable order.
@@ -224,15 +232,17 @@ impl PlanetMeshPublicationTransaction {
 pub struct PlanetMeshPublication {
     limits: PlanetMeshPublicationLimits,
     generation: u64,
+    lineage: Arc<()>,
     meshes: Vec<PublishedPlanetHeightfieldMesh>,
 }
 
 impl PlanetMeshPublication {
     /// Creates an empty publication with fixed capacity and validation limits.
-    pub const fn new(limits: PlanetMeshPublicationLimits) -> Self {
+    pub fn new(limits: PlanetMeshPublicationLimits) -> Self {
         Self {
             limits,
             generation: 0,
+            lineage: Arc::new(()),
             meshes: Vec::new(),
         }
     }
@@ -245,6 +255,12 @@ impl PlanetMeshPublication {
     /// Returns the current publication generation.
     pub const fn generation(&self) -> u64 {
         self.generation
+    }
+
+    /// Opaque identity shared by this publication's clones and emitted deltas.
+    #[must_use]
+    pub fn lineage_token(&self) -> &Arc<()> {
+        &self.lineage
     }
 
     /// Returns all published tiles in stable `TileKey` order.
@@ -377,12 +393,14 @@ impl PlanetMeshPublication {
             );
             PlanetMeshPublicationDelta {
                 generation: next_generation,
+                lineage: Arc::clone(&self.lineage),
                 changed_tiles,
                 removed_tiles,
             }
         } else {
             PlanetMeshPublicationDelta {
                 generation: next_generation,
+                lineage: Arc::clone(&self.lineage),
                 ..Default::default()
             }
         };

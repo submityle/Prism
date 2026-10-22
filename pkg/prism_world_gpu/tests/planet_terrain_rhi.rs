@@ -125,6 +125,28 @@ fn full_snapshot_delta_budget_failure_and_device_identity_are_atomic() {
     let mut roomy = PlanetTerrainRhiCache::new(&gpu, limits(2, 8192));
     assert_eq!(roomy.apply_snapshot(&gpu, &publication).unwrap().tiles, 2);
 
+    let mut fork = PlanetMeshPublication::new(PlanetMeshPublicationLimits {
+        max_tiles: 4,
+        max_mesh_bytes: 16_384,
+        max_neighbor_comparisons: 128,
+    });
+    let mut fork_initial = fork.begin();
+    for tile in [tile_a, tile_b] {
+        fork_initial
+            .stage_build(
+                source(tile, 0),
+                PlanetMeshConfig::new(6_371_000_000, [0; 3], 10_000.0).unwrap(),
+                BakeLimits {
+                    max_samples: 9,
+                    max_bytes: 4096,
+                },
+                prism_world_terrain::PlanetHeightfieldNormalNeighborhood::empty(),
+            )
+            .unwrap();
+    }
+    fork.commit(fork_initial).unwrap();
+    fork.commit(fork.begin()).unwrap();
+    fork.commit(fork.begin()).unwrap();
     let mut remove = publication.begin();
     remove.stage_remove(tile_b).unwrap();
     let (_, remove_delta) = publication.commit_with_delta(remove).unwrap();
@@ -132,6 +154,19 @@ fn full_snapshot_delta_budget_failure_and_device_identity_are_atomic() {
         .apply_delta(&gpu, &publication, &remove_delta)
         .unwrap();
     assert_eq!((removed.generation, removed.tiles), (3, 1));
+    let mut fork_remove = fork.begin();
+    fork_remove.stage_remove(tile_a).unwrap();
+    let (_, fork_delta) = fork.commit_with_delta(fork_remove).unwrap();
+    assert_eq!(fork_delta.generation(), publication.generation() + 1);
+    assert!(matches!(
+        roomy.apply_delta(&gpu, &fork, &fork_delta),
+        Err(PlanetTerrainRhiError::ForeignLineage)
+    ));
+    assert_eq!(
+        roomy.stats(),
+        removed,
+        "foreign-lineage delta must be atomic"
+    );
     assert!(matches!(
         roomy.apply_delta(&gpu, &publication, &add_delta),
         Err(PlanetTerrainRhiError::Generation {
