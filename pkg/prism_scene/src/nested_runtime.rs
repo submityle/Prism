@@ -6,7 +6,7 @@
 //! scene materializer registry to produce typed constructors.
 
 use alloc::boxed::Box;
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -84,6 +84,16 @@ pub struct NestedReplaceError {
     pub cause: NestedInstantiateError,
     /// Still-live prior generation.
     pub previous: Box<SceneTreeSpawn>,
+}
+
+/// A dependent-tree reload batch failed before its publication point. Every
+/// previous tree is returned live and in caller order.
+#[derive(Debug)]
+pub struct NestedReloadBatchError {
+    /// Reason the candidate generation was rejected.
+    pub cause: NestedInstantiateError,
+    /// All original live trees, still authoritative.
+    pub trees: Vec<SceneTreeSpawn>,
 }
 
 /// One nested child and the parent local slot it occupies.
@@ -188,6 +198,110 @@ pub fn replace_nested_typed<P: NestedSceneProvider>(
     provider: &P,
     limits: NestedSpawnLimits,
 ) -> Result<SceneTreeSpawn, NestedReplaceError> {
+    let replacement =
+        stage_nested_replacement(world, &previous, template, root_plan, provider, limits)?;
+    previous.despawn_tree(world);
+    Ok(replacement)
+}
+
+/// Reloads every live tree whose root template is in the invalidated GUID set.
+/// All replacements are staged before any old tree is retired. A failure
+/// destroys completed candidates and returns every old tree to the caller.
+/// The invalidation set should contain the cache's complete transitive
+/// `dependent` closure so a changed nested template reloads its live roots.
+pub fn reload_invalidated_nested_trees<P: NestedSceneProvider>(
+    world: &mut World,
+    trees: Vec<SceneTreeSpawn>,
+    invalidated: &[StableGuid],
+    provider: &P,
+    limits: NestedSpawnLimits,
+) -> Result<Vec<SceneTreeSpawn>, NestedReloadBatchError> {
+    if invalidated.is_empty() {
+        return Ok(trees);
+    }
+    let invalidated: BTreeSet<_> = invalidated.iter().copied().collect();
+    let mut previous = trees.into_iter();
+    let mut staged: Vec<(SceneTreeSpawn, Option<SceneTreeSpawn>)> = Vec::new();
+    while let Some(tree) = previous.next() {
+        let root_guid = tree
+            .root
+            .root
+            .and_then(|root| world.get::<SceneInstance>(root))
+            .map(|instance| instance.template);
+        let Some(guid) = root_guid.filter(|guid| invalidated.contains(guid)) else {
+            staged.push((tree, None));
+            continue;
+        };
+        let Some(template) = provider.template(guid) else {
+            for (_, candidate) in staged.iter_mut().rev() {
+                if let Some(candidate) = candidate.take() {
+                    candidate.despawn_tree(world);
+                }
+            }
+            let mut old = staged.into_iter().map(|(old, _)| old).collect::<Vec<_>>();
+            old.push(tree);
+            old.extend(previous);
+            return Err(NestedReloadBatchError {
+                cause: NestedInstantiateError::MissingTemplate(guid),
+                trees: old,
+            });
+        };
+        let plan = match provider.typed_plan(guid) {
+            Ok(plan) => plan,
+            Err(cause) => {
+                for (_, candidate) in staged.iter_mut().rev() {
+                    if let Some(candidate) = candidate.take() {
+                        candidate.despawn_tree(world);
+                    }
+                }
+                let mut old = staged.into_iter().map(|(old, _)| old).collect::<Vec<_>>();
+                old.push(tree);
+                old.extend(previous);
+                return Err(NestedReloadBatchError {
+                    cause: NestedInstantiateError::Provider(cause),
+                    trees: old,
+                });
+            }
+        };
+        match stage_nested_replacement(world, &tree, template, plan, provider, limits) {
+            Ok(candidate) => staged.push((tree, Some(candidate))),
+            Err(error) => {
+                for (_, candidate) in staged.iter_mut().rev() {
+                    if let Some(candidate) = candidate.take() {
+                        candidate.despawn_tree(world);
+                    }
+                }
+                let mut old = staged.into_iter().map(|(old, _)| old).collect::<Vec<_>>();
+                old.push(*error.previous);
+                old.extend(previous);
+                return Err(NestedReloadBatchError {
+                    cause: error.cause,
+                    trees: old,
+                });
+            }
+        }
+    }
+
+    let mut replacements = Vec::with_capacity(staged.len());
+    for (old, candidate) in staged {
+        if let Some(candidate) = candidate {
+            old.despawn_tree(world);
+            replacements.push(candidate);
+        } else {
+            replacements.push(old);
+        }
+    }
+    Ok(replacements)
+}
+
+fn stage_nested_replacement<P: NestedSceneProvider>(
+    world: &mut World,
+    previous: &SceneTreeSpawn,
+    template: &SceneTemplate,
+    root_plan: TypedSpawnPlan,
+    provider: &P,
+    limits: NestedSpawnLimits,
+) -> Result<SceneTreeSpawn, NestedReplaceError> {
     let old_guid = previous
         .root
         .root
@@ -199,19 +313,19 @@ pub fn replace_nested_typed<P: NestedSceneProvider>(
                 previous: old_guid,
                 replacement: template.guid,
             },
-            previous: Box::new(previous),
+            previous: Box::new(clone_tree_handle(previous)),
         });
     }
     if let Err(error) = template.validate() {
         return Err(NestedReplaceError {
             cause: NestedInstantiateError::InvalidTemplate(error),
-            previous: Box::new(previous),
+            previous: Box::new(clone_tree_handle(previous)),
         });
     }
     if limits.max_instances == 0 {
         return Err(NestedReplaceError {
             cause: NestedInstantiateError::InstanceLimit,
-            previous: Box::new(previous),
+            previous: Box::new(clone_tree_handle(previous)),
         });
     }
     let mut active = vec![template.guid];
@@ -225,18 +339,32 @@ pub fn replace_nested_typed<P: NestedSceneProvider>(
         0,
         &mut active,
         &mut count,
-        Some(&previous),
+        Some(previous),
     ) {
         Ok(replacement) => replacement,
         Err(cause) => {
             return Err(NestedReplaceError {
                 cause,
-                previous: Box::new(previous),
+                previous: Box::new(clone_tree_handle(previous)),
             })
         }
     };
-    previous.despawn_tree(world);
     Ok(replacement)
+}
+
+fn clone_tree_handle(tree: &SceneTreeSpawn) -> SceneTreeSpawn {
+    SceneTreeSpawn {
+        root: tree.root.clone(),
+        children: tree
+            .children
+            .iter()
+            .map(|child| SceneTreeChild {
+                slot_root: child.slot_root,
+                template: child.template,
+                tree: clone_tree_handle(&child.tree),
+            })
+            .collect(),
+    }
 }
 
 fn spawn_tree<P: NestedSceneProvider>(
@@ -520,6 +648,7 @@ mod tests {
             templates: BTreeMap::from([
                 (guid(1), descriptor(1, &[(1, 2)])),
                 (guid(2), descriptor(2, &[])),
+                (guid(3), descriptor(3, &[])),
             ]),
             ..Provider::default()
         }
@@ -627,5 +756,126 @@ mod tests {
         .unwrap();
         assert_eq!(world.entity_count(), 4);
         assert!(world.contains(retry.root.root.unwrap()));
+    }
+
+    #[test]
+    fn invalidation_batch_reloads_matching_roots_and_leaves_unrelated_roots_untouched() {
+        let provider = provider();
+        let root_template = provider.template(guid(1)).unwrap();
+        let other_template = provider.template(guid(3)).unwrap();
+        let mut world = World::new();
+        let root = spawn_nested_typed(
+            &mut world,
+            root_template,
+            typed_root_plan(),
+            &provider,
+            NestedSpawnLimits::default(),
+        )
+        .unwrap();
+        let other = spawn_nested_typed(
+            &mut world,
+            other_template,
+            typed_root_plan(),
+            &provider,
+            NestedSpawnLimits::default(),
+        )
+        .unwrap();
+        let old_root = root.root.root.unwrap();
+        let old_other = other.root.root.unwrap();
+
+        let replacements = reload_invalidated_nested_trees(
+            &mut world,
+            vec![root, other],
+            &[guid(1)],
+            &provider,
+            NestedSpawnLimits::default(),
+        )
+        .unwrap();
+
+        assert_eq!(replacements.len(), 2);
+        assert_ne!(replacements[0].root.root.unwrap(), old_root);
+        assert_eq!(replacements[1].root.root.unwrap(), old_other);
+        assert!(!world.contains(old_root));
+        assert!(world.contains(old_other));
+        assert_eq!(world.entity_count(), 6);
+    }
+
+    #[test]
+    fn empty_invalidation_preserves_tree_ownership_and_world() {
+        let provider = provider();
+        let root_template = provider.template(guid(1)).unwrap();
+        let mut world = World::new();
+        let tree = spawn_nested_typed(
+            &mut world,
+            root_template,
+            typed_root_plan(),
+            &provider,
+            NestedSpawnLimits::default(),
+        )
+        .unwrap();
+        let root = tree.root.root.unwrap();
+
+        let trees = reload_invalidated_nested_trees(
+            &mut world,
+            vec![tree],
+            &[],
+            &provider,
+            NestedSpawnLimits::default(),
+        )
+        .unwrap();
+
+        assert_eq!(trees.len(), 1);
+        assert_eq!(trees[0].root.root, Some(root));
+        assert!(world.contains(root));
+        assert_eq!(world.entity_count(), 4);
+    }
+
+    #[test]
+    fn invalidation_batch_failure_returns_all_old_trees_and_discards_candidates() {
+        let provider = provider();
+        let root_template = provider.template(guid(1)).unwrap().clone();
+        let other_template = provider.template(guid(3)).unwrap().clone();
+        let mut world = World::new();
+        let root = spawn_nested_typed(
+            &mut world,
+            &root_template,
+            typed_root_plan(),
+            &provider,
+            NestedSpawnLimits::default(),
+        )
+        .unwrap();
+        let other = spawn_nested_typed(
+            &mut world,
+            &other_template,
+            typed_root_plan(),
+            &provider,
+            NestedSpawnLimits::default(),
+        )
+        .unwrap();
+        let old_roots = [root.root.root.unwrap(), other.root.root.unwrap()];
+        let failing = Provider {
+            templates: provider.templates.clone(),
+            fail_replay_for: Some(guid(2)),
+        };
+
+        let error = reload_invalidated_nested_trees(
+            &mut world,
+            vec![root, other],
+            &[guid(1), guid(3)],
+            &failing,
+            NestedSpawnLimits::default(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.trees.len(), 2);
+        assert_eq!(
+            [
+                error.trees[0].root.root.unwrap(),
+                error.trees[1].root.root.unwrap(),
+            ],
+            old_roots
+        );
+        assert!(old_roots.iter().all(|root| world.contains(*root)));
+        assert_eq!(world.entity_count(), 6);
     }
 }
