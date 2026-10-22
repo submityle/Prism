@@ -339,8 +339,8 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
         let current = world.change_tick();
         if this_run != current
             || self
-                .dirty_window()
-                .is_some_and(|(_, previous)| previous.is_newer_than(last_run, current))
+                .dirty_cursor_tick()
+                .is_some_and(|covered_through| covered_through.is_newer_than(last_run, current))
         {
             return false;
         }
@@ -437,7 +437,6 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
         // panic; in that case the caller can retry this same window without
         // losing the journal events.
         self.set_dirty_column_cursor(changes.cursor);
-        self.remember_sparse_window(last_run, this_run);
         true
     }
 
@@ -518,6 +517,7 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
         let mut sparse_fallback = self.sparse_fallback_needed(world, last_run, this_run);
         let sparse_replay =
             !sparse_fallback && self.sparse_replay_needed(world, last_run, this_run);
+        let sparse_cursor_advanced = !sparse_fallback && !sparse_replay;
         let mut indexed_entities = Vec::new();
         if !sparse_fallback {
             let index_stats = if sparse_replay {
@@ -619,7 +619,9 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
                 self.set_dirty_column_cursor(cursor);
             }
             self.commit_dirty_cursors(sparse_cursors);
-            self.remember_sparse_window(last_run, this_run);
+            // Gap recovery consumed/rebased sparse cursors through the current
+            // world, even if the requested report ended at a historical tick.
+            self.acknowledge_dirty_cursors(world.change_tick());
             return report;
         }
 
@@ -632,6 +634,7 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
             &mut report,
         ) {
             self.commit_dirty_cursors(sparse_cursors);
+            self.acknowledge_dirty_cursors(world.change_tick());
             return report;
         }
 
@@ -675,11 +678,18 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
         // The union is already visited in deterministic ArchetypeId order.
         // Process each candidate inside the merge instead of materializing a
         // second O(candidate archetypes) vector before matching/filtering it.
+        let mut matched_cursor = 0;
         merge_sorted_archetype_iterators(&mut candidate_sources, |archetype_id| {
             report.stats.candidate_archetype_checks += 1;
-            if matched_archetypes.binary_search(&archetype_id).is_err() {
+            while matched_cursor < matched_archetypes.len()
+                && matched_archetypes[matched_cursor] < archetype_id
+            {
+                matched_cursor += 1;
+            }
+            if matched_archetypes.get(matched_cursor) != Some(&archetype_id) {
                 return;
             }
+            matched_cursor += 1;
             report.stats.matched_archetypes += 1;
             let Some(archetype) = world.archetypes().get(archetype_id) else {
                 return;
@@ -763,7 +773,9 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
             self.set_dirty_column_cursor(cursor);
         }
         self.commit_dirty_cursors(sparse_cursors);
-        self.remember_sparse_window(last_run, this_run);
+        if journal_baseline.is_some() || sparse_cursor_advanced {
+            self.acknowledge_dirty_cursors(world.change_tick());
+        }
         report
     }
 }

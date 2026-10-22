@@ -641,7 +641,7 @@ fn dirty_fallback_merges_overlapping_component_postings_once() {
     }
     let target = target.expect("the full component-set archetype was spawned");
 
-    let state = w.query::<(
+    let state = w.query_filtered::<(
         Option<&Noise0>,
         Option<&Noise1>,
         Option<&Noise2>,
@@ -651,7 +651,7 @@ fn dirty_fallback_merges_overlapping_component_postings_once() {
         Option<&Noise6>,
         Option<&Noise7>,
         Option<&Noise8>,
-    )>();
+    ), With<Noise0>>();
     let baseline = state.dirty_chunks_with_stats(&w, w.change_tick(), w.change_tick());
     assert!(baseline.stats.journal_gap);
 
@@ -671,7 +671,10 @@ fn dirty_fallback_merges_overlapping_component_postings_once() {
     assert_eq!(w.archetypes().len(), 512);
     assert_eq!(report.stats.archetype_index_entries_scanned, 9 * 256);
     assert_eq!(report.stats.candidate_archetype_checks, 511);
-    assert_eq!(report.stats.matched_archetypes, 511);
+    // Candidate IDs include every non-empty component combination, while the
+    // With<Noise0> query matches only half; the sorted intersection must skip
+    // non-matches without disturbing later matching candidates.
+    assert_eq!(report.stats.matched_archetypes, 256);
     assert_eq!(report.stats.reported_chunks, 1);
     assert_eq!(report.chunks.len(), 1);
 }
@@ -956,6 +959,36 @@ fn sparse_retained_replay_matches_historical_tick_oracle() {
 }
 
 #[test]
+fn sparse_historical_window_selects_only_its_tick_from_full_retained_history() {
+    let mut w = World::new();
+    let entity = w.spawn((Big::new(0), SparseDirty(0)));
+    let state = w.query::<&SparseDirty>();
+    let activation = w.change_tick();
+    let _ = state.dirty_chunks_with_stats(&w, activation, activation);
+    let mut target = (Tick::ZERO, Tick::ZERO);
+    for index in 0..crate::change_index::MAX_RETAINED_BATCHES {
+        advance_frame(&mut w);
+        w.get_mut::<SparseDirty>(entity).unwrap().0 += 1;
+        if index == 2047 {
+            target = (w.last_change_tick(), w.change_tick());
+        }
+    }
+    let replay = state.dirty_chunks_with_stats(&w, target.0, target.1);
+    assert_eq!(replay.stats.sparse_replay_sources, 1);
+    assert_eq!(replay.stats.sparse_index_batches_scanned, 1);
+    assert_eq!(replay.stats.sparse_index_events, 1);
+    assert_eq!(replay.stats.sparse_index_gaps, 0);
+    assert_eq!(replay.stats.sparse_fallback_scans, 0);
+    assert_eq!(replay.stats.sparse_entities_checked, 0);
+    assert_eq!(replay.chunks.len(), 1);
+    assert!(row_is_covered(&replay.chunks, 0));
+    assert_eq!(
+        replay.chunks,
+        state.dirty_chunks_with_stats(&w, target.0, target.1).chunks
+    );
+}
+
+#[test]
 fn sparse_replay_gap_rebaselines_transactionally_for_next_forward_window() {
     let mut w = World::new();
     let entity = w.spawn((Big::new(0), SparseDirty(0)));
@@ -991,6 +1024,45 @@ fn sparse_replay_gap_rebaselines_transactionally_for_next_forward_window() {
     assert_eq!(next.stats.sparse_index_batches_scanned, 1);
     assert_eq!(next.stats.reported_chunks, 1);
     assert!(next.stats.reported_rows > 0);
+}
+
+#[test]
+fn sparse_historical_gap_recovery_preserves_current_cursor_coverage() {
+    let mut w = World::new();
+    let entity = w.spawn((Big::new(0), SparseDirty(0)));
+    let state = w.query::<&SparseDirty>();
+    let activation = w.change_tick();
+    state.dirty_chunks(&w, activation, activation);
+    advance_frame(&mut w);
+    let last_run = w.change_tick();
+    w.get_mut::<SparseDirty>(entity).unwrap().0 += 1;
+    state.dirty_chunks(&w, activation, last_run);
+    advance_frame(&mut w);
+    w.get_mut::<SparseDirty>(entity).unwrap().0 += 1;
+    let current = w.change_tick();
+
+    // Restore invalidates retained history. Even an empty historical report
+    // must rebase its sparse cursor through CURRENT, not the old upper bound.
+    w.change_tracker.reset();
+    let recovered = state.dirty_chunks_with_stats(&w, activation, activation);
+    assert_eq!(recovered.stats.sparse_index_gaps, 1);
+    assert_eq!(state.dirty_cursor_tick(), Some(current));
+    let repeated = state.dirty_chunks_with_stats(&w, last_run, current);
+    assert_eq!(repeated.stats.sparse_replay_sources, 1);
+    assert_eq!(repeated.stats.sparse_index_gaps, 1);
+    let location = w.entities().location(entity).unwrap();
+    assert!(repeated.chunks.iter().any(|chunk| {
+        chunk.archetype == location.archetype_id
+            && row_is_covered(core::slice::from_ref(chunk), location.row as usize)
+    }));
+
+    // After that recovery, a disjoint forward window uses the new cursor.
+    advance_frame(&mut w);
+    w.get_mut::<SparseDirty>(entity).unwrap().0 += 1;
+    let forward = state.dirty_chunks_with_stats(&w, current, w.change_tick());
+    assert_eq!(forward.stats.sparse_replay_sources, 0);
+    assert_eq!(forward.stats.sparse_index_gaps, 0);
+    assert_eq!(forward.stats.sparse_index_events, 1);
 }
 
 #[test]
