@@ -8,6 +8,7 @@
 #![deny(missing_docs)]
 
 mod document;
+mod enum_remap;
 mod journal;
 mod migration;
 mod pipeline;
@@ -15,6 +16,7 @@ mod store;
 mod transaction;
 
 pub use document::{CodecError, SettingsDocument};
+pub use enum_remap::EnumRemap;
 pub use journal::{
     inspect_journal, reconstruct_transaction, recover_journal, ApplyOp, ApplyOpState,
     CompensationState, EffectState, Journal, JournalError, JournalEvent, JournalInspection,
