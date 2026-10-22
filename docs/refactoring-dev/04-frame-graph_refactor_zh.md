@@ -181,3 +181,5 @@ RenderGraph 全 package 的 unit 122/122、doc 1 passed / 1 ignored 已于 2026-
 
 
 **2026-10-23 Frame Graph 旧入口删除与 runtime 复验**：移除 `prism_render_architecture::frame_graph` 模块及其重复 compiler 测试，runtime 与 Scene composition 测试改为直接引用 `prism_render_graph::frame_graph::ResourceLifetime`。当前 Rust/TOML 搜索未发现 architecture 旧路径消费者；Frame Graph 定义和公开入口只保留在 `prism_render_graph`。随后 `cargo test -p prism_render_runtime --lib retirement_tests --jobs 1 --config profile.test.debug=0 -- --test-threads=1` 实际运行 **28 passed / 0 failed / 20 filtered out**，覆盖 runtime retirement 与 submission-state 回归。该测试关闭这次 API 迁移的 runtime 定向回归缺口，不代表 render-graph 全 package 或全场景闭环重跑。
+
+**2026-10-23 当前工作树 RenderGraph package 复验**：`cargo test -p prism_render_graph --jobs 1 --config profile.test.debug=0 -- --test-threads=1` 实际 **127 passed / 0 failed / 0 ignored**；doc tests **1 passed / 1 ignored**（exit 0）。较 2026-10-22 的 122 项新增覆盖已包含于当前全 package 运行；ignored doctest 不计为通过。该结果仅覆盖 RenderGraph crate，不代表 31-pass 全场景执行或 GPU 图像 parity。

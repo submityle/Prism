@@ -28,7 +28,7 @@ use crate::pipeline_cache::{
     PipelineCachePersistenceStatus,
 };
 use crate::queue::{CanonicalMaterialBindings, RenderQueues};
-use crate::queue_stage::fill_queues;
+use crate::queue_stage::{fill_queues, ClstDrawSubmissions};
 use crate::record::RenderRecord;
 use crate::runtime_resource::RenderRuntimeResource;
 use crate::scene::{SceneRegistry, VisibilityWorkList};
@@ -425,8 +425,8 @@ where
         let mesh_pipelines = MeshPipelines::surface_encode(runtime.device());
         // The material ABI buffers are created against the device too, so they are
         // built here as well.
-        let material_buffers = MaterialParameterBuffers::new(
-            runtime.device(),
+        let material_buffers = MaterialParameterBuffers::new_owned(
+            runtime.device_handle(),
             config.material_capacity,
             config.material_parameter_words,
             config.material_texture_rows,
@@ -519,6 +519,9 @@ where
         render.world.insert_resource(material_buffers);
         render
             .world
+            .insert_resource(crate::material::NativeExecutionTableBuffers::new());
+        render
+            .world
             .insert_resource(CanonicalMaterialBindings::new(config.material_capacity));
         render.world.insert_resource(MaterialUploadStats::default());
         render.world.insert_resource(native_vt);
@@ -566,6 +569,7 @@ where
         render
             .world
             .insert_resource(crate::frame::FrameGraphTextureImports::default());
+        render.world.init_resource::<ClstDrawSubmissions>();
         render.world.insert_resource(device_loss.clone());
 
         // The render schedule, plus the `Last` phase that runs it each frame.
@@ -588,7 +592,12 @@ where
             .resource_mut::<Schedules>()
             .get_mut(RenderStartup)
             .expect("the RenderStartup schedule was just inserted")
-            .add_systems(init_particle_gpu_state::<I>);
+            .add_systems((
+                init_particle_gpu_state::<I>,
+                crate::startup::init_gpu_resource::<
+                    crate::render_asset::VirtualGeometryGpuPublicationStore<I>,
+                >,
+            ));
         {
             let schedule = render
                 .world
@@ -652,6 +661,12 @@ where
             .add_systems(drive_render_schedule_with_ember_loss_guard::<I>);
 
         app.insert_sub_app(RenderApp, render);
+
+        // Virtual-geometry publication is part of the default render spine.
+        // The bridge is generation-bound and fail-closed; requiring an
+        // application-specific opt-in here would leave the CLST queue with no
+        // authoritative page-table lifecycle in the production plugin.
+        crate::render_asset::register_virtual_geometry_publication_bridge::<I>(app);
 
         // The main-world end of the bridge: each frame, drain the signal and
         // emit `DeviceLost`, which `drive_app_lifecycle` folds into
