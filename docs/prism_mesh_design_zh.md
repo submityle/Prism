@@ -908,7 +908,7 @@ CLST stream 另提供 `resident_page_words(key)`，以借用形式返回驻留�
 当前状态按接线层次区分：
 
 - **已接入调度：** RenderScene 插件初始化 `GeometryDrawPhases` 与 `VirtualGeometryDrawPublications`，并在 `build_unified_visibility` 之后、`PrepareResources` 阶段调用 `build_geometry_draw_phases`。该系统为每个可见 view 清空并重建本帧快照，读取 visibility selection、GPU Scene mirror、geometry registry 与显式 publication 输入，生成通过整阶段 fail-closed 校验的 LOD/Cluster typed draw records；输入快照 revision 变化时旧 phase 不会保留。
-- **已实现但未形成资产生命周期闭环：** unified visibility 现在可对显式 `VirtualGeometrySceneBindings` 选择层级 cut，并按 view/asset page key 合并 page requests；target error pixels 有可验证设置。该选择仍没有和实际页驻留状态合并为 resident cut，也未证明缺页时祖先替代的覆盖和无裂缝。
+- **resident cut 已接入、覆盖证明仍未闭合：** unified visibility 对显式 `VirtualGeometrySceneBindings` 选择层级 cut，并按 view/asset page key 合并 page requests；若当前 Scene publication snapshot 的 generation 与内容 revision 匹配，会查询页驻留状态，通过缓存反向边的 `ResidentCutResolver` 解析缺页节点的驻留祖先；只有每个输入区域都有解析且输出不重叠时才发布虚拟 cut。snapshot 缺失、身份不匹配、祖先缺页或解析冲突时保留原始页请求并使用标准 Mesh LOD。该逻辑通过 RenderScene crate check（新增独立请求累计 helper 前），但最新完整编译/系统级验证仍待完成；hierarchy 数据仍未编码几何区域/过渡边界，因此不声称 fallback 的全 cut 覆盖或视觉无裂缝。
 - **已实现但尚未自动接线：** `register_virtual_geometry_publication_bridge::<I>` 提供 typed Register/Reconcile/RetireAll 请求、单向 extraction、RenderApp `PrepareResources` store 调用和逐请求诊断。它必须由应用显式安装，RenderScene runtime registry/selection 当前没有生产系统自动投递这些请求；`VirtualGeometryDrawPublications` 也尚未从 GPU store 同步。
 - **尚未形成生产 draw：** `GeometryDrawPhases` 仍没有 Opaque 主 pass 消费者；CLST shader、物理页池 buffer、page table 和 Cluster descriptor 尚未在统一主视图 raster pipeline 中绑定并执行。Opaque producer 需要由权威 draw phase 与 exact publication/page/material binding 建立，不能依赖独立 GPU harness 或手工注入的临时 submission。
 
