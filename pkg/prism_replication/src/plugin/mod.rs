@@ -205,6 +205,7 @@ pub(super) fn encode_reject(error: ProtocolError) -> Vec<u8> {
             bytes.push(2);
         }
         ProtocolError::SecurityFailure => bytes.push(3),
+        ProtocolError::CommandIdentityExhausted => bytes.push(4),
     }
     bytes
 }
@@ -248,6 +249,7 @@ pub(super) fn decode_rpc(bytes: &[u8]) -> Result<RpcEnvelope<'_>, ProtocolError>
                 },
                 2 if detail.is_empty() => ProtocolError::UnexpectedHandshake,
                 3 if detail.is_empty() => ProtocolError::SecurityFailure,
+                4 if detail.is_empty() => ProtocolError::CommandIdentityExhausted,
                 _ => return Err(malformed(NetChannel::RpcReliable)),
             };
             Ok(RpcEnvelope::Reject(error))

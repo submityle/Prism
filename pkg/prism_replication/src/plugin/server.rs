@@ -58,7 +58,7 @@ pub struct ServerReplication<S: ServerStrategy> {
     connection: ConnectionState,
     next_rpc_id: u64,
     pending_commands: VecDeque<QueuedInboundCommand>,
-    next_inbound_command_id: u64,
+    next_inbound_command_id: Option<u64>,
     leased_inbound_command: Option<u64>,
     external_command_consumer: bool,
     journal: Option<Box<dyn AuthorityJournal>>,
@@ -149,7 +149,7 @@ impl<S: ServerStrategy> ServerReplication<S> {
             connection,
             next_rpc_id: 0,
             pending_commands: VecDeque::new(),
-            next_inbound_command_id: 0,
+            next_inbound_command_id: Some(0),
             leased_inbound_command: None,
             external_command_consumer: false,
             journal: None,
@@ -499,8 +499,11 @@ impl<S: ServerStrategy> ServerReplication<S> {
                         );
                         break;
                     }
-                    let id = self.next_inbound_command_id;
-                    self.next_inbound_command_id = self.next_inbound_command_id.wrapping_add(1);
+                    let Some(id) = self.next_inbound_command_id else {
+                        self.reject(ProtocolError::CommandIdentityExhausted, true);
+                        break;
+                    };
+                    self.next_inbound_command_id = id.checked_add(1);
                     self.pending_commands.push_back(QueuedInboundCommand {
                         id,
                         payload: payload.to_vec(),
@@ -1091,6 +1094,39 @@ mod tests {
         assert_eq!(second_payload, b"second");
         assert!(server.acknowledge_inbound_command(second_id));
         assert!(server.lease_inbound_command().is_none());
+    }
+
+    #[test]
+    fn inbound_command_identity_exhaustion_rejects_instead_of_reusing_ids() {
+        let (mut client, mut server) = memory_pair(
+            ReplicationConfig::for_capacity(8),
+            ReplicationConfig::for_capacity(8),
+        );
+        drive(&mut client, &mut server);
+        assert_eq!(server.poll_inbound_commands(), Ok(0));
+        server.next_inbound_command_id = Some(u64::MAX);
+        client.try_send_rpc(b"last unique id").unwrap();
+        for _ in 0..16 {
+            client.pump();
+            server.poll_inbound_commands().unwrap();
+            if server.last_protocol_error == Some(ProtocolError::CommandIdentityExhausted) {
+                break;
+            }
+        }
+        assert_eq!(server.pending_commands.len(), 1);
+        assert_eq!(server.pending_commands.front().unwrap().id, u64::MAX);
+        assert_eq!(server.next_inbound_command_id, None);
+        client.try_send_rpc(b"must not alias").unwrap();
+        for _ in 0..16 {
+            client.pump();
+            server.poll_inbound_commands().unwrap();
+        }
+        assert_eq!(server.pending_commands.len(), 1);
+        assert_eq!(server.pending_commands.front().unwrap().id, u64::MAX);
+        assert!(matches!(
+            server.connection,
+            ConnectionState::Rejected(ProtocolError::CommandIdentityExhausted)
+        ));
     }
 
     /// Exercise the actual app scheduling seam, with the same assertions for

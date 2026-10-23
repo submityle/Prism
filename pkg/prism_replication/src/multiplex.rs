@@ -121,6 +121,8 @@ pub enum ProtocolError {
     UnexpectedHandshake,
     /// The authenticated transport failed after construction.
     SecurityFailure,
+    /// The connection exhausted its never-reused inbound command identity space.
+    CommandIdentityExhausted,
 }
 
 /// Select an exact protocol version and a mutually supportable rollback window.
