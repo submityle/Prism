@@ -434,6 +434,8 @@ dematerialize(instance):  // A → C/B,退离
 
 **双表示资产身份契约（selection API v2）**：每条选择除稳定 level 的 `asset_key` 外，还在 transition 活跃时返回 `transition_assets`，其 `from_asset_key` / `to_asset_key` 与 `LodTransition::{from_level,to_level}` 一一对应。正向、反向迟滞过渡均验证资产身份方向，非过渡选择返回 `None`；renderer 无需根据 level 再查询 cluster catalog 才能确定两份表示。该 API 只补齐 selector 的双表示身份，不表示 renderer 已加载两份资产或任何 pass 已消费该 transition；完整 HLOD 集成和 GPU/图像验收边界不变。
 
+**Renderer 消费链源码核对（2026-10-23）**：当前生产代码没有调用 `HlodRuntime::plan` 的 HLOD-to-renderer 接线；原生路径 `prism_render_visibility::cull_view` 对每个可见 scene handle 只选择一个 `GeometryLodChain` level 并产出一个 `GpuRenderWorkItem`（`pkg/prism_render_visibility/src/culling.rs`、`work.rs`）。该 work item 没有 transition alpha/dither 身份；几何 LOD chain 是单 geometry 内的 screen-error 切片，不是跨对象 HLOD proxy。因而仅为 from/to 各追加一条普通 work item 仍没有共享 coverage 规则，无法保证 opaque、shadow、GI、ray-scene 等 pass 的物体覆盖一致；HLOD 仍未进入生产 draw path。
+
 ### 10.7 当前 HLOD bake artifact 与 runtime catalog 边界
 
 `prism_world_residency::bake_hlod` 已把稳定排序后的 proxy bounds 烘焙为具体的八顶点/三十六索引 AABB proxy mesh，并为每个 representation 生成有限的 bounds、稳定 material key/参数以及 geometry/material/artifact hash；输入、数量、字节预算和数值有效性在分配/发布前检查，失败不返回部分 output。`HlodBakeOutput::artifacts()` 与 `HlodRuntime::insert_bake()` 形成从 bake 到 runtime catalog 的确定性接口，catalog 插入按 cluster/representation/artifact 一次性提交，并可按选中的 asset key 取回 artifact；重复身份或不一致引用不会污染旧 catalog。该产物是 engine-neutral 的可消费代理，不是最终 renderer meshlet/材质系统：尚未替代资产包/流送、GPU buffer residency、Scene/ECS 单体 materialization、产品 renderer graph、跨后端画面和受控帧时验收。
