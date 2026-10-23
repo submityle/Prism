@@ -832,6 +832,8 @@ impl<'world, P: SceneEcsProvider> SceneEcsHost<'world, P> {
         ownership.cells.insert(sector, replacement);
         ownership.retired_cells.push((sector, previous));
         if let Some(objects) = persistence_objects {
+            let mut objects = objects;
+            canonicalize_persistence_objects(&mut objects);
             ownership.persistence_objects.insert(sector, objects);
         }
         self.retry_retired_cells();
@@ -876,6 +878,8 @@ impl<'world, P: SceneEcsProvider> SceneEcsHost<'world, P> {
         }
         let ownership = self.ownership_mut();
         ownership.cells.insert(sector, spawn);
+        let mut objects = objects;
+        canonicalize_persistence_objects(&mut objects);
         ownership.persistence_objects.insert(sector, objects);
         Ok(())
     }
@@ -894,21 +898,18 @@ impl<'world, P: SceneEcsProvider> SceneEcsHost<'world, P> {
         SceneEcsHostError<P::Error>,
     > {
         let mut objects = existing_objects.unwrap_or_default();
-        for object in self
-            .provider
-            .persistence_objects(sector)
-            .map_err(SceneEcsHostError::Provider)?
-        {
-            if !objects.contains(&object) {
-                objects.push(object);
-            }
-        }
+        objects.extend(
+            self.provider
+                .persistence_objects(sector)
+                .map_err(SceneEcsHostError::Provider)?,
+        );
+        canonicalize_persistence_objects(&mut objects);
         let layout = self
             .provider
             .scene_persistence_restore_layout(sector)
             .map_err(SceneEcsHostError::Provider)?;
         let snapshot = if let Some(layout) = layout {
-            if !objects.contains(&layout.companion_object) {
+            if objects.binary_search(&layout.companion_object).is_err() {
                 return Err(SceneEcsHostError::PersistenceLayoutMissingCompanion(sector));
             }
             layout
@@ -957,12 +958,8 @@ impl<'world, P: SceneEcsProvider> SceneEcsHost<'world, P> {
             .map_err(SceneEcsHostError::PersistenceAppend)?;
         let ownership = self.ownership_mut();
         let objects = ownership.persistence_objects.entry(sector).or_default();
-        for transaction in &transactions {
-            let object = transaction.object();
-            if !objects.contains(&object) {
-                objects.push(object);
-            }
-        }
+        objects.extend(transactions.iter().map(Transaction::object));
+        canonicalize_persistence_objects(objects);
         self.destroy_cell(sector, &spawn);
         Ok(())
     }
@@ -984,12 +981,8 @@ impl<'world, P: SceneEcsProvider> SceneEcsHost<'world, P> {
             .map_err(|error| SceneEcsHostError::DurableAppend(error.to_string()))?;
         let ownership = self.ownership_mut();
         let objects = ownership.persistence_objects.entry(sector).or_default();
-        for transaction in &transactions {
-            let object = transaction.object();
-            if !objects.contains(&object) {
-                objects.push(object);
-            }
-        }
+        objects.extend(transactions.iter().map(Transaction::object));
+        canonicalize_persistence_objects(objects);
         self.destroy_cell(sector, &spawn);
         Ok(())
     }
@@ -1030,6 +1023,11 @@ impl<'world, P: SceneEcsProvider> SceneEcsHost<'world, P> {
             )
             .map_err(SceneEcsHostError::PersistenceBridge)
     }
+}
+
+fn canonicalize_persistence_objects(objects: &mut Vec<WorldPersistentId>) {
+    objects.sort_unstable();
+    objects.dedup();
 }
 
 impl<P: SceneEcsProvider> crate::SceneHost for SceneEcsHost<'_, P> {
@@ -1113,6 +1111,19 @@ mod tests {
     use prism_world_persist::{
         ActorId, FieldId, LogicalClock, OverrideDelta, OverrideValue, PersistentId, TransactionId,
     };
+
+    #[test]
+    fn persistence_inventory_canonicalization_sorts_and_deduplicates_large_batches() {
+        let mut objects: Vec<_> = (0..100_000u128)
+            .rev()
+            .flat_map(|value| [WorldPersistentId(value), WorldPersistentId(value)])
+            .collect();
+        canonicalize_persistence_objects(&mut objects);
+        assert_eq!(objects.len(), 100_000);
+        assert!(objects.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(objects.binary_search(&WorldPersistentId(0)).is_ok());
+        assert!(objects.binary_search(&WorldPersistentId(99_999)).is_ok());
+    }
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub(super) struct Marker(pub(super) u32);

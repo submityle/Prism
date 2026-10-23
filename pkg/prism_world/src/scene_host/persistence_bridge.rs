@@ -5,8 +5,8 @@ use alloc::vec::Vec;
 use core::convert::TryFrom;
 use prism_scene::{
     decode_persistence, encode_persistence, ComponentTypeId, FieldPath,
-    OverrideValue as SceneValue, PersistenceDecodeLimits,
-    PersistedPropertyOverride, PersistentEntityMap, SceneInstancePersistence,
+    OverrideValue as SceneValue, PersistedPropertyOverride, PersistenceDecodeLimits,
+    PersistentEntityMap, SceneInstancePersistence,
 };
 use prism_world_persist::{
     ActorId, FieldId, FieldOverride, LogicalClock, OverrideDelta, OverrideValue as WorldValue,
@@ -790,11 +790,11 @@ mod tests {
         assert_eq!(restored.structural, batch.scene_snapshot.structural);
         assert_eq!(restored.properties.len(), 1);
         assert_eq!(restored.properties[0].local, LocalEntityId::new(3));
-        assert_eq!(restored.properties[0].persistent, Some(PersistentId::from_u128(77)));
         assert_eq!(
-            restored.properties[0].value,
-            OverrideValue::I64(42)
+            restored.properties[0].persistent,
+            Some(PersistentId::from_u128(77))
         );
+        assert_eq!(restored.properties[0].value, OverrideValue::I64(42));
         drop(reopened);
         let _ = std::fs::remove_file(path);
     }

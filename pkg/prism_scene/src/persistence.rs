@@ -11,7 +11,9 @@ use prism_asset::StableGuid;
 
 use crate::identity::{LocalEntityId, PersistentId};
 use crate::instance::SceneInstance;
-use crate::overrides::{ComponentTypeId, OverrideSet, PropertyOverride, StructuralOp};
+use crate::overrides::{
+    ComponentTypeId, OverrideError, OverrideSet, PropertyOverride, StructuralOp,
+};
 use crate::path::FieldPath;
 use crate::template::SceneTemplate;
 
@@ -208,11 +210,100 @@ impl SceneInstancePersistence {
         )
     }
 
+    /// Rebuilds the sparse override set for the current template. Persisted
+    /// property targets prefer stable entity identity and therefore survive a
+    /// base-local reordering. Local-id-only properties and structural targets
+    /// are accepted only when the template identity is unchanged. Structural
+    /// payloads remain opaque and are copied without schema interpretation.
+    pub fn restore_overrides(
+        &self,
+        current_template: &SceneTemplate,
+        identities: &PersistentEntityMap,
+    ) -> Result<OverrideSet, PersistenceRestoreError> {
+        let same_template = self.template == current_template.guid;
+        let mut overrides = OverrideSet::new();
+
+        for property in &self.properties {
+            let local = if let Some(persistent) = property.persistent {
+                identities
+                    .local_for_persistent(persistent)
+                    .ok_or(PersistenceRestoreError::MissingPersistentEntity { persistent })?
+            } else if same_template {
+                property.local
+            } else {
+                return Err(PersistenceRestoreError::LocalIdentityTemplateMismatch {
+                    snapshot: self.template,
+                    current: current_template.guid,
+                    local: property.local,
+                });
+            };
+            if overrides.set_property(property.with_local(local)).is_some() {
+                return Err(PersistenceRestoreError::DuplicateProperty {
+                    target: local,
+                    component: property.component,
+                    path: property.path.clone(),
+                });
+            }
+        }
+
+        if !same_template && !self.structural.is_empty() {
+            return Err(PersistenceRestoreError::StructuralTemplateMismatch {
+                snapshot: self.template,
+                current: current_template.guid,
+            });
+        }
+        for operation in &self.structural {
+            overrides.push_structural(operation.clone());
+        }
+        overrides
+            .validate_for_plan(&current_template.plan)
+            .map_err(PersistenceRestoreError::InvalidOverrides)?;
+        Ok(overrides)
+    }
+
     /// Whether this snapshot contains no property or structural changes.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.properties.is_empty() && self.structural.is_empty()
     }
+}
+
+/// A persisted scene snapshot cannot be safely applied to the requested
+/// template without additional stable structural identities or migration.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PersistenceRestoreError {
+    /// A stable entity ID in the snapshot is absent from the current template.
+    MissingPersistentEntity {
+        /// The unresolved stable identity.
+        persistent: PersistentId,
+    },
+    /// A local-only property cannot be mapped across template identities.
+    LocalIdentityTemplateMismatch {
+        /// Template identity stored with the snapshot.
+        snapshot: StableGuid,
+        /// Template identity requested for restoration.
+        current: StableGuid,
+        /// Local entity identity that has no persistent counterpart.
+        local: LocalEntityId,
+    },
+    /// Structural operations contain template-local targets but no stable IDs.
+    StructuralTemplateMismatch {
+        /// Template identity stored with the snapshot.
+        snapshot: StableGuid,
+        /// Template identity requested for restoration.
+        current: StableGuid,
+    },
+    /// Two persisted properties resolve to the same runtime property key.
+    DuplicateProperty {
+        /// Resolved runtime-local entity identity.
+        target: LocalEntityId,
+        /// Property component identity.
+        component: ComponentTypeId,
+        /// Property field path.
+        path: FieldPath,
+    },
+    /// The restored delta is structurally invalid for the current template.
+    InvalidOverrides(OverrideError),
 }
 
 /// A capture result keeps diagnostics alongside the snapshot so a missing
@@ -265,7 +356,10 @@ pub type PersistentOverrideSet = SceneInstancePersistence;
 
 #[cfg(test)]
 mod tests {
-    use super::{EntityBinding, PersistentEntityMap, SceneInstancePersistence};
+    use super::{
+        EntityBinding, PersistedPropertyOverride, PersistenceRestoreError, PersistentEntityMap,
+        SceneInstancePersistence,
+    };
     use crate::identity::{LocalEntityId, PersistentId};
     use crate::overrides::{ComponentTypeId, OverrideSet, OverrideValue, PropertyOverride};
     use crate::path::FieldPath;
@@ -370,5 +464,148 @@ mod tests {
                 Some(binding.local)
             );
         }
+    }
+
+    #[test]
+    fn restore_rebinds_properties_by_persistent_identity_after_local_reorder() {
+        let source_guid = StableGuid::from_u128(7);
+        let current_guid = StableGuid::from_u128(8);
+        let persistent = PersistentId::from_u128(77);
+        let snapshot = SceneInstancePersistence {
+            template: source_guid,
+            instance: Some(PersistentId::from_u128(99)),
+            properties: vec![PersistedPropertyOverride {
+                local: LocalEntityId::new(1),
+                persistent: Some(persistent),
+                component: ComponentTypeId::from_raw(3),
+                path: FieldPath::parse("value").unwrap(),
+                value: OverrideValue::U64(42),
+            }],
+            structural: Vec::new(),
+        };
+        let identities =
+            PersistentEntityMap::new(vec![EntityBinding::new(LocalEntityId::new(9), persistent)])
+                .unwrap();
+
+        let current_template = SceneTemplate::new(
+            current_guid,
+            InstantiationPlan {
+                entity_count: 10,
+                groups: Box::new([crate::ArchetypeGroup::new(
+                    crate::ArchetypeSignature::default(),
+                    (0..10)
+                        .map(LocalEntityId::new)
+                        .collect::<Vec<_>>()
+                        .into_boxed_slice(),
+                    Box::new([]),
+                )]),
+                entity_valued_fields: Box::new([]),
+                hierarchy: (1..10)
+                    .map(|local| (LocalEntityId::new(local), LocalEntityId::new(local - 1)))
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+                reserved_local_base: LocalEntityId::RESERVED_BASE,
+            },
+        );
+        let restored = snapshot
+            .restore_overrides(&current_template, &identities)
+            .unwrap();
+        assert_eq!(restored.property_count(), 1);
+        assert_eq!(restored.properties()[0].target, LocalEntityId::new(9));
+        assert_eq!(restored.properties()[0].value, OverrideValue::U64(42));
+    }
+
+    #[test]
+    fn restore_fails_closed_for_missing_identity_or_unmigrated_structure() {
+        let source_guid = StableGuid::from_u128(7);
+        let current_guid = StableGuid::from_u128(8);
+        let snapshot = SceneInstancePersistence {
+            template: source_guid,
+            instance: None,
+            properties: vec![PersistedPropertyOverride {
+                local: LocalEntityId::new(0),
+                persistent: Some(PersistentId::from_u128(77)),
+                component: ComponentTypeId::from_raw(3),
+                path: FieldPath::parse("value").unwrap(),
+                value: OverrideValue::U64(42),
+            }],
+            structural: Vec::new(),
+        };
+        assert_eq!(
+            snapshot.restore_overrides(
+                &template_with_guid(current_guid),
+                &PersistentEntityMap::default()
+            ),
+            Err(PersistenceRestoreError::MissingPersistentEntity {
+                persistent: PersistentId::from_u128(77)
+            })
+        );
+
+        let structural = SceneInstancePersistence {
+            template: source_guid,
+            instance: None,
+            properties: Vec::new(),
+            structural: vec![crate::StructuralOp::RemoveEntity {
+                local: LocalEntityId::new(2),
+            }],
+        };
+        assert_eq!(
+            structural.restore_overrides(
+                &template_with_guid(current_guid),
+                &PersistentEntityMap::default()
+            ),
+            Err(PersistenceRestoreError::StructuralTemplateMismatch {
+                snapshot: source_guid,
+                current: current_guid
+            })
+        );
+    }
+
+    #[test]
+    fn restore_keeps_structural_replay_order_for_same_template() {
+        let template = StableGuid::from_u128(7);
+        let snapshot = SceneInstancePersistence {
+            template,
+            instance: None,
+            properties: Vec::new(),
+            structural: vec![crate::StructuralOp::AddEntity {
+                local: LocalEntityId::reserved(0),
+                parent: LocalEntityId::new(0),
+                archetype: crate::ArchetypeSignature::default(),
+                data: Vec::new(),
+            }],
+        };
+        let restored = snapshot
+            .restore_overrides(
+                &template_with_guid(template),
+                &PersistentEntityMap::default(),
+            )
+            .unwrap();
+        assert_eq!(restored.structural(), snapshot.structural);
+    }
+
+    fn template_with_guid(guid: StableGuid) -> SceneTemplate {
+        SceneTemplate::new(
+            guid,
+            InstantiationPlan {
+                entity_count: 3,
+                groups: Box::new([crate::ArchetypeGroup::new(
+                    crate::ArchetypeSignature::default(),
+                    Box::new([
+                        LocalEntityId::new(0),
+                        LocalEntityId::new(1),
+                        LocalEntityId::new(2),
+                    ]),
+                    Box::new([]),
+                )]),
+                entity_valued_fields: Box::new([]),
+                hierarchy: vec![
+                    (LocalEntityId::new(1), LocalEntityId::new(0)),
+                    (LocalEntityId::new(2), LocalEntityId::new(1)),
+                ]
+                .into_boxed_slice(),
+                reserved_local_base: LocalEntityId::RESERVED_BASE,
+            },
+        )
     }
 }

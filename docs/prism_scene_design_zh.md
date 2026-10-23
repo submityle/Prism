@@ -901,6 +901,8 @@ prism_scene/
 
 ---
 
+**M6 typed snapshot restore primitive（2026-10-23）**：`SceneInstancePersistence::restore_overrides` 已在 `prism_scene` 提供 ECS-free 的对称恢复：属性优先用 `PersistentId` 在当前 `PersistentEntityMap` 中重定位，缺失映射 fail closed；无 persistent identity 的旧属性只允许同 template GUID 按 local id 回退。结构操作保持有序 opaque payload，但因目标仍是 template-local ID，只允许同 template GUID 恢复；跨模板结构迁移明确报错。重复属性 identity 折叠和 `OverrideSet::validate_for_plan` 校验失败均 fail closed。`prism_scene` 全套验证为 160 unit + 1 doctest 通过（`CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test --target-dir /private/tmp/prism-scene-restore-target -j 1 -p prism_scene --no-default-features --offline`）。该 primitive 不执行 typed component decoder、不写入 `SceneInstance` / ECS；provider 的应用层 layout 装配与 typed ECS apply、结构 identity migration、端到端 journal/provider 回滚仍未完成。
+
 ## 23. 诚实边界与风险
 
 直陈局限，不粉饰；每条给缓解。

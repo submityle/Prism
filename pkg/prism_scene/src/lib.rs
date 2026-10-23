@@ -135,7 +135,8 @@ pub use partition::{FileCellStore, PersistentEntityRef, PersistentPartition};
 pub use path::{FieldPath, FieldSegment};
 pub use persistence::{
     EntityBinding, PersistedPropertyOverride, PersistenceCapture, PersistenceDiagnostic,
-    PersistenceError, PersistentEntityMap, PersistentOverrideSet, SceneInstancePersistence,
+    PersistenceError, PersistenceRestoreError, PersistentEntityMap, PersistentOverrideSet,
+    SceneInstancePersistence,
 };
 pub use persistence_codec::{
     decode_persistence, encode_persistence, PersistenceCodecError, PersistenceDecodeLimits,
