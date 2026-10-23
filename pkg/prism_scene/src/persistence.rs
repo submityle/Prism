@@ -35,7 +35,10 @@ impl EntityBinding {
 /// A deterministic bidirectional index for template entity identities.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PersistentEntityMap {
-    bindings: Vec<EntityBinding>,
+    /// Local-id order supports deterministic serialization and local lookup.
+    by_local: Vec<EntityBinding>,
+    /// Persistent-id order makes reverse reload lookup logarithmic as well.
+    by_persistent: Vec<EntityBinding>,
 }
 
 impl PersistentEntityMap {
@@ -65,7 +68,10 @@ impl PersistentEntityMap {
                 });
             }
         }
-        Ok(Self { bindings })
+        Ok(Self {
+            by_local: bindings,
+            by_persistent,
+        })
     }
 
     /// Builds the conventional root-template identity map.
@@ -74,37 +80,42 @@ impl PersistentEntityMap {
     /// map with [`Self::new`] so their GUID chain is represented exactly.
     #[must_use]
     pub fn for_template(template: &SceneTemplate) -> Self {
-        let bindings = (0..template.entity_count())
+        let bindings: Vec<EntityBinding> = (0..template.entity_count())
             .map(|index| {
                 let local = LocalEntityId::new(index);
                 EntityBinding::new(local, PersistentId::derive(&[template.guid], &[local]))
             })
             .collect();
-        Self { bindings }
+        let mut by_persistent = bindings.clone();
+        by_persistent.sort_unstable_by_key(|binding| binding.persistent);
+        Self {
+            by_local: bindings,
+            by_persistent,
+        }
     }
 
     /// Returns the binding for a local id.
     #[must_use]
     pub fn persistent_for_local(&self, local: LocalEntityId) -> Option<PersistentId> {
-        self.bindings
+        self.by_local
             .binary_search_by_key(&local, |binding| binding.local)
             .ok()
-            .map(|index| self.bindings[index].persistent)
+            .map(|index| self.by_local[index].persistent)
     }
 
     /// Returns the local id for a persistent id.
     #[must_use]
     pub fn local_for_persistent(&self, persistent: PersistentId) -> Option<LocalEntityId> {
-        self.bindings
-            .iter()
-            .find(|binding| binding.persistent == persistent)
-            .map(|binding| binding.local)
+        self.by_persistent
+            .binary_search_by_key(&persistent, |binding| binding.persistent)
+            .ok()
+            .map(|index| self.by_persistent[index].local)
     }
 
     /// Returns all bindings in local-id order.
     #[must_use]
     pub fn bindings(&self) -> &[EntityBinding] {
-        &self.bindings
+        &self.by_local
     }
 }
 
@@ -317,5 +328,47 @@ mod tests {
             map.local_for_persistent(PersistentId::from_u128(8)),
             Some(LocalEntityId::new(4))
         );
+        assert_eq!(
+            map.persistent_for_local(LocalEntityId::new(4)),
+            Some(PersistentId::from_u128(8))
+        );
+        assert_eq!(
+            map.bindings(),
+            &[EntityBinding::new(
+                LocalEntityId::new(4),
+                PersistentId::from_u128(8)
+            )]
+        );
+    }
+
+    #[test]
+    fn reverse_identity_index_is_sorted_and_bijective() {
+        let map = PersistentEntityMap::new(vec![
+            EntityBinding::new(LocalEntityId::new(17), PersistentId::from_u128(2)),
+            EntityBinding::new(LocalEntityId::new(3), PersistentId::from_u128(91)),
+            EntityBinding::new(LocalEntityId::new(9), PersistentId::from_u128(7)),
+        ])
+        .unwrap();
+        assert_eq!(
+            map.bindings()
+                .iter()
+                .map(|entry| entry.local)
+                .collect::<Vec<_>>(),
+            vec![
+                LocalEntityId::new(3),
+                LocalEntityId::new(9),
+                LocalEntityId::new(17)
+            ]
+        );
+        for binding in map.bindings() {
+            assert_eq!(
+                map.persistent_for_local(binding.local),
+                Some(binding.persistent)
+            );
+            assert_eq!(
+                map.local_for_persistent(binding.persistent),
+                Some(binding.local)
+            );
+        }
     }
 }

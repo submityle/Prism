@@ -194,15 +194,14 @@ pub trait SceneEcsProvider {
 
     /// Applies reconstructed world state to a newly spawned cell before its
     /// ownership is published. Mapping fields into scene overrides/components
-    /// remains the provider's typed responsibility.
+    /// remains the provider's typed responsibility. This is required so a
+    /// provider cannot silently accept a persisted load without restoring it.
     fn replay_cell_persistence(
         &mut self,
-        _world: &mut World,
-        _sector: SectorId,
-        _states: &[CellPersistenceState],
-    ) -> Result<(), Self::Error> {
-        Ok(())
-    }
+        world: &mut World,
+        sector: SectorId,
+        states: &[CellPersistenceState],
+    ) -> Result<(), Self::Error>;
 }
 
 /// Configuration errors for stable residency-to-scene bindings.

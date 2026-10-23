@@ -344,21 +344,37 @@ impl ScenePersistenceSchema {
         companion_object: WorldPersistentId,
         companion_field: FieldId,
     ) -> Result<Vec<Transaction>, ScenePersistenceBridgeError> {
+        let mut filtered = batch.clone();
+        let mut filtered_ids = Vec::with_capacity(transaction_ids.len());
+        for ((object, delta), id) in filtered
+            .deltas
+            .iter_mut()
+            .zip(transaction_ids.iter().copied())
+        {
+            let changes: Vec<_> = delta
+                .iter()
+                .filter(|change| prior.get(*object, change.field) != Some(&change.value))
+                .cloned()
+                .collect();
+            *delta = OverrideDelta::new(changes)
+                .map_err(|_| ScenePersistenceBridgeError::IncompatibleValue)?;
+            if !delta.is_empty() {
+                filtered_ids.push(id);
+            }
+        }
+        filtered.deltas.retain(|(_, delta)| !delta.is_empty());
         let mut transactions = self.transactions_for_batch(
-            batch,
+            &filtered,
             prior,
             actor,
             clock,
             next_sequence,
-            transaction_ids,
+            &filtered_ids,
         )?;
-        if batch.deltas.iter().any(|(object, delta)| {
+        if filtered.deltas.iter().any(|(object, delta)| {
             *object == companion_object && delta.get(companion_field).is_some()
         }) {
             return Err(ScenePersistenceBridgeError::CompanionFieldCollision);
-        }
-        if transaction_ids.contains(&companion_transaction_id) {
-            return Err(ScenePersistenceBridgeError::DuplicateTransactionId);
         }
         let sequence = next_sequence
             .checked_add(
@@ -371,6 +387,9 @@ impl ScenePersistenceSchema {
             .map_err(|_| ScenePersistenceBridgeError::InvalidCompanionSnapshot)?;
         if prior.get(companion_object, companion_field) == Some(&WorldValue::Bytes(bytes.clone())) {
             return Ok(transactions);
+        }
+        if filtered_ids.contains(&companion_transaction_id) {
+            return Err(ScenePersistenceBridgeError::DuplicateTransactionId);
         }
         let delta = OverrideDelta::single(companion_field, WorldValue::Bytes(bytes))
             .map_err(|_| ScenePersistenceBridgeError::IncompatibleValue)?;
