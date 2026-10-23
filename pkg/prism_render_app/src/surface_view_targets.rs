@@ -24,6 +24,11 @@ use prism_window::WindowId;
 
 use crate::{RenderTarget, RenderViewport};
 
+/// Four-f32 fragment immediate slot used by the camera-local HDR upscaler.
+/// Only `.x` carries exposure stops today; the full 16-byte window preserves
+/// the RHI's alignment contract for future local camera parameters.
+pub(crate) const SURFACE_VIEW_UPSCALE_PUSH_CONSTANT_BYTES: u32 = 16;
+
 /// Convert an output rectangle to the local raster extent requested by a
 /// camera. Invalid scales fail open to full resolution; valid scales use
 /// ceiling so no output edge is undersampled by integer truncation.
@@ -148,7 +153,11 @@ impl<D: RenderDevice> SurfaceViewUpscaler<D> {
         let layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
             label: Some("camera HDR upscale layout".into()),
             bind_group_layouts: vec![bindings],
-            push_constant_ranges: vec![],
+            push_constant_ranges: vec![PushConstantRange {
+                stages: ShaderStages::FRAGMENT,
+                start: 0,
+                end: SURFACE_VIEW_UPSCALE_PUSH_CONSTANT_BYTES,
+            }],
         });
         let pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
             label: Some("camera HDR upscale pipeline".into()),

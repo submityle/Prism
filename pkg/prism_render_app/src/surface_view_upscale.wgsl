@@ -4,6 +4,7 @@ struct VertexOutput {
 }
 
 @group(0) @binding(0) var source: texture_2d<f32>;
+var<immediate> params: vec4<f32>;
 
 @vertex
 fn vs_main(@builtin(vertex_index) index: u32) -> VertexOutput {
@@ -26,5 +27,6 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let b = textureLoad(source, vec2<i32>(upper.x, lower.y), 0);
     let c = textureLoad(source, vec2<i32>(lower.x, upper.y), 0);
     let d = textureLoad(source, vec2<i32>(upper.x, upper.y), 0);
-    return mix(mix(a, b, weight.x), mix(c, d, weight.x), weight.y);
+    let hdr = mix(mix(a, b, weight.x), mix(c, d, weight.x), weight.y);
+    return vec4<f32>(hdr.rgb * exp2(params.x), hdr.a);
 }

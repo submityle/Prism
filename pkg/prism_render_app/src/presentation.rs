@@ -1017,6 +1017,7 @@ impl<I: Instance + 'static> WindowRenderTargets<I> {
                     order: camera.surface.order,
                     clear: camera.surface.clear,
                     viewport: camera.surface.viewport,
+                    exposure_stops: camera.surface.exposure_stops,
                     target,
                     queues: &camera.queues,
                     lighting,

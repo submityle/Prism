@@ -4,8 +4,8 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::convert::TryFrom;
 use prism_scene::{
-    ComponentTypeId, FieldPath, OverrideValue as SceneValue, PersistedPropertyOverride,
-    PersistentEntityMap, SceneInstancePersistence,
+    encode_persistence, ComponentTypeId, FieldPath, OverrideValue as SceneValue,
+    PersistedPropertyOverride, PersistentEntityMap, SceneInstancePersistence,
 };
 use prism_world_persist::{
     ActorId, FieldId, FieldOverride, LogicalClock, OverrideDelta, OverrideValue as WorldValue,
@@ -142,6 +142,10 @@ pub enum ScenePersistenceBridgeError {
     TransactionIdCountMismatch,
     /// Transaction sequence arithmetic exceeded the wire-domain limit.
     TransactionSequenceExhausted,
+    /// The companion snapshot could not be encoded as canonical PRSI bytes.
+    InvalidCompanionSnapshot,
+    /// The companion binding aliases a sparse property field in the same batch.
+    CompanionFieldCollision,
 }
 
 impl ScenePersistenceSchema {
@@ -317,6 +321,73 @@ impl ScenePersistenceSchema {
         Ok(transactions)
     }
 
+    /// Adds the encoded scene-only companion state as one explicitly bound
+    /// opaque world field, so properties and ordered structural metadata can
+    /// be committed by the same durable journal batch. The companion is kept
+    /// separate from sparse property fields and is never interpreted as LWW
+    /// structural operations.
+    pub fn transactions_for_batch_with_companion(
+        &self,
+        batch: &ScenePersistenceBatch,
+        prior: &WorldState,
+        actor: ActorId,
+        clock: LogicalClock,
+        next_sequence: u64,
+        transaction_ids: &[TransactionId],
+        companion_transaction_id: TransactionId,
+        companion_object: WorldPersistentId,
+        companion_field: FieldId,
+    ) -> Result<Vec<Transaction>, ScenePersistenceBridgeError> {
+        let mut transactions = self.transactions_for_batch(
+            batch,
+            prior,
+            actor,
+            clock,
+            next_sequence,
+            transaction_ids,
+        )?;
+        if batch.deltas.iter().any(|(object, delta)| {
+            *object == companion_object && delta.get(companion_field).is_some()
+        }) {
+            return Err(ScenePersistenceBridgeError::CompanionFieldCollision);
+        }
+        let sequence = next_sequence
+            .checked_add(
+                u64::try_from(transactions.len())
+                    .map_err(|_| ScenePersistenceBridgeError::TransactionSequenceExhausted)?,
+            )
+            .filter(|sequence| *sequence < u64::MAX)
+            .ok_or(ScenePersistenceBridgeError::TransactionSequenceExhausted)?;
+        let bytes = encode_persistence(&batch.scene_snapshot)
+            .map_err(|_| ScenePersistenceBridgeError::InvalidCompanionSnapshot)?;
+        let delta = OverrideDelta::single(companion_field, WorldValue::Bytes(bytes))
+            .map_err(|_| ScenePersistenceBridgeError::IncompatibleValue)?;
+        let inverse = OverrideDelta::single(
+            companion_field,
+            prior
+                .get(companion_object, companion_field)
+                .cloned()
+                .unwrap_or(WorldValue::Delete),
+        )
+        .map_err(|_| ScenePersistenceBridgeError::IncompatibleValue)?;
+        if transaction_ids.contains(&companion_transaction_id) {
+            return Err(ScenePersistenceBridgeError::TransactionIdCountMismatch);
+        }
+        transactions.push(
+            Transaction::new(
+                companion_transaction_id,
+                actor,
+                clock,
+                sequence,
+                companion_object,
+                delta,
+                inverse,
+            )
+            .map_err(|_| ScenePersistenceBridgeError::IncompatibleValue)?,
+        );
+        Ok(transactions)
+    }
+
     /// Reconstructs property rows from the world state for entities in `identities`.
     /// Template metadata and ordered structural operations are copied from the
     /// supplied scene snapshot; only registered world fields are consumed.
@@ -390,6 +461,7 @@ mod tests {
         SceneEntityMap, SceneFieldBinding, SceneFieldValueKind, SceneObjectBinding,
         ScenePersistenceBridgeError, ScenePersistenceSchema,
     };
+    use alloc::format;
     use alloc::vec;
     use alloc::vec::Vec;
     use prism_asset::StableGuid;
@@ -398,7 +470,7 @@ mod tests {
         PersistedPropertyOverride, PersistentEntityMap, PersistentId, SceneInstancePersistence,
     };
     use prism_world_persist::{
-        ActorId, FieldId, LogicalClock, OverrideDelta, OverrideValue as WorldValue,
+        ActorId, FieldId, FileJournal, LogicalClock, OverrideDelta, OverrideValue as WorldValue,
         PersistentId as WorldPersistentId, Snapshot, Timeline, TransactionId, WorldState,
     };
 
@@ -553,6 +625,73 @@ mod tests {
                 .get(FieldId(101)),
             Some(&WorldValue::Integer(7))
         );
+    }
+
+    #[test]
+    fn durable_companion_and_sparse_property_commit_reopen_as_one_batch() {
+        let schema = schema();
+        let snapshot = SceneInstancePersistence {
+            structural: vec![prism_scene::StructuralOp::RemoveEntity {
+                local: LocalEntityId::new(8),
+            }],
+            ..scene_snapshot()
+        };
+        let identities = PersistentEntityMap::new(vec![EntityBinding::new(
+            LocalEntityId::new(3),
+            PersistentId::from_u128(77),
+        )])
+        .unwrap();
+        let prior = WorldState::new();
+        let batch = schema
+            .snapshot_to_deltas(&snapshot, &identities, &entity_map(), &prior)
+            .unwrap();
+        let transactions = schema
+            .transactions_for_batch_with_companion(
+                &batch,
+                &prior,
+                ActorId(2),
+                LogicalClock(1),
+                0,
+                &[TransactionId(1)],
+                TransactionId(2),
+                WorldPersistentId(9900),
+                FieldId(900),
+            )
+            .unwrap();
+        assert_eq!(transactions.len(), 2);
+        assert_eq!(transactions[0].sequence(), 0);
+        assert_eq!(transactions[1].sequence(), 1);
+        assert!(matches!(
+            transactions[1].delta().get(FieldId(900)),
+            Some(WorldValue::Bytes(_))
+        ));
+
+        let path = std::env::temp_dir().join(format!(
+            "prism-scene-companion-{}-{}.pwrj",
+            std::process::id(),
+            TransactionId(2).0
+        ));
+        {
+            let mut journal = FileJournal::open(&path).unwrap();
+            journal.append_batch(&transactions).unwrap();
+        }
+        let reopened = FileJournal::open(&path).unwrap();
+        let replayed =
+            Timeline::replay(&Snapshot::new(0, WorldState::new()), reopened.log()).unwrap();
+        let bytes = match replayed.get(WorldPersistentId(9900), FieldId(900)).unwrap() {
+            WorldValue::Bytes(bytes) => bytes,
+            other => panic!("unexpected companion value: {other:?}"),
+        };
+        assert_eq!(
+            prism_scene::decode_persistence(bytes, Default::default()).unwrap(),
+            batch.scene_snapshot
+        );
+        assert_eq!(
+            replayed.get(WorldPersistentId(7700), FieldId(101)),
+            Some(&WorldValue::Integer(42))
+        );
+        drop(reopened);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
