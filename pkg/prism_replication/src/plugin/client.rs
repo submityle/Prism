@@ -110,7 +110,7 @@ pub struct Replication<S: ReplicationStrategy> {
     mux: ChannelMux<Box<dyn Transport>>,
     config: ReplicationConfig,
     connection: ConnectionState,
-    next_rpc_id: u64,
+    next_rpc_id: Option<u64>,
     inbound_events: VecDeque<Vec<u8>>,
     inbound_rpcs: VecDeque<Vec<u8>>,
     inbound_inputs: VecDeque<Vec<u8>>,
@@ -191,7 +191,7 @@ impl<S: ReplicationStrategy> Replication<S> {
             mux,
             config,
             connection,
-            next_rpc_id: 0,
+            next_rpc_id: Some(0),
             inbound_events: VecDeque::new(),
             inbound_rpcs: VecDeque::new(),
             inbound_inputs: VecDeque::new(),
@@ -673,6 +673,9 @@ impl<S: ReplicationStrategy> Replication<S> {
             self.last_send_error = Some(MuxSendError::ConnectionNotEstablished);
             return Ok(None);
         }
+        if self.next_rpc_id.is_none() {
+            return Err(SessionError::RpcIdentityExhausted);
+        }
         let bytes = self.strategy.encode(&input);
         let frame = encode_rpc(&bytes);
         if let Err(error) = self.mux.check_send(NetChannel::RpcReliable, frame.len()) {
@@ -690,8 +693,8 @@ impl<S: ReplicationStrategy> Replication<S> {
         session.predict(input, |record, input| strategy.simulate(record, input))?;
         mux.send(NetChannel::RpcReliable, &frame)
             .expect("send preflight and queue mutation are contiguous");
-        let id = *next_rpc_id;
-        *next_rpc_id = next_rpc_id.wrapping_add(1);
+        let id = next_rpc_id.expect("identity availability checked before prediction");
+        *next_rpc_id = id.checked_add(1);
         Ok(Some(id))
     }
 
@@ -707,6 +710,10 @@ impl<S: ReplicationStrategy> Replication<S> {
     /// Queue one reliable ordered RPC/control payload and return its local call
     /// sequence. Backpressure and MTU failures are explicit.
     pub fn try_send_rpc(&mut self, bytes: &[u8]) -> Result<u64, MuxSendError> {
+        let Some(id) = self.next_rpc_id else {
+            self.last_send_error = Some(MuxSendError::RpcIdentityExhausted);
+            return Err(MuxSendError::RpcIdentityExhausted);
+        };
         if matches!(self.connection, ConnectionState::Rejected(_)) {
             let error = MuxSendError::ConnectionNotEstablished;
             self.last_send_error = Some(error);
@@ -717,8 +724,7 @@ impl<S: ReplicationStrategy> Replication<S> {
             self.last_send_error = Some(error);
             return Err(error);
         }
-        let id = self.next_rpc_id;
-        self.next_rpc_id = self.next_rpc_id.wrapping_add(1);
+        self.next_rpc_id = id.checked_add(1);
         Ok(id)
     }
 
@@ -1161,6 +1167,33 @@ mod tests {
             replication.take_send_error(),
             Some(MuxSendError::Backpressured(NetChannel::RpcReliable))
         ));
+    }
+
+    #[test]
+    fn rpc_identity_exhaustion_does_not_queue_or_predict() {
+        let (client_end, _server_end) = InMemoryTransport::pair_secure();
+        let mut app = App::new();
+        app.add_plugins(ReplicationPlugin::new(
+            schema(),
+            8,
+            snapshot_at(0, 0),
+            Add,
+            Box::new(client_end),
+        ));
+        let replication = app.world_mut().resource_mut::<Replication<Add>>();
+        replication.next_rpc_id = None;
+        let unacked_before = replication.unacked();
+        assert_eq!(
+            replication.predict_and_send(3),
+            Err(SessionError::RpcIdentityExhausted)
+        );
+        assert_eq!(replication.predicted(), 0);
+        assert_eq!(replication.unacked(), unacked_before);
+        assert_eq!(
+            replication.try_send_rpc(b"no id"),
+            Err(MuxSendError::RpcIdentityExhausted)
+        );
+        assert_eq!(replication.unacked(), unacked_before);
     }
 
     #[test]

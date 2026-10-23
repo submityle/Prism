@@ -44,6 +44,8 @@ pub enum SessionError {
     Prediction(PredictionError),
     /// The server has no authoritative baseline to serve.
     NoBaseline,
+    /// The local RPC call identity space is exhausted and cannot safely wrap.
+    RpcIdentityExhausted,
     /// A revision counter would overflow `u32`.
     RevisionOverflow(u32),
     /// The negotiated rollback window already contains the maximum number of

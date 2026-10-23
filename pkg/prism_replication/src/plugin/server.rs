@@ -56,7 +56,7 @@ pub struct ServerReplication<S: ServerStrategy> {
     mux: ChannelMux<Box<dyn Transport>>,
     config: ReplicationConfig,
     connection: ConnectionState,
-    next_rpc_id: u64,
+    next_rpc_id: Option<u64>,
     pending_commands: VecDeque<QueuedInboundCommand>,
     next_inbound_command_id: Option<u64>,
     leased_inbound_command: Option<u64>,
@@ -147,7 +147,7 @@ impl<S: ServerStrategy> ServerReplication<S> {
             mux,
             config,
             connection,
-            next_rpc_id: 0,
+            next_rpc_id: Some(0),
             pending_commands: VecDeque::new(),
             next_inbound_command_id: Some(0),
             leased_inbound_command: None,
@@ -710,11 +710,14 @@ impl<S: ServerStrategy> ServerReplication<S> {
     /// Queue a reliable RPC response/control payload.
     pub fn send_rpc(&mut self, bytes: &[u8]) -> Result<u64, MuxSendError> {
         self.require_established()?;
+        let Some(id) = self.next_rpc_id else {
+            self.last_send_error = Some(MuxSendError::RpcIdentityExhausted);
+            return Err(MuxSendError::RpcIdentityExhausted);
+        };
         let rpc = encode_rpc(bytes);
         let result = self.mux.send(NetChannel::RpcReliable, &rpc);
         self.record_send(result)?;
-        let id = self.next_rpc_id;
-        self.next_rpc_id = self.next_rpc_id.wrapping_add(1);
+        self.next_rpc_id = id.checked_add(1);
         Ok(id)
     }
 
@@ -1094,6 +1097,22 @@ mod tests {
         assert_eq!(second_payload, b"second");
         assert!(server.acknowledge_inbound_command(second_id));
         assert!(server.lease_inbound_command().is_none());
+    }
+
+    #[test]
+    fn server_rpc_identity_exhaustion_does_not_queue_response() {
+        let (mut client, mut server) = memory_pair(
+            ReplicationConfig::for_capacity(8),
+            ReplicationConfig::for_capacity(8),
+        );
+        drive(&mut client, &mut server);
+        server.next_rpc_id = None;
+        let queued_before = server.mux.queued(NetChannel::RpcReliable);
+        assert_eq!(
+            server.send_rpc(b"no id"),
+            Err(MuxSendError::RpcIdentityExhausted)
+        );
+        assert_eq!(server.mux.queued(NetChannel::RpcReliable), queued_before);
     }
 
     #[test]

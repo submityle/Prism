@@ -253,6 +253,8 @@ pub enum MuxSendError {
     },
     /// The bounded reliable queue is full. The caller must retry later.
     Backpressured(NetChannel),
+    /// The local RPC call identity space is exhausted and cannot safely wrap.
+    RpcIdentityExhausted,
 }
 
 /// Result of accepting unreliable traffic.
