@@ -106,6 +106,9 @@ pub enum SurfaceViewExecutionError {
     Target(crate::surface_view_targets::SurfaceViewTargetError),
     /// Target/lighting declarations failed the graph's admission contract.
     GraphAdmission,
+    /// The canonical material and execution-table snapshots are not available
+    /// for this frame; a simplified non-material composite must not be used.
+    MaterialSnapshotUnavailable,
 }
 
 /// One camera whose output-space viewport is outside a selected output.

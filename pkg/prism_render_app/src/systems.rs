@@ -115,9 +115,21 @@ mod composite_material_admission_tests {
 
     #[test]
     fn missing_one_canonical_snapshot_rejects_the_composite_pair() {
-        let device = prism_render_driver_null::NullDevice::default();
-        let material_buffers =
-            MaterialParameterBuffers::new(&device, 2, 64, 8, prism_render_driver::BufferUsages::NONE);
+        let instance = prism_render_driver_null::NullInstance::new();
+        let adapter = instance
+            .request_adapter(&prism_render_driver::RequestAdapterOptions::default())
+            .expect("the null backend always has an adapter");
+        let device = instance
+            .create_device(&adapter, &prism_render_driver::DeviceDescriptor::default())
+            .expect("the null backend always creates a device")
+            .0;
+        let material_buffers = MaterialParameterBuffers::new_owned(
+            std::sync::Arc::new(device),
+            2,
+            64,
+            8,
+            prism_render_driver::BufferUsages::NONE,
+        );
         let execution_buffers = NativeExecutionTableBuffers::new();
         assert!(material_buffers.snapshot().is_some());
         assert!(execution_buffers.snapshot().is_none());
