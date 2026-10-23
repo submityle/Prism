@@ -1346,6 +1346,10 @@ renderer 接线期间，`CameraIntent`/`ViewData` 的每视图可见性元数据
 
 该 feature 是可选构图数据能力，不会自动接入编辑器 UI，也不应描述为“编辑器关闭时不进入运行时包”：是否编入由应用的 Cargo feature 选择决定。Prism Editor 已有端到端数据与绘制接线：`PublishedCompositionGizmos` 与同帧 `PublishedViews` 输入 `CompositionFrame::update`，把每条归一化线段映射到 editor viewport 的物理像素；`CompositionGuidePainter` 上传复用顶点缓冲并用 `LineList` alpha 混合绘制到预览目标，load/store 保留已有画面并限制在 viewport scissor。`DesktopSceneRenderer::encode_preview` 调用 gizmo 与 composition 绘制；`consumes_published_camera_guides_maps_pixels_and_clears_without_stale_vertices` 验证像素映射、draw command 和空帧清理/容量复用。已证实的是实际 GPU draw command 路径及 CPU 几何合同；当前没有专门的强制物理 GPU composition pixel-readback 测试，因此不把视觉像素输出记作硬件验收完成。
 
+#### 28.10.1 ECS 相机回归验证补充（2026-10-23）
+
+`CARGO_TARGET_DIR=/private/tmp/prism-camera-ecs-verify CARGO_PROFILE_TEST_DEBUG=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 cargo test -p prism_camera_ecs --all-features --lib --offline`：21 passed、0 failed。首次运行暴露 `pending_track_events_are_retryable_until_acknowledged` 测试 fixture 使用 `Entity::from_bits(11)`，其 generation 为零，按 ECS entity contract 属于无效 bit pattern；将 fixture 改为非零 generation 后，事件队列行为测试与完整 ECS 相机库测试通过。该修复只改变测试输入，不改变运行时 Entity 或事件队列语义。
+
 ---
 
 > 小结：`prism_camera` 以「意图 vs 结果」分离为骨架，把 AAA 相机的四大难点——**时域正确（jitter/历史/运动矢量）、大世界精度（相机相对渲染）、电影级手感（导演混合 + 弹簧臂避障 + 物理镜头曝光）、多视图共享（view_family 聚合预算）**——分别落在清晰的契约职责中，核心 `no_std`、可逐 feature 裁剪、下游经 `ViewRegistry` 单向解耦。它取代 `bevy_camera` 的「巨组件 + 示例级控制器」，升格为一等的取景与导演内核。

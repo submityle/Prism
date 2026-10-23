@@ -1837,7 +1837,7 @@ mod tests {
     #[test]
     fn pending_track_events_are_retryable_until_acknowledged() {
         let mut pending = PendingCameraTrackEvents::with_capacity(2);
-        let camera = Entity::from_bits(11).unwrap();
+        let camera = Entity::from_bits((1_u64 << 32) | 11).unwrap();
         assert!(pending.enqueue(&[
             CameraTrackEvent {
                 camera,
