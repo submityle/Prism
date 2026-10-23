@@ -450,6 +450,101 @@ pub fn encode_projected_hair_segments_le(
     Ok(bytes)
 }
 
+/// One groom and its object-to-clip transform for a shared Hair visibility
+/// buffer.
+#[derive(Clone, Copy, Debug)]
+pub struct HairRasterGroomInput<'a> {
+    pub clip_from_world: &'a [[f32; 4]; 4],
+    pub groom: &'a ResampledGroom,
+}
+
+/// Address range for one groom in a compact multi-groom segment upload.
+///
+/// `first_segment_id..first_segment_id + segment_count` describes the groom's
+/// stable logical segment IDs, including segments clipped out of the view.
+/// `upload_offset_bytes` and `visible_segment_count` address only records that
+/// survived projection and are present in [`HairRasterUploadBatch::bytes`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HairRasterGroomUpload {
+    pub first_segment_id: u32,
+    pub segment_count: u32,
+    pub upload_offset_bytes: u64,
+    pub visible_segment_count: u32,
+}
+
+/// Compact little-endian upload for multiple grooms sharing one visibility
+/// buffer, with stable non-overlapping IDs and per-groom byte ranges.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct HairRasterUploadBatch {
+    pub bytes: Vec<u8>,
+    pub grooms: Vec<HairRasterGroomUpload>,
+}
+
+fn next_hair_segment_id(
+    first_segment_id: u32,
+    segment_count: u32,
+) -> Result<u32, ProjectedHairRasterSegmentError> {
+    first_segment_id
+        .checked_add(segment_count)
+        .ok_or(ProjectedHairRasterSegmentError::SegmentIdOutOfRange)
+}
+
+/// Projects and packs a deterministic multi-groom visibility input.
+///
+/// IDs are assigned in input order using each groom's full logical segment
+/// count, so clipping never renumbers later segments or grooms. Visible records
+/// are compacted into one upload slab while retaining their assigned IDs. This
+/// avoids per-groom GPU buffers and gives downstream shading an exact mapping
+/// from each groom's logical segment range to its compact upload subrange.
+pub fn project_hair_raster_upload_batch(
+    inputs: &[HairRasterGroomInput<'_>],
+    viewport: [u32; 2],
+) -> Result<HairRasterUploadBatch, ProjectedHairRasterSegmentError> {
+    let mut batch = HairRasterUploadBatch {
+        bytes: Vec::new(),
+        grooms: Vec::new(),
+    };
+    batch
+        .grooms
+        .try_reserve_exact(inputs.len())
+        .map_err(|_| ProjectedHairRasterSegmentError::UploadSizeOutOfRange)?;
+
+    let mut first_segment_id = 0_u32;
+    for input in inputs {
+        let projected = project_resampled_groom_with_id_base(
+            input.clip_from_world,
+            input.groom,
+            viewport,
+            first_segment_id,
+        )?;
+        let segment_count = u32::try_from(projected.len())
+            .map_err(|_| ProjectedHairRasterSegmentError::SegmentCountOutOfRange)?;
+        let visible_segment_count = u32::try_from(projected.iter().flatten().count())
+            .map_err(|_| ProjectedHairRasterSegmentError::SegmentCountOutOfRange)?;
+        let upload_offset_bytes = u64::try_from(batch.bytes.len())
+            .map_err(|_| ProjectedHairRasterSegmentError::UploadSizeOutOfRange)?;
+        let encoded_byte_len = usize::try_from(visible_segment_count)
+            .ok()
+            .and_then(|count| count.checked_mul(32))
+            .ok_or(ProjectedHairRasterSegmentError::UploadSizeOutOfRange)?;
+        batch
+            .bytes
+            .try_reserve(encoded_byte_len)
+            .map_err(|_| ProjectedHairRasterSegmentError::UploadSizeOutOfRange)?;
+        for segment in projected.into_iter().flatten() {
+            batch.bytes.extend_from_slice(&segment.encode_le());
+        }
+        batch.grooms.push(HairRasterGroomUpload {
+            first_segment_id,
+            segment_count,
+            upload_offset_bytes,
+            visible_segment_count,
+        });
+        first_segment_id = next_hair_segment_id(first_segment_id, segment_count)?;
+    }
+    Ok(batch)
+}
+
 /// Why a projected hair segment could not be encoded for the GPU rasterizer.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProjectedHairRasterSegmentError {
@@ -1047,6 +1142,81 @@ mod tests {
         );
         assert_eq!(
             project_resampled_groom_with_id_base(&identity, &groom, [100, 100], u32::MAX - 2,),
+            Err(ProjectedHairRasterSegmentError::SegmentIdOutOfRange)
+        );
+    }
+
+    #[test]
+    fn multi_groom_upload_keeps_stable_ids_when_segments_are_clipped() {
+        use super::super::dynamics::Vec3;
+        use super::super::groom_import::StrandAttributes;
+
+        let identity = [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ];
+        let visible = ResampledGroom {
+            points_per_strand: 3,
+            positions: vec![
+                Vec3::new(-0.5, 0.0, 0.5),
+                Vec3::new(0.0, 0.0, 0.5),
+                Vec3::new(0.5, 0.0, 0.5),
+            ],
+            attributes: vec![StrandAttributes::new(0.1, 0.05, [0.0; 2], 1)],
+        };
+        let clipped = ResampledGroom {
+            points_per_strand: 3,
+            positions: vec![
+                Vec3::new(0.0, 0.0, -0.5),
+                Vec3::new(0.0, 0.0, -0.25),
+                Vec3::new(0.0, 0.0, 0.5),
+            ],
+            attributes: vec![StrandAttributes::new(0.1, 0.05, [0.0; 2], 2)],
+        };
+        let batch = project_hair_raster_upload_batch(
+            &[
+                HairRasterGroomInput {
+                    clip_from_world: &identity,
+                    groom: &visible,
+                },
+                HairRasterGroomInput {
+                    clip_from_world: &identity,
+                    groom: &clipped,
+                },
+            ],
+            [64, 64],
+        )
+        .unwrap();
+
+        assert_eq!(batch.grooms.len(), 2);
+        assert_eq!(batch.grooms[0].first_segment_id, 0);
+        assert_eq!(batch.grooms[0].segment_count, 2);
+        assert_eq!(batch.grooms[0].upload_offset_bytes, 0);
+        assert_eq!(batch.grooms[0].visible_segment_count, 2);
+        assert_eq!(batch.grooms[1].first_segment_id, 2);
+        assert_eq!(batch.grooms[1].segment_count, 2);
+        assert_eq!(batch.grooms[1].upload_offset_bytes, 64);
+        assert_eq!(batch.grooms[1].visible_segment_count, 1);
+        assert_eq!(batch.bytes.len(), 96);
+        assert_eq!(
+            u32::from_le_bytes(batch.bytes[64 + 28..64 + 32].try_into().unwrap()),
+            3
+        );
+    }
+
+    #[test]
+    fn multi_groom_upload_handles_empty_batch_and_checks_global_id_overflow() {
+        use super::next_hair_segment_id;
+
+        assert_eq!(
+            project_hair_raster_upload_batch(&[], [64, 64]).unwrap(),
+            HairRasterUploadBatch::default()
+        );
+        assert_eq!(next_hair_segment_id(u32::MAX - 1, 1), Ok(u32::MAX));
+        assert_eq!(
+            next_hair_segment_id(u32::MAX, 1),
             Err(ProjectedHairRasterSegmentError::SegmentIdOutOfRange)
         );
     }
