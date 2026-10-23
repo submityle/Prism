@@ -22,60 +22,56 @@ fn device() -> prism_render_driver_null::NullDevice {
         .0
 }
 
-fn upscale_ids(
-    device: &impl RenderDevice,
+fn upscale_ids<D: RenderDevice + Clone + Send + Sync + 'static>(
+    device: &D,
 ) -> (RenderPipelineId, prism_render_driver::BindGroupLayoutId) {
-    use prism_render_driver::*;
-    let shader = device.create_shader_module(&ShaderModuleDescriptor::wgsl(include_str!(
-        "../../surface_view_upscale.wgsl"
-    )));
-    let bindings = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-        label: Some("test camera upscale bindings".into()),
-        entries: vec![BindGroupLayoutEntry {
-            binding: 0,
-            visibility: ShaderStages::FRAGMENT,
-            ty: BindingType::Texture {
-                sample_type: TextureSampleType::Float,
-                view_dimension: TextureViewDimension::D2,
-                multisampled: false,
-            },
-            count: None,
-        }],
-    });
-    let layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
-        label: Some("test camera upscale layout".into()),
-        bind_group_layouts: vec![bindings],
-        push_constant_ranges: vec![PushConstantRange {
-            stages: ShaderStages::FRAGMENT,
-            start: 0,
-            end: 16,
-        }],
-    });
-    let pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
-        label: Some("test camera upscale".into()),
-        layout: Some(layout),
-        vertex: VertexState {
-            module: shader,
-            entry_point: "vs_main".into(),
-            buffers: vec![],
-        },
-        primitive: PrimitiveState {
-            cull_mode: None,
-            ..Default::default()
-        },
-        depth_stencil: None,
-        multisample: MultisampleState::default(),
-        fragment: Some(FragmentState {
-            module: shader,
-            entry_point: "fs_main".into(),
-            targets: vec![Some(ColorTargetState::opaque(crate::RENDER_TARGET_FORMAT))],
-        }),
-    });
-    (pipeline, bindings)
+    let upscaler = crate::surface_view_targets::SurfaceViewUpscaler::new(alloc::sync::Arc::new(
+        device.clone(),
+    ));
+    (upscaler.pipeline(), upscaler.bindings())
 }
 
 fn camera(index: u32) -> Entity {
     Entity::from_bits((1_u64 << 32) | u64::from(index)).expect("valid test entity")
+}
+
+fn test_surface(camera: Entity, viewport: [u32; 4]) -> crate::SurfaceView {
+    crate::SurfaceView {
+        camera,
+        target: prism_camera::RenderTarget::PrimaryWindow,
+        clear: ClearMode::ColorAndDepth,
+        order: 0,
+        clip_from_world: [[1.0, 0.0, 0.0, 0.0]; 4],
+        previous_clip_from_world: [[1.0, 0.0, 0.0, 0.0]; 4],
+        viewport,
+        history_epoch: 0,
+        history_valid: false,
+        resolution_scale: 1.0,
+        history_frames: 0,
+        exposure_stops: 0.0,
+    }
+}
+
+fn finalize_test_graph(
+    prepared: PreparedSurfaceViewGraph,
+    particle: Option<&crate::particle::ParticleGpuState>,
+    frame_index: u64,
+) -> Result<(RenderGraph, TextureHandle), DisplayTransformGpuError> {
+    let runtime = prism_render_runtime::RenderRuntime::headless(
+        NullInstance::default(),
+        Extent3d::new_2d(1, 1),
+    )
+        .expect("null render runtime initializes");
+    finalize_surface_view_graph(
+        prepared,
+        particle,
+        None,
+        &BTreeMap::new(),
+        frame_index,
+        Some(&runtime),
+        crate::TaaOutput::PrimaryWindow,
+        &mut crate::TaaHistoryCache::default(),
+    )
 }
 
 fn sampled_queue(view: TextureViewId) -> (RenderQueues, DrawFunctions) {
@@ -127,6 +123,20 @@ fn surface_view_input<'a>(
         viewport: [0, 0, 8, 8],
         exposure_stops: 0.0,
         target,
+        surface: crate::SurfaceView {
+            camera: camera(1),
+            target: prism_camera::RenderTarget::PrimaryWindow,
+            clear: ClearMode::ColorAndDepth,
+            order: 0,
+            clip_from_world: [[1.0, 0.0, 0.0, 0.0]; 4],
+            previous_clip_from_world: [[1.0, 0.0, 0.0, 0.0]; 4],
+            viewport: [0, 0, 8, 8],
+            history_epoch: 0,
+            history_valid: false,
+            resolution_scale: 1.0,
+            history_frames: 0,
+            exposure_stops: 0.0,
+        },
         queues,
         lighting: None,
         upscale_pipeline: RenderPipelineId::from_parts(30, 1),
@@ -151,6 +161,7 @@ fn surface_graph_rejects_missing_sampled_texture_import_without_panicking() {
         None,
         &views,
         &FrameGraphTextureImports::default(),
+        crate::TaaOutput::PrimaryWindow,
     );
     match result {
         Err(SurfaceViewGraphError::MissingExternalTextureImport(actual)) => {
@@ -190,7 +201,16 @@ fn surface_graph_resolves_sampled_texture_import_before_target_append() {
     let views = [surface_view_input(&local, &queues)];
 
     let prepared =
-        prepare_surface_view_graph(&output, &queues, &functions, None, None, &views, &imports)
+        prepare_surface_view_graph(
+            &output,
+            &queues,
+            &functions,
+            None,
+            None,
+            &views,
+            &imports,
+            crate::TaaOutput::PrimaryWindow,
+        )
             .expect("published sampled texture import is resolved during target construction");
     assert!(prepared.textures.contains_key(&view));
     assert!(prepared.graph.compile().is_ok());
@@ -218,6 +238,7 @@ fn surface_graph_resolves_per_camera_clear_loads_in_stable_composition_order() {
             clear: ClearMode::None,
             viewport: [0, 0, 8, 8],
             target: &third,
+            surface: test_surface(camera(3), [0, 0, 8, 8]),
             queues: &queues,
             lighting: None,
             exposure_stops: 0.0,
@@ -230,6 +251,7 @@ fn surface_graph_resolves_per_camera_clear_loads_in_stable_composition_order() {
             clear: ClearMode::Inherit,
             viewport: [0, 0, 8, 8],
             target: &first,
+            surface: test_surface(camera(1), [0, 0, 8, 8]),
             queues: &queues,
             lighting: None,
             exposure_stops: 0.0,
@@ -242,6 +264,7 @@ fn surface_graph_resolves_per_camera_clear_loads_in_stable_composition_order() {
             clear: ClearMode::DepthOnly,
             viewport: [0, 0, 8, 8],
             target: &second,
+            surface: test_surface(camera(2), [0, 0, 8, 8]),
             queues: &queues,
             lighting: None,
             exposure_stops: 0.0,
@@ -258,6 +281,7 @@ fn surface_graph_resolves_per_camera_clear_loads_in_stable_composition_order() {
         None,
         &views,
         &FrameGraphTextureImports::default(),
+        crate::TaaOutput::PrimaryWindow,
     )
     .expect("all clear modes form a valid graph");
     let plan = prepared.graph.compile().expect("clear graph compiles");
@@ -384,6 +408,7 @@ fn physical_gpu_camera_clear_modes_preserve_or_clear_private_hdr_attachments() {
             clear: mode,
             viewport: [0, 0, extent.width, extent.height],
             target: &local,
+            surface: test_surface(camera(1), [0, 0, extent.width, extent.height]),
             queues: &queues,
             lighting: None,
             exposure_stops: 0.0,
@@ -398,9 +423,10 @@ fn physical_gpu_camera_clear_modes_preserve_or_clear_private_hdr_attachments() {
             None,
             &views,
             &FrameGraphTextureImports::default(),
+            crate::TaaOutput::PrimaryWindow,
         )
         .expect("physical camera clear graph is valid");
-        let (graph, _) = finalize_surface_view_graph(prepared, None, None, &BTreeMap::new(), 0)
+        let (graph, _) = finalize_test_graph(prepared, None, 0)
             .expect("camera output composition graph is valid");
         let recorded = graph
             .execute(&device, &queue)
@@ -432,6 +458,7 @@ fn surface_graph_rejects_duplicate_camera_before_declaring_any_target_graph() {
             clear: ClearMode::Inherit,
             viewport: [0, 0, 8, 8],
             target: &first,
+            surface: test_surface(camera(7), [0, 0, 8, 8]),
             queues: &queues,
             lighting: None,
             exposure_stops: 0.0,
@@ -444,6 +471,7 @@ fn surface_graph_rejects_duplicate_camera_before_declaring_any_target_graph() {
             clear: ClearMode::None,
             viewport: [8, 0, 8, 8],
             target: &second,
+            surface: test_surface(camera(7), [8, 0, 8, 8]),
             queues: &queues,
             lighting: None,
             exposure_stops: 0.0,
@@ -461,6 +489,7 @@ fn surface_graph_rejects_duplicate_camera_before_declaring_any_target_graph() {
             None,
             &views,
             &FrameGraphTextureImports::default(),
+            crate::TaaOutput::PrimaryWindow,
         ),
         Err(SurfaceViewGraphError::DuplicateCamera(entity)) if entity == camera(7)
     ));
@@ -483,6 +512,7 @@ fn surface_graph_rejects_a_camera_rect_outside_the_output() {
         clear: ClearMode::ColorAndDepth,
         viewport: [9, 0, 8, 8],
         target: &local,
+        surface: test_surface(camera(9), [9, 0, 8, 8]),
         queues: &queues,
         lighting: None,
         exposure_stops: 0.0,
@@ -499,6 +529,7 @@ fn surface_graph_rejects_a_camera_rect_outside_the_output() {
             None,
             &views,
             &FrameGraphTextureImports::default(),
+            crate::TaaOutput::PrimaryWindow,
         ),
         Err(SurfaceViewGraphError::InvalidViewport(entity)) if entity == camera(9)
     ));
@@ -540,6 +571,7 @@ fn surface_graph_defers_sorted_camera_upscales_and_keeps_targets_local() {
             viewport: [7, 4, 6, 4],
             exposure_stops: 0.0,
             target: &second,
+            surface: test_surface(camera(9), [7, 4, 6, 4]),
             queues: &queues,
             lighting: None,
             upscale_pipeline: RenderPipelineId::from_parts(30, 1),
@@ -552,6 +584,7 @@ fn surface_graph_defers_sorted_camera_upscales_and_keeps_targets_local() {
             viewport: [3, 2, 8, 6],
             exposure_stops: 0.0,
             target: &first,
+            surface: test_surface(camera(7), [3, 2, 8, 6]),
             queues: &queues,
             lighting: None,
             upscale_pipeline: RenderPipelineId::from_parts(30, 1),
@@ -566,6 +599,7 @@ fn surface_graph_defers_sorted_camera_upscales_and_keeps_targets_local() {
         None,
         &views,
         &FrameGraphTextureImports::default(),
+            crate::TaaOutput::PrimaryWindow,
     )
     .unwrap();
     assert_eq!(prepared.stages().upscale_passes, 2);
@@ -596,8 +630,7 @@ fn surface_graph_defers_sorted_camera_upscales_and_keeps_targets_local() {
         prepared.camera_outputs[0].depth.resource(),
         prepared.camera_outputs[1].depth.resource()
     );
-    let (graph, source) =
-        finalize_surface_view_graph(prepared, None, None, &BTreeMap::new(), 0).unwrap();
+    let (graph, source) = finalize_test_graph(prepared, None, 0).unwrap();
     assert_eq!(graph.pass_count(), scene_passes + 2);
     let stages = graph.blackboard().get::<SurfaceViewGraphStages>().unwrap();
     stages.assert_contract();
@@ -671,6 +704,7 @@ fn camera_local_exposure_isolated_in_null_graph_before_global_display_stage() {
             viewport: [0, 0, 8, 8],
             exposure_stops: -2.0,
             target: &first,
+            surface: test_surface(camera(2), [0, 0, 8, 8]),
             queues: &queues,
             lighting: None,
             upscale_pipeline,
@@ -683,6 +717,7 @@ fn camera_local_exposure_isolated_in_null_graph_before_global_display_stage() {
             viewport: [8, 0, 8, 8],
             exposure_stops: 1.5,
             target: &second,
+            surface: test_surface(camera(3), [8, 0, 8, 8]),
             queues: &queues,
             lighting: None,
             upscale_pipeline,
@@ -697,10 +732,10 @@ fn camera_local_exposure_isolated_in_null_graph_before_global_display_stage() {
         None,
         &views,
         &FrameGraphTextureImports::default(),
+        crate::TaaOutput::PrimaryWindow,
     )
     .unwrap();
-    let (graph, _) =
-        finalize_surface_view_graph(prepared, None, None, &BTreeMap::new(), 0).unwrap();
+    let (graph, _) = finalize_test_graph(prepared, None, 0).unwrap();
     let stages = graph.blackboard().get::<SurfaceViewGraphStages>().unwrap();
     assert_eq!(stages.upscale_passes, 2);
     let recorded = graph.record(&device).expect("Null graph records");
@@ -865,6 +900,7 @@ fn surface_graph_native_particles_use_local_depth_and_precede_each_camera_copy()
             clear: ClearMode::Inherit,
             viewport: *viewport,
             target,
+            surface: test_surface(*camera, *viewport),
             queues: &queues,
             lighting: None,
             exposure_stops: 0.0,
@@ -880,6 +916,7 @@ fn surface_graph_native_particles_use_local_depth_and_precede_each_camera_copy()
         None,
         &views,
         &FrameGraphTextureImports::default(),
+        crate::TaaOutput::PrimaryWindow,
     )
     .unwrap();
     let local_depths: Vec<_> = prepared
@@ -887,8 +924,7 @@ fn surface_graph_native_particles_use_local_depth_and_precede_each_camera_copy()
         .iter()
         .map(|local| local.depth)
         .collect();
-    let (graph, _) =
-        finalize_surface_view_graph(prepared, Some(state), None, &BTreeMap::new(), 0).unwrap();
+    let (graph, _) = finalize_test_graph(prepared, Some(state), 0).unwrap();
     let stages = graph.blackboard().get::<SurfaceViewGraphStages>().unwrap();
     stages.assert_contract();
     assert_eq!(stages.manual.particle_passes, 0);

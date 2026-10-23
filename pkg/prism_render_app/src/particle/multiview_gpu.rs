@@ -219,7 +219,9 @@ impl Output {
                 order: view.order,
                 clear: prism_camera::ClearMode::ColorAndDepth,
                 viewport: view.viewport,
+                exposure_stops: view.exposure_stops,
                 target,
+                surface: *view,
                 queues: &queues,
                 lighting: None,
                 upscale_pipeline: prism_render_driver::RenderPipelineId::from_parts(30, 1),
@@ -234,10 +236,19 @@ impl Output {
             None,
             &inputs,
             &FrameGraphTextureImports::default(),
+            crate::TaaOutput::PrimaryWindow,
         )
         .unwrap();
-        let (graph, _) =
-            finalize_surface_view_graph(prepared, Some(state), None, &BTreeMap::new(), frame)?;
+        let (graph, _) = finalize_surface_view_graph::<prism_render_driver_null::NullInstance>(
+            prepared,
+            Some(state),
+            None,
+            &BTreeMap::new(),
+            frame,
+            None,
+            crate::TaaOutput::PrimaryWindow,
+            &mut crate::TaaHistoryCache::default(),
+        )?;
         let stages = graph.blackboard().get::<SurfaceViewGraphStages>().unwrap();
         stages.assert_contract();
         assert_eq!(

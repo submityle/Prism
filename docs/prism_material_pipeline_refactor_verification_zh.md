@@ -91,6 +91,60 @@ target/debug/deps/prism_render_scene-52519585a36c04ae shading_resolve_wesl_compi
 - 首次沙盒内严格运行因该环境无 GPU adapter 而无法验证；随后跨沙盒 Apple Metal 严格运行同一集成门禁 **1 passed / 0 failed**。测试真实覆盖默认 `surface_encode` draw、GBuffer readback、lighting composite 与边界像素，不是仅编译或 shader link-test。
 - 此门禁关闭的是默认 surface encode/GBuffer/composite 的当前设备切片；它仍不覆盖 canonical 注册 response、材质纹理进入默认完整 resolve 的全部语义、全帧 CPU golden parity 或 Metal 外设备，故 **P0-material 仍未完成**。不得将此结果表述为完整默认材质着色路径验收。
 
+## 0.10 2026-10-23 Native composite 材质组生产接线复核
+
+> 历史快照：本节记录时生产 binding 尚未接线；此判断已由 §0.12 覆盖。当前 group-2 shader 消费状态见 §0.14。
+
+- 当前工作树中 `lighting_gpu.rs` 已有 composite group-2 的四个只读 storage layout、bind-group 构造/cache helper；`frame.rs` 也仅在 pass 携带材质绑定时才 import 并声明四个材质 buffer 为 composite read。这些属于接线脚手架，不代表 shader 或生产调用链已消费它们。
+- `LIGHTING_COMPOSITE_WGSL` 当前没有 group 2 声明，也没有按 `surface_id` 读取 canonical header/parameter 或执行表。生产 `systems.rs` 的 offscreen 与 per-camera target 均调用普通 `pass_for_target`；`pass_for_target_with_materials` 及同文件 `composite_material_buffers` helper 当前没有生产调用者。因此默认 Native composite 仍按 GBuffer albedo 执行简化 direct/GI，P0-material 未关闭。
+- 生命周期审计发现 execution-table 有 completion-published immutable snapshot/owner；header、parameter、texture buffers 则由 `MaterialParameterBuffers` 直接持有可增长 allocation，扩容时会销毁旧 ID，尚无可由 graph submission retain 的同代 buffer owner。故不能只将裸 buffer IDs 传入 group-2；实现默认消费前须建立覆盖 material buffers 与 execution-table generation 的帧级 owner，并让 frame graph 保活到 submission 完成，同时覆盖扩容、设备恢复、多 target/camera 与 generation 一致性。
+- 定向 Cargo 测试尝试因共享构建目录空间不足，在链接 `proc-macro2` build script 时以 `No space left on device` 退出，未运行测试断言；不得记为代码测试失败或通过。随后确认当前没有匹配到活动 Cargo/rustc 进程，并执行 `cargo clean`，只移除 **32.9 MiB** 构建产物；此前空间压力主要来自并行/外部构建写入，后续重试前仍需重新检查可用空间。
+- 该复核为只读源码审计加环境诊断，没有新增 GPU 或运行时验证；下一步仍是先做同代 buffer 生命周期/graph owner，再让默认 composite 真正执行 canonical material response，之后才以默认 mesh 全帧 GPU readback + CPU golden 作为 P0 验收。UV 持久化、footprint 与切线空间输入另属后续表面输入契约，不因 group-2 接线而自动解决。
+
+## 0.11 2026-10-23 材质 ABI allocation generation owner 首片
+
+> 本节首片结论后来由 §0.14 修订：dirty-row 原地写入的历史边界已过期；当前状态以 §0.14 为准。
+
+- `MaterialParameterBuffers::new_owned` 为 Native 生产资源保留创建设备，并把 header/parameter/texture 三个物理 buffer 放入同一个 `Arc` allocation generation；`snapshot()` 返回 IDs、容量和 graph-retainable owner。扩容/显式 release 只撤销当前代持有，旧代在外部 snapshot 全部释放后才通过原设备销毁。device recovery 使用新设备建立新代，旧代仍由旧设备 owner 退役。
+- 首片当时只保护 allocation identity 与资源回收；当时关于 dirty-row 原地写入的结论已过期，见 §0.14。material header 与 execution table 的逻辑 generation 原子发布仍未解决。
+- 新增 Null RHI 回归 `allocation_snapshot_pins_old_buffers_across_growth`，验证增长后旧三 buffer 仍存活、snapshot IDs 不变、释放旧 owner 后仅旧代回收，再显式释放当前代。生产 plugin 已改用 owned 构造，recovery 已改用 owned 重建入口。
+- 首片记录时尚未接入 `LightingGpuPass`；该接线已由 §0.12 完成。§0.14 又加入 pinned dirty-row / retirement 的字节 COW。当前仍不能据此声称 group-2 shader 消费材质，或 material 与 execution registry 已原子发布为同一逻辑 generation。
+
+## 0.12 2026-10-23 Native composite graph owner 与生产绑定接线
+
+> 本节描述物理资源 owner、graph retain 与 producer binding 的接线。§0.14 补充 allocation byte-generation COW；group-2 shader consumption 和逻辑 registry generation 原子性仍未完成。
+
+- `systems.rs` 现在从 `MaterialParameterBuffers::snapshot()` 与 completion-published `NativeExecutionTableBuffers::snapshot()` 捕获同帧 owner bundle，并以相同 snapshot IDs/容量生成 composite bindings。offscreen、surface-view camera、window target 均调用 `pass_for_target_with_materials`；window 多输出复用该帧绑定 generation。
+- `FrameGraphTextureImports` 增加帧级 external owner 集合。`append_target_graph` 将这些 owner retain 到每个 target graph；既有 `execute_prepared_owned` 再将 graph allocations 保留到 queue completion。因此 graph recording、尚未提交、in-flight submission 三段均持有 ABI allocation 与 execution-table 资源 owner。材质 buffer read 的 graph imports 与 group-2 bind group 使用同一组 IDs。
+- 验证：`CARGO_INCREMENTAL=0 cargo --config profile.dev.debug=0 check -p prism_render_app --lib --features camera-cutscene --jobs 1` **通过**；`CARGO_INCREMENTAL=0 cargo --config profile.test.debug=0 test -p prism_render_app --lib --features camera-cutscene allocation_snapshot_pins_old_buffers_across_growth --jobs 1 -- --nocapture` **1 passed / 0 failed**；触及文件 `rustfmt` 与 `git diff --check` 通过。
+- 本切片完成 graph/submission 的**物理资源保活与绑定 IDs 一致**。当时“不提供同代字节不可变性”已由 §0.14 的 allocation COW 首片部分关闭，但 material/execution 的共同逻辑 generation 仍未原子对齐。`LIGHTING_COMPOSITE_WGSL` 尚无 group 2 声明/消费，绑定本身不会执行 canonical material response；resolver、消费侧 fail-closed 校验及默认全帧 parity 仍未完成。
+
+## 0.13 2026-10-23 Native 响应复用边界 / crate 依赖复核
+
+- 通过当前 Cargo metadata/tree 复核，`prism_render_app` 依赖 `prism_render_material` 与 `prism_render_shading`；`prism_render_scene` 依赖 `prism_render_material` 与 `prism_render_shading`，没有发现 `prism_render_scene → prism_render_app` 的反向依赖。因此“复用 scene 响应 shader 必然导致 app/scene crate cycle”不成立，不能据此排除共享实现。
+- 依赖无环不等于 scene resolver 可直接搬入 Native composite：`shading_resolve.wesl` 的 response arm 还依赖 GPU Scene 几何重建、聚类/光照上下文、材质纹理与 VT、按有限 program/permutation 生成的 registered dispatch，以及 response composition 控制。当前 Native composite 的 group 2 仍只有 header、parameter、plan、program 四类 buffer，且 shader 尚未消费这些绑定。
+- Native opaque raster 的 UV0 目前只在 fragment 内用于 base-color/portable-VT 采样；GBuffer 后续只保留 material slot，没有 per-pixel generation/revision、UV/footprint、切线/normal-map 上下文。若 composite 负责完整响应，必须补齐规范 `SurfaceData`（或可验证的等价重建输入），不能把 slot + albedo 描述为完整响应输入。现有 `surface_encode → GBuffer → composite` 物理 GPU 测试是手工组装的 contract/readback 测试，不是默认生产 `PrepareAssets → Queue → target_graph` opaque draw 的端到端 parity。
+- 当前 owner 保障 GPU allocation 不会在 graph/submission 生命周期内提前销毁；pinned allocation snapshot 遇到有效 dirty-row 更新或材质退役时会切换到新 allocation，并从 CPU mirror 初始化新代，旧代字节保持稳定；无 pin 时仍用 dirty-range 增量更新。该 COW 不将 material snapshot 与 execution-table snapshot 绑定到同一逻辑 registry generation。当材质或 execution snapshot 不可用时，生产入口仍有普通 composite 分支；完整 resolver 接入时必须移除静默降级，改为显式诊断/等待。
+- 可复用的权威语义定位为 schema 生成的 `material_unpack.wesl::prism_unpack_surface`、`shading_resolve.wesl::evaluate_response_arm` 与其上游完整 resolve 入口；Native CPU Lambert/GI evaluator 只可作为照明数值子项 oracle，不可代称 canonical material response。不得把仅 header 解码、仅 program-kind 分支或 `albedo × Lambert + GI` 标为 P0-material 闭环。
+- 本次源码复核未修改 shader/runtime，也未运行构建或测试。后续实现须抽取真实可共享的响应 ABI/执行函数及明确输入契约，让 scene 与 Native 共用语义；闭合材质 header 与 execution-table 的逻辑版本一致性，并覆盖 builtin、registered、MaskBlend 和 fail-closed。纵向验收须使用默认 Native opaque mesh 的生产准备、队列构建与 target graph，readback 对照 CPU golden，再扩展无效/过期 tuple、纹理/VT、in-flight 更新、device recovery、resize 与跨 adapter/backend。allocation byte-generation COW 已由 §0.14 单独补记，不应误列为完全未实现。
+
+## 0.14 2026-10-23 Allocation byte-generation COW 首片与 Native composite 状态
+
+- **Allocation COW 首片已实现**：`pkg/prism_render_app/src/material/buffers.rs` 的 `MaterialBufferSnapshot` pin 住物理 allocation；同步时若 dirty rows 确实变化且当前代仍被 snapshot 持有，producer 分配新 generation、从 CPU mirror 全量初始化新 buffer，再切换当前代。无 pin 时保留原 dirty-range 上传路径。材质退役在 pinned 情况下也切换 allocation，旧 generation 在最后一个 owner 释放后由原设备回收。
+- **验证结果**：`CARGO_INCREMENTAL=0 cargo --config profile.test.debug=0 test -p prism_render_app --lib --features camera-cutscene material::buffers::ownership_tests::retained_snapshot_is_immutable_across_dirty_rows_and_retirement --jobs 1 -- --nocapture` 在当前工作树 **1 passed / 0 failed**。该机制解决 allocation/字节代际稳定，不保证 material registry 与 execution-table 的逻辑 generation 原子一致，也未把 texture/VT publication 纳入同一原子快照。
+- **Native composite 已消费 group 2，但尚非 canonical response**：`lighting_gpu.rs` 拼接并编译 `shaders/composite_material.wesl`，composite 调用 `prism_composite_material_surface(surface_id)`，读取 header、parameter heap、execution plan/program 并解包 surface；当前仅有限校验 tuple/range，并以 `base_weight`、`base_metalness`、`transmission_weight` 调整 GBuffer albedo 后执行简化 direct/GI/emission。registered kind 2 目前走 albedo 直出。故“完全没有 shader 消费”已过时，但 canonical response 与完整 plan/blend 语义仍未实现。
+- **真实剩余项**：完整 canonical resolver 与消费侧 surface identity/generation/revision、plan/family/blend/mask 语义 fail-closed；完整 per-pixel SurfaceData（UV/footprint、切线和法线贴图上下文）；material/execution/texture/VT 的共同逻辑 generation；默认 Native mesh 生产 graph 全帧 GPU readback/CPU golden parity，并覆盖 builtin、registered、MaskBlend、纹理/VT、in-flight 更新、device recovery、resize 与跨 backend。生产入口使用带材质 bindings 的 target-aware pass；测试/内部仍保留无材质构造路径，需由严格图契约拒绝或迁移为真实 snapshot fixture。P0-material 未完成。
+- §7.13 为当前状态的逐项核对；§0.10、§0.11 与 §7.12 中较早结论已明确标为历史/被后续覆盖，勿将它们当作当前状态。
+
+## 0.15 2026-10-23 测试编译修复与 P0 identity/plan 消费复核
+
+- **测试目标编译通过**：修复 `checked_row` 返回借用缺少显式 lifetime、surface-view 测试仍调用已不存在的 `RenderRuntime::new`、particle multiview 测试无法推断 runtime backend 三处错误后，`CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 cargo check -p prism_render_app --tests -j 1 --message-format short` 完成，退出码 0。该证据只表示测试目标类型检查通过，不表示测试执行通过。
+- **定向测试未能执行**：`cargo test -p prism_render_app --lib material::fail_closed:: --jobs 1 -- --nocapture` 首次因磁盘空间不足而在依赖归档阶段退出，未运行断言。清理本仓库 `target` 后重试，仍在生成 `prism_render_architecture` 归档时因磁盘再次不足退出；随后 `cargo clean` 回收本次目标目录产物。不得将其记为测试失败或通过；需要在可用磁盘空间足以完成 test profile 构建后重跑。
+- **Native identity 消费缺口确认**：默认 draw queue 携带 `(index, generation, revision, execution_plan_index)`；`surface_encode.wesl` raster 阶段校验这些值，但 GBuffer 的 `surface_id` 只保存 material slot，composite 无法对逐像素 identity tuple 再验证。帧级 owner pin 解决资源生命周期，不替代消费侧 identity 校验。
+- **execution plan 只读未执行**：`composite_material.wesl` admission 检查 plan endpoint 与 program/package/permutation 的部分一致性；`family`、`blended_channels`、`mask_kind/index`、`blend_domain` 目前未参与响应执行。Native composite 也没有 registered package/permutation evaluator；registered program kind 不能按 albedo 简化路径冒充 canonical response。
+- **下一条 P0 实现切片**：统一 Native consumer identity ABI 与规范 `SurfaceData`，令 builtin/registered 两端 response 产出完整通道，再按 plan family/channel/mask/domain 执行 composition；所有不支持的上下文必须 admission fail-closed。随后以默认 Native opaque mesh 的生产准备、队列和 target graph 做 GPU readback，对拍 `resolve_pixel`/response-composition CPU oracle，并覆盖无效 tuple、MaskBlend、texture/VT、in-flight 更新、recovery、resize。仅有测试编译和单 kernel 对拍不构成 P0 验收。
+- 本节没有新增运行时/GPU 单测结果，也没有据此宣告 P0 关闭；当前磁盘约束下不继续叠加 Cargo 构建。源码实现与完整验收仍待推进。
+
 ## 0. 2026-10-15 增量复核
 
 本报告原始结论保留为 2026-10-14 历史快照；本次重构增量已单独完成并验证：
@@ -108,7 +162,7 @@ target/debug/deps/prism_render_scene-52519585a36c04ae shading_resolve_wesl_compi
 1. **文档主体可信。** 大部分 ✅ 项与代码相符：P1-b、P1-c、P1-d（引擎侧）、P1-f2、P1-h、P2-c（两个开放瓣）、P2-f、P2-g、P2-j 均逐条找到落地代码与门禁。
 2. **初始文档快照有 4 处低估实现**：P2-e 区域 illumination、P3-b 入射辐照度语义、P1-g S1–S4、coat_darkening 均已在 §3/§5 裁决并由后续状态更正；它们不应继续进入当前未完成清单。
 3. **MaterialX nodedef**：解析、导出与结构往返测试已有；未完成的是 nodedef ↔ `author_node` 的语义映射与 PCM 实例，而非基础 nodedef 往返。
-4. **P2-h 原理化分层 BSDF 已有局部 CPU/GPU/reference 对照证据**：coat/base 能量耦合闭式、零反照率再分配项，以及 `coat_darkening` 对 reflective base 与 transmission substrate 的统一消费均已落地。path-traced reference 已接入 `CoatLayer`、clearcoat conductor/diffuse 与 `Bsdf` 分发；2026-10-20 定向 `reference_pt::clearcoat` **13 passed**。受限 Lambert fixture 有 CPU parity；§0.8 另记录 production `shading_resolve` GPU readback 与 clearcoat reference 对拍 **1 passed**。这些结果不等于完整材质组合或 path-traced 场景图像 parity；粗糙 diffuse 等未支持输入仍由 adapter fail-closed。
+4. **P2-h 原理化分层 BSDF 的核心参数通路已接入，完整 parity 仍未闭合**：coat/base 能量耦合闭式、零反照率再分配项，以及 `coat_darkening` 对 reflective base 与 transmission substrate 的统一消费均已落地。path-traced reference 已接入 `CoatLayer`、clearcoat conductor/diffuse 与 `Bsdf` 分发；当前 `ClearcoatDiffuse` 将 `base_weight` 作为独立权重缩放完整 substrate（包括 rough-diffuse 多散射补偿），不缩放 coat lobe。当前工作树 `reference_pt::clearcoat_diffuse` **8 passed**，`reference_pt_adapter` **9 passed**，覆盖 base weight、roughness、coat-medium tint 与小图 CPU parity。§0.8 另有 production `shading_resolve` GPU readback 与受限 clearcoat reference 对拍 **1 passed**。这些证据不等于全组合实时 GPU / path-traced 场景 parity；尚未被 adapter 表达的其他响应瓣仍显式拒绝。
 5. **计数类偏差普遍存在**（都是历史快照，不影响结论、但影响可信度）：门禁数字、header 字数、烘表常量数、PRISM 占槽数与目录行数、`bake::tests` 项数。
 6. **历史快照有过编号/状态冲突及过期失败记录**；当前勘误保留在 §5，现行状态以 §3、§4、§7 为准。
 7. **当前工作树的生成物门禁已恢复绿色**：`prism-material-codegen write` 已重新生成 `surface_layout.rs` 与 `material_unpack.wesl`，`codegen_freshness` 全部通过；剩余设备能力失败仅属于需要真实 GPU 特性的独立门禁。
@@ -203,7 +257,7 @@ pub const SURFACE_CACHE_AUX: [CacheAuxLayout; 1] = [
 | 项 | 文档声明 | 代码裁决 | 缺口 |
 |---|---|---|---|
 | **P2-e 四线正交** | 部分（缺 ①逐区域 illumination ②作者侧 `respond_custom` WESL） | **① 已落地（文档错）**；② 确实缺失 | ①：`material_classification.wesl:87` `material_class(header, region_illumination)`、`:104-106` 覆盖规则、`:152` 消费 `metadata.z`；CPU `classification.rs:686/716-722`；来源 `visibility_raster.wesl:127` `region_illumination_selector`（扫描 `SEMANTIC_ILLUMINATION_MASK` 纹理行，`:142-171`）+ `:47` `FEATURE_REGION_ILLUMINATION`；作者 API `record.rs:106`、`authoring.rs:82`；`raster.rs:179` 发 shader def；门禁 `classification.rs:788`、`:927`、`authoring.rs:154`。语义限制：选择子仅在 `header.illumination ∈ {Lit,Stylized}` 时生效，`Unlit`/`Custom` 忽略区域遮罩（`:716-722`）<br>②：全仓 `respond_custom` 仅 1 处注释（`prism_render_shading/src/classification.rs:145`），无 WESL；`custom_program` 只是 header u32 标记（`record.rs:158`、`material_classification.wesl:114`） |
-| **P2-h 原理化分层 BSDF** | 未做（路线图表无 ✅） | **实时与 reference 局部验收成立；已补受限 adapter + CPU image parity fixture** | 实时侧：闭式 `t_slab=(1−f_v)(1−f_l)/(1−f_v·f_l)`、`r_slab`、基底乘 `coat_attenuation = 1 + coat·(coat_t_slab−1)`、零反照率再分配项 `coat·(r_slab−A)·n·l/π`，以及 `coat_darkening = lerp(1,Δ,C·δ)` 对 reflective base 与 transmission substrate 的统一消费（CPU `lighting.rs:765-926`，WESL `brdf.wesl:1269-1386`，CPU/WESL 结构门禁 `lighting.rs:2070` / `shading/resolve/shader_tests.rs:223`）。reference 侧 `reference_pt/coat.rs` darkening 核、conductor/diffuse substrate 消费及 `Bsdf` 参数贯通由定向测试覆盖；`reference_pt::clearcoat` 结果为 **13 passed, 0 failed**。新增 `prism_render_shading::reference_pt_adapter`：只接受已证明的 Lambert diffuse substrate，并直接映射到 `reference_pt::Bsdf::ClearcoatDiffuse`；对不可表示或尚未严格对拍的 diffuse roughness、metallic/specular/transmission/SSS/sheen/thin-film/glint/coat-frame/非白 coat-color 显式拒绝。4×4 固定方向像素 fixture 覆盖 coat off、coat on + darkening 0/1，`cargo test -p prism_render_shading reference_pt_adapter --lib` **2 passed, 0 failed**，fixture `max_abs < 3e-5`。这仍是 CPU 生产 evaluator ↔ reference BSDF 的小图对拍，不是实时 GPU readback，也不是完整 path-traced 场景图像 parity；粗糙 diffuse 的严格 parity 尚未闭合。 |
+| **P2-h 原理化分层 BSDF** | 未做（路线图表无 ✅） | **coat/base 物理闭式及 reference 参数通路已实现；受限 CPU/GPU parity 已有证据** | 实时侧：闭式 `t_slab=(1−f_v)(1−f_l)/(1−f_v·f_l)`、`r_slab`、基底乘 `coat_attenuation = 1 + coat·(coat_t_slab−1)`、零反照率再分配项 `coat·(r_slab−A)·n·l/π`，以及 `coat_darkening = lerp(1,Δ,C·δ)` 对 reflective base 与 transmission substrate 的统一消费（CPU `lighting.rs:765-926`，WESL `brdf.wesl:1269-1386`，CPU/WESL 结构门禁 `lighting.rs:2070` / `shading/resolve/shader_tests.rs:223`）。reference `ClearcoatDiffuse` 将 `base_weight` 独立传入完整 base BRDF；定向测试当前 **8 passed**，adapter parity suite **9 passed**。adapter 支持 Lambert 与 Oren-Nayar diffuse，并映射 base weight/roughness/coat-medium tint；仍对尚不匹配的其他 response lobe、coat frame 等显式拒绝。小图 CPU parity 不等于全材质 GPU resolve 或完整 path-traced 场景 parity；完整组合与跨 backend 图像门禁仍待完成。 |
 | **P1-g 自描述反射瓣 schema** | ✅（实现与门禁源码存在；本轮未复跑） | **S1–S4 已实现；当前工作树 Cargo 验证状态未复核** | `material_classification.wesl` 的 schema metadata block 由 `emit_material_classification` 生成；`generated_contract.rs` 提供 schema 派生的 `SpecializationId` 布局/位打包和 CPU sample/golden field directory；`codegen_freshness.rs` 覆盖生成物新鲜度、ID 边界/往返、schema mutation 与 sample/golden 索引。不得由其他 crate 的 check 推导这些 target 本轮通过 |
 | **P0-b 高光抗锯齿** | P0 | **主路径接线 + 生产 WESL 小图 GPU/readback 已成立；完整验收仍有边界** | 消费端：`gi/specular_aa/normal_variance.rs:124` `filter_alpha_sq`、`:104` `kernel_roughness_sq = (2v).min(cap)`、`toksvig.rs`/`lean.rs`；主高光 `lighting.rs:408`；GPU 孪生 `specular_aa.wesl:81/106` + `brdf.wesl:836`。主 resolve 已从同一 normal-map 记录、同一 mip 和同一 UV footprint 生成方差，并由顺序门禁锁定 `reset < center_sample < normal_record < forward samples < variance < response`，且 `variance..response` 不允许再次 reset。新增 29×17 fixture 真实编译并 dispatch 生产 `specular_aa.wesl + brdf.wesl`，readback 493 像素 / 1972 通道与 CPU golden 对拍：Apple M2 / Metal 最差 34 ULP（门限 64）、最大绝对误差 `4.768371582e-6`；493/493 像素均有非零方差且 filtered alpha 增大，尾部 guard 未被覆盖。离线方差语义、texel 编码/解码及 CPU resolve fallback 已有实现与单测；仍缺完整 `shading_resolve` 全帧 dispatch/readback，以及 Metal 外后端验证。**例外**：SSR 分支已有独立方差来源 —— `ssr_repack.wesl:154` / `:445-447` |
 | **P1-e 贵瓣采样缩放** | 路线图表无 ✅（完整采样验收仍未完成） | **GPU uniform、贵瓣选择器、天空 LUT 与 direct SSS 三项动态积分循环均有真实消费；定向 GPU 门禁已通过** | `PrepareResources` 上传 32-byte `LobeSampleBudgetGpu`，resolve 消费 `max_full_lobes`；天空 LUT 方向/步进预算见 §0.3。生产 `subsurface_direct` 与 principled SSS 读取同一预算，taps/steps/profile samples 分别改变真实 GPU 循环。§0.5 严格 M2/Metal 定向模块 **10 passed**（含两项 GPU dispatch/readback），实际 layout 门禁 **2 passed**、完整 resolve WESL 链接 **1 passed**。剩余：完整 resolve 全帧 readback、各质量档图像误差与 GPU timing/成本、跨设备验收 |
@@ -214,7 +268,7 @@ pub const SURFACE_CACHE_AUX: [CacheAuxLayout; 1] = [
 
 | 文档说法 | 裁决 | 事实 |
 |---|---|---|
-| doc:1041 "coat_darkening 仍因公式不确定、仓库 path-traced 参考亦未实现而搁置" | **不成立** | CPU + WESL 双线实现（`clearcoat.rs:117/131/450/459-460/475`、`clearcoat.wesl:122/133/378-379/387`）与门禁已存在；reference path 现已实现 substrate darkening，并由 `reference_pt::clearcoat` 定向测试 **13/13** 覆盖。仍未证明完整离线/实时图像级 parity。 |
+| doc:1041 "coat_darkening 仍因公式不确定、仓库 path-traced 参考亦未实现而搁置" | **不成立（已实现并有局部证据）** | CPU/WESL 与 reference path 均有 substrate darkening 实现；`reference_pt::clearcoat` 定向测试 13/13。剩余是更广材质输入下的实时 GPU ↔ path-traced 图像级 parity，不是公式或 reference BSDF 待实现。 |
 | doc:1183/doc:1189 "逐区域 illumination 未完成" | **不成立** | 见 §3.2 P2-e ①，且 doc:1353 自证已实现 |
 | doc:1187 P3-b "未开始" | **不成立（低估）** | `shade.wgsl` 写 `incoming = light_radiance * max(dot(n, l), 0)`，`gpu/shade.rs:1-4` 明写 "stores view-independent incoming irradiance, not a material response" → §14.3 的架构约束已在独立 slice 落地；缺的是真实 producer、多光源/GI/SSS/emission |
 | doc:1166-1168 "`cargo test --lib -- --list` 因 `texel_cache::gpu::dispatch` 重复声明/重复导出失败" | **不成立（不可复现）** | `texel_cache/gpu/mod.rs:9` 只有一次 `pub mod dispatch;`；`texel_cache/mod.rs:22-24` 只用一次 `#[path = "gpu/tests.rs"] mod gpu_tests`；`gpu/mod.rs:8-17` 无 `tests` 声明；无重复 `pub use`。本轮 `-- --list` 正常输出 **1718 tests, 0 benchmarks** |
@@ -322,10 +376,10 @@ pub const SURFACE_CACHE_AUX: [CacheAuxLayout; 1] = [
 
 两个明确裁决：
 
-1. **über 分层消费有必要**。它是当前材质主链的运行时执行模型，必须作为 `SurfaceData → ShadingPlan → response → composition` 的唯一消费路径收口；不能用“有 path-traced reference”替代实时消费。
-2. **path-traced reference 也有必要，但角色不同**。production material ABI 到 `reference_pt::Bsdf` 的 coat/darkening 对应实现已存在，并有 clearcoat 定向测试 **13/13**；它应继续作为独立 oracle / 参考图生成器，用于 P2-h 图像级 parity，不应成为实时渲染运行时依赖，也不应阻塞 M0、P0-material、P0-b、P1-a 的先行闭环。
+1. **über 分层消费有必要**。它是当前材质主链的运行时执行模型，必须作为 `SurfaceData → ShadingPlan → response → composition` 的唯一消费路径收口；不能用“有 path-traced reference”替代实时消费。Native composite 已实际读取/解包 group 2 并有限消费部分字段，但仍未执行完整材质响应或 plan composition。
+2. **path-traced reference 有必要，且基础 clearcoat 对应实现已存在**。`reference_pt::Bsdf` coat/darkening 已有定向测试与受限 adapter parity；它继续作为独立 oracle，用于扩展 P2-h 图像级 parity，不进入实时运行时依赖，也不阻塞 Native 默认材质消费主线。
 
-因此，当前最合理的并行关系是：M0 走主线；先闭合 P0-material 的默认材质消费路径，再让 P0-b、P1-a、P1-e 并行收口实时质量、纹理驻留和预算；P2-h 可同步补 reference adapter 与图像门禁；P2-a/b/i 和 P3 暂不抢占主线资源。当前默认 mesh draw 已消费 canonical header/参数 ABI 并解包基础 surface，但 `ForwardLitProvider` / `ForwardLitMaterial` 仍是独立简化契约，不能代表注册 response 与 texture heap 已进入默认 resolve。P0-material 完成前，独立 shader、VT 或材质预算门禁仍按局部证据登记。
+因此，当前最合理的并行关系是：M0 走主线；先闭合 P0-material 的默认材质消费路径，再让 P0-b、P1-a、P1-e 并行收口实时质量、纹理驻留和预算；P2-h 可同步补 reference adapter 与图像门禁；P2-a/b/i 和 P3 暂不抢占主线资源。当前默认 mesh draw 已消费 canonical header/参数 ABI 并解包基础 surface；Native composite 也已有限读取材质与 execution tables，但 `ForwardLitProvider` / `ForwardLitMaterial` 和 composite response 仍未形成完整 canonical 消费契约，不能代表注册 response、完整纹理采样与 plan composition 已进入默认 resolve。P0-material 完成前，独立 shader、VT 或材质预算门禁仍按局部证据登记。
 
 ### 7.1 2026-10-22 当前工作树复核与 Material-VT 设备丢失回收增量（验证未闭合）
 
@@ -374,7 +428,7 @@ Material-VT GPU slice 新增单调设备放弃标记：已知 device loss、恢�
 
 - 当前工作树新增 `NativeExecutionTableBuffers`，能镜像 registry 的 plan/program rows，并以 queue completion callback 发布版本；plugin、PrepareAssets 与 device recovery 已管理该资源。它目前仍**没有被 `LightingGpuState`/`LightingGpuPass`、composite bind group 或 frame graph 消费**，所以只是 GPU mirror，不是 `ShadingPlan` 生产执行接线。
 - Native composite 当前仍只读 GBuffer 的 position/normal/albedo/surface id 与 GI，并以 albedo 做简化 direct lighting。继续闭合 P0-material 还需将已完成上传的 plan/program、canonical headers 与 parameter heap 作为只读 storage bindings传入 composite，在 frame graph 声明读依赖，并按真实 GPU material header 校验 plan/program tuple；缺少/过期/越界状态须 fail-closed。
-- `sync_registry` 在表版本变化时使用 `queue.wait_idle()` 后重写/扩容 buffer；这能避免覆盖仍被旧帧读取的 storage，但会在材质表更新时引入队列级同步。接入前需替换为 completion-token 保护的版本化 buffer/退休策略，或以实测证明更新频率和停顿成本可接受；不能把当前等待方案当作最终性能闭环。
+- **历史审计结论已过期**：当前 `NativeExecutionTableBuffers::sync_registry` 为每个新版本分配全新 buffer，并以 queue completion 发布 snapshot；不再因 execution-table 更新调用 `queue.wait_idle()`，旧 completed snapshot 由 Arc owner 保持。此修订只适用于 execution tables；canonical header/parameter/texture-row 仍由可变 `MaterialParameterBuffers` 原地写入，扩容会立即销毁旧 allocation，整份材质快照的 graph/in-flight COW 生命周期仍未完成。
 - registered response 不能直接复用 scene resolve 的 evaluator/linker：它依赖 scene resolve 提供的完整 surface、视图和光照上下文。可共享 `ResponseOutput` 通道/组合语义；Native 必须先定义其可提供的响应上下文，并对暂不支持的能力明确拒绝，不能复制 context-dependent evaluator 或静默降为 albedo-only。
 - **不得把 direct-only Lit 或“只绑定执行表”当作完整主链切片。** 当前 `prism_render_scene` 的 resolve/opaque host 依赖 Bevy RenderApp（legacy-bevy），而 `prism_render_app` 是 Bevy-free 的 Native RHI 主机；直接调用 scene evaluator 不会把它变成 Native 默认入口。完整实现要么将可复用的材质求值/响应契约下沉到后端无关层并为 Native 实现完整 pass host，要么在 Native renderer 中完整实现等价的 resolve；两者都必须覆盖已声明的 builtin、registered、mask blend、纹理/VT 与响应组合，不能缩窄为简化 albedo 着色。
 - shader 侧也存在明确的迁移边界：现有 `shading_resolve.wesl` 导入 `prism_render_scene::shaders::*` 的 surface/BRDF/lighting/geometry 等模块，并直接导入 `bevy_render::maths::affine3_to_square`；Native `prism_render_app/build.rs` 当前只链接 `prism_render_material` 的 material/material_unpack/material_virtual_texture 与 `prism_surface_encode`。因此要复用完整 resolver，必须把完整的 shader dependency closure 与其 host ABI 一起移出 Bevy 专属包/路径，不能仅复制入口 shader 或只改一条 import。
@@ -384,9 +438,40 @@ Material-VT GPU slice 新增单调设备放弃标记：已知 device loss、恢�
 
 ### 7.7 2026-10-23 Native 主链续审：CPU/Scene 增量不等于 Native GPU 执行
 
+### 7.8 2026-10-23 纹理槽耗尽改为显式失败（定向回归通过）
+
+- `TextureSlotHeap::acquire` 不再把容量耗尽伪装成白色纹理；返回 `CapacityExhausted`。`RenderMaterials::resolve_textures` 返回带材质行与 semantic 的错误，并在部分请求已成功取得 slot 后发生溢出时回滚新 leases，保留该材质原有 leases 与已发布 record。lease 保存 slot generation，释放时不会误释放同 image 的替代 residency。
+- 新增 runtime-tail 回归覆盖部分成功后溢出、旧 record/引用不变、失败新增 image 无 residency，以及释放容量后重试。RenderMaterials 的库内调用点已迁移到显式处理 `Result`。
+- 2026-10-23 后续复核：显式类型修正后，`CARGO_INCREMENTAL=0 cargo --config profile.dev.debug=0 check -p prism_render_app --lib -j 1` **通过**，证明生产 lib 编译通过。之后以单 job、低调试信息运行 `CARGO_INCREMENTAL=0 cargo --config profile.test.debug=0 test -p prism_render_app --lib texture_resolution_overflow_rolls_back_and_preserves_published_material --jobs 1 -- --nocapture`，结果 **1 passed / 0 failed**；覆盖部分成功后溢出、旧 record/引用不变、失败新增 image 无 residency，以及释放容量后重试。该证据只验证纹理槽耗尽事务，不代表 `prism_render_app` 全部 lib tests 或 GPU 主链已通过。
+- 本修复只关闭纹理槽容量错误的 fail-open，不改变 §7.6–7.7 的裁决：Native execution-table 到 composite/frame graph 的材质解析主链仍未完成，不能据此声明 P0-material 完成。
+
+### 7.9 2026-10-23 Native graph lease 现有基础复核
+
+- Native frame runtime 已有可复用的外部 owner 生命周期：`frame.rs::append_target_graph`/`retain_queue_binding_owners` 将绑定 owner 放入 `RenderGraph::retain_external_owner`；`RenderRuntime::execute_prepared_owned` 将录制后的 `GraphAllocations` 放入 `FrameSubmission`，并由真实 queue completion callback 持有第二份 owner 至 GPU 完成。Material-VT 的 `GpuSliceLease::external_owner` 已走这条路径。
+- 因而材质主链无需另造提交/回调机制；应由不可变的 `NativeMaterialSnapshot` owner 持有同代 header、parameter、texture-row、execution-table buffers 与 VT lease，在 composite 所属 graph 建立时 retain owner，使录制未提交期间也不能替换/释放该代资源。当前材质 ABI buffers 仍由可变 `MaterialParameterBuffers` 原地写入/扩容；execution-table mirror 已是 completion-published immutable generations，但尚无整份材质 snapshot 将它们与其他资源绑定为同代，因此现成 owner pin 机制本身仍未构成主链所需的整体 snapshot/COW。
+- 磁盘复核（该次历史状态）：仓库 `target` 当时仅约 8 KiB，执行获授权的 `cargo clean` 只移除 5 个文件/1.8 KiB；文件系统仍仅余约 586 MiB，说明空间压力不来自当前仓库构建目录。其后定向容量回归已在共享构建环境中通过；此记录不构成清理其他目录的授权。
+
+### 7.10 2026-10-23 composite 材质绑定 seam 续审（§0.12 前历史快照）
+
+> 本节判断记录在 Native graph owner / production binding 接线（§0.12）之前。下列“生产入口未接入”“graph 未 pin owner”只描述当时状态，不代表当前状态；现状以 §0.12、§0.13 及 §7.12 为准。仍有效的历史发现仅是：group-2 已绑定不等于 shader 已消费、材质字节快照尚未与 execution-table 逻辑代际原子化、完整 SurfaceData 输入未闭合。
+
+- 当前工作树新增 `systems.rs::composite_material_buffers`、`LightingGpuState::pass_for_target_with_materials`、composite group-2 布局/绑定工厂，以及 `frame.rs` 对四类材质 storage buffer 的 import/read 声明和 group-2 绑定录制代码；这些实现目前均未由生产入口调用。`systems.rs` 的 offscreen 与 camera surface-view 仍调用 `pass_for_target`；`presentation.rs` 的 window target 与 window camera surface-view 也仍调用 `pass_for_target`。故新增接线现阶段是未消费 seam，不能记为 Native 材质主链已接入。
+- `PreparedSurfaceViewGraph::retain_external_owner` 已提供 graph pin 入口，但当前准备/提交调用点没有调用它。更关键的是，`composite_material_buffers` 只读取当前 `MaterialParameterBuffers` 的裸 ID，而该资源在扩容时会立即销毁旧 header/parameter/texture buffers，并在普通同步时原地写入；仅 retain `NativeExecutionTableSnapshot` 不能保护其他三类资源，也不能保证同一代一致性。因此在 immutable material snapshot/COW 生命周期确立前，不应把现有 seam 接入真实 draw，以免录制 graph 与更新跨代或读到覆写数据。
+- `RenderMaterials::new` 创建的 registry 初始 `execution_tables` 为 `None`；当前生产 `sync_material_buffers` 只尝试镜像已安装的 tables，仓库中的 `install_execution_tables` 调用点仅见测试。默认生产场景因此没有证据能获得 composite 所需的 execution snapshot。需要由真实生产 shader/package 注册路径建立并验证 builtin execution tables；未注册或尚未完成 GPU publication 时应让相关材质 draw 明确 fail-closed，而非静默跳过 group 2。
+- 当前 `LIGHTING_COMPOSITE_WGSL` 仍未声明 group 2，也仍以 GBuffer albedo 执行简化 direct/GI；即使把 bind group 调用接上，仍没有材质 header/parameter/plan/program 解包、身份/范围检查、执行计划或 response 计算。完整 P0-material 仍须完成 immutable snapshot 与生产注册、全路径接线、canonical builtin/registered/mask-blend + texture/VT 响应语义及默认 mesh 全帧 GPU readback/CPU golden parity。
+- 输入契约也尚不完整：Native `surface_encode.wesl` 已从 location 2 接收并插值 UV0，当前 fragment 可用于 base-color/portable-VT 采样；但 UV 没有写入 GBuffer 或其他持久 per-pixel payload，因此后置 composite 仍读不到 UV。切线基、normal-map 输入、UV footprint 与 coverage/动态 response 上下文也尚未形成 composite 契约。若要让 composite 成为完整材质响应消费者，须定义并实现规范 per-pixel `SurfaceData`/GBuffer（或等价可重建输入），不能把现有 albedo + surface index 当作完整 canonical response 输入；后续 footprint、texture/VT/sampler 与 response context 必须与 header/执行表同代绑定。
+- 本次只读审计对目标文件运行 `git diff --check`，结果通过；没有运行 Cargo，也没有 GPU 验证。此门禁只证明差异无空白错误，不代表新 seam 可编译或 GPU 可执行。
+
 本轮对当前 dirty 工作树的增量进行只读审计，确认 `prism_render_shading/src/resolve.rs` 的扩展主要增加 CPU resolve oracle、纹理输入折叠和 registered CPU response 测试；调用者仍需提供已采样纹理输入，因此它不承担 GPU texture/VT sampling，也未进入 `prism_render_app` 的 Native 调用链。`prism_render_scene` 的 resolve/composition 改动属于 Bevy GPU Scene 路径，同样不等于 Native composite 已消费材质执行表。上述工作可作为共享语义和 oracle 的基础，但不关闭 P0-material。
 
-当前 Native 断点明确位于 GBuffer 写出之后、composite 着色之前：`LIGHTING_COMPOSITE_WGSL` 从 GBuffer 读取 albedo 并计算简化 direct/GI；`NativeExecutionTableBuffers` 虽在 `PrepareAssets` 同步 plan/program rows，却未传入 `LightingGpuState::pass_for_target`、composite bind group 或 frame graph。故 Native GPU 上当前没有依据 surface id 读取 canonical header/parameter、校验并执行 `ShadingPlan`、采样通用材质纹理或执行 builtin/registered response 的生产路径。
+### 7.11 2026-10-23 UV-only payload 设计复核（尚未实现）
+
+- 当前 Native opaque raster 已把 UV0 插值到 fragment，并在 raster 时用于现有 portable-VT base-color 采样；缺口只在 `surface_encode` 到后置 composite 的持久传递。UV-only payload 不应被描述为完整 `SurfaceData`，也不包含 UV footprint、切线基或 normal-map 上下文。
+- 当前六个 GBuffer MRT 已按 32 bytes/sample 的本地预算门禁核算。直接追加 UV attachment 会改变该预算；压缩 world-position 为 half 则改变坐标精度契约。因此本轮撤销了未接完的 half-position/Rg16 MRT 草案，没有保留这项精度回退。
+- 候选方案是以 target-sized 的 `array<vec2<f32>>` storage buffer 承载 UV0：fragment 按 `@builtin(position)` 映射唯一像素槽，composite 按同一像素索引读取。相较额外 MRT，它不增加颜色附件字节/样本或 UV 重放 draw；代价是约 8 bytes/像素的驻留存储、每个可见 fragment 一次写及 composite 一次读，并需要每个 RenderTarget 的容量/生命周期、queue bind group、frame-graph write→read 依赖、clear/background 语义与 resize/recovery 一并接入。该方案仍是待验证设计，不是已实现结论。
+- 实施前必须确认 RHI/WGPU 在实际 adapter 能力与现有 `SurfaceEncodeProvider` pipeline layout 下允许 fragment writable-storage binding，并明确 render-graph 的外部 storage-buffer import/owner pin；再用真实 GPU 对比 GPU 写入的 UV 与同一 draw 的插值/texture-sampling 参考，覆盖遮挡、重叠三角形、裁切边缘、viewport/scissor、多 camera target、resize 和 device recovery。若约束不成立，再选择单独 UV raster pass，并量化重复几何处理的成本；不得通过降低 world-position 精度绕开附件预算。
+
+§0.12 之后的生产 binding 接线与 shader 消费必须分开判断：Native `systems.rs` 与 `presentation.rs` 已将材质/execution snapshot bindings 传给各 target pass；当前 `LIGHTING_COMPOSITE_WGSL` 已声明 group 2，并调用 `composite_material.wesl` 解包材质，有限消费少数字段后仍执行简化 direct/GI/emission。frame graph 最新改动要求 composite pass 必须绑定 group 2 并声明四项 buffer reads，但仍有旧的内部无材质 pass 工厂/测试调用，且该最新改动尚未编译验证。allocation 字节稳定已有 §0.14 所述 COW 首片；仍缺共同逻辑 generation、完整 per-pixel SurfaceData、消费侧身份/tuple/plan 校验和 canonical builtin/registered/MaskBlend 响应求值。当前结论详见 §0.14 与 §7.13–§7.15。
 
 后续完整实现必须作为同一真实默认 mesh draw 闭环验收：
 
@@ -396,3 +481,25 @@ Material-VT GPU slice 新增单调设备放弃标记：已知 device loss、恢�
 4. 使用默认 Native mesh 的完整生产 graph 做 GPU readback，与相同材质、纹理、视图/光照输入的 CPU golden 逐像素对拍；覆盖无效/过期计划、VT 更新与双 slice lease、in-flight 更新、device recovery、resize。单独 shader/kernel、ABI bytes 或 CPU-only fixture 均不足以关闭此项。
 
 Native 接线的直接定位为 `pkg/prism_render_app/src/lighting_gpu.rs` 的 `LIGHTING_COMPOSITE_WGSL` / `composite_static_layout_descriptor` / `LightingGpuPass::create_composite_target_bind_group`，以及 `pkg/prism_render_app/src/presentation.rs` 的 pass 获取点和 `pkg/prism_render_app/src/frame.rs` 的图录制点。**环境记录**：本轮观察到 `target` 约 2.8 GiB、文件系统剩余约 586 MiB；系统拒绝进程清单查询，因此没有安全依据判断能否删除共享 target，也未启动会写入共享目录的 Cargo 验证。此记录不是代码失败或通过证据。
+
+### 7.12 2026-10-23 Native composite 当前状态交叉核验
+
+> 本节原始生命周期描述在 allocation COW 首片之前形成；“dirty-row bytes 仍会原地更新”已被 §0.14 覆盖。其余关于 shader 尚未消费 group 2、缺少完整 SurfaceData 与逻辑 generation 的结论仍有效。
+
+- 生产入口：`systems.rs` offscreen/camera target 与 `presentation.rs` window target 均在可用时调用 `pass_for_target_with_materials`，并保留普通无材质 pass 的 `None` 分支。故 bindings 已进入 graph，但材质/execution snapshot 缺失时仍可静默落回旧简化 lighting 路径；该分支须在 canonical resolver 生效时删除或改为显式诊断/等待。
+- Shader：composite 仍无 group-2 声明和材质读取。当前 group-2 layout 的四个资源是 header、parameter heap、execution plan/program；纹理 rows/heap、VT lease 和 per-pixel UV/footprint/切线数据并未进入该 composite 输入。
+- 生命周期：graph owner 保活和 execution-table completion-published generation 已有；pinned allocation snapshot 的有效 dirty-row 更新/退役会 COW 到新 allocation，旧代字节保持稳定。material 与 execution snapshot 仍未绑定同一个逻辑 registry generation；物理 owner pin 不等价于跨 registry 原子发布。
+- 本节是源码交叉核验，不构成实现/测试通过。P0-material 的退出条件仍是完整默认 Native mesh production graph 上的 canonical response readback 与 CPU golden parity，覆盖 builtin/registered/MaskBlend、纹理/VT、无效 tuple、in-flight 更新、device recovery、resize 和目标后端能力。
+
+### 7.13 2026-10-23 当前 Native composite 未完成项更正
+
+- **Producer 与 shader 部分消费均已存在**：`systems.rs` 与 `presentation.rs` 提供材质 bindings；`composite_material.wesl` 读取并解包 header/parameter/execution tables，主 shader 使用少量字段。现在 frame graph 在 lighting composite 下要求 group 2 与四项 buffer reads。旧的 `pass_for_target` 无材质入口仍存在于内部 API/测试设施，不能作为合法 composite dispatch 使用；需要拆分真正不访问 group 2 的 pipeline，或完成无旧入口的 API 迁移。
+- **Native composite 仍不是 canonical 输出**：它未执行 builtin 的完整 BRDF response，也未执行 registered response 或 execution plan 的 blended channels/mask/domain 语义；当前 program kind 2 直接输出 albedo。现有有限 header/range 检查不等于完整 tuple 校验。
+- **当前主要未完成项**：①实现并接入完整 canonical material response resolver；②在消费侧校验 per-pixel surface identity、generation/revision、plan/program 与 buffer 范围，对无效 tuple fail-closed；③消费完整 execution plan 的 family/blend/mask/domain 语义；④提供完整 per-pixel `SurfaceData`，包括 UV/footprint、切线/法线贴图上下文及所需 response context；⑤将 material ABI 与 execution tables、texture/VT publication 绑定到同一逻辑 registry generation；⑥默认 Native mesh 生产 graph 的完整 GPU readback 与 CPU golden parity，覆盖 builtin、registered、MaskBlend、纹理/VT、in-flight 更新、设备恢复、resize 与目标 backend。
+- **Allocation COW 首片边界**：`MaterialBufferSnapshot` pin 期间，dirty-row 有效变化和材质退役均创建新 allocation 并从 CPU mirror 初始化，旧 allocation 在 owner 释放前不被覆写/销毁；无 pin 时继续使用 dirty-range 增量更新。回归 `retained_snapshot_is_immutable_across_dirty_rows_and_retirement` 已在当前工作树定向通过（1 passed / 0 failed）。该首片不提供跨 registry 逻辑原子性，也不代表 composite 已消费 group 2。
+
+### 7.14 2026-10-23 Native composite snapshot 缺失 fail-closed
+
+- `systems.rs::execute_frame` 现在在创建任何输出 graph 前要求同时取得 material allocation snapshot 与 completion-published execution-table snapshot；任一缺失则记录 `SurfaceViewExecutionError::MaterialSnapshotUnavailable`、计为失败并停止该帧，不再让 offscreen/texture-output 走不带材质 group 的简化 composite。
+- window presentation 同样要求 lighting pass 存在时必须有 canonical material bindings；缺失时返回 graph 错误并记录同一诊断，不再调用普通 `pass_for_target` 成功渲染。offscreen、registered texture 输出及其 camera subview 将无法创建带材质 group 的 pass 视为 graph admission failure；这些生产输出只使用 `pass_for_target_with_materials`。无有效 camera 子视图的 texture target 不创建无意义的 composite pass。
+- 这是关闭“snapshot 缺失时静默成功降级”的 host-side 安全切片，不代表 composite shader 已消费 group 2，也不代表 resolver、SurfaceData 或 registry 逻辑代际原子性已完成。需通过本轮 `prism_render_app` 编译与定向门禁复核；全帧 canonical parity 仍未完成。
