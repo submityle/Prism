@@ -8,7 +8,10 @@
 
 use super::contract::{RecipeCost, RecipeId};
 use super::culling::ClusterBounds;
+use super::restir_gi::{stream_initial as stream_initial_gi, GiCandidate, GiReservoir};
 use super::stochastic::{select_tile_lights, MegaLight, StochasticTile};
+use super::ReservoirBudget;
+use crate::particle::reservoir_sample::Rng;
 
 /// A dense visibility table produced by a virtual-shadow implementation.
 ///
@@ -58,6 +61,15 @@ pub struct DirectRisOutput {
     pub selected: StochasticTile,
 }
 
+/// Output of one initial WorldReSTIR-GI reservoir execution.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WorldRestirOutput {
+    /// The finalized path-sample reservoir, retained for temporal/spatial reuse.
+    pub reservoir: GiReservoir,
+    /// Scene-linear indirect outgoing radiance represented by this reservoir.
+    pub radiance: [f32; 3],
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RecipeBackendError {
     ContributionCountMismatch,
@@ -75,7 +87,7 @@ pub struct RecipeBackendRegistration {
     pub deterministic_twin: bool,
 }
 
-const REGISTRATIONS: [RecipeBackendRegistration; 3] = [
+const REGISTRATIONS: [RecipeBackendRegistration; 4] = [
     RecipeBackendRegistration {
         recipe: RecipeId::DirectStochasticRt,
         cost: RecipeId::DirectStochasticRt.cost(),
@@ -89,6 +101,11 @@ const REGISTRATIONS: [RecipeBackendRegistration; 3] = [
     RecipeBackendRegistration {
         recipe: RecipeId::SpecializedDeterministic,
         cost: RecipeId::SpecializedDeterministic.cost(),
+        deterministic_twin: true,
+    },
+    RecipeBackendRegistration {
+        recipe: RecipeId::WorldRestir,
+        cost: RecipeId::WorldRestir.cost(),
         deterministic_twin: true,
     },
 ];
@@ -111,6 +128,7 @@ pub const fn registration(recipe: RecipeId) -> Option<RecipeBackendRegistration>
         RecipeId::DirectStochasticRt => Some(REGISTRATIONS[0]),
         RecipeId::DirectStochasticVsm => Some(REGISTRATIONS[1]),
         RecipeId::SpecializedDeterministic => Some(REGISTRATIONS[2]),
+        RecipeId::WorldRestir => Some(REGISTRATIONS[3]),
         _ => None,
     }
 }
@@ -159,6 +177,36 @@ pub fn deterministic_twin(
     work: DirectRisWork<'_>,
 ) -> Result<DirectRisOutput, RecipeBackendError> {
     execute(recipe, work)
+}
+
+/// Executes the initial WorldReSTIR-GI candidate stream on the CPU.
+/// The registered provider supplies the deterministic reference used for
+/// parity and replay. Temporal/spatial reuse remains a subsequent operation.
+pub fn execute_world_restir(
+    recipe: RecipeId,
+    candidates: &[GiCandidate],
+    budget: ReservoirBudget,
+    seed: u32,
+) -> Result<WorldRestirOutput, RecipeBackendError> {
+    if recipe != RecipeId::WorldRestir {
+        return Err(RecipeBackendError::UnsupportedRecipe);
+    }
+    let mut rng = Rng::new(seed);
+    let mut reservoir = stream_initial_gi(candidates, budget, &mut rng);
+    reservoir.finalize();
+    let radiance = if reservoir.is_empty() {
+        [0.0; 3]
+    } else {
+        [
+            reservoir.sample.radiance[0] * reservoir.w,
+            reservoir.sample.radiance[1] * reservoir.w,
+            reservoir.sample.radiance[2] * reservoir.w,
+        ]
+    };
+    Ok(WorldRestirOutput {
+        reservoir,
+        radiance,
+    })
 }
 
 fn execute_ris(
@@ -244,11 +292,12 @@ mod tests {
 
     #[test]
     fn registrations_cover_executable_direct_recipe_backends() {
-        assert_eq!(registrations().len(), 3);
+        assert_eq!(registrations().len(), 4);
         assert!(is_registered(RecipeId::DirectStochasticRt));
         assert!(is_registered(RecipeId::DirectStochasticVsm));
         assert!(!is_registered(RecipeId::DirectDeterministicCsm));
         assert!(is_registered(RecipeId::SpecializedDeterministic));
+        assert!(is_registered(RecipeId::WorldRestir));
         assert!(
             registration(RecipeId::DirectStochasticRt)
                 .expect("registered RT recipe")
@@ -275,12 +324,22 @@ mod tests {
             }
         }
 
-        assert_eq!(registered_from_all, vec![
-            RecipeId::DirectStochasticRt,
-            RecipeId::DirectStochasticVsm,
-            RecipeId::SpecializedDeterministic,
-        ]);
-        assert_eq!(registrations().iter().map(|entry| entry.recipe).collect::<Vec<_>>(), registered_from_all);
+        assert_eq!(
+            registered_from_all,
+            vec![
+                RecipeId::DirectStochasticRt,
+                RecipeId::DirectStochasticVsm,
+                RecipeId::SpecializedDeterministic,
+                RecipeId::WorldRestir,
+            ]
+        );
+        assert_eq!(
+            registrations()
+                .iter()
+                .map(|entry| entry.recipe)
+                .collect::<Vec<_>>(),
+            registered_from_all
+        );
     }
 
     #[test]
@@ -380,5 +439,48 @@ mod tests {
         )
         .expect_err("an unregistered recipe must not have a pseudo execution path");
         assert_eq!(error, RecipeBackendError::UnsupportedRecipe);
+    }
+
+    #[test]
+    fn world_restir_registration_executes_gi_reservoir_and_is_deterministic() {
+        let candidates = [
+            GiCandidate {
+                sample: super::super::restir_gi::GiSample {
+                    sample_point: [0.0, 0.0, 1.0],
+                    sample_normal: [0.0, 0.0, -1.0],
+                    radiance: [2.0, 1.0, 0.5],
+                },
+                target_pdf: 1.0,
+                source_pdf: 1.0,
+            },
+            GiCandidate {
+                sample: super::super::restir_gi::GiSample {
+                    sample_point: [1.0, 0.0, 1.0],
+                    sample_normal: [0.0, 0.0, -1.0],
+                    radiance: [4.0, 2.0, 1.0],
+                },
+                target_pdf: 2.0,
+                source_pdf: 1.0,
+            },
+        ];
+        let budget = ReservoirBudget {
+            initial_candidates: 2,
+            ..ReservoirBudget::default()
+        };
+        let first = execute_world_restir(RecipeId::WorldRestir, &candidates, budget, 19)
+            .expect("registered WorldRestir provider");
+        let second = execute_world_restir(RecipeId::WorldRestir, &candidates, budget, 19)
+            .expect("deterministic twin");
+        assert_eq!(first, second);
+        assert_eq!(first.reservoir.m, 2);
+        assert!((first.reservoir.w - 0.75).abs() < 1.0e-6);
+        assert_eq!(
+            first.radiance,
+            [
+                first.reservoir.sample.radiance[0] * first.reservoir.w,
+                first.reservoir.sample.radiance[1] * first.reservoir.w,
+                first.reservoir.sample.radiance[2] * first.reservoir.w,
+            ]
+        );
     }
 }

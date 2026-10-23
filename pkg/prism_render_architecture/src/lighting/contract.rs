@@ -1950,7 +1950,7 @@ mod tests {
         assert!(plan
             .rejected
             .contains(&Rejection::Budget(RecipeId::SpecializedDeterministic)));
-        assert!(plan.explain().contains("unavailable:WorldRestir"));
+        assert!(plan.explain().contains("determinism:WorldRestir"));
     }
 
     #[test]
@@ -1981,7 +1981,7 @@ mod tests {
     }
 
     #[test]
-    fn planner_rejects_world_restir_without_a_registered_backend() {
+    fn planner_admits_world_restir_when_candidates_and_backend_are_available() {
         let plan = BudgetCompiler::compile(
             SceneStats::default(),
             FrameResourceBudget {
@@ -2000,8 +2000,9 @@ mod tests {
             Tier::Balanced,
             GiCandidateAvailability::HostProvided,
         );
-        assert!(!plan.recipes.contains(&RecipeId::WorldRestir));
-        assert!(plan
+        assert!(plan.recipes.contains(&RecipeId::WorldRestir));
+        assert_eq!(plan.candidate_source, GiCandidateSource::HostProvided);
+        assert!(!plan
             .rejected
             .iter()
             .any(|rejection| matches!(rejection, Rejection::Unavailable(RecipeId::WorldRestir))));
@@ -2025,7 +2026,7 @@ mod tests {
         assert!(plan
             .rejected
             .iter()
-            .any(|rejection| matches!(rejection, Rejection::Unavailable(RecipeId::WorldRestir))));
+            .any(|rejection| matches!(rejection, Rejection::Determinism(RecipeId::WorldRestir))));
     }
 
     #[test]
@@ -2089,9 +2090,10 @@ mod tests {
             RecipeId::PathTracedOffline,
         ] {
             assert!(!plan.recipes.contains(&recipe));
-            assert!(plan
-                .rejected
-                .contains(&Rejection::Unavailable(recipe)), "{recipe:?}");
+            assert!(
+                plan.rejected.contains(&Rejection::Unavailable(recipe)),
+                "{recipe:?}"
+            );
         }
     }
 
