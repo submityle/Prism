@@ -48,7 +48,10 @@ cryptographic verification remains the responsibility of the host control
 plane.
 
 - `SessionConfig::outbound_capacity` bounds unacknowledged data packets;
-  `inbound_capacity` bounds retained out-of-order packets.
+  `inbound_capacity` bounds retained out-of-order packets. The receiver also
+  rejects future sequences farther than this distance from its next expected
+  sequence before they consume reorder storage, preventing a forged far-future
+  packet from pinning the receive cursor.
 - `Session::send` assigns sequence numbers starting at one and validates
   outgoing `DeltaEnvelope` and `AoiSubscription` against `AuthorityPolicy` and
   the local actor.
@@ -58,6 +61,7 @@ plane.
   moves the session to `SessionState::Failed`.
 - `Session::receive` buffers out-of-order packets, delivers contiguous packets
   in sequence order, cumulatively acknowledges them, and suppresses duplicates.
+  Reorder state is bounded by both packet count and sequence distance.
 - `MemoryTransport::pair` is a bounded no-std adapter used by integration
   tests and deterministic host harnesses; production hosts can implement
   `Transport` over their own authenticated channel.

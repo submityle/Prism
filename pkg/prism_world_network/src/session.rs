@@ -252,6 +252,15 @@ pub enum ReceiveError {
     InvalidSequence(u64),
     /// The bounded reorder window is full.
     InboundFull,
+    /// A data sequence is farther ahead than the configured reorder window.
+    OutsideReceiveWindow {
+        /// Next contiguous sequence expected by the receiver.
+        expected: u64,
+        /// Sequence carried by the rejected packet.
+        received: u64,
+        /// Maximum accepted sequence distance.
+        window: usize,
+    },
     /// An acknowledgement claims data that has never been sent.
     InvalidAck {
         /// Highest local sequence sent so far.
@@ -521,6 +530,14 @@ impl Session {
             return Ok(ReceiveOutcome::Duplicate { sequence });
         }
         if sequence > self.next_receive_sequence {
+            let distance = sequence - self.next_receive_sequence;
+            if u128::from(distance) > self.config.inbound_capacity as u128 {
+                return Err(ReceiveError::OutsideReceiveWindow {
+                    expected: self.next_receive_sequence,
+                    received: sequence,
+                    window: self.config.inbound_capacity,
+                });
+            }
             if self.inbound.len() >= self.config.inbound_capacity {
                 return Err(ReceiveError::InboundFull);
             }
@@ -692,6 +709,65 @@ mod tests {
             .receive(sender_transport.try_recv().expect("ack packet"))
             .expect("ack accepted");
         assert_eq!(sender.pending(), 0);
+    }
+
+    #[test]
+    fn receive_window_rejects_far_future_packets_without_poisoning_retry() {
+        let mut receiver = session(1, 8, 2, 10);
+        receiver
+            .authenticate(AuthToken(0xfeed))
+            .expect("receiver auth");
+        let far = TransportPacket::Data {
+            session: SessionId(1),
+            sequence: 4,
+            message: WorldMessage::Subscribe(subscription(4, 7)),
+        };
+        assert_eq!(
+            receiver.receive(far.clone()),
+            Err(ReceiveError::OutsideReceiveWindow {
+                expected: 1,
+                received: 4,
+                window: 2,
+            })
+        );
+        assert_eq!(receiver.inbound.len(), 0);
+
+        let in_window = TransportPacket::Data {
+            session: SessionId(1),
+            sequence: 2,
+            message: WorldMessage::Subscribe(subscription(2, 7)),
+        };
+        assert_eq!(
+            receiver.receive(in_window),
+            Ok(ReceiveOutcome::Buffered { sequence: 2 })
+        );
+        assert_eq!(
+            receiver.receive(TransportPacket::Data {
+                session: SessionId(1),
+                sequence: 3,
+                message: WorldMessage::Subscribe(subscription(3, 7)),
+            }),
+            Ok(ReceiveOutcome::Buffered { sequence: 3 })
+        );
+        assert_eq!(receiver.inbound.len(), 2);
+        assert_eq!(
+            receiver.receive(far),
+            Err(ReceiveError::OutsideReceiveWindow {
+                expected: 1,
+                received: 4,
+                window: 2,
+            })
+        );
+        assert_eq!(receiver.inbound.len(), 2);
+        assert!(matches!(
+            receiver.receive(TransportPacket::Data {
+                session: SessionId(1),
+                sequence: 1,
+                message: WorldMessage::Subscribe(subscription(1, 7)),
+            }),
+            Ok(ReceiveOutcome::Delivered { sequence: 1, messages }) if messages.len() == 3
+        ));
+        assert_eq!(receiver.inbound.len(), 0);
     }
 
     #[test]
