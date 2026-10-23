@@ -73,9 +73,9 @@ pub use multi_server::{
     decode_authority_aoi_event, decode_authority_aoi_replication_payload,
     encode_authority_aoi_event, encode_authority_aoi_replication_payload, AuthorityAoiEventError,
     AuthorityAoiReplicationPayload, AuthorityEntityProjection, AuthorityReplicationProvider,
-    AuthorityReplicationProviderError, EntitySnapshotPayload, InboundAuthorityCommand,
-    LeasedAuthorityCommand, MultiPeerAuthority, MultiPeerAuthorityConfig, MultiPeerAuthorityError,
-    MultiPeerServerPlugin, PeerId,
+    AuthorityReplicationProviderError, EntitySnapshotPayload, LeasedAuthorityCommand,
+    MultiPeerAuthority, MultiPeerAuthorityConfig, MultiPeerAuthorityError, MultiPeerServerPlugin,
+    PeerId,
 };
 pub use server::{
     ExternalCommandModeError, ReplicationServerPlugin, ServerReplication, ServerStrategy,

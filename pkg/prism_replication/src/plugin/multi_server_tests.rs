@@ -385,7 +385,7 @@ fn inbound_commands_are_extracted_fairly_without_advancing_peer_records() {
         for (_, client) in &mut clients {
             client.pump();
         }
-        authority.poll_inbound_commands(0).unwrap();
+        authority.lease_inbound_commands(0).unwrap();
     }
     assert!(clients
         .iter()
@@ -401,23 +401,18 @@ fn inbound_commands_are_extracted_fairly_without_advancing_peer_records() {
         for (_, client) in &mut clients {
             client.pump();
         }
-        drained.extend(authority.poll_inbound_commands(1).unwrap());
+        let leased = authority.lease_inbound_commands(1).unwrap();
+        for command in leased {
+            drained.push((command.peer_id, command.payload.clone()));
+            authority.acknowledge_inbound_command(&command).unwrap();
+        }
     }
     assert_eq!(
         drained,
         vec![
-            InboundAuthorityCommand {
-                peer_id: 10,
-                payload: b"10-a".to_vec(),
-            },
-            InboundAuthorityCommand {
-                peer_id: 20,
-                payload: b"20-a".to_vec(),
-            },
-            InboundAuthorityCommand {
-                peer_id: 20,
-                payload: b"20-b".to_vec(),
-            },
+            (10, b"10-a".to_vec()),
+            (20, b"20-a".to_vec()),
+            (20, b"20-b".to_vec()),
         ]
     );
     assert!(authority.peer_ids().into_iter().all(|peer_id| {
@@ -697,7 +692,7 @@ fn external_command_handoff_preflights_every_peer_before_polling_any_peer() {
 
     let pending_before = [10, 20].map(|peer_id| authority.pending_aoi_events(peer_id));
     assert!(matches!(
-        authority.poll_inbound_commands(8),
+        authority.lease_inbound_commands(8),
         Err(MultiPeerAuthorityError::ExternalCommandMode {
             peer_id: 20,
             reason: ExternalCommandModeError::DurableJournalInstalled,

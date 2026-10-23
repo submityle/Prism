@@ -357,7 +357,8 @@ impl<S: ServerStrategy> ServerReplication<S> {
     }
 
     /// Poll this connection and move it into externally managed command mode.
-    /// Commands are then removed only by [`take_inbound_command`](Self::take_inbound_command);
+    /// Commands remain queued until their lease is acknowledged; a released
+    /// lease becomes available again without changing FIFO order.
     /// `pump` continues servicing transport and auxiliary lanes but never applies
     /// these commands to the per-peer `Record`. This mode is one-way for the
     /// lifetime of the connection so an application cannot accidentally split
@@ -393,22 +394,11 @@ impl<S: ServerStrategy> ServerReplication<S> {
         Ok(())
     }
 
-    /// Remove the oldest decoded RPC payload in externally managed command mode.
-    #[must_use]
-    pub fn take_inbound_command(&mut self) -> Option<Vec<u8>> {
-        if !self.external_command_consumer || self.leased_inbound_command.is_some() {
-            return None;
-        }
-        self.pending_commands
-            .pop_front()
-            .map(|command| command.payload)
-    }
-
     /// Lease the oldest decoded RPC payload without removing it from the
     /// reliable command queue. At most one command per connection may be
     /// leased; the next command remains blocked until the lease is acknowledged
     /// or released.
-    pub(crate) fn lease_inbound_command(&mut self) -> Option<(u64, Vec<u8>)> {
+    pub fn lease_inbound_command(&mut self) -> Option<(u64, Vec<u8>)> {
         if !self.external_command_consumer || self.leased_inbound_command.is_some() {
             return None;
         }
@@ -418,7 +408,7 @@ impl<S: ServerStrategy> ServerReplication<S> {
     }
 
     /// Remove a previously leased head command after its consumer commits it.
-    pub(crate) fn acknowledge_inbound_command(&mut self, command_id: u64) -> bool {
+    pub fn acknowledge_inbound_command(&mut self, command_id: u64) -> bool {
         if self.leased_inbound_command != Some(command_id)
             || self.pending_commands.front().map(|command| command.id) != Some(command_id)
         {
@@ -430,7 +420,7 @@ impl<S: ServerStrategy> ServerReplication<S> {
     }
 
     /// Return a lease to the queue without consuming its reliable command.
-    pub(crate) fn release_inbound_command(&mut self, command_id: u64) -> bool {
+    pub fn release_inbound_command(&mut self, command_id: u64) -> bool {
         if self.leased_inbound_command != Some(command_id)
             || self.pending_commands.front().map(|command| command.id) != Some(command_id)
         {
@@ -1066,6 +1056,41 @@ mod tests {
             server.poll_inbound_commands(),
             Err(ExternalCommandModeError::RecordAuthorityAlreadyAdvanced)
         );
+    }
+
+    #[test]
+    fn external_commands_require_lease_ack_or_release() {
+        let (mut client, mut server) = memory_pair(
+            ReplicationConfig::for_capacity(8),
+            ReplicationConfig::for_capacity(8),
+        );
+        drive(&mut client, &mut server);
+        assert_eq!(server.poll_inbound_commands(), Ok(0));
+        client.try_send_rpc(b"first").unwrap();
+        client.try_send_rpc(b"second").unwrap();
+
+        let mut first = None;
+        for _ in 0..16 {
+            client.pump();
+            server.poll_inbound_commands().unwrap();
+            first = server.lease_inbound_command();
+            if first.is_some() {
+                break;
+            }
+        }
+        let (first_id, first_payload) = first.expect("first command should arrive");
+        assert_eq!(first_payload, b"first");
+        assert!(server.lease_inbound_command().is_none());
+        assert!(server.release_inbound_command(first_id));
+        let (retry_id, retry_payload) = server.lease_inbound_command().unwrap();
+        assert_eq!(retry_id, first_id);
+        assert_eq!(retry_payload, b"first");
+        assert!(server.acknowledge_inbound_command(retry_id));
+
+        let (second_id, second_payload) = server.lease_inbound_command().unwrap();
+        assert_eq!(second_payload, b"second");
+        assert!(server.acknowledge_inbound_command(second_id));
+        assert!(server.lease_inbound_command().is_none());
     }
 
     /// Exercise the actual app scheduling seam, with the same assertions for

@@ -47,18 +47,6 @@ pub struct EntitySnapshotPayload {
     pub bytes: Vec<u8>,
 }
 
-/// One decoded reliable command removed from a peer connection for a shared
-/// authority executor. Ordering within a peer is preserved; across peers the
-/// coordinator emits a deterministic round-robin order for the currently
-/// queued commands.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct InboundAuthorityCommand {
-    /// Stable identity of the peer that submitted the command.
-    pub peer_id: PeerId,
-    /// Command payload after RPC framing has been removed.
-    pub payload: Vec<u8>,
-}
-
 /// A reliable command temporarily reserved for an external authority consumer.
 /// The command remains in its peer's FIFO until acknowledged.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -799,63 +787,6 @@ impl<S: ServerStrategy> MultiPeerAuthority<S> {
         applied
     }
 
-    /// Poll all peer transports without applying their commands to per-peer
-    /// `Record` state, then remove up to `limit` commands in bounded
-    /// round-robin order. The first call permanently selects external command
-    /// consumption for each connection. Commands retain each peer's reliable
-    /// FIFO order; cross-peer order is a local scheduling policy, not a claim
-    /// of cross-machine deterministic arrival ordering.
-    ///
-    /// # Errors
-    /// Returns [`MultiPeerAuthorityError::ExternalCommandMode`] without changing
-    /// any peer mode if a record journal is installed or record authority has
-    /// already advanced for any admitted peer.
-    pub fn poll_inbound_commands(
-        &mut self,
-        limit: usize,
-    ) -> Result<Vec<InboundAuthorityCommand>, MultiPeerAuthorityError> {
-        let peer_ids: Vec<PeerId> = self.peers.keys().copied().collect();
-        self.enable_external_world_authority()?;
-        for &peer_id in &peer_ids {
-            self.flush_aoi_events(peer_id);
-            if let Some(peer) = self.peers.get_mut(&peer_id) {
-                peer.server.poll_external_commands();
-            }
-        }
-        if limit == 0 || peer_ids.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let start = self
-            .command_cursor
-            .and_then(|cursor| peer_ids.iter().position(|peer_id| *peer_id == cursor))
-            .map_or(0, |index| (index + 1) % peer_ids.len());
-        let mut commands = Vec::new();
-        let mut next_index = start;
-        while commands.len() < limit {
-            let mut found = false;
-            for offset in 0..peer_ids.len() {
-                let index = (next_index + offset) % peer_ids.len();
-                let peer_id = peer_ids[index];
-                let command = self
-                    .peers
-                    .get_mut(&peer_id)
-                    .and_then(|peer| peer.server.take_inbound_command());
-                if let Some(payload) = command {
-                    commands.push(InboundAuthorityCommand { peer_id, payload });
-                    self.command_cursor = Some(peer_id);
-                    next_index = (index + 1) % peer_ids.len();
-                    found = true;
-                    break;
-                }
-            }
-            if !found {
-                break;
-            }
-        }
-        Ok(commands)
-    }
-
     /// Poll peer transports and lease up to `limit` commands without removing
     /// them from the reliable queues. A connection may have only one outstanding
     /// lease, so its FIFO head cannot be bypassed. Consumers must acknowledge a
@@ -866,7 +797,14 @@ impl<S: ServerStrategy> MultiPeerAuthority<S> {
         &mut self,
         limit: usize,
     ) -> Result<Vec<LeasedAuthorityCommand>, MultiPeerAuthorityError> {
-        self.poll_inbound_commands(0)?;
+        self.enable_external_world_authority()?;
+        let peer_ids: Vec<PeerId> = self.peers.keys().copied().collect();
+        for &peer_id in &peer_ids {
+            self.flush_aoi_events(peer_id);
+            if let Some(peer) = self.peers.get_mut(&peer_id) {
+                peer.server.poll_external_commands();
+            }
+        }
         if limit == 0 || self.peers.is_empty() {
             return Ok(Vec::new());
         }
