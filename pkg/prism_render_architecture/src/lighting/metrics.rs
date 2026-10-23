@@ -266,6 +266,9 @@ pub struct NotApplicable {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct AcceptancePlan {
+    /// Complete set of cases required by this acceptance matrix. Each case
+    /// must be represented by exactly one gate rule or justified N/A entry.
+    pub expected_cases: Vec<Case>,
     pub rules: Vec<GateRule>,
     pub not_applicable: Vec<NotApplicable>,
 }
@@ -276,10 +279,21 @@ pub enum PlanError {
     InvalidBooleanStatistic(Case),
     EmptyNotApplicableReason(Case),
     DuplicateCase(Case),
+    DuplicateExpectedCase(Case),
+    MissingCaseCoverage(Case),
+    UnexpectedCaseDeclaration(Case),
 }
 
 impl AcceptancePlan {
     pub fn validate(&self) -> Result<(), PlanError> {
+        let mut expected = Vec::new();
+        for case in &self.expected_cases {
+            if expected.contains(case) {
+                return Err(PlanError::DuplicateExpectedCase(*case));
+            }
+            expected.push(*case);
+        }
+
         let mut seen = Vec::new();
         for rule in &self.rules {
             rule.validate()?;
@@ -296,6 +310,16 @@ impl AcceptancePlan {
                 return Err(PlanError::DuplicateCase(na.case));
             }
             seen.push(na.case);
+        }
+        for case in &self.expected_cases {
+            if !seen.contains(case) {
+                return Err(PlanError::MissingCaseCoverage(*case));
+            }
+        }
+        for case in seen {
+            if !expected.contains(&case) {
+                return Err(PlanError::UnexpectedCaseDeclaration(case));
+            }
         }
         Ok(())
     }
@@ -615,6 +639,7 @@ mod tests {
             s7_case(HardwareClass::H3, Metric::FlipError),
         ];
         let plan = AcceptancePlan {
+            expected_cases: cases.to_vec(),
             rules: vec![
                 GateRule {
                     case: cases[0],
@@ -698,6 +723,7 @@ mod tests {
         );
 
         let plan = AcceptancePlan {
+            expected_cases: vec![c],
             rules: vec![GateRule {
                 case: c,
                 statistic: Statistic::Min,
@@ -739,6 +765,7 @@ mod tests {
     #[test]
     fn evaluates_less_than_and_greater_than_gates_including_equality() {
         let plan = AcceptancePlan {
+            expected_cases: vec![case(Metric::GpuFrameMs), case(Metric::Psnr)],
             rules: vec![
                 rule(Metric::GpuFrameMs, Statistic::P95, Comparison::AtMost, 10.0),
                 rule(Metric::Psnr, Statistic::P50, Comparison::AtLeast, 30.0),
@@ -763,8 +790,95 @@ mod tests {
     }
 
     #[test]
+    fn every_expected_case_requires_exactly_one_rule_or_justified_na() {
+        let expected = case(Metric::GpuFrameMs);
+        let uncovered = AcceptancePlan {
+            expected_cases: vec![expected],
+            rules: vec![],
+            not_applicable: vec![],
+        };
+        assert_eq!(
+            uncovered.validate(),
+            Err(PlanError::MissingCaseCoverage(expected))
+        );
+
+        let covered = AcceptancePlan {
+            expected_cases: vec![expected],
+            rules: vec![rule(
+                Metric::GpuFrameMs,
+                Statistic::P95,
+                Comparison::AtMost,
+                10.0,
+            )],
+            not_applicable: vec![],
+        };
+        let report = covered
+            .evaluate(&[Measurement {
+                case: expected,
+                samples: vec![8.0, 9.0],
+            }])
+            .unwrap();
+        assert_eq!(report.status, OverallStatus::Pass);
+    }
+
+    #[test]
+    fn expected_case_can_be_covered_by_a_justified_na() {
+        let expected = case(Metric::BiasBoundTightness);
+        let plan = AcceptancePlan {
+            expected_cases: vec![expected],
+            rules: vec![],
+            not_applicable: vec![NotApplicable {
+                case: expected,
+                reason: "No traced contribution on this hardware class".into(),
+            }],
+        };
+        let report = plan.evaluate(&[]).unwrap();
+        assert_eq!(report.status, OverallStatus::Fail);
+        assert_eq!(report.not_applicable_count, 1);
+    }
+
+    #[test]
+    fn duplicate_expected_and_extra_declared_cases_are_rejected() {
+        let expected = case(Metric::GpuFrameMs);
+        let duplicate_expected = AcceptancePlan {
+            expected_cases: vec![expected, expected],
+            rules: vec![rule(
+                Metric::GpuFrameMs,
+                Statistic::P95,
+                Comparison::AtMost,
+                10.0,
+            )],
+            not_applicable: vec![],
+        };
+        assert_eq!(
+            duplicate_expected.validate(),
+            Err(PlanError::DuplicateExpectedCase(expected))
+        );
+
+        let extra = case(Metric::ResidentBytes);
+        let extra_declaration = AcceptancePlan {
+            expected_cases: vec![expected],
+            rules: vec![
+                rule(Metric::GpuFrameMs, Statistic::P95, Comparison::AtMost, 10.0),
+                GateRule {
+                    case: extra,
+                    statistic: Statistic::Max,
+                    comparison: Comparison::AtMost,
+                    threshold: 1024.0,
+                },
+            ],
+            not_applicable: vec![],
+        };
+        assert_eq!(
+            extra_declaration.validate(),
+            Err(PlanError::UnexpectedCaseDeclaration(extra))
+        );
+    }
+
+    #[test]
     fn missing_or_empty_measurement_fails_instead_of_becoming_na_or_pass() {
         let plan = AcceptancePlan {
+            expected_cases: vec![case(Metric::VariancePostDenoise)],
             rules: vec![rule(
                 Metric::VariancePostDenoise,
                 Statistic::P95,
@@ -812,6 +926,7 @@ mod tests {
     fn na_requires_a_reason_and_is_never_counted_as_pass() {
         let c = case(Metric::BiasBoundTightness);
         let invalid = AcceptancePlan {
+            expected_cases: vec![c],
             rules: vec![],
             not_applicable: vec![NotApplicable {
                 case: c,
@@ -823,6 +938,7 @@ mod tests {
             Err(PlanError::EmptyNotApplicableReason(c))
         );
         let valid = AcceptancePlan {
+            expected_cases: vec![c],
             rules: vec![],
             not_applicable: vec![NotApplicable {
                 case: c,
@@ -850,6 +966,7 @@ mod tests {
             0.005,
         );
         let duplicate = AcceptancePlan {
+            expected_cases: vec![r.case],
             rules: vec![r.clone(), r],
             not_applicable: vec![],
         };
@@ -858,6 +975,7 @@ mod tests {
             Err(PlanError::DuplicateCase(_))
         ));
         let invalid = AcceptancePlan {
+            expected_cases: vec![case(Metric::EnergyError)],
             rules: vec![rule(
                 Metric::EnergyError,
                 Statistic::Max,
@@ -875,6 +993,10 @@ mod tests {
     #[test]
     fn report_summary_and_digest_are_deterministic_and_escape_newlines() {
         let plan = AcceptancePlan {
+            expected_cases: vec![
+                case(Metric::TemporalInstability),
+                case(Metric::BiasBoundTightness),
+            ],
             rules: vec![rule(
                 Metric::TemporalInstability,
                 Statistic::P99,
@@ -901,6 +1023,7 @@ mod tests {
     fn boolean_displayability_uses_minimum_to_require_every_frame() {
         let c = case(Metric::DisplayableOutput);
         let plan = AcceptancePlan {
+            expected_cases: vec![c],
             rules: vec![GateRule {
                 case: c,
                 statistic: Statistic::Min,
