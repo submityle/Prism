@@ -109,6 +109,9 @@ pub enum AuthorityReplicationProviderError {
     EntityUnavailable,
     /// The provider could not serialize the entity within its own schema.
     SerializationFailed,
+    /// The application snapshot provider panicked. The AOI event remains
+    /// queued and can be retried on a later pump.
+    ProviderPanicked,
 }
 
 impl core::fmt::Display for AuthorityReplicationProviderError {
@@ -116,6 +119,7 @@ impl core::fmt::Display for AuthorityReplicationProviderError {
         formatter.write_str(match self {
             Self::EntityUnavailable => "authoritative AOI entity is unavailable",
             Self::SerializationFailed => "authoritative AOI entity serialization failed",
+            Self::ProviderPanicked => "authoritative AOI snapshot provider panicked",
         })
     }
 }
@@ -1292,10 +1296,12 @@ impl<S: ServerStrategy> MultiPeerAuthority<S> {
                 if provided.is_some() {
                     consumed_overrides.push((entity_id, revision));
                 }
-                match provided
-                    .map(Ok)
-                    .unwrap_or_else(|| self.provider.snapshot_entity(peer_id, entity_id, revision))
-                {
+                match provided.map(Ok).unwrap_or_else(|| {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        self.provider.snapshot_entity(peer_id, entity_id, revision)
+                    }))
+                    .unwrap_or(Err(AuthorityReplicationProviderError::ProviderPanicked))
+                }) {
                     Ok(bytes) => {
                         let next_len = encoded_len
                             .checked_add(8)
@@ -1334,10 +1340,12 @@ impl<S: ServerStrategy> MultiPeerAuthority<S> {
                 if provided.is_some() {
                     consumed_overrides.push((entity_id, revision));
                 }
-                match provided
-                    .map(Ok)
-                    .unwrap_or_else(|| self.provider.snapshot_entity(peer_id, entity_id, revision))
-                {
+                match provided.map(Ok).unwrap_or_else(|| {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        self.provider.snapshot_entity(peer_id, entity_id, revision)
+                    }))
+                    .unwrap_or(Err(AuthorityReplicationProviderError::ProviderPanicked))
+                }) {
                     Ok(bytes) => {
                         let next_len = encoded_len
                             .checked_add(8)

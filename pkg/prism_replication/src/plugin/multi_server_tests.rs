@@ -8,6 +8,7 @@ use crate::transport::memory::InMemoryTransport;
 use alloc::boxed::Box;
 use alloc::vec;
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone)]
@@ -834,6 +835,92 @@ fn provider_failure_retains_bounded_aoi_update_until_shared_state_is_available()
         }]
     );
     assert_eq!(authority.pending_aoi_events(1), Some(0));
+}
+
+struct PanicOnceWorld {
+    panic: Arc<AtomicBool>,
+}
+
+impl AuthorityReplicationProvider for PanicOnceWorld {
+    fn snapshot_entity(
+        &self,
+        _peer_id: PeerId,
+        _entity_id: u32,
+        _aoi_revision: u64,
+    ) -> Result<Vec<u8>, AuthorityReplicationProviderError> {
+        if self.panic.swap(false, Ordering::SeqCst) {
+            panic!("injected authority snapshot provider panic");
+        }
+        Ok(entity_blob(4, 9))
+    }
+}
+
+#[test]
+fn provider_panic_retains_committed_aoi_event_for_retry() {
+    let panic = Arc::new(AtomicBool::new(true));
+    let mut authority = MultiPeerAuthority::new(
+        config(),
+        PanicOnceWorld {
+            panic: Arc::clone(&panic),
+        },
+    )
+    .unwrap();
+    let (client_transport, server_transport) = secure_pair();
+    let mut client =
+        Replication::new(schema(), 8, &seed(), AddClient, Box::new(client_transport)).unwrap();
+    authority
+        .admit_peer(
+            1,
+            (0.0, 0.0),
+            5.0,
+            schema(),
+            8,
+            &seed(),
+            AddAuthority,
+            Box::new(server_transport),
+        )
+        .unwrap();
+    authority.pump();
+    assert_eq!(authority.aoi().entity_count(), 0);
+    for _ in 0..8 {
+        client.pump();
+        authority.pump();
+    }
+    let initial = decode_authority_aoi_replication_payload(
+        &client
+            .recv_event()
+            .expect("initial AOI admission event is delivered"),
+        8,
+        1024,
+    )
+    .unwrap();
+    assert!(initial.entered.is_empty());
+    assert_eq!(authority.pending_aoi_events(1), Some(0));
+
+    authority.upsert_entity(4, (0.0, 0.0)).unwrap();
+    assert_eq!(authority.aoi().entity_count(), 1);
+    assert_eq!(authority.pending_aoi_events(1), Some(1));
+    assert_eq!(
+        authority.take_provider_error(1),
+        Some(AuthorityReplicationProviderError::ProviderPanicked)
+    );
+
+    for _ in 0..16 {
+        client.pump();
+        authority.pump();
+    }
+    let payload = decode_authority_aoi_replication_payload(
+        &client
+            .recv_event()
+            .expect("provider panic retry delivers enter"),
+        8,
+        1024,
+    )
+    .unwrap();
+    assert_eq!(payload.entered[0].entity_id, 4);
+    assert_eq!(payload.entered[0].bytes, entity_blob(4, 9));
+    assert_eq!(authority.pending_aoi_events(1), Some(0));
+    assert_eq!(authority.aoi().entity_count(), 1);
 }
 
 #[test]
