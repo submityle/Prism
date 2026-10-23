@@ -3,6 +3,7 @@
 use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::vec::Vec;
 use core::marker::PhantomData;
+use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
 
 use prism_app::{FixedPostUpdate, Plugin};
 use prism_ecs::change_observers::ChangeContext;
@@ -319,8 +320,26 @@ where
             updates.push((*entity, None));
             continue;
         }
-        let identity = state.source.stable_id(world, *entity);
-        let position = state.source.position(world, *entity);
+        let sampled = catch_unwind(AssertUnwindSafe(|| {
+            let identity = state.source.stable_id(world, *entity);
+            let position = state.source.position(world, *entity);
+            (identity, position)
+        }));
+        let (identity, position) = match sampled {
+            Ok(sampled) => sampled,
+            Err(payload) => {
+                // The source is project code and may panic. Since these core
+                // resources were temporarily removed to satisfy exclusive ECS
+                // borrowing, restore them before propagating the panic so the
+                // App panic policy cannot turn one bad projection into lost
+                // authority state or an orphaned dirty queue.
+                world.insert_resource(authority);
+                world.insert_resource(state);
+                world.insert_resource(queue);
+                world.insert_resource(status);
+                resume_unwind(payload);
+            }
+        };
         let (Some(network_id), Some(position)) = (identity, position) else {
             if let Some(previous) = previous {
                 staged_ids.insert(previous.network_id, None);
@@ -348,13 +367,21 @@ where
             break;
         }
         staged_ids.insert(network_id, Some(*entity));
-        let snapshot = match state.source.snapshot(world, *entity) {
-            Ok(snapshot) => snapshot,
-            Err(_) => {
-                failed = true;
-                break;
-            }
-        };
+        let snapshot =
+            match catch_unwind(AssertUnwindSafe(|| state.source.snapshot(world, *entity))) {
+                Err(payload) => {
+                    world.insert_resource(authority);
+                    world.insert_resource(state);
+                    world.insert_resource(queue);
+                    world.insert_resource(status);
+                    resume_unwind(payload);
+                }
+                Ok(Ok(snapshot)) => snapshot,
+                Ok(Err(_)) => {
+                    failed = true;
+                    break;
+                }
+            };
         let operation = if previous
             .is_none_or(|old| old.network_id != network_id || old.position != position)
         {
@@ -433,6 +460,7 @@ mod tests {
     use crate::plugin::AuthorityReplicationProviderError;
     use crate::plugin::PeerId;
     use prism_ecs::component::Component;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     #[derive(Clone)]
     struct ReplicatedMarker(u32, u32);
@@ -696,5 +724,66 @@ mod tests {
             2
         );
         assert_eq!(app.world().resource::<EcsAoiProjectionStatus>().failures, 1);
+    }
+
+    struct PanicOnceSource(AtomicBool);
+
+    impl EcsAoiProjectionSource for PanicOnceSource {
+        fn stable_id(&self, _: &World, entity: Entity) -> Option<u32> {
+            Some(entity.index())
+        }
+
+        fn position(&self, _: &World, _: Entity) -> Option<(f32, f32)> {
+            Some((0.0, 0.0))
+        }
+
+        fn snapshot(&self, _: &World, entity: Entity) -> Result<Vec<u8>, EcsAoiSourceError> {
+            if self.0.swap(false, Ordering::SeqCst) {
+                panic!("injected projection source panic");
+            }
+            Ok(entity.to_bits().to_le_bytes().to_vec())
+        }
+    }
+
+    #[test]
+    fn source_panic_restores_authority_state_and_dirty_queue_before_unwind() {
+        let mut app = prism_app::App::new();
+        app.insert_resource(authority());
+        app.add_plugins(EcsAoiProjectionPlugin::<PanicOnceSource, Strategy>::new(
+            PanicOnceSource(AtomicBool::new(true)),
+            EcsAoiProjectionConfig::new(4, 4).unwrap(),
+        ));
+        let entity = app.world_mut().spawn(());
+        assert!(mark_aoi_entity_dirty(app.world_mut(), entity));
+
+        assert!(catch_unwind(AssertUnwindSafe(|| {
+            app.world_mut().run_schedule(FixedPostUpdate);
+        }))
+        .is_err());
+        assert!(app.world().contains(entity));
+        assert_eq!(app.world().resource::<DirtyQueue>().items.len(), 1);
+        assert!(app
+            .world()
+            .contains_resource::<ProjectionState<PanicOnceSource, Strategy>>());
+        assert!(app
+            .world()
+            .contains_resource::<MultiPeerAuthority<Strategy>>());
+        assert_eq!(
+            app.world()
+                .resource::<MultiPeerAuthority<Strategy>>()
+                .aoi()
+                .entity_count(),
+            0
+        );
+
+        app.world_mut().run_schedule(FixedPostUpdate);
+        assert_eq!(app.world().resource::<DirtyQueue>().items.len(), 0);
+        assert_eq!(
+            app.world()
+                .resource::<MultiPeerAuthority<Strategy>>()
+                .aoi()
+                .entity_count(),
+            1
+        );
     }
 }
