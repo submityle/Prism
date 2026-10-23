@@ -503,3 +503,27 @@ Native 接线的直接定位为 `pkg/prism_render_app/src/lighting_gpu.rs` 的 `
 - `systems.rs::execute_frame` 现在在创建任何输出 graph 前要求同时取得 material allocation snapshot 与 completion-published execution-table snapshot；任一缺失则记录 `SurfaceViewExecutionError::MaterialSnapshotUnavailable`、计为失败并停止该帧，不再让 offscreen/texture-output 走不带材质 group 的简化 composite。
 - window presentation 同样要求 lighting pass 存在时必须有 canonical material bindings；缺失时返回 graph 错误并记录同一诊断，不再调用普通 `pass_for_target` 成功渲染。offscreen、registered texture 输出及其 camera subview 将无法创建带材质 group 的 pass 视为 graph admission failure；这些生产输出只使用 `pass_for_target_with_materials`。无有效 camera 子视图的 texture target 不创建无意义的 composite pass。
 - 这是关闭“snapshot 缺失时静默成功降级”的 host-side 安全切片，不代表 composite shader 已消费 group 2，也不代表 resolver、SurfaceData 或 registry 逻辑代际原子性已完成。需通过本轮 `prism_render_app` 编译与定向门禁复核；全帧 canonical parity 仍未完成。
+
+### 7.15 2026-10-23 canonical resolver 落地依赖复核
+
+- **共享材质 ABI 可以复用，但完整 Native resolver 尚不存在**：Native composite 可复用 `material.wesl` header、生成的 `material_unpack.wesl::prism_unpack_surface` 和 execution table row；共享 Scene resolve 另有 `material_sample.wesl` 的 texture/VT/LOD fold、`shading_resolve.wesl::evaluate_response_arm` 的 builtin/registered 响应入口，以及 16-word `ResponseOutput`/response composition。它们分属数据解包、采样、响应、输出组合，不是一个可直接接入 composite 的完整 resolver。
+- **参数宽度截断的实现状态**：`shading_resolve.wesl::load_surface_parameters` 和调用侧使用完整 `prism_packed_word_count`，暂存数组尺寸引用生成的 `PRISM_SURFACE_MAX_WORDS`，并对 `parameter_size == packed_words * 4`、最大 ABI 宽度及 heap 范围 fail-closed；Native `composite_material.wesl` 的 unpack 临时数组也已改为同一生成常量，避免两条消费者路径各自硬编码 104。本轮尝试的 `cargo test -p prism_render_scene --lib ...` 未启用 `legacy-bevy`，因此 resolve 模块及其源码测试未编入目标；命令退出成功但 **0 tests matched**，不构成该测试通过。随后启用正确构建前检查时，另一次 `cargo check -p prism_render_app --lib` 因共享 target 目录被并发清理而报告临时目录不存在，未得到编译结论。仍需在启用对应 feature 的目标上执行 WESL link，并以最大合法 lobe 组合进行 CPU/WESL/GPU 数值对拍；不能将“删除 40-word cap”单独算作宽度验收。
+- **不得混淆 plan、response 与 composition**：Native `composite_material.wesl` 当前只有限验证 endpoint/package/permutation 并解包 surface；完整消费还需校验 plan family、blended-channel mask、mask kind/index 与 blend domain，并执行两端 response。`shading_resolve.wesl::evaluate_response_arm` 可作为 builtin/registered 入口参考，但 registered GPU evaluator 是受链接配置约束的扩展 seam，CPU evaluator 不是 GPU 实现。`response_composition.wgsl::compose_responses` 只合并已经求值的输出，不能替代 resolver 或 mask 取值。
+- **表面输入仍须纵向补齐**：`surface_encode.wesl` 当前 `SurfaceMaterial` 每 draw 有 index/generation/revision/plan，raster 校验后 GBuffer `surface_id` 只写 index；composite 没有逐像素 producer identity 可复核 generation/revision。GBuffer 也没有 UV/footprint、tangent/normal-map context。帧级 allocation pin 保障资源字节生命周期，但不能被表述成完整 per-pixel identity 或 `SurfaceData`。
+- **实现顺序约束**：先统一完整参数 gather 与消费者身份输入，再实现单一 `resolve_material_response`（完整 tuple admission、SurfaceData、builtin/registered evaluator），最后实现 plan-driven 两臂通道/domain composition；每一阶段均须保持无效/不支持输入 fail-closed。退出条件仍是默认 Native production graph 的 GPU readback 对拍 CPU resolve + response-composition oracle，并覆盖 104-word 表面、身份失效、MaskBlend mask/domain/channel、纹理/VT、in-flight 更新、recovery、resize 与目标 backend。
+- 本节是源码审计结论，没有修改运行时/着色器，也没有新增编译、GPU dispatch 或图像 parity 证据；不得将上述依赖复核写成实现完成。
+
+### 7.16 2026-10-23 双消费者材质 ABI 上限统一与构建复验
+
+- `shading_resolve.wesl` 与 Native `composite_material.wesl` 的参数暂存数组现都引用 schema 生成的 `PRISM_SURFACE_MAX_WORDS`，移除 Native composite 单独硬编码 `104` 的第二事实源。完整参数 gather、声明字节数和 heap 边界仍各自 fail-closed。
+- `CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 cargo check -p prism_render_app --lib --jobs 1 --message-format short` **通过，退出码 0**；该构建执行 `prism_render_app/build.rs`，实际链接 `composite_material.wesl` 及其 generated `material_unpack.wesl` import，证明 Native composite 上限引用可解析。该命令不执行测试、不验证 `shading_resolve` 的 legacy-bevy WESL test target，也不提供 GPU dispatch/readback 或最大宽度数值 parity。
+- 本轮 `prism_render_scene --lib` 的普通 feature 配置不编入 legacy-bevy gated 的 `shading::resolve`；过滤命令报告 0 tests，不能作通过证据。对应源码测试仍待在正确 feature/build 目标执行。
+- `cargo check` 生成的共享仓库 `target` 曾增长至约 3.6 GiB、磁盘剩余约 386 MiB。按目标要求执行 `cargo clean`，Cargo 报告移除 5940 个文件、1.8 GiB；未删除源码。该清理发生在当前已知 Cargo 检查结束后。
+- P0-material 仍开放：Native plan row 的 family/channel/mask/domain 尚未被消费来执行两臂 canonical response；GBuffer 逐像素 identity 与完整 `SurfaceData`、跨 material/execution/texture 的逻辑代际、默认生产图全帧 GPU readback/CPU golden parity 均未完成。ABI 上限统一只是前置正确性修复，不是 resolver 或重构完成。
+
+### 7.17 2026-10-23 Execution plan channel admission 与 Native fail-closed 边界
+
+- `MaterialExecutionTables::register_plan_with_mask_resolver` 现校验 blended channel mask：Single 必须为空；MaskBlend 必须与 `FullRadiance`、`DirectOnly` 或非空 radiance 子集 `CustomChannelMask` 精确一致。未知位、alpha/auxiliary 位、空 custom domain、缺失/多余 channel 均拒绝为 `InvalidBlendedChannels`，避免执行表行与 authoring plan 分叉。定向测试 `register_plan_requires_channels_to_match_the_plan_domain_and_shape` **1 passed / 0 failed**。
+- Native `composite_material.wesl` 现将 shader admission 收窄为精确的 Single + FusedBuiltin 行（left 与 material program 相同、right sentinel、零 blended channels、无 mask、FullRadiance 编码及零 reserved）；其他 plan 不会把任意 endpoint 冒充完整材质响应。此为安全 fail-closed，不代表 MaskBlend/SplitResponse 已实现。
+- 本轮 `cargo check -p prism_render_app --lib` 在磁盘不足后，清理 `target` 重试仍因 `wgsl_parse` 未以 rlib 形式提供而未通过；随后 `CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 cargo build -p prism_render_app --lib --jobs 1 --message-format short` **通过**（退出码 0）。该 build 确实执行 `build.rs` 并完成 Native `composite_material.wesl` + generated material ABI 的链接，但不是 GPU dispatch/readback 或 shader 行为验收。本轮没有 GPU 行为验证。
+- P0 仍未完成：消费侧逐像素 identity/generation/revision、完整 SurfaceData、canonical builtin/registered evaluator、两臂 response 与 mask/domain composition、共同逻辑代际以及默认生产 graph 全帧 CPU/GPU parity 均开放。
