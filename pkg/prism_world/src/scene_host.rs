@@ -180,31 +180,17 @@ pub trait SceneEcsProvider {
         Ok(Vec::new())
     }
 
-    /// Captures pending cell edits as transactions starting at `next_sequence`.
-    /// The host validates and appends the whole batch before eviction.
-    fn capture_cell_persistence(
-        &mut self,
-        _world: &World,
-        _sector: SectorId,
-        _next_sequence: u64,
-    ) -> Result<Vec<Transaction>, Self::Error> {
-        Ok(Vec::new())
-    }
-
     /// Captures scene-native persistence data for host-owned transaction
-    /// construction. Returning `Some` selects the integrated bridge path; the
-    /// host computes exact inverses and appends property plus companion as one
-    /// batch. `prior` is replayed from the same authoritative log being
-    /// appended, and `next_sequence` is that log's next sequence.
+    /// construction. The host computes exact inverses and appends property plus
+    /// companion as one batch. `prior` is replayed from the same authoritative
+    /// log being appended, and `next_sequence` is that log's next sequence.
     fn capture_scene_persistence(
         &mut self,
-        _world: &World,
-        _sector: SectorId,
-        _prior: &WorldState,
-        _next_sequence: u64,
-    ) -> Result<Option<ScenePersistenceCapture>, Self::Error> {
-        Ok(None)
-    }
+        world: &World,
+        sector: SectorId,
+        prior: &WorldState,
+        next_sequence: u64,
+    ) -> Result<ScenePersistenceCapture, Self::Error>;
 
     /// Applies reconstructed world state to a newly spawned cell before its
     /// ownership is published. Mapping fields into scene overrides/components
@@ -955,7 +941,7 @@ impl<'world, P: SceneEcsProvider> SceneEcsHost<'world, P> {
         let prior = Timeline::replay(&Snapshot::new(0, WorldState::new()), journal.log())
             .map_err(SceneEcsHostError::PersistenceReplay)?;
         let transactions =
-            self.capture_scene_or_legacy_transactions(sector, &prior, next_sequence)?;
+            self.capture_scene_transactions(sector, &prior, next_sequence)?;
         journal
             .append_batch(&transactions)
             .map_err(|error| SceneEcsHostError::DurableAppend(error.to_string()))?;
@@ -979,38 +965,33 @@ impl<'world, P: SceneEcsProvider> SceneEcsHost<'world, P> {
     ) -> Result<Vec<Transaction>, SceneEcsHostError<P::Error>> {
         let prior = Timeline::replay(&Snapshot::new(0, WorldState::new()), log)
             .map_err(SceneEcsHostError::PersistenceReplay)?;
-        self.capture_scene_or_legacy_transactions(sector, &prior, next_sequence)
+        self.capture_scene_transactions(sector, &prior, next_sequence)
     }
 
-    fn capture_scene_or_legacy_transactions(
+    fn capture_scene_transactions(
         &mut self,
         sector: SectorId,
         prior: &WorldState,
         next_sequence: u64,
     ) -> Result<Vec<Transaction>, SceneEcsHostError<P::Error>> {
-        if let Some(capture) = self
+        let capture = self
             .provider
             .capture_scene_persistence(self.world, sector, prior, next_sequence)
-            .map_err(SceneEcsHostError::Provider)?
-        {
-            return capture
-                .schema
-                .transactions_for_batch_with_companion(
-                    &capture.batch,
-                    prior,
-                    capture.actor,
-                    capture.clock,
-                    next_sequence,
-                    &capture.transaction_ids,
-                    capture.companion_transaction_id,
-                    capture.companion_object,
-                    capture.companion_field,
-                )
-                .map_err(SceneEcsHostError::PersistenceBridge);
-        }
-        self.provider
-            .capture_cell_persistence(self.world, sector, next_sequence)
-            .map_err(SceneEcsHostError::Provider)
+            .map_err(SceneEcsHostError::Provider)?;
+        capture
+            .schema
+            .transactions_for_batch_with_companion(
+                &capture.batch,
+                prior,
+                capture.actor,
+                capture.clock,
+                next_sequence,
+                &capture.transaction_ids,
+                capture.companion_transaction_id,
+                capture.companion_object,
+                capture.companion_field,
+            )
+            .map_err(SceneEcsHostError::PersistenceBridge)
     }
 }
 
@@ -1117,7 +1098,6 @@ mod tests {
         pub(super) fail_stage_on: Option<usize>,
         pub(super) persistent_object: Option<WorldPersistentId>,
         pub(super) cell_entity: Option<Entity>,
-        pub(super) scene_capture: bool,
         pub(super) scene_property_delta: bool,
     }
 
@@ -1241,60 +1221,39 @@ mod tests {
             Ok(self.persistent_object.into_iter().collect())
         }
 
-        fn capture_cell_persistence(
-            &mut self,
-            world: &World,
-            _sector: SectorId,
-            next_sequence: u64,
-        ) -> Result<Vec<Transaction>, Self::Error> {
-            let Some(object) = self.persistent_object else {
-                return Ok(Vec::new());
-            };
-            let value = i64::from(
-                world
-                    .get::<Marker>(self.cell_entity.ok_or(())?)
-                    .ok_or(())?
-                    .0,
-            );
-            let delta =
-                OverrideDelta::single(FieldId(1), OverrideValue::Integer(value)).map_err(|_| ())?;
-            let inverse =
-                OverrideDelta::single(FieldId(1), OverrideValue::Integer(7)).map_err(|_| ())?;
-            Ok(alloc::vec![Transaction::new(
-                TransactionId(1000),
-                ActorId(1),
-                LogicalClock(next_sequence),
-                next_sequence,
-                object,
-                delta,
-                inverse,
-            )
-            .map_err(|_| ())?])
-        }
-
         fn capture_scene_persistence(
             &mut self,
-            _world: &World,
+            world: &World,
             sector: SectorId,
             _prior: &WorldState,
             _next_sequence: u64,
-        ) -> Result<Option<ScenePersistenceCapture>, Self::Error> {
-            if !self.scene_capture {
-                return Ok(None);
+        ) -> Result<ScenePersistenceCapture, Self::Error> {
+            let companion_id = 9009;
+            let mut deltas = Vec::new();
+            let mut transaction_ids = Vec::new();
+            if let Some(object) = self.persistent_object {
+                let value = if self.scene_property_delta {
+                    12
+                } else {
+                    i64::from(
+                        world
+                            .get::<Marker>(self.cell_entity.ok_or(())?)
+                            .ok_or(())?
+                            .0,
+                    )
+                };
+                deltas.push((
+                    object,
+                    OverrideDelta::single(FieldId(1), OverrideValue::Integer(value))
+                        .map_err(|_| ())?,
+                ));
+                transaction_ids.push(TransactionId(1000));
             }
             let schema = ScenePersistenceSchema::new(Vec::new()).map_err(|_| ())?;
-            Ok(Some(ScenePersistenceCapture {
+            Ok(ScenePersistenceCapture {
                 schema,
                 batch: ScenePersistenceBatch {
-                    deltas: if self.scene_property_delta {
-                        vec![(
-                            WorldPersistentId(7700),
-                            OverrideDelta::single(FieldId(1), OverrideValue::Integer(12))
-                                .map_err(|_| ())?,
-                        )]
-                    } else {
-                        Vec::new()
-                    },
+                    deltas,
                     scene_snapshot: SceneInstancePersistence {
                         template: StableGuid::from_u128(sector.morton_hint() as u128),
                         instance: None,
@@ -1304,15 +1263,13 @@ mod tests {
                 },
                 actor: ActorId(9),
                 clock: LogicalClock(9),
-                transaction_ids: if self.scene_property_delta {
-                    vec![TransactionId(9008)]
-                } else {
-                    Vec::new()
-                },
-                companion_transaction_id: TransactionId(9009),
-                companion_object: WorldPersistentId(9909),
+                transaction_ids,
+                companion_transaction_id: TransactionId(companion_id),
+                companion_object: WorldPersistentId(u128::from(
+                    9909u64.wrapping_add(sector.morton_hint()),
+                )),
                 companion_field: FieldId(9909),
-            }))
+            })
         }
 
         fn replay_cell_persistence(
@@ -1365,7 +1322,6 @@ mod tests {
         let mut world = World::new();
         let sector = SectorId::new(0, 17, -2, 3);
         let provider = Provider {
-            scene_capture: true,
             ..Provider::default()
         };
         let mut host = SceneEcsHost::new(&mut world, provider);
@@ -1378,6 +1334,7 @@ mod tests {
             structural: Vec::new(),
         };
         let bytes = prism_scene::encode_persistence(&companion).unwrap();
+        let companion_object = PersistentId(u128::from(9909u64.wrapping_add(sector.morton_hint())));
         let delta = OverrideDelta::single(FieldId(9909), OverrideValue::Bytes(bytes)).unwrap();
         log.append(
             Transaction::new(
@@ -1385,7 +1342,7 @@ mod tests {
                 ActorId(9),
                 LogicalClock(9),
                 0,
-                PersistentId(9909),
+                companion_object,
                 delta.clone(),
                 delta,
             )
@@ -1402,7 +1359,7 @@ mod tests {
         let mut world = World::new();
         let sector = SectorId::new(0, 23, 1, -5);
         let provider = Provider {
-            scene_capture: true,
+            persistent_object: Some(WorldPersistentId(7700)),
             scene_property_delta: true,
             ..Provider::default()
         };
@@ -1436,7 +1393,10 @@ mod tests {
             Some(&OverrideValue::Integer(11))
         );
         assert_eq!(log.get(2).unwrap().sequence(), 2);
-        assert_eq!(log.get(2).unwrap().object(), PersistentId(9909));
+        assert_eq!(
+            log.get(2).unwrap().object(),
+            PersistentId(u128::from(9909u64.wrapping_add(sector.morton_hint())))
+        );
         assert!(matches!(
             log.get(2).unwrap().delta().get(FieldId(9909)),
             Some(OverrideValue::Bytes(_))

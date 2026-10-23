@@ -117,7 +117,7 @@ fn world_persistence_delta_survives_scene_eviction_and_reload() {
     runtime.apply_scene_plan(&eviction, &mut host).unwrap();
     runtime.mark_unloaded(sector);
     assert!(!host.world().contains(first_root));
-    assert_eq!(runtime.persistence().len(), 1);
+    assert_eq!(runtime.persistence().len(), 2);
     assert_eq!(runtime.persistence().get(0).unwrap().object(), object);
 
     let reload = runtime.tick(
@@ -662,7 +662,7 @@ fn durable_scene_eviction_survives_runtime_and_journal_restart() {
         .apply_scene_plan_durable(&eviction, &mut host, &mut journal)
         .unwrap();
     assert!(!host.world().contains(root));
-    assert_eq!(journal.log().len(), 1);
+    assert_eq!(journal.log().len(), 2);
     drop(host);
     drop(runtime);
     drop(journal);
@@ -805,7 +805,7 @@ fn failed_world_state_replay_despawns_unpublished_scene() {
     assert_eq!(host.loaded_cell_count(), 0);
     assert_eq!(host.residency_binding(41), None);
     assert_eq!(host.world().entity_count(), 0);
-    assert_eq!(runtime.persistence().len(), 1);
+    assert_eq!(runtime.persistence().len(), 2);
 }
 
 #[test]
@@ -846,14 +846,7 @@ fn scene_plan_with_records_commits_provider_transition_after_scene_stream_work()
     let mut runtime = make_runtime();
     let mut host = SceneEcsHost::new(&mut world, Provider::default());
     let root = load_bound_cell(&mut runtime, &mut host, sector, 41);
-    let mut records = alloc::vec![ResidencyRecord::new(
-        41,
-        ResidencyState::TierC,
-        0,
-        1,
-        1,
-        1,
-    )];
+    let mut records = alloc::vec![ResidencyRecord::new(41, ResidencyState::TierC, 0, 1, 1, 1,)];
     let plan = runtime.tick(
         &[DemandSource::new(sector, 0, 1, 10).unwrap()],
         &[manifest(sector)],
@@ -1193,13 +1186,8 @@ fn provider_handoff_preserves_state_without_unloading_or_overwriting_cells() {
     let mut runtime = make_runtime();
     let mut host = SceneEcsHost::new(&mut world, Provider::default());
     let root = load_bound_cell(&mut runtime, &mut host, sector, 41);
-    SceneHost::transition_residency(
-        &mut host,
-        41,
-        ResidencyState::TierC,
-        ResidencyState::TierA,
-    )
-    .unwrap();
+    SceneHost::transition_residency(&mut host, 41, ResidencyState::TierC, ResidencyState::TierA)
+        .unwrap();
     let provider = host.into_provider();
     let mut replacement = SceneEcsHost::new(&mut world, provider);
     assert_eq!(
