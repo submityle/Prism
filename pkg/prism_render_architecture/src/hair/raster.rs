@@ -23,6 +23,8 @@
 use alloc::vec::Vec;
 use core::fmt;
 
+use super::groom_import::ResampledGroom;
+
 /// GPU storage-buffer record consumed by `HairRasterSegment` in
 /// `pkg/prism_render_scene/src/shaders/hair_raster.wesl`.
 ///
@@ -303,6 +305,62 @@ pub fn project_hair_raster_segment(
     .map(Some)
 }
 
+/// Projects every adjacent control-point pair in a resampled groom.
+///
+/// Segment IDs are assigned in stable strand-major order, including segments
+/// clipped from the view, so IDs remain deterministic as the camera moves.
+/// The IDs address this returned vector's logical input order; callers that
+/// compact `None` results must retain each record's `seg_id` rather than use
+/// its compacted index. Publicly mutable groom fields are checked before any
+/// indexing. The default empty groom is valid and produces no records.
+pub fn project_resampled_groom(
+    clip_from_world: &[[f32; 4]; 4],
+    groom: &ResampledGroom,
+    viewport: [u32; 2],
+) -> Result<Vec<Option<ProjectedHairRasterSegment>>, ProjectedHairRasterSegmentError> {
+    let strand_count = groom.attributes.len();
+    if strand_count == 0 {
+        if !groom.positions.is_empty() {
+            return Err(ProjectedHairRasterSegmentError::InvalidGroomLayout);
+        }
+        return Ok(Vec::new());
+    }
+    if groom.points_per_strand < 2
+        || strand_count
+            .checked_mul(groom.points_per_strand)
+            .filter(|&expected| expected == groom.positions.len())
+            .is_none()
+    {
+        return Err(ProjectedHairRasterSegmentError::InvalidGroomLayout);
+    }
+    let segments_per_strand = groom.points_per_strand - 1;
+    let segment_count = strand_count
+        .checked_mul(segments_per_strand)
+        .filter(|&count| count.saturating_sub(1) <= u32::MAX as usize)
+        .ok_or(ProjectedHairRasterSegmentError::SegmentIdOutOfRange)?;
+    let mut projected = Vec::with_capacity(segment_count);
+    for (strand_index, attributes) in groom.attributes.iter().enumerate() {
+        let base = strand_index * groom.points_per_strand;
+        for segment_index in 0..segments_per_strand {
+            let t0 = segment_index as f32 / segments_per_strand as f32;
+            let t1 = (segment_index + 1) as f32 / segments_per_strand as f32;
+            let seg_id = (strand_index * segments_per_strand + segment_index) as u32;
+            let a = groom.positions[base + segment_index];
+            let b = groom.positions[base + segment_index + 1];
+            projected.push(project_hair_raster_segment(
+                clip_from_world,
+                [a.x, a.y, a.z],
+                attributes.radius_at(t0),
+                [b.x, b.y, b.z],
+                attributes.radius_at(t1),
+                viewport,
+                seg_id,
+            )?);
+        }
+    }
+    Ok(projected)
+}
+
 /// Why a projected hair segment could not be encoded for the GPU rasterizer.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProjectedHairRasterSegmentError {
@@ -320,6 +378,10 @@ pub enum ProjectedHairRasterSegmentError {
     NegativeWidth,
     /// Projected strand diameter exceeds the safe shader pixel-bound range.
     WidthOutOfRange,
+    /// Resampled groom point and per-strand attribute arrays are inconsistent.
+    InvalidGroomLayout,
+    /// Stable strand-major segment identity does not fit in the GPU ABI.
+    SegmentIdOutOfRange,
 }
 
 impl fmt::Display for ProjectedHairRasterSegmentError {
@@ -337,6 +399,12 @@ impl fmt::Display for ProjectedHairRasterSegmentError {
             Self::NegativeWidth => f.write_str("hair raster width must be non-negative"),
             Self::WidthOutOfRange => {
                 f.write_str("hair raster width exceeds shader pixel-bound range")
+            }
+            Self::InvalidGroomLayout => {
+                f.write_str("resampled groom point and attribute layout is inconsistent")
+            }
+            Self::SegmentIdOutOfRange => {
+                f.write_str("hair raster segment identity exceeds the GPU ABI")
             }
         }
     }
@@ -716,6 +784,64 @@ mod tests {
                 0,
             ),
             Err(ProjectedHairRasterSegmentError::ViewportOutOfRange)
+        );
+    }
+
+    #[test]
+    fn resampled_groom_projects_segments_with_stable_ids_and_radius_taper() {
+        use super::super::dynamics::Vec3;
+        use super::super::groom_import::StrandAttributes;
+
+        let identity = [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ];
+        let groom = ResampledGroom {
+            points_per_strand: 3,
+            positions: vec![
+                Vec3::new(-0.5, 0.0, 0.5),
+                Vec3::new(0.0, 0.0, 0.5),
+                Vec3::new(0.5, 0.0, 0.5),
+                Vec3::new(-0.5, 0.5, 0.5),
+                Vec3::new(0.0, 0.5, 0.5),
+                Vec3::new(0.5, 0.5, 0.5),
+            ],
+            attributes: vec![
+                StrandAttributes::new(0.1, 0.05, [0.0; 2], 11),
+                StrandAttributes::new(0.08, 0.02, [0.0; 2], 22),
+            ],
+        };
+        let projected = project_resampled_groom(&identity, &groom, [100, 100]).unwrap();
+        assert_eq!(projected.len(), 4);
+        let records: Vec<_> = projected.into_iter().map(Option::unwrap).collect();
+        assert_eq!(
+            records.iter().map(|r| r.seg_id()).collect::<Vec<_>>(),
+            [0, 1, 2, 3]
+        );
+        assert!((records[0].width_px() - 2.0_f32.sqrt() * 10.0).abs() < 1.0e-4);
+        assert!((records[1].width_px() - 2.0_f32.sqrt() * 7.5).abs() < 1.0e-4);
+        assert!((records[2].width_px() - 2.0_f32.sqrt() * 8.0).abs() < 1.0e-4);
+        assert!((records[3].width_px() - 2.0_f32.sqrt() * 5.0).abs() < 1.0e-4);
+    }
+
+    #[test]
+    fn resampled_groom_projection_rejects_malformed_public_layout() {
+        let malformed = ResampledGroom {
+            points_per_strand: 3,
+            positions: vec![super::super::dynamics::Vec3::ZERO; 2],
+            attributes: vec![super::super::groom_import::StrandAttributes::default()],
+        };
+        let identity = [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ];
+        assert_eq!(
+            project_resampled_groom(&identity, &malformed, [64, 64]),
+            Err(ProjectedHairRasterSegmentError::InvalidGroomLayout)
         );
     }
 
