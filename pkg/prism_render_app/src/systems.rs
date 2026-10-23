@@ -534,10 +534,23 @@ pub(crate) fn execute_frame<I>(
         stats.execution_trace.outcome = FrameExecutionOutcome::Failed;
         return;
     }
-    let lighting_pass = lighting_gpu.pass_for_target(&plan.plan, &offscreen.target, runtime);
+    let lighting_pass = match composite_material_bindings {
+        Some(buffers) => lighting_gpu.pass_for_target_with_materials(
+            &plan.plan,
+            &offscreen.target,
+            runtime,
+            buffers,
+        ),
+        None => lighting_gpu.pass_for_target(&plan.plan, &offscreen.target, runtime),
+    };
     let upscaler = cameras
         .iter()
-        .any(|camera| matches!(camera.surface.target, prism_camera::RenderTarget::PrimaryWindow | prism_camera::RenderTarget::Texture(0)) )
+        .any(|camera| {
+            matches!(
+                camera.surface.target,
+                prism_camera::RenderTarget::PrimaryWindow | prism_camera::RenderTarget::Texture(0)
+            )
+        })
         .then(|| camera_targets.ensure_upscaler(runtime))
         .flatten();
     let view_inputs: Vec<_> = cameras
@@ -564,6 +577,7 @@ pub(crate) fn execute_frame<I>(
                 order: camera.surface.order,
                 clear: camera.surface.clear,
                 viewport: camera.surface.viewport,
+                exposure_stops: camera.surface.exposure_stops,
                 target,
                 queues: &camera.queues,
                 lighting: lighting_gpu.pass_for_target(&plan.plan, target, runtime),

@@ -113,6 +113,7 @@ pub mod surface_view_targets;
 pub mod surface_views;
 mod sync_world;
 mod systems;
+pub mod taa_history;
 mod target;
 mod texture_cache;
 mod transforms;

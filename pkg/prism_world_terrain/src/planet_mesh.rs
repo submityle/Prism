@@ -366,6 +366,11 @@ impl PlanetHeightfieldMesh {
         &self.indices
     }
 
+    #[cfg(feature = "bevy_mesh_adapter")]
+    pub(crate) fn into_bevy_parts(self) -> (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<u32>) {
+        (self.positions, self.normals, self.uvs, self.indices)
+    }
+
     pub(crate) const fn lod_seam_neighbors(&self) -> [Option<TileKey>; 4] {
         self.lod_seam_neighbors
     }

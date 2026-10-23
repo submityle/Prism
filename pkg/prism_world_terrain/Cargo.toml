@@ -10,6 +10,7 @@ publish = false
 [features]
 default = []
 mesh = ["dep:prism_mesh", "dep:prism_render_driver"]
+bevy_mesh_adapter = ["mesh", "dep:bevy_asset", "dep:bevy_mesh"]
 scatter = ["dep:prism_world_residency"]
 
 [dependencies]
@@ -18,6 +19,8 @@ libm = "0.2"
 prism_world_residency = { path = "../prism_world_residency", optional = true }
 prism_mesh = { path = "../prism_mesh", optional = true }
 prism_render_driver = { path = "../prism_render_driver", optional = true }
+bevy_asset = { path = "../../crates/bevy_asset", version = "0.20.0-dev", optional = true }
+bevy_mesh = { path = "../../crates/bevy_mesh", version = "0.20.0-dev", optional = true }
 
 [[bench]]
 name = "heightfield_bake"

@@ -10,6 +10,8 @@
 extern crate alloc;
 
 mod bake;
+#[cfg(feature = "bevy_mesh_adapter")]
+mod bevy_mesh_adapter;
 mod coordinates;
 mod cube_sphere;
 mod dual_contouring;
@@ -47,6 +49,10 @@ mod voxel;
 pub use bake::{
     BakeError, BakeLimits, GridChange, HeightfieldImportError, HeightfieldMesh, HeightfieldTile,
     SampleBounds,
+};
+#[cfg(feature = "bevy_mesh_adapter")]
+pub use bevy_mesh_adapter::{
+    heightfield_to_bevy_mesh, planet_heightfield_to_bevy_mesh, TerrainBevyMeshError,
 };
 pub use coordinates::{
     CoordinateError, FixedPoint3, I64Point, VerifiedLocalPoint, FIXED_FRAC_BITS, FIXED_SCALE,

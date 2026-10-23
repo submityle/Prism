@@ -1330,6 +1330,16 @@ renderer 接线期间，`CameraIntent`/`ViewData` 的每视图可见性元数据
 
 本切片尚未宣称物理 GPU 视觉完成：当前环境在 `WgpuInstance` 中未发现可用物理 adapter，因而没有真实设备的缩放像素 readback 证据；Null backend 只验证图计划和资源生命周期。`history_frames` 到 TAA 历史资源保留，以及任意纹理目标 owner/输出生命周期，仍需对应消费者接线和集成验收。
 
+#### 28.9.1 TAA history RenderApp 当前实现证据（2026-10-23）
+
+`pkg/prism_render_app/src/taa_history.rs` 现在提供可被 RenderApp 调用的真实历史资源闭环：`TaaHistoryCache` 在 RenderApp world 中初始化；`TaaHistoryKey` 同时包含完整 generational `Entity`、输出命名空间、宽高和格式，因此实体复用、窗口/纹理目标切换、尺寸变化和格式变化不会共享旧历史。每个 owner 持有两张真实 `Rgba16Float` RHI texture/view，`append_resolve` 在调用方提供的 RenderGraph 中加入 compute resolve，输入 current HDR、motion vector、reactive mask，输出 ping-pong history；首帧、非连续帧、`history_epoch` 变化和 camera cut 都显式回退到 current 并返回 `reset=true`。
+
+`history_frames` 的语义是 owner 的闲置保留帧数，不是历史纹理数量。`mark_submitted` 只在 `execute_tracked` 成功后推进 ping-pong、epoch、最后使用帧和 completion watermark；图编译/提交失败可用 `cancel_pending` 撤销，避免污染下一帧。owner、bind group 和 resolve pipeline 都由 graph external owner pin 保活；resize/target/format/device generation 变化产生的旧 owner 进入退休队列，只有相同设备代际的 `completed_value` 达到提交值，或 RenderRuntime 已完成旧代队列排空后，才允许销毁 GPU texture/view/bind group/pipeline。pending resolve 不会被闲置回收提前 retire。
+
+已有 Null 测试覆盖：真实 texture/view 创建、真实 compute pass admission、graph compile、`execute_tracked`、成功提交后的状态推进、`history_frames` 到期后的 retirement、GPU completion 前不销毁以及 `wait_idle` 后回收；另有 key 隔离和空尺寸/不支持格式拒绝测试。本次复核中限定测试未能完成链接/执行：共享构建目录先后出现 `target/debug/deps` 被清理和磁盘 `No space left on device`；完整 `cargo check -p prism_render_app --features camera-cutscene --lib --offline` 已编译到 `prism_render_app`，TAA 自身错误已清零，但被共享工作树既有 `pkg/prism_render_app/src/target.rs:837` 的 `old` 未声明为 `mut` 阻塞。该错误不属于本切片文件集合。
+
+这项增量仍有一个明确的集成边界：由于本切片禁止修改 `frame.rs`、`surface_views.rs`、`surface_view_targets.rs` 和 `systems.rs`，现有默认 surface composition 尚未自动调用 `TaaHistoryCache::append_resolve`，也没有把现有相机 graph 的 current/motion/reactive view 句柄自动传入该 API。因此当前能确认的是“真实可调用的 RenderApp TAA history primitive 与其 GPU-safe 生命周期”，不能表述为“默认 Prism 相机帧已经启用 TAA”或“已完成真实设备像素/readback 验收”。
+
 ### 28.10 构图辅助与安全框（`composition_aid`）
 
 三分法、黄金比、标题/动作安全框作为只读、归一化视口坐标线段从 `ViewData` 计算；`CompositionGuide::compute_into` 支持调用方复用输出缓冲，至多写出 8 条线段，viewport 为零时清空输出并返回错误计数。`prism_camera_ecs/composition_aid` feature 将配置组件和 `PublishedCompositionGizmos` 输出接入 `PostUpdate`，只为当帧已发布且携带 guide 配置的相机生成数据；inactive 或离开 published 集合的相机不会遗留旧帧 gizmo。无效更新是否保留上帧 view 由 `PublishedViews` 的 retain-last-valid 策略决定，构图系统只消费该帧实际发布的快照。输出遵循 published view 的稳定 `(order, entity)` 顺序。ECS 缓冲按索引复用，稳态相机数不变时不重分配 entry/line 缓冲；guide 变化只覆盖缓冲内容。

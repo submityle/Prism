@@ -1005,8 +1005,13 @@ impl<I: Instance + 'static> WindowRenderTargets<I> {
                             .into(),
                     )
                 })?;
-                let mut lighting = lighting_context
-                    .and_then(|(state, plan)| state.pass_for_target(plan, target, runtime));
+                let mut lighting =
+                    lighting_context.and_then(|(state, plan)| match material_buffers {
+                        Some(buffers) => {
+                            state.pass_for_target_with_materials(plan, target, runtime, buffers)
+                        }
+                        None => state.pass_for_target(plan, target, runtime),
+                    });
                 if !frame_work {
                     if let Some(pass) = lighting.as_mut() {
                         pass.run_gi = false;

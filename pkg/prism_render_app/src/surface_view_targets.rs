@@ -132,7 +132,7 @@ pub(crate) struct SurfaceViewUpscaler<D: RenderDevice> {
 }
 
 impl<D: RenderDevice> SurfaceViewUpscaler<D> {
-    fn new(device: Arc<D>) -> Self {
+    pub(crate) fn new(device: Arc<D>) -> Self {
         use prism_render_driver::*;
         let shader = device.create_shader_module(&ShaderModuleDescriptor::wgsl(include_str!(
             "surface_view_upscale.wgsl"
@@ -197,7 +197,7 @@ impl<D: RenderDevice> SurfaceViewUpscaler<D> {
 }
 
 impl<D: RenderDevice> SurfaceViewUpscaler<D> {
-    fn destroy(self) {
+    pub(crate) fn destroy(self) {
         self.device.destroy_render_pipeline(self.pipeline);
         self.device.destroy_pipeline_layout(self.layout);
         self.device.destroy_bind_group_layout(self.bindings);

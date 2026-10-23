@@ -454,6 +454,7 @@ where
             .world
             .insert_resource(crate::display_transform_gpu::OffscreenFrameOutput::default());
         render.world.insert_resource(RenderRecord::default());
+        render.world.init_resource::<crate::taa_history::TaaHistoryCache>();
         render.world.insert_resource(RenderFrameStats::default());
         render
             .world

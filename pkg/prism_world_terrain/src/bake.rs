@@ -565,6 +565,11 @@ impl HeightfieldMesh {
         &self.indices
     }
 
+    #[cfg(feature = "bevy_mesh_adapter")]
+    pub(crate) fn into_bevy_parts(self) -> (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<u32>) {
+        (self.positions, self.normals, self.uvs, self.indices)
+    }
+
     /// Removes active transition strips and restores the regular grid topology.
     ///
     /// The replacement index stream is fully allocated and budget-checked before
