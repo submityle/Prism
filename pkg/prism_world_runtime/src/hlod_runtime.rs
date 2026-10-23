@@ -13,7 +13,7 @@ use prism_world_residency::{
 };
 
 /// Revision of the runtime HLOD selection contract.
-pub const HLOD_RUNTIME_SELECTION_VERSION: u32 = 1;
+pub const HLOD_RUNTIME_SELECTION_VERSION: u32 = 2;
 
 /// Admission and output limits for one HLOD selection plan.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -69,9 +69,22 @@ pub struct HlodSelection {
     pub level: usize,
     /// Derived asset key for the selected representation.
     pub asset_key: u64,
+    /// Concrete asset identities for both representations while blending.
+    /// `from_asset_key` and `to_asset_key` correspond exactly to the level
+    /// indices in `transition`; neither needs to be reconstructed by callers.
+    pub transition_assets: Option<HlodTransitionAssets>,
     /// Blend pair for the active boundary band, including frames where
     /// hysteresis keeps `level` on the prior stable representation.
     pub transition: Option<LodTransition>,
+}
+
+/// Asset identities consumed together by an active HLOD cross-fade.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HlodTransitionAssets {
+    /// Asset key for `LodTransition::from_level`.
+    pub from_asset_key: u64,
+    /// Asset key for `LodTransition::to_level`.
+    pub to_asset_key: u64,
 }
 
 /// A deterministic, sorted HLOD selection result.
@@ -469,11 +482,16 @@ impl HlodRuntime {
             let transition = transition_to
                 .map(|to_level| cluster.transition(request.distance, current, to_level))
                 .transpose()?;
+            let transition_assets = transition.map(|transition| HlodTransitionAssets {
+                from_asset_key: cluster.levels()[transition.from_level].asset_key,
+                to_asset_key: cluster.levels()[transition.to_level].asset_key,
+            });
             let asset_key = cluster.levels()[level].asset_key;
             selections.push(HlodSelection {
                 cluster_id: request.cluster_id,
                 level,
                 asset_key,
+                transition_assets,
                 transition,
             });
             next_levels.push((request.cluster_id, level));
@@ -547,12 +565,17 @@ mod tests {
                     cluster_id: 1,
                     level: 0,
                     asset_key: 101,
+                    transition_assets: None,
                     transition: None,
                 },
                 HlodSelection {
                     cluster_id: 2,
                     level: 1,
                     asset_key: 202,
+                    transition_assets: Some(HlodTransitionAssets {
+                        from_asset_key: 201,
+                        to_asset_key: 202,
+                    }),
                     transition: Some(LodTransition {
                         from_level: 0,
                         to_level: 1,
@@ -572,6 +595,13 @@ mod tests {
         let reverse_transition = held.selections()[0].transition.unwrap();
         assert_eq!(reverse_transition.from_level, 1);
         assert_eq!(reverse_transition.to_level, 0);
+        assert_eq!(
+            held.selections()[0].transition_assets,
+            Some(HlodTransitionAssets {
+                from_asset_key: 202,
+                to_asset_key: 201,
+            })
+        );
     }
 
     #[test]
@@ -589,6 +619,13 @@ mod tests {
         assert_eq!(transition.from_level, 0);
         assert_eq!(transition.to_level, 1);
         assert_eq!(transition.alpha_q16, 3_276);
+        assert_eq!(
+            near_edge.selections()[0].transition_assets,
+            Some(HlodTransitionAssets {
+                from_asset_key: 101,
+                to_asset_key: 102,
+            })
+        );
         assert_eq!(runtime.active_level(1), Some(0));
 
         let middle = runtime
@@ -622,6 +659,13 @@ mod tests {
         assert_eq!(held.selections()[0].level, 1);
         assert_eq!(held.selections()[0].transition.unwrap().from_level, 1);
         assert_eq!(held.selections()[0].transition.unwrap().to_level, 0);
+        assert_eq!(
+            held.selections()[0].transition_assets,
+            Some(HlodTransitionAssets {
+                from_asset_key: 102,
+                to_asset_key: 101,
+            })
+        );
         assert_eq!(runtime.active_level(1), Some(1));
 
         let reversed = runtime

@@ -40,7 +40,7 @@ pub use world_partition_capability::{WorldPartitionCapability, WorldPartitionCap
 mod hlod_runtime;
 pub use hlod_runtime::{
     HlodDistanceRequest, HlodRuntime, HlodRuntimeError, HlodSelection, HlodSelectionBudget,
-    HlodSelectionPlan, HLOD_RUNTIME_SELECTION_VERSION,
+    HlodSelectionPlan, HlodTransitionAssets, HLOD_RUNTIME_SELECTION_VERSION,
 };
 mod sdf_local_volume;
 pub use sdf_local_volume::{WorldSdfLocalVolume, WorldSdfLocalVolumeError};
