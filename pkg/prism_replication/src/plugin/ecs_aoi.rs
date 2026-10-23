@@ -92,15 +92,58 @@ pub fn mark_aoi_entity_dirty(world: &mut World, entity: Entity) -> bool {
         return true;
     }
     if queue.items.len() >= queue.capacity {
-        queue.overflowed = true;
-        if let Some(status) = world.get_resource_mut::<EcsAoiProjectionStatus>() {
-            status.overflowed = true;
-            status.failures = status.failures.saturating_add(1);
+        if !queue.overflowed {
+            queue.overflowed = true;
+            if let Some(status) = world.get_resource_mut::<EcsAoiProjectionStatus>() {
+                status.overflowed = true;
+                status.failures = status.failures.saturating_add(1);
+            }
         }
         return false;
     }
     queue.membership.insert(entity);
     queue.items.push_back(entity);
+    true
+}
+
+/// Rebuild the dirty queue from an authoritative live-entity snapshot after
+/// overflow or whenever the host requests a full reconciliation. The caller
+/// must pass every live entity eligible for this adapter; the projection stage
+/// samples those entities and also visits every previously published entity so
+/// stale network ids become removals. If the unique union exceeds the configured
+/// queue capacity, nothing changes and the queue remains halted.
+pub fn rebuild_aoi_projection_queue<S, A>(world: &mut World, live_entities: &[Entity]) -> bool
+where
+    S: EcsAoiProjectionSource,
+    A: ServerStrategy,
+{
+    let Some(mut queue) = world.remove_resource::<DirtyQueue>() else {
+        return false;
+    };
+    let Some(state) = world.get_resource::<ProjectionState<S, A>>() else {
+        world.insert_resource(queue);
+        return false;
+    };
+    let mut entities = BTreeSet::new();
+    entities.extend(
+        live_entities
+            .iter()
+            .copied()
+            .filter(|entity| world.contains(*entity)),
+    );
+    entities.extend(state.published.keys().copied());
+    if entities.len() > queue.capacity {
+        world.insert_resource(queue);
+        return false;
+    }
+    queue.items = entities.iter().copied().collect();
+    queue.membership = entities;
+    queue.overflowed = false;
+    if let Some(status) = world.get_resource_mut::<EcsAoiProjectionStatus>() {
+        status.overflowed = false;
+        status.pending_entities = queue.items.len();
+    }
+    world.insert_resource(queue);
     true
 }
 
@@ -111,7 +154,6 @@ fn mark_lifecycle_dirty(context: &mut ObserverContext<'_>) {
 type RegisterTracker = fn(&mut World);
 
 fn register_tracker<T: Component>(world: &mut World) {
-    world.observe::<T, _>(LifecycleEvent::Insert, mark_lifecycle_dirty);
     world.observe::<T, _>(LifecycleEvent::Remove, mark_lifecycle_dirty);
     world.observe_changed::<T, _>(|context: &mut ChangeContext<'_>| {
         let changed = context.changed().to_vec();
@@ -219,6 +261,10 @@ where
     S: EcsAoiProjectionSource,
     A: ServerStrategy,
 {
+    // Changed<T> observers enqueue dirty entities. Flush while the queue is
+    // still installed as a resource; flushing after taking it would silently
+    // reject every observer mark from this projection pass.
+    world.flush_changed_observers();
     let Some(mut queue) = world.remove_resource::<DirtyQueue>() else {
         return;
     };
@@ -247,15 +293,25 @@ where
     let count = queue.items.len().min(state.max_entities_per_tick());
     let entities: Vec<_> = queue.items.iter().take(count).copied().collect();
     let mut operations = Vec::with_capacity(count);
+    let mut removals = Vec::with_capacity(count);
     let mut updates = Vec::with_capacity(count);
-    let mut staged_ids = state.by_network_id.clone();
+    // Overlay only the identities touched by this bounded batch instead of
+    // cloning the full published-id index on every fixed tick.
+    let mut staged_ids = BTreeMap::<u32, Option<Entity>>::new();
+    // Release every prior id owned by a dirty entity before claiming new ids.
+    // This makes swaps/rebindings independent of FIFO order within the batch.
+    for entity in &entities {
+        if let Some(previous) = state.published.get(entity) {
+            staged_ids.insert(previous.network_id, None);
+        }
+    }
     let mut failed = false;
     for entity in &entities {
         let previous = state.published.get(entity).copied();
         if !world.contains(*entity) {
             if let Some(previous) = previous {
-                staged_ids.remove(&previous.network_id);
-                operations.push(AuthorityEntityProjection::Remove {
+                staged_ids.insert(previous.network_id, None);
+                removals.push(AuthorityEntityProjection::Remove {
                     entity_id: previous.network_id,
                 });
             }
@@ -266,8 +322,8 @@ where
         let position = state.source.position(world, *entity);
         let (Some(network_id), Some(position)) = (identity, position) else {
             if let Some(previous) = previous {
-                staged_ids.remove(&previous.network_id);
-                operations.push(AuthorityEntityProjection::Remove {
+                staged_ids.insert(previous.network_id, None);
+                removals.push(AuthorityEntityProjection::Remove {
                     entity_id: previous.network_id,
                 });
             }
@@ -277,19 +333,20 @@ where
         if let Some(previous) = previous
             && previous.network_id != network_id
         {
-            staged_ids.remove(&previous.network_id);
-            operations.push(AuthorityEntityProjection::Remove {
+            staged_ids.insert(previous.network_id, None);
+            removals.push(AuthorityEntityProjection::Remove {
                 entity_id: previous.network_id,
             });
         }
-        if staged_ids
+        let current_owner = staged_ids
             .get(&network_id)
-            .is_some_and(|owner| *owner != *entity)
-        {
+            .copied()
+            .unwrap_or_else(|| state.by_network_id.get(&network_id).copied());
+        if current_owner.is_some_and(|owner| owner != *entity) {
             failed = true;
             break;
         }
-        staged_ids.insert(network_id, *entity);
+        staged_ids.insert(network_id, Some(*entity));
         let snapshot = match state.source.snapshot(world, *entity) {
             Ok(snapshot) => snapshot,
             Err(_) => {
@@ -321,6 +378,8 @@ where
         ));
     }
 
+    removals.append(&mut operations);
+    let operations = removals;
     let operation_count = operations.len();
     if !failed && (operations.is_empty() || authority.project_entities_atomic(&operations).is_ok())
     {
@@ -331,7 +390,13 @@ where
                 state.published.remove(&entity);
             }
         }
-        state.by_network_id = staged_ids;
+        for (network_id, owner) in staged_ids {
+            if let Some(owner) = owner {
+                state.by_network_id.insert(network_id, owner);
+            } else {
+                state.by_network_id.remove(&network_id);
+            }
+        }
         for _ in 0..entities.len() {
             if let Some(entity) = queue.items.pop_front() {
                 queue.membership.remove(&entity);
@@ -369,7 +434,7 @@ mod tests {
     use prism_ecs::component::Component;
 
     #[derive(Clone)]
-    struct ReplicatedMarker(u32);
+    struct ReplicatedMarker(u32, u32);
     impl Component for ReplicatedMarker {}
 
     struct Source;
@@ -385,7 +450,11 @@ mod tests {
         fn snapshot(&self, world: &World, entity: Entity) -> Result<Vec<u8>, EcsAoiSourceError> {
             world
                 .get::<ReplicatedMarker>(entity)
-                .map(|marker| marker.0.to_le_bytes().to_vec())
+                .map(|marker| {
+                    let mut snapshot = marker.0.to_le_bytes().to_vec();
+                    snapshot.extend_from_slice(&marker.1.to_le_bytes());
+                    snapshot
+                })
                 .ok_or(EcsAoiSourceError::TemporarilyUnavailable)
         }
     }
@@ -427,7 +496,8 @@ mod tests {
             )
             .track_component::<ReplicatedMarker>(),
         );
-        let entity = app.world_mut().spawn(ReplicatedMarker(77));
+        let entity = app.world_mut().spawn(ReplicatedMarker(77, 1));
+        app.world_mut().flush_changed_observers();
         app.world_mut().run_schedule(FixedPostUpdate);
         assert_eq!(
             app.world()
@@ -439,14 +509,19 @@ mod tests {
         assert_eq!(
             app.world()
                 .resource::<EcsAoiProjectionStatus>()
+                .committed_entities,
+            1
+        );
+        assert_eq!(
+            app.world()
+                .resource::<EcsAoiProjectionStatus>()
                 .pending_entities,
             0
         );
         app.world_mut()
             .get_mut::<ReplicatedMarker>(entity)
             .unwrap()
-            .0 = 88;
-        app.world_mut().flush_changed_observers();
+            .1 = 2;
         app.world_mut().run_schedule(FixedPostUpdate);
         assert_eq!(
             app.world()
@@ -454,6 +529,12 @@ mod tests {
                 .aoi()
                 .entity_count(),
             1
+        );
+        assert_eq!(
+            app.world()
+                .resource::<EcsAoiProjectionStatus>()
+                .committed_entities,
+            2
         );
         assert!(app.world_mut().remove::<ReplicatedMarker>(entity));
         app.world_mut().run_schedule(FixedPostUpdate);
@@ -490,6 +571,86 @@ mod tests {
         assert_eq!(world.resource::<DirtyQueue>().items.len(), 1);
         assert!(world.resource::<DirtyQueue>().overflowed);
         assert!(world.resource::<EcsAoiProjectionStatus>().overflowed);
+    }
+
+    #[test]
+    fn full_resync_rebuild_clears_overflow_only_after_capacity_check() {
+        let mut app = prism_app::App::new();
+        app.insert_resource(authority());
+        app.add_plugins(EcsAoiProjectionPlugin::<Source, Strategy>::new(
+            Source,
+            EcsAoiProjectionConfig::new(1, 1).unwrap(),
+        ));
+        let first = app.world_mut().spawn(ReplicatedMarker(31, 0));
+        let second = app.world_mut().spawn(ReplicatedMarker(32, 0));
+        assert!(mark_aoi_entity_dirty(app.world_mut(), first));
+        assert!(!mark_aoi_entity_dirty(app.world_mut(), second));
+        assert!(!rebuild_aoi_projection_queue::<Source, Strategy>(
+            app.world_mut(),
+            &[first, second],
+        ));
+        assert!(app.world().resource::<EcsAoiProjectionStatus>().overflowed);
+
+        app.world_mut().despawn(second);
+        assert!(rebuild_aoi_projection_queue::<Source, Strategy>(
+            app.world_mut(),
+            &[first],
+        ));
+        assert!(!app.world().resource::<EcsAoiProjectionStatus>().overflowed);
+        assert_eq!(
+            app.world()
+                .resource::<EcsAoiProjectionStatus>()
+                .pending_entities,
+            1
+        );
+        app.world_mut().run_schedule(FixedPostUpdate);
+        assert_eq!(
+            app.world()
+                .resource::<MultiPeerAuthority<Strategy>>()
+                .aoi()
+                .entity_count(),
+            1
+        );
+    }
+
+    #[test]
+    fn stable_identity_swap_in_one_batch_is_not_order_dependent() {
+        let mut app = prism_app::App::new();
+        app.insert_resource(authority());
+        app.add_plugins(EcsAoiProjectionPlugin::<Source, Strategy>::new(
+            Source,
+            EcsAoiProjectionConfig::new(4, 4).unwrap(),
+        ));
+        let first = app.world_mut().spawn(ReplicatedMarker(10, 0));
+        let second = app.world_mut().spawn(ReplicatedMarker(20, 0));
+        assert!(mark_aoi_entity_dirty(app.world_mut(), first));
+        assert!(mark_aoi_entity_dirty(app.world_mut(), second));
+        app.world_mut().run_schedule(FixedPostUpdate);
+        app.world_mut()
+            .get_mut::<ReplicatedMarker>(first)
+            .unwrap()
+            .0 = 20;
+        app.world_mut()
+            .get_mut::<ReplicatedMarker>(second)
+            .unwrap()
+            .0 = 10;
+        assert!(mark_aoi_entity_dirty(app.world_mut(), first));
+        assert!(mark_aoi_entity_dirty(app.world_mut(), second));
+        app.world_mut().run_schedule(FixedPostUpdate);
+        assert_eq!(
+            app.world()
+                .resource::<EcsAoiProjectionStatus>()
+                .pending_entities,
+            0
+        );
+        assert_eq!(app.world().resource::<EcsAoiProjectionStatus>().failures, 0);
+        assert_eq!(
+            app.world()
+                .resource::<MultiPeerAuthority<Strategy>>()
+                .aoi()
+                .entity_count(),
+            2
+        );
     }
 
     struct ConstantIdentitySource;

@@ -66,8 +66,8 @@ pub use client::{
 pub use durable::{DurableLogOperation, DurableRecoveryError};
 pub use ecs::{EcsReplication, EcsReplicationError, EcsReplicationPlugin, NetworkRollbackDriver};
 pub use ecs_aoi::{
-    mark_aoi_entity_dirty, EcsAoiProjectionConfig, EcsAoiProjectionPlugin, EcsAoiProjectionSource,
-    EcsAoiProjectionStatus, EcsAoiSourceError,
+    mark_aoi_entity_dirty, rebuild_aoi_projection_queue, EcsAoiProjectionConfig,
+    EcsAoiProjectionPlugin, EcsAoiProjectionSource, EcsAoiProjectionStatus, EcsAoiSourceError,
 };
 pub use multi_server::{
     decode_authority_aoi_event, decode_authority_aoi_replication_payload,
