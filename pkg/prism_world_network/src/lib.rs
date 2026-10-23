@@ -14,6 +14,8 @@ extern crate std;
 
 #[cfg(feature = "crypto")]
 mod crypto_transport;
+#[cfg(feature = "crypto")]
+mod psk_handshake;
 mod server_mesh;
 mod session;
 #[cfg(feature = "std")]
@@ -33,6 +35,10 @@ pub use prism_world_persist::{
     PersistentId, Transaction, TransactionId,
 };
 pub use prism_world_stream::{AabbI64, GlobalPos, SectorId};
+#[cfg(feature = "crypto")]
+pub use psk_handshake::{
+    ClientHandshake, ClientHello, HandshakeError, SecureSessionConfig, ServerHandshake, ServerHello,
+};
 pub use server_mesh::{
     AbortOutcome, AdmissionError, ApplyOutcome, AuthorityEpoch, AuthorityLease, AuthorityLoad,
     BatchPrepareResult, CommitOutcome, EpochError, HandoffCommand,

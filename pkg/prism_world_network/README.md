@@ -69,6 +69,16 @@ contract.
   Authentication is verified before replay state advances. The host must
   establish and rotate keys, guarantee nonce-prefix uniqueness for each key,
   and authenticate peers; this is not a key-exchange protocol.
+- `ClientHandshake` / `ServerHandshake` provide a mutually
+  authenticated PSK exchange: fresh 256-bit nonces, transcript-bound HMAC-SHA256
+  proofs, session-id binding, and domain-separated directional AES keys and
+  nonce prefixes. The resulting role-specific `SecureSessionConfig` consumes
+  directly into `Aes256GcmTransport`. PSK distribution, secure storage, peer
+  identity-to-PSK mapping, rotation/revocation and rate limiting remain the
+  deployment control plane's responsibility. A `ServerHandshake` verifier is
+  consumed by one `accept` call; this is not a replay cache. The host must
+  enforce session-id uniqueness/replay admission when required by its session
+  policy.
 - `ServerMesh` owns bounded partition-authority metadata only. It fences old
   authorities with `(authority, epoch, lease)` matching, reserves target
   capacity during prepare, and rechecks the source fence during commit.

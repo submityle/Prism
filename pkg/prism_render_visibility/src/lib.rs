@@ -49,7 +49,10 @@ pub use hzb_footprint::{conservative_occluder_reverse_z, HzbFootprint};
 pub use hzb_projection::{project_world_aabb, ProjectedBounds, WorldAabb};
 pub use hzb_pyramid::{HzbMip, HzbPyramid};
 pub use hzb_query::{test_bounds_occluded, OcclusionQuery};
-pub use lod::{GeometryLod, GeometryLodChain, LodSelection};
+pub use lod::{
+    validate_geometry_lod_levels, GeometryLod, GeometryLodChain, GeometryLodDefinition,
+    GeometryLodDrawWindow, GeometryLodValidationError, LodSelection,
+};
 pub use occlusion::{HzbPhase, HzbTest};
 pub use occlusion_resolve::resolve_occluded_set;
 pub use output::{BufferRange, ViewVisibilityOutput, VisibilityFrame};
