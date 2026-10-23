@@ -171,9 +171,22 @@ impl VirtualGeometryDrawPublications {
             .insert(publication.asset_id(), publication);
     }
 
-    /// Removes a retired asset publication.
-    pub fn retire(&mut self, asset_id: u32) -> Option<VirtualGeometryGpuPublication> {
-        if let Some(state) = self.residency.get_mut(&asset_id) {
+    /// Removes a publication only when the retirement names its exact lifetime.
+    /// Delayed retirement for an older generation cannot remove a replacement.
+    pub fn retire(
+        &mut self,
+        asset_id: u32,
+        content_revision: [u8; 32],
+        generation: u64,
+    ) -> Option<VirtualGeometryGpuPublication> {
+        let current = self.publications.get(&asset_id)?;
+        if current.content_revision() != content_revision || current.generation() != generation {
+            return None;
+        }
+        if let Some(state) = self.residency.get_mut(&asset_id)
+            && state.content_revision == content_revision
+            && state.generation == generation
+        {
             // Keep the generation/revision tombstone so delayed deltas cannot
             // resurrect this lifetime, but release the potentially large page
             // map as soon as its publication is retired.
@@ -983,16 +996,35 @@ mod tests {
         )
         .expect("publication fixture is valid");
         publications.replace(publication);
+        publications.apply_residency_delta(55, [3; 32], 21, true, &[(key, true)]);
+        publications.replace(
+            VirtualGeometryGpuPublication::build(
+                &virtual_asset(),
+                [3; 32],
+                21,
+                &[],
+                &[VirtualGeometryMaterialBinding {
+                    material_slot: 0,
+                    material: MATERIAL,
+                }],
+            )
+            .expect("replacement publication fixture is valid"),
+        );
 
-        assert!(publications.retire(55).is_some());
-        assert!(!publications.is_page_resident(55, [2; 32], 20, key));
+        // An older teardown cannot remove either the replacement publication
+        // or its page residency.
+        assert!(publications.retire(55, [2; 32], 20).is_none());
+        assert!(publications.is_page_resident(55, [3; 32], 21, key));
+
+        assert!(publications.retire(55, [3; 32], 21).is_some());
+        assert!(!publications.is_page_resident(55, [3; 32], 21, key));
 
         // The same retired lifetime cannot be reactivated by a delayed delta.
-        publications.apply_residency_delta(55, [2; 32], 20, true, &[(key, true)]);
-        assert!(!publications.is_page_resident(55, [2; 32], 20, key));
-        // A genuinely newer publication lifetime can reuse the asset identity.
         publications.apply_residency_delta(55, [3; 32], 21, true, &[(key, true)]);
-        assert!(publications.is_page_resident(55, [3; 32], 21, key));
+        assert!(!publications.is_page_resident(55, [3; 32], 21, key));
+        // A genuinely newer publication lifetime can reuse the asset identity.
+        publications.apply_residency_delta(55, [4; 32], 22, true, &[(key, true)]);
+        assert!(publications.is_page_resident(55, [4; 32], 22, key));
     }
 
     #[test]
