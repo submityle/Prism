@@ -41,6 +41,7 @@ pub(crate) fn build_unified_visibility(
     geometries: Res<crate::RenderGeometryRegistry>,
     mut state: ResMut<UnifiedVisibilityState>,
     mut representation_selections: ResMut<crate::geometry::GeometryRepresentationSelections>,
+    virtual_geometries: Res<crate::geometry::VirtualGeometryRuntimeRegistry>,
     mut fabric_handles: Local<Vec<prism_render_architecture::gpu_scene::SceneHandle>>,
     mut buffers: ResMut<UnifiedVisibilityBuffers>,
     mut diagnostics: ResMut<PrismVisibilityDiagnostics>,
@@ -153,18 +154,79 @@ pub(crate) fn build_unified_visibility(
             let Some(lod) = geometry_record.resolve_lod(item.lod_or_cluster) else {
                 continue;
             };
-            representation_selections.insert(
-                handle,
-                item.scene,
-                crate::geometry::visibility_lod_selection(
-                    item.geometry,
-                    geometry_record.revision,
-                    item.scene,
+            let binding = virtual_geometries.scene_binding(item.geometry, geometry_record.revision);
+            let cluster = binding.and_then(|binding| {
+                // `state.views` is populated only after this view's work items
+                // have been processed. Use the current extracted view here;
+                // searching the accumulated list silently disabled CLST for
+                // every view, including the first one.
+                let frustum = frustum?;
+                let projection = virtual_geometry_lod_projection(
+                    extracted.viewport.w,
+                    extracted.clip_from_view,
+                )?;
+                let frustum = prism_render_architecture::virtual_geometry::Frustum::from_planes(
+                    frustum.half_spaces.map(|plane| {
+                        let [x, y, z, distance] = plane.normal_d().to_array();
+                        prism_render_architecture::virtual_geometry::Plane::new([x, y, z], distance)
+                    }),
+                );
+                crate::geometry::select_virtual_geometry_cut(
+                    &virtual_geometries,
+                    binding,
+                    position,
+                    &frustum,
+                    projection,
+                    settings.virtual_geometry_target_error_pixels()?,
+                )
+            });
+            if let (Some(binding), Some((cut, requests))) = (binding, cluster) {
+                if let Some(first) = cut.first() {
+                    representation_selections.insert_cluster_selection(
+                        handle,
+                        item.scene,
+                        crate::geometry::GeometryRepresentationSelection::virtual_cluster(
+                            crate::geometry::GeometryRepresentationIdentity {
+                                scene: item.scene,
+                                geometry: item.geometry,
+                                geometry_revision: geometry_record.revision,
+                                selection_revision,
+                                view: Some(handle),
+                            },
+                            first.node,
+                            binding.identity(),
+                        ),
+                        cut,
+                        requests,
+                    );
+                } else {
+                    representation_selections.insert(
+                        handle,
+                        item.scene,
+                        crate::geometry::visibility_lod_selection(
+                            item.geometry,
+                            geometry_record.revision,
+                            item.scene,
+                            handle,
+                            selection_revision,
+                            lod.level,
+                        ),
+                    );
+                }
+            } else {
+                representation_selections.insert(
                     handle,
-                    selection_revision,
-                    lod.level,
-                ),
-            );
+                    item.scene,
+                    crate::geometry::visibility_lod_selection(
+                        item.geometry,
+                        geometry_record.revision,
+                        item.scene,
+                        handle,
+                        selection_revision,
+                        lod.level,
+                    ),
+                );
+            }
         }
         let candidates: Vec<_> = state.frame.work_items
             [output.start as usize..(output.start + output.count) as usize]
@@ -431,6 +493,28 @@ fn squared_distance(a: [f32; 3], b: [f32; 3]) -> f32 {
     a.into_iter().zip(b).map(|(a, b)| (a - b) * (a - b)).sum()
 }
 
+fn virtual_geometry_lod_projection(
+    viewport_height: u32,
+    clip_from_view: bevy_math::Mat4,
+) -> Option<prism_render_architecture::virtual_geometry::LodProjection> {
+    // CLST's projected-error model is perspective. Orthographic/custom
+    // projections must use the ordinary mesh LOD until an appropriate
+    // projection model is supplied rather than receiving a guessed cut.
+    let focal_length_pixels = viewport_height as f32 * 0.5 * clip_from_view.y_axis.y.abs();
+    if viewport_height == 0
+        || clip_from_view.w_axis.w.abs() > 1.0e-6
+        || !focal_length_pixels.is_finite()
+        || focal_length_pixels <= 0.0
+    {
+        return None;
+    }
+    Some(
+        prism_render_architecture::virtual_geometry::LodProjection::from_focal_length_pixels(
+            focal_length_pixels,
+        ),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use bevy_render::view::RetainedViewEntity;
@@ -440,6 +524,29 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn virtual_geometry_projection_uses_vertical_fov_and_viewport_height() {
+        let projection =
+            bevy_math::Mat4::perspective_rh(core::f32::consts::FRAC_PI_2, 16.0 / 9.0, 0.1, 100.0);
+        let lod = virtual_geometry_lod_projection(720, projection).expect("perspective view");
+        assert!((lod.focal_length_pixels - 360.0).abs() < 1.0e-3);
+    }
+
+    #[test]
+    fn virtual_geometry_projection_rejects_invalid_or_non_perspective_views() {
+        let perspective =
+            bevy_math::Mat4::perspective_rh(core::f32::consts::FRAC_PI_2, 1.0, 0.1, 100.0);
+        assert!(virtual_geometry_lod_projection(0, perspective).is_none());
+        assert!(virtual_geometry_lod_projection(720, bevy_math::Mat4::IDENTITY).is_none());
+        let invalid = bevy_math::Mat4::from_cols(
+            bevy_math::Vec4::X,
+            bevy_math::Vec4::new(0.0, f32::NAN, 0.0, 0.0),
+            bevy_math::Vec4::Z,
+            bevy_math::Vec4::W,
+        );
+        assert!(virtual_geometry_lod_projection(720, invalid).is_none());
+    }
 
     #[test]
     fn helper_tables_cover_live_scene_and_stale_material_fallback() {

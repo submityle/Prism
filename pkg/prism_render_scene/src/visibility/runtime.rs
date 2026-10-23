@@ -27,6 +27,17 @@ pub struct UnifiedVisibilitySettings {
     pub hzb_depth_bias: f32,
     /// Projected motion above this value bypasses previous-HZB rejection.
     pub hzb_fast_motion_threshold: f32,
+    /// Maximum projected CLST geometric error in pixels. Zero requests the
+    /// finest valid cut; non-finite and negative values are rejected.
+    pub virtual_geometry_target_error_pixels: f32,
+}
+
+/// Validation failures for visibility settings that affect deterministic
+/// virtual-geometry selection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UnifiedVisibilitySettingsError {
+    /// The CLST target error must be finite and non-negative.
+    InvalidVirtualGeometryTargetErrorPixels,
 }
 
 impl Default for UnifiedVisibilitySettings {
@@ -40,7 +51,28 @@ impl Default for UnifiedVisibilitySettings {
             hzb_occlusion: false,
             hzb_depth_bias: 0.001,
             hzb_fast_motion_threshold: 0.05,
+            virtual_geometry_target_error_pixels: 1.0,
         }
+    }
+}
+
+impl UnifiedVisibilitySettings {
+    /// Validates the settings consumed by RenderScene visibility.
+    pub fn validate(&self) -> Result<(), UnifiedVisibilitySettingsError> {
+        if !self.virtual_geometry_target_error_pixels.is_finite()
+            || self.virtual_geometry_target_error_pixels < 0.0
+        {
+            return Err(UnifiedVisibilitySettingsError::InvalidVirtualGeometryTargetErrorPixels);
+        }
+        Ok(())
+    }
+
+    /// Returns the CLST target error only when it is safe to use.
+    #[must_use]
+    pub fn virtual_geometry_target_error_pixels(&self) -> Option<f32> {
+        self.validate()
+            .is_ok()
+            .then_some(self.virtual_geometry_target_error_pixels)
     }
 }
 
@@ -356,6 +388,22 @@ mod diagnostics_tests {
             UnifiedVisibilityEnabled(false),
             &settings
         ));
+    }
+
+    #[test]
+    fn virtual_geometry_error_setting_has_a_validated_default_and_rejects_invalid_values() {
+        let mut settings = UnifiedVisibilitySettings::default();
+        assert_eq!(settings.virtual_geometry_target_error_pixels(), Some(1.0));
+        assert!(settings.validate().is_ok());
+
+        settings.virtual_geometry_target_error_pixels = -0.25;
+        assert_eq!(settings.virtual_geometry_target_error_pixels(), None);
+        assert_eq!(
+            settings.validate(),
+            Err(UnifiedVisibilitySettingsError::InvalidVirtualGeometryTargetErrorPixels)
+        );
+        settings.virtual_geometry_target_error_pixels = f32::NAN;
+        assert!(settings.validate().is_err());
     }
 }
 
