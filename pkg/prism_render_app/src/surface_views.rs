@@ -15,7 +15,12 @@ use prism_ecs::world::WorldId;
 use prism_math::Mat4;
 use prism_transform::GlobalTransform;
 
+#[cfg(feature = "camera-cutscene")]
+use self::cinematic::camera_exposure_stops;
 use crate::visibility::{PrismCamera, PrismFrustum, ViewFlags};
+
+#[cfg(feature = "camera-cutscene")]
+mod cinematic;
 
 /// A validated scene camera, with column-major world-to-clip matrices.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -42,6 +47,8 @@ pub struct SurfaceView {
     pub resolution_scale: f32,
     /// Number of temporal history frames requested by the camera-side LOD policy.
     pub history_frames: u32,
+    /// Scene-linear exposure compensation in stops, applied before camera composition.
+    pub exposure_stops: f32,
 }
 
 /// Why a camera was omitted. Prerequisite errors precede value validation.
@@ -222,6 +229,7 @@ pub fn extract_surface_views(main: &mut World, render: &mut World) {
                 history_valid: old.is_some(),
                 resolution_scale: 1.0,
                 history_frames: 0,
+                exposure_stops: 0.0,
             },
         );
         extracted.incarnations.insert(entity, incarnation);
@@ -330,10 +338,16 @@ fn extract_published_surface_views(main: &World, render: &mut World, published: 
                 history_valid: prior.is_some(),
                 resolution_scale,
                 history_frames,
+                exposure_stops: 0.0,
             },
         );
         #[cfg(feature = "camera-cutscene")]
         if let Some(params) = render_params_by_entity.get(&published_view.entity) {
+            extracted
+                .views
+                .get_mut(&published_view.entity)
+                .expect("published view inserted immediately above")
+                .exposure_stops = camera_exposure_stops(params);
             extracted
                 .render_params
                 .insert(published_view.entity, params.clone());
@@ -491,6 +505,7 @@ mod tests {
         assert_eq!(extracted.clear, ClearMode::DepthOnly);
         assert_eq!(extracted.resolution_scale, 1.0);
         assert_eq!(extracted.history_frames, 0);
+        assert_eq!(extracted.exposure_stops, 0.0);
     }
 
     #[cfg(feature = "camera-cutscene")]
@@ -531,6 +546,8 @@ mod tests {
         assert!(extracted.render_params(unrelated).is_none());
         assert!(extracted.get(camera).is_some());
         assert!(extracted.get(unrelated).is_some());
+        assert!((extracted.get(camera).unwrap().exposure_stops + 2.263_034_4).abs() < 1.0e-6);
+        assert_eq!(extracted.get(unrelated).unwrap().exposure_stops, 0.0);
     }
 
     #[cfg(feature = "view-lod")]

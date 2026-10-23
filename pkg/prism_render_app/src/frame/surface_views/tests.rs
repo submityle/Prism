@@ -5,9 +5,9 @@ use crate::target::RenderTarget;
 use prism_ecs::prelude::Entity;
 use prism_render_architecture::gpu_scene::{GeometryHandle, SceneHandle, SceneMaterialHandle};
 use prism_render_driver::{
-    BindGroupId, CopyCommand, DepthLoadOp, DeviceDescriptor, Extent3d, Instance, LoadOp, Pass,
-    RenderCommand, RenderDevice, RenderPipelineId, RequestAdapterOptions, ScissorRect,
-    TextureDescriptor, TextureFormat, TextureUsages, TextureViewDescriptor, Viewport,
+    BindGroupId, DepthLoadOp, DeviceDescriptor, Extent3d, Instance, LoadOp, Pass, RenderCommand,
+    RenderDevice, RenderPipelineId, RequestAdapterOptions, ScissorRect, TextureDescriptor,
+    TextureFormat, TextureUsages, TextureViewDescriptor, Viewport,
 };
 use prism_render_driver_null::NullInstance;
 
@@ -20,6 +20,58 @@ fn device() -> prism_render_driver_null::NullDevice {
         .create_device(&adapter, &DeviceDescriptor::default())
         .expect("the null backend always creates a device")
         .0
+}
+
+fn upscale_ids(
+    device: &impl RenderDevice,
+) -> (RenderPipelineId, prism_render_driver::BindGroupLayoutId) {
+    use prism_render_driver::*;
+    let shader = device.create_shader_module(&ShaderModuleDescriptor::wgsl(include_str!(
+        "../../surface_view_upscale.wgsl"
+    )));
+    let bindings = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+        label: Some("test camera upscale bindings".into()),
+        entries: vec![BindGroupLayoutEntry {
+            binding: 0,
+            visibility: ShaderStages::FRAGMENT,
+            ty: BindingType::Texture {
+                sample_type: TextureSampleType::Float,
+                view_dimension: TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        }],
+    });
+    let layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+        label: Some("test camera upscale layout".into()),
+        bind_group_layouts: vec![bindings],
+        push_constant_ranges: vec![PushConstantRange {
+            stages: ShaderStages::FRAGMENT,
+            start: 0,
+            end: 16,
+        }],
+    });
+    let pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
+        label: Some("test camera upscale".into()),
+        layout: Some(layout),
+        vertex: VertexState {
+            module: shader,
+            entry_point: "vs_main".into(),
+            buffers: vec![],
+        },
+        primitive: PrimitiveState {
+            cull_mode: None,
+            ..Default::default()
+        },
+        depth_stencil: None,
+        multisample: MultisampleState::default(),
+        fragment: Some(FragmentState {
+            module: shader,
+            entry_point: "fs_main".into(),
+            targets: vec![Some(ColorTargetState::opaque(crate::RENDER_TARGET_FORMAT))],
+        }),
+    });
+    (pipeline, bindings)
 }
 
 fn camera(index: u32) -> Entity {
@@ -73,9 +125,12 @@ fn surface_view_input<'a>(
         order: 0,
         clear: ClearMode::ColorAndDepth,
         viewport: [0, 0, 8, 8],
+        exposure_stops: 0.0,
         target,
         queues,
         lighting: None,
+        upscale_pipeline: RenderPipelineId::from_parts(30, 1),
+        upscale_bindings: prism_render_driver::BindGroupLayoutId::from_parts(31, 1),
     }
 }
 
@@ -153,6 +208,7 @@ fn surface_graph_resolves_per_camera_clear_loads_in_stable_composition_order() {
     let first = RenderTarget::new(&device, Extent3d::new_2d(8, 8));
     let second = RenderTarget::new(&device, Extent3d::new_2d(8, 8));
     let third = RenderTarget::new(&device, Extent3d::new_2d(8, 8));
+    let (upscale_pipeline, upscale_bindings) = upscale_ids(&device);
     let queues = RenderQueues::new();
     let functions = DrawFunctions::default();
     let views = [
@@ -164,6 +220,9 @@ fn surface_graph_resolves_per_camera_clear_loads_in_stable_composition_order() {
             target: &third,
             queues: &queues,
             lighting: None,
+            exposure_stops: 0.0,
+            upscale_pipeline,
+            upscale_bindings,
         },
         SurfaceViewGraphInput {
             camera: camera(1),
@@ -173,6 +232,9 @@ fn surface_graph_resolves_per_camera_clear_loads_in_stable_composition_order() {
             target: &first,
             queues: &queues,
             lighting: None,
+            exposure_stops: 0.0,
+            upscale_pipeline,
+            upscale_bindings,
         },
         SurfaceViewGraphInput {
             camera: camera(2),
@@ -182,6 +244,9 @@ fn surface_graph_resolves_per_camera_clear_loads_in_stable_composition_order() {
             target: &second,
             queues: &queues,
             lighting: None,
+            exposure_stops: 0.0,
+            upscale_pipeline,
+            upscale_bindings,
         },
     ];
 
@@ -321,6 +386,9 @@ fn physical_gpu_camera_clear_modes_preserve_or_clear_private_hdr_attachments() {
             target: &local,
             queues: &queues,
             lighting: None,
+            exposure_stops: 0.0,
+            upscale_pipeline: upscale_ids(&device).0,
+            upscale_bindings: upscale_ids(&device).1,
         }];
         let prepared = prepare_surface_view_graph(
             &output,
@@ -366,6 +434,9 @@ fn surface_graph_rejects_duplicate_camera_before_declaring_any_target_graph() {
             target: &first,
             queues: &queues,
             lighting: None,
+            exposure_stops: 0.0,
+            upscale_pipeline: RenderPipelineId::from_parts(30, 1),
+            upscale_bindings: prism_render_driver::BindGroupLayoutId::from_parts(31, 1),
         },
         SurfaceViewGraphInput {
             camera: camera(7),
@@ -375,6 +446,9 @@ fn surface_graph_rejects_duplicate_camera_before_declaring_any_target_graph() {
             target: &second,
             queues: &queues,
             lighting: None,
+            exposure_stops: 0.0,
+            upscale_pipeline: RenderPipelineId::from_parts(30, 1),
+            upscale_bindings: prism_render_driver::BindGroupLayoutId::from_parts(31, 1),
         },
     ];
 
@@ -411,6 +485,9 @@ fn surface_graph_rejects_a_camera_rect_outside_the_output() {
         target: &local,
         queues: &queues,
         lighting: None,
+        exposure_stops: 0.0,
+        upscale_pipeline: RenderPipelineId::from_parts(30, 1),
+        upscale_bindings: prism_render_driver::BindGroupLayoutId::from_parts(31, 1),
     }];
 
     assert!(matches!(
@@ -430,18 +507,16 @@ fn surface_graph_rejects_a_camera_rect_outside_the_output() {
     output.destroy(&device);
 }
 
-fn camera_copies(passes: &[Pass]) -> Vec<(usize, &CopyCommand)> {
+fn camera_upscales(passes: &[Pass]) -> Vec<(usize, &[RenderCommand])> {
     passes
         .iter()
         .enumerate()
         .flat_map(|(index, pass)| match pass {
-            Pass::Transfer { label, commands }
-                if label.as_deref() == Some("prism-surface-view-copy") =>
-            {
-                commands
-                    .iter()
-                    .map(move |command| (index, command))
-                    .collect::<Vec<_>>()
+            Pass::Render {
+                descriptor,
+                commands,
+            } if descriptor.label.as_deref() == Some("prism-surface-view-upscale") => {
+                vec![(index, commands.as_slice())]
             }
             _ => Vec::new(),
         })
@@ -449,7 +524,7 @@ fn camera_copies(passes: &[Pass]) -> Vec<(usize, &CopyCommand)> {
 }
 
 #[test]
-fn surface_graph_defers_sorted_camera_copies_and_keeps_targets_local() {
+fn surface_graph_defers_sorted_camera_upscales_and_keeps_targets_local() {
     let device = device();
     let output = RenderTarget::new(&device, Extent3d::new_2d(32, 16));
     let first = RenderTarget::new(&device, Extent3d::new_2d(8, 6));
@@ -463,18 +538,24 @@ fn surface_graph_defers_sorted_camera_copies_and_keeps_targets_local() {
             order: -2,
             clear: ClearMode::Inherit,
             viewport: [7, 4, 6, 4],
+            exposure_stops: 0.0,
             target: &second,
             queues: &queues,
             lighting: None,
+            upscale_pipeline: RenderPipelineId::from_parts(30, 1),
+            upscale_bindings: prism_render_driver::BindGroupLayoutId::from_parts(31, 1),
         },
         SurfaceViewGraphInput {
             camera: camera(7),
             order: 3,
             clear: ClearMode::DepthOnly,
             viewport: [3, 2, 8, 6],
+            exposure_stops: 0.0,
             target: &first,
             queues: &queues,
             lighting: None,
+            upscale_pipeline: RenderPipelineId::from_parts(30, 1),
+            upscale_bindings: prism_render_driver::BindGroupLayoutId::from_parts(31, 1),
         },
     ];
     let prepared = prepare_surface_view_graph(
@@ -487,7 +568,7 @@ fn surface_graph_defers_sorted_camera_copies_and_keeps_targets_local() {
         &FrameGraphTextureImports::default(),
     )
     .unwrap();
-    assert_eq!(prepared.stages().copy_passes, 2);
+    assert_eq!(prepared.stages().upscale_passes, 2);
     assert_eq!(
         prepared
             .stages()
@@ -501,7 +582,7 @@ fn surface_graph_defers_sorted_camera_copies_and_keeps_targets_local() {
     assert_eq!(
         prepared.graph.pass_count(),
         scene_passes,
-        "preparation must leave camera copies deferred until after particle append"
+        "preparation must leave camera composition deferred until after particle append"
     );
     for (local, extent) in prepared
         .camera_outputs
@@ -525,24 +606,25 @@ fn surface_graph_defers_sorted_camera_copies_and_keeps_targets_local() {
     let recorded = graph
         .record(&device)
         .expect("camera graph records on the null backend");
-    let copies = camera_copies(&recorded.commands().passes);
-    assert_eq!(copies.len(), 2);
-    for ((_, command), (target, rect)) in copies
+    let upscales = camera_upscales(&recorded.commands().passes);
+    assert_eq!(upscales.len(), 2);
+    for ((_, commands), (target, rect)) in upscales
         .iter()
         .zip([(&second, [7, 4, 6, 4]), (&first, [3, 2, 8, 6])])
     {
-        assert_eq!(
-            **command,
-            CopyCommand::CopyTextureToTexture {
-                src: target.texture(),
-                src_mip_level: 0,
-                src_origin: [0, 0, 0],
-                dst: output.texture(),
-                dst_mip_level: 0,
-                dst_origin: [rect[0], rect[1], 0],
-                size: Extent3d::new_2d(rect[2], rect[3]),
-            }
-        );
+        assert!(commands.iter().any(
+            |command| matches!(command, RenderCommand::SetViewport(viewport)
+            if viewport.x == rect[0] as f32 && viewport.y == rect[1] as f32
+                && viewport.width == rect[2] as f32 && viewport.height == rect[3] as f32)
+        ));
+        assert!(commands.iter().any(
+            |command| matches!(command, RenderCommand::SetScissor(scissor)
+            if scissor.x == rect[0] && scissor.y == rect[1]
+                && scissor.width == rect[2] && scissor.height == rect[3])
+        ));
+        assert!(commands
+            .iter()
+            .any(|command| matches!(command, RenderCommand::Draw { .. })));
         let clears = recorded
             .commands()
             .passes
@@ -561,9 +643,90 @@ fn surface_graph_defers_sorted_camera_copies_and_keeps_targets_local() {
         );
     }
     assert!(
-        copies[0].0 < copies[1].0,
+        upscales[0].0 < upscales[1].0,
         "overlapping cameras compose in entity order"
     );
+    recorded.release(&device);
+    second.destroy(&device);
+    first.destroy(&device);
+    output.destroy(&device);
+}
+
+#[test]
+fn camera_local_exposure_isolated_in_null_graph_before_global_display_stage() {
+    use prism_render_driver::{RenderCommand, ShaderStages};
+
+    let device = device();
+    let output = RenderTarget::new(&device, Extent3d::new_2d(24, 8));
+    let first = RenderTarget::new(&device, Extent3d::new_2d(8, 8));
+    let second = RenderTarget::new(&device, Extent3d::new_2d(8, 8));
+    let (upscale_pipeline, upscale_bindings) = upscale_ids(&device);
+    let queues = RenderQueues::new();
+    let functions = DrawFunctions::default();
+    let views = [
+        SurfaceViewGraphInput {
+            camera: camera(2),
+            order: 0,
+            clear: ClearMode::ColorAndDepth,
+            viewport: [0, 0, 8, 8],
+            exposure_stops: -2.0,
+            target: &first,
+            queues: &queues,
+            lighting: None,
+            upscale_pipeline,
+            upscale_bindings,
+        },
+        SurfaceViewGraphInput {
+            camera: camera(3),
+            order: 1,
+            clear: ClearMode::ColorAndDepth,
+            viewport: [8, 0, 8, 8],
+            exposure_stops: 1.5,
+            target: &second,
+            queues: &queues,
+            lighting: None,
+            upscale_pipeline,
+            upscale_bindings,
+        },
+    ];
+    let prepared = prepare_surface_view_graph(
+        &output,
+        &queues,
+        &functions,
+        None,
+        None,
+        &views,
+        &FrameGraphTextureImports::default(),
+    )
+    .unwrap();
+    let (graph, _) =
+        finalize_surface_view_graph(prepared, None, None, &BTreeMap::new(), 0).unwrap();
+    let stages = graph.blackboard().get::<SurfaceViewGraphStages>().unwrap();
+    assert_eq!(stages.upscale_passes, 2);
+    let recorded = graph.record(&device).expect("Null graph records");
+    let upscale_commands = camera_upscales(&recorded.commands().passes);
+    assert_eq!(upscale_commands.len(), 2);
+    let read_exposure = |commands: &[RenderCommand]| {
+        let bytes = commands
+            .iter()
+            .find_map(|command| match command {
+                RenderCommand::SetPushConstants {
+                    stages: actual_stages,
+                    offset: 0,
+                    data,
+                } if *actual_stages == ShaderStages::FRAGMENT && data.len() == 16 => {
+                    Some(data.as_slice())
+                }
+                _ => None,
+            })
+            .expect("each camera upscale uploads its local exposure");
+        f32::from_ne_bytes(bytes[0..4].try_into().unwrap())
+    };
+    assert_eq!(read_exposure(upscale_commands[0].1), -2.0);
+    assert_eq!(read_exposure(upscale_commands[1].1), 1.5);
+    assert!(upscale_commands[0].0 < upscale_commands[1].0);
+    // This graph ends in frame-wide linear HDR. The host appends the single
+    // global display transform after this graph, never per camera.
     recorded.release(&device);
     second.destroy(&device);
     first.destroy(&device);
@@ -704,6 +867,9 @@ fn surface_graph_native_particles_use_local_depth_and_precede_each_camera_copy()
             target,
             queues: &queues,
             lighting: None,
+            exposure_stops: 0.0,
+            upscale_pipeline: RenderPipelineId::from_parts(30, 1),
+            upscale_bindings: prism_render_driver::BindGroupLayoutId::from_parts(31, 1),
         })
         .collect();
     let prepared = prepare_surface_view_graph(
@@ -735,24 +901,28 @@ fn surface_graph_native_particles_use_local_depth_and_precede_each_camera_copy()
         .record(device.as_ref())
         .expect("native multiview graph records");
     let passes = &recorded.commands().passes;
-    let copies = camera_copies(passes);
-    assert_eq!(copies.len(), 2);
+    let upscales = camera_upscales(passes);
+    assert_eq!(upscales.len(), 2);
     let mut total_draws = 0;
-    for ((((entity, rect), target), depth), (copy_position, copy)) in
-        cameras.iter().zip(&targets).zip(&local_depths).zip(&copies)
+    for ((((entity, rect), target), depth), (upscale_position, upscale_commands)) in cameras
+        .iter()
+        .zip(&targets)
+        .zip(&local_depths)
+        .zip(&upscales)
     {
-        assert_eq!(
-            **copy,
-            CopyCommand::CopyTextureToTexture {
-                src: target.texture(),
-                src_mip_level: 0,
-                src_origin: [0, 0, 0],
-                dst: output.texture(),
-                dst_mip_level: 0,
-                dst_origin: [rect[0], rect[1], 0],
-                size: Extent3d::new_2d(rect[2], rect[3]),
-            }
-        );
+        assert!(upscale_commands.iter().any(
+            |command| matches!(command, RenderCommand::SetViewport(viewport)
+            if viewport.x == rect[0] as f32 && viewport.y == rect[1] as f32
+                && viewport.width == rect[2] as f32 && viewport.height == rect[3] as f32)
+        ));
+        assert!(upscale_commands.iter().any(
+            |command| matches!(command, RenderCommand::SetScissor(scissor)
+            if scissor.x == rect[0] && scissor.y == rect[1]
+                && scissor.width == rect[2] && scissor.height == rect[3])
+        ));
+        assert!(upscale_commands
+            .iter()
+            .any(|command| matches!(command, RenderCommand::Draw { .. })));
         let mut local_draws = 0;
         for (position, pass) in passes.iter().enumerate() {
             let Pass::Render {
@@ -780,8 +950,8 @@ fn surface_graph_native_particles_use_local_depth_and_precede_each_camera_copy()
             }
             local_draws += 1;
             assert!(
-                position < *copy_position,
-                "camera particles must reach their local HDR before copy"
+                position < *upscale_position,
+                "camera particles must reach their local HDR before composition"
             );
             assert_eq!(descriptor.color_attachments[0].unwrap().load, LoadOp::Load);
             let attachment = descriptor.depth_stencil_attachment.unwrap();
@@ -826,7 +996,7 @@ fn surface_graph_native_particles_use_local_depth_and_precede_each_camera_copy()
         );
     }
     assert_eq!(total_draws, state.fabric_draw_count());
-    assert!(copies[0].0 < copies[1].0);
+    assert!(upscales[0].0 < upscales[1].0);
     recorded.release(device.as_ref());
     render
         .remove_resource::<ParticleGpuState>()

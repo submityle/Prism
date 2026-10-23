@@ -12,6 +12,7 @@ pub(crate) struct SurfaceViewGraphInput<'a> {
     pub order: i32,
     pub clear: ClearMode,
     pub viewport: [u32; 4],
+    pub exposure_stops: f32,
     pub target: &'a RenderTarget,
     pub queues: &'a RenderQueues,
     pub lighting: Option<LightingGpuPass>,
@@ -130,6 +131,7 @@ pub(crate) struct PreparedSurfaceViewGraph {
 struct PreparedCameraOutput {
     camera: Entity,
     viewport: [u32; 4],
+    exposure_stops: f32,
     source_extent: crate::RenderViewport,
     upscale_pipeline: prism_render_driver::RenderPipelineId,
     upscale_bindings: prism_render_driver::BindGroupLayoutId,
@@ -268,6 +270,11 @@ pub(crate) fn prepare_surface_view_graph(
         camera_outputs.push(PreparedCameraOutput {
             camera: view.camera,
             viewport: view.viewport,
+            exposure_stops: if view.exposure_stops.is_finite() {
+                view.exposure_stops.clamp(-24.0, 24.0)
+            } else {
+                0.0
+            },
             source_extent: view.target.viewport(),
             upscale_pipeline: view.upscale_pipeline,
             upscale_bindings: view.upscale_bindings,
@@ -351,6 +358,9 @@ pub(crate) fn finalize_surface_view_graph(
             Some("camera HDR upscale source".into()),
         );
         let pipeline = output.upscale_pipeline;
+        // Apply per-camera exposure while the image is still linear HDR, before
+        // composition into the frame-wide target and its single display transform.
+        let exposure = [output.exposure_stops, 0.0_f32, 0.0, 0.0];
         graph.add_raster_pass(
             "prism-surface-view-upscale",
             PassFlags::SIDE_EFFECT,
@@ -363,6 +373,11 @@ pub(crate) fn finalize_surface_view_graph(
                     context
                         .set_render_pipeline(pipeline)
                         .set_render_bind_group(0, bind_group, vec![])
+                        .set_render_push_constants(
+                            prism_render_driver::ShaderStages::FRAGMENT,
+                            0,
+                            bytemuck::bytes_of(&exposure).to_vec(),
+                        )
                         .set_viewport(prism_render_driver::Viewport {
                             x: x as f32,
                             y: y as f32,
