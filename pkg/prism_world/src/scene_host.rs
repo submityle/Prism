@@ -25,9 +25,14 @@ use prism_world_persist::{
 use prism_world_stream::SectorId;
 
 mod ownership;
+mod persistence_bridge;
 mod plan_application;
 
 use ownership::SceneOwnership;
+pub use persistence_bridge::{
+    SceneEntityMap, SceneFieldBinding, SceneFieldValueKind, SceneObjectBinding,
+    ScenePersistenceBatch, ScenePersistenceBridgeError, ScenePersistenceSchema,
+};
 
 #[cfg(test)]
 mod regression_tests;
