@@ -529,7 +529,7 @@ App 配置分层（§14）与 cvar（§24.6）的读写/校验**委托 `prism_re
 
 M5 identity mapping 增量（2026-10-23）：`ReplicationMapping` 将稳定 `EntityId` 与包含完整 generation 的本地 ECS handle 分开维护；新增按稳定实体分组的 component 次级索引，使稳定实体解析不再扫描全量 mapping，按实体清理也只访问该实体的组件项。同一稳定实体的不同 component 映射若指向不同本地 handle 会显式拒绝，避免一个稳定身份跨 ECS generation 拆分。映射生命周期专项测试覆盖多组件查询、component/entity 删除、generation 冲突与索引一致性。该改进仍不提供 World/AOI/outbox 崩溃恢复。
 
-M5 World→AOI adapter 增量（2026-10-23）：可选 `EcsAoiProjectionPlugin` 通过项目提供的 source 分别取得稳定网络 ID、AOI 二维位置与完整快照；具体 ECS component 类型由宿主显式 `track_component<T>` 订阅 Insert/Remove 生命周期，或由命令/system 显式调用 `mark_aoi_entity_dirty`。dirty handle 以有界 FIFO+BTreeSet 去重，adapter 在 `FixedPostUpdate` 只采样 dirty 实体并受每 tick 数量上限约束；快照采样或 AOI/outbox 批量提交失败时保留队列，backpressure 时由原子投影留存的 snapshot override 固定 wire payload。队列溢出转为 sticky halted 状态并暴露 `EcsAoiProjectionStatus`，不静默丢更新；宿主须显式重建/重同步后重新安装 adapter。scene/dynamic identity、坐标系和复制 schema 仍由项目定义。本机制不回滚 World 写入，也不提供 World/AOI/outbox 崩溃恢复。
+M5 World→AOI adapter 增量（2026-10-23）：可选 `EcsAoiProjectionPlugin` 通过项目提供的 source 分别取得稳定网络 ID、AOI 二维位置与完整快照；具体 ECS component 类型由宿主显式 `track_component<T>` 订阅 Insert/Remove 结构事件和 `Changed<T>` coalesced 写入事件，其他系统/命令可调用 `mark_aoi_entity_dirty`。dirty handle 以有界 FIFO+BTreeSet 去重，adapter 在 `FixedPostUpdate` 只采样 dirty 实体并受每 tick 数量上限约束；快照采样或 AOI/outbox 批量提交失败时保留队列，backpressure 时由原子投影留存的 snapshot override 固定 wire payload。stable network ID 在 adapter 内必须对本地 generation-bearing Entity 唯一；冲突整批拒绝并保留 dirty 队列。队列溢出转为 sticky halted 状态并暴露 `EcsAoiProjectionStatus`，不静默丢更新；当前恢复方式是宿主显式重建/重同步后重新安装 adapter。scene/dynamic identity、坐标系和复制 schema 仍由项目定义。本机制不回滚 World 写入，也不提供 World/AOI/outbox 崩溃恢复。
 
 ### 25.4 多世界各持独立 time 时间域
 
