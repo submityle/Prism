@@ -109,35 +109,23 @@ L0 数学门面   prism_math: Vec3/Quat/Mat4/Affine3（SIMD, f32/f64/fixed）
 ## 5. 核心模型：Transform / GlobalTransform / Affine3
 
 ```rust
-/// 局部变换：相对父节点的可写意图。无父则相对世界。
-/// 存 TRS 三元组（而非矩阵）：直观、可独立插值、避免矩阵分解。
-#[derive(Component, Clone, Copy, PartialEq)]
-pub struct Transform {
-    pub translation: Vec3,
-    pub rotation:    Quat,
-    pub scale:       Vec3,
-}
+use prism_math::{Quat, Vec3};
+use prism_transform::{GlobalTransform, Transform};
 
-/// 全局变换：传播产出的世界空间结果。只读（引擎写，用户读）。
-/// 用 3×4 仿射（Affine3）存：比 4×4 省 1/4 内存与带宽，含非均匀缩放/错切。
-#[derive(Component, Clone, Copy, PartialEq)]
-pub struct GlobalTransform(pub Affine3);
+let parent = Transform::from_xyz(10.0, 0.0, 0.0)
+    .with_rotation(Quat::IDENTITY)
+    .with_scale(Vec3::splat(2.0));
+let child = Transform::from_translation(Vec3::new(1.0, 0.0, 0.0));
 
-impl Transform {
-    pub const IDENTITY: Self = Self {
-        translation: Vec3::ZERO, rotation: Quat::IDENTITY, scale: Vec3::ONE,
-    };
-    pub fn from_xyz(x: f32, y: f32, z: f32) -> Self { /* PLANNED */ unimplemented!() }
-    pub fn affine(&self) -> Affine3 { /* TRS → Affine3，SIMD */ unimplemented!() }
-    pub fn mul(&self, child: &Transform) -> Transform { /* 组合（仅均匀缩放可闭合为 TRS） */ unimplemented!() }
-}
-
-impl GlobalTransform {
-    pub fn translation(&self) -> Vec3 { /* PLANNED */ unimplemented!() }
-    pub fn to_mat4(&self) -> Mat4 { /* 供 GPU/旧接口 */ unimplemented!() }
-    pub fn mul_transform(&self, local: &Transform) -> GlobalTransform { /* 父Global ∘ 子Local */ unimplemented!() }
-}
+// Lossless parent-world × child-local composition uses affine math and can
+// represent shear produced by non-uniform scale and rotated descendants.
+let parent_world = GlobalTransform::from_transform(&parent);
+let child_world = parent_world.mul_transform(&child);
+let world_position = child_world.translation();
+let gpu_matrix = child_world.to_matrix();
 ```
+
+以上是当前 `prism_transform` 的真实 value API 示例，不把变换值类型误写成 ECS derive 组件。`Transform` 的 TRS/仿射转换与组合、`GlobalTransform` 的平移/矩阵/父子组合均已实现，见 `pkg/prism_transform/src/lib.rs`；层级 ECS 接线由相应 adapter/propagation 模块负责。示例中的 `mul_transform` 在 `Transform` 上是 TRS 投影，若需保留非均匀缩放与旋转产生的 shear，应像上例一样通过 `GlobalTransform::mul_transform` 组合。
 
 设计要点：
 - **Transform 存 TRS 而非矩阵**：可独立插值旋转（slerp）、避免每帧矩阵分解、与动画/物理语义一致。
