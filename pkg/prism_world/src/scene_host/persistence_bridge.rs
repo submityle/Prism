@@ -500,6 +500,33 @@ impl ScenePersistenceSchema {
         self.deltas_to_snapshot(world, &companion, identities, entities)
     }
 
+    /// Restores a snapshot when this scene has persisted state, returning `None`
+    /// only when the companion field has never been written. A present but
+    /// malformed or non-byte value remains an error; absence is the valid
+    /// first-load case for a scene with no saved overrides yet.
+    pub fn snapshot_from_world_state_if_present(
+        &self,
+        world: &WorldState,
+        companion_object: WorldPersistentId,
+        companion_field: FieldId,
+        identities: &PersistentEntityMap,
+        entities: &SceneEntityMap,
+        limits: PersistenceDecodeLimits,
+    ) -> Result<Option<SceneInstancePersistence>, ScenePersistenceBridgeError> {
+        if world.get(companion_object, companion_field).is_none() {
+            return Ok(None);
+        }
+        self.snapshot_from_world_state(
+            world,
+            companion_object,
+            companion_field,
+            identities,
+            entities,
+            limits,
+        )
+        .map(Some)
+    }
+
     fn find_scene_field(
         &self,
         component: ComponentTypeId,
@@ -783,6 +810,19 @@ mod tests {
         let entities = entity_map();
         let empty = WorldState::new();
         assert_eq!(
+            schema
+                .snapshot_from_world_state_if_present(
+                    &empty,
+                    WorldPersistentId(9900),
+                    FieldId(900),
+                    &identities,
+                    &entities,
+                    Default::default(),
+                )
+                .unwrap(),
+            None
+        );
+        assert_eq!(
             schema.snapshot_from_world_state(
                 &empty,
                 WorldPersistentId(9900),
@@ -813,6 +853,26 @@ mod tests {
                 Default::default(),
             ),
             Err(ScenePersistenceBridgeError::InvalidCompanionValueKind)
+        );
+        timeline
+            .commit(
+                TransactionId(11),
+                ActorId(1),
+                LogicalClock(2),
+                WorldPersistentId(9900),
+                OverrideDelta::single(FieldId(900), WorldValue::Bytes(vec![0, 1, 2])).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            schema.snapshot_from_world_state_if_present(
+                timeline.state(),
+                WorldPersistentId(9900),
+                FieldId(900),
+                &identities,
+                &entities,
+                Default::default(),
+            ),
+            Err(ScenePersistenceBridgeError::InvalidCompanionSnapshot)
         );
     }
 

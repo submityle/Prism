@@ -170,9 +170,11 @@ pub trait SceneEcsProvider {
         Ok(())
     }
 
-    /// Returns the world object IDs owned by this cell. Scene IDs and world
-    /// persistence IDs are separate domains; providers make the mapping
-    /// explicit here rather than relying on representation coincidence.
+    /// Returns every world object ID owned by this cell, including any object
+    /// that stores its PRSI companion. Scene IDs and world persistence IDs are
+    /// separate domains; providers make the mapping explicit here rather than
+    /// relying on representation coincidence. This list seeds load/reload
+    /// state before the first eviction, including after process restart.
     fn persistence_objects(
         &mut self,
         _sector: SectorId,
