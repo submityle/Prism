@@ -11,6 +11,7 @@ use prism_app::{FixedPreUpdate, Plugin};
 use prism_ecs::resource::Resource;
 use prism_ecs::world::World;
 
+use super::MultiPeerAuthorityError;
 use super::{LeasedAuthorityCommand, MultiPeerAuthority, ServerStrategy};
 
 /// A command handler's transaction decision for the current fixed tick.
@@ -27,6 +28,16 @@ pub enum AuthorityCommandDecision {
 /// Invalid configuration for the fixed-tick authority executor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AuthorityWorldExecutorConfigError;
+
+/// Failure to activate the shared-world executor for all admitted peers.
+#[derive(Clone, Debug, PartialEq)]
+pub enum AuthorityWorldExecutorInstallError {
+    /// Authority resource is missing from the app during plugin construction.
+    MissingAuthorityResource,
+    /// A peer was already advanced by per-peer authority or has a durable record
+    /// journal that cannot cover the shared ECS world.
+    Authority(MultiPeerAuthorityError),
+}
 
 /// Bounded executor diagnostics. Command ownership remains in the server peer
 /// queue until a terminal handler decision is acknowledged.
@@ -130,6 +141,33 @@ where
         + 'static,
 {
     fn build(&self, app: &mut prism_app::App) {
+        self.install(app).expect(
+            "AuthorityWorldExecutorPlugin requires an unadvanced MultiPeerAuthority resource",
+        );
+    }
+}
+
+impl<S, H> AuthorityWorldExecutorPlugin<S, H>
+where
+    S: ServerStrategy,
+    H: FnMut(&mut World, &LeasedAuthorityCommand) -> AuthorityCommandDecision
+        + Send
+        + Sync
+        + 'static,
+{
+    /// Install the executor and atomically transfer all admitted peers to
+    /// external World authority before any frame/transport system can run.
+    pub fn install(
+        &self,
+        app: &mut prism_app::App,
+    ) -> Result<(), AuthorityWorldExecutorInstallError> {
+        let authority = app
+            .world_mut()
+            .get_resource_mut::<MultiPeerAuthority<S>>()
+            .ok_or(AuthorityWorldExecutorInstallError::MissingAuthorityResource)?;
+        authority
+            .enable_external_world_authority()
+            .map_err(AuthorityWorldExecutorInstallError::Authority)?;
         let handler = self
             .handler
             .lock()
@@ -147,6 +185,7 @@ where
         });
         app.insert_resource(AuthorityWorldExecutorStatus::<S>::default());
         app.add_systems(FixedPreUpdate, execute_authority_world::<S, H>);
+        Ok(())
     }
 }
 
@@ -276,13 +315,14 @@ mod tests {
     use crate::delta::{encode_snapshot, FieldKind, FieldValue, Record, Schema};
     use crate::plugin::{
         AuthorityReplicationProvider, AuthorityReplicationProviderError, MultiPeerAuthorityConfig,
-        Replication, ReplicationStrategy,
+        MultiPeerServerPlugin, Replication, ReplicationStrategy,
     };
     use crate::transport::memory::InMemoryTransport;
     use crate::transport::Transport;
     use alloc::boxed::Box;
     use alloc::vec;
     use alloc::vec::Vec;
+    use prism_app::First;
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -374,23 +414,16 @@ mod tests {
             .unwrap();
         for _ in 0..16 {
             client.pump();
-            authority.lease_inbound_commands(0).unwrap();
+            authority.pump();
         }
         assert!(client.negotiated().is_some());
-        client.try_send_rpc(b"apply once").unwrap();
-        client.try_send_rpc(b"reject once").unwrap();
-        client.try_send_rpc(b"panic once").unwrap();
-        for _ in 0..8 {
-            client.pump();
-            authority.lease_inbound_commands(0).unwrap();
-        }
 
         let invocations = Arc::new(AtomicUsize::new(0));
         let handler_invocations = Arc::clone(&invocations);
         let mut app = prism_app::App::new();
-        app.insert_resource(authority);
+        app.add_plugins(MultiPeerServerPlugin::from_authority(authority));
         app.insert_resource(AppliedCount::default());
-        app.add_plugins(
+        let executor_plugin =
             AuthorityWorldExecutorPlugin::<AddAuthority, _>::new(move |world, command| {
                 assert_eq!(command.peer_id, 42);
                 let invocation = handler_invocations.fetch_add(1, Ordering::Relaxed);
@@ -408,14 +441,29 @@ mod tests {
                 AuthorityCommandDecision::Applied
             })
             .try_with_max_commands_per_tick(2)
-            .unwrap(),
-        );
+            .unwrap();
+        app.add_plugins(executor_plugin);
         assert!(
             AuthorityWorldExecutorPlugin::<AddAuthority, _>::new(|_, _| {
                 AuthorityCommandDecision::Rejected
             })
             .try_with_max_commands_per_tick(0)
             .is_err()
+        );
+
+        client.try_send_rpc(b"apply once").unwrap();
+        client.try_send_rpc(b"reject once").unwrap();
+        client.try_send_rpc(b"panic once").unwrap();
+        client.pump();
+        app.world_mut().run_schedule(First);
+        assert_eq!(
+            app.world()
+                .resource::<MultiPeerAuthority<AddAuthority>>()
+                .peer(42)
+                .unwrap()
+                .applied(),
+            0,
+            "the First transport pump must not advance per-peer Record before executor installation"
         );
 
         app.world_mut().run_schedule(FixedPreUpdate);

@@ -693,6 +693,30 @@ impl<S: ServerStrategy> MultiPeerAuthority<S> {
         self.peers.get_mut(&peer_id).map(|peer| &mut peer.server)
     }
 
+    /// Atomically select external World authority for every admitted peer.
+    /// Validate all peer authority/journal states before mutating any connection.
+    pub fn enable_external_world_authority(&mut self) -> Result<(), MultiPeerAuthorityError> {
+        let peer_ids: Vec<PeerId> = self.peers.keys().copied().collect();
+        for &peer_id in &peer_ids {
+            if let Some(peer) = self.peers.get(&peer_id) {
+                peer.server
+                    .validate_external_command_mode()
+                    .map_err(|reason| MultiPeerAuthorityError::ExternalCommandMode {
+                        peer_id,
+                        reason,
+                    })?;
+            }
+        }
+        for peer_id in peer_ids {
+            if let Some(peer) = self.peers.get_mut(&peer_id) {
+                peer.server
+                    .select_external_command_mode()
+                    .expect("all peer external authority states were prevalidated");
+            }
+        }
+        Ok(())
+    }
+
     /// Number of AOI events retained for one peer.
     #[must_use]
     pub fn pending_aoi_events(&self, peer_id: PeerId) -> Option<usize> {
@@ -750,22 +774,11 @@ impl<S: ServerStrategy> MultiPeerAuthority<S> {
         limit: usize,
     ) -> Result<Vec<InboundAuthorityCommand>, MultiPeerAuthorityError> {
         let peer_ids: Vec<PeerId> = self.peers.keys().copied().collect();
-        for &peer_id in &peer_ids {
-            if let Some(peer) = self.peers.get(&peer_id) {
-                peer.server
-                    .validate_external_command_mode()
-                    .map_err(|reason| MultiPeerAuthorityError::ExternalCommandMode {
-                        peer_id,
-                        reason,
-                    })?;
-            }
-        }
+        self.enable_external_world_authority()?;
         for &peer_id in &peer_ids {
             self.flush_aoi_events(peer_id);
             if let Some(peer) = self.peers.get_mut(&peer_id) {
-                peer.server
-                    .poll_inbound_commands()
-                    .expect("all peer modes were validated before mutation");
+                peer.server.poll_external_commands();
             }
         }
         if limit == 0 || peer_ids.is_empty() {

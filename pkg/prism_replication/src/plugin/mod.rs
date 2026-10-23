@@ -54,8 +54,9 @@ pub use crate::security::{
     SessionSecurityProvider,
 };
 pub use authority_ecs::{
-    AuthorityCommandDecision, AuthorityWorldExecutorConfigError, AuthorityWorldExecutorPlugin,
-    AuthorityWorldExecutorStats, AuthorityWorldExecutorStatus,
+    AuthorityCommandDecision, AuthorityWorldExecutorConfigError,
+    AuthorityWorldExecutorInstallError, AuthorityWorldExecutorPlugin, AuthorityWorldExecutorStats,
+    AuthorityWorldExecutorStatus,
 };
 pub use client::{
     AuthorityUpdate, EcsReplicationStrategy, NetworkRollbackSimulation, Replication,

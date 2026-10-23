@@ -364,12 +364,22 @@ impl<S: ServerStrategy> ServerReplication<S> {
     /// authority between the ECS world and the record strategy.
     pub fn poll_inbound_commands(&mut self) -> Result<usize, ExternalCommandModeError> {
         self.validate_external_command_mode()?;
+        self.select_external_command_mode()?;
+        Ok(self.poll_external_commands())
+    }
+
+    pub(crate) fn select_external_command_mode(&mut self) -> Result<(), ExternalCommandModeError> {
+        self.validate_external_command_mode()?;
         self.external_command_consumer = true;
+        Ok(())
+    }
+
+    pub(crate) fn poll_external_commands(&mut self) -> usize {
         self.last_error = None;
         if self.poll_network() {
-            Ok(self.pending_commands.len())
+            self.pending_commands.len()
         } else {
-            Ok(0)
+            0
         }
     }
 
