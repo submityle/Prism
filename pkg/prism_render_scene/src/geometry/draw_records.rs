@@ -183,10 +183,15 @@ impl VirtualGeometryDrawPublications {
         if current.content_revision() != content_revision || current.generation() != generation {
             return None;
         }
-        if let Some(state) = self.residency.get_mut(&asset_id)
-            && state.content_revision == content_revision
-            && state.generation == generation
-        {
+        let state = self.residency.entry(asset_id).or_default();
+        if state.generation < generation {
+            *state = VirtualGeometryResidencyState {
+                content_revision,
+                generation,
+                active: false,
+                pages: BTreeMap::new(),
+            };
+        } else if state.generation == generation && state.content_revision == content_revision {
             // Keep the generation/revision tombstone so delayed deltas cannot
             // resurrect this lifetime, but release the potentially large page
             // map as soon as its publication is retired.
@@ -1025,6 +1030,31 @@ mod tests {
         // A genuinely newer publication lifetime can reuse the asset identity.
         publications.apply_residency_delta(55, [4; 32], 22, true, &[(key, true)]);
         assert!(publications.is_page_resident(55, [4; 32], 22, key));
+    }
+
+    #[test]
+    fn retiring_without_residency_snapshot_still_records_tombstone() {
+        let key = GeometryPageKey::new(55, 0);
+        let mut publications = VirtualGeometryDrawPublications::default();
+        publications.replace(
+            VirtualGeometryGpuPublication::build(
+                &virtual_asset(),
+                [5; 32],
+                23,
+                &[],
+                &[VirtualGeometryMaterialBinding {
+                    material_slot: 0,
+                    material: MATERIAL,
+                }],
+            )
+            .expect("publication fixture is valid"),
+        );
+
+        assert!(publications.retire(55, [5; 32], 23).is_some());
+        // The retirement may overtake residency transport; late data for the
+        // retired lifetime must remain rejected even with no prior mirror row.
+        publications.apply_residency_delta(55, [5; 32], 23, true, &[(key, true)]);
+        assert!(!publications.is_page_resident(55, [5; 32], 23, key));
     }
 
     #[test]
