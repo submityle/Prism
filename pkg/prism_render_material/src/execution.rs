@@ -124,6 +124,7 @@ pub enum MaterialExecutionError {
         program: ResponseProgramIndex,
     },
     InvalidPlanShape,
+    InvalidBlendedChannels,
     InvalidExecutionFamily,
     Permutation(PermutationError),
     PermutationCountMismatch {
@@ -250,6 +251,38 @@ fn blend_domain_word(source: &ShadingPlan) -> u32 {
             crate::BlendDomain::DirectOnly => 1,
             crate::BlendDomain::CustomChannelMask(_) => 2,
         },
+    }
+}
+
+fn validate_blended_channels(
+    source: &ShadingPlan,
+    blended_channels: ChannelMask,
+) -> Result<(), MaterialExecutionError> {
+    let expected = match source {
+        ShadingPlan::Single { .. } => ChannelMask::default(),
+        ShadingPlan::MaskBlend { domain, .. } => match domain {
+            crate::BlendDomain::FullRadiance => ChannelMask::radiance(),
+            crate::BlendDomain::DirectOnly => ChannelMask::one(crate::ResponseChannel::Direct),
+            crate::BlendDomain::CustomChannelMask(channels) => *channels,
+        },
+    };
+
+    // Require exact equality rather than merely a subset: the row is a runtime
+    // contract, so accepting extra or omitted channels would let its domain
+    // disagree with the authored plan. This also rejects non-radiance and
+    // unknown bits because `expected` is derived only from legal plan values.
+    let valid = match source {
+        ShadingPlan::Single { .. } => blended_channels.0 == 0,
+        ShadingPlan::MaskBlend { .. } => {
+            expected.0 != 0
+                && ChannelMask::radiance().contains(expected)
+                && blended_channels == expected
+        }
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(MaterialExecutionError::InvalidBlendedChannels)
     }
 }
 
@@ -426,6 +459,7 @@ impl MaterialExecutionTables {
         blended_channels: ChannelMask,
         resolver: Option<&dyn MaskSourceResolver>,
     ) -> Result<PlanIndex, MaterialExecutionError> {
+        validate_blended_channels(&source, blended_channels)?;
         let (mask_kind, mask_index) = resolve_mask_source(&source, resolver)?;
         let left_entry = self.program(left)?;
         if let Some(right) = right {
@@ -999,6 +1033,126 @@ mod tests {
                 .to_words(),
             [0, 0, 0, 1, 0]
         );
+    }
+
+    #[test]
+    fn register_plan_requires_channels_to_match_the_plan_domain_and_shape() {
+        use crate::{BlendDomain, ResponseChannel, ResponseMaskSource};
+
+        let entry = compiled();
+        let packages = ready_packages(&entry);
+        let mut tables = MaterialExecutionTables::new();
+        let package = tables.register_package(&entry, &packages).unwrap();
+        let lit = tables
+            .register_program(
+                ProgramRef::Builtin(BuiltinProgram::Lit),
+                &entry,
+                package,
+                ModuleId(7),
+                PermutationSpace::try_new([2]).unwrap(),
+            )
+            .unwrap();
+        let npr = tables
+            .register_program(
+                ProgramRef::Builtin(BuiltinProgram::Npr),
+                &entry,
+                package,
+                ModuleId(8),
+                PermutationSpace::try_new([2]).unwrap(),
+            )
+            .unwrap();
+        let channels = ChannelMask::radiance();
+        let source_for = |domain| ShadingPlan::MaskBlend {
+            left: ProgramRef::Builtin(BuiltinProgram::Lit),
+            right: ProgramRef::Builtin(BuiltinProgram::Npr),
+            mask: ResponseMaskSource::RegionMask,
+            domain,
+        };
+        let family = ExecutionFamily::Composition;
+
+        for (domain, expected) in [
+            (BlendDomain::FullRadiance, channels),
+            (
+                BlendDomain::DirectOnly,
+                ChannelMask::one(ResponseChannel::Direct),
+            ),
+            (
+                BlendDomain::CustomChannelMask(
+                    ChannelMask::one(ResponseChannel::Reflection)
+                        .union(ChannelMask::one(ResponseChannel::Emission)),
+                ),
+                ChannelMask::one(ResponseChannel::Reflection)
+                    .union(ChannelMask::one(ResponseChannel::Emission)),
+            ),
+        ] {
+            tables
+                .register_plan(source_for(domain), lit, Some(npr), family, expected)
+                .unwrap();
+        }
+
+        for (domain, supplied) in [
+            // Domain mismatch: DirectOnly cannot claim the complete set.
+            (BlendDomain::DirectOnly, channels),
+            // Omitted domain channels are invalid too.
+            (
+                BlendDomain::FullRadiance,
+                ChannelMask::one(ResponseChannel::Direct),
+            ),
+            // Alpha, auxiliary, and unknown bits are not radiance channels.
+            (
+                BlendDomain::CustomChannelMask(ChannelMask(1 << 5)),
+                ChannelMask(1 << 5),
+            ),
+            (
+                BlendDomain::CustomChannelMask(ChannelMask(1 << 6)),
+                ChannelMask(1 << 6),
+            ),
+            (
+                BlendDomain::CustomChannelMask(ChannelMask(1 << 7)),
+                ChannelMask(1 << 7),
+            ),
+            // Empty custom domains are forbidden.
+            (
+                BlendDomain::CustomChannelMask(ChannelMask(0)),
+                ChannelMask(0),
+            ),
+        ] {
+            assert_eq!(
+                tables.register_plan(source_for(domain), lit, Some(npr), family, supplied,),
+                Err(MaterialExecutionError::InvalidBlendedChannels),
+            );
+        }
+
+        assert_eq!(
+            tables.register_plan(
+                ShadingPlan::single_builtin(BuiltinProgram::Lit),
+                lit,
+                None,
+                ExecutionFamily::FusedBuiltin,
+                ChannelMask::one(ResponseChannel::Direct),
+            ),
+            Err(MaterialExecutionError::InvalidBlendedChannels),
+        );
+        assert!(matches!(
+            tables.register_plan(
+                ShadingPlan::single_builtin(BuiltinProgram::Lit),
+                lit,
+                Some(npr),
+                ExecutionFamily::FusedBuiltin,
+                ChannelMask::default(),
+            ),
+            Err(MaterialExecutionError::InvalidPlanShape)
+        ));
+        assert!(matches!(
+            tables.register_plan(
+                source_for(BlendDomain::DirectOnly),
+                lit,
+                None,
+                family,
+                ChannelMask::one(ResponseChannel::Direct),
+            ),
+            Err(MaterialExecutionError::InvalidPlanShape)
+        ));
     }
 
     #[test]
