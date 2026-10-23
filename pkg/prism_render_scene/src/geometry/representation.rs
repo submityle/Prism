@@ -6,8 +6,10 @@
 //! explicit fallback, never an implicit reinterpretation of a stale selection.
 
 use alloc::collections::BTreeMap;
+use alloc::vec::Vec;
 
 use bevy_ecs::prelude::Resource;
+use prism_render_architecture::virtual_geometry::{CutCluster, GeometryPageKey};
 use prism_render_architecture::{abi::GenerationalHandle, gpu_scene::GeometryHandle};
 
 /// Current wire/data contract version for cross-pass geometry selection.
@@ -131,11 +133,16 @@ pub struct ResolvedGeometryRepresentation {
 /// ray-scene mirrors. The snapshot revision changes once per visibility build;
 /// consumers must match both it and the embedded view/geometry identity before
 /// reusing a selection. Only visible work items are present.
-#[derive(Resource, Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Resource, Clone, Debug, Default, PartialEq)]
 pub struct GeometryRepresentationSelections {
     revision: u64,
     views:
         BTreeMap<GenerationalHandle, BTreeMap<GenerationalHandle, GeometryRepresentationSelection>>,
+    cluster_cuts: BTreeMap<
+        (GenerationalHandle, GenerationalHandle),
+        (Vec<CutCluster>, Vec<(GeometryPageKey, f32)>),
+    >,
+    cluster_requests_by_view: BTreeMap<(GenerationalHandle, GeometryPageKey), f32>,
 }
 
 impl GeometryRepresentationSelections {
@@ -150,6 +157,8 @@ impl GeometryRepresentationSelections {
     ) {
         self.revision = revision;
         self.views = views;
+        self.cluster_cuts.clear();
+        self.cluster_requests_by_view.clear();
     }
 
     /// Publishes one exact per-instance selection into the current snapshot.
@@ -169,6 +178,8 @@ impl GeometryRepresentationSelections {
     pub(crate) fn begin_frame(&mut self, revision: u64) {
         self.revision = revision;
         self.views.clear();
+        self.cluster_cuts.clear();
+        self.cluster_requests_by_view.clear();
     }
 
     /// Monotonic visibility-frame revision associated with this snapshot.
@@ -194,6 +205,100 @@ impl GeometryRepresentationSelections {
         scene: GenerationalHandle,
     ) -> Option<&GeometryRepresentationSelection> {
         self.views.get(&view)?.get(&scene)
+    }
+
+    /// Publishes a complete deterministic CLST cut for one visible instance.
+    pub(crate) fn set_cluster_cut(
+        &mut self,
+        view: GenerationalHandle,
+        scene: GenerationalHandle,
+        cut: Vec<CutCluster>,
+        requests: Vec<(GeometryPageKey, f32)>,
+    ) {
+        self.cluster_cuts.insert((view, scene), (cut, requests));
+    }
+
+    /// Publishes one exact CLST selection and its complete cut atomically.
+    pub(crate) fn insert_cluster_selection(
+        &mut self,
+        view: GenerationalHandle,
+        scene: GenerationalHandle,
+        selection: GeometryRepresentationSelection,
+        cut: Vec<CutCluster>,
+        requests: Vec<(GeometryPageKey, f32)>,
+    ) {
+        self.insert(view, scene, selection);
+        self.record_cluster_page_requests(view, &requests);
+        self.set_cluster_cut(view, scene, cut, requests);
+    }
+
+    /// Records page demand even when no complete resident cut can currently be
+    /// drawn. This lets streaming make progress while the renderer uses the
+    /// instance's standard LOD fallback for the current frame.
+    pub(crate) fn record_cluster_page_requests(
+        &mut self,
+        view: GenerationalHandle,
+        requests: &[(GeometryPageKey, f32)],
+    ) {
+        for (page, priority) in requests {
+            let current = self
+                .cluster_requests_by_view
+                .entry((view, *page))
+                .or_insert(*priority);
+            if *priority > *current {
+                *current = *priority;
+            }
+        }
+    }
+
+    /// Exact CLST cut produced for one view/instance pair in this snapshot.
+    #[must_use]
+    pub fn cluster_cut(
+        &self,
+        view: GenerationalHandle,
+        scene: GenerationalHandle,
+    ) -> Option<&[CutCluster]> {
+        self.cluster_cuts
+            .get(&(view, scene))
+            .map(|(cut, _)| cut.as_slice())
+    }
+
+    /// Deterministically coalesced pages referenced by the selected cut.
+    #[must_use]
+    pub fn cluster_page_requests(
+        &self,
+        view: GenerationalHandle,
+        scene: GenerationalHandle,
+    ) -> Option<Vec<GeometryPageKey>> {
+        self.cluster_cuts
+            .get(&(view, scene))
+            .map(|(_, requests)| requests.iter().map(|(page, _)| *page).collect())
+    }
+
+    /// Per-instance page requests paired with maximum projected coverage
+    /// priority. Results are lexicographically ordered by page key.
+    #[must_use]
+    pub fn weighted_cluster_page_requests(
+        &self,
+        view: GenerationalHandle,
+        scene: GenerationalHandle,
+    ) -> Option<&[(GeometryPageKey, f32)]> {
+        self.cluster_cuts
+            .get(&(view, scene))
+            .map(|(_, requests)| requests.as_slice())
+    }
+
+    /// All page requests for a view, coalesced across scene instances. The
+    /// lexicographic page order and maximum coverage priority are stable.
+    #[must_use]
+    pub fn page_requests_for_view(&self, view: GenerationalHandle) -> Vec<(GeometryPageKey, f32)> {
+        self.cluster_requests_by_view
+            .range(
+                (view, GeometryPageKey::new(0, 0))
+                    ..=(view, GeometryPageKey::new(u32::MAX, u32::MAX)),
+            )
+            .map(|((_, page), priority)| (*page, *priority))
+            .collect()
     }
 
     /// Number of views represented by the current visibility snapshot.
@@ -450,5 +555,97 @@ mod tests {
         snapshot.begin_frame(30);
         assert_eq!(snapshot.view_count(), 0);
         assert!(snapshot.for_view(view).is_none());
+    }
+
+    #[test]
+    fn cluster_page_requests_expose_keys_and_weights_and_coalesce_by_max_priority() {
+        let mut snapshot = GeometryRepresentationSelections::default();
+        let view = GenerationalHandle::new(2, 4);
+        let scene_a = GenerationalHandle::new(7, 2);
+        let scene_b = GenerationalHandle::new(8, 2);
+        let identity = GeometryRepresentationIdentity {
+            scene: scene_a,
+            geometry: GeometryHandle::new(5, 3),
+            geometry_revision: 17,
+            selection_revision: 29,
+            view: Some(view),
+        };
+        let page_a = GeometryPageKey::new(9, 1);
+        let page_b = GeometryPageKey::new(9, 2);
+        snapshot.begin_frame(29);
+        snapshot.insert_cluster_selection(
+            view,
+            scene_a,
+            GeometryRepresentationSelection::virtual_cluster(
+                identity,
+                1,
+                VirtualGeometryRepresentationIdentity {
+                    asset_id: 9,
+                    generation: 3,
+                    content_revision: [4; 32],
+                },
+            ),
+            vec![
+                CutCluster {
+                    node: 1,
+                    page: page_a,
+                },
+                CutCluster {
+                    node: 2,
+                    page: page_b,
+                },
+            ],
+            vec![(page_a, 2.0), (page_b, 4.0)],
+        );
+        let mut second = identity;
+        second.scene = scene_b;
+        snapshot.insert_cluster_selection(
+            view,
+            scene_b,
+            GeometryRepresentationSelection::virtual_cluster(
+                second,
+                3,
+                VirtualGeometryRepresentationIdentity {
+                    asset_id: 9,
+                    generation: 3,
+                    content_revision: [4; 32],
+                },
+            ),
+            vec![CutCluster {
+                node: 3,
+                page: page_a,
+            }],
+            vec![(page_a, 7.0)],
+        );
+
+        assert_eq!(
+            snapshot.cluster_page_requests(view, scene_a),
+            Some(vec![page_a, page_b])
+        );
+        assert_eq!(
+            snapshot.weighted_cluster_page_requests(view, scene_a),
+            Some(&[(page_a, 2.0), (page_b, 4.0)][..])
+        );
+        assert_eq!(
+            snapshot.page_requests_for_view(view),
+            vec![(page_a, 7.0), (page_b, 4.0)]
+        );
+        snapshot.begin_frame(30);
+        assert!(snapshot.cluster_cut(view, scene_a).is_none());
+        assert!(snapshot.page_requests_for_view(view).is_empty());
+    }
+
+    #[test]
+    fn page_demand_is_retained_when_residency_snapshot_is_unavailable() {
+        let mut snapshot = GeometryRepresentationSelections::default();
+        let view = GenerationalHandle::new(2, 4);
+        let requested = [(GeometryPageKey::new(12, 7), 3.5)];
+        snapshot.begin_frame(41);
+        snapshot.record_cluster_page_requests(view, &requested);
+        assert_eq!(snapshot.page_requests_for_view(view), requested);
+        assert!(snapshot.for_view(view).is_none());
+        assert!(snapshot
+            .cluster_cut(view, GenerationalHandle::new(5, 3))
+            .is_none());
     }
 }

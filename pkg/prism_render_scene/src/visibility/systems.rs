@@ -39,6 +39,7 @@ pub(crate) fn build_unified_visibility(
     fabric_frame: Res<RenderFabricFrame>,
     materials: Res<RenderMaterialRegistry>,
     geometries: Res<crate::RenderGeometryRegistry>,
+    virtual_publications: Res<crate::geometry::VirtualGeometryDrawPublications>,
     mut state: ResMut<UnifiedVisibilityState>,
     mut representation_selections: ResMut<crate::geometry::GeometryRepresentationSelections>,
     virtual_geometries: Res<crate::geometry::VirtualGeometryRuntimeRegistry>,
@@ -179,6 +180,41 @@ pub(crate) fn build_unified_visibility(
                     projection,
                     settings.virtual_geometry_target_error_pixels()?,
                 )
+                .and_then(|(requested_cut, requests)| {
+                    representation_selections.record_cluster_page_requests(handle, &requests);
+                    let publication = virtual_publications.get(binding.asset_id.get())?;
+                    if publication.generation() != binding.generation.get()
+                        || publication.content_revision() != binding.content_revision.digest()
+                    {
+                        return None;
+                    }
+                    let asset = virtual_geometries.current_handle(binding.asset_id)?;
+                    let hierarchy = virtual_geometries.hierarchy(&asset).ok()?;
+                    let resolver =
+                        prism_render_architecture::virtual_geometry::ResidentCutResolver::new(
+                            hierarchy,
+                        )
+                        .ok()?;
+                    let resolved = resolver
+                        .resolve(&requested_cut, |key| {
+                            publication
+                                .page_index(key)
+                                .and_then(|index| publication.page(index))
+                                .is_some_and(|page| page.is_resident())
+                        })
+                        .ok()?;
+                    // A partial residency result would create visible holes. Publish a
+                    // fallback cut only when every requested region resolves and the
+                    // resolver has proven that the emitted ancestors do not overlap.
+                    if resolved
+                        .regions
+                        .iter()
+                        .any(|region| region.resident.is_none())
+                    {
+                        return None;
+                    }
+                    Some((resolved.clusters, requests))
+                })
             });
             if let (Some(binding), Some((cut, requests))) = (binding, cluster) {
                 if let Some(first) = cut.first() {
