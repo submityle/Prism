@@ -5,7 +5,10 @@
 //! canonical subscription fields, and the versioned persistence transaction
 //! codec for delta messages.
 
+use alloc::collections::VecDeque;
+use alloc::rc::Rc;
 use alloc::vec::Vec;
+use core::cell::RefCell;
 use prism_world_persist::{decode_transaction, encode_transaction, ActorId, CodecError};
 
 use crate::{
@@ -24,6 +27,92 @@ const MAX_PAYLOAD: usize = 16 * 1024 * 1024;
 
 /// Maximum encoded transport payload accepted by this codec.
 pub const MAX_TRANSPORT_PAYLOAD: usize = MAX_PAYLOAD;
+
+/// A non-blocking host byte-channel adapter.
+///
+/// The adapter owns framing boundaries: one successful send hands one complete
+/// `PWN1` frame to the host, and one receive returns one complete frame. A real
+/// stream transport must perform its own bounded frame assembly before
+/// returning from `try_recv_bytes`.
+pub trait ByteTransport {
+    /// Adapter-specific I/O error.
+    type Error;
+
+    /// Attempts to enqueue one complete frame. Backpressure must not consume a
+    /// session retry attempt.
+    fn try_send_bytes(&mut self, frame: &[u8]) -> Result<(), Self::Error>;
+
+    /// Removes one complete frame, if available.
+    fn try_recv_bytes(&mut self) -> Result<Option<Vec<u8>>, Self::Error>;
+}
+
+/// Errors from the bounded in-memory byte transport.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MemoryByteTransportError {
+    /// The configured queue cannot have zero capacity.
+    InvalidCapacity,
+    /// The peer's receive queue is full.
+    Backpressure,
+}
+
+type ByteQueue = Rc<RefCell<VecDeque<Vec<u8>>>>;
+
+/// Connected bounded byte endpoints for deterministic host integration tests.
+pub struct MemoryByteTransport {
+    inbound: ByteQueue,
+    outbound: ByteQueue,
+    capacity: usize,
+}
+
+impl MemoryByteTransport {
+    /// Creates two connected bounded endpoints.
+    pub fn pair(capacity: usize) -> Result<(Self, Self), MemoryByteTransportError> {
+        if capacity == 0 {
+            return Err(MemoryByteTransportError::InvalidCapacity);
+        }
+        let left_to_right = Rc::new(RefCell::new(VecDeque::new()));
+        let right_to_left = Rc::new(RefCell::new(VecDeque::new()));
+        Ok((
+            Self {
+                inbound: Rc::clone(&right_to_left),
+                outbound: Rc::clone(&left_to_right),
+                capacity,
+            },
+            Self {
+                inbound: left_to_right,
+                outbound: right_to_left,
+                capacity,
+            },
+        ))
+    }
+
+    /// Returns the number of complete frames waiting at this endpoint.
+    pub fn queued(&self) -> usize {
+        self.inbound.borrow().len()
+    }
+}
+
+impl ByteTransport for MemoryByteTransport {
+    type Error = MemoryByteTransportError;
+
+    fn try_send_bytes(&mut self, frame: &[u8]) -> Result<(), Self::Error> {
+        let mut outbound = self.outbound.borrow_mut();
+        if outbound.len() >= self.capacity {
+            return Err(MemoryByteTransportError::Backpressure);
+        }
+        let mut owned = Vec::new();
+        owned
+            .try_reserve_exact(frame.len())
+            .map_err(|_| MemoryByteTransportError::Backpressure)?;
+        owned.extend_from_slice(frame);
+        outbound.push_back(owned);
+        Ok(())
+    }
+
+    fn try_recv_bytes(&mut self) -> Result<Option<Vec<u8>>, Self::Error> {
+        Ok(self.inbound.borrow_mut().pop_front())
+    }
+}
 
 /// Errors raised by the transport packet wire codec.
 #[derive(Clone, Debug, Eq, PartialEq)]

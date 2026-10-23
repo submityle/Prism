@@ -34,6 +34,12 @@ contract.
   16 MiB payload cap. ACK frames are represented explicitly. This is a
   serialization boundary, not encryption, key exchange, socket I/O, or packet
   retry; the `Session` state machine remains responsible for the latter.
+- `ByteTransport` plus `Session::flush_bytes`/`receive_bytes` now connect that
+  codec to the reliable state machine without an enum-only host shim. A send
+  marks a pending packet only after the complete frame is accepted by the host;
+  codec failure, byte backpressure, malformed input, and session ordering
+  errors remain explicit. `MemoryByteTransport` is a bounded reference adapter
+  for tests; production code must provide framed socket/QUIC I/O.
 - `ServerMesh` owns bounded partition-authority metadata only. It fences old
   authorities with `(authority, epoch, lease)` matching, reserves target
   capacity during prepare, and rechecks the source fence during commit.

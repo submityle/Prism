@@ -10,6 +10,7 @@ use alloc::rc::Rc;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
+use crate::wire::{decode_packet, encode_packet, ByteTransport, WireCodecError};
 use crate::{AoiSubscription, AuthorityPolicy, DeltaEnvelope, PermissionError, SubscriptionId};
 use prism_world_persist::ActorId;
 
@@ -290,6 +291,39 @@ pub enum FlushError<E> {
     },
 }
 
+/// Failures while flushing packets through the byte-channel codec.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ByteFlushError<E> {
+    /// The session has not completed authentication.
+    NotAuthenticated,
+    /// A packet exhausted its configured retry budget.
+    RetryExhausted(u64),
+    /// The host byte transport refused a send.
+    Transport(E),
+    /// The host clock moved backwards for a pending packet.
+    ClockRegression {
+        /// Packet whose retry clock regressed.
+        sequence: u64,
+        /// Previously observed send tick.
+        previous: u64,
+        /// Current flush tick.
+        now: u64,
+    },
+    /// The packet could not be represented by the bounded wire codec.
+    Codec(WireCodecError),
+}
+
+/// Failures while receiving and decoding one byte-channel frame.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ByteReceiveError<E> {
+    /// The host byte transport returned an I/O error.
+    Transport(E),
+    /// The frame failed bounded wire decoding.
+    Codec(WireCodecError),
+    /// The decoded packet failed session validation or ordering.
+    Session(ReceiveError),
+}
+
 /// Result of accepting one packet.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ReceiveOutcome {
@@ -483,6 +517,73 @@ impl Session {
         Ok(report)
     }
 
+    /// Sends eligible acknowledgements and data through the versioned byte
+    /// codec. Codec failure occurs before the corresponding pending packet is
+    /// marked sent; host backpressure likewise preserves its retry state.
+    pub fn flush_bytes<T: ByteTransport>(
+        &mut self,
+        transport: &mut T,
+        now: u64,
+    ) -> Result<FlushReport, ByteFlushError<T::Error>> {
+        if self.state != SessionState::Authenticated {
+            return Err(ByteFlushError::NotAuthenticated);
+        }
+        let mut report = FlushReport::default();
+        if let Some(sequence) = self.pending_ack {
+            let frame = encode_packet(&TransportPacket::Ack {
+                session: self.config.session,
+                sequence,
+            })
+            .map_err(ByteFlushError::Codec)?;
+            transport
+                .try_send_bytes(&frame)
+                .map_err(ByteFlushError::Transport)?;
+            self.pending_ack = None;
+            report.sent += 1;
+        }
+
+        for pending in &mut self.outbound {
+            if let Some(previous) = pending.last_sent {
+                if now < previous {
+                    return Err(ByteFlushError::ClockRegression {
+                        sequence: pending.sequence,
+                        previous,
+                        now,
+                    });
+                }
+                if now - previous < self.config.retry_after_ticks {
+                    continue;
+                }
+                if pending.attempts >= self.config.max_attempts {
+                    self.state = SessionState::Failed {
+                        sequence: pending.sequence,
+                    };
+                    return Err(ByteFlushError::RetryExhausted(pending.sequence));
+                }
+            }
+
+            let retry = pending.attempts > 0;
+            let frame = encode_packet(&TransportPacket::Data {
+                session: self.config.session,
+                sequence: pending.sequence,
+                message: pending.message.clone(),
+            })
+            .map_err(ByteFlushError::Codec)?;
+            transport
+                .try_send_bytes(&frame)
+                .map_err(ByteFlushError::Transport)?;
+            pending.last_sent = Some(now);
+            pending.attempts += 1;
+            report.sent += 1;
+            if retry {
+                report.retries += 1;
+            }
+            self.highest_sent_sequence = self.highest_sent_sequence.max(pending.sequence);
+        }
+        report.pending = self.outbound.len();
+        Ok(report)
+    }
+
     /// Accepts one packet from the host transport.
     pub fn receive(&mut self, packet: TransportPacket) -> Result<ReceiveOutcome, ReceiveError> {
         if packet.session() != self.config.session {
@@ -498,6 +599,25 @@ impl Session {
                 sequence, message, ..
             } => self.receive_data(sequence, message),
         }
+    }
+
+    /// Decodes and accepts one complete byte-channel frame. A malformed frame
+    /// is returned to the host as an explicit error and cannot advance ACK or
+    /// receive state.
+    pub fn receive_bytes<T: ByteTransport>(
+        &mut self,
+        transport: &mut T,
+    ) -> Result<Option<ReceiveOutcome>, ByteReceiveError<T::Error>> {
+        let Some(frame) = transport
+            .try_recv_bytes()
+            .map_err(ByteReceiveError::Transport)?
+        else {
+            return Ok(None);
+        };
+        let packet = decode_packet(&frame).map_err(ByteReceiveError::Codec)?;
+        self.receive(packet)
+            .map(Some)
+            .map_err(ByteReceiveError::Session)
     }
 
     fn receive_ack(&mut self, sequence: u64) -> Result<ReceiveOutcome, ReceiveError> {
@@ -709,6 +829,68 @@ mod tests {
             .receive(sender_transport.try_recv().expect("ack packet"))
             .expect("ack accepted");
         assert_eq!(sender.pending(), 0);
+    }
+
+    #[test]
+    fn byte_transport_codec_preserves_reliable_delivery_and_ack_release() {
+        let mut sender = session(11, 7, 4, 10);
+        let mut receiver = session(11, 8, 4, 10);
+        sender.authenticate(AuthToken(0xfeed)).expect("sender auth");
+        receiver
+            .authenticate(AuthToken(0xfeed))
+            .expect("receiver auth");
+        sender
+            .send(WorldMessage::Subscribe(subscription(9, 7)))
+            .expect("message queued");
+        let (mut sender_transport, mut receiver_transport) =
+            crate::MemoryByteTransport::pair(4).expect("valid byte transport");
+        assert_eq!(
+            sender
+                .flush_bytes(&mut sender_transport, 0)
+                .expect("byte flush")
+                .sent,
+            1
+        );
+        assert!(matches!(
+            receiver
+                .receive_bytes(&mut receiver_transport)
+                .expect("byte receive"),
+            Some(ReceiveOutcome::Delivered { sequence: 1, .. })
+        ));
+        receiver
+            .flush_bytes(&mut receiver_transport, 0)
+            .expect("ack byte flush");
+        assert!(matches!(
+            sender
+                .receive_bytes(&mut sender_transport)
+                .expect("ack byte receive"),
+            Some(ReceiveOutcome::Acknowledged {
+                sequence: 1,
+                released: 1
+            })
+        ));
+        assert_eq!(sender.pending(), 0);
+    }
+
+    #[test]
+    fn malformed_byte_frame_is_reported_without_advancing_receive_state() {
+        let mut receiver = session(12, 8, 2, 10);
+        receiver
+            .authenticate(AuthToken(0xfeed))
+            .expect("receiver auth");
+        let (mut sender_transport, mut receiver_transport) =
+            crate::MemoryByteTransport::pair(2).expect("valid byte transport");
+        sender_transport
+            .try_send_bytes(&[0, 1, 2])
+            .expect("inject malformed frame");
+        assert!(matches!(
+            receiver.receive_bytes(&mut receiver_transport),
+            Err(ByteReceiveError::Codec(
+                crate::WireCodecError::UnexpectedEof
+            ))
+        ));
+        assert_eq!(receiver.pending_ack, None);
+        assert_eq!(receiver.next_receive_sequence, 1);
     }
 
     #[test]

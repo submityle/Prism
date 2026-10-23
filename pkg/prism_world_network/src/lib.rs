@@ -34,11 +34,14 @@ pub use server_mesh::{
     ServerMesh, ServerMeshConfig, ServerMeshNode, ServerMeshSnapshot,
 };
 pub use session::{
-    AuthToken, FlushError, FlushReport, MemoryTransport, MemoryTransportError, ReceiveError,
-    ReceiveOutcome, Session, SessionConfig, SessionConfigError, SessionError, SessionId,
-    SessionState, Transport, TransportPacket, WorldMessage,
+    AuthToken, ByteFlushError, ByteReceiveError, FlushError, FlushReport, MemoryTransport,
+    MemoryTransportError, ReceiveError, ReceiveOutcome, Session, SessionConfig, SessionConfigError,
+    SessionError, SessionId, SessionState, Transport, TransportPacket, WorldMessage,
 };
-pub use wire::{decode_packet, encode_packet, WireCodecError, MAX_TRANSPORT_PAYLOAD};
+pub use wire::{
+    decode_packet, encode_packet, ByteTransport, MemoryByteTransport, MemoryByteTransportError,
+    WireCodecError, MAX_TRANSPORT_PAYLOAD,
+};
 
 /// Stable identity for an AOI subscription.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
