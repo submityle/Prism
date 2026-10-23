@@ -168,6 +168,141 @@ impl ProjectedHairRasterSegment {
     }
 }
 
+/// Projects a world-space strand segment into the compute-raster ABI.
+///
+/// The matrix is column-major and follows WGSL `clip_from_world * vec4(p, 1)`
+/// convention. The segment is clipped against the homogeneous near/far planes
+/// and positive-`w` camera plane before perspective division. Screen coordinates
+/// are y-down pixels; NDC depth is preserved in the raster shader's
+/// `0=near..1=far` convention. `radius_*` are world-space radii. Width uses a
+/// conservative bound over the entire clipped segment, which avoids
+/// under-covering when radius and perspective scale vary along its length.
+#[must_use]
+pub fn project_hair_raster_segment(
+    clip_from_world: &[[f32; 4]; 4],
+    world_a: [f32; 3],
+    radius_a: f32,
+    world_b: [f32; 3],
+    radius_b: f32,
+    viewport: [u32; 2],
+    seg_id: u32,
+) -> Result<Option<ProjectedHairRasterSegment>, ProjectedHairRasterSegmentError> {
+    if viewport[0] == 0 || viewport[1] == 0 {
+        return Err(ProjectedHairRasterSegmentError::EmptyViewport);
+    }
+    if viewport[0] > (1 << 24) || viewport[1] > (1 << 24) {
+        return Err(ProjectedHairRasterSegmentError::ViewportOutOfRange);
+    }
+    if !radius_a.is_finite() || !radius_b.is_finite() {
+        return Err(ProjectedHairRasterSegmentError::NonFiniteValue);
+    }
+    if radius_a > (1 << 24) as f32 || radius_b > (1 << 24) as f32 {
+        return Err(ProjectedHairRasterSegmentError::WidthOutOfRange);
+    }
+    if radius_a < 0.0 || radius_b < 0.0 {
+        return Err(ProjectedHairRasterSegmentError::NegativeWidth);
+    }
+    if !world_a.into_iter().chain(world_b).all(f32::is_finite)
+        || !clip_from_world
+            .iter()
+            .flatten()
+            .all(|value| value.is_finite())
+    {
+        return Err(ProjectedHairRasterSegmentError::NonFiniteValue);
+    }
+    let project = |point: [f32; 3]| {
+        let p = [point[0], point[1], point[2], 1.0];
+        core::array::from_fn::<_, 4, _>(|row| {
+            clip_from_world[0][row] * p[0]
+                + clip_from_world[1][row] * p[1]
+                + clip_from_world[2][row] * p[2]
+                + clip_from_world[3][row] * p[3]
+        })
+    };
+    let mut a = project(world_a);
+    let mut b = project(world_b);
+    let mut ra = radius_a;
+    let mut rb = radius_b;
+    // Clip against w>epsilon, z>=0, and z<=w. This is a parametric segment
+    // clip in homogeneous space; applying each plane to the current endpoints
+    // preserves perspective-correct endpoint depth after division.
+    for plane in 0..3 {
+        let distance = |v: [f32; 4]| match plane {
+            0 => v[3] - 1.0e-6,
+            1 => v[2],
+            _ => v[3] - v[2],
+        };
+        let da = distance(a);
+        let db = distance(b);
+        if da < 0.0 && db < 0.0 {
+            return Ok(None);
+        }
+        if da < 0.0 || db < 0.0 {
+            let t = da / (da - db);
+            let clipped = core::array::from_fn(|i| a[i] + (b[i] - a[i]) * t);
+            let clipped_radius = ra + (rb - ra) * t;
+            if da < 0.0 {
+                a = clipped;
+                ra = clipped_radius;
+            } else {
+                b = clipped;
+                rb = clipped_radius;
+            }
+        }
+    }
+    let to_screen = |v: [f32; 4]| {
+        let inv_w = 1.0 / v[3];
+        [
+            (v[0] * inv_w * 0.5 + 0.5) * viewport[0] as f32,
+            (0.5 - v[1] * inv_w * 0.5) * viewport[1] as f32,
+            v[2] * inv_w,
+        ]
+    };
+    let screen_a = to_screen(a);
+    let screen_b = to_screen(b);
+    // Each Jacobian numerator is affine along the clipped world-space segment,
+    // so its absolute maximum is bounded by its endpoint maxima. `w` is also
+    // affine and positive after clipping; its minimum is at an endpoint. Using
+    // those bounds together with the maximum endpoint radius gives a valid
+    // screen-space upper bound even when radius and perspective scale peak at
+    // different points in the segment.
+    let jacobian_numerator = |v: [f32; 4], axis: usize, row: usize| {
+        clip_from_world[axis][row] * v[3] - clip_from_world[axis][3] * v[row]
+    };
+    let mut jacobian_bound_sq = 0.0;
+    for axis in 0..3 {
+        let nx = jacobian_numerator(a, axis, 0)
+            .abs()
+            .max(jacobian_numerator(b, axis, 0).abs())
+            * viewport[0] as f32
+            * 0.5;
+        let ny = jacobian_numerator(a, axis, 1)
+            .abs()
+            .max(jacobian_numerator(b, axis, 1).abs())
+            * viewport[1] as f32
+            * 0.5;
+        jacobian_bound_sq += nx * nx + ny * ny;
+    }
+    // Frobenius norm bounds the largest singular value of the 2x3 screen
+    // Jacobian, including diagonal camera orientations.
+    let min_w = a[3].min(b[3]);
+    let max_radius = ra.max(rb);
+    let width = max_radius * 2.0 * jacobian_bound_sq.sqrt() / (min_w * min_w);
+    if !screen_a.into_iter().chain(screen_b).all(f32::is_finite) || !width.is_finite() {
+        return Err(ProjectedHairRasterSegmentError::NonFiniteValue);
+    }
+    ProjectedHairRasterSegment::try_new(
+        [screen_a[0], screen_a[1]],
+        [screen_b[0], screen_b[1]],
+        screen_a[2],
+        screen_b[2],
+        width,
+        seg_id,
+        viewport,
+    )
+    .map(Some)
+}
+
 /// Why a projected hair segment could not be encoded for the GPU rasterizer.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProjectedHairRasterSegmentError {
@@ -470,6 +605,118 @@ mod tests {
         assert_eq!(offset_of!(ProjectedHairRasterSegment, depth1), 20);
         assert_eq!(offset_of!(ProjectedHairRasterSegment, width_px), 24);
         assert_eq!(offset_of!(ProjectedHairRasterSegment, seg_id), 28);
+    }
+
+    #[test]
+    fn world_projection_maps_identity_and_computes_screen_width() {
+        let identity = [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ];
+        let segment = project_hair_raster_segment(
+            &identity,
+            [-0.5, 0.0, 0.25],
+            0.1,
+            [0.5, 0.0, 0.75],
+            0.1,
+            [100, 50],
+            9,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(segment.p0(), [25.0, 25.0]);
+        assert_eq!(segment.p1(), [75.0, 25.0]);
+        assert_eq!(segment.depth0(), 0.25);
+        assert_eq!(segment.depth1(), 0.75);
+        assert!((segment.width_px() - 10.0_f32 * 1.25_f32.sqrt()).abs() < 1.0e-5);
+    }
+
+    #[test]
+    fn world_projection_clips_near_plane_and_rejects_hidden_segments() {
+        let identity = [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ];
+        let clipped = project_hair_raster_segment(
+            &identity,
+            [0.0, 0.0, -1.0],
+            0.1,
+            [0.0, 0.0, 0.5],
+            0.1,
+            [64, 64],
+            1,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(clipped.depth0(), 0.0);
+        assert_eq!(clipped.depth1(), 0.5);
+        assert_eq!(
+            project_hair_raster_segment(
+                &identity,
+                [0.0, 0.0, -1.0],
+                0.1,
+                [0.0, 0.0, -0.5],
+                0.1,
+                [64, 64],
+                1,
+            )
+            .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn world_projection_applies_perspective_divide_and_depth_clipping() {
+        // clip = (x, y, z - 1, z), so the near plane is z=1 and
+        // perspective division makes equal world-space x values differ.
+        let perspective = [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 1.0],
+            [0.0, 0.0, -1.0, 0.0],
+        ];
+        let segment = project_hair_raster_segment(
+            &perspective,
+            [0.5, 0.0, 1.0],
+            0.05,
+            [0.5, 0.0, 2.0],
+            0.05,
+            [100, 100],
+            3,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(segment.p0(), [75.0, 50.0]);
+        assert_eq!(segment.p1(), [62.5, 50.0]);
+        assert_eq!(segment.depth0(), 0.0);
+        assert_eq!(segment.depth1(), 0.5);
+        assert!(segment.width_px() > 2.5);
+    }
+
+    #[test]
+    fn world_projection_rejects_viewport_dimensions_outside_shader_range() {
+        let identity = [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ];
+        assert_eq!(
+            project_hair_raster_segment(
+                &identity,
+                [0.0; 3],
+                0.1,
+                [0.5, 0.0, 0.5],
+                0.1,
+                [(1 << 24) + 1, 64],
+                0,
+            ),
+            Err(ProjectedHairRasterSegmentError::ViewportOutOfRange)
+        );
     }
 
     #[test]
