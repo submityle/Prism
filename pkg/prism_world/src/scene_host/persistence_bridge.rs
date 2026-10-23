@@ -140,6 +140,8 @@ pub enum ScenePersistenceBridgeError {
     DuplicateObjectField,
     /// One transaction identity is required for each object delta.
     TransactionIdCountMismatch,
+    /// Transaction identities in one scene batch must be unique.
+    DuplicateTransactionId,
     /// Transaction sequence arithmetic exceeded the wire-domain limit.
     TransactionSequenceExhausted,
     /// The companion snapshot could not be encoded as canonical PRSI bytes.
@@ -290,6 +292,13 @@ impl ScenePersistenceSchema {
         if transaction_ids.len() != batch.deltas.len() {
             return Err(ScenePersistenceBridgeError::TransactionIdCountMismatch);
         }
+        if transaction_ids
+            .iter()
+            .enumerate()
+            .any(|(index, id)| transaction_ids[..index].contains(id))
+        {
+            return Err(ScenePersistenceBridgeError::DuplicateTransactionId);
+        }
         let mut transactions = Vec::with_capacity(batch.deltas.len());
         for ((object, delta), &id) in batch.deltas.iter().zip(transaction_ids) {
             let offset = u64::try_from(transactions.len())
@@ -351,6 +360,9 @@ impl ScenePersistenceSchema {
         }) {
             return Err(ScenePersistenceBridgeError::CompanionFieldCollision);
         }
+        if transaction_ids.contains(&companion_transaction_id) {
+            return Err(ScenePersistenceBridgeError::DuplicateTransactionId);
+        }
         let sequence = next_sequence
             .checked_add(
                 u64::try_from(transactions.len())
@@ -360,6 +372,9 @@ impl ScenePersistenceSchema {
             .ok_or(ScenePersistenceBridgeError::TransactionSequenceExhausted)?;
         let bytes = encode_persistence(&batch.scene_snapshot)
             .map_err(|_| ScenePersistenceBridgeError::InvalidCompanionSnapshot)?;
+        if prior.get(companion_object, companion_field) == Some(&WorldValue::Bytes(bytes.clone())) {
+            return Ok(transactions);
+        }
         let delta = OverrideDelta::single(companion_field, WorldValue::Bytes(bytes))
             .map_err(|_| ScenePersistenceBridgeError::IncompatibleValue)?;
         let inverse = OverrideDelta::single(
@@ -370,9 +385,6 @@ impl ScenePersistenceSchema {
                 .unwrap_or(WorldValue::Delete),
         )
         .map_err(|_| ScenePersistenceBridgeError::IncompatibleValue)?;
-        if transaction_ids.contains(&companion_transaction_id) {
-            return Err(ScenePersistenceBridgeError::TransactionIdCountMismatch);
-        }
         transactions.push(
             Transaction::new(
                 companion_transaction_id,
@@ -458,8 +470,9 @@ impl ScenePersistenceSchema {
 #[cfg(test)]
 mod tests {
     use super::{
-        SceneEntityMap, SceneFieldBinding, SceneFieldValueKind, SceneObjectBinding,
-        ScenePersistenceBridgeError, ScenePersistenceSchema,
+        encode_persistence, SceneEntityMap, SceneFieldBinding, SceneFieldValueKind,
+        SceneObjectBinding, ScenePersistenceBatch, ScenePersistenceBridgeError,
+        ScenePersistenceSchema,
     };
     use alloc::format;
     use alloc::vec;
@@ -692,6 +705,75 @@ mod tests {
         );
         drop(reopened);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn companion_builder_elides_unchanged_bytes_and_rejects_duplicate_ids() {
+        let schema = schema();
+        let snapshot = SceneInstancePersistence {
+            properties: Vec::new(),
+            structural: Vec::new(),
+            ..scene_snapshot()
+        };
+        let entities = entity_map();
+        let identities = PersistentEntityMap::new(vec![EntityBinding::new(
+            LocalEntityId::new(3),
+            PersistentId::from_u128(77),
+        )])
+        .unwrap();
+        let prior = WorldState::new();
+        let batch = schema
+            .snapshot_to_deltas(&snapshot, &identities, &entities, &prior)
+            .unwrap();
+        let encoded = encode_persistence(&batch.scene_snapshot).unwrap();
+        let mut prior_timeline = Timeline::new();
+        prior_timeline
+            .commit(
+                TransactionId(2),
+                ActorId(1),
+                LogicalClock(1),
+                WorldPersistentId(9900),
+                OverrideDelta::single(FieldId(900), WorldValue::Bytes(encoded)).unwrap(),
+            )
+            .unwrap();
+        let prior = prior_timeline.state().clone();
+        assert!(schema
+            .transactions_for_batch_with_companion(
+                &batch,
+                &prior,
+                ActorId(1),
+                LogicalClock(2),
+                0,
+                &[],
+                TransactionId(3),
+                WorldPersistentId(9900),
+                FieldId(900),
+            )
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            schema.transactions_for_batch(
+                &ScenePersistenceBatch {
+                    deltas: alloc::vec![
+                        (
+                            WorldPersistentId(8),
+                            OverrideDelta::single(FieldId(1), WorldValue::Integer(1)).unwrap()
+                        ),
+                        (
+                            WorldPersistentId(9),
+                            OverrideDelta::single(FieldId(2), WorldValue::Integer(2)).unwrap()
+                        ),
+                    ],
+                    scene_snapshot: batch.scene_snapshot,
+                },
+                &WorldState::new(),
+                ActorId(1),
+                LogicalClock(1),
+                0,
+                &[TransactionId(4), TransactionId(4)],
+            ),
+            Err(ScenePersistenceBridgeError::DuplicateTransactionId)
+        );
     }
 
     #[test]
