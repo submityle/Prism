@@ -224,6 +224,11 @@ impl LodSchedule {
         let mut prev = f32::NEG_INFINITY;
         for (i, b) in bands.iter().enumerate() {
             assert!(
+                b.max_distance_sq >= 0.0,
+                "band {i} max_distance_sq must be >= 0, got {}",
+                b.max_distance_sq
+            );
+            assert!(
                 b.tick_period >= 1,
                 "band {i} tick_period must be >= 1, got {}",
                 b.tick_period
@@ -289,6 +294,31 @@ impl LodSchedule {
     #[inline]
     pub fn bands(&self) -> &[LodBand] {
         &self.bands
+    }
+
+    /// The finite squared-distance bound beyond which entities are dormant,
+    /// when this schedule can be safely driven from a bounded spatial query.
+    ///
+    /// Returns `Some(max_distance_sq)` only for [`OutOfRange::Dormant`] with a
+    /// finite farthest band. Under [`OutOfRange::ClampToLast`], distant entities
+    /// remain active and still require cadence scheduling, so a bounded spatial
+    /// query alone cannot represent the complete population. A non-finite last
+    /// bound is likewise not spatially indexable as a finite region.
+    #[inline]
+    pub fn finite_dormant_bound_sq(&self) -> Option<f32> {
+        if self.beyond_last != OutOfRange::Dormant {
+            return None;
+        }
+        let bound = self.bands.last()?.max_distance_sq;
+        bound.is_finite().then_some(bound)
+    }
+
+    /// The finite world-space radius corresponding to
+    /// [`finite_dormant_bound_sq`](Self::finite_dormant_bound_sq).
+    #[inline]
+    pub fn finite_dormant_radius(&self) -> Option<f64> {
+        self.finite_dormant_bound_sq()
+            .map(|bound_sq| libm::sqrt(bound_sq as f64))
     }
 
     /// Returns the detail [`LodLevel`] for the given *squared* distance, or
@@ -585,6 +615,26 @@ mod tests {
     }
 
     #[test]
+    fn finite_dormant_bound_only_exists_for_bounded_dormancy_schedules() {
+        assert_eq!(sched().finite_dormant_bound_sq(), None);
+        assert_eq!(
+            sched()
+                .with_policy(OutOfRange::Dormant)
+                .finite_dormant_bound_sq(),
+            Some(40_000.0)
+        );
+        assert_eq!(
+            sched()
+                .with_policy(OutOfRange::Dormant)
+                .finite_dormant_radius(),
+            Some(200.0)
+        );
+        let unbounded =
+            LodSchedule::from_sorted_pairs(&[(f32::INFINITY, 1)]).with_policy(OutOfRange::Dormant);
+        assert_eq!(unbounded.finite_dormant_bound_sq(), None);
+    }
+
+    #[test]
     fn quality_tier_defaults_to_highest_and_is_ordered() {
         // Bands built via the frequency-only path default to full precision.
         let s = sched();
@@ -683,6 +733,12 @@ mod tests {
     #[should_panic]
     fn zero_tick_period_panics() {
         let _ = LodSchedule::from_sorted_pairs(&[(100.0, 0)]);
+    }
+
+    #[test]
+    #[should_panic(expected = "max_distance_sq must be >= 0")]
+    fn negative_distance_bound_panics() {
+        let _ = LodSchedule::from_sorted_pairs(&[(-1.0, 1)]);
     }
 
     #[test]

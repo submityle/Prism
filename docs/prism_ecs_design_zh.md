@@ -656,7 +656,7 @@ pkg/prism_ecs_macros/              # derive: Component/Bundle/SystemSet/Resource
 
 把"海量轻实体"的更新组织为**处理器（processor）**：按距离/重要度分档，不同档位以不同频率、不同精度批量跑（如远处 AI 10Hz 粗更新、近处 60Hz 精更新）。处理器消费 chunk 批次（§6）、受 §13.2 LOD 调度，使 CPU 成本随"活跃近处实体数"而非"总实体数"增长。
 
-**候选驱动接线（2026-10-23）**：新增 `EntityLodProcessor::drive_candidates`，允许空间索引调用方只交付候选集；处理器的遍历、距离评估和 decisions 输出成本为 `O(candidates)`，原 `drive` 仍保留全 population 兼容路径。调用方必须提供活动半径内的全部实体，并将可能离开范围的先前活跃实体作为 exit guard；每个实体在批次中只能出现一次。被省略实体不评估、不改变 dormancy，实体增删和 stale handle 清理由调用方负责。该 API 使按索引缩小候选集成为可能，但仓库尚无统一 ECS spatial-query→LOD processor 消费接线，也没有证明候选完整性、唤醒正确性及近处数量固定而远处总人口增长时的端到端工作量/性能门槛，因此 §23.7 的规模目标仍未完成。
+**候选驱动接线（2026-10-23）**：`LodSchedule::finite_dormant_radius` 暴露有限 Dormant 档位半径；`InterestGrid::cell_bounds_for_radius` 将世界球体映射到保守 3D cell AABB；`CellEntityIndex::entities_in_world_radius` 通过有序稀疏 cell 索引取得该区域内的实体句柄（不扫描全量实体/cell），调用方解析位置、并入先前活跃 exit guards 后传给 `EntityLodProcessor::drive_candidates` 做精确距离判定。半径候选只覆盖粗包围盒，不能跳过处理器的精确 LOD 检查；候选需要与该 index 的坐标格一致，实体位置/streaming cell 变化时必须维护索引。ClampToLast 或无限 Dormant 半径没有有限查询边界，应走完整 population 路径。隔离 target 验证：`cargo test --offline --locked -p prism_ecs --features partition --lib partition::` **157/157 通过**；`cargo check --offline --locked -p prism_ecs --no-default-features --features partition` 通过。索引更新与边界测试通过不等于已完成人口增长性能门槛。该组合目前仍是显式 API 串接，exit-guard 持续集合维护、实体销毁清理、ECS position resolve 的统一调度接线及远处人口增长工作量/受控性能门槛尚未验收，因此 §23.7 的规模目标仍未完成。
 
 ### 23.8 诚实边界
 

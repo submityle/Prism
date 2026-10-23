@@ -117,6 +117,43 @@ impl InterestGrid {
         )
     }
 
+    /// Returns the inclusive cell-coordinate AABB enclosing a world-space
+    /// sphere. The result is a conservative broad-phase region: callers must
+    /// apply an exact distance test to the returned entities.
+    ///
+    /// Bounds use the same floor mapping as [`cell_of`](Self::cell_of), so
+    /// negative coordinates and points exactly on cell boundaries are
+    /// handled consistently. Returns `None` for a negative/non-finite radius
+    /// or a non-finite center. Finite extreme bounds saturate to the supported
+    /// `i32` streaming-cell domain.
+    pub fn cell_bounds_for_radius(
+        &self,
+        center: WorldPos,
+        radius: f64,
+    ) -> Option<(CellCoord, CellCoord)> {
+        if !radius.is_finite()
+            || radius < 0.0
+            || !center.x.is_finite()
+            || !center.y.is_finite()
+            || !center.z.is_finite()
+        {
+            return None;
+        }
+
+        Some((
+            self.cell_of(WorldPos::new(
+                center.x - radius,
+                center.y - radius,
+                center.z - radius,
+            )),
+            self.cell_of(WorldPos::new(
+                center.x + radius,
+                center.y + radius,
+                center.z + radius,
+            )),
+        ))
+    }
+
     /// Projects a floating-origin [`GridCell`] straight onto a streaming
     /// [`CellCoord`] by narrowing each `i64` axis to `i32` (saturating).
     ///
@@ -262,6 +299,41 @@ mod tests {
     fn interests_on_empty_sources_is_empty() {
         let grid = InterestGrid::new(100.0);
         assert!(grid.interests(&[]).is_empty());
+    }
+
+    #[test]
+    fn radius_bounds_are_inclusive_conservative_and_handle_negative_cells() {
+        let grid = InterestGrid::new(10.0);
+        assert_eq!(
+            grid.cell_bounds_for_radius(WorldPos::new(-0.5, 0.0, 20.0), 10.0),
+            Some((CellCoord::new(-2, -1, 1), CellCoord::new(0, 1, 3)))
+        );
+        assert_eq!(
+            grid.cell_bounds_for_radius(WorldPos::new(5.0, 5.0, 5.0), 0.0),
+            Some((CellCoord::new(0, 0, 0), CellCoord::new(0, 0, 0)))
+        );
+        assert_eq!(
+            grid.cell_bounds_for_radius(WorldPos::new(0.0, 0.0, 0.0), f64::MAX),
+            Some((
+                CellCoord::new(i32::MIN, i32::MIN, i32::MIN),
+                CellCoord::new(i32::MAX, i32::MAX, i32::MAX)
+            ))
+        );
+    }
+
+    #[test]
+    fn radius_bounds_reject_invalid_inputs() {
+        let grid = InterestGrid::new(10.0);
+        for radius in [-1.0, f64::NAN, f64::INFINITY] {
+            assert_eq!(
+                grid.cell_bounds_for_radius(WorldPos::new(0.0, 0.0, 0.0), radius),
+                None
+            );
+        }
+        assert_eq!(
+            grid.cell_bounds_for_radius(WorldPos::new(f64::NAN, 0.0, 0.0), 1.0),
+            None
+        );
     }
 
     #[test]

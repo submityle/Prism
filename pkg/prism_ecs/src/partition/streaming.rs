@@ -22,11 +22,14 @@
 //! Neither type performs I/O or despawns on its own: they are the accounting
 //! the owning scene drives around the streamer's schedule.
 
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 
 use crate::collections::HashMap;
 use crate::entity::Entity;
 use crate::partition::cell::CellCoord;
+use crate::partition::floating_origin::WorldPos;
+use crate::partition::interest::InterestGrid;
 use crate::world::World;
 
 /// A non-owning, generation-checked handle to an entity that may have been
@@ -173,6 +176,10 @@ impl WeakRefs {
 pub struct CellEntityIndex {
     /// cell -> entities currently assigned to it (unsorted; sorted on output).
     by_cell: HashMap<CellCoord, Vec<Entity>>,
+    /// Ordered coordinate index used for bounded 3D range queries. The final
+    /// level stores only occupied z coordinates; entity buckets remain in
+    /// `by_cell` so this index does not duplicate entity handles.
+    cells_by_x_y: BTreeMap<i32, BTreeMap<i32, BTreeSet<i32>>>,
     /// entity -> its current cell, so moves/removals need no scan.
     of_entity: HashMap<Entity, CellCoord>,
 }
@@ -194,12 +201,12 @@ impl CellEntityIndex {
             Some(prev) if prev == cell => Some(prev),
             Some(prev) => {
                 self.detach_from_cell(entity, prev);
-                self.by_cell.entry(cell).or_default().push(entity);
+                self.attach_to_cell(entity, cell);
                 self.of_entity.insert(entity, cell);
                 Some(prev)
             }
             None => {
-                self.by_cell.entry(cell).or_default().push(entity);
+                self.attach_to_cell(entity, cell);
                 self.of_entity.insert(entity, cell);
                 None
             }
@@ -235,11 +242,62 @@ impl CellEntityIndex {
         out
     }
 
+    /// Returns entities resident in the inclusive 3D cell-coordinate AABB
+    /// `[min, max]`, sorted and deduplicated by entity handle.
+    ///
+    /// Query cost follows occupied x/y index branches intersecting the range
+    /// plus occupied cells in the range; it does not scan every indexed cell.
+    /// No coordinate arithmetic is performed, so even ranges spanning
+    /// `i32::MIN..=i32::MAX` cannot overflow. An inverted bound on any axis
+    /// denotes an empty query.
+    pub fn entities_in_aabb(&self, min: CellCoord, max: CellCoord) -> Vec<Entity> {
+        if min.x > max.x || min.y > max.y || min.z > max.z {
+            return Vec::new();
+        }
+
+        let mut out = Vec::new();
+        for (&x, ys) in self.cells_by_x_y.range(min.x..=max.x) {
+            let _ = x;
+            for (&y, zs) in ys.range(min.y..=max.y) {
+                let _ = y;
+                for &z in zs.range(min.z..=max.z) {
+                    if let Some(entities) = self.by_cell.get(&CellCoord::new(x, y, z)) {
+                        out.extend_from_slice(entities);
+                    }
+                }
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    /// Returns a conservative broad-phase candidate set from cells intersecting
+    /// the AABB around a world-space sphere. The returned entities can lie
+    /// outside the sphere; evaluate exact distance/LOD before scheduling them.
+    ///
+    /// The cell index and `grid` must describe the same coordinate lattice.
+    /// For an `OutOfRange::Dormant` schedule, pass its finite farthest-band
+    /// radius. Callers must additionally include previously-awake exit guards
+    /// that may have moved beyond this region. Returns `None` for invalid
+    /// center/radius inputs; an unbounded LOD policy must use a complete
+    /// population path instead of this bounded query.
+    pub fn entities_in_world_radius(
+        &self,
+        grid: &InterestGrid,
+        center: WorldPos,
+        radius: f64,
+    ) -> Option<Vec<Entity>> {
+        let (min, max) = grid.cell_bounds_for_radius(center, radius)?;
+        Some(self.entities_in_aabb(min, max))
+    }
+
     /// Drains every entity assigned to `cell`, removing them from the index and
     /// returning them sorted by handle. Used on cell unload to despawn exactly
     /// that cell's entities.
     pub fn take_cell(&mut self, cell: CellCoord) -> Vec<Entity> {
         let mut out = self.by_cell.remove(&cell).unwrap_or_default();
+        self.unindex_cell(cell);
         for &entity in &out {
             self.of_entity.remove(&entity);
         }
@@ -291,7 +349,41 @@ impl CellEntityIndex {
             }
             if bucket.is_empty() {
                 self.by_cell.remove(&cell);
+                self.unindex_cell(cell);
             }
+        }
+    }
+
+    fn attach_to_cell(&mut self, entity: Entity, cell: CellCoord) {
+        let bucket = self.by_cell.entry(cell).or_default();
+        if bucket.is_empty() {
+            self.cells_by_x_y
+                .entry(cell.x)
+                .or_default()
+                .entry(cell.y)
+                .or_default()
+                .insert(cell.z);
+        }
+        // `assign` returns early for an entity already in this cell, and
+        // moving entities are detached before reaching this method. Avoid a
+        // linear duplicate scan in dense cells; uniqueness follows from the
+        // `of_entity` invariant.
+        bucket.push(entity);
+    }
+
+    fn unindex_cell(&mut self, cell: CellCoord) {
+        let Some(ys) = self.cells_by_x_y.get_mut(&cell.x) else {
+            return;
+        };
+        let Some(zs) = ys.get_mut(&cell.y) else {
+            return;
+        };
+        zs.remove(&cell.z);
+        if zs.is_empty() {
+            ys.remove(&cell.y);
+        }
+        if ys.is_empty() {
+            self.cells_by_x_y.remove(&cell.x);
         }
     }
 }
@@ -299,6 +391,8 @@ impl CellEntityIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::partition::floating_origin::WorldPos;
+    use crate::partition::interest::InterestGrid;
 
     fn cell(x: i32, y: i32, z: i32) -> CellCoord {
         CellCoord::new(x, y, z)
@@ -434,6 +528,124 @@ mod tests {
         idx.assign(b, cell(0, 0, 0));
 
         assert_eq!(idx.entities_in(cell(0, 0, 0)), alloc::vec![a, b, c]);
+    }
+
+    #[test]
+    fn index_aabb_is_empty_for_empty_index_or_inverted_bounds() {
+        let idx = CellEntityIndex::new();
+        assert!(idx
+            .entities_in_aabb(cell(-1, -1, -1), cell(1, 1, 1))
+            .is_empty());
+
+        let mut world = World::new();
+        let e = world.spawn(());
+        let mut idx = CellEntityIndex::new();
+        idx.assign(e, cell(0, 0, 0));
+        assert!(idx
+            .entities_in_aabb(cell(1, 0, 0), cell(0, 0, 0))
+            .is_empty());
+        assert!(idx
+            .entities_in_aabb(cell(0, 1, 0), cell(0, 0, 0))
+            .is_empty());
+        assert!(idx
+            .entities_in_aabb(cell(0, 0, 1), cell(0, 0, 0))
+            .is_empty());
+    }
+
+    #[test]
+    fn index_aabb_includes_boundaries_and_negative_coordinates_deterministically() {
+        let mut world = World::new();
+        let a = world.spawn(());
+        let b = world.spawn(());
+        let c = world.spawn(());
+        let outside = world.spawn(());
+        let mut idx = CellEntityIndex::new();
+        idx.assign(c, cell(-2, 1, 3)); // inclusive max corner
+        idx.assign(a, cell(-4, -1, -3)); // inclusive min corner
+        idx.assign(b, cell(0, 0, 0));
+        idx.assign(outside, cell(-5, 0, 0));
+
+        assert_eq!(
+            idx.entities_in_aabb(cell(-4, -1, -3), cell(-2, 1, 3)),
+            alloc::vec![a, c]
+        );
+        assert_eq!(
+            idx.entities_in_aabb(cell(-4, -1, -3), cell(0, 1, 3)),
+            alloc::vec![a, b, c]
+        );
+    }
+
+    #[test]
+    fn index_aabb_tracks_moves_removals_and_duplicate_assignments() {
+        let mut world = World::new();
+        let a = world.spawn(());
+        let b = world.spawn(());
+        let mut idx = CellEntityIndex::new();
+        idx.assign(a, cell(1, 2, 3));
+        idx.assign(b, cell(1, 2, 3));
+        idx.assign(a, cell(1, 2, 3));
+        assert_eq!(
+            idx.entities_in_aabb(cell(1, 2, 3), cell(1, 2, 3)),
+            alloc::vec![a, b]
+        );
+
+        idx.assign(a, cell(-1, -2, -3));
+        assert_eq!(
+            idx.entities_in_aabb(cell(1, 2, 3), cell(1, 2, 3)),
+            alloc::vec![b]
+        );
+        assert_eq!(
+            idx.entities_in_aabb(cell(-1, -2, -3), cell(-1, -2, -3)),
+            alloc::vec![a]
+        );
+
+        assert_eq!(idx.remove(a), Some(cell(-1, -2, -3)));
+        assert!(idx
+            .entities_in_aabb(cell(-1, -2, -3), cell(-1, -2, -3))
+            .is_empty());
+        assert_eq!(
+            idx.entities_in_aabb(cell(1, 2, 3), cell(1, 2, 3)),
+            alloc::vec![b]
+        );
+    }
+
+    #[test]
+    fn index_aabb_handles_full_integer_domain_without_overflow() {
+        let mut world = World::new();
+        let e = world.spawn(());
+        let mut idx = CellEntityIndex::new();
+        idx.assign(e, cell(i32::MIN, i32::MAX, 0));
+        assert_eq!(
+            idx.entities_in_aabb(
+                cell(i32::MIN, i32::MIN, i32::MIN),
+                cell(i32::MAX, i32::MAX, i32::MAX)
+            ),
+            alloc::vec![e]
+        );
+    }
+
+    #[test]
+    fn world_radius_query_is_a_conservative_deterministic_candidate_source() {
+        let mut world = World::new();
+        let near = world.spawn(());
+        let boundary = world.spawn(());
+        let far = world.spawn(());
+        let mut idx = CellEntityIndex::new();
+        let grid = InterestGrid::new(10.0);
+        idx.assign(near, grid.cell_of(WorldPos::new(-1.0, 0.0, 0.0)));
+        idx.assign(boundary, grid.cell_of(WorldPos::new(10.0, 0.0, 0.0)));
+        idx.assign(far, grid.cell_of(WorldPos::new(100.0, 0.0, 0.0)));
+
+        // The cell AABB includes a boundary cell and is intentionally a
+        // superset; the caller's exact LOD evaluation decides true distance.
+        assert_eq!(
+            idx.entities_in_world_radius(&grid, WorldPos::new(0.0, 0.0, 0.0), 10.0),
+            Some(alloc::vec![near, boundary])
+        );
+        assert_eq!(
+            idx.entities_in_world_radius(&grid, WorldPos::new(0.0, 0.0, 0.0), f64::NAN),
+            None
+        );
     }
 
     #[test]
