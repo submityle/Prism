@@ -176,15 +176,22 @@ fn map_words(host: &GpuHost, staging: &wgpu::Buffer) -> Vec<u32> {
     reason = "the bounded replay keeps ABI setup, ordered dispatch, and readback auditable"
 )]
 fn replay(host: &GpuHost, wgsl: &str, segments: &[GpuSegment]) -> (Vec<u32>, Vec<u32>, Vec<u32>) {
-    assert!(!segments.is_empty());
     assert!(segments.len() <= u32::MAX as usize);
     assert!(WIDTH
         .checked_mul(HEIGHT)
         .is_some_and(|pixels| pixels as usize == PIXELS));
     let device = &host.device;
+    // Storage bindings must have a non-zero size even for an empty frame; the
+    // production segment_count immediate keeps this sentinel record unread.
+    let empty_segment = GpuSegment::zeroed();
+    let segment_upload = if segments.is_empty() {
+        bytemuck::bytes_of(&empty_segment)
+    } else {
+        bytemuck::cast_slice(segments)
+    };
     let segment_buffer = device.create_buffer_init(&BufferInitDescriptor {
         label: Some("hair_raster_segments"),
-        contents: bytemuck::cast_slice(segments),
+        contents: segment_upload,
         usage: BufferUsages::STORAGE,
     });
     // Per-frame clear contract: depth and ID use all-ones sentinels; zero
@@ -299,14 +306,16 @@ fn replay(host: &GpuHost, wgsl: &str, segments: &[GpuSegment]) -> (Vec<u32>, Vec
         ("hair_raster_resolve", &resolve_pipeline),
         ("hair_raster_publish", &publish_pipeline),
     ] {
-        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-            label: Some(label),
-            timestamp_writes: None,
-        });
-        pass.set_pipeline(pipeline);
-        pass.set_bind_group(0, &bind_group, &[]);
-        pass.set_immediates(0, &immediate_bytes);
-        pass.dispatch_workgroups(workgroups, 1, 1);
+        if workgroups > 0 {
+            let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                label: Some(label),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.set_immediates(0, &immediate_bytes);
+            pass.dispatch_workgroups(workgroups, 1, 1);
+        }
     }
     let byte_len = (PIXELS * size_of::<u32>()) as u64;
     for (source, destination) in [
@@ -360,6 +369,155 @@ fn pixel(x: u32, y: u32) -> usize {
     (y * WIDTH + x) as usize
 }
 
+fn cpu_capsule_coverage(
+    center: [f32; 2],
+    a: [f32; 2],
+    b: [f32; 2],
+    radius: f32,
+    samples: u32,
+) -> (f32, f32) {
+    let ab = [b[0] - a[0], b[1] - a[1]];
+    let denom = ab[0] * ab[0] + ab[1] * ab[1];
+    let mut inside = 0.0;
+    let mut best_t = 0.0;
+    let mut best_dist2 = f32::MAX;
+    for i in 0..samples.max(1) {
+        let fi = i as f32;
+        let ox = (fi * 0.618_034).fract() - 0.5;
+        let oy = (fi * 0.381_966).fract() - 0.5;
+        let sample = [center[0] + ox, center[1] + oy];
+        let ap = [sample[0] - a[0], sample[1] - a[1]];
+        let t = if denom <= 1.0e-12 {
+            0.0
+        } else {
+            ((ap[0] * ab[0] + ap[1] * ab[1]) / denom).clamp(0.0, 1.0)
+        };
+        let dx = sample[0] - (a[0] + ab[0] * t);
+        let dy = sample[1] - (a[1] + ab[1] * t);
+        let dist2 = dx * dx + dy * dy;
+        let distance = dist2.sqrt();
+        inside += (radius + 0.5 - distance).clamp(0.0, 1.0) / samples.max(1) as f32;
+        if dist2 < best_dist2 {
+            best_dist2 = dist2;
+            best_t = t;
+        }
+    }
+    (inside.clamp(0.0, 1.0), best_t)
+}
+
+fn cpu_oracle(segments: &[GpuSegment]) -> (Vec<u32>, Vec<u32>, Vec<u32>) {
+    let mut depth = vec![DEPTH_EMPTY; PIXELS];
+    let mut ids = vec![ID_EMPTY; PIXELS];
+    let mut coverage = vec![COVERAGE_EMPTY; PIXELS];
+    for segment in segments {
+        let radius = segment.width_px.max(0.0) * 0.5;
+        if radius <= 0.0 {
+            continue;
+        }
+        let lo_x = segment.p0[0].min(segment.p1[0]) - (radius + 1.0);
+        let lo_y = segment.p0[1].min(segment.p1[1]) - (radius + 1.0);
+        let hi_x = segment.p0[0].max(segment.p1[0]) + (radius + 1.0);
+        let hi_y = segment.p0[1].max(segment.p1[1]) + (radius + 1.0);
+        let x0 = (lo_x.floor() as i32).max(0);
+        let y0 = (lo_y.floor() as i32).max(0);
+        let x1 = (hi_x.ceil() as i32).min(WIDTH as i32 - 1);
+        let y1 = (hi_y.ceil() as i32).min(HEIGHT as i32 - 1);
+        if x0 > x1 || y0 > y1 {
+            continue;
+        }
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                let (cov, t) = cpu_capsule_coverage(
+                    [x as f32 + 0.5, y as f32 + 0.5],
+                    segment.p0,
+                    segment.p1,
+                    radius,
+                    HairSoftRasterAbi::default().subpixel_samples,
+                );
+                if cov < HairSoftRasterAbi::default().coverage_epsilon {
+                    continue;
+                }
+                let z = segment.depth0 + (segment.depth1 - segment.depth0) * t;
+                let quantized_depth = (z.clamp(0.0, 1.0) * 16_777_215.0) as u32;
+                let index = pixel(x as u32, y as u32);
+                depth[index] = depth[index].min(quantized_depth);
+            }
+        }
+    }
+    for segment in segments {
+        let radius = segment.width_px.max(0.0) * 0.5;
+        if radius <= 0.0 {
+            continue;
+        }
+        let x0 = ((segment.p0[0].min(segment.p1[0]) - (radius + 1.0)).floor() as i32).max(0);
+        let y0 = ((segment.p0[1].min(segment.p1[1]) - (radius + 1.0)).floor() as i32).max(0);
+        let x1 = ((segment.p0[0].max(segment.p1[0]) + (radius + 1.0)).ceil() as i32)
+            .min(WIDTH as i32 - 1);
+        let y1 = ((segment.p0[1].max(segment.p1[1]) + (radius + 1.0)).ceil() as i32)
+            .min(HEIGHT as i32 - 1);
+        if x0 > x1 || y0 > y1 {
+            continue;
+        }
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                let (cov, t) = cpu_capsule_coverage(
+                    [x as f32 + 0.5, y as f32 + 0.5],
+                    segment.p0,
+                    segment.p1,
+                    radius,
+                    HairSoftRasterAbi::default().subpixel_samples,
+                );
+                if cov < HairSoftRasterAbi::default().coverage_epsilon {
+                    continue;
+                }
+                let z = segment.depth0 + (segment.depth1 - segment.depth0) * t;
+                let quantized_depth = (z.clamp(0.0, 1.0) * 16_777_215.0) as u32;
+                let index = pixel(x as u32, y as u32);
+                if depth[index] == quantized_depth {
+                    ids[index] = ids[index].min(segment.seg_id);
+                }
+            }
+        }
+    }
+    for segment in segments {
+        let radius = segment.width_px.max(0.0) * 0.5;
+        if radius <= 0.0 {
+            continue;
+        }
+        let x0 = ((segment.p0[0].min(segment.p1[0]) - (radius + 1.0)).floor() as i32).max(0);
+        let y0 = ((segment.p0[1].min(segment.p1[1]) - (radius + 1.0)).floor() as i32).max(0);
+        let x1 = ((segment.p0[0].max(segment.p1[0]) + (radius + 1.0)).ceil() as i32)
+            .min(WIDTH as i32 - 1);
+        let y1 = ((segment.p0[1].max(segment.p1[1]) + (radius + 1.0)).ceil() as i32)
+            .min(HEIGHT as i32 - 1);
+        if x0 > x1 || y0 > y1 {
+            continue;
+        }
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                let (cov, t) = cpu_capsule_coverage(
+                    [x as f32 + 0.5, y as f32 + 0.5],
+                    segment.p0,
+                    segment.p1,
+                    radius,
+                    HairSoftRasterAbi::default().subpixel_samples,
+                );
+                if cov < HairSoftRasterAbi::default().coverage_epsilon {
+                    continue;
+                }
+                let z = segment.depth0 + (segment.depth1 - segment.depth0) * t;
+                let quantized_depth = (z.clamp(0.0, 1.0) * 16_777_215.0) as u32;
+                let index = pixel(x as u32, y as u32);
+                if depth[index] == quantized_depth && ids[index] == segment.seg_id {
+                    let quantized_coverage = (cov.clamp(0.0, 1.0) * COVERAGE_QUANT) as u32;
+                    coverage[index] = coverage[index].max(quantized_coverage);
+                }
+            }
+        }
+    }
+    (depth, ids, coverage)
+}
+
 fn make_segment(y: f32, depth: f32, id: u32) -> GpuSegment {
     GpuSegment {
         p0: [2.0, y],
@@ -386,11 +544,47 @@ fn hair_raster_three_pass_physical_gpu_acceptance() {
         make_segment(3.5, 0.2, 40), // nearer depth must win regardless of ID
         make_segment(8.5, 0.4, 23),
         make_segment(8.5, 0.4, 7), // equal quantized depth: minimum ID wins
+        GpuSegment {
+            p0: [-0.25, 1.5],
+            p1: [2.0, 1.5],
+            depth0: 0.6,
+            depth1: 0.6,
+            width_px: 1.4,
+            seg_id: 11,
+        }, // crosses the top-left viewport boundary
+        GpuSegment {
+            p0: [12.5, 10.5],
+            p1: [12.5, 10.5],
+            depth0: 0.3,
+            depth1: 0.3,
+            width_px: 1.4,
+            seg_id: 31,
+        }, // degenerate segment behaves as an analytic point capsule
     ];
     let (depth_a, id_a, coverage_a) = replay(&host, &wgsl, &scene);
+    let expected_a = cpu_oracle(&scene);
+    assert_eq!(depth_a, expected_a.0, "full-frame depth matches CPU oracle");
+    assert_eq!(id_a, expected_a.1, "full-frame IDs match CPU oracle");
+    assert_eq!(
+        coverage_a, expected_a.2,
+        "full-frame coverage matches CPU oracle"
+    );
     let mut reversed = scene;
     reversed.reverse();
     let (depth_b, id_b, coverage_b) = replay(&host, &wgsl, &reversed);
+    let expected_b = cpu_oracle(&reversed);
+    assert_eq!(
+        depth_b, expected_b.0,
+        "reversed full-frame depth matches CPU oracle"
+    );
+    assert_eq!(
+        id_b, expected_b.1,
+        "reversed full-frame IDs match CPU oracle"
+    );
+    assert_eq!(
+        coverage_b, expected_b.2,
+        "reversed full-frame coverage matches CPU oracle"
+    );
 
     let occlusion = pixel(4, 3);
     let tie = pixel(4, 8);
@@ -426,4 +620,9 @@ fn hair_raster_three_pass_physical_gpu_acceptance() {
     assert_eq!(depth_b[untouched], DEPTH_EMPTY);
     assert_eq!(id_b[untouched], ID_EMPTY);
     assert_eq!(coverage_b[untouched], COVERAGE_EMPTY);
+
+    let empty = replay(&host, &wgsl, &[]);
+    assert!(empty.0.iter().all(|&value| value == DEPTH_EMPTY));
+    assert!(empty.1.iter().all(|&value| value == ID_EMPTY));
+    assert!(empty.2.iter().all(|&value| value == COVERAGE_EMPTY));
 }
