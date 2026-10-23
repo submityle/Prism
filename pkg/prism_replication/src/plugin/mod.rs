@@ -41,6 +41,7 @@ mod authority_ecs;
 mod client;
 mod durable;
 mod ecs;
+mod ecs_aoi;
 mod multi_server;
 mod server;
 
@@ -64,6 +65,10 @@ pub use client::{
 };
 pub use durable::{DurableLogOperation, DurableRecoveryError};
 pub use ecs::{EcsReplication, EcsReplicationError, EcsReplicationPlugin, NetworkRollbackDriver};
+pub use ecs_aoi::{
+    mark_aoi_entity_dirty, EcsAoiProjectionConfig, EcsAoiProjectionPlugin, EcsAoiProjectionSource,
+    EcsAoiProjectionStatus, EcsAoiSourceError,
+};
 pub use multi_server::{
     decode_authority_aoi_event, decode_authority_aoi_replication_payload,
     encode_authority_aoi_event, encode_authority_aoi_replication_payload, AuthorityAoiEventError,

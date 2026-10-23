@@ -527,7 +527,9 @@ App 配置分层（§14）与 cvar（§24.6）的读写/校验**委托 `prism_re
 
 状态更正（2026-10-23）：本节旧“嵌套集合 metadata 默认值未完成”“Set 未完成”和“带数据 enum 未完成”描述均已过时；递归 metadata 默认值、Set、typed data-enum schema/codec/migration/remap 已实现；`rename` 作为独立展示名已支持，不改变稳定 key。空嵌套集合无法可靠推导 schema 时 fail-closed，属于支持形状边界。剩余机制缺口是完整 reflected type/字段策略映射、异步 applier、端到端故障注入和发行门禁。专项测试数见 §22，不再保留过期的 `283` 数字。
 
-M5 identity mapping 增量（2026-10-23）：`ReplicationMapping` 将稳定 `EntityId` 与包含完整 generation 的本地 ECS handle 分开维护；新增按稳定实体分组的 component 次级索引，使稳定实体解析不再扫描全量 mapping，按实体清理也只访问该实体的组件项。同一稳定实体的不同 component 映射若指向不同本地 handle 会显式拒绝，避免一个稳定身份跨 ECS generation 拆分。映射生命周期专项测试覆盖多组件查询、component/entity 删除、generation 冲突与索引一致性。该改进仍不等于 World dirty-tracking 到 AOI 的自动投影，也不提供 World/AOI/outbox 崩溃恢复。
+M5 identity mapping 增量（2026-10-23）：`ReplicationMapping` 将稳定 `EntityId` 与包含完整 generation 的本地 ECS handle 分开维护；新增按稳定实体分组的 component 次级索引，使稳定实体解析不再扫描全量 mapping，按实体清理也只访问该实体的组件项。同一稳定实体的不同 component 映射若指向不同本地 handle 会显式拒绝，避免一个稳定身份跨 ECS generation 拆分。映射生命周期专项测试覆盖多组件查询、component/entity 删除、generation 冲突与索引一致性。该改进仍不提供 World/AOI/outbox 崩溃恢复。
+
+M5 World→AOI adapter 增量（2026-10-23）：可选 `EcsAoiProjectionPlugin` 通过项目提供的 source 分别取得稳定网络 ID、AOI 二维位置与完整快照；具体 ECS component 类型由宿主显式 `track_component<T>` 订阅 Insert/Remove 生命周期，或由命令/system 显式调用 `mark_aoi_entity_dirty`。dirty handle 以有界 FIFO+BTreeSet 去重，adapter 在 `FixedPostUpdate` 只采样 dirty 实体并受每 tick 数量上限约束；快照采样或 AOI/outbox 批量提交失败时保留队列，backpressure 时由原子投影留存的 snapshot override 固定 wire payload。队列溢出转为 sticky halted 状态并暴露 `EcsAoiProjectionStatus`，不静默丢更新；宿主须显式重建/重同步后重新安装 adapter。scene/dynamic identity、坐标系和复制 schema 仍由项目定义。本机制不回滚 World 写入，也不提供 World/AOI/outbox 崩溃恢复。
 
 ### 25.4 多世界各持独立 time 时间域
 
