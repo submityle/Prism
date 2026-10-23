@@ -36,8 +36,8 @@ use prism_world_sim::{simulation_delta_to_transaction, SimulationDelta, Simulati
 pub use scene_host::{
     CellPersistenceState, ResidencyBinding, SceneEcsHost, SceneEcsHostConfigError,
     SceneEcsHostError, SceneEcsProvider, SceneEntityMap, SceneFieldBinding, SceneFieldValueKind,
-    SceneObjectBinding, ScenePersistenceBatch, ScenePersistenceBridgeError, ScenePersistenceSchema,
-    SceneResidencyTransition,
+    SceneObjectBinding, ScenePersistenceBatch, ScenePersistenceBridgeError,
+    ScenePersistenceCapture, ScenePersistenceSchema, SceneResidencyTransition,
 };
 
 /// Per-frame budgets for the two hot policy paths.

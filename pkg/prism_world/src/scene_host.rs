@@ -55,6 +55,28 @@ pub struct CellPersistenceState {
     pub state: ObjectState,
 }
 
+/// Provider-captured scene state and explicit persistence identities for one
+/// atomic sparse-property plus PRSI companion journal batch.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ScenePersistenceCapture {
+    /// Schema-owned conversion from scene fields to world fields.
+    pub schema: ScenePersistenceSchema,
+    /// Canonical scene snapshot diff against the supplied prior state.
+    pub batch: ScenePersistenceBatch,
+    /// Author for every transaction in this capture.
+    pub actor: prism_world_persist::ActorId,
+    /// Monotonic logical clock for every transaction in this capture.
+    pub clock: prism_world_persist::LogicalClock,
+    /// IDs in canonical object-delta order.
+    pub transaction_ids: Vec<prism_world_persist::TransactionId>,
+    /// Stable identity for the PRSI companion transaction.
+    pub companion_transaction_id: prism_world_persist::TransactionId,
+    /// Explicit world object storing the PRSI companion.
+    pub companion_object: WorldPersistentId,
+    /// Explicit opaque-byte field storing the PRSI companion.
+    pub companion_field: prism_world_persist::FieldId,
+}
+
 /// Fully resolved scene target passed to a provider residency batch.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SceneResidencyTransition {
@@ -169,6 +191,21 @@ pub trait SceneEcsProvider {
         Ok(Vec::new())
     }
 
+    /// Captures scene-native persistence data for host-owned transaction
+    /// construction. Returning `Some` selects the integrated bridge path; the
+    /// host computes exact inverses and appends property plus companion as one
+    /// batch. `prior` is replayed from the same authoritative log being
+    /// appended, and `next_sequence` is that log's next sequence.
+    fn capture_scene_persistence(
+        &mut self,
+        _world: &World,
+        _sector: SectorId,
+        _prior: &WorldState,
+        _next_sequence: u64,
+    ) -> Result<Option<ScenePersistenceCapture>, Self::Error> {
+        Ok(None)
+    }
+
     /// Applies reconstructed world state to a newly spawned cell before its
     /// ownership is published. Mapping fields into scene overrides/components
     /// remains the provider's typed responsibility.
@@ -239,6 +276,8 @@ pub enum SceneEcsHostError<E> {
     DurableAppend(alloc::string::String),
     /// The world persistence log could not be replayed for a cell.
     PersistenceReplay(TimelineError),
+    /// Scene-native persistence data could not be converted into transactions.
+    PersistenceBridge(ScenePersistenceBridgeError),
 }
 
 /// A scene-owned ECS host implementing [`crate::SceneHost`].
@@ -888,10 +927,8 @@ impl<'world, P: SceneEcsProvider> SceneEcsHost<'world, P> {
         let Some(spawn) = self.ownership().cells.get(&sector).cloned() else {
             return Err(SceneEcsHostError::CellNotLoaded(sector));
         };
-        let transactions = self
-            .provider
-            .capture_cell_persistence(self.world, sector, log.next_sequence())
-            .map_err(SceneEcsHostError::Provider)?;
+        let transactions =
+            self.capture_persistence_transactions(sector, log, log.next_sequence())?;
         log.append_batch(&transactions)
             .map_err(SceneEcsHostError::PersistenceAppend)?;
         let ownership = self.ownership_mut();
@@ -914,10 +951,11 @@ impl<'world, P: SceneEcsProvider> SceneEcsHost<'world, P> {
         let Some(spawn) = self.ownership().cells.get(&sector).cloned() else {
             return Err(SceneEcsHostError::CellNotLoaded(sector));
         };
-        let transactions = self
-            .provider
-            .capture_cell_persistence(self.world, sector, journal.cursor().next_sequence())
-            .map_err(SceneEcsHostError::Provider)?;
+        let next_sequence = journal.cursor().next_sequence();
+        let prior = Timeline::replay(&Snapshot::new(0, WorldState::new()), journal.log())
+            .map_err(SceneEcsHostError::PersistenceReplay)?;
+        let transactions =
+            self.capture_scene_or_legacy_transactions(sector, &prior, next_sequence)?;
         journal
             .append_batch(&transactions)
             .map_err(|error| SceneEcsHostError::DurableAppend(error.to_string()))?;
@@ -931,6 +969,48 @@ impl<'world, P: SceneEcsProvider> SceneEcsHost<'world, P> {
         }
         self.destroy_cell(sector, &spawn);
         Ok(())
+    }
+
+    fn capture_persistence_transactions(
+        &mut self,
+        sector: SectorId,
+        log: &AppendOnlyLog,
+        next_sequence: u64,
+    ) -> Result<Vec<Transaction>, SceneEcsHostError<P::Error>> {
+        let prior = Timeline::replay(&Snapshot::new(0, WorldState::new()), log)
+            .map_err(SceneEcsHostError::PersistenceReplay)?;
+        self.capture_scene_or_legacy_transactions(sector, &prior, next_sequence)
+    }
+
+    fn capture_scene_or_legacy_transactions(
+        &mut self,
+        sector: SectorId,
+        prior: &WorldState,
+        next_sequence: u64,
+    ) -> Result<Vec<Transaction>, SceneEcsHostError<P::Error>> {
+        if let Some(capture) = self
+            .provider
+            .capture_scene_persistence(self.world, sector, prior, next_sequence)
+            .map_err(SceneEcsHostError::Provider)?
+        {
+            return capture
+                .schema
+                .transactions_for_batch_with_companion(
+                    &capture.batch,
+                    prior,
+                    capture.actor,
+                    capture.clock,
+                    next_sequence,
+                    &capture.transaction_ids,
+                    capture.companion_transaction_id,
+                    capture.companion_object,
+                    capture.companion_field,
+                )
+                .map_err(SceneEcsHostError::PersistenceBridge);
+        }
+        self.provider
+            .capture_cell_persistence(self.world, sector, next_sequence)
+            .map_err(SceneEcsHostError::Provider)
     }
 }
 
@@ -1010,10 +1090,10 @@ mod tests {
     use prism_reflect::Reflect;
     use prism_scene::{
         replay_overrides, spawn_typed_plan, ArchetypeGroup, ArchetypeSignature, InstantiationPlan,
-        ResidencyTier, TypedSpawnPlan,
+        ResidencyTier, SceneInstancePersistence, TypedSpawnPlan,
     };
     use prism_world_persist::{
-        ActorId, FieldId, LogicalClock, OverrideDelta, OverrideValue, TransactionId,
+        ActorId, FieldId, LogicalClock, OverrideDelta, OverrideValue, PersistentId, TransactionId,
     };
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1037,6 +1117,8 @@ mod tests {
         pub(super) fail_stage_on: Option<usize>,
         pub(super) persistent_object: Option<WorldPersistentId>,
         pub(super) cell_entity: Option<Entity>,
+        pub(super) scene_capture: bool,
+        pub(super) scene_property_delta: bool,
     }
 
     impl SceneEcsProvider for Provider {
@@ -1190,6 +1272,49 @@ mod tests {
             .map_err(|_| ())?])
         }
 
+        fn capture_scene_persistence(
+            &mut self,
+            _world: &World,
+            sector: SectorId,
+            _prior: &WorldState,
+            _next_sequence: u64,
+        ) -> Result<Option<ScenePersistenceCapture>, Self::Error> {
+            if !self.scene_capture {
+                return Ok(None);
+            }
+            let schema = ScenePersistenceSchema::new(Vec::new()).map_err(|_| ())?;
+            Ok(Some(ScenePersistenceCapture {
+                schema,
+                batch: ScenePersistenceBatch {
+                    deltas: if self.scene_property_delta {
+                        vec![(
+                            WorldPersistentId(7700),
+                            OverrideDelta::single(FieldId(1), OverrideValue::Integer(12))
+                                .map_err(|_| ())?,
+                        )]
+                    } else {
+                        Vec::new()
+                    },
+                    scene_snapshot: SceneInstancePersistence {
+                        template: StableGuid::from_u128(sector.morton_hint() as u128),
+                        instance: None,
+                        properties: Vec::new(),
+                        structural: Vec::new(),
+                    },
+                },
+                actor: ActorId(9),
+                clock: LogicalClock(9),
+                transaction_ids: if self.scene_property_delta {
+                    vec![TransactionId(9008)]
+                } else {
+                    Vec::new()
+                },
+                companion_transaction_id: TransactionId(9009),
+                companion_object: WorldPersistentId(9909),
+                companion_field: FieldId(9909),
+            }))
+        }
+
         fn replay_cell_persistence(
             &mut self,
             world: &mut World,
@@ -1233,6 +1358,89 @@ mod tests {
         drop(host);
         assert!(!world.contains(root));
         assert_eq!(world.entity_count(), 0);
+    }
+
+    #[test]
+    fn structured_capture_filters_persisted_properties_and_companion_before_append() {
+        let mut world = World::new();
+        let sector = SectorId::new(0, 17, -2, 3);
+        let provider = Provider {
+            scene_capture: true,
+            ..Provider::default()
+        };
+        let mut host = SceneEcsHost::new(&mut world, provider);
+        crate::SceneHost::load_cell(&mut host, sector).unwrap();
+        let mut log = AppendOnlyLog::new();
+        let companion = SceneInstancePersistence {
+            template: StableGuid::from_u128(sector.morton_hint() as u128),
+            instance: None,
+            properties: Vec::new(),
+            structural: Vec::new(),
+        };
+        let bytes = prism_scene::encode_persistence(&companion).unwrap();
+        let delta = OverrideDelta::single(FieldId(9909), OverrideValue::Bytes(bytes)).unwrap();
+        log.append(
+            Transaction::new(
+                TransactionId(9009),
+                ActorId(9),
+                LogicalClock(9),
+                0,
+                PersistentId(9909),
+                delta.clone(),
+                delta,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        host.unload_cell_with_persistence(sector, &mut log).unwrap();
+        assert_eq!(log.len(), 1);
+        assert!(host.loaded_cell(sector).is_none());
+    }
+
+    #[test]
+    fn structured_capture_appends_companion_and_sparse_delta_in_one_memory_batch() {
+        let mut world = World::new();
+        let sector = SectorId::new(0, 23, 1, -5);
+        let provider = Provider {
+            scene_capture: true,
+            scene_property_delta: true,
+            ..Provider::default()
+        };
+        let mut host = SceneEcsHost::new(&mut world, provider);
+        crate::SceneHost::load_cell(&mut host, sector).unwrap();
+        let prior_delta = OverrideDelta::single(FieldId(1), OverrideValue::Integer(11)).unwrap();
+        let mut log = AppendOnlyLog::new();
+        log.append(
+            Transaction::new(
+                TransactionId(1),
+                ActorId(1),
+                LogicalClock(1),
+                0,
+                PersistentId(7700),
+                prior_delta.clone(),
+                prior_delta,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        host.unload_cell_with_persistence(sector, &mut log).unwrap();
+        assert_eq!(log.len(), 3);
+        assert_eq!(log.get(1).unwrap().sequence(), 1);
+        assert_eq!(log.get(1).unwrap().object(), PersistentId(7700));
+        assert_eq!(
+            log.get(1).unwrap().delta().get(FieldId(1)),
+            Some(&OverrideValue::Integer(12))
+        );
+        assert_eq!(
+            log.get(1).unwrap().inverse().get(FieldId(1)),
+            Some(&OverrideValue::Integer(11))
+        );
+        assert_eq!(log.get(2).unwrap().sequence(), 2);
+        assert_eq!(log.get(2).unwrap().object(), PersistentId(9909));
+        assert!(matches!(
+            log.get(2).unwrap().delta().get(FieldId(9909)),
+            Some(OverrideValue::Bytes(_))
+        ));
     }
 
     #[test]
