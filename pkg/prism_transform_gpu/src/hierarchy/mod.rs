@@ -163,6 +163,7 @@ impl GpuMat3x4 {
 pub struct GpuHierarchyPropagate {
     pipeline: ComputePipeline,
     layout: BindGroupLayout,
+    device_generation: u64,
 }
 
 /// Reusable GPU-resident world-transform output for hierarchy propagation.
@@ -372,7 +373,11 @@ impl GpuHierarchyPropagate {
             compilation_options: PipelineCompilationOptions::default(),
             cache: None,
         });
-        GpuHierarchyPropagate { pipeline, layout }
+        GpuHierarchyPropagate {
+            pipeline,
+            layout,
+            device_generation: ctx.device_generation(),
+        }
     }
 
     /// Records hierarchy propagation into reusable GPU-resident output
@@ -400,6 +405,11 @@ impl GpuHierarchyPropagate {
         output: &mut GpuHierarchyOutput,
         encoder: &mut CommandEncoder,
     ) {
+        assert_eq!(
+            self.device_generation,
+            ctx.device_generation(),
+            "GpuHierarchyPropagate belongs to a different device generation; rebuild the pipeline"
+        );
         assert_eq!(
             input.layout(),
             MatrixLayout::RowMajor3x4,
@@ -511,6 +521,11 @@ impl GpuHierarchyPropagate {
         ctx: &GpuContext,
         input: &ComputeHierarchyInput,
     ) -> Vec<GlobalTransform> {
+        assert_eq!(
+            self.device_generation,
+            ctx.device_generation(),
+            "GpuHierarchyPropagate belongs to a different device generation; rebuild the pipeline"
+        );
         assert_eq!(
             input.layout(),
             MatrixLayout::RowMajor3x4,
