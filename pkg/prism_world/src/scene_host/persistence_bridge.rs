@@ -186,8 +186,9 @@ impl ScenePersistenceSchema {
         snapshot: &SceneInstancePersistence,
         identities: &PersistentEntityMap,
         entities: &SceneEntityMap,
+        prior: &WorldState,
     ) -> Result<ScenePersistenceBatch, ScenePersistenceBridgeError> {
-        let mut grouped: BTreeMap<WorldPersistentId, BTreeMap<FieldId, WorldValue>> =
+        let mut desired_by_object: BTreeMap<WorldPersistentId, BTreeMap<FieldId, WorldValue>> =
             BTreeMap::new();
         for property in &snapshot.properties {
             let scene_id = property
@@ -203,7 +204,7 @@ impl ScenePersistenceSchema {
                 .find_scene_field(property.component, &property.path)
                 .ok_or(ScenePersistenceBridgeError::UnmappedSceneField)?;
             let value = to_world_value(&property.value, binding.value_kind)?;
-            if grouped
+            if desired_by_object
                 .entry(object)
                 .or_default()
                 .insert(binding.field, value)
@@ -212,18 +213,54 @@ impl ScenePersistenceSchema {
                 return Err(ScenePersistenceBridgeError::DuplicateObjectField);
             }
         }
-        let deltas = grouped
-            .into_iter()
-            .map(|(object, fields)| {
-                let changes = fields
-                    .into_iter()
-                    .map(|(field, value)| FieldOverride { field, value })
-                    .collect();
-                OverrideDelta::new(changes)
-                    .map(|delta| (object, delta))
-                    .map_err(|_| ScenePersistenceBridgeError::IncompatibleValue)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut objects: BTreeMap<WorldPersistentId, ()> = entities
+            .bindings
+            .iter()
+            .map(|binding| (binding.world, ()))
+            .collect();
+        for object in desired_by_object.keys() {
+            objects.insert(*object, ());
+        }
+        let mut deltas = Vec::new();
+        for object in objects.keys().copied() {
+            let desired = desired_by_object.get(&object);
+            let mut fields = BTreeMap::new();
+            if let Some(previous) = prior.object(object) {
+                for (field, _) in previous.iter() {
+                    if self
+                        .by_world_field
+                        .binary_search_by_key(field, |binding| binding.field)
+                        .is_err()
+                    {
+                        return Err(ScenePersistenceBridgeError::UnmappedWorldField);
+                    }
+                    fields.insert(*field, ());
+                }
+            }
+            if let Some(desired) = desired {
+                fields.extend(desired.keys().map(|field| (*field, ())));
+            }
+            let changes = fields
+                .keys()
+                .filter_map(|&field| {
+                    let old = prior.get(object, field);
+                    let new = desired.and_then(|values| values.get(&field));
+                    if old == new {
+                        None
+                    } else {
+                        Some(FieldOverride {
+                            field,
+                            value: new.cloned().unwrap_or(WorldValue::Delete),
+                        })
+                    }
+                })
+                .collect();
+            let delta = OverrideDelta::new(changes)
+                .map_err(|_| ScenePersistenceBridgeError::IncompatibleValue)?;
+            if !delta.is_empty() {
+                deltas.push((object, delta));
+            }
+        }
         let mut scene_snapshot = snapshot.clone();
         scene_snapshot.properties.clear();
         Ok(ScenePersistenceBatch {
@@ -403,13 +440,14 @@ mod tests {
         let schema = schema();
         let snapshot = scene_snapshot();
         let entities = entity_map();
+        let prior = WorldState::new();
         let identities = PersistentEntityMap::new(vec![EntityBinding::new(
             LocalEntityId::new(3),
             PersistentId::from_u128(77),
         )])
         .unwrap();
         let batch = schema
-            .snapshot_to_deltas(&snapshot, &identities, &entities)
+            .snapshot_to_deltas(&snapshot, &identities, &entities, &prior)
             .unwrap();
         assert_eq!(batch.deltas.len(), 1);
         assert_eq!(batch.deltas[0].0, WorldPersistentId(7700));
@@ -419,7 +457,6 @@ mod tests {
         );
         assert!(batch.scene_snapshot.properties.is_empty());
 
-        let prior = WorldState::new();
         let transactions = schema
             .transactions_for_batch(
                 &batch,
@@ -474,9 +511,6 @@ mod tests {
             PersistentId::from_u128(77),
         )])
         .unwrap();
-        let batch = schema
-            .snapshot_to_deltas(&snapshot, &identities, &entity_map())
-            .unwrap();
         let mut initial = Timeline::new();
         initial
             .commit(
@@ -488,6 +522,9 @@ mod tests {
             )
             .unwrap();
         let prior = initial.state().clone();
+        let batch = schema
+            .snapshot_to_deltas(&snapshot, &identities, &entity_map(), &prior)
+            .unwrap();
         let transactions = schema
             .transactions_for_batch(
                 &batch,
@@ -519,6 +556,44 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_diff_emits_delete_for_removed_override_and_skips_unchanged_values() {
+        let schema = schema();
+        let identities = PersistentEntityMap::new(vec![EntityBinding::new(
+            LocalEntityId::new(3),
+            PersistentId::from_u128(77),
+        )])
+        .unwrap();
+        let entities = entity_map();
+        let mut prior_timeline = Timeline::new();
+        prior_timeline
+            .commit(
+                TransactionId(20),
+                ActorId(2),
+                LogicalClock(1),
+                WorldPersistentId(7700),
+                OverrideDelta::single(FieldId(101), WorldValue::Integer(42)).unwrap(),
+            )
+            .unwrap();
+        let prior = prior_timeline.state().clone();
+        let removed = SceneInstancePersistence {
+            properties: Vec::new(),
+            ..scene_snapshot()
+        };
+        let removal = schema
+            .snapshot_to_deltas(&removed, &identities, &entities, &prior)
+            .unwrap();
+        assert_eq!(removal.deltas.len(), 1);
+        assert_eq!(
+            removal.deltas[0].1.get(FieldId(101)),
+            Some(&WorldValue::Delete)
+        );
+        let unchanged = schema
+            .snapshot_to_deltas(&scene_snapshot(), &identities, &entities, &prior)
+            .unwrap();
+        assert!(unchanged.deltas.is_empty());
+    }
+
+    #[test]
     fn bridge_rejects_ambiguous_schema_and_unsupported_snapshot_content() {
         let binding = SceneFieldBinding {
             component: ComponentTypeId::from_raw(11),
@@ -535,9 +610,10 @@ mod tests {
             PersistentId::from_u128(77),
         )])
         .unwrap();
+        let prior = WorldState::new();
         let mut snapshot = scene_snapshot();
         let batch = schema()
-            .snapshot_to_deltas(&snapshot, &identities, &entity_map())
+            .snapshot_to_deltas(&snapshot, &identities, &entity_map(), &prior)
             .unwrap();
         assert_eq!(batch.scene_snapshot.structural, snapshot.structural);
         assert_eq!(
@@ -550,21 +626,21 @@ mod tests {
                 local: LocalEntityId::new(4),
             });
         let batch = schema()
-            .snapshot_to_deltas(&snapshot, &identities, &entity_map())
+            .snapshot_to_deltas(&snapshot, &identities, &entity_map(), &prior)
             .unwrap();
         assert_eq!(batch.scene_snapshot.structural, snapshot.structural);
         assert!(batch.scene_snapshot.properties.is_empty());
         snapshot.structural.clear();
         snapshot.properties[0].persistent = None;
         assert_eq!(
-            schema().snapshot_to_deltas(&snapshot, &identities, &entity_map()),
+            schema().snapshot_to_deltas(&snapshot, &identities, &entity_map(), &prior),
             Err(ScenePersistenceBridgeError::MissingEntityIdentity)
         );
 
         let mut incompatible = scene_snapshot();
         incompatible.properties[0].value = OverrideValue::Str("42".into());
         assert_eq!(
-            schema().snapshot_to_deltas(&incompatible, &identities, &entity_map()),
+            schema().snapshot_to_deltas(&incompatible, &identities, &entity_map(), &prior),
             Err(ScenePersistenceBridgeError::IncompatibleValue)
         );
 
