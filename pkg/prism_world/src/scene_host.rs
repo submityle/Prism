@@ -197,10 +197,8 @@ pub trait SceneEcsProvider {
     /// state before the first eviction, including after process restart.
     fn persistence_objects(
         &mut self,
-        _sector: SectorId,
-    ) -> Result<Vec<WorldPersistentId>, Self::Error> {
-        Ok(Vec::new())
-    }
+        sector: SectorId,
+    ) -> Result<Vec<WorldPersistentId>, Self::Error>;
 
     /// Describes the provider-owned identities/schema needed to restore the
     /// PRSI companion for this cell. Return `None` only when the provider has no
@@ -1139,6 +1137,7 @@ mod tests {
         pub(super) cell_entity: Option<Entity>,
         pub(super) scene_property_delta: bool,
         pub(super) restore_layout: bool,
+        pub(super) omit_companion_object: bool,
         pub(super) restored_scene_templates: Vec<StableGuid>,
     }
 
@@ -1260,7 +1259,7 @@ mod tests {
             sector: SectorId,
         ) -> Result<Vec<WorldPersistentId>, Self::Error> {
             let mut objects: Vec<_> = self.persistent_object.into_iter().collect();
-            if self.restore_layout {
+            if self.restore_layout && !self.omit_companion_object {
                 objects.push(WorldPersistentId(u128::from(
                     9909u64.wrapping_add(sector.morton_hint()),
                 )));
@@ -1510,6 +1509,27 @@ mod tests {
         host.load_cell_with_persistence(sector, &log).unwrap();
         assert_eq!(host.provider.restored_scene_templates, vec![template]);
         assert_eq!(host.loaded_cell_count(), 1);
+    }
+
+    #[test]
+    fn persistence_layout_rejects_undeclared_companion_before_scene_spawn() {
+        let mut world = World::new();
+        let sector = SectorId::new(0, 31, 7, -3);
+        let provider = Provider {
+            restore_layout: true,
+            omit_companion_object: true,
+            ..Provider::default()
+        };
+        let mut host = SceneEcsHost::new(&mut world, provider);
+        let error = host
+            .load_cell_with_persistence(sector, &AppendOnlyLog::new())
+            .unwrap_err();
+        assert_eq!(
+            error,
+            SceneEcsHostError::PersistenceLayoutMissingCompanion(sector)
+        );
+        assert_eq!(host.loaded_cell_count(), 0);
+        assert_eq!(host.world().entity_count(), 0);
     }
 
     #[test]
