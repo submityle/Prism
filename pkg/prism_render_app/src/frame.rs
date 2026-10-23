@@ -1,7 +1,9 @@
 //! Building the frame's render graph.
 
 use alloc::collections::BTreeMap;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::any::Any;
 
 use prism_ecs::prelude::Resource;
 use prism_ecs::world::World;
@@ -237,11 +239,19 @@ pub struct FrameGraphTextureImport {
 #[derive(Clone, Default)]
 pub struct FrameGraphTextureImports {
     entries: BTreeMap<TextureViewId, FrameGraphTextureImport>,
+    external_owners: Vec<Arc<dyn Any + Send + Sync>>,
 }
 
 impl Resource for FrameGraphTextureImports {}
 
 impl FrameGraphTextureImports {
+    /// Pins an immutable external resource generation to every graph built
+    /// from this frame's imports. Submission ownership then extends its life
+    /// through GPU completion.
+    pub fn retain_owner(&mut self, owner: Arc<dyn Any + Send + Sync>) {
+        self.external_owners.push(owner);
+    }
+
     /// Publishes or replaces an owner texture import keyed by its view id.
     pub fn set(&mut self, import: FrameGraphTextureImport) {
         self.entries.insert(import.view, import);
@@ -619,6 +629,9 @@ fn append_target_graph(
     clear: ClearMode,
     external_views: &FrameGraphTextureImports,
 ) -> TargetGraphAppend {
+    for owner in &external_views.external_owners {
+        graph.retain_external_owner(owner.clone());
+    }
     // Persistent camera queues carry physical IDs and owners, NEVER handles
     // from a previous output graph. Resolve on a local copy before splitting.
     let mut local_queues = queues.clone();
