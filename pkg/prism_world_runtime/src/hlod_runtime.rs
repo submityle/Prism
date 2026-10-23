@@ -69,7 +69,8 @@ pub struct HlodSelection {
     pub level: usize,
     /// Derived asset key for the selected representation.
     pub asset_key: u64,
-    /// Transition from the previously active representation, if changed.
+    /// Blend pair for the active boundary band, including frames where
+    /// hysteresis keeps `level` on the prior stable representation.
     pub transition: Option<LodTransition>,
 }
 
@@ -450,8 +451,23 @@ impl HlodRuntime {
                 .copied()
                 .unwrap_or(0);
             let level = cluster.transition_target(request.distance, current)?;
-            let transition = (level != current)
-                .then(|| cluster.transition(request.distance, current, level))
+            let candidate = cluster.level_for_distance(request.distance);
+            // Hysteresis decides when the stable level changes; the blend
+            // pair is active throughout the boundary band, including frames
+            // before the level switch and the switch-completion frame.
+            let transition_to = if candidate != current {
+                Some(candidate)
+            } else if current + 1 < cluster.levels().len()
+                && in_transition_band(cluster, request.distance, current + 1)
+            {
+                Some(current + 1)
+            } else if current > 0 && in_transition_band(cluster, request.distance, current) {
+                Some(current - 1)
+            } else {
+                None
+            };
+            let transition = transition_to
+                .map(|to_level| cluster.transition(request.distance, current, to_level))
                 .transpose()?;
             let asset_key = cluster.levels()[level].asset_key;
             selections.push(HlodSelection {
@@ -468,6 +484,12 @@ impl HlodRuntime {
         }
         Ok(HlodSelectionPlan { selections })
     }
+}
+
+fn in_transition_band(cluster: &HlodCluster, distance: u32, boundary_level: usize) -> bool {
+    let level = cluster.levels()[boundary_level];
+    distance >= level.enter_distance.saturating_sub(level.transition_width)
+        && distance <= level.enter_distance.saturating_add(level.transition_width)
 }
 
 #[cfg(test)]
@@ -547,7 +569,69 @@ mod tests {
             }])
             .unwrap();
         assert_eq!(held.selections()[0].level, 1);
-        assert!(held.selections()[0].transition.is_none());
+        let reverse_transition = held.selections()[0].transition.unwrap();
+        assert_eq!(reverse_transition.from_level, 1);
+        assert_eq!(reverse_transition.to_level, 0);
+    }
+
+    #[test]
+    fn transition_is_reported_across_the_full_band_and_respects_hysteresis() {
+        let mut runtime = HlodRuntime::new(budget());
+        runtime.insert(cluster(1)).unwrap();
+
+        let near_edge = runtime
+            .plan(&[HlodDistanceRequest {
+                cluster_id: 1,
+                distance: 91,
+            }])
+            .unwrap();
+        let transition = near_edge.selections()[0].transition.unwrap();
+        assert_eq!(transition.from_level, 0);
+        assert_eq!(transition.to_level, 1);
+        assert_eq!(transition.alpha_q16, 3_276);
+        assert_eq!(runtime.active_level(1), Some(0));
+
+        let middle = runtime
+            .plan(&[HlodDistanceRequest {
+                cluster_id: 1,
+                distance: 100,
+            }])
+            .unwrap();
+        assert_eq!(middle.selections()[0].transition.unwrap().alpha_q16, 32_767);
+        assert_eq!(runtime.active_level(1), Some(0));
+
+        let completed = runtime
+            .plan(&[HlodDistanceRequest {
+                cluster_id: 1,
+                distance: 110,
+            }])
+            .unwrap();
+        assert_eq!(completed.selections()[0].level, 1);
+        assert_eq!(
+            completed.selections()[0].transition.unwrap().alpha_q16,
+            65_535
+        );
+        assert_eq!(runtime.active_level(1), Some(1));
+
+        let held = runtime
+            .plan(&[HlodDistanceRequest {
+                cluster_id: 1,
+                distance: 95,
+            }])
+            .unwrap();
+        assert_eq!(held.selections()[0].level, 1);
+        assert_eq!(held.selections()[0].transition.unwrap().from_level, 1);
+        assert_eq!(held.selections()[0].transition.unwrap().to_level, 0);
+        assert_eq!(runtime.active_level(1), Some(1));
+
+        let reversed = runtime
+            .plan(&[HlodDistanceRequest {
+                cluster_id: 1,
+                distance: 89,
+            }])
+            .unwrap();
+        assert_eq!(reversed.selections()[0].level, 0);
+        assert_eq!(runtime.active_level(1), Some(0));
     }
 
     #[test]

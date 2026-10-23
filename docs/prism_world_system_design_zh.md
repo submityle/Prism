@@ -428,6 +428,8 @@ dematerialize(instance):  // A → C/B,退离
 
 ### 10.6 当前 runtime HLOD 选择器边界
 
+**逐帧过渡状态修正（2026-10-23）**：runtime 现在在完整 transition band 内每帧输出相同的 `from_level/to_level` 表示对及距离驱动 Q16 alpha；迟滞只控制稳定 `active_level` 的提交外沿，不会再把 transition 压缩成仅切换瞬间的端点。回归覆盖接近方向的 band 起点/中点/远端、反向迟滞保持与越界切换。`cargo test --offline --locked -p prism_world_runtime hlod_runtime` 隔离 target 7/7 通过。该修正确保选择器提供逐帧 blend 参数，不等于 renderer 已消费双表示，也不证明 opaque/shadow/GI 等 pass 的 coverage 一致；具体 draw 接线仍需 renderer 与真实 GPU/图像验收。
+
 `pkg/prism_world_runtime/src/hlod_runtime.rs` 已实现有界的 `HlodRuntime`：按稳定 cluster id 排序 distance request、调用 `prism_world_residency::HlodCluster` 选择 representation，并返回切换 transition；活动 level 仅在整批 plan 成功后提交。规划器在排序后以相邻项检查重复请求，并用按请求数预留的临时 `Vec` 收集选择及待提交 level，避免为这两项工作另建 `BTreeSet`/`BTreeMap`；复杂度仍包含请求排序与 catalog/active-level 的有序树查找，不能描述成线性总成本。正确性回归覆盖确定性顺序、迟滞、重复输入及失败不提交状态。`pkg/prism_world_runtime/benches/hlod_plan.rs` 提供 release 稳态量具，覆盖 16/64/256/1,024 个 catalog/request；2026-10-22 Apple Silicon 共享主机一次诊断的 p50 为 23.95/26.06/30.34/109.83 ns/request，p95 为 51.40/26.39/30.92/110.79，p99 为 71.38/27.78/32.23/112.98。该量具无墙钟门槛，单机结果受系统负载影响，不构成受控基线或优化收益证明；仍缺 allocation/work-count 指标、受控 A/B 与代表性请求分布。
 
 ### 10.7 当前 HLOD bake artifact 与 runtime catalog 边界
