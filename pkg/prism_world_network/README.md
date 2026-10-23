@@ -26,6 +26,14 @@ contract.
   delivered transaction through the persistence CRDT facade, and completes the
   cumulative-ACK lifecycle. This is codec/session/merge integration coverage;
   it is not a disk-journal, socket, or encrypted transport test.
+- `encode_packet`/`decode_packet` provide the stable `PWN1` little-endian byte
+  frame for host transports. Delta payloads reuse the versioned persist
+  transaction codec and retain the full `SectorId`; subscriptions retain signed
+  inclusive AOI bounds. Header version, packet sequence, message kind, payload
+  length, and all integer fields are checked before publication, with a fixed
+  16 MiB payload cap. ACK frames are represented explicitly. This is a
+  serialization boundary, not encryption, key exchange, socket I/O, or packet
+  retry; the `Session` state machine remains responsible for the latter.
 - `ServerMesh` owns bounded partition-authority metadata only. It fences old
   authorities with `(authority, epoch, lease)` matching, reserves target
   capacity during prepare, and rechecks the source fence during commit.

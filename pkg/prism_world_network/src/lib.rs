@@ -12,6 +12,7 @@ extern crate alloc;
 
 mod server_mesh;
 mod session;
+mod wire;
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
@@ -37,6 +38,7 @@ pub use session::{
     ReceiveOutcome, Session, SessionConfig, SessionConfigError, SessionError, SessionId,
     SessionState, Transport, TransportPacket, WorldMessage,
 };
+pub use wire::{decode_packet, encode_packet, WireCodecError, MAX_TRANSPORT_PAYLOAD};
 
 /// Stable identity for an AOI subscription.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
