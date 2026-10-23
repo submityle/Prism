@@ -1,6 +1,6 @@
 //! Explicit mapping between scene property snapshots and world field deltas.
 
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 use core::convert::TryFrom;
 use prism_scene::{
@@ -292,11 +292,8 @@ impl ScenePersistenceSchema {
         if transaction_ids.len() != batch.deltas.len() {
             return Err(ScenePersistenceBridgeError::TransactionIdCountMismatch);
         }
-        if transaction_ids
-            .iter()
-            .enumerate()
-            .any(|(index, id)| transaction_ids[..index].contains(id))
-        {
+        let unique_ids: BTreeSet<_> = transaction_ids.iter().copied().collect();
+        if unique_ids.len() != transaction_ids.len() {
             return Err(ScenePersistenceBridgeError::DuplicateTransactionId);
         }
         let mut transactions = Vec::with_capacity(batch.deltas.len());
