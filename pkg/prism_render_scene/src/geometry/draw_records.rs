@@ -81,9 +81,90 @@ pub struct GeometryDrawPhase {
 #[derive(Resource, Clone, Debug, Default)]
 pub struct VirtualGeometryDrawPublications {
     publications: BTreeMap<u32, VirtualGeometryGpuPublication>,
+    residency: BTreeMap<u32, VirtualGeometryResidencyState>,
+}
+
+/// Incrementally mirrored page residency for one exact publication lifetime.
+#[derive(Clone, Debug, Default)]
+struct VirtualGeometryResidencyState {
+    content_revision: [u8; 32],
+    generation: u64,
+    active: bool,
+    pages: BTreeMap<GeometryPageKey, bool>,
 }
 
 impl VirtualGeometryDrawPublications {
+    /// Applies a generation-bound page residency delta exported by RenderApp.
+    /// A new generation replaces old rows; stale generations are ignored.
+    pub fn apply_residency_delta(
+        &mut self,
+        asset_id: u32,
+        content_revision: [u8; 32],
+        generation: u64,
+        active: bool,
+        changed_pages: &[(GeometryPageKey, bool)],
+    ) {
+        if !active {
+            let state = self.residency.entry(asset_id).or_default();
+            if state.generation > generation {
+                return;
+            }
+            if state.generation < generation {
+                *state = VirtualGeometryResidencyState {
+                    content_revision,
+                    generation,
+                    active: false,
+                    pages: BTreeMap::new(),
+                };
+            } else if state.generation == generation && state.content_revision == content_revision {
+                state.active = false;
+                state.pages.clear();
+            } else {
+                return;
+            }
+            return;
+        }
+        let state = self.residency.entry(asset_id).or_default();
+        if state.generation > generation
+            || (state.generation == generation
+                && (state.content_revision != content_revision || !state.active))
+        {
+            return;
+        }
+        if state.generation < generation {
+            *state = VirtualGeometryResidencyState {
+                content_revision,
+                generation,
+                active: true,
+                pages: BTreeMap::new(),
+            };
+        }
+        state.active = true;
+        for &(key, resident) in changed_pages {
+            if key.asset == asset_id {
+                state.pages.insert(key, resident);
+            }
+        }
+    }
+
+    /// Returns whether the current exact asset generation has the requested
+    /// logical page resident. Unknown/stale page state is always nonresident.
+    #[must_use]
+    pub fn is_page_resident(
+        &self,
+        asset_id: u32,
+        content_revision: [u8; 32],
+        generation: u64,
+        key: GeometryPageKey,
+    ) -> bool {
+        self.residency.get(&asset_id).is_some_and(|state| {
+            state.active
+                && state.content_revision == content_revision
+                && state.generation == generation
+                && state.pages.get(&key).copied().unwrap_or(false)
+        })
+    }
+
     /// Replaces one asset publication atomically.
     pub fn replace(&mut self, publication: VirtualGeometryGpuPublication) {
         self.publications
@@ -92,6 +173,13 @@ impl VirtualGeometryDrawPublications {
 
     /// Removes a retired asset publication.
     pub fn retire(&mut self, asset_id: u32) -> Option<VirtualGeometryGpuPublication> {
+        if let Some(state) = self.residency.get_mut(&asset_id) {
+            // Keep the generation/revision tombstone so delayed deltas cannot
+            // resurrect this lifetime, but release the potentially large page
+            // map as soon as its publication is retired.
+            state.active = false;
+            state.pages.clear();
+        }
         self.publications.remove(&asset_id)
     }
 
@@ -861,6 +949,50 @@ mod tests {
             error,
             GeometryDrawPhaseError::VirtualPublicationMismatch { scene: SCENE_A }
         );
+    }
+
+    #[test]
+    fn stale_retirement_cannot_remove_newer_residency_generation() {
+        let key = GeometryPageKey::new(55, 0);
+        let mut publications = VirtualGeometryDrawPublications::default();
+        publications.apply_residency_delta(55, [2; 32], 20, true, &[(key, true)]);
+        publications.apply_residency_delta(55, [1; 32], 19, false, &[]);
+        assert!(publications.is_page_resident(55, [2; 32], 20, key));
+        publications.apply_residency_delta(55, [2; 32], 20, false, &[]);
+        assert!(!publications.is_page_resident(55, [2; 32], 20, key));
+        publications.apply_residency_delta(55, [2; 32], 20, true, &[(key, true)]);
+        assert!(!publications.is_page_resident(55, [2; 32], 20, key));
+        publications.apply_residency_delta(55, [3; 32], 21, true, &[(key, true)]);
+        assert!(publications.is_page_resident(55, [3; 32], 21, key));
+    }
+
+    #[test]
+    fn retiring_publication_releases_residency_pages_and_keeps_tombstone() {
+        let key = GeometryPageKey::new(55, 0);
+        let mut publications = VirtualGeometryDrawPublications::default();
+        publications.apply_residency_delta(55, [2; 32], 20, true, &[(key, true)]);
+        let publication = VirtualGeometryGpuPublication::build(
+            &virtual_asset(),
+            [2; 32],
+            20,
+            &[],
+            &[VirtualGeometryMaterialBinding {
+                material_slot: 0,
+                material: MATERIAL,
+            }],
+        )
+        .expect("publication fixture is valid");
+        publications.replace(publication);
+
+        assert!(publications.retire(55).is_some());
+        assert!(!publications.is_page_resident(55, [2; 32], 20, key));
+
+        // The same retired lifetime cannot be reactivated by a delayed delta.
+        publications.apply_residency_delta(55, [2; 32], 20, true, &[(key, true)]);
+        assert!(!publications.is_page_resident(55, [2; 32], 20, key));
+        // A genuinely newer publication lifetime can reuse the asset identity.
+        publications.apply_residency_delta(55, [3; 32], 21, true, &[(key, true)]);
+        assert!(publications.is_page_resident(55, [3; 32], 21, key));
     }
 
     #[test]
