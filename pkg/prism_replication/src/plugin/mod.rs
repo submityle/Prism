@@ -369,3 +369,13 @@ fn unaudited_contract_keeps_v1_and_rejects_hash_envelopes() {
         })
     ));
 }
+
+#[cfg(test)]
+#[test]
+fn exhausted_command_identity_rejection_round_trips_on_rpc_wire() {
+    let encoded = encode_reject(ProtocolError::CommandIdentityExhausted);
+    assert!(matches!(
+        decode_rpc(&encoded),
+        Ok(RpcEnvelope::Reject(ProtocolError::CommandIdentityExhausted))
+    ));
+}
