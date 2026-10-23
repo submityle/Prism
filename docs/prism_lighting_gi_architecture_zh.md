@@ -10,7 +10,7 @@
 
 ### 0.9 实施落点（2026-10-23 增量更新）
 
-**2026-10-23 实施状态增量**：`WorldRestir` 已登记为 architecture executable provider，provider 复用 `restir_gi` 的 GI sample reservoir、确定性初始候选流和 finalized radiance CPU reference；有效候选输入现在可通过 `LightingPlan` 准入。消费范围内候选会先验证有限值与非负辐射/PDF，预算外候选不会被扫描。recipe backend 定向测试现为 **11/11 通过**，planner 有效候选准入测试 **1/1 通过**。物理 GPU 宿主图测试未能执行：test target 编译被 renderer 其他模块的当前错误阻塞（SurfaceView 新字段初始化、surface-view 测试 helper 类型不匹配）；`cargo check -p prism_render_app --lib` 同样被 virtual geometry resource、texture target registry API 调用与 TAA `Arc` 类型错误阻塞。故**不宣称** trace→candidate→GI→composite 当前端到端验收通过；原有材质/纹理闭环、scene/present parity 和性能矩阵仍未完成。
+**2026-10-23 实施状态增量**：`WorldRestir` 已登记为 architecture executable provider，provider 复用 `restir_gi` 的 GI sample reservoir、确定性初始候选流和 finalized radiance CPU reference；有效候选输入现在可通过 `LightingPlan` 准入。消费范围内候选会先验证有限值与非负辐射/PDF，预算外候选不会被扫描。recipe backend 定向测试 **11/11 通过**，planner 有效候选准入测试 **1/1 通过**。物理 GPU 宿主图测试二进制可运行；普通模式因无可用 adapter 而 skip，设置 `PRISM_REQUIRE_GPU=1` 后明确失败 `no usable graphics adapter`，因此当前环境没有产生物理 GPU parity 证据。故**不宣称** trace→candidate→GI→composite 当前端到端验收通过；原有材质/纹理闭环、scene/present parity 和性能矩阵仍未完成。
 
 本轮重构把提案中最容易再次分叉的边界落成了可编译代码，并接入新宿主的真实帧生命周期：
 
