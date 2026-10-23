@@ -7,7 +7,7 @@
 //! server connection accepts them.
 
 use alloc::boxed::Box;
-use alloc::collections::{BTreeMap, VecDeque};
+use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::vec;
 use alloc::vec::Vec;
 use core::mem::size_of;
@@ -69,6 +69,34 @@ pub struct LeasedAuthorityCommand {
     pub command_id: u128,
     /// Command payload after RPC framing has been removed.
     pub payload: Vec<u8>,
+}
+
+/// A generic authority-side entity projection operation. It carries only
+/// stable network identity and caller-serialized state; gameplay components and
+/// ECS entity types remain application-owned.
+#[derive(Clone, Debug, PartialEq)]
+pub enum AuthorityEntityProjection {
+    /// Insert or move an entity in the AOI index and publish entered snapshots.
+    Upsert {
+        /// Stable replication identity, never an ECS allocation slot.
+        entity_id: u32,
+        /// Authoritative spatial position.
+        position: (f32, f32),
+        /// Canonical provider payload for newly-visible peers.
+        snapshot: Vec<u8>,
+    },
+    /// Remove an entity from the AOI index and publish leave edges.
+    Remove {
+        /// Stable replication identity.
+        entity_id: u32,
+    },
+    /// Publish a changed snapshot to the current viewers without changing AOI.
+    Update {
+        /// Stable replication identity.
+        entity_id: u32,
+        /// Canonical provider payload for current viewers.
+        snapshot: Vec<u8>,
+    },
 }
 
 /// One peer's AOI update with real entity snapshots and lifecycle removals.
@@ -509,9 +537,21 @@ pub fn decode_authority_aoi_event(
 struct PeerAuthority<S: ServerStrategy> {
     server: ServerReplication<S>,
     leased_command: Option<(u128, u64)>,
+    snapshot_overrides: BTreeMap<(u32, u64), VecDeque<Vec<u8>>>,
     pending_aoi_events: VecDeque<PendingAoiEvent>,
     last_aoi_send_error: Option<MuxSendError>,
     last_provider_error: Option<AuthorityReplicationProviderError>,
+}
+
+/// Fully validated AOI/outbox replacement produced by projection preflight.
+/// It stays private to the atomic projection method and cannot be retained
+/// across another authority mutation.
+struct PreparedAuthorityProjection {
+    aoi: AuthorityAoi,
+    deltas: Vec<AuthorityAoiDelta>,
+    overrides: Vec<(PeerId, u32, u64, Vec<u8>)>,
+    events: Vec<(PeerId, PendingAoiEvent)>,
+    touched: BTreeSet<PeerId>,
 }
 
 #[derive(Clone, Debug)]
@@ -604,6 +644,7 @@ impl<S: ServerStrategy> MultiPeerAuthority<S> {
         let mut peer = PeerAuthority {
             server,
             leased_command: None,
+            snapshot_overrides: BTreeMap::new(),
             pending_aoi_events: VecDeque::new(),
             last_aoi_send_error: None,
             last_provider_error: None,
@@ -956,6 +997,207 @@ impl<S: ServerStrategy> MultiPeerAuthority<S> {
         self.dispatch_deltas(deltas)
     }
 
+    /// Preflight a bounded batch of entity projection operations. This clones
+    /// only the bounded AOI index/state, simulates operations in caller order,
+    /// and verifies exact per-peer outbox demand before changing the live AOI.
+    /// The returned plan is tied to this authority's current peer/outbox state
+    /// and commit rejects it if any intervening authority mutation occurred.
+    fn prepare_entity_projection(
+        &self,
+        operations: &[AuthorityEntityProjection],
+    ) -> Result<PreparedAuthorityProjection, MultiPeerAuthorityError> {
+        let mut aoi = self.aoi.clone();
+        let mut deltas = Vec::new();
+        let mut overrides = Vec::new();
+        let mut events = Vec::new();
+        let mut required = BTreeMap::<PeerId, usize>::new();
+        let mut touched = BTreeSet::new();
+        for operation in operations {
+            match operation {
+                AuthorityEntityProjection::Upsert {
+                    entity_id,
+                    position,
+                    snapshot,
+                } => {
+                    let changed = aoi.upsert_entity(*entity_id, *position)?;
+                    for delta in changed {
+                        touched.insert(delta.peer_id);
+                        *required.entry(delta.peer_id).or_default() += 1;
+                        if delta.entered.contains(entity_id) {
+                            // The enter delta itself carries the snapshot;
+                            // record an override without enqueueing a duplicate
+                            // standalone update event.
+                            overrides.push((
+                                delta.peer_id,
+                                *entity_id,
+                                delta.revision,
+                                snapshot.clone(),
+                            ));
+                        }
+                        events.push((delta.peer_id, PendingAoiEvent::Delta(delta.clone())));
+                        deltas.push(delta);
+                    }
+                }
+                AuthorityEntityProjection::Remove { entity_id } => {
+                    let changed = aoi.remove_entity(*entity_id)?;
+                    for delta in changed {
+                        touched.insert(delta.peer_id);
+                        *required.entry(delta.peer_id).or_default() += 1;
+                        events.push((delta.peer_id, PendingAoiEvent::Delta(delta.clone())));
+                        deltas.push(delta);
+                    }
+                }
+                AuthorityEntityProjection::Update {
+                    entity_id,
+                    snapshot,
+                } => {
+                    for peer_id in aoi.viewers(*entity_id) {
+                        touched.insert(peer_id);
+                        *required.entry(peer_id).or_default() += 1;
+                        let revision = aoi.peer_revision(peer_id)?;
+                        overrides.push((peer_id, *entity_id, revision, snapshot.clone()));
+                        events.push((
+                            peer_id,
+                            PendingAoiEvent::EntityUpdate {
+                                entity_id: *entity_id,
+                                revision,
+                            },
+                        ));
+                    }
+                }
+            }
+        }
+        for (peer_id, needed) in required {
+            let peer = self
+                .peers
+                .get(&peer_id)
+                .ok_or(MultiPeerAuthorityError::UnknownPeer { peer_id })?;
+            if peer
+                .pending_aoi_events
+                .len()
+                .checked_add(needed)
+                .is_none_or(|length| length > self.config.max_pending_aoi_events_per_peer)
+            {
+                return Err(MultiPeerAuthorityError::PendingQueueFull { peer_id });
+            }
+        }
+        for delta in &deltas {
+            let mut encoded_len = AOI_REPLICATION_HEADER_LEN
+                .checked_add(
+                    delta
+                        .left
+                        .len()
+                        .checked_mul(size_of::<u32>())
+                        .ok_or(MultiPeerAuthorityError::EventCountOverflow)?,
+                )
+                .ok_or(MultiPeerAuthorityError::EventCountOverflow)?;
+            for entity_id in &delta.entered {
+                let snapshot = overrides
+                    .iter()
+                    .find(|(peer_id, candidate, revision, _)| {
+                        *peer_id == delta.peer_id
+                            && *candidate == *entity_id
+                            && *revision == delta.revision
+                    })
+                    .ok_or(MultiPeerAuthorityError::AoiPayloadTooLarge {
+                        actual: usize::MAX,
+                        max: self.config.max_aoi_payload_bytes,
+                    })?;
+                if u32::try_from(snapshot.3.len()).is_err() {
+                    return Err(MultiPeerAuthorityError::AoiPayloadTooLarge {
+                        actual: usize::MAX,
+                        max: self.config.max_aoi_payload_bytes,
+                    });
+                }
+                encoded_len = encoded_len
+                    .checked_add(8)
+                    .and_then(|length| length.checked_add(snapshot.3.len()))
+                    .ok_or(MultiPeerAuthorityError::EventCountOverflow)?;
+            }
+            if encoded_len > self.config.max_aoi_payload_bytes {
+                return Err(MultiPeerAuthorityError::AoiPayloadTooLarge {
+                    actual: encoded_len,
+                    max: self.config.max_aoi_payload_bytes,
+                });
+            }
+        }
+        for (_, _, _, snapshot) in &overrides {
+            if u32::try_from(snapshot.len()).is_err() {
+                return Err(MultiPeerAuthorityError::AoiPayloadTooLarge {
+                    actual: usize::MAX,
+                    max: self.config.max_aoi_payload_bytes,
+                });
+            }
+            let encoded_len = AOI_REPLICATION_HEADER_LEN
+                .checked_add(8)
+                .and_then(|length| length.checked_add(snapshot.len()))
+                .ok_or(MultiPeerAuthorityError::EventCountOverflow)?;
+            if encoded_len > self.config.max_aoi_payload_bytes {
+                return Err(MultiPeerAuthorityError::AoiPayloadTooLarge {
+                    actual: encoded_len,
+                    max: self.config.max_aoi_payload_bytes,
+                });
+            }
+        }
+        Ok(PreparedAuthorityProjection {
+            aoi,
+            deltas,
+            overrides,
+            events,
+            touched,
+        })
+    }
+
+    /// Commit a preflighted entity projection batch and enqueue all resulting
+    /// enter/leave/update snapshots. No capacity or AOI validation remains.
+    fn commit_entity_projection(
+        &mut self,
+        prepared: PreparedAuthorityProjection,
+    ) -> Vec<AuthorityAoiDelta> {
+        let PreparedAuthorityProjection {
+            aoi,
+            deltas,
+            overrides,
+            events,
+            touched,
+        } = prepared;
+        self.aoi = aoi;
+        for (peer_id, entity_id, revision, snapshot) in overrides {
+            let peer = self
+                .peers
+                .get_mut(&peer_id)
+                .expect("prepared update peer remains admitted");
+            peer.snapshot_overrides
+                .entry((entity_id, revision))
+                .or_default()
+                .push_back(snapshot);
+        }
+        // Preserve caller operation order in the per-peer FIFO.
+        for (peer_id, event) in events {
+            self.peers
+                .get_mut(&peer_id)
+                .expect("prepared AOI peers remain admitted")
+                .pending_aoi_events
+                .push_back(event);
+        }
+        for peer_id in touched {
+            self.flush_aoi_events(peer_id);
+        }
+        deltas
+    }
+
+    /// Atomically preflight and enqueue an entity projection batch. On any
+    /// AOI validation or per-peer outbox capacity error, neither the AOI index
+    /// nor its queues change. Successful preflight and commit happen under one
+    /// exclusive borrow of this coordinator, so the candidate cannot go stale.
+    pub fn project_entities_atomic(
+        &mut self,
+        operations: &[AuthorityEntityProjection],
+    ) -> Result<Vec<AuthorityAoiDelta>, MultiPeerAuthorityError> {
+        let prepared = self.prepare_entity_projection(operations)?;
+        Ok(self.commit_entity_projection(prepared))
+    }
+
     /// Remove an entity and dispatch all resulting leave updates.
     pub fn remove_entity(
         &mut self,
@@ -1101,8 +1343,21 @@ impl<S: ServerStrategy> MultiPeerAuthority<S> {
                 return;
             }
             let mut provider_failed = None;
+            let mut consumed_overrides = Vec::new();
             for entity_id in entered_ids {
-                match self.provider.snapshot_entity(peer_id, entity_id, revision) {
+                let provided = self
+                    .peers
+                    .get(&peer_id)
+                    .and_then(|peer| peer.snapshot_overrides.get(&(entity_id, revision)))
+                    .and_then(|snapshots| snapshots.front())
+                    .cloned();
+                if provided.is_some() {
+                    consumed_overrides.push((entity_id, revision));
+                }
+                match provided
+                    .map(Ok)
+                    .unwrap_or_else(|| self.provider.snapshot_entity(peer_id, entity_id, revision))
+                {
                     Ok(bytes) => {
                         let next_len = encoded_len
                             .checked_add(8)
@@ -1132,7 +1387,19 @@ impl<S: ServerStrategy> MultiPeerAuthority<S> {
                 }
             }
             if let Some(entity_id) = updated_id {
-                match self.provider.snapshot_entity(peer_id, entity_id, revision) {
+                let provided = self
+                    .peers
+                    .get(&peer_id)
+                    .and_then(|peer| peer.snapshot_overrides.get(&(entity_id, revision)))
+                    .and_then(|snapshots| snapshots.front())
+                    .cloned();
+                if provided.is_some() {
+                    consumed_overrides.push((entity_id, revision));
+                }
+                match provided
+                    .map(Ok)
+                    .unwrap_or_else(|| self.provider.snapshot_entity(peer_id, entity_id, revision))
+                {
                     Ok(bytes) => {
                         let next_len = encoded_len
                             .checked_add(8)
@@ -1190,6 +1457,14 @@ impl<S: ServerStrategy> MultiPeerAuthority<S> {
                 Ok(_) => {
                     if let Some(peer) = self.peers.get_mut(&peer_id) {
                         peer.pending_aoi_events.pop_front();
+                        for key in consumed_overrides {
+                            if let Some(snapshots) = peer.snapshot_overrides.get_mut(&key) {
+                                snapshots.pop_front();
+                                if snapshots.is_empty() {
+                                    peer.snapshot_overrides.remove(&key);
+                                }
+                            }
+                        }
                         peer.last_provider_error = None;
                         peer.last_aoi_send_error = None;
                     }

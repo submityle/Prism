@@ -67,7 +67,7 @@ pub use ecs::{EcsReplication, EcsReplicationError, EcsReplicationPlugin, Network
 pub use multi_server::{
     decode_authority_aoi_event, decode_authority_aoi_replication_payload,
     encode_authority_aoi_event, encode_authority_aoi_replication_payload, AuthorityAoiEventError,
-    AuthorityAoiReplicationPayload, AuthorityReplicationProvider,
+    AuthorityAoiReplicationPayload, AuthorityEntityProjection, AuthorityReplicationProvider,
     AuthorityReplicationProviderError, EntitySnapshotPayload, InboundAuthorityCommand,
     LeasedAuthorityCommand, MultiPeerAuthority, MultiPeerAuthorityConfig, MultiPeerAuthorityError,
     MultiPeerServerPlugin, PeerId,

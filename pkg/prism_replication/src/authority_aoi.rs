@@ -101,6 +101,7 @@ pub struct AuthorityAoiDelta {
     pub visible: Vec<u32>,
 }
 
+#[derive(Clone)]
 struct PeerInterest {
     center: (f32, f32),
     radius: f32,
@@ -109,6 +110,7 @@ struct PeerInterest {
 }
 
 /// Bounded authority-side AOI index and per-peer subscription state.
+#[derive(Clone)]
 pub struct AuthorityAoi {
     config: AuthorityAoiConfig,
     grid: AoiGrid,

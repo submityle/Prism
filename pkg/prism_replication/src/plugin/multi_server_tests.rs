@@ -2,7 +2,7 @@ use super::*;
 
 use crate::delta::{encode_snapshot, FieldKind, FieldValue, Record};
 use crate::event_log::{MemoryEventLogBackend, ReplayEventLog};
-use crate::plugin::{Replication, ReplicationStrategy};
+use crate::plugin::{AuthorityEntityProjection, Replication, ReplicationStrategy};
 use crate::security::test_support::Provider;
 use crate::transport::memory::InMemoryTransport;
 use alloc::boxed::Box;
@@ -505,6 +505,162 @@ fn leased_commands_remain_queued_until_acknowledged_and_retry_in_fifo_order() {
     assert_eq!(next[0].payload, b"20-b");
     authority.acknowledge_inbound_command(&next[0]).unwrap();
     assert!(authority.lease_inbound_commands(8).unwrap().is_empty());
+}
+
+#[test]
+fn atomic_entity_projection_preflights_total_peer_outbox_demand() {
+    let world = Arc::new(Mutex::new(BTreeMap::new()));
+    let mut atomic = MultiPeerAuthority::new(
+        MultiPeerAuthorityConfig {
+            max_pending_aoi_events_per_peer: 1,
+            ..config()
+        },
+        SharedWorld(world),
+    )
+    .unwrap();
+    let (_client_transport, server_transport) = secure_pair();
+    atomic
+        .admit_peer(
+            10,
+            (0.0, 0.0),
+            5.0,
+            schema(),
+            8,
+            &seed(),
+            AddAuthority,
+            Box::new(server_transport),
+        )
+        .unwrap();
+    assert_eq!(atomic.pending_aoi_events(10), Some(1));
+    let queued = AuthorityEntityProjection::Upsert {
+        entity_id: 7,
+        position: (1.0, 0.0),
+        snapshot: entity_blob(7, 1),
+    };
+    let queued2 = AuthorityEntityProjection::Upsert {
+        entity_id: 8,
+        position: (2.0, 0.0),
+        snapshot: entity_blob(8, 2),
+    };
+    assert!(matches!(
+        atomic.project_entities_atomic(&[queued, queued2]),
+        Err(MultiPeerAuthorityError::PendingQueueFull { peer_id: 10 })
+    ));
+    assert_eq!(atomic.aoi().entity_count(), 0);
+    assert_eq!(atomic.pending_aoi_events(10), Some(1));
+}
+
+#[test]
+fn atomic_projection_uses_supplied_snapshot_and_retains_it_across_send_backpressure() {
+    let world = Arc::new(Mutex::new(BTreeMap::new()));
+    let (client_transport, server_transport) = secure_pair();
+    let mut client =
+        Replication::new(schema(), 8, &seed(), AddClient, Box::new(client_transport)).unwrap();
+    let mut authority = MultiPeerAuthority::new(
+        MultiPeerAuthorityConfig {
+            max_pending_aoi_events_per_peer: 4,
+            ..config()
+        },
+        SharedWorld(world.clone()),
+    )
+    .unwrap();
+    authority
+        .admit_peer(
+            10,
+            (0.0, 0.0),
+            5.0,
+            schema(),
+            8,
+            &seed(),
+            AddAuthority,
+            Box::new(server_transport),
+        )
+        .unwrap();
+
+    let supplied = entity_blob(7, 91);
+    let deltas = authority
+        .project_entities_atomic(&[AuthorityEntityProjection::Upsert {
+            entity_id: 7,
+            position: (1.0, 0.0),
+            snapshot: supplied.clone(),
+        }])
+        .unwrap();
+    assert_eq!(deltas.len(), 1);
+    assert_eq!(authority.pending_aoi_events(10), Some(2));
+    // The reliable send has not been accepted before handshake. A retry after
+    // handshake must use the exact prepared snapshot, not a later provider value.
+    world.lock().unwrap().insert(7, entity_blob(7, 12));
+    for _ in 0..16 {
+        client.pump();
+        authority.pump();
+    }
+    assert!(client.negotiated().is_some());
+    // Consume the initial empty-AOI admission event.
+    assert!(client.recv_event().is_some());
+    authority.pump();
+    let update = decode_authority_aoi_replication_payload(
+        &client.recv_event().expect("preflighted update is retried"),
+        8,
+        1024,
+    )
+    .unwrap();
+    assert_eq!(update.entered[0].bytes, supplied);
+    assert_eq!(authority.pending_aoi_events(10), Some(0));
+}
+
+#[test]
+fn atomic_projection_preserves_mixed_operation_order_per_peer() {
+    let world = Arc::new(Mutex::new(BTreeMap::new()));
+    let (client_transport, server_transport) = secure_pair();
+    let mut client =
+        Replication::new(schema(), 8, &seed(), AddClient, Box::new(client_transport)).unwrap();
+    let mut authority = MultiPeerAuthority::new(config(), SharedWorld(world)).unwrap();
+    authority
+        .admit_peer(
+            10,
+            (0.0, 0.0),
+            5.0,
+            schema(),
+            8,
+            &seed(),
+            AddAuthority,
+            Box::new(server_transport),
+        )
+        .unwrap();
+    for _ in 0..16 {
+        client.pump();
+        authority.pump();
+    }
+    assert!(client.negotiated().is_some());
+    assert!(client.recv_event().is_some()); // admission's empty AOI delta
+
+    authority
+        .project_entities_atomic(&[
+            AuthorityEntityProjection::Upsert {
+                entity_id: 7,
+                position: (1.0, 0.0),
+                snapshot: entity_blob(7, 1),
+            },
+            AuthorityEntityProjection::Update {
+                entity_id: 7,
+                snapshot: entity_blob(7, 2),
+            },
+            AuthorityEntityProjection::Remove { entity_id: 7 },
+        ])
+        .unwrap();
+    for _ in 0..8 {
+        authority.pump();
+        client.pump();
+    }
+    let payloads = std::iter::from_fn(|| client.recv_event())
+        .map(|bytes| decode_authority_aoi_replication_payload(&bytes, 8, 1024).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(payloads.len(), 3);
+    assert_eq!(payloads[0].entered[0].bytes, entity_blob(7, 1));
+    assert_eq!(payloads[1].updated[0].bytes, entity_blob(7, 2));
+    assert_eq!(payloads[2].left, vec![7]);
+    assert_eq!(payloads[0].revision, payloads[1].revision);
+    assert!(payloads[1].revision < payloads[2].revision);
 }
 
 #[test]
