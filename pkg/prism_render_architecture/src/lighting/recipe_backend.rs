@@ -76,6 +76,7 @@ pub enum RecipeBackendError {
     ShadowSlotCountMismatch,
     ShadowSlotsRequired,
     ShadowSlotsForbidden,
+    InvalidGiCandidate { index: usize },
     UnsupportedRecipe,
 }
 
@@ -190,6 +191,23 @@ pub fn execute_world_restir(
 ) -> Result<WorldRestirOutput, RecipeBackendError> {
     if recipe != RecipeId::WorldRestir {
         return Err(RecipeBackendError::UnsupportedRecipe);
+    }
+    let candidate_count = candidates
+        .len()
+        .min(usize::from(budget.initial_candidates));
+    for (index, candidate) in candidates[..candidate_count].iter().enumerate() {
+        let sample = candidate.sample;
+        let finite = candidate.target_pdf.is_finite()
+            && candidate.source_pdf.is_finite()
+            && sample.sample_point.iter().all(|value| value.is_finite())
+            && sample.sample_normal.iter().all(|value| value.is_finite())
+            && sample.radiance.iter().all(|value| value.is_finite());
+        let nonnegative = candidate.target_pdf >= 0.0
+            && candidate.source_pdf >= 0.0
+            && sample.radiance.iter().all(|value| *value >= 0.0);
+        if !finite || !nonnegative {
+            return Err(RecipeBackendError::InvalidGiCandidate { index });
+        }
     }
     let mut rng = Rng::new(seed);
     let mut reservoir = stream_initial_gi(candidates, budget, &mut rng);
@@ -482,5 +500,51 @@ mod tests {
                 first.reservoir.sample.radiance[2] * first.reservoir.w,
             ]
         );
+    }
+
+    #[test]
+    fn world_restir_rejects_non_finite_or_negative_candidates_before_resampling() {
+        let candidate = GiCandidate {
+            sample: super::super::restir_gi::GiSample {
+                sample_point: [0.0, 0.0, 1.0],
+                sample_normal: [0.0, 0.0, -1.0],
+                radiance: [f32::NAN, 1.0, 1.0],
+            },
+            target_pdf: 1.0,
+            source_pdf: 1.0,
+        };
+        let error = execute_world_restir(
+            RecipeId::WorldRestir,
+            &[candidate],
+            ReservoirBudget {
+                initial_candidates: 1,
+                ..ReservoirBudget::default()
+            },
+            0,
+        )
+        .expect_err("non-finite radiance must not poison the reservoir");
+        assert_eq!(error, RecipeBackendError::InvalidGiCandidate { index: 0 });
+    }
+
+    #[test]
+    fn world_restir_does_not_inspect_candidates_outside_the_budget() {
+        let invalid_unused = GiCandidate {
+            sample: super::super::restir_gi::GiSample {
+                sample_point: [0.0, 0.0, 1.0],
+                sample_normal: [0.0, 0.0, 1.0],
+                radiance: [-1.0, 0.0, 0.0],
+            },
+            target_pdf: 1.0,
+            source_pdf: 1.0,
+        };
+        let output = execute_world_restir(
+            RecipeId::WorldRestir,
+            &[invalid_unused],
+            ReservoirBudget::default(),
+            0,
+        )
+        .expect("unconsumed candidate is outside this execution");
+        assert!(output.reservoir.is_empty());
+        assert_eq!(output.radiance, [0.0; 3]);
     }
 }
