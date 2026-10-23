@@ -78,6 +78,11 @@ impl AoiGrid {
         self.positions.get(&id).copied()
     }
 
+    /// Iterate tracked entities in ascending stable-id order.
+    pub fn entries(&self) -> impl Iterator<Item = (u32, (f32, f32))> + '_ {
+        self.positions.iter().map(|(&id, &position)| (id, position))
+    }
+
     /// Insert or move `id` to `(x, z)`.
     ///
     /// Re-inserting an existing id moves it (its old cell is vacated).

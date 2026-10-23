@@ -533,6 +533,8 @@ M5 identity mapping 增量（2026-10-23）：`ReplicationMapping` 将稳定 `Ent
 M5 World→AOI adapter 增量（2026-10-23）：可选 `EcsAoiProjectionPlugin` 通过项目提供的 source 分别取得稳定网络 ID、AOI 二维位置与完整快照；具体 ECS component 类型由宿主显式 `track_component<T>` 跟踪插入/修改（`Changed<T>` coalesced observer）及移除（lifecycle observer），其他系统/命令可调用 `mark_aoi_entity_dirty`。adapter 在 `FixedPostUpdate` 投影前 flush Changed observers，确保变更在本 tick 进入 dirty queue。dirty handle 以有界 FIFO+BTreeSet 去重，adapter 按每 tick 数量上限采样；快照采样或 AOI/outbox 批量提交失败时保留队列，backpressure 时由原子投影留存的 snapshot override 固定 wire payload。stable network ID 在 adapter 内必须对本地 generation-bearing Entity 唯一；身份释放先于同批新身份 claim，允许确定性的 ID swap，冲突整批拒绝并保留 dirty 队列。队列溢出转为 sticky halted 状态并暴露 `EcsAoiProjectionStatus`，不静默丢更新；宿主完成全量实体核对后可调用 `rebuild_aoi_projection_queue`，以有界 live Entity 与已发布 Entity 并集重建 dirty 队列，容量不够会拒绝并继续 halt。scene/dynamic identity、坐标系和复制 schema 仍由项目定义。本机制不回滚 World 写入，也不提供 World/AOI/outbox 崩溃恢复。
 故障边界增量（2026-10-23）：source 回调 panic 时，adapter 在恢复 panic 前先把临时移出 World 的 authority、projection state、dirty queue 与 status resource 放回；panic 本身仍按宿主策略传播，不伪装成成功投影。注入 snapshot panic 的测试验证 authority/AOI 不变、dirty 项仍在，后续 fixed tick 可重试成功。进一步发现并修复 replication snapshot provider panic：AOI 已提交后，provider panic 现在转成可查询的 `ProviderPanicked`，pending event 保留并由后续 pump 重试；回归测试验证 AOI 只提交一次、事件最终送达。该保护是内存内 panic safety，不是进程崩溃后的 World/AOI/outbox 持久化事务。
 
+AOI 恢复基础（2026-10-23）：`AuthorityAoi::snapshot/restore` 导出并校验有序 entity position、peer view、visible set、revision 与完整配置；restore 对配置变化、容量越界、重复/乱序 ID、非法坐标/视图以及与空间索引不一致的 visible set fail-closed。该 API 尚未接入 MultiPeer journal，也不持久化 peer outbox 或 World；不能据此宣称 M5 崩溃恢复完成。Round-trip 与篡改快照拒绝测试通过。
+
 ### 25.4 多世界各持独立 time 时间域
 
 App 多世界（§24.9）与 ECS 多 World（ECS §16）协同时，每个 World 持**独立时间上下文**（time §24.8）：主世界、编辑器预览世界、服务器子应用世界互不干扰（一个暂停不冻结另一个），经子应用隔离。

@@ -67,6 +67,8 @@ pub enum AuthorityAoiError {
     UnknownPeer,
     /// A per-peer subscription revision cannot advance further.
     RevisionExhausted,
+    /// A persisted AOI snapshot is malformed, inconsistent, or exceeds bounds.
+    InvalidSnapshot,
 }
 
 impl core::fmt::Display for AuthorityAoiError {
@@ -81,9 +83,40 @@ impl core::fmt::Display for AuthorityAoiError {
             Self::PeerAlreadyAdmitted => "authority AOI peer is already admitted",
             Self::UnknownPeer => "authority AOI peer is not admitted",
             Self::RevisionExhausted => "authority AOI peer revision is exhausted",
+            Self::InvalidSnapshot => "authority AOI snapshot is invalid",
         };
         formatter.write_str(message)
     }
+}
+
+/// Stable, transport-independent snapshot of an authority AOI index.
+///
+/// The vectors are emitted in ascending ID order. Restore validates the saved
+/// visible sets against the saved entity positions and view parameters instead
+/// of silently recomputing a potentially different subscription state.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AuthorityAoiSnapshot {
+    /// Configuration that bounded and shaped this AOI state.
+    pub config: AuthorityAoiConfig,
+    /// Tracked entities as `(stable_id, (x, z))` pairs.
+    pub entities: Vec<(u32, (f32, f32))>,
+    /// Active peer subscriptions in ascending peer-id order.
+    pub peers: Vec<AuthorityAoiPeerSnapshot>,
+}
+
+/// One peer's saved AOI view.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AuthorityAoiPeerSnapshot {
+    /// Stable caller-owned peer identity.
+    pub peer_id: u64,
+    /// Saved view centre.
+    pub center: (f32, f32),
+    /// Saved view radius.
+    pub radius: f32,
+    /// Saved visible entity IDs in ascending order.
+    pub visible: Vec<u32>,
+    /// Monotonic subscription revision, never zero for an admitted peer.
+    pub revision: u64,
 }
 
 /// The deterministic subscription delta for one authority peer.
@@ -155,6 +188,86 @@ impl AuthorityAoi {
     #[must_use]
     pub fn entity_count(&self) -> usize {
         self.grid.len()
+    }
+
+    /// Export the complete bounded AOI state in deterministic ID order.
+    #[must_use]
+    pub fn snapshot(&self) -> AuthorityAoiSnapshot {
+        AuthorityAoiSnapshot {
+            config: self.config,
+            entities: self.grid.entries().collect(),
+            peers: self
+                .peers
+                .iter()
+                .map(|(&peer_id, peer)| AuthorityAoiPeerSnapshot {
+                    peer_id,
+                    center: peer.center,
+                    radius: peer.radius,
+                    visible: peer.visible.iter().copied().collect(),
+                    revision: peer.revision,
+                })
+                .collect(),
+        }
+    }
+
+    /// Restore a saved AOI state only when its configuration matches the
+    /// caller's current limits and every persisted view is internally
+    /// consistent with the saved spatial index.
+    pub fn restore(
+        snapshot: AuthorityAoiSnapshot,
+        expected_config: AuthorityAoiConfig,
+    ) -> Result<Self, AuthorityAoiError> {
+        if snapshot.config != expected_config
+            || snapshot.entities.len() > expected_config.max_entities
+            || snapshot.peers.len() > expected_config.max_peers
+        {
+            return Err(AuthorityAoiError::InvalidSnapshot);
+        }
+
+        let mut restored = Self::new(expected_config)?;
+        let mut previous_entity = None;
+        for (entity_id, position) in snapshot.entities {
+            if previous_entity.is_some_and(|previous| previous >= entity_id)
+                || !position.0.is_finite()
+                || !position.1.is_finite()
+            {
+                return Err(AuthorityAoiError::InvalidSnapshot);
+            }
+            previous_entity = Some(entity_id);
+            restored
+                .grid
+                .insert(entity_id, position.0, position.1)
+                .map_err(|_| AuthorityAoiError::InvalidSnapshot)?;
+        }
+
+        let mut previous_peer = None;
+        for peer_snapshot in snapshot.peers {
+            if previous_peer.is_some_and(|previous| previous >= peer_snapshot.peer_id)
+                || peer_snapshot.revision == 0
+                || peer_snapshot.visible.len() > expected_config.max_entities_per_peer
+                || peer_snapshot.visible.windows(2).any(|ids| ids[0] >= ids[1])
+            {
+                return Err(AuthorityAoiError::InvalidSnapshot);
+            }
+            previous_peer = Some(peer_snapshot.peer_id);
+            restored
+                .validate_view(peer_snapshot.center, peer_snapshot.radius)
+                .map_err(|_| AuthorityAoiError::InvalidSnapshot)?;
+            let visible: BTreeSet<u32> = peer_snapshot.visible.into_iter().collect();
+            if visible != restored.visible_set(peer_snapshot.center, peer_snapshot.radius) {
+                return Err(AuthorityAoiError::InvalidSnapshot);
+            }
+            restored.peers.insert(
+                peer_snapshot.peer_id,
+                PeerInterest {
+                    center: peer_snapshot.center,
+                    radius: peer_snapshot.radius,
+                    visible,
+                    revision: peer_snapshot.revision,
+                },
+            );
+        }
+        Ok(restored)
     }
 
     /// Return the current viewers of an indexed entity in deterministic
@@ -425,5 +538,80 @@ mod tests {
         assert!(updates[0].visible.is_empty());
         assert!(aoi.remove_entity(1).unwrap().is_empty());
         assert_eq!(aoi.entity_count(), 0);
+    }
+
+    #[test]
+    fn snapshot_round_trips_exact_bounded_spatial_and_subscription_state() {
+        let mut original = aoi();
+        original.admit_peer(20, (0.0, 0.0), 5.0).unwrap();
+        original.admit_peer(10, (30.0, 0.0), 5.0).unwrap();
+        original.upsert_entity(9, (1.0, 0.0)).unwrap();
+        original.upsert_entity(3, (31.0, 0.0)).unwrap();
+        original.update_peer(20, (1.0, 0.0), 6.0).unwrap();
+
+        let snapshot = original.snapshot();
+        assert_eq!(snapshot.entities, vec![(3, (31.0, 0.0)), (9, (1.0, 0.0))]);
+        assert_eq!(
+            snapshot
+                .peers
+                .iter()
+                .map(|peer| peer.peer_id)
+                .collect::<Vec<_>>(),
+            vec![10, 20]
+        );
+        let restored = AuthorityAoi::restore(snapshot, original.config()).unwrap();
+        assert_eq!(restored.snapshot(), original.snapshot());
+        assert_eq!(restored.viewers(9), vec![20]);
+        assert_eq!(restored.viewers(3), vec![10]);
+    }
+
+    #[test]
+    fn restore_rejects_configuration_or_visible_set_mismatch() {
+        let mut original = aoi();
+        original.admit_peer(1, (0.0, 0.0), 5.0).unwrap();
+        original.upsert_entity(7, (1.0, 0.0)).unwrap();
+        let canonical = original.snapshot();
+
+        let mut mismatched_config = canonical.clone();
+        mismatched_config.config.cell_size = 5.0;
+        assert_eq!(
+            AuthorityAoi::restore(mismatched_config, original.config()).err(),
+            Some(AuthorityAoiError::InvalidSnapshot)
+        );
+
+        let mut mismatched_view = canonical.clone();
+        mismatched_view.peers[0].visible.clear();
+        assert_eq!(
+            AuthorityAoi::restore(mismatched_view, original.config()).err(),
+            Some(AuthorityAoiError::InvalidSnapshot)
+        );
+
+        let mut duplicate_entity = canonical.clone();
+        duplicate_entity.entities.push(duplicate_entity.entities[0]);
+        assert_eq!(
+            AuthorityAoi::restore(duplicate_entity, original.config()).err(),
+            Some(AuthorityAoiError::InvalidSnapshot)
+        );
+
+        let mut non_finite_entity = canonical.clone();
+        non_finite_entity.entities[0].1 .0 = f32::NAN;
+        assert_eq!(
+            AuthorityAoi::restore(non_finite_entity, original.config()).err(),
+            Some(AuthorityAoiError::InvalidSnapshot)
+        );
+
+        let mut zero_revision = canonical.clone();
+        zero_revision.peers[0].revision = 0;
+        assert_eq!(
+            AuthorityAoi::restore(zero_revision, original.config()).err(),
+            Some(AuthorityAoiError::InvalidSnapshot)
+        );
+
+        let mut duplicate_peer = canonical;
+        duplicate_peer.peers.push(duplicate_peer.peers[0].clone());
+        assert_eq!(
+            AuthorityAoi::restore(duplicate_peer, original.config()).err(),
+            Some(AuthorityAoiError::InvalidSnapshot)
+        );
     }
 }
