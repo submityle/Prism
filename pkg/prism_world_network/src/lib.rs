@@ -34,9 +34,10 @@ pub use server_mesh::{
     ServerMesh, ServerMeshConfig, ServerMeshNode, ServerMeshSnapshot,
 };
 pub use session::{
-    AuthToken, ByteFlushError, ByteReceiveError, FlushError, FlushReport, MemoryTransport,
-    MemoryTransportError, ReceiveError, ReceiveOutcome, Session, SessionConfig, SessionConfigError,
-    SessionError, SessionId, SessionState, Transport, TransportPacket, WorldMessage,
+    AuthToken, ByteFlushError, ByteReceiveError, ByteStreamReceiveError, ByteStreamReceiveStatus,
+    FlushError, FlushReport, MemoryTransport, MemoryTransportError, ReceiveError, ReceiveOutcome,
+    Session, SessionConfig, SessionConfigError, SessionError, SessionId, SessionState, Transport,
+    TransportPacket, WorldMessage,
 };
 pub use wire::{
     decode_packet, encode_packet, ByteFrameDecoder, ByteTransport, FrameDecodeStatus,

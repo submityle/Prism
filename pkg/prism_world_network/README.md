@@ -48,6 +48,11 @@ contract.
   beyond the configured retained-byte budget, then pass each returned frame to
   `decode_packet`. It is framing only: it does not authenticate, decrypt,
   retry, or interpret application messages.
+- `Session::receive_stream_chunk` composes that decoder with session admission
+  while consuming at most one frame per call. Hosts drain additional frames by
+  calling it with an empty chunk, so application delivery remains bounded and
+  backpressure can be applied between messages. Framing, codec, and session
+  errors remain separate; no socket or QUIC implementation is hidden here.
 - `ServerMesh` owns bounded partition-authority metadata only. It fences old
   authorities with `(authority, epoch, lease)` matching, reserves target
   capacity during prepare, and rechecks the source fence during commit.

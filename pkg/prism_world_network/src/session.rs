@@ -10,7 +10,10 @@ use alloc::rc::Rc;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
-use crate::wire::{decode_packet, encode_packet, ByteTransport, WireCodecError};
+use crate::wire::{
+    decode_packet, encode_packet, ByteFrameDecoder, ByteTransport, FrameDecodeStatus,
+    FrameDecoderError, WireCodecError,
+};
 use crate::{AoiSubscription, AuthorityPolicy, DeltaEnvelope, PermissionError, SubscriptionId};
 use prism_world_persist::ActorId;
 
@@ -324,6 +327,26 @@ pub enum ByteReceiveError<E> {
     Session(ReceiveError),
 }
 
+/// Result of feeding one arbitrary stream chunk to a session.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ByteStreamReceiveStatus {
+    /// The decoder retained the bytes but does not yet have a complete frame.
+    NeedMore,
+    /// One complete frame was decoded and accepted by the session.
+    Received(ReceiveOutcome),
+}
+
+/// Failures while framing and accepting one stream chunk.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ByteStreamReceiveError {
+    /// The stream decoder rejected the chunk before mutating its retained bytes.
+    Framing(FrameDecoderError),
+    /// A complete frame failed the PWN1 application codec.
+    Codec(WireCodecError),
+    /// The decoded packet failed session validation or ordering.
+    Session(ReceiveError),
+}
+
 /// Result of accepting one packet.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ReceiveOutcome {
@@ -620,6 +643,34 @@ impl Session {
             .map_err(ByteReceiveError::Session)
     }
 
+    /// Feeds one arbitrary stream chunk and accepts at most one complete frame.
+    ///
+    /// A caller receiving several frames in one read should call this method
+    /// again with an empty chunk until it returns [`ByteStreamReceiveStatus::NeedMore`].
+    /// This one-frame contract keeps result storage bounded and lets the host
+    /// apply backpressure between application messages. Framing errors occur
+    /// before the decoder buffer changes; codec and session errors do not advance
+    /// this session's receive sequence or ACK state.
+    pub fn receive_stream_chunk(
+        &mut self,
+        decoder: &mut ByteFrameDecoder,
+        chunk: &[u8],
+    ) -> Result<ByteStreamReceiveStatus, ByteStreamReceiveError> {
+        decoder
+            .push(chunk)
+            .map_err(ByteStreamReceiveError::Framing)?;
+        let FrameDecodeStatus::Frame(frame) = decoder
+            .next_frame()
+            .map_err(ByteStreamReceiveError::Framing)?
+        else {
+            return Ok(ByteStreamReceiveStatus::NeedMore);
+        };
+        let packet = decode_packet(&frame).map_err(ByteStreamReceiveError::Codec)?;
+        self.receive(packet)
+            .map(ByteStreamReceiveStatus::Received)
+            .map_err(ByteStreamReceiveError::Session)
+    }
+
     fn receive_ack(&mut self, sequence: u64) -> Result<ReceiveOutcome, ReceiveError> {
         if sequence == 0 || sequence > self.highest_sent_sequence {
             return Err(ReceiveError::InvalidAck {
@@ -891,6 +942,49 @@ mod tests {
         ));
         assert_eq!(receiver.pending_ack, None);
         assert_eq!(receiver.next_receive_sequence, 1);
+    }
+
+    #[test]
+    fn stream_chunk_delivers_at_most_one_frame_and_empty_chunks_drain_tail() {
+        let mut sender = session(13, 7, 4, 10);
+        let mut receiver = session(13, 8, 4, 10);
+        sender.authenticate(AuthToken(0xfeed)).unwrap();
+        receiver.authenticate(AuthToken(0xfeed)).unwrap();
+        for id in [31, 32] {
+            sender
+                .send(WorldMessage::Subscribe(subscription(id, 7)))
+                .unwrap();
+        }
+        let (mut tx, mut rx) = crate::MemoryByteTransport::pair(4).unwrap();
+        sender.flush_bytes(&mut tx, 0).unwrap();
+        let first = rx.try_recv_bytes().unwrap().unwrap();
+        let second = rx.try_recv_bytes().unwrap().unwrap();
+        let mut chunk = first;
+        chunk.extend_from_slice(&second);
+        let max_frame = second.len();
+        let mut decoder = ByteFrameDecoder::new(max_frame).unwrap();
+        assert!(matches!(
+            receiver.receive_stream_chunk(&mut decoder, &chunk),
+            Err(ByteStreamReceiveError::Framing(
+                FrameDecoderError::BufferLimitExceeded { .. }
+            ))
+        ));
+        assert_eq!(decoder.buffered_len(), 0);
+
+        let mut decoder = ByteFrameDecoder::new(chunk.len()).unwrap();
+        assert!(matches!(
+            receiver.receive_stream_chunk(&mut decoder, &chunk).unwrap(),
+            ByteStreamReceiveStatus::Received(ReceiveOutcome::Delivered { sequence: 1, .. })
+        ));
+        assert!(matches!(
+            receiver.receive_stream_chunk(&mut decoder, &[]).unwrap(),
+            ByteStreamReceiveStatus::Received(ReceiveOutcome::Delivered { sequence: 2, .. })
+        ));
+        assert_eq!(
+            receiver.receive_stream_chunk(&mut decoder, &[]).unwrap(),
+            ByteStreamReceiveStatus::NeedMore
+        );
+        assert_eq!(decoder.buffered_len(), 0);
     }
 
     #[test]
