@@ -26,7 +26,7 @@ use crate::sequence::{Delivery, DeliveryWindow};
 /// The sender half of a reliable ordered channel.
 #[derive(Clone, Debug)]
 pub struct ReliableSender {
-    next_seq: u64,
+    next_seq: Option<u64>,
     window: usize,
     min_rto: u32,
     rto: u32,
@@ -53,7 +53,7 @@ impl ReliableSender {
     pub fn new(min_rto: u32, window: usize) -> Self {
         let min_rto = min_rto.max(1);
         Self {
-            next_seq: 0,
+            next_seq: Some(0),
             window: window.max(1),
             min_rto,
             rto: min_rto,
@@ -67,11 +67,11 @@ impl ReliableSender {
     /// number — or `None` when the send window is already full (the caller should
     /// retry once acknowledgements return; see [`is_full`](Self::is_full)).
     pub fn send(&mut self, payload: Vec<u8>) -> Option<u64> {
-        if self.is_full() {
+        if self.is_full() || self.next_seq.is_none() {
             return None;
         }
-        let seq = self.next_seq;
-        self.next_seq = self.next_seq.wrapping_add(1);
+        let seq = self.next_seq.expect("sequence availability checked");
+        self.next_seq = seq.checked_add(1);
         self.queued.push_back((seq, payload));
         Some(seq)
     }
@@ -343,7 +343,7 @@ mod tests {
     #[test]
     fn sequences_past_the_u32_range_stay_distinct() {
         let mut sender = ReliableSender::new(2, 4);
-        sender.next_seq = u64::from(u32::MAX) + 1;
+        sender.next_seq = Some(u64::from(u32::MAX) + 1);
         assert_eq!(sender.send(b"p".to_vec()), Some(u64::from(u32::MAX) + 1));
         assert_eq!(sender.send(b"q".to_vec()), Some(u64::from(u32::MAX) + 2));
 
@@ -356,6 +356,19 @@ mod tests {
         assert!(sender.ack(u64::from(u32::MAX) + 1, 1));
         assert!(sender.ack(u64::from(u32::MAX) + 2, 1));
         assert_eq!(sender.unacked(), 0);
+    }
+
+    #[test]
+    fn sequence_exhaustion_never_reuses_a_reliable_packet_id() {
+        let mut sender = ReliableSender::new(2, 4);
+        sender.next_seq = Some(u64::MAX);
+        assert_eq!(sender.send(b"last".to_vec()), Some(u64::MAX));
+        assert_eq!(sender.next_seq, None);
+        assert_eq!(sender.send(b"must not wrap".to_vec()), None);
+        assert_eq!(sender.unacked(), 1);
+        let mut outgoing = Vec::new();
+        sender.tick(0, &mut outgoing);
+        assert_eq!(outgoing, vec![(u64::MAX, b"last".to_vec())]);
     }
 
     /// End-to-end over a lossy, jittery link: every message is delivered exactly

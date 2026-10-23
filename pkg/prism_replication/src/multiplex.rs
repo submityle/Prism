@@ -255,6 +255,8 @@ pub enum MuxSendError {
     Backpressured(NetChannel),
     /// The local RPC call identity space is exhausted and cannot safely wrap.
     RpcIdentityExhausted,
+    /// An unreliable channel exhausted its never-reused packet sequence space.
+    SequenceExhausted(NetChannel),
 }
 
 /// Result of accepting unreliable traffic.
@@ -302,12 +304,29 @@ impl ReliableLane {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 struct UnreliableLane {
-    next_send: u64,
+    next_send: Option<u64>,
     newest_received: Option<u64>,
-    pending: VecDeque<Vec<u8>>,
+    pending: VecDeque<(u64, Vec<u8>)>,
     inbound: VecDeque<Vec<u8>>,
+}
+
+impl Default for UnreliableLane {
+    fn default() -> Self {
+        Self {
+            next_send: Some(0),
+            newest_received: None,
+            pending: VecDeque::new(),
+            inbound: VecDeque::new(),
+        }
+    }
+}
+
+impl UnreliableLane {
+    fn next_sequence(&self) -> Option<u64> {
+        self.next_send
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -462,6 +481,19 @@ impl<D: Transport> ChannelMux<D> {
             .saturating_sub(HEADER_LEN.saturating_add(self.datagram.security_overhead()))
     }
 
+    fn reserve_unreliable_sequence(&mut self, channel: NetChannel) -> Result<u64, MuxSendError> {
+        let lane = match channel {
+            NetChannel::StateUnreliable => &mut self.state,
+            NetChannel::InputUnreliable => &mut self.input,
+            _ => unreachable!("only unreliable channels own this sequence"),
+        };
+        let Some(sequence) = lane.next_send else {
+            return Err(MuxSendError::SequenceExhausted(channel));
+        };
+        lane.next_send = sequence.checked_add(1);
+        Ok(sequence)
+    }
+
     /// Queue a message. Reliable queues apply explicit bounded backpressure;
     /// state keeps only the newest unsent snapshot, and input keeps a short
     /// bounded tail while discarding the oldest input first.
@@ -470,6 +502,14 @@ impl<D: Transport> ChannelMux<D> {
         channel: NetChannel,
         payload: &[u8],
     ) -> Result<QueueOutcome, MuxSendError> {
+        let sequence_available = match channel {
+            NetChannel::StateUnreliable => self.state.next_sequence().is_some(),
+            NetChannel::InputUnreliable => self.input.next_sequence().is_some(),
+            _ => true,
+        };
+        if !sequence_available {
+            return Err(MuxSendError::SequenceExhausted(channel));
+        }
         if payload.len() > self.max_payload() {
             return Err(MuxSendError::TooLarge {
                 len: payload.len(),
@@ -491,8 +531,9 @@ impl<D: Transport> ChannelMux<D> {
 
         match channel {
             NetChannel::StateUnreliable => {
+                let seq = self.reserve_unreliable_sequence(channel)?;
                 let replaced = self.state.pending.pop_back().is_some();
-                self.state.pending.push_back(payload.to_vec());
+                self.state.pending.push_back((seq, payload.to_vec()));
                 self.telemetry.record_accepted(NetChannel::StateUnreliable);
                 if replaced {
                     self.stats.unreliable_dropped = self.stats.unreliable_dropped.saturating_add(1);
@@ -504,6 +545,7 @@ impl<D: Transport> ChannelMux<D> {
                 }
             }
             NetChannel::InputUnreliable => {
+                let seq = self.reserve_unreliable_sequence(channel)?;
                 let replaced = if self.input.pending.len() >= self.config.input_queue {
                     self.input.pending.pop_front();
                     self.stats.unreliable_dropped = self.stats.unreliable_dropped.saturating_add(1);
@@ -513,7 +555,7 @@ impl<D: Transport> ChannelMux<D> {
                 } else {
                     false
                 };
-                self.input.pending.push_back(payload.to_vec());
+                self.input.pending.push_back((seq, payload.to_vec()));
                 self.telemetry.record_accepted(NetChannel::InputUnreliable);
                 Ok(if replaced {
                     QueueOutcome::ReplacedOlder
@@ -529,6 +571,14 @@ impl<D: Transport> ChannelMux<D> {
     /// connection. Reliable channels report bounded-queue backpressure;
     /// unreliable channels always accept by replacing expendable older data.
     pub fn check_send(&self, channel: NetChannel, payload_len: usize) -> Result<(), MuxSendError> {
+        let sequence_available = match channel {
+            NetChannel::StateUnreliable => self.state.next_sequence().is_some(),
+            NetChannel::InputUnreliable => self.input.next_sequence().is_some(),
+            _ => true,
+        };
+        if !sequence_available {
+            return Err(MuxSendError::SequenceExhausted(channel));
+        }
         if payload_len > self.max_payload() {
             return Err(MuxSendError::TooLarge {
                 len: payload_len,
@@ -872,7 +922,7 @@ impl<D: Transport> ChannelMux<D> {
                     NetChannel::StateUnreliable => &mut self.state,
                     _ => unreachable!(),
                 };
-                let Some(payload) = lane.pending.front() else {
+                let Some((_, payload)) = lane.pending.front() else {
                     break;
                 };
                 let wire_len = HEADER_LEN
@@ -888,9 +938,7 @@ impl<D: Transport> ChannelMux<D> {
                     }
                     break;
                 }
-                let payload = lane.pending.pop_front().expect("front existed");
-                let seq = lane.next_send;
-                lane.next_send = lane.next_send.wrapping_add(1);
+                let (seq, payload) = lane.pending.pop_front().expect("front existed");
                 let packet = encode_packet(KIND_DATA, channel, seq, &payload);
                 self.datagram.send(&packet);
                 self.stats.datagrams_sent = self.stats.datagrams_sent.saturating_add(1);
@@ -1009,6 +1057,22 @@ mod tests {
         assert_eq!(b.recv(NetChannel::StateUnreliable), Some(b"new".to_vec()));
         assert_eq!(b.recv(NetChannel::StateUnreliable), None);
         assert_eq!(a.stats().unreliable_dropped, 1);
+    }
+
+    #[test]
+    fn unreliable_sequence_exhaustion_refuses_without_mutating_queue() {
+        let mut mux = ChannelMux::new(MockTransport::default(), MuxConfig::default());
+        mux.input.next_send = None;
+        let before = mux.queued(NetChannel::InputUnreliable);
+        assert_eq!(
+            mux.send(NetChannel::InputUnreliable, b"input"),
+            Err(MuxSendError::SequenceExhausted(NetChannel::InputUnreliable))
+        );
+        assert_eq!(
+            mux.check_send(NetChannel::InputUnreliable, 5),
+            Err(MuxSendError::SequenceExhausted(NetChannel::InputUnreliable))
+        );
+        assert_eq!(mux.queued(NetChannel::InputUnreliable), before);
     }
 
     #[test]
