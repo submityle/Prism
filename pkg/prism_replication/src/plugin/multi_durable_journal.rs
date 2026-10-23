@@ -416,6 +416,7 @@ mod tests {
     struct SharedState {
         inner: MemoryEventLogBackend,
         fail_sync_once: bool,
+        fail_checkpoint_once: bool,
         last_payload: Option<Vec<u8>>,
     }
 
@@ -424,6 +425,7 @@ mod tests {
             Self(Arc::new(Mutex::new(SharedState {
                 inner: MemoryEventLogBackend::new(capacity, LIMITS.max_total_bytes),
                 fail_sync_once: false,
+                fail_checkpoint_once: false,
                 last_payload: None,
             })))
         }
@@ -452,12 +454,16 @@ mod tests {
         }
 
         fn checkpoint(&mut self, entry: &EventLogEntry) -> Option<Result<(), Self::Error>> {
-            self.0
-                .lock()
-                .unwrap()
+            let mut state = self.0.lock().unwrap();
+            let result = state
                 .inner
                 .checkpoint(entry)
-                .map(|result| result.map_err(|_| "checkpoint"))
+                .map(|result| result.map_err(|_| "checkpoint"));
+            if state.fail_checkpoint_once {
+                state.fail_checkpoint_once = false;
+                return Some(Err("checkpoint"));
+            }
+            result
         }
 
         fn replay(
@@ -531,6 +537,35 @@ mod tests {
         let restored = MultiPeerDurableJournal::open(log(backend), state(0), LIMITS).unwrap();
         assert_eq!(restored.state(), &state(19));
         assert_eq!(restored.next_sequence(), 20);
+    }
+
+    #[test]
+    fn ambiguous_checkpoint_failure_retries_the_same_checkpoint_and_candidate() {
+        let backend = SharedBackend::new(3);
+        let shared = backend.0.clone();
+        let mut journal = MultiPeerDurableJournal::open(log(backend), state(0), LIMITS).unwrap();
+        journal.commit(state(1)).unwrap();
+        journal.commit(state(2)).unwrap();
+        shared.lock().unwrap().fail_checkpoint_once = true;
+
+        assert!(matches!(
+            journal.commit(state(3)),
+            Err(MultiPeerJournalError::Backend {
+                operation: MultiPeerJournalOperation::Checkpoint,
+                ..
+            })
+        ));
+        assert_eq!(journal.state(), &state(2));
+        assert_eq!(journal.next_sequence(), 3);
+        let installed = shared.lock().unwrap().inner.start_cursor().next_sequence();
+        assert_eq!(installed, 2);
+
+        journal.commit(state(3)).unwrap();
+        assert_eq!(journal.state(), &state(3));
+        let restored =
+            MultiPeerDurableJournal::open(log(SharedBackend(shared)), state(0), LIMITS).unwrap();
+        assert_eq!(restored.state(), &state(3));
+        assert_eq!(restored.next_sequence(), 4);
     }
 
     #[test]
