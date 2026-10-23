@@ -42,6 +42,7 @@ mod client;
 mod durable;
 mod ecs;
 mod ecs_aoi;
+pub mod multi_durable;
 mod multi_server;
 mod server;
 
