@@ -434,6 +434,8 @@ dematerialize(instance):  // A → C/B,退离
 
 `prism_world_residency::bake_hlod` 已把稳定排序后的 proxy bounds 烘焙为具体的八顶点/三十六索引 AABB proxy mesh，并为每个 representation 生成有限的 bounds、稳定 material key/参数以及 geometry/material/artifact hash；输入、数量、字节预算和数值有效性在分配/发布前检查，失败不返回部分 output。`HlodBakeOutput::artifacts()` 与 `HlodRuntime::insert_bake()` 形成从 bake 到 runtime catalog 的确定性接口，catalog 插入按 cluster/representation/artifact 一次性提交，并可按选中的 asset key 取回 artifact；重复身份或不一致引用不会污染旧 catalog。该产物是 engine-neutral 的可消费代理，不是最终 renderer meshlet/材质系统：尚未替代资产包/流送、GPU buffer residency、Scene/ECS 单体 materialization、产品 renderer graph、跨后端画面和受控帧时验收。
 
+**Runtime catalog 增量插入成本修正（2026-10-23）**：`HlodRuntime::insert_bake` 原先为验证一个新 bake 而克隆整个 live cluster、representation、artifact 三张 `BTreeMap`，导致增量流送更新的时间/峰值内存随已有 catalog 规模增长。现改为只为 incoming delta 分配临时身份数组、排序并验证重复项与交叉引用；所有可返回错误的容量/身份/引用校验及 scratch 预留完成后，再将新项写入 live map。验证复杂度收敛到本批输入的排序/查找和每项树插入，不再复制已有 catalog；单次提交期间的新增 map 节点分配仍由标准分配器处理。隔离 target 上 `cargo test --offline --locked -p prism_world_runtime hlod_runtime` 通过 6/6，覆盖既有 bake 插入、重复身份拒绝后旧条目保留、移除级联和 selection 状态原子性。尚无 catalog 大小×delta 大小的 allocation/时延 A/B 基准；完整 HLOD 产品链路边界见下段，不能因本优化宣称 HierarchicalLod 完成。
+
 当前 HLOD 已能烘焙并 catalog 确定性的 AABB 代理几何与材质参数，但仍未实现完整屏幕空间误差驱动、scene residency/proxy asset streaming、renderer dither/fade，也不实现 §10.4 的单体物化穿透。因此它仍不等同于本章定义的完整 HLOD 产品链路。能力门禁将这一边界显式拆成 `WorldPartitionCapability::HlodSelection`（已支持）与 `WorldPartitionCapability::HierarchicalLod`（仍不支持）；后者必须等资产/驻留、产品渲染提交、屏幕空间切换和物化穿透形成真实集成并完成验收后才能放行。
 
 ---

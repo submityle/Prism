@@ -266,44 +266,96 @@ impl HlodRuntime {
             });
         }
 
-        let mut next_clusters = self.clusters.clone();
-        let mut next_representations = self.representations.clone();
-        let mut next_artifacts = self.artifacts.clone();
+        // Validate only the incoming delta. Cloning the live BTreeMaps here
+        // made every small streaming update O(total catalog size) in both
+        // time and peak memory, despite each bake already being bounded.
+        let mut cluster_ids = Vec::new();
+        cluster_ids
+            .try_reserve_exact(bake.clusters().len())
+            .map_err(|_| HlodRuntimeError::AllocationFailed)?;
         for cluster in bake.clusters() {
-            if next_clusters.contains_key(&cluster.id()) {
+            if self.clusters.contains_key(&cluster.id()) {
                 return Err(HlodRuntimeError::DuplicateCluster {
                     cluster_id: cluster.id(),
                 });
             }
-            next_clusters.insert(cluster.id(), cluster.clone());
+            cluster_ids.push(cluster.id());
         }
+        cluster_ids.sort_unstable();
+        if let Some(pair) = cluster_ids.windows(2).find(|pair| pair[0] == pair[1]) {
+            return Err(HlodRuntimeError::DuplicateCluster {
+                cluster_id: pair[0],
+            });
+        }
+
+        let mut representation_ids = Vec::new();
+        representation_ids
+            .try_reserve_exact(bake.representations().len())
+            .map_err(|_| HlodRuntimeError::AllocationFailed)?;
         for representation in bake.representations() {
-            if next_representations.contains_key(&representation.id()) {
+            if self.representations.contains_key(&representation.id()) {
                 return Err(HlodRuntimeError::DuplicateRepresentation {
                     representation_id: representation.id(),
                 });
             }
-            if !next_clusters.contains_key(&representation.cluster_id()) {
+            let cluster_is_in_bake = cluster_ids
+                .binary_search(&representation.cluster_id())
+                .is_ok();
+            if !cluster_is_in_bake && !self.clusters.contains_key(&representation.cluster_id()) {
                 return Err(HlodRuntimeError::RepresentationClusterMissing {
                     representation_id: representation.id(),
                     cluster_id: representation.cluster_id(),
                 });
             }
-            next_representations.insert(representation.id(), *representation);
+            representation_ids.push(representation.id());
         }
+        representation_ids.sort_unstable();
+        if let Some(pair) = representation_ids
+            .windows(2)
+            .find(|pair| pair[0] == pair[1])
+        {
+            return Err(HlodRuntimeError::DuplicateRepresentation {
+                representation_id: pair[0],
+            });
+        }
+
+        let mut artifact_ids = Vec::new();
+        artifact_ids
+            .try_reserve_exact(bake.artifacts().len())
+            .map_err(|_| HlodRuntimeError::AllocationFailed)?;
         for artifact in bake.artifacts() {
             let representation_id = artifact.representation_id();
-            if next_artifacts.contains_key(&representation_id) {
+            if self.artifacts.contains_key(&representation_id) {
                 return Err(HlodRuntimeError::DuplicateArtifact { representation_id });
             }
-            if !next_representations.contains_key(&representation_id) {
+            let representation_is_in_bake =
+                representation_ids.binary_search(&representation_id).is_ok();
+            if !representation_is_in_bake && !self.representations.contains_key(&representation_id)
+            {
                 return Err(HlodRuntimeError::ArtifactRepresentationMissing { representation_id });
             }
-            next_artifacts.insert(representation_id, artifact.clone());
+            artifact_ids.push(representation_id);
         }
-        self.clusters = next_clusters;
-        self.representations = next_representations;
-        self.artifacts = next_artifacts;
+        artifact_ids.sort_unstable();
+        if let Some(pair) = artifact_ids.windows(2).find(|pair| pair[0] == pair[1]) {
+            return Err(HlodRuntimeError::DuplicateArtifact {
+                representation_id: pair[0],
+            });
+        }
+
+        // All fallible validation and scratch allocation is complete. Publish
+        // the incoming catalog entries only after that point.
+        for cluster in bake.clusters() {
+            self.clusters.insert(cluster.id(), cluster.clone());
+        }
+        for representation in bake.representations() {
+            self.representations
+                .insert(representation.id(), *representation);
+        }
+        for artifact in bake.artifacts() {
+            self.artifacts
+                .insert(artifact.representation_id(), artifact.clone());
+        }
         Ok(())
     }
 
@@ -596,7 +648,7 @@ mod tests {
     }
 
     #[test]
-    fn bake_insert_is_atomic_on_duplicate_catalog_identity() {
+    fn bake_insert_is_atomic_on_duplicate_representation() {
         let bake = bake_hlod(
             HlodBakeConfig::new(1, 1, 1, 1, 9, HlodBakeBudget::new(1, 1, 1, 4096)),
             &[HlodProxyRecord {
