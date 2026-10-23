@@ -19,6 +19,12 @@ use alloc::vec::Vec;
 
 use crate::aoi::{interest_delta, select_within_budget, AoiError, AoiGrid};
 
+const AUTHORITY_AOI_SNAPSHOT_MAGIC: [u8; 4] = *b"PAOI";
+const AUTHORITY_AOI_SNAPSHOT_VERSION: u8 = 1;
+const AUTHORITY_AOI_SNAPSHOT_HEADER_LEN: usize = 4 + 1 + 8 * 3 + 4 * 2 + 8 * 2;
+const AUTHORITY_AOI_ENTITY_RECORD_LEN: usize = 4 + 4 * 2;
+const AUTHORITY_AOI_PEER_RECORD_LEN: usize = 8 + 4 * 3 + 8 + 8;
+
 /// Bounded authority-side AOI configuration.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AuthorityAoiConfig {
@@ -117,6 +123,233 @@ pub struct AuthorityAoiPeerSnapshot {
     pub visible: Vec<u32>,
     /// Monotonic subscription revision, never zero for an admitted peer.
     pub revision: u64,
+}
+
+impl AuthorityAoiSnapshot {
+    /// Encode this snapshot in the canonical, versioned little-endian format.
+    ///
+    /// `max_bytes` is checked before any output allocation. Snapshot encoding
+    /// is intended for checkpoints, not per-frame hot paths.
+    pub fn encode(&self, max_bytes: usize) -> Result<Vec<u8>, AuthorityAoiError> {
+        // Reuse restore's invariant checks so callers cannot persist malformed
+        // public snapshot values as if they were canonical authority state.
+        AuthorityAoi::restore(self.clone(), self.config)?;
+        let entity_count =
+            u64::try_from(self.entities.len()).map_err(|_| AuthorityAoiError::InvalidSnapshot)?;
+        let peer_count =
+            u64::try_from(self.peers.len()).map_err(|_| AuthorityAoiError::InvalidSnapshot)?;
+        let mut encoded_len = AUTHORITY_AOI_SNAPSHOT_HEADER_LEN;
+        encoded_len = encoded_len
+            .checked_add(
+                self.entities
+                    .len()
+                    .checked_mul(AUTHORITY_AOI_ENTITY_RECORD_LEN)
+                    .ok_or(AuthorityAoiError::InvalidSnapshot)?,
+            )
+            .ok_or(AuthorityAoiError::InvalidSnapshot)?;
+        for peer in &self.peers {
+            encoded_len = encoded_len
+                .checked_add(AUTHORITY_AOI_PEER_RECORD_LEN)
+                .and_then(|length| length.checked_add(peer.visible.len().checked_mul(4)?))
+                .ok_or(AuthorityAoiError::InvalidSnapshot)?;
+        }
+        if encoded_len > max_bytes {
+            return Err(AuthorityAoiError::InvalidSnapshot);
+        }
+
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(encoded_len)
+            .map_err(|_| AuthorityAoiError::InvalidSnapshot)?;
+        bytes.extend_from_slice(&AUTHORITY_AOI_SNAPSHOT_MAGIC);
+        bytes.push(AUTHORITY_AOI_SNAPSHOT_VERSION);
+        for limit in [
+            self.config.max_peers,
+            self.config.max_entities,
+            self.config.max_entities_per_peer,
+        ] {
+            bytes.extend_from_slice(
+                &u64::try_from(limit)
+                    .map_err(|_| AuthorityAoiError::InvalidSnapshot)?
+                    .to_le_bytes(),
+            );
+        }
+        bytes.extend_from_slice(&self.config.max_radius.to_bits().to_le_bytes());
+        bytes.extend_from_slice(&self.config.cell_size.to_bits().to_le_bytes());
+        bytes.extend_from_slice(&entity_count.to_le_bytes());
+        bytes.extend_from_slice(&peer_count.to_le_bytes());
+        for &(entity_id, (x, z)) in &self.entities {
+            bytes.extend_from_slice(&entity_id.to_le_bytes());
+            bytes.extend_from_slice(&x.to_bits().to_le_bytes());
+            bytes.extend_from_slice(&z.to_bits().to_le_bytes());
+        }
+        for peer in &self.peers {
+            bytes.extend_from_slice(&peer.peer_id.to_le_bytes());
+            bytes.extend_from_slice(&peer.center.0.to_bits().to_le_bytes());
+            bytes.extend_from_slice(&peer.center.1.to_bits().to_le_bytes());
+            bytes.extend_from_slice(&peer.radius.to_bits().to_le_bytes());
+            bytes.extend_from_slice(&peer.revision.to_le_bytes());
+            bytes.extend_from_slice(
+                &u64::try_from(peer.visible.len())
+                    .map_err(|_| AuthorityAoiError::InvalidSnapshot)?
+                    .to_le_bytes(),
+            );
+            for entity_id in &peer.visible {
+                bytes.extend_from_slice(&entity_id.to_le_bytes());
+            }
+        }
+        debug_assert_eq!(bytes.len(), encoded_len);
+        Ok(bytes)
+    }
+
+    /// Decode a canonical AOI snapshot with strict byte and collection bounds.
+    /// The persisted configuration must match `expected_config` exactly.
+    pub fn decode(
+        bytes: &[u8],
+        expected_config: AuthorityAoiConfig,
+        max_bytes: usize,
+    ) -> Result<Self, AuthorityAoiError> {
+        if bytes.len() > max_bytes || bytes.len() < AUTHORITY_AOI_SNAPSHOT_HEADER_LEN {
+            return Err(AuthorityAoiError::InvalidSnapshot);
+        }
+        let mut cursor = SnapshotCursor::new(bytes);
+        if cursor.take(4)? != AUTHORITY_AOI_SNAPSHOT_MAGIC
+            || cursor.byte()? != AUTHORITY_AOI_SNAPSHOT_VERSION
+        {
+            return Err(AuthorityAoiError::InvalidSnapshot);
+        }
+        let config = AuthorityAoiConfig {
+            max_peers: cursor.usize_u64()?,
+            max_entities: cursor.usize_u64()?,
+            max_entities_per_peer: cursor.usize_u64()?,
+            max_radius: f32::from_bits(cursor.u32()?),
+            cell_size: f32::from_bits(cursor.u32()?),
+        };
+        if config != expected_config {
+            return Err(AuthorityAoiError::InvalidSnapshot);
+        }
+        let entity_count = cursor.bounded_count(config.max_entities)?;
+        let peer_count = cursor.bounded_count(config.max_peers)?;
+        cursor.ensure_records_fit(entity_count, AUTHORITY_AOI_ENTITY_RECORD_LEN)?;
+        let mut entities = Vec::new();
+        entities
+            .try_reserve_exact(entity_count)
+            .map_err(|_| AuthorityAoiError::InvalidSnapshot)?;
+        for _ in 0..entity_count {
+            entities.push((
+                cursor.u32()?,
+                (f32::from_bits(cursor.u32()?), f32::from_bits(cursor.u32()?)),
+            ));
+        }
+
+        // Every peer has a fixed-size header. Check the entire minimum peer
+        // section before allocating any peer or visible-id vectors.
+        cursor.ensure_records_fit(peer_count, AUTHORITY_AOI_PEER_RECORD_LEN)?;
+        let mut peers = Vec::new();
+        peers
+            .try_reserve_exact(peer_count)
+            .map_err(|_| AuthorityAoiError::InvalidSnapshot)?;
+        for _ in 0..peer_count {
+            let peer_id = cursor.u64()?;
+            let center = (f32::from_bits(cursor.u32()?), f32::from_bits(cursor.u32()?));
+            let radius = f32::from_bits(cursor.u32()?);
+            let revision = cursor.u64()?;
+            let visible_count = cursor.bounded_count(config.max_entities_per_peer)?;
+            cursor.ensure_records_fit(visible_count, 4)?;
+            let mut visible = Vec::new();
+            visible
+                .try_reserve_exact(visible_count)
+                .map_err(|_| AuthorityAoiError::InvalidSnapshot)?;
+            for _ in 0..visible_count {
+                visible.push(cursor.u32()?);
+            }
+            peers.push(AuthorityAoiPeerSnapshot {
+                peer_id,
+                center,
+                radius,
+                visible,
+                revision,
+            });
+        }
+        if !cursor.is_empty() {
+            return Err(AuthorityAoiError::InvalidSnapshot);
+        }
+        let snapshot = Self {
+            config,
+            entities,
+            peers,
+        };
+        AuthorityAoi::restore(snapshot.clone(), expected_config)?;
+        Ok(snapshot)
+    }
+}
+
+struct SnapshotCursor<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> SnapshotCursor<'a> {
+    const fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, offset: 0 }
+    }
+
+    fn take(&mut self, len: usize) -> Result<&'a [u8], AuthorityAoiError> {
+        let end = self
+            .offset
+            .checked_add(len)
+            .filter(|&end| end <= self.bytes.len())
+            .ok_or(AuthorityAoiError::InvalidSnapshot)?;
+        let value = &self.bytes[self.offset..end];
+        self.offset = end;
+        Ok(value)
+    }
+
+    fn byte(&mut self) -> Result<u8, AuthorityAoiError> {
+        Ok(self.take(1)?[0])
+    }
+
+    fn u32(&mut self) -> Result<u32, AuthorityAoiError> {
+        Ok(u32::from_le_bytes(
+            self.take(4)?
+                .try_into()
+                .map_err(|_| AuthorityAoiError::InvalidSnapshot)?,
+        ))
+    }
+
+    fn u64(&mut self) -> Result<u64, AuthorityAoiError> {
+        Ok(u64::from_le_bytes(
+            self.take(8)?
+                .try_into()
+                .map_err(|_| AuthorityAoiError::InvalidSnapshot)?,
+        ))
+    }
+
+    fn usize_u64(&mut self) -> Result<usize, AuthorityAoiError> {
+        usize::try_from(self.u64()?).map_err(|_| AuthorityAoiError::InvalidSnapshot)
+    }
+
+    fn bounded_count(&mut self, max: usize) -> Result<usize, AuthorityAoiError> {
+        let count = self.usize_u64()?;
+        if count > max {
+            return Err(AuthorityAoiError::InvalidSnapshot);
+        }
+        Ok(count)
+    }
+
+    fn ensure_records_fit(&self, count: usize, record_len: usize) -> Result<(), AuthorityAoiError> {
+        let required = count
+            .checked_mul(record_len)
+            .ok_or(AuthorityAoiError::InvalidSnapshot)?;
+        if required > self.bytes.len().saturating_sub(self.offset) {
+            return Err(AuthorityAoiError::InvalidSnapshot);
+        }
+        Ok(())
+    }
+
+    fn is_empty(&self) -> bool {
+        self.offset == self.bytes.len()
+    }
 }
 
 /// The deterministic subscription delta for one authority peer.
@@ -612,6 +845,47 @@ mod tests {
         assert_eq!(
             AuthorityAoi::restore(duplicate_peer, original.config()).err(),
             Some(AuthorityAoiError::InvalidSnapshot)
+        );
+    }
+
+    #[test]
+    fn snapshot_codec_is_canonical_bounded_and_rejects_corruption() {
+        let mut original = aoi();
+        original.admit_peer(4, (0.0, 0.0), 8.0).unwrap();
+        original.upsert_entity(2, (1.0, 0.0)).unwrap();
+        original.upsert_entity(7, (7.0, 0.0)).unwrap();
+        let snapshot = original.snapshot();
+        let encoded = snapshot.encode(4096).unwrap();
+        let decoded = AuthorityAoiSnapshot::decode(&encoded, original.config(), 4096).unwrap();
+        assert_eq!(decoded, snapshot);
+        assert_eq!(decoded.encode(4096).unwrap(), encoded);
+        assert_eq!(
+            snapshot.encode(encoded.len() - 1),
+            Err(AuthorityAoiError::InvalidSnapshot)
+        );
+
+        assert_eq!(
+            AuthorityAoiSnapshot::decode(&encoded[..encoded.len() - 1], original.config(), 4096),
+            Err(AuthorityAoiError::InvalidSnapshot)
+        );
+        let mut trailing = encoded.clone();
+        trailing.push(0);
+        assert_eq!(
+            AuthorityAoiSnapshot::decode(&trailing, original.config(), 4096),
+            Err(AuthorityAoiError::InvalidSnapshot)
+        );
+        let mut unsupported_version = encoded.clone();
+        unsupported_version[4] = AUTHORITY_AOI_SNAPSHOT_VERSION + 1;
+        assert_eq!(
+            AuthorityAoiSnapshot::decode(&unsupported_version, original.config(), 4096),
+            Err(AuthorityAoiError::InvalidSnapshot)
+        );
+        let mut oversized_count = encoded;
+        let count_offset = 4 + 1 + 8 * 3 + 4 * 2;
+        oversized_count[count_offset..count_offset + 8].copy_from_slice(&u64::MAX.to_le_bytes());
+        assert_eq!(
+            AuthorityAoiSnapshot::decode(&oversized_count, original.config(), 4096),
+            Err(AuthorityAoiError::InvalidSnapshot)
         );
     }
 }
