@@ -12,6 +12,8 @@ extern crate alloc;
 #[cfg(feature = "std")]
 extern crate std;
 
+#[cfg(feature = "crypto")]
+mod crypto_transport;
 mod server_mesh;
 mod session;
 #[cfg(feature = "std")]
@@ -22,6 +24,10 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::cmp::Ordering;
 
+#[cfg(feature = "crypto")]
+pub use crypto_transport::{
+    Aes256GcmTransport, CryptoTransportError, CryptoTransportErrorSource, ReplayWindow,
+};
 pub use prism_world_persist::{
     ActorId, CrdtError, FieldId, LogicalClock, LwwRegister, OverrideDelta, OverrideValue,
     PersistentId, Transaction, TransactionId,

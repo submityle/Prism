@@ -126,6 +126,13 @@ impl UdpByteTransport {
     pub const fn max_frame_bytes(&self) -> usize {
         self.config.max_frame_bytes
     }
+
+    #[cfg(all(test, feature = "crypto"))]
+    pub(crate) fn inject_test_datagram(&self, bytes: &[u8]) {
+        self.socket
+            .send(bytes)
+            .expect("test datagram send succeeds");
+    }
 }
 
 impl ByteTransport for UdpByteTransport {

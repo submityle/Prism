@@ -9,10 +9,12 @@ publish = false
 [dependencies]
 prism_world_persist = { path = "../prism_world_persist", default-features = false }
 prism_world_stream = { path = "../prism_world_stream", default-features = false }
+ring = { version = "0.17.14", optional = true }
 
 [features]
 default = []
 std = []
+crypto = ["std", "dep:ring"]
 
 [lints.rust]
 missing_docs = "warn"

@@ -60,8 +60,15 @@ contract.
   wait; the Session retry/ACK machinery handles datagram loss and duplicates.
   UDP does not provide confidentiality, authentication, congestion control, or
   fragmentation; production peers must use a secure authenticated channel and
-  respect the configured MTU-sized frame ceiling. The default build remains
-  `no_std`.
+  respect the configured MTU-sized frame ceiling. Add the opt-in `crypto`
+  feature for AES-GCM protection when sending over untrusted networks; the
+  default build remains `no_std`.
+- With the opt-in `crypto` feature, `Aes256GcmTransport` wraps UDP datagrams in
+  AES-256-GCM envelopes using independent directional keys, session-bound AAD,
+  never-reused monotonic send nonces, and a fixed 128-datagram replay window.
+  Authentication is verified before replay state advances. The host must
+  establish and rotate keys, guarantee nonce-prefix uniqueness for each key,
+  and authenticate peers; this is not a key-exchange protocol.
 - `ServerMesh` owns bounded partition-authority metadata only. It fences old
   authorities with `(authority, epoch, lease)` matching, reserves target
   capacity during prepare, and rechecks the source fence during commit.
