@@ -14,9 +14,11 @@
 //!   re-entered range, driving the [`DormancySet`] authoritatively;
 //! * collects the awake entities that should run their simulation this frame.
 //!
-//! This is the "processor" form from design §23.7: cost scales with the active
-//! near population, not the total, and far entities collapse to a reduced
-//! cadence or to dormancy. It is deliberately `World`-independent — the owner
+//! This is the "processor" form from design §23.7. [`drive_candidates`](Self::drive_candidates)
+//! lets a spatial-index owner bound work to a candidate population, while
+//! [`drive`](Self::drive) remains the convenience full-population path. Far
+//! entities can collapse to a reduced cadence or dormancy. It is deliberately
+//! `World`-independent — the owner
 //! extracts `(entity, position)` from its transform components and applies the
 //! returned [`LodLevel`](crate::partition::lod::LodLevel) tags / tick list back to the world — matching the pure
 //! bookkeeping style of the rest of [`crate::partition`].
@@ -176,12 +178,40 @@ impl EntityLodProcessor {
         frame: u64,
         dormancy: &mut DormancySet,
     ) -> LodTickResult {
+        self.drive_candidates(viewpoint, population, frame, dormancy)
+    }
+
+    /// Drives a candidate subset for one frame (design §13.2 / §23.7).
+    ///
+    /// This is the indexed-population entry point: callers may pass only the
+    /// entities selected by a spatial query instead of materializing and
+    /// evaluating every entity in the world. To preserve transitions, the
+    /// candidate set must include **all entities within the schedule's
+    /// farthest active distance** and every previously-awake entity that may
+    /// have moved out of range since the last pass, with each entity appearing
+    /// at most once. Entities omitted from this
+    /// slice are neither evaluated nor changed in `dormancy`; in particular,
+    /// dormant entities outside the query bounds are expected to remain asleep
+    /// until a later spatial query selects them. Entity creation/destruction
+    /// and stale handles remain the caller's responsibility.
+    ///
+    /// The work performed here is `O(candidates)` (plus sorting emitted
+    /// results), independent of the total world population. Completeness and
+    /// freshness of the spatial candidate query are part of the caller's
+    /// contract; use [`drive`](Self::drive) when no such index is available.
+    pub fn drive_candidates(
+        &self,
+        viewpoint: [f32; 3],
+        candidates: &[(Entity, [f32; 3])],
+        frame: u64,
+        dormancy: &mut DormancySet,
+    ) -> LodTickResult {
         let mut to_tick = Vec::new();
         let mut slept = Vec::new();
         let mut woken = Vec::new();
-        let mut decisions = Vec::with_capacity(population.len());
+        let mut decisions = Vec::with_capacity(candidates.len());
 
-        for &(entity, position) in population {
+        for &(entity, position) in candidates {
             let decision = self.evaluate(viewpoint, position, entity, frame);
             match decision.level {
                 None => {
@@ -268,6 +298,56 @@ mod tests {
         // Frame 4: both tick (4 % 4 == 0, 4 % 1 == 0).
         let r = proc.drive([0.0; 3], &pop, 4, &mut dormancy);
         assert_eq!(r.to_tick, alloc::vec![near, mid]);
+    }
+
+    #[test]
+    fn candidate_drive_only_evaluates_spatial_candidates_and_preserves_transitions() {
+        let proc = EntityLodProcessor::new(schedule());
+        let mut dormancy = DormancySet::new();
+        let leaving_range = ent(1, 1);
+        let entering_range = ent(2, 1);
+        let near = ent(3, 1);
+
+        // A previous awake entity must remain a candidate long enough to be
+        // put to sleep after leaving range. A dormant entity is reconsidered
+        // when the spatial query selects it again.
+        let first = proc.drive_candidates(
+            [0.0; 3],
+            &[
+                (leaving_range, [10.0, 0.0, 0.0]),
+                (entering_range, [1000.0, 0.0, 0.0]),
+                (near, [1.0, 0.0, 0.0]),
+            ],
+            0,
+            &mut dormancy,
+        );
+        assert_eq!(first.decisions.len(), 3);
+        assert!(dormancy.is_dormant(entering_range));
+
+        let second = proc.drive_candidates(
+            [0.0; 3],
+            &[
+                // Spatial query includes recently-awake entities as an exit
+                // guard, even when they no longer intersect the active radius.
+                (leaving_range, [1000.0, 0.0, 0.0]),
+                // This dormant entity is now inside the spatial query bounds.
+                (entering_range, [5.0, 0.0, 0.0]),
+                (near, [2.0, 0.0, 0.0]),
+            ],
+            1,
+            &mut dormancy,
+        );
+        assert_eq!(second.decisions.len(), 3);
+        assert_eq!(second.slept, alloc::vec![leaving_range]);
+        assert_eq!(second.woken, alloc::vec![entering_range]);
+        assert!(dormancy.is_dormant(leaving_range));
+        assert!(!dormancy.is_dormant(entering_range));
+
+        // Unrelated off-index population is not passed to or evaluated by the
+        // processor; output work is bounded by the candidate slice.
+        let sparse = proc.drive_candidates([0.0; 3], &[(near, [3.0, 0.0, 0.0])], 2, &mut dormancy);
+        assert_eq!(sparse.decisions.len(), 1);
+        assert_eq!(sparse.to_tick, alloc::vec![near]);
     }
 
     #[test]

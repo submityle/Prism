@@ -656,7 +656,7 @@ pkg/prism_ecs_macros/              # derive: Component/Bundle/SystemSet/Resource
 
 把"海量轻实体"的更新组织为**处理器（processor）**：按距离/重要度分档，不同档位以不同频率、不同精度批量跑（如远处 AI 10Hz 粗更新、近处 60Hz 精更新）。处理器消费 chunk 批次（§6）、受 §13.2 LOD 调度，使 CPU 成本随"活跃近处实体数"而非"总实体数"增长。
 
-**当前性能边界（2026-10-23 源码审查）**：`LodProcessor::drive` 当前仍逐帧遍历传入的整个 `population`，对每个实体计算距离/LOD 决策，并构造全量 `decisions` 输出；低频与 dormancy 只减少下游 tick 工作，处理器自身成本仍是 `O(population)`。不能简单跳过休眠实体，否则实体移动后无法及时重新进入视野并唤醒。要达到上面的规模目标，需要由空间索引或明确的增量位置/成员变更输入提供候选集，并保持唤醒正确性；当前 API 未提供该契约，因此该性能目标尚未完成，也没有受控规模基准证明。
+**候选驱动接线（2026-10-23）**：新增 `EntityLodProcessor::drive_candidates`，允许空间索引调用方只交付候选集；处理器的遍历、距离评估和 decisions 输出成本为 `O(candidates)`，原 `drive` 仍保留全 population 兼容路径。调用方必须提供活动半径内的全部实体，并将可能离开范围的先前活跃实体作为 exit guard；每个实体在批次中只能出现一次。被省略实体不评估、不改变 dormancy，实体增删和 stale handle 清理由调用方负责。该 API 使按索引缩小候选集成为可能，但仓库尚无统一 ECS spatial-query→LOD processor 消费接线，也没有证明候选完整性、唤醒正确性及近处数量固定而远处总人口增长时的端到端工作量/性能门槛，因此 §23.7 的规模目标仍未完成。
 
 ### 23.8 诚实边界
 
