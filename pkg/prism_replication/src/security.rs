@@ -948,7 +948,7 @@ pub struct SecureTransport<T, P> {
     replay: ReplayWindow,
     pending: VecDeque<Vec<u8>>,
     inbound: VecDeque<Vec<u8>>,
-    poll_ticks: u32,
+    poll_ticks: u64,
     last_error: Option<SecurityError>,
     replayed: u64,
     handshake_transmissions: u64,
@@ -1297,7 +1297,7 @@ where
     }
 
     fn drive(&mut self) {
-        self.poll_ticks = self.poll_ticks.wrapping_add(1);
+        self.poll_ticks = self.poll_ticks.saturating_add(1);
         if self.state == State::ClientHelloSent && self.poll_ticks.is_multiple_of(4) {
             self.send_handshake();
         }
@@ -1722,6 +1722,55 @@ mod tests {
         );
         assert!(client.inner.outbox.is_empty());
         assert!(server.recv().is_none());
+    }
+
+    #[test]
+    fn queued_datagrams_are_discarded_and_reported_if_sequence_exhausts_on_flush() {
+        let mut client = SecureTransport::new_client(
+            MockTransport::default(),
+            test_support::Provider::new(0x31, 1),
+        )
+        .unwrap();
+        client.send(b"queued-before-handshake");
+        assert_eq!(client.pending.len(), 1);
+        // The queued send emits a client hello; the test below models the
+        // peer completing that handshake before the local sequence is used.
+        client.inner.outbox.clear();
+
+        // Model a session whose handshake has just completed after consuming
+        // the entire outbound nonce sequence. Flushing must fail closed: no
+        // queued plaintext is emitted under a reused nonce, and the terminal
+        // error remains observable through the public diagnostics API.
+        client.state = State::Established;
+        client.next_send = u64::MAX;
+        client.flush_pending();
+
+        assert_eq!(client.security_state(), TransportSecurity::Rejected);
+        assert_eq!(client.pending.len(), 0);
+        assert!(client.inner.outbox.is_empty());
+        assert_eq!(
+            client.take_security_error(),
+            Some(SecurityError::SequenceExhausted)
+        );
+        client.flush_pending();
+        assert!(client.inner.outbox.is_empty());
+        assert!(client.pending.is_empty());
+    }
+
+    #[test]
+    fn handshake_retry_clock_saturates_without_rewinding_retry_phase() {
+        let mut client = SecureTransport::new_client(
+            MockTransport::default(),
+            test_support::Provider::new(0x31, 1),
+        )
+        .unwrap();
+        client.poll_ticks = u64::MAX - 1;
+        client.drive();
+        assert_eq!(client.poll_ticks, u64::MAX);
+        let retries = client.handshake_retries;
+        client.drive();
+        assert_eq!(client.poll_ticks, u64::MAX);
+        assert_eq!(client.handshake_retries, retries);
     }
 
     #[test]

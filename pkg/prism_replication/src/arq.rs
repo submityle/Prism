@@ -64,8 +64,10 @@ impl ReliableSender {
     }
 
     /// Queue `payload` for reliable ordered delivery, returning its sequence
-    /// number — or `None` when the send window is already full (the caller should
-    /// retry once acknowledgements return; see [`is_full`](Self::is_full)).
+    /// number — or `None` when the send window is full or the 64-bit sequence
+    /// space is exhausted. Window backpressure can be retried after ACKs return
+    /// (see [`is_full`](Self::is_full)); sequence exhaustion is terminal for
+    /// this sender and never wraps to an old packet identity.
     pub fn send(&mut self, payload: Vec<u8>) -> Option<u64> {
         if self.is_full() || self.next_seq.is_none() {
             return None;
