@@ -14,10 +14,13 @@
 //! Provenance: standard `wgpu` initialisation; no Unreal Engine or Unity source
 //! or derived code.
 
+use core::sync::atomic::{AtomicU64, Ordering};
 use wgpu::{
     Adapter, BackendOptions, Backends, Device, DeviceDescriptor, Instance, InstanceDescriptor,
     InstanceFlags, PollType, Queue, RequestAdapterOptions,
 };
+
+static NEXT_DEVICE_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 /// Blocks the current thread until `future` resolves.
 ///
@@ -40,6 +43,7 @@ pub struct GpuContext {
     device: Device,
     /// The queue used to submit command buffers.
     queue: Queue,
+    device_generation: u64,
 }
 
 impl GpuContext {
@@ -62,11 +66,17 @@ impl GpuContext {
             ..Default::default()
         }))
         .ok()?;
+        let device_generation = NEXT_DEVICE_GENERATION
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                current.checked_add(1)
+            })
+            .ok()?;
         Some(GpuContext {
             instance,
             adapter,
             device,
             queue,
+            device_generation,
         })
     }
 
@@ -80,6 +90,13 @@ impl GpuContext {
     #[must_use]
     pub fn queue(&self) -> &Queue {
         &self.queue
+    }
+
+    /// Stable identity for this logical device lifetime. GPU-owned caches use
+    /// it to reject handles from another context and rebuild after recreation.
+    #[must_use]
+    pub(crate) fn device_generation(&self) -> u64 {
+        self.device_generation
     }
 
     /// Blocks until all previously submitted work on this device completes.

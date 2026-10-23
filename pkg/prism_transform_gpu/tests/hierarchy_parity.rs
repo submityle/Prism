@@ -18,7 +18,9 @@ use prism_transform::compute_hierarchy::{
 use prism_transform::gpu_upload::MatrixLayout;
 use prism_transform::hierarchy::Hierarchy;
 use prism_transform::{GlobalTransform, Transform};
-use prism_transform_gpu::{GpuContext, GpuHierarchyPropagate};
+use prism_transform_gpu::buffer;
+use prism_transform_gpu::{GpuContext, GpuHierarchyOutput, GpuHierarchyPropagate};
+use wgpu::CommandEncoderDescriptor;
 
 /// Acquires a device, or prints a skip note and returns `None` on hosts without
 /// a usable adapter.
@@ -227,4 +229,68 @@ fn identity_locals_passthrough() {
     let locals = vec![Transform::IDENTITY; hierarchy.len()];
 
     check(&ctx, &hierarchy, &locals);
+}
+
+#[test]
+fn recorded_output_is_resident_and_reused() {
+    let Some(ctx) = with_gpu() else { return };
+    let kernel = GpuHierarchyPropagate::new(&ctx);
+    let mut output = GpuHierarchyOutput::new();
+    let mut hierarchy = Hierarchy::new();
+    let root = hierarchy.spawn_root();
+    hierarchy.spawn_child(root);
+    let locals = [
+        Transform::from_xyz(5.0, -2.0, 1.0),
+        Transform::from_xyz(1.0, 2.0, 3.0),
+    ];
+    let schedule = LevelSchedule::build(&hierarchy).unwrap();
+    let input =
+        ComputeHierarchyInput::pack(&hierarchy, &schedule, &locals, MatrixLayout::RowMajor3x4);
+
+    let mut encoder = ctx
+        .device()
+        .create_command_encoder(&CommandEncoderDescriptor {
+            label: Some("prism_transform_resident_output_test"),
+        });
+    kernel.record(&ctx, &input, &mut output, &mut encoder);
+    assert_eq!(output.len(), 2);
+    assert!(!output.is_empty());
+    let first_capacity = output.capacity_nodes();
+    let resident = output
+        .storage_buffer(&ctx)
+        .expect("non-empty output buffer");
+    let stage = buffer::staging(ctx.device(), "resident_output_test_stage", 2 * 48);
+    buffer::copy(&mut encoder, resident, &stage, 2 * 48);
+    ctx.queue().submit([encoder.finish()]);
+    let worlds: Vec<[f32; 12]> = buffer::read_back(&ctx, &stage);
+    assert_eq!(worlds.len(), 2);
+    assert_eq!(
+        &worlds[0],
+        &[1.0, 0.0, 0.0, 5.0, 0.0, 1.0, 0.0, -2.0, 0.0, 0.0, 1.0, 1.0]
+    );
+    assert_eq!(
+        &worlds[1],
+        &[1.0, 0.0, 0.0, 6.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 4.0]
+    );
+
+    let mut smaller = Hierarchy::new();
+    smaller.spawn_root();
+    let smaller_schedule = LevelSchedule::build(&smaller).unwrap();
+    let smaller_input = ComputeHierarchyInput::pack(
+        &smaller,
+        &smaller_schedule,
+        &[Transform::IDENTITY],
+        MatrixLayout::RowMajor3x4,
+    );
+    let mut encoder = ctx
+        .device()
+        .create_command_encoder(&CommandEncoderDescriptor {
+            label: Some("prism_transform_resident_output_reuse_test"),
+        });
+    kernel.record(&ctx, &smaller_input, &mut output, &mut encoder);
+    assert_eq!(output.len(), 1);
+    assert_eq!(output.capacity_nodes(), first_capacity);
+    assert!(output.storage_buffer(&ctx).is_some());
+    ctx.queue().submit([encoder.finish()]);
+    ctx.wait();
 }

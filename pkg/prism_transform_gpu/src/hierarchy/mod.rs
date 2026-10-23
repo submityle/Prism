@@ -32,6 +32,7 @@
 //! derived code.
 
 use alloc::vec::Vec;
+use core::num::NonZeroU64;
 
 use bytemuck::{Pod, Zeroable};
 use prism_math::{Affine3, Mat3, Vec3};
@@ -40,9 +41,10 @@ use prism_transform::gpu_upload::MatrixLayout;
 use prism_transform::GlobalTransform;
 use wgpu::{
     BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
-    BindGroupLayoutEntry, BindingType, BufferBindingType, CommandEncoderDescriptor,
-    ComputePassDescriptor, ComputePipeline, ComputePipelineDescriptor, PipelineCompilationOptions,
-    PipelineLayoutDescriptor, ShaderModuleDescriptor, ShaderSource, ShaderStages,
+    BindGroupLayoutEntry, BindingType, Buffer, BufferBindingType, BufferUsages, CommandEncoder,
+    CommandEncoderDescriptor, ComputePassDescriptor, ComputePipeline, ComputePipelineDescriptor,
+    PipelineCompilationOptions, PipelineLayoutDescriptor, ShaderModuleDescriptor, ShaderSource,
+    ShaderStages,
 };
 
 use crate::buffer;
@@ -163,6 +165,146 @@ pub struct GpuHierarchyPropagate {
     layout: BindGroupLayout,
 }
 
+/// Reusable GPU-resident world-transform output for hierarchy propagation.
+///
+/// The storage buffer is owned by this value and remains valid until it is
+/// dropped or replaced by a larger allocation/device-generation change. Its
+/// first [`len`](Self::len) matrices are the output of the most recently
+/// recorded propagation, after the caller submits that command encoder. The
+/// buffer can be bound by subsequent GPU work without a CPU readback.
+///
+/// This type is not `Clone`: one owner controls its allocation and reuse. Do
+/// not access the buffer while another command submission is writing it; order
+/// dependent GPU work on the same queue after the propagation submission.
+#[derive(Default)]
+pub struct GpuHierarchyOutput {
+    worlds: Option<Buffer>,
+    capacity_nodes: usize,
+    len: usize,
+    device_generation: Option<u64>,
+}
+
+impl GpuHierarchyOutput {
+    /// Creates an empty output owner. The GPU buffer is allocated lazily by
+    /// [`GpuHierarchyPropagate::record`].
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            worlds: None,
+            capacity_nodes: 0,
+            len: 0,
+            device_generation: None,
+        }
+    }
+
+    /// Number of node-indexed matrices produced by the latest recording.
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Whether the latest recording produced no matrices.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Allocated matrix capacity. Repeated recordings at or below this size
+    /// reuse the same storage allocation on the same device generation.
+    #[must_use]
+    pub const fn capacity_nodes(&self) -> usize {
+        self.capacity_nodes
+    }
+
+    /// Returns the storage buffer for binding as a read-only storage resource.
+    /// The meaningful output range is `0..len()`, with each matrix occupying
+    /// 48 bytes in `RowMajor3x4` encoding. Returns `None` before the first
+    /// non-empty recording.
+    ///
+    /// # Panics
+    /// Panics if this output was last allocated for a different `GpuContext`.
+    /// Device-bound `wgpu` buffers cannot be rebound across context/device
+    /// recreation; record the input again to rebuild them for the new context.
+    #[must_use]
+    pub fn storage_buffer(&self, ctx: &GpuContext) -> Option<&Buffer> {
+        if self.worlds.is_some() {
+            assert_eq!(
+                self.device_generation,
+                Some(ctx.device_generation()),
+                "GpuHierarchyOutput belongs to a different device generation; record it again"
+            );
+        }
+        self.worlds.as_ref()
+    }
+
+    /// Returns a binding covering exactly the active `0..len()` matrix range,
+    /// avoiding accidental exposure of spare capacity to downstream shaders.
+    #[must_use]
+    pub fn storage_binding(&self, ctx: &GpuContext) -> Option<wgpu::BufferBinding<'_>> {
+        if self.len == 0 {
+            return None;
+        }
+        let buffer = self.storage_buffer(ctx)?;
+        let size = NonZeroU64::new(worlds_byte_len(self.len))
+            .expect("non-empty hierarchy output range must be non-zero");
+        Some(wgpu::BufferBinding {
+            buffer,
+            offset: 0,
+            size: Some(size),
+        })
+    }
+
+    fn prepare(&mut self, ctx: &GpuContext, required_nodes: usize) -> &Buffer {
+        let generation = ctx.device_generation();
+        let same_device = self.device_generation == Some(generation);
+        if !same_device || required_nodes > self.capacity_nodes {
+            let requested_capacity = if same_device {
+                grown_capacity(self.capacity_nodes, required_nodes)
+            } else {
+                grown_capacity(0, required_nodes)
+            };
+            let max_buffer_bytes = ctx.device().limits().max_buffer_size;
+            let max_nodes = usize::try_from(max_buffer_bytes).unwrap_or(usize::MAX)
+                / (MAT3X4_FLOATS * size_of::<f32>());
+            assert!(
+                required_nodes <= max_nodes,
+                "hierarchy output exceeds the device maximum buffer size"
+            );
+            let capacity_nodes = requested_capacity.min(max_nodes);
+            let size = capacity_nodes
+                .checked_mul(MAT3X4_FLOATS)
+                .and_then(|floats| floats.checked_mul(size_of::<f32>()))
+                .and_then(|bytes| u64::try_from(bytes).ok())
+                .expect("hierarchy output buffer size must fit in u64");
+            self.worlds = Some(ctx.device().create_buffer(&wgpu::BufferDescriptor {
+                label: Some("prism_transform_hierarchy_worlds_resident"),
+                size,
+                usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+            self.capacity_nodes = capacity_nodes;
+            self.device_generation = Some(generation);
+        }
+        self.len = required_nodes;
+        self.worlds
+            .as_ref()
+            .expect("non-empty hierarchy output has an allocated buffer")
+    }
+}
+
+fn grown_capacity(current: usize, required: usize) -> usize {
+    debug_assert!(required > 0);
+    required.max(current.saturating_mul(2)).max(1)
+}
+
+fn worlds_byte_len(nodes: usize) -> u64 {
+    nodes
+        .checked_mul(MAT3X4_FLOATS)
+        .and_then(|floats| floats.checked_mul(size_of::<f32>()))
+        .and_then(|bytes| u64::try_from(bytes).ok())
+        .expect("hierarchy output byte length must fit in u64")
+}
+
 impl GpuHierarchyPropagate {
     /// Compiles the hierarchy-propagation kernel on `ctx`'s device.
     #[must_use]
@@ -233,33 +375,48 @@ impl GpuHierarchyPropagate {
         GpuHierarchyPropagate { pipeline, layout }
     }
 
-    /// Propagates `input` on the device and returns one world
-    /// [`GlobalTransform`] per node, node-indexed, mirroring
-    /// [`propagate_by_levels`](prism_transform::compute_hierarchy::propagate_by_levels).
+    /// Records hierarchy propagation into reusable GPU-resident output
+    /// storage. This method neither submits `encoder` nor allocates a
+    /// `MAP_READ`/staging buffer; callers may record dependent GPU work after
+    /// this call and submit the encoder once.
     ///
-    /// An empty input returns an empty `Vec` without dispatching.
+    /// Input topology/local-matrix buffers and per-level uniforms are uploaded
+    /// for this recording. The output allocation is retained by `output`,
+    /// reused when its device generation and capacity permit, and grown
+    /// geometrically when needed. `output.storage_buffer(ctx)` exposes the
+    /// node-indexed `RowMajor3x4` result after the encoder has been submitted.
+    /// For an empty input, no dispatch or output allocation is made and
+    /// `output.len()` becomes zero; any prior allocation is retained.
     ///
     /// # Panics
     /// Panics if `input`'s matrix layout is not
-    /// [`MatrixLayout::RowMajor3x4`] (the only encoding this kernel decodes).
-    #[must_use]
-    pub fn propagate(
+    /// [`MatrixLayout::RowMajor3x4`], the only encoding this kernel decodes,
+    /// or if the active output range exceeds the device's storage-binding
+    /// limit.
+    pub fn record(
         &self,
         ctx: &GpuContext,
         input: &ComputeHierarchyInput,
-    ) -> Vec<GlobalTransform> {
+        output: &mut GpuHierarchyOutput,
+        encoder: &mut CommandEncoder,
+    ) {
         assert_eq!(
             input.layout(),
             MatrixLayout::RowMajor3x4,
             "GpuHierarchyPropagate decodes only the RowMajor3x4 affine layout"
         );
         let node_count = input.node_count();
+        output.len = 0;
         if node_count == 0 {
-            return Vec::new();
+            return;
         }
 
         let device = ctx.device();
-
+        assert!(
+            worlds_byte_len(node_count)
+                <= u64::from(device.limits().max_storage_buffer_binding_size),
+            "hierarchy output exceeds the device maximum storage binding size"
+        );
         let parents_buf =
             buffer::storage_read(device, "prism_transform_hierarchy_parents", input.parents());
         let order_buf = buffer::storage_read(
@@ -272,12 +429,12 @@ impl GpuHierarchyPropagate {
             "prism_transform_hierarchy_locals",
             input.local_matrices(),
         );
-        let worlds_bytes = (node_count * MAT3X4_FLOATS * size_of::<f32>()) as u64;
-        let worlds_buf =
-            buffer::storage_rw_zeroed(device, "prism_transform_hierarchy_worlds", worlds_bytes);
+        let worlds_buf = output.prepare(ctx, node_count);
+        let worlds_binding_size = NonZeroU64::new(worlds_byte_len(node_count))
+            .expect("non-empty hierarchy output range must be non-zero");
 
-        // One uniform + bind group per level so each pass addresses its own
-        // dispatch-order slice; the shared storage buffers are reused.
+        // One uniform + bind group per level; the storage buffers are shared.
+        // Keep the owning bind groups alive through command recording.
         let level_bind_groups: Vec<(LevelParams, wgpu::BindGroup)> = input
             .level_ranges()
             .iter()
@@ -312,25 +469,24 @@ impl GpuHierarchyPropagate {
                         },
                         BindGroupEntry {
                             binding: 4,
-                            resource: worlds_buf.as_entire_binding(),
+                            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                buffer: worlds_buf,
+                                offset: 0,
+                                size: Some(worlds_binding_size),
+                            }),
                         },
                     ],
                 });
-                // Keep `params_buf` alive via the closure's bind group, which
-                // retains a reference to it.
                 let _ = params_buf;
                 (params, bind_group)
             })
             .collect();
 
-        let mut enc = device.create_command_encoder(&CommandEncoderDescriptor {
-            label: Some("prism_transform_hierarchy_encoder"),
-        });
         for (params, bind_group) in &level_bind_groups {
             if params.count == 0 {
                 continue;
             }
-            let mut pass = enc.begin_compute_pass(&ComputePassDescriptor {
+            let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
                 label: Some("prism_transform_hierarchy_pass"),
                 timestamp_writes: None,
             });
@@ -338,9 +494,45 @@ impl GpuHierarchyPropagate {
             pass.set_bind_group(0, bind_group, &[]);
             pass.dispatch_workgroups(params.count.div_ceil(WORKGROUP), 1, 1);
         }
+    }
 
+    /// Propagates `input` on the device and returns one world
+    /// [`GlobalTransform`] per node, node-indexed, mirroring
+    /// [`propagate_by_levels`](prism_transform::compute_hierarchy::propagate_by_levels).
+    ///
+    /// An empty input returns an empty `Vec` without dispatching.
+    ///
+    /// # Panics
+    /// Panics if `input`'s matrix layout is not
+    /// [`MatrixLayout::RowMajor3x4`] (the only encoding this kernel decodes).
+    #[must_use]
+    pub fn propagate(
+        &self,
+        ctx: &GpuContext,
+        input: &ComputeHierarchyInput,
+    ) -> Vec<GlobalTransform> {
+        assert_eq!(
+            input.layout(),
+            MatrixLayout::RowMajor3x4,
+            "GpuHierarchyPropagate decodes only the RowMajor3x4 affine layout"
+        );
+        let node_count = input.node_count();
+        if node_count == 0 {
+            return Vec::new();
+        }
+
+        let device = ctx.device();
+        let mut enc = device.create_command_encoder(&CommandEncoderDescriptor {
+            label: Some("prism_transform_hierarchy_encoder"),
+        });
+        let mut resident = GpuHierarchyOutput::new();
+        self.record(ctx, input, &mut resident, &mut enc);
+        let worlds_buf = resident
+            .storage_buffer(ctx)
+            .expect("non-empty hierarchy has resident world transforms");
+        let worlds_bytes = worlds_byte_len(node_count);
         let stage = buffer::staging(device, "prism_transform_hierarchy_stage", worlds_bytes);
-        buffer::copy(&mut enc, &worlds_buf, &stage, worlds_bytes);
+        buffer::copy(&mut enc, worlds_buf, &stage, worlds_bytes);
         ctx.queue().submit([enc.finish()]);
 
         let out: Vec<GpuMat3x4> = buffer::read_back(ctx, &stage);
@@ -358,5 +550,26 @@ fn buffer_layout(binding: u32, ty: BindingType) -> BindGroupLayoutEntry {
         visibility: ShaderStages::COMPUTE,
         ty,
         count: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::grown_capacity;
+
+    #[test]
+    fn output_capacity_grows_geometrically_and_never_shrinks() {
+        assert_eq!(grown_capacity(0, 1), 1);
+        assert_eq!(grown_capacity(4, 5), 8);
+        assert_eq!(grown_capacity(4, 9), 9);
+    }
+
+    #[test]
+    fn output_starts_empty_without_allocating_a_device_buffer() {
+        let output = super::GpuHierarchyOutput::new();
+        assert!(output.is_empty());
+        assert_eq!(output.len(), 0);
+        assert_eq!(output.capacity_nodes(), 0);
+        assert!(output.worlds.is_none());
     }
 }

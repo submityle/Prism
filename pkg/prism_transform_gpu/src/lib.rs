@@ -12,8 +12,9 @@
 //! the row-major local matrices, and the flattened dispatch order produced by
 //! `ComputeHierarchyInput::pack`, then dispatches one compute pass per depth
 //! level (shallow to deep) so every child reads an already-finalized parent
-//! world matrix, and reads the world matrices back. The parity tests diff the
-//! GPU readback against `propagate_by_levels`.
+//! world matrix. [`GpuHierarchyPropagate::record`] writes to reusable resident
+//! output storage for downstream GPU consumers; [`GpuHierarchyPropagate::propagate`]
+//! remains the synchronous CPU-readback convenience API and parity oracle.
 //!
 //! # Why a tolerance, not bit-exactness
 //!
@@ -51,4 +52,4 @@ pub mod context;
 pub mod hierarchy;
 
 pub use context::{block_on, GpuContext};
-pub use hierarchy::GpuHierarchyPropagate;
+pub use hierarchy::{GpuHierarchyOutput, GpuHierarchyPropagate};
