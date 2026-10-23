@@ -17,10 +17,12 @@ use alloc::string::ToString;
 use alloc::vec::Vec;
 use prism_ecs::entity::Entity;
 use prism_ecs::world::World;
-use prism_scene::{despawn_instance, LocalEntityId, SceneInstance, SceneSpawn};
+use prism_scene::{
+    despawn_instance, LocalEntityId, SceneInstance, SceneInstancePersistence, SceneSpawn,
+};
 use prism_world_persist::{
-    AppendOnlyLog, FileJournal, LogError, ObjectState, PersistentId as WorldPersistentId, Snapshot,
-    Timeline, TimelineError, Transaction, WorldState,
+    AppendOnlyLog, FieldId, FileJournal, LogError, ObjectState, PersistentId as WorldPersistentId,
+    Snapshot, Timeline, TimelineError, Transaction, WorldState,
 };
 use prism_world_stream::SectorId;
 
@@ -55,6 +57,24 @@ pub struct CellPersistenceState {
     pub state: ObjectState,
 }
 
+/// Explicit scene persistence layout required to reconstruct one cell's PRSI
+/// companion and map its world fields back into scene property identities.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScenePersistenceRestoreLayout {
+    /// Schema-owned scene component field mapping.
+    pub schema: ScenePersistenceSchema,
+    /// Scene persistent entity identity index for the active template.
+    pub identities: prism_scene::PersistentEntityMap,
+    /// Explicit scene-to-world object mapping.
+    pub entities: SceneEntityMap,
+    /// Object containing the PRSI companion byte field.
+    pub companion_object: WorldPersistentId,
+    /// Field containing the PRSI companion byte field.
+    pub companion_field: FieldId,
+    /// Resource bounds for untrusted companion decoding.
+    pub decode_limits: prism_scene::PersistenceDecodeLimits,
+}
+
 /// Provider-captured scene state and explicit persistence identities for one
 /// atomic sparse-property plus PRSI companion journal batch.
 #[derive(Clone, Debug, PartialEq)]
@@ -74,7 +94,7 @@ pub struct ScenePersistenceCapture {
     /// Explicit world object storing the PRSI companion.
     pub companion_object: WorldPersistentId,
     /// Explicit opaque-byte field storing the PRSI companion.
-    pub companion_field: prism_world_persist::FieldId,
+    pub companion_field: FieldId,
 }
 
 /// Fully resolved scene target passed to a provider residency batch.
@@ -182,6 +202,15 @@ pub trait SceneEcsProvider {
         Ok(Vec::new())
     }
 
+    /// Describes the provider-owned identities/schema needed to restore the
+    /// PRSI companion for this cell. Return `None` only when the provider has no
+    /// scene snapshot persistence for the cell. If present, the companion
+    /// object must also be returned by [`Self::persistence_objects`].
+    fn scene_persistence_restore_layout(
+        &mut self,
+        sector: SectorId,
+    ) -> Result<Option<ScenePersistenceRestoreLayout>, Self::Error>;
+
     /// Captures scene-native persistence data for host-owned transaction
     /// construction. The host computes exact inverses and appends property plus
     /// companion as one batch. `prior` is replayed from the same authoritative
@@ -203,6 +232,7 @@ pub trait SceneEcsProvider {
         world: &mut World,
         sector: SectorId,
         states: &[CellPersistenceState],
+        scene_snapshot: Option<&SceneInstancePersistence>,
     ) -> Result<(), Self::Error>;
 }
 
@@ -265,6 +295,8 @@ pub enum SceneEcsHostError<E> {
     PersistenceReplay(TimelineError),
     /// Scene-native persistence data could not be converted into transactions.
     PersistenceBridge(ScenePersistenceBridgeError),
+    /// The persisted scene companion is absent from the provider's object set.
+    PersistenceLayoutMissingCompanion(SectorId),
 }
 
 /// A scene-owned ECS host implementing [`crate::SceneHost`].
@@ -416,7 +448,7 @@ impl<'world, P: SceneEcsProvider> SceneEcsHost<'world, P> {
     /// remains authoritative. Despawn hooks for the old scene run only after
     /// ownership has switched to the replacement.
     pub fn reload_cell(&mut self, sector: SectorId) -> Result<(), SceneEcsHostError<P::Error>> {
-        self.reload_cell_with_state(sector, &[], None)
+        self.reload_cell_with_state(sector, &[], None, None)
     }
 
     /// Stages and publishes several cell replacements as one ownership batch.
@@ -583,21 +615,9 @@ impl<'world, P: SceneEcsProvider> SceneEcsHost<'world, P> {
             .map_err(SceneEcsHostError::PersistenceReplay)?;
         let mut persistence = Vec::with_capacity(sectors.len());
         for &sector in &sectors {
-            let objects = if let Some(objects) = self.ownership().persistence_objects.get(&sector) {
-                objects.clone()
-            } else {
-                self.provider
-                    .persistence_objects(sector)
-                    .map_err(SceneEcsHostError::Provider)?
-            };
-            let states = objects
-                .iter()
-                .map(|&object| CellPersistenceState {
-                    object,
-                    state: world_state.object(object).cloned().unwrap_or_default(),
-                })
-                .collect::<Vec<_>>();
-            persistence.push((sector, objects, states));
+            let (objects, states, snapshot) =
+                self.restore_cell_persistence(sector, &world_state, None)?;
+            persistence.push((sector, objects, states, snapshot));
         }
 
         let mut staged: Vec<(SectorId, SceneSpawn, SceneSpawn, Vec<WorldPersistentId>)> =
@@ -608,7 +628,7 @@ impl<'world, P: SceneEcsProvider> SceneEcsHost<'world, P> {
             .values()
             .flat_map(|spawn| spawn.remap().entities().map(|(_, entity)| entity))
             .collect();
-        for (sector, objects, states) in persistence {
+        for (sector, objects, states, snapshot) in persistence {
             let previous = self.ownership().cells[&sector].clone();
             let Some(old_root) = previous.root else {
                 self.cleanup_staged_reloads(&staged);
@@ -673,10 +693,12 @@ impl<'world, P: SceneEcsProvider> SceneEcsHost<'world, P> {
                 self.cleanup_staged_reloads(&staged);
                 return Err(error);
             }
-            if let Err(error) = self
-                .provider
-                .replay_cell_persistence(self.world, sector, &states)
-            {
+            if let Err(error) = self.provider.replay_cell_persistence(
+                self.world,
+                sector,
+                &states,
+                snapshot.as_ref(),
+            ) {
                 despawn_instance(self.world, &replacement);
                 self.cleanup_staged_reloads(&staged);
                 return Err(SceneEcsHostError::Provider(error));
@@ -718,6 +740,7 @@ impl<'world, P: SceneEcsProvider> SceneEcsHost<'world, P> {
         &mut self,
         sector: SectorId,
         states: &[CellPersistenceState],
+        snapshot: Option<&SceneInstancePersistence>,
         persistence_objects: Option<Vec<WorldPersistentId>>,
     ) -> Result<(), SceneEcsHostError<P::Error>> {
         let previous = self
@@ -788,7 +811,7 @@ impl<'world, P: SceneEcsProvider> SceneEcsHost<'world, P> {
         // provider's staged entity map without risking writes to old entities.
         if let Err(error) = self
             .provider
-            .replay_cell_persistence(self.world, sector, states)
+            .replay_cell_persistence(self.world, sector, states, snapshot)
         {
             despawn_instance(self.world, &replacement);
             return Err(SceneEcsHostError::Provider(error));
@@ -822,57 +845,18 @@ impl<'world, P: SceneEcsProvider> SceneEcsHost<'world, P> {
         sector: SectorId,
         log: &AppendOnlyLog,
     ) -> Result<(), SceneEcsHostError<P::Error>> {
-        if self.loaded_cell(sector).is_some() {
-            let mut objects = self
-                .ownership()
-                .persistence_objects
-                .get(&sector)
-                .cloned()
-                .unwrap_or_default();
-            for object in self
-                .provider
-                .persistence_objects(sector)
-                .map_err(SceneEcsHostError::Provider)?
-            {
-                if !objects.contains(&object) {
-                    objects.push(object);
-                }
-            }
-            let world_state = Timeline::replay(&Snapshot::new(0, WorldState::new()), log)
-                .map_err(SceneEcsHostError::PersistenceReplay)?;
-            let states: Vec<_> = objects
-                .iter()
-                .map(|&object| CellPersistenceState {
-                    object,
-                    state: world_state.object(object).cloned().unwrap_or_default(),
-                })
-                .collect();
-            return self.reload_cell_with_state(sector, &states, Some(objects));
-        }
-        let mut objects = self
-            .ownership()
-            .persistence_objects
-            .get(&sector)
-            .cloned()
-            .unwrap_or_default();
-        for object in self
-            .provider
-            .persistence_objects(sector)
-            .map_err(SceneEcsHostError::Provider)?
-        {
-            if !objects.contains(&object) {
-                objects.push(object);
-            }
-        }
         let world_state = Timeline::replay(&Snapshot::new(0, WorldState::new()), log)
             .map_err(SceneEcsHostError::PersistenceReplay)?;
-        let states: Vec<_> = objects
-            .iter()
-            .map(|&object| CellPersistenceState {
-                object,
-                state: world_state.object(object).cloned().unwrap_or_default(),
-            })
-            .collect();
+        if self.loaded_cell(sector).is_some() {
+            let (objects, states, snapshot) = self.restore_cell_persistence(
+                sector,
+                &world_state,
+                self.ownership().persistence_objects.get(&sector).cloned(),
+            )?;
+            return self.reload_cell_with_state(sector, &states, snapshot.as_ref(), Some(objects));
+        }
+        let (objects, states, snapshot) =
+            self.restore_cell_persistence(sector, &world_state, None)?;
 
         let spawn = self
             .provider
@@ -885,9 +869,9 @@ impl<'world, P: SceneEcsProvider> SceneEcsHost<'world, P> {
             despawn_instance(self.world, &spawn);
             return Err(SceneEcsHostError::SceneNotAttached(sector));
         }
-        if let Err(error) = self
-            .provider
-            .replay_cell_persistence(self.world, sector, &states)
+        if let Err(error) =
+            self.provider
+                .replay_cell_persistence(self.world, sector, &states, snapshot.as_ref())
         {
             despawn_instance(self.world, &spawn);
             return Err(SceneEcsHostError::Provider(error));
@@ -896,6 +880,61 @@ impl<'world, P: SceneEcsProvider> SceneEcsHost<'world, P> {
         ownership.cells.insert(sector, spawn);
         ownership.persistence_objects.insert(sector, objects);
         Ok(())
+    }
+
+    fn restore_cell_persistence(
+        &mut self,
+        sector: SectorId,
+        world_state: &WorldState,
+        existing_objects: Option<Vec<WorldPersistentId>>,
+    ) -> Result<
+        (
+            Vec<WorldPersistentId>,
+            Vec<CellPersistenceState>,
+            Option<SceneInstancePersistence>,
+        ),
+        SceneEcsHostError<P::Error>,
+    > {
+        let mut objects = existing_objects.unwrap_or_default();
+        for object in self
+            .provider
+            .persistence_objects(sector)
+            .map_err(SceneEcsHostError::Provider)?
+        {
+            if !objects.contains(&object) {
+                objects.push(object);
+            }
+        }
+        let layout = self
+            .provider
+            .scene_persistence_restore_layout(sector)
+            .map_err(SceneEcsHostError::Provider)?;
+        let snapshot = if let Some(layout) = layout {
+            if !objects.contains(&layout.companion_object) {
+                return Err(SceneEcsHostError::PersistenceLayoutMissingCompanion(sector));
+            }
+            layout
+                .schema
+                .snapshot_from_world_state_if_present(
+                    world_state,
+                    layout.companion_object,
+                    layout.companion_field,
+                    &layout.identities,
+                    &layout.entities,
+                    layout.decode_limits,
+                )
+                .map_err(SceneEcsHostError::PersistenceBridge)?
+        } else {
+            None
+        };
+        let states = objects
+            .iter()
+            .map(|&object| CellPersistenceState {
+                object,
+                state: world_state.object(object).cloned().unwrap_or_default(),
+            })
+            .collect();
+        Ok((objects, states, snapshot))
     }
 
     fn unload_cell(&mut self, sector: SectorId) -> Result<(), SceneEcsHostError<P::Error>> {
@@ -941,8 +980,7 @@ impl<'world, P: SceneEcsProvider> SceneEcsHost<'world, P> {
         let next_sequence = journal.cursor().next_sequence();
         let prior = Timeline::replay(&Snapshot::new(0, WorldState::new()), journal.log())
             .map_err(SceneEcsHostError::PersistenceReplay)?;
-        let transactions =
-            self.capture_scene_transactions(sector, &prior, next_sequence)?;
+        let transactions = self.capture_scene_transactions(sector, &prior, next_sequence)?;
         journal
             .append_batch(&transactions)
             .map_err(|error| SceneEcsHostError::DurableAppend(error.to_string()))?;
@@ -1100,6 +1138,8 @@ mod tests {
         pub(super) persistent_object: Option<WorldPersistentId>,
         pub(super) cell_entity: Option<Entity>,
         pub(super) scene_property_delta: bool,
+        pub(super) restore_layout: bool,
+        pub(super) restored_scene_templates: Vec<StableGuid>,
     }
 
     impl SceneEcsProvider for Provider {
@@ -1217,9 +1257,34 @@ mod tests {
 
         fn persistence_objects(
             &mut self,
-            _sector: SectorId,
+            sector: SectorId,
         ) -> Result<Vec<WorldPersistentId>, Self::Error> {
-            Ok(self.persistent_object.into_iter().collect())
+            let mut objects: Vec<_> = self.persistent_object.into_iter().collect();
+            if self.restore_layout {
+                objects.push(WorldPersistentId(u128::from(
+                    9909u64.wrapping_add(sector.morton_hint()),
+                )));
+            }
+            Ok(objects)
+        }
+
+        fn scene_persistence_restore_layout(
+            &mut self,
+            sector: SectorId,
+        ) -> Result<Option<ScenePersistenceRestoreLayout>, Self::Error> {
+            if !self.restore_layout {
+                return Ok(None);
+            }
+            Ok(Some(ScenePersistenceRestoreLayout {
+                schema: ScenePersistenceSchema::new(Vec::new()).map_err(|_| ())?,
+                identities: prism_scene::PersistentEntityMap::default(),
+                entities: SceneEntityMap::new(Vec::new()).map_err(|_| ())?,
+                companion_object: WorldPersistentId(u128::from(
+                    9909u64.wrapping_add(sector.morton_hint()),
+                )),
+                companion_field: FieldId(9909),
+                decode_limits: Default::default(),
+            }))
         }
 
         fn capture_scene_persistence(
@@ -1278,7 +1343,11 @@ mod tests {
             world: &mut World,
             _sector: SectorId,
             states: &[CellPersistenceState],
+            scene_snapshot: Option<&SceneInstancePersistence>,
         ) -> Result<(), Self::Error> {
+            if let Some(snapshot) = scene_snapshot {
+                self.restored_scene_templates.push(snapshot.template);
+            }
             if self.fail_replay {
                 return Err(());
             }
@@ -1402,6 +1471,45 @@ mod tests {
             log.get(2).unwrap().delta().get(FieldId(9909)),
             Some(OverrideValue::Bytes(_))
         ));
+    }
+
+    #[test]
+    fn durable_load_routes_decoded_prsi_companion_to_provider_replay() {
+        let mut world = World::new();
+        let sector = SectorId::new(0, 29, -4, 2);
+        let template = StableGuid::from_u128(0xfeed);
+        let companion_object =
+            WorldPersistentId(u128::from(9909u64.wrapping_add(sector.morton_hint())));
+        let snapshot = SceneInstancePersistence {
+            template,
+            instance: None,
+            properties: Vec::new(),
+            structural: Vec::new(),
+        };
+        let bytes = prism_scene::encode_persistence(&snapshot).unwrap();
+        let delta = OverrideDelta::single(FieldId(9909), OverrideValue::Bytes(bytes)).unwrap();
+        let mut log = AppendOnlyLog::new();
+        log.append(
+            Transaction::new(
+                TransactionId(77),
+                ActorId(1),
+                LogicalClock(1),
+                0,
+                companion_object,
+                delta.clone(),
+                delta,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let provider = Provider {
+            restore_layout: true,
+            ..Provider::default()
+        };
+        let mut host = SceneEcsHost::new(&mut world, provider);
+        host.load_cell_with_persistence(sector, &log).unwrap();
+        assert_eq!(host.provider.restored_scene_templates, vec![template]);
+        assert_eq!(host.loaded_cell_count(), 1);
     }
 
     #[test]

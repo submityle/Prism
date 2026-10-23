@@ -37,7 +37,8 @@ pub use scene_host::{
     CellPersistenceState, ResidencyBinding, SceneEcsHost, SceneEcsHostConfigError,
     SceneEcsHostError, SceneEcsProvider, SceneEntityMap, SceneFieldBinding, SceneFieldValueKind,
     SceneObjectBinding, ScenePersistenceBatch, ScenePersistenceBridgeError,
-    ScenePersistenceCapture, ScenePersistenceSchema, SceneResidencyTransition,
+    ScenePersistenceCapture, ScenePersistenceRestoreLayout, ScenePersistenceSchema,
+    SceneResidencyTransition,
 };
 
 /// Per-frame budgets for the two hot policy paths.
