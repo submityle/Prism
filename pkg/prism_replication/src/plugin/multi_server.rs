@@ -951,6 +951,7 @@ impl<S: ServerStrategy> MultiPeerAuthority<S> {
         let mut aoi = self.aoi.clone();
         let mut deltas = Vec::new();
         let mut overrides = Vec::new();
+        let mut override_indices = BTreeMap::<(PeerId, u32, u64), usize>::new();
         let mut events = Vec::new();
         let mut required = BTreeMap::<PeerId, usize>::new();
         let mut touched = BTreeSet::new();
@@ -969,6 +970,8 @@ impl<S: ServerStrategy> MultiPeerAuthority<S> {
                             // The enter delta itself carries the snapshot;
                             // record an override without enqueueing a duplicate
                             // standalone update event.
+                            let key = (delta.peer_id, *entity_id, delta.revision);
+                            override_indices.entry(key).or_insert(overrides.len());
                             overrides.push((
                                 delta.peer_id,
                                 *entity_id,
@@ -997,6 +1000,8 @@ impl<S: ServerStrategy> MultiPeerAuthority<S> {
                         touched.insert(peer_id);
                         *required.entry(peer_id).or_default() += 1;
                         let revision = aoi.peer_revision(peer_id)?;
+                        let key = (peer_id, *entity_id, revision);
+                        override_indices.entry(key).or_insert(overrides.len());
                         overrides.push((peer_id, *entity_id, revision, snapshot.clone()));
                         events.push((
                             peer_id,
@@ -1034,13 +1039,9 @@ impl<S: ServerStrategy> MultiPeerAuthority<S> {
                 )
                 .ok_or(MultiPeerAuthorityError::EventCountOverflow)?;
             for entity_id in &delta.entered {
-                let snapshot = overrides
-                    .iter()
-                    .find(|(peer_id, candidate, revision, _)| {
-                        *peer_id == delta.peer_id
-                            && *candidate == *entity_id
-                            && *revision == delta.revision
-                    })
+                let snapshot = override_indices
+                    .get(&(delta.peer_id, *entity_id, delta.revision))
+                    .and_then(|&index| overrides.get(index))
                     .ok_or(MultiPeerAuthorityError::AoiPayloadTooLarge {
                         actual: usize::MAX,
                         max: self.config.max_aoi_payload_bytes,

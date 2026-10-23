@@ -535,6 +535,8 @@ M5 World→AOI adapter 增量（2026-10-23）：可选 `EcsAoiProjectionPlugin` 
 
 AOI 恢复基础（2026-10-23）：`AuthorityAoi::snapshot/restore` 导出并校验有序 entity position、peer view、visible set、revision 与完整配置；restore 对配置变化、容量越界、重复/乱序 ID、非法坐标/视图以及与空间索引不一致的 visible set fail-closed。快照现另有 `PAOI` magic、版本 1、little-endian 的有界 canonical 编解码；编码先校验状态并在分配前检查 `max_bytes`，解码校验配置、集合/字节上限、计数、截断、尾随字节及快照不变量。Round-trip、canonical 重编码、长度边界、截断、尾随字节、不支持版本和越界 count 有专项测试。codec 仍只是 AOI checkpoint 格式：尚未接入 MultiPeer journal，不持久化 peer outbox 或 World；不能据此宣称 M5 崩溃恢复完成。
 
+M5 投影预检性能增量（2026-10-23）：批量 AOI 投影在校验 enter payload 时，snapshot override 由逐个线性扫描改为 `(peer_id, entity_id, revision)` 有序索引查询，避免实体/peer 事件数增长时形成二次扫描；索引保留重复键取首个 override 的既有语义。混合 upsert/update/remove 顺序回归与 replication crate 全量单测、UDP acceptance 通过。该优化不改变 MultiPeer 尚无 durable journal 的状态。
+
 ### 25.4 多世界各持独立 time 时间域
 
 App 多世界（§24.9）与 ECS 多 World（ECS §16）协同时，每个 World 持**独立时间上下文**（time §24.8）：主世界、编辑器预览世界、服务器子应用世界互不干扰（一个暂停不冻结另一个），经子应用隔离。
