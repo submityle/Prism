@@ -269,6 +269,16 @@ pub enum MappingError {
         /// Incoming local handle.
         incoming: LocalEntityId,
     },
+    /// One stable entity was mapped to more than one local ECS handle across
+    /// its component entries.
+    EntityLocalCollision {
+        /// Stable entity identity.
+        entity: EntityId,
+        /// Existing local handle.
+        existing: LocalEntityId,
+        /// Incoming local handle.
+        incoming: LocalEntityId,
+    },
     /// An update arrived older than the retained mapping revision.
     StaleRevision {
         /// Stable entity identity.
@@ -340,6 +350,7 @@ pub struct ReplicationMapping {
     schemas: BTreeMap<SchemaId, SchemaDescriptor>,
     entries: BTreeMap<MappingKey, MappingEntry>,
     locals: BTreeMap<LocalEntityId, EntityId>,
+    entity_components: BTreeMap<EntityId, BTreeMap<ComponentKey, LocalEntityId>>,
 }
 
 impl ReplicationMapping {
@@ -351,6 +362,7 @@ impl ReplicationMapping {
             schemas: BTreeMap::new(),
             entries: BTreeMap::new(),
             locals: BTreeMap::new(),
+            entity_components: BTreeMap::new(),
         }
     }
 
@@ -392,15 +404,13 @@ impl ReplicationMapping {
 
     /// Resolve a stable entity identity to its current local ECS handle.
     ///
-    /// The mapping table is component-keyed, so this walks the bounded entry
-    /// set and returns the first deterministic match. A lifecycle provider can
-    /// then use the returned local handle for an update or despawn.
+    /// The mapping maintains a secondary stable-entity index, so lookup is
+    /// `O(log entities)` rather than scanning every component mapping.
     #[must_use]
     pub fn resolve_entity(&self, entity: EntityId) -> Option<LocalEntityId> {
-        self.entries
-            .values()
-            .find(|entry| entry.entity == entity)
-            .map(|entry| entry.local)
+        self.entity_components
+            .get(&entity)
+            .and_then(|components| components.values().next().copied())
     }
 
     /// Remove every component mapping owned by one stable entity.
@@ -409,17 +419,14 @@ impl ReplicationMapping {
     /// entity is an idempotent no-op, which lets a retransmitted despawn be
     /// handled without rebinding a recycled ECS handle.
     pub fn remove_entity(&mut self, entity: EntityId) -> usize {
-        let keys: Vec<_> = self
-            .entries
-            .keys()
-            .copied()
-            .filter(|key| key.entity == entity)
-            .collect();
-        let removed = keys.len();
-        for key in keys {
-            self.entries.remove(&key);
+        let Some(components) = self.entity_components.remove(&entity) else {
+            return 0;
+        };
+        let removed = components.len();
+        for (component, local) in components {
+            self.entries.remove(&MappingKey { entity, component });
+            self.locals.remove(&local);
         }
-        self.locals.retain(|_, owner| *owner != entity);
         removed
     }
 
@@ -431,10 +438,16 @@ impl ReplicationMapping {
     ) -> Option<MappingEntry> {
         let key = MappingKey { entity, component };
         let entry = self.entries.remove(&key)?;
+        if let Some(components) = self.entity_components.get_mut(&entity) {
+            components.remove(&component);
+            if components.is_empty() {
+                self.entity_components.remove(&entity);
+            }
+        }
         if !self
-            .entries
-            .values()
-            .any(|candidate| candidate.local == entry.local)
+            .entity_components
+            .get(&entity)
+            .is_some_and(|components| components.values().any(|local| *local == entry.local))
         {
             self.locals.remove(&entry.local);
         }
@@ -479,6 +492,19 @@ impl ReplicationMapping {
             entity: entry.entity,
             component: entry.component,
         };
+        if let Some(existing_local) = self
+            .entity_components
+            .get(&entry.entity)
+            .and_then(|components| components.values().next().copied())
+            && !self.entries.contains_key(&key)
+            && existing_local != entry.local
+        {
+            return Err(MappingError::EntityLocalCollision {
+                entity: entry.entity,
+                existing: existing_local,
+                incoming: entry.local,
+            });
+        }
         if let Some(existing) = self.entries.get(&key).copied() {
             if existing == entry {
                 return Ok(());
@@ -526,6 +552,10 @@ impl ReplicationMapping {
 
         self.locals.insert(entry.local, entry.entity);
         self.entries.insert(key, entry);
+        self.entity_components
+            .entry(entry.entity)
+            .or_default()
+            .insert(entry.component, entry.local);
         Ok(())
     }
 
@@ -795,6 +825,67 @@ mod tests {
         second.encode(&mut b).unwrap();
         assert_eq!(a, b);
         assert_eq!(ReplicationMapping::decode(&a, limits).unwrap(), first);
+    }
+
+    #[test]
+    fn entity_secondary_index_tracks_component_lifecycle() {
+        let local_a = LocalEntityId::from_entity_bits((1_u64 << 32) | 1).unwrap();
+        let local_b = LocalEntityId::from_entity_bits((1_u64 << 32) | 2).unwrap();
+        let entity_a = EntityId::from_u128(101);
+        let entity_b = EntityId::from_u128(202);
+        let mut mapping = ReplicationMapping::new(MappingLimits::new(1, 4));
+        mapping.register_schema(schema(7, 3)).unwrap();
+        mapping
+            .upsert(entry(local_a.entity_bits(), entity_a.as_u128(), 4, 1))
+            .unwrap();
+        mapping
+            .upsert(entry(local_a.entity_bits(), entity_a.as_u128(), 5, 1))
+            .unwrap();
+        mapping
+            .upsert(entry(local_b.entity_bits(), entity_b.as_u128(), 4, 1))
+            .unwrap();
+
+        assert_eq!(mapping.resolve_entity(entity_a), Some(local_a));
+        assert_eq!(mapping.resolve_entity(entity_b), Some(local_b));
+        assert_eq!(
+            mapping
+                .remove_component(entity_a, ComponentKey::new(SchemaId::from_u128(7), 4))
+                .unwrap()
+                .local,
+            local_a
+        );
+        assert_eq!(mapping.resolve_entity(entity_a), Some(local_a));
+        assert_eq!(mapping.resolve_local(local_a), Some(entity_a));
+        assert_eq!(mapping.remove_entity(entity_a), 1);
+        assert_eq!(mapping.resolve_entity(entity_a), None);
+        assert_eq!(mapping.resolve_local(local_a), None);
+        assert_eq!(mapping.resolve_entity(entity_b), Some(local_b));
+        assert_eq!(mapping.entry_len(), 1);
+    }
+
+    #[test]
+    fn entity_components_cannot_split_across_local_generations() {
+        let local_a = (1_u64 << 32) | 1;
+        let local_b = (2_u64 << 32) | 1;
+        let entity = EntityId::from_u128(101);
+        let mut mapping = ReplicationMapping::new(MappingLimits::new(1, 2));
+        mapping.register_schema(schema(7, 3)).unwrap();
+        mapping
+            .upsert(entry(local_a, entity.as_u128(), 4, 1))
+            .unwrap();
+        assert_eq!(
+            mapping.upsert(entry(local_b, entity.as_u128(), 5, 1)),
+            Err(MappingError::EntityLocalCollision {
+                entity,
+                existing: LocalEntityId::from_entity_bits(local_a).unwrap(),
+                incoming: LocalEntityId::from_entity_bits(local_b).unwrap(),
+            })
+        );
+        assert_eq!(mapping.entry_len(), 1);
+        assert_eq!(
+            mapping.resolve_entity(entity),
+            LocalEntityId::from_entity_bits(local_a)
+        );
     }
 
     #[test]
