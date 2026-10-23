@@ -21,6 +21,191 @@
 //! transparency subsystem's `HairVisibility` resolve.
 
 use alloc::vec::Vec;
+use core::fmt;
+
+/// GPU storage-buffer record consumed by `HairRasterSegment` in
+/// `pkg/prism_render_scene/src/shaders/hair_raster.wesl`.
+///
+/// The two `vec2<f32>` fields have WGSL alignment 8; the remaining scalar
+/// fields have alignment 4. This representation therefore has offsets
+/// `0, 8, 16, 20, 24, 28` and a 32-byte array stride. Construct records with
+/// [`ProjectedHairRasterSegment::try_new`] so coordinates and scalar values
+/// satisfy the shader's viewport and numeric assumptions. Segments may have
+/// endpoints outside the viewport; the shader clips their expanded bounds,
+/// which is required for strands crossing a view edge.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[repr(C, align(8))]
+pub struct ProjectedHairRasterSegment {
+    /// Projected start point in pixel coordinates.
+    p0: [f32; 2],
+    /// Projected end point in pixel coordinates.
+    p1: [f32; 2],
+    /// Normalized depth at `p0`, where zero is near and one is far.
+    depth0: f32,
+    /// Normalized depth at `p1`, where zero is near and one is far.
+    depth1: f32,
+    /// Projected strand diameter in pixels.
+    width_px: f32,
+    /// Packed strand/segment identity used by deferred shading.
+    seg_id: u32,
+}
+
+impl ProjectedHairRasterSegment {
+    /// Builds a GPU record after validating it against the target viewport.
+    /// Endpoints may lie outside the viewport so segments crossing a view edge
+    /// are retained; the shader clips its radius-expanded bounds. Coordinates
+    /// and widths are bounded to keep the shader's float-to-i32 AABB conversion
+    /// away from saturation.
+    pub fn try_new(
+        p0: [f32; 2],
+        p1: [f32; 2],
+        depth0: f32,
+        depth1: f32,
+        width_px: f32,
+        seg_id: u32,
+        viewport: [u32; 2],
+    ) -> Result<Self, ProjectedHairRasterSegmentError> {
+        if viewport[0] == 0 || viewport[1] == 0 {
+            return Err(ProjectedHairRasterSegmentError::EmptyViewport);
+        }
+        // Keep dimensions exactly representable in f32: the shader uses them
+        // for pixel-space clipping and u32 pixel addressing.
+        if viewport[0] > (1 << 24) || viewport[1] > (1 << 24) {
+            return Err(ProjectedHairRasterSegmentError::ViewportOutOfRange);
+        }
+        if !p0[0].is_finite()
+            || !p0[1].is_finite()
+            || !p1[0].is_finite()
+            || !p1[1].is_finite()
+            || !depth0.is_finite()
+            || !depth1.is_finite()
+            || !width_px.is_finite()
+        {
+            return Err(ProjectedHairRasterSegmentError::NonFiniteValue);
+        }
+        // hair_segment_bounds converts floor/ceil of endpoint +/- radius to
+        // i32 before clipping. Leave generous headroom for the radius and its
+        // one-pixel filter expansion, while retaining offscreen endpoints.
+        let coordinate_limit = (1 << 30) as f32;
+        if [p0, p1]
+            .iter()
+            .any(|p| p[0].abs() > coordinate_limit || p[1].abs() > coordinate_limit)
+        {
+            return Err(ProjectedHairRasterSegmentError::CoordinateOutOfRange);
+        }
+        if !(0.0..=1.0).contains(&depth0) || !(0.0..=1.0).contains(&depth1) {
+            return Err(ProjectedHairRasterSegmentError::DepthOutOfRange);
+        }
+        if width_px < 0.0 {
+            return Err(ProjectedHairRasterSegmentError::NegativeWidth);
+        }
+        // Bounds expand by half the diameter plus one pixel before conversion
+        // to i32; reject giant radii instead of relying on shader saturation.
+        if width_px > (1 << 24) as f32 {
+            return Err(ProjectedHairRasterSegmentError::WidthOutOfRange);
+        }
+        Ok(Self {
+            p0,
+            p1,
+            depth0,
+            depth1,
+            width_px,
+            seg_id,
+        })
+    }
+
+    /// Projected start point in pixel coordinates.
+    #[must_use]
+    pub const fn p0(&self) -> [f32; 2] {
+        self.p0
+    }
+
+    /// Projected end point in pixel coordinates.
+    #[must_use]
+    pub const fn p1(&self) -> [f32; 2] {
+        self.p1
+    }
+
+    /// Normalized depth at `p0`.
+    #[must_use]
+    pub const fn depth0(&self) -> f32 {
+        self.depth0
+    }
+
+    /// Normalized depth at `p1`.
+    #[must_use]
+    pub const fn depth1(&self) -> f32 {
+        self.depth1
+    }
+
+    /// Projected strand diameter in pixels.
+    #[must_use]
+    pub const fn width_px(&self) -> f32 {
+        self.width_px
+    }
+
+    /// Packed strand/segment identity.
+    #[must_use]
+    pub const fn seg_id(&self) -> u32 {
+        self.seg_id
+    }
+
+    /// Encodes the record as the shader's 32-byte storage-buffer layout.
+    /// Float bit patterns and the identity are written little-endian, matching
+    /// the WebGPU/WGSL host-shareable buffer representation.
+    #[must_use]
+    pub fn encode_le(self) -> [u8; 32] {
+        let mut bytes = [0; 32];
+        bytes[0..4].copy_from_slice(&self.p0[0].to_le_bytes());
+        bytes[4..8].copy_from_slice(&self.p0[1].to_le_bytes());
+        bytes[8..12].copy_from_slice(&self.p1[0].to_le_bytes());
+        bytes[12..16].copy_from_slice(&self.p1[1].to_le_bytes());
+        bytes[16..20].copy_from_slice(&self.depth0.to_le_bytes());
+        bytes[20..24].copy_from_slice(&self.depth1.to_le_bytes());
+        bytes[24..28].copy_from_slice(&self.width_px.to_le_bytes());
+        bytes[28..32].copy_from_slice(&self.seg_id.to_le_bytes());
+        bytes
+    }
+}
+
+/// Why a projected hair segment could not be encoded for the GPU rasterizer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProjectedHairRasterSegmentError {
+    /// A zero-sized render target cannot contain projected coordinates.
+    EmptyViewport,
+    /// Pixel dimensions exceed the exact integer range of f32 coordinates.
+    ViewportOutOfRange,
+    /// A coordinate, depth, or width was NaN or infinite.
+    NonFiniteValue,
+    /// An endpoint exceeds the safe finite range for shader pixel-bound math.
+    CoordinateOutOfRange,
+    /// Normalized depth was not in `0..=1`.
+    DepthOutOfRange,
+    /// Projected strand diameter was negative.
+    NegativeWidth,
+    /// Projected strand diameter exceeds the safe shader pixel-bound range.
+    WidthOutOfRange,
+}
+
+impl fmt::Display for ProjectedHairRasterSegmentError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EmptyViewport => f.write_str("hair raster viewport must be non-zero"),
+            Self::ViewportOutOfRange => {
+                f.write_str("hair raster viewport exceeds shader i32 bounds")
+            }
+            Self::NonFiniteValue => f.write_str("hair raster segment contains a non-finite value"),
+            Self::CoordinateOutOfRange => {
+                f.write_str("hair raster endpoint exceeds shader pixel-bound range")
+            }
+            Self::DepthOutOfRange => f.write_str("hair raster depth must be in 0..=1"),
+            Self::NegativeWidth => f.write_str("hair raster width must be non-negative"),
+            Self::WidthOutOfRange => {
+                f.write_str("hair raster width exceeds shader pixel-bound range")
+            }
+        }
+    }
+}
 
 /// Default strand screen width, in pixels, at or below which a segment is
 /// rasterized through the compute software path.
@@ -273,6 +458,109 @@ pub fn bin_hair_raster(
 mod tests {
     use super::*;
     use alloc::vec;
+    use core::mem::{align_of, offset_of, size_of};
+
+    #[test]
+    fn projected_segment_matches_wgsl_storage_layout() {
+        assert_eq!(align_of::<ProjectedHairRasterSegment>(), 8);
+        assert_eq!(size_of::<ProjectedHairRasterSegment>(), 32);
+        assert_eq!(offset_of!(ProjectedHairRasterSegment, p0), 0);
+        assert_eq!(offset_of!(ProjectedHairRasterSegment, p1), 8);
+        assert_eq!(offset_of!(ProjectedHairRasterSegment, depth0), 16);
+        assert_eq!(offset_of!(ProjectedHairRasterSegment, depth1), 20);
+        assert_eq!(offset_of!(ProjectedHairRasterSegment, width_px), 24);
+        assert_eq!(offset_of!(ProjectedHairRasterSegment, seg_id), 28);
+    }
+
+    #[test]
+    fn projected_segment_constructor_accepts_viewport_boundary_and_offscreen_values() {
+        let segment = ProjectedHairRasterSegment::try_new(
+            [0.0, 0.0],
+            [1920.0, 1080.0],
+            0.0,
+            1.0,
+            0.75,
+            0x1234_5678,
+            [1920, 1080],
+        )
+        .unwrap();
+        assert_eq!(segment.p0, [0.0, 0.0]);
+        assert_eq!(segment.p1, [1920.0, 1080.0]);
+        assert_eq!(segment.seg_id, 0x1234_5678);
+        let crossing = ProjectedHairRasterSegment::try_new(
+            [-5.0, 20.0],
+            [30.0, 20.0],
+            0.25,
+            0.5,
+            2.0,
+            7,
+            [16, 32],
+        )
+        .unwrap();
+        assert_eq!(crossing.p0(), [-5.0, 20.0]);
+        let encoded = segment.encode_le();
+        assert_eq!(encoded.len(), 32);
+        assert_eq!(&encoded[0..4], &0.0_f32.to_le_bytes());
+        assert_eq!(&encoded[8..12], &1920.0_f32.to_le_bytes());
+        assert_eq!(&encoded[16..20], &0.0_f32.to_le_bytes());
+        assert_eq!(&encoded[20..24], &1.0_f32.to_le_bytes());
+        assert_eq!(&encoded[24..28], &0.75_f32.to_le_bytes());
+        assert_eq!(&encoded[28..32], &0x1234_5678_u32.to_le_bytes());
+    }
+
+    #[test]
+    fn projected_segment_constructor_rejects_invalid_viewports_values_and_coordinates() {
+        let make = |p0, p1, depth0, depth1, width, viewport| {
+            ProjectedHairRasterSegment::try_new(p0, p1, depth0, depth1, width, 0, viewport)
+        };
+        assert_eq!(
+            make([0.0; 2], [1.0; 2], 0.5, 0.5, 1.0, [0, 1]),
+            Err(ProjectedHairRasterSegmentError::EmptyViewport)
+        );
+        assert_eq!(
+            make([0.0; 2], [1.0; 2], 0.5, 0.5, 1.0, [(1 << 24) + 1, 1]),
+            Err(ProjectedHairRasterSegmentError::ViewportOutOfRange)
+        );
+        assert_eq!(
+            make([f32::NAN, 0.0], [1.0; 2], 0.5, 0.5, 1.0, [10, 10]),
+            Err(ProjectedHairRasterSegmentError::NonFiniteValue)
+        );
+        assert_eq!(
+            make([0.0; 2], [1.0; 2], f32::INFINITY, 0.5, 1.0, [10, 10]),
+            Err(ProjectedHairRasterSegmentError::NonFiniteValue)
+        );
+        assert_eq!(
+            make([0.0; 2], [1.0; 2], 0.5, 0.5, f32::NEG_INFINITY, [10, 10]),
+            Err(ProjectedHairRasterSegmentError::NonFiniteValue)
+        );
+        assert_eq!(
+            make(
+                [-((1 << 30) as f32) - 256.0, 0.0],
+                [1.0; 2],
+                0.5,
+                0.5,
+                1.0,
+                [10, 10]
+            ),
+            Err(ProjectedHairRasterSegmentError::CoordinateOutOfRange)
+        );
+        assert_eq!(
+            make([0.0; 2], [1.0; 2], -0.001, 0.5, 1.0, [10, 10]),
+            Err(ProjectedHairRasterSegmentError::DepthOutOfRange)
+        );
+        assert_eq!(
+            make([0.0; 2], [1.0; 2], 0.5, 1.001, 1.0, [10, 10]),
+            Err(ProjectedHairRasterSegmentError::DepthOutOfRange)
+        );
+        assert_eq!(
+            make([0.0; 2], [1.0; 2], 0.5, 0.5, -0.001, [10, 10]),
+            Err(ProjectedHairRasterSegmentError::NegativeWidth)
+        );
+        assert_eq!(
+            make([0.0; 2], [1.0; 2], 0.5, 0.5, (1 << 25) as f32, [10, 10]),
+            Err(ProjectedHairRasterSegmentError::WidthOutOfRange)
+        );
+    }
 
     fn stats(screen_width_px: f32, screen_length_px: f32, coverage: f32) -> HairStrandSegmentStats {
         HairStrandSegmentStats {
