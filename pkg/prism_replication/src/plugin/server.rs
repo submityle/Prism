@@ -21,8 +21,9 @@ use crate::transport::Transport;
 use super::durable::{self, AuthorityJournal, PreparedCommit, RestoredAuthority};
 use super::DurableRecoveryError;
 use super::{
-    decode_event, decode_rpc, decode_state, encode_accept, encode_event, encode_reject, encode_rpc,
-    encode_snapshot, encode_state, ConnectionState, EventEnvelope, ReplicationConfig, RpcEnvelope,
+    decode_event, decode_rpc, decode_state, encode_accept, encode_delivery, encode_event,
+    encode_reject, encode_rpc, encode_snapshot, encode_state, ConnectionState, EventEnvelope,
+    ReplicationConfig, RpcEnvelope,
 };
 
 /// How the authority turns an inbound command into an authoritative change.
@@ -58,6 +59,7 @@ pub struct ServerReplication<S: ServerStrategy> {
     connection: ConnectionState,
     next_rpc_id: Option<u64>,
     pending_commands: VecDeque<QueuedInboundCommand>,
+    inbound_delivery_acks: VecDeque<(u64, u64)>,
     next_inbound_command_id: Option<u64>,
     leased_inbound_command: Option<u64>,
     external_command_consumer: bool,
@@ -149,6 +151,7 @@ impl<S: ServerStrategy> ServerReplication<S> {
             connection,
             next_rpc_id: Some(0),
             pending_commands: VecDeque::new(),
+            inbound_delivery_acks: VecDeque::new(),
             next_inbound_command_id: Some(0),
             leased_inbound_command: None,
             external_command_consumer: false,
@@ -453,7 +456,9 @@ impl<S: ServerStrategy> ServerReplication<S> {
     }
 
     fn drain_control(&mut self) {
-        while self.pending_commands.len() < self.config.mux.reliable_queue.max(1) {
+        while self.pending_commands.len() + self.inbound_delivery_acks.len()
+            < self.config.mux.reliable_queue.max(1)
+        {
             let Some(bytes) = self.mux.recv(NetChannel::RpcReliable) else {
                 break;
             };
@@ -509,6 +514,21 @@ impl<S: ServerStrategy> ServerReplication<S> {
                         payload: payload.to_vec(),
                     });
                 }
+                RpcEnvelope::DeliveryAck {
+                    generation,
+                    sequence,
+                } => {
+                    if !matches!(self.connection, ConnectionState::Established(_)) {
+                        self.reject(
+                            ProtocolError::TrafficBeforeHandshake {
+                                channel: NetChannel::RpcReliable,
+                            },
+                            true,
+                        );
+                        break;
+                    }
+                    self.inbound_delivery_acks.push_back((generation, sequence));
+                }
                 RpcEnvelope::Accept(_) | RpcEnvelope::Reject(_) => {
                     self.reject(ProtocolError::UnexpectedHandshake, true);
                     break;
@@ -532,7 +552,11 @@ impl<S: ServerStrategy> ServerReplication<S> {
                         self.last_audit_error.get_or_insert(error);
                     }
                 }
-                Ok(EventEnvelope::Delta(_) | EventEnvelope::Snapshot(_)) => {
+                Ok(
+                    EventEnvelope::Delta(_)
+                    | EventEnvelope::Snapshot(_)
+                    | EventEnvelope::Delivery { .. },
+                ) => {
                     self.reject(
                         ProtocolError::MalformedMessage {
                             channel: NetChannel::EventsReliable,
@@ -650,6 +674,28 @@ impl<S: ServerStrategy> ServerReplication<S> {
         let event = encode_event(bytes);
         let result = self.mux.send(NetChannel::EventsReliable, &event);
         self.record_send(result)
+    }
+
+    /// Queue one reliable application-delivery event. The receiving
+    /// application must acknowledge only after applying the payload.
+    pub fn send_delivery(
+        &mut self,
+        generation: u64,
+        sequence: u64,
+        bytes: &[u8],
+    ) -> Result<QueueOutcome, MuxSendError> {
+        self.require_established()?;
+        if generation == 0 || sequence == 0 {
+            return Err(MuxSendError::InvalidDeliveryIdentity);
+        }
+        let event = encode_delivery(generation, sequence, bytes);
+        let result = self.mux.send(NetChannel::EventsReliable, &event);
+        self.record_send(result)
+    }
+
+    /// Take the next client application-level cumulative delivery ACK.
+    pub fn recv_delivery_ack(&mut self) -> Option<(u64, u64)> {
+        self.inbound_delivery_acks.pop_front()
     }
 
     /// Retained ECS hashes received from this client. A record-only server has

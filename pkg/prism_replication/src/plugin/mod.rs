@@ -62,8 +62,8 @@ pub use authority_ecs::{
     AuthorityWorldExecutorStatus,
 };
 pub use client::{
-    AuthorityUpdate, EcsReplicationStrategy, NetworkRollbackSimulation, Replication,
-    ReplicationPlugin, ReplicationStrategy,
+    AuthorityUpdate, DeliveredEvent, DeliveryAckError, EcsReplicationStrategy,
+    NetworkRollbackSimulation, Replication, ReplicationPlugin, ReplicationStrategy,
 };
 pub use durable::{DurableLogOperation, DurableRecoveryError};
 pub use ecs::{EcsReplication, EcsReplicationError, EcsReplicationPlugin, NetworkRollbackDriver};
@@ -157,12 +157,14 @@ const RPC_HELLO: u8 = 0;
 const RPC_ACCEPT: u8 = 1;
 const RPC_REJECT: u8 = 2;
 const RPC_PAYLOAD: u8 = 3;
+const RPC_DELIVERY_ACK: u8 = 4;
 
 const EVENT_DELTA: u8 = 0;
 const EVENT_PAYLOAD: u8 = 1;
 const EVENT_SNAPSHOT: u8 = 2;
 #[cfg(feature = "determinism")]
 const EVENT_FRAME_HASH: u8 = 3;
+const EVENT_DELIVERY: u8 = 4;
 const STATE_PAYLOAD: u8 = 0;
 
 pub(super) enum RpcEnvelope<'a> {
@@ -170,12 +172,18 @@ pub(super) enum RpcEnvelope<'a> {
     Accept(NegotiatedProtocol),
     Reject(ProtocolError),
     Payload(&'a [u8]),
+    DeliveryAck { generation: u64, sequence: u64 },
 }
 
 pub(super) enum EventEnvelope<'a> {
     Delta(&'a [u8]),
     Payload(&'a [u8]),
     Snapshot(&'a [u8]),
+    Delivery {
+        generation: u64,
+        sequence: u64,
+        payload: &'a [u8],
+    },
     #[cfg(feature = "determinism")]
     FrameHash(FrameHashUpdate),
 }
@@ -214,6 +222,14 @@ pub(super) fn encode_reject(error: ProtocolError) -> Vec<u8> {
 
 pub(super) fn encode_rpc(payload: &[u8]) -> Vec<u8> {
     encode_payload(RPC_PAYLOAD, payload)
+}
+
+pub(super) fn encode_delivery_ack(generation: u64, sequence: u64) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(17);
+    bytes.push(RPC_DELIVERY_ACK);
+    bytes.extend_from_slice(&generation.to_le_bytes());
+    bytes.extend_from_slice(&sequence.to_le_bytes());
+    bytes
 }
 
 pub(super) fn decode_rpc(bytes: &[u8]) -> Result<RpcEnvelope<'_>, ProtocolError> {
@@ -257,6 +273,17 @@ pub(super) fn decode_rpc(bytes: &[u8]) -> Result<RpcEnvelope<'_>, ProtocolError>
             Ok(RpcEnvelope::Reject(error))
         }
         RPC_PAYLOAD => Ok(RpcEnvelope::Payload(payload)),
+        RPC_DELIVERY_ACK if payload.len() == 16 => {
+            let generation = u64::from_le_bytes(payload[..8].try_into().unwrap());
+            let sequence = u64::from_le_bytes(payload[8..].try_into().unwrap());
+            if generation == 0 || sequence == 0 {
+                return Err(malformed(NetChannel::RpcReliable));
+            }
+            Ok(RpcEnvelope::DeliveryAck {
+                generation,
+                sequence,
+            })
+        }
         _ => Err(malformed(NetChannel::RpcReliable)),
     }
 }
@@ -267,6 +294,15 @@ pub(super) fn encode_delta(payload: &[u8]) -> Vec<u8> {
 
 pub(super) fn encode_event(payload: &[u8]) -> Vec<u8> {
     encode_payload(EVENT_PAYLOAD, payload)
+}
+
+pub(super) fn encode_delivery(generation: u64, sequence: u64, payload: &[u8]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(17 + payload.len());
+    bytes.push(EVENT_DELIVERY);
+    bytes.extend_from_slice(&generation.to_le_bytes());
+    bytes.extend_from_slice(&sequence.to_le_bytes());
+    bytes.extend_from_slice(payload);
+    bytes
 }
 
 pub(super) fn decode_event(bytes: &[u8]) -> Result<EventEnvelope<'_>, ProtocolError> {
@@ -290,6 +326,18 @@ pub(super) fn decode_event(bytes: &[u8]) -> Result<EventEnvelope<'_>, ProtocolEr
             }
         }
         EVENT_PAYLOAD => Ok(EventEnvelope::Payload(payload)),
+        EVENT_DELIVERY if payload.len() >= 16 => {
+            let generation = u64::from_le_bytes(payload[..8].try_into().unwrap());
+            let sequence = u64::from_le_bytes(payload[8..16].try_into().unwrap());
+            if generation == 0 || sequence == 0 {
+                return Err(malformed(NetChannel::EventsReliable));
+            }
+            Ok(EventEnvelope::Delivery {
+                generation,
+                sequence,
+                payload: &payload[16..],
+            })
+        }
         #[cfg(feature = "determinism")]
         EVENT_FRAME_HASH => FrameHashUpdate::decode(payload)
             .map(EventEnvelope::FrameHash)

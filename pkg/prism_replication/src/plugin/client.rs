@@ -21,9 +21,30 @@ use crate::session::{ClientSession, SessionError};
 use crate::transport::Transport;
 
 use super::{
-    decode_event, decode_rpc, decode_state, encode_event, encode_hello, encode_rpc, encode_state,
-    ConnectionState, EventEnvelope, ReplicationConfig, RpcEnvelope,
+    decode_event, decode_rpc, decode_state, encode_delivery_ack, encode_event, encode_hello,
+    encode_rpc, encode_state, ConnectionState, EventEnvelope, ReplicationConfig, RpcEnvelope,
 };
+
+/// One reliable application event retained until the integration applies it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeliveredEvent {
+    /// Durable peer incarnation that owns this sequence namespace.
+    pub generation: u64,
+    /// Monotonic sequence within `generation`, starting at one.
+    pub sequence: u64,
+    /// Exact application payload.
+    pub payload: Vec<u8>,
+}
+
+/// Invalid application delivery cursor or a reliable-channel refusal.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DeliveryAckError {
+    /// The cursor was not delivered on the selected peer generation or would
+    /// move the cumulative acknowledgement backwards.
+    InvalidCursor,
+    /// The reliable RPC lane could not admit the ACK.
+    Send(MuxSendError),
+}
 
 /// The application's replication strategy: how a local input advances the record.
 pub trait ReplicationStrategy: Send + Sync + 'static {
@@ -112,6 +133,11 @@ pub struct Replication<S: ReplicationStrategy> {
     connection: ConnectionState,
     next_rpc_id: Option<u64>,
     inbound_events: VecDeque<Vec<u8>>,
+    inbound_delivery_events: VecDeque<DeliveredEvent>,
+    delivery_generation: Option<u64>,
+    highest_delivery_received: u64,
+    highest_delivery_dequeued: u64,
+    acknowledged_delivery_sequence: u64,
     inbound_rpcs: VecDeque<Vec<u8>>,
     inbound_inputs: VecDeque<Vec<u8>>,
     inbound_bulk: VecDeque<Vec<u8>>,
@@ -193,6 +219,11 @@ impl<S: ReplicationStrategy> Replication<S> {
             connection,
             next_rpc_id: Some(0),
             inbound_events: VecDeque::new(),
+            inbound_delivery_events: VecDeque::new(),
+            delivery_generation: None,
+            highest_delivery_received: 0,
+            highest_delivery_dequeued: 0,
+            acknowledged_delivery_sequence: 0,
             inbound_rpcs: VecDeque::new(),
             inbound_inputs: VecDeque::new(),
             inbound_bulk: VecDeque::new(),
@@ -252,7 +283,7 @@ impl<S: ReplicationStrategy> Replication<S> {
 
         let mut applied = 0;
         let event_queue_limit = self.config.mux.reliable_queue.max(1);
-        while self.inbound_events.len() < event_queue_limit
+        while self.inbound_events.len() + self.inbound_delivery_events.len() < event_queue_limit
             && (!defer_authority
                 || self.deferred_authority.len() < event_queue_limit
                 || self.deferred_resync_required)
@@ -298,6 +329,41 @@ impl<S: ReplicationStrategy> Replication<S> {
                 }
                 Ok(EventEnvelope::Payload(event)) => {
                     self.inbound_events.push_back(event.to_vec());
+                }
+                Ok(EventEnvelope::Delivery {
+                    generation,
+                    sequence,
+                    payload,
+                }) => {
+                    if self.delivery_generation.is_none() {
+                        if sequence != 1 {
+                            self.reject(ProtocolError::MalformedMessage {
+                                channel: NetChannel::EventsReliable,
+                            });
+                            break;
+                        }
+                        self.delivery_generation = Some(generation);
+                    }
+                    if self.delivery_generation != Some(generation) {
+                        self.reject(ProtocolError::MalformedMessage {
+                            channel: NetChannel::EventsReliable,
+                        });
+                        break;
+                    }
+                    if sequence > self.highest_delivery_received {
+                        if self.highest_delivery_received.checked_add(1) != Some(sequence) {
+                            self.reject(ProtocolError::MalformedMessage {
+                                channel: NetChannel::EventsReliable,
+                            });
+                            break;
+                        }
+                        self.highest_delivery_received = sequence;
+                        self.inbound_delivery_events.push_back(DeliveredEvent {
+                            generation,
+                            sequence,
+                            payload: payload.to_vec(),
+                        });
+                    }
                 }
                 #[cfg(feature = "determinism")]
                 Ok(EventEnvelope::FrameHash(update))
@@ -562,6 +628,10 @@ impl<S: ReplicationStrategy> Replication<S> {
                     self.reject(ProtocolError::UnexpectedHandshake);
                     break;
                 }
+                RpcEnvelope::DeliveryAck { .. } => {
+                    self.reject(ProtocolError::UnexpectedHandshake);
+                    break;
+                }
             }
         }
     }
@@ -737,6 +807,51 @@ impl<S: ReplicationStrategy> Replication<S> {
         self.record_send(result)
     }
 
+    /// Establish the persisted application cursor before pumping a resumed
+    /// durable-delivery stream. The caller must persist this cursor atomically
+    /// with applying each event; the transport cannot provide that guarantee.
+    pub fn resume_delivery_cursor(&mut self, generation: u64, applied_sequence: u64) -> bool {
+        if generation == 0 || !self.inbound_delivery_events.is_empty() {
+            return false;
+        }
+        if self
+            .delivery_generation
+            .is_some_and(|current| current != generation)
+        {
+            return false;
+        }
+        if self.highest_delivery_received != self.acknowledged_delivery_sequence {
+            return false;
+        }
+        self.delivery_generation = Some(generation);
+        self.highest_delivery_received = applied_sequence;
+        self.highest_delivery_dequeued = applied_sequence;
+        self.acknowledged_delivery_sequence = applied_sequence;
+        true
+    }
+
+    /// Acknowledge an event only after the application has successfully applied
+    /// it. ACKs are cumulative and may be re-sent idempotently after reconnect.
+    pub fn acknowledge_delivery(
+        &mut self,
+        generation: u64,
+        applied_sequence: u64,
+    ) -> Result<(), DeliveryAckError> {
+        self.require_established().map_err(DeliveryAckError::Send)?;
+        if self.delivery_generation != Some(generation)
+            || applied_sequence == 0
+            || applied_sequence < self.acknowledged_delivery_sequence
+            || applied_sequence > self.highest_delivery_dequeued
+        {
+            return Err(DeliveryAckError::InvalidCursor);
+        }
+        let bytes = encode_delivery_ack(generation, applied_sequence);
+        let result = self.mux.send(NetChannel::RpcReliable, &bytes);
+        self.record_send(result).map_err(DeliveryAckError::Send)?;
+        self.acknowledged_delivery_sequence = applied_sequence;
+        Ok(())
+    }
+
     /// Retained ECS hash comparison, independent of application event traffic.
     #[cfg(feature = "determinism")]
     #[must_use]
@@ -824,6 +939,14 @@ impl<S: ReplicationStrategy> Replication<S> {
     /// Take one reliable event delivered by the authority.
     pub fn recv_event(&mut self) -> Option<Vec<u8>> {
         self.inbound_events.pop_front()
+    }
+
+    /// Take the next sequenced delivery event. It is not acknowledged until
+    /// the application calls [`Self::acknowledge_delivery`] after applying it.
+    pub fn recv_delivery_event(&mut self) -> Option<DeliveredEvent> {
+        let event = self.inbound_delivery_events.pop_front()?;
+        self.highest_delivery_dequeued = event.sequence;
+        Some(event)
     }
 
     /// Take one reliable RPC response/control payload delivered by the authority.
@@ -1135,6 +1258,71 @@ mod tests {
         let client = client_app.world().resource::<Replication<Add>>();
         assert_eq!(client.acked(), 1);
         assert_eq!(int(client.state().unwrap()), 3);
+    }
+
+    #[test]
+    fn durable_delivery_requires_dequeue_and_roundtrips_application_ack() {
+        let (client_end, server_end) = InMemoryTransport::pair_secure();
+        let mut client_app = App::new();
+        client_app.add_plugins(ReplicationPlugin::new(
+            schema(),
+            8,
+            snapshot_at(0, 0),
+            Add,
+            Box::new(client_end),
+        ));
+        let mut server_app = App::new();
+        server_app.add_plugins(ReplicationServerPlugin::new(
+            schema(),
+            8,
+            snapshot_at(0, 0),
+            AddAuthority,
+            Box::new(server_end),
+        ));
+
+        for _ in 0..4 {
+            client_app.update();
+            server_app.update();
+        }
+        assert!(client_app
+            .world()
+            .resource::<Replication<Add>>()
+            .negotiated()
+            .is_some());
+
+        server_app
+            .world_mut()
+            .resource_mut::<ServerReplication<AddAuthority>>()
+            .send_delivery(9, 1, b"committed payload")
+            .unwrap();
+        for _ in 0..3 {
+            client_app.update();
+            server_app.update();
+        }
+
+        let client = client_app.world_mut().resource_mut::<Replication<Add>>();
+        assert_eq!(
+            client.acknowledge_delivery(9, 1),
+            Err(DeliveryAckError::InvalidCursor),
+            "wire receipt alone must not be enough to acknowledge"
+        );
+        let event = client.recv_delivery_event().unwrap();
+        assert_eq!(event.generation, 9);
+        assert_eq!(event.sequence, 1);
+        assert_eq!(event.payload, b"committed payload");
+        client.acknowledge_delivery(9, 1).unwrap();
+
+        for _ in 0..3 {
+            client_app.update();
+            server_app.update();
+        }
+        assert_eq!(
+            server_app
+                .world_mut()
+                .resource_mut::<ServerReplication<AddAuthority>>()
+                .recv_delivery_ack(),
+            Some((9, 1))
+        );
     }
 
     #[test]

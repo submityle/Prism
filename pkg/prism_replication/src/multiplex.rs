@@ -255,6 +255,8 @@ pub enum MuxSendError {
     Backpressured(NetChannel),
     /// The local RPC call identity space is exhausted and cannot safely wrap.
     RpcIdentityExhausted,
+    /// A durable delivery generation or sequence is zero, which is reserved.
+    InvalidDeliveryIdentity,
     /// An unreliable channel exhausted its never-reused packet sequence space.
     SequenceExhausted(NetChannel),
 }

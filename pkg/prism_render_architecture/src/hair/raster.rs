@@ -75,6 +75,7 @@ impl ProjectedHairRasterSegment {
         if viewport[0] > (1 << 24) || viewport[1] > (1 << 24) {
             return Err(ProjectedHairRasterSegmentError::ViewportOutOfRange);
         }
+        checked_hair_raster_pixel_count(viewport)?;
         if !p0[0].is_finite()
             || !p0[1].is_finite()
             || !p1[0].is_finite()
@@ -195,6 +196,7 @@ pub fn project_hair_raster_segment(
     if viewport[0] > (1 << 24) || viewport[1] > (1 << 24) {
         return Err(ProjectedHairRasterSegmentError::ViewportOutOfRange);
     }
+    checked_hair_raster_pixel_count(viewport)?;
     if !radius_a.is_finite() || !radius_b.is_finite() {
         return Err(ProjectedHairRasterSegmentError::NonFiniteValue);
     }
@@ -318,6 +320,28 @@ pub fn project_resampled_groom(
     groom: &ResampledGroom,
     viewport: [u32; 2],
 ) -> Result<Vec<Option<ProjectedHairRasterSegment>>, ProjectedHairRasterSegmentError> {
+    project_resampled_groom_with_id_base(clip_from_world, groom, viewport, 0)
+}
+
+/// Projects one groom while assigning IDs from a caller-owned global range.
+///
+/// Use a disjoint `first_segment_id` range when multiple grooms share one
+/// visibility buffer; this prevents their strand-major local indices from
+/// aliasing in the deferred-shading lookup. The caller owns range allocation
+/// and must retain the same ID-to-groom/segment mapping through shading.
+pub fn project_resampled_groom_with_id_base(
+    clip_from_world: &[[f32; 4]; 4],
+    groom: &ResampledGroom,
+    viewport: [u32; 2],
+    first_segment_id: u32,
+) -> Result<Vec<Option<ProjectedHairRasterSegment>>, ProjectedHairRasterSegmentError> {
+    if viewport[0] == 0 || viewport[1] == 0 {
+        return Err(ProjectedHairRasterSegmentError::EmptyViewport);
+    }
+    if viewport[0] > (1 << 24) || viewport[1] > (1 << 24) {
+        return Err(ProjectedHairRasterSegmentError::ViewportOutOfRange);
+    }
+    checked_hair_raster_pixel_count(viewport)?;
     let strand_count = groom.attributes.len();
     if strand_count == 0 {
         if !groom.positions.is_empty() {
@@ -336,15 +360,24 @@ pub fn project_resampled_groom(
     let segments_per_strand = groom.points_per_strand - 1;
     let segment_count = strand_count
         .checked_mul(segments_per_strand)
-        .filter(|&count| count.saturating_sub(1) <= u32::MAX as usize)
         .ok_or(ProjectedHairRasterSegmentError::SegmentIdOutOfRange)?;
-    let mut projected = Vec::with_capacity(segment_count);
+    validate_projected_segment_range(segment_count, first_segment_id)?;
+    let mut projected = Vec::new();
+    projected
+        .try_reserve_exact(segment_count)
+        .map_err(|_| ProjectedHairRasterSegmentError::UploadSizeOutOfRange)?;
     for (strand_index, attributes) in groom.attributes.iter().enumerate() {
         let base = strand_index * groom.points_per_strand;
         for segment_index in 0..segments_per_strand {
             let t0 = segment_index as f32 / segments_per_strand as f32;
             let t1 = (segment_index + 1) as f32 / segments_per_strand as f32;
-            let seg_id = (strand_index * segments_per_strand + segment_index) as u32;
+            let local_segment_id = strand_index * segments_per_strand + segment_index;
+            let seg_id = first_segment_id
+                .checked_add(
+                    u32::try_from(local_segment_id)
+                        .map_err(|_| ProjectedHairRasterSegmentError::SegmentIdOutOfRange)?,
+                )
+                .ok_or(ProjectedHairRasterSegmentError::SegmentIdOutOfRange)?;
             let a = groom.positions[base + segment_index];
             let b = groom.positions[base + segment_index + 1];
             projected.push(project_hair_raster_segment(
@@ -361,6 +394,62 @@ pub fn project_resampled_groom(
     Ok(projected)
 }
 
+fn validate_projected_segment_range(
+    segment_count: usize,
+    first_segment_id: u32,
+) -> Result<(), ProjectedHairRasterSegmentError> {
+    // The dispatch ABI carries the record count in one u32. Even when the
+    // final stable ID would fit (for example IDs 0..=u32::MAX), that many
+    // records cannot be described by a u32 segment_count.
+    u32::try_from(segment_count)
+        .map_err(|_| ProjectedHairRasterSegmentError::SegmentCountOutOfRange)?;
+    if segment_count > 0
+        && first_segment_id
+            .checked_add(
+                u32::try_from(segment_count - 1)
+                    .map_err(|_| ProjectedHairRasterSegmentError::SegmentIdOutOfRange)?,
+            )
+            .is_none_or(|last_segment_id| last_segment_id == u32::MAX)
+    {
+        return Err(ProjectedHairRasterSegmentError::SegmentIdOutOfRange);
+    }
+    Ok(())
+}
+
+fn checked_hair_raster_pixel_count(
+    viewport: [u32; 2],
+) -> Result<u32, ProjectedHairRasterSegmentError> {
+    viewport[0]
+        .checked_mul(viewport[1])
+        .filter(|&pixel_count| pixel_count > 0)
+        .ok_or(ProjectedHairRasterSegmentError::ViewportPixelCountOutOfRange)
+}
+
+/// Packs projected Hair records into one contiguous little-endian upload slab.
+///
+/// The exact 32-byte shader ABI is preserved for every record. Capacity is
+/// reserved once, avoiding per-record staging allocations; allocation or
+/// address-space overflow is reported instead of panicking. Clipped records
+/// are intentionally not accepted here: callers compact the `Some` results
+/// from [`project_resampled_groom`] first, while retaining each record's stable
+/// `seg_id`.
+pub fn encode_projected_hair_segments_le(
+    segments: &[ProjectedHairRasterSegment],
+) -> Result<Vec<u8>, ProjectedHairRasterSegmentError> {
+    let byte_len = segments
+        .len()
+        .checked_mul(32)
+        .ok_or(ProjectedHairRasterSegmentError::UploadSizeOutOfRange)?;
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(byte_len)
+        .map_err(|_| ProjectedHairRasterSegmentError::UploadSizeOutOfRange)?;
+    for segment in segments {
+        bytes.extend_from_slice(&segment.encode_le());
+    }
+    Ok(bytes)
+}
+
 /// Why a projected hair segment could not be encoded for the GPU rasterizer.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProjectedHairRasterSegmentError {
@@ -368,6 +457,8 @@ pub enum ProjectedHairRasterSegmentError {
     EmptyViewport,
     /// Pixel dimensions exceed the exact integer range of f32 coordinates.
     ViewportOutOfRange,
+    /// Viewport area exceeds the shader's u32 pixel-address space.
+    ViewportPixelCountOutOfRange,
     /// A coordinate, depth, or width was NaN or infinite.
     NonFiniteValue,
     /// An endpoint exceeds the safe finite range for shader pixel-bound math.
@@ -382,6 +473,14 @@ pub enum ProjectedHairRasterSegmentError {
     InvalidGroomLayout,
     /// Stable strand-major segment identity does not fit in the GPU ABI.
     SegmentIdOutOfRange,
+    /// Segment count cannot be represented by the immediate dispatch ABI.
+    SegmentCountOutOfRange,
+    /// The segment dispatch exceeds the device's one-dimensional workgroup limit.
+    DispatchExceedsDeviceLimit,
+    /// Raster parameters cannot be represented by the shader contract.
+    InvalidRasterParams,
+    /// Packed upload byte length overflows or cannot be reserved.
+    UploadSizeOutOfRange,
 }
 
 impl fmt::Display for ProjectedHairRasterSegmentError {
@@ -390,6 +489,9 @@ impl fmt::Display for ProjectedHairRasterSegmentError {
             Self::EmptyViewport => f.write_str("hair raster viewport must be non-zero"),
             Self::ViewportOutOfRange => {
                 f.write_str("hair raster viewport exceeds shader i32 bounds")
+            }
+            Self::ViewportPixelCountOutOfRange => {
+                f.write_str("hair raster viewport area exceeds u32 pixel addressing")
             }
             Self::NonFiniteValue => f.write_str("hair raster segment contains a non-finite value"),
             Self::CoordinateOutOfRange => {
@@ -405,6 +507,18 @@ impl fmt::Display for ProjectedHairRasterSegmentError {
             }
             Self::SegmentIdOutOfRange => {
                 f.write_str("hair raster segment identity exceeds the GPU ABI")
+            }
+            Self::SegmentCountOutOfRange => {
+                f.write_str("hair raster segment count exceeds the immediate ABI")
+            }
+            Self::DispatchExceedsDeviceLimit => {
+                f.write_str("hair raster segment dispatch exceeds the device workgroup limit")
+            }
+            Self::InvalidRasterParams => {
+                f.write_str("hair raster parameters violate the shader ABI")
+            }
+            Self::UploadSizeOutOfRange => {
+                f.write_str("hair raster upload size exceeds addressable memory")
             }
         }
     }
@@ -424,6 +538,12 @@ pub const DEFAULT_HAIR_SOFTWARE_WIDTH_PX: f32 = 2.0;
 /// shimmering noise as strands flicker in and out between frames, so it is
 /// dropped before it reaches the vis-buffer.
 pub const DEFAULT_HAIR_MIN_COVERAGE: f32 = 1.0 / 256.0;
+/// Maximum sub-pixel samples accepted by one hair raster dispatch.
+///
+/// Each sample evaluates a point-to-segment distance in both winner and
+/// coverage passes. Bounding this count prevents malformed runtime settings
+/// from multiplying per-segment pixel work without limit.
+pub const MAX_HAIR_RASTER_SUBPIXEL_SAMPLES: u32 = 64;
 
 /// Screen-space statistics for one projected strand segment.
 ///
@@ -517,6 +637,77 @@ impl Default for HairSoftRasterAbi {
             tile_size_px: 16,
             max_segments_per_tile: 256,
         }
+    }
+}
+
+/// Five-word immediate parameter block consumed by `hair_raster.wesl`.
+///
+/// Its 20-byte little-endian representation is viewport width/height, coverage
+/// epsilon, sample count, and segment count, in that order.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[repr(C)]
+pub struct HairRasterDispatchParams {
+    viewport: [u32; 2],
+    coverage_epsilon: f32,
+    subpixel_samples: u32,
+    segment_count: u32,
+}
+
+impl HairRasterDispatchParams {
+    /// Validates and constructs the immediate block for a raster dispatch.
+    pub fn try_new(
+        viewport: [u32; 2],
+        abi: HairSoftRasterAbi,
+        segment_count: usize,
+    ) -> Result<Self, ProjectedHairRasterSegmentError> {
+        if viewport[0] == 0 || viewport[1] == 0 {
+            return Err(ProjectedHairRasterSegmentError::EmptyViewport);
+        }
+        if viewport[0] > (1 << 24) || viewport[1] > (1 << 24) {
+            return Err(ProjectedHairRasterSegmentError::ViewportOutOfRange);
+        }
+        checked_hair_raster_pixel_count(viewport)?;
+        let segment_count = u32::try_from(segment_count)
+            .map_err(|_| ProjectedHairRasterSegmentError::SegmentCountOutOfRange)?;
+        if !abi.coverage_epsilon.is_finite()
+            || !(0.0..=1.0).contains(&abi.coverage_epsilon)
+            || abi.subpixel_samples == 0
+            || !abi.subpixel_samples.is_power_of_two()
+            || abi.subpixel_samples > MAX_HAIR_RASTER_SUBPIXEL_SAMPLES
+        {
+            return Err(ProjectedHairRasterSegmentError::InvalidRasterParams);
+        }
+        Ok(Self {
+            viewport,
+            coverage_epsilon: abi.coverage_epsilon,
+            subpixel_samples: abi.subpixel_samples,
+            segment_count,
+        })
+    }
+
+    /// Encodes the WGSL immediate block as five little-endian 32-bit words.
+    #[must_use]
+    pub fn encode_le(self) -> [u8; 20] {
+        let mut bytes = [0; 20];
+        bytes[0..4].copy_from_slice(&self.viewport[0].to_le_bytes());
+        bytes[4..8].copy_from_slice(&self.viewport[1].to_le_bytes());
+        bytes[8..12].copy_from_slice(&self.coverage_epsilon.to_le_bytes());
+        bytes[12..16].copy_from_slice(&self.subpixel_samples.to_le_bytes());
+        bytes[16..20].copy_from_slice(&self.segment_count.to_le_bytes());
+        bytes
+    }
+
+    /// Returns the one-dimensional workgroup count after checking the device
+    /// limit. An empty groom requires no dispatch and returns zero.
+    pub fn dispatch_workgroups(
+        self,
+        max_workgroups_per_dimension: u32,
+    ) -> Result<u32, ProjectedHairRasterSegmentError> {
+        let workgroups = self.segment_count.div_ceil(64);
+        if workgroups > max_workgroups_per_dimension {
+            return Err(ProjectedHairRasterSegmentError::DispatchExceedsDeviceLimit);
+        }
+        Ok(workgroups)
     }
 }
 
@@ -788,6 +979,22 @@ mod tests {
     }
 
     #[test]
+    fn raster_abi_rejects_viewport_area_outside_u32_pixel_addressing() {
+        assert_eq!(
+            ProjectedHairRasterSegment::try_new(
+                [0.0, 0.0],
+                [1.0, 1.0],
+                0.0,
+                1.0,
+                1.0,
+                0,
+                [65_536, 65_536],
+            ),
+            Err(ProjectedHairRasterSegmentError::ViewportPixelCountOutOfRange)
+        );
+    }
+
+    #[test]
     fn resampled_groom_projects_segments_with_stable_ids_and_radius_taper() {
         use super::super::dynamics::Vec3;
         use super::super::groom_import::StrandAttributes;
@@ -824,6 +1031,24 @@ mod tests {
         assert!((records[1].width_px() - 2.0_f32.sqrt() * 7.5).abs() < 1.0e-4);
         assert!((records[2].width_px() - 2.0_f32.sqrt() * 8.0).abs() < 1.0e-4);
         assert!((records[3].width_px() - 2.0_f32.sqrt() * 5.0).abs() < 1.0e-4);
+        let upload = encode_projected_hair_segments_le(&records).unwrap();
+        assert_eq!(upload.len(), records.len() * 32);
+        for (index, record) in records.iter().enumerate() {
+            assert_eq!(&upload[index * 32..(index + 1) * 32], &record.encode_le());
+        }
+        let rebased =
+            project_resampled_groom_with_id_base(&identity, &groom, [100, 100], 40).unwrap();
+        assert_eq!(
+            rebased
+                .iter()
+                .map(|record| record.as_ref().unwrap().seg_id())
+                .collect::<Vec<_>>(),
+            [40, 41, 42, 43]
+        );
+        assert_eq!(
+            project_resampled_groom_with_id_base(&identity, &groom, [100, 100], u32::MAX - 2,),
+            Err(ProjectedHairRasterSegmentError::SegmentIdOutOfRange)
+        );
     }
 
     #[test]
@@ -843,6 +1068,29 @@ mod tests {
             project_resampled_groom(&identity, &malformed, [64, 64]),
             Err(ProjectedHairRasterSegmentError::InvalidGroomLayout)
         );
+    }
+
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn projected_segment_range_matches_count_and_id_abis() {
+        assert_eq!(
+            validate_projected_segment_range(u32::MAX as usize, 0),
+            Ok(())
+        );
+        assert_eq!(
+            validate_projected_segment_range(u32::MAX as usize + 1, 0),
+            Err(ProjectedHairRasterSegmentError::SegmentCountOutOfRange)
+        );
+        assert_eq!(
+            validate_projected_segment_range(2, u32::MAX),
+            Err(ProjectedHairRasterSegmentError::SegmentIdOutOfRange)
+        );
+        assert_eq!(
+            validate_projected_segment_range(1, u32::MAX),
+            Err(ProjectedHairRasterSegmentError::SegmentIdOutOfRange)
+        );
+        assert_eq!(validate_projected_segment_range(1, u32::MAX - 1), Ok(()));
+        assert_eq!(validate_projected_segment_range(0, u32::MAX), Ok(()));
     }
 
     #[test]
@@ -1100,5 +1348,53 @@ mod tests {
         assert_eq!(abi.subpixel_samples, 8);
         assert_eq!(abi.tile_size_px, 16);
         assert_eq!(abi.max_segments_per_tile, 256);
+    }
+
+    #[test]
+    fn dispatch_params_match_the_twenty_byte_wgsl_immediate_layout() {
+        let params = HairRasterDispatchParams::try_new(
+            [1280, 720],
+            HairSoftRasterAbi::default(),
+            0x0102_0304,
+        )
+        .unwrap();
+        assert_eq!(core::mem::size_of::<HairRasterDispatchParams>(), 20);
+        assert_eq!(
+            params.encode_le(),
+            [
+                0x00, 0x05, 0x00, 0x00, // viewport width
+                0xD0, 0x02, 0x00, 0x00, // viewport height
+                0x00, 0x00, 0x80, 0x3B, // 1/256 coverage epsilon
+                0x08, 0x00, 0x00, 0x00, // sample count
+                0x04, 0x03, 0x02, 0x01, // segment count
+            ]
+        );
+        assert_eq!(params.dispatch_workgroups(300_000), Ok(264_205));
+        assert_eq!(
+            params.dispatch_workgroups(1_000),
+            Err(ProjectedHairRasterSegmentError::DispatchExceedsDeviceLimit)
+        );
+    }
+
+    #[test]
+    fn dispatch_params_reject_invalid_epsilon_and_unaddressable_viewport() {
+        let mut abi = HairSoftRasterAbi::default();
+        abi.coverage_epsilon = f32::NAN;
+        assert_eq!(
+            HairRasterDispatchParams::try_new([1, 1], abi, 1),
+            Err(ProjectedHairRasterSegmentError::InvalidRasterParams)
+        );
+        assert_eq!(
+            HairRasterDispatchParams::try_new([65_536, 65_536], HairSoftRasterAbi::default(), 1),
+            Err(ProjectedHairRasterSegmentError::ViewportPixelCountOutOfRange)
+        );
+        for samples in [0, 3, MAX_HAIR_RASTER_SUBPIXEL_SAMPLES * 2] {
+            let mut abi = HairSoftRasterAbi::default();
+            abi.subpixel_samples = samples;
+            assert_eq!(
+                HairRasterDispatchParams::try_new([1, 1], abi, 1),
+                Err(ProjectedHairRasterSegmentError::InvalidRasterParams)
+            );
+        }
     }
 }
