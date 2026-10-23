@@ -120,9 +120,12 @@ pub struct QueryState<D: QueryData, F: QueryFilter = ()> {
     /// user-provided `QueryFilter::filter_chunk`; its cursor updates are only
     /// published after that scan completes successfully.
     dirty_pass: SpinLock<()>,
-    /// Last explicit dirty-window request. The change index is a forward-only
-    /// cursor, so overlapping or rewound requests replay retained history.
-    dirty_last_window: SpinLock<Option<(Tick, Tick)>>,
+    /// World tick through which a successful dirty pass acknowledged forward
+    /// cursors. Historical requests must not rewind this boundary: a later
+    /// overlapping request still needs history already consumed by a cursor.
+    /// A historical gap recovery may acknowledge cursors through the current
+    /// world tick, not merely through that request's historical upper bound.
+    dirty_cursor_tick: SpinLock<Option<Tick>>,
     /// Cursor into the world's column-change journal. A forward window can use
     /// this to discover only changed archetypes/chunks; gaps and rewound
     /// windows deliberately fall back to the conservative column index.
@@ -190,7 +193,7 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
             dirty_activation_cursors,
             dirty_cursors,
             dirty_pass: SpinLock::new(()),
-            dirty_last_window: SpinLock::new(None),
+            dirty_cursor_tick: SpinLock::new(None),
             dirty_column_cursor: SpinLock::new(None),
             dirty_activation_tick,
             _marker: PhantomData,
@@ -231,11 +234,11 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
         &self.data_state
     }
 
-    /// Last dirty-window request, used to decide whether a journal cursor can
-    /// safely advance or a historical fallback is required.
+    /// Last acknowledged forward-cursor boundary, independent of the most
+    /// recent requested window.
     #[inline]
-    pub(crate) fn dirty_window(&self) -> Option<(Tick, Tick)> {
-        *self.dirty_last_window.lock()
+    pub(crate) fn dirty_cursor_tick(&self) -> Option<Tick> {
+        *self.dirty_cursor_tick.lock()
     }
 
     /// Read the non-destructive table journal cursor.
@@ -362,17 +365,17 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
         let now = world.change_tick();
         let historical = this_run != now;
         let overlapping = self
-            .dirty_last_window
+            .dirty_cursor_tick
             .lock()
-            .is_some_and(|(_, previous_this)| previous_this.is_newer_than(last_run, now));
+            .is_some_and(|covered_through| covered_through.is_newer_than(last_run, now));
         let valid_age = last_run.age_since(this_run) <= Tick::MAX_CHANGE_AGE
             && this_run.age_since(now) <= Tick::MAX_CHANGE_AGE;
         (historical || overlapping) && valid_age
     }
 
     #[inline]
-    pub(crate) fn remember_sparse_window(&self, last_run: Tick, this_run: Tick) {
-        *self.dirty_last_window.lock() = Some((last_run, this_run));
+    pub(crate) fn acknowledge_dirty_cursors(&self, current_tick: Tick) {
+        *self.dirty_cursor_tick.lock() = Some(current_tick);
     }
 
     /// Whether `entity` is matched by this query (live and satisfying every
@@ -461,7 +464,7 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
             // or renumbered archetypes, so drop them and re-scan from scratch.
             if cache.generation != generation {
                 cache.ids = Arc::new(Vec::new());
-                cache.checked = 0;
+                cache.checked_through = None;
                 cache.generation = generation;
                 cache.eviction_checked = eviction_cursor;
             } else if cache.eviction_checked != eviction_cursor {
@@ -469,7 +472,7 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
                 // whole matched-id snapshot. Probe only newly evicted IDs first;
                 // compact iff one actually belongs to the cached match set. A
                 // bounded log can report that this cache fell behind; in that
-                // case scan only its own matched IDs against registry tombstones.
+                // case scan only its own matched IDs against the live registry.
                 let pending_evictions = world.archetypes().evictions_since(cache.eviction_checked);
                 let affected = if let Some(mut pending_evictions) = pending_evictions {
                     let pending_count = pending_evictions.len();
@@ -479,47 +482,37 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
                     {
                         pending_evictions.any(|id| cache.ids.binary_search(id).is_ok())
                     } else {
-                        cache.ids.iter().any(|id| {
-                            world
-                                .archetypes()
-                                .get(*id)
-                                .is_some_and(|archetype| archetype.is_evicted())
-                        })
+                        cache
+                            .ids
+                            .iter()
+                            .any(|id| world.archetypes().get(*id).is_none())
                     }
                 } else {
-                    cache.ids.iter().any(|id| {
-                        world
-                            .archetypes()
-                            .get(*id)
-                            .is_some_and(|archetype| archetype.is_evicted())
-                    })
+                    cache
+                        .ids
+                        .iter()
+                        .any(|id| world.archetypes().get(*id).is_none())
                 };
                 if affected {
-                    Arc::make_mut(&mut cache.ids).retain(|id| {
-                        world
-                            .archetypes()
-                            .get(*id)
-                            .is_some_and(|archetype| !archetype.is_evicted())
-                    });
+                    Arc::make_mut(&mut cache.ids)
+                        .retain(|id| world.archetypes().get(*id).is_some());
                 }
                 cache.eviction_checked = eviction_cursor;
             }
-            cache.checked
+            cache.checked_through
         };
 
-        let total = world.archetypes().len();
-        if checked >= total {
+        let latest_id = world.archetypes().last_id();
+        if checked == latest_id {
             return self.matched.lock().ids.clone();
         }
 
         // Resolve the newly-created archetypes with the lock released. Relies on
-        // the archetype invariants (immutable component sets, never removed
-        // within a generation) so an id tested once never needs retesting.
+        // the archetype invariants (immutable component sets, monotonic IDs,
+        // and no ID reuse) so an id tested once never needs retesting.
         let mut appended: Vec<ArchetypeId> = Vec::new();
-        for archetype in world.archetypes().iter().skip(checked) {
-            if !archetype.is_evicted()
-                && D::matches(&self.data_state, archetype)
-                && F::matches(&self.filter_state, archetype)
+        for archetype in world.archetypes().iter_after(checked) {
+            if D::matches(&self.data_state, archetype) && F::matches(&self.filter_state, archetype)
             {
                 appended.push(archetype.id());
             }
@@ -530,12 +523,12 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
         let mut cache = self.matched.lock();
         if cache.generation == generation
             && cache.eviction_checked == eviction_cursor
-            && cache.checked == checked
+            && cache.checked_through == checked
         {
             if !appended.is_empty() {
                 Arc::make_mut(&mut cache.ids).extend(appended);
             }
-            cache.checked = total;
+            cache.checked_through = latest_id;
         }
         cache.ids.clone()
     }

@@ -67,18 +67,15 @@ impl OccupancyStats {
     }
 }
 
-/// Per stable-ID slot snapshot: live archetype identity (or an explicitly
-/// marked evicted tombstone) and chunk occupancy.
+/// Per-live-archetype snapshot: stable identity and chunk occupancy.
 #[derive(Debug, Clone)]
 pub struct ArchetypeReport {
     /// The archetype's stable id.
     pub id: ArchetypeId,
-    /// Whether this stable-ID slot is a permanently evicted tombstone.
-    /// Tombstones remain in reports for ID continuity, but their released
-    /// component identity is intentionally empty.
+    /// Compatibility field retained for report consumers. Reports contain
+    /// live registry entries only, so this is always `false`.
     pub evicted: bool,
-    /// Component ids that make up a live archetype's identity. Empty for an
-    /// evicted tombstone because its identity metadata has been reclaimed.
+    /// Component ids that make up the archetype's identity.
     pub components: Vec<ComponentId>,
     /// Chunk occupancy for the archetype's Table storage.
     pub occupancy: OccupancyStats,
@@ -93,34 +90,29 @@ pub struct ArchetypeReport {
 pub struct WorldReport {
     /// Number of live entities in the world.
     pub entity_count: u32,
-    /// Number of addressable archetype slots, including the empty archetype
-    /// and permanently evicted tombstones.
+    /// Number of live archetypes, including the empty archetype.
     pub archetype_count: usize,
-    /// Number of live archetypes, including the live empty archetype but
-    /// excluding permanently evicted tombstones.
+    /// Number of live archetypes, including the live empty archetype. Kept
+    /// separately for compatibility; currently equal to `archetype_count`.
     pub live_archetype_count: usize,
     /// Number of registered component types.
     pub component_count: usize,
     /// The world's current change tick at capture time.
     pub change_tick: Tick,
-    /// One report per stable-ID slot, in native archetype order; tombstones
-    /// are retained and marked by [`ArchetypeReport::evicted`].
+    /// One report per live archetype, in ascending stable-ID order. Evicted
+    /// IDs are not represented.
     pub archetypes: Vec<ArchetypeReport>,
 }
 
 impl WorldReport {
     /// Capture a structural snapshot of `world`.
     ///
-    /// Read-only: walks the archetype table once and records chunk geometry,
-    /// live-row counts, and tombstone state. Evicted slots remain in the list
-    /// for stable-ID continuity and have empty component identity. Does not
-    /// touch component values.
+    /// Read-only: walks the live archetype registry once and records chunk
+    /// geometry and live-row counts. Does not touch component values.
     pub fn capture(world: &World) -> Self {
         let archetypes = world.archetypes();
         let mut reports = Vec::with_capacity(archetypes.len());
-        let mut live_archetype_count = 0;
         for archetype in archetypes.iter() {
-            live_archetype_count += usize::from(!archetype.is_evicted());
             let table = archetype.table();
             let occupancy = OccupancyStats {
                 chunk_count: table.chunk_count(),
@@ -137,7 +129,7 @@ impl WorldReport {
         Self {
             entity_count: world.entity_count(),
             archetype_count: archetypes.len(),
-            live_archetype_count,
+            live_archetype_count: archetypes.len(),
             component_count: world.components().len(),
             change_tick: world.change_tick(),
             archetypes: reports,
@@ -266,7 +258,7 @@ mod tests {
     }
 
     #[test]
-    fn report_marks_evicted_slots_and_separates_live_archetype_count() {
+    fn report_omits_evicted_archetypes_and_counts_only_live_entries() {
         let mut world = World::new();
         let entity = world.spawn((Position(1.0, 1.0), Batch(17)));
         let evicted_id = world.entities().location(entity).unwrap().archetype_id;
@@ -274,14 +266,7 @@ mod tests {
 
         let report = WorldReport::capture(&world);
         assert_eq!(report.archetype_count, report.archetypes.len());
-        assert_eq!(report.live_archetype_count + 1, report.archetype_count);
-        let tombstone = report
-            .archetypes
-            .iter()
-            .find(|item| item.id == evicted_id)
-            .unwrap();
-        assert!(tombstone.evicted);
-        assert!(tombstone.components.is_empty());
-        assert_eq!(tombstone.occupancy.live_rows, 0);
+        assert_eq!(report.live_archetype_count, report.archetype_count);
+        assert!(!report.archetypes.iter().any(|item| item.id == evicted_id));
     }
 }

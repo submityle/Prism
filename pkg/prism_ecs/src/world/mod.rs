@@ -232,7 +232,7 @@ impl World {
     /// and alias a recent one. Cheap to run periodically (design §10).
     pub fn check_change_ticks(&mut self) {
         let this_run = self.change_tick;
-        for arch in self.archetypes.iter_mut() {
+        for arch in self.archetypes.iter_mut_unordered() {
             arch.table_mut().check_change_ticks(this_run);
         }
         self.sparse_sets.check_change_ticks(this_run);

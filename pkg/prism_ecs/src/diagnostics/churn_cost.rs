@@ -11,7 +11,8 @@
 //! This module is the *gross* dual of [`system_cost`](super::system_cost): it
 //! joins the same profiler self time against
 //! [`structural_churn`](super::structural_churn), whose figures count absolute
-//! entity / archetype movement so opposing moves add instead of cancelling. The
+//! live-entity deltas and actual archetype creations plus permanent evictions.
+//! Archetype moves add even when they cancel within a single step. The
 //! join surfaces the signal net cost accounting cannot:
 //!
 //! * **expensive oscillator** (self time high *and* oscillation non-zero) — a
@@ -61,8 +62,8 @@ pub struct ChurnCostEntry {
     pub has_timing: bool,
     /// Gross entity movement (`Σ |entity_delta|`) folded from the churn profile.
     pub gross_entity_churn: u64,
-    /// Gross archetype movement (`Σ |archetype_delta|`) folded from the churn
-    /// profile.
+    /// Actual archetype creations plus permanent evictions folded from the
+    /// churn profile. Registry-reset observations contribute zero.
     pub gross_archetype_churn: u64,
     /// Entity oscillation: gross entity movement beyond the net delta
     /// (`gross - |net|`), the thrash net accounting hides.
@@ -344,7 +345,7 @@ impl ChurnCostProfile {
 mod tests {
     use super::*;
     use crate::command::Commands;
-    use crate::component::Component;
+    use crate::component::{Component, ComponentId, Components, StorageType};
     use crate::diagnostics::profiler::SpanNode;
     use crate::diagnostics::step_inspector::SteppingInspector;
     use crate::entity::Entity;
@@ -355,6 +356,21 @@ mod tests {
     #[derive(Debug, PartialEq, Clone, Copy)]
     struct Marker;
     impl Component for Marker {}
+
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    struct SharedKey(u32);
+    impl Component for SharedKey {
+        const STORAGE: StorageType = StorageType::Shared;
+
+        fn install_storage_glue(components: &mut Components, id: ComponentId) {
+            components.set_shared_box(id, crate::component::shared_box_of::<Self>());
+        }
+    }
+
+    fn shared_cycle(world: &mut World) {
+        let entity = world.spawn(SharedKey(0));
+        assert!(world.despawn(entity));
+    }
 
     // +5 entities via deferred commands.
     fn spawner(mut commands: Commands) {
@@ -466,6 +482,96 @@ mod tests {
         assert!(profile.worst_oscillator().is_none());
         assert_eq!(spawner.entity_oscillation, 0);
         assert_eq!(despawner.entity_oscillation, 0);
+    }
+
+    #[test]
+    fn join_counts_archetype_churn_that_cancels_within_one_step() {
+        let mut world = World::new();
+        let mut schedule = Schedule::new();
+        schedule.add_systems(shared_cycle);
+        let trace = SteppingInspector::new().capture_frame(&mut schedule, &mut world);
+        let churn = StructuralChurnProfile::from_trace(&trace);
+        let name = name_of(&schedule, "shared_cycle");
+        let flame = FlameGraph::from_roots(alloc::vec![SpanNode::new(
+            name.clone(),
+            Duration::from_micros(70),
+            Vec::new(),
+        )]);
+
+        let profile = ChurnCostProfile::join(&flame, &churn, &schedule);
+        let entry = profile.entry(&name).unwrap();
+        assert!(entry.is_matched());
+        assert_eq!(entry.gross_entity_churn, 0);
+        assert_eq!(entry.net_entity_delta, 0);
+        assert_eq!(entry.gross_archetype_churn, 2);
+        assert_eq!(entry.total_gross_churn(), 2);
+        assert_eq!(entry.nanos_per_churn(), Some(35_000));
+        assert!(!entry.is_compute_bound());
+        assert_eq!(profile.total_gross_churn, 2);
+    }
+
+    #[test]
+    fn join_counts_permanent_evictions_when_live_archetypes_decline() {
+        let mut world = World::new();
+        let first = world.spawn(SharedKey(0));
+        let second = world.spawn(SharedKey(1));
+        let mut schedule = Schedule::new();
+        schedule.add_systems(move |world: &mut World| {
+            assert!(world.despawn(first));
+            assert!(world.despawn(second));
+        });
+        let trace = SteppingInspector::new().capture_frame(&mut schedule, &mut world);
+        let churn = StructuralChurnProfile::from_trace(&trace);
+        let name = trace[0].name(&schedule).unwrap().to_string();
+        let flame = FlameGraph::from_roots(alloc::vec![SpanNode::new(
+            name.clone(),
+            Duration::from_micros(40),
+            Vec::new(),
+        )]);
+
+        let profile = ChurnCostProfile::join(&flame, &churn, &schedule);
+        let entry = profile.entry(&name).unwrap();
+        assert_eq!(entry.net_entity_delta, -2);
+        assert_eq!(entry.gross_entity_churn, 2);
+        assert_eq!(entry.gross_archetype_churn, 2);
+        assert_eq!(entry.total_gross_churn(), 4);
+        assert_eq!(entry.nanos_per_churn(), Some(10_000));
+        assert_eq!(profile.total_gross_churn, 4);
+        assert_eq!(profile.total_entity_oscillation, 0);
+    }
+
+    #[test]
+    fn join_does_not_charge_registry_reset_as_archetype_churn() {
+        let mut world = World::new();
+        let empty = world.snapshot();
+        for _ in 0..3 {
+            shared_cycle(&mut world);
+        }
+        let entity = world.spawn(Marker);
+        assert!(world.despawn(entity));
+        let mut schedule = Schedule::new();
+        schedule
+            .add_systems((move |world: &mut World| world.restore(&empty), shared_cycle).chain());
+        let trace = SteppingInspector::new().capture_frame(&mut schedule, &mut world);
+        assert!(trace[0].archetype_registry_reset);
+        assert_eq!(trace[0].archetype_delta(), -1);
+        let churn = StructuralChurnProfile::from_trace(&trace);
+        let reset_name = trace[0].name(&schedule).unwrap().to_string();
+        let flame = FlameGraph::from_roots(alloc::vec![SpanNode::new(
+            reset_name.clone(),
+            Duration::from_micros(40),
+            Vec::new(),
+        )]);
+
+        let profile = ChurnCostProfile::join(&flame, &churn, &schedule);
+        let reset = profile.entry(&reset_name).unwrap();
+        assert!(reset.is_matched());
+        assert_eq!(reset.gross_archetype_churn, 0);
+        assert_eq!(reset.total_gross_churn(), 0);
+        let next = profile.entry(&name_of(&schedule, "shared_cycle")).unwrap();
+        assert_eq!(next.gross_archetype_churn, 2);
+        assert_eq!(profile.total_gross_churn, 2);
+        assert_eq!(profile.total_entity_oscillation, 0);
     }
 
     /// A churny system never timed shows up as churn-only with zero duration.

@@ -10,11 +10,14 @@
 //! headline "成本 ∝ 变化量" (design §10) is about containing.
 //!
 //! This module takes the dual, **gross** lens over the same
-//! [`StepObservation`] trace: it accumulates the absolute entity- and
-//! archetype-count movement each system drives, so opposing moves add instead
-//! of cancelling. The gap between gross and net — the *oscillation* — is pure
-//! structural thrash: churn that produced no lasting size change and is the
+//! [`StepObservation`] trace: it accumulates absolute live-entity deltas and
+//! actual archetype creations plus permanent evictions. Archetype moves add
+//! even when they cancel within one step. Within a fully measured trace, the
+//! gap between gross and net — the *oscillation* — is pure structural thrash:
+//! churn that produced no lasting size change and is the
 //! prime candidate for command batching or scheduling changes (design §9).
+//! Registry-reset observations retain live net deltas but contribute no gross
+//! archetype churn; oscillation across those gaps is only the measured excess.
 //!
 //! Aggregation is by schedule node, so concatenating several frames' traces (or
 //! a node observed more than once) sums cleanly, and a node that oscillates
@@ -31,9 +34,12 @@ use crate::schedule::graph::Schedule;
 
 /// Gross structural movement a single schedule node drove over a trace.
 ///
-/// *Gross* figures sum the absolute per-observation deltas (opposing moves add);
-/// *net* figures sum the signed deltas (opposing moves cancel). The gap between
-/// them is oscillation — structural work that left world size unchanged.
+/// *Gross* entity figures sum absolute per-observation live-count deltas;
+/// *gross* archetype figures sum actual creations and permanent evictions.
+/// *Net* figures sum signed live-count deltas. At a registry reset (e.g. world
+/// restore), archetype gross is unavailable and contributes zero, while net
+/// still describes the size change. Oscillation is the non-negative excess
+/// of measured gross over the absolute net.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SystemChurnEntry {
     /// The schedule node index this entry aggregates.
@@ -43,13 +49,14 @@ pub struct SystemChurnEntry {
     /// Number of observations in which this node ran (vs. was gated off).
     pub run_count: usize,
     /// Number of observations in which this node observably moved entities or
-    /// archetypes (a non-zero delta).
+    /// archetypes (a non-zero live delta or measured archetype churn).
     pub migrating_observation_count: usize,
     /// Summed absolute live-entity movement across the trace
     /// (`Σ |entity_delta|`).
     pub gross_entity_churn: u64,
-    /// Summed absolute archetype-count movement across the trace
-    /// (`Σ |archetype_delta|`).
+    /// Summed archetype creations plus permanent evictions across the trace.
+    /// Registry-reset observations contribute zero because their counters
+    /// belong to different generations.
     pub gross_archetype_churn: u64,
     /// Net live-entity delta across the trace (negative for net despawns).
     pub net_entity_delta: i64,
@@ -85,7 +92,7 @@ impl SystemChurnEntry {
     /// Whether this node moved any structure at all over the trace.
     #[inline]
     pub fn is_migrating(&self) -> bool {
-        self.total_churn() > 0
+        self.total_churn() > 0 || self.migrating_observation_count > 0
     }
 
     /// Resolve this node's system name against `schedule` (its `type_name`,
@@ -106,8 +113,8 @@ pub struct StructuralChurnProfile {
     pub entries: Vec<SystemChurnEntry>,
     /// Total gross entity movement across every system (`Σ |entity_delta|`).
     pub total_gross_entity_churn: u64,
-    /// Total gross archetype movement across every system
-    /// (`Σ |archetype_delta|`).
+    /// Total measured archetype creations plus permanent evictions across
+    /// every system. Registry-reset observations contribute zero.
     pub total_gross_archetype_churn: u64,
     /// Net live-entity delta across the whole trace.
     pub total_net_entity_delta: i64,
@@ -147,11 +154,12 @@ impl StructuralChurnProfile {
 
             let ed = obs.entity_delta();
             let ad = obs.archetype_delta();
+            let archetype_churn = obs.gross_archetype_churn();
             entry.gross_entity_churn += ed.unsigned_abs();
-            entry.gross_archetype_churn += ad.unsigned_abs() as u64;
+            entry.gross_archetype_churn += archetype_churn;
             entry.net_entity_delta += ed;
             entry.net_archetype_delta += ad;
-            if ed != 0 || ad != 0 {
+            if ed != 0 || ad != 0 || archetype_churn != 0 {
                 entry.migrating_observation_count += 1;
             }
         }
@@ -242,7 +250,7 @@ impl StructuralChurnProfile {
 mod tests {
     use super::*;
     use crate::command::Commands;
-    use crate::component::Component;
+    use crate::component::{Component, ComponentId, Components, StorageType};
     use crate::diagnostics::step_inspector::SteppingInspector;
     use crate::schedule::{IntoSystemConfigs, Schedule};
     use crate::system::Query;
@@ -251,6 +259,21 @@ mod tests {
     #[derive(Debug, PartialEq, Clone, Copy)]
     struct Marker;
     impl Component for Marker {}
+
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    struct SharedKey(u32);
+    impl Component for SharedKey {
+        const STORAGE: StorageType = StorageType::Shared;
+
+        fn install_storage_glue(components: &mut Components, id: ComponentId) {
+            components.set_shared_box(id, crate::component::shared_box_of::<Self>());
+        }
+    }
+
+    fn shared_cycle(world: &mut World) {
+        let entity = world.spawn(SharedKey(0));
+        assert!(world.despawn(entity));
+    }
 
     // Spawns five Marker entities via deferred commands: +5 entities.
     fn spawner(mut commands: Commands) {
@@ -333,6 +356,90 @@ mod tests {
             "all entity movement was pure oscillation this frame"
         );
         assert_eq!(profile.migrating_system_count, 2);
+    }
+
+    #[test]
+    fn same_step_archetype_churn_accumulates_despite_zero_net_delta() {
+        let mut world = World::new();
+        let mut schedule = Schedule::new();
+        schedule.add_systems(shared_cycle);
+        let mut inspector = SteppingInspector::new();
+        let mut trace = inspector.capture_frame(&mut schedule, &mut world);
+        let profile = StructuralChurnProfile::from_trace(&trace);
+        let entry = profile.hottest().unwrap();
+
+        assert_eq!(entry.gross_entity_churn, 0);
+        assert_eq!(entry.net_archetype_delta, 0);
+        assert_eq!(entry.gross_archetype_churn, 2);
+        assert_eq!(entry.archetype_oscillation(), 2);
+        assert_eq!(entry.migrating_observation_count, 1);
+        assert!(entry.is_migrating());
+        assert_eq!(profile.migrating_system_count, 1);
+        assert_eq!(profile.total_gross_archetype_churn, 2);
+        assert_eq!(profile.total_net_archetype_delta, 0);
+        assert_eq!(profile.total_archetype_oscillation(), 2);
+
+        trace.extend(inspector.capture_frame(&mut schedule, &mut world));
+        let repeated = StructuralChurnProfile::from_trace(&trace);
+        let entry = repeated.hottest().unwrap();
+        assert_eq!(entry.run_count, 2);
+        assert_eq!(entry.migrating_observation_count, 2);
+        assert_eq!(entry.gross_archetype_churn, 4);
+        assert_eq!(entry.net_archetype_delta, 0);
+        assert_eq!(repeated.total_gross_archetype_churn, 4);
+        assert_eq!(repeated.total_archetype_oscillation(), 4);
+    }
+
+    #[test]
+    fn net_archetype_decline_counts_permanent_evictions() {
+        let mut world = World::new();
+        let first = world.spawn(SharedKey(0));
+        let second = world.spawn(SharedKey(1));
+        let mut schedule = Schedule::new();
+        schedule.add_systems(move |world: &mut World| {
+            assert!(world.despawn(first));
+            assert!(world.despawn(second));
+        });
+        let trace = SteppingInspector::new().capture_frame(&mut schedule, &mut world);
+        let profile = StructuralChurnProfile::from_trace(&trace);
+        let entry = profile.hottest().unwrap();
+
+        assert_eq!(entry.net_archetype_delta, -2);
+        assert_eq!(entry.gross_archetype_churn, 2);
+        assert_eq!(entry.archetype_oscillation(), 0);
+        assert_eq!(profile.total_net_archetype_delta, -2);
+        assert_eq!(profile.total_gross_archetype_churn, 2);
+        assert_eq!(profile.total_archetype_oscillation(), 0);
+    }
+
+    #[test]
+    fn restore_keeps_net_delta_without_fabricating_gross_churn() {
+        let mut world = World::new();
+        let empty = world.snapshot();
+        for _ in 0..3 {
+            shared_cycle(&mut world);
+        }
+        // Empty ordinary archetypes stay live until restore rebuilds the
+        // registry. Their disappearance remains a net delta, not an eviction.
+        let entity = world.spawn(Marker);
+        assert!(world.despawn(entity));
+        let mut schedule = Schedule::new();
+        schedule
+            .add_systems((move |world: &mut World| world.restore(&empty), shared_cycle).chain());
+        let trace = SteppingInspector::new().capture_frame(&mut schedule, &mut world);
+        assert!(trace[0].archetype_registry_reset);
+        let profile = StructuralChurnProfile::from_trace(&trace);
+        let reset = profile.entry(trace[0].node().unwrap()).unwrap();
+
+        assert_eq!(reset.net_archetype_delta, -1);
+        assert_eq!(reset.gross_archetype_churn, 0);
+        assert_eq!(reset.archetype_oscillation(), 0);
+        assert_eq!(reset.migrating_observation_count, 1);
+        assert!(reset.is_migrating());
+        assert_eq!(profile.migrating_system_count, 2);
+        assert_eq!(profile.total_net_archetype_delta, -1);
+        assert_eq!(profile.total_gross_archetype_churn, 2);
+        assert_eq!(profile.total_archetype_oscillation(), 1);
     }
 
     /// Entries rank by descending total churn with a node-index tie-break.

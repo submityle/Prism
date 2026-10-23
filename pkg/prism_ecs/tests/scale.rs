@@ -615,10 +615,10 @@ fn scale_simd_kernels_vs_scalar() {
 
 mod perf_gate {
     use super::*;
-    use prism_ecs::archetype::Archetype;
+    use prism_ecs::archetype::{Archetype, COLUMN_CHANGE_LOG_CAPACITY};
     use prism_ecs::change::Tick;
     use prism_ecs::component::Components;
-    use prism_ecs::query::{Access, QueryFilter};
+    use prism_ecs::query::{Access, QueryFilter, QueryState};
     use prism_ecs::storage::SparseSets;
     use std::collections::BTreeSet;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -703,8 +703,8 @@ mod perf_gate {
         assert_eq!(MATCH_CALLS.swap(0, Ordering::Relaxed), 0);
     }
 
-    // These assertions bound *reported output*, not the internal chunk-version
-    // scan. dirty_chunks currently visits every matched chunk (O(chunks)).
+    // These assertions bound reported output, not internal discovery work.
+    // The indexed workload below separately checks actual traversal counters.
     #[test]
     fn perf_contract_dirty_output_tracks_touched_chunks_not_world_rows() {
         for count in [256usize, 16_384] {
@@ -755,16 +755,209 @@ mod perf_gate {
     }
 
     #[cfg(all(feature = "multi_thread", feature = "simd"))]
-    const SAMPLES: usize = 9;
+    const SAMPLES: usize = 101;
+
+    #[cfg(all(feature = "multi_thread", feature = "simd"))]
+    const WARMUPS: usize = 5;
+
+    // Keep all 10,000 writes in each sample, but consume two forward windows
+    // before the bounded journal can lose history. Never time a replay/fallback
+    // and present it as normal incremental discovery.
+    const DIRTY_WRITES: usize = 10_000;
+    const DIRTY_WINDOW_WRITES: usize = 5_000;
+    const DIRTY_QUERIES: usize = DIRTY_WRITES.div_ceil(DIRTY_WINDOW_WRITES);
+    const DIRTY_ROWS_PER_CHUNK: usize = 32;
+
+    fn dirty_world(count: usize) -> (World, Vec<Entity>, QueryState<&'static DirtyCell>) {
+        let mut world = World::new();
+        let entities = world.spawn_batch((0..count).map(|_| DirtyCell {
+            value: 0,
+            _padding: [0; 504],
+        }));
+        let location = world.entities().location(entities[0]).unwrap();
+        let table = world
+            .archetypes()
+            .get(location.archetype_id)
+            .unwrap()
+            .table();
+        assert_eq!(size_of::<DirtyCell>(), 512);
+        assert_eq!(table.rows_per_chunk(), DIRTY_ROWS_PER_CHUNK);
+        let query = world.query::<&DirtyCell>();
+        let tick = world.change_tick();
+        // Establish a cursor after spawning; spawn overflow is not the workload.
+        assert!(query.dirty_chunks(&world, tick, tick).is_empty());
+        (world, entities, query)
+    }
+
+    // All writes, expected-set construction, assertions and report destruction
+    // are outside the timed interval. Both paths verify the exact chunk set.
+    fn dirty_window_sample(
+        world: &mut World,
+        entities: &[Entity],
+        query: &QueryState<&DirtyCell>,
+        stride: usize,
+        indices: std::ops::Range<usize>,
+        expect_gap: bool,
+    ) -> Duration {
+        let writes = indices.len();
+        assert!(stride > 0 && (indices.end - 1) * stride < entities.len());
+        let last = world.change_tick();
+        world.set_last_change_tick(last);
+        world.increment_change_tick();
+        let now = world.change_tick();
+        let mut expected = BTreeSet::new();
+        for index in indices {
+            let entity = entities[index * stride];
+            world.get_mut::<DirtyCell>(entity).unwrap().value += 1;
+            let location = world.entities().location(entity).unwrap();
+            expected.insert((
+                location.archetype_id,
+                location.row as usize / DIRTY_ROWS_PER_CHUNK * DIRTY_ROWS_PER_CHUNK,
+            ));
+        }
+        // More than INLINE_CHUNKS (currently 8): clustered Pos used to stay
+        // inline and could not measure the indexed high-cardinality path.
+        assert!(
+            expected.len() > 8,
+            "workload no longer exercises indexed candidates"
+        );
+        let start = Instant::now();
+        let report = query.dirty_chunks_with_stats(world, last, now);
+        let elapsed = start.elapsed();
+        assert_eq!(
+            report.stats.journal_gap, expect_gap,
+            "unexpected dirty path"
+        );
+        if expect_gap {
+            assert_eq!(report.stats.journal_events, 0);
+            assert_eq!(report.stats.journal_records_scanned, 0);
+            assert!(
+                report.stats.summaries_tested > 0,
+                "fallback did not visit interval index"
+            );
+            assert!(report.stats.archetype_index_entries_scanned > 0);
+        } else {
+            assert_eq!(report.stats.journal_events, writes);
+            assert_eq!(report.stats.journal_records_scanned, writes);
+            assert_eq!(report.stats.candidate_chunk_marks, writes);
+            assert_eq!(
+                report.stats.summaries_tested, 0,
+                "unexpected index fallback"
+            );
+            assert_eq!(report.stats.archetype_index_entries_scanned, 0);
+        }
+        assert_eq!(report.stats.candidate_archetype_checks, 1);
+        assert_eq!(report.stats.matched_archetypes, 1);
+        assert_eq!(report.stats.merged_candidates, expected.len());
+        assert_eq!(report.stats.reported_chunks, expected.len());
+        assert_eq!(report.chunks.len(), expected.len());
+        assert_eq!(
+            report
+                .chunks
+                .iter()
+                .map(|chunk| (chunk.archetype, chunk.start))
+                .collect::<BTreeSet<_>>(),
+            expected
+        );
+        assert!(report.chunks.windows(2).all(|pair| {
+            (pair[0].archetype, pair[0].start) < (pair[1].archetype, pair[1].start)
+        }));
+        black_box(report);
+        elapsed
+    }
+
+    fn forward_dirty_sample(
+        world: &mut World,
+        entities: &[Entity],
+        query: &QueryState<&DirtyCell>,
+        stride: usize,
+    ) -> Duration {
+        assert!(DIRTY_WINDOW_WRITES <= COLUMN_CHANGE_LOG_CAPACITY);
+        assert!(stride > 0 && (DIRTY_WRITES - 1) * stride < entities.len());
+        let mut elapsed = Duration::ZERO;
+        for first in (0..DIRTY_WRITES).step_by(DIRTY_WINDOW_WRITES) {
+            let end = (first + DIRTY_WINDOW_WRITES).min(DIRTY_WRITES);
+            elapsed += dirty_window_sample(world, entities, query, stride, first..end, false);
+        }
+        elapsed // Sum of DIRTY_QUERIES calls, not an average or write timing.
+    }
+
+    #[test]
+    fn perf_contract_dirty_forward_windows_retain_all_ten_thousand_writes() {
+        assert_eq!(DIRTY_QUERIES, 2);
+        assert!(DIRTY_WRITES > COLUMN_CHANGE_LOG_CAPACITY);
+        for stride in [1, 2] {
+            let (mut world, entities, query) = dirty_world(DIRTY_WRITES * stride);
+            // Reuse the actual producer body across samples: retained history
+            // wraps repeatedly, while each forward read must remain gap-free.
+            for _ in 0..3 {
+                forward_dirty_sample(&mut world, &entities, &query, stride);
+            }
+            for (index, entity) in entities.iter().enumerate() {
+                assert_eq!(
+                    world.get::<DirtyCell>(*entity).unwrap().value,
+                    if index % stride == 0 { 3 } else { 0 }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn perf_contract_dirty_single_window_overflow_is_explicit_fallback() {
+        assert!(DIRTY_WRITES > COLUMN_CHANGE_LOG_CAPACITY);
+        let (mut world, entities, query) = dirty_world(DIRTY_WRITES * 2);
+        for stride in [1, 2] {
+            dirty_window_sample(&mut world, &entities, &query, stride, 0..DIRTY_WRITES, true);
+            assert_eq!(
+                world
+                    .query_filtered::<&DirtyCell, Changed<DirtyCell>>()
+                    .iter(&world)
+                    .count(),
+                DIRTY_WRITES
+            );
+            // A gap is not sticky: the same cursor must resume strict forward discovery.
+            forward_dirty_sample(&mut world, &entities, &query, stride);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "unexpected dirty path")]
+    fn perf_contract_dirty_overflow_cannot_masquerade_as_forward() {
+        let (mut world, entities, query) = dirty_world(DIRTY_WRITES);
+        dirty_window_sample(&mut world, &entities, &query, 1, 0..DIRTY_WRITES, false);
+    }
+
+    #[test]
+    #[should_panic(expected = "unexpected dirty path")]
+    fn perf_contract_dirty_retained_window_cannot_masquerade_as_gap() {
+        let (mut world, entities, query) = dirty_world(DIRTY_WRITES);
+        dirty_window_sample(
+            &mut world,
+            &entities,
+            &query,
+            1,
+            0..DIRTY_WINDOW_WRITES,
+            true,
+        );
+    }
+
+    #[cfg(all(feature = "multi_thread", feature = "simd"))]
+    fn emit_controlled_contract() {
+        println!(
+            "PRISM_ECS_PERF_CONTRACT_V1 {{\"protocol\":\"PRISM_ECS_PERF_V2\",\"samples\":{SAMPLES},\"warmups\":{WARMUPS},\"dirty_writes_per_sample\":{DIRTY_WRITES},\"dirty_writes_per_window\":{DIRTY_WINDOW_WRITES},\"dirty_queries_per_sample\":{DIRTY_QUERIES},\"dirty_rows_per_chunk\":{DIRTY_ROWS_PER_CHUNK},\"column_change_log_capacity\":{COLUMN_CHANGE_LOG_CAPACITY},\"dirty_gap_writes_per_window\":{DIRTY_WRITES},\"dirty_gap_queries_per_sample\":1}}"
+        );
+    }
 
     #[cfg(all(feature = "multi_thread", feature = "simd"))]
     fn emit_samples(metric: &str, units: usize, mut run: impl FnMut() -> Duration) {
-        black_box(run()); // Untimed warmup, excluded from the persisted sample set.
+        for _ in 0..WARMUPS {
+            black_box(run());
+        }
         for sample in 0..SAMPLES {
             let ns = run().as_nanos();
             assert!(ns > 0, "sample is below clock resolution");
             println!(
-                "PRISM_ECS_PERF_V1 {{\"metric\":\"{metric}\",\"sample\":{sample},\"ns\":{ns},\"units\":{units}}}"
+                "PRISM_ECS_PERF_V2 {{\"metric\":\"{metric}\",\"sample\":{sample},\"ns\":{ns},\"units\":{units}}}"
             );
         }
     }
@@ -785,6 +978,7 @@ mod perf_gate {
         if cfg!(debug_assertions) {
             panic!("performance samples require --release");
         }
+        emit_controlled_contract();
         emit_samples("spawn_batch", ENTITIES, || {
             let mut world = World::new();
             let start = Instant::now();
@@ -817,7 +1011,7 @@ mod perf_gate {
                 });
             });
         }
-        let runs = (3 * (SAMPLES + 1)) as f32;
+        let runs = (3 * (SAMPLES + WARMUPS)) as f32;
         for (i, p) in world.query::<&Pos>().iter(&world).enumerate() {
             assert_eq!((p.0, p.1, p.2), (i as f32 + runs, 2.0 * runs, 3.0 * runs));
         }
@@ -828,43 +1022,83 @@ mod perf_gate {
                 black_box(query.iter(&world));
             }
         });
-        let mut last = world.change_tick();
+        drop(world); // Do not retain the propagation world beside the 512-byte rows.
+        let (mut world, entities, query) = dirty_world(ENTITIES);
+        let last = world.change_tick();
         world.set_last_change_tick(last);
         world.increment_change_tick();
-        sample_body("dirty_idle", 1, || {
-            assert!(query
-                .dirty_chunks(&world, last, world.change_tick())
-                .is_empty());
+        emit_samples("dirty_idle", 10_000, || {
+            let start = Instant::now();
+            let mut reported_chunks = 0;
+            for _ in 0..10_000 {
+                reported_chunks +=
+                    black_box(query.dirty_chunks(&world, last, world.change_tick())).len();
+            }
+            let elapsed = start.elapsed();
+            assert_eq!(reported_chunks, 0);
+            elapsed
         });
 
-        let entities: Vec<_> = world.query::<Entity>().iter(&world).collect();
         for (metric, stride) in [("dirty_clustered", 1), ("dirty_scattered", 100)] {
-            last = world.change_tick();
-            world.set_last_change_tick(last);
-            world.increment_change_tick();
-            for k in 0..10_000 {
-                world.get_mut::<Pos>(entities[k * stride]).unwrap().1 += 1.0;
-            }
-            let changed = world.query_filtered::<&Pos, Changed<Pos>>();
-            assert_eq!(changed.iter(&world).count(), 10_000);
-            sample_body(metric, 1, || {
-                let dirty = query.dirty_chunks(&world, last, world.change_tick());
-                assert!(!dirty.is_empty());
-                black_box(dirty);
+            emit_samples(metric, DIRTY_QUERIES, || {
+                forward_dirty_sample(&mut world, &entities, &query, stride)
             });
-            if stride == 100 {
-                sample_body("changed_scan", ENTITIES, || {
-                    assert_eq!(black_box(changed.iter(&world).count()), 10_000);
-                });
-            }
         }
+        emit_samples("dirty_gap_fallback", 1, || {
+            dirty_window_sample(&mut world, &entities, &query, 100, 0..DIRTY_WRITES, true)
+        });
+
+        // A separate row-scan window retains the original 10,000 changed rows;
+        // it does not claim to consume the bounded journal incrementally.
+        world.set_last_change_tick(world.change_tick());
+        world.increment_change_tick();
+        for k in 0..DIRTY_WRITES {
+            world.get_mut::<DirtyCell>(entities[k * 100]).unwrap().value += 1;
+        }
+        let changed = world.query_filtered::<&DirtyCell, Changed<DirtyCell>>();
+        emit_samples("changed_scan", ENTITIES, || {
+            let start = Instant::now();
+            let changed_count = black_box(changed.iter(&world).count());
+            let elapsed = start.elapsed();
+            assert_eq!(changed_count, DIRTY_WRITES);
+            elapsed
+        });
 
         let mut dst = vec![1.0f32; ENTITIES];
         let src = vec![2.0f32; ENTITIES];
         sample_body("simd_add", ENTITIES, || {
             prism_ecs::query::add_assign(black_box(&mut dst), black_box(&src));
         });
-        assert!(dst.iter().all(|&v| v == 1.0 + 2.0 * (SAMPLES + 1) as f32));
+        assert!(dst
+            .iter()
+            .all(|&v| v == 1.0 + 2.0 * (SAMPLES + WARMUPS) as f32));
+    }
+
+    /// Small synthetic wire-protocol check; no ECS workload or hardware claim.
+    #[cfg(all(feature = "multi_thread", feature = "simd"))]
+    #[test]
+    fn perf_contract_controlled_protocol_smoke() {
+        emit_controlled_contract();
+        for (metric, units) in [
+            ("spawn_batch", ENTITIES),
+            ("serial_propagate", ENTITIES),
+            ("parallel_propagate_1", ENTITIES),
+            ("parallel_propagate_4", ENTITIES),
+            ("query_cache_idle", 1024),
+            ("dirty_idle", 10_000),
+            ("dirty_clustered", DIRTY_QUERIES),
+            ("dirty_scattered", DIRTY_QUERIES),
+            ("dirty_gap_fallback", 1),
+            ("changed_scan", ENTITIES),
+            ("simd_add", ENTITIES),
+        ] {
+            let mut calls = 0;
+            emit_samples(metric, units, || {
+                calls += 1;
+                Duration::from_nanos(100)
+            });
+            assert_eq!(calls, WARMUPS + SAMPLES);
+        }
     }
 
     const PORTABLE_PREFIX: &str = "PRISM_ECS_COMPLEXITY_V1 ";

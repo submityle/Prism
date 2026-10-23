@@ -67,8 +67,8 @@ simd = []
 partition = []
 
 # GPU-resident component columns with dirty-block tracking (design §15 / §3).
-# Opt-in GPU-driven tier: persistent column mapping + incremental dirty upload
-# accessors live here; the actual upload is on the render side. The base build
+# Opt-in GPU-driven tier: CPU upload planning + incremental dirty spans live
+# here; buffer ownership, mapping and upload are on the render side. The base build
 # pays nothing. no_std + alloc clean; does not require `std`.
 gpu_resident = []
 

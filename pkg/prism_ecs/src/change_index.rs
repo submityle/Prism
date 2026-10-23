@@ -5,7 +5,7 @@
 //! borrows and structural writes append the owning entity to the component's
 //! tick batch, so observers consume only batches created since their cursor.
 
-use alloc::collections::VecDeque;
+use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec::Vec;
 use core::cell::UnsafeCell;
 use core::hint::spin_loop;
@@ -81,6 +81,11 @@ struct ChangeBatch {
 struct ComponentLog {
     active: usize,
     batches: VecDeque<ChangeBatch>,
+    /// Raw tick -> absolute batch ids, ordered by append position. Retention
+    /// removes ids together with their batches, so this index has the same
+    /// bounded lifetime as the log. Multiple nonadjacent batches may share a
+    /// tick (out-of-order writes and tick wrap must not overwrite each other).
+    batches_by_tick: BTreeMap<u32, VecDeque<usize>>,
     base_batch: usize,
     event_count: usize,
     loss_revision: u64,
@@ -118,7 +123,8 @@ pub(crate) struct ChangeCursor {
 /// can verify that delivery is proportional to indexed changes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ChangeIndexStats {
-    /// Retained tick batches examined, including batches outside the window.
+    /// Retained batch records examined: window-selected records on the normal
+    /// path, or the complete retained suffix when a cursor gap forces rebuild.
     pub(crate) batches_scanned: usize,
     pub(crate) batches: usize,
     pub(crate) events: usize,
@@ -257,6 +263,7 @@ impl ChangeTracker {
         state.logs[index].get_or_insert_with(|| ComponentLog {
             active: 0,
             batches: VecDeque::new(),
+            batches_by_tick: BTreeMap::new(),
             base_batch: 0,
             event_count: 0,
             loss_revision: 0,
@@ -320,6 +327,7 @@ impl ChangeTracker {
         if log.active == 0 {
             log.base_batch = log.base_batch.saturating_add(log.batches.len());
             log.batches.clear();
+            log.batches_by_tick.clear();
             log.event_count = 0;
             log.loss_revision = 0;
             log.loss_saturated = false;
@@ -393,6 +401,7 @@ impl ChangeTracker {
             if log.event_count == MAX_RETAINED_EVENTS {
                 log.base_batch = log.base_batch.saturating_add(log.batches.len());
                 log.batches.clear();
+                log.batches_by_tick.clear();
                 log.event_count = 0;
                 Self::note_loss(log);
                 log.discarding_tick = Some(tick);
@@ -402,6 +411,11 @@ impl ChangeTracker {
             log.event_count += 1;
             return;
         }
+        let batch_id = log.base_batch + log.batches.len();
+        log.batches_by_tick
+            .entry(tick.get())
+            .or_default()
+            .push_back(batch_id);
         log.batches.push_back(ChangeBatch {
             tick,
             entities: alloc::vec![entity],
@@ -409,6 +423,15 @@ impl ChangeTracker {
         log.event_count += 1;
         while log.batches.len() > MAX_RETAINED_BATCHES || log.event_count > MAX_RETAINED_EVENTS {
             let expired = log.batches.pop_front().expect("over-limit log is nonempty");
+            let ids = log
+                .batches_by_tick
+                .get_mut(&expired.tick.get())
+                .expect("retained batch is tick-indexed");
+            let removed = ids.pop_front();
+            debug_assert_eq!(removed, Some(log.base_batch));
+            if ids.is_empty() {
+                log.batches_by_tick.remove(&expired.tick.get());
+            }
             log.event_count -= expired.entities.len();
             log.base_batch = log.base_batch.saturating_add(1);
             Self::note_loss(log);
@@ -441,23 +464,66 @@ impl ChangeTracker {
             gap = true;
             cursor.next_batch = log.base_batch;
         }
-        let start = cursor
-            .next_batch
-            .saturating_sub(log.base_batch)
-            .min(log.batches.len());
         let mut stats = ChangeIndexStats {
             gap,
             ..ChangeIndexStats::default()
         };
-        for batch in log.batches.iter().skip(start) {
-            stats.batches_scanned += 1;
-            cursor.next_batch += 1;
-            if batch.tick.is_newer_than(last_run, this_run) {
-                stats.batches += 1;
-                stats.events += batch.entities.len();
-                out.extend_from_slice(&batch.entities);
+
+        let end_batch = log.base_batch.saturating_add(log.batches.len());
+        if !gap {
+            // The tick index lets a narrow observer window skip retained
+            // batches outside that window. Cursor advancement still consumes
+            // the complete append interval: a later forward request must not
+            // replay older/out-of-order batches that were intentionally
+            // excluded here. Sort selected absolute ids to preserve the
+            // historical append-order delivery contract across tick keys.
+            let width = last_run.age_since(this_run).min(Tick::MAX_CHANGE_AGE);
+            let mut batch_ids = Vec::new();
+            if width != 0 {
+                let first_tick = this_run.get().wrapping_sub(width - 1);
+                let mut select = |low, high| {
+                    for (_, ids) in log.batches_by_tick.range(low..=high) {
+                        let offset = ids.partition_point(|id| *id < cursor.next_batch);
+                        batch_ids.extend(ids.iter().skip(offset).copied());
+                    }
+                };
+                if first_tick <= this_run.get() {
+                    select(first_tick, this_run.get());
+                } else {
+                    select(first_tick, u32::MAX);
+                    select(0, this_run.get());
+                }
+                batch_ids.sort_unstable();
+            }
+            for id in batch_ids {
+                let batch = &log.batches[id - log.base_batch];
+                stats.batches_scanned += 1;
+                if batch.tick.is_newer_than(last_run, this_run) {
+                    stats.batches += 1;
+                    stats.events += batch.entities.len();
+                    out.extend_from_slice(&batch.entities);
+                }
+            }
+        } else {
+            // A gap invalidates incremental delivery; callers rebuild from
+            // authoritative live state. Preserve the previous diagnostic and
+            // output semantics by scanning/counting the retained suffix while
+            // consuming the append interval; the partial output is discarded
+            // by every gap-aware caller.
+            let start = cursor
+                .next_batch
+                .saturating_sub(log.base_batch)
+                .min(log.batches.len());
+            for batch in log.batches.iter().skip(start) {
+                stats.batches_scanned += 1;
+                if batch.tick.is_newer_than(last_run, this_run) {
+                    stats.batches += 1;
+                    stats.events += batch.entities.len();
+                    out.extend_from_slice(&batch.entities);
+                }
             }
         }
+        cursor.next_batch = end_batch;
         cursor.loss_revision = log.loss_revision;
         stats
     }
@@ -500,8 +566,38 @@ impl ChangeTracker {
             };
         }
 
+        // Tick::is_newer_than accepts a wrapping interval whose width is the
+        // clamped observer age. Convert it to at most two raw-u32 ranges, not
+        // a scan over all retained batches. Keep the final predicate below as
+        // the semantic oracle (including empty/over-age windows).
+        let width = last_run.age_since(this_run).min(Tick::MAX_CHANGE_AGE);
+        if width == 0 {
+            return ChangeIndexStats::default();
+        }
+        let first_tick = this_run.get().wrapping_sub(width - 1);
+        let mut batch_ids = Vec::new();
+        let mut select = |low, high| {
+            for (_, ids) in log.batches_by_tick.range(low..=high) {
+                // Activation is an append-position boundary, not a raw-tick
+                // boundary: a retained tick can occur on both sides of it.
+                let offset = ids.partition_point(|id| *id < activation.next_batch);
+                batch_ids.extend(ids.iter().skip(offset).copied());
+            }
+        };
+        if first_tick <= this_run.get() {
+            select(first_tick, this_run.get());
+        } else {
+            select(first_tick, u32::MAX);
+            select(0, this_run.get());
+        }
+        // Consumers have always received append order, even for nonmonotonic
+        // ticks. Sorting only selected ids preserves that contract without
+        // inspecting the unrelated history. O(log B + K log K + events), with
+        // B bounded by MAX_RETAINED_BATCHES, rather than a full O(B) scan.
+        batch_ids.sort_unstable();
         let mut stats = ChangeIndexStats::default();
-        for batch in log.batches.iter().skip(start) {
+        for id in batch_ids {
+            let batch = &log.batches[id - log.base_batch];
             stats.batches_scanned += 1;
             if batch.tick.is_newer_than(last_run, this_run) {
                 stats.batches += 1;
@@ -521,6 +617,7 @@ impl ChangeTracker {
         for log in state.logs.iter_mut().flatten() {
             log.base_batch = log.base_batch.saturating_add(log.batches.len());
             log.batches.clear();
+            log.batches_by_tick.clear();
             log.event_count = 0;
             log.discarding_tick = None;
             log.loss_revision = 0;
@@ -721,6 +818,45 @@ mod revision_tests {
     }
 
     #[test]
+    fn collect_uses_tick_index_to_skip_out_of_window_retained_batches() {
+        let tracker = ChangeTracker::new();
+        let component = ComponentId::new(0);
+        let mut cursor = tracker.activate(component);
+        for (index, tick) in [10, 100, 11, 101, 12].into_iter().enumerate() {
+            tracker.record(component, entity(index as u32), Tick::new(tick));
+        }
+
+        let mut collected = Vec::new();
+        let stats = tracker.collect(
+            component,
+            &mut cursor,
+            Tick::new(9),
+            Tick::new(12),
+            &mut collected,
+        );
+        assert_eq!(collected, [entity(0), entity(2), entity(4)]);
+        assert_eq!(stats.batches_scanned, 3);
+        assert_eq!(stats.batches, 3);
+        assert_eq!(stats.events, 3);
+
+        // The call acknowledges its full append interval, including the two
+        // deliberately excluded future-tick batches. They cannot be replayed
+        // by the next forward collection.
+        collected.clear();
+        let next = tracker.collect(
+            component,
+            &mut cursor,
+            Tick::new(99),
+            Tick::new(101),
+            &mut collected,
+        );
+        assert!(collected.is_empty());
+        assert_eq!(next.batches_scanned, 0);
+        assert_eq!(next.batches, 0);
+        assert_eq!(next.events, 0);
+    }
+
+    #[test]
     fn replay_reads_only_post_activation_events_without_advancing_cursor() {
         let tracker = ChangeTracker::new();
         let component = ComponentId::new(0);
@@ -734,7 +870,7 @@ mod revision_tests {
         let stats =
             tracker.replay_since(component, activation, Tick::new(1), Tick::new(2), &mut out);
         assert!(!stats.gap);
-        assert_eq!(stats.batches_scanned, 2);
+        assert_eq!(stats.batches_scanned, 1);
         assert_eq!(stats.batches, 1);
         assert_eq!(stats.events, 1);
         assert_eq!(out, [entity(2)]);
@@ -750,6 +886,170 @@ mod revision_tests {
         );
         assert_eq!(repeated, out);
         assert_eq!(repeated_stats.batches_scanned, stats.batches_scanned);
+    }
+
+    #[test]
+    fn replay_tick_index_skips_unrelated_retained_batches() {
+        let tracker = ChangeTracker::new();
+        let component = ComponentId::new(0);
+        let activation = tracker.activate(component);
+        for tick in 1..=MAX_RETAINED_BATCHES as u32 {
+            tracker.record(component, entity(tick), Tick::new(tick));
+        }
+        let mut out = Vec::new();
+        let stats = tracker.replay_since(
+            component,
+            activation,
+            Tick::new(2047),
+            Tick::new(2048),
+            &mut out,
+        );
+        assert_eq!(out, [entity(2048)]);
+        assert!(!stats.gap);
+        assert_eq!(stats.batches_scanned, 1);
+        assert_eq!(stats.batches, 1);
+        assert_eq!(stats.events, 1);
+    }
+
+    #[test]
+    fn replay_tick_index_matches_full_scan_for_nonmonotonic_and_wrapping_ticks() {
+        let tracker = ChangeTracker::new();
+        let component = ComponentId::new(0);
+        let _initial = tracker.activate(component);
+        let ticks = [
+            0,
+            1,
+            7,
+            u32::MAX - 1,
+            u32::MAX,
+            Tick::MAX_CHANGE_AGE - 1,
+            Tick::MAX_CHANGE_AGE,
+            Tick::MAX_CHANGE_AGE + 1,
+            u32::MAX - Tick::MAX_CHANGE_AGE,
+            u32::MAX - Tick::MAX_CHANGE_AGE + 1,
+            1 << 31,
+        ];
+        // A tick can have several disjoint append batches and can occur both
+        // before and after subscription; never use tick as a unique batch id.
+        for (index, &tick) in ticks.iter().enumerate() {
+            tracker.record(component, entity(index as u32), Tick::new(tick));
+        }
+        let activation = tracker.activate(component);
+        for index in 0..512 {
+            let tick = ticks[(index * 7) % ticks.len()];
+            tracker.record(component, entity(100 + index as u32), Tick::new(tick));
+            tracker.record(component, entity(1000 + index as u32), Tick::new(tick));
+        }
+        for &last in &ticks {
+            for &now in &ticks {
+                let last = Tick::new(last);
+                let now = Tick::new(now);
+                let (expected, expected_batches) = {
+                    let state = tracker.state.lock();
+                    let log = state.logs[component.index() as usize].as_ref().unwrap();
+                    let selected = log
+                        .batches
+                        .iter()
+                        .skip(activation.next_batch - log.base_batch)
+                        .filter(|batch| batch.tick.is_newer_than(last, now));
+                    let mut expected = Vec::new();
+                    let mut batches = 0;
+                    for batch in selected {
+                        batches += 1;
+                        expected.extend_from_slice(&batch.entities);
+                    }
+                    (expected, batches)
+                };
+                let mut out = Vec::new();
+                let stats = tracker.replay_since(component, activation, last, now, &mut out);
+                assert!(!stats.gap);
+                assert_eq!(out, expected, "window {last:?} -> {now:?}");
+                assert_eq!(stats.batches_scanned, expected_batches);
+                assert_eq!(stats.batches, expected_batches);
+                assert_eq!(stats.events, expected.len());
+            }
+        }
+    }
+
+    fn assert_tick_index_matches_retained_batches(tracker: &ChangeTracker, component: ComponentId) {
+        let state = tracker.state.lock();
+        let log = state.logs[component.index() as usize].as_ref().unwrap();
+        let mut expected = BTreeMap::<u32, VecDeque<usize>>::new();
+        for (offset, batch) in log.batches.iter().enumerate() {
+            expected
+                .entry(batch.tick.get())
+                .or_default()
+                .push_back(log.base_batch + offset);
+        }
+        assert_eq!(log.batches_by_tick, expected);
+        assert!(log.batches_by_tick.len() <= MAX_RETAINED_BATCHES);
+        assert!(log.batches_by_tick.values().all(|ids| !ids.is_empty()));
+    }
+
+    #[test]
+    fn replay_tick_index_retention_reset_and_deactivation_remove_stale_ids() {
+        let tracker = ChangeTracker::new();
+        let component = ComponentId::new(0);
+        let _initial = tracker.activate(component);
+        for index in 0..(MAX_RETAINED_BATCHES * 2 + 7) {
+            // Repeated raw ticks test expiry when a key still owns later ids.
+            tracker.record(
+                component,
+                entity(index as u32),
+                Tick::new((index % 17) as u32),
+            );
+        }
+        assert_tick_index_matches_retained_batches(&tracker, component);
+        let activation = tracker.activate(component);
+        tracker.record(component, entity(99_999), Tick::new(22));
+        // This append evicts an old batch: pre-eviction subscriptions must gap.
+        let mut out = Vec::new();
+        assert!(
+            tracker
+                .replay_since(
+                    component,
+                    activation,
+                    Tick::new(21),
+                    Tick::new(22),
+                    &mut out
+                )
+                .gap
+        );
+        assert!(out.is_empty());
+        assert_tick_index_matches_retained_batches(&tracker, component);
+
+        tracker.reset();
+        assert_tick_index_matches_retained_batches(&tracker, component);
+        tracker.record(component, entity(1), Tick::new(1));
+        tracker.deactivate(component);
+        tracker.deactivate(component);
+        assert_tick_index_matches_retained_batches(&tracker, component);
+        let activation = tracker.activate(component);
+        tracker.record(component, entity(2), Tick::new(2));
+        let mut out = Vec::new();
+        let stats =
+            tracker.replay_since(component, activation, Tick::new(1), Tick::new(2), &mut out);
+        assert!(!stats.gap);
+        assert_eq!(out, [entity(2)]);
+    }
+
+    #[test]
+    fn replay_tick_index_single_tick_overflow_clears_all_keys() {
+        let tracker = ChangeTracker::new();
+        let component = ComponentId::new(0);
+        let _initial = tracker.activate(component);
+        tracker.record(component, entity(1), Tick::new(1));
+        let entities = vec![entity(2); MAX_RETAINED_EVENTS];
+        tracker.record_batch(component, &entities, Tick::new(2));
+        assert_tick_index_matches_retained_batches(&tracker, component);
+        {
+            let state = tracker.state.lock();
+            let log = state.logs[component.index() as usize].as_ref().unwrap();
+            assert!(log.batches.is_empty());
+            assert_eq!(log.discarding_tick, Some(Tick::new(2)));
+        }
+        tracker.record(component, entity(3), Tick::new(3));
+        assert_tick_index_matches_retained_batches(&tracker, component);
     }
 
     #[test]

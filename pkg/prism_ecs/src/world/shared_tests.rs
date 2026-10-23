@@ -540,9 +540,10 @@ fn evicted_shared_archetypes_reclaim_table_component_postings() {
             .with_shared_binding(binding.0, binding.1)
             .unwrap();
         assert_eq!(binding_posting.len(), 2);
-        assert!(
-            w.archetypes.len() > binding_posting.len(),
-            "candidate posting stays local while stable tombstones accumulate"
+        assert_eq!(
+            w.archetypes.len(),
+            4,
+            "the live registry contains the empty archetype, anchor, and two variants"
         );
         assert!(binding_posting.contains(first_archetype));
         assert!(binding_posting.contains(second_archetype));
@@ -603,19 +604,15 @@ fn evicted_shared_archetypes_reclaim_table_component_postings() {
                 .is_none_or(|posting| posting.is_empty()),
             "repeated churn must not accumulate stale postings for variant-only columns"
         );
+        assert_eq!(
+            w.archetypes.len(),
+            2,
+            "evicted registry entries are reclaimed"
+        );
         for id in [first_archetype, second_archetype] {
             assert!(
-                w.archetypes.get(id).is_some_and(|arch| {
-                    arch.is_empty()
-                        && arch.is_evicted()
-                        && arch.table().entities().is_empty()
-                        && arch.table().chunk_count() == 0
-                        && arch.table().column(position).is_none()
-                        && arch.components().is_empty()
-                        && arch.shared_bindings().is_empty()
-                        && arch.relation_pairs().is_empty()
-                }),
-                "the compact tombstone remains addressable without retaining key metadata"
+                w.archetypes.get(id).is_none(),
+                "an evicted stable id no longer resolves to a retained tombstone"
             );
             assert!(
                 pre_eviction_snapshot.contains(&id),
@@ -673,6 +670,44 @@ fn bounded_eviction_log_recovers_a_lagging_query_cache() {
         "published immutable snapshots remain valid across gap recovery"
     );
     assert_eq!(state.iter(&w).count(), 1);
+}
+
+#[test]
+fn warmed_queries_find_new_ids_after_live_registry_shrinks_and_restore_replaces_it() {
+    let mut world = World::new();
+    world.register_snapshot_component::<Position>();
+    world.register_snapshot_component::<BatchKey>();
+    let anchor = world.spawn((Position(-1), BatchKey(u32::MAX)));
+    let entities: Vec<_> = (0..32)
+        .map(|value| world.spawn((Position(value), BatchKey(value as u32))))
+        .collect();
+    let state = world.query::<&Position>();
+    let old_matches = state.matched_archetypes(&world);
+    let highest_old = *old_matches.last().unwrap();
+    assert_eq!(state.iter(&world).count(), 33);
+    for entity in entities {
+        assert!(world.despawn(entity));
+    }
+    let fresh = world.spawn((Position(100), BatchKey(100)));
+    assert_eq!(world.archetypes.len(), 3);
+    assert!(archetype_of(&world, fresh) > highest_old);
+    let mut values: Vec<_> = state.iter(&world).map(|position| position.0).collect();
+    values.sort_unstable();
+    assert_eq!(values, [-1, 100]);
+    assert_eq!(old_matches.len(), 33);
+
+    let snapshot = world.snapshot();
+    assert!(world.despawn(fresh));
+    // Removing the highest issued ID must not move the scan cursor backwards.
+    let compacted = state.matched_archetypes(&world);
+    assert!(Arc::ptr_eq(&compacted, &state.matched_archetypes(&world)));
+    world.spawn((Position(200), BatchKey(200)));
+    assert_eq!(state.iter(&world).count(), 2);
+    world.restore(&snapshot);
+    let mut restored: Vec<_> = state.iter(&world).map(|position| position.0).collect();
+    restored.sort_unstable();
+    assert_eq!(restored, [-1, 100]);
+    assert_eq!(world.get::<Position>(anchor), Some(&Position(-1)));
 }
 
 #[test]

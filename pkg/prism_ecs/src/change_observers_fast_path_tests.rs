@@ -11,7 +11,7 @@ impl Component for Value {}
 
 struct Sparse(u32);
 impl Component for Sparse {
-    const STORAGE: crate::component::StorageType = crate::component::StorageType::SparseSet;
+    const STORAGE: StorageType = StorageType::SparseSet;
 }
 
 #[derive(Clone)]
@@ -81,11 +81,7 @@ fn assert_idle(world: &mut World) {
     );
 }
 
-fn force_change_index_gap(
-    world: &mut World,
-    component: crate::component::ComponentId,
-    entity: Entity,
-) {
+fn force_change_index_gap(world: &mut World, component: ComponentId, entity: Entity) {
     let tick = world.change_tick();
     for _ in 0..=crate::change_index::MAX_RETAINED_EVENTS {
         world.change_tracker.record(component, entity, tick);
@@ -478,7 +474,7 @@ fn observer_to_reaction_sparse_flush_ignores_unaffected_registry_entries() {
     );
     let reaction_stats = world.reactions.reaction_stats();
     assert_eq!(reaction_stats.ordering_nodes, 2);
-    assert_eq!(reaction_stats.ordering_edges, 2);
+    assert_eq!(reaction_stats.ordering_edges, 1);
     assert_eq!(reaction_stats.executed_nodes, 1);
 }
 
@@ -586,7 +582,7 @@ fn sparse_pipeline_work_counts_ignore_clean_registry_and_entity_growth() {
     assert_eq!(large[1], 1, "one relevant journal event is consumed");
     assert_eq!(large[2], 1, "only the relevant journal record is scanned");
     assert_eq!(&large[7..10], &[1, 2, 1]);
-    assert_eq!(&large[10..13], &[2, 2, 1]);
+    assert_eq!(&large[10..13], &[2, 1, 1]);
 }
 
 #[test]
@@ -758,7 +754,7 @@ fn callback_churn_then_panic_keeps_candidates_and_deferred_slots_valid() {
 
     let order = Arc::new(Mutex::new(Vec::new()));
     let future_id = Arc::new(OnceLock::<ObserverId>::new());
-    let panic_once = Arc::new(core::sync::atomic::AtomicBool::new(true));
+    let panic_once = Arc::new(AtomicBool::new(true));
     let first_order = order.clone();
     let future_id_in_first = future_id.clone();
     let panic_once_in_first = panic_once.clone();
@@ -810,7 +806,7 @@ fn callback_registration_and_removal_do_not_change_current_candidates() {
     let entity = world.spawn(Value(0));
     let order = Arc::new(Mutex::new(Vec::new()));
     let removed_id = Arc::new(std::sync::OnceLock::<ObserverId>::new());
-    let registered = Arc::new(core::sync::atomic::AtomicBool::new(false));
+    let registered = Arc::new(AtomicBool::new(false));
 
     let order_a = order.clone();
     let removed_id_a = removed_id.clone();

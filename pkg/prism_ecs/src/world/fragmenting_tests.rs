@@ -123,13 +123,7 @@ fn shared_value_eviction_releases_fragmenting_relation_identity_without_id_reuse
     assert!(!before.is_evicted());
 
     assert!(world.despawn(source));
-    let tombstone = world.archetypes().get(evicted_id).unwrap();
-    assert!(tombstone.is_evicted());
-    assert!(tombstone.components().is_empty());
-    assert!(tombstone.shared_binding(batch_id).is_none());
-    assert!(tombstone.shared_arc(batch_id).is_none());
-    assert!(tombstone.shared_bindings().is_empty());
-    assert!(tombstone.relation_pairs().is_empty());
+    assert!(world.archetypes().get(evicted_id).is_none());
 
     let replacement = world.spawn(Batch(9));
     let replacement_id = archetype(&world, replacement);
@@ -137,7 +131,7 @@ fn shared_value_eviction_releases_fragmenting_relation_identity_without_id_reuse
         replacement_id, evicted_id,
         "stable tombstone IDs are not reused"
     );
-    assert!(world.archetypes().get(evicted_id).unwrap().is_evicted());
+    assert!(world.archetypes().get(evicted_id).is_none());
     assert!(!world.archetypes().get(replacement_id).unwrap().is_evicted());
     assert!(world
         .archetypes()

@@ -468,7 +468,7 @@ mod tests {
     }
 
     #[test]
-    fn evicted_tombstone_is_not_reported_as_a_live_batch_key() {
+    fn evicted_archetype_is_removed_and_not_reported_as_a_live_batch_key() {
         let mut world = World::new();
         let entity = world.spawn((Position(1), BatchKey(42)));
         let archetype_id = world.entities().location(entity).unwrap().archetype_id;
@@ -477,8 +477,7 @@ mod tests {
         assert_eq!(before.batch_keys()[0].entity_count, 1);
 
         assert!(world.despawn(entity));
-        let tombstone = world.archetypes().get(archetype_id).unwrap();
-        assert!(tombstone.is_evicted());
+        assert!(world.archetypes().get(archetype_id).is_none());
         let after = SharedComponentBatchReport::capture(&world);
         assert!(after.is_empty());
         assert_eq!(after.batch_key_count(), 0);

@@ -12,7 +12,7 @@
 //! (design §5.3, §9).
 
 use alloc::boxed::Box;
-use alloc::collections::{BTreeMap, BinaryHeap, VecDeque};
+use alloc::collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::cell::UnsafeCell;
@@ -61,6 +61,44 @@ pub struct ColumnChanges {
     pub gap: bool,
     /// Events after the supplied cursor, in revision order. Empty on a gap.
     pub events: Vec<ColumnChange>,
+}
+
+/// A physical chunk affected by writes to one subscribed component or by
+/// structural changes. Consecutive records for the same chunk are coalesced;
+/// nonconsecutive occurrences may repeat and consumers may deduplicate them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ColumnChunkChange {
+    /// Stable archetype address within this registry; it may already be evicted.
+    pub archetype: ArchetypeId,
+    /// Physical chunk, including removed tail chunks. `None` announces an
+    /// archetype identity change rather than a particular live chunk.
+    pub chunk: Option<usize>,
+    /// Number of relevant raw journal records represented by this run.
+    pub event_count: usize,
+}
+
+/// Non-destructive component-filtered chunk discovery for external consumers.
+/// The source records stay compressed without allocating a second event list.
+pub struct ColumnChunkChanges {
+    /// Acknowledge only after successfully consuming this snapshot/baseline.
+    pub cursor: ColumnChangeCursor,
+    /// Missing selected or structural history requires a full live baseline.
+    pub gap: bool,
+    /// Relevant raw records read, before run compression. Unrelated component
+    /// records are not visited; index searches are not included in this count.
+    pub records_scanned: usize,
+    runs: Vec<FilteredColumnChangeRun>,
+}
+
+impl ColumnChunkChanges {
+    /// Compressed chunk runs in journal revision order. Empty on a gap.
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = ColumnChunkChange> + '_ {
+        self.runs.iter().map(|run| ColumnChunkChange {
+            archetype: run.change.archetype,
+            chunk: run.change.chunk,
+            event_count: run.event_count,
+        })
+    }
 }
 
 /// Result and deterministic work count for the query-only filtered journal read.
@@ -303,6 +341,59 @@ impl ColumnJournal {
         }
 
         let first_retained = state.revision - state.events.len() as u64;
+        // The overwhelmingly common external subscription selects one
+        // component. Merge its revision stream with structural changes
+        // directly, avoiding a temporary source Vec and per-event heap work.
+        if component_ids.len() == 1 {
+            let component_index = state.component_events.get(&component_ids[0]);
+            let component_start = component_index
+                .map(|index| lower_bound_revision(index, cursor.revision))
+                .unwrap_or(0);
+            let structural_start = lower_bound_revision(&state.structural_events, cursor.revision);
+            let component_count = component_index
+                .map(|index| index.len() - component_start)
+                .unwrap_or(0);
+            let structural_count = state.structural_events.len() - structural_start;
+            let mut events = Vec::new();
+            let mut component_offset = component_start;
+            let mut structural_offset = structural_start;
+
+            loop {
+                let component_revision = component_index
+                    .and_then(|index| index.get(component_offset))
+                    .copied();
+                let structural_revision = state.structural_events.get(structural_offset).copied();
+                let revision = match (component_revision, structural_revision) {
+                    (Some(component), Some(structural)) if component < structural => {
+                        component_offset += 1;
+                        component
+                    }
+                    (Some(_), Some(structural)) => {
+                        structural_offset += 1;
+                        structural
+                    }
+                    (Some(component), None) => {
+                        component_offset += 1;
+                        component
+                    }
+                    (None, Some(structural)) => {
+                        structural_offset += 1;
+                        structural
+                    }
+                    (None, None) => break,
+                };
+                let offset = (revision - first_retained - 1) as usize;
+                push_column_change_run(&mut events, state.events[offset]);
+            }
+
+            return FilteredColumnChanges {
+                cursor: current,
+                gap: false,
+                events,
+                records_scanned: component_count + structural_count,
+            };
+        }
+
         let mut records_scanned = 0;
         let mut sources = Vec::with_capacity(component_ids.len() + 1);
         for component in component_ids {
@@ -399,7 +490,9 @@ fn lower_bound_revision(revisions: &VecDeque<u64>, cursor_revision: u64) -> usiz
     low
 }
 
-/// A stable, dense identifier for an [`Archetype`] within a world.
+/// A stable, monotonically-issued identifier within one archetype registry.
+/// World restore replaces the registry: persistent caches must also track
+/// world identity and the world's archetype generation.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct ArchetypeId(u32);
 
@@ -411,13 +504,13 @@ impl ArchetypeId {
     /// archetype), always allocated at construction.
     pub const EMPTY: Self = Self(0);
 
-    /// Construct an [`ArchetypeId`] from its raw index.
+    /// Construct an [`ArchetypeId`] from its raw stable value.
     #[inline]
     pub const fn new(index: u32) -> Self {
         Self(index)
     }
 
-    /// The raw dense index.
+    /// The raw stable value. Values are not dense after archetype eviction.
     #[inline]
     pub const fn index(self) -> u32 {
         self.0
@@ -439,18 +532,14 @@ pub type RelationPair = (ComponentId, Entity);
 /// One archetype: a (non-shared) component set plus the table storing its
 /// entities, together with the shared-component value bindings that split it
 /// from otherwise-identical archetypes (design §6), and fragmenting relation
-/// pairs (design §11). Permanently evicted stable-ID entries retain only their
-/// ID, empty metadata/storage, and eviction marker.
+/// pairs (design §11). Permanently evicted archetypes are removed from the live
+/// registry; their IDs remain stale and are never reused.
 pub struct Archetype {
     id: ArchetypeId,
     components: ComponentSet,
     shared: Box<[SharedBinding]>,
     pairs: Box<[RelationPair]>,
-    /// Evicted stable-ID tombstones replace their backing table with an empty
-    /// shell and release component/relation/shared-key allocations. The slot
-    /// remains addressable to preserve stable ArchetypeIds.
     table: Table,
-    evicted: bool,
 }
 
 impl Archetype {
@@ -460,10 +549,7 @@ impl Archetype {
         self.id
     }
 
-    /// The exact set of component ids every entity in a live archetype has.
-    /// Permanently evicted archetypes release this metadata and return the
-    /// empty set; use [`Archetype::is_evicted`] to distinguish that tombstone
-    /// from the live empty archetype.
+    /// The exact set of component ids every entity in this live archetype has.
     #[inline]
     pub fn components(&self) -> &ComponentSet {
         &self.components
@@ -472,7 +558,6 @@ impl Archetype {
     /// Whether entities here have the table/sparse component `id`. Shared
     /// bindings are *not* reported here (they are archetype-level batch keys,
     /// not table columns); query [`Archetype::shared_binding`] for those.
-    /// Permanently evicted tombstones return `false` for every component.
     #[inline]
     pub fn contains(&self, id: ComponentId) -> bool {
         self.components.contains(id)
@@ -481,7 +566,7 @@ impl Archetype {
     /// The interned [`SharedValueId`] bound to shared component `id` in this
     /// archetype, or `None` if this archetype has no binding for `id` (design
     /// §6). This is the precise, per-archetype membership test for a shared
-    /// component. Permanently evicted tombstones return `None`.
+    /// component.
     #[inline]
     pub fn shared_binding(&self, id: ComponentId) -> Option<SharedValueId> {
         self.shared
@@ -494,7 +579,6 @@ impl Archetype {
     /// component `id` in this archetype, or `None` if unbound (design §6). The
     /// value is immutable; downcast via
     /// [`SharedValue::as_any`](crate::storage::SharedValue::as_any) to read it.
-    /// Permanently evicted tombstones return `None`.
     #[inline]
     pub fn shared_arc(&self, id: ComponentId) -> Option<&Arc<dyn SharedValue>> {
         self.shared
@@ -504,8 +588,7 @@ impl Archetype {
     }
 
     /// All shared-component bindings on this live archetype, sorted by
-    /// [`ComponentId`] (design §6). Permanently evicted tombstones return an
-    /// empty slice.
+    /// [`ComponentId`] (design §6).
     #[inline]
     pub fn shared_bindings(&self) -> &[SharedBinding] {
         &self.shared
@@ -513,15 +596,13 @@ impl Archetype {
 
     /// Fragmenting relation pairs shared by every entity in this live
     /// archetype. Sorted and duplicate-free; pairs are identity, not component
-    /// columns. Evicted tombstones release this metadata and return an empty
-    /// slice.
+    /// columns.
     #[inline]
     pub fn relation_pairs(&self) -> &[RelationPair] {
         &self.pairs
     }
 
-    /// Number of entities in this archetype. Permanently evicted tombstones
-    /// have length zero.
+    /// Number of entities in this archetype.
     #[inline]
     pub fn len(&self) -> usize {
         self.table.len()
@@ -533,16 +614,12 @@ impl Archetype {
         self.table.is_empty()
     }
 
-    /// Whether this stable-id tombstone was permanently evicted from lookup
-    /// indexes after its last shared-value reference was released.
-    ///
-    /// Evicted archetypes remain addressable through [`Archetypes::get`] and
-    /// [`Archetypes::iter`] to preserve stable IDs, but their component,
-    /// shared-binding, relation-pair, and table storage metadata is released.
-    /// This distinguishes an evicted tombstone from a live empty archetype.
+    /// Whether this archetype has been evicted. A resolvable `Archetype` is
+    /// always live; eviction removes the ID from [`Archetypes::get`] and
+    /// [`Archetypes::iter`] instead of retaining a tombstone object.
     #[inline]
     pub fn is_evicted(&self) -> bool {
-        self.evicted
+        false
     }
 
     /// Immutable access to the backing table.
@@ -561,18 +638,6 @@ impl Archetype {
     /// (design §17 原型预热).
     pub(crate) fn reserve(&mut self, additional: usize) {
         self.table.reserve(additional);
-    }
-
-    /// Drop storage and all archetype identity metadata after permanent
-    /// eviction. The stable ID remains addressable, while evicted IDs are
-    /// excluded before any table access or query matching.
-    fn release_evicted_storage(&mut self) {
-        debug_assert!(self.evicted);
-        debug_assert!(self.is_empty());
-        self.table = Table::new(core::iter::empty());
-        self.components = ComponentSet::default();
-        self.shared = Box::default();
-        self.pairs = Box::default();
     }
 }
 
@@ -856,7 +921,14 @@ impl Iterator for ArchetypePostingIter<'_> {
 
 /// The per-world registry of archetypes.
 pub struct Archetypes {
-    archetypes: Vec<Archetype>,
+    /// Live archetypes keyed by their never-reused stable id. Hash lookup keeps
+    /// the row-query hot path O(1) expected while permanent eviction reclaims
+    /// entries instead of leaving one tombstone allocation per historical id.
+    archetypes: HashMap<ArchetypeId, Archetype>,
+    /// Stable ordering and ranged incremental scans without retaining dead IDs.
+    archetype_ids: BTreeSet<ArchetypeId>,
+    /// Next monotonic id. The public invalid sentinel is never issued.
+    next_id: u64,
     by_key: HashMap<ArchetypeKey, ArchetypeId>,
     /// Inverted table-column index. Each posting list is ordered by
     /// `ArchetypeId`, matching the registry's stable insertion order. Entries
@@ -872,7 +944,7 @@ pub struct Archetypes {
     /// Recent eviction IDs let query caches skip full snapshot compaction when
     /// churn is unrelated to their matches. Old entries are discarded at a
     /// fixed bound; lagging query caches then conservatively inspect their own
-    /// matched IDs against tombstone state.
+    /// matched IDs against the live registry.
     evicted_ids: VecDeque<ArchetypeId>,
     /// Absolute number of evictions, used to distinguish a retained suffix
     /// from a query cursor that fell behind the bounded log.
@@ -884,7 +956,9 @@ impl Archetypes {
     /// [`ArchetypeId::EMPTY`].
     pub fn new() -> Self {
         let mut this = Self {
-            archetypes: Vec::new(),
+            archetypes: HashMap::default(),
+            archetype_ids: BTreeSet::new(),
+            next_id: 0,
             by_key: HashMap::default(),
             by_component: HashMap::default(),
             by_shared_binding: HashMap::default(),
@@ -898,58 +972,65 @@ impl Archetypes {
         this
     }
 
-    /// Number of addressable stable-ID slots, including permanently evicted
-    /// tombstones.
+    /// Number of live archetypes. Permanently evicted IDs are not addressable
+    /// and do not contribute to this count.
     #[inline]
     pub fn len(&self) -> usize {
         self.archetypes.len()
     }
 
-    /// Whether there are no archetypes (never true after [`Archetypes::new`]).
+    /// Cumulative archetypes created in this registry, including the empty
+    /// archetype and entries since permanently evicted. A world restore may
+    /// replace the registry; compare its structural generation before taking
+    /// differences between observations.
+    #[inline]
+    pub fn created_count(&self) -> u64 {
+        self.next_id
+    }
+
+    /// Whether there are no live archetypes (never true after [`Archetypes::new`]).
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.archetypes.is_empty()
     }
 
-    /// Borrow an archetype by id, including a permanently evicted tombstone.
+    /// Borrow a live archetype by stable id. Permanently evicted IDs return
+    /// `None`; IDs are never reused, so a stale id cannot alias a new archetype.
     #[inline]
     pub fn get(&self, id: ArchetypeId) -> Option<&Archetype> {
-        self.archetypes.get(id.0 as usize)
+        self.archetypes.get(&id)
     }
 
     /// Mutably borrow an archetype by id.
     #[inline]
     pub fn get_mut(&mut self, id: ArchetypeId) -> Option<&mut Archetype> {
-        self.archetypes.get_mut(id.0 as usize)
+        self.archetypes.get_mut(&id)
     }
 
     /// Mutably borrow two distinct archetypes at once (for structural moves).
     ///
     /// # Panics
-    /// Panics if `a == b` or either id is out of range.
+    /// Panics if `a == b` or either id is not live.
     pub fn get_pair_mut(
         &mut self,
         a: ArchetypeId,
         b: ArchetypeId,
     ) -> (&mut Archetype, &mut Archetype) {
         assert_ne!(a, b, "cannot borrow the same archetype twice");
-        let (lo, hi) = (a.0.min(b.0) as usize, a.0.max(b.0) as usize);
-        let (left, right) = self.archetypes.split_at_mut(hi);
-        let lo_ref = &mut left[lo];
-        let hi_ref = &mut right[0];
-        if a.0 < b.0 {
-            (lo_ref, hi_ref)
-        } else {
-            (hi_ref, lo_ref)
-        }
+        let [first, second] = self.archetypes.get_many_mut([&a, &b]);
+        (
+            first.expect("first archetype id must be live"),
+            second.expect("second archetype id must be live"),
+        )
     }
 
-    /// All stable-ID slots in id order, including permanently evicted
-    /// tombstones. Use [`Archetype::is_evicted`] to distinguish tombstones
-    /// from live empty archetypes.
+    /// All live archetypes in stable-ID order. Permanently evicted IDs are
+    /// omitted and can no longer be resolved with [`Archetypes::get`].
     #[inline]
     pub fn iter(&self) -> impl Iterator<Item = &Archetype> {
-        self.archetypes.iter()
+        self.archetype_ids
+            .iter()
+            .map(|id| self.archetypes.get(id).expect("ordered id must be live"))
     }
 
     /// Archetypes whose table component set contains `component`, in stable
@@ -980,6 +1061,27 @@ impl Archetypes {
         self.eviction_count
     }
 
+    /// Highest id issued in this registry, including ids that were evicted.
+    #[inline]
+    pub(crate) fn last_id(&self) -> Option<ArchetypeId> {
+        self.next_id
+            .checked_sub(1)
+            .filter(|id| *id < u64::from(u32::MAX))
+            .map(|id| ArchetypeId(id as u32))
+    }
+
+    /// Live archetypes strictly after a query cache's monotonic scan cursor.
+    #[inline]
+    pub(crate) fn iter_after(
+        &self,
+        cursor: Option<ArchetypeId>,
+    ) -> impl Iterator<Item = &Archetype> {
+        let lower = cursor.map_or(Unbounded, Excluded);
+        self.archetype_ids
+            .range((lower, Unbounded))
+            .map(|id| self.archetypes.get(id).expect("ordered id must be live"))
+    }
+
     /// Retained evictions since `cursor`, or `None` when the cursor predates
     /// the bounded log and the caller must conservatively inspect its cache.
     #[inline]
@@ -1000,6 +1102,33 @@ impl Archetypes {
     /// read/write scheduling barrier.
     pub fn column_changes_since(&self, cursor: Option<ColumnChangeCursor>) -> ColumnChanges {
         self.column_journal.since(cursor)
+    }
+
+    /// Discover chunks written for `component`, plus structural changes, using
+    /// revision indexes rather than scanning unrelated retained events.
+    ///
+    /// Keep an independent cursor per subscribed component. When changing the
+    /// component, pass `None` and rebuild its baseline; a cursor does not carry
+    /// a subscription identity. Same-tick/backdated writes are included.
+    /// Unrelated log overflow alone does not force a rebuild, but loss of any
+    /// selected/structural record or bounded eviction metadata does. A gap
+    /// returns no runs. Acknowledge its cursor only after a full baseline.
+    ///
+    /// Chunk addresses may no longer be live, so validate them before fetching
+    /// payload. As with [`Self::column_changes_since`], journal synchronization
+    /// does not replace the ECS read/write scheduling barrier.
+    pub fn column_chunks_since(
+        &self,
+        cursor: Option<ColumnChangeCursor>,
+        component: ComponentId,
+    ) -> ColumnChunkChanges {
+        let changes = self.column_journal.since_components(cursor, &[component]);
+        ColumnChunkChanges {
+            cursor: changes.cursor,
+            gap: changes.gap,
+            records_scanned: changes.records_scanned,
+            runs: changes.events,
+        }
     }
 
     /// Discover structural changes and writes to selected components without
@@ -1026,10 +1155,25 @@ impl Archetypes {
         self.column_journal.cursor()
     }
 
-    /// All archetypes mutably, in id order.
-    #[inline]
+    /// All live archetypes mutably, in stable-ID order. Construction and full
+    /// traversal take O(A) expected time and O(A) temporary space.
     pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Archetype> {
-        self.archetypes.iter_mut()
+        // The source iterator supplies disjoint borrows. Removing each borrow
+        // from this temporary map transfers it to the caller at most once, so
+        // callers may retain multiple items without aliasing or raw pointers.
+        let mut entries: HashMap<_, _> = self
+            .archetypes
+            .iter_mut()
+            .map(|(&id, archetype)| (id, archetype))
+            .collect();
+        self.archetype_ids
+            .iter()
+            .map(move |id| entries.remove(id).expect("ordered id must be live"))
+    }
+
+    /// Allocation-free traversal for order-independent internal maintenance.
+    pub(crate) fn iter_mut_unordered(&mut self) -> impl Iterator<Item = &mut Archetype> {
+        self.archetypes.values_mut()
     }
 
     /// Get the id for `set`, creating the archetype (and its empty table) if it
@@ -1045,8 +1189,8 @@ impl Archetypes {
     ///
     /// `bindings` need not be sorted; the derived key is canonicalized. The
     /// supplied [`Arc`] handles are retained on the created archetype to keep
-    /// each interned value alive for the archetype's lifetime (shared values
-    /// are immortal once an archetype binds them). `components` supplies the
+    /// each interned value alive until the archetype is permanently evicted.
+    /// `components` supplies the
     /// layout/drop metadata for the table columns of `set`.
     pub fn get_or_create_shared(
         &mut self,
@@ -1085,10 +1229,9 @@ impl Archetypes {
     /// entity into an archetype still holding the *old* value's [`Arc`] — a silent
     /// wrong-value read. Evicting the lookup entry closes that aliasing window.
     ///
-    /// The [`Archetype`] struct is left tombstoned in the `archetypes` vec so
-    /// existing [`ArchetypeId`]s (dense vec indices) stay stable; its key and
-    /// inverted-index entries are removed, so the tombstone can never again be
-    /// returned by a lookup and a fresh archetype is minted on demand instead.
+    /// Remove the entire [`Archetype`] and its lookup/posting entries. IDs are
+    /// never reused within this registry; stale IDs resolve to `None` and a
+    /// subsequent matching spawn receives a fresh, larger ID.
     /// This is safe because `refcount(cid, sid) == 0` implies no live entity
     /// binds `(cid, sid)`, so every archetype binding it is empty and
     /// unreferenced by any [`EntityLocation`](crate::entity::EntityLocation).
@@ -1106,27 +1249,26 @@ impl Archetypes {
             .get(&(cid, sid))
             .into_iter()
             .flat_map(|posting| posting.blocks().flatten().copied())
-            .filter(|id| archetypes[id.index() as usize].is_empty())
+            .filter(|id| archetypes.get(id).is_some_and(Archetype::is_empty))
             .collect();
 
         if evicted.is_empty() {
             return;
         }
 
-        // Keep stable ArchetypeIds in `archetypes`, but reclaim their lookup
-        // and inverted-index entries. Reconstructing each canonical key avoids
-        // scanning the global `by_key` map during a shared-value churn event.
+        // Remove evicted entries from the live registry after index cleanup.
+        // Reconstructing each canonical key avoids scanning the global
+        // `by_key` map during a shared-value churn event.
         evicted.sort_unstable();
         for &id in &evicted {
-            let arch = &archetypes[id.index() as usize];
+            let arch = archetypes.get(&id).expect("posting id must be live");
             let key = ArchetypeKey::from_bindings(&arch.components, &arch.shared, &arch.pairs);
             let removed = by_key.remove(&key);
             debug_assert_eq!(removed, Some(id));
-            archetypes[id.index() as usize].evicted = true;
         }
         *eviction_count = eviction_count
             .checked_add(evicted.len())
-            .expect("eviction count cannot exceed the archetype registry length");
+            .expect("lifetime archetype eviction count exhausted");
         let overflow = eviction_log.len().saturating_sub(
             ARCHETYPE_EVICTION_LOG_CAPACITY - evicted.len().min(ARCHETYPE_EVICTION_LOG_CAPACITY),
         );
@@ -1147,7 +1289,7 @@ impl Archetypes {
         let mut component_evictions = Vec::new();
         let mut binding_evictions = Vec::new();
         for &id in &evicted {
-            let arch = &archetypes[id.index() as usize];
+            let arch = archetypes.get(&id).expect("evicted archetype must be live");
             component_evictions.extend(
                 arch.components
                     .ids()
@@ -1165,11 +1307,8 @@ impl Archetypes {
         binding_evictions.dedup();
 
         // All data needed to clean the postings is now copied into the
-        // eviction batches. Release each stable tombstone's heavyweight table
-        // and shared-value Arcs before touching the postings.
-        for &id in &evicted {
-            archetypes[id.index() as usize].release_evicted_storage();
-        }
+        // eviction batches. The archetypes stay addressable until postings are
+        // cleaned, then are removed from the live registry in one final pass.
 
         let mut removed_ids = Vec::new();
         let mut index = 0;
@@ -1213,6 +1352,20 @@ impl Archetypes {
             }
             index = end;
         }
+
+        for id in evicted {
+            let removed = archetypes.remove(&id);
+            debug_assert!(removed.is_some());
+            let removed_id = self.archetype_ids.remove(&id);
+            debug_assert!(removed_id);
+        }
+        // Contract geometrically after a large live-set reduction. Checking
+        // four capacities is constant work; rebuilding only below 1/4 load
+        // avoids an O(registry) rehash on every eviction or small oscillation.
+        shrink_registry_map(archetypes);
+        shrink_registry_map(by_key);
+        shrink_registry_map(by_component);
+        shrink_registry_map(by_shared_binding);
     }
 
     fn insert(
@@ -1222,7 +1375,13 @@ impl Archetypes {
         pairs: &[RelationPair],
         components: &Components,
     ) -> ArchetypeId {
-        let id = ArchetypeId(self.archetypes.len() as u32);
+        let raw_id = u32::try_from(self.next_id).expect("archetype id space exhausted");
+        assert_ne!(raw_id, u32::MAX, "archetype id space exhausted");
+        self.next_id = self
+            .next_id
+            .checked_add(1)
+            .expect("archetype id allocator exhausted");
+        let id = ArchetypeId(raw_id);
         for &component in set.ids() {
             self.by_component.entry(component).or_default().push(id);
         }
@@ -1248,14 +1407,18 @@ impl Archetypes {
         let shared = shared.into_boxed_slice();
         let key = ArchetypeKey::from_bindings(&set, &shared, pairs);
         let pairs = key.pairs.clone();
-        self.archetypes.push(Archetype {
+        self.archetypes.insert(
             id,
-            components: set,
-            shared,
-            pairs,
-            table,
-            evicted: false,
-        });
+            Archetype {
+                id,
+                components: set,
+                shared,
+                pairs,
+                table,
+            },
+        );
+        let inserted = self.archetype_ids.insert(id);
+        debug_assert!(inserted);
         self.by_key.insert(key, id);
         self.column_journal.record(ColumnChange {
             archetype: id,
@@ -1263,6 +1426,13 @@ impl Archetypes {
             chunk: None,
         });
         id
+    }
+}
+
+fn shrink_registry_map<K: Eq + core::hash::Hash, V>(map: &mut HashMap<K, V>) {
+    const MIN_CAPACITY: usize = 64;
+    if map.capacity() > MIN_CAPACITY && map.len() <= map.capacity() / 4 {
+        map.shrink_to(map.len().saturating_mul(2).max(MIN_CAPACITY));
     }
 }
 
@@ -1602,6 +1772,276 @@ mod tests {
         let empty = archetypes.get(ArchetypeId::EMPTY).unwrap();
         assert!(empty.components().is_empty());
         assert!(empty.is_empty());
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn archetype_id_exhaustion_rejects_the_sentinel_before_mutating_registry() {
+        let mut components = Components::new();
+        let a = components.register::<A>();
+        let b = components.register::<B>();
+        let mut archetypes = Archetypes::new();
+        archetypes.next_id = u64::from(u32::MAX - 1);
+        let last = archetypes.get_or_create(&ComponentSet::from_ids([a]), &components);
+        assert_eq!(last.index(), u32::MAX - 1);
+        assert_eq!(archetypes.created_count(), u64::from(u32::MAX));
+        let cursor = archetypes.column_change_cursor();
+        for _ in 0..2 {
+            let rejected = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                archetypes.get_or_create(&ComponentSet::from_ids([b]), &components);
+            }));
+            assert!(rejected.is_err());
+            assert_eq!(archetypes.len(), 2);
+            assert_eq!(archetypes.created_count(), u64::from(u32::MAX));
+            assert_eq!(archetypes.last_id(), Some(last));
+            assert!(archetypes.with_component(b).is_none());
+            assert_eq!(archetypes.by_key.len(), 2);
+            assert!(archetypes.get(ArchetypeId::INVALID).is_none());
+            assert!(archetypes
+                .column_changes_since(Some(cursor))
+                .events
+                .is_empty());
+        }
+    }
+
+    #[test]
+    fn mutable_archetype_borrows_preserve_order_and_can_be_retained_together() {
+        let mut components = Components::new();
+        let a = components.register::<A>();
+        let b = components.register::<B>();
+        let mut archetypes = Archetypes::new();
+        let first = archetypes.get_or_create(&ComponentSet::from_ids([a]), &components);
+        let second = archetypes.get_or_create(&ComponentSet::from_ids([b]), &components);
+        let (right, left) = archetypes.get_pair_mut(second, first);
+        assert_eq!((right.id(), left.id()), (second, first));
+        let (left, right) = archetypes.get_pair_mut(first, second);
+        assert_eq!((left.id(), right.id()), (first, second));
+        let retained: Vec<_> = archetypes.iter_mut().collect();
+        assert_eq!(
+            retained.iter().map(|entry| entry.id()).collect::<Vec<_>>(),
+            [ArchetypeId::EMPTY, first, second]
+        );
+        for entry in retained {
+            entry.reserve(1);
+        }
+    }
+
+    #[test]
+    fn mutable_iteration_preserves_sparse_id_order_through_eviction_and_recreation() {
+        #[derive(PartialEq, Eq, Hash)]
+        struct Key(u32);
+        impl Component for Key {
+            const STORAGE: crate::component::StorageType = crate::component::StorageType::Shared;
+        }
+        let mut components = Components::new();
+        let a = components.register::<A>();
+        let key = components.register::<Key>();
+        let set = ComponentSet::from_ids([a]);
+        let mut archetypes = Archetypes::new();
+        let mut issued = Vec::new();
+        let mut weak_values = Vec::new();
+        // Exercise multiple ordered-tree nodes and large ID holes without
+        // allocating storage proportional to the historical ID high water.
+        for base in [1, 1 << 8, 1 << 16, 1 << 24, u32::MAX - 64] {
+            archetypes.next_id = u64::from(base);
+            for _ in 0..16 {
+                let value = issued.len() as u32;
+                let shared = Arc::new(Key(value));
+                weak_values.push(Arc::downgrade(&shared));
+                issued.push(archetypes.get_or_create_shared(
+                    &set,
+                    &[(key, SharedValueId::new(value), shared)],
+                    &components,
+                ));
+            }
+        }
+        let latest = *issued.last().unwrap();
+        let mut expected = vec![ArchetypeId::EMPTY];
+        for (value, &id) in issued.iter().enumerate() {
+            if value % 3 == 1 {
+                expected.push(id);
+            } else {
+                archetypes.evict_shared_binding(key, SharedValueId::new(value as u32));
+                assert!(archetypes.get(id).is_none());
+                assert!(weak_values[value].upgrade().is_none());
+            }
+        }
+        // Reusing a freed shared-value ID must append a fresh archetype ID,
+        // never revive the old object's position or its retained Arc.
+        let replacement = Arc::new(Key(999));
+        let replacement_weak = Arc::downgrade(&replacement);
+        let recreated = archetypes.get_or_create_shared(
+            &set,
+            &[(key, SharedValueId::new(0), replacement)],
+            &components,
+        );
+        assert!(recreated > latest);
+        assert!(archetypes.get(issued[0]).is_none());
+        expected.push(recreated);
+
+        let mut retained: Vec<_> = archetypes.iter_mut().collect();
+        assert_eq!(
+            retained.iter().map(|entry| entry.id()).collect::<Vec<_>>(),
+            expected
+        );
+        // Hold every mutable reference together, then mutate in reverse order
+        // and resolve each stable ID again after the borrows are released.
+        for (index, entry) in retained.iter_mut().enumerate().rev() {
+            entry.reserve(index + 1);
+        }
+        drop(retained);
+        assert_eq!(
+            archetypes.iter().map(Archetype::id).collect::<Vec<_>>(),
+            expected
+        );
+        for (index, &id) in expected.iter().enumerate() {
+            assert!(archetypes.get(id).unwrap().table().capacity() >= index + 1);
+        }
+        assert_eq!(
+            archetypes
+                .iter_after(Some(issued[31]))
+                .map(Archetype::id)
+                .collect::<Vec<_>>(),
+            expected
+                .iter()
+                .copied()
+                .filter(|&id| id > issued[31])
+                .collect::<Vec<_>>()
+        );
+
+        for value in 0..issued.len() as u32 {
+            archetypes.evict_shared_binding(key, SharedValueId::new(value));
+        }
+        assert!(weak_values.iter().all(|value| value.upgrade().is_none()));
+        assert!(replacement_weak.upgrade().is_none());
+        assert_eq!(archetypes.len(), 1);
+        assert_eq!(archetypes.by_key.len(), 1);
+        assert!(archetypes.by_component.is_empty());
+        assert!(archetypes.by_shared_binding.is_empty());
+        assert_eq!(archetypes.archetype_ids.len(), 1);
+        assert_eq!(
+            archetypes
+                .iter_mut()
+                .map(|entry| entry.id())
+                .collect::<Vec<_>>(),
+            [ArchetypeId::EMPTY]
+        );
+    }
+
+    #[test]
+    fn dropping_partially_consumed_mutable_iteration_preserves_all_archetypes() {
+        let mut components = Components::new();
+        let a = components.register::<A>();
+        let b = components.register::<B>();
+        let mut archetypes = Archetypes::new();
+        let first = archetypes.get_or_create(&ComponentSet::from_ids([a]), &components);
+        let second = archetypes.get_or_create(&ComponentSet::from_ids([b]), &components);
+        {
+            let mut entries = archetypes.iter_mut();
+            let empty = entries.next().unwrap();
+            let first_entry = entries.next().unwrap();
+            drop(entries);
+            // Dropping the temporary map releases unconsumed borrows, while
+            // references already handed out remain usable together.
+            assert_eq!(empty.id(), ArchetypeId::EMPTY);
+            assert_eq!(first_entry.id(), first);
+            empty.reserve(2);
+            first_entry.reserve(3);
+        }
+        assert_eq!(archetypes.len(), 3);
+        assert!(
+            archetypes
+                .get(ArchetypeId::EMPTY)
+                .unwrap()
+                .table()
+                .capacity()
+                >= 2
+        );
+        assert!(archetypes.get(first).unwrap().table().capacity() >= 3);
+        archetypes.get_mut(second).unwrap().reserve(4);
+        assert_eq!(
+            archetypes
+                .iter_mut()
+                .map(|entry| entry.id())
+                .collect::<Vec<_>>(),
+            [ArchetypeId::EMPTY, first, second]
+        );
+        assert!(archetypes.get(second).unwrap().table().capacity() >= 4);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn mutable_archetype_pair_rejects_duplicate_and_missing_ids() {
+        let mut archetypes = Archetypes::new();
+        for pair in [
+            (ArchetypeId::EMPTY, ArchetypeId::EMPTY),
+            (ArchetypeId::EMPTY, ArchetypeId::new(42)),
+            (ArchetypeId::new(42), ArchetypeId::EMPTY),
+        ] {
+            assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = archetypes.get_pair_mut(pair.0, pair.1);
+            }))
+            .is_err());
+        }
+        assert_eq!(archetypes.len(), 1);
+    }
+
+    #[test]
+    fn shared_archetype_eviction_reclaims_objects_and_high_water_capacity() {
+        #[derive(PartialEq, Eq, Hash)]
+        struct Key(u32);
+        impl Component for Key {
+            const STORAGE: crate::component::StorageType = crate::component::StorageType::Shared;
+        }
+        let mut components = Components::new();
+        let a = components.register::<A>();
+        let key = components.register::<Key>();
+        let set = ComponentSet::from_ids([a]);
+        let mut archetypes = Archetypes::new();
+        let mut issued = Vec::new();
+        let mut weak_values = Vec::new();
+        for value in 0..1024 {
+            let shared = Arc::new(Key(value));
+            weak_values.push(Arc::downgrade(&shared));
+            let id = archetypes.get_or_create_shared(
+                &set,
+                &[(key, SharedValueId::new(value), shared)],
+                &components,
+            );
+            issued.push(id);
+        }
+        assert_eq!(archetypes.created_count(), 1025);
+        assert!(archetypes.archetypes.capacity() > 1024);
+        for (value, &id) in issued.iter().enumerate() {
+            archetypes.evict_shared_binding(key, SharedValueId::new(value as u32));
+            assert!(archetypes.get(id).is_none());
+            assert!(weak_values[value].upgrade().is_none());
+        }
+        assert_eq!(archetypes.len(), 1);
+        assert_eq!(archetypes.archetype_ids.len(), 1);
+        assert!(archetypes.by_component.is_empty());
+        assert!(archetypes.by_shared_binding.is_empty());
+        assert_eq!(archetypes.by_key.len(), 1);
+        for capacity in [
+            archetypes.archetypes.capacity(),
+            archetypes.by_key.capacity(),
+            archetypes.by_shared_binding.capacity(),
+        ] {
+            assert!(capacity <= 128, "historical capacity retained: {capacity}");
+        }
+        let latest = *issued.last().unwrap();
+        assert_eq!(archetypes.last_id(), Some(latest));
+        assert_eq!(archetypes.iter_after(Some(latest)).count(), 0);
+        let next = archetypes.get_or_create(&set, &components);
+        assert!(next > latest);
+        assert_eq!(archetypes.created_count(), 1026);
+        assert_eq!(
+            archetypes
+                .iter_after(Some(latest))
+                .map(Archetype::id)
+                .collect::<Vec<_>>(),
+            [next]
+        );
     }
 
     #[test]

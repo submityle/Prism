@@ -20,13 +20,12 @@ use crate::archetype::ArchetypeId;
 
 /// Incrementally-maintained set of archetypes a query matches.
 ///
-/// Archetype component sets are immutable and archetype ids remain stable
-/// (except by a wholesale registry replacement on restore), so a match decision
-/// for a live [`ArchetypeId`] is permanent within a structural generation.
-/// Permanently evicted shared-value tombstones are compacted from `ids` only
-/// when an eviction event intersects the cached matches. The cache records how
-/// many archetypes have been examined (`checked`), the ids that matched
-/// (`ids`), and its structural generation and eviction-log cursor.
+/// Archetype component sets are immutable and archetype ids are monotonic and
+/// never reused (except by a wholesale registry replacement on restore), so a
+/// match decision for a live [`ArchetypeId`] is permanent within a structural
+/// generation. Evicted IDs are removed from `ids` when an eviction event
+/// intersects the cached matches. The cache records the highest ID examined,
+/// the ids that matched, and its structural generation and eviction-log cursor.
 pub(crate) struct MatchedArchetypes {
     /// Immutable, shareable ids of every non-evicted archetype matched so far,
     /// in ascending id order. Query iterators retain this snapshot without
@@ -34,10 +33,10 @@ pub(crate) struct MatchedArchetypes {
     /// only when the structural generation changes, matching ids are added, or
     /// evicted ids are compacted.
     pub(crate) ids: Arc<Vec<ArchetypeId>>,
-    /// Number of the world's archetypes already tested. Archetypes with index
-    /// `< checked` have a settled (permanent) match decision.
-    pub(crate) checked: usize,
-    /// The `World::archetype_generation` these `ids`/`checked` were computed
+    /// Highest monotonically-issued ID tested, including IDs since evicted.
+    /// `None` means no registry ID has been examined yet.
+    pub(crate) checked_through: Option<ArchetypeId>,
+    /// The `World::archetype_generation` these `ids`/`checked_through` were computed
     /// against; a mismatch clears the cache and re-scans from scratch.
     pub(crate) generation: u64,
     /// Number of `Archetypes::evicted_ids` events already checked. Unlike a
@@ -51,7 +50,7 @@ impl MatchedArchetypes {
     pub(crate) fn new(generation: u64, eviction_checked: usize) -> Self {
         Self {
             ids: Arc::new(Vec::new()),
-            checked: 0,
+            checked_through: None,
             generation,
             eviction_checked,
         }

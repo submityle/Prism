@@ -1,16 +1,13 @@
 //! GPU-resident column upload / dirty-block census (design §15, §16.6).
 //!
-//! A GPU-resident component column
-//! ([`GpuResidentColumn`](crate::gpu_resident::GpuResidentColumn)) keeps its
-//! element data persistently mapped on the GPU and tracks which fixed-size
-//! blocks changed since the last acknowledged upload, so each frame only the
-//! dirty blocks are re-sent (the Horizon / Insomniac incremental-upload shape,
-//! design §15 脏块增量上传). The whole value of that scheme is that upload cost
-//! tracks *change volume*, not column size — the same headline as the rest of
-//! the kernel (design §1 成本 ∝ 变化量).
+//! [`GpuResidentColumn`] is a CPU-side upload planner, not a mapped GPU buffer.
+//! It tracks caller-reported dirty blocks since the last consumed plan, not
+//! since GPU acknowledgement. Allocation, execution and synchronization are
+//! caller-owned. Initial allocation, growth and explicit invalidation copy the
+//! whole live extent; otherwise only coalesced dirty spans are planned.
 //!
 //! This module reads one or more columns and reports, per column, how much the
-//! next incremental upload will cost and how well the dirty set coalesces, plus
+//! next plan would copy and how well the dirty set coalesces, plus
 //! a registry-wide roll-up. It uses only the columns' *immutable* accessors —
 //! it never calls `take_upload` / `take_upload_plan`, so running it from a
 //! diagnostics system does not consume or disturb pending uploads.
@@ -19,9 +16,9 @@
 //!
 //! * **pending upload size** —
 //!   [`pending_upload_bytes`](ColumnUploadEntry::pending_upload_bytes) is the
-//!   minimal (coalesced) byte count the next incremental upload will copy;
+//!   byte count the next successful plan will copy, including full replacement;
 //!   [`total_pending_upload_bytes`](GpuUploadReport::total_pending_upload_bytes)
-//!   is the frame's whole GPU-upload budget.
+//!   is a saturating total for the supplied planners, not a measured GPU cost.
 //! * **upload amplification** —
 //!   [`upload_amplification_permille`](ColumnUploadEntry::upload_amplification_permille)
 //!   is pending bytes over live bytes: `1000` means the entire column is being
@@ -34,8 +31,9 @@
 //! * **capacity pressure** —
 //!   [`needs_reallocation`](ColumnUploadEntry::needs_reallocation) /
 //!   [`columns_needing_reallocation`](GpuUploadReport::columns_needing_reallocation)
-//!   flag columns whose live extent has outgrown their GPU buffer, forcing a
-//!   full re-upload next frame.
+//!   flag growth or explicit invalidation. Empty invalidations request release
+//!   without copying bytes. Estimates do not validate device limits or whether
+//!   the planner's checked capacity/version arithmetic can produce a plan.
 //!
 //! # Determinism (design §14)
 //!
@@ -52,8 +50,8 @@ use crate::gpu_resident::GpuResidentColumn;
 /// frame (design §15 / §16.6).
 ///
 /// All figures are a read-only snapshot of the column's *pending* state: the
-/// dirty blocks that the next incremental upload would copy, the live extent,
-/// and the renderer's acknowledged GPU buffer capacity.
+/// raw dirty blocks, bytes the next successful plan would copy, live extent,
+/// and capacity recorded by CPU planning (not acknowledged GPU capacity).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct ColumnUploadEntry {
     /// The component whose GPU-resident column this describes.
@@ -64,24 +62,24 @@ pub struct ColumnUploadEntry {
     pub block_count: usize,
     /// Blocks currently marked dirty (the raw, uncoalesced dirty count).
     pub dirty_block_count: usize,
-    /// Coalesced upload spans — adjacent dirty blocks merged — i.e. the number
-    /// of separate GPU copy operations the next incremental upload issues.
+    /// Coalesced raw dirty spans. Replacement may instead use one full span;
+    /// zero-byte spans need not issue a GPU copy.
     pub dirty_span_count: usize,
-    /// Minimal (coalesced) bytes the next incremental upload copies, clamped to
-    /// the live extent.
+    /// Bytes the next successful plan copies: full live extent on replacement,
+    /// otherwise coalesced dirty bytes. Zero for an empty release or zero stride.
     pub pending_upload_bytes: usize,
     /// Live byte extent of the column (`element_count * element_stride`).
     pub live_bytes: usize,
-    /// Blocks the renderer currently has allocated on the GPU for this column.
+    /// Block capacity recorded by CPU planning, not GPU acknowledgement.
     pub gpu_capacity_blocks: usize,
-    /// Bytes the renderer currently has allocated on the GPU for this column.
+    /// Byte capacity recorded by CPU planning, not GPU acknowledgement.
     pub gpu_capacity_bytes: usize,
-    /// Whether the live extent has outgrown the GPU buffer, so the next upload
-    /// plan must reallocate and re-upload the whole live extent.
+    /// Whether growth or invalidation requires replacement/full upload, or an
+    /// empty release. This is not a device allocation success guarantee.
     pub needs_reallocation: bool,
     /// The column's upload version (bumped once per non-empty upload taken).
     pub upload_version: u64,
-    /// Identity of the column's current GPU buffer allocation.
+    /// Identity recorded by the last allocation plan, not GPU acknowledgement.
     pub buffer_generation: u64,
 }
 
@@ -89,31 +87,43 @@ impl ColumnUploadEntry {
     /// Account one GPU-resident column into an entry, without disturbing its
     /// pending-upload state.
     pub fn from_column(component: ComponentId, column: &GpuResidentColumn) -> Self {
-        let pending_upload_bytes = column
-            .coalesced_dirty_blocks()
-            .iter()
-            .map(|d| d.byte_len)
-            .sum();
+        let spans = column.coalesced_dirty_spans();
+        let dirty_span_count = spans.len();
+        let live_bytes = column.len() * column.element_stride();
+        let needs_reallocation = column.needs_reallocation();
+        let pending_upload_bytes = if needs_reallocation {
+            live_bytes
+        } else {
+            spans.map(|d| d.byte_len).sum()
+        };
         Self {
             component,
             element_count: column.len(),
             block_count: column.block_count(),
             dirty_block_count: column.dirty_block_count(),
-            dirty_span_count: column.coalesced_dirty_blocks().len(),
+            dirty_span_count,
             pending_upload_bytes,
-            live_bytes: column.len() * column.element_stride(),
+            live_bytes,
             gpu_capacity_blocks: column.gpu_capacity_blocks(),
             gpu_capacity_bytes: column.gpu_capacity_bytes(),
-            needs_reallocation: column.needs_reallocation(),
+            needs_reallocation,
             upload_version: column.upload_version(),
             buffer_generation: column.buffer_generation(),
         }
     }
 
-    /// Whether this column has no pending dirty blocks (nothing to upload).
+    /// Whether no raw dirty blocks are pending. A clean column may still need
+    /// replacement/full upload or an empty release; see [`Self::has_pending_plan`].
     #[inline]
     pub const fn is_clean(&self) -> bool {
         self.dirty_block_count == 0
+    }
+
+    /// Whether a successful next plan would contain spans or replacement/release.
+    /// Includes zero-stride spans and zero-byte releases, not only byte copies.
+    #[inline]
+    pub const fn has_pending_plan(&self) -> bool {
+        self.needs_reallocation || !self.is_clean()
     }
 
     /// Whether every live block is dirty — a worst-case frame where the
@@ -127,10 +137,7 @@ impl ColumnUploadEntry {
     /// Returns `0` for an empty column.
     #[inline]
     pub const fn dirty_permille(&self) -> u64 {
-        if self.block_count == 0 {
-            return 0;
-        }
-        self.dirty_block_count as u64 * 1000 / self.block_count as u64
+        permille(self.dirty_block_count as u128, self.block_count as u128)
     }
 
     /// Pending upload bytes over live bytes, in per-mille (`1000` = the entire
@@ -138,10 +145,7 @@ impl ColumnUploadEntry {
     /// paying off: small is good. Returns `0` for an empty column.
     #[inline]
     pub const fn upload_amplification_permille(&self) -> u64 {
-        if self.live_bytes == 0 {
-            return 0;
-        }
-        self.pending_upload_bytes as u64 * 1000 / self.live_bytes as u64
+        permille(self.pending_upload_bytes as u128, self.live_bytes as u128)
     }
 
     /// Dirty blocks per coalesced span, in per-mille (`1000` = one block per
@@ -149,10 +153,10 @@ impl ColumnUploadEntry {
     /// Returns `0` when nothing is dirty.
     #[inline]
     pub const fn blocks_per_span_permille(&self) -> u64 {
-        if self.dirty_span_count == 0 {
-            return 0;
-        }
-        self.dirty_block_count as u64 * 1000 / self.dirty_span_count as u64
+        permille(
+            self.dirty_block_count as u128,
+            self.dirty_span_count as u128,
+        )
     }
 
     /// GPU buffer blocks allocated beyond the live extent (grow-only slack a
@@ -169,10 +173,53 @@ impl ColumnUploadEntry {
     /// `0` before any GPU capacity has been established.
     #[inline]
     pub const fn capacity_utilization_permille(&self) -> u64 {
-        if self.gpu_capacity_blocks == 0 {
-            return 0;
+        permille(self.block_count as u128, self.gpu_capacity_blocks as u128)
+    }
+}
+
+// Widen before scaling; saturate only the returned ratio. The fallback also
+// handles wide aggregate totals without overflowing numerator * 1000.
+const fn permille(numerator: u128, denominator: u128) -> u64 {
+    if denominator == 0 {
+        return 0;
+    }
+    let value = if let Some(scaled) = numerator.checked_mul(1000) {
+        scaled / denominator
+    } else {
+        let whole = numerator / denominator;
+        if whole > u64::MAX as u128 / 1000 {
+            return u64::MAX;
         }
-        self.block_count as u64 * 1000 / self.gpu_capacity_blocks as u64
+        let base = numerator % denominator;
+        let mut remainder = 0;
+        let mut fraction = 0;
+        let mut bit = 10;
+        // Long multiplication/division of base * 1000, keeping every
+        // intermediate remainder below denominator. Neither addition wraps.
+        while bit != 0 {
+            bit -= 1;
+            fraction *= 2;
+            if remainder >= denominator - remainder {
+                remainder -= denominator - remainder;
+                fraction += 1;
+            } else {
+                remainder *= 2;
+            }
+            if (1000 >> bit) & 1 != 0 {
+                if remainder >= denominator - base {
+                    remainder -= denominator - base;
+                    fraction += 1;
+                } else {
+                    remainder += base;
+                }
+            }
+        }
+        whole * 1000 + fraction
+    };
+    if value > u64::MAX as u128 {
+        u64::MAX
+    } else {
+        value as u64
     }
 }
 
@@ -181,6 +228,8 @@ impl ColumnUploadEntry {
 /// Built from an explicit list of columns via
 /// [`from_columns`](Self::from_columns). The entries are sorted by
 /// [`ComponentId`]; the roll-up accessors aggregate the whole supplied set.
+/// `usize` totals saturate at `usize::MAX`; aggregate ratios use unsaturated
+/// wide totals so overflowing a display total does not distort the ratio.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct GpuUploadReport {
     entries: Vec<ColumnUploadEntry>,
@@ -221,29 +270,36 @@ impl GpuUploadReport {
         self.entries.is_empty()
     }
 
-    /// Total minimal (coalesced) bytes the next incremental upload copies
-    /// across every column — the frame's whole GPU-upload budget.
+    /// Total bytes the next successful plans copy, saturating at `usize::MAX`.
     #[inline]
     pub fn total_pending_upload_bytes(&self) -> usize {
-        self.entries.iter().map(|e| e.pending_upload_bytes).sum()
+        self.entries
+            .iter()
+            .fold(0usize, |sum, e| sum.saturating_add(e.pending_upload_bytes))
     }
 
-    /// Total live byte extent across every column.
+    /// Total live byte extent, saturating at `usize::MAX`.
     #[inline]
     pub fn total_live_bytes(&self) -> usize {
-        self.entries.iter().map(|e| e.live_bytes).sum()
+        self.entries
+            .iter()
+            .fold(0usize, |sum, e| sum.saturating_add(e.live_bytes))
     }
 
-    /// Total dirty blocks pending across every column.
+    /// Total dirty blocks, saturating at `usize::MAX`.
     #[inline]
     pub fn total_dirty_blocks(&self) -> usize {
-        self.entries.iter().map(|e| e.dirty_block_count).sum()
+        self.entries
+            .iter()
+            .fold(0usize, |sum, e| sum.saturating_add(e.dirty_block_count))
     }
 
-    /// Total live blocks across every column.
+    /// Total live blocks, saturating at `usize::MAX`.
     #[inline]
     pub fn total_blocks(&self) -> usize {
-        self.entries.iter().map(|e| e.block_count).sum()
+        self.entries
+            .iter()
+            .fold(0usize, |sum, e| sum.saturating_add(e.block_count))
     }
 
     /// Number of columns with at least one dirty block this frame.
@@ -252,14 +308,21 @@ impl GpuUploadReport {
         self.entries.iter().filter(|e| !e.is_clean()).count()
     }
 
-    /// Number of columns with nothing pending (zero-cost this frame).
+    /// Number of columns with no raw dirty blocks. They may still need
+    /// replacement/full upload or release.
     #[inline]
     pub fn clean_column_count(&self) -> usize {
         self.entries.iter().filter(|e| e.is_clean()).count()
     }
 
-    /// Number of columns whose live extent has outgrown their GPU buffer and
-    /// will force a full re-upload on their next upload plan.
+    /// Number of columns with spans or replacement/release pending, including
+    /// zero-byte work. A successful plan from each would be nonempty.
+    #[inline]
+    pub fn pending_plan_column_count(&self) -> usize {
+        self.entries.iter().filter(|e| e.has_pending_plan()).count()
+    }
+
+    /// Number of columns requiring replacement or release on their next plan.
     #[inline]
     pub fn columns_needing_reallocation(&self) -> usize {
         self.entries.iter().filter(|e| e.needs_reallocation).count()
@@ -269,11 +332,13 @@ impl GpuUploadReport {
     /// when there are no live blocks.
     #[inline]
     pub fn aggregate_dirty_permille(&self) -> u64 {
-        let blocks = self.total_blocks();
-        if blocks == 0 {
-            return 0;
-        }
-        self.total_dirty_blocks() as u64 * 1000 / blocks as u64
+        permille(
+            self.entries
+                .iter()
+                .map(|e| e.dirty_block_count as u128)
+                .sum(),
+            self.entries.iter().map(|e| e.block_count as u128).sum(),
+        )
     }
 
     /// Aggregate upload amplification over the whole set, in per-mille: total
@@ -281,11 +346,13 @@ impl GpuUploadReport {
     /// Returns `0` when there are no live bytes.
     #[inline]
     pub fn aggregate_upload_amplification_permille(&self) -> u64 {
-        let live = self.total_live_bytes();
-        if live == 0 {
-            return 0;
-        }
-        self.total_pending_upload_bytes() as u64 * 1000 / live as u64
+        permille(
+            self.entries
+                .iter()
+                .map(|e| e.pending_upload_bytes as u128)
+                .sum(),
+            self.entries.iter().map(|e| e.live_bytes as u128).sum(),
+        )
     }
 
     /// The column with the largest pending upload (ties resolve to the lowest
@@ -351,6 +418,7 @@ mod tests {
         assert_eq!(report.dirty_column_count(), 0);
         assert_eq!(report.clean_column_count(), 0);
         assert_eq!(report.columns_needing_reallocation(), 0);
+        assert_eq!(report.pending_plan_column_count(), 0);
         assert_eq!(report.aggregate_dirty_permille(), 0);
         assert_eq!(report.aggregate_upload_amplification_permille(), 0);
         assert_eq!(report.hottest_upload(), None);
@@ -405,6 +473,8 @@ mod tests {
         assert_eq!(e.blocks_per_span_permille(), 0);
         assert_eq!(report.clean_column_count(), 1);
         assert_eq!(report.dirty_column_count(), 0);
+        assert!(!e.has_pending_plan());
+        assert_eq!(report.pending_plan_column_count(), 0);
     }
 
     #[test]
@@ -422,6 +492,156 @@ mod tests {
         // utilization > 1000 since live extent outgrew the buffer: 5/2.
         assert_eq!(e.capacity_utilization_permille(), 2500);
         assert_eq!(report.columns_needing_reallocation(), 1);
+        // The replacement must copy the complete live column, not just block 4.
+        assert_eq!(e.pending_upload_bytes, 20);
+        assert_eq!(e.upload_amplification_permille(), 1000);
+    }
+
+    #[test]
+    fn clean_initial_growth_and_invalidation_predict_full_upload_without_consuming() {
+        let mut column = GpuResidentColumn::new(4, 2);
+        column.ensure_len(3);
+        for phase in 0..3 {
+            if phase == 1 {
+                column.ensure_len(9);
+            } else if phase == 2 {
+                column.force_reallocation();
+            }
+            assert!(column.is_clean());
+            let before = (column.upload_version(), column.buffer_generation());
+            let report = GpuUploadReport::from_columns(&[(cid(1), &column)]);
+            assert_eq!(report, GpuUploadReport::from_columns(&[(cid(1), &column)]));
+            let entry = report.column(cid(1)).unwrap();
+            assert!(entry.is_clean());
+            assert!(entry.has_pending_plan());
+            assert_eq!(report.pending_plan_column_count(), 1);
+            assert_eq!(entry.pending_upload_bytes, column.len() * 4);
+            assert_eq!(entry.upload_amplification_permille(), 1000);
+            assert_eq!(
+                before,
+                (column.upload_version(), column.buffer_generation())
+            );
+            let plan = column.take_upload_plan();
+            assert!(plan.reallocate.is_some());
+            assert_eq!(plan.spans.len(), 1);
+            assert_eq!(entry.pending_upload_bytes, plan.spans[0].byte_len);
+            assert!(!ColumnUploadEntry::from_column(cid(1), &column).has_pending_plan());
+        }
+    }
+
+    #[test]
+    fn empty_release_is_pending_even_without_bytes_or_dirty_blocks() {
+        let mut column = resident(8, 2, 7);
+        column.mark_dirty(6);
+        column.truncate(0);
+        column.force_reallocation();
+        let version = column.upload_version();
+        let generation = column.buffer_generation();
+        let report = GpuUploadReport::from_columns(&[(cid(1), &column)]);
+        let entry = report.column(cid(1)).unwrap();
+        assert!(entry.is_clean());
+        assert!(entry.has_pending_plan());
+        assert_eq!(report.pending_plan_column_count(), 1);
+        assert_eq!(report.total_pending_upload_bytes(), 0);
+        assert_eq!(entry.dirty_permille(), 0);
+        assert_eq!(entry.upload_amplification_permille(), 0);
+        let plan = column.take_upload_plan();
+        let release = plan.reallocate.unwrap();
+        assert_eq!(release.capacity_blocks, 0);
+        assert_eq!(release.capacity_bytes, 0);
+        assert_eq!(release.buffer_generation, generation + 1);
+        assert!(plan.spans.is_empty());
+        assert_eq!(column.upload_version(), version);
+        assert!(!ColumnUploadEntry::from_column(cid(1), &column).has_pending_plan());
+    }
+
+    #[test]
+    fn zero_stride_growth_dirty_spans_and_release_remain_visible() {
+        let mut column = GpuResidentColumn::new(0, 4);
+        column.ensure_len(5);
+        for phase in 0..3 {
+            if phase == 1 {
+                column.mark_dirty(4);
+            } else if phase == 2 {
+                column.truncate(0);
+                column.force_reallocation();
+            }
+            let entry = ColumnUploadEntry::from_column(cid(1), &column);
+            assert!(entry.has_pending_plan());
+            assert_eq!(entry.pending_upload_bytes, 0);
+            assert_eq!(entry.live_bytes, 0);
+            assert_eq!(entry.upload_amplification_permille(), 0);
+            let plan = column.take_upload_plan();
+            assert!(!plan.is_empty());
+            assert!(plan.spans.iter().all(|span| span.byte_len == 0));
+            assert_eq!(plan.spans.is_empty(), phase == 2);
+            assert!(!ColumnUploadEntry::from_column(cid(1), &column).has_pending_plan());
+        }
+    }
+
+    #[test]
+    fn census_does_not_consume_incremental_spans_or_versions() {
+        let mut column = resident(3, 2, 9);
+        column.mark_dirty(0);
+        column.mark_dirty(8);
+        let spans = column.coalesced_dirty_blocks();
+        let version = column.upload_version();
+        let generation = column.buffer_generation();
+        let entry = ColumnUploadEntry::from_column(cid(1), &column);
+        assert_eq!(entry.pending_upload_bytes, 9);
+        assert_eq!(entry.dirty_span_count, 2);
+        assert_eq!(column.coalesced_dirty_blocks(), spans);
+        assert_eq!(column.upload_version(), version);
+        assert_eq!(column.buffer_generation(), generation);
+        let plan = column.take_upload_plan();
+        assert_eq!(plan.reallocate, None);
+        assert_eq!(plan.spans, spans);
+        assert_eq!(column.upload_version(), version + 1);
+    }
+
+    #[test]
+    fn huge_logical_columns_saturate_display_totals_without_distorting_ratios() {
+        // Planners allocate only dirty intervals, not the logical byte extent.
+        let rows = usize::MAX / 2;
+        let mut dirty = resident(1, 1, rows);
+        let clean = resident(1, 1, rows);
+        dirty.mark_range(0, rows);
+        let report =
+            GpuUploadReport::from_columns(&[(cid(1), &dirty), (cid(2), &clean), (cid(3), &clean)]);
+        assert_eq!(report.total_live_bytes(), usize::MAX);
+        assert_eq!(report.total_blocks(), usize::MAX);
+        assert_eq!(report.total_dirty_blocks(), rows);
+        assert_eq!(report.total_pending_upload_bytes(), rows);
+        assert_eq!(report.aggregate_dirty_permille(), 333);
+        assert_eq!(report.aggregate_upload_amplification_permille(), 333);
+        let entry = report.column(cid(1)).unwrap();
+        assert_eq!(entry.dirty_permille(), 1000);
+        assert_eq!(entry.upload_amplification_permille(), 1000);
+        assert_eq!(
+            entry.blocks_per_span_permille(),
+            u64::try_from(rows as u128 * 1000).unwrap_or(u64::MAX)
+        );
+    }
+
+    #[test]
+    fn wide_permille_handles_fractional_overflow_and_saturation_boundaries() {
+        assert_eq!(permille(u128::MAX, 0), 0);
+        assert_eq!(permille(u128::MAX, u128::MAX), 1000);
+        assert_eq!(permille(u128::MAX - 1, u128::MAX), 999);
+        assert_eq!(permille(u128::MAX / 3, u128::MAX), 333);
+        assert_eq!(permille(u128::MAX, u128::MAX / 3), 3000);
+        assert_eq!(permille(u128::MAX, 1), u64::MAX);
+        assert_eq!(permille(u64::MAX as u128, 1000), u64::MAX);
+        assert_eq!(permille(u64::MAX as u128 + 1, 1000), u64::MAX);
+        for denominator in 1..=257u128 {
+            for numerator in [0, 1, denominator / 2, denominator, denominator * 3 - 1] {
+                let scale = u128::MAX / (denominator * 3);
+                assert_eq!(
+                    permille(numerator * scale, denominator * scale),
+                    (numerator * 1000 / denominator) as u64
+                );
+            }
+        }
     }
 
     #[test]
