@@ -2553,7 +2553,7 @@ mod tests {
         };
     }
 
-    #[derive(Component, Default, Clone)]
+    #[derive(Component, Default)]
     struct Fail;
     impl FromTemplate for Fail {
         type Template = Fail;
@@ -2569,7 +2569,7 @@ mod tests {
         }
 
         fn clone_template(&self) -> Self {
-            self.clone()
+            Fail
         }
     }
 

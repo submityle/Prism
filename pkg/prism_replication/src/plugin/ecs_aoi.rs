@@ -125,16 +125,17 @@ where
         return false;
     };
     let mut entities = BTreeSet::new();
-    entities.extend(
-        live_entities
-            .iter()
-            .copied()
-            .filter(|entity| world.contains(*entity)),
-    );
-    entities.extend(state.published.keys().copied());
-    if entities.len() > queue.capacity {
-        world.insert_resource(queue);
-        return false;
+    for entity in live_entities
+        .iter()
+        .copied()
+        .filter(|entity| world.contains(*entity))
+        .chain(state.published.keys().copied())
+    {
+        entities.insert(entity);
+        if entities.len() > queue.capacity {
+            world.insert_resource(queue);
+            return false;
+        }
     }
     queue.items = entities.iter().copied().collect();
     queue.membership = entities;
