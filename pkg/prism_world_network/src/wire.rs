@@ -28,6 +28,219 @@ const MAX_PAYLOAD: usize = 16 * 1024 * 1024;
 /// Maximum encoded transport payload accepted by this codec.
 pub const MAX_TRANSPORT_PAYLOAD: usize = MAX_PAYLOAD;
 
+/// Result of asking a stream decoder for its next complete frame.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FrameDecodeStatus {
+    /// More bytes are required before a complete frame is available.
+    NeedMore,
+    /// One complete, framing-validated `PWN1` frame.
+    Frame(Vec<u8>),
+}
+
+/// Errors raised while assembling bounded `PWN1` frames from a byte stream.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FrameDecoderError {
+    /// The configured per-frame and cumulative buffering limit is invalid.
+    InvalidMaxFrameBytes(usize),
+    /// The cumulative retained stream would exceed the configured bound.
+    BufferLimitExceeded {
+        /// Bytes already retained by the decoder.
+        buffered: usize,
+        /// Bytes supplied by the rejected chunk.
+        incoming: usize,
+        /// Maximum retained bytes.
+        limit: usize,
+    },
+    /// The frame marker is invalid.
+    InvalidMagic,
+    /// The frame version is not supported.
+    UnsupportedVersion(u8),
+    /// The declared payload exceeds the global codec limit.
+    PayloadTooLarge(u32),
+    /// The declared frame cannot fit within the decoder's per-frame limit.
+    FrameTooLarge {
+        /// Declared total frame length.
+        frame_bytes: usize,
+        /// Configured maximum total frame length.
+        limit: usize,
+    },
+    /// An allocation failed before the chunk or frame was published.
+    AllocationFailed,
+}
+
+/// A bounded framing decoder for socket, QUIC-stream, and other fragmented byte sources.
+///
+/// `max_frame_bytes` is both the maximum total size of one frame and the maximum
+/// number of unconsumed bytes retained by this decoder. Callers must drain frames
+/// with [`Self::next_frame`] before feeding more bytes beyond that budget. Framing
+/// validation happens before `push` mutates the retained stream, so a malformed
+/// chunk leaves the previous state intact.
+pub struct ByteFrameDecoder {
+    buffer: Vec<u8>,
+    max_frame_bytes: usize,
+}
+
+impl ByteFrameDecoder {
+    /// Creates a decoder with a bounded total-frame and retained-stream budget.
+    pub fn new(max_frame_bytes: usize) -> Result<Self, FrameDecoderError> {
+        if !(HEADER_BYTES..=HEADER_BYTES.saturating_add(MAX_PAYLOAD)).contains(&max_frame_bytes) {
+            return Err(FrameDecoderError::InvalidMaxFrameBytes(max_frame_bytes));
+        }
+        Ok(Self {
+            buffer: Vec::new(),
+            max_frame_bytes,
+        })
+    }
+
+    /// Adds one arbitrary stream chunk. Empty chunks are accepted without effect.
+    pub fn push(&mut self, chunk: &[u8]) -> Result<(), FrameDecoderError> {
+        if chunk.is_empty() {
+            return Ok(());
+        }
+        let buffered = self.buffer.len();
+        let retained =
+            buffered
+                .checked_add(chunk.len())
+                .ok_or(FrameDecoderError::BufferLimitExceeded {
+                    buffered,
+                    incoming: chunk.len(),
+                    limit: self.max_frame_bytes,
+                })?;
+        if retained > self.max_frame_bytes {
+            return Err(FrameDecoderError::BufferLimitExceeded {
+                buffered,
+                incoming: chunk.len(),
+                limit: self.max_frame_bytes,
+            });
+        }
+        validate_stream(&self.buffer, chunk, self.max_frame_bytes)?;
+        self.buffer
+            .try_reserve_exact(chunk.len())
+            .map_err(|_| FrameDecoderError::AllocationFailed)?;
+        self.buffer.extend_from_slice(chunk);
+        Ok(())
+    }
+
+    /// Returns the next complete frame, retaining any later frames or partial bytes.
+    pub fn next_frame(&mut self) -> Result<FrameDecodeStatus, FrameDecoderError> {
+        if self.buffer.len() < HEADER_BYTES {
+            return Ok(FrameDecodeStatus::NeedMore);
+        }
+        let frame_bytes = validate_header(&self.buffer, self.max_frame_bytes)?;
+        if self.buffer.len() < frame_bytes {
+            return Ok(FrameDecodeStatus::NeedMore);
+        }
+        let mut frame = Vec::new();
+        frame
+            .try_reserve_exact(frame_bytes)
+            .map_err(|_| FrameDecoderError::AllocationFailed)?;
+        frame.extend_from_slice(&self.buffer[..frame_bytes]);
+        self.buffer.copy_within(frame_bytes.., 0);
+        self.buffer.truncate(self.buffer.len() - frame_bytes);
+        Ok(FrameDecodeStatus::Frame(frame))
+    }
+
+    /// Returns the number of bytes retained but not yet returned as a frame.
+    pub const fn buffered_len(&self) -> usize {
+        self.buffer.len()
+    }
+}
+
+fn validate_stream(
+    buffered: &[u8],
+    incoming: &[u8],
+    max_frame_bytes: usize,
+) -> Result<(), FrameDecoderError> {
+    let total = buffered.len().saturating_add(incoming.len());
+    let byte = |index: usize| {
+        if index < buffered.len() {
+            buffered[index]
+        } else {
+            incoming[index - buffered.len()]
+        }
+    };
+    let mut offset = 0;
+    while total.saturating_sub(offset) >= 4 {
+        for (index, expected) in MAGIC.iter().enumerate() {
+            if byte(offset + index) != *expected {
+                return Err(FrameDecoderError::InvalidMagic);
+            }
+        }
+        if total - offset < HEADER_BYTES {
+            if total - offset > 4 && byte(offset + 4) != VERSION {
+                return Err(FrameDecoderError::UnsupportedVersion(byte(offset + 4)));
+            }
+            return Ok(());
+        }
+        if byte(offset + 4) != VERSION {
+            return Err(FrameDecoderError::UnsupportedVersion(byte(offset + 4)));
+        }
+        let mut length_bytes = [0_u8; 4];
+        for (index, value) in length_bytes.iter_mut().enumerate() {
+            *value = byte(offset + 30 + index);
+        }
+        let payload = u32::from_le_bytes(length_bytes);
+        let payload_usize = payload as usize;
+        if payload_usize > MAX_PAYLOAD {
+            return Err(FrameDecoderError::PayloadTooLarge(payload));
+        }
+        let frame_bytes =
+            HEADER_BYTES
+                .checked_add(payload_usize)
+                .ok_or(FrameDecoderError::FrameTooLarge {
+                    frame_bytes: usize::MAX,
+                    limit: max_frame_bytes,
+                })?;
+        if frame_bytes > max_frame_bytes {
+            return Err(FrameDecoderError::FrameTooLarge {
+                frame_bytes,
+                limit: max_frame_bytes,
+            });
+        }
+        if total - offset < frame_bytes {
+            return Ok(());
+        }
+        offset += frame_bytes;
+    }
+    if total > offset {
+        for index in 0..total - offset {
+            if byte(offset + index) != MAGIC[index] {
+                return Err(FrameDecoderError::InvalidMagic);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_header(bytes: &[u8], max_frame_bytes: usize) -> Result<usize, FrameDecoderError> {
+    debug_assert!(bytes.len() >= HEADER_BYTES);
+    if bytes[..4] != MAGIC {
+        return Err(FrameDecoderError::InvalidMagic);
+    }
+    if bytes[4] != VERSION {
+        return Err(FrameDecoderError::UnsupportedVersion(bytes[4]));
+    }
+    let payload = u32::from_le_bytes(bytes[30..34].try_into().unwrap());
+    let payload_usize = payload as usize;
+    if payload_usize > MAX_PAYLOAD {
+        return Err(FrameDecoderError::PayloadTooLarge(payload));
+    }
+    let frame_bytes =
+        HEADER_BYTES
+            .checked_add(payload_usize)
+            .ok_or(FrameDecoderError::FrameTooLarge {
+                frame_bytes: usize::MAX,
+                limit: max_frame_bytes,
+            })?;
+    if frame_bytes > max_frame_bytes {
+        return Err(FrameDecoderError::FrameTooLarge {
+            frame_bytes,
+            limit: max_frame_bytes,
+        });
+    }
+    Ok(frame_bytes)
+}
+
 /// A non-blocking host byte-channel adapter.
 ///
 /// The adapter owns framing boundaries: one successful send hands one complete
@@ -345,5 +558,110 @@ mod tests {
             sequence: 1,
         };
         assert_eq!(decode_packet(&encode_packet(&ack).unwrap()).unwrap(), ack);
+    }
+
+    fn unsubscribe_packet(sequence: u64, id: u128) -> TransportPacket {
+        TransportPacket::Data {
+            session: SessionId(9),
+            sequence,
+            message: WorldMessage::Unsubscribe(SubscriptionId(id)),
+        }
+    }
+
+    #[test]
+    fn frame_decoder_handles_header_and_payload_fragmentation() {
+        let frame = encode_packet(&unsubscribe_packet(1, 11)).unwrap();
+        let mut decoder = ByteFrameDecoder::new(frame.len()).unwrap();
+        decoder.push(&frame[..2]).unwrap();
+        assert_eq!(decoder.next_frame().unwrap(), FrameDecodeStatus::NeedMore);
+        decoder.push(&frame[2..HEADER_BYTES]).unwrap();
+        assert_eq!(decoder.next_frame().unwrap(), FrameDecodeStatus::NeedMore);
+        decoder.push(&frame[HEADER_BYTES..]).unwrap();
+        let decoded = match decoder.next_frame().unwrap() {
+            FrameDecodeStatus::Frame(frame) => decode_packet(&frame).unwrap(),
+            FrameDecodeStatus::NeedMore => panic!("complete frame expected"),
+        };
+        assert_eq!(decoded, unsubscribe_packet(1, 11));
+        assert_eq!(decoder.buffered_len(), 0);
+    }
+
+    #[test]
+    fn frame_decoder_handles_multiple_frames_and_partial_tail() {
+        let first = encode_packet(&unsubscribe_packet(1, 11)).unwrap();
+        let second = encode_packet(&unsubscribe_packet(2, 12)).unwrap();
+        let mut decoder = ByteFrameDecoder::new(first.len() + second.len()).unwrap();
+        let split = second.len() / 2;
+        let mut chunk = first.clone();
+        chunk.extend_from_slice(&second[..split]);
+        decoder.push(&chunk).unwrap();
+        assert_eq!(
+            decoder.next_frame().unwrap(),
+            FrameDecodeStatus::Frame(first)
+        );
+        assert_eq!(decoder.next_frame().unwrap(), FrameDecodeStatus::NeedMore);
+        decoder.push(&second[split..]).unwrap();
+        assert_eq!(
+            decoder.next_frame().unwrap(),
+            FrameDecodeStatus::Frame(second)
+        );
+        assert_eq!(decoder.next_frame().unwrap(), FrameDecodeStatus::NeedMore);
+    }
+
+    #[test]
+    fn frame_decoder_rejects_bad_header_without_poisoning_state() {
+        let frame = encode_packet(&unsubscribe_packet(1, 11)).unwrap();
+        let mut decoder = ByteFrameDecoder::new(frame.len()).unwrap();
+        decoder.push(&frame[..3]).unwrap();
+        assert_eq!(decoder.push(&[b'X']), Err(FrameDecoderError::InvalidMagic));
+        assert_eq!(decoder.buffered_len(), 3);
+        decoder.push(&frame[3..]).unwrap();
+        assert_eq!(
+            decoder.next_frame().unwrap(),
+            FrameDecodeStatus::Frame(frame)
+        );
+    }
+
+    #[test]
+    fn frame_decoder_rejects_version_and_declared_length_before_completion() {
+        let frame = encode_packet(&unsubscribe_packet(1, 11)).unwrap();
+        let mut version = frame[..5].to_vec();
+        version[4] = 2;
+        let mut decoder = ByteFrameDecoder::new(frame.len()).unwrap();
+        assert_eq!(
+            decoder.push(&version),
+            Err(FrameDecoderError::UnsupportedVersion(2))
+        );
+        assert_eq!(decoder.buffered_len(), 0);
+
+        let mut length = frame[..HEADER_BYTES].to_vec();
+        length[30..34].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert_eq!(
+            decoder.push(&length),
+            Err(FrameDecoderError::PayloadTooLarge(u32::MAX))
+        );
+        assert_eq!(decoder.buffered_len(), 0);
+    }
+
+    #[test]
+    fn frame_decoder_enforces_capacity_and_accepts_exact_limit() {
+        let frame = encode_packet(&unsubscribe_packet(1, 11)).unwrap();
+        assert!(matches!(
+            ByteFrameDecoder::new(HEADER_BYTES - 1),
+            Err(FrameDecoderError::InvalidMaxFrameBytes(value)) if value == HEADER_BYTES - 1
+        ));
+        let mut decoder = ByteFrameDecoder::new(frame.len()).unwrap();
+        decoder.push(&frame).unwrap();
+        assert_eq!(decoder.buffered_len(), frame.len());
+        let extra = [0_u8];
+        assert!(matches!(
+            decoder.push(&extra),
+            Err(FrameDecoderError::BufferLimitExceeded { .. })
+        ));
+        assert_eq!(
+            decoder.next_frame().unwrap(),
+            FrameDecodeStatus::Frame(frame)
+        );
+        decoder.push(&[]).unwrap();
+        assert_eq!(decoder.next_frame().unwrap(), FrameDecodeStatus::NeedMore);
     }
 }

@@ -39,8 +39,9 @@ pub use session::{
     SessionError, SessionId, SessionState, Transport, TransportPacket, WorldMessage,
 };
 pub use wire::{
-    decode_packet, encode_packet, ByteTransport, MemoryByteTransport, MemoryByteTransportError,
-    WireCodecError, MAX_TRANSPORT_PAYLOAD,
+    decode_packet, encode_packet, ByteFrameDecoder, ByteTransport, FrameDecodeStatus,
+    FrameDecoderError, MemoryByteTransport, MemoryByteTransportError, WireCodecError,
+    MAX_TRANSPORT_PAYLOAD,
 };
 
 /// Stable identity for an AOI subscription.

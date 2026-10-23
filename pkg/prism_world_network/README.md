@@ -40,6 +40,14 @@ contract.
   codec failure, byte backpressure, malformed input, and session ordering
   errors remain explicit. `MemoryByteTransport` is a bounded reference adapter
   for tests; production code must provide framed socket/QUIC I/O.
+- `ByteFrameDecoder` supplies the bounded framing step for stream-oriented
+  socket/QUIC adapters. It accepts arbitrary fragments, validates magic,
+  version, declared payload length, per-frame size, and cumulative retained
+  bytes before mutating its buffer; one chunk may contain multiple frames and a
+  frame may span multiple chunks. Callers drain `next_frame()` before feeding
+  beyond the configured retained-byte budget, then pass each returned frame to
+  `decode_packet`. It is framing only: it does not authenticate, decrypt,
+  retry, or interpret application messages.
 - `ServerMesh` owns bounded partition-authority metadata only. It fences old
   authorities with `(authority, epoch, lease)` matching, reserves target
   capacity during prepare, and rechecks the source fence during commit.
