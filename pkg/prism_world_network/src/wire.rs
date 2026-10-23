@@ -203,8 +203,8 @@ fn validate_stream(
         offset += frame_bytes;
     }
     if total > offset {
-        for index in 0..total - offset {
-            if byte(offset + index) != MAGIC[index] {
+        for (index, expected) in MAGIC.iter().enumerate().take(total - offset) {
+            if byte(offset + index) != *expected {
                 return Err(FrameDecoderError::InvalidMagic);
             }
         }
@@ -612,7 +612,7 @@ mod tests {
         let frame = encode_packet(&unsubscribe_packet(1, 11)).unwrap();
         let mut decoder = ByteFrameDecoder::new(frame.len()).unwrap();
         decoder.push(&frame[..3]).unwrap();
-        assert_eq!(decoder.push(&[b'X']), Err(FrameDecoderError::InvalidMagic));
+        assert_eq!(decoder.push(b"X"), Err(FrameDecoderError::InvalidMagic));
         assert_eq!(decoder.buffered_len(), 3);
         decoder.push(&frame[3..]).unwrap();
         assert_eq!(

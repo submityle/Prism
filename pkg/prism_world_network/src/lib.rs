@@ -4,14 +4,18 @@
 //! from [`prism_world_stream`] to durable identity and field merge contracts
 //! from [`prism_world_persist`], and exposes a host-provided reliable session
 //! seam over those messages.
-#![no_std]
+#![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
 extern crate alloc;
+#[cfg(feature = "std")]
+extern crate std;
 
 mod server_mesh;
 mod session;
+#[cfg(feature = "std")]
+mod udp_transport;
 mod wire;
 
 use alloc::collections::BTreeMap;
@@ -39,6 +43,8 @@ pub use session::{
     Session, SessionConfig, SessionConfigError, SessionError, SessionId, SessionState, Transport,
     TransportPacket, WorldMessage,
 };
+#[cfg(feature = "std")]
+pub use udp_transport::{UdpByteTransport, UdpByteTransportConfig, UdpByteTransportError};
 pub use wire::{
     decode_packet, encode_packet, ByteFrameDecoder, ByteTransport, FrameDecodeStatus,
     FrameDecoderError, MemoryByteTransport, MemoryByteTransportError, WireCodecError,

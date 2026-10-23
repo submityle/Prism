@@ -53,6 +53,15 @@ contract.
   calling it with an empty chunk, so application delivery remains bounded and
   backpressure can be applied between messages. Framing, codec, and session
   errors remain separate; no socket or QUIC implementation is hidden here.
+- With the opt-in `std` feature, `UdpByteTransport` wraps a connected
+  non-blocking `UdpSocket` as a complete-frame `ByteTransport`. Its fixed receive
+  buffer is `max_frame_bytes + 1`, allowing oversized datagrams to be detected
+  and discarded rather than accepted after truncation. Send and receive never
+  wait; the Session retry/ACK machinery handles datagram loss and duplicates.
+  UDP does not provide confidentiality, authentication, congestion control, or
+  fragmentation; production peers must use a secure authenticated channel and
+  respect the configured MTU-sized frame ceiling. The default build remains
+  `no_std`.
 - `ServerMesh` owns bounded partition-authority metadata only. It fences old
   authorities with `(authority, epoch, lease)` matching, reserves target
   capacity during prepare, and rechecks the source fence during commit.
