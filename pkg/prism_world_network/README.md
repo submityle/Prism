@@ -20,6 +20,12 @@ contract.
   object-indexed merge facade, and the transport-independent session contract.
 - Merge duplicate detection is indexed by `TransactionId`, so replaying a
   large batch does not scan every object bucket linearly.
+- The session integration regression encodes a canonical `AppendOnlyLog` with
+  the persistence wire codec, decodes it, sends its transaction as a sector
+  `DeltaEnvelope`, validates authority at both session edges, merges the
+  delivered transaction through the persistence CRDT facade, and completes the
+  cumulative-ACK lifecycle. This is codec/session/merge integration coverage;
+  it is not a disk-journal, socket, or encrypted transport test.
 - `ServerMesh` owns bounded partition-authority metadata only. It fences old
   authorities with `(authority, epoch, lease)` matching, reserves target
   capacity during prepare, and rechecks the source fence during commit.

@@ -75,6 +75,134 @@ pub struct CameraTrackEvent {
 impl Event for CameraTrackEvent {}
 
 #[cfg(feature = "cutscene")]
+/// A stable batch token for reliable camera-track event consumption.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CameraTrackEventBatchToken(u64);
+
+#[cfg(feature = "cutscene")]
+/// Bounded, acknowledgement-based camera-track event queue.
+///
+/// The ordinary [`Events<CameraTrackEvent>`] stream remains a same-frame
+/// notification, while this queue is the durable in-process hand-off: a
+/// consumer must acknowledge the token returned by [`peek_batch`]. Until
+/// then the exact occurrences remain available for retry. Capacity is checked
+/// before a player commits its event cursor, so a full queue cannot lose an
+/// authored occurrence.
+#[derive(Clone, Debug, Resource)]
+pub struct PendingCameraTrackEvents {
+    events: Vec<CameraTrackEvent>,
+    capacity: usize,
+    next_token: u64,
+    in_flight: Option<(CameraTrackEventBatchToken, usize)>,
+}
+
+#[cfg(feature = "cutscene")]
+impl Default for PendingCameraTrackEvents {
+    fn default() -> Self {
+        Self::with_capacity(256)
+    }
+}
+
+#[cfg(feature = "cutscene")]
+impl PendingCameraTrackEvents {
+    /// Creates a bounded queue. A zero capacity is valid and explicitly
+    /// disables event playback rather than silently growing allocations.
+    #[must_use]
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            events: Vec::with_capacity(capacity),
+            capacity,
+            next_token: 1,
+            in_flight: None,
+        }
+    }
+
+    /// Number of queued occurrences, including an unacknowledged batch.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.events.len()
+    }
+
+    /// Whether no occurrences are waiting for delivery.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.events.is_empty()
+    }
+
+    /// Maximum number of queued occurrences.
+    #[must_use]
+    pub const fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    /// Returns a stable retryable snapshot. Repeated calls before ack return
+    /// the same token and events, so a failed consumer does not duplicate
+    /// or advance the queue.
+    #[must_use]
+    pub fn peek_batch(&mut self) -> Option<(CameraTrackEventBatchToken, &[CameraTrackEvent])> {
+        if self.events.is_empty() {
+            return None;
+        }
+        let (token, count) = self.in_flight.unwrap_or_else(|| {
+            let token = CameraTrackEventBatchToken(self.next_token);
+            self.next_token = self.next_token.wrapping_add(1).max(1);
+            self.in_flight = Some((token, self.events.len()));
+            (token, self.events.len())
+        });
+        Some((token, &self.events[..count]))
+    }
+
+    /// Acknowledges exactly the currently exposed batch. Stale or repeated
+    /// tokens are rejected without modifying the queue.
+    pub fn ack(&mut self, token: CameraTrackEventBatchToken) -> bool {
+        let Some((active, count)) = self.in_flight else {
+            return false;
+        };
+        if active != token {
+            return false;
+        }
+        self.events.drain(..count);
+        self.in_flight = None;
+        true
+    }
+
+    fn can_enqueue(&self, count: usize) -> bool {
+        count <= self.capacity.saturating_sub(self.events.len())
+    }
+
+    fn enqueue(&mut self, events: &[CameraTrackEvent]) -> bool {
+        if !self.can_enqueue(events.len()) {
+            return false;
+        }
+        self.events.extend_from_slice(events);
+        true
+    }
+
+    fn enqueue_occurrences(
+        &mut self,
+        camera: Entity,
+        playback_epoch: u64,
+        occurrences: &[prism_camera::CameraTrackEventOccurrence],
+    ) -> bool {
+        if !self.can_enqueue(occurrences.len()) {
+            return false;
+        }
+        self.events.extend(
+            occurrences
+                .iter()
+                .copied()
+                .map(|occurrence| CameraTrackEvent {
+                    camera,
+                    playback_epoch,
+                    tick: occurrence.tick,
+                    event_key: occurrence.event_key,
+                }),
+        );
+        true
+    }
+}
+
+#[cfg(feature = "cutscene")]
 /// Per-entity, fixed-tick validated track playback state.
 #[derive(Clone, Debug, Component)]
 pub struct CameraTrackPlayerComponent {
@@ -1373,6 +1501,8 @@ impl Plugin for CameraPlugin {
             .init_resource::<CameraDiagnostics>()
             .init_resource::<CameraPerformanceBudget>()
             .init_resource::<CameraDeriveScratch>();
+        #[cfg(feature = "cutscene")]
+        app.init_resource::<PendingCameraTrackEvents>();
         #[cfg(feature = "composition_aid")]
         app.init_resource::<PublishedCompositionGizmos>();
         #[cfg(feature = "view_lod")]
@@ -1457,6 +1587,7 @@ fn apply_camera_tracks(
         &mut CameraPoseComponent,
     )>,
     mut events: ResMut<Events<CameraTrackEvent>>,
+    mut pending: ResMut<PendingCameraTrackEvents>,
 ) {
     for (entity, mut player, mut pose) in players.iter_mut() {
         if !player.playing {
@@ -1477,13 +1608,22 @@ fn apply_camera_tracks(
         }
         let tick = player.tick;
         let playback_epoch = player.playback_epoch;
+        // Advance a clone first. The real cursor is committed only after the
+        // bounded reliable queue accepts every crossed occurrence. This keeps
+        // authored events retryable when a consumer has not acknowledged old
+        // work and the queue is full.
         let CameraTrackPlayerComponent {
             track,
             cursor,
             occurrences,
             ..
         } = &mut *player;
-        if cursor.advance(track, tick, occurrences).is_ok() {
+        let mut trial_cursor = *cursor;
+        if trial_cursor.advance(track, tick, occurrences).is_err() {
+            continue;
+        }
+        if pending.enqueue_occurrences(entity, playback_epoch, occurrences) {
+            *cursor = trial_cursor;
             for occurrence in occurrences.drain(..) {
                 events.send(CameraTrackEvent {
                     camera: entity,
@@ -1691,6 +1831,69 @@ mod tests {
                 .count(),
             0
         );
+    }
+
+    #[cfg(feature = "cutscene")]
+    #[test]
+    fn pending_track_events_are_retryable_until_acknowledged() {
+        let mut pending = PendingCameraTrackEvents::with_capacity(2);
+        let camera = Entity::from_bits(11).unwrap();
+        assert!(pending.enqueue(&[
+            CameraTrackEvent {
+                camera,
+                playback_epoch: 3,
+                tick: 2,
+                event_key: 7,
+            },
+            CameraTrackEvent {
+                camera,
+                playback_epoch: 3,
+                tick: 4,
+                event_key: 7,
+            },
+        ]));
+        let (token, first) = {
+            let (token, batch) = pending.peek_batch().unwrap();
+            (token, batch.to_vec())
+        };
+        let (retry_token, retry) = pending.peek_batch().unwrap();
+        assert_eq!(token, retry_token);
+        assert_eq!(first, retry);
+        assert!(!pending.ack(CameraTrackEventBatchToken(999)));
+        assert_eq!(pending.len(), 2);
+        assert!(pending.ack(token));
+        assert!(pending.is_empty());
+        assert!(!pending.ack(token));
+    }
+
+    #[cfg(feature = "cutscene")]
+    #[test]
+    fn full_pending_track_queue_does_not_commit_player_cursor() {
+        let mut app = App::new();
+        app.add_plugins(CameraPlugin::default());
+        app.world_mut()
+            .resource_mut::<PendingCameraTrackEvents>()
+            .capacity = 0;
+        let camera = app.world_mut().spawn(CameraBundle::default());
+        app.world_mut().insert(
+            camera,
+            CameraTrackPlayerComponent::new(validated_track(), 0),
+        );
+        app.update();
+        app.world_mut()
+            .get_mut::<CameraTrackPlayerComponent>(camera)
+            .unwrap()
+            .tick = 5;
+        app.update();
+        let player = app
+            .world()
+            .get::<CameraTrackPlayerComponent>(camera)
+            .unwrap();
+        assert_eq!(player.cursor.last_tick(), Some(0));
+        assert!(app
+            .world()
+            .resource::<PendingCameraTrackEvents>()
+            .is_empty());
     }
 
     #[test]

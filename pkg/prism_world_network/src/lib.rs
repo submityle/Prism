@@ -568,6 +568,7 @@ impl PersistentMergeState {
 mod tests {
     use super::*;
     use alloc::vec;
+    use prism_world_persist::{decode_log, encode_log, AppendOnlyLog};
 
     fn bounds() -> AabbI64 {
         AabbI64::new(GlobalPos::new(-10, -10, -10), GlobalPos::new(10, 10, 10))
@@ -694,5 +695,78 @@ mod tests {
         left.merge(vec![&first])
             .expect("repeating an envelope is idempotent");
         assert_eq!(left.len(), 3);
+    }
+
+    #[test]
+    fn durable_persist_log_delta_round_trips_through_session_and_crdt_merge() {
+        let sector = SectorId::new(0, 3, -2, 1);
+        let original = transaction(0xabc, 7, 10, 0, 0xdef, 1234);
+        let mut source_log = AppendOnlyLog::new();
+        source_log
+            .append(original)
+            .expect("source persistence accepts the transaction");
+        let wire_log = encode_log(&source_log).expect("canonical persist log encodes");
+        let recovered_log = decode_log(&wire_log).expect("canonical persist log decodes");
+        assert_eq!(recovered_log, source_log);
+        let envelope = DeltaEnvelope::new(
+            sector,
+            recovered_log
+                .get(0)
+                .expect("one durable transaction")
+                .clone(),
+        );
+
+        let config = |actor| SessionConfig {
+            session: SessionId(0x55),
+            actor: ActorId(actor),
+            token: AuthToken(0xfeed),
+            authority: AuthorityPolicy::new(ActorId(7), ReplicationPolicy::AuthorityOnly),
+            outbound_capacity: 2,
+            inbound_capacity: 2,
+            max_attempts: 3,
+            retry_after_ticks: 1,
+        };
+        let mut sender = Session::new(config(7)).expect("valid sender");
+        let mut receiver = Session::new(config(8)).expect("valid receiver");
+        sender
+            .authenticate(AuthToken(0xfeed))
+            .expect("sender authenticated");
+        receiver
+            .authenticate(AuthToken(0xfeed))
+            .expect("receiver authenticated");
+        sender
+            .send(WorldMessage::Delta(envelope.clone()))
+            .expect("authority queues durable delta");
+        let (mut sender_transport, mut receiver_transport) =
+            MemoryTransport::pair(4).expect("bounded transport");
+        assert_eq!(sender.flush(&mut sender_transport, 0).unwrap().sent, 1);
+        let received = receiver_transport.try_recv().expect("data packet");
+        let delivered = receiver
+            .receive(received)
+            .expect("receiver validates delta");
+        let ReceiveOutcome::Delivered { messages, .. } = delivered else {
+            panic!("first reliable data packet must be delivered");
+        };
+        let [WorldMessage::Delta(received_envelope)] = messages.as_slice() else {
+            panic!("one persistence delta must be delivered");
+        };
+        assert_eq!(received_envelope, &envelope);
+
+        let mut merge = PersistentMergeState::new();
+        merge
+            .merge([received_envelope])
+            .expect("received transaction merges into persistence CRDT");
+        assert_eq!(
+            merge.get(PersistentId(0xdef), FieldId(1)),
+            Some(&OverrideValue::Integer(1234))
+        );
+
+        receiver
+            .flush(&mut receiver_transport, 0)
+            .expect("receiver emits cumulative acknowledgement");
+        let ack = sender_transport.try_recv().expect("ack packet");
+        sender.receive(ack).expect("sender accepts ack");
+        assert_eq!(sender.pending(), 0);
+        assert_eq!(recovered_log.get(0), Some(received_envelope.transaction()));
     }
 }
