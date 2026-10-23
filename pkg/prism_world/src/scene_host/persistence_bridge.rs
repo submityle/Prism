@@ -4,7 +4,8 @@ use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 use core::convert::TryFrom;
 use prism_scene::{
-    encode_persistence, ComponentTypeId, FieldPath, OverrideValue as SceneValue,
+    decode_persistence, encode_persistence, ComponentTypeId, FieldPath,
+    OverrideValue as SceneValue, PersistenceDecodeLimits,
     PersistedPropertyOverride, PersistentEntityMap, SceneInstancePersistence,
 };
 use prism_world_persist::{
@@ -146,6 +147,10 @@ pub enum ScenePersistenceBridgeError {
     TransactionSequenceExhausted,
     /// The companion snapshot could not be encoded as canonical PRSI bytes.
     InvalidCompanionSnapshot,
+    /// No companion value exists at the explicitly registered object/field.
+    MissingCompanionSnapshot,
+    /// The companion field exists but is not stored as opaque bytes.
+    InvalidCompanionValueKind,
     /// The companion binding aliases a sparse property field in the same batch.
     CompanionFieldCollision,
 }
@@ -471,6 +476,30 @@ impl ScenePersistenceSchema {
         })
     }
 
+    /// Restores a complete scene snapshot from the authoritative replayed world
+    /// state. The PRSI companion supplies template/instance identity and ordered
+    /// structural operations; registered sparse world fields supply properties.
+    /// The caller must provide the explicit companion binding and identity maps
+    /// belonging to this scene.
+    pub fn snapshot_from_world_state(
+        &self,
+        world: &WorldState,
+        companion_object: WorldPersistentId,
+        companion_field: FieldId,
+        identities: &PersistentEntityMap,
+        entities: &SceneEntityMap,
+        limits: PersistenceDecodeLimits,
+    ) -> Result<SceneInstancePersistence, ScenePersistenceBridgeError> {
+        let bytes = match world.get(companion_object, companion_field) {
+            Some(WorldValue::Bytes(bytes)) => bytes,
+            Some(_) => return Err(ScenePersistenceBridgeError::InvalidCompanionValueKind),
+            None => return Err(ScenePersistenceBridgeError::MissingCompanionSnapshot),
+        };
+        let companion = decode_persistence(bytes, limits)
+            .map_err(|_| ScenePersistenceBridgeError::InvalidCompanionSnapshot)?;
+        self.deltas_to_snapshot(world, &companion, identities, entities)
+    }
+
     fn find_scene_field(
         &self,
         component: ComponentTypeId,
@@ -719,8 +748,72 @@ mod tests {
             replayed.get(WorldPersistentId(7700), FieldId(101)),
             Some(&WorldValue::Integer(42))
         );
+        let restored = schema
+            .snapshot_from_world_state(
+                &replayed,
+                WorldPersistentId(9900),
+                FieldId(900),
+                &identities,
+                &entity_map(),
+                Default::default(),
+            )
+            .unwrap();
+        assert_eq!(restored.template, batch.scene_snapshot.template);
+        assert_eq!(restored.instance, batch.scene_snapshot.instance);
+        assert_eq!(restored.structural, batch.scene_snapshot.structural);
+        assert_eq!(restored.properties.len(), 1);
+        assert_eq!(restored.properties[0].local, LocalEntityId::new(3));
+        assert_eq!(restored.properties[0].persistent, Some(PersistentId::from_u128(77)));
+        assert_eq!(
+            restored.properties[0].value,
+            OverrideValue::I64(42)
+        );
         drop(reopened);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn companion_restore_fails_closed_on_missing_or_wrong_kind_value() {
+        let schema = schema();
+        let identities = PersistentEntityMap::new(vec![EntityBinding::new(
+            LocalEntityId::new(3),
+            PersistentId::from_u128(77),
+        )])
+        .unwrap();
+        let entities = entity_map();
+        let empty = WorldState::new();
+        assert_eq!(
+            schema.snapshot_from_world_state(
+                &empty,
+                WorldPersistentId(9900),
+                FieldId(900),
+                &identities,
+                &entities,
+                Default::default(),
+            ),
+            Err(ScenePersistenceBridgeError::MissingCompanionSnapshot)
+        );
+        let mut timeline = Timeline::new();
+        timeline
+            .commit(
+                TransactionId(10),
+                ActorId(1),
+                LogicalClock(1),
+                WorldPersistentId(9900),
+                OverrideDelta::single(FieldId(900), WorldValue::Integer(8)).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            schema.snapshot_from_world_state(
+                timeline.state(),
+                WorldPersistentId(9900),
+                FieldId(900),
+                &identities,
+                &entities,
+                Default::default(),
+            ),
+            Err(ScenePersistenceBridgeError::InvalidCompanionValueKind)
+        );
     }
 
     #[test]
