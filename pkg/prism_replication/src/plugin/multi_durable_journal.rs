@@ -27,6 +27,8 @@ pub enum MultiPeerJournalOperation {
     Verify,
     /// Establish the durable barrier.
     Sync,
+    /// Replace an old retained prefix with the last published checkpoint.
+    Checkpoint,
 }
 
 /// Recovery or commit error. A failed commit retains its exact pending record
@@ -100,6 +102,7 @@ pub struct MultiPeerDurableJournal<B> {
     state: MultiPeerCheckpoint,
     next_sequence: u64,
     pending: Option<PendingCommit>,
+    pending_checkpoint: Option<ReplayRecord>,
 }
 
 impl<B: EventLogBackend> MultiPeerDurableJournal<B> {
@@ -129,6 +132,7 @@ impl<B: EventLogBackend> MultiPeerDurableJournal<B> {
             state: initial_checkpoint.clone(),
             next_sequence: end,
             pending: None,
+            pending_checkpoint: None,
         };
 
         if start == end {
@@ -257,8 +261,10 @@ impl<B: EventLogBackend> MultiPeerDurableJournal<B> {
             debug_assert_eq!(next, sequence + 1);
         }
 
-        let pending = self.pending.as_ref().expect("pending record installed");
-        let sequence = pending.sequence;
+        let (sequence, record) = {
+            let pending = self.pending.as_ref().expect("pending record installed");
+            (pending.sequence, pending.record.clone())
+        };
         let following = sequence
             .checked_add(1)
             .ok_or(MultiPeerJournalError::SequenceExhausted)?;
@@ -269,9 +275,12 @@ impl<B: EventLogBackend> MultiPeerDurableJournal<B> {
                 actual: actual_cursor,
             });
         }
-        self.log
-            .append(u128::from(sequence), pending.record.clone())
-            .map_err(|error| map_log_error(MultiPeerJournalOperation::Append, error))?;
+        if actual_cursor == sequence {
+            self.checkpoint_published_prefix(sequence)?;
+            self.log
+                .append(u128::from(sequence), record.clone())
+                .map_err(|error| map_log_error(MultiPeerJournalOperation::Append, error))?;
+        }
         let actual_cursor = self.log.backend().cursor().next_sequence();
         if actual_cursor != following {
             return Err(MultiPeerJournalError::CursorChanged {
@@ -288,7 +297,7 @@ impl<B: EventLogBackend> MultiPeerDurableJournal<B> {
             || replayed.end_cursor().next_sequence() != following
             || replayed.records()[0].sequence != sequence
             || replayed.records()[0].idempotency_key != u128::from(sequence)
-            || replayed.records()[0].record != pending.record
+            || replayed.records()[0].record != record
         {
             return Err(MultiPeerJournalError::InvalidJournal(
                 "appended record did not replay exactly",
@@ -305,6 +314,56 @@ impl<B: EventLogBackend> MultiPeerDurableJournal<B> {
         let committed = self.pending.take().expect("verified pending record");
         self.state = committed.candidate;
         self.next_sequence = following;
+        Ok(())
+    }
+
+    fn checkpoint_published_prefix(
+        &mut self,
+        candidate_sequence: u64,
+    ) -> Result<(), MultiPeerJournalError<B::Error>> {
+        if self.pending_checkpoint.is_none() && self.log.backend().remaining_capacity() == Some(0) {
+            let start = self.log.backend().start_cursor().next_sequence();
+            // Keep at least one older record before replacing the prefix; a
+            // one-slot provider cannot gain room by replacing its sole entry.
+            if candidate_sequence.saturating_sub(start) <= 1 {
+                return Ok(());
+            }
+            let sequence = candidate_sequence - 1;
+            let payload = self
+                .state
+                .encode(self.limits)
+                .map_err(MultiPeerJournalError::CheckpointCodec)?;
+            self.pending_checkpoint = Some(ReplayRecord::new(
+                sequence,
+                sequence,
+                NetChannel::EventsReliable,
+                ReplayDirection::ServerToClient,
+                None,
+                payload,
+            ));
+        }
+        let Some(checkpoint) = self.pending_checkpoint.as_ref() else {
+            return Ok(());
+        };
+        let sequence = checkpoint.sequence;
+        let result = self
+            .log
+            .checkpoint(u128::from(sequence), checkpoint.clone());
+        if let Some(result) = result {
+            result.map_err(|error| map_log_error(MultiPeerJournalOperation::Checkpoint, error))?;
+            if self.log.backend().start_cursor().next_sequence() != sequence
+                || self.log.backend().cursor().next_sequence() != candidate_sequence
+            {
+                return Err(MultiPeerJournalError::CursorChanged {
+                    expected: candidate_sequence,
+                    actual: self.log.backend().cursor().next_sequence(),
+                });
+            }
+            self.pending_checkpoint = None;
+        } else {
+            // Unsupported providers retain their bounded admission behavior.
+            self.pending_checkpoint = None;
+        }
         Ok(())
     }
 }
@@ -329,7 +388,7 @@ mod tests {
     use alloc::{vec, vec::Vec};
 
     use super::*;
-    use crate::event_log::{EventLogAppend, EventLogBatch, MemoryEventLogBackend};
+    use crate::event_log::{EventLogAppend, EventLogBatch, EventLogEntry, MemoryEventLogBackend};
     use std::sync::{Arc, Mutex};
 
     const LIMITS: MultiPeerCheckpointLimits = MultiPeerCheckpointLimits {
@@ -388,6 +447,19 @@ mod tests {
             self.0.lock().unwrap().inner.start_cursor()
         }
 
+        fn remaining_capacity(&self) -> Option<usize> {
+            self.0.lock().unwrap().inner.remaining_capacity()
+        }
+
+        fn checkpoint(&mut self, entry: &EventLogEntry) -> Option<Result<(), Self::Error>> {
+            self.0
+                .lock()
+                .unwrap()
+                .inner
+                .checkpoint(entry)
+                .map(|result| result.map_err(|_| "checkpoint"))
+        }
+
         fn replay(
             &self,
             cursor: EventLogCursor,
@@ -426,6 +498,39 @@ mod tests {
         let restored = MultiPeerDurableJournal::open(log(backend), state(1), LIMITS).unwrap();
         assert_eq!(restored.state(), &state(2));
         assert_eq!(restored.next_sequence(), 2);
+    }
+
+    #[test]
+    fn bounded_log_reclaims_only_published_state_and_recovers_latest_commit() {
+        let backend = SharedBackend::new(3);
+        let mut journal =
+            MultiPeerDurableJournal::open(log(backend.clone()), state(0), LIMITS).unwrap();
+        for value in 1..20 {
+            journal.commit(state(value)).unwrap();
+        }
+        assert!(
+            backend
+                .0
+                .lock()
+                .unwrap()
+                .inner
+                .start_cursor()
+                .next_sequence()
+                > 0
+        );
+        assert!(
+            backend
+                .0
+                .lock()
+                .unwrap()
+                .inner
+                .remaining_capacity()
+                .unwrap()
+                > 0
+        );
+        let restored = MultiPeerDurableJournal::open(log(backend), state(0), LIMITS).unwrap();
+        assert_eq!(restored.state(), &state(19));
+        assert_eq!(restored.next_sequence(), 20);
     }
 
     #[test]
