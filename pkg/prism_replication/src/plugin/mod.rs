@@ -43,6 +43,7 @@ mod durable;
 mod ecs;
 mod ecs_aoi;
 pub mod multi_durable;
+pub mod multi_durable_journal;
 mod multi_server;
 mod server;
 
