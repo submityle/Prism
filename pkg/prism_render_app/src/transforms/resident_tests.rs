@@ -582,11 +582,14 @@ fn hardware_resident_column_changes_pixels_and_clean_frames_keep_draws_without_u
             .runtime();
         assert!(runtime.wait_idle());
         assert_eq!(world.resource::<RenderFrameStats>().frames_failed, 0);
-        runtime.queue().read_texture_rgba8(
+        runtime
+            .queue()
+            .read_texture_rgba8(
             world.resource::<crate::RenderTarget>().texture(),
             SIZE,
             SIZE,
-        )
+            )
+            .expect("resident transform output readback must complete")
     }
     fn pixel(bytes: &[u8], x: usize) -> &[u8] {
         let start = (8 * SIZE as usize + x) * 4;

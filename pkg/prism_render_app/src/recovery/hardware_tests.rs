@@ -36,6 +36,7 @@ fn read_target(world: &World) -> Vec<u8> {
     runtime
         .queue()
         .read_texture_rgba8(target.texture(), SIZE, SIZE)
+        .expect("recovery target readback must complete")
 }
 
 fn read_material_buffers(world: &World) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
@@ -44,19 +45,25 @@ fn read_material_buffers(world: &World) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
         .runtime();
     let buffers = world.resource::<crate::MaterialParameterBuffers>();
     let queue = runtime.queue();
-    let headers = queue.read_buffer(
-        buffers.headers().expect("header buffer"),
-        u64::from(buffers.header_capacity()) * core::mem::size_of::<GpuMaterialHeader>() as u64,
-    );
-    let parameters = queue.read_buffer(
-        buffers.parameters().expect("parameter buffer"),
-        u64::from(buffers.parameter_capacity_words()) * 4,
-    );
-    let textures = queue.read_buffer(
-        buffers.textures().expect("texture buffer"),
-        u64::from(buffers.texture_capacity_rows())
-            * core::mem::size_of::<GpuMaterialTexture>() as u64,
-    );
+    let headers = queue
+        .read_buffer(
+            buffers.headers().expect("header buffer"),
+            u64::from(buffers.header_capacity()) * core::mem::size_of::<GpuMaterialHeader>() as u64,
+        )
+        .expect("recovery material headers readback must complete");
+    let parameters = queue
+        .read_buffer(
+            buffers.parameters().expect("parameter buffer"),
+            u64::from(buffers.parameter_capacity_words()) * 4,
+        )
+        .expect("recovery material parameters readback must complete");
+    let textures = queue
+        .read_buffer(
+            buffers.textures().expect("texture buffer"),
+            u64::from(buffers.texture_capacity_rows())
+                * core::mem::size_of::<GpuMaterialTexture>() as u64,
+        )
+        .expect("recovery material textures readback must complete");
     (headers, parameters, textures)
 }
 
@@ -209,7 +216,11 @@ fn gpu_recovery_rebuilds_resources_and_restores_pixels() {
             .world
             .resource::<RenderRuntimeResource<WgpuInstance>>();
         let replay_id = *replay.current();
-        let replay_bytes = runtime.runtime().queue().read_buffer(replay_id, 16);
+        let replay_bytes = runtime
+            .runtime()
+            .queue()
+            .read_buffer(replay_id, 16)
+            .expect("recovery replay readback must complete");
         (
             read_target(&render.world),
             read_material_buffers(&render.world),
@@ -354,7 +365,11 @@ fn gpu_recovery_rebuilds_resources_and_restores_pixels() {
     assert!(runtime.runtime().wait_idle());
     let (_, recovered_materials, recovered_replay, _) = {
         let replay_id = *replay.current();
-        let replay_bytes = runtime.runtime().queue().read_buffer(replay_id, 16);
+        let replay_bytes = runtime
+            .runtime()
+            .queue()
+            .read_buffer(replay_id, 16)
+            .expect("recovered replay readback must complete");
         (
             read_target(&render.world),
             read_material_buffers(&render.world),

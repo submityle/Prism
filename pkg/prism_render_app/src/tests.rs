@@ -2173,7 +2173,13 @@ pub(super) fn dispatch_lighting_test_composite<I>(
         runtime.wait_idle(),
         "lighting composite completes on the GPU"
     );
-    drop((material_snapshot, execution_snapshot, material_buffers, execution_buffers, registry));
+    drop((
+        material_snapshot,
+        execution_snapshot,
+        material_buffers,
+        execution_buffers,
+        registry,
+    ));
 }
 
 /// The render schedule runs every frame, the extract feeds it, and the runtime
@@ -6762,17 +6768,8 @@ pub(super) fn queue_scene_fixture(app: &mut App) -> GenerationalHandle {
         )
         .expect("normals fit")
         .with_attribute(
-            MeshVertexAttribute::new(
-                "Vertex_Uv",
-                prism_render_driver::VertexFormat::Float32x2,
-                2,
-            ),
-            VertexAttributeValues::Float32x2(vec![
-                [0.0, 0.0],
-                [1.0, 0.0],
-                [1.0, 1.0],
-                [0.0, 1.0],
-            ]),
+            MeshVertexAttribute::new("Vertex_Uv", prism_render_driver::VertexFormat::Float32x2, 2),
+            VertexAttributeValues::Float32x2(vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]),
         )
         .expect("UVs fit")
         .indexed(Indices::Uint16(vec![0, 1, 2, 0, 2, 3]));
