@@ -10,7 +10,7 @@ use crate::registry::{ConcurrentNodeLibrary, NodeDefinition, NodeRegistry};
 use crate::value::Value;
 use futures::Future;
 use prism_diagnostic::{Event, Level};
-use prism_reflect::{impl_reflect_value, Reflect};
+use prism_reflect::{impl_reflect_value, Reflect, ReflectRef};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -46,6 +46,16 @@ pub fn value_from_reflect(value: &dyn Reflect) -> Result<Value, ReflectValueErro
     if let Some(value) = value.downcast_ref::<JsonValue>() {
         return Ok(Value::Json(Arc::new(value.0.clone())));
     }
+    if let ReflectRef::List(list) = value.reflect_ref() {
+        let values = list
+            .iter_reflect()
+            .map(value_from_reflect)
+            .collect::<Result<Vec<_>, _>>()?;
+        return Ok(Value::List(Arc::new(values)));
+    }
+    if value.downcast_ref::<()>().is_some() {
+        return Ok(Value::Unit);
+    }
     Err(ReflectValueError::UnsupportedType(
         value.type_name().to_owned(),
     ))
@@ -61,9 +71,14 @@ pub fn value_to_reflect(value: &Value) -> Result<Box<dyn Reflect>, ReflectValueE
         Value::F64(value) => Box::new(*value),
         Value::String(value) => Box::new(value.to_string()),
         Value::Json(value) => Box::new(JsonValue((**value).clone())),
-        Value::Unit | Value::List(_) => {
-            return Err(ReflectValueError::UnsupportedValue(value.ty()))
+        Value::List(values) => {
+            let mut list = prism_reflect::DynamicList::new();
+            for value in values.iter() {
+                list.push_boxed(value_to_reflect(value)?);
+            }
+            Box::new(list)
         }
+        Value::Unit => Box::new(()),
     })
 }
 
@@ -227,6 +242,22 @@ mod tests {
     use super::*;
     use crate::model::Pin;
     use crate::registry::{ExecNext, FnRunner, NodeDefinition, Purity, RunnerKind};
+
+    #[test]
+    fn reflected_lists_round_trip_nested_values() {
+        let value = Value::List(Arc::new(vec![
+            Value::I64(7),
+            Value::List(Arc::new(vec![Value::Bool(true), Value::String(Arc::from("ok"))])),
+        ]));
+        let reflected = value_to_reflect(&value).expect("list conversion");
+        assert_eq!(value_from_reflect(&*reflected).expect("list conversion"), value);
+    }
+
+    #[test]
+    fn reflected_unit_round_trips_as_visual_unit() {
+        let reflected = value_to_reflect(&Value::Unit).expect("unit conversion");
+        assert_eq!(value_from_reflect(&*reflected).expect("unit conversion"), Value::Unit);
+    }
 
     #[tokio::test]
     async fn host_polls_completed_task() {
