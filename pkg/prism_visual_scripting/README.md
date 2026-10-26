@@ -1,10 +1,10 @@
-# uwu_visual_script
+# prism_visual_scripting
 
 可视化脚本引擎 —— Graph 编排 + 扁平 IR + 解释器，
 为「事件驱动、节点可热替换、可审计、可嵌入」的本地脚本场景打底。
 
 不假设运行环境：节点既可以是纯 Rust 闭包（内置），也可以是
-[`uwu_wasm`](../uwu_wasm/) 沙箱里的 WASM Component（实现一个 `NodeRunner`
+[`host-owned WASM sandbox`](../host-owned WASM sandbox/) 沙箱里的 WASM Component（实现一个 `NodeRunner`
 trait 即可接入）。编译器与 VM 对后端透明，同一个 Graph 可混用 Rust / Wasm /
 未来的 RPC 节点。
 
@@ -21,7 +21,7 @@ trait 即可接入）。编译器与 VM 对后端透明，同一个 Graph 可混
 - **静态校验**：方向 / exec-data 一致性 / 类型兼容 / Wildcard 拒绝 / Pure 子图无环
 - **Pure 节点折叠**：每个 impure block 内反向递归 emit `CallPure`，编译期消除重复求值
 - **slot 数组运行期**：`SlotId` 直接当下标，VM 主循环零 HashMap、无递归驱动
-- **可插拔执行体**：`NodeRunner` trait → `FnRunner` / `WasmRunner`（待补）/ 自定义
+- **可插拔执行体**：`NodeRunner` trait → `FnRunner` / host-provided `WasmHost`/`WasmEffectExecutor`/ 自定义
 - **节点实例配置**：节点 `config` 会进入可序列化 `ExecutionPlan`，并在 `InvokeCtx.config` 中按实例传递；编译时会规范化键顺序
 - **注册表身份锁定**：`ExecutionPlan` 绑定 `NodeRegistry` manifest digest，实例化时拒绝不同的节点快照
 - **可恢复执行**：VM 在 block 边界生成 `VmState`，支持 JSON 序列化后从下一 block 恢复
@@ -44,7 +44,7 @@ trait 即可接入）。编译器与 VM 对后端透明，同一个 Graph 可混
 - **Event Stream Windows**：`WindowedStream` 支持 tumbling/sliding window、watermark、allowed lateness、重复事件去重和 bounded backpressure
 - **Deterministic Reducers**：关闭窗口可执行 count/sum/average/min/max/distinct-count，结果绑定 source digest，并对重复投递做幂等重放和篡改检测
 - **类型化等待**：`AwaitCondition` 表达 external/timer/signal/approval/child-run，继续复用可序列化 `Suspension` 恢复闭环
-- **可选 WASM Effect 后端**：启用 `uwu-wasm` feature 后，`WasmEffectExecutor` 通过 JSON Component ABI 接入 `uwu_wasm::Sandbox` 的 fuel、deadline、策略和 attestation
+- **可选 WASM Effect 后端**：启用 `wasm` feature 后，`WasmEffectExecutor` 通过 JSON Component ABI 接入 宿主实现的 `WasmHost` 的 fuel、deadline、策略和 attestation
 - **DurableStore / RunCoordinator**：文件或内存 CAS 存储提供 payload digest、inbox 去重、outbox 确认、事件原子追加和运行 checkpoint
 - **AwaitBroker**：timer / signal / approval / child-run 的确定性匹配、幂等注册、快照恢复
 - **Durable Effect Journal**：pending/committed 两阶段记录，崩溃后按稳定 identity at-least-once 重试；外部写仍必须幂等
@@ -83,13 +83,13 @@ let env = ExecutionEnv::new()
     .with_event_sink(&event_log);
 ```
 
-`uwu-wasm` 是可选 feature，不会进入默认构建：
+`wasm` 是可选 feature，不会进入默认构建：
 
 ```text
-cargo check --features uwu-wasm
+cargo check --features wasm
 ```
 
-它使用 `uwu_wasm::Sandbox` 执行 Component，沙箱策略、资源上限、fuel、deadline、模块摘要白名单和执行回执仍由 `uwu_wasm` 管理。
+它使用 宿主实现的 `WasmHost` 执行 Component，沙箱策略、资源上限、fuel、deadline、模块摘要白名单和执行回执仍由 `host-owned WASM sandbox` 管理。
 
 ---
 
@@ -140,7 +140,7 @@ src/
 ## 快速开始
 
 ```rust
-use uwu_visual_script::prelude::*;
+use prism_visual_scripting::prelude::*;
 use std::collections::HashMap;
 
 // 1. 节点库（含全部内置节点）
@@ -179,7 +179,7 @@ Vm::new(program).run_all(&mut host)?;
 
 ```rust,no_run
 use tokio_util::sync::CancellationToken;
-use uwu_visual_script::prelude::*;
+use prism_visual_scripting::prelude::*;
 
 # async fn run(graph: &Graph) -> VsResult<()> {
 let engine = VisualScriptEngine::new();
@@ -355,13 +355,13 @@ vm.run_all_with_env(&mut host, &env)?;
 
 ---
 
-## 接入 uwu_wasm
+## 接入 host-owned WASM sandbox
 
-`NodeRunner` 是 trait 对象，新增一个 `WasmRunner` 即可：
+`NodeRunner` 是 trait 对象，新增一个 `WasmEffectExecutor` 即可：
 
 ```rust
 struct WasmRunner {
-    sandbox: Arc<uwu_wasm::Sandbox>,
+    sandbox: Arc<host-owned WASM sandbox::Sandbox>,
     module: String,
     export: String,
 }
@@ -370,9 +370,7 @@ impl NodeRunner for WasmRunner {
     fn invoke(&self, inputs: &[Value], outputs: &mut [Value], _cx: &mut InvokeCtx<'_>)
         -> VsResult<ExecNext>
     {
-        // Value -> wasmtime::component::Val 编组
-        // sandbox.call_typed(&self.module, &self.export, params)
-        // Val -> Value 解组写入 outputs
+        // WasmHost 负责 Value JSON ABI 编组、沙箱调用与回执校验
         Ok(ExecNext::End)
     }
 }
@@ -402,7 +400,7 @@ pub enum VsError {
 ## 测试
 
 ```bash
-cargo test -p uwu_visual_script
+cargo test -p prism_visual_scripting
 ```
 
 当前测试：4 个。集成测试位于 `tests/integration.rs`：

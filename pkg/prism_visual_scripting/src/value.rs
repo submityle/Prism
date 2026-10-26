@@ -1,6 +1,6 @@
 //! 蓝图值与类型系统。
 //!
-//! 与 `wasmtime::component::Val` 对齐，便于后续接入 uwu_wasm。
+//! 与 `wasmtime::component::Val` 对齐，便于接入宿主 WASM ABI。
 
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;

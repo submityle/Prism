@@ -30,7 +30,7 @@ pub struct UpgradeRecord {
 }
 
 /// Host-provided runner for the candidate module. Implementations can invoke
-/// a `WorkflowVm`, a remote worker, or an `uwu_wasm` sandbox.
+/// a `WorkflowVm`, a remote worker, or a host-owned WASM sandbox.
 pub trait ShadowExecutor: Send + Sync {
     fn run(&self, revision: &str, input: &[u8]) -> VsResult<Vec<ExecutionEvent>>;
 }

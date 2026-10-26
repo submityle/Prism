@@ -1,7 +1,7 @@
 //! 常用类型一站式 re-export。
 //!
 //! ```ignore
-//! use uwu_visual_script::prelude::*;
+//! use prism_visual_scripting::prelude::*;
 //! ```
 
 pub use crate::actor::{

@@ -1,7 +1,4 @@
-//! 变量节点：固定计数器演示。
-//!
-//! TODO：等 IR 接入 `LoadVar/StoreVar` 指令后，把这里换成通用 `var.set` / `var.get`，
-//! 变量名通过 `Node.config` 传入。
+//! 固定计数器演示节点；通用变量访问通过 HostServices 提供。
 
 use super::pins::{data_out, exec_in, exec_out};
 use crate::registry::{ExecNext, FnRunner, NodeDefinition, NodeLibrary, Purity, RunnerKind};

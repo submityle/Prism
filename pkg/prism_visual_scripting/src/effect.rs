@@ -2,7 +2,7 @@
 //!
 //! Effects are descriptions, not callbacks embedded in the graph. The VM assigns every
 //! invocation a stable identity and delegates execution to an [`EffectExecutor`]. Executors may
-//! route the request to a local service, a remote worker, or an `uwu_wasm` sandbox.
+//! route the request to a local service, a remote worker, or a host-owned WASM sandbox.
 
 use crate::{
     DurableMutation, DurableStore, ExecNext, RecordKey, RevisionGuard, Value, VsError, VsResult,

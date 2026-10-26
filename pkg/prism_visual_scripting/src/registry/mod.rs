@@ -5,7 +5,7 @@
 //! - [`library`]：[`NodeDefinition`] / [`NodeLibrary`] / [`Purity`] / [`ExecNext`]。
 //!
 //! 设计要点：节点的"运行时实现"是 trait 对象，可以是纯 Rust 闭包、可以是
-//! 包装 `uwu_wasm::Sandbox::call_typed` 的 `WasmRunner`，对编译器和 VM 透明。
+//! 包装宿主 `WasmHost` 的 WASM effect runner，对编译器和 VM 透明。
 
 pub mod host;
 pub mod library;
