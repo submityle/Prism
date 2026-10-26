@@ -9,25 +9,25 @@
 > - **持久化执行 / 事件溯源**：**Temporal** / Azure **Durable Functions** / AWS **Step Functions**（确定性重放、Saga 补偿、定时器/信号、人审批关口、子工作流）、Erlang/OTP（双版本并存 + 状态迁移热加载）
 > - **LLM / Agent 编排**：**LangGraph** / Dify / Flowise（流式 token、human-in-the-loop、子图/子 agent、工具调用图）
 > - **编译器 IR 优化**：sea-of-nodes（V8 TurboFan / HotSpot C2）的 GVN/CSE/DCE/常量折叠心智，用于 Pure 子图折叠与热路径融合
-> - **WASM 组件化沙箱**：wasmtime **Component Model + WASI p2**、内容寻址 + `InstancePre` 缓存 + 原子指针热插拔 + 执行回执（本仓 `uwu_wasm` 为后端参考实现）
-> - **引擎内脚本内核**：`uwu_visual_script`（本设计的架构基线：Graph→ExecutionPlan→SlotProgram→VM、Pure/Impure、slot 扁平数组、Effect/Saga/Actor/Await、流式输出、WASM Effect 适配）
+> - **WASM 组件化沙箱**：wasmtime **Component Model + WASI p2**、内容寻址 + `InstancePre` 缓存 + 原子指针热插拔 + 执行回执（本仓通过宿主 `WasmHost` 保持后端边界）
+> - **引擎内脚本内核**：`prism_visual_scripting`（本设计的架构基线：Graph→ExecutionPlan→SlotProgram→VM、Pure/Impure、slot 扁平数组、Effect/Saga/Actor/Await、流式输出、WASM Effect 适配）
 >
 > 本文聚焦「图作为编译目标 + 可持久化运行时 + 作者/机器双友好」的经典工程路线；不复刻 UE/Unity/Houdini 的对象模型或源码，只借其**节点语义边界、编译形态与调度心智**；核心抽象 `no_std + alloc` 友好，后端执行器需 `std`；**不依赖任何 `bevy_*` crate**。
 
-- 版本: v0.1（设计阶段，未进入编码）
+- 版本: v0.1（已进入 Prism 编码；核心运行时、持久化原语、诊断/Reflect 适配与可取消宿主已落地）
 - 适用引擎: Prism（后 Bevy 时代，独立运行时）
-- 架构基线: `uwu_visual_script`（独立仓，引擎内可视化脚本引擎内核，提供 Graph 模型 / 三层 IR / slot VM / Effect / Saga / Actor / Await / 流式输出 / 可恢复执行 / WASM Effect 适配）、`uwu_wasm`（独立仓，wasmtime Component 沙箱，提供内容寻址 / `InstancePre` 缓存 / 热插拔 / 能力策略 / 回执 / 时间旅行）
+- 架构基线: `pkg/prism_visual_scripting`（Prism 工作区 crate，提供 Graph 模型 / 三层 IR / slot VM / Effect / Saga / Actor / Await / 流式输出 / 可恢复执行 / `PrismHost` / `prism_reflect` 与 `prism_diagnostic` 适配）；WASM 通过可选 `wasm` feature 的 `WasmHost` 注入，具体沙箱由宿主负责
 - 关键依赖（均为 `pkg/` 下的 prism 原生 crate）: `prism_reflect`（§12 函数反射 / 路径访问 / `schema` 版本化迁移——**宿主 API 绑定、节点元数据、图状态迁移的唯一真相层**）、`prism_ecs`（Commands/ECB、exclusive system `&mut World`、observer/reaction、`world::snapshot` 回滚底座——**图节点访问世界的受控边界**）、`prism_tasks`（work-stealing + fiber 作业图：off-thread 图编译 / 批量子图并行 / 主线程亲和）、`prism_platform`（`vm` 页级内存服务 WASM 线性内存与 slot 池、`security`/`capability` 能力模型、高精度计时服务 deadline、`dynlib` 服务原生节点后端）、`prism_app`（Plugin/Schedule/`cvar`/`settings`/`fixed`/`determinism`）、`prism_asset`（图资产加载 / mtime 监视 / 热重载管线）、`prism_diagnostic`（`budget`/`hitch`/`profiler`/`replay`/`telemetry`）、`prism_time`（固定步 / 录制回放 / 确定性）、`prism_ui` + `prism_ui_*`（蓝图编辑器画布、inspector、timetravel、devtools、hotreload 的 UI 底座）
-- 可选后端依赖: `wasmtime` + `wasmtime-wasi`（节点级/子图级 WASM Component，门控 feature `node-wasm`，参考 `uwu_wasm`）、`cranelift`（可选热图 JIT，feature `jit`）
+- 可选后端依赖: `wasmtime` + `wasmtime-wasi`（节点级/子图级 WASM Component，门控 feature `wasm`，参考 `WasmHost`）、`cranelift`（可选热图 JIT，feature `jit`）
 - 层级定位: `prism_script` §「后端矩阵」中 `backend-graph` 的正式落地；架在 `prism_reflect`（类型/函数真相层）与 `prism_ecs`（世界）之上，**图不进内核仿真内循环**；对上服务 `prism_game_creator`（创作工作流）与 gameplay 可编程性接缝
 - 相关文档: `prism_script_design_zh.md`（后端矩阵 / 宿主绑定 / 热更新内核 / 调度接缝——**本文复用其 `ScriptHost`/`BindingRegistry`/`HotSwap`/`WorldProxy` 并补齐图特有的编译与编辑产品化**）、`prism_reflect_design_zh.md`（§12 函数反射 / §24.6 编辑器属性桥 / schema 迁移）、`prism_ecs_design_zh.md`（Commands / exclusive / snapshot）、`prism_tasks_design_zh.md`（并行 / fiber / 主线程亲和）、`prism_diagnostic_design_zh.md`（预算 / hitch / profiler / 回放）、`prism_editor_framework_design_zh.md` + `prism_ui_*`（编辑器画布与调试 HUD）、`prism_gameplay_design_zh.md`（§18 可编程性接缝、§26 Game Features 热插拔）、`prism_sequencer`/`prism_animation_engine_design_zh.md`（图驱动时间轴/状态机的消费者）、`prism_network_design_zh.md` / `prism_anticheat_design_zh.md`（确定性 / 回放 / 权威校验接缝）
-- 明确约束: 核心抽象（Graph 模型 / 三层 IR / 注册表骨架 / slot VM 骨架）`no_std + alloc` 友好；异步 VM / Effect / WASM / 编辑器需 `std`；`graph-sync` / `graph-async` / `durable` / `node-wasm` / `node-native` / `jit` / `hot-reload` / `determinism` / `editor` / `llm-authoring` / `trace` 均为 feature，发行版可只带所需能力；默认构建**零图脚本税**（未启用任何图后端时编译期移除）；图**永不下探内核热路径**（ECS 存储内循环、物理 solver、渲染 RG 永远走原生字段）
+- 明确约束: 核心抽象（Graph 模型 / 三层 IR / 注册表骨架 / slot VM 骨架）`no_std + alloc` 友好；异步 VM / Effect / WASM / 编辑器需 `std`；`graph-sync` / `graph-async` / `durable` / `wasm` / `node-native` / `jit` / `hot-reload` / `determinism` / `editor` / `llm-authoring` / `trace` 均为 feature，发行版可只带所需能力；默认构建**零图脚本税**（未启用任何图后端时编译期移除）；图**永不下探内核热路径**（ECS 存储内循环、物理 solver、渲染 RG 永远走原生字段）
 
 ---
 
 ## 目录
 1. 设计哲学
-2. 现状基线与差距（`uwu_visual_script` 复用面 / 缺口）
+2. 现状基线与差距（`prism_visual_scripting` 复用面 / 缺口）
 3. 分层架构：作者层 / 编译层 / 运行层 / 宿主集成层
 4. 图模型：Pin / Node / Edge / Variable / Graph / Control
 5. 三层 IR 与编译管线：Graph → ExecutionPlan → SlotProgram
@@ -54,7 +54,7 @@
 1. **图是编译目标，不是解释玩具。** 核心铁律借 Blueprint Nativization / MetaSound / VEX：编辑态 `Graph` 一律 lower 成扁平的 `SlotProgram`（`SlotId` 直接当数组下标，VM 主循环零 HashMap、无递归驱动），热点子图可进一步折叠为单个 WASM Component 或原生函数。**逐节点解释只在冷路径与调试相位出现。**
 2. **exec/data 双流 + Pure/Impure 二分是第一性区分。** exec 控制流决定「何时跑」，data 数据流决定「要什么」；Pure 节点 demand-driven（可缓存、可折叠、可池化、可并行），Impure 节点沿 exec 流推进（对应 `CallPure` / `CallImpure`）。这是整套优化与调度的地基。
 3. **持久化执行是一等公民。** 借 Temporal/Durable Functions：VM 在每个 block 边界生成可序列化 `VmState`，长流程（任务链、对话、建造流程、剧情）支持 checkpoint→存档→跨进程恢复；副作用经声明式 Effect journaled，重放确定、幂等去重、Saga 逆序补偿。**游戏里的"等玩家 3 天后回来继续"与 Agent 的"等审批"是同一套原语。**
-4. **多后端对编译器与 VM 透明。** 借 `uwu_visual_script` 的 `NodeRunner` trait 对象：同一张图可混用 Rust 闭包节点、Async 节点、声明式 Effect、WASM 节点、原生 dylib 节点、未来的 RPC 节点。换后端不改图、不改编译器。
+4. **多后端对编译器与 VM 透明。** 借 `prism_visual_scripting` 的 `NodeRunner` trait 对象：同一张图可混用 Rust 闭包节点、Async 节点、声明式 Effect、WASM 节点、原生 dylib 节点、未来的 RPC 节点。换后端不改图、不改编译器。
 5. **性能分级，诚实标注。** 原生节点（零开销、不沙箱）→ 图内联/Pure 折叠（低解释开销）→ WASM 节点（沙箱、可控开销）→ 异步/Effect（含调度与持久化税）。每档开销与隔离级别明示，作者按场景选；热点可一键"折叠为原生/WASM"。
 6. **机器可作者化（LLM-friendly）是硬指标，不是附赠。** 节点自带结构化元数据（描述/分类/schema/示例），可导出机器可读目录；`Graph` 是纯 serde JSON，LLM 可直接吐；编译期静态校验返回**结构化错误**，闭环喂回 LLM 自修复；图可反向摘要为自然语言。**人连线与机器生成走同一条编译/校验管线。**
 7. **改完即见效、错了说得清、崩图不崩引擎。** 热重载 < 一帧可感知（内容寻址 + 原子指针翻转 + 状态迁移）；每次节点调用是微沙箱边界（燃料/时限/内存/能力 + trap 捕获 + 超预算熔断）；图错误降级为"这帧这张图不生效 + 带节点定位的诊断"，不是进程崩溃。
@@ -64,7 +64,7 @@
 
 ## 2. 现状基线与差距
 
-### 2.1 已有基础（`uwu_visual_script` 直接复用，不重复造轮子）
+### 2.1 已有基础（`prism_visual_scripting` 已落地能力）
 - **图模型（编辑/磁盘态已就绪）**：`Graph { nodes, edges, variables, entries, controls }`、`Pin { name, dir, ty, default }`、`Node { id, def, title, config }`、`Edge { from, to }`、`NodeDefRef { id, version }`——完整的可序列化编辑器画布格式，天然适配编辑器与 LLM。
 - **三层 IR + 编译管线（核心已就绪）**：`Graph`（源）→ `ExecutionPlan`（可序列化计划，`def_id` 字符串化、不带 trait object、可缓存/签名/远程执行）→ `SlotProgram`（instantiate 后带 `Arc<NodeDefinition>` 的最终程序）。`compile::{plan, instantiate, lower, validate}` 已分层。
 - **扁平 slot 运行期（已就绪）**：`Instr::{LoadConst, Move, LoadVar, StoreVar, CallPure, CallImpure, ...}`、`SlotProgram { slots_count, blocks, defs, vars, entries, registry_digest }`、`HALT` sentinel、每 impure 节点一个 Block、Pure 节点反向折叠（`pure_emitted` 缓存）。
@@ -77,12 +77,12 @@
 - **事件审计 / 回放（已就绪）**：`ExecutionEventSink` + `InMemoryEventLog`（单调序号、`events_since` 增量读取）+ `ExecutionReplay`（`ReplayDivergence`/`ReplayReport`）。
 - **窗口流处理（已就绪）**：`WindowedStream`（tumbling/sliding/watermark/allowed lateness/去重/背压）+ deterministic reducers（count/sum/avg/min/max/distinct，绑定 source digest、幂等重放）。
 - **身份锁定（已就绪）**：`ExecutionPlan` 绑定 `NodeRegistry` manifest digest，实例化拒绝不同节点快照；`VmState`/`WorkflowVmState` 固定 `execution_id`。
-- **WASM Effect 适配（已就绪）**：`node-wasm` feature 下 `WasmEffectExecutor` 经 JSON Component ABI（`operation: func(string)->string`）接入 `uwu_wasm::Sandbox` 的 fuel/deadline/策略/attestation。
-- **`uwu_wasm`（WASM 后端参考实现）**：wasmtime Component Model + WASI p2、内容寻址 SHA-256、`InstancePre` 缓存、mtime 轮询 + 原子指针热插拔、Capability/Fuel/Deadline/内存页策略、金丝雀路由 + 自愈、执行回执、时间旅行（snapshot/rewind/diff/replay）。
+- **WASM Effect 适配（已就绪）**：`wasm` feature 下 `WasmEffectExecutor` 经 JSON Component ABI（`operation: func(string)->string`）接入宿主 `WasmHost`；fuel/deadline/策略/attestation 由宿主沙箱实现。
+- **WASM 宿主策略（边界已定义）**：`WasmHost` 明确 JSON ABI、组件/操作名与错误回执；具体 Component Model、WASI、fuel、deadline、能力、热插拔和回放策略由应用宿主接入。
 
 ### 2.2 关键缺口（本设计填补）
-`uwu_visual_script` 是**引擎无关的内核**，`prism_script` 只给了 `backend-graph` 三行方针。要达到次世代 AAA + LLM 友好，需补：
-- **节点级 WASM / 原生执行体**：当前只有 Effect 级 WASM（`WasmEffectExecutor`）；缺 `WasmRunner: NodeRunner`（`Value↔component::Val` 直接编组，README 标注"待补"）与 `NativeRunner`（经 `prism_platform::dynlib`）。
+`prism_visual_scripting` 是**引擎无关的内核**，`prism_script` 只给了 `backend-graph` 三行方针。要达到次世代 AAA + LLM 友好，需补：
+- **节点级 WASM / 原生执行体**：当前已提供 Effect 级 WASM（`WasmEffectExecutor`）与宿主边界；仍缺 `WasmRunner: NodeRunner`（`Value↔component::Val` 直接编组）与 `NativeRunner`（经 `prism_platform::dynlib`）。
 - **节点元数据与机器可读目录**：`NodeDefinition` 只有 `id/purity/inputs/outputs/runner`，**无 description/category/schema/示例**；LLM 作者化、编辑器节点面板、文档生成都缺真相源。
 - **图↔自然语言 / 自修复闭环**：无"NL→Graph"生成辅助、无"Graph→NL"摘要器、无"生成→`compile()` 报错→回灌"的产品化 loop。
 - **引擎集成接缝**：无图↔ECS 受控世界访问（查询代理 / 命令缓冲 / 确定性相位），无图↔`prism_reflect` 绑定表的节点自动生成，无图作为 `prism_asset` 资产的热重载接入，无 Prism 调度（主线程亲和 / 帧预算熔断）接缝。
@@ -118,8 +118,8 @@
 │ L3 宿主集成层 (Host Integration)                                            │
 │   BindingRegistry  ← prism_reflect 函数反射（宿主 API → 节点，零手写胶水）     │
 │   WorldProxy       ← prism_ecs（只读相位查询 / Commands/ECB / observer 边界）  │
-│   EffectExecutor   本地服务 / RPC worker / uwu_wasm::Sandbox                 │
-│   节点后端         Rust 闭包 / Async / WASM(uwu_wasm) / Native(dynlib) / RPC   │
+│   EffectExecutor   本地服务 / RPC worker / WasmHost::Sandbox                 │
+│   节点后端         Rust 闭包 / Async / WASM(WasmHost) / Native(dynlib) / RPC   │
 │   能力/预算/污点/trace/事件  ← prism_platform / prism_diagnostic             │
 └──────────────────────────────────────────────────────────────────────────┘
 ```
@@ -134,7 +134,7 @@
 
 ## 4. 图模型
 
-沿用 `uwu_visual_script::model`，并补 Prism 侧的元数据与控制语义。
+沿用 `prism_visual_scripting::model`，并补 Prism 侧的元数据与控制语义。
 
 ### 4.1 核心类型（基线，已就绪）
 ```rust
@@ -323,7 +323,7 @@ pub enum ExecNext {
   1. **内置节点**（`builtin`：event.begin / flow.branch / math.* / cmp.* / debug.print / var.* 等，已就绪）。
   2. **反射桥接节点（零手写）**：`#[graph_node]` 过程宏 + `prism_reflect::DynamicFunction`，把宿主 Rust 函数/方法自动注册为节点，pin 由反射签名推导、`meta` 由 doc 注释与属性推导。**这是节点规模化的关键：宿主 API 改签名→节点自动更新。**
   3. **图即节点（Collapse/Macro）**：任意 `Function` 图可注册为可复用节点（内联或 `Call`）。
-  4. **WASM/Native 节点**：从 `uwu_wasm` 组件 / `dynlib` 导出注册（§7）。
+  4. **WASM/Native 节点**：从 `WasmHost` 组件 / `dynlib` 导出注册（§7）。
 
 ### 6.4 节点实例配置（已就绪）
 - `Node.config`（不走 pin 的常量）进入 `ExecutionPlan`，编译期**规范化键顺序**（保证 plan digest 稳定），运行期经 `InvokeCtx.config` 按实例传递。
@@ -332,7 +332,7 @@ pub enum ExecNext {
 
 ## 7. 多后端节点执行体
 
-`RunnerKind` 是后端分发点，编译器与 VM 对其透明（借 `uwu_visual_script` trait 对象设计）。
+`RunnerKind` 是后端分发点，编译器与 VM 对其透明（借 `prism_visual_scripting` trait 对象设计）。
 
 | 后端 | RunnerKind | 隔离 | 开销 | 热更新 | 适用 |
 |---|---|---|---|---|---|
@@ -343,10 +343,10 @@ pub enum ExecNext {
 | 原生节点（新增） | `Native(NativeNodeSpec)` | 无 | 零 | dylib 热重载 | 第一方热点、需零开销 |
 | RPC（预留） | `Rpc(RpcSpec)` | 进程/网络 | 网络税 | 换端点 | 跨进程/跨机服务 |
 
-### 7.1 节点级 WasmRunner（本设计落地 `uwu_visual_script` 的"待补"）
+### 7.1 节点级 WasmRunner（后续节点级扩展）
 ```rust
 pub struct WasmRunner {
-    sandbox: Arc<uwu_wasm::Sandbox>,
+    sandbox: Arc<WasmHost::Sandbox>,
     component: String,   // 内容寻址摘要/名
     export: String,      // 组件导出函数
 }
@@ -357,7 +357,7 @@ impl NodeRunner for WasmRunner {
     {
         // 1. Value -> wasmtime::component::Val（类型化，零/低拷贝；大对象经线性内存句柄）
         // 2. sandbox.call_typed::<Params, Returns>(&component, &export, params)
-        //    —— fuel/deadline/能力/内存页由 uwu_wasm::Policy 管；回执可验签
+        //    —— fuel/deadline/能力/内存页由 WasmHost policy 管；回执可验签
         // 3. component::Val -> Value 写回 outputs
         Ok(ExecNext::End)
     }
@@ -472,7 +472,7 @@ impl NodeRunner for WasmRunner {
 - 对"同一 Pure 子图作用于 N 个实体/粒子/样本"的场景（AI 感知批量、粒子逻辑、程序化网格），lower 成 **SoA 批处理内核**：输入输出按列存，单次调用处理一批，内层可 SIMD（经 `prism_math` 向量化）。
 - 调度：批量内核交 `prism_tasks` 分块并行；GPU 卸载为长期扩展点（图标注 `gpu` → 子图转 compute kernel，远期，不在 M0–M7）。
 
-### 11.3 WASM 实例化与调用成本压制（借 `uwu_wasm`）
+### 11.3 WASM 实例化与调用成本压制（借 `WasmHost`）
 - `InstancePre` 缓存（按 engine+digest）+ **pooling allocator** + 实例池：热路径只做 `instantiate_pre + call`。
 - 默认**关 attestation/fuel 旁路**于非安全敏感第一方组件（可配），安全敏感/UGC 组件开满策略。
 - 零拷贝类型化 ABI（§7.1）替代 JSON，大对象走线性内存句柄。
@@ -499,7 +499,7 @@ impl NodeRunner for WasmRunner {
 
 - **能力白名单**：`PermissionGate::check_permission(action, scope)`（已就绪）+ `prism_platform::capability`。图只能调用其能力集内的节点；UGC/mod 图默认最小能力。
 - **资源预算**：`BudgetMeter::consume_budget(dimension, amount)`（已就绪），维度 `steps`/`tokens`/`money_usd`/`alloc_bytes`/`io_ops`；超预算熔断（节点返回 `Error` 或 VM `Runtime` 熔断）。
-- **WASM 边界（UGC/mod）**：`uwu_wasm::Policy`（fuel/deadline/memory_pages/capability 白名单）+ 内容寻址准入 + 执行回执验签 + 可选 eBPF 双链交叉。崩/trap 捕获降级为"这张图这帧不生效"。
+- **WASM 边界（UGC/mod）**：`WasmHost policy`（fuel/deadline/memory_pages/capability 白名单）+ 内容寻址准入 + 执行回执验签 + 可选 eBPF 双链交叉。崩/trap 捕获降级为"这张图这帧不生效"。
 - **污点传播（`TaintPolicy`/`TaintProvider`，已就绪）**：标记不可信输入（玩家文本、网络数据、LLM 输出），阻止其未经净化流入敏感 Effect（如执行命令、写存档）。对 LLM 节点尤为关键（prompt injection 防线）。
 - **Native 硬约束**：原生节点零沙箱 → **仅第一方签名源**可注册 Native；第三方/UGC 强制走 WASM。
 - **身份锁定（已就绪）**：`ExecutionPlan` 绑定 `registry_digest`，`VmState` 绑定 `execution_id`，拒绝节点快照替换与跨运行串线。
@@ -508,7 +508,7 @@ impl NodeRunner for WasmRunner {
 
 ## 14. 可观测性与调试
 
-- **时间旅行（借 `uwu_wasm::TimeTravelSession`）**：snapshot / rewind / diff / replay。图层面：在任意 block 边界打点，倒带重放，对比两次运行的 slot/变量差分——定位"为什么这次走了 false 分支"。
+- **时间旅行（借 `host time-travel session`）**：snapshot / rewind / diff / replay。图层面：在任意 block 边界打点，倒带重放，对比两次运行的 slot/变量差分——定位"为什么这次走了 false 分支"。
 - **节点级断点 / 单步 / 数据监视**：VM 可恢复特性天然支持单步（每 block 暂停）；编辑器在节点/引脚挂断点与 watch，实时显示流经引脚的 `Value` 与 `Chunk` 流。
 - **事件审计 HUD**：`ExecutionEvent` 流投影为时间线（节点进入/退出、Effect 请求/完成/失败），接 `prism_diagnostic::telemetry` 与 `prism_ui_timetravel`。
 - **热路径预算归因**：`prism_diagnostic::hitch`/`profiler` 把图开销归因到具体节点/子图，标红超预算节点。
@@ -519,7 +519,7 @@ impl NodeRunner for WasmRunner {
 
 ## 15. LLM 友好性：节点元数据·Schema 导出 / 图↔自然语言 / 编译报错自修复 / Agent 原语
 
-> **这是本设计的硬指标，不是附赠功能。** 用户明确问过"LLM 友好吗"——回答是：基线 `uwu_visual_script` 已经打好三分之二地基（`Graph` 是纯 serde JSON、`VsError` 是结构化错误、slot VM 可单步可重放），缺的那一块（节点自描述元数据 + 机器可读目录 + 自修复闭环 + Agent 作者化原语）由本章补齐。目标：**人连线与机器生成走同一条编译/校验/执行管线，LLM 既能"读图"也能"写图"还能"改图"，且每一步都有结构化反馈可闭环。**
+> **这是本设计的硬指标，不是附赠功能。** 用户明确问过"LLM 友好吗"——回答是：基线 `prism_visual_scripting` 已经打好三分之二地基（`Graph` 是纯 serde JSON、`VsError` 是结构化错误、slot VM 可单步可重放），缺的那一块（节点自描述元数据 + 机器可读目录 + 自修复闭环 + Agent 作者化原语）由本章补齐。目标：**人连线与机器生成走同一条编译/校验/执行管线，LLM 既能"读图"也能"写图"还能"改图"，且每一步都有结构化反馈可闭环。**
 
 ### 15.1 为什么这套架构天然对 LLM 友好（基线既有优势）
 
@@ -702,7 +702,7 @@ impl<'a> Authoring<'a> {
 | `prism_script_graph_compile` | 编译管线 / 类型检查 / IR 优化（折叠/DCE/CSE）/ lower | — | ✅ |
 | `prism_script_graph_vm` | slot VM / 可恢复执行 / 调度 | `graph-sync` / `graph-async` | 核心 ✅，async 需 `std` |
 | `prism_script_graph_durable` | 持久化 / Actor / Saga / Await / 事件溯源 | `durable` | `std` |
-| `prism_script_graph_wasm` | 节点级/子图级 WASM Component 后端（参考 `uwu_wasm`） | `node-wasm` | `std` |
+| `prism_visual_scripting::wasm` | 节点级/子图级 WASM Component 后端（参考 `WasmHost`） | `wasm` | `std` |
 | `prism_script_graph_native` | 原生 dylib 节点后端（`prism_platform::dynlib`） | `node-native` | `std` |
 | `prism_script_graph_jit` | 热图 cranelift JIT | `jit` | `std` |
 | `prism_script_graph_llm` | LLM 作者化 / 目录导出 / 自修复 / 图↔NL | `llm-authoring` | `std` |
@@ -716,12 +716,12 @@ impl<'a> Authoring<'a> {
 
 ## 19. 路线图（M0–M7）
 
-- **M0 骨架对齐**：移植 `uwu_visual_script` 的 Graph/IR/slot VM 骨架为 `prism_script_graph_core/compile/vm`，接 `prism_reflect` 类型真相层、`prism_ecs` 世界边界。产出：Pure/Impure 同步图可编译可跑，`prism_diagnostic` 微基准接入。
+- **M0 骨架对齐**：移植 `prism_visual_scripting` 的 Graph/IR/slot VM 骨架为 `prism_visual_scripting`，接 `prism_reflect` 类型真相层、`prism_ecs` 世界边界。产出：Pure/Impure 同步图可编译可跑，`prism_diagnostic` 微基准接入。
 - **M1 节点模型与目录**：`NodeMeta` + 注册表内容寻址 + `prism_reflect` schema 导出目录（§15.2）。产出：节点手册 JSON/MD 自动生成，Inspector 属性自动生成。
 - **M2 异步与效果层**：`RunnerKind::Async` + 声明式 Effect + 流式 `Chunk`（§10），接 `prism_tasks` 调度。产出：异步节点、流式输出、主线程亲和。
 - **M3 持久化执行**：`VmState` 快照/恢复 + `ExecutionStore` + Actor/Saga/Await（§9），事件溯源骨架。产出：长流程存档恢复、崩溃续跑。
 - **M4 性能优化相位**：IR 折叠/DCE/CSE、slot 布局优化、批量 SoA 内核（§11.2）、热图 AOT 融合；达成 §11.4 基准。
-- **M5 WASM/Native 节点后端**：`node-wasm`（参考 `uwu_wasm`：`InstancePre` 缓存/pooling/Policy/回执）+ `node-native`（签名源 dylib）。产出：UGC 沙箱节点、第一方原生热点节点，补齐 README 标注的节点级 `WasmRunner` 缺口。
+- **M5 WASM/Native 节点后端**：`wasm`（参考 `WasmHost`：`InstancePre` 缓存/pooling/Policy/回执）+ `node-native`（签名源 dylib）。产出：UGC 沙箱节点、第一方原生热点节点，补齐 README 标注的节点级 `WasmRunner` 缺口。
 - **M6 确定性/网络/回放 + 可选 JIT**：`determinism` 档 + 事件溯源重放 + `prism_network` 接缝（§12）；可选 cranelift `jit` 热块原生化。产出：lockstep 可用、服务录像回放、反作弊对账。
 - **M7 LLM 作者化 + 编辑器完善**：`llm-authoring` 生成→校验→自修复闭环 + 图↔NL（§15）；编辑器时间旅行/热重载 HUD（§16）全量。产出：首轮/≤3 轮自修复通过率回归上线，L0–L5 分层体验完整。
 
