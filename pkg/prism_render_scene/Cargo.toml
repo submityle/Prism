@@ -156,3 +156,8 @@ required-features = ["legacy-bevy"]
 name = "fabric_domain_gpu"
 path = "tests/fabric_domain_gpu.rs"
 required-features = ["legacy-bevy"]
+
+[[test]]
+name = "render_fabric_scene_taa_response_performance"
+path = "tests/render_fabric_scene_taa_response_performance.rs"
+required-features = ["legacy-bevy"]
