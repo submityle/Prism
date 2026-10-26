@@ -477,6 +477,35 @@ impl FrameGraphBuffers {
             ] {
                 self.require(buffer, BufferDesc::new(size, usage));
             }
+            let materials = pass
+                .composite_material_buffers()
+                .expect("lighting composite requires canonical material buffers");
+            for (buffer, size) in [
+                (
+                    materials.headers.expect("validated material headers"),
+                    materials.headers_size_bytes,
+                ),
+                (
+                    materials
+                        .parameters
+                        .expect("validated material parameters"),
+                    materials.parameters_size_bytes,
+                ),
+                (
+                    materials
+                        .execution_plans
+                        .expect("validated material execution plans"),
+                    materials.execution_plans_size_bytes,
+                ),
+                (
+                    materials
+                        .execution_programs
+                        .expect("validated material execution programs"),
+                    materials.execution_programs_size_bytes,
+                ),
+            ] {
+                self.require(buffer, BufferDesc::new(size, BufferUsages::STORAGE));
+            }
         }
         if let Some(trace) = trace {
             for buffer in [
@@ -547,6 +576,8 @@ impl FrameGraphBuffers {
 struct TargetGraphAppend {
     color: TextureHandle,
     depth: TextureHandle,
+    taa_motion: TextureHandle,
+    taa_reactive: TextureHandle,
     stages: FrameGraphStages,
 }
 
@@ -669,15 +700,16 @@ fn append_target_graph(
                 target.viewport().height,
             ))
             .with_usage(
-                TextureUsages::COPY_SRC
+                TextureUsages::RENDER_ATTACHMENT
+                    .union(TextureUsages::COPY_SRC)
                     .union(TextureUsages::TEXTURE_BINDING)
                     .union(TextureUsages::STORAGE_BINDING),
             ),
         ImportedTexture {
             texture: target.texture(),
             default_view: target.view(),
-            entry_state: TextureState::initial(),
-            exit_state: TextureState::copy_src(),
+            entry_state: target.color_entry_state(),
+            exit_state: target.color_exit_state(),
             mip_levels: 1,
             array_layers: 1,
         },
@@ -820,6 +852,44 @@ fn append_target_graph(
             array_layers: 1,
         },
     );
+    let mut motion = graph.import_texture(
+        "prism-render-app-taa-motion",
+        TextureDesc::color(target.taa_motion_format())
+            .with_size(prism_render_graph::SizeClass::absolute_2d(
+                target.viewport().width,
+                target.viewport().height,
+            ))
+            .with_usage(crate::target::TAA_TEMPORAL_INPUT_USAGES),
+        ImportedTexture {
+            texture: target.taa_motion_texture(),
+            default_view: target.taa_motion_view(),
+            entry_state: TextureState::initial(),
+            exit_state: TextureState::shader_read(
+                prism_render_driver::PipelineStages::COMPUTE_SHADER,
+            ),
+            mip_levels: 1,
+            array_layers: 1,
+        },
+    );
+    let mut reactive = graph.import_texture(
+        "prism-render-app-taa-reactive",
+        TextureDesc::color(target.taa_reactive_format())
+            .with_size(prism_render_graph::SizeClass::absolute_2d(
+                target.viewport().width,
+                target.viewport().height,
+            ))
+            .with_usage(crate::target::TAA_TEMPORAL_INPUT_USAGES),
+        ImportedTexture {
+            texture: target.taa_reactive_texture(),
+            default_view: target.taa_reactive_view(),
+            entry_state: TextureState::initial(),
+            exit_state: TextureState::shader_read(
+                prism_render_driver::PipelineStages::COMPUTE_SHADER,
+            ),
+            mip_levels: 1,
+            array_layers: 1,
+        },
+    );
     // Collect every physical buffer before importing it. An imported buffer's
     // descriptor is the union of the usages this frame declares — the graph
     // neither owns nor sizes it, and the size is the owner's business (a mesh
@@ -900,6 +970,8 @@ fn append_target_graph(
     external_texture_handles.insert(target.normal_view(), normal);
     external_texture_handles.insert(target.albedo_view(), albedo);
     external_texture_handles.insert(target.surface_id_view(), surface_id);
+    external_texture_handles.insert(target.taa_motion_view(), motion);
+    external_texture_handles.insert(target.taa_reactive_view(), reactive);
     external_texture_handles.insert(target.depth_view(), depth);
     for (index, import) in external_views.iter().enumerate() {
         if external_texture_handles.contains_key(&import.view) {
@@ -1218,10 +1290,14 @@ fn append_target_graph(
         external_texture_handles.insert(target.normal_view(), normal);
         external_texture_handles.insert(target.albedo_view(), albedo);
         external_texture_handles.insert(target.surface_id_view(), surface_id);
+        external_texture_handles.insert(target.taa_motion_view(), motion);
+        external_texture_handles.insert(target.taa_reactive_view(), reactive);
         external_texture_handles.insert(target.depth_view(), depth);
         return TargetGraphAppend {
             color,
             depth,
+            taa_motion: motion,
+            taa_reactive: reactive,
             stages,
         };
     };
@@ -1274,6 +1350,45 @@ fn append_target_graph(
         ),
         lighting.surfaces,
     );
+    let materials = lighting
+        .composite_material_buffers()
+        .expect("lighting composite requires canonical material buffers");
+    let material_bindings = [
+        (
+            "prism-material-headers",
+            materials.headers.expect("validated material headers"),
+            materials.headers_size_bytes,
+        ),
+        (
+            "prism-material-parameters",
+            materials
+                .parameters
+                .expect("validated material parameters"),
+            materials.parameters_size_bytes,
+        ),
+        (
+            "prism-material-execution-plans",
+            materials
+                .execution_plans
+                .expect("validated material execution plans"),
+            materials.execution_plans_size_bytes,
+        ),
+        (
+            "prism-material-execution-programs",
+            materials
+                .execution_programs
+                .expect("validated material execution programs"),
+            materials.execution_programs_size_bytes,
+        ),
+    ];
+    let material_reads = material_bindings.map(|(name, buffer, size)| {
+        buffers.import(
+            graph,
+            name,
+            BufferDesc::new(size, BufferUsages::STORAGE),
+            buffer,
+        )
+    });
     if let (Some(trace), Some(hits), Some((trace_triangles, trace_attributes, trace_rays)), true) =
         (trace, trace_hits, trace_inputs, lighting.run_gi)
         && let (
@@ -1342,6 +1457,14 @@ fn append_target_graph(
     let target_bind_group = lighting
         .composite_target_bind_group
         .expect("lighting graph requires a target-aware composite bind group");
+    let material_bind_group = lighting
+        .composite_material_bind_group
+        .expect("lighting composite requires canonical material bind group");
+    assert_eq!(
+        crate::lighting_gpu::LightingGpuPass::composite_material_group(),
+        2,
+        "composite material bind group must match the shader's group 2"
+    );
     let extent = target.viewport().extent();
     graph.add_compute_pass(
         "prism-lighting-composite-dispatch",
@@ -1358,21 +1481,30 @@ fn append_target_graph(
             let _directionals = builder.read_storage_buffer(directionals);
             let _punctuals = builder.read_storage_buffer(punctuals);
             let _areas = builder.read_storage_buffer(areas);
+            assert_eq!(material_reads.len(), 4);
+            for handle in material_reads {
+                let _ = builder.read_storage_buffer(handle);
+            }
             color = builder.write_storage_texture(color);
             move |context| {
                 context
                     .set_compute_pipeline(lighting.composite_pipeline)
                     .set_compute_bind_group(0, lighting.composite_bind_group, Vec::new())
-                    .set_compute_bind_group(1, target_bind_group, Vec::new())
-                    .dispatch(
-                        extent
-                            .width
-                            .div_ceil(crate::lighting_gpu::COMPOSITE_WORKGROUP_X),
-                        extent
-                            .height
-                            .div_ceil(crate::lighting_gpu::COMPOSITE_WORKGROUP_Y),
-                        1,
-                    );
+                    .set_compute_bind_group(1, target_bind_group, Vec::new());
+                context.set_compute_bind_group(
+                    crate::lighting_gpu::LightingGpuPass::composite_material_group(),
+                    material_bind_group,
+                    Vec::new(),
+                );
+                context.dispatch(
+                    extent
+                        .width
+                        .div_ceil(crate::lighting_gpu::COMPOSITE_WORKGROUP_X),
+                    extent
+                        .height
+                        .div_ceil(crate::lighting_gpu::COMPOSITE_WORKGROUP_Y),
+                    1,
+                );
             }
         },
     );
@@ -1486,10 +1618,14 @@ fn append_target_graph(
     external_texture_handles.insert(target.normal_view(), normal);
     external_texture_handles.insert(target.albedo_view(), albedo);
     external_texture_handles.insert(target.surface_id_view(), surface_id);
+    external_texture_handles.insert(target.taa_motion_view(), motion);
+    external_texture_handles.insert(target.taa_reactive_view(), reactive);
     external_texture_handles.insert(target.depth_view(), depth);
     TargetGraphAppend {
         color,
         depth,
+        taa_motion: motion,
+        taa_reactive: reactive,
         stages,
     }
 }
@@ -1877,6 +2013,11 @@ mod tests {
             target.surface_id_view(),
         ]
         .map(|view| handles[&view].resource());
+        assert_eq!(
+            gbuffer.len(),
+            crate::forward_lit::SURFACE_GBUFFER_TARGET_COUNT,
+            "frame graph GBuffer attachment count must match the surface shader ABI"
+        );
         let hdr = handles[&target.view()].resource();
         let depth = handles[&target.depth_view()].resource();
         let mut gbuffer_clears = 0;
@@ -1886,10 +2027,18 @@ mod tests {
                 .as_ref()
                 .expect("no-lighting scene passes are raster");
             let resources: Vec<_> = raster.colors.iter().map(|a| a.resource).collect();
+            if resources.as_slice() == gbuffer.as_slice() {
+                assert_eq!(
+                    raster.colors.len(),
+                    crate::forward_lit::SURFACE_GBUFFER_TARGET_COUNT,
+                    "opaque raster attachment count must match SurfaceEncodeProvider"
+                );
+            }
             assert!(
                 resources.as_slice() == gbuffer.as_slice() || resources == [hdr],
                 "GBuffer and HDR must never share an attachment set"
             );
+            // Keep the concrete format accounting beside the ABI assertion:
             // WebGPU charges sRGB8 RGBA 8 attachment bytes, not its 4 storage
             // bytes. Six GBuffer targets cost 4+4+4+8+8+4 = 32; HDR costs 8.
             let bytes: u32 = raster
@@ -1999,7 +2148,9 @@ mod tests {
                 .attachments
                 .iter()
                 .flatten()
-                .filter(|raster| raster.colors.len() == 6)
+                .filter(|raster| {
+                    raster.colors.len() == crate::forward_lit::SURFACE_GBUFFER_TARGET_COUNT
+                })
                 .collect();
             assert_eq!(passes.len(), 2);
             assert_eq!(passes[0].colors[3].load, LoadOp::Clear(Color::TRANSPARENT));
@@ -2095,7 +2246,9 @@ mod tests {
                         .iter()
                         .position(|raster| {
                             raster.as_ref().is_some_and(|raster| {
-                                raster.colors.len() == 6 && raster.colors[0].load == LoadOp::Load
+                                raster.colors.len()
+                                    == crate::forward_lit::SURFACE_GBUFFER_TARGET_COUNT
+                                    && raster.colors[0].load == LoadOp::Load
                             })
                         })
                         .unwrap();
@@ -2247,7 +2400,8 @@ mod tests {
             .iter()
             .position(|attachments| {
                 attachments.as_ref().is_some_and(|raster| {
-                    raster.colors.len() == 6 && raster.colors[0].load == LoadOp::Load
+                    raster.colors.len() == crate::forward_lit::SURFACE_GBUFFER_TARGET_COUNT
+                        && raster.colors[0].load == LoadOp::Load
                 })
             })
             .expect("surface draw pass exists");

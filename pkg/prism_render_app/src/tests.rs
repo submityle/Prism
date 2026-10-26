@@ -20,8 +20,8 @@ use crate::intent::{RenderIntent, RenderViewport};
 use crate::label::{Render, RenderApp};
 use crate::lighting::{
     evaluate_deterministic_direct, evaluate_deterministic_gi, ExtractedLightingInputs,
-    LightingDebugViewState, LightingDirectionalInput, LightingGiCandidateInput, LightingPlanState,
-    LightingPunctualInput, LightingSceneInputs, LightingSurfaceInput,
+    LightingAreaInput, LightingDebugViewState, LightingDirectionalInput, LightingGiCandidateInput,
+    LightingPlanState, LightingPunctualInput, LightingSceneInputs, LightingSurfaceInput,
 };
 use crate::lighting_gpu::LightingGpuState;
 use crate::plugin::{save_persisted_pso_cache, PrismRenderPlugin};
@@ -29,6 +29,7 @@ use crate::record::RenderRecord;
 use crate::runtime_resource::RenderRuntimeResource;
 use crate::stats::RenderFrameStats;
 use crate::target::RenderTarget;
+use crate::visibility_bridge::ExtractedVisibilityViews;
 
 use crate::bin_queue::bin_indirect_args;
 use crate::draw::{DrawFunctionId, DrawFunctions};
@@ -37,12 +38,13 @@ use crate::pipeline_cache::{
     hash_vertex_layouts, pso_device_fingerprint, PipelineCache, PipelineCachePersistenceStatus,
     PipelineCompiler, PipelineKey, PipelineResolution,
 };
-use crate::queue::DrawRequest;
 use crate::queue::{phase_for_material, phase_for_render_class};
+use crate::queue::{CanonicalMaterialBindings, DrawRequest};
 use crate::queue::{PhaseItem, RenderQueues};
 use crate::sets::{RenderPhase, RenderSystems};
 use crate::texture_cache::{TextureCache, TextureKey};
 use crate::views::RenderViews;
+use crate::{MaterialParameterBuffers, RenderMaterials};
 use prism_ecs::prelude::{ResMut, Resource};
 use prism_ecs::schedule::IntoSystemConfigs;
 use prism_render_architecture::abi::GenerationalHandle;
@@ -459,7 +461,9 @@ fn render_queues_are_phased_and_sort_deterministically() {
         draw: DrawFunctionId(0),
         geometry,
         vertices: vec![vertices],
+        vertex_sizes: vec![64],
         indices: None,
+        index_size: None,
         first: 0,
         count: 3,
         base_vertex: 0,
@@ -535,8 +539,22 @@ fn recording_a_phase_invokes_each_draw_function() {
         fn set_pipeline(&mut self, pipeline: prism_render_driver::RenderPipelineId) {
             self.0.push(pipeline);
         }
-        fn set_vertex_buffer(&mut self, _: u32, _: BufferId, _: u64) {}
-        fn set_index_buffer(&mut self, _: BufferId, _: prism_render_driver::IndexFormat, _: u64) {}
+        fn set_vertex_buffer(
+            &mut self,
+            _: u32,
+            _: BufferId,
+            _: u64,
+            _: Option<core::num::NonZeroU64>,
+        ) {
+        }
+        fn set_index_buffer(
+            &mut self,
+            _: BufferId,
+            _: prism_render_driver::IndexFormat,
+            _: u64,
+            _: Option<core::num::NonZeroU64>,
+        ) {
+        }
         fn draw(&mut self, _: core::ops::Range<u32>, _: core::ops::Range<u32>) {}
         fn draw_indexed(&mut self, _: core::ops::Range<u32>, _: i32, _: core::ops::Range<u32>) {}
         fn draw_indexed_indirect(&mut self, _: prism_render_graph::BufferHandle, _: u64) {}
@@ -566,7 +584,9 @@ fn recording_a_phase_invokes_each_draw_function() {
                 draw,
                 geometry,
                 vertices: vec![vertices],
+                vertex_sizes: vec![64],
                 indices: None,
+                index_size: None,
                 first: 0,
                 count: 3,
                 base_vertex: 0,
@@ -685,6 +705,7 @@ fn fill_from_visibility_resolves_and_queues() {
                 render_phase: RenderPhase::Opaque,
                 draw: None,
                 sort_class: crate::PassDescriptorClass::SURFACE,
+                shader_package: None,
             }],
         )
         .unwrap();
@@ -892,7 +913,9 @@ fn filling_the_queue_specializes_and_appends() {
         variant,
         layout: vec![layout],
         vertices: vec![vertices],
+        vertex_sizes: vec![64],
         indices: None,
+        index_size: None,
         first: 0,
         count: 3,
         base_vertex: 0,
@@ -1934,9 +1957,223 @@ fn app_on_null_backend(config: RenderAppConfig) -> App {
     app
 }
 
+#[test]
+fn lighting_extraction_does_not_create_a_missing_canonical_scene() {
+    let mut app = app_on_null_backend(RenderAppConfig::new(EXTENT));
+    assert!(
+        app.world_mut()
+            .get_resource::<crate::LightingLightScene>()
+            .is_none(),
+        "the application must explicitly publish the canonical light scene"
+    );
+
+    app.update();
+
+    assert!(
+        app.world_mut()
+            .get_resource::<crate::LightingLightScene>()
+            .is_none(),
+        "lighting extraction must not install an implicit authority"
+    );
+    let render = app.get_sub_app(RenderApp).expect("render sub-app");
+    let extracted = render.world.resource::<ExtractedLightingInputs>();
+    assert_eq!(extracted.stats.lights, 0);
+    assert!(extracted.directionals.is_empty());
+    assert!(extracted.punctuals.is_empty());
+    assert!(extracted.areas.is_empty());
+    assert_eq!(extracted.light_scene_identity, 0);
+    assert_eq!(extracted.light_scene_sequence, 0);
+    assert_eq!(extracted.light_scene_epoch, 0);
+    assert_eq!(extracted.light_scene_error, None);
+}
+
 /// Whether a missing adapter must fail a GPU-gated test instead of skipping it.
 pub(crate) fn require_gpu() -> bool {
     std::env::var_os("PRISM_REQUIRE_GPU").is_some()
+}
+
+/// Uploads one covered material sample to the real frame target's GBuffer.
+/// Albedo is quantized through the target's sRGB8 format, and the returned
+/// surface carries the decoded value used by the per-pixel CPU oracle.
+pub(super) fn write_lighting_test_gbuffer_pixel(
+    queue: &impl RenderQueue,
+    target: &RenderTarget,
+    x: u32,
+    y: u32,
+    mut surface: LightingSurfaceInput,
+    surface_id: u32,
+) -> LightingSurfaceInput {
+    fn encode_srgb8(linear: f32) -> u8 {
+        let linear = linear.clamp(0.0, 1.0);
+        let encoded = if linear <= 0.003_130_8 {
+            linear * 12.92
+        } else {
+            1.055 * linear.powf(1.0 / 2.4) - 0.055
+        };
+        (encoded * 255.0).round() as u8
+    }
+
+    fn decode_srgb8(encoded: u8) -> f32 {
+        let encoded = f32::from(encoded) / 255.0;
+        if encoded <= 0.040_45 {
+            encoded / 12.92
+        } else {
+            ((encoded + 0.055) / 1.055).powf(2.4)
+        }
+    }
+
+    fn exact_axis_half(value: f32) -> u16 {
+        if value == 0.0 {
+            0x0000
+        } else if value == 1.0 {
+            0x3c00
+        } else if value == -1.0 {
+            0xbc00
+        } else {
+            panic!("GBuffer fixture normal must use exact axis values, got {value}");
+        }
+    }
+
+    let mut upload = |texture, bytes: &[u8]| {
+        queue.write_texture(
+            TextureWrite {
+                texture,
+                mip_level: 0,
+                origin: [x, y, 0],
+                size: Extent3d::new_2d(1, 1),
+            },
+            bytes,
+            ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(bytes.len() as u32),
+                rows_per_image: Some(1),
+            },
+        );
+    };
+
+    for (texture, value) in [
+        (target.position_x_texture(), surface.position[0]),
+        (target.position_y_texture(), surface.position[1]),
+        (target.position_z_texture(), surface.position[2]),
+    ] {
+        upload(texture, &value.to_le_bytes());
+    }
+    let normal = [
+        exact_axis_half(surface.normal[0]),
+        exact_axis_half(surface.normal[1]),
+        exact_axis_half(surface.normal[2]),
+        0x3c00,
+    ];
+    let normal_bytes = normal
+        .into_iter()
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>();
+    upload(target.normal_texture(), &normal_bytes);
+
+    let encoded_albedo = surface.albedo.map(encode_srgb8);
+    let mut albedo_bytes = encoded_albedo.to_vec();
+    albedo_bytes.push(255);
+    upload(target.albedo_texture(), &albedo_bytes);
+    surface.albedo = encoded_albedo.map(decode_srgb8);
+    upload(target.surface_id_texture(), &surface_id.to_le_bytes());
+    surface
+}
+
+/// Executes the production composite pipeline against one target's actual
+/// GBuffer bindings, without invoking the frame graph's GBuffer clear first.
+pub(super) fn dispatch_lighting_test_composite<I>(
+    lighting: &LightingGpuState<I>,
+    plan: &LightingPlan,
+    target: &RenderTarget,
+    runtime: &RenderRuntime<I>,
+) where
+    I: prism_render_driver::Instance + 'static,
+    I::Device: Send + Sync + 'static,
+    I::Queue: prism_render_driver::FrameSync,
+{
+    use prism_render_driver::{BufferUsages, CommandEncoder, ComputeCommand};
+
+    // Production composite bind-group layout includes canonical material
+    // snapshots even when this focused test only exercises direct/GI math.
+    // Build and retain real snapshots for the entire submission instead of
+    // dispatching an incomplete test-only pipeline binding set.
+    let mut registry = prism_render_material::MaterialRegistry::new(1);
+    registry
+        .install_execution_tables(&prism_render_material::MaterialExecutionTables::new())
+        .expect("empty canonical execution tables are valid for fallback material");
+    let device = runtime.device_handle();
+    let mut material_buffers =
+        MaterialParameterBuffers::new_owned(device.clone(), 1, 1, 1, BufferUsages::NONE);
+    material_buffers.sync_registry(runtime.device(), runtime.queue(), &registry, [0]);
+    let mut execution_buffers = crate::material::NativeExecutionTableBuffers::new();
+    execution_buffers
+        .sync_registry(device, runtime.queue(), &registry)
+        .expect("canonical execution-table upload is available");
+    assert!(runtime.wait_idle(), "material snapshots publish on GPU");
+    let material_snapshot = material_buffers
+        .snapshot()
+        .expect("material allocation snapshot");
+    let execution_snapshot = execution_buffers.snapshot().expect("execution snapshot");
+    let material_bindings = crate::lighting_gpu::LightingCompositeMaterialBuffers {
+        headers: Some(material_snapshot.headers()),
+        headers_size_bytes: u64::from(material_snapshot.header_capacity())
+            * core::mem::size_of::<prism_render_material::GpuMaterialHeader>() as u64,
+        parameters: Some(material_snapshot.parameters()),
+        parameters_size_bytes: u64::from(material_snapshot.parameter_capacity_words()) * 4,
+        execution_plans: Some(execution_snapshot.plan_buffer()),
+        execution_plans_size_bytes: execution_snapshot.plan_rows().len() as u64
+            * (prism_render_material::EXECUTION_PLAN_ROW_WORDS * 4) as u64,
+        execution_programs: Some(execution_snapshot.program_buffer()),
+        execution_programs_size_bytes: execution_snapshot.program_rows().len() as u64 * 20,
+    };
+    let pass = lighting
+        .pass_for_target_with_materials(plan, target, runtime, material_bindings)
+        .expect("prepared lighting plan binds to the real GBuffer target and material tables");
+    let target_bind_group = pass
+        .composite_target_bind_group
+        .expect("target-aware lighting pass owns its GBuffer bindings");
+    let extent = target.viewport().extent();
+    let mut encoder = CommandEncoder::new();
+    encoder.push_compute_pass(
+        Some("prism-test-lighting-composite".into()),
+        vec![
+            ComputeCommand::SetPipeline(pass.composite_pipeline),
+            ComputeCommand::SetBindGroup {
+                index: 0,
+                bind_group: pass.composite_bind_group,
+                dynamic_offsets: Vec::new(),
+            },
+            ComputeCommand::SetBindGroup {
+                index: 1,
+                bind_group: target_bind_group,
+                dynamic_offsets: Vec::new(),
+            },
+            ComputeCommand::SetBindGroup {
+                index: crate::lighting_gpu::LightingGpuPass::composite_material_group(),
+                bind_group: pass
+                    .composite_material_bind_group
+                    .expect("composite requires canonical material bindings"),
+                dynamic_offsets: Vec::new(),
+            },
+            ComputeCommand::Dispatch {
+                x: extent
+                    .width
+                    .div_ceil(crate::lighting_gpu::COMPOSITE_WORKGROUP_X),
+                y: extent
+                    .height
+                    .div_ceil(crate::lighting_gpu::COMPOSITE_WORKGROUP_Y),
+                z: 1,
+            },
+        ],
+    );
+    // Bind groups refer to external canonical buffers, so keep their owners
+    // alive through queue completion just as the host graph does.
+    runtime.queue().submit(&[encoder.finish()]);
+    assert!(
+        runtime.wait_idle(),
+        "lighting composite completes on the GPU"
+    );
+    drop((material_snapshot, execution_snapshot, material_buffers, execution_buffers, registry));
 }
 
 /// The render schedule runs every frame, the extract feeds it, and the runtime
@@ -1952,7 +2189,7 @@ fn render_schedule_runs_each_frame_and_submits_a_frame() {
     let render = app
         .get_sub_app(RenderApp)
         .expect("the plugin registers the render sub-app");
-    let stats = *render
+    let stats = render
         .world
         .get_resource::<RenderFrameStats>()
         .expect("the plugin installs the stats resource");
@@ -1967,8 +2204,8 @@ fn render_schedule_runs_each_frame_and_submits_a_frame() {
     );
     assert_eq!(
         stats.passes_declared,
-        FRAMES * 4,
-        "without GI candidates each frame declares direct, composite, clear, and OCIO passes"
+        FRAMES * 3,
+        "without GI candidates each frame declares composite, clear, and OCIO passes"
     );
     assert_eq!(stats.last_viewport, RenderViewport::from_extent(EXTENT));
 
@@ -2008,7 +2245,7 @@ fn lighting_plan_uses_host_caps_scene_stats_and_budget() {
             triangle_density: 4.0,
         })
         .with_lighting_budget(FrameResourceBudget {
-            gpu_ms: 1.0,
+            gpu_ms: 0.5,
             bandwidth: 8 * 1024 * 1024,
             resident_bytes: 16 * 1024 * 1024,
             io_ops: 16,
@@ -2019,6 +2256,7 @@ fn lighting_plan_uses_host_caps_scene_stats_and_budget() {
             virtual_shadow: false,
             offline: false,
             deterministic_npr: false,
+            prefiltered_environment: false,
         })
         .with_lighting_tier(Tier::Preview);
     let mut app = app_on_null_backend(config);
@@ -2057,7 +2295,9 @@ fn lighting_candidate_test_capabilities() -> prism_render_driver::DeviceCapabili
 }
 
 fn lighting_candidate_test_trace_scene(surface_count: usize) -> crate::LightingTraceSceneInput {
-    use prism_render_architecture::ray_scene::{Bvh, GpuBvhBuffers, Triangle};
+    use prism_render_architecture::ray_scene::{
+        Bvh, GpuBvhBuffers, RayHitAttributeRecord, RayHitIdentity, Triangle,
+    };
 
     let triangle = Triangle::new([-1.0, -1.0, -1.0], [1.0, -1.0, -1.0], [0.0, 1.0, -1.0], 73);
     crate::LightingTraceSceneInput::new(
@@ -2825,76 +3065,258 @@ fn replacing_light_scene_lineage_with_matching_epochs_refreshes_derived_lights()
 }
 
 #[test]
-fn unsupported_canonical_light_rejects_the_whole_native_snapshot_explicitly() {
+fn mixed_canonical_scene_preserves_supported_lights_and_submits_with_emitter_rejections() {
     use prism_render_architecture::lighting::{
-        LightClass, LightClassification, LightEmission, LightGeometry, LightMobility, LightRecord,
-        LightUnit,
+        LightClass, LightClassification, LightEmission, LightFlags, LightGeometry, LightMobility,
+        LightRecord, LightUnit, LightVisibility,
     };
     let mut app = app_on_null_backend(RenderAppConfig::new(EXTENT));
     app.world_mut()
         .insert_resource(crate::LightingLightScene::default());
-    {
-        let mut scene = app.world_mut().resource_mut::<crate::LightingLightScene>();
-        scene
-            .scene
-            .insert(
-                LightRecord::new(
-                    LightClassification {
-                        class: LightClass::Directional,
-                        mobility: LightMobility::Static,
-                    },
-                    LightEmission::new([1.0; 3], 1.0, LightUnit::Lux),
-                    LightGeometry::Directional {
-                        direction: [0.0, -1.0, 0.0],
-                    },
-                ),
-                1,
-            )
-            .expect("supported directional");
-        scene
-            .scene
-            .insert(
-                LightRecord::new(
-                    LightClassification {
-                        class: LightClass::Rect,
-                        mobility: LightMobility::Static,
-                    },
-                    LightEmission::new([1.0; 3], 1.0, LightUnit::Nits),
-                    LightGeometry::Rect {
-                        position: [0.0; 3],
-                        direction: [0.0, -1.0, 0.0],
-                        right: [1.0, 0.0, 0.0],
-                        up: [0.0, 0.0, 1.0],
-                        width: 1.0,
-                        height: 1.0,
-                    },
-                ),
-                1,
-            )
-            .expect("valid but unsupported rect light");
-    }
+    let (
+        directional_handle,
+        point_handle,
+        spot_handle,
+        rect_handle,
+        disk_handle,
+        capsule_handle,
+        sky_handle,
+        emissive_handle,
+        unit_handle,
+        layer_handle,
+        flags_handle,
+    ) = {
+        let scene = app.world_mut().resource_mut::<crate::LightingLightScene>();
+        let mut frame = 1_u64;
+        let mut insert = |record, description| {
+            let handle = scene
+                .scene
+                .insert(record, frame)
+                .unwrap_or_else(|error| panic!("{description}: {error:?}"))
+                .0;
+            frame += 1;
+            handle
+        };
+        let directional_handle = insert(
+            LightRecord::new(
+                LightClassification {
+                    class: LightClass::Directional,
+                    mobility: LightMobility::Static,
+                },
+                LightEmission::new([1.0; 3], 1.0, LightUnit::Lux),
+                LightGeometry::Directional {
+                    direction: [0.0, -1.0, 0.0],
+                },
+            ),
+            "supported directional",
+        );
+        let point_handle = insert(
+            LightRecord::new(
+                LightClassification {
+                    class: LightClass::Point,
+                    mobility: LightMobility::Dynamic,
+                },
+                LightEmission::new([1.0; 3], 2.0, LightUnit::Candela),
+                LightGeometry::Point {
+                    position: [1.0, 2.0, 3.0],
+                    radius: 0.1,
+                    range: 10.0,
+                },
+            ),
+            "supported point",
+        );
+        let spot_handle = insert(
+            LightRecord::new(
+                LightClassification {
+                    class: LightClass::Spot,
+                    mobility: LightMobility::Dynamic,
+                },
+                LightEmission::new([1.0; 3], 3.0, LightUnit::Candela),
+                LightGeometry::Spot {
+                    position: [0.0, 3.0, 0.0],
+                    direction: [0.0, -1.0, 0.0],
+                    inner_angle: 0.2,
+                    outer_angle: 0.6,
+                    radius: 0.1,
+                    range: 12.0,
+                },
+            ),
+            "supported spot",
+        );
+        let rect_handle = insert(
+            LightRecord::new(
+                LightClassification {
+                    class: LightClass::Rect,
+                    mobility: LightMobility::Static,
+                },
+                LightEmission::new([1.0; 3], 1.0, LightUnit::Nits),
+                LightGeometry::Rect {
+                    position: [0.0; 3],
+                    direction: [0.0, -1.0, 0.0],
+                    right: [1.0, 0.0, 0.0],
+                    up: [0.0, 0.0, 1.0],
+                    width: 1.0,
+                    height: 1.0,
+                },
+            ),
+            "unsupported rect",
+        );
+        let disk_handle = insert(
+            LightRecord::new(
+                LightClassification {
+                    class: LightClass::Disk,
+                    mobility: LightMobility::Static,
+                },
+                LightEmission::new([1.0; 3], 1.0, LightUnit::Nits),
+                LightGeometry::Disk {
+                    position: [0.0; 3],
+                    direction: [0.0, -1.0, 0.0],
+                    radius: 0.5,
+                },
+            ),
+            "unsupported disk",
+        );
+        let capsule_handle = insert(
+            LightRecord::new(
+                LightClassification {
+                    class: LightClass::Capsule,
+                    mobility: LightMobility::Static,
+                },
+                LightEmission::new([1.0; 3], 1.0, LightUnit::Nits),
+                LightGeometry::Capsule {
+                    a: [-0.5, 0.0, 0.0],
+                    b: [0.5, 0.0, 0.0],
+                    radius: 0.1,
+                },
+            ),
+            "unsupported capsule",
+        );
+        let sky_handle = insert(
+            LightRecord::new(
+                LightClassification {
+                    class: LightClass::Sky,
+                    mobility: LightMobility::Static,
+                },
+                LightEmission::new([1.0; 3], 1.0, LightUnit::Radiance),
+                LightGeometry::Sky {
+                    rotation: [0.0, 0.0, 0.0, 1.0],
+                },
+            ),
+            "unsupported sky",
+        );
+        let emissive_handle = insert(
+            LightRecord::new(
+                LightClassification {
+                    class: LightClass::Emissive,
+                    mobility: LightMobility::Static,
+                },
+                LightEmission::new([1.0; 3], 1.0, LightUnit::Radiance),
+                LightGeometry::Emissive { emitter_id: 7 },
+            ),
+            "unsupported emissive",
+        );
+        let unit_handle = insert(
+            LightRecord::new(
+                LightClassification {
+                    class: LightClass::Point,
+                    mobility: LightMobility::Dynamic,
+                },
+                LightEmission::new([1.0; 3], 1.0, LightUnit::Unitless),
+                LightGeometry::Point {
+                    position: [0.0; 3],
+                    radius: 0.0,
+                    range: 4.0,
+                },
+            ),
+            "unsupported direct-light unit",
+        );
+        let mut layered = LightRecord::new(
+            LightClassification {
+                class: LightClass::Point,
+                mobility: LightMobility::Dynamic,
+            },
+            LightEmission::new([1.0; 3], 1.0, LightUnit::Candela),
+            LightGeometry::Point {
+                position: [0.0; 3],
+                radius: 0.0,
+                range: 4.0,
+            },
+        );
+        layered.visibility = LightVisibility {
+            enabled: true,
+            layer_mask: 1,
+        };
+        let layer_handle = insert(layered, "unsupported layer mask");
+        let mut flagged = LightRecord::new(
+            LightClassification {
+                class: LightClass::Point,
+                mobility: LightMobility::Dynamic,
+            },
+            LightEmission::new([1.0; 3], 1.0, LightUnit::Candela),
+            LightGeometry::Point {
+                position: [0.0; 3],
+                radius: 0.0,
+                range: 4.0,
+            },
+        );
+        flagged.flags = LightFlags::CAST_SHADOW;
+        let flags_handle = insert(flagged, "unsupported renderer flags");
+        (
+            directional_handle,
+            point_handle,
+            spot_handle,
+            rect_handle,
+            disk_handle,
+            capsule_handle,
+            sky_handle,
+            emissive_handle,
+            unit_handle,
+            layer_handle,
+            flags_handle,
+        )
+    };
     app.update();
     let render = app.get_sub_app(RenderApp).expect("render sub-app");
     let extracted = render.world.resource::<ExtractedLightingInputs>();
-    assert!(matches!(
-        extracted.light_scene_error,
-        Some(crate::LightingSceneExtractError::UnsupportedClass {
-            class: LightClass::Rect,
-            ..
-        })
-    ));
-    assert!(extracted.directionals.is_empty());
-    assert!(extracted.punctuals.is_empty());
+    assert_eq!(extracted.light_scene_error, None);
+    assert_eq!(extracted.directional_handles, vec![directional_handle]);
+    assert_eq!(extracted.punctual_handles, vec![point_handle, spot_handle]);
+    assert_eq!(
+        extracted.area_handles,
+        vec![rect_handle, disk_handle, capsule_handle]
+    );
+    assert_eq!(extracted.directionals.len(), 1);
+    assert_eq!(extracted.punctuals.len(), 2);
+    assert_eq!(extracted.areas.len(), 3);
+    assert_eq!(
+        extracted.light_scene_rejections,
+        vec![
+            crate::LightingSceneExtractError::UnsupportedClass {
+                handle: sky_handle,
+                class: LightClass::Sky,
+            },
+            crate::LightingSceneExtractError::UnsupportedClass {
+                handle: emissive_handle,
+                class: LightClass::Emissive,
+            },
+            crate::LightingSceneExtractError::UnsupportedUnit {
+                handle: unit_handle,
+                unit: LightUnit::Unitless,
+            },
+            crate::LightingSceneExtractError::UnsupportedLayerMask {
+                handle: layer_handle,
+                mask: 1,
+            },
+            crate::LightingSceneExtractError::UnsupportedFlags {
+                handle: flags_handle,
+                bits: LightFlags::CAST_SHADOW.bits(),
+            },
+        ]
+    );
     let stats = render.world.resource::<RenderFrameStats>();
-    assert_eq!(stats.frames_submitted, 0);
-    assert_eq!(stats.frames_failed, 1);
-    assert!(matches!(
-        stats.lighting_input_error,
-        Some(crate::LightingSceneExtractError::UnsupportedClass {
-            class: LightClass::Rect,
-            ..
-        })
-    ));
+    assert_eq!(stats.frames_submitted, 1);
+    assert_eq!(stats.frames_failed, 0);
+    assert_eq!(stats.lighting_input_error, None);
 }
 
 #[test]
@@ -2941,6 +3363,7 @@ fn lighting_debug_view_resynchronizes_as_the_plan_changes() {
         virtual_shadow: true,
         offline: true,
         deterministic_npr: false,
+        prefiltered_environment: false,
     });
     let mut app = app_on_null_backend(config);
     app.update();
@@ -2993,10 +3416,140 @@ fn deterministic_direct_cpu_oracle_accumulates_all_light_terms() {
         intensity: [4.0, 8.0, 16.0],
         ..LightingPunctualInput::default()
     }];
-    assert_eq!(
-        evaluate_deterministic_direct(surface, &directionals, &punctuals),
-        [1.5, 1.5, 11.0]
+    let actual = evaluate_deterministic_direct(surface, &directionals, &punctuals, &[]);
+    for (actual, irradiance_times_albedo) in actual.into_iter().zip([1.5, 1.5, 11.0]) {
+        let expected = irradiance_times_albedo / core::f32::consts::PI;
+        assert!((actual - expected).abs() <= 1.0e-6);
+    }
+}
+
+#[test]
+fn deterministic_direct_lambert_normalizes_ambient_directional_and_point_independently() {
+    let pi = core::f32::consts::PI;
+    let surface = LightingSurfaceInput {
+        albedo: [1.0, 0.5, 0.25],
+        ..LightingSurfaceInput::default()
+    };
+    // Each fixture independently supplies PI irradiance at normal incidence.
+    // Expectations do not call the CPU oracle or duplicate the shader formula.
+    let ambient = evaluate_deterministic_direct(
+        LightingSurfaceInput {
+            ambient: [pi; 3],
+            ..surface
+        },
+        &[],
+        &[],
+        &[],
     );
+    let directional = evaluate_deterministic_direct(
+        surface,
+        &[LightingDirectionalInput {
+            illuminance: [pi; 3],
+            ..Default::default()
+        }],
+        &[],
+        &[],
+    );
+    let point = LightingPunctualInput {
+        position: [0.0, 2.0, 0.0],
+        intensity: [4.0 * pi; 3],
+        ..Default::default()
+    };
+    let punctual = evaluate_deterministic_direct(surface, &[], &[point], &[]);
+    for result in [ambient, directional, punctual] {
+        for (actual, expected) in result.into_iter().zip(surface.albedo) {
+            assert!((actual - expected).abs() <= 1.0e-6);
+        }
+    }
+    let twice_distance = evaluate_deterministic_direct(
+        surface,
+        &[],
+        &[LightingPunctualInput {
+            position: [0.0, 4.0, 0.0],
+            ..point
+        }],
+        &[],
+    );
+    for (actual, albedo) in twice_distance.into_iter().zip(surface.albedo) {
+        assert!((actual - albedo * 0.25).abs() <= 1.0e-6);
+    }
+}
+
+#[test]
+fn deterministic_direct_rect_lambert_matches_analytic_quadrature() {
+    // All four rectangle quadrature points have r²=4+1/6. The receiver and
+    // emitter cosines are each 2/r. With area=1 and emitted radiance=PI,
+    // outgoing radiance is albedo * 4/r⁴ after the Lambert normalization.
+    let surface = LightingSurfaceInput {
+        albedo: [1.0, 0.5, 0.25],
+        ..Default::default()
+    };
+    let light = LightingAreaInput {
+        origin: [0.0, 2.0, 0.0, 0.0],
+        radiance: [core::f32::consts::PI; 4],
+        shape: [0.5, 0.5, 0.0, 0.0],
+        ..Default::default()
+    };
+    let actual = evaluate_deterministic_direct(surface, &[], &[], &[light]);
+    let geometry = 4.0 / (4.0_f32 + 1.0 / 6.0).powi(2);
+    for (actual, albedo) in actual.into_iter().zip(surface.albedo) {
+        assert!((actual - albedo * geometry).abs() <= 1.0e-6);
+    }
+}
+
+#[test]
+fn deterministic_direct_cpu_oracle_matches_area_estimators_for_rect_disk_and_capsule() {
+    let surface = LightingSurfaceInput {
+        position: [0.0, 0.0, 0.0],
+        normal: [0.0, 1.0, 0.0],
+        albedo: [0.8, 0.6, 0.4],
+        ambient: [0.0; 3],
+    };
+    let areas = [
+        LightingAreaInput {
+            origin: [0.0, 3.0, 0.0, 0.0],
+            vector_a: [0.0, -1.0, 0.0, 0.0],
+            vector_b: [1.0, 0.0, 0.0, 0.0],
+            vector_c: [0.0, 0.0, 1.0, 0.0],
+            radiance: [2.0, 1.0, 0.5, 0.0],
+            shape: [0.75, 0.5, 0.0, 0.0],
+            shape_kind: [0, 1, 0, 0],
+        },
+        LightingAreaInput {
+            origin: [2.0, 3.0, 0.0, 0.0],
+            vector_a: [0.0, -1.0, 0.0, 0.0],
+            vector_b: [0.0; 4],
+            vector_c: [0.0; 4],
+            radiance: [1.0, 2.0, 3.0, 0.0],
+            shape: [0.5, 0.0, 0.0, 0.0],
+            shape_kind: [1, 1, 0, 0],
+        },
+        LightingAreaInput {
+            origin: [-2.0, 1.5, 0.0, 0.0],
+            vector_a: [-2.0, 3.5, 0.0, 0.0],
+            vector_b: [0.0; 4],
+            vector_c: [0.0; 4],
+            radiance: [0.75, 1.5, 2.25, 0.0],
+            shape: [0.4, 0.0, 0.0, 0.0],
+            shape_kind: [2, 1, 0, 0],
+        },
+    ];
+    let all = evaluate_deterministic_direct(surface, &[], &[], &areas);
+    let mut sum = [0.0; 3];
+    for (index, area) in areas.iter().enumerate() {
+        let contribution =
+            evaluate_deterministic_direct(surface, &[], &[], core::slice::from_ref(area));
+        assert!(
+            contribution.iter().any(|value| *value > 0.0),
+            "area {index} must contribute a positive direct-light sample"
+        );
+        for channel in 0..3 {
+            sum[channel] += contribution[channel];
+        }
+    }
+    for channel in 0..3 {
+        assert!((all[channel] - sum[channel]).abs() < 1.0e-6);
+    }
 }
 
 /// The render sub-app owns the GPU state; the main world never sees it.
@@ -3096,9 +3649,9 @@ fn empty_viewport_skips_the_frame() {
 /// frame, and reading it back shows the frame's pass actually wrote the target.
 ///
 /// The target is pre-filled opaque white first (and the pre-fill is itself read
-/// back to prove it landed), so a black result can only come from the frame's
-/// clear pass executing — a freshly created wgpu texture is already zeroed, so
-/// an unfilled target would pass vacuously.
+/// back to prove it landed), so the zero HDR result proves the cleared GBuffer
+/// was rejected by the composite — a freshly created wgpu texture is already
+/// zeroed, so an unfilled target would pass vacuously.
 #[test]
 fn wgpu_backend_records_and_clears_a_real_frame() {
     const SIZE: u32 = 32;
@@ -3170,21 +3723,11 @@ fn wgpu_backend_records_and_clears_a_real_frame() {
             vec![candidate]
         })
         .collect::<Vec<_>>();
-    let expected_direct = surfaces
-        .iter()
-        .copied()
-        .map(|sample| evaluate_deterministic_direct(sample, &directionals, &punctuals))
-        .collect::<Vec<_>>();
     let expected_gi = surfaces
         .iter()
         .copied()
         .zip(&gi_candidates_per_surface)
         .map(|(sample, candidates)| evaluate_deterministic_gi(sample, candidates))
-        .collect::<Vec<_>>();
-    let expected_composite = expected_direct
-        .iter()
-        .zip(&expected_gi)
-        .map(|(direct, gi)| [direct[0] + gi[0], direct[1] + gi[1], direct[2] + gi[2]])
         .collect::<Vec<_>>();
     {
         use prism_render_architecture::lighting::{
@@ -3235,7 +3778,8 @@ fn wgpu_backend_records_and_clears_a_real_frame() {
 
     // Pre-fill the offscreen target with opaque white, then prove the upload
     // landed before any frame is rendered.
-    let white = vec![0xFF_u8; (SIZE * SIZE * 4) as usize];
+    // Each RGBA16F channel is little-endian half-float 1.0 (0x3c00).
+    let white = [0x00_u8, 0x3c].repeat((SIZE * SIZE * 4) as usize);
     {
         let render = app.get_sub_app(RenderApp).expect("render sub-app");
         let runtime = render
@@ -3257,16 +3801,15 @@ fn wgpu_backend_records_and_clears_a_real_frame() {
             &white,
             ImageDataLayout {
                 offset: 0,
-                bytes_per_row: Some(SIZE * 4),
+                bytes_per_row: Some(SIZE * 8),
                 rows_per_image: Some(SIZE),
             },
         );
         assert!(runtime.runtime().wait_idle());
-        let prefill = queue.read_texture_rgba8(target.texture(), SIZE, SIZE);
+        let prefill = queue.read_texture_rgba16f(target.texture(), SIZE, SIZE);
+        assert_eq!(prefill.len(), (SIZE * SIZE) as usize);
         assert!(
-            prefill
-                .chunks_exact(4)
-                .all(|pixel| pixel == [0xFF, 0xFF, 0xFF, 0xFF]),
+            prefill.iter().all(|pixel| *pixel == [1.0; 4]),
             "the white pre-fill landed, so the black assertion below is meaningful"
         );
     }
@@ -3291,11 +3834,16 @@ fn wgpu_backend_records_and_clears_a_real_frame() {
     let pixels = runtime
         .runtime()
         .queue()
-        .read_texture_rgba8(target.texture(), SIZE, SIZE);
-    assert_eq!(pixels.len(), (SIZE * SIZE * 4) as usize);
+        .read_texture_rgba16f(target.texture(), SIZE, SIZE);
+    assert_eq!(pixels.len(), (SIZE * SIZE) as usize);
+    let first_nonzero = pixels
+        .iter()
+        .enumerate()
+        .find(|(_, pixel)| **pixel != [0.0; 4]);
     assert!(
-        pixels.chunks_exact(4).all(|pixel| pixel == [0, 0, 0, 255]),
-        "the frame's clear pass overwrote the white target with opaque black"
+        pixels.iter().all(|pixel| *pixel == [0.0; 4]),
+        "the composite overwrote the white target with transparent black for an uncovered GBuffer; first nonzero={first_nonzero:?}, lighting_passes={}",
+        render.world.resource::<RenderFrameStats>().lighting_gpu_passes_recorded
     );
 
     let lighting = render
@@ -3313,46 +3861,23 @@ fn wgpu_backend_records_and_clears_a_real_frame() {
     );
     assert_eq!(plan.plan.candidate_source, GiCandidateSource::HostProvided);
     assert!(plan.plan.recipes.contains(&RecipeId::WorldRestir));
-    let read_output = |buffer| {
-        runtime
-            .runtime()
-            .queue()
-            .read_buffer(buffer, crate::lighting_gpu::OUTPUT_BYTES)
-            .chunks_exact(4)
-            .map(|bytes| f32::from_ne_bytes(bytes.try_into().expect("f32-sized output")))
-            .collect::<Vec<_>>()
-    };
-    let direct_values = read_output(lighting.direct_output_buffer());
-    let gi_values = read_output(lighting.gi_output_buffer());
-    let composite_values = read_output(lighting.output_buffer());
+    let gi_values = runtime
+        .runtime()
+        .queue()
+        .read_buffer(
+            lighting.gi_output_buffer(),
+            crate::lighting_gpu::OUTPUT_BYTES,
+        )
+        .chunks_exact(4)
+        .map(|bytes| f32::from_ne_bytes(bytes.try_into().expect("f32-sized GI output")))
+        .collect::<Vec<_>>();
     assert_eq!(
-        direct_values.len(),
+        gi_values.len(),
         crate::lighting_gpu::MAX_LIGHTING_SURFACES * 4
     );
-    assert_eq!(gi_values.len(), direct_values.len());
-    assert_eq!(composite_values.len(), direct_values.len());
     for surface_index in 0..surfaces.len() {
         let base = surface_index * 4;
-        for channel in 0..3 {
-            assert!(
-                (direct_values[base + channel] - expected_direct[surface_index][channel]).abs()
-                    < 1.0e-4,
-                "GPU direct surface {surface_index} channel {channel}: {} vs {}",
-                direct_values[base + channel],
-                expected_direct[surface_index][channel]
-            );
-            assert!(
-                (composite_values[base + channel] - expected_composite[surface_index][channel])
-                    .abs()
-                    < 1.0e-4,
-                "GPU composite surface {surface_index} channel {channel}: {} vs {}",
-                composite_values[base + channel],
-                expected_composite[surface_index][channel]
-            );
-        }
-        assert_eq!(direct_values[base + 3], 1.0);
         assert_eq!(gi_values[base + 3], 1.0);
-        assert_eq!(composite_values[base + 3], 1.0);
         for channel in 0..3 {
             assert!(
                 (gi_values[base + channel] - expected_gi[surface_index][channel]).abs() < 1.0e-4,
@@ -3362,24 +3887,173 @@ fn wgpu_backend_records_and_clears_a_real_frame() {
             );
         }
     }
-    for tail in (surfaces.len() * 4)..direct_values.len() {
-        assert_eq!(
-            direct_values[tail], 0.0,
-            "direct tail is deterministically clear"
-        );
+    for tail in (surfaces.len() * 4)..gi_values.len() {
         assert_eq!(gi_values[tail], 0.0, "GI tail is deterministically clear");
-        assert_eq!(
-            composite_values[tail], 0.0,
-            "composite tail is deterministically clear"
+    }
+    // Direct light is evaluated from per-pixel GBuffer data by the composite.
+    // Use id zero here only to select GI row zero; direct lighting is
+    // independent of that identity and uses position, normal, and albedo.
+    let gbuffer_surface =
+        write_lighting_test_gbuffer_pixel(runtime.runtime().queue(), &target, 0, 0, surfaces[0], 0);
+    let mut direct_surface = gbuffer_surface;
+    direct_surface.ambient = [0.0; 3];
+    let expected_direct =
+        evaluate_deterministic_direct(direct_surface, &directionals, &punctuals, &[]);
+    dispatch_lighting_test_composite(lighting, &plan.plan, &target, runtime.runtime());
+    let hdr_pixels = runtime
+        .runtime()
+        .queue()
+        .read_texture_rgba16f(target.texture(), SIZE, SIZE);
+    assert_eq!(hdr_pixels.len(), (SIZE * SIZE) as usize);
+    for channel in 0..3 {
+        let expected = expected_direct[channel] + expected_gi[0][channel];
+        assert!(
+            (hdr_pixels[0][channel] - expected).abs() <= 2.0e-3,
+            "per-pixel HDR channel {channel}: GPU {} != CPU {}",
+            hdr_pixels[0][channel],
+            expected
         );
     }
+    assert_eq!(hdr_pixels[0][3], 1.0);
+    assert!(
+        hdr_pixels[1..].iter().all(|pixel| *pixel == [0.0; 4]),
+        "uncovered GBuffer pixels remain transparent black in HDR"
+    );
     assert_eq!(
         render
             .world
             .resource::<RenderFrameStats>()
             .lighting_gpu_passes_recorded,
-        3
+        2,
+        "GI and composite are the only lighting compute passes"
     );
+}
+
+#[test]
+fn physical_gpu_area_direct_light_matches_cpu_oracle_for_rect_disk_and_capsule() {
+    use prism_render_architecture::lighting::LightSceneHandle;
+    use prism_render_driver::DeviceType;
+    use prism_render_driver_wgpu::WgpuInstance;
+
+    let extent = Extent3d::new_2d(1, 1);
+    let mut runtime = match RenderRuntime::headless(WgpuInstance::new(), extent) {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            assert!(
+                !require_gpu(),
+                "PRISM_REQUIRE_GPU=1 but physical GPU runtime creation failed: {error}"
+            );
+            eprintln!("SKIPPED area direct parity: {error}");
+            return;
+        }
+    };
+    if !matches!(
+        runtime.adapter_info().device_type,
+        DeviceType::IntegratedGpu | DeviceType::DiscreteGpu
+    ) {
+        assert!(
+            !require_gpu(),
+            "PRISM_REQUIRE_GPU=1 requires a physical GPU, found {:?} ({})",
+            runtime.adapter_info().device_type,
+            runtime.adapter_info().name
+        );
+        eprintln!(
+            "SKIPPED area direct parity: adapter is {:?} ({})",
+            runtime.adapter_info().device_type,
+            runtime.adapter_info().name
+        );
+        return;
+    }
+
+    let surface = LightingSurfaceInput {
+        position: [0.0, 0.0, 0.0],
+        normal: [0.0, 1.0, 0.0],
+        albedo: [0.8, 0.6, 0.4],
+        ambient: [0.0; 3],
+    };
+    let areas = vec![
+        LightingAreaInput {
+            origin: [0.0, 3.0, 0.0, 0.0],
+            vector_a: [0.0, -1.0, 0.0, 0.0],
+            vector_b: [1.0, 0.0, 0.0, 0.0],
+            vector_c: [0.0, 0.0, 1.0, 0.0],
+            radiance: [2.0, 1.0, 0.5, 0.0],
+            shape: [0.75, 0.5, 0.0, 0.0],
+            shape_kind: [0, 1, 0, 0],
+        },
+        LightingAreaInput {
+            origin: [2.0, 3.0, 0.0, 0.0],
+            vector_a: [0.0, -1.0, 0.0, 0.0],
+            vector_b: [0.0; 4],
+            vector_c: [0.0; 4],
+            radiance: [1.0, 2.0, 3.0, 0.0],
+            shape: [0.5, 0.0, 0.0, 0.0],
+            shape_kind: [1, 1, 0, 0],
+        },
+        LightingAreaInput {
+            origin: [-2.0, 1.5, 0.0, 0.0],
+            vector_a: [-2.0, 3.5, 0.0, 0.0],
+            vector_b: [0.0; 4],
+            vector_c: [0.0; 4],
+            radiance: [0.75, 1.5, 2.25, 0.0],
+            shape: [0.4, 0.0, 0.0, 0.0],
+            shape_kind: [2, 1, 0, 0],
+        },
+    ];
+    let area_handles = [
+        LightSceneHandle::new(10, 1),
+        LightSceneHandle::new(11, 1),
+        LightSceneHandle::new(12, 1),
+    ];
+    for (index, area) in areas.iter().enumerate() {
+        let contribution =
+            evaluate_deterministic_direct(surface, &[], &[], std::slice::from_ref(area));
+        assert!(
+            contribution.iter().any(|value| *value > 0.0),
+            "area {index} must contribute a positive direct-light sample"
+        );
+    }
+
+    let mut inputs = ExtractedLightingInputs::default();
+    // Direct is evaluated from the bound per-pixel GBuffer. The host GI
+    // surface list is deliberately empty so this guards direct-only admission
+    // against an accidental dependency on GI/oracle staging data.
+    inputs.areas = areas.clone();
+    inputs.area_handles = area_handles.to_vec();
+    let plan = LightingPlan {
+        tier: Tier::Balanced,
+        candidate_source: GiCandidateSource::Disabled,
+        recipes: vec![RecipeId::SpecializedDeterministic],
+        partition: Default::default(),
+        budget: FrameResourceBudget::default(),
+        rejected: Vec::new(),
+    };
+    let lighting = LightingGpuState::new(&mut runtime).expect("lighting GPU bundle");
+    lighting
+        .prepare(&plan, &inputs, 0, &runtime)
+        .expect("area light tables prepare");
+    let pass = lighting
+        .pass(&plan)
+        .expect("direct area pass must not require host GI surfaces");
+    assert!(pass.run_direct);
+    assert!(!pass.run_gi);
+    assert_eq!(pass.candidate_surface_count, 0);
+    let target = RenderTarget::new(runtime.device(), extent);
+    let gbuffer_surface =
+        write_lighting_test_gbuffer_pixel(runtime.queue(), &target, 0, 0, surface, 0xf123_4567);
+    let expected = evaluate_deterministic_direct(gbuffer_surface, &[], &[], &areas);
+    dispatch_lighting_test_composite(&lighting, &plan, &target, &runtime);
+    let hdr = runtime.queue().read_texture_rgba16f(target.texture(), 1, 1);
+    assert_eq!(hdr.len(), 1);
+    for channel in 0..3 {
+        assert!(
+            (hdr[0][channel] - expected[channel]).abs() <= 2.0e-3,
+            "area composite HDR channel {channel}: GPU {} != CPU {}",
+            hdr[0][channel],
+            expected[channel]
+        );
+    }
+    assert_eq!(hdr[0][3], 1.0);
 }
 
 /// A `RenderQueue` that captures submitted command buffers instead of issuing
@@ -3405,10 +4079,12 @@ impl RenderQueue for CapturingQueue {
     }
 }
 
-/// `mesh_draw` records a full draw into a graph pass: bind the pipeline, bind the
-/// vertex and index buffers, then one indexed draw.
+/// `mesh_draw` records a full draw into the real graph recorder: bind the
+/// pipeline and group (including every dynamic offset), bind geometry, then
+/// issue one indexed draw.
 #[test]
 fn mesh_draw_records_into_a_graph_pass() {
+    use crate::draw::{BindGroupBindingId, RenderBindGroupBinding};
     use prism_render_driver::{CommandBuffer, IndexFormat, Pass, RenderCommand};
     use prism_render_graph::{ImportedTexture, PassFlags, RenderGraph, TextureDesc};
 
@@ -3450,8 +4126,17 @@ fn mesh_draw_records_into_a_graph_pass() {
         fragment: None,
     });
 
+    let bind_group = prism_render_driver::BindGroupId::from_parts(6, 1);
     let mut functions = DrawFunctions::new();
-    let draw = functions.register(crate::mesh_draw);
+    let draw = functions.register_mesh_with_bind_groups(vec![RenderBindGroupBinding {
+        identity: BindGroupBindingId(5),
+        index: 2,
+        bind_group,
+        dynamic_offsets: vec![128, 640],
+        buffers: Vec::new(),
+        sampled_textures: Vec::new(),
+        external_owners: Vec::new(),
+    }]);
     assert_eq!(draw, DrawFunctionId(0), "the first registration is id 0");
 
     let mut queues = RenderQueues::new();
@@ -3462,7 +4147,9 @@ fn mesh_draw_records_into_a_graph_pass() {
             draw,
             geometry: GenerationalHandle::new(1, 1),
             vertices: vec![vertices],
+            vertex_sizes: vec![64],
             indices: Some((indices, IndexFormat::Uint16)),
+            index_size: Some(64),
             first: 0,
             count: 3,
             base_vertex: 0,
@@ -3514,17 +4201,554 @@ fn mesh_draw_records_into_a_graph_pass() {
     assert!(
         matches!(
             commands.get(1),
-            Some(RenderCommand::SetVertexBuffer { slot: 0, .. })
+            Some(RenderCommand::SetBindGroup {
+                index: 2,
+                bind_group: recorded_bind_group,
+                dynamic_offsets,
+            }) if *recorded_bind_group == bind_group && dynamic_offsets == &[128, 640]
+        ),
+        "the render recorder preserves every bind-group dynamic offset"
+    );
+    assert!(
+        matches!(
+            commands.get(2),
+            Some(RenderCommand::SetVertexBuffer { slot: 0, size: Some(size), .. }) if size.get() == 64
         ),
         "the vertex buffer is bound at slot 0"
     );
     assert!(
-        matches!(commands.get(2), Some(RenderCommand::SetIndexBuffer(_))),
+        matches!(commands.get(3), Some(RenderCommand::SetIndexBuffer(binding)) if binding.size.is_some_and(|size| size.get() == 64)),
         "the index buffer is bound"
     );
     assert!(
-        matches!(commands.get(3), Some(RenderCommand::DrawIndexed { .. })),
+        matches!(commands.get(4), Some(RenderCommand::DrawIndexed { .. })),
         "one indexed draw is issued"
+    );
+}
+
+/// A forward-lit mesh draw carries one explicit binding contract: the pipeline
+/// is recorded first, followed by the declared render bind group, then geometry
+/// and the draw. The same contract is visible from the queued item.
+#[test]
+fn forward_mesh_draw_records_bind_group_and_exposes_identity() {
+    use crate::draw::{
+        BindGroupBindingId, MeshRecorder, RenderBindGroupBinding, RenderBindGroupBuffer,
+        RenderBindGroupBufferAccess,
+    };
+    use prism_render_driver::{BindGroupId, IndexFormat, RenderPipelineId};
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum RecordedDrawCommand {
+        Pipeline,
+        BindGroup {
+            index: u32,
+            bind_group: BindGroupId,
+            dynamic_offsets: Vec<u32>,
+        },
+        Vertex,
+        Index,
+        Draw,
+        DrawIndexed,
+        DrawIndirect,
+        MultiDrawIndirect,
+    }
+
+    #[derive(Default)]
+    struct Log(Vec<RecordedDrawCommand>);
+
+    impl MeshRecorder for Log {
+        fn set_pipeline(&mut self, _: RenderPipelineId) {
+            self.0.push(RecordedDrawCommand::Pipeline);
+        }
+
+        fn set_render_bind_group(
+            &mut self,
+            index: u32,
+            bind_group: BindGroupId,
+            dynamic_offsets: Vec<u32>,
+        ) {
+            self.0.push(RecordedDrawCommand::BindGroup {
+                index,
+                bind_group,
+                dynamic_offsets,
+            });
+        }
+
+        fn set_vertex_buffer(
+            &mut self,
+            _: u32,
+            _: BufferId,
+            _: u64,
+            _: Option<core::num::NonZeroU64>,
+        ) {
+            self.0.push(RecordedDrawCommand::Vertex);
+        }
+
+        fn set_index_buffer(
+            &mut self,
+            _: BufferId,
+            _: IndexFormat,
+            _: u64,
+            _: Option<core::num::NonZeroU64>,
+        ) {
+            self.0.push(RecordedDrawCommand::Index);
+        }
+
+        fn draw(&mut self, _: core::ops::Range<u32>, _: core::ops::Range<u32>) {
+            self.0.push(RecordedDrawCommand::Draw);
+        }
+
+        fn draw_indexed(&mut self, _: core::ops::Range<u32>, _: i32, _: core::ops::Range<u32>) {
+            self.0.push(RecordedDrawCommand::DrawIndexed);
+        }
+
+        fn draw_indexed_indirect(&mut self, _: prism_render_graph::BufferHandle, _: u64) {
+            self.0.push(RecordedDrawCommand::DrawIndirect);
+        }
+
+        fn multi_draw_indirect(
+            &mut self,
+            _: prism_render_graph::BufferHandle,
+            _: u64,
+            _: u32,
+            _: u32,
+        ) {
+            self.0.push(RecordedDrawCommand::MultiDrawIndirect);
+        }
+    }
+
+    let pipeline = RenderPipelineId::from_parts(7, 1);
+    let vertices = BufferId::from_parts(8, 1);
+    let material_buffer = BufferId::from_parts(9, 1);
+    let bind_group = BindGroupId::from_parts(10, 1);
+    let binding = RenderBindGroupBinding {
+        identity: BindGroupBindingId(42),
+        index: 3,
+        bind_group,
+        dynamic_offsets: vec![256, 768],
+        buffers: vec![RenderBindGroupBuffer {
+            buffer: material_buffer,
+            access: RenderBindGroupBufferAccess::Storage,
+        }],
+        sampled_textures: Vec::new(),
+        external_owners: Vec::new(),
+    };
+
+    let mut functions = DrawFunctions::new();
+    let draw = functions.register_mesh_with_bind_groups(vec![binding.clone()]);
+    let item = PhaseItem {
+        pipeline,
+        draw,
+        geometry: GenerationalHandle::new(1, 1),
+        vertices: vec![vertices],
+        vertex_sizes: vec![64],
+        indices: None,
+        index_size: None,
+        first: 0,
+        count: 3,
+        base_vertex: 0,
+        indirect: None,
+        lod_level: 0,
+        material: GenerationalHandle::new(2, 1),
+        scene: GenerationalHandle::new(3, 1),
+        order: 0,
+    };
+
+    assert_eq!(
+        item.bind_group_identity(&functions),
+        Some(BindGroupBindingId(42))
+    );
+    assert_eq!(item.bind_groups(&functions), &[binding]);
+
+    let mut log = Log::default();
+    functions.call(draw, &item, &mut log);
+    assert_eq!(
+        log.0,
+        [
+            RecordedDrawCommand::Pipeline,
+            RecordedDrawCommand::BindGroup {
+                index: 3,
+                bind_group,
+                dynamic_offsets: vec![256, 768],
+            },
+            RecordedDrawCommand::Vertex,
+            RecordedDrawCommand::Draw,
+        ]
+    );
+}
+
+/// Per-draw groups are resolved after the static contract, in contract order,
+/// and remain paired with their phase item when queue sorting reorders draws.
+#[test]
+fn dynamic_bind_groups_follow_items_and_record_after_static_groups() {
+    use crate::draw::{
+        BindGroupBindingId, MeshRecorder, RenderBindGroupBinding, RenderBindGroupBindingContract,
+        RenderBindGroupBuffer, RenderBindGroupBufferAccess,
+    };
+    use prism_render_driver::{BindGroupId, IndexFormat, RenderPipelineId};
+
+    #[derive(Default)]
+    struct Log(Vec<(u32, BindGroupId, Vec<u32>)>);
+
+    impl MeshRecorder for Log {
+        fn set_pipeline(&mut self, _: RenderPipelineId) {}
+
+        fn set_render_bind_group(
+            &mut self,
+            index: u32,
+            bind_group: BindGroupId,
+            dynamic_offsets: Vec<u32>,
+        ) {
+            self.0.push((index, bind_group, dynamic_offsets));
+        }
+
+        fn set_vertex_buffer(
+            &mut self,
+            _: u32,
+            _: BufferId,
+            _: u64,
+            _: Option<core::num::NonZeroU64>,
+        ) {
+        }
+        fn set_index_buffer(
+            &mut self,
+            _: BufferId,
+            _: IndexFormat,
+            _: u64,
+            _: Option<core::num::NonZeroU64>,
+        ) {
+        }
+        fn draw(&mut self, _: core::ops::Range<u32>, _: core::ops::Range<u32>) {}
+        fn draw_indexed(&mut self, _: core::ops::Range<u32>, _: i32, _: core::ops::Range<u32>) {}
+        fn draw_indexed_indirect(&mut self, _: prism_render_graph::BufferHandle, _: u64) {}
+        fn multi_draw_indirect(
+            &mut self,
+            _: prism_render_graph::BufferHandle,
+            _: u64,
+            _: u32,
+            _: u32,
+        ) {
+        }
+    }
+
+    let static_group = RenderBindGroupBinding {
+        identity: BindGroupBindingId(1),
+        index: 0,
+        bind_group: BindGroupId::from_parts(10, 1),
+        dynamic_offsets: vec![64, 128],
+        buffers: vec![],
+        sampled_textures: Vec::new(),
+        external_owners: Vec::new(),
+    };
+    let material_contract = RenderBindGroupBindingContract {
+        identity: BindGroupBindingId(2),
+        index: 2,
+    };
+    let view_contract = RenderBindGroupBindingContract {
+        identity: BindGroupBindingId(3),
+        index: 1,
+    };
+    let material_a = RenderBindGroupBinding {
+        identity: material_contract.identity,
+        index: material_contract.index,
+        bind_group: BindGroupId::from_parts(20, 1),
+        dynamic_offsets: vec![256, 512],
+        buffers: vec![RenderBindGroupBuffer {
+            buffer: BufferId::from_parts(30, 1),
+            access: RenderBindGroupBufferAccess::Storage,
+        }],
+        sampled_textures: Vec::new(),
+        external_owners: Vec::new(),
+    };
+    let view_a = RenderBindGroupBinding {
+        identity: view_contract.identity,
+        index: view_contract.index,
+        bind_group: BindGroupId::from_parts(21, 1),
+        dynamic_offsets: vec![1024],
+        buffers: vec![RenderBindGroupBuffer {
+            buffer: BufferId::from_parts(31, 1),
+            access: RenderBindGroupBufferAccess::Uniform,
+        }],
+        sampled_textures: Vec::new(),
+        external_owners: Vec::new(),
+    };
+    let mut functions = DrawFunctions::new();
+    let draw = functions.register_with_bind_groups_and_dynamic_contract(
+        |item, ctx| {
+            ctx.set_pipeline(item.pipeline);
+            ctx.set_vertex_buffer(0, item.vertices[0], 0, None);
+            ctx.draw(0..item.count, 0..1);
+        },
+        vec![static_group.clone()],
+        vec![material_contract, view_contract],
+    );
+
+    let item = |order| PhaseItem {
+        pipeline: RenderPipelineId::from_parts(40, 1),
+        draw,
+        geometry: GenerationalHandle::new(1, 1),
+        vertices: vec![BufferId::from_parts(41, 1)],
+        vertex_sizes: vec![64],
+        indices: None,
+        index_size: None,
+        first: 0,
+        count: 3,
+        base_vertex: 0,
+        indirect: None,
+        lod_level: 0,
+        material: GenerationalHandle::new(2, 1),
+        scene: GenerationalHandle::new(3, 1),
+        order,
+    };
+
+    let mut queues = RenderQueues::new();
+    // Supply the dynamic groups in the opposite order. The contract order
+    // must still be slot 2 followed by slot 1 after the static slot 0.
+    queues.push_with_bind_groups(
+        RenderPhase::Opaque,
+        item(2),
+        vec![view_a.clone(), material_a.clone()],
+    );
+    queues.push_with_bind_groups(
+        RenderPhase::Opaque,
+        item(1),
+        vec![material_a.clone(), view_a.clone()],
+    );
+    queues.sort();
+
+    let mut log = Log::default();
+    queues.record(RenderPhase::Opaque, &mut log, &functions);
+    assert_eq!(
+        log.0,
+        vec![
+            (0, static_group.bind_group, vec![64, 128]),
+            (2, material_a.bind_group, vec![256, 512]),
+            (1, view_a.bind_group, vec![1024]),
+            (0, static_group.bind_group, vec![64, 128]),
+            (2, material_a.bind_group, vec![256, 512]),
+            (1, view_a.bind_group, vec![1024]),
+        ]
+    );
+    assert_eq!(
+        queues.dynamic_bind_groups(RenderPhase::Opaque, 0),
+        &[material_a, view_a]
+    );
+}
+
+#[test]
+#[should_panic(expected = "missing required dynamic render bind groups")]
+fn dynamic_bind_group_contract_rejects_missing_binding() {
+    use crate::draw::{BindGroupBindingId, MeshRecorder, RenderBindGroupBindingContract};
+    use prism_render_driver::{BindGroupId, IndexFormat, RenderPipelineId};
+    use std::ops::Range;
+
+    #[derive(Default)]
+    struct Noop;
+    impl MeshRecorder for Noop {
+        fn set_pipeline(&mut self, _: RenderPipelineId) {}
+        fn set_render_bind_group(&mut self, _: u32, _: BindGroupId, _: Vec<u32>) {}
+        fn set_vertex_buffer(
+            &mut self,
+            _: u32,
+            _: BufferId,
+            _: u64,
+            _: Option<core::num::NonZeroU64>,
+        ) {
+        }
+        fn set_index_buffer(
+            &mut self,
+            _: BufferId,
+            _: IndexFormat,
+            _: u64,
+            _: Option<core::num::NonZeroU64>,
+        ) {
+        }
+        fn draw(&mut self, _: Range<u32>, _: Range<u32>) {}
+        fn draw_indexed(&mut self, _: Range<u32>, _: i32, _: Range<u32>) {}
+        fn draw_indexed_indirect(&mut self, _: prism_render_graph::BufferHandle, _: u64) {}
+        fn multi_draw_indirect(
+            &mut self,
+            _: prism_render_graph::BufferHandle,
+            _: u64,
+            _: u32,
+            _: u32,
+        ) {
+        }
+    }
+
+    let mut functions = DrawFunctions::new();
+    let draw = functions.register_with_bind_groups_and_dynamic_contract(
+        |item, ctx| ctx.set_pipeline(item.pipeline),
+        Vec::new(),
+        vec![RenderBindGroupBindingContract {
+            identity: BindGroupBindingId(7),
+            index: 1,
+        }],
+    );
+    let item = PhaseItem {
+        pipeline: RenderPipelineId::from_parts(50, 1),
+        draw,
+        geometry: GenerationalHandle::new(1, 1),
+        vertices: vec![BufferId::from_parts(51, 1)],
+        vertex_sizes: vec![64],
+        indices: None,
+        index_size: None,
+        first: 0,
+        count: 3,
+        base_vertex: 0,
+        indirect: None,
+        lod_level: 0,
+        material: GenerationalHandle::new(2, 1),
+        scene: GenerationalHandle::new(3, 1),
+        order: 0,
+    };
+    let mut log = Noop;
+    functions.call_with_bindings(draw, &item, &[], &mut log);
+}
+
+#[test]
+#[should_panic(expected = "unknown dynamic render bind group")]
+fn dynamic_bind_group_contract_rejects_unknown_binding_with_offsets() {
+    use crate::draw::{
+        BindGroupBindingId, MeshRecorder, RenderBindGroupBinding, RenderBindGroupBindingContract,
+    };
+    use prism_render_driver::{BindGroupId, IndexFormat, RenderPipelineId};
+    use std::ops::Range;
+
+    #[derive(Default)]
+    struct Noop;
+    impl MeshRecorder for Noop {
+        fn set_pipeline(&mut self, _: RenderPipelineId) {}
+        fn set_render_bind_group(&mut self, _: u32, _: BindGroupId, _: Vec<u32>) {}
+        fn set_vertex_buffer(
+            &mut self,
+            _: u32,
+            _: BufferId,
+            _: u64,
+            _: Option<core::num::NonZeroU64>,
+        ) {
+        }
+        fn set_index_buffer(
+            &mut self,
+            _: BufferId,
+            _: IndexFormat,
+            _: u64,
+            _: Option<core::num::NonZeroU64>,
+        ) {
+        }
+        fn draw(&mut self, _: Range<u32>, _: Range<u32>) {}
+        fn draw_indexed(&mut self, _: Range<u32>, _: i32, _: Range<u32>) {}
+        fn draw_indexed_indirect(&mut self, _: prism_render_graph::BufferHandle, _: u64) {}
+        fn multi_draw_indirect(
+            &mut self,
+            _: prism_render_graph::BufferHandle,
+            _: u64,
+            _: u32,
+            _: u32,
+        ) {
+        }
+    }
+
+    let mut functions = DrawFunctions::new();
+    let draw = functions.register_with_bind_groups_and_dynamic_contract(
+        |item, ctx| ctx.set_pipeline(item.pipeline),
+        Vec::new(),
+        vec![RenderBindGroupBindingContract {
+            identity: BindGroupBindingId(7),
+            index: 1,
+        }],
+    );
+    let item = PhaseItem {
+        pipeline: RenderPipelineId::from_parts(52, 1),
+        draw,
+        geometry: GenerationalHandle::new(1, 1),
+        vertices: vec![BufferId::from_parts(53, 1)],
+        vertex_sizes: vec![64],
+        indices: None,
+        index_size: None,
+        first: 0,
+        count: 3,
+        base_vertex: 0,
+        indirect: None,
+        lod_level: 0,
+        material: GenerationalHandle::new(2, 1),
+        scene: GenerationalHandle::new(3, 1),
+        order: 0,
+    };
+    let unknown = RenderBindGroupBinding {
+        identity: BindGroupBindingId(8),
+        index: 1,
+        bind_group: BindGroupId::from_parts(54, 1),
+        dynamic_offsets: vec![256, 512],
+        buffers: Vec::new(),
+        sampled_textures: Vec::new(),
+        external_owners: Vec::new(),
+    };
+    let mut log = Noop;
+    functions.call_with_bindings(draw, &item, &[unknown], &mut log);
+}
+
+#[test]
+fn frame_graph_declares_dynamic_binding_buffers() {
+    use crate::draw::{
+        BindGroupBindingId, RenderBindGroupBinding, RenderBindGroupBuffer,
+        RenderBindGroupBufferAccess,
+    };
+    use prism_render_driver::{BindGroupId, BufferUsages, RenderPipelineId};
+
+    let extent = Extent3d::new_2d(4, 4);
+    let runtime = RenderRuntime::headless(NullInstance::new(), extent)
+        .expect("the null runtime always comes up");
+    let target = RenderTarget::new(runtime.device(), extent);
+    let dynamic_buffer = runtime.device().create_buffer(&BufferDescriptor {
+        label: Some("dynamic-bind-group-buffer".into()),
+        size: 64,
+        usage: BufferUsages::STORAGE,
+        mapped_at_creation: false,
+    });
+    let binding = RenderBindGroupBinding {
+        identity: BindGroupBindingId(91),
+        index: 1,
+        bind_group: BindGroupId::from_parts(92, 1),
+        dynamic_offsets: Vec::new(),
+        buffers: vec![RenderBindGroupBuffer {
+            buffer: dynamic_buffer,
+            access: RenderBindGroupBufferAccess::Storage,
+        }],
+        sampled_textures: Vec::new(),
+        external_owners: Vec::new(),
+    };
+    let mut functions = DrawFunctions::new();
+    let draw = functions.register(|item, context| {
+        context.set_pipeline(item.pipeline);
+        context.set_vertex_buffer(0, item.vertices[0], 0, None);
+        context.draw(0..item.count, 0..1);
+    });
+    let item = PhaseItem {
+        pipeline: RenderPipelineId::from_parts(93, 1),
+        draw,
+        geometry: GenerationalHandle::new(1, 1),
+        vertices: vec![],
+        vertex_sizes: vec![],
+        indices: None,
+        index_size: None,
+        first: 0,
+        count: 3,
+        base_vertex: 0,
+        indirect: None,
+        lod_level: 0,
+        material: GenerationalHandle::new(2, 1),
+        scene: GenerationalHandle::new(3, 1),
+        order: 0,
+    };
+    let mut queues = RenderQueues::new();
+    queues.push_with_bind_groups(RenderPhase::Opaque, item, vec![binding]);
+
+    let graph = crate::frame::target_graph(&target, &queues, &functions, None);
+    let plan = graph.compile().expect("dynamic binding graph compiles");
+    assert!(
+        plan.used_buffers.iter().any(|used| *used),
+        "the frame graph must realize the dynamic binding buffer"
     );
 }
 
@@ -3556,6 +4780,7 @@ fn lighting_plan_records_compute_pipeline_bind_group_and_dispatch() {
             virtual_shadow: false,
             offline: false,
             deterministic_npr: false,
+            prefiltered_environment: false,
         },
         Tier::Balanced,
         GiCandidateAvailability::HostProvided,
@@ -3563,12 +4788,19 @@ fn lighting_plan_records_compute_pipeline_bind_group_and_dispatch() {
     let mut extracted = ExtractedLightingInputs::default();
     extracted.surfaces = vec![LightingSurfaceInput::default()];
     extracted.gi_candidates = vec![Vec::new()];
-    lighting.prepare(&plan, &extracted, 0, runtime.queue());
+    lighting
+        .prepare(&plan, &extracted, 0, &runtime)
+        .expect("lighting tables prepare");
 
     let target = RenderTarget::new(runtime.device(), extent);
     let queues = RenderQueues::new();
     let functions = DrawFunctions::new();
-    let graph = crate::frame::target_graph(&target, &queues, &functions, lighting.pass(&plan));
+    let graph = crate::frame::target_graph(
+        &target,
+        &queues,
+        &functions,
+        lighting.pass_for_target(&plan, &target, &runtime),
+    );
     let capture = CapturingQueue::default();
     graph
         .execute(runtime.device(), &capture)
@@ -3584,6 +4816,7 @@ fn lighting_plan_records_compute_pipeline_bind_group_and_dispatch() {
             _ => None,
         })
         .map(|(label, commands)| {
+            let label = label.expect("lighting compute passes are labeled");
             assert!(matches!(
                 commands.first(),
                 Some(ComputeCommand::SetPipeline(_))
@@ -3592,19 +4825,35 @@ fn lighting_plan_records_compute_pipeline_bind_group_and_dispatch() {
                 commands.get(1),
                 Some(ComputeCommand::SetBindGroup { index: 0, .. })
             ));
-            assert!(matches!(
-                commands.get(2),
-                Some(ComputeCommand::Dispatch { x: 1, y: 1, z: 1 })
-            ));
-            label.expect("lighting compute passes are labeled")
+            match label.as_str() {
+                "prism-lighting-gi-dispatch" => {
+                    assert_eq!(commands.len(), 3);
+                    assert!(matches!(
+                        commands.get(2),
+                        Some(ComputeCommand::Dispatch { x: 1, y: 1, z: 1 })
+                    ));
+                }
+                "prism-lighting-composite-dispatch" => {
+                    assert_eq!(commands.len(), 4);
+                    assert!(matches!(
+                        commands.get(2),
+                        Some(ComputeCommand::SetBindGroup { index: 1, .. })
+                    ));
+                    assert!(matches!(
+                        commands.get(3),
+                        Some(ComputeCommand::Dispatch { x: 1, y: 1, z: 1 })
+                    ));
+                }
+                other => panic!("unexpected lighting compute pass {other}"),
+            }
+            label
         })
         .collect::<Vec<_>>();
     assert_eq!(
         compute_labels,
         [
-            "prism-lighting-direct-dispatch",
             "prism-lighting-gi-dispatch",
-            "prism-lighting-composite",
+            "prism-lighting-composite-dispatch",
         ]
     );
 }
@@ -3614,7 +4863,9 @@ fn frame_graph_records_optional_trace_between_scene_and_gi() {
     use crate::lighting::LightingTraceSceneInput;
     use crate::lighting_trace_gpu::{LightingTraceGpu, PackedTraceScene, TraceRay};
     use prism_render_architecture::lighting::contract::RecipeId;
-    use prism_render_architecture::ray_scene::{Bvh, Triangle};
+    use prism_render_architecture::ray_scene::{
+        Bvh, RayHitAttributeRecord, RayHitIdentity, Triangle,
+    };
     use prism_render_driver::{BufferDescriptor, BufferUsages, Pass};
 
     let extent = Extent3d::new_2d(4, 4);
@@ -3649,7 +4900,9 @@ fn frame_graph_records_optional_trace_between_scene_and_gi() {
         }]),
         1,
     ));
-    lighting.prepare(&plan, &extracted, 0, runtime.queue());
+    lighting
+        .prepare(&plan, &extracted, 0, &runtime)
+        .expect("lighting tables prepare");
     let rays = [TraceRay {
         origin: [0.0, 0.0, 0.0],
         t_min: 0.0,
@@ -3684,9 +4937,15 @@ fn frame_graph_records_optional_trace_between_scene_and_gi() {
     let mut host_plan = plan.clone();
     host_plan.candidate_source = GiCandidateSource::HostProvided;
     extracted.gi_candidates = vec![Vec::new(); extracted.surfaces.len()];
-    lighting.prepare(&host_plan, &extracted, 0, runtime.queue());
-    let absent =
-        crate::frame::target_graph(&target, &queues, &functions, lighting.pass(&host_plan));
+    lighting
+        .prepare(&host_plan, &extracted, 0, &runtime)
+        .expect("host lighting tables prepare");
+    let absent = crate::frame::target_graph(
+        &target,
+        &queues,
+        &functions,
+        lighting.pass_for_target(&host_plan, &target, &runtime),
+    );
     assert_eq!(
         absent
             .blackboard()
@@ -3700,7 +4959,9 @@ fn frame_graph_records_optional_trace_between_scene_and_gi() {
         .get::<crate::frame::FrameGraphStages>()
         .unwrap()
         .assert_contract();
-    lighting.prepare(&plan, &extracted, 0, runtime.queue());
+    lighting
+        .prepare(&plan, &extracted, 0, &runtime)
+        .expect("trace lighting tables prepare");
 
     let graph = crate::frame::target_graph_with_trace(
         &target,
@@ -3736,11 +4997,11 @@ fn frame_graph_records_optional_trace_between_scene_and_gi() {
     assert_eq!(
         labels,
         [
-            "prism-render-app-clear",
+            "prism-render-app-clear-gbuffer",
             "prism-lighting-trace-dispatch",
             "prism-lighting-gi-candidate-build",
             "prism-lighting-gi-dispatch",
-            "prism-lighting-composite",
+            "prism-lighting-composite-dispatch",
         ]
     );
 }
@@ -3753,7 +5014,9 @@ fn physical_gpu_offscreen_host_graph_traces_builds_gi_and_composites() {
         PackedTraceScene, TraceRay,
     };
     use prism_render_architecture::lighting::contract::BudgetCompiler;
-    use prism_render_architecture::ray_scene::{Bvh, GpuBvhBuffers, Triangle};
+    use prism_render_architecture::ray_scene::{
+        Bvh, GpuBvhBuffers, RayHitAttributeRecord, RayHitIdentity, Triangle,
+    };
     use prism_render_driver::{BufferDescriptor, BufferUsages, DeviceType};
     use prism_render_driver_wgpu::WgpuInstance;
 
@@ -3790,7 +5053,15 @@ fn physical_gpu_offscreen_host_graph_traces_builds_gi_and_composites() {
     }
 
     let triangle = Triangle::new([-1.0, -1.0, -1.0], [1.0, -1.0, -1.0], [0.0, 1.0, -1.0], 73);
-    let bvh = Arc::new(GpuBvhBuffers::from_bvh(&Bvh::build(&[triangle])));
+    let bvh = Arc::new(
+        GpuBvhBuffers::from_bvh(&Bvh::build(&[triangle]))
+            .with_hit_attributes(vec![RayHitAttributeRecord::new(
+                RayHitIdentity::new(11, 73, 1),
+                [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
+                [[0.0, 0.0, 1.0]; 3],
+            )])
+            .expect("valid secondary shading attributes"),
+    );
     let packed_scene = PackedTraceScene::from(&*bvh);
     let surface = LightingSurfaceInput {
         position: [0.0, 0.0, 0.0],
@@ -3840,10 +5111,44 @@ fn physical_gpu_offscreen_host_graph_traces_builds_gi_and_composites() {
     assert!(plan.recipes.contains(&RecipeId::SpecializedDeterministic));
 
     let lighting = LightingGpuState::new(&mut runtime).expect("lighting GPU bundle");
-    lighting.prepare(&plan, &extracted, FRAME_INDEX, runtime.queue());
-    let lighting_pass = lighting.pass(&plan).expect("GI surface admits its recipe");
+    lighting
+        .prepare(&plan, &extracted, FRAME_INDEX, &runtime)
+        .expect("lighting tables prepare");
+    let target = RenderTarget::new(runtime.device(), extent);
+    let mut material_registry = prism_render_material::MaterialRegistry::new(1);
+    material_registry
+        .install_execution_tables(&prism_render_material::MaterialExecutionTables::new())
+        .expect("empty canonical execution tables are valid for fallback material");
+    let device = runtime.device_handle();
+    let mut material_buffers =
+        MaterialParameterBuffers::new_owned(device.clone(), 1, 1, 1, BufferUsages::NONE);
+    material_buffers.sync_registry(runtime.device(), runtime.queue(), &material_registry, [0]);
+    let mut execution_buffers = crate::material::NativeExecutionTableBuffers::new();
+    execution_buffers
+        .sync_registry(device, runtime.queue(), &material_registry)
+        .expect("canonical execution-table upload is available");
+    assert!(runtime.wait_idle(), "material snapshots publish on GPU");
+    let material_snapshot = material_buffers
+        .snapshot()
+        .expect("material allocation snapshot");
+    let execution_snapshot = execution_buffers.snapshot().expect("execution snapshot");
+    let material_bindings = crate::lighting_gpu::LightingCompositeMaterialBuffers {
+        headers: Some(material_snapshot.headers()),
+        headers_size_bytes: u64::from(material_snapshot.header_capacity())
+            * core::mem::size_of::<prism_render_material::GpuMaterialHeader>() as u64,
+        parameters: Some(material_snapshot.parameters()),
+        parameters_size_bytes: u64::from(material_snapshot.parameter_capacity_words()) * 4,
+        execution_plans: Some(execution_snapshot.plan_buffer()),
+        execution_plans_size_bytes: execution_snapshot.plan_rows().len() as u64
+            * (prism_render_material::EXECUTION_PLAN_ROW_WORDS * 4) as u64,
+        execution_programs: Some(execution_snapshot.program_buffer()),
+        execution_programs_size_bytes: execution_snapshot.program_rows().len() as u64 * 20,
+    };
+    let lighting_pass = lighting
+        .pass_for_target_with_materials(&plan, &target, &runtime, material_bindings)
+        .expect("GI surface admits its target-aware recipe");
     let hit_output = runtime.device().create_buffer(&BufferDescriptor::new(
-        (core::mem::size_of::<u32>() * 8) as u64,
+        (core::mem::size_of::<u32>() * 16) as u64,
         BufferUsages::STORAGE | BufferUsages::COPY_SRC,
     ));
     let mut trace = LightingTraceGpu::new(runtime.device_handle());
@@ -3853,7 +5158,7 @@ fn physical_gpu_offscreen_host_graph_traces_builds_gi_and_composites() {
             &BorrowedPackedTraceScene::from(&packed_scene),
             &rays,
             hit_output,
-            (core::mem::size_of::<u32>() * 8) as u64,
+            (core::mem::size_of::<u32>() * 16) as u64,
             Some(lighting_pass.gi_candidate_target()),
         )
         .expect("valid scene, rays, radiance table, and GI targets prepare");
@@ -3861,7 +5166,6 @@ fn physical_gpu_offscreen_host_graph_traces_builds_gi_and_composites() {
     // This is the same target_graph_with_trace constructor used by the
     // offscreen/window host composition path, not an independently assembled
     // trace/candidate/GI graph.
-    let target = RenderTarget::new(runtime.device(), extent);
     let queues = RenderQueues::new();
     let functions = DrawFunctions::new();
     let mut graph = crate::frame::target_graph_with_trace(
@@ -3871,6 +5175,8 @@ fn physical_gpu_offscreen_host_graph_traces_builds_gi_and_composites() {
         Some(lighting_pass),
         Some(recorder),
     );
+    graph.retain_external_owner(material_snapshot.external_owner());
+    graph.retain_external_owner(execution_snapshot.external_owner());
     let stages = *graph
         .blackboard()
         .get::<crate::frame::FrameGraphStages>()
@@ -3883,8 +5189,8 @@ fn physical_gpu_offscreen_host_graph_traces_builds_gi_and_composites() {
     assert_eq!(stages.composite_passes, 1);
     assert_eq!(
         graph.pass_count(),
-        6,
-        "clear, trace, candidate, direct, GI, composite"
+        5,
+        "clear, trace, candidate, GI, composite"
     );
     let recorded = graph
         .execute(runtime.device(), runtime.queue())
@@ -3908,16 +5214,15 @@ fn physical_gpu_offscreen_host_graph_traces_builds_gi_and_composites() {
     .expect("CPU candidate oracle accepts the same authored inputs");
     let expected_gi = evaluate_deterministic_gi(surface, &cpu_candidates[0]);
 
-    let read_rgb = |buffer| {
-        runtime
-            .queue()
-            .read_buffer(buffer, crate::lighting_gpu::OUTPUT_BYTES)
-            .chunks_exact(4)
-            .map(|bytes| f32::from_ne_bytes(bytes.try_into().expect("f32-sized output")))
-            .collect::<Vec<_>>()
-    };
-    let gi = read_rgb(lighting.gi_output_buffer());
-    let composite = read_rgb(lighting.output_buffer());
+    let gi = runtime
+        .queue()
+        .read_buffer(
+            lighting.gi_output_buffer(),
+            crate::lighting_gpu::OUTPUT_BYTES,
+        )
+        .chunks_exact(4)
+        .map(|bytes| f32::from_ne_bytes(bytes.try_into().expect("f32-sized output")))
+        .collect::<Vec<_>>();
     for channel in 0..3 {
         assert!(
             (gi[channel] - expected_gi[channel]).abs() <= 2.0e-4,
@@ -3925,13 +5230,21 @@ fn physical_gpu_offscreen_host_graph_traces_builds_gi_and_composites() {
             gi[channel],
             expected_gi[channel]
         );
-        assert!(
-            (composite[channel] - expected_gi[channel]).abs() <= 2.0e-4,
-            "host graph composite channel {channel}: GPU {} != CPU {}",
-            composite[channel],
-            expected_gi[channel]
-        );
     }
+
+    // This fixture has no raster draw queue, so the same-frame graph composite
+    // must preserve the cleared-coverage result. Do not inject a synthetic
+    // GBuffer pixel and dispatch a second composite: that would not prove
+    // scene -> trace -> GI -> composite parity.
+    let hdr = runtime
+        .queue()
+        .read_texture_rgba16f(target.texture(), extent.width, extent.height);
+    assert_eq!(hdr.len(), (extent.width * extent.height) as usize);
+    assert!(expected_gi.iter().any(|channel| *channel > 0.0));
+    assert!(
+        hdr.iter().all(|pixel| *pixel == [0.0; 4]),
+        "a host graph with no raster coverage composites cleared pixels"
+    );
 }
 
 #[test]
@@ -4012,14 +5325,16 @@ fn lighting_graph_skips_direct_when_only_world_restir_is_admitted() {
     let mut extracted = ExtractedLightingInputs::default();
     extracted.surfaces = vec![LightingSurfaceInput::default()];
     extracted.gi_candidates = vec![Vec::new()];
-    lighting.prepare(&plan, &extracted, 0, runtime.queue());
+    lighting
+        .prepare(&plan, &extracted, 0, &runtime)
+        .expect("lighting tables prepare");
 
     let target = RenderTarget::new(runtime.device(), extent);
     let graph = crate::frame::target_graph(
         &target,
         &RenderQueues::new(),
         &DrawFunctions::new(),
-        lighting.pass(&plan),
+        lighting.pass_for_target(&plan, &target, &runtime),
     );
     let capture = CapturingQueue::default();
     graph
@@ -4037,7 +5352,10 @@ fn lighting_graph_skips_direct_when_only_world_restir_is_admitted() {
         .collect::<Vec<_>>();
     assert_eq!(
         labels,
-        ["prism-lighting-gi-dispatch", "prism-lighting-composite",]
+        [
+            "prism-lighting-gi-dispatch",
+            "prism-lighting-composite-dispatch",
+        ]
     );
 }
 
@@ -4057,19 +5375,16 @@ fn lighting_graph_has_no_compute_pass_without_an_admitted_backend() {
         budget: FrameResourceBudget::default(),
         rejected: Vec::new(),
     };
-    lighting.prepare(
-        &plan,
-        &ExtractedLightingInputs::default(),
-        0,
-        runtime.queue(),
-    );
+    lighting
+        .prepare(&plan, &ExtractedLightingInputs::default(), 0, &runtime)
+        .expect("lighting tables prepare");
 
     let target = RenderTarget::new(runtime.device(), extent);
     let graph = crate::frame::target_graph(
         &target,
         &RenderQueues::new(),
         &DrawFunctions::new(),
-        lighting.pass(&plan),
+        lighting.pass_for_target(&plan, &target, &runtime),
     );
     let capture = CapturingQueue::default();
     graph
@@ -4101,7 +5416,9 @@ fn lighting_empty_surface_batch_clears_outputs_without_dispatching() {
         rejected: Vec::new(),
     };
     let extracted = ExtractedLightingInputs::default();
-    lighting.prepare(&plan, &extracted, 0, runtime.queue());
+    lighting
+        .prepare(&plan, &extracted, 0, &runtime)
+        .expect("lighting tables prepare");
     assert!(
         lighting.pass(&plan).is_none(),
         "empty batches have no lighting pass"
@@ -4112,7 +5429,7 @@ fn lighting_empty_surface_batch_clears_outputs_without_dispatching() {
         &target,
         &RenderQueues::new(),
         &DrawFunctions::new(),
-        lighting.pass(&plan),
+        lighting.pass_for_target(&plan, &target, &runtime),
     );
     let capture = CapturingQueue::default();
     graph
@@ -4214,7 +5531,9 @@ fn mesh_bin_draw_records_a_multi_draw() {
             draw,
             geometry: GenerationalHandle::new(1, 1),
             vertices: vec![vertices],
+            vertex_sizes: vec![64],
             indices: Some((indices, IndexFormat::Uint16)),
+            index_size: Some(64),
             first: 0,
             count: 0,
             base_vertex: 0,
@@ -4400,6 +5719,7 @@ fn bin_fixture(
                     render_phase: phase,
                     draw: None,
                     sort_class: crate::PassDescriptorClass::SURFACE,
+                    shader_package: None,
                 }],
             )
             .unwrap();
@@ -4467,7 +5787,7 @@ fn bin_stream_fills_the_indirect_queue_and_records_a_multi_draw() {
     let (device, queue) = NullInstance::new()
         .create_device(&adapter, &DeviceDescriptor::default())
         .expect("the null device always comes up");
-    let fixture = bin_fixture(&device, &queue);
+    let mut fixture = bin_fixture(&device, &queue);
     let provider = StubProvider::new(&device);
 
     let candidates = fixture
@@ -4642,6 +5962,7 @@ fn split_bin_expands_to_three_work_items_with_one_indirect_range() {
                     render_phase: RenderPhase::Opaque,
                     draw: Some(DrawFunctionId(0)),
                     sort_class: crate::PassDescriptorClass::SURFACE,
+                    shader_package: None,
                 },
                 crate::PassDescriptor {
                     role: PassRole::ResponseRight,
@@ -4652,6 +5973,7 @@ fn split_bin_expands_to_three_work_items_with_one_indirect_range() {
                     render_phase: RenderPhase::Opaque,
                     draw: Some(DrawFunctionId(0)),
                     sort_class: crate::PassDescriptorClass::SURFACE,
+                    shader_package: None,
                 },
                 crate::PassDescriptor {
                     role: PassRole::Composition,
@@ -4662,6 +5984,7 @@ fn split_bin_expands_to_three_work_items_with_one_indirect_range() {
                     render_phase: RenderPhase::Opaque,
                     draw: Some(DrawFunctionId(1)),
                     sort_class: crate::PassDescriptorClass::SURFACE,
+                    shader_package: None,
                 },
             ],
         )
@@ -4868,7 +6191,7 @@ fn unknown_class_is_zero_or_loud() {
     let (device, queue) = NullInstance::new()
         .create_device(&adapter, &DeviceDescriptor::default())
         .expect("the null device always comes up");
-    let fixture = bin_fixture(&device, &queue);
+    let mut fixture = bin_fixture(&device, &queue);
     let provider = StubProvider::new(&device);
 
     let mut candidates = fixture
@@ -4877,6 +6200,33 @@ fn unknown_class_is_zero_or_loud() {
     // A foreign descriptor-table ID must never silently drop geometry.
     let mut foreign = candidates[0];
     foreign.key.pipeline_class = u32::MAX;
+    let frozen_material = fixture
+        .instances
+        .get(foreign.scene)
+        .expect("bin representative is resident")
+        .material;
+    fixture.registry.set_material_frozen(frozen_material, true);
+    let frozen_bins = build_view_draw_bins(GenerationalHandle::new(0, 1), 8, [foreign]);
+    let frozen_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        RenderQueues::new().fill_bins(
+            &device,
+            &mut MeshPipelineSpecializer::new(),
+            &fixture.registry,
+            &fixture.meshes,
+            &fixture.instances,
+            declared_args_buffer(&device),
+            &frozen_bins,
+            None,
+            1,
+            DrawFunctionId(0),
+            &provider,
+        )
+    }));
+    assert!(
+        frozen_result.is_err(),
+        "a frozen material cannot fall through the unknown-class spine fallback"
+    );
+    fixture.registry.set_material_frozen(frozen_material, false);
     // A bin whose vertex-buffer class has no resident pipeline inputs.
     let mut orphan = candidates[1];
     orphan.key.vertex_buffer_class = 99;
@@ -5105,10 +6455,12 @@ fn the_frame_records_the_queued_draws() {
     };
     let item = |pipeline, index| PhaseItem {
         pipeline,
-        draw: crate::draw::canonical::MESH,
+        draw: crate::draw::canonical::MESH_UNBOUND,
         geometry: GenerationalHandle::new(1, 1),
         vertices: vec![vertices],
+        vertex_sizes: vec![64],
         indices: Some((indices, prism_render_driver::IndexFormat::Uint16)),
+        index_size: Some(64),
         first: 0,
         count: 3,
         base_vertex: 0,
@@ -5289,10 +6641,12 @@ fn the_frame_draws_a_queued_mesh_on_a_gpu() {
             RenderPhase::Opaque,
             PhaseItem {
                 pipeline,
-                draw: crate::draw::canonical::MESH,
+                draw: crate::draw::canonical::MESH_UNBOUND,
                 geometry: GenerationalHandle::new(1, 1),
                 vertices,
+                vertex_sizes: vec![index_count as u64 * 4],
                 indices: Some((indices, prism_render_driver::IndexFormat::Uint16)),
+                index_size: Some(index_count as u64 * 2),
                 first: 0,
                 count: index_count,
                 base_vertex: 0,
@@ -5325,38 +6679,47 @@ fn the_frame_draws_a_queued_mesh_on_a_gpu() {
     let pixels = runtime
         .runtime()
         .queue()
-        .read_texture_rgba8(target.texture(), SIZE, SIZE);
-    let pixel = |x: u32, y: u32| {
-        let index = ((y * SIZE + x) * 4) as usize;
-        [
-            pixels[index],
-            pixels[index + 1],
-            pixels[index + 2],
-            pixels[index + 3],
-        ]
-    };
+        .read_texture_rgba16f(target.texture(), SIZE, SIZE);
+    assert_eq!(pixels.len(), (SIZE * SIZE) as usize);
+    let pixel = |x: u32, y: u32| pixels[(y * SIZE + x) as usize];
     assert_eq!(
         pixel(SIZE / 2, SIZE / 2),
-        [255, 0, 0, 255],
+        [1.0, 0.0, 0.0, 1.0],
         "the queued mesh rasterized in the frame's target"
     );
     assert_eq!(
         pixel(0, 0),
-        [0, 0, 0, 255],
+        [0.0, 0.0, 0.0, 1.0],
         "outside the quad the frame's clear is what remains"
     );
 }
-/// The scene fixture the queue-stage tests draw: a mesh in the simulation's
-/// arena, a geometry + material + binding in the render world's registry, and a
-/// visible work item naming the instance.
+/// Stable identifiers for the real camera/renderable queue fixture.
+#[derive(prism_ecs::prelude::Resource)]
+pub(super) struct QueueSceneFixtureIdentity {
+    pub scene: prism_render_architecture::gpu_scene::SceneHandle,
+    pub instance: prism_ecs::prelude::Entity,
+}
+
+pub(super) fn queue_scene_handle(app: &App) -> prism_render_architecture::gpu_scene::SceneHandle {
+    app.world().resource::<QueueSceneFixtureIdentity>().scene
+}
+
+/// The scene fixture the queue-stage tests draw: a real Prism camera and
+/// renderable feed native per-view culling; matching mesh/material records are
+/// registered in the render world's queue resolver.
 pub(super) fn queue_scene_fixture(app: &mut App) -> GenerationalHandle {
+    use prism_math::{Frustum, Mat4, Plane, Vec3};
     use prism_mesh::{Indices, Mesh, MeshVertexAttribute, VertexAttributeValues};
     use prism_render_architecture::geometry::{
         GeometryLodRecord, GeometryPrimitiveKind, GeometryRecord,
     };
+    use prism_render_architecture::gpu_scene::SceneHandle;
     use prism_render_visibility::{
-        GpuRenderWorkItem, RenderPassMask, VisibilityStageMask, WorkSortKey,
+        GeometryLod, GeometryLodChain, GpuRenderWorkItem, RenderPassMask, VisibilityStageMask,
+        WorkSortKey,
     };
+    use prism_transform::ecs::LocalBounds;
+    use prism_transform::{GlobalTransform, Transform};
 
     let mesh = Mesh::new(PrimitiveTopology::TriangleList)
         .with_attribute(
@@ -5373,6 +6736,20 @@ pub(super) fn queue_scene_fixture(app: &mut App) -> GenerationalHandle {
             ]),
         )
         .expect("positions fit")
+        .with_attribute(
+            MeshVertexAttribute::new(
+                "Vertex_Normal",
+                prism_render_driver::VertexFormat::Float32x3,
+                1,
+            ),
+            VertexAttributeValues::Float32x3(vec![
+                [0.0, 0.0, 1.0],
+                [0.0, 0.0, 1.0],
+                [0.0, 0.0, 1.0],
+                [0.0, 0.0, 1.0],
+            ]),
+        )
+        .expect("normals fit")
         .indexed(Indices::Uint16(vec![0, 1, 2, 0, 2, 3]));
     let mut meshes = prism_asset::Assets::new();
     let mesh_id = meshes.insert(mesh).id();
@@ -5380,7 +6757,64 @@ pub(super) fn queue_scene_fixture(app: &mut App) -> GenerationalHandle {
 
     let geometry = GenerationalHandle::new(1, 1);
     let material = GenerationalHandle::new(2, 1);
-    let scene = GenerationalHandle::new(3, 1);
+    if app
+        .world()
+        .get_resource::<crate::visibility::PrismRenderScene>()
+        .is_none()
+    {
+        app.add_plugins(crate::visibility::PrismVisibilityPlugin);
+    }
+    {
+        let scene = app
+            .world_mut()
+            .resource_mut::<crate::visibility::PrismRenderScene>();
+        scene.insert_geometry(GeometryLodChain {
+            geometry,
+            lods: vec![GeometryLod {
+                level: 0,
+                screen_error: 0.0,
+                resident: true,
+                fallback: true,
+            }],
+        });
+        scene.insert_material(prism_render_material::fallback_material_record(material, 1));
+    }
+    let mut camera = crate::visibility::PrismCamera::new(Mat4::IDENTITY, [0, 0, 8, 8]);
+    camera.layer_mask = 1;
+    app.world_mut().spawn((
+        camera,
+        crate::visibility::PrismFrustum(Frustum::from_planes([
+            Plane::new(Vec3::new(1.0, 0.0, 0.0), 10.0),
+            Plane::new(Vec3::new(-1.0, 0.0, 0.0), 10.0),
+            Plane::new(Vec3::new(0.0, -1.0, 0.0), 10.0),
+            Plane::new(Vec3::new(0.0, 1.0, 0.0), 10.0),
+            Plane::new(Vec3::new(0.0, 0.0, -1.0), 1.0),
+            Plane::new(Vec3::new(0.0, 0.0, 1.0), 100.0),
+        ])),
+        GlobalTransform::from_transform(&Transform::from_xyz(0.0, 0.0, 0.0)),
+    ));
+    let mut renderable = crate::visibility::PrismRenderable::new(geometry, material);
+    renderable.render_layers = 1;
+    let instance = app.world_mut().spawn((
+        renderable,
+        LocalBounds(prism_math::Aabb3::from_center_half_extents(
+            Vec3::ZERO,
+            Vec3::splat(0.5),
+        )),
+        GlobalTransform::IDENTITY,
+        crate::visibility::PrismViewVisibility::default(),
+    ));
+    crate::visibility::sync_scene(app.world_mut());
+    let scene_handle = app
+        .world()
+        .resource::<crate::visibility::PrismRenderScene>()
+        .handle_for(instance)
+        .expect("the real renderable receives a stable scene identity");
+    debug_assert_eq!(scene_handle, SceneHandle::new(1, 1));
+    app.world_mut().insert_resource(QueueSceneFixtureIdentity {
+        scene: scene_handle,
+        instance,
+    });
     let render = app
         .sub_app_mut(RenderApp)
         .expect("the plugin registers the render sub-app");
@@ -5408,17 +6842,117 @@ pub(super) fn queue_scene_fixture(app: &mut App) -> GenerationalHandle {
         registry.insert_material(prism_render_material::fallback_material_record(material, 1));
         registry.bind_geometry_mesh(geometry, mesh_id);
     }
-    let work = render.world.resource_mut::<VisibilityWorkList>();
-    work.push(GpuRenderWorkItem {
-        scene,
-        geometry,
-        material,
-        lod_or_cluster: 0,
-        pass_mask: RenderPassMask::OPAQUE,
-        visibility_stages: VisibilityStageMask::EARLY,
-        sort_key: WorkSortKey::new(0, 0, 0, 0, 3),
-    });
+    {
+        let materials = render.world.resource_mut::<RenderMaterials>();
+        let first = materials
+            .registry_mut()
+            .allocate()
+            .expect("the material fixture has room for the first slot");
+        assert_eq!(first.index, 1);
+        let published = materials
+            .registry_mut()
+            .allocate()
+            .expect("the material fixture has room for the scene slot");
+        assert_eq!(published, material);
+        materials
+            .publish(prism_render_material::fallback_material_record(material, 1))
+            .expect("the scene material publishes into the canonical registry");
+    }
+    render
+        .world
+        .resource_mut::<VisibilityWorkList>()
+        .set(vec![GpuRenderWorkItem {
+            scene: scene_handle,
+            geometry,
+            material,
+            lod_or_cluster: 0,
+            pass_mask: RenderPassMask::OPAQUE,
+            visibility_stages: VisibilityStageMask::EARLY,
+            sort_key: WorkSortKey::new(0, 0, 0, 0, 3),
+        }]);
     geometry
+}
+
+#[test]
+fn canonical_default_mesh_binding_uses_material_generation_and_graph_buffers() {
+    use crate::mesh_pipelines::MeshPipelines;
+    use prism_render_driver::{BufferUsages, DeviceDescriptor, Instance, RequestAdapterOptions};
+
+    let adapter = NullInstance::new()
+        .request_adapter(&RequestAdapterOptions::default())
+        .expect("the null backend has an adapter");
+    let (device, queue) = NullInstance::new()
+        .create_device(&adapter, &DeviceDescriptor::default())
+        .expect("the null device comes up");
+    let pipelines = MeshPipelines::surface_encode(&device);
+    let mut bindings = CanonicalMaterialBindings::new(4);
+    assert!(bindings.ensure_layout(&device, 0, pipelines.surface_bind_group_layout()));
+    assert!(bindings.prepare_capacity(&device, 4));
+    assert!(!bindings.prepare_frame(&queue, None));
+    let view = crate::surface_views::SurfaceView {
+        camera: prism_ecs::prelude::Entity::from_bits(1_u64 << 32).unwrap(),
+        target: prism_camera::RenderTarget::PrimaryWindow,
+        clear: prism_camera::ClearMode::ColorAndDepth,
+        order: 0,
+        clip_from_world: [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
+        previous_clip_from_world: [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
+        viewport: [0, 0, 8, 8],
+        history_epoch: 0,
+        history_valid: true,
+        resolution_scale: 1.0,
+        history_frames: 0,
+        exposure_stops: 0.0,
+    };
+    assert!(bindings.prepare_frame(&queue, Some(&view)));
+
+    let mut buffers = MaterialParameterBuffers::new(&device, 4, 64, 4, BufferUsages::NONE);
+    let mut registry = prism_render_material::MaterialRegistry::new(1);
+    let handle = registry.allocate().unwrap();
+    let record = prism_render_material::fallback_material_record(handle, 3);
+    registry.publish(record.clone()).unwrap();
+    buffers.sync_registry(&device, &queue, &registry, [handle.index]);
+    assert!(bindings.prepare_material_buffers(&device, &buffers));
+
+    let binding = bindings
+        .binding_for(&queue, handle, &record, &buffers)
+        .expect("the live generation/revision resolves to a binding");
+    assert_eq!(binding.identity, crate::draw::canonical::SURFACE_MATERIAL);
+    assert_eq!(binding.index, crate::draw::canonical::SURFACE_GROUP);
+    assert_eq!(binding.dynamic_offsets, vec![0, 256]);
+    assert_eq!(binding.buffers.len(), 5);
+    assert!(binding.buffers[..2].iter().all(|buffer| matches!(
+        buffer.access,
+        crate::draw::RenderBindGroupBufferAccess::Uniform
+    )));
+    assert_ne!(binding.buffers[0].buffer, binding.buffers[1].buffer);
+    assert_eq!(
+        binding.buffers[2..],
+        [
+            crate::draw::RenderBindGroupBuffer {
+                buffer: buffers.headers().unwrap(),
+                access: crate::draw::RenderBindGroupBufferAccess::Storage,
+            },
+            crate::draw::RenderBindGroupBuffer {
+                buffer: buffers.parameters().unwrap(),
+                access: crate::draw::RenderBindGroupBufferAccess::Storage,
+            },
+        ]
+    );
+
+    let stale = GenerationalHandle::new(handle.index, handle.generation + 1);
+    assert!(bindings
+        .binding_for(&queue, stale, &record, &buffers)
+        .is_none());
 }
 
 #[test]
@@ -5426,6 +6960,7 @@ fn the_queue_stage_turns_the_visible_set_into_draws() {
     let extent = Extent3d::new_2d(8, 8);
     let mut app = app_on_null_backend(RenderAppConfig::new(extent));
     let geometry = queue_scene_fixture(&mut app);
+    capture_camera_queues(&mut app);
 
     app.update();
 
@@ -5441,9 +6976,287 @@ fn the_queue_stage_turns_the_visible_set_into_draws() {
     );
     let stats = render.world.resource::<RenderFrameStats>();
     assert_eq!(stats.draws_queued, 1, "the visible item became a draw");
-    assert_eq!(stats.draws_recorded, 1, "and the frame recorded it");
-    assert!(stats.passes_declared >= 2, "clear plus the opaque pass");
+    assert_eq!(stats.view_queue_rejection, None);
+    let snapshot = render.world.resource::<CameraQueueSnapshot>();
+    assert!(snapshot.cameras.is_ready());
+    assert_eq!(snapshot.cameras.len(), 1);
+    assert!(
+        snapshot.global.is_empty(),
+        "automatic work is not global work"
+    );
+    let camera = snapshot.cameras.iter().next().unwrap();
+    assert_eq!(camera.frame_slot, 0);
+    assert_eq!(camera.queues.phase(RenderPhase::Opaque).len(), 1);
+    assert_eq!(
+        camera.queues.phase(RenderPhase::Opaque)[0].geometry,
+        geometry
+    );
+    assert_eq!(
+        camera.queues.dynamic_bind_groups(RenderPhase::Opaque, 0)[0].dynamic_offsets[0],
+        0
+    );
 }
+
+/// Observe Queue before the frame consumer and Cleanup mutate frame-local data.
+/// These tests assert queue production, independently of output routing/recording.
+#[derive(Default, Resource)]
+struct CameraQueueSnapshot {
+    cameras: crate::SurfaceViewQueues,
+    global: RenderQueues,
+    windows: std::collections::BTreeMap<prism_window::WindowId, RenderQueues>,
+}
+
+fn snapshot_camera_queues(
+    cameras: prism_ecs::prelude::Res<crate::SurfaceViewQueues>,
+    global: prism_ecs::prelude::Res<RenderQueues>,
+    windows: prism_ecs::prelude::Res<crate::WindowRenderQueues>,
+    mut snapshot: ResMut<CameraQueueSnapshot>,
+) {
+    snapshot.cameras = (*cameras).clone();
+    snapshot.global = (*global).clone();
+    snapshot.windows = windows.0.clone();
+}
+
+fn capture_camera_queues(app: &mut App) {
+    let render = app.sub_app_mut(RenderApp).expect("the render sub-app");
+    render.world.init_resource::<CameraQueueSnapshot>();
+    render
+        .world
+        .resource_mut::<Schedules>()
+        .get_mut(Render)
+        .expect("the Render schedule")
+        .add_systems(snapshot_camera_queues.in_set(RenderSystems::Prepare));
+}
+
+fn spawn_queue_camera(
+    app: &mut App,
+    layer_mask: u32,
+    translation: f32,
+) -> prism_ecs::prelude::Entity {
+    use prism_math::{Frustum, Mat4, Plane, Vec3, Vec4};
+
+    let mut camera = crate::visibility::PrismCamera::new(
+        Mat4::from_cols(
+            Vec4::new(1.0, 0.0, 0.0, 0.0),
+            Vec4::new(0.0, 1.0, 0.0, 0.0),
+            Vec4::new(0.0, 0.0, 1.0, 0.0),
+            Vec4::new(translation, 0.0, 0.0, 1.0),
+        ),
+        [0, 0, 4, 8],
+    );
+    camera.layer_mask = layer_mask;
+    app.world_mut().spawn((
+        camera,
+        crate::visibility::PrismFrustum(Frustum::from_planes([
+            Plane::new(Vec3::X, 10.0),
+            Plane::new(-Vec3::X, 10.0),
+            Plane::new(Vec3::Y, 10.0),
+            Plane::new(-Vec3::Y, 10.0),
+            Plane::new(-Vec3::Z, 1.0),
+            Plane::new(Vec3::Z, 100.0),
+        ])),
+        prism_transform::GlobalTransform::IDENTITY,
+    ))
+}
+
+#[test]
+fn the_queue_stage_admits_multiple_cameras_including_empty_work() {
+    let mut app = app_on_null_backend(RenderAppConfig::new(Extent3d::new_2d(8, 8)));
+    queue_scene_fixture(&mut app);
+    capture_camera_queues(&mut app);
+    // This camera's layer excludes the object. A valid empty camera must still
+    // reserve a frame slot, rather than inheriting another camera's draws.
+    let second = spawn_queue_camera(&mut app, 2, 0.25);
+
+    app.update();
+
+    let render = app.get_sub_app(RenderApp).expect("the render sub-app");
+    let views = render.world.resource::<ExtractedVisibilityViews>();
+    assert_eq!(views.len(), 2, "both validated cameras survive extraction");
+    assert_eq!(views.get(second).unwrap().work.len(), 0);
+    let stats = render.world.resource::<RenderFrameStats>();
+    assert_eq!(stats.draws_queued, 1);
+    assert_eq!(stats.view_queue_rejection, None);
+    let snapshot = render.world.resource::<CameraQueueSnapshot>();
+    assert!(snapshot.cameras.is_ready());
+    assert!(snapshot.cameras.rejections().is_empty());
+    assert_eq!(snapshot.cameras.len(), 2);
+    let cameras: Vec<_> = snapshot.cameras.iter().collect();
+    assert!(
+        (
+            cameras[0].camera().index(),
+            cameras[0].camera().generation()
+        ) < (
+            cameras[1].camera().index(),
+            cameras[1].camera().generation()
+        )
+    );
+    assert_eq!([cameras[0].frame_slot, cameras[1].frame_slot], [0, 1]);
+    assert_eq!(cameras.iter().map(|v| v.queues.len()).sum::<usize>(), 1);
+    let empty = snapshot.cameras.get(second).unwrap();
+    assert!(empty.queues.is_empty());
+    assert_eq!(empty.surface.viewport, [0, 0, 4, 8]);
+    assert_eq!(empty.surface.clip_from_world[3][0], 0.25);
+    assert!(snapshot.global.is_empty());
+}
+
+#[test]
+fn the_queue_stage_shares_materials_but_not_camera_frame_slots() {
+    let mut app = app_on_null_backend(RenderAppConfig::new(Extent3d::new_2d(8, 8)));
+    queue_scene_fixture(&mut app);
+    capture_camera_queues(&mut app);
+    let second = spawn_queue_camera(&mut app, 1, 0.25);
+    app.update();
+
+    let first_camera = {
+        let render = app.get_sub_app(RenderApp).unwrap();
+        let snapshot = render.world.resource::<CameraQueueSnapshot>();
+        assert!(snapshot.cameras.is_ready());
+        assert_eq!(snapshot.cameras.len(), 2);
+        let cameras: Vec<_> = snapshot.cameras.iter().collect();
+        assert_eq!([cameras[0].frame_slot, cameras[1].frame_slot], [0, 1]);
+        for camera in &cameras {
+            assert_eq!(camera.queues.phase(RenderPhase::Opaque).len(), 1);
+        }
+        let a = &cameras[0]
+            .queues
+            .dynamic_bind_groups(RenderPhase::Opaque, 0)[0];
+        let b = &cameras[1]
+            .queues
+            .dynamic_bind_groups(RenderPhase::Opaque, 0)[0];
+        assert_eq!(a.bind_group, b.bind_group);
+        assert_eq!(a.buffers, b.buffers, "geometry/material storage is shared");
+        assert_eq!(a.dynamic_offsets.len(), 2);
+        assert_eq!(b.dynamic_offsets.len(), 2);
+        assert_eq!(a.dynamic_offsets[0], 0);
+        assert!(b.dynamic_offsets[0] > a.dynamic_offsets[0]);
+        assert_eq!(a.dynamic_offsets[1], b.dynamic_offsets[1]);
+        assert_ne!(
+            cameras[0].surface.clip_from_world,
+            cameras[1].surface.clip_from_world
+        );
+        cameras
+            .iter()
+            .find(|v| v.camera() != second)
+            .unwrap()
+            .camera()
+    };
+
+    // Removing one camera discards its queue, and a later camera is admitted
+    // with current matrices rather than reusing the removed camera's snapshot.
+    assert!(app.world_mut().despawn(second));
+    app.update();
+    {
+        let render = app.get_sub_app(RenderApp).unwrap();
+        let snapshot = render.world.resource::<CameraQueueSnapshot>();
+        assert!(snapshot.cameras.is_ready());
+        assert_eq!(snapshot.cameras.len(), 1);
+        assert!(snapshot.cameras.get(second).is_none());
+        assert_eq!(snapshot.cameras.get(first_camera).unwrap().frame_slot, 0);
+    }
+    let replacement = spawn_queue_camera(&mut app, 1, -0.25);
+    app.update();
+    let render = app.get_sub_app(RenderApp).unwrap();
+    let snapshot = render.world.resource::<CameraQueueSnapshot>();
+    assert!(snapshot.cameras.is_ready());
+    assert_eq!(snapshot.cameras.len(), 2);
+    assert!(snapshot.cameras.get(second).is_none());
+    assert_eq!(
+        snapshot
+            .cameras
+            .get(replacement)
+            .unwrap()
+            .surface
+            .clip_from_world[3][0],
+        -0.25
+    );
+    assert_eq!(
+        snapshot
+            .cameras
+            .iter()
+            .map(|v| v.frame_slot)
+            .collect::<Vec<_>>(),
+        [0, 1]
+    );
+}
+
+#[test]
+fn the_queue_stage_preserves_explicit_global_and_window_producers() {
+    let mut app = app_on_null_backend(RenderAppConfig::new(Extent3d::new_2d(8, 8)));
+    queue_scene_fixture(&mut app);
+    capture_camera_queues(&mut app);
+    app.update();
+    // Reuse a real prepared draw/binding, so the frame consumer sees valid
+    // resources too. Queue must neither replace nor append to this producer.
+    let mut explicit = {
+        let render = app.get_sub_app(RenderApp).unwrap();
+        render
+            .world
+            .resource::<CameraQueueSnapshot>()
+            .cameras
+            .iter()
+            .next()
+            .unwrap()
+            .queues
+            .clone()
+    };
+    let original = explicit.phase(RenderPhase::Opaque)[0].clone();
+    let bindings = explicit
+        .dynamic_bind_groups(RenderPhase::Opaque, 0)
+        .to_vec();
+    explicit.clear();
+    let mut item = original;
+    item.order = 777;
+    explicit.push_with_bind_groups(RenderPhase::Opaque, item.clone(), bindings.clone());
+    {
+        let render = app.sub_app_mut(RenderApp).unwrap();
+        render.world.insert_resource(explicit.clone());
+        let windows = render.world.resource_mut::<crate::WindowRenderQueues>();
+        windows.0.insert(prism_window::WindowId(17), explicit);
+        windows
+            .0
+            .insert(prism_window::WindowId(18), RenderQueues::new());
+    }
+    app.update();
+    let render = app.get_sub_app(RenderApp).unwrap();
+    let snapshot = render.world.resource::<CameraQueueSnapshot>();
+    assert!(snapshot.cameras.is_ready());
+    assert_eq!(snapshot.cameras.len(), 1);
+    assert_eq!(snapshot.cameras.iter().next().unwrap().queues.len(), 1);
+    assert_eq!(snapshot.global.phase(RenderPhase::Opaque), &[item.clone()]);
+    assert_eq!(
+        snapshot.global.dynamic_bind_groups(RenderPhase::Opaque, 0),
+        bindings
+    );
+    assert_eq!(snapshot.windows.len(), 2);
+    let window = &snapshot.windows[&prism_window::WindowId(17)];
+    assert_eq!(window.phase(RenderPhase::Opaque), &[item]);
+    assert_eq!(window.dynamic_bind_groups(RenderPhase::Opaque, 0), bindings);
+    assert!(snapshot.windows[&prism_window::WindowId(18)].is_empty());
+}
+
+#[test]
+fn the_queue_stage_keeps_valid_camera_when_another_camera_is_invalid() {
+    let mut app = app_on_null_backend(RenderAppConfig::new(Extent3d::new_2d(8, 8)));
+    queue_scene_fixture(&mut app);
+    capture_camera_queues(&mut app);
+    let invalid = spawn_queue_camera(&mut app, 1, f32::NAN);
+    app.update();
+    let render = app.get_sub_app(RenderApp).unwrap();
+    let snapshot = render.world.resource::<CameraQueueSnapshot>();
+    assert!(snapshot.cameras.is_ready());
+    assert_eq!(snapshot.cameras.len(), 1);
+    assert!(snapshot.cameras.get(invalid).is_none());
+    assert_eq!(snapshot.cameras.iter().next().unwrap().queues.len(), 1);
+    assert_eq!(
+        render
+            .world
+            .resource::<RenderFrameStats>()
+            .view_queue_rejection,
+        None
+    );
+}
+
 /// The whole spine on hardware: a visible work item in the scene becomes a
 /// queued draw, the frame records it with the pipeline the mesh's own layout
 /// specialized, and the pixels land in the frame target — no test pushing items
@@ -5485,24 +7298,17 @@ fn the_spine_draws_the_visible_set_on_a_gpu() {
     let pixels = runtime
         .runtime()
         .queue()
-        .read_texture_rgba8(target.texture(), SIZE, SIZE);
-    let pixel = |x: u32, y: u32| {
-        let index = ((y * SIZE + x) * 4) as usize;
-        [
-            pixels[index],
-            pixels[index + 1],
-            pixels[index + 2],
-            pixels[index + 3],
-        ]
-    };
+        .read_texture_rgba16f(target.texture(), SIZE, SIZE);
+    assert_eq!(pixels.len(), (SIZE * SIZE) as usize);
+    let pixel = |x: u32, y: u32| pixels[(y * SIZE + x) as usize];
     assert_eq!(
         pixel(SIZE / 2, SIZE / 2),
-        [255, 255, 255, 255],
+        [1.0; 4],
         "the visible mesh was drawn (the spine's flat pipeline)"
     );
     assert_eq!(
         pixel(0, 0),
-        [0, 0, 0, 255],
+        [0.0, 0.0, 0.0, 1.0],
         "outside the mesh the frame's clear remains"
     );
 }
@@ -5588,9 +7394,7 @@ fn depth_resolves_occlusion_on_a_gpu() {
         GeometryLodRecord, GeometryPrimitiveKind, GeometryRecord,
     };
     use prism_render_material::MaterialRenderClass;
-    use prism_render_visibility::{
-        GpuRenderWorkItem, RenderPassMask, VisibilityStageMask, WorkSortKey,
-    };
+    use prism_render_visibility::{GeometryLod, GeometryLodChain};
 
     const SIZE: u32 = 8;
     let extent = Extent3d::new_2d(SIZE, SIZE);
@@ -5607,6 +7411,7 @@ fn depth_resolves_occlusion_on_a_gpu() {
         prism_render_driver_wgpu::WgpuInstance::new(),
         RenderAppConfig::new(extent),
     ));
+    app.add_plugins(crate::visibility::PrismVisibilityPlugin);
 
     // Two quads over the same screen area, one nearer (reversed-Z: bigger depth).
     let quad = |depth: f32| {
@@ -5640,6 +7445,54 @@ fn depth_resolves_occlusion_on_a_gpu() {
     let near_record = prism_render_material::fallback_material_record(near_material, 1);
     let mut far_record = prism_render_material::fallback_material_record(far_material, 1);
     far_record.render_class = MaterialRenderClass::Opaque;
+    {
+        let scene = app
+            .world_mut()
+            .resource_mut::<crate::visibility::PrismRenderScene>();
+        for (geometry, material) in [
+            (near_geometry, near_record.clone()),
+            (far_geometry, far_record.clone()),
+        ] {
+            scene.insert_geometry(GeometryLodChain {
+                geometry,
+                lods: vec![GeometryLod {
+                    level: 0,
+                    screen_error: 0.0,
+                    resident: true,
+                    fallback: true,
+                }],
+            });
+            scene.insert_material(material);
+        }
+    }
+    app.world_mut().spawn((
+        crate::visibility::PrismCamera::new(prism_math::Mat4::IDENTITY, [0, 0, SIZE, SIZE]),
+        crate::visibility::PrismFrustum(prism_math::Frustum::from_planes([
+            prism_math::Plane::new(prism_math::Vec3::X, 10.0),
+            prism_math::Plane::new(-prism_math::Vec3::X, 10.0),
+            prism_math::Plane::new(prism_math::Vec3::Y, 10.0),
+            prism_math::Plane::new(-prism_math::Vec3::Y, 10.0),
+            prism_math::Plane::new(-prism_math::Vec3::Z, 1.0),
+            prism_math::Plane::new(prism_math::Vec3::Z, 100.0),
+        ])),
+        prism_transform::GlobalTransform::from_transform(&prism_transform::Transform::from_xyz(
+            0.0, 0.0, 1.5,
+        )),
+    ));
+    for (geometry, material, depth) in [
+        (near_geometry, near_material, 0.9),
+        (far_geometry, far_material, 0.1),
+    ] {
+        app.world_mut().spawn((
+            crate::visibility::PrismRenderable::new(geometry, material),
+            prism_transform::ecs::LocalBounds(prism_math::Aabb3::from_center_half_extents(
+                prism_math::Vec3::new(0.0, 0.0, depth),
+                prism_math::Vec3::new(0.5, 0.5, 0.01),
+            )),
+            prism_transform::GlobalTransform::IDENTITY,
+            crate::visibility::PrismViewVisibility::default(),
+        ));
+    }
 
     let (device, colour_pipelines) = {
         let render = app.get_sub_app(RenderApp).expect("the render sub-app");
@@ -5737,35 +7590,12 @@ fn depth_resolves_occlusion_on_a_gpu() {
                         render_phase: RenderPhase::Opaque,
                         draw: None,
                         sort_class: crate::PassDescriptorClass::SURFACE,
+                        shader_package: None,
                     }],
                 )
                 .unwrap();
         }
     }
-    {
-        let work = render.world.resource_mut::<VisibilityWorkList>();
-        // The *far* quad sorts last, so it is drawn last: without a working depth
-        // test it would overwrite the near quad and the centre would be blue.
-        work.push(GpuRenderWorkItem {
-            scene: GenerationalHandle::new(10, 1),
-            geometry: near_geometry,
-            material: near_material,
-            lod_or_cluster: 0,
-            pass_mask: RenderPassMask::OPAQUE,
-            visibility_stages: VisibilityStageMask::EARLY,
-            sort_key: WorkSortKey::new(0, 0, 0, 0, 1),
-        });
-        work.push(GpuRenderWorkItem {
-            scene: GenerationalHandle::new(11, 1),
-            geometry: far_geometry,
-            material: far_material,
-            lod_or_cluster: 0,
-            pass_mask: RenderPassMask::OPAQUE,
-            visibility_stages: VisibilityStageMask::EARLY,
-            sort_key: WorkSortKey::new(0, 0, 0, 0, 9),
-        });
-    }
-
     app.update();
 
     let render = app.get_sub_app(RenderApp).expect("the render sub-app");
@@ -5782,11 +7612,12 @@ fn depth_resolves_occlusion_on_a_gpu() {
     let pixels = runtime
         .runtime()
         .queue()
-        .read_texture_rgba8(target.texture(), SIZE, SIZE);
-    let centre = ((SIZE / 2 * SIZE + SIZE / 2) * 4) as usize;
+        .read_texture_rgba16f(target.texture(), SIZE, SIZE);
+    assert_eq!(pixels.len(), (SIZE * SIZE) as usize);
+    let centre = (SIZE / 2 * SIZE + SIZE / 2) as usize;
     assert_eq!(
-        &pixels[centre..centre + 4],
-        &[255, 0, 0, 255],
+        pixels[centre],
+        [1.0, 0.0, 0.0, 1.0],
         "the nearer quad survives the later, farther draw"
     );
 }

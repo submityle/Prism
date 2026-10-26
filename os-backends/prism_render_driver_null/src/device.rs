@@ -133,6 +133,18 @@ impl NullDevice {
     /// Creates a null device reporting `caps`.
     #[must_use]
     pub(crate) fn new(caps: rhi::DeviceCapabilities) -> Self {
+        Self::new_with_capabilities(caps)
+    }
+
+    /// Creates an isolated resource-tracking device with explicit capabilities.
+    ///
+    /// Pair with [`crate::NullQueue::new`] for graph and capability-negotiation
+    /// tests. Unlike [`crate::NullInstance::new`], this does not select the
+    /// portable baseline: the caller chooses the simulated logical-device
+    /// limits. It does not execute shaders or certify real hardware support.
+    /// The default instance continues to report the eight-storage-buffer floor.
+    #[must_use]
+    pub fn new_with_capabilities(caps: rhi::DeviceCapabilities) -> Self {
         Self {
             inner: Arc::new(DeviceInner::new(caps)),
         }
