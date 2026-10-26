@@ -460,7 +460,7 @@ fn resident_cpu_page_uploads_through_the_render_bridge() {
 
     let recording_queue = RecordingQueue::default();
     let event = bridge
-        .upload_page(&residency, page, 3, &recording_queue)
+        .upload_page_deferred(&residency, page, 3, GpuCompletionValue(3), &recording_queue)
         .expect("resident page upload");
     assert!(matches!(
         event,
@@ -470,7 +470,7 @@ fn resident_cpu_page_uploads_through_the_render_bridge() {
     let first_allocation = bridge.allocation(page).expect("published GPU allocation");
 
     let replaced = bridge
-        .upload_page(&residency, page, 4, &recording_queue)
+        .upload_page_deferred(&residency, page, 4, GpuCompletionValue(4), &recording_queue)
         .expect("resident page replacement");
     let second_allocation = bridge.allocation(page).expect("replacement allocation");
     assert_ne!(first_allocation, second_allocation);
@@ -523,7 +523,7 @@ fn render_bridge_deferred_replacement_requires_completion_before_reuse() {
     let recording_queue = RecordingQueue::default();
 
     let first = bridge
-        .upload_page(&residency, page, 1, &recording_queue)
+        .upload_page_deferred(&residency, page, 1, GpuCompletionValue(1), &recording_queue)
         .expect("initial upload");
     let first = match first {
         FixedPagePoolEvent::Allocated { allocation, .. } => allocation,

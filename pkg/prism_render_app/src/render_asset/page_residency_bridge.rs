@@ -107,61 +107,6 @@ impl FixedPageResidencyBridge {
             .flatten()
     }
 
-    /// Uploads one already-resident CPU page, replacing its prior GPU range
-    /// atomically when one exists.
-    ///
-    /// This compatibility API performs immediate replacement. Callers that
-    /// may still have in-flight consumers must use
-    /// [`Self::upload_page_deferred`] and provide the actual completion value.
-    pub fn upload_page(
-        &mut self,
-        residency: &PageResidency,
-        page: PageId,
-        revision: u64,
-        queue: &dyn RenderQueue,
-    ) -> Result<FixedPagePoolEvent, PageResidencyBridgeError> {
-        if residency.page_size().bytes() != self.pool.page_size() {
-            return Err(PageResidencyBridgeError::PageSizeMismatch {
-                cpu: residency.page_size().bytes(),
-                gpu: self.pool.page_size(),
-            });
-        }
-        let bytes = residency
-            .resident_bytes(page)
-            .ok_or(PageResidencyBridgeError::PageNotResident(page))?;
-        let upload = FixedPageUpload::new(revision, bytes);
-        let event = if let Some(previous) = self.allocations.get(&page).copied() {
-            let mut transaction = self
-                .pool
-                .begin_replace(previous, upload)
-                .map_err(PageResidencyBridgeError::Pool)?;
-            transaction
-                .upload(queue)
-                .map_err(PageResidencyBridgeError::Pool)?;
-            transaction
-                .commit()
-                .map_err(PageResidencyBridgeError::Pool)?
-        } else {
-            let mut transaction = self
-                .pool
-                .begin_upload(upload)
-                .map_err(PageResidencyBridgeError::Pool)?;
-            transaction
-                .upload(queue)
-                .map_err(PageResidencyBridgeError::Pool)?;
-            transaction
-                .commit()
-                .map_err(PageResidencyBridgeError::Pool)?
-        };
-        let allocation = match event {
-            FixedPagePoolEvent::Allocated { allocation, .. }
-            | FixedPagePoolEvent::Replaced { allocation, .. } => allocation,
-            FixedPagePoolEvent::Released { .. } => unreachable!("upload cannot release a page"),
-        };
-        self.allocations.insert(page, allocation);
-        Ok(event)
-    }
-
     /// Uploads a resident page and retires its previous GPU allocation until
     /// the caller-provided completion value has been observed.
     ///
@@ -186,7 +131,24 @@ impl FixedPageResidencyBridge {
             .ok_or(PageResidencyBridgeError::PageNotResident(page))?;
         let upload = FixedPageUpload::new(revision, bytes);
         let Some(previous) = self.allocations.get(&page).copied() else {
-            return self.upload_page(residency, page, revision, queue);
+            let mut transaction = self
+                .pool
+                .begin_upload(upload)
+                .map_err(PageResidencyBridgeError::Pool)?;
+            transaction
+                .upload(queue)
+                .map_err(PageResidencyBridgeError::Pool)?;
+            let event = transaction
+                .commit()
+                .map_err(PageResidencyBridgeError::Pool)?;
+            let allocation = match event {
+                FixedPagePoolEvent::Allocated { allocation, .. } => allocation,
+                FixedPagePoolEvent::Replaced { .. } | FixedPagePoolEvent::Released { .. } => {
+                    unreachable!("initial upload cannot replace or release a page")
+                }
+            };
+            self.allocations.insert(page, allocation);
+            return Ok(event);
         };
         let mut transaction = self
             .pool
