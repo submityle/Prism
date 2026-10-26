@@ -344,15 +344,21 @@ vm.run_all_with_env(&mut host, &env)?;
 
 ---
 
-## 性能与扩展计划
+## 性能与扩展状态
 
-设计文档内已铺好的优化点（按优先级）：
+当前非 WASM 热路径已经具备可测量的基线：
 
-- **P0**：预编译 `TypedCallSite`（消除运行期 HashMap）、Pure cluster 跨 block 共享、Store 池化（Pure 节点）
-- **P1**：常量折叠 + DCE、Receipt 模式分级、副作用感知并行（`Parallel` 节点）、Slot 内联 + Resource handle、变量短路、Latent 异步调度
-- **P2**：Hot-Path AOT 融合（标记 `hot` 的子图编译为单个 wasm Component）、确定性回放、Snapshot 懒序列化
+- 编译与执行 Criterion 基准覆盖 8 / 64 / 256 节点图。
+- scheduler admission 基准覆盖 64 / 1,024 / 4,096 个任务，并验证 run identity O(1) 去重路径。
+- `FairScheduler` 的过期、完成、租户公平和 determinism gate 均有回归测试。
+- VM 使用 slot 扁平数组；后续优化应以现有 Criterion 基线和回归测试为依据，避免牺牲确定性。
 
----
+运行基准：
+
+```bash
+cargo bench --locked -p benches --bench prism_visual_scripting --offline
+```
+
 
 ## 接入宿主拥有的 WASM 沙箱
 
@@ -402,7 +408,7 @@ pub enum VsError {
 cargo test -p prism_visual_scripting
 ```
 
-当前测试：4 个。集成测试位于 `tests/integration.rs`：
+当前测试覆盖编译器、slot VM、scheduler、await broker、fork/join、snapshot、迁移链、确定性门禁和端到端集成路径，运行：
 
 - `library_registers_builtins` — 注册表自检
 - `end_to_end_branch_default_false` — Begin → Branch → Print 完整流
