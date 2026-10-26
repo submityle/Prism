@@ -1,4 +1,4 @@
-//! 流程控制节点：分支 / 直通。
+//! 流程控制节点：分支 / 序列。
 
 use super::pins::{data_in, exec_in, exec_out};
 use crate::registry::{ExecNext, FnRunner, NodeDefinition, NodeLibrary, Purity, RunnerKind};
@@ -20,12 +20,17 @@ pub fn register(lib: &mut NodeLibrary) {
         })),
     });
 
-    // flow.passthrough: 单路直通（占位，未来可扩展为 sequence 多路）
+    // flow.sequence: explicit single-successor sequencing boundary.
+    // Keeping this as a named control node makes the graph intent observable to
+    // compilers, diagnostics, and editor tooling instead of hiding it in a
+    // generic pass-through node.
     lib.register(NodeDefinition {
-        id: "flow.passthrough".into(),
+        id: "flow.sequence".into(),
         purity: Purity::Impure,
         inputs: vec![exec_in()],
         outputs: vec![exec_out("then")],
-        runner: RunnerKind::sync(FnRunner(|_in, _out, _cx| Ok(ExecNext::Pin("then".into())))),
+        runner: RunnerKind::sync(FnRunner(|_input, _output, _context| {
+            Ok(ExecNext::Pin("then".into()))
+        })),
     });
 }

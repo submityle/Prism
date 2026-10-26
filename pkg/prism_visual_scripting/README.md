@@ -3,9 +3,7 @@
 可视化脚本引擎 —— Graph 编排 + 扁平 IR + 解释器，
 为「事件驱动、节点可热替换、可审计、可嵌入」的本地脚本场景打底。
 
-不假设运行环境：节点既可以是纯 Rust 闭包（内置），也可以是
-[`host-owned WASM sandbox`](../host-owned WASM sandbox/) 沙箱里的 WASM Component（实现一个 `NodeRunner`
-trait 即可接入）。编译器与 VM 对后端透明，同一个 Graph 可混用 Rust / Wasm /
+不假设运行环境：节点既可以是纯 Rust 闭包（内置），也可以接入**宿主拥有的 WASM 沙箱**（实现一个 `NodeRunner` trait 即可接入）。编译器与 VM 对后端透明，同一个 Graph 可混用 Rust / Wasm /
 未来的 RPC 节点。
 
 ---
@@ -128,7 +126,7 @@ src/
 └── builtin/          内置节点
     ├── pins.rs           exec_in / exec_out / data_in / data_out 助手
     ├── events.rs         event.begin
-    ├── flow.rs           flow.branch / flow.passthrough
+    ├── flow.rs           flow.branch / flow.sequence
     ├── math.rs           math.add / math.mul
     ├── compare.rs        cmp.greater
     ├── debug.rs          debug.print
@@ -324,7 +322,7 @@ vm.run_all_with_env(&mut host, &env)?;
 |---|---|---|---|---|
 | `event.begin` | Impure | — | `then: exec` | 默认事件入口 |
 | `flow.branch` | Impure | `exec_in`, `cond: bool` | `true: exec`, `false: exec` | 条件分支 |
-| `flow.passthrough` | Impure | `exec_in` | `then: exec` | 占位直通 |
+| `flow.sequence` | Impure | `exec_in` | `then: exec` | 显式单后继顺序边界 |
 | `math.add` | Pure | `a, b: f64` | `sum: f64` | 加法 |
 | `math.mul` | Pure | `a, b: f64` | `product: f64` | 乘法 |
 | `cmp.greater` | Pure | `a, b: f64` | `out: bool` | `a > b` |
@@ -355,13 +353,13 @@ vm.run_all_with_env(&mut host, &env)?;
 
 ---
 
-## 接入 host-owned WASM sandbox
+## 接入宿主拥有的 WASM 沙箱
 
-`NodeRunner` 是 trait 对象，新增一个 `WasmEffectExecutor` 即可：
+`NodeRunner` 是 trait 对象；对于声明式副作用，可直接使用 crate 提供的 `WasmEffectExecutor`。节点级 WASM runner 则由宿主实现，并自行负责沙箱策略、资源预算和模块准入：
 
 ```rust
 struct WasmRunner {
-    sandbox: Arc<host-owned WASM sandbox::Sandbox>,
+    host: Arc<dyn WasmHost>,
     module: String,
     export: String,
 }

@@ -1,10 +1,10 @@
 //! 端到端集成测试。
 
+use prism_visual_scripting::prelude::*;
+use prism_visual_scripting::{compile_to_plan, instantiate, PinIndex};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
-use prism_visual_scripting::prelude::*;
-use prism_visual_scripting::{PinIndex, compile_to_plan, instantiate};
 
 fn make_node(id: NodeId, def: &str) -> Node {
     Node {
@@ -256,6 +256,7 @@ fn library_registers_builtins() {
     let lib = NodeLibrary::with_builtins();
     assert!(lib.get("math.add").is_some());
     assert!(lib.get("flow.branch").is_some());
+    assert!(lib.get("flow.sequence").is_some());
     assert!(lib.get("event.begin").is_some());
 }
 
