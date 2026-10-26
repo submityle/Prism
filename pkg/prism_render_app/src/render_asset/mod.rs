@@ -20,6 +20,7 @@ mod context;
 mod extract;
 #[cfg(feature = "fixed-page-feedback")]
 mod page_feedback;
+mod lighting_virtual_residency;
 mod page_pool;
 mod page_residency_bridge;
 #[cfg(feature = "resident-page-streaming")]
@@ -54,6 +55,10 @@ pub use page_pool::{
     FixedPagePoolEvent, FixedPageReclaimEvent, FixedPageUpload, PageAllocation, PagePoolError,
     PageReleaseTransaction, PageReplaceTransaction, PageUploadTransaction,
 };
+pub use lighting_virtual_residency::{
+    LightingPageUpload, LightingResidencySync, LightingVirtualResidencyError,
+    LightingVirtualResidencyGpuAdapter,
+};
 pub use page_residency_bridge::{FixedPageResidencyBridge, PageResidencyBridgeError};
 #[cfg(feature = "resident-page-streaming")]
 pub use page_resident::{
@@ -77,7 +82,11 @@ pub(crate) use stage::{
 pub use stage::{prepare_assets, register_render_assets, AssetSyncStats};
 pub use table::RenderAssets;
 pub use virtual_geometry_gpu::{
+    register_virtual_geometry_publication_bridge, ExtractedVirtualGeometryPublicationRequests,
     VirtualGeometryGpuBuffers, VirtualGeometryGpuPublicationStore, VirtualGeometryGpuStoreError,
+    VirtualGeometryPublicationDiagnostics, VirtualGeometryPublicationRequest,
+    VirtualGeometryPublicationRequests, VirtualGeometryResidencyAssetSnapshot,
+    VirtualGeometryResidencySnapshot,
 };
 
 /// An asset the renderer keeps a separate GPU form of.
