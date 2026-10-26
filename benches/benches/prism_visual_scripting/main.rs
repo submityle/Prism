@@ -6,7 +6,8 @@
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use prism_visual_scripting::{
-    compile, Edge, Endpoint, Graph, InMemoryHost, Node, NodeDefRef, NodeLibrary, Vm,
+    compile, Edge, Endpoint, FairScheduler, Graph, InMemoryHost, Node, NodeDefRef, NodeLibrary,
+    SchedulerLimits, Vm,
 };
 use std::collections::HashMap;
 use std::hint::black_box;
@@ -89,5 +90,43 @@ fn bench_execute(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_compile, bench_execute);
+fn bench_scheduler_admission(c: &mut Criterion) {
+    let mut group = c.benchmark_group("prism_visual_scripting/scheduler_admit");
+    for &count in &[64usize, 1_024, 4_096] {
+        group.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, &count| {
+            b.iter_batched(
+                || {
+                    let mut scheduler = FairScheduler::new(SchedulerLimits {
+                        max_active: count,
+                        max_active_per_tenant: count,
+                        max_queued: count + 1,
+                    })
+                    .expect("benchmark scheduler limits are valid");
+                    for index in 0..count {
+                        scheduler
+                            .admit(format!("run-{index}"), "bench", 0, None)
+                            .expect("benchmark admission succeeds");
+                    }
+                    scheduler
+                },
+                |mut scheduler| {
+                    black_box(
+                        scheduler
+                            .admit("run-0", "bench", 0, None)
+                            .expect("duplicate lookup"),
+                    );
+                },
+                criterion::BatchSize::SmallInput,
+            );
+        });
+    }
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_compile,
+    bench_execute,
+    bench_scheduler_admission
+);
 criterion_main!(benches);
