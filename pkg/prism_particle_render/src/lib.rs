@@ -7,6 +7,7 @@
 
 mod adapter;
 mod fabric_gpu;
+mod transport;
 
 pub use adapter::{
     particle_resource_payload, particle_resource_template, ParticleExtractBatch,
@@ -17,4 +18,9 @@ pub use adapter::{
 };
 pub use fabric_gpu::{
     ParticleFabricGpuBuffer, ParticleFabricGpuDraw, ParticleFabricScenePublication,
+};
+pub use transport::{
+    ParticleFabricBufferLease, ParticleFabricDeviceGeneration, ParticleFabricLeaseError,
+    ParticleFabricLeaseId, ParticleFabricLeaseIssuer, ParticleFabricLeaseProvenance,
+    ParticleFabricSceneTransport, ParticleFabricTransportError,
 };
