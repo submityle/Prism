@@ -465,7 +465,9 @@ fn assert_sampled_mips(
         );
         queue.submit(&[encoder.finish()]);
         assert!(queue.wait_idle(), "mip {level} sampling must finish");
-        let sampled = queue.read_texture_rgba8(target, extent.width, extent.height);
+        let sampled = queue
+            .read_texture_rgba8(target, extent.width, extent.height)
+            .expect("PNG mip GPU readback must complete");
         device.destroy_texture_view(view);
         device.destroy_texture(target);
         device.destroy_render_pipeline(pipeline);

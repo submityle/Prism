@@ -260,7 +260,12 @@ fn batch_deformation_matches_cpu_on_a_real_gpu_and_retains_history() {
         let bytes = count as u64 * 32;
         let first = cache.submit_pose(queue, 10, pose).unwrap();
         assert!(runtime.wait_idle());
-        assert_close(&queue.read_buffer(first.current, bytes), &expected);
+        assert_close(
+            &queue
+                .read_buffer(first.current, bytes)
+                .expect("first deformation output readback must complete"),
+            &expected,
+        );
         assert!(!first.history_valid);
 
         // A rejected newer pose must leave current/history buffers intact.
@@ -273,7 +278,12 @@ fn batch_deformation_matches_cpu_on_a_real_gpu_and_retains_history() {
             Err(DeformationCacheError::Input(_))
         ));
         assert_eq!(cache.output(), Some(first));
-        assert_close(&queue.read_buffer(first.current, bytes), &expected);
+        assert_close(
+            &queue
+                .read_buffer(first.current, bytes)
+                .expect("rejected deformation output readback must complete"),
+            &expected,
+        );
         let overflow = DeformationPose {
             morph_weights: &[f32::MAX, 0.0],
             ..pose
@@ -297,16 +307,36 @@ fn batch_deformation_matches_cpu_on_a_real_gpu_and_retains_history() {
         assert!(runtime.wait_idle());
         assert!(second.history_valid);
         assert_eq!(second.previous, first.current);
-        assert_close(&queue.read_buffer(second.previous, bytes), &expected);
-        assert_close(&queue.read_buffer(second.current, bytes), &second_expected);
+        assert_close(
+            &queue
+                .read_buffer(second.previous, bytes)
+                .expect("deformation history readback must complete"),
+            &expected,
+        );
+        assert_close(
+            &queue
+                .read_buffer(second.current, bytes)
+                .expect("second deformation output readback must complete"),
+            &second_expected,
+        );
         let third = cache.submit_pose(queue, 12, pose).unwrap();
         assert!(runtime.wait_idle());
         assert_eq!(
             third.current, first.current,
             "two outputs reused, no reallocation"
         );
-        assert_close(&queue.read_buffer(third.previous, bytes), &second_expected);
-        assert_close(&queue.read_buffer(third.current, bytes), &expected);
+        assert_close(
+            &queue
+                .read_buffer(third.previous, bytes)
+                .expect("reused deformation history readback must complete"),
+            &second_expected,
+        );
+        assert_close(
+            &queue
+                .read_buffer(third.current, bytes)
+                .expect("reused deformation output readback must complete"),
+            &expected,
+        );
         cache.invalidate_history();
         let teleported = cache.submit_pose(queue, 13, pose).unwrap();
         assert!(!teleported.history_valid);
@@ -347,7 +377,12 @@ fn batch_deformation_matches_cpu_on_a_real_gpu_and_retains_history() {
     let mut cache = DeformationCache::new(runtime.device_handle(), queue, mesh).unwrap();
     let output = cache.submit_pose(queue, 1, pose).unwrap();
     assert!(runtime.wait_idle());
-    assert_close(&queue.read_buffer(output.current, 3 * 32), &expected);
+    assert_close(
+        &queue
+            .read_buffer(output.current, 3 * 32)
+            .expect("single-pose deformation readback must complete"),
+        &expected,
+    );
 }
 
 #[test]
@@ -508,15 +543,17 @@ fn deformed_current_and_previous_are_vertex_inputs_for_a_real_gpu_draw() {
         let _ = builder.read_vertex(previous);
         move |ctx| {
             ctx.set_render_pipeline(pipeline);
-            ctx.set_vertex_buffer(0, ctx.buffer(current), 0);
-            ctx.set_vertex_buffer(1, ctx.buffer(previous), 0);
+            ctx.set_vertex_buffer(0, ctx.buffer(current), 0, None);
+            ctx.set_vertex_buffer(1, ctx.buffer(previous), 0, None);
             ctx.draw(0..6, 0..1);
         }
     });
     let recorded = graph.execute(device, queue).unwrap();
     assert!(runtime.wait_idle());
     recorded.release(device);
-    let pixels = queue.read_texture_rgba8(texture, 16, 16);
+    let pixels = queue
+        .read_texture_rgba8(texture, 16, 16)
+        .expect("deformed draw GPU readback must complete");
     let pixel = |x: usize, y: usize| &pixels[(y * 16 + x) * 4..(y * 16 + x + 1) * 4];
     assert_eq!(
         pixel(12, 8),

@@ -393,10 +393,12 @@ fn close(actual: f32, expected: f32) {
 }
 
 fn assert_gpu_buffers(state: &ParticleGpuState, queue: &WgpuQueue, tick: u64) -> f32 {
-    let particles = queue.read_buffer(
-        state.gpu_simulation.particles(),
-        4 * prism_render_gpudriven::GPU_PARTICLE_STRIDE,
-    );
+    let particles = queue
+        .read_buffer(
+            state.gpu_simulation.particles(),
+            4 * prism_render_gpudriven::GPU_PARTICLE_STRIDE,
+        )
+        .expect("particle multiview pool readback must complete");
     let live: Vec<_> = particles
         .chunks_exact(prism_render_gpudriven::GPU_PARTICLE_STRIDE as usize)
         .enumerate()
@@ -413,12 +415,16 @@ fn assert_gpu_buffers(state: &ParticleGpuState, queue: &WgpuQueue, tick: u64) ->
     close(scalar(particle, 4), 0.0);
     close(scalar(particle, 8), 0.5);
     close(scalar(particle, 12), 0.02 * tick as f32);
-    let count = queue.read_buffer(state.gpu_renderer.input_count_buffer(), 4);
+    let count = queue
+        .read_buffer(state.gpu_renderer.input_count_buffer(), 4)
+        .expect("particle multiview input-count readback must complete");
     assert_eq!(word(&count, 0), 1, "bridge output count is GPU-authored");
-    let stream = queue.read_buffer(
-        state.gpu_renderer.input_buffer(),
-        PARTICLE_RENDER_INPUT_STRIDE,
-    );
+    let stream = queue
+        .read_buffer(
+            state.gpu_renderer.input_buffer(),
+            PARTICLE_RENDER_INPUT_STRIDE,
+        )
+        .expect("particle multiview stream readback must complete");
     close(scalar(&stream, 0), x);
     close(scalar(&stream, 4), 0.0);
     close(scalar(&stream, 8), 0.5);
@@ -440,19 +446,25 @@ fn assert_gpu_buffers(state: &ParticleGpuState, queue: &WgpuQueue, tick: u64) ->
                 private_work.insert(renderer.sprite_args()),
                 "camera/material work must not alias"
             );
-            let control = queue.read_buffer(renderer.control(), 16);
+            let control = queue
+                .read_buffer(renderer.control(), 16)
+                .expect("particle camera control readback must complete");
             assert_eq!(
                 word(&control, 0),
                 1,
                 "every camera/material must cull the live particle"
             );
-            let visible = queue.read_buffer(renderer.visible_indices(), 4);
+            let visible = queue
+                .read_buffer(renderer.visible_indices(), 4)
+                .expect("particle camera visibility readback must complete");
             assert_eq!(
                 word(&visible, 0),
                 0,
                 "visible index addresses the compact bridge stream"
             );
-            let args = queue.read_buffer(renderer.sprite_args(), 16);
+            let args = queue
+                .read_buffer(renderer.sprite_args(), 16)
+                .expect("particle camera draw-args readback must complete");
             assert_eq!(word(&args, 0), 6);
             assert_eq!(
                 word(&args, 4),
@@ -499,11 +511,14 @@ fn assert_image(pixels: &[[f32; 4]], width: u32, height: u32, expected_x: f32) -
 }
 
 fn read_output(queue: &WgpuQueue, output: &Output, world_x: f32) -> [Vec<[f32; 4]>; 2] {
-    let image =
-        queue.read_texture_rgba16f(output.target.texture(), OUTPUT_EXTENT[0], OUTPUT_EXTENT[1]);
+    let image = queue
+        .read_texture_rgba16f(output.target.texture(), OUTPUT_EXTENT[0], OUTPUT_EXTENT[1])
+        .expect("particle multiview composite readback must complete");
     let local: [_; 2] = core::array::from_fn(|camera| {
         let [_, _, width, height] = RECTS[camera];
-        let pixels = queue.read_texture_rgba16f(output.cameras[camera].texture(), width, height);
+        let pixels = queue
+            .read_texture_rgba16f(output.cameras[camera].texture(), width, height)
+            .expect("particle multiview camera readback must complete");
         assert_image(&pixels, width, height, world_x + PROJECTION_X[camera]);
         pixels
     });

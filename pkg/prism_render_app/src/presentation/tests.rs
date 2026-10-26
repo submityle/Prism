@@ -164,7 +164,9 @@ fn native_particle_multi_output_case(first: FirstParticleOutput) {
             cameras: &cameras,
             targets: &mut camera_targets,
             frame_index: frame,
+            taa_history: &mut crate::TaaHistoryCache::default(),
             texture_imports: &texture_imports,
+            composite_material_buffers: None,
             ember: Some(&ember),
             ember_external: &external,
         };
@@ -513,7 +515,9 @@ fn physical_gpu_hdr_present_applies_display_transform_once_for_unorm_and_srgb_ta
             rows_per_image: Some(extent.height),
         },
     );
-    let linear_capture = queue.read_texture_rgba16f(target.texture(), extent.width, extent.height);
+    let linear_capture = queue
+        .read_texture_rgba16f(target.texture(), extent.width, extent.height)
+        .expect("presentation HDR seed readback must complete");
     assert_eq!(linear_capture.as_slice(), uploaded.as_slice());
 
     let lifetime = WindowLifetime::new();
@@ -591,11 +595,14 @@ fn physical_gpu_hdr_present_applies_display_transform_once_for_unorm_and_srgb_ta
         let recorded = graph
             .execute(&*device, &queue)
             .expect("HDR compute and present graph");
-        let display =
-            queue.read_texture_rgba8(transform.output_texture(), extent.width, extent.height);
+        let display = queue
+            .read_texture_rgba8(transform.output_texture(), extent.width, extent.height)
+            .expect("presentation SDR readback must complete");
         assert_eq!(display.len(), pixels.len() * 4, "SDR capture stays RGBA8");
         for (texture, _, format, _) in &outputs {
-            let presented = queue.read_texture_rgba8(*texture, extent.width, extent.height);
+            let presented = queue
+                .read_texture_rgba8(*texture, extent.width, extent.height)
+                .expect("presented surface readback must complete");
             assert_eq!(presented.len(), display.len());
             for (index, ((source, encoded), actual)) in uploaded
                 .iter()
@@ -628,7 +635,9 @@ fn physical_gpu_hdr_present_applies_display_transform_once_for_unorm_and_srgb_ta
             }
         }
         assert_eq!(
-            queue.read_texture_rgba16f(target.texture(), extent.width, extent.height),
+            queue
+                .read_texture_rgba16f(target.texture(), extent.width, extent.height)
+                .expect("presentation HDR preservation readback must complete"),
             linear_capture,
             "linear capture must retain HDR/negative values across exposure changes"
         );

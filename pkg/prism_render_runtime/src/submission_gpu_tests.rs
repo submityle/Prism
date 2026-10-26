@@ -163,8 +163,11 @@ fn owned_buffers(
 
 fn assert_payload(runtime: &WgpuRuntime, buffer: rhi::BufferId) {
     assert_eq!(
-        runtime.queue().read_buffer(buffer, BUFFER_SIZE),
-        PAYLOAD,
+        runtime
+            .queue()
+            .read_buffer(buffer, BUFFER_SIZE)
+            .expect("owned-submission GPU readback must complete"),
+        PAYLOAD.to_vec(),
         "GPU transfer/readback payload mismatch for {buffer:?}"
     );
 }

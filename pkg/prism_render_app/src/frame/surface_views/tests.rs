@@ -61,7 +61,7 @@ fn finalize_test_graph(
         NullInstance::default(),
         Extent3d::new_2d(1, 1),
     )
-        .expect("null render runtime initializes");
+    .expect("null render runtime initializes");
     finalize_surface_view_graph(
         prepared,
         particle,
@@ -200,18 +200,17 @@ fn surface_graph_resolves_sampled_texture_import_before_target_append() {
     let (queues, functions) = sampled_queue(view);
     let views = [surface_view_input(&local, &queues)];
 
-    let prepared =
-        prepare_surface_view_graph(
-            &output,
-            &queues,
-            &functions,
-            None,
-            None,
-            &views,
-            &imports,
-            crate::TaaOutput::PrimaryWindow,
-        )
-            .expect("published sampled texture import is resolved during target construction");
+    let prepared = prepare_surface_view_graph(
+        &output,
+        &queues,
+        &functions,
+        None,
+        None,
+        &views,
+        &imports,
+        crate::TaaOutput::PrimaryWindow,
+    )
+    .expect("published sampled texture import is resolved during target construction");
     assert!(prepared.textures.contains_key(&view));
     assert!(prepared.graph.compile().is_ok());
 
@@ -431,7 +430,9 @@ fn physical_gpu_camera_clear_modes_preserve_or_clear_private_hdr_attachments() {
         let recorded = graph
             .execute(&device, &queue)
             .expect("camera clear graph executes");
-        let pixels = queue.read_texture_rgba16f(output.texture(), extent.width, extent.height);
+        let pixels = queue
+            .read_texture_rgba16f(output.texture(), extent.width, extent.height)
+            .expect("camera output GPU readback must complete");
         assert!(
             pixels.iter().all(|pixel| *pixel == expected),
             "mode={mode:?}: {pixels:?}"
@@ -599,7 +600,7 @@ fn surface_graph_defers_sorted_camera_upscales_and_keeps_targets_local() {
         None,
         &views,
         &FrameGraphTextureImports::default(),
-            crate::TaaOutput::PrimaryWindow,
+        crate::TaaOutput::PrimaryWindow,
     )
     .unwrap();
     assert_eq!(prepared.stages().upscale_passes, 2);

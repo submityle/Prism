@@ -3806,7 +3806,9 @@ fn wgpu_backend_records_and_clears_a_real_frame() {
             },
         );
         assert!(runtime.runtime().wait_idle());
-        let prefill = queue.read_texture_rgba16f(target.texture(), SIZE, SIZE);
+        let prefill = queue
+            .read_texture_rgba16f(target.texture(), SIZE, SIZE)
+            .expect("pre-fill texture readback must complete");
         assert_eq!(prefill.len(), (SIZE * SIZE) as usize);
         assert!(
             prefill.iter().all(|pixel| *pixel == [1.0; 4]),
@@ -3834,7 +3836,8 @@ fn wgpu_backend_records_and_clears_a_real_frame() {
     let pixels = runtime
         .runtime()
         .queue()
-        .read_texture_rgba16f(target.texture(), SIZE, SIZE);
+        .read_texture_rgba16f(target.texture(), SIZE, SIZE)
+        .expect("frame target texture readback must complete");
     assert_eq!(pixels.len(), (SIZE * SIZE) as usize);
     let first_nonzero = pixels
         .iter()
@@ -3868,6 +3871,7 @@ fn wgpu_backend_records_and_clears_a_real_frame() {
             lighting.gi_output_buffer(),
             crate::lighting_gpu::OUTPUT_BYTES,
         )
+        .expect("GI output buffer readback must complete")
         .chunks_exact(4)
         .map(|bytes| f32::from_ne_bytes(bytes.try_into().expect("f32-sized GI output")))
         .collect::<Vec<_>>();
@@ -3903,7 +3907,8 @@ fn wgpu_backend_records_and_clears_a_real_frame() {
     let hdr_pixels = runtime
         .runtime()
         .queue()
-        .read_texture_rgba16f(target.texture(), SIZE, SIZE);
+        .read_texture_rgba16f(target.texture(), SIZE, SIZE)
+        .expect("direct-light HDR readback must complete");
     assert_eq!(hdr_pixels.len(), (SIZE * SIZE) as usize);
     for channel in 0..3 {
         let expected = expected_direct[channel] + expected_gi[0][channel];
@@ -4043,7 +4048,10 @@ fn physical_gpu_area_direct_light_matches_cpu_oracle_for_rect_disk_and_capsule()
         write_lighting_test_gbuffer_pixel(runtime.queue(), &target, 0, 0, surface, 0xf123_4567);
     let expected = evaluate_deterministic_direct(gbuffer_surface, &[], &[], &areas);
     dispatch_lighting_test_composite(&lighting, &plan, &target, &runtime);
-    let hdr = runtime.queue().read_texture_rgba16f(target.texture(), 1, 1);
+    let hdr = runtime
+        .queue()
+        .read_texture_rgba16f(target.texture(), 1, 1)
+        .expect("area-light HDR readback must complete");
     assert_eq!(hdr.len(), 1);
     for channel in 0..3 {
         assert!(
@@ -5220,6 +5228,7 @@ fn physical_gpu_offscreen_host_graph_traces_builds_gi_and_composites() {
             lighting.gi_output_buffer(),
             crate::lighting_gpu::OUTPUT_BYTES,
         )
+        .expect("host graph GI output readback must complete")
         .chunks_exact(4)
         .map(|bytes| f32::from_ne_bytes(bytes.try_into().expect("f32-sized output")))
         .collect::<Vec<_>>();
@@ -5238,7 +5247,8 @@ fn physical_gpu_offscreen_host_graph_traces_builds_gi_and_composites() {
     // scene -> trace -> GI -> composite parity.
     let hdr = runtime
         .queue()
-        .read_texture_rgba16f(target.texture(), extent.width, extent.height);
+        .read_texture_rgba16f(target.texture(), extent.width, extent.height)
+        .expect("host graph HDR readback must complete");
     assert_eq!(hdr.len(), (extent.width * extent.height) as usize);
     assert!(expected_gi.iter().any(|channel| *channel > 0.0));
     assert!(
@@ -6679,7 +6689,8 @@ fn the_frame_draws_a_queued_mesh_on_a_gpu() {
     let pixels = runtime
         .runtime()
         .queue()
-        .read_texture_rgba16f(target.texture(), SIZE, SIZE);
+        .read_texture_rgba16f(target.texture(), SIZE, SIZE)
+        .expect("mesh HDR target readback must complete");
     assert_eq!(pixels.len(), (SIZE * SIZE) as usize);
     let pixel = |x: u32, y: u32| pixels[(y * SIZE + x) as usize];
     assert_eq!(
@@ -7312,7 +7323,8 @@ fn the_spine_draws_the_visible_set_on_a_gpu() {
     let pixels = runtime
         .runtime()
         .queue()
-        .read_texture_rgba16f(target.texture(), SIZE, SIZE);
+        .read_texture_rgba16f(target.texture(), SIZE, SIZE)
+        .expect("visible mesh HDR target readback must complete");
     assert_eq!(pixels.len(), (SIZE * SIZE) as usize);
     let pixel = |x: u32, y: u32| pixels[(y * SIZE + x) as usize];
     assert_eq!(
@@ -7626,7 +7638,8 @@ fn depth_resolves_occlusion_on_a_gpu() {
     let pixels = runtime
         .runtime()
         .queue()
-        .read_texture_rgba16f(target.texture(), SIZE, SIZE);
+        .read_texture_rgba16f(target.texture(), SIZE, SIZE)
+        .expect("depth-order HDR target readback must complete");
     assert_eq!(pixels.len(), (SIZE * SIZE) as usize);
     let centre = (SIZE / 2 * SIZE + SIZE / 2) as usize;
     assert_eq!(

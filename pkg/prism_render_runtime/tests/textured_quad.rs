@@ -232,7 +232,9 @@ fn rhi_texture_sampler_bind_group_renders_through_the_graph() {
     //    (likewise `y`), with no pixel straddling the boundary and no filtering,
     //    so every output pixel is exactly one source texel and the whole image
     //    can be checked with exact byte equality.
-    let pixels = queue.read_texture_rgba8(target_texture, SIZE, SIZE);
+    let pixels = queue
+        .read_texture_rgba8(target_texture, SIZE, SIZE)
+        .expect("textured-quad GPU readback must complete");
     assert_eq!(
         pixels.len(),
         (SIZE * SIZE * 4) as usize,

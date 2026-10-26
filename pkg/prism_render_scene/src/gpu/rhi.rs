@@ -857,8 +857,11 @@ mod tests {
         host.queue.submit([encoder.finish()]);
         let output_id = device.register_buffer(&output);
         assert_eq!(
-            bridge.queue().read_buffer(output_id, 4),
-            271828_u32.to_le_bytes()
+            bridge
+                .queue()
+                .read_buffer(output_id, 4)
+                .expect("imported compute output readback must complete"),
+            271828_u32.to_le_bytes().to_vec()
         );
         device.release_buffer(output_id);
     }

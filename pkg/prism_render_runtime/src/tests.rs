@@ -683,7 +683,10 @@ fn rhi_graph_clears_imported_target() {
     rt.execute(graph).expect("graph executes on the RHI");
     assert!(rt.wait_idle(), "the submitted frame completes");
 
-    let pixels = rt.queue().read_texture_rgba8(texture, SIZE, SIZE);
+    let pixels = rt
+        .queue()
+        .read_texture_rgba8(texture, SIZE, SIZE)
+        .expect("clear-target GPU readback must complete");
     assert_eq!(pixels.len(), (SIZE * SIZE * 4) as usize);
     assert!(
         pixels.chunks_exact(4).all(|p| p == [0, 0, 0, 255]),
@@ -879,7 +882,7 @@ fn rhi_graph_draws_a_triangle() {
         let _ = b.color_attachment(target);
         move |ctx| {
             ctx.set_render_pipeline(pipeline);
-            ctx.set_vertex_buffer(0, vertices, 0);
+            ctx.set_vertex_buffer(0, vertices, 0, None);
             ctx.draw(0..3, 0..1);
         }
     });
@@ -889,7 +892,9 @@ fn rhi_graph_draws_a_triangle() {
 
     // The compiler clears the fresh target to opaque black, then the triangle
     // paints the center red and leaves the corners black.
-    let pixels = queue.read_texture_rgba8(target_texture, SIZE, SIZE);
+    let pixels = queue
+        .read_texture_rgba8(target_texture, SIZE, SIZE)
+        .expect("triangle-target GPU readback must complete");
     let at = |x: u32, y: u32| {
         let i = ((y * SIZE + x) * 4) as usize;
         [pixels[i], pixels[i + 1], pixels[i + 2], pixels[i + 3]]

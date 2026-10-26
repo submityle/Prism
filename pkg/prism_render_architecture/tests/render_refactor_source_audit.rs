@@ -10,6 +10,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const FORBIDDEN_MARKERS: &[&str] = &["TODO", "FIXME", "XXX", "todo!", "unimplemented!"];
+const FORBIDDEN_REMOVED_APIS: &[&str] = &[
+    "FixedPageStreamingManager",
+    "release_after(",
+    "WATER_SPRAY_RESOURCE",
+];
 
 fn is_test_source(path: &Path) -> bool {
     if path
@@ -96,6 +101,58 @@ fn render_refactor_scope_has_no_executable_unfinished_markers() {
     assert!(
         violations.is_empty(),
         "render-refactor scope contains executable unfinished markers:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn render_refactor_scope_has_no_removed_unpublished_api_symbols() {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repo_root = manifest_dir
+        .parent()
+        .and_then(Path::parent)
+        .expect("architecture crate must live under the repository pkg directory");
+
+    let relative_scopes = [
+        "pkg/prism_render_app/src",
+        "pkg/prism_render_scene/src",
+        "pkg/prism_render_architecture/src",
+        "pkg/prism_render_gpudriven/src",
+        "pkg/prism_render_driver/src",
+        "os-backends/prism_render_driver_wgpu/src",
+    ];
+    let mut files = Vec::new();
+    for relative_scope in relative_scopes {
+        let scope = repo_root.join(relative_scope);
+        assert!(scope.is_dir(), "missing removed-API audit scope {scope:?}");
+        collect_files(&scope, &mut files);
+    }
+
+    let mut violations = Vec::new();
+    for path in files {
+        if path.extension().and_then(|extension| extension.to_str()) != Some("rs") {
+            continue;
+        }
+        let source = fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("cannot read removed-API audit file {path:?}: {error}"));
+        for marker in FORBIDDEN_REMOVED_APIS {
+            let mut search_from = 0;
+            while let Some(relative) = source[search_from..].find(marker) {
+                let offset = search_from + relative;
+                let line = source[..offset]
+                    .bytes()
+                    .filter(|byte| *byte == b'\n')
+                    .count()
+                    + 1;
+                violations.push(format!("{}:{line}: {marker}", path.display()));
+                search_from = offset + marker.len();
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "removed unpublished API symbols remain in render sources:\n{}",
         violations.join("\n")
     );
 }

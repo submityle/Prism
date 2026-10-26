@@ -533,10 +533,10 @@ fn draw_prepared_mesh_on_gpu(with_half_attributes: bool) {
             ctx.set_render_pipeline(pipeline);
             for (slot, &vertex_handle) in vertex_handles.iter().enumerate() {
                 let vertices = ctx.buffer(vertex_handle);
-                ctx.set_vertex_buffer(slot as u32, vertices, 0);
+                ctx.set_vertex_buffer(slot as u32, vertices, 0, None);
             }
             let indices = ctx.buffer(index_handle);
-            ctx.set_index_buffer(indices, IndexFormat::Uint16, 0);
+            ctx.set_index_buffer(indices, IndexFormat::Uint16, 0, None);
             ctx.draw_indexed(0..6, 0, 0..1);
         }
     });
@@ -545,7 +545,9 @@ fn draw_prepared_mesh_on_gpu(with_half_attributes: bool) {
     assert!(runtime.wait_idle(), "the submitted draw completes");
     recorded.release(device);
 
-    let pixels = queue.read_texture_rgba8(target_texture, SIZE, SIZE);
+    let pixels = queue
+        .read_texture_rgba8(target_texture, SIZE, SIZE)
+        .expect("mesh draw GPU readback must complete");
     let pixel = |x: u32, y: u32| {
         let index = ((y * SIZE + x) * 4) as usize;
         [
