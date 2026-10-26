@@ -53,7 +53,7 @@ const CMP_EPS: f32 = 1.0e-6;
 ///
 /// Arithmetic methods are named `plus` / `minus` / `scale` (not the operator
 /// names) to keep the closed-form algebra explicit and to match the sibling
-/// `ray_*` contracts; operator traits are intentionally not implemented.
+/// `ray_*` contracts; operator traits are deliberately omitted.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Vec3 {
     /// The x component.
