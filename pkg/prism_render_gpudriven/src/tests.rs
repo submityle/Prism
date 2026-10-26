@@ -199,7 +199,7 @@ fn gpu_cull_matches_the_cpu_reference_and_drives_indirect_draws() {
         },
     );
     cull.set_scene(&queue, &frustum, &instances);
-    let output = cull.run(&queue);
+    let output = cull.run(&queue).expect("GPU cull readback");
 
     // The GPU-authored count is the surviving count the CPU never computed.
     assert_eq!(
@@ -247,7 +247,9 @@ fn gpu_cull_matches_the_cpu_reference_and_drives_indirect_draws() {
         device.poll_wait(),
         "the device stays healthy after the indirect draw"
     );
-    let pixels = queue.read_texture_rgba8(draw.target(), RESOLUTION, RESOLUTION);
+    let pixels = queue
+        .read_texture_rgba8(draw.target(), RESOLUTION, RESOLUTION)
+        .expect("GPU texture readback");
     assert_eq!(
         count_lit_pixels(&pixels),
         expected,
@@ -264,7 +266,9 @@ fn gpu_cull_matches_the_cpu_reference_and_drives_indirect_draws() {
         device.poll_wait(),
         "the device stays healthy after the multi-draw"
     );
-    let pixels = queue.read_texture_rgba8(draw.target(), RESOLUTION, RESOLUTION);
+    let pixels = queue
+        .read_texture_rgba8(draw.target(), RESOLUTION, RESOLUTION)
+        .expect("GPU texture readback");
     assert_eq!(
         count_lit_pixels(&pixels),
         expected,
@@ -311,7 +315,7 @@ fn render_gpu_driven(
     let scene = SceneDrawStage::new(device, SCENE_RESOLUTION, cull.visible(), capacity);
     scene.upload(queue, &FrameUniform::new(*camera, INDEX_COUNT), instances);
 
-    let output = cull.run(queue);
+    let output = cull.run(queue).expect("GPU cull readback");
     let recorded = scene
         .render_graph(device, queue, &cull, mode)
         .expect("the GPU-driven frame graph compiles");
@@ -320,7 +324,9 @@ fn render_gpu_driven(
         "the device stays healthy after the GPU-driven scene draw"
     );
     recorded.release(device);
-    let pixels = queue.read_texture_rgba8(scene.target(), SCENE_RESOLUTION, SCENE_RESOLUTION);
+    let pixels = queue
+        .read_texture_rgba8(scene.target(), SCENE_RESOLUTION, SCENE_RESOLUTION)
+        .expect("GPU texture readback");
 
     scene.destroy(device);
     cull.destroy(device);
@@ -504,7 +510,9 @@ fn naive_and_gpu_driven_paths_render_identical_images() {
         device.poll_wait(),
         "the device stays healthy after the naive scene draw"
     );
-    let naive_pixels = queue.read_texture_rgba8(naive.target(), SCENE_RESOLUTION, SCENE_RESOLUTION);
+    let naive_pixels = queue
+        .read_texture_rgba8(naive.target(), SCENE_RESOLUTION, SCENE_RESOLUTION)
+        .expect("GPU texture readback");
     naive.destroy(&device);
 
     assert_eq!(
@@ -548,7 +556,7 @@ fn gpu_cull_is_repeatable_across_resubmissions() {
     cull.set_scene(&queue, &frustum, &instances);
 
     for round in 0..4 {
-        let output = cull.run(&queue);
+        let output = cull.run(&queue).expect("GPU cull readback");
         assert_eq!(
             output.args.instance_count,
             reference.len() as u32,
@@ -602,14 +610,16 @@ fn gpu_scene_draw_coverage_is_stable_across_resubmissions() {
     let mut coverage = Vec::new();
     let mut counts = Vec::new();
     for _ in 0..3 {
-        let output = cull.run(&queue);
+        let output = cull.run(&queue).expect("GPU cull readback");
         counts.push(output.args.instance_count);
         let recorded = scene
             .render_graph(&device, &queue, &cull, IndirectMode::Single)
             .expect("the resubmitted frame graph compiles");
         assert!(device.poll_wait(), "the device stays healthy across frames");
         recorded.release(&device);
-        let pixels = queue.read_texture_rgba8(scene.target(), SCENE_RESOLUTION, SCENE_RESOLUTION);
+        let pixels = queue
+            .read_texture_rgba8(scene.target(), SCENE_RESOLUTION, SCENE_RESOLUTION)
+            .expect("GPU texture readback");
         coverage.push(count_lit_pixels(&pixels));
     }
 

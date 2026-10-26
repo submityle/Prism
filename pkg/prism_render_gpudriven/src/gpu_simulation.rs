@@ -764,14 +764,17 @@ impl GpuSimulationStage {
 
     /// Submits and reads the GPU-authored state for verification.
     #[must_use]
-    pub fn run(&self, queue: &(impl RenderQueue + ReadBuffer)) -> GpuSimulationOutput {
+    pub fn run(
+        &self,
+        queue: &(impl RenderQueue + ReadBuffer),
+    ) -> Result<GpuSimulationOutput, rhi::ReadbackError> {
         queue.submit(&[self.encode()]);
-        let control_bytes = queue.read_buffer(self.control, u64::from(CONTROL_WORDS) * 4);
-        let control = read_u32_array::<12>(&control_bytes);
+        let control_bytes = queue.read_buffer(self.control, u64::from(CONTROL_WORDS) * 4)?;
+        let control = read_u32_array::<{ CONTROL_WORDS as usize }>(&control_bytes);
         let live_count = control[2].min(self.capacity) as u64;
         let source_count = control[0].min(self.event_capacity) as u64;
         let cursors = read_u32_array::<4>(
-            &queue.read_buffer(self.event_cursors, u64::from(EVENT_CHANNEL_COUNT) * 4),
+            &queue.read_buffer(self.event_cursors, u64::from(EVENT_CHANNEL_COUNT) * 4)?,
         );
         let compact_count = control[8].min(self.channel_capacity * EVENT_CHANNEL_COUNT) as usize;
         let compact_bytes = queue.read_buffer(
@@ -786,14 +789,14 @@ impl GpuSimulationStage {
             compact_events.extend(decode_events(&compact_bytes[start..end]));
         }
         debug_assert_eq!(compact_events.len(), compact_count);
-        GpuSimulationOutput {
+        Ok(GpuSimulationOutput {
             particles: decode_particles(&queue.read_buffer(
                 self.particles,
                 u64::from(self.capacity) * GPU_PARTICLE_STRIDE,
-            )),
-            active_indices: read_u32s(&queue.read_buffer(self.active_indices, live_count * 4)),
+            )?),
+            active_indices: read_u32s(&queue.read_buffer(self.active_indices, live_count * 4)?),
             source_events: decode_events(
-                &queue.read_buffer(self.source_events, source_count * GPU_EVENT_STRIDE),
+                &queue.read_buffer(self.source_events, source_count * GPU_EVENT_STRIDE)?,
             ),
             compact_events,
             control,

@@ -299,22 +299,25 @@ impl CullStage {
     /// instead hand [`Self::draw_args`] straight to the draw stage and never
     /// touch the CPU.
     #[must_use]
-    pub fn run(&self, queue: &(impl RenderQueue + ReadBuffer)) -> CullOutput {
+    pub fn run(
+        &self,
+        queue: &(impl RenderQueue + ReadBuffer),
+    ) -> Result<CullOutput, rhi::ReadbackError> {
         queue.submit(&[self.encode()]);
         let args =
-            IndirectArgs::from_bytes(&queue.read_buffer(self.draw_args, IndirectArgs::BYTES));
+            IndirectArgs::from_bytes(&queue.read_buffer(self.draw_args, IndirectArgs::BYTES)?);
         let count = args.instance_count;
-        let indices = read_u32s(&queue.read_buffer(self.visible, u64::from(count) * 4));
+        let indices = read_u32s(&queue.read_buffer(self.visible, u64::from(count) * 4)?);
         let multi_args = queue
-            .read_buffer(self.multi_args, u64::from(count) * IndirectArgs::BYTES)
+            .read_buffer(self.multi_args, u64::from(count) * IndirectArgs::BYTES)?
             .chunks_exact(IndirectArgs::BYTES as usize)
             .map(IndirectArgs::from_bytes)
             .collect();
-        CullOutput {
+        Ok(CullOutput {
             args,
             indices,
             multi_args,
-        }
+        })
     }
 
     /// The GPU-authored visible-index list: one `u32` survivor id per element.

@@ -3,7 +3,7 @@
 
 use alloc::vec::Vec;
 
-use prism_render_driver::BufferId;
+use prism_render_driver::{BufferId, ReadbackError};
 use prism_render_driver_wgpu::WgpuQueue;
 
 /// A backend hook that copies a buffer's contents back to the CPU.
@@ -15,11 +15,11 @@ use prism_render_driver_wgpu::WgpuQueue;
 pub trait ReadBuffer {
     /// Copies `size` bytes from `buffer` to the CPU, blocking until the GPU has
     /// caught up.
-    fn read_buffer(&self, buffer: BufferId, size: u64) -> Vec<u8>;
+    fn read_buffer(&self, buffer: BufferId, size: u64) -> Result<Vec<u8>, ReadbackError>;
 }
 
 impl ReadBuffer for WgpuQueue {
-    fn read_buffer(&self, buffer: BufferId, size: u64) -> Vec<u8> {
+    fn read_buffer(&self, buffer: BufferId, size: u64) -> Result<Vec<u8>, ReadbackError> {
         WgpuQueue::read_buffer(self, buffer, size)
     }
 }

@@ -3,6 +3,27 @@
 use crate::BufferId;
 use alloc::vec::Vec;
 
+/// Failure while synchronously capturing GPU-owned readback data.
+///
+/// This is shared by backend-specific blocking buffer/texture capture hooks.
+/// It deliberately contains no driver-specific error value: callers can
+/// recover by retrying on a healthy device, rebuilding after device loss, or
+/// correcting the requested resource/range.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReadbackError {
+    /// The requested byte or texel extent is empty, overflows, or exceeds the
+    /// source resource.
+    InvalidRange,
+    /// The source id is stale, missing, or lacks the required copy usage.
+    ResourceUnavailable,
+    /// The requested texture format is not supported by the capture hook.
+    UnsupportedFormat,
+    /// The source device has been lost and cannot service the request.
+    DeviceLost,
+    /// The driver rejected the staging-buffer mapping or its mapped range.
+    MapFailed,
+}
+
 /// An exact byte range captured at the queue position of a readback request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BufferReadbackRange {

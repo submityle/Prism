@@ -196,7 +196,7 @@ fn physical_gpu_executes_force_lifetime_collision_spawn_and_event_compaction() {
         Err(HardwareDeviceError::Device(error)) => panic!("GPU device creation failed: {error}"),
     };
 
-    let stage = GpuSimulationStage::new(&device, 4, 16);
+    let stage = GpuSimulationStage::new(&device, 4, 16).expect("simulation resources");
     let pool = [
         GpuParticle::live([0.0, 0.05, 0.0], [0.0, -1.0, 0.0], 2.0, 0.1, 10, 0),
         GpuParticle::live([0.0, 2.0, 0.0], [0.0; 3], 0.05, 0.0, 11, 0),
@@ -227,7 +227,7 @@ fn physical_gpu_executes_force_lifetime_collision_spawn_and_event_compaction() {
             ..GpuSimulationParams::default()
         },
     );
-    let output = stage.run(&queue);
+    let output = stage.run(&queue).expect("GPU simulation readback");
     assert_eq!(output.particles.len(), 4);
     assert!(
         output.particles[0].position[1] >= output.particles[0].radius - 1.0e-5,
@@ -293,7 +293,8 @@ fn physical_gpu_integrators_match_cpu_reference() {
         IntegratorKind::Verlet,
         IntegratorKind::Rk2,
     ] {
-        let stage = GpuSimulationStage::new(&device, initial.len() as u32, 8);
+        let stage = GpuSimulationStage::new(&device, initial.len() as u32, 8)
+            .expect("simulation resources");
         stage.initialize_particles(&queue, &initial);
         stage.upload_inputs(
             &queue,
@@ -325,12 +326,12 @@ fn physical_gpu_integrators_match_cpu_reference() {
         for state in &mut reference {
             *state = integrate(integrator, *state, dt, |p, v| forces.accumulate(p, v));
         }
-        let mut output = stage.run(&queue);
+        let mut output = stage.run(&queue).expect("GPU simulation readback");
         for _ in 1..8 {
             for state in &mut reference {
                 *state = integrate(integrator, *state, dt, |p, v| forces.accumulate(p, v));
             }
-            output = stage.run(&queue);
+            output = stage.run(&queue).expect("GPU simulation readback");
         }
         assert_eq!(output.particles.len(), initial.len());
         assert_eq!(output.active_indices.len(), initial.len());
@@ -658,7 +659,8 @@ fn physical_gpu_force_library_matches_cpu_reference() {
         GpuParticle::live([1.0e-4, 0.0, 0.0], [0.0; 3], 10.0, 0.0, 103, 7),
         GpuParticle::live([0.25, -0.5, 0.125], [0.0; 3], 10.0, 0.0, 104, 9),
     ];
-    let stage = GpuSimulationStage::new(&device, initial.len() as u32, 16);
+    let stage =
+        GpuSimulationStage::new(&device, initial.len() as u32, 16).expect("simulation resources");
     for (label, entries, step_dt) in cases {
         let mut field = ForceField::new();
         for entry in entries {
@@ -690,7 +692,7 @@ fn physical_gpu_force_library_matches_cpu_reference() {
                 for state in &mut reference {
                     *state = integrate(integrator, *state, step_dt, |p, v| field.accumulate(p, v));
                 }
-                let actual = stage.run(&queue);
+                let actual = stage.run(&queue).expect("GPU simulation readback");
                 assert_eq!(
                     actual.active_indices.len(),
                     initial.len(),
@@ -848,7 +850,8 @@ fn physical_gpu_collision_library_matches_cpu_reference() {
     initial[10].radius = f32::INFINITY;
     initial[11].radius = 0.0;
     initial[13].velocity = [f32::NAN, -2.0, f32::INFINITY];
-    let stage = GpuSimulationStage::new(&device, initial.len() as u32, 64);
+    let stage =
+        GpuSimulationStage::new(&device, initial.len() as u32, 64).expect("simulation resources");
     for (label, colliders) in cases {
         for (restitution, friction) in [(0.625, 0.25), (2.0, -1.0), (f32::NAN, f32::INFINITY)] {
             stage.initialize_particles(&queue, &initial);
@@ -891,7 +894,7 @@ fn physical_gpu_collision_library_matches_cpu_reference() {
                         hits.push(i as u32);
                     }
                 }
-                let actual = stage.run(&queue);
+                let actual = stage.run(&queue).expect("GPU simulation readback");
                 assert_eq!(actual.active_indices.len(), initial.len(), "{label}");
                 let mut event_indices: Vec<_> = actual
                     .compact_events

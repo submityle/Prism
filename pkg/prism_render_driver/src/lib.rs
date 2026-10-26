@@ -33,8 +33,8 @@ mod frame_sync;
 mod instance;
 mod loss;
 mod pipeline;
-mod reclaim;
 mod readback;
+mod reclaim;
 mod resource;
 mod sampler;
 mod shader;
@@ -72,11 +72,11 @@ pub use instance::{
     RequestAdapterOptions,
 };
 pub use loss::DeviceLostReason;
-pub use readback::{BufferReadback, BufferReadbackError, BufferReadbackRange};
 pub use pipeline::{
     ColorTargetState, ComputePipelineDescriptor, FragmentState, PipelineLayoutDescriptor,
     PushConstantRange, RenderPipelineDescriptor, VertexState,
 };
+pub use readback::{BufferReadback, BufferReadbackError, BufferReadbackRange, ReadbackError};
 pub use resource::{
     BindGroupId, BindGroupLayoutId, BufferId, ComputePipelineId, PipelineLayoutId,
     RenderPipelineId, ResourceId, SamplerId, ShaderModuleId, TextureId, TextureViewId,

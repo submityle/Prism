@@ -3645,7 +3645,9 @@ mod tests {
             .expect("Ember frame graph executes on the physical GPU");
         assert!(device.poll_wait(), "the physical GPU remains healthy");
 
-        let bytes = queue.read_buffer(attribute_pool, state.attribute_pool_size());
+        let bytes = queue
+            .read_buffer(attribute_pool, state.attribute_pool_size())
+            .expect("Ember attribute readback");
         let value = f32::from_le_bytes(bytes[..4].try_into().expect("four-byte attribute"));
         assert!(
             (value - 2.5).abs() <= 1.0e-6,
