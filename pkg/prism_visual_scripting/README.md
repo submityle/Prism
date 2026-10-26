@@ -26,6 +26,7 @@
 - **Checkpoint 身份绑定**：`VmState` / `WorkflowVmState` 固定 `execution_id`，恢复时拒绝跨运行串线
 - **多图 Function 调用**：`ControlNode::Call` / `Return` 生成真实调用帧，参数、返回值和调用栈均可恢复
 - **有界并行调度**：`ControlNode::Fork` 支持 deterministic `all` / `race` join、并发上限和失败分支
+- **调度身份索引**：FairScheduler 以哈希索引做 run identity 去重，避免 admission 随队列长度线性扫描；过期和完成路径同步回收索引
 - **可恢复 scheduler**：`WorkflowVmState` 保存 task、call frame、join、队列与全局 step budget，恢复时校验全部引用
 - **状态迁移**：`ControlNode::Transition` 产生结构化状态迁移结果，由上层 StateMachine 持久化
 - **结构化错误流**：Runner 可返回 `ExecNext::Error`，由命名 `error` exec pin 接管；未处理错误不会静默走正常分支
