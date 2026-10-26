@@ -6750,6 +6750,20 @@ pub(super) fn queue_scene_fixture(app: &mut App) -> GenerationalHandle {
             ]),
         )
         .expect("normals fit")
+        .with_attribute(
+            MeshVertexAttribute::new(
+                "Vertex_Uv",
+                prism_render_driver::VertexFormat::Float32x2,
+                2,
+            ),
+            VertexAttributeValues::Float32x2(vec![
+                [0.0, 0.0],
+                [1.0, 0.0],
+                [1.0, 1.0],
+                [0.0, 1.0],
+            ]),
+        )
+        .expect("UVs fit")
         .indexed(Indices::Uint16(vec![0, 1, 2, 0, 2, 3]));
     let mut meshes = prism_asset::Assets::new();
     let mesh_id = meshes.insert(mesh).id();
