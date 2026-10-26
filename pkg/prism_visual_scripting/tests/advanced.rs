@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use prism_visual_scripting::prelude::*;
+use std::sync::Arc;
 
 #[test]
 fn migration_registry_requires_a_contiguous_digest_bound_chain() {
@@ -85,6 +85,35 @@ fn scheduler_stops_when_only_tenant_is_at_its_active_limit() {
 }
 
 #[test]
+fn scheduler_releases_run_identity_after_completion_and_expiry() {
+    let mut scheduler = FairScheduler::new(SchedulerLimits {
+        max_active: 1,
+        max_active_per_tenant: 1,
+        max_queued: 4,
+    })
+    .unwrap();
+    scheduler.admit("run", "tenant", 1, None).unwrap();
+    assert_eq!(
+        scheduler.admit("run", "tenant", 1, None).unwrap(),
+        AdmitResult::Duplicate
+    );
+    let active = scheduler.poll(0);
+    scheduler.complete(&active[0].run_id).unwrap();
+    assert_eq!(
+        scheduler.admit("run", "tenant", 1, None).unwrap(),
+        AdmitResult::Queued
+    );
+
+    scheduler.admit("expiring", "tenant", 1, Some(5)).unwrap();
+    scheduler.poll(5);
+    scheduler.complete("run").unwrap();
+    scheduler.poll(5);
+    assert_eq!(
+        scheduler.admit("expiring", "tenant", 1, None).unwrap(),
+        AdmitResult::Queued
+    );
+}
+#[test]
 fn determinism_gate_rejects_unapproved_native_runner() {
     let library = NodeLibrary::with_builtins();
     let graph = Graph {
@@ -102,15 +131,14 @@ fn determinism_gate_rejects_unapproved_native_runner() {
     };
     let vm = Vm::new(compile(&graph, &library).unwrap());
     let denied = SimulationDeterminismGate::default();
-    assert!(
-        vm.run_all_with_env(
+    assert!(vm
+        .run_all_with_env(
             &mut InMemoryHost::default(),
             &ExecutionEnv::new().with_determinism(&denied),
         )
         .unwrap_err()
         .to_string()
-        .contains("not admitted")
-    );
+        .contains("not admitted"));
     let mut allowed = SimulationDeterminismGate::default();
     allowed.allow("event.begin", RunnerClass::Sync);
     vm.run_all_with_env(
