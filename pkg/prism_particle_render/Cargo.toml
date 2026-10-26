@@ -9,7 +9,12 @@ publish = false
 
 [dependencies]
 thiserror = "2.0"
+prism_particle_app = { path = "../prism_particle_app" }
 prism_render_architecture = { path = "../prism_render_architecture" }
+prism_render_driver = { path = "../prism_render_driver" }
+
+[dev-dependencies]
+prism_ecs = { path = "../prism_ecs" }
 
 [lints]
 workspace = true

@@ -6,8 +6,15 @@
 //! framework.
 
 mod adapter;
+mod fabric_gpu;
 
 pub use adapter::{
-    ParticleExtractBatch, ParticleFabricError, ParticleFabricFrame, ParticleInstanceKey,
-    ParticleInstanceSnapshot, PARTICLE_INSTANCE_PAYLOAD_ROLE,
+    particle_resource_payload, particle_resource_template, ParticleExtractBatch,
+    ParticleFabricError, ParticleFabricFrame, ParticleInstanceKey, ParticleInstanceSnapshot,
+    PARTICLE_ALIVE_RESOURCE_PAYLOAD_ROLE, PARTICLE_EMITTER_COUNT_PAYLOAD_ROLE,
+    PARTICLE_EMITTER_POSITION_BOUNDS_PAYLOAD_ROLE, PARTICLE_INSTANCE_PAYLOAD_ROLE,
+    PARTICLE_STREAM_RESOURCE_PAYLOAD_ROLE,
+};
+pub use fabric_gpu::{
+    ParticleFabricGpuBuffer, ParticleFabricGpuDraw, ParticleFabricScenePublication,
 };

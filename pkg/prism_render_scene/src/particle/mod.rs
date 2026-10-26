@@ -8,3 +8,13 @@ pub use prism_particle_render::{
     ParticleExtractBatch, ParticleFabricError, ParticleFabricFrame, ParticleInstanceKey,
     ParticleInstanceSnapshot, PARTICLE_INSTANCE_PAYLOAD_ROLE,
 };
+
+#[cfg(feature = "legacy-bevy")]
+mod fabric;
+#[cfg(feature = "legacy-bevy")]
+pub use fabric::{
+    install_particle_fabric,
+    ParticleSceneFabricBuffer, ParticleSceneFabricBufferOwned, ParticleSceneFabricDispatch,
+    ParticleSceneFabricDispatchOwned, ParticleSceneFabricError, ParticleSceneFabricHost,
+    ParticleSceneFabricHostInput, ParticleSceneFabricInput, ParticleSceneFabricSlot,
+};
