@@ -106,9 +106,12 @@ const WORKGROUP_SIZE: u32 = 64;
 /// cross the device boundary as integer flags.
 const CODE_TRUE: u32 = 1;
 
+/// Blend-mode discriminant for alpha-tested cutout, which is order-independent
+/// but remains distinct from opaque for ABI and phase routing.
+const BLEND_ALPHA_MASK: u32 = 3;
 /// Blend-mode discriminant for the one order-dependent mode, matching the host
 /// `BLEND_ALPHA` packing; only this mode reports `needs_sort`.
-const BLEND_ALPHA: u32 = 3;
+const BLEND_ALPHA: u32 = 4;
 
 /// The portable core-`WGSL` sort/cull kernel, embedded inline so the twin ships
 /// as a single source file. Mirrors the `CPU` golden
@@ -204,8 +207,9 @@ struct Res {
 @group(0) @binding(2) var<storage, read_write> results: array<Res>;
 
 // The one order-dependent blend mode; only it needs a sort. Matches the host
-// `BLEND_ALPHA` packing.
-const BLEND_ALPHA: u32 = 3u;
+// `BLEND_ALPHA` packing. Alpha-mask is deliberately a separate code but does
+// not require sorting.
+const BLEND_ALPHA: u32 = 4u;
 
 // Sort-strategy discriminants, matching the host `strategy_from_code` decode.
 const STRATEGY_NONE: u32 = 0u;
@@ -621,6 +625,7 @@ fn blend_code(blend: BlendMode) -> u32 {
         BlendMode::Opaque => 0,
         BlendMode::Additive => 1,
         BlendMode::Premultiplied => 2,
+        BlendMode::AlphaMask => BLEND_ALPHA_MASK,
         BlendMode::AlphaBlend => BLEND_ALPHA,
     }
 }

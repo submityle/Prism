@@ -276,6 +276,7 @@ fn needs_sort_over_every_blend_mode() {
     let gpu = GpuSortCull::new(&ctx);
     let modes = [
         BlendMode::Opaque,
+        BlendMode::AlphaMask,
         BlendMode::Additive,
         BlendMode::Premultiplied,
         BlendMode::AlphaBlend,
@@ -290,9 +291,10 @@ fn needs_sort_over_every_blend_mode() {
         .collect();
     let got = check(&ctx, &gpu, &queries);
     assert!(!got[0].needs_sort, "opaque needs no sort");
-    assert!(!got[1].needs_sort, "additive needs no sort");
-    assert!(!got[2].needs_sort, "premultiplied needs no sort");
-    assert!(got[3].needs_sort, "alpha blend needs a sort");
+    assert!(!got[1].needs_sort, "alpha mask needs no sort");
+    assert!(!got[2].needs_sort, "additive needs no sort");
+    assert!(!got[3].needs_sort, "premultiplied needs no sort");
+    assert!(got[4].needs_sort, "alpha blend needs a sort");
 }
 
 #[test]

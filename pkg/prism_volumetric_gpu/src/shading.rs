@@ -116,8 +116,10 @@ const BLEND_OPAQUE: u32 = 0;
 const BLEND_ADDITIVE: u32 = 1;
 /// `BlendMode::Premultiplied` classification code.
 const BLEND_PREMULTIPLIED: u32 = 2;
+/// `BlendMode::AlphaMask` classification code.
+const BLEND_ALPHA_MASK: u32 = 3;
 /// `BlendMode::AlphaBlend` classification code.
-const BLEND_ALPHA: u32 = 3;
+const BLEND_ALPHA: u32 = 4;
 
 /// `ShadingBasis::Unlit` basis code.
 const BASIS_UNLIT: u32 = 0;
@@ -141,7 +143,7 @@ const MODEL_HYBRID: u32 = 4;
 
 /// `ParticleRenderPhase::Opaque` phase code.
 const PHASE_OPAQUE: u32 = 0;
-/// `ParticleRenderPhase::AlphaMask` phase code (never produced by the router).
+/// `ParticleRenderPhase::AlphaMask` phase code.
 const PHASE_ALPHA_MASK: u32 = 1;
 /// `ParticleRenderPhase::Transparent` phase code.
 const PHASE_TRANSPARENT: u32 = 2;
@@ -351,11 +353,15 @@ fn lighting_services(kind: u32, base: u32, overlay: u32, caps: u32) -> u32 {
     return svc;
 }
 
-// Render phase for a blend mode (`render_phase_for`): opaque lands in the opaque
-// phase, every blended mode in the transparent phase.
+// Render phase for a blend mode (`render_phase_for`): opaque and alpha-mask
+// land in their depth-tested phases, every blended mode in the transparent
+// phase.
 fn render_phase_for(blend: u32) -> u32 {
     if (blend == 0u) {
         return 0u;
+    }
+    if (blend == 3u) {
+        return 1u;
     }
     return 2u;
 }
@@ -364,7 +370,7 @@ fn render_phase_for(blend: u32) -> u32 {
 // or trivial counts need no sort; an order-dependent blend prefers the shared
 // OIT path, else a radix sort for large counts and a bitonic sort for small.
 fn choose_sort_strategy(blend: u32, count: u32, radix_min: u32, prefer: u32) -> u32 {
-    let needs_sort = (blend == 3u);
+    let needs_sort = (blend == 4u);
     if (!needs_sort || count <= 1u) {
         return 0u;
     }
@@ -493,7 +499,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     } else {
         let unstable = (q.flipbook_rate > 0.0) && (q.flipbook_rate >= q.flipbook_unstable_rate);
         var bias = 0.5;
-        if (q.mv_blend == 0u) {
+        if (q.mv_blend == 0u || q.mv_blend == 3u) {
             bias = 0.0;
         }
         var mask = bias;
@@ -795,6 +801,7 @@ fn blend_code(blend: BlendMode) -> u32 {
         BlendMode::Opaque => BLEND_OPAQUE,
         BlendMode::Additive => BLEND_ADDITIVE,
         BlendMode::Premultiplied => BLEND_PREMULTIPLIED,
+        BlendMode::AlphaMask => BLEND_ALPHA_MASK,
         BlendMode::AlphaBlend => BLEND_ALPHA,
     }
 }

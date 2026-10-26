@@ -213,12 +213,13 @@ fn lcg(state: &mut u64) -> f32 {
     (bits & 0x00ff_ffff) as f32 / 16_777_216.0
 }
 
-/// Draws one of four blend modes from the generator.
+/// Draws one of the five blend modes from the generator.
 fn pick_blend(state: &mut u64) -> BlendMode {
-    match (lcg(state) * 4.0) as u32 {
+    match (lcg(state) * 5.0) as u32 {
         0 => BlendMode::Opaque,
-        1 => BlendMode::Additive,
-        2 => BlendMode::Premultiplied,
+        1 => BlendMode::AlphaMask,
+        2 => BlendMode::Additive,
+        3 => BlendMode::Premultiplied,
         _ => BlendMode::AlphaBlend,
     }
 }
@@ -276,6 +277,7 @@ fn render_phase_maps_every_blend() {
     let gpu = GpuShading::new(&ctx);
     let blends = [
         BlendMode::Opaque,
+        BlendMode::AlphaMask,
         BlendMode::Additive,
         BlendMode::Premultiplied,
         BlendMode::AlphaBlend,
@@ -299,7 +301,8 @@ fn render_phase_maps_every_blend() {
     // Spot-check the two phase classes directly.
     let got = gpu.eval(&ctx, &queries);
     assert_eq!(got[0].phase, ParticleRenderPhase::Opaque);
-    assert_eq!(got[3].phase, ParticleRenderPhase::Transparent);
+    assert_eq!(got[1].phase, ParticleRenderPhase::AlphaMask);
+    assert_eq!(got[4].phase, ParticleRenderPhase::Transparent);
 }
 
 #[test]
