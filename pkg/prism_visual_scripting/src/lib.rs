@@ -56,8 +56,8 @@ pub use durable::{
     InboxEntry, OutboxEntry, RecordKey, RevisionGuard,
 };
 pub use ecs_proxy::{
-    require_component_bytes, require_snapshot_digest, require_world_proxy, SnapshotWorldProxy,
-    WorldProxy, WorldProxyContext,
+    require_component_bytes, require_component_json, require_snapshot_digest, require_world_proxy,
+    SnapshotWorldProxy, WorldProxy, WorldProxyContext,
 };
 pub use effect::{
     DurableEffectExecutor, DurableEffectState, EffectClass, EffectError, EffectExecutor,

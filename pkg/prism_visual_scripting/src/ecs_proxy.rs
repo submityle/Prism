@@ -80,6 +80,14 @@ impl SnapshotWorldProxy {
         })
     }
 
+    pub fn component_json(&self, entity_bits: u64, component: &str) -> VsResult<serde_json::Value> {
+        let bytes = self
+            .component_bytes(entity_bits, component)
+            .ok_or_else(|| VsError::Runtime("ECS component is not present in snapshot".into()))?;
+        serde_json::from_slice(&bytes)
+            .map_err(|error| VsError::Runtime(format!("ECS component JSON decode failed: {error}")))
+    }
+
     pub fn digest(&self) -> [u8; 32] {
         let mut hasher = Sha256::new();
         hasher.update(b"prism.visual_scripting.ecs.snapshot.v1");
@@ -140,6 +148,14 @@ impl WorldProxyContext {
     pub fn component_bytes(&self, entity_bits: u64, component: &str) -> Option<Vec<u8>> {
         self.proxy.component_bytes(entity_bits, component)
     }
+
+    pub fn component_json(&self, entity_bits: u64, component: &str) -> VsResult<serde_json::Value> {
+        let bytes = self
+            .component_bytes(entity_bits, component)
+            .ok_or_else(|| VsError::Runtime("ECS component is not present in snapshot".into()))?;
+        serde_json::from_slice(&bytes)
+            .map_err(|error| VsError::Runtime(format!("ECS component JSON decode failed: {error}")))
+    }
 }
 
 pub fn require_component_bytes<'a>(
@@ -159,6 +175,16 @@ pub fn require_component_bytes<'a>(
     proxy
         .component_bytes(entity_bits, component)
         .ok_or_else(|| VsError::Runtime("ECS component is not present in snapshot".into()))
+}
+
+pub fn require_component_json<'a>(
+    ctx: &'a InvokeCtx<'a>,
+    entity_bits: u64,
+    component: &str,
+) -> VsResult<serde_json::Value> {
+    let bytes = require_component_bytes(ctx, entity_bits, component)?;
+    serde_json::from_slice(&bytes)
+        .map_err(|error| VsError::Runtime(format!("ECS component JSON decode failed: {error}")))
 }
 
 pub fn require_snapshot_digest<'a>(ctx: &'a InvokeCtx<'a>) -> VsResult<[u8; 32]> {
@@ -249,6 +275,26 @@ mod tests {
         let components =
             (0..17).map(|entity| (entity, "Transform".to_owned(), vec![0; MAX_COMPONENT_BYTES]));
         assert!(SnapshotWorldProxy::with_components(0..17, components).is_err());
+    }
+
+    #[test]
+    fn component_json_decoding_is_structured() {
+        let snapshot = SnapshotWorldProxy::with_components(
+            [7],
+            [
+                (7, "Transform".to_owned(), br#"{"x":1}"#.to_vec()),
+                (7, "Broken".to_owned(), b"not-json".to_vec()),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            snapshot.component_json(7, "Transform").unwrap()["x"],
+            serde_json::json!(1)
+        );
+        assert!(matches!(
+            snapshot.component_json(7, "Broken"),
+            Err(VsError::Runtime(message)) if message.contains("JSON decode")
+        ));
     }
 
     #[test]
