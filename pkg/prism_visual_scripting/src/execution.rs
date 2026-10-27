@@ -108,6 +108,29 @@ impl ExecutionReplay {
     ) -> VsResult<Option<ReplayDivergence>> {
         Self::validate_pair(expected)?;
         Self::validate_pair(actual)?;
+        if let (Some(expected_first), Some(actual_first)) = (expected.first(), actual.first()) {
+            if expected_first.execution_id.is_empty() || actual_first.execution_id.is_empty() {
+                return Err(crate::VsError::Validate(
+                    "replay execution identity must not be empty".into(),
+                ));
+            }
+            if expected_first.execution_id != actual_first.execution_id
+                || expected
+                    .iter()
+                    .any(|event| event.execution_id != expected_first.execution_id)
+                || actual
+                    .iter()
+                    .any(|event| event.execution_id != actual_first.execution_id)
+            {
+                return Err(crate::VsError::Runtime(
+                    "replay execution identity mismatch".into(),
+                ));
+            }
+        } else if expected.len() != actual.len() {
+            return Err(crate::VsError::Runtime(
+                "replay execution identity mismatch".into(),
+            ));
+        }
         for (left, right) in expected.iter().zip(actual) {
             let left_digest = event_digest(left)?;
             let right_digest = event_digest(right)?;

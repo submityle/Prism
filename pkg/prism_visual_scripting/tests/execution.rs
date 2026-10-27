@@ -34,4 +34,8 @@ fn replay_verifier_rejects_tampering_and_reports_divergence() {
     invalid[0].sequence = 1;
     invalid[0].execution_id = "other-run".into();
     assert!(ExecutionReplay::validate(&invalid, "run-replay").is_err());
+
+    let mut different_execution = expected.clone();
+    different_execution[0].execution_id = "other-run".into();
+    assert!(ExecutionReplay::compare(&expected, &different_execution).is_err());
 }
