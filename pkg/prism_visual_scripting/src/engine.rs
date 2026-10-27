@@ -331,11 +331,7 @@ impl VisualScriptEngine {
         }
         let mut workflow = WorkflowProgram::new();
         for (id, graph) in graphs {
-            if id.is_empty() {
-                return Err(VsError::Validate(
-                    "workflow graph id must not be empty".into(),
-                ));
-            }
+            validate_identity("workflow graph", id)?;
             workflow.insert(id.clone(), self.compile(graph)?);
         }
         Ok(workflow)
