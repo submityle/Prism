@@ -613,3 +613,35 @@ fn compiler_rejects_duplicate_node_ids() {
     };
     assert!(matches!(error, VsError::Validate(message) if message.contains("duplicate node id")));
 }
+
+#[test]
+fn compiler_rejects_unknown_graph_entry() {
+    let lib = NodeLibrary::with_builtins();
+    let graph = Graph {
+        nodes: vec![make_node(1, "event.begin")],
+        entries: vec![99],
+        ..Default::default()
+    };
+    let error = match compile(&graph, &lib) {
+        Ok(_) => panic!("unknown graph entry must be rejected"),
+        Err(error) => error,
+    };
+    assert!(matches!(error, VsError::UnknownNode(99)));
+}
+
+#[test]
+fn compiler_rejects_pure_graph_entry() {
+    let lib = NodeLibrary::with_builtins();
+    let graph = Graph {
+        nodes: vec![make_node(1, "math.add")],
+        entries: vec![1],
+        ..Default::default()
+    };
+    let error = match compile(&graph, &lib) {
+        Ok(_) => panic!("pure graph entry must be rejected"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(error, VsError::Validate(message) if message.contains("must reference an impure node"))
+    );
+}

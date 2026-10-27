@@ -25,7 +25,7 @@ pub(super) fn run(cx: &mut LowerCtx<'_>) -> VsResult<()> {
         cx.block_for_impure.insert(*nid, bid);
     }
 
-    register_entries(cx, &impure);
+    register_entries(cx, &impure)?;
 
     for nid in impure {
         lower_impure_block(cx, nid)?;
@@ -33,7 +33,7 @@ pub(super) fn run(cx: &mut LowerCtx<'_>) -> VsResult<()> {
     Ok(())
 }
 
-fn register_entries(cx: &mut LowerCtx<'_>, impure: &[NodeId]) {
+fn register_entries(cx: &mut LowerCtx<'_>, impure: &[NodeId]) -> VsResult<()> {
     let mut entries: BTreeSet<NodeId> = cx.graph.entries.iter().copied().collect();
     // 自动识别：是 event 节点且 exec_in 没有连入边 → 视为入口。
     for &nid in impure {
@@ -52,10 +52,17 @@ fn register_entries(cx: &mut LowerCtx<'_>, impure: &[NodeId]) {
         }
     }
     for nid in entries {
-        if let Some(&bid) = cx.block_for_impure.get(&nid) {
-            cx.entries.insert(nid, bid);
-        }
+        let Some(&bid) = cx.block_for_impure.get(&nid) else {
+            if !cx.defs_by_node.contains_key(&nid) {
+                return Err(crate::error::VsError::UnknownNode(nid));
+            }
+            return Err(crate::error::VsError::Validate(format!(
+                "graph entry {nid} must reference an impure node"
+            )));
+        };
+        cx.entries.insert(nid, bid);
     }
+    Ok(())
 }
 
 fn lower_impure_block(cx: &mut LowerCtx<'_>, node_id: NodeId) -> VsResult<()> {
