@@ -13,6 +13,7 @@ const MAX_COMPONENT_BYTES: usize = 1024 * 1024;
 const MAX_TOTAL_COMPONENT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_COMPONENT_ENTRIES: usize = 65_536;
 const MAX_SNAPSHOT_ENTITIES: usize = 1_000_000;
+const MAX_WRITE_OPERATIONS: usize = 65_536;
 
 /// Minimal read-only world surface safe to expose across an execution boundary.
 pub trait WorldProxy: Send + Sync {
@@ -175,6 +176,7 @@ pub struct WorldWriteTransaction {
     entities: BTreeSet<u64>,
     components: BTreeMap<(u64, String), Vec<u8>>,
     base_digest: [u8; 32],
+    operations: usize,
 }
 
 impl SnapshotWorldProxy {
@@ -185,6 +187,7 @@ impl SnapshotWorldProxy {
             entities: (*self.entities).clone(),
             components: (*self.components).clone(),
             base_digest: self.digest(),
+            operations: 0,
         }
     }
 }
@@ -197,6 +200,7 @@ impl WorldWriteTransaction {
         component: impl Into<String>,
         bytes: Vec<u8>,
     ) -> VsResult<()> {
+        self.charge_operation()?;
         let component = component.into();
         validate_component_entry(
             &self.entities,
@@ -211,6 +215,7 @@ impl WorldWriteTransaction {
 
     /// Remove one component from the transaction overlay.
     pub fn remove_component(&mut self, entity_bits: u64, component: &str) -> VsResult<bool> {
+        self.charge_operation()?;
         if component.is_empty()
             || component.len() > MAX_COMPONENT_NAME_BYTES
             || !component.is_ascii()
@@ -221,6 +226,15 @@ impl WorldWriteTransaction {
             .components
             .remove(&(entity_bits, component.to_owned()))
             .is_some())
+    }
+
+    fn charge_operation(&mut self) -> VsResult<()> {
+        self.operations = self
+            .operations
+            .checked_add(1)
+            .filter(|count| *count <= MAX_WRITE_OPERATIONS)
+            .ok_or_else(|| VsError::Runtime("ECS write operation budget exhausted".into()))?;
+        Ok(())
     }
 
     /// Commit only when `current` is the snapshot this transaction observed.
@@ -464,6 +478,19 @@ mod tests {
         ));
         let newer = source.begin_write().commit().unwrap();
         assert_eq!(newer.digest(), source.digest());
+    }
+
+    #[test]
+    fn write_transaction_enforces_operation_budget() {
+        let source = SnapshotWorldProxy::new([7]).unwrap();
+        let mut tx = source.begin_write();
+        for _ in 0..MAX_WRITE_OPERATIONS {
+            tx.remove_component(7, "Missing").unwrap();
+        }
+        assert!(matches!(
+            tx.remove_component(7, "Missing"),
+            Err(VsError::Runtime(message)) if message.contains("operation budget")
+        ));
     }
 
     #[test]
