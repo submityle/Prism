@@ -205,6 +205,27 @@ impl SnapshotWorldProxy {
             log: Vec::new(),
         }
     }
+
+    /// Replay a validated write log on this snapshot and commit atomically.
+    pub fn apply_write_log(&self, log: &[WorldWriteOp]) -> VsResult<Self> {
+        let mut transaction = self.begin_write();
+        for operation in log {
+            match operation {
+                WorldWriteOp::Set {
+                    entity_bits,
+                    component,
+                    bytes,
+                } => transaction.set_component(*entity_bits, component.clone(), bytes.clone())?,
+                WorldWriteOp::Remove {
+                    entity_bits,
+                    component,
+                } => {
+                    transaction.remove_component(*entity_bits, component)?;
+                }
+            }
+        }
+        transaction.commit_if_current(self)
+    }
 }
 
 impl WorldWriteTransaction {
@@ -546,9 +567,11 @@ mod tests {
         let log_digest = tx.operation_digest();
         assert_ne!(log_digest, [0; 32]);
         assert_eq!(log_digest, tx.operation_digest());
+        let replayed = source.apply_write_log(tx.operation_log()).unwrap();
         let updated = tx.commit().unwrap();
         assert_eq!(updated.component_json(7, "Transform").unwrap()["x"], 2);
-        assert!(updated.component_json(7, "Velocity").is_ok());
+        assert_eq!(replayed.digest(), updated.digest());
+
         let mut remove = updated.begin_write();
         assert!(remove.remove_component(7, "Velocity").unwrap());
         let mut stale = source.begin_write();
