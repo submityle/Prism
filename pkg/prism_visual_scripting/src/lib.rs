@@ -86,9 +86,9 @@ pub use saga::{
 };
 pub use scheduler::{AdmitResult, FairScheduler, ScheduledRun, SchedulerLimits, SchedulerSnapshot};
 pub use script_runtime::{
-    Binding, BindingRegistry, CallBudget, HotSwap, ResourceBudget, SandboxTier, ScriptBackend,
-    ScriptCall, ScriptCallResult, ScriptHost, ScriptModule, ScriptPolicy, StateBlob, StateMigrator,
-    SwapRecord,
+    BackendCallResult, Binding, BindingRegistry, CallBudget, HotSwap, ResourceBudget, SandboxTier,
+    ScriptBackend, ScriptCall, ScriptCallResult, ScriptHost, ScriptModule, ScriptPolicy, StateBlob,
+    StateMigrator, SwapRecord,
 };
 pub use simulation::{SimulationDeterminismGate, SimulationHarness, SimulationTrace};
 pub use stream::{
