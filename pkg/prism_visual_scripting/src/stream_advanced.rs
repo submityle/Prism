@@ -71,6 +71,13 @@ impl IntervalJoin {
         event: KeyedStreamEvent,
     ) -> VsResult<Vec<JoinedEvent>> {
         validate_keyed_event(&event)?;
+        if event.event_time_ms.checked_sub(self.before_ms).is_none()
+            || event.event_time_ms.checked_add(self.after_ms).is_none()
+        {
+            return Err(VsError::Runtime(
+                "join event interval arithmetic exhausted".into(),
+            ));
+        }
         if self
             .watermark_ms
             .is_some_and(|watermark| event.event_time_ms < watermark)
