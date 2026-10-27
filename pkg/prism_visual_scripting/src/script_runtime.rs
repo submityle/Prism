@@ -76,6 +76,29 @@ impl BindingRegistry {
         Ok(())
     }
 
+    pub fn validate_output(&self, name: &str, outputs: &[Value]) -> VsResult<()> {
+        let binding = self
+            .bindings
+            .get(name)
+            .ok_or_else(|| VsError::Runtime(format!("unknown host binding: {name}")))?;
+        match (&binding.output, outputs) {
+            (None, []) => Ok(()),
+            (None, _) => Err(VsError::Runtime(format!(
+                "binding `{name}` declares no output, received {}",
+                outputs.len()
+            ))),
+            (Some(expected), [actual]) if expected.accepts(&actual.ty()) => Ok(()),
+            (Some(expected), [actual]) => Err(VsError::Runtime(format!(
+                "binding `{name}` output expects {expected:?}, received {:?}",
+                actual.ty()
+            ))),
+            (Some(_), received) => Err(VsError::Runtime(format!(
+                "binding `{name}` declares one output, received {}",
+                received.len()
+            ))),
+        }
+    }
+
     pub fn authorize(&self, name: &str, policy: &ScriptPolicy) -> VsResult<()> {
         let binding = self
             .bindings
@@ -491,6 +514,8 @@ impl ScriptHost {
         }
         let mut budget = self.begin_call();
         let result = backend.call(&instance.0, &request, &mut budget)?;
+        self.bindings
+            .validate_output(&request.operation, &result.outputs)?;
         budget.check_deadline()?;
         Ok(ScriptCallResult {
             module_digest: module.digest,
@@ -628,6 +653,27 @@ mod tests {
             .validate_args("typed", &[Value::Bool(true)])
             .unwrap_err();
         assert!(matches!(error, VsError::Validate(message) if message.contains("expects I64")));
+    }
+
+    #[test]
+    fn binding_output_contract_rejects_wrong_type() {
+        let mut registry = BindingRegistry::default();
+        registry
+            .register(Binding {
+                name: "typed.output".into(),
+                category: "test".into(),
+                inputs: vec![],
+                output: Some(ValueType::I64),
+                capabilities: BTreeSet::new(),
+                deterministic: true,
+            })
+            .unwrap();
+        let error = registry
+            .validate_output("typed.output", &[Value::Bool(true)])
+            .unwrap_err();
+        assert!(
+            matches!(error, VsError::Runtime(message) if message.contains("output expects I64"))
+        );
     }
 
     #[test]
