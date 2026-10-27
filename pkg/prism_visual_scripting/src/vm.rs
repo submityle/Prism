@@ -133,7 +133,22 @@ impl VmState {
             self.pending_suspension = Some(pending);
             return Err(VsError::Runtime("suspension identity mismatch".into()));
         }
-        let expected = (pending.outputs.end - pending.outputs.start) as usize;
+        let expected = match pending.outputs.end.checked_sub(pending.outputs.start) {
+            Some(width) => width as usize,
+            None => {
+                self.pending_suspension = Some(pending);
+                return Err(VsError::Runtime(
+                    "suspension output slot range is reversed".into(),
+                ));
+            }
+        };
+        let end = pending.outputs.end as usize;
+        if end > self.slots.len() {
+            self.pending_suspension = Some(pending);
+            return Err(VsError::Runtime(
+                "suspension output slot range exceeds VM slots".into(),
+            ));
+        }
         if resolution.outputs.len() != expected {
             self.pending_suspension = Some(pending);
             return Err(VsError::Runtime(format!(
@@ -153,9 +168,7 @@ impl VmState {
                 return Err(error);
             }
         };
-        let target = self
-            .slots
-            .get_mut(pending.outputs.start as usize..pending.outputs.end as usize);
+        let target = self.slots.get_mut(pending.outputs.start as usize..end);
         let Some(target) = target else {
             self.pending_suspension = Some(pending);
             return Err(VsError::Runtime(
@@ -1131,5 +1144,66 @@ fn resolve_or_suspend(
             error_target,
         })),
         next => resolve_next(next, &targets, on_end, error_target).map(VmStepOutcome::Next),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pending(outputs: std::ops::Range<SlotId>) -> PendingSuspension {
+        PendingSuspension {
+            suspension: Suspension::new("resume", Value::I64(0)),
+            outputs,
+            targets: Vec::new(),
+            on_end: SlotProgram::HALT,
+            error_target: None,
+        }
+    }
+
+    fn state(pending_suspension: PendingSuspension) -> VmState {
+        VmState {
+            entry_node: 0,
+            block: SlotProgram::HALT,
+            slots: vec![Value::I64(0); 4],
+            budget_remaining: None,
+            execution_id: None,
+            next_effect_sequence: 0,
+            pending_suspension: Some(pending_suspension),
+        }
+    }
+
+    #[test]
+    fn resume_rejects_reversed_output_range_without_consuming_suspension() {
+        let pending = pending(5..3);
+        let mut vm = state(pending.clone());
+        let error = vm
+            .resume_suspension(
+                "resume",
+                SuspensionResolution {
+                    outputs: Vec::new(),
+                    next: ExecNext::End,
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(error, VsError::Runtime(message) if message.contains("reversed")));
+        assert_eq!(vm.pending_suspension, Some(pending));
+    }
+
+    #[test]
+    fn resume_rejects_output_range_beyond_slots_without_consuming_suspension() {
+        let pending = pending(2..5);
+        let mut vm = state(pending.clone());
+        let error = vm
+            .resume_suspension(
+                "resume",
+                SuspensionResolution {
+                    outputs: vec![Value::I64(0); 3],
+                    next: ExecNext::End,
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(error, VsError::Runtime(message) if message.contains("exceeds VM slots")));
+        assert_eq!(vm.pending_suspension, Some(pending));
     }
 }
