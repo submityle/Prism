@@ -12,7 +12,7 @@ use crate::{
     ScriptModule, Value, VsError, VsResult,
 };
 use async_trait::async_trait;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -165,6 +165,7 @@ pub struct WasmEffectExecutor {
     host: Arc<dyn WasmHost>,
     component: String,
     budget: ResourceBudget,
+    allowed_capabilities: Option<Arc<BTreeSet<String>>>,
 }
 
 impl WasmEffectExecutor {
@@ -182,7 +183,19 @@ impl WasmEffectExecutor {
             host,
             component: component.into(),
             budget,
+            allowed_capabilities: None,
         }
+    }
+
+    /// Restrict effects to the explicitly listed capabilities.
+    pub fn with_capabilities<I, S>(mut self, capabilities: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.allowed_capabilities =
+            Some(Arc::new(capabilities.into_iter().map(Into::into).collect()));
+        self
     }
 
     pub fn component(&self) -> &str {
@@ -193,6 +206,14 @@ impl WasmEffectExecutor {
 #[async_trait]
 impl EffectExecutor for WasmEffectExecutor {
     async fn execute(&self, request: EffectRequest) -> Result<EffectResponse, EffectError> {
+        if let Some(allowed) = &self.allowed_capabilities {
+            if !allowed.contains(&request.spec.capability) {
+                return Err(EffectError {
+                    message: format!("effect capability denied: {}", request.spec.capability),
+                    retryable: false,
+                });
+            }
+        }
         request.spec.validate().map_err(|error| EffectError {
             message: error.to_string(),
             retryable: false,
