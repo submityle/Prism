@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 const MAX_COMPONENT_NAME_BYTES: usize = 128;
 const MAX_COMPONENT_BYTES: usize = 1024 * 1024;
+const MAX_TOTAL_COMPONENT_BYTES: usize = 16 * 1024 * 1024;
 
 /// Minimal read-only world surface safe to expose across an execution boundary.
 pub trait WorldProxy: Send + Sync {
@@ -51,6 +52,7 @@ impl SnapshotWorldProxy {
     {
         let entities = entities.into_iter().collect::<BTreeSet<_>>();
         let mut component_map = BTreeMap::new();
+        let mut total_component_bytes = 0usize;
         for (entity_bits, component, bytes) in components {
             if component.is_empty()
                 || component.len() > MAX_COMPONENT_NAME_BYTES
@@ -58,11 +60,15 @@ impl SnapshotWorldProxy {
                 || bytes.len() > MAX_COMPONENT_BYTES
                 || !entities.contains(&entity_bits)
                 || component_map.contains_key(&(entity_bits, component.clone()))
+                || total_component_bytes
+                    .checked_add(bytes.len())
+                    .is_none_or(|total| total > MAX_TOTAL_COMPONENT_BYTES)
             {
                 return Err(VsError::Validate(
                     "invalid ECS component snapshot entry".into(),
                 ));
             }
+            total_component_bytes += bytes.len();
             component_map.insert((entity_bits, component), bytes);
         }
         let count = u32::try_from(entities.len())
@@ -236,6 +242,13 @@ mod tests {
             ),
             Err(VsError::Validate(message)) if message.contains("component snapshot")
         ));
+    }
+
+    #[test]
+    fn snapshot_rejects_total_component_payload_limit() {
+        let components =
+            (0..17).map(|entity| (entity, "Transform".to_owned(), vec![0; MAX_COMPONENT_BYTES]));
+        assert!(SnapshotWorldProxy::with_components(0..17, components).is_err());
     }
 
     #[test]
