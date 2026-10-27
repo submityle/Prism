@@ -193,18 +193,20 @@ impl PrismHost {
                 let _ = tx.send(result);
             }
         });
-        self.tasks
-            .lock()
-            .expect("task registry lock poisoned")
-            .insert(id, (cancel, rx));
+        match self.tasks.lock() {
+            Ok(mut tasks) => tasks.insert(id, (cancel, rx)),
+            Err(poisoned) => poisoned.into_inner().insert(id, (cancel, rx)),
+        };
         id
     }
 
     /// Request cancellation. Work that ignores its token is still drained as cancelled.
     pub fn cancel_task(&self, id: TaskId) -> bool {
-        self.tasks
-            .lock()
-            .expect("task registry lock poisoned")
+        let tasks = match self.tasks.lock() {
+            Ok(tasks) => tasks,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        tasks
             .get(&id)
             .map(|(token, _)| {
                 token.cancel();
@@ -215,7 +217,10 @@ impl PrismHost {
 
     /// Poll without blocking; completed tasks are removed from the host.
     pub fn poll_task(&self, id: TaskId) -> TaskPoll {
-        let mut tasks = self.tasks.lock().expect("task registry lock poisoned");
+        let mut tasks = match self.tasks.lock() {
+            Ok(tasks) => tasks,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         let Some((token, receiver)) = tasks.get_mut(&id) else {
             return TaskPoll::Unknown;
         };
@@ -247,16 +252,25 @@ mod tests {
     fn reflected_lists_round_trip_nested_values() {
         let value = Value::List(Arc::new(vec![
             Value::I64(7),
-            Value::List(Arc::new(vec![Value::Bool(true), Value::String(Arc::from("ok"))])),
+            Value::List(Arc::new(vec![
+                Value::Bool(true),
+                Value::String(Arc::from("ok")),
+            ])),
         ]));
         let reflected = value_to_reflect(&value).expect("list conversion");
-        assert_eq!(value_from_reflect(&*reflected).expect("list conversion"), value);
+        assert_eq!(
+            value_from_reflect(&*reflected).expect("list conversion"),
+            value
+        );
     }
 
     #[test]
     fn reflected_unit_round_trips_as_visual_unit() {
         let reflected = value_to_reflect(&Value::Unit).expect("unit conversion");
-        assert_eq!(value_from_reflect(&*reflected).expect("unit conversion"), Value::Unit);
+        assert_eq!(
+            value_from_reflect(&*reflected).expect("unit conversion"),
+            Value::Unit
+        );
     }
 
     #[tokio::test]
