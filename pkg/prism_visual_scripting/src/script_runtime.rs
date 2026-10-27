@@ -419,6 +419,56 @@ impl CallBudget {
 #[cfg(test)]
 mod tests {
     use super::*;
+    struct EchoBackend;
+
+    impl ScriptBackend for EchoBackend {
+        type Instance = Vec<u8>;
+
+        fn compile(
+            &self,
+            module: &ScriptModule,
+            _bindings: &BindingRegistry,
+        ) -> VsResult<Self::Instance> {
+            Ok(module.bytes.to_vec())
+        }
+
+        fn call(
+            &self,
+            instance: &Self::Instance,
+            operation: &str,
+            args: &[Value],
+            budget: &mut CallBudget,
+        ) -> VsResult<Vec<Value>> {
+            budget.charge(1)?;
+            if instance.is_empty() || operation != "echo" {
+                return Err(VsError::Runtime("invalid echo invocation".into()));
+            }
+            Ok(args.to_vec())
+        }
+    }
+
+    #[test]
+    fn host_publishes_compiles_and_calls_backend() {
+        let host = ScriptHost::new(
+            ScriptPolicy::new(SandboxTier::Sandboxed),
+            BindingRegistry::default(),
+        )
+        .with_backend(EchoBackend);
+        let module = ScriptModule::from_bytes("echo", 1, b"component");
+        let digest = module.digest;
+        host.publish(module).unwrap();
+        let result = host
+            .call(ScriptCall {
+                module: "echo".into(),
+                operation: "echo".into(),
+                args: vec![Value::I64(7)],
+            })
+            .unwrap();
+        assert_eq!(result.module_digest, digest);
+        assert_eq!(result.generation, 1);
+        assert_eq!(result.outputs, vec![Value::I64(7)]);
+    }
+
     #[test]
     fn content_addressed_publish_is_atomic_and_monotonic() {
         let swap = HotSwap::default();
