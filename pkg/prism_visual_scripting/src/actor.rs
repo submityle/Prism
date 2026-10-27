@@ -146,7 +146,9 @@ impl ActorState {
         let expires_at_ms = now_ms
             .checked_add(ttl_ms)
             .ok_or_else(|| VsError::Runtime("actor lease expiry exhausted".into()))?;
-        let lease = self.lease.as_mut().expect("check_lease verified lease");
+        let Some(lease) = self.lease.as_mut() else {
+            return Err(VsError::Runtime("actor lease state is inconsistent".into()));
+        };
         lease.expires_at_ms = expires_at_ms;
         Ok(lease.clone())
     }
