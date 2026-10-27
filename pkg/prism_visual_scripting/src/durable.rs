@@ -196,6 +196,13 @@ fn apply_mutation(
             .dispatched = true;
     }
     for mut event in mutation.events {
+        if event.execution_id.is_empty()
+            || event.execution_id.len() > crate::execution::MAX_EXECUTION_ID_BYTES
+        {
+            return Err(VsError::Validate(
+                "durable event execution identity must be non-empty and at most 128 bytes".into(),
+            ));
+        }
         event.sequence = next_event_sequence(record.events.len())?;
         record.events.push(event);
     }

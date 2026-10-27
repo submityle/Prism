@@ -52,6 +52,33 @@ fn in_memory_store_enforces_create_cas_and_payload_integrity() {
 }
 
 #[test]
+fn durable_events_reject_invalid_execution_identity() {
+    for execution_id in [String::new(), "x".repeat(129)] {
+        let error = InMemoryDurableStore::default()
+            .commit(
+                &key(),
+                RevisionGuard::Create,
+                DurableMutation {
+                    events: vec![ExecutionEvent {
+                        sequence: 0,
+                        execution_id,
+                        task_id: 1,
+                        frame_depth: 0,
+                        node_id: 1,
+                        timestamp_ms: 0,
+                        event: ExecutionEventKind::NodeStarted {
+                            def_id: "test.node".into(),
+                        },
+                    }],
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("execution identity"));
+    }
+}
+
+#[test]
 fn inbox_outbox_and_events_are_atomic_and_idempotent() {
     let store = InMemoryDurableStore::default();
     let k = key();
