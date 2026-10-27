@@ -206,7 +206,16 @@ impl SlotProgram {
                     Instr::CallGraph { target_graph, .. } => {
                         check_graph_call(target_graph)?;
                     }
-                    Instr::ForkGraphs { branches, .. } => {
+                    Instr::ForkGraphs {
+                        branches,
+                        max_concurrency,
+                        ..
+                    } => {
+                        if branches.is_empty() || *max_concurrency == 0 {
+                            return Err(VsError::Validate(
+                                "IR fork requires branches and positive concurrency".into(),
+                            ));
+                        }
                         for branch in branches {
                             check_graph_call(branch)?;
                         }
