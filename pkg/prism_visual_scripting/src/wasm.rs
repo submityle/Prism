@@ -168,7 +168,12 @@ impl ScriptBackend for WasmScriptBackend {
                     VsError::Runtime(error.message)
                 }
             })?;
-        if result.outputs.len().saturating_add(result.chunks.len()) > MAX_WASM_RESULT_VALUES {
+        let result_count = result
+            .outputs
+            .len()
+            .checked_add(result.chunks.len())
+            .ok_or_else(|| VsError::Runtime("WASM result value count exhausted".into()))?;
+        if result_count > MAX_WASM_RESULT_VALUES {
             return Err(VsError::Runtime(
                 "WASM result exceeds value-count budget".into(),
             ));
@@ -276,7 +281,15 @@ impl EffectExecutor for WasmEffectExecutor {
             message: error.message,
             retryable: error.retryable,
         })?;
-        if result.outputs.len().saturating_add(result.chunks.len()) > MAX_WASM_RESULT_VALUES {
+        let result_count = result
+            .outputs
+            .len()
+            .checked_add(result.chunks.len())
+            .ok_or_else(|| EffectError {
+                message: "WASM effect result value count exhausted".into(),
+                retryable: false,
+            })?;
+        if result_count > MAX_WASM_RESULT_VALUES {
             return Err(EffectError {
                 message: "WASM effect result exceeds value-count budget".into(),
                 retryable: false,
