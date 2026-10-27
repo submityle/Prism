@@ -608,6 +608,7 @@ impl ScriptHost {
         };
         let mut budget = self.begin_call();
         let result = backend.call(&instance, &request, &mut budget)?;
+        budget.verify_execution_charge()?;
         self.bindings
             .validate_output(&request.operation, &result.outputs)?;
         budget.check_deadline()?;
@@ -644,6 +645,20 @@ impl CallBudget {
         }
         Ok(())
     }
+    pub fn verify_execution_charge(&self) -> VsResult<()> {
+        if self.calls == 0 {
+            return Err(VsError::Runtime(
+                "script backend did not charge execution budget".into(),
+            ));
+        }
+        if self.remaining_fuel > self.limits.fuel {
+            return Err(VsError::Runtime(
+                "script backend increased execution fuel".into(),
+            ));
+        }
+        Ok(())
+    }
+
     pub fn deadline(&self) -> Instant {
         self.started + self.limits.wall_time
     }
@@ -1107,6 +1122,20 @@ mod tests {
             .unwrap();
         assert_eq!(state.schema_version, 3);
     }
+    #[test]
+    fn budget_rejects_missing_execution_charge() {
+        let budget = CallBudget::new(ResourceBudget {
+            fuel: 10,
+            memory_pages: 1,
+            wall_time: Duration::from_secs(1),
+            max_calls: 1,
+        });
+        assert!(matches!(
+            budget.verify_execution_charge(),
+            Err(VsError::Runtime(message)) if message.contains("did not charge")
+        ));
+    }
+
     #[test]
     fn budget_enforces_call_count() {
         let mut budget = CallBudget::new(ResourceBudget {
