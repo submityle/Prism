@@ -516,6 +516,11 @@ impl ScriptHost {
                 MAX_CONFIG_ENTRIES
             )));
         }
+        if !valid_identifier(&request.module) {
+            return Err(VsError::Validate(
+                "script module must be non-empty and space-free".into(),
+            ));
+        }
         if !valid_identifier(&request.operation) {
             return Err(VsError::Validate(
                 "script operation must be non-empty and space-free".into(),
@@ -808,6 +813,23 @@ mod tests {
         assert!(
             matches!(config_error, Err(VsError::Validate(message)) if message.contains("config"))
         );
+    }
+    #[test]
+    fn call_rejects_invalid_module_identifier() {
+        let host = ScriptHost::new(
+            ScriptPolicy::new(SandboxTier::Sandboxed),
+            BindingRegistry::default(),
+        );
+        let error = host.call(ScriptCall {
+            module: "module/../escape".into(),
+            operation: "op".into(),
+            request_id: "request".into(),
+            execution_id: "execution".into(),
+            attempt: 0,
+            args: Vec::new(),
+            config: BTreeMap::new(),
+        });
+        assert!(matches!(error, Err(VsError::Validate(message)) if message.contains("module")));
     }
     #[test]
     fn content_addressed_publish_is_atomic_and_monotonic() {
