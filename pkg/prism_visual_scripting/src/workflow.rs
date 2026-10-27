@@ -939,7 +939,11 @@ enum TaskStep {
 }
 
 fn assign_slots(slots: &mut [Value], range: &Range<SlotId>, values: &[Value]) -> VsResult<()> {
-    let expected = (range.end - range.start) as usize;
+    let expected = range
+        .end
+        .checked_sub(range.start)
+        .ok_or_else(|| VsError::Runtime("workflow slot range is reversed".into()))?
+        as usize;
     if expected != values.len() {
         return Err(VsError::Runtime(format!(
             "workflow value arity mismatch: expected {expected}, got {}",
