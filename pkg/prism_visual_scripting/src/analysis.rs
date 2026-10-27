@@ -6,7 +6,7 @@
 use crate::effect::{EffectClass, IdempotencyPolicy};
 use crate::model::{ControlNode, Graph, NodeId};
 use crate::registry::{NodeRegistry, Purity, RunnerKind};
-use crate::{Value, VsResult};
+use crate::{Value, VsError, VsResult};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
@@ -101,11 +101,19 @@ pub fn analyze_graph(graph: &Graph, registry: &dyn NodeRegistry) -> VsResult<Sta
     for node in &graph.nodes {
         let def = &defs[&node.id];
         if let RunnerKind::Effect(spec) = &def.runner {
-            report.bounds.effect_count += 1;
+            report.bounds.effect_count = report
+                .bounds
+                .effect_count
+                .checked_add(1)
+                .ok_or_else(|| VsError::Validate("static effect count exhausted".into()))?;
+            let retry_cost = 1usize
+                .checked_add(usize::from(spec.retry.max_attempts))
+                .ok_or_else(|| VsError::Validate("static retry cost exhausted".into()))?;
             report.bounds.cost_units = report
                 .bounds
                 .cost_units
-                .saturating_add(1 + usize::from(spec.retry.max_attempts));
+                .checked_add(retry_cost)
+                .ok_or_else(|| VsError::Validate("static cost bound exhausted".into()))?;
             if spec.class == EffectClass::ExternalWrite
                 && spec.idempotency != IdempotencyPolicy::Required
             {
@@ -127,7 +135,11 @@ pub fn analyze_graph(graph: &Graph, registry: &dyn NodeRegistry) -> VsResult<Sta
         }
         if def.id.starts_with("await.") || def.id.starts_with("wait.") || def.id.contains("suspend")
         {
-            report.bounds.wait_count += 1;
+            report.bounds.wait_count = report
+                .bounds
+                .wait_count
+                .checked_add(1)
+                .ok_or_else(|| VsError::Validate("static wait count exhausted".into()))?;
             let has_timeout = node
                 .config
                 .get("timeout_ms")
@@ -143,7 +155,11 @@ pub fn analyze_graph(graph: &Graph, registry: &dyn NodeRegistry) -> VsResult<Sta
             }
         }
         if def.purity == Purity::Impure {
-            report.bounds.cost_units = report.bounds.cost_units.saturating_add(1);
+            report.bounds.cost_units = report
+                .bounds
+                .cost_units
+                .checked_add(1)
+                .ok_or_else(|| VsError::Validate("static cost bound exhausted".into()))?;
         }
     }
 
@@ -159,7 +175,10 @@ pub fn analyze_graph(graph: &Graph, registry: &dyn NodeRegistry) -> VsResult<Sta
                 report.bounds.max_parallelism = report
                     .bounds
                     .max_parallelism
-                    .saturating_add(usize::from(*max_concurrency).min(branches.len()));
+                    .checked_add(usize::from(*max_concurrency).min(branches.len()))
+                    .ok_or_else(|| {
+                        VsError::Validate("static parallelism bound exhausted".into())
+                    })?;
                 if branches.is_empty() || *max_concurrency == 0 {
                     report.findings.push(finding(
                         FindingSeverity::Error,
