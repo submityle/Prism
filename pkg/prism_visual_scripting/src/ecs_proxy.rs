@@ -11,6 +11,7 @@ use std::sync::Arc;
 const MAX_COMPONENT_NAME_BYTES: usize = 128;
 const MAX_COMPONENT_BYTES: usize = 1024 * 1024;
 const MAX_TOTAL_COMPONENT_BYTES: usize = 16 * 1024 * 1024;
+const MAX_COMPONENT_ENTRIES: usize = 65_536;
 
 /// Minimal read-only world surface safe to expose across an execution boundary.
 pub trait WorldProxy: Send + Sync {
@@ -60,7 +61,8 @@ impl SnapshotWorldProxy {
         let mut component_map = BTreeMap::new();
         let mut total_component_bytes = 0usize;
         for (entity_bits, component, bytes) in components {
-            if component.is_empty()
+            if component_map.len() >= MAX_COMPONENT_ENTRIES
+                || component.is_empty()
                 || component.len() > MAX_COMPONENT_NAME_BYTES
                 || !component.is_ascii()
                 || bytes.len() > MAX_COMPONENT_BYTES
@@ -299,6 +301,14 @@ mod tests {
         let components =
             (0..17).map(|entity| (entity, "Transform".to_owned(), vec![0; MAX_COMPONENT_BYTES]));
         assert!(SnapshotWorldProxy::with_components(0..17, components).is_err());
+    }
+
+    #[test]
+    fn snapshot_rejects_component_entry_limit() {
+        let entities = 0..=MAX_COMPONENT_ENTRIES as u64;
+        let components = (0..=MAX_COMPONENT_ENTRIES as u64)
+            .map(|entity| (entity, format!("C{entity}"), Vec::new()));
+        assert!(SnapshotWorldProxy::with_components(entities, components).is_err());
     }
 
     #[test]
