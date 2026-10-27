@@ -254,6 +254,39 @@ impl WorldWriteTransaction {
         Ok(removed)
     }
 
+    /// Return a domain-separated digest of the ordered write log.
+    #[must_use]
+    pub fn operation_digest(&self) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        hasher.update(b"prism.visual_scripting.ecs.write_log.v1");
+        for operation in &self.log {
+            match operation {
+                WorldWriteOp::Set {
+                    entity_bits,
+                    component,
+                    bytes,
+                } => {
+                    hasher.update([0]);
+                    hasher.update(entity_bits.to_le_bytes());
+                    hasher.update((component.len() as u64).to_le_bytes());
+                    hasher.update(component.as_bytes());
+                    hasher.update((bytes.len() as u64).to_le_bytes());
+                    hasher.update(bytes);
+                }
+                WorldWriteOp::Remove {
+                    entity_bits,
+                    component,
+                } => {
+                    hasher.update([1]);
+                    hasher.update(entity_bits.to_le_bytes());
+                    hasher.update((component.len() as u64).to_le_bytes());
+                    hasher.update(component.as_bytes());
+                }
+            }
+        }
+        hasher.finalize().into()
+    }
+
     /// Return the deterministic operation log accumulated by this transaction.
     #[must_use]
     pub fn operation_log(&self) -> &[WorldWriteOp] {
@@ -510,6 +543,9 @@ mod tests {
             ]
         );
         assert_eq!(source.component_json(7, "Transform").unwrap()["x"], 1);
+        let log_digest = tx.operation_digest();
+        assert_ne!(log_digest, [0; 32]);
+        assert_eq!(log_digest, tx.operation_digest());
         let updated = tx.commit().unwrap();
         assert_eq!(updated.component_json(7, "Transform").unwrap()["x"], 2);
         assert!(updated.component_json(7, "Velocity").is_ok());
