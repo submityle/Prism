@@ -202,6 +202,19 @@ pub fn require_component_bytes<'a>(
         .ok_or_else(|| VsError::Runtime("ECS component is not present in snapshot".into()))
 }
 
+pub fn require_component_names<'a>(
+    ctx: &'a InvokeCtx<'a>,
+    entity_bits: u64,
+) -> VsResult<Vec<String>> {
+    let proxy = require_world_proxy(ctx)?;
+    if !proxy.contains_bits(entity_bits) {
+        return Err(VsError::Runtime(
+            "ECS entity is not present in snapshot".into(),
+        ));
+    }
+    Ok(proxy.component_names(entity_bits))
+}
+
 pub fn require_component_json<'a>(
     ctx: &'a InvokeCtx<'a>,
     entity_bits: u64,
@@ -357,6 +370,11 @@ mod tests {
         let mut host = InMemoryHost::default();
         let config = BTreeMap::<String, Value>::new();
         let ctx = InvokeCtx::from_env(&config, &mut host, &cancel, &env);
+        assert_eq!(require_component_names(&ctx, 7).unwrap(), vec!["Transform"]);
+        assert!(matches!(
+            require_component_names(&ctx, 8),
+            Err(VsError::Runtime(message)) if message.contains("entity")
+        ));
         assert_eq!(
             require_component_bytes(&ctx, 7, "Transform").unwrap(),
             vec![1, 2]
