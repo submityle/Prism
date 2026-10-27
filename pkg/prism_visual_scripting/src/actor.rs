@@ -264,11 +264,11 @@ pub struct InMemoryActorStore {
 
 impl ActorStore for InMemoryActorStore {
     fn load(&self, id: &ActorId) -> Option<ActorState> {
-        self.actors
-            .lock()
-            .expect("actor store poisoned")
-            .get(id)
-            .cloned()
+        let actors = match self.actors.lock() {
+            Ok(actors) => actors,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        actors.get(id).cloned()
     }
 
     fn save(&self, state: ActorState) -> VsResult<()> {
