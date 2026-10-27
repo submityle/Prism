@@ -21,7 +21,9 @@ pub use crate::durable::{
     DurableMutation, DurableRecord, DurableStore, FileDurableStore, InMemoryDurableStore,
     InboxEntry, OutboxEntry, RecordKey, RevisionGuard,
 };
-pub use crate::ecs_proxy::{require_world_proxy, WorldProxy, WorldProxyContext};
+pub use crate::ecs_proxy::{
+    require_world_proxy, SnapshotWorldProxy, WorldProxy, WorldProxyContext,
+};
 pub use crate::effect::{
     DurableEffectExecutor, DurableEffectState, EffectClass, EffectError, EffectExecutor,
     EffectRequest, EffectResponse, EffectSpec, ExecutionClock, IdempotencyPolicy,

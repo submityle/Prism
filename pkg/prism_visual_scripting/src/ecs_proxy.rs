@@ -4,12 +4,46 @@
 //! execution, keeping world lifetimes and thread affinity outside the scripting crate.
 
 use crate::{InvokeCtx, VsError, VsResult};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 /// Minimal read-only world surface safe to expose across an execution boundary.
 pub trait WorldProxy: Send + Sync {
     fn entity_count(&self) -> u32;
     fn contains_bits(&self, entity_bits: u64) -> bool;
+}
+
+/// Immutable host snapshot suitable for deterministic execution and replay.
+#[derive(Clone, Debug, Default)]
+pub struct SnapshotWorldProxy {
+    entities: Arc<BTreeSet<u64>>,
+    count: u32,
+}
+
+impl SnapshotWorldProxy {
+    pub fn new<I>(entities: I) -> VsResult<Self>
+    where
+        I: IntoIterator<Item = u64>,
+    {
+        let entities = entities.into_iter().collect::<BTreeSet<_>>();
+        let count = u32::try_from(entities.len())
+            .map_err(|_| VsError::Validate("world entity count exceeds u32".into()))?;
+        let _ = count;
+        Ok(Self {
+            entities: Arc::new(entities),
+            count,
+        })
+    }
+}
+
+impl WorldProxy for SnapshotWorldProxy {
+    fn entity_count(&self) -> u32 {
+        self.count
+    }
+
+    fn contains_bits(&self, entity_bits: u64) -> bool {
+        self.entities.contains(&entity_bits)
+    }
 }
 
 /// Concrete external context injected through [`crate::ExecutionEnv::with_external`].
@@ -56,6 +90,14 @@ mod tests {
         fn contains_bits(&self, bits: u64) -> bool {
             self.entities.contains(&bits)
         }
+    }
+
+    #[test]
+    fn snapshot_proxy_is_deterministic_and_read_only() {
+        let snapshot = SnapshotWorldProxy::new([9, 3, 9]).unwrap();
+        assert_eq!(snapshot.entity_count(), 2);
+        assert!(snapshot.contains_bits(3));
+        assert!(!snapshot.contains_bits(4));
     }
 
     #[test]
