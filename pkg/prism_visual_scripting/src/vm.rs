@@ -1054,7 +1054,9 @@ impl Vm {
                     if delay > 0 {
                         clock.sleep_millis(delay).await;
                     }
-                    attempt = attempt.saturating_add(1);
+                    attempt = attempt
+                        .checked_add(1)
+                        .ok_or_else(|| VsError::Runtime("effect retry attempt exhausted".into()))?;
                 }
             }
         }
