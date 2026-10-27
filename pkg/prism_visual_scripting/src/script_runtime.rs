@@ -225,6 +225,23 @@ impl ScriptModule {
     pub fn digest_hex(&self) -> String {
         self.digest.iter().map(|b| format!("{b:02x}")).collect()
     }
+
+    pub fn validate(&self) -> VsResult<()> {
+        if !valid_identifier(&self.name) {
+            return Err(VsError::Validate(
+                "module name must be non-empty and space-free".into(),
+            ));
+        }
+        if self.schema_version == 0 {
+            return Err(VsError::Validate(
+                "module schema version must be non-zero".into(),
+            ));
+        }
+        if self.bytes.is_empty() {
+            return Err(VsError::Validate("module bytes must be non-empty".into()));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -434,11 +451,7 @@ impl ScriptHost {
         self
     }
     pub fn publish(&self, module: ScriptModule) -> VsResult<SwapRecord> {
-        if !valid_identifier(&module.name) {
-            return Err(VsError::Validate(
-                "script module name must be non-empty and space-free".into(),
-            ));
-        }
+        module.validate()?;
         if let Some(existing) = self.hotswap.acquire(&module.name) {
             if existing.module.digest == module.digest {
                 return Ok(SwapRecord {
@@ -624,6 +637,20 @@ mod tests {
         assert!(swaps.is_current(&current));
     }
 
+    #[test]
+    fn publish_rejects_invalid_module_metadata() {
+        let host = ScriptHost::new(
+            ScriptPolicy::new(SandboxTier::Sandboxed),
+            BindingRegistry::default(),
+        );
+        for module in [
+            ScriptModule::from_bytes("bad name", 1, b"module"),
+            ScriptModule::from_bytes("empty-schema", 0, b"module"),
+            ScriptModule::from_bytes("empty-bytes", 1, Vec::<u8>::new()),
+        ] {
+            assert!(matches!(host.publish(module), Err(VsError::Validate(_))));
+        }
+    }
     #[test]
     fn publish_rejects_modules_larger_than_memory_budget() {
         let mut policy = ScriptPolicy::new(SandboxTier::Fortified);
