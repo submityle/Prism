@@ -74,14 +74,24 @@ pub trait WasmHost: Send + Sync + 'static {
             "WASM host must validate component bytes",
         ))
     }
+    /// Compile validated bytes into a host-owned content-addressed instance.
+    /// The default is deliberately rejected; production hosts should return a
+    /// compiled handle representation understood by their `call` method.
+    fn compile_module(&self, bytes: &[u8]) -> Result<Vec<u8>, WasmHostError> {
+        self.validate_module(bytes)?;
+        Err(WasmHostError::permanent(
+            "WASM host must compile component bytes",
+        ))
+    }
+
     fn call(&self, request: WasmCall) -> Result<WasmCallResult, WasmHostError>;
 }
 
 /// Adapter that turns a typed `WasmHost` into a `ScriptBackend`.
 ///
-/// The compiled instance is retained as content-addressed bytes; actual
-/// Component compilation/instance pooling remains owned by the host and can
-/// be backed by `prism_wasm::Sandbox` without leaking wasmtime types here.
+/// The compiled instance is retained as a host-defined opaque byte handle;
+/// actual Component compilation and instance pooling remain owned by the host
+/// and can be backed by `prism_wasm::Sandbox` without leaking wasmtime types.
 pub struct WasmScriptBackend {
     host: Arc<dyn WasmHost>,
     component: String,
@@ -108,9 +118,8 @@ impl ScriptBackend for WasmScriptBackend {
             return Err(VsError::Runtime("WASM script module is empty".into()));
         }
         self.host
-            .validate_module(&module.bytes)
-            .map_err(|error| VsError::Compile(error.message))?;
-        Ok(module.bytes.to_vec())
+            .compile_module(&module.bytes)
+            .map_err(|error| VsError::Compile(error.message))
     }
 
     fn call(
@@ -214,6 +223,11 @@ mod tests {
                     retryable: false,
                 })
             }
+        }
+
+        fn compile_module(&self, bytes: &[u8]) -> Result<Vec<u8>, WasmHostError> {
+            self.validate_module(bytes)?;
+            Ok(bytes.to_vec())
         }
 
         fn call(&self, request: WasmCall) -> Result<WasmCallResult, WasmHostError> {
