@@ -194,3 +194,71 @@ impl EffectExecutor for WasmEffectExecutor {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    struct RecordingHost {
+        call: Mutex<Option<WasmCall>>,
+    }
+
+    impl WasmHost for RecordingHost {
+        fn validate_module(&self, bytes: &[u8]) -> Result<(), WasmHostError> {
+            if bytes == b"component" {
+                Ok(())
+            } else {
+                Err(WasmHostError {
+                    message: "invalid component".into(),
+                    retryable: false,
+                })
+            }
+        }
+
+        fn call(&self, request: WasmCall) -> Result<WasmCallResult, WasmHostError> {
+            *self.call.lock().unwrap() = Some(request);
+            Ok(WasmCallResult {
+                outputs: vec![Value::I64(9)],
+                next: ExecNext::End,
+                chunks: Vec::new(),
+            })
+        }
+    }
+
+    #[test]
+    fn adapter_forwards_identity_config_and_budget() {
+        let host = Arc::new(RecordingHost {
+            call: Mutex::new(None),
+        });
+        let backend = WasmScriptBackend::new(host.clone(), "combat");
+        let module = ScriptModule::from_bytes("combat", 1, b"component");
+        let instance = backend
+            .compile(&module, &BindingRegistry::default())
+            .unwrap();
+        let request = crate::ScriptCall {
+            module: "combat".into(),
+            operation: "tick".into(),
+            request_id: "req-42".into(),
+            execution_id: "exec-42".into(),
+            attempt: 3,
+            args: vec![Value::I64(1)],
+            config: BTreeMap::from([("difficulty".into(), Value::I64(2))]),
+        };
+        let mut budget = CallBudget::new(crate::ResourceBudget {
+            fuel: 100,
+            memory_pages: 64,
+            ..crate::ResourceBudget::sandboxed()
+        });
+        let result = backend.call(&instance, &request, &mut budget).unwrap();
+        assert_eq!(result.outputs, vec![Value::I64(9)]);
+        let captured = host.call.lock().unwrap().clone().unwrap();
+        assert_eq!(captured.request_id, "req-42");
+        assert_eq!(captured.execution_id, "exec-42");
+        assert_eq!(captured.attempt, 3);
+        assert_eq!(captured.config, request.config);
+        assert_eq!(captured.fuel_remaining, 99);
+        assert_eq!(captured.memory_pages_limit, 64);
+        assert!(captured.deadline >= budget.started);
+    }
+}
