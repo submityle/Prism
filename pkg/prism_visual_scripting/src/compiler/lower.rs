@@ -218,15 +218,20 @@ fn ensure_value(
     pure_emitted: &mut HashMap<NodeId, SlotId>,
 ) -> VsResult<SlotId> {
     let def = cx.defs_by_node[&ep.node].clone();
-    let data_pos = data_pin_position(&def.outputs, ep.pin) as u32;
+    let data_pos = u32::try_from(data_pin_position(&def.outputs, ep.pin))
+        .map_err(|_| crate::error::VsError::Validate("slot count exceeds u32::MAX".into()))?;
     match def.purity {
         Purity::Impure => {
             let base = cx.impure_out_slots[&ep.node];
-            Ok(base + data_pos)
+            base.checked_add(data_pos).ok_or_else(|| {
+                crate::error::VsError::Validate("slot count exceeds u32::MAX".into())
+            })
         }
         Purity::Pure => {
             if let Some(&base) = pure_emitted.get(&ep.node) {
-                return Ok(base + data_pos);
+                return base.checked_add(data_pos).ok_or_else(|| {
+                    crate::error::VsError::Validate("slot count exceeds u32::MAX".into())
+                });
             }
             let in_range = emit_inputs(cx, ep.node, block, pure_emitted)?;
             let n_outs = u32::try_from(def.data_outputs().len()).map_err(|_| {
