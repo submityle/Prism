@@ -14,6 +14,7 @@ use crate::{
 use async_trait::async_trait;
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 /// A typed request handed to a host-owned `prism_wasm` Component sandbox.
 #[derive(Clone, Debug)]
@@ -25,6 +26,9 @@ pub struct WasmCall {
     pub attempt: u16,
     pub inputs: Vec<Value>,
     pub config: BTreeMap<String, Value>,
+    pub fuel_remaining: u64,
+    pub memory_pages_limit: u32,
+    pub deadline: Instant,
 }
 
 /// A typed Component result before it is committed as a visual-scripting Effect.
@@ -129,6 +133,9 @@ impl ScriptBackend for WasmScriptBackend {
                 attempt: request.attempt,
                 inputs: request.args.clone(),
                 config: request.config.clone(),
+                fuel_remaining: budget.remaining_fuel,
+                memory_pages_limit: budget.limits.memory_pages,
+                deadline: budget.deadline(),
             })
             .map_err(|error| VsError::Runtime(error.message))?;
         Ok(BackendCallResult {
@@ -169,6 +176,9 @@ impl EffectExecutor for WasmEffectExecutor {
             attempt: request.attempt,
             inputs: request.inputs,
             config: request.config,
+            fuel_remaining: u64::MAX,
+            memory_pages_limit: u32::MAX,
+            deadline: Instant::now() + std::time::Duration::from_secs(10),
         };
         let result = tokio::task::spawn_blocking(move || host.call(call))
             .await

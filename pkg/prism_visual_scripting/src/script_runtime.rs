@@ -453,6 +453,10 @@ impl CallBudget {
         }
         Ok(())
     }
+    pub fn deadline(&self) -> Instant {
+        self.started + self.limits.wall_time
+    }
+
     pub fn charge(&mut self, fuel: u64) -> VsResult<()> {
         self.calls = self
             .calls
