@@ -28,6 +28,8 @@ pub type BlockId = u32;
 pub type DefId = u32;
 pub type VarId = u32;
 
+const MAX_IR_CONFIG_ENTRIES: usize = 256;
+const MAX_IR_IDENTIFIER_BYTES: usize = 128;
 #[derive(Clone, Serialize, Deserialize)]
 pub enum Instr {
     /// 把字面量装入 slot。
@@ -167,6 +169,41 @@ impl SlotProgram {
         let valid_range = |start: SlotId, end: SlotId| start <= end && end <= self.slots_count;
         for (block_id, block) in self.blocks.iter().enumerate() {
             for instr in &block.instrs {
+                let check_config = |config: &BTreeMap<String, Value>| {
+                    if config.len() > MAX_IR_CONFIG_ENTRIES
+                        || config
+                            .keys()
+                            .any(|key| key.is_empty() || key.len() > MAX_IR_IDENTIFIER_BYTES)
+                    {
+                        return Err(VsError::Validate("IR node config exceeds limits".into()));
+                    }
+                    Ok(())
+                };
+                match instr {
+                    Instr::CallPure { config, .. } => {
+                        check_config(config)?;
+                    }
+                    Instr::CallImpure {
+                        config, targets, ..
+                    } => {
+                        check_config(config)?;
+                        if targets.iter().any(|(name, _)| {
+                            name.is_empty() || name.len() > MAX_IR_IDENTIFIER_BYTES
+                        }) {
+                            return Err(VsError::Validate(
+                                "IR exec pin identifier exceeds limits".into(),
+                            ));
+                        }
+                    }
+                    Instr::Transition { state, .. }
+                        if state.is_empty() || state.len() > MAX_IR_IDENTIFIER_BYTES =>
+                    {
+                        return Err(VsError::Validate(
+                            "IR transition identifier exceeds limits".into(),
+                        ));
+                    }
+                    _ => {}
+                }
                 let valid_slot = |slot: SlotId| slot < self.slots_count;
                 match instr {
                     Instr::LoadConst { dst, .. }
