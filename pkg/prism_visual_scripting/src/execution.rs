@@ -81,7 +81,7 @@ impl ExecutionReplay {
             ));
         }
         for (index, event) in events.iter().enumerate() {
-            let expected = index as u64 + 1;
+            let expected = next_execution_sequence(index)?;
             if event.sequence != expected {
                 return Err(crate::VsError::Runtime(format!(
                     "replay event sequence mismatch: expected {expected}, got {}",
@@ -174,7 +174,7 @@ impl ExecutionReplay {
 
     fn validate_pair(events: &[ExecutionEvent]) -> VsResult<()> {
         for (index, event) in events.iter().enumerate() {
-            if event.sequence != index as u64 + 1 {
+            if event.sequence != next_execution_sequence(index)? {
                 return Err(crate::VsError::Runtime(
                     "replay event sequence is not contiguous".into(),
                 ));
