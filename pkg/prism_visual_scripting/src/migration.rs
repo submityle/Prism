@@ -6,6 +6,8 @@ use sha2::{Digest as _, Sha256};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+const MAX_MIGRATION_STEPS: usize = 1024;
+
 pub type MigrationFn = Arc<dyn Fn(Value) -> VsResult<Value> + Send + Sync>;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -71,6 +73,11 @@ impl MigrationRegistry {
                 )));
             }
             descriptors.push(step.descriptor.clone());
+            if descriptors.len() > MAX_MIGRATION_STEPS {
+                return Err(VsError::Validate(format!(
+                    "migration chain exceeds {MAX_MIGRATION_STEPS} steps"
+                )));
+            }
             current = step.descriptor.to;
         }
         Ok(descriptors)
