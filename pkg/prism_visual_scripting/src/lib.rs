@@ -57,8 +57,8 @@ pub use durable::{
 };
 pub use ecs_proxy::{
     require_component_bytes, require_component_json, require_component_names, require_entity_count,
-    require_snapshot_digest, require_world_proxy, SnapshotWorldProxy, WorldProxy,
-    WorldProxyContext,
+    require_entity_present, require_snapshot_digest, require_world_proxy, SnapshotWorldProxy,
+    WorldProxy, WorldProxyContext,
 };
 pub use effect::{
     DurableEffectExecutor, DurableEffectState, EffectClass, EffectError, EffectExecutor,
