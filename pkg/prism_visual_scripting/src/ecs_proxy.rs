@@ -12,6 +12,7 @@ const MAX_COMPONENT_NAME_BYTES: usize = 128;
 const MAX_COMPONENT_BYTES: usize = 1024 * 1024;
 const MAX_TOTAL_COMPONENT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_COMPONENT_ENTRIES: usize = 65_536;
+const MAX_SNAPSHOT_ENTITIES: usize = 1_000_000;
 
 /// Minimal read-only world surface safe to expose across an execution boundary.
 pub trait WorldProxy: Send + Sync {
@@ -58,6 +59,11 @@ impl SnapshotWorldProxy {
         C: IntoIterator<Item = (u64, String, Vec<u8>)>,
     {
         let entities = entities.into_iter().collect::<BTreeSet<_>>();
+        if entities.len() > MAX_SNAPSHOT_ENTITIES {
+            return Err(VsError::Validate(
+                "world entity count exceeds snapshot limit".into(),
+            ));
+        }
         let mut component_map = BTreeMap::new();
         let mut total_component_bytes = 0usize;
         for (entity_bits, component, bytes) in components {
@@ -301,6 +307,15 @@ mod tests {
         let components =
             (0..17).map(|entity| (entity, "Transform".to_owned(), vec![0; MAX_COMPONENT_BYTES]));
         assert!(SnapshotWorldProxy::with_components(0..17, components).is_err());
+    }
+
+    #[test]
+    fn snapshot_rejects_entity_limit() {
+        assert!(SnapshotWorldProxy::with_components(
+            0..=MAX_SNAPSHOT_ENTITIES as u64,
+            std::iter::empty::<(u64, String, Vec<u8>)>(),
+        )
+        .is_err());
     }
 
     #[test]
