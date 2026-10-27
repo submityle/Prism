@@ -225,6 +225,18 @@ impl WasmEffectExecutor {
 #[async_trait]
 impl EffectExecutor for WasmEffectExecutor {
     async fn execute(&self, request: EffectRequest) -> Result<EffectResponse, EffectError> {
+        if !valid_component_identifier(&self.component) {
+            return Err(EffectError {
+                message: "WASM component identifier must be non-empty, ASCII, and bounded".into(),
+                retryable: false,
+            });
+        }
+        if !valid_component_identifier(&request.spec.operation) {
+            return Err(EffectError {
+                message: "WASM operation identifier must be non-empty, ASCII, and bounded".into(),
+                retryable: false,
+            });
+        }
         if let Some(allowed) = &self.allowed_capabilities {
             if !allowed.contains(&request.spec.capability) {
                 return Err(EffectError {
@@ -264,6 +276,12 @@ impl EffectExecutor for WasmEffectExecutor {
             message: error.message,
             retryable: error.retryable,
         })?;
+        if result.outputs.len().saturating_add(result.chunks.len()) > MAX_WASM_RESULT_VALUES {
+            return Err(EffectError {
+                message: "WASM effect result exceeds value-count budget".into(),
+                retryable: false,
+            });
+        }
         if started.elapsed() > timeout {
             return Err(EffectError::retryable(
                 "wasm effect exceeded its wall-clock deadline",
