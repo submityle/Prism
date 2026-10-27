@@ -18,12 +18,14 @@ pub fn instantiate(plan: &ExecutionPlan, registry: &dyn NodeRegistry) -> VsResul
             None => return Err(VsError::UnknownDef(id.clone())),
         }
     }
-    Ok(SlotProgram {
+    let program = SlotProgram {
         slots_count: plan.slots_count,
         blocks: plan.blocks.clone(),
         defs,
         vars: plan.vars.clone(),
         entries: plan.entries.clone(),
         registry_digest: plan.registry_digest,
-    })
+    };
+    program.validate()?;
+    Ok(program)
 }

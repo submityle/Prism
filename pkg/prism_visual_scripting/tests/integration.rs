@@ -645,3 +645,22 @@ fn compiler_rejects_pure_graph_entry() {
         matches!(error, VsError::Validate(message) if message.contains("must reference an impure node"))
     );
 }
+
+#[test]
+fn instantiate_rejects_out_of_bounds_ir_slots() {
+    let lib = NodeLibrary::with_builtins();
+    let graph = Graph {
+        nodes: vec![make_node(1, "event.begin")],
+        entries: vec![1],
+        ..Default::default()
+    };
+    let mut plan = compile_to_plan(&graph, &lib).expect("plan");
+    plan.blocks[0].instrs.push(Instr::Move { dst: 1, src: 0 });
+    let error = match instantiate(&plan, &lib) {
+        Ok(_) => panic!("invalid IR slot must be rejected"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(error, VsError::Validate(message) if message.contains("slot range out of bounds"))
+    );
+}

@@ -20,6 +20,7 @@ use std::collections::BTreeMap;
 use std::ops::Range;
 use std::sync::Arc;
 
+use crate::error::{VsError, VsResult};
 use crate::registry::NodeDefinition;
 
 pub type SlotId = u32;
@@ -157,8 +158,136 @@ pub struct SlotProgram {
 }
 
 impl SlotProgram {
-    /// 程序结束的 sentinel block。
     pub const HALT: BlockId = u32::MAX;
+
+    /// Validate the in-process program before handing it to the interpreter.
+    pub fn validate(&self) -> VsResult<()> {
+        let valid_target =
+            |target: BlockId| target == Self::HALT || (target as usize) < self.blocks.len();
+        let valid_range = |start: SlotId, end: SlotId| start <= end && end <= self.slots_count;
+        for (block_id, block) in self.blocks.iter().enumerate() {
+            for instr in &block.instrs {
+                let (ranges, targets): (Vec<(SlotId, SlotId)>, Vec<BlockId>) = match instr {
+                    Instr::LoadConst { dst, .. } => {
+                        (vec![(*dst, dst.saturating_add(1))], Vec::new())
+                    }
+                    Instr::Move { dst, src } => (
+                        vec![(*dst, dst.saturating_add(1)), (*src, src.saturating_add(1))],
+                        Vec::new(),
+                    ),
+                    Instr::LoadVar { dst, var } => {
+                        if (*var as usize) >= self.vars.len() {
+                            return Err(VsError::Validate("IR variable index out of range".into()));
+                        }
+                        (vec![(*dst, dst.saturating_add(1))], Vec::new())
+                    }
+                    Instr::StoreVar { var, src } => {
+                        if (*var as usize) >= self.vars.len() {
+                            return Err(VsError::Validate("IR variable index out of range".into()));
+                        }
+                        (vec![(*src, src.saturating_add(1))], Vec::new())
+                    }
+                    Instr::CallPure {
+                        def,
+                        inputs,
+                        outputs,
+                        ..
+                    } => {
+                        if (*def as usize) >= self.defs.len() {
+                            return Err(VsError::Validate(
+                                "IR definition index out of range".into(),
+                            ));
+                        }
+                        (
+                            vec![(inputs.start, inputs.end), (outputs.start, outputs.end)],
+                            Vec::new(),
+                        )
+                    }
+                    Instr::CallImpure {
+                        def,
+                        inputs,
+                        outputs,
+                        targets,
+                        on_end,
+                        error_target,
+                        ..
+                    } => {
+                        if (*def as usize) >= self.defs.len() {
+                            return Err(VsError::Validate(
+                                "IR definition index out of range".into(),
+                            ));
+                        }
+                        let mut targets = targets
+                            .iter()
+                            .map(|(_, target)| *target)
+                            .collect::<Vec<_>>();
+                        targets.push(*on_end);
+                        if let Some(target) = error_target {
+                            targets.push(*target);
+                        }
+                        (
+                            vec![(inputs.start, inputs.end), (outputs.start, outputs.end)],
+                            targets,
+                        )
+                    }
+                    Instr::Jump { target } => (Vec::new(), vec![*target]),
+                    Instr::FrameEntry {
+                        outputs, target, ..
+                    } => (vec![(outputs.start, outputs.end)], vec![*target]),
+                    Instr::Return { inputs, .. } => (vec![(inputs.start, inputs.end)], Vec::new()),
+                    Instr::CallGraph {
+                        inputs,
+                        outputs,
+                        target,
+                        error_target,
+                        ..
+                    } => {
+                        let mut targets = vec![*target];
+                        if let Some(target) = error_target {
+                            targets.push(*target);
+                        }
+                        (
+                            vec![(inputs.start, inputs.end), (outputs.start, outputs.end)],
+                            targets,
+                        )
+                    }
+                    Instr::ForkGraphs {
+                        inputs,
+                        outputs,
+                        target,
+                        error_target,
+                        ..
+                    } => {
+                        let mut targets = vec![*target];
+                        if let Some(target) = error_target {
+                            targets.push(*target);
+                        }
+                        (
+                            vec![(inputs.start, inputs.end), (outputs.start, outputs.end)],
+                            targets,
+                        )
+                    }
+                    Instr::Transition { .. } => (Vec::new(), Vec::new()),
+                };
+                if ranges.iter().any(|(start, end)| !valid_range(*start, *end)) {
+                    return Err(VsError::Validate(format!(
+                        "IR slot range out of bounds in block {block_id}"
+                    )));
+                }
+                if targets.iter().any(|target| !valid_target(*target)) {
+                    return Err(VsError::Validate(format!(
+                        "IR block target out of bounds in block {block_id}"
+                    )));
+                }
+            }
+        }
+        for target in self.entries.values() {
+            if !valid_target(*target) {
+                return Err(VsError::Validate("IR entry target out of bounds".into()));
+            }
+        }
+        Ok(())
+    }
 
     /// 把 in-proc 程序投影回可序列化 [`ExecutionPlan`]。无损：blocks / vars /
     /// entries 直接克隆，`defs` 投影为 `def_ids`。
