@@ -437,13 +437,19 @@ pub struct ScriptCallResult {
 }
 
 #[derive(Clone)]
+struct PublishedScript {
+    module: ScriptModule,
+    instance: Option<Vec<u8>>,
+    generation: u64,
+}
+
+#[derive(Clone)]
 pub struct ScriptHost {
     pub bindings: Arc<BindingRegistry>,
     pub policy: ScriptPolicy,
-    pub hotswap: HotSwap,
     pub migrator: StateMigrator,
     backend: Option<Arc<dyn ScriptBackend<Instance = Vec<u8>>>>,
-    instances: Arc<RwLock<BTreeMap<String, (Vec<u8>, [u8; 32])>>>,
+    published: Arc<RwLock<BTreeMap<String, PublishedScript>>>,
 }
 
 impl ScriptHost {
@@ -451,10 +457,9 @@ impl ScriptHost {
         Self {
             bindings: Arc::new(bindings),
             policy,
-            hotswap: HotSwap::default(),
             migrator: StateMigrator::default(),
             backend: None,
-            instances: Arc::new(RwLock::new(BTreeMap::new())),
+            published: Arc::new(RwLock::new(BTreeMap::new())),
         }
     }
     pub fn with_backend<B>(mut self, backend: B) -> Self
@@ -466,13 +471,15 @@ impl ScriptHost {
     }
     pub fn publish(&self, module: ScriptModule) -> VsResult<SwapRecord> {
         module.validate()?;
-        if let Some(existing) = self.hotswap.acquire(&module.name) {
-            if existing.module.digest == module.digest {
-                return Ok(SwapRecord {
-                    old_digest: Some(existing.module.digest),
-                    new_digest: module.digest,
-                    generation: existing.generation,
-                });
+        if let Ok(published) = self.published.read() {
+            if let Some(existing) = published.get(&module.name) {
+                if existing.module.digest == module.digest {
+                    return Ok(SwapRecord {
+                        old_digest: Some(existing.module.digest),
+                        new_digest: module.digest,
+                        generation: existing.generation,
+                    });
+                }
             }
         }
         let max_module_bytes = (self.policy.budget.memory_pages as usize)
@@ -485,14 +492,38 @@ impl ScriptHost {
                 max_module_bytes
             )));
         }
-        if let Some(backend) = &self.backend {
-            let instance = backend.compile(&module, &self.bindings)?;
-            self.instances
-                .write()
-                .map_err(|_| VsError::Runtime("script instance registry poisoned".into()))?
-                .insert(module.name.clone(), (instance, module.digest));
-        }
-        self.hotswap.publish(module)
+        let instance = if let Some(backend) = &self.backend {
+            Some(backend.compile(&module, &self.bindings)?)
+        } else {
+            None
+        };
+        let mut published = self
+            .published
+            .write()
+            .map_err(|_| VsError::Runtime("published script registry poisoned".into()))?;
+        let generation = published.get(&module.name).map_or(1, |current| {
+            if current.module.digest == module.digest {
+                current.generation
+            } else {
+                current.generation.saturating_add(1)
+            }
+        });
+        let record = SwapRecord {
+            old_digest: published
+                .get(&module.name)
+                .map(|current| current.module.digest),
+            new_digest: module.digest,
+            generation,
+        };
+        published.insert(
+            module.name.clone(),
+            PublishedScript {
+                module,
+                instance,
+                generation,
+            },
+        );
+        Ok(record)
     }
     pub fn authorize(&self, binding: &str) -> VsResult<()> {
         self.bindings.authorize(binding, &self.policy)
@@ -536,26 +567,27 @@ impl ScriptHost {
         }
         self.bindings
             .validate_args(&request.operation, &request.args)?;
-        let lease = self.hotswap.acquire(&request.module).ok_or_else(|| {
-            VsError::Runtime(format!("script module not installed: {}", request.module))
-        })?;
-        let module = lease.module.clone();
         let backend = self
             .backend
             .as_ref()
             .ok_or_else(|| VsError::Runtime("script backend is not configured".into()))?;
-        let instance = self
-            .instances
-            .read()
-            .map_err(|_| VsError::Runtime("script instance registry poisoned".into()))?
-            .get(&request.module)
-            .cloned()
-            .ok_or_else(|| VsError::Runtime("script instance is not compiled".into()))?;
-        if instance.1 != module.digest {
-            return Err(VsError::Runtime("script instance digest is stale".into()));
-        }
+        let (module, instance, generation) = {
+            let published = self
+                .published
+                .read()
+                .map_err(|_| VsError::Runtime("published script registry poisoned".into()))?;
+            let script = published.get(&request.module).ok_or_else(|| {
+                VsError::Runtime(format!("script module not installed: {}", request.module))
+            })?;
+            let instance = script
+                .instance
+                .as_ref()
+                .ok_or_else(|| VsError::Runtime("script instance is not compiled".into()))?
+                .clone();
+            (script.module.clone(), instance, script.generation)
+        };
         let mut budget = self.begin_call();
-        let result = backend.call(&instance.0, &request, &mut budget)?;
+        let result = backend.call(&instance, &request, &mut budget)?;
         self.bindings
             .validate_output(&request.operation, &result.outputs)?;
         budget.check_deadline()?;
@@ -564,7 +596,7 @@ impl ScriptHost {
             outputs: result.outputs,
             next: result.next,
             chunks: result.chunks,
-            generation: lease.generation,
+            generation,
         })
     }
 }
