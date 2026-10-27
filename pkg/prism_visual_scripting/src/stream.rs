@@ -224,7 +224,7 @@ impl WindowedStream {
                     });
                 }
                 BackpressurePolicy::DropOldest => {
-                    self.drop_oldest_until(self.max_buffered_events.saturating_sub(starts.len()));
+                    self.drop_oldest_until(self.max_buffered_events.saturating_sub(starts.len()))?;
                     result = StreamIngest::DroppedOldest;
                 }
             }
@@ -281,7 +281,7 @@ impl WindowedStream {
         }
     }
 
-    fn drop_oldest_until(&mut self, target: usize) {
+    fn drop_oldest_until(&mut self, target: usize) -> Result<(), StreamIngestError> {
         while self.buffered_events() > target {
             let Some(start) = self
                 .windows
@@ -292,6 +292,11 @@ impl WindowedStream {
             else {
                 break;
             };
+            if self.dropped_events == u64::MAX {
+                return Err(StreamIngestError::Arithmetic {
+                    message: "dropped event count exhausted".into(),
+                });
+            }
             let should_remove = if let Some(events) = self.windows.get_mut(&start) {
                 events.remove(0);
                 events.is_empty()
@@ -301,8 +306,9 @@ impl WindowedStream {
             if should_remove {
                 self.windows.remove(&start);
             }
-            self.dropped_events = self.dropped_events.saturating_add(1);
+            self.dropped_events += 1;
         }
+        Ok(())
     }
 }
 
