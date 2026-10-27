@@ -1,8 +1,8 @@
 use async_trait::async_trait;
+use prism_visual_scripting::prelude::*;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use prism_visual_scripting::prelude::*;
 
 fn node(id: NodeId, def: &str) -> Node {
     Node {
@@ -141,6 +141,14 @@ async fn effect_runs_with_retry_and_audits_identity() {
         })
         .collect();
     assert!(ids.windows(2).all(|pair| pair[0] == pair[1]));
+}
+
+#[test]
+fn virtual_clock_rejects_checked_overflow_without_wrapping() {
+    let clock = VirtualClock::new(u64::MAX - 1);
+    let error = clock.try_advance(2).unwrap_err();
+    assert!(error.to_string().contains("virtual clock exhausted"));
+    assert_eq!(clock.now_millis(), u64::MAX - 1);
 }
 
 #[tokio::test]
