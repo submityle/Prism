@@ -758,6 +758,15 @@ impl WorkflowVm {
                     "ready queue contains duplicate task".into(),
                 ));
             }
+            if state
+                .tasks
+                .get(task_id)
+                .is_none_or(|task| task.status != TaskStatus::Ready)
+            {
+                return Err(VsError::Runtime(
+                    "ready queue contains non-ready task".into(),
+                ));
+            }
         }
         for (task_id, task) in &state.tasks {
             if task.id != *task_id {
