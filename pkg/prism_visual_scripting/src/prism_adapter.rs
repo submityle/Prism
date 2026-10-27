@@ -178,12 +178,18 @@ impl PrismHost {
     }
 
     /// Submit cancellable work. The future receives a token owned by the host.
-    pub fn spawn_task<F, Fut>(&self, work: F) -> TaskId
+    pub fn spawn_task<F, Fut>(&self, work: F) -> VsResult<TaskId>
     where
         F: FnOnce(CancellationToken) -> Fut + Send + 'static,
         Fut: Future<Output = VsResult<Value>> + Send + 'static,
     {
-        let id = TaskId(self.next_task.fetch_add(1, Ordering::Relaxed));
+        let id = TaskId(
+            self.next_task
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
+                    next.checked_add(1)
+                })
+                .map_err(|_| VsError::Runtime("task id space exhausted".into()))?,
+        );
         let cancel = CancellationToken::new();
         let child = cancel.clone();
         let (tx, rx) = oneshot::channel();
@@ -197,7 +203,7 @@ impl PrismHost {
             Ok(mut tasks) => tasks.insert(id, (cancel, rx)),
             Err(poisoned) => poisoned.into_inner().insert(id, (cancel, rx)),
         };
-        id
+        Ok(id)
     }
 
     /// Request cancellation. Work that ignores its token is still drained as cancelled.
@@ -276,7 +282,7 @@ mod tests {
     #[tokio::test]
     async fn host_polls_completed_task() {
         let host = PrismHost::new();
-        let id = host.spawn_task(|_| async { Ok(Value::I64(7)) });
+        let id = host.spawn_task(|_| async { Ok(Value::I64(7)) }).unwrap();
         tokio::task::yield_now().await;
         assert!(matches!(
             host.poll_task(id),
@@ -288,12 +294,14 @@ mod tests {
     #[tokio::test]
     async fn host_cancels_task_before_poll() {
         let host = PrismHost::new();
-        let id = host.spawn_task(|cancel| async move {
-            tokio::select! {
-                _ = cancel.cancelled() => Err(VsError::Cancelled),
-                _ = tokio::time::sleep(std::time::Duration::from_secs(60)) => Ok(Value::Unit),
-            }
-        });
+        let id = host
+            .spawn_task(|cancel| async move {
+                tokio::select! {
+                    _ = cancel.cancelled() => Err(VsError::Cancelled),
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(60)) => Ok(Value::Unit),
+                }
+            })
+            .unwrap();
         assert!(host.cancel_task(id));
         assert!(matches!(host.poll_task(id), TaskPoll::Cancelled));
     }
