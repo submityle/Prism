@@ -8,8 +8,8 @@
 
 use crate::effect::{EffectError, EffectExecutor, EffectRequest, EffectResponse};
 use crate::{
-    BackendCallResult, BindingRegistry, CallBudget, ExecNext, ScriptBackend, ScriptModule, Value,
-    VsError, VsResult,
+    BackendCallResult, BindingRegistry, CallBudget, ExecNext, ResourceBudget, ScriptBackend,
+    ScriptModule, Value, VsError, VsResult,
 };
 use async_trait::async_trait;
 use std::collections::BTreeMap;
@@ -164,14 +164,24 @@ impl ScriptBackend for WasmScriptBackend {
 pub struct WasmEffectExecutor {
     host: Arc<dyn WasmHost>,
     component: String,
+    budget: ResourceBudget,
 }
 
 impl WasmEffectExecutor {
-    /// Construct an executor for a registered Component name.
+    /// Construct an executor with the conservative sandbox budget.
     pub fn new(host: Arc<dyn WasmHost>, component: impl Into<String>) -> Self {
+        Self::with_budget(host, component, ResourceBudget::sandboxed())
+    }
+
+    pub fn with_budget(
+        host: Arc<dyn WasmHost>,
+        component: impl Into<String>,
+        budget: ResourceBudget,
+    ) -> Self {
         Self {
             host,
             component: component.into(),
+            budget,
         }
     }
 
@@ -184,6 +194,7 @@ impl WasmEffectExecutor {
 impl EffectExecutor for WasmEffectExecutor {
     async fn execute(&self, request: EffectRequest) -> Result<EffectResponse, EffectError> {
         let host = Arc::clone(&self.host);
+        let budget = self.budget.clone();
         let call = WasmCall {
             component: self.component.clone(),
             operation: request.spec.operation.clone(),
@@ -192,9 +203,9 @@ impl EffectExecutor for WasmEffectExecutor {
             attempt: request.attempt,
             inputs: request.inputs,
             config: request.config,
-            fuel_remaining: u64::MAX,
-            memory_pages_limit: u32::MAX,
-            deadline: Instant::now() + std::time::Duration::from_secs(10),
+            fuel_remaining: budget.fuel,
+            memory_pages_limit: budget.memory_pages,
+            deadline: Instant::now() + std::time::Duration::from_millis(request.spec.timeout_ms),
         };
         let result = tokio::task::spawn_blocking(move || host.call(call))
             .await
@@ -282,6 +293,44 @@ mod tests {
             error,
             VsError::RetryableRuntime(message) if message == "temporary component outage"
         ));
+    }
+
+    struct ControlHost;
+
+    impl WasmHost for ControlHost {
+        fn compile_module(&self, bytes: &[u8]) -> Result<Vec<u8>, WasmHostError> {
+            Ok(bytes.to_vec())
+        }
+
+        fn call(&self, _request: WasmCall) -> Result<WasmCallResult, WasmHostError> {
+            Ok(WasmCallResult {
+                outputs: vec![Value::I64(7)],
+                next: ExecNext::Pin("success".into()),
+                chunks: vec![Value::I64(8)],
+            })
+        }
+    }
+
+    #[test]
+    fn adapter_preserves_control_flow_and_chunks() {
+        let backend = WasmScriptBackend::new(Arc::new(ControlHost), "combat");
+        let module = ScriptModule::from_bytes("combat", 1, b"component");
+        let instance = backend
+            .compile(&module, &BindingRegistry::default())
+            .unwrap();
+        let request = crate::ScriptCall {
+            module: "combat".into(),
+            operation: "tick".into(),
+            request_id: "req-control".into(),
+            execution_id: "exec-control".into(),
+            attempt: 1,
+            args: Vec::new(),
+            config: BTreeMap::new(),
+        };
+        let mut budget = CallBudget::new(crate::ResourceBudget::sandboxed());
+        let result = backend.call(&instance, &request, &mut budget).unwrap();
+        assert_eq!(result.next, ExecNext::Pin("success".into()));
+        assert_eq!(result.chunks, vec![Value::I64(8)]);
     }
 
     #[test]
