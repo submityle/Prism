@@ -114,8 +114,11 @@ impl ScriptBackend for WasmScriptBackend {
         module: &ScriptModule,
         _bindings: &BindingRegistry,
     ) -> VsResult<Self::Instance> {
-        if module.bytes.is_empty() {
-            return Err(VsError::Runtime("WASM script module is empty".into()));
+        module.validate()?;
+        if self.component.is_empty() || self.component.len() > 128 {
+            return Err(VsError::Validate(
+                "WASM component identifier must be non-empty and bounded".into(),
+            ));
         }
         self.host
             .compile_module(&module.bytes)
@@ -353,6 +356,22 @@ mod tests {
         }
     }
 
+    #[test]
+    fn adapter_rejects_invalid_component_identifier() {
+        let backend = WasmScriptBackend::new(
+            Arc::new(RecordingHost {
+                call: Mutex::new(None),
+            }),
+            "",
+        );
+        let module = ScriptModule::from_bytes("component", 1, b"component");
+        let error = backend
+            .compile(&module, &BindingRegistry::default())
+            .unwrap_err();
+        assert!(
+            matches!(error, VsError::Validate(message) if message.contains("component identifier"))
+        );
+    }
     #[test]
     fn adapter_preserves_retryable_host_failure() {
         let backend = WasmScriptBackend::new(Arc::new(RetryHost), "combat");
