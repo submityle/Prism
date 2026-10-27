@@ -427,9 +427,10 @@ impl ScriptHost {
                 request.operation
             )));
         }
-        let module = self.hotswap.current(&request.module).ok_or_else(|| {
+        let lease = self.hotswap.acquire(&request.module).ok_or_else(|| {
             VsError::Runtime(format!("script module not installed: {}", request.module))
         })?;
+        let module = lease.module.clone();
         let backend = self
             .backend
             .as_ref()
@@ -452,7 +453,7 @@ impl ScriptHost {
             outputs: result.outputs,
             next: result.next,
             chunks: result.chunks,
-            generation: self.hotswap.generation(&request.module).unwrap_or(0),
+            generation: lease.generation,
         })
     }
 }
