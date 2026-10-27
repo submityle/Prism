@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 const MAX_MIGRATION_STEPS: usize = 1024;
+const MAX_MIGRATION_REGISTRATIONS: usize = 4096;
 
 pub type MigrationFn = Arc<dyn Fn(Value) -> VsResult<Value> + Send + Sync>;
 
@@ -42,6 +43,11 @@ impl MigrationRegistry {
         if self.steps.contains_key(&from) {
             return Err(VsError::Runtime(format!(
                 "migration from schema {from} is already registered"
+            )));
+        }
+        if self.steps.len() >= MAX_MIGRATION_REGISTRATIONS {
+            return Err(VsError::Validate(format!(
+                "migration registry exceeds {MAX_MIGRATION_REGISTRATIONS} entries"
             )));
         }
         self.steps.insert(
