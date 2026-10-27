@@ -27,7 +27,7 @@
 
 ### 当前代码实现边界（v0.3）
 
-当前代码已经提供可复用的脚本控制平面：`pkg/prism_visual_scripting/src/script_runtime.rs` 的 `ScriptHost`、`BindingRegistry`、`ScriptPolicy`、`CallBudget`、`HotSwap`、`StateMigrator` 和内容寻址 `ScriptModule`；`ScriptHost::publish` 会编译 backend 实例，`ScriptHost::call` 会执行带预算、deadline 与 binding capability 授权的调用。启用 `wasm` feature 后，`WasmScriptBackend` 要求 host 实现 `validate_module` 后才接受字节，并将 typed `WasmHost` 接入调用入口；host 实现应在 `prism_wasm::Sandbox` 中完成真实 Component 编译、燃料/内存/epoch deadline 与导入能力门控。当前 adapter 本身不直接持有 wasmtime 类型，不能把它描述为已独立完成完整 WASM 沙箱。
+当前代码已经提供可复用的脚本控制平面：`pkg/prism_visual_scripting/src/script_runtime.rs` 的 `ScriptHost`、`BindingRegistry`、`ScriptPolicy`、`CallBudget`、`HotSwap`、`StateMigrator` 和内容寻址 `ScriptModule`；`ScriptHost::publish` 会编译 backend 实例，`ScriptHost::call` 会执行带预算、deadline 与 binding capability 授权的调用。启用 `wasm` feature 后，`WasmScriptBackend` 要求 host 实现 `validate_module` 后才接受字节，并将 typed `WasmHost` 接入调用入口；backend 结果会保留 `outputs`、`ExecNext` 和 `chunks`，不会把控制流或流式输出降级为单一数据数组。host 实现应在 `prism_wasm::Sandbox` 中完成真实 Component 编译、燃料/内存/epoch deadline 与导入能力门控。当前 adapter 本身不直接持有 wasmtime 类型，不能把它描述为已独立完成完整 WASM 沙箱。
 
 以下能力明确属于后续实现目标，而不是当前已提供的公共 API：`WorldProxy`/ECS 绑定、`#[script_api]` 反射宏、跨组件持久实例状态、`.cwasm` AOT、wasmi 解释器、WIT/code-chunk 分发协议、完整并行实例池、主机/iOS 平台自动后端选择，以及编辑器 live 调参与 time-travel 状态恢复。文中这些 API 片段均为设计契约/伪代码，不能当作已经存在的调用入口。
 
