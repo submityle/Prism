@@ -42,6 +42,8 @@ impl SnapshotWorldProxy {
 
     pub fn digest(&self) -> [u8; 32] {
         let mut hasher = Sha256::new();
+        hasher.update(b"prism.visual_scripting.ecs.snapshot.v1");
+        hasher.update(self.count.to_le_bytes());
         for entity_bits in self.entities.iter() {
             hasher.update(entity_bits.to_le_bytes());
         }
