@@ -65,6 +65,17 @@ impl IntervalJoin {
             + self.right.values().map(Vec::len).sum::<usize>()
     }
 
+    fn buffered_events_checked(&self) -> VsResult<usize> {
+        self.left
+            .values()
+            .chain(self.right.values())
+            .try_fold(0usize, |total, events| {
+                total
+                    .checked_add(events.len())
+                    .ok_or_else(|| VsError::Runtime("join buffered event count exhausted".into()))
+            })
+    }
+
     pub fn ingest(
         &mut self,
         side: JoinSide,
@@ -90,7 +101,7 @@ impl IntervalJoin {
         if !self.seen.insert((side, event.event_id.clone())) {
             return Ok(Vec::new());
         }
-        if self.buffered_events() == self.max_buffered_events {
+        if self.buffered_events_checked()? >= self.max_buffered_events {
             self.seen.remove(&(side, event.event_id.clone()));
             return Err(VsError::Runtime("join buffer capacity exceeded".into()));
         }
@@ -239,6 +250,17 @@ impl SessionWindowStream {
             .sum()
     }
 
+    fn buffered_events_checked(&self) -> VsResult<usize> {
+        self.sessions
+            .values()
+            .flatten()
+            .try_fold(0usize, |total, session| {
+                total.checked_add(session.events.len()).ok_or_else(|| {
+                    VsError::Runtime("session buffered event count exhausted".into())
+                })
+            })
+    }
+
     pub fn ingest(&mut self, event: KeyedStreamEvent) -> VsResult<bool> {
         validate_keyed_event(&event)?;
         if self
@@ -253,7 +275,7 @@ impl SessionWindowStream {
         if !self.seen_event_ids.insert(event.event_id.clone()) {
             return Ok(false);
         }
-        if self.buffered_events() == self.max_buffered_events {
+        if self.buffered_events_checked()? >= self.max_buffered_events {
             self.seen_event_ids.remove(&event.event_id);
             return Err(VsError::Runtime("session buffer capacity exceeded".into()));
         }
