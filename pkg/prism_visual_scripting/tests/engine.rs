@@ -1,8 +1,8 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-use tokio_util::sync::CancellationToken;
 use prism_visual_scripting::prelude::*;
+use tokio_util::sync::CancellationToken;
 
 fn pin(name: &str, dir: PinDir, ty: ValueType) -> Pin {
     Pin {
@@ -117,6 +117,31 @@ async fn facade_compiles_runs_and_keeps_event_streams_isolated() {
     assert_eq!(status, VmRunStatus::Completed);
     assert!(engine.events("missing").is_empty());
     engine.validate_replay("exec-a").unwrap();
+}
+
+#[tokio::test]
+async fn facade_rejects_oversized_execution_identity() {
+    let engine = VisualScriptEngine::new();
+    let graph = Graph {
+        name: "simple".into(),
+        nodes: vec![node(1, "event.begin"), node(2, "debug.print")],
+        edges: vec![edge(1, 0, 2, 0)],
+        entries: vec![1],
+        ..Default::default()
+    };
+    let oversized = "e".repeat(129);
+    let error = engine
+        .run_graph(
+            &oversized,
+            &graph,
+            1,
+            &mut InMemoryHost::default(),
+            &CancellationToken::new(),
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, VsError::Validate(message) if message.contains("exceeds")));
 }
 
 #[tokio::test]

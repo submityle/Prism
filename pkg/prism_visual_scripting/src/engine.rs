@@ -974,10 +974,16 @@ impl VisualScriptEngine {
     }
 }
 
+const MAX_ENGINE_ID_BYTES: usize = 128;
+
 fn validate_identity(kind: &str, value: &str) -> VsResult<()> {
     if value.is_empty() {
         Err(VsError::Validate(format!(
             "{kind} identity must not be empty"
+        )))
+    } else if value.len() > MAX_ENGINE_ID_BYTES {
+        Err(VsError::Validate(format!(
+            "{kind} identity exceeds {MAX_ENGINE_ID_BYTES} bytes"
         )))
     } else {
         Ok(())
