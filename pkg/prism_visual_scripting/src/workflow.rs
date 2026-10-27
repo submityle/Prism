@@ -406,12 +406,13 @@ impl WorkflowVm {
             .shared_graph(&frame.graph)
             .ok_or_else(|| VsError::Runtime(format!("unknown workflow graph {}", frame.graph)))?;
         let vm = Vm::from_shared(program);
+        let cancel = env.cancel.unwrap_or(fallback_cancel);
         let outcome = vm
             .run_block_async(
                 frame.vm.block,
                 &mut frame.vm.slots,
                 host,
-                fallback_cancel,
+                cancel,
                 env,
                 crate::vm::InvocationScope {
                     execution_id: env.execution_id,

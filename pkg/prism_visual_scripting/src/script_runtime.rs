@@ -287,9 +287,10 @@ impl StateMigrator {
             .steps
             .write()
             .map_err(|_| VsError::Runtime("migration registry poisoned".into()))?;
-        if steps.insert((from, to), migration).is_some() {
+        if steps.contains_key(&(from, to)) {
             return Err(VsError::Validate("migration already registered".into()));
         }
+        steps.insert((from, to), migration);
         Ok(())
     }
     pub fn migrate(&self, mut state: StateBlob, target: u32) -> VsResult<StateBlob> {
@@ -989,6 +990,49 @@ mod tests {
             .unwrap();
         let policy = ScriptPolicy::new(SandboxTier::Fortified).deterministic(true);
         assert!(registry.authorize("time.now", &policy).is_err());
+    }
+    #[test]
+    fn duplicate_migration_registration_preserves_original() {
+        let migrator = StateMigrator::default();
+        migrator
+            .register(
+                1,
+                2,
+                Arc::new(|mut state| {
+                    state.schema_version = 2;
+                    state
+                        .fields
+                        .insert("source".into(), Value::String("original".into()));
+                    Ok(state)
+                }),
+            )
+            .unwrap();
+        assert!(migrator
+            .register(
+                1,
+                2,
+                Arc::new(|mut state| {
+                    state.schema_version = 2;
+                    state
+                        .fields
+                        .insert("source".into(), Value::String("replacement".into()));
+                    Ok(state)
+                })
+            )
+            .is_err());
+        let state = migrator
+            .migrate(
+                StateBlob {
+                    schema_version: 1,
+                    fields: BTreeMap::new(),
+                },
+                2,
+            )
+            .unwrap();
+        assert_eq!(
+            state.fields.get("source"),
+            Some(&Value::String("original".into()))
+        );
     }
     #[test]
     fn migrator_walks_multiple_schema_steps() {
