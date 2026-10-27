@@ -16,6 +16,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Instant;
 
+const MAX_WASM_RESULT_VALUES: usize = 1024;
+
 /// A typed request handed to a host-owned `prism_wasm` Component sandbox.
 #[derive(Clone, Debug)]
 pub struct WasmCall {
@@ -157,6 +159,11 @@ impl ScriptBackend for WasmScriptBackend {
                     VsError::Runtime(error.message)
                 }
             })?;
+        if result.outputs.len().saturating_add(result.chunks.len()) > MAX_WASM_RESULT_VALUES {
+            return Err(VsError::Runtime(
+                "WASM result exceeds value-count budget".into(),
+            ));
+        }
         Ok(BackendCallResult {
             outputs: result.outputs,
             next: result.next,
@@ -435,6 +442,44 @@ mod tests {
         assert_eq!(result.chunks, vec![Value::I64(8)]);
     }
 
+    struct LargeResultHost;
+
+    impl WasmHost for LargeResultHost {
+        fn compile_module(&self, bytes: &[u8]) -> Result<Vec<u8>, WasmHostError> {
+            Ok(bytes.to_vec())
+        }
+
+        fn call(&self, _request: WasmCall) -> Result<WasmCallResult, WasmHostError> {
+            Ok(WasmCallResult {
+                outputs: vec![Value::Unit; MAX_WASM_RESULT_VALUES + 1],
+                next: ExecNext::End,
+                chunks: Vec::new(),
+            })
+        }
+    }
+
+    #[test]
+    fn adapter_rejects_oversized_result() {
+        let backend = WasmScriptBackend::new(Arc::new(LargeResultHost), "combat");
+        let module = ScriptModule::from_bytes("combat", 1, b"component");
+        let instance = backend
+            .compile(&module, &BindingRegistry::default())
+            .unwrap();
+        let request = crate::ScriptCall {
+            module: "combat".into(),
+            operation: "tick".into(),
+            request_id: "req-large".into(),
+            execution_id: "exec-large".into(),
+            attempt: 0,
+            args: Vec::new(),
+            config: BTreeMap::new(),
+        };
+        let mut budget = CallBudget::new(crate::ResourceBudget::sandboxed());
+        let error = backend.call(&instance, &request, &mut budget).unwrap_err();
+        assert!(
+            matches!(error, VsError::Runtime(message) if message.contains("value-count budget"))
+        );
+    }
     #[test]
     fn adapter_forwards_identity_config_and_budget() {
         let host = Arc::new(RecordingHost {
