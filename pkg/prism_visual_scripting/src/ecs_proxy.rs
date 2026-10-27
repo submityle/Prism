@@ -427,6 +427,7 @@ mod tests {
         let snapshot =
             SnapshotWorldProxy::with_components([7], [(7, "Transform".to_owned(), vec![1, 2])])
                 .unwrap();
+        let schema_digest = snapshot.component_schema_digest(7, "Transform").unwrap();
         let external = WorldProxyContext::new(Arc::new(snapshot));
         let env = ExecutionEnv::new().with_external(&external);
         let cancel = tokio_util::sync::CancellationToken::new();
@@ -434,6 +435,10 @@ mod tests {
         let config = BTreeMap::<String, Value>::new();
         let ctx = InvokeCtx::from_env(&config, &mut host, &cancel, &env);
         assert_eq!(require_entity_count(&ctx).unwrap(), 1);
+        assert_eq!(
+            require_component_schema_digest(&ctx, 7, "Transform").unwrap(),
+            schema_digest
+        );
         assert!(require_entity_present(&ctx, 7).unwrap());
         assert!(!require_entity_present(&ctx, 8).unwrap());
         assert_eq!(require_component_names(&ctx, 7).unwrap(), vec!["Transform"]);
