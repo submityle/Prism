@@ -96,15 +96,17 @@ impl IntervalJoin {
             .into_iter()
             .flatten()
             .filter(|candidate| match side {
-                JoinSide::Left => in_interval(
+                JoinSide::Left => checked_interval(
                     candidate.event_time_ms,
-                    event.event_time_ms.saturating_sub(self.before_ms),
-                    event.event_time_ms.saturating_add(self.after_ms),
-                ),
-                JoinSide::Right => in_interval(
                     event.event_time_ms,
-                    candidate.event_time_ms.saturating_sub(self.before_ms),
-                    candidate.event_time_ms.saturating_add(self.after_ms),
+                    self.before_ms,
+                    self.after_ms,
+                ),
+                JoinSide::Right => checked_interval(
+                    event.event_time_ms,
+                    candidate.event_time_ms,
+                    self.before_ms,
+                    self.after_ms,
                 ),
             })
             .map(|candidate| match side {
@@ -148,10 +150,16 @@ impl IntervalJoin {
         self.watermark_ms = Some(watermark_ms);
         let before = self.buffered_events();
         retain_join_events(&mut self.left, |event| {
-            event.event_time_ms.saturating_add(self.after_ms) >= watermark_ms
+            event
+                .event_time_ms
+                .checked_add(self.after_ms)
+                .is_some_and(|end| end >= watermark_ms)
         });
         retain_join_events(&mut self.right, |event| {
-            event.event_time_ms.saturating_add(self.before_ms) >= watermark_ms
+            event
+                .event_time_ms
+                .checked_add(self.before_ms)
+                .is_some_and(|end| end >= watermark_ms)
         });
         before - self.buffered_events()
     }
@@ -169,6 +177,16 @@ fn retain_join_events(
 
 fn in_interval(value: u64, start: u64, end: u64) -> bool {
     value >= start && value <= end
+}
+
+fn checked_interval(value: u64, center: u64, before_ms: u64, after_ms: u64) -> bool {
+    let Some(start) = center.checked_sub(before_ms) else {
+        return false;
+    };
+    let Some(end) = center.checked_add(after_ms) else {
+        return false;
+    };
+    in_interval(value, start, end)
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -241,8 +259,14 @@ impl SessionWindowStream {
         };
         let mut index = 0;
         while index < sessions.len() {
-            let touches = merged.start_ms <= sessions[index].end_ms.saturating_add(self.gap_ms)
-                && sessions[index].start_ms <= merged.end_ms.saturating_add(self.gap_ms);
+            let touches = sessions[index]
+                .end_ms
+                .checked_add(self.gap_ms)
+                .is_some_and(|end| merged.start_ms <= end)
+                && merged
+                    .end_ms
+                    .checked_add(self.gap_ms)
+                    .is_some_and(|end| sessions[index].start_ms <= end);
             if touches {
                 let session = sessions.remove(index);
                 merged.start_ms = merged.start_ms.min(session.start_ms);
@@ -272,7 +296,11 @@ impl SessionWindowStream {
         self.sessions.retain(|_, sessions| {
             let mut retained = Vec::new();
             for session in std::mem::take(sessions) {
-                if session.end_ms.saturating_add(self.gap_ms) <= watermark_ms {
+                if session
+                    .end_ms
+                    .checked_add(self.gap_ms)
+                    .is_some_and(|end| end <= watermark_ms)
+                {
                     closed.push(session);
                 } else {
                     retained.push(session);
