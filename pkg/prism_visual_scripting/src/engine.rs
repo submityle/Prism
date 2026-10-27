@@ -348,9 +348,7 @@ impl VisualScriptEngine {
         graphs: &BTreeMap<String, Graph>,
     ) -> VsResult<Arc<WorkflowProgram>> {
         let workflow_id = workflow_id.into();
-        if workflow_id.is_empty() {
-            return Err(VsError::Validate("workflow id must not be empty".into()));
-        }
+        validate_identity("workflow", &workflow_id)?;
         let workflow = Arc::new(self.compile_workflow(graphs)?);
         self.workflows.insert(workflow_id, workflow.clone());
         Ok(workflow)
@@ -363,7 +361,8 @@ impl VisualScriptEngine {
         workflow: WorkflowProgram,
     ) -> VsResult<Arc<WorkflowProgram>> {
         let workflow_id = workflow_id.into();
-        if workflow_id.is_empty() || workflow.is_empty() {
+        validate_identity("workflow", &workflow_id)?;
+        if workflow.is_empty() {
             return Err(VsError::Validate(
                 "workflow id and program must not be empty".into(),
             ));

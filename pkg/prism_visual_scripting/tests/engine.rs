@@ -119,6 +119,17 @@ async fn facade_compiles_runs_and_keeps_event_streams_isolated() {
     engine.validate_replay("exec-a").unwrap();
 }
 
+#[test]
+fn facade_rejects_oversized_workflow_identity() {
+    let engine = VisualScriptEngine::new();
+    let oversized = "w".repeat(129);
+    let result = engine.register_workflow(
+        oversized,
+        &BTreeMap::from([("main".into(), Graph::default())]),
+    );
+    assert!(matches!(result, Err(VsError::Validate(message)) if message.contains("exceeds")));
+}
+
 #[tokio::test]
 async fn facade_rejects_oversized_execution_identity() {
     let engine = VisualScriptEngine::new();
