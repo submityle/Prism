@@ -7,7 +7,9 @@
 //! runtime hot path.
 
 use crate::effect::{EffectError, EffectExecutor, EffectRequest, EffectResponse};
-use crate::{ExecNext, Value};
+use crate::{
+    BindingRegistry, CallBudget, ExecNext, ScriptBackend, ScriptModule, Value, VsError, VsResult,
+};
 use async_trait::async_trait;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -64,7 +66,70 @@ pub trait WasmHost: Send + Sync + 'static {
     fn call(&self, request: WasmCall) -> Result<WasmCallResult, WasmHostError>;
 }
 
-/// Effect executor backed by a host-provided typed WASM Component sandbox.
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Adapter that turns a typed `WasmHost` into a `ScriptBackend`.
+///
+/// The compiled instance is retained as content-addressed bytes; actual
+/// Component compilation/instance pooling remains owned by the host and can
+/// be backed by `prism_wasm::Sandbox` without leaking wasmtime types here.
+pub struct WasmScriptBackend {
+    host: Arc<dyn WasmHost>,
+    component: String,
+    sequence: AtomicU64,
+}
+
+impl WasmScriptBackend {
+    pub fn new(host: Arc<dyn WasmHost>, component: impl Into<String>) -> Self {
+        Self {
+            host,
+            component: component.into(),
+            sequence: AtomicU64::new(1),
+        }
+    }
+}
+
+impl ScriptBackend for WasmScriptBackend {
+    type Instance = Vec<u8>;
+
+    fn compile(
+        &self,
+        module: &ScriptModule,
+        _bindings: &BindingRegistry,
+    ) -> VsResult<Self::Instance> {
+        if module.bytes.is_empty() {
+            return Err(VsError::Runtime("WASM script module is empty".into()));
+        }
+        Ok(module.bytes.to_vec())
+    }
+
+    fn call(
+        &self,
+        instance: &Self::Instance,
+        operation: &str,
+        args: &[Value],
+        budget: &mut CallBudget,
+    ) -> VsResult<Vec<Value>> {
+        budget.charge(1)?;
+        if instance.is_empty() {
+            return Err(VsError::Runtime("WASM script instance is empty".into()));
+        }
+        let id = self.sequence.fetch_add(1, Ordering::Relaxed).to_string();
+        let result = self
+            .host
+            .call(WasmCall {
+                component: self.component.clone(),
+                operation: operation.to_string(),
+                request_id: id.clone(),
+                execution_id: format!("script:{id}"),
+                attempt: 0,
+                inputs: args.to_vec(),
+                config: BTreeMap::new(),
+            })
+            .map_err(|error| VsError::Runtime(error.message))?;
+        Ok(result.outputs)
+    }
+}
 pub struct WasmEffectExecutor {
     host: Arc<dyn WasmHost>,
     component: String,

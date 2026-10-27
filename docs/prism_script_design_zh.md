@@ -17,15 +17,30 @@
 >
 > 本文为纯经典运行时 / 编译 / 沙箱 / 调度路线，**不含任何 AI/ML 内容**；不复刻 UE/Unity/Roblox 的对象模型或源码，只借其**可编程性边界划分与热更新形态**；**不依赖任何 `bevy_*` crate**。
 
-- 版本: v0.2（设计阶段，未进入编码；相对 v0.1 收敛为单一 WASM 载体）
+- 版本: v0.3（RCC/脚本控制平面已进入编码；WASM 沙箱与脚本宿主边界已实现并验证；完整 ECS/反射绑定、状态迁移、AOT 与解释器后端仍以本文目标为准）
 - 适用引擎: Prism（后 Bevy 时代，独立运行时）
 - 关键依赖（均为 `pkg/` 下的 prism 原生 crate）: `prism_reflect`（函数反射 §12 / 路径访问 / `schema` 版本化迁移 / 脚本桥 §24.6——**宿主 API 绑定与状态迁移的唯一真相层**）、`prism_ecs`（Commands/ECB、exclusive system `&mut World`、observer/reaction、`world::snapshot` 回滚底座）、`prism_tasks`（work-stealing + fiber 作业图：off-thread 编译 / 批量脚本并行 / 主线程亲和）、`prism_platform`（`vm` 虚拟内存页级底座服务 WASM 线性内存与池化、`security`/`capability` 能力模型、高精度计时）、`prism_app`（Plugin/Schedule/`cvar`/`settings`/`platform_tier`/`fixed`/`determinism`；**第一方代码热重载 §24.2**）、`prism_asset`（脚本资产加载 / **容器打包与挂载 `.ucas`+`MountTable` §13、热重载与依赖失效 §12、patch/DLC/CDN §23.4/§23.5**，脚本包分发全部复用它）、`prism_diagnostic`（`budget`/`hitch`/`profiler`/`replay`/`telemetry`）、`prism_time`（固定步 / 录制回放 / 确定性）
-- 可选后端依赖: `wasmtime` + `wasmtime-wasi`（WASM Component Model，门控 feature `backend-wasm`，参考本仓 `prism_wasm`）；主机/iOS 认证档可选 `wasmi`（纯解释器，运行时热更兜底，feature `backend-wasm-interp`）
+- 可选后端依赖: 当前仅通过 `prism_visual_scripting` 的 `wasm` feature 接入 `prism_wasm`（`wasmtime` + `wasmtime-wasi`）；`wasmi`、`backend-wasm-interp`、AOT `.cwasm` 和平台自动选择仍未实现。
+- 明确约束: 当前 WASM 执行器使用 `std` 与 `wasmtime`；绑定宏、ECS 代理、完整调度 feature 隔离和零脚本税仍按后续实现目标管理。
 - 层级定位: Gameplay 文档 §18「可编程性：脚本与可视化蓝图」中**脚本运行时**部分的正式落地；架在 `prism_reflect`（类型真相层）与 `prism_ecs`（世界）之上，**不进内核热路径**
 - 相关文档: `prism_visual_scripting_design_zh.md`（**图脚本的全部内容——图模型 / 三层 IR / 节点执行 / 图编辑器**，本文不重写，仅共享绑定层）、`prism_app_design_zh.md`（§24.2 第一方代码/模块热重载、`platform_tier`、确定性）、`prism_asset_design_zh.md`（§12 热重载与依赖失效、§13 打包容器 `.ucas`/`MountTable`、§23.4/§23.5 CDN/patch/DLC）、`prism_reflect_design_zh.md`（§12 函数反射 / §24.6 脚本编辑器属性桥 / schema 版本化）、`prism_ecs_design_zh.md`（Commands / exclusive system / snapshot）、`prism_tasks_design_zh.md`（并行 / fiber / 主线程亲和）、`prism_platform_design_zh.md`（vm / security / capability）、`prism_diagnostic_design_zh.md`（预算 / hitch / profiler / 回放）、`prism_gameplay_design_zh.md`（§13 数据驱动、§26 Game Features 运行时插拔）、`prism_game_creator_design_zh.md`（§24 迭代/PIE、§26 内容包、`prism_gc_ugc` UGC/Mod 消费者）、`prism_network_design_zh.md` / `prism_anticheat_design_zh.md`（确定性 / 回滚 / 权威校验接缝）
-- 明确约束: 核心抽象 `no_std + alloc` 友好（绑定表 / 句柄 / 调度骨架）；WASM 执行器需 `std`；`backend-wasm` / `backend-wasm-interp` / `hot-reload` / `determinism` / `sandbox` / `trace` 均为 feature；默认构建**零脚本税**（未启用后端时编译期移除）
 
----
+### 当前代码实现边界（v0.3）
+
+当前代码已经提供可复用的脚本控制平面：`pkg/prism_visual_scripting/src/script_runtime.rs` 的 `ScriptHost`、`BindingRegistry`、`ScriptPolicy`、`CallBudget`、`HotSwap`、`StateMigrator` 和内容寻址 `ScriptModule`；`ScriptHost::publish` 会编译 backend 实例，`ScriptHost::call` 会执行带预算的调用。启用 `wasm` feature 后，`WasmScriptBackend` 将 typed `WasmHost` 接入该调用入口；`pkg/prism_wasm` 提供 WASM Component 沙箱、策略准入、加载器、热替换、灰度路由和调试基础设施。两层不把 JSON 当作运行时 ABI。
+
+以下能力明确属于后续实现目标，而不是当前已提供的公共 API：`WorldProxy`/ECS 绑定、`#[script_api]` 反射宏、跨组件持久实例状态、`.cwasm` AOT、wasmi 解释器、WIT/code-chunk 分发协议、完整并行实例池、主机/iOS 平台自动后端选择，以及编辑器 live 调参与 time-travel 状态恢复。文中这些 API 片段均为设计契约/伪代码，不能当作已经存在的调用入口。
+
+当前可验证入口：
+
+```text
+cargo check -p prism_visual_scripting --all-targets
+cargo test -p prism_visual_scripting --no-run
+cargo check -p prism_wasm --all-targets
+```
+
+WASM 运行时的文件加载强制 root containment；默认 capability 仍为 deny-by-default。任何新增平台后端或宿主导入都必须先补策略测试和对应的实现映射，不能仅通过文档宣称完成。
+
 
 ## 目录
 1. 设计哲学
@@ -458,6 +473,8 @@ off-thread 编译 / .cwasm 反序列化 (prism_tasks spawn_blocking)   ← 不�
 ## 17. 易用性分层与默认体验
 
 易用性是可量化目标，分两类用户（图脚本的策划体验在 VS 文档）：
+
+**当前状态：以下是目标体验，尚未作为公共 API 提供。** 已实现入口是 `ScriptHost::new(policy, bindings)`、`publish(ScriptModule)`、`call(ScriptCall)` 及 `prism_wasm::Sandbox`；其余示例仅用于定义最终契约。
 
 **第一方工程师（Rust / host API）**
 - 一个属性宏暴露 API：`#[script_api]`，WASM import 与图节点面板自动可见（§6）。

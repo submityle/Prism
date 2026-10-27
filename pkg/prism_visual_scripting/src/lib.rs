@@ -26,6 +26,7 @@ pub mod prism_adapter;
 pub mod registry;
 pub mod saga;
 pub mod scheduler;
+pub mod script_runtime;
 pub mod simulation;
 pub mod stream;
 pub mod stream_advanced;
@@ -84,6 +85,11 @@ pub use saga::{
     CompensationIntent, PendingCompensation, SagaOrchestrator, SagaState, SagaStatus, SagaStep,
 };
 pub use scheduler::{AdmitResult, FairScheduler, ScheduledRun, SchedulerLimits, SchedulerSnapshot};
+pub use script_runtime::{
+    Binding, BindingRegistry, CallBudget, HotSwap, ResourceBudget, SandboxTier, ScriptBackend,
+    ScriptCall, ScriptCallResult, ScriptHost, ScriptModule, ScriptPolicy, StateBlob, StateMigrator,
+    SwapRecord,
+};
 pub use simulation::{SimulationDeterminismGate, SimulationHarness, SimulationTrace};
 pub use stream::{
     AggregationSpec, BackpressurePolicy, ClosedWindow, LateEvent, ReductionOutcome, StreamEvent,
@@ -97,7 +103,9 @@ pub use upgrade::{ShadowExecutor, UpgradeCoordinator, UpgradeRecord, UpgradeStat
 pub use value::{Value, ValueType};
 pub use vm::{Suspension, SuspensionResolution, Vm, VmRunStatus, VmState};
 #[cfg(feature = "wasm")]
-pub use wasm::{WasmCall, WasmCallResult, WasmEffectExecutor, WasmHost, WasmHostError};
+pub use wasm::{
+    WasmCall, WasmCallResult, WasmEffectExecutor, WasmHost, WasmHostError, WasmScriptBackend,
+};
 pub use workflow::{
     WorkflowCompletion, WorkflowProgram, WorkflowRunStatus, WorkflowVm, WorkflowVmState,
 };
