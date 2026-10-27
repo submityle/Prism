@@ -79,6 +79,10 @@ impl WorldProxyContext {
     pub fn proxy(&self) -> &dyn WorldProxy {
         self.proxy.as_ref()
     }
+
+    pub fn snapshot_digest(&self) -> Option<[u8; 32]> {
+        self.proxy.snapshot_digest()
+    }
 }
 
 /// Retrieve the host-owned world proxy, producing a structured error when a graph
@@ -125,6 +129,8 @@ mod tests {
             WorldProxy::snapshot_digest(&snapshot),
             Some(snapshot.digest())
         );
+        let context = WorldProxyContext::new(Arc::new(snapshot.clone()));
+        assert_eq!(context.snapshot_digest(), Some(snapshot.digest()));
     }
 
     #[test]
