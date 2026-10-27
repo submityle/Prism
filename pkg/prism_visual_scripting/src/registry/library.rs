@@ -55,7 +55,9 @@ impl NodeDefinition {
             &self.outputs,
             effect,
         ))
-        .expect("node contract must be serializable");
+        .unwrap_or_else(|_| {
+            b"prism.visual_scripting.node_contract.serialization_error.v1".to_vec()
+        });
         Sha256::digest(payload).into()
     }
 
