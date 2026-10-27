@@ -7,6 +7,7 @@
 //! easy to test without a GPU or a particular VM.
 
 use crate::error::{VsError, VsResult};
+use crate::registry::library::ExecNext;
 use crate::value::{Value, ValueType};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -30,7 +31,7 @@ pub struct BindingRegistry {
 
 impl BindingRegistry {
     pub fn register(&mut self, binding: Binding) -> VsResult<()> {
-        if binding.name.is_empty() || binding.name.contains(' ') {
+        if !valid_identifier(&binding.name) {
             return Err(VsError::Validate(
                 "binding name must be non-empty and space-free".into(),
             ));
@@ -162,6 +163,10 @@ impl ScriptModule {
         let name = name.into();
         let bytes: Arc<[u8]> = Arc::from(bytes.into());
         let mut hash = Sha256::new();
+        hash.update(b"prism.script.module.v1\0");
+        hash.update((name.len() as u64).to_le_bytes());
+        hash.update(name.as_bytes());
+        hash.update(schema_version.to_le_bytes());
         hash.update(&bytes);
         let digest: [u8; 32] = hash.finalize().into();
         Self {
@@ -183,6 +188,13 @@ pub struct StateBlob {
 }
 
 pub type MigrationFn = Arc<dyn Fn(StateBlob) -> VsResult<StateBlob> + Send + Sync>;
+
+fn valid_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b':' | b'-'))
+}
 
 #[derive(Clone, Default)]
 pub struct StateMigrator {
@@ -257,7 +269,9 @@ impl HotSwap {
             Some((old, generation)) => SwapRecord {
                 old_digest: Some(old.digest),
                 new_digest: module.digest,
-                generation: generation.saturating_add(1),
+                generation: generation
+                    .checked_add(1)
+                    .ok_or_else(|| VsError::Runtime("hot-swap generation exhausted".into()))?,
             },
             None => SwapRecord {
                 old_digest: None,
@@ -289,7 +303,7 @@ pub trait ScriptBackend: Send + Sync {
         operation: &str,
         args: &[Value],
         budget: &mut CallBudget,
-    ) -> VsResult<Vec<Value>>;
+    ) -> VsResult<BackendCallResult>;
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -300,9 +314,18 @@ pub struct ScriptCall {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct BackendCallResult {
+    pub outputs: Vec<Value>,
+    pub next: ExecNext,
+    pub chunks: Vec<Value>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct ScriptCallResult {
     pub module_digest: [u8; 32],
     pub outputs: Vec<Value>,
+    pub next: ExecNext,
+    pub chunks: Vec<Value>,
     pub generation: u64,
 }
 
@@ -335,7 +358,7 @@ impl ScriptHost {
         self
     }
     pub fn publish(&self, module: ScriptModule) -> VsResult<SwapRecord> {
-        if module.name.is_empty() || module.name.contains(char::is_whitespace) {
+        if !valid_identifier(&module.name) {
             return Err(VsError::Validate(
                 "script module name must be non-empty and space-free".into(),
             ));
@@ -356,7 +379,7 @@ impl ScriptHost {
         CallBudget::new(self.policy.budget.clone())
     }
     pub fn call(&self, request: ScriptCall) -> VsResult<ScriptCallResult> {
-        if request.operation.is_empty() || request.operation.contains(char::is_whitespace) {
+        if !valid_identifier(&request.operation) {
             return Err(VsError::Validate(
                 "script operation must be non-empty and space-free".into(),
             ));
@@ -387,11 +410,13 @@ impl ScriptHost {
             return Err(VsError::Runtime("script instance digest is stale".into()));
         }
         let mut budget = self.begin_call();
-        let outputs = backend.call(&instance.0, &request.operation, &request.args, &mut budget)?;
+        let result = backend.call(&instance.0, &request.operation, &request.args, &mut budget)?;
         budget.check_deadline()?;
         Ok(ScriptCallResult {
             module_digest: module.digest,
-            outputs,
+            outputs: result.outputs,
+            next: result.next,
+            chunks: result.chunks,
             generation: self.hotswap.generation(&request.module).unwrap_or(0),
         })
     }
@@ -461,12 +486,16 @@ mod tests {
             operation: &str,
             args: &[Value],
             budget: &mut CallBudget,
-        ) -> VsResult<Vec<Value>> {
+        ) -> VsResult<BackendCallResult> {
             budget.charge(1)?;
             if instance.is_empty() || operation != "echo" {
                 return Err(VsError::Runtime("invalid echo invocation".into()));
             }
-            Ok(args.to_vec())
+            Ok(BackendCallResult {
+                outputs: args.to_vec(),
+                next: ExecNext::End,
+                chunks: Vec::new(),
+            })
         }
     }
 

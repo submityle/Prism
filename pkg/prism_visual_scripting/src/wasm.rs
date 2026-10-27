@@ -8,7 +8,8 @@
 
 use crate::effect::{EffectError, EffectExecutor, EffectRequest, EffectResponse};
 use crate::{
-    BindingRegistry, CallBudget, ExecNext, ScriptBackend, ScriptModule, Value, VsError, VsResult,
+    BackendCallResult, BindingRegistry, CallBudget, ExecNext, ScriptBackend, ScriptModule, Value,
+    VsError, VsResult,
 };
 use async_trait::async_trait;
 use std::collections::BTreeMap;
@@ -118,7 +119,7 @@ impl ScriptBackend for WasmScriptBackend {
         operation: &str,
         args: &[Value],
         budget: &mut CallBudget,
-    ) -> VsResult<Vec<Value>> {
+    ) -> VsResult<BackendCallResult> {
         budget.charge(1)?;
         if instance.is_empty() {
             return Err(VsError::Runtime("WASM script instance is empty".into()));
@@ -136,7 +137,11 @@ impl ScriptBackend for WasmScriptBackend {
                 config: BTreeMap::new(),
             })
             .map_err(|error| VsError::Runtime(error.message))?;
-        Ok(result.outputs)
+        Ok(BackendCallResult {
+            outputs: result.outputs,
+            next: result.next,
+            chunks: result.chunks,
+        })
     }
 }
 pub struct WasmEffectExecutor {
