@@ -471,6 +471,14 @@ impl ScriptHost {
         self
     }
     pub fn publish(&self, module: ScriptModule) -> VsResult<SwapRecord> {
+        self.publish_with_expected_generation(module, None)
+    }
+
+    pub fn publish_with_expected_generation(
+        &self,
+        module: ScriptModule,
+        expected_generation: Option<u64>,
+    ) -> VsResult<SwapRecord> {
         module.validate()?;
         if let Ok(published) = self.published.read() {
             if let Some(existing) = published.get(&module.name) {
@@ -502,6 +510,16 @@ impl ScriptHost {
             .published
             .write()
             .map_err(|_| VsError::Runtime("published script registry poisoned".into()))?;
+        if let Some(expected) = expected_generation {
+            let actual = published
+                .get(&module.name)
+                .map_or(0, |current| current.generation);
+            if actual != expected {
+                return Err(VsError::Runtime(format!(
+                    "script generation changed: expected {expected}, actual {actual}"
+                )));
+            }
+        }
         let generation = match published.get(&module.name) {
             None => 1,
             Some(current) if current.module.digest == module.digest => current.generation,
@@ -713,6 +731,27 @@ mod tests {
             })
         }
     }
+    #[test]
+    fn publish_rejects_stale_expected_generation() {
+        let host = ScriptHost::new(
+            ScriptPolicy::new(SandboxTier::Sandboxed),
+            BindingRegistry::default(),
+        );
+        host.publish(ScriptModule::from_bytes("cas", 1, b"old"))
+            .unwrap();
+        assert!(matches!(
+            host.publish_with_expected_generation(
+                ScriptModule::from_bytes("cas", 1, b"new"),
+                Some(0),
+            ),
+            Err(VsError::Runtime(message)) if message.contains("generation changed")
+        ));
+        let record = host
+            .publish_with_expected_generation(ScriptModule::from_bytes("cas", 1, b"new"), Some(1))
+            .unwrap();
+        assert_eq!(record.generation, 2);
+    }
+
     #[test]
     fn failed_publish_preserves_previous_snapshot() {
         let mut bindings = BindingRegistry::default();
