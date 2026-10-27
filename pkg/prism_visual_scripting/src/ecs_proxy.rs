@@ -25,6 +25,11 @@ pub trait WorldProxy: Send + Sync {
         None
     }
 
+    /// Return a stable identity for the reflected component representation.
+    fn component_schema_digest(&self, entity_bits: u64, component: &str) -> Option<[u8; 32]> {
+        let _ = (entity_bits, component);
+        None
+    }
     /// Return sorted component type names visible on one entity.
     fn component_names(&self, entity_bits: u64) -> Vec<String> {
         let _ = entity_bits;
@@ -102,6 +107,16 @@ impl SnapshotWorldProxy {
             .map_err(|error| VsError::Runtime(format!("ECS component JSON decode failed: {error}")))
     }
 
+    pub fn component_schema_digest(&self, entity_bits: u64, component: &str) -> Option<[u8; 32]> {
+        let bytes = self.component_bytes(entity_bits, component)?;
+        let mut hasher = Sha256::new();
+        hasher.update(b"prism.visual_scripting.ecs.component.schema.v1");
+        hasher.update((component.len() as u64).to_le_bytes());
+        hasher.update(component.as_bytes());
+        hasher.update((bytes.len() as u64).to_le_bytes());
+        hasher.update(bytes);
+        Some(hasher.finalize().into())
+    }
     pub fn digest(&self) -> [u8; 32] {
         let mut hasher = Sha256::new();
         hasher.update(b"prism.visual_scripting.ecs.snapshot.v1");
@@ -133,6 +148,10 @@ impl WorldProxy for SnapshotWorldProxy {
         self.components
             .get(&(entity_bits, component.to_owned()))
             .cloned()
+    }
+
+    fn component_schema_digest(&self, entity_bits: u64, component: &str) -> Option<[u8; 32]> {
+        SnapshotWorldProxy::component_schema_digest(self, entity_bits, component)
     }
 
     fn component_names(&self, entity_bits: u64) -> Vec<String> {
@@ -170,6 +189,9 @@ impl WorldProxyContext {
         self.proxy.component_bytes(entity_bits, component)
     }
 
+    pub fn component_schema_digest(&self, entity_bits: u64, component: &str) -> Option<[u8; 32]> {
+        self.proxy.component_schema_digest(entity_bits, component)
+    }
     pub fn component_names(&self, entity_bits: u64) -> Vec<String> {
         self.proxy.component_names(entity_bits)
     }
@@ -191,6 +213,16 @@ pub fn require_entity_present<'a>(ctx: &'a InvokeCtx<'a>, entity_bits: u64) -> V
     Ok(require_world_proxy(ctx)?.contains_bits(entity_bits))
 }
 
+pub fn require_component_schema_digest<'a>(
+    ctx: &'a InvokeCtx<'a>,
+    entity_bits: u64,
+    component: &str,
+) -> VsResult<[u8; 32]> {
+    let _ = require_component_bytes(ctx, entity_bits, component)?;
+    require_world_proxy(ctx)?
+        .component_schema_digest(entity_bits, component)
+        .ok_or_else(|| VsError::Runtime("ECS component schema digest is not configured".into()))
+}
 pub fn require_component_bytes<'a>(
     ctx: &'a InvokeCtx<'a>,
     entity_bits: u64,
@@ -324,6 +356,11 @@ mod tests {
             Some(vec![1, 2, 3])
         );
         assert_eq!(snapshot.component_bytes(7, "Health"), None);
+        assert_ne!(
+            snapshot.component_schema_digest(7, "Transform"),
+            snapshot.component_schema_digest(7, "Velocity")
+        );
+        assert_eq!(snapshot.component_schema_digest(7, "Missing"), None);
         let changed =
             SnapshotWorldProxy::with_components([7], [(7, "Transform".to_owned(), vec![1, 2, 4])])
                 .unwrap();
