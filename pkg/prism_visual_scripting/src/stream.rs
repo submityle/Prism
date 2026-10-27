@@ -208,13 +208,19 @@ impl WindowedStream {
             });
         }
         let mut result = StreamIngest::Accepted;
-        if self.buffered_events() + starts.len() > self.max_buffered_events {
+        let required = self
+            .buffered_events()
+            .checked_add(starts.len())
+            .ok_or_else(|| StreamIngestError::Arithmetic {
+                message: "buffered event count exhausted".into(),
+            })?;
+        if required > self.max_buffered_events {
             match self.backpressure {
                 BackpressurePolicy::Reject => {
                     self.seen_event_ids.remove(&event.event_id);
                     return Err(StreamIngestError::Backpressure {
                         capacity: self.max_buffered_events,
-                        required: self.buffered_events() + starts.len(),
+                        required,
                     });
                 }
                 BackpressurePolicy::DropOldest => {
