@@ -875,6 +875,27 @@ impl WorkflowVm {
                     "join references missing parent task".into(),
                 ));
             }
+            let parent = state
+                .tasks
+                .get(&join.parent_task)
+                .ok_or_else(|| VsError::Runtime("join references missing parent task".into()))?;
+            let parent_frame = parent
+                .frames
+                .last()
+                .ok_or_else(|| VsError::Runtime("join parent has no frame".into()))?;
+            let parent_program = self
+                .program
+                .graph(&parent_frame.graph)
+                .ok_or_else(|| VsError::Runtime("join parent references unknown graph".into()))?;
+            if join.outputs.start > join.outputs.end
+                || join.outputs.end > parent_program.slots_count
+                || !valid_block(parent_program, join.success)
+                || join
+                    .error
+                    .is_some_and(|block| !valid_block(parent_program, block))
+            {
+                return Err(VsError::Runtime("invalid resumed join target".into()));
+            }
             if state.tasks[&join.parent_task].status != TaskStatus::Waiting(*join_id) {
                 return Err(VsError::Runtime(
                     "join parent is not waiting for this join".into(),
