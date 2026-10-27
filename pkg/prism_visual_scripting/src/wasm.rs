@@ -17,6 +17,15 @@ use std::sync::Arc;
 use std::time::Instant;
 
 const MAX_WASM_RESULT_VALUES: usize = 1024;
+const MAX_COMPONENT_IDENTIFIER_BYTES: usize = 128;
+
+fn valid_component_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_COMPONENT_IDENTIFIER_BYTES
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b':' | b'-'))
+}
 
 /// A typed request handed to a host-owned `prism_wasm` Component sandbox.
 #[derive(Clone, Debug)]
@@ -117,9 +126,9 @@ impl ScriptBackend for WasmScriptBackend {
         _bindings: &BindingRegistry,
     ) -> VsResult<Self::Instance> {
         module.validate()?;
-        if self.component.is_empty() || self.component.len() > 128 {
+        if !valid_component_identifier(&self.component) {
             return Err(VsError::Validate(
-                "WASM component identifier must be non-empty and bounded".into(),
+                "WASM component identifier must be non-empty, ASCII, and bounded".into(),
             ));
         }
         self.host
@@ -378,6 +387,20 @@ mod tests {
         assert!(
             matches!(error, VsError::Validate(message) if message.contains("component identifier"))
         );
+    }
+    #[test]
+    fn adapter_rejects_non_identifier_component() {
+        let backend = WasmScriptBackend::new(
+            Arc::new(RecordingHost {
+                call: Mutex::new(None),
+            }),
+            "combat/../escape",
+        );
+        let module = ScriptModule::from_bytes("component", 1, b"component");
+        let error = backend
+            .compile(&module, &BindingRegistry::default())
+            .unwrap_err();
+        assert!(matches!(error, VsError::Validate(message) if message.contains("ASCII")));
     }
     #[test]
     fn adapter_preserves_retryable_host_failure() {
