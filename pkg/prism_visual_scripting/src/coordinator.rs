@@ -7,6 +7,26 @@ use crate::{MigrationRegistry, Value};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+const MAX_MODULE_REVISION_BYTES: usize = 128;
+
+fn validate_module_revision(revision: &str) -> VsResult<()> {
+    if revision.is_empty() {
+        return Err(VsError::Validate(
+            "module revision must not be empty".into(),
+        ));
+    }
+    if revision.len() > MAX_MODULE_REVISION_BYTES {
+        return Err(VsError::Validate(format!(
+            "module revision exceeds {MAX_MODULE_REVISION_BYTES} bytes"
+        )));
+    }
+    if !revision.is_ascii() || revision.chars().any(char::is_whitespace) {
+        return Err(VsError::Validate(
+            "module revision must be printable ASCII without whitespace".into(),
+        ));
+    }
+    Ok(())
+}
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VersionedCheckpoint {
@@ -120,6 +140,7 @@ impl RunCoordinator {
         module_revision: &str,
         migrations: &MigrationRegistry,
     ) -> VsResult<DurableRecord> {
+        validate_module_revision(module_revision)?;
         let key = Self::key(run_id)?;
         let Some(current) = self.store.load(&key)? else {
             return Err(VsError::Runtime(format!("unknown run {run_id}")));
