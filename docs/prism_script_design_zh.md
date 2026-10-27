@@ -31,6 +31,7 @@
 - effect retry attempt 递增采用 checked arithmetic；重试身份达到可表示上界时显式返回 runtime 错误，不饱和复用最后一次 attempt。
 - 静态安全分析的 effect、retry cost、wait、impure cost 与并行度上界均使用 checked 累加；资源证明无法表示时返回结构化 Validate 错误，不再饱和为伪有限上界。
 - IR slot 单值指令的 range 终点统一使用 checked 加法；SlotId 到达 `u32::MAX` 时在验证入口以结构化错误拒绝，不使用饱和算术生成伪合法范围。
+- ECS snapshot 构造的组件 payload 总量使用 checked 累加；即使未来调整容量上限或输入来自不可信恢复数据，累计溢出也返回结构化 Validate 错误，不会回绕。
 - 适用引擎: Prism（后 Bevy 时代，独立运行时）
 - 关键依赖（均为 `pkg/` 下的 prism 原生 crate）: `prism_reflect`（函数反射 §12 / 路径访问 / `schema` 版本化迁移 / 脚本桥 §24.6——**宿主 API 绑定与状态迁移的唯一真相层**）、`prism_ecs`（Commands/ECB、exclusive system `&mut World`、observer/reaction、`world::snapshot` 回滚底座）、`prism_tasks`（work-stealing + fiber 作业图：off-thread 编译 / 批量脚本并行 / 主线程亲和）、`prism_platform`（`vm` 虚拟内存页级底座服务 WASM 线性内存与池化、`security`/`capability` 能力模型、高精度计时）、`prism_app`（Plugin/Schedule/`cvar`/`settings`/`platform_tier`/`fixed`/`determinism`；**第一方代码热重载 §24.2**）、`prism_asset`（脚本资产加载 / **容器打包与挂载 `.ucas`+`MountTable` §13、热重载与依赖失效 §12、patch/DLC/CDN §23.4/§23.5**，脚本包分发全部复用它）、`prism_diagnostic`（`budget`/`hitch`/`profiler`/`replay`/`telemetry`）、`prism_time`（固定步 / 录制回放 / 确定性）
 - 可选后端依赖: 当前仅通过 `prism_visual_scripting` 的 `wasm` feature 接入 `prism_wasm`（`wasmtime` + `wasmtime-wasi`）；`wasmi`、`backend-wasm-interp`、AOT `.cwasm` 和平台自动选择仍未实现。

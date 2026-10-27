@@ -88,7 +88,9 @@ impl SnapshotWorldProxy {
                     "invalid ECS component snapshot entry".into(),
                 ));
             }
-            total_component_bytes += bytes.len();
+            total_component_bytes = total_component_bytes
+                .checked_add(bytes.len())
+                .ok_or_else(|| VsError::Validate("ECS component bytes exhausted".into()))?;
             component_map.insert((entity_bits, component), bytes);
         }
         let count = u32::try_from(entities.len())
