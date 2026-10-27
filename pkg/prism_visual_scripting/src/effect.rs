@@ -241,7 +241,23 @@ impl VirtualClock {
 
     pub fn advance(&self, millis: u64) {
         self.now_ms
-            .fetch_add(millis, std::sync::atomic::Ordering::SeqCst);
+            .fetch_update(
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+                |now| Some(now.saturating_add(millis)),
+            )
+            .expect("atomic clock update cannot fail");
+    }
+
+    pub fn try_advance(&self, millis: u64) -> VsResult<()> {
+        self.now_ms
+            .fetch_update(
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+                |now| now.checked_add(millis),
+            )
+            .map(|_| ())
+            .map_err(|_| VsError::Runtime("virtual clock exhausted".into()))
     }
 }
 
