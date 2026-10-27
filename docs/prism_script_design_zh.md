@@ -354,7 +354,7 @@ off-thread 编译 / .cwasm 反序列化 (prism_tasks spawn_blocking)   ← 不�
 
 ## 10. 状态迁移与版本化：复用 reflect schema，改脚本不丢状态
 
-checkpoint 的 `module_revision` 必须为非空、无空白的可打印 ASCII 标识，且不超过 128 字节；超限或非法值在迁移提交前拒绝。
+checkpoint 的序列化 payload 还受 8 MiB 硬上限约束，创建和 CAS 更新路径均拒绝超限状态。
 
 热更新最难的不是「换代码」，是「换代码时保住运行时状态」。本设计把它建在 **`prism_reflect` schema 版本化迁移** 之上，**不自造迁移框架**：
 

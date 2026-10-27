@@ -8,6 +8,16 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 const MAX_MODULE_REVISION_BYTES: usize = 128;
+const MAX_CHECKPOINT_BYTES: usize = 8 * 1024 * 1024;
+
+fn validate_checkpoint_size(checkpoint: &[u8]) -> VsResult<()> {
+    if checkpoint.len() > MAX_CHECKPOINT_BYTES {
+        return Err(VsError::Validate(format!(
+            "workflow checkpoint exceeds {MAX_CHECKPOINT_BYTES} bytes"
+        )));
+    }
+    Ok(())
+}
 
 fn validate_module_revision(revision: &str) -> VsResult<()> {
     if revision.is_empty() {
@@ -74,6 +84,7 @@ impl RunCoordinator {
         execution_id: &str,
         checkpoint: Vec<u8>,
     ) -> VsResult<DurableRecord> {
+        validate_checkpoint_size(&checkpoint)?;
         if execution_id.is_empty() {
             return Err(VsError::Validate(
                 "execution identity must not be empty".into(),
@@ -108,6 +119,7 @@ impl RunCoordinator {
         status: RunStatus,
         checkpoint: Vec<u8>,
     ) -> VsResult<DurableRecord> {
+        validate_checkpoint_size(&checkpoint)?;
         let key = Self::key(run_id)?;
         let Some(current) = self.store.load(&key)? else {
             return Err(VsError::Runtime(format!("unknown run {run_id}")));
@@ -169,7 +181,7 @@ impl RunCoordinator {
 
 #[cfg(test)]
 mod tests {
-    use super::validate_module_revision;
+    use super::{validate_checkpoint_size, validate_module_revision, MAX_CHECKPOINT_BYTES};
 
     #[test]
     fn module_revision_boundary_is_explicit() {
@@ -178,5 +190,7 @@ mod tests {
         assert!(validate_module_revision(&"m".repeat(129)).is_err());
         assert!(validate_module_revision("module revision").is_err());
         assert!(validate_module_revision("模块").is_err());
+        assert!(validate_checkpoint_size(&vec![0; MAX_CHECKPOINT_BYTES]).is_ok());
+        assert!(validate_checkpoint_size(&vec![0; MAX_CHECKPOINT_BYTES + 1]).is_err());
     }
 }
