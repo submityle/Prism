@@ -33,7 +33,9 @@ pub fn compile(graph: &Graph, lib: &NodeLibrary) -> VsResult<SlotProgram> {
     validate::run(&cx)?;
     cx.allocate_impure_outputs()?;
     lower::run(&mut cx)?;
-    Ok(cx.finish())
+    let program = cx.finish();
+    program.validate()?;
+    Ok(program)
 }
 
 /// 显式两阶段：Graph -> ExecutionPlan。
