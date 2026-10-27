@@ -74,6 +74,8 @@ pub use execution::{
 };
 pub use ir::{Block, ExecutionPlan, Instr, SlotProgram};
 pub use migration::{migration_digest, MigrationDescriptor, MigrationFn, MigrationRegistry};
+pub use prism_reflect::{ScriptBridge, ScriptError};
+
 pub use model::{
     ControlNode, Edge, Endpoint, Graph, GraphCall, JoinPolicy, Node, NodeDefRef, NodeId, Pin,
     PinDir, PinIndex, Variable,

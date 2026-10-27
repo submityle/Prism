@@ -72,3 +72,4 @@ pub use crate::wasm::{WasmCall, WasmCallResult, WasmEffectExecutor, WasmHost, Wa
 pub use crate::workflow::{
     WorkflowCompletion, WorkflowProgram, WorkflowRunStatus, WorkflowVm, WorkflowVmState,
 };
+pub use crate::{ScriptBridge, ScriptError};
