@@ -85,6 +85,12 @@ impl WorldProxyContext {
     }
 }
 
+pub fn require_snapshot_digest<'a>(ctx: &'a InvokeCtx<'a>) -> VsResult<[u8; 32]> {
+    let proxy = require_world_proxy(ctx)?;
+    proxy
+        .snapshot_digest()
+        .ok_or_else(|| VsError::Runtime("ECS snapshot digest is not configured".into()))
+}
 /// Retrieve the host-owned world proxy, producing a structured error when a graph
 /// requires ECS access but the execution was intentionally run without a world.
 pub fn require_world_proxy<'a>(ctx: &'a InvokeCtx<'a>) -> VsResult<&'a dyn WorldProxy> {
@@ -148,6 +154,10 @@ mod tests {
         assert_eq!(proxy.entity_count(), 2);
         assert!(proxy.contains_bits(0x100000001));
         assert!(!proxy.contains_bits(0x200000001));
+        assert!(matches!(
+            require_snapshot_digest(&ctx),
+            Err(VsError::Runtime(message)) if message.contains("snapshot digest")
+        ));
     }
 
     #[test]

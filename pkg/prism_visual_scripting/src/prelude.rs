@@ -22,7 +22,7 @@ pub use crate::durable::{
     InboxEntry, OutboxEntry, RecordKey, RevisionGuard,
 };
 pub use crate::ecs_proxy::{
-    require_world_proxy, SnapshotWorldProxy, WorldProxy, WorldProxyContext,
+    require_snapshot_digest, require_world_proxy, SnapshotWorldProxy, WorldProxy, WorldProxyContext,
 };
 pub use crate::effect::{
     DurableEffectExecutor, DurableEffectState, EffectClass, EffectError, EffectExecutor,
