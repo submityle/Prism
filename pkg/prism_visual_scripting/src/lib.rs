@@ -13,6 +13,7 @@ pub mod builtin;
 pub mod compiler;
 pub mod coordinator;
 pub mod durable;
+pub mod ecs_proxy;
 pub mod effect;
 pub mod engine;
 pub mod error;
@@ -54,6 +55,7 @@ pub use durable::{
     DurableMutation, DurableRecord, DurableStore, FileDurableStore, InMemoryDurableStore,
     InboxEntry, OutboxEntry, RecordKey, RevisionGuard,
 };
+pub use ecs_proxy::{require_world_proxy, WorldProxy, WorldProxyContext};
 pub use effect::{
     DurableEffectExecutor, DurableEffectState, EffectClass, EffectError, EffectExecutor,
     EffectRequest, EffectResponse, EffectSpec, ExecutionClock, IdempotencyPolicy,
