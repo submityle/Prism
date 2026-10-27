@@ -19,6 +19,11 @@ fn temp_store_path(label: &str) -> std::path::PathBuf {
 }
 
 #[test]
+fn event_sequence_allocator_rejects_u64_exhaustion() {
+    let error = prism_visual_scripting::durable::next_event_sequence(usize::MAX).unwrap_err();
+    assert!(error.to_string().contains("event sequence exhausted"));
+}
+#[test]
 fn in_memory_store_enforces_create_cas_and_payload_integrity() {
     let store = InMemoryDurableStore::default();
     let record = store

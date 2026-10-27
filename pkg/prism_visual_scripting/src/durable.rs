@@ -196,7 +196,7 @@ fn apply_mutation(
             .dispatched = true;
     }
     for mut event in mutation.events {
-        event.sequence = record.events.len() as u64 + 1;
+        event.sequence = next_event_sequence(record.events.len())?;
         record.events.push(event);
     }
     record.revision = record
@@ -204,6 +204,13 @@ fn apply_mutation(
         .checked_add(1)
         .ok_or_else(|| VsError::Runtime("durable revision exhausted".into()))?;
     Ok(record)
+}
+
+pub fn next_event_sequence(event_count: usize) -> VsResult<u64> {
+    u64::try_from(event_count)
+        .ok()
+        .and_then(|sequence| sequence.checked_add(1))
+        .ok_or_else(|| VsError::Runtime("durable event sequence exhausted".into()))
 }
 
 #[derive(Default)]
