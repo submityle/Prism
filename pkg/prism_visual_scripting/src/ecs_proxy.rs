@@ -8,6 +8,9 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+const MAX_COMPONENT_NAME_BYTES: usize = 128;
+const MAX_COMPONENT_BYTES: usize = 1024 * 1024;
+
 /// Minimal read-only world surface safe to expose across an execution boundary.
 pub trait WorldProxy: Send + Sync {
     fn entity_count(&self) -> u32;
@@ -49,7 +52,13 @@ impl SnapshotWorldProxy {
         let entities = entities.into_iter().collect::<BTreeSet<_>>();
         let mut component_map = BTreeMap::new();
         for (entity_bits, component, bytes) in components {
-            if component.is_empty() || component.len() > 128 || !entities.contains(&entity_bits) {
+            if component.is_empty()
+                || component.len() > MAX_COMPONENT_NAME_BYTES
+                || !component.is_ascii()
+                || bytes.len() > MAX_COMPONENT_BYTES
+                || !entities.contains(&entity_bits)
+                || component_map.contains_key(&(entity_bits, component.clone()))
+            {
                 return Err(VsError::Validate(
                     "invalid ECS component snapshot entry".into(),
                 ));
@@ -161,6 +170,26 @@ mod tests {
         fn contains_bits(&self, bits: u64) -> bool {
             self.entities.contains(&bits)
         }
+    }
+
+    #[test]
+    fn snapshot_rejects_duplicate_or_unbounded_component_entries() {
+        assert!(SnapshotWorldProxy::with_components(
+            [7],
+            [
+                (7, "Transform".to_owned(), vec![1]),
+                (7, "Transform".to_owned(), vec![2]),
+            ],
+        )
+        .is_err());
+        assert!(
+            SnapshotWorldProxy::with_components([7], [(7, "位置".to_owned(), vec![1])],).is_err()
+        );
+        assert!(SnapshotWorldProxy::with_components(
+            [7],
+            [(7, "Transform".to_owned(), vec![0; MAX_COMPONENT_BYTES + 1])],
+        )
+        .is_err());
     }
 
     #[test]
