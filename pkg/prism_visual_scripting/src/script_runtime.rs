@@ -35,13 +35,10 @@ impl BindingRegistry {
                 "binding name must be non-empty and space-free".into(),
             ));
         }
-        if self
-            .bindings
-            .insert(binding.name.clone(), binding)
-            .is_some()
-        {
+        if self.bindings.contains_key(&binding.name) {
             return Err(VsError::Validate("binding already registered".into()));
         }
+        self.bindings.insert(binding.name.clone(), binding);
         Ok(())
     }
 
@@ -162,6 +159,7 @@ impl ScriptModule {
         schema_version: u32,
         bytes: impl Into<Vec<u8>>,
     ) -> Self {
+        let name = name.into();
         let bytes: Arc<[u8]> = Arc::from(bytes.into());
         let mut hash = Sha256::new();
         hash.update(&bytes);
@@ -337,6 +335,11 @@ impl ScriptHost {
         self
     }
     pub fn publish(&self, module: ScriptModule) -> VsResult<SwapRecord> {
+        if module.name.is_empty() || module.name.contains(char::is_whitespace) {
+            return Err(VsError::Validate(
+                "script module name must be non-empty and space-free".into(),
+            ));
+        }
         if let Some(backend) = &self.backend {
             let instance = backend.compile(&module, &self.bindings)?;
             self.instances
@@ -353,6 +356,19 @@ impl ScriptHost {
         CallBudget::new(self.policy.budget.clone())
     }
     pub fn call(&self, request: ScriptCall) -> VsResult<ScriptCallResult> {
+        if request.operation.is_empty() || request.operation.contains(char::is_whitespace) {
+            return Err(VsError::Validate(
+                "script operation must be non-empty and space-free".into(),
+            ));
+        }
+        if self.bindings.contains(&request.operation) {
+            self.bindings.authorize(&request.operation, &self.policy)?;
+        } else {
+            return Err(VsError::Runtime(format!(
+                "unknown host binding: {}",
+                request.operation
+            )));
+        }
         let module = self.hotswap.current(&request.module).ok_or_else(|| {
             VsError::Runtime(format!("script module not installed: {}", request.module))
         })?;
@@ -372,6 +388,7 @@ impl ScriptHost {
         }
         let mut budget = self.begin_call();
         let outputs = backend.call(&instance.0, &request.operation, &request.args, &mut budget)?;
+        budget.check_deadline()?;
         Ok(ScriptCallResult {
             module_digest: module.digest,
             outputs,
@@ -396,6 +413,12 @@ impl CallBudget {
             started: Instant::now(),
             limits,
         }
+    }
+    pub fn check_deadline(&self) -> VsResult<()> {
+        if self.started.elapsed() > self.limits.wall_time {
+            return Err(VsError::Runtime("script wall-time budget exceeded".into()));
+        }
+        Ok(())
     }
     pub fn charge(&mut self, fuel: u64) -> VsResult<()> {
         self.calls = self
@@ -449,11 +472,19 @@ mod tests {
 
     #[test]
     fn host_publishes_compiles_and_calls_backend() {
-        let host = ScriptHost::new(
-            ScriptPolicy::new(SandboxTier::Sandboxed),
-            BindingRegistry::default(),
-        )
-        .with_backend(EchoBackend);
+        let mut bindings = BindingRegistry::default();
+        bindings
+            .register(Binding {
+                name: "echo".into(),
+                category: "test".into(),
+                inputs: vec![ValueType::I64],
+                output: Some(ValueType::I64),
+                capabilities: BTreeSet::new(),
+                deterministic: true,
+            })
+            .unwrap();
+        let host = ScriptHost::new(ScriptPolicy::new(SandboxTier::Sandboxed), bindings)
+            .with_backend(EchoBackend);
         let module = ScriptModule::from_bytes("echo", 1, b"component");
         let digest = module.digest;
         host.publish(module).unwrap();

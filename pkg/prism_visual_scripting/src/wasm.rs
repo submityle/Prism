@@ -63,6 +63,12 @@ impl WasmHostError {
 /// batch form. The trait does not prescribe a wire representation, allowing a
 /// POD Component ABI without forcing JSON allocation into the Effect path.
 pub trait WasmHost: Send + Sync + 'static {
+    /// Validate and compile component bytes in the host-owned sandbox.
+    fn validate_module(&self, _bytes: &[u8]) -> Result<(), WasmHostError> {
+        Err(WasmHostError::permanent(
+            "WASM host must validate component bytes",
+        ))
+    }
     fn call(&self, request: WasmCall) -> Result<WasmCallResult, WasmHostError>;
 }
 
@@ -100,6 +106,9 @@ impl ScriptBackend for WasmScriptBackend {
         if module.bytes.is_empty() {
             return Err(VsError::Runtime("WASM script module is empty".into()));
         }
+        self.host
+            .validate_module(&module.bytes)
+            .map_err(|error| VsError::Compile(error.message))?;
         Ok(module.bytes.to_vec())
     }
 
