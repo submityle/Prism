@@ -306,6 +306,18 @@ mod tests {
         assert!(matches!(host.poll_task(id), TaskPoll::Cancelled));
     }
 
+    #[tokio::test]
+    async fn host_rejects_task_id_exhaustion() {
+        let host = PrismHost::new();
+        host.next_task.store(u64::MAX, Ordering::Relaxed);
+        let error = host.spawn_task(|_| async { Ok(Value::Unit) }).unwrap_err();
+        assert!(error.to_string().contains("task id space exhausted"));
+        assert!(matches!(
+            host.poll_task(TaskId(u64::MAX)),
+            TaskPoll::Unknown
+        ));
+    }
+
     #[test]
     fn host_registers_node_in_concurrent_registry() {
         let host = PrismHost::new();
