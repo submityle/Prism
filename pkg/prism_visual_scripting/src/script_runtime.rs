@@ -240,7 +240,22 @@ impl ScriptModule {
         if self.bytes.is_empty() {
             return Err(VsError::Validate("module bytes must be non-empty".into()));
         }
+        if self.digest != Self::compute_digest(&self.name, self.schema_version, &self.bytes) {
+            return Err(VsError::Validate(
+                "module digest does not match content".into(),
+            ));
+        }
         Ok(())
+    }
+
+    fn compute_digest(name: &str, schema_version: u32, bytes: &[u8]) -> [u8; 32] {
+        let mut hash = Sha256::new();
+        hash.update(b"prism.script.module.v1\0");
+        hash.update((name.len() as u64).to_le_bytes());
+        hash.update(name.as_bytes());
+        hash.update(schema_version.to_le_bytes());
+        hash.update(bytes);
+        hash.finalize().into()
     }
 }
 
@@ -650,6 +665,18 @@ mod tests {
         ] {
             assert!(matches!(host.publish(module), Err(VsError::Validate(_))));
         }
+    }
+    #[test]
+    fn publish_rejects_tampered_module_digest() {
+        let host = ScriptHost::new(
+            ScriptPolicy::new(SandboxTier::Sandboxed),
+            BindingRegistry::default(),
+        );
+        let mut module = ScriptModule::from_bytes("tampered", 1, b"module");
+        module.digest[0] ^= 0xff;
+        assert!(
+            matches!(host.publish(module), Err(VsError::Validate(message)) if message.contains("digest"))
+        );
     }
     #[test]
     fn publish_rejects_modules_larger_than_memory_budget() {
