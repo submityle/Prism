@@ -113,3 +113,27 @@ pub fn migration_digest(name: &str, from: u32, to: u32) -> [u8; 32] {
     digest.update(to.to_le_bytes());
     digest.finalize().into()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::MigrationRegistry;
+    use crate::Value;
+    use std::sync::Arc;
+
+    #[test]
+    fn migration_plan_rejects_excessive_chain() {
+        let mut registry = MigrationRegistry::default();
+        for schema in 0..1025u32 {
+            registry
+                .register(
+                    schema,
+                    schema + 1,
+                    [0; 32],
+                    Arc::new(|value: Value| Ok::<Value, crate::VsError>(value)),
+                )
+                .unwrap();
+        }
+        let error = registry.plan(0, 1025).unwrap_err();
+        assert!(error.to_string().contains("exceeds 1024"));
+    }
+}
