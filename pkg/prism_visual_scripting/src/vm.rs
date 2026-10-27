@@ -402,6 +402,7 @@ impl Vm {
         host: &mut dyn HostServices,
         env: &ExecutionEnv<'_>,
     ) -> VsResult<VmRunStatus> {
+        self.program.validate()?;
         let fallback_cancel = CancellationToken::new();
         let state = self.initial_state(entry_node, state, env.execution_id)?;
         self.run_from_sync(state, host, &fallback_cancel, env)
@@ -415,6 +416,7 @@ impl Vm {
         host: &mut dyn HostServices,
         env: &ExecutionEnv<'_>,
     ) -> VsResult<VmRunStatus> {
+        self.program.validate()?;
         let fallback_cancel = CancellationToken::new();
         let state = self.initial_state(entry_node, state, env.execution_id)?;
         self.run_from_async(state, host, &fallback_cancel, env)
