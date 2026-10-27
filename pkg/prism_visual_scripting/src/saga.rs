@@ -97,11 +97,11 @@ impl SagaState {
             ));
         }
         if self.committed_step_ids.contains(&step_id) {
-            let existing = self
-                .steps
-                .iter()
-                .find(|step| step.step_id == step_id)
-                .expect("committed step identity index is inconsistent");
+            let Some(existing) = self.steps.iter().find(|step| step.step_id == step_id) else {
+                return Err(VsError::Runtime(
+                    "saga committed step index is inconsistent".into(),
+                ));
+            };
             if existing.forward_effect_id != forward_effect_id
                 || existing.compensation != compensation
             {
@@ -169,7 +169,11 @@ impl SagaState {
             self.bump_revision()?;
             return Ok(None);
         };
-        let intent = step.compensation.as_ref().expect("filtered compensation");
+        let Some(intent) = step.compensation.as_ref() else {
+            return Err(VsError::Runtime(
+                "saga compensation state is inconsistent".into(),
+            ));
+        };
         let effect_id = compensation_effect_id(&self.id, step);
         let request = EffectRequest {
             id: effect_id.clone(),
