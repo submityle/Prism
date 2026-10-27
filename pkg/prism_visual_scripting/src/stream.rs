@@ -183,7 +183,16 @@ impl WindowedStream {
                 },
             });
         }
-        if event.event_time_ms.saturating_add(self.allowed_lateness_ms) <= current_watermark {
+        let lateness_deadline = match event.event_time_ms.checked_add(self.allowed_lateness_ms) {
+            Some(deadline) => deadline,
+            None => {
+                self.seen_event_ids.remove(&event.event_id);
+                return Err(StreamIngestError::Arithmetic {
+                    message: "event lateness deadline exhausted".into(),
+                });
+            }
+        };
+        if lateness_deadline <= current_watermark {
             self.seen_event_ids.remove(&event.event_id);
             return Err(StreamIngestError::Late {
                 reason: LateEvent::TooLate {
