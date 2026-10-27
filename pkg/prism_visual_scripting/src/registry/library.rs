@@ -56,7 +56,10 @@ impl NodeDefinition {
             effect,
         ))
         .unwrap_or_else(|_| {
-            b"prism.visual_scripting.node_contract.serialization_error.v1".to_vec()
+            let mut fallback =
+                b"prism.visual_scripting.node_contract.serialization_error.v1:".to_vec();
+            fallback.extend_from_slice(self.id.as_bytes());
+            fallback
         });
         Sha256::digest(payload).into()
     }
