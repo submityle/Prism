@@ -247,10 +247,12 @@ impl WindowedStream {
             self.windows.entry(start).or_default().push(event.clone());
         }
         self.sort_windows();
-        let watermark = self
-            .max_event_time_ms
-            .expect("ingest assigned max event time")
-            .saturating_sub(self.allowed_lateness_ms);
+        let Some(max_event_time_ms) = self.max_event_time_ms else {
+            return Err(StreamIngestError::Arithmetic {
+                message: "max event time was not recorded".into(),
+            });
+        };
+        let watermark = max_event_time_ms.saturating_sub(self.allowed_lateness_ms);
         let closed = self.advance_watermark(watermark);
         Ok((result, closed))
     }
@@ -272,12 +274,13 @@ impl WindowedStream {
         closable
             .into_iter()
             .filter_map(|start| {
+                let end = self.spec.end(start)?;
                 self.windows.remove(&start).map(|mut events| {
                     events.sort_by_key(|event| (event.event_time_ms, event.event_id.clone()));
                     self.closed_windows.insert(start);
                     ClosedWindow {
                         start_ms: start,
-                        end_ms: self.spec.end(start).expect("validated window end"),
+                        end_ms: end,
                         events,
                     }
                 })
