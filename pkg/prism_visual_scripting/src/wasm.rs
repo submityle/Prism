@@ -330,6 +330,13 @@ mod tests {
             config: BTreeMap::new(),
             attempt: 1,
         };
+        let denied = WasmEffectExecutor::new(Arc::new(SlowHost), "effects")
+            .with_capabilities(["effects.write"]);
+        let denied_error = denied.execute(request.clone()).await.unwrap_err();
+        assert!(!denied_error.retryable);
+        assert!(denied_error.message.contains("capability denied"));
+
+        let executor = WasmEffectExecutor::new(Arc::new(SlowHost), "effects");
         let error = executor.execute(request).await.unwrap_err();
         assert!(error.retryable);
         assert!(error.message.contains("deadline"));
