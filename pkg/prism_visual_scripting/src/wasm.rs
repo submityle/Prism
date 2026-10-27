@@ -273,6 +273,47 @@ mod tests {
         }
     }
 
+    struct SlowHost;
+
+    impl WasmHost for SlowHost {
+        fn call(&self, _request: WasmCall) -> Result<WasmCallResult, WasmHostError> {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+            Ok(WasmCallResult {
+                outputs: vec![Value::Unit],
+                next: ExecNext::End,
+                chunks: Vec::new(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn effect_executor_hard_times_out_blocking_host() {
+        let executor = WasmEffectExecutor::new(Arc::new(SlowHost), "effects");
+        let request = EffectRequest {
+            id: "effect-timeout".into(),
+            execution_id: "execution-timeout".into(),
+            task_id: 1,
+            frame_depth: 0,
+            sequence: 1,
+            node_id: 7,
+            spec: crate::effect::EffectSpec {
+                capability: "effects.read".into(),
+                operation: "slow".into(),
+                class: crate::effect::EffectClass::ReadOnly,
+                idempotency: crate::effect::IdempotencyPolicy::BestEffort,
+                retry: crate::effect::RetryPolicy::never(),
+                timeout_ms: 1,
+                required_permissions: Vec::new(),
+            },
+            inputs: Vec::new(),
+            config: BTreeMap::new(),
+            attempt: 1,
+        };
+        let error = executor.execute(request).await.unwrap_err();
+        assert!(error.retryable);
+        assert!(error.message.contains("deadline"));
+    }
+
     struct RetryHost;
 
     impl WasmHost for RetryHost {
