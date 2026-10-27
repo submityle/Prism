@@ -249,6 +249,12 @@ pub struct SwapRecord {
     pub generation: u64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScriptLease {
+    pub module: ScriptModule,
+    pub generation: u64,
+}
+
 #[derive(Clone, Default)]
 pub struct HotSwap {
     modules: Arc<RwLock<BTreeMap<String, (ScriptModule, u64)>>>,
@@ -282,6 +288,27 @@ impl HotSwap {
         modules.insert(module.name.clone(), (module, record.generation));
         Ok(record)
     }
+    pub fn acquire(&self, name: &str) -> Option<ScriptLease> {
+        self.modules
+            .read()
+            .ok()?
+            .get(name)
+            .map(|(module, generation)| ScriptLease {
+                module: module.clone(),
+                generation: *generation,
+            })
+    }
+
+    pub fn is_current(&self, lease: &ScriptLease) -> bool {
+        self.modules
+            .read()
+            .ok()
+            .and_then(|modules| modules.get(&lease.module.name).cloned())
+            .is_some_and(|(module, generation)| {
+                generation == lease.generation && module.digest == lease.module.digest
+            })
+    }
+
     pub fn current(&self, name: &str) -> Option<ScriptModule> {
         self.modules.read().ok()?.get(name).map(|(m, _)| m.clone())
     }
@@ -508,6 +535,23 @@ mod tests {
                 chunks: Vec::new(),
             })
         }
+    }
+
+    #[test]
+    fn hot_swap_leases_revoke_old_generation() {
+        let swaps = HotSwap::default();
+        let first = ScriptModule::from_bytes("lease", 1, b"v1");
+        swaps.publish(first).unwrap();
+        let lease = swaps.acquire("lease").unwrap();
+        assert!(swaps.is_current(&lease));
+
+        swaps
+            .publish(ScriptModule::from_bytes("lease", 1, b"v2"))
+            .unwrap();
+        assert!(!swaps.is_current(&lease));
+        let current = swaps.acquire("lease").unwrap();
+        assert_eq!(current.generation, 2);
+        assert!(swaps.is_current(&current));
     }
 
     #[test]
