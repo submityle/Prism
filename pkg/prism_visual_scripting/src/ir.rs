@@ -230,6 +230,11 @@ impl SlotProgram {
                     _ => {}
                 }
                 let valid_slot = |slot: SlotId| slot < self.slots_count;
+                let single_slot_range = |slot: SlotId| {
+                    slot.checked_add(1)
+                        .map(|end| (slot, end))
+                        .ok_or_else(|| VsError::Validate("IR slot range exhausted".into()))
+                };
                 match instr {
                     Instr::LoadConst { dst, .. }
                     | Instr::LoadVar { dst, .. }
@@ -246,24 +251,22 @@ impl SlotProgram {
                     _ => {}
                 }
                 let (ranges, targets): (Vec<(SlotId, SlotId)>, Vec<BlockId>) = match instr {
-                    Instr::LoadConst { dst, .. } => {
-                        (vec![(*dst, dst.saturating_add(1))], Vec::new())
-                    }
+                    Instr::LoadConst { dst, .. } => (vec![single_slot_range(*dst)?], Vec::new()),
                     Instr::Move { dst, src } => (
-                        vec![(*dst, dst.saturating_add(1)), (*src, src.saturating_add(1))],
+                        vec![single_slot_range(*dst)?, single_slot_range(*src)?],
                         Vec::new(),
                     ),
                     Instr::LoadVar { dst, var } => {
                         if (*var as usize) >= self.vars.len() {
                             return Err(VsError::Validate("IR variable index out of range".into()));
                         }
-                        (vec![(*dst, dst.saturating_add(1))], Vec::new())
+                        (vec![single_slot_range(*dst)?], Vec::new())
                     }
                     Instr::StoreVar { var, src } => {
                         if (*var as usize) >= self.vars.len() {
                             return Err(VsError::Validate("IR variable index out of range".into()));
                         }
-                        (vec![(*src, src.saturating_add(1))], Vec::new())
+                        (vec![single_slot_range(*src)?], Vec::new())
                     }
                     Instr::CallPure {
                         def,
