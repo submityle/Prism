@@ -136,6 +136,25 @@ impl WorldProxyContext {
     }
 }
 
+pub fn require_component_bytes<'a>(
+    ctx: &'a InvokeCtx<'a>,
+    entity_bits: u64,
+    component: &str,
+) -> VsResult<Vec<u8>> {
+    if component.is_empty() || component.len() > MAX_COMPONENT_NAME_BYTES || !component.is_ascii() {
+        return Err(VsError::Validate("invalid ECS component name".into()));
+    }
+    let proxy = require_world_proxy(ctx)?;
+    if !proxy.contains_bits(entity_bits) {
+        return Err(VsError::Runtime(
+            "ECS entity is not present in snapshot".into(),
+        ));
+    }
+    proxy
+        .component_bytes(entity_bits, component)
+        .ok_or_else(|| VsError::Runtime("ECS component is not present in snapshot".into()))
+}
+
 pub fn require_snapshot_digest<'a>(ctx: &'a InvokeCtx<'a>) -> VsResult<[u8; 32]> {
     let proxy = require_world_proxy(ctx)?;
     proxy
@@ -216,6 +235,35 @@ mod tests {
                 [(8, "Transform".to_owned(), vec![1])],
             ),
             Err(VsError::Validate(message)) if message.contains("component snapshot")
+        ));
+    }
+
+    #[test]
+    fn required_component_reads_are_structured() {
+        let snapshot =
+            SnapshotWorldProxy::with_components([7], [(7, "Transform".to_owned(), vec![1, 2])])
+                .unwrap();
+        let external = WorldProxyContext::new(Arc::new(snapshot));
+        let env = ExecutionEnv::new().with_external(&external);
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let mut host = InMemoryHost::default();
+        let config = BTreeMap::<String, Value>::new();
+        let ctx = InvokeCtx::from_env(&config, &mut host, &cancel, &env);
+        assert_eq!(
+            require_component_bytes(&ctx, 7, "Transform").unwrap(),
+            vec![1, 2]
+        );
+        assert!(matches!(
+            require_component_bytes(&ctx, 8, "Transform"),
+            Err(VsError::Runtime(message)) if message.contains("entity")
+        ));
+        assert!(matches!(
+            require_component_bytes(&ctx, 7, "Velocity"),
+            Err(VsError::Runtime(message)) if message.contains("component")
+        ));
+        assert!(matches!(
+            require_component_bytes(&ctx, 7, "位置"),
+            Err(VsError::Validate(message)) if message.contains("component name")
         ));
     }
 
