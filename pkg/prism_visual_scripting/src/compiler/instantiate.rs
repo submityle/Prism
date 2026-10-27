@@ -8,6 +8,25 @@ use crate::ir::{ExecutionPlan, SlotProgram};
 use crate::registry::NodeRegistry;
 
 pub fn instantiate(plan: &ExecutionPlan, registry: &dyn NodeRegistry) -> VsResult<SlotProgram> {
+    for id in &plan.def_ids {
+        if id.is_empty() || id.len() > 128 {
+            return Err(VsError::Validate(
+                "plan definition identifier exceeds limits".into(),
+            ));
+        }
+    }
+    for name in &plan.vars {
+        if name.is_empty() || name.len() > 128 {
+            return Err(VsError::Validate(
+                "plan variable identifier exceeds limits".into(),
+            ));
+        }
+    }
+    if plan.blocks.is_empty() {
+        return Err(VsError::Validate(
+            "plan must contain at least one block".into(),
+        ));
+    }
     if plan.registry_digest != registry.registry_digest() {
         return Err(VsError::Runtime("node registry identity mismatch".into()));
     }

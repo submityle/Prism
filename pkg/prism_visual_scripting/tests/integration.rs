@@ -1,7 +1,9 @@
 //! 端到端集成测试。
 
 use prism_visual_scripting::prelude::*;
-use prism_visual_scripting::{compile_to_plan, instantiate, PinIndex};
+use prism_visual_scripting::{
+    compile_to_plan, instantiate, Block, ExecutionPlan, NodeRegistry, PinIndex,
+};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
@@ -662,5 +664,23 @@ fn instantiate_rejects_out_of_bounds_ir_slots() {
     };
     assert!(
         matches!(error, VsError::Validate(message) if message.contains("slot index out of bounds"))
+    );
+}
+
+#[test]
+fn instantiate_rejects_invalid_plan_metadata() {
+    let lib = NodeLibrary::with_builtins();
+    let plan = ExecutionPlan {
+        blocks: vec![Block::default()],
+        def_ids: vec!["d".repeat(129)],
+        registry_digest: lib.registry_digest(),
+        ..Default::default()
+    };
+    let error = match instantiate(&plan, &lib) {
+        Ok(_) => panic!("invalid plan metadata must be rejected"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(error, VsError::Validate(message) if message.contains("definition identifier"))
     );
 }
