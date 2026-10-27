@@ -132,6 +132,7 @@ impl ScriptBackend for WasmScriptBackend {
         if instance.is_empty() {
             return Err(VsError::Runtime("WASM script instance is empty".into()));
         }
+        budget.check_deadline()?;
         let result = self
             .host
             .call(WasmCall {
