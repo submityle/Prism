@@ -4,6 +4,7 @@
 //! execution, keeping world lifetimes and thread affinity outside the scripting crate.
 
 use crate::{InvokeCtx, VsError, VsResult};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
@@ -28,11 +29,18 @@ impl SnapshotWorldProxy {
         let entities = entities.into_iter().collect::<BTreeSet<_>>();
         let count = u32::try_from(entities.len())
             .map_err(|_| VsError::Validate("world entity count exceeds u32".into()))?;
-        let _ = count;
         Ok(Self {
             entities: Arc::new(entities),
             count,
         })
+    }
+
+    pub fn digest(&self) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        for entity_bits in self.entities.iter() {
+            hasher.update(entity_bits.to_le_bytes());
+        }
+        hasher.finalize().into()
     }
 }
 
@@ -98,6 +106,10 @@ mod tests {
         assert_eq!(snapshot.entity_count(), 2);
         assert!(snapshot.contains_bits(3));
         assert!(!snapshot.contains_bits(4));
+        assert_eq!(
+            snapshot.digest(),
+            SnapshotWorldProxy::new([3, 9]).unwrap().digest()
+        );
     }
 
     #[test]
