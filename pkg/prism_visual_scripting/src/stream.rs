@@ -153,6 +153,16 @@ impl WindowedStream {
         self.windows.values().map(Vec::len).sum()
     }
 
+    fn buffered_events_checked(&self) -> Result<usize, StreamIngestError> {
+        self.windows.values().try_fold(0usize, |total, events| {
+            total
+                .checked_add(events.len())
+                .ok_or_else(|| StreamIngestError::Arithmetic {
+                    message: "buffered event count exhausted".into(),
+                })
+        })
+    }
+
     pub fn dropped_events(&self) -> u64 {
         self.dropped_events
     }
@@ -209,7 +219,7 @@ impl WindowedStream {
         }
         let mut result = StreamIngest::Accepted;
         let required = self
-            .buffered_events()
+            .buffered_events_checked()?
             .checked_add(starts.len())
             .ok_or_else(|| StreamIngestError::Arithmetic {
                 message: "buffered event count exhausted".into(),
@@ -282,7 +292,7 @@ impl WindowedStream {
     }
 
     fn drop_oldest_until(&mut self, target: usize) -> Result<(), StreamIngestError> {
-        while self.buffered_events() > target {
+        while self.buffered_events_checked()? > target {
             let Some(start) = self
                 .windows
                 .iter()
