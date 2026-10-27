@@ -5,13 +5,19 @@
 
 use crate::{InvokeCtx, VsError, VsResult};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 /// Minimal read-only world surface safe to expose across an execution boundary.
 pub trait WorldProxy: Send + Sync {
     fn entity_count(&self) -> u32;
     fn contains_bits(&self, entity_bits: u64) -> bool;
+
+    /// Return a deterministic, owned encoding of one reflected component.
+    fn component_bytes(&self, entity_bits: u64, component: &str) -> Option<Vec<u8>> {
+        let _ = (entity_bits, component);
+        None
+    }
 
     /// Stable content identity when the host supplies a deterministic snapshot.
     fn snapshot_digest(&self) -> Option<[u8; 32]> {
@@ -23,6 +29,7 @@ pub trait WorldProxy: Send + Sync {
 #[derive(Clone, Debug, Default)]
 pub struct SnapshotWorldProxy {
     entities: Arc<BTreeSet<u64>>,
+    components: Arc<BTreeMap<(u64, String), Vec<u8>>>,
     count: u32,
 }
 
@@ -31,11 +38,29 @@ impl SnapshotWorldProxy {
     where
         I: IntoIterator<Item = u64>,
     {
+        Self::with_components(entities, std::iter::empty::<(u64, String, Vec<u8>)>())
+    }
+
+    pub fn with_components<I, C>(entities: I, components: C) -> VsResult<Self>
+    where
+        I: IntoIterator<Item = u64>,
+        C: IntoIterator<Item = (u64, String, Vec<u8>)>,
+    {
         let entities = entities.into_iter().collect::<BTreeSet<_>>();
+        let mut component_map = BTreeMap::new();
+        for (entity_bits, component, bytes) in components {
+            if component.is_empty() || component.len() > 128 || !entities.contains(&entity_bits) {
+                return Err(VsError::Validate(
+                    "invalid ECS component snapshot entry".into(),
+                ));
+            }
+            component_map.insert((entity_bits, component), bytes);
+        }
         let count = u32::try_from(entities.len())
             .map_err(|_| VsError::Validate("world entity count exceeds u32".into()))?;
         Ok(Self {
             entities: Arc::new(entities),
+            components: Arc::new(component_map),
             count,
         })
     }
@@ -46,6 +71,13 @@ impl SnapshotWorldProxy {
         hasher.update(self.count.to_le_bytes());
         for entity_bits in self.entities.iter() {
             hasher.update(entity_bits.to_le_bytes());
+        }
+        for ((entity_bits, component), bytes) in self.components.iter() {
+            hasher.update(entity_bits.to_le_bytes());
+            hasher.update((component.len() as u64).to_le_bytes());
+            hasher.update(component.as_bytes());
+            hasher.update((bytes.len() as u64).to_le_bytes());
+            hasher.update(bytes);
         }
         hasher.finalize().into()
     }
@@ -58,6 +90,12 @@ impl WorldProxy for SnapshotWorldProxy {
 
     fn contains_bits(&self, entity_bits: u64) -> bool {
         self.entities.contains(&entity_bits)
+    }
+
+    fn component_bytes(&self, entity_bits: u64, component: &str) -> Option<Vec<u8>> {
+        self.components
+            .get(&(entity_bits, component.to_owned()))
+            .cloned()
     }
 
     fn snapshot_digest(&self) -> Option<[u8; 32]> {
@@ -82,6 +120,10 @@ impl WorldProxyContext {
 
     pub fn snapshot_digest(&self) -> Option<[u8; 32]> {
         self.proxy.snapshot_digest()
+    }
+
+    pub fn component_bytes(&self, entity_bits: u64, component: &str) -> Option<Vec<u8>> {
+        self.proxy.component_bytes(entity_bits, component)
     }
 }
 
@@ -119,6 +161,33 @@ mod tests {
         fn contains_bits(&self, bits: u64) -> bool {
             self.entities.contains(&bits)
         }
+    }
+
+    #[test]
+    fn snapshot_component_reads_are_owned_and_digest_bound() {
+        let snapshot =
+            SnapshotWorldProxy::with_components([7], [(7, "Transform".to_owned(), vec![1, 2, 3])])
+                .unwrap();
+        assert_eq!(
+            snapshot.component_bytes(7, "Transform"),
+            Some(vec![1, 2, 3])
+        );
+        assert_eq!(snapshot.component_bytes(7, "Velocity"), None);
+        let changed =
+            SnapshotWorldProxy::with_components([7], [(7, "Transform".to_owned(), vec![1, 2, 4])])
+                .unwrap();
+        assert_ne!(snapshot.digest(), changed.digest());
+    }
+
+    #[test]
+    fn snapshot_rejects_component_for_unknown_entity() {
+        assert!(matches!(
+            SnapshotWorldProxy::with_components(
+                [7],
+                [(8, "Transform".to_owned(), vec![1])],
+            ),
+            Err(VsError::Validate(message)) if message.contains("component snapshot")
+        ));
     }
 
     #[test]
