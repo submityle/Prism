@@ -79,10 +79,12 @@ impl MigrationRegistry {
     pub fn migrate(&self, mut value: Value, from: u32, to: u32) -> VsResult<Value> {
         let plan = self.plan(from, to)?;
         for descriptor in plan {
-            let step = self
-                .steps
-                .get(&descriptor.from)
-                .expect("migration plan is registered");
+            let step = self.steps.get(&descriptor.from).ok_or_else(|| {
+                VsError::Runtime(format!(
+                    "migration plan became invalid at schema {}",
+                    descriptor.from
+                ))
+            })?;
             value = (step.transform)(value)?;
         }
         Ok(value)
