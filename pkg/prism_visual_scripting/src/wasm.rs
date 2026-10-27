@@ -73,8 +73,6 @@ pub trait WasmHost: Send + Sync + 'static {
     fn call(&self, request: WasmCall) -> Result<WasmCallResult, WasmHostError>;
 }
 
-use std::sync::atomic::{AtomicU64, Ordering};
-
 /// Adapter that turns a typed `WasmHost` into a `ScriptBackend`.
 ///
 /// The compiled instance is retained as content-addressed bytes; actual
@@ -83,7 +81,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub struct WasmScriptBackend {
     host: Arc<dyn WasmHost>,
     component: String,
-    sequence: AtomicU64,
 }
 
 impl WasmScriptBackend {
@@ -91,7 +88,6 @@ impl WasmScriptBackend {
         Self {
             host,
             component: component.into(),
-            sequence: AtomicU64::new(1),
         }
     }
 }
@@ -116,25 +112,23 @@ impl ScriptBackend for WasmScriptBackend {
     fn call(
         &self,
         instance: &Self::Instance,
-        operation: &str,
-        args: &[Value],
+        request: &crate::ScriptCall,
         budget: &mut CallBudget,
     ) -> VsResult<BackendCallResult> {
         budget.charge(1)?;
         if instance.is_empty() {
             return Err(VsError::Runtime("WASM script instance is empty".into()));
         }
-        let id = self.sequence.fetch_add(1, Ordering::Relaxed).to_string();
         let result = self
             .host
             .call(WasmCall {
                 component: self.component.clone(),
-                operation: operation.to_string(),
-                request_id: id.clone(),
-                execution_id: format!("script:{id}"),
-                attempt: 0,
-                inputs: args.to_vec(),
-                config: BTreeMap::new(),
+                operation: request.operation.clone(),
+                request_id: request.request_id.clone(),
+                execution_id: request.execution_id.clone(),
+                attempt: request.attempt,
+                inputs: request.args.clone(),
+                config: request.config.clone(),
             })
             .map_err(|error| VsError::Runtime(error.message))?;
         Ok(BackendCallResult {

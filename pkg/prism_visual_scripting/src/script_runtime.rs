@@ -300,8 +300,7 @@ pub trait ScriptBackend: Send + Sync {
     fn call(
         &self,
         instance: &Self::Instance,
-        operation: &str,
-        args: &[Value],
+        request: &ScriptCall,
         budget: &mut CallBudget,
     ) -> VsResult<BackendCallResult>;
 }
@@ -310,7 +309,11 @@ pub trait ScriptBackend: Send + Sync {
 pub struct ScriptCall {
     pub module: String,
     pub operation: String,
+    pub request_id: String,
+    pub execution_id: String,
+    pub attempt: u16,
     pub args: Vec<Value>,
+    pub config: BTreeMap<String, Value>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -379,6 +382,11 @@ impl ScriptHost {
         CallBudget::new(self.policy.budget.clone())
     }
     pub fn call(&self, request: ScriptCall) -> VsResult<ScriptCallResult> {
+        if request.request_id.is_empty() || request.execution_id.is_empty() {
+            return Err(VsError::Validate(
+                "script request and execution identities are required".into(),
+            ));
+        }
         if !valid_identifier(&request.operation) {
             return Err(VsError::Validate(
                 "script operation must be non-empty and space-free".into(),
@@ -410,7 +418,7 @@ impl ScriptHost {
             return Err(VsError::Runtime("script instance digest is stale".into()));
         }
         let mut budget = self.begin_call();
-        let result = backend.call(&instance.0, &request.operation, &request.args, &mut budget)?;
+        let result = backend.call(&instance.0, &request, &mut budget)?;
         budget.check_deadline()?;
         Ok(ScriptCallResult {
             module_digest: module.digest,
@@ -483,16 +491,15 @@ mod tests {
         fn call(
             &self,
             instance: &Self::Instance,
-            operation: &str,
-            args: &[Value],
+            request: &ScriptCall,
             budget: &mut CallBudget,
         ) -> VsResult<BackendCallResult> {
             budget.charge(1)?;
-            if instance.is_empty() || operation != "echo" {
+            if instance.is_empty() || request.operation != "echo" {
                 return Err(VsError::Runtime("invalid echo invocation".into()));
             }
             Ok(BackendCallResult {
-                outputs: args.to_vec(),
+                outputs: request.args.clone(),
                 next: ExecNext::End,
                 chunks: Vec::new(),
             })
@@ -521,7 +528,11 @@ mod tests {
             .call(ScriptCall {
                 module: "echo".into(),
                 operation: "echo".into(),
+                request_id: "req-1".into(),
+                execution_id: "exec-1".into(),
+                attempt: 0,
                 args: vec![Value::I64(7)],
+                config: BTreeMap::new(),
             })
             .unwrap();
         assert_eq!(result.module_digest, digest);
