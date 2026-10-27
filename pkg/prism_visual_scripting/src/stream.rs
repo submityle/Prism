@@ -30,23 +30,32 @@ impl WindowSpec {
 
     fn starts_for(&self, event_time_ms: u64) -> Vec<u64> {
         match self {
-            Self::Tumbling { size_ms } => vec![(event_time_ms / size_ms) * size_ms],
+            Self::Tumbling { size_ms } => {
+                let start = (event_time_ms / size_ms) * size_ms;
+                start
+                    .checked_add(*size_ms)
+                    .map_or_else(Vec::new, |_| vec![start])
+            }
             Self::Sliding { size_ms, step_ms } => {
                 let latest = (event_time_ms / step_ms) * step_ms;
                 let earliest = event_time_ms.saturating_sub(size_ms - 1);
                 let first = (earliest / step_ms) * step_ms;
                 (first..=latest)
                     .step_by(*step_ms as usize)
-                    .filter(|start| event_time_ms < start.saturating_add(*size_ms))
+                    .filter(|start| {
+                        start
+                            .checked_add(*size_ms)
+                            .is_some_and(|end| event_time_ms < end)
+                    })
                     .collect()
             }
         }
     }
 
-    fn end(&self, start: u64) -> u64 {
+    fn end(&self, start: u64) -> Option<u64> {
         match self {
             Self::Tumbling { size_ms } | Self::Sliding { size_ms, .. } => {
-                start.saturating_add(*size_ms)
+                start.checked_add(*size_ms)
             }
         }
     }
@@ -95,6 +104,7 @@ pub enum LateEvent {
 pub enum StreamIngestError {
     Late { reason: LateEvent },
     Backpressure { capacity: usize, required: usize },
+    Arithmetic { message: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -156,6 +166,12 @@ impl WindowedStream {
         }
         let current_watermark = self.watermark_ms.unwrap_or(0);
         let starts = self.spec.starts_for(event.event_time_ms);
+        if starts.is_empty() || starts.iter().any(|start| self.spec.end(*start).is_none()) {
+            self.seen_event_ids.remove(&event.event_id);
+            return Err(StreamIngestError::Arithmetic {
+                message: "event window end time exhausted".into(),
+            });
+        }
         if starts
             .iter()
             .any(|start| self.closed_windows.contains(start))
@@ -226,7 +242,7 @@ impl WindowedStream {
             .windows
             .keys()
             .copied()
-            .filter(|start| self.spec.end(*start) <= watermark_ms)
+            .filter(|start| self.spec.end(*start).is_some_and(|end| end <= watermark_ms))
             .collect();
         closable
             .into_iter()
@@ -236,7 +252,7 @@ impl WindowedStream {
                     self.closed_windows.insert(start);
                     ClosedWindow {
                         start_ms: start,
-                        end_ms: self.spec.end(start),
+                        end_ms: self.spec.end(start).expect("validated window end"),
                         events,
                     }
                 })

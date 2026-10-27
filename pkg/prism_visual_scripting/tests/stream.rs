@@ -9,6 +9,24 @@ fn event(id: &str, time: u64, value: i64) -> StreamEvent {
 }
 
 #[test]
+fn window_end_overflow_is_rejected_without_mutating_stream() {
+    let mut stream = WindowedStream::new(
+        WindowSpec::Tumbling { size_ms: 2 },
+        0,
+        4,
+        BackpressurePolicy::Reject,
+    )
+    .unwrap();
+    let error = stream.ingest(event("overflow", u64::MAX, 1)).unwrap_err();
+    assert!(matches!(
+        error,
+        StreamIngestError::Arithmetic { message } if message.contains("end time exhausted")
+    ));
+    assert_eq!(stream.buffered_events(), 0);
+    assert!(stream.seen_event_ids.is_empty());
+}
+
+#[test]
 fn tumbling_window_orders_out_of_order_events_and_closes_by_watermark() {
     let mut stream = WindowedStream::new(
         WindowSpec::Tumbling { size_ms: 100 },
