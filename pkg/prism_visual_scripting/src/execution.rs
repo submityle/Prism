@@ -210,7 +210,10 @@ pub struct InMemoryEventLog {
 
 impl InMemoryEventLog {
     pub fn events(&self) -> Vec<ExecutionEvent> {
-        self.events.lock().expect("event log poisoned").clone()
+        match self.events.lock() {
+            Ok(events) => events.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
     }
 
     pub fn events_since(&self, sequence: u64) -> Vec<ExecutionEvent> {
