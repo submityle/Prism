@@ -97,7 +97,7 @@ pub use upgrade::{ShadowExecutor, UpgradeCoordinator, UpgradeRecord, UpgradeStat
 pub use value::{Value, ValueType};
 pub use vm::{Suspension, SuspensionResolution, Vm, VmRunStatus, VmState};
 #[cfg(feature = "wasm")]
-pub use wasm::{WasmEffectExecutor, WasmHost};
+pub use wasm::{WasmCall, WasmCallResult, WasmEffectExecutor, WasmHost, WasmHostError};
 pub use workflow::{
     WorkflowCompletion, WorkflowProgram, WorkflowRunStatus, WorkflowVm, WorkflowVmState,
 };

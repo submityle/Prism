@@ -1,0 +1,37 @@
+[package]
+name = "prism_wasm"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+wasmtime = "37.0.2"
+wasmtime-wasi = "37.0.2"
+anyhow = "1"
+parking_lot = "0.12"
+sha2 = "0.10"
+hmac = "0.12"
+hex = "0.4"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
+
+[dev-dependencies]
+wat = "1"
+
+[[example]]
+name = "demo"
+path = "examples/demo.rs"
+
+[[example]]
+name = "multi"
+path = "examples/multi.rs"
+
+[[example]]
+name = "concurrent"
+path = "examples/concurrent.rs"
+
+[[example]]
+name = "multi_sandbox"
+path = "examples/multi_sandbox.rs"
+
+[[example]]
+name = "single_tenant_multi_sandbox"
+path = "examples/single_tenant_multi_sandbox.rs"

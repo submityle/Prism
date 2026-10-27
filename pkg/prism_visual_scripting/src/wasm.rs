@@ -1,57 +1,77 @@
-//! Optional WASM effect adapter boundary.
+//! Typed WASM effect boundary for the visual-scripting runtime.
 //!
-//! The visual-scripting core does not own a WASM runtime. Hosts implement
-//! [`WasmHost`] around their chosen sandbox and retain control of fuel,
-//! deadlines, capabilities, and module admission.
+//! `prism_visual_scripting` owns the Effect contract; `prism_wasm` owns the
+//! Component sandbox. This module deliberately does not expose a JSON ABI:
+//! hosts receive typed Rust values and decide how to encode them for a
+//! Component call. JSON remains an application-level adapter outside the
+//! runtime hot path.
 
 use crate::effect::{EffectError, EffectExecutor, EffectRequest, EffectResponse};
 use crate::{ExecNext, Value};
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
-/// Host-owned JSON Component ABI implementation.
+/// A typed request handed to a host-owned `prism_wasm` Component sandbox.
+#[derive(Clone, Debug)]
+pub struct WasmCall {
+    pub component: String,
+    pub operation: String,
+    pub request_id: String,
+    pub execution_id: String,
+    pub attempt: u16,
+    pub inputs: Vec<Value>,
+    pub config: BTreeMap<String, Value>,
+}
+
+/// A typed Component result before it is committed as a visual-scripting Effect.
+#[derive(Clone, Debug)]
+pub struct WasmCallResult {
+    pub outputs: Vec<Value>,
+    pub next: ExecNext,
+    pub chunks: Vec<Value>,
+}
+
+/// Host failure with an explicit retry contract.
+#[derive(Clone, Debug)]
+pub struct WasmHostError {
+    pub message: String,
+    pub retryable: bool,
+}
+
+impl WasmHostError {
+    pub fn permanent(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            retryable: false,
+        }
+    }
+
+    pub fn retryable(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            retryable: true,
+        }
+    }
+}
+
+/// Host-owned typed Component ABI.
+///
+/// Implementations normally wrap `prism_wasm::Sandbox::call_typed` or its
+/// batch form. The trait does not prescribe a wire representation, allowing a
+/// POD Component ABI without forcing JSON allocation into the Effect path.
 pub trait WasmHost: Send + Sync + 'static {
-    /// Invoke one component operation and return its JSON response payload.
-    fn call_json(&self, component: &str, operation: &str, input: String) -> Result<String, String>;
+    fn call(&self, request: WasmCall) -> Result<WasmCallResult, WasmHostError>;
 }
 
-#[derive(Clone, Debug, Serialize)]
-#[serde(deny_unknown_fields)]
-struct WasmEffectInput {
-    request_id: String,
-    execution_id: String,
-    attempt: u16,
-    inputs: Vec<Value>,
-    config: std::collections::BTreeMap<String, Value>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct WasmEffectOutput {
-    outputs: Vec<Value>,
-    next: ExecNext,
-    #[serde(default)]
-    chunks: Vec<Value>,
-    #[serde(default)]
-    error: Option<WasmEffectError>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct WasmEffectError {
-    message: String,
-    retryable: bool,
-}
-
-/// Effect executor backed by a host-provided WASM/component sandbox.
+/// Effect executor backed by a host-provided typed WASM Component sandbox.
 pub struct WasmEffectExecutor {
     host: Arc<dyn WasmHost>,
     component: String,
 }
 
 impl WasmEffectExecutor {
-    /// Construct an executor for a registered component name.
+    /// Construct an executor for a registered Component name.
     pub fn new(host: Arc<dyn WasmHost>, component: impl Into<String>) -> Self {
         Self {
             host,
@@ -59,7 +79,6 @@ impl WasmEffectExecutor {
         }
     }
 
-    /// Return the registered component name.
     pub fn component(&self) -> &str {
         &self.component
     }
@@ -68,37 +87,27 @@ impl WasmEffectExecutor {
 #[async_trait]
 impl EffectExecutor for WasmEffectExecutor {
     async fn execute(&self, request: EffectRequest) -> Result<EffectResponse, EffectError> {
-        let operation = request.spec.operation.clone();
-        let input = serde_json::to_string(&WasmEffectInput {
-            request_id: request.id.clone(),
-            execution_id: request.execution_id.clone(),
-            attempt: request.attempt,
-            inputs: request.inputs.clone(),
-            config: request.config.clone(),
-        })
-        .map_err(|error| EffectError::permanent(format!("encode wasm effect input: {error}")))?;
         let host = Arc::clone(&self.host);
-        let component = self.component.clone();
-        let result =
-            tokio::task::spawn_blocking(move || host.call_json(&component, &operation, input))
-                .await
-                .map_err(|error| {
-                    EffectError::retryable(format!("wasm effect worker failed: {error}"))
-                })?
-                .map_err(|error| EffectError::retryable(format!("wasm effect failed: {error}")))?;
-        let response = serde_json::from_str::<WasmEffectOutput>(&result).map_err(|error| {
-            EffectError::permanent(format!("decode wasm effect output: {error}"))
-        })?;
-        if let Some(error) = response.error {
-            return Err(EffectError {
+        let call = WasmCall {
+            component: self.component.clone(),
+            operation: request.spec.operation.clone(),
+            request_id: request.id,
+            execution_id: request.execution_id,
+            attempt: request.attempt,
+            inputs: request.inputs,
+            config: request.config,
+        };
+        let result = tokio::task::spawn_blocking(move || host.call(call))
+            .await
+            .map_err(|error| EffectError::retryable(format!("wasm effect worker failed: {error}")))?
+            .map_err(|error| EffectError {
                 message: error.message,
                 retryable: error.retryable,
-            });
-        }
+            })?;
         Ok(EffectResponse {
-            outputs: response.outputs,
-            next: response.next,
-            chunks: response.chunks,
+            outputs: result.outputs,
+            next: result.next,
+            chunks: result.chunks,
         })
     }
 }

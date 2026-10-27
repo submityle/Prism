@@ -1,5 +1,7 @@
 # Prism Visual Scripting 顶级次世代 AAA 级可视化蓝图系统设计方案
 
+> 当前统一语义与执行升级见 [`prism_rcc_design_v2_zh.md`](prism_rcc_design_v2_zh.md)：本文保留 Graph/三层 IR/持久化工作流/编辑器产品边界，RCC v2 负责动态依赖、Effect 偏序、增量求值、跨 Tier 等价和状态连续性。
+
 > 面向 Prism（脱离 Bevy 的独立引擎）的 **图编排 + 扁平 IR + 多后端执行器 + 持久化执行 + 可热替换 + LLM 可作者化** 的可视化脚本（Blueprint 对标）内核设计。它是 `prism_script_design_zh.md` 中 `backend-graph` 后端的正式落地：**同一张图既能编译成贴着原生 System 调用的扁平指令链在热路径边缘低开销运行，也能把子图折叠成 WASM Component / 原生 dylib，还能承载事件驱动的持久化长流程（存档即恢复、崩溃可续、轨迹可重放）**。目标：**连线即逻辑、改图即见效、热点不被解释拖垮、长流程不丢状态、机器（LLM）也能可靠生成与自修复图**。
 >
 > 借形态不抄码。借鉴：

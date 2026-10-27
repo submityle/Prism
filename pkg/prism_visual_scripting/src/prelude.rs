@@ -64,7 +64,7 @@ pub use crate::upgrade::{ShadowExecutor, UpgradeCoordinator, UpgradeRecord, Upgr
 pub use crate::value::{Value, ValueType};
 pub use crate::vm::{Suspension, SuspensionResolution, Vm, VmRunStatus, VmState};
 #[cfg(feature = "wasm")]
-pub use crate::wasm::{WasmEffectExecutor, WasmHost};
+pub use crate::wasm::{WasmCall, WasmCallResult, WasmEffectExecutor, WasmHost, WasmHostError};
 pub use crate::workflow::{
     WorkflowCompletion, WorkflowProgram, WorkflowRunStatus, WorkflowVm, WorkflowVmState,
 };

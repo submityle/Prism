@@ -1,5 +1,7 @@
 # Prism Script 顶级次世代 AAA 级热更新脚本系统设计方案
 
+> 当前统一语义升级见 [`prism_rcc_design_v2_zh.md`](prism_rcc_design_v2_zh.md)：脚本由命令序列升级为 Reactive Causal Core（RCC）因果程序；本文保留 WASM 运行时边界与平台执行矩阵。
+
 > 面向 Prism（脱离 Bevy 后的独立引擎）的 **单载体、可热更新、可沙箱、可确定性回放** 脚本运行时内核设计。它不是「再造一门语言」，也不是「并列四种后端」，而是把「运行时可编程性」收敛为一条清晰的主干：**WASM 组件作为唯一的运行时热更脚本载体 ＋ 反射驱动的宿主 API 绑定层 ＋ 内容寻址热替换 ＋ 状态迁移 ＋ 灰度回滚 ＋ 预算化沙箱调度**。目标：**改脚本不重启、崩脚本不崩引擎、热路径不被脚本拖垮、改完即见效**。
 >
 > **单载体立场（本文的核心收敛）**：运行时热更的脚本代码**只有 WASM 一种载体**。可视化图脚本是另一层作者形态，**完整归属 `prism_visual_scripting_design_zh.md`**，本文只在绑定层与之共享 host API，不重写它；第一方原生代码的开发期热重载是**引擎机制**，归 `prism_app_design_zh.md` §24.2，**不是脚本载体**。不再保留「Native / Graph / WASM / Rhai 四类载体菜单」，也**不含 Rhai 等嵌入式解释语言**。
@@ -7,7 +9,7 @@
 > 借形态不抄码。借鉴：
 > - **可下发字节码 + 原生热点**：Unreal **Blueprint**（字节码跨平台解释、随 pak 下发、可热改）＋ nativized/C++（随包编译、不热更）——本文的 WASM 解释 ≈ Blueprint 字节码，AOT/随包原生 ≈ nativized
 > - **能力安全脚本**：UEFN **Verse**（可热更新、能力安全、强类型）、Roblox **Luau**（沙箱化 + 渐进类型）、Garry's Mod / WoW Lua modding（能力白名单）
-> - **WASM 作为可信边界 ABI**：**Fastly Compute / Extism**（WASM 插件 ABI）、wasmtime **Component Model + WASI p2**（typed import/export、内容寻址 + `InstancePre` 缓存 + 原子指针热插拔，本仓 `uwu_wasm` 为后端参考实现）
+> - **WASM 作为可信边界 ABI**：**Fastly Compute / Extism**（WASM 插件 ABI）、wasmtime **Component Model + WASI p2**（typed import/export、内容寻址 + `InstancePre` 缓存 + 原子指针热插拔，本仓 `prism_wasm` 为后端参考实现）
 > - **托管运行时热重载**：Unity C# **Domain Reload / ScriptableObject 热重载**、**Erlang/OTP 热代码加载**（双版本并存 + `code_change` 回调迁移状态）
 > - **可下发内容包**：Unreal **Game Feature Plugin**（code + content 可插拔单元）/ `.pak` 挂载、UEFN **Verse 包**
 > - **AOT 预编译**：wasmtime `Engine::precompile_module` / `Component::serialize` → `.cwasm`（cook 期预编译，跳过运行期 Cranelift，冷启动快）
@@ -18,7 +20,7 @@
 - 版本: v0.2（设计阶段，未进入编码；相对 v0.1 收敛为单一 WASM 载体）
 - 适用引擎: Prism（后 Bevy 时代，独立运行时）
 - 关键依赖（均为 `pkg/` 下的 prism 原生 crate）: `prism_reflect`（函数反射 §12 / 路径访问 / `schema` 版本化迁移 / 脚本桥 §24.6——**宿主 API 绑定与状态迁移的唯一真相层**）、`prism_ecs`（Commands/ECB、exclusive system `&mut World`、observer/reaction、`world::snapshot` 回滚底座）、`prism_tasks`（work-stealing + fiber 作业图：off-thread 编译 / 批量脚本并行 / 主线程亲和）、`prism_platform`（`vm` 虚拟内存页级底座服务 WASM 线性内存与池化、`security`/`capability` 能力模型、高精度计时）、`prism_app`（Plugin/Schedule/`cvar`/`settings`/`platform_tier`/`fixed`/`determinism`；**第一方代码热重载 §24.2**）、`prism_asset`（脚本资产加载 / **容器打包与挂载 `.ucas`+`MountTable` §13、热重载与依赖失效 §12、patch/DLC/CDN §23.4/§23.5**，脚本包分发全部复用它）、`prism_diagnostic`（`budget`/`hitch`/`profiler`/`replay`/`telemetry`）、`prism_time`（固定步 / 录制回放 / 确定性）
-- 可选后端依赖: `wasmtime` + `wasmtime-wasi`（WASM Component Model，门控 feature `backend-wasm`，参考本仓 `uwu_wasm`）；主机/iOS 认证档可选 `wasmi`（纯解释器，运行时热更兜底，feature `backend-wasm-interp`）
+- 可选后端依赖: `wasmtime` + `wasmtime-wasi`（WASM Component Model，门控 feature `backend-wasm`，参考本仓 `prism_wasm`）；主机/iOS 认证档可选 `wasmi`（纯解释器，运行时热更兜底，feature `backend-wasm-interp`）
 - 层级定位: Gameplay 文档 §18「可编程性：脚本与可视化蓝图」中**脚本运行时**部分的正式落地；架在 `prism_reflect`（类型真相层）与 `prism_ecs`（世界）之上，**不进内核热路径**
 - 相关文档: `prism_visual_scripting_design_zh.md`（**图脚本的全部内容——图模型 / 三层 IR / 节点执行 / 图编辑器**，本文不重写，仅共享绑定层）、`prism_app_design_zh.md`（§24.2 第一方代码/模块热重载、`platform_tier`、确定性）、`prism_asset_design_zh.md`（§12 热重载与依赖失效、§13 打包容器 `.ucas`/`MountTable`、§23.4/§23.5 CDN/patch/DLC）、`prism_reflect_design_zh.md`（§12 函数反射 / §24.6 脚本编辑器属性桥 / schema 版本化）、`prism_ecs_design_zh.md`（Commands / exclusive system / snapshot）、`prism_tasks_design_zh.md`（并行 / fiber / 主线程亲和）、`prism_platform_design_zh.md`（vm / security / capability）、`prism_diagnostic_design_zh.md`（预算 / hitch / profiler / 回放）、`prism_gameplay_design_zh.md`（§13 数据驱动、§26 Game Features 运行时插拔）、`prism_game_creator_design_zh.md`（§24 迭代/PIE、§26 内容包、`prism_gc_ugc` UGC/Mod 消费者）、`prism_network_design_zh.md` / `prism_anticheat_design_zh.md`（确定性 / 回滚 / 权威校验接缝）
 - 明确约束: 核心抽象 `no_std + alloc` 友好（绑定表 / 句柄 / 调度骨架）；WASM 执行器需 `std`；`backend-wasm` / `backend-wasm-interp` / `hot-reload` / `determinism` / `sandbox` / `trace` 均为 feature；默认构建**零脚本税**（未启用后端时编译期移除）
@@ -55,7 +57,7 @@
 ## 1. 设计哲学
 
 1. **可编程性是一层绑定，不是一门语言；运行时热更只有一个载体。** 真相在 `prism_reflect`：类型、函数、路径、schema 版本都从反射来。运行时热更脚本统一走 **WASM 组件**——跨语言、强沙箱、可热替换、可下发。不再并列「原生 / 图 / WASM / 解释器」四后端：图脚本是**另一层作者形态**（§4，归 VS 文档），原生代码热重载是**引擎开发期机制**（§4，归 app §24.2）。
-2. **热更新是一等公民，而非事后补丁。** 从第一天就按「双版本并存 + 原子指针翻转 + 旧调用零中断 + 状态迁移回调 + 灰度/回滚」设计（借 Erlang/OTP 与 `uwu_wasm` 热插拔）。
+2. **热更新是一等公民，而非事后补丁。** 从第一天就按「双版本并存 + 原子指针翻转 + 旧调用零中断 + 状态迁移回调 + 灰度/回滚」设计（借 Erlang/OTP 与 `prism_wasm` 热插拔）。
 3. **不重造已有的轮子，只做脚本层增量。** 容器打包、挂载、CDN/patch、资产热重载与依赖失效、第一方代码热重载、Game Feature 运行时插拔——**全在兄弟文档已设计**（§2 清单）。本文只做它们没覆盖的脚本层：**WASM 执行底座 + 反射绑定层 + 沙箱门控 + code chunk 交接 + 脚本层确定性/预算调度接缝**。
 4. **脚本不碰内核热路径。** 分层铁律：脚本只调用 Layer 3/4 的稳定 API（gameplay / 服务 / 数据），内层仿真循环（ECS 存储、物理 solver、渲染 RG）永远走原生字段，反射与脚本边界不下探（与 `prism_reflect` §「边界使用原则」一致）。
 5. **崩脚本不崩引擎。** 每次脚本调用是一个「微沙箱边界」：资源上限（燃料 / 时限 / 内存页）、trap 捕获、超预算熔断、坏版本自愈回退。脚本错误降级为「这一帧这个脚本不生效 + 诊断」，不是进程崩溃。
@@ -82,12 +84,12 @@
 | 回滚底座 / 快照 / Commands / 并行 ECB | `prism_ecs` | §7 世界访问与回滚相位复用 |
 | 并行 / fiber / 主线程亲和 / 帧预算 | `prism_tasks` | §13 调度完全架在其上，不自建线程池 |
 | 预算 / hitch / profiler / 回放 / 时间旅行 | `prism_diagnostic` | §16 脚本诊断复用 |
-| WASM 后端参考实现（wasmtime CM + 内容寻址 + 热插拔） | 独立仓 `uwu_wasm` | §8 `backend-wasm` 的直接蓝本 |
+| WASM 后端参考实现（wasmtime CM + 内容寻址 + 热插拔） | 独立仓 `prism_wasm` | §8 `backend-wasm` 的直接蓝本 |
 
 ### 2.2 本文真正独占的增量（填补上述都没有的脚本层）
 Gameplay §18 只给了「Rust 一等公民 / 可选图脚本 / 可选 WASM」的三行方针，**没有**成体系的脚本运行时。以下**没有任何兄弟文档覆盖**，是本文独占并深化的：
 
-1. **WASM 执行底座**（§8）：`compile → instantiate_pre → call` 全链路、`InstancePre`/pooling allocator、fuel/deadline/内存页预算、AOT 预编译——借 `uwu_wasm` 并对其默认配置做热路径调优。
+1. **WASM 执行底座**（§8）：`compile → instantiate_pre → call` 全链路、`InstancePre`/pooling allocator、fuel/deadline/内存页预算、AOT 预编译——借 `prism_wasm` 并对其默认配置做热路径调优。
 2. **反射驱动的宿主 API 绑定层**（§6）：`#[script_api]` 派生宏 → `BindingRegistry`，建于 `prism_reflect` derive 之上。reflect 本身没写这层，这是脚本独有；**图脚本（VS 文档）也消费这同一张绑定表**。
 3. **WASM 沙箱能力门控**（§12）：Trusted / Sandboxed / Fortified 三档随签名信任根映射。
 4. **code chunk 交接协议**（§20）：字节 → 验签 → 实例化 → 注册进 `ScriptHost`，与 asset loader 协议同构但代码专属。
@@ -191,7 +193,7 @@ pub trait ScriptBackend: Send + Sync {
 }
 ```
 
-- **`Interned name` vs `digest`**：热替换 ≡ 把 `name → digest` 的指针翻到新版本；旧 `Instance` 被在途调用持有，自然延命（借 `uwu_wasm` 原子指针心智）。
+- **`Interned name` vs `digest`**：热替换 ≡ 把 `name → digest` 的指针翻到新版本；旧 `Instance` 被在途调用持有，自然延命（借 `prism_wasm` 原子指针心智）。
 - **`Handle` 零拷贝句柄**：脚本持有的实体/资产/资源都是不透明 `Handle`（generational id），不是裸指针——安全、可校验、可审计。脚本永远拿不到宿主裸内存。
 - **为什么留 `ScriptBackend` trait 而非写死 WASM**：唯一目的是让「同平台 JIT 实现」与「主机/iOS 解释器实现」共用上层内核（§21），**不是**为了未来再塞回四后端。
 
@@ -247,7 +249,7 @@ pub struct WorldProxy<'w> {
 
 ## 8. WASM 执行底座：编译 / 实例化 / 调用（本文独占深化）
 
-这是 reflect/asset/app 都没有、脚本层独占的部分。直接以 `uwu_wasm`（wasmtime 37 + Component Model + WASI p2）为蓝本，并对其默认配置做热路径调优。
+这是 reflect/asset/app 都没有、脚本层独占的部分。直接以 `prism_wasm`（wasmtime 37 + Component Model + WASI p2）为蓝本，并对其默认配置做热路径调优。
 
 ### 8.1 全链路
 ```
@@ -261,16 +263,16 @@ compile：
    └─ AOT 路径（cook 期已 precompile）：Component::deserialize(.cwasm)（跳过 Cranelift）
    │
    ▼
-InstancePre（每沙箱/每策略缓存，继承 uwu_wasm 的 InstancePre 缓存 + OnceCell 去重）
+InstancePre（每沙箱/每策略缓存，继承 prism_wasm 的 InstancePre 缓存 + OnceCell 去重）
    │
    ▼
 instantiate_pre + call（热路径只做这两步）
 ```
 
-### 8.2 对 `uwu_wasm` 默认配置的热路径调优
-`uwu_wasm` 默认有 4 个热路径固定开销；`backend-wasm` 落地时**默认关闭/旁路**，按需开启：
+### 8.2 对 `prism_wasm` 默认配置的热路径调优
+`prism_wasm` 默认有 4 个热路径固定开销；`backend-wasm` 落地时**默认关闭/旁路**，按需开启：
 
-| 开销项 | `uwu_wasm` 默认 | Prism `backend-wasm` 策略 |
+| 开销项 | `prism_wasm` 默认 | Prism `backend-wasm` 策略 |
 |---|---|---|
 | 每调用新建 `Store` + instantiate | 恒定付出 | **开启 pooling allocator**（`InstanceAllocationStrategy::Pooling`，复用线性内存映射） |
 | 无 pooling allocator | on-demand mmap/munmap | **预留实例池**（走 `prism_platform::vm` 页级 reserve/commit），按 `platform_tier` 配池大小 |
@@ -289,14 +291,14 @@ instantiate_pre + call（热路径只做这两步）
 
 ### 8.4 其他底座要点
 - **零拷贝 ABI**：POD 走线性内存直读（§6），避免逐字段 lower/lift。
-- **batch 调用**：对「同一脚本、多实体」用 `call_many`，把 digest 查表/锁/策略常量摊薄到整批（继承 `uwu_wasm::call_typed_many`），一个 `spawn_blocking` 跑一批。
+- **batch 调用**：对「同一脚本、多实体」用 `call_many`，把 digest 查表/锁/策略常量摊薄到整批（继承 `prism_wasm::call_typed_many`），一个 `spawn_blocking` 跑一批。
 - **编译在 off-thread**：编译/反序列化走 `prism_tasks` 的 `spawn_blocking` 车道，不占帧 worker。
 
 ---
 
 ## 9. 热更新机制：内容寻址 + 原子替换 + 零中断（复用 app/asset + AOT 缓存）
 
-脚本热更内核（借 `uwu_wasm::HotSwap` + Erlang/OTP 双版本并存）。**源变更监视、容器叠挂、分发全部复用 asset**（§12/§13/§23），本文只做「字节就绪之后」的编译 + 替换 + 迁移：
+脚本热更内核（借 `prism_wasm::HotSwap` + Erlang/OTP 双版本并存）。**源变更监视、容器叠挂、分发全部复用 asset**（§12/§13/§23），本文只做「字节就绪之后」的编译 + 替换 + 迁移：
 
 ```
 源变更 (asset mtime §12 / 编辑器保存 / asset 高优先级容器叠挂下发 §23.5)
@@ -324,10 +326,10 @@ off-thread 编译 / .cwasm 反序列化 (prism_tasks spawn_blocking)   ← 不�
 ```
 
 要点：
-- **内容寻址去重**：相同字节只编译一次（跨模块/跨租户），digest 既是缓存键也是审计 ID（借 `uwu_wasm`）。
+- **内容寻址去重**：相同字节只编译一次（跨模块/跨租户），digest 既是缓存键也是审计 ID（借 `prism_wasm`）。
 - **编译在 off-thread**：主线程只做「翻指针」这一个原子操作，热替换对帧的影响 ≈ 一次原子写（目标 < 一帧不可感知）。
 - **编译失败安全**：新版本编译/校验失败 → 保留当前版本，旧调用完全不受影响，错误进诊断面板。
-- **灰度 / 影子**：金丝雀按流量权重或哈希分发（借 `uwu_wasm::CanaryRouter`）；影子模式让新旧版本双跑、比对输出，验证热更正确性而不影响玩家。
+- **灰度 / 影子**：金丝雀按流量权重或哈希分发（借 `prism_wasm::CanaryRouter`）；影子模式让新旧版本双跑、比对输出，验证热更正确性而不影响玩家。
 - **自愈回滚**：错误率/超预算率超阈值自动 `pin_version` 回退（借 `SelfHealing`），并通知作者。
 - **AOT 缓存段**：命中 `.cwasm`（§8.3）时「编译」退化为反序列化，PC/Android 热替换更快；主机/iOS 的 `.cwasm` 不走运行时下发（§21）。
 - **第一方原生码热重载不在此**：改引擎/玩法 crate 的热重载是 `prism_app` §24.2 的 dylib 机制（卸旧符号→载新→重接 Schedule、state 外置），**与脚本热更是两条独立路径**，本文不重写。
@@ -347,7 +349,7 @@ off-thread 编译 / .cwasm 反序列化 (prism_tasks spawn_blocking)   ← 不�
 - **ECS 组件热替换**：脚本定义的运行时组件（经 reflect 动态类型）版本变更时，复用 reflect `apply`/部分 patch 做字段级迁移，不整表重建（对标 Unity 域重载后的字段保留，但更细粒度）。
 - **不可迁移的东西**：原生裸内存、文件句柄、网络连接——这些不进脚本持久 state，由宿主侧资源管理，脚本只持 `Handle`，热替换后句柄仍有效。
 
-> 这解决了「`uwu_wasm` 每次调用新建 Store、调用间无持久状态」的空白：状态持久化在**宿主侧的 reflect state 块**，而非 WASM 实例内，所以热替换与无状态执行可以共存。
+> 这解决了「`prism_wasm` 每次调用新建 Store、调用间无持久状态」的空白：状态持久化在**宿主侧的 reflect state 块**，而非 WASM 实例内，所以热替换与无状态执行可以共存。
 
 ---
 
@@ -446,7 +448,7 @@ off-thread 编译 / .cwasm 反序列化 (prism_tasks spawn_blocking)   ← 不�
 
 - **预算与 hitch 归因**：每脚本每帧耗时/燃料/分配计入 `prism_diagnostic::budget`；超预算或造成 hitch 的脚本被 `hitch` 归因点名（模块名 + digest + 入口）。
 - **Profiler 集成**：脚本调用进 `profiler` span 树，与原生系统同一张火焰图，一眼看出脚本热点。
-- **时间旅行调试**（借 `uwu_wasm` time-travel + `prism_diagnostic::replay`）：快照/倒带/差分/重放脚本执行；配合 WorldSnapshot 做「这一帧这个脚本为什么这么做」的回溯。
+- **时间旅行调试**（借 `prism_wasm` time-travel + `prism_diagnostic::replay`）：快照/倒带/差分/重放脚本执行；配合 WorldSnapshot 做「这一帧这个脚本为什么这么做」的回溯。
 - **Live 调参**（编辑器内，L5）：对所有脚本提供「不改源、调常量/参数即时生效」的 live tuning（对标 UE 控制台）。图脚本的交互式调试在 VS 文档。
 - **错误诊断**：`ScriptError` 带源码位置（source map：WASM DWARF）、调用栈、入参摘要、修复提示。编译错误直接定位到源行。
 - **热重载 HUD**：显示每个模块的当前 digest、版本、灰度状态、错误率、上次热替换时间——作者对「现在跑的是哪版」一目了然。
@@ -521,7 +523,7 @@ pkg/
 │                           #   核心 no_std+alloc 友好；WASM 后端经 feature 门控
 ├── prism_script_macros     # #[script_api] 派生宏（建于 prism_reflect derive 之上）
 ├── prism_script_bind       # L2：BindingRegistry / WorldProxy / Policy（反射驱动，图脚本共享）
-└── prism_script_wasm       # L4：WasmBackend（wasmtime Component Model + WASI p2，借 uwu_wasm）
+└── prism_script_wasm       # L4：WasmBackend（wasmtime Component Model + WASI p2，借 prism_wasm）
                             #   feature backend-wasm-interp 时内含 wasmi 解释实现（主机/iOS）
 ```
 
@@ -623,7 +625,7 @@ UE 的做法与此同构：**Blueprint 字节码到处用解释执行**（跨平
 ## 22. 路线图（M0–M5）
 
 - **M0 内核骨架**：`ScriptHost` + `BindingRegistry`（反射驱动）+ `#[script_api]` 宏 + `WorldProxy`（只读相位 + ECB）。**先接 WASM 最小闭环**（wasmtime Component Model，load/instantiate/call 跑通）。→ 可编译可测的最小闭环 + 微基准。
-- **M1 WASM 底座调优**：移植 `uwu_wasm` 的内容寻址 + `InstancePre` 缓存 + 策略；**默认开 pooling allocator、关 attestation、可信脚本旁路 fuel**（§8.2）；接 `prism_platform::vm` 实例池。
+- **M1 WASM 底座调优**：移植 `prism_wasm` 的内容寻址 + `InstancePre` 缓存 + 策略；**默认开 pooling allocator、关 attestation、可信脚本旁路 fuel**（§8.2）；接 `prism_platform::vm` 实例池。
 - **M2 热更新内核**：HotSwap（内容寻址 + off-thread 编译 + 原子指针）+ asset mtime 监视接入（§12）+ 编译失败安全 + 灰度/自愈回滚。
 - **M3 状态迁移 + AOT**：`StateMigrator`（reflect schema 版本化）+ 组件级字段迁移 + `migrate` 回调；cook 期 `.cwasm` 预编译 + 内容寻址缓存（§8.3）。
 - **M4 调度 / 性能 / 安全**：`prism_tasks` 并行车道 + 主线程亲和 + 帧预算熔断 + `call_many` + 零拷贝 ABI；能力白名单 + 资源上限 + 三档沙箱 + 确定性档。基准对齐 §11。
@@ -635,7 +637,7 @@ UE 的做法与此同构：**Blueprint 字节码到处用解释执行**（跨平
 
 **扩展点**
 - `ScriptBackend` trait：JIT 与解释器实现共用上层内核（§5）；**不用于再塞回多语言后端**。
-- `Loader` trait：File/Memory/OCI/网络下发可插拔（借 `uwu_wasm::ChainLoader`）。
+- `Loader` trait：File/Memory/OCI/网络下发可插拔（借 `prism_wasm::ChainLoader`）。
 - `Policy` / `Capability`：可定义新能力标签与资源维度。
 - `StateMigrator` 迁移链：schema 迁移规则可注册（建于 reflect）。
 
