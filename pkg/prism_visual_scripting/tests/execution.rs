@@ -20,6 +20,14 @@ fn execution_sequence_allocator_rejects_u64_exhaustion() {
     assert!(error.to_string().contains("event sequence exhausted"));
 }
 #[test]
+fn replay_verifier_rejects_oversized_execution_identity() {
+    let oversized = "x".repeat(129);
+    let mut events = vec![event(1, 1)];
+    events[0].execution_id = oversized.clone();
+    assert!(ExecutionReplay::validate(&events, &oversized).is_err());
+}
+
+#[test]
 fn replay_verifier_rejects_tampering_and_reports_divergence() {
     let expected = vec![event(1, 1), event(2, 2)];
     let report = ExecutionReplay::validate(&expected, "run-replay").unwrap();

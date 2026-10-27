@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::sync::Mutex;
 
+pub const MAX_EXECUTION_ID_BYTES: usize = 128;
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ExecutionEventKind {
@@ -75,9 +77,9 @@ pub struct ExecutionReplay;
 
 impl ExecutionReplay {
     pub fn validate(events: &[ExecutionEvent], execution_id: &str) -> VsResult<ReplayReport> {
-        if execution_id.is_empty() {
+        if execution_id.is_empty() || execution_id.len() > MAX_EXECUTION_ID_BYTES {
             return Err(crate::VsError::Validate(
-                "replay execution identity must not be empty".into(),
+                "replay execution identity must be non-empty and at most 128 bytes".into(),
             ));
         }
         for (index, event) in events.iter().enumerate() {
@@ -109,7 +111,11 @@ impl ExecutionReplay {
         Self::validate_pair(expected)?;
         Self::validate_pair(actual)?;
         if let (Some(expected_first), Some(actual_first)) = (expected.first(), actual.first()) {
-            if expected_first.execution_id.is_empty() || actual_first.execution_id.is_empty() {
+            if expected_first.execution_id.is_empty()
+                || expected_first.execution_id.len() > MAX_EXECUTION_ID_BYTES
+                || actual_first.execution_id.is_empty()
+                || actual_first.execution_id.len() > MAX_EXECUTION_ID_BYTES
+            {
                 return Err(crate::VsError::Validate(
                     "replay execution identity must not be empty".into(),
                 ));
