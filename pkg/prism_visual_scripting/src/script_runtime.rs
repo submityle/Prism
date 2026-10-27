@@ -53,6 +53,29 @@ impl BindingRegistry {
         self.bindings.contains_key(name)
     }
 
+    pub fn validate_args(&self, name: &str, args: &[Value]) -> VsResult<()> {
+        let binding = self
+            .bindings
+            .get(name)
+            .ok_or_else(|| VsError::Runtime(format!("unknown host binding: {name}")))?;
+        if binding.inputs.len() != args.len() {
+            return Err(VsError::Validate(format!(
+                "binding `{name}` expects {} arguments, received {}",
+                binding.inputs.len(),
+                args.len()
+            )));
+        }
+        for (index, (expected, actual)) in binding.inputs.iter().zip(args).enumerate() {
+            if !expected.accepts(&actual.ty()) {
+                return Err(VsError::Validate(format!(
+                    "binding `{name}` argument {index} expects {expected:?}, received {:?}",
+                    actual.ty()
+                )));
+            }
+        }
+        Ok(())
+    }
+
     pub fn authorize(&self, name: &str, policy: &ScriptPolicy) -> VsResult<()> {
         let binding = self
             .bindings
@@ -446,6 +469,8 @@ impl ScriptHost {
                 request.operation
             )));
         }
+        self.bindings
+            .validate_args(&request.operation, &request.args)?;
         let lease = self.hotswap.acquire(&request.module).ok_or_else(|| {
             VsError::Runtime(format!("script module not installed: {}", request.module))
         })?;
@@ -584,6 +609,25 @@ mod tests {
         assert!(
             matches!(error, VsError::Validate(message) if message.contains("exceeds memory budget"))
         );
+    }
+
+    #[test]
+    fn binding_argument_contract_rejects_wrong_shape() {
+        let mut registry = BindingRegistry::default();
+        registry
+            .register(Binding {
+                name: "typed".into(),
+                category: "test".into(),
+                inputs: vec![ValueType::I64],
+                output: None,
+                capabilities: BTreeSet::new(),
+                deterministic: true,
+            })
+            .unwrap();
+        let error = registry
+            .validate_args("typed", &[Value::Bool(true)])
+            .unwrap_err();
+        assert!(matches!(error, VsError::Validate(message) if message.contains("expects I64")));
     }
 
     #[test]
