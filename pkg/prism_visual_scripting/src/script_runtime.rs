@@ -393,6 +393,16 @@ impl ScriptHost {
                 "script module name must be non-empty and space-free".into(),
             ));
         }
+        let max_module_bytes = (self.policy.budget.memory_pages as usize)
+            .checked_mul(64 * 1024)
+            .ok_or_else(|| VsError::Validate("script memory budget overflow".into()))?;
+        if module.bytes.len() > max_module_bytes {
+            return Err(VsError::Validate(format!(
+                "script module exceeds memory budget: {} > {} bytes",
+                module.bytes.len(),
+                max_module_bytes
+            )));
+        }
         if let Some(backend) = &self.backend {
             let instance = backend.compile(&module, &self.bindings)?;
             self.instances
@@ -553,6 +563,18 @@ mod tests {
         let current = swaps.acquire("lease").unwrap();
         assert_eq!(current.generation, 2);
         assert!(swaps.is_current(&current));
+    }
+
+    #[test]
+    fn publish_rejects_modules_larger_than_memory_budget() {
+        let mut policy = ScriptPolicy::new(SandboxTier::Fortified);
+        policy.budget.memory_pages = 1;
+        let host = ScriptHost::new(policy, BindingRegistry::default());
+        let oversized = ScriptModule::from_bytes("large", 1, vec![0_u8; 64 * 1024 + 1]);
+        let error = host.publish(oversized).unwrap_err();
+        assert!(
+            matches!(error, VsError::Validate(message) if message.contains("exceeds memory budget"))
+        );
     }
 
     #[test]
