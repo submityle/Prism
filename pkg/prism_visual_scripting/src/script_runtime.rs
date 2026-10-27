@@ -208,13 +208,7 @@ impl ScriptModule {
     ) -> Self {
         let name = name.into();
         let bytes: Arc<[u8]> = Arc::from(bytes.into());
-        let mut hash = Sha256::new();
-        hash.update(b"prism.script.module.v1\0");
-        hash.update((name.len() as u64).to_le_bytes());
-        hash.update(name.as_bytes());
-        hash.update(schema_version.to_le_bytes());
-        hash.update(&bytes);
-        let digest: [u8; 32] = hash.finalize().into();
+        let digest = Self::compute_digest(&name, schema_version, &bytes);
         Self {
             name: name.into(),
             digest,
