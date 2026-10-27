@@ -247,6 +247,41 @@ mod tests {
         }
     }
 
+    struct RetryHost;
+
+    impl WasmHost for RetryHost {
+        fn compile_module(&self, bytes: &[u8]) -> Result<Vec<u8>, WasmHostError> {
+            Ok(bytes.to_vec())
+        }
+
+        fn call(&self, _request: WasmCall) -> Result<WasmCallResult, WasmHostError> {
+            Err(WasmHostError::retryable("temporary component outage"))
+        }
+    }
+
+    #[test]
+    fn adapter_preserves_retryable_host_failure() {
+        let backend = WasmScriptBackend::new(Arc::new(RetryHost), "combat");
+        let module = ScriptModule::from_bytes("combat", 1, b"component");
+        let instance = backend
+            .compile(&module, &BindingRegistry::default())
+            .unwrap();
+        let request = crate::ScriptCall {
+            module: "combat".into(),
+            operation: "tick".into(),
+            request_id: "req-retry".into(),
+            execution_id: "exec-retry".into(),
+            attempt: 1,
+            args: Vec::new(),
+            config: BTreeMap::new(),
+        };
+        let mut budget = CallBudget::new(crate::ResourceBudget::sandboxed());
+        let error = backend.call(&instance, &request, &mut budget).unwrap_err();
+        assert!(
+            matches!(error, VsError::RetryableRuntime(message) if message == "temporary component outage")
+        );
+    }
+
     #[test]
     fn adapter_forwards_identity_config_and_budget() {
         let host = Arc::new(RecordingHost {
