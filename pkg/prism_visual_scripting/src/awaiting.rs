@@ -73,6 +73,15 @@ impl InMemoryAwaitBroker {
         for (id, ready) in &snapshot.ready {
             validate_request(id, &ready.request)?;
         }
+        if snapshot
+            .pending
+            .keys()
+            .any(|id| snapshot.ready.contains_key(id))
+        {
+            return Err(VsError::Validate(
+                "await identity appears in both pending and ready".into(),
+            ));
+        }
         *state = snapshot;
         Ok(())
     }

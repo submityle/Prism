@@ -52,6 +52,36 @@ fn broker_matches_typed_waits_in_deterministic_order() {
 }
 
 #[test]
+fn broker_rejects_pending_ready_identity_overlap() {
+    let broker = InMemoryAwaitBroker::default();
+    broker
+        .register(request("stable", AwaitCondition::Timer { deadline_ms: 9 }))
+        .unwrap();
+    let snapshot = AwaitBrokerState {
+        pending: std::collections::BTreeMap::from([(
+            "overlap".into(),
+            request("overlap", AwaitCondition::Timer { deadline_ms: 10 }),
+        )]),
+        ready: std::collections::BTreeMap::from([(
+            "overlap".into(),
+            AwaitReady {
+                request: request("overlap", AwaitCondition::Timer { deadline_ms: 10 }),
+                resolution: SuspensionResolution {
+                    outputs: vec![Value::Bool(true)],
+                    next: ExecNext::End,
+                },
+            },
+        )]),
+    };
+    assert!(matches!(
+        broker.restore(snapshot),
+        Err(VsError::Validate(message)) if message.contains("both pending and ready")
+    ));
+    let preserved = broker.snapshot().unwrap();
+    assert!(preserved.pending.contains_key("stable"));
+    assert!(preserved.ready.is_empty());
+}
+#[test]
 fn broker_is_idempotent_and_checkpointable() {
     let broker = InMemoryAwaitBroker::default();
     let approval = request(
@@ -66,13 +96,11 @@ fn broker_is_idempotent_and_checkpointable() {
         payload: Value::I64(1),
         ..approval
     };
-    assert!(
-        broker
-            .register(changed)
-            .unwrap_err()
-            .to_string()
-            .contains("different content")
-    );
+    assert!(broker
+        .register(changed)
+        .unwrap_err()
+        .to_string()
+        .contains("different content"));
 
     let snapshot = broker.snapshot().unwrap();
     let restored = InMemoryAwaitBroker::default();
