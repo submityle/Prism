@@ -661,6 +661,6 @@ fn instantiate_rejects_out_of_bounds_ir_slots() {
         Err(error) => error,
     };
     assert!(
-        matches!(error, VsError::Validate(message) if message.contains("slot range out of bounds"))
+        matches!(error, VsError::Validate(message) if message.contains("slot index out of bounds"))
     );
 }

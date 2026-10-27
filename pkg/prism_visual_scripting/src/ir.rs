@@ -167,6 +167,22 @@ impl SlotProgram {
         let valid_range = |start: SlotId, end: SlotId| start <= end && end <= self.slots_count;
         for (block_id, block) in self.blocks.iter().enumerate() {
             for instr in &block.instrs {
+                let valid_slot = |slot: SlotId| slot < self.slots_count;
+                match instr {
+                    Instr::LoadConst { dst, .. }
+                    | Instr::LoadVar { dst, .. }
+                    | Instr::StoreVar { src: dst, .. } => {
+                        if !valid_slot(*dst) {
+                            return Err(VsError::Validate("IR slot index out of bounds".into()));
+                        }
+                    }
+                    Instr::Move { dst, src } => {
+                        if !valid_slot(*dst) || !valid_slot(*src) {
+                            return Err(VsError::Validate("IR slot index out of bounds".into()));
+                        }
+                    }
+                    _ => {}
+                }
                 let (ranges, targets): (Vec<(SlotId, SlotId)>, Vec<BlockId>) = match instr {
                     Instr::LoadConst { dst, .. } => {
                         (vec![(*dst, dst.saturating_add(1))], Vec::new())
