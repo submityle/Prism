@@ -23,7 +23,7 @@ pub use crate::durable::{
 };
 pub use crate::ecs_proxy::{
     require_snapshot_digest, require_world_proxy, SnapshotWorldProxy, WorldProxy,
-    WorldProxyContext, WorldWriteTransaction,
+    WorldProxyContext, WorldWriteOp, WorldWriteTransaction,
 };
 pub use crate::effect::{
     DurableEffectExecutor, DurableEffectState, EffectClass, EffectError, EffectExecutor,

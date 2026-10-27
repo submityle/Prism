@@ -167,7 +167,20 @@ impl WorldProxy for SnapshotWorldProxy {
     }
 }
 
-/// Copy-on-write component transaction over an immutable [`SnapshotWorldProxy`].
+/// One deterministic operation in a component write transaction.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WorldWriteOp {
+    Set {
+        entity_bits: u64,
+        component: String,
+        bytes: Vec<u8>,
+    },
+    Remove {
+        entity_bits: u64,
+        component: String,
+    },
+}
+
 ///
 /// A transaction never mutates the source snapshot. `commit` validates all
 /// limits atomically and returns a new deterministic snapshot.
@@ -177,6 +190,7 @@ pub struct WorldWriteTransaction {
     components: BTreeMap<(u64, String), Vec<u8>>,
     base_digest: [u8; 32],
     operations: usize,
+    log: Vec<WorldWriteOp>,
 }
 
 impl SnapshotWorldProxy {
@@ -188,6 +202,7 @@ impl SnapshotWorldProxy {
             components: (*self.components).clone(),
             base_digest: self.digest(),
             operations: 0,
+            log: Vec::new(),
         }
     }
 }
@@ -209,7 +224,13 @@ impl WorldWriteTransaction {
             &component,
             &bytes,
         )?;
-        self.components.insert((entity_bits, component), bytes);
+        self.components
+            .insert((entity_bits, component.clone()), bytes.clone());
+        self.log.push(WorldWriteOp::Set {
+            entity_bits,
+            component,
+            bytes,
+        });
         Ok(())
     }
 
@@ -222,10 +243,21 @@ impl WorldWriteTransaction {
         {
             return Err(VsError::Validate("invalid ECS component name".into()));
         }
-        Ok(self
+        let removed = self
             .components
             .remove(&(entity_bits, component.to_owned()))
-            .is_some())
+            .is_some();
+        self.log.push(WorldWriteOp::Remove {
+            entity_bits,
+            component: component.to_owned(),
+        });
+        Ok(removed)
+    }
+
+    /// Return the deterministic operation log accumulated by this transaction.
+    #[must_use]
+    pub fn operation_log(&self) -> &[WorldWriteOp] {
+        &self.log
     }
 
     fn charge_operation(&mut self) -> VsResult<()> {
@@ -462,6 +494,21 @@ mod tests {
             .unwrap();
         tx.set_component(7, "Velocity", br#"{"x":3}"#.to_vec())
             .unwrap();
+        assert_eq!(
+            tx.operation_log(),
+            &[
+                WorldWriteOp::Set {
+                    entity_bits: 7,
+                    component: "Transform".into(),
+                    bytes: br#"{"x":2}"#.to_vec(),
+                },
+                WorldWriteOp::Set {
+                    entity_bits: 7,
+                    component: "Velocity".into(),
+                    bytes: br#"{"x":3}"#.to_vec(),
+                },
+            ]
+        );
         assert_eq!(source.component_json(7, "Transform").unwrap()["x"], 1);
         let updated = tx.commit().unwrap();
         assert_eq!(updated.component_json(7, "Transform").unwrap()["x"], 2);
