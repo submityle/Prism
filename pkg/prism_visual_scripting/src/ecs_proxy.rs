@@ -23,6 +23,12 @@ pub trait WorldProxy: Send + Sync {
         None
     }
 
+    /// Return sorted component type names visible on one entity.
+    fn component_names(&self, entity_bits: u64) -> Vec<String> {
+        let _ = entity_bits;
+        Vec::new()
+    }
+
     /// Stable content identity when the host supplies a deterministic snapshot.
     fn snapshot_digest(&self) -> Option<[u8; 32]> {
         None
@@ -121,6 +127,13 @@ impl WorldProxy for SnapshotWorldProxy {
             .cloned()
     }
 
+    fn component_names(&self, entity_bits: u64) -> Vec<String> {
+        self.components
+            .range((entity_bits, String::new())..=(entity_bits, "\u{10ffff}".to_owned()))
+            .map(|((_, component), _)| component.clone())
+            .collect()
+    }
+
     fn snapshot_digest(&self) -> Option<[u8; 32]> {
         Some(self.digest())
     }
@@ -147,6 +160,10 @@ impl WorldProxyContext {
 
     pub fn component_bytes(&self, entity_bits: u64, component: &str) -> Option<Vec<u8>> {
         self.proxy.component_bytes(entity_bits, component)
+    }
+
+    pub fn component_names(&self, entity_bits: u64) -> Vec<String> {
+        self.proxy.component_names(entity_bits)
     }
 
     pub fn component_json(&self, entity_bits: u64, component: &str) -> VsResult<serde_json::Value> {
@@ -245,14 +262,21 @@ mod tests {
 
     #[test]
     fn snapshot_component_reads_are_owned_and_digest_bound() {
-        let snapshot =
-            SnapshotWorldProxy::with_components([7], [(7, "Transform".to_owned(), vec![1, 2, 3])])
-                .unwrap();
+        let snapshot = SnapshotWorldProxy::with_components(
+            [7],
+            [
+                (7, "Transform".to_owned(), vec![1, 2, 3]),
+                (7, "Velocity".to_owned(), vec![4]),
+            ],
+        )
+        .unwrap();
+        assert_eq!(snapshot.component_names(7), vec!["Transform", "Velocity"]);
+        assert!(snapshot.component_names(8).is_empty());
         assert_eq!(
             snapshot.component_bytes(7, "Transform"),
             Some(vec![1, 2, 3])
         );
-        assert_eq!(snapshot.component_bytes(7, "Velocity"), None);
+        assert_eq!(snapshot.component_bytes(7, "Health"), None);
         let changed =
             SnapshotWorldProxy::with_components([7], [(7, "Transform".to_owned(), vec![1, 2, 4])])
                 .unwrap();
