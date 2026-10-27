@@ -262,6 +262,8 @@ pub struct StateBlob {
 pub type MigrationFn = Arc<dyn Fn(StateBlob) -> VsResult<StateBlob> + Send + Sync>;
 
 const MAX_IDENTIFIER_BYTES: usize = 128;
+const MAX_CONFIG_ENTRIES: usize = 256;
+const MAX_ID_BYTES: usize = 128;
 
 fn valid_identifier(value: &str) -> bool {
     !value.is_empty()
@@ -499,10 +501,20 @@ impl ScriptHost {
         CallBudget::new(self.policy.budget.clone())
     }
     pub fn call(&self, request: ScriptCall) -> VsResult<ScriptCallResult> {
-        if request.request_id.is_empty() || request.execution_id.is_empty() {
+        if request.request_id.is_empty()
+            || request.execution_id.is_empty()
+            || request.request_id.len() > MAX_ID_BYTES
+            || request.execution_id.len() > MAX_ID_BYTES
+        {
             return Err(VsError::Validate(
-                "script request and execution identities are required".into(),
+                "script request and execution identities must be non-empty and bounded".into(),
             ));
+        }
+        if request.config.len() > MAX_CONFIG_ENTRIES {
+            return Err(VsError::Validate(format!(
+                "script config exceeds {} entries",
+                MAX_CONFIG_ENTRIES
+            )));
         }
         if !valid_identifier(&request.operation) {
             return Err(VsError::Validate(
@@ -761,6 +773,42 @@ mod tests {
         assert_eq!(result.outputs, vec![Value::I64(7)]);
     }
 
+    #[test]
+    fn call_rejects_oversized_identity_and_config() {
+        let host = ScriptHost::new(
+            ScriptPolicy::new(SandboxTier::Sandboxed),
+            BindingRegistry::default(),
+        );
+        let oversized_id = "i".repeat(MAX_ID_BYTES + 1);
+        let identity_error = host.call(ScriptCall {
+            module: "module".into(),
+            operation: "op".into(),
+            request_id: oversized_id,
+            execution_id: "execution".into(),
+            attempt: 0,
+            args: Vec::new(),
+            config: BTreeMap::new(),
+        });
+        assert!(
+            matches!(identity_error, Err(VsError::Validate(message)) if message.contains("identities"))
+        );
+
+        let config = (0..=MAX_CONFIG_ENTRIES)
+            .map(|index| (format!("key-{index}"), Value::I64(index as i64)))
+            .collect();
+        let config_error = host.call(ScriptCall {
+            module: "module".into(),
+            operation: "op".into(),
+            request_id: "request".into(),
+            execution_id: "execution".into(),
+            attempt: 0,
+            args: Vec::new(),
+            config,
+        });
+        assert!(
+            matches!(config_error, Err(VsError::Validate(message)) if message.contains("config"))
+        );
+    }
     #[test]
     fn content_addressed_publish_is_atomic_and_monotonic() {
         let swap = HotSwap::default();
