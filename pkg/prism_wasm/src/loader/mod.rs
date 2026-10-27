@@ -62,11 +62,10 @@ pub trait Loader: Send + Sync {
 /// 文件系统加载器：在多个搜索根目录下查找模块。
 ///
 /// 查找顺序：
-///   1. 把 `name` 当作绝对/相对路径直接试一次；
-///   2. 依次拼接 `root/name`；
-///   3. 依次拼接 `root/name.{ext}`（默认尝试 `.wasm`、`.wat`）。
+///   1. 依次拼接 `root/name`；
+///   2. 依次拼接 `root/name.{ext}`（默认尝试 `.wasm`、`.wat`）。
 ///
-/// 命中第一个就返回。
+/// `name` 仅接受相对、无 `..` 的逻辑模块名；绝对路径和越界路径一律拒绝。
 pub struct FileLoader {
     /// 搜索根目录列表。
     roots: Vec<PathBuf>,
@@ -82,33 +81,37 @@ impl FileLoader {
         P: Into<PathBuf>,
     {
         Self {
-            roots: roots.into_iter().map(Into::into).collect(),
+            roots: roots.into_iter().map(|root| {
+                let path = root.into();
+                fs::canonicalize(&path).unwrap_or(path)
+            }).collect(),
             extensions: vec!["wasm", "wat"],
         }
     }
 
     /// 运行期追加一个搜索根 —— 支持「自定义加载路径」的核心入口。
     pub fn add_root(&mut self, p: impl Into<PathBuf>) {
-        self.roots.push(p.into());
+        let path = p.into();
+        self.roots.push(fs::canonicalize(&path).unwrap_or(path));
     }
 
     /// 按上述顺序解析逻辑名到磁盘路径，找不到返回 `None`。
     fn resolve(&self, name: &str) -> Option<PathBuf> {
-        // 1) 直接当路径
-        let direct = Path::new(name);
-        if direct.is_file() {
-            return Some(direct.to_path_buf());
+        let requested = Path::new(name);
+        if requested.is_absolute() || requested.components().any(|component| matches!(component, std::path::Component::ParentDir)) {
+            return None;
         }
-        // 2) / 3) 在每个 root 下逐一尝试
         for root in &self.roots {
-            let candidate = root.join(name);
-            if candidate.is_file() {
-                return Some(candidate);
-            }
-            for ext in &self.extensions {
-                let candidate = root.join(format!("{name}.{ext}"));
-                if candidate.is_file() {
-                    return Some(candidate);
+            let candidates = std::iter::once(root.join(name)).chain(
+                self.extensions.iter().map(|ext| root.join(format!("{name}.{ext}"))),
+            );
+            for candidate in candidates {
+                let canonical = match fs::canonicalize(&candidate) {
+                    Ok(path) => path,
+                    Err(_) => continue,
+                };
+                if canonical.starts_with(root) && canonical.is_file() {
+                    return Some(canonical);
                 }
             }
         }
@@ -164,6 +167,24 @@ impl Loader for MemoryLoader {
         // `(*bytes).clone()` 复制内层 `Vec<u8>`：因为 `ModuleSource::new`
         // 会在内部重新 Arc，所以这里必须给一个独立的 Vec。
         Ok(ModuleSource::new(name, (*bytes).clone()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn file_loader_rejects_escape_paths() {
+        let root = std::env::temp_dir().join(format!("prism-wasm-loader-{}", SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("safe.wasm"), b"safe").unwrap();
+        let loader = FileLoader::new([root.clone()]);
+        assert!(loader.load("safe").is_ok());
+        assert!(loader.load("../safe.wasm").is_err());
+        assert!(loader.load(root.to_string_lossy().as_ref()).is_err());
+        fs::remove_dir_all(root).unwrap();
     }
 }
 
