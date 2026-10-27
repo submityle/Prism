@@ -169,6 +169,14 @@ impl SlotProgram {
         let valid_range = |start: SlotId, end: SlotId| start <= end && end <= self.slots_count;
         for (block_id, block) in self.blocks.iter().enumerate() {
             for instr in &block.instrs {
+                let check_graph_call = |call: &GraphCall| {
+                    if call.graph.is_empty() || call.graph.len() > MAX_IR_IDENTIFIER_BYTES {
+                        return Err(VsError::Validate(
+                            "IR graph identifier exceeds limits".into(),
+                        ));
+                    }
+                    Ok(())
+                };
                 let check_config = |config: &BTreeMap<String, Value>| {
                     if config.len() > MAX_IR_CONFIG_ENTRIES
                         || config
@@ -193,6 +201,14 @@ impl SlotProgram {
                             return Err(VsError::Validate(
                                 "IR exec pin identifier exceeds limits".into(),
                             ));
+                        }
+                    }
+                    Instr::CallGraph { target_graph, .. } => {
+                        check_graph_call(target_graph)?;
+                    }
+                    Instr::ForkGraphs { branches, .. } => {
+                        for branch in branches {
+                            check_graph_call(branch)?;
                         }
                     }
                     Instr::Transition { state, .. }
