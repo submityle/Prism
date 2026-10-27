@@ -27,6 +27,7 @@ fn validate_module_revision(revision: &str) -> VsResult<()> {
     }
     Ok(())
 }
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VersionedCheckpoint {
@@ -163,5 +164,19 @@ impl RunCoordinator {
         let bytes = serde_json::to_vec(&envelope)
             .map_err(|e| VsError::Runtime(format!("encode versioned checkpoint: {e}")))?;
         self.checkpoint(run_id, expected_revision, execution_id, status, bytes)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_module_revision;
+
+    #[test]
+    fn module_revision_boundary_is_explicit() {
+        assert!(validate_module_revision("module@2026.10").is_ok());
+        assert!(validate_module_revision("").is_err());
+        assert!(validate_module_revision(&"m".repeat(129)).is_err());
+        assert!(validate_module_revision("module revision").is_err());
+        assert!(validate_module_revision("模块").is_err());
     }
 }
