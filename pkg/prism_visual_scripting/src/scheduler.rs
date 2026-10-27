@@ -166,14 +166,23 @@ impl FairScheduler {
         let tenant = self
             .state
             .active
-            .remove(run_id)
+            .get(run_id)
+            .cloned()
             .ok_or_else(|| VsError::Runtime(format!("run {run_id} is not active")))?;
+        let count = self
+            .active_tenants
+            .get(&tenant)
+            .copied()
+            .ok_or_else(|| VsError::Runtime("active tenant accounting missing".into()))?;
+        if count == 0 {
+            return Err(VsError::Runtime("active tenant count underflow".into()));
+        }
+        self.state.active.remove(run_id);
         self.run_ids.remove(run_id);
-        if let Some(count) = self.active_tenants.get_mut(&tenant) {
-            *count = count.saturating_sub(1);
-            if *count == 0 {
-                self.active_tenants.remove(&tenant);
-            }
+        if count == 1 {
+            self.active_tenants.remove(&tenant);
+        } else if let Some(count) = self.active_tenants.get_mut(&tenant) {
+            *count -= 1;
         }
         Ok(())
     }
