@@ -716,13 +716,15 @@ impl VisualScriptEngine {
                 "run checkpoint does not contain resumable workflow state".into(),
             ));
         };
-        let mut restored = 0;
+        let mut restored: usize = 0;
         for suspension in state.suspensions() {
-            restored += usize::from(self.await_broker.register(AwaitRequest {
-                id: suspension.id,
-                condition: suspension.condition,
-                payload: suspension.payload,
-            })?);
+            restored = restored
+                .checked_add(usize::from(self.await_broker.register(AwaitRequest {
+                    id: suspension.id,
+                    condition: suspension.condition,
+                    payload: suspension.payload,
+                })?))
+                .ok_or_else(|| VsError::Runtime("restored suspension count exhausted".into()))?;
         }
         Ok(restored)
     }
