@@ -393,6 +393,15 @@ impl ScriptHost {
                 "script module name must be non-empty and space-free".into(),
             ));
         }
+        if let Some(existing) = self.hotswap.acquire(&module.name) {
+            if existing.module.digest == module.digest {
+                return Ok(SwapRecord {
+                    old_digest: Some(existing.module.digest),
+                    new_digest: module.digest,
+                    generation: existing.generation,
+                });
+            }
+        }
         let max_module_bytes = (self.policy.budget.memory_pages as usize)
             .checked_mul(64 * 1024)
             .ok_or_else(|| VsError::Validate("script memory budget overflow".into()))?;
