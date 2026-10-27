@@ -212,7 +212,25 @@ pub fn require_component_names<'a>(
             "ECS entity is not present in snapshot".into(),
         ));
     }
-    Ok(proxy.component_names(entity_bits))
+    let mut names = proxy.component_names(entity_bits);
+    if names.len() > MAX_COMPONENT_ENTRIES {
+        return Err(VsError::Validate(
+            "ECS component name count exceeds snapshot limit".into(),
+        ));
+    }
+    if names
+        .iter()
+        .any(|name| name.is_empty() || name.len() > MAX_COMPONENT_NAME_BYTES || !name.is_ascii())
+    {
+        return Err(VsError::Validate("invalid ECS component name list".into()));
+    }
+    names.sort_unstable();
+    if names.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(VsError::Validate(
+            "ECS component name list contains duplicates".into(),
+        ));
+    }
+    Ok(names)
 }
 
 pub fn require_component_json<'a>(
@@ -389,6 +407,34 @@ mod tests {
         ));
         assert!(matches!(
             require_component_bytes(&ctx, 7, "位置"),
+            Err(VsError::Validate(message)) if message.contains("component name")
+        ));
+    }
+
+    #[test]
+    fn required_component_names_rejects_noncanonical_host_output() {
+        struct MaliciousWorld;
+        impl WorldProxy for MaliciousWorld {
+            fn entity_count(&self) -> u32 {
+                1
+            }
+
+            fn contains_bits(&self, entity_bits: u64) -> bool {
+                entity_bits == 7
+            }
+
+            fn component_names(&self, _entity_bits: u64) -> Vec<String> {
+                vec!["Velocity".into(), "Velocity".into(), "位置".into()]
+            }
+        }
+        let external = WorldProxyContext::new(Arc::new(MaliciousWorld));
+        let env = ExecutionEnv::new().with_external(&external);
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let mut host = InMemoryHost::default();
+        let config = BTreeMap::<String, Value>::new();
+        let ctx = InvokeCtx::from_env(&config, &mut host, &cancel, &env);
+        assert!(matches!(
+            require_component_names(&ctx, 7),
             Err(VsError::Validate(message)) if message.contains("component name")
         ));
     }
