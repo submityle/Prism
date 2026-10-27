@@ -213,13 +213,17 @@ impl EffectExecutor for WasmEffectExecutor {
             memory_pages_limit: budget.memory_pages,
             deadline: Instant::now() + std::time::Duration::from_millis(request.spec.timeout_ms),
         };
-        let result = tokio::task::spawn_blocking(move || host.call(call))
-            .await
-            .map_err(|error| EffectError::retryable(format!("wasm effect worker failed: {error}")))?
-            .map_err(|error| EffectError {
-                message: error.message,
-                retryable: error.retryable,
-            })?;
+        let result = tokio::time::timeout(
+            timeout,
+            tokio::task::spawn_blocking(move || host.call(call)),
+        )
+        .await
+        .map_err(|_| EffectError::retryable("wasm effect exceeded its wall-clock deadline"))?
+        .map_err(|error| EffectError::retryable(format!("wasm effect worker failed: {error}")))?
+        .map_err(|error| EffectError {
+            message: error.message,
+            retryable: error.retryable,
+        })?;
         if started.elapsed() > timeout {
             return Err(EffectError::retryable(
                 "wasm effect exceeded its wall-clock deadline",
