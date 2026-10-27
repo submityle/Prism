@@ -1,35 +1,46 @@
 use async_trait::async_trait;
-use std::sync::Arc;
 use prism_visual_scripting::prelude::*;
+use std::sync::Arc;
+
+#[test]
+fn lease_expiry_overflow_is_rejected_without_installing_lease() {
+    let mut actor = ActorState::new(ActorId::new("overflow", "1"), Value::Unit);
+    let error = actor.acquire_lease("worker", u64::MAX, 1).unwrap_err();
+    assert!(error.to_string().contains("lease expiry exhausted"));
+    assert!(actor.lease.is_none());
+
+    let lease = actor.acquire_lease("worker", u64::MAX - 2, 1).unwrap();
+    let error = actor
+        .renew_lease(&lease.owner, &lease.token, u64::MAX - 2, 3)
+        .unwrap_err();
+    assert!(error.to_string().contains("lease expiry exhausted"));
+    assert_eq!(actor.lease.as_ref().unwrap().expires_at_ms, u64::MAX - 1);
+}
 
 #[test]
 fn actor_mailbox_is_idempotent_and_commits_with_fencing() {
     let mut actor = ActorState::new(ActorId::new("order", "42"), Value::I64(0));
     let first = actor.acquire_lease("worker-a", 100, 1000).unwrap();
-    assert!(
-        actor
-            .enqueue(
-                &first.owner,
-                &first.token,
-                101,
-                "event-1",
-                "order.created",
-                Value::I64(7),
-            )
-            .unwrap()
-    );
-    assert!(
-        !actor
-            .enqueue(
-                &first.owner,
-                &first.token,
-                102,
-                "event-1",
-                "order.created",
-                Value::I64(999),
-            )
-            .unwrap()
-    );
+    assert!(actor
+        .enqueue(
+            &first.owner,
+            &first.token,
+            101,
+            "event-1",
+            "order.created",
+            Value::I64(7),
+        )
+        .unwrap());
+    assert!(!actor
+        .enqueue(
+            &first.owner,
+            &first.token,
+            102,
+            "event-1",
+            "order.created",
+            Value::I64(999),
+        )
+        .unwrap());
     let signal = actor
         .claim_next(&first.owner, &first.token, 103)
         .unwrap()
@@ -65,18 +76,16 @@ fn expired_lease_fences_old_worker_and_allows_takeover() {
         )
         .unwrap_err();
     assert!(error.to_string().contains("fencing token"));
-    assert!(
-        actor
-            .enqueue(
-                &new.owner,
-                &new.token,
-                11,
-                "event-1",
-                "deploy.requested",
-                Value::Unit,
-            )
-            .unwrap()
-    );
+    assert!(actor
+        .enqueue(
+            &new.owner,
+            &new.token,
+            11,
+            "event-1",
+            "deploy.requested",
+            Value::Unit,
+        )
+        .unwrap());
 }
 
 #[test]
@@ -133,21 +142,19 @@ async fn durable_actor_runtime_dispatches_mailbox_and_commits_state() {
     let runtime = DurableActorRuntime::new(store);
     let id = ActorId::new("counter", "7");
     runtime.create(id.clone(), Value::I64(1)).unwrap();
-    assert!(
-        runtime
-            .enqueue(
-                &id,
-                "worker",
-                0,
-                100,
-                ActorMessage {
-                    signal_id: "add-1".into(),
-                    topic: "add".into(),
-                    payload: Value::I64(4),
-                },
-            )
-            .unwrap()
-    );
+    assert!(runtime
+        .enqueue(
+            &id,
+            "worker",
+            0,
+            100,
+            ActorMessage {
+                signal_id: "add-1".into(),
+                topic: "add".into(),
+                payload: Value::I64(4),
+            },
+        )
+        .unwrap());
     let signal = runtime
         .process_next(&id, "worker", 100, &VirtualClock::new(1), &AddHandler)
         .await

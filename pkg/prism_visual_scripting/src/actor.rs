@@ -112,6 +112,9 @@ impl ActorState {
                 self.id.key, current.owner
             )));
         }
+        let expires_at_ms = now_ms
+            .checked_add(ttl_ms)
+            .ok_or_else(|| VsError::Runtime("actor lease expiry exhausted".into()))?;
         self.next_epoch = self
             .next_epoch
             .checked_add(1)
@@ -121,7 +124,7 @@ impl ActorState {
             owner,
             token,
             epoch: self.next_epoch,
-            expires_at_ms: now_ms.saturating_add(ttl_ms),
+            expires_at_ms,
         };
         self.lease = Some(lease.clone());
         Ok(lease)
@@ -140,8 +143,11 @@ impl ActorState {
                 "actor lease ttl must be greater than zero".into(),
             ));
         }
+        let expires_at_ms = now_ms
+            .checked_add(ttl_ms)
+            .ok_or_else(|| VsError::Runtime("actor lease expiry exhausted".into()))?;
         let lease = self.lease.as_mut().expect("check_lease verified lease");
-        lease.expires_at_ms = now_ms.saturating_add(ttl_ms);
+        lease.expires_at_ms = expires_at_ms;
         Ok(lease.clone())
     }
 
