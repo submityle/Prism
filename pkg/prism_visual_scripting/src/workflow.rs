@@ -901,13 +901,14 @@ impl WorkflowVm {
                     "join parent is not waiting for this join".into(),
                 ));
             }
-            if join.total == 0
-                || join.total
-                    != join.queued.len()
-                        + join.running.len()
-                        + join.results.len()
-                        + join.failures.len()
-            {
+            let accounted = join
+                .queued
+                .len()
+                .checked_add(join.running.len())
+                .and_then(|count| count.checked_add(join.results.len()))
+                .and_then(|count| count.checked_add(join.failures.len()))
+                .ok_or_else(|| VsError::Runtime("invalid resumed join accounting".into()))?;
+            if join.total == 0 || join.total != accounted {
                 return Err(VsError::Runtime("invalid resumed join accounting".into()));
             }
             let mut branch_indexes = std::collections::BTreeSet::new();
