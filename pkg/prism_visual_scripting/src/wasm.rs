@@ -277,9 +277,11 @@ mod tests {
         };
         let mut budget = CallBudget::new(crate::ResourceBudget::sandboxed());
         let error = backend.call(&instance, &request, &mut budget).unwrap_err();
-        assert!(
-            matches!(error, VsError::RetryableRuntime(message) if message == "temporary component outage")
-        );
+        assert!(error.is_retryable());
+        assert!(matches!(
+            error,
+            VsError::RetryableRuntime(message) if message == "temporary component outage"
+        ));
     }
 
     #[test]

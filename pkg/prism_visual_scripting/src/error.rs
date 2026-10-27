@@ -41,3 +41,10 @@ pub enum VsError {
 }
 
 pub type VsResult<T> = Result<T, VsError>;
+
+impl VsError {
+    /// Whether retrying the same logical request may succeed without changing its input.
+    pub const fn is_retryable(&self) -> bool {
+        matches!(self, Self::RetryableRuntime(_))
+    }
+}
