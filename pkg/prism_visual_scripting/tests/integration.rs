@@ -598,3 +598,18 @@ fn execution_plan_rejects_a_different_registry_snapshot() {
     };
     assert!(format!("{error}").contains("registry identity"));
 }
+
+#[test]
+fn compiler_rejects_duplicate_node_ids() {
+    let lib = NodeLibrary::with_builtins();
+    let graph = Graph {
+        nodes: vec![make_node(1, "event.begin"), make_node(1, "event.begin")],
+        entries: vec![1],
+        ..Default::default()
+    };
+    let error = match compile(&graph, &lib) {
+        Ok(_) => panic!("duplicate node ids must be rejected"),
+        Err(error) => error,
+    };
+    assert!(matches!(error, VsError::Validate(message) if message.contains("duplicate node id")));
+}

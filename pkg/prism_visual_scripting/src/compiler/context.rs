@@ -34,6 +34,9 @@ impl<'a> LowerCtx<'a> {
         let mut def_index: HashMap<String, DefId> = HashMap::new();
 
         for n in &graph.nodes {
+            if defs_by_node.contains_key(&n.id) {
+                return Err(VsError::Validate(format!("duplicate node id {}", n.id)));
+            }
             let def = lib.resolve(n)?;
             if !def_index.contains_key(&def.id) {
                 def_index.insert(def.id.clone(), def_table.len() as DefId);
