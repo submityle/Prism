@@ -193,6 +193,12 @@ impl WasmEffectExecutor {
 #[async_trait]
 impl EffectExecutor for WasmEffectExecutor {
     async fn execute(&self, request: EffectRequest) -> Result<EffectResponse, EffectError> {
+        request.spec.validate().map_err(|error| EffectError {
+            message: error.to_string(),
+            retryable: false,
+        })?;
+        let timeout = std::time::Duration::from_millis(request.spec.timeout_ms);
+        let started = Instant::now();
         let host = Arc::clone(&self.host);
         let budget = self.budget.clone();
         let call = WasmCall {
@@ -214,6 +220,11 @@ impl EffectExecutor for WasmEffectExecutor {
                 message: error.message,
                 retryable: error.retryable,
             })?;
+        if started.elapsed() > timeout {
+            return Err(EffectError::retryable(
+                "wasm effect exceeded its wall-clock deadline",
+            ));
+        }
         Ok(EffectResponse {
             outputs: result.outputs,
             next: result.next,
