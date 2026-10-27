@@ -681,6 +681,75 @@ mod tests {
         }
     }
 
+    struct RejectingBackend;
+
+    impl ScriptBackend for RejectingBackend {
+        type Instance = Vec<u8>;
+
+        fn compile(
+            &self,
+            module: &ScriptModule,
+            _bindings: &BindingRegistry,
+        ) -> VsResult<Self::Instance> {
+            if module.bytes.as_ref() == b"reject" {
+                return Err(VsError::Runtime("compile rejected".into()));
+            }
+            Ok(module.bytes.to_vec())
+        }
+
+        fn call(
+            &self,
+            instance: &Self::Instance,
+            _request: &ScriptCall,
+            budget: &mut CallBudget,
+        ) -> VsResult<BackendCallResult> {
+            budget.charge(1)?;
+            Ok(BackendCallResult {
+                outputs: vec![Value::I64(instance.len() as i64)],
+                next: ExecNext::End,
+                chunks: Vec::new(),
+            })
+        }
+    }
+    #[test]
+    fn failed_publish_preserves_previous_snapshot() {
+        let mut bindings = BindingRegistry::default();
+        bindings
+            .register(Binding {
+                name: "measure".into(),
+                category: "test".into(),
+                inputs: vec![],
+                output: Some(ValueType::I64),
+                capabilities: BTreeSet::new(),
+                deterministic: true,
+            })
+            .unwrap();
+        let host = ScriptHost::new(ScriptPolicy::new(SandboxTier::Sandboxed), bindings)
+            .with_backend(RejectingBackend);
+        host.publish(ScriptModule::from_bytes("stable", 1, b"good"))
+            .unwrap();
+        assert!(matches!(
+            host.publish(ScriptModule::from_bytes("stable", 1, b"reject")),
+            Err(VsError::Runtime(message)) if message.contains("compile rejected")
+        ));
+        let result = host
+            .call(ScriptCall {
+                module: "stable".into(),
+                operation: "measure".into(),
+                request_id: "request".into(),
+                execution_id: "execution".into(),
+                attempt: 0,
+                args: Vec::new(),
+                config: BTreeMap::new(),
+            })
+            .unwrap();
+        assert_eq!(
+            result.module_digest,
+            ScriptModule::from_bytes("stable", 1, b"good").digest
+        );
+        assert_eq!(result.generation, 1);
+    }
+
     #[test]
     fn hot_swap_leases_revoke_old_generation() {
         let swaps = HotSwap::default();
