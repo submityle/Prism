@@ -31,7 +31,7 @@ use context::LowerCtx;
 pub fn compile(graph: &Graph, lib: &NodeLibrary) -> VsResult<SlotProgram> {
     let mut cx = LowerCtx::new(graph, lib)?;
     validate::run(&cx)?;
-    cx.allocate_impure_outputs();
+    cx.allocate_impure_outputs()?;
     lower::run(&mut cx)?;
     Ok(cx.finish())
 }

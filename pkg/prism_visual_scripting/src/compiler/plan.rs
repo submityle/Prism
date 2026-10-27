@@ -14,7 +14,7 @@ use crate::registry::NodeRegistry;
 pub fn plan(graph: &Graph, registry: &dyn NodeRegistry) -> VsResult<ExecutionPlan> {
     let mut cx = LowerCtx::new(graph, registry)?;
     validate::run(&cx)?;
-    cx.allocate_impure_outputs();
+    cx.allocate_impure_outputs()?;
     lower::run(&mut cx)?;
     let program = cx.finish();
     Ok(program.to_plan())

@@ -76,21 +76,25 @@ impl<'a> LowerCtx<'a> {
         })
     }
 
-    pub fn allocate_impure_outputs(&mut self) {
+    pub fn allocate_impure_outputs(&mut self) -> VsResult<()> {
         let nodes: Vec<NodeId> = self.graph.nodes.iter().map(|n| n.id).collect();
         for nid in nodes {
             if self.defs_by_node[&nid].purity == crate::registry::Purity::Impure {
-                let n_outs = self.defs_by_node[&nid].data_outputs().len() as u32;
-                let start = self.alloc_slots(n_outs);
+                let n_outs = u32::try_from(self.defs_by_node[&nid].data_outputs().len())
+                    .map_err(|_| VsError::Validate("slot count exceeds u32::MAX".into()))?;
+                let start = self.alloc_slots(n_outs)?;
                 self.impure_out_slots.insert(nid, start);
             }
         }
+        Ok(())
     }
 
-    pub fn alloc_slots(&mut self, n: u32) -> SlotId {
-        let s = self.next_slot;
-        self.next_slot += n;
-        s
+    pub fn alloc_slots(&mut self, n: u32) -> VsResult<SlotId> {
+        let start = self.next_slot;
+        self.next_slot = start
+            .checked_add(n)
+            .ok_or_else(|| VsError::Validate("slot count exceeds u32::MAX".into()))?;
+        Ok(start)
     }
 
     pub fn finish(self) -> SlotProgram {

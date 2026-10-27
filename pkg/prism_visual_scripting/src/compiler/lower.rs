@@ -65,8 +65,12 @@ fn lower_impure_block(cx: &mut LowerCtx<'_>, node_id: NodeId) -> VsResult<()> {
 
     let in_range = emit_inputs(cx, node_id, &mut block, &mut pure_emitted)?;
     let out_start = cx.impure_out_slots[&node_id];
-    let out_count = cx.defs_by_node[&node_id].data_outputs().len() as u32;
-    let out_range = out_start..(out_start + out_count);
+    let out_count = u32::try_from(cx.defs_by_node[&node_id].data_outputs().len())
+        .map_err(|_| crate::error::VsError::Validate("slot count exceeds u32::MAX".into()))?;
+    let out_end = out_start
+        .checked_add(out_count)
+        .ok_or_else(|| crate::error::VsError::Validate("slot count exceeds u32::MAX".into()))?;
+    let out_range = out_start..out_end;
 
     let def = cx.defs_by_node[&node_id].clone();
     let mut targets: Vec<(String, BlockId)> = Vec::new();
@@ -172,10 +176,15 @@ fn emit_inputs(
 ) -> VsResult<std::ops::Range<SlotId>> {
     let def = cx.defs_by_node[&node_id].clone();
     let data_inputs = def.data_inputs();
-    let n = data_inputs.len() as u32;
-    let start = cx.alloc_slots(n);
+    let n = u32::try_from(data_inputs.len())
+        .map_err(|_| crate::error::VsError::Validate("slot count exceeds u32::MAX".into()))?;
+    let start = cx.alloc_slots(n)?;
     for (k, &pin_idx) in data_inputs.iter().enumerate() {
-        let slot = start + k as u32;
+        let slot = start
+            .checked_add(u32::try_from(k).map_err(|_| {
+                crate::error::VsError::Validate("slot count exceeds u32::MAX".into())
+            })?)
+            .ok_or_else(|| crate::error::VsError::Validate("slot count exceeds u32::MAX".into()))?;
         let pin = &def.inputs[pin_idx];
         let pin_idx16 = pin_idx as PinIndex;
         if let Some(src) = cx.incoming_by_endpoint.get(&(node_id, pin_idx16)).copied() {
@@ -195,7 +204,10 @@ fn emit_inputs(
             });
         }
     }
-    Ok(start..(start + n))
+    let end = start
+        .checked_add(n)
+        .ok_or_else(|| crate::error::VsError::Validate("slot count exceeds u32::MAX".into()))?;
+    Ok(start..end)
 }
 
 /// 确保 endpoint 上有可用值的 slot；如必要 emit 上游 pure 节点。
@@ -217,18 +229,25 @@ fn ensure_value(
                 return Ok(base + data_pos);
             }
             let in_range = emit_inputs(cx, ep.node, block, pure_emitted)?;
-            let n_outs = def.data_outputs().len() as u32;
-            let out_start = cx.alloc_slots(n_outs);
+            let n_outs = u32::try_from(def.data_outputs().len()).map_err(|_| {
+                crate::error::VsError::Validate("slot count exceeds u32::MAX".into())
+            })?;
+            let out_start = cx.alloc_slots(n_outs)?;
+            let out_end = out_start.checked_add(n_outs).ok_or_else(|| {
+                crate::error::VsError::Validate("slot count exceeds u32::MAX".into())
+            })?;
             let def_id = cx.def_index[&def.id];
             block.instrs.push(Instr::CallPure {
                 def: def_id,
                 node_id: ep.node,
                 inputs: in_range,
-                outputs: out_start..(out_start + n_outs),
+                outputs: out_start..out_end,
                 config: canonical_config(cx, ep.node),
             });
             pure_emitted.insert(ep.node, out_start);
-            Ok(out_start + data_pos)
+            Ok(out_start.checked_add(data_pos).ok_or_else(|| {
+                crate::error::VsError::Validate("slot count exceeds u32::MAX".into())
+            })?)
         }
     }
 }
