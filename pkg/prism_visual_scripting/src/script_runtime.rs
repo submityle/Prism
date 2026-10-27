@@ -261,8 +261,11 @@ pub struct StateBlob {
 
 pub type MigrationFn = Arc<dyn Fn(StateBlob) -> VsResult<StateBlob> + Send + Sync>;
 
+const MAX_IDENTIFIER_BYTES: usize = 128;
+
 fn valid_identifier(value: &str) -> bool {
     !value.is_empty()
+        && value.len() <= MAX_IDENTIFIER_BYTES
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b':' | b'-'))
@@ -653,7 +656,7 @@ mod tests {
             BindingRegistry::default(),
         );
         for module in [
-            ScriptModule::from_bytes("bad name", 1, b"module"),
+            ScriptModule::from_bytes("x".repeat(129), 1, b"module"),
             ScriptModule::from_bytes("empty-schema", 0, b"module"),
             ScriptModule::from_bytes("empty-bytes", 1, Vec::<u8>::new()),
         ] {
