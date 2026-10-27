@@ -240,13 +240,19 @@ impl VirtualClock {
     }
 
     pub fn advance(&self, millis: u64) {
-        self.now_ms
-            .fetch_update(
+        let mut current = self.now_ms.load(std::sync::atomic::Ordering::SeqCst);
+        loop {
+            let next = current.saturating_add(millis);
+            match self.now_ms.compare_exchange(
+                current,
+                next,
                 std::sync::atomic::Ordering::SeqCst,
                 std::sync::atomic::Ordering::SeqCst,
-                |now| Some(now.saturating_add(millis)),
-            )
-            .expect("atomic clock update cannot fail");
+            ) {
+                Ok(_) => return,
+                Err(observed) => current = observed,
+            }
+        }
     }
 
     pub fn try_advance(&self, millis: u64) -> VsResult<()> {
