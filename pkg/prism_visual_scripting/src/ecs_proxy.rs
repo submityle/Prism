@@ -174,6 +174,7 @@ impl WorldProxy for SnapshotWorldProxy {
 pub struct WorldWriteTransaction {
     entities: BTreeSet<u64>,
     components: BTreeMap<(u64, String), Vec<u8>>,
+    base_digest: [u8; 32],
 }
 
 impl SnapshotWorldProxy {
@@ -183,6 +184,7 @@ impl SnapshotWorldProxy {
         WorldWriteTransaction {
             entities: (*self.entities).clone(),
             components: (*self.components).clone(),
+            base_digest: self.digest(),
         }
     }
 }
@@ -219,6 +221,14 @@ impl WorldWriteTransaction {
             .components
             .remove(&(entity_bits, component.to_owned()))
             .is_some())
+    }
+
+    /// Commit only when `current` is the snapshot this transaction observed.
+    pub fn commit_if_current(self, current: &SnapshotWorldProxy) -> VsResult<SnapshotWorldProxy> {
+        if self.base_digest != current.digest() {
+            return Err(VsError::Runtime("stale ECS write transaction".into()));
+        }
+        self.commit()
     }
 
     /// Atomically validate and publish the overlay as a new immutable snapshot.
@@ -444,11 +454,16 @@ mod tests {
         assert!(updated.component_json(7, "Velocity").is_ok());
         let mut remove = updated.begin_write();
         assert!(remove.remove_component(7, "Velocity").unwrap());
-        assert!(remove
-            .commit()
-            .unwrap()
-            .component_json(7, "Velocity")
-            .is_err());
+        let mut stale = source.begin_write();
+        stale
+            .set_component(7, "Transform", br#"{"x":9}"#.to_vec())
+            .unwrap();
+        assert!(matches!(
+            stale.commit_if_current(&updated),
+            Err(VsError::Runtime(message)) if message.contains("stale")
+        ));
+        let newer = source.begin_write().commit().unwrap();
+        assert_eq!(newer.digest(), source.digest());
     }
 
     #[test]
