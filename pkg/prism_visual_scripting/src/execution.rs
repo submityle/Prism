@@ -1,6 +1,6 @@
 //! Structured execution event stream used for audit, replay tooling, and durable projections.
 
-use crate::{EffectError, EffectSpec, Value, VsResult};
+use crate::{EffectError, EffectSpec, Value, VsError, VsResult};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::sync::Mutex;
@@ -226,7 +226,10 @@ impl InMemoryEventLog {
 
 impl ExecutionEventSink for InMemoryEventLog {
     fn append(&self, mut event: ExecutionEvent) -> VsResult<()> {
-        let mut events = self.events.lock().expect("event log poisoned");
+        let mut events = self
+            .events
+            .lock()
+            .map_err(|_| VsError::Runtime("event log poisoned".into()))?;
         event.sequence = next_execution_sequence(events.len())?;
         events.push(event);
         Ok(())
