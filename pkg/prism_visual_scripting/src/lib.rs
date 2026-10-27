@@ -56,7 +56,7 @@ pub use durable::{
     InboxEntry, OutboxEntry, RecordKey, RevisionGuard,
 };
 pub use ecs_proxy::{
-    require_component_bytes, require_component_json, require_component_names,
+    require_component_bytes, require_component_json, require_component_names, require_entity_count,
     require_snapshot_digest, require_world_proxy, SnapshotWorldProxy, WorldProxy,
     WorldProxyContext,
 };

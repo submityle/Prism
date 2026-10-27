@@ -183,6 +183,10 @@ impl WorldProxyContext {
     }
 }
 
+pub fn require_entity_count<'a>(ctx: &'a InvokeCtx<'a>) -> VsResult<u32> {
+    Ok(require_world_proxy(ctx)?.entity_count())
+}
+
 pub fn require_component_bytes<'a>(
     ctx: &'a InvokeCtx<'a>,
     entity_bits: u64,
@@ -388,6 +392,7 @@ mod tests {
         let mut host = InMemoryHost::default();
         let config = BTreeMap::<String, Value>::new();
         let ctx = InvokeCtx::from_env(&config, &mut host, &cancel, &env);
+        assert_eq!(require_entity_count(&ctx).unwrap(), 1);
         assert_eq!(require_component_names(&ctx, 7).unwrap(), vec!["Transform"]);
         assert!(matches!(
             require_component_names(&ctx, 8),
