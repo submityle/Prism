@@ -81,10 +81,13 @@ impl FileLoader {
         P: Into<PathBuf>,
     {
         Self {
-            roots: roots.into_iter().map(|root| {
-                let path = root.into();
-                fs::canonicalize(&path).unwrap_or(path)
-            }).collect(),
+            roots: roots
+                .into_iter()
+                .map(|root| {
+                    let path = root.into();
+                    fs::canonicalize(&path).unwrap_or(path)
+                })
+                .collect(),
             extensions: vec!["wasm", "wat"],
         }
     }
@@ -98,12 +101,23 @@ impl FileLoader {
     /// 按上述顺序解析逻辑名到磁盘路径，找不到返回 `None`。
     fn resolve(&self, name: &str) -> Option<PathBuf> {
         let requested = Path::new(name);
-        if requested.is_absolute() || requested.components().any(|component| matches!(component, std::path::Component::ParentDir)) {
+        if requested.is_absolute()
+            || requested.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::ParentDir
+                        | std::path::Component::Prefix(_)
+                        | std::path::Component::RootDir
+                )
+            })
+        {
             return None;
         }
         for root in &self.roots {
             let candidates = std::iter::once(root.join(name)).chain(
-                self.extensions.iter().map(|ext| root.join(format!("{name}.{ext}"))),
+                self.extensions
+                    .iter()
+                    .map(|ext| root.join(format!("{name}.{ext}"))),
             );
             for candidate in candidates {
                 let canonical = match fs::canonicalize(&candidate) {
@@ -177,7 +191,13 @@ mod tests {
 
     #[test]
     fn file_loader_rejects_escape_paths() {
-        let root = std::env::temp_dir().join(format!("prism-wasm-loader-{}", SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+        let root = std::env::temp_dir().join(format!(
+            "prism-wasm-loader-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         fs::create_dir_all(&root).unwrap();
         fs::write(root.join("safe.wasm"), b"safe").unwrap();
         let loader = FileLoader::new([root.clone()]);
