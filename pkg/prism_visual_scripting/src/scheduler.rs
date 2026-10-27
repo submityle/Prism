@@ -4,6 +4,8 @@ use crate::{VsError, VsResult};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet, VecDeque};
 
+pub const MAX_SCHEDULER_ID_BYTES: usize = 128;
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SchedulerLimits {
@@ -76,6 +78,11 @@ impl FairScheduler {
             return Err(VsError::Validate(
                 "run and tenant identities must not be empty".into(),
             ));
+        }
+        if run_id.len() > MAX_SCHEDULER_ID_BYTES || tenant.len() > MAX_SCHEDULER_ID_BYTES {
+            return Err(VsError::Validate(format!(
+                "run and tenant identities must not exceed {MAX_SCHEDULER_ID_BYTES} bytes"
+            )));
         }
         if self.run_ids.contains(&run_id) {
             return Ok(AdmitResult::Duplicate);

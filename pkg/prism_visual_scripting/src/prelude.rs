@@ -50,6 +50,7 @@ pub use crate::saga::{
 };
 pub use crate::scheduler::{
     AdmitResult, FairScheduler, ScheduledRun, SchedulerLimits, SchedulerSnapshot,
+    MAX_SCHEDULER_ID_BYTES,
 };
 pub use crate::simulation::{SimulationDeterminismGate, SimulationHarness, SimulationTrace};
 pub use crate::stream::{

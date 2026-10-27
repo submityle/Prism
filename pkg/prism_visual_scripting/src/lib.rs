@@ -84,7 +84,10 @@ pub use registry::{
 pub use saga::{
     CompensationIntent, PendingCompensation, SagaOrchestrator, SagaState, SagaStatus, SagaStep,
 };
-pub use scheduler::{AdmitResult, FairScheduler, ScheduledRun, SchedulerLimits, SchedulerSnapshot};
+pub use scheduler::{
+    AdmitResult, FairScheduler, ScheduledRun, SchedulerLimits, SchedulerSnapshot,
+    MAX_SCHEDULER_ID_BYTES,
+};
 pub use script_runtime::{
     BackendCallResult, Binding, BindingRegistry, CallBudget, HotSwap, ResourceBudget, SandboxTier,
     ScriptBackend, ScriptCall, ScriptCallResult, ScriptHost, ScriptModule, ScriptPolicy, StateBlob,

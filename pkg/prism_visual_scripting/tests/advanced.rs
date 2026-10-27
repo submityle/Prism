@@ -114,6 +114,25 @@ fn scheduler_releases_run_identity_after_completion_and_expiry() {
     );
 }
 #[test]
+fn scheduler_rejects_oversized_identities() {
+    let mut scheduler = FairScheduler::new(SchedulerLimits {
+        max_active: 1,
+        max_active_per_tenant: 1,
+        max_queued: 2,
+    })
+    .unwrap();
+    let oversized = "x".repeat(MAX_SCHEDULER_ID_BYTES + 1);
+    assert!(matches!(
+        scheduler.admit(&oversized, "tenant", 0, None),
+        Err(VsError::Validate(message)) if message.contains("128")
+    ));
+    assert!(matches!(
+        scheduler.admit("run", &oversized, 0, None),
+        Err(VsError::Validate(message)) if message.contains("128")
+    ));
+}
+
+#[test]
 fn determinism_gate_rejects_unapproved_native_runner() {
     let library = NodeLibrary::with_builtins();
     let graph = Graph {
