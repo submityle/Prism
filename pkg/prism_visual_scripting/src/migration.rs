@@ -142,4 +142,28 @@ mod tests {
         let error = registry.plan(0, 1025).unwrap_err();
         assert!(error.to_string().contains("exceeds 1024"));
     }
+
+    #[test]
+    fn migration_registry_rejects_excessive_registration_count() {
+        let mut registry = MigrationRegistry::default();
+        for schema in 0..4096u32 {
+            registry
+                .register(
+                    schema,
+                    schema + 1,
+                    [0; 32],
+                    Arc::new(|value: Value| Ok::<Value, crate::VsError>(value)),
+                )
+                .unwrap();
+        }
+        let error = registry
+            .register(
+                4096,
+                4097,
+                [0; 32],
+                Arc::new(|value: Value| Ok::<Value, crate::VsError>(value)),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("exceeds 4096"));
+    }
 }
