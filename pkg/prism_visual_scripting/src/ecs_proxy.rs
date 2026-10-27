@@ -166,7 +166,114 @@ impl WorldProxy for SnapshotWorldProxy {
     }
 }
 
-/// Concrete external context injected through [`crate::ExecutionEnv::with_external`].
+/// Copy-on-write component transaction over an immutable [`SnapshotWorldProxy`].
+///
+/// A transaction never mutates the source snapshot. `commit` validates all
+/// limits atomically and returns a new deterministic snapshot.
+#[derive(Clone, Debug)]
+pub struct WorldWriteTransaction {
+    entities: BTreeSet<u64>,
+    components: BTreeMap<(u64, String), Vec<u8>>,
+}
+
+impl SnapshotWorldProxy {
+    /// Start an isolated component write transaction.
+    #[must_use]
+    pub fn begin_write(&self) -> WorldWriteTransaction {
+        WorldWriteTransaction {
+            entities: (*self.entities).clone(),
+            components: (*self.components).clone(),
+        }
+    }
+}
+
+impl WorldWriteTransaction {
+    /// Replace one component's owned encoding in the transaction overlay.
+    pub fn set_component(
+        &mut self,
+        entity_bits: u64,
+        component: impl Into<String>,
+        bytes: Vec<u8>,
+    ) -> VsResult<()> {
+        let component = component.into();
+        validate_component_entry(
+            &self.entities,
+            &self.components,
+            entity_bits,
+            &component,
+            &bytes,
+        )?;
+        self.components.insert((entity_bits, component), bytes);
+        Ok(())
+    }
+
+    /// Remove one component from the transaction overlay.
+    pub fn remove_component(&mut self, entity_bits: u64, component: &str) -> VsResult<bool> {
+        if component.is_empty()
+            || component.len() > MAX_COMPONENT_NAME_BYTES
+            || !component.is_ascii()
+        {
+            return Err(VsError::Validate("invalid ECS component name".into()));
+        }
+        Ok(self
+            .components
+            .remove(&(entity_bits, component.to_owned()))
+            .is_some())
+    }
+
+    /// Atomically validate and publish the overlay as a new immutable snapshot.
+    pub fn commit(self) -> VsResult<SnapshotWorldProxy> {
+        SnapshotWorldProxy::with_components(
+            self.entities.iter().copied(),
+            self.components
+                .into_iter()
+                .map(|((entity, name), bytes)| (entity, name, bytes)),
+        )
+    }
+}
+
+fn validate_component_entry(
+    entities: &BTreeSet<u64>,
+    components: &BTreeMap<(u64, String), Vec<u8>>,
+    entity_bits: u64,
+    component: &str,
+    bytes: &[u8],
+) -> VsResult<()> {
+    let replacing = components.contains_key(&(entity_bits, component.to_owned()));
+    let total = components
+        .values()
+        .map(Vec::len)
+        .try_fold(bytes.len(), |total, size| {
+            total
+                .checked_add(size)
+                .ok_or_else(|| VsError::Validate("ECS component bytes exhausted".into()))
+        })?;
+    let existing = if replacing {
+        components
+            .get(&(entity_bits, component.to_owned()))
+            .map(Vec::len)
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    let total = total
+        .checked_sub(existing)
+        .ok_or_else(|| VsError::Validate("ECS component bytes exhausted".into()))?;
+    if component.is_empty()
+        || component.len() > MAX_COMPONENT_NAME_BYTES
+        || !component.is_ascii()
+        || bytes.len() > MAX_COMPONENT_BYTES
+        || !entities.contains(&entity_bits)
+        || (!replacing && components.len() >= MAX_COMPONENT_ENTRIES)
+        || total > MAX_TOTAL_COMPONENT_BYTES
+    {
+        return Err(VsError::Validate(
+            "invalid ECS component transaction entry".into(),
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Clone)]
 pub struct WorldProxyContext {
     proxy: Arc<dyn WorldProxy>,
@@ -317,6 +424,31 @@ mod tests {
         fn contains_bits(&self, bits: u64) -> bool {
             self.entities.contains(&bits)
         }
+    }
+
+    #[test]
+    fn write_transaction_is_isolated_and_commits_atomically() {
+        let source = SnapshotWorldProxy::with_components(
+            [7],
+            [(7, "Transform".to_owned(), br#"{"x":1}"#.to_vec())],
+        )
+        .unwrap();
+        let mut tx = source.begin_write();
+        tx.set_component(7, "Transform", br#"{"x":2}"#.to_vec())
+            .unwrap();
+        tx.set_component(7, "Velocity", br#"{"x":3}"#.to_vec())
+            .unwrap();
+        assert_eq!(source.component_json(7, "Transform").unwrap()["x"], 1);
+        let updated = tx.commit().unwrap();
+        assert_eq!(updated.component_json(7, "Transform").unwrap()["x"], 2);
+        assert!(updated.component_json(7, "Velocity").is_ok());
+        let mut remove = updated.begin_write();
+        assert!(remove.remove_component(7, "Velocity").unwrap());
+        assert!(remove
+            .commit()
+            .unwrap()
+            .component_json(7, "Velocity")
+            .is_err());
     }
 
     #[test]
