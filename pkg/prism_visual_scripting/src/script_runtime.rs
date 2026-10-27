@@ -501,13 +501,14 @@ impl ScriptHost {
             .published
             .write()
             .map_err(|_| VsError::Runtime("published script registry poisoned".into()))?;
-        let generation = published.get(&module.name).map_or(1, |current| {
-            if current.module.digest == module.digest {
-                current.generation
-            } else {
-                current.generation.saturating_add(1)
-            }
-        });
+        let generation = match published.get(&module.name) {
+            None => 1,
+            Some(current) if current.module.digest == module.digest => current.generation,
+            Some(current) => current
+                .generation
+                .checked_add(1)
+                .ok_or_else(|| VsError::Runtime("script generation exhausted".into()))?,
+        };
         let record = SwapRecord {
             old_digest: published
                 .get(&module.name)
@@ -748,6 +749,34 @@ mod tests {
             ScriptModule::from_bytes("stable", 1, b"good").digest
         );
         assert_eq!(result.generation, 1);
+    }
+
+    #[test]
+    fn publish_rejects_generation_overflow_without_replacing_snapshot() {
+        let host = ScriptHost::new(
+            ScriptPolicy::new(SandboxTier::Sandboxed),
+            BindingRegistry::default(),
+        );
+        let current = ScriptModule::from_bytes("overflow", 1, b"old");
+        let current_digest = current.digest;
+        host.published.write().unwrap().insert(
+            current.name.clone(),
+            PublishedScript {
+                module: current,
+                instance: None,
+                generation: u64::MAX,
+            },
+        );
+        let error = host
+            .publish(ScriptModule::from_bytes("overflow", 1, b"new"))
+            .unwrap_err();
+        assert!(
+            matches!(error, VsError::Runtime(message) if message.contains("generation exhausted"))
+        );
+        let published = host.published.read().unwrap();
+        let record = published.get("overflow").unwrap();
+        assert_eq!(record.generation, u64::MAX);
+        assert_eq!(record.module.digest, current_digest);
     }
 
     #[test]
