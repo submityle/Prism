@@ -15,6 +15,11 @@ fn event(sequence: u64, node_id: u32) -> ExecutionEvent {
 }
 
 #[test]
+fn execution_sequence_allocator_rejects_u64_exhaustion() {
+    let error = prism_visual_scripting::execution::next_execution_sequence(usize::MAX).unwrap_err();
+    assert!(error.to_string().contains("event sequence exhausted"));
+}
+#[test]
 fn replay_verifier_rejects_tampering_and_reports_divergence() {
     let expected = vec![event(1, 1), event(2, 2)];
     let report = ExecutionReplay::validate(&expected, "run-replay").unwrap();

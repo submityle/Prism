@@ -190,6 +190,13 @@ fn event_digest(event: &ExecutionEvent) -> VsResult<[u8; 32]> {
     Ok(Sha256::digest(bytes).into())
 }
 
+pub fn next_execution_sequence(event_count: usize) -> VsResult<u64> {
+    u64::try_from(event_count)
+        .ok()
+        .and_then(|sequence| sequence.checked_add(1))
+        .ok_or_else(|| crate::VsError::Runtime("execution event sequence exhausted".into()))
+}
+
 #[derive(Default)]
 pub struct InMemoryEventLog {
     events: Mutex<Vec<ExecutionEvent>>,
@@ -211,7 +218,7 @@ impl InMemoryEventLog {
 impl ExecutionEventSink for InMemoryEventLog {
     fn append(&self, mut event: ExecutionEvent) -> VsResult<()> {
         let mut events = self.events.lock().expect("event log poisoned");
-        event.sequence = events.len() as u64 + 1;
+        event.sequence = next_execution_sequence(events.len())?;
         events.push(event);
         Ok(())
     }
