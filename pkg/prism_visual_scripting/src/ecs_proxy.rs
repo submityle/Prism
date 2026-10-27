@@ -12,6 +12,11 @@ use std::sync::Arc;
 pub trait WorldProxy: Send + Sync {
     fn entity_count(&self) -> u32;
     fn contains_bits(&self, entity_bits: u64) -> bool;
+
+    /// Stable content identity when the host supplies a deterministic snapshot.
+    fn snapshot_digest(&self) -> Option<[u8; 32]> {
+        None
+    }
 }
 
 /// Immutable host snapshot suitable for deterministic execution and replay.
@@ -51,6 +56,10 @@ impl WorldProxy for SnapshotWorldProxy {
 
     fn contains_bits(&self, entity_bits: u64) -> bool {
         self.entities.contains(&entity_bits)
+    }
+
+    fn snapshot_digest(&self) -> Option<[u8; 32]> {
+        Some(self.digest())
     }
 }
 
@@ -109,6 +118,10 @@ mod tests {
         assert_eq!(
             snapshot.digest(),
             SnapshotWorldProxy::new([3, 9]).unwrap().digest()
+        );
+        assert_eq!(
+            WorldProxy::snapshot_digest(&snapshot),
+            Some(snapshot.digest())
         );
     }
 
