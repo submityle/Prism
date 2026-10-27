@@ -309,7 +309,6 @@ mod tests {
 
     #[tokio::test]
     async fn effect_executor_hard_times_out_blocking_host() {
-        let executor = WasmEffectExecutor::new(Arc::new(SlowHost), "effects");
         let request = EffectRequest {
             id: "effect-timeout".into(),
             execution_id: "execution-timeout".into(),
