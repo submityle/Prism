@@ -10,6 +10,8 @@ pub enum VsError {
     Compile(String),
     #[error("runtime error: {0}")]
     Runtime(String),
+    #[error("retryable runtime error: {0}")]
+    RetryableRuntime(String),
     #[error("type mismatch: expected {expected:?}, got {got:?} at {location}")]
     TypeMismatch {
         expected: crate::value::ValueType,

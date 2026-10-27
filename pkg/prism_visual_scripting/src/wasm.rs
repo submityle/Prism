@@ -147,7 +147,13 @@ impl ScriptBackend for WasmScriptBackend {
                 memory_pages_limit: budget.limits.memory_pages,
                 deadline: budget.deadline(),
             })
-            .map_err(|error| VsError::Runtime(error.message))?;
+            .map_err(|error| {
+                if error.retryable {
+                    VsError::RetryableRuntime(error.message)
+                } else {
+                    VsError::Runtime(error.message)
+                }
+            })?;
         Ok(BackendCallResult {
             outputs: result.outputs,
             next: result.next,
