@@ -7,7 +7,10 @@ use bevy_render::{
     renderer::{RenderContext, RenderDevice},
 };
 use bytemuck::bytes_of;
-use prism_render_architecture::render_fabric::{FrameRenderItem, RenderDomain, RenderObjectId};
+use prism_render_architecture::render_fabric::{
+    DecalAbiBuffer, FrameRenderItem, RenderDomain, RenderObjectId, DECAL_ABI_BUFFERS,
+    DECAL_ABI_BUFFER_COUNT,
+};
 use prism_render_driver::{
     BufferDescriptor, BufferState, BufferUsages, Extent3d, RenderQueue as _,
 };
@@ -26,7 +29,8 @@ use crate::{
         DecalDomainInput, DomainFrameIdentity,
     },
     fabric_runtime::{
-        self, SceneFabricDispatch, SceneFabricPass, SceneFabricRequest, SceneFabricRuntime,
+        self, SceneFabricCoordinatorInput, SceneFabricCoordinatorInputError, SceneFabricDispatch,
+        SceneFabricObjectResource, SceneFabricPass, SceneFabricRequest, SceneFabricRuntime,
         SceneFabricRuntimeError,
     },
     gpu::{fabric::SceneFabric, rhi::SceneRhi},
@@ -63,6 +67,284 @@ pub(crate) struct DecalResolvePublication {
     pub(crate) items: Vec<FrameRenderItem>,
     pub(crate) domain_view: DomainRecordReadyView,
     pub(crate) workgroups: [u32; 3],
+}
+
+/// Error raised while admitting a real Decal publication fan-out to the
+/// shared SceneFabric coordinator.
+#[derive(Debug, Error)]
+pub(crate) enum DecalResolveBatchError {
+    #[error("Decal batch must contain at least one publication")]
+    Empty,
+    #[error("Decal batch publications must share frame and extent")]
+    FrameOrExtentMismatch,
+    #[error("Decal batch contains duplicate object/history identity")]
+    DuplicateIdentity,
+    #[error("Decal batch publication is not a complete six-buffer record-ready view")]
+    IncompleteResources,
+    #[error("Decal batch publication has an invalid workgroup dimension")]
+    InvalidWorkgroups,
+    #[error("Decal batch publication failed semantic validation: {0}")]
+    Semantic(String),
+    #[error("Decal batch resource is not a buffer: {0}")]
+    Resource(String),
+    #[error("Decal batch coordinator input rejected: {0}")]
+    Input(#[from] SceneFabricCoordinatorInputError),
+    #[error("Decal batch completion token must be non-zero")]
+    InvalidCompletionToken,
+}
+
+/// One real object-scoped Decal fan-out prepared for the shared coordinator.
+///
+/// The adapter owns the publications and the bind groups created from their
+/// authenticated [`DomainRecordReadyView`] values. `append_to` only borrows
+/// this object while the coordinator compiles and records the shared batch;
+/// the adapter must then be moved into [`DecalResolveBatchSubmission`] so the
+/// six-buffer leases cannot retire before the host queue completion.
+pub(crate) struct DecalResolveBatchAdapter<'pipeline> {
+    frame: u64,
+    extent: Extent3d,
+    items: Vec<FrameRenderItem>,
+    publications: Vec<DecalResolvePublication>,
+    bind_groups: Vec<BindGroup>,
+    native_pipeline: &'pipeline ComputePipeline,
+}
+
+impl<'pipeline> DecalResolveBatchAdapter<'pipeline> {
+    /// Builds one real fan-out from producer publications and the resolved
+    /// native compute pipeline. No publication is accepted unless its six
+    /// physical resources are record-ready and its semantic identity matches.
+    pub(crate) fn from_publications(
+        rhi: &SceneRhi,
+        device: &RenderDevice,
+        pipeline: &DecalResolvePipeline,
+        native_pipeline: &'pipeline ComputePipeline,
+        publications: Vec<DecalResolvePublication>,
+    ) -> Result<Self, DecalResolveBatchError> {
+        let first = publications.first().ok_or(DecalResolveBatchError::Empty)?;
+        let frame = first.frame;
+        let extent = first.extent;
+        let mut items = Vec::new();
+        let mut bind_groups = Vec::with_capacity(publications.len());
+
+        for (index, publication) in publications.iter().enumerate() {
+            if publication.frame != frame || publication.extent != extent {
+                return Err(DecalResolveBatchError::FrameOrExtentMismatch);
+            }
+            if publications[..index]
+                .iter()
+                .any(|candidate| candidate.identity == publication.identity)
+            {
+                return Err(DecalResolveBatchError::DuplicateIdentity);
+            }
+            if publication.workgroups.iter().any(|&group| group == 0) {
+                return Err(DecalResolveBatchError::InvalidWorkgroups);
+            }
+            let consumer = prepare_decal_visibility(&publication.items, publication.identity)
+                .map_err(|error| DecalResolveBatchError::Semantic(error.to_string()))?;
+            if consumer.object() != RenderObjectId::Decal(publication.identity.object)
+                || publication.domain_view.frame() != frame
+                || publication.domain_view.resources().len() != DECAL_ABI_BUFFER_COUNT
+                || publication.domain_view.resources().iter().any(|resource| {
+                    !matches!(
+                        resource.record_ready(),
+                        Ok(DomainRecordReadyResource::Buffer { .. })
+                    )
+                })
+            {
+                return Err(DecalResolveBatchError::IncompleteResources);
+            }
+            let bind_group =
+                create_decal_bind_group(rhi, device, pipeline, &publication.domain_view)
+                    .map_err(|error| DecalResolveBatchError::Resource(error.into()))?;
+            items.extend_from_slice(&publication.items);
+            bind_groups.push(bind_group);
+        }
+
+        Ok(Self {
+            frame,
+            extent,
+            items,
+            publications,
+            bind_groups,
+            native_pipeline,
+        })
+    }
+
+    /// Appends this fan-out to the shared coordinator boundary.
+    ///
+    /// `SceneFabricCoordinatorInput` intentionally has no object-resource
+    /// field. Putting multiple Decal publications into its shared resource
+    /// vector would collapse distinct object/history addresses to the same
+    /// `(ResourceKey, frame)` and be rejected by the authoritative runtime.
+    /// The six real buffers therefore move into `object_resources`, while the
+    /// shared input receives the complete semantic item set, one Decal pass,
+    /// and one real dispatch per publication. The caller must pass the
+    /// returned object resources to `fabric_runtime::prepare_with_objects`
+    /// together with [`Self::object_accesses`].
+    pub(crate) fn append_to<'a, 'lease>(
+        &'a self,
+        batch: &mut SceneFabricCoordinatorInput<'a, 'lease>,
+        object_resources: &mut Vec<SceneFabricObjectResource<'a, 'a>>,
+    ) -> Result<(), DecalResolveBatchError> {
+        let mut object_bindings =
+            Vec::with_capacity(self.publications.len() * DECAL_ABI_BUFFER_COUNT);
+        for publication in &self.publications {
+            for resource in publication.domain_view.resources() {
+                let ready = resource
+                    .record_ready()
+                    .map_err(|error| DecalResolveBatchError::Resource(error.to_string()))?;
+                if !matches!(ready, DomainRecordReadyResource::Buffer { .. }) {
+                    return Err(DecalResolveBatchError::IncompleteResources);
+                }
+                object_bindings.push(
+                    SceneFabricObjectResource::from_domain(resource)
+                        .map_err(|error| DecalResolveBatchError::Resource(error.to_string()))?,
+                );
+            }
+        }
+
+        let dispatches = self
+            .publications
+            .iter()
+            .zip(&self.bind_groups)
+            .map(|(publication, bind_group)| SceneFabricDispatch {
+                pipeline: self.native_pipeline,
+                bind_group,
+                bind_group_index: 0,
+                workgroups: publication.workgroups,
+                push_constants: None,
+            })
+            .collect::<Vec<_>>();
+        if dispatches.is_empty()
+            || object_bindings.len() != self.publications.len() * DECAL_ABI_BUFFER_COUNT
+        {
+            return Err(DecalResolveBatchError::IncompleteResources);
+        }
+
+        batch.append_parts(
+            self.frame,
+            self.extent,
+            &self.items,
+            &[DECAL_PASS],
+            &[],
+            Vec::new(),
+            vec![SceneFabricPass::Compute {
+                pass: DECAL_PASS,
+                dispatches,
+            }],
+        )?;
+        object_resources.extend(object_bindings);
+        Ok(())
+    }
+
+    /// Returns the exact object-access declarations required when the shared
+    /// coordinator input is prepared through the object-aware runtime path.
+    #[must_use]
+    pub(crate) const fn object_accesses(
+        &self,
+    ) -> &'static [prism_render_architecture::render_fabric::ObjectResourceAccess] {
+        DECAL_OBJECT_ACCESSES
+    }
+
+    #[must_use]
+    pub(crate) const fn frame(&self) -> u64 {
+        self.frame
+    }
+
+    #[must_use]
+    pub(crate) const fn extent(&self) -> Extent3d {
+        self.extent
+    }
+
+    #[must_use]
+    pub(crate) fn publication_count(&self) -> usize {
+        self.publications.len()
+    }
+
+    #[must_use]
+    pub(crate) fn resource_count(&self) -> usize {
+        self.publications.len() * DECAL_ABI_BUFFER_COUNT
+    }
+
+    /// Transfers the publication and bind-group ownership to a completion
+    /// ticket after the shared host has submitted the recorded batch.
+    pub(crate) fn submit(
+        self,
+        completion: prism_render_architecture::gpu_scene::GpuCompletionValue,
+    ) -> Result<DecalResolveBatchSubmission<'pipeline>, DecalResolveBatchError> {
+        if completion.0 == 0 {
+            return Err(DecalResolveBatchError::InvalidCompletionToken);
+        }
+        Ok(DecalResolveBatchSubmission {
+            completion,
+            adapter: Some(self),
+        })
+    }
+}
+
+/// Completion-gated ownership for one recorded Decal fan-out.
+pub(crate) struct DecalResolveBatchSubmission<'pipeline> {
+    completion: prism_render_architecture::gpu_scene::GpuCompletionValue,
+    adapter: Option<DecalResolveBatchAdapter<'pipeline>>,
+}
+
+/// Completion-gated ownership retained by the unified SceneFabric host.
+///
+/// The native coordinator imports the bind groups into its recorded graph, but
+/// the publication views and Bevy bind-group wrappers still need an explicit
+/// owner until the host queue has completed the command buffer. This lease is
+/// deliberately independent of the pipeline borrow so it can live in an ECS
+/// resource without manufacturing a `'static` adapter reference.
+pub(crate) struct DecalResolveBatchLease {
+    _publications: Vec<DecalResolvePublication>,
+    _bind_groups: Vec<BindGroup>,
+}
+
+impl DecalResolveBatchLease {
+    pub(crate) fn from_adapter<'pipeline>(adapter: DecalResolveBatchAdapter<'pipeline>) -> Self {
+        let DecalResolveBatchAdapter {
+            publications,
+            bind_groups,
+            ..
+        } = adapter;
+        Self {
+            _publications: publications,
+            _bind_groups: bind_groups,
+        }
+    }
+}
+
+impl<'pipeline> DecalResolveBatchSubmission<'pipeline> {
+    #[must_use]
+    pub(crate) const fn completion(
+        &self,
+    ) -> prism_render_architecture::gpu_scene::GpuCompletionValue {
+        self.completion
+    }
+
+    /// Retires all six-buffer publications only after the host completion
+    /// tracker has observed this exact submission value.
+    pub(crate) fn complete(
+        mut self,
+        completed: prism_render_architecture::gpu_scene::GpuCompletionValue,
+    ) -> Result<(), Self> {
+        if completed < self.completion {
+            return Err(self);
+        }
+        self.adapter.take();
+        Ok(())
+    }
+}
+
+impl Drop for DecalResolveBatchSubmission<'_> {
+    fn drop(&mut self) {
+        if let Some(adapter) = self.adapter.take() {
+            // Without a confirmed completion value, releasing these leases
+            // could race the host queue. Preserve the same safety rule as the
+            // shared coordinator and the Hair batch adapter.
+            std::mem::forget(adapter);
+        }
+    }
 }
 
 impl DecalResolvePublication {
@@ -141,6 +423,19 @@ pub(crate) fn build_decal_resource_publication_with_extent(
     extent: Extent3d,
     workgroups: [u32; 3],
 ) -> Result<DecalPreparedResourcePublication, String> {
+    if extent.width == 0 || extent.height == 0 || extent.depth_or_array_layers == 0 {
+        return Err("Decal publication extent must be non-zero".into());
+    }
+    if workgroups.iter().any(|&group| group == 0) {
+        return Err("Decal publication workgroups must be non-zero".into());
+    }
+    let consumer = prepare_decal_visibility(items, identity).map_err(|error| error.to_string())?;
+    if consumer.object() != RenderObjectId::Decal(identity.object) {
+        return Err("Decal publication semantic identity does not match its object".into());
+    }
+    if consumer.resource_declarations().len() != DECAL_ABI_BUFFER_COUNT {
+        return Err("Decal publication must cover the complete six-buffer ABI".into());
+    }
     let instance = prism_render_architecture::render_fabric::DecalInstance::new(
         projector.world_to_decal.to_cols_array(),
         projector.projection_dir.to_array(),
@@ -191,6 +486,11 @@ pub(crate) fn build_decal_resource_publication_with_extent(
             usage,
         ))),
     ];
+    debug_assert_eq!(DECAL_ABI_BUFFERS.len(), buffers.len());
+    debug_assert_eq!(
+        DECAL_ABI_BUFFERS.map(DecalAbiBuffer::stride),
+        core::array::from_fn(|index| buffers[index].buffer().size())
+    );
     let payloads: [&[u8]; 6] = [
         bytes_of(&instance),
         bytes_of(material),
@@ -319,7 +619,7 @@ impl DecalPreparedResources {
         if domain_view.frame() != frame {
             return Err("Decal prepared resource frame does not match publication frame");
         }
-        if domain_view.resources().len() != 6
+        if domain_view.resources().len() != DECAL_ABI_BUFFER_COUNT
             || domain_view.resources().iter().any(|resource| {
                 !matches!(
                     resource.record_ready(),
@@ -392,7 +692,7 @@ struct DecalInFlightPublication {
     completion: prism_render_architecture::gpu_scene::GpuCompletionValue,
     // The leading underscores are intentional: these fields are the lifetime
     // anchors for graph allocations and producer-owned buffer leases.
-    _recorded: RecordedGraph,
+    _recorded: Option<RecordedGraph>,
     _publications: Vec<DecalResolvePublication>,
 }
 
@@ -401,6 +701,13 @@ impl DecalResolveHost {
         &mut self,
         publication: DecalResolvePublication,
     ) -> Result<(), &'static str> {
+        if self
+            .pending
+            .first()
+            .is_some_and(|pending| pending.frame != publication.frame)
+        {
+            return Err("Decal host cannot mix publications from different frames");
+        }
         if self.pending.iter().any(|pending| {
             pending.frame == publication.frame && pending.identity == publication.identity
         }) {
@@ -411,7 +718,10 @@ impl DecalResolveHost {
         Ok(())
     }
 
-    fn take_for_frame(&mut self, frame: u64) -> Result<Vec<DecalResolvePublication>, String> {
+    pub(crate) fn take_for_frame(
+        &mut self,
+        frame: u64,
+    ) -> Result<Vec<DecalResolvePublication>, String> {
         if let Some(publication) = self
             .pending
             .iter()
@@ -451,7 +761,7 @@ impl DecalResolveHost {
     ) {
         self.in_flight.push(DecalInFlightPublication {
             completion,
-            _recorded: recorded,
+            _recorded: Some(recorded),
             _publications: publications,
         });
     }
@@ -471,6 +781,23 @@ impl DecalResolveHost {
     #[cfg(test)]
     fn last_recorded_frame(&self) -> Option<u64> {
         self.last_recorded_frame
+    }
+
+    #[cfg(test)]
+    fn arm_test_completion(
+        &mut self,
+        completion: prism_render_architecture::gpu_scene::GpuCompletionValue,
+    ) {
+        self.in_flight.push(DecalInFlightPublication {
+            completion,
+            _recorded: None,
+            _publications: Vec::new(),
+        });
+    }
+
+    #[cfg(test)]
+    fn in_flight_len(&self) -> usize {
+        self.in_flight.len()
     }
 }
 
@@ -683,10 +1010,18 @@ pub(crate) fn prepare_decal_resolves<'a>(
     let extent = publications[0].extent;
     let mut items = Vec::new();
     let mut views = Vec::with_capacity(publications.len());
-    for publication in publications.iter() {
+    for (publication_index, publication) in publications.iter().enumerate() {
         if publication.frame != frame || publication.extent != extent {
             return Err(DecalResolveError::BindGroup(
                 "Decal fan-out publications must share frame and extent",
+            ));
+        }
+        if publications[..publication_index]
+            .iter()
+            .any(|candidate| candidate.identity == publication.identity)
+        {
+            return Err(DecalResolveError::BindGroup(
+                "Decal fan-out contains duplicate object/history identity",
             ));
         }
         let expected = RenderObjectId::Decal(publication.identity.object);
@@ -822,4 +1157,36 @@ pub(crate) fn retire_decal_resolve_resources(
     completion: Res<GpuCompletionTracker>,
 ) {
     host.retire_completed(completion.completed_value());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use prism_render_architecture::gpu_scene::GpuCompletionValue;
+
+    #[test]
+    fn completion_gated_retirement_keeps_decal_leases_until_and_only_until_completion() {
+        let mut host = DecalResolveHost::default();
+        host.arm_test_completion(GpuCompletionValue(7));
+        assert_eq!(host.in_flight_len(), 1);
+
+        host.retire_completed(GpuCompletionValue(6));
+        assert_eq!(host.in_flight_len(), 1);
+
+        host.retire_completed(GpuCompletionValue(7));
+        assert_eq!(host.in_flight_len(), 0);
+
+        // Retirement is idempotent; a later poll cannot retire the same batch twice.
+        host.retire_completed(GpuCompletionValue(8));
+        assert_eq!(host.in_flight_len(), 0);
+    }
+
+    #[test]
+    fn decal_batch_contract_keeps_each_abi_slot_object_scoped() {
+        assert_eq!(DECAL_OBJECT_ACCESSES.len(), DECAL_ABI_BUFFER_COUNT);
+        for (ordinal, access) in DECAL_OBJECT_ACCESSES.iter().enumerate() {
+            assert_eq!(access.pass, DECAL_PASS);
+            assert_eq!(access.ordinal, ordinal);
+        }
+    }
 }
