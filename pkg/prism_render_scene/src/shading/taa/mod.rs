@@ -25,6 +25,7 @@
 mod abi;
 mod bind_groups;
 mod dispatch;
+pub(crate) mod fabric;
 mod jitter;
 mod pipeline;
 mod resources;
@@ -32,8 +33,8 @@ mod resources;
 #[cfg(test)]
 mod shader_tests;
 
-pub(crate) use bind_groups::prepare_taa_bind_groups;
-pub(crate) use dispatch::taa_resolve_pass;
+pub(crate) use bind_groups::{prepare_taa_bind_groups, ViewTaaBindGroup};
+pub(crate) use dispatch::{append_taa_fabric_parts, taa_resolve_pass};
 pub(crate) use jitter::prepare_taa_jitter;
-pub(crate) use pipeline::init_taa_resolve_pipeline;
-pub(crate) use resources::{prepare_taa_textures, ViewTaa};
+pub(crate) use pipeline::{init_taa_resolve_pipeline, TaaResolvePipeline};
+pub(crate) use resources::{prepare_taa_textures, TaaHistoryCache, ViewTaa};
