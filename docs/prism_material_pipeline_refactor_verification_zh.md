@@ -527,3 +527,27 @@ Native 接线的直接定位为 `pkg/prism_render_app/src/lighting_gpu.rs` 的 `
 - Native `composite_material.wesl` 现将 shader admission 收窄为精确的 Single + FusedBuiltin 行（left 与 material program 相同、right sentinel、零 blended channels、无 mask、FullRadiance 编码及零 reserved）；其他 plan 不会把任意 endpoint 冒充完整材质响应。此为安全 fail-closed，不代表 MaskBlend/SplitResponse 已实现。
 - 本轮 `cargo check -p prism_render_app --lib` 在磁盘不足后，清理 `target` 重试仍因 `wgsl_parse` 未以 rlib 形式提供而未通过；随后 `CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 cargo build -p prism_render_app --lib --jobs 1 --message-format short` **通过**（退出码 0）。该 build 确实执行 `build.rs` 并完成 Native `composite_material.wesl` + generated material ABI 的链接，但不是 GPU dispatch/readback 或 shader 行为验收。本轮没有 GPU 行为验证。
 - P0 仍未完成：消费侧逐像素 identity/generation/revision、完整 SurfaceData、canonical builtin/registered evaluator、两臂 response 与 mask/domain composition、共同逻辑代际以及默认生产 graph 全帧 CPU/GPU parity 均开放。
+
+### 7.18 2026-10-28 material/execution snapshot 版本配对护栏（状态修订）
+
+- `MaterialRegistry::install_execution_tables` 在验证成功后递增 execution-table version，并将
+  fallback 与所有 header 槽加入 dirty 集合。`MaterialParameterBuffers::sync_registry` 消费这批行并把
+  当前 registry version 写入 `MaterialBufferSnapshot`；因此“只推进版本戳而不消费重装产生的 dirty batch”
+  已被当前实现关闭。行、参数 heap 和 texture rows 仍按字节/布局比较，仅在内容或 allocation 真正变化时
+  写入；所以 dirty batch 被消费不等于必然产生冗余 header 写入。
+- Native composite admission 要求 material snapshot 与已完成发布的 execution-table snapshot 具有相同且
+  非零的 registry execution-table version；不匹配时拒绝材质 composite，不再把两份“各自最新”的物理
+  buffer 拼成一个逻辑材质快照。该 admission 只关闭版本配对错误，不等于完整逻辑帧 bundle 原子发布。
+- 当前工作树可复核的定向测试如下，均为 **1 passed / 0 failed**：
+  `systems::composite_material_admission_tests::material_and_execution_snapshots_require_the_same_nonzero_registry_version`；
+  `material::buffers::ownership_tests::material_snapshot_tracks_execution_version_without_material_dirty_rows`；
+  `registry::tests::installing_execution_tables_redirties_every_material_header_row`。
+- 旧的 `lighting_trace_gpu.rs` 6/9 元组编译阻塞已关闭：当前 `uploaded_scene_identity` 的声明与构造均为
+  9 元组（包含三个 buffer ID），本轮 `prism_render_app --lib` 测试目标成功编译，未再出现该类型错误。
+  但 `pkg/prism_render_app/src/material/runtime_tail_tests.rs` 当前没有被 `material/mod.rs` 纳入测试模块；
+  以该测试名筛选时实际结果为 **0 passed / 0 failed / 823 filtered**。因此不能把其中的
+  “registry 重装→Native 上传→新 snapshot”跨层回归写成已通过，也不能据此声称真实生产 graph 或 GPU
+  帧 parity 已验证。
+- 仍未完成：GBuffer 逐像素 generation/revision/plan 身份、texture/VT 与 material/execution 的共同逻辑
+  frame bundle、完整 `SurfaceData`、canonical response、plan composition，以及默认 Native 全帧 GPU/CPU
+  parity。
