@@ -12,14 +12,15 @@ use bevy_ecs::{
 };
 use bevy_render::{
     render_resource::{BindGroup, Buffer, ComputePipeline},
-    renderer::RenderContext,
+    renderer::{RenderContext, RenderGraph, RenderGraphSystems, RenderQueue},
 };
 use prism_particle_render::{
-    particle_resource_payload, ParticleFabricScenePublication,
+    particle_resource_payload, ParticleFabricCompletion, ParticleFabricDeviceGeneration,
+    ParticleFabricScenePublication, ParticleFabricSceneTransport,
     PARTICLE_ALIVE_RESOURCE_PAYLOAD_ROLE, PARTICLE_STREAM_RESOURCE_PAYLOAD_ROLE,
 };
 use prism_render_architecture::render_fabric::{
-    DomainPayload, FrameRenderItem, RenderDomain, ResourceKey, PARTICLE_ALIVE_RESOURCE,
+    DomainPayload, FrameRenderItem, PassKey, RenderDomain, ResourceKey, PARTICLE_ALIVE_RESOURCE,
     PARTICLE_BRIDGE_PASS, PARTICLE_RENDER_PASS, PARTICLE_STREAM_RESOURCE,
 };
 use prism_render_driver::{BufferId, BufferUsages, Extent3d};
@@ -51,13 +52,17 @@ pub struct ParticleSceneFabricDispatch<'a> {
     pub bind_group: &'a BindGroup,
     pub bind_group_index: u32,
     pub workgroups: [u32; 3],
+    /// Buffer identity declared by the bind-group producer for contract validation.
+    pub stream: BufferId,
+    /// Buffer identity declared by the bind-group producer for contract validation.
+    pub alive: BufferId,
 }
 
 /// Inputs for one same-frame Particle bridge/render slice.
 pub struct ParticleSceneFabricInput<'a> {
     pub frame: u64,
     pub extent: Extent3d,
-    pub publication: &'a ParticleFabricScenePublication,
+    pub transport: &'a ParticleFabricSceneTransport,
     pub stream: Option<ParticleSceneFabricBuffer<'a>>,
     pub alive: Option<ParticleSceneFabricBuffer<'a>>,
     pub bridge: ParticleSceneFabricDispatch<'a>,
@@ -88,6 +93,8 @@ pub struct ParticleSceneFabricDispatchOwned {
     pub bind_group: BindGroup,
     pub bind_group_index: u32,
     pub workgroups: [u32; 3],
+    pub stream: BufferId,
+    pub alive: BufferId,
 }
 
 impl ParticleSceneFabricDispatchOwned {
@@ -98,12 +105,16 @@ impl ParticleSceneFabricDispatchOwned {
         bind_group: BindGroup,
         bind_group_index: u32,
         workgroups: [u32; 3],
+        stream: BufferId,
+        alive: BufferId,
     ) -> Self {
         Self {
             pipeline,
             bind_group,
             bind_group_index,
             workgroups,
+            stream,
+            alive,
         }
     }
 }
@@ -116,7 +127,8 @@ impl ParticleSceneFabricDispatchOwned {
 /// production error.
 pub struct ParticleSceneFabricHostInput {
     pub extent: Extent3d,
-    pub publication: ParticleFabricScenePublication,
+    pub transport: ParticleFabricSceneTransport,
+    pub completion: ParticleFabricCompletion,
     pub stream: Option<ParticleSceneFabricBufferOwned>,
     pub alive: Option<ParticleSceneFabricBufferOwned>,
     pub bridge: Option<ParticleSceneFabricDispatchOwned>,
@@ -130,7 +142,8 @@ impl ParticleSceneFabricHostInput {
     #[must_use]
     pub const fn new(
         extent: Extent3d,
-        publication: ParticleFabricScenePublication,
+        transport: ParticleFabricSceneTransport,
+        completion: ParticleFabricCompletion,
         stream: Option<ParticleSceneFabricBufferOwned>,
         alive: Option<ParticleSceneFabricBufferOwned>,
         bridge: Option<ParticleSceneFabricDispatchOwned>,
@@ -138,7 +151,8 @@ impl ParticleSceneFabricHostInput {
     ) -> Self {
         Self {
             extent,
-            publication,
+            transport,
+            completion,
             stream,
             alive,
             bridge,
@@ -147,10 +161,17 @@ impl ParticleSceneFabricHostInput {
     }
 
     fn borrowed(&self) -> Result<ParticleSceneFabricInput<'_>, ParticleSceneFabricError> {
+        validate_transport_dispatches(
+            &self.transport,
+            self.bridge.as_ref().map(|dispatch| dispatch.stream),
+            self.bridge.as_ref().map(|dispatch| dispatch.alive),
+            self.renderer.as_ref().map(|dispatch| dispatch.stream),
+            self.renderer.as_ref().map(|dispatch| dispatch.alive),
+        )?;
         Ok(ParticleSceneFabricInput {
-            frame: self.publication.frame(),
+            frame: self.transport.frame(),
             extent: self.extent,
-            publication: &self.publication,
+            transport: &self.transport,
             stream: self
                 .stream
                 .as_ref()
@@ -171,6 +192,8 @@ impl ParticleSceneFabricHostInput {
                     bind_group: &dispatch.bind_group,
                     bind_group_index: dispatch.bind_group_index,
                     workgroups: dispatch.workgroups,
+                    stream: dispatch.stream,
+                    alive: dispatch.alive,
                 })?,
             renderer: self
                 .renderer
@@ -181,6 +204,8 @@ impl ParticleSceneFabricHostInput {
                     bind_group: &dispatch.bind_group,
                     bind_group_index: dispatch.bind_group_index,
                     workgroups: dispatch.workgroups,
+                    stream: dispatch.stream,
+                    alive: dispatch.alive,
                 })?,
         })
     }
@@ -196,6 +221,8 @@ pub struct ParticleSceneFabricHost {
     pending: Option<ParticleSceneFabricHostInput>,
     last_error: Option<ParticleSceneFabricError>,
     last_recorded_frame: Option<u64>,
+    device_generation: Option<ParticleFabricDeviceGeneration>,
+    in_flight_completions: Vec<ParticleFabricCompletion>,
 }
 
 impl ParticleSceneFabricHost {
@@ -206,9 +233,27 @@ impl ParticleSceneFabricHost {
     ) -> Result<(), ParticleSceneFabricError> {
         if let Some(pending) = self.pending.as_ref() {
             return Err(ParticleSceneFabricError::PendingPublication {
-                frame: pending.publication.frame(),
+                frame: pending.transport.frame(),
             });
         }
+        if !input.transport.publication().is_empty() {
+            let expected = self
+                .device_generation
+                .ok_or(ParticleSceneFabricError::MissingHostDeviceGeneration)?;
+            if expected != input.transport.device_generation() {
+                return Err(ParticleSceneFabricError::DeviceGenerationMismatch {
+                    expected,
+                    actual: input.transport.device_generation(),
+                });
+            }
+        }
+        validate_transport_dispatches(
+            &input.transport,
+            input.bridge.as_ref().map(|dispatch| dispatch.stream),
+            input.bridge.as_ref().map(|dispatch| dispatch.alive),
+            input.renderer.as_ref().map(|dispatch| dispatch.stream),
+            input.renderer.as_ref().map(|dispatch| dispatch.alive),
+        )?;
         self.last_error = None;
         self.pending = Some(input);
         Ok(())
@@ -222,18 +267,33 @@ impl ParticleSceneFabricHost {
         let Some(input) = self.pending.take() else {
             return Ok(None);
         };
-        if input.publication.frame() != frame {
+        if input.transport.frame() != frame {
             let error = ParticleSceneFabricError::FrameMismatch {
                 expected: frame,
-                actual: input.publication.frame(),
+                actual: input.transport.frame(),
             };
             self.last_error = Some(ParticleSceneFabricError::FrameMismatch {
                 expected: frame,
-                actual: input.publication.frame(),
+                actual: input.transport.frame(),
             });
             return Err(error);
         }
         Ok(Some(input))
+    }
+
+    /// Sets the device/resource-table generation accepted by this host.
+    ///
+    /// The SceneRhi bridge cannot infer the producer's native generation from
+    /// wgpu handles, so the RenderApp owner must configure this value from the
+    /// same device-table lifecycle that issued the transport leases.
+    pub fn set_device_generation(&mut self, generation: ParticleFabricDeviceGeneration) {
+        self.device_generation = Some(generation);
+    }
+
+    /// Returns the generation currently accepted by this host, if configured.
+    #[must_use]
+    pub const fn device_generation(&self) -> Option<ParticleFabricDeviceGeneration> {
+        self.device_generation
     }
 
     /// Records the frame whose command buffer was handed to the host context.
@@ -266,37 +326,37 @@ impl ParticleSceneFabricHost {
 /// accidental reuse.
 #[derive(Default)]
 pub struct ParticleSceneFabricSlot {
-    publication: Option<ParticleFabricScenePublication>,
+    transport: Option<ParticleFabricSceneTransport>,
 }
 
 impl ParticleSceneFabricSlot {
     pub fn publish(
         &mut self,
-        result: Result<ParticleFabricScenePublication, ParticleSceneFabricError>,
+        result: Result<ParticleFabricSceneTransport, ParticleSceneFabricError>,
     ) -> Result<(), ParticleSceneFabricError> {
         match result {
             Ok(publication) => {
-                self.publication = Some(publication);
+                self.transport = Some(publication);
                 Ok(())
             }
             Err(error) => {
-                self.publication = None;
+                self.transport = None;
                 Err(error)
             }
         }
     }
 
     pub fn clear(&mut self) {
-        self.publication = None;
+        self.transport = None;
     }
 
-    pub fn take_for_frame(&mut self, frame: u64) -> Option<ParticleFabricScenePublication> {
-        let publication = self.publication.take()?;
-        (publication.frame() == frame).then_some(publication)
+    pub fn take_for_frame(&mut self, frame: u64) -> Option<ParticleFabricSceneTransport> {
+        let transport = self.transport.take()?;
+        (transport.frame() == frame).then_some(transport)
     }
 
     pub fn is_empty(&self) -> bool {
-        self.publication.is_none()
+        self.transport.is_none()
     }
 }
 
@@ -326,6 +386,23 @@ pub enum ParticleSceneFabricError {
         expected: BufferId,
         actual: BufferId,
     },
+    #[error("Particle dispatch stream BufferId {actual:?} does not match transport {expected:?}")]
+    DispatchStreamIdMismatch {
+        expected: BufferId,
+        actual: BufferId,
+    },
+    #[error("Particle dispatch alive BufferId {actual:?} does not match transport {expected:?}")]
+    DispatchAliveIdMismatch {
+        expected: BufferId,
+        actual: BufferId,
+    },
+    #[error("Particle host has no configured device generation")]
+    MissingHostDeviceGeneration,
+    #[error("Particle transport device generation {actual:?} does not match host {expected:?}")]
+    DeviceGenerationMismatch {
+        expected: ParticleFabricDeviceGeneration,
+        actual: ParticleFabricDeviceGeneration,
+    },
     #[error(
         "Particle {resource:?} host buffer is {actual} bytes, publication requires {required}"
     )]
@@ -342,8 +419,110 @@ pub enum ParticleSceneFabricError {
     },
     #[error("Particle semantic publication is invalid: {0}")]
     SemanticMismatch(&'static str),
+    #[error("Particle active pass {0:?} is already present in the shared batch")]
+    DuplicatePass(PassKey),
     #[error(transparent)]
     Runtime(#[from] SceneFabricRuntimeError),
+}
+
+fn validate_transport_dispatches(
+    transport: &ParticleFabricSceneTransport,
+    bridge_stream: Option<BufferId>,
+    bridge_alive: Option<BufferId>,
+    renderer_stream: Option<BufferId>,
+    renderer_alive: Option<BufferId>,
+) -> Result<(), ParticleSceneFabricError> {
+    if transport.publication().is_empty() {
+        if bridge_stream.is_some()
+            || bridge_alive.is_some()
+            || renderer_stream.is_some()
+            || renderer_alive.is_some()
+        {
+            return Err(ParticleSceneFabricError::SemanticMismatch(
+                "empty Particle transport carries physical dispatch metadata",
+            ));
+        }
+        return Ok(());
+    }
+
+    let expected_stream = transport
+        .stream()
+        .ok_or(ParticleSceneFabricError::MissingStream)?
+        .buffer();
+    let expected_alive = transport
+        .alive()
+        .ok_or(ParticleSceneFabricError::MissingAlive)?
+        .buffer();
+    let bridge_stream = bridge_stream.ok_or(ParticleSceneFabricError::MissingBridgeDispatch)?;
+    let bridge_alive = bridge_alive.ok_or(ParticleSceneFabricError::MissingBridgeDispatch)?;
+    let renderer_stream =
+        renderer_stream.ok_or(ParticleSceneFabricError::MissingRendererDispatch)?;
+    let renderer_alive = renderer_alive.ok_or(ParticleSceneFabricError::MissingRendererDispatch)?;
+    for actual in [bridge_stream, renderer_stream] {
+        if actual != expected_stream {
+            return Err(ParticleSceneFabricError::DispatchStreamIdMismatch {
+                expected: expected_stream,
+                actual,
+            });
+        }
+    }
+    for actual in [bridge_alive, renderer_alive] {
+        if actual != expected_alive {
+            return Err(ParticleSceneFabricError::DispatchAliveIdMismatch {
+                expected: expected_alive,
+                actual,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Appends one non-empty Particle publication to caller-owned shared
+/// SceneFabric batch vectors.
+///
+/// This is the production adapter for the unified path. It does not prepare
+/// or record a private runtime: the caller can move the resulting vectors into
+/// one shared [`SceneFabricRequest`] or coordinator input. The borrowed
+/// [`ParticleSceneFabricHostInput`] must remain alive until that shared batch
+/// has been recorded and its completion policy has run, which keeps every
+/// real Buffer, ComputePipeline, BindGroup and completion owner valid.
+///
+/// Empty publications return `Ok(false)` and append nothing. A non-empty
+/// publication either appends its complete two-pass request or returns an
+/// error before any output vector is mutated.
+pub(crate) fn append_particle_fabric_parts<'a, 'lease>(
+    input: &'a ParticleSceneFabricHostInput,
+    items: &mut Vec<FrameRenderItem>,
+    active_passes: &mut Vec<PassKey>,
+    resources: &mut Vec<SceneFabricResource<'a, 'lease>>,
+    recorders: &mut Vec<SceneFabricPass<'a>>,
+) -> Result<bool, ParticleSceneFabricError> {
+    if input.transport.publication().is_empty() {
+        validate_transport_dispatches(
+            &input.transport,
+            input.bridge.as_ref().map(|dispatch| dispatch.stream),
+            input.bridge.as_ref().map(|dispatch| dispatch.alive),
+            input.renderer.as_ref().map(|dispatch| dispatch.stream),
+            input.renderer.as_ref().map(|dispatch| dispatch.alive),
+        )?;
+        return Ok(false);
+    }
+
+    let borrowed = input.borrowed()?;
+    let Some(request) = build_particle_fabric_request(borrowed)? else {
+        return Ok(false);
+    };
+
+    for &pass in request.active_passes {
+        if active_passes.contains(&pass) {
+            return Err(ParticleSceneFabricError::DuplicatePass(pass));
+        }
+    }
+    items.extend_from_slice(request.items);
+    active_passes.extend_from_slice(request.active_passes);
+    resources.extend(request.resources);
+    recorders.extend(request.recorders);
+    Ok(true)
 }
 
 /// Imports the publication's real stream/alive buffers and records the two
@@ -353,24 +532,70 @@ pub(crate) fn prepare_particle_fabric<'a>(
     rhi: &SceneRhi,
     input: ParticleSceneFabricInput<'a>,
 ) -> Result<Option<SceneFabricRuntime<'a>>, ParticleSceneFabricError> {
-    let publication = input.publication;
+    let Some(request) = build_particle_fabric_request(input)? else {
+        return Ok(None);
+    };
+    Ok(Some(prepare_with_templates(
+        scene_fabric,
+        rhi,
+        request,
+        &[],
+    )?))
+}
+
+fn build_particle_fabric_request<'a, 'lease>(
+    input: ParticleSceneFabricInput<'a>,
+) -> Result<Option<SceneFabricRequest<'a, 'lease>>, ParticleSceneFabricError> {
+    let ParticleSceneFabricInput {
+        frame,
+        extent,
+        transport,
+        stream,
+        alive,
+        bridge,
+        renderer,
+    } = input;
+    let publication = transport.publication();
     if publication.is_empty() {
         return Ok(None);
     }
-    if input.frame != publication.frame() {
+    if frame != publication.frame() {
         return Err(ParticleSceneFabricError::FrameMismatch {
             expected: publication.frame(),
-            actual: input.frame,
+            actual: frame,
         });
     }
 
     validate_items(publication.items())?;
     validate_draw_bindings(publication)?;
+    validate_transport_dispatches(
+        transport,
+        Some(bridge.stream),
+        Some(bridge.alive),
+        Some(renderer.stream),
+        Some(renderer.alive),
+    )?;
 
-    let stream = input
-        .stream
+    let stream = stream.ok_or(ParticleSceneFabricError::MissingStream)?;
+    let alive = alive.ok_or(ParticleSceneFabricError::MissingAlive)?;
+    let transport_stream = transport
+        .stream()
         .ok_or(ParticleSceneFabricError::MissingStream)?;
-    let alive = input.alive.ok_or(ParticleSceneFabricError::MissingAlive)?;
+    let transport_alive = transport
+        .alive()
+        .ok_or(ParticleSceneFabricError::MissingAlive)?;
+    if stream.id != transport_stream.buffer() {
+        return Err(ParticleSceneFabricError::StreamIdMismatch {
+            expected: transport_stream.buffer(),
+            actual: stream.id,
+        });
+    }
+    if alive.id != transport_alive.buffer() {
+        return Err(ParticleSceneFabricError::AliveIdMismatch {
+            expected: transport_alive.buffer(),
+            actual: alive.id,
+        });
+    }
     let expected_stream = publication.draws()[0].stream;
     let expected_alive = publication.draws()[0].alive;
     validate_host_buffer(PARTICLE_STREAM_RESOURCE, expected_stream, stream)?;
@@ -398,39 +623,33 @@ pub(crate) fn prepare_particle_fabric<'a>(
         SceneFabricPass::Compute {
             pass: PARTICLE_BRIDGE_PASS,
             dispatches: vec![SceneFabricDispatch {
-                pipeline: input.bridge.pipeline,
-                bind_group: input.bridge.bind_group,
-                bind_group_index: input.bridge.bind_group_index,
-                workgroups: input.bridge.workgroups,
+                pipeline: bridge.pipeline,
+                bind_group: bridge.bind_group,
+                bind_group_index: bridge.bind_group_index,
+                workgroups: bridge.workgroups,
                 push_constants: None,
             }],
         },
         SceneFabricPass::Compute {
             pass: PARTICLE_RENDER_PASS,
             dispatches: vec![SceneFabricDispatch {
-                pipeline: input.renderer.pipeline,
-                bind_group: input.renderer.bind_group,
-                bind_group_index: input.renderer.bind_group_index,
-                workgroups: input.renderer.workgroups,
+                pipeline: renderer.pipeline,
+                bind_group: renderer.bind_group,
+                bind_group_index: renderer.bind_group_index,
+                workgroups: renderer.workgroups,
                 push_constants: None,
             }],
         },
     ];
-    let request = SceneFabricRequest {
+    Ok(Some(SceneFabricRequest {
         frame: publication.frame(),
-        extent: input.extent,
+        extent,
         items: publication.items(),
         active_passes: &[PARTICLE_BRIDGE_PASS, PARTICLE_RENDER_PASS],
         fulfilled_dependencies: &[],
         resources,
         recorders,
-    };
-    Ok(Some(prepare_with_templates(
-        scene_fabric,
-        rhi,
-        request,
-        &[],
-    )?))
+    }))
 }
 
 /// Production Bevy host entry point: import the already-authenticated native
@@ -474,12 +693,13 @@ pub(crate) fn record_particle_fabric_system(
         return;
     };
 
-    if input.publication.is_empty() {
-        host.record_success(input.publication.frame());
+    if input.transport.publication().is_empty() {
+        input.completion.complete();
+        host.record_success(input.transport.frame());
         return;
     }
 
-    let frame_number = input.publication.frame();
+    let frame_number = input.transport.frame();
     let borrowed = match input.borrowed() {
         Ok(input) => input,
         Err(error) => {
@@ -488,11 +708,30 @@ pub(crate) fn record_particle_fabric_system(
         }
     };
     match record_particle_fabric(scene_fabric.as_ref(), rhi.as_ref(), borrowed, &mut context) {
-        Ok(Some(_recorded)) => host.record_success(frame_number),
+        Ok(Some(_recorded)) => {
+            host.in_flight_completions.push(input.completion);
+            host.record_success(frame_number);
+        }
         Ok(None) => host.record_error(ParticleSceneFabricError::SemanticMismatch(
             "non-empty Particle publication produced no recorded graph",
         )),
         Err(error) => host.record_error(error),
+    }
+}
+
+/// Registers producer completion callbacks only after Bevy has submitted the
+/// RenderGraph command buffers for this frame.
+fn finish_particle_fabric_system(
+    mut host: ResMut<ParticleSceneFabricHost>,
+    queue: Option<Res<RenderQueue>>,
+) {
+    let completions = std::mem::take(&mut host.in_flight_completions);
+    let Some(queue) = queue else {
+        host.in_flight_completions.extend(completions);
+        return;
+    };
+    for completion in completions {
+        queue.on_submitted_work_done(Box::new(move || completion.complete()));
     }
 }
 
@@ -508,16 +747,34 @@ pub fn install_particle_fabric(render_app: &mut bevy_app::SubApp) {
         bevy_core_pipeline::Core3d,
         record_particle_fabric_system.before(bevy_core_pipeline::Core3dSystems::MainPass),
     );
+    render_app.add_systems(
+        RenderGraph,
+        finish_particle_fabric_system.in_set(RenderGraphSystems::Finish),
+    );
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use prism_particle_render::{
+        ParticleFabricGpuBuffer, ParticleFabricGpuDraw, ParticleFabricLeaseIssuer,
+        ParticleFabricScenePublication,
+    };
+    use prism_render_architecture::render_fabric::{DomainObjectHandle, RenderObjectId};
+    use prism_render_driver::BufferState;
 
     fn empty_input(frame: u64) -> ParticleSceneFabricHostInput {
+        let transport = ParticleFabricSceneTransport::try_new(
+            ParticleFabricScenePublication::new(frame, Vec::new(), Vec::new()),
+            ParticleFabricDeviceGeneration::new(1),
+            None,
+            None,
+        )
+        .expect("empty transport");
         ParticleSceneFabricHostInput::new(
             Extent3d::new_2d(1, 1),
-            ParticleFabricScenePublication::new(frame, Vec::new(), Vec::new()),
+            transport,
+            ParticleFabricCompletion::new(|| {}),
             None,
             None,
             None,
@@ -526,22 +783,48 @@ mod tests {
     }
 
     #[test]
+    fn empty_publication_does_not_append_a_fake_particle_batch() {
+        let input = empty_input(4);
+        let mut items = Vec::new();
+        let mut active_passes = Vec::new();
+        let mut resources = Vec::new();
+        let mut recorders = Vec::new();
+
+        assert!(!append_particle_fabric_parts(
+            &input,
+            &mut items,
+            &mut active_passes,
+            &mut resources,
+            &mut recorders,
+        )
+        .unwrap());
+        assert!(items.is_empty());
+        assert!(active_passes.is_empty());
+        assert!(resources.is_empty());
+        assert!(recorders.is_empty());
+    }
+
+    #[test]
     fn host_consumes_only_the_shared_frame_and_clears_stale_publication() {
         let mut host = ParticleSceneFabricHost::default();
         host.publish(empty_input(7))
             .expect("first publication accepted");
 
-        let error = host
-            .take_for_frame(8)
-            .expect_err("stale publication must be rejected");
+        let result = host.take_for_frame(8);
         assert!(matches!(
-            error,
-            ParticleSceneFabricError::FrameMismatch {
+            result,
+            Err(ParticleSceneFabricError::FrameMismatch {
                 expected: 8,
                 actual: 7
-            }
+            })
         ));
-        assert_eq!(host.last_error(), Some(&error));
+        assert!(matches!(
+            host.last_error(),
+            Some(ParticleSceneFabricError::FrameMismatch {
+                expected: 8,
+                actual: 7
+            })
+        ));
         assert!(host.take_for_frame(7).unwrap().is_none());
     }
 
@@ -551,18 +834,23 @@ mod tests {
         host.publish(empty_input(3))
             .expect("first publication accepted");
 
-        let error = host
-            .publish(empty_input(4))
-            .expect_err("mailbox must be one-shot");
+        let result = host.publish(empty_input(4));
         assert!(matches!(
-            error,
-            ParticleSceneFabricError::PendingPublication { frame: 3 }
+            result,
+            Err(ParticleSceneFabricError::PendingPublication { frame: 3 })
         ));
         assert!(host.take_for_frame(3).unwrap().is_some());
     }
 
     #[test]
     fn non_empty_host_input_requires_every_real_physical_binding() {
+        let mut issuer = ParticleFabricLeaseIssuer::new(ParticleFabricDeviceGeneration::new(1));
+        let stream_lease = issuer
+            .issue(BufferId::from_parts(1, 1), 11)
+            .expect("stream lease");
+        let alive_lease = issuer
+            .issue(BufferId::from_parts(2, 1), 11)
+            .expect("alive lease");
         let publication = ParticleFabricScenePublication::new(
             11,
             vec![FrameRenderItem {
@@ -615,17 +903,126 @@ mod tests {
                 },
             }],
         );
+        let transport = ParticleFabricSceneTransport::try_new(
+            publication,
+            issuer.device_generation(),
+            Some(stream_lease),
+            Some(alive_lease),
+        )
+        .expect("transport construction");
         let host = ParticleSceneFabricHostInput::new(
             Extent3d::new_2d(1, 1),
-            publication,
+            transport,
+            ParticleFabricCompletion::new(|| {}),
             None,
             None,
             None,
             None,
         );
+        let mut items = Vec::new();
+        let mut active_passes = Vec::new();
+        let mut resources = Vec::new();
+        let mut recorders = Vec::new();
         assert!(matches!(
-            host.borrowed(),
+            append_particle_fabric_parts(
+                &host,
+                &mut items,
+                &mut active_passes,
+                &mut resources,
+                &mut recorders,
+            ),
             Err(ParticleSceneFabricError::MissingBridgeDispatch)
+        ));
+        assert!(items.is_empty());
+        assert!(active_passes.is_empty());
+        assert!(resources.is_empty());
+        assert!(recorders.is_empty());
+    }
+
+    #[test]
+    fn host_rejects_transport_from_a_different_device_generation_before_import() {
+        let mut issuer = ParticleFabricLeaseIssuer::new(ParticleFabricDeviceGeneration::new(7));
+        let stream = BufferId::from_parts(11, 1);
+        let alive = BufferId::from_parts(12, 1);
+        let semantic_stream = particle_resource_payload(
+            PARTICLE_STREAM_RESOURCE,
+            PARTICLE_STREAM_RESOURCE_PAYLOAD_ROLE,
+        )
+        .expect("stream template");
+        let semantic_alive = particle_resource_payload(
+            PARTICLE_ALIVE_RESOURCE,
+            PARTICLE_ALIVE_RESOURCE_PAYLOAD_ROLE,
+        )
+        .expect("alive template");
+        let object = RenderObjectId::Particle(DomainObjectHandle::new(2, 1));
+        let publication = ParticleFabricScenePublication::new(
+            12,
+            vec![
+                FrameRenderItem {
+                    object_id: object,
+                    domain: RenderDomain::Particle,
+                    history_key: 0,
+                    motion_source: prism_render_architecture::motion::MotionSource::Particle,
+                    payload: DomainPayload::Resource(semantic_stream),
+                },
+                FrameRenderItem {
+                    object_id: object,
+                    domain: RenderDomain::Particle,
+                    history_key: 0,
+                    motion_source: prism_render_architecture::motion::MotionSource::Particle,
+                    payload: DomainPayload::Resource(semantic_alive),
+                },
+            ],
+            vec![ParticleFabricGpuDraw {
+                object_id: object,
+                renderer_index: 0,
+                history_key: 0,
+                bounds_min: [-1.0; 3],
+                bounds_max: [1.0; 3],
+                geometry:
+                    prism_render_architecture::particle::indirect_draw::RendererGeometry::Sprite {
+                        alive_count: 1,
+                        first_instance: 0,
+                    },
+                stream: ParticleFabricGpuBuffer {
+                    semantic: semantic_stream,
+                    buffer: stream,
+                    version: stream.generation(),
+                    size: 256,
+                    usage: BufferUsages::STORAGE,
+                    entry_state: BufferState::initial(),
+                },
+                alive: ParticleFabricGpuBuffer {
+                    semantic: semantic_alive,
+                    buffer: alive,
+                    version: alive.generation(),
+                    size: 256,
+                    usage: BufferUsages::STORAGE,
+                    entry_state: BufferState::initial(),
+                },
+            }],
+        );
+        let transport = ParticleFabricSceneTransport::try_new(
+            publication,
+            ParticleFabricDeviceGeneration::new(7),
+            Some(issuer.issue(stream, 12).unwrap()),
+            Some(issuer.issue(alive, 12).unwrap()),
+        )
+        .expect("transport construction");
+        let mut host = ParticleSceneFabricHost::default();
+        host.set_device_generation(ParticleFabricDeviceGeneration::new(8));
+        let result = host.publish(ParticleSceneFabricHostInput::new(
+            Extent3d::new_2d(1, 1),
+            transport,
+            ParticleFabricCompletion::new(|| {}),
+            None,
+            None,
+            None,
+            None,
+        ));
+        assert!(matches!(
+            result,
+            Err(ParticleSceneFabricError::DeviceGenerationMismatch { .. })
         ));
     }
 }

@@ -12,9 +12,14 @@ pub use prism_particle_render::{
 #[cfg(feature = "legacy-bevy")]
 mod fabric;
 #[cfg(feature = "legacy-bevy")]
+pub(crate) use fabric::append_particle_fabric_parts;
+#[cfg(feature = "legacy-bevy")]
+#[cfg(test)]
+pub(crate) use fabric::prepare_particle_fabric;
+#[cfg(feature = "legacy-bevy")]
 pub use fabric::{
-    install_particle_fabric,
-    ParticleSceneFabricBuffer, ParticleSceneFabricBufferOwned, ParticleSceneFabricDispatch,
-    ParticleSceneFabricDispatchOwned, ParticleSceneFabricError, ParticleSceneFabricHost,
-    ParticleSceneFabricHostInput, ParticleSceneFabricInput, ParticleSceneFabricSlot,
+    install_particle_fabric, ParticleSceneFabricBuffer, ParticleSceneFabricBufferOwned,
+    ParticleSceneFabricDispatch, ParticleSceneFabricDispatchOwned, ParticleSceneFabricError,
+    ParticleSceneFabricHost, ParticleSceneFabricHostInput, ParticleSceneFabricInput,
+    ParticleSceneFabricSlot,
 };
