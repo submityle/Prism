@@ -2,7 +2,7 @@
 //! clear-coat shading model.
 //!
 //! This is the paint-and-lacquer material: a pigmented matte base (modelled by
-//! an [`OrenNayar`] diffuse lobe) sealed under the thin dielectric clear coat
+//! the energy-preserving [`EonDiffuse`] diffuse lobe) sealed under the thin dielectric clear coat
 //! from [`super::coat`]. It is the diffuse counterpart of
 //! [`super::clearcoat::ClearcoatConductor`] and reuses the exact same
 //! [`CoatLayer`], so the coat contributes an additive `GGX` dielectric highlight
@@ -16,7 +16,7 @@
 //! transcendental budget of the reference path tracer.
 
 use super::coat::CoatLayer;
-use super::oren_nayar::OrenNayar;
+use super::eon::EonDiffuse;
 #[cfg(test)]
 use super::sampler::Rng;
 use super::sampler::SampleSource;
@@ -35,14 +35,21 @@ pub struct ClearcoatDiffuseSample {
 
 /// A diffuse base viewed through a dielectric clear coat.
 ///
-/// The base is an [`OrenNayar`] rough-diffuse lobe; the coat is a reusable
+/// The base is an [`EonDiffuse`] rough-diffuse lobe; the coat is a reusable
 /// [`CoatLayer`] dielectric interface scaled by its own weight in `[0, 1]`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ClearcoatDiffuse {
     /// The rough-diffuse base layer seen through the coat.
-    base: OrenNayar,
+    base: EonDiffuse,
+    /// Scale for the complete diffuse response, including EON compensation.
+    base_weight: f32,
     /// The thin dielectric clear coat layered over the base.
     coat: CoatLayer,
+    /// Coat-medium color, applied to substrate transmission rather than to the
+    /// dielectric interface highlight (OpenPBR coat-color semantics).
+    coat_color: Vec3,
+    coat_ior: f32,
+    coat_weight: f32,
 }
 
 impl ClearcoatDiffuse {
@@ -60,17 +67,51 @@ impl ClearcoatDiffuse {
         coat_color: Vec3,
         coat_darkening: f32,
     ) -> Self {
+        Self::new_weighted(
+            albedo,
+            sigma,
+            1.0,
+            coat_roughness,
+            coat_ior,
+            coat_weight,
+            coat_color,
+            coat_darkening,
+        )
+    }
+
+    /// Builds an OpenPBR clear-coat layered diffuse response with explicit
+    /// base-layer weight. The weight scales the complete base BRDF, including
+    /// rough-diffuse multiple-scattering compensation, but not the coat lobe.
+    #[must_use]
+    pub fn new_weighted(
+        albedo: Vec3,
+        sigma: f32,
+        base_weight: f32,
+        coat_roughness: f32,
+        coat_ior: f32,
+        coat_weight: f32,
+        coat_color: Vec3,
+        coat_darkening: f32,
+    ) -> Self {
         Self {
-            base: OrenNayar::new(albedo, sigma),
+            base: EonDiffuse::new(albedo, sigma),
+            base_weight: base_weight.clamp(0.0, 1.0),
             coat: CoatLayer::new(
                 coat_roughness,
                 coat_ior,
                 coat_weight,
-                coat_color,
+                Vec3::ONE,
                 coat_darkening,
                 ((albedo.x + albedo.y + albedo.z) / 3.0).clamp(0.0, 1.0),
                 1.0,
             ),
+            coat_color: Vec3::new(
+                coat_color.x.clamp(0.0, 1.0),
+                coat_color.y.clamp(0.0, 1.0),
+                coat_color.z.clamp(0.0, 1.0),
+            ),
+            coat_ior: coat_ior.max(1.0 + 1.0e-3),
+            coat_weight: coat_weight.clamp(0.0, 1.0),
         }
     }
 
@@ -87,10 +128,13 @@ impl ClearcoatDiffuse {
         }
         let t_o = self.coat.transmission(cos_o);
         let t_i = self.coat.transmission(cos_i);
+        let absorption = coat_absorption(self.coat_color, cos_i, cos_o, self.coat_ior);
+        let absorption = Vec3::ONE.add(absorption.sub(Vec3::ONE).scale(self.coat_weight));
         let base = self
             .base
             .evaluate(wo, wi, normal)
-            .scale(t_o * t_i * self.coat.base_darkening(cos_o));
+            .mul(absorption)
+            .scale(self.base_weight * t_o * t_i * self.coat.base_darkening(cos_o));
         base.add(self.coat.lobe(wo, wi, normal, cos_o, cos_i))
     }
 
@@ -151,8 +195,28 @@ impl ClearcoatDiffuse {
     }
 }
 
+/// OpenPBR two-way coat-medium transmittance applied to the substrate only.
+fn coat_absorption(coat_color: Vec3, mu_i: f32, mu_o: f32, eta: f32) -> Vec3 {
+    let refracted_cosine = |mu: f32| {
+        let mu = mu.clamp(0.0, 1.0);
+        (1.0 - (1.0 - mu * mu) / (eta * eta)).max(0.0).sqrt()
+    };
+    let ti = refracted_cosine(mu_i);
+    let to = refracted_cosine(mu_o);
+    if ti <= 0.0 || to <= 0.0 {
+        return Vec3::ZERO;
+    }
+    let exponent = 0.5 * (ti.recip() + to.recip());
+    Vec3::new(
+        coat_color.x.powf(exponent),
+        coat_color.y.powf(exponent),
+        coat_color.z.powf(exponent),
+    )
+}
+
 #[cfg(test)]
 mod tests {
+    use super::super::oren_nayar::OrenNayar;
     use super::*;
 
     /// The macroscopic surface normal used throughout the tests (`+y`).
@@ -189,6 +253,24 @@ mod tests {
             Vec3::ONE,
             coat_darkening,
         )
+    }
+
+    #[test]
+    fn base_weight_scales_only_the_complete_substrate_response() {
+        let full = ClearcoatDiffuse::new_weighted(ALBEDO, 0.6, 1.0, 0.2, 1.5, 0.8, Vec3::ONE, 0.7);
+        let quarter =
+            ClearcoatDiffuse::new_weighted(ALBEDO, 0.6, 0.25, 0.2, 1.5, 0.8, Vec3::ONE, 0.7);
+        let no_base =
+            ClearcoatDiffuse::new_weighted(ALBEDO, 0.6, 0.0, 0.2, 1.5, 0.8, Vec3::ONE, 0.7);
+        let wo = view_at(0.63);
+        let wi = Vec3::new(-0.31, 0.91, 0.27).normalize_or_zero();
+        let substrate_full = full.evaluate(wo, wi, N).sub(no_base.evaluate(wo, wi, N));
+        let substrate_quarter = quarter.evaluate(wo, wi, N).sub(no_base.evaluate(wo, wi, N));
+        assert!(substrate_quarter.sub(substrate_full.scale(0.25)).length() < 1.0e-6);
+        assert!(
+            no_base.evaluate(wo, wi, N).length() > 0.0,
+            "the independent coat lobe survives zero base weight"
+        );
     }
 
     /// A view direction at the given cosine to the normal, tilted in the `x-y`

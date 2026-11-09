@@ -38,6 +38,12 @@ pub struct ClearcoatConductor {
     base: Conductor,
     /// The thin dielectric clear coat layered over the base.
     coat: CoatLayer,
+    /// Two-way normal-incidence transmittance of the coat medium.
+    coat_color: Vec3,
+    /// Relative index used for the coat's refracted substrate path.
+    coat_ior: f32,
+    /// Presence of the coat, used to mix its absorption with the uncovered base.
+    coat_weight: f32,
 }
 
 impl ClearcoatConductor {
@@ -64,11 +70,18 @@ impl ClearcoatConductor {
                 coat_roughness,
                 coat_ior,
                 coat_weight,
-                coat_color,
+                Vec3::ONE,
                 coat_darkening,
                 base_albedo,
                 roughness,
             ),
+            coat_color: Vec3::new(
+                coat_color.x.clamp(0.0, 1.0),
+                coat_color.y.clamp(0.0, 1.0),
+                coat_color.z.clamp(0.0, 1.0),
+            ),
+            coat_ior: coat_ior.max(1.0 + 1.0e-3),
+            coat_weight: coat_weight.clamp(0.0, 1.0),
         }
     }
 
@@ -85,9 +98,12 @@ impl ClearcoatConductor {
         }
         let t_o = self.coat.transmission(cos_o);
         let t_i = self.coat.transmission(cos_i);
+        let absorption = coat_absorption(self.coat_color, cos_i, cos_o, self.coat_ior);
+        let absorption = Vec3::ONE.add(absorption.sub(Vec3::ONE).scale(self.coat_weight));
         let base = self
             .base
             .evaluate(wo, wi, normal)
+            .mul(absorption)
             .scale(t_o * t_i * self.coat.base_darkening(cos_o));
         base.add(self.coat.lobe(wo, wi, normal, cos_o, cos_i))
     }
@@ -147,6 +163,26 @@ impl ClearcoatConductor {
             pdf,
         })
     }
+}
+
+/// OpenPBR two-way coat transmittance applied to the substrate, never the
+/// coat's own specular reflection. `coat_color` is defined at normal incidence.
+fn coat_absorption(coat_color: Vec3, mu_i: f32, mu_o: f32, eta: f32) -> Vec3 {
+    let refracted_cosine = |mu: f32| {
+        let mu = mu.clamp(0.0, 1.0);
+        (1.0 - (1.0 - mu * mu) / (eta * eta)).max(0.0).sqrt()
+    };
+    let ti = refracted_cosine(mu_i);
+    let to = refracted_cosine(mu_o);
+    if ti <= 0.0 || to <= 0.0 {
+        return Vec3::ZERO;
+    }
+    let exponent = 0.5 * (ti.recip() + to.recip());
+    Vec3::new(
+        coat_color.x.powf(exponent),
+        coat_color.y.powf(exponent),
+        coat_color.z.powf(exponent),
+    )
 }
 
 #[cfg(test)]
@@ -244,6 +280,75 @@ mod tests {
             actual.max_component() < neutral.evaluate(wo, wi, N).max_component(),
             "darkening should attenuate the substrate while preserving the coat highlight"
         );
+    }
+
+    #[test]
+    fn partial_coat_darkening_is_applied_once_to_the_substrate() {
+        let neutral = coated_gold_with_darkening(0.45, 0.2, 0.0);
+        let darkened = coated_gold_with_darkening(0.45, 0.2, 1.0);
+        let wo = view_at(0.31);
+        let wi = Vec3::new(-0.25, 0.91, 0.32).normalize_or_zero();
+        let cos_o = N.dot(wo);
+        let cos_i = N.dot(wi);
+
+        let throughput = darkened.coat.transmission(cos_o) * darkened.coat.transmission(cos_i);
+        let substrate = darkened.base.evaluate(wo, wi, N);
+        let darkening = darkened.coat.base_darkening(cos_o);
+        let expected_base = substrate.scale(throughput * darkening);
+        let expected_coat = darkened.coat.lobe(wo, wi, N, cos_o, cos_i);
+        let expected = expected_base.add(expected_coat);
+        let actual = darkened.evaluate(wo, wi, N);
+
+        assert!(actual.sub(expected).length() < 1.0e-6);
+        assert!(darkening < 1.0);
+        assert!(
+            expected_coat
+                .sub(neutral.coat.lobe(wo, wi, N, cos_o, cos_i))
+                .length()
+                < 1.0e-6,
+            "darkening must not affect the additive coat lobe"
+        );
+        assert!(
+            actual.sub(neutral.evaluate(wo, wi, N)).length() > 1.0e-6,
+            "partial coat darkening must measurably attenuate its substrate"
+        );
+    }
+
+    #[test]
+    fn coat_color_absorbs_the_substrate_without_tinting_the_highlight() {
+        let neutral = ClearcoatConductor::new(
+            Metal::Gold.complex_ior().0,
+            Metal::Gold.complex_ior().1,
+            0.3,
+            0.2,
+            1.5,
+            0.45,
+            Vec3::ONE,
+            0.0,
+        );
+        let tinted = ClearcoatConductor::new(
+            Metal::Gold.complex_ior().0,
+            Metal::Gold.complex_ior().1,
+            0.3,
+            0.2,
+            1.5,
+            0.45,
+            Vec3::new(0.25, 0.7, 0.9),
+            0.0,
+        );
+        let wo = view_at(0.47);
+        let wi = view_at(0.76);
+        let cos_o = N.dot(wo);
+        let cos_i = N.dot(wi);
+        let transmission = tinted.coat.transmission(cos_o) * tinted.coat.transmission(cos_i);
+        let absorption = coat_absorption(tinted.coat_color, cos_i, cos_o, tinted.coat_ior);
+        let mixed_absorption = Vec3::ONE.add(absorption.sub(Vec3::ONE).scale(tinted.coat_weight));
+        let substrate = tinted.base.evaluate(wo, wi, N).scale(transmission);
+        let expected_delta = substrate.mul(mixed_absorption.sub(Vec3::ONE));
+        let actual_delta = tinted.evaluate(wo, wi, N).sub(neutral.evaluate(wo, wi, N));
+
+        assert!(actual_delta.sub(expected_delta).length() < 1.0e-6);
+        assert!(actual_delta.x < actual_delta.y && actual_delta.y < actual_delta.z);
     }
 
     /// Adding a coat injects an extra specular highlight: near the mirror

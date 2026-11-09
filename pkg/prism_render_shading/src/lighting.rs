@@ -1,6 +1,6 @@
 use core::f32::consts::PI;
 
-use bevy_math::ops;
+use prism_math::ops;
 
 use crate::clearcoat::{
     base_normal_albedo, coat_base_roughness_estimate, coat_darkening_delta,
@@ -12,6 +12,7 @@ use crate::{
     glint_bin_solid_angle, glint_half_slope, glint_microfacet_count, glint_ndf_from_density,
     glint_seed,
 };
+use crate::{LobeSampleBudget, ShadingQuality};
 
 /// [`SurfaceSample::glint_state`] sentinel: the pixel did not sample the glint
 /// mixture, so the authored weight is the blend factor (the exact path).
@@ -415,6 +416,29 @@ pub fn evaluate_principled_direct_channels_with(
     light: DirectLightSample,
     pre: &PrincipledPre,
 ) -> PrincipledDirectChannels {
+    evaluate_principled_direct_channels_with_budget(
+        surface,
+        frame,
+        light,
+        pre,
+        &ShadingQuality::High.budget(),
+    )
+}
+
+/// Budgeted production evaluator used by the render resolve.
+///
+/// The three P1-e material fields are consumed by the actual direct-light
+/// kernel: SSS uses both the separable tap and curvature quadrature counts,
+/// while transmission evaluates its Burley profile normalization with the
+/// translucency sample count. The budget changes loop bounds only; it never
+/// changes the response family or a pipeline permutation.
+pub fn evaluate_principled_direct_channels_with_budget(
+    surface: SurfaceSample,
+    frame: ShadingFrame,
+    light: DirectLightSample,
+    pre: &PrincipledPre,
+    budget: &LobeSampleBudget,
+) -> PrincipledDirectChannels {
     let n = normalize_or(frame.normal, [0.0, 1.0, 0.0]);
     let v = normalize_or(frame.view, n);
     let l = normalize_or(light.direction, n);
@@ -565,7 +589,7 @@ pub fn evaluate_principled_direct_channels_with(
     // see `crate::gi::env_brdf::multiscatter` for the derivation and the
     // white-furnace conservation proof.
     let compensation = crate::gi::env_brdf::multiscatter::multiscatter_direct_parts(
-        bevy_math::Vec3::from_array(f0),
+        prism_math::Vec3::from_array(f0),
         pre.e_ggx_view,
         crate::ggx_albedo_table::ggx_albedo_lookup(n_dot_l, roughness),
         pre.e_ggx_avg,
@@ -613,13 +637,14 @@ pub fn evaluate_principled_direct_channels_with(
     // `OpenPBR` `base_weight` scales the whole base layer; `1.0` is exact.
     let subsurface = surface.subsurface.clamp(0.0, 1.0);
     let base = if subsurface > 0.0 {
-        let (scattered, transmitted) = crate::subsurface::subsurface_diffuse_terms(
+        let (scattered, transmitted) = crate::subsurface::subsurface_diffuse_terms_with_budget(
             &surface,
             n,
             v,
             l,
             raw_n_dot_l,
             diffuse_weight,
+            budget,
         );
         // Replace only the diffuse share. GGX stays present, and coat/fuzz
         // layer the combined substrate below instead of evaluating a second
@@ -833,7 +858,7 @@ pub fn evaluate_principled_direct_channels_with(
             let depth = surface.thickness;
             let beer = if depth > 0.0 {
                 crate::gi::translucency::transmission::transmittance_from_color(
-                    bevy_math::Vec3::from_array(slab_color),
+                    prism_math::Vec3::from_array(slab_color),
                     1.0,
                     depth,
                 )
@@ -2161,6 +2186,16 @@ mod tests {
                 && total(transmitted_half) > total(transmitted_full),
             "coat darkening must monotonically reduce the transmitted substrate: none={transmitted_none:?} half={transmitted_half:?} full={transmitted_full:?}"
         );
+        let expected_full_factor = coat_modulated_darkening(1.0, 1.0, delta);
+        for channel in 0..3 {
+            let expected = transmitted_none[channel] * expected_full_factor;
+            assert!(
+                (transmitted_full[channel] - expected).abs()
+                    <= 2.0e-6 * expected.abs().max(1.0),
+                "transmission must receive exactly one coat darkening factor in channel {channel}: actual={} expected={expected}",
+                transmitted_full[channel]
+            );
+        }
         let zero_darkening = evaluate_principled_direct_channels(
             SurfaceSample {
                 transmission: 0.75,

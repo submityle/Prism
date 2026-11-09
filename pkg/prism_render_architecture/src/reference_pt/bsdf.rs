@@ -26,8 +26,10 @@ use super::conductor_ms::MultiscatterConductor;
 use super::conductor_schlick_ms::SchlickMultiscatterConductor;
 use super::dielectric::{fresnel_dielectric, refract};
 use super::dielectric_ms::MultiscatterDielectric;
+use super::eon::EonDiffuse;
 use super::fresnel_blend::FresnelBlend;
 use super::microfacet::{fresnel_schlick, GgxIsotropic};
+use super::openpbr::OpenPbrMaterial;
 use super::oren_nayar::OrenNayar;
 use super::rough_dielectric::RoughDielectric;
 use super::rough_dielectric_aniso::AnisoRoughDielectric;
@@ -209,6 +211,22 @@ pub enum Bsdf {
         /// Micro-slope standard deviation (radians); `0` is Lambert.
         sigma: f32,
     },
+    /// Energy-preserving OpenPBR EON rough diffuse: the Oren-Nayar lobe plus
+    /// its reciprocal multiple-scattering compensation term. It uses the same
+    /// cosine sampling density as [`Bsdf::OrenNayar`].
+    EonDiffuse {
+        /// Per-channel base colour / diffuse albedo.
+        albedo: Vec3,
+        /// OpenPBR diffuse roughness mapped to a micro-slope sigma in radians.
+        sigma: f32,
+    },
+    /// Independent OpenPBR front-facing direct-response closure. This variant
+    /// is used by the material adapter when the realtime response contains
+    /// more than the standalone diffuse/coat slice.
+    OpenPbr {
+        /// Complete OpenPBR response inputs consumed by the CPU oracle.
+        material: OpenPbrMaterial,
+    },
     /// Rough dielectric interface (frosted glass): the reflect-and-refract
     /// behaviour of [`Bsdf::Dielectric`] blurred by a GGX microfacet lobe (see
     /// [`crate::reference_pt::rough_dielectric`]). It is glossy (non-delta), so
@@ -321,6 +339,8 @@ pub enum Bsdf {
         albedo: Vec3,
         /// Oren-Nayar surface roughness `sigma` in radians (`0` is Lambertian).
         sigma: f32,
+        /// OpenPBR weight for the complete base response, independent of albedo.
+        base_weight: f32,
         /// Perceptual roughness of the coat highlight in `[0, 1]`.
         coat_roughness: f32,
         /// Relative index of refraction of the coat over the exterior medium
@@ -419,6 +439,10 @@ impl Bsdf {
             Self::OrenNayar { albedo, sigma } => {
                 OrenNayar::new(*albedo, *sigma).evaluate(wo, wi, normal)
             }
+            Self::EonDiffuse { albedo, sigma } => {
+                EonDiffuse::new(*albedo, *sigma).evaluate(wo, wi, normal)
+            }
+            Self::OpenPbr { material } => material.evaluate(wo, wi, normal),
             Self::RoughDielectric {
                 ior,
                 reflectance,
@@ -478,14 +502,16 @@ impl Bsdf {
             Self::ClearcoatDiffuse {
                 albedo,
                 sigma,
+                base_weight,
                 coat_roughness,
                 coat_ior,
                 coat_weight,
                 coat_color,
                 coat_darkening,
-            } => ClearcoatDiffuse::new(
+            } => ClearcoatDiffuse::new_weighted(
                 *albedo,
                 *sigma,
+                *base_weight,
                 *coat_roughness,
                 *coat_ior,
                 *coat_weight,
@@ -553,6 +579,10 @@ impl Bsdf {
             Self::OrenNayar { albedo, sigma } => {
                 OrenNayar::new(*albedo, *sigma).pdf(wo, wi, normal)
             }
+            Self::EonDiffuse { albedo, sigma } => {
+                EonDiffuse::new(*albedo, *sigma).pdf(wo, wi, normal)
+            }
+            Self::OpenPbr { material } => material.pdf(wo, wi, normal),
             Self::RoughDielectric {
                 ior,
                 reflectance,
@@ -612,14 +642,16 @@ impl Bsdf {
             Self::ClearcoatDiffuse {
                 albedo,
                 sigma,
+                base_weight,
                 coat_roughness,
                 coat_ior,
                 coat_weight,
                 coat_color,
                 coat_darkening,
-            } => ClearcoatDiffuse::new(
+            } => ClearcoatDiffuse::new_weighted(
                 *albedo,
                 *sigma,
+                *base_weight,
                 *coat_roughness,
                 *coat_ior,
                 *coat_weight,
@@ -773,6 +805,22 @@ impl Bsdf {
                     pdf: s.pdf,
                     specular: false,
                 }),
+            Self::EonDiffuse { albedo, sigma } => EonDiffuse::new(*albedo, *sigma)
+                .sample(wo, normal, rng)
+                .map(|s| BsdfSample {
+                    direction: s.direction,
+                    value: s.value,
+                    pdf: s.pdf,
+                    specular: false,
+                }),
+            Self::OpenPbr { material } => {
+                material.sample(wo, normal, rng).map(|sample| BsdfSample {
+                    direction: sample.direction,
+                    value: sample.value,
+                    pdf: sample.pdf,
+                    specular: false,
+                })
+            }
             Self::RoughDielectric {
                 ior,
                 reflectance,
@@ -862,14 +910,16 @@ impl Bsdf {
             Self::ClearcoatDiffuse {
                 albedo,
                 sigma,
+                base_weight,
                 coat_roughness,
                 coat_ior,
                 coat_weight,
                 coat_color,
                 coat_darkening,
-            } => ClearcoatDiffuse::new(
+            } => ClearcoatDiffuse::new_weighted(
                 *albedo,
                 *sigma,
+                *base_weight,
                 *coat_roughness,
                 *coat_ior,
                 *coat_weight,
@@ -1734,6 +1784,7 @@ mod tests {
         let coated = Bsdf::ClearcoatDiffuse {
             albedo,
             sigma: 0.0,
+            base_weight: 1.0,
             coat_roughness: 0.02,
             coat_ior: 1.5,
             coat_weight: 1.0,
@@ -1753,6 +1804,7 @@ mod tests {
         let uncoated = Bsdf::ClearcoatDiffuse {
             albedo,
             sigma: 0.0,
+            base_weight: 1.0,
             coat_roughness: 0.02,
             coat_ior: 1.5,
             coat_weight: 0.0,
@@ -1801,6 +1853,23 @@ mod tests {
         let a = flat.evaluate(wo, wi, N);
         let b = lambert.evaluate(wo, wi, N);
         assert!((a.x - b.x).abs() <= 1e-6 && (a.y - b.y).abs() <= 1e-6);
+    }
+
+    #[test]
+    fn eon_diffuse_dispatches_the_compensated_reference_lobe() {
+        let eon = Bsdf::EonDiffuse {
+            albedo: Vec3::new(0.7, 0.5, 0.3),
+            sigma: 0.75 * core::f32::consts::FRAC_PI_2,
+        };
+        let on = Bsdf::OrenNayar {
+            albedo: Vec3::new(0.7, 0.5, 0.3),
+            sigma: 0.75 * core::f32::consts::FRAC_PI_2,
+        };
+        let wo = Vec3::new(0.3, 0.95, 0.0).normalize_or_zero();
+        let wi = Vec3::new(-0.4, 0.82, 0.2).normalize_or_zero();
+        assert!(!eon.is_specular());
+        assert!(eon.evaluate(wo, wi, N).max_component() > on.evaluate(wo, wi, N).max_component());
+        assert!((eon.pdf(wo, wi, N) - on.pdf(wo, wi, N)).abs() < 1.0e-6);
     }
 
     #[test]

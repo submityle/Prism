@@ -63,7 +63,7 @@
 //! * Every returned estimate is finite; adversarial inputs can reduce quality
 //!   but cannot produce `NaN` or `Inf`.
 
-use bevy_math::ops;
+use prism_math::ops;
 
 use crate::quality::{LobeSampleBudget, ShadingQuality};
 

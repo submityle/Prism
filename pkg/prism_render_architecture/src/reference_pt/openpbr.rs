@@ -11,10 +11,29 @@ use prism_math::ops;
 use super::eon::EonDiffuse;
 use super::ggx_energy::{multiscatter_fresnel, multiscatter_lobe};
 use super::microfacet::GgxIsotropic;
+use super::rough_dielectric::RoughDielectric;
+use super::sampler::{cosine_hemisphere_pdf, cosine_sample_hemisphere, SampleSource};
 use super::{Vec3, INV_PI, PI};
 
 const MIN_ROUGHNESS: f32 = 0.045;
 const MIN_COS: f32 = 1.0e-5;
+
+/// The result of sampling the complete OpenPBR reference closure.
+///
+/// The proposal is a finite mixture of the closure's diffuse, base-specular,
+/// coat, transmission, and sheen proposals. `value` is always the complete
+/// response, while `pdf` is the corresponding sum of all proposal densities;
+/// this is what makes the sample usable by the path integrator without sharing
+/// any realtime sampling state.
+#[derive(Clone, Copy, Debug)]
+pub struct OpenPbrSample {
+    /// Sampled outgoing direction, in the hemisphere selected by the closure.
+    pub direction: Vec3,
+    /// Complete OpenPBR response at `(wo, direction)`.
+    pub value: Vec3,
+    /// The one-sample mixture density for `direction`.
+    pub pdf: f32,
+}
 
 /// Material inputs consumed by the independent OpenPBR direct oracle.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -225,6 +244,290 @@ impl OpenPbrMaterial {
             coated
         }
     }
+
+    /// Evaluates the path-transport response used by [`Self::sample`].
+    ///
+    /// The direct oracle above intentionally preserves the realtime OpenPBR
+    /// front-facing response. Path transport additionally needs an actual
+    /// opposite-hemisphere event; that event uses the independent rough
+    /// dielectric reference lobe and therefore can continue through a second
+    /// surface instead of terminating at the first transmission sample.
+    #[must_use]
+    pub fn evaluate_path(&self, wo: Vec3, wi: Vec3, normal: Vec3) -> Vec3 {
+        let normal = normal.faced_toward(wo);
+        let cos_o = normal.dot(wo);
+        let cos_i = normal.dot(wi);
+        if cos_o <= 0.0 || cos_i >= 0.0 {
+            return self.evaluate(wo, wi, normal);
+        }
+        let Some(ior) = finite_positive(self.index_of_refraction) else {
+            return Vec3::ZERO;
+        };
+        let Some(transmission) = finite_unit(self.transmission) else {
+            return Vec3::ZERO;
+        };
+        if transmission <= 0.0 {
+            return Vec3::ZERO;
+        }
+        let tint = if self.thin_walled > 0.5 {
+            self.transmission_color
+        } else {
+            self.base_color.mul(self.transmission_color)
+        };
+        RoughDielectric::new(
+            ior,
+            Vec3::ONE,
+            tint,
+            self.perceptual_roughness.clamp(MIN_ROUGHNESS, 1.0),
+        )
+        .evaluate(wo, wi, normal)
+        .scale(transmission)
+    }
+
+    /// Returns the solid-angle density used by [`Self::sample`].
+    ///
+    /// The density is deliberately independent of the response evaluation: a
+    /// proposal may be broader than a particular lobe and remains unbiased as
+    /// long as the full response is divided by this exact mixture density.
+    /// Returning zero for invalid inputs keeps a malformed oracle input from
+    /// turning into a non-finite path weight.
+    #[must_use]
+    pub fn pdf(&self, wo: Vec3, wi: Vec3, normal: Vec3) -> f32 {
+        let normal = normal.faced_toward(wo);
+        let cos_o = normal.dot(wo);
+        let cos_i = normal.dot(wi);
+        if !wo.is_finite() || !wi.is_finite() || !normal.is_finite() || cos_o <= 0.0 || cos_i == 0.0
+        {
+            return 0.0;
+        }
+        let Some(weights) = self.lobe_probabilities(cos_o) else {
+            return 0.0;
+        };
+        let transmission_pdf = Self::rough_transmission_pdf(self, wo, wi, normal);
+        if cos_i < 0.0 {
+            return if weights[2] > 0.0 {
+                weights[2] * transmission_pdf
+            } else {
+                0.0
+            };
+        }
+        let diffuse_pdf = EonDiffuse::new(
+            self.base_color,
+            self.diffuse_roughness.clamp(0.0, 1.0) * core::f32::consts::FRAC_PI_2,
+        )
+        .pdf(wo, wi, normal);
+        let specular_pdf = Self::ggx_reflection_pdf(self.perceptual_roughness, wo, wi, normal);
+        let coat_pdf = Self::ggx_reflection_pdf(self.clearcoat_roughness, wo, wi, normal);
+        let cosine_pdf = cosine_hemisphere_pdf(normal, wi);
+        let pdf = weights[0] * diffuse_pdf
+            + weights[1] * specular_pdf
+            + weights[2] * transmission_pdf
+            + weights[3] * coat_pdf
+            + weights[4] * cosine_pdf;
+        if pdf.is_finite() && pdf > 0.0 {
+            pdf
+        } else {
+            0.0
+        }
+    }
+
+    /// Importance-samples the independent OpenPBR reference closure.
+    ///
+    /// A component is selected from a normalized, luminance-weighted mixture;
+    /// the returned value is then reevaluated as the complete closure and the
+    /// returned density is the full mixture density, not just the selected
+    /// component's density. This preserves unbiased multi-bounce transport and
+    /// keeps the sampler/PDF pair valid when several lobes overlap.
+    #[must_use]
+    pub fn sample(
+        &self,
+        wo: Vec3,
+        normal: Vec3,
+        rng: &mut impl SampleSource,
+    ) -> Option<OpenPbrSample> {
+        let normal = normal.faced_toward(wo);
+        let cos_o = normal.dot(wo);
+        if !wo.is_finite() || !normal.is_finite() || cos_o <= 0.0 {
+            return None;
+        }
+        let weights = self.lobe_probabilities(cos_o)?;
+        let selector = rng.next_f32();
+        if !selector.is_finite() {
+            return None;
+        }
+        let mut threshold = 0.0;
+        let mut selected = weights.len() - 1;
+        for (index, probability) in weights.iter().enumerate() {
+            threshold += *probability;
+            if selector < threshold {
+                selected = index;
+                break;
+            }
+        }
+        let direction = match selected {
+            0 => {
+                EonDiffuse::new(
+                    self.base_color,
+                    self.diffuse_roughness.clamp(0.0, 1.0) * core::f32::consts::FRAC_PI_2,
+                )
+                .sample(wo, normal, rng)?
+                .direction
+            }
+            1 => Self::sample_ggx_reflection(self.perceptual_roughness, wo, normal, rng)?,
+            2 => Self::sample_rough_transmission(self, wo, normal, rng)?,
+            4 => cosine_sample_hemisphere(normal, rng).direction,
+            3 => Self::sample_ggx_reflection(self.clearcoat_roughness, wo, normal, rng)?,
+            _ => return None,
+        };
+        let cos_i = normal.dot(direction);
+        if cos_i == 0.0 || !direction.is_finite() {
+            return None;
+        }
+        let pdf = self.pdf(wo, direction, normal);
+        if pdf <= 0.0 || !pdf.is_finite() {
+            return None;
+        }
+        let value = self.evaluate_path(wo, direction, normal);
+        if !value.is_finite() {
+            return None;
+        }
+        Some(OpenPbrSample {
+            direction,
+            value,
+            pdf,
+        })
+    }
+
+    /// Builds the normalized proposal probabilities for the five finite lobes.
+    /// The proposal weights track response energy only to reduce variance; they
+    /// are not used to scale the evaluated response.
+    fn lobe_probabilities(&self, _cos_o: f32) -> Option<[f32; 5]> {
+        let base_weight = finite_unit(self.base_weight)?;
+        let metallic = finite_unit(self.metallic)?;
+        let transmission = finite_unit(self.transmission)?;
+        let clearcoat = finite_unit(self.clearcoat)?;
+        let sheen = finite_unit(self.sheen)?;
+        let diffuse_energy = average_nonnegative(self.base_color);
+        let specular_f0 = dielectric_f0_at_normal(
+            finite_positive(self.specular_ior)?,
+            finite_unit(self.specular_weight)?,
+            self.specular_color,
+        );
+        let metal_energy = average_nonnegative(self.base_color) * base_weight;
+        let specular_energy = average_nonnegative(specular_f0)
+            .mul_add(1.0 - metallic, metal_energy * metallic)
+            .max(0.0);
+        let weights = [
+            base_weight * (1.0 - metallic) * (1.0 - transmission) * diffuse_energy,
+            base_weight * (1.0 - transmission) * specular_energy,
+            transmission * average_nonnegative(self.transmission_color).max(0.05),
+            clearcoat,
+            sheen * average_nonnegative(self.fuzz_color).max(0.05),
+        ];
+        let total = weights.iter().copied().sum::<f32>();
+        if !total.is_finite() || total <= 0.0 {
+            return None;
+        }
+        let inv_total = 1.0 / total;
+        let normalized = weights.map(|weight| weight * inv_total);
+        if normalized
+            .iter()
+            .all(|weight| weight.is_finite() && *weight >= 0.0)
+        {
+            Some(normalized)
+        } else {
+            None
+        }
+    }
+
+    /// Evaluates the VNDF-reflection proposal density used by both base and
+    /// coat sampling.
+    fn ggx_reflection_pdf(roughness: f32, wo: Vec3, wi: Vec3, normal: Vec3) -> f32 {
+        let cos_o = normal.dot(wo);
+        let cos_i = normal.dot(wi);
+        if cos_o <= 0.0 || cos_i <= 0.0 {
+            return 0.0;
+        }
+        let half = wo.add(wi).normalize_or_zero();
+        if half.length_squared() <= 1.0e-12 {
+            return 0.0;
+        }
+        GgxIsotropic::from_roughness(roughness).reflection_pdf(cos_o, normal.dot(half))
+    }
+
+    /// Samples a GGX VNDF reflection direction and rejects directions that do
+    /// not land in the visible macroscopic hemisphere.
+    fn sample_ggx_reflection(
+        roughness: f32,
+        wo: Vec3,
+        normal: Vec3,
+        rng: &mut impl SampleSource,
+    ) -> Option<Vec3> {
+        let ggx = GgxIsotropic::from_roughness(roughness);
+        let half = ggx.sample_half_vector(wo, normal, rng)?;
+        if wo.dot(half) <= 0.0 {
+            return None;
+        }
+        let direction = wo.negate().reflect(half).normalize_or_zero();
+        if normal.dot(direction) <= 0.0 || !direction.is_finite() {
+            None
+        } else {
+            Some(direction)
+        }
+    }
+
+    fn rough_transmission_pdf(&self, wo: Vec3, wi: Vec3, normal: Vec3) -> f32 {
+        let Some(ior) = finite_positive(self.index_of_refraction) else {
+            return 0.0;
+        };
+        RoughDielectric::new(
+            ior,
+            Vec3::ONE,
+            Vec3::ONE,
+            self.perceptual_roughness.clamp(MIN_ROUGHNESS, 1.0),
+        )
+        .pdf(wo, wi, normal)
+    }
+
+    fn sample_rough_transmission(
+        &self,
+        wo: Vec3,
+        normal: Vec3,
+        rng: &mut impl SampleSource,
+    ) -> Option<Vec3> {
+        let ior = finite_positive(self.index_of_refraction)?;
+        RoughDielectric::new(
+            ior,
+            Vec3::ONE,
+            Vec3::ONE,
+            self.perceptual_roughness.clamp(MIN_ROUGHNESS, 1.0),
+        )
+        .sample(wo, normal, rng)
+        .map(|sample| sample.direction)
+    }
+}
+
+fn finite_unit(value: f32) -> Option<f32> {
+    if value.is_finite() && (0.0..=1.0).contains(&value) {
+        Some(value)
+    } else {
+        None
+    }
+}
+
+fn finite_positive(value: f32) -> Option<f32> {
+    if value.is_finite() && value > 0.0 {
+        Some(value)
+    } else {
+        None
+    }
+}
+
+fn average_nonnegative(value: Vec3) -> f32 {
+    if !value.is_finite() {
+        return 0.0;
+    }
+    ((value.x.max(0.0) + value.y.max(0.0) + value.z.max(0.0)) / 3.0).min(1.0)
 }
 
 fn mix(a: Vec3, b: Vec3, t: f32) -> Vec3 {
@@ -461,4 +764,253 @@ fn glint_density(smooth: f32, count: f32, bin: f32, seed: u32) -> f32 {
         0.0
     };
     (hits / (count.max(1.0) * bin)).max(0.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::bsdf::Bsdf;
+    use super::super::integrator::{Material, PathIntegrator, Scene};
+    use super::super::sampler::Rng;
+    use super::super::Vec3;
+    use super::*;
+
+    const N: Vec3 = Vec3::new(0.0, 1.0, 0.0);
+
+    fn material() -> OpenPbrMaterial {
+        OpenPbrMaterial {
+            base_color: Vec3::new(0.72, 0.43, 0.19),
+            base_weight: 1.0,
+            diffuse_roughness: 0.35,
+            metallic: 0.15,
+            perceptual_roughness: 0.28,
+            specular_weight: 1.0,
+            specular_color: Vec3::new(0.95, 0.98, 1.0),
+            specular_ior: 1.5,
+            transmission: 0.0,
+            index_of_refraction: 1.5,
+            dispersion: 0.0,
+            thin_walled: 0.0,
+            transmission_color: Vec3::ONE,
+            transmission_scatter: Vec3::ZERO,
+            transmission_scatter_anisotropy: 0.0,
+            transmission_dispersion_abbe_number: 20.0,
+            coat_darkening: 0.0,
+            scatter_anisotropy: 0.0,
+            clearcoat: 0.35,
+            clearcoat_roughness: 0.16,
+            coat_ior: 1.5,
+            coat_color: Vec3::new(0.98, 0.96, 0.94),
+            sheen: 0.2,
+            fuzz_roughness: 0.45,
+            fuzz_color: Vec3::new(0.9, 0.8, 0.7),
+            subsurface: 0.0,
+            subsurface_color: Vec3::ONE,
+            subsurface_radius: 1.0,
+            subsurface_radius_scale: Vec3::ONE,
+            thickness: 0.0,
+            iridescence: 0.0,
+            iridescence_thickness_nm: 0.0,
+            iridescence_ior: 1.3,
+            glint_weight: 0.0,
+            glint_roughness: 0.4,
+            glint_density: 0.0,
+            glint_bin_half_width: 0.0,
+            glint_state: -1.0,
+            glint_cell: [0.0, 0.0],
+            glint_footprint_area: 0.0,
+        }
+    }
+
+    #[test]
+    fn sample_reports_the_complete_mixture_pdf_and_response() {
+        let material = material();
+        let wo = Vec3::new(0.35, 0.91, -0.12).normalize_or_zero();
+        let mut rng = Rng::seed(0x0B_B2);
+        let mut valid = 0u32;
+        for _ in 0..20_000 {
+            let Some(sample) = material.sample(wo, N, &mut rng) else {
+                continue;
+            };
+            let queried_pdf = material.pdf(wo, sample.direction, N);
+            let evaluated = material.evaluate(wo, sample.direction, N);
+            assert!(sample.pdf.is_finite() && sample.pdf > 0.0);
+            assert!((sample.pdf - queried_pdf).abs() <= 1.0e-6 * sample.pdf.max(1.0));
+            assert!(sample.value.sub(evaluated).length() <= 1.0e-6);
+            assert!(sample.direction.is_finite());
+            valid += 1;
+        }
+        assert!(valid > 18_000, "too many invalid mixture samples: {valid}");
+    }
+
+    #[test]
+    fn transmission_and_coat_are_present_in_the_sampling_density() {
+        let mut material = material();
+        material.transmission = 0.45;
+        material.clearcoat = 0.8;
+        let wo = Vec3::new(-0.28, 0.95, 0.1).normalize_or_zero();
+        let wi = Vec3::new(0.17, 0.72, 0.67).normalize_or_zero();
+        let pdf = material.pdf(wo, wi, N);
+        assert!(pdf.is_finite() && pdf > 0.0);
+        let cosine = super::super::sampler::cosine_hemisphere_pdf(N, wi);
+        assert!((pdf - cosine).abs() > 1.0e-5);
+    }
+
+    #[test]
+    fn transmission_sampling_reaches_the_opposite_hemisphere() {
+        let mut material = material();
+        material.base_weight = 0.0;
+        material.metallic = 0.0;
+        material.specular_weight = 0.0;
+        material.clearcoat = 0.0;
+        material.sheen = 0.0;
+        material.transmission = 1.0;
+        let wo = Vec3::new(0.18, 0.98, -0.04).normalize_or_zero();
+        let mut rng = Rng::seed(0x0A_B5);
+        let mut crossed = 0u32;
+        for _ in 0..10_000 {
+            let Some(sample) = material.sample(wo, N, &mut rng) else {
+                continue;
+            };
+            let cos_i = N.dot(sample.direction);
+            assert!((sample.pdf - material.pdf(wo, sample.direction, N)).abs() < 1.0e-6);
+            assert!(sample.value.is_finite());
+            if cos_i < 0.0 {
+                crossed += 1;
+            }
+        }
+        assert!(crossed > 8_000, "too few transmitted paths: {crossed}");
+    }
+
+    #[test]
+    fn bsdf_dispatch_uses_the_independent_openpbr_sampler() {
+        let material = material();
+        let bsdf = Bsdf::OpenPbr { material };
+        let wo = Vec3::new(0.2, 0.96, 0.05).normalize_or_zero();
+        let mut rng = Rng::seed(0x0B_B3);
+        let sample = bsdf.sample(wo, N, &mut rng).expect("OpenPBR sample");
+        assert!((sample.pdf - bsdf.pdf(wo, sample.direction, N)).abs() < 1.0e-6);
+        assert!(
+            sample
+                .value
+                .sub(bsdf.evaluate(wo, sample.direction, N))
+                .length()
+                < 1.0e-6
+        );
+        assert!(!sample.specular);
+    }
+
+    #[test]
+    fn openpbr_closure_supports_recursive_white_furnace_transport() {
+        let positions = alloc::vec![
+            [-5.0_f32, 0.0, -5.0],
+            [5.0, 0.0, -5.0],
+            [0.0, 0.0, 5.0],
+            [-5.0, 0.0, -5.0],
+            [-5.0, 0.0, 5.0],
+            [-5.0, 10.0, 0.0],
+        ];
+        let indices = alloc::vec![[0u32, 1, 2], [3, 4, 5]];
+        let mesh = crate::ray_scene::triangle_mesh::TriangleMesh::new(
+            positions,
+            alloc::vec![],
+            alloc::vec![],
+            indices,
+        )
+        .expect("valid corner");
+        let bsdf_material = material();
+        let scene = Scene::new(
+            crate::ray_scene::triangle_mesh::TriangleMeshBvh::build(mesh),
+            alloc::vec![
+                Material::new(Bsdf::OpenPbr {
+                    material: bsdf_material,
+                }),
+                Material::new(Bsdf::OpenPbr {
+                    material: bsdf_material,
+                }),
+            ],
+            alloc::vec![],
+            Vec3::ONE,
+        )
+        .expect("OpenPBR corner");
+        let primary = crate::ray_scene::traversal::Ray::new(
+            [0.0, 2.0, 0.0],
+            [0.0, -1.0, 0.0],
+            0.0,
+            f32::INFINITY,
+        );
+        let integrator = PathIntegrator::new(12, 4);
+        let mut sum = 0.0f64;
+        for stream in 0..8_000u64 {
+            let mut rng = Rng::with_stream(0x0B_B4, stream + 1);
+            let value = integrator.radiance(&scene, primary, &mut rng);
+            assert!(value.is_finite());
+            sum += f64::from(value.x);
+        }
+        let mean = sum / 8_000.0;
+        assert!(mean > 0.35 && mean < 1.2, "recursive OpenPBR mean {mean}");
+    }
+
+    #[test]
+    fn transmission_continues_to_a_second_surface_before_the_depth_cap() {
+        let positions = alloc::vec![
+            [-8.0_f32, 0.0, -8.0],
+            [8.0, 0.0, -8.0],
+            [0.0, 0.0, 8.0],
+            [-8.0, -2.0, -8.0],
+            [8.0, -2.0, -8.0],
+            [0.0, -2.0, 8.0],
+        ];
+        let indices = alloc::vec![[0u32, 1, 2], [3, 4, 5]];
+        let mesh = crate::ray_scene::triangle_mesh::TriangleMesh::new(
+            positions,
+            alloc::vec![],
+            alloc::vec![],
+            indices,
+        )
+        .expect("valid transmissive stack");
+        let mut transmissive = material();
+        transmissive.base_weight = 0.0;
+        transmissive.metallic = 0.0;
+        transmissive.specular_weight = 0.0;
+        transmissive.clearcoat = 0.0;
+        transmissive.sheen = 0.0;
+        transmissive.transmission = 1.0;
+        transmissive.transmission_color = Vec3::ONE;
+        transmissive.base_color = Vec3::ONE;
+        let surface = Bsdf::OpenPbr {
+            material: transmissive,
+        };
+        let emitter = Material::emissive(surface, Vec3::ONE);
+        let scene = Scene::new(
+            crate::ray_scene::triangle_mesh::TriangleMeshBvh::build(mesh),
+            alloc::vec![Material::new(surface), emitter],
+            alloc::vec![],
+            Vec3::ZERO,
+        )
+        .expect("transmissive stack materials");
+        let primary = crate::ray_scene::traversal::Ray::new(
+            [0.0, 1.0, 0.0],
+            [0.0, -1.0, 0.0],
+            0.0,
+            f32::INFINITY,
+        );
+        let shallow = PathIntegrator::new(1, 99);
+        let deep = PathIntegrator::new(2, 99);
+        let mut shallow_sum = 0.0_f64;
+        let mut deep_sum = 0.0_f64;
+        for stream in 0..4_000_u64 {
+            let mut shallow_rng = Rng::with_stream(0x0B_B5, stream + 1);
+            let mut deep_rng = Rng::with_stream(0x0B_B5, stream + 1);
+            shallow_sum += f64::from(shallow.radiance(&scene, primary, &mut shallow_rng).x);
+            deep_sum += f64::from(deep.radiance(&scene, primary, &mut deep_rng).x);
+        }
+        assert_eq!(
+            shallow_sum, 0.0,
+            "depth one must stop before the second surface"
+        );
+        assert!(
+            deep_sum > 1_000.0,
+            "transmission did not reach the second surface: {deep_sum}"
+        );
+    }
 }

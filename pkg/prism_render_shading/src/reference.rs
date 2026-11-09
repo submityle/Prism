@@ -119,48 +119,37 @@ impl PrincipledReference {
             self.coat_roughness,
             coat_weight,
         );
-        let base_eta = spec::coat_specular_ior_ratio(
-            self.specular_ior,
-            self.coat_ior,
-            coat_weight,
-        );
+        let base_color = sanitize_rgb(self.base_color);
+        let specular_color = sanitize_rgb(self.specular_color);
+        let coat_color = sanitize_rgb(self.coat_color);
+        let base_eta = spec::coat_specular_ior_ratio(self.specular_ior, self.coat_ior, coat_weight);
         let dielectric_f = spec::base_dielectric_fresnel_rgb(
             v_dot_h,
             base_eta,
             self.specular_weight,
-            self.specular_color,
+            specular_color,
         );
         let metal_f = spec::base_metal_fresnel_rgb(
             v_dot_h,
             base_weight,
-            self.base_color,
+            base_color,
             self.specular_weight,
-            self.specular_color,
+            specular_color,
         );
         let fresnel = lerp3(dielectric_f, metal_f, metallic);
         let (alpha_t, alpha_b) = spec::anisotropy_to_alpha(base_roughness, self.anisotropy);
         let base_specular = spec::microfacet_brdf(
-            fresnel,
-            half[0],
-            half[2],
-            n_dot_h,
-            view[0],
-            view[2],
-            light[0],
-            light[2],
-            n_dot_v,
-            n_dot_l,
-            alpha_t,
-            alpha_b,
+            fresnel, half[0], half[2], n_dot_h, view[0], view[2], light[0], light[2], n_dot_v,
+            n_dot_l, alpha_t, alpha_b,
         );
 
         let sigma = finite_clamp(self.diffuse_roughness, 0.0, 1.0) * FRAC_PI_2;
         let s = dot(view, light) - n_dot_v * n_dot_l;
-        let diffuse = diffuse_brdf(self.base_color, n_dot_v, n_dot_l, s, sigma);
+        let diffuse = diffuse_brdf(base_color, n_dot_v, n_dot_l, s, sigma);
         let diffuse = array_scale(diffuse, 1.0 - metallic);
         let base_brdf = array_scale(array_add(diffuse, base_specular), base_weight);
 
-        let coat_ior = self.coat_ior.max(spec::MIN_IOR);
+        let coat_ior = finite_positive(self.coat_ior, spec::MIN_IOR).max(spec::MIN_IOR);
         let (coat_alpha_t, coat_alpha_b) = spec::anisotropy_to_alpha(self.coat_roughness, 0.0);
         let coat_f = coat_weight * spec::dielectric_fresnel(v_dot_h, coat_ior);
         let coat_brdf = spec::microfacet_brdf(
@@ -180,37 +169,24 @@ impl PrincipledReference {
 
         let view_f = spec::dielectric_fresnel(n_dot_v, coat_ior);
         let light_f = spec::dielectric_fresnel(n_dot_l, coat_ior);
-        let slab_transmission = (1.0 - coat_weight * view_f).max(0.0)
-            * (1.0 - coat_weight * light_f).max(0.0);
+        let slab_transmission =
+            (1.0 - coat_weight * view_f).max(0.0) * (1.0 - coat_weight * light_f).max(0.0);
         let base_roughness_estimate = spec::base_roughness_estimate(
             self.specular_roughness,
             self.specular_weight,
             self.specular_ior,
             metallic,
         );
-        let internal_reflection = spec::internal_reflection_general(
-            coat_ior,
-            n_dot_v,
-            base_roughness_estimate,
-        );
-        let delta = spec::coat_darkening_delta(
-            arithmetic_mean(self.base_color),
-            internal_reflection,
-        );
-        let darkening = spec::modulated_darkening_factor(
-            coat_weight,
-            self.coat_darkening,
-            delta,
-        );
-        let absorption = spec::coat_absorption_rgb(
-            self.coat_color,
-            n_dot_l,
-            n_dot_v,
-            coat_ior,
-        );
-        let base_factor = array_scale(absorption, slab_transmission * darkening).map(|value| {
-            1.0 + coat_weight * (value - 1.0)
-        });
+        let internal_reflection =
+            spec::internal_reflection_general(coat_ior, n_dot_v, base_roughness_estimate);
+        let delta = spec::coat_darkening_delta(arithmetic_mean(base_color), internal_reflection);
+        let darkening = spec::modulated_darkening_factor(coat_weight, self.coat_darkening, delta);
+        let absorption = spec::coat_absorption_rgb(coat_color, n_dot_l, n_dot_v, coat_ior);
+        // Transmission and darkening already include coat_weight in their own
+        // specification formulas. Absorption is a separate coat layer and is
+        // mixed by coat_weight exactly once, before those terms are applied.
+        let absorption = absorption.map(|value| 1.0 + coat_weight * (value - 1.0));
+        let base_factor = array_scale(absorption, slab_transmission * darkening);
         let layered_base_brdf = array_mul(base_brdf, base_factor);
         let total_brdf = array_add(layered_base_brdf, coat_brdf);
 
@@ -248,11 +224,7 @@ impl PrincipledReference {
             let cos_theta = theta.cos();
             for phi_index in 0..phi_samples {
                 let phi = (phi_index as f32 + 0.5) * d_phi;
-                let light = [
-                    sin_theta * phi.cos(),
-                    cos_theta,
-                    sin_theta * phi.sin(),
-                ];
+                let light = [sin_theta * phi.cos(), cos_theta, sin_theta * phi.sin()];
                 let brdf = self.evaluate_brdf(view, light);
                 let measure = sin_theta * d_theta * d_phi;
                 for channel in 0..3 {
@@ -277,13 +249,7 @@ impl LayeredReferenceValue {
     }
 }
 
-fn diffuse_brdf(
-    base_color: [f32; 3],
-    cos_o: f32,
-    cos_i: f32,
-    s: f32,
-    sigma: f32,
-) -> [f32; 3] {
+fn diffuse_brdf(base_color: [f32; 3], cos_o: f32, cos_i: f32, s: f32, sigma: f32) -> [f32; 3] {
     let e_i = spec::eon_directional_albedo(cos_i, sigma);
     let e_o = spec::eon_directional_albedo(cos_o, sigma);
     let mut result = [0.0; 3];
@@ -302,6 +268,18 @@ fn finite_clamp(value: f32, low: f32, high: f32) -> f32 {
     } else {
         low
     }
+}
+
+fn finite_positive(value: f32, fallback: f32) -> f32 {
+    if value.is_finite() && value > 0.0 {
+        value
+    } else {
+        fallback
+    }
+}
+
+fn sanitize_rgb(value: [f32; 3]) -> [f32; 3] {
+    value.map(|channel| finite_clamp(channel, 0.0, 1.0))
 }
 
 fn arithmetic_mean(value: [f32; 3]) -> f32 {
@@ -407,6 +385,82 @@ mod tests {
     }
 
     #[test]
+    fn partial_coat_transmission_and_darkening_are_not_blended_twice() {
+        let material = PrincipledReference {
+            base_color: [0.7, 0.4, 0.2],
+            coat_weight: 0.5,
+            coat_darkening: 0.8,
+            coat_color: [0.7, 0.9, 0.5],
+            ..Default::default()
+        };
+        let view = view_at(0.37);
+        let light = view_at(0.82);
+        let layers = material.evaluate_layers(view, light);
+        let nv = view[1];
+        let nl = light[1];
+        let eta = material.coat_ior;
+        let transmission = (1.0 - material.coat_weight * spec::dielectric_fresnel(nv, eta))
+            * (1.0 - material.coat_weight * spec::dielectric_fresnel(nl, eta));
+        let rb = spec::base_roughness_estimate(
+            material.specular_roughness,
+            material.specular_weight,
+            material.specular_ior,
+            material.metallic,
+        );
+        let k = spec::internal_reflection_general(eta, nv, rb);
+        let delta = spec::coat_darkening_delta(arithmetic_mean(material.base_color), k);
+        let darkening =
+            spec::modulated_darkening_factor(material.coat_weight, material.coat_darkening, delta);
+        let absorption = spec::coat_absorption_rgb(material.coat_color, nl, nv, eta)
+            .map(|value| 1.0 + material.coat_weight * (value - 1.0));
+        let expected_factor = array_scale(absorption, transmission * darkening);
+        for channel in 0..3 {
+            assert!(
+                (layers.base_factor[channel] - expected_factor[channel]).abs() < 1.0e-6,
+                "channel {channel}: actual={} expected={}",
+                layers.base_factor[channel],
+                expected_factor[channel]
+            );
+        }
+    }
+
+    #[test]
+    fn coat_darkening_uses_outgoing_view_angle() {
+        let material = PrincipledReference {
+            base_color: [0.15, 0.35, 0.7],
+            coat_weight: 1.0,
+            coat_darkening: 1.0,
+            ..Default::default()
+        };
+        let a = material.evaluate_layers(view_at(0.25), view_at(0.85));
+        let b = material.evaluate_layers(view_at(0.85), view_at(0.25));
+        let rb = spec::base_roughness_estimate(
+            material.specular_roughness,
+            material.specular_weight,
+            material.specular_ior,
+            material.metallic,
+        );
+        let expected_a = spec::modulated_darkening_factor(
+            material.coat_weight,
+            material.coat_darkening,
+            spec::coat_darkening_delta(
+                arithmetic_mean(material.base_color),
+                spec::internal_reflection_general(material.coat_ior, 0.25, rb),
+            ),
+        );
+        let expected_b = spec::modulated_darkening_factor(
+            material.coat_weight,
+            material.coat_darkening,
+            spec::coat_darkening_delta(
+                arithmetic_mean(material.base_color),
+                spec::internal_reflection_general(material.coat_ior, 0.85, rb),
+            ),
+        );
+        assert!((a.darkening - expected_a).abs() < 1.0e-6);
+        assert!((b.darkening - expected_b).abs() < 1.0e-6);
+    }
+
+    #[test]
     fn layered_brdf_is_reciprocal_for_symmetric_terms() {
         let material = PrincipledReference {
             base_color: [0.7, 0.3, 0.9],
@@ -416,6 +470,7 @@ mod tests {
             coat_weight: 0.8,
             coat_roughness: 0.3,
             coat_color: [0.9, 0.8, 0.7],
+            coat_darkening: 0.0,
             ..Default::default()
         };
         let a = material.evaluate_brdf(view_at(0.81), view_at(0.63));
@@ -456,6 +511,8 @@ mod tests {
             ..Default::default()
         };
         let value = material.evaluate_brdf([f32::NAN, 0.0, 0.0], [0.0, 1.0, 0.0]);
-        assert!(value.into_iter().all(|channel| channel.is_finite() && channel >= 0.0));
+        assert!(value
+            .into_iter()
+            .all(|channel| channel.is_finite() && channel >= 0.0));
     }
 }

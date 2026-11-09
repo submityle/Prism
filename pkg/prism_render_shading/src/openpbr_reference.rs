@@ -36,7 +36,7 @@
 
 use core::f32::consts::PI;
 
-use bevy_math::ops;
+use prism_math::ops;
 
 /// Lower bound on a relative IOR, matching the real-time interface guard.
 pub const MIN_IOR: f32 = 1.0 + 1.0e-3;
