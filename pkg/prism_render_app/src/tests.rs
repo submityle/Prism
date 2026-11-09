@@ -60,8 +60,8 @@ use prism_render_architecture::shader_package::{
 };
 use prism_render_architecture::view_family::ViewKind;
 use prism_render_material::{
-    material_pipeline_state, MaterialBlendMode, MaterialDepthTest, MaterialRenderClass,
-    MaterialRenderPhase, MaterialRenderTarget, RenderDomain,
+    material_pipeline_state, MaterialBlendMode, MaterialDepthTest, MaterialExecutionTables,
+    MaterialRenderClass, MaterialRenderPhase, MaterialRenderTarget, RenderDomain,
 };
 
 fn dense(index: u64) -> PermutationIndex {
@@ -1957,6 +1957,22 @@ fn app_on_null_backend(config: RenderAppConfig) -> App {
     app
 }
 
+/// Publishes the canonical execution table used by the fallback material.
+///
+/// The frame executor admits a lighting composite only when both halves of
+/// the material ABI have been completion-published. These plugin tests do not
+/// author a material, but they still exercise the production composite graph,
+/// so install the real empty canonical table before the first render frame.
+fn install_lighting_test_material_tables(app: &mut App) {
+    let render = app.sub_app_mut(RenderApp).expect("the render sub-app");
+    render
+        .world
+        .resource_mut::<RenderMaterials>()
+        .registry_mut()
+        .install_execution_tables(&MaterialExecutionTables::new())
+        .expect("the fallback material accepts the canonical execution table");
+}
+
 #[test]
 fn lighting_extraction_does_not_create_a_missing_canonical_scene() {
     let mut app = app_on_null_backend(RenderAppConfig::new(EXTENT));
@@ -2127,7 +2143,7 @@ pub(super) fn dispatch_lighting_test_composite<I>(
         execution_programs_size_bytes: execution_snapshot.program_rows().len() as u64 * 20,
     };
     let pass = lighting
-        .pass_for_target_with_materials(plan, target, runtime, material_bindings)
+        .pass_for_target_with_materials(plan, target, runtime, [0.0; 3], material_bindings)
         .expect("prepared lighting plan binds to the real GBuffer target and material tables");
     let target_bind_group = pass
         .composite_target_bind_group
@@ -2180,6 +2196,60 @@ pub(super) fn dispatch_lighting_test_composite<I>(
         execution_buffers,
         registry,
     ));
+}
+
+/// Captures one completion-published canonical material generation for tests
+/// that record the production lighting graph directly.
+fn lighting_test_material_bindings<I>(
+    runtime: &RenderRuntime<I>,
+) -> (
+    crate::lighting_gpu::LightingCompositeMaterialBuffers,
+    crate::material::MaterialBufferSnapshot,
+    crate::material::NativeExecutionTableSnapshot,
+)
+where
+    I: prism_render_driver::Instance + 'static,
+    I::Device: Send + Sync + 'static,
+    I::Queue: prism_render_driver::FrameSync,
+{
+    let mut registry = prism_render_material::MaterialRegistry::new(1);
+    registry
+        .install_execution_tables(&MaterialExecutionTables::new())
+        .expect("empty canonical execution tables are valid for fallback material");
+    let device = runtime.device_handle();
+    let mut material_buffers = MaterialParameterBuffers::new_owned(
+        device.clone(),
+        1,
+        1,
+        1,
+        prism_render_driver::BufferUsages::NONE,
+    );
+    material_buffers.sync_registry(runtime.device(), runtime.queue(), &registry, [0]);
+    let mut execution_buffers = crate::material::NativeExecutionTableBuffers::new();
+    execution_buffers
+        .sync_registry(device, runtime.queue(), &registry)
+        .expect("canonical execution-table upload is available");
+    assert!(runtime.wait_idle(), "material snapshots publish on GPU");
+
+    let material_snapshot = material_buffers
+        .snapshot()
+        .expect("material allocation snapshot");
+    let execution_snapshot = execution_buffers
+        .snapshot()
+        .expect("execution-table snapshot");
+    let bindings = crate::lighting_gpu::LightingCompositeMaterialBuffers {
+        headers: Some(material_snapshot.headers()),
+        headers_size_bytes: u64::from(material_snapshot.header_capacity())
+            * core::mem::size_of::<prism_render_material::GpuMaterialHeader>() as u64,
+        parameters: Some(material_snapshot.parameters()),
+        parameters_size_bytes: u64::from(material_snapshot.parameter_capacity_words()) * 4,
+        execution_plans: Some(execution_snapshot.plan_buffer()),
+        execution_plans_size_bytes: execution_snapshot.plan_rows().len() as u64
+            * (prism_render_material::EXECUTION_PLAN_ROW_WORDS * 4) as u64,
+        execution_programs: Some(execution_snapshot.program_buffer()),
+        execution_programs_size_bytes: execution_snapshot.program_rows().len() as u64 * 20,
+    };
+    (bindings, material_snapshot, execution_snapshot)
 }
 
 /// The render schedule runs every frame, the extract feeds it, and the runtime
@@ -2572,9 +2642,13 @@ fn lighting_candidate_plugin_source_switches_keep_plan_debug_and_graph_in_the_sa
     use crate::lighting_trace_gpu::{LightingTraceState, TracePreparationStatus};
 
     let mut app = app_on_null_backend(RenderAppConfig::new(EXTENT));
-    app.world_mut()
-        .resource_mut::<LightingSceneInputs>()
-        .gi_candidates = vec![Vec::new()];
+    install_lighting_test_material_tables(&mut app);
+    {
+        let inputs = app.world_mut().resource_mut::<LightingSceneInputs>();
+        inputs.surfaces = vec![LightingSurfaceInput::default()];
+        inputs.surface_material_indices = vec![0];
+        inputs.gi_candidates = vec![Vec::new()];
+    }
     let mut trace_dispatches = 0;
 
     for (index, source) in [
@@ -2711,6 +2785,12 @@ fn lighting_candidate_plugin_disables_valid_trace_when_gi_exceeds_budget() {
         ..RenderAppConfig::DEFAULT.lighting_budget
     });
     let mut app = app_on_null_backend(config);
+    install_lighting_test_material_tables(&mut app);
+    {
+        let inputs = app.world_mut().resource_mut::<LightingSceneInputs>();
+        inputs.surfaces = vec![LightingSurfaceInput::default()];
+        inputs.surface_material_indices = vec![0];
+    }
     app.world_mut()
         .insert_resource(lighting_candidate_test_trace_scene(1));
     app.update();
@@ -3743,6 +3823,7 @@ fn wgpu_backend_records_and_clears_a_real_frame() {
         {
             let inputs = app.world_mut().resource_mut::<LightingSceneInputs>();
             inputs.surfaces = surfaces.clone();
+            inputs.surface_material_indices = (0..surfaces.len() as u32).collect();
             inputs.gi_candidates = gi_candidates_per_surface;
         }
         let mut lights = app.world_mut().resource_mut::<crate::LightingLightScene>();
@@ -4801,20 +4882,23 @@ fn lighting_plan_records_compute_pipeline_bind_group_and_dispatch() {
     );
     let mut extracted = ExtractedLightingInputs::default();
     extracted.surfaces = vec![LightingSurfaceInput::default()];
+    extracted.surface_material_indices = vec![0];
     extracted.gi_candidates = vec![Vec::new()];
     lighting
         .prepare(&plan, &extracted, 0, &runtime)
         .expect("lighting tables prepare");
+    let (material_bindings, material_snapshot, execution_snapshot) =
+        lighting_test_material_bindings(&runtime);
 
     let target = RenderTarget::new(runtime.device(), extent);
     let queues = RenderQueues::new();
     let functions = DrawFunctions::new();
-    let graph = crate::frame::target_graph(
-        &target,
-        &queues,
-        &functions,
-        lighting.pass_for_target(&plan, &target, &runtime),
-    );
+    let lighting_pass = lighting
+        .pass_for_target_with_materials(&plan, &target, &runtime, [0.0; 3], material_bindings)
+        .expect("prepared lighting plan binds canonical material tables");
+    let mut graph = crate::frame::target_graph(&target, &queues, &functions, Some(lighting_pass));
+    graph.retain_external_owner(material_snapshot.external_owner());
+    graph.retain_external_owner(execution_snapshot.external_owner());
     let capture = CapturingQueue::default();
     graph
         .execute(runtime.device(), &capture)
@@ -4896,6 +4980,7 @@ fn frame_graph_records_optional_trace_between_scene_and_gi() {
     };
     let mut extracted = ExtractedLightingInputs::default();
     extracted.surfaces = vec![LightingSurfaceInput::default()];
+    extracted.surface_material_indices = vec![0];
 
     let triangle = Triangle::new([-1.0, -1.0, -1.0], [1.0, -1.0, -1.0], [0.0, 1.0, -1.0], 0);
     let bvh = Bvh::build(&[triangle]);
@@ -4958,7 +5043,7 @@ fn frame_graph_records_optional_trace_between_scene_and_gi() {
         &target,
         &queues,
         &functions,
-        lighting.pass_for_target(&host_plan, &target, &runtime),
+        lighting.pass_for_target(&host_plan, &target, &runtime, [0.0; 3]),
     );
     assert_eq!(
         absent
@@ -5109,6 +5194,7 @@ fn physical_gpu_offscreen_host_graph_traces_builds_gi_and_composites() {
     }];
     let mut extracted = ExtractedLightingInputs::default();
     extracted.surfaces = vec![surface];
+    extracted.surface_material_indices = vec![0];
     extracted.trace_scene = Some(trace_scene);
     let availability = extracted.candidate_availability(runtime.device().capabilities());
     assert_eq!(availability, GiCandidateAvailability::SoftwareBvhGpu);
@@ -5159,7 +5245,7 @@ fn physical_gpu_offscreen_host_graph_traces_builds_gi_and_composites() {
         execution_programs_size_bytes: execution_snapshot.program_rows().len() as u64 * 20,
     };
     let lighting_pass = lighting
-        .pass_for_target_with_materials(&plan, &target, &runtime, material_bindings)
+        .pass_for_target_with_materials(&plan, &target, &runtime, [0.0; 3], material_bindings)
         .expect("GI surface admits its target-aware recipe");
     let hit_output = runtime.device().create_buffer(&BufferDescriptor::new(
         (core::mem::size_of::<u32>() * 16) as u64,
@@ -5340,18 +5426,26 @@ fn lighting_graph_skips_direct_when_only_world_restir_is_admitted() {
     };
     let mut extracted = ExtractedLightingInputs::default();
     extracted.surfaces = vec![LightingSurfaceInput::default()];
+    extracted.surface_material_indices = vec![0];
     extracted.gi_candidates = vec![Vec::new()];
     lighting
         .prepare(&plan, &extracted, 0, &runtime)
         .expect("lighting tables prepare");
 
     let target = RenderTarget::new(runtime.device(), extent);
-    let graph = crate::frame::target_graph(
+    let (material_bindings, material_snapshot, execution_snapshot) =
+        lighting_test_material_bindings(&runtime);
+    let lighting_pass = lighting
+        .pass_for_target_with_materials(&plan, &target, &runtime, [0.0; 3], material_bindings)
+        .expect("GI-only lighting pass binds canonical material tables");
+    let mut graph = crate::frame::target_graph(
         &target,
         &RenderQueues::new(),
         &DrawFunctions::new(),
-        lighting.pass_for_target(&plan, &target, &runtime),
+        Some(lighting_pass),
     );
+    graph.retain_external_owner(material_snapshot.external_owner());
+    graph.retain_external_owner(execution_snapshot.external_owner());
     let capture = CapturingQueue::default();
     graph
         .execute(runtime.device(), &capture)
@@ -5400,7 +5494,7 @@ fn lighting_graph_has_no_compute_pass_without_an_admitted_backend() {
         &target,
         &RenderQueues::new(),
         &DrawFunctions::new(),
-        lighting.pass_for_target(&plan, &target, &runtime),
+        lighting.pass_for_target(&plan, &target, &runtime, [0.0; 3]),
     );
     let capture = CapturingQueue::default();
     graph
@@ -5445,7 +5539,7 @@ fn lighting_empty_surface_batch_clears_outputs_without_dispatching() {
         &target,
         &RenderQueues::new(),
         &DrawFunctions::new(),
-        lighting.pass_for_target(&plan, &target, &runtime),
+        lighting.pass_for_target(&plan, &target, &runtime, [0.0; 3]),
     );
     let capture = CapturingQueue::default();
     graph
@@ -6922,6 +7016,7 @@ fn canonical_default_mesh_binding_uses_material_generation_and_graph_buffers() {
             [0.0, 0.0, 1.0, 0.0],
             [0.0, 0.0, 0.0, 1.0],
         ],
+        view_position: [0.0; 3],
         previous_clip_from_world: [
             [1.0, 0.0, 0.0, 0.0],
             [0.0, 1.0, 0.0, 0.0],

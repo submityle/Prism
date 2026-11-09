@@ -8,7 +8,7 @@ use prism_render_architecture::lighting::contract::{
     BudgetCompiler, ChangeFields, ChangeJournal, GiCandidateAvailability, GiCandidateRejection,
     LightingPlan, PlanCaps, RecipeExecution, RecipeId, RejectionExplanation, SceneStats, Tier,
 };
-use prism_render_architecture::lighting::{DebugMeta, DebugView};
+use prism_render_architecture::lighting::{DebugMeta, DebugView, LightScene};
 use prism_render_architecture::ray_scene::GpuBvhBuffers;
 use prism_render_driver::RenderDevice;
 use prism_render_material::{
@@ -154,6 +154,46 @@ pub struct LightingPunctualInput {
     pub _padding: [f32; 7],
 }
 
+/// Extended emitter consumed by the deterministic direct-light recipe.
+///
+/// `kind` is encoded in `shape_kind[0]`: 0 is a rectangle, 1 is a disk, and
+/// 2 is a capsule. The vector fields are shape-specific but always carry
+/// normalized directions where a direction is required. Radiance is linear
+/// scene radiance and is already converted from the canonical photometric
+/// unit by the main-world adapter.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
+pub struct LightingAreaInput {
+    /// Center for a rectangle/disk, or endpoint A for a capsule.
+    pub origin: [f32; 4],
+    /// Propagation direction for a rectangle/disk, or endpoint B for a capsule.
+    pub vector_a: [f32; 4],
+    /// Rectangle right axis; unused for disk/capsule.
+    pub vector_b: [f32; 4],
+    /// Rectangle up axis; unused for disk/capsule.
+    pub vector_c: [f32; 4],
+    /// Emitted scene-linear radiance.
+    pub radiance: [f32; 4],
+    /// Rectangle half extents, disk radius, or capsule radius.
+    pub shape: [f32; 4],
+    /// `[kind, visibility, 0, 0]`.
+    pub shape_kind: [u32; 4],
+}
+
+impl Default for LightingAreaInput {
+    fn default() -> Self {
+        Self {
+            origin: [0.0; 4],
+            vector_a: [0.0, -1.0, 0.0, 0.0],
+            vector_b: [1.0, 0.0, 0.0, 0.0],
+            vector_c: [0.0, 0.0, 1.0, 0.0],
+            radiance: [0.0; 4],
+            shape: [0.0; 4],
+            shape_kind: [0, 1, 0, 0],
+        }
+    }
+}
+
 impl Default for LightingPunctualInput {
     fn default() -> Self {
         Self {
@@ -173,9 +213,14 @@ impl Default for LightingPunctualInput {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
 pub struct LightingSurfaceInput {
+    /// World-space receiver position.
     pub position: [f32; 3],
+    /// World-space receiver normal; normalized at evaluation.
     pub normal: [f32; 3],
+    /// Dimensionless diffuse reflectance, not a pre-divided BRDF.
     pub albedo: [f32; 3],
+    /// Incident diffuse irradiance in the same scene-linear convention as lights.
+    /// This is not outgoing radiance: the Lambert BRDF is applied exactly once.
     pub ambient: [f32; 3],
 }
 
@@ -236,6 +281,101 @@ pub struct LightingSceneInputs {
     /// candidates are never implicitly broadcast across unrelated surfaces.
     pub gi_candidates: Vec<Vec<LightingGiCandidateInput>>,
     pub surfaces: Vec<LightingSurfaceInput>,
+    /// Material slots corresponding one-to-one with [`surfaces`]. The Native
+    /// composite resolves this explicit relation per pixel; it never treats a
+    /// GBuffer material slot as a GI-array index. A material slot may occur at
+    /// most once in this list. Missing or duplicate mappings fail closed.
+    pub surface_material_indices: Vec<u32>,
+    /// Frame-level controls for the builtin NPR response. These controls are
+    /// copied with the lighting snapshot so the Native composite and its CPU
+    /// reference never observe different stylized policies.
+    pub stylized: NativeStylizedParams,
+}
+
+/// Native frame-level controls for the builtin stylized response.
+///
+/// This is intentionally separate from material data: materials provide
+/// relative NPR modifiers, while the scene owns the shared artistic policy.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
+pub struct NativeStylizedParams {
+    /// Cel quantization band count.
+    pub bands: u32,
+    /// Cosine wrap in `[0, 1]`.
+    pub wrap: f32,
+    /// Band-edge softness in `[0, 1]`.
+    pub ramp_softness: f32,
+    /// Stepped-shadow threshold in `[0, 1]`.
+    pub shadow_threshold: f32,
+    /// Stepped-shadow transition half-width.
+    pub shadow_softness: f32,
+    /// Stylized specular intensity.
+    pub specular_intensity: f32,
+    /// Stylized specular threshold.
+    pub specular_threshold: f32,
+    /// Stylized specular transition half-width.
+    pub specular_softness: f32,
+    /// Stylized specular tint.
+    pub specular_color: [f32; 3],
+    /// Stylized rim intensity.
+    pub rim_intensity: f32,
+    /// Stylized rim tint.
+    pub rim_color: [f32; 3],
+    /// Stylized rim exponent.
+    pub rim_power: f32,
+}
+
+impl Default for NativeStylizedParams {
+    fn default() -> Self {
+        Self {
+            bands: 4,
+            wrap: 0.0,
+            ramp_softness: 0.0,
+            shadow_threshold: 0.0,
+            shadow_softness: 0.0,
+            specular_intensity: 0.0,
+            specular_threshold: 0.5,
+            specular_softness: 0.05,
+            specular_color: [1.0; 3],
+            rim_intensity: 0.0,
+            rim_color: [1.0; 3],
+            rim_power: 4.0,
+        }
+    }
+}
+
+impl NativeStylizedParams {
+    /// Returns whether the packed controls are safe for a shader invocation.
+    #[must_use]
+    pub fn is_valid(self) -> bool {
+        self.bands != 0
+            && self.wrap.is_finite()
+            && (0.0..=1.0).contains(&self.wrap)
+            && self.ramp_softness.is_finite()
+            && (0.0..=1.0).contains(&self.ramp_softness)
+            && self.shadow_threshold.is_finite()
+            && (0.0..=1.0).contains(&self.shadow_threshold)
+            && self.shadow_softness.is_finite()
+            && (0.0..=1.0).contains(&self.shadow_softness)
+            && self.specular_intensity.is_finite()
+            && self.specular_intensity >= 0.0
+            && self.specular_threshold.is_finite()
+            && (0.0..=1.0).contains(&self.specular_threshold)
+            && self.specular_softness.is_finite()
+            && (0.0..=1.0).contains(&self.specular_softness)
+            && self
+                .specular_color
+                .iter()
+                .all(|value| value.is_finite() && *value >= 0.0)
+            && self.rim_intensity.is_finite()
+            && self.rim_intensity >= 0.0
+            && self
+                .rim_color
+                .iter()
+                .all(|value| value.is_finite() && *value >= 0.0)
+            && self.rim_power.is_finite()
+            && self.rim_power >= 0.0
+    }
 }
 
 /// Immutable outgoing radiance authored for one stable BVH primitive.
@@ -669,7 +809,9 @@ impl LightingSceneInputs {
             stats,
             journal: ChangeJournal::new(),
             gi_candidates: Vec::new(),
-            surfaces: vec![LightingSurfaceInput::default()],
+            surfaces: Vec::new(),
+            surface_material_indices: Vec::new(),
+            stylized: NativeStylizedParams::default(),
         }
     }
 }
@@ -680,7 +822,9 @@ impl Default for LightingSceneInputs {
             stats: SceneStats::default(),
             journal: ChangeJournal::new(),
             gi_candidates: Vec::new(),
-            surfaces: vec![LightingSurfaceInput::default()],
+            surfaces: Vec::new(),
+            surface_material_indices: Vec::new(),
+            stylized: NativeStylizedParams::default(),
         }
     }
 }
@@ -699,18 +843,34 @@ pub struct ExtractedLightingInputs {
     pub stats: SceneStats,
     pub journal_snapshot: prism_render_architecture::lighting::contract::JournalSnapshot,
     pub directionals: Vec<LightingDirectionalInput>,
+    /// Canonical generation-safe handles aligned with `directionals`.
+    pub directional_handles: Vec<prism_render_architecture::lighting::LightSceneHandle>,
     pub punctuals: Vec<LightingPunctualInput>,
+    /// Canonical generation-safe handles aligned with `punctuals`.
+    pub punctual_handles: Vec<prism_render_architecture::lighting::LightSceneHandle>,
+    pub areas: Vec<LightingAreaInput>,
+    /// Canonical generation-safe handles aligned with `areas`.
+    pub area_handles: Vec<prism_render_architecture::lighting::LightSceneHandle>,
+    /// Recoverable per-emitter diagnostics from canonical direct-light adaptation.
+    pub light_scene_rejections: Vec<crate::lighting_scene::LightingSceneExtractError>,
     /// Canonical scene sequence represented by this extracted snapshot.
     pub light_scene_sequence: u64,
     /// Canonical scene lineage represented by this extracted snapshot.
     pub light_scene_identity: u64,
     /// Canonical scene epoch represented by this extracted snapshot.
     pub light_scene_epoch: u64,
-    /// Explicit all-or-nothing native conversion failure, if any.
+    /// Snapshot-wide canonical conversion failure, if any.
     pub light_scene_error: Option<crate::lighting_scene::LightingSceneExtractError>,
     /// Per-surface GI candidates, aligned with `surfaces` when present.
     pub gi_candidates: Vec<Vec<LightingGiCandidateInput>>,
     pub surfaces: Vec<LightingSurfaceInput>,
+    /// Explicit material-slot mapping for the lighting surfaces. This is
+    /// intentionally separate from `LightingSurfaceInput`: a material can be
+    /// reused by many world surfaces, so no positional or material-slot
+    /// inference is safe here.
+    pub surface_material_indices: Vec<u32>,
+    /// Frame-level NPR controls paired with the light snapshot.
+    pub stylized: NativeStylizedParams,
     /// Optional packed scene used to generate and trace this frame's GI rays.
     pub trace_scene: Option<LightingTraceSceneInput>,
 }
@@ -881,19 +1041,18 @@ pub(crate) fn extract_lighting_inputs(main: &mut World, render: &mut World) {
         .get_resource::<LightingSceneInputs>()
         .cloned()
         .unwrap_or_default();
-    if main
-        .get_resource::<crate::lighting_scene::LightingLightScene>()
-        .is_none()
-    {
-        main.insert_resource(crate::lighting_scene::LightingLightScene::default());
-    }
-    let light_scene = main
-        .get_resource::<crate::lighting_scene::LightingLightScene>()
-        .expect("canonical light scene was initialized");
-    let light_scene_sequence = light_scene.scene.sequence();
-    let light_scene_identity = light_scene.scene.identity();
-    let light_scene_epoch = light_scene.scene.scene_epoch();
-    let light_count = light_scene.scene.len();
+    // The canonical scene is an explicit main-world input. Extraction must not
+    // create or mutate it: doing so would turn a missing producer into an
+    // implicit lighting authority. A temporary empty snapshot keeps the
+    // render path deterministic until the application publishes its scene.
+    let empty_light_scene = LightScene::default();
+    let published_light_scene = main.get_resource::<crate::lighting_scene::LightingLightScene>();
+    let light_scene =
+        published_light_scene.map_or(&empty_light_scene, |published| &published.scene);
+    let light_scene_sequence = light_scene.sequence();
+    let light_scene_identity = light_scene.identity();
+    let light_scene_epoch = light_scene.scene_epoch();
+    let light_count = light_scene.len();
     let native_changed = render
         .get_resource::<ExtractedLightingInputs>()
         .is_none_or(|previous| {
@@ -901,8 +1060,12 @@ pub(crate) fn extract_lighting_inputs(main: &mut World, render: &mut World) {
                 || previous.light_scene_sequence != light_scene_sequence
                 || previous.light_scene_epoch != light_scene_epoch
         });
+    let native = native_changed.then(|| crate::lighting_scene::derive_native_lights(light_scene));
     let mut stats = inputs.stats;
-    if light_count != 0 {
+    // SceneStats may carry a host estimate when no canonical lighting scene
+    // has been published yet. Once the authoritative scene exists, including
+    // an explicitly empty scene, its exact count supersedes that estimate.
+    if published_light_scene.is_some() {
         stats.lights = u32::try_from(light_count).unwrap_or(u32::MAX);
     }
     let trace_scene = main.get_resource::<LightingTraceSceneInput>().cloned();
@@ -910,15 +1073,25 @@ pub(crate) fn extract_lighting_inputs(main: &mut World, render: &mut World) {
         extracted.stats = stats;
         extracted.journal_snapshot = inputs.journal.snapshot();
         if native_changed {
-            match crate::lighting_scene::derive_native_lights(&light_scene.scene) {
+            match native.expect("changed canonical scene must have a native snapshot") {
                 Ok(native) => {
                     extracted.directionals = native.directionals;
+                    extracted.directional_handles = native.directional_handles;
                     extracted.punctuals = native.punctuals;
+                    extracted.punctual_handles = native.punctual_handles;
+                    extracted.areas = native.areas;
+                    extracted.area_handles = native.area_handles;
+                    extracted.light_scene_rejections = native.rejections;
                     extracted.light_scene_error = None;
                 }
                 Err(error) => {
                     extracted.directionals.clear();
+                    extracted.directional_handles.clear();
                     extracted.punctuals.clear();
+                    extracted.punctual_handles.clear();
+                    extracted.areas.clear();
+                    extracted.area_handles.clear();
+                    extracted.light_scene_rejections.clear();
                     extracted.light_scene_error = Some(error);
                 }
             }
@@ -928,24 +1101,59 @@ pub(crate) fn extract_lighting_inputs(main: &mut World, render: &mut World) {
         }
         extracted.gi_candidates = inputs.gi_candidates;
         extracted.surfaces = inputs.surfaces;
+        extracted.surface_material_indices = inputs.surface_material_indices;
+        extracted.stylized = inputs.stylized;
         extracted.trace_scene = trace_scene;
     } else {
-        let (directionals, punctuals, light_scene_error) =
-            match crate::lighting_scene::derive_native_lights(&light_scene.scene) {
-                Ok(native) => (native.directionals, native.punctuals, None),
-                Err(error) => (Vec::new(), Vec::new(), Some(error)),
-            };
+        let (
+            directionals,
+            directional_handles,
+            punctuals,
+            punctual_handles,
+            areas,
+            area_handles,
+            light_scene_rejections,
+            light_scene_error,
+        ) = match native.expect("first extraction must have a native snapshot") {
+            Ok(native) => (
+                native.directionals,
+                native.directional_handles,
+                native.punctuals,
+                native.punctual_handles,
+                native.areas,
+                native.area_handles,
+                native.rejections,
+                None,
+            ),
+            Err(error) => (
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Some(error),
+            ),
+        };
         render.insert_resource(ExtractedLightingInputs {
             stats,
             journal_snapshot: inputs.journal.snapshot(),
             directionals,
+            directional_handles,
             punctuals,
+            punctual_handles,
+            areas,
+            area_handles,
+            light_scene_rejections,
             light_scene_sequence,
             light_scene_identity,
             light_scene_epoch,
             light_scene_error,
             gi_candidates: inputs.gi_candidates,
             surfaces: inputs.surfaces,
+            surface_material_indices: inputs.surface_material_indices,
+            stylized: inputs.stylized,
             trace_scene,
         });
     }
@@ -1033,22 +1241,26 @@ fn changed_epoch_fields(
 /// Evaluates the deterministic direct-light recipe on the CPU.
 ///
 /// This is the numeric oracle for the GPU kernel. It intentionally covers one
-/// stable Lambert contract: ambient irradiance, directional lights, and point
-/// or spot lights with inverse-square, range, cone, and visibility terms.
+/// stable Lambert contract: ambient irradiance, directional lights, point or
+/// spot lights, and the deterministic four-sample finite-area estimator.
+/// Every incident irradiance term is multiplied by `albedo / PI`; the result
+/// is outgoing diffuse radiance, matching the indirect-light contract.
 #[must_use]
 pub(crate) fn evaluate_deterministic_direct(
     surface: LightingSurfaceInput,
     directionals: &[LightingDirectionalInput],
     punctuals: &[LightingPunctualInput],
+    areas: &[LightingAreaInput],
 ) -> [f32; 3] {
     let normal = normalize_or(surface.normal, [0.0, 1.0, 0.0]);
-    let mut radiance = mul(surface.albedo, surface.ambient);
+    let diffuse_brdf = scale(surface.albedo, core::f32::consts::FRAC_1_PI);
+    let mut radiance = mul(diffuse_brdf, surface.ambient);
     for light in directionals {
         let direction = normalize_or(light.direction_to_light, [0.0, 1.0, 0.0]);
         let cosine = dot(normal, direction).max(0.0) * light.visibility.clamp(0.0, 1.0);
         radiance = add(
             radiance,
-            mul(surface.albedo, scale(light.illuminance, cosine)),
+            mul(diffuse_brdf, scale(light.illuminance, cosine)),
         );
     }
     for light in punctuals {
@@ -1073,12 +1285,151 @@ pub(crate) fn evaluate_deterministic_direct(
         }
         let cosine =
             dot(normal, direction).max(0.0) * attenuation * light.visibility.clamp(0.0, 1.0);
+        radiance = add(radiance, mul(diffuse_brdf, scale(light.intensity, cosine)));
+    }
+    for light in areas {
         radiance = add(
             radiance,
-            mul(surface.albedo, scale(light.intensity, cosine)),
+            mul(diffuse_brdf, evaluate_area_direct(light, surface, normal)),
         );
     }
     radiance
+}
+
+fn evaluate_area_direct(
+    light: &LightingAreaInput,
+    surface: LightingSurfaceInput,
+    normal: [f32; 3],
+) -> [f32; 3] {
+    let measure = area_measure(light);
+    if !measure.is_finite() || measure <= 0.0 {
+        return [0.0; 3];
+    }
+    let mut result = [0.0; 3];
+    for (sample_index, _) in [0_u32, 1, 2, 3].into_iter().enumerate() {
+        let point = area_sample(light, sample_index as u32);
+        let to_light = sub(point, surface.position);
+        let distance_squared = dot(to_light, to_light);
+        if !distance_squared.is_finite() || distance_squared <= 1.0e-8 {
+            continue;
+        }
+        let direction = scale(to_light, distance_squared.sqrt().recip());
+        let cosine_surface = dot(normal, direction).max(0.0);
+        let cosine_source = if light.shape_kind[0] == 0 || light.shape_kind[0] == 1 {
+            dot(
+                normalize_or(
+                    [light.vector_a[0], light.vector_a[1], light.vector_a[2]],
+                    [0.0, -1.0, 0.0],
+                ),
+                scale(direction, -1.0),
+            )
+            .max(0.0)
+        } else {
+            let axis = normalize_or(
+                sub(
+                    [light.vector_a[0], light.vector_a[1], light.vector_a[2]],
+                    [light.origin[0], light.origin[1], light.origin[2]],
+                ),
+                [0.0, 1.0, 0.0],
+            );
+            let center = scale(
+                add(
+                    [light.origin[0], light.origin[1], light.origin[2]],
+                    [light.vector_a[0], light.vector_a[1], light.vector_a[2]],
+                ),
+                0.5,
+            );
+            let radial = normalize_or(sub(point, center), basis_tangent(axis));
+            dot(radial, scale(direction, -1.0)).max(0.0)
+        };
+        result = add(
+            result,
+            scale(
+                [light.radiance[0], light.radiance[1], light.radiance[2]],
+                cosine_surface * cosine_source / distance_squared,
+            ),
+        );
+    }
+    scale(
+        result,
+        measure * 0.25 * (light.shape_kind[1] as f32).clamp(0.0, 1.0),
+    )
+}
+
+fn area_sample(light: &LightingAreaInput, sample_index: u32) -> [f32; 3] {
+    let origin = [light.origin[0], light.origin[1], light.origin[2]];
+    let vector_a = [light.vector_a[0], light.vector_a[1], light.vector_a[2]];
+    if light.shape_kind[0] == 0 {
+        let uv = [
+            [-0.57735026, -0.57735026],
+            [0.57735026, -0.57735026],
+            [-0.57735026, 0.57735026],
+            [0.57735026, 0.57735026],
+        ][sample_index as usize];
+        return add(
+            add(
+                origin,
+                scale(
+                    [light.vector_b[0], light.vector_b[1], light.vector_b[2]],
+                    light.shape[0] * uv[0],
+                ),
+            ),
+            scale(
+                [light.vector_c[0], light.vector_c[1], light.vector_c[2]],
+                light.shape[1] * uv[1],
+            ),
+        );
+    }
+    if light.shape_kind[0] == 1 {
+        let offsets = [[0.5, 0.0], [-0.5, 0.0], [0.0, 0.5], [0.0, -0.5]][sample_index as usize];
+        return add(
+            add(
+                origin,
+                scale(basis_tangent(vector_a), light.shape[0] * offsets[0]),
+            ),
+            scale(basis_bitangent(vector_a), light.shape[0] * offsets[1]),
+        );
+    }
+    let axis = normalize_or(sub(vector_a, origin), [0.0, 1.0, 0.0]);
+    let t = [0.125, 0.375, 0.625, 0.875][sample_index as usize];
+    let angle: f32 = [0.0, 1.5707963, 3.1415927, 4.712389][sample_index as usize];
+    let center = add(origin, scale(sub(vector_a, origin), t));
+    let radial = add(
+        scale(basis_tangent(axis), angle.cos()),
+        scale(basis_bitangent(axis), angle.sin()),
+    );
+    add(center, scale(radial, light.shape[0]))
+}
+
+fn area_measure(light: &LightingAreaInput) -> f32 {
+    if light.shape_kind[0] == 0 {
+        return 4.0 * light.shape[0] * light.shape[1];
+    }
+    if light.shape_kind[0] == 1 {
+        return core::f32::consts::PI * light.shape[0] * light.shape[0];
+    }
+    let length = sub(
+        [light.vector_a[0], light.vector_a[1], light.vector_a[2]],
+        [light.origin[0], light.origin[1], light.origin[2]],
+    );
+    let length = dot(length, length).sqrt();
+    2.0 * core::f32::consts::PI * light.shape[0] * length
+        + 4.0 * core::f32::consts::PI * light.shape[0] * light.shape[0]
+}
+
+fn basis_tangent(direction: [f32; 3]) -> [f32; 3] {
+    let n = normalize_or(direction, [0.0, 1.0, 0.0]);
+    let reference = if n[1].abs() > 0.9 {
+        [1.0, 0.0, 0.0]
+    } else {
+        [0.0, 1.0, 0.0]
+    };
+    normalize_or(cross(reference, n), [1.0, 0.0, 0.0])
+}
+
+fn basis_bitangent(direction: [f32; 3]) -> [f32; 3] {
+    let n = normalize_or(direction, [0.0, 1.0, 0.0]);
+    normalize_or(cross(n, basis_tangent(n)), [0.0, 0.0, 1.0])
 }
 
 /// Evaluates the deterministic initial GI reservoir used by the GPU twin.
@@ -1157,6 +1508,14 @@ fn scale(a: [f32; 3], value: f32) -> [f32; 3] {
     [a[0] * value, a[1] * value, a[2] * value]
 }
 
+fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
 fn normalize_or(value: [f32; 3], fallback: [f32; 3]) -> [f32; 3] {
     let length_squared = dot(value, value);
     if length_squared.is_finite() && length_squared > 1.0e-12 {
@@ -1167,11 +1526,26 @@ fn normalize_or(value: [f32; 3], fallback: [f32; 3]) -> [f32; 3] {
 }
 
 #[cfg(test)]
+mod lighting_input_defaults_tests {
+    use super::*;
+
+    #[test]
+    fn absent_scene_has_no_synthetic_lighting_surfaces() {
+        assert!(LightingSceneInputs::default().surfaces.is_empty());
+        assert!(LightingSceneInputs::with_stats(SceneStats::default())
+            .surfaces
+            .is_empty());
+    }
+}
+
+#[cfg(test)]
 mod radiance_tests {
     use super::*;
     use prism_render_architecture::{
         abi::{AbiHash, AbiVersion},
-        ray_scene::{Bvh, Triangle, TRIANGLE_WORDS},
+        ray_scene::{
+            Bvh, GpuBvhBuffers, RayHitAttributeRecord, RayHitIdentity, Triangle, TRIANGLE_WORDS,
+        },
         shader_package::{
             ArtifactDigest, ManifestExpectation, ModuleId, PermutationSpace, ShaderPackageId,
             ShaderPackageManifest, ShaderPackageRegistry, ShaderPackageVariantManifest,
@@ -1308,6 +1682,26 @@ mod radiance_tests {
         )])))
     }
 
+    fn packed_bvh_with_hit_attributes(bvh: Bvh) -> Arc<GpuBvhBuffers> {
+        let packed = GpuBvhBuffers::from_bvh(&bvh);
+        let attributes = packed
+            .triangles
+            .chunks_exact(TRIANGLE_WORDS)
+            .map(|triangle| {
+                RayHitAttributeRecord::new(
+                    RayHitIdentity::new(1, triangle[9], 1),
+                    [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
+                    [[0.0, 0.0, 1.0]; 3],
+                )
+            })
+            .collect();
+        Arc::new(
+            packed
+                .with_hit_attributes(attributes)
+                .expect("one hit-attribute record is required for every packed triangle"),
+        )
+    }
+
     fn build_one<'a>(
         tables: &MaterialExecutionTables,
         binding: MaterialExecutionBinding,
@@ -1333,7 +1727,7 @@ mod radiance_tests {
 
     #[test]
     fn authoritative_unlit_materials_feed_trace_and_candidate_radiance() {
-        let bvh = Arc::new(GpuBvhBuffers::from_bvh(&Bvh::build(&[
+        let bvh = packed_bvh_with_hit_attributes(Bvh::build(&[
             Triangle::new(
                 [-2.0, -1.0, -1.0],
                 [-1.0, -1.0, -1.0],
@@ -1341,7 +1735,7 @@ mod radiance_tests {
                 73,
             ),
             Triangle::new([1.0, -1.0, -1.0], [2.0, -1.0, -1.0], [1.5, 1.0, -1.0], 11),
-        ])));
+        ]));
         let (tables, binding) = execution_fixture(ProgramRef::Builtin(BuiltinProgram::Unlit));
         let material_11 = material(
             7,
