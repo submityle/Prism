@@ -10,9 +10,10 @@ use alloc::{collections::BTreeMap, vec::Vec};
 use core::fmt;
 
 use prism_render_architecture::render_fabric::{
-    AccessKind, FeatureId, FeatureSelection, PassKey, PassTemplate, QueueClass, RenderQualityTier,
-    ResourceInput, ResourceKey, ResourceOwner, ResourceScope, ResourceUse, SelectedFeature,
-    ShaderPermutationBinding, VariantId,
+    AccessKind, FeatureId, FeatureSelection, FrozenShaderSelection, PassKey, PassTemplate,
+    QueueClass, RenderQualityTier, ResourceInput, ResourceKey, ResourceOwner, ResourceScope,
+    ResourceUse, SelectedFeature, SelectedFeatureShaderBinding, ShaderPermutationBinding,
+    VariantId,
 };
 use prism_render_architecture::shader_package::{
     PermutationError, PermutationIndex, PermutationKey, PermutationSpace,
@@ -24,6 +25,7 @@ use crate::draw::DrawFunctionId;
 use crate::mesh_pipelines::{ResponseModuleCache, ResponseModuleCacheError, ResponseModuleSpec};
 use crate::pipeline_pass::{
     PassDescriptor, PassDescriptorClass, PassDescriptorTable, PassRole, PassSetError,
+    ShaderPackageIdentity,
 };
 use crate::scene::SceneRegistry;
 use crate::sets::RenderPhase;
@@ -133,6 +135,18 @@ pub enum FeatureMappingError {
         /// Selected variant.
         variant: VariantId,
     },
+    /// A host pass does not match the immutable package/module binding in the frozen selection.
+    FrozenShaderBindingMismatch {
+        feature: FeatureId,
+        variant: VariantId,
+        pass: Option<PassKey>,
+    },
+    /// The host pass family is inconsistent with its declared semantic role.
+    ExecutionFamilyMismatch {
+        feature: FeatureId,
+        variant: VariantId,
+        pass: Option<PassKey>,
+    },
     /// The selected key is invalid for its declared space.
     Permutation(PermutationError),
     /// Shader module residency rejected the declaration.
@@ -241,6 +255,48 @@ impl<'a, D: RenderDevice + ?Sized> FeatureSelectionMapper<'a, D> {
         feature_id: FeatureId,
         bindings: &[FeaturePassBinding],
     ) -> Result<FeaturePassSet, FeatureMappingError> {
+        self.map_feature_inner(selection, feature_id, bindings, None)
+    }
+
+    /// Maps a selected feature using a previously frozen package binding.
+    /// Semantic choices always come from frozen.selection(); supplied pass
+    /// declarations are accepted only when they match the frozen declaration.
+    pub fn map_frozen_feature(
+        &mut self,
+        frozen: &FrozenShaderSelection,
+        feature_id: FeatureId,
+        bindings: &[FeaturePassBinding],
+    ) -> Result<FeaturePassSet, FeatureMappingError> {
+        let selected = frozen
+            .selection()
+            .feature(feature_id)
+            .ok_or(FeatureMappingError::MissingSelection(feature_id))?;
+        let package_binding =
+            frozen
+                .binding(feature_id)
+                .ok_or(FeatureMappingError::FrozenShaderBindingMismatch {
+                    feature: feature_id,
+                    variant: selected.variant_id(),
+                    pass: None,
+                })?;
+        self.map_feature_inner(
+            frozen.selection(),
+            feature_id,
+            bindings,
+            Some((package_binding, frozen.identity_digest())),
+        )
+    }
+
+    fn map_feature_inner(
+        &mut self,
+        selection: &FeatureSelection,
+        feature_id: FeatureId,
+        bindings: &[FeaturePassBinding],
+        frozen: Option<(
+            &SelectedFeatureShaderBinding,
+            prism_render_architecture::shader_package::ArtifactDigest,
+        )>,
+    ) -> Result<FeaturePassSet, FeatureMappingError> {
         let selected = selection
             .feature(feature_id)
             .ok_or(FeatureMappingError::MissingSelection(feature_id))?;
@@ -262,6 +318,51 @@ impl<'a, D: RenderDevice + ?Sized> FeatureSelectionMapper<'a, D> {
                     selected: selected.variant_id(),
                     binding: binding.variant_id,
                 });
+            }
+        }
+        if let Some((package, _)) = frozen {
+            if package.feature_id() != feature_id
+                || package.variant_id() != selected.variant_id()
+                || package.package() != package.module().identity.package
+            {
+                return Err(FeatureMappingError::FrozenShaderBindingMismatch {
+                    feature: feature_id,
+                    variant: selected.variant_id(),
+                    pass: None,
+                });
+            }
+            let checked_index = package.permutation_index().map_err(|_| {
+                FeatureMappingError::FrozenShaderBindingMismatch {
+                    feature: feature_id,
+                    variant: selected.variant_id(),
+                    pass: None,
+                }
+            })?;
+            for binding in &relevant {
+                let pass = binding.pass_key;
+                if binding.module.identity != package.module().identity
+                    || binding.module.permutations != package.module().permutations
+                    || binding.permutation != package.permutation()
+                    || resolve_permutation(selected, binding)? != checked_index
+                {
+                    return Err(FeatureMappingError::FrozenShaderBindingMismatch {
+                        feature: feature_id,
+                        variant: selected.variant_id(),
+                        pass,
+                    });
+                }
+                let family_matches = match binding.role {
+                    PassRole::Surface => binding.module.execution_family == prism_render_architecture::shader_package::ExecutionFamily::FusedBuiltin,
+                    PassRole::ResponseLeft | PassRole::ResponseRight => binding.module.execution_family == prism_render_architecture::shader_package::ExecutionFamily::SplitResponse,
+                    PassRole::Composition => binding.module.execution_family == prism_render_architecture::shader_package::ExecutionFamily::Composition,
+                };
+                if !family_matches {
+                    return Err(FeatureMappingError::ExecutionFamilyMismatch {
+                        feature: feature_id,
+                        variant: selected.variant_id(),
+                        pass,
+                    });
+                }
             }
         }
 
@@ -334,7 +435,12 @@ impl<'a, D: RenderDevice + ?Sized> FeatureSelectionMapper<'a, D> {
         // device-wide closure. Keep the hot key compact and injective; shader
         // source descriptors are deliberately checked again by `intern` on a
         // hit so an ABI/source drift cannot be hidden by this cache.
-        let cache_key = mapping_cache_key(selection, selected, &ordered);
+        let cache_key = mapping_cache_key(
+            selection,
+            selected,
+            &ordered,
+            frozen.map(|(binding, digest)| (binding.identity_digest(), digest)),
+        );
         if let Some(cache) = self.cache.as_deref_mut() {
             if let Some(cached) = cache.entries.get(&cache_key).cloned() {
                 let mut valid = cached.passes().len() == ordered.len();
@@ -381,6 +487,16 @@ impl<'a, D: RenderDevice + ?Sized> FeatureSelectionMapper<'a, D> {
                 render_phase: binding.render_phase,
                 draw: binding.draw,
                 sort_class: binding.sort_class,
+                shader_package: frozen.map(|(package, selection_digest)| ShaderPackageIdentity {
+                    feature_id: package.feature_id(),
+                    variant_id: package.variant_id(),
+                    package_id: package.package(),
+                    binding_digest: package.identity_digest(),
+                    selection_digest,
+                    checked_permutation_index: package
+                        .permutation_index()
+                        .expect("frozen binding was checked"),
+                }),
             });
         }
         PassDescriptorTable::validate(&passes).map_err(FeatureMappingError::PassSet)?;
@@ -413,6 +529,10 @@ fn mapping_cache_key(
     selection: &FeatureSelection,
     selected: &SelectedFeature,
     bindings: &[&FeaturePassBinding],
+    frozen: Option<(
+        prism_render_architecture::shader_package::ArtifactDigest,
+        prism_render_architecture::shader_package::ArtifactDigest,
+    )>,
 ) -> Vec<u8> {
     // The mapper is device-local, but the cache key must still describe the
     // complete frozen selection. In particular, an author may replace a
@@ -450,6 +570,13 @@ fn mapping_cache_key(
 
     push_u32(&mut key, selected.feature_id().0);
     push_u32(&mut key, selected.variant_id().0);
+    if let Some((binding, selection)) = frozen {
+        key.push(1);
+        key.extend_from_slice(&binding.0);
+        key.extend_from_slice(&selection.0);
+    } else {
+        key.push(0);
+    }
     push_u64(&mut key, bindings.len() as u64);
     for binding in bindings {
         push_u32(&mut key, binding.feature_id.0);
@@ -706,7 +833,7 @@ mod tests {
     use prism_render_architecture::backend::capability::CapabilitySet;
     use prism_render_architecture::render_fabric::{
         FeatureCatalog, FeatureDefinition, FeatureKind, FeatureVariant, FrozenRoots,
-        RenderQualityTier, ServiceSet,
+        RenderQualityTier, ServiceSet, ShaderModuleBinding, ShaderPackageBinding,
     };
     use prism_render_architecture::shader_package::{
         ArtifactDigest, ExecutionFamily, ModuleIdentity, ShaderPackageId,
@@ -821,6 +948,22 @@ mod tests {
         }
     }
 
+    fn freeze(selection: &FeatureSelection, binding: &FeaturePassBinding) -> FrozenShaderSelection {
+        let package = ShaderPackageBinding {
+            package: binding.module.identity.package,
+            module: ShaderModuleBinding {
+                identity: binding.module.identity.clone(),
+                permutations: binding.module.permutations.clone(),
+                full_lobe_fallback: binding.module.full_lobe_fallback,
+            },
+            permutation: binding.permutation,
+            pass_descriptors: Vec::new(),
+        };
+        selection
+            .bind_shader_packages(&[(VARIANT, package)].into_iter().collect())
+            .unwrap()
+    }
+
     fn binding(
         variant: VariantId,
         permutation: Option<ShaderPermutationBinding>,
@@ -868,6 +1011,64 @@ mod tests {
             mapping_cache.stats(),
             FeatureMappingCacheStats { hits: 1, misses: 1 }
         );
+    }
+
+    #[test]
+    fn frozen_mapping_retains_copyable_package_identity_on_each_pass() {
+        let (selection, space, key) = selection();
+        let device = null_device();
+        let mut modules = ResponseModuleCache::new();
+        let binding = binding(
+            VARIANT,
+            Some(ShaderPermutationBinding { space, key }),
+            spec(prism_render_driver::ShaderModuleDescriptor::wgsl(
+                "@compute @workgroup_size(1) fn main() {}",
+            )),
+        );
+        let frozen = freeze(&selection, &binding);
+        let set = FeatureSelectionMapper::new(&device, &mut modules)
+            .map_frozen_feature(&frozen, FEATURE, core::slice::from_ref(&binding))
+            .unwrap();
+        let identity = set.passes()[0].shader_package.unwrap();
+        assert_eq!(identity.feature_id, FEATURE);
+        assert_eq!(identity.variant_id, VARIANT);
+        assert_eq!(identity.package_id, binding.module.identity.package);
+        assert_eq!(
+            identity.binding_digest,
+            frozen.binding(FEATURE).unwrap().identity_digest()
+        );
+        assert_eq!(identity.selection_digest, frozen.identity_digest());
+        assert_eq!(identity.checked_permutation_index.get(), 5);
+        let copied = set.passes()[0];
+        assert_eq!(copied.shader_package, Some(identity));
+    }
+
+    #[test]
+    fn frozen_mapping_rejects_module_or_family_drift() {
+        let (selection, space, key) = selection();
+        let device = null_device();
+        let mut modules = ResponseModuleCache::new();
+        let original = binding(
+            VARIANT,
+            Some(ShaderPermutationBinding { space, key }),
+            spec(prism_render_driver::ShaderModuleDescriptor::wgsl(
+                "@compute @workgroup_size(1) fn main() {}",
+            )),
+        );
+        let frozen = freeze(&selection, &original);
+        let mut changed = original.clone();
+        changed.module.identity.digest = ArtifactDigest([0xa5; 32]);
+        let mut mapper = FeatureSelectionMapper::new(&device, &mut modules);
+        assert!(matches!(
+            mapper.map_frozen_feature(&frozen, FEATURE, &[changed]),
+            Err(FeatureMappingError::FrozenShaderBindingMismatch { .. })
+        ));
+        let mut wrong_family = original;
+        wrong_family.role = PassRole::ResponseLeft;
+        assert!(matches!(
+            mapper.map_frozen_feature(&frozen, FEATURE, &[wrong_family]),
+            Err(FeatureMappingError::ExecutionFamilyMismatch { .. })
+        ));
     }
 
     #[test]
@@ -1082,6 +1283,7 @@ mod tests {
                 render_phase: RenderPhase::Opaque,
                 draw: Some(DrawFunctionId(0)),
                 sort_class: PassDescriptorClass::SURFACE,
+                shader_package: None,
             }],
         };
         assert!(matches!(
@@ -1182,12 +1384,19 @@ mod tests {
                 "@compute @workgroup_size(1) fn main() {}",
             )),
         );
-        let set = FeatureSelectionMapper::new(&device, &mut modules)
-            .map_feature(&selection, FEATURE, core::slice::from_ref(&binding))
-            .unwrap();
+        let frozen = freeze(&selection, &binding);
         let material = fallback_material_record(GenerationalHandle::new(4, 1), 1);
         let mut registry = SceneRegistry::new();
-        let table_index = set.install(&mut registry, &material).unwrap();
+        let table_index = registry
+            .insert_material_with_frozen_selection(
+                &device,
+                &mut modules,
+                material.clone(),
+                &frozen,
+                FEATURE,
+                core::slice::from_ref(&binding),
+            )
+            .unwrap();
         registry.insert_mesh_class(
             7,
             crate::MeshClass::new(Vec::new(), PrimitiveTopology::TriangleList),
@@ -1206,14 +1415,22 @@ mod tests {
         assert_eq!(bin.len(), 1);
         assert_eq!(
             bin[0],
-            set.passes()[0].mesh_variant(
+            registry.pass_descriptors(table_index).unwrap()[0].mesh_variant(
                 PrimitiveTopology::TriangleList,
                 Some(crate::RENDER_TARGET_FORMAT),
                 None,
                 1
             )
         );
-        assert_eq!(registry.pass_descriptors(table_index), Some(set.passes()));
+        let pass = registry.pass_descriptors(table_index).unwrap()[0];
+        assert_eq!(
+            pass.shader_package.unwrap().selection_digest,
+            frozen.identity_digest()
+        );
+        assert_eq!(
+            registry.material_pass_index(material.handle),
+            Some(table_index)
+        );
     }
 
     #[test]
@@ -1245,5 +1462,42 @@ mod tests {
         assert!(registry.material(material.handle).is_none());
         assert!(registry.material_pass_index(material.handle).is_none());
         assert_eq!(registry.feature_mapping_cache_len(), 0);
+    }
+
+    #[test]
+    fn failed_frozen_feature_install_does_not_publish_material_or_pass_binding() {
+        let (selection, space, key) = selection();
+        let device = null_device();
+        let mut modules = ResponseModuleCache::new();
+        let original = binding(
+            VARIANT,
+            Some(ShaderPermutationBinding { space, key }),
+            spec(prism_render_driver::ShaderModuleDescriptor::wgsl(
+                "@compute @workgroup_size(1) fn main() {}",
+            )),
+        );
+        let frozen = freeze(&selection, &original);
+        let mut drifted = original;
+        drifted.module.identity.digest = ArtifactDigest([0xa5; 32]);
+        let mut registry = SceneRegistry::new();
+        let material = fallback_material_record(GenerationalHandle::new(9, 1), 1);
+        assert!(matches!(
+            registry.insert_material_with_frozen_selection(
+                &device,
+                &mut modules,
+                material.clone(),
+                &frozen,
+                FEATURE,
+                &[drifted],
+            ),
+            Err(FeatureMappingError::FrozenShaderBindingMismatch { .. })
+        ));
+        assert_eq!(registry.material_count(), 0);
+        assert!(registry.material(material.handle).is_none());
+        assert!(registry.material_pass_index(material.handle).is_none());
+        assert!(matches!(
+            registry.last_feature_mapping_error(),
+            Some(FeatureMappingError::FrozenShaderBindingMismatch { .. })
+        ));
     }
 }

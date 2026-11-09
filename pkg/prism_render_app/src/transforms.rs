@@ -28,7 +28,9 @@ use crate::ecs_columns::{has_resident_transform, ResidentTransformRows};
 use crate::runtime_resource::RenderRuntimeResource;
 use crate::{DrawFunctionId, DrawFunctions, DrawRequest, MeshPipelineProvider, MeshPipelines};
 
-const STRIDE: usize = 48;
+/// Current affine + previous affine + validity/padding.
+const STRIDE: usize = 112;
+const RESIDENT_STRIDE: usize = 48;
 
 /// Associates an entity's world pose with one render scene instance.
 /// Handles include the generation; reused scene slots never inherit old poses.
@@ -43,6 +45,7 @@ struct Snapshot {
     version: u64,
     rows: BTreeMap<SceneHandle, usize>,
     bytes: Arc<[u8]>,
+    motion_bytes: Arc<[u8]>,
     error: Option<String>,
 }
 
@@ -75,9 +78,14 @@ impl PublishedTransforms {
         self.snapshot.error.as_deref()
     }
 
-    /// Packed row-major 3×4 poses from the most recent complete publication.
+    /// Current/previous affine records from the most recent complete publication.
     pub fn bytes(&self) -> &[u8] {
-        &self.snapshot.bytes
+        &self.snapshot.motion_bytes
+    }
+
+    /// Current/previous affine records for the motion-capable mesh ABI.
+    pub fn motion_bytes(&self) -> &[u8] {
+        &self.snapshot.motion_bytes
     }
 
     fn publish(
@@ -101,6 +109,18 @@ impl PublishedTransforms {
         let structural = self.buffers.len() != globals.len()
             || self.snapshot.rows != rows
             || self.snapshot.error.is_some();
+        let previous_by_handle: BTreeMap<SceneHandle, GlobalTransform> = self
+            .snapshot
+            .rows
+            .iter()
+            .filter_map(|(handle, &row)| {
+                self.buffers
+                    .read()
+                    .get(row)
+                    .copied()
+                    .map(|value| (*handle, value))
+            })
+            .collect();
         let dirty: Vec<u32> = if structural {
             Vec::new()
         } else {
@@ -116,20 +136,33 @@ impl PublishedTransforms {
             self.buffers = MultiBuffer::double(globals.len(), GlobalTransform::IDENTITY);
         }
         self.buffers.publish_from(globals);
-        let ranges = if structural {
-            self.packed.pack_all(self.buffers.read())
+        if structural {
+            self.packed.pack_all(self.buffers.read());
         } else {
-            self.packed.pack_dirty(self.buffers.read(), &dirty)
-        };
-        let bytes = if structural || !ranges.is_empty() {
-            Arc::from(self.packed.as_bytes())
+            self.packed.pack_dirty(self.buffers.read(), &dirty);
+        }
+        let motion_bytes = if !structural
+            && dirty.is_empty()
+            && motion_history_is_settled(&self.snapshot.motion_bytes, globals)
+        {
+            self.snapshot.motion_bytes.clone()
         } else {
-            self.snapshot.bytes.clone()
+            let mut bytes = Vec::with_capacity(globals.len() * STRIDE);
+            for (handle, &row) in &rows {
+                let current = globals[row];
+                let (previous, valid) = previous_by_handle
+                    .get(handle)
+                    .copied()
+                    .map_or((current, false), |previous| (previous, true));
+                append_motion_record(&mut bytes, current, previous, valid);
+            }
+            Arc::from(bytes)
         };
         self.snapshot = Arc::new(Snapshot {
             version,
             rows,
-            bytes,
+            bytes: motion_bytes.clone(),
+            motion_bytes,
             error: None,
         });
     }
@@ -144,7 +177,11 @@ impl ExtractedTransforms {
         self.0.version
     }
     pub fn bytes(&self) -> &[u8] {
-        &self.0.bytes
+        &self.0.motion_bytes
+    }
+
+    pub fn motion_bytes(&self) -> &[u8] {
+        &self.0.motion_bytes
     }
     pub fn row(&self, scene: SceneHandle) -> Option<usize> {
         self.0.rows.get(&scene).copied()
@@ -247,7 +284,7 @@ impl RenderTransforms {
     pub fn buffer(&self) -> Option<BufferId> {
         self.allocation
             .as_ref()
-            .filter(|_| self.prepared && !self.source.bytes.is_empty())
+            .filter(|_| self.prepared && !self.source.motion_bytes.is_empty())
             .map(|a| a.id)
     }
     pub fn version(&self) -> u64 {
@@ -257,7 +294,7 @@ impl RenderTransforms {
     fn needs_retirement(&self, device: &Arc<dyn RenderDevice + Send + Sync>, bytes: usize) -> bool {
         self.allocation
             .as_ref()
-            .is_some_and(|a| Arc::ptr_eq(&a.device, device) && bytes > a.capacity)
+            .is_some_and(|a| Arc::ptr_eq(&a.device, device) && (bytes == 0 || bytes > a.capacity))
     }
 
     fn reject_preparation(
@@ -285,13 +322,14 @@ impl RenderTransforms {
         let unchanged = self
             .last_upload
             .as_ref()
-            .is_some_and(|bytes| Arc::ptr_eq(bytes, &source.bytes));
+            .is_some_and(|bytes| Arc::ptr_eq(bytes, &source.motion_bytes));
         self.source = source;
         if let Some(error) = &self.source.error {
             return Err(error.clone());
         }
-        let bytes = &self.source.bytes;
+        let bytes = &self.source.motion_bytes;
         if bytes.is_empty() {
+            self.allocation.take();
             self.uploaded.clear();
             self.last_upload = Some(bytes.clone());
             self.prepared = true;
@@ -354,12 +392,26 @@ impl RenderTransforms {
         }
         let rows = self.source.rows.clone();
         let draw = move |item: &crate::PhaseItem, ctx: &mut dyn crate::MeshRecorder| {
-            let (buffer, offset) = match resident.0.get(&item.scene) {
+            let (buffer, offset, stride) = match resident.0.get(&item.scene) {
                 Some(Ok(binding)) => {
                     let Some(buffer) = binding.column.buffer_id() else {
                         return;
                     };
-                    (buffer, (binding.row * STRIDE) as u64)
+                    let Some(offset) = binding
+                        .row
+                        .checked_mul(RESIDENT_STRIDE)
+                        .and_then(|offset| u64::try_from(offset).ok())
+                    else {
+                        return;
+                    };
+                    let stride = RESIDENT_STRIDE as u64;
+                    if offset
+                        .checked_add(stride)
+                        .is_none_or(|end| end > binding.column.live_bytes())
+                    {
+                        return;
+                    }
+                    (buffer, offset, stride)
                 }
                 Some(Err(_)) => return,
                 None => {
@@ -367,10 +419,27 @@ impl RenderTransforms {
                     else {
                         return;
                     };
-                    (allocation.id, (row * STRIDE) as u64)
+                    let Some(offset) = row
+                        .checked_mul(STRIDE)
+                        .and_then(|offset| u64::try_from(offset).ok())
+                    else {
+                        return;
+                    };
+                    let stride = STRIDE as u64;
+                    if offset
+                        .checked_add(stride)
+                        .is_none_or(|end| end > allocation.capacity as u64)
+                    {
+                        return;
+                    }
+                    (allocation.id, offset, stride)
                 }
             };
-            if item.indirect.is_some() || item.vertices.last() != Some(&buffer) {
+            if item.indirect.is_some()
+                || item.vertices.last() != Some(&buffer)
+                || item.vertices.len() != item.vertex_sizes.len()
+                || item.vertex_sizes.last().copied() != Some(stride)
+            {
                 return;
             }
             ctx.set_pipeline(item.pipeline);
@@ -380,10 +449,20 @@ impl RenderTransforms {
                 } else {
                     0
                 };
-                ctx.set_vertex_buffer(slot as u32, buffer, offset);
+                let size = if slot + 1 == item.vertices.len() {
+                    std::num::NonZeroU64::new(stride)
+                } else {
+                    None
+                };
+                ctx.set_vertex_buffer(slot as u32, buffer, offset, size);
             }
             if let Some((indices, format)) = item.indices {
-                ctx.set_index_buffer(indices, format, 0);
+                ctx.set_index_buffer(
+                    indices,
+                    format,
+                    0,
+                    item.index_size.and_then(std::num::NonZeroU64::new),
+                );
                 ctx.draw_indexed(item.first..item.first + item.count, item.base_vertex, 0..1);
             } else {
                 ctx.draw(item.first..item.first + item.count, 0..1);
@@ -422,6 +501,8 @@ impl RenderTransforms {
             .is_some_and(|variant| provider.transformed_descriptor(&variant).is_none())
         {
             Some("mesh fallback does not support the affine transform stream".into())
+        } else if request.vertices.len() != request.vertex_sizes.len() {
+            Some("mesh vertex buffer range metadata is inconsistent".into())
         } else if request.draw != crate::draw::canonical::MESH {
             Some("transform stream requires the direct mesh draw contract".into())
         } else if request
@@ -450,15 +531,72 @@ impl RenderTransforms {
             self.stats.draws_rejected += 1;
             return Err(error);
         };
-        request.layout.push(VertexBufferLayout::packed(
-            VertexStepMode::Instance,
-            13,
-            &[VertexFormat::Float32x4; 3],
-        ));
+        let stride = if self.resident.0.contains_key(&request.scene) {
+            RESIDENT_STRIDE
+        } else {
+            STRIDE
+        };
+        let mut layout =
+            VertexBufferLayout::packed(VertexStepMode::Instance, 13, &[VertexFormat::Float32x4; 3]);
+        // The previous affine and validity word are part of the 112B motion
+        // record but are not extra vertex attributes. The current affine is the
+        // only part consumed by today's locations 13..15 shader contract.
+        layout.array_stride = stride as u64;
+        request.layout.push(layout);
         request.vertices.push(buffer);
+        request.vertex_sizes.push(stride as u64);
         request.draw = draw;
         Ok(true)
     }
+}
+
+fn append_motion_record(
+    output: &mut Vec<u8>,
+    current: GlobalTransform,
+    previous: GlobalTransform,
+    valid: bool,
+) {
+    append_affine(output, &current);
+    append_affine(output, &previous);
+    output.extend_from_slice(&u32::from(valid).to_le_bytes());
+    output.extend_from_slice(&[0; 12]);
+}
+
+fn append_affine(output: &mut Vec<u8>, transform: &GlobalTransform) {
+    for value in affine_values(*transform) {
+        output.extend_from_slice(&value.to_le_bytes());
+    }
+}
+
+fn motion_history_is_settled(bytes: &[u8], globals: &[GlobalTransform]) -> bool {
+    bytes.len() == globals.len().saturating_mul(STRIDE)
+        && bytes
+            .chunks_exact(STRIDE)
+            .zip(globals)
+            .all(|(record, current)| {
+                u32::from_le_bytes(record[96..100].try_into().unwrap()) != 0
+                    && record[..48] == record[48..96]
+                    && record[..48] == affine_bytes(*current)
+            })
+}
+
+fn affine_bytes(transform: GlobalTransform) -> [u8; RESIDENT_STRIDE] {
+    let mut bytes = [0; RESIDENT_STRIDE];
+    for (index, value) in affine_values(transform).into_iter().enumerate() {
+        bytes[index * core::mem::size_of::<f32>()..(index + 1) * core::mem::size_of::<f32>()]
+            .copy_from_slice(&value.to_le_bytes());
+    }
+    bytes
+}
+
+fn affine_values(transform: GlobalTransform) -> [f32; 12] {
+    let affine = transform.affine();
+    let m = affine.matrix3;
+    let t = affine.translation;
+    [
+        m.x_axis.x, m.y_axis.x, m.z_axis.x, t.x, m.x_axis.y, m.y_axis.y, m.z_axis.y, t.y,
+        m.x_axis.z, m.y_axis.z, m.z_axis.z, t.z,
+    ]
 }
 
 pub(crate) fn prepare_transform_resources<I>(world: &mut World)

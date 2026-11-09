@@ -37,7 +37,14 @@ fn handle(index: u32) -> SceneHandle {
     SceneHandle::new(index, 1)
 }
 
+fn visible_scene(app: &App) -> SceneHandle {
+    app.world()
+        .resource::<crate::tests::QueueSceneFixtureIdentity>()
+        .scene
+}
+
 fn entities(app: &mut App) -> (Entity, Entity) {
+    let visible_scene = visible_scene(app);
     // Keep a preceding row in the SAME archetype, to catch accidentally binding
     // offset zero or a packed scene-order row instead of the physical ECS row.
     let first = app
@@ -45,7 +52,7 @@ fn entities(app: &mut App) -> (Entity, Entity) {
         .spawn((affine(-0.75), RenderTransformBinding(handle(9))));
     let visible = app
         .world_mut()
-        .spawn((affine(0.75), RenderTransformBinding(handle(3))));
+        .spawn((affine(0.75), RenderTransformBinding(visible_scene)));
     (first, visible)
 }
 
@@ -61,8 +68,12 @@ fn app() -> (App, Entity, Entity) {
 }
 
 fn request(world: &World) -> DrawRequest {
-    let work = world.resource::<crate::VisibilityWorkList>().items()[0];
-    world
+    let work = world
+        .resource::<crate::VisibilityWorkList>()
+        .items()
+        .first()
+        .expect("the queue fixture must have a visible work item");
+    let mut request = world
         .resource::<crate::SceneRegistry>()
         .resolve_passes(
             &work,
@@ -72,7 +83,8 @@ fn request(world: &World) -> DrawRequest {
             crate::draw::canonical::MESH,
         )
         .unwrap()
-        .remove(0)
+        .remove(0);
+    request
 }
 
 fn item(request: DrawRequest) -> crate::PhaseItem {
@@ -81,7 +93,9 @@ fn item(request: DrawRequest) -> crate::PhaseItem {
         draw: request.draw,
         geometry: request.geometry,
         vertices: request.vertices,
+        vertex_sizes: request.vertex_sizes,
         indices: request.indices,
+        index_size: request.index_size,
         first: request.first,
         count: request.count,
         base_vertex: request.base_vertex,
@@ -95,15 +109,28 @@ fn item(request: DrawRequest) -> crate::PhaseItem {
 
 #[derive(Default)]
 struct Commands {
-    vertices: Vec<(u32, BufferId, u64)>,
+    vertices: Vec<(u32, BufferId, u64, Option<core::num::NonZeroU64>)>,
     draws: usize,
 }
 impl crate::MeshRecorder for Commands {
     fn set_pipeline(&mut self, _: rhi::RenderPipelineId) {}
-    fn set_vertex_buffer(&mut self, slot: u32, buffer: BufferId, offset: u64) {
-        self.vertices.push((slot, buffer, offset));
+    fn set_vertex_buffer(
+        &mut self,
+        slot: u32,
+        buffer: BufferId,
+        offset: u64,
+        size: Option<core::num::NonZeroU64>,
+    ) {
+        self.vertices.push((slot, buffer, offset, size));
     }
-    fn set_index_buffer(&mut self, _: BufferId, _: rhi::IndexFormat, _: u64) {}
+    fn set_index_buffer(
+        &mut self,
+        _: BufferId,
+        _: rhi::IndexFormat,
+        _: u64,
+        _: Option<core::num::NonZeroU64>,
+    ) {
+    }
     fn draw(&mut self, _: core::ops::Range<u32>, instances: core::ops::Range<u32>) {
         assert_eq!(instances, 0..1);
         self.draws += 1;
@@ -141,7 +168,12 @@ fn assert_direct_row(app: &mut App, entity: Entity) -> BufferId {
         .call(item.draw, &item, &mut commands);
     assert_eq!(
         commands.vertices.last(),
-        Some(&(1, column.buffer_id().unwrap(), u64::from(location.row) * 48))
+        Some(&(
+            2,
+            column.buffer_id().unwrap(),
+            u64::from(location.row) * 48,
+            core::num::NonZeroU64::new(48),
+        ))
     );
     assert_eq!(commands.draws, 1);
     assert!(
@@ -239,9 +271,10 @@ fn scene_generation_and_binding_removal_do_not_reuse_a_stale_draw_row() {
     assert_direct_row(&mut app, visible);
     let render = &app.get_sub_app(RenderApp).unwrap().world;
     let mut stale = request(render);
+    let scene = visible_scene(&app);
     let draw = render.resource::<RenderTransforms>().draw.unwrap();
     stale.vertices.push(
-        render.resource::<RenderTransforms>().resident.0[&handle(3)]
+        render.resource::<RenderTransforms>().resident.0[&scene]
             .as_ref()
             .unwrap()
             .column
@@ -252,12 +285,12 @@ fn scene_generation_and_binding_removal_do_not_reuse_a_stale_draw_row() {
     let stale = item(stale);
     *app.world_mut()
         .get_mut::<RenderTransformBinding>(visible)
-        .unwrap() = RenderTransformBinding(SceneHandle::new(3, 2));
+        .unwrap() = RenderTransformBinding(SceneHandle::new(scene.index, scene.generation + 1));
     app.update();
     let render = &mut app.sub_app_mut(RenderApp).unwrap().world;
     let mut old_request = request(render);
     let mut current_request = request(render);
-    current_request.scene = SceneHandle::new(3, 2);
+    current_request.scene = SceneHandle::new(scene.index, scene.generation + 1);
     let mut transforms = render.remove_resource::<RenderTransforms>().unwrap();
     assert!(!transforms
         .decorate(&mut old_request, render.resource::<MeshPipelines>())
@@ -292,10 +325,11 @@ fn resident_row_errors_reject_the_draw_and_a_valid_next_extract_recovers() {
     let (mut app, _, visible) = app();
     app.update();
     let buffer = assert_direct_row(&mut app, visible);
+    let scene_handle = visible_scene(&app);
     let render = &mut app.sub_app_mut(RenderApp).unwrap().world;
     let rows = render.resource::<ResidentTransformRows>().clone();
     render.resource_mut::<ResidentTransformRows>().0.insert(
-        handle(3),
+        scene_handle,
         Err("resident transform upload: DeviceLost".into()),
     );
     prepare_transform_buffer::<NullInstance>(render).unwrap();
@@ -317,10 +351,11 @@ fn failed_preparation_rejects_new_scene_bindings_without_releasing_old_views() {
     let (mut app, _, visible) = app();
     app.update();
     let old_buffer = assert_direct_row(&mut app, visible);
+    let old_handle = visible_scene(&app);
     let render = &mut app.sub_app_mut(RenderApp).unwrap().world;
     let mut next = render.resource::<ResidentTransformRows>().clone();
-    let row = next.0.remove(&handle(3)).unwrap();
-    let new_handle = SceneHandle::new(3, 2);
+    let row = next.0.remove(&old_handle).unwrap();
+    let new_handle = SceneHandle::new(old_handle.index, old_handle.generation + 1);
     next.0.insert(new_handle, row);
     let mut request = request(render);
     request.scene = new_handle;
@@ -331,7 +366,7 @@ fn failed_preparation_rejects_new_scene_bindings_without_releasing_old_views() {
         "injected retirement wait failure".into(),
     );
     assert_eq!(
-        transforms.resident.0[&handle(3)]
+        transforms.resident.0[&old_handle]
             .as_ref()
             .unwrap()
             .column
@@ -399,6 +434,18 @@ fn resident_draw_remaps_swap_remove_migration_and_snapshot_restore() {
     app.world_mut().register_snapshot_component::<Affine>();
     app.world_mut()
         .register_snapshot_component::<RenderTransformBinding>();
+    app.world_mut()
+        .register_snapshot_component::<crate::visibility::PrismCamera>();
+    app.world_mut()
+        .register_snapshot_component::<crate::visibility::PrismFrustum>();
+    app.world_mut()
+        .register_snapshot_component::<crate::visibility::PrismRenderable>();
+    app.world_mut()
+        .register_snapshot_component::<crate::visibility::PrismViewVisibility>();
+    app.world_mut()
+        .register_snapshot_component::<prism_transform::ecs::LocalBounds>();
+    app.world_mut()
+        .register_snapshot_component::<prism_transform::GlobalTransform>();
     let snapshot = app.world().snapshot();
     app.update();
     let initial = assert_direct_row(&mut app, visible);
@@ -483,7 +530,7 @@ fn legacy_and_resident_sources_coexist_but_duplicate_scene_bindings_are_rejected
     app.update();
     assert_eq!(
         app.world().resource::<PublishedTransforms>().bytes().len(),
-        48
+        112
     );
     let render = app.get_sub_app(RenderApp).unwrap();
     assert!(render
@@ -497,7 +544,7 @@ fn legacy_and_resident_sources_coexist_but_duplicate_scene_bindings_are_rejected
     );
     *app.world_mut()
         .get_mut::<RenderTransformBinding>(legacy)
-        .unwrap() = RenderTransformBinding(handle(3));
+        .unwrap() = RenderTransformBinding(visible_scene(&app));
     app.update();
     let render = app.get_sub_app(RenderApp).unwrap();
     assert_eq!(
@@ -521,10 +568,11 @@ fn generic_column_registration_does_not_opt_into_mesh_transform_semantics() {
     app.register_gpu_column::<Affine>().unwrap();
     app.add_plugins(PrismRenderPlugin::new(NullInstance::new()));
     crate::tests::queue_scene_fixture(&mut app);
+    let scene = visible_scene(&app);
     app.world_mut().spawn((
         affine(0.75),
         prism_transform::Transform::IDENTITY,
-        RenderTransformBinding(handle(3)),
+        RenderTransformBinding(scene),
     ));
     app.update();
     let render = app.get_sub_app(RenderApp).unwrap();
@@ -540,7 +588,7 @@ fn generic_column_registration_does_not_opt_into_mesh_transform_semantics() {
             .resource::<RenderTransforms>()
             .stats()
             .uploaded_bytes,
-        48
+        112
     );
     assert_eq!(
         render.world.resource::<RenderFrameStats>().draws_recorded,
@@ -567,33 +615,42 @@ fn hardware_resident_column_changes_pixels_and_clean_frames_keep_draws_without_u
     use prism_render_driver_wgpu::WgpuInstance;
     const SIZE: u32 = 16;
     let extent = rhi::Extent3d::new_2d(SIZE, SIZE);
-    if prism_render_runtime::RenderRuntime::<WgpuInstance>::wgpu(extent).is_err() {
-        assert!(
-            std::env::var_os("PRISM_REQUIRE_GPU").is_none(),
-            "required GPU is unavailable"
-        );
-        eprintln!("SKIPPED resident-column production draw: no adapter");
+    let runtime = match prism_render_runtime::RenderRuntime::<WgpuInstance>::wgpu(extent) {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            assert!(
+                std::env::var_os("PRISM_REQUIRE_GPU").is_none(),
+                "required GPU is unavailable: {error}"
+            );
+            eprintln!("SKIPPED resident-column production draw: no adapter: {error}");
+            return;
+        }
+    };
+    if !runtime.adapter().supports_immediates() {
+        eprintln!("SKIPPED resident-column production draw: adapter lacks IMMEDIATES");
         return;
     }
-    fn pixels(app: &App) -> Vec<u8> {
+    drop(runtime);
+    fn pixels(app: &App) -> Vec<[f32; 4]> {
         let world = &app.get_sub_app(RenderApp).unwrap().world;
         let runtime = world
             .resource::<RenderRuntimeResource<WgpuInstance>>()
             .runtime();
         assert!(runtime.wait_idle());
         assert_eq!(world.resource::<RenderFrameStats>().frames_failed, 0);
-        runtime
+        let pixels = runtime
             .queue()
-            .read_texture_rgba8(
-            world.resource::<crate::RenderTarget>().texture(),
-            SIZE,
-            SIZE,
+            .read_texture_rgba16f(
+                world.resource::<crate::RenderTarget>().texture(),
+                SIZE,
+                SIZE,
             )
-            .expect("resident transform output readback must complete")
+            .expect("resident transform output readback must complete");
+        assert_eq!(pixels.len(), (SIZE * SIZE) as usize);
+        pixels
     }
-    fn pixel(bytes: &[u8], x: usize) -> &[u8] {
-        let start = (8 * SIZE as usize + x) * 4;
-        &bytes[start..start + 4]
+    fn pixel(pixels: &[[f32; 4]], x: usize) -> &[f32; 4] {
+        &pixels[8 * SIZE as usize + x]
     }
     let mut app = App::new();
     app.add_plugins(PrismRenderPlugin::with_config(
@@ -605,8 +662,8 @@ fn hardware_resident_column_changes_pixels_and_clean_frames_keep_draws_without_u
     let (first, visible) = entities(&mut app);
     app.update();
     let right = pixels(&app);
-    assert_eq!(pixel(&right, 13), &[255, 255, 255, 255]);
-    assert_eq!(pixel(&right, 8), &[0, 0, 0, 255]);
+    assert_eq!(pixel(&right, 13), &[1.0; 4]);
+    assert_eq!(pixel(&right, 8), &[0.0, 0.0, 0.0, 1.0]);
     let buffer = assert_direct_row(&mut app, visible);
 
     app.update();
@@ -626,8 +683,8 @@ fn hardware_resident_column_changes_pixels_and_clean_frames_keep_draws_without_u
     *app.world_mut().get_mut::<Affine>(visible).unwrap() = affine(-0.75);
     app.update();
     let left = pixels(&app);
-    assert_eq!(pixel(&left, 2), &[255, 255, 255, 255]);
-    assert_eq!(pixel(&left, 13), &[0, 0, 0, 255]);
+    assert_eq!(pixel(&left, 2), &[1.0; 4]);
+    assert_eq!(pixel(&left, 13), &[0.0, 0.0, 0.0, 1.0]);
     assert_ne!(left, right);
     assert_eq!(assert_direct_row(&mut app, visible), buffer);
     let changed = app

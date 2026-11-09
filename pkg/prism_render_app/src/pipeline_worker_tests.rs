@@ -1,4 +1,5 @@
 use super::*;
+use crate::mesh_pipeline::{MeshPipelineProvider, MeshPipelineSpecializer};
 use prism_render_architecture::abi::AbiHash;
 use prism_render_architecture::shader_package::{
     DeviceFingerprint, GraphicsBackend, PersistLoadError, PersistedPsoCache, PipelineReadiness,
@@ -245,6 +246,87 @@ fn descriptor() -> RenderPipelineDescriptor {
     }
 }
 
+fn frozen_permuted_selection_at(
+    quality: prism_render_architecture::render_fabric::RenderQualityTier,
+) -> FrozenShaderSelection {
+    use prism_render_architecture::backend::capability::CapabilitySet;
+    use prism_render_architecture::render_fabric::{
+        FeatureDefinition, FeatureSelection, FeatureVariant, FrozenRoots, PassDescriptorIdentity,
+        RenderDomain, RenderQualityTier, ServiceSet, ShaderModuleBinding, ShaderPackageBinding,
+        ShaderPermutationBinding,
+    };
+    use prism_render_architecture::shader_package::{
+        ArtifactDigest, ModuleIdentity, PermutationSelector, PermutationSpace, ShaderPackageId,
+    };
+
+    let feature_id = FeatureId(0x7000);
+    let variant_id = VariantId(0x7001);
+    let space = Box::leak(Box::new(PermutationSpace::new([2, 3])));
+    let key = Box::leak(Box::new(
+        PermutationSelector::new()
+            .select(1)
+            .select(2)
+            .finish_in(space)
+            .unwrap(),
+    ));
+    let variant = FeatureVariant {
+        id: variant_id,
+        rank: 0,
+        min_quality: RenderQualityTier::Low,
+        required_caps: CapabilitySet::EMPTY,
+        requires_services_extra: ServiceSet::EMPTY,
+        passes: &[],
+        shader_permutation: Some(ShaderPermutationBinding { space, key }),
+    };
+    let feature = FeatureDefinition::subsystem(
+        feature_id,
+        RenderDomain::Surface,
+        ServiceSet::EMPTY,
+        Box::leak(vec![variant].into_boxed_slice()),
+    );
+    let catalog = prism_render_architecture::render_fabric::FeatureCatalog::new(
+        Box::leak(vec![feature].into_boxed_slice()),
+        Box::leak(Vec::new().into_boxed_slice()),
+    )
+    .unwrap();
+    let roots = FrozenRoots::from_build_profile(
+        &catalog,
+        Box::leak(vec![feature_id].into_boxed_slice()),
+        &[],
+    )
+    .unwrap();
+    let selection =
+        FeatureSelection::resolve(&catalog, &roots, CapabilitySet::EMPTY, quality).unwrap();
+    let selected = selection.feature(feature_id).unwrap();
+    let package = ShaderPackageId::new("test.pipeline-cache.permuted");
+    let binding = ShaderPackageBinding {
+        package,
+        module: ShaderModuleBinding {
+            identity: ModuleIdentity {
+                package,
+                digest: ArtifactDigest::from_bytes(b"test.pipeline-cache.module"),
+                entry_point: "main".into(),
+                binding_layout_digest: ArtifactDigest::from_bytes(b"test.pipeline-cache.layout").0,
+            },
+            permutations: space.clone(),
+            full_lobe_fallback: None,
+        },
+        permutation: Some(ShaderPermutationBinding { space, key }),
+        pass_descriptors: selected
+            .passes()
+            .iter()
+            .map(PassDescriptorIdentity::from_template)
+            .collect(),
+    };
+    let mut packages = std::collections::BTreeMap::new();
+    packages.insert(variant_id, binding);
+    selection.bind_shader_packages(&packages).unwrap()
+}
+
+fn frozen_permuted_selection() -> FrozenShaderSelection {
+    frozen_permuted_selection_at(prism_render_architecture::render_fabric::RenderQualityTier::Low)
+}
+
 fn key(class: u32) -> PipelineKey {
     PipelineKey::from_descriptor(
         ExecutionFamily::FusedBuiltin,
@@ -252,6 +334,203 @@ fn key(class: u32) -> PipelineKey {
         PermutationIndex::ZERO,
         &descriptor(),
     )
+}
+
+#[test]
+fn frozen_selection_maps_to_real_pipeline_and_exact_warm_key() {
+    let frozen = frozen_permuted_selection();
+    let feature = frozen.selection().selected()[0].feature_id();
+    let state = PipelineState::from_descriptor(&descriptor());
+    let selected = frozen.binding(feature).unwrap();
+    let expected = PsoCacheKey::new(
+        selected.package(),
+        selected.permutation_index().unwrap().get(),
+        state.to_hash(),
+    );
+    assert_eq!(expected.permutation_index, 5);
+
+    let mut cache = PipelineCache::new();
+    let mut planner = WarmSetPlanner::new();
+    assert_eq!(
+        cache.require_frozen_selection_warm(
+            &mut planner,
+            &frozen,
+            feature,
+            ModuleId(0x7100),
+            ExecutionFamily::FusedBuiltin,
+            state.clone(),
+            WarmPriority::Critical,
+        ),
+        Ok(expected.clone())
+    );
+    assert_eq!(planner.plan().keys(), vec![expected.clone()]);
+
+    let key = cache
+        .register_frozen_selection(
+            &frozen,
+            feature,
+            ModuleId(0x7100),
+            ExecutionFamily::FusedBuiltin,
+            state,
+        )
+        .unwrap();
+    assert_eq!(cache.cold_key_for(&key), Ok(expected));
+
+    // Bookkeeping/NullDevice gate coverage, not physical GPU completion.
+    let identity = FeaturePipelineIdentity::from_frozen_selection(
+        &frozen,
+        feature,
+        ModuleId(0x7100),
+        ExecutionFamily::FusedBuiltin,
+        PipelineState::from_descriptor(&descriptor()),
+    )
+    .unwrap();
+    assert_eq!(
+        cache.request_feature_draw(&identity),
+        Ok(DrawDecision::Skip)
+    );
+    assert_eq!(cache.readiness(&key), Ok(PipelineReadiness::Queued));
+    assert_eq!(cache.warm_counters().compiles_started, 0);
+
+    let device = device();
+    let resolution = cache
+        .resolve_frozen_selection_or_request(
+            &*device,
+            &frozen,
+            feature,
+            ModuleId(0x7100),
+            ExecutionFamily::FusedBuiltin,
+            PipelineState::from_descriptor(&descriptor()),
+            descriptor(),
+            &frozen,
+            feature,
+            ModuleId(0x7100),
+            ExecutionFamily::FusedBuiltin,
+            PipelineState::from_descriptor(&descriptor()),
+            descriptor(),
+        )
+        .unwrap();
+    assert!(resolution.is_ready());
+    assert_eq!(cache.lookup_status(&key), Some(PipelineLookupStatus::Ready));
+    let warmed = cache.warm_counters();
+    assert_eq!(
+        cache.request_feature_draw(&identity),
+        Ok(DrawDecision::Draw)
+    );
+    assert_eq!(cache.warm_counters(), warmed);
+    cache.shutdown(&*device);
+}
+
+#[test]
+fn frozen_selection_rejects_same_slot_with_changed_binding_digest() {
+    let frozen = frozen_permuted_selection();
+    let feature = frozen.selection().selected()[0].feature_id();
+    let mut packages = std::collections::BTreeMap::new();
+    for binding in frozen.bindings() {
+        let mut package = binding.binding().clone();
+        if binding.feature_id() == feature {
+            package.module.identity.digest =
+                prism_render_architecture::shader_package::ArtifactDigest::from_bytes(
+                    b"test.pipeline-cache.module.stale",
+                );
+        }
+        packages.insert(binding.variant_id(), package);
+    }
+    let stale = frozen.selection().bind_shader_packages(&packages).unwrap();
+    let state = PipelineState::from_descriptor(&descriptor());
+    let mut cache = PipelineCache::new();
+    cache
+        .register_frozen_selection(
+            &frozen,
+            feature,
+            ModuleId(0x7200),
+            ExecutionFamily::FusedBuiltin,
+            state.clone(),
+        )
+        .unwrap();
+    assert_eq!(
+        cache.register_frozen_selection(
+            &stale,
+            feature,
+            ModuleId(0x7200),
+            ExecutionFamily::FusedBuiltin,
+            state,
+        ),
+        Err(PipelineKeyMappingError::FeatureBindingChanged {
+            feature,
+            variant: frozen.binding(feature).unwrap().variant_id(),
+            module_id: ModuleId(0x7200),
+        })
+    );
+
+    let next_selection = frozen_permuted_selection_at(
+        prism_render_architecture::render_fabric::RenderQualityTier::High,
+    );
+    assert_ne!(frozen.identity_digest(), next_selection.identity_digest());
+    assert_eq!(
+        cache.register_frozen_selection(
+            &next_selection,
+            feature,
+            ModuleId(0x7200),
+            ExecutionFamily::FusedBuiltin,
+            PipelineState::from_descriptor(&descriptor()),
+        ),
+        Err(PipelineKeyMappingError::FeatureBindingChanged {
+            feature,
+            variant: frozen.binding(feature).unwrap().variant_id(),
+            module_id: ModuleId(0x7200),
+        })
+    );
+}
+
+#[test]
+fn fallback_cold_key_registration_does_not_rebind_frozen_selected_permutation() {
+    let frozen = frozen_permuted_selection();
+    let feature = frozen.selection().selected()[0].feature_id();
+    let selected_index = frozen
+        .binding(feature)
+        .unwrap()
+        .permutation_index()
+        .unwrap();
+    let state = PipelineState::from_descriptor(&descriptor());
+    let selected_identity = FeaturePipelineIdentity::from_frozen_selection(
+        &frozen,
+        feature,
+        ModuleId(0x7300),
+        ExecutionFamily::FusedBuiltin,
+        state.clone(),
+    )
+    .unwrap();
+    let fallback_index = PermutationIndex::ZERO;
+    assert_ne!(selected_index, fallback_index);
+    let fallback_identity = selected_identity.with_validated_fallback(fallback_index, state);
+    let mut cache = PipelineCache::new();
+    let selected_key = cache.register_feature_identity(&selected_identity).unwrap();
+    let fallback_key = cache
+        .register_fallback_identity(&fallback_identity)
+        .unwrap();
+    assert_eq!(selected_key.permutation_index, selected_index);
+    assert_eq!(fallback_key.permutation_index, fallback_index);
+    assert_eq!(
+        cache.cold_key_for(&selected_key),
+        Ok(selected_identity.cold_key())
+    );
+    assert_eq!(
+        cache.cold_key_for(&fallback_key),
+        Ok(fallback_identity.cold_key())
+    );
+    let stale = selected_identity.with_validated_fallback(
+        fallback_index,
+        PipelineState::from_descriptor(&descriptor()),
+    );
+    assert_eq!(
+        cache.register_feature_identity(&stale),
+        Err(PipelineKeyMappingError::FeatureBindingChanged {
+            feature,
+            variant: selected_identity.variant_id(),
+            module_id: ModuleId(0x7300),
+        })
+    );
 }
 
 struct ControlledCompiler {
@@ -690,14 +969,14 @@ fn shutdown_drains_full_result_channel_and_drop_joins_workers() {
 }
 
 #[test]
-fn cancel_clear_and_re_request_do_not_enqueue_duplicate_jobs() {
+fn cancel_clear_and_re_request_admits_only_the_current_generation() {
     let device = device();
     let compiler = ControlledCompiler::new(device.clone(), None);
     let mut cache = PipelineCache::with_compiler_config(
         compiler.clone(),
         PipelineCompileConfig {
             worker_count: 1,
-            queue_capacity: 0,
+            queue_capacity: 1,
         },
     );
     request(&mut cache, &device, 1);
@@ -717,9 +996,99 @@ fn cancel_clear_and_re_request_do_not_enqueue_duplicate_jobs() {
     ));
     compiler.release();
     drain(&mut cache, &device);
-    assert_eq!(compiler.started.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        compiler.started.load(Ordering::SeqCst),
+        2,
+        "the stale generation must be retired and the replacement generation compiled"
+    );
     assert!(request(&mut cache, &device, 1).is_ready());
     cache.shutdown(&*device);
+}
+
+#[test]
+fn physical_wgpu_driver_specializes_frozen_surface_and_retires_it_on_clear() {
+    use prism_render_architecture::shader_package::{
+        ExecutionFamily, ModuleId, PermutationIndex,
+    };
+    use prism_render_driver::{
+        PrimitiveTopology, TextureFormat, VertexAttribute, VertexBufferLayout, VertexFormat,
+        VertexStepMode,
+    };
+    use prism_render_driver_wgpu::{HardwareDeviceError, WgpuInstance};
+
+    let instance = WgpuInstance::new();
+    let (device, _queue) = match instance.request_default_hardware_device() {
+        Ok(pair) => pair,
+        Err(HardwareDeviceError::NoAdapter | HardwareDeviceError::NonHardware(_)) => {
+            eprintln!("SKIPPED native frozen surface PSO: no physical GPU adapter");
+            return;
+        }
+        Err(error) => panic!("physical adapter was found but device creation failed: {error}"),
+    };
+    let mut pipelines = crate::MeshPipelines::surface_encode(&device);
+    let frozen = frozen_permuted_selection();
+    let feature = frozen.selection().selected()[0].feature_id();
+    let binding = frozen.binding(feature).unwrap();
+    let permutation = binding.permutation_index().unwrap();
+    let variant = crate::MeshPipelineKey {
+        execution_family: ExecutionFamily::FusedBuiltin,
+        response_module_id: ModuleId::SPINE,
+        permutation_index: permutation,
+        fallback_permutation: None,
+        color_format: Some(TextureFormat::Rgba16Float),
+        depth_format: Some(TextureFormat::Depth32Float),
+        sample_count: 1,
+        topology: PrimitiveTopology::TriangleList,
+    };
+    let pass = crate::pipeline_pass::PassDescriptor {
+        role: crate::pipeline_pass::PassRole::Surface,
+        execution_family: ExecutionFamily::FusedBuiltin,
+        response_module_id: ModuleId::SPINE,
+        permutation_index: permutation,
+        fallback_permutation: None,
+        render_phase: crate::RenderPhase::Opaque,
+        draw: None,
+        sort_class: crate::pipeline_pass::PassDescriptorClass::SURFACE,
+        shader_package: Some(crate::pipeline_pass::ShaderPackageIdentity {
+            feature_id: binding.feature_id(),
+            variant_id: binding.variant_id(),
+            package_id: binding.package(),
+            binding_digest: binding.identity_digest(),
+            selection_digest: frozen.identity_digest(),
+            checked_permutation_index: permutation,
+        }),
+    };
+    let layout = vec![VertexBufferLayout {
+        array_stride: 32,
+        step_mode: VertexStepMode::Vertex,
+        attributes: vec![
+            VertexAttribute {
+                format: VertexFormat::Float32x3,
+                offset: 0,
+                shader_location: 0,
+            },
+            VertexAttribute {
+                format: VertexFormat::Float32x3,
+                offset: 12,
+                shader_location: 1,
+            },
+            VertexAttribute {
+                format: VertexFormat::Float32x2,
+                offset: 24,
+                shader_location: 2,
+            },
+        ],
+    }];
+    let mut specializer = MeshPipelineSpecializer::new();
+    let resolution = specializer
+        .specialize_frozen_pass(&device, &pass, variant, &layout, |variant| {
+            pipelines.descriptor(variant)
+        })
+        .expect("frozen native surface specialization");
+    assert!(resolution.is_ready(), "a synchronous native driver must be ready");
+    assert_eq!(specializer.pipeline_count(), 1);
+    specializer.clear(&device);
+    assert_eq!(specializer.pipeline_count(), 0);
 }
 
 #[test]
@@ -826,6 +1195,41 @@ fn unregistered_lookup_exposes_mapping_error_without_dropping_fallback() {
         cache.last_mapping_error(),
         Some(PipelineKeyMappingError::UnregisteredModule(ModuleId(7)))
     );
+}
+
+#[test]
+fn warm_runtime_direct_draw_gate_skips_until_its_exact_pipeline_is_ready() {
+    // The NullDevice tests readiness wiring only, not GPU rendering evidence.
+    let device = device();
+    let mut cache = PipelineCache::new();
+    cache
+        .register_module_package(ModuleId(1), ShaderPackageId::new("app.strict-draw-gate"))
+        .unwrap();
+    let target = key(1);
+    assert_eq!(cache.request_draw(&target), Ok(DrawDecision::Skip));
+    assert_eq!(cache.readiness(&target), Ok(PipelineReadiness::Queued));
+    assert_eq!(cache.request_draw(&target), Ok(DrawDecision::Skip));
+    assert_eq!(cache.warm_counters().compiles_started, 0);
+    assert_eq!(cache.warm_counters().runtime_misses, 2);
+
+    // Resolving the exact same target/fallback creates a real NullDevice PSO;
+    // merely observing a miss above must never mark that pipeline ready.
+    let resolution = cache.resolve_or_request(
+        &*device,
+        target.clone(),
+        descriptor(),
+        target.clone(),
+        descriptor(),
+    );
+    assert!(resolution.is_ready());
+    let warmed = cache.warm_counters();
+    assert_eq!(cache.request_draw(&target), Ok(DrawDecision::Draw));
+    assert_eq!(cache.warm_counters(), warmed);
+    assert_eq!(
+        cache.readiness(&key(2)),
+        Err(PipelineKeyMappingError::UnknownColdKey)
+    );
+    cache.shutdown(&*device);
 }
 
 #[test]

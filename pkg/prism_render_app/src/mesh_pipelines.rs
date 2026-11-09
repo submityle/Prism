@@ -6,10 +6,10 @@
 //! descriptor can name it). This module is the render-world resource that holds
 //! the provider and its device-rebuild recipe.
 //!
-//! The production constructor is [`MeshPipelines::forward_lit`]. The explicit
+//! The production constructor is [`MeshPipelines::surface_encode`]. The explicit
 //! legacy [`MeshPipelines::spine`] constructor remains available only for
 //! callers that deliberately request that provider; it is never selected by
-//! forward-lit construction or recovery.
+//! surface-encode construction or recovery.
 
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
@@ -23,19 +23,18 @@ use prism_render_architecture::shader_package::{
     PermutationIndex, PermutationSpace, ShaderPackageId,
 };
 use prism_render_driver::{
-    ColorTargetState, DepthStencilState, FragmentState, MultisampleState, PrimitiveState,
-    RenderDevice, RenderPipelineDescriptor, ShaderModuleDescriptor, ShaderModuleId, TextureFormat,
-    VertexState,
+    BindGroupLayoutId, ColorTargetState, DepthStencilState, FragmentState, MultisampleState,
+    PrimitiveState, RenderDevice, RenderPipelineDescriptor, ShaderModuleDescriptor, ShaderModuleId,
+    TextureFormat, VertexState,
 };
 
 use crate::mesh_pipeline::{MeshPipelineKey, MeshPipelineProvider};
 
-#[path = "forward_lit.rs"]
-mod forward_lit;
-
-pub use forward_lit::{
-    ForwardLitBindingContract, ForwardLitBindingRejection, ForwardLitFrame, ForwardLitMaterial,
-    ForwardLitProvider, ForwardLitRejection, ForwardLitResourceSet,
+pub use crate::forward_lit::{
+    surface_encode_shader_descriptor, SurfaceBindingContract, SurfaceBindingRejection,
+    SurfaceEncodeProvider, SurfaceFrame, SurfaceMaterial, SurfaceRejection, SurfaceResourceSet,
+    SURFACE_ENCODE_WGSL, SURFACE_FRAME_BINDING, SURFACE_GBUFFER_TARGET_COUNT, SURFACE_GROUP,
+    SURFACE_MATERIAL_BINDING,
 };
 
 /// The pipeline provider every queued mesh draw specializes through.
@@ -44,10 +43,12 @@ pub struct MeshPipelines {
     provider: Box<dyn MeshPipelineProvider + Send + Sync>,
     response_modules: ResponseModuleCache,
     recovery: MeshPipelineRecovery,
+    surface_bind_group_layout: Option<BindGroupLayoutId>,
+    surface_vt_bind_group_layout: Option<BindGroupLayoutId>,
 }
 
 enum MeshPipelineRecovery {
-    ForwardLit,
+    SurfaceEncode,
     Spine {
         color_format: TextureFormat,
     },
@@ -348,6 +349,8 @@ impl MeshPipelines {
             provider: Box::new(provider),
             response_modules: ResponseModuleCache::new(),
             recovery: MeshPipelineRecovery::Unavailable,
+            surface_bind_group_layout: None,
+            surface_vt_bind_group_layout: None,
         }
     }
 
@@ -377,6 +380,8 @@ impl MeshPipelines {
                 factory: Box::new(factory),
                 modules_rebuilt: false,
             },
+            surface_bind_group_layout: None,
+            surface_vt_bind_group_layout: None,
         }
     }
 
@@ -411,21 +416,43 @@ impl MeshPipelines {
             provider: Box::new(SpineMeshPipeline::from_module(shader_module, color_format)),
             response_modules,
             recovery: MeshPipelineRecovery::Spine { color_format },
+            surface_bind_group_layout: None,
+            surface_vt_bind_group_layout: None,
         }
     }
 
-    /// Builds the production opaque forward-lit provider.
+    /// Builds the production opaque surface-encode provider.
     ///
-    /// The provider declares the complete group-0 ABI. Draw recording remains
-    /// fail-closed until the caller supplies all frame, light, and material
-    /// buffers required by that ABI.
+    /// The caller binds frame and material uniforms at group 0 with dynamic
+    /// offsets in `[frame, material]` order.
     #[must_use]
-    pub fn forward_lit(device: &dyn RenderDevice) -> Self {
+    pub fn surface_encode(device: &dyn RenderDevice) -> Self {
+        let provider = SurfaceEncodeProvider::new(device);
+        let surface_bind_group_layout = Some(provider.bind_group_layout());
+        let surface_vt_bind_group_layout = Some(provider.vt_bind_group_layout());
         Self {
-            provider: build_forward_lit_provider(device),
+            provider: Box::new(provider),
             response_modules: ResponseModuleCache::new(),
-            recovery: MeshPipelineRecovery::ForwardLit,
+            recovery: MeshPipelineRecovery::SurfaceEncode,
+            surface_bind_group_layout,
+            surface_vt_bind_group_layout,
         }
+    }
+
+    /// The active native surface provider's actual group-0 layout.
+    ///
+    /// Custom and spine providers return `None`. Recovery invalidates this id
+    /// before rebuilding and publishes the replacement provider's layout;
+    /// callers must recreate bind groups on the replacement device.
+    #[must_use]
+    pub const fn surface_bind_group_layout(&self) -> Option<BindGroupLayoutId> {
+        self.surface_bind_group_layout
+    }
+
+    /// The active surface provider's native Material-VT group-1 layout.
+    #[must_use]
+    pub const fn surface_vt_bind_group_layout(&self) -> Option<BindGroupLayoutId> {
+        self.surface_vt_bind_group_layout
     }
 
     /// The wrapped provider.
@@ -447,7 +474,7 @@ impl MeshPipelines {
 
     /// Rebuilds the provider and its resident shader modules on `device`.
     ///
-    /// The forward-lit and spine providers each carry an explicit built-in
+    /// The surface-encode and spine providers each carry an explicit built-in
     /// recipe. A custom provider created with [`Self::new`] is rejected instead
     /// of being silently replaced by either built-in provider, so recovery
     /// remains observable and the app stays paused.
@@ -456,8 +483,11 @@ impl MeshPipelines {
         device: &dyn RenderDevice,
     ) -> Result<(), MeshPipelineRecoveryError> {
         match &mut self.recovery {
-            MeshPipelineRecovery::ForwardLit => {
-                self.provider = build_forward_lit_provider(device);
+            MeshPipelineRecovery::SurfaceEncode => {
+                let provider = SurfaceEncodeProvider::new(device);
+                self.surface_bind_group_layout = Some(provider.bind_group_layout());
+                self.surface_vt_bind_group_layout = Some(provider.vt_bind_group_layout());
+                self.provider = Box::new(provider);
                 Ok(())
             }
             MeshPipelineRecovery::Spine { color_format } => {
@@ -490,7 +520,7 @@ impl MeshPipelines {
 
     pub(crate) fn check_recovery(&self) -> Result<(), MeshPipelineRecoveryError> {
         match &self.recovery {
-            MeshPipelineRecovery::ForwardLit
+            MeshPipelineRecovery::SurfaceEncode
             | MeshPipelineRecovery::Spine { .. }
             | MeshPipelineRecovery::Custom { .. } => Ok(()),
             MeshPipelineRecovery::Unavailable => Err(MeshPipelineRecoveryError::CustomProvider),
@@ -501,6 +531,8 @@ impl MeshPipelines {
     /// factory retry on the same device intentionally keeps its rebuilt module
     /// ids, while a later device loss must recreate them again.
     pub(crate) fn begin_recovery(&mut self) {
+        self.surface_bind_group_layout = None;
+        self.surface_vt_bind_group_layout = None;
         if let MeshPipelineRecovery::Custom {
             modules_rebuilt, ..
         } = &mut self.recovery
@@ -512,7 +544,7 @@ impl MeshPipelines {
     #[cfg(test)]
     fn recovery_kind(&self) -> &'static str {
         match &self.recovery {
-            MeshPipelineRecovery::ForwardLit => "forward-lit",
+            MeshPipelineRecovery::SurfaceEncode => "surface-encode",
             MeshPipelineRecovery::Spine { .. } => "spine",
             MeshPipelineRecovery::Custom { .. } => "custom",
             MeshPipelineRecovery::Unavailable => "unavailable",
@@ -524,12 +556,6 @@ impl MeshPipelines {
             module.shader_module = device.create_shader_module(&module.descriptor);
         }
     }
-}
-
-fn build_forward_lit_provider(
-    device: &dyn RenderDevice,
-) -> Box<dyn MeshPipelineProvider + Send + Sync> {
-    Box::new(ForwardLitProvider::new(device))
 }
 
 impl MeshPipelineProvider for MeshPipelines {
@@ -565,7 +591,7 @@ mod tests {
             .0
     }
 
-    fn forward_lit_variant() -> MeshPipelineKey {
+    fn surface_encode_variant() -> MeshPipelineKey {
         MeshPipelineKey {
             execution_family: ExecutionFamily::FusedBuiltin,
             response_module_id: ModuleId::SPINE,
@@ -579,60 +605,185 @@ mod tests {
     }
 
     #[test]
-    fn forward_lit_is_the_explicit_production_recipe() {
+    fn surface_encode_is_the_explicit_production_recipe() {
         let device = device();
-        let pipelines = MeshPipelines::forward_lit(&device);
-        assert_eq!(pipelines.recovery_kind(), "forward-lit");
+        let pipelines = MeshPipelines::surface_encode(&device);
+        assert_eq!(pipelines.recovery_kind(), "surface-encode");
+        assert!(pipelines.surface_bind_group_layout().is_some());
 
-        let descriptor = pipelines.descriptor(&forward_lit_variant());
+        let descriptor = pipelines.descriptor(&surface_encode_variant());
         assert!(descriptor.layout.is_some());
         assert_eq!(descriptor.vertex.entry_point, "vs");
         assert_eq!(
             descriptor
                 .fragment
                 .as_ref()
-                .expect("forward-lit fragment")
+                .expect("surface-encode fragment")
                 .targets,
-            vec![Some(ColorTargetState::opaque(TextureFormat::Rgba16Float))]
+            vec![
+                Some(ColorTargetState::opaque(
+                    crate::target::POSITION_X_GBUFFER_FORMAT
+                )),
+                Some(ColorTargetState::opaque(
+                    crate::target::POSITION_Y_GBUFFER_FORMAT
+                )),
+                Some(ColorTargetState::opaque(
+                    crate::target::POSITION_Z_GBUFFER_FORMAT
+                )),
+                Some(ColorTargetState::opaque(crate::target::GBUFFER_FORMAT)),
+                Some(ColorTargetState::opaque(
+                    crate::target::ALBEDO_GBUFFER_FORMAT
+                )),
+                Some(ColorTargetState::opaque(
+                    crate::target::SURFACE_ID_GBUFFER_FORMAT
+                )),
+            ]
         );
     }
 
     #[test]
-    fn forward_lit_recovery_recreates_shader_and_layouts_on_the_replacement_device() {
+    fn surface_encode_recovery_recreates_shader_and_layouts_on_the_replacement_device() {
         let old_device = device();
-        let mut pipelines = MeshPipelines::forward_lit(&old_device);
-        assert_eq!(old_device.live_resource_count(), 3);
+        let mut pipelines = MeshPipelines::surface_encode(&old_device);
+        assert_eq!(old_device.live_resource_count(), 4);
+        let old_layout = pipelines
+            .surface_bind_group_layout()
+            .expect("initial layout");
 
         let replacement = device();
         assert_eq!(replacement.live_resource_count(), 0);
+        // Shift this device's layout arena so retaining the old id is detectable.
+        let sentinel = replacement
+            .create_bind_group_layout(&SurfaceBindingContract::new().layout_descriptor());
 
         pipelines.begin_recovery();
+        assert_eq!(pipelines.surface_bind_group_layout(), None);
         pipelines
             .recover(&replacement)
-            .expect("forward-lit recovery recipe");
+            .expect("surface-encode recovery recipe");
 
-        let recovered = pipelines.descriptor(&forward_lit_variant());
-        assert_eq!(pipelines.recovery_kind(), "forward-lit");
-        assert_eq!(replacement.live_resource_count(), 3);
+        let recovered = pipelines.descriptor(&surface_encode_variant());
+        assert_eq!(pipelines.recovery_kind(), "surface-encode");
+        assert_eq!(replacement.live_resource_count(), 5);
+        let layout = pipelines
+            .surface_bind_group_layout()
+            .expect("replacement layout");
+        assert_ne!(layout, old_layout);
+        let frame = replacement.create_buffer(&prism_render_driver::BufferDescriptor::new(
+            SurfaceFrame::SIZE_BYTES,
+            prism_render_driver::BufferUsages::UNIFORM,
+        ));
+        let material = replacement.create_buffer(&prism_render_driver::BufferDescriptor::new(
+            SurfaceMaterial::SIZE_BYTES,
+            prism_render_driver::BufferUsages::UNIFORM,
+        ));
+        let headers = replacement.create_buffer(&prism_render_driver::BufferDescriptor::new(
+            core::mem::size_of::<prism_render_material::GpuMaterialHeader>() as u64,
+            prism_render_driver::BufferUsages::STORAGE,
+        ));
+        let parameters = replacement.create_buffer(&prism_render_driver::BufferDescriptor::new(
+            4,
+            prism_render_driver::BufferUsages::STORAGE,
+        ));
+        let group = replacement.create_bind_group(&prism_render_driver::BindGroupDescriptor {
+            label: None,
+            layout: Some(layout),
+            entries: vec![
+                prism_render_driver::BindGroupEntry {
+                    binding: 0,
+                    resource: prism_render_driver::BindingResource::Buffer {
+                        buffer: frame,
+                        offset: 0,
+                        size: Some(SurfaceFrame::SIZE_BYTES),
+                    },
+                },
+                prism_render_driver::BindGroupEntry {
+                    binding: 1,
+                    resource: prism_render_driver::BindingResource::Buffer {
+                        buffer: material,
+                        offset: 0,
+                        size: Some(SurfaceMaterial::SIZE_BYTES),
+                    },
+                },
+                prism_render_driver::BindGroupEntry {
+                    binding: 2,
+                    resource: prism_render_driver::BindingResource::Buffer {
+                        buffer: headers,
+                        offset: 0,
+                        size: None,
+                    },
+                },
+                prism_render_driver::BindGroupEntry {
+                    binding: 3,
+                    resource: prism_render_driver::BindingResource::Buffer {
+                        buffer: parameters,
+                        offset: 0,
+                        size: None,
+                    },
+                },
+            ],
+        });
+        replacement.destroy_bind_group(group);
+        replacement.destroy_buffer(frame);
+        replacement.destroy_buffer(material);
+        replacement.destroy_buffer(headers);
+        replacement.destroy_buffer(parameters);
+        replacement.destroy_bind_group_layout(sentinel);
         assert_eq!(recovered.vertex.entry_point, "vs");
         assert_eq!(
             recovered
                 .fragment
                 .as_ref()
-                .expect("recovered forward-lit fragment")
+                .expect("recovered surface-encode fragment")
                 .targets,
-            vec![Some(ColorTargetState::opaque(TextureFormat::Rgba16Float))]
+            vec![
+                Some(ColorTargetState::opaque(
+                    crate::target::POSITION_X_GBUFFER_FORMAT
+                )),
+                Some(ColorTargetState::opaque(
+                    crate::target::POSITION_Y_GBUFFER_FORMAT
+                )),
+                Some(ColorTargetState::opaque(
+                    crate::target::POSITION_Z_GBUFFER_FORMAT
+                )),
+                Some(ColorTargetState::opaque(crate::target::GBUFFER_FORMAT)),
+                Some(ColorTargetState::opaque(
+                    crate::target::ALBEDO_GBUFFER_FORMAT
+                )),
+                Some(ColorTargetState::opaque(
+                    crate::target::SURFACE_ID_GBUFFER_FORMAT
+                )),
+            ]
         );
     }
 
     #[test]
-    fn forward_lit_default_has_no_binding_fallback() {
+    fn surface_encode_default_has_no_binding_fallback() {
         let device = device();
-        let provider = ForwardLitProvider::new(&device);
+        let provider = SurfaceEncodeProvider::new(&device);
         assert_eq!(
-            provider.bind_group_descriptor(ForwardLitResourceSet::default()),
-            Err(ForwardLitBindingRejection::MissingFrame)
+            provider.bind_group_descriptor(SurfaceResourceSet::default()),
+            Err(SurfaceBindingRejection::MissingFrame)
         );
+    }
+
+    #[test]
+    fn other_providers_do_not_advertise_a_native_surface_layout() {
+        let device = device();
+        let spine = MeshPipelines::spine(&device, TextureFormat::Rgba8Unorm);
+        assert_eq!(spine.surface_bind_group_layout(), None);
+        let custom = MeshPipelines::new(SpineMeshPipeline::new(&device, TextureFormat::Rgba8Unorm));
+        assert_eq!(custom.surface_bind_group_layout(), None);
+        let recoverable = MeshPipelines::with_recovery_factory(
+            SpineMeshPipeline::new(&device, TextureFormat::Rgba8Unorm),
+            |device, _| {
+                Ok(Box::new(SpineMeshPipeline::new(
+                    device,
+                    TextureFormat::Rgba8Unorm,
+                )))
+            },
+        );
+        assert_eq!(recoverable.surface_bind_group_layout(), None);
     }
 }
 

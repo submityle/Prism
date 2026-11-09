@@ -44,6 +44,17 @@ fn translation(bytes: &[u8], row: usize) -> [f32; 3] {
     })
 }
 
+fn motion_valid(bytes: &[u8]) -> bool {
+    u32::from_le_bytes(bytes[96..100].try_into().unwrap()) != 0
+}
+
+fn motion_translation(bytes: &[u8], affine: usize) -> [f32; 3] {
+    core::array::from_fn(|axis| {
+        let offset = affine * 48 + axis * 16 + 12;
+        f32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
+    })
+}
+
 fn scene(index: u32, generation: u32) -> SceneHandle {
     SceneHandle::new(index, generation)
 }
@@ -81,13 +92,41 @@ fn hierarchy_publication_and_extraction_are_complete_and_immutable() {
     // A later publish/rotation cannot mutate an extracted or held snapshot.
     publish_transforms(&mut main);
     publish_transforms(&mut main);
-    assert_eq!(translation(&held.bytes, 0), [6.0, 0.0, 0.0]);
+    assert_eq!(translation(&held.motion_bytes, 0), [6.0, 0.0, 0.0]);
     assert_eq!(render.resource::<ExtractedTransforms>().version(), 1);
     extract_transforms(&mut main, &mut render);
     assert_eq!(
         translation(render.resource::<ExtractedTransforms>().bytes(), 0),
         [12.0, 0.0, 0.0]
     );
+}
+
+#[test]
+fn motion_publication_pairs_current_previous_affines_and_invalidates_new_instances() {
+    let mut main = World::new();
+    let entity = spawn(&mut main, scene(7, 3), 1.0);
+    publish_transforms(&mut main);
+    let initial = main.resource::<PublishedTransforms>().motion_bytes();
+    assert_eq!(initial.len(), STRIDE);
+    assert_eq!(motion_translation(initial, 0)[0], 1.0);
+    assert_eq!(motion_translation(initial, 1)[0], 1.0);
+    assert!(
+        !motion_valid(initial),
+        "new instances have no reusable history"
+    );
+
+    main.increment_change_tick();
+    *main.get_mut::<Transform>(entity).unwrap() = Transform::from_xyz(2.5, 0.0, 0.0);
+    publish_transforms(&mut main);
+    let moved = main.resource::<PublishedTransforms>().motion_bytes();
+    assert_eq!(motion_translation(moved, 0)[0], 2.5);
+    assert_eq!(motion_translation(moved, 1)[0], 1.0);
+    assert!(motion_valid(moved));
+    publish_transforms(&mut main);
+    let settled = main.resource::<PublishedTransforms>().motion_bytes();
+    assert_eq!(motion_translation(settled, 0)[0], 2.5);
+    assert_eq!(motion_translation(settled, 1)[0], 2.5);
+    assert!(motion_valid(settled));
 }
 
 #[test]
@@ -105,7 +144,7 @@ fn skipped_extracts_upload_all_changes_since_last_consumption_and_static_frames_
         &writes,
     )
     .unwrap();
-    assert_eq!(gpu.stats.uploaded_bytes, 96);
+    assert_eq!(gpu.stats.uploaded_bytes, 224);
 
     main.increment_change_tick();
     *main.get_mut::<Transform>(a).unwrap() = Transform::from_xyz(10.0, 0.0, 0.0);
@@ -121,10 +160,24 @@ fn skipped_extracts_upload_all_changes_since_last_consumption_and_static_frames_
     )
     .unwrap();
     assert_eq!(gpu.stats.upload_calls, 1);
+    assert_eq!(gpu.stats.uploaded_bytes, 224);
     let captured = writes.0.lock().unwrap();
     assert_eq!(translation(&captured[0].2, 0)[0], 10.0);
     assert_eq!(translation(&captured[0].2, 1)[0], 20.0);
     drop(captured);
+    main.increment_change_tick();
+    *main.get_mut::<Transform>(b).unwrap() = Transform::from_xyz(30.0, 0.0, 0.0);
+    publish_transforms(&mut main);
+    writes.0.lock().unwrap().clear();
+    gpu.sync(
+        main.resource::<PublishedTransforms>().snapshot.clone(),
+        device.clone(),
+        &writes,
+    )
+    .unwrap();
+    assert_eq!(gpu.stats.upload_calls, 1);
+    assert_eq!(gpu.stats.uploaded_bytes, 112);
+    assert_eq!(writes.0.lock().unwrap()[0].1, 112);
     publish_transforms(&mut main);
     gpu.sync(
         main.resource::<PublishedTransforms>().snapshot.clone(),
@@ -150,6 +203,14 @@ fn dirty_upload_uses_row_offsets_and_device_replacement_replays_clean_bytes() {
         &writes,
     )
     .unwrap();
+    publish_transforms(&mut main);
+    gpu.sync(
+        main.resource::<PublishedTransforms>().snapshot.clone(),
+        first_device.clone(),
+        &writes,
+    )
+    .unwrap();
+    assert_eq!(gpu.stats.uploaded_bytes, 224);
     main.increment_change_tick();
     *main.get_mut::<Transform>(b).unwrap() = Transform::from_xyz(9.0, 0.0, 0.0);
     publish_transforms(&mut main);
@@ -160,8 +221,8 @@ fn dirty_upload_uses_row_offsets_and_device_replacement_replays_clean_bytes() {
         &writes,
     )
     .unwrap();
-    assert_eq!(gpu.stats.uploaded_bytes, 48);
-    assert_eq!(writes.0.lock().unwrap()[0].1, 48);
+    assert_eq!(gpu.stats.uploaded_bytes, 112);
+    assert_eq!(writes.0.lock().unwrap()[0].1, 112);
 
     gpu.sync(
         main.resource::<PublishedTransforms>().snapshot.clone(),
@@ -171,7 +232,7 @@ fn dirty_upload_uses_row_offsets_and_device_replacement_replays_clean_bytes() {
     .unwrap();
     assert_eq!(gpu.stats.allocations, 1);
     assert_eq!(
-        gpu.stats.uploaded_bytes, 96,
+        gpu.stats.uploaded_bytes, 224,
         "a clean CPU publication must replay on a new device"
     );
 }
@@ -242,7 +303,8 @@ fn plugin_publishes_extracts_uploads_and_records_transform_bound_meshes() {
     let mut app = App::new();
     app.add_plugins(PrismRenderPlugin::new(NullInstance::new()));
     crate::tests::queue_scene_fixture(&mut app);
-    let entity = spawn(app.world_mut(), scene(3, 1), 0.5);
+    let fixture_scene = crate::tests::queue_scene_handle(&app);
+    let entity = spawn(app.world_mut(), fixture_scene, 0.5);
     app.update();
     let render = app.get_sub_app(RenderApp).unwrap();
     assert_eq!(
@@ -255,7 +317,7 @@ fn plugin_publishes_extracts_uploads_and_records_transform_bound_meshes() {
             .resource::<RenderTransforms>()
             .stats()
             .uploaded_bytes,
-        48
+        112
     );
     assert_eq!(
         render.world.resource::<RenderFrameStats>().draws_recorded,
@@ -277,7 +339,7 @@ fn plugin_publishes_extracts_uploads_and_records_transform_bound_meshes() {
             .resource::<RenderTransforms>()
             .stats()
             .uploaded_bytes,
-        48
+        112
     );
     app.update();
     assert_eq!(
@@ -295,15 +357,28 @@ fn plugin_publishes_extracts_uploads_and_records_transform_bound_meshes() {
 fn draw_consumes_the_bound_scene_row_and_reports_unsupported_providers() {
     #[derive(Default)]
     struct Commands {
-        vertices: Vec<(u32, rhi::BufferId, u64)>,
+        vertices: Vec<(u32, rhi::BufferId, u64, Option<core::num::NonZeroU64>)>,
         draws: Vec<(core::ops::Range<u32>, core::ops::Range<u32>)>,
     }
     impl crate::MeshRecorder for Commands {
         fn set_pipeline(&mut self, _: rhi::RenderPipelineId) {}
-        fn set_vertex_buffer(&mut self, slot: u32, buffer: rhi::BufferId, offset: u64) {
-            self.vertices.push((slot, buffer, offset));
+        fn set_vertex_buffer(
+            &mut self,
+            slot: u32,
+            buffer: rhi::BufferId,
+            offset: u64,
+            size: Option<core::num::NonZeroU64>,
+        ) {
+            self.vertices.push((slot, buffer, offset, size));
         }
-        fn set_index_buffer(&mut self, _: rhi::BufferId, _: rhi::IndexFormat, _: u64) {}
+        fn set_index_buffer(
+            &mut self,
+            _: rhi::BufferId,
+            _: rhi::IndexFormat,
+            _: u64,
+            _: Option<core::num::NonZeroU64>,
+        ) {
+        }
         fn draw(&mut self, vertices: core::ops::Range<u32>, instances: core::ops::Range<u32>) {
             self.draws.push((vertices, instances));
         }
@@ -337,8 +412,9 @@ fn draw_consumes_the_bound_scene_row_and_reports_unsupported_providers() {
     let mut app = App::new();
     app.add_plugins(PrismRenderPlugin::new(NullInstance::new()));
     crate::tests::queue_scene_fixture(&mut app);
-    spawn(app.world_mut(), scene(1, 1), 1.0);
-    spawn(app.world_mut(), scene(3, 1), 0.5);
+    spawn(app.world_mut(), scene(2, 1), 1.0);
+    let fixture_scene = crate::tests::queue_scene_handle(&app);
+    spawn(app.world_mut(), fixture_scene, 0.5);
     app.update();
     let render = &mut app.sub_app_mut(RenderApp).unwrap().world;
     let work = render.resource::<crate::VisibilityWorkList>().items()[0];
@@ -361,13 +437,16 @@ fn draw_consumes_the_bound_scene_row_and_reports_unsupported_providers() {
     assert_eq!(transforms.stats().draws_rejected, 1);
     // Rejecting one request must not poison the prepared buffer for valid draws.
     assert!(transforms.decorate(&mut request, provider).unwrap());
-    assert_eq!(request.layout.last().unwrap().array_stride, 48);
+    assert_eq!(request.layout.last().unwrap().array_stride, STRIDE as u64);
+    assert_eq!(request.layout.last().unwrap().attributes.len(), 3);
     let mut item = crate::PhaseItem {
         pipeline: rhi::RenderPipelineId::from_parts(0, 0),
         draw: request.draw,
         geometry: request.geometry,
         vertices: request.vertices,
+        vertex_sizes: request.vertex_sizes,
         indices: request.indices,
+        index_size: request.index_size,
         first: request.first,
         count: request.count,
         base_vertex: request.base_vertex,
@@ -378,11 +457,17 @@ fn draw_consumes_the_bound_scene_row_and_reports_unsupported_providers() {
         order: request.order,
     };
     let functions = render.resource::<DrawFunctions>();
+    let expected_row = transforms.source.rows[&request.scene];
     let mut commands = Commands::default();
     functions.call(item.draw, &item, &mut commands);
     assert_eq!(
         commands.vertices.last().unwrap(),
-        &(1, transforms.buffer().unwrap(), 48)
+        &(
+            (item.vertices.len() - 1) as u32,
+            transforms.buffer().unwrap(),
+            (expected_row * STRIDE) as u64,
+            std::num::NonZeroU64::new(112),
+        )
     );
     assert_eq!(commands.draws, vec![(0..6, 0..1)]);
     item.scene = scene(3, 2);
@@ -400,21 +485,30 @@ fn hardware_shader_consumes_published_translation() {
     use prism_render_driver_wgpu::WgpuInstance;
     const SIZE: u32 = 16;
     let extent = rhi::Extent3d::new_2d(SIZE, SIZE);
-    if prism_render_runtime::RenderRuntime::<WgpuInstance>::wgpu(extent).is_err() {
-        assert!(
-            std::env::var_os("PRISM_REQUIRE_GPU").is_none(),
-            "required GPU is unavailable"
-        );
-        eprintln!("SKIPPED transform shader readback: no adapter");
+    let runtime = match prism_render_runtime::RenderRuntime::<WgpuInstance>::wgpu(extent) {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            assert!(
+                std::env::var_os("PRISM_REQUIRE_GPU").is_none(),
+                "required GPU is unavailable: {error}"
+            );
+            eprintln!("SKIPPED transform shader readback: no adapter: {error}");
+            return;
+        }
+    };
+    if !runtime.adapter().supports_immediates() {
+        eprintln!("SKIPPED transform shader readback: adapter lacks IMMEDIATES");
         return;
     }
+    drop(runtime);
     let mut app = App::new();
     app.add_plugins(PrismRenderPlugin::with_config(
         WgpuInstance::new(),
         RenderAppConfig::new(extent),
     ));
     crate::tests::queue_scene_fixture(&mut app);
-    spawn(app.world_mut(), scene(3, 1), 0.75);
+    let fixture_scene = crate::tests::queue_scene_handle(&app);
+    spawn(app.world_mut(), fixture_scene, 0.75);
     app.update();
     let render = app.get_sub_app(RenderApp).unwrap();
     let runtime = render
@@ -425,17 +519,18 @@ fn hardware_shader_consumes_published_translation() {
     let target = render.world.resource::<crate::RenderTarget>();
     let pixels = runtime
         .queue()
-        .read_texture_rgba8(target.texture(), SIZE, SIZE);
-    let pixel =
-        |x: u32, y: u32| &pixels[((y * SIZE + x) * 4) as usize..((y * SIZE + x + 1) * 4) as usize];
+        .read_texture_rgba16f(target.texture(), SIZE, SIZE)
+        .expect("transform output readback must complete");
+    assert_eq!(pixels.len(), (SIZE * SIZE) as usize);
+    let pixel = |x: u32, y: u32| &pixels[(y * SIZE + x) as usize];
     assert_eq!(
         pixel(8, 8),
-        &[0, 0, 0, 255],
+        &[0.0, 0.0, 0.0, 1.0],
         "the original center must be cleared"
     );
     assert_eq!(
         pixel(13, 8),
-        &[255, 255, 255, 255],
+        &[1.0; 4],
         "the translated quad must cover its new position"
     );
 }

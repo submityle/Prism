@@ -20,9 +20,11 @@ use prism_render_driver::{
 use std::collections::{BTreeMap, HashMap};
 
 use crate::pipeline_cache::{
-    PipelineBinaryCacheError, PipelineCache, PipelineCachePersistenceConfig,
-    PipelineCachePersistenceError, PipelineCompiler, PipelineKey, PipelineResolution,
+    FeaturePipelineIdentity, PipelineBinaryCacheError, PipelineCache,
+    PipelineCachePersistenceConfig, PipelineCachePersistenceError, PipelineCompiler, PipelineKey,
+    PipelineKeyMappingError, PipelineResolution, PipelineState,
 };
+use crate::pipeline_pass::PassDescriptor;
 
 /// The variant part of a mesh pipeline key: everything but the vertex layout.
 ///
@@ -448,6 +450,59 @@ impl MeshPipelineSpecializer {
         self.specialize_with(device, variant, layout, |variant| {
             provider.descriptor(variant)
         })
+    }
+
+    /// Specializes one frozen pass and registers its exact package identity in
+    /// the same typed/cold mapping used by warm and persisted PSO requests.
+    /// Direct and bin queue paths call this method with the shared pass-table
+    /// descriptor, so their package, permutation and fixed-function identity
+    /// cannot drift independently.
+    pub fn specialize_frozen_pass<D, F>(
+        &mut self,
+        device: &D,
+        pass: &PassDescriptor,
+        variant: MeshPipelineKey,
+        layout: &[VertexBufferLayout],
+        build: F,
+    ) -> Result<PipelineResolution, PipelineKeyMappingError>
+    where
+        D: RenderDevice,
+        F: Fn(&MeshPipelineKey) -> RenderPipelineDescriptor,
+    {
+        if pass.response_module_id != variant.response_module_id
+            || pass.execution_family != variant.execution_family
+            || pass.permutation_index != variant.permutation_index
+        {
+            return Err(PipelineKeyMappingError::FrozenPassProvenanceMismatch {
+                module_id: pass.response_module_id,
+            });
+        }
+        let descriptor = with_mesh_layout(build(&variant), layout);
+        let identity = FeaturePipelineIdentity::from_pass_descriptor(
+            pass,
+            PipelineState::from_descriptor(&descriptor),
+        )?;
+        let mapped = self.cache.register_feature_identity(&identity)?;
+        let expected = variant.key_from_descriptor(&descriptor);
+        if mapped != expected {
+            return Err(PipelineKeyMappingError::FrozenPassProvenanceMismatch {
+                module_id: pass.response_module_id,
+            });
+        }
+        if let Some(fallback_variant) = full_lobe_fallback(variant) {
+            let fallback_descriptor = with_mesh_layout(build(&fallback_variant), layout);
+            let fallback_identity = identity.with_validated_fallback(
+                fallback_variant.permutation_index,
+                PipelineState::from_descriptor(&fallback_descriptor),
+            );
+            let mapped_fallback = self.cache.register_fallback_identity(&fallback_identity)?;
+            if mapped_fallback != fallback_variant.key_from_descriptor(&fallback_descriptor) {
+                return Err(PipelineKeyMappingError::FrozenPassProvenanceMismatch {
+                    module_id: pass.response_module_id,
+                });
+            }
+        }
+        Ok(self.specialize_with(device, variant, layout, build))
     }
 
     /// Queues a batch of hot mesh specializations for background compilation.

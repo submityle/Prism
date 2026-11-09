@@ -20,9 +20,13 @@ pub mod pipeline_state;
 pub use pipeline_state::PipelineState;
 
 use prism_ecs::prelude::Resource;
+use prism_render_architecture::render_fabric::{
+    FeatureId, FrozenShaderSelection, SelectedFeatureShaderBinding, ShaderBindingError, VariantId,
+};
 use prism_render_architecture::shader_package::{
-    AdmitOutcome, DeviceFingerprint, DrawDecision, GraphicsBackend, LruPsoCache, PersistLoadError,
-    PersistedPsoCache, PipelineReadiness, PsoCacheKey, ShaderPackageId, WarmCounters, WarmRuntime,
+    AdmitOutcome, ArtifactDigest, DeviceFingerprint, DrawDecision, GraphicsBackend, LruPsoCache,
+    PersistLoadError, PersistedPsoCache, PipelineReadiness, PsoCacheKey, ShaderPackageId,
+    WarmCounters, WarmPriority, WarmRuntime, WarmSetPlanner,
 };
 pub use prism_render_architecture::shader_package::{ExecutionFamily, ModuleId, PermutationIndex};
 use prism_render_architecture::{abi::AbiHash, ARCHITECTURE_VERSION};
@@ -199,6 +203,227 @@ fn pso_device_fingerprint_for_abi_sources(
 /// No string, packed bin class, or hash-only state participates in lookup.
 pub type PipelineKey = prism_render_architecture::shader_package::PipelineIdentity<PipelineState>;
 
+/// A driver-local pipeline identity derived from one frozen Render Fabric
+/// selection.
+///
+/// The fields that determine package/permutation identity are private on
+/// purpose.  Callers obtain this value from [`FrozenShaderSelection`], so a
+/// pipeline consumer cannot manufacture a dense permutation index or swap a
+/// package after feature selection has completed.  The app still supplies the
+/// driver-local module handle and the typed fixed-function state because those
+/// do not belong in the portable architecture selection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FeaturePipelineIdentity {
+    feature: FeatureId,
+    variant: VariantId,
+    package: ShaderPackageId,
+    binding_digest: ArtifactDigest,
+    selection_digest: ArtifactDigest,
+    module_id: ModuleId,
+    execution_family: ExecutionFamily,
+    permutation_index: PermutationIndex,
+    pipeline_state: PipelineState,
+}
+
+/// Failure while deriving a pipeline identity from a frozen selection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FeaturePipelineIdentityError {
+    /// The requested feature is not part of the frozen selection.
+    MissingFeature(FeatureId),
+    /// The selected package declaration is internally invalid.
+    Binding(ShaderBindingError),
+}
+
+impl std::fmt::Display for FeaturePipelineIdentityError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "feature pipeline identity error: {self:?}")
+    }
+}
+
+impl std::error::Error for FeaturePipelineIdentityError {}
+
+impl FeaturePipelineIdentity {
+    /// Derives the module-declared fallback identity while preserving frozen
+    /// feature/package provenance. The caller must validate the fallback
+    /// permutation against the resident module declaration first.
+    pub(crate) fn with_validated_fallback(
+        &self,
+        permutation_index: PermutationIndex,
+        pipeline_state: PipelineState,
+    ) -> Self {
+        Self {
+            feature: self.feature,
+            variant: self.variant,
+            package: self.package,
+            binding_digest: self.binding_digest,
+            selection_digest: self.selection_digest,
+            module_id: self.module_id,
+            execution_family: self.execution_family,
+            permutation_index,
+            pipeline_state,
+        }
+    }
+
+    /// Derives an identity from validated scene pass provenance and the
+    /// descriptor's full typed fixed-function state. Package and permutation
+    /// values are never accepted from an independent queue input.
+    pub fn from_pass_descriptor(
+        pass: &crate::pipeline_pass::PassDescriptor,
+        pipeline_state: PipelineState,
+    ) -> Result<Self, PipelineKeyMappingError> {
+        let provenance =
+            pass.shader_package
+                .ok_or(PipelineKeyMappingError::MissingFrozenPassProvenance {
+                    module_id: pass.response_module_id,
+                })?;
+        if provenance.checked_permutation_index != pass.permutation_index {
+            return Err(PipelineKeyMappingError::FrozenPassProvenanceMismatch {
+                module_id: pass.response_module_id,
+            });
+        }
+        Ok(Self {
+            feature: provenance.feature_id,
+            variant: provenance.variant_id,
+            package: provenance.package_id,
+            binding_digest: provenance.binding_digest,
+            selection_digest: provenance.selection_digest,
+            module_id: pass.response_module_id,
+            execution_family: pass.execution_family,
+            permutation_index: pass.permutation_index,
+            pipeline_state,
+        })
+    }
+
+    /// Derives a pipeline identity from the package binding attached to one
+    /// feature in the frozen selection.  This method never calls the feature
+    /// resolver and never accepts an independent permutation index.
+    pub fn from_frozen_selection(
+        selection: &FrozenShaderSelection,
+        feature: FeatureId,
+        module_id: ModuleId,
+        execution_family: ExecutionFamily,
+        pipeline_state: PipelineState,
+    ) -> Result<Self, FeaturePipelineIdentityError> {
+        let binding = selection
+            .binding(feature)
+            .ok_or(FeaturePipelineIdentityError::MissingFeature(feature))?;
+        Self::from_binding(
+            binding,
+            selection.identity_digest(),
+            module_id,
+            execution_family,
+            pipeline_state,
+        )
+    }
+
+    fn from_binding(
+        binding: &SelectedFeatureShaderBinding,
+        selection_digest: ArtifactDigest,
+        module_id: ModuleId,
+        execution_family: ExecutionFamily,
+        pipeline_state: PipelineState,
+    ) -> Result<Self, FeaturePipelineIdentityError> {
+        Ok(Self {
+            feature: binding.feature_id(),
+            variant: binding.variant_id(),
+            package: binding.package(),
+            binding_digest: binding.identity_digest(),
+            selection_digest,
+            module_id,
+            execution_family,
+            permutation_index: binding
+                .permutation_index()
+                .map_err(FeaturePipelineIdentityError::Binding)?,
+            pipeline_state,
+        })
+    }
+
+    /// The complete hot pipeline key consumed by [`PipelineCache`].
+    #[must_use]
+    pub fn pipeline_key(&self) -> PipelineKey {
+        PipelineKey::new(
+            self.execution_family,
+            self.module_id,
+            self.permutation_index,
+            self.pipeline_state.clone(),
+        )
+    }
+
+    /// The cold package/permutation/state identity used by warm and persisted
+    /// PSO caches.
+    #[must_use]
+    pub fn cold_key(&self) -> PsoCacheKey {
+        PsoCacheKey::new(
+            self.package,
+            self.permutation_index.get(),
+            self.pipeline_state.to_hash(),
+        )
+    }
+
+    #[must_use]
+    pub const fn feature_id(&self) -> FeatureId {
+        self.feature
+    }
+
+    #[must_use]
+    pub const fn variant_id(&self) -> VariantId {
+        self.variant
+    }
+
+    #[must_use]
+    pub const fn package(&self) -> ShaderPackageId {
+        self.package
+    }
+
+    #[must_use]
+    pub const fn module_id(&self) -> ModuleId {
+        self.module_id
+    }
+
+    #[must_use]
+    pub const fn execution_family(&self) -> ExecutionFamily {
+        self.execution_family
+    }
+
+    #[must_use]
+    pub const fn permutation_index(&self) -> PermutationIndex {
+        self.permutation_index
+    }
+
+    #[must_use]
+    pub const fn binding_digest(&self) -> ArtifactDigest {
+        self.binding_digest
+    }
+
+    #[must_use]
+    pub const fn selection_digest(&self) -> ArtifactDigest {
+        self.selection_digest
+    }
+
+    #[must_use]
+    pub fn pipeline_state(&self) -> &PipelineState {
+        &self.pipeline_state
+    }
+}
+
+/// One exact frozen-selection request for load-time PSO warming.
+#[derive(Clone, Debug)]
+pub struct FeaturePipelineWarmRequest {
+    pub identity: FeaturePipelineIdentity,
+    pub descriptor: RenderPipelineDescriptor,
+    pub fallback: FeaturePipelineIdentity,
+    pub fallback_descriptor: RenderPipelineDescriptor,
+    pub priority: WarmPriority,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FeatureBindingFingerprint {
+    package: ShaderPackageId,
+    binding_digest: ArtifactDigest,
+    selection_digest: ArtifactDigest,
+    permutation_index: PermutationIndex,
+}
+
 /// Converts the typed app identity into the architecture's cold-cache key.
 ///
 /// The conversion is intentionally one-way at the data level: the cold key
@@ -248,6 +473,22 @@ pub enum PipelineKeyMappingError {
     LruDisabled,
     /// Two distinct typed keys mapped to one cold key; do not guess.
     AmbiguousColdKey,
+    /// The same frozen feature/variant/module slot was registered with a
+    /// different package declaration.  A stale cache entry must be rejected;
+    /// it must never be silently rebound to the new shader identity.
+    FeatureBindingChanged {
+        feature: FeatureId,
+        variant: VariantId,
+        module_id: ModuleId,
+    },
+    /// The requested feature was not part of the frozen shader selection.
+    MissingFrozenFeature(FeatureId),
+    /// The frozen selection carried an invalid package/permutation binding.
+    InvalidFrozenBinding(FeatureId),
+    /// Queue request has no frozen package provenance.
+    MissingFrozenPassProvenance { module_id: ModuleId },
+    /// Frozen pass provenance no longer matches its executable descriptor.
+    FrozenPassProvenanceMismatch { module_id: ModuleId },
 }
 
 /// The requested-specialization lookup result, separate from the pipeline that
@@ -427,6 +668,7 @@ impl PipelineResolution {
 
 /// One background compile request.
 struct PipelineCompileJob {
+    generation: u64,
     key: PipelineKey,
     descriptor: RenderPipelineDescriptor,
 }
@@ -450,7 +692,8 @@ impl Default for PipelineCompileConfig {
     }
 }
 
-type PipelineCompileResult = (PipelineKey, Result<RenderPipelineId, ()>);
+type PipelineJobToken = (u64, PipelineKey);
+type PipelineCompileResult = (PipelineJobToken, Result<RenderPipelineId, ()>);
 
 /// The worker queue behind an asynchronous [`PipelineCache`].
 struct PipelineCompileQueue {
@@ -506,7 +749,10 @@ impl PipelineCompileQueue {
                                 }))
                                 .map_err(|_| ());
                             compiling.fetch_sub(1, Ordering::SeqCst);
-                            if results_tx.send((job.key, result)).is_err() {
+                            if results_tx
+                                .send(((job.generation, job.key), result))
+                                .is_err()
+                            {
                                 break;
                             }
                         }
@@ -582,21 +828,26 @@ impl Drop for PipelineCompileQueue {
 /// A content-addressed, reference-counted cache of compiled render pipelines.
 #[derive(Resource)]
 pub struct PipelineCache {
+    /// Generation of the current device-local cache contents. Every worker
+    /// job carries this token so a late result from a cleared generation can
+    /// never complete a same-key request admitted by the replacement
+    /// generation.
+    generation: u64,
     cache: ContentCache<PipelineKey, RenderPipelineId>,
     /// Keys whose specialization is being compiled in the background.
-    pending: BTreeSet<PipelineKey>,
+    pending: BTreeSet<PipelineJobToken>,
     /// Cold jobs waiting for an in-flight slot. Bounding this queue keeps a
     /// frame that discovers thousands of new permutations from turning into an
     /// unbounded descriptor backlog.
-    waiting: VecDeque<(PipelineKey, RenderPipelineDescriptor)>,
+    waiting: VecDeque<(PipelineJobToken, RenderPipelineDescriptor)>,
     /// Keys currently owned by the compile worker.
-    in_flight: BTreeSet<PipelineKey>,
+    in_flight: BTreeSet<PipelineJobToken>,
     /// Pending keys whose callers released all references before the compile
     /// finished. The late pipeline is destroyed on arrival.
-    canceled: BTreeSet<PipelineKey>,
+    canceled: BTreeSet<PipelineJobToken>,
     /// Keys whose background compile failed. They keep using the fallback until
     /// a later synchronous request retries them.
-    failed: BTreeSet<PipelineKey>,
+    failed: BTreeSet<PipelineJobToken>,
     compile_queue: Option<PipelineCompileQueue>,
     /// Cold package identity for each driver-local module.
     module_packages: std::collections::BTreeMap<ModuleId, ShaderPackageId>,
@@ -604,6 +855,12 @@ pub struct PipelineCache {
     /// populated after a collision-free typed key has been seen.
     cold_by_typed: std::collections::BTreeMap<PipelineKey, PsoCacheKey>,
     typed_by_cold: std::collections::BTreeMap<PsoCacheKey, PipelineKey>,
+    /// Frozen Render Fabric declarations admitted for each driver-local module.
+    /// This is separate from the package-only map because a package can retain
+    /// its name while its artifact, pass table, or permutation declaration has
+    /// become stale.
+    feature_bindings:
+        std::collections::BTreeMap<(FeatureId, VariantId, ModuleId), FeatureBindingFingerprint>,
     /// Architecture lifecycle model driven by the real queue transitions.
     warm_runtime: WarmRuntime,
     /// Optional byte-budgeted cold residency model. It is opt-in because the
@@ -638,6 +895,7 @@ impl PipelineCache {
     #[must_use]
     pub fn new() -> Self {
         Self {
+            generation: 0,
             cache: ContentCache::new(),
             pending: BTreeSet::new(),
             waiting: VecDeque::new(),
@@ -648,6 +906,7 @@ impl PipelineCache {
             module_packages: std::collections::BTreeMap::new(),
             cold_by_typed: std::collections::BTreeMap::new(),
             typed_by_cold: std::collections::BTreeMap::new(),
+            feature_bindings: std::collections::BTreeMap::new(),
             warm_runtime: WarmRuntime::new(),
             lru: None,
             persisted: std::collections::BTreeMap::new(),
@@ -697,6 +956,7 @@ impl PipelineCache {
         config: PipelineCompileConfig,
     ) -> Self {
         Self {
+            generation: 0,
             cache: ContentCache::new(),
             pending: BTreeSet::new(),
             waiting: VecDeque::new(),
@@ -707,6 +967,7 @@ impl PipelineCache {
             module_packages: std::collections::BTreeMap::new(),
             cold_by_typed: std::collections::BTreeMap::new(),
             typed_by_cold: std::collections::BTreeMap::new(),
+            feature_bindings: std::collections::BTreeMap::new(),
             warm_runtime: WarmRuntime::new(),
             lru: None,
             persisted: std::collections::BTreeMap::new(),
@@ -760,6 +1021,228 @@ impl PipelineCache {
             });
         }
         self.module_packages.insert(module_id, package);
+        Ok(())
+    }
+
+    /// Admits one exact frozen-selection identity into the hot/cold mapping.
+    ///
+    /// Registration is idempotent for the same selection generation.  Reusing
+    /// a `(feature, variant, module)` slot with a different package digest,
+    /// permutation declaration, or frozen-selection generation is a stale
+    /// cache condition and is rejected before any pipeline lookup occurs.
+    pub fn register_feature_identity(
+        &mut self,
+        identity: &FeaturePipelineIdentity,
+    ) -> Result<PipelineKey, PipelineKeyMappingError> {
+        let slot = (identity.feature, identity.variant, identity.module_id);
+        let fingerprint = FeatureBindingFingerprint {
+            package: identity.package,
+            binding_digest: identity.binding_digest,
+            selection_digest: identity.selection_digest,
+            permutation_index: identity.permutation_index,
+        };
+        if let Some(existing) = self.feature_bindings.get(&slot)
+            && existing != &fingerprint
+        {
+            return Err(PipelineKeyMappingError::FeatureBindingChanged {
+                feature: identity.feature,
+                variant: identity.variant,
+                module_id: identity.module_id,
+            });
+        }
+        self.register_module_package(identity.module_id, identity.package)?;
+        let key = identity.pipeline_key();
+        self.remember_cold_key(&key)?;
+        self.feature_bindings.insert(slot, fingerprint);
+        Ok(key)
+    }
+
+    /// Registers a module-declared fallback PSO under the selected feature's
+    /// package without claiming that fallback permutation as the frozen
+    /// selection binding. The feature slot remains pinned to the exact chosen
+    /// permutation, while the fallback still gets an unambiguous typed/cold
+    /// identity for readiness and persistence.
+    pub(crate) fn register_fallback_identity(
+        &mut self,
+        identity: &FeaturePipelineIdentity,
+    ) -> Result<PipelineKey, PipelineKeyMappingError> {
+        self.register_module_package(identity.module_id, identity.package)?;
+        let key = identity.pipeline_key();
+        self.remember_cold_key(&key)?;
+        Ok(key)
+    }
+
+    fn frozen_identity(
+        selection: &FrozenShaderSelection,
+        feature: FeatureId,
+        module_id: ModuleId,
+        execution_family: ExecutionFamily,
+        pipeline_state: PipelineState,
+    ) -> Result<FeaturePipelineIdentity, PipelineKeyMappingError> {
+        FeaturePipelineIdentity::from_frozen_selection(
+            selection,
+            feature,
+            module_id,
+            execution_family,
+            pipeline_state,
+        )
+        .map_err(|error| match error {
+            FeaturePipelineIdentityError::MissingFeature(feature) => {
+                PipelineKeyMappingError::MissingFrozenFeature(feature)
+            }
+            FeaturePipelineIdentityError::Binding(_) => {
+                PipelineKeyMappingError::InvalidFrozenBinding(feature)
+            }
+        })
+    }
+
+    /// Registers a pipeline identity directly from a frozen selection without
+    /// exposing a raw package/permutation input at the production call site.
+    pub fn register_frozen_selection(
+        &mut self,
+        selection: &FrozenShaderSelection,
+        feature: FeatureId,
+        module_id: ModuleId,
+        execution_family: ExecutionFamily,
+        pipeline_state: PipelineState,
+    ) -> Result<PipelineKey, PipelineKeyMappingError> {
+        let identity = Self::frozen_identity(
+            selection,
+            feature,
+            module_id,
+            execution_family,
+            pipeline_state,
+        )?;
+        self.register_feature_identity(&identity)
+    }
+
+    /// Requires the exact selected package/permutation in a deterministic warm
+    /// set.  The full package permutation space is never enumerated here.
+    pub fn require_frozen_selection_warm(
+        &mut self,
+        planner: &mut WarmSetPlanner,
+        selection: &FrozenShaderSelection,
+        feature: FeatureId,
+        module_id: ModuleId,
+        execution_family: ExecutionFamily,
+        pipeline_state: PipelineState,
+        priority: WarmPriority,
+    ) -> Result<PsoCacheKey, PipelineKeyMappingError> {
+        let identity = Self::frozen_identity(
+            selection,
+            feature,
+            module_id,
+            execution_family,
+            pipeline_state,
+        )?;
+        self.require_feature_warm(planner, &identity, priority)
+    }
+
+    /// Resolves one exact selected package/permutation through the real cache
+    /// and compiler path.  Neither the feature resolver nor a permutation
+    /// selector is called during this operation.
+    pub fn resolve_frozen_selection_or_request<D: RenderDevice>(
+        &mut self,
+        device: &D,
+        selection: &FrozenShaderSelection,
+        feature: FeatureId,
+        module_id: ModuleId,
+        execution_family: ExecutionFamily,
+        pipeline_state: PipelineState,
+        descriptor: RenderPipelineDescriptor,
+        fallback_selection: &FrozenShaderSelection,
+        fallback_feature: FeatureId,
+        fallback_module_id: ModuleId,
+        fallback_execution_family: ExecutionFamily,
+        fallback_state: PipelineState,
+        fallback_descriptor: RenderPipelineDescriptor,
+    ) -> Result<PipelineResolution, PipelineKeyMappingError> {
+        let identity = Self::frozen_identity(
+            selection,
+            feature,
+            module_id,
+            execution_family,
+            pipeline_state,
+        )?;
+        let fallback = Self::frozen_identity(
+            fallback_selection,
+            fallback_feature,
+            fallback_module_id,
+            fallback_execution_family,
+            fallback_state,
+        )?;
+        self.resolve_feature_or_request(
+            device,
+            &identity,
+            descriptor,
+            &fallback,
+            fallback_descriptor,
+        )
+    }
+
+    /// Adds the exact frozen-selection identity to a deterministic warm set.
+    /// No package-wide permutation enumeration occurs here; only the selected
+    /// dense permutation is admitted.
+    pub fn require_feature_warm(
+        &mut self,
+        planner: &mut WarmSetPlanner,
+        identity: &FeaturePipelineIdentity,
+        priority: WarmPriority,
+    ) -> Result<PsoCacheKey, PipelineKeyMappingError> {
+        self.register_feature_identity(identity)?;
+        let cold = identity.cold_key();
+        planner.require(cold.clone(), priority);
+        Ok(cold)
+    }
+
+    /// Gates a draw using the exact package/permutation derived from a frozen
+    /// selection.
+    pub fn request_feature_draw(
+        &mut self,
+        identity: &FeaturePipelineIdentity,
+    ) -> Result<DrawDecision, PipelineKeyMappingError> {
+        let key = self.register_feature_identity(identity)?;
+        Ok(self.warm_runtime.request_draw(
+            self.cold_by_typed
+                .get(&key)
+                .expect("registered feature identity has a cold mapping"),
+        ))
+    }
+
+    /// Resolves an exact frozen-selection identity through the same bounded
+    /// compiler/cache path used by normal pipeline requests.
+    pub fn resolve_feature_or_request<D: RenderDevice>(
+        &mut self,
+        device: &D,
+        identity: &FeaturePipelineIdentity,
+        descriptor: RenderPipelineDescriptor,
+        fallback: &FeaturePipelineIdentity,
+        fallback_descriptor: RenderPipelineDescriptor,
+    ) -> Result<PipelineResolution, PipelineKeyMappingError> {
+        let key = self.register_feature_identity(identity)?;
+        let fallback_key = self.register_fallback_identity(fallback)?;
+        Ok(self.resolve_or_request(device, key, descriptor, fallback_key, fallback_descriptor))
+    }
+
+    /// Warms a batch of exact frozen-selection identities through the same
+    /// cache path as foreground requests, while also recording the requested
+    /// priorities in the architecture warm planner.
+    pub fn prewarm_features<D: RenderDevice>(
+        &mut self,
+        device: &D,
+        planner: &mut WarmSetPlanner,
+        requests: impl IntoIterator<Item = FeaturePipelineWarmRequest>,
+    ) -> Result<(), PipelineKeyMappingError> {
+        for request in requests {
+            self.require_feature_warm(planner, &request.identity, request.priority)?;
+            let _ = self.resolve_feature_or_request(
+                device,
+                &request.identity,
+                request.descriptor,
+                &request.fallback,
+                request.fallback_descriptor,
+            )?;
+        }
         Ok(())
     }
 
@@ -836,14 +1319,14 @@ impl PipelineCache {
         self.warm_runtime.counters()
     }
 
-    /// Gates a draw using the architecture runtime state without blocking.
+    /// Gates a draw without blocking or allowing a placeholder PSO. Non-ready
+    /// keys return `Skip`; a compiled fallback must be requested by its own key.
     pub fn request_draw(
         &mut self,
         key: &PipelineKey,
-        allow_placeholder: bool,
     ) -> Result<DrawDecision, PipelineKeyMappingError> {
         let cold = self.remember_cold_key(key)?;
-        Ok(self.warm_runtime.request_draw(&cold, allow_placeholder))
+        Ok(self.warm_runtime.request_draw(&cold))
     }
 
     /// Records a real backend residency-size observation for a compiled PSO.
@@ -1204,7 +1687,8 @@ impl PipelineCache {
     }
 
     /// Mirrors a failed/canceled worker result into the cold lifecycle model.
-    fn mark_failed(&mut self, key: &PipelineKey) {
+    fn mark_failed(&mut self, token: &PipelineJobToken) {
+        let key = &token.1;
         let Some(cold) = self.cold_by_typed.get(key).cloned() else {
             return;
         };
@@ -1277,10 +1761,11 @@ impl PipelineCache {
             self.last_lookup.insert(key, PipelineLookupStatus::Ready);
             return PipelineResolution::Ready(fallback);
         }
-        let was_known = self.pending.contains(&key)
-            || self.in_flight.contains(&key)
-            || self.waiting.iter().any(|(queued, _)| queued == &key)
-            || self.failed.contains(&key);
+        let token = (self.generation, key.clone());
+        let was_known = self.pending.contains(&token)
+            || self.in_flight.contains(&token)
+            || self.waiting.iter().any(|(queued, _)| queued == &token)
+            || self.failed.contains(&token);
         self.last_lookup.insert(
             key.clone(),
             if was_known {
@@ -1289,23 +1774,23 @@ impl PipelineCache {
                 PipelineLookupStatus::Miss
             },
         );
-        if !self.failed.contains(&key) {
+        if !self.failed.contains(&token) {
             if let Some(cold) = key_cold.or_else(|| self.cold_by_typed.get(&key).cloned()) {
-                let _ = self.warm_runtime.request_draw(&cold, true);
+                let _ = self.warm_runtime.request_draw(&cold);
             }
         }
-        if self.failed.contains(&key) {
+        if self.failed.contains(&token) {
             return PipelineResolution::Fallback(fallback);
         }
-        if self.pending.contains(&key) {
+        if self.pending.contains(&token) {
             return PipelineResolution::Fallback(fallback);
         }
 
-        if self.in_flight.contains(&key) {
+        if self.in_flight.contains(&token) {
             // A released or cleared job is still in the worker pool: revive it
             // instead of enqueuing a duplicate.
-            self.canceled.remove(&key);
-            self.pending.insert(key);
+            self.canceled.remove(&token);
+            self.pending.insert(token);
             return PipelineResolution::Fallback(fallback);
         }
 
@@ -1319,8 +1804,8 @@ impl PipelineCache {
                 // bounded. The next lookup may try to admit this key again.
                 return PipelineResolution::Fallback(fallback);
             }
-            self.pending.insert(key.clone());
-            self.waiting.push_back((key, descriptor));
+            self.pending.insert(token.clone());
+            self.waiting.push_back((token, descriptor));
             self.dispatch_waiting();
             return PipelineResolution::Fallback(fallback);
         }
@@ -1370,19 +1855,19 @@ impl PipelineCache {
             .as_ref()
             .map(PipelineCompileQueue::poll)
             .unwrap_or_default();
-        for (key, result) in ready {
-            self.in_flight.remove(&key);
+        for (token, result) in ready {
+            self.in_flight.remove(&token);
             match result {
                 Ok(id) => {
-                    if !self.complete(key, id) {
+                    if !self.complete(token, id) {
                         device.destroy_render_pipeline(id);
                     }
                 }
                 Err(()) => {
-                    self.canceled.remove(&key);
-                    if self.pending.remove(&key) {
-                        self.failed.insert(key.clone());
-                        self.mark_failed(&key);
+                    self.canceled.remove(&token);
+                    if self.pending.remove(&token) {
+                        self.failed.insert(token.clone());
+                        self.mark_failed(&token);
                     }
                 }
             }
@@ -1419,32 +1904,34 @@ impl PipelineCache {
             return;
         };
         while self.in_flight.len() < worker_count {
-            let Some((key, descriptor)) = self.waiting.pop_front() else {
+            let Some((token, descriptor)) = self.waiting.pop_front() else {
                 break;
             };
             let result = {
                 let Some(queue) = self.compile_queue.as_ref() else {
-                    self.waiting.push_front((key, descriptor));
+                    self.waiting.push_front((token, descriptor));
                     break;
                 };
                 queue.request(PipelineCompileJob {
-                    key: key.clone(),
+                    generation: token.0,
+                    key: token.1.clone(),
                     descriptor,
                 })
             };
             match result {
                 Ok(()) => {
-                    self.in_flight.insert(key.clone());
-                    self.mark_compiling(&key);
+                    self.in_flight.insert(token.clone());
+                    self.mark_compiling(&token.1);
                 }
                 Err(mpsc::TrySendError::Full(job)) => {
-                    self.waiting.push_front((job.key, job.descriptor));
+                    self.waiting
+                        .push_front(((job.generation, job.key), job.descriptor));
                     break;
                 }
                 Err(mpsc::TrySendError::Disconnected(_)) => {
-                    self.pending.remove(&key);
-                    self.failed.insert(key.clone());
-                    self.mark_failed(&key);
+                    self.pending.remove(&token);
+                    self.failed.insert(token.clone());
+                    self.mark_failed(&token);
                 }
             }
         }
@@ -1453,19 +1940,24 @@ impl PipelineCache {
     /// Inserts a completed background compile. Returns `false` when the result
     /// was canceled or had no pending request, in which case the caller must
     /// destroy it.
-    fn complete(&mut self, key: PipelineKey, id: RenderPipelineId) -> bool {
-        if self.canceled.remove(&key) {
-            self.pending.remove(&key);
-            self.mark_failed(&key);
+    fn complete(&mut self, token: PipelineJobToken, id: RenderPipelineId) -> bool {
+        let key = &token.1;
+        if self.canceled.remove(&token) {
+            self.pending.remove(&token);
+            self.mark_failed(&token);
             return false;
         }
-        if !self.pending.remove(&key) || self.cache.refcount(&key) != 0 {
-            self.mark_failed(&key);
+        if token.0 != self.generation
+            || !self.pending.remove(&token)
+            || self.cache.refcount(key) != 0
+        {
+            self.mark_failed(&token);
             return false;
         }
         self.cache.get_or_create(key.clone(), || id);
-        self.mark_ready(&key);
-        self.last_lookup.insert(key, PipelineLookupStatus::Ready);
+        self.mark_ready(key);
+        self.last_lookup
+            .insert(key.clone(), PipelineLookupStatus::Ready);
         true
     }
 
@@ -1480,14 +1972,15 @@ impl PipelineCache {
         descriptor: &RenderPipelineDescriptor,
     ) -> RenderPipelineId {
         key.assert_matches(descriptor);
-        self.pending.remove(&key);
-        self.waiting.retain(|(queued, _)| queued != &key);
-        if self.in_flight.contains(&key) {
+        let token = (self.generation, key.clone());
+        self.pending.remove(&token);
+        self.waiting.retain(|(queued, _)| queued != &token);
+        if self.in_flight.contains(&token) {
             // A foreground compile overtook a dispatched job: its late result
             // must be destroyed, not inserted over the synchronous pipeline.
-            self.canceled.insert(key.clone());
+            self.canceled.insert(token);
         }
-        self.failed.remove(&key);
+        self.failed.remove(&(self.generation, key.clone()));
         let id = self
             .cache
             .get_or_create(key.clone(), || device.create_render_pipeline(descriptor));
@@ -1499,15 +1992,16 @@ impl PipelineCache {
     /// Drops one reference to `key`, destroying the pipeline when it reaches
     /// zero. Returns whether the pipeline was evicted.
     pub fn release<D: RenderDevice>(&mut self, device: &D, key: &PipelineKey) -> bool {
-        if self.pending.remove(key) {
-            self.mark_failed(key);
-            self.waiting.retain(|(queued, _)| queued != key);
-            if self.in_flight.contains(key) {
-                self.canceled.insert(key.clone());
+        let token = (self.generation, key.clone());
+        if self.pending.remove(&token) {
+            self.mark_failed(&token);
+            self.waiting.retain(|(queued, _)| queued != &token);
+            if self.in_flight.contains(&token) {
+                self.canceled.insert(token);
             }
             return false;
         }
-        self.failed.remove(key);
+        self.failed.remove(&token);
         match self.cache.release(key) {
             Some(id) => {
                 device.destroy_render_pipeline(id);
@@ -1526,13 +2020,13 @@ impl PipelineCache {
             .chain(self.in_flight.iter())
             .cloned()
             .collect::<Vec<_>>();
-        for key in &pending {
-            self.mark_failed(key);
+        for token in &pending {
+            self.mark_failed(token);
         }
         self.pending.clear();
         self.waiting.clear();
         // Keep dispatched slots occupied until pump destroys stale results.
-        self.canceled = self.in_flight.clone();
+        self.canceled.extend(self.in_flight.iter().cloned());
         self.failed.clear();
         self.cache
             .drain_all(|id| device.destroy_render_pipeline(id));
@@ -1541,9 +2035,14 @@ impl PipelineCache {
         self.module_packages.clear();
         self.cold_by_typed.clear();
         self.typed_by_cold.clear();
+        self.feature_bindings.clear();
         self.last_binary_error = None;
         self.last_lookup.clear();
         self.last_mapping_error = None;
+        self.generation = self
+            .generation
+            .checked_add(1)
+            .expect("pipeline cache generation exhausted");
         if let Some(budget) = self.lru.as_ref().map(LruPsoCache::budget_bytes) {
             self.lru = Some(LruPsoCache::with_budget(budget));
         }
@@ -1573,9 +2072,14 @@ impl PipelineCache {
         self.module_packages.clear();
         self.cold_by_typed.clear();
         self.typed_by_cold.clear();
+        self.feature_bindings.clear();
         self.last_binary_error = None;
         self.last_lookup.clear();
         self.last_mapping_error = None;
+        self.generation = self
+            .generation
+            .checked_add(1)
+            .expect("pipeline cache generation exhausted");
         if let Some(budget) = self.lru.as_ref().map(LruPsoCache::budget_bytes) {
             self.lru = Some(LruPsoCache::with_budget(budget));
         }
@@ -1603,9 +2107,14 @@ impl PipelineCache {
         self.module_packages.clear();
         self.cold_by_typed.clear();
         self.typed_by_cold.clear();
+        self.feature_bindings.clear();
         self.last_binary_error = None;
         self.last_lookup.clear();
         self.last_mapping_error = None;
+        self.generation = self
+            .generation
+            .checked_add(1)
+            .expect("pipeline cache generation exhausted");
         if let Some(budget) = self.lru.as_ref().map(LruPsoCache::budget_bytes) {
             self.lru = Some(LruPsoCache::with_budget(budget));
         }
