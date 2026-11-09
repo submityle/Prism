@@ -1,5 +1,6 @@
 //! The systems that bridge the main world and the render sub-app.
 
+use std::collections::BTreeSet;
 use std::time::Instant;
 
 use prism_ecs::prelude::{Res, ResMut, SystemParam};
@@ -14,7 +15,9 @@ use crate::lighting::LightingPlanState;
 use crate::lighting_gpu::{
     lighting_submission_domain, LightingCompositeMaterialBuffers, LightingGpuState,
 };
-use crate::material::{MaterialParameterBuffers, NativeExecutionTableBuffers};
+use crate::material::{
+    MaterialFrameSnapshotBundle, MaterialParameterBuffers, NativeExecutionTableBuffers,
+};
 use crate::record::RenderRecord;
 use crate::runtime_resource::RenderRuntimeResource;
 use crate::startup::ensure_render_startup;
@@ -73,6 +76,7 @@ pub(crate) struct OffscreenFrameTargets<'w> {
 pub(crate) struct FrameExecutionResources<'w> {
     trace_gpu: ResMut<'w, crate::lighting_trace_gpu::LightingTraceState>,
     stats: ResMut<'w, RenderFrameStats>,
+    taa_history: ResMut<'w, crate::TaaHistoryCache>,
     fabric_frame: Option<Res<'w, crate::ExtractedRenderFabricFrame>>,
     particle: Option<Res<'w, crate::particle::ParticleGpuState>>,
     particle_status: Res<'w, crate::particle::ParticleUploadStatus>,
@@ -89,10 +93,13 @@ fn composite_material_buffers(
     executions: &NativeExecutionTableBuffers,
 ) -> Option<(
     LightingCompositeMaterialBuffers,
-    std::sync::Arc<dyn core::any::Any + Send + Sync>,
+    std::sync::Arc<MaterialFrameSnapshotBundle>,
 )> {
     let material_snapshot = materials.snapshot()?;
     let execution_snapshot = executions.snapshot()?;
+    let bundle = MaterialFrameSnapshotBundle::new(material_snapshot, execution_snapshot).ok()?;
+    let material_snapshot = bundle.material();
+    let execution_snapshot = bundle.execution();
     let bindings = LightingCompositeMaterialBuffers {
         headers: Some(material_snapshot.headers()),
         headers_size_bytes: u64::from(material_snapshot.header_capacity())
@@ -105,8 +112,7 @@ fn composite_material_buffers(
         execution_programs: Some(execution_snapshot.program_buffer()),
         execution_programs_size_bytes: execution_snapshot.program_rows().len() as u64 * 20,
     };
-    let owner = std::sync::Arc::new((material_snapshot, execution_snapshot));
-    Some((bindings, owner))
+    Some((bindings, std::sync::Arc::new(bundle)))
 }
 
 #[cfg(test)]
@@ -308,6 +314,8 @@ pub(crate) fn execute_frame<I>(
 {
     let mut trace_gpu = execution.trace_gpu;
     let mut stats = execution.stats;
+    let mut taa_history = execution.taa_history;
+    let mut live_taa_keys = BTreeSet::new();
     let fabric_frame = execution.fabric_frame;
     let particle = execution.particle;
     let particle_status = execution.particle_status;
@@ -316,15 +324,7 @@ pub(crate) fn execute_frame<I>(
     let ember_status = execution.ember_status;
     let material_binding =
         composite_material_buffers(&execution.material_buffers, &execution.execution_buffers);
-    let Some((composite_material_bindings, material_owner)) = material_binding else {
-        stats.surface_view_error =
-            Some(crate::stats::SurfaceViewExecutionError::MaterialSnapshotUnavailable);
-        stats.frames_failed = stats.frames_failed.saturating_add(1);
-        stats.execution_trace.outcome = FrameExecutionOutcome::Failed;
-        return;
-    };
     let mut frame_texture_imports = (*execution.frame_texture_imports).clone();
-    frame_texture_imports.retain_owner(material_owner);
     stats
         .execution_trace
         .begin(&record, queues.len() as u64, &inputs);
@@ -480,6 +480,21 @@ pub(crate) fn execute_frame<I>(
         return;
     }
     stats.lighting_upload_error = None;
+    let lighting_available = lighting_gpu.pass(&plan.plan).is_some();
+    if lighting_available && material_binding.is_none() {
+        stats.surface_view_error =
+            Some(crate::stats::SurfaceViewExecutionError::MaterialSnapshotUnavailable);
+        stats.frames_failed = stats.frames_failed.saturating_add(1);
+        stats.execution_trace.outcome = FrameExecutionOutcome::Failed;
+        return;
+    }
+    if let Some((_, owner)) = material_binding.as_ref() {
+        frame_texture_imports.retain_owner(owner.external_owner());
+    }
+    let composite_material_bindings = material_binding.as_ref().map(|(bindings, _)| *bindings);
+    let registered_response_wgsl = material_binding.as_ref().map(|(_, owner)| {
+        std::sync::Arc::<str>::from(owner.execution().registered_response_wgsl())
+    });
     // Every registered texture output gets its own graph and receipt. It is
     // intentionally independent from the window presentation path and the
     // legacy default offscreen output.
@@ -525,13 +540,21 @@ pub(crate) fn execute_frame<I>(
                     viewport: camera.surface.viewport,
                     exposure_stops: camera.surface.exposure_stops,
                     target,
+                    surface: camera.surface,
                     queues: &camera.queues,
-                    lighting: Some(lighting_gpu.pass_for_target_with_materials(
-                        &plan.plan,
-                        target,
-                        runtime,
-                        composite_material_bindings,
-                    )?),
+                    lighting: composite_material_bindings
+                        .as_ref()
+                        .copied()
+                        .and_then(|bindings| {
+                            lighting_gpu.target_pass(
+                                &plan.plan,
+                                target,
+                                runtime,
+                                camera.surface.view_position,
+                                bindings,
+                                registered_response_wgsl.as_deref(),
+                            )
+                        }),
                     upscale_pipeline,
                     upscale_bindings,
                 })
@@ -540,25 +563,32 @@ pub(crate) fn execute_frame<I>(
         if view_inputs.is_empty() {
             continue;
         }
-        let Some(lighting_pass) = lighting_gpu.pass_for_target_with_materials(
-            &plan.plan,
-            &output_target,
-            runtime,
-            composite_material_bindings,
-        ) else {
-            stats.surface_view_error =
-                Some(crate::stats::SurfaceViewExecutionError::GraphAdmission);
-            stats.frames_failed = stats.frames_failed.saturating_add(1);
-            continue;
+        let output_view_position = match selected.as_slice() {
+            [camera] => camera.surface.view_position,
+            _ => [f32::NAN; 3],
         };
+        let lighting_pass = composite_material_bindings
+            .as_ref()
+            .copied()
+            .and_then(|bindings| {
+                lighting_gpu.target_pass(
+                    &plan.plan,
+                    &output_target,
+                    runtime,
+                    output_view_position,
+                    bindings,
+                    registered_response_wgsl.as_deref(),
+                )
+            });
         let mut prepared = match frame::prepare_surface_view_graph(
             &output_target,
             &queues,
             &functions,
-            Some(lighting_pass),
+            lighting_pass,
             None,
             &view_inputs,
             &frame_texture_imports,
+            crate::TaaOutput::Texture(handle.route_id()),
         ) {
             Ok(prepared) => prepared,
             Err(_) => {
@@ -579,6 +609,7 @@ pub(crate) fn execute_frame<I>(
                 continue;
             }
         };
+        live_taa_keys.extend(prepared.taa_keys().iter().copied());
         if let Some(owner) = texture_targets.external_owner(handle) {
             prepared.retain_external_owner(owner);
         }
@@ -593,8 +624,15 @@ pub(crate) fn execute_frame<I>(
             Some(&ember),
             ember_external.graph_imports(),
             record.frame_index,
+            Some(runtime),
+            crate::TaaOutput::Texture(handle.route_id()),
+            &mut taa_history,
         );
         let Ok((graph, _)) = finalized else {
+            taa_history.cancel_output(
+                crate::TaaOutput::Texture(handle.route_id()),
+                record.frame_index,
+            );
             texture_targets.publish_receipt(crate::target::TextureTargetReceipt {
                 handle,
                 frame_index: record.frame_index,
@@ -609,8 +647,19 @@ pub(crate) fn execute_frame<I>(
             stats.frames_failed = stats.frames_failed.saturating_add(1);
             continue;
         };
+        let particle_output = particle
+            .as_ref()
+            .and_then(|particle| particle.graph_output_lease(&graph));
         match runtime.execute_tracked(graph) {
             Ok(submission) => {
+                taa_history.mark_output_submitted(
+                    crate::TaaOutput::Texture(handle.route_id()),
+                    record.frame_index,
+                    submission,
+                );
+                if let Some(output) = particle_output {
+                    debug_assert!(output.confirm_submitted());
+                }
                 let sealed = texture_targets.seal(runtime, handle);
                 if !sealed {
                     // The graph reached the queue, but without a successful
@@ -649,6 +698,10 @@ pub(crate) fn execute_frame<I>(
                 }
             }
             Err(_) => {
+                taa_history.cancel_output(
+                    crate::TaaOutput::Texture(handle.route_id()),
+                    record.frame_index,
+                );
                 let _ = texture_targets.publish_receipt(crate::target::TextureTargetReceipt {
                     handle,
                     frame_index: record.frame_index,
@@ -697,19 +750,28 @@ pub(crate) fn execute_frame<I>(
         &overrides,
         &queues,
         &functions,
-        Some((&*lighting_gpu, &plan.plan)),
+        lighting_available.then_some((&*lighting_gpu, &plan.plan)),
         trace,
         particle.as_ref().map(|value| &**value),
         crate::presentation::SurfaceViewDriveContext {
             cameras: &cameras,
             targets: &mut camera_targets,
             frame_index: record.frame_index,
+            taa_history: &mut taa_history,
+            live_taa_keys: &mut live_taa_keys,
             texture_imports: &frame_texture_imports,
-            composite_material_buffers: Some(composite_material_bindings),
+            composite_material_buffers: composite_material_bindings,
+            registered_response_wgsl: registered_response_wgsl.clone(),
             ember: Some(&ember),
             ember_external: &ember_external,
         },
         &mut stats,
+    );
+    taa_history.retain_live(
+        &live_taa_keys,
+        record.frame_index,
+        runtime.device_generation(),
+        runtime.completed_value(),
     );
     if window_receipt.handled {
         if let Some(submission) = window_receipt.first_submission.and_then(|submission| {
@@ -774,17 +836,29 @@ pub(crate) fn execute_frame<I>(
         stats.execution_trace.outcome = FrameExecutionOutcome::Failed;
         return;
     }
-    let Some(lighting_pass) = lighting_gpu.pass_for_target_with_materials(
-        &plan.plan,
-        &offscreen.target,
-        runtime,
-        composite_material_bindings,
-    ) else {
-        stats.surface_view_error = Some(crate::stats::SurfaceViewExecutionError::GraphAdmission);
-        stats.frames_failed = stats.frames_failed.saturating_add(1);
-        stats.execution_trace.outcome = FrameExecutionOutcome::Failed;
-        return;
+    let mut manual_views = cameras.iter().filter(|camera| {
+        matches!(
+            camera.surface.target,
+            prism_camera::RenderTarget::PrimaryWindow | prism_camera::RenderTarget::Texture(0)
+        )
+    });
+    let manual_view_position = match (manual_views.next(), manual_views.next()) {
+        (Some(camera), None) => camera.surface.view_position,
+        _ => [f32::NAN; 3],
     };
+    let lighting_pass = composite_material_bindings
+        .as_ref()
+        .copied()
+        .and_then(|bindings| {
+            lighting_gpu.target_pass(
+                &plan.plan,
+                &offscreen.target,
+                runtime,
+                manual_view_position,
+                bindings,
+                registered_response_wgsl.as_deref(),
+            )
+        });
     let upscaler = cameras
         .iter()
         .any(|camera| {
@@ -821,13 +895,21 @@ pub(crate) fn execute_frame<I>(
                 viewport: camera.surface.viewport,
                 exposure_stops: camera.surface.exposure_stops,
                 target,
+                surface: camera.surface,
                 queues: &camera.queues,
-                lighting: Some(lighting_gpu.pass_for_target_with_materials(
-                    &plan.plan,
-                    target,
-                    runtime,
-                    composite_material_bindings,
-                )?),
+                lighting: composite_material_bindings
+                    .as_ref()
+                    .copied()
+                    .and_then(|bindings| {
+                        lighting_gpu.target_pass(
+                            &plan.plan,
+                            target,
+                            runtime,
+                            camera.surface.view_position,
+                            bindings,
+                            registered_response_wgsl.as_deref(),
+                        )
+                    }),
                 upscale_pipeline,
                 upscale_bindings,
             })
@@ -837,10 +919,11 @@ pub(crate) fn execute_frame<I>(
         &offscreen.target,
         &queues,
         &functions,
-        Some(lighting_pass),
+        lighting_pass,
         trace,
         &view_inputs,
         &frame_texture_imports,
+        crate::TaaOutput::Texture(0),
     ) {
         Ok(prepared) => prepared,
         Err(_) => {
@@ -851,12 +934,16 @@ pub(crate) fn execute_frame<I>(
             return;
         }
     };
+    live_taa_keys.extend(prepared.taa_keys().iter().copied());
     let graph = frame::finalize_surface_view_graph(
         prepared,
         particle.as_ref().map(|value| &**value),
         Some(&ember),
         ember_external.graph_imports(),
         record.frame_index,
+        Some(runtime),
+        crate::TaaOutput::Texture(0),
+        &mut taa_history,
     )
     .and_then(|(mut graph, source)| {
         let output = offscreen
@@ -875,6 +962,7 @@ pub(crate) fn execute_frame<I>(
     let graph = match graph {
         Ok(graph) => graph,
         Err(_) => {
+            taa_history.cancel_output(crate::TaaOutput::Texture(0), record.frame_index);
             stats.frames_failed += 1;
             stats.execution_trace.outcome = FrameExecutionOutcome::Failed;
             return;
@@ -892,7 +980,7 @@ pub(crate) fn execute_frame<I>(
     stages.assert_contract();
     assert_eq!(
         stages.gi_recipes,
-        u32::from(lighting_pass.run_gi),
+        lighting_pass.map_or(0, |pass| u32::from(pass.run_gi)),
         "GI graph admission must match the selected lighting pass"
     );
     stats.execution_trace.graph = Some(single_stages);
@@ -903,8 +991,19 @@ pub(crate) fn execute_frame<I>(
             .iter()
             .map(|view| view.queues.len() as u64)
             .sum::<u64>();
+    let particle_output = particle
+        .as_ref()
+        .and_then(|particle| particle.graph_output_lease(&graph));
     match runtime.execute_tracked(graph) {
         Ok(submission) => {
+            taa_history.mark_output_submitted(
+                crate::TaaOutput::Texture(0),
+                record.frame_index,
+                submission,
+            );
+            if let Some(output) = particle_output {
+                debug_assert!(output.confirm_submitted());
+            }
             seal_surface_view_submission_bookkeeping(runtime, &mut camera_targets, &mut stats);
             if let Some(submission) =
                 lighting_submission_domain(runtime.device_generation()).submission(submission)
@@ -932,6 +1031,7 @@ pub(crate) fn execute_frame<I>(
             stats.ember_compute_passes_recorded += u64::from(stages.ember_compute_passes);
         }
         Err(_) => {
+            taa_history.cancel_output(crate::TaaOutput::Texture(0), record.frame_index);
             // A compile failure is the only error `execute` can return; the
             // runtime issues no GPU work in that case, so we count the frame and
             // leave it at that. The minimal clear graph cannot cycle today, so

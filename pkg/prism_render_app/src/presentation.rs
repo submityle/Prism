@@ -281,7 +281,12 @@ pub(crate) struct SurfaceViewDriveContext<'a, I: Instance + 'static> {
     pub(crate) cameras: &'a crate::SurfaceViewQueues,
     pub(crate) targets: &'a mut SurfaceViewTargets<I::Device>,
     pub(crate) frame_index: u64,
+    pub(crate) taa_history: &'a mut crate::TaaHistoryCache,
+    pub(crate) live_taa_keys: &'a mut alloc::collections::BTreeSet<crate::TaaHistoryKey>,
     pub(crate) texture_imports: &'a crate::frame::FrameGraphTextureImports,
+    pub(crate) composite_material_buffers:
+        Option<crate::lighting_gpu::LightingCompositeMaterialBuffers>,
+    pub(crate) registered_response_wgsl: Option<Arc<str>>,
     pub(crate) ember: Option<&'a crate::particle::EmberGpuAssetRegistry>,
     pub(crate) ember_external: &'a crate::particle::ExtractedEmberExternalGpuResources,
 }
@@ -638,7 +643,9 @@ impl<I: Instance + 'static> WindowRenderTargets<I> {
             .filter_map(|(&id, gpu)| {
                 let keep = requests.enabled
                     && requests.windows.get(&id).is_some_and(|request| {
-                        gpu.device_generation == runtime.device_generation()
+                        request.visible
+                            && !request.viewport.is_empty()
+                            && gpu.device_generation == runtime.device_generation()
                             && Arc::ptr_eq(&gpu.target.device, &runtime.device_handle())
                             && Arc::ptr_eq(&gpu.factory, &request.factory)
                     });
@@ -924,16 +931,55 @@ impl<I: Instance + 'static> WindowRenderTargets<I> {
             gpu.needs_reconfigure = true;
             return Err(WindowRenderError::Surface(SurfaceError::Outdated).into());
         }
-        let mut lighting = if let Some((lighting_gpu, plan)) = lighting_context {
-            Some(
-                lighting_gpu
-                    .pass_for_target(plan, &gpu.target, runtime)
-                    .ok_or_else(|| {
-                        WindowRenderError::Graph(
-                            "lighting plan has no target-aware composite binding".into(),
-                        )
-                    })?,
+        let material_buffers = context
+            .as_deref()
+            .and_then(|context| context.composite_material_buffers);
+        if context.is_some() && lighting_context.is_some() && material_buffers.is_none() {
+            stats.surface_view_error =
+                Some(crate::stats::SurfaceViewExecutionError::MaterialSnapshotUnavailable);
+            return Err(WindowRenderError::Graph(
+                "canonical material snapshots are unavailable for the lighting composite".into(),
             )
+            .into());
+        }
+        let manual_view_position = context
+            .as_deref()
+            .and_then(|context| {
+                let mut cameras = context.cameras.iter().filter(|camera| {
+                    let routed = match camera.surface.target {
+                        prism_camera::RenderTarget::PrimaryWindow => is_primary,
+                        prism_camera::RenderTarget::Window(window) => window == id.0,
+                        prism_camera::RenderTarget::Texture(_) => false,
+                    };
+                    routed && crate::systems::surface_view_fits(&camera.surface, request.viewport)
+                });
+                match (cameras.next(), cameras.next()) {
+                    (Some(camera), None) => Some(camera.surface.view_position),
+                    _ => None,
+                }
+            })
+            .unwrap_or([f32::NAN; 3]);
+        let mut lighting = if let Some((lighting_gpu, plan)) = lighting_context {
+            let material_buffers = material_buffers.ok_or_else(|| {
+                WindowRenderError::Graph(
+                    "canonical material snapshots are required for the lighting composite".into(),
+                )
+            })?;
+            let pass = lighting_gpu.target_pass(
+                plan,
+                &gpu.target,
+                runtime,
+                manual_view_position,
+                material_buffers,
+                context
+                    .as_deref()
+                    .and_then(|context| context.registered_response_wgsl.as_deref()),
+            );
+            Some(pass.ok_or_else(|| {
+                WindowRenderError::Graph(
+                    "lighting plan has no target-aware composite binding".into(),
+                )
+            })?)
         } else {
             None
         };
@@ -1005,13 +1051,16 @@ impl<I: Instance + 'static> WindowRenderTargets<I> {
                             .into(),
                     )
                 })?;
-                let mut lighting =
-                    lighting_context.and_then(|(state, plan)| match material_buffers {
-                        Some(buffers) => {
-                            state.pass_for_target_with_materials(plan, target, runtime, buffers)
-                        }
-                        None => state.pass_for_target(plan, target, runtime),
-                    });
+                let mut lighting = lighting_context.and_then(|(state, plan)| {
+                    state.target_pass(
+                        plan,
+                        target,
+                        runtime,
+                        camera.surface.view_position,
+                        material_buffers.expect("validated canonical material snapshots"),
+                        context.registered_response_wgsl.as_deref(),
+                    )
+                });
                 if !frame_work {
                     if let Some(pass) = lighting.as_mut() {
                         pass.run_gi = false;
@@ -1024,6 +1073,7 @@ impl<I: Instance + 'static> WindowRenderTargets<I> {
                     viewport: camera.surface.viewport,
                     exposure_stops: camera.surface.exposure_stops,
                     target,
+                    surface: camera.surface,
                     queues: &camera.queues,
                     lighting,
                     upscale_pipeline,
@@ -1039,20 +1089,28 @@ impl<I: Instance + 'static> WindowRenderTargets<I> {
             if frame_work { trace } else { None },
             &inputs,
             &imports,
+            crate::TaaOutput::Window(id.0),
         )
         .map_err(|error| {
             stats.surface_view_error =
                 Some(crate::stats::SurfaceViewExecutionError::GraphAdmission);
             WindowRenderError::Graph(format!("surface graph admission: {error:?}"))
         })?;
+        let prepared_taa_keys = prepared.taa_keys().to_vec();
         let draws = queues.len() as u64
             + inputs
                 .iter()
                 .map(|input| input.queues.len() as u64)
                 .sum::<u64>();
         drop(inputs);
+        if let Some(context) = context.as_deref_mut() {
+            context.live_taa_keys.extend(prepared_taa_keys);
+        }
         let empty_external = BTreeMap::new();
-        let (mut graph, color) = crate::frame::finalize_surface_view_graph(
+        let mut fallback_taa_history = crate::TaaHistoryCache::default();
+        let taa_output = crate::TaaOutput::Window(id.0);
+        let taa_frame = context.as_ref().map_or(0, |context| context.frame_index);
+        let (mut graph, color) = match crate::frame::finalize_surface_view_graph(
             prepared,
             // Every output draws its cameras. Particle bridge reuse is guarded
             // by actual submission, independently of frame-wide Ember/trace.
@@ -1066,10 +1124,27 @@ impl<I: Instance + 'static> WindowRenderTargets<I> {
                 context.ember_external.graph_imports()
             }),
             context.as_deref().map_or(0, |context| context.frame_index),
-        )
-        .map_err(|error| {
-            WindowRenderError::Graph(format!("surface graph finalization: {error:?}"))
-        })?;
+            Some(runtime),
+            taa_output,
+            context
+                .as_deref_mut()
+                .map_or(&mut fallback_taa_history, |context| {
+                    &mut *context.taa_history
+                }),
+        ) {
+            Ok(result) => result,
+            Err(error) => {
+                if let Some(context) = context.as_deref_mut() {
+                    context.taa_history.cancel_output(taa_output, taa_frame);
+                } else {
+                    fallback_taa_history.cancel_output(taa_output, taa_frame);
+                }
+                return Err(WindowRenderError::Graph(format!(
+                    "surface graph finalization: {error:?}"
+                ))
+                .into());
+            }
+        };
         let transformed = gpu
             .display_transform
             .append(&mut graph, runtime.queue(), &OcioConfig::srgb(), color)
@@ -1099,9 +1174,21 @@ impl<I: Instance + 'static> WindowRenderTargets<I> {
             Ok(submission) => submission,
             Err(error) => {
                 gpu.lifetime.in_flight.fetch_sub(1, Ordering::AcqRel);
+                if let Some(context) = context.as_deref_mut() {
+                    context.taa_history.cancel_output(taa_output, taa_frame);
+                } else {
+                    fallback_taa_history.cancel_output(taa_output, taa_frame);
+                }
                 return Err(WindowRenderError::Graph(format!("{error:?}")).into());
             }
         };
+        if let Some(context) = context.as_deref_mut() {
+            context
+                .taa_history
+                .mark_output_submitted(taa_output, taa_frame, submission);
+        } else {
+            fallback_taa_history.mark_output_submitted(taa_output, taa_frame, submission);
+        }
         if let Some(output) = particle_output {
             // execute_tracked marks the token only after queue.submit succeeds.
             // Confirm before present (which may fail after successful submit).

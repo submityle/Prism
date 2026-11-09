@@ -23,7 +23,7 @@ use crate::lighting::{
     LightingAreaInput, LightingDebugViewState, LightingDirectionalInput, LightingGiCandidateInput,
     LightingPlanState, LightingPunctualInput, LightingSceneInputs, LightingSurfaceInput,
 };
-use crate::lighting_gpu::LightingGpuState;
+use crate::lighting_gpu::{LightingCompositeMaterialBuffers, LightingGpuState};
 use crate::plugin::{save_persisted_pso_cache, PrismRenderPlugin};
 use crate::record::RenderRecord;
 use crate::runtime_resource::RenderRuntimeResource;
@@ -950,46 +950,6 @@ fn filling_the_queue_specializes_and_appends() {
         4,
         "two distinct layouts specialize two pipelines plus their fallbacks"
     );
-}
-
-/// A bin class indexes the same explicit pass table as direct resolution.
-#[test]
-fn phase_for_bin_class_round_trips_the_render_class() {
-    let mut registry = SceneRegistry::new();
-    for (index, (domain, class, phase)) in [
-        (
-            RenderDomain::Surface,
-            MaterialRenderClass::Opaque,
-            RenderPhase::Opaque,
-        ),
-        (
-            RenderDomain::Hair,
-            MaterialRenderClass::Opaque,
-            RenderPhase::Opaque,
-        ),
-        (
-            RenderDomain::Surface,
-            MaterialRenderClass::Transparent,
-            RenderPhase::Transparent,
-        ),
-        (
-            RenderDomain::Volume,
-            MaterialRenderClass::Opaque,
-            RenderPhase::Custom,
-        ),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let handle = GenerationalHandle::new(index as u32, 1);
-        let mut record = prism_render_material::fallback_material_record(handle, 1);
-        record.render_domain = domain;
-        record.render_class = class;
-        registry.insert_material(record);
-        let table = registry.material_pass_index(handle).unwrap();
-        assert_eq!(crate::phase_for_bin_class(&registry, table), Some(phase));
-    }
-    assert_eq!(crate::phase_for_bin_class(&registry, u32::MAX), None);
 }
 
 /// Surface draws are phased by blend family only — the illumination axis is a
@@ -2143,7 +2103,7 @@ pub(super) fn dispatch_lighting_test_composite<I>(
         execution_programs_size_bytes: execution_snapshot.program_rows().len() as u64 * 20,
     };
     let pass = lighting
-        .pass_for_target_with_materials(plan, target, runtime, [0.0; 3], material_bindings)
+        .target_pass(plan, target, runtime, [0.0; 3], material_bindings, None)
         .expect("prepared lighting plan binds to the real GBuffer target and material tables");
     let target_bind_group = pass
         .composite_target_bind_group
@@ -2376,8 +2336,15 @@ fn lighting_candidate_test_trace_scene(surface_count: usize) -> crate::LightingT
     };
 
     let triangle = Triangle::new([-1.0, -1.0, -1.0], [1.0, -1.0, -1.0], [0.0, 1.0, -1.0], 73);
+    let packed_bvh = GpuBvhBuffers::from_bvh(&Bvh::build(&[triangle]))
+        .with_hit_attributes(vec![RayHitAttributeRecord::new(
+            RayHitIdentity::new(1, 73, 1),
+            [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
+            [[0.0, 0.0, 1.0]; 3],
+        )])
+        .expect("valid lighting trace hit attributes");
     crate::LightingTraceSceneInput::new(
-        Arc::new(GpuBvhBuffers::from_bvh(&Bvh::build(&[triangle]))),
+        Arc::new(packed_bvh),
         (0..surface_count).map(|index| index as u64 + 100).collect(),
         1,
         0.001,
@@ -2642,6 +2609,11 @@ fn lighting_candidate_plugin_source_switches_keep_plan_debug_and_graph_in_the_sa
     use crate::lighting_trace_gpu::{LightingTraceState, TracePreparationStatus};
 
     let mut app = app_on_null_backend(RenderAppConfig::new(EXTENT));
+    // Exercise the submitted lighting graph, including its target-aware
+    // surface-identity pass. Without a validated native view the production
+    // scheduler correctly builds only the clear graph because no finite
+    // camera position is available for the lighting target binding.
+    queue_scene_fixture(&mut app);
     install_lighting_test_material_tables(&mut app);
     {
         let inputs = app.world_mut().resource_mut::<LightingSceneInputs>();
@@ -2650,6 +2622,7 @@ fn lighting_candidate_plugin_source_switches_keep_plan_debug_and_graph_in_the_sa
         inputs.gi_candidates = vec![Vec::new()];
     }
     let mut trace_dispatches = 0;
+    let mut lighting_dispatches = 0;
 
     for (index, source) in [
         GiCandidateSource::HostProvided,
@@ -2771,6 +2744,22 @@ fn lighting_candidate_plugin_source_switches_keep_plan_debug_and_graph_in_the_sa
         assert_eq!(stages.gi_recipes, u32::from(gi_admitted));
         assert_eq!(stages.trace_dispatches, expected_trace);
         assert_eq!(stages.candidate_build_dispatches, expected_trace);
+        assert_eq!(
+            stages.surface_identity_passes, stages.composite_passes,
+            "every admitted lighting graph records its surface-identity pass"
+        );
+        let surface_stages = stats
+            .execution_trace
+            .surface_graph
+            .as_ref()
+            .expect("submitted surface graph publishes aggregate stages");
+        surface_stages.assert_contract();
+        assert_eq!(
+            surface_stages.surface_identity_passes, surface_stages.composite_passes,
+            "the aggregate multi-view graph keeps identity and composite pass counts aligned"
+        );
+        lighting_dispatches += u64::from(surface_stages.lighting_dispatches);
+        assert_eq!(stats.lighting_gpu_passes_recorded, lighting_dispatches);
         trace_dispatches += u64::from(expected_trace);
         assert_eq!(stats.trace_gpu_dispatches_recorded, trace_dispatches);
     }
@@ -3757,6 +3746,18 @@ fn wgpu_backend_records_and_clears_a_real_frame() {
         prism_render_driver_wgpu::WgpuInstance::new(),
         RenderAppConfig::new(extent),
     ));
+    install_lighting_test_material_tables(&mut app);
+    if app
+        .world()
+        .get_resource::<crate::visibility::PrismRenderScene>()
+        .is_none()
+    {
+        app.add_plugins(crate::visibility::PrismVisibilityPlugin);
+    }
+    // The target-aware lighting contract requires one finite view position.
+    // Keep the camera's work list empty so this remains a clear/composite
+    // regression rather than depending on a geometry raster result.
+    spawn_queue_camera(&mut app, 1, 0.0);
     app.world_mut()
         .insert_resource(crate::LightingLightScene::default());
     let surface = LightingSurfaceInput {
@@ -3930,10 +3931,16 @@ fn wgpu_backend_records_and_clears_a_real_frame() {
         .iter()
         .enumerate()
         .find(|(_, pixel)| **pixel != [0.0; 4]);
+    let stats = render.world.resource::<RenderFrameStats>();
     assert!(
         pixels.iter().all(|pixel| *pixel == [0.0; 4]),
-        "the composite overwrote the white target with transparent black for an uncovered GBuffer; first nonzero={first_nonzero:?}, lighting_passes={}",
-        render.world.resource::<RenderFrameStats>().lighting_gpu_passes_recorded
+        "the composite overwrote the white target with transparent black for an uncovered GBuffer; first nonzero={first_nonzero:?}, lighting_passes={}, submitted={}, failed={}, outcome={:?}, surface_error={:?}, queue_rejection={:?}",
+        stats.lighting_gpu_passes_recorded,
+        stats.frames_submitted,
+        stats.frames_failed,
+        stats.execution_trace.outcome,
+        stats.surface_view_error,
+        stats.view_queue_rejection
     );
 
     let lighting = render
@@ -4016,8 +4023,8 @@ fn wgpu_backend_records_and_clears_a_real_frame() {
             .world
             .resource::<RenderFrameStats>()
             .lighting_gpu_passes_recorded,
-        2,
-        "GI and composite are the only lighting compute passes"
+        5,
+        "manual GI/composite plus the camera identity/composite passes are recorded"
     );
 }
 
@@ -4887,18 +4894,27 @@ fn lighting_plan_records_compute_pipeline_bind_group_and_dispatch() {
     lighting
         .prepare(&plan, &extracted, 0, &runtime)
         .expect("lighting tables prepare");
-    let (material_bindings, material_snapshot, execution_snapshot) =
-        lighting_test_material_bindings(&runtime);
-
     let target = RenderTarget::new(runtime.device(), extent);
     let queues = RenderQueues::new();
     let functions = DrawFunctions::new();
+    let (material_bindings, material_snapshot, execution_snapshot) =
+        lighting_test_material_bindings(&runtime);
     let lighting_pass = lighting
-        .pass_for_target_with_materials(&plan, &target, &runtime, [0.0; 3], material_bindings)
+        .target_pass(&plan, &target, &runtime, [0.0; 3], material_bindings, None)
         .expect("prepared lighting plan binds canonical material tables");
     let mut graph = crate::frame::target_graph(&target, &queues, &functions, Some(lighting_pass));
     graph.retain_external_owner(material_snapshot.external_owner());
     graph.retain_external_owner(execution_snapshot.external_owner());
+    let stages = *graph
+        .blackboard()
+        .get::<crate::frame::FrameGraphStages>()
+        .expect("lighting graph publishes stage accounting");
+    stages.assert_contract();
+    assert_eq!(stages.surface_identity_passes, 1);
+    assert_eq!(stages.gi_recipes, 1);
+    assert_eq!(stages.composite_passes, 1);
+    assert_eq!(stages.lighting_dispatches, 3);
+    assert_eq!(graph.pass_count(), 4, "clear, identity, GI, composite");
     let capture = CapturingQueue::default();
     graph
         .execute(runtime.device(), &capture)
@@ -4924,6 +4940,13 @@ fn lighting_plan_records_compute_pipeline_bind_group_and_dispatch() {
                 Some(ComputeCommand::SetBindGroup { index: 0, .. })
             ));
             match label.as_str() {
+                "prism-surface-identity" => {
+                    assert_eq!(commands.len(), 3);
+                    assert!(matches!(
+                        commands.get(2),
+                        Some(ComputeCommand::Dispatch { .. })
+                    ));
+                }
                 "prism-lighting-gi-dispatch" => {
                     assert_eq!(commands.len(), 3);
                     assert!(matches!(
@@ -4932,13 +4955,17 @@ fn lighting_plan_records_compute_pipeline_bind_group_and_dispatch() {
                     ));
                 }
                 "prism-lighting-composite-dispatch" => {
-                    assert_eq!(commands.len(), 4);
+                    assert_eq!(commands.len(), 5);
                     assert!(matches!(
                         commands.get(2),
                         Some(ComputeCommand::SetBindGroup { index: 1, .. })
                     ));
                     assert!(matches!(
                         commands.get(3),
+                        Some(ComputeCommand::SetBindGroup { index: 2, .. })
+                    ));
+                    assert!(matches!(
+                        commands.get(4),
                         Some(ComputeCommand::Dispatch { x: 1, y: 1, z: 1 })
                     ));
                 }
@@ -4950,6 +4977,7 @@ fn lighting_plan_records_compute_pipeline_bind_group_and_dispatch() {
     assert_eq!(
         compute_labels,
         [
+            "prism-surface-identity",
             "prism-lighting-gi-dispatch",
             "prism-lighting-composite-dispatch",
         ]
@@ -4984,11 +5012,18 @@ fn frame_graph_records_optional_trace_between_scene_and_gi() {
 
     let triangle = Triangle::new([-1.0, -1.0, -1.0], [1.0, -1.0, -1.0], [0.0, 1.0, -1.0], 0);
     let bvh = Bvh::build(&[triangle]);
-    let scene = PackedTraceScene::from(
-        &prism_render_architecture::ray_scene::GpuBvhBuffers::from_bvh(&bvh),
+    let packed_bvh = std::sync::Arc::new(
+        prism_render_architecture::ray_scene::GpuBvhBuffers::from_bvh(&bvh)
+            .with_hit_attributes(vec![RayHitAttributeRecord::new(
+                RayHitIdentity::new(1, 0, 1),
+                [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
+                [[0.0, 0.0, 1.0]; 3],
+            )])
+            .expect("valid trace hit attributes"),
     );
+    let scene = PackedTraceScene::from(&*packed_bvh);
     extracted.trace_scene = Some(LightingTraceSceneInput::new(
-        std::sync::Arc::new(prism_render_architecture::ray_scene::GpuBvhBuffers::from_bvh(&bvh)),
+        packed_bvh,
         vec![1],
         1,
         0.001,
@@ -5011,7 +5046,7 @@ fn frame_graph_records_optional_trace_between_scene_and_gi() {
         selection_u01: 0.5,
     }];
     let output = runtime.device().create_buffer(&BufferDescriptor::new(
-        32,
+        crate::lighting_trace_gpu::HOST_TRACE_OUTPUT_BYTES,
         BufferUsages::STORAGE | BufferUsages::COPY_SRC,
     ));
     let mut trace = LightingTraceGpu::new(runtime.device_handle());
@@ -5023,13 +5058,15 @@ fn frame_graph_records_optional_trace_between_scene_and_gi() {
             &borrowed_scene,
             &rays,
             output,
-            32,
+            crate::lighting_trace_gpu::HOST_TRACE_OUTPUT_BYTES,
             Some(lighting_pass.gi_candidate_target()),
         )
         .expect("trace inputs prepare without submitting a command buffer");
     let target = RenderTarget::new(runtime.device(), extent);
     let queues = RenderQueues::new();
     let functions = DrawFunctions::new();
+    let (material_bindings, material_snapshot, execution_snapshot) =
+        lighting_test_material_bindings(&runtime);
 
     // The no-trace path must use an admitted host producer; a software-BVH
     // plan cannot be recorded without its trace/candidate-build passes.
@@ -5043,7 +5080,14 @@ fn frame_graph_records_optional_trace_between_scene_and_gi() {
         &target,
         &queues,
         &functions,
-        lighting.pass_for_target(&host_plan, &target, &runtime, [0.0; 3]),
+        lighting.target_pass(
+            &host_plan,
+            &target,
+            &runtime,
+            [0.0; 3],
+            material_bindings,
+            None,
+        ),
     );
     assert_eq!(
         absent
@@ -5066,9 +5110,18 @@ fn frame_graph_records_optional_trace_between_scene_and_gi() {
         &target,
         &queues,
         &functions,
-        Some(lighting_pass),
+        Some(
+            lighting
+                .target_pass(&plan, &target, &runtime, [0.0; 3], material_bindings, None)
+                .expect("trace lighting pass binds canonical material tables"),
+        ),
         Some(recorder),
     );
+    // The graph holds physical buffer ids, while these snapshots own the
+    // completion-published material buffers for the submission lifetime.
+    let mut graph = graph;
+    graph.retain_external_owner(material_snapshot.external_owner());
+    graph.retain_external_owner(execution_snapshot.external_owner());
     let stages = *graph
         .blackboard()
         .get::<crate::frame::FrameGraphStages>()
@@ -5097,6 +5150,7 @@ fn frame_graph_records_optional_trace_between_scene_and_gi() {
         labels,
         [
             "prism-render-app-clear-gbuffer",
+            "prism-surface-identity",
             "prism-lighting-trace-dispatch",
             "prism-lighting-gi-candidate-build",
             "prism-lighting-gi-dispatch",
@@ -5245,7 +5299,7 @@ fn physical_gpu_offscreen_host_graph_traces_builds_gi_and_composites() {
         execution_programs_size_bytes: execution_snapshot.program_rows().len() as u64 * 20,
     };
     let lighting_pass = lighting
-        .pass_for_target_with_materials(&plan, &target, &runtime, [0.0; 3], material_bindings)
+        .target_pass(&plan, &target, &runtime, [0.0; 3], material_bindings, None)
         .expect("GI surface admits its target-aware recipe");
     let hit_output = runtime.device().create_buffer(&BufferDescriptor::new(
         (core::mem::size_of::<u32>() * 16) as u64,
@@ -5436,7 +5490,7 @@ fn lighting_graph_skips_direct_when_only_world_restir_is_admitted() {
     let (material_bindings, material_snapshot, execution_snapshot) =
         lighting_test_material_bindings(&runtime);
     let lighting_pass = lighting
-        .pass_for_target_with_materials(&plan, &target, &runtime, [0.0; 3], material_bindings)
+        .target_pass(&plan, &target, &runtime, [0.0; 3], material_bindings, None)
         .expect("GI-only lighting pass binds canonical material tables");
     let mut graph = crate::frame::target_graph(
         &target,
@@ -5463,6 +5517,7 @@ fn lighting_graph_skips_direct_when_only_world_restir_is_admitted() {
     assert_eq!(
         labels,
         [
+            "prism-surface-identity",
             "prism-lighting-gi-dispatch",
             "prism-lighting-composite-dispatch",
         ]
@@ -5494,7 +5549,14 @@ fn lighting_graph_has_no_compute_pass_without_an_admitted_backend() {
         &target,
         &RenderQueues::new(),
         &DrawFunctions::new(),
-        lighting.pass_for_target(&plan, &target, &runtime, [0.0; 3]),
+        lighting.target_pass(
+            &plan,
+            &target,
+            &runtime,
+            [0.0; 3],
+            LightingCompositeMaterialBuffers::default(),
+            None,
+        ),
     );
     let capture = CapturingQueue::default();
     graph
@@ -5539,7 +5601,14 @@ fn lighting_empty_surface_batch_clears_outputs_without_dispatching() {
         &target,
         &RenderQueues::new(),
         &DrawFunctions::new(),
-        lighting.pass_for_target(&plan, &target, &runtime, [0.0; 3]),
+        lighting.target_pass(
+            &plan,
+            &target,
+            &runtime,
+            [0.0; 3],
+            LightingCompositeMaterialBuffers::default(),
+            None,
+        ),
     );
     let capture = CapturingQueue::default();
     graph
@@ -7061,6 +7130,10 @@ fn canonical_default_mesh_binding_uses_material_generation_and_graph_buffers() {
             },
             crate::draw::RenderBindGroupBuffer {
                 buffer: buffers.parameters().unwrap(),
+                access: crate::draw::RenderBindGroupBufferAccess::Storage,
+            },
+            crate::draw::RenderBindGroupBuffer {
+                buffer: buffers.textures().unwrap(),
                 access: crate::draw::RenderBindGroupBufferAccess::Storage,
             },
         ]
