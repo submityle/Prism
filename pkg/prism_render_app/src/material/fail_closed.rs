@@ -8,8 +8,11 @@
 
 use prism_render_architecture::shader_package::ExecutionFamily;
 use prism_render_material::{
-    GpuMaterialHeader, LobeMask, EXECUTION_PLAN_ROW_WORDS, SURFACE_CORE_WORDS,
-    SURFACE_LOBE_WORDS_BY_SLOT,
+    GpuMaterialHeader, LobeMask, EXECUTION_MASK_DYNAMIC_CHANNEL, EXECUTION_MASK_NONE,
+    EXECUTION_MASK_REGION, EXECUTION_MASK_TEXTURE, EXECUTION_MASK_UV_CHANNEL,
+    EXECUTION_MASK_VERTEX_ATTRIBUTE, EXECUTION_PLAN_ROW_WORDS, RESPONSE_PROGRAM_KIND_CUSTOM,
+    RESPONSE_PROGRAM_KIND_LIT, RESPONSE_PROGRAM_KIND_NPR, RESPONSE_PROGRAM_KIND_UNLIT,
+    SURFACE_CORE_WORDS, SURFACE_LOBE_WORDS_BY_SLOT,
 };
 
 /// Per-pixel identity supplied by the surface/visibility producer. A GPU
@@ -95,14 +98,35 @@ pub enum MaterialTupleValidationError {
         index: u64,
         limit: u64,
     },
+    InvalidPlanChannels {
+        value: u32,
+    },
+    InvalidMask {
+        kind: u32,
+        index: u32,
+    },
+    InvalidBlendDomain {
+        value: u32,
+    },
+    InvalidPlanFamily {
+        value: u32,
+    },
+    InvalidProgramKind {
+        index: u32,
+        value: u32,
+    },
+    InvalidProgramId {
+        index: u32,
+        kind: u32,
+        value: u32,
+    },
 }
 
 /// Validate one header and its complete execution binding against the exact
 /// table mirrors and parameter-heap length intended for consumption.
 ///
-/// Both endpoints of a MaskBlend plan are recognized as plan owners. MaskBlend
-/// is therefore not rejected here; support for blending its response at the
-/// consuming shader remains a separate integration concern.
+/// Both endpoints of a MaskBlend plan are recognized as plan owners, and the
+/// row's family/channel/mask/domain semantics are checked before consumption.
 pub fn validate_material_tuple(
     identity: SurfaceMaterialIdentity,
     headers: &[GpuMaterialHeader],
@@ -206,6 +230,13 @@ pub fn validate_material_tuple(
             program: program_index,
         });
     }
+    validate_plan_semantics(plan, family, program_rows)?;
+    validate_program_identity(program_index, program)?;
+    for endpoint in [plan[0], plan[1]] {
+        if endpoint != u32::MAX {
+            validate_program_identity(endpoint, &program_rows[endpoint as usize])?;
+        }
+    }
     let owning_package = program[1];
     if owning_package != header.execution_package_index {
         return Err(MaterialTupleValidationError::PackageNotOwnedByProgram {
@@ -234,6 +265,113 @@ pub fn validate_material_tuple(
         permutation_index,
         execution_family: family,
     })
+}
+
+fn validate_plan_semantics(
+    plan: &[u32; EXECUTION_PLAN_ROW_WORDS],
+    family: ExecutionFamily,
+    programs: &[[u32; 5]],
+) -> Result<(), MaterialTupleValidationError> {
+    if plan[7] != 0 {
+        return Err(MaterialTupleValidationError::InvalidPlanFamily { value: plan[7] });
+    }
+    let single = plan[1] == u32::MAX;
+    if single {
+        if plan[3] != 0 || plan[4] != EXECUTION_MASK_NONE || plan[5] != 0 || plan[6] != 0 {
+            return Err(MaterialTupleValidationError::InvalidPlanChannels { value: plan[3] });
+        }
+        if family == ExecutionFamily::Composition {
+            return Err(MaterialTupleValidationError::InvalidPlanFamily {
+                value: family as u32,
+            });
+        }
+    } else {
+        if plan[3] == 0 || plan[3] & !31 != 0 {
+            return Err(MaterialTupleValidationError::InvalidPlanChannels { value: plan[3] });
+        }
+        if !(1..=5).contains(&plan[4]) {
+            return Err(MaterialTupleValidationError::InvalidMask {
+                kind: plan[4],
+                index: plan[5],
+            });
+        }
+        if matches!(
+            plan[4],
+            EXECUTION_MASK_VERTEX_ATTRIBUTE | EXECUTION_MASK_UV_CHANNEL | EXECUTION_MASK_REGION
+        ) && plan[5] != 0
+        {
+            return Err(MaterialTupleValidationError::InvalidMask {
+                kind: plan[4],
+                index: plan[5],
+            });
+        }
+        if plan[4] == EXECUTION_MASK_DYNAMIC_CHANNEL && plan[5] > 3 {
+            return Err(MaterialTupleValidationError::InvalidMask {
+                kind: plan[4],
+                index: plan[5],
+            });
+        }
+        match plan[6] {
+            0 if plan[3] != 31 => {
+                return Err(MaterialTupleValidationError::InvalidBlendDomain { value: plan[6] })
+            }
+            1 if plan[3] != 1 => {
+                return Err(MaterialTupleValidationError::InvalidBlendDomain { value: plan[6] })
+            }
+            2 if plan[3] == 0 => {
+                return Err(MaterialTupleValidationError::InvalidBlendDomain { value: plan[6] })
+            }
+            0..=2 => {}
+            value => return Err(MaterialTupleValidationError::InvalidBlendDomain { value }),
+        }
+        let left_kind = programs[plan[0] as usize][0];
+        let right_kind = programs[plan[1] as usize][0];
+        if family == ExecutionFamily::SplitResponse
+            || (family == ExecutionFamily::FusedBuiltin
+                && (left_kind == RESPONSE_PROGRAM_KIND_CUSTOM
+                    || right_kind == RESPONSE_PROGRAM_KIND_CUSTOM))
+            || (family == ExecutionFamily::Composition
+                && left_kind != RESPONSE_PROGRAM_KIND_CUSTOM
+                && right_kind != RESPONSE_PROGRAM_KIND_CUSTOM)
+        {
+            return Err(MaterialTupleValidationError::InvalidPlanFamily {
+                value: family as u32,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_program_identity(
+    index: u32,
+    program: &[u32; 5],
+) -> Result<(), MaterialTupleValidationError> {
+    let kind = program[0];
+    let valid_kind = matches!(
+        kind,
+        RESPONSE_PROGRAM_KIND_LIT
+            | RESPONSE_PROGRAM_KIND_NPR
+            | RESPONSE_PROGRAM_KIND_UNLIT
+            | RESPONSE_PROGRAM_KIND_CUSTOM
+    );
+    if !valid_kind {
+        return Err(MaterialTupleValidationError::InvalidProgramKind { index, value: kind });
+    }
+    let expected_id = match kind {
+        RESPONSE_PROGRAM_KIND_LIT => 0,
+        RESPONSE_PROGRAM_KIND_NPR => 1,
+        RESPONSE_PROGRAM_KIND_UNLIT => 2,
+        RESPONSE_PROGRAM_KIND_CUSTOM => return Ok(()),
+        _ => unreachable!(),
+    };
+    if program[4] != expected_id {
+        return Err(MaterialTupleValidationError::InvalidProgramId {
+            index,
+            kind,
+            value: program[4],
+        });
+    }
+    Ok(())
 }
 
 fn checked_row<'a, const N: usize>(
@@ -451,5 +589,63 @@ mod tests {
         let tuple =
             validate_material_tuple(identity(), &headers, 24, &plans, &programs, 1).unwrap();
         assert_eq!(tuple.program_index, 1);
+    }
+
+    #[test]
+    fn rejects_invalid_plan_semantics_and_program_identity() {
+        let (headers, mut plans, mut programs) = fixture();
+        let identity = identity();
+
+        plans[0][3] = 1;
+        assert!(matches!(
+            validate_material_tuple(identity, &headers, 24, &plans, &programs, 1),
+            Err(MaterialTupleValidationError::InvalidPlanChannels { .. })
+        ));
+
+        programs.push([0, 0, 4, 0, 1]);
+        plans[0][1] = 1;
+        plans[0][3] = 31;
+        plans[0][4] = 0;
+        plans[0][5] = 0;
+        plans[0][6] = 0;
+        plans[0][2] = ExecutionFamily::Composition as u32;
+        assert!(matches!(
+            validate_material_tuple(identity, &headers, 24, &plans, &programs, 1),
+            Err(MaterialTupleValidationError::InvalidMask { .. })
+        ));
+
+        plans[0][4] = EXECUTION_MASK_DYNAMIC_CHANNEL;
+        plans[0][5] = 4;
+        assert!(matches!(
+            validate_material_tuple(identity, &headers, 24, &plans, &programs, 1),
+            Err(MaterialTupleValidationError::InvalidMask { .. })
+        ));
+
+        plans[0][5] = 0;
+        plans[0][6] = 1;
+        assert!(matches!(
+            validate_material_tuple(identity, &headers, 24, &plans, &programs, 1),
+            Err(MaterialTupleValidationError::InvalidBlendDomain { .. })
+        ));
+
+        plans[0][6] = 0;
+        assert!(matches!(
+            validate_material_tuple(identity, &headers, 24, &plans, &programs, 1),
+            Err(MaterialTupleValidationError::InvalidPlanFamily { .. })
+        ));
+
+        plans[0][2] = ExecutionFamily::SplitResponse as u32;
+        assert!(matches!(
+            validate_material_tuple(identity, &headers, 24, &plans, &programs, 1),
+            Err(MaterialTupleValidationError::InvalidPlanFamily { .. })
+        ));
+
+        plans[0][2] = ExecutionFamily::Composition as u32;
+        programs[1][0] = RESPONSE_PROGRAM_KIND_CUSTOM;
+        programs[0][4] = 9;
+        assert!(matches!(
+            validate_material_tuple(identity, &headers, 24, &plans, &programs, 1),
+            Err(MaterialTupleValidationError::InvalidProgramId { .. })
+        ));
     }
 }
