@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 roxmltree = "0.21.1"
 prism_material_pcm = { path = "../prism_material_pcm" }
+prism_material_schema = { path = "../prism_material_schema" }
 prism_render_material = { path = "../prism_render_material" }
 
 [lints]

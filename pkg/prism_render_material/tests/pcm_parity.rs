@@ -66,7 +66,7 @@ fn the_committed_catalogue_agrees_with_the_schema_row_for_row() {
     assert_eq!(
         count_of(Kind::AuthorNode),
         count_identity(Kind::AuthorNode),
-        "§4's authoring front-end does not exist yet, so no author node can be registered"
+        "every schema author_node identity must be registered in PCM"
     );
     assert_eq!(
         count_of(Kind::Composite),

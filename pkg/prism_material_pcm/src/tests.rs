@@ -29,9 +29,9 @@ fn the_builtin_catalogue_registers_every_core_lobe_as_a_khr_item() {
     let registry = builtin_registry();
     assert_eq!(
         registry.len(),
-        7 + 7 + 4 + 5,
+        7 + 7 + 4 + 5 + 7,
         "7 KHR lobes + 3 Prism lobes + 4 channels + 3 response modes + 1 cache aux \
-         + 5 bake/pass-time rows"
+         + 5 bake/pass-time rows + 7 author-node rows"
     );
     for (index, slot) in [0u32, 1, 2, 3, 4, 5, 6].into_iter().enumerate() {
         let manifest = registry.manifest_at(slot).expect("core lobe slot");
@@ -256,8 +256,8 @@ fn identity_only_rows_promote_in_place_without_gaining_a_slot() {
             .map(ExtensionManifest::namespace),
         Some(Namespace::Khr)
     );
-    assert_eq!(registry.identity_only().len(), 5);
-    assert_eq!(registry.len(), 23);
+    assert_eq!(registry.identity_only().len(), 12);
+    assert_eq!(registry.len(), 30);
     assert_eq!(registry.slot_of_uid(UID_TRANSFER_SRGB), None);
 }
 
@@ -597,8 +597,9 @@ fn energy_policies_are_lobe_only_and_roll_up_by_priority() {
 }
 
 /// Every extension-point kind is represented by at least one real extension.
-/// Surface/runtime rows live in `builtin_registry`; author nodes live in their
-/// bake-only catalogue because they never become surface-header identities.
+/// All built-in rows live in `builtin_registry`; identity-only author nodes
+/// remain present for authoring identity validation but never become
+/// surface-header identities.
 #[test]
 fn the_catalogue_covers_every_kind_that_has_an_implementation() {
     let registry = builtin_registry();
@@ -609,11 +610,11 @@ fn the_catalogue_covers_every_kind_that_has_an_implementation() {
             .map(ExtensionManifest::uid)
             .collect();
         if kind == Kind::AuthorNode {
-            assert!(
-                rows.is_empty(),
-                "author nodes must not enter the surface catalogue"
-            );
-            assert!(!BUILTIN_AUTHOR_NODES.is_empty());
+            let author_uids: Vec<&str> = BUILTIN_AUTHOR_NODES
+                .iter()
+                .map(|entry| entry.manifest().uid())
+                .collect();
+            assert_eq!(rows, author_uids);
             continue;
         }
         assert!(!rows.is_empty(), "{kind} has no registered extension");

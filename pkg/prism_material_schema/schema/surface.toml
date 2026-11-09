@@ -1401,3 +1401,76 @@ vendor = "prism"
 stability = "stable"
 requires_caps = []
 view_dependent = false
+
+# MaterialX author nodes are identity-only bake extensions. The `id` is the
+# canonical MaterialX `nodedef node` category; the evaluator must bind it to
+# the matching PCM author_node manifest before executing an instance.
+[[identity_extension]]
+id = "add"
+uid = "org.prism.author_node.materialx.add"
+kind = "author_node"
+namespace = "PRISM"
+vendor = "prism"
+stability = "candidate"
+requires_caps = []
+view_dependent = false
+
+[[identity_extension]]
+id = "clamp"
+uid = "org.prism.author_node.materialx.clamp"
+kind = "author_node"
+namespace = "PRISM"
+vendor = "prism"
+stability = "candidate"
+requires_caps = []
+view_dependent = false
+
+[[identity_extension]]
+id = "convert"
+uid = "org.prism.author_node.materialx.convert"
+kind = "author_node"
+namespace = "PRISM"
+vendor = "prism"
+stability = "candidate"
+requires_caps = []
+view_dependent = false
+
+[[identity_extension]]
+id = "divide"
+uid = "org.prism.author_node.materialx.divide"
+kind = "author_node"
+namespace = "PRISM"
+vendor = "prism"
+stability = "candidate"
+requires_caps = []
+view_dependent = false
+
+[[identity_extension]]
+id = "mix"
+uid = "org.prism.author_node.materialx.mix"
+kind = "author_node"
+namespace = "PRISM"
+vendor = "prism"
+stability = "candidate"
+requires_caps = []
+view_dependent = false
+
+[[identity_extension]]
+id = "multiply"
+uid = "org.prism.author_node.materialx.multiply"
+kind = "author_node"
+namespace = "PRISM"
+vendor = "prism"
+stability = "candidate"
+requires_caps = []
+view_dependent = false
+
+[[identity_extension]]
+id = "subtract"
+uid = "org.prism.author_node.materialx.subtract"
+kind = "author_node"
+namespace = "PRISM"
+vendor = "prism"
+stability = "candidate"
+requires_caps = []
+view_dependent = false

@@ -327,10 +327,10 @@ const PRISM_SLOTTED: [(&str, u32, Kind, Stability, CapabilitySet, bool); 4] = [
 ///   lobes' sample counts without touching the permutation key;
 /// * `outline` — the §8.5 step-6 composite pass.
 ///
-/// MaterialX author nodes are registered in [`BUILTIN_AUTHOR_NODES`], a
-/// separate authoring/bake catalogue. They deliberately do not enter this
-/// schema-mirrored surface catalogue because they own neither a surface header
-/// slot nor a runtime surface identity.
+/// MaterialX author nodes are registered in [`BUILTIN_AUTHOR_NODES`] and enter
+/// the full identity-only catalogue below. They own neither a surface header
+/// slot nor a runtime surface identity, so registering them here does not add
+/// any runtime material state.
 ///
 /// The identity/governance/capability/view-dependence fields below are mirrored
 /// from `surface.toml`'s `[[identity_extension]]` rows and checked both ways by
@@ -457,6 +457,11 @@ pub fn builtin_registry() -> ExtensionRegistry {
         registry
             .register(manifest)
             .expect("the built-in Prism bake/pass-time catalogue is valid");
+    }
+    for entry in &BUILTIN_AUTHOR_NODES {
+        registry
+            .register(entry.manifest().clone())
+            .expect("the built-in MaterialX author-node catalogue is valid");
     }
     registry
 }

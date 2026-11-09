@@ -1,8 +1,7 @@
 #![allow(missing_docs, reason = "integration tests are self-describing")]
 
 use prism_render_material_authoring::{
-    adapt_openpbr_surface, export_materialx, parse_materialx, Connection,
-    DiagnosticCode, Severity,
+    adapt_openpbr_surface, export_materialx, parse_materialx, Connection, DiagnosticCode, Severity,
 };
 
 const SOURCE: &str = r#"<?xml version="1.0"?>
@@ -146,6 +145,20 @@ fn duplicate_author_node_instance_ports_are_rejected() {
     assert!(error
         .to_string()
         .contains("duplicate document identifier 'a'"));
+}
+
+#[test]
+fn invalid_direct_author_node_nodedefs_fail_before_an_instance_is_added() {
+    let source = r#"<materialx>
+      <nodedef name="ND_bad_add" node="add">
+        <input name="a" type="float"/>
+        <output name="out" type="float"/>
+      </nodedef>
+    </materialx>"#;
+    let error =
+        parse_materialx(source).expect_err("invalid author-node signature must fail before use");
+    assert_eq!(error.0.code, DiagnosticCode::InvalidStructure);
+    assert!(error.to_string().contains("requires 2 inputs"));
 }
 
 #[test]

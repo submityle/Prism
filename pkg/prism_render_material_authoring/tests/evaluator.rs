@@ -284,3 +284,71 @@ fn graph_backed_nodedef_keeps_graph_semantics_without_builtin_author_node_alias(
     .expect("nodegraph implementation evaluates");
     assert_eq!(value.value, "6");
 }
+
+#[test]
+fn every_schema_author_node_has_a_real_instance_semantics_and_pcm_identity() {
+    let document = parse_materialx(
+        r#"<materialx>
+      <nodedef name="ND_add" node="add"><input name="a" type="float"/><input name="b" type="float"/><output name="out" type="float"/></nodedef>
+      <nodedef name="ND_clamp" node="clamp"><input name="value" type="float"/><input name="low" type="float"/><input name="high" type="float"/><output name="out" type="float"/></nodedef>
+      <nodedef name="ND_convert" node="convert"><input name="in" type="color3"/><output name="out" type="vector3"/></nodedef>
+      <nodedef name="ND_divide" node="divide"><input name="a" type="float"/><input name="b" type="float"/><output name="out" type="float"/></nodedef>
+      <nodedef name="ND_mix" node="mix"><input name="a" type="float"/><input name="b" type="float"/><input name="t" type="float"/><output name="out" type="float"/></nodedef>
+      <nodedef name="ND_multiply" node="multiply"><input name="a" type="float"/><input name="b" type="float"/><output name="out" type="float"/></nodedef>
+      <nodedef name="ND_subtract" node="subtract"><input name="a" type="float"/><input name="b" type="float"/><output name="out" type="float"/></nodedef>
+      <nodegraph name="g">
+        <add name="add" nodedef="ND_add"><input name="a" type="float" value="1.25"/><input name="b" type="float" value="2.75"/></add>
+        <clamp name="clamp" nodedef="ND_clamp"><input name="value" type="float" value="2.0"/><input name="low" type="float" value="0.0"/><input name="high" type="float" value="1.0"/></clamp>
+        <convert name="convert" nodedef="ND_convert"><input name="in" type="color3" value="0.1, 0.2, 0.3"/></convert>
+        <divide name="divide" nodedef="ND_divide"><input name="a" type="float" value="6.0"/><input name="b" type="float" value="2.0"/></divide>
+        <mix name="mix" nodedef="ND_mix"><input name="a" type="float" value="0.0"/><input name="b" type="float" value="1.0"/><input name="t" type="float" value="0.25"/></mix>
+        <multiply name="multiply" nodedef="ND_multiply"><input name="a" type="float" value="2.0"/><input name="b" type="float" value="3.0"/></multiply>
+        <subtract name="subtract" nodedef="ND_subtract"><input name="a" type="float" value="4.0"/><input name="b" type="float" value="1.5"/></subtract>
+      </nodegraph>
+    </materialx>"#,
+    )
+    .expect("all schema-declared author-node definitions are valid");
+    let graph = &document.nodegraphs[0];
+    let expected = [
+        ("add", "org.prism.author_node.materialx.add", "4"),
+        ("clamp", "org.prism.author_node.materialx.clamp", "1"),
+        (
+            "convert",
+            "org.prism.author_node.materialx.convert",
+            "0.1, 0.2, 0.3",
+        ),
+        ("divide", "org.prism.author_node.materialx.divide", "3"),
+        ("mix", "org.prism.author_node.materialx.mix", "0.25"),
+        ("multiply", "org.prism.author_node.materialx.multiply", "6"),
+        (
+            "subtract",
+            "org.prism.author_node.materialx.subtract",
+            "2.5",
+        ),
+    ];
+    for (node_name, uid, expected_value) in expected {
+        let node = graph
+            .nodes
+            .iter()
+            .find(|node| node.name == node_name)
+            .expect("author-node instance exists");
+        assert_eq!(
+            author_node_manifest(&document, node)
+                .expect("schema and PCM author-node identities agree")
+                .expect("direct nodedef resolves to an author node")
+                .uid(),
+            uid
+        );
+        let value = evaluate_connection(
+            &document,
+            graph,
+            &Connection {
+                node: Some(node_name.into()),
+                output: Some("out".into()),
+                nodegraph: None,
+            },
+        )
+        .expect("author-node instance evaluates");
+        assert_eq!(value.value, expected_value, "{node_name}");
+    }
+}

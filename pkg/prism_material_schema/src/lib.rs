@@ -948,7 +948,13 @@ impl SurfaceSchema {
         // Bake/pass-time identity rows share the same global uid space but no
         // header slot: their identity is resolved by the registry before the
         // runtime, so there is no per-material address to allocate.
+        let mut identity_ids = BTreeSet::new();
         for extension in &self.identity_extensions {
+            if extension.id.trim().is_empty() || !identity_ids.insert(extension.id.as_str()) {
+                return Err(SchemaError::DuplicateIdentityExtensionId(
+                    extension.id.clone(),
+                ));
+            }
             if !uids.insert(extension.uid.clone()) {
                 return Err(SchemaError::DuplicateUid(extension.uid.clone()));
             }
@@ -1118,6 +1124,8 @@ pub enum SchemaError {
     DuplicateChannelWord(u32),
     /// Two header-resident non-lobe records claim the same registry slot.
     DuplicateHeaderSlot(u32),
+    /// Two bake/pass-time identity extensions claim the same display id.
+    DuplicateIdentityExtensionId(String),
     /// Runtime channel words do not tile `0..channels.len()`.
     NonContiguousChannelWords,
     /// A runtime channel's neutral default is not a single scalar.
@@ -1211,6 +1219,9 @@ impl fmt::Display for SchemaError {
             }
             Self::DuplicateHeaderSlot(slot) => {
                 write!(f, "two header-resident records claim registry slot {slot}")
+            }
+            Self::DuplicateIdentityExtensionId(id) => {
+                write!(f, "duplicate identity extension id {id:?}")
             }
             Self::NonContiguousChannelWords => {
                 write!(
@@ -1331,7 +1342,24 @@ mod tests {
         assert_eq!(surfel.requires_caps, ["object_space_cache"]);
         assert!(!surfel.view_dependent);
 
-        assert_eq!(schema.identity_extensions.len(), 5);
+        assert_eq!(schema.identity_extensions.len(), 12);
+        let author_nodes: Vec<_> = schema
+            .identity_extensions
+            .iter()
+            .filter(|extension| extension.kind == IdentityKind::AuthorNode)
+            .collect();
+        assert_eq!(
+            author_nodes
+                .iter()
+                .map(|extension| extension.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["add", "clamp", "convert", "divide", "mix", "multiply", "subtract"]
+        );
+        assert!(author_nodes.iter().all(|extension| {
+            extension
+                .uid
+                .starts_with("org.prism.author_node.materialx.")
+        }));
         let measured = schema
             .identity_extensions
             .iter()
@@ -1757,6 +1785,16 @@ view_dependent = false
         assert!(matches!(
             SurfaceSchema::parse(&bad),
             Err(SchemaError::Parse(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_duplicate_identity_extension_ids() {
+        let mut schema = surface_schema();
+        schema.identity_extensions[1].id = schema.identity_extensions[0].id.clone();
+        assert!(matches!(
+            schema.validate(),
+            Err(SchemaError::DuplicateIdentityExtensionId(_))
         ));
     }
 }
