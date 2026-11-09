@@ -11,9 +11,12 @@ const NODEDEF_ATTRIBUTE: &str = "nodedef";
 
 /// Return the stable PCM author-node manifest selected by a node instance.
 ///
-/// `None` means the node is a built-in MaterialX category without a `nodedef`
-/// binding. A referenced definition is resolved by binary search and must map
-/// to one of Prism's executable pure-numeric author-node categories.
+/// `None` means the node is either a built-in MaterialX category without a
+/// `nodedef` binding, or its `nodedef` is implemented by a nodegraph. Graph
+/// implementations retain their own semantics and must not be mislabeled as
+/// the category's built-in operator. A directly evaluated definition is
+/// resolved by binary search and must map to an executable pure-numeric
+/// author-node category.
 pub fn author_node_manifest(
     document: &Document,
     node: &Node,
@@ -28,6 +31,13 @@ pub(crate) fn resolve<'a>(
     let Some(name) = node.attributes.get(NODEDEF_ATTRIBUTE) else {
         return Ok(None);
     };
+    if document
+        .nodegraphs
+        .iter()
+        .any(|graph| graph.nodedef.as_deref() == Some(name.as_str()))
+    {
+        return Ok(None);
+    }
     let definition = document
         .nodedefs
         .binary_search_by(|definition| definition.name.as_str().cmp(name.as_str()))
@@ -69,10 +79,118 @@ pub(crate) fn validate_document(document: &Document) -> Result<(), AuthoringErro
         .iter()
         .flat_map(|graph| graph.nodes.iter())
     {
+        if let Some(name) = node.attributes.get(NODEDEF_ATTRIBUTE)
+            && let Some(implementation) = document
+                .nodegraphs
+                .iter()
+                .find(|graph| graph.nodedef.as_deref() == Some(name.as_str()))
+        {
+            let definition = document
+                .nodedefs
+                .binary_search_by(|definition| definition.name.cmp(name))
+                .ok()
+                .map(|index| &document.nodedefs[index])
+                .ok_or_else(|| {
+                    error(
+                        DiagnosticCode::InvalidReference,
+                        format!("node '{}' references unknown nodedef '{name}'", node.name),
+                    )
+                })?;
+            validate_graph_instance(node, definition, implementation)?;
+            continue;
+        }
         let Some((definition, _)) = resolve(document, node)? else {
             continue;
         };
         validate_instance(node, definition)?;
+    }
+    Ok(())
+}
+
+fn validate_graph_instance(
+    node: &Node,
+    definition: &NodeDef,
+    implementation: &crate::NodeGraph,
+) -> Result<(), AuthoringError> {
+    if node.category != definition.category {
+        return Err(error(
+            DiagnosticCode::InvalidStructure,
+            format!(
+                "node '{}' category '{}' does not match nodedef '{}' category '{}'",
+                node.name, node.category, definition.name, definition.category
+            ),
+        ));
+    }
+    if node.value.is_some() {
+        return Err(error(
+            DiagnosticCode::InvalidStructure,
+            format!(
+                "nodegraph instance '{}' cannot carry a node-level value",
+                node.name
+            ),
+        ));
+    }
+
+    for input in &node.inputs {
+        if input.value.is_none()
+            && input.connection.is_none()
+            && !input.attributes.contains_key("interfacename")
+        {
+            return Err(error(
+                DiagnosticCode::InvalidStructure,
+                format!(
+                    "node '{}' input '{}' has no value or connection",
+                    node.name, input.name
+                ),
+            ));
+        }
+        let declared = implementation
+            .inputs
+            .iter()
+            .find(|candidate| candidate.name == input.name)
+            .ok_or_else(|| {
+                error(
+                    DiagnosticCode::InvalidStructure,
+                    format!(
+                        "node '{}' input '{}' is not declared by nodegraph '{}'",
+                        node.name, input.name, implementation.name
+                    ),
+                )
+            })?;
+        if let (Some(actual), Some(expected)) =
+            (input.type_name.as_deref(), declared.type_name.as_deref())
+        {
+            require_type_match(
+                &format!("node '{}' input '{}'", node.name, input.name),
+                actual,
+                expected,
+            )?;
+        }
+    }
+
+    for output in &node.outputs {
+        let declared = definition
+            .outputs
+            .iter()
+            .find(|candidate| candidate.name == output.name)
+            .ok_or_else(|| {
+                error(
+                    DiagnosticCode::InvalidReference,
+                    format!(
+                        "node '{}' output '{}' is not declared by nodedef '{}'",
+                        node.name, output.name, definition.name
+                    ),
+                )
+            })?;
+        if let (Some(actual), Some(expected)) =
+            (output.type_name.as_deref(), declared.type_name.as_deref())
+        {
+            require_type_match(
+                &format!("node '{}' output '{}'", node.name, output.name),
+                actual,
+                expected,
+            )?;
+        }
     }
     Ok(())
 }

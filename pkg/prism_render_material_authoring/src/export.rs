@@ -46,8 +46,12 @@ fn export_nodegraph(out: &mut String, graph: &NodeGraph, indent: usize) {
         out,
         indent,
         &format!(
-            "<nodegraph name=\"{}\"{}>",
+            "<nodegraph name=\"{}\"{}{}>",
             escape(&graph.name),
+            graph
+                .nodedef
+                .as_ref()
+                .map_or_else(String::new, |name| format!(" nodedef=\"{}\"", escape(name))),
             attributes(&graph.attributes)
         ),
     );

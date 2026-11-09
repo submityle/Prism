@@ -242,3 +242,45 @@ fn nodedef_convert_preserves_components_across_equal_width_numeric_types() {
     assert_eq!(value.type_name, "vector3");
     assert_eq!(value.value, "0.1, 0.2, 0.3");
 }
+
+#[test]
+fn graph_backed_nodedef_keeps_graph_semantics_without_builtin_author_node_alias() {
+    let document = parse_materialx(
+        r#"<materialx>
+      <nodedef name="ND_graph_add" node="add">
+        <input name="x" type="float" value="2"/>
+        <input name="y" type="float" value="3"/>
+        <output name="out" type="float"/>
+      </nodedef>
+      <nodegraph name="NG_graph_add" nodedef="ND_graph_add">
+        <input name="x" type="float" value="2"/>
+        <input name="y" type="float" value="3"/>
+        <multiply name="product">
+          <input name="in1" interfacename="x"/>
+          <input name="in2" interfacename="y"/>
+        </multiply>
+        <output name="out" type="float" nodename="product"/>
+      </nodegraph>
+      <nodegraph name="use">
+        <add name="instance" nodedef="ND_graph_add"/>
+      </nodegraph>
+    </materialx>"#,
+    )
+    .expect("graph-backed nodedef is structurally valid");
+    let instance = &document.nodegraphs[1].nodes[0];
+    assert!(author_node_manifest(&document, instance)
+        .expect("graph-backed nodes are not invalid")
+        .is_none());
+
+    let value = evaluate_connection(
+        &document,
+        &document.nodegraphs[1],
+        &Connection {
+            node: Some("instance".into()),
+            output: Some("out".into()),
+            nodegraph: None,
+        },
+    )
+    .expect("nodegraph implementation evaluates");
+    assert_eq!(value.value, "6");
+}

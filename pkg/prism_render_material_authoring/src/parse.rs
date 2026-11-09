@@ -206,12 +206,15 @@ fn parse_nodegraph(
             }
         }
     }
+    let mut graph_attributes = attrs(xml, element, &["name", "nodedef", "doc", "namespace"])?;
+    graph_attributes.remove("nodedef");
     Ok(NodeGraph {
         name,
+        nodedef: element.attribute("nodedef").map(str::to_owned),
         inputs,
         nodes,
         outputs,
-        attributes: attrs(xml, element, &["name", "doc", "namespace"])?,
+        attributes: graph_attributes,
     })
 }
 
@@ -416,12 +419,90 @@ fn parse_output(
 }
 
 fn validate_references(xml: &XmlDocument<'_>, doc: &Document) -> Result<(), AuthoringError> {
+    let definitions: BTreeSet<_> = doc
+        .nodedefs
+        .iter()
+        .map(|definition| definition.name.as_str())
+        .collect();
     let graphs: BTreeMap<_, _> = doc
         .nodegraphs
         .iter()
         .map(|g| (g.name.as_str(), g))
         .collect();
     for graph in &doc.nodegraphs {
+        if let Some(name) = graph.nodedef.as_deref() {
+            if !definitions.contains(name) {
+                return Err(AuthoringError::new(
+                    DiagnosticCode::InvalidReference,
+                    format!(
+                        "nodegraph '{}' references unknown nodedef '{name}'",
+                        graph.name
+                    ),
+                    None,
+                ));
+            }
+            if doc
+                .nodegraphs
+                .iter()
+                .any(|other| other.name != graph.name && other.nodedef.as_deref() == Some(name))
+            {
+                return Err(AuthoringError::new(
+                    DiagnosticCode::InvalidStructure,
+                    format!("nodedef '{name}' has more than one nodegraph implementation"),
+                    None,
+                ));
+            }
+            let definition = doc
+                .nodedefs
+                .iter()
+                .find(|definition| definition.name == name)
+                .expect("definition index validated");
+            for (label, actual, declared) in [
+                (
+                    "input",
+                    graph
+                        .inputs
+                        .iter()
+                        .map(|item| (&item.name, item.type_name.as_deref()))
+                        .collect::<Vec<_>>(),
+                    definition
+                        .inputs
+                        .iter()
+                        .map(|item| (&item.name, item.type_name.as_deref()))
+                        .collect::<Vec<_>>(),
+                ),
+                (
+                    "output",
+                    graph
+                        .outputs
+                        .iter()
+                        .map(|item| (&item.name, item.type_name.as_deref()))
+                        .collect::<Vec<_>>(),
+                    definition
+                        .outputs
+                        .iter()
+                        .map(|item| (&item.name, item.type_name.as_deref()))
+                        .collect::<Vec<_>>(),
+                ),
+            ] {
+                if actual.len() != declared.len()
+                    || declared.iter().any(|(name, ty)| {
+                        !actual.iter().any(|(actual_name, actual_ty)| {
+                            *actual_name == *name && *actual_ty == *ty
+                        })
+                    })
+                {
+                    return Err(AuthoringError::new(
+                        DiagnosticCode::InvalidStructure,
+                        format!(
+                            "nodegraph '{}' {label} signature does not match nodedef '{name}'",
+                            graph.name
+                        ),
+                        None,
+                    ));
+                }
+            }
+        }
         let nodes: BTreeSet<_> = graph.nodes.iter().map(|n| n.name.as_str()).collect();
         for input in graph
             .inputs
