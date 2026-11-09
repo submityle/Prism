@@ -246,7 +246,8 @@ impl ReferencePtMaterialAdapter {
                     transmission_color: Vec3::from_array(surface.transmission_color),
                     transmission_scatter: Vec3::from_array(surface.transmission_scatter),
                     transmission_scatter_anisotropy: surface.transmission_scatter_anisotropy,
-                    transmission_dispersion_abbe_number: surface.transmission_dispersion_abbe_number,
+                    transmission_dispersion_abbe_number: surface
+                        .transmission_dispersion_abbe_number,
                     coat_darkening: surface.coat_darkening,
                     scatter_anisotropy: surface.scatter_anisotropy,
                     clearcoat: surface.clearcoat,
@@ -313,6 +314,7 @@ impl ReferencePtMaterialAdapter {
 mod tests {
     use super::*;
     use prism_render_architecture::reference_pt::compare::compare_pixels;
+    use prism_render_architecture::reference_pt::sampler::Rng;
 
     use crate::{evaluate_clearcoat_direct, DirectLightSample, ShadingFrame};
 
@@ -325,6 +327,60 @@ mod tests {
             clearcoat: 1.0,
             clearcoat_roughness: 0.2,
             ..Default::default()
+        }
+    }
+
+    fn openpbr_surface() -> SurfaceSample {
+        SurfaceSample {
+            base_color: [0.42, 0.18, 0.07],
+            base_weight: 0.83,
+            diffuse_roughness: 0.37,
+            metallic: 0.27,
+            perceptual_roughness: 0.41,
+            specular_weight: 0.63,
+            specular_color: [0.71, 0.82, 0.93],
+            specular_ior: 1.77,
+            transmission: 0.38,
+            index_of_refraction: 1.52,
+            dispersion: 0.72,
+            thin_walled: 0.25,
+            geometry_opacity: 1.0,
+            transmission_color: [0.86, 0.73, 0.61],
+            transmission_scatter: [0.12, 0.23, 0.34],
+            transmission_scatter_anisotropy: -0.31,
+            transmission_dispersion_abbe_number: 47.0,
+            coat_darkening: 0.44,
+            scatter_anisotropy: 0.28,
+            ambient_occlusion: 1.0,
+            emissive: [0.0; 3],
+            clearcoat: 0.22,
+            clearcoat_roughness: 0.28,
+            coat_ior: 1.61,
+            coat_color: [0.93, 0.81, 0.69],
+            coat_normal: [0.0; 3],
+            coat_roughness_anisotropy: 0.0,
+            coat_tangent: [0.0; 3],
+            sheen: 0.44,
+            fuzz_roughness: 0.63,
+            fuzz_color: [0.51, 0.67, 0.79],
+            subsurface: 0.31,
+            subsurface_color: [0.72, 0.41, 0.26],
+            subsurface_radius: 0.83,
+            subsurface_radius_scale: [0.91, 0.57, 0.23],
+            thickness: 0.67,
+            anisotropy: 0.0,
+            anisotropy_rotation: 0.0,
+            normal_variance: 0.0,
+            iridescence: 0.55,
+            iridescence_thickness_nm: 430.0,
+            iridescence_ior: 1.38,
+            glint_weight: 0.2,
+            glint_roughness: 0.24,
+            glint_density: 2.5,
+            glint_bin_half_width: 0.07,
+            glint_state: -1.0,
+            glint_cell: [3.0, 5.0],
+            glint_footprint_area: 0.32,
         }
     }
 
@@ -582,44 +638,281 @@ mod tests {
             ),
             (
                 SurfaceSample {
+                    geometry_opacity: 0.5,
+                    ..base
+                },
+                E::UnsupportedGeometryOpacity,
+            ),
+            (
+                SurfaceSample {
+                    ambient_occlusion: 0.5,
+                    ..base
+                },
+                E::UnsupportedAmbientOcclusion,
+            ),
+            (
+                SurfaceSample {
+                    anisotropy: 0.5,
+                    ..base
+                },
+                E::UnsupportedAnisotropy,
+            ),
+            (
+                SurfaceSample {
+                    anisotropy_rotation: 0.5,
+                    ..base
+                },
+                E::UnsupportedAnisotropy,
+            ),
+            (
+                SurfaceSample {
                     coat_normal: [1.0e-8, 0.0, 0.0],
                     ..base
                 },
                 E::UnsupportedCoatFrame,
-            ),
-            (
-                SurfaceSample {
-                    coat_tangent: [1.0e-8, 0.0, 0.0],
-                    ..base
-                },
-                E::UnsupportedCoatFrame,
-            ),
-            (
-                SurfaceSample {
-                    coat_roughness_anisotropy: 1.0e-8,
-                    ..base
-                },
-                E::UnsupportedCoatFrame,
-            ),
-            (
-                SurfaceSample {
-                    normal_variance: 1.0e-8,
-                    ..base
-                },
-                E::UnsupportedNormalVariance,
-            ),
-            (
-                SurfaceSample {
-                    emissive: [0.0, 1.0e-8, 0.0],
-                    ..base
-                },
-                E::UnsupportedEmission,
             ),
         ] {
             assert_eq!(
                 ReferencePtMaterialAdapter::from_surface(surface),
                 Err(error),
                 "{surface:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn adapter_copies_every_supported_openpbr_field_into_the_independent_bsdf() {
+        let surface = openpbr_surface();
+        let adapter = ReferencePtMaterialAdapter::from_surface(surface).unwrap();
+        let Bsdf::OpenPbr { material } = adapter.bsdf() else {
+            panic!("a non-zero OpenPBR lobe must not fall back to ClearcoatDiffuse");
+        };
+        assert_eq!(
+            material,
+            OpenPbrMaterial {
+                base_color: Vec3::from_array(surface.base_color),
+                base_weight: surface.base_weight,
+                diffuse_roughness: surface.diffuse_roughness,
+                metallic: surface.metallic,
+                perceptual_roughness: surface.perceptual_roughness,
+                specular_weight: surface.specular_weight,
+                specular_color: Vec3::from_array(surface.specular_color),
+                specular_ior: surface.specular_ior,
+                transmission: surface.transmission,
+                index_of_refraction: surface.index_of_refraction,
+                dispersion: surface.dispersion,
+                thin_walled: surface.thin_walled,
+                transmission_color: Vec3::from_array(surface.transmission_color),
+                transmission_scatter: Vec3::from_array(surface.transmission_scatter),
+                transmission_scatter_anisotropy: surface.transmission_scatter_anisotropy,
+                transmission_dispersion_abbe_number: surface.transmission_dispersion_abbe_number,
+                coat_darkening: surface.coat_darkening,
+                scatter_anisotropy: surface.scatter_anisotropy,
+                clearcoat: surface.clearcoat,
+                clearcoat_roughness: surface.clearcoat_roughness,
+                coat_ior: surface.coat_ior,
+                coat_color: Vec3::from_array(surface.coat_color),
+                sheen: surface.sheen,
+                fuzz_roughness: surface.fuzz_roughness,
+                fuzz_color: Vec3::from_array(surface.fuzz_color),
+                subsurface: surface.subsurface,
+                subsurface_color: Vec3::from_array(surface.subsurface_color),
+                subsurface_radius: surface.subsurface_radius,
+                subsurface_radius_scale: Vec3::from_array(surface.subsurface_radius_scale),
+                thickness: surface.thickness,
+                iridescence: surface.iridescence,
+                iridescence_thickness_nm: surface.iridescence_thickness_nm,
+                iridescence_ior: surface.iridescence_ior,
+                glint_weight: surface.glint_weight,
+                glint_roughness: surface.glint_roughness,
+                glint_density: surface.glint_density,
+                glint_bin_half_width: surface.glint_bin_half_width,
+                glint_state: surface.glint_state,
+                glint_cell: surface.glint_cell,
+                glint_footprint_area: surface.glint_footprint_area,
+            }
+        );
+    }
+
+    #[test]
+    fn supported_openpbr_lobes_change_the_reference_response_instead_of_being_dropped() {
+        let view = normalize([0.37, 0.82, 0.43]);
+        let light = normalize([-0.48, 0.76, 0.43]);
+        let baseline_surface = openpbr_surface();
+        let baseline = ReferencePtMaterialAdapter::from_surface(baseline_surface)
+            .unwrap()
+            .evaluate(view, light, NORMAL);
+        let cases = [
+            (
+                "metallic",
+                SurfaceSample {
+                    metallic: 0.91,
+                    ..baseline_surface
+                },
+            ),
+            (
+                "specular",
+                SurfaceSample {
+                    specular_weight: 0.07,
+                    ..baseline_surface
+                },
+            ),
+            (
+                "transmission",
+                SurfaceSample {
+                    transmission: 0.91,
+                    ..baseline_surface
+                },
+            ),
+            (
+                "sheen",
+                SurfaceSample {
+                    sheen: 0.02,
+                    ..baseline_surface
+                },
+            ),
+            (
+                "subsurface",
+                SurfaceSample {
+                    subsurface: 0.0,
+                    ..baseline_surface
+                },
+            ),
+            (
+                "iridescence",
+                SurfaceSample {
+                    iridescence: 0.0,
+                    ..baseline_surface
+                },
+            ),
+        ];
+        for (name, surface) in cases {
+            let value = ReferencePtMaterialAdapter::from_surface(surface)
+                .unwrap()
+                .evaluate(view, light, NORMAL);
+            let delta = value
+                .into_iter()
+                .zip(baseline)
+                .map(|(actual, expected)| (actual - expected).abs())
+                .fold(0.0, f32::max);
+            assert!(
+                delta > 1.0e-6,
+                "{name} changed SurfaceSample but not the reference response: baseline={baseline:?} value={value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn mapped_transmission_reaches_the_opposite_hemisphere_through_the_path_sampler() {
+        let surface = SurfaceSample {
+            base_weight: 0.0,
+            metallic: 0.0,
+            specular_weight: 0.0,
+            transmission: 1.0,
+            clearcoat: 0.0,
+            sheen: 0.0,
+            subsurface: 0.0,
+            iridescence: 0.0,
+            glint_weight: 0.0,
+            perceptual_roughness: 0.35,
+            ..openpbr_surface()
+        };
+        let adapter = ReferencePtMaterialAdapter::from_surface(surface).unwrap();
+        let mut saw_transmission = false;
+        for seed in 0..64 {
+            let mut rng = Rng::seed(seed);
+            if let Some(sample) = adapter.bsdf().sample(
+                Vec3::from_array(normalize([0.2, 0.95, 0.1])),
+                Vec3::from_array(NORMAL),
+                &mut rng,
+            ) {
+                assert!(sample.direction.is_finite());
+                assert!(sample.value.is_finite());
+                assert!(sample.pdf.is_finite() && sample.pdf > 0.0);
+                if sample.direction.y < 0.0 {
+                    saw_transmission = true;
+                }
+            }
+        }
+        assert!(
+            saw_transmission,
+            "mapped transmission never produced an opposite-hemisphere path sample"
+        );
+    }
+
+    #[test]
+    fn adapter_rejects_all_non_brdf_surface_fields_explicitly() {
+        use ReferencePtAdapterError as E;
+        let base = openpbr_surface();
+        for (surface, error) in [
+            (
+                SurfaceSample {
+                    geometry_opacity: 0.5,
+                    ..base
+                },
+                E::UnsupportedGeometryOpacity,
+            ),
+            (
+                SurfaceSample {
+                    ambient_occlusion: 0.5,
+                    ..base
+                },
+                E::UnsupportedAmbientOcclusion,
+            ),
+            (
+                SurfaceSample {
+                    emissive: [0.01, 0.0, 0.0],
+                    ..base
+                },
+                E::UnsupportedEmission,
+            ),
+            (
+                SurfaceSample {
+                    anisotropy: 0.2,
+                    ..base
+                },
+                E::UnsupportedAnisotropy,
+            ),
+            (
+                SurfaceSample {
+                    anisotropy_rotation: 0.2,
+                    ..base
+                },
+                E::UnsupportedAnisotropy,
+            ),
+            (
+                SurfaceSample {
+                    coat_roughness_anisotropy: 0.2,
+                    ..base
+                },
+                E::UnsupportedCoatFrame,
+            ),
+            (
+                SurfaceSample {
+                    coat_normal: [0.0, 1.0, 0.0],
+                    ..base
+                },
+                E::UnsupportedCoatFrame,
+            ),
+            (
+                SurfaceSample {
+                    coat_tangent: [1.0, 0.0, 0.0],
+                    ..base
+                },
+                E::UnsupportedCoatFrame,
+            ),
+            (
+                SurfaceSample {
+                    normal_variance: 0.2,
+                    ..base
+                },
+                E::UnsupportedNormalVariance,
+            ),
+        ] {
+            assert_eq!(
+                ReferencePtMaterialAdapter::from_surface(surface),
+                Err(error),
+                "unsupported field was accepted: {surface:?}"
             );
         }
     }
@@ -651,7 +944,10 @@ mod tests {
                 coat_darkening: 0.4,
             }
         );
-        assert!(adapter.evaluate(NORMAL, NORMAL, NORMAL).iter().all(|value| value.is_finite()));
+        assert!(adapter
+            .evaluate(NORMAL, NORMAL, NORMAL)
+            .iter()
+            .all(|value| value.is_finite()));
     }
 
     #[test]
@@ -870,7 +1166,10 @@ mod tests {
             };
             let adapter = ReferencePtMaterialAdapter::from_surface(surface)
                 .expect("transmission has an independent reference implementation");
-            assert!(adapter.evaluate(NORMAL, NORMAL, NORMAL).iter().all(|value| value.is_finite()));
+            assert!(adapter
+                .evaluate(NORMAL, NORMAL, NORMAL)
+                .iter()
+                .all(|value| value.is_finite()));
         }
     }
 }
