@@ -1,5 +1,7 @@
 # 02 · Shading Plan 与 Composition
 
+> **2026-11-09 目标边界（当前权威）**：响应与组合的目标实现/验收只走 Prism 原生 prism_render_app、Prism RHI 与 prism_render_graph。Bevy、Bevy RenderApp、prism_render_scene 的 Bevy 集成路径、SceneRhi 与 legacy-bevy 是历史/排除项，不是当前 composition recorder、TAA/history 或 GPU parity 的前提。局部历史 harness 不能替代原生全帧证据。
+
 > 本文记录当前响应程序、组合器、执行分桶、输出通道和水体接线。Surface ABI 真源见 [`01-surface-abi_refactor_zh.md`](01-surface-abi_refactor_zh.md)。
 
 ## 0. 核心模型
@@ -154,6 +156,8 @@ water_surface_fs_mask_blend
 
 ## 8. 当前源码与测试证据
 
+本节涉及的 prism_render_scene、Bevy 或 SceneRhi 记录属于历史/排除路径；响应与组合当前验收只接受 Prism 原生 RHI/RenderGraph 证据。
+
 直接源码位置：
 
 - plan 与 contract：`pkg/prism_render_material/src/shading_plan.rs`；
@@ -181,6 +185,15 @@ water_surface_fs_mask_blend
 - 仍缺完整 Scene/Fabric/TAA 帧的前后版本 parity，以及删除旧入口前已运行护栏的历史记录。TAA history 的真实双槽、exact binding、completion-gated publication/retirement 已由 2026-10-22 strict GPU `19/19` 局部验证（见 §10）；统一全场景 runtime/recorder、完整场景图像 parity 与跨适配器验收仍未闭合。
 
 本轮复跑口径：`water_hybrid_golden` 为 `19/19`，沙盒外 `PRISM_REQUIRE_GPU=1 cargo test -p prism_render_scene --test water_hybrid_gpu -- --nocapture` 为 `19/19`，adapter 为 Apple M2 / Metal。跨适配器门禁单独位于 `tests/cross_adapter_acceptance.rs`；本机只有一个 physical adapter，默认输出 `SKIP_UNVERIFIED`，严格模式失败。故水体 `19/19` 只能证明 16×16 fixture 在一个适配器上的局部 output/parity，不扩张为完整 Scene/TAA 图像 parity、第二适配器通过或 Render Fabric 生产闭环。
+
+### 8.1 2026-11-09 原生 Prism 当前未完成项
+
+响应 contract、bucket、MaskBlend 公式以及局部 composition/TAA 证据不能代替原生全帧闭环。当前仍需：
+
+1. 在 prism_render_app 原生 RHI/RenderGraph 中把 Lit/NPR/Unlit/Registered、fused/split、两臂共享 lighting context、composition 与 HDR export 接入同一生产帧，并证明实际 draw/dispatch、barrier、bind group 和 completion 顺序。
+2. 完成 water、reactive mask、TAA/history 与 response planes 的原生多视图隔离、精确 frame/version/layout/physical identity、缺历史清零和退休；历史 Bevy/SceneRhi harness 是排除项。
+3. 完成任意注册 response program 的 package/entry/ABI/digest/PSO 真实消费和失败恢复；不以 fallback 或 CPU golden 冒充真实原生 GPU 输出。
+4. 取得完整帧前后版本图像 parity、第二 physical adapter、资源/带宽/队列/缓存性能和 P50/P95/P99 证据。当前局部 water/composition/TAA 数字只在各自日志范围内有效。
 
 ## 9. Git 历史锚点
 

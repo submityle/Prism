@@ -1,6 +1,8 @@
 # 05 · Render Fabric 与特性声明
 
-> 状态：Render Fabric 目标规范与实现证据审计（允许破坏性重构，不保留旧 API）；2026-10-26：Particle 已新增 RenderApp → Bevy SceneFabric 的真实物理资源 import、bind-group/compute recorder 与 completion-retirement vertical slice；全场景统一 recorder 与完整验收仍未闭合
+> **2026-11-09 目标边界（当前权威）**：当前目标只走 Prism 原生 prism_render_app、Prism RHI 与 prism_render_graph/RenderGraph。Bevy、Bevy RenderApp、prism_render_scene 的 Bevy 集成路径、SceneRhi 与 legacy-bevy 均为历史/排除项；它们不能作为当前 Fabric 实现或验收前提。原生全场景统一 recorder 与完整验收仍未闭合。
+
+> 状态：Render Fabric 目标规范与实现证据审计（允许破坏性重构，不保留旧 API）；2026-11-09：Bevy RenderApp/SceneFabric/SceneRhi 接线已归档为历史/排除项，不再作为目标实现或验收前提；当前只以 Prism 原生 prism_render_app、Prism RHI 与 prism_render_graph/RenderGraph 判断，原生全场景统一 recorder 与完整验收仍未闭合
 > 上层导航：[`00-overview_refactor_zh.md`](00-overview_refactor_zh.md)
 > 范围：六层渲染装配与四个权威的职责切分、三个正交轴的术语收敛（`RenderDomain` / `ResponseProgram` / `ExecutionFamily`）、特性的三层声明（`FeatureDefinition` / `FeatureVariant` / `PassTemplate`）、变体的确定性选择规则、语义 ID 与帧图 ID 的分离（`ResourceKey` / `ResourceId`）、`ResourceUse` 的完整访问描述、服务依赖的两层模型与服务提供者校验、`FeatureCatalog`、`FrameRenderItem` 与域负载、三份并行服务集与两份 `ShadingFrontend` 的删除、跨子系统回边的一帧延迟契约
 > 非范围：SurfaceData 布局（→ [`01-surface-abi_refactor_zh.md`](01-surface-abi_refactor_zh.md)）、`ShadingPlan` 与五类契约（→ [`02-response-composition_refactor_zh.md`](02-response-composition_refactor_zh.md)）、PSO 身份与缓存失效（→ [`03-shader-package_refactor_zh.md`](03-shader-package_refactor_zh.md)）、两套帧图编译器的合并裁决与手排 pass 覆盖（→ [`04-frame-graph_refactor_zh.md`](04-frame-graph_refactor_zh.md)）
@@ -1240,6 +1242,21 @@ particle spray ──?──────▶ water foam
 - shader：`pkg/prism_render_scene/src/shaders/{shading_resolve,visibility_raster,water_surface_raster}.wesl`、`pkg/prism_render_scene/src/shading/{graph,runtime,raster}.rs`
 - 回边：`pkg/prism_render_architecture/src/water/{coupling,spray_bridge}.rs`
 - 设备选择与 runtime 边界：`pkg/prism_render_scene/src/gpu/fabric.rs:13-51` 实际设备初始化 `SceneFabric`；`pkg/prism_render_architecture/src/render_fabric/device.rs:33-48` 定义 `compile`，`runtime.rs:180-200` 定义 runtime 执行与 prepare seam；水体窄 adapter 的生产调用见 `pkg/prism_render_scene/src/shading/fabric_executor.rs` 与 `water/dispatch.rs`，但测试调用和窄切片都不能当作全场景生产闭环。
+
+## 14.5 2026-11-09 原生 Prism 当前未完成项（权威清单）
+
+本节覆盖范围优先于本篇早期版本记录中的 Bevy/SceneRhi 叙述。历史 Bevy RenderApp、Bevy SceneFabric、SceneRhi lease、legacy-bevy feature、render-world owner 与其 GPU harness 全部保留为历史/排除项；它们不再是当前目标的 producer、provider、recorder 或验收前提，也不与 Prism 原生结果合并计数。
+
+按 Prism 原生 prism_render_app + Prism RHI + prism_render_graph，真实未完成项为：
+
+1. **统一原生帧入口**：把当前纳入目标的 Surface、Particle、response/composition、water、TAA/history 及其他实际域输入，在同一原生帧中完成 compile、prepare、resource import、pipeline/bind-group 解析、record、submit 和 completion；现有局部 recorder、CPU fixture、source ledger 或历史 Bevy seam 均不足。
+2. **全 pass 覆盖**：以 prism_render_graph 的真实声明为准重新固定 native pass inventory，并让同一生产入口覆盖每个实际 pass。当前没有足够证据证明一个原生入口覆盖完整 pass 集，也没有足够证据证明 31-pass 场景在原生 RHI 上完成过一次完整 GPU 帧。
+3. **域 payload 与多视图扇出**：为每个纳入 native 目标的域建立稳定 owner、frame/object/history identity、真实 payload、per-view fan-out、provider、import 与下游 geometry/visibility/shading consumer；不能用 Bevy Hair/Volume/Decal vertical slice 推断 native 完成。
+4. **历史与生命周期**：在原生 RenderQueue/RHI 上完成 TAA、water feedback 及所有 persistent resource 的 exact frame/version/physical/layout publication、resize/removal/device-loss、submission failure 与 completion-gated retirement；未提交或失败的资源不得提前复用。
+5. **真实 GPU 证据**：在允许跨沙盒的环境中，对原生生产入口执行 strict GPU shader compile、draw/dispatch、readback 和图像 parity；单 adapter 局部 harness、无 adapter skip、CPU/null backend 与历史 SceneRhi 结果均不构成完整验收。
+6. **验收与性能**：完成全部当前 gate 的端到端运行，明确每个 gate 的真实范围；补齐至少两个 distinct physical adapter、全帧图像 parity、资源/显存峰值、队列等待、吞吐、编译/缓存命中率和 P50/P95/P99。任何未运行、SKIP_UNVERIFIED 或仅测试定义的项目保持未验证。
+
+本次文档同步未运行 Cargo、GPU 或代码测试；因此本节只收口目标边界和未完成项，不把已有历史数字升级为完成声明。
 
 ## 15. 当前实现证据审计（2026-10-20 更新）
 

@@ -1,5 +1,7 @@
 # 03 · Shader Package 与置换治理
 
+> **2026-11-09 目标边界（当前权威）**：Shader package、PSO、队列与缓存的目标消费者是 Prism 原生 prism_render_app、Prism RHI 与 prism_render_graph。Bevy、Bevy RenderApp、prism_render_scene 的 Bevy 集成路径、SceneRhi 与 legacy-bevy 仅为历史/排除项，不是 shader package、driver binary 或验收闭环的实现前提。
+
 > 文档口径：以当前源码、测试和已合入历史为准的实现审计。本文描述当前身份模型、缓存生命周期、队列入口与必须保持的架构约束。
 > 上层导航：[`00-overview_refactor_zh.md`](00-overview_refactor_zh.md)
 > 相关文档：[`02-response-composition_refactor_zh.md`](02-response-composition_refactor_zh.md)、[`04-frame-graph_refactor_zh.md`](04-frame-graph_refactor_zh.md)
@@ -122,6 +124,8 @@ bin 路径位于 `pkg/prism_render_app/src/bin_queue.rs`：
 
 ## 6. 当前验收证据
 
+本节涉及的 scene、Bevy 或 SceneRhi 记录属于历史/排除路径；native shader package 结论不能由这些记录升级。
+
 | 契约 | 证据 |
 |---|---|
 | typed state 覆盖 descriptor 固定功能字段、hash/canonical bytes 稳定 | `pkg/prism_render_app/src/pipeline_state_tests.rs` |
@@ -135,6 +139,15 @@ bin 路径位于 `pkg/prism_render_app/src/bin_queue.rs`：
 | 当前 shading crate 测试 | `cargo test -p prism_render_scene --lib shading`：844 passed，0 failed（历史记录） |
 
 2026-10-20 历史记录：`render_fabric` 较早 134 项、后续 136 项通过；app `pipeline_cache::worker_tests` **27/27**。当时一次 architecture 重试因并发 `prism_physics_core` 编译错误未执行测试，该阻断仅为历史。2026-10-22 architecture 代理已报告实际运行 `prism_render_architecture --lib render_fabric` **200/200、terminal exit 0**，含新增对象资源 CPU 契约 9 项；同日较早 176/176 保留为历史。仅关闭此 `render_fabric` 筛选的待复跑状态，不声称整个 `shader_package`（95/95 仍为历史）、app worker、architecture acceptance 或真实 driver binary 已复跑，也不关闭完整 Scene/Fabric、跨适配器与性能验收。
+
+### 6.1 2026-11-09 原生 Prism 当前未完成项
+
+当前身份模型、冻结选择和 CPU/cache 契约已有源码与局部记录，但以下 native 证据仍缺：
+
+1. 在 prism_render_app + Prism RHI + prism_render_graph 中完成冻结 FeatureSelection 到真实 pipeline/bind group/draw/dispatch 的全帧消费，覆盖 split pass set 与 composition，不把 Bevy/SceneRhi path 的消费当作替代。
+2. 取得真实 driver binary 的编译、加载、失效、回退、设备丢失和重建结果；验证 package digest、typed PipelineState、cold key、DriverLocal cache 在至少两个 physical adapter 上的隔离与复用边界。
+3. 对异步编译队列、warm set、fallback/skip、PSO 驻留和资源退休记录内存上限、等待、命中率、编译时延、显存和 P50/P95/P99；当前 worker/CPU 测试不是性能结论。
+4. 将 shader package 的 native 消费放进完整 Surface/response/TAA/RenderGraph 帧并取得图像 parity；局部 water、composition 或历史 scene library 数字不构成该证据。
 
 ## 7. 历史依据
 

@@ -2,6 +2,8 @@
 
 > 本文记录 2026-10-16 工作区中已经由源码、测试和 Git 历史共同确认的材质运行形状。它描述当前契约，不列实施切片或未来迁移顺序。
 
+> **2026-11-09 目标边界（当前权威）**：本系列的目标实现与验收只走 Prism 原生 prism_render_app、Prism RHI 和 prism_render_graph/RenderGraph。Bevy、Bevy RenderApp、prism_render_scene 的 Bevy 集成路径、SceneRhi 与 legacy-bevy 均为历史记录或排除项，不是当前实现前提，也不构成当前验收证据。下文保留这些名称时，仅表示历史证据、对照或明确排除的路线；原生全帧证据必须来自同一 Prism RHI 设备与原生 RenderGraph 的真实调用链。
+
 ## 0. 一句话
 
 Prism 的材质链路是：
@@ -98,6 +100,8 @@ Transmissive / Transparent / Additive
 
 ### 5.2 已记录的完整验收结果
 
+本节中的 prism_render_scene、Bevy、SceneRhi 和 legacy-bevy 命令/日志均是历史或排除路径的证据，只保留其原始范围；它们不代表当前 Prism 原生目标已通过。
+
 下表对应 2026-10-16 已保存的历史完整命令输出；仅对自该次运行后未变化的契约保留回归参考价值，不视为当前工作树整体通过。
 
 | 目标 | 结果 |
@@ -155,6 +159,18 @@ Bevy `prism_render_scene` 路径现另有 Hair/Volume/Decal 的生产帧聚合 s
 `fabric_domains::gpu` 进一步将 canonical semantic role 接纳为带 table/physical identity 的 `SceneRhi` buffer/texture lease，校验容量、range、alignment、usage、texture layout/default view、exact binding/import coverage 与物理别名，并生成运行时 `ResourceId` import 和 record-ready 借用视图。该层只完成 physical-resource admission/import，不含 pipeline、bind group、draw/dispatch recorder、visibility/geometry consumer 或 full-frame parity。Bevy 路径与原生 `RenderApp` 的 Surface/Particle 路径仍是两条集成路径，不合并记作一个 GPU 闭环；上述失败边界不缩减全场景闭环和完整验收目标。
 
 跨适配器门禁为 `pkg/prism_render_scene/tests/cross_adapter_acceptance.rs`：默认模式发现少于两个 distinct physical adapter 时必须输出 `SKIP_UNVERIFIED`，该状态不计入验收；`PRISM_REQUIRE_GPU=1` 必须失败。当前沙盒 inventory 为 0 个 physical adapter；沙盒外真实 inventory 为 1 个 `Apple M2 / Metal / IntegratedGpu`，因此严格模式按预期失败。该 probe 只验证每个 adapter 的 storage-compute submit/readback，不冒充水体、Scene 或 TAA full-frame parity；第二个 physical adapter 仍是未验证阻塞。
+
+### 5.3 2026-11-09 原生 Prism 当前未完成项（权威清单）
+
+本篇的 Artifact、Surface ABI、ShadingPlan 与局部 GPU 结果只能证明各自切片。按当前目标边界，以下事项仍未完成或未取得足够证据：
+
+1. 在同一 Prism 原生 RHI 设备上，完成从 material extraction/prepare、Surface 与 response binding、prism_render_graph 编译，到 record、submit、completion 的统一生产调用；现有 package、fixture 或历史 Bevy/SceneRhi 记录不能代替该证据。
+2. 证明 Surface ABI、ShadingPlan、resident composition、water、TAA/history 在原生 prism_render_app 的同一帧中使用同一份 verified identity、资源版本、layout、barrier 和 completion publication；局部水体、composition 或 TAA 结果不能外推为完整帧。
+3. 完成 native shader package → pipeline/PSO → bind group → draw/dispatch 的全路径，包含未就绪、失败、设备丢失、resize 和退休语义；Bevy SceneRhi 的 provider/lease 不属于该路径。
+4. 对所有当前纳入 Prism 原生目标的 render domains 完成多视图 payload fan-out、资源导入和消费者接线；历史 Bevy Hair/Volume/Decal seam 只能作为排除项和历史证据，不计入 native domain 完成度。
+5. 运行并记录原生全帧图像 parity、至少两个 distinct physical adapter 的严格验收，以及资源峰值、队列等待、吞吐和 P50/P95/P99；缺少实际输出的测试定义或 SKIP_UNVERIFIED 不算通过。
+
+因此，本系列当前结论是“局部契约和局部生产切片有证据，原生全帧闭环仍未完成”。本次文档同步未运行 Cargo 或 GPU；所有新增结论均为范围/证据口径收口，不把未验证内容写成完成。
 
 ## 6. Git 历史锚点
 

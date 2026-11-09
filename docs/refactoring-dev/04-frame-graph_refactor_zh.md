@@ -1,5 +1,7 @@
 # 04 · Frame Graph 与 pass 组织
 
+> **2026-11-09 目标边界（当前权威）**：Frame Graph 的目标实现与验收只走 Prism 原生 prism_render_app、Prism RHI 与唯一的 prism_render_graph/RenderGraph。Bevy、Bevy RenderApp、prism_render_scene 的 Bevy 集成路径、SceneRhi 与 legacy-bevy 是历史/排除项，不是 31-pass 生产入口、资源导入或 GPU 验收前提。所有未完成项按原生 compile → prepare → record → submit → completion 重新核验。
+
 > 文档口径：以当前源码、测试和已合入历史为准的实现审计。本文描述统一编译内核、shading graph 拓扑、生成式后处理清单和调度边界。
 > 上层导航：[`00-overview_refactor_zh.md`](00-overview_refactor_zh.md)
 > 相关文档：[`02-response-composition_refactor_zh.md`](02-response-composition_refactor_zh.md)、[`03-shader-package_refactor_zh.md`](03-shader-package_refactor_zh.md)
@@ -110,6 +112,8 @@ response planes + coverage ──▶ response_composition ──▶ HDR
 
 ## 6. 当前验收证据
 
+本节涉及的 prism_render_scene、Bevy、SceneRhi 或 legacy-bevy 命令和 harness 只保留为历史/排除证据；当前 frame-graph 验收必须由 Prism 原生 RenderGraph 重新提供。
+
 | 契约 | 证据 |
 |---|---|
 | 统一 graph 的 pass、资源、SSA version、hazard、schedule、barrier、alias、lifetime | `pkg/prism_render_graph/src/compile/`、`pkg/prism_render_graph/src/graph.rs`、`pkg/prism_render_graph/text/unit/compiler.rs`、`pkg/prism_render_graph/text/unit/graph.rs` |
@@ -138,6 +142,15 @@ response planes + coverage ──▶ response_composition ──▶ HDR
 2026-10-22 TAA GPU 首次阻断与重试通过记录：main 的首次 TAA GPU 日志 `/private/tmp/prism-taa-gpu-20261022.log` 因依赖 `prism_physics_core/src/world.rs:651` 缺少 `prepare_assembly_collider` 报 E0599，未执行测试，仅保留为历史编译阻断；随后重试已成功，不再列为当前待复跑状态。main 实际运行并确认 terminal exit 0，本次文档同步已读取 `/private/tmp/prism-taa-gpu-20261022-retry.log`：`prism_render_scene --lib` 的 `shading::taa::resources::gpu_tests` 筛选在 `PRISM_REQUIRE_GPU=1` 严格模式下，Apple M2 / Metal REAL HARDWARE **19 passed / 0 failed / 0 ignored**，2021 filtered out，0.84s，包含新增 lifecycle 7 项。覆盖真实 bind-group、两帧 publication/import 与 CPU golden、queue completion，以及 resize/removal/device-table replacement 的 retirement、未提交 dispatch 资源保留与 ID 回收。日志中的 stale ID panic 由 `catch_unwind` 捕获，是预期失效断言，最终测试通过。TAA 局部 GPU 验证缺口已关闭；完整 Scene/Fabric/TAA full-frame parity、统一全场景 runtime/recorder 和第二 physical adapter 仍未闭合。
 
 跨适配器行为单独由 `pkg/prism_render_scene/tests/cross_adapter_acceptance.rs` 验收：它枚举 distinct physical adapters，并在每个 adapter 上执行 storage compute、submit、copy-to-staging 和 map/readback。默认 profile 在少于两个 adapter 时输出 `SKIP_UNVERIFIED`；`PRISM_REQUIRE_GPU=1` 将同一条件提升为失败。2026-10-20 沙盒外只发现 `Apple M2 / Metal / IntegratedGpu` 一个 adapter，故严格门禁失败。该测试证明 adapter-local submission/readback，不证明 31-pass frame graph、Scene imports、TAA exact history publication 或 water full-frame parity 已跨 adapter 通过；TAA history 的单适配器局部 GPU 缺口已由 2026-10-22 strict 19/19 关闭，但这不是跨 adapter 或 full-frame 验收。
+
+### 6.1 2026-11-09 原生 Prism 当前未完成项
+
+prism_render_graph 的编译器、SSA、hazard、barrier、alias、lifetime 和 package 级测试已有证据；以下生产验收仍未完成：
+
+1. 建立一个 Prism 原生生产入口，覆盖当前纳入目标的完整 pass inventory，并在同一帧完成 compile → prepare → import → record → submit → completion。现有 Bevy SceneFabric/SceneRhi recorder、schedule ledger 或 source-inventory 结果均为历史/排除项，不能充当该入口。
+2. 用真实 native Surface、response、water、TAA/history 与 domain resources 验证 imported/persistent/transient 的版本、layout、queue transfer、barrier、alias 与 failure cleanup；package unit 通过不等于真实 GPU 图执行。
+3. 完成多视图、多队列、resize、device loss、submission failure 和 completion retirement 的端到端 readback/parity，证明被裁剪或失败的 pass 不提交残留命令。
+4. 取得完整帧图像 parity、至少两个 physical adapter 的严格结果，以及 graph compile/record/submit 的内存、队列等待、吞吐和 P50/P95/P99 数据。
 
 ## 7. 历史依据
 

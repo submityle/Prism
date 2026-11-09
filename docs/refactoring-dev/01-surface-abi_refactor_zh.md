@@ -1,5 +1,7 @@
 # 01 · Surface ABI 与数据布局
 
+> **2026-11-09 目标边界（当前权威）**：Surface ABI 的目标消费者是 Prism 原生 prism_render_app、Prism RHI 与 prism_render_graph。Bevy、Bevy RenderApp、prism_render_scene 的 Bevy 集成路径、SceneRhi 与 legacy-bevy 只作为历史/排除项保留；它们不作为 ABI 实现、资源提供者或验收前提。当前未完成项必须按原生提取、绑定、RenderGraph 编译/录制/提交和 GPU 证据重新列出。
+
 > 本文记录当前 Surface ABI 的真源、字段边界、身份语义和可复现门禁。响应程序与组合规则见 [`02-response-composition_refactor_zh.md`](02-response-composition_refactor_zh.md)。
 
 ## 1. ABI 真源与职责
@@ -73,7 +75,7 @@ GPU header + dense execution binding
 
 ## 5. OpenPBR 导入与区域隔离
 
-- `adapt_openpbr_surface` / `import_openpbr_surface` 是当前 OpenPBR 导入入口。
+- `adapt_openpbr_surface` 是 MaterialX/OpenPBR authoring 的唯一导入入口；它直接返回完整的 `RuntimeSurface`，不再保留少字段兼容视图。
 - Standard Surface 别名只在语义一致时映射；未知字段直接返回错误。
 - `project_to_openpbr` 是有损向下投影。
 - 纯 OpenPBR 子集通过 `pure_openpbr_projects_to_a_byte_identical_fixed_point` 保持字节不动点。
@@ -102,6 +104,8 @@ GPU header + dense execution binding
 
 ## 7. 当前源码与测试证据
 
+本节涉及的 prism_render_scene 运行记录属于历史/排除路径；Surface ABI 当前验收只接受 Prism 原生 material、RHI 与 RenderGraph 证据。
+
 直接源码位置：
 
 - schema：`pkg/prism_material_schema/schema/surface.toml`；
@@ -112,6 +116,17 @@ GPU header + dense execution binding
 - authoring IR 与 closure lowering：`pkg/prism_render_material/src/ir.rs`。
 
 历史运行记录（非本轮复跑）：`cargo test -p prism_render_material --tests` 曾有单元测试 `878 passed; 0 failed`；`codegen_freshness` 11 项、`material_header_abi` 3 项、`pcm_parity` 7 项、`schema_parity` 9 项、`shading_plan` 33 项、`surface_abi_mirror` 2 项均通过。此前另有 `prism_render_scene --lib` 1909/1909 与 `prism_render_material::handle::tests` 6/6 记录；codegen/integration 后续已于 2026-10-22 随 material 全 package 复验，见 §9。
+
+### 7.1 2026-11-09 原生 Prism 当前未完成项
+
+Surface schema/codegen 与 Rust/WESL mirror 的局部门禁已有记录，但下列原生验收仍未完成：
+
+1. 在 prism_render_app 的真实 extraction、material upload、bind-group 建立和 prism_render_graph record/submit 中消费同一 Surface ABI，并证明字段、lobe mask、execution binding、layout 与资源版本没有在中间层复制或漂移。
+2. 覆盖原生 response/composition、water、TAA/history 与多视图的 ABI 消费，完成错误输入清空、resize、device replacement、completion-gated retirement 和真实 readback/parity；历史 Bevy/SceneRhi 集成不计入。
+3. 覆盖 Surface ABI 对 shader package、pipeline state、PSO cache、driver binary 和后端格式能力的影响，完成至少两个 physical adapter 的严格结果。
+4. 记录与 ABI 相关的带宽、上传量、绑定数量、缓存命中率、显存峰值及 P50/P95/P99；单元测试通过不能替代性能证据。
+
+以下历史运行记录仍保留，但只证明其原始范围；它们不把 Surface ABI 标记为 native 全场景完成。
 
 ## 8. Git 历史锚点
 
